@@ -29,6 +29,7 @@ async function createApp(args: {
   vi.resetModules()
   process.env.ATTACHMENT_PATH = args.attachmentPath
   const publishSpy = vi.fn()
+  let downloadSpy: ReturnType<typeof vi.fn> | null = null
 
   vi.doMock('../../src/rbac/service', () => ({
     isAdmin: vi.fn().mockResolvedValue(false),
@@ -41,7 +42,7 @@ async function createApp(args: {
     eventBus: { publish: publishSpy },
   }))
   if (args.mockStorageDownload) {
-    const downloadSpy = vi.fn(async () => args.mockStorageDownload as Buffer)
+    downloadSpy = vi.fn(async () => args.mockStorageDownload as Buffer)
     vi.doMock('../../src/services/StorageService', async () => {
       const actual = await vi.importActual<any>('../../src/services/StorageService')
       return {
@@ -75,7 +76,7 @@ async function createApp(args: {
   })
   app.use('/api/multitable', univerMetaRouter())
 
-  return { app, mockPool, publishSpy }
+  return { app, mockPool, publishSpy, downloadSpy }
 }
 
 describe('Multitable attachment API', () => {
@@ -431,6 +432,146 @@ describe('Multitable attachment API', () => {
     }
   })
 
+  test('F2: rejects attachment download when the attachment field is field-masked', async () => {
+    const attachmentPath = await fs.mkdtemp(path.join(os.tmpdir(), 'multitable-attachment-field-mask-'))
+
+    try {
+      const { app, downloadSpy } = await createApp({
+        attachmentPath,
+        mockStorageDownload: Buffer.from('SECRET ATTACHMENT BYTES'),
+        queryHandler: async (sql, params) => {
+          if (sql.includes('FROM multitable_attachments') && sql.includes('storage_file_id')) {
+            expect(params).toEqual(['att_field_masked'])
+            return {
+              rows: [{
+                id: 'att_field_masked',
+                sheet_id: 'sheet_acl',
+                record_id: 'rec_visible',
+                field_id: 'fld_secret_files',
+                storage_file_id: 'storage_att_field_masked',
+                filename: 'secret.txt',
+                original_name: 'secret.txt',
+                mime_type: 'text/plain',
+                size: 23,
+              }],
+            }
+          }
+          if (sql.includes('FROM spreadsheet_permissions')) {
+            expect(params).toEqual(['user_multitable_attachments', ['sheet_acl']])
+            return {
+              rows: [{ sheet_id: 'sheet_acl', perm_code: 'spreadsheet:read', subject_type: 'user' }],
+            }
+          }
+          if (/FROM meta_sheets WHERE id = ANY[\s\S]*base_id/i.test(sql)) return { rows: [] }
+          if (sql.includes('SELECT row_level_read_permissions_enabled AS enabled, base_id FROM meta_sheets')) {
+            expect(params).toEqual(['sheet_acl'])
+            return { rows: [{ enabled: false, base_id: null }] }
+          }
+          if (sql.includes('FROM meta_fields') && sql.includes('ORDER BY "order" ASC')) {
+            expect(params).toEqual(['sheet_acl'])
+            return {
+              rows: [{
+                id: 'fld_secret_files',
+                name: 'Secret files',
+                type: 'attachment',
+                property: {},
+                order: 1,
+              }],
+            }
+          }
+          if (sql.includes('FROM field_permissions fp')) {
+            expect(params).toEqual(['user_multitable_attachments', 'sheet_acl'])
+            return {
+              rows: [{
+                field_id: 'fld_secret_files',
+                visible: false,
+                read_only: false,
+              }],
+            }
+          }
+          throw new Error(`Unhandled SQL in test: ${sql}`)
+        },
+      })
+
+      const response = await request(app)
+        .get('/api/multitable/attachments/att_field_masked')
+        .expect(403)
+
+      expect(response.body).toEqual({
+        ok: false,
+        error: { code: 'FIELD_FORBIDDEN', message: 'Attachment field is not readable' },
+      })
+      expect(downloadSpy).toHaveBeenCalledTimes(0)
+      expect(JSON.stringify(response.body)).not.toContain('SECRET ATTACHMENT BYTES')
+      expect(JSON.stringify(response.body)).not.toContain('secret.txt')
+    } finally {
+      await fs.rm(attachmentPath, { recursive: true, force: true })
+    }
+  })
+
+  test('F2: rejects attachment download when the owning record is row-denied', async () => {
+    const attachmentPath = await fs.mkdtemp(path.join(os.tmpdir(), 'multitable-attachment-row-deny-'))
+
+    try {
+      const { app, downloadSpy } = await createApp({
+        attachmentPath,
+        mockStorageDownload: Buffer.from('ROW DENIED ATTACHMENT BYTES'),
+        queryHandler: async (sql, params) => {
+          if (sql.includes('FROM multitable_attachments') && sql.includes('storage_file_id')) {
+            expect(params).toEqual(['att_row_denied'])
+            return {
+              rows: [{
+                id: 'att_row_denied',
+                sheet_id: 'sheet_acl',
+                record_id: 'rec_secret',
+                field_id: 'fld_files',
+                storage_file_id: 'storage_att_row_denied',
+                filename: 'row-secret.txt',
+                original_name: 'row-secret.txt',
+                mime_type: 'text/plain',
+                size: 27,
+              }],
+            }
+          }
+          if (sql.includes('FROM spreadsheet_permissions')) {
+            expect(params).toEqual(['user_multitable_attachments', ['sheet_acl']])
+            return {
+              rows: [{ sheet_id: 'sheet_acl', perm_code: 'spreadsheet:read', subject_type: 'user' }],
+            }
+          }
+          if (/FROM meta_sheets WHERE id = ANY[\s\S]*base_id/i.test(sql)) return { rows: [] }
+          if (sql.includes('SELECT row_level_read_permissions_enabled AS enabled, base_id FROM meta_sheets')) {
+            expect(params).toEqual(['sheet_acl'])
+            return { rows: [{ enabled: true, base_id: null }] }
+          }
+          if (sql.includes('SELECT DISTINCT rp.record_id')) {
+            expect(params).toEqual(['user_multitable_attachments', 'sheet_acl'])
+            return { rows: [{ record_id: 'rec_secret' }] }
+          }
+          if (sql.includes('SELECT conditional_read_rules AS rules FROM meta_sheets')) {
+            expect(params).toEqual(['sheet_acl'])
+            return { rows: [{ rules: [] }] }
+          }
+          throw new Error(`Unhandled SQL in test: ${sql}`)
+        },
+      })
+
+      const response = await request(app)
+        .get('/api/multitable/attachments/att_row_denied')
+        .expect(404)
+
+      expect(response.body).toEqual({
+        ok: false,
+        error: { code: 'NOT_FOUND', message: 'Attachment not found: att_row_denied' },
+      })
+      expect(downloadSpy).toHaveBeenCalledTimes(0)
+      expect(JSON.stringify(response.body)).not.toContain('ROW DENIED ATTACHMENT BYTES')
+      expect(JSON.stringify(response.body)).not.toContain('row-secret.txt')
+    } finally {
+      await fs.rm(attachmentPath, { recursive: true, force: true })
+    }
+  })
+
   test('deletes an attachment and removes it from the owning record field', async () => {
     const attachmentPath = await fs.mkdtemp(path.join(os.tmpdir(), 'multitable-attachment-delete-'))
     let storedPath = ''
@@ -501,6 +642,10 @@ describe('Multitable attachment API', () => {
             return {
               rows: [{ id: 'rec_ops_1', created_by: 'user_multitable_attachments' }],
             }
+          }
+          if (sql.includes('SELECT locked, locked_by, created_by FROM meta_records WHERE id = $1 AND sheet_id = $2')) {
+            expect(params).toEqual(['rec_ops_1', 'sheet_ops'])
+            return { rows: [{ locked: false, locked_by: null, created_by: 'user_multitable_attachments' }] }
           }
           if (sql.includes('UPDATE meta_records') && sql.includes('version = version + 1')) {
             expect(params).toEqual([
@@ -588,6 +733,10 @@ describe('Multitable attachment API', () => {
             return {
               rows: [{ id: 'rec_acl_1', created_by: 'other_user' }],
             }
+          }
+          if (sql.includes('SELECT locked, locked_by, created_by FROM meta_records WHERE id = $1 AND sheet_id = $2')) {
+            expect(params).toEqual(['rec_acl_1', 'sheet_acl'])
+            return { rows: [{ locked: false, locked_by: null, created_by: 'other_user' }] }
           }
           if (sql.includes('SELECT id, version, data FROM meta_records WHERE id = $1 AND sheet_id = $2 FOR UPDATE')) {
             expect(params).toEqual(['rec_acl_1', 'sheet_acl'])

@@ -55,4 +55,6 @@ RP 路由预览线收官后，/goal 固定节奏把 batch-2 的 12 个「G」项
 
 **agent 韧性事件**（多次由主循环接管/自做）：B2-21 agent 撞 session 限额（自做）· B2-18 agent 撞 auth 错误 mid-commit（接管其未提交实现）· B2-25/B2-27 agent 完成但留诚实 gap（补行为测试+mutation）· B2-26 agent 撞 transient 500（自做）· B2-23 agent 反过来纠正我的假竞态命题。模式：agent 跑量、主循环守门+接管，产出不因单个 agent 死亡而丢失。
 
-**owner 决策项（未做，branch-protection scope）**：①把一个 web-test job 提进 required 集（现 required test(20.x) 只 build apps/web，从不跑 spec；已把散落 spec 两点接线进非-required guard 补救）②两仓 merge-queue（治本 rebase treadmill）。
+**CI 闭环状态（更新 2026-07-08）**：①**已完成** —— always-on `web-tests` job（`.github/workflows/web-tests.yml` + `apps/web/scripts/run-required-web-tests.sh`，跑守卫并集 107 files / 1571 tests）已合入 main 且**已进 branch protection required contexts**（append，未动既有 5 项）。跑 apps/web spec 的 required 闸门补齐。②**剩 merge-queue**（owner 分支保护开关，治本本轮反复的 BEHIND/rebase/filter-line 冲突）。
+
+> 后续维护：新增 web spec 时同步加进 `run-required-web-tests.sh` 与对应 guard（approval-web-guard / multitable-web-guard）——三者须一致（本 job 是两 guard filter 的并集）；或将脚本放宽为「全量减隔离区」使新 spec 自动纳入。

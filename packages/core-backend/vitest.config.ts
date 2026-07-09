@@ -27,6 +27,10 @@ export default defineConfig({
       'tests/integration/approval-direct-manager.api.test.ts',
       'tests/integration/approval-postgate-acceptance.api.test.ts',
       'tests/integration/dept-head-sync-plumbing.test.ts',
+      // DT-HARDEN-02 orphan guard (real DB): proves the admission SAVEPOINT rolls back a users
+      // INSERT when the bind throws after it. DATABASE_URL-gated; excluded here so the no-DB job
+      // cannot skip-green it, and wired as a WHOLE FILE into the approval real-DB step.
+      'tests/integration/directory-sync-admission-orphan-guard.db.test.ts',
       'tests/integration/approval-manager-chain.db.test.ts',
       'tests/integration/approval-requester-department.db.test.ts',
       'tests/integration/approval-requester-title.db.test.ts',
@@ -63,6 +67,11 @@ export default defineConfig({
       // a WHOLE FILE into the `Run approval real-DB integration` step in plugin-tests.yml where it
       // runs against real Postgres every PR.
       'tests/integration/dingtalk-approval-card-deliveries.db.test.ts',
+      // DT-OPS-02 P2 follow-up: preview/apply auto-admission-candidate-count parity.
+      // DATABASE_URL-gated (describeIfDatabase). Excluded from the no-DB default job so it
+      // doesn't skip-green, and wired as a WHOLE FILE into the `Run approval real-DB
+      // integration` step in plugin-tests.yml where it runs against real Postgres every PR.
+      'tests/integration/directory-sync-preview-apply-parity.db.test.ts',
       // A-2a approval.task_created trigger chain: DATABASE_URL-gated (describeIfDatabase). Excluded
       // from the no-DB default job so it doesn't skip-green, and wired as a WHOLE FILE into the
       // automation real-DB step in plugin-tests.yml where it runs against real Postgres every PR.
@@ -78,6 +87,11 @@ export default defineConfig({
       // DT-HARDEN-07 backfill idempotence + dry-run honesty: DATABASE_URL-gated. Same two-point
       // wiring — the script had zero coverage, which is how a non-idempotent backfill shipped.
       'tests/integration/directory-primary-department-backfill.db.test.ts',
+      // DT-OPS-01 deprovision selection: DATABASE_URL-gated (describeIfDatabase). These goldens
+      // exist *because* a fake client made the selection SQL untestable — running them without a
+      // DB would skip-green and restore exactly that hole. Excluded here, wired as a WHOLE FILE
+      // into the `Run approval real-DB integration` step in plugin-tests.yml.
+      'tests/integration/directory-deprovision-selection.db.test.ts',
       // T36-1: projection per-row participant read + the #3537 fence goldens (both were previously
       // wired into NO workflow — skip-green; now run in plugin-tests' approval real-DB step).
       'tests/integration/approval-projection-visibility.db.test.ts',
@@ -86,6 +100,12 @@ export default defineConfig({
       'tests/integration/approval-route-preview-substrate.db.test.ts',
       'tests/integration/approval-route-preview-api.db.test.ts',
       'tests/integration/approval-template-route-preview-api.db.test.ts',
+      // DT-OPS-03 P2-2: manager-binding coverage CTE + failure-streak ORDER BY are mock-only in
+      // every unit test (corrupting either leaves all 13 unit tests green). DATABASE_URL-gated
+      // (describeIfDatabase). Excluded from the no-DB default job so it doesn't skip-green, and
+      // wired as a WHOLE FILE into the `Run approval real-DB integration` step in
+      // plugin-tests.yml where it runs against real Postgres every PR.
+      'tests/integration/directory-sync-alert-coverage.db.test.ts',
       'tests/integration/attendance-comp-time-expiry-reminder.test.ts',
       'tests/integration/attendance-expiry-service.test.ts',
       'tests/integration/attendance-notification-deliveries.test.ts',
@@ -102,6 +122,19 @@ export default defineConfig({
       // re-add/self-scoped DELETE/reader-deny 403/cascade) is no longer invisible debt.
       'tests/integration/comment-reactions.api.test.ts',
       'tests/integration/multitable-oapi1-comments-read-realdb.test.ts',
+      // D-1 delete-revision parity goldens: real Postgres only (describeIfDatabase would merely
+      // skip-green here, re-opening the "real-DB spec silently skips in the no-DB lane" hole) —
+      // whole-file wired into `Run multitable real-DB integration` in plugin-tests.yml.
+      'tests/integration/multitable-d1-delete-revision-parity-realdb.test.ts',
+      // 4c-3 RB matrix: real Postgres only — whole-file wired into `Run multitable real-DB
+      // integration` in plugin-tests.yml (describeIfDatabase alone would skip-green here).
+      'tests/integration/multitable-undelete-inbound-replay-realdb.test.ts',
+      'tests/integration/multitable-undelete-pit-inbound-replay-realdb.test.ts',
+      // 4c-3 §7 R8 absorption-audit hardening (P3-1/P3-2): PIT-resurrect inbound-replay anchor
+      // heuristic goldens + PIT-reset inline-delete inbound-capture goldens. Real Postgres only —
+      // whole-file wired into `Run multitable real-DB integration` in plugin-tests.yml.
+      'tests/integration/multitable-undelete-inbound-resurrect-realdb.test.ts',
+      'tests/integration/multitable-reset-pit-inbound-capture-realdb.test.ts',
       // W6 full-HTTP-path approve->resume seam: mounts authRouter + approvalsRouter on an
       // ephemeral port against real Postgres, so it is excluded from the default run and wired
       // into the dedicated `Run multitable real-DB integration` job in plugin-tests.yml.
