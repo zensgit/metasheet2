@@ -2672,8 +2672,29 @@ export class AutomationExecutor {
       }
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error)
-      await markDingTalkApprovalCardDeliverySendFailed(this.deps.queryFn, delivery.id, errorMessage).catch(() => null)
-      return { actionType, status: 'failed', error: errorMessage, output: { deliveryId: delivery.id } }
+      // DT-HARDEN-06: if the ledger row cannot be flipped out of `pending`, the card is
+      // fail-closed but invisible — no sweeper, no admin listing. Swallowing that
+      // silently (`.catch(() => null)`) hid the only signal an operator would ever get.
+      // The send failure is still what we report; the bookkeeping failure is surfaced.
+      let ledgerError: string | null = null
+      try {
+        await markDingTalkApprovalCardDeliverySendFailed(this.deps.queryFn, delivery.id, errorMessage)
+      } catch (markError) {
+        ledgerError = markError instanceof Error ? markError.message : String(markError)
+        logger.error(
+          `DingTalk approval-card delivery ${delivery.id} is stuck pending: failed to record the send failure`,
+          markError instanceof Error ? markError : new Error(ledgerError),
+        )
+      }
+      return {
+        actionType,
+        status: 'failed',
+        error: errorMessage,
+        output: {
+          deliveryId: delivery.id,
+          ...(ledgerError ? { deliveryLedgerError: ledgerError, deliveryStuckPending: true } : {}),
+        },
+      }
     }
   }
 
@@ -2925,6 +2946,11 @@ export class AutomationExecutor {
     }
     const batches = chunkItems(resolvedRecipients, DINGTALK_PERSON_BATCH_SIZE)
 
+    // DT-HARDEN-06: recipients whose batch already reached DingTalk. A later batch
+    // throwing must not re-mark them failed — that used to write BOTH a success and a
+    // failed delivery row for the same recipient in the same send attempt.
+    const sentRecipients = new Set<(typeof resolvedRecipients)[number]>()
+
     try {
       const messageConfig = await readDingTalkMessageConfigFromRuntime()
       const accessToken = await fetchDingTalkAppAccessToken(messageConfig, { fetchFn: this.deps.fetchFn })
@@ -2958,6 +2984,7 @@ export class AutomationExecutor {
           recordId: context.recordId,
           initiatedBy: context.actorId ?? null,
         })))
+        for (const recipient of batch) sentRecipients.add(recipient)
       }
 
       return {
@@ -2990,7 +3017,12 @@ export class AutomationExecutor {
           : null
       const errorMessage = error instanceof Error ? error.message : String(error)
 
-      await Promise.all(resolvedRecipients.map((recipient) => recordDingTalkPersonDeliverySafely(this.deps.queryFn, {
+      // DT-HARDEN-06: only recipients whose batch never reached DingTalk are failures.
+      // Recipients from earlier successful batches keep their success row — the send
+      // did happen for them, and a partial failure is a partial result, not a total one.
+      const unsentRecipients = resolvedRecipients.filter((recipient) => !sentRecipients.has(recipient))
+
+      await Promise.all(unsentRecipients.map((recipient) => recordDingTalkPersonDeliverySafely(this.deps.queryFn, {
         localUserId: recipient.localUserId,
         dingtalkUserId: recipient.dingtalkUserId,
         sourceType: 'automation',
@@ -3010,6 +3042,11 @@ export class AutomationExecutor {
         actionType: 'send_dingtalk_person_message',
         status: 'failed',
         error: errorMessage,
+        output: {
+          notifiedUsers: sentRecipients.size,
+          failedRecipientCount: unsentRecipients.length,
+          batchCount: batches.length,
+        },
       }
     }
   }

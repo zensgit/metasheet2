@@ -1303,6 +1303,87 @@ describe('AutomationExecutor', () => {
     expect(insertCalls).toHaveLength(2)
   })
 
+  // DT-HARDEN-06: work notifications go out in batches of 100. When a later batch threw,
+  // the catch marked EVERY resolved recipient failed — including the earlier batches that
+  // had already been sent AND already had a success row written. The same recipient ended
+  // up with both a success and a failed delivery row for one send attempt.
+  it('records only unsent recipients as failed when a later batch throws (DT-HARDEN-06)', async () => {
+    process.env.DINGTALK_APP_KEY = 'dt-app-key'
+    process.env.DINGTALK_APP_SECRET = 'dt-app-secret'
+    process.env.DINGTALK_AGENT_ID = '123456789'
+
+    const recipientCount = 150 // → two batches: 100 + 50
+    const recipientRows = Array.from({ length: recipientCount }, (_, i) => ({
+      local_user_id: `user_${i}`,
+      local_user_active: true,
+      dingtalk_user_id: `dt-user-${i}`,
+    }))
+
+    const queryFn = vi.fn()
+      .mockResolvedValueOnce({ rows: recipientRows })
+      .mockResolvedValue({ rows: [] })
+
+    const fetchFn = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ access_token: 'app-access-token' }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }))
+      // batch 1 (100 recipients) succeeds
+      .mockResolvedValueOnce(new Response(JSON.stringify({ errcode: 0, errmsg: 'ok', task_id: 1 }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }))
+      // batch 2 (50 recipients) is rejected by DingTalk
+      .mockResolvedValueOnce(new Response(JSON.stringify({ errcode: 88, errmsg: 'rate limited' }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      })) as unknown as typeof fetch
+
+    deps = createMockDeps({ queryFn, fetchFn })
+    executor = new AutomationExecutor(deps)
+
+    const rule = createMockRule({
+      actions: [{
+        type: 'send_dingtalk_person_message',
+        config: {
+          userIds: recipientRows.map((row) => row.local_user_id),
+          titleTemplate: 'T',
+          bodyTemplate: 'B',
+        },
+      }],
+    })
+    const result = await executor.execute(rule, {
+      recordId: 'r1',
+      data: {},
+      sheetId: 'sheet_1',
+      actorId: 'user_1',
+    })
+
+    expect(result.status).toBe('failed')
+
+    const deliveryInserts = queryFn.mock.calls
+      .filter((call) => String(call[0]).includes('INSERT INTO dingtalk_person_deliveries'))
+      .map((call) => {
+        const params = call[1] as unknown[]
+        return { localUserId: String(params[1]), status: String(params[7]) }
+      })
+
+    const succeeded = deliveryInserts.filter((row) => row.status === 'success').map((row) => row.localUserId)
+    const failed = deliveryInserts.filter((row) => row.status === 'failed').map((row) => row.localUserId)
+
+    // Exactly one row per recipient — no double-recording.
+    expect(deliveryInserts).toHaveLength(recipientCount)
+    expect(succeeded).toHaveLength(100)
+    expect(failed).toHaveLength(50)
+
+    // The load-bearing invariant: nobody is both success and failed for one attempt.
+    const overlap = succeeded.filter((id) => failed.includes(id))
+    expect(overlap).toEqual([])
+
+    // Partial success is reported as a partial result.
+    expect(result.steps[0]?.output).toMatchObject({ notifiedUsers: 100, failedRecipientCount: 50 })
+  })
+
   it('fails send_dingtalk_person_message when the internal processing view is not in the sheet', async () => {
     process.env.DINGTALK_APP_KEY = 'dt-app-key'
     process.env.DINGTALK_APP_SECRET = 'dt-app-secret'
