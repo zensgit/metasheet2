@@ -3023,7 +3023,7 @@
                     :placeholder="tr('0 = no cap', '0＝不限')"
                   />
                   <small class="attendance__field-hint" data-overtime-bank-hint="cap">
-                    {{ tr('Not enforced yet — the runtime does not read this value.', '尚未强制——运行时暂不读取该值。') }}
+                    {{ tr('Caps the comp-time banked from overtime per calendar month. An approval that would push the month past this cap is blocked. 0 = no cap.', '限制每自然月由加班转入调休池的额度上限。若某次审批会使当月超过该上限，则阻断该审批。0＝不限。') }}
                   </small>
                 </label>
                 <label class="attendance__field" for="attendance-overtime-bank-validity">
