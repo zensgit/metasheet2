@@ -739,6 +739,40 @@ function Get-WorkspaceProjectRelativeRoots {
   return @($roots | Select-Object -Unique)
 }
 
+function Remove-DirectoryTree {
+  param(
+    [string]$Path,
+    [string]$Label = 'Directory tree'
+  )
+
+  if (-not (Test-Path -LiteralPath $Path)) {
+    return
+  }
+
+  # PowerShell's FileSystem provider can fail while traversing deep pnpm trees
+  # on Windows. Node is already a required runtime and removes those trees
+  # without asking the provider to enumerate every nested path.
+  $removeScript = @'
+const fs = require('node:fs')
+const target = process.argv[1]
+if (!target) throw new Error('cleanup target is required')
+fs.rmSync(target, { recursive: true, force: true, maxRetries: 5, retryDelay: 250 })
+'@
+  $output = & node -e $removeScript $Path 2>&1
+  $exitCode = $LASTEXITCODE
+  foreach ($line in @($output)) {
+    if (-not [string]::IsNullOrWhiteSpace([string]$line)) {
+      Write-Host "[node-rm] $line"
+    }
+  }
+  if ($exitCode -ne 0) {
+    throw "$Label cleanup failed for $Path (node exit=$exitCode)"
+  }
+  if (Test-Path -LiteralPath $Path) {
+    throw "$Label cleanup did not remove $Path"
+  }
+}
+
 function Remove-WorkspaceNodeModules {
   param([string]$Root)
 
@@ -748,7 +782,7 @@ function Remove-WorkspaceNodeModules {
     $projectRoot = if ([string]::IsNullOrWhiteSpace($relativeRoot)) { $Root } else { Join-Path $Root $relativeRoot }
     $modulesPath = Join-Path $projectRoot 'node_modules'
     if (Test-Path -LiteralPath $modulesPath) {
-      Remove-Item -LiteralPath $modulesPath -Recurse -Force
+      Remove-DirectoryTree -Path $modulesPath -Label 'Staging dependency tree'
     }
   }
 }
@@ -890,7 +924,7 @@ function Restore-WorkspaceNodeModules {
 
   foreach ($entry in @($Transaction.Entries) | Sort-Object { $_.ModulesPath.Length } -Descending) {
     if (Test-Path -LiteralPath $entry.ModulesPath) {
-      Remove-Item -LiteralPath $entry.ModulesPath -Recurse -Force
+      Remove-DirectoryTree -Path $entry.ModulesPath -Label 'Rollback dependency tree'
     }
     if ($entry.HadExisting -and (Test-Path -LiteralPath $entry.BackupPath)) {
       Move-Item -LiteralPath $entry.BackupPath -Destination $entry.ModulesPath
@@ -903,7 +937,7 @@ function Complete-WorkspaceNodeModulesTransaction {
 
   foreach ($entry in @($Transaction.Entries)) {
     if ($entry.HadExisting -and (Test-Path -LiteralPath $entry.BackupPath)) {
-      Remove-Item -LiteralPath $entry.BackupPath -Recurse -Force
+      Remove-DirectoryTree -Path $entry.BackupPath -Label 'Retired dependency backup'
     }
   }
 }
