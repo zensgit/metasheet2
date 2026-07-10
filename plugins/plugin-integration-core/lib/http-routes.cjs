@@ -104,6 +104,10 @@ const ROUTES = [
   ['POST', '/api/integration/stock-preparation/generation/run', 'stockPreparationGenerationRun'],
   ['POST', '/api/integration/stock-preparation/exceptions/resolve', 'stockPreparationExceptionResolve'],
   ['POST', '/api/integration/stock-preparation/exceptions/bulk-resolve', 'stockPreparationExceptionBulkResolve'],
+  // #3751 MVP W5 (queue reads): values-free exception queue (view 6) + prep-line summary (view 5).
+  // Value-bearing detail reads (drawing numbers / quantities / unit symbols) stay OWNER-GATED.
+  ['GET', '/api/integration/stock-preparation/exceptions', 'stockPreparationExceptionList'],
+  ['GET', '/api/integration/stock-preparation/prep-lines', 'stockPreparationPrepLineList'],
   // FOS-2: generic field-option-sync (preset-driven). Stock-prep route above is a compat alias.
   ['POST', '/api/integration/field-options/sync', 'fieldOptionsSync'],
   ['GET', '/api/integration/templates', 'templatesList'],
@@ -305,6 +309,8 @@ const {
   listMaterialMappingCandidates,
   getUnitConversionSummary,
   listUnitConversionCandidates,
+  listStockPreparationExceptions,
+  listStockPreparationPrepLines,
 } = require('./stock-preparation-confirm-reads.cjs')
 // #3751 MVP W4: generation run + human exception resolution. resolvedBy is the route user identity;
 // resolvedAt is stamped in the module — the body can carry neither (closed allowlists).
@@ -746,6 +752,22 @@ const VALID_STOCK_PREPARATION_EXCEPTION_BULK_RESOLVE_REQUEST_KEYS = new Set([
   'projectId',
   'exceptionIds',
   'resolutionAction',
+])
+const VALID_STOCK_PREPARATION_EXCEPTION_LIST_QUERY_KEYS = new Set([
+  'tenantId',
+  'workspaceId',
+  'projectId',
+  'snapshotBatchId',
+  'status',
+  'exceptionType',
+  'severity',
+])
+const VALID_STOCK_PREPARATION_PREP_LINE_LIST_QUERY_KEYS = new Set([
+  'tenantId',
+  'workspaceId',
+  'projectId',
+  'snapshotBatchId',
+  'prepStatus',
 ])
 // FOS-2: generic field-option-sync request — closed allowlist. Operator names a preset (FOS-1
 // catalog) + supplies option sets keyed by the preset's source keys. No sheetId / credentials.
@@ -3797,6 +3819,52 @@ function createHandlers(services, options = {}) {
         exceptionIds: input.exceptionIds,
         resolutionAction: input.resolutionAction,
         resolvedBy: user.id || user.email,
+      })
+      return sendOk(res, result)
+    },
+
+    // #3751 MVP W5: values-free exception queue for view 6 (message text never crosses).
+    async stockPreparationExceptionList(req, res) {
+      requireAccess(req, 'admin')
+      const input = stockPreparationConfirmReadInput(req, requestQuery(req), VALID_STOCK_PREPARATION_EXCEPTION_LIST_QUERY_KEYS, 'STOCK_PREPARATION_EXCEPTION_LIST_REQUEST_INVALID')
+      const provisioning = context && context.api && context.api.multitable
+        ? context.api.multitable.provisioning
+        : undefined
+      if (!provisioning) {
+        throw new HttpRouteError(501, 'CONFIRM_READS_PROVISIONING_API_UNAVAILABLE', 'multitable provisioning API is not available')
+      }
+      const result = await listStockPreparationExceptions({
+        recordsApi: getMultitableRecordsApi(),
+        provisioning,
+        targetProjectId: input.targetProjectId,
+        projectId: input.projectId,
+        snapshotBatchId: input.snapshotBatchId,
+        status: input.status,
+        exceptionType: input.exceptionType,
+        severity: input.severity,
+        permission: 'admin',
+      })
+      return sendOk(res, result)
+    },
+
+    // #3751 MVP W5: values-free prep-line summary for view 5 (value-bearing detail stays owner-gated).
+    async stockPreparationPrepLineList(req, res) {
+      requireAccess(req, 'admin')
+      const input = stockPreparationConfirmReadInput(req, requestQuery(req), VALID_STOCK_PREPARATION_PREP_LINE_LIST_QUERY_KEYS, 'STOCK_PREPARATION_PREP_LINE_LIST_REQUEST_INVALID')
+      const provisioning = context && context.api && context.api.multitable
+        ? context.api.multitable.provisioning
+        : undefined
+      if (!provisioning) {
+        throw new HttpRouteError(501, 'CONFIRM_READS_PROVISIONING_API_UNAVAILABLE', 'multitable provisioning API is not available')
+      }
+      const result = await listStockPreparationPrepLines({
+        recordsApi: getMultitableRecordsApi(),
+        provisioning,
+        targetProjectId: input.targetProjectId,
+        projectId: input.projectId,
+        snapshotBatchId: input.snapshotBatchId,
+        prepStatus: input.prepStatus,
+        permission: 'admin',
       })
       return sendOk(res, result)
     },
