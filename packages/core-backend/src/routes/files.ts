@@ -17,6 +17,23 @@ import type { RequestWithFiles } from '../types/multer'
 
 const logger = new Logger('FilesRouter')
 
+interface FilesOwnerRow {
+  owner_id: string | null
+}
+
+/**
+ * F2 files-acl-tombstone design-lock (2026-07-10): does an ACTIVE (`deleted_at IS NULL`) `files`
+ * row exist for this id? Used by the delete route below to decide which of the two delete paths
+ * applies (tombstone-first vs. the unchanged legacy no-row path). Not an ownership check — that is
+ * F1's concern, landing in a follow-up commit on this same branch.
+ */
+async function hasActiveFileRow(id: string): Promise<boolean> {
+  const result = await sql<FilesOwnerRow>`
+    SELECT owner_id FROM files WHERE id = ${id} AND deleted_at IS NULL
+  `.execute(db)
+  return result.rows.length > 0
+}
+
 // Storage service singleton - initialized lazily
 let storageService: StorageServiceImpl | null = null
 
@@ -206,24 +223,52 @@ export function filesRouter(): Router {
   r.delete('/api/files/:id', authenticate, async (req: Request, res: Response) => {
     try {
       const { id } = req.params
+      const userId = req.user?.id ?? req.user?.userId ?? req.user?.sub ?? 'anonymous'
       const storage = getStorageService()
 
-      // Check if file exists
+      if (await hasActiveFileRow(id)) {
+        // F2 files-acl-tombstone design-lock (2026-07-10): tombstone-first delete order. The
+        // previous order (storage.delete → `DELETE FROM files`) could split on a mid-operation
+        // failure: storage succeeds, the row delete fails → the binary is gone but the row still
+        // reads as valid evidence (exactly the dangling state H2 #4044 P3-2 was meant to close).
+        // Tombstoning BEFORE touching storage means a DB failure here leaves storage completely
+        // untouched (caught below, 5xx, nothing else runs), and once this succeeds every consumer
+        // (G2's `deleted_at IS NULL` filter) treats the id as gone regardless of what happens to
+        // the storage object next — there is no window where the row still looks valid but the
+        // blob is gone.
+        try {
+          await sql`
+            UPDATE files SET deleted_at = now() WHERE id = ${id} AND deleted_at IS NULL
+          `.execute(db)
+        } catch (updateErr) {
+          logger.error(`Failed to tombstone files row ${id}; storage object left untouched`, updateErr instanceof Error ? updateErr : undefined)
+          return res.status(500).json({ error: 'Failed to delete file' })
+        }
+
+        try {
+          await storage.delete(id)
+        } catch (storageErr) {
+          // The row is already tombstoned — evidence integrity holds (no consumer will ever see this
+          // id as valid again) even if the underlying blob is still sitting in storage. That blob's
+          // removal is a compensating cleanup (retry / manual sweep), deliberately not retried inline
+          // here and not surfaced as a client-facing failure: from the caller's perspective the file
+          // is gone, which is true from every consumer's point of view.
+          logger.warn(`Storage delete failed for tombstoned file ${id}; blob left for compensating cleanup`, storageErr instanceof Error ? storageErr : undefined)
+        }
+
+        logger.info(`File deleted: ${id} by user ${userId}`)
+        return res.json({ success: true, id })
+      }
+
+      // No active `files` row for this id — a legacy object that predates the S2 writer (migration
+      // 035 never had one either) or an id that was already fully processed by the branch above.
+      // Unaffected by the tombstone change: unchanged pre-F2 behavior (storage-existence-gated
+      // delete, no row to tombstone).
       const exists = await storage.exists(id)
       if (!exists) {
         return res.status(404).json({ error: 'File not found' })
       }
-
       await storage.delete(id)
-      // H2 photo-evidence-hardening design-lock (2026-07-10), P3-2: the storage object was the
-      // only thing this route ever deleted — the `files` row (owner_id + meta, written on upload
-      // since S2 #4016) was left behind as an orphan, and attendance's G2 photo-evidence check
-      // reads that row, not the storage object, so a punch could still cite "evidence" whose
-      // underlying file no longer exists. Delete the row too. Parameterized; a missing row (an
-      // object that predates the S2 writer, or a second delete of the same id) is not an error —
-      // `DELETE ... WHERE id = $1` is a no-op when no row matches.
-      await sql`DELETE FROM files WHERE id = ${id}`.execute(db)
-      const userId = req.user?.id ?? req.user?.userId ?? req.user?.sub ?? 'anonymous'
 
       logger.info(`File deleted: ${id} by user ${userId}`)
       res.json({ success: true, id })

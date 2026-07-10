@@ -892,7 +892,7 @@ describeDb('② S3 outdoor punch approval (real DB, route-level)', () => {
     }
   })
 
-  it('H2 P3-2: delete removes the files row (orphan-row cleanup) and the id is no longer usable as evidence', async () => {
+  it('H2 P3-2 + F2 tombstone: delete marks the files row deleted_at (not a hard delete) and the id is no longer usable as evidence', async () => {
     await createOutdoorFlow()
     await setOutdoorPhoto({ requireApproval: true, requirePhoto: true })
     const u = photoUid('delrow')
@@ -902,14 +902,22 @@ describeDb('② S3 outdoor punch approval (real DB, route-level)', () => {
       expect(up.status).toBe(200)
       const fileId = uploadedFileId(up)
       expect(fileId).toBeTruthy()
-      const before = (await pool.query(`SELECT id FROM files WHERE id = $1`, [fileId])).rows[0]
+      const before = (await pool.query(`SELECT id, deleted_at FROM files WHERE id = $1`, [fileId])).rows[0]
       expect(before).toBeTruthy()
+      expect(before.deleted_at).toBeNull()
       const del = await requestJson(`${baseUrl}/api/files/${fileId}`, { method: 'DELETE', headers: authHeaders(t) })
       expect(del.status).toBe(200)
-      // P3-2: the files row is gone, not just the storage object
-      const after = (await pool.query(`SELECT id FROM files WHERE id = $1`, [fileId])).rows[0]
-      expect(after).toBeUndefined()
-      // dangling evidence: punching with the now-deleted fileId is rejected, not silently accepted
+      // F2 files-acl-tombstone design-lock (2026-07-10): the row is TOMBSTONED, not hard-deleted — it
+      // remains as an audit record + compensating-delete pointer, invisible to every consumer via the
+      // `deleted_at IS NULL` filter (G2, this file's own info/download/list).
+      const after = (await pool.query(`SELECT id, deleted_at FROM files WHERE id = $1`, [fileId])).rows[0]
+      expect(after).toBeTruthy()
+      expect(after.deleted_at).not.toBeNull()
+      // download 404s the same as if the row had truly vanished (F1's ACL + F2's tombstone filter
+      // compose: a tombstoned row reads as "no active row" for the owner too, same as a stranger).
+      const dl = await requestJson(`${baseUrl}/api/files/${fileId}/download`, { headers: authHeaders(t) })
+      expect(dl.status).toBe(404)
+      // dangling evidence: punching with the now-tombstoned fileId is rejected, not silently accepted
       const r = await punch(t, { eventType: 'check_in', location: OUTSIDE, photoFileId: fileId })
       expect(r.status).toBe(422)
       expect((r.body as { error?: { code?: string } })?.error?.code).toBe('OUTDOOR_PHOTO_INVALID')

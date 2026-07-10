@@ -24851,7 +24851,10 @@ module.exports = {
             }
             let photoFileId = null
             if (rawPhotoFileId) {
-              const photoRows = await db.query('SELECT id, owner_id, meta FROM files WHERE id = $1 LIMIT 1', [rawPhotoFileId])
+              // F2 files-acl-tombstone design-lock (2026-07-10): `DELETE /api/files/:id` now tombstones
+              // the row (`deleted_at`) instead of hard-deleting it — this filter is what makes a
+              // tombstoned id read as "no such evidence" here, same as the pre-tombstone hard-delete did.
+              const photoRows = await db.query('SELECT id, owner_id, meta FROM files WHERE id = $1 AND deleted_at IS NULL LIMIT 1', [rawPhotoFileId])
               const photoRow = photoRows[0] ?? null
               const photoMeta = normalizeMetadata(photoRow?.meta)
               // H2 photo-evidence-hardening design-lock (2026-07-10) P3-1 AMENDMENT: `meta.contentType`
