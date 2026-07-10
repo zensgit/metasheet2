@@ -3,16 +3,19 @@ import {
   normalizeErrorMessage,
   readNumericField,
   requestDingTalkTransportJson,
-  type DingTalkCallSafety,
+  type DingTalkCallKind,
 } from './transport'
 
 // Error shapes and the H06 timeout knob moved to the unified transport (roadmap
 // §7.2) — re-exported so existing callers keep importing them from this module.
+// isDingTalkOutcomeUnknown lets ledger writers distinguish "maybe delivered"
+// send failures (network/timeout/5xx) from definite rejections.
 export {
   DINGTALK_REQUEST_TIMEOUT_MS,
   DingTalkBusinessError,
   DingTalkRequestError,
   DingTalkTimeoutError,
+  isDingTalkOutcomeUnknown,
 } from './transport'
 
 export interface DingTalkOauthConfig {
@@ -174,21 +177,21 @@ function normalizeDirectoryBaseUrl(baseUrl?: string): string {
 /**
  * v1.0 api.dingtalk.com endpoints (HTTP-status based, no errcode envelope). All
  * timeout/retry/backoff/flow-control handling lives in the shared transport seam
- * (roadmap §7.2); `safety` is the explicit idempotency classification every call
- * site must declare — see DingTalkCallSafety in ./transport.
+ * (roadmap §7.2); `kind` is the explicit business-semantics tier every call site
+ * must declare (read / exchange / send) — see DingTalkCallKind in ./transport.
  */
 async function requestDingTalkJson(
   input: string,
   init: RequestInit,
   fallbackError: string,
-  safety: DingTalkCallSafety,
+  kind: DingTalkCallKind,
   options?: DingTalkRequestOptions,
 ): Promise<Record<string, unknown>> {
   return requestDingTalkTransportJson({
     input,
     init,
     fallbackError,
-    safety,
+    kind,
     envelope: 'none',
     fetchFn: options?.fetchFn,
     timeoutMs: options?.timeoutMs,
@@ -205,7 +208,7 @@ async function requestDingTalkDirectoryJson(
   path: string,
   init: RequestInit,
   fallbackError: string,
-  safety: DingTalkCallSafety,
+  kind: DingTalkCallKind,
   baseUrl?: string,
   options?: DingTalkRequestOptions,
 ): Promise<Record<string, unknown>> {
@@ -213,7 +216,7 @@ async function requestDingTalkDirectoryJson(
     input: `${normalizeDirectoryBaseUrl(baseUrl)}${path}`,
     init,
     fallbackError,
-    safety,
+    kind,
     envelope: 'oapi',
     fetchFn: options?.fetchFn,
     timeoutMs: options?.timeoutMs,
@@ -318,9 +321,9 @@ export async function exchangeCodeForUserAccessToken(
       }),
     },
     'Failed to obtain access token from DingTalk',
-    // One-shot authorization-code exchange: a retry after an ambiguous failure
-    // replays a possibly-consumed code — never retried beyond network-error/429.
-    'non-idempotent-write',
+    // One-shot authorization-code exchange: a retry after ANY ambiguous failure
+    // burns or double-redeems the single-use code — never retried.
+    'exchange',
   )
 
   const accessToken = typeof payload.accessToken === 'string'
@@ -360,7 +363,7 @@ export async function fetchDingTalkCurrentUser(accessToken: string): Promise<Din
       },
     },
     'Failed to get current user info from DingTalk',
-    'idempotent-read',
+    'read',
   )
 
   const openId = typeof payload.openId === 'string'
@@ -439,7 +442,7 @@ async function fetchDingTalkAppAccessTokenUncached(
       },
     },
     'Failed to obtain DingTalk app access token',
-    'idempotent-read',
+    'read',
     baseUrl,
     options,
   )
@@ -503,8 +506,8 @@ export async function listDingTalkDepartments(
       }),
     },
     'Failed to list DingTalk departments',
-    // POST-verb but a pure list read — idempotent.
-    'idempotent-read',
+    // POST-verb but a query-shaped read — safe to retry.
+    'read',
     config?.baseUrl,
   )
 
@@ -545,7 +548,7 @@ export async function getDingTalkDepartmentDetail(
       }),
     },
     'Failed to read DingTalk department detail',
-    'idempotent-read',
+    'read',
     config?.baseUrl,
   )
 
@@ -582,7 +585,7 @@ export async function listDingTalkDepartmentUsers(
       }),
     },
     'Failed to list DingTalk department users',
-    'idempotent-read',
+    'read',
     config?.baseUrl,
   )
 
@@ -638,7 +641,7 @@ export async function getDingTalkUserDetail(
       }),
     },
     'Failed to read DingTalk user detail',
-    'idempotent-read',
+    'read',
     config?.baseUrl,
   )
 
@@ -700,9 +703,9 @@ export async function getDingTalkUserInfoByAuthCode(
       body: JSON.stringify({ code: authCode }),
     },
     'Failed to exchange DingTalk container auth code',
-    // One-shot container authCode: replaying a possibly-consumed code after an
-    // ambiguous failure would fail differently — never retried beyond network/429.
-    'non-idempotent-write',
+    // One-shot container authCode: a retry after ANY ambiguous failure burns or
+    // double-redeems the single-use code — never retried.
+    'exchange',
     config?.baseUrl,
   )
 
@@ -948,9 +951,10 @@ export async function sendDingTalkWorkNotificationActionCard(
       }),
     },
     'Failed to send DingTalk action-card work notification',
-    // Send: a duplicate action card is worse than a missed retry — only
-    // network-error-before-response and HTTP 429 are retried.
-    'non-idempotent-write',
+    // Side-effect send: never auto-retried. A lost response has no task_id, so
+    // DingTalk's async-send result query cannot serve as an idempotency key —
+    // uncertain outcomes surface via isDingTalkOutcomeUnknown instead.
+    'send',
     config.baseUrl,
     options,
   )
@@ -1010,9 +1014,10 @@ export async function sendDingTalkWorkNotification(
       }),
     },
     'Failed to send DingTalk work notification',
-    // Send: a duplicate work notification is worse than a missed retry — only
-    // network-error-before-response and HTTP 429 are retried.
-    'non-idempotent-write',
+    // Side-effect send: never auto-retried. A lost response has no task_id, so
+    // DingTalk's async-send result query cannot serve as an idempotency key —
+    // uncertain outcomes surface via isDingTalkOutcomeUnknown instead.
+    'send',
     config.baseUrl,
     options,
   )

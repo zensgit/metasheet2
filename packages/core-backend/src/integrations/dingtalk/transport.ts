@@ -11,7 +11,8 @@ const logger = new Logger('DingTalkTransport')
  *    (each retry attempt gets its own fresh `AbortSignal.timeout`; a caller-supplied
  *    overall signal aborts the in-flight attempt AND any backoff wait immediately);
  *  - bounded retry with exponential backoff + full jitter, honoring `Retry-After`;
- *  - explicit idempotency-safety classification (see {@link DingTalkCallSafety});
+ *  - explicit BUSINESS-SEMANTICS classification per call site (see
+ *    {@link DingTalkCallKind}) — never inferred from the HTTP verb;
  *  - DingTalk flow-control recognition: HTTP 429 as well as HTTP-200 envelopes
  *    carrying flow-control errcodes (see {@link isDingTalkFlowControlErrcode});
  *  - error-shape preservation: when retries are exhausted or a failure is
@@ -19,7 +20,12 @@ const logger = new Logger('DingTalkTransport')
  *    (DingTalkRequestError / DingTalkBusinessError / DingTalkTimeoutError / the raw
  *    network error). Callers pattern-match on these shapes (routes/auth.ts,
  *    multitable/automation-executor.ts, AttendanceNotificationDeliveryWorker) —
- *    do not wrap or re-type them here.
+ *    do not wrap or re-type them here. Send-tier uncertain outcomes additionally
+ *    carry an {@link isDingTalkOutcomeUnknown} marker for ledger writers.
+ *
+ * Rate-limit handling here (backoff on 429/flow-control) is BEST-EFFORT and
+ * in-process only: replicas do not share a quota. Multi-replica shared throttling
+ * (per app/corp, Redis or equivalent) is explicitly out of scope — follow-up work.
  */
 
 export class DingTalkRequestError extends Error {
@@ -68,27 +74,42 @@ export class DingTalkTimeoutError extends Error {
 }
 
 /**
- * Idempotency-safety classification — REQUIRED at every call site so review can see
- * the retry class of every outbound call (roadmap §7.2: "Retry only safe/idempotent
- * API classes", "Keep work-notification sends bounded and classified"):
+ * Business-semantics classification — chosen EXPLICITLY at every call site, never
+ * inferred from the HTTP verb (roadmap §7.2: "Retry only safe/idempotent API
+ * classes", "Keep work-notification sends bounded and classified"):
  *
- *  - `'idempotent-read'`: GET-shaped reads. DingTalk's legacy topapi reads are
- *    POST-verb but semantically idempotent list/get calls (listsub, user/list,
- *    user/get, department/get) — repeating them cannot double-apply anything.
- *    Retried on: network error, HTTP 429, HTTP 5xx, and flow-control errcodes
- *    inside HTTP-200 envelopes.
+ *  - `'read'` — SAFE READS: token GET, user/department gets, and directory
+ *    query-shaped POSTs that only read (listsub, user/list, user/get,
+ *    department/get). Repeating them cannot double-apply anything. Retried on:
+ *    network error, HTTP 429, selected transient 5xx (500/502/503/504), and
+ *    flow-control errcodes inside HTTP-200 envelopes.
  *
- *  - `'non-idempotent-write'`: sends/notifications and one-shot code exchanges.
- *    Retried ONLY on network-error-before-response and HTTP 429 (both mean the
- *    request was rejected/never answered before processing). NEVER retried on an
- *    ambiguous 5xx or flow-control errcode observed AFTER DingTalk may have started
- *    processing — a duplicate work notification is worse than a missed retry.
+ *  - `'exchange'` — ONE-SHOT EXCHANGES: OAuth authorization-code exchange, E1
+ *    container-login authCode. The code is single-use; a retry after an ambiguous
+ *    failure burns it or double-redeems. NO retry on ANY failure — a fetch
+ *    timeout/disconnect only proves the CLIENT saw no response, not that DingTalk
+ *    didn't receive and execute the request.
  *
- * Per-attempt timeouts (DingTalkTimeoutError) are NOT retried for either class: an
+ *  - `'send'` — SIDE-EFFECT SENDS: asyncsend_v2 work notifications / action cards.
+ *    On network error, timeout, or 5xx the outcome is UNKNOWN — DingTalk may have
+ *    delivered the message even though we saw no response — so the transport does
+ *    NOT resend; it rethrows the original error marked via
+ *    {@link isDingTalkOutcomeUnknown} (and `outcomeUnknown: true` on the error)
+ *    so ledger writers can record `outcome_unknown` instead of a plain failure.
+ *    Note DingTalk's async-send result query (by task_id) can reconcile a KNOWN
+ *    send, but when the response was lost there IS no task_id — it cannot serve
+ *    as an idempotency key for auto-retry. HTTP 429 on sends is a definite
+ *    pre-processing rejection, but auto-retry is deliberately NOT enabled in this
+ *    slice pending endpoint-contract confirmation; it fails through unchanged.
+ *
+ * Unclassified call sites default to `'exchange'` — the most conservative tier
+ * (no retry at all).
+ *
+ * Per-attempt timeouts (DingTalkTimeoutError) are NOT retried for any tier: an
  * abort cannot distinguish "server still processing" from "request never arrived",
  * and retrying would multiply DT-HARDEN-06's bounded wall-time by the attempt count.
  */
-export type DingTalkCallSafety = 'idempotent-read' | 'non-idempotent-write'
+export type DingTalkCallKind = 'read' | 'exchange' | 'send'
 
 export interface DingTalkTransportConfig {
   /** Total attempts including the first one (1 = no retries). */
@@ -136,7 +157,7 @@ export function resolveDingTalkTransportConfig(): DingTalkTransportConfig {
  *    envelope `code` field), so the transport never retries a class the delivery
  *    layer considers permanent, and vice versa.
  *
- * Only consulted for `'idempotent-read'` calls — see {@link DingTalkCallSafety}.
+ * Only consulted for `'read'` calls — see {@link DingTalkCallKind}.
  */
 export function isDingTalkFlowControlErrcode(code: number): boolean {
   return code === 90018
@@ -145,6 +166,38 @@ export function isDingTalkFlowControlErrcode(code: number): boolean {
     || code === 429
     || (code >= 500 && code < 600)
     || code === 50001
+}
+
+/**
+ * Selected transient 5xx statuses retried for `'read'` calls. 501/505/… are
+ * permanent contract errors, not blips — retrying them only burns quota.
+ */
+const RETRYABLE_READ_5XX: ReadonlySet<number> = new Set([500, 502, 503, 504])
+
+/**
+ * Send-tier uncertain-outcome marker: the request MAY have been executed by
+ * DingTalk although the client saw no (usable) response. Ledger writers should
+ * record such failures as `outcome_unknown` rather than a plain failure. The
+ * original error object is thrown UNCHANGED apart from an added
+ * `outcomeUnknown: true` property; this guard also works for frozen/exotic
+ * errors via a WeakSet.
+ */
+const outcomeUnknownErrors = new WeakSet<object>()
+
+export function isDingTalkOutcomeUnknown(error: unknown): boolean {
+  if (typeof error !== 'object' || error === null) return false
+  if (outcomeUnknownErrors.has(error)) return true
+  return (error as { outcomeUnknown?: unknown }).outcomeUnknown === true
+}
+
+function markOutcomeUnknown(error: unknown): void {
+  if (typeof error !== 'object' || error === null) return
+  outcomeUnknownErrors.add(error)
+  try {
+    Object.defineProperty(error, 'outcomeUnknown', { value: true, enumerable: true, configurable: true })
+  } catch {
+    // frozen error object — the WeakSet still answers isDingTalkOutcomeUnknown
+  }
 }
 
 /**
@@ -185,7 +238,11 @@ export interface DingTalkTransportRequest {
   input: string
   init: RequestInit
   fallbackError: string
-  safety: DingTalkCallSafety
+  /**
+   * Business-semantics tier chosen at the call site (see {@link DingTalkCallKind}).
+   * Omitted/unknown defaults to `'exchange'` — the most conservative tier (no retry).
+   */
+  kind?: DingTalkCallKind
   /**
    * `'oapi'`: legacy oapi.dingtalk.com envelope endpoints — an `errcode !== 0` in an
    * HTTP-200 body throws DingTalkBusinessError INSIDE the retry loop, so flow-control
@@ -321,41 +378,56 @@ interface DingTalkFailureClassification {
   reason: string
   retryable: boolean
   retryAfterMs: number | null
+  /** Send-tier only: the request may have been executed although we saw no response. */
+  outcomeUnknown: boolean
 }
 
-/** The explicit retry-safety matrix — see {@link DingTalkCallSafety} for the rationale. */
-function classifyDingTalkFailure(error: unknown, safety: DingTalkCallSafety): DingTalkFailureClassification {
-  const readsOnly = safety === 'idempotent-read'
+/** The explicit retry matrix — see {@link DingTalkCallKind} for the tier rationale. */
+function classifyDingTalkFailure(error: unknown, kind: DingTalkCallKind): DingTalkFailureClassification {
+  const isRead = kind === 'read'
+  // Uncertain outcomes (no usable response: timeout / network error / 5xx) get the
+  // outcome-unknown marker on the send tier so ledger writers can distinguish
+  // "maybe delivered" from "definitely rejected".
+  const unknownIfSend = kind === 'send'
 
   if (error instanceof DingTalkTimeoutError) {
-    // Timeout/abort: the request MAY be processing server-side. Not retried for
-    // either class — see DingTalkCallSafety.
-    return { error, reason: 'timeout', retryable: false, retryAfterMs: null }
+    // Timeout/abort: the request MAY be processing server-side. Never retried.
+    return { error, reason: 'timeout', retryable: false, retryAfterMs: null, outcomeUnknown: unknownIfSend }
   }
   if (error instanceof DingTalkRequestError) {
     const retryAfterMs = retryAfterHints.get(error) ?? null
     if (error.statusCode === 429) {
-      // Rejected by rate limiting before processing — safe for reads AND writes.
-      return { error, reason: 'http_429', retryable: true, retryAfterMs }
+      // Definite pre-processing rejection. Retried on reads only: send-tier 429
+      // auto-retry is deliberately NOT enabled in this slice (endpoint-contract
+      // confirmation pending); exchanges never retry.
+      return { error, reason: 'http_429', retryable: isRead, retryAfterMs, outcomeUnknown: false }
     }
     if (error.statusCode >= 500 && error.statusCode < 600) {
-      // Ambiguous server failure — a write may already have been applied; reads only.
-      return { error, reason: `http_${error.statusCode}`, retryable: readsOnly, retryAfterMs }
+      // Server-side failure AFTER the request arrived — a send may already have
+      // been executed. Only selected transient 5xx are retried, reads only.
+      return {
+        error,
+        reason: `http_${error.statusCode}`,
+        retryable: isRead && RETRYABLE_READ_5XX.has(error.statusCode),
+        retryAfterMs,
+        outcomeUnknown: unknownIfSend,
+      }
     }
-    return { error, reason: `http_${error.statusCode}`, retryable: false, retryAfterMs: null }
+    return { error, reason: `http_${error.statusCode}`, retryable: false, retryAfterMs: null, outcomeUnknown: false }
   }
   if (error instanceof DingTalkBusinessError) {
     const errcode = readNumericField(error.responseBody ?? {}, 'errcode', 'code')
     if (errcode !== null && isDingTalkFlowControlErrcode(errcode)) {
-      // HTTP-200 flow-control envelope. Reads only: unlike a transport-level 429 we
-      // cannot be certain the app layer did no work before answering.
-      return { error, reason: `flow_control_errcode_${errcode}`, retryable: readsOnly, retryAfterMs: null }
+      // HTTP-200 flow-control envelope: a definite app-layer rejection (we DID get
+      // a response), so it is not outcome-unknown — but only reads retry it.
+      return { error, reason: `flow_control_errcode_${errcode}`, retryable: isRead, retryAfterMs: null, outcomeUnknown: false }
     }
-    return { error, reason: 'business_error', retryable: false, retryAfterMs: null }
+    return { error, reason: 'business_error', retryable: false, retryAfterMs: null, outcomeUnknown: false }
   }
-  // fetch rejected without producing a response (DNS/conn-refused/reset): the one
-  // non-429 class the §7.2 design allows writes to retry (network-error-before-response).
-  return { error, reason: 'network_error', retryable: true, retryAfterMs: null }
+  // fetch rejected without producing a response (DNS/conn-refused/reset). Reads may
+  // retry; exchanges never (single-use code may have been redeemed server-side);
+  // sends never (the notification may have gone out) — outcome unknown.
+  return { error, reason: 'network_error', retryable: isRead, retryAfterMs: null, outcomeUnknown: unknownIfSend }
 }
 
 /** Resolves `true` when the signal aborted before the delay elapsed. */
@@ -384,6 +456,8 @@ export async function requestDingTalkTransportJson(request: DingTalkTransportReq
   const timeoutMs = request.timeoutMs ?? DINGTALK_REQUEST_TIMEOUT_MS
   const callerSignal = request.signal ?? request.init.signal ?? undefined
   const fetchFn = request.fetchFn ?? fetch
+  // Unclassified defaults to the most conservative tier: no retry at all.
+  const kind: DingTalkCallKind = request.kind ?? 'exchange'
 
   for (let attempt = 1; ; attempt++) {
     if (callerSignal?.aborted) {
@@ -395,18 +469,20 @@ export async function requestDingTalkTransportJson(request: DingTalkTransportReq
     try {
       return await performDingTalkAttempt(request, fetchFn, timeoutMs, callerSignal)
     } catch (error) {
-      failure = classifyDingTalkFailure(error, request.safety)
+      failure = classifyDingTalkFailure(error, kind)
     }
 
     if (!failure.retryable || attempt >= config.maxAttempts || callerSignal?.aborted) {
       // Exhausted or non-retryable: rethrow the ORIGINAL error unchanged — callers
-      // pattern-match on the pre-retry shapes.
+      // pattern-match on the pre-retry shapes. Send-tier uncertain outcomes get the
+      // outcome-unknown marker (additive property; shape otherwise identical).
+      if (failure.outcomeUnknown) markOutcomeUnknown(failure.error)
       throw failure.error
     }
 
     const delayMs = computeDingTalkRetryDelayMs(attempt, config, failure.retryAfterMs)
     logger.warn(
-      `DingTalk transport retry ${attempt + 1}/${config.maxAttempts} after ${failure.reason} (${request.safety}): backing off ${delayMs}ms`,
+      `DingTalk transport retry ${attempt + 1}/${config.maxAttempts} after ${failure.reason} (${kind}): backing off ${delayMs}ms`,
     )
     const aborted = await sleepUnlessAborted(delayMs, callerSignal)
     if (aborted) {
