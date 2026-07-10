@@ -2539,23 +2539,32 @@ async function readIntegrationNameForAlert(integrationId: string): Promise<strin
 }
 
 async function markSyncFailure(integrationId: string, runId: string, message: string): Promise<void> {
-  await query(
-    `UPDATE directory_integrations
-     SET last_sync_at = NOW(),
-         last_error = $2,
-         updated_at = NOW()
-     WHERE id = $1`,
-    [integrationId, message],
-  )
-  await query(
-    `UPDATE directory_sync_runs
-     SET status = 'failed',
-         finished_at = NOW(),
-         error_message = $2,
-         updated_at = NOW()
-     WHERE id = $1`,
-    [runId, message],
-  )
+  // DT-HARDEN-05: one transaction, run-row (lease release) first. As two bare
+  // statements, a crash between them left the lease held until it went stale while
+  // the integration already recorded the failure. No status guard on the run row on
+  // purpose: if the lease was reclaimed while this run was alive, overwriting the
+  // reclaimer's generic orphaned message with the real failure (e.g. the lease-lost
+  // rollback) is the more truthful record — and the row is already 'failed', so no
+  // state regresses.
+  await transaction(async (client) => {
+    await client.query(
+      `UPDATE directory_sync_runs
+       SET status = 'failed',
+           finished_at = NOW(),
+           error_message = $2,
+           updated_at = NOW()
+       WHERE id = $1`,
+      [runId, message],
+    )
+    await client.query(
+      `UPDATE directory_integrations
+       SET last_sync_at = NOW(),
+           last_error = $2,
+           updated_at = NOW()
+       WHERE id = $1`,
+      [integrationId, message],
+    )
+  })
   try {
     await query(
       `INSERT INTO directory_sync_alerts (integration_id, run_id, level, code, message, details, created_at, updated_at)
@@ -2683,13 +2692,29 @@ async function loadMatchMaps(accounts: DirectoryAccountRow[]) {
 }
 
 /**
- * DT-HARDEN-05 — how long a `running` run row may sit before another caller may assume
- * its owner died and reclaim the lease. Deliberately generous: a large-tenant sync is
- * a long serial walk over the DingTalk directory API.
+ * DT-HARDEN-05 — how often a running sync proves it is alive by touching
+ * `last_heartbeat_at` on its run row. Env-tunable, floored at 5 seconds so a
+ * misconfiguration cannot hammer the pool.
  */
-export const DIRECTORY_SYNC_LEASE_TTL_MINUTES = (() => {
-  const raw = Number(process.env.DIRECTORY_SYNC_LEASE_TTL_MINUTES)
-  return Number.isFinite(raw) && raw > 0 ? Math.trunc(raw) : 120
+export const DIRECTORY_SYNC_HEARTBEAT_INTERVAL_MS = (() => {
+  const raw = Number(process.env.DIRECTORY_SYNC_HEARTBEAT_INTERVAL_MS)
+  return Number.isFinite(raw) && raw >= 5_000 ? Math.trunc(raw) : 60_000
+})()
+
+/**
+ * DT-HARDEN-05 — how long a `running` run may go without a heartbeat before another
+ * caller may assume its owner died and reclaim the lease. This keys off liveness
+ * (`last_heartbeat_at`, falling back to `started_at` for a run that died before its
+ * first beat), NOT total run age — a live large-tenant sync beats indefinitely and is
+ * never reclaimed, while a crashed one is reclaimed within minutes instead of hours.
+ * Clamped to at least 5x the heartbeat interval so a GC pause or one slow beat write
+ * cannot cause a false reclaim in a multi-replica deployment.
+ */
+export const DIRECTORY_SYNC_LEASE_STALE_MINUTES = (() => {
+  const raw = Number(process.env.DIRECTORY_SYNC_LEASE_STALE_MINUTES)
+  const requested = Number.isFinite(raw) && raw > 0 ? Math.trunc(raw) : 10
+  const floorMinutes = Math.ceil((DIRECTORY_SYNC_HEARTBEAT_INTERVAL_MS * 5) / 60_000)
+  return Math.max(requested, floorMinutes)
 })()
 
 /** Thrown when another sync already holds the lease for this integration. */
@@ -2709,6 +2734,24 @@ export class DirectorySyncInProgressError extends Error {
   }
 }
 
+/**
+ * Thrown when a run reaches its completion write only to find its row is no longer
+ * `running` — the lease was reclaimed as stale while this process was still alive
+ * (heartbeat starved: event-loop stall, saturated pool, network partition). Thrown
+ * INSIDE the apply transaction so the zombie's writes roll back instead of racing
+ * the new claimant's.
+ */
+export class DirectorySyncLeaseLostError extends Error {
+  readonly code = 'DIRECTORY_SYNC_LEASE_LOST'
+
+  constructor(runId: string) {
+    super(
+      `Directory sync run ${runId} lost its lease while still alive (reclaimed as stale by a newer trigger); its apply was rolled back`,
+    )
+    this.name = 'DirectorySyncLeaseLostError'
+  }
+}
+
 function isUniqueViolation(error: unknown): boolean {
   return typeof error === 'object' && error !== null && (error as { code?: unknown }).code === '23505'
 }
@@ -2720,7 +2763,7 @@ function isUniqueViolation(error: unknown): boolean {
  * manual trigger to unstick it.
  */
 export async function reclaimStaleDirectorySyncRuns(integrationId?: string): Promise<number> {
-  const params: unknown[] = [DIRECTORY_SYNC_LEASE_TTL_MINUTES]
+  const params: unknown[] = [DIRECTORY_SYNC_LEASE_STALE_MINUTES]
   let scope = ''
   if (integrationId && normalizeText(integrationId)) {
     params.push(normalizeText(integrationId))
@@ -2731,10 +2774,10 @@ export async function reclaimStaleDirectorySyncRuns(integrationId?: string): Pro
     `UPDATE directory_sync_runs
         SET status = 'failed',
             finished_at = NOW(),
-            error_message = COALESCE(error_message, 'orphaned: sync lease expired'),
+            error_message = COALESCE(error_message, 'orphaned: sync lease heartbeat went stale; owner presumed crashed'),
             updated_at = NOW()
       WHERE status = 'running'
-        AND started_at < NOW() - ($1::int * INTERVAL '1 minute')${scope}
+        AND COALESCE(last_heartbeat_at, started_at) < NOW() - ($1::int * INTERVAL '1 minute')${scope}
       RETURNING id`,
     params,
   )
@@ -2812,6 +2855,27 @@ export async function syncDirectoryIntegration(
   const runResult = await claimDirectorySyncRun(integrationId, triggeredBy, triggerSource)
   const runId = runResult.rows[0].id
   hooks.onRunStarted?.(runId)
+
+  // DT-HARDEN-05 heartbeat: prove this run is alive for as long as it holds the lease.
+  // A timer (rather than beats threaded through fetchAllDepartments/fetchAllUsers) also
+  // covers the long apply transaction, and keeps runId out of the fetch helpers' scope.
+  // The `status = 'running'` predicate keeps a late beat from resurrecting a row the
+  // reclaimer already flipped. unref'd so a beat never keeps the process alive.
+  const heartbeat = setInterval(() => {
+    query(
+      `UPDATE directory_sync_runs
+          SET last_heartbeat_at = NOW(),
+              updated_at = NOW()
+        WHERE id = $1
+          AND status = 'running'`,
+      [runId],
+    ).catch((error) => {
+      // Best-effort by design: a missed beat only matters if EVERY beat inside the
+      // staleness window misses, and reclaim then treats the run as dead — safe, loud.
+      logger.warn(`Directory sync heartbeat failed for run ${runId}: ${readErrorMessage(error, 'unknown error')}`)
+    })
+  }, DIRECTORY_SYNC_HEARTBEAT_INTERVAL_MS)
+  heartbeat.unref?.()
 
   try {
     const departments = await fetchAllDepartments(config, integration.name)
@@ -3291,15 +3355,24 @@ export async function syncDirectoryIntegration(
          WHERE id = $1`,
         [integrationId],
       )
-      await client.query(
+      // The lease may have been reclaimed while this run was alive-but-silent (starved
+      // heartbeat). Completing unconditionally would resurrect the reclaimed row AND
+      // commit an apply that races the new claimant's — so the guard is on status, and
+      // a miss aborts the whole transaction.
+      const completion = await client.query(
         `UPDATE directory_sync_runs
          SET status = 'completed',
              finished_at = NOW(),
              stats = $2::jsonb,
              updated_at = NOW()
-         WHERE id = $1`,
+         WHERE id = $1
+           AND status = 'running'
+         RETURNING id`,
         [runId, JSON.stringify(stats)],
       )
+      if (completion.rows.length === 0) {
+        throw new DirectorySyncLeaseLostError(runId)
+      }
     })
 
     for (const invite of autoAdmissionInvites) {
@@ -3380,6 +3453,8 @@ export async function syncDirectoryIntegration(
     const message = readErrorMessage(error, 'Directory sync failed')
     await markSyncFailure(integrationId, runId, message)
     throw error
+  } finally {
+    clearInterval(heartbeat)
   }
 }
 

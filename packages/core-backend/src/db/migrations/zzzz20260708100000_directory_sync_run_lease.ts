@@ -18,6 +18,12 @@ import { sql, type Kysely } from 'kysely'
  * Backfill: any `running` row on deploy is by definition orphaned — the process that
  * owned it is being replaced — so it is closed out first, which also clears the
  * pre-existing zombie rows that had no recovery path at all.
+ *
+ * Liveness: `last_heartbeat_at` is the owner's proof of life. The sync beats it on an
+ * interval while it runs, and reclaim treats a run as dead only when the heartbeat
+ * (falling back to `started_at` for a run that died before its first beat) has gone
+ * stale — a wall-clock age on `started_at` alone would steal the lease from a live
+ * long-running sync on a large tenant.
  */
 export async function up(db: Kysely<unknown>): Promise<void> {
   await sql`
@@ -34,8 +40,14 @@ export async function up(db: Kysely<unknown>): Promise<void> {
     ON directory_sync_runs(integration_id)
     WHERE status = 'running'
   `.execute(db)
+
+  await sql`
+    ALTER TABLE directory_sync_runs
+    ADD COLUMN IF NOT EXISTS last_heartbeat_at TIMESTAMPTZ
+  `.execute(db)
 }
 
 export async function down(db: Kysely<unknown>): Promise<void> {
+  await sql`ALTER TABLE directory_sync_runs DROP COLUMN IF EXISTS last_heartbeat_at`.execute(db)
   await sql`DROP INDEX IF EXISTS uq_directory_sync_runs_one_running_per_integration`.execute(db)
 }
