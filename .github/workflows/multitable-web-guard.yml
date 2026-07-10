@@ -61,6 +61,10 @@ on:
       - 'apps/web/tests/multitable-history-center-inline-diff.spec.ts'
       - 'apps/web/tests/multitable-history-center-ai-shortcut-label.spec.ts'
       - 'apps/web/tests/multitable-history-center-pinned-batch-deeplink.spec.ts'
+      # Owner P1 (R9): the layer-2∩layer-3 field-scope wiring spec is the real-workbench golden
+      # for #4007/#4018 — it must trigger this guard and run in its vitest filter (and in the
+      # always-on run-required-web-tests.sh), otherwise those security goldens run in NO gate.
+      - 'apps/web/tests/multitable-workbench-history-field-scope-wiring.spec.ts'
       - 'apps/web/src/multitable/components/MetaKanbanView.vue'
       - 'apps/web/src/multitable/components/MetaViewManager.vue'
       - 'apps/web/src/multitable/utils/view-config.ts'
@@ -165,6 +169,10 @@ on:
       - 'apps/web/tests/multitable-history-center-inline-diff.spec.ts'
       - 'apps/web/tests/multitable-history-center-ai-shortcut-label.spec.ts'
       - 'apps/web/tests/multitable-history-center-pinned-batch-deeplink.spec.ts'
+      # Owner P1 (R9): the layer-2∩layer-3 field-scope wiring spec is the real-workbench golden
+      # for #4007/#4018 — it must trigger this guard and run in its vitest filter (and in the
+      # always-on run-required-web-tests.sh), otherwise those security goldens run in NO gate.
+      - 'apps/web/tests/multitable-workbench-history-field-scope-wiring.spec.ts'
       - 'apps/web/src/multitable/components/MetaKanbanView.vue'
       - 'apps/web/src/multitable/components/MetaViewManager.vue'
       - 'apps/web/src/multitable/utils/view-config.ts'
@@ -291,4 +299,4 @@ jobs:
         # L1c: HistoryBatchChangesList.vue's only behavioral coverage — 3 specs that mount the real
         # component tree via HistoryCenterModal (inline-diff, ai-shortcut-label, pinned-batch-deeplink)
         # — were exercised in NO CI gate; added alongside their new path triggers above.
-        run: pnpm --filter @metasheet/web exec vitest run multitable-rollup-aggregation-fe multitable-trash-fe multitable-history-fe multitable-history-center-inline-diff multitable-history-center-ai-shortcut-label multitable-history-center-pinned-batch-deeplink multitable-kanban-view multitable-field-manager multitable-sheet-cursor-state multitable-record-permission-manager multitable-sheet-permission-manager multitable-yjs-scalar-cell multitable-yjs-cell-editor multitable-conditional-rule multitable-person-picker multitable-cell-renderer-person-inactive meta-toolbar-filter-builder meta-filter-group meta-grid-table multitable-grid multitable-reorder-view-fields multitable-restore-preview-dialog multitable-restore-batch-dialog multitable-config-history-modal multitable-workbench-restore-wiring multitable-config-revert-refresh multitable-reset-confirm-dialog multitable-reset-tsource-picker multitable-field-visibility multitable-required-if multitable-conditional-formatting statusTag AutomationExecutionsView parallelBranchRunsView automation-recipes meta-automation-labels multitable-automation-manager automation-save-block-reasons automation-action-summary automation-target-sheet-options multitable-automation-rule-editor --reporter=dot
+        run: pnpm --filter @metasheet/web exec vitest run multitable-rollup-aggregation-fe multitable-trash-fe multitable-history-fe multitable-history-center-inline-diff multitable-history-center-ai-shortcut-label multitable-history-center-pinned-batch-deeplink multitable-workbench-history-field-scope-wiring multitable-kanban-view multitable-field-manager multitable-sheet-cursor-state multitable-record-permission-manager multitable-sheet-permission-manager multitable-yjs-scalar-cell multitable-yjs-cell-editor multitable-conditional-rule multitable-person-picker multitable-cell-renderer-person-inactive meta-toolbar-filter-builder meta-filter-group meta-grid-table multitable-grid multitable-reorder-view-fields multitable-restore-preview-dialog multitable-restore-batch-dialog multitable-config-history-modal multitable-workbench-restore-wiring multitable-config-revert-refresh multitable-reset-confirm-dialog multitable-reset-tsource-picker multitable-field-visibility multitable-required-if multitable-conditional-formatting statusTag AutomationExecutionsView parallelBranchRunsView automation-recipes meta-automation-labels multitable-automation-manager automation-save-block-reasons automation-action-summary automation-target-sheet-options multitable-automation-rule-editor --reporter=dot
