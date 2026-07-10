@@ -4,7 +4,11 @@ Date: 2026-07-10 · Lane: evidence (no lane PR — final archival landed via **#
 Debt item: `docs/development/multitable-time-machine-plus-todo-20260619.md:102` — T2 tests: "browser Path A screenshot for dense timeline layout" (never captured), plus §3 rule (line 314): "Browser evidence is required for the global history center timeline before calling the UI slice complete."
 Captured after R9 landed record titles + typed link/person diffs + click-through, so the evidence also covers those.
 
-## Files (all in /tmp/lane-evidence-out/)
+## Files
+
+> **仓库归档内容 = 本目录的 5 张 PNG + 本 MD**（经 #4064 落库）。下表描述的即这 5 张归档图。
+> `/tmp/lane-evidence-out/` 是当时的**捕获源目录**（会话临时,日滚清理）,其中的种子/捕获脚本与 `.token`
+> **未提交也不应提交**——脚本内容已在下方「Steps to reproduce」全文重述,`.token` 为已过期 dev JWT。
 
 | File | What it proves (vs T2/T3 checklist) |
 |---|---|
@@ -14,7 +18,7 @@ Captured after R9 landed record titles + typed link/person diffs + click-through
 | `03-record-chip-clickthrough-drawer.png` | **Click-through.** Clicking the `Write launch spec` chip (`[data-test="hist-rec-label"]`) closed the modal and opened the Record Detail drawer for that record (URL gains `#recordId=rec_655e505a-…`), showing Task Name / Owner / Related Feature "Realtime Sync, Audit Log" / Status Done. |
 | `04-history-batch-expanded-person-diff.png` | Bonus: typed PERSON diff. Field filter = "Owner"; expanded batch `Update — Update user docs`, diff `Owner: ~~e0546c94-…~~ → Carol Li`. After-side renders the person NAME. **Observed nuance (honest):** the before-side fell back to the raw user id even though Bob Wu is still assigned elsewhere in the loaded grid — person-summary cache hit resolves names per side only on full coverage; a miss shows the id. Same family of fallback exists for links (an unlinked before-side rendered as "1 linked record" count in another batch). Not a blocker for T2 (the link diff in `02` renders names on both sides); worth a look if per-side person hydration should widen. |
 
-Also in this dir: `seed.mjs` + `seed-continue.mjs` (API seeding), `capture.mjs`/`capture2.mjs`/`capture3.mjs` (Playwright), `seed-output.txt` (ids), `.token` (expired dev JWT).
+捕获源目录（`/tmp/lane-evidence-out/`,未归档）另含当时的工作文件：`seed.mjs`/`seed-continue.mjs`（API 种子）、`capture*.mjs`（Playwright 捕获）、`seed-output.txt`（ids）、`.token`（已过期 dev JWT,**未提交**）——复现请直接按下节步骤,不依赖这些临时文件。
 
 ## Steps to reproduce
 
