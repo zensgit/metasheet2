@@ -539,7 +539,16 @@ const routeState = vi.hoisted(() => {
     // B3-02 (行级未读): the pending-tab list issues a per-actor approval_reads lookup after the
     // main query. Absence from `state.reads` means unread — mirrors the real LEFT JOIN ... IS NULL
     // predicate for an actor who has not opened a given row.
-    if (normalized.startsWith('SELECT instance_id FROM approval_reads')) {
+    //
+    // REVIEW P2 HARDENING: the handler is keyed on the FULL predicate text, not just the SELECT
+    // prefix — a prefix-only match let the mock re-implement the per-user filter and shadow the
+    // real SQL (mutating `user_id = $1` away in the service stayed green). Now a predicate edit
+    // in the service falls through to the unhandled-SQL throw below and the suite goes red.
+    if (
+      normalized.startsWith('SELECT instance_id FROM approval_reads')
+      && normalized.includes('WHERE user_id = $1')
+      && normalized.includes('instance_id = ANY($2::text[])')
+    ) {
       const userId = String(params[0])
       const ids = new Set((params[1] as string[]) || [])
       const rows = Array.from(state.reads)
