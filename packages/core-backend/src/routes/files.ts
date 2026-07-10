@@ -10,6 +10,7 @@ import { authenticate } from '../middleware/auth'
 import { Logger } from '../core/logger'
 import { StorageServiceImpl } from '../services/StorageService'
 import { db } from '../db/db'
+import { sniffImageContentType } from '../services/imageMagicBytes'
 import * as path from 'path'
 import { loadMulter, createUploadMiddleware } from '../types/multer'
 import type { RequestWithFiles } from '../types/multer'
@@ -80,6 +81,18 @@ export function filesRouter(): Router {
           // success with no corresponding row, which would make every downstream fileId
           // ownership/content-type check either wrongly reject a real upload or be unable to
           // tell a real id from a forged one.
+          //
+          // H2 photo-evidence-hardening design-lock (2026-07-10), P3-1: `contentType` above is
+          // client-asserted (the multipart part's Content-Type header, trusted as-is by multer).
+          // `sniffed: true` is written unconditionally on this path — it is a PATH MARKER, not a
+          // content-type value: it tells a consumer "this row went through magic-byte sniffing",
+          // distinguishing it from rows written before this slice (which never carry the key).
+          // `sniffedContentType` is written ONLY when a magic-byte signature actually matched —
+          // its own presence/absence still means exactly "did we detect an image", kept pure.
+          // Never rejects the upload on a miss (this route is general-purpose; a resume PDF or a
+          // CSV export is a legitimate non-image upload) — sniffing is advisory for downstream
+          // consumers (attendance G2) to decide what a miss means in their own domain.
+          const sniffedContentType = sniffImageContentType(file.buffer)
           try {
             await sql`
               INSERT INTO files (id, url, owner_id, meta, created_at)
@@ -90,7 +103,9 @@ export function filesRouter(): Router {
                 ${JSON.stringify({
                   contentType: result.contentType,
                   filename: result.filename,
-                  size: result.size
+                  size: result.size,
+                  sniffed: true,
+                  ...(sniffedContentType ? { sniffedContentType } : {})
                 })}::jsonb,
                 now()
               )
@@ -200,6 +215,14 @@ export function filesRouter(): Router {
       }
 
       await storage.delete(id)
+      // H2 photo-evidence-hardening design-lock (2026-07-10), P3-2: the storage object was the
+      // only thing this route ever deleted — the `files` row (owner_id + meta, written on upload
+      // since S2 #4016) was left behind as an orphan, and attendance's G2 photo-evidence check
+      // reads that row, not the storage object, so a punch could still cite "evidence" whose
+      // underlying file no longer exists. Delete the row too. Parameterized; a missing row (an
+      // object that predates the S2 writer, or a second delete of the same id) is not an error —
+      // `DELETE ... WHERE id = $1` is a no-op when no row matches.
+      await sql`DELETE FROM files WHERE id = ${id}`.execute(db)
       const userId = req.user?.id ?? req.user?.userId ?? req.user?.sub ?? 'anonymous'
 
       logger.info(`File deleted: ${id} by user ${userId}`)

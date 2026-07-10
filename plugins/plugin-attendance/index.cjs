@@ -24854,8 +24854,28 @@ module.exports = {
               const photoRows = await db.query('SELECT id, owner_id, meta FROM files WHERE id = $1 LIMIT 1', [rawPhotoFileId])
               const photoRow = photoRows[0] ?? null
               const photoMeta = normalizeMetadata(photoRow?.meta)
-              const photoContentType = typeof photoMeta.contentType === 'string' ? photoMeta.contentType : ''
-              if (!photoRow || photoRow.owner_id !== userId || !photoContentType.startsWith('image/')) {
+              // H2 photo-evidence-hardening design-lock (2026-07-10) P3-1 AMENDMENT: `meta.contentType`
+              // is client-asserted (multer trusts the multipart part's Content-Type header as-is), so a
+              // forged `image/png` declaration on a non-image body previously passed this check. Rows
+              // written by the sniff-aware upload path (core routes/files.ts) carry `meta.sniffed ===
+              // true` — a PATH MARKER, not a content-type value — and ONLY those rows are held to the
+              // sniffed verdict: `meta.sniffedContentType` must be present and start with `image/`, else
+              // invalid (a magic-byte miss on a real upload is rejected here — this is what closes the
+              // forged-MIME gap). Rows with no `sniffed` key predate this slice and fall back to the
+              // pre-existing `meta.contentType` check byte-for-byte — old evidence is not retroactively
+              // invalidated. (Considered writing `sniffedContentType` unconditionally with a null
+              // sentinel on a miss instead of this separate marker — rejected: JSON key-present-but-null
+              // vs key-absent is a classic wire-format footgun, and a plain boolean path marker is more
+              // explicit and reusable by any future consumer of this table.)
+              let photoContentTypeValid
+              if (photoMeta.sniffed === true) {
+                const sniffedContentType = typeof photoMeta.sniffedContentType === 'string' ? photoMeta.sniffedContentType : ''
+                photoContentTypeValid = sniffedContentType.startsWith('image/')
+              } else {
+                const photoContentType = typeof photoMeta.contentType === 'string' ? photoMeta.contentType : ''
+                photoContentTypeValid = photoContentType.startsWith('image/')
+              }
+              if (!photoRow || photoRow.owner_id !== userId || !photoContentTypeValid) {
                 res.status(422).json({ ok: false, error: { code: 'OUTDOOR_PHOTO_INVALID', message: '照片证据无效' } })
                 return
               }
