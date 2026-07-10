@@ -10,10 +10,20 @@ import {
   AttendanceNotificationDeliveryWorker,
   resolveAttendanceNotificationQuietHours,
   isAttendanceNotificationQuietHours,
+  DingTalkAttendanceDeliveryChannel,
+  WeComAttendanceDeliveryChannel,
+  EmailAttendanceDeliveryChannel,
+  DINGTALK_WORK_NOTIFICATION_CHANNEL_NAME,
+  WECOM_WORK_NOTIFICATION_CHANNEL_NAME,
+  EMAIL_SMTP_CHANNEL_NAME,
   type AttendanceNotificationQuietHoursConfig,
   type AttendanceNotificationDeliveryQuery,
+  type EmailDeliveryTransport,
 } from '../../src/services/AttendanceNotificationDeliveryWorker'
 import type { Logger } from '../../src/core/logger'
+import type { DingTalkMessageConfig } from '../../src/integrations/dingtalk/client'
+import type { WeComMessageConfig } from '../../src/integrations/wecom/client'
+import { EMAIL_TRANSPORT_ENV } from '../../src/services/email-transport-readiness'
 
 function makeQuery(rows: unknown[] = []): AttendanceNotificationDeliveryQuery {
   return vi.fn(async () => ({ rows, rowCount: rows.length })) as unknown as AttendanceNotificationDeliveryQuery
@@ -317,5 +327,177 @@ describe('AttendanceNotificationDeliveryWorker: quiet-hours env resolution at co
     await worker.runBatch()
 
     expect(query).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('R8 quiet-hours × the FULL channel roster (DingTalk + WeCom S4 + email) — owner-ratified 2026-07-10: ' +
+  'the pre-claim gate is channel-agnostic, not DingTalk-only', () => {
+  // Real channel instances (not the deterministic fake) with every I/O seam DI-injected, mirroring the
+  // patterns in attendance-wecom-delivery-channel.test.ts / attendance-email-delivery-channel.test.ts /
+  // attendance-scheduler.test.ts's "real DingTalk channel" case. This proves the combination end-to-end
+  // through the SAME channelsByName / deliver() call site the worker actually uses in production — not
+  // through a re-implementation of the gate.
+
+  const DT_CONFIG: DingTalkMessageConfig = {
+    appKey: 'dt-app-key',
+    appSecret: 'dt-app-secret',
+    agentId: '123456789',
+    baseUrl: 'https://oapi.dingtalk.com',
+  }
+  const WECOM_CONFIG: WeComMessageConfig = { corpId: 'corp-1', corpSecret: 'corpsecret-value', agentId: '1000002' }
+  const READY_SMTP_ENV = {
+    [EMAIL_TRANSPORT_ENV]: 'smtp',
+    MULTITABLE_EMAIL_SMTP_HOST: 'smtp.example.com',
+    MULTITABLE_EMAIL_SMTP_PORT: '587',
+    MULTITABLE_EMAIL_SMTP_USER: 'smtp-user',
+    MULTITABLE_EMAIL_SMTP_PASSWORD: 'smtp-password-secret',
+    MULTITABLE_EMAIL_SMTP_FROM: 'ops@example.com',
+  } as NodeJS.ProcessEnv
+
+  function makeRoster() {
+    const dtSendWorkNotification = vi.fn(async () => ({ taskId: 'dt-task-1', raw: {} }))
+    const dtSendActionCard = vi.fn(async () => ({ taskId: 'dt-task-2', raw: {} }))
+    const dingTalkChannel = new DingTalkAttendanceDeliveryChannel({
+      query: vi.fn(async () => ({ rows: [{ integration_id: 'dt-integ-1', external_user_id: 'dt-user-1' }] })) as never,
+      readConfig: async () => DT_CONFIG,
+      fetchAccessToken: async () => 'dt-access-token',
+      sendWorkNotification: dtSendWorkNotification,
+      sendWorkNotificationActionCard: dtSendActionCard,
+    })
+
+    const weComSendTextMessage = vi.fn(async () => ({ errcode: 0, errmsg: 'ok', invalidUserIds: [], raw: {} }))
+    const weComSendTextCardMessage = vi.fn(async () => ({ errcode: 0, errmsg: 'ok', invalidUserIds: [], raw: {} }))
+    const weComChannel = new WeComAttendanceDeliveryChannel({
+      query: vi.fn(async () => ({ rows: [{ integration_id: 'we-integ-1', external_user_id: 'we-user-1' }] })) as never,
+      readConfig: async () => WECOM_CONFIG,
+      fetchAccessToken: async () => 'we-access-token',
+      sendTextMessage: weComSendTextMessage,
+      sendTextCardMessage: weComSendTextCardMessage,
+    })
+
+    const emailSendMail = vi.fn(async () => ({ messageId: 'email-ok' }))
+    const emailTransport: EmailDeliveryTransport = { sendMail: emailSendMail }
+    const emailChannel = new EmailAttendanceDeliveryChannel({
+      env: READY_SMTP_ENV,
+      query: vi.fn(async () => ({ rows: [{ email: 'user@example.com' }] })) as never,
+      createTransport: () => emailTransport,
+    })
+
+    return {
+      channels: [dingTalkChannel, weComChannel, emailChannel],
+      dtSendWorkNotification,
+      dtSendActionCard,
+      weComSendTextMessage,
+      weComSendTextCardMessage,
+      emailSendMail,
+    }
+  }
+
+  function claimedRow(id: string, channel: string) {
+    return {
+      id,
+      org_id: 'org1',
+      source_type: 'unscheduled_reminder',
+      source_id: 'src1',
+      source_key: `key-${id}`,
+      recipient_user_id: 'u1',
+      recipient_role: 'member',
+      channel,
+      attempt_count: 0,
+      payload: { title: 'Punch reminder', body: 'You have an unscheduled shift today.' },
+    }
+  }
+
+  /** Worker-level `query`: claimDueDeliveries' claim SQL vs. every terminal-state UPDATE (mark*). */
+  function makeWorkerQuery(claimRows: ReturnType<typeof claimedRow>[]): AttendanceNotificationDeliveryQuery {
+    return vi.fn(async (sql: string) => {
+      if (sql.includes('FOR UPDATE SKIP LOCKED')) return { rows: claimRows, rowCount: claimRows.length }
+      // markSent/markFailed/markRetrying/markSkipped: CAS UPDATE — report exactly 1 row matched.
+      return { rows: [], rowCount: 1 }
+    }) as unknown as AttendanceNotificationDeliveryQuery
+  }
+
+  it('inside the window: ZERO claims AND ZERO sends on every channel (DingTalk, WeCom, email) — proves the ' +
+    'gate fences the whole batch, not a DingTalk-only path, and that WeCom has no separate claim/send path ' +
+    'that could bypass it', async () => {
+    const roster = makeRoster()
+    const claimQuery = makeWorkerQuery([
+      claimedRow('dlv-dt', DINGTALK_WORK_NOTIFICATION_CHANNEL_NAME),
+      claimedRow('dlv-wecom', WECOM_WORK_NOTIFICATION_CHANNEL_NAME),
+      claimedRow('dlv-email', EMAIL_SMTP_CHANNEL_NAME),
+    ])
+    const quietHours: AttendanceNotificationQuietHoursConfig = { start: '22:00', end: '08:00', timeZone: 'UTC' }
+    const worker = new AttendanceNotificationDeliveryWorker({
+      query: claimQuery,
+      channels: roster.channels,
+      quietHours,
+      now: () => new Date('2026-07-09T23:30:00Z'), // inside 22:00-08:00
+    })
+
+    const result = await worker.runBatch()
+
+    expect(result).toEqual(ZERO_RESULT)
+    // claimDueDeliveries never ran — no SQL at all, not even the claim SQL that WOULD have returned rows
+    // for all three channels above.
+    expect(claimQuery).not.toHaveBeenCalled()
+    // Every channel's real network/DB send seam: zero calls. If WeCom (or any channel) had a separate
+    // claim/send path that bypassed runBatch()'s pre-claim gate, its send spy would have fired here.
+    expect(roster.dtSendWorkNotification).not.toHaveBeenCalled()
+    expect(roster.dtSendActionCard).not.toHaveBeenCalled()
+    expect(roster.weComSendTextMessage).not.toHaveBeenCalled()
+    expect(roster.weComSendTextCardMessage).not.toHaveBeenCalled()
+    expect(roster.emailSendMail).not.toHaveBeenCalled()
+  })
+
+  it('outside the window: all three channels flow — claim SQL issued once, one send per channel, all sent', async () => {
+    const roster = makeRoster()
+    const claimQuery = makeWorkerQuery([
+      claimedRow('dlv-dt', DINGTALK_WORK_NOTIFICATION_CHANNEL_NAME),
+      claimedRow('dlv-wecom', WECOM_WORK_NOTIFICATION_CHANNEL_NAME),
+      claimedRow('dlv-email', EMAIL_SMTP_CHANNEL_NAME),
+    ])
+    const quietHours: AttendanceNotificationQuietHoursConfig = { start: '22:00', end: '08:00', timeZone: 'UTC' }
+    const worker = new AttendanceNotificationDeliveryWorker({
+      query: claimQuery,
+      channels: roster.channels,
+      quietHours,
+      now: () => new Date('2026-07-09T12:00:00Z'), // outside 22:00-08:00
+    })
+
+    const result = await worker.runBatch()
+
+    expect(result.claimed).toBe(3)
+    expect(result.sent).toBe(3)
+    expect(result.failed).toBe(0)
+    expect(result.skipped).toBe(0)
+    // Claim SQL fired exactly once; every mark* CAS-update call after it is on the SAME query mock, so
+    // this only asserts the claim itself was not skipped (mirrors the existing single-channel test above).
+    expect(claimQuery).toHaveBeenCalledWith(expect.stringContaining('FOR UPDATE SKIP LOCKED'), expect.any(Array))
+    expect(roster.dtSendWorkNotification).toHaveBeenCalledTimes(1)
+    expect(roster.weComSendTextMessage).toHaveBeenCalledTimes(1)
+    expect(roster.emailSendMail).toHaveBeenCalledTimes(1)
+  })
+
+  it('quiet hours OFF (no config): all three channels flow exactly as if the gate did not exist', async () => {
+    const roster = makeRoster()
+    const claimQuery = makeWorkerQuery([
+      claimedRow('dlv-dt', DINGTALK_WORK_NOTIFICATION_CHANNEL_NAME),
+      claimedRow('dlv-wecom', WECOM_WORK_NOTIFICATION_CHANNEL_NAME),
+      claimedRow('dlv-email', EMAIL_SMTP_CHANNEL_NAME),
+    ])
+    const worker = new AttendanceNotificationDeliveryWorker({
+      query: claimQuery,
+      channels: roster.channels,
+      quietHours: null, // explicit off
+      now: () => new Date('2026-07-09T23:30:00Z'), // would be inside window if the gate were active
+    })
+
+    const result = await worker.runBatch()
+
+    expect(result.claimed).toBe(3)
+    expect(result.sent).toBe(3)
+    expect(roster.dtSendWorkNotification).toHaveBeenCalledTimes(1)
+    expect(roster.weComSendTextMessage).toHaveBeenCalledTimes(1)
+    expect(roster.emailSendMail).toHaveBeenCalledTimes(1)
   })
 })
