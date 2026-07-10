@@ -16,10 +16,11 @@
 // imports ONLY the landed pure engines (mapper / diff / frozen templates / common helpers). It does
 // NOT read PLM (the expansion is passed in), and it has NO records / write API, NO createRecord /
 // patchRecord, NO apply-writer, NO K3 / ERP / SQL, and NO fetch / HTTP / live I/O of any kind. Any
-// who/when stamp (startedAt / finishedAt / createdAt / createdBy) is a persistence-time concern and is
-// deliberately left unset here so the plan stays deterministic and free of invented timestamps or
-// identity; the separate persistence slice fills those. (The tokens named in this header comment appear
-// ONLY here, in prose, to document the boundary — never as code.)
+// who/when stamp (startedAt / finishedAt / createdAt / createdBy) is deliberately left unset here so the
+// plan stays deterministic and free of invented timestamps or identity. These remain OWNER-DEFERRED: the
+// persistence slice (sync-run-persist) also leaves them unset by design — whether a commit should stamp
+// who/when is an open owner decision, not something a downstream slice silently fills. (The tokens named
+// in this header comment appear ONLY here, in prose, to document the boundary — never as code.)
 
 const {
   mapExpansionRowsToSnapshotLines,

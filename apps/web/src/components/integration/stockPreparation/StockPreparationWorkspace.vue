@@ -45,11 +45,29 @@
         {{ bi(activeView.zhDesc, activeView.enDesc) }}
       </p>
       <p class="stock-prep__panel-endpoint" data-testid="stock-prep-panel-endpoint">
-        <span class="stock-prep__badge">{{ bi('只读', 'readonly') }} · GET</span>
+        <span class="stock-prep__badge">{{
+          activeView.confirmWrites ? bi('只读 + 人工确认', 'readonly + human confirm') : `${bi('只读', 'readonly')} · GET`
+        }}</span>
         <code>{{ activeView.endpoint }}</code>
       </p>
-      <!-- View 1 (project-workspace) is a real readonly view; the other five tabs keep the placeholder. -->
-      <StockPreparationProjectWorkspaceView v-if="activeKey === 'project-workspace'" />
+      <!-- Views 1-4 are real views; the remaining tabs keep the placeholder. Views 2-4 share the
+           shell-owned projectId context selected in view 1 (#4017 pattern). -->
+      <StockPreparationProjectWorkspaceView
+        v-if="activeKey === 'project-workspace'"
+        @select-project="handleProjectSelect"
+      />
+      <StockPreparationSnapshotDiffView
+        v-else-if="activeKey === 'bom-snapshot-diff'"
+        :project-id="selectedProjectId"
+      />
+      <StockPreparationMappingConfirmView
+        v-else-if="activeKey === 'material-mapping'"
+        :project-id="selectedProjectId"
+      />
+      <StockPreparationUnitConfirmView
+        v-else-if="activeKey === 'unit-conversion'"
+        :project-id="selectedProjectId"
+      />
       <p v-else class="stock-prep__panel-pending" data-testid="stock-prep-panel-pending">
         {{ bi('该视图将在后续 wave 落地,当前为容器占位。', 'This view lands in a later wave; this is a container placeholder for now.') }}
       </p>
@@ -68,10 +86,14 @@
 // and only renders values-free copy. NAMING — the snapshot surface uses 快照批次 / "snapshot batch"
 // to avoid colliding with PLM view-state "snapshot" and k3WiseSetup "mapping" vocabularies.
 import { computed, ref } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import { useLocale } from '../../../composables/useLocale'
 import PageShell from '../../layout/PageShell.vue'
 import PageHeader from '../../layout/PageHeader.vue'
 import StockPreparationProjectWorkspaceView from './StockPreparationProjectWorkspaceView.vue'
+import StockPreparationSnapshotDiffView from './StockPreparationSnapshotDiffView.vue'
+import StockPreparationMappingConfirmView from './StockPreparationMappingConfirmView.vue'
+import StockPreparationUnitConfirmView from './StockPreparationUnitConfirmView.vue'
 
 const { locale } = useLocale()
 
@@ -95,8 +117,13 @@ interface StockPreparationViewTab {
   en: string
   zhDesc: string
   enDesc: string
-  /** The readonly (GET) summary endpoint the future view reads. Values-free path only. */
+  /** The readonly (GET) summary endpoint the view reads. Values-free path only. */
   endpoint: string
+  /**
+   * True for the two confirmation views whose row actions issue MULTITABLE-INTERNAL human-confirm
+   * writes (W3b). Still no external ERP/K3 write — the badge copy reflects the human-confirm nature.
+   */
+  confirmWrites?: boolean
 }
 
 // Tab order follows the MVP business loop (design §"MVP Goal"). Descriptions are values-free — they
@@ -125,6 +152,7 @@ const views: StockPreparationViewTab[] = [
     zhDesc: '将 PLM 图号/版本映射到 ERP 物料编码/内部 id;歧义或未匹配的行进入人工确认,不自动创建 ERP 物料。',
     enDesc: 'Map PLM drawing/version to ERP material code/internal id; ambiguous or unmatched rows go to manual confirmation, never auto-create ERP material.',
     endpoint: '/api/integration/stock-preparation/material-mappings/summary',
+    confirmWrites: true,
   },
   {
     key: 'unit-conversion',
@@ -133,6 +161,7 @@ const views: StockPreparationViewTab[] = [
     zhDesc: '将设计单位换算为 ERP 领用单位;无唯一有效规则时进入异常队列,不做静默猜测。',
     enDesc: 'Convert the design unit to the ERP issue unit; with no unique active rule the line enters the exception queue rather than a silent guess.',
     endpoint: '/api/integration/stock-preparation/unit-conversions/summary',
+    confirmWrites: true,
   },
   {
     key: 'prep-line',
@@ -154,6 +183,29 @@ const views: StockPreparationViewTab[] = [
 
 const activeKey = ref<StockPreparationViewKey>(views[0].key)
 const activeView = computed(() => views.find((view) => view.key === activeKey.value) ?? null)
+
+// Shared project context (view 1 → view 2). The shell is the single owner of the selected
+// projectId: view 1 emits it (row action), view 2 receives it as a prop, and the `?projectId=`
+// route query seeds/mirrors it so a reload or shared link keeps the same project scope. The
+// projectId is an internal MetaSheet handle — kept in state/URL, never rendered (values-free).
+const route = useRoute()
+const router = useRouter()
+
+function projectIdFromQuery(): string | undefined {
+  const raw = route.query?.projectId
+  const value = Array.isArray(raw) ? raw[0] : raw
+  return typeof value === 'string' && value.length > 0 ? value : undefined
+}
+
+const selectedProjectId = ref<string | undefined>(projectIdFromQuery())
+
+function handleProjectSelect(projectId: string): void {
+  selectedProjectId.value = projectId
+  // Jump straight into view 2 already scoped — no re-select there.
+  activeKey.value = 'bom-snapshot-diff'
+  // Mirror the handle into the query (replace: selecting is not a history step).
+  void router.replace({ query: { ...route.query, projectId } })
+}
 </script>
 
 <style scoped>
