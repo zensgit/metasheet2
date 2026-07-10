@@ -3629,6 +3629,26 @@ describe('DirectoryManagementView', () => {
     batchButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
     await flushUi(8)
 
+    expect(apiFetchMock).toHaveBeenCalledWith(
+      '/api/admin/directory/accounts/batch-bind',
+      expect.objectContaining({
+        method: 'POST',
+        body: JSON.stringify({
+          bindings: [
+            {
+              accountId: 'account-1',
+              localUserRef: 'alpha@example.com',
+              enableDingTalkGrant: true,
+            },
+            {
+              accountId: 'account-2',
+              localUserRef: 'beta@example.com',
+              enableDingTalkGrant: true,
+            },
+          ],
+        }),
+      }),
+    )
     // Must NOT claim blanket success for a batch that only partially committed.
     expect(container?.textContent).not.toContain('已完成 2 个目录成员的批量绑定')
     expect(container?.textContent).toContain('已绑定 1 个目录成员，另有 1 个失败')
@@ -3841,6 +3861,204 @@ describe('DirectoryManagementView', () => {
     expect(container?.textContent).toContain('推荐绑定确认')
     expect(container?.textContent).toContain('已完成')
     expect(container?.textContent).toContain('进度 2 / 2')
+  })
+
+  it('reports a partial-failure status when batch-confirming recommended pending bindings commits some items but not all', async () => {
+    apiFetchMock
+      .mockResolvedValueOnce(createJsonResponse({
+        ok: true,
+        data: {
+          items: [createIntegration()],
+        },
+      }))
+      .mockResolvedValueOnce(createJsonResponse({
+        ok: true,
+        data: { items: [] },
+      }))
+      .mockResolvedValueOnce(createJsonResponse(
+        createScheduleSnapshotPayload(),
+      ))
+      .mockResolvedValueOnce(createJsonResponse(
+        createAlertListPayload([]),
+      ))
+      .mockResolvedValueOnce(createJsonResponse(
+        createReviewItemsPayload([
+          {
+            kind: 'pending_binding',
+            reason: '目录成员尚未绑定本地用户。',
+            account: createAccount({
+              id: 'account-1',
+              name: '成员一',
+            }),
+            recommendations: [{
+              localUser: {
+                id: 'user-1',
+                email: 'alpha@example.com',
+                name: 'Alpha',
+                role: 'user',
+                isActive: true,
+              },
+              reasons: ['email'],
+            }],
+            recommendationStatus: {
+              code: 'recommended',
+              message: '已命中唯一精确候选，可直接确认推荐绑定。',
+            },
+            flags: {
+              missingUnionId: false,
+              missingOpenId: false,
+            },
+            actionable: {
+              canBatchUnbind: false,
+              canConfirmRecommendation: true,
+            },
+          },
+          {
+            kind: 'pending_binding',
+            reason: '目录成员尚未绑定本地用户。',
+            account: createAccount({
+              id: 'account-2',
+              name: '成员二',
+              externalUserId: '0447654442691175',
+            }),
+            recommendations: [{
+              localUser: {
+                id: 'user-2',
+                email: 'beta@example.com',
+                name: 'Beta',
+                role: 'user',
+                isActive: true,
+              },
+              reasons: ['mobile'],
+            }],
+            recommendationStatus: {
+              code: 'recommended',
+              message: '已命中唯一精确候选，可直接确认推荐绑定。',
+            },
+            flags: {
+              missingUnionId: false,
+              missingOpenId: false,
+            },
+            actionable: {
+              canBatchUnbind: false,
+              canConfirmRecommendation: true,
+            },
+          },
+        ]),
+      ))
+      .mockResolvedValueOnce(createJsonResponse(
+        createAccountListPayload([
+          createAccount({
+            id: 'account-1',
+            name: '成员一',
+          }),
+          createAccount({
+            id: 'account-2',
+            name: '成员二',
+            externalUserId: '0447654442691175',
+          }),
+        ]),
+      ))
+      .mockResolvedValueOnce(createJsonResponse({
+        ok: true,
+        data: {
+          items: [
+            {
+              id: 'account-1',
+              localUser: {
+                id: 'user-1',
+                email: 'alpha@example.com',
+              },
+            },
+          ],
+          updatedCount: 1,
+          failedCount: 1,
+          failed: [
+            { accountId: 'account-2', error: 'Directory account is already linked to a local user' },
+          ],
+        },
+      }))
+      .mockResolvedValueOnce(createJsonResponse({
+        ok: true,
+        data: {
+          items: [createIntegration()],
+        },
+      }))
+      .mockResolvedValueOnce(createJsonResponse(
+        createReviewItemsPayload([]),
+      ))
+      .mockResolvedValueOnce(createJsonResponse(
+        createAccountListPayload([
+          createAccount({
+            id: 'account-1',
+            name: '成员一',
+            linkStatus: 'linked',
+            matchStrategy: 'manual_admin',
+            localUser: {
+              id: 'user-1',
+              email: 'alpha@example.com',
+              name: 'Alpha',
+            },
+          }),
+          createAccount({
+            id: 'account-2',
+            name: '成员二',
+            externalUserId: '0447654442691175',
+          }),
+        ]),
+      ))
+
+    app = createApp(DirectoryManagementView)
+    app.component('RouterLink', {
+      props: ['to'],
+      template: '<a><slot /></a>',
+    })
+    app.mount(container!)
+    await flushUi()
+
+    const reviewCheckboxes = Array.from(container!.querySelectorAll('.directory-admin__review-item .directory-admin__review-select input[type="checkbox"]')) as HTMLInputElement[]
+    expect(reviewCheckboxes).toHaveLength(2)
+
+    reviewCheckboxes[0].checked = true
+    reviewCheckboxes[0].dispatchEvent(new Event('change', { bubbles: true }))
+    reviewCheckboxes[1].checked = true
+    reviewCheckboxes[1].dispatchEvent(new Event('change', { bubbles: true }))
+    await flushUi(2)
+
+    const batchConfirmButton = Array.from(container!.querySelectorAll('button')).find((button) => button.textContent?.includes('批量确认推荐'))
+    expect(batchConfirmButton).toBeTruthy()
+    batchConfirmButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await flushUi(8)
+
+    expect(apiFetchMock).toHaveBeenCalledWith(
+      '/api/admin/directory/accounts/batch-bind',
+      expect.objectContaining({
+        method: 'POST',
+        body: JSON.stringify({
+          bindings: [
+            {
+              accountId: 'account-1',
+              localUserRef: 'user-1',
+              enableDingTalkGrant: true,
+            },
+            {
+              accountId: 'account-2',
+              localUserRef: 'user-2',
+              enableDingTalkGrant: true,
+            },
+          ],
+        }),
+      }),
+    )
+    // Must NOT claim blanket success for a batch that only partially committed.
+    expect(container?.textContent).not.toContain('已完成 2 个目录成员的推荐绑定确认')
+    expect(container?.textContent).toContain('已绑定 1 个目录成员，另有 1 个失败')
+    expect(container?.textContent).toContain('account-2')
+    expect(container?.textContent).toContain('Directory account is already linked to a local user')
+
+    const statusEl = container!.querySelector('.directory-admin__status')
+    expect(statusEl).toBeTruthy()
+    expect(statusEl?.className).toContain('directory-admin__status--error')
   })
 
   it('shows visible progress while batch-confirming recommended pending bindings', async () => {
@@ -5654,6 +5872,198 @@ describe('DirectoryManagementView', () => {
     expect(container?.textContent).toContain('已完成')
     expect(container?.textContent).toContain('进度 2 / 2')
     expect(container?.textContent).toContain('暂无待处理项')
+  })
+
+  it('reports a partial-failure status when batch-admit-users commits some items but not all', async () => {
+    apiFetchMock
+      .mockResolvedValueOnce(createJsonResponse({
+        ok: true,
+        data: {
+          items: [createIntegration()],
+        },
+      }))
+      .mockResolvedValueOnce(createJsonResponse({
+        ok: true,
+        data: { items: [] },
+      }))
+      .mockResolvedValueOnce(createJsonResponse(
+        createScheduleSnapshotPayload(),
+      ))
+      .mockResolvedValueOnce(createJsonResponse(
+        createAlertListPayload([]),
+      ))
+      .mockResolvedValueOnce(createJsonResponse(
+        createReviewItemsPayload([
+          {
+            kind: 'pending_binding',
+            reason: '目录成员尚未绑定本地用户。',
+            account: createAccount({
+              id: 'account-1',
+              name: '林岚',
+              email: null,
+              openId: null,
+            }),
+            recommendations: [],
+            recommendationStatus: {
+              code: 'no_exact_match',
+              message: '未命中唯一的邮箱或手机号精确匹配，请人工搜索本地用户。',
+            },
+            flags: {
+              missingUnionId: false,
+              missingOpenId: true,
+            },
+            actionable: {
+              canBatchUnbind: false,
+              canConfirmRecommendation: false,
+            },
+          },
+          {
+            kind: 'pending_binding',
+            reason: '目录成员尚未绑定本地用户。',
+            account: createAccount({
+              id: 'account-2',
+              externalUserId: '0447654442691175',
+              name: '次页成员',
+              email: null,
+              openId: null,
+            }),
+            recommendations: [],
+            recommendationStatus: {
+              code: 'no_exact_match',
+              message: '未命中唯一的邮箱或手机号精确匹配，请人工搜索本地用户。',
+            },
+            flags: {
+              missingUnionId: false,
+              missingOpenId: true,
+            },
+            actionable: {
+              canBatchUnbind: false,
+              canConfirmRecommendation: false,
+            },
+          },
+        ]),
+      ))
+      .mockResolvedValueOnce(createJsonResponse(
+        createAccountListPayload([
+          createAccount({ id: 'account-1', openId: null }),
+          createAccount({ id: 'account-2', externalUserId: '0447654442691175', name: '次页成员', openId: null }),
+        ]),
+      ))
+      .mockResolvedValueOnce(createJsonResponse({
+        ok: true,
+        data: {
+          items: [
+            {
+              id: 'account-1',
+              localUser: {
+                id: 'user-1',
+                username: 'dt_0447654442691174_account',
+              },
+            },
+          ],
+          onboardingPackets: [
+            {
+              userId: 'user-1',
+              name: '林岚',
+              email: null,
+              username: 'dt_0447654442691174_account',
+              mobile: '13900001234',
+              temporaryPassword: 'Temp#123456',
+              onboarding: {
+                inviteMessage: '账号：dt_0447654442691174_account',
+              },
+            },
+          ],
+          updatedCount: 1,
+          failedCount: 1,
+          failed: [
+            { accountId: 'account-2', error: 'Directory account is already linked to a local user' },
+          ],
+          enableDingTalkGrant: false,
+        },
+      }))
+      .mockResolvedValueOnce(createJsonResponse({
+        ok: true,
+        data: {
+          items: [createIntegration({
+            stats: {
+              departmentCount: 12,
+              accountCount: 98,
+              pendingLinkCount: 1,
+              linkedCount: 91,
+              lastRunStatus: 'completed',
+            },
+          })],
+        },
+      }))
+      .mockResolvedValueOnce(createJsonResponse(
+        createReviewItemsPayload([]),
+      ))
+      .mockResolvedValueOnce(createJsonResponse(
+        createAccountListPayload([
+          createAccount({
+            id: 'account-1',
+            openId: null,
+            linkStatus: 'linked',
+            matchStrategy: 'manual_admin',
+            localUser: {
+              id: 'user-1',
+              username: 'dt_0447654442691174_account',
+              email: null,
+              name: '林岚',
+            },
+          }),
+          createAccount({
+            id: 'account-2',
+            externalUserId: '0447654442691175',
+            name: '次页成员',
+            openId: null,
+          }),
+        ]),
+      ))
+
+    app = createApp(DirectoryManagementView)
+    registerRouterLink(app)
+    app.mount(container!)
+    await flushUi()
+
+    const manualButton = Array.from(container!.querySelectorAll('button')).find((button) => button.textContent?.includes('人工处理'))
+    expect(manualButton).toBeTruthy()
+    manualButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await flushUi(2)
+
+    const reviewCheckboxes = Array.from(container!.querySelectorAll('.directory-admin__review-item .directory-admin__review-select input[type="checkbox"]')) as HTMLInputElement[]
+    expect(reviewCheckboxes).toHaveLength(2)
+    reviewCheckboxes[0].checked = true
+    reviewCheckboxes[0].dispatchEvent(new Event('change', { bubbles: true }))
+    reviewCheckboxes[1].checked = true
+    reviewCheckboxes[1].dispatchEvent(new Event('change', { bubbles: true }))
+    await flushUi(2)
+
+    const batchAdmitButton = Array.from(container!.querySelectorAll('button')).find((button) => button.textContent?.includes('批量创建并绑定'))
+    expect(batchAdmitButton?.textContent).toContain('(2)')
+    batchAdmitButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await flushUi(8)
+
+    expect(apiFetchMock).toHaveBeenCalledWith(
+      '/api/admin/directory/accounts/batch-admit-users',
+      expect.objectContaining({
+        method: 'POST',
+        body: JSON.stringify({
+          accountIds: ['account-1', 'account-2'],
+          enableDingTalkGrant: false,
+        }),
+      }),
+    )
+    // Must NOT claim blanket success for a batch that only partially committed.
+    expect(container?.textContent).not.toContain('已创建并绑定 2 个目录成员')
+    expect(container?.textContent).toContain('已创建并绑定 1 个目录成员，另有 1 个失败')
+    expect(container?.textContent).toContain('account-2')
+    expect(container?.textContent).toContain('Directory account is already linked to a local user')
+
+    const statusEl = container!.querySelector('.directory-admin__status')
+    expect(statusEl).toBeTruthy()
+    expect(statusEl?.className).toContain('directory-admin__status--error')
   })
 
   it('tests a saved integration with diagnostics and reuses the saved secret on the backend', async () => {

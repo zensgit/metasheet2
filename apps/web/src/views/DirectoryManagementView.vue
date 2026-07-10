@@ -4887,6 +4887,9 @@ interface ReviewBindingsOutcome {
 
 // Shared by the batch-bind and batch-admit-users partial-failure toasts: both server
 // routes return `failed: [{ accountId, error }]` for per-item failures (DT-HARDEN-04).
+// Both call sites use the same limit so the two toasts stay visually consistent.
+const FAILED_BINDINGS_PREVIEW_LIMIT = 3
+
 function readFailedBindingsPreview(failed: unknown[], limit: number): string {
   return failed
     .slice(0, limit)
@@ -4964,7 +4967,7 @@ async function submitReviewBindings(bindings: Array<{
       })
     }
     await refreshAfterReviewBindings()
-    const failedPreview = readFailedBindingsPreview(outcome.failed, 3)
+    const failedPreview = readFailedBindingsPreview(outcome.failed, FAILED_BINDINGS_PREVIEW_LIMIT)
     const message = outcome.failedCount > 0
       ? `已绑定 ${appliedCount} 个目录成员，另有 ${outcome.failedCount} 个失败${failedPreview ? `：${failedPreview}` : '，请重试'}`
       : successMessage
@@ -5188,7 +5191,7 @@ async function batchAdmitReviewItems() {
     await refreshAfterReviewBindings()
     const failedCount = Number(data?.failedCount ?? 0)
     const failedItems = Array.isArray(data?.failed) ? data.failed : []
-    const failedPreview = readFailedBindingsPreview(failedItems, 2)
+    const failedPreview = readFailedBindingsPreview(failedItems, FAILED_BINDINGS_PREVIEW_LIMIT)
     const message = failedCount > 0
       ? `已创建并绑定 ${appliedCount} 个目录成员，另有 ${failedCount} 个失败${failedPreview ? `：${failedPreview}` : '，请重试'}`
       : `已创建并绑定 ${appliedCount} 个目录成员`
