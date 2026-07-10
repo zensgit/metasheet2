@@ -370,6 +370,61 @@ describe('StockPreparationExceptionQueueView (view 6: queue reads + human resolu
     expect(notice.textContent).toContain('2')
   })
 
+  it('PRUNES the selection on reload: a selected row that comes back resolved leaves the set', async () => {
+    // P3-2 (#4030 review): after a single resolve, the refreshed list returns the selected alpha row
+    // as RESOLVED. The selection set must be pruned to the still-open rows only — a stale handle
+    // lingering in the set would ride into the next bulk payload (and skew the bulk gate).
+    let listReads = 0
+    h.apiFetch.mockImplementation(async (url: string) => {
+      if (url.includes('/exceptions/resolve')) {
+        return ok({
+          persisted: true,
+          mode: 'resolved',
+          exceptionId: 'exc-handle-alpha',
+          evidence: { subject: 'exception', mode: 'resolved', target: { objectId: 'obj', keyField: 'exceptionId' }, valuesFree: true },
+        })
+      }
+      if (url.includes('/exceptions')) {
+        listReads += 1
+        if (listReads === 1) return ok(exceptionsData())
+        // Reload: alpha is now resolved (server-stamped) — everything else unchanged.
+        const data = exceptionsData() as { rows: Array<Record<string, unknown>> }
+        data.rows[0] = {
+          ...data.rows[0],
+          status: 'resolved',
+          resolutionAction: 'mapping_confirmed',
+          resolved: true,
+          resolvedByPresent: true,
+        }
+        return ok(data)
+      }
+      return ok({})
+    })
+    const root = mountView()
+    await waitForSelector(root, '[data-testid="stock-prep-exception-overview"]')
+
+    setSelect(root, 'stock-prep-exception-action-select', 'mapping_confirmed')
+    const boxes = rowCheckboxes(root)
+    clickCheckbox(boxes[0]) // alpha (missing_mapping)
+    clickCheckbox(boxes[1]) // beta (missing_mapping)
+    await waitForCondition(() =>
+      (root.querySelector('[data-testid="stock-prep-exception-selected-count"]')?.textContent || '').includes('2'))
+
+    // Single-resolve alpha → reload returns it resolved → the set keeps ONLY beta.
+    ;(root.querySelector('[data-testid="stock-prep-exception-row-resolve"]') as HTMLButtonElement).click()
+    await waitForCondition(() => listReads === 2)
+    await waitForCondition(() =>
+      (root.querySelector('[data-testid="stock-prep-exception-selected-count"]')?.textContent || '').includes('1'))
+
+    const boxesAfter = rowCheckboxes(root)
+    // Alpha row is read-only now: deselected AND disabled.
+    expect(boxesAfter[0].checked).toBe(false)
+    expect(boxesAfter[0].disabled).toBe(true)
+    // Beta survives the prune, and the (same-type, action-chosen) bulk entry stays enabled for it.
+    expect(boxesAfter[1].checked).toBe(true)
+    expect((root.querySelector('[data-testid="stock-prep-exception-bulk-resolve"]') as HTMLButtonElement).disabled).toBe(false)
+  })
+
   it('MIRRORS the same-reason gate: a mixed-type selection disables bulk resolve and posts NOTHING', async () => {
     mockRoutes()
     const root = mountView()

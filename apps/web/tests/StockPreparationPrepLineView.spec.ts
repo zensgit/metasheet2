@@ -311,6 +311,35 @@ describe('StockPreparationPrepLineView (view 5: values-free prep lines + generat
     expect(hint.textContent).toContain('异常队列')
   })
 
+  it('mirrors the SERVER ready field, never a local recompute from status (asymmetric fixture)', async () => {
+    // P3-1 (#4030 review): status says 'ready' but the server invariant verdict is ready:false
+    // (e.g. pre-existing unresolved blocking exceptions counted AFTER persistence). A UI that
+    // recomputed ready from status === 'ready' would render 是/yes and hide the blocked hint —
+    // both surfaces MUST follow the server's ready field alone.
+    mockRoutes({
+      run: () => ok(generationRunData({
+        status: 'ready',
+        ready: false,
+        unresolvedBlockingExceptionCount: 2,
+        created: { lines: 0, exceptions: 0, run: 0 },
+        patched: { lines: 0, run: 0 },
+      }), 200),
+    })
+    const root = mountView()
+    await waitForSelector(root, '[data-testid="stock-prep-line-overview"]')
+    ;(root.querySelector('[data-testid="stock-prep-line-generate"]') as HTMLButtonElement).click()
+    await waitForSelector(root, '[data-testid="stock-prep-line-generate-blocked"]')
+
+    const result = root.querySelector('[data-testid="stock-prep-line-generate-result"]') as HTMLElement
+    // The status enum still renders as-is…
+    expect(result.textContent).toContain('ready')
+    // …but ready=false renders 否 and the server's unresolved blocking count (the only 2 — all
+    // created/patched counts are zeroed in this fixture).
+    expect(result.textContent).toContain('否')
+    expect(result.textContent).toContain('2')
+    expect(root.querySelector('[data-testid="stock-prep-line-generate-blocked"]')).not.toBeNull()
+  })
+
   it('renders a values-free action error (clamped code, never the raw body) on a failed run', async () => {
     mockRoutes({ run: () => fail(422, 'GENERATION_BATCH_NOT_FOUND') })
     const root = mountView()
