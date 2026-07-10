@@ -57,6 +57,11 @@ describe('first-paint skeleton tripwire (UF-8)', () => {
 
   it('ApprovalCenterView and ApprovalDetailView keep their el-skeleton first-paint blocks', () => {
     expect(read('src/views/approval/ApprovalCenterView.vue')).toContain('el-skeleton')
-    expect(read('src/views/approval/ApprovalDetailView.vue')).toContain('el-skeleton')
+    // B3-13: ApprovalDetailView's first-paint skeleton now renders through the shared
+    // AsyncStateBlock (state="loading"), which is where its el-skeleton texture lives — the
+    // tripwire follows the texture: the view must still mount the block, and the block must
+    // still be skeleton-based. Behavioral loading coverage lives in approvalDetailPolish.spec.ts.
+    expect(read('src/views/approval/ApprovalDetailView.vue')).toContain('AsyncStateBlock')
+    expect(read('src/components/status/AsyncStateBlock.vue')).toContain('el-skeleton')
   })
 })
