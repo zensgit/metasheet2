@@ -185,10 +185,14 @@ describe('§7.1 directory inactive-linked backlog digest', () => {
 
   describe('buildDirectoryInactiveLinkedAlertMessage', () => {
     it('reports the threshold and count, caps the example list at 5, and notes the remainder', () => {
+      // count === sample.length here on purpose: getDirectoryInactiveLinkedMetric only ever
+      // returns a shorter sample than count once count exceeds its OWN 20-row cap, so a
+      // count/sample-length mismatch (e.g. count:7, sample:6) is not a state the real query
+      // can produce. This message-builder has its own, separate 5-item display cap.
       const metric: DirectoryInactiveLinkedMetric = {
         thresholdDays: 30,
-        count: 7,
-        sample: Array.from({ length: 6 }, (_, i) => ({
+        count: 8,
+        sample: Array.from({ length: 8 }, (_, i) => ({
           directoryAccountId: `acc-${i}`,
           externalUserId: `ext-${i}`,
           accountName: `Account ${i}`,
@@ -201,9 +205,29 @@ describe('§7.1 directory inactive-linked backlog digest', () => {
       }
       const { subject, content } = buildDirectoryInactiveLinkedAlertMessage({ integrationName: 'CN', metric })
       expect(subject).toContain('30')
-      expect(content).toContain('数量：7')
+      expect(content).toContain('数量：8')
       expect((content.match(/Account \d/g) ?? []).length).toBe(5)
-      expect(content).toContain('以及其他 2 个账号')
+      expect(content).toContain('以及其他 3 个账号')
+    })
+
+    it('shows every example without a remainder line when the backlog is small enough to fit', () => {
+      const metric: DirectoryInactiveLinkedMetric = {
+        thresholdDays: 30,
+        count: 2,
+        sample: Array.from({ length: 2 }, (_, i) => ({
+          directoryAccountId: `acc-${i}`,
+          externalUserId: `ext-${i}`,
+          accountName: `Account ${i}`,
+          localUserId: `user-${i}`,
+          localUserEmail: `user${i}@example.com`,
+          localUserName: `User ${i}`,
+          inactiveSinceAt: '2026-01-01T00:00:00.000Z',
+          inactiveDays: 40 + i,
+        })),
+      }
+      const { content } = buildDirectoryInactiveLinkedAlertMessage({ integrationName: 'CN', metric })
+      expect((content.match(/Account \d/g) ?? []).length).toBe(2)
+      expect(content).not.toContain('以及其他')
     })
   })
 

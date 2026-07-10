@@ -1118,6 +1118,16 @@ describe('adminDirectoryRouter', () => {
     expect(alertDeliveryMocks.getDirectoryInactiveLinkedMetric).toHaveBeenCalledWith('dir-1', 30)
   })
 
+  it('rejects an unauthenticated inactive-linked request (401)', async () => {
+    const response = await invokeRoute('get', '/integrations/:integrationId/inactive-linked', {
+      params: { integrationId: 'dir-1' },
+    })
+
+    expect(response.statusCode).toBe(401)
+    expect(response.body).toMatchObject({ ok: false, error: { code: 'UNAUTHENTICATED' } })
+    expect(alertDeliveryMocks.getDirectoryInactiveLinkedMetric).not.toHaveBeenCalled()
+  })
+
   it('admin-gates the inactive-linked route (403 for non-admin)', async () => {
     rbacMocks.isRbacAdmin.mockResolvedValue(false)
 

@@ -367,12 +367,16 @@ export function buildDirectoryInactiveLinkedAlertMessage(options: {
     `- 阈值：${metric.thresholdDays} 天`,
     `- 数量：${metric.count}`,
   ]
-  for (const item of metric.sample.slice(0, 5)) {
+  const shown = Math.min(metric.sample.length, 5)
+  for (const item of metric.sample.slice(0, shown)) {
     const label = item.localUserName || item.localUserEmail || item.localUserId
     lines.push(`  - ${item.accountName || item.externalUserId} → ${label}（已停用 ${item.inactiveDays} 天）`)
   }
-  if (metric.count > metric.sample.length) {
-    lines.push(`  - ……以及其他 ${metric.count - Math.min(metric.sample.length, 5)} 个账号`)
+  // `metric.sample` is already capped (INACTIVE_LINKED_SAMPLE_LIMIT) upstream, so
+  // `count` can exceed `sample.length` even before this message's own 5-item cap —
+  // compare against what was actually SHOWN here, not the upstream sample size.
+  if (metric.count > shown) {
+    lines.push(`  - ……以及其他 ${metric.count - shown} 个账号`)
   }
   return { subject, content: lines.join('\n') }
 }

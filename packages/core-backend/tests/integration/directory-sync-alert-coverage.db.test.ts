@@ -495,7 +495,6 @@ describeIfDatabase('§7.1 directory inactive-linked backlog metric (real DB)', (
   let integrationId = ''
   let otherIntegrationIdRef = ''
   const userIds: string[] = []
-  const accountIds: string[] = []
 
   const daysAgo = (n: number) => new Date(Date.now() - n * 24 * 60 * 60 * 1000).toISOString()
 
@@ -530,7 +529,6 @@ describeIfDatabase('§7.1 directory inactive-linked backlog metric (real DB)', (
          VALUES ($1, $2, $3, $4, $5, '{}'::jsonb, $6) RETURNING id`,
         [opts.integration ?? integrationId, opts.externalUserId, `key-${opts.externalUserId}`, opts.externalUserId, opts.isActive, opts.updatedAt],
       )
-      accountIds.push(result.rows[0].id)
       return result.rows[0].id
     }
     const link = async (accountId: string, userId: string) => {
