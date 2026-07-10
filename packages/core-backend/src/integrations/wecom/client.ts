@@ -260,7 +260,6 @@ export function resolveWeComMessageConfigReadiness(
 // would be invisible to a DI-mode unit test that stubs the sender.
 export const WECOM_TEXTCARD_TITLE_MAX_CHARS = 128
 export const WECOM_TEXTCARD_DESCRIPTION_MAX_CHARS = 512
-export const WECOM_TEXTCARD_BTNTXT_MAX_CHARS = 4
 export const WECOM_TEXT_CONTENT_MAX_BYTES = 2048
 
 export function clampWeComCharLength(value: string, maxChars: number): string {
