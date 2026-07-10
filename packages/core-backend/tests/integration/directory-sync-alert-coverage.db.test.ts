@@ -1,9 +1,34 @@
-import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
+
+// R5 (per-run summary block below): the DingTalk HTTP client is mocked so real
+// `syncDirectoryIntegration` runs can pull a synthetic directory against real Postgres.
+// The DT-OPS-03 blocks in this file never touch the client, so they are unaffected.
+const clientMocks = vi.hoisted(() => ({
+  fetchDingTalkAppAccessToken: vi.fn(),
+  listDingTalkDepartments: vi.fn(),
+  getDingTalkDepartmentDetail: vi.fn(),
+  listDingTalkDepartmentUsers: vi.fn(),
+  getDingTalkUserDetail: vi.fn(),
+}))
+
+vi.mock('../../src/integrations/dingtalk/client', () => ({
+  fetchDingTalkAppAccessToken: clientMocks.fetchDingTalkAppAccessToken,
+  listDingTalkDepartments: clientMocks.listDingTalkDepartments,
+  getDingTalkDepartmentDetail: clientMocks.getDingTalkDepartmentDetail,
+  listDingTalkDepartmentUsers: clientMocks.listDingTalkDepartmentUsers,
+  getDingTalkUserDetail: clientMocks.getDingTalkUserDetail,
+}))
+
 import { query } from '../../src/db/pg'
 import {
   countConsecutiveFailedRuns,
   getDirectoryManagerBindingCoverage,
 } from '../../src/directory/directory-sync-alert-delivery'
+import {
+  createDirectoryIntegration,
+  listDirectorySyncRuns,
+  syncDirectoryIntegration,
+} from '../../src/directory/directory-sync'
 
 /**
  * DT-OPS-03 P2-2 — REAL DB coverage. The unit test (directory-sync-alert-delivery.test.ts)
@@ -214,5 +239,238 @@ describeIfDatabase('DT-OPS-03 manager binding coverage + failure streak (real DB
       const streak = await countConsecutiveFailedRuns(integrationId)
       expect(streak).toBe(0)
     })
+  })
+})
+
+/**
+ * R5 — per-run directory sync summary persisted into directory_sync_runs.stats.
+ *
+ * Drives the REAL `syncDirectoryIntegration` (mocked DingTalk pull, real Postgres apply)
+ * four times over an evolving synthetic directory and asserts the run rows carry an honest
+ * change summary: created-vs-updated split (the `(xmax = 0)` upsert discriminator — this is
+ * exactly what mocks cannot exercise), per-run deactivation TRANSITION counts, the
+ * manager-binding coverage snapshot, and durationMs. Real-DB on purpose: ON CONFLICT
+ * resolution and xmax semantics only exist in PostgreSQL.
+ *
+ * The `it` blocks are order-dependent (run 1 → run 4), matching this file's existing style.
+ */
+describeIfDatabase('R5 per-run sync summary stats (real DB)', () => {
+  const CORP = `dsrs-corp-${TS}`
+  const D1 = `dsrs-d1-${TS}`
+  const D2 = `dsrs-d2-${TS}`
+  const EXT_M1 = `dsrs-ext-m1-${TS}` // dept head of D1, pre-seeded + pre-linked
+  const EXT_M2 = `dsrs-ext-m2-${TS}` // leader_in_dept manager, never linked
+  const EXT_E3 = `dsrs-ext-e3-${TS}` // plain employee, departs before run 2
+  const U_MGR = `dsrs-umgr-${TS}` // local user M1 is linked to
+
+  let integrationId = ''
+  // Which directory the mocked DingTalk tenant currently answers with.
+  let pullScenario: 'full' | 'e3Departed' | 'd2Departed' = 'full'
+
+  function userDetail(userId: string, name: string, source: Record<string, unknown> = {}) {
+    return {
+      userId,
+      name,
+      unionId: `dsrs-un-${userId}`,
+      openId: `dsrs-op-${userId}`,
+      email: undefined,
+      mobile: undefined,
+      departmentIds: [] as string[],
+      source,
+    }
+  }
+
+  beforeAll(async () => {
+    await query(
+      `INSERT INTO users (id, email, name, password_hash, role)
+       VALUES ($1, $2, 'DSRS Manager', 'x', 'user')
+       ON CONFLICT (id) DO NOTHING`,
+      [U_MGR, `${U_MGR}@example.test`],
+    )
+
+    const integration = await createDirectoryIntegration({
+      name: `dsrs-${TS}`,
+      corpId: CORP,
+      appKey: `dsrs-appkey-${TS}`,
+      appSecret: 'dsrs-appsecret',
+      admissionMode: 'manual_only',
+    })
+    integrationId = integration.id
+
+    // Pre-seed M1 as an existing, LINKED directory account: run 1 must count it as
+    // UPDATED (upsert hits ON CONFLICT), and coverage must count it as the one bound manager.
+    const m1Account = (await query<{ id: string }>(
+      `INSERT INTO directory_accounts (
+         integration_id, corp_id, external_user_id, union_id, external_key, name, is_active, last_seen_at, created_at, updated_at
+       ) VALUES ($1, $2, $3, $4, $4, 'Manager One', true, NOW(), NOW(), NOW())
+       RETURNING id`,
+      [integrationId, CORP, EXT_M1, `dsrs-un-${EXT_M1}`],
+    )).rows[0].id
+    await query(
+      `INSERT INTO directory_account_links (directory_account_id, local_user_id, link_status, match_strategy, created_at, updated_at)
+       VALUES ($1, $2, 'linked', 'manual', NOW(), NOW())`,
+      [m1Account, U_MGR],
+    )
+
+    clientMocks.fetchDingTalkAppAccessToken.mockResolvedValue('dsrs-token')
+    clientMocks.listDingTalkDepartments.mockImplementation(async (_token: string, parentId: string) => {
+      if (parentId !== '1') return []
+      const children = [{ id: D1, parentId: '1', name: 'Ops', order: 0, source: {} }]
+      if (pullScenario !== 'd2Departed') {
+        children.push({ id: D2, parentId: '1', name: 'Empty Wing', order: 1, source: {} })
+      }
+      return children
+    })
+    // D1 names M1 as its department head (dept_manager_userid_list manager path).
+    clientMocks.getDingTalkDepartmentDetail.mockImplementation(async (_token: string, deptId: string) => ({
+      deptManagerUserIdList: deptId === D1 ? [EXT_M1] : [],
+    }))
+    clientMocks.listDingTalkDepartmentUsers.mockImplementation(async (_token: string, deptId: string) => {
+      if (deptId === D1) {
+        const users = [
+          { userId: EXT_M1, name: 'Manager One', departmentIds: [D1], source: {} },
+          { userId: EXT_M2, name: 'Manager Two', departmentIds: [D1], source: {} },
+        ]
+        if (pullScenario === 'full') {
+          users.push({ userId: EXT_E3, name: 'Employee Three', departmentIds: [D1], source: {} })
+        }
+        return { users, nextCursor: null, hasMore: false }
+      }
+      return { users: [], nextCursor: null, hasMore: false }
+    })
+    clientMocks.getDingTalkUserDetail.mockImplementation(async (_token: string, userId: string) => {
+      switch (userId) {
+        case EXT_M1:
+          return userDetail(EXT_M1, 'Manager One')
+        case EXT_M2:
+          // leader_in_dept manager path (account raw), never linked to a local user.
+          return userDetail(EXT_M2, 'Manager Two', { leader_in_dept: [{ dept_id: 999, leader: true }] })
+        case EXT_E3:
+          return userDetail(EXT_E3, 'Employee Three')
+        default:
+          throw new Error(`unexpected userId ${userId}`)
+      }
+    })
+  })
+
+  afterAll(async () => {
+    if (integrationId) {
+      await query(`DELETE FROM directory_sync_runs WHERE integration_id = $1`, [integrationId])
+      await query(`DELETE FROM directory_account_links WHERE directory_account_id IN (SELECT id FROM directory_accounts WHERE integration_id = $1)`, [integrationId])
+      await query(`DELETE FROM directory_account_departments WHERE directory_account_id IN (SELECT id FROM directory_accounts WHERE integration_id = $1)`, [integrationId])
+      await query(`DELETE FROM directory_accounts WHERE integration_id = $1`, [integrationId])
+      await query(`DELETE FROM directory_departments WHERE integration_id = $1`, [integrationId])
+      await query(`DELETE FROM directory_integrations WHERE id = $1`, [integrationId])
+    }
+    await query(`DELETE FROM users WHERE id = $1`, [U_MGR])
+  })
+
+  it('sentinel: DATABASE_URL is set (DB-backed lane must not silently skip)', () => {
+    expect(process.env.DATABASE_URL).toBeTruthy()
+  })
+
+  it('run 1: first sync splits created vs updated (xmax discriminator), snapshots manager coverage, keeps pre-existing stats keys, and flows through the runs list', async () => {
+    pullScenario = 'full'
+    const result = await syncDirectoryIntegration(integrationId, 'system:dsrs-test')
+    const stats = result.run.stats as Record<string, unknown>
+
+    // Departments: synthetic root + D1 + D2, all new to the DB.
+    expect(stats.departmentsSynced).toBe(3)
+    expect(stats.departmentsCreatedCount).toBe(3)
+    expect(stats.departmentsUpdatedCount).toBe(0)
+    expect(stats.departmentsDeactivatedCount).toBe(0)
+
+    // Accounts: M2 + E3 are genuinely new (INSERT, xmax=0); pre-seeded M1 hits
+    // ON CONFLICT DO UPDATE (xmax != 0). A mock could never prove this split.
+    expect(stats.accountsSynced).toBe(3)
+    expect(stats.accountsCreatedCount).toBe(2)
+    expect(stats.accountsUpdatedCount).toBe(1)
+    expect(stats.accountsDeactivatedCount).toBe(0)
+
+    // Manager coverage snapshot: M1 (dept head, linked) + M2 (leader_in_dept, unlinked).
+    expect(stats.managerCount).toBe(2)
+    expect(stats.linkedManagerCount).toBe(1)
+    expect(stats.managerCoverage).toBe(0.5)
+
+    expect(typeof stats.durationMs).toBe('number')
+    expect(stats.durationMs as number).toBeGreaterThanOrEqual(0)
+
+    // The summary is ADDITIVE: pre-existing completion keys must survive the merge.
+    expect(stats.linkedCount).toBe(1)
+    expect(stats.pendingCount).toBe(0)
+    expect(stats.unmatchedCount).toBe(2)
+    expect(stats.autoAdmittedCount).toBe(0)
+    expect(stats.deprovisionApplied).toBe(false)
+
+    // The persisted snapshot must agree with the live #3914 coverage function that
+    // GET /manager-coverage serves — same numbers, one from the run row, one live.
+    const live = await getDirectoryManagerBindingCoverage(integrationId)
+    expect(live).toEqual({ managerCount: 2, linkedManagerCount: 1, coverage: 0.5 })
+    expect(stats.managerCount).toBe(live.managerCount)
+    expect(stats.linkedManagerCount).toBe(live.linkedManagerCount)
+    expect(stats.managerCoverage).toBe(live.coverage)
+
+    // OPS-02 surface: GET /integrations/:id/runs serves listDirectorySyncRuns verbatim —
+    // the new keys must arrive there with no route change.
+    const runs = await listDirectorySyncRuns(integrationId, { limit: 5, offset: 0 })
+    const listed = runs.items.find((item) => item.id === result.run.id)
+    expect(listed).toBeTruthy()
+    const listedStats = listed?.stats as Record<string, unknown>
+    expect(listedStats.accountsCreatedCount).toBe(2)
+    expect(listedStats.accountsUpdatedCount).toBe(1)
+    expect(listedStats.managerCoverage).toBe(0.5)
+    expect(typeof listedStats.durationMs).toBe('number')
+  })
+
+  it('run 2: after one user departs — nothing created, survivors updated, departure counted as deactivated', async () => {
+    pullScenario = 'e3Departed'
+    const result = await syncDirectoryIntegration(integrationId, 'system:dsrs-test')
+    const stats = result.run.stats as Record<string, unknown>
+
+    expect(stats.accountsCreatedCount).toBe(0)
+    expect(stats.accountsUpdatedCount).toBe(2)
+    expect(stats.accountsDeactivatedCount).toBe(1)
+
+    expect(stats.departmentsCreatedCount).toBe(0)
+    expect(stats.departmentsUpdatedCount).toBe(3)
+    expect(stats.departmentsDeactivatedCount).toBe(0)
+
+    // Cross-check the count against the actual DB effect: E3 really is inactive now.
+    const e3 = await query<{ is_active: boolean }>(
+      `SELECT is_active FROM directory_accounts WHERE integration_id = $1 AND external_user_id = $2`,
+      [integrationId, EXT_E3],
+    )
+    expect(e3.rows[0]?.is_active).toBe(false)
+  })
+
+  it('run 3: a department departs — counted once; the already-inactive account is NOT re-counted', async () => {
+    pullScenario = 'd2Departed'
+    const result = await syncDirectoryIntegration(integrationId, 'system:dsrs-test')
+    const stats = result.run.stats as Record<string, unknown>
+
+    expect(stats.departmentsSynced).toBe(2)
+    expect(stats.departmentsCreatedCount).toBe(0)
+    expect(stats.departmentsUpdatedCount).toBe(2)
+    expect(stats.departmentsDeactivatedCount).toBe(1)
+    // E3 went inactive in run 2; a TRANSITION count must not report it again.
+    expect(stats.accountsDeactivatedCount).toBe(0)
+  })
+
+  it('run 4: steady state — deactivation counts are transitions, not a re-stamp of the backlog', async () => {
+    pullScenario = 'd2Departed'
+    const result = await syncDirectoryIntegration(integrationId, 'system:dsrs-test')
+    const stats = result.run.stats as Record<string, unknown>
+
+    // D2 and E3 are long gone; without the `AND is_active = true` predicate both
+    // deactivation sweeps would report them on every run forever.
+    expect(stats.departmentsDeactivatedCount).toBe(0)
+    expect(stats.accountsDeactivatedCount).toBe(0)
+    expect(stats.accountsCreatedCount).toBe(0)
+    expect(stats.accountsUpdatedCount).toBe(2)
+
+    // Coverage snapshot is stable across runs when nothing about managers changed.
+    expect(stats.managerCount).toBe(2)
+    expect(stats.linkedManagerCount).toBe(1)
+    expect(stats.managerCoverage).toBe(0.5)
   })
 })

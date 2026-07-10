@@ -31,7 +31,7 @@ import { invalidateUserPerms } from '../rbac/service'
 import { decryptStoredSecretValue, normalizeStoredSecretValue } from '../security/encrypted-secrets'
 import { getBcryptSaltRounds } from '../security/auth-runtime-config'
 import { SimpleCronExpression } from '../services/SchedulerService'
-import { deliverDirectorySyncFailureAlert } from './directory-sync-alert-delivery'
+import { deliverDirectorySyncFailureAlert, getDirectoryManagerBindingCoverage } from './directory-sync-alert-delivery'
 
 const logger = new Logger('DirectorySync')
 const DEFAULT_ORG_ID = 'default'
@@ -2856,6 +2856,10 @@ export async function syncDirectoryIntegration(
   await reclaimStaleDirectorySyncRuns(integrationId)
   const runResult = await claimDirectorySyncRun(integrationId, triggeredBy, triggerSource)
   const runId = runResult.rows[0].id
+  // R5: wall-clock anchor for stats.durationMs. Measured app-side from the lease claim to
+  // just before the completion UPDATE (stats is serialized inside the transaction), so it
+  // is immune to app/DB clock skew that started_at/finished_at arithmetic would inherit.
+  const runStartedAtMs = Date.now()
   hooks.onRunStarted?.(runId)
 
   // DT-HARDEN-05 heartbeat: prove this run is alive for as long as it holds the lease.
@@ -2919,8 +2923,16 @@ export async function syncDirectoryIntegration(
     const autoAdmissionOnboardingPackets: DirectoryAutoAdmissionOnboardingPacket[] = []
 
     await transaction(async (client) => {
+      // R5: created-vs-updated split for the run summary. `departmentsSynced`/`accountsSynced`
+      // conflate "0 new" and "500 new"; the discriminator is `(xmax = 0)` on the upserted row —
+      // a freshly INSERTed tuple has xmax 0, an ON CONFLICT DO UPDATE tuple carries the updating
+      // transaction's xid (pg-only repo, standard PostgreSQL trick). Read defensively
+      // (`rows[0]?.created === true`) so a fake client answering empty rows in unit suites
+      // falls into the "updated" bucket instead of throwing.
+      let departmentsCreatedCount = 0
+      let departmentsUpdatedCount = 0
       for (const department of departments.values()) {
-        await client.query(
+        const departmentUpsert = await client.query(
           `INSERT INTO directory_departments (
              integration_id, provider, external_department_id, external_parent_department_id, name,
              full_path, order_index, is_active, raw, last_seen_at, created_at, updated_at
@@ -2935,7 +2947,8 @@ export async function syncDirectoryIntegration(
              is_active = true,
              raw = EXCLUDED.raw,
              last_seen_at = EXCLUDED.last_seen_at,
-             updated_at = NOW()`,
+             updated_at = NOW()
+           RETURNING (xmax = 0) AS created`,
           [
             integrationId,
             DEFAULT_PROVIDER,
@@ -2953,12 +2966,16 @@ export async function syncDirectoryIntegration(
             syncTimestamp,
           ],
         )
+        if (departmentUpsert.rows[0]?.created === true) departmentsCreatedCount += 1
+        else departmentsUpdatedCount += 1
       }
 
+      let accountsCreatedCount = 0
+      let accountsUpdatedCount = 0
       const userList = Array.from(users.values())
       for (const user of userList) {
         const externalKey = normalizeText(user.unionId || user.openId || user.userId)
-        await client.query(
+        const accountUpsert = await client.query(
           `INSERT INTO directory_accounts (
              integration_id, provider, corp_id, external_user_id, union_id, open_id, external_key,
              name, nick, email, mobile, job_number, title, avatar_url, is_active, raw, last_seen_at, created_at, updated_at
@@ -2979,7 +2996,8 @@ export async function syncDirectoryIntegration(
              is_active = true,
              raw = EXCLUDED.raw,
              last_seen_at = EXCLUDED.last_seen_at,
-             updated_at = NOW()`,
+             updated_at = NOW()
+           RETURNING (xmax = 0) AS created`,
           [
             integrationId,
             DEFAULT_PROVIDER,
@@ -2999,14 +3017,24 @@ export async function syncDirectoryIntegration(
             syncTimestamp,
           ],
         )
+        if (accountUpsert.rows[0]?.created === true) accountsCreatedCount += 1
+        else accountsUpdatedCount += 1
       }
 
-      await client.query(
+      // R5, mirroring the DT-OPS-01 account sweep below: `AND is_active = true` makes this a
+      // TRANSITION (departments that departed in THIS run), not a re-stamp of every
+      // long-gone department on every sync — without it the per-run count would report the
+      // same departed department forever. The resulting state is identical for already-
+      // inactive rows (nothing reads directory_departments.updated_at); only the honest
+      // count is new.
+      const deactivatedDepartmentsResult = await client.query(
         `UPDATE directory_departments
          SET is_active = false, updated_at = NOW()
-         WHERE integration_id = $1 AND last_seen_at < $2`,
+         WHERE integration_id = $1 AND last_seen_at < $2 AND is_active = true
+         RETURNING id`,
         [integrationId, syncTimestamp],
       )
+      const departmentsDeactivatedCount = deactivatedDepartmentsResult.rows.length
       // DT-OPS-01: `AND is_active = true` makes this a TRANSITION, not a re-stamp of the
       // whole backlog. Without it the deprovision executor re-processed every account ever
       // deactivated on every sync — audit spam, and it would stomp a reactivation.
@@ -3314,9 +3342,32 @@ export async function syncDirectoryIntegration(
         enabled: isDirectoryDeprovisionEnabled(),
       })
 
+      // R5: per-run manager-binding snapshot. The live GET /manager-coverage endpoint
+      // (#3914) answers "what is coverage NOW"; persisting the same numbers here answers
+      // "what did THIS run leave it at", so admins can see the trend across runs. Runs
+      // through the transaction client on purpose: it must see this run's (uncommitted)
+      // final link state, and `getDirectoryManagerBindingCoverage`'s queryFn is injectable
+      // for exactly this. Placed after the link loop, member-group projection and
+      // deprovision so it is the end-of-run snapshot.
+      const managerBindingCoverage = await getDirectoryManagerBindingCoverage(
+        integrationId,
+        (sql, params) => client.query(sql, params),
+      )
+
       const stats = {
         departmentsSynced: departments.size,
         accountsSynced: users.size,
+        // R5 per-run change summary — all additive; every pre-existing key above/below is kept.
+        departmentsCreatedCount,
+        departmentsUpdatedCount,
+        departmentsDeactivatedCount,
+        accountsCreatedCount,
+        accountsUpdatedCount,
+        accountsDeactivatedCount: deactivatedAccountIds.length,
+        managerCount: managerBindingCoverage.managerCount,
+        linkedManagerCount: managerBindingCoverage.linkedManagerCount,
+        managerCoverage: managerBindingCoverage.coverage,
+        durationMs: Date.now() - runStartedAtMs,
         deprovisionApplied: deprovisionOutcome.applied,
         deprovisionCandidateCount: deprovisionOutcome.candidateCount,
         deprovisionManualReviewCount: deprovisionOutcome.manualReviewCount,
