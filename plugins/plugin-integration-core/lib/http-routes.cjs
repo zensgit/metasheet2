@@ -83,6 +83,12 @@ const ROUTES = [
   // #3751 MVP W3 (diff rows): per-row diffType/changeTypes/reviewStatus browse for view 2 — closed
   // 11-key projection, optional caller-chosen base pair, optional enum filters, capped fail-closed.
   ['GET', '/api/integration/stock-preparation/snapshot-batches/:snapshotBatchId/diff/rows', 'stockPreparationSnapshotDiffRows'],
+  // #3751 MVP W3 (confirm reads): values-free confirmation-state summaries + review-queue lists for
+  // FE views 3/4 (queryRecords-only; unit candidates COMPUTED per read, never persisted).
+  ['GET', '/api/integration/stock-preparation/material-mappings/summary', 'stockPreparationMaterialMappingSummary'],
+  ['GET', '/api/integration/stock-preparation/material-mappings/candidates', 'stockPreparationMaterialMappingCandidates'],
+  ['GET', '/api/integration/stock-preparation/unit-conversions/summary', 'stockPreparationUnitConversionSummary'],
+  ['GET', '/api/integration/stock-preparation/unit-conversions/candidates', 'stockPreparationUnitConversionCandidates'],
   // #3751 MVP W3 (confirm writes): candidate-sync feeds the mapping review queue; confirm/retire are
   // the human confirmation surface over the two confirmation tables (multitable-internal only,
   // admin-gated, server-stamped confirmedBy/confirmedAt, values-free).
@@ -285,6 +291,15 @@ const {
   confirmUnitConversionRule,
   retireUnitConversionRule,
 } = require('./stock-preparation-confirm-writes.cjs')
+// #3751 MVP W3: READONLY confirmation-state reads for FE views 3/4 (summaries + review queues;
+// queryRecords-only; unit candidates computed per read; values-free rows).
+const {
+  getMaterialMappingSummary,
+  listMaterialMappingCandidates,
+  getUnitConversionSummary,
+  listUnitConversionCandidates,
+} = require('./stock-preparation-confirm-reads.cjs')
+const { MATCH_STATUSES: STOCK_PREPARATION_MATCH_STATUSES } = require('./stock-preparation-material-match.cjs')
 // FOS-4: canonical stock-prep objectId — readiness is bound per TARGET, so any preset targeting this
 // table (v1 replace + the disable-missing prove-the-path preset) reuses the canonical readiness check.
 const { STOCK_PREPARATION_MAIN_TABLE_TEMPLATE } = require('./stock-preparation-templates.cjs')
@@ -632,6 +647,29 @@ const VALID_STOCK_PREPARATION_SNAPSHOT_DIFF_ROWS_QUERY_KEYS = new Set([
   'baseSnapshotBatchId',
   'reviewStatus',
   'diffType',
+])
+// #3751 MVP W3 (confirm reads): closed query allowlists — one Set per route.
+const VALID_STOCK_PREPARATION_MAPPING_SUMMARY_QUERY_KEYS = new Set([
+  'tenantId',
+  'workspaceId',
+  'projectId',
+])
+const VALID_STOCK_PREPARATION_MAPPING_CANDIDATES_QUERY_KEYS = new Set([
+  'tenantId',
+  'workspaceId',
+  'projectId',
+  'matchStatus',
+])
+const VALID_STOCK_PREPARATION_UNIT_SUMMARY_QUERY_KEYS = new Set([
+  'tenantId',
+  'workspaceId',
+  'projectId',
+])
+const VALID_STOCK_PREPARATION_UNIT_CANDIDATES_QUERY_KEYS = new Set([
+  'tenantId',
+  'workspaceId',
+  'projectId',
+  'snapshotBatchId',
 ])
 // #3751 MVP W3: closed request allowlists for the confirm-write routes — one Set per route (no
 // sharing that would widen a sibling parser). The confirmation stamps (confirmedBy / confirmedAt)
@@ -1115,6 +1153,21 @@ function stockPreparationSnapshotDiffRowsInput(req, rawQuery = {}) {
     baseSnapshotBatchId: input.baseSnapshotBatchId,
     reviewStatus: input.reviewStatus,
     diffType: input.diffType,
+    targetProjectId: resolveIntegrationStagingProjectId(tenantId, input.projectId),
+  }
+}
+
+// #3751 MVP W3 (confirm reads): shared parse for the four read routes. `projectId` is REQUIRED on
+// every one (FE always sends it; #4002-LIST parity) even where the table is tenant-scoped.
+function stockPreparationConfirmReadInput(req, rawQuery, allowedKeys, code) {
+  const input = normalizeStockPreparationSnapshotReadQuery(rawQuery, code, allowedKeys)
+  const tenantId = resolveTenantId(req, input)
+  if (!input.projectId) {
+    throw new HttpRouteError(400, code, 'projectId is required', { field: 'projectId' })
+  }
+  return {
+    ...input,
+    tenantId,
     targetProjectId: resolveIntegrationStagingProjectId(tenantId, input.projectId),
   }
 }
@@ -3467,6 +3520,91 @@ function createHandlers(services, options = {}) {
         baseSnapshotBatchId: input.baseSnapshotBatchId,
         reviewStatus: input.reviewStatus,
         diffType: input.diffType,
+        permission: 'admin',
+      })
+      return sendOk(res, result)
+    },
+
+    // #3751 MVP W3: values-free material-mapping confirmation summary (FE view 3 header).
+    async stockPreparationMaterialMappingSummary(req, res) {
+      requireAccess(req, 'admin')
+      const input = stockPreparationConfirmReadInput(req, requestQuery(req), VALID_STOCK_PREPARATION_MAPPING_SUMMARY_QUERY_KEYS, 'STOCK_PREPARATION_MAPPING_SUMMARY_REQUEST_INVALID')
+      const provisioning = context && context.api && context.api.multitable
+        ? context.api.multitable.provisioning
+        : undefined
+      if (!provisioning) {
+        throw new HttpRouteError(501, 'CONFIRM_READS_PROVISIONING_API_UNAVAILABLE', 'multitable provisioning API is not available')
+      }
+      const result = await getMaterialMappingSummary({
+        recordsApi: getMultitableRecordsApi(),
+        provisioning,
+        targetProjectId: input.targetProjectId,
+        permission: 'admin',
+      })
+      return sendOk(res, result)
+    },
+
+    // #3751 MVP W3: values-free mapping review queue (handle + enums + booleans + confidence only).
+    async stockPreparationMaterialMappingCandidates(req, res) {
+      requireAccess(req, 'admin')
+      const input = stockPreparationConfirmReadInput(req, requestQuery(req), VALID_STOCK_PREPARATION_MAPPING_CANDIDATES_QUERY_KEYS, 'STOCK_PREPARATION_MAPPING_CANDIDATES_REQUEST_INVALID')
+      if (input.matchStatus && !Object.values(STOCK_PREPARATION_MATCH_STATUSES).includes(input.matchStatus)) {
+        throw new HttpRouteError(400, 'STOCK_PREPARATION_MAPPING_CANDIDATES_REQUEST_INVALID', 'matchStatus must be one of the match-status vocabulary', { field: 'matchStatus' })
+      }
+      const provisioning = context && context.api && context.api.multitable
+        ? context.api.multitable.provisioning
+        : undefined
+      if (!provisioning) {
+        throw new HttpRouteError(501, 'CONFIRM_READS_PROVISIONING_API_UNAVAILABLE', 'multitable provisioning API is not available')
+      }
+      const result = await listMaterialMappingCandidates({
+        recordsApi: getMultitableRecordsApi(),
+        provisioning,
+        targetProjectId: input.targetProjectId,
+        matchStatus: input.matchStatus,
+        permission: 'admin',
+      })
+      return sendOk(res, result)
+    },
+
+    // #3751 MVP W3: values-free unit-conversion confirmation summary (FE view 4 header). The pending
+    // unit-line count is COMPUTED over the latest complete batch of the business project.
+    async stockPreparationUnitConversionSummary(req, res) {
+      requireAccess(req, 'admin')
+      const input = stockPreparationConfirmReadInput(req, requestQuery(req), VALID_STOCK_PREPARATION_UNIT_SUMMARY_QUERY_KEYS, 'STOCK_PREPARATION_UNIT_SUMMARY_REQUEST_INVALID')
+      const provisioning = context && context.api && context.api.multitable
+        ? context.api.multitable.provisioning
+        : undefined
+      if (!provisioning) {
+        throw new HttpRouteError(501, 'CONFIRM_READS_PROVISIONING_API_UNAVAILABLE', 'multitable provisioning API is not available')
+      }
+      const result = await getUnitConversionSummary({
+        recordsApi: getMultitableRecordsApi(),
+        provisioning,
+        targetProjectId: input.targetProjectId,
+        projectId: input.projectId,
+        permission: 'admin',
+      })
+      return sendOk(res, result)
+    },
+
+    // #3751 MVP W3: COMPUTED unit-rule candidate list (values stripped — only hasCandidate crosses;
+    // a candidate is confirmable via the unit-conversions/confirm fingerprint mode).
+    async stockPreparationUnitConversionCandidates(req, res) {
+      requireAccess(req, 'admin')
+      const input = stockPreparationConfirmReadInput(req, requestQuery(req), VALID_STOCK_PREPARATION_UNIT_CANDIDATES_QUERY_KEYS, 'STOCK_PREPARATION_UNIT_CANDIDATES_REQUEST_INVALID')
+      const provisioning = context && context.api && context.api.multitable
+        ? context.api.multitable.provisioning
+        : undefined
+      if (!provisioning) {
+        throw new HttpRouteError(501, 'CONFIRM_READS_PROVISIONING_API_UNAVAILABLE', 'multitable provisioning API is not available')
+      }
+      const result = await listUnitConversionCandidates({
+        recordsApi: getMultitableRecordsApi(),
+        provisioning,
+        targetProjectId: input.targetProjectId,
+        projectId: input.projectId,
+        snapshotBatchId: input.snapshotBatchId,
         permission: 'admin',
       })
       return sendOk(res, result)
