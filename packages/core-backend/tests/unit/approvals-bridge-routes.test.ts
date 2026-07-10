@@ -1253,6 +1253,17 @@ describe('approval bridge routes', () => {
 
     expect(response.body.total).toBe(2)
     expect(response.body.data.map((row: { id: string }) => row.id).sort()).toEqual(['local-2', 'local-3'])
+
+    // SECURITY: the reverse lookup is scoped to the AUTHENTICATED actor (req.user) only — a
+    // request-supplied actorId/userId param must not re-target it to another user's history.
+    // Same authenticated test-user, hostile params claiming someone-else: the result set is
+    // byte-identical to the un-parameterized call above; someone-else's local-4 never leaks.
+    const overrideAttempt = await request(app)
+      .get('/api/approvals?tab=processed&actorId=someone-else&userId=someone-else')
+      .expect(200)
+    expect(overrideAttempt.body.total).toBe(2)
+    expect(overrideAttempt.body.data.map((row: { id: string }) => row.id).sort()).toEqual(['local-2', 'local-3'])
+    expect(overrideAttempt.body.data.map((row: { id: string }) => row.id)).not.toContain('local-4')
   })
 
   // ---------------------------------------------------------------------------
@@ -1288,8 +1299,11 @@ describe('approval bridge routes', () => {
       created_at: now,
       updated_at: now,
     })
-    // Only local-1 has an approval_reads row — local-2 stays unread.
+    // Only local-1 has an approval_reads row FOR THE ACTOR — local-2 stays unread. someone-else's
+    // own read of local-2 must NOT mark it read for test-user (the predicate is per-user:
+    // user_id = actor AND instance_id match, never instance-wide).
     routeState.state.reads.add('test-user local-1')
+    routeState.state.reads.add('someone-else local-2')
 
     const app = createApp(createPlmAdapterMock())
     const pendingResponse = await request(app).get('/api/approvals?tab=pending').expect(200)

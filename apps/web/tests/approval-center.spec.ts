@@ -69,10 +69,19 @@ vi.mock('../src/approvals/api', () => ({
   listTemplates: (...args: unknown[]) => listTemplatesSpy(...args),
 }))
 
-// B3-03: mutable so a deep-link test can set `?templateId=...&createdFrom=...&createdTo=...`
-// BEFORE mounting (mirrors landing here from an ApprovalMetricsView 看板钻取 link); every other
-// existing test leaves it at the default empty query, unchanged.
-let mockRouteQuery: Record<string, string> = {}
+// B3-03: REACTIVE so a deep-link test can set `?templateId=...&createdFrom=...&createdTo=...`
+// BEFORE mounting (mirrors landing here from an ApprovalMetricsView 看板钻取 link) AND mutate it
+// AFTER mounting (mirrors a params-only navigation reusing the mounted instance — the view's
+// `watch(() => route.query, ...)` must observe the change). `name` matches the real
+// `approval-list` route because the view's watcher is route-name-guarded. Every other existing
+// test leaves the query at its default {} from beforeEach, unchanged.
+const mockRoute = reactive({
+  name: 'approval-list' as string | undefined,
+  params: {},
+  query: {} as Record<string, string>,
+  path: '/approvals',
+  meta: {},
+})
 
 vi.mock('vue-router', async () => {
   const actual = await vi.importActual<typeof import('vue-router')>('vue-router')
@@ -82,12 +91,7 @@ vi.mock('vue-router', async () => {
       push: pushSpy,
       back: vi.fn(),
     }),
-    useRoute: () => ({
-      params: {},
-      query: mockRouteQuery,
-      path: '/approvals',
-      meta: {},
-    }),
+    useRoute: () => mockRoute,
   }
 })
 
@@ -314,7 +318,34 @@ const ElSelect = defineComponent({
   props: { modelValue: [String, Array], placeholder: String, clearable: Boolean, multiple: Boolean, filterable: Boolean },
   emits: ['update:modelValue', 'change'],
   render() {
-    return h('select', { 'data-el-select': 'true' }, this.$slots.default?.())
+    // B3-03: a native `change` drives v-model + @change (like the real component) so tests can
+    // exercise the filter bar's own reload path, not just deep-link prefill.
+    return h('select', {
+      'data-el-select': 'true',
+      onChange: (e: Event) => {
+        const value = (e.target as HTMLSelectElement).value
+        this.$emit('update:modelValue', value)
+        this.$emit('change', value)
+      },
+    }, this.$slots.default?.())
+  },
+})
+
+// B3-03: interactive stand-in for the created-range picker (same pattern as
+// approvalMetricsView.spec.ts's set-date-range stub) — clicking commits a fixed
+// YYYY-MM-DD day-boundary range through v-model + @change.
+const ElDatePicker = defineComponent({
+  name: 'ElDatePicker',
+  props: { modelValue: { type: Array, default: null } },
+  emits: ['update:modelValue', 'change'],
+  render() {
+    return h('button', {
+      onClick: () => {
+        const range = ['2026-05-01', '2026-06-30']
+        this.$emit('update:modelValue', range)
+        this.$emit('change', range)
+      },
+    }, 'created-range')
   },
 })
 
@@ -424,7 +455,8 @@ describe('ApprovalCenterView', () => {
     getTemplateSpy.mockResolvedValue({ formSchema: { fields: [] } })
     listTemplatesSpy.mockClear()
     listTemplatesSpy.mockResolvedValue({ data: [], total: 0 })
-    mockRouteQuery = {}
+    mockRoute.name = 'approval-list'
+    mockRoute.query = {}
 
     container = document.createElement('div')
     document.body.appendChild(container)
@@ -454,6 +486,7 @@ describe('ApprovalCenterView', () => {
     app.component('ElInput', ElInput)
     app.component('ElSelect', ElSelect)
     app.component('ElOption', ElOption)
+    app.component('ElDatePicker', ElDatePicker)
     app.component('ElPagination', ElPagination)
     app.component('ElButton', ElButton)
     app.component('ElAlert', ElAlert)
@@ -512,7 +545,7 @@ describe('ApprovalCenterView', () => {
   // params, and the ApprovalMetricsView deep-link pre-fill that lands here.
   // ---------------------------------------------------------------------------
   it('B3-03: a 看板钻取 deep link (templateId + createdFrom/createdTo query) pre-fills the filter bar before the first load', async () => {
-    mockRouteQuery = {
+    mockRoute.query = {
       templateId: 'tpl-88',
       createdFrom: '2026-05-01T00:00:00Z',
       createdTo: '2026-06-30T23:59:59Z',
@@ -530,6 +563,97 @@ describe('ApprovalCenterView', () => {
     listTemplatesSpy.mockResolvedValue({ data: [{ id: 'tpl-1', name: '采购审批' }], total: 1 })
     await mountView()
     expect(listTemplatesSpy).toHaveBeenCalledWith({ pageSize: 200 })
+  })
+
+  it('B3-03: driving the filter bar (template select + created range) reloads with the server params — same day-boundary convention as the deep link', async () => {
+    listTemplatesSpy.mockResolvedValue({ data: [{ id: 'tpl-7', name: '费用报销' }], total: 1 })
+    await mountView()
+    expect(loadPendingSpy).toHaveBeenCalledTimes(1)
+
+    const select = container!.querySelector<HTMLSelectElement>('[data-testid="approval-template-filter"]')
+    expect(select, 'the template filter select renders').toBeTruthy()
+    select!.value = 'tpl-7'
+    select!.dispatchEvent(new Event('change'))
+    await flushUi()
+
+    expect(loadPendingSpy).toHaveBeenLastCalledWith(expect.objectContaining({
+      templateId: 'tpl-7',
+      page: 1,
+    }))
+
+    const picker = container!.querySelector<HTMLButtonElement>('[data-testid="approval-created-range-filter"]')
+    expect(picker, 'the created-range picker renders').toBeTruthy()
+    picker!.click()
+    await flushUi()
+
+    // Plain YYYY-MM-DD picker days widen to the inclusive day-start/day-end ISO window the
+    // server's `created_at >= / <=` predicate expects — identical to the deep-link convention.
+    expect(loadPendingSpy).toHaveBeenLastCalledWith(expect.objectContaining({
+      templateId: 'tpl-7',
+      createdFrom: '2026-05-01T00:00:00Z',
+      createdTo: '2026-06-30T23:59:59Z',
+      page: 1,
+    }))
+  })
+
+  it('B3-03: a params-only navigation (query change on the mounted instance) re-syncs the filters and explicitly reloads', async () => {
+    await mountView()
+    expect(loadPendingSpy).toHaveBeenCalledTimes(1)
+    expect(loadPendingSpy).toHaveBeenCalledWith(expect.objectContaining({
+      templateId: undefined,
+      createdFrom: undefined,
+      createdTo: undefined,
+    }))
+
+    // The router reuses this instance for /approvals?templateId=... — only the query changes.
+    mockRoute.query = {
+      templateId: 'tpl-42',
+      createdFrom: '2026-05-01T00:00:00Z',
+      createdTo: '2026-06-30T23:59:59Z',
+    }
+    await flushUi()
+
+    expect(loadPendingSpy).toHaveBeenCalledTimes(2)
+    expect(loadPendingSpy).toHaveBeenLastCalledWith(expect.objectContaining({
+      templateId: 'tpl-42',
+      createdFrom: '2026-05-01T00:00:00Z',
+      createdTo: '2026-06-30T23:59:59Z',
+      page: 1,
+    }))
+  })
+
+  it('B3-03: a params-nav to the BARE list (empty query) clears previously deep-linked filters — full sync, not merge', async () => {
+    mockRoute.query = {
+      templateId: 'tpl-88',
+      createdFrom: '2026-05-01T00:00:00Z',
+      createdTo: '2026-06-30T23:59:59Z',
+    }
+    await mountView()
+    expect(loadPendingSpy).toHaveBeenLastCalledWith(expect.objectContaining({ templateId: 'tpl-88' }))
+
+    // e.g. clicking the 审批中心 menu entry while already on the filtered list.
+    mockRoute.query = {}
+    await flushUi()
+
+    expect(loadPendingSpy).toHaveBeenCalledTimes(2)
+    expect(loadPendingSpy).toHaveBeenLastCalledWith(expect.objectContaining({
+      templateId: undefined,
+      createdFrom: undefined,
+      createdTo: undefined,
+      page: 1,
+    }))
+  })
+
+  it('B3-03: the query watcher stays inert while navigating AWAY from approval-list (route-name guard)', async () => {
+    await mountView()
+    expect(loadPendingSpy).toHaveBeenCalledTimes(1)
+
+    // Navigation to another route mutates the global route object BEFORE this instance unmounts.
+    mockRoute.name = 'attendance'
+    mockRoute.query = { section: 'attendance-overview-requests' }
+    await flushUi()
+
+    expect(loadPendingSpy).toHaveBeenCalledTimes(1)
   })
 
   it('renders pending approvals with status tags', async () => {

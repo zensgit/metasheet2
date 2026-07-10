@@ -1090,19 +1090,35 @@ function openAttendanceApprovalQueue() {
 // ISO timestamps; the date-range picker only understands day boundaries, so only the date
 // portion is used to repopulate it — the resulting createdFrom/createdTo the picker's own
 // `@change`/query-building path derives are the SAME day-start/day-end convention either way.
+//
+// This is a full SYNC, not a merge: at every deep-link entry point (mount + the params-nav
+// watcher below) the route query is the source of truth — a key that is absent CLEARS its
+// filter. Otherwise navigating from a filtered drill-down to the bare 审批中心 menu entry
+// (query {}) would silently keep serving the old template/date-scoped list under an
+// unfiltered-looking URL.
 function applyDeepLinkFilters(): void {
   const rawTemplateId = route.query.templateId
-  if (typeof rawTemplateId === 'string' && rawTemplateId) {
-    templateFilter.value = rawTemplateId
-  }
+  templateFilter.value = typeof rawTemplateId === 'string' ? rawTemplateId : ''
   const rawCreatedFrom = route.query.createdFrom
   const rawCreatedTo = route.query.createdTo
   const fromDate = typeof rawCreatedFrom === 'string' && rawCreatedFrom ? rawCreatedFrom.slice(0, 10) : ''
   const toDate = typeof rawCreatedTo === 'string' && rawCreatedTo ? rawCreatedTo.slice(0, 10) : ''
-  if (fromDate && toDate) {
-    createdRange.value = [fromDate, toDate]
-  }
+  createdRange.value = fromDate && toDate ? [fromDate, toDate] : null
 }
+
+// B3-03: params-only navigation to /approvals (e.g. a second 看板钻取 link clicked while this
+// view is already mounted, or an in-app push carrying a different query) REUSES this component
+// instance — onMounted never re-runs, so without this watcher the new query would be silently
+// ignored. Re-sync the filter bar from the query and explicitly reload from page 1. The
+// route-name guard keeps the watcher inert while navigating AWAY (the global `route` object
+// mutates to the target route before this instance unmounts).
+watch(() => route.query, () => {
+  if (route.name !== 'approval-list') return
+  applyDeepLinkFilters()
+  currentPage.value = 1
+  clearPendingSelection()
+  loadCurrentTab()
+})
 
 // B2-04-style id→name lookup so the filter dropdown shows readable template names rather than
 // raw ids. Best-effort: a failed fetch just leaves the select empty (no crash, no blocking the
