@@ -61,37 +61,50 @@ export async function isFilesRequestAdmin(req: Request): Promise<boolean> {
   return isRbacAdmin(userId)
 }
 
-export interface FilesAclRow {
-  ownerId: string | null
-}
+/**
+ * F3 files-storage-integrity design-lock (2026-07-10), G7: the `files` row for an id, resolved to a
+ * THREE-state discriminant instead of the previous binary "active row | null". The old `loadActiveFileOwner`
+ * filtered `deleted_at IS NULL`, folding "never existed" and "already tombstoned" into the same `null`,
+ * so `filesAclAllowsAccess`'s `admin → true` bypass let an admin still read a tombstoned file whose blob
+ * was left for compensating cleanup (F3-3). Separating `deleted` lets the decision deny it for EVERYONE.
+ *
+ * - `missing`  — no row at all (never existed, or a legacy object that predates the S2 `files` writer).
+ * - `active`   — a live row; `ownerId` is its `owner_id`.
+ * - `deleted`  — a tombstoned row (`deleted_at IS NOT NULL`).
+ */
+export type FilesAclRecord =
+  | { state: 'missing' }
+  | { state: 'active'; ownerId: string | null }
+  | { state: 'deleted' }
 
 export interface FilesAclDecisionInput {
   admin: boolean
   callerId: string
-  /** The active (`deleted_at IS NULL`) `files` row for this id, or `null` if none exists —
-   * covers both "never had a row" (legacy/pre-S2 object) and "already tombstoned" uniformly. */
-  row: FilesAclRow | null
+  record: FilesAclRecord
 }
 
 /**
  * The single access decision reused by list/info/download/delete.
  *
- * - admin → always allowed.
- * - no active row (never existed, predates the S2 writer, or already tombstoned) → **not** allowed
- *   for non-admins. There are no known non-admin, non-attendance consumers of these HTTP endpoints
- *   in this codebase (verified: no frontend or plugin caller references them outside this file's own
- *   upload/delete usage inside the attendance test suite) — the fail-closed reading costs nothing in
- *   practice and is what the owner's authorization asked for. Recorded here, not silently assumed.
- * - row exists but `ownerId` is the `'anonymous'` sentinel → **never** treated as "the caller owns
- *   it", even if the caller's own derived id also happens to be `'anonymous'` (the fallback used
- *   when a request carries no identity claim at all) — that sentinel represents "nobody
- *   attributable", not a real identity two different anonymous uploads could coincidentally share.
+ * - `deleted` (tombstoned) → **404-for-all, INCLUDING admin** (G7). Checked FIRST, before the admin
+ *   bypass — this is the whole point of the three-state split: a tombstoned file's blob may still be
+ *   sitting in storage (blob removal is a deliberately-deferred compensating cleanup, F3/OUT), and an
+ *   admin must not be able to read evidence that every other consumer already treats as gone.
+ * - admin (on a non-deleted record) → always allowed.
+ * - `missing` (never existed, or predates the S2 writer) → **not** allowed for non-admins. There are no
+ *   known non-admin, non-attendance consumers of these HTTP endpoints in this codebase (verified: no
+ *   frontend or plugin caller references them outside this file's own upload/delete usage inside the
+ *   attendance test suite) — the fail-closed reading costs nothing in practice.
+ * - `active` but `ownerId` is the `'anonymous'` sentinel → **never** treated as "the caller owns it",
+ *   even if the caller's own derived id also resolved to `'anonymous'` (the no-identity-claim fallback)
+ *   — that sentinel is "nobody attributable", not a real identity two anonymous uploads could share.
  * - otherwise → caller must be the row's owner.
  */
 export function filesAclAllowsAccess(input: FilesAclDecisionInput): boolean {
+  if (input.record.state === 'deleted') return false
   if (input.admin) return true
-  if (!input.row) return false
-  if (input.row.ownerId === null) return false
-  if (input.row.ownerId === FILES_ANONYMOUS_OWNER_ID) return false
-  return input.row.ownerId === input.callerId
+  if (input.record.state === 'missing') return false
+  if (input.record.ownerId === null) return false
+  if (input.record.ownerId === FILES_ANONYMOUS_OWNER_ID) return false
+  return input.record.ownerId === input.callerId
 }

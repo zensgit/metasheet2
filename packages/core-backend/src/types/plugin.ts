@@ -1687,6 +1687,10 @@ export interface StorageFile {
   name?: string
   filename?: string    // alias for name
   path: string
+  /** F3 (2026-07-10): server-derived physical storage key (`<uuid>/<safe-basename>` for the local
+   * provider). Equal to `path` for the local provider; carried explicitly so callers persist the
+   * key that `downloadByKey` re-reads without depending on `path`'s legacy client-derived meaning. */
+  storageKey?: string
   url?: string         // file URL
   size: number
   mimeType?: string

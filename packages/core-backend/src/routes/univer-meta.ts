@@ -15564,7 +15564,9 @@ export function univerMetaRouter(): Router {
       if (!await ensureAttachmentDownloadReadable(req, res, query, metadata)) return
 
       const storage = getAttachmentStorageService()
-      const buffer = await readAttachmentBinaryShared({ storage, storageFileId: metadata.storageFileId })
+      // F3 design-lock G8: read by the persisted physical storage_path (index-free direct read) so a
+      // restart never 404s a still-present attachment; storageFileId is the legacy fallback.
+      const buffer = await readAttachmentBinaryShared({ storage, storageFileId: metadata.storageFileId, storagePath: metadata.storagePath })
       const mimeType = metadata.mimeType
       const fileName = metadata.filename ?? metadata.originalName ?? attachmentId
       const forceInline = req.query.thumbnail === 'true' || isImageMimeType(mimeType)
