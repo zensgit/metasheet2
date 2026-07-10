@@ -30,7 +30,7 @@ const {
   HELD_REASONS,
 } = require('./stock-preparation-unit-rule-match.cjs')
 const { MATCH_STATUSES, MATCH_METHODS, VERSION_POLICIES: MATCH_VERSION_POLICIES } = require('./stock-preparation-material-match.cjs')
-const { VERSION_POLICIES } = require('./stock-preparation-mvp-generation.cjs')
+const { VERSION_POLICIES, EXCEPTION_TYPES, PREP_STATUSES, UNIT_STATUSES } = require('./stock-preparation-mvp-generation.cjs')
 const { optionalString, isPlainObject } = require('./stock-preparation-common.cjs')
 
 const REQUIRED_PERMISSION = 'admin'
@@ -46,6 +46,13 @@ const MATCH_STATUS_VALUES = Object.freeze(Object.values(MATCH_STATUSES))
 const MATCH_METHOD_VALUES = Object.freeze([...Object.values(MATCH_METHODS), 'manual_confirm'])
 const VERSION_POLICY_VALUES = Object.freeze([...new Set([...Object.values(VERSION_POLICIES), ...Object.values(MATCH_VERSION_POLICIES)])])
 const SCOPE_TYPE_VALUES = Object.freeze(['material', 'category', 'generic'])
+// W5 queue-read vocabularies (engine + design §8 closed sets; same fold-to-unknown discipline).
+const EXCEPTION_TYPE_VALUES = Object.freeze(Object.values(EXCEPTION_TYPES))
+const EXCEPTION_SEVERITY_VALUES = Object.freeze(['info', 'warning', 'blocking'])
+const EXCEPTION_STATUS_VALUES = Object.freeze(['open', 'resolved', 'ignored', 'deferred'])
+const RESOLUTION_ACTION_VALUES = Object.freeze(['mapping_confirmed', 'unit_rule_confirmed', 'accepted_change', 'manual_hold'])
+const PREP_STATUS_VALUES = Object.freeze(Object.values(PREP_STATUSES))
+const UNIT_STATUS_VALUES = Object.freeze(Object.values(UNIT_STATUSES))
 const ROUNDING_RULE_VALUES = Object.freeze(['none', 'ceil', 'floor', 'nearest', 'pack_size'])
 // A mapping row awaits a human decision when it is ACTIVE and in any non-matched status.
 const PENDING_CONFIRM_STATUSES = Object.freeze([
@@ -88,6 +95,8 @@ const BATCH_OBJECT_ID = templateByRole('bom_snapshot_batch').objectId
 const LINE_OBJECT_ID = templateByRole('bom_snapshot_line').objectId
 const RUN_OBJECT_ID = templateByRole('run_record').objectId
 const MATERIAL_OBJECT_ID = templateByRole('erp_material_master').objectId
+const EXCEPTION_OBJECT_ID = templateByRole('exception_confirmation').objectId
+const PREP_LINE_OBJECT_ID = templateByRole('stock_preparation_line').objectId
 
 function assertAdminPermission(permission) {
   if (permission !== REQUIRED_PERMISSION) {
@@ -397,6 +406,111 @@ async function listUnitConversionCandidates({ recordsApi, provisioning, targetPr
   }
 }
 
+// helper: validate an optional enum filter (422 with the field NAME only).
+function optionalEnumFilter(value, enumValues, field) {
+  const normalized = optionalString(value)
+  if (normalized && !enumValues.includes(normalized)) {
+    throw new StockPreparationConfirmReadError(422, 'CONFIRM_READS_CONFIG_INVALID', `${field} must be one of the ${field} vocabulary`, { field })
+  }
+  return normalized
+}
+
+function foldEnum(value, enumValues) {
+  const normalized = optionalString(value)
+  if (!normalized) return undefined
+  return enumValues.includes(normalized) ? normalized : 'unknown'
+}
+
+// ── W5: exception queue list (FE view 6) ──────────────────────────────────────────────────────────
+// VALUES-FREE rows: handles + enums + booleans only — the `message` cell (human-readable business
+// text) NEVER crosses; resolver identity surfaces as a presence boolean.
+async function listStockPreparationExceptions({ recordsApi, provisioning, targetProjectId, projectId, snapshotBatchId, status, exceptionType, severity, permission } = {}) {
+  assertAdminPermission(permission)
+  const api = ensureReadOnlyRecordsApi(recordsApi)
+  const prov = ensureProvisioningApi(provisioning)
+  const stagingProjectId = requiredString(targetProjectId, 'targetProjectId')
+  const businessProjectId = requiredString(projectId, 'projectId')
+  const statusFilter = optionalEnumFilter(status, EXCEPTION_STATUS_VALUES, 'status')
+  const typeFilter = optionalEnumFilter(exceptionType, EXCEPTION_TYPE_VALUES, 'exceptionType')
+  const severityFilter = optionalEnumFilter(severity, EXCEPTION_SEVERITY_VALUES, 'severity')
+  const batchFilter = optionalString(snapshotBatchId)
+
+  const exceptionSheet = await findMvpSheet(prov, stagingProjectId, EXCEPTION_OBJECT_ID)
+  let rows = exceptionSheet
+    ? (await queryAllRecords(api, exceptionSheet.id, batchFilter
+        ? { projectId: businessProjectId, snapshotBatchId: batchFilter }
+        : { projectId: businessProjectId })).map(recordData)
+    : []
+  if (statusFilter) rows = rows.filter((data) => optionalString(data.status) === statusFilter)
+  if (typeFilter) rows = rows.filter((data) => optionalString(data.exceptionType) === typeFilter)
+  if (severityFilter) rows = rows.filter((data) => optionalString(data.severity) === severityFilter)
+  if (rows.length > MAX_LIST_ROWS) {
+    throw new StockPreparationConfirmReadError(422, 'CONFIRM_READS_ROWS_TOO_LARGE', 'exception queue read exceeded the row bound', { maxRows: MAX_LIST_ROWS })
+  }
+  const unresolvedBlockingCount = rows.filter((data) => optionalString(data.severity) === 'blocking' && optionalString(data.status) !== 'resolved').length
+  return {
+    rowCount: rows.length,
+    unresolvedBlockingCount,
+    byType: enumCounts(rows, 'exceptionType', EXCEPTION_TYPE_VALUES),
+    byStatus: enumCounts(rows, 'status', EXCEPTION_STATUS_VALUES),
+    bySeverity: enumCounts(rows, 'severity', EXCEPTION_SEVERITY_VALUES),
+    rows: rows.map((data) => ({
+      exceptionId: optionalString(data.exceptionId),
+      snapshotBatchId: optionalString(data.snapshotBatchId) || undefined,
+      snapshotLineId: optionalString(data.snapshotLineId) || undefined,
+      stockPrepLineId: optionalString(data.stockPrepLineId) || undefined,
+      exceptionType: foldEnum(data.exceptionType, EXCEPTION_TYPE_VALUES),
+      severity: foldEnum(data.severity, EXCEPTION_SEVERITY_VALUES),
+      status: foldEnum(data.status, EXCEPTION_STATUS_VALUES),
+      resolutionAction: foldEnum(data.resolutionAction, RESOLUTION_ACTION_VALUES),
+      resolved: optionalString(data.status) === 'resolved',
+      resolvedByPresent: optionalString(data.resolvedBy) !== null,
+    })),
+  }
+}
+
+// ── W5: prep-line list (FE view 5) ────────────────────────────────────────────────────────────────
+// VALUES-FREE summary rows: handles + status enums + counts + presence booleans. Drawing numbers,
+// quantities, and unit symbols are value-bearing operator reads — OWNER-GATED (OD-W3-1), not served.
+async function listStockPreparationPrepLines({ recordsApi, provisioning, targetProjectId, projectId, snapshotBatchId, prepStatus, permission } = {}) {
+  assertAdminPermission(permission)
+  const api = ensureReadOnlyRecordsApi(recordsApi)
+  const prov = ensureProvisioningApi(provisioning)
+  const stagingProjectId = requiredString(targetProjectId, 'targetProjectId')
+  const businessProjectId = requiredString(projectId, 'projectId')
+  const prepStatusFilter = optionalEnumFilter(prepStatus, PREP_STATUS_VALUES, 'prepStatus')
+  const batchFilter = optionalString(snapshotBatchId)
+
+  const prepLineSheet = await findMvpSheet(prov, stagingProjectId, PREP_LINE_OBJECT_ID)
+  let rows = prepLineSheet
+    ? (await queryAllRecords(api, prepLineSheet.id, batchFilter
+        ? { projectId: businessProjectId, snapshotBatchId: batchFilter }
+        : { projectId: businessProjectId })).map(recordData)
+    : []
+  if (prepStatusFilter) rows = rows.filter((data) => optionalString(data.prepStatus) === prepStatusFilter)
+  if (rows.length > MAX_LIST_ROWS) {
+    throw new StockPreparationConfirmReadError(422, 'CONFIRM_READS_ROWS_TOO_LARGE', 'prep-line read exceeded the row bound', { maxRows: MAX_LIST_ROWS })
+  }
+  return {
+    rowCount: rows.length,
+    byPrepStatus: enumCounts(rows, 'prepStatus', PREP_STATUS_VALUES),
+    byMappingStatus: enumCounts(rows, 'mappingStatus', MATCH_STATUS_VALUES),
+    byUnitStatus: enumCounts(rows, 'unitStatus', UNIT_STATUS_VALUES),
+    rows: rows.map((data) => ({
+      stockPrepLineId: optionalString(data.stockPrepLineId),
+      snapshotBatchId: optionalString(data.snapshotBatchId) || undefined,
+      snapshotLineId: optionalString(data.snapshotLineId) || undefined,
+      prepStatus: foldEnum(data.prepStatus, PREP_STATUS_VALUES),
+      mappingStatus: foldEnum(data.mappingStatus, MATCH_STATUS_VALUES),
+      unitStatus: foldEnum(data.unitStatus, UNIT_STATUS_VALUES),
+      exceptionCount: toNumber(data.exceptionCount) || 0,
+      hasIssueQty: toNumber(data.issueQtyFinal) !== null,
+      hasErpTarget: Boolean(optionalString(data.erpMaterialCode) && optionalString(data.erpMaterialInternalId)),
+      createdFromRunId: optionalString(data.createdFromRunId) || undefined,
+    })),
+  }
+}
+
 module.exports = {
   REQUIRED_PERMISSION,
   MAPPING_OBJECT_ID,
@@ -406,6 +520,8 @@ module.exports = {
   listMaterialMappingCandidates,
   getUnitConversionSummary,
   listUnitConversionCandidates,
+  listStockPreparationExceptions,
+  listStockPreparationPrepLines,
   __internals: {
     assertAdminPermission,
     ensureReadOnlyRecordsApi,
