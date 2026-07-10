@@ -254,6 +254,27 @@ function Resolve-CorepackCommand {
   return $null
 }
 
+function Resolve-CorepackShimPnpmCandidates {
+  param([string]$CorepackPath)
+
+  # Corrective (#3751 entity-machine rerun, failureClass=PNPM_VERSION_MISMATCH): `corepack prepare
+  # --activate` writes its pnpm shim NEXT TO the corepack binary, but a user/system-profile pnpm.cmd
+  # earlier on PATH can shadow it. These co-located shims are probed FIRST so the freshly activated
+  # pin always wins over shadowing profile binaries.
+  if ([string]::IsNullOrWhiteSpace($CorepackPath)) {
+    return @()
+  }
+  $shimDir = Split-Path -Parent $CorepackPath
+  $candidates = @()
+  foreach ($leaf in @('pnpm.cmd', 'pnpm.exe', 'pnpm.ps1', 'pnpm')) {
+    $candidate = Join-Path $shimDir $leaf
+    if (Test-Path -LiteralPath $candidate) {
+      $candidates += $candidate
+    }
+  }
+  return $candidates
+}
+
 function Resolve-PackagePnpmVersion {
   param([string]$PackageRoot)
 
@@ -287,10 +308,34 @@ function Initialize-PinnedPnpm {
     Write-Info 'corepack is unavailable; an already-installed exact pnpm version is required'
   }
 
-  $pnpmPath = Resolve-PnpmInstallCommand
+  # Shim-first resolution (#3751 corrective): probe the shims co-located with corepack and select
+  # the candidate whose --version equals the pin; only when NO co-located shim matches fall back to
+  # the generic PATH walk. The exact-version check below stays fail-closed on either path, so a
+  # shadowing profile pnpm can delay but never bypass the pin.
+  $pnpmPath = $null
+  $probedShims = @()
+  foreach ($candidate in (Resolve-CorepackShimPnpmCandidates -CorepackPath $corepackPath)) {
+    $candidateVersion = Invoke-PnpmSingleLine -PnpmPath $candidate -Arguments @('--version')
+    $candidateLabel = if ([string]::IsNullOrWhiteSpace($candidateVersion)) { '<none>' } else { $candidateVersion.Trim() }
+    $probedShims += ("{0} => {1}" -f $candidate, $candidateLabel)
+    if ($candidateLabel -eq $RequiredVersion) {
+      $pnpmPath = $candidate
+      break
+    }
+  }
+  if (-not [string]::IsNullOrWhiteSpace($pnpmPath)) {
+    Write-Info "Pinned pnpm resolved via corepack-co-located shim: $pnpmPath"
+  } else {
+    if ($probedShims.Count -gt 0) {
+      Write-Info ("No co-located corepack shim matched the pin; probed: " + ($probedShims -join '; '))
+    }
+    $pnpmPath = Resolve-PnpmInstallCommand
+  }
+
   $actualVersion = Invoke-PnpmSingleLine -PnpmPath $pnpmPath -Arguments @('--version')
   if ([string]::IsNullOrWhiteSpace($actualVersion) -or $actualVersion.Trim() -ne $RequiredVersion) {
-    throw "PNPM_VERSION_MISMATCH: package requires $RequiredVersion but resolved '$actualVersion' at $pnpmPath"
+    $probeSuffix = if ($probedShims.Count -gt 0) { " (co-located shims probed: " + ($probedShims -join '; ') + ")" } else { '' }
+    throw "PNPM_VERSION_MISMATCH: package requires $RequiredVersion but resolved '$actualVersion' at $pnpmPath$probeSuffix"
   }
 
   Write-Info "Pinned pnpm ready: version=$RequiredVersion path=$pnpmPath"

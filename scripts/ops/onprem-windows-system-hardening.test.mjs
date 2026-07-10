@@ -45,6 +45,13 @@ test('on-prem package build and apply use the same exact pnpm version', () => {
   assert.match(applyScript, /Resolve-PackagePnpmVersion/)
   assert.match(applyScript, /corepackPath prepare "pnpm@\$RequiredVersion" --activate/)
   assert.match(applyScript, /PNPM_VERSION_MISMATCH/)
+  // #3751 corrective: the pinned Corepack shim (co-located with the corepack binary) must be probed
+  // BEFORE the generic PATH walk, so a shadowing user/system-profile pnpm can never preempt the pin.
+  assert.match(applyScript, /Resolve-CorepackShimPnpmCandidates/)
+  const shimFirstIndex = applyScript.indexOf('Resolve-CorepackShimPnpmCandidates -CorepackPath')
+  const fallbackIndex = applyScript.indexOf('$pnpmPath = Resolve-PnpmInstallCommand')
+  assert.ok(shimFirstIndex > -1 && fallbackIndex > -1 && shimFirstIndex < fallbackIndex,
+    'co-located corepack shim probe must precede the generic pnpm PATH fallback')
   assert.match(verifyScript, /packaged root package\.json must pin pnpm@9\.15\.9/)
   assert.match(verifyScript, /PACKAGE-METADATA\.json must pin pnpm 9\.15\.9/)
 })
