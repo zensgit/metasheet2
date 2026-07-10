@@ -4,6 +4,7 @@ import {
   readDingTalkMessageConfig,
   sendDingTalkInteractiveApprovalCard,
   sendDingTalkWorkNotification,
+  updateDingTalkInteractiveApprovalCard,
 } from '../../src/integrations/dingtalk/client'
 
 describe('dingtalk work notification client', () => {
@@ -220,6 +221,94 @@ describe('dingtalk work notification client', () => {
         rejectUrl: 'https://ms.example.test/m/approval-decision?d=delivery-1&t=token',
       },
     )).rejects.toThrow('create-and-deliver rejected')
+  })
+
+  it('B-4 sends the official card-instances update shape (statusText only, update-by-key)', async () => {
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({
+      success: true,
+      result: true,
+    }), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    const result = await updateDingTalkInteractiveApprovalCard(
+      'app-access-token',
+      {
+        outTrackId: 'delivery-1',
+        statusText: '已由 张审批 同意 · 2026/07/10 14:30',
+      },
+      { openApiBaseUrl: 'https://api.dingtalk.test/' },
+    )
+
+    expect(result.raw).toEqual({ success: true, result: true })
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    const [url, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit]
+    expect(url).toBe('https://api.dingtalk.test/v1.0/card/instances')
+    expect(init.method).toBe('PUT')
+    expect(init.headers).toEqual({
+      'Content-Type': 'application/json',
+      'x-acs-dingtalk-access-token': 'app-access-token',
+    })
+    // Values-free fence (B-2 §5 / B-4): the update carries statusText ONLY — no form values, no
+    // extra params can ride the terminal update.
+    expect(JSON.parse(String(init.body))).toEqual({
+      outTrackId: 'delivery-1',
+      cardData: {
+        cardParamMap: {
+          statusText: '已由 张审批 同意 · 2026/07/10 14:30',
+        },
+      },
+      cardUpdateOptions: { updateCardDataByKey: true },
+    })
+  })
+
+  it('B-4 update fails closed when the API returns HTTP 200 with success=false', async () => {
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({
+      success: false,
+      message: 'card instance not found',
+    }), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    await expect(updateDingTalkInteractiveApprovalCard(
+      'app-access-token',
+      { outTrackId: 'delivery-1', statusText: '已同意' },
+    )).rejects.toThrow('card instance not found')
+  })
+
+  it('B-4 update fails closed on HTTP-200 with a missing success flag (never assume success)', async () => {
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({
+      result: true,
+    }), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    await expect(updateDingTalkInteractiveApprovalCard(
+      'app-access-token',
+      { outTrackId: 'delivery-1', statusText: '已同意' },
+    )).rejects.toThrow(/update failed/)
+  })
+
+  it('B-4 update surfaces HTTP errors as typed request failures', async () => {
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({
+      message: 'invalid token',
+    }), { status: 401, headers: { 'Content-Type': 'application/json' } }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    await expect(updateDingTalkInteractiveApprovalCard(
+      'app-access-token',
+      { outTrackId: 'delivery-1', statusText: '已同意' },
+    )).rejects.toThrow('invalid token')
+  })
+
+  it('B-4 update refuses empty token / outTrackId / statusText without calling the API', async () => {
+    const fetchMock = vi.fn()
+    vi.stubGlobal('fetch', fetchMock)
+
+    await expect(updateDingTalkInteractiveApprovalCard('', { outTrackId: 'delivery-1', statusText: '已同意' }))
+      .rejects.toThrow('access token is required')
+    await expect(updateDingTalkInteractiveApprovalCard('token', { outTrackId: '  ', statusText: '已同意' }))
+      .rejects.toThrow('outTrackId is required')
+    await expect(updateDingTalkInteractiveApprovalCard('token', { outTrackId: 'delivery-1', statusText: ' ' }))
+      .rejects.toThrow('status text is required')
+    expect(fetchMock).not.toHaveBeenCalled()
   })
 
   it('B-2 fails closed when create-and-deliver omits delivery results', async () => {
