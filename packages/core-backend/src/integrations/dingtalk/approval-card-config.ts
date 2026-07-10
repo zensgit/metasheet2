@@ -77,6 +77,35 @@ export async function resolveApprovalCardLinkSecret(queryFn: QueryFn = query): P
 }
 
 /**
+ * DT-R2 per-corp variant: the deep-link HMAC secret of ONE SPECIFIC integration — env
+ * `APPROVAL_CARD_LINK_SECRET` still wins (global override, unchanged), else THAT integration's
+ * stored (encrypted-at-rest) `approvalCardLinkSecret`, else '' (fail-closed).
+ *
+ * Deliberately NO fallback to the legacy "one stored dingtalk integration" pick: a token pinned
+ * to corp A must never sign or verify with corp B's secret. Callers with no integration id
+ * (legacy NULL delivery rows) use `resolveApprovalCardLinkSecret` instead — same source the
+ * legacy rows were signed with, preserving the sign/verify same-source invariant per population.
+ */
+export async function resolveApprovalCardLinkSecretForIntegration(
+  integrationId: string,
+  queryFn: QueryFn = query,
+): Promise<string> {
+  const fromEnv = (process.env.APPROVAL_CARD_LINK_SECRET ?? '').trim()
+  if (fromEnv) return fromEnv
+  try {
+    const row = await loadIntegrationById(queryFn, integrationId)
+    if (!row) return ''
+    const config = parseJsonRecord(row.config)
+    const stored = normalizeText(config[APPROVAL_CARD_LINK_SECRET_CONFIG_KEY])
+    if (!stored) return ''
+    return decryptStoredSecretValue(stored).trim()
+  } catch {
+    // Fail-closed: an unreadable/undecryptable stored secret must never sign or verify.
+    return ''
+  }
+}
+
+/**
  * Public base URL for the decision deep link: env (`PUBLIC_APP_URL` / `APP_BASE_URL`) first,
  * else the stored `approvalCardPublicAppUrl` (plaintext — not a secret), else null.
  * Normalized to a trailing slash exactly like resolveAutomationAppBaseUrl.

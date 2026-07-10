@@ -24,7 +24,8 @@ const SHEET_ID = `sheet_card_${TS}`
 const CREATOR = `u_card_creator_${TS}`
 const REQUESTER = `u_card_req_${TS}`
 const APPROVER = `u_card_appr_${TS}`
-import { randomUUID } from 'crypto'
+import { createHmac, randomUUID } from 'crypto'
+import { normalizeStoredSecretValue } from '../../src/security/encrypted-secrets'
 const DD_INTEGRATION = randomUUID()
 const DD_ACCOUNT = randomUUID()
 const DD_USER_ID = `dd_ext_${TS}`
@@ -345,5 +346,70 @@ describeIfDatabase('A-2b send_dingtalk_approval_card action (real DB)', () => {
     expect(rows[0].send_status).toBe('pending')
 
     await svc.deleteRule(rule.id, SHEET_ID)
+  })
+
+  test('DT-R2: the ledger row carries the assignee integration_id resolved via the directory-link lateral', async () => {
+    const rule = await svc.createRule(SHEET_ID, {
+      name: 'card r2 integration-id', triggerType: 'approval.task_created', triggerConfig: { templateId },
+      actionType: 'send_dingtalk_approval_card', actionConfig: {}, createdBy: CREATOR,
+    } as never)
+    ruleIds.push(rule.id)
+    try {
+      const dto = await approvals.createApproval({ templateId, formData: { summary: 'r2 anchor run' } }, { userId: REQUESTER, userName: REQUESTER })
+      const instanceId = (dto as { id: string }).id
+      const rows = await waitFor(() => cardRows(instanceId))
+      expect(rows).toHaveLength(1)
+      // The callback credential anchor: the row is pinned to the corp the card went through.
+      expect(rows[0].integration_id).toBe(DD_INTEGRATION)
+      expect(rows[0].send_status).toBe('sent')
+    } finally {
+      await svc.deleteRule(rule.id, SHEET_ID)
+    }
+  })
+
+  test('DT-R2 same-source signing: env unset → the deep-link token is HMAC-signed with the ASSIGNEE integration\'s stored secret', async () => {
+    const prevSecret = process.env.APPROVAL_CARD_LINK_SECRET
+    delete process.env.APPROVAL_CARD_LINK_SECRET
+    const corpSecret = `r2-corp-stored-secret-${TS}`
+    await q(
+      `UPDATE directory_integrations
+          SET config = jsonb_set(COALESCE(config, '{}'::jsonb), '{approvalCardLinkSecret}', to_jsonb($2::text), true)
+        WHERE id = $1`,
+      [DD_INTEGRATION, normalizeStoredSecretValue(corpSecret)],
+    )
+    const rule = await svc.createRule(SHEET_ID, {
+      name: 'card r2 corp secret', triggerType: 'approval.task_created', triggerConfig: { templateId },
+      actionType: 'send_dingtalk_approval_card', actionConfig: {}, createdBy: CREATOR,
+    } as never)
+    ruleIds.push(rule.id)
+    try {
+      sentBodies.length = 0
+      const dto = await approvals.createApproval({ templateId, formData: { summary: 'r2 corp secret run' } }, { userId: REQUESTER, userName: REQUESTER })
+      const instanceId = (dto as { id: string }).id
+      const rows = await waitFor(() => cardRows(instanceId))
+      expect(rows).toHaveLength(1)
+      const row = rows[0]
+      expect(row.integration_id).toBe(DD_INTEGRATION)
+      expect(row.send_status).toBe('sent')
+
+      // Same-source proof at the real call site: the token in the sent deep link must be
+      // HMAC-SHA256(deliveryId, THAT integration's stored secret) — never a global LIMIT-1 pick.
+      expect(sentBodies).toHaveLength(1)
+      const msg = sentBodies[0].msg as { action_card: { single_url: string } }
+      const tokenMatch = /[?&]t=([0-9a-f]{32})/.exec(msg.action_card.single_url)
+      expect(tokenMatch).not.toBeNull()
+      const expected = createHmac('sha256', corpSecret).update(String(row.id)).digest('hex').slice(0, 32)
+      expect(tokenMatch?.[1]).toBe(expected)
+    } finally {
+      await svc.deleteRule(rule.id, SHEET_ID).catch(() => {})
+      await q(
+        `UPDATE directory_integrations
+            SET config = COALESCE(config, '{}'::jsonb) - 'approvalCardLinkSecret'
+          WHERE id = $1`,
+        [DD_INTEGRATION],
+      ).catch(() => {})
+      if (prevSecret === undefined) delete process.env.APPROVAL_CARD_LINK_SECRET
+      else process.env.APPROVAL_CARD_LINK_SECRET = prevSecret
+    }
   })
 })
