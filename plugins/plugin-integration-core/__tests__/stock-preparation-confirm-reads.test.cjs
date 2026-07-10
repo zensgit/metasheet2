@@ -169,6 +169,8 @@ async function main() {
       (api, prov) => listMaterialMappingCandidates({ permission: 'read', recordsApi: api, provisioning: prov, targetProjectId: STAGING_PROJECT_ID }),
       (api, prov) => getUnitConversionSummary({ permission: 'read', recordsApi: api, provisioning: prov, targetProjectId: STAGING_PROJECT_ID, projectId: BUSINESS_PROJECT_ID }),
       (api, prov) => listUnitConversionCandidates({ permission: 'read', recordsApi: api, provisioning: prov, targetProjectId: STAGING_PROJECT_ID, projectId: BUSINESS_PROJECT_ID }),
+      (api, prov) => listStockPreparationExceptions({ permission: 'read', recordsApi: api, provisioning: prov, targetProjectId: STAGING_PROJECT_ID, projectId: BUSINESS_PROJECT_ID }),
+      (api, prov) => listStockPreparationPrepLines({ permission: 'read', recordsApi: api, provisioning: prov, targetProjectId: STAGING_PROJECT_ID, projectId: BUSINESS_PROJECT_ID }),
     ]) {
       const api = makeReadOnlyRecordsApi()
       const provisioning = makeProvisioning()
@@ -364,9 +366,12 @@ async function main() {
     api.seed(SHEET.exception, { exceptionId: 'e2', projectId: BUSINESS_PROJECT_ID, snapshotBatchId: 'b1', exceptionType: 'unit_missing', severity: 'blocking', status: 'resolved', resolutionAction: 'unit_rule_confirmed', resolvedBy: OPERATOR, resolvedAt: 'x', message: `m2_${SECRET}` })
     api.seed(SHEET.exception, { exceptionId: 'e3', projectId: BUSINESS_PROJECT_ID, snapshotBatchId: 'b2', exceptionType: `junk_${SECRET}`, severity: 'warning', status: 'open', message: 'x' })
     api.seed(SHEET.exception, { exceptionId: 'e4', projectId: 'proj_other', snapshotBatchId: 'bx', exceptionType: 'invalid_qty', severity: 'blocking', status: 'open', message: 'x' })
+    // F1 (review #4027): a SECOND blocking+open row makes the count asymmetric (2 vs the resolved
+    // row's 1) so inverting the status predicate can no longer produce the same number.
+    api.seed(SHEET.exception, { exceptionId: 'e5', projectId: BUSINESS_PROJECT_ID, snapshotBatchId: 'b2', exceptionType: 'unit_conflict', severity: 'blocking', status: 'open', message: 'x' })
     const result = await listStockPreparationExceptions(baseInput(api, makeProvisioning(), { projectId: BUSINESS_PROJECT_ID }))
-    assert.equal(result.rowCount, 3, 'other-project rows never surface')
-    assert.equal(result.unresolvedBlockingCount, 1, 'resolved blocking row excluded; warning excluded')
+    assert.equal(result.rowCount, 4, 'other-project rows never surface')
+    assert.equal(result.unresolvedBlockingCount, 2, 'exactly the blocking+unresolved rows (resolved blocking excluded, warning excluded)')
     assert.equal(result.byType.missing_mapping, 1)
     assert.equal(result.byType.unknown, 1, 'junk type folds')
     const resolvedRow = result.rows.find((row) => row.exceptionId === 'e2')
@@ -382,6 +387,7 @@ async function main() {
     assert.ok(openOnly.rows.every((row) => row.status === 'open'))
     const batchOnly = await listStockPreparationExceptions(baseInput(api, makeProvisioning(), { projectId: BUSINESS_PROJECT_ID, snapshotBatchId: 'b1' }))
     assert.equal(batchOnly.rowCount, 2)
+    assert.equal(batchOnly.unresolvedBlockingCount, 1, 'batch-scoped count follows the batch filter')
     await expectError(
       listStockPreparationExceptions(baseInput(api, makeProvisioning(), { projectId: BUSINESS_PROJECT_ID, status: 'bogus' })),
       { status: 422, code: 'CONFIRM_READS_CONFIG_INVALID' },
@@ -397,11 +403,14 @@ async function main() {
     const api = makeReadOnlyRecordsApi()
     api.seed(SHEET.prepLine, { stockPrepLineId: 'p1', projectId: BUSINESS_PROJECT_ID, snapshotBatchId: 'b1', snapshotLineId: 'l1', childDrawingNo: `D_${SECRET}`, designQty: 3, designUnit: `u_${SECRET}`, issueQtyFinal: 3, issueUnit: `u_${SECRET}`, erpMaterialCode: 'C1', erpMaterialInternalId: 'I1', prepStatus: 'draft', mappingStatus: 'matched', unitStatus: 'converted', exceptionCount: 0, createdFromRunId: 'run_x' })
     api.seed(SHEET.prepLine, { stockPrepLineId: 'p2', projectId: BUSINESS_PROJECT_ID, snapshotBatchId: 'b1', snapshotLineId: 'l2', childDrawingNo: 'D2', prepStatus: 'held', mappingStatus: 'not_found', unitStatus: 'missing_rule', exceptionCount: 2 })
+    // F4 (review #4027): a row with ONLY the code (no internal id) pins hasErpTarget's AND semantics.
+    api.seed(SHEET.prepLine, { stockPrepLineId: 'p2b', projectId: BUSINESS_PROJECT_ID, snapshotBatchId: 'b1', erpMaterialCode: 'C_ONLY', prepStatus: 'draft', mappingStatus: 'pending_confirm', unitStatus: 'missing_rule' })
     api.seed(SHEET.prepLine, { stockPrepLineId: 'p3', projectId: 'proj_other', snapshotBatchId: 'bx', prepStatus: 'draft' })
     const result = await listStockPreparationPrepLines(baseInput(api, makeProvisioning(), { projectId: BUSINESS_PROJECT_ID }))
-    assert.equal(result.rowCount, 2, 'other-project rows never surface')
-    assert.equal(result.byPrepStatus.draft, 1)
+    assert.equal(result.rowCount, 3, 'other-project rows never surface')
+    assert.equal(result.byPrepStatus.draft, 2)
     assert.equal(result.byPrepStatus.held, 1)
+    assert.equal(result.rows.find((row) => row.stockPrepLineId === 'p2b').hasErpTarget, false, 'code without internal id is NOT a full ERP target (AND semantics)')
     const first = result.rows.find((row) => row.stockPrepLineId === 'p1')
     assert.equal(first.hasIssueQty, true)
     assert.equal(first.hasErpTarget, true)

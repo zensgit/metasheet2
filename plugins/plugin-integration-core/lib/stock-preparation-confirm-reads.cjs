@@ -447,6 +447,9 @@ async function listStockPreparationExceptions({ recordsApi, provisioning, target
   if (rows.length > MAX_LIST_ROWS) {
     throw new StockPreparationConfirmReadError(422, 'CONFIRM_READS_ROWS_TOO_LARGE', 'exception queue read exceeded the row bound', { maxRows: MAX_LIST_ROWS })
   }
+  // Count scope follows the ACTIVE filters (post-filter subset): it equals the W4a ready-invariant
+  // count only for a batch-scoped, unfiltered read — display context, never the enforcement point
+  // (enforcement lives in the generation run route).
   const unresolvedBlockingCount = rows.filter((data) => optionalString(data.severity) === 'blocking' && optionalString(data.status) !== 'resolved').length
   return {
     rowCount: rows.length,
