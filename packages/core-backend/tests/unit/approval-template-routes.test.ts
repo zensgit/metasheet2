@@ -23,6 +23,8 @@ type TemplateVersionRow = {
   status: 'draft' | 'published' | 'archived'
   form_schema: Record<string, unknown>
   approval_graph: Record<string, unknown>
+  /** B3-09 — recorded at publish time; null everywhere else (mirrors the nullable column). */
+  publish_note: string | null
   created_at: Date
   updated_at: Date
 }
@@ -122,6 +124,7 @@ const routeState = vi.hoisted(() => {
           { key: 'e2', source: 'approve_1', target: 'end' },
         ],
       },
+      publish_note: null,
       created_at: timestamp,
       updated_at: timestamp,
       ...overrides,
@@ -143,6 +146,21 @@ const routeState = vi.hoisted(() => {
     const normalized = normalize(sql)
 
     if (normalized === 'BEGIN' || normalized === 'COMMIT' || normalized === 'ROLLBACK') {
+      return { rows: [], rowCount: 0 }
+    }
+
+    // B3-09 — rbacGuardAny's DB fallbacks (namespace admission / isAdmin / userHasPermission /
+    // legacy users.permissions) for the NON-admin user in the 403 test: this suite has no RBAC
+    // tables, so every lookup resolves empty → the guard's own 403 fires (rather than a masked
+    // 500 from an unhandled-query throw).
+    if (
+      normalized.includes('FROM user_roles')
+      || normalized.includes('FROM user_permissions')
+      || normalized.includes('FROM user_namespace_admissions')
+    ) {
+      return { rows: [], rowCount: 0 }
+    }
+    if (normalized.startsWith('SELECT permissions FROM users WHERE id = $1')) {
       return { rows: [], rowCount: 0 }
     }
 
@@ -288,8 +306,26 @@ const routeState = vi.hoisted(() => {
       const row = state.versions.get(String(params[0]))
       if (!row) return { rows: [], rowCount: 0 }
       row.status = 'published'
+      // B3-09 — the publish UPDATE now also writes publish_note ($2, null when the admin sent none).
+      row.publish_note = params.length > 1 ? ((params[1] as string | null) ?? null) : null
       row.updated_at = now()
       return { rows: [row], rowCount: 1 }
+    }
+
+    // B3-09 — listTemplateVersions: summary rows newest-first with the ACTIVE published-definition
+    // id LEFT JOINed on (null for versions never published or whose definition was superseded).
+    if (normalized.startsWith('SELECT v.*, pd.id AS published_definition_id FROM approval_template_versions v')) {
+      const rows = Array.from(state.versions.values())
+        .filter((row) => row.template_id === String(params[0]))
+        .sort((left, right) => right.version - left.version)
+        .map((row) => ({
+          ...row,
+          published_definition_id:
+            Array.from(state.publishedDefinitions.values()).find(
+              (pd) => pd.template_version_id === row.id && pd.is_active,
+            )?.id ?? null,
+        }))
+      return { rows, rowCount: rows.length }
     }
 
     if (normalized.startsWith('SELECT * FROM approval_published_definitions WHERE template_version_id = $1')) {
@@ -373,18 +409,28 @@ const routeState = vi.hoisted(() => {
 
 vi.mock('../../src/db/pg', () => ({
   pool: routeState.pool,
+  // B3-09 — rbac/namespace-admission.ts imports the bare `query` helper (not `pool`); route it to
+  // the same mock so the guard's non-admin deny path resolves instead of blowing up the mock.
+  query: (sql: string, params?: unknown[]) => routeState.pool.query(sql, params ?? []),
 }))
+
+// B3-09 — the mock user is now swappable per test (default stays the historical template-admin)
+// so the versions-list guard can be proven to 403 a NON-admin, not just 200 an admin.
+const authState = vi.hoisted(() => {
+  const adminUser = {
+    id: 'template-admin',
+    sub: 'template-admin',
+    name: 'Template Admin',
+    email: 'template@example.com',
+    permissions: ['*:*'],
+    roles: ['admin'],
+  }
+  return { adminUser, currentUser: adminUser as Record<string, unknown> }
+})
 
 vi.mock('../../src/middleware/auth', () => ({
   authenticate: (req: express.Request, _res: express.Response, next: express.NextFunction) => {
-    req.user = {
-      id: 'template-admin',
-      sub: 'template-admin',
-      name: 'Template Admin',
-      email: 'template@example.com',
-      permissions: ['*:*'],
-      roles: ['admin'],
-    } as never
+    req.user = authState.currentUser as never
     next()
   },
 }))
@@ -396,6 +442,7 @@ describe('approval template routes', () => {
     routeState.reset()
     routeState.pool.query.mockClear()
     routeState.pool.connect.mockClear()
+    authState.currentUser = authState.adminUser
   })
 
   function createApp() {
@@ -737,6 +784,143 @@ describe('approval template routes', () => {
       const response = await request(app).get('/api/approval-templates/tpl-missing/usage')
       expect(response.status).toBe(404)
       expect(response.body.error.code).toBe('APPROVAL_TEMPLATE_NOT_FOUND')
+    })
+  })
+
+  // B3-09 (模板治理 — 版本历史 + 发布说明)
+  describe('B3-09 version history + publish note', () => {
+    function publishableTemplate() {
+      const template = routeState.createTemplateFixture()
+      const version = routeState.createVersionFixture(template.id)
+      template.latest_version_id = version.id
+      return { template, version }
+    }
+
+    const validPolicy = { allowRevoke: false }
+
+    it('persists a trimmed publish note and returns it on the version detail', async () => {
+      const { template, version } = publishableTemplate()
+      const app = createApp()
+
+      const response = await request(app)
+        .post(`/api/approval-templates/${template.id}/publish`)
+        .send({ policy: validPolicy, note: '  修复报销金额上限条件  ' })
+
+      expect(response.status).toBe(200)
+      expect(response.body.publishNote).toBe('修复报销金额上限条件')
+      expect(routeState.state.versions.get(version.id)?.publish_note).toBe('修复报销金额上限条件')
+    })
+
+    it('publishes without a note exactly as before (publishNote null)', async () => {
+      const { template, version } = publishableTemplate()
+      const app = createApp()
+
+      const response = await request(app)
+        .post(`/api/approval-templates/${template.id}/publish`)
+        .send({ policy: validPolicy })
+
+      expect(response.status).toBe(200)
+      expect(response.body.publishNote).toBeNull()
+      expect(routeState.state.versions.get(version.id)?.publish_note).toBeNull()
+    })
+
+    it('rejects an over-length note with 400 BEFORE opening a transaction (fail-fast, nothing written)', async () => {
+      const { template, version } = publishableTemplate()
+      const app = createApp()
+
+      const response = await request(app)
+        .post(`/api/approval-templates/${template.id}/publish`)
+        .send({ policy: validPolicy, note: 'x'.repeat(2001) })
+
+      expect(response.status).toBe(400)
+      expect(response.body.error.code).toBe('VALIDATION_ERROR')
+      // normalizeTemplatePublishNote throws before pool.connect() — the same pre-transaction
+      // ordering discipline as the policy validator. No client checkout, no status flip.
+      expect(routeState.pool.connect).not.toHaveBeenCalled()
+      expect(routeState.state.versions.get(version.id)?.status).toBe('draft')
+    })
+
+    it('rejects a non-string note with 400', async () => {
+      const { template } = publishableTemplate()
+      const app = createApp()
+
+      const response = await request(app)
+        .post(`/api/approval-templates/${template.id}/publish`)
+        .send({ policy: validPolicy, note: 42 })
+
+      expect(response.status).toBe(400)
+      expect(response.body.error.code).toBe('VALIDATION_ERROR')
+    })
+
+    it('lists versions newest-first as summary rows (publishNote + active definition id, NO schema/graph payloads)', async () => {
+      const template = routeState.createTemplateFixture({ status: 'published' })
+      const v1 = routeState.createVersionFixture(template.id, {
+        version: 1,
+        status: 'published',
+        publish_note: '首次发布',
+      })
+      const v2 = routeState.createVersionFixture(template.id, { version: 2, status: 'draft' })
+      template.latest_version_id = v2.id
+      template.active_version_id = v1.id
+      // v1 carries the ACTIVE published definition; a superseded (inactive) one must not surface.
+      routeState.state.publishedDefinitions.set('pub-active', {
+        id: 'pub-active',
+        template_id: template.id,
+        template_version_id: v1.id,
+        runtime_graph: {},
+        is_active: true,
+        published_at: new Date('2026-04-11T12:00:00.000Z'),
+      })
+      // Another template's versions must not leak into this list.
+      const other = routeState.createTemplateFixture()
+      routeState.createVersionFixture(other.id, { version: 9 })
+
+      const app = createApp()
+      const response = await request(app).get(`/api/approval-templates/${template.id}/versions`)
+
+      expect(response.status).toBe(200)
+      expect(response.body.versions).toHaveLength(2)
+      expect(response.body.versions.map((row: { version: number }) => row.version)).toEqual([2, 1])
+      expect(response.body.versions[1]).toMatchObject({
+        id: v1.id,
+        templateId: template.id,
+        status: 'published',
+        publishNote: '首次发布',
+        publishedDefinitionId: 'pub-active',
+      })
+      expect(response.body.versions[0]).toMatchObject({
+        id: v2.id,
+        status: 'draft',
+        publishNote: null,
+        publishedDefinitionId: null,
+      })
+      // Summary shape — the heavy payloads stay on the per-version detail endpoint.
+      expect(response.body.versions[0]).not.toHaveProperty('formSchema')
+      expect(response.body.versions[0]).not.toHaveProperty('approvalGraph')
+    })
+
+    it('404s the versions list for a template that does not exist', async () => {
+      const app = createApp()
+      const response = await request(app).get('/api/approval-templates/tpl-missing/versions')
+      expect(response.status).toBe(404)
+      expect(response.body.error.code).toBe('APPROVAL_TEMPLATE_NOT_FOUND')
+    })
+
+    it('403s the versions list for a non-admin (approvalTemplateAdminGuard, not just authenticate)', async () => {
+      const { template } = publishableTemplate()
+      authState.currentUser = {
+        id: 'plain-user',
+        sub: 'plain-user',
+        name: 'Plain User',
+        email: 'plain@example.com',
+        permissions: ['approvals:read', 'approvals:write'],
+        roles: ['user'],
+      }
+
+      const app = createApp()
+      const response = await request(app).get(`/api/approval-templates/${template.id}/versions`)
+
+      expect(response.status).toBe(403)
     })
   })
 })

@@ -359,6 +359,62 @@
             </el-timeline>
             <el-empty v-else description="暂无审批节点" :image-size="60" />
           </div>
+
+          <!-- B3-09 (模板治理 — 版本历史): admin-only (the endpoint sits behind the same
+               template-admin guard as publish/archive; non-admins never fetch, so no 403 noise).
+               Summary rows only — full schema/graph of one version stays an on-demand detail
+               fetch, not part of this list. -->
+          <div
+            v-if="canManageTemplates"
+            class="template-detail__section"
+            data-testid="template-detail-version-history"
+          >
+            <h2>版本历史</h2>
+            <el-alert
+              v-if="versionHistoryError"
+              type="warning"
+              :title="versionHistoryError"
+              :closable="false"
+            />
+            <el-table
+              v-else
+              :data="versionHistory"
+              class="ms-w-100pct"
+              max-height="320"
+              stripe
+            >
+              <el-table-column label="版本" width="90">
+                <template #default="{ row }">v{{ row.version }}</template>
+              </el-table-column>
+              <el-table-column label="状态" width="140">
+                <template #default="{ row }">
+                  <el-tag size="small" :type="versionStatusTagType(row.status)">
+                    {{ versionStatusLabel(row.status) }}
+                  </el-tag>
+                  <el-tag
+                    v-if="row.publishedDefinitionId"
+                    size="small"
+                    type="success"
+                    class="template-detail__version-active-tag"
+                  >
+                    当前生效
+                  </el-tag>
+                </template>
+              </el-table-column>
+              <el-table-column label="发布说明" min-width="240">
+                <template #default="{ row }">
+                  <span v-if="row.publishNote" class="template-detail__version-note">{{ row.publishNote }}</span>
+                  <span v-else>-</span>
+                </template>
+              </el-table-column>
+              <el-table-column label="更新时间" width="180">
+                <template #default="{ row }">{{ formatDate(row.updatedAt) }}</template>
+              </el-table-column>
+              <template #empty>
+                <el-empty description="暂无版本记录" :image-size="60" />
+              </template>
+            </el-table>
+          </div>
         </div>
       </div>
 
@@ -368,7 +424,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import PageShell from '../../components/layout/PageShell.vue'
 import PageHeader from '../../components/layout/PageHeader.vue'
 import StatusTag from '../../components/status/StatusTag.vue'
@@ -388,6 +444,8 @@ import type {
   EmptyAssigneePolicy,
   ApprovalTemplateVisibilityScope,
   ApprovalTemplateVisibilityType,
+  ApprovalTemplateVersionSummaryDTO,
+  ApprovalTemplateStatus,
 } from '../../types/approval'
 import { useApprovalTemplateStore } from '../../approvals/templateStore'
 import { useApprovalPermissions } from '../../approvals/permissions'
@@ -398,6 +456,7 @@ import {
   getTemplateUsage,
   archiveTemplate,
   unarchiveTemplate,
+  listTemplateVersions,
 } from '../../approvals/api'
 import { describeFieldVisibilityRule } from '../../approvals/fieldVisibility'
 import { templateArchiveConfirmMessage, templateUnarchiveConfirmMessage } from '../../approvals/templateArchiveConfirm'
@@ -720,6 +779,50 @@ async function handleUnarchive() {
   }
 }
 
+// B3-09 (模板治理 — 版本历史) — admin-only fetch. `canManageTemplates` resolves asynchronously
+// (refreshApprovalAccess), so a mount-time check would race a slow permission load to a permanently
+// empty section; instead watch it and fetch ONCE when it turns true. Non-admins never fire the
+// request (the endpoint would 403 them anyway).
+const versionHistory = ref<ApprovalTemplateVersionSummaryDTO[]>([])
+const versionHistoryError = ref('')
+let versionHistoryFetched = false
+
+const VERSION_STATUS_LABELS: Record<ApprovalTemplateStatus, string> = {
+  draft: '草稿',
+  published: '已发布',
+  archived: '已停用',
+}
+
+function versionStatusLabel(status: ApprovalTemplateStatus): string {
+  return VERSION_STATUS_LABELS[status] ?? status
+}
+
+function versionStatusTagType(status: ApprovalTemplateStatus): 'primary' | 'info' | 'warning' {
+  if (status === 'published') return 'primary'
+  if (status === 'archived') return 'warning'
+  return 'info'
+}
+
+async function loadVersionHistory() {
+  if (versionHistoryFetched) return
+  versionHistoryFetched = true
+  try {
+    versionHistory.value = await listTemplateVersions(route.params.id as string)
+    versionHistoryError.value = ''
+  } catch (e: any) {
+    // Load failure degrades to an inline warning — never blocks the rest of the detail page.
+    versionHistoryError.value = e?.message ?? '版本历史加载失败'
+  }
+}
+
+watch(
+  canManageTemplates,
+  (isAdmin) => {
+    if (isAdmin) void loadVersionHistory()
+  },
+  { immediate: true },
+)
+
 onMounted(() => {
   const id = route.params.id as string
   store.loadTemplate(id)
@@ -809,6 +912,16 @@ onMounted(() => {
 .template-detail__node-mode,
 .template-detail__node-policy {
   margin-left: 4px;
+}
+
+/* B3-09 — version-history rows */
+.template-detail__version-active-tag {
+  margin-left: 8px;
+}
+
+.template-detail__version-note {
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 
 @media (max-width: 768px) {

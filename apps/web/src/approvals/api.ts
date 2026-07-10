@@ -10,6 +10,7 @@ import type {
   ApprovalTemplateListItemDTO,
   ApprovalTemplateDetailDTO,
   ApprovalTemplateVersionDetailDTO,
+  ApprovalTemplateVersionSummaryDTO,
   UnifiedApprovalDTO,
   UnifiedApprovalHistoryDTO,
   CreateApprovalRequest,
@@ -112,6 +113,7 @@ function mockVersionDetail(templateId: string, versionId: string): ApprovalTempl
       policy: { allowRevoke: true, revokeBeforeNodeKeys: ['approval_2'] },
     },
     publishedDefinitionId: 'def_1',
+    publishNote: null,
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
   }
@@ -851,6 +853,34 @@ export async function getTemplateVersion(
 ): Promise<ApprovalTemplateVersionDetailDTO> {
   if (USE_MOCK) return mockVersionDetail(templateId, versionId)
   return apiGet(`/api/approval-templates/${templateId}/versions/${versionId}`)
+}
+
+/**
+ * B3-09 (模板治理 — 版本历史): newest-first summary rows. Server shape = `{ versions: [...] }` from
+ * GET /api/approval-templates/:id/versions (admin-guarded, same as the version detail endpoint).
+ */
+export async function listTemplateVersions(
+  templateId: string,
+): Promise<ApprovalTemplateVersionSummaryDTO[]> {
+  if (USE_MOCK) {
+    const detail = mockVersionDetail(templateId, `ver_${templateId}_1`)
+    return [
+      {
+        id: detail.id,
+        templateId: detail.templateId,
+        version: detail.version,
+        status: detail.status,
+        publishNote: detail.publishNote,
+        publishedDefinitionId: detail.publishedDefinitionId,
+        createdAt: detail.createdAt,
+        updatedAt: detail.updatedAt,
+      },
+    ]
+  }
+  const response = await apiGet<{ versions: ApprovalTemplateVersionSummaryDTO[] }>(
+    `/api/approval-templates/${encodeURIComponent(templateId)}/versions`,
+  )
+  return response.versions
 }
 
 export async function listApprovals(

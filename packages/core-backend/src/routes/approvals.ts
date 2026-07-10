@@ -710,6 +710,23 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
     }
   })
 
+  // B3-09 (模板治理 — 版本历史): newest-first summary rows (no formSchema/approvalGraph payloads —
+  // the per-version detail endpoint below serves those on demand). Same admin guard as the rest
+  // of the template-authoring surface.
+  r.get('/api/approval-templates/:id/versions', authenticate, approvalTemplateAdminGuard, async (req: Request, res: Response) => {
+    try {
+      const versions = await productService.listTemplateVersions(req.params.id)
+      res.json({ versions })
+    } catch (error) {
+      handleApprovalsError(
+        res,
+        error,
+        'APPROVAL_TEMPLATE_VERSIONS_FETCH_FAILED',
+        'Failed to fetch approval template versions',
+      )
+    }
+  })
+
   r.get('/api/approval-templates/:id/versions/:versionId', authenticate, approvalTemplateAdminGuard, async (req: Request, res: Response) => {
     try {
       const version = await productService.getTemplateVersion(req.params.id, req.params.versionId)
