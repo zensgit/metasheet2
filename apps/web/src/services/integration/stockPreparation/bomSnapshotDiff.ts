@@ -22,6 +22,11 @@ export interface StockPreparationSnapshotBatchSummary {
   syncRunId: string | null
   lineCount: number
   createdAtPresent: boolean
+  /**
+   * Backend completeness flag (#4002): true when the multi-step persist path (batch row → lines →
+   * run row) did not finish — zero lines OR no matching run row. Values-free boolean only.
+   */
+  incomplete: boolean
 }
 
 export interface StockPreparationSnapshotBatchListResult {

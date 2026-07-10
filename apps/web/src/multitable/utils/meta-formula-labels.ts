@@ -119,6 +119,20 @@ const FUNCTION_DESCRIPTIONS: Record<FormulaFunctionName, LocaleText> = {
   VAR: { en: 'Returns the sample variance of numeric values.', zh: '返回数字值的样本方差。' },
   MEDIAN: { en: 'Returns the median of numeric values.', zh: '返回数字值的中位数。' },
   MODE: { en: 'Returns the most common numeric value.', zh: '返回最常见的数字值。' },
+  // Cluster-C path-1 batch 1: 13 standard scalar functions.
+  PRODUCT: { en: 'Multiplies numeric values together.', zh: '将数字值相乘。' },
+  SIGN: { en: 'Returns 1, -1, or 0 depending on whether a number is positive, negative, or zero.', zh: '根据数字为正、负或零，返回 1、-1 或 0。' },
+  PI: { en: 'Returns the value of pi.', zh: '返回圆周率 π 的值。' },
+  RADIANS: { en: 'Converts a value in degrees to radians.', zh: '将角度值转换为弧度。' },
+  DEGREES: { en: 'Converts a value in radians to degrees.', zh: '将弧度值转换为角度。' },
+  GCD: { en: 'Returns the greatest common divisor of the given integers.', zh: '返回给定整数的最大公约数。' },
+  LCM: { en: 'Returns the least common multiple of the given integers.', zh: '返回给定整数的最小公倍数。' },
+  VALUE: { en: 'Converts text that looks like a number into a number.', zh: '将形似数字的文本转换为数字。' },
+  PROPER: { en: 'Capitalizes the first letter of each word in text.', zh: '将文本中每个单词的首字母转换为大写。' },
+  TEXTJOIN: { en: 'Joins text values with a delimiter, optionally skipping empty values.', zh: '使用分隔符拼接文本值，可选择跳过空值。' },
+  STDEVP: { en: 'Returns the population standard deviation of numeric values.', zh: '返回数字值的总体标准差。' },
+  VARP: { en: 'Returns the population variance of numeric values.', zh: '返回数字值的总体方差。' },
+  CHOOSE: { en: 'Returns the value at the given 1-based position from a list of values.', zh: '从一组值中返回给定位置（从 1 开始）的值。' },
 }
 
 const DIAGNOSTIC_LABELS: Record<FormulaDiagnosticLabelKey, LocaleText> = {

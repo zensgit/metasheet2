@@ -219,6 +219,71 @@ describeIfDatabase('A-4 card-delivery wrapper (real DB)', () => {
     }
   })
 
+  test('DT-R2 per-corp verify: a token signed under corp A fail-closes against a delivery pinned to corp B; the pinned corp verifies; env override still wins', async () => {
+    const instanceId = await newInstance()
+    const prev = process.env.APPROVAL_CARD_LINK_SECRET
+    delete process.env.APPROVAL_CARD_LINK_SECRET
+    const secretA = `cdw-r2-corp-a-secret-${TS}`
+    const secretB = `cdw-r2-corp-b-secret-${TS}`
+    const mkIntegration = async (label: string, secret: string, updatedAtSql: string): Promise<string> => {
+      const inserted = await q(
+        `INSERT INTO directory_integrations (name, provider, status, corp_id, config, updated_at)
+         VALUES ($1, 'dingtalk', 'active', $2, $3::jsonb, ${updatedAtSql})
+         RETURNING id`,
+        [`cdw-r2-${label}-${TS}`, `corp_cdw_r2_${label}_${TS}`, JSON.stringify({ approvalCardLinkSecret: normalizeStoredSecretValue(secret) })],
+      )
+      return (inserted.rows[0] as { id: string }).id
+    }
+    // Anti-shadowing: corp A is deliberately the FRESHEST integration, so the legacy LIMIT-1
+    // global pick (active-first, updated_at DESC) lands on corp A — if verify ever fell back to
+    // that pick instead of the DELIVERY row's pinned corp B, corp A's token would verify and
+    // corp B's would fail, turning every assertion below red. now()-1min on corp B keeps both
+    // rows behind any real integration if a crash skips the finally.
+    const corpA = await mkIntegration('a', secretA, `now()`)
+    const corpB = await mkIntegration('b', secretB, `now() - interval '1 minute'`)
+    try {
+      const row = await insertDingTalkApprovalCardDelivery(q, {
+        instanceId,
+        nodeKey: 'approval_1',
+        recipientUserId: APPROVER,
+        recipientDingTalkUserId: `dd_${APPROVER}`,
+        deliveryKind: 'work_notice_action_card',
+        integrationId: corpB,
+      })
+      await markDingTalkApprovalCardDeliverySent(q, row.id, 'task_r2')
+      expect(row.integration_id).toBe(corpB)
+
+      const signWith = (secret: string) => createHmac('sha256', secret).update(row.id).digest('hex').slice(0, 32)
+
+      // Fail-closed cross-corp: corp A's secret must never open a corp-B delivery.
+      expect(await verifyApprovalCardLinkToken(row.id, signWith(secretA), q, corpB)).toBe(false)
+      expect((await getApprovalCardDeliverySummary({ query: q }, { deliveryId: row.id, token: signWith(secretA), viewerUserId: APPROVER })).status).toBe('not_found')
+      const crossCorpAction = await executeApprovalActionFromCardDelivery(
+        { query: q, approvals },
+        { deliveryId: row.id, token: signWith(secretA), decision: 'approve', comment: '越权', actor: approverActor },
+      )
+      expect(crossCorpAction.status).toBe('not_found')
+
+      // Same-source: the DELIVERY row's own integration secret verifies through the real wrapper.
+      expect(await verifyApprovalCardLinkToken(row.id, signWith(secretB), q, corpB)).toBe(true)
+      expect((await getApprovalCardDeliverySummary({ query: q }, { deliveryId: row.id, token: signWith(secretB), viewerUserId: APPROVER })).status).toBe('ok')
+
+      // Env override is global and unchanged: with env set, the env-signed token wins even on a pinned row.
+      process.env.APPROVAL_CARD_LINK_SECRET = SECRET
+      expect((await getApprovalCardDeliverySummary({ query: q }, { deliveryId: row.id, token: tokenFor(row.id), viewerUserId: APPROVER })).status).toBe('ok')
+      delete process.env.APPROVAL_CARD_LINK_SECRET
+
+      // A pinned integration with NO stored secret fail-closes (no LIMIT-1 fallback, no cross-corp rescue).
+      await q(`UPDATE directory_integrations SET config = COALESCE(config, '{}'::jsonb) - 'approvalCardLinkSecret' WHERE id = $1`, [corpB])
+      expect(await verifyApprovalCardLinkToken(row.id, signWith(secretB), q, corpB)).toBe(false)
+      expect(await verifyApprovalCardLinkToken(row.id, signWith(secretA), q, corpB)).toBe(false)
+    } finally {
+      await q('DELETE FROM directory_integrations WHERE id = ANY($1::uuid[])', [[corpA, corpB]]).catch(() => {})
+      if (prev === undefined) delete process.env.APPROVAL_CARD_LINK_SECRET
+      else process.env.APPROVAL_CARD_LINK_SECRET = prev
+    }
+  })
+
   test('undelivered card (send_status=pending) is stale — never actionable', async () => {
     const instanceId = await newInstance()
     const row = await insertDingTalkApprovalCardDelivery(q, {

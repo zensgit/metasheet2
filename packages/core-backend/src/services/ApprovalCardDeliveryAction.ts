@@ -15,7 +15,10 @@
 import { createHmac, timingSafeEqual } from 'crypto'
 
 import type { ApprovalProductService } from './ApprovalProductService'
-import { resolveApprovalCardLinkSecret } from '../integrations/dingtalk/approval-card-config'
+import {
+  resolveApprovalCardLinkSecret,
+  resolveApprovalCardLinkSecretForIntegration,
+} from '../integrations/dingtalk/approval-card-config'
 import {
   claimDingTalkApprovalCardDeliveryActed,
   findDingTalkApprovalCardDeliveryById,
@@ -59,14 +62,23 @@ export type ApprovalCardActionOutcome =
  * matches the executor's link composition exactly. CFG-1: the secret resolves env-first with the
  * stored (encrypted) directory-integration config as fallback — the SAME source the executor signs
  * with. Fail-closed without the secret.
+ *
+ * DT-R2 per-corp verify: when the delivery row carries an `integration_id`, the token verifies
+ * against THAT integration's secret ONLY (env override still wins) — a token signed under corp A
+ * must never verify against a delivery pinned to corp B (fail-closed, no LIMIT-1 fallback).
+ * Legacy rows (`integration_id` NULL) keep the original single-integration resolver — the same
+ * source they were signed with, so in-flight links survive the rollout.
  */
 export async function verifyApprovalCardLinkToken(
   deliveryId: string,
   token: string,
   queryFn?: QueryFn,
+  integrationId?: string | null,
 ): Promise<boolean> {
   if (!deliveryId || !token || token.length !== 32) return false
-  const secret = await resolveApprovalCardLinkSecret(queryFn)
+  const secret = integrationId
+    ? await resolveApprovalCardLinkSecretForIntegration(integrationId, queryFn)
+    : await resolveApprovalCardLinkSecret(queryFn)
   if (!secret) return false
   const expected = createHmac('sha256', secret).update(deliveryId).digest('hex').slice(0, 32)
   const a = Buffer.from(expected, 'utf8')
@@ -132,9 +144,11 @@ export async function getApprovalCardDeliverySummary(
   deps: { query: QueryFn },
   input: { deliveryId: string; token: string; viewerUserId: string },
 ): Promise<{ status: 'ok'; summary: ApprovalCardDeliverySummary } | { status: 'not_found' }> {
-  if (!(await verifyApprovalCardLinkToken(input.deliveryId, input.token, deps.query))) return { status: 'not_found' }
+  // DT-R2: the row is loaded before verify so the token checks against the DELIVERY's own
+  // integration secret. Both failure orders collapse to the same not_found — no existence oracle.
   const delivery = await findDingTalkApprovalCardDeliveryById(deps.query, input.deliveryId)
   if (!delivery) return { status: 'not_found' }
+  if (!(await verifyApprovalCardLinkToken(input.deliveryId, input.token, deps.query, delivery.integration_id))) return { status: 'not_found' }
   const summary = await buildSummary(deps.query, delivery, input.viewerUserId)
   if (!summary) return { status: 'not_found' }
   return { status: 'ok', summary }
@@ -150,9 +164,10 @@ export async function executeApprovalActionFromCardDelivery(
     actor: { userId: string; userName: string; roles?: string[]; ip?: string | null; userAgent?: string | null }
   },
 ): Promise<ApprovalCardActionOutcome> {
-  if (!(await verifyApprovalCardLinkToken(input.deliveryId, input.token, deps.query))) return { status: 'not_found' }
+  // DT-R2: row first, then verify against the row's own integration secret (see summary path).
   const delivery = await findDingTalkApprovalCardDeliveryById(deps.query, input.deliveryId)
   if (!delivery) return { status: 'not_found' }
+  if (!(await verifyApprovalCardLinkToken(input.deliveryId, input.token, deps.query, delivery.integration_id))) return { status: 'not_found' }
 
   const preSummary = await buildSummary(deps.query, delivery, input.actor.userId)
   if (!preSummary) return { status: 'not_found' }

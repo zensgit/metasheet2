@@ -1339,6 +1339,59 @@ describe('TemplateAuthoringView', () => {
     expect(pushSpy).toHaveBeenCalledWith({ path: '/approval-templates/tpl_created' })
   })
 
+  // B3-09 (模板治理 — 发布说明): the checklist dialog carries an OPTIONAL note; typed → trimmed and
+  // sent, untyped/whitespace-only → the payload has NO note key (byte-identical to pre-B3-09 wire).
+  it('B3-09: publishes with a trimmed note when one is typed in the checklist dialog', async () => {
+    await mountView()
+
+    setInput('approval-template-key', 'purchase')
+    setInput('approval-template-name', '采购审批')
+    ;(container!.querySelector('[data-testid="approval-template-publish-button"]') as HTMLButtonElement).click()
+    await flushUi()
+
+    setInput('approval-publish-note-input', '  上调金额上限至 5000  ')
+    const confirmButton = container!.querySelector('[data-testid="approval-publish-checklist-confirm"]') as HTMLButtonElement
+    confirmButton.click()
+    await flushUi()
+
+    expect(publishTemplateSpy).toHaveBeenCalledWith('tpl_created', {
+      policy: { allowRevoke: true },
+      note: '上调金额上限至 5000',
+    })
+  })
+
+  it('B3-09: reopening the publish dialog clears the previous note; whitespace-only sends no note key', async () => {
+    await mountView()
+
+    setInput('approval-template-key', 'purchase')
+    setInput('approval-template-name', '采购审批')
+
+    // First open: type a note, then close WITHOUT publishing.
+    ;(container!.querySelector('[data-testid="approval-template-publish-button"]') as HTMLButtonElement).click()
+    await flushUi()
+    setInput('approval-publish-note-input', '第一次的说明')
+    const dialog = container!.querySelector('[data-testid="approval-publish-checklist"]')!
+    const cancelButton = Array.from(dialog.querySelectorAll('button')).find(
+      (button) => button.textContent?.includes('取消'),
+    ) as HTMLButtonElement
+    cancelButton.click()
+    await flushUi()
+    expect(publishTemplateSpy).not.toHaveBeenCalled()
+
+    // Reopen: the previous note must NOT carry over (a note describes ONE publish action).
+    ;(container!.querySelector('[data-testid="approval-template-publish-button"]') as HTMLButtonElement).click()
+    await flushUi()
+    const noteInput = container!.querySelector('[data-testid="approval-publish-note-input"]') as HTMLInputElement
+    expect(noteInput.value).toBe('')
+
+    // Whitespace-only note → payload carries no note key at all.
+    setInput('approval-publish-note-input', '   ')
+    ;(container!.querySelector('[data-testid="approval-publish-checklist-confirm"]') as HTMLButtonElement).click()
+    await flushUi()
+
+    expect(publishTemplateSpy).toHaveBeenCalledWith('tpl_created', { policy: { allowRevoke: true } })
+  })
+
   it('B2-03: an invalid draft (blank key/name) opens the publish checklist with a failing "表单字段" item and disables the confirm button', async () => {
     await mountView()
     // leave key/name blank — validateTemplateFormFields fails ('模板 Key 必填' / '模板名称必填').

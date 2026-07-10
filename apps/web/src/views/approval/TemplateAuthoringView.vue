@@ -1421,6 +1421,18 @@
           <span v-if="!item.ok && item.detail" class="template-authoring__publish-checklist-detail">{{ item.detail }}</span>
         </li>
       </ul>
+      <!-- B3-09 (发布说明): optional; server trims + caps at 2000 chars (maxlength mirrors it so a
+           long paste fails visibly here instead of a 400 at confirm). Cleared when the dialog
+           reopens so a note never silently carries over to the NEXT publish. -->
+      <el-input
+        v-model="publishNote"
+        type="textarea"
+        :rows="2"
+        :maxlength="2000"
+        show-word-limit
+        placeholder="发布说明（可选）：本次发布改了什么"
+        data-testid="approval-publish-note-input"
+      />
       <template #footer>
         <el-button @click="publishChecklistVisible = false">取消</el-button>
         <el-button
@@ -1978,6 +1990,8 @@ const publishChecklist = computed<PublishChecklistItem[]>(() => [
 ])
 const canConfirmPublish = computed(() => publishChecklist.value.every((item) => item.ok))
 const publishChecklistVisible = ref(false)
+// B3-09 (发布说明) — optional free text bound to the checklist dialog's textarea.
+const publishNote = ref('')
 const canvasEdgeLines = computed(() => {
   const pos = new Map(canvasLayout.value.nodes.map((n) => [n.key, n]))
   return canvasEffectiveGraph.value.edges.map((edge) => {
@@ -2327,6 +2341,8 @@ async function handleSave() {
 // SAME persistDraft → publishTemplate → success-routing sequence as before this change.
 function openPublishChecklist() {
   if (!canSave.value || publishing.value) return
+  // B3-09 — a publish note describes ONE publish action; never carry it into the next one.
+  publishNote.value = ''
   publishChecklistVisible.value = true
 }
 
@@ -2337,7 +2353,13 @@ async function confirmPublish() {
   try {
     const saved = await persistDraft()
     if (!saved) return
-    await publishTemplate(saved.id, { policy: { allowRevoke: draft.value.allowRevoke } })
+    // B3-09 — whitespace-only normalizes to null server-side; send undefined to keep the wire
+    // payload identical to pre-B3-09 publishes when the admin typed nothing.
+    const note = publishNote.value.trim()
+    await publishTemplate(saved.id, {
+      policy: { allowRevoke: draft.value.allowRevoke },
+      ...(note ? { note } : {}),
+    })
     ElMessage.success('模板已发布')
     await router.push({ path: `/approval-templates/${saved.id}` })
   } catch (error: any) {

@@ -55,6 +55,7 @@ function batchListWithPlantedExtras(): StockPreparationSnapshotBatchListResult {
         syncRunId: 'sync-run-alpha',
         lineCount: 7,
         createdAtPresent: true,
+        incomplete: false,
         // Planted business values (not part of the type) — must never reach the DOM.
         drawingNo: PLANTED_DRAWING_NO,
         materialCode: PLANTED_MATERIAL_CODE,
@@ -62,12 +63,15 @@ function batchListWithPlantedExtras(): StockPreparationSnapshotBatchListResult {
         quantity: PLANTED_QUANTITY,
       },
       {
+        // Incomplete batch (#4002 semantics: run row absent → incomplete) — the view must surface
+        // the boolean flag and disable this batch's diff entry.
         snapshotBatchId: 'batch-beta',
         snapshotVersion: 2,
         snapshotStatus: 'superseded',
         syncRunId: null,
         lineCount: 4,
         createdAtPresent: false,
+        incomplete: true,
       },
     ],
   } as unknown as StockPreparationSnapshotBatchListResult
@@ -289,6 +293,44 @@ describe('StockPreparationSnapshotDiffView (readonly, values-free)', () => {
     const text = root.textContent || ''
     expect(text).not.toContain('secret')
     expect(text).not.toContain('404')
+  })
+
+  it('marks an incomplete batch with a values-free badge and disables its diff entry', async () => {
+    h.listBatches.mockResolvedValue(batchListWithPlantedExtras())
+    h.getDiff.mockResolvedValue(diffSummary())
+    const root = mountView()
+    await flushUi()
+
+    // Exactly ONE incomplete badge (only batch-beta is incomplete), boolean-derived copy only.
+    const badges = root.querySelectorAll('[data-testid="stock-prep-snapshot-incomplete-badge"]')
+    expect(badges.length).toBe(1)
+    expect(badges[0].textContent).toContain('不完整')
+    // The badge sits in the incomplete row, not the complete one.
+    const rows = root.querySelectorAll('[data-testid="stock-prep-snapshot-batch-row"]')
+    expect(rows[0].querySelector('[data-testid="stock-prep-snapshot-incomplete-badge"]')).toBeNull()
+    expect(rows[1].querySelector('[data-testid="stock-prep-snapshot-incomplete-badge"]')).not.toBeNull()
+
+    // Complete batch keeps a live diff entry; the incomplete batch's entry is disabled.
+    const selectButtons = root.querySelectorAll('[data-testid="stock-prep-snapshot-batch-select"]')
+    expect((selectButtons[0] as HTMLButtonElement).disabled).toBe(false)
+    expect((selectButtons[1] as HTMLButtonElement).disabled).toBe(true)
+
+    // Activating the incomplete batch's entry never issues the diff GET (disabled + guard).
+    ;(selectButtons[1] as HTMLButtonElement).click()
+    await flushUi()
+    expect(h.getDiff).not.toHaveBeenCalled()
+    expect(root.querySelector('[data-testid="stock-prep-snapshot-diff"]')).toBeNull()
+    expect(root.querySelector('[data-testid="stock-prep-snapshot-diff-hint"]')).not.toBeNull()
+  })
+
+  it('renders the English incomplete badge copy when locale is not zh-CN', async () => {
+    h.locale = 'en'
+    h.listBatches.mockResolvedValue(batchListWithPlantedExtras())
+    const root = mountView()
+    await flushUi()
+    const badge = root.querySelector('[data-testid="stock-prep-snapshot-incomplete-badge"]') as HTMLElement
+    expect(badge).not.toBeNull()
+    expect(badge.textContent).toMatch(/incomplete/i)
   })
 
   it('never renders a planted business value even after a batch is selected (values-free)', async () => {

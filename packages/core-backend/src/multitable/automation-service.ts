@@ -882,6 +882,17 @@ export class AutomationService {
     return this.jobService
   }
 
+  /**
+   * B3-11 — expose the Kysely client for READ-ONLY name lookups at the route
+   * boundary (`resolveExecutionNameMaps`). No new capability: routes already
+   * reach the same tables indirectly via `getRule`/`listRules`; this just lets
+   * the read-only runs-list route batch a rule/sheet name lookup without adding
+   * a bespoke passthrough method here for every future read-only enrichment.
+   */
+  get dbClient(): Kysely<Database> {
+    return this.db
+  }
+
   /** Expose executor for manual test runs */
   get exec(): AutomationExecutor {
     return this.executor

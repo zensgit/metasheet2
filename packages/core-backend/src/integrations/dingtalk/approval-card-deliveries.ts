@@ -31,6 +31,12 @@ export interface DingTalkApprovalCardDeliveryRow {
   recipient_dingtalk_user_id: string
   delivery_kind: DingTalkApprovalCardDeliveryKind
   task_id: string | null
+  /**
+   * DT-R2: the directory integration (corp) the card was sent through — the callback path's
+   * credential/secret anchor. NULL on legacy rows and env-only sends (verify falls back to the
+   * legacy single-integration resolver for those).
+   */
+  integration_id: string | null
   card_state: DingTalkApprovalCardState
   acted_action: string | null
   acted_by: string | null
@@ -44,7 +50,7 @@ export interface DingTalkApprovalCardDeliveryRow {
 type QueryFn = (sql: string, params?: unknown[]) => Promise<{ rows: unknown[] }>
 
 const RETURNING_COLUMNS =
-  'id, instance_id, node_key, recipient_user_id, recipient_dingtalk_user_id, delivery_kind, task_id, card_state, acted_action, acted_by, acted_at, send_status, send_error, created_at, updated_at'
+  'id, instance_id, node_key, recipient_user_id, recipient_dingtalk_user_id, delivery_kind, task_id, integration_id, card_state, acted_action, acted_by, acted_at, send_status, send_error, created_at, updated_at'
 
 export interface InsertDingTalkApprovalCardDeliveryInput {
   /** Optional caller-supplied id; defaults to a fresh UUID. Doubles as the interactive-card outTrackId (Slice B). */
@@ -56,6 +62,8 @@ export interface InsertDingTalkApprovalCardDeliveryInput {
   deliveryKind: DingTalkApprovalCardDeliveryKind
   /** asyncsend_v2 task id — recorded after the send call returns (Slice A). */
   taskId?: string | null
+  /** DT-R2: the assignee's directory integration id (uuid) — null/omitted for env-only sends. */
+  integrationId?: string | null
 }
 
 export async function insertDingTalkApprovalCardDelivery(
@@ -63,10 +71,14 @@ export async function insertDingTalkApprovalCardDelivery(
   input: InsertDingTalkApprovalCardDeliveryInput,
 ): Promise<DingTalkApprovalCardDeliveryRow> {
   const id = input.id && input.id.trim().length > 0 ? input.id.trim() : randomUUID()
+  const integrationId =
+    typeof input.integrationId === 'string' && input.integrationId.trim().length > 0
+      ? input.integrationId.trim()
+      : null
   const result = await query(
     `INSERT INTO dingtalk_approval_card_deliveries
-       (id, instance_id, node_key, recipient_user_id, recipient_dingtalk_user_id, delivery_kind, task_id)
-     VALUES ($1, $2, $3, $4, $5, $6, $7)
+       (id, instance_id, node_key, recipient_user_id, recipient_dingtalk_user_id, delivery_kind, task_id, integration_id)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
      RETURNING ${RETURNING_COLUMNS}`,
     [
       id,
@@ -76,6 +88,7 @@ export async function insertDingTalkApprovalCardDelivery(
       input.recipientDingTalkUserId,
       input.deliveryKind,
       input.taskId ?? null,
+      integrationId,
     ],
   )
   return result.rows[0] as DingTalkApprovalCardDeliveryRow

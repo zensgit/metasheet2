@@ -34,6 +34,10 @@ import type {
   BomMultitableLineUpdateResult,
   BomEcoRevisionIntentResult,
 } from '../data-adapters/PLMAdapter'
+// #4020: value import (not type-only) -- isFeatureAvailable is the shared affordance-
+// visibility judgment (entry.available when the provider sends it, else the pre-#4020
+// supported+entitled derivation), so these routes never re-derive it locally.
+import { isFeatureAvailable } from '../data-adapters/PLMAdapter'
 
 // Typed wrapper for temporary tables not yet in main Database interface
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -789,8 +793,9 @@ router.get(
 // PLM-COLLAB Phase 3 C (P3-C): relay the governed READ-ONLY BOM multi-table review context,
 // GATED by the advisory manifest. Pinned order: resolve adapter (404) -> duck-typed guard ->
 // capabilities pre-check. If bom_multitable is not supported -> hide (old PLM / unlit). If it
-// is supported but the tenant is NOT entitled (per the advisory manifest), return the
-// unentitled affordance WITHOUT calling the data endpoint ("未授权不查资源"). Only an entitled
+// IS supported but not `available` (#4020: `isFeatureAvailable` -- the provider-computed
+// `entry.available` when present, else the pre-#4020 supported+entitled derivation), return the
+// unentitled affordance WITHOUT calling the data endpoint ("未授权不查资源"). Only an available
 // tenant reaches getBomMultitableContext, and the PROVIDER stays the authoritative gate (we
 // reflect its entitled + null its context otherwise). Read-only; never 500s -> degrades.
 interface PlmBomReviewAdapter {
@@ -980,8 +985,9 @@ router.get(
       // old PLM / feature unlit -> hide the surface entirely
       return res.json({ data_source_id: dataSourceId, available: false, reason: 'unsupported' })
     }
-    if (feature.entitled !== true) {
-      // supported but not entitled -> DO NOT query the resource; advisory upgrade affordance
+    if (!isFeatureAvailable(feature)) {
+      // #4020: supported but not available (unentitled, non-base) -> DO NOT query the
+      // resource; advisory upgrade affordance instead
       return res.json({ data_source_id: dataSourceId, available: true, entitled: false, context: null })
     }
     // 2) entitled -> fetch the governed read-only context (never 500 -> degrade)
@@ -1052,7 +1058,8 @@ router.patch(
         reason: 'unsupported',
       })
     }
-    if (feature.entitled !== true) {
+    if (!isFeatureAvailable(feature)) {
+      // #4020: supported but not available (unentitled, non-base) -> block the write
       return res.status(403).json({
         error: 'BOM write-back is not entitled',
         data_source_id: dataSourceId,
@@ -1106,8 +1113,9 @@ router.patch(
 
 // ECO Phase 3 consumer CTA relay: opt-in that opens/attaches a PENDING ECO revision for a
 // lifecycle-LOCKED part. Pre-gates on the capabilities advisory descriptor `bom_eco_revision`
-// (supported + entitled + actions includes `eco_revision_intent` — Phase-0 Lock 3: availability
-// discovery is the advisory, never the error payload). Provider owns idempotency
+// (supported + available (#4020: `isFeatureAvailable`) + actions includes
+// `eco_revision_intent` — Phase-0 Lock 3: availability discovery is the advisory, never the
+// error payload). Provider owns idempotency
 // (attach-before-create), so no Idempotency-Key here. Never a raw 500.
 router.post(
   '/api/plm-workbench/data-sources/:id/bom-multitable/:partId/eco-intent',
@@ -1151,7 +1159,8 @@ router.post(
         reason: 'unsupported',
       })
     }
-    if (feature.entitled !== true) {
+    if (!isFeatureAvailable(feature)) {
+      // #4020: supported but not available (unentitled, non-base) -> block the intent
       return res.status(403).json({
         error: 'BOM ECO revision is not entitled',
         data_source_id: dataSourceId,

@@ -13,7 +13,14 @@ import { join } from 'node:path'
 const h = vi.hoisted(() => ({
   locale: 'zh-CN' as string,
   hasPerm: true,
-  route: { path: '/multitable', fullPath: '/multitable', meta: {} as Record<string, unknown> },
+  route: {
+    path: '/multitable',
+    fullPath: '/multitable',
+    meta: {} as Record<string, unknown>,
+    query: {} as Record<string, unknown>,
+  },
+  // Shared router double so tests can assert on replace (shell mirrors projectId into the query).
+  router: { push: vi.fn(), replace: vi.fn() },
   apiFetch: vi.fn(),
   loadProductFeatures: vi.fn().mockResolvedValue(undefined),
   fetchPlugins: vi.fn().mockResolvedValue(undefined),
@@ -24,7 +31,7 @@ vi.mock('vue-router', async () => {
   return {
     ...actual,
     useRoute: () => h.route,
-    useRouter: () => ({ push: vi.fn() }),
+    useRouter: () => h.router,
   }
 })
 
@@ -97,6 +104,20 @@ async function flushUi(cycles = 3): Promise<void> {
   }
 }
 
+// Bounded polling wait (same idiom as waitForText in the AfterSalesView specs) for DOM that appears
+// after a REAL Response body read: `new Response(...).json()` can take macrotask turns, so
+// microtask-only flushUi cycles are timing-fragile on slower CI runners. Each cycle yields one
+// macrotask + nextTick; throws on timeout so a missing element fails loudly, not as a null deref.
+async function waitForSelector(container: HTMLElement, selector: string, cycles = 40): Promise<Element> {
+  for (let i = 0; i < cycles; i += 1) {
+    const el = container.querySelector(selector)
+    if (el) return el
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    await nextTick()
+  }
+  throw new Error(`Timed out waiting for selector: ${selector}`)
+}
+
 const VIEW_KEYS = [
   'project-workspace',
   'bom-snapshot-diff',
@@ -140,6 +161,7 @@ describe('StockPreparationWorkspace shell', () => {
 
   beforeEach(() => {
     h.locale = 'zh-CN'
+    h.route = { path: '/stock-prep', fullPath: '/stock-prep', meta: {}, query: {} }
     container = document.createElement('div')
     document.body.appendChild(container)
   })
@@ -210,6 +232,337 @@ describe('StockPreparationWorkspace shell', () => {
     expect(panelAfter.querySelector('[data-testid="stock-prep-desc-exception-queue"]')).not.toBeNull()
   })
 
+  // Shared project context (view 1 → view 2): values-free fixtures behind the REAL service modules
+  // (only apiFetch is mocked), so the projectId hand-off is asserted across the actual wiring.
+  function mockStockPrepReads(): void {
+    h.apiFetch.mockImplementation(async (url: string) => {
+      if (url.includes('/api/integration/stock-preparation/projects')) {
+        return new Response(
+          JSON.stringify({
+            ok: true,
+            data: {
+              projectCount: 1,
+              statusCounts: { active: 1 },
+              projects: [
+                {
+                  projectId: 'proj-alpha',
+                  projectStatus: 'active',
+                  lastSyncRunId: 'sync-run-alpha',
+                  snapshotBatchCount: 1,
+                  openExceptionCount: 0,
+                  readyLineCount: 0,
+                  heldLineCount: 0,
+                },
+              ],
+            },
+          }),
+          { status: 200 },
+        )
+      }
+      if (url.includes('/api/integration/stock-preparation/snapshot-batches')) {
+        return new Response(
+          JSON.stringify({
+            ok: true,
+            data: {
+              projectId: 'proj-alpha',
+              batchCount: 2,
+              batches: [
+                {
+                  snapshotBatchId: 'batch-alpha',
+                  snapshotVersion: 2,
+                  snapshotStatus: 'active',
+                  syncRunId: 'sync-run-alpha',
+                  lineCount: 3,
+                  createdAtPresent: true,
+                  incomplete: false,
+                },
+                {
+                  // incomplete:true through the REAL wire (#4002: zero lines / run row absent), so
+                  // the badge + disabled-diff rendering is proven end-to-end (apiFetch →
+                  // parseIntegrationResponse → real service module → view), not only via the
+                  // mocked-service view spec.
+                  snapshotBatchId: 'batch-beta',
+                  snapshotVersion: 1,
+                  snapshotStatus: 'superseded',
+                  syncRunId: null,
+                  lineCount: 0,
+                  createdAtPresent: true,
+                  incomplete: true,
+                },
+              ],
+            },
+          }),
+          { status: 200 },
+        )
+      }
+      // Views 3/4 confirmation reads (values-free minimal fixtures) — order: sync/candidates
+      // fragments are all distinct from the summary fragments, so plain includes() is safe.
+      if (url.includes('/api/integration/stock-preparation/material-mappings/summary')) {
+        return new Response(
+          JSON.stringify({
+            ok: true,
+            data: {
+              totalMappingCount: 1,
+              activeMappingCount: 1,
+              matchStatusCounts: { matched: 0, pending_confirm: 1, multi_candidate: 0, not_found: 0, version_conflict: 0 },
+              versionPolicyCounts: { drawing_and_version: 1, drawing_only: 0, category_rule: 0, manual: 0 },
+              pendingConfirmCount: 1,
+            },
+          }),
+          { status: 200 },
+        )
+      }
+      if (url.includes('/api/integration/stock-preparation/material-mappings/candidates')) {
+        return new Response(
+          JSON.stringify({
+            ok: true,
+            data: {
+              rowCount: 1,
+              byMatchStatus: { matched: 0, pending_confirm: 1, multi_candidate: 0, not_found: 0, version_conflict: 0 },
+              rows: [
+                {
+                  mappingId: 'map-handle-alpha',
+                  matchStatus: 'pending_confirm',
+                  matchMethod: 'exact_code_candidate',
+                  versionPolicy: 'drawing_and_version',
+                  confidence: 0.9,
+                  isActive: true,
+                  confirmed: false,
+                  hasErpTarget: true,
+                  plmVersionPresent: true,
+                },
+              ],
+            },
+          }),
+          { status: 200 },
+        )
+      }
+      if (url.includes('/api/integration/stock-preparation/unit-conversions/summary')) {
+        return new Response(
+          JSON.stringify({
+            ok: true,
+            data: {
+              totalRuleCount: 1,
+              activeRuleCount: 1,
+              requiresConfirmationCount: 0,
+              scopeTypeCounts: { material: 1, category: 0, generic: 0 },
+              roundingRuleCounts: { none: 1, ceil: 0, floor: 0, nearest: 0, pack_size: 0 },
+              pendingUnitLineCount: 1,
+            },
+          }),
+          { status: 200 },
+        )
+      }
+      if (url.includes('/api/integration/stock-preparation/unit-conversions/candidates')) {
+        return new Response(
+          JSON.stringify({
+            ok: true,
+            data: {
+              status: 'pending_confirmation',
+              snapshotBatchId: 'batch-alpha',
+              rowCount: 1,
+              byOutcome: { candidate: 1 },
+              byReason: { unknown: 1 },
+              rows: [{ contextFingerprint: 'fp-handle-alpha', outcome: 'candidate', hasCandidate: true }],
+            },
+          }),
+          { status: 200 },
+        )
+      }
+      // Views 5/6 W5a list reads (values-free minimal fixtures). The bare /exceptions fragment is
+      // checked LAST among stock-prep URLs so it can never shadow a more specific path.
+      if (url.includes('/api/integration/stock-preparation/prep-lines')) {
+        return new Response(
+          JSON.stringify({
+            ok: true,
+            data: {
+              rowCount: 1,
+              byPrepStatus: { draft: 1, held: 0 },
+              byMappingStatus: { matched: 1, pending_confirm: 0, multi_candidate: 0, not_found: 0, version_conflict: 0 },
+              byUnitStatus: { converted: 1, missing_rule: 0, conflict: 0 },
+              rows: [
+                {
+                  stockPrepLineId: 'line-handle-alpha',
+                  prepStatus: 'draft',
+                  mappingStatus: 'matched',
+                  unitStatus: 'converted',
+                  exceptionCount: 0,
+                  hasIssueQty: true,
+                  hasErpTarget: true,
+                },
+              ],
+            },
+          }),
+          { status: 200 },
+        )
+      }
+      if (url.includes('/api/integration/stock-preparation/exceptions')) {
+        return new Response(
+          JSON.stringify({
+            ok: true,
+            data: {
+              rowCount: 1,
+              unresolvedBlockingCount: 1,
+              byType: { missing_mapping: 1, multi_candidate: 0, version_conflict: 0, erp_item_missing: 0, unit_missing: 0, unit_conflict: 0, invalid_qty: 0, missing_child_bom: 0 },
+              byStatus: { open: 1, resolved: 0, ignored: 0, deferred: 0 },
+              bySeverity: { info: 0, warning: 0, blocking: 1 },
+              rows: [
+                {
+                  exceptionId: 'exc-handle-alpha',
+                  exceptionType: 'missing_mapping',
+                  severity: 'blocking',
+                  status: 'open',
+                  resolved: false,
+                  resolvedByPresent: false,
+                },
+              ],
+            },
+          }),
+          { status: 200 },
+        )
+      }
+      return new Response(JSON.stringify({ ok: true, data: {} }), { status: 200 })
+    })
+  }
+
+  it('shares the projectId selected in view 1 with view 2 — no re-select needed', async () => {
+    mockStockPrepReads()
+    const root = await mountShell()
+
+    // Pick a project in view 1 (its row renders after the REAL projects Response settles — poll).
+    const selectButton = (await waitForSelector(
+      root,
+      '[data-testid="stock-prep-project-select"]',
+    )) as HTMLButtonElement
+    selectButton.click()
+
+    // The shell jumps to view 2 already scoped: no select-a-project state, batch list GET issued
+    // with the SAME internal handle view 1 emitted. Wait for the settled data view, not a fixed
+    // number of flushes (real Response.json() timing differs between local and CI).
+    await waitForSelector(root, '[data-testid="stock-prep-snapshot-overview"]')
+    const panel = root.querySelector('[data-testid="stock-prep-panel"]') as HTMLElement
+    expect(panel.getAttribute('data-active')).toBe('bom-snapshot-diff')
+    expect(root.querySelector('[data-testid="stock-prep-snapshot-no-project"]')).toBeNull()
+    const batchListCalls = h.apiFetch.mock.calls
+      .map((call) => String(call[0]))
+      .filter((url) => url.includes('/snapshot-batches'))
+    expect(batchListCalls.length).toBe(1)
+    expect(batchListCalls[0]).toContain('projectId=proj-alpha')
+
+    // NIT-1: close the incomplete wire→render loop — the REAL apiFetch fixture carries an
+    // incomplete:true batch, and exactly that row materializes the badge + disabled diff entry.
+    const incompleteBadges = root.querySelectorAll('[data-testid="stock-prep-snapshot-incomplete-badge"]')
+    expect(incompleteBadges.length).toBe(1)
+    expect(incompleteBadges[0].textContent).toContain('不完整')
+    const diffButtons = root.querySelectorAll('[data-testid="stock-prep-snapshot-batch-select"]')
+    expect(diffButtons.length).toBe(2)
+    expect((diffButtons[0] as HTMLButtonElement).disabled).toBe(false)
+    expect((diffButtons[1] as HTMLButtonElement).disabled).toBe(true)
+
+    // The handle is mirrored into the route query (replace, not push) for reload/deep-link parity…
+    expect(h.router.replace).toHaveBeenCalledWith(
+      expect.objectContaining({ query: expect.objectContaining({ projectId: 'proj-alpha' }) }),
+    )
+    // …but stays values-free in the DOM: the internal handle is never rendered.
+    expect(root.textContent || '').not.toContain('proj-alpha')
+  })
+
+  it('shares the projectId with views 3 and 4 — confirmation views open already scoped', async () => {
+    mockStockPrepReads()
+    const root = await mountShell()
+
+    // Pick a project in view 1 (REAL wire), then enter the two confirmation tabs.
+    const selectButton = (await waitForSelector(
+      root,
+      '[data-testid="stock-prep-project-select"]',
+    )) as HTMLButtonElement
+    selectButton.click()
+    await waitForSelector(root, '[data-testid="stock-prep-snapshot-overview"]')
+
+    // View 3 (material mapping): opens scoped — no re-select, reads carry the SAME handle.
+    ;(root.querySelector('[data-testid="stock-prep-tab-material-mapping"]') as HTMLButtonElement).click()
+    await waitForSelector(root, '[data-testid="stock-prep-mapping-overview"]')
+    expect(root.querySelector('[data-testid="stock-prep-mapping-no-project"]')).toBeNull()
+    const mappingSummaryCalls = h.apiFetch.mock.calls
+      .map((call) => String(call[0]))
+      .filter((url) => url.includes('/material-mappings/summary'))
+    expect(mappingSummaryCalls.length).toBe(1)
+    expect(mappingSummaryCalls[0]).toContain('projectId=proj-alpha')
+
+    // View 4 (unit conversion): same shared scope.
+    ;(root.querySelector('[data-testid="stock-prep-tab-unit-conversion"]') as HTMLButtonElement).click()
+    await waitForSelector(root, '[data-testid="stock-prep-unit-overview"]')
+    expect(root.querySelector('[data-testid="stock-prep-unit-no-project"]')).toBeNull()
+    const unitSummaryCalls = h.apiFetch.mock.calls
+      .map((call) => String(call[0]))
+      .filter((url) => url.includes('/unit-conversions/summary'))
+    expect(unitSummaryCalls.length).toBe(1)
+    expect(unitSummaryCalls[0]).toContain('projectId=proj-alpha')
+
+    // The internal handle stays values-free in the DOM across all tabs.
+    expect(root.textContent || '').not.toContain('proj-alpha')
+  })
+
+  it('shares the projectId with views 5 and 6 — prep-line and exception views open already scoped', async () => {
+    mockStockPrepReads()
+    const root = await mountShell()
+
+    // Pick a project in view 1 (REAL wire), then enter the two W5 tabs.
+    const selectButton = (await waitForSelector(
+      root,
+      '[data-testid="stock-prep-project-select"]',
+    )) as HTMLButtonElement
+    selectButton.click()
+    await waitForSelector(root, '[data-testid="stock-prep-snapshot-overview"]')
+
+    // View 5 (prep lines): opens scoped — no re-select, the list read carries the SAME handle.
+    ;(root.querySelector('[data-testid="stock-prep-tab-prep-line"]') as HTMLButtonElement).click()
+    await waitForSelector(root, '[data-testid="stock-prep-line-overview"]')
+    expect(root.querySelector('[data-testid="stock-prep-line-no-project"]')).toBeNull()
+    const prepLineCalls = h.apiFetch.mock.calls
+      .map((call) => String(call[0]))
+      .filter((url) => url.includes('/prep-lines'))
+    expect(prepLineCalls.length).toBe(1)
+    expect(prepLineCalls[0]).toContain('projectId=proj-alpha')
+
+    // View 6 (exception queue): same shared scope.
+    ;(root.querySelector('[data-testid="stock-prep-tab-exception-queue"]') as HTMLButtonElement).click()
+    await waitForSelector(root, '[data-testid="stock-prep-exception-overview"]')
+    expect(root.querySelector('[data-testid="stock-prep-exception-no-project"]')).toBeNull()
+    const exceptionCalls = h.apiFetch.mock.calls
+      .map((call) => String(call[0]))
+      .filter((url) => url.split('?')[0] === '/api/integration/stock-preparation/exceptions')
+    expect(exceptionCalls.length).toBe(1)
+    expect(exceptionCalls[0]).toContain('projectId=proj-alpha')
+
+    // The internal handle stays values-free in the DOM across all tabs.
+    expect(root.textContent || '').not.toContain('proj-alpha')
+  })
+
+  it('seeds the shared project context from the ?projectId= route query (deep link / reload)', async () => {
+    mockStockPrepReads()
+    h.route = {
+      path: '/stock-prep',
+      fullPath: '/stock-prep?projectId=proj-alpha',
+      meta: {},
+      query: { projectId: 'proj-alpha' },
+    }
+    const root = await mountShell()
+
+    const snapshotTab = root.querySelector('[data-testid="stock-prep-tab-bom-snapshot-diff"]') as HTMLButtonElement
+    snapshotTab.click()
+
+    // View 2 opens already scoped to the query's project handle — no re-select state. Poll for the
+    // settled data view (real Response.json() timing differs between local and CI).
+    await waitForSelector(root, '[data-testid="stock-prep-snapshot-overview"]')
+    expect(root.querySelector('[data-testid="stock-prep-snapshot-no-project"]')).toBeNull()
+    const batchListCalls = h.apiFetch.mock.calls
+      .map((call) => String(call[0]))
+      .filter((url) => url.includes('/snapshot-batches'))
+    expect(batchListCalls.length).toBe(1)
+    expect(batchListCalls[0]).toContain('projectId=proj-alpha')
+  })
+
   it('shell copy is values-free (no secrets, no long numeric runs) in both locales', async () => {
     for (const locale of ['zh-CN', 'en']) {
       h.locale = locale
@@ -248,7 +601,7 @@ describe('App nav entry for Stock Preparation', () => {
   beforeEach(() => {
     h.locale = 'zh-CN'
     h.hasPerm = true
-    h.route = { path: '/multitable', fullPath: '/multitable', meta: {} }
+    h.route = { path: '/multitable', fullPath: '/multitable', meta: {}, query: {} }
     window.localStorage.clear()
     window.localStorage.setItem('auth_token', 'session-token')
   })

@@ -102,6 +102,40 @@ that gap in the contract-first way:
    `ItemType`, so the metadata response is meaningful instead of an empty
    placeholder.
 
+## #4020: unified `available` affordance-visibility formula (2026-07-10)
+
+The Yuantus provider (#1156) now computes a unified per-feature `available` field on
+every `GET /api/v1/integrations/capabilities` entry: `available = supported &&
+(packaging === 'base' || entitled)`. The capabilities interaction's response body is
+enriched (no new interaction, no count change -- still 41) to pin the formula for three
+feature keys:
+
+- `bom_multitable` -- paid, licensed under this fixture's `tenant-1 holds an active
+  plm.bom_multitable license` provider state: `entitled: true`, `available: true`.
+- `discussion_core` -- base-packaged (`packaging: "base"`), **no** license row on this
+  fixture: `entitled: false`, `available: true`. This is the exact case #4020 exists for
+  -- a naive entitled-only derivation would wrongly hide a base affordance.
+- `metasheet_review` -- paid-packaged (`packaging: "paid"`), also **no** license row on
+  this fixture: `entitled: false`, `available: false`. (`metasheet_review` was NOT part
+  of the licensed provider state, so this reflects the actual unlicensed reading, not an
+  invented flip -- see the dev doc for the grounding against the live Yuantus provider
+  fixture seeding.)
+
+`entitled` and `available` on all three keys are left **without** a matchingRule, so
+they are matched by exact equality (the formula's own discriminators) rather than the
+usual `type` matcher -- mirroring the ECO Phase 0 discriminated-409 precedent
+(`detail.code` / `eco_required` exact, message/state type-matched).
+
+Consumer-side, `packages/core-backend/src/data-adapters/PLMAdapter.ts` adds `available?:
+boolean` to `IntegrationFeatureCapability` (additive) plus an exported
+`isFeatureAvailable(entry)` helper: consumes `entry.available` directly when present,
+falls back to `supported && entitled` when absent (older provider). The three
+`plm-workbench.ts` gates that used to check `feature.entitled !== true` (BOM multitable
+read context, BOM multitable write-back, BOM ECO-revision intent) are re-keyed through
+this helper. No discussion UI affordance is wired -- this is a capability-helper +
+pact change only. See
+`docs/development/plm-capability-available-helper-dev-and-verification-20260710.md`.
+
 ## Running the test
 
 ```bash
