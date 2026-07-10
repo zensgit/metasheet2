@@ -185,6 +185,7 @@
           show-selection
           :selectable="isRowBatchSelectable"
           show-wait-column
+          show-unread-dot
           :actions-width="150"
           @row-click="handleRowClick"
           @selection-change="handlePendingSelectionChange"
