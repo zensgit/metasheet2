@@ -134,6 +134,74 @@ test('Windows apply preflights dependencies before live overlay and rolls activa
   assert.match(script, /Remove-WorkspaceNodeModules -Root \$packageRoot/)
 })
 
+test('staging dependency cleanup bypasses PowerShell deep-path traversal', () => {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'ms2 onprem deep cleanup-'))
+  const applyHelper = path.join(repoRoot, 'scripts/ops/multitable-onprem-apply-package.ps1')
+  const modulesPath = path.join(tempRoot, 'node_modules')
+  let deepPath = modulesPath
+  for (let index = 0; index < 18; index += 1) {
+    deepPath = path.join(deepPath, `pnpm-segment-${index}-${'x'.repeat(18)}`)
+  }
+  fs.mkdirSync(deepPath, { recursive: true })
+  fs.writeFileSync(path.join(deepPath, 'package.json'), '{}')
+  assert.ok(deepPath.length > 260, 'fixture must exceed the traditional Windows MAX_PATH boundary')
+
+  const harness = String.raw`
+$ErrorActionPreference = 'Stop'
+$tokens = $null
+$errors = $null
+$ast = [System.Management.Automation.Language.Parser]::ParseFile($env:APPLY_HELPER, [ref]$tokens, [ref]$errors)
+if ($errors.Count -gt 0) { throw ($errors | ForEach-Object { $_.Message } | Out-String) }
+$functionText = $ast.FindAll({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $true) |
+  ForEach-Object { $_.Extent.Text }
+Invoke-Expression ($functionText -join [Environment]::NewLine)
+
+Remove-WorkspaceNodeModules -Root $env:TARGET_ROOT
+if (Test-Path -LiteralPath $env:TARGET_PATH) { throw 'deep dependency tree survived cleanup' }
+`
+
+  try {
+    const result = spawnSync('pwsh', ['-NoProfile', '-NonInteractive', '-Command', harness], {
+      cwd: repoRoot,
+      env: {
+        ...process.env,
+        APPLY_HELPER: applyHelper,
+        TARGET_ROOT: tempRoot,
+        TARGET_PATH: modulesPath,
+      },
+      encoding: 'utf8',
+    })
+    assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`)
+
+    const script = readScript('scripts/ops/multitable-onprem-apply-package.ps1')
+    assert.match(script, /fs\.rmSync\(target, \{ recursive: true, force: true, maxRetries: 5, retryDelay: 250 \}\)/)
+    assert.match(script, /if \(\$exitCode -ne 0\)/)
+    assert.match(script, /cleanup did not remove \$Path/)
+    const cleanupBlock = script.slice(
+      script.indexOf('function Remove-WorkspaceNodeModules'),
+      script.indexOf('function New-PackageOverlayTransaction'),
+    )
+    assert.match(cleanupBlock, /Remove-DirectoryTree -Path \$modulesPath/)
+    assert.doesNotMatch(cleanupBlock, /Remove-Item[\s\S]*-Recurse/)
+
+    const restoreBlock = script.slice(
+      script.indexOf('function Restore-WorkspaceNodeModules'),
+      script.indexOf('function Complete-WorkspaceNodeModulesTransaction'),
+    )
+    assert.match(restoreBlock, /Remove-DirectoryTree -Path \$entry\.ModulesPath/)
+    assert.doesNotMatch(restoreBlock, /Remove-Item[\s\S]*-Recurse/)
+
+    const completeBlock = script.slice(
+      script.indexOf('function Complete-WorkspaceNodeModulesTransaction'),
+      script.indexOf('function Invoke-HealthcheckOnce'),
+    )
+    assert.match(completeBlock, /Remove-DirectoryTree -Path \$entry\.BackupPath/)
+    assert.doesNotMatch(completeBlock, /Remove-Item[\s\S]*-Recurse/)
+  } finally {
+    fs.rmSync(tempRoot, { recursive: true, force: true })
+  }
+})
+
 test('package overlay and workspace dependency rollback restore the previous live tree', () => {
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'ms2-onprem-rollback-'))
   const applyHelper = path.join(repoRoot, 'scripts/ops/multitable-onprem-apply-package.ps1')
