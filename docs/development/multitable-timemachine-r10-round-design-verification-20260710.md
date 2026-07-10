@@ -14,13 +14,13 @@
 | 项 | 载体 | 关键验证 |
 |---|---|---|
 | **TrashModal 双层过滤 hygiene**（R9 观察项收尾） | #4060 `bc97802a2` | `historyVisibleFields`→`twoLayerVisibleFields` 更名服务双消费者；真实挂载 spec 经新 `open-trash` 锚点；突变恰红 `'Hidden Value' to be '#del_1'`；对抗审 **APPROVE 0P1/0P2/0P3**（含反证：fields 仅 title 一处消费、无恢复列选择器回归；全仓 sibling 扫描=最后一个单层喂给面） |
-| **四份 gate-front 决策 one-pager** | #4059 `63944c461` | ①restore 回链 mini-lock ②field-value tombstone 地板（推荐 A=接受边界+复议触发器） ③resurrect 锚精确化（**审阅贡献 A′=服务端按 asOf T 推导锚,零 wire 变更,成为新推荐**） ④all-tables 字段元数据（推荐 B=服务端掩码 fieldNames 复用投影 allow-set）。对抗审 APPROVE-with-hardening 0P1/0P2,2P3 全折入（legacy /restore NULL 意图钉进 G2;A 选项成本修正=preview response 并不下发候选锚） |
+| **四份 gate-front 决策 one-pager** | #4059 `63944c461` | ①restore 回链 mini-lock ②field-value tombstone 地板（推荐 A=接受边界+复议触发器） ③resurrect 锚精确化（**审阅贡献 A′=服务端按 asOf T 推导锚,零 wire 变更,成为新推荐**） ④all-tables 字段元数据（推荐 B=服务端掩码 fieldNames 复用投影 allow-set）。对抗审 APPROVE-with-hardening 0P1/0P2,2P3 全折入（legacy /restore 处置=**初审时钉为 NULL golden,后被 owner 深审推翻,最终以 OD-0 为准**;A 选项成本修正=preview response 并不下发候选锚） |
 | **T2 浏览器证据（历史欠账清偿）** | `docs/development/assets/multitable-history-center-t2-evidence-20260710/`（5 PNG + EVIDENCE.md） | 真实全栈（新鲜 pg + migrate + backend + vite + 无头 Chromium）：①密集时间线（~22 可见批次行,actor 显示名非 id,筛选栏全量）②展开批次含**记录标题** + **link diff 显示名称非 JSON** ③record chip click-through 关模态开抽屉 ④workbench 基线 ⑤person diff（含诚实发现,见 §3） |
 
 ## §2 复审贡献（值得留档的设计输入）
 
 - **A′ 锚推导方案**（#4059 复审 P3-2）：resurrect 的唯一现役入口 PIT-revert wire 上已携带 `asOf` T，vintage-正确锚可由「该记录 T 之后首条 delete revision」服务端推导——比显式参数便宜（零 wire 变更）且恰好修掉多 vintage under-replay；原推荐 A 的「客户端已知候选锚」经核为不实（preview response 只回 recordId/snapshot/snapshotHash）。
-- **legacy `/restore` 第三路**（P3-1）：`POST …/records/:recordId/restore` 也产 `source='restore'` revision 但无活跃 FE 调用方——回链锁 §5 显式出界 + G2 钉 NULL 意图。
+- **legacy `/restore` 第三路**（P3-1，**初审处置已被推翻**）：`POST …/records/:recordId/restore` 也产 `source='restore'` revision——初审曾以「无活跃 FE 调用方」为由出界+G2 钉 NULL;**owner 深审推翻该处置**（活路由永久 NULL=双轨语义），最终以回链锁 **OD-0**（三路全穿线 或 正式废弃）为准,NULL golden 已删除。
 
 ## §3 诚实发现与携带项
 
