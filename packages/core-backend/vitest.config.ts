@@ -121,6 +121,12 @@ export default defineConfig({
       // wired as a WHOLE FILE into the `Run approval real-DB integration` step in
       // plugin-tests.yml where it runs against real Postgres every PR.
       'tests/integration/directory-sync-alert-coverage.db.test.ts',
+      // F5 files-orphan-blob-retention (blob_purged_at migration + sweepOrphanFileBlobs GF5-8 matrix):
+      // DATABASE_URL-gated (describeDb), isolated per-test schema. Excluded from the no-DB default job
+      // so it doesn't skip-green, and wired as a WHOLE FILE into the `Run attendance integration tests`
+      // step in plugin-tests.yml (alongside files-storage-key-migration.db.test.ts) where it runs
+      // against real Postgres every PR.
+      'tests/integration/files-orphan-blob-retention.db.test.ts',
       'tests/integration/attendance-comp-time-expiry-reminder.test.ts',
       'tests/integration/attendance-expiry-service.test.ts',
       'tests/integration/attendance-notification-deliveries.test.ts',

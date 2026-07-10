@@ -369,6 +369,8 @@ describeDb('F1 files-acl-tombstone: resource-level ACL matrix (real DB, route-le
   }
   const storageKeyInDb = async (id: string): Promise<string | null> =>
     (await pool.query<{ storage_key: string | null }>(`SELECT storage_key FROM files WHERE id = $1`, [id])).rows[0]?.storage_key ?? null
+  const blobPurgedAtInDb = async (id: string): Promise<Date | null> =>
+    (await pool.query<{ blob_purged_at: Date | null }>(`SELECT blob_purged_at FROM files WHERE id = $1`, [id])).rows[0]?.blob_purged_at ?? null
   const pathExists = async (p: string): Promise<boolean> => fsp.access(p).then(() => true).catch(() => false)
 
   it('G3 (test 3+5) — a directly-seeded row (physical object never seen by the in-memory index) still downloads: DB storage_key is authoritative, no warmup window', async () => {
@@ -485,6 +487,63 @@ describeDb('F1 files-acl-tombstone: resource-level ACL matrix (real DB, route-le
       expect((await download(tAdmin, id)).status).toBe(404)
     } finally {
       await cleanupFiles(owner, admin)
+    }
+  })
+
+  // ---------------------------------------------------------------------------
+  // F5 files-orphan-blob-retention design-lock (2026-07-10), GF5-7: the DELETE route's root-cause fix —
+  // physical delete now goes through `deleteByKey` (resolved via `resolveActiveStorageKey`, the same
+  // resolution download/info use) instead of the old index-keyed `storage.delete(id)`. This proves the
+  // synchronous common-path outcome end-to-end against the real running server: the physical blob is
+  // actually gone from disk AND `blob_purged_at` is stamped in the same request — not left for the
+  // background sweep.
+  // ---------------------------------------------------------------------------
+  it('GF5-7 — DELETE physically removes the blob by storage_key and stamps blob_purged_at synchronously', async () => {
+    const owner = uid('gf57-owner')
+    const t = await mintUserToken(owner)
+    try {
+      const up = await uploadFile(t, { filename: 'gf57.png', contentType: 'image/png', content: PHOTO_PNG })
+      expect(up.status).toBe(200)
+      const id = uploadedFileId(up)
+      const key = await storageKeyInDb(id)
+      expect(key).toBeTruthy()
+      const full = path.resolve(STORAGE_ROOT, key!)
+      expect(await pathExists(full)).toBe(true)
+      expect(await blobPurgedAtInDb(id)).toBeNull()
+
+      const delRes = await del(t, id)
+      expect(delRes.status).toBe(200)
+      expect(delRes.body).toEqual({ success: true, id })
+
+      // the physical blob is gone (deleted by key, not by the stale in-memory index) AND the row is
+      // stamped as confirmed-purged in the same request — no dependency on the background sweep.
+      expect(await pathExists(full)).toBe(false)
+      expect(await blobPurgedAtInDb(id)).not.toBeNull()
+    } finally {
+      await cleanupFiles(owner)
+    }
+  })
+
+  it('GF5-7 — DELETE on a row with a POISONED storage_key skips the physical delete (blob_purged_at stays NULL, no throw)', async () => {
+    const owner = uid('gf57-poison')
+    const t = await mintUserToken(owner)
+    const id = randomUUID()
+    const washKey = `${id}-gf57-poison.png`
+    const full = await writePhysical(washKey, PHOTO_PNG)
+    try {
+      await seedFileRow({ id, owner, storageKey: `!f3-collision:${id}`, urlKey: washKey })
+
+      const delRes = await del(t, id)
+      expect(delRes.status).toBe(200)
+      expect(delRes.body).toEqual({ success: true, id })
+
+      // the poisoned key was never resolved/deleted through — the (simulated collision-group) blob is
+      // untouched, and blob_purged_at stays NULL (a human, not the sweep, must ever resolve poison rows).
+      expect(await pathExists(full)).toBe(true)
+      expect(await blobPurgedAtInDb(id)).toBeNull()
+    } finally {
+      await fsp.unlink(full).catch(() => undefined)
+      await cleanupFiles(owner)
     }
   })
 })
