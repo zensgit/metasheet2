@@ -215,8 +215,9 @@ async function main() {
       assert.equal(call.data.severity, 'blocking')
       assert.equal(call.data.status, 'open')
     }
-    const runWrites = api.createCalls.filter((entry) => entry.sheetId === SHEET.run && entry.data.runType === 'generation')
-    assert.equal(runWrites.length, 1)
+    const runWrites = api.createCalls.filter((entry) => entry.sheetId === SHEET.run && entry.data.runType === 'prep_generate')
+    assert.equal(runWrites.length, 1, 'run row carries the design-vocabulary prep_generate type')
+    assert.equal(runWrites[0].data.status, 'partial', 'engine partial is preserved, not folded to succeeded')
     assert.ok(!JSON.stringify(result.evidence).includes(SECRET), 'evidence stays values-free')
   })
 
@@ -248,6 +249,36 @@ async function main() {
     const second = await runStockPreparationGeneration(baseRunInput(api, provisioning, { snapshotBatchId }))
     assert.equal(second.ready, true)
     assert.equal(second.unresolvedBlockingExceptionCount, 0)
+    // P2-3: the run ledger reflects the LATEST verdict — the stable run row's status was patched.
+    const runRow = api.rowsOf(SHEET.run).find((row) => row.data.runType === 'prep_generate')
+    assert.equal(runRow.data.status, 'succeeded', 'ledger reflects the latest verdict')
+    // Both runs mapped to 'succeeded' (engine was ready both times; the invariant block is response-
+    // level), so no status patch was needed — the ledger-flip path is pinned separately below.
+    assert.equal(second.created.run, 0, 'stable runId => never a duplicate run row')
+  })
+
+  // ---- (c2) run-ledger flip (P2-3) ----
+  await run('a blocked first run records failed; fixing inputs and re-running patches the ledger', async () => {
+    const api = makeRecordsApi()
+    const provisioning = makeProvisioning()
+    // Batch whose single line has NO mapping => engine 'blocked' => run row 'failed'.
+    const syncRunId = 'run_flip'
+    api.seed(SHEET.batch, { snapshotBatchId: 'batch_flip', projectId: BUSINESS_PROJECT_ID, snapshotVersion: 1, syncRunId })
+    api.seed(SHEET.run, { runId: syncRunId, status: 'succeeded' })
+    api.seed(SHEET.line, { snapshotLineId: 'f_l1', snapshotBatchId: 'batch_flip', projectId: BUSINESS_PROJECT_ID, childDrawingNo: 'F-100', childVersion: 'V1', designUnit: 'pcs', designQty: 1 })
+    const first = await runStockPreparationGeneration(baseRunInput(api, provisioning, { snapshotBatchId: 'batch_flip' }))
+    assert.equal(first.status, 'blocked')
+    const ledger = () => api.rowsOf(SHEET.run).find((row) => row.data.runType === 'prep_generate')
+    assert.equal(ledger().data.status, 'failed')
+    // Fix the inputs: confirm the mapping + material + rule, resolve the old exception, re-run.
+    api.seed(SHEET.mapping, { mappingId: 'map_f', plmDrawingNo: 'F-100', plmVersion: 'V1', erpMaterialCode: 'F-100', erpMaterialInternalId: 'ITM_F', versionPolicy: 'drawing_and_version', matchStatus: 'matched', isActive: true, confirmedBy: OPERATOR, confirmedAt: 'x' })
+    api.seed(SHEET.material, { erpMaterialId: 'erp_f', erpMaterialCode: 'F-100', erpMaterialInternalId: 'ITM_F', issueUnit: 'pcs', isActive: true })
+    api.seed(SHEET.rule, { conversionRuleId: 'rule_f', plmUnit: 'pcs', erpIssueUnit: 'pcs', conversionFactor: 1, scopeType: 'generic', roundingRule: 'none', requiresConfirmation: true, isActive: true, confirmedBy: OPERATOR, confirmedAt: 'x' })
+    const second = await runStockPreparationGeneration(baseRunInput(api, provisioning, { snapshotBatchId: 'batch_flip' }))
+    assert.equal(second.status, 'ready')
+    assert.equal(ledger().data.status, 'succeeded', 'P2-3: the frozen-failed ledger is patched to the latest verdict')
+    assert.equal(second.patched.run, 1)
+    assert.equal(second.created.run, 0)
   })
 
   // ---- (d) re-run semantics ----
@@ -262,10 +293,22 @@ async function main() {
     assert.equal(replay.patched.lines, 1, 'existing prep line refreshed via patch')
     assert.equal(replay.created.exceptions, 0)
     assert.ok(replay.skipped.exceptions >= 1)
-    assert.equal(replay.created.run, 0, 'stable runId => run row create-only')
+    assert.equal(replay.created.run, 0, 'stable runId => run row never duplicated')
     assert.equal(replay.mode, 'refreshed')
     assert.equal(api.createCalls.length, createsAfterFirst, 'replay created zero new rows')
     assert.equal(api.rowsOf(SHEET.prepLine).length, 1, 'no prep-line duplicates')
+    // P2-1: explicit-clear — a template field the fresh row no longer carries is NULLED, never left
+    // stale. Plant a stale ERP internal id on the stored prep line, re-run, and require it cleared
+    // alongside the fresh code (no hybrid identity row).
+    const prepLineRecord = api.rowsOf(SHEET.prepLine)[0]
+    await api.patchRecord({ sheetId: SHEET.prepLine, recordId: prepLineRecord.id, changes: { erpMaterialInternalId: 'STALE_ITM' } })
+    // Remove internalId from the mapping so the fresh generated line lacks that field.
+    const mappingRecord = api.rowsOf(SHEET.mapping).find((row) => row.data.mappingId === 'map_a')
+    await api.patchRecord({ sheetId: SHEET.mapping, recordId: mappingRecord.id, changes: { erpMaterialInternalId: null } })
+    api.patchCalls.length = 0
+    await runStockPreparationGeneration(baseRunInput(api, provisioning))
+    const refreshed = api.rowsOf(SHEET.prepLine)[0]
+    assert.notEqual(refreshed.data.erpMaterialInternalId, 'STALE_ITM', 'stale ERP internal id must not survive a refresh (hybrid-row guard)')
     // A human-resolved exception row is never clobbered by a re-run.
     const excRecord = api.rowsOf(SHEET.exception)[0]
     await resolveStockPreparationException({
@@ -282,7 +325,7 @@ async function main() {
   await run('resolve patches exactly the resolution quartet; vocabulary + replay + 404 gates hold', async () => {
     const api = makeRecordsApi()
     const provisioning = makeProvisioning()
-    api.seed(SHEET.exception, { exceptionId: 'exc_1', projectId: BUSINESS_PROJECT_ID, exceptionType: 'mapping_missing', severity: 'blocking', status: 'open', message: `m_${SECRET}` })
+    api.seed(SHEET.exception, { exceptionId: 'exc_1', projectId: BUSINESS_PROJECT_ID, exceptionType: 'missing_mapping', severity: 'blocking', status: 'open', message: `m_${SECRET}` })
     const base = (overrides = {}) => ({
       permission: 'admin', recordsApi: api, provisioning, targetProjectId: STAGING_PROJECT_ID,
       exceptionId: 'exc_1', resolutionAction: 'mapping_confirmed', resolvedBy: OPERATOR, ...overrides,
@@ -310,7 +353,7 @@ async function main() {
     const provisioning = makeProvisioning()
     api.seed(SHEET.exception, { exceptionId: 'b1', projectId: BUSINESS_PROJECT_ID, exceptionType: 'unit_missing', severity: 'blocking', status: 'open' })
     api.seed(SHEET.exception, { exceptionId: 'b2', projectId: BUSINESS_PROJECT_ID, exceptionType: 'unit_missing', severity: 'blocking', status: 'resolved', resolutionAction: 'manual_hold', resolvedBy: OPERATOR, resolvedAt: 'x' })
-    api.seed(SHEET.exception, { exceptionId: 'b3', projectId: BUSINESS_PROJECT_ID, exceptionType: 'mapping_missing', severity: 'blocking', status: 'open' })
+    api.seed(SHEET.exception, { exceptionId: 'b3', projectId: BUSINESS_PROJECT_ID, exceptionType: 'missing_mapping', severity: 'blocking', status: 'open' })
     const base = (overrides = {}) => ({
       permission: 'admin', recordsApi: api, provisioning, targetProjectId: STAGING_PROJECT_ID,
       exceptionIds: ['b1', 'b2'], resolutionAction: 'unit_rule_confirmed', resolvedBy: OPERATOR, ...overrides,
@@ -327,6 +370,10 @@ async function main() {
       bulkResolveStockPreparationExceptions(base({ exceptionIds: Array.from({ length: MAX_BULK_RESOLVE + 1 }, (_, index) => `x${index}`) })),
       { status: 422, code: 'EXCEPTION_BULK_TOO_LARGE' },
     )
+    // P2-4: bulk resolutionAction outside the closed vocabulary is refused before any patch.
+    await expectError(bulkResolveStockPreparationExceptions(base({ resolutionAction: 'bogus_action' })), { status: 400, code: 'EXCEPTION_RESOLUTION_ACTION_INVALID' })
+    await expectError(bulkResolveStockPreparationExceptions(base({ resolutionAction: undefined })), { status: 400, code: 'EXCEPTION_RESOLUTION_ACTION_INVALID' })
+    assert.equal(api.patchCalls.length, 0)
     // Happy: same type, one already resolved => resolved 1 / skipped 1.
     const result = await bulkResolveStockPreparationExceptions(base())
     assert.equal(result.resolved, 1)
@@ -355,6 +402,15 @@ async function main() {
     await expectError(
       runStockPreparationGeneration(baseRunInput(api, provisioning, { snapshotBatchId: 'orphan' })),
       { status: 409, code: 'GENERATION_BATCH_INCOMPLETE' },
+    )
+    // P2-5: an EXISTING complete batch owned by ANOTHER project must 404 via the explicit-id path —
+    // deleting the project-ownership guard now has a failing negative (parity with the W3c read side).
+    seedGenerationFixture(api, { snapshotBatchId: 'other_owner' })
+    const otherBatch = api.rowsOf(SHEET.batch).find((row) => row.data.snapshotBatchId === 'other_owner')
+    await api.patchRecord({ sheetId: SHEET.batch, recordId: otherBatch.id, changes: { projectId: 'proj_other' } })
+    await expectError(
+      runStockPreparationGeneration(baseRunInput(api, provisioning, { snapshotBatchId: 'other_owner' })),
+      { status: 404, code: 'GENERATION_BATCH_NOT_FOUND' },
     )
   })
 

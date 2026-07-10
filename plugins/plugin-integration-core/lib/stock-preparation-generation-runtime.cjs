@@ -46,7 +46,8 @@ const RESOLUTION_ACTION_SET = new Set(RESOLUTION_ACTIONS)
 const EXCEPTION_STATUS_OPEN = 'open'
 const EXCEPTION_STATUS_RESOLVED = 'resolved'
 const BLOCKING_SEVERITY = 'blocking'
-const GENERATION_RUN_TYPE = 'generation'
+// Design §runs closed vocabulary: run_type ∈ {plm_sync, erp_material_sync, mapping_match, unit_match, prep_generate}.
+const GENERATION_RUN_TYPE = 'prep_generate'
 
 class StockPreparationGenerationRuntimeError extends Error {
   constructor(status, code, message, details = {}) {
@@ -316,8 +317,15 @@ async function runStockPreparationGeneration(input = {}) {
     const grounded = groundRow(PREP_LINE_FIELD_IDS, line)
     const existing = existingPrepLinesById.get(stockPrepLineId)
     if (existing) {
+      // Explicit-clear refresh (review #4024 P2-1): every template field ABSENT from the fresh row is
+      // nulled, so a re-run can never leave a hybrid row (e.g. a stale erpMaterialInternalId under a
+      // freshly rebound erpMaterialCode) — the patched row exactly mirrors this generation.
       const changes = { ...grounded }
       delete changes[PREP_LINE_KEY_FIELD]
+      for (const fieldId of PREP_LINE_FIELD_IDS) {
+        if (fieldId === PREP_LINE_KEY_FIELD) continue
+        if (!(fieldId in changes)) changes[fieldId] = null
+      }
       await prepLineTarget.scoped.patchRecord({ recordId: existing.id, changes })
       linesPatched += 1
     } else {
@@ -341,20 +349,23 @@ async function runStockPreparationGeneration(input = {}) {
     exceptionsCreated += 1
   }
 
-  // Run record: create-only on the engine's stable runId (a replay keeps the original row).
+  // Run record: stable engine runId. The FIRST run creates the row; a RE-RUN patches its status so
+  // the ledger reflects the LATEST generation verdict (review #4024 P2-3 — a resolve-then-re-run must
+  // not leave a frozen 'failed'). Status maps onto the design closed vocabulary, 'partial' preserved.
   const runId = optionalString(generated.runId)
+  const runStatus = generated.status === 'blocked' ? 'failed' : (generated.status === 'partial' ? 'partial' : 'succeeded')
   let runCreated = 0
+  let runPatched = 0
   if (runId) {
     const existingRun = await batchContextRunLookup(batchContext.runTarget.scoped, runId)
     if (!existingRun) {
       await batchContext.runTarget.scoped.createRecord({
-        data: groundRow(RUN_FIELD_IDS, {
-          runId,
-          runType: GENERATION_RUN_TYPE,
-          status: generated.status === 'blocked' ? 'failed' : 'succeeded',
-        }),
+        data: groundRow(RUN_FIELD_IDS, { runId, runType: GENERATION_RUN_TYPE, status: runStatus }),
       })
       runCreated = 1
+    } else if (optionalString(readCell(existingRun, 'status')) !== runStatus) {
+      await batchContext.runTarget.scoped.patchRecord({ recordId: existingRun.id, changes: { status: runStatus } })
+      runPatched = 1
     }
   }
 
@@ -365,22 +376,22 @@ async function runStockPreparationGeneration(input = {}) {
   const ready = generated.status === 'ready' && unresolvedBlockingExceptionCount === 0
 
   return {
-    persisted: linesCreated + linesPatched + exceptionsCreated + runCreated > 0,
-    mode: linesCreated + exceptionsCreated + runCreated > 0 ? 'created' : (linesPatched > 0 ? 'refreshed' : 'skipped_existing'),
+    persisted: linesCreated + linesPatched + exceptionsCreated + runCreated + runPatched > 0,
+    mode: linesCreated + exceptionsCreated + runCreated > 0 ? 'created' : (linesPatched + runPatched > 0 ? 'refreshed' : 'skipped_existing'),
     snapshotBatchId: batchContext.snapshotBatchId,
     runId,
     status: generated.status,
     ready,
     unresolvedBlockingExceptionCount,
     created: { lines: linesCreated, exceptions: exceptionsCreated, run: runCreated },
-    patched: { lines: linesPatched },
+    patched: { lines: linesPatched, run: runPatched },
     skipped: { exceptions: exceptionsSkipped },
     evidence: {
       ...generated.evidence,
       persistence: {
         lines: { created: linesCreated, patched: linesPatched, target: { objectId: PREP_LINE_OBJECT_ID } },
         exceptions: { created: exceptionsCreated, skipped: exceptionsSkipped, target: { objectId: EXCEPTION_OBJECT_ID }, humanFieldsExcluded: EXCEPTION_HUMAN_FIELD_IDS.slice() },
-        run: { created: runCreated, target: { objectId: RUN_OBJECT_ID } },
+        run: { created: runCreated, patched: runPatched, target: { objectId: RUN_OBJECT_ID } },
       },
       ready,
       unresolvedBlockingExceptionCount,
