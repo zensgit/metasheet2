@@ -27,7 +27,7 @@ const {
   STOCK_PREPARATION_MVP_TABLE_TEMPLATES,
   STOCK_PREPARATION_MVP_REQUIRED_OBJECT_IDS,
 } = require('./stock-preparation-templates.cjs')
-const { planBomSnapshotDiff, CHANGE_TYPES } = require('./stock-preparation-snapshot-diff.cjs')
+const { planBomSnapshotDiff, CHANGE_TYPES, DIFF_TYPES, REVIEW_STATUSES } = require('./stock-preparation-snapshot-diff.cjs')
 const { optionalString, isPlainObject } = require('./stock-preparation-common.cjs')
 const {
   StockPreparationTargetProvisioningError,
@@ -274,24 +274,58 @@ function pickPredecessor(batchRows, currentSnapshotBatchId, currentVersion) {
   return best
 }
 
+// Resolve the diff BASE batch id. An EXPLICIT `requestedBase` is a caller-chosen pair and must be
+// validated (differ from current -> 400; exist -> 404; same business project -> 409). Without it the
+// predecessor rule applies unchanged (highest version strictly below current, same business project).
+async function resolveDiffBase(api, batchSheet, { currentSnapshotBatchId, projectId, currentVersion, requestedBase }) {
+  if (requestedBase) {
+    if (requestedBase === currentSnapshotBatchId) {
+      throw new StockPreparationTargetProvisioningError(400, 'SNAPSHOT_DIFF_BASE_INVALID', 'baseSnapshotBatchId must differ from the diffed batch', { field: 'baseSnapshotBatchId' })
+    }
+    const baseRows = batchSheet ? await queryAllRecords(api, batchSheet.id, { snapshotBatchId: requestedBase }) : []
+    const baseRow = baseRows[0] || null
+    if (!baseRow) {
+      throw new StockPreparationTargetProvisioningError(404, 'SNAPSHOT_DIFF_BASE_NOT_FOUND', 'base snapshot batch was not found', { field: 'baseSnapshotBatchId' })
+    }
+    const baseProjectId = optionalString(readCell(baseRow, 'projectId'))
+    if (projectId && baseProjectId && baseProjectId !== projectId) {
+      throw new StockPreparationTargetProvisioningError(409, 'SNAPSHOT_DIFF_BASE_PROJECT_MISMATCH', 'base snapshot batch belongs to a different business project', { field: 'baseSnapshotBatchId' })
+    }
+    return requestedBase
+  }
+  if (batchSheet && projectId) {
+    const projectBatchRows = await queryAllRecords(api, batchSheet.id, { projectId })
+    return pickPredecessor(projectBatchRows, currentSnapshotBatchId, currentVersion)
+  }
+  return null
+}
+
 /**
  * Values-free diff of a snapshot batch against its immutable predecessor batch.
  * The batch id arrives from the route PATH. `targetProjectId` (STAGING) locates the MVP tables; the
  * business project used to scope the predecessor search is read from the current batch row itself (the
  * FE diff call carries no projectId), falling back to `businessProjectId` when the batch row is absent.
+ * An optional `baseSnapshotBatchId` overrides the predecessor auto-pick with a validated caller-chosen
+ * pair; when absent the original predecessor semantics are preserved unchanged.
  */
-async function getSnapshotDiff({ recordsApi, provisioning, targetProjectId, businessProjectId, snapshotBatchId, permission } = {}) {
+async function getSnapshotDiff({ recordsApi, provisioning, targetProjectId, businessProjectId, snapshotBatchId, baseSnapshotBatchId: baseOverride, permission } = {}) {
   assertAdminPermission(permission)
   const api = ensureReadOnlyRecordsApi(recordsApi)
   const prov = ensureProvisioningApi(provisioning)
   const currentSnapshotBatchId = requiredString(snapshotBatchId, 'snapshotBatchId')
   const stagingProjectId = requiredString(targetProjectId, 'targetProjectId')
+  const requestedBase = optionalString(baseOverride)
 
   const batchSheet = await findMvpSheet(prov, stagingProjectId, BATCH_OBJECT_ID)
   const lineSheet = await findMvpSheet(prov, stagingProjectId, LINE_OBJECT_ID)
   const exceptionSheet = await findMvpSheet(prov, stagingProjectId, EXCEPTION_OBJECT_ID)
 
   if (!batchSheet && !lineSheet && !exceptionSheet) {
+    // An explicit base cannot be verified against an unprovisioned substrate — fail closed instead of
+    // silently answering with the empty-diff shape.
+    if (requestedBase) {
+      throw new StockPreparationTargetProvisioningError(404, 'SNAPSHOT_DIFF_BASE_NOT_FOUND', 'base snapshot batch was not found', { field: 'baseSnapshotBatchId' })
+    }
     return {
       snapshotBatchId: currentSnapshotBatchId,
       baseSnapshotBatchId: null,
@@ -313,12 +347,12 @@ async function getSnapshotDiff({ recordsApi, provisioning, targetProjectId, busi
     }
   }
 
-  // Predecessor = highest version strictly below the current, within the same business project.
-  let baseSnapshotBatchId = null
-  if (batchSheet && projectId) {
-    const projectBatchRows = await queryAllRecords(api, batchSheet.id, { projectId })
-    baseSnapshotBatchId = pickPredecessor(projectBatchRows, currentSnapshotBatchId, currentVersion)
-  }
+  const baseSnapshotBatchId = await resolveDiffBase(api, batchSheet, {
+    currentSnapshotBatchId,
+    projectId,
+    currentVersion,
+    requestedBase,
+  })
 
   // Lines for the current + predecessor batches (never mutated; passed straight to the diff engine).
   const currentLines = lineSheet
@@ -354,15 +388,131 @@ async function getSnapshotDiff({ recordsApi, provisioning, targetProjectId, busi
   }
 }
 
+// Per-row projection whitelist: EXACTLY the engine's values-free diff-row keys. makeDiff's output is
+// already values-free (handles + sha16 fingerprints + enums), but projecting through this closed list
+// means a FUTURE engine key can never leak through this route unreviewed.
+const DIFF_ROW_KEYS = Object.freeze([
+  'diffId',
+  'diffType',
+  'reviewStatus',
+  'changeTypes',
+  'reason',
+  'rowCount',
+  'previousSnapshotLineId',
+  'currentSnapshotLineId',
+  'keyFingerprint',
+  'previousPathKeyFingerprint',
+  'currentPathKeyFingerprint',
+])
+const MAX_DIFF_ROWS = 2000
+const REVIEW_STATUS_VALUES = new Set(Object.values(REVIEW_STATUSES))
+const DIFF_TYPE_VALUES = new Set(Object.values(DIFF_TYPES))
+
+function projectDiffRow(diff) {
+  const out = {}
+  for (const key of DIFF_ROW_KEYS) {
+    const value = diff ? diff[key] : undefined
+    if (value !== undefined) out[key] = Array.isArray(value) ? value.slice() : value
+  }
+  return out
+}
+
+/**
+ * Values-free PER-ROW diff of a snapshot batch (view 2's row browse: diffType / changeTypes /
+ * reviewStatus per diff row). Same read flow + base semantics as getSnapshotDiff; each row passes the
+ * closed DIFF_ROW_KEYS projection; optional reviewStatus / diffType filters; result capped fail-closed.
+ * `heldRowCount` counts held rows over the WHOLE pair (pre-filter) so a filtered read keeps context.
+ */
+async function listSnapshotDiffRows({ recordsApi, provisioning, targetProjectId, businessProjectId, snapshotBatchId, baseSnapshotBatchId: baseOverride, reviewStatus, diffType, permission } = {}) {
+  assertAdminPermission(permission)
+  const api = ensureReadOnlyRecordsApi(recordsApi)
+  const prov = ensureProvisioningApi(provisioning)
+  const currentSnapshotBatchId = requiredString(snapshotBatchId, 'snapshotBatchId')
+  const stagingProjectId = requiredString(targetProjectId, 'targetProjectId')
+  const requestedBase = optionalString(baseOverride)
+  // Belt-and-braces enum gates (the route allowlist rejects these first with its own 400 code).
+  const reviewStatusFilter = optionalString(reviewStatus)
+  if (reviewStatusFilter && !REVIEW_STATUS_VALUES.has(reviewStatusFilter)) {
+    throw new StockPreparationTargetProvisioningError(422, 'SNAPSHOT_READS_CONFIG_INVALID', 'reviewStatus must be one of the review-status vocabulary', { field: 'reviewStatus' })
+  }
+  const diffTypeFilter = optionalString(diffType)
+  if (diffTypeFilter && !DIFF_TYPE_VALUES.has(diffTypeFilter)) {
+    throw new StockPreparationTargetProvisioningError(422, 'SNAPSHOT_READS_CONFIG_INVALID', 'diffType must be one of the diff-type vocabulary', { field: 'diffType' })
+  }
+
+  const batchSheet = await findMvpSheet(prov, stagingProjectId, BATCH_OBJECT_ID)
+  const lineSheet = await findMvpSheet(prov, stagingProjectId, LINE_OBJECT_ID)
+
+  if (!batchSheet && !lineSheet) {
+    if (requestedBase) {
+      throw new StockPreparationTargetProvisioningError(404, 'SNAPSHOT_DIFF_BASE_NOT_FOUND', 'base snapshot batch was not found', { field: 'baseSnapshotBatchId' })
+    }
+    return { snapshotBatchId: currentSnapshotBatchId, baseSnapshotBatchId: null, rowCount: 0, heldRowCount: 0, rows: [] }
+  }
+
+  let projectId = optionalString(businessProjectId)
+  let currentVersion = null
+  if (batchSheet) {
+    const currentRows = await queryAllRecords(api, batchSheet.id, { snapshotBatchId: currentSnapshotBatchId })
+    const currentBatchRow = currentRows[0] || null
+    if (currentBatchRow) {
+      projectId = optionalString(readCell(currentBatchRow, 'projectId')) || projectId
+      currentVersion = toNumber(readCell(currentBatchRow, 'snapshotVersion'))
+    }
+  }
+
+  const baseSnapshotBatchId = await resolveDiffBase(api, batchSheet, {
+    currentSnapshotBatchId,
+    projectId,
+    currentVersion,
+    requestedBase,
+  })
+
+  const currentLines = lineSheet
+    ? (await queryAllRecords(api, lineSheet.id, { snapshotBatchId: currentSnapshotBatchId })).map(recordData)
+    : []
+  const previousLines = lineSheet && baseSnapshotBatchId
+    ? (await queryAllRecords(api, lineSheet.id, { snapshotBatchId: baseSnapshotBatchId })).map(recordData)
+    : []
+
+  const plan = planBomSnapshotDiff({
+    previousSnapshotBatchId: baseSnapshotBatchId || NO_PREDECESSOR_SENTINEL,
+    currentSnapshotBatchId,
+    previousLines,
+    currentLines,
+  })
+
+  const heldRowCount = plan.diffs.filter((diff) => diff.reviewStatus === REVIEW_STATUSES.HELD).length
+  let rows = plan.diffs
+  if (reviewStatusFilter) rows = rows.filter((diff) => diff.reviewStatus === reviewStatusFilter)
+  if (diffTypeFilter) rows = rows.filter((diff) => diff.diffType === diffTypeFilter)
+  if (rows.length > MAX_DIFF_ROWS) {
+    throw new StockPreparationTargetProvisioningError(422, 'SNAPSHOT_READS_ROWS_TOO_LARGE', 'snapshot diff row read exceeded the row bound', { maxRows: MAX_DIFF_ROWS })
+  }
+
+  return {
+    snapshotBatchId: currentSnapshotBatchId,
+    baseSnapshotBatchId,
+    rowCount: rows.length,
+    heldRowCount,
+    rows: rows.map(projectDiffRow),
+  }
+}
+
 module.exports = {
   listSnapshotBatches,
   getSnapshotDiff,
+  listSnapshotDiffRows,
   BATCH_OBJECT_ID,
   LINE_OBJECT_ID,
   RUN_OBJECT_ID,
   EXCEPTION_OBJECT_ID,
   BLOCKING_EXCEPTION_SEVERITY,
   __internals: {
+    resolveDiffBase,
+    projectDiffRow,
+    DIFF_ROW_KEYS,
+    MAX_DIFF_ROWS,
     templateByRole,
     assertMvpObjectId,
     ensureReadOnlyRecordsApi,

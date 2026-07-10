@@ -20,6 +20,7 @@ const path = require('node:path')
 const {
   listSnapshotBatches,
   getSnapshotDiff,
+  listSnapshotDiffRows,
   BATCH_OBJECT_ID,
   LINE_OBJECT_ID,
   RUN_OBJECT_ID,
@@ -346,6 +347,161 @@ async function main() {
     // The version/unit change between /root/S c1->c2 still counts, values-free.
     assert.equal(diffResult.baseSnapshotBatchId, 'c1')
     assert.ok(diffResult.changeCounts.versionChanged >= 1)
+  })
+
+  // ---- W3a: caller-chosen base pair on the counts diff ----
+  await run('diff base-override: valid pair honored; unknown 404; cross-project 409; self 400', async () => {
+    const rows = {
+      [SHEET_IDS[BATCH_OBJECT_ID]]: [
+        { snapshotBatchId: 'b1', projectId: BUSINESS_PROJECT, snapshotVersion: 1, syncRunId: 'r1' },
+        { snapshotBatchId: 'b2', projectId: BUSINESS_PROJECT, snapshotVersion: 2, syncRunId: 'r2' },
+        { snapshotBatchId: 'b3', projectId: BUSINESS_PROJECT, snapshotVersion: 3, syncRunId: 'r3' },
+        { snapshotBatchId: 'bx', projectId: OTHER_PROJECT, snapshotVersion: 1, syncRunId: 'rx' },
+      ],
+      [SHEET_IDS[LINE_OBJECT_ID]]: [
+        { snapshotLineId: 'l1', snapshotBatchId: 'b1', childDrawingNo: 'A', childVersion: 'V1', pathKey: '/root/A', designQty: 1 },
+        { snapshotLineId: 'l3', snapshotBatchId: 'b3', childDrawingNo: 'A', childVersion: 'V3', pathKey: '/root/A', designQty: 1 },
+      ],
+    }
+    // Explicit base b1 (predecessor auto-pick would choose b2): version change A V1 -> V3 counts.
+    const result = await getSnapshotDiff({
+      recordsApi: makeRecordsApi(rows),
+      provisioning: makeProvisioning(),
+      targetProjectId: STAGING_PROJECT,
+      snapshotBatchId: 'b3',
+      baseSnapshotBatchId: 'b1',
+      permission: 'admin',
+    })
+    assert.equal(result.baseSnapshotBatchId, 'b1', 'explicit base echoes back')
+    assert.ok(result.changeCounts.versionChanged >= 1)
+    const expectDiffError = async (base, status, code) => {
+      let caught = null
+      try {
+        await getSnapshotDiff({
+          recordsApi: makeRecordsApi(rows),
+          provisioning: makeProvisioning(),
+          targetProjectId: STAGING_PROJECT,
+          snapshotBatchId: 'b3',
+          baseSnapshotBatchId: base,
+          permission: 'admin',
+        })
+      } catch (error) {
+        caught = error
+      }
+      assert.ok(caught, `expected error for base ${base}`)
+      assert.equal(caught.status, status)
+      assert.equal(caught.code, code)
+    }
+    await expectDiffError('nope', 404, 'SNAPSHOT_DIFF_BASE_NOT_FOUND')
+    await expectDiffError('bx', 409, 'SNAPSHOT_DIFF_BASE_PROJECT_MISMATCH')
+    await expectDiffError('b3', 400, 'SNAPSHOT_DIFF_BASE_INVALID')
+  })
+
+  // ---- W3a: per-row diff browse ----
+  await run('diff rows: 11-key whitelist projection, heldRowCount, filters, values-free', async () => {
+    const rows = {
+      [SHEET_IDS[BATCH_OBJECT_ID]]: [
+        { snapshotBatchId: 'd1', projectId: BUSINESS_PROJECT, snapshotVersion: 1, syncRunId: 'r1' },
+        { snapshotBatchId: 'd2', projectId: BUSINESS_PROJECT, snapshotVersion: 2, syncRunId: 'r2' },
+      ],
+      [SHEET_IDS[LINE_OBJECT_ID]]: [
+        // unchanged row + version-changed row + added row => mixed ready/held statuses.
+        { snapshotLineId: 'p1', snapshotBatchId: 'd1', childDrawingNo: `S_${SECRET}`, childVersion: 'V1', pathKey: '/root/same', designQty: 1, designUnit: `u_${SECRET}` },
+        { snapshotLineId: 'p2', snapshotBatchId: 'd1', childDrawingNo: 'B', childVersion: 'V1', pathKey: '/root/B', designQty: 1 },
+        { snapshotLineId: 'c1', snapshotBatchId: 'd2', childDrawingNo: `S_${SECRET}`, childVersion: 'V1', pathKey: '/root/same', designQty: 1, designUnit: `u_${SECRET}` },
+        { snapshotLineId: 'c2', snapshotBatchId: 'd2', childDrawingNo: 'B', childVersion: 'V2', pathKey: '/root/B', designQty: 1 },
+        { snapshotLineId: 'c3', snapshotBatchId: 'd2', childDrawingNo: 'C', childVersion: 'V1', pathKey: '/root/C', designQty: 1 },
+      ],
+    }
+    const DIFF_ROW_KEY_SET = new Set([
+      'diffId', 'diffType', 'reviewStatus', 'changeTypes', 'reason', 'rowCount',
+      'previousSnapshotLineId', 'currentSnapshotLineId', 'keyFingerprint',
+      'previousPathKeyFingerprint', 'currentPathKeyFingerprint',
+    ])
+    const result = await listSnapshotDiffRows({
+      recordsApi: makeRecordsApi(rows),
+      provisioning: makeProvisioning(),
+      targetProjectId: STAGING_PROJECT,
+      snapshotBatchId: 'd2',
+      permission: 'admin',
+    })
+    assert.equal(result.baseSnapshotBatchId, 'd1')
+    assert.ok(result.rowCount >= 3, 'unchanged + changed + added rows surface')
+    assert.ok(result.heldRowCount >= 2, 'version change + added are held under the all-blocking policy')
+    for (const row of result.rows) {
+      for (const key of Object.keys(row)) {
+        assert.ok(DIFF_ROW_KEY_SET.has(key), `row key ${key} must be whitelisted`)
+      }
+      assert.ok(row.diffId && row.diffType && row.reviewStatus)
+      assert.ok(Array.isArray(row.changeTypes))
+    }
+    assert.equal(JSON.stringify(result).includes(SECRET), false, 'no secret leaks through a diff row')
+
+    // filters narrow by enum; held filter drops the unchanged row.
+    const held = await listSnapshotDiffRows({
+      recordsApi: makeRecordsApi(rows),
+      provisioning: makeProvisioning(),
+      targetProjectId: STAGING_PROJECT,
+      snapshotBatchId: 'd2',
+      reviewStatus: 'held',
+      permission: 'admin',
+    })
+    assert.equal(held.rowCount, held.rows.length)
+    assert.ok(held.rows.every((row) => row.reviewStatus === 'held'))
+    assert.ok(held.rowCount < result.rowCount, 'held filter narrows the unchanged row away')
+    assert.equal(held.heldRowCount, result.heldRowCount, 'heldRowCount stays pre-filter context')
+    const added = await listSnapshotDiffRows({
+      recordsApi: makeRecordsApi(rows),
+      provisioning: makeProvisioning(),
+      targetProjectId: STAGING_PROJECT,
+      snapshotBatchId: 'd2',
+      diffType: 'added',
+      permission: 'admin',
+    })
+    assert.ok(added.rows.every((row) => row.diffType === 'added'))
+
+    // bogus enum fails closed at the module belt-and-braces gate too.
+    let caught = null
+    try {
+      await listSnapshotDiffRows({
+        recordsApi: makeRecordsApi(rows),
+        provisioning: makeProvisioning(),
+        targetProjectId: STAGING_PROJECT,
+        snapshotBatchId: 'd2',
+        reviewStatus: 'bogus',
+        permission: 'admin',
+      })
+    } catch (error) {
+      caught = error
+    }
+    assert.equal(caught && caught.code, 'SNAPSHOT_READS_CONFIG_INVALID')
+  })
+
+  await run('diff rows: result row cap fails closed at 2000', async () => {
+    const manyLines = []
+    for (let index = 0; index < 2001; index += 1) {
+      manyLines.push({ snapshotLineId: `m${index}`, snapshotBatchId: 'big1', childDrawingNo: `D${index}`, childVersion: 'V1', pathKey: `/root/D${index}`, designQty: 1 })
+    }
+    const rows = {
+      [SHEET_IDS[BATCH_OBJECT_ID]]: [
+        { snapshotBatchId: 'big1', projectId: BUSINESS_PROJECT, snapshotVersion: 1, syncRunId: 'r1' },
+      ],
+      [SHEET_IDS[LINE_OBJECT_ID]]: manyLines,
+    }
+    let caught = null
+    try {
+      await listSnapshotDiffRows({
+        recordsApi: makeRecordsApi(rows),
+        provisioning: makeProvisioning(),
+        targetProjectId: STAGING_PROJECT,
+        snapshotBatchId: 'big1',
+        permission: 'admin',
+      })
+    } catch (error) {
+      caught = error
+    }
+    assert.equal(caught && caught.status, 422)
+    assert.equal(caught && caught.code, 'SNAPSHOT_READS_ROWS_TOO_LARGE')
   })
 
   console.log(`\nstock-preparation-snapshot-reads.test.cjs: ${passed} passed, ${failed} failed`)
