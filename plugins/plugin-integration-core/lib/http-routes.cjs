@@ -97,6 +97,13 @@ const ROUTES = [
   ['POST', '/api/integration/stock-preparation/material-mappings/retire', 'stockPreparationMaterialMappingRetire'],
   ['POST', '/api/integration/stock-preparation/unit-conversions/confirm', 'stockPreparationUnitConversionConfirm'],
   ['POST', '/api/integration/stock-preparation/unit-conversions/retire', 'stockPreparationUnitConversionRetire'],
+  // #3751 MVP W4 (generation runtime): run the landed generation engine over CONFIRMED inputs and
+  // persist draft prep lines + blocking exceptions + a run record (multitable-internal only); human
+  // exception resolution single + bulk (same-reason gate). ready is computed SERVER-SIDE: engine
+  // 'ready' AND zero unresolved blocking exceptions — never frontend-derived.
+  ['POST', '/api/integration/stock-preparation/generation/run', 'stockPreparationGenerationRun'],
+  ['POST', '/api/integration/stock-preparation/exceptions/resolve', 'stockPreparationExceptionResolve'],
+  ['POST', '/api/integration/stock-preparation/exceptions/bulk-resolve', 'stockPreparationExceptionBulkResolve'],
   // FOS-2: generic field-option-sync (preset-driven). Stock-prep route above is a compat alias.
   ['POST', '/api/integration/field-options/sync', 'fieldOptionsSync'],
   ['GET', '/api/integration/templates', 'templatesList'],
@@ -299,6 +306,13 @@ const {
   getUnitConversionSummary,
   listUnitConversionCandidates,
 } = require('./stock-preparation-confirm-reads.cjs')
+// #3751 MVP W4: generation run + human exception resolution. resolvedBy is the route user identity;
+// resolvedAt is stamped in the module — the body can carry neither (closed allowlists).
+const {
+  runStockPreparationGeneration,
+  resolveStockPreparationException,
+  bulkResolveStockPreparationExceptions,
+} = require('./stock-preparation-generation-runtime.cjs')
 const { MATCH_STATUSES: STOCK_PREPARATION_MATCH_STATUSES } = require('./stock-preparation-material-match.cjs')
 // FOS-4: canonical stock-prep objectId — readiness is bound per TARGET, so any preset targeting this
 // table (v1 replace + the disable-missing prove-the-path preset) reuses the canonical readiness check.
@@ -710,6 +724,28 @@ const VALID_STOCK_PREPARATION_UNIT_RETIRE_REQUEST_KEYS = new Set([
   'workspaceId',
   'projectId',
   'conversionRuleId',
+])
+// #3751 MVP W4: closed allowlists for the generation/exception routes. The resolution stamps
+// (resolvedBy / resolvedAt) are DELIBERATELY absent — server-derived, body-supplied => 400.
+const VALID_STOCK_PREPARATION_GENERATION_RUN_REQUEST_KEYS = new Set([
+  'tenantId',
+  'workspaceId',
+  'projectId',
+  'snapshotBatchId',
+])
+const VALID_STOCK_PREPARATION_EXCEPTION_RESOLVE_REQUEST_KEYS = new Set([
+  'tenantId',
+  'workspaceId',
+  'projectId',
+  'exceptionId',
+  'resolutionAction',
+])
+const VALID_STOCK_PREPARATION_EXCEPTION_BULK_RESOLVE_REQUEST_KEYS = new Set([
+  'tenantId',
+  'workspaceId',
+  'projectId',
+  'exceptionIds',
+  'resolutionAction',
 ])
 // FOS-2: generic field-option-sync request — closed allowlist. Operator names a preset (FOS-1
 // catalog) + supplies option sets keyed by the preset's source keys. No sheetId / credentials.
@@ -3705,6 +3741,62 @@ function createHandlers(services, options = {}) {
         provisioning: getMultitableProvisioning(),
         targetProjectId: resolveIntegrationStagingProjectId(tenantId, input.projectId),
         conversionRuleId: input.conversionRuleId,
+      })
+      return sendOk(res, result)
+    },
+
+    // #3751 MVP W4: generation run — engine over confirmed inputs; draft prep lines UPSERT; blocking
+    // exceptions create-only (human resolution preserved); run record create-only. `ready` is the
+    // server-computed invariant verdict (engine ready AND zero unresolved blocking exceptions).
+    async stockPreparationGenerationRun(req, res) {
+      requireAccess(req, 'admin')
+      const input = normalizeStockPreparationConfirmBody(requestBody(req), VALID_STOCK_PREPARATION_GENERATION_RUN_REQUEST_KEYS, 'STOCK_PREPARATION_GENERATION_RUN_REQUEST_INVALID')
+      const tenantId = resolveTenantId(req, input)
+      const result = await runStockPreparationGeneration({
+        context,
+        permission: 'admin',
+        recordsApi: getMultitableRecordsApi(),
+        provisioning: getMultitableProvisioning(),
+        targetProjectId: resolveIntegrationStagingProjectId(tenantId, input.projectId),
+        projectId: input.projectId,
+        snapshotBatchId: input.snapshotBatchId,
+      })
+      return sendOk(res, result, result.created && (result.created.lines + result.created.exceptions + result.created.run) > 0 ? 201 : 200)
+    },
+
+    // #3751 MVP W4: single exception resolve — patch EXACTLY the resolution quartet, server-stamped.
+    async stockPreparationExceptionResolve(req, res) {
+      const user = requireAccess(req, 'admin')
+      const input = normalizeStockPreparationConfirmBody(requestBody(req), VALID_STOCK_PREPARATION_EXCEPTION_RESOLVE_REQUEST_KEYS, 'STOCK_PREPARATION_EXCEPTION_RESOLVE_REQUEST_INVALID')
+      const tenantId = resolveTenantId(req, input)
+      const result = await resolveStockPreparationException({
+        context,
+        permission: 'admin',
+        recordsApi: getMultitableRecordsApi(),
+        provisioning: getMultitableProvisioning(),
+        targetProjectId: resolveIntegrationStagingProjectId(tenantId, input.projectId),
+        exceptionId: input.exceptionId,
+        resolutionAction: input.resolutionAction,
+        resolvedBy: user.id || user.email,
+      })
+      return sendOk(res, result)
+    },
+
+    // #3751 MVP W4: bulk exception resolve — SAME-REASON gate (#3890) refuses mixed exceptionTypes
+    // before any patch; bounded id list.
+    async stockPreparationExceptionBulkResolve(req, res) {
+      const user = requireAccess(req, 'admin')
+      const input = normalizeStockPreparationConfirmBody(requestBody(req), VALID_STOCK_PREPARATION_EXCEPTION_BULK_RESOLVE_REQUEST_KEYS, 'STOCK_PREPARATION_EXCEPTION_BULK_RESOLVE_REQUEST_INVALID')
+      const tenantId = resolveTenantId(req, input)
+      const result = await bulkResolveStockPreparationExceptions({
+        context,
+        permission: 'admin',
+        recordsApi: getMultitableRecordsApi(),
+        provisioning: getMultitableProvisioning(),
+        targetProjectId: resolveIntegrationStagingProjectId(tenantId, input.projectId),
+        exceptionIds: input.exceptionIds,
+        resolutionAction: input.resolutionAction,
+        resolvedBy: user.id || user.email,
       })
       return sendOk(res, result)
     },
