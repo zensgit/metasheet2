@@ -4525,6 +4525,12 @@ function stopRunPolling(): void {
 }
 
 const DIRECTORY_RUN_POLL_INTERVAL_MS = 5000
+// P3 hardening: a crashed worker (scheduler disabled) leaves the run row 'running' forever, and
+// this tab locks its own sync/preview buttons on pollingRunId — the very actions that would
+// reclaim the lease. Bound the poll so the tab gives up and unlocks instead of hammering /runs
+// indefinitely; the run itself is untouched server-side.
+const DIRECTORY_RUN_POLL_MAX_DURATION_MS = 10 * 60 * 1000
+let runPollStartedAtMs = 0
 
 async function pollAsyncRun(integrationId: string, runId: string, token: number): Promise<void> {
   let body: unknown = null
@@ -4555,6 +4561,11 @@ async function pollAsyncRun(integrationId: string, runId: string, token: number)
       setStatus(buildAsyncRunSummary(run))
     }
     await refreshAfterDirectorySync(integrationId)
+    return
+  }
+  if (Date.now() - runPollStartedAtMs >= DIRECTORY_RUN_POLL_MAX_DURATION_MS) {
+    stopRunPolling()
+    setStatus('已停止自动轮询（超过 10 分钟），运行可能仍在进行，请前往下方运行记录手动刷新查看最新状态', 'error')
     return
   }
   // Still running — or paged out of the first page (>10 newer runs between polls; the run is
@@ -4612,6 +4623,7 @@ async function startAsyncSync() {
     stopRunPolling()
     pollingRunId.value = runId
     pollingIntegrationId = integration.id
+    runPollStartedAtMs = Date.now()
     const token = runPollToken
     setStatus(`后台同步已启动（运行 ${runId}），正在轮询运行状态...`)
     void pollAsyncRun(integration.id, runId, token)

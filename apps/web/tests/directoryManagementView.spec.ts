@@ -7153,6 +7153,12 @@ describe('DirectoryManagementView', () => {
         .find((button) => button.textContent?.trim() === label) as HTMLButtonElement | undefined
     }
 
+    // Integration-list items are multi-line buttons (name + corpId + stats) — match by substring.
+    function findIntegrationButton(name: string): HTMLButtonElement | undefined {
+      return Array.from(container!.querySelectorAll('.directory-admin__item'))
+        .find((item) => item.textContent?.includes(name)) as HTMLButtonElement | undefined
+    }
+
     function runsCallCount(): number {
       return apiFetchMock.mock.calls.filter(([path]) => String(path).includes('/runs')).length
     }
@@ -7409,6 +7415,174 @@ describe('DirectoryManagementView', () => {
 
         app!.unmount()
         app = null
+
+        const settledCallCount = apiFetchMock.mock.calls.length
+        await vi.advanceTimersByTimeAsync(30_000)
+        await flushUi(4)
+        expect(apiFetchMock.mock.calls.length).toBe(settledCallCount)
+      } finally {
+        vi.useRealTimers()
+      }
+    })
+
+    // Gate P2-1 (adversarial review of #4069): the existing unmount test above settles the poll's
+    // /runs GET BEFORE unmounting, so it never exercises the race the `runPollToken` check exists
+    // for — a GET that is still in flight when the poll is torn down. Deleting
+    // `if (token !== runPollToken) return` in pollAsyncRun leaves all other tests green; this one
+    // pins the exact zombie-continuation failure mode described in the review.
+    it('a poll GET still in flight when switching integration must not resurrect the loop for the OLD integration (kills a deleted runPollToken check)', async () => {
+      vi.useFakeTimers()
+      try {
+        const integrationA = createIntegration()
+        const integrationB = createIntegration({ id: 'dir-2', name: 'DingTalk CN 2', corpId: 'dingcorp-2' })
+
+        apiFetchMock
+          .mockResolvedValueOnce(createJsonResponse({ ok: true, data: { items: [integrationA, integrationB] } }))
+          .mockResolvedValueOnce(createJsonResponse(createRunsPayload([])))
+          .mockResolvedValueOnce(createJsonResponse(createScheduleSnapshotPayload()))
+          .mockResolvedValueOnce(createJsonResponse(createAlertListPayload([])))
+          .mockResolvedValueOnce(createJsonResponse(createReviewItemsPayload([])))
+          .mockResolvedValueOnce(createJsonResponse(createAccountListPayload([])))
+
+        mountView()
+        await flushUi()
+
+        apiFetchMock.mockResolvedValueOnce(createJsonResponse(
+          { ok: true, data: { accepted: true, runId: 'run-bg-1', integrationId: 'dir-1' } },
+          202,
+        ))
+        // The poll's first /runs GET is deliberately left unresolved — it is still "in flight"
+        // when we switch integration below.
+        let resolveStalePoll: (value: unknown) => void = () => {}
+        const stalePoll = new Promise((resolve) => { resolveStalePoll = resolve })
+        apiFetchMock.mockImplementationOnce(() => stalePoll)
+
+        findButton('后台同步')!.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+        await flushUi(8)
+        expect(container?.textContent).toContain('后台同步进行中（运行 run-bg-1）')
+
+        // Switch to a second integration WHILE the poll GET above is still pending.
+        apiFetchMock
+          .mockResolvedValueOnce(createJsonResponse(createRunsPayload([])))
+          .mockResolvedValueOnce(createJsonResponse(createScheduleSnapshotPayload({ integrationId: 'dir-2' })))
+          .mockResolvedValueOnce(createJsonResponse(createAlertListPayload([])))
+          .mockResolvedValueOnce(createJsonResponse(createReviewItemsPayload([])))
+          .mockResolvedValueOnce(createJsonResponse(createAccountListPayload([])))
+        findIntegrationButton('DingTalk CN 2')!.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+        await flushUi(8)
+        expect(container?.textContent).not.toContain('后台同步进行中')
+
+        const callCountBeforeStaleResolve = apiFetchMock.mock.calls.length
+
+        // NOW the stale GET resolves — with a TERMINAL run belonging to the OLD integration A.
+        resolveStalePoll(createJsonResponse(createRunsPayload([
+          createBackgroundRun('completed', { stats: { accountsSynced: 777 } }),
+        ])))
+        await flushUi(8)
+
+        // Must NOT write A's stale runs into the (now-B) panel.
+        expect(container?.textContent).not.toContain('777')
+        // Must NOT call refreshAfterDirectorySync(A) — that would fire ~6 more fetches.
+        expect(apiFetchMock.mock.calls.length).toBe(callCountBeforeStaleResolve)
+
+        // Must NOT re-arm the timer either (terminal branch shouldn't, but pin it explicitly).
+        await vi.advanceTimersByTimeAsync(30_000)
+        await flushUi(4)
+        expect(apiFetchMock.mock.calls.length).toBe(callCountBeforeStaleResolve)
+      } finally {
+        vi.useRealTimers()
+      }
+    })
+
+    // Gate P2-2 (adversarial review of #4069): both integration-switch hygiene lines added at the
+    // top of selectIntegration (stop the OLD poll, clear the OLD preview) are individually
+    // deletable with the rest of the suite green. One test, two independent assertions — either
+    // deleted line turns a different assertion below RED.
+    it('switching to a second integration mid-poll stops the OLD poll and clears the OLD preview card', async () => {
+      vi.useFakeTimers()
+      try {
+        const integrationA = createIntegration()
+        const integrationB = createIntegration({ id: 'dir-2', name: 'DingTalk CN 2', corpId: 'dingcorp-2' })
+
+        apiFetchMock
+          .mockResolvedValueOnce(createJsonResponse({ ok: true, data: { items: [integrationA, integrationB] } }))
+          .mockResolvedValueOnce(createJsonResponse(createRunsPayload([])))
+          .mockResolvedValueOnce(createJsonResponse(createScheduleSnapshotPayload()))
+          .mockResolvedValueOnce(createJsonResponse(createAlertListPayload([])))
+          .mockResolvedValueOnce(createJsonResponse(createReviewItemsPayload([])))
+          .mockResolvedValueOnce(createJsonResponse(createAccountListPayload([])))
+
+        mountView()
+        await flushUi()
+
+        // Render a preview card for A (the footer 预览同步 button, not gated on pollingRunId yet).
+        apiFetchMock.mockResolvedValueOnce(createJsonResponse(createPreviewPayload({ wouldCreateAccounts: 3 })))
+        findButton('预览同步')!.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+        await flushUi(8)
+        expect(container?.textContent).toContain('将新增账号 3')
+
+        // Start a background poll for A too (independent of the preview).
+        apiFetchMock.mockResolvedValueOnce(createJsonResponse(
+          { ok: true, data: { accepted: true, runId: 'run-bg-1', integrationId: 'dir-1' } },
+          202,
+        ))
+        apiFetchMock.mockResolvedValueOnce(createJsonResponse(createRunsPayload([createBackgroundRun('running')])))
+        findButton('后台同步')!.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+        await flushUi(8)
+        expect(container?.textContent).toContain('后台同步进行中（运行 run-bg-1）')
+
+        // Switch to B.
+        apiFetchMock
+          .mockResolvedValueOnce(createJsonResponse(createRunsPayload([])))
+          .mockResolvedValueOnce(createJsonResponse(createScheduleSnapshotPayload({ integrationId: 'dir-2' })))
+          .mockResolvedValueOnce(createJsonResponse(createAlertListPayload([])))
+          .mockResolvedValueOnce(createJsonResponse(createReviewItemsPayload([])))
+          .mockResolvedValueOnce(createJsonResponse(createAccountListPayload([])))
+        findIntegrationButton('DingTalk CN 2')!.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+        await flushUi(8)
+
+        // Preview hygiene: A's stale preview card must not render under B's header.
+        expect(container?.textContent).not.toContain('将新增账号 3')
+        expect(container?.textContent).not.toContain('同步预览（dry-run）')
+
+        // Poll hygiene: the OLD poll must not keep firing against A after the switch.
+        const settledCallCount = apiFetchMock.mock.calls.length
+        await vi.advanceTimersByTimeAsync(10_000)
+        await flushUi(4)
+        expect(apiFetchMock.mock.calls.length).toBe(settledCallCount)
+      } finally {
+        vi.useRealTimers()
+      }
+    })
+
+    // Gate P3-1 (adversarial review of #4069, author-flagged): a crashed worker with the
+    // scheduler disabled leaves a run row 'running' forever, and this tab locks its own
+    // sync/preview buttons on pollingRunId — the very action that would reclaim the lease —
+    // so it would otherwise poll every 5s indefinitely. Bound it.
+    it('stops polling after ~10 minutes if the run never reaches terminal, surfaces guidance, and unlocks the buttons', async () => {
+      vi.useFakeTimers()
+      try {
+        mockInitialLoad(createIntegration())
+        apiFetchMock.mockResolvedValueOnce(createJsonResponse(
+          { ok: true, data: { accepted: true, runId: 'run-bg-1', integrationId: 'dir-1' } },
+          202,
+        ))
+        apiFetchMock.mockResolvedValue(createJsonResponse(createRunsPayload([createBackgroundRun('running')])))
+
+        mountView()
+        await flushUi()
+
+        findButton('后台同步')!.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+        await flushUi(8)
+
+        // Cross the 10-minute cap (120 ticks of the 5s interval would otherwise run forever).
+        await vi.advanceTimersByTimeAsync(10 * 60 * 1000 + 5_000)
+        await flushUi(8)
+
+        expect(container?.textContent).toContain('已停止自动轮询')
+        expect(container?.textContent).toContain('运行记录')
+        expect(container?.textContent).not.toContain('后台同步进行中')
+        expect(findButton('后台同步')?.disabled).toBe(false)
 
         const settledCallCount = apiFetchMock.mock.calls.length
         await vi.advanceTimersByTimeAsync(30_000)
