@@ -328,6 +328,27 @@ describe('AttendanceNotificationDeliveryWorker: quiet-hours env resolution at co
 
     expect(query).toHaveBeenCalledTimes(1)
   })
+
+  // Re-gate P2-1: the env→gate-ON PRODUCTION wiring. Every other gate-ON test injects the
+  // config object directly, so neutering the constructor's env fallback (→ null) plus the
+  // scheduler's explicit wiring left the whole suite green while a production
+  // ATTENDANCE_NOTIFICATION_QUIET_HOURS silently did nothing. This is the one test where
+  // the gate turns ON purely from process.env through the real constructor default —
+  // no quietHours option passed.
+  it('valid env + NO quietHours option → gate ON from env alone: in-window runBatch issues ZERO SQL', async () => {
+    process.env.ATTENDANCE_NOTIFICATION_QUIET_HOURS = '22:00-08:00'
+    process.env.ATTENDANCE_NOTIFICATION_QUIET_HOURS_TZ = 'UTC'
+    const query = makeQuery()
+    const worker = new AttendanceNotificationDeliveryWorker({
+      query,
+      now: () => new Date('2026-07-09T23:30:00Z'), // 23:30 UTC — inside the cross-midnight window
+    })
+
+    const result = await worker.runBatch()
+
+    expect(result).toEqual({ claimed: 0, sent: 0, retrying: 0, failed: 0 })
+    expect(query).not.toHaveBeenCalled()
+  })
 })
 
 describe('R8 quiet-hours × the FULL channel roster (DingTalk + WeCom S4 + email) — owner-ratified 2026-07-10: ' +
