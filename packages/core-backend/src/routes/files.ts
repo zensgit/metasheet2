@@ -415,15 +415,35 @@ export function filesRouter(): Router {
           return res.status(500).json({ error: 'Failed to delete file' })
         }
 
-        try {
-          await storage.delete(id)
-        } catch (storageErr) {
-          // The row is already tombstoned — evidence integrity holds (no consumer will ever see this
-          // id as valid again) even if the underlying blob is still sitting in storage. That blob's
-          // removal is a compensating cleanup (retry / manual sweep), deliberately not retried inline
-          // here and not surfaced as a client-facing failure: from the caller's perspective the file
-          // is gone, which is true from every consumer's point of view.
-          logger.warn(`Storage delete failed for tombstoned file ${id}; blob left for compensating cleanup`, storageErr instanceof Error ? storageErr : undefined)
+        // F5 files-orphan-blob-retention design-lock (2026-07-10), GF5-7 (root-cause fix, mirrors the F3
+        // read-path fix): the old `storage.delete(id)` here located the physical object through the
+        // provider's in-memory disk-scan index, keyed by `md5(relpath)` after any index rebuild — NOT by
+        // the uuid `id` this route has. In any process that did not perform this exact upload (a restart,
+        // a second replica), that lookup silently misses and the blob becomes an orphan on every delete,
+        // not just on a genuine storage failure. `resolveActiveStorageKey` (the same resolution the
+        // download/info routes use) recovers the persisted `storage_key` — or, for pre-F3 rows, derives
+        // one from `url` via the controlled fallback — and rejects (`null`) a poisoned or unresolvable
+        // key so it is never guessed at. `deleteByKey` then deletes by that key directly, with no index
+        // dependency, and treats an already-gone object (ENOENT) as success.
+        const resolved = resolveActiveStorageKey(detail)
+        if (resolved) {
+          try {
+            await storage.deleteByKey(resolved.key)
+            await sql`UPDATE files SET blob_purged_at = now() WHERE id = ${id}`.execute(db)
+          } catch (storageErr) {
+            // The row is already tombstoned — evidence integrity holds (no consumer will ever see this
+            // id as valid again) even if the underlying blob is still sitting in storage. `blob_purged_at`
+            // stays NULL so the F5 sweep (GF5-6) picks this row up and retries; not surfaced as a
+            // client-facing failure — from the caller's perspective the file is gone, which is true from
+            // every consumer's point of view.
+            logger.warn(`Storage delete failed for tombstoned file ${id}; blob left for compensating cleanup`, storageErr instanceof Error ? storageErr : undefined)
+          }
+        } else {
+          // Poisoned (`!f3-collision:`) or unresolvable (null storage_key + rejected url-fallback) key:
+          // never guess at a physical path. `blob_purged_at` stays NULL forever for this row — by design,
+          // not a bug (GF5-3) — a poisoned key may be shared by other rows in its collision group, and
+          // deleting it here could destroy evidence a different un-purged row still depends on.
+          logger.warn(`Storage delete skipped for tombstoned file ${id}: no safe storage key to resolve (poisoned or unresolvable)`)
         }
 
         logger.info(`File deleted: ${id} by user ${callerId}`)

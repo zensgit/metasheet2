@@ -147,6 +147,15 @@ interface StorageProvider {
   /** F3 design-lock G3: read a physical object by its deterministic storage key, bypassing the
    * in-memory disk-scan index entirely (no warmup window, no id-drift). */
   downloadByKey(storageKey: string): Promise<Buffer>
+  /** F5 files-orphan-blob-retention design-lock (2026-07-10), GF5-2: delete a physical object by its
+   * deterministic storage key — the symmetric write-side counterpart to `downloadByKey`, and the ONLY
+   * safe way to physically delete an object outside the process that uploaded it (the in-memory
+   * disk-scan index a bare `delete(fileId)` depends on is keyed by `md5(relpath)` after a rebuild, not
+   * the uuid `fileId`, so it silently fails to locate the object in any other process — see F3's root-
+   * cause note on `files.ts`'s DELETE route). Idempotent: deleting an already-gone key (ENOENT) resolves
+   * successfully rather than throwing, so both the delete route and the F5 sweep can treat "delete" and
+   * "confirm already deleted" as the same outcome. */
+  deleteByKey(storageKey: string): Promise<void>
   delete(fileId: string): Promise<void>
   exists(fileId: string): Promise<boolean>
   getFileInfo(fileId: string): Promise<StorageFile | null>
@@ -334,6 +343,28 @@ class LocalStorageProvider implements StorageProvider {
       return await fs.readFile(fullPath)
     } catch (error) {
       this.logger.error(`Failed to download file by key ${storageKey}`, error as Error)
+      throw error
+    }
+  }
+
+  // F5 files-orphan-blob-retention design-lock (2026-07-10), GF5-2: delete a physical object by its
+  // deterministic storage key. Containment (G2) is re-asserted first, exactly like `downloadByKey` —
+  // a corrupt/legacy/derived key can never unlink outside the base path. ENOENT is swallowed (the
+  // object is already gone, which IS the target state) so both the delete route (GF5-7) and the sweep
+  // (GF5-6) can treat "deleted" and "confirmed already deleted" as one successful outcome and stamp
+  // `blob_purged_at` either way — this is the ONLY place that ENOENT-as-success decision is made; every
+  // caller of `deleteByKey` sees a plain resolve/reject and does not need to re-inspect the error code.
+  // Any OTHER error (EACCES/EIO/etc.) is rethrown so callers leave `blob_purged_at` unset and retry.
+  async deleteByKey(storageKey: string): Promise<void> {
+    const fullPath = resolveWithinBase(this.basePath, storageKey)
+    try {
+      await fs.unlink(fullPath)
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException)?.code
+      if (code === 'ENOENT') {
+        return
+      }
+      this.logger.error(`Failed to delete file by key ${storageKey}`, error as Error)
       throw error
     }
   }
@@ -646,6 +677,14 @@ class S3StorageProvider implements StorageProvider {
     return this.download(storageKey)
   }
 
+  // F5 design-lock GF5-2: for S3 the id IS the key IS the path (see G6 note on `downloadByKey` above),
+  // so `deleteByKey` is the same delete as `delete(fileId)`. S3's DeleteObject is itself idempotent
+  // (deleting an already-absent key is not an error), so no ENOENT-style translation is needed here —
+  // unlike the local provider, there is no separate "already gone" error class to swallow.
+  async deleteByKey(storageKey: string): Promise<void> {
+    return this.delete(storageKey)
+  }
+
   async delete(fileId: string): Promise<void> {
     try {
       const params: S3DeleteParams = {
@@ -949,6 +988,20 @@ export class StorageServiceImpl extends EventEmitter implements StorageService {
     } catch (error) {
       this.logger.error(`Failed to delete file: ${fileId}`, error as Error)
       this.emit('file:error', { operation: 'delete', fileId, error })
+      throw error
+    }
+  }
+
+  // F5 design-lock GF5-2: delete a physical object by its deterministic storage key (DB `storage_key`),
+  // bypassing the provider's in-memory index. Used by files.ts's delete route (GF5-7, the root-cause fix
+  // for the id-drift `storage.delete(id)` had) and the orphan-blob sweep (GF5-6).
+  async deleteByKey(storageKey: string): Promise<void> {
+    try {
+      await this.provider.deleteByKey(storageKey)
+      this.emit('file:deleted', { fileId: storageKey })
+    } catch (error) {
+      this.logger.error(`Failed to delete file by key: ${storageKey}`, error as Error)
+      this.emit('file:error', { operation: 'delete', fileId: storageKey, error })
       throw error
     }
   }

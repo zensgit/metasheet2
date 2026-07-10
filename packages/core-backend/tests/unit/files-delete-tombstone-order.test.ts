@@ -39,6 +39,12 @@ vi.mock('kysely', async (importOriginal) => {
           }
           return { rows: [] }
         }
+        // F5 GF5-7: the physical-delete-confirmed stamp, written after a successful (or ENOENT)
+        // storage.deleteByKey call.
+        if (text.includes('UPDATE files SET blob_purged_at')) {
+          kyselyMocks.state.callOrder.push('blob-purged-update')
+          return { rows: [] }
+        }
         if (text.includes('SELECT owner_id, deleted_at, storage_key')) {
           return { rows: kyselyMocks.state.ownerRows }
         }
@@ -57,6 +63,10 @@ const storageMocks = vi.hoisted(() => ({
   delete: vi.fn(async () => {
     kyselyMocks.state.callOrder.push('storage-delete')
   }),
+  // F5 GF5-7: the active-branch physical delete now goes through deleteByKey, not delete(id).
+  deleteByKey: vi.fn(async (_key: string) => {
+    kyselyMocks.state.callOrder.push('storage-deleteByKey')
+  }),
 }))
 
 vi.mock('../../src/services/StorageService', () => ({
@@ -64,6 +74,7 @@ vi.mock('../../src/services/StorageService', () => ({
     createLocalService: () => ({
       exists: storageMocks.exists,
       delete: storageMocks.delete,
+      deleteByKey: storageMocks.deleteByKey,
     }),
   },
 }))
@@ -94,8 +105,12 @@ describe('files.ts DELETE — F2 tombstone-first ordering (mocked db + storage)'
     authMocks.user = { id: 'owner-1' }
     storageMocks.exists.mockClear()
     storageMocks.delete.mockClear()
+    storageMocks.deleteByKey.mockClear()
     storageMocks.delete.mockImplementation(async () => {
       kyselyMocks.state.callOrder.push('storage-delete')
+    })
+    storageMocks.deleteByKey.mockImplementation(async (_key: string) => {
+      kyselyMocks.state.callOrder.push('storage-deleteByKey')
     })
   })
 
@@ -117,9 +132,9 @@ describe('files.ts DELETE — F2 tombstone-first ordering (mocked db + storage)'
     expect(kyselyMocks.state.callOrder).toEqual(['tombstone-update'])
   })
 
-  it('(b) storage.delete throws → 200 + logger.warn(id), but the tombstone UPDATE already ran first', async () => {
-    storageMocks.delete.mockImplementation(async () => {
-      kyselyMocks.state.callOrder.push('storage-delete')
+  it('(b) storage.deleteByKey throws (non-ENOENT) → 200 + logger.warn(id), tombstone UPDATE already ran, blob_purged_at is NOT stamped', async () => {
+    storageMocks.deleteByKey.mockImplementation(async (_key: string) => {
+      kyselyMocks.state.callOrder.push('storage-deleteByKey')
       throw new Error('injected storage delete failure')
     })
     const warnSpy = vi.spyOn(Logger.prototype, 'warn')
@@ -129,22 +144,54 @@ describe('files.ts DELETE — F2 tombstone-first ordering (mocked db + storage)'
 
     expect(res.status).toBe(200)
     expect(res.body).toEqual({ success: true, id: 'photo-1' })
-    // ordering proof: tombstone-first, not storage-first — a reverted implementation (storage.delete
-    // before the UPDATE) would flip this order and would also call storage.delete unconditionally
-    // even when the UPDATE was set up to fail (see test (a) above).
-    expect(kyselyMocks.state.callOrder).toEqual(['tombstone-update', 'storage-delete'])
+    // ordering proof: tombstone-first, not storage-first — a reverted implementation (storage delete
+    // before the UPDATE) would flip this order and would also call storage.deleteByKey unconditionally
+    // even when the UPDATE was set up to fail (see test (a) above). blob_purged_at is never stamped
+    // (F5 GF5-7) — the row stays a candidate for the background sweep to retry.
+    expect(kyselyMocks.state.callOrder).toEqual(['tombstone-update', 'storage-deleteByKey'])
     const warnCall = warnSpy.mock.calls.find(([msg]) => typeof msg === 'string' && msg.includes('photo-1'))
     expect(warnCall).toBeDefined()
   })
 
-  it('normal path (no injected failure): tombstone UPDATE then storage.delete, 200', async () => {
+  it('normal path (no injected failure): tombstone UPDATE, then storage.deleteByKey(resolved storage_key), then blob_purged_at stamp, 200', async () => {
     const app = buildApp()
 
     const res = await request(app).delete('/api/files/photo-1')
 
     expect(res.status).toBe(200)
     expect(res.body).toEqual({ success: true, id: 'photo-1' })
-    expect(kyselyMocks.state.callOrder).toEqual(['tombstone-update', 'storage-delete'])
+    expect(kyselyMocks.state.callOrder).toEqual(['tombstone-update', 'storage-deleteByKey', 'blob-purged-update'])
+    // F5 GF5-7 root-cause fix: deletes by the row's persisted storage_key, NOT storage.delete(id) —
+    // proves the route no longer depends on the id-keyed in-memory disk-scan index.
+    expect(storageMocks.deleteByKey).toHaveBeenCalledWith('uuid-x/photo.jpg')
+    expect(storageMocks.delete).not.toHaveBeenCalled()
+  })
+
+  it('GF5-3/GF5-7 — a POISONED storage_key skips the physical delete entirely: no deleteByKey call, no blob_purged_at stamp, still 200', async () => {
+    kyselyMocks.state.ownerRows = [{ owner_id: 'owner-1', deleted_at: null, storage_key: '!f3-collision:photo-1', url: null, meta: {}, created_at: new Date() }]
+    const warnSpy = vi.spyOn(Logger.prototype, 'warn')
+    const app = buildApp()
+
+    const res = await request(app).delete('/api/files/photo-1')
+
+    expect(res.status).toBe(200)
+    expect(res.body).toEqual({ success: true, id: 'photo-1' })
+    expect(kyselyMocks.state.callOrder).toEqual(['tombstone-update'])
+    expect(storageMocks.deleteByKey).not.toHaveBeenCalled()
+    const warnCall = warnSpy.mock.calls.find(([msg]) => typeof msg === 'string' && msg.includes('photo-1') && msg.includes('no safe storage key'))
+    expect(warnCall).toBeDefined()
+  })
+
+  it('GF5-7 — a NULL storage_key with no resolvable url skips the physical delete: no deleteByKey call, no blob_purged_at stamp, still 200', async () => {
+    kyselyMocks.state.ownerRows = [{ owner_id: 'owner-1', deleted_at: null, storage_key: null, url: null, meta: {}, created_at: new Date() }]
+    const app = buildApp()
+
+    const res = await request(app).delete('/api/files/photo-1')
+
+    expect(res.status).toBe(200)
+    expect(res.body).toEqual({ success: true, id: 'photo-1' })
+    expect(kyselyMocks.state.callOrder).toEqual(['tombstone-update'])
+    expect(storageMocks.deleteByKey).not.toHaveBeenCalled()
   })
 
   it('cross-user (non-owner, non-admin) delete request never reaches the tombstone UPDATE or storage at all — 404', async () => {
