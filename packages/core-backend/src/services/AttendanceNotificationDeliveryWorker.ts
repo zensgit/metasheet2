@@ -93,6 +93,13 @@ export interface AttendanceNotificationDeliveryWorkerOptions {
   workerId?: string
   now?: () => Date
   logger?: Logger
+  /**
+   * R8 quiet hours gate. `undefined` (the default when the worker is constructed by
+   * resolveAttendanceNotificationDeliveryJob) resolves from ATTENDANCE_NOTIFICATION_QUIET_HOURS /
+   * ATTENDANCE_NOTIFICATION_QUIET_HOURS_TZ at construction time; pass `null` explicitly to force the
+   * gate off (e.g. tests), or a concrete config to bypass env parsing entirely (also tests).
+   */
+  quietHours?: AttendanceNotificationQuietHoursConfig | null
 }
 
 export interface DingTalkAttendanceDeliveryChannelOptions {
@@ -212,6 +219,119 @@ export function computeDeliveryBackoffMs(attemptCount: number): number {
   if (attemptCount === 3) return 15 * 60_000
   if (attemptCount === 4) return 60 * 60_000
   return 6 * 60 * 60_000
+}
+
+export interface AttendanceNotificationQuietHoursConfig {
+  /** 24h "HH:MM", local to `timeZone`. */
+  start: string
+  /** 24h "HH:MM", local to `timeZone`; may be < start (cross-midnight window, e.g. 22:00-08:00). */
+  end: string
+  /** IANA zone name, e.g. "Asia/Shanghai". */
+  timeZone: string
+}
+
+const QUIET_HOURS_ENV_PATTERN = /^([01]\d|2[0-3]):([0-5]\d)-([01]\d|2[0-3]):([0-5]\d)$/
+const DEFAULT_QUIET_HOURS_TZ = 'Asia/Shanghai'
+
+/**
+ * R8 quiet-hours window (design decision: deployment-wide v1, consistent with every existing
+ * ATTENDANCE_NOTIFICATION_* knob — per-org config is a named follow-up, not v1).
+ *
+ * ATTENDANCE_NOTIFICATION_QUIET_HOURS="HH:MM-HH:MM" — unset/empty = off (unchanged behavior).
+ * ATTENDANCE_NOTIFICATION_QUIET_HOURS_TZ — IANA zone; defaults to Asia/Shanghai.
+ *
+ * Malformed input (bad "HH:MM-HH:MM" shape, or a TZ Intl does not recognize) never throws: it logs a
+ * single warn and disables the gate (off), exactly like unset — a typo in ops config must not crash the
+ * scheduler tick or start silently dropping notifications outside a window nobody intended.
+ *
+ * Channel-agnostic by construction: this config is consumed only by AttendanceNotificationDeliveryWorker
+ * .runBatch()'s pre-claim gate (see the R8 comment there), which runs BEFORE claimDueDeliveries() and
+ * therefore BEFORE any per-row channel dispatch. It applies to every channel this worker dispatches —
+ * DingTalk, WeCom, and email alike — with no per-channel opt-out; there is no separate claim/send path
+ * for any registered channel that could bypass it (verified for WeCom's S4 adapter, which routes through
+ * the same channelsByName / deliver() call site as DingTalk and email).
+ */
+export function resolveAttendanceNotificationQuietHours(
+  env: NodeJS.ProcessEnv = process.env,
+  logger: Pick<Logger, 'warn'> = new Logger('AttendanceNotificationDeliveryWorker'),
+): AttendanceNotificationQuietHoursConfig | null {
+  const raw = (env.ATTENDANCE_NOTIFICATION_QUIET_HOURS ?? '').trim()
+  if (!raw) return null
+  const match = QUIET_HOURS_ENV_PATTERN.exec(raw)
+  if (!match) {
+    logger.warn(
+      `Ignoring malformed ATTENDANCE_NOTIFICATION_QUIET_HOURS="${raw}" (expected "HH:MM-HH:MM", 24h clock); quiet hours disabled`,
+    )
+    return null
+  }
+  const start = `${match[1]}:${match[2]}`
+  const end = `${match[3]}:${match[4]}`
+  if (start === end) {
+    // start === end (e.g. "22:00-22:00") is treated as INVALID config, same tier as a malformed shape —
+    // NOT as a valid zero-length or full-day window. A zero-length window is almost certainly a config
+    // typo, not an intentional one-minute quiet period; and "fixing" it to mean full-day-quiet instead
+    // would let a typo silently stop ALL attendance notifications for 24h with no visible signal beyond
+    // this warn. Least-surprise is to refuse the config outright, exactly like a malformed shape.
+    logger.warn(
+      `Ignoring ATTENDANCE_NOTIFICATION_QUIET_HOURS="${raw}" (start equals end — a zero-length window is not a valid config; use two distinct HH:MM values); quiet hours disabled`,
+    )
+    return null
+  }
+  const timeZone = (env.ATTENDANCE_NOTIFICATION_QUIET_HOURS_TZ ?? '').trim() || DEFAULT_QUIET_HOURS_TZ
+  try {
+    // Throws RangeError for a zone Intl does not recognize; this is the validation, the format result
+    // itself is discarded.
+    new Intl.DateTimeFormat('en-US', { timeZone }).format(new Date())
+  } catch {
+    logger.warn(`Ignoring invalid ATTENDANCE_NOTIFICATION_QUIET_HOURS_TZ="${timeZone}"; quiet hours disabled`)
+    return null
+  }
+  return { start, end, timeZone }
+}
+
+/**
+ * Same cross-midnight wrap shape as NotificationService.isInQuietHours (start<=end → contiguous
+ * window; start>end → wraps past midnight, "inside" means >= start OR <= end), but the local HH:MM is
+ * computed via Intl.DateTimeFormat in the CONFIGURED timezone — NotificationService uses
+ * `toTimeString()` (server-local time) and silently ignores its own `timezone` field; that bug is not
+ * repeated here.
+ *
+ * Both endpoints are INCLUSIVE: `current <= end` means the window covers the entire end minute (e.g.
+ * "22:00-08:00" still defers at 08:00:59), not up-to-but-excluding it. Intentional, documented here and
+ * in .env.example — not changed by this pass.
+ *
+ * Fail-OPEN on a broken Intl result: if formatToParts unexpectedly omits the hour/minute parts (should
+ * not happen given the options passed above, but a broken runtime ICU data set is not impossible), this
+ * returns `false` (outside the window) rather than defaulting to "00:00". Defaulting to midnight would
+ * silently land inside any cross-midnight window and could make notifications stop flowing permanently
+ * and invisibly on every tick. A late/deferred notification is recoverable (the next in-window tick
+ * sends it); a silent permanent quiet window is not — so an unparseable local time must not block
+ * delivery.
+ */
+export function isAttendanceNotificationQuietHours(
+  now: Date,
+  config: AttendanceNotificationQuietHoursConfig,
+  logger: Pick<Logger, 'warn'> = new Logger('AttendanceNotificationDeliveryWorker'),
+): boolean {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: config.timeZone,
+    hour: '2-digit',
+    minute: '2-digit',
+    hourCycle: 'h23',
+  }).formatToParts(now)
+  const hour = parts.find((p) => p.type === 'hour')?.value
+  const minute = parts.find((p) => p.type === 'minute')?.value
+  if (hour === undefined || minute === undefined) {
+    logger.warn(
+      `Could not determine local time for quiet-hours check (timeZone="${config.timeZone}"); treating as OUTSIDE the quiet window so notifications are not blocked`,
+    )
+    return false
+  }
+  const current = `${hour}:${minute}`
+  if (config.start <= config.end) {
+    return current >= config.start && current <= config.end
+  }
+  return current >= config.start || current <= config.end
 }
 
 export class DeterministicFakeAttendanceDeliveryChannel implements AttendanceDeliveryChannel {
@@ -664,6 +784,8 @@ export class AttendanceNotificationDeliveryWorker {
   private readonly workerId: string
   private readonly now: () => Date
   private readonly logger: Logger
+  private readonly quietHours: AttendanceNotificationQuietHoursConfig | null
+  private quietHoursLogged = false
   private running = false
 
   constructor(options: AttendanceNotificationDeliveryWorkerOptions = {}) {
@@ -677,6 +799,9 @@ export class AttendanceNotificationDeliveryWorker {
     this.workerId = options.workerId ?? `attendance-delivery:${process.pid}:${randomBytes(4).toString('hex')}`
     this.now = options.now ?? (() => new Date())
     this.logger = options.logger ?? new Logger('AttendanceNotificationDeliveryWorker')
+    this.quietHours = options.quietHours !== undefined
+      ? options.quietHours
+      : resolveAttendanceNotificationQuietHours(process.env, this.logger)
   }
 
   async claimDueDeliveries(): Promise<DeliveryRow[]> {
@@ -732,6 +857,29 @@ export class AttendanceNotificationDeliveryWorker {
     this.running = true
     const result: AttendanceNotificationDeliveryResult = { claimed: 0, sent: 0, retrying: 0, failed: 0, skipped: 0 }
     try {
+      // R8: quiet-hours gate sits BEFORE claimDueDeliveries — a zero-result return here touches no SQL
+      // at all, so due rows stay untouched (pending/retrying, next_attempt_at unchanged, attempt_count
+      // unchanged, no lease taken). They are not lost and not penalized; the very next in-window
+      // runBatch() call drains them oldest-first via claimDueDeliveries' ORDER BY. This must NOT be
+      // expressed as a channel-level retryable failure — that would burn attempt_count toward
+      // maxAttempts and could dead-letter a row via computeDeliveryBackoffMs's up-to-6h backoff.
+      //
+      // This gate fences the WHOLE batch, not any one channel: claimDueDeliveries() is the ONLY place
+      // outbox rows get claimed, and deliver() (the only caller of channel.send()) only runs over rows
+      // that claimDueDeliveries() returned. Every registered AttendanceDeliveryChannel — DingTalk, WeCom
+      // (S4), and email — is dispatched exclusively through that one claim -> deliver loop below, so
+      // quiet hours applies to every channel this worker dispatches with no per-channel opt-out. Ratified
+      // product decision (owner, 2026-07-10): "don't disturb at night" is channel-independent.
+      if (this.quietHours && isAttendanceNotificationQuietHours(this.now(), this.quietHours, this.logger)) {
+        if (!this.quietHoursLogged) {
+          this.logger.info(
+            `Attendance notification dispatch deferred: quiet hours ${this.quietHours.start}-${this.quietHours.end} (${this.quietHours.timeZone})`,
+          )
+          this.quietHoursLogged = true
+        }
+        return result
+      }
+      this.quietHoursLogged = false
       const rows = await this.claimDueDeliveries()
       result.claimed = rows.length
       let lostLease = 0
