@@ -70,7 +70,7 @@ import StatusTag from '../../components/status/StatusTag.vue'
 // i18n follow-up (ballot T3-1 build-contract must-fix — "all user-facing
 // labels via i18n"): the shipped v0 (#3517) hardcoded these as Chinese-only
 // literals. This mirrors the app's established `useLocale()` / `isZh` pattern
-// (see ApprovalInboxView.vue, useNotificationInbox.ts) instead of introducing
+// (see ApprovalDetailView.vue, useNotificationInbox.ts) instead of introducing
 // a new i18n mechanism.
 const props = withDefaults(
   defineProps<{
