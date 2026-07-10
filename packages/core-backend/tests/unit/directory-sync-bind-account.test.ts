@@ -34,7 +34,14 @@ vi.mock('../../src/auth/invite-tokens', () => ({
   issueInviteToken: inviteTokenMocks.issueInviteToken,
 }))
 
-import { admitDirectoryAccountUser, batchBindDirectoryAccounts, batchUnbindDirectoryAccounts, bindDirectoryAccount, unbindDirectoryAccount } from '../../src/directory/directory-sync'
+import {
+  admitDirectoryAccountUser,
+  batchAdmitDirectoryAccountUsers,
+  batchBindDirectoryAccounts,
+  batchUnbindDirectoryAccounts,
+  bindDirectoryAccount,
+  unbindDirectoryAccount,
+} from '../../src/directory/directory-sync'
 
 describe('bindDirectoryAccount', () => {
   beforeEach(() => {
@@ -1055,6 +1062,188 @@ describe('bindDirectoryAccount', () => {
     ])
     // account-1 really did commit (its transaction ran).
     expect(pgMocks.transaction).toHaveBeenCalledTimes(1)
+  })
+
+  it('batch-admits no-email directory accounts with generated usernames and grant disabled by default', async () => {
+    const clientQuery = vi.fn().mockResolvedValue({ rows: [] })
+    pgMocks.transaction.mockImplementation(async (handler) => handler({ query: clientQuery }))
+    pgMocks.query
+      // batch service preloads account-1 to derive name/username
+      .mockResolvedValueOnce({
+        rows: [{
+          id: 'account-bulk-1',
+          integration_id: 'dir-1',
+          provider: 'dingtalk',
+          corp_id: 'dingcorp',
+          external_user_id: '0447654442691174',
+          union_id: 'union-1',
+          open_id: null,
+          external_key: 'union-1',
+          name: '林岚',
+          email: null,
+          mobile: '13900001234',
+        }],
+      })
+      // P2-1 eligibility gate: no existing directory_account_links row for account-bulk-1
+      .mockResolvedValueOnce({ rows: [] })
+      // P2-1 eligibility gate: no active user matches account-bulk-1's mobile
+      .mockResolvedValueOnce({ rows: [] })
+      // admitDirectoryAccountUser reloads account-1 + previous link
+      .mockResolvedValueOnce({
+        rows: [{
+          id: 'account-bulk-1',
+          integration_id: 'dir-1',
+          provider: 'dingtalk',
+          corp_id: 'dingcorp',
+          external_user_id: '0447654442691174',
+          union_id: 'union-1',
+          open_id: null,
+          external_key: 'union-1',
+          name: '林岚',
+          email: null,
+          mobile: '13900001234',
+        }],
+      })
+      .mockResolvedValueOnce({ rows: [{ local_user_id: null, local_user_email: null, local_user_username: null, local_user_name: null }] })
+      // summary reload
+      .mockResolvedValueOnce({
+        rows: [{
+          integration_id: 'dir-1',
+          provider: 'dingtalk',
+          corp_id: 'dingcorp',
+          directory_account_id: 'account-bulk-1',
+          external_user_id: '0447654442691174',
+          union_id: 'union-1',
+          open_id: null,
+          external_key: 'union-1',
+          account_name: '林岚',
+          account_email: null,
+          account_mobile: '13900001234',
+          account_is_active: true,
+          account_updated_at: '2026-07-08T00:00:00.000Z',
+          link_status: 'linked',
+          match_strategy: 'manual_admin',
+          reviewed_by: 'admin-1',
+          review_note: null,
+          link_updated_at: '2026-07-08T00:00:00.000Z',
+          local_user_id: 'user-created',
+          local_user_email: null,
+          local_user_username: 'dt_0447654442691174_accountb',
+          local_user_name: '林岚',
+          department_paths: ['DingTalk CN'],
+        }],
+      })
+      // account-2 does not exist → second item fails without affecting account-1
+      .mockResolvedValueOnce({ rows: [] })
+
+    const outcome = await batchAdmitDirectoryAccountUsers(['account-bulk-1', 'account-missing'], {
+      adminUserId: 'admin-1',
+    })
+
+    expect(outcome.succeeded).toHaveLength(1)
+    expect(outcome.failed).toEqual([
+      { accountId: 'account-missing', error: expect.stringMatching(/not found/i) },
+    ])
+    const createUserCall = clientQuery.mock.calls.find((entry) => String(entry[0]).includes('INSERT INTO users'))
+    const createdUserId = Array.isArray(createUserCall?.[1]) ? String(createUserCall?.[1]?.[0] || '') : ''
+    expect(createUserCall?.[1]).toEqual(expect.arrayContaining([
+      null,
+      'dt_0447654442691174_accountb',
+      '林岚',
+      '13900001234',
+      JSON.stringify([]),
+    ]))
+    expect(clientQuery.mock.calls.some((entry) => String(entry[0]).includes('INSERT INTO user_external_auth_grants'))).toBe(false)
+    expect(outcome.succeeded[0]).toMatchObject({
+      account: {
+        id: 'account-bulk-1',
+      },
+      user: {
+        id: createdUserId,
+        email: null,
+        username: 'dt_0447654442691174_accountb',
+        mobile: '13900001234',
+      },
+      inviteToken: null,
+    })
+    expect(outcome.succeeded[0].temporaryPassword).toMatch(/^Tmp-/)
+    expect(pgMocks.transaction).toHaveBeenCalledTimes(1)
+    expect(inviteLedgerMocks.recordInvite).not.toHaveBeenCalled()
+  })
+
+  // P2-1 (post-#3972 review): a direct batch-admit call bypasses the UI's "no recommendation
+  // candidate" filter. The server must reject an account whose email case-insensitively
+  // matches an existing active user, instead of creating a duplicate `users` row.
+  it('rejects batch-admit for an account whose email case-insensitively matches an existing user', async () => {
+    pgMocks.transaction.mockImplementation(async () => {
+      throw new Error('transaction should not open for an ineligible account')
+    })
+    pgMocks.query
+      .mockResolvedValueOnce({
+        rows: [{
+          id: 'account-case-mismatch',
+          integration_id: 'dir-1',
+          provider: 'dingtalk',
+          corp_id: 'dingcorp',
+          external_user_id: '0447654442691175',
+          union_id: 'union-2',
+          open_id: null,
+          external_key: 'union-2',
+          name: 'Alice',
+          email: 'alice@x.com',
+          mobile: null,
+        }],
+      })
+      // P2-1 eligibility gate: no existing directory_account_links row
+      .mockResolvedValueOnce({ rows: [] })
+      // P2-1 eligibility gate: an active user already matches this email case-insensitively
+      .mockResolvedValueOnce({ rows: [{ id: 'user-existing' }] })
+
+    const outcome = await batchAdmitDirectoryAccountUsers(['account-case-mismatch'], {
+      adminUserId: 'admin-1',
+    })
+
+    expect(outcome.succeeded).toEqual([])
+    expect(outcome.failed).toEqual([
+      { accountId: 'account-case-mismatch', error: expect.stringMatching(/already exists/i) },
+    ])
+    expect(pgMocks.transaction).not.toHaveBeenCalled()
+  })
+
+  // P2-1: an account already linked to a local user must not be silently re-admitted into a
+  // brand new user (which would orphan the existing link).
+  it('rejects batch-admit for an account already linked to a local user', async () => {
+    pgMocks.transaction.mockImplementation(async () => {
+      throw new Error('transaction should not open for an ineligible account')
+    })
+    pgMocks.query
+      .mockResolvedValueOnce({
+        rows: [{
+          id: 'account-already-linked',
+          integration_id: 'dir-1',
+          provider: 'dingtalk',
+          corp_id: 'dingcorp',
+          external_user_id: '0447654442691176',
+          union_id: 'union-3',
+          open_id: null,
+          external_key: 'union-3',
+          name: 'Bob',
+          email: null,
+          mobile: null,
+        }],
+      })
+      // P2-1 eligibility gate: this account is already linked
+      .mockResolvedValueOnce({ rows: [{ link_status: 'linked', local_user_id: 'user-existing' }] })
+
+    const outcome = await batchAdmitDirectoryAccountUsers(['account-already-linked'], {
+      adminUserId: 'admin-1',
+    })
+
+    expect(outcome.succeeded).toEqual([])
+    expect(outcome.failed).toEqual([
+      { accountId: 'account-already-linked', error: expect.stringMatching(/already linked/i) },
+    ])
+    expect(pgMocks.transaction).not.toHaveBeenCalled()
   })
 
   // DT-HARDEN-04: symmetric to the batch-unbind isolation test above. A fail-fast bind

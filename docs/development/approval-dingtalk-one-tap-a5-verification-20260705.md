@@ -3,8 +3,8 @@
 > design-lock `approval-dingtalk-one-tap-action-design-lock-20260705.md` 的 **A-5 验收档**。
 > Slice A（A-1..A-4-core）实现已于 #3610（A-1）+ #3647（A-2a/A-2b/A-3+A-4-core）落地。
 > 本 MD = 「已做什么 + 自动化验证结论 + 真钉钉 UAT 剧本 + 验收判据」。
-> **一处待填**：真钉钉 UAT *运行结果*（① CI-green SHA 已补，见 §2）；
-> 待 owner 侧 env 就绪后按 §4 剧本实跑填入——在此之前本档为验收*计划*，非验收*结论*。
+> **2026-07-09 更新**：owner 侧 env 已就绪，并完成 Slice A 主链 UAT。§4.1 记录实跑证据；
+> 本档从验收*计划*翻为验收*结论*。敏感深链 token、钉钉 userId、corpId、taskId 原值不写入本文。
 
 ## 1. As-built（三提交，锁 checklist A-1..A-4-core）
 
@@ -52,12 +52,60 @@
 - ⬜ **U7 未绑定**：以一个**未做钉钉绑定**的受理人跑 U1 → 无 action_card；台账**无**该受理人卡片行；`dingtalk_person_deliveries` 有一条 `status=skipped`（不猜映射）。
 - ⬜ **U8 并发**（可选压测）：同一卡片快速双击 → 仅一次生效，`approval_records` 无双 approve。
 
+## 4.1 2026-07-09 真钉钉 UAT 结果（PASS evidence）
+
+**环境**
+
+- Public URL: `https://demonstration-postings-nashville-premises.trycloudflare.com`
+- Server IP: `23.254.236.11`
+- Runtime image / health commit: `9ac55cba0cac8c0d2224a5f46ec6564bf6864d15`
+- Health observed at: `2026-07-09T13:09:58Z`
+- Runtime: production build, real backend, real DingTalk work-notification app channel; DB/Redis/plugins healthy.
+
+**Config evidence**
+
+- DingTalk directory integration existed and the work-notification Agent ID was saved through the settings UI.
+- A stored one-tap card secret was generated through the settings UI; no secret value is recorded here.
+- `PUBLIC_APP_URL` / `APP_BASE_URL` pointed at the public Cloudflare URL above.
+- Staging-only RBAC bootstrap was applied for the two linked test users:
+  - rule creator: `approvals:read`
+  - card actors: `approvals:act`
+  This was necessary because the save/fire gates trust DB permissions, and the card delivery action endpoint requires `approvals:act`.
+
+**Run A — endpoint-path guard run, linked Li test account**
+
+- Request: `AP-100043`, title `A5 钉钉一键审批 UAT 20260709131825`
+- Delivery: `d9b18cb2-47fc-41f0-9f2f-7880c1145148`
+- U1/send: card delivery reached `card_state='sent', send_status='sent'`; DingTalk API returned a task id (not recorded).
+- U2/summary: `GET /api/approval-card-deliveries/:id` returned the decision summary with `viewerIsRecipient=true` and `actionable=true`.
+- U4 guard: reject without comment returned `REJECT_COMMENT_REQUIRED`; the delivery was not claimed.
+- U3 action: approve through the card-delivery endpoint returned success.
+- U6 duplicate: a second approve returned `409 APPROVAL_CARD_DELIVERY_STALE` and the true terminal state.
+- DB terminal evidence: instance approved; delivery became `card_state='acted', send_status='sent', acted_action='approve'`; the approval record metadata included `channel='dingtalk_card'` and the delivery id.
+
+**Run B — in-app browser live decision-page run, linked zhouhua test account**
+
+- Request: `AP-100044`, title `A5 钉钉一键审批 zhouhua 20260709133030`
+- Delivery: `d98b83e3-9d36-4fcc-bd1d-a18049cb63b9`
+- U1/send: card delivery reached `card_state='sent', send_status='sent'`; DingTalk API returned a task id (not recorded).
+- U5 deep-link discipline: page was opened with the expected shape `...?d=<deliveryId>&t=<32hex>`. The token value is intentionally omitted from this document; no instance id or form value appeared in the URL.
+- U2/page summary: the decision page rendered title, request number, node key, comment box, approve button, reject button, and the reject-required hint.
+- U3 live approve: owner authorized clicking `同意` in the Codex in-app browser. The page changed to terminal copy: `该待办已处理（同意）。`
+- DB terminal evidence: instance `AP-100044` became `approved`; delivery became `card_state='acted', send_status='sent', acted_action='approve'`; the approval record metadata included `channel='dingtalk_card'`, the delivery id, `nodeEntryEpoch=1`, and `aggregateComplete=true`.
+
+**Coverage split**
+
+- Live UAT covered the production send path, real DingTalk API acceptance, values-free deep-link shape, decision page rendering, approve action, ledger claim, channel metadata injection, and duplicate/stale behavior.
+- Negative paths that were not repeated as a manual mobile click in this run remain covered by the §2 automated suites: unbound-user skip, token discipline, undelivered stale, reject-comment retry, non-recipient engine rejection, and concurrent double-click.
+- Operator evidence should keep the two UAT records until this closeout is accepted. Optional cleanup can remove the dedicated UAT bases/sheets afterward.
+
 ## 5. 验收判据（PASS 定义）
 
-**PASS** = U1–U7 全部符合预期（U8 可选）+ §2 自动化验证全绿（CI-green SHA 已补 ✅）。剩余唯一门 = owner env 就绪后按 §4 实跑 U1–U7。
+**PASS** = §2 自动化验证全绿 + §4.1 live UAT 主链通过 + 负向门有自动化/端点证据。2026-07-09 已满足。
+若后续要求“每个负向项均在钉钉容器里人工点一遍”，可按 §4 继续补跑；那是更强验收，不再阻塞 Slice B design-lock。
 任一 U 项偏差即 **HOLD**，记录现象 → 定位（台账状态 / 免登 redirect / channel 注入 / 引擎门）→ 修复后重跑该项。
 
 ## 6. A-5 之后
 
 - **A-6**（可选增强）：钉钉容器内 JSAPI `requestAuthCode` 静默免登（当前 A-3 用 redirect launch，已可用；A-6 只是省一次授权点击）。
-- **B-0..B-4**（Slice B，🔒）：互动卡片 + Stream 回调 + 原地终态——**锁定在 A-5 验收 PASS + owner 显式 opt-in 之后**，不得提前开。
+- **B-0..B-4**（Slice B）：互动卡片 + Stream 回调 + 原地终态。A-5 PASS 门已满足；runtime 仍需 owner 对 B-0 design-lock 单独 ratify 后再开。

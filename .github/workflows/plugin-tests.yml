@@ -2,6 +2,8 @@ name: Plugin System Tests
 
 on:
   workflow_dispatch:
+  merge_group:
+    types: [checks_requested]
   push:
     branches: [main, develop]
     paths:
@@ -230,6 +232,10 @@ jobs:
             tests/integration/multitable-history-audit-reveal-taint-realdb.test.ts \
             tests/integration/multitable-record-reconstructor-realdb.test.ts \
             tests/integration/multitable-d1-delete-revision-parity-realdb.test.ts \
+            tests/integration/multitable-d1-delete-revisions-realdb.test.ts \
+            tests/integration/multitable-undelete-inbound-replay-realdb.test.ts \
+            tests/integration/multitable-undelete-pit-inbound-replay-realdb.test.ts \
+            tests/integration/multitable-undelete-inbound-resurrect-realdb.test.ts \
             tests/integration/multitable-pit-view-realdb.test.ts \
             tests/integration/multitable-restore-preview-realdb.test.ts \
             tests/integration/multitable-restore-execute-realdb.test.ts \
@@ -250,6 +256,7 @@ jobs:
             tests/integration/multitable-revert-pit-realdb.test.ts \
             tests/integration/multitable-undelete-pit-realdb.test.ts \
             tests/integration/multitable-reset-pit-realdb.test.ts \
+            tests/integration/multitable-reset-pit-inbound-capture-realdb.test.ts \
             tests/integration/multitable-config-revision-retention-realdb.test.ts \
             tests/integration/multitable-config-history-api-realdb.test.ts \
             tests/integration/multitable-config-history-view-redaction-realdb.test.ts \
@@ -322,6 +329,7 @@ jobs:
             tests/integration/automation-approval-completed-trigger.test.ts \
             tests/integration/automation-approval-task-created-trigger.test.ts \
             tests/integration/automation-dingtalk-approval-card-action.test.ts \
+            tests/integration/dingtalk-person-message-integration-scoping.db.test.ts \
             tests/integration/approval-card-delivery-wrapper.db.test.ts \
             tests/integration/approval-projection-visibility.db.test.ts \
             tests/integration/approval-projection-participant-read.db.test.ts \
@@ -351,7 +359,7 @@ jobs:
             tests/integration/multitable-attachment-readgate.security.test.ts \
             --reporter=dot
 
-      - name: Run approval real-DB integration (directory endpoints + P1-C field redaction + P1-B add_sign/reduce_sign + direct_manager create/start + A/E/B/D/G cross-lane acceptance + dept_head sync-plumbing carry-forward + continuous_managers chain walk + common template presets)
+      - name: Run approval real-DB integration (directory endpoints + P1-C field redaction + P1-B add_sign/reduce_sign + direct_manager create/start + A/E/B/D/G cross-lane acceptance + dept_head sync-plumbing carry-forward + continuous_managers chain walk + common template presets + DT-OPS-01 deprovision selection goldens)
         # Lane A (directory endpoints) + Lane B (P1-C hidden field redaction) + Lane D (add_sign/reduce_sign). Wired as WHOLE FILE runs so the
         # gate is robust (a name filter that matches zero tests would exit green and hide
         # regressions). The file is describeIfDatabase-guarded + excluded from the no-DB
@@ -389,8 +397,12 @@ jobs:
             tests/integration/approval-node-signature-policy.api.test.ts \
             tests/integration/dingtalk-approval-card-deliveries.db.test.ts \
             tests/integration/dingtalk-container-login.db.test.ts \
+            tests/integration/directory-admission-case-insensitive-uniqueness.db.test.ts \
             tests/integration/directory-primary-department-write.db.test.ts \
             tests/integration/directory-primary-department-backfill.db.test.ts \
+            tests/integration/directory-sync-preview-apply-parity.db.test.ts \
+            tests/integration/directory-sync-alert-coverage.db.test.ts \
+            tests/integration/directory-deprovision-selection.db.test.ts \
             tests/integration/attendance-csv-export-bom.test.ts \
             --reporter=dot
 

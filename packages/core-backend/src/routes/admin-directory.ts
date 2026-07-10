@@ -1,9 +1,11 @@
 import type { Request, Response } from 'express'
 import { Router } from 'express'
 import { auditLog } from '../audit/audit'
+import { Logger } from '../core/logger'
 import {
   acknowledgeDirectorySyncAlert,
   admitDirectoryAccountUser,
+  batchAdmitDirectoryAccountUsers,
   batchBindDirectoryAccounts,
   batchUnbindDirectoryAccounts,
   bindDirectoryAccount,
@@ -17,11 +19,13 @@ import {
   listDirectoryReviewItems,
   listDirectorySyncAlerts,
   listDirectorySyncRuns,
+  previewDirectorySyncIntegration,
   syncDirectoryIntegration,
   testDirectoryIntegration,
   unbindDirectoryAccount,
   updateDirectoryIntegration,
 } from '../directory/directory-sync'
+import { getDirectoryManagerBindingCoverage } from '../directory/directory-sync-alert-delivery'
 import {
   getDingTalkWorkNotificationRuntimeStatusFromStore,
   saveDingTalkWorkNotificationAgentId,
@@ -35,6 +39,8 @@ import {
 import { refreshDirectoryIntegrationSchedule } from '../directory/directory-sync-scheduler'
 import { isAdmin as isRbacAdmin } from '../rbac/service'
 import { jsonError, jsonOk, parsePagination } from '../util/response'
+
+const logger = new Logger('AdminDirectoryRoutes')
 
 function normalizeAlertFilter(value: unknown): 'all' | 'pending' | 'acknowledged' {
   const normalized = typeof value === 'string' ? value.trim() : ''
@@ -289,12 +295,57 @@ export function adminDirectoryRouter(): Router {
     const adminUserId = await ensurePlatformAdmin(req, res)
     if (!adminUserId) return
 
+    // DT-OPS-02: async is OPT-IN. The synchronous response carries the auto-admission
+    // onboarding packets (one-time temporary passwords), which are never persisted — a
+    // 202 would silently throw them away. Callers that do not need them (large tenants,
+    // where the pull outlives any sane request timeout) ask for 202 + runId and poll the
+    // runs endpoint.
+    if (req.body?.async === true) {
+      try {
+        const runId = await new Promise<string>((resolve, reject) => {
+          syncDirectoryIntegration(req.params.integrationId, adminUserId, 'manual', { onRunStarted: resolve })
+            .then((result) => {
+              logger.info(`Async directory sync finished for ${req.params.integrationId} (run ${result.run.id})`)
+            })
+            .catch((error) => {
+              // If this fires before the run row exists the promise rejects and we answer
+              // an error; afterwards `resolve` has already won and this only logs, because
+              // the failure is recorded on the run row and its alert.
+              logger.warn(`Async directory sync failed for ${req.params.integrationId}: ${readErrorMessage(error, 'unknown error')}`)
+              reject(error)
+            })
+        })
+        res.status(202)
+        jsonOk(res, { accepted: true, runId, integrationId: req.params.integrationId })
+        return
+      } catch (error) {
+        const message = readErrorMessage(error, 'Failed to start directory sync')
+        jsonError(res, /not found/i.test(message) ? 404 : 500, 'DIRECTORY_SYNC_FAILED', message)
+        return
+      }
+    }
+
     try {
       const result = await syncDirectoryIntegration(req.params.integrationId, adminUserId)
       jsonOk(res, result)
     } catch (error) {
       const message = readErrorMessage(error, 'Failed to sync directory integration')
       jsonError(res, /not found/i.test(message) ? 404 : 500, 'DIRECTORY_SYNC_FAILED', message)
+    }
+  })
+
+  // DT-OPS-02: look before you leap. Pulls the DingTalk directory exactly as a sync does
+  // and reports what would change — writing nothing at all.
+  router.post('/integrations/:integrationId/sync/preview', async (req: Request, res: Response) => {
+    const adminUserId = await ensurePlatformAdmin(req, res)
+    if (!adminUserId) return
+
+    try {
+      const preview = await previewDirectorySyncIntegration(req.params.integrationId)
+      jsonOk(res, { preview })
+    } catch (error) {
+      const message = readErrorMessage(error, 'Failed to preview directory sync')
+      jsonError(res, /not found/i.test(message) ? 404 : 500, 'DIRECTORY_SYNC_PREVIEW_FAILED', message)
     }
   })
 
@@ -436,6 +487,21 @@ export function adminDirectoryRouter(): Router {
     } catch (error) {
       const message = readErrorMessage(error, 'Failed to load directory departments')
       jsonError(res, /required|invalid/i.test(message) ? 400 : 500, 'DIRECTORY_DEPARTMENTS_FAILED', message)
+    }
+  })
+
+  // DT-OPS-03 (§7.4): approval-routing health. Coverage is a read-only derived metric —
+  // no write path, same admin gate and error-handling shape as the sibling GET routes above.
+  router.get('/integrations/:integrationId/manager-coverage', async (req: Request, res: Response) => {
+    const adminUserId = await ensurePlatformAdmin(req, res)
+    if (!adminUserId) return
+
+    try {
+      const coverage = await getDirectoryManagerBindingCoverage(req.params.integrationId)
+      jsonOk(res, { coverage })
+    } catch (error) {
+      const message = readErrorMessage(error, 'Failed to load directory manager binding coverage')
+      jsonError(res, /required|invalid/i.test(message) ? 400 : 500, 'DIRECTORY_MANAGER_COVERAGE_FAILED', message)
     }
   })
 
@@ -661,6 +727,98 @@ export function adminDirectoryRouter(): Router {
             ? 400
             : 500
       jsonError(res, statusCode, 'DIRECTORY_BATCH_BIND_FAILED', message)
+    }
+  })
+
+  router.post('/accounts/batch-admit-users', async (req: Request, res: Response) => {
+    const adminUserId = await ensurePlatformAdmin(req, res)
+    if (!adminUserId) return
+
+    try {
+      const rawAccountIds = Array.isArray(req.body?.accountIds) ? req.body.accountIds : []
+      const accountIds = rawAccountIds.filter((value): value is string => typeof value === 'string')
+      const enableDingTalkGrant = req.body?.enableDingTalkGrant === true
+      const outcome = await batchAdmitDirectoryAccountUsers(accountIds, {
+        adminUserId,
+        enableDingTalkGrant,
+      })
+
+      await Promise.all(outcome.succeeded.flatMap((result) => [
+        auditLog({
+          actorId: adminUserId,
+          actorType: 'user',
+          action: 'create',
+          resourceType: 'user',
+          resourceId: result.user.id,
+          meta: {
+            adminUserId,
+            source: 'directory_bulk_manual_admission',
+            directoryAccountId: result.account.id,
+            integrationId: result.account.integrationId,
+            email: result.user.email,
+            username: result.user.username,
+            name: result.user.name,
+            mobile: result.user.mobile,
+            generatedPassword: typeof result.temporaryPassword === 'string',
+            mode: 'bulk_manual_admission',
+            selectionSize: accountIds.length,
+          },
+        }),
+        auditLog({
+          actorId: adminUserId,
+          actorType: 'user',
+          action: 'bind',
+          resourceType: 'directory-account-link',
+          resourceId: result.account.id,
+          meta: {
+            adminUserId,
+            directoryAccountId: result.account.id,
+            integrationId: result.account.integrationId,
+            previousLocalUserId: result.previousLocalUser?.id ?? null,
+            previousLocalUserEmail: result.previousLocalUser?.email ?? null,
+            localUserId: result.user.id,
+            localUserEmail: result.user.email,
+            localUserUsername: result.user.username,
+            externalUserId: result.account.externalUserId,
+            corpId: result.account.corpId,
+            enableDingTalkGrant,
+            mode: 'bulk_manual_admission',
+            selectionSize: accountIds.length,
+          },
+        }),
+      ]))
+
+      if (outcome.succeeded.length === 0 && outcome.failed.length > 0) {
+        throw new Error(outcome.failed[0].error)
+      }
+
+      jsonOk(res, {
+        items: outcome.succeeded.map((result) => result.account),
+        users: outcome.succeeded.map((result) => result.user),
+        onboardingPackets: outcome.succeeded.map((result) => ({
+          userId: result.user.id,
+          name: result.user.name,
+          email: result.user.email,
+          username: result.user.username,
+          mobile: result.user.mobile,
+          temporaryPassword: result.temporaryPassword ?? '',
+          onboarding: result.onboarding,
+        })),
+        updatedCount: outcome.succeeded.length,
+        failedCount: outcome.failed.length,
+        failed: outcome.failed,
+        enableDingTalkGrant,
+      })
+    } catch (error) {
+      const message = readErrorMessage(error, 'Failed to batch create and bind local users for directory accounts')
+      const statusCode = /not found/i.test(message)
+        ? 404
+        : /already exists|already bound|already linked/i.test(message)
+          ? 409
+          : /required|invalid|password|cannot be pre-bound|missing DingTalk openId/i.test(message)
+            ? 400
+            : 500
+      jsonError(res, statusCode, 'DIRECTORY_BATCH_ADMISSION_FAILED', message)
     }
   })
 

@@ -12,6 +12,7 @@ const auditMocks = vi.hoisted(() => ({
 const directoryMocks = vi.hoisted(() => ({
   acknowledgeDirectorySyncAlert: vi.fn(),
   admitDirectoryAccountUser: vi.fn(),
+  batchAdmitDirectoryAccountUsers: vi.fn(),
   batchBindDirectoryAccounts: vi.fn(),
   batchUnbindDirectoryAccounts: vi.fn(),
   bindDirectoryAccount: vi.fn(),
@@ -26,6 +27,7 @@ const directoryMocks = vi.hoisted(() => ({
   listDirectorySyncAlerts: vi.fn(),
   listDirectorySyncRuns: vi.fn(),
   syncDirectoryIntegration: vi.fn(),
+  previewDirectorySyncIntegration: vi.fn(),
   testDirectoryIntegration: vi.fn(),
   unbindDirectoryAccount: vi.fn(),
   updateDirectoryIntegration: vi.fn(),
@@ -52,6 +54,7 @@ vi.mock('../../src/audit/audit', () => ({
 vi.mock('../../src/directory/directory-sync', () => ({
   acknowledgeDirectorySyncAlert: directoryMocks.acknowledgeDirectorySyncAlert,
   admitDirectoryAccountUser: directoryMocks.admitDirectoryAccountUser,
+  batchAdmitDirectoryAccountUsers: directoryMocks.batchAdmitDirectoryAccountUsers,
   batchBindDirectoryAccounts: directoryMocks.batchBindDirectoryAccounts,
   batchUnbindDirectoryAccounts: directoryMocks.batchUnbindDirectoryAccounts,
   bindDirectoryAccount: directoryMocks.bindDirectoryAccount,
@@ -66,6 +69,7 @@ vi.mock('../../src/directory/directory-sync', () => ({
   listDirectorySyncAlerts: directoryMocks.listDirectorySyncAlerts,
   listDirectorySyncRuns: directoryMocks.listDirectorySyncRuns,
   syncDirectoryIntegration: directoryMocks.syncDirectoryIntegration,
+  previewDirectorySyncIntegration: directoryMocks.previewDirectorySyncIntegration,
   testDirectoryIntegration: directoryMocks.testDirectoryIntegration,
   unbindDirectoryAccount: directoryMocks.unbindDirectoryAccount,
   updateDirectoryIntegration: directoryMocks.updateDirectoryIntegration,
@@ -73,6 +77,14 @@ vi.mock('../../src/directory/directory-sync', () => ({
 
 vi.mock('../../src/directory/directory-sync-scheduler', () => ({
   refreshDirectoryIntegrationSchedule: schedulerMocks.refreshDirectoryIntegrationSchedule,
+}))
+
+const alertDeliveryMocks = vi.hoisted(() => ({
+  getDirectoryManagerBindingCoverage: vi.fn(),
+}))
+
+vi.mock('../../src/directory/directory-sync-alert-delivery', () => ({
+  getDirectoryManagerBindingCoverage: alertDeliveryMocks.getDirectoryManagerBindingCoverage,
 }))
 
 const approvalCardConfigMocks = vi.hoisted(() => ({
@@ -168,6 +180,8 @@ describe('adminDirectoryRouter', () => {
     auditMocks.auditLog.mockReset()
     directoryMocks.acknowledgeDirectorySyncAlert.mockReset()
     directoryMocks.admitDirectoryAccountUser.mockReset()
+    directoryMocks.previewDirectorySyncIntegration.mockReset()
+    directoryMocks.syncDirectoryIntegration.mockReset()
     directoryMocks.batchBindDirectoryAccounts.mockReset()
     directoryMocks.batchUnbindDirectoryAccounts.mockReset()
     directoryMocks.bindDirectoryAccount.mockReset()
@@ -186,6 +200,7 @@ describe('adminDirectoryRouter', () => {
     directoryMocks.unbindDirectoryAccount.mockReset()
     directoryMocks.updateDirectoryIntegration.mockReset()
     schedulerMocks.refreshDirectoryIntegrationSchedule.mockReset()
+    alertDeliveryMocks.getDirectoryManagerBindingCoverage.mockReset()
     workNotificationMocks.getDingTalkWorkNotificationRuntimeStatusFromStore.mockReset()
     workNotificationMocks.saveDingTalkWorkNotificationAgentId.mockReset()
     workNotificationMocks.testDingTalkWorkNotificationAgentId.mockReset()
@@ -487,6 +502,84 @@ describe('adminDirectoryRouter', () => {
     })
   })
 
+  // DT-OPS-02: async is opt-in precisely because the synchronous response carries the
+  // auto-admission onboarding packets (one-time temporary passwords, never persisted).
+  // A default 202 would silently throw them away — the test above pins that.
+  it('answers 202 with the runId when async is requested, without waiting for the pull', async () => {
+    let resolveSync: (value: unknown) => void = () => {}
+    directoryMocks.syncDirectoryIntegration.mockImplementation(
+      (_id: string, _actor: string, _source: string, hooks: { onRunStarted?: (runId: string) => void }) => {
+        // The run row exists; the DingTalk walk has not finished (and never does here).
+        hooks?.onRunStarted?.('run-async-1')
+        return new Promise((resolve) => { resolveSync = resolve })
+      },
+    )
+
+    const response = await invokeRoute('post', '/integrations/:integrationId/sync', {
+      params: { integrationId: 'dir-1' },
+      body: { async: true },
+      user: { id: 'admin-1', role: 'admin' },
+    })
+
+    expect(response.statusCode).toBe(202)
+    expect(response.body).toMatchObject({ ok: true, data: { accepted: true, runId: 'run-async-1', integrationId: 'dir-1' } })
+    // The request returned while the sync is still in flight.
+    resolveSync({ run: { id: 'run-async-1' } })
+  })
+
+  it('surfaces an error when an async sync fails before the run row exists', async () => {
+    directoryMocks.syncDirectoryIntegration.mockRejectedValue(new Error('Directory integration not found'))
+
+    const response = await invokeRoute('post', '/integrations/:integrationId/sync', {
+      params: { integrationId: 'missing' },
+      body: { async: true },
+      user: { id: 'admin-1', role: 'admin' },
+    })
+
+    expect(response.statusCode).toBe(404)
+  })
+
+  it('previews a sync without applying it', async () => {
+    directoryMocks.previewDirectorySyncIntegration.mockResolvedValue({
+      integrationId: 'dir-1',
+      integrationName: 'CN',
+      departmentsSeen: 3,
+      accountsSeen: 12,
+      wouldCreateAccounts: 2,
+      wouldDeactivateAccounts: 1,
+      wouldDeactivateLinkedAccounts: 1,
+      autoAdmissionMode: 'auto_for_scoped_departments',
+      autoAdmissionCandidateCount: 2,
+      autoAdmissionSkippedMissingEmailCount: 0,
+      autoAdmissionExcludedCount: 0,
+      sampledNewAccounts: [],
+      sampledDeactivations: [],
+    })
+
+    const response = await invokeRoute('post', '/integrations/:integrationId/sync/preview', {
+      params: { integrationId: 'dir-1' },
+      user: { id: 'admin-1', role: 'admin' },
+    })
+
+    expect(response.statusCode).toBe(200)
+    expect(directoryMocks.previewDirectorySyncIntegration).toHaveBeenCalledWith('dir-1')
+    // The load-bearing property: previewing must never apply.
+    expect(directoryMocks.syncDirectoryIntegration).not.toHaveBeenCalled()
+    expect(response.body).toMatchObject({
+      ok: true,
+      data: { preview: { wouldCreateAccounts: 2, wouldDeactivateLinkedAccounts: 1 } },
+    })
+  })
+
+  it('requires platform admin for the preview endpoint', async () => {
+    const response = await invokeRoute('post', '/integrations/:integrationId/sync/preview', {
+      params: { integrationId: 'dir-1' },
+      user: { id: 'not-admin' },
+    })
+    expect(response.statusCode).toBe(403)
+    expect(directoryMocks.previewDirectorySyncIntegration).not.toHaveBeenCalled()
+  })
+
   it('tests a saved integration by forwarding the integrationId and payload to the directory service', async () => {
     directoryMocks.testDirectoryIntegration.mockResolvedValue({
       corpId: 'dingcorp',
@@ -747,6 +840,55 @@ describe('adminDirectoryRouter', () => {
           },
         ],
       },
+    })
+  })
+
+  it('returns directory manager binding coverage for an integration (DT-OPS-03)', async () => {
+    alertDeliveryMocks.getDirectoryManagerBindingCoverage.mockResolvedValue({
+      managerCount: 4,
+      linkedManagerCount: 3,
+      coverage: 0.75,
+    })
+
+    const response = await invokeRoute('get', '/integrations/:integrationId/manager-coverage', {
+      params: { integrationId: 'dir-1' },
+      user: { id: 'admin-1', role: 'admin' },
+    })
+
+    expect(response.statusCode).toBe(200)
+    expect(alertDeliveryMocks.getDirectoryManagerBindingCoverage).toHaveBeenCalledWith('dir-1')
+    expect(response.body).toMatchObject({
+      ok: true,
+      data: {
+        coverage: { managerCount: 4, linkedManagerCount: 3, coverage: 0.75 },
+      },
+    })
+  })
+
+  it('admin-gates the manager binding coverage route (403 for non-admin)', async () => {
+    rbacMocks.isRbacAdmin.mockResolvedValue(false)
+
+    const response = await invokeRoute('get', '/integrations/:integrationId/manager-coverage', {
+      params: { integrationId: 'dir-1' },
+      user: { id: 'user-1', role: 'user' },
+    })
+
+    expect(response.statusCode).toBe(403)
+    expect(alertDeliveryMocks.getDirectoryManagerBindingCoverage).not.toHaveBeenCalled()
+  })
+
+  it('surfaces manager binding coverage failures as 500', async () => {
+    alertDeliveryMocks.getDirectoryManagerBindingCoverage.mockRejectedValue(new Error('db unreachable'))
+
+    const response = await invokeRoute('get', '/integrations/:integrationId/manager-coverage', {
+      params: { integrationId: 'dir-1' },
+      user: { id: 'admin-1', role: 'admin' },
+    })
+
+    expect(response.statusCode).toBe(500)
+    expect(response.body).toMatchObject({
+      ok: false,
+      error: { code: 'DIRECTORY_MANAGER_COVERAGE_FAILED', message: 'db unreachable' },
     })
   })
 
@@ -1195,6 +1337,113 @@ describe('adminDirectoryRouter', () => {
     })
 
     expect(response.statusCode).toBe(409)
+    expect(auditMocks.auditLog).not.toHaveBeenCalled()
+  })
+
+  it('batch-creates and binds directory accounts with grant disabled by default', async () => {
+    directoryMocks.batchAdmitDirectoryAccountUsers.mockResolvedValue({
+      succeeded: [
+        {
+          account: {
+            id: 'account-1',
+            integrationId: 'dir-1',
+            corpId: 'dingcorp',
+            externalUserId: '0447654442691174',
+            localUser: {
+              id: 'user-1',
+              email: null,
+              username: 'dt_0447654442691174_account1',
+            },
+          },
+          previousLocalUser: null,
+          user: {
+            id: 'user-1',
+            email: null,
+            username: 'dt_0447654442691174_account1',
+            name: '林岚',
+            mobile: '13900001234',
+            role: 'user',
+            is_active: true,
+          },
+          temporaryPassword: 'Temp#123456',
+          inviteToken: null,
+          onboarding: {
+            accountLabel: 'dt_0447654442691174_account1',
+            acceptInviteUrl: '',
+            inviteMessage: '账号：dt_0447654442691174_account1',
+          },
+        },
+      ],
+      failed: [{ accountId: 'account-2', error: 'User with this username already exists' }],
+    })
+
+    const response = await invokeRoute('post', '/accounts/batch-admit-users', {
+      body: {
+        accountIds: ['account-1', 'account-2'],
+      },
+      user: { id: 'admin-1', role: 'admin' },
+    })
+
+    expect(response.statusCode).toBe(200)
+    expect(directoryMocks.batchAdmitDirectoryAccountUsers).toHaveBeenCalledWith(['account-1', 'account-2'], {
+      adminUserId: 'admin-1',
+      enableDingTalkGrant: false,
+    })
+    expect(auditMocks.auditLog).toHaveBeenCalledTimes(2)
+    expect(auditMocks.auditLog).toHaveBeenCalledWith(expect.objectContaining({
+      action: 'create',
+      resourceType: 'user',
+      resourceId: 'user-1',
+      meta: expect.objectContaining({
+        source: 'directory_bulk_manual_admission',
+        mode: 'bulk_manual_admission',
+        selectionSize: 2,
+      }),
+    }))
+    expect(auditMocks.auditLog).toHaveBeenCalledWith(expect.objectContaining({
+      action: 'bind',
+      resourceType: 'directory-account-link',
+      resourceId: 'account-1',
+      meta: expect.objectContaining({
+        enableDingTalkGrant: false,
+        mode: 'bulk_manual_admission',
+        selectionSize: 2,
+      }),
+    }))
+    expect(response.body).toMatchObject({
+      ok: true,
+      data: {
+        items: [{ id: 'account-1' }],
+        users: [{ id: 'user-1', username: 'dt_0447654442691174_account1' }],
+        onboardingPackets: [{
+          userId: 'user-1',
+          username: 'dt_0447654442691174_account1',
+          temporaryPassword: 'Temp#123456',
+        }],
+        updatedCount: 1,
+        failedCount: 1,
+        failed: [{ accountId: 'account-2', error: expect.stringContaining('username') }],
+        enableDingTalkGrant: false,
+      },
+    })
+  })
+
+  it('keeps the historical error mapping when a batch admission commits nothing', async () => {
+    directoryMocks.batchAdmitDirectoryAccountUsers.mockResolvedValue({
+      succeeded: [],
+      failed: [{ accountId: 'account-1', error: 'User with this username already exists' }],
+    })
+
+    const response = await invokeRoute('post', '/accounts/batch-admit-users', {
+      body: { accountIds: ['account-1'] },
+      user: { id: 'admin-1', role: 'admin' },
+    })
+
+    expect(response.statusCode).toBe(409)
+    expect(response.body).toMatchObject({
+      ok: false,
+      error: { code: 'DIRECTORY_BATCH_ADMISSION_FAILED' },
+    })
     expect(auditMocks.auditLog).not.toHaveBeenCalled()
   })
 
