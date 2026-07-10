@@ -18,7 +18,7 @@
 | #4021 | **W3c confirm-reads**:映射 summary/候选队列 + 单位 summary/候选(计算不存)四条只读路由 | APPROVE;P2-C1/C2 测试硬化 + P3 matchMethod unknown 折叠已修 |
 | #4026 | **FE 视图 3+4**:物料映射确认 + 单位换算确认(双向 wire 契约逐字节对齐;43 spec) | APPROVE,零 findings,5/5 mutation KILLED |
 
-**续落(全部 MERGED on main):**
+**续落(MERGED on main;实现 PR 合计 12 个):**
 
 | PR | 切片 | 对抗审阅 |
 |---|---|---|
@@ -26,7 +26,13 @@
 | #4027 | **W5a 队列读**:异常队列 LIST(message 绝不过线)+ 备料明细 values-free summary LIST(值面 owner-gated OD-W3-1) | APPROVE-with-hardening(P2 谓词 fixture 对称 + 403 循环 + AND 种子,全修) |
 | #4029 | **W5b 审计轨(#3890)**:migration 066 + append-only store(结构性 values-free 闸)+ 8 写 handler 审计 + GET /audit;无 store 时写路由 501 拒绝 | APPROVE-with-hardening(P2 501 零测→8 路由 fail-closed 测试落;迁移锁测试;key 不回显;workspace 过滤)全修。**落地时 test(20.x) 红=DingTalk 共享 DB flake,rerun 洗绿(非本 PR)** |
 | #4030 | **FE 视图 5+6**:备料明细(值面注记 owner-gated)+ 异常确认队列(same-reason 前端镜像,server 409 为准);壳 union 合并 #4026(视图 1-6 全挂) | APPROVE(零 P1/P2;P3 ready 镜像 asymmetric fixture + prune-on-reload fixture 已补;guard 43 文件/598 测绿) |
-| #4038 | **W6 postdeploy smoke**:727 行脚本 + dispatch-only workflow + 10 脚本测试;61 断言链(不变量翻转/human_preserved 幸存/审计 8/8/6 发 fail-closed 探针/全局 leakScan 含泄漏注入自证;scratch harness 驱动真实 createHandlers 61/61) | **opus4.8 终审 APPROVE,零 P1/P2**(skip-when-unreachable 无假绿路径/leakScan neuter 实测变红/ready 不变量诚实性核实[确无 erp_material_master 写路由]/13+ 断言对真源);P3-2 非空背板已补(f75098cb3);P3-1 建议=把 postdeploy-smoke 脚本测试接进轻量 node --test 门(后续独立小 PR) |
+
+**在途(第 13 个实现 PR,owner REQUEST_CHANGES 修复中,fresh-green 后合并):**
+
+| PR | 切片 | 审阅 |
+|---|---|---|
+| #4038 | **W6 postdeploy smoke**:脚本 + dispatch-only workflow + 脚本测试;61 断言链(不变量翻转/human_preserved 幸存/审计 8/8/fail-closed 探针/leakScan;scratch harness 驱动真实 createHandlers) | opus4.8 APPROVE(P3-2 非空背板已补)→ **owner 复审 REQUEST_CHANGES 两 P2**:① workflow 缺 concurrency 串行闸;② 输出层非 values-free by construction(mode/code/field 原样透传可泄业务值)——修复=固定 concurrency group + 输出注册集投影 + 毒值负测 |
+
 
 ## 2. 端点地图(本轮新增,全部 `requireAccess(req,'admin')` + staging/business 分裂)
 
@@ -81,8 +87,10 @@
 
 ## 5. 测试与 CI 姿态(诚实声明)
 
-- **plugin-integration-core 测试链(现 32 套件)不在任何 CI workflow**——每个 PR body 附本地验证
-  命令;本轮每次落地前主循环实跑全链。收尾规划 B1(integration-guard lane)仍是已知缺口。
+- **CI 口径更正**:plugin-integration-core CJS 测试链**已由 integration-guard.yml 执行**
+  (`pnpm --filter plugin-integration-core test`,非 required check)——收尾规划 B1 的 guard lane
+  已成立;本文早稿的"零 CI"表述过时。required 集(contracts×3/pr-validate/test 20.x)仍不含该链,
+  故每个 PR body 附本地验证命令 + 主循环落地前实跑全链的纪律保留。
 - apps/web StockPreparation specs 由 #4017 起纳入 **非 required** 的 integration-guard(red 可见
   但不硬阻 admin-merge);required web-tests 白名单不含它们。
 - 新增测试:W3b 24 · W3a +3(reads 12)· W3c 8→10 · W4a 8 · FE 43(#4026)+ 35(#4017)。
@@ -103,10 +111,11 @@ OD-W3-2 退役审计字段(归 W5b)。
 
 ## 8. 收官声明(2026-07-10)
 
-**W3/W4/W5 全波 + F follow-ups 已全部 MERGED on main(本轮 15 个实现 PR + 本 docs PR)。**
-键盘侧余项仅 #4038 smoke 的落地(opus 终审后 arm)与其**实体机执行**(owner dispatch,
-workflow_dispatch base_url+token)。按收官口径:**decision-clean 池已清空;剩余 = owner-gated
-池(§7)+ Open Decisions(§6)+ 实体机 UAT 执行**——不说"全部开发好了"。
+**代码侧完成口径(更正版):W2 尾段 + W3/W4/W5 全波 + F follow-ups = 12 个实现 PR 已 MERGED
+on main;第 13 个(#4038 smoke)在途,owner REQUEST_CHANGES 修复后 fresh-green 合并。**
+落地定序(owner 指定):#4038 fresh-green 合并 → **实体机 dispatch PASS** → 本 MD 补 PASS 记录。
+**实体机 PASS 之前只称"代码侧完成",不称"全线闭环"。** decision-clean 池已清空;剩余 =
+owner-gated 池(§7)+ Open Decisions(§6)+ 实体机执行。
 
 补充审计轨说明(W5b):8 action 决策面审计 + 结构性 values-free 闸(migration 066);
 provisioning/ensure/sync-persist 面保留各自 run 记录,刻意不进本轨。
