@@ -11,11 +11,38 @@ import { Logger } from '../core/logger'
 import { StorageServiceImpl } from '../services/StorageService'
 import { db } from '../db/db'
 import { sniffImageContentType } from '../services/imageMagicBytes'
+import { getFilesRequestUserId, isFilesRequestAdmin, filesAclAllowsAccess, type FilesAclRow } from '../services/filesAcl'
 import * as path from 'path'
 import { loadMulter, createUploadMiddleware } from '../types/multer'
 import type { RequestWithFiles } from '../types/multer'
 
 const logger = new Logger('FilesRouter')
+
+interface FilesOwnerRow {
+  owner_id: string | null
+}
+
+interface FilesListRow {
+  id: string
+  url: string | null
+  owner_id: string | null
+  meta: Record<string, unknown> | null
+  created_at: Date
+}
+
+/**
+ * F1 files-acl-tombstone design-lock (2026-07-10): the single row lookup every ACL-gated endpoint
+ * (list/info/download/delete) uses to decide ownership. `deleted_at IS NULL` makes a tombstoned row
+ * (F2) read as "no active row" here too — the same filter list/info/download/delete's own
+ * consumption paths apply, so a deleted file is uniformly invisible everywhere, not just to G2.
+ */
+async function loadActiveFileOwner(id: string): Promise<FilesAclRow | null> {
+  const result = await sql<FilesOwnerRow>`
+    SELECT owner_id FROM files WHERE id = ${id} AND deleted_at IS NULL
+  `.execute(db)
+  const row = result.rows[0]
+  return row ? { ownerId: row.owner_id } : null
+}
 
 // Storage service singleton - initialized lazily
 let storageService: StorageServiceImpl | null = null
@@ -61,7 +88,7 @@ export function filesRouter(): Router {
 
           const storage = getStorageService()
           const uploadPath = (req.body.path as string) || ''
-          const userId = req.user?.id ?? req.user?.userId ?? req.user?.sub ?? 'anonymous'
+          const userId = getFilesRequestUserId(req)
 
           const result = await storage.upload(file.buffer, {
             filename: file.originalname,
@@ -147,6 +174,17 @@ export function filesRouter(): Router {
   r.get('/api/files/:id/download', authenticate, async (req: Request, res: Response) => {
     try {
       const { id } = req.params
+
+      // F1 files-acl-tombstone design-lock (2026-07-10): owner-or-admin, else 404 (not 403 — a 403
+      // would confirm the id exists to a caller who isn't allowed to see it; 404 is indistinguishable
+      // from a genuinely nonexistent id).
+      const callerId = getFilesRequestUserId(req)
+      const admin = await isFilesRequestAdmin(req)
+      const row = await loadActiveFileOwner(id)
+      if (!filesAclAllowsAccess({ admin, callerId, row })) {
+        return res.status(404).json({ error: 'File not found' })
+      }
+
       const storage = getStorageService()
 
       // Check if file exists
@@ -175,6 +213,16 @@ export function filesRouter(): Router {
   r.get('/api/files/:id', authenticate, async (req: Request, res: Response) => {
     try {
       const { id } = req.params
+
+      // F1 files-acl-tombstone design-lock (2026-07-10): owner-or-admin, else 404 (see rationale on
+      // the download route above — same predicate, same anti-enumeration reasoning).
+      const callerId = getFilesRequestUserId(req)
+      const admin = await isFilesRequestAdmin(req)
+      const row = await loadActiveFileOwner(id)
+      if (!filesAclAllowsAccess({ admin, callerId, row })) {
+        return res.status(404).json({ error: 'File not found' })
+      }
+
       const storage = getStorageService()
 
       const fileInfo = await storage.getFileInfo(id)
@@ -206,26 +254,65 @@ export function filesRouter(): Router {
   r.delete('/api/files/:id', authenticate, async (req: Request, res: Response) => {
     try {
       const { id } = req.params
+      const callerId = getFilesRequestUserId(req)
+
+      // F1 files-acl-tombstone design-lock (2026-07-10): owner-or-admin, else 404 (see rationale on
+      // the download route above). This lookup also doubles as F2's "does an active row exist"
+      // branch decision below — a caller who fails this gate never reaches storage either way.
+      const admin = await isFilesRequestAdmin(req)
+      const row = await loadActiveFileOwner(id)
+      if (!filesAclAllowsAccess({ admin, callerId, row })) {
+        return res.status(404).json({ error: 'File not found' })
+      }
+
       const storage = getStorageService()
 
-      // Check if file exists
+      if (row) {
+        // F2 files-acl-tombstone design-lock (2026-07-10): tombstone-first delete order. The
+        // previous order (storage.delete → `DELETE FROM files`) could split on a mid-operation
+        // failure: storage succeeds, the row delete fails → the binary is gone but the row still
+        // reads as valid evidence (exactly the dangling state H2 #4044 P3-2 was meant to close).
+        // Tombstoning BEFORE touching storage means a DB failure here leaves storage completely
+        // untouched (caught below, 5xx, nothing else runs), and once this succeeds every consumer
+        // (G2's `deleted_at IS NULL` filter, this file's own list/info/download filters) treats the
+        // id as gone regardless of what happens to the storage object next — there is no window
+        // where the row still looks valid but the blob is gone.
+        try {
+          await sql`
+            UPDATE files SET deleted_at = now() WHERE id = ${id} AND deleted_at IS NULL
+          `.execute(db)
+        } catch (updateErr) {
+          logger.error(`Failed to tombstone files row ${id}; storage object left untouched`, updateErr instanceof Error ? updateErr : undefined)
+          return res.status(500).json({ error: 'Failed to delete file' })
+        }
+
+        try {
+          await storage.delete(id)
+        } catch (storageErr) {
+          // The row is already tombstoned — evidence integrity holds (no consumer will ever see this
+          // id as valid again) even if the underlying blob is still sitting in storage. That blob's
+          // removal is a compensating cleanup (retry / manual sweep), deliberately not retried inline
+          // here and not surfaced as a client-facing failure: from the caller's perspective the file
+          // is gone, which is true from every consumer's point of view.
+          logger.warn(`Storage delete failed for tombstoned file ${id}; blob left for compensating cleanup`, storageErr instanceof Error ? storageErr : undefined)
+        }
+
+        logger.info(`File deleted: ${id} by user ${callerId}`)
+        return res.json({ success: true, id })
+      }
+
+      // No active `files` row for this id — a legacy object that predates the S2 writer (migration
+      // 035 never had one either) or an id that was already fully processed by the branch above.
+      // Unaffected by the tombstone change: unchanged pre-F2 behavior (storage-existence-gated
+      // delete, no row to tombstone). Reaching this branch already required admin (a non-admin with
+      // no matching row was rejected by the ACL gate above).
       const exists = await storage.exists(id)
       if (!exists) {
         return res.status(404).json({ error: 'File not found' })
       }
-
       await storage.delete(id)
-      // H2 photo-evidence-hardening design-lock (2026-07-10), P3-2: the storage object was the
-      // only thing this route ever deleted — the `files` row (owner_id + meta, written on upload
-      // since S2 #4016) was left behind as an orphan, and attendance's G2 photo-evidence check
-      // reads that row, not the storage object, so a punch could still cite "evidence" whose
-      // underlying file no longer exists. Delete the row too. Parameterized; a missing row (an
-      // object that predates the S2 writer, or a second delete of the same id) is not an error —
-      // `DELETE ... WHERE id = $1` is a no-op when no row matches.
-      await sql`DELETE FROM files WHERE id = ${id}`.execute(db)
-      const userId = req.user?.id ?? req.user?.userId ?? req.user?.sub ?? 'anonymous'
 
-      logger.info(`File deleted: ${id} by user ${userId}`)
+      logger.info(`File deleted: ${id} by user ${callerId}`)
       res.json({ success: true, id })
     } catch (error) {
       logger.error('Failed to delete file', error instanceof Error ? error : undefined)
@@ -233,26 +320,55 @@ export function filesRouter(): Router {
     }
   })
 
-  // List files (optional prefix filter)
+  // List files
+  //
+  // F1 files-acl-tombstone design-lock (2026-07-10): previously sourced from the storage provider's
+  // own disk-scan index (`storage.listFiles`), which carries no owner attribution at all (a
+  // filesystem scan has no concept of "who uploaded this"). Resource-level ACL requires an
+  // owner-attributed source, so this now queries the `files` DB table (the row storage.listFiles
+  // could never have provided) — non-admin callers see only their own active rows, admin sees all
+  // active rows. `deleted_at IS NULL` for both (tombstoned rows are invisible here too, same as
+  // info/download/delete). No known caller of this endpoint exists in this codebase today (grepped
+  // frontend + backend + plugins — zero references outside this file and its own tests), so this
+  // response-shape change (DB-row-derived, not disk-scan-derived; the old `path`/prefix-filter
+  // concept doesn't carry over — `files` rows have no `path` column) carries no compatibility risk.
   r.get('/api/files', authenticate, async (req: Request, res: Response) => {
     try {
-      const storage = getStorageService()
-      const prefix = req.query.prefix as string | undefined
+      const callerId = getFilesRequestUserId(req)
+      const admin = await isFilesRequestAdmin(req)
       const limit = parseInt(req.query.limit as string) || 100
       const offset = parseInt(req.query.offset as string) || 0
 
-      const files = await storage.listFiles(prefix, { limit, offset })
+      const result = admin
+        ? await sql<FilesListRow>`
+            SELECT id, url, owner_id, meta, created_at
+            FROM files
+            WHERE deleted_at IS NULL
+            ORDER BY created_at DESC
+            LIMIT ${limit} OFFSET ${offset}
+          `.execute(db)
+        : await sql<FilesListRow>`
+            SELECT id, url, owner_id, meta, created_at
+            FROM files
+            WHERE deleted_at IS NULL AND owner_id = ${callerId} AND owner_id <> 'anonymous'
+            ORDER BY created_at DESC
+            LIMIT ${limit} OFFSET ${offset}
+          `.execute(db)
 
       res.json({
-        data: files.map(f => ({
-          id: f.id,
-          filename: f.filename,
-          size: f.size,
-          contentType: f.contentType,
-          path: f.path,
-          createdAt: f.createdAt
-        })),
-        total: files.length,
+        data: result.rows.map((row) => {
+          const meta = (row.meta ?? {}) as Record<string, unknown>
+          return {
+            id: row.id,
+            filename: typeof meta.filename === 'string' ? meta.filename : null,
+            size: typeof meta.size === 'number' ? meta.size : null,
+            contentType: typeof meta.contentType === 'string' ? meta.contentType : null,
+            url: row.url,
+            ownerId: row.owner_id,
+            createdAt: row.created_at
+          }
+        }),
+        total: result.rows.length,
         limit,
         offset
       })
