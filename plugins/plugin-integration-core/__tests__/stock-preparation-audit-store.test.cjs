@@ -132,6 +132,10 @@ async function main() {
       ['deep nesting', { outer: { inner: { deep: 1 } } }],
       ['nested non-numeric', { counts: { open: 'many' } }],
       ['non-object detail', 'just-a-string'],
+      ['unshaped KEY', { [`bad key ${SECRET}`]: 1 }],
+      ['NaN number', { count: NaN }],
+      ['Infinity number', { count: Infinity }],
+      ['negative Infinity nested', { counts: { open: -Infinity } }],
     ]) {
       const error = await expectAuditError(store.append({ ...base, detail }), label === 'non-object detail' ? 'AUDIT_DETAIL_INVALID' : 'AUDIT_DETAIL_INVALID')
       assert.ok(!JSON.stringify({ message: error.message, details: error.details }).includes(SECRET), `${label}: error must not echo the value`)
@@ -156,6 +160,9 @@ async function main() {
     const call = db.selects[0]
     assert.equal(call.table, AUDIT_TABLE)
     assert.deepEqual(call.options.where, { tenant_id: 'tenant_1', action: 'unit_confirm', project_id: 'proj_1' })
+    // NIT (review #4029): workspaceId is a real filter, not a dead allowlist key.
+    await store.list({ tenantId: 'tenant_1', workspaceId: 'ws_9' })
+    assert.deepEqual(db.selects[1].options.where, { tenant_id: 'tenant_1', workspace_id: 'ws_9' })
     assert.equal(call.options.limit, MAX_LIST_LIMIT, 'limit clamps to the bound')
     await expectAuditError(store.list({ tenantId: 'tenant_1', action: 'bogus' }), 'AUDIT_ACTION_INVALID')
     await expectAuditError(store.list({}), 'AUDIT_CONFIG_INVALID')

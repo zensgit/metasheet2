@@ -1,8 +1,12 @@
 'use strict'
 
-// #3751 stock-prep MVP — W5b (#3890): VALUES-FREE audit trail for the stock-preparation write
-// surface. One row per successful write operation (confirms / retires / candidate sync / generation
-// runs / exception resolution), stored in plugin SQL (integration_stock_prep_audit, migration 066).
+// #3751 stock-prep MVP — W5b (#3890): VALUES-FREE audit trail for the stock-preparation DECISION
+// surface — confirms / retires / candidate sync / generation runs / exception resolution (8 actions).
+// Provisioning/ensure/option-sync/plan/persist keep their own run records and are deliberately NOT
+// routed through this trail. Stored in plugin SQL (integration_stock_prep_audit, migration 066).
+// The structural gate below is a BACKSTOP on top of call-site discipline: enum-shaped short strings
+// pass by shape, so call sites still only put counts/enums/booleans in detail (handles go in the
+// dedicated subject_id column).
 //
 // HARD boundary:
 //   - values-free BY CONSTRUCTION, not by caller discipline alone: `detail` passes a structural
@@ -66,7 +70,8 @@ function assertValuesFreeDetail(detail) {
   }
   for (const [key, value] of Object.entries(detail)) {
     if (!SAFE_STRING_PATTERN.test(key)) {
-      throw new StockPreparationAuditError(422, 'AUDIT_DETAIL_INVALID', 'detail key is not enum-shaped', { field: `detail.${key.slice(0, 32)}` })
+      // The offending KEY is itself the potential leak vector — never echo it, not even truncated.
+      throw new StockPreparationAuditError(422, 'AUDIT_DETAIL_INVALID', 'detail key is not enum-shaped', { field: 'detail.<invalid-key>' })
     }
     if (isSafeScalar(value)) continue
     if (value && typeof value === 'object' && !Array.isArray(value)) {
@@ -128,7 +133,7 @@ function createStockPreparationAuditStore({ db, idGenerator = crypto.randomUUID 
     return { id: row.id, action: normalizedAction }
   }
 
-  async function list({ tenantId, projectId, action, limit } = {}) {
+  async function list({ tenantId, workspaceId, projectId, action, limit } = {}) {
     const tenant = optionalString(tenantId)
     if (!tenant) {
       throw new StockPreparationAuditError(422, 'AUDIT_CONFIG_INVALID', 'tenantId is required', { field: 'tenantId' })
@@ -142,6 +147,8 @@ function createStockPreparationAuditStore({ db, idGenerator = crypto.randomUUID 
     if (normalizedAction) where.action = normalizedAction
     const project = optionalString(projectId)
     if (project) where.project_id = project
+    const workspace = optionalString(workspaceId)
+    if (workspace) where.workspace_id = workspace
     const rows = await db.select(AUDIT_TABLE, {
       where,
       orderBy: ['created_at', 'DESC'],

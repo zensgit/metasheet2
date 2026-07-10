@@ -3999,6 +3999,7 @@ function createHandlers(services, options = {}) {
       const audit = requireStockPreparationAudit()
       const result = await audit.list({
         tenantId,
+        workspaceId: firstString(rawQuery.workspaceId),
         projectId: firstString(rawQuery.projectId),
         action: firstString(rawQuery.action),
         limit: firstString(rawQuery.limit),
