@@ -108,6 +108,8 @@ const ROUTES = [
   // Value-bearing detail reads (drawing numbers / quantities / unit symbols) stay OWNER-GATED.
   ['GET', '/api/integration/stock-preparation/exceptions', 'stockPreparationExceptionList'],
   ['GET', '/api/integration/stock-preparation/prep-lines', 'stockPreparationPrepLineList'],
+  // #3751 MVP W5b (#3890): values-free audit trail over the stock-prep write surface.
+  ['GET', '/api/integration/stock-preparation/audit', 'stockPreparationAuditList'],
   // FOS-2: generic field-option-sync (preset-driven). Stock-prep route above is a compat alias.
   ['POST', '/api/integration/field-options/sync', 'fieldOptionsSync'],
   ['GET', '/api/integration/templates', 'templatesList'],
@@ -761,6 +763,13 @@ const VALID_STOCK_PREPARATION_EXCEPTION_LIST_QUERY_KEYS = new Set([
   'status',
   'exceptionType',
   'severity',
+])
+const VALID_STOCK_PREPARATION_AUDIT_LIST_QUERY_KEYS = new Set([
+  'tenantId',
+  'workspaceId',
+  'projectId',
+  'action',
+  'limit',
 ])
 const VALID_STOCK_PREPARATION_PREP_LINE_LIST_QUERY_KEYS = new Set([
   'tenantId',
@@ -2079,6 +2088,16 @@ function createHandlers(services, options = {}) {
   }
 
   const externalSystems = requireService('externalSystemRegistry', ['upsertExternalSystem', 'getExternalSystem', 'deleteExternalSystem', 'listExternalSystems'])
+  // W5b (#3890): the stock-prep audit store is OPTIONAL at registration (environments without the
+  // SQL db can still register read routes), but every stock-prep WRITE op fails closed without it —
+  // an unaudited confirm/generation/resolve is refused, not silently allowed.
+  const stockPreparationAudit = services.stockPreparationAuditStore || null
+  function requireStockPreparationAudit() {
+    if (!stockPreparationAudit || typeof stockPreparationAudit.append !== 'function') {
+      throw new HttpRouteError(501, 'AUDIT_STORE_UNAVAILABLE', 'stock-preparation audit store is not available; writes are refused without an audit trail')
+    }
+    return stockPreparationAudit
+  }
   const adapterRegistry = requireService('adapterRegistry', ['createAdapter', 'listAdapterKinds'])
   const pipelineRegistry = requireService('pipelineRegistry', ['upsertPipeline', 'getPipeline', 'listPipelines', 'listPipelineRuns'])
   const runner = requireService('pipelineRunner', ['runPipeline'])
@@ -3673,7 +3692,8 @@ function createHandlers(services, options = {}) {
     // stripped). Admin-gated; staging targetProjectId is server-derived, never request-trusted;
     // defaultVersionPolicy is REQUIRED per request (OD2: no server default). 201 only when it created.
     async stockPreparationMaterialMappingCandidatesSync(req, res) {
-      requireAccess(req, 'admin')
+      const user = requireAccess(req, 'admin')
+      const audit = requireStockPreparationAudit()
       const input = normalizeStockPreparationConfirmBody(requestBody(req), VALID_STOCK_PREPARATION_MAPPING_CANDIDATES_SYNC_REQUEST_KEYS, 'STOCK_PREPARATION_MAPPING_CANDIDATES_SYNC_REQUEST_INVALID')
       const tenantId = resolveTenantId(req, input)
       const result = await syncMaterialMappingCandidates({
@@ -3686,6 +3706,16 @@ function createHandlers(services, options = {}) {
         snapshotBatchId: input.snapshotBatchId,
         defaultVersionPolicy: input.defaultVersionPolicy,
       })
+      await audit.append({
+        tenantId,
+        workspaceId: input.workspaceId,
+        projectId: input.projectId,
+        action: 'mapping_candidates_sync',
+        subjectId: result.snapshotBatchId,
+        mode: result.mode,
+        actor: user.id || user.email,
+        detail: { created: result.created.mappings, skippedExisting: result.skipped.existing, skippedMatched: result.skipped.matched, status: result.status },
+      })
       return sendOk(res, result, result.persisted ? 201 : 200)
     },
 
@@ -3694,6 +3724,7 @@ function createHandlers(services, options = {}) {
     // user identity; confirmedAt is stamped in the module — the body can carry neither.
     async stockPreparationMaterialMappingConfirm(req, res) {
       const user = requireAccess(req, 'admin')
+      const audit = requireStockPreparationAudit()
       const input = normalizeStockPreparationConfirmBody(requestBody(req), VALID_STOCK_PREPARATION_MAPPING_CONFIRM_REQUEST_KEYS, 'STOCK_PREPARATION_MAPPING_CONFIRM_REQUEST_INVALID')
       const tenantId = resolveTenantId(req, input)
       const result = await confirmMaterialMapping({
@@ -3707,13 +3738,24 @@ function createHandlers(services, options = {}) {
         notes: input.notes,
         confirmedBy: user.id || user.email,
       })
+      await audit.append({
+        tenantId,
+        workspaceId: input.workspaceId,
+        projectId: input.projectId,
+        action: 'mapping_confirm',
+        subjectId: result.mappingId,
+        mode: result.mode,
+        actor: user.id || user.email,
+        detail: { persisted: result.persisted },
+      })
       return sendOk(res, result, result.mode === 'created' ? 201 : 200)
     },
 
     // #3751 MVP W3: retire a mapping (patch EXACTLY isActive:false) — the recovery path for a wrong
     // confirm. Audit-trail coverage is the Wave-5 role/audit slice.
     async stockPreparationMaterialMappingRetire(req, res) {
-      requireAccess(req, 'admin')
+      const user = requireAccess(req, 'admin')
+      const audit = requireStockPreparationAudit()
       const input = normalizeStockPreparationConfirmBody(requestBody(req), VALID_STOCK_PREPARATION_MAPPING_RETIRE_REQUEST_KEYS, 'STOCK_PREPARATION_MAPPING_RETIRE_REQUEST_INVALID')
       const tenantId = resolveTenantId(req, input)
       const result = await retireMaterialMapping({
@@ -3724,6 +3766,16 @@ function createHandlers(services, options = {}) {
         targetProjectId: resolveIntegrationStagingProjectId(tenantId, input.projectId),
         mappingId: input.mappingId,
       })
+      await audit.append({
+        tenantId,
+        workspaceId: input.workspaceId,
+        projectId: input.projectId,
+        action: 'mapping_retire',
+        subjectId: result.mappingId,
+        mode: result.mode,
+        actor: user.id || user.email,
+        detail: { persisted: result.persisted },
+      })
       return sendOk(res, result)
     },
 
@@ -3732,6 +3784,7 @@ function createHandlers(services, options = {}) {
     // user-entered values per OD3/OD4). Same server-stamp discipline as the mapping confirm.
     async stockPreparationUnitConversionConfirm(req, res) {
       const user = requireAccess(req, 'admin')
+      const audit = requireStockPreparationAudit()
       const input = normalizeStockPreparationConfirmBody(requestBody(req), VALID_STOCK_PREPARATION_UNIT_CONFIRM_REQUEST_KEYS, 'STOCK_PREPARATION_UNIT_CONFIRM_REQUEST_INVALID')
       const tenantId = resolveTenantId(req, input)
       const result = await confirmUnitConversionRule({
@@ -3747,13 +3800,24 @@ function createHandlers(services, options = {}) {
         rule: input.rule,
         confirmedBy: user.id || user.email,
       })
+      await audit.append({
+        tenantId,
+        workspaceId: input.workspaceId,
+        projectId: input.projectId,
+        action: 'unit_confirm',
+        subjectId: result.conversionRuleId,
+        mode: result.mode,
+        actor: user.id || user.email,
+        detail: { persisted: result.persisted },
+      })
       return sendOk(res, result, result.mode === 'created' ? 201 : 200)
     },
 
     // #3751 MVP W3: retire a unit rule (patch EXACTLY isActive:false) — required before re-creating a
     // same-scope rule with a different factor (two active same-scope rules fail closed as a conflict).
     async stockPreparationUnitConversionRetire(req, res) {
-      requireAccess(req, 'admin')
+      const user = requireAccess(req, 'admin')
+      const audit = requireStockPreparationAudit()
       const input = normalizeStockPreparationConfirmBody(requestBody(req), VALID_STOCK_PREPARATION_UNIT_RETIRE_REQUEST_KEYS, 'STOCK_PREPARATION_UNIT_RETIRE_REQUEST_INVALID')
       const tenantId = resolveTenantId(req, input)
       const result = await retireUnitConversionRule({
@@ -3764,6 +3828,16 @@ function createHandlers(services, options = {}) {
         targetProjectId: resolveIntegrationStagingProjectId(tenantId, input.projectId),
         conversionRuleId: input.conversionRuleId,
       })
+      await audit.append({
+        tenantId,
+        workspaceId: input.workspaceId,
+        projectId: input.projectId,
+        action: 'unit_retire',
+        subjectId: result.conversionRuleId,
+        mode: result.mode,
+        actor: user.id || user.email,
+        detail: { persisted: result.persisted },
+      })
       return sendOk(res, result)
     },
 
@@ -3771,7 +3845,8 @@ function createHandlers(services, options = {}) {
     // exceptions create-only (human resolution preserved); run record create-only. `ready` is the
     // server-computed invariant verdict (engine ready AND zero unresolved blocking exceptions).
     async stockPreparationGenerationRun(req, res) {
-      requireAccess(req, 'admin')
+      const user = requireAccess(req, 'admin')
+      const audit = requireStockPreparationAudit()
       const input = normalizeStockPreparationConfirmBody(requestBody(req), VALID_STOCK_PREPARATION_GENERATION_RUN_REQUEST_KEYS, 'STOCK_PREPARATION_GENERATION_RUN_REQUEST_INVALID')
       const tenantId = resolveTenantId(req, input)
       const result = await runStockPreparationGeneration({
@@ -3783,12 +3858,30 @@ function createHandlers(services, options = {}) {
         projectId: input.projectId,
         snapshotBatchId: input.snapshotBatchId,
       })
+      await audit.append({
+        tenantId,
+        workspaceId: input.workspaceId,
+        projectId: input.projectId,
+        action: 'generation_run',
+        subjectId: result.snapshotBatchId,
+        mode: result.mode,
+        actor: user.id || user.email,
+        detail: {
+          status: result.status,
+          ready: result.ready,
+          unresolvedBlocking: result.unresolvedBlockingExceptionCount,
+          linesCreated: result.created.lines,
+          linesPatched: result.patched.lines,
+          exceptionsCreated: result.created.exceptions,
+        },
+      })
       return sendOk(res, result, result.created && (result.created.lines + result.created.exceptions + result.created.run) > 0 ? 201 : 200)
     },
 
     // #3751 MVP W4: single exception resolve — patch EXACTLY the resolution quartet, server-stamped.
     async stockPreparationExceptionResolve(req, res) {
       const user = requireAccess(req, 'admin')
+      const audit = requireStockPreparationAudit()
       const input = normalizeStockPreparationConfirmBody(requestBody(req), VALID_STOCK_PREPARATION_EXCEPTION_RESOLVE_REQUEST_KEYS, 'STOCK_PREPARATION_EXCEPTION_RESOLVE_REQUEST_INVALID')
       const tenantId = resolveTenantId(req, input)
       const result = await resolveStockPreparationException({
@@ -3801,6 +3894,16 @@ function createHandlers(services, options = {}) {
         resolutionAction: input.resolutionAction,
         resolvedBy: user.id || user.email,
       })
+      await audit.append({
+        tenantId,
+        workspaceId: input.workspaceId,
+        projectId: input.projectId,
+        action: 'exception_resolve',
+        subjectId: result.exceptionId,
+        mode: result.mode,
+        actor: user.id || user.email,
+        detail: { resolutionAction: input.resolutionAction, persisted: result.persisted },
+      })
       return sendOk(res, result)
     },
 
@@ -3808,6 +3911,7 @@ function createHandlers(services, options = {}) {
     // before any patch; bounded id list.
     async stockPreparationExceptionBulkResolve(req, res) {
       const user = requireAccess(req, 'admin')
+      const audit = requireStockPreparationAudit()
       const input = normalizeStockPreparationConfirmBody(requestBody(req), VALID_STOCK_PREPARATION_EXCEPTION_BULK_RESOLVE_REQUEST_KEYS, 'STOCK_PREPARATION_EXCEPTION_BULK_RESOLVE_REQUEST_INVALID')
       const tenantId = resolveTenantId(req, input)
       const result = await bulkResolveStockPreparationExceptions({
@@ -3819,6 +3923,15 @@ function createHandlers(services, options = {}) {
         exceptionIds: input.exceptionIds,
         resolutionAction: input.resolutionAction,
         resolvedBy: user.id || user.email,
+      })
+      await audit.append({
+        tenantId,
+        workspaceId: input.workspaceId,
+        projectId: input.projectId,
+        action: 'exception_bulk_resolve',
+        mode: result.mode,
+        actor: user.id || user.email,
+        detail: { resolutionAction: input.resolutionAction, resolved: result.resolved, skipped: result.skipped, exceptionType: result.exceptionType },
       })
       return sendOk(res, result)
     },
@@ -3865,6 +3978,30 @@ function createHandlers(services, options = {}) {
         snapshotBatchId: input.snapshotBatchId,
         prepStatus: input.prepStatus,
         permission: 'admin',
+      })
+      return sendOk(res, result)
+    },
+
+    // #3751 MVP W5b (#3890): values-free audit trail read — entries are values-free BY CONSTRUCTION
+    // (the store's structural gate refused anything else at append time).
+    async stockPreparationAuditList(req, res) {
+      requireAccess(req, 'admin')
+      const rawQuery = requestQuery(req)
+      if (!isPlainObject(rawQuery)) {
+        throw new HttpRouteError(400, 'STOCK_PREPARATION_AUDIT_LIST_REQUEST_INVALID', 'request must be an object')
+      }
+      for (const key of Object.keys(rawQuery)) {
+        if (!VALID_STOCK_PREPARATION_AUDIT_LIST_QUERY_KEYS.has(key)) {
+          throw new HttpRouteError(400, 'STOCK_PREPARATION_AUDIT_LIST_REQUEST_INVALID', `unsupported request field: ${key}`, { field: key })
+        }
+      }
+      const tenantId = resolveTenantId(req, { tenantId: firstString(rawQuery.tenantId) })
+      const audit = requireStockPreparationAudit()
+      const result = await audit.list({
+        tenantId,
+        projectId: firstString(rawQuery.projectId),
+        action: firstString(rawQuery.action),
+        limit: firstString(rawQuery.limit),
       })
       return sendOk(res, result)
     },
