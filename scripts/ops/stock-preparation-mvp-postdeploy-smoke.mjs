@@ -475,6 +475,7 @@ async function main() {
     unitCandidates.ok && unitData.snapshotBatchId === fixture.snapshotBatchId && S.unitCandidateRowCount >= 1,
     `http=${unitCandidates.status} rows=${S.unitCandidateRowCount}`)
   must('unit candidate rows are values-stripped (hasCandidate boolean, no candidateRule payload)',
+    unitRows.length >= 1 &&
     unitRows.every((row) => typeof row.hasCandidate === 'boolean' && !('candidateRule' in row) && typeof row.outcome === 'string'))
 
   const unitConfirmBody = {
