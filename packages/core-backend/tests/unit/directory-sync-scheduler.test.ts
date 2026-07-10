@@ -6,16 +6,30 @@ const pgMocks = vi.hoisted(() => ({
 
 const directoryMocks = vi.hoisted(() => ({
   syncDirectoryIntegration: vi.fn(),
+  reclaimStaleDirectorySyncRuns: vi.fn(),
 }))
 
 vi.mock('../../src/db/pg', () => ({
   query: pgMocks.query,
+  // The real directory-sync (loaded below via importOriginal for its error class)
+  // imports { query, transaction }; a factory missing either export fails at load.
+  transaction: vi.fn(),
 }))
 
-vi.mock('../../src/directory/directory-sync', () => ({
+vi.mock('../../src/directory/directory-sync', async (importOriginal) => ({
+  // DT-HARDEN-05: runScheduledSync discriminates lease conflicts with
+  // `error instanceof DirectorySyncInProgressError`. Re-export the REAL class so the
+  // skip test below exercises the same discrimination production performs. The old
+  // factory omitted it (and reclaimStaleDirectorySyncRuns), leaving the module under
+  // test holding `undefined` — the boot sweep threw into its own catch and every
+  // DT-HARDEN-05 guard in this file was unfalsifiable.
+  DirectorySyncInProgressError: (await importOriginal<typeof import('../../src/directory/directory-sync')>())
+    .DirectorySyncInProgressError,
   syncDirectoryIntegration: directoryMocks.syncDirectoryIntegration,
+  reclaimStaleDirectorySyncRuns: directoryMocks.reclaimStaleDirectorySyncRuns,
 }))
 
+import { DirectorySyncInProgressError } from '../../src/directory/directory-sync'
 import {
   refreshDirectoryIntegrationSchedule,
   resetDirectorySyncSchedulerForTests,
@@ -36,6 +50,8 @@ describe('directory-sync-scheduler', () => {
   beforeEach(() => {
     pgMocks.query.mockReset()
     directoryMocks.syncDirectoryIntegration.mockReset()
+    directoryMocks.reclaimStaleDirectorySyncRuns.mockReset()
+    directoryMocks.reclaimStaleDirectorySyncRuns.mockResolvedValue(0)
     resetDirectorySyncSchedulerForTests()
   })
 
@@ -138,5 +154,37 @@ describe('directory-sync-scheduler', () => {
     expect(scheduler.unschedule).toHaveBeenCalledWith(`directory-sync:${row.id}`)
     expect(scheduler.schedule).not.toHaveBeenCalled()
     expect(scheduler.reschedule).not.toHaveBeenCalled()
+  })
+
+  // DT-HARDEN-05 gate P2-2: the boot sweep and the in-progress skip are the scheduler's
+  // two consumer-side lease guards. Each gets its own pin so a refactor that drops
+  // either one goes red instead of degrading silently.
+  it('sweeps stale runs once at boot', async () => {
+    const scheduler = createSchedulerMock()
+    scheduler.getJob.mockResolvedValue(null)
+    pgMocks.query.mockResolvedValueOnce({ rows: [] })
+
+    await startDirectorySyncScheduler({ scheduler: scheduler as never })
+
+    expect(directoryMocks.reclaimStaleDirectorySyncRuns).toHaveBeenCalledTimes(1)
+  })
+
+  it('skips a scheduled tick on a lease conflict but keeps any other failure a job error', async () => {
+    const scheduler = createSchedulerMock()
+    scheduler.getJob.mockResolvedValue(null)
+    pgMocks.query.mockResolvedValueOnce({
+      rows: [
+        { id: 'dir-1', name: 'DingTalk CN', status: 'active', sync_enabled: true, schedule_cron: '*/5 * * * *' },
+      ],
+    })
+
+    await startDirectorySyncScheduler({ scheduler: scheduler as never })
+    const scheduleHandler = scheduler.schedule.mock.calls[0][2] as () => Promise<void>
+
+    directoryMocks.syncDirectoryIntegration.mockRejectedValueOnce(new DirectorySyncInProgressError('run-held'))
+    await expect(scheduleHandler()).resolves.toBeUndefined()
+
+    directoryMocks.syncDirectoryIntegration.mockRejectedValueOnce(new Error('DingTalk 500'))
+    await expect(scheduleHandler()).rejects.toThrow('DingTalk 500')
   })
 })
