@@ -1547,6 +1547,8 @@ export interface DingTalkApprovalCardDeliveriesTable {
   recipient_dingtalk_user_id: string
   delivery_kind: 'work_notice_action_card' | 'interactive_card'
   task_id: string | null
+  /** DT-R2: directory integration (corp) the card was sent through; NULL on legacy/env-only rows. */
+  integration_id: string | null
   card_state: 'sent' | 'acted' | 'superseded' | 'expired' | 'revoked'
   acted_action: string | null
   acted_by: string | null

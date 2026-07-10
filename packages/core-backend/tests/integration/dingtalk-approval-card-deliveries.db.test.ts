@@ -7,6 +7,8 @@
  *   - supersede sweeps only still-`sent` rows of the instance,
  *   - the DB CHECKs reject invalid states and acted-audit inconsistencies.
  */
+import { randomUUID } from 'crypto'
+
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { pool } from '../../src/db/pg'
 import {
@@ -192,6 +194,57 @@ describeIfDb('A-1 — dingtalk approval card delivery ledger (real DB)', () => {
         deliveryKind: 'interactive_card',
       }),
     ).rejects.toThrow()
+  })
+
+  it('DT-R2: integration_id persists through insert + RETURNING, null passes through, and deleting the integration SET NULLs without touching the audit row', async () => {
+    const integrationId = randomUUID()
+    await q(
+      `INSERT INTO directory_integrations (id, name, provider, corp_id) VALUES ($1, $2, 'dingtalk', $3)`,
+      [integrationId, `dacd-r2-${Date.now()}`, `corp_dacd_r2_${Date.now()}`],
+    )
+    try {
+      // Linked row: the column round-trips through INSERT + RETURNING and findById.
+      const linked = await insertDingTalkApprovalCardDelivery(q, {
+        instanceId: INSTANCE,
+        nodeKey: 'approval_1',
+        recipientUserId: 'user_r2a',
+        recipientDingTalkUserId: 'dd_user_r2a',
+        deliveryKind: 'work_notice_action_card',
+        integrationId,
+      })
+      expect(linked.integration_id).toBe(integrationId)
+      expect((await findDingTalkApprovalCardDeliveryById(q, linked.id))?.integration_id).toBe(integrationId)
+
+      // Unlinked row (env-only / legacy shape): null passthrough, never a guessed integration.
+      const unlinked = await insertDingTalkApprovalCardDelivery(q, {
+        instanceId: INSTANCE,
+        nodeKey: 'approval_1',
+        recipientUserId: 'user_r2b',
+        recipientDingTalkUserId: 'dd_user_r2b',
+        deliveryKind: 'work_notice_action_card',
+      })
+      expect(unlinked.integration_id).toBeNull()
+
+      // FK rejects an unknown integration — the anchor is never dangling.
+      await expect(
+        insertDingTalkApprovalCardDelivery(q, {
+          instanceId: INSTANCE,
+          nodeKey: 'approval_1',
+          recipientUserId: 'user_r2c',
+          recipientDingTalkUserId: 'dd_user_r2c',
+          deliveryKind: 'work_notice_action_card',
+          integrationId: randomUUID(),
+        }),
+      ).rejects.toThrow()
+
+      // ON DELETE SET NULL: removing the integration must NOT delete the approval audit row.
+      await q(`DELETE FROM directory_integrations WHERE id = $1`, [integrationId])
+      const survivor = await findDingTalkApprovalCardDeliveryById(q, linked.id)
+      expect(survivor).not.toBeNull()
+      expect(survivor?.integration_id).toBeNull()
+    } finally {
+      await q(`DELETE FROM directory_integrations WHERE id = $1`, [integrationId]).catch(() => {})
+    }
   })
 
   it('ON DELETE CASCADE removes ledger rows with their instance', async () => {
