@@ -97,10 +97,12 @@ vi.mock('../../src/directory/directory-sync-scheduler', () => ({
 
 const alertDeliveryMocks = vi.hoisted(() => ({
   getDirectoryManagerBindingCoverage: vi.fn(),
+  getDirectoryInactiveLinkedMetric: vi.fn(),
 }))
 
 vi.mock('../../src/directory/directory-sync-alert-delivery', () => ({
   getDirectoryManagerBindingCoverage: alertDeliveryMocks.getDirectoryManagerBindingCoverage,
+  getDirectoryInactiveLinkedMetric: alertDeliveryMocks.getDirectoryInactiveLinkedMetric,
 }))
 
 const approvalCardConfigMocks = vi.hoisted(() => ({
@@ -217,6 +219,7 @@ describe('adminDirectoryRouter', () => {
     directoryMocks.updateDirectoryIntegration.mockReset()
     schedulerMocks.refreshDirectoryIntegrationSchedule.mockReset()
     alertDeliveryMocks.getDirectoryManagerBindingCoverage.mockReset()
+    alertDeliveryMocks.getDirectoryInactiveLinkedMetric.mockReset()
     workNotificationMocks.getDingTalkWorkNotificationRuntimeStatusFromStore.mockReset()
     workNotificationMocks.saveDingTalkWorkNotificationAgentId.mockReset()
     workNotificationMocks.testDingTalkWorkNotificationAgentId.mockReset()
@@ -1079,6 +1082,76 @@ describe('adminDirectoryRouter', () => {
     expect(response.body).toMatchObject({
       ok: false,
       error: { code: 'DIRECTORY_MANAGER_COVERAGE_FAILED', message: 'db unreachable' },
+    })
+  })
+
+  it('returns the directory inactive-linked backlog metric for an integration (§7.1)', async () => {
+    alertDeliveryMocks.getDirectoryInactiveLinkedMetric.mockResolvedValue({
+      thresholdDays: 30,
+      count: 2,
+      sample: [{ directoryAccountId: 'acc-1', externalUserId: 'ext-1', accountName: 'Alice', localUserId: 'u-1', localUserEmail: 'a@example.com', localUserName: 'Alice', inactiveSinceAt: '2026-06-01T00:00:00.000Z', inactiveDays: 40 }],
+    })
+
+    const response = await invokeRoute('get', '/integrations/:integrationId/inactive-linked', {
+      params: { integrationId: 'dir-1' },
+      query: { days: '30' },
+      user: { id: 'admin-1', role: 'admin' },
+    })
+
+    expect(response.statusCode).toBe(200)
+    expect(alertDeliveryMocks.getDirectoryInactiveLinkedMetric).toHaveBeenCalledWith('dir-1', 30)
+    expect(response.body).toMatchObject({
+      ok: true,
+      data: { metric: { thresholdDays: 30, count: 2 } },
+    })
+  })
+
+  it('defaults the inactive-linked threshold to 30 days when the query param is missing or invalid', async () => {
+    alertDeliveryMocks.getDirectoryInactiveLinkedMetric.mockResolvedValue({ thresholdDays: 30, count: 0, sample: [] })
+
+    await invokeRoute('get', '/integrations/:integrationId/inactive-linked', {
+      params: { integrationId: 'dir-1' },
+      query: { days: 'not-a-number' },
+      user: { id: 'admin-1', role: 'admin' },
+    })
+
+    expect(alertDeliveryMocks.getDirectoryInactiveLinkedMetric).toHaveBeenCalledWith('dir-1', 30)
+  })
+
+  it('rejects an unauthenticated inactive-linked request (401)', async () => {
+    const response = await invokeRoute('get', '/integrations/:integrationId/inactive-linked', {
+      params: { integrationId: 'dir-1' },
+    })
+
+    expect(response.statusCode).toBe(401)
+    expect(response.body).toMatchObject({ ok: false, error: { code: 'UNAUTHENTICATED' } })
+    expect(alertDeliveryMocks.getDirectoryInactiveLinkedMetric).not.toHaveBeenCalled()
+  })
+
+  it('admin-gates the inactive-linked route (403 for non-admin)', async () => {
+    rbacMocks.isRbacAdmin.mockResolvedValue(false)
+
+    const response = await invokeRoute('get', '/integrations/:integrationId/inactive-linked', {
+      params: { integrationId: 'dir-1' },
+      user: { id: 'user-1', role: 'user' },
+    })
+
+    expect(response.statusCode).toBe(403)
+    expect(alertDeliveryMocks.getDirectoryInactiveLinkedMetric).not.toHaveBeenCalled()
+  })
+
+  it('surfaces inactive-linked metric failures as 500', async () => {
+    alertDeliveryMocks.getDirectoryInactiveLinkedMetric.mockRejectedValue(new Error('db unreachable'))
+
+    const response = await invokeRoute('get', '/integrations/:integrationId/inactive-linked', {
+      params: { integrationId: 'dir-1' },
+      user: { id: 'admin-1', role: 'admin' },
+    })
+
+    expect(response.statusCode).toBe(500)
+    expect(response.body).toMatchObject({
+      ok: false,
+      error: { code: 'DIRECTORY_INACTIVE_LINKED_FAILED', message: 'db unreachable' },
     })
   })
 

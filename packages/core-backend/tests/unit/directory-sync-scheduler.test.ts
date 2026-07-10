@@ -9,11 +9,19 @@ const directoryMocks = vi.hoisted(() => ({
   reclaimStaleDirectorySyncRuns: vi.fn(),
 }))
 
+const alertDeliveryMocks = vi.hoisted(() => ({
+  deliverDirectoryInactiveLinkedAlert: vi.fn(),
+}))
+
 vi.mock('../../src/db/pg', () => ({
   query: pgMocks.query,
   // The real directory-sync (loaded below via importOriginal for its error class)
   // imports { query, transaction }; a factory missing either export fails at load.
   transaction: vi.fn(),
+}))
+
+vi.mock('../../src/directory/directory-sync-alert-delivery', () => ({
+  deliverDirectoryInactiveLinkedAlert: alertDeliveryMocks.deliverDirectoryInactiveLinkedAlert,
 }))
 
 vi.mock('../../src/directory/directory-sync', async (importOriginal) => ({
@@ -52,6 +60,8 @@ describe('directory-sync-scheduler', () => {
     directoryMocks.syncDirectoryIntegration.mockReset()
     directoryMocks.reclaimStaleDirectorySyncRuns.mockReset()
     directoryMocks.reclaimStaleDirectorySyncRuns.mockResolvedValue(0)
+    alertDeliveryMocks.deliverDirectoryInactiveLinkedAlert.mockReset()
+    alertDeliveryMocks.deliverDirectoryInactiveLinkedAlert.mockResolvedValue(false)
     resetDirectorySyncSchedulerForTests()
   })
 
@@ -117,6 +127,12 @@ describe('directory-sync-scheduler', () => {
       'system:directory-sync-scheduler',
       'scheduler',
     )
+    // §7.1 offboarding blind-spot digest: fires after a successful scheduled sync, carrying
+    // the integration's display name through for the alert message.
+    expect(alertDeliveryMocks.deliverDirectoryInactiveLinkedAlert).toHaveBeenCalledWith({
+      integrationId: 'dir-1',
+      integrationName: 'DingTalk CN',
+    })
   })
 
   it.each([
@@ -183,8 +199,12 @@ describe('directory-sync-scheduler', () => {
 
     directoryMocks.syncDirectoryIntegration.mockRejectedValueOnce(new DirectorySyncInProgressError('run-held'))
     await expect(scheduleHandler()).resolves.toBeUndefined()
+    expect(alertDeliveryMocks.deliverDirectoryInactiveLinkedAlert).not.toHaveBeenCalled()
 
     directoryMocks.syncDirectoryIntegration.mockRejectedValueOnce(new Error('DingTalk 500'))
     await expect(scheduleHandler()).rejects.toThrow('DingTalk 500')
+    // §7.1 digest is a POST-run check: neither failure path (lease conflict skip, nor a
+    // real sync error) should reach it.
+    expect(alertDeliveryMocks.deliverDirectoryInactiveLinkedAlert).not.toHaveBeenCalled()
   })
 })
