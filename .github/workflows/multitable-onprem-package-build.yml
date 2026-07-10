@@ -70,6 +70,8 @@ jobs:
           pkg_tgz="$(ls -1 output/releases/multitable-onprem/*.tgz | sort | tail -n 1)"
           pkg_zip="$(ls -1 output/releases/multitable-onprem/*.zip | sort | tail -n 1)"
           pkg_meta="${pkg_tgz%.tgz}.json"
+          pkg_bootstrap_ps1="${pkg_tgz%.tgz}-deploy-bootstrap.ps1"
+          pkg_bootstrap_bat="${pkg_tgz%.tgz}-deploy-bootstrap.bat"
           pkg_name="$(basename "${pkg_tgz%.tgz}")"
           verify_dir="output/releases/multitable-onprem/verify"
           mkdir -p "$verify_dir"
@@ -97,6 +99,8 @@ jobs:
           echo "PACKAGE_FILE=$pkg_tgz" >> "$GITHUB_ENV"
           echo "PACKAGE_FILE_ZIP=$pkg_zip" >> "$GITHUB_ENV"
           echo "PACKAGE_META_FILE=$pkg_meta" >> "$GITHUB_ENV"
+          echo "PACKAGE_BOOTSTRAP_PS1=$pkg_bootstrap_ps1" >> "$GITHUB_ENV"
+          echo "PACKAGE_BOOTSTRAP_BAT=$pkg_bootstrap_bat" >> "$GITHUB_ENV"
           echo "PACKAGE_VERIFY_TGZ_JSON=$verify_tgz_json" >> "$GITHUB_ENV"
           echo "PACKAGE_VERIFY_TGZ_MD=$verify_tgz_md" >> "$GITHUB_ENV"
           echo "PACKAGE_VERIFY_ZIP_JSON=$verify_zip_json" >> "$GITHUB_ENV"
@@ -121,6 +125,10 @@ jobs:
             "$PACKAGE_FILE_ZIP"
             "${PACKAGE_FILE}.sha256"
             "${PACKAGE_FILE_ZIP}.sha256"
+            "$PACKAGE_BOOTSTRAP_PS1"
+            "$PACKAGE_BOOTSTRAP_BAT"
+            "${PACKAGE_BOOTSTRAP_PS1}.sha256"
+            "${PACKAGE_BOOTSTRAP_BAT}.sha256"
             "output/releases/multitable-onprem/SHA256SUMS"
             "$PACKAGE_META_FILE"
             "$PACKAGE_VERIFY_TGZ_JSON"
@@ -144,6 +152,8 @@ jobs:
           path: |
             output/releases/multitable-onprem/*.tgz
             output/releases/multitable-onprem/*.zip
+            output/releases/multitable-onprem/*-deploy-bootstrap.ps1
+            output/releases/multitable-onprem/*-deploy-bootstrap.bat
             output/releases/multitable-onprem/*.sha256
             output/releases/multitable-onprem/SHA256SUMS
             output/releases/multitable-onprem/*.json
@@ -158,6 +168,8 @@ jobs:
             echo ""
             echo "- Package (.tgz): \`${PACKAGE_FILE}\`"
             echo "- Package (.zip): \`${PACKAGE_FILE_ZIP}\`"
+            echo "- First-hop bootstrap (.ps1): \`${PACKAGE_BOOTSTRAP_PS1}\`"
+            echo "- First-hop bootstrap (.bat): \`${PACKAGE_BOOTSTRAP_BAT}\`"
             echo "- Verify (.tgz JSON): \`${PACKAGE_VERIFY_TGZ_JSON}\`"
             echo "- Verify (.zip JSON): \`${PACKAGE_VERIFY_ZIP_JSON}\`"
             echo "- Artifact: \`multitable-onprem-package-${{ github.run_id }}-${{ github.run_attempt }}\`"

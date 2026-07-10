@@ -9,8 +9,10 @@ import { fileURLToPath } from 'node:url'
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..')
 const buildScriptPath = path.join(repoRoot, 'scripts/ops/multitable-onprem-package-build.sh')
 const verifyScriptPath = path.join(repoRoot, 'scripts/ops/multitable-onprem-package-verify.sh')
+const packageWorkflowPath = path.join(repoRoot, '.github/workflows/multitable-onprem-package-build.yml')
 const buildScript = fs.readFileSync(buildScriptPath, 'utf8')
 const verifyScript = fs.readFileSync(verifyScriptPath, 'utf8')
+const packageWorkflow = fs.readFileSync(packageWorkflowPath, 'utf8')
 
 function runVerifierFunction(functionName, listEntries) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ms2-package-list-'))
@@ -246,6 +248,43 @@ test('on-prem package build emits first-hop Windows bootstrap sidecar assets', (
     verifyScript,
     /first-hop bootstrap release sidecar/,
     'package verifier should require the package metadata to describe the bootstrap sidecar',
+  )
+})
+
+test('on-prem release and workflow artifacts publish both first-hop bootstrap sidecars', () => {
+  assert.match(
+    packageWorkflow,
+    /pkg_bootstrap_ps1="\$\{pkg_tgz%\.tgz\}-deploy-bootstrap\.ps1"/,
+    'the workflow should derive the PowerShell sidecar from the selected package name',
+  )
+  assert.match(
+    packageWorkflow,
+    /pkg_bootstrap_bat="\$\{pkg_tgz%\.tgz\}-deploy-bootstrap\.bat"/,
+    'the workflow should derive the batch sidecar from the selected package name',
+  )
+  const releaseAssetsMatch = packageWorkflow.match(/assets=\(\n([\s\S]*?)\n\s+\)/)
+  assert.ok(releaseAssetsMatch, 'the workflow should declare a GitHub Release asset list')
+  const releaseAssets = releaseAssetsMatch[1]
+  for (const asset of [
+    '"$PACKAGE_BOOTSTRAP_PS1"',
+    '"$PACKAGE_BOOTSTRAP_BAT"',
+    '"${PACKAGE_BOOTSTRAP_PS1}.sha256"',
+    '"${PACKAGE_BOOTSTRAP_BAT}.sha256"',
+  ]) {
+    assert.ok(
+      releaseAssets.includes(asset),
+      `the GitHub Release asset list should include ${asset}`,
+    )
+  }
+  assert.match(
+    packageWorkflow,
+    /output\/releases\/multitable-onprem\/\*-deploy-bootstrap\.ps1/,
+    'the workflow artifact should retain the PowerShell bootstrap sidecar',
+  )
+  assert.match(
+    packageWorkflow,
+    /output\/releases\/multitable-onprem\/\*-deploy-bootstrap\.bat/,
+    'the workflow artifact should retain the batch bootstrap sidecar',
   )
 })
 
