@@ -38,7 +38,7 @@ import { checkColumnExists, checkTableExists } from './_patterns'
  *     transaction rolls back (nothing lands). A DB with legacy collisions/traversal fails closed and an
  *     operator must reconcile the listed rows before re-running (see PR body ops runbook). A clean DB
  *     (CI / fresh install / most prod) has no unsafe rows and applies fully.
- *   - 'poison': quarantine each unsafe row to a DISTINCT, non-resolvable `!f3-quarantine:<id>` key
+ *   - 'poison': quarantine each unsafe row to a DISTINCT, non-resolvable `!f3-collision:<id>` key
  *     (fail-closed at read: no shared blob, no last-write-wins) and complete the migration — poison rows
  *     are a well-defined terminal state, so this still leaves NO half-migration.
  * Flipping the policy is this ONE constant + swapping the corresponding test assertions; nothing else in
@@ -56,9 +56,10 @@ const DEFAULT_STORAGE_BASE_URL = 'http://localhost:8900/files'
 const STORAGE_KEY_UNIQUE_INDEX = 'idx_files_storage_key_active'
 
 /**
- * Single decision point for how a legacy collision / unresolvable-url row is handled. Default 'abort'
- * (owner guard G). Flip to 'poison' HERE (and swap the matching test assertions) to complete the migration
- * with quarantined rows instead of failing closed. Nothing else in the codebase reads this.
+ * Single decision point for how a legacy collision / unresolvable-url row is handled. Default 'poison'
+ * (owner's ratified default). Flip to 'abort' HERE (and swap the matching test assertions) to fail closed
+ * and roll the whole migration back instead of completing with quarantined rows. Nothing else in the
+ * codebase reads this.
  */
 const COLLISION_POLICY: 'abort' | 'poison' = 'poison'
 
