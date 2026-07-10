@@ -1584,8 +1584,11 @@ describe('AutomationExecutor', () => {
         ],
       })
       .mockResolvedValue({ rows: [] })
-    const fetchFn = vi.fn()
-      .mockResolvedValue(new Response(JSON.stringify({ errcode: 0, errmsg: 'ok', access_token: 'tok', expires_in: 7200 }), { status: 200, headers: { 'Content-Type': 'application/json' } })) as unknown as typeof fetch
+    // Fresh Response per call — a real fetch never resolves an already-consumed body;
+    // this test spans 4 fetches (2 tokens + 2 sends) and the transport no longer
+    // swallows the double-read TypeError a single shared mockResolvedValue Response
+    // produces (body-phase timeout fix, PR #4046).
+    const fetchFn = vi.fn(async () => new Response(JSON.stringify({ errcode: 0, errmsg: 'ok', access_token: 'tok', expires_in: 7200 }), { status: 200, headers: { 'Content-Type': 'application/json' } })) as unknown as typeof fetch
 
     deps = createMockDeps({ queryFn, fetchFn })
     executor = new AutomationExecutor(deps)

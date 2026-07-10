@@ -9,7 +9,9 @@ const logger = new Logger('DingTalkTransport')
  *
  *  - the DT-HARDEN-06 per-request timeout — preserved, now composed PER ATTEMPT
  *    (each retry attempt gets its own fresh `AbortSignal.timeout`; a caller-supplied
- *    overall signal aborts the in-flight attempt AND any backoff wait immediately);
+ *    overall signal aborts the in-flight attempt AND any backoff wait immediately).
+ *    The budget covers the whole attempt: a response BODY that stalls after headers
+ *    arrived surfaces as the same DingTalkTimeoutError as a request-phase timeout;
  *  - bounded retry with exponential backoff + full jitter, honoring `Retry-After`;
  *  - explicit BUSINESS-SEMANTICS classification per call site (see
  *    {@link DingTalkCallKind}) — never inferred from the HTTP verb;
@@ -157,7 +159,10 @@ export function resolveDingTalkTransportConfig(): DingTalkTransportConfig {
  *    envelope `code` field), so the transport never retries a class the delivery
  *    layer considers permanent, and vice versa.
  *
- * Only consulted for `'read'` calls — see {@link DingTalkCallKind}.
+ * The failure classifier consults this set for EVERY tier, but only `'read'` calls
+ * retry on a match; for `'send'`/`'exchange'` it only shapes the failure reason (a
+ * flow-control envelope is a definite rejection, so it is never outcome-unknown).
+ * See {@link DingTalkCallKind}.
  */
 export function isDingTalkFlowControlErrcode(code: number): boolean {
   return code === 90018
@@ -285,17 +290,55 @@ export function readNumericField(payload: Record<string, unknown>, ...keys: stri
   return null
 }
 
-async function readJson(response: Response): Promise<Record<string, unknown> | null> {
+/**
+ * Structural (name-based) check rather than `instanceof Error`: abort reasons are
+ * `DOMException`s, and DOMException only inherits from Error in recent Node versions
+ * (late 18.x onward) — the supported floor is Node >=18.0.0.
+ */
+function isAbortError(error: unknown): boolean {
+  if (typeof error !== 'object' || error === null) return false
+  const name = (error as { name?: unknown }).name
+  return name === 'AbortError' || name === 'TimeoutError'
+}
+
+/**
+ * Body-phase abort detection. Current undici rejects an aborted body read with the
+ * abort reason itself (AbortError / TimeoutError DOMException); Node 18's undici
+ * wraps it as `TypeError: terminated` with the reason as `cause`. A `terminated`
+ * whose cause is a socket error is NOT an abort — it falls through to network-error
+ * classification.
+ */
+function isBodyAbortError(error: unknown): boolean {
+  if (isAbortError(error)) return true
+  if (typeof error !== 'object' || error === null) return false
+  return isAbortError((error as { cause?: unknown }).cause)
+}
+
+/**
+ * Read the response body as JSON under the SAME per-attempt budget as the request
+ * itself: undici ties the body stream to the request signal, so a body that stalls
+ * past the per-attempt timeout rejects here with the abort reason AFTER headers
+ * already arrived. That MUST surface as DingTalkTimeoutError — identical
+ * classification to a request-phase timeout (never retried; outcome-unknown on the
+ * send tier) — and must never be swallowed into a `null` payload: on the ok-path a
+ * swallowed body abort would normalize to `{}` and report SUCCESS for a call whose
+ * outcome is unknown; on the non-ok path it would masquerade as a retryable
+ * `http_<status>`. Only a genuinely non-JSON body (SyntaxError from JSON.parse)
+ * keeps the tolerant `null`; any other mid-body stream failure (connection reset)
+ * rethrows raw and classifies as a network error.
+ */
+async function readJson(response: Response, timeoutMs: number): Promise<Record<string, unknown> | null> {
   try {
     const payload = await response.json()
     return payload && typeof payload === 'object' ? payload as Record<string, unknown> : null
-  } catch {
-    return null
+  } catch (error) {
+    if (error instanceof SyntaxError) return null
+    if (isBodyAbortError(error)) {
+      logger.warn(`DingTalk response body read aborted after ${timeoutMs}ms (headers received, body stalled)`)
+      throw new DingTalkTimeoutError(timeoutMs)
+    }
+    throw error
   }
-}
-
-function isAbortError(error: unknown): boolean {
-  return error instanceof Error && (error.name === 'AbortError' || error.name === 'TimeoutError')
 }
 
 function normalizeDingTalkApiPayload(payload: Record<string, unknown>, fallbackError: string): Record<string, unknown> {
@@ -323,17 +366,55 @@ function readResponseHeader(response: Response, name: string): string | null {
  */
 const retryAfterHints = new WeakMap<object, number>()
 
+interface PerAttemptSignal {
+  signal: AbortSignal
+  /**
+   * Fallback-composition cleanup: detach the abort listeners once the attempt
+   * settles, so a long-lived caller signal does not accumulate one listener per
+   * attempt (`AbortSignal.any` manages its own internal registrations; the manual
+   * fallback must clean up explicitly). No-op on the native / no-caller-signal paths.
+   */
+  dispose: () => void
+}
+
+const noopDispose = () => {}
+
 /**
  * DT-HARDEN-06 composed per attempt: each attempt gets its OWN fresh timeout signal
  * (a retry must not start with an already-spent timeout budget); the caller's
- * overall signal aborts every attempt as well as the backoff sleeps.
+ * overall signal aborts every attempt as well as the backoff sleeps. The composed
+ * signal also governs the response BODY read (undici ties body streams to the
+ * request signal), so the per-attempt budget covers headers AND body.
  */
-function composePerAttemptSignal(callerSignal: AbortSignal | undefined, timeoutMs: number): AbortSignal {
+function composePerAttemptSignal(callerSignal: AbortSignal | undefined, timeoutMs: number): PerAttemptSignal {
   const timeoutSignal = AbortSignal.timeout(timeoutMs)
-  if (!callerSignal) return timeoutSignal
-  if (typeof AbortSignal.any === 'function') return AbortSignal.any([callerSignal, timeoutSignal])
-  // Pre-Node-20.3 fallback: preserve the pre-retry precedence (caller signal wins).
-  return callerSignal
+  if (!callerSignal) return { signal: timeoutSignal, dispose: noopDispose }
+  if (typeof AbortSignal.any === 'function') {
+    return { signal: AbortSignal.any([callerSignal, timeoutSignal]), dispose: noopDispose }
+  }
+  // Pre-Node-20.3 fallback: manual AbortSignal.any — whichever of (caller signal,
+  // per-attempt timeout) fires first aborts the attempt, with the same abort-reason
+  // surface as the native path. NOTE an earlier revision returned the caller signal
+  // alone here, silently dropping the per-attempt timeout whenever a caller passed
+  // a signal on Node <20.3.
+  const controller = new AbortController()
+  const onCallerAbort = () => controller.abort(callerSignal.reason)
+  const onTimeoutAbort = () => controller.abort(timeoutSignal.reason)
+  if (callerSignal.aborted) {
+    controller.abort(callerSignal.reason)
+  } else if (timeoutSignal.aborted) {
+    controller.abort(timeoutSignal.reason)
+  } else {
+    callerSignal.addEventListener('abort', onCallerAbort, { once: true })
+    timeoutSignal.addEventListener('abort', onTimeoutAbort, { once: true })
+  }
+  return {
+    signal: controller.signal,
+    dispose: () => {
+      callerSignal.removeEventListener('abort', onCallerAbort)
+      timeoutSignal.removeEventListener('abort', onTimeoutAbort)
+    },
+  }
 }
 
 async function performDingTalkAttempt(
@@ -342,35 +423,40 @@ async function performDingTalkAttempt(
   timeoutMs: number,
   callerSignal: AbortSignal | undefined,
 ): Promise<Record<string, unknown>> {
-  let response: Response
+  const { signal, dispose } = composePerAttemptSignal(callerSignal, timeoutMs)
   try {
-    response = await fetchFn(request.input, {
-      ...request.init,
-      signal: composePerAttemptSignal(callerSignal, timeoutMs),
-    })
-  } catch (error) {
-    if (isAbortError(error)) {
-      logger.warn(`DingTalk request timed out after ${timeoutMs}ms`)
-      throw new DingTalkTimeoutError(timeoutMs)
+    let response: Response
+    try {
+      response = await fetchFn(request.input, {
+        ...request.init,
+        signal,
+      })
+    } catch (error) {
+      if (isAbortError(error)) {
+        logger.warn(`DingTalk request timed out after ${timeoutMs}ms`)
+        throw new DingTalkTimeoutError(timeoutMs)
+      }
+      throw error
     }
-    throw error
-  }
 
-  const payload = await readJson(response)
+    const payload = await readJson(response, timeoutMs)
 
-  if (!response.ok) {
-    const message = normalizeErrorMessage(payload, request.fallbackError)
-    logger.warn(`DingTalk request failed (${response.status}): ${message}`)
-    const requestError = new DingTalkRequestError(message, response.status, payload)
-    const retryAfterMs = parseRetryAfterMs(readResponseHeader(response, 'retry-after'))
-    if (retryAfterMs !== null) retryAfterHints.set(requestError, retryAfterMs)
-    throw requestError
-  }
+    if (!response.ok) {
+      const message = normalizeErrorMessage(payload, request.fallbackError)
+      logger.warn(`DingTalk request failed (${response.status}): ${message}`)
+      const requestError = new DingTalkRequestError(message, response.status, payload)
+      const retryAfterMs = parseRetryAfterMs(readResponseHeader(response, 'retry-after'))
+      if (retryAfterMs !== null) retryAfterHints.set(requestError, retryAfterMs)
+      throw requestError
+    }
 
-  if (request.envelope === 'oapi') {
-    return normalizeDingTalkApiPayload(payload ?? {}, request.fallbackError)
+    if (request.envelope === 'oapi') {
+      return normalizeDingTalkApiPayload(payload ?? {}, request.fallbackError)
+    }
+    return payload ?? {}
+  } finally {
+    dispose()
   }
-  return payload ?? {}
 }
 
 interface DingTalkFailureClassification {
