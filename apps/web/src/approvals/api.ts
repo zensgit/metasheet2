@@ -321,7 +321,11 @@ export interface TemplateListQuery {
 }
 
 export interface ApprovalListQuery {
-  tab?: 'pending' | 'mine' | 'cc' | 'completed'
+  /**
+   * B3-01 adds `processed` (我已处理): every instance the actor has ANY approval_records row for,
+   * regardless of the instance's CURRENT status — distinct from `completed` (status <> 'pending').
+   */
+  tab?: 'pending' | 'mine' | 'cc' | 'completed' | 'processed'
   status?: ApprovalStatus
   search?: string
   page?: number
@@ -333,6 +337,13 @@ export interface ApprovalListQuery {
    *   - 'plm'      → PLM-mirrored only
    */
   sourceSystem?: 'all' | 'platform' | 'plm'
+  /**
+   * B3-03 (模板/时间筛选): narrow the feed to one published template + a created-at window.
+   * Additive — composes with `tab`/`sourceSystem`/every other filter.
+   */
+  templateId?: string
+  createdFrom?: string
+  createdTo?: string
 }
 
 // ---------------------------------------------------------------------------
@@ -818,11 +829,19 @@ export async function listApprovals(
     else if (query?.tab === 'mine') items = items.filter((a) => a.requester?.id === 'user_1')
     else if (query?.tab === 'cc') items = items.slice(0, 3)
     else if (query?.tab === 'completed') items = items.filter((a) => ['approved', 'rejected', 'revoked'].includes(a.status))
+    // B3-01: dev-preview stand-in only (the real predicate is a server-side approval_records
+    // reverse lookup this mock has no per-item action history to replicate) — a fixed slice so
+    // the 我已处理 tab renders SOME rows in mock mode, ANY status, matching the real "not limited
+    // by current status" contract in spirit.
+    else if (query?.tab === 'processed') items = items.slice(3, 9)
     if (query?.status) items = items.filter((a) => a.status === query.status)
     if (query?.search) {
       const q = query.search.toLowerCase()
       items = items.filter((a) => (a.title ?? '').toLowerCase().includes(q) || (a.requestNo ?? '').toLowerCase().includes(q))
     }
+    if (query?.templateId) items = items.filter((a) => a.templateId === query.templateId)
+    if (query?.createdFrom) items = items.filter((a) => a.createdAt >= query.createdFrom!)
+    if (query?.createdTo) items = items.filter((a) => a.createdAt <= query.createdTo!)
     const page = query?.page ?? 1
     const pageSize = query?.pageSize ?? 10
     const start = (page - 1) * pageSize
@@ -835,6 +854,9 @@ export async function listApprovals(
   if (query?.page) params.set('page', String(query.page))
   if (query?.pageSize) params.set('pageSize', String(query.pageSize))
   if (query?.sourceSystem) params.set('sourceSystem', query.sourceSystem)
+  if (query?.templateId) params.set('templateId', query.templateId)
+  if (query?.createdFrom) params.set('createdFrom', query.createdFrom)
+  if (query?.createdTo) params.set('createdTo', query.createdTo)
   const qs = params.toString()
   return apiGet(`/api/approvals${qs ? `?${qs}` : ''}`)
 }
