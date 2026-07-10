@@ -30,7 +30,27 @@ const DD_ACCOUNT = randomUUID()
 const DD_USER_ID = `dd_ext_${TS}`
 
 const q = (sqlText: string, params?: unknown[]) => poolManager.get().query(sqlText, params)
-const queryFn = ((sqlText: string, params?: unknown[]) => poolManager.get().query(sqlText, params)) as never
+
+// DT-HARDEN-06 fault injector: a one-shot flag that makes the NEXT `dingtalk_approval_card_deliveries`
+// mark-failed write (the ledger UPDATE ... SET send_status = 'failed' issued from the executor's
+// catch block) throw instead of hitting the real pool. Everything else passes through unchanged, so
+// this is the fault-injection seam only — assertions read the persisted execution record, not this
+// wrapper. `ledgerMarkFailedInjectorFired` proves the matcher actually fired (guards against the
+// helper SQL shape drifting and the injector silently going quiet).
+let failNextLedgerMarkFailed = false
+let ledgerMarkFailedInjectorFired = false
+const queryFn = (async (sqlText: string, params?: unknown[]) => {
+  if (
+    failNextLedgerMarkFailed &&
+    sqlText.includes('dingtalk_approval_card_deliveries') &&
+    sqlText.includes("send_status = 'failed'")
+  ) {
+    failNextLedgerMarkFailed = false
+    ledgerMarkFailedInjectorFired = true
+    throw new Error('simulated ledger outage')
+  }
+  return poolManager.get().query(sqlText, params)
+}) as never
 
 let svc: AutomationService
 let approvals: ApprovalProductService
@@ -248,6 +268,82 @@ describeIfDatabase('A-2b send_dingtalk_approval_card action (real DB)', () => {
     expect(rows).toHaveLength(1)
     expect(rows[0].send_status).toBe('failed')
     expect(String(rows[0].send_error)).toContain('Failed to send DingTalk action-card work notification')
+
+    // Negative direction of DT-HARDEN-06 (gate hardening, #4009 P2): here the send fails but the
+    // ledger mark-failed write SUCCEEDS (no fault injection — failNextLedgerMarkFailed stays
+    // false) — send_status='failed' landed on the row above via the ordinary path. deliveryStuckPending
+    // /deliveryLedgerError are an exceptional signal reserved for when the bookkeeping write ITSELF
+    // failed, not a generic "send failed" flag. Without this assertion, hardcoding
+    // `deliveryStuckPending: true` unconditionally on every send-fail output would survive the whole
+    // suite: it would make every ordinary, correctly-ledgered failure scream "stuck pending" and kill
+    // the flag's signal value for operators chasing real stuck rows.
+    const executionRows = await waitFor(async () => {
+      const r = await q(
+        `SELECT steps FROM multitable_automation_executions WHERE rule_id = $1 ORDER BY created_at DESC`,
+        [rule.id],
+      )
+      return r.rows
+    })
+    expect(executionRows.length).toBeGreaterThan(0)
+    const rawSteps = (executionRows[0] as { steps: unknown }).steps
+    const steps = (typeof rawSteps === 'string' ? JSON.parse(rawSteps) : rawSteps) as Array<Record<string, unknown>>
+    const cardStep = steps.find((s) => s.actionType === 'send_dingtalk_approval_card') as
+      | { status: string; output?: { deliveryId?: string; deliveryStuckPending?: boolean; deliveryLedgerError?: string } }
+      | undefined
+    expect(cardStep).toBeDefined()
+    expect(cardStep!.status).toBe('failed')
+    expect(cardStep!.output?.deliveryId).toBeTruthy()
+    expect(cardStep!.output?.deliveryStuckPending).toBeUndefined()
+    expect(cardStep!.output?.deliveryLedgerError).toBeUndefined()
+
+    await svc.deleteRule(rule.id, SHEET_ID)
+  })
+
+  test('DT-HARDEN-06: send fails AND the ledger mark-failed write ALSO fails — deliveryStuckPending/deliveryLedgerError surface in the persisted execution record, not swallowed', async () => {
+    // Reuses the directory binding established by 'bound recipient' — APPROVER stays
+    // linked to DD_USER_ID for the rest of the describe block (cleanup happens in afterAll).
+    const rule = await svc.createRule(SHEET_ID, {
+      name: 'card ledger-fail', triggerType: 'approval.task_created', triggerConfig: { templateId },
+      actionType: 'send_dingtalk_approval_card', actionConfig: {}, createdBy: CREATOR,
+    } as never)
+    ruleIds.push(rule.id)
+
+    failNextSend = true
+    ledgerMarkFailedInjectorFired = false
+    failNextLedgerMarkFailed = true
+    const dto = await approvals.createApproval({ templateId, formData: { summary: 'ledger-fail run' } }, { userId: REQUESTER, userName: REQUESTER })
+    const instanceId = (dto as { id: string }).id
+
+    const executionRows = await waitFor(async () => {
+      const r = await q(
+        `SELECT steps FROM multitable_automation_executions WHERE rule_id = $1 ORDER BY created_at DESC`,
+        [rule.id],
+      )
+      return r.rows
+    })
+    expect(executionRows.length).toBeGreaterThan(0)
+    const rawSteps = (executionRows[0] as { steps: unknown }).steps
+    const steps = (typeof rawSteps === 'string' ? JSON.parse(rawSteps) : rawSteps) as Array<Record<string, unknown>>
+    const cardStep = steps.find((s) => s.actionType === 'send_dingtalk_approval_card') as
+      | { status: string; output?: { deliveryId?: string; deliveryStuckPending?: boolean; deliveryLedgerError?: string } }
+      | undefined
+    expect(cardStep).toBeDefined()
+    expect(cardStep!.status).toBe('failed')
+    expect(cardStep!.output?.deliveryId).toBeTruthy()
+    expect(cardStep!.output?.deliveryStuckPending).toBe(true)
+    expect(String(cardStep!.output?.deliveryLedgerError)).toContain('simulated ledger outage')
+
+    // Matcher-rot guard: prove the injector actually fired. Without this, a refactor of the
+    // mark-failed helper's SQL shape could make the fault injector silently no-op, and this
+    // test would then only be exercising the ordinary (never-fails) happy send-fail path.
+    expect(ledgerMarkFailedInjectorFired).toBe(true)
+
+    // The real stuck condition the flag simulates: the ledger row never left 'pending' because
+    // the mark-failed write — the only thing that flips it to 'failed' — is what the injector broke.
+    const rows = await cardRows(instanceId)
+    expect(rows).toHaveLength(1)
+    expect(rows[0].send_status).toBe('pending')
+
     await svc.deleteRule(rule.id, SHEET_ID)
   })
 })
