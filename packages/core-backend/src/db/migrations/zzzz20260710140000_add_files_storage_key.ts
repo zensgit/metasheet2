@@ -60,15 +60,23 @@ const STORAGE_KEY_UNIQUE_INDEX = 'idx_files_storage_key_active'
  * (owner guard G). Flip to 'poison' HERE (and swap the matching test assertions) to complete the migration
  * with quarantined rows instead of failing closed. Nothing else in the codebase reads this.
  */
-const COLLISION_POLICY: 'abort' | 'poison' = 'abort'
+const COLLISION_POLICY: 'abort' | 'poison' = 'poison'
 
-const QUARANTINE_PREFIX = '!f3-quarantine:'
+/**
+ * MUST equal `FILES_POISON_KEY_PREFIX` in `../../services/filesStorageKey.ts` — the download/info read
+ * path rejects exactly this prefix BEFORE any url-fallback/provider call (owner guard D/G rule 2). A unit
+ * test (`filesStorageKey.test.ts`) asserts the two literals are identical so they can never drift. Kept a
+ * local literal (not an import) so this migration stays a self-contained historical snapshot.
+ */
+const QUARANTINE_PREFIX = '!f3-collision:'
+
+type UnsafeReason = 'collision' | 'unparseable-url' | 'traversal-url'
 
 function resolveStorageBaseUrlPrefix(): string {
   return (process.env.STORAGE_BASE_URL || DEFAULT_STORAGE_BASE_URL).replace(/\/+$/, '')
 }
 
-type UnsafeIdRow = { id: string }
+type DerivedKeyRow = { id: string; derived_key: string }
 type CollisionRow = { derived_key: string; ids: string[]; n: number | string }
 
 async function applyBackfill(trx: Kysely<unknown>): Promise<void> {
@@ -94,10 +102,11 @@ async function applyBackfill(trx: Kysely<unknown>): Promise<void> {
       AND left(url, ${prefixLen + 1}) = ${prefixWithSep}
   `
 
-  // Unresolvable / traversal: derived key is empty or has a `..` PATH SEGMENT (precise segment match, not
-  // a substring, so a legit filename like `a..b.txt` is not a false positive).
-  const unresolvable = await sql<UnsafeIdRow>`
-    SELECT id
+  // Unresolvable / traversal: derived key is empty (unparseable-url) or has a `..` PATH SEGMENT
+  // (traversal-url — precise segment match, not a substring, so a legit filename like `a..b.txt` is not a
+  // false positive). `derived_key` is returned so the reason can be classified for the audit list.
+  const unresolvable = await sql<DerivedKeyRow>`
+    SELECT id, substr(url, ${prefixLen + 2}) AS derived_key
     FROM ${eligible}
       AND (
         substr(url, ${prefixLen + 2}) = ''
@@ -118,41 +127,47 @@ async function applyBackfill(trx: Kysely<unknown>): Promise<void> {
     HAVING count(*) > 1
   `.execute(trx)
 
-  const unsafeIds = new Set<string>(unresolvable.rows.map((r) => r.id))
-  let collidingRowCount = 0
+  // Owner guard D/G rule 4 — auditable `{id, reason}` conflict list. reason ∈ unparseable-url (empty
+  // derived key) / traversal-url (`..` segment) / collision (shared derived key). collision wins if a row
+  // is both (the more actionable reason for an operator).
+  const unsafe = new Map<string, UnsafeReason>()
+  for (const r of unresolvable.rows) {
+    unsafe.set(r.id, r.derived_key === '' ? 'unparseable-url' : 'traversal-url')
+  }
+  // Rule 1 — the WHOLE collision group is quarantined (every id in the group), NEVER keep-one-winner.
   for (const c of collisions.rows) {
     for (const id of c.ids || []) {
-      unsafeIds.add(id)
-      collidingRowCount += 1
+      unsafe.set(id, 'collision')
     }
-    // ops-facing server log (migration console) — carries the key so an operator can locate the physical
-    // file. NOT an API/audit surface.
-    // eslint-disable-next-line no-console
-    console.error(
-      `[F3 migration] storage_key collision: key='${c.derived_key}' shared by ${Number(c.n)} active files rows: ${(c.ids || []).join(', ')}`,
-    )
-  }
-  if (unresolvable.rows.length > 0) {
-    // eslint-disable-next-line no-console
-    console.error(
-      `[F3 migration] storage_key unresolvable/traversal url on ${unresolvable.rows.length} active files row(s): ${unresolvable.rows.map((r) => r.id).join(', ')}`,
-    )
   }
 
-  if (unsafeIds.size > 0) {
+  if (unsafe.size > 0) {
+    // ops-facing server log (migration console): one `{"id","reason"}` line per row so an operator can
+    // reconcile (fix url / re-upload / tombstone). NOT an API/audit surface. urls/derived keys are kept
+    // OUT of this list (they can carry user-ish filenames); the url stays on the row itself (rule 3) for
+    // manual repair.
+    for (const [id, reason] of unsafe) {
+      // eslint-disable-next-line no-console
+      console.error(`[F3 migration] storage_key quarantine: {"id":"${id}","reason":"${reason}"}`)
+    }
+
     if (COLLISION_POLICY === 'abort') {
-      // Fail-closed + atomic: the throw rolls the whole transaction back (nothing lands). Message carries
-      // counts/id-count only (no urls/keys — those are in the ops console log above).
+      // Fail-closed + atomic: the throw rolls the whole transaction back (nothing lands). Kept as the
+      // flippable alternative to poison (one constant + swap tests) — NOT the ratified default.
       throw new Error(
-        `F3 storage_key backfill aborted: ${unsafeIds.size} unsafe files row(s) (${collidingRowCount} colliding, ${unresolvable.rows.length} unresolvable/traversal) — migration rolled back, nothing applied. Reconcile before re-deploying.`,
+        `F3 storage_key backfill aborted: ${unsafe.size} unsafe files row(s) — migration rolled back, nothing applied. Reconcile before re-deploying.`,
       )
     }
-    // poison: quarantine each unsafe row to a DISTINCT, non-resolvable key (fail-closed at read: neither
-    // row serves the shared blob). Non-empty, so the runtime fallback never re-derives it.
+
+    // poison (owner's ratified default): quarantine each unsafe row to a DISTINCT, non-resolvable
+    // `!f3-collision:<id>` key (rule 1: whole group, no winner). Only `storage_key` is written — `url` is
+    // left intact (rule 3: audit + manual repair). Non-empty, so the runtime fallback never re-derives it;
+    // the read path rejects the prefix before any fallback/provider call (rule 2). This is a migration
+    // SUCCESS, not an abort — poison is a well-defined terminal state, so no half-migration exists.
     await sql`
       UPDATE files
       SET storage_key = ${QUARANTINE_PREFIX} || id
-      WHERE id = ANY(${Array.from(unsafeIds)}::text[])
+      WHERE id = ANY(${Array.from(unsafe.keys())}::text[])
         AND deleted_at IS NULL
         AND storage_key IS NULL
     `.execute(trx)
