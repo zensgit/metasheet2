@@ -432,10 +432,61 @@
           <button v-if="selectedIntegration" class="directory-admin__button directory-admin__button--secondary" type="button" :disabled="approvalCardBusy" @click="void saveApprovalCardPublicAppUrl()">
             保存对外访问地址
           </button>
-          <button class="directory-admin__button directory-admin__button--secondary" type="button" :disabled="busy || !selectedIntegration" @click="void syncIntegration()">
+          <button class="directory-admin__button directory-admin__button--secondary" type="button" :disabled="busy || pollingRunId !== '' || !selectedIntegration" @click="void syncIntegration()">
             手动同步
           </button>
+          <button class="directory-admin__button directory-admin__button--secondary" type="button" :disabled="busy || previewBusy || pollingRunId !== '' || !selectedIntegration" @click="void previewSync()">
+            {{ previewBusy ? '预览中...' : '预览同步' }}
+          </button>
+          <button class="directory-admin__button directory-admin__button--secondary" type="button" :disabled="busy || asyncSyncBusy || pollingRunId !== '' || !selectedIntegration" @click="void startAsyncSync()">
+            {{ asyncSyncBusy ? '启动中...' : pollingRunId ? '后台同步中...' : '后台同步' }}
+          </button>
         </footer>
+        <p v-if="pollingRunId" class="directory-admin__hint">
+          后台同步进行中（运行 {{ pollingRunId }}），每 5 秒自动刷新运行记录。后台模式不返回一次性临时凭据。
+        </p>
+
+        <section v-if="selectedIntegration && (previewBusy || previewResult)" class="directory-admin__section">
+          <div class="directory-admin__section-head">
+            <div>
+              <h3>同步预览（dry-run）</h3>
+              <p class="directory-admin__hint">只读预演：按同步的方式拉取钉钉通讯录并计算将发生的变更，不写入任何数据。</p>
+            </div>
+            <button
+              class="directory-admin__button directory-admin__button--secondary"
+              type="button"
+              :disabled="busy || previewBusy"
+              @click="void previewSync()"
+            >
+              {{ previewBusy ? '预览中...' : '重新预览' }}
+            </button>
+          </div>
+          <div v-if="previewBusy" class="directory-admin__empty">同步预览生成中（将完整拉取一次钉钉通讯录）...</div>
+          <article v-else-if="previewResult" class="directory-admin__schedule-card">
+            <div class="directory-admin__chips">
+              <span class="directory-admin__chip">部门 {{ previewResult.departmentsSeen }}</span>
+              <span class="directory-admin__chip">账号 {{ previewResult.accountsSeen }}</span>
+              <span class="directory-admin__chip">将新增账号 {{ previewResult.wouldCreateAccounts }}</span>
+              <span class="directory-admin__chip" :class="{ 'directory-admin__chip--warning': previewResult.wouldDeactivateAccounts > 0 }">
+                将停用 {{ previewResult.wouldDeactivateAccounts }}
+              </span>
+              <span class="directory-admin__chip" :class="{ 'directory-admin__chip--danger': previewResult.wouldDeactivateLinkedAccounts > 0 }">
+                其中已绑定 {{ previewResult.wouldDeactivateLinkedAccounts }}
+              </span>
+            </div>
+            <p class="directory-admin__hint">
+              自动准入：{{ previewResult.autoAdmissionMode === 'auto_for_scoped_departments'
+                ? `符合条件 ${previewResult.autoAdmissionCandidateCount} 人 · 缺少邮箱跳过 ${previewResult.autoAdmissionSkippedMissingEmailCount} 人 · 命中排除部门 ${previewResult.autoAdmissionExcludedCount} 人`
+                : '已关闭' }}
+            </p>
+            <p class="directory-admin__hint">
+              将新增账号：{{ formatPreviewSample(previewResult.sampledNewAccounts, previewResult.wouldCreateAccounts) }}
+            </p>
+            <p class="directory-admin__hint">
+              将停用账号：{{ formatPreviewDeactivationSample(previewResult.sampledDeactivations, previewResult.wouldDeactivateAccounts) }}
+            </p>
+          </article>
+        </section>
 
         <section v-if="selectedIntegration" ref="accountsSectionRef" class="directory-admin__section">
           <h3>当前概览</h3>
@@ -1883,6 +1934,23 @@
               账号 {{ readNumericStat(run.stats, 'accountsSynced') }} / 部门 {{ readNumericStat(run.stats, 'departmentsSynced') }} /
               待确认 {{ readNumericStat(run.stats, 'pendingCount') }} / 已链接 {{ readNumericStat(run.stats, 'linkedCount') }}
             </p>
+            <!-- R5 per-run change summary (#4054): keys are additive jsonb — gate each line on key
+                 presence so pre-R5 runs (keys absent) don't render a misleading all-zero summary. -->
+            <p
+              v-if="hasRunStat(run.stats, 'accountsCreatedCount') || hasRunStat(run.stats, 'accountsUpdatedCount') || hasRunStat(run.stats, 'departmentsCreatedCount')"
+              class="directory-admin__hint"
+            >
+              本次变更：账号 新增 {{ readNumericStat(run.stats, 'accountsCreatedCount') }} · 更新 {{ readNumericStat(run.stats, 'accountsUpdatedCount') }} · 停用 {{ readNumericStat(run.stats, 'accountsDeactivatedCount') }}
+              / 部门 新增 {{ readNumericStat(run.stats, 'departmentsCreatedCount') }} · 更新 {{ readNumericStat(run.stats, 'departmentsUpdatedCount') }} · 停用 {{ readNumericStat(run.stats, 'departmentsDeactivatedCount') }}
+            </p>
+            <p
+              v-if="hasRunStat(run.stats, 'managerCoverage') || hasRunStat(run.stats, 'durationMs')"
+              class="directory-admin__hint"
+            >
+              <template v-if="hasRunStat(run.stats, 'managerCoverage')">主管绑定覆盖 {{ formatManagerCoverage(run.stats) }}</template>
+              <template v-if="hasRunStat(run.stats, 'managerCoverage') && hasRunStat(run.stats, 'durationMs')"> · </template>
+              <template v-if="hasRunStat(run.stats, 'durationMs')">耗时 {{ formatRunDurationMs(readNumericStat(run.stats, 'durationMs')) }}</template>
+            </p>
             <p v-if="readStringStat(run.stats, 'diagnosticTitle')" class="directory-admin__hint">
               诊断：{{ readStringStat(run.stats, 'diagnosticTitle') }}
               · 子部门 {{ readNumericStat(run.stats, 'rootDepartmentChildCount') }}
@@ -1957,6 +2025,24 @@ type DirectoryRun = {
   finishedAt: string | null
   stats: Record<string, unknown>
   errorMessage: string | null
+}
+
+// Mirrors DirectorySyncPreview from packages/core-backend/src/directory/directory-sync.ts
+// (DT-OPS-02 preview endpoint) — read-only dry-run counts + samples, nothing written.
+type DirectorySyncPreview = {
+  integrationId: string
+  integrationName: string
+  departmentsSeen: number
+  accountsSeen: number
+  wouldCreateAccounts: number
+  wouldDeactivateAccounts: number
+  wouldDeactivateLinkedAccounts: number
+  autoAdmissionMode: 'manual_only' | 'auto_for_scoped_departments'
+  autoAdmissionCandidateCount: number
+  autoAdmissionSkippedMissingEmailCount: number
+  autoAdmissionExcludedCount: number
+  sampledNewAccounts: Array<{ externalUserId: string; name: string }>
+  sampledDeactivations: Array<{ externalUserId: string; name: string; linked: boolean }>
 }
 
 type DirectoryObservationStatus =
@@ -2265,6 +2351,21 @@ const loadingAccounts = ref(false)
 const loadingDepartments = ref(false)
 const busy = ref(false)
 const approvalCardBusy = ref(false)
+// Wave 2 async-sync UI state. `previewBusy` is deliberately its OWN flag (a preview does a
+// full DingTalk pull — it must not silently block/unblock the global `busy` actions).
+const previewBusy = ref(false)
+const previewResult = ref<DirectorySyncPreview | null>(null)
+const asyncSyncBusy = ref(false)
+/** Non-empty exactly while this tab is polling a background sync run it started. */
+const pollingRunId = ref('')
+/** Which integration the active poll belongs to (poll survives same-integration refreshes). */
+let pollingIntegrationId = ''
+// Self-rescheduling setTimeout (NOT setInterval) so a slow poll never overlaps the next tick;
+// `runPollToken` defeats zombie continuations — stopRunPolling() bumps it, and every async
+// continuation re-checks it after each await (a fetch resolving after unmount/stop can't
+// resurrect the loop). Pattern borrowed from useAiBulkFill.ts.
+let runPollTimer: ReturnType<typeof setTimeout> | null = null
+let runPollToken = 0
 const approvalCardLinkSecretEnvOverrideActive = ref(false)
 const bindingAccountId = ref('')
 const unbindingAccountId = ref('')
@@ -3538,6 +3639,11 @@ function describeDepartmentParent(department: DirectoryDepartment): string {
 }
 
 async function selectIntegration(integrationId: string): Promise<void> {
+  // Poll + preview are integration-scoped: kill them only when actually SWITCHING integration
+  // (selectIntegration also runs as a same-integration refresh after saves — an active
+  // background-sync poll must survive those).
+  if (pollingRunId.value && pollingIntegrationId !== integrationId) stopRunPolling()
+  if (previewResult.value && previewResult.value.integrationId !== integrationId) previewResult.value = null
   selectedIntegrationId.value = integrationId
   approvalCardLinkSecretEnvOverrideActive.value = false
   testResult.value = null
@@ -4254,7 +4360,15 @@ async function syncIntegration() {
       method: 'POST',
     })
     const body = await readJson(response)
-    if (!response.ok) throw new Error(readApiError(body, '目录同步失败'))
+    if (!response.ok) {
+      // DT-HARDEN-05 / #4049: another sync already holds the lease — benign, show the
+      // active run instead of a generic failure.
+      if (readApiErrorCode(body) === 'DIRECTORY_SYNC_IN_PROGRESS') {
+        setStatus(buildSyncInProgressMessage(body), 'error')
+        return
+      }
+      throw new Error(readApiError(body, '目录同步失败'))
+    }
     autoAdmissionOnboardingPackets.value = readAutoAdmissionOnboardingPackets(body?.data as Record<string, unknown> | undefined)
     const autoAdmittedCount = Number(body?.data?.run?.stats?.autoAdmittedCount ?? 0)
     const autoAdmittedNoEmailCount = Number(body?.data?.run?.stats?.autoAdmittedNoEmailCount ?? 0)
@@ -4299,19 +4413,224 @@ async function syncIntegration() {
     } else {
       setStatus('目录同步已完成')
     }
-    await Promise.all([
-      loadIntegrations(),
-      loadRuns(selectedIntegration.value.id),
-      loadScheduleSnapshot(selectedIntegration.value.id),
-      loadAlerts(selectedIntegration.value.id),
-      loadReviewItems(selectedIntegration.value.id),
-      loadAccounts(selectedIntegration.value.id),
-      departmentsLoaded.value ? loadDepartments(selectedIntegration.value.id, { force: true }) : Promise.resolve(),
-    ])
+    await refreshAfterDirectorySync(selectedIntegration.value.id)
   } catch (error) {
     setStatus(error instanceof Error ? error.message : '目录同步失败', 'error')
   } finally {
     busy.value = false
+  }
+}
+
+/** The post-sync panel refresh both the synchronous and the background (polled) path share. */
+async function refreshAfterDirectorySync(integrationId: string): Promise<void> {
+  await Promise.all([
+    loadIntegrations(),
+    loadRuns(integrationId),
+    loadScheduleSnapshot(integrationId),
+    loadAlerts(integrationId),
+    loadReviewItems(integrationId),
+    loadAccounts(integrationId),
+    departmentsLoaded.value ? loadDepartments(integrationId, { force: true }) : Promise.resolve(),
+  ])
+}
+
+function readActiveRunId(payload: unknown): string {
+  const error = payload && typeof payload === 'object'
+    ? (payload as { error?: { details?: unknown } }).error
+    : undefined
+  const details = error && typeof error === 'object' ? error.details : undefined
+  const activeRunId = details && typeof details === 'object'
+    ? (details as { activeRunId?: unknown }).activeRunId
+    : undefined
+  return typeof activeRunId === 'string' ? activeRunId : ''
+}
+
+/** #4049: 409 DIRECTORY_SYNC_IN_PROGRESS carries details.activeRunId — surface it, not a generic error. */
+function buildSyncInProgressMessage(payload: unknown): string {
+  const activeRunId = readActiveRunId(payload)
+  return activeRunId ? `已有同步在进行中（运行 ${activeRunId}）` : '已有同步在进行中'
+}
+
+// DT-OPS-02 dry-run preview: read-only, but it performs a FULL DingTalk directory pull —
+// hence its own busy flag and the same 409 lease refusal handling as the sync triggers.
+async function previewSync() {
+  const integration = selectedIntegration.value
+  if (!integration) return
+  previewBusy.value = true
+  try {
+    const response = await apiFetch(`/api/admin/directory/integrations/${integration.id}/sync/preview`, {
+      method: 'POST',
+    })
+    const body = await readJson(response)
+    if (!response.ok) {
+      if (readApiErrorCode(body) === 'DIRECTORY_SYNC_IN_PROGRESS') {
+        setStatus(buildSyncInProgressMessage(body), 'error')
+        return
+      }
+      throw new Error(readApiError(body, '同步预览失败'))
+    }
+    const preview = (body?.data?.preview ?? null) as DirectorySyncPreview | null
+    if (!preview) throw new Error('同步预览未返回结果')
+    previewResult.value = preview
+    setStatus('同步预览已生成（未写入任何数据）')
+  } catch (error) {
+    setStatus(error instanceof Error ? error.message : '同步预览失败', 'error')
+  } finally {
+    previewBusy.value = false
+  }
+}
+
+function formatPreviewSample(entries: Array<{ externalUserId: string; name: string }>, total: number): string {
+  if (entries.length === 0) return '无'
+  const summary = entries.map((entry) => `${entry.name} (${entry.externalUserId})`).join('，')
+  return total > entries.length ? `${summary} 等 ${total} 人` : summary
+}
+
+function formatPreviewDeactivationSample(
+  entries: Array<{ externalUserId: string; name: string; linked: boolean }>,
+  total: number,
+): string {
+  if (entries.length === 0) return '无'
+  const summary = entries
+    .map((entry) => `${entry.name} (${entry.externalUserId}${entry.linked ? '，已绑定本地用户' : ''})`)
+    .join('，')
+  return total > entries.length ? `${summary} 等 ${total} 人` : summary
+}
+
+// MAIN-LOOP-RATIFIED FAIL-SAFE: async mode discards the one-time temp-password onboarding
+// packets (the backend never persists them — a 202 cannot carry them). When auto-admission
+// is enabled the admin must explicitly acknowledge that before a background sync runs.
+async function confirmAsyncSyncDiscardsOnboardingPackets(): Promise<boolean> {
+  try {
+    await ElMessageBox.confirm(
+      '后台同步不会返回一次性临时密码入职凭据：这些凭据从不持久化，异步模式下会被直接丢弃且无法找回。当前集成已开启自动准入，如本次同步可能为新成员创建账号，建议改用「手动同步」（同步模式）以获取临时凭据。确定继续后台同步吗？',
+      '后台同步将丢弃临时凭据',
+      { type: 'warning', confirmButtonText: '仍然后台同步', cancelButtonText: '取消' },
+    )
+    return true
+  } catch {
+    return false
+  }
+}
+
+function stopRunPolling(): void {
+  if (runPollTimer) {
+    clearTimeout(runPollTimer)
+    runPollTimer = null
+  }
+  // Invalidate any in-flight poll continuation (checked after every await in pollAsyncRun).
+  runPollToken += 1
+  pollingRunId.value = ''
+  pollingIntegrationId = ''
+}
+
+const DIRECTORY_RUN_POLL_INTERVAL_MS = 5000
+// P3 hardening: a crashed worker (scheduler disabled) leaves the run row 'running' forever, and
+// this tab locks its own sync/preview buttons on pollingRunId — the very actions that would
+// reclaim the lease. Bound the poll so the tab gives up and unlocks instead of hammering /runs
+// indefinitely; the run itself is untouched server-side.
+const DIRECTORY_RUN_POLL_MAX_DURATION_MS = 10 * 60 * 1000
+let runPollStartedAtMs = 0
+
+async function pollAsyncRun(integrationId: string, runId: string, token: number): Promise<void> {
+  let body: unknown = null
+  let responseOk = false
+  try {
+    const response = await apiFetch(`/api/admin/directory/integrations/${integrationId}/runs?page=1&pageSize=10`)
+    body = await readJson(response)
+    responseOk = response.ok
+  } catch {
+    responseOk = false
+  }
+  if (token !== runPollToken) return
+  if (!responseOk) {
+    stopRunPolling()
+    setStatus(readApiError(body, '后台同步状态查询失败，已停止轮询，请手动刷新运行记录'), 'error')
+    return
+  }
+  const data = (body as { data?: { items?: unknown } } | null)?.data
+  const items = data && Array.isArray(data.items) ? (data.items as DirectoryRun[]) : []
+  // Keep the 运行记录 panel live while polling — it is the run-status surface.
+  runs.value = items
+  const run = items.find((item) => item.id === runId)
+  if (run && run.status !== 'running') {
+    stopRunPolling()
+    if (run.status === 'failed' || run.errorMessage) {
+      setStatus(`后台同步失败（运行 ${runId}）：${run.errorMessage || '未知错误'}`, 'error')
+    } else {
+      setStatus(buildAsyncRunSummary(run))
+    }
+    await refreshAfterDirectorySync(integrationId)
+    return
+  }
+  if (Date.now() - runPollStartedAtMs >= DIRECTORY_RUN_POLL_MAX_DURATION_MS) {
+    stopRunPolling()
+    setStatus('已停止自动轮询（超过 10 分钟），运行可能仍在进行，请前往下方运行记录手动刷新查看最新状态', 'error')
+    return
+  }
+  // Still running — or paged out of the first page (>10 newer runs between polls; the run is
+  // still live, keep polling rather than fail). Reschedule exactly one next tick.
+  runPollTimer = setTimeout(() => {
+    runPollTimer = null
+    void pollAsyncRun(integrationId, runId, token)
+  }, DIRECTORY_RUN_POLL_INTERVAL_MS)
+}
+
+function buildAsyncRunSummary(run: DirectoryRun): string {
+  const stats = run.stats ?? {}
+  const parts = [`后台同步已完成（运行 ${run.id}）`]
+  parts.push(
+    `账号 ${readNumericStat(stats, 'accountsSynced')} / 部门 ${readNumericStat(stats, 'departmentsSynced')} / 待确认 ${readNumericStat(stats, 'pendingCount')} / 已链接 ${readNumericStat(stats, 'linkedCount')}`,
+  )
+  if (hasRunStat(stats, 'accountsCreatedCount') || hasRunStat(stats, 'accountsUpdatedCount')) {
+    parts.push(
+      `本次新增账号 ${readNumericStat(stats, 'accountsCreatedCount')}，更新 ${readNumericStat(stats, 'accountsUpdatedCount')}，停用 ${readNumericStat(stats, 'accountsDeactivatedCount')}`,
+    )
+  }
+  const autoAdmittedCount = readNumericStat(stats, 'autoAdmittedCount')
+  if (autoAdmittedCount > 0) {
+    parts.push(`自动准入 ${autoAdmittedCount} 位成员（后台同步不返回一次性临时凭据）`)
+  }
+  return parts.join('，')
+}
+
+async function startAsyncSync() {
+  const integration = selectedIntegration.value
+  if (!integration) return
+  if (pollingRunId.value) return
+  if (
+    integration.config.admissionMode === 'auto_for_scoped_departments'
+    && !(await confirmAsyncSyncDiscardsOnboardingPackets())
+  ) {
+    return
+  }
+  asyncSyncBusy.value = true
+  try {
+    const response = await apiFetch(`/api/admin/directory/integrations/${integration.id}/sync`, {
+      method: 'POST',
+      body: JSON.stringify({ async: true }),
+    })
+    const body = await readJson(response)
+    if (!response.ok) {
+      if (readApiErrorCode(body) === 'DIRECTORY_SYNC_IN_PROGRESS') {
+        setStatus(buildSyncInProgressMessage(body), 'error')
+        return
+      }
+      throw new Error(readApiError(body, '启动后台同步失败'))
+    }
+    const runId = typeof body?.data?.runId === 'string' ? body.data.runId : ''
+    if (!runId) throw new Error('后台同步已受理，但未返回运行 ID')
+    stopRunPolling()
+    pollingRunId.value = runId
+    pollingIntegrationId = integration.id
+    runPollStartedAtMs = Date.now()
+    const token = runPollToken
+    setStatus(`后台同步已启动（运行 ${runId}），正在轮询运行状态...`)
+    void pollAsyncRun(integration.id, runId, token)
+  } catch (error) {
+    setStatus(error instanceof Error ? error.message : '启动后台同步失败', 'error')
+  } finally {
+    asyncSyncBusy.value = false
   }
 }
 
@@ -5389,6 +5708,36 @@ function readNumericStat(stats: Record<string, unknown>, key: string): number {
   return 0
 }
 
+/**
+ * R5 (#4054) stats keys are additive jsonb — pre-R5 runs simply lack them. Where rendering
+ * a defaulted 0 would mislead ("this run deactivated 0" vs "this run predates counting"),
+ * gate on actual key presence instead of readNumericStat's 0 fallback.
+ */
+function hasRunStat(stats: Record<string, unknown> | null | undefined, key: string): boolean {
+  const value = stats?.[key]
+  return value !== undefined && value !== null
+}
+
+function formatManagerCoverage(stats: Record<string, unknown>): string {
+  const managerCount = readNumericStat(stats, 'managerCount')
+  const linkedManagerCount = readNumericStat(stats, 'linkedManagerCount')
+  const coverage = stats['managerCoverage']
+  const percent = typeof coverage === 'number' && Number.isFinite(coverage)
+    ? `${Math.round(coverage * 100)}%`
+    : '—'
+  return `${percent}（${linkedManagerCount}/${managerCount}）`
+}
+
+function formatRunDurationMs(durationMs: number): string {
+  if (!Number.isFinite(durationMs) || durationMs < 0) return '—'
+  if (durationMs < 1000) return `${Math.round(durationMs)}ms`
+  const seconds = durationMs / 1000
+  if (seconds < 60) return `${seconds.toFixed(1)}s`
+  const minutes = Math.floor(seconds / 60)
+  const remainder = Math.round(seconds % 60)
+  return `${minutes}m${remainder}s`
+}
+
 function readStringStat(stats: Record<string, unknown>, key: string): string {
   const value = stats[key]
   return typeof value === 'string' ? value : ''
@@ -5417,6 +5766,8 @@ onMounted(() => {
 
 onUnmounted(() => {
   stopDirectoryLocationSync()
+  // Timer hygiene: never leak the background-sync poll past the view's lifetime.
+  stopRunPolling()
 })
 </script>
 
