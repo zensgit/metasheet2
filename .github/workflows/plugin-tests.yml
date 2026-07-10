@@ -349,6 +349,7 @@ jobs:
             tests/integration/automation-dingtalk-approval-card-action.test.ts \
             tests/integration/dingtalk-person-message-integration-scoping.db.test.ts \
             tests/integration/approval-card-delivery-wrapper.db.test.ts \
+            tests/integration/dingtalk-approval-card-callback.db.test.ts \
             tests/integration/approval-projection-visibility.db.test.ts \
             tests/integration/approval-projection-participant-read.db.test.ts \
             tests/integration/approval-route-preview-substrate.db.test.ts \
