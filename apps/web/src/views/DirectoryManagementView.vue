@@ -4879,20 +4879,52 @@ async function handleReviewUnbind(item: DirectoryReviewItem) {
   }
 }
 
+interface ReviewBindingsOutcome {
+  appliedCount: number
+  failedCount: number
+  failed: unknown[]
+}
+
+// Shared by the batch-bind and batch-admit-users partial-failure toasts: both server
+// routes return `failed: [{ accountId, error }]` for per-item failures (DT-HARDEN-04).
+// Both call sites use the same limit so the two toasts stay visually consistent.
+const FAILED_BINDINGS_PREVIEW_LIMIT = 3
+
+function readFailedBindingsPreview(failed: unknown[], limit: number): string {
+  return failed
+    .slice(0, limit)
+    .map((entry) => {
+      if (!entry || typeof entry !== 'object') return ''
+      const item = entry as Record<string, unknown>
+      const accountId = typeof item.accountId === 'string' ? item.accountId : ''
+      const error = typeof item.error === 'string' ? item.error : ''
+      return [accountId, error].filter(Boolean).join(': ')
+    })
+    .filter(Boolean)
+    .join('；')
+}
+
 async function postReviewBindings(bindings: Array<{
   accountId: string
   localUserRef: string
   enableDingTalkGrant: boolean
-}>, failureMessage = '绑定目录成员失败'): Promise<number> {
-  if (!selectedIntegration.value || bindings.length === 0) return 0
+}>, failureMessage = '绑定目录成员失败'): Promise<ReviewBindingsOutcome> {
+  if (!selectedIntegration.value || bindings.length === 0) {
+    return { appliedCount: 0, failedCount: 0, failed: [] }
+  }
   const response = await apiFetch('/api/admin/directory/accounts/batch-bind', {
     method: 'POST',
     body: JSON.stringify({ bindings }),
   })
   const body = await readJson(response)
   if (!response.ok) throw new Error(readApiError(body, failureMessage))
-  const processedItems = Array.isArray(body?.data?.items) ? body.data.items : []
-  return processedItems.length > 0 ? processedItems.length : bindings.length
+  const data = body?.data as Record<string, unknown> | undefined
+  const processedItems = Array.isArray(data?.items) ? data.items : []
+  return {
+    appliedCount: Number(data?.updatedCount ?? processedItems.length),
+    failedCount: Number(data?.failedCount ?? 0),
+    failed: Array.isArray(data?.failed) ? data.failed : [],
+  }
 }
 
 async function refreshAfterReviewBindings(): Promise<void> {
@@ -4923,7 +4955,8 @@ async function submitReviewBindings(bindings: Array<{
         message: `正在提交${readReviewBatchProgressKindLabel(progressKind)}请求...`,
       })
     }
-    appliedCount = await postReviewBindings(bindings, failureMessage)
+    const outcome = await postReviewBindings(bindings, failureMessage)
+    appliedCount = outcome.appliedCount
     if (progressKind) {
       setReviewBatchProgress({
         kind: progressKind,
@@ -4934,14 +4967,18 @@ async function submitReviewBindings(bindings: Array<{
       })
     }
     await refreshAfterReviewBindings()
-    setStatus(successMessage)
+    const failedPreview = readFailedBindingsPreview(outcome.failed, FAILED_BINDINGS_PREVIEW_LIMIT)
+    const message = outcome.failedCount > 0
+      ? `已绑定 ${appliedCount} 个目录成员，另有 ${outcome.failedCount} 个失败${failedPreview ? `：${failedPreview}` : '，请重试'}`
+      : successMessage
+    setStatus(message, outcome.failedCount > 0 ? 'error' : 'info')
     if (progressKind) {
       setReviewBatchProgress({
         kind: progressKind,
         phase: 'completed',
         total: bindings.length,
         applied: appliedCount,
-        message: successMessage,
+        message,
       })
     }
   } catch (error) {
@@ -5154,17 +5191,7 @@ async function batchAdmitReviewItems() {
     await refreshAfterReviewBindings()
     const failedCount = Number(data?.failedCount ?? 0)
     const failedItems = Array.isArray(data?.failed) ? data.failed : []
-    const failedPreview = failedItems
-      .slice(0, 2)
-      .map((entry) => {
-        if (!entry || typeof entry !== 'object') return ''
-        const item = entry as Record<string, unknown>
-        const accountId = typeof item.accountId === 'string' ? item.accountId : ''
-        const error = typeof item.error === 'string' ? item.error : ''
-        return [accountId, error].filter(Boolean).join(': ')
-      })
-      .filter(Boolean)
-      .join('；')
+    const failedPreview = readFailedBindingsPreview(failedItems, FAILED_BINDINGS_PREVIEW_LIMIT)
     const message = failedCount > 0
       ? `已创建并绑定 ${appliedCount} 个目录成员，另有 ${failedCount} 个失败${failedPreview ? `：${failedPreview}` : '，请重试'}`
       : `已创建并绑定 ${appliedCount} 个目录成员`

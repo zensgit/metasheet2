@@ -6,6 +6,7 @@ import { matchesTrigger, TRIGGER_TYPE_BY_EVENT, ALL_TRIGGER_TYPES } from '../../
 import type { AutomationTrigger, AutomationTriggerType } from '../../src/multitable/automation-triggers'
 import { EventBus } from '../../src/integration/events/event-bus'
 import { __resetDingTalkAppAccessTokenCacheForTests } from '../../src/integrations/dingtalk/client'
+import { encryptStoredSecretValue } from '../../src/security/encrypted-secrets'
 import { ALL_ACTION_TYPES, type AutomationAction } from '../../src/multitable/automation-actions'
 
 // ── DB mock for AutomationLogService ──────────────────────────────────────
@@ -644,6 +645,51 @@ describe('AutomationExecutor', () => {
     expect(payload.markdown.text).toContain('/multitable/sheet_1/view_grid?recordId=r1')
     expect(payload.markdown.text).toContain('处理权限：需登录系统并具备该表格/视图访问权限')
     expect((queryFn.mock.calls[3]?.[0] as string) ?? '').toContain('INSERT INTO dingtalk_group_deliveries')
+  })
+
+  // DT-HARDEN-03: destinations are stored encrypted. The send path must decrypt before
+  // URL validation + HMAC signing — reading the raw column would feed an `enc:` blob to
+  // normalizeDingTalkRobotWebhookUrl and break every group delivery in production.
+  it('decrypts an encrypted destination before signing and sending (DT-HARDEN-03)', async () => {
+    process.env.ENCRYPTION_KEY = process.env.ENCRYPTION_KEY || 'unit-test-key'
+    process.env.ENCRYPTION_SALT = process.env.ENCRYPTION_SALT || 'unit-test-salt'
+    const plainWebhook = 'https://oapi.dingtalk.com/robot/send?access_token=secret-token'
+    const encryptedWebhook = encryptStoredSecretValue(plainWebhook)
+    const encryptedSecret = encryptStoredSecretValue('SECunit0123456789')
+    expect(encryptedWebhook).not.toContain('secret-token')
+
+    const queryFn = vi.fn()
+      .mockResolvedValueOnce({
+        rows: [{ id: 'dt_1', name: 'Ops Group', webhook_url: encryptedWebhook, secret: encryptedSecret, enabled: true }],
+      })
+    const fetchFn = vi.fn(async () => new Response(JSON.stringify({ errcode: 0, errmsg: 'ok' }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    })) as unknown as typeof fetch
+
+    deps = createMockDeps({ queryFn, fetchFn })
+    executor = new AutomationExecutor(deps)
+
+    const rule = createMockRule({
+      actions: [{
+        type: 'send_dingtalk_group_message',
+        config: { destinationId: 'dt_1', titleTemplate: 'T', bodyTemplate: 'B' },
+      }],
+    })
+    const result = await executor.execute(rule, {
+      recordId: 'r1',
+      data: {},
+      sheetId: 'sheet_1',
+      actorId: 'user_1',
+    })
+
+    expect(result.status).toBe('success')
+    const [url] = fetchFn.mock.calls[0] as [string, RequestInit]
+    // Sent to the decrypted URL, signed with the decrypted secret.
+    expect(url).toContain('https://oapi.dingtalk.com/robot/send?access_token=secret-token')
+    expect(url).not.toContain('enc:')
+    expect(url).toContain('sign=')
+    expect(url).toContain('timestamp=')
   })
 
   it('fails send_dingtalk_group_message when the internal processing view is not in the sheet', async () => {

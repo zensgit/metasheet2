@@ -1,7 +1,7 @@
 import { Logger } from '../core/logger'
 import { query } from '../db/pg'
 import { SchedulerServiceImpl } from '../services/SchedulerService'
-import { syncDirectoryIntegration } from './directory-sync'
+import { DirectorySyncInProgressError, reclaimStaleDirectorySyncRuns, syncDirectoryIntegration } from './directory-sync'
 
 type DirectoryScheduleRow = {
   id: string
@@ -53,7 +53,18 @@ async function getScheduleRow(integrationId: string): Promise<DirectoryScheduleR
 }
 
 async function runScheduledSync(integrationId: string): Promise<void> {
-  await syncDirectoryIntegration(integrationId, SYSTEM_TRIGGERED_BY, 'scheduler')
+  try {
+    await syncDirectoryIntegration(integrationId, SYSTEM_TRIGGERED_BY, 'scheduler')
+  } catch (error) {
+    // DT-HARDEN-05: a manual sync (or another replica's scheduler) already holds the
+    // lease. Skipping is the correct outcome — the directory is being refreshed. Any
+    // other failure stays an error so the job reports it.
+    if (error instanceof DirectorySyncInProgressError) {
+      logger.info(`Skipped scheduled directory sync for ${integrationId}: ${error.message}`)
+      return
+    }
+    throw error
+  }
 }
 
 async function applySchedule(row: DirectoryScheduleRow | null): Promise<void> {
@@ -98,6 +109,15 @@ export async function startDirectorySyncScheduler(
 
   scheduler = options.scheduler ?? new SchedulerServiceImpl()
   started = true
+
+  try {
+    // DT-HARDEN-05: a crash or redeploy leaves `running` run rows nobody owns, which
+    // would hold the lease until it expires. Sweep them once at boot so an integration
+    // is never wedged waiting for a process that no longer exists.
+    await reclaimStaleDirectorySyncRuns()
+  } catch (error) {
+    logger.warn(`Failed to reclaim stale directory sync runs: ${error instanceof Error ? error.message : String(error)}`)
+  }
 
   try {
     const rows = await listScheduleRows()

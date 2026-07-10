@@ -285,4 +285,50 @@ describe('ApprovalMetricsView — B analytics breakdown sections', () => {
     expect(container.textContent).toContain('按部门汇总')
     expect(rowsOf(container, 'metrics-table-teams')).toBe(TEAM_ROWS.length)
   })
+
+  // ---------------------------------------------------------------------------
+  // B3-03 (看板钻取): every KPI tile deep-links into the approvals list. With no date range set,
+  // the query is EMPTY (never a status filter — no tile maps to one); once the shared date range
+  // is set, the link carries the SAME createdFrom/createdTo window the tile's own numbers were
+  // computed over (identical day-start/day-end convention as the since/until the fetchers get).
+  // ---------------------------------------------------------------------------
+  it('B3-03: a KPI tile drill link routes to the approvals list with an EMPTY query when no date range is set', async () => {
+    const m = await mountView()
+    app = m.app; container = m.container
+
+    const drill = container.querySelector<HTMLElement>('[data-testid="metric-total-drill"]')
+    expect(drill, 'the 总量 tile has a drill link').toBeTruthy()
+    drill!.click()
+
+    expect(pushSpy).toHaveBeenCalledWith({ name: 'approval-list', query: {} })
+  })
+
+  it('B3-03: a KPI tile drill link carries the tile\'s own createdFrom/createdTo window once the date range is set', async () => {
+    const m = await mountView()
+    app = m.app; container = m.container
+
+    container.querySelector<HTMLButtonElement>('[data-testid="set-date-range"]')!.click()
+    await flushUi()
+
+    const drill = container.querySelector<HTMLElement>('[data-testid="metric-sla-rate-drill"]')
+    expect(drill, 'the SLA 超时率 tile has a drill link').toBeTruthy()
+    drill!.click()
+
+    expect(pushSpy).toHaveBeenCalledWith({
+      name: 'approval-list',
+      query: {
+        createdFrom: '2026-04-01T00:00:00Z',
+        createdTo: '2026-04-25T23:59:59Z',
+      },
+    })
+  })
+
+  it('B3-03: all four KPI tiles expose a drill link', async () => {
+    const m = await mountView()
+    app = m.app; container = m.container
+
+    for (const tile of ['metric-total-drill', 'metric-approval-rate-drill', 'metric-avg-duration-drill', 'metric-sla-rate-drill']) {
+      expect(container.querySelector(`[data-testid="${tile}"]`), `${tile} exists`).toBeTruthy()
+    }
+  })
 })

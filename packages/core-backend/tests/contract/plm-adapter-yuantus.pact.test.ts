@@ -254,6 +254,47 @@ describe('Pact: Metasheet2 consumer -> YuantusPLM provider (Wave 1 + Wave 2 docu
     }
   })
 
+  // #4020 (PLM-COLLAB C1 follow-up): the provider now computes a unified per-feature
+  // `available` field -- `available = supported && (packaging === 'base' || entitled)`
+  // (Yuantus provider #1156). Pins the formula for bom_multitable (paid, licensed under this
+  // fixture's tenant-1 provider state), discussion_core (base packaging -- available stays
+  // true even though entitled is false, since a base deployment ships no license row -- the
+  // exact bug #4020 fixes), and metasheet_review (paid packaging, unlicensed under this same
+  // fixture -- entitled false AND available false). entitled/available are EXACT-matched (the
+  // formula's own discriminators); everything else on these entries stays match-by-type.
+  it('#4020: the capabilities interaction pins the provider-computed available formula', () => {
+    const pact = loadPact()
+    const interaction = pact.interactions.find(
+      i => i.request.path === '/api/v1/integrations/capabilities',
+    )
+    expect(interaction).toBeDefined()
+    const body = interaction!.response.body as {
+      features: Record<string, { supported: boolean; entitled: boolean; available?: boolean }>
+    }
+
+    expect(body.features.bom_multitable.supported).toBe(true)
+    expect(body.features.bom_multitable.entitled).toBe(true)
+    expect(body.features.bom_multitable.available).toBe(true)
+
+    // base-packaged: unlicensed (entitled false) but STILL available -- the bug #4020 fixes
+    expect(body.features.discussion_core.supported).toBe(true)
+    expect(body.features.discussion_core.entitled).toBe(false)
+    expect(body.features.discussion_core.available).toBe(true)
+
+    // paid-packaged, unlicensed under this fixture: available follows entitled (both false)
+    expect(body.features.metasheet_review.supported).toBe(true)
+    expect(body.features.metasheet_review.entitled).toBe(false)
+    expect(body.features.metasheet_review.available).toBe(false)
+
+    // entitled/available are the formula's discriminators -- must be EXACT-matched, never
+    // loosened to a type matcher (a type matcher would erase the pinned true/false split)
+    const rules = interaction!.response.matchingRules?.body ?? {}
+    for (const key of ['bom_multitable', 'discussion_core', 'metasheet_review']) {
+      expect(rules).not.toHaveProperty(`$.features.${key}.entitled`)
+      expect(rules).not.toHaveProperty(`$.features.${key}.available`)
+    }
+  })
+
   it('documents the V1.2 parent-host-mediated embed-token mint contract', () => {
     const pact = loadPact()
     const interaction = pact.interactions.find(

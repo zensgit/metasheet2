@@ -37,6 +37,11 @@ export default defineConfig({
       // re-admission of an already-linked account). DATABASE_URL-gated; excluded here so the
       // no-DB job cannot skip-green it, and wired as a WHOLE FILE into the approval real-DB step.
       'tests/integration/directory-admission-case-insensitive-uniqueness.db.test.ts',
+      // DT-HARDEN-05 lease golden (real DB): proves the partial unique index makes the lease
+      // a database invariant and that COALESCE(last_heartbeat_at, started_at) staleness never
+      // reclaims a live long run. DATABASE_URL-gated; excluded here so the no-DB job cannot
+      // skip-green it, and wired as a WHOLE FILE into the approval real-DB step.
+      'tests/integration/directory-sync-run-lease.db.test.ts',
       'tests/integration/approval-manager-chain.db.test.ts',
       'tests/integration/approval-requester-department.db.test.ts',
       'tests/integration/approval-requester-title.db.test.ts',
@@ -167,6 +172,13 @@ export default defineConfig({
       // keystone that used to live here moved to comment-reactions.api.test.ts.
       'tests/integration/comments.api.test.ts',
       'tests/integration/events-api.test.ts',
+      // multitable-attachments.api.test.ts self-mocks its DB pool (no live DB needed) and its own
+      // 12/12 pass standalone; it stays excluded here (unrelated to the comments.api.test.ts note
+      // above) and is NOT wired into the real-DB job. Its F2 security-critical subset (attachment
+      // download row-deny 404 / field-mask 403, #3973) is independently covered by a self-contained
+      // real-DB file, tests/integration/multitable-attachment-readgate.security.test.ts, wired as a
+      // WHOLE FILE into the `Run multitable real-DB integration` step in plugin-tests.yml — so F2
+      // has a live CI regression guard even though this parent file remains excluded/unwired.
       'tests/integration/multitable-attachments.api.test.ts',
       // multitable-context.api.test.ts needs setup.integration.ts + a live DB (its template
       // catalog/install routes go through rbacGuard, which 403s under the default setup). It

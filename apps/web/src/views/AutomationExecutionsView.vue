@@ -52,8 +52,14 @@
         <div class="automation-runs__summary">
           <span class="automation-runs__time">{{ formatTime(run.triggeredAt) }}</span>
           <StatusTag domain="automationRun" :status="run.status" />
-          <span class="automation-runs__rule" data-field="ruleId"><code class="automation-runs__code">{{ run.ruleId }}</code></span>
-          <span v-if="run.sheetId" class="automation-runs__sheet" data-field="sheetId"><code class="automation-runs__code">{{ run.sheetId }}</code></span>
+          <span class="automation-runs__rule" data-field="ruleName">
+            <template v-if="run.ruleName && run.ruleName !== run.ruleId">{{ run.ruleName }}</template>
+            <code v-else class="automation-runs__code" data-field="ruleId">{{ run.ruleId }}</code>
+          </span>
+          <span v-if="run.sheetId" class="automation-runs__sheet" data-field="sheetName">
+            <template v-if="run.sheetName && run.sheetName !== run.sheetId">{{ run.sheetName }}</template>
+            <code v-else class="automation-runs__code" data-field="sheetId">{{ run.sheetId }}</code>
+          </span>
           <span class="automation-runs__trigger" data-field="triggeredBy">{{ run.triggeredBy }}</span>
           <span class="automation-runs__duration">{{ run.duration ?? '-' }}ms</span>
         </div>
@@ -339,9 +345,11 @@ if (isAdmin) void loadData()
 .automation-runs__time { color: var(--ms-text-2); min-width: 150px; }
 .automation-runs__rule { color: var(--ms-text-2); font-weight: 600; }
 .automation-runs__sheet { color: var(--ms-text-2); }
-/* UF-8: ruleId/sheetId stay raw IDs (no rule/sheet-name lookup available on the list payload
-   without a new API call, which is out of scope for a presentation-only slice) — honest <code>
-   fallback names them as machine values instead of plain inline text (design-lock §3.5). */
+/* B3-11: the list payload now resolves ruleName/sheetName via a batched server-side lookup
+   (UF-8's prior "no lookup available" constraint is lifted). A resolved name renders as plain
+   text; an UNRESOLVED one (rule/sheet deleted, or name === id) still degrades to the honest
+   <code> id fallback — it names the value as a machine id instead of dressing it up as a
+   plain label (design-lock §3.5). */
 .automation-runs__code { font-family: monospace; font-size: 11px; background: var(--ms-bg-page); padding: 1px 4px; border-radius: var(--ms-radius-sm); }
 .automation-runs__trigger { color: var(--ms-text-2); }
 .automation-runs__duration { margin-left: auto; color: var(--ms-text-3); }
