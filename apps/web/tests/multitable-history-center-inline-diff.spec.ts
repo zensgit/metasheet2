@@ -445,3 +445,44 @@ describe('HistoryCenterModal — type-aware link/person diff values (PR-B)', () 
     } finally { app.unmount(); container.remove() }
   })
 })
+
+describe('HistoryCenterModal — record click-through emit (PR-C)', () => {
+  it('a non-delete change row renders a BUTTON chip that emits open-record with {sheetId, recordId}', async () => {
+    mockListHistoryEvents.mockResolvedValue({ batches: [batch()], total: 1, nextCursor: null, searchTruncated: false })
+    mockGetHistoryBatch.mockResolvedValue(detailWith([{
+      sheetId: 'sheet_9', recordId: 'rec_click', action: 'update', version: 2,
+      changedFieldIds: ['fld_title'], before: { fld_title: 'a' }, after: { fld_title: 'b' },
+    }]))
+    const onOpenRecord = vi.fn()
+    const { app, container } = mountModalWithProps({ fields: TYPED_FIELDS, onOpenRecord })
+    try {
+      await flushPromises()
+      container.querySelector<HTMLButtonElement>('[data-test="hist-batch"]')!.click()
+      await flushPromises()
+      const chip = container.querySelector<HTMLElement>('[data-test="hist-rec-label"]')!
+      expect(chip.tagName).toBe('BUTTON')
+      chip.click()
+      expect(onOpenRecord).toHaveBeenCalledTimes(1)
+      expect(onOpenRecord).toHaveBeenCalledWith({ sheetId: 'sheet_9', recordId: 'rec_click' })
+    } finally { app.unmount(); container.remove() }
+  })
+
+  it('a DELETE change row renders plain text (no button — the record is gone)', async () => {
+    mockListHistoryEvents.mockResolvedValue({ batches: [batch({ action: 'delete' })], total: 1, nextCursor: null, searchTruncated: false })
+    mockGetHistoryBatch.mockResolvedValue(detailWith([{
+      sheetId: 'sheet_1', recordId: 'rec_gone', action: 'delete', version: 3,
+      changedFieldIds: [], before: { fld_title: 'Doomed' }, after: null,
+    }]))
+    const onOpenRecord = vi.fn()
+    const { app, container } = mountModalWithProps({ fields: TYPED_FIELDS, onOpenRecord })
+    try {
+      await flushPromises()
+      container.querySelector<HTMLButtonElement>('[data-test="hist-batch"]')!.click()
+      await flushPromises()
+      const chip = container.querySelector<HTMLElement>('[data-test="hist-rec-label"]')!
+      expect(chip.tagName).toBe('SPAN')
+      chip.click()
+      expect(onOpenRecord).not.toHaveBeenCalled()
+    } finally { app.unmount(); container.remove() }
+  })
+})
