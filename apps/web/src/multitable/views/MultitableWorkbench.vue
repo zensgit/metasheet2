@@ -7,9 +7,9 @@
         <span>{{ conflictMessage }}</span>
       </div>
       <div class="mt-workbench__conflict-actions">
-        <button class="mt-workbench__conflict-btn" @click="onReloadConflict">{{ wb('conflict.reload', isZh) }}</button>
-        <button class="mt-workbench__conflict-btn mt-workbench__conflict-btn--primary" @click="onRetryConflict">{{ wb('conflict.retry', isZh) }}</button>
-        <button class="mt-workbench__conflict-btn" @click="grid.dismissConflict()">{{ wb('conflict.dismiss', isZh) }}</button>
+        <MtButton class="mt-workbench__conflict-btn" @click="onReloadConflict">{{ wb('conflict.reload', isZh) }}</MtButton>
+        <MtButton class="mt-workbench__conflict-btn mt-workbench__conflict-btn--primary" @click="onRetryConflict">{{ wb('conflict.retry', isZh) }}</MtButton>
+        <MtButton class="mt-workbench__conflict-btn" @click="grid.dismissConflict()">{{ wb('conflict.dismiss', isZh) }}</MtButton>
       </div>
     </div>
     <div v-if="basePickerBases.length" class="mt-workbench__base-bar">
@@ -675,6 +675,7 @@ import MetaImportModal from '../components/MetaImportModal.vue'
 import MetaBulkEditDialog from '../components/MetaBulkEditDialog.vue'
 import MetaMentionPopover from '../components/MetaMentionPopover.vue'
 import MetaDashboardView from '../components/MetaDashboardView.vue'
+import { MtButton } from '../ui'
 import type { MetaBase } from '../types'
 import { bulkImportRecords } from '../import/bulk-import'
 import { extractImportTokens, type ImportBuildFailure, type ImportBuildResult, type ImportValueResolver } from '../import/delimited'
@@ -4336,15 +4337,12 @@ defineExpose({
 }
 .mt-workbench__conflict-copy { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: #8a5a00; }
 .mt-workbench__conflict-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-.mt-workbench__conflict-btn {
-  padding: 6px 10px;
-  border: 1px solid #d9b56d;
-  border-radius: 8px;
-  background: #fff;
-  color: #8a5a00;
-  cursor: pointer;
-  font-size: 12px;
-}
+/* .mt-workbench__conflict-btn: all three sharers (reload / retry / dismiss in the conflict banner)
+   are now <MtButton> (token-styled; reload/dismiss = default ghost, sanctioned border drop as in
+   batch-1). The bespoke base CSS was removed to avoid double-styling the MtButton root; the class is
+   kept on the elements only for selector stability (the existing workbench spec queries it). The
+   `--primary` amber variant below is deliberately KEPT as an additive class — MtButton has no
+   warning/amber variant, so it preserves the banner's attention fill on the retry action. */
 .mt-workbench__conflict-btn--primary { background: #f59e0b; border-color: #f59e0b; color: #fff; }
 .mt-workbench__actions { display: flex; gap: 6px; padding: 4px 16px 0; }
 .mt-workbench__capability-banner {
