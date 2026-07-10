@@ -535,8 +535,11 @@
       :base-id="activeBaseId || ''"
       :sheet-id="workbench.activeSheetId.value"
       :fields="historyVisibleFields"
+      :link-summaries="grid.linkSummaries.value"
+      :person-summaries="grid.personSummaries.value"
       :initial-batch-id="historyDeepLinkBatchId"
       @close="closeHistory"
+      @open-record="onHistoryOpenRecord"
     />
     <MetaConfigHistoryModal
       :visible="configHistory.visible"
@@ -996,6 +999,19 @@ function openHistoryForBatch(batchId: string) {
   historyDeepLinkBatchId.value = batchId
   showHistory.value = true
 }
+// PR-C: click-through from a History Center change row to the record drawer — same shape as the
+// Notification Center's click-to-locate (onNotificationNavigate): switch to the change's sheet first
+// (resolveDeepLink resolves against the active sheet; a declined unsaved-changes discard aborts, so we
+// never look the record up in the wrong sheet), then locate via resolveDeepLink (loaded row → drawer;
+// off-page → getRecord fetch; gone/denied → the existing not-found toast).
+async function onHistoryOpenRecord(payload: { sheetId: string; recordId: string }) {
+  if (payload.sheetId && payload.sheetId !== workbench.activeSheetId.value) {
+    if (!onSelectSheet(payload.sheetId)) return
+  }
+  closeHistory()
+  await resolveDeepLink(payload.recordId)
+}
+
 function closeHistory() {
   showHistory.value = false
   historyDeepLinkBatchId.value = null
