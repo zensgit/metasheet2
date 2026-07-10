@@ -3084,6 +3084,16 @@ export class ApprovalProductService {
       if (!template.latest_version_id) {
         throw new ServiceError('Approval template has no version to publish', 400, 'APPROVAL_TEMPLATE_VERSION_NOT_FOUND')
       }
+      // B3-08 review fix (P3-1): publish previously flipped status to 'published' unconditionally,
+      // silently reactivating an ARCHIVED template — bypassing the explicit 启用 confirm that is the
+      // whole point of the archive state machine. Fail closed instead: unarchive first, then publish.
+      if (template.status === 'archived') {
+        throw new ServiceError(
+          'Approval template is archived — unarchive it before publishing',
+          409,
+          'APPROVAL_TEMPLATE_ARCHIVED',
+        )
+      }
 
       const versionResult = await client.query<TemplateVersionRow>(
         `SELECT * FROM approval_template_versions WHERE id = $1 AND template_id = $2`,

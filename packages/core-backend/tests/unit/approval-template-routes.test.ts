@@ -840,6 +840,23 @@ describe('approval template routes', () => {
       expect(routeState.state.versions.get(version.id)?.status).toBe('draft')
     })
 
+    it('409s publishing an ARCHIVED template (no silent reactivation bypassing 启用)', async () => {
+      const template = routeState.createTemplateFixture({ status: 'archived' })
+      const version = routeState.createVersionFixture(template.id)
+      template.latest_version_id = version.id
+
+      const app = createApp()
+      const response = await request(app)
+        .post(`/api/approval-templates/${template.id}/publish`)
+        .send({ policy: validPolicy })
+
+      expect(response.status).toBe(409)
+      expect(response.body.error.code).toBe('APPROVAL_TEMPLATE_ARCHIVED')
+      // fail-closed: nothing flipped
+      expect(routeState.state.templates.get(template.id)?.status).toBe('archived')
+      expect(routeState.state.versions.get(version.id)?.status).toBe('draft')
+    })
+
     it('rejects a non-string note with 400', async () => {
       const { template } = publishableTemplate()
       const app = createApp()
@@ -894,9 +911,18 @@ describe('approval template routes', () => {
         publishNote: null,
         publishedDefinitionId: null,
       })
-      // Summary shape — the heavy payloads stay on the per-version detail endpoint.
-      expect(response.body.versions[0]).not.toHaveProperty('formSchema')
-      expect(response.body.versions[0]).not.toHaveProperty('approvalGraph')
+      // Summary shape — pin the EXACT key set (review P3-2: a `...row` spread would leak the
+      // snake_case form_schema/approval_graph blobs while camelCase-absence checks stayed green).
+      expect(Object.keys(response.body.versions[0]).sort()).toEqual([
+        'createdAt',
+        'id',
+        'publishNote',
+        'publishedDefinitionId',
+        'status',
+        'templateId',
+        'updatedAt',
+        'version',
+      ])
     })
 
     it('404s the versions list for a template that does not exist', async () => {
