@@ -103,6 +103,8 @@ on:
       - 'apps/web/tests/StockPreparationWorkspace.spec.ts'
       - 'apps/web/tests/StockPreparationProjectWorkspaceView.spec.ts'
       - 'apps/web/tests/StockPreparationSnapshotDiffView.spec.ts'
+      - 'apps/web/tests/StockPreparationMappingConfirmView.spec.ts'
+      - 'apps/web/tests/StockPreparationUnitConfirmView.spec.ts'
       - '.github/workflows/integration-guard.yml'
   push:
     branches: [main]
@@ -187,6 +189,8 @@ on:
       - 'apps/web/tests/StockPreparationWorkspace.spec.ts'
       - 'apps/web/tests/StockPreparationProjectWorkspaceView.spec.ts'
       - 'apps/web/tests/StockPreparationSnapshotDiffView.spec.ts'
+      - 'apps/web/tests/StockPreparationMappingConfirmView.spec.ts'
+      - 'apps/web/tests/StockPreparationUnitConfirmView.spec.ts'
       - '.github/workflows/integration-guard.yml'
 
 jobs:
@@ -239,4 +243,4 @@ jobs:
       # Consolidated here into the SINGLE unioned list (verified green on both Node 20 and this repo's
       # default Node before landing) — do not reintroduce a second `run:` key; add new specs to this one.
       - name: Run integration web guard specs (targeted)
-        run: pnpm --filter @metasheet/web exec vitest run composition-vocab-mirror multitable-resolver-vocab-mirror integrationErrorCodeLabels fieldHints IntegrationReadSourceConfigPanel IntegrationReadSourceCompositionPanel IntegrationReadSourceCompositionAuthoringPanel readSourceCompositions.service IntegrationWorkbenchView IntegrationWorkbenchRail IntegrationMonitoringSection IntegrationCleaningDatasetSection IntegrationMappingRulesSection IntegrationObjectTemplateSection IntegrationPayloadPreviewSection IntegrationConnectionSection IntegrationBridgeAgentSection IntegrationK3WiseSetupView IntegrationHelpView IntegrationPipelineRunSection IntegrationStockPrepPanel IntegrationExternalWritePanel IntegrationTableActionsPanel IntegrationFieldOptionSyncPanel readSourceModePresets IntegrationReadSourceWizard JsonAssist IntegrationCompositionWizard bridgeAgentConfigCheck IntegrationOptionSetsStructuredEditor optionSetsStructured integrationWorkbench MetaIntegrationFieldRuleAuthoring readSourceTemplateCatalog IntegrationTemplateCatalogPicker StockPreparationWorkspace StockPreparationProjectWorkspaceView StockPreparationSnapshotDiffView --reporter=dot
+        run: pnpm --filter @metasheet/web exec vitest run composition-vocab-mirror multitable-resolver-vocab-mirror integrationErrorCodeLabels fieldHints IntegrationReadSourceConfigPanel IntegrationReadSourceCompositionPanel IntegrationReadSourceCompositionAuthoringPanel readSourceCompositions.service IntegrationWorkbenchView IntegrationWorkbenchRail IntegrationMonitoringSection IntegrationCleaningDatasetSection IntegrationMappingRulesSection IntegrationObjectTemplateSection IntegrationPayloadPreviewSection IntegrationConnectionSection IntegrationBridgeAgentSection IntegrationK3WiseSetupView IntegrationHelpView IntegrationPipelineRunSection IntegrationStockPrepPanel IntegrationExternalWritePanel IntegrationTableActionsPanel IntegrationFieldOptionSyncPanel readSourceModePresets IntegrationReadSourceWizard JsonAssist IntegrationCompositionWizard bridgeAgentConfigCheck IntegrationOptionSetsStructuredEditor optionSetsStructured integrationWorkbench MetaIntegrationFieldRuleAuthoring readSourceTemplateCatalog IntegrationTemplateCatalogPicker StockPreparationWorkspace StockPreparationProjectWorkspaceView StockPreparationSnapshotDiffView StockPreparationMappingConfirmView StockPreparationUnitConfirmView --reporter=dot
