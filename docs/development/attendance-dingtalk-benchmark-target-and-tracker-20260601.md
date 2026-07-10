@@ -60,8 +60,17 @@
 > **余量（更新后口径）**:
 > 1. 🔒 **owner/operator 门不变**:S7 A2-resolver（等 A1 live 手感）· 五连 staging smoke · E4 真机注册 ·
 >    档 B 治理门 · T2 三项（§3.1 打卡切外勤 / #2 自助入口 / #8 多段夜班）。
-> 2. ~~**P3 硬化小刀池**~~ → **Wave-2 已全落地 ✅（2026-07-10 同日）**:R4 P3-1 = H1 #4045 `4c0e11e2e` ·
->    S2 P3-1+P3-2 = H2 #4044 `7a94997e5`。验证 MD:`attendance-hardening-wave2-verification-20260710.md`。
+> 2. **P3 硬化小刀池 → Wave-2 两刀已合,但 owner 审阅（2026-07-10）REOPEN 硬化池,「已收口」口径作废**:
+>    H1 #4045 `4c0e11e2e` 判定成立 ✅;H2 #4044 `7a94997e5` 已合但暴露两个后续必修项——
+>    **F1〔P1〕文件资源级授权缺失**:files.ts 的 list/info/download/delete 只有 authenticate,任何登录用户可
+>    枚举/读取/删除他人考勤照片。属既有平台缺口,但 S2/H2 把敏感照片证据接入后**不得再作 OUT 排除**;
+>    owner 已明示授权开安全刀（至少 owner/org/业务 ACL 锁住四端点）。
+>    **F2〔P2〕删除顺序重造悬挂证据**:H2 的 delete 先 storage.delete 后删行——存储删成/DB 删败时二进制
+>    已消失而 files 行仍被 G2 当有效证据,恰是 H2 声称消灭的状态;改为 DB tombstone/失效**先行**,存储对象
+>    异步/补偿删除,并补 DB 删除失败注入测试。
+>    〔P3 措辞纠正〕magic-byte 是**格式前缀筛查**（BMP 仅 2 字节),不构成「文件为真实图片」的证明。
+>    **硬化池在 F1/F2 落地并复审通过前保持 OPEN**;考勤线亦非零待办（#4011 R8 quiet-hours 等仍 OPEN,
+>    属 DingTalk backlog 池车道）——本节口径 = 「本批主体实现已合」。
 > 3. **命名前置（按需立项）**:wecom directory population 线 · comp_time 单人调整 primitive ·
 >    SMS 渠道（供应商选型 owner 门）· >50 org 计提 fairness 轮转。
 > 4. **新增 owner 决策项（H1 审阅产出）**:never-configured vs suspended 收窄（`has_active/has_any` 双谓词,
