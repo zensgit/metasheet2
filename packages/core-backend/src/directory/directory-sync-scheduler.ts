@@ -2,6 +2,7 @@ import { Logger } from '../core/logger'
 import { query } from '../db/pg'
 import { SchedulerServiceImpl } from '../services/SchedulerService'
 import { DirectorySyncInProgressError, reclaimStaleDirectorySyncRuns, syncDirectoryIntegration } from './directory-sync'
+import { deliverDirectoryInactiveLinkedAlert } from './directory-sync-alert-delivery'
 
 type DirectoryScheduleRow = {
   id: string
@@ -52,7 +53,7 @@ async function getScheduleRow(integrationId: string): Promise<DirectoryScheduleR
   return result.rows[0] ?? null
 }
 
-async function runScheduledSync(integrationId: string): Promise<void> {
+async function runScheduledSync(integrationId: string, integrationName: string): Promise<void> {
   try {
     await syncDirectoryIntegration(integrationId, SYSTEM_TRIGGERED_BY, 'scheduler')
   } catch (error) {
@@ -65,6 +66,13 @@ async function runScheduledSync(integrationId: string): Promise<void> {
     }
     throw error
   }
+
+  // §7.1 offboarding blind-spot digest. Deliberately scoped to scheduler-triggered (nightly)
+  // syncs only, not manual ones: the manual-sync route lives in directory-sync.ts's apply
+  // region, which is being touched by an unlanded PR in the same lane batch — this hook
+  // stays entirely in this file to avoid any collision there. `deliverDirectoryInactiveLinkedAlert`
+  // is best-effort and never throws, so no try/catch is needed here.
+  await deliverDirectoryInactiveLinkedAlert({ integrationId, integrationName })
 }
 
 async function applySchedule(row: DirectoryScheduleRow | null): Promise<void> {
@@ -88,7 +96,7 @@ async function applySchedule(row: DirectoryScheduleRow | null): Promise<void> {
       logger.info(`Rescheduled directory sync job: ${jobName} (${cronExpression})`)
     } else {
       await scheduler.schedule(jobName, cronExpression, async () => {
-        await runScheduledSync(row.id)
+        await runScheduledSync(row.id, row.name)
       }, {
         timezone: 'UTC',
       })

@@ -26,7 +26,7 @@ import {
   unbindDirectoryAccount,
   updateDirectoryIntegration,
 } from '../directory/directory-sync'
-import { getDirectoryManagerBindingCoverage } from '../directory/directory-sync-alert-delivery'
+import { getDirectoryInactiveLinkedMetric, getDirectoryManagerBindingCoverage } from '../directory/directory-sync-alert-delivery'
 import {
   getDingTalkWorkNotificationRuntimeStatusFromStore,
   saveDingTalkWorkNotificationAgentId,
@@ -67,6 +67,17 @@ function normalizeReviewFilter(value: unknown): 'all' | 'pending_binding' | 'ina
     default:
       return 'all'
   }
+}
+
+const DEFAULT_INACTIVE_LINKED_DAYS = 30
+const MAX_INACTIVE_LINKED_DAYS = 3650
+
+function normalizeInactiveLinkedDays(value: unknown): number {
+  const raw = typeof value === 'string' ? value.trim() : ''
+  if (!raw) return DEFAULT_INACTIVE_LINKED_DAYS
+  const parsed = Number(raw)
+  if (!Number.isInteger(parsed) || parsed <= 0) return DEFAULT_INACTIVE_LINKED_DAYS
+  return Math.min(parsed, MAX_INACTIVE_LINKED_DAYS)
 }
 
 function readErrorMessage(error: unknown, fallback: string): string {
@@ -590,6 +601,24 @@ export function adminDirectoryRouter(): Router {
     } catch (error) {
       const message = readErrorMessage(error, 'Failed to load directory manager binding coverage')
       jsonError(res, /required|invalid/i.test(message) ? 400 : 500, 'DIRECTORY_MANAGER_COVERAGE_FAILED', message)
+    }
+  })
+
+  // §7.1 offboarding blind-spot metric: directory accounts that went inactive (DingTalk
+  // removal / deactivation sweep) at least `days` ago while still linked to a LOCAL user
+  // that is still active. Read-only derived metric — no write path, same admin gate and
+  // error-handling shape as the sibling GET routes (mirrors /manager-coverage above).
+  router.get('/integrations/:integrationId/inactive-linked', async (req: Request, res: Response) => {
+    const adminUserId = await ensurePlatformAdmin(req, res)
+    if (!adminUserId) return
+
+    try {
+      const thresholdDays = normalizeInactiveLinkedDays(req.query.days)
+      const metric = await getDirectoryInactiveLinkedMetric(req.params.integrationId, thresholdDays)
+      jsonOk(res, { metric })
+    } catch (error) {
+      const message = readErrorMessage(error, 'Failed to load directory inactive-linked metric')
+      jsonError(res, /required|invalid/i.test(message) ? 400 : 500, 'DIRECTORY_INACTIVE_LINKED_FAILED', message)
     }
   })
 

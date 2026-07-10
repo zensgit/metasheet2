@@ -22,6 +22,7 @@ vi.mock('../../src/integrations/dingtalk/client', () => ({
 import { query } from '../../src/db/pg'
 import {
   countConsecutiveFailedRuns,
+  getDirectoryInactiveLinkedMetric,
   getDirectoryManagerBindingCoverage,
 } from '../../src/directory/directory-sync-alert-delivery'
 import {
@@ -472,5 +473,173 @@ describeIfDatabase('R5 per-run sync summary stats (real DB)', () => {
     expect(stats.managerCount).toBe(2)
     expect(stats.linkedManagerCount).toBe(1)
     expect(stats.managerCoverage).toBe(0.5)
+  })
+})
+
+
+/**
+ * roadmap §7.1 — offboarding blind spot. Self-contained describe block, appended at the end
+ * of the file on purpose (see the lane brief this was written under): this file is also
+ * being extended by another unlanded PR touching the deprovision-selection area, and a
+ * trailing, independent describe block keeps that a trivial 3-way merge.
+ *
+ * "Linked" mirrors the `inactive_linked` review-item filter in directory-sync.ts exactly:
+ * `directory_account_links.local_user_id IS NOT NULL`, independent of `link_status`. Anchor
+ * for "how long inactive": `directory_accounts.updated_at`, set directly by these fixtures
+ * (see the module doc-comment on `getDirectoryInactiveLinkedMetric` for why that column is
+ * the correct anchor given the current schema).
+ */
+describeIfDatabase('§7.1 directory inactive-linked backlog metric (real DB)', () => {
+  const TS2 = Date.now()
+  const THRESHOLD_DAYS = 10
+  let integrationId = ''
+  let otherIntegrationIdRef = ''
+  const userIds: string[] = []
+  const accountIds: string[] = []
+
+  const daysAgo = (n: number) => new Date(Date.now() - n * 24 * 60 * 60 * 1000).toISOString()
+
+  beforeAll(async () => {
+    integrationId = (await query<{ id: string }>(
+      `INSERT INTO directory_integrations (name, corp_id) VALUES ($1, $2) RETURNING id`,
+      [`dil-int-${TS2}`, `dil-corp-${TS2}`],
+    )).rows[0].id
+
+    // A second, wholly separate integration — proves the metric is scoped per-integration
+    // and does not leak another tenant's backlog into this one's count.
+    const otherIntegrationId = (await query<{ id: string }>(
+      `INSERT INTO directory_integrations (name, corp_id) VALUES ($1, $2) RETURNING id`,
+      [`dil-other-int-${TS2}`, `dil-other-corp-${TS2}`],
+    )).rows[0].id
+
+    const insertUser = async (id: string, isActive: boolean) => {
+      await query(
+        `INSERT INTO users (id, email, password_hash, is_active) VALUES ($1, $2, 'x', $3)`,
+        [id, `${id}@example.test`, isActive],
+      )
+      userIds.push(id)
+    }
+    const insertAccount = async (opts: {
+      externalUserId: string
+      isActive: boolean
+      updatedAt: string
+      integration?: string
+    }) => {
+      const result = await query<{ id: string }>(
+        `INSERT INTO directory_accounts (integration_id, external_user_id, external_key, name, is_active, raw, updated_at)
+         VALUES ($1, $2, $3, $4, $5, '{}'::jsonb, $6) RETURNING id`,
+        [opts.integration ?? integrationId, opts.externalUserId, `key-${opts.externalUserId}`, opts.externalUserId, opts.isActive, opts.updatedAt],
+      )
+      accountIds.push(result.rows[0].id)
+      return result.rows[0].id
+    }
+    const link = async (accountId: string, userId: string) => {
+      await query(
+        `INSERT INTO directory_account_links (directory_account_id, local_user_id, link_status, match_strategy)
+         VALUES ($1, $2, 'linked', 'manual')`,
+        [accountId, userId],
+      )
+    }
+
+    const uOldActive = `dil-u-old-active-${TS2}`
+    const uBoundaryActive = `dil-u-boundary-active-${TS2}`
+    const uRecentActive5 = `dil-u-recent5-${TS2}`
+    const uRecentActive1 = `dil-u-recent1-${TS2}`
+    const uLocalInactive = `dil-u-local-inactive-${TS2}`
+    const uStillActiveAccount = `dil-u-still-active-account-${TS2}`
+    const uOtherTenant = `dil-u-other-tenant-${TS2}`
+    await Promise.all([
+      insertUser(uOldActive, true),
+      insertUser(uBoundaryActive, true),
+      insertUser(uRecentActive5, true),
+      insertUser(uRecentActive1, true),
+      insertUser(uLocalInactive, false),
+      insertUser(uStillActiveAccount, true),
+      insertUser(uOtherTenant, true),
+    ])
+
+    // 1. QUALIFIES — 20 days inactive (past threshold), linked, local user still active.
+    const accOld = await insertAccount({ externalUserId: `dil-old-${TS2}`, isActive: false, updatedAt: daysAgo(20) })
+    await link(accOld, uOldActive)
+
+    // 2. QUALIFIES — exactly AT the 10-day threshold (the predicate is `<=`, inclusive).
+    const accBoundary = await insertAccount({ externalUserId: `dil-boundary-${TS2}`, isActive: false, updatedAt: daysAgo(THRESHOLD_DAYS) })
+    await link(accBoundary, uBoundaryActive)
+
+    // 3. EXCLUDED — only 5 days inactive, short of the 10-day threshold (crosses the
+    //    boundary the OTHER way from fixture 1/2).
+    const accRecent5 = await insertAccount({ externalUserId: `dil-recent5-${TS2}`, isActive: false, updatedAt: daysAgo(5) })
+    await link(accRecent5, uRecentActive5)
+
+    // 4. EXCLUDED — 1 day inactive, well short of the threshold.
+    const accRecent1 = await insertAccount({ externalUserId: `dil-recent1-${TS2}`, isActive: false, updatedAt: daysAgo(1) })
+    await link(accRecent1, uRecentActive1)
+
+    // 5. EXCLUDED — unlinked. 20 days inactive but no directory_account_links row at all;
+    //    this is the review-queue's OWN definition of "not linked" — must not leak in.
+    await insertAccount({ externalUserId: `dil-unlinked-${TS2}`, isActive: false, updatedAt: daysAgo(20) })
+
+    // 6. EXCLUDED — linked, 20 days inactive, but the LOCAL USER is already inactive. This
+    //    account is not part of the offboarding blind spot: there is nothing left to revoke.
+    const accLocalInactive = await insertAccount({ externalUserId: `dil-local-inactive-${TS2}`, isActive: false, updatedAt: daysAgo(20) })
+    await link(accLocalInactive, uLocalInactive)
+
+    // 7. EXCLUDED — linked, local user active, but the directory ACCOUNT itself is still
+    //    active (never went inactive) — sanity check on `a.is_active = FALSE`.
+    const accStillActive = await insertAccount({ externalUserId: `dil-still-active-${TS2}`, isActive: true, updatedAt: daysAgo(20) })
+    await link(accStillActive, uStillActiveAccount)
+
+    // 8. EXCLUDED — same shape as fixture 1, but under a DIFFERENT integration. Kept alive
+    //    through the assertions below (cleaned up in afterAll) — proves the metric is
+    //    scoped by integration_id rather than trivially absent.
+    const accOtherTenant = await insertAccount({ externalUserId: `dil-other-tenant-${TS2}`, isActive: false, updatedAt: daysAgo(20), integration: otherIntegrationId })
+    await link(accOtherTenant, uOtherTenant)
+
+    otherIntegrationIdRef = otherIntegrationId
+  })
+
+  afterAll(async () => {
+    if (integrationId) {
+      await query(`DELETE FROM directory_accounts WHERE integration_id = $1`, [integrationId])
+      await query(`DELETE FROM directory_integrations WHERE id = $1`, [integrationId])
+    }
+    if (otherIntegrationIdRef) {
+      await query(`DELETE FROM directory_accounts WHERE integration_id = $1`, [otherIntegrationIdRef])
+      await query(`DELETE FROM directory_integrations WHERE id = $1`, [otherIntegrationIdRef])
+    }
+    if (userIds.length) {
+      await query(`DELETE FROM users WHERE id = ANY($1)`, [userIds])
+    }
+  })
+
+  it('sentinel: DATABASE_URL is set (DB-backed lane must not silently skip)', () => {
+    expect(process.env.DATABASE_URL).toBeTruthy()
+  })
+
+  it('counts only linked, still-locally-active accounts inactive at least the threshold, crossing the boundary both ways (real SQL)', async () => {
+    const metric = await getDirectoryInactiveLinkedMetric(integrationId, THRESHOLD_DAYS)
+    expect(metric.thresholdDays).toBe(THRESHOLD_DAYS)
+    expect(metric.count).toBe(2)
+
+    const externalIds = metric.sample.map((s) => s.externalUserId)
+    expect(externalIds).toContain(`dil-old-${TS2}`)
+    expect(externalIds).toContain(`dil-boundary-${TS2}`)
+    expect(externalIds).not.toContain(`dil-recent5-${TS2}`)
+    expect(externalIds).not.toContain(`dil-recent1-${TS2}`)
+    expect(externalIds).not.toContain(`dil-unlinked-${TS2}`)
+    expect(externalIds).not.toContain(`dil-local-inactive-${TS2}`)
+    expect(externalIds).not.toContain(`dil-still-active-${TS2}`)
+    expect(externalIds).not.toContain(`dil-other-tenant-${TS2}`)
+
+    // ORDER BY updated_at ASC — the most-overdue account (20 days) sorts before the
+    // boundary account (10 days).
+    expect(metric.sample[0].externalUserId).toBe(`dil-old-${TS2}`)
+    expect(metric.sample[0].inactiveDays).toBeGreaterThanOrEqual(20)
+    expect(metric.sample[1].externalUserId).toBe(`dil-boundary-${TS2}`)
+  })
+
+  it('returns zero for a threshold high enough that nothing qualifies', async () => {
+    const metric = await getDirectoryInactiveLinkedMetric(integrationId, 3650)
+    expect(metric).toMatchObject({ count: 0, sample: [] })
   })
 })
