@@ -34,10 +34,7 @@
 import { createHmac } from 'crypto'
 
 import { findDingTalkApprovalCardDeliveryById } from './approval-card-deliveries'
-import {
-  resolveApprovalCardLinkSecret,
-  resolveApprovalCardLinkSecretForIntegration,
-} from './approval-card-config'
+import { resolveApprovalCardLinkSecretForIntegration } from './approval-card-config'
 import {
   executeApprovalActionFromCardDelivery,
   type ApprovalCardDeliverySummary,
@@ -75,7 +72,7 @@ export type DingTalkApprovalCardCallbackResult =
   | { outcome: 'rejected'; reason: DingTalkApprovalCardCallbackRejectReason }
   | { outcome: 'ignored_unsupported_action'; outTrackId: string }
   | { outcome: 'delivery_not_found'; outTrackId: string }
-  | { outcome: 'operator_unresolved'; deliveryId: string; reason: 'unlinked' | 'inactive' | 'ambiguous' }
+  | { outcome: 'operator_unresolved'; deliveryId: string; reason: 'unlinked' | 'inactive' | 'ambiguous' | 'integration_unpinned' }
   | { outcome: 'link_secret_unavailable'; deliveryId: string }
   | { outcome: 'executed'; deliveryId: string; summary: ApprovalCardDeliverySummary }
   | { outcome: 'stale'; deliveryId: string; summary: ApprovalCardDeliverySummary }
@@ -178,19 +175,25 @@ export type DingTalkApprovalCardCallbackDeps = {
 
 type ResolvedOperator =
   | { ok: true; userId: string; userName: string }
-  | { ok: false; reason: 'unlinked' | 'inactive' | 'ambiguous' }
+  | { ok: false; reason: 'unlinked' | 'inactive' | 'ambiguous' | 'integration_unpinned' }
 
 /**
  * DingTalk operator → ACTIVE linked local user, fail-closed. Same predicate set as the A-chain
  * send lateral (automation-executor recipient mapping), inverted, and pinned to the delivery's
- * integration when the row carries one (DT-R2). One external id resolving to MORE than one local
- * user (possible only on legacy unpinned rows) is refused as ambiguous — identity is never a
- * freshest-wins pick on this surface.
+ * integration (DT-R2). One external id resolving to MORE than one local user is refused as
+ * ambiguous — identity is never a freshest-wins pick on this surface.
+ *
+ * OWNER HARD GATE (2026-07-10): the lookup MUST be corp-scoped by the delivery row's
+ * integration_id. A NULL-integration delivery previously degraded to a GLOBAL DingTalk-userId
+ * lookup — the exact cross-corp identity-collision face the gate forbids (corp X's "user123"
+ * unlinked + corp Y's "user123" linked → wrong-person resolution). NULL now refuses outright
+ * (`integration_unpinned`); an unpinned delivery's card is dead-on-click rather than
+ * cross-corp-guessable.
  */
 async function resolveOperatorLocalUser(
   query: QueryFn,
   operatorDingTalkUserId: string,
-  integrationId: string | null,
+  integrationId: string,
 ): Promise<ResolvedOperator> {
   const result = await query(
     `SELECT DISTINCT u.id AS local_user_id,
@@ -205,7 +208,7 @@ async function resolveOperatorLocalUser(
       WHERE a.provider = 'dingtalk'
         AND a.external_user_id = $1
         AND a.is_active = TRUE
-        AND ($2::uuid IS NULL OR a.integration_id = $2::uuid)`,
+        AND a.integration_id = $2::uuid`,
     [operatorDingTalkUserId, integrationId],
   )
   const rows = result.rows as Array<{ local_user_id: string; local_user_name: string | null; local_user_active: boolean }>
@@ -245,16 +248,22 @@ export async function executeDingTalkApprovalCardCallback(
   const delivery = await findDingTalkApprovalCardDeliveryById(deps.query, outTrackId)
   if (!delivery) return { outcome: 'delivery_not_found', outTrackId }
 
+  // Owner hard gate (2026-07-10): operator identity may only resolve inside the delivery's own
+  // DingTalk corp. An unpinned delivery (integration_id NULL) refuses OUTRIGHT — never a global
+  // userId lookup (cross-corp identity-collision face).
+  if (!delivery.integration_id) {
+    return { outcome: 'operator_unresolved', deliveryId: delivery.id, reason: 'integration_unpinned' }
+  }
+
   const operator = await resolveOperatorLocalUser(deps.query, operatorDingTalkUserId, delivery.integration_id)
   if (operator.ok === false) {
     return { outcome: 'operator_unresolved', deliveryId: delivery.id, reason: operator.reason }
   }
 
   // Same-source signing (see module doc): resolve the secret exactly as the sender did — pinned
-  // integration first (env override wins inside the resolver), legacy resolver for NULL rows.
-  const linkSecret = delivery.integration_id
-    ? await resolveApprovalCardLinkSecretForIntegration(delivery.integration_id, deps.query)
-    : await resolveApprovalCardLinkSecret(deps.query)
+  // integration (env override wins inside the resolver). The legacy NULL-row resolver is
+  // unreachable here by the owner gate above.
+  const linkSecret = await resolveApprovalCardLinkSecretForIntegration(delivery.integration_id, deps.query)
   if (!linkSecret) return { outcome: 'link_secret_unavailable', deliveryId: delivery.id }
   const token = createHmac('sha256', linkSecret).update(delivery.id).digest('hex').slice(0, 32)
 

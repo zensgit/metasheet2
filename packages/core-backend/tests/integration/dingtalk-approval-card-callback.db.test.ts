@@ -330,16 +330,18 @@ describeIfDatabase('B-3 DingTalk card callback adapter (real DB)', () => {
     expect(result).toEqual({ outcome: 'delivery_not_found', outTrackId: ghost })
   })
 
-  test('DT-R2 identity pinning: one external id linked in two corps is ambiguous ONLY for unpinned rows; the pinned corp resolves cleanly', async () => {
+  test('DT-R2 identity pinning: unpinned rows refuse OUTRIGHT (owner gate); the pinned corp resolves cleanly', async () => {
     const instanceId = await newInstance()
 
-    // Legacy/unpinned delivery (integration_id NULL): DD_DUP maps to two local users → refuse.
+    // Owner hard gate (2026-07-10): an unpinned delivery (integration_id NULL) refuses BEFORE any
+    // lookup — previously this degraded to a GLOBAL userId lookup that refused only on ambiguity,
+    // so a globally-unique-but-wrong-corp id would have resolved (cross-corp collision face).
     const unpinned = await insertDingTalkApprovalCardDelivery(q, {
       instanceId, nodeKey: 'approval_1', recipientUserId: APPROVER, recipientDingTalkUserId: DD_DUP, deliveryKind: 'interactive_card', integrationId: null,
     })
     await markDingTalkApprovalCardDeliverySent(q, unpinned.id, 'carrier_dup_unpinned')
-    const ambiguous = await executeDingTalkApprovalCardCallback(deps, payloadFor(unpinned.id, DD_DUP))
-    expect(ambiguous).toEqual({ outcome: 'operator_unresolved', deliveryId: unpinned.id, reason: 'ambiguous' })
+    const refused = await executeDingTalkApprovalCardCallback(deps, payloadFor(unpinned.id, DD_DUP))
+    expect(refused).toEqual({ outcome: 'operator_unresolved', deliveryId: unpinned.id, reason: 'integration_unpinned' })
     expect(await approveRecordCount(instanceId)).toBe(0)
 
     // Corp-A-pinned delivery: the SAME external id resolves to corp A's link (APPROVER) → executes.

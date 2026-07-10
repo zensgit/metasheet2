@@ -193,7 +193,9 @@ function deliveryRow(overrides: Record<string, unknown> = {}): Record<string, un
     recipient_dingtalk_user_id: OPERATOR,
     delivery_kind: 'interactive_card',
     task_id: 'carrier-1',
-    integration_id: null,
+    // Owner hard gate (2026-07-10): operator resolution requires a corp-pinned delivery; the
+    // default fixture is pinned. The unpinned (null) case has its own refusal test below.
+    integration_id: 'a1a1a1a1-2222-4333-8444-555555555555',
     card_state: 'sent',
     acted_action: null,
     acted_by: null,
@@ -356,6 +358,22 @@ describe('executeDingTalkApprovalCardCallback (B-3 §B-3 execution)', () => {
     expect(accountLookup).toBeTruthy()
     expect(accountLookup!.params).toContain('f0f0f0f0-1111-4222-8333-444444444444')
     expect(accountLookup!.params).toContain(OPERATOR)
+    // Owner hard gate (2026-07-10): the predicate must be an unconditional corp pin — no
+    // `IS NULL OR` global-fallback arm may reappear in this SQL.
+    expect(accountLookup!.sql).not.toMatch(/IS NULL\s+OR/i)
+  })
+
+  it('OWNER GATE: an unpinned delivery (integration_id NULL) refuses outright — no global userId lookup, no engine call', async () => {
+    const h = makeHarness({ deliveryRows: [deliveryRow({ integration_id: null })] })
+    const result = await executeDingTalkApprovalCardCallback(h.deps as never, wirePayload())
+    expect(result).toEqual({
+      outcome: 'operator_unresolved',
+      deliveryId: DELIVERY_ID,
+      reason: 'integration_unpinned',
+    })
+    // fail-closed BEFORE the lookup: the directory is never queried, the engine never dispatched.
+    expect(h.calls.some((c) => c.sql.includes('FROM directory_accounts'))).toBe(false)
+    expect(h.dispatchAction).not.toHaveBeenCalled()
   })
 
   it('missing link secret fail-closes BEFORE the engine (link_secret_unavailable)', async () => {
