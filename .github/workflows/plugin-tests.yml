@@ -502,6 +502,7 @@ jobs:
             tests/integration/attendance-outdoor-punch.test.ts \
             tests/integration/attendance-files-acl.test.ts \
             tests/integration/files-storage-key-migration.db.test.ts \
+            tests/integration/files-orphan-blob-retention.db.test.ts \
             tests/integration/attendance-import-template-prefs.test.ts \
             tests/integration/attendance-notification-deliveries.test.ts \
             tests/integration/attendance-comp-time-expiry-reminder.test.ts \
