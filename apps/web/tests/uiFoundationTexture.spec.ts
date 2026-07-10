@@ -56,12 +56,15 @@ describe('first-paint skeleton tripwire (UF-8)', () => {
   const read = (rel: string) => readFileSync(resolve(__dirname, '..', rel), 'utf8')
 
   it('ApprovalCenterView and ApprovalDetailView keep their el-skeleton first-paint blocks', () => {
-    expect(read('src/views/approval/ApprovalCenterView.vue')).toContain('el-skeleton')
+    // Review P3-2: assert the ELEMENT form ('<el-skeleton' / '<AsyncStateBlock') — the bare word
+    // also appears in comments, so a word-match tripwire was satisfiable by deleting the element
+    // and keeping the comment (mutation-proven green before this tightening).
+    expect(read('src/views/approval/ApprovalCenterView.vue')).toContain('<el-skeleton')
     // B3-13: ApprovalDetailView's first-paint skeleton now renders through the shared
     // AsyncStateBlock (state="loading"), which is where its el-skeleton texture lives — the
     // tripwire follows the texture: the view must still mount the block, and the block must
     // still be skeleton-based. Behavioral loading coverage lives in approvalDetailPolish.spec.ts.
-    expect(read('src/views/approval/ApprovalDetailView.vue')).toContain('AsyncStateBlock')
-    expect(read('src/components/status/AsyncStateBlock.vue')).toContain('el-skeleton')
+    expect(read('src/views/approval/ApprovalDetailView.vue')).toContain('<AsyncStateBlock')
+    expect(read('src/components/status/AsyncStateBlock.vue')).toContain('<el-skeleton')
   })
 })
