@@ -1,18 +1,20 @@
 /**
- * Regression test for the History Center field-NAME leak (T2/T3 UX-parity audit, PR-A).
+ * Regression test for the History Center field-NAME leak (T2/T3 UX-parity audit, PR-A + owner P1 fix).
  *
- * MultitableWorkbench.vue used to wire HistoryCenterModal's `fields` prop to `propertyVisibleGridFields`
- * (filterPropertyVisibleFields — strips only property-hidden fields) instead of `scopedAllFields` (also
- * strips fields denied via per-subject field_permissions RBAC, effectiveFieldPermissions[f.id]?.visible
- * === false). The sibling TrashModal always used `scopedAllFields`. Consequence: a field this actor cannot
- * READ (per field_permissions) still had its NAME enumerated in the History field-filter <select> and in
- * per-change diff labels — backend correctly withholds VALUES (LOCK-3), but the FE leaked the label.
+ * Field-name visibility has TWO independent layers, and the History field list must filter BOTH:
+ *  - layer-2: property-hidden (field.property.hidden === true / property.visible === false) —
+ *    filterPropertyVisibleFields / propertyVisibleGridFields covers ONLY this;
+ *  - layer-3: per-subject field_permissions RBAC (effectiveFieldPermissions[f.id]?.visible === false) —
+ *    scopedAllFields covers ONLY this.
+ * The original wiring used propertyVisibleGridFields (leaked RBAC-denied names); the first fix swapped to
+ * scopedAllFields (owner P1: re-leaked property-hidden names). The correct wiring is the INTERSECTION —
+ * `historyVisibleFields = filterPropertyVisibleFields(scopedAllFields)` — and this spec pins BOTH layers:
+ * either single-layer wiring turns exactly one assertion red. Backend already withholds VALUES (LOCK-3);
+ * the label itself was the FE-side leak.
  *
  * This test does NOT mock HistoryCenterModal or HistoryBatchChangesList — it mounts the real
  * MultitableWorkbench (heavy siblings stubbed, same pattern as
- * multitable-workbench-permission-wiring.spec.ts) with one field denied via grid.fieldPermissions, opens
- * the real History Center, and asserts the denied field's name is absent from the field-filter dropdown
- * while a normal field's name is present.
+ * multitable-workbench-permission-wiring.spec.ts).
  */
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest'
 import { createApp, defineComponent, h, nextTick, ref, computed, type App as VueApp, type Component } from 'vue'
@@ -129,7 +131,11 @@ vi.mock('../src/multitable/realtime/comments-realtime', async () => {
 
 const fields = [
   { id: 'fld_1', name: 'Title', type: 'string', property: {}, order: 0, options: [] },
+  // layer-3 leak case: RBAC-denied via field_permissions (property says visible)
   { id: 'fld_2', name: 'SecretSalary', type: 'string', property: {}, order: 1, options: [] },
+  // layer-2 leak case: property-hidden (RBAC says visible) — the History field list must
+  // filter BOTH layers (layer-2 ∩ layer-3), not either one alone
+  { id: 'fld_3', name: 'HiddenNotes', type: 'string', property: { hidden: true }, order: 2, options: [] },
 ]
 const views = [
   { id: 'view_1', name: 'Grid View', sheetId: 'sheet_1', type: 'grid', filterInfo: null, sortInfo: null, groupInfo: null, hiddenFieldIds: [], config: {} },
@@ -286,9 +292,11 @@ describe('MultitableWorkbench -> HistoryCenterModal field-scope wiring', () => {
     expect(fieldSelect).toBeTruthy()
     const optionTexts = Array.from(fieldSelect!.querySelectorAll('option')).map((o) => o.textContent)
     const optionValues = Array.from(fieldSelect!.querySelectorAll('option')).map((o) => (o as HTMLOptionElement).value)
-    expect(optionTexts).toContain('Title') // fld_1 — RBAC-visible
-    expect(optionTexts).not.toContain('SecretSalary') // fld_2 — denied via field_permissions
+    expect(optionTexts).toContain('Title') // fld_1 — visible on both layers
+    expect(optionTexts).not.toContain('SecretSalary') // fld_2 — layer-3: denied via field_permissions
     expect(optionValues).not.toContain('fld_2')
+    expect(optionTexts).not.toContain('HiddenNotes') // fld_3 — layer-2: property-hidden
+    expect(optionValues).not.toContain('fld_3')
 
     // Expand the batch and confirm the visible field's diff label still resolves to its real name (the
     // fix must not regress the normal, non-denied path).

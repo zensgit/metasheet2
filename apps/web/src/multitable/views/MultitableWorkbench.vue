@@ -534,7 +534,7 @@
       :open="showHistory"
       :base-id="activeBaseId || ''"
       :sheet-id="workbench.activeSheetId.value"
-      :fields="scopedAllFields"
+      :fields="historyVisibleFields"
       :initial-batch-id="historyDeepLinkBatchId"
       @close="closeHistory"
     />
@@ -1320,6 +1320,10 @@ const effectiveRowActions = computed<MetaRowActions>(() => {
 const scopedAllFields = computed(() =>
   grid.fields.value.filter((field) => effectiveFieldPermissions.value[field.id]?.visible !== false),
 )
+// History Center field list: BOTH visibility layers must filter — layer-2 property-hidden
+// (property.hidden / property.visible=false) ∩ layer-3 per-subject field_permissions (RBAC).
+// Either alone leaks the other layer's hidden field NAMES into the filter options / diff labels.
+const historyVisibleFields = computed(() => filterPropertyVisibleFields(scopedAllFields.value))
 const scopedGridFields = computed(() =>
   grid.visibleFields.value.filter((field) => effectiveFieldPermissions.value[field.id]?.visible !== false),
 )
