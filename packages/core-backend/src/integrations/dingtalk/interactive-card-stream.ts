@@ -1,11 +1,15 @@
 /**
  * B-1 (DingTalk interactive approval cards): env-gated Stream worker skeleton.
+ * B-3 adds the callback dispatch seam: events that carry a card-callback payload are handed to
+ * the B-3 adapter (`interactive-card-callback.ts`), which funnels into the A-4 card-delivery
+ * wrapper. Dispatch stays behind the SAME env gate — with the flag off (the default) no client
+ * is ever created, so no callback can execute.
  *
- * This slice deliberately does not execute approval actions. It establishes the
- * optional worker boundary and SDK adapter seam so B-2/B-3 can add send/callback
- * behavior without changing startup/shutdown discipline.
+ * This module stays import-side-effect-free: the production callback executor (db pool +
+ * ApprovalProductService) is materialized lazily via dynamic import on the first callback event.
  */
 import { Logger } from '../../core/logger'
+import type { DingTalkApprovalCardCallbackResult } from './interactive-card-callback'
 
 export const DINGTALK_INTERACTIVE_CARD_STREAM_ENABLED_ENV = 'DINGTALK_INTERACTIVE_CARD_STREAM_ENABLED'
 export const DINGTALK_INTERACTIVE_CARD_CLIENT_ID_ENV = 'DINGTALK_INTERACTIVE_CARD_CLIENT_ID'
@@ -45,7 +49,18 @@ export type DingTalkInteractiveCardStreamEvent = {
   eventType?: string
   /** Provider/card event id if present. Do not trust this as a business identifier. */
   eventId?: string
+  /**
+   * Raw card-callback payload (opaque transport data). It is parsed ONLY by the B-3 callback
+   * adapter into the ratified `{outTrackId, action, operatorDingTalkUserId}` triple; the worker
+   * never reads or logs it. Events without a payload are transport noise and are ignored.
+   */
+  payload?: unknown
 }
+
+/** B-3 dispatch seam: raw callback payload → typed outcome (see interactive-card-callback.ts). */
+export type DingTalkInteractiveCardCallbackExecutor = (
+  payload: unknown,
+) => Promise<DingTalkApprovalCardCallbackResult>
 
 export type DingTalkInteractiveCardStreamHandlers = {
   onEvent(event: DingTalkInteractiveCardStreamEvent): Promise<void>
@@ -110,9 +125,38 @@ export const unwiredDingTalkInteractiveCardStreamClientFactory: DingTalkInteract
   throw new Error('DINGTALK_INTERACTIVE_CARD_STREAM_SDK_UNWIRED')
 }
 
+/**
+ * Values-free log line for a callback outcome: outcome/reason codes and ledger delivery ids only —
+ * never operator ids, summaries, card payloads, or engine messages (lock §4 failure policy).
+ */
+function describeCallbackResult(result: DingTalkApprovalCardCallbackResult): string {
+  switch (result.outcome) {
+    case 'rejected':
+      return `rejected:${result.reason}`
+    case 'ignored_unsupported_action':
+      return `ignored_unsupported_action out_track_id=${result.outTrackId}`
+    case 'delivery_not_found':
+      return `delivery_not_found out_track_id=${result.outTrackId}`
+    case 'operator_unresolved':
+      return `operator_unresolved:${result.reason} delivery=${result.deliveryId}`
+    case 'link_secret_unavailable':
+      return `link_secret_unavailable delivery=${result.deliveryId}`
+    case 'executed':
+      return `executed delivery=${result.deliveryId}`
+    case 'stale':
+      return `stale delivery=${result.deliveryId}`
+    case 'engine_rejected':
+      return `engine_rejected:${result.code} delivery=${result.deliveryId}`
+    case 'wrapper_not_found':
+      return `wrapper_not_found delivery=${result.deliveryId}`
+  }
+}
+
 export class DingTalkInteractiveCardStreamWorker {
   private readonly logger: Pick<Logger, 'info' | 'warn'>
   private readonly clientFactory: DingTalkInteractiveCardStreamClientFactory
+  private readonly callbackExecutor: DingTalkInteractiveCardCallbackExecutor | null
+  private defaultCallbackExecutor: Promise<DingTalkInteractiveCardCallbackExecutor> | null = null
   private client: DingTalkInteractiveCardStreamClient | null = null
   private initializing: Promise<DingTalkInteractiveCardStreamWorkerStatus> | null = null
   private status: DingTalkInteractiveCardStreamWorkerStatus = { state: 'disabled', reason: 'env_disabled' }
@@ -120,9 +164,12 @@ export class DingTalkInteractiveCardStreamWorker {
   constructor(options: {
     logger?: Pick<Logger, 'info' | 'warn'>
     clientFactory?: DingTalkInteractiveCardStreamClientFactory
+    /** B-3 dispatch override (tests). Omitted → the lazy production executor. */
+    callbackExecutor?: DingTalkInteractiveCardCallbackExecutor
   } = {}) {
     this.logger = options.logger ?? new Logger('DingTalkInteractiveCardStreamWorker')
     this.clientFactory = options.clientFactory ?? unwiredDingTalkInteractiveCardStreamClientFactory
+    this.callbackExecutor = options.callbackExecutor ?? null
   }
 
   getStatus(): DingTalkInteractiveCardStreamWorkerStatus {
@@ -193,8 +240,44 @@ export class DingTalkInteractiveCardStreamWorker {
     }
   }
 
-  private async handleEvent(_event: DingTalkInteractiveCardStreamEvent): Promise<void> {
-    // B-1 owns only the worker boundary. B-3 will parse callbacks and call the card-delivery wrapper.
-    this.logger.info('DingTalk interactive-card Stream event received (ignored by B-1 skeleton)')
+  private async handleEvent(event: DingTalkInteractiveCardStreamEvent): Promise<void> {
+    // This handler is reachable ONLY through a started client, and a client exists ONLY when the
+    // env gate resolved enabled — with the flag off (default) no callback can ever execute.
+    if (event.payload === undefined) {
+      this.logger.info('DingTalk interactive-card Stream event received (no card callback payload; ignored)')
+      return
+    }
+    try {
+      const executor = await this.resolveCallbackExecutor()
+      const result = await executor(event.payload)
+      this.logger.info(`DingTalk interactive-card callback handled (${describeCallbackResult(result)})`)
+    } catch {
+      // Values-free (lock §4 failure policy): reason code only — never the error message or the
+      // payload, either of which may carry transport data or form values.
+      this.logger.warn('DingTalk interactive-card callback failed (callback_handler_error)')
+    }
+  }
+
+  /**
+   * Injected executor if provided (tests); otherwise the production executor, materialized once
+   * via dynamic import so this module keeps zero import side effects (no pool at load time).
+   */
+  private resolveCallbackExecutor(): Promise<DingTalkInteractiveCardCallbackExecutor> | DingTalkInteractiveCardCallbackExecutor {
+    if (this.callbackExecutor) return this.callbackExecutor
+    if (!this.defaultCallbackExecutor) {
+      this.defaultCallbackExecutor = (async () => {
+        const [{ executeDingTalkApprovalCardCallback }, { poolManager }, { ApprovalProductService }] = await Promise.all([
+          import('./interactive-card-callback'),
+          import('../../integration/db/connection-pool'),
+          import('../../services/ApprovalProductService'),
+        ])
+        const deps = {
+          query: (sql: string, params?: unknown[]) => poolManager.get().query(sql, params),
+          approvals: new ApprovalProductService(),
+        }
+        return (payload: unknown) => executeDingTalkApprovalCardCallback(deps, payload)
+      })()
+    }
+    return this.defaultCallbackExecutor
   }
 }
