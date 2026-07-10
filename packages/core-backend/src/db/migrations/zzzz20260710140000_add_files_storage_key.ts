@@ -34,13 +34,13 @@ import { checkColumnExists, checkTableExists } from './_patterns'
  * silently backfill (two rows sharing one blob = last-write-wins confidentiality leak; a traversal key
  * reads outside the root). Both `abort` and `poison` are fail-closed; they differ only in whether the
  * migration completes:
- *   - 'abort' (DEFAULT, per owner guard G): any unsafe row → throw with a conflict report → the whole
- *     transaction rolls back (nothing lands). A DB with legacy collisions/traversal fails closed and an
- *     operator must reconcile the listed rows before re-running (see PR body ops runbook). A clean DB
- *     (CI / fresh install / most prod) has no unsafe rows and applies fully.
- *   - 'poison': quarantine each unsafe row to a DISTINCT, non-resolvable `!f3-collision:<id>` key
- *     (fail-closed at read: no shared blob, no last-write-wins) and complete the migration — poison rows
- *     are a well-defined terminal state, so this still leaves NO half-migration.
+ *   - 'abort': any unsafe row → throw with a conflict report → the whole transaction rolls back (nothing
+ *     lands). A DB with legacy collisions/traversal fails closed and an operator must reconcile the listed
+ *     rows before re-running (see PR body ops runbook). A clean DB (CI / fresh install / most prod) has no
+ *     unsafe rows and applies fully.
+ *   - 'poison' (DEFAULT, per owner guard G): quarantine each unsafe row to a DISTINCT, non-resolvable
+ *     `!f3-collision:<id>` key (fail-closed at read: no shared blob, no last-write-wins) and complete the
+ *     migration — poison rows are a well-defined terminal state, so this still leaves NO half-migration.
  * Flipping the policy is this ONE constant + swapping the corresponding test assertions; nothing else in
  * the codebase branches on it.
  *
