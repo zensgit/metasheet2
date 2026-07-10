@@ -45,16 +45,36 @@
         {{ bi(activeView.zhDesc, activeView.enDesc) }}
       </p>
       <p class="stock-prep__panel-endpoint" data-testid="stock-prep-panel-endpoint">
-        <span class="stock-prep__badge">{{ bi('只读', 'readonly') }} · GET</span>
+        <span class="stock-prep__badge">{{
+          activeView.confirmWrites ? bi('只读 + 人工确认', 'readonly + human confirm') : `${bi('只读', 'readonly')} · GET`
+        }}</span>
         <code>{{ activeView.endpoint }}</code>
       </p>
-      <!-- Views 1-2 are real readonly views; the other four tabs keep the placeholder. -->
+      <!-- Views 1-6 are all real views now (the placeholder branch remains only as a guard for any
+           future tab). Views 2-6 share the shell-owned projectId context selected in view 1
+           (#4017 pattern). -->
       <StockPreparationProjectWorkspaceView
         v-if="activeKey === 'project-workspace'"
         @select-project="handleProjectSelect"
       />
       <StockPreparationSnapshotDiffView
         v-else-if="activeKey === 'bom-snapshot-diff'"
+        :project-id="selectedProjectId"
+      />
+      <StockPreparationMappingConfirmView
+        v-else-if="activeKey === 'material-mapping'"
+        :project-id="selectedProjectId"
+      />
+      <StockPreparationUnitConfirmView
+        v-else-if="activeKey === 'unit-conversion'"
+        :project-id="selectedProjectId"
+      />
+      <StockPreparationPrepLineView
+        v-else-if="activeKey === 'prep-line'"
+        :project-id="selectedProjectId"
+      />
+      <StockPreparationExceptionQueueView
+        v-else-if="activeKey === 'exception-queue'"
         :project-id="selectedProjectId"
       />
       <p v-else class="stock-prep__panel-pending" data-testid="stock-prep-panel-pending">
@@ -81,6 +101,10 @@ import PageShell from '../../layout/PageShell.vue'
 import PageHeader from '../../layout/PageHeader.vue'
 import StockPreparationProjectWorkspaceView from './StockPreparationProjectWorkspaceView.vue'
 import StockPreparationSnapshotDiffView from './StockPreparationSnapshotDiffView.vue'
+import StockPreparationMappingConfirmView from './StockPreparationMappingConfirmView.vue'
+import StockPreparationUnitConfirmView from './StockPreparationUnitConfirmView.vue'
+import StockPreparationPrepLineView from './StockPreparationPrepLineView.vue'
+import StockPreparationExceptionQueueView from './StockPreparationExceptionQueueView.vue'
 
 const { locale } = useLocale()
 
@@ -104,8 +128,14 @@ interface StockPreparationViewTab {
   en: string
   zhDesc: string
   enDesc: string
-  /** The readonly (GET) summary endpoint the future view reads. Values-free path only. */
+  /** The readonly (GET) summary endpoint the view reads. Values-free path only. */
   endpoint: string
+  /**
+   * True for the views whose actions issue MULTITABLE-INTERNAL writes: the two confirmation views
+   * (W3b human confirms), the prep-line view (W4a generation run), and the exception queue (W4a
+   * resolutions). Still no external ERP/K3 write — the badge copy reflects the human-confirm nature.
+   */
+  confirmWrites?: boolean
 }
 
 // Tab order follows the MVP business loop (design §"MVP Goal"). Descriptions are values-free — they
@@ -134,6 +164,7 @@ const views: StockPreparationViewTab[] = [
     zhDesc: '将 PLM 图号/版本映射到 ERP 物料编码/内部 id;歧义或未匹配的行进入人工确认,不自动创建 ERP 物料。',
     enDesc: 'Map PLM drawing/version to ERP material code/internal id; ambiguous or unmatched rows go to manual confirmation, never auto-create ERP material.',
     endpoint: '/api/integration/stock-preparation/material-mappings/summary',
+    confirmWrites: true,
   },
   {
     key: 'unit-conversion',
@@ -142,6 +173,7 @@ const views: StockPreparationViewTab[] = [
     zhDesc: '将设计单位换算为 ERP 领用单位;无唯一有效规则时进入异常队列,不做静默猜测。',
     enDesc: 'Convert the design unit to the ERP issue unit; with no unique active rule the line enters the exception queue rather than a silent guess.',
     endpoint: '/api/integration/stock-preparation/unit-conversions/summary',
+    confirmWrites: true,
   },
   {
     key: 'prep-line',
@@ -149,7 +181,9 @@ const views: StockPreparationViewTab[] = [
     en: 'Prep Lines',
     zhDesc: '仅由已确认的快照、映射与单位规则生成备料行;未解决的映射/单位冲突不会产出就绪行。',
     enDesc: 'Prep lines generated only from confirmed snapshots, mappings, and unit rules; unresolved mapping/unit conflicts never produce ready lines.',
-    endpoint: '/api/integration/stock-preparation/prep-lines/summary',
+    endpoint: '/api/integration/stock-preparation/prep-lines',
+    // View 5's generation run is a MULTITABLE-INTERNAL table op (W4a) — badge drops the GET-only claim.
+    confirmWrites: true,
   },
   {
     key: 'exception-queue',
@@ -157,7 +191,8 @@ const views: StockPreparationViewTab[] = [
     en: 'Exception Queue',
     zhDesc: '所有不确定的行都可见、可处理;阻断级异常保持可见并阻止最终确认。',
     enDesc: 'Every uncertain row is visible and actionable; blocking exceptions stay visible and prevent final confirmation.',
-    endpoint: '/api/integration/stock-preparation/exceptions/summary',
+    endpoint: '/api/integration/stock-preparation/exceptions',
+    confirmWrites: true,
   },
 ]
 

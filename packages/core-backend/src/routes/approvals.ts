@@ -647,6 +647,8 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
     try {
       const version = await productService.publishTemplate(req.params.id, {
         policy: req.body?.policy,
+        // B3-09 — optional publish note; the service normalizes (trim, empty->null, length cap).
+        note: req.body?.note,
       })
       res.json(version)
     } catch (error) {
@@ -655,6 +657,72 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
         error,
         'APPROVAL_TEMPLATE_PUBLISH_FAILED',
         'Failed to publish approval template',
+      )
+    }
+  })
+
+  // B3-08 (模板治理 — 用量/blast-radius): fetched by the FE archive confirm dialog BEFORE the
+  // archive call so the admin sees the instance count first (mirrors the ruleStats /
+  // automationDeleteRuleConfirmMessage precedent). Read-only; safe to call for a template of any
+  // status.
+  r.get('/api/approval-templates/:id/usage', authenticate, approvalTemplateAdminGuard, async (req: Request, res: Response) => {
+    try {
+      const usage = await productService.getTemplateUsage(req.params.id)
+      res.json(usage)
+    } catch (error) {
+      handleApprovalsError(
+        res,
+        error,
+        'APPROVAL_TEMPLATE_USAGE_FETCH_FAILED',
+        'Failed to fetch approval template usage',
+      )
+    }
+  })
+
+  // B3-08 (模板治理 — 停用/启用): PUBLISHED <-> ARCHIVED. Archived templates cannot be the target of
+  // a new createApproval/route-preview (assembleCreationContext's published-status gate already
+  // fails closed for any non-'published' status); already-running instances are untouched.
+  r.post('/api/approval-templates/:id/archive', authenticate, approvalTemplateAdminGuard, async (req: Request, res: Response) => {
+    try {
+      const template = await productService.archiveTemplate(req.params.id)
+      res.json(template)
+    } catch (error) {
+      handleApprovalsError(
+        res,
+        error,
+        'APPROVAL_TEMPLATE_ARCHIVE_FAILED',
+        'Failed to archive approval template',
+      )
+    }
+  })
+
+  r.post('/api/approval-templates/:id/unarchive', authenticate, approvalTemplateAdminGuard, async (req: Request, res: Response) => {
+    try {
+      const template = await productService.unarchiveTemplate(req.params.id)
+      res.json(template)
+    } catch (error) {
+      handleApprovalsError(
+        res,
+        error,
+        'APPROVAL_TEMPLATE_UNARCHIVE_FAILED',
+        'Failed to unarchive approval template',
+      )
+    }
+  })
+
+  // B3-09 (模板治理 — 版本历史): newest-first summary rows (no formSchema/approvalGraph payloads —
+  // the per-version detail endpoint below serves those on demand). Same admin guard as the rest
+  // of the template-authoring surface.
+  r.get('/api/approval-templates/:id/versions', authenticate, approvalTemplateAdminGuard, async (req: Request, res: Response) => {
+    try {
+      const versions = await productService.listTemplateVersions(req.params.id)
+      res.json({ versions })
+    } catch (error) {
+      handleApprovalsError(
+        res,
+        error,
+        'APPROVAL_TEMPLATE_VERSIONS_FETCH_FAILED',
+        'Failed to fetch approval template versions',
       )
     }
   })
@@ -722,8 +790,27 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
       const workflowKey = typeof req.query.workflowKey === 'string' ? req.query.workflowKey : undefined
       const businessKey = typeof req.query.businessKey === 'string' ? req.query.businessKey : undefined
       const assignee = typeof req.query.assignee === 'string' ? req.query.assignee : undefined
-      const tab = typeof req.query.tab === 'string' ? req.query.tab as 'pending' | 'mine' | 'cc' | 'completed' : undefined
+      const tab = typeof req.query.tab === 'string' ? req.query.tab as 'pending' | 'mine' | 'cc' | 'completed' | 'processed' : undefined
       const search = typeof req.query.search === 'string' ? req.query.search : undefined
+      // B3-03 (模板/时间筛选): optional template + created-at window. Empty strings are treated as
+      // absent so a cleared filter chip degrades to the unfiltered feed rather than a 400.
+      const templateId = typeof req.query.templateId === 'string' && req.query.templateId.trim()
+        ? req.query.templateId.trim()
+        : undefined
+      const rawCreatedFrom = typeof req.query.createdFrom === 'string' ? req.query.createdFrom.trim() : ''
+      const rawCreatedTo = typeof req.query.createdTo === 'string' ? req.query.createdTo.trim() : ''
+      for (const [label, value] of [['createdFrom', rawCreatedFrom], ['createdTo', rawCreatedTo]] as const) {
+        if (value && Number.isNaN(Date.parse(value))) {
+          return res.status(400).json(
+            approvalErrorResponse(
+              'APPROVAL_DATE_FILTER_INVALID',
+              `${label} must be a valid ISO-8601 date`,
+            ),
+          )
+        }
+      }
+      const createdFrom = rawCreatedFrom || undefined
+      const createdTo = rawCreatedTo || undefined
       const page = parsePaging(req.query.page, 1, Number.MAX_SAFE_INTEGER)
       const pageSize = parsePaging(req.query.pageSize, 20)
       const { limit, offset } = req.query.page || req.query.pageSize
@@ -774,6 +861,9 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
         businessKey,
         assignee,
         search,
+        templateId,
+        createdFrom,
+        createdTo,
         tab,
         includeExternalTabSources: rawSourceSystem === 'all',
         actorId: actorId || undefined,

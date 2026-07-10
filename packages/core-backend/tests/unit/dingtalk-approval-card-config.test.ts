@@ -17,6 +17,7 @@ import {
   generateApprovalCardLinkSecret,
   getApprovalCardConfigStatus,
   resolveApprovalCardLinkSecret,
+  resolveApprovalCardLinkSecretForIntegration,
   resolveApprovalCardPublicAppUrl,
   saveApprovalCardPublicAppUrl,
 } from '../../src/integrations/dingtalk/approval-card-config'
@@ -93,6 +94,61 @@ describe('approval card config resolvers (CFG-1)', () => {
       // Even a token forged with an EMPTY HMAC key must be rejected — no secret means no verify.
       const emptyKeyForgery = createHmac('sha256', '').update('card-delivery-1').digest('hex').slice(0, 32)
       await expect(verifyApprovalCardLinkToken('card-delivery-1', emptyKeyForgery)).resolves.toBe(false)
+    })
+  })
+
+  describe('DT-R2 resolveApprovalCardLinkSecretForIntegration', () => {
+    it('env wins and skips the store entirely', async () => {
+      vi.stubEnv('APPROVAL_CARD_LINK_SECRET', 'env-secret')
+      await expect(resolveApprovalCardLinkSecretForIntegration('dir-a')).resolves.toBe('env-secret')
+      expect(dbMocks.query).not.toHaveBeenCalled()
+    })
+
+    it('resolves the SPECIFIC integration by id (never the LIMIT-1 global pick)', async () => {
+      dbMocks.query.mockResolvedValueOnce({
+        rows: [{ id: 'dir-a', name: 'Corp A', status: 'active', config: { [APPROVAL_CARD_LINK_SECRET_CONFIG_KEY]: normalizeStoredSecretValue('corp-a-secret') } }],
+      })
+      await expect(resolveApprovalCardLinkSecretForIntegration('dir-a')).resolves.toBe('corp-a-secret')
+      const [sql, params] = dbMocks.query.mock.calls[0] as [string, unknown[]]
+      expect(sql).toContain('WHERE id = $1 AND provider = $2')
+      expect(params).toEqual(['dir-a', 'dingtalk'])
+    })
+
+    it('fail-closes ("") on unknown integration, missing key, undecryptable value, or query failure — NO fallback secret', async () => {
+      dbMocks.query.mockResolvedValueOnce({ rows: [] })
+      await expect(resolveApprovalCardLinkSecretForIntegration('ghost')).resolves.toBe('')
+      dbMocks.query.mockResolvedValueOnce({ rows: [{ id: 'dir-a', name: 'n', status: 'active', config: {} }] })
+      await expect(resolveApprovalCardLinkSecretForIntegration('dir-a')).resolves.toBe('')
+      dbMocks.query.mockResolvedValueOnce({ rows: [{ id: 'dir-a', name: 'n', status: 'active', config: { [APPROVAL_CARD_LINK_SECRET_CONFIG_KEY]: 'enc:not-a-real-ciphertext' } }] })
+      await expect(resolveApprovalCardLinkSecretForIntegration('dir-a')).resolves.toBe('')
+      dbMocks.query.mockRejectedValueOnce(new Error('db down'))
+      await expect(resolveApprovalCardLinkSecretForIntegration('dir-a')).resolves.toBe('')
+    })
+
+    it('verify pinned to corp B rejects a token signed under corp A (fail-closed cross-corp)', async () => {
+      // Anti-shadowing mock: the by-id lookup yields corp B, while the legacy LIMIT-1 global
+      // pick yields CORP A — if verify ever ignored the pinned integration and fell back to the
+      // global pick, tokenA would verify and tokenB would fail, flipping both assertions red.
+      dbMocks.query.mockImplementation(async (sql: string) => {
+        if (sql.includes('WHERE id = $1')) {
+          return { rows: [{ id: 'dir-b', name: 'Corp B', status: 'active', config: { [APPROVAL_CARD_LINK_SECRET_CONFIG_KEY]: normalizeStoredSecretValue('corp-b-secret') } }] }
+        }
+        return { rows: [{ config: { [APPROVAL_CARD_LINK_SECRET_CONFIG_KEY]: normalizeStoredSecretValue('corp-a-secret') } }] }
+      })
+      const deliveryId = 'card-delivery-r2'
+      const tokenA = createHmac('sha256', 'corp-a-secret').update(deliveryId).digest('hex').slice(0, 32)
+      const tokenB = createHmac('sha256', 'corp-b-secret').update(deliveryId).digest('hex').slice(0, 32)
+      await expect(verifyApprovalCardLinkToken(deliveryId, tokenA, undefined, 'dir-b')).resolves.toBe(false)
+      await expect(verifyApprovalCardLinkToken(deliveryId, tokenB, undefined, 'dir-b')).resolves.toBe(true)
+    })
+
+    it('verify without an integration id keeps the legacy resolver (NULL delivery rows stay verifiable)', async () => {
+      dbMocks.query.mockResolvedValue({
+        rows: [{ config: { [APPROVAL_CARD_LINK_SECRET_CONFIG_KEY]: normalizeStoredSecretValue('legacy-secret') } }],
+      })
+      const deliveryId = 'card-delivery-legacy'
+      const token = createHmac('sha256', 'legacy-secret').update(deliveryId).digest('hex').slice(0, 32)
+      await expect(verifyApprovalCardLinkToken(deliveryId, token, undefined, null)).resolves.toBe(true)
     })
   })
 

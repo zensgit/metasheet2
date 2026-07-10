@@ -1,6 +1,6 @@
 /**
  * 4c-2 forward tombstone-capture (design-lock 2026-07-07, #3809 + #3830 correction; owner-ratified
- * 2026-07-08). Shared capture helpers for the two ratified capture points:
+ * 2026-07-08). Shared capture helpers for the three ratified capture points:
  *   1. `dropFieldCascade` (univer-meta.ts) — column values + that field's link edges + auto-number
  *      sequence state, captured into `meta_field_value_tombstones` / `meta_link_tombstones`
  *      (reason='field_delete').
@@ -8,8 +8,13 @@
  *      `meta_link_tombstones` (reason='record_delete'). Outbound edges are already covered by
  *      `meta_records_trash` (the trashed row's `data` still carries the link-field arrays and
  *      `restoreRecord` replays them) — capturing them again here would be redundant.
+ *   3. The point-in-time RESET route's inline per-candidate record delete (`univer-meta.ts`, added by
+ *      4c-3 §7/D-3) — the second surface that can hard-delete a record and later resurrect it. Same
+ *      shape as point 2 (INBOUND edges only, `reason='record_delete'`), anchored to its own
+ *      pre-generated delete-revision id so a later resurrect of that candidate can name this
+ *      deletion's tombstones the same way `deleteRecord`'s restore does.
  *
- * Both capture points are same-txn, placed BEFORE the destructive statement(s) they shadow, and use a
+ * All three capture points are same-txn, placed BEFORE the destructive statement(s) they shadow, and use a
  * single batched `INSERT ... SELECT` (never a per-row round trip). Gated by
  * `MULTITABLE_TOMBSTONE_CAPTURE_ENABLED` (default OFF — off means today's behavior byte-for-byte,
  * §0/C1/C3). When on, a capture whose row count would exceed `MULTITABLE_TOMBSTONE_CAPTURE_MAX_ROWS`

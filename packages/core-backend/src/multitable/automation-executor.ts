@@ -25,6 +25,7 @@ import {
 import { readDingTalkMessageConfigFromRuntime } from '../integrations/dingtalk/work-notification-settings'
 import {
   resolveApprovalCardLinkSecret,
+  resolveApprovalCardLinkSecretForIntegration,
   resolveApprovalCardPublicAppUrl,
 } from '../integrations/dingtalk/approval-card-config'
 import {
@@ -41,6 +42,10 @@ import {
   normalizeDingTalkRobotWebhookUrl,
   validateDingTalkRobotResponse,
 } from '../integrations/dingtalk/robot'
+import {
+  decryptDingTalkDestinationSecret,
+  decryptDingTalkDestinationWebhookUrl,
+} from './dingtalk-group-destinations'
 import type {
   AutomationAction,
   AutomationActionType,
@@ -2638,10 +2643,6 @@ export class AutomationExecutor {
     if (!baseUrl) {
       return { actionType, status: 'failed', error: 'PUBLIC_APP_URL or APP_BASE_URL (or the stored approval-card public app URL) is required for the approval decision link' }
     }
-    const linkSecret = await resolveApprovalCardLinkSecret(this.deps.queryFn)
-    if (!linkSecret) {
-      return { actionType, status: 'failed', error: 'APPROVAL_CARD_LINK_SECRET (env or stored approval-card link secret) is required for signed approval decision links' }
-    }
 
     // Instance metadata for the card summary — ids/title/request_no only, NO form values.
     const instanceResult = await this.deps.queryFn(
@@ -2678,9 +2679,10 @@ export class AutomationExecutor {
     )
     const recipientRow = (recipientResult.rows[0] ?? null) as { local_user_active?: boolean; dingtalk_user_id?: string | null; integration_id?: string | null } | null
     const dingtalkUserId = typeof recipientRow?.dingtalk_user_id === 'string' ? recipientRow.dingtalk_user_id.trim() : ''
-    // DT-OPS-04: send the card with the assignee's own corp credentials. (Persisting the
-    // integration on the delivery row — so the approve/reject callback can resolve it too —
-    // needs a migration and is tracked separately.)
+    // DT-OPS-04: send the card with the assignee's own corp credentials. DT-R2 closed the
+    // remainder: the integration is persisted on the delivery row (integration_id) so the
+    // approve/reject callback resolves the SAME corp's secret; the deep-link token is signed
+    // with that integration's secret below (env override unchanged).
     const assigneeIntegrationId = typeof recipientRow?.integration_id === 'string' ? recipientRow.integration_id.trim() : ''
     if (!recipientRow || recipientRow.local_user_active !== true || !dingtalkUserId) {
       await recordDingTalkPersonDeliverySafely(this.deps.queryFn, {
@@ -2698,6 +2700,23 @@ export class AutomationExecutor {
       return { actionType, status: 'failed', error: 'Recipient has no linked, active DingTalk account (skipped — mappings are never guessed)' }
     }
 
+    // DT-R2 same-source signing: the deep-link token is signed with the ASSIGNEE integration's
+    // secret (env `APPROVAL_CARD_LINK_SECRET` still wins) and the integration is persisted on
+    // the delivery row, so the wrapper's verify resolves the identical source. No cross-corp
+    // fallback: a missing per-corp secret fail-closes the send BEFORE any ledger row is written.
+    const linkSecret = assigneeIntegrationId
+      ? await resolveApprovalCardLinkSecretForIntegration(assigneeIntegrationId, this.deps.queryFn)
+      : await resolveApprovalCardLinkSecret(this.deps.queryFn)
+    if (!linkSecret) {
+      return {
+        actionType,
+        status: 'failed',
+        error: assigneeIntegrationId
+          ? `APPROVAL_CARD_LINK_SECRET (env) or a stored approval-card link secret on the assignee's DingTalk integration (${assigneeIntegrationId}) is required for signed approval decision links`
+          : 'APPROVAL_CARD_LINK_SECRET (env or stored approval-card link secret) is required for signed approval decision links',
+      }
+    }
+
     // Ledger FIRST — the row is the only legitimate delivery → instance anchor.
     const entryEpochRaw = event.task?.entryEpoch
     const sourceStepRaw = event.task?.sourceStep
@@ -2707,6 +2726,7 @@ export class AutomationExecutor {
       recipientUserId: assigneeUserId,
       recipientDingTalkUserId: dingtalkUserId,
       deliveryKind: 'work_notice_action_card',
+      integrationId: assigneeIntegrationId || null,
     })
 
     const token = createHmac('sha256', linkSecret).update(delivery.id).digest('hex').slice(0, 32)
@@ -3438,9 +3458,14 @@ export class AutomationExecutor {
 
     for (const destination of orderedDestinations) {
       try {
+        // DT-HARDEN-03: destinations are stored encrypted; decrypt before URL
+        // validation and HMAC signing. Reading the raw column here would feed an
+        // `enc:` blob to normalizeDingTalkRobotWebhookUrl and fail every send.
         runtimeWebhookByDestinationId.set(destination.id, {
-          webhookUrl: normalizeDingTalkRobotWebhookUrl(destination.webhook_url),
-          secret: normalizeDingTalkRobotSecret(destination.secret ?? undefined),
+          webhookUrl: normalizeDingTalkRobotWebhookUrl(
+            decryptDingTalkDestinationWebhookUrl(destination.webhook_url),
+          ),
+          secret: normalizeDingTalkRobotSecret(decryptDingTalkDestinationSecret(destination.secret)),
         })
       } catch (err) {
         failedDestinations.push({

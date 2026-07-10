@@ -295,6 +295,132 @@ describe('StockPreparationWorkspace shell', () => {
           { status: 200 },
         )
       }
+      // Views 3/4 confirmation reads (values-free minimal fixtures) — order: sync/candidates
+      // fragments are all distinct from the summary fragments, so plain includes() is safe.
+      if (url.includes('/api/integration/stock-preparation/material-mappings/summary')) {
+        return new Response(
+          JSON.stringify({
+            ok: true,
+            data: {
+              totalMappingCount: 1,
+              activeMappingCount: 1,
+              matchStatusCounts: { matched: 0, pending_confirm: 1, multi_candidate: 0, not_found: 0, version_conflict: 0 },
+              versionPolicyCounts: { drawing_and_version: 1, drawing_only: 0, category_rule: 0, manual: 0 },
+              pendingConfirmCount: 1,
+            },
+          }),
+          { status: 200 },
+        )
+      }
+      if (url.includes('/api/integration/stock-preparation/material-mappings/candidates')) {
+        return new Response(
+          JSON.stringify({
+            ok: true,
+            data: {
+              rowCount: 1,
+              byMatchStatus: { matched: 0, pending_confirm: 1, multi_candidate: 0, not_found: 0, version_conflict: 0 },
+              rows: [
+                {
+                  mappingId: 'map-handle-alpha',
+                  matchStatus: 'pending_confirm',
+                  matchMethod: 'exact_code_candidate',
+                  versionPolicy: 'drawing_and_version',
+                  confidence: 0.9,
+                  isActive: true,
+                  confirmed: false,
+                  hasErpTarget: true,
+                  plmVersionPresent: true,
+                },
+              ],
+            },
+          }),
+          { status: 200 },
+        )
+      }
+      if (url.includes('/api/integration/stock-preparation/unit-conversions/summary')) {
+        return new Response(
+          JSON.stringify({
+            ok: true,
+            data: {
+              totalRuleCount: 1,
+              activeRuleCount: 1,
+              requiresConfirmationCount: 0,
+              scopeTypeCounts: { material: 1, category: 0, generic: 0 },
+              roundingRuleCounts: { none: 1, ceil: 0, floor: 0, nearest: 0, pack_size: 0 },
+              pendingUnitLineCount: 1,
+            },
+          }),
+          { status: 200 },
+        )
+      }
+      if (url.includes('/api/integration/stock-preparation/unit-conversions/candidates')) {
+        return new Response(
+          JSON.stringify({
+            ok: true,
+            data: {
+              status: 'pending_confirmation',
+              snapshotBatchId: 'batch-alpha',
+              rowCount: 1,
+              byOutcome: { candidate: 1 },
+              byReason: { unknown: 1 },
+              rows: [{ contextFingerprint: 'fp-handle-alpha', outcome: 'candidate', hasCandidate: true }],
+            },
+          }),
+          { status: 200 },
+        )
+      }
+      // Views 5/6 W5a list reads (values-free minimal fixtures). The bare /exceptions fragment is
+      // checked LAST among stock-prep URLs so it can never shadow a more specific path.
+      if (url.includes('/api/integration/stock-preparation/prep-lines')) {
+        return new Response(
+          JSON.stringify({
+            ok: true,
+            data: {
+              rowCount: 1,
+              byPrepStatus: { draft: 1, held: 0 },
+              byMappingStatus: { matched: 1, pending_confirm: 0, multi_candidate: 0, not_found: 0, version_conflict: 0 },
+              byUnitStatus: { converted: 1, missing_rule: 0, conflict: 0 },
+              rows: [
+                {
+                  stockPrepLineId: 'line-handle-alpha',
+                  prepStatus: 'draft',
+                  mappingStatus: 'matched',
+                  unitStatus: 'converted',
+                  exceptionCount: 0,
+                  hasIssueQty: true,
+                  hasErpTarget: true,
+                },
+              ],
+            },
+          }),
+          { status: 200 },
+        )
+      }
+      if (url.includes('/api/integration/stock-preparation/exceptions')) {
+        return new Response(
+          JSON.stringify({
+            ok: true,
+            data: {
+              rowCount: 1,
+              unresolvedBlockingCount: 1,
+              byType: { missing_mapping: 1, multi_candidate: 0, version_conflict: 0, erp_item_missing: 0, unit_missing: 0, unit_conflict: 0, invalid_qty: 0, missing_child_bom: 0 },
+              byStatus: { open: 1, resolved: 0, ignored: 0, deferred: 0 },
+              bySeverity: { info: 0, warning: 0, blocking: 1 },
+              rows: [
+                {
+                  exceptionId: 'exc-handle-alpha',
+                  exceptionType: 'missing_mapping',
+                  severity: 'blocking',
+                  status: 'open',
+                  resolved: false,
+                  resolvedByPresent: false,
+                },
+              ],
+            },
+          }),
+          { status: 200 },
+        )
+      }
       return new Response(JSON.stringify({ ok: true, data: {} }), { status: 200 })
     })
   }
@@ -338,6 +464,78 @@ describe('StockPreparationWorkspace shell', () => {
       expect.objectContaining({ query: expect.objectContaining({ projectId: 'proj-alpha' }) }),
     )
     // …but stays values-free in the DOM: the internal handle is never rendered.
+    expect(root.textContent || '').not.toContain('proj-alpha')
+  })
+
+  it('shares the projectId with views 3 and 4 — confirmation views open already scoped', async () => {
+    mockStockPrepReads()
+    const root = await mountShell()
+
+    // Pick a project in view 1 (REAL wire), then enter the two confirmation tabs.
+    const selectButton = (await waitForSelector(
+      root,
+      '[data-testid="stock-prep-project-select"]',
+    )) as HTMLButtonElement
+    selectButton.click()
+    await waitForSelector(root, '[data-testid="stock-prep-snapshot-overview"]')
+
+    // View 3 (material mapping): opens scoped — no re-select, reads carry the SAME handle.
+    ;(root.querySelector('[data-testid="stock-prep-tab-material-mapping"]') as HTMLButtonElement).click()
+    await waitForSelector(root, '[data-testid="stock-prep-mapping-overview"]')
+    expect(root.querySelector('[data-testid="stock-prep-mapping-no-project"]')).toBeNull()
+    const mappingSummaryCalls = h.apiFetch.mock.calls
+      .map((call) => String(call[0]))
+      .filter((url) => url.includes('/material-mappings/summary'))
+    expect(mappingSummaryCalls.length).toBe(1)
+    expect(mappingSummaryCalls[0]).toContain('projectId=proj-alpha')
+
+    // View 4 (unit conversion): same shared scope.
+    ;(root.querySelector('[data-testid="stock-prep-tab-unit-conversion"]') as HTMLButtonElement).click()
+    await waitForSelector(root, '[data-testid="stock-prep-unit-overview"]')
+    expect(root.querySelector('[data-testid="stock-prep-unit-no-project"]')).toBeNull()
+    const unitSummaryCalls = h.apiFetch.mock.calls
+      .map((call) => String(call[0]))
+      .filter((url) => url.includes('/unit-conversions/summary'))
+    expect(unitSummaryCalls.length).toBe(1)
+    expect(unitSummaryCalls[0]).toContain('projectId=proj-alpha')
+
+    // The internal handle stays values-free in the DOM across all tabs.
+    expect(root.textContent || '').not.toContain('proj-alpha')
+  })
+
+  it('shares the projectId with views 5 and 6 — prep-line and exception views open already scoped', async () => {
+    mockStockPrepReads()
+    const root = await mountShell()
+
+    // Pick a project in view 1 (REAL wire), then enter the two W5 tabs.
+    const selectButton = (await waitForSelector(
+      root,
+      '[data-testid="stock-prep-project-select"]',
+    )) as HTMLButtonElement
+    selectButton.click()
+    await waitForSelector(root, '[data-testid="stock-prep-snapshot-overview"]')
+
+    // View 5 (prep lines): opens scoped — no re-select, the list read carries the SAME handle.
+    ;(root.querySelector('[data-testid="stock-prep-tab-prep-line"]') as HTMLButtonElement).click()
+    await waitForSelector(root, '[data-testid="stock-prep-line-overview"]')
+    expect(root.querySelector('[data-testid="stock-prep-line-no-project"]')).toBeNull()
+    const prepLineCalls = h.apiFetch.mock.calls
+      .map((call) => String(call[0]))
+      .filter((url) => url.includes('/prep-lines'))
+    expect(prepLineCalls.length).toBe(1)
+    expect(prepLineCalls[0]).toContain('projectId=proj-alpha')
+
+    // View 6 (exception queue): same shared scope.
+    ;(root.querySelector('[data-testid="stock-prep-tab-exception-queue"]') as HTMLButtonElement).click()
+    await waitForSelector(root, '[data-testid="stock-prep-exception-overview"]')
+    expect(root.querySelector('[data-testid="stock-prep-exception-no-project"]')).toBeNull()
+    const exceptionCalls = h.apiFetch.mock.calls
+      .map((call) => String(call[0]))
+      .filter((url) => url.split('?')[0] === '/api/integration/stock-preparation/exceptions')
+    expect(exceptionCalls.length).toBe(1)
+    expect(exceptionCalls[0]).toContain('projectId=proj-alpha')
+
+    // The internal handle stays values-free in the DOM across all tabs.
     expect(root.textContent || '').not.toContain('proj-alpha')
   })
 

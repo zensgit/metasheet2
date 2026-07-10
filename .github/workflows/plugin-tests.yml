@@ -71,6 +71,12 @@ jobs:
         run: |
           pnpm run verify:integration-k3wise:poc
 
+      - name: Run on-prem package apply and archive contract tests
+        run: |
+          node --test \
+            scripts/ops/onprem-windows-system-hardening.test.mjs \
+            scripts/ops/multitable-onprem-package-no-node-modules.test.mjs
+
   test:
     runs-on: ubuntu-latest
 
@@ -402,6 +408,7 @@ jobs:
             tests/integration/directory-sync-preview-apply-parity.db.test.ts \
             tests/integration/directory-sync-alert-coverage.db.test.ts \
             tests/integration/directory-deprovision-selection.db.test.ts \
+            tests/integration/directory-sync-run-lease.db.test.ts \
             tests/integration/attendance-csv-export-bom.test.ts \
             --reporter=dot
 
@@ -479,6 +486,7 @@ jobs:
             tests/integration/attendance-expiry-service.test.ts \
             tests/integration/attendance-unscheduled-reminder.test.ts \
             tests/integration/attendance-outdoor-punch.test.ts \
+            tests/integration/attendance-files-acl.test.ts \
             tests/integration/attendance-import-template-prefs.test.ts \
             tests/integration/attendance-notification-deliveries.test.ts \
             tests/integration/attendance-comp-time-expiry-reminder.test.ts \

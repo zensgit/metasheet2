@@ -26,6 +26,22 @@
         >
           编辑模板
         </el-button>
+        <el-button
+          v-if="canManageTemplates && template.status === 'published'"
+          :loading="archiving"
+          data-testid="template-detail-archive-button"
+          @click="handleArchive"
+        >
+          停用
+        </el-button>
+        <el-button
+          v-if="canManageTemplates && template.status === 'archived'"
+          :loading="archiving"
+          data-testid="template-detail-unarchive-button"
+          @click="handleUnarchive"
+        >
+          启用
+        </el-button>
       </template>
     </PageHeader>
 
@@ -343,6 +359,62 @@
             </el-timeline>
             <el-empty v-else description="暂无审批节点" :image-size="60" />
           </div>
+
+          <!-- B3-09 (模板治理 — 版本历史): admin-only (the endpoint sits behind the same
+               template-admin guard as publish/archive; non-admins never fetch, so no 403 noise).
+               Summary rows only — full schema/graph of one version stays an on-demand detail
+               fetch, not part of this list. -->
+          <div
+            v-if="canManageTemplates"
+            class="template-detail__section"
+            data-testid="template-detail-version-history"
+          >
+            <h2>版本历史</h2>
+            <el-alert
+              v-if="versionHistoryError"
+              type="warning"
+              :title="versionHistoryError"
+              :closable="false"
+            />
+            <el-table
+              v-else
+              :data="versionHistory"
+              class="ms-w-100pct"
+              max-height="320"
+              stripe
+            >
+              <el-table-column label="版本" width="90">
+                <template #default="{ row }">v{{ row.version }}</template>
+              </el-table-column>
+              <el-table-column label="状态" width="140">
+                <template #default="{ row }">
+                  <el-tag size="small" :type="versionStatusTagType(row.status)">
+                    {{ versionStatusLabel(row.status) }}
+                  </el-tag>
+                  <el-tag
+                    v-if="row.publishedDefinitionId"
+                    size="small"
+                    type="success"
+                    class="template-detail__version-active-tag"
+                  >
+                    当前生效
+                  </el-tag>
+                </template>
+              </el-table-column>
+              <el-table-column label="发布说明" min-width="240">
+                <template #default="{ row }">
+                  <span v-if="row.publishNote" class="template-detail__version-note">{{ row.publishNote }}</span>
+                  <span v-else>-</span>
+                </template>
+              </el-table-column>
+              <el-table-column label="更新时间" width="180">
+                <template #default="{ row }">{{ formatDate(row.updatedAt) }}</template>
+              </el-table-column>
+              <template #empty>
+                <el-empty description="暂无版本记录" :image-size="60" />
+              </template>
+            </el-table>
+          </div>
         </div>
       </div>
 
@@ -352,7 +424,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import PageShell from '../../components/layout/PageShell.vue'
 import PageHeader from '../../components/layout/PageHeader.vue'
 import StatusTag from '../../components/status/StatusTag.vue'
@@ -364,7 +436,7 @@ import {
   QuestionFilled,
   CircleCheckFilled,
 } from '@element-plus/icons-vue'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import type {
   ApprovalNodeType,
   FormFieldType,
@@ -372,11 +444,22 @@ import type {
   EmptyAssigneePolicy,
   ApprovalTemplateVisibilityScope,
   ApprovalTemplateVisibilityType,
+  ApprovalTemplateVersionSummaryDTO,
+  ApprovalTemplateStatus,
 } from '../../types/approval'
 import { useApprovalTemplateStore } from '../../approvals/templateStore'
 import { useApprovalPermissions } from '../../approvals/permissions'
-import { updateTemplateCategory, updateTemplateSlaHours, updateTemplateVisibilityScope } from '../../approvals/api'
+import {
+  updateTemplateCategory,
+  updateTemplateSlaHours,
+  updateTemplateVisibilityScope,
+  getTemplateUsage,
+  archiveTemplate,
+  unarchiveTemplate,
+  listTemplateVersions,
+} from '../../approvals/api'
 import { describeFieldVisibilityRule } from '../../approvals/fieldVisibility'
+import { templateArchiveConfirmMessage, templateUnarchiveConfirmMessage } from '../../approvals/templateArchiveConfirm'
 
 const route = useRoute()
 const router = useRouter()
@@ -410,6 +493,8 @@ const visibilitySaving = ref(false)
 const editingSla = ref(false)
 const slaDraft = ref<number | null>(null)
 const slaSaving = ref(false)
+// B3-08 — 停用/启用 state.
+const archiving = ref(false)
 
 function beginEditSla() {
   if (!template.value) return
@@ -637,6 +722,107 @@ function editTemplate() {
   router.push({ path: `/approval-templates/${template.value.id}/edit` })
 }
 
+// B3-08 (模板治理 — 停用): fetches the usage/blast-radius indicator FIRST (best-effort — a failed
+// usage read still shows the confirm, just without the instance-count line) so the confirm dialog
+// can state it, mirroring the ruleStats / DelegationSettingsView.disable() precedent.
+async function handleArchive() {
+  if (!template.value || archiving.value) return
+  const current = template.value
+  let usage
+  try {
+    usage = await getTemplateUsage(current.id)
+  } catch {
+    usage = undefined
+  }
+  try {
+    await ElMessageBox.confirm(
+      templateArchiveConfirmMessage(current.name, usage),
+      '停用模板',
+      { confirmButtonText: '停用', cancelButtonText: '取消', type: 'warning' },
+    )
+  } catch {
+    return
+  }
+  archiving.value = true
+  try {
+    const updated = await archiveTemplate(current.id)
+    store.activeTemplate = updated
+    ElMessage.success('已停用模板')
+  } catch (e: any) {
+    ElMessage.error(e?.message ?? '停用模板失败')
+  } finally {
+    archiving.value = false
+  }
+}
+
+async function handleUnarchive() {
+  if (!template.value || archiving.value) return
+  const current = template.value
+  try {
+    await ElMessageBox.confirm(
+      templateUnarchiveConfirmMessage(current.name),
+      '启用模板',
+      { confirmButtonText: '启用', cancelButtonText: '取消', type: 'info' },
+    )
+  } catch {
+    return
+  }
+  archiving.value = true
+  try {
+    const updated = await unarchiveTemplate(current.id)
+    store.activeTemplate = updated
+    ElMessage.success('已启用模板')
+  } catch (e: any) {
+    ElMessage.error(e?.message ?? '启用模板失败')
+  } finally {
+    archiving.value = false
+  }
+}
+
+// B3-09 (模板治理 — 版本历史) — admin-only fetch. `canManageTemplates` resolves asynchronously
+// (refreshApprovalAccess), so a mount-time check would race a slow permission load to a permanently
+// empty section; instead watch it and fetch ONCE when it turns true. Non-admins never fire the
+// request (the endpoint would 403 them anyway).
+const versionHistory = ref<ApprovalTemplateVersionSummaryDTO[]>([])
+const versionHistoryError = ref('')
+let versionHistoryFetched = false
+
+const VERSION_STATUS_LABELS: Record<ApprovalTemplateStatus, string> = {
+  draft: '草稿',
+  published: '已发布',
+  archived: '已停用',
+}
+
+function versionStatusLabel(status: ApprovalTemplateStatus): string {
+  return VERSION_STATUS_LABELS[status] ?? status
+}
+
+function versionStatusTagType(status: ApprovalTemplateStatus): 'primary' | 'info' | 'warning' {
+  if (status === 'published') return 'primary'
+  if (status === 'archived') return 'warning'
+  return 'info'
+}
+
+async function loadVersionHistory() {
+  if (versionHistoryFetched) return
+  versionHistoryFetched = true
+  try {
+    versionHistory.value = await listTemplateVersions(route.params.id as string)
+    versionHistoryError.value = ''
+  } catch (e: any) {
+    // Load failure degrades to an inline warning — never blocks the rest of the detail page.
+    versionHistoryError.value = e?.message ?? '版本历史加载失败'
+  }
+}
+
+watch(
+  canManageTemplates,
+  (isAdmin) => {
+    if (isAdmin) void loadVersionHistory()
+  },
+  { immediate: true },
+)
+
 onMounted(() => {
   const id = route.params.id as string
   store.loadTemplate(id)
@@ -726,6 +912,16 @@ onMounted(() => {
 .template-detail__node-mode,
 .template-detail__node-policy {
   margin-left: 4px;
+}
+
+/* B3-09 — version-history rows */
+.template-detail__version-active-tag {
+  margin-left: 8px;
+}
+
+.template-detail__version-note {
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 
 @media (max-width: 768px) {
