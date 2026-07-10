@@ -117,13 +117,16 @@ async function applyBackfill(trx: Kysely<unknown>): Promise<void> {
       )
   `.execute(trx)
 
-  // Collision: two+ eligible rows derive the same physical key (same-name overwrite).
+  // Collision: two+ eligible rows derive the same physical key (same-name overwrite). GROUP BY the
+  // ordinal (1 = derived_key) rather than repeating `substr(url, $N)` — kysely emits each `${...}` as a
+  // distinct positional parameter, so a repeated `substr(url, ${...})` would be two different params and
+  // Postgres would reject the GROUP BY as not matching the SELECT expression.
   const collisions = await sql<CollisionRow>`
     SELECT substr(url, ${prefixLen + 2}) AS derived_key,
            array_agg(id ORDER BY id) AS ids,
            count(*) AS n
     FROM ${eligible}
-    GROUP BY substr(url, ${prefixLen + 2})
+    GROUP BY 1
     HAVING count(*) > 1
   `.execute(trx)
 
