@@ -96,6 +96,10 @@ approval-time fault tolerance was added — historical `photoFileId` values alre
   similar) package was added, and `pnpm-lock.yaml` is untouched by this slice.
 - **No delete-route ownership/authorization change.** Pre-existing behavior (any authenticated caller may
   delete any file by id) is unchanged; this slice only makes the delete also remove the substrate row G2 reads.
+- **SVG (and any signature-less/text format) is deliberately NOT accepted as photo evidence.** The sniff list is
+  PNG/JPEG/GIF/WEBP/BMP only; an SVG upload gets `sniffed:true` with no `sniffedContentType` and is 422-rejected
+  by G2. This is an intentional tightening for the punch-photo threat model (SVG is scriptable text, not a
+  camera output), recorded here per adversarial review #4044 so it reads as a decision, not an omission.
 
 ---
 
