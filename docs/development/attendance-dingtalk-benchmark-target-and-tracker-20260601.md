@@ -7,6 +7,35 @@
 
 ---
 
+## ⚠ 2026-07-08 审计校正 + 当前权威（S8 refresh — 读这里,别被下方历史注记误导）
+
+> **本账本正文写于 06-01,回填注记多停在 06-26,严重落后 origin/main。** 2026-07-08 三路审计
+> （账本档位 × refresh v3 阶梯 × **代码实证**）结论如下。下方 §0.x-§6 的历史注记是**准确的时点记录,不重写**,
+> 但**当前状态以本节 + 余量规划为权威**。基线更新:origin/main @ `8ec4da2a1`(2026-07-08)。
+>
+> **档位内能力 100% 闭环**（下方多处标 🟡 的 backfill 注记是过时快照,实际均已 ✅,勿重开发）:
+> - **C5 外发通知**:已 real DingTalk staging PASS 闭环 ✅（§0.3 表 L212;注记 L88/L90/L92「C5 保持 🟡」为历史）。
+> - **调度 D5 / 换班 SW5 / 小组织 SO3**:均 staging-proven ✅（§2 对账表 L213;各自 prep 注记「保持 🟡」为历史;
+>   2026-07-08 另在 on-prem 主机 222 对收官版 `972518a8f` 复证 PASS residue=0）。
+> - **HMR 人工缺卡提醒**:HMR-0..5 整线 ✅（HMR-5 于 on-prem 222 PASS `hmr5-smoke-run3` residue=0;§0.6）。
+> - MUST×6 / SHOULD×5 / OPTIONAL×3 / §0.5 四切片(RT/TA/销假/NS) / A2 自动写入 / 年假 L0-L6 / S2 内外勤 全 ✅。
+>
+> **真余量（= 当前目标池;详见 `attendance-benchmark-remaining-plan-20260708.md` #3925）**:
+> 1. **假配置落地缺陷**(admin UI 有旋钮、引擎零强制):**S1** overtimeBankPolicy.validityDays〔已修 #3927,与
+>    真旋钮 compTimeFromOvertime.expiresInDays 冲突〕→ **S1b** maxMinutesPerPeriod 每周期上限〔PROPOSED,3 分叉待 owner〕;
+>    **S2** requirePhoto 不在线上 zod;**S3** 年假计提无定时 job（手工路由触发）。
+> 2. **能力补齐**:S4 SMS/WeCom 渠道 · S5 报表 xlsx 导出 · S6 批量改余额 · **S7 A2 审批人 resolver**〔owner-gated,
+>    等看 A1 结构化审批编辑器 #3893 live 手感〕。
+> 3. **owner/operator 门**:五连 staging smoke（MP-6/HMR-5/AE-4/RD-4-5/OT-bank v1-8,harness 全备）· **E4 真机**（#3843,
+>    注册钉钉微应用）· 档 B 中央审批融合（治理门冻结）。
+> 4. **审计红线澄清**:服务端 `punchPolicy.geoFence` 经纬度围栏**已实现并 staging 实跑**（#2308）;§6 OUT 禁的是
+>    自研**原生/硬件级**围栏与设备绑定（WiFi/蓝牙/人脸/极速打卡/上班前推送均零命中,属新增能力须 owner 立项）。
+>
+> **方法红线（防再被坑）**:本账本的 backfill 注记 = 时点快照,常滞后;判断"还剩什么"**必须 `git log origin/main` +
+> 代码实证**,不可只读注记(本会话已两次被 stale 注记误导:S2、三条 staging 线)。
+
+---
+
 ## 0. 三视野（北极星）
 
 | 视野 | 范围 | 量级 | 现在做？ |
