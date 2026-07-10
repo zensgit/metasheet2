@@ -37,6 +37,12 @@ export interface DingTalkGroupDestination {
   webhookUrl: string
   secret?: string
   hasSecret?: boolean
+  // DT-HARDEN-03 P3: set when the stored ciphertext could not be decrypted with the
+  // running ENCRYPTION_KEY/ENCRYPTION_SALT (wrong-key backfill, key rotation, or
+  // corruption). webhookUrl/secret are then unusable placeholders — callers must not
+  // sign, send, or trust them; the row still surfaces so list/read endpoints respond
+  // instead of throwing for every other (readable) row in the same result set.
+  credentialUnreadable?: boolean
   enabled: boolean
   scope: 'private' | 'sheet' | 'org'
   sheetId?: string

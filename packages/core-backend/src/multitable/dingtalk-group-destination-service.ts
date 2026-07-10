@@ -49,13 +49,36 @@ function generateId(): string {
 
 function rowToDestination(row: DingTalkGroupDestinationRow): DingTalkGroupDestination {
   const scope = row.org_id ? 'org' : row.sheet_id ? 'sheet' : 'private'
+  // DT-HARDEN-03 P3: decrypt failures (wrong-key backfill, key rotation, corruption)
+  // must not throw here — this runs inside Array.map for list/get, and the routes that
+  // call it (GET /dingtalk-groups, GET /dingtalk-groups/:id/deliveries) have no
+  // try/catch, so an uncaught throw on ANY row hangs the whole response with none of
+  // the OTHER (readable) rows ever reaching the client. Flag the row instead; never
+  // fall back to the raw stored value (it would leak the `enc:` ciphertext blob as a
+  // "webhook URL" through the masking layer, which passes non-URLs through verbatim).
+  let webhookUrl: string
+  let secret: string | undefined
+  let credentialUnreadable = false
+  try {
+    webhookUrl = decryptDingTalkDestinationWebhookUrl(row.webhook_url)
+    secret = decryptDingTalkDestinationSecret(row.secret)
+  } catch (error) {
+    credentialUnreadable = true
+    webhookUrl = ''
+    secret = undefined
+    logger.error(
+      `DingTalk group destination ${row.id} has unreadable credentials (decrypt failed): ` +
+      `${error instanceof Error ? error.message : String(error)}`,
+    )
+  }
   return {
     id: row.id,
     name: row.name,
     // DT-HARDEN-03: stored encrypted; the domain object always carries plaintext so
     // masking, signing and validation downstream keep working unchanged.
-    webhookUrl: decryptDingTalkDestinationWebhookUrl(row.webhook_url),
-    secret: decryptDingTalkDestinationSecret(row.secret),
+    webhookUrl,
+    secret,
+    ...(credentialUnreadable ? { credentialUnreadable: true as const } : {}),
     enabled: row.enabled,
     scope,
     sheetId: row.sheet_id ?? undefined,
