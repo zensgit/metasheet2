@@ -914,6 +914,77 @@ export async function sendDingTalkInteractiveApprovalCard(
   }
 }
 
+/**
+ * B-4 (interactive approval cards): update a delivered interactive card in place.
+ *
+ * Official card-instances update endpoint (`PUT /v1.0/card/instances`), addressed by the SAME
+ * `outTrackId` the B-2 send used (= the ledger delivery id). The update is a PRESENTATION
+ * follow-up only: it carries exactly one param — the terminal `statusText` — with
+ * `updateCardDataByKey` so every other card param (title/requestNo/nodeName/buttons) stays as
+ * sent. Values-free by construction (B-2 §5 fence): no form data can ride this call.
+ *
+ * HTTP-200 business failures fail closed (`success !== true` throws), same discipline as
+ * create-and-deliver above — callers must never treat an unacknowledged update as applied.
+ */
+export interface DingTalkInteractiveApprovalCardUpdateInput {
+  /** Must equal dingtalk_approval_card_deliveries.id — the only card ↔ ledger anchor. */
+  outTrackId: string
+  /** Terminal status copy (values-free, built server-side by interactive-card-update.ts). */
+  statusText: string
+}
+
+export async function updateDingTalkInteractiveApprovalCard(
+  accessToken: string,
+  input: DingTalkInteractiveApprovalCardUpdateInput,
+  config: DingTalkInteractiveCardConfig = {},
+  options?: DingTalkRequestOptions,
+): Promise<{ requestId?: string; raw: Record<string, unknown> }> {
+  const outTrackId = input.outTrackId.trim()
+  const statusText = input.statusText.trim()
+
+  if (!accessToken.trim()) throw new Error('DingTalk access token is required')
+  if (!outTrackId) throw new Error('DingTalk interactive-card outTrackId is required')
+  if (!statusText) throw new Error('DingTalk interactive-card status text is required')
+
+  const payload = await requestDingTalkJson(
+    `${normalizeDingTalkOpenApiBaseUrl(config.openApiBaseUrl)}/v1.0/card/instances`,
+    {
+      method: 'PUT',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-acs-dingtalk-access-token': accessToken,
+      },
+      body: JSON.stringify({
+        outTrackId,
+        cardData: {
+          cardParamMap: {
+            statusText,
+          },
+        },
+        cardUpdateOptions: { updateCardDataByKey: true },
+      }),
+    },
+    'Failed to update DingTalk interactive approval card',
+    // B-4 terminal update is a SIDE-EFFECT SEND tier (same as createAndDeliver above): although
+    // the PUT is an idempotent statusText overwrite, we never auto-resend on ambiguity — a lost
+    // update is non-critical by design (duplicate clicks converge via the stale summary).
+    'send',
+    options,
+  )
+
+  if (payload.success !== true) {
+    throw new DingTalkBusinessError(
+      normalizeErrorMessage(payload, 'DingTalk interactive-card update failed'),
+      payload,
+    )
+  }
+
+  return {
+    requestId: readStringField(payload, 'requestId', 'request_id'),
+    raw: payload,
+  }
+}
+
 export async function sendDingTalkWorkNotificationActionCard(
   accessToken: string,
   input: DingTalkWorkNotificationActionCardInput,

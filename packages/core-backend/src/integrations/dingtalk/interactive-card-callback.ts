@@ -29,12 +29,19 @@
  *   the SAME secret source the sender used (`approval-card-config`, env-first, per-integration
  *   pinned). A missing secret fail-closes BEFORE any engine call.
  *
- * The result is a typed union B-4 will map to in-place card updates. B-3 performs NO card update.
+ * The result is a typed union mapped by B-4 (`interactive-card-update.ts`) to an in-place card
+ * update, hooked here at outcome production. The update is a PRESENTATION follow-up only: it never
+ * throws back into this path and owns no ledger/engine access, so a failed card update can never
+ * roll back a committed action (lock §B-4 row 6).
  */
 import { createHmac } from 'crypto'
 
 import { findDingTalkApprovalCardDeliveryById } from './approval-card-deliveries'
 import { resolveApprovalCardLinkSecretForIntegration } from './approval-card-config'
+import {
+  applyDingTalkApprovalCardTerminalUpdate,
+  type DingTalkApprovalCardUpdateSender,
+} from './interactive-card-update'
 import {
   executeApprovalActionFromCardDelivery,
   type ApprovalCardDeliverySummary,
@@ -171,6 +178,12 @@ export function parseDingTalkApprovalCardCallback(payload: unknown): DingTalkApp
 export type DingTalkApprovalCardCallbackDeps = {
   query: QueryFn
   approvals: Pick<ApprovalProductService, 'dispatchAction'>
+  /**
+   * B-4 card-update sender override (tests / alternate transports). Omitted → the production
+   * sender behind the SAME env gate as the B-2 send (`resolveDingTalkInteractiveCardStreamConfig`);
+   * with the gate off the terminal update is a silent no-op.
+   */
+  cardUpdateSender?: DingTalkApprovalCardUpdateSender
 }
 
 type ResolvedOperator =
@@ -229,42 +242,71 @@ async function resolveOperatorLocalUser(
 
 /**
  * Full B-3 execution: parse → ledger-only delivery resolve → fail-closed operator mapping →
- * same-source token threading → A-4 wrapper. Returns the typed outcome for B-4; never updates
- * the card, never logs (callers own values-free logging).
+ * same-source token threading → A-4 wrapper — then the B-4 terminal card update at outcome
+ * production. Returns the typed outcome; never logs (callers own values-free logging).
+ *
+ * The B-4 follow-up is failure-isolated by construction: `applyDingTalkApprovalCardTerminalUpdate`
+ * never throws and holds no query/engine access, so the committed action and the returned outcome
+ * are identical whether the card update succeeds, fails, or is env-disabled (no-rollback, §B-4).
  */
 export async function executeDingTalkApprovalCardCallback(
   deps: DingTalkApprovalCardCallbackDeps,
   payload: unknown,
 ): Promise<DingTalkApprovalCardCallbackResult> {
+  const { result, operatorDisplayName } = await resolveDingTalkApprovalCardCallbackOutcome(deps, payload)
+  await applyDingTalkApprovalCardTerminalUpdate(result, { operatorDisplayName }, deps.cardUpdateSender)
+  return result
+}
+
+/**
+ * Outcome production (the B-3 pipeline), plus the server-side operator display name for B-4's
+ * success copy — resolved from LOCAL user data by `resolveOperatorLocalUser`, never from callback
+ * payload display text (lock §B-4).
+ */
+async function resolveDingTalkApprovalCardCallbackOutcome(
+  deps: DingTalkApprovalCardCallbackDeps,
+  payload: unknown,
+): Promise<{ result: DingTalkApprovalCardCallbackResult; operatorDisplayName: string | null }> {
   const parsed = parseDingTalkApprovalCardCallback(payload)
   if (parsed.ok === false) {
-    return parsed.outcome === 'rejected'
-      ? { outcome: 'rejected', reason: parsed.reason }
-      : { outcome: 'ignored_unsupported_action', outTrackId: parsed.outTrackId }
+    return {
+      result: parsed.outcome === 'rejected'
+        ? { outcome: 'rejected', reason: parsed.reason }
+        : { outcome: 'ignored_unsupported_action', outTrackId: parsed.outTrackId },
+      operatorDisplayName: null,
+    }
   }
   const { outTrackId, operatorDingTalkUserId } = parsed.callback
 
   // LEDGER-ONLY resolution (§2): the delivery row is the sole delivery → instance anchor.
   const delivery = await findDingTalkApprovalCardDeliveryById(deps.query, outTrackId)
-  if (!delivery) return { outcome: 'delivery_not_found', outTrackId }
+  if (!delivery) return { result: { outcome: 'delivery_not_found', outTrackId }, operatorDisplayName: null }
 
   // Owner hard gate (2026-07-10): operator identity may only resolve inside the delivery's own
   // DingTalk corp. An unpinned delivery (integration_id NULL) refuses OUTRIGHT — never a global
   // userId lookup (cross-corp identity-collision face).
   if (!delivery.integration_id) {
-    return { outcome: 'operator_unresolved', deliveryId: delivery.id, reason: 'integration_unpinned' }
+    return {
+      result: { outcome: 'operator_unresolved', deliveryId: delivery.id, reason: 'integration_unpinned' },
+      operatorDisplayName: null,
+    }
   }
 
   const operator = await resolveOperatorLocalUser(deps.query, operatorDingTalkUserId, delivery.integration_id)
   if (operator.ok === false) {
-    return { outcome: 'operator_unresolved', deliveryId: delivery.id, reason: operator.reason }
+    return {
+      result: { outcome: 'operator_unresolved', deliveryId: delivery.id, reason: operator.reason },
+      operatorDisplayName: null,
+    }
   }
 
   // Same-source signing (see module doc): resolve the secret exactly as the sender did — pinned
   // integration (env override wins inside the resolver). The legacy NULL-row resolver is
-  // unreachable here by the owner gate above.
+  // unreachable here by the owner gate above (P2 landing discipline: do NOT re-add it).
   const linkSecret = await resolveApprovalCardLinkSecretForIntegration(delivery.integration_id, deps.query)
-  if (!linkSecret) return { outcome: 'link_secret_unavailable', deliveryId: delivery.id }
+  if (!linkSecret) {
+    return { result: { outcome: 'link_secret_unavailable', deliveryId: delivery.id }, operatorDisplayName: operator.userName }
+  }
   const token = createHmac('sha256', linkSecret).update(delivery.id).digest('hex').slice(0, 32)
 
   const outcome = await executeApprovalActionFromCardDelivery(
@@ -285,23 +327,27 @@ export async function executeDingTalkApprovalCardCallback(
     },
   )
 
+  const operatorDisplayName = operator.userName
   switch (outcome.status) {
     case 'ok':
-      return { outcome: 'executed', deliveryId: delivery.id, summary: outcome.summary }
+      return { result: { outcome: 'executed', deliveryId: delivery.id, summary: outcome.summary }, operatorDisplayName }
     case 'stale':
-      return { outcome: 'stale', deliveryId: delivery.id, summary: outcome.summary }
+      return { result: { outcome: 'stale', deliveryId: delivery.id, summary: outcome.summary }, operatorDisplayName }
     case 'engine_rejected':
       // Values-free: the engine's human-readable message may carry titles/names — only the stable
       // code and HTTP class cross this boundary. B-4 maps codes to reason-coded card copy.
       return {
-        outcome: 'engine_rejected',
-        deliveryId: delivery.id,
-        code: outcome.code,
-        httpStatus: outcome.httpStatus,
-        summary: outcome.summary,
+        result: {
+          outcome: 'engine_rejected',
+          deliveryId: delivery.id,
+          code: outcome.code,
+          httpStatus: outcome.httpStatus,
+          summary: outcome.summary,
+        },
+        operatorDisplayName,
       }
     case 'not_found':
     default:
-      return { outcome: 'wrapper_not_found', deliveryId: delivery.id }
+      return { result: { outcome: 'wrapper_not_found', deliveryId: delivery.id }, operatorDisplayName }
   }
 }
