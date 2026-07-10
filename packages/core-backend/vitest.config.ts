@@ -95,6 +95,10 @@ export default defineConfig({
       'tests/integration/dingtalk-person-message-integration-scoping.db.test.ts',
       // A-4 card-delivery wrapper: DATABASE_URL-gated. Same two-point wiring (no skip-green).
       'tests/integration/approval-card-delivery-wrapper.db.test.ts',
+      // B-3 interactive-card callback adapter: DATABASE_URL-gated, and its per-corp test UNSETS
+      // APPROVAL_CARD_LINK_SECRET (env-first short-circuit would hide the stored-secret path).
+      // Same two-point wiring (no skip-green) — whole file in the multitable real-DB step.
+      'tests/integration/dingtalk-approval-card-callback.db.test.ts',
       // DT-HARDEN-07 primary-department write → approval-routing golden: DATABASE_URL-gated
       // (describeIfDatabase). Excluded from the no-DB default job so it cannot skip-green, and
       // wired as a WHOLE FILE into the `Run approval real-DB integration` step in plugin-tests.yml.

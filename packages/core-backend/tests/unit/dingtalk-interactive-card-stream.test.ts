@@ -7,10 +7,12 @@ import {
   DINGTALK_INTERACTIVE_CARD_TEMPLATE_ID_ENV,
   DingTalkInteractiveCardStreamWorker,
   resolveDingTalkInteractiveCardStreamConfig,
+  type DingTalkInteractiveCardCallbackExecutor,
   type DingTalkInteractiveCardStreamClient,
   type DingTalkInteractiveCardStreamClientFactory,
   type DingTalkInteractiveCardStreamHandlers,
 } from '../../src/integrations/dingtalk/interactive-card-stream'
+import type { DingTalkApprovalCardCallbackResult } from '../../src/integrations/dingtalk/interactive-card-callback'
 
 function env(overrides: Record<string, string | undefined> = {}): NodeJS.ProcessEnv {
   return {
@@ -125,7 +127,7 @@ describe('DingTalk interactive-card Stream worker (B-1)', () => {
       expect(client.start).toHaveBeenCalledTimes(1)
 
       await handlers?.onEvent({ eventType: 'approval-card-click', eventId: 'evt-1' })
-      expect(log.info).toHaveBeenCalledWith('DingTalk interactive-card Stream event received (ignored by B-1 skeleton)')
+      expect(log.info).toHaveBeenCalledWith('DingTalk interactive-card Stream event received (no card callback payload; ignored)')
 
       await expect(worker.shutdown()).resolves.toEqual({ state: 'disabled', reason: 'env_disabled' })
       expect(client.close).toHaveBeenCalledTimes(1)
@@ -213,6 +215,106 @@ describe('DingTalk interactive-card Stream worker (B-1)', () => {
 
       expect(factory).toHaveBeenCalledTimes(1)
       expect(client.start).toHaveBeenCalledTimes(1)
+    })
+  })
+
+  // ── B-3: callback dispatch behind the SAME env gate (lock §B-3 step 8) ──────────────────────
+  describe('B-3 callback dispatch', () => {
+    const activeEnv = () => env({
+      [DINGTALK_INTERACTIVE_CARD_STREAM_ENABLED_ENV]: '1',
+      [DINGTALK_INTERACTIVE_CARD_CLIENT_ID_ENV]: 'client-1',
+      [DINGTALK_INTERACTIVE_CARD_CLIENT_SECRET_ENV]: 'secret-1',
+      [DINGTALK_INTERACTIVE_CARD_TEMPLATE_ID_ENV]: 'template-1',
+    })
+
+    function activeWorker(executor: DingTalkInteractiveCardCallbackExecutor) {
+      const log = logger()
+      let handlers: DingTalkInteractiveCardStreamHandlers | null = null
+      const client: DingTalkInteractiveCardStreamClient = {
+        start: vi.fn(async () => {}),
+        close: vi.fn(async () => {}),
+      }
+      const factory = vi.fn<DingTalkInteractiveCardStreamClientFactory>(async (_config, h) => {
+        handlers = h
+        return client
+      })
+      const worker = new DingTalkInteractiveCardStreamWorker({ logger: log, clientFactory: factory, callbackExecutor: executor })
+      return { log, worker, factory, handlers: () => handlers }
+    }
+
+    it('FLAG DEFAULT OFF: with an empty env no client starts and no callback can ever execute', async () => {
+      const log = logger()
+      const executor = vi.fn<DingTalkInteractiveCardCallbackExecutor>()
+      const factory = vi.fn<DingTalkInteractiveCardStreamClientFactory>()
+      const worker = new DingTalkInteractiveCardStreamWorker({ logger: log, clientFactory: factory, callbackExecutor: executor })
+
+      await expect(worker.initialize(env())).resolves.toEqual({ state: 'disabled', reason: 'env_disabled' })
+      expect(factory).not.toHaveBeenCalled()
+      expect(executor).not.toHaveBeenCalled()
+    })
+
+    it('dispatches a payload-carrying event to the callback executor exactly once and logs values-free', async () => {
+      const executor = vi.fn<DingTalkInteractiveCardCallbackExecutor>(async () => ({
+        outcome: 'executed',
+        deliveryId: 'd-1',
+        summary: { approval: { title: 'SECRET_TITLE' } } as never,
+      }))
+      const { log, worker, factory, handlers } = activeWorker(executor)
+      await expect(worker.initialize(activeEnv())).resolves.toEqual({ state: 'active' })
+      expect(factory).toHaveBeenCalledTimes(1)
+
+      const payload = { outTrackId: 'd-1', userId: 'dd_op', content: 'SECRET_FORM_VALUE' }
+      await handlers()!.onEvent({ eventType: 'CARD_CALLBACK', payload })
+
+      expect(executor).toHaveBeenCalledTimes(1)
+      expect(executor).toHaveBeenCalledWith(payload)
+      const logged = JSON.stringify([...log.info.mock.calls, ...log.warn.mock.calls])
+      expect(logged).toContain('executed delivery=d-1')
+      expect(logged).not.toContain('SECRET_FORM_VALUE')
+      expect(logged).not.toContain('SECRET_TITLE')
+      expect(logged).not.toContain('dd_op')
+    })
+
+    it('payload-less transport events never touch the callback executor', async () => {
+      const executor = vi.fn<DingTalkInteractiveCardCallbackExecutor>()
+      const { log, worker, handlers } = activeWorker(executor)
+      await worker.initialize(activeEnv())
+
+      await handlers()!.onEvent({ eventType: 'ping', eventId: 'evt-2' })
+      expect(executor).not.toHaveBeenCalled()
+      expect(log.info).toHaveBeenCalledWith('DingTalk interactive-card Stream event received (no card callback payload; ignored)')
+    })
+
+    it('executor throw → values-free reason-code warn, never the error or payload', async () => {
+      const executor = vi.fn<DingTalkInteractiveCardCallbackExecutor>(async () => {
+        throw new Error('boom with SECRET_FORM_VALUE and credentials')
+      })
+      const { log, worker, handlers } = activeWorker(executor)
+      await worker.initialize(activeEnv())
+
+      await expect(handlers()!.onEvent({ payload: { outTrackId: 'x' } })).resolves.toBeUndefined()
+      expect(log.warn).toHaveBeenCalledWith('DingTalk interactive-card callback failed (callback_handler_error)')
+      expect(JSON.stringify(log.warn.mock.calls)).not.toContain('SECRET_FORM_VALUE')
+    })
+
+    it('reports rejected/refusal outcomes as reason codes only', async () => {
+      const outcomes: DingTalkApprovalCardCallbackResult[] = [
+        { outcome: 'rejected', reason: 'out_track_id_not_uuid' },
+        { outcome: 'ignored_unsupported_action', outTrackId: 'd-2' },
+        { outcome: 'operator_unresolved', deliveryId: 'd-3', reason: 'unlinked' },
+      ]
+      const executor = vi.fn<DingTalkInteractiveCardCallbackExecutor>()
+      outcomes.forEach((o) => executor.mockResolvedValueOnce(o))
+      const { log, worker, handlers } = activeWorker(executor)
+      await worker.initialize(activeEnv())
+
+      for (let i = 0; i < outcomes.length; i += 1) {
+        await handlers()!.onEvent({ payload: {} })
+      }
+      const logged = JSON.stringify(log.info.mock.calls)
+      expect(logged).toContain('rejected:out_track_id_not_uuid')
+      expect(logged).toContain('ignored_unsupported_action out_track_id=d-2')
+      expect(logged).toContain('operator_unresolved:unlinked delivery=d-3')
     })
   })
 })
