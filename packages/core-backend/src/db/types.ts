@@ -1553,7 +1553,7 @@ export interface DingTalkApprovalCardDeliveriesTable {
   acted_action: string | null
   acted_by: string | null
   acted_at: NullableTimestamp
-  send_status: 'pending' | 'sent' | 'failed'
+  send_status: 'pending' | 'sent' | 'failed' | 'outcome_unknown'
   send_error: string | null
   created_at: CreatedAt
   updated_at: CreatedAt
@@ -1567,7 +1567,7 @@ export interface DingTalkPersonDeliveriesTable {
   subject: string
   content: string
   success: boolean
-  status: 'success' | 'failed' | 'skipped'
+  status: 'success' | 'failed' | 'skipped' | 'outcome_unknown'
   http_status: number | null
   response_body: string | null
   error_message: string | null

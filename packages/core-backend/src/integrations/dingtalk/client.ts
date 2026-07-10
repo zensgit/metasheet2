@@ -13,6 +13,7 @@ import {
 export {
   DINGTALK_REQUEST_TIMEOUT_MS,
   DingTalkBusinessError,
+  DingTalkMalformedResponseError,
   DingTalkRequestError,
   DingTalkTimeoutError,
   isDingTalkOutcomeUnknown,

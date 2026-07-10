@@ -23,7 +23,11 @@ const logger = new Logger('DingTalkTransport')
  *    network error). Callers pattern-match on these shapes (routes/auth.ts,
  *    multitable/automation-executor.ts, AttendanceNotificationDeliveryWorker) —
  *    do not wrap or re-type them here. Send-tier uncertain outcomes additionally
- *    carry an {@link isDingTalkOutcomeUnknown} marker for ledger writers.
+ *    carry an {@link isDingTalkOutcomeUnknown} marker for ledger writers;
+ *  - malformed-2xx guard: an HTTP-2xx response with an unusable body never
+ *    normalizes to success — it throws {@link DingTalkMalformedResponseError}
+ *    (a NEW shape; pre-fix such responses silently became `{}`/success, so no
+ *    existing caller pattern-matched a shape for them).
  *
  * Rate-limit handling here (backoff on 429/flow-control) is BEST-EFFORT and
  * in-process only: replicas do not share a quota. Multi-replica shared throttling
@@ -49,6 +53,36 @@ export class DingTalkBusinessError extends Error {
     super(message)
     this.name = 'DingTalkBusinessError'
     this.responseBody = responseBody
+  }
+}
+
+/**
+ * An HTTP-2xx response whose body is UNUSABLE: not JSON (HTML error page, empty
+ * body, truncated stream, bare primitive/array) or — for `envelope: 'oapi'`
+ * endpoints — a JSON object MISSING the `errcode`/`code` discriminator the OAPI
+ * envelope contract guarantees. Such a response must NEVER normalize to success
+ * (the pre-fix behavior turned it into `{}` and reported success for a call whose
+ * outcome is unusable). Classification is per tier: reads may retry it within the
+ * attempt budget (transient proxy/CDN garbage), exchanges never retry, sends never
+ * resend and carry the {@link isDingTalkOutcomeUnknown} marker — the request very
+ * likely DID execute; only the response is unusable.
+ *
+ * `reason` is intentionally coarse ('unparseable_body' | 'missing_errcode') and the
+ * message carries NO body content — a garbled body could contain anything.
+ */
+export class DingTalkMalformedResponseError extends Error {
+  readonly httpStatus: number
+  readonly reason: 'unparseable_body' | 'missing_errcode'
+
+  constructor(reason: 'unparseable_body' | 'missing_errcode', httpStatus: number, fallbackError: string) {
+    super(
+      reason === 'missing_errcode'
+        ? `${fallbackError}: DingTalk returned HTTP ${httpStatus} with a JSON body missing the errcode/code envelope discriminator`
+        : `${fallbackError}: DingTalk returned HTTP ${httpStatus} with an unusable (non-JSON or non-object) body`,
+    )
+    this.name = 'DingTalkMalformedResponseError'
+    this.httpStatus = httpStatus
+    this.reason = reason
   }
 }
 
@@ -323,14 +357,17 @@ function isBodyAbortError(error: unknown): boolean {
  * send tier) — and must never be swallowed into a `null` payload: on the ok-path a
  * swallowed body abort would normalize to `{}` and report SUCCESS for a call whose
  * outcome is unknown; on the non-ok path it would masquerade as a retryable
- * `http_<status>`. Only a genuinely non-JSON body (SyntaxError from JSON.parse)
- * keeps the tolerant `null`; any other mid-body stream failure (connection reset)
- * rethrows raw and classifies as a network error.
+ * `http_<status>`. A genuinely non-JSON/non-object body (SyntaxError from
+ * JSON.parse, bare primitive, top-level array) returns the tolerant `null` — the
+ * OK-PATH then throws {@link DingTalkMalformedResponseError} instead of
+ * normalizing it to `{}`/success, while the non-ok path keeps `responseBody: null`
+ * on the DingTalkRequestError as before. Any other mid-body stream failure
+ * (connection reset) rethrows raw and classifies as a network error.
  */
 async function readJson(response: Response, timeoutMs: number): Promise<Record<string, unknown> | null> {
   try {
     const payload = await response.json()
-    return payload && typeof payload === 'object' ? payload as Record<string, unknown> : null
+    return payload && typeof payload === 'object' && !Array.isArray(payload) ? payload as Record<string, unknown> : null
   } catch (error) {
     if (error instanceof SyntaxError) return null
     if (isBodyAbortError(error)) {
@@ -341,10 +378,31 @@ async function readJson(response: Response, timeoutMs: number): Promise<Record<s
   }
 }
 
-function normalizeDingTalkApiPayload(payload: Record<string, unknown>, fallbackError: string): Record<string, unknown> {
-  const errcode = readNumericField(payload, 'errcode', 'code')
-  if (errcode !== null && errcode !== 0) {
-    throw new DingTalkBusinessError(normalizeErrorMessage(payload, fallbackError), payload)
+/**
+ * OK-path (HTTP 2xx) envelope normalization. A `null` payload (unparseable body) is
+ * a malformed response for EVERY envelope — never `{}`/success. For `'oapi'`
+ * envelopes the errcode/code discriminator is REQUIRED (the OAPI contract always
+ * carries `errcode: 0` on success; a 2xx JSON object without it is not a success
+ * envelope — e.g. a proxy error page in JSON clothing); `'none'` (v1.0
+ * api.dingtalk.com) endpoints have no discriminator, so any JSON object passes.
+ */
+function normalizeDingTalkApiPayload(
+  payload: Record<string, unknown> | null,
+  envelope: 'oapi' | 'none',
+  httpStatus: number,
+  fallbackError: string,
+): Record<string, unknown> {
+  if (payload === null) {
+    throw new DingTalkMalformedResponseError('unparseable_body', httpStatus, fallbackError)
+  }
+  if (envelope === 'oapi') {
+    const errcode = readNumericField(payload, 'errcode', 'code')
+    if (errcode === null) {
+      throw new DingTalkMalformedResponseError('missing_errcode', httpStatus, fallbackError)
+    }
+    if (errcode !== 0) {
+      throw new DingTalkBusinessError(normalizeErrorMessage(payload, fallbackError), payload)
+    }
   }
   return payload
 }
@@ -450,10 +508,7 @@ async function performDingTalkAttempt(
       throw requestError
     }
 
-    if (request.envelope === 'oapi') {
-      return normalizeDingTalkApiPayload(payload ?? {}, request.fallbackError)
-    }
-    return payload ?? {}
+    return normalizeDingTalkApiPayload(payload, request.envelope, response.status, request.fallbackError)
   } finally {
     dispose()
   }
@@ -509,6 +564,15 @@ function classifyDingTalkFailure(error: unknown, kind: DingTalkCallKind): DingTa
       return { error, reason: `flow_control_errcode_${errcode}`, retryable: isRead, retryAfterMs: null, outcomeUnknown: false }
     }
     return { error, reason: 'business_error', retryable: false, retryAfterMs: null, outcomeUnknown: false }
+  }
+  if (error instanceof DingTalkMalformedResponseError) {
+    // HTTP-2xx with an unusable body (or a 2xx oapi envelope missing its errcode
+    // discriminator): the server very likely EXECUTED the request — only the
+    // response is unusable. Per tier (owner-ratified, kept separate): reads may
+    // retry within the existing attempt budget (transient proxy/CDN garbage, same
+    // class as a 5xx-on-read); exchanges never retry (the single-use code may
+    // already be redeemed); sends never resend and record outcome_unknown.
+    return { error, reason: `malformed_response_${error.reason}`, retryable: isRead, retryAfterMs: null, outcomeUnknown: unknownIfSend }
   }
   // fetch rejected without producing a response (DNS/conn-refused/reset). Reads may
   // retry; exchanges never (single-use code may have been redeemed server-side);

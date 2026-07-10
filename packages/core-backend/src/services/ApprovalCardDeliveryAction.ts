@@ -10,7 +10,11 @@
  *   reject-comment-required, nodeEntryEpoch round-scoping and version conflicts apply untouched.
  * - Channel attribution is injected SERVER-SIDE (`channelOrigin` → approval_records.metadata);
  *   HTTP bodies never carry it.
- * - A card is actionable only while card_state='sent' AND send_status='sent' (review P2).
+ * - A card is actionable only while card_state='sent' AND the send possibly delivered:
+ *   send_status IN ('sent','outcome_unknown') (review P2; PR #4046 Phase B widened the set by
+ *   exactly outcome_unknown — a send whose outcome the client could not observe MAY have been
+ *   delivered, and a valid HMAC deep-link token is itself proof of delivery, so the ledger's
+ *   send-time uncertainty must not make a delivered card inoperable. pending/failed stay stale.)
  */
 import { createHmac, timingSafeEqual } from 'crypto'
 
@@ -36,7 +40,7 @@ export interface ApprovalCardDeliverySummary {
   nodeKey: string
   recipientUserId: string
   viewerIsRecipient: boolean
-  /** card live + send delivered + instance still pending — the page may offer 同意/拒绝. */
+  /** card live + send possibly delivered ('sent'/'outcome_unknown') + instance still pending — the page may offer 同意/拒绝. */
   actionable: boolean
   approval: {
     instanceId: string
@@ -125,7 +129,7 @@ async function buildSummary(
     viewerIsRecipient: delivery.recipient_user_id === viewerUserId,
     actionable:
       delivery.card_state === 'sent'
-      && delivery.send_status === 'sent'
+      && (delivery.send_status === 'sent' || delivery.send_status === 'outcome_unknown')
       && instance.status === 'pending',
     approval: {
       instanceId: instance.id,
