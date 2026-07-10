@@ -965,6 +965,10 @@ export async function updateDingTalkInteractiveApprovalCard(
       }),
     },
     'Failed to update DingTalk interactive approval card',
+    // B-4 terminal update is a SIDE-EFFECT SEND tier (same as createAndDeliver above): although
+    // the PUT is an idempotent statusText overwrite, we never auto-resend on ambiguity — a lost
+    // update is non-critical by design (duplicate clicks converge via the stale summary).
+    'send',
     options,
   )
 
