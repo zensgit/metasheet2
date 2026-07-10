@@ -88,6 +88,15 @@ export interface LedgerRetentionSchedulerOptions {
   leaderOptions?: LedgerRetentionSchedulerLeaderOptions | null
   runtime?: LedgerRetentionSchedulerRuntimeOptions
   logger?: Logger
+  /**
+   * Label used in the "rows swept" tick log line. Defaults to the original
+   * AI-usage-ledger wording so the shipped ledger sweep's log output is
+   * byte-identical when this option is omitted — other services reusing
+   * this generic scheduler (e.g. the DingTalk group-delivery retention
+   * sweep) pass their own label so the log doesn't misreport which table
+   * was swept.
+   */
+  sweptEntityLabel?: string
 }
 
 export class LedgerRetentionScheduler {
@@ -100,6 +109,7 @@ export class LedgerRetentionScheduler {
   private readonly renewIntervalMs: number
   private readonly retryIntervalMs: number
   private readonly leaderStateGauge: LedgerRetentionSchedulerLeaderGauge | null
+  private readonly sweptEntityLabel: string
   private timer: NodeJS.Timeout | null = null
   private renewalTimer: NodeJS.Timeout | null = null
   private acquisitionTimer: NodeJS.Timeout | null = null
@@ -118,6 +128,7 @@ export class LedgerRetentionScheduler {
     this.retryIntervalMs = this.leaderOptions?.retryIntervalMs ?? Math.max(1_000, Math.floor(this.ttlMs / 3))
     this.leaderStateGauge = options.runtime?.leaderStateGauge ?? null
     this.logger = options.logger ?? new Logger('LedgerRetentionScheduler')
+    this.sweptEntityLabel = options.sweptEntityLabel ?? 'AI usage ledger rows'
     if (this.leaderOptions) {
       this.setLeaderGauge('follower')
       this.ready = this.attemptLeadership().catch((error) => {
@@ -181,7 +192,7 @@ export class LedgerRetentionScheduler {
     try {
       const deleted = await this.service.sweep()
       if (deleted > 0) {
-        this.logger.info(`AI usage ledger rows swept (retention): ${deleted}`)
+        this.logger.info(`${this.sweptEntityLabel} swept (retention): ${deleted}`)
       }
       return deleted
     } catch (error) {
