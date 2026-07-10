@@ -20,6 +20,7 @@ import {
   DingTalkRequestError,
   fetchDingTalkAppAccessToken,
   sendDingTalkInteractiveApprovalCard,
+  isDingTalkOutcomeUnknown,
   sendDingTalkWorkNotification,
   sendDingTalkWorkNotificationActionCard,
 } from '../integrations/dingtalk/client'
@@ -33,6 +34,7 @@ import {
 import {
   insertDingTalkApprovalCardDelivery,
   markDingTalkApprovalCardDeliverySendFailed,
+  markDingTalkApprovalCardDeliverySendOutcomeUnknown,
   markDingTalkApprovalCardDeliverySent,
 } from '../integrations/dingtalk/approval-card-deliveries'
 import { createHmac } from 'crypto'
@@ -559,7 +561,8 @@ async function recordDingTalkPersonDelivery(
     subject: string
     content: string
     success: boolean
-    status?: 'success' | 'failed' | 'skipped'
+    /** `outcome_unknown` (PR #4046 Phase B): send threw with the transport's outcome-unknown marker — maybe delivered, never auto-resent. */
+    status?: 'success' | 'failed' | 'skipped' | 'outcome_unknown'
     httpStatus?: number | null
     responseBody?: string | null
     errorMessage?: string | null
@@ -1861,6 +1864,9 @@ export class AutomationExecutor {
           ? stringifyResponseBody(error.responseBody)
           : null
       const errorMessage = redactDingTalkFailureAlertText(error instanceof Error ? error.message : String(error))
+      // PR #4046 Phase B: an outcome-unknown send (transport marker) is recorded as the DISTINCT
+      // `outcome_unknown` telemetry state — the alert may well have reached the rule creator; it
+      // is never auto-resent and must not read as a definite failure.
       await recordDingTalkPersonDeliverySafely(this.deps.queryFn, {
         localUserId: ruleCreatorId,
         dingtalkUserId,
@@ -1868,7 +1874,7 @@ export class AutomationExecutor {
         subject,
         content,
         success: false,
-        status: 'failed',
+        status: isDingTalkOutcomeUnknown(error) ? 'outcome_unknown' : 'failed',
         httpStatus,
         responseBody,
         errorMessage,
@@ -2802,17 +2808,27 @@ export class AutomationExecutor {
       }
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error)
+      // PR #4046 Phase B (owner doctrine): a send whose outcome is unknowable (transport marker —
+      // network error/timeout/5xx/malformed 2xx) records the DISTINCT `outcome_unknown` ledger
+      // state, never plain `failed`, and is NEVER auto-resent — the card may well have reached
+      // the recipient. There is no task_id for a lost response, so DingTalk's async-send result
+      // query cannot reconcile it automatically; reconciliation is manual/ops via this state.
+      const outcomeUnknown = isDingTalkOutcomeUnknown(error)
       // DT-HARDEN-06: if the ledger row cannot be flipped out of `pending`, the card is
       // fail-closed but invisible — no sweeper, no admin listing. Swallowing that
       // silently (`.catch(() => null)`) hid the only signal an operator would ever get.
       // The send failure is still what we report; the bookkeeping failure is surfaced.
       let ledgerError: string | null = null
       try {
-        await markDingTalkApprovalCardDeliverySendFailed(this.deps.queryFn, delivery.id, errorMessage)
+        if (outcomeUnknown) {
+          await markDingTalkApprovalCardDeliverySendOutcomeUnknown(this.deps.queryFn, delivery.id, errorMessage)
+        } else {
+          await markDingTalkApprovalCardDeliverySendFailed(this.deps.queryFn, delivery.id, errorMessage)
+        }
       } catch (markError) {
         ledgerError = markError instanceof Error ? markError.message : String(markError)
         logger.error(
-          `DingTalk approval-card delivery ${delivery.id} is stuck pending: failed to record the send failure`,
+          `DingTalk approval-card delivery ${delivery.id} is stuck pending: failed to record the send ${outcomeUnknown ? 'outcome-unknown state' : 'failure'}`,
           markError instanceof Error ? markError : new Error(ledgerError),
         )
       }
@@ -2822,6 +2838,7 @@ export class AutomationExecutor {
         error: errorMessage,
         output: {
           deliveryId: delivery.id,
+          ...(outcomeUnknown ? { deliveryOutcomeUnknown: true } : {}),
           ...(ledgerError ? { deliveryLedgerError: ledgerError, deliveryStuckPending: true } : {}),
         },
       }
@@ -3103,6 +3120,12 @@ export class AutomationExecutor {
     // throwing must not re-mark them failed — that used to write BOTH a success and a
     // failed delivery row for the same recipient in the same send attempt.
     const sentRecipients = new Set<(typeof resolvedRecipients)[number]>()
+    // PR #4046 Phase B: the batch whose send call is IN FLIGHT when an error is thrown. Only
+    // these recipients can have an UNKNOWN outcome (the send was attempted and the response was
+    // lost); recipients of batches never reached have a KNOWN outcome (not sent) and stay
+    // `failed`. Cleared after each successful batch; null while no send is in flight (so a
+    // token-fetch/config failure — no send attempted — marks nobody outcome_unknown).
+    let inFlightSendBatch: (typeof resolvedRecipients) | null = null
 
     try {
       let responseCount = 0
@@ -3122,6 +3145,7 @@ export class AutomationExecutor {
           configCache.set(integrationId, credentials)
         }
 
+        inFlightSendBatch = batch
         const result = await sendDingTalkWorkNotification(
           credentials.accessToken,
           {
@@ -3132,6 +3156,7 @@ export class AutomationExecutor {
           credentials.messageConfig,
           { fetchFn: this.deps.fetchFn },
         )
+        inFlightSendBatch = null
         const responseBody = stringifyResponseBody(result.raw)
         responseCount += 1
 
@@ -3188,6 +3213,16 @@ export class AutomationExecutor {
       // did happen for them, and a partial failure is a partial result, not a total one.
       const unsentRecipients = resolvedRecipients.filter((recipient) => !sentRecipients.has(recipient))
 
+      // PR #4046 Phase B: when the thrown error carries the transport's outcome-unknown marker,
+      // the recipients of the batch that was IN FLIGHT get the DISTINCT `outcome_unknown` state
+      // (the message may well have reached them — never auto-resent, reconciliation is
+      // manual/ops). Recipients of batches never attempted have a KNOWN outcome and stay
+      // `failed`, exactly as before.
+      const outcomeUnknown = isDingTalkOutcomeUnknown(error)
+      const outcomeUnknownRecipients = outcomeUnknown && inFlightSendBatch
+        ? new Set<(typeof resolvedRecipients)[number]>(inFlightSendBatch)
+        : new Set<(typeof resolvedRecipients)[number]>()
+
       await Promise.all(unsentRecipients.map((recipient) => recordDingTalkPersonDeliverySafely(this.deps.queryFn, {
         localUserId: recipient.localUserId,
         dingtalkUserId: recipient.dingtalkUserId,
@@ -3195,7 +3230,7 @@ export class AutomationExecutor {
         subject: renderedTitle,
         content: bodyWithLinks,
         success: false,
-        status: 'failed',
+        status: outcomeUnknownRecipients.has(recipient) ? 'outcome_unknown' : 'failed',
         httpStatus,
         responseBody,
         errorMessage,
@@ -3210,8 +3245,11 @@ export class AutomationExecutor {
         error: errorMessage,
         output: {
           notifiedUsers: sentRecipients.size,
-          failedRecipientCount: unsentRecipients.length,
+          failedRecipientCount: unsentRecipients.length - outcomeUnknownRecipients.size,
           batchCount: batches.length,
+          ...(outcomeUnknownRecipients.size > 0
+            ? { deliveryOutcomeUnknown: true, outcomeUnknownRecipientCount: outcomeUnknownRecipients.size }
+            : {}),
         },
       }
     }

@@ -41,7 +41,14 @@ export interface DingTalkApprovalCardDeliveryRow {
   acted_action: string | null
   acted_by: string | null
   acted_at: Date | string | null
-  send_status: 'pending' | 'sent' | 'failed'
+  /**
+   * `outcome_unknown` (PR #4046 Phase B): the send threw with the transport's
+   * isDingTalkOutcomeUnknown marker — DingTalk may well have delivered the card even though the
+   * client saw no usable response. NEVER auto-resent (owner doctrine); reconciliation is
+   * manual/ops, and a valid HMAC callback (the token only exists inside the delivered card's
+   * deep link) is itself proof of delivery, so outcome_unknown rows stay claimable.
+   */
+  send_status: 'pending' | 'sent' | 'failed' | 'outcome_unknown'
   send_error: string | null
   created_at: Date | string
   updated_at: Date | string
@@ -107,10 +114,13 @@ export async function findDingTalkApprovalCardDeliveryById(
 
 /**
  * Atomic acted-claim: succeeds for exactly one caller while the card is still `sent` AND was
- * actually delivered (`send_status='sent'` — review P2: a pending/failed send never produced a
- * live button, so nothing may claim it). Returns the updated row for the winner, `null` for
- * everyone else (duplicate callback, double tap, undelivered card, or a card already
- * superseded/expired) — losers re-read via `find…ById` to render the real terminal state.
+ * possibly delivered (`send_status IN ('sent','outcome_unknown')` — review P2: a pending/failed
+ * send never produced a live button, so nothing may claim it; PR #4046 Phase B widened the set by
+ * exactly `outcome_unknown`, whose card MAY in fact have been delivered — a valid HMAC callback
+ * proves it was, so the ledger's send-time uncertainty must not make a delivered card inoperable).
+ * Returns the updated row for the winner, `null` for everyone else (duplicate callback, double
+ * tap, undelivered card, or a card already superseded/expired) — losers re-read via `find…ById`
+ * to render the real terminal state.
  */
 export async function claimDingTalkApprovalCardDeliveryActed(
   query: QueryFn,
@@ -120,7 +130,7 @@ export async function claimDingTalkApprovalCardDeliveryActed(
   const result = await query(
     `UPDATE dingtalk_approval_card_deliveries
      SET card_state = 'acted', acted_action = $2, acted_by = $3, acted_at = NOW(), updated_at = NOW()
-     WHERE id = $1 AND card_state = 'sent' AND send_status = 'sent'
+     WHERE id = $1 AND card_state = 'sent' AND send_status IN ('sent', 'outcome_unknown')
      RETURNING ${RETURNING_COLUMNS}`,
     [id, input.action, input.actedBy],
   )
@@ -152,6 +162,28 @@ export async function markDingTalkApprovalCardDeliverySendFailed(
   const result = await query(
     `UPDATE dingtalk_approval_card_deliveries
      SET send_status = 'failed', send_error = $2, updated_at = NOW()
+     WHERE id = $1 AND send_status = 'pending'
+     RETURNING ${RETURNING_COLUMNS}`,
+    [id, error],
+  )
+  return (result.rows[0] as DingTalkApprovalCardDeliveryRow | undefined) ?? null
+}
+
+/**
+ * PR #4046 Phase B: records a send whose outcome is UNKNOWN (network error / timeout / 5xx /
+ * malformed 2xx — the transport's isDingTalkOutcomeUnknown marker). Distinct from `failed`
+ * (definite rejection): the card may well have reached the recipient, so this state is never
+ * auto-resent AND stays claimable by a valid HMAC callback. Same pending-only guard as the
+ * other A-2b transitions.
+ */
+export async function markDingTalkApprovalCardDeliverySendOutcomeUnknown(
+  query: QueryFn,
+  id: string,
+  error: string,
+): Promise<DingTalkApprovalCardDeliveryRow | null> {
+  const result = await query(
+    `UPDATE dingtalk_approval_card_deliveries
+     SET send_status = 'outcome_unknown', send_error = $2, updated_at = NOW()
      WHERE id = $1 AND send_status = 'pending'
      RETURNING ${RETURNING_COLUMNS}`,
     [id, error],

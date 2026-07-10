@@ -67,7 +67,12 @@ const ruleIds: string[] = []
 const sentBodies: Array<Record<string, unknown>> = []
 const interactiveBodies: Array<Record<string, unknown>> = []
 let failNextSend = false
+// PR #4046 Phase B: one-shot TRANSPORT-LEVEL failure — the asyncsend fetch REJECTS at network
+// level, so the real client + transport seam (send tier: no resend) rethrows the error marked
+// isDingTalkOutcomeUnknown. asyncsendCallCount proves the no-second-send-attempt property.
+let failNextSendNetwork = false
 let fetchCallCount = 0
+let asyncsendCallCount = 0
 
 const fakeFetch: typeof fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
   fetchCallCount += 1
@@ -76,6 +81,11 @@ const fakeFetch: typeof fetch = (async (input: RequestInfo | URL, init?: Request
     return new Response(JSON.stringify({ errcode: 0, errmsg: 'ok', access_token: 'tok_test' }), { status: 200, headers: { 'Content-Type': 'application/json' } })
   }
   if (url.includes('/topapi/message/corpconversation/asyncsend_v2')) {
+    asyncsendCallCount += 1
+    if (failNextSendNetwork) {
+      failNextSendNetwork = false
+      throw new TypeError('fetch failed')
+    }
     if (failNextSend) {
       failNextSend = false
       return new Response(JSON.stringify({ errcode: 88, errmsg: 'ding: simulated send failure' }), { status: 200, headers: { 'Content-Type': 'application/json' } })
@@ -463,6 +473,85 @@ describeIfDatabase('A-2b send_dingtalk_approval_card action (real DB)', () => {
     expect(cardStep!.output?.deliveryLedgerError).toBeUndefined()
 
     await svc.deleteRule(rule.id, SHEET_ID)
+  })
+
+  test('PR #4046 Phase B: a transport-level outcome-unknown send failure records send_status=outcome_unknown (NOT failed), the execution output carries deliveryOutcomeUnknown, and there is NO second send attempt', async () => {
+    const rule = await svc.createRule(SHEET_ID, {
+      name: 'card outcome-unknown', triggerType: 'approval.task_created', triggerConfig: { templateId },
+      actionType: 'send_dingtalk_approval_card', actionConfig: {}, createdBy: CREATOR,
+    } as never)
+    ruleIds.push(rule.id)
+
+    failNextSendNetwork = true
+    const asyncsendBefore = asyncsendCallCount
+    const dto = await approvals.createApproval({ templateId, formData: { summary: 'outcome-unknown run' } }, { userId: REQUESTER, userName: REQUESTER })
+    const instanceId = (dto as { id: string }).id
+
+    // The ledger consumes the marker: the DISTINCT outcome_unknown state, never plain 'failed' —
+    // the card may well have been delivered (owner doctrine: no auto-resend on ambiguity; a lost
+    // response has no task_id, so DingTalk's result query cannot reconcile it automatically).
+    const rows = await waitFor(async () => (await cardRows(instanceId)).filter((r) => r.send_status !== 'pending'))
+    expect(rows).toHaveLength(1)
+    expect(rows[0].send_status).toBe('outcome_unknown')
+    expect(rows[0].task_id).toBeNull()
+    expect(String(rows[0].send_error)).toContain('fetch failed')
+
+    // NO second send attempt: exactly one asyncsend fetch for this run (transport send tier
+    // never resends; the executor makes exactly one send call).
+    expect(asyncsendCallCount).toBe(asyncsendBefore + 1)
+
+    // The persisted execution record carries the flag for the execution ledger/readers.
+    const executionRows = await waitFor(async () => {
+      const r = await q(
+        `SELECT steps FROM multitable_automation_executions WHERE rule_id = $1 ORDER BY created_at DESC`,
+        [rule.id],
+      )
+      return r.rows
+    })
+    expect(executionRows.length).toBeGreaterThan(0)
+    const rawSteps = (executionRows[0] as { steps: unknown }).steps
+    const steps = (typeof rawSteps === 'string' ? JSON.parse(rawSteps) : rawSteps) as Array<Record<string, unknown>>
+    const cardStep = steps.find((s) => s.actionType === 'send_dingtalk_approval_card') as
+      | { status: string; output?: { deliveryId?: string; deliveryOutcomeUnknown?: boolean; deliveryStuckPending?: boolean } }
+      | undefined
+    expect(cardStep).toBeDefined()
+    expect(cardStep!.status).toBe('failed')
+    expect(cardStep!.output?.deliveryId).toBe(rows[0].id)
+    expect(cardStep!.output?.deliveryOutcomeUnknown).toBe(true)
+    expect(cardStep!.output?.deliveryStuckPending).toBeUndefined()
+
+    // Contrast pin (mutation guard both directions): the DEFINITE-rejection path in the previous
+    // test stays 'failed' WITHOUT the flag — mapping outcome-unknown back to plain 'failed' turns
+    // the assertions above red; mapping all failures to outcome_unknown turns that test red.
+
+    await svc.deleteRule(rule.id, SHEET_ID)
+  })
+
+  test('PR #4046 Phase B: dingtalk_person_deliveries accepts the outcome_unknown status (widened CHECK) and still rejects unknown values', async () => {
+    // The executor's person-delivery writes go through recordDingTalkPersonDeliverySafely, which
+    // swallows insert errors by design — a unit test cannot prove the DB accepts the new status.
+    // Prove the widened CHECK against real Postgres here (both directions).
+    const inserted = await q(
+      `INSERT INTO dingtalk_person_deliveries
+         (id, local_user_id, dingtalk_user_id, source_type, subject, content, success, status, error_message)
+       VALUES ($1, $2, $3, 'automation', 's', 'c', FALSE, 'outcome_unknown', 'fetch failed')
+       RETURNING id, status`,
+      [randomUUID(), APPROVER, DD_USER_ID],
+    )
+    expect((inserted.rows[0] as { status: string }).status).toBe('outcome_unknown')
+
+    let code: string | undefined
+    try {
+      await q(
+        `INSERT INTO dingtalk_person_deliveries
+           (id, local_user_id, source_type, subject, content, success, status)
+         VALUES ($1, $2, 'automation', 's', 'c', FALSE, 'bogus_status')`,
+        [randomUUID(), APPROVER],
+      )
+    } catch (e) {
+      code = (e as { code?: string }).code
+    }
+    expect(code).toBe('23514')
   })
 
   test('DT-HARDEN-06: send fails AND the ledger mark-failed write ALSO fails — deliveryStuckPending/deliveryLedgerError surface in the persisted execution record, not swallowed', async () => {

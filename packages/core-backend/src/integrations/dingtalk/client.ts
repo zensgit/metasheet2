@@ -1,7 +1,24 @@
-import { Logger } from '../../core/logger'
 import { assertDingTalkCorpAllowed } from './runtime-policy'
+import {
+  DingTalkBusinessError,
+  normalizeErrorMessage,
+  readNumericField,
+  requestDingTalkTransportJson,
+  type DingTalkCallKind,
+} from './transport'
 
-const logger = new Logger('DingTalkClient')
+// Error shapes and the H06 timeout knob moved to the unified transport (roadmap
+// §7.2) — re-exported so existing callers keep importing them from this module.
+// isDingTalkOutcomeUnknown lets ledger writers distinguish "maybe delivered"
+// send failures (network/timeout/5xx) from definite rejections.
+export {
+  DINGTALK_REQUEST_TIMEOUT_MS,
+  DingTalkBusinessError,
+  DingTalkMalformedResponseError,
+  DingTalkRequestError,
+  DingTalkTimeoutError,
+  isDingTalkOutcomeUnknown,
+} from './transport'
 
 export interface DingTalkOauthConfig {
   clientId: string
@@ -73,8 +90,10 @@ export interface DingTalkWorkNotificationResult {
 
 interface DingTalkRequestOptions {
   fetchFn?: typeof fetch
-  /** Override the default per-request timeout (DT-HARDEN-06). */
+  /** Override the default per-request timeout (DT-HARDEN-06); applies PER ATTEMPT. */
   timeoutMs?: number
+  /** Overall abort signal: cancels the in-flight attempt AND any retry backoff immediately. */
+  signal?: AbortSignal
 }
 
 export interface DingTalkDepartment {
@@ -117,28 +136,6 @@ export interface DingTalkDirectoryUser {
   source: Record<string, unknown>
 }
 
-export class DingTalkRequestError extends Error {
-  statusCode: number
-  responseBody: Record<string, unknown> | null
-
-  constructor(message: string, statusCode: number, responseBody: Record<string, unknown> | null) {
-    super(message)
-    this.name = 'DingTalkRequestError'
-    this.statusCode = statusCode
-    this.responseBody = responseBody
-  }
-}
-
-export class DingTalkBusinessError extends Error {
-  responseBody: Record<string, unknown> | null
-
-  constructor(message: string, responseBody: Record<string, unknown> | null) {
-    super(message)
-    this.name = 'DingTalkBusinessError'
-    this.responseBody = responseBody
-  }
-}
-
 function readStringEnv(...keys: string[]): string {
   for (const key of keys) {
     const value = process.env[key]
@@ -167,114 +164,9 @@ function readEnvStatus<const T extends readonly string[]>(
   }
 }
 
-function normalizeErrorMessage(payload: Record<string, unknown> | null, fallback: string): string {
-  if (!payload) return fallback
-  const candidates = [
-    payload.message,
-    payload.msg,
-    payload.error_description,
-    payload.errorDescription,
-    payload.error,
-  ]
-  for (const candidate of candidates) {
-    if (typeof candidate === 'string' && candidate.trim().length > 0) {
-      return candidate.trim()
-    }
-  }
-  return fallback
-}
-
-async function readJson(response: Response): Promise<Record<string, unknown> | null> {
-  try {
-    const payload = await response.json()
-    return payload && typeof payload === 'object' ? payload as Record<string, unknown> : null
-  } catch {
-    return null
-  }
-}
-
-/**
- * DT-HARDEN-06: every DingTalk call that is not the group-robot webhook goes through
- * here — gettoken, directory sync, work notifications, approval cards, container
- * login. They used a naked `fetch` with no timeout, so a hung connection blocked an
- * inline automation execution or a whole directory sync for as long as undici's
- * default (~300s). Bound them, and surface the timeout as a typed operational error
- * so callers record a failed run/delivery instead of hanging.
- */
-export const DINGTALK_REQUEST_TIMEOUT_MS = (() => {
-  const raw = Number(process.env.DINGTALK_REQUEST_TIMEOUT_MS)
-  return Number.isFinite(raw) && raw > 0 ? Math.trunc(raw) : 10_000
-})()
-
-export class DingTalkTimeoutError extends Error {
-  readonly timeoutMs: number
-
-  constructor(timeoutMs: number) {
-    super(`DingTalk request timed out after ${timeoutMs}ms`)
-    this.name = 'DingTalkTimeoutError'
-    this.timeoutMs = timeoutMs
-  }
-}
-
-function isAbortError(error: unknown): boolean {
-  return error instanceof Error && (error.name === 'AbortError' || error.name === 'TimeoutError')
-}
-
-async function requestDingTalkJson(
-  input: string,
-  init: RequestInit,
-  fallbackError: string,
-  options?: DingTalkRequestOptions,
-): Promise<Record<string, unknown>> {
-  const timeoutMs = options?.timeoutMs ?? DINGTALK_REQUEST_TIMEOUT_MS
-  let response: Response
-  try {
-    response = await (options?.fetchFn ?? fetch)(input, {
-      ...init,
-      // Spread first: an explicit `signal: undefined` in `init` would otherwise
-      // clobber the timeout. A caller-supplied signal still wins.
-      signal: init.signal ?? AbortSignal.timeout(timeoutMs),
-    })
-  } catch (error) {
-    if (isAbortError(error)) {
-      logger.warn(`DingTalk request timed out after ${timeoutMs}ms`)
-      throw new DingTalkTimeoutError(timeoutMs)
-    }
-    throw error
-  }
-  const payload = await readJson(response)
-
-  if (!response.ok) {
-    const message = normalizeErrorMessage(payload, fallbackError)
-    logger.warn(`DingTalk request failed (${response.status}): ${message}`)
-    throw new DingTalkRequestError(message, response.status, payload)
-  }
-
-  return payload ?? {}
-}
-
-function readNumericField(payload: Record<string, unknown>, ...keys: string[]): number | null {
-  for (const key of keys) {
-    const value = payload[key]
-    if (typeof value === 'number') return value
-    if (typeof value === 'string' && value.trim().length > 0 && !Number.isNaN(Number(value))) {
-      return Number(value)
-    }
-  }
-  return null
-}
-
 function readNestedPayload(payload: Record<string, unknown>, key = 'result'): Record<string, unknown> {
   const nested = payload[key]
   return nested && typeof nested === 'object' ? nested as Record<string, unknown> : {}
-}
-
-function normalizeDingTalkApiPayload(payload: Record<string, unknown>, fallbackError: string): Record<string, unknown> {
-  const errcode = readNumericField(payload, 'errcode', 'code')
-  if (errcode !== null && errcode !== 0) {
-    throw new DingTalkBusinessError(normalizeErrorMessage(payload, fallbackError), payload)
-  }
-  return payload
 }
 
 function normalizeDirectoryBaseUrl(baseUrl?: string): string {
@@ -284,20 +176,54 @@ function normalizeDirectoryBaseUrl(baseUrl?: string): string {
   return normalized.replace(/\/+$/, '')
 }
 
+/**
+ * v1.0 api.dingtalk.com endpoints (HTTP-status based, no errcode envelope). All
+ * timeout/retry/backoff/flow-control handling lives in the shared transport seam
+ * (roadmap §7.2); `kind` is the explicit business-semantics tier every call site
+ * must declare (read / exchange / send) — see DingTalkCallKind in ./transport.
+ */
+async function requestDingTalkJson(
+  input: string,
+  init: RequestInit,
+  fallbackError: string,
+  kind: DingTalkCallKind,
+  options?: DingTalkRequestOptions,
+): Promise<Record<string, unknown>> {
+  return requestDingTalkTransportJson({
+    input,
+    init,
+    fallbackError,
+    kind,
+    envelope: 'none',
+    fetchFn: options?.fetchFn,
+    timeoutMs: options?.timeoutMs,
+    signal: options?.signal,
+  })
+}
+
+/**
+ * Legacy oapi.dingtalk.com envelope endpoints: an `errcode !== 0` inside an HTTP-200
+ * body surfaces as DingTalkBusinessError. The envelope is checked INSIDE the
+ * transport's retry loop so flow-control errcodes back off on idempotent reads.
+ */
 async function requestDingTalkDirectoryJson(
   path: string,
   init: RequestInit,
   fallbackError: string,
+  kind: DingTalkCallKind,
   baseUrl?: string,
   options?: DingTalkRequestOptions,
 ): Promise<Record<string, unknown>> {
-  const payload = await requestDingTalkJson(
-    `${normalizeDirectoryBaseUrl(baseUrl)}${path}`,
+  return requestDingTalkTransportJson({
+    input: `${normalizeDirectoryBaseUrl(baseUrl)}${path}`,
     init,
     fallbackError,
-    options,
-  )
-  return normalizeDingTalkApiPayload(payload, fallbackError)
+    kind,
+    envelope: 'oapi',
+    fetchFn: options?.fetchFn,
+    timeoutMs: options?.timeoutMs,
+    signal: options?.signal,
+  })
 }
 
 export function readDingTalkOauthConfig(): DingTalkOauthConfig {
@@ -397,6 +323,9 @@ export async function exchangeCodeForUserAccessToken(
       }),
     },
     'Failed to obtain access token from DingTalk',
+    // One-shot authorization-code exchange: a retry after ANY ambiguous failure
+    // burns or double-redeems the single-use code — never retried.
+    'exchange',
   )
 
   const accessToken = typeof payload.accessToken === 'string'
@@ -436,6 +365,7 @@ export async function fetchDingTalkCurrentUser(accessToken: string): Promise<Din
       },
     },
     'Failed to get current user info from DingTalk',
+    'read',
   )
 
   const openId = typeof payload.openId === 'string'
@@ -514,6 +444,7 @@ async function fetchDingTalkAppAccessTokenUncached(
       },
     },
     'Failed to obtain DingTalk app access token',
+    'read',
     baseUrl,
     options,
   )
@@ -577,6 +508,8 @@ export async function listDingTalkDepartments(
       }),
     },
     'Failed to list DingTalk departments',
+    // POST-verb but a query-shaped read — safe to retry.
+    'read',
     config?.baseUrl,
   )
 
@@ -617,6 +550,7 @@ export async function getDingTalkDepartmentDetail(
       }),
     },
     'Failed to read DingTalk department detail',
+    'read',
     config?.baseUrl,
   )
 
@@ -653,6 +587,7 @@ export async function listDingTalkDepartmentUsers(
       }),
     },
     'Failed to list DingTalk department users',
+    'read',
     config?.baseUrl,
   )
 
@@ -708,6 +643,7 @@ export async function getDingTalkUserDetail(
       }),
     },
     'Failed to read DingTalk user detail',
+    'read',
     config?.baseUrl,
   )
 
@@ -769,6 +705,9 @@ export async function getDingTalkUserInfoByAuthCode(
       body: JSON.stringify({ code: authCode }),
     },
     'Failed to exchange DingTalk container auth code',
+    // One-shot container authCode: a retry after ANY ambiguous failure burns or
+    // double-redeems the single-use code — never retried.
+    'exchange',
     config?.baseUrl,
   )
 
@@ -960,6 +899,9 @@ export async function sendDingTalkInteractiveApprovalCard(
       }),
     },
     'Failed to send DingTalk interactive approval card',
+    // B-2 interactive card is a SIDE-EFFECT SEND: never resent on ambiguity; a lost
+    // response surfaces as outcome-unknown for the card ledger (same tier as asyncsend_v2).
+    'send',
     options,
   )
 
@@ -1014,6 +956,10 @@ export async function sendDingTalkWorkNotificationActionCard(
       }),
     },
     'Failed to send DingTalk action-card work notification',
+    // Side-effect send: never auto-retried. A lost response has no task_id, so
+    // DingTalk's async-send result query cannot serve as an idempotency key —
+    // uncertain outcomes surface via isDingTalkOutcomeUnknown instead.
+    'send',
     config.baseUrl,
     options,
   )
@@ -1073,6 +1019,10 @@ export async function sendDingTalkWorkNotification(
       }),
     },
     'Failed to send DingTalk work notification',
+    // Side-effect send: never auto-retried. A lost response has no task_id, so
+    // DingTalk's async-send result query cannot serve as an idempotency key —
+    // uncertain outcomes surface via isDingTalkOutcomeUnknown instead.
+    'send',
     config.baseUrl,
     options,
   )
