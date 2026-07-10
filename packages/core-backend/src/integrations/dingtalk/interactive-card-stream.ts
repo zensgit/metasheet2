@@ -64,7 +64,7 @@ export type DingTalkInteractiveCardStreamClientFactory = (
 export type DingTalkInteractiveCardStreamWorkerStatus =
   | { state: 'disabled'; reason: DingTalkInteractiveCardStreamDisabledReason }
   | { state: 'active' }
-  | { state: 'failed'; reason: 'client_start_failed' | 'client_stop_failed' }
+  | { state: 'failed'; reason: 'client_start_failed' | 'client_stop_failed' | 'sdk_unwired' }
 
 function readEnv(env: NodeJS.ProcessEnv, key: string): string {
   return typeof env[key] === 'string' ? env[key]!.trim() : ''
@@ -114,6 +114,7 @@ export class DingTalkInteractiveCardStreamWorker {
   private readonly logger: Pick<Logger, 'info' | 'warn'>
   private readonly clientFactory: DingTalkInteractiveCardStreamClientFactory
   private client: DingTalkInteractiveCardStreamClient | null = null
+  private initializing: Promise<DingTalkInteractiveCardStreamWorkerStatus> | null = null
   private status: DingTalkInteractiveCardStreamWorkerStatus = { state: 'disabled', reason: 'env_disabled' }
 
   constructor(options: {
@@ -129,6 +130,16 @@ export class DingTalkInteractiveCardStreamWorker {
   }
 
   async initialize(env: NodeJS.ProcessEnv = process.env): Promise<DingTalkInteractiveCardStreamWorkerStatus> {
+    if (this.initializing) return this.initializing
+    if (this.client && this.status.state === 'active') return this.status
+
+    this.initializing = this.initializeOnce(env).finally(() => {
+      this.initializing = null
+    })
+    return this.initializing
+  }
+
+  private async initializeOnce(env: NodeJS.ProcessEnv): Promise<DingTalkInteractiveCardStreamWorkerStatus> {
     const config = resolveDingTalkInteractiveCardStreamConfig(env)
     if (config.enabled === false) {
       this.status = { state: 'disabled', reason: config.reason }
@@ -136,22 +147,33 @@ export class DingTalkInteractiveCardStreamWorker {
       return this.status
     }
 
+    let createdClient: DingTalkInteractiveCardStreamClient | null = null
     try {
-      const client = await this.clientFactory(config, {
+      createdClient = await this.clientFactory(config, {
         onEvent: async (event) => {
           await this.handleEvent(event)
         },
       })
-      await client.start()
-      this.client = client
+      await createdClient.start()
+      this.client = createdClient
       this.status = { state: 'active' }
       this.logger.info('DingTalk interactive-card Stream worker started')
       return this.status
-    } catch {
+    } catch (error) {
+      if (createdClient) {
+        try {
+          await createdClient.close()
+        } catch {
+          this.logger.warn('DingTalk interactive-card Stream worker failed to close half-started client (client_start_failed)')
+        }
+      }
       this.client = null
-      this.status = { state: 'failed', reason: 'client_start_failed' }
+      const reason = error instanceof Error && error.message === 'DINGTALK_INTERACTIVE_CARD_STREAM_SDK_UNWIRED'
+        ? 'sdk_unwired'
+        : 'client_start_failed'
+      this.status = { state: 'failed', reason }
       // Values-free: do not log SDK error messages because they may include transport payloads or credentials.
-      this.logger.warn('DingTalk interactive-card Stream worker failed to start (client_start_failed)')
+      this.logger.warn(`DingTalk interactive-card Stream worker failed to start (${reason})`)
       return this.status
     }
   }

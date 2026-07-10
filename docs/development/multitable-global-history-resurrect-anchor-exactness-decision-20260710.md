@@ -14,6 +14,9 @@
 
 ## 建议
 
-**A′**（原推荐 A 经审阅修正后降为次选）：T 已在 wire 上、语义即「恢复到 T 时刻」，vintage-正确锚由 T 唯一决定——服务端推导比把选择权推给调用方更便宜也更不易错。实现要点（ratify 后才排）：锚选择查询改为「首条 `action='delete'` 且 created_at > T」（找不到时 fail-closed 维持现启发式?否——找不到=该记录 T 时刻未删,resurrect 集合本就不含它;以 goldens 钉边界）；R8 的多 vintage/未捕获 vintage goldens 翻断言为精确重放；锚选择突变（改回 latest-delete 启发式）⇒ 多 vintage golden 红。
+**A′**（原推荐 A 经审阅修正后降为次选）：T 已在 wire 上、语义即「恢复到 T 时刻」，vintage-正确锚由 T 唯一决定——服务端推导比把选择权推给调用方更便宜也更不易错。实现要点（ratify 后才排）：
+- **锚选择的确定性排序契约（owner P2，锁定为规范文本，与既有 LOCK-11 确定性约束一致）**：筛 `action='delete'` 且 `created_at > T`，排序 **`ORDER BY created_at ASC, version ASC, id ASC LIMIT 1`**——同毫秒多条 delete revision 时由 version、再由 id 决出唯一且稳定的锚；任何实现不得省略三级 tiebreak。
+- 找不到时的语义：找不到 = 该记录 T 时刻未删，resurrect 集合本就不含它；以 goldens 钉边界（不回退启发式）。
+- Goldens：R8 的多 vintage/未捕获 vintage goldens 翻断言为精确重放；**新增同毫秒 golden**（两条 delete revision `created_at` 相同 → version/id tiebreak 选定且跨运行稳定）；锚选择突变（改回 latest-delete 启发式，或去掉任一 tiebreak 键）⇒ 对应 golden 红。
 
 - **解锁词**：owner 点头选项（A′/A/B/C）。选 C=关闭本项,从 owner 菜单划除。
