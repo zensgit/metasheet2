@@ -183,6 +183,8 @@ describe('Cluster-C batch 2 scalar functions', () => {
       expect(await calc('=SECOND(TIMEVALUE("13:30:45"))')).toBe(45)
       expect(await calc('=SECOND(TIMEVALUE("13:30"))')).toBe(0) // seconds default to 0
       expect(await calc('=TIMEVALUE("25:00:00")')).toBe('#VALUE!') // hour out of range
+      expect(await calc('=TIMEVALUE("12:75")')).toBe('#VALUE!') // minute out of range (gate P3: mi>59 guard)
+      expect(await calc('=TIMEVALUE("12:30:99")')).toBe('#VALUE!') // second out of range (gate P3: se>59 guard)
       expect(await calc('=TIMEVALUE("not-a-time")')).toBe('#VALUE!')
     })
 
@@ -199,6 +201,9 @@ describe('Cluster-C batch 2 scalar functions', () => {
       expect(await calc('=YEARFRAC(DATE(2026, 1, 1), DATE(2027, 1, 1))')).toBeCloseTo(1, 9)
       expect(await calc('=YEARFRAC(DATE(2026, 1, 1), DATE(2026, 7, 1))')).toBeCloseTo(0.5, 9)
       expect(await calc('=YEARFRAC(DATE(2026, 1, 1), DATE(2026, 4, 1))')).toBeCloseTo(0.25, 9)
+      // gate P2: day-31 adjustments in days360US are load-bearing — d1=31→30 and d2=31→30(after d1 adj)
+      expect(await calc('=YEARFRAC(DATE(2026, 1, 31), DATE(2026, 6, 30))')).toBeCloseTo(150 / 360, 9) // 0.416667, not 0.413889
+      expect(await calc('=YEARFRAC(DATE(2026, 1, 30), DATE(2026, 3, 31))')).toBeCloseTo(60 / 360, 9) // 0.166667
       // Reversed argument order still yields the same positive fraction (matches Excel).
       expect(await calc('=YEARFRAC(DATE(2026, 7, 1), DATE(2026, 1, 1))')).toBeCloseTo(0.5, 9)
       expect(await calc('=YEARFRAC(DATE(2026, 1, 1), DATE(2026, 1, 1), 0)')).toBe(0)
