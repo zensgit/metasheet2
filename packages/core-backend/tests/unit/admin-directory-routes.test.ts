@@ -1,5 +1,9 @@
 import type { Request, Response } from 'express'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+// Resolves through the vi.mock factory below, which re-exports the REAL class —
+// so `new DirectorySyncInProgressError(...)` here is the same constructor the
+// route's `instanceof` discriminates against in production.
+import { DirectorySyncInProgressError } from '../../src/directory/directory-sync'
 
 const rbacMocks = vi.hoisted(() => ({
   isRbacAdmin: vi.fn(),
@@ -545,6 +549,41 @@ describe('adminDirectoryRouter', () => {
     })
 
     expect(response.statusCode).toBe(404)
+  })
+
+  // DT-HARDEN-05 gate P2-1: a lease conflict is a benign "already running" state and must
+  // map to 409 + the active runId on BOTH trigger paths — never a 500 that monitoring
+  // pages on. The async branch regressed exactly this way once (its catch knew only
+  // /not found/→404, else 500), so each branch gets its own pin.
+  it('maps a lease conflict to 409 with the active runId on the synchronous path', async () => {
+    directoryMocks.syncDirectoryIntegration.mockRejectedValue(new DirectorySyncInProgressError('run-live-1'))
+
+    const response = await invokeRoute('post', '/integrations/:integrationId/sync', {
+      params: { integrationId: 'dir-1' },
+      user: { id: 'admin-1', role: 'admin' },
+    })
+
+    expect(response.statusCode).toBe(409)
+    expect(response.body).toMatchObject({
+      ok: false,
+      error: { code: 'DIRECTORY_SYNC_IN_PROGRESS', details: { activeRunId: 'run-live-1' } },
+    })
+  })
+
+  it('maps a lease conflict to 409 with the active runId on the async path too', async () => {
+    directoryMocks.syncDirectoryIntegration.mockRejectedValue(new DirectorySyncInProgressError('run-live-2'))
+
+    const response = await invokeRoute('post', '/integrations/:integrationId/sync', {
+      params: { integrationId: 'dir-1' },
+      body: { async: true },
+      user: { id: 'admin-1', role: 'admin' },
+    })
+
+    expect(response.statusCode).toBe(409)
+    expect(response.body).toMatchObject({
+      ok: false,
+      error: { code: 'DIRECTORY_SYNC_IN_PROGRESS', details: { activeRunId: 'run-live-2' } },
+    })
   })
 
   it('previews a sync without applying it', async () => {
