@@ -254,27 +254,6 @@ function Resolve-CorepackCommand {
   return $null
 }
 
-function Resolve-CorepackShimPnpmCandidates {
-  param([string]$CorepackPath)
-
-  # Corrective (#3751 entity-machine rerun, failureClass=PNPM_VERSION_MISMATCH): `corepack prepare
-  # --activate` writes its pnpm shim NEXT TO the corepack binary, but a user/system-profile pnpm.cmd
-  # earlier on PATH can shadow it. These co-located shims are probed FIRST so the freshly activated
-  # pin always wins over shadowing profile binaries.
-  if ([string]::IsNullOrWhiteSpace($CorepackPath)) {
-    return @()
-  }
-  $shimDir = Split-Path -Parent $CorepackPath
-  $candidates = @()
-  foreach ($leaf in @('pnpm.cmd', 'pnpm.exe', 'pnpm.ps1', 'pnpm')) {
-    $candidate = Join-Path $shimDir $leaf
-    if (Test-Path -LiteralPath $candidate) {
-      $candidates += $candidate
-    }
-  }
-  return $candidates
-}
-
 function Resolve-PackagePnpmVersion {
   param([string]$PackageRoot)
 
@@ -295,6 +274,13 @@ function Resolve-PackagePnpmVersion {
 function Initialize-PinnedPnpm {
   param([string]$RequiredVersion)
 
+  # Corrective (#3751 entity-machine rerun, failureClass=PNPM_VERSION_MISMATCH): `corepack prepare
+  # --activate` only records the pin in $COREPACK_HOME (it writes NO shim — shims come from
+  # `corepack enable`), so ANY PATH-based pnpm resolution can be shadowed by a user/system-profile
+  # pnpm of a different version. The fix is to stop resolving pnpm from PATH entirely whenever
+  # corepack exists: every pnpm invocation goes THROUGH corepack as `corepack pnpm@<pin> ...`
+  # (version-addressed passthrough — corepack itself guarantees the exact pinned version, PATH
+  # shadowing becomes irrelevant). The exact-version check stays fail-closed on both paths.
   $corepackPath = Resolve-CorepackCommand
   if (-not [string]::IsNullOrWhiteSpace($corepackPath)) {
     Write-Info "Activate pinned pnpm via corepack prepare pnpm@$RequiredVersion --activate"
@@ -304,42 +290,33 @@ function Initialize-PinnedPnpm {
     if ($prepareExit -ne 0) {
       throw "corepack failed to activate pnpm $RequiredVersion (exit=$prepareExit)"
     }
-  } else {
-    Write-Info 'corepack is unavailable; an already-installed exact pnpm version is required'
+
+    $specArg = "pnpm@$RequiredVersion"
+    $actualVersion = $null
+    try {
+      $actualVersion = Invoke-PnpmSingleLine -PnpmPath $corepackPath -PnpmSpecArg $specArg -Arguments @('--version')
+    } catch {
+      throw "PNPM_VERSION_MISMATCH: corepack passthrough '$specArg --version' failed at $corepackPath ($($_.Exception.Message))"
+    }
+    if ([string]::IsNullOrWhiteSpace($actualVersion) -or $actualVersion.Trim() -ne $RequiredVersion) {
+      throw "PNPM_VERSION_MISMATCH: package requires $RequiredVersion but corepack passthrough resolved '$actualVersion' at $corepackPath"
+    }
+
+    Write-Info "Pinned pnpm ready via corepack passthrough: version=$RequiredVersion launcher=$corepackPath $specArg"
+    return @{ Path = $corepackPath; SpecArg = $specArg }
   }
 
-  # Shim-first resolution (#3751 corrective): probe the shims co-located with corepack and select
-  # the candidate whose --version equals the pin; only when NO co-located shim matches fall back to
-  # the generic PATH walk. The exact-version check below stays fail-closed on either path, so a
-  # shadowing profile pnpm can delay but never bypass the pin.
-  $pnpmPath = $null
-  $probedShims = @()
-  foreach ($candidate in (Resolve-CorepackShimPnpmCandidates -CorepackPath $corepackPath)) {
-    $candidateVersion = Invoke-PnpmSingleLine -PnpmPath $candidate -Arguments @('--version')
-    $candidateLabel = if ([string]::IsNullOrWhiteSpace($candidateVersion)) { '<none>' } else { $candidateVersion.Trim() }
-    $probedShims += ("{0} => {1}" -f $candidate, $candidateLabel)
-    if ($candidateLabel -eq $RequiredVersion) {
-      $pnpmPath = $candidate
-      break
-    }
-  }
-  if (-not [string]::IsNullOrWhiteSpace($pnpmPath)) {
-    Write-Info "Pinned pnpm resolved via corepack-co-located shim: $pnpmPath"
-  } else {
-    if ($probedShims.Count -gt 0) {
-      Write-Info ("No co-located corepack shim matched the pin; probed: " + ($probedShims -join '; '))
-    }
-    $pnpmPath = Resolve-PnpmInstallCommand
-  }
-
+  # No corepack at all: an already-installed exact pnpm is required (pre-existing posture). The
+  # PATH walk here is the LAST resort and stays fail-closed on the exact-version check.
+  Write-Info 'corepack is unavailable; an already-installed exact pnpm version is required'
+  $pnpmPath = Resolve-PnpmInstallCommand
   $actualVersion = Invoke-PnpmSingleLine -PnpmPath $pnpmPath -Arguments @('--version')
   if ([string]::IsNullOrWhiteSpace($actualVersion) -or $actualVersion.Trim() -ne $RequiredVersion) {
-    $probeSuffix = if ($probedShims.Count -gt 0) { " (co-located shims probed: " + ($probedShims -join '; ') + ")" } else { '' }
-    throw "PNPM_VERSION_MISMATCH: package requires $RequiredVersion but resolved '$actualVersion' at $pnpmPath$probeSuffix"
+    throw "PNPM_VERSION_MISMATCH: package requires $RequiredVersion but resolved '$actualVersion' at $pnpmPath"
   }
 
   Write-Info "Pinned pnpm ready: version=$RequiredVersion path=$pnpmPath"
-  return $pnpmPath
+  return @{ Path = $pnpmPath; SpecArg = '' }
 }
 
 function Convert-PositiveInt {
@@ -365,8 +342,15 @@ function ConvertTo-CmdQuoted {
 function Invoke-PnpmSingleLine {
   param(
     [string]$PnpmPath,
-    [string[]]$Arguments
+    [string[]]$Arguments,
+    [string]$PnpmSpecArg = ''
   )
+
+  # Corepack passthrough mode: the version-addressed spec token (pnpm@<pin>) rides FIRST so the
+  # launcher is corepack itself and PATH shadowing cannot substitute another pnpm.
+  if (-not [string]::IsNullOrWhiteSpace($PnpmSpecArg)) {
+    $Arguments = @($PnpmSpecArg) + $Arguments
+  }
 
   if ($PnpmPath.ToLowerInvariant().EndsWith('.ps1')) {
     $output = powershell.exe -NoProfile -ExecutionPolicy Bypass -File $PnpmPath @Arguments 2>$null
@@ -383,6 +367,7 @@ function New-DependencyRefreshCommandWrapper {
   param(
     [string]$WrapperPath,
     [string]$PnpmPath,
+    [string]$PnpmSpecArg = '',
     [string]$RootDir,
     [string]$StoreDir,
     [switch]$Offline
@@ -395,6 +380,10 @@ function New-DependencyRefreshCommandWrapper {
     "powershell.exe -NoProfile -ExecutionPolicy Bypass -File $quotedPnpmPath"
   } else {
     "call $quotedPnpmPath"
+  }
+  # Corepack passthrough: the spec token (pnpm@<pin>) follows the launcher in every wrapper line.
+  if (-not [string]::IsNullOrWhiteSpace($PnpmSpecArg)) {
+    $pnpmPrefix = "$pnpmPrefix $PnpmSpecArg"
   }
   $offlineFlag = if ($Offline) { ' --offline' } else { '' }
 
@@ -610,6 +599,7 @@ function Invoke-DependencyInstall {
   param(
     [string]$Description,
     [string]$PnpmPath,
+    [string]$PnpmSpecArg = '',
     [string]$RootDir,
     [string]$StoreDir,
     [string]$LogPrefix,
@@ -623,6 +613,7 @@ function Invoke-DependencyInstall {
   New-DependencyRefreshCommandWrapper `
     -WrapperPath $wrapperPath `
     -PnpmPath $PnpmPath `
+    -PnpmSpecArg $PnpmSpecArg `
     -RootDir $RootDir `
     -StoreDir $StoreDir `
     -Offline:$Offline
@@ -1003,7 +994,9 @@ try {
 
   if ($InstallDeps -ne '0') {
     $requiredPnpmVersion = Resolve-PackagePnpmVersion -PackageRoot $packageRoot
-    $pnpmInstallPath = Initialize-PinnedPnpm -RequiredVersion $requiredPnpmVersion
+    $pnpmLauncher = Initialize-PinnedPnpm -RequiredVersion $requiredPnpmVersion
+    $pnpmInstallPath = $pnpmLauncher.Path
+    $pnpmSpecArg = [string]$pnpmLauncher.SpecArg
     $dependencyTimeoutSec = Convert-PositiveInt -Value $DependencyRefreshTimeoutSec -Label 'DependencyRefreshTimeoutSec'
     $dependencyHeartbeatSec = Convert-PositiveInt -Value $DependencyRefreshHeartbeatSec -Label 'DependencyRefreshHeartbeatSec'
     # The deploy-local content-addressable store is cache-only state. Reusing it
@@ -1013,11 +1006,11 @@ try {
     $timestamp = Get-Date -Format 'yyyyMMdd-HHmmss'
     $preflightLogPrefix = Join-Path $outputLogs ('dependency-preflight-' + $timestamp)
     $dependencyLogPrefix = Join-Path $outputLogs ('dependency-activate-' + $timestamp)
-    Write-Info "pnpm path: $pnpmInstallPath"
-    Write-Info "pnpm install path: $pnpmInstallPath"
+    Write-Info "pnpm launcher: $pnpmInstallPath $pnpmSpecArg"
+    Write-Info "pnpm install launcher: $pnpmInstallPath $pnpmSpecArg"
     Write-Info "dependency transaction store: $dependencyStoreDir"
     try {
-      $pnpmVersion = Invoke-PnpmSingleLine -PnpmPath $pnpmInstallPath -Arguments @('--version')
+      $pnpmVersion = Invoke-PnpmSingleLine -PnpmPath $pnpmInstallPath -PnpmSpecArg $pnpmSpecArg -Arguments @('--version')
       if (-not [string]::IsNullOrWhiteSpace($pnpmVersion)) {
         Write-Info "pnpm version: $pnpmVersion"
       }
@@ -1026,7 +1019,7 @@ try {
       Write-Info "Unable to read pnpm version before dependency refresh: $($_.Exception.Message)"
     }
     try {
-      $pnpmRegistry = Invoke-PnpmSingleLine -PnpmPath $pnpmInstallPath -Arguments @('config', 'get', 'registry')
+      $pnpmRegistry = Invoke-PnpmSingleLine -PnpmPath $pnpmInstallPath -PnpmSpecArg $pnpmSpecArg -Arguments @('config', 'get', 'registry')
       if (-not [string]::IsNullOrWhiteSpace($pnpmRegistry)) {
         Write-Info "pnpm config registry: $pnpmRegistry"
       }
@@ -1035,7 +1028,7 @@ try {
       Write-Info "Unable to read pnpm registry before dependency refresh: $($_.Exception.Message)"
     }
     try {
-      $pnpmStoreDir = Invoke-PnpmSingleLine -PnpmPath $pnpmInstallPath -Arguments @('config', 'get', 'store-dir')
+      $pnpmStoreDir = Invoke-PnpmSingleLine -PnpmPath $pnpmInstallPath -PnpmSpecArg $pnpmSpecArg -Arguments @('config', 'get', 'store-dir')
       if (-not [string]::IsNullOrWhiteSpace($pnpmStoreDir)) {
         Write-Info "pnpm config store-dir: $pnpmStoreDir"
       }
@@ -1050,6 +1043,7 @@ try {
     Invoke-DependencyInstall `
       -Description 'Preflight dependencies in staging (pinned pnpm, frozen lockfile)' `
       -PnpmPath $pnpmInstallPath `
+      -PnpmSpecArg $pnpmSpecArg `
       -RootDir $packageRoot `
       -StoreDir $dependencyStoreDir `
       -LogPrefix $preflightLogPrefix `
@@ -1079,6 +1073,7 @@ try {
       Invoke-DependencyInstall `
         -Description 'Activate preflighted dependencies in live root (offline, rollback protected)' `
         -PnpmPath $pnpmInstallPath `
+      -PnpmSpecArg $pnpmSpecArg `
         -RootDir $resolvedRoot `
         -StoreDir $dependencyStoreDir `
         -LogPrefix $dependencyLogPrefix `

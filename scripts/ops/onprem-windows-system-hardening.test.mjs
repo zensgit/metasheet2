@@ -20,7 +20,7 @@ test('Windows apply helper bootstraps SYSTEM-safe tool PATH and resolves pnpm fr
   assert.match(script, /Join-Path \$base 'nodejs'/)
   assert.match(script, /foreach \(\$leaf in @\('pnpm\.exe', 'pnpm\.cmd', 'pnpm\.ps1'\)\)/)
   assert.match(script, /Initialize-WindowsSystemToolPath/)
-  assert.match(script, /\$pnpmInstallPath = Initialize-PinnedPnpm -RequiredVersion \$requiredPnpmVersion/)
+  assert.match(script, /\$pnpmLauncher = Initialize-PinnedPnpm -RequiredVersion \$requiredPnpmVersion/)
   assert.match(script, /\$pnpmPath = Resolve-PnpmInstallCommand/)
 })
 
@@ -45,13 +45,22 @@ test('on-prem package build and apply use the same exact pnpm version', () => {
   assert.match(applyScript, /Resolve-PackagePnpmVersion/)
   assert.match(applyScript, /corepackPath prepare "pnpm@\$RequiredVersion" --activate/)
   assert.match(applyScript, /PNPM_VERSION_MISMATCH/)
-  // #3751 corrective: the pinned Corepack shim (co-located with the corepack binary) must be probed
-  // BEFORE the generic PATH walk, so a shadowing user/system-profile pnpm can never preempt the pin.
-  assert.match(applyScript, /Resolve-CorepackShimPnpmCandidates/)
-  const shimFirstIndex = applyScript.indexOf('Resolve-CorepackShimPnpmCandidates -CorepackPath')
-  const fallbackIndex = applyScript.indexOf('$pnpmPath = Resolve-PnpmInstallCommand')
-  assert.ok(shimFirstIndex > -1 && fallbackIndex > -1 && shimFirstIndex < fallbackIndex,
-    'co-located corepack shim probe must precede the generic pnpm PATH fallback')
+  // #3751 corrective: whenever corepack exists, EVERY pnpm invocation must ride the version-addressed
+  // corepack passthrough (corepack pnpm@<pin> ...) — corepack prepare --activate writes NO shim, so
+  // any PATH-based pnpm resolution can be shadowed by a profile pnpm of another version.
+  assert.match(applyScript, /SpecArg = "pnpm@\$RequiredVersion"|\$specArg = "pnpm@\$RequiredVersion"/)
+  assert.match(applyScript, /PnpmSpecArg/)
+  // The PATH walk survives ONLY as the corepack-absent last resort, and must come after the
+  // passthrough return inside Initialize-PinnedPnpm.
+  const initStart = applyScript.indexOf('function Initialize-PinnedPnpm')
+  const initEnd = applyScript.indexOf('function Convert-PositiveInt')
+  const initBody = applyScript.slice(initStart, initEnd)
+  const passthroughReturn = initBody.indexOf('SpecArg = $specArg')
+  const pathWalkFallback = initBody.indexOf('Resolve-PnpmInstallCommand')
+  assert.ok(passthroughReturn > -1 && pathWalkFallback > -1 && passthroughReturn < pathWalkFallback,
+    'corepack passthrough must be returned before the corepack-absent PATH-walk fallback')
+  // The dependency wrapper composes the spec token into its command prefix.
+  assert.match(applyScript, /\$pnpmPrefix = "\$pnpmPrefix \$PnpmSpecArg"/)
   assert.match(verifyScript, /packaged root package\.json must pin pnpm@9\.15\.9/)
   assert.match(verifyScript, /PACKAGE-METADATA\.json must pin pnpm 9\.15\.9/)
 })
