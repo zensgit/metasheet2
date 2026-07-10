@@ -56,6 +56,9 @@ export type DingTalkStreamClientLike = {
   config: {
     subscriptions: Array<{ type: string; topic: string }>
     autoReconnect?: boolean
+    // P2-1: close() blanks these to kill an already-scheduled SDK reconnect (see close()).
+    clientId?: string
+    clientSecret?: string
   }
   registerCallbackListener(topic: string, listener: (frame: DingTalkStreamDownStreamFrame) => void): unknown
   connect(): Promise<void>
@@ -174,10 +177,17 @@ export async function createDingTalkInteractiveCardStreamSdkClient(
       await client.connect()
     },
     async close() {
-      // Disable the built-in reconnect FIRST — the SDK resets its own user-disconnect latch on
-      // every connection attempt, so a pending reconnect timer could otherwise reconnect after
-      // shutdown — then close the socket (a no-op if the client never connected).
+      // Review P2-1 (proved against the real SDK dist): disabling autoReconnect does NOT stop an
+      // ALREADY-SCHEDULED reconnect timer — the SDK checks its reconnect gate only at SCHEDULE
+      // time, connect() never re-checks it, and _connect() resets the user-disconnect latch. A
+      // retry timer pending at shutdown (guaranteed during any outage — 1s chain) would resurrect
+      // the connection after close(). Defense: ALSO blank the credentials so a resurrected
+      // connect() dies at endpoint resolution — and with autoReconnect false at that point, no
+      // further retry is scheduled from that failure. Then close the socket (no-op if never
+      // connected).
       client.config.autoReconnect = false
+      client.config.clientId = ''
+      client.config.clientSecret = ''
       client.disconnect()
     },
   }

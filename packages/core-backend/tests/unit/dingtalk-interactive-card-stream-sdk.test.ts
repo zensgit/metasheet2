@@ -47,10 +47,19 @@ function enabledConfig(): Extract<DingTalkInteractiveCardStreamConfig, { enabled
 
 /** Mirrors the real DWClient surface the adapter relies on, incl. subscription bookkeeping. */
 class FakeDWClient {
-  config: { subscriptions: Array<{ type: string; topic: string }>; autoReconnect?: boolean } = {
+  config: {
+    subscriptions: Array<{ type: string; topic: string }>
+    autoReconnect?: boolean
+    clientId?: string
+    clientSecret?: string
+  } = {
     // Real SDK default: a wildcard EVENT subscription the adapter must drop.
     subscriptions: [{ type: 'EVENT', topic: '*' }],
     autoReconnect: true,
+    // Real SDK behavior: the ctor copies credentials onto config, where a late reconnect reads
+    // them (P2-1 — close() must blank these to kill an already-scheduled reconnect timer).
+    clientId: 'client-1',
+    clientSecret: 'secret-1',
   }
 
   listeners = new Map<string, (frame: DingTalkStreamDownStreamFrame) => void>()
@@ -138,6 +147,11 @@ describe('DingTalk interactive-card Stream SDK adapter', () => {
     expect(dw.disconnect).toHaveBeenCalledTimes(1)
     expect(autoReconnectAtDisconnect).toBe(false)
     expect(dw.config.autoReconnect).toBe(false)
+    // Review P2-1: an ALREADY-SCHEDULED SDK reconnect timer survives the autoReconnect flip (the
+    // gate is checked at schedule time only) — close() must ALSO blank the credentials so a
+    // resurrected connect() dies at endpoint resolution and schedules nothing further.
+    expect(dw.config.clientId).toBe('')
+    expect(dw.config.clientSecret).toBe('')
   })
 
   it('threads a card-callback frame into handlers.onEvent with the JSON-decoded payload and acks it', async () => {

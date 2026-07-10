@@ -81,6 +81,12 @@ export type DingTalkInteractiveCardStreamClientFactory = (
 
 export type DingTalkInteractiveCardStreamWorkerStatus =
   | { state: 'disabled'; reason: DingTalkInteractiveCardStreamDisabledReason }
+  // Review P2-2 (proved against the real SDK dist): the SDK's connect() RESOLVES even on total
+  // failure (bad credentials, unreachable endpoint) and retries internally forever — so 'active'
+  // means "worker running; connection lifecycle delegated to the SDK", NOT "connected". A
+  // misconfigured-but-enabled worker reports active while the SDK silently retries; real
+  // connectivity is a UAT checklist item (U12/U13), and 'client_start_failed' is reachable only
+  // through factory/setup throws, never through a connect() rejection.
   | { state: 'active' }
   | { state: 'failed'; reason: 'client_start_failed' | 'client_stop_failed' | 'sdk_unwired' }
 
@@ -244,6 +250,7 @@ export class DingTalkInteractiveCardStreamWorker {
         return this.abortInFlightInitialize(createdClient)
       }
       this.client = createdClient
+      // 'active' = running-with-SDK-owned-connection, not proven-connected (see status type doc).
       this.status = { state: 'active' }
       this.logger.info('DingTalk interactive-card Stream worker started')
       return this.status
