@@ -52,10 +52,6 @@ export function startDingTalkGroupDeliveryRetentionScheduler(
   return sharedScheduler
 }
 
-export function getSharedDingTalkGroupDeliveryRetentionScheduler(): LedgerRetentionScheduler | null {
-  return sharedScheduler
-}
-
 export function stopDingTalkGroupDeliveryRetentionScheduler(): void {
   if (sharedScheduler) {
     sharedScheduler.stop()

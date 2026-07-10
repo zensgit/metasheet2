@@ -3,6 +3,7 @@ import {
   DINGTALK_GROUP_DELIVERY_RETENTION_DEFAULT_DAYS,
   DINGTALK_GROUP_DELIVERY_RETENTION_MIN_DAYS,
   resolveDingTalkGroupDeliveryRetentionConfig,
+  sweepDingTalkGroupDeliveryRetention,
 } from '../../src/services/dingtalk-group-delivery-retention'
 import {
   LedgerRetentionScheduler,
@@ -62,6 +63,23 @@ describe('resolveDingTalkGroupDeliveryRetentionConfig (env parse + floor + opt-o
   })
 })
 
+describe('sweepDingTalkGroupDeliveryRetention re-floor (defense-in-depth)', () => {
+  it('re-floors an out-of-range config.retentionDays before building the DELETE — even though the only production caller (resolveDingTalkGroupDeliveryRetentionConfig) already floors it, a config object built by hand (e.g. a future caller, or a test) must not be able to bypass the floor', async () => {
+    const calls: Array<unknown[] | undefined> = []
+    const query = vi.fn(async (_sql: string, params?: unknown[]) => {
+      calls.push(params)
+      return { rows: [], rowCount: 0 }
+    })
+    await sweepDingTalkGroupDeliveryRetention(query as never, {
+      retentionDays: 1, // below DINGTALK_GROUP_DELIVERY_RETENTION_MIN_DAYS (7); only reachable by
+      // constructing the config directly, bypassing resolveDingTalkGroupDeliveryRetentionConfig's own floor
+      disabled: false,
+    })
+    expect(query).toHaveBeenCalledTimes(1)
+    expect(calls[0]?.[0]).toBe(DINGTALK_GROUP_DELIVERY_RETENTION_MIN_DAYS) // re-floored to 7, not the raw 1
+  })
+})
+
 describe('DingTalk group-delivery retention scheduler (reuses the generic LedgerRetentionScheduler)', () => {
   afterEach(() => {
     stopLedgerRetentionScheduler()
@@ -110,5 +128,30 @@ describe('DingTalk group-delivery retention scheduler (reuses the generic Ledger
     expect(resolveDingTalkGroupDeliveryRetentionSchedulerIntervalMs()).toBe(3600000)
     process.env.DINGTALK_GROUP_DELIVERY_RETENTION_SCHEDULER_INTERVAL_MS = '-5'
     expect(resolveDingTalkGroupDeliveryRetentionSchedulerIntervalMs()).toBeUndefined()
+  })
+
+  it('start() actually arms the interval loop (not just returns a scheduler): the injected sweep fires once timers advance past the interval, fires again on the NEXT interval (the loop re-arms, it is not a one-shot timeout), and stop() halts further ticks', async () => {
+    vi.useFakeTimers()
+    try {
+      const sweep = vi.fn<() => Promise<number>>().mockResolvedValue(0)
+      const intervalMs = 60_000 // MIN_INTERVAL_MS floor in LedgerRetentionScheduler
+      const scheduler = startDingTalkGroupDeliveryRetentionScheduler({ service: { sweep }, intervalMs })
+      expect(scheduler).not.toBeNull()
+      await scheduler!.ready // no leaderOptions → resolves synchronously, but await to flush the .then() that arms the timer
+
+      expect(sweep).not.toHaveBeenCalled() // nothing fires before the interval elapses
+
+      await vi.advanceTimersByTimeAsync(intervalMs)
+      expect(sweep).toHaveBeenCalledTimes(1)
+
+      await vi.advanceTimersByTimeAsync(intervalMs)
+      expect(sweep).toHaveBeenCalledTimes(2) // second interval: the loop re-arms itself
+
+      stopDingTalkGroupDeliveryRetentionScheduler()
+      await vi.advanceTimersByTimeAsync(intervalMs * 3)
+      expect(sweep).toHaveBeenCalledTimes(2) // stop() cleared the interval — no further ticks
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })
