@@ -24,6 +24,7 @@ import {
   parseDingTalkApprovalCardCallback,
   type DingTalkApprovalCardCallbackResult,
 } from '../../src/integrations/dingtalk/interactive-card-callback'
+import type { DingTalkApprovalCardTerminalUpdate } from '../../src/integrations/dingtalk/interactive-card-update'
 
 const DELIVERY_ID = '11111111-2222-4333-8444-555555555555'
 const OPERATOR = 'dd_operator_1'
@@ -410,11 +411,101 @@ describe('executeDingTalkApprovalCardCallback (B-3 §B-3 execution)', () => {
   })
 })
 
+// ── B-4 hook: terminal card update at outcome production (lock §B-4) ───────────────────────────
+
+describe('B-4 hook: terminal card update at outcome production', () => {
+  beforeEach(() => {
+    vi.stubEnv('APPROVAL_CARD_LINK_SECRET', 'b3-unit-secret')
+  })
+  afterEach(() => {
+    vi.unstubAllEnvs()
+  })
+
+  function recordingSender() {
+    const sends: DingTalkApprovalCardTerminalUpdate[] = []
+    const sender = async (update: DingTalkApprovalCardTerminalUpdate) => { sends.push(update) }
+    return { sends, sender }
+  }
+
+  it('executed → sender gets 已由 <server-side local name> 同意 · <time>; hostile payload display text never enters the copy', async () => {
+    const h = makeHarness()
+    const { sends, sender } = recordingSender()
+    const result = await executeDingTalkApprovalCardCallback(
+      { ...h.deps, cardUpdateSender: sender } as never,
+      wirePayload({ nick: '大黑客', operatorName: 'Payload Hacker', senderNick: 'EvilNick' }),
+    )
+    expect(result.outcome).toBe('executed')
+    expect(sends).toHaveLength(1)
+    expect(sends[0].outTrackId).toBe(DELIVERY_ID)
+    // Display name is the LOCAL users.name resolved fail-closed by the adapter (lock §B-4).
+    expect(sends[0].statusText).toMatch(/^已由 Approver A 同意 · \d{4}\/\d{2}\/\d{2} \d{2}:\d{2}$/)
+    expect(sends[0].statusText).not.toContain('大黑客')
+    expect(sends[0].statusText).not.toContain('Payload Hacker')
+    expect(sends[0].statusText).not.toContain('EvilNick')
+  })
+
+  it('NO ROLLBACK: a failing card update leaves the committed action untouched — result stays executed, ZERO DB traffic after the update attempt', async () => {
+    const h = makeHarness()
+    let callsAtUpdate = -1
+    const sender = async () => {
+      callsAtUpdate = h.calls.length
+      throw new Error('card update API 500')
+    }
+    const result = await executeDingTalkApprovalCardCallback(
+      { ...h.deps, cardUpdateSender: sender } as never,
+      wirePayload(),
+    )
+    expect(result.outcome).toBe('executed')
+    expect(h.dispatchAction).toHaveBeenCalledTimes(1)
+    // The update ran AFTER the acted claim, and NOTHING ran after it failed: no ledger revert,
+    // no re-claim, no compensating engine call (lock §B-4 row 6).
+    expect(callsAtUpdate).toBeGreaterThan(0)
+    expect(h.calls.length).toBe(callsAtUpdate)
+    expect(h.calls.some((c) => c.sql.includes("SET card_state = 'sent'"))).toBe(false)
+  })
+
+  it('P3-H at the hook: delivery_not_found and operator_unresolved send BYTE-EQUAL neutral copy', async () => {
+    const notFoundH = makeHarness({ deliveryRows: [] })
+    const a = recordingSender()
+    await executeDingTalkApprovalCardCallback({ ...notFoundH.deps, cardUpdateSender: a.sender } as never, wirePayload())
+
+    const unmappedH = makeHarness({ linkRows: [] })
+    const b = recordingSender()
+    await executeDingTalkApprovalCardCallback({ ...unmappedH.deps, cardUpdateSender: b.sender } as never, wirePayload())
+
+    expect(a.sends).toHaveLength(1)
+    expect(b.sends).toHaveLength(1)
+    expect(a.sends[0].statusText).toBe(b.sends[0].statusText)
+    expect(a.sends[0].outTrackId).toBe(DELIVERY_ID)
+  })
+
+  it('stale duplicate → sender receives the TRUE terminal state from the summary', async () => {
+    const h = makeHarness({
+      deliveryRows: [deliveryRow({ card_state: 'acted', acted_action: 'approve', acted_by: 'u_appr', acted_at: '2026-07-10T06:30:00.000Z' })],
+    })
+    const { sends, sender } = recordingSender()
+    const result = await executeDingTalkApprovalCardCallback({ ...h.deps, cardUpdateSender: sender } as never, wirePayload())
+    expect(result.outcome).toBe('stale')
+    expect(sends).toEqual([{ outTrackId: DELIVERY_ID, statusText: '已同意 · 2026/07/10 14:30' }])
+  })
+
+  it('parse-level rejection and unsupported actions never touch the card updater (no-op rows)', async () => {
+    const h = makeHarness()
+    const { sends, sender } = recordingSender()
+    await executeDingTalkApprovalCardCallback({ ...h.deps, cardUpdateSender: sender } as never, wirePayload({ outTrackId: 'not-a-uuid' }))
+    await executeDingTalkApprovalCardCallback(
+      { ...h.deps, cardUpdateSender: sender } as never,
+      wirePayload({ content: JSON.stringify({ cardPrivateData: { actionIds: ['reject'] } }) }),
+    )
+    expect(sends).toHaveLength(0)
+  })
+})
+
 // ── Slice-A-style static tripwire (lock §6): no raw approvals-actions route on this chain ──────
 
 describe('B-3 static tripwire: callback chain never touches the raw approvals actions route', () => {
   const SRC = join(__dirname, '../../src/integrations/dingtalk')
-  const files = ['interactive-card-callback.ts', 'interactive-card-stream.ts']
+  const files = ['interactive-card-callback.ts', 'interactive-card-stream.ts', 'interactive-card-update.ts']
 
   it('modules do not contain or compose the raw route path', () => {
     for (const file of files) {
