@@ -31,7 +31,10 @@
 
 轮末汇报曾把 #4025/#4042 与前六项并述——实际上二者当时**仅做了合并核验，未做 owner 内容深审**。补审结论：1 P2 + 2 P3，由本 fix-forward PR 同修：
 
-- **P2（行为修正，owner 裁决）**：`InboundReplayResult.total` 承诺 `total === replayed + sum(skipped)`，但实现先算 `total` 再做 tripwire fold（`skipped.alreadyPresent` 后增）——drift 窗口内 total 少计且下游 `recoverable: replay.total > 0`（record-service.ts）随之失真；RB15 还把这一不一致固化为断言（`total===0`）。修：**fold 完再算 total**；RB15 改期望 `total===1` 并新增契约恒等断言。
+- **P2（行为修正，owner 裁决，两阶段）**：`InboundReplayResult.total` 原实现先算 `total` 再做 tripwire fold——DOWNWARD drift 窗口内 total 少计到 0，下游 `recoverable: replay.total > 0`（record-service.ts）随之失真，RB15 还把这一不一致固化为断言（`total===0`）。
+  - **首修**（后被推翻）：fold 完再派生 `total = replayed + sum(skipped)`，RB15 期望 `total===1` + 恒等断言——只解决 downward 方向。
+  - **复审发现 UPWARD drift 仍过计**（owner 反例）：diag 时 `neighborDeclined=1/replayable=0`，缝隙里邻居再同意、写入成功 ⇒ `replayed=1` + stale 标签 1 ⇒ 派生 total=2，而锚下真实只有 1 条 tombstone；恒等断言只证 `2===1+1` 的算术自洽，证不了 total 真实。
+  - **终修**：`total = diagnosticTotal`（诊断语句单快照锁定真值：每条锚行恰落一个 CASE 桶；锚 tombstone 集 in-txn 稳定——capture 不会对已删记录运行，retention 地板保住持有 FOR-UPDATE trash 行的组），**永不从 replayed/skipped 派生**；放弃 upward 方向的 sum 强契约（stale 标签不可归因，`skipped` breakdown 在 drift 窗口明文 advisory；`total`/`replayed` 恒精确）。**RB17** 钉住 upward：`replayed=1` 且 `total=1`（非 stale 膨胀的 2），sum-超出-total 边界诚实钉在 2；判别突变（total 改回派生）→ 恰 RB17 红、RB15 绿。RB15 改题 DOWNWARD（fold 保 sum 恒等=附带成立非承诺）。
 - **P3（注释自相矛盾）**：tripwire 注释称 NOT EXISTS「仍能阻止任何重复」，与 RB16 证明的同语句盲区矛盾——收窄为「拒绝语句快照中已可见的重复；同语句正在插入的兄弟行对其不可见（RB16）」。
 - **P3（本台账过时）**：§1 表 #4025 行原记旧 head `519679bfa`/auto-merge 中——已更正为合并 SHA `ea45dde6a`（最终 head `7f48983a`）。
 
