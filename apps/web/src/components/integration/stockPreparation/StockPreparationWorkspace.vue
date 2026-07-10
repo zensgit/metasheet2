@@ -50,8 +50,9 @@
         }}</span>
         <code>{{ activeView.endpoint }}</code>
       </p>
-      <!-- Views 1-4 are real views; the remaining tabs keep the placeholder. Views 2-4 share the
-           shell-owned projectId context selected in view 1 (#4017 pattern). -->
+      <!-- Views 1-6 are all real views now (the placeholder branch remains only as a guard for any
+           future tab). Views 2-6 share the shell-owned projectId context selected in view 1
+           (#4017 pattern). -->
       <StockPreparationProjectWorkspaceView
         v-if="activeKey === 'project-workspace'"
         @select-project="handleProjectSelect"
@@ -66,6 +67,14 @@
       />
       <StockPreparationUnitConfirmView
         v-else-if="activeKey === 'unit-conversion'"
+        :project-id="selectedProjectId"
+      />
+      <StockPreparationPrepLineView
+        v-else-if="activeKey === 'prep-line'"
+        :project-id="selectedProjectId"
+      />
+      <StockPreparationExceptionQueueView
+        v-else-if="activeKey === 'exception-queue'"
         :project-id="selectedProjectId"
       />
       <p v-else class="stock-prep__panel-pending" data-testid="stock-prep-panel-pending">
@@ -94,6 +103,8 @@ import StockPreparationProjectWorkspaceView from './StockPreparationProjectWorks
 import StockPreparationSnapshotDiffView from './StockPreparationSnapshotDiffView.vue'
 import StockPreparationMappingConfirmView from './StockPreparationMappingConfirmView.vue'
 import StockPreparationUnitConfirmView from './StockPreparationUnitConfirmView.vue'
+import StockPreparationPrepLineView from './StockPreparationPrepLineView.vue'
+import StockPreparationExceptionQueueView from './StockPreparationExceptionQueueView.vue'
 
 const { locale } = useLocale()
 
@@ -120,8 +131,9 @@ interface StockPreparationViewTab {
   /** The readonly (GET) summary endpoint the view reads. Values-free path only. */
   endpoint: string
   /**
-   * True for the two confirmation views whose row actions issue MULTITABLE-INTERNAL human-confirm
-   * writes (W3b). Still no external ERP/K3 write — the badge copy reflects the human-confirm nature.
+   * True for the views whose actions issue MULTITABLE-INTERNAL writes: the two confirmation views
+   * (W3b human confirms), the prep-line view (W4a generation run), and the exception queue (W4a
+   * resolutions). Still no external ERP/K3 write — the badge copy reflects the human-confirm nature.
    */
   confirmWrites?: boolean
 }
@@ -169,7 +181,9 @@ const views: StockPreparationViewTab[] = [
     en: 'Prep Lines',
     zhDesc: '仅由已确认的快照、映射与单位规则生成备料行;未解决的映射/单位冲突不会产出就绪行。',
     enDesc: 'Prep lines generated only from confirmed snapshots, mappings, and unit rules; unresolved mapping/unit conflicts never produce ready lines.',
-    endpoint: '/api/integration/stock-preparation/prep-lines/summary',
+    endpoint: '/api/integration/stock-preparation/prep-lines',
+    // View 5's generation run is a MULTITABLE-INTERNAL table op (W4a) — badge drops the GET-only claim.
+    confirmWrites: true,
   },
   {
     key: 'exception-queue',
@@ -177,7 +191,8 @@ const views: StockPreparationViewTab[] = [
     en: 'Exception Queue',
     zhDesc: '所有不确定的行都可见、可处理;阻断级异常保持可见并阻止最终确认。',
     enDesc: 'Every uncertain row is visible and actionable; blocking exceptions stay visible and prevent final confirmation.',
-    endpoint: '/api/integration/stock-preparation/exceptions/summary',
+    endpoint: '/api/integration/stock-preparation/exceptions',
+    confirmWrites: true,
   },
 ]
 
