@@ -14,6 +14,25 @@ import {
 import {
   readDingTalkMessageConfigFromRuntime,
 } from '../integrations/dingtalk/work-notification-settings'
+import {
+  WeComBusinessError,
+  WeComRequestError,
+  clampWeComByteLengthUtf8,
+  clampWeComCharLength,
+  fetchWeComAppAccessToken,
+  invalidateWeComAppAccessTokenCache,
+  readWeComMessageConfigFromEnv,
+  resolveWeComMessageConfigReadiness,
+  sendWeComTextCardMessage,
+  sendWeComTextMessage,
+  WECOM_TEXTCARD_DESCRIPTION_MAX_CHARS,
+  WECOM_TEXTCARD_TITLE_MAX_CHARS,
+  WECOM_TEXT_CONTENT_MAX_BYTES,
+  type WeComMessageConfig,
+  type WeComSendMessageResult,
+  type WeComTextCardMessageInput,
+  type WeComTextMessageInput,
+} from '../integrations/wecom/client'
 import nodemailer from 'nodemailer'
 import {
   resolveEmailSmtpTransportConfig,
@@ -146,6 +165,7 @@ const MIN_LEASE_MS = 5_000
 const MAX_LEASE_MS = 10 * 60_000
 export const DINGTALK_WORK_NOTIFICATION_CHANNEL_NAME = 'dingtalk_work_notification'
 export const EMAIL_SMTP_CHANNEL_NAME = 'email_smtp'
+export const WECOM_WORK_NOTIFICATION_CHANNEL_NAME = 'wecom_work_notification'
 
 /**
  * Channel names a producer may assign to a NEW outbox row — these MUST be names the worker's channel
@@ -156,6 +176,7 @@ export const EMAIL_SMTP_CHANNEL_NAME = 'email_smtp'
 const ROUTABLE_DEFAULT_DELIVERY_CHANNELS: ReadonlySet<string> = new Set([
   DINGTALK_WORK_NOTIFICATION_CHANNEL_NAME,
   EMAIL_SMTP_CHANNEL_NAME,
+  WECOM_WORK_NOTIFICATION_CHANNEL_NAME,
 ])
 
 /**
@@ -234,6 +255,15 @@ export function createAttendanceDeliveryChannelsFromEnv(env: NodeJS.ProcessEnv =
     resolveEmailTransportReadiness(env).ok
   ) {
     channels.push(new EmailAttendanceDeliveryChannel({ env }))
+  }
+  // WeCom (企业微信): a THIRD, independent in-app channel — register ONLY when explicitly enabled AND
+  // its app credentials (corpid+corpsecret+agentid) are all present (env-only readiness check, see
+  // resolveWeComMessageConfigReadiness); else register-nothing (S4 design-lock G2).
+  if (
+    env.ATTENDANCE_NOTIFICATION_WECOM_ENABLED === 'true' &&
+    resolveWeComMessageConfigReadiness(env).ok
+  ) {
+    channels.push(new WeComAttendanceDeliveryChannel())
   }
   return channels
 }
@@ -373,6 +403,197 @@ export class DingTalkAttendanceDeliveryChannel implements AttendanceDeliveryChan
       ok: true,
       integrationId: rows[0].integration_id,
       dingTalkUserId,
+    }
+  }
+}
+
+// ── WeCom (企业微信) delivery channel ───────────────────────────────────────────
+// S4 design-lock (attendance-wecom-delivery-channel-s4-design-lock-20260710). A THIRD, independent
+// AttendanceDeliveryChannel beside DingTalk and Email — coexists via name-routing. Config is env-only
+// (no directory-stored tier in this slice; see design-lock G7). Recipient resolution is the SAME
+// three-table JOIN as DingTalk, scoped to provider='wecom' (zero new tables/columns).
+
+interface WeComRecipientRow {
+  integration_id: string
+  external_user_id: string
+}
+
+export interface WeComAttendanceDeliveryChannelOptions {
+  query?: AttendanceNotificationDeliveryQuery
+  readConfig?: (integrationId?: string) => Promise<WeComMessageConfig>
+  fetchAccessToken?: (config: WeComMessageConfig) => Promise<string>
+  sendTextMessage?: (
+    accessToken: string,
+    input: WeComTextMessageInput,
+    config: WeComMessageConfig,
+  ) => Promise<WeComSendMessageResult>
+  sendTextCardMessage?: (
+    accessToken: string,
+    input: WeComTextCardMessageInput,
+    config: WeComMessageConfig,
+  ) => Promise<WeComSendMessageResult>
+}
+
+const WECOM_TOKEN_EXPIRED_ERRCODES: ReadonlySet<number> = new Set([42001, 40014])
+
+export class WeComAttendanceDeliveryChannel implements AttendanceDeliveryChannel {
+  readonly name = WECOM_WORK_NOTIFICATION_CHANNEL_NAME
+  private readonly query: AttendanceNotificationDeliveryQuery
+  private readonly readConfig: (integrationId?: string) => Promise<WeComMessageConfig>
+  private readonly fetchAccessToken: (config: WeComMessageConfig) => Promise<string>
+  private readonly sendTextMessage: (
+    accessToken: string,
+    input: WeComTextMessageInput,
+    config: WeComMessageConfig,
+  ) => Promise<WeComSendMessageResult>
+
+  private readonly sendTextCardMessage: (
+    accessToken: string,
+    input: WeComTextCardMessageInput,
+    config: WeComMessageConfig,
+  ) => Promise<WeComSendMessageResult>
+
+  constructor(options: WeComAttendanceDeliveryChannelOptions = {}) {
+    this.query = options.query ?? (defaultQuery as AttendanceNotificationDeliveryQuery)
+    this.readConfig = options.readConfig ?? (async () => readWeComMessageConfigFromEnv())
+    this.fetchAccessToken = options.fetchAccessToken ?? fetchWeComAppAccessToken
+    this.sendTextMessage = options.sendTextMessage ?? sendWeComTextMessage
+    this.sendTextCardMessage = options.sendTextCardMessage ?? sendWeComTextCardMessage
+  }
+
+  async send(message: AttendanceDeliveryMessage): Promise<AttendanceDeliveryChannelResult> {
+    const recipient = await this.resolveRecipient(message)
+    if (recipient.ok === false) return recipient.result
+
+    let config: WeComMessageConfig
+    try {
+      config = await this.readConfig(recipient.integrationId)
+    } catch (error) {
+      return classifyWeComConfigError(error)
+    }
+
+    const deepLink = attendanceDeepLinkEnabled()
+      ? buildAttendanceNotificationDeepLink(message.sourceType, resolveAttendanceDeepLinkBaseUrl())
+      : null
+    const title = buildDeliveryTitle(message)
+    const content = buildDeliveryContent(message)
+
+    // Field-length guards (design-lock G4) are applied HERE, before the (possibly-injected) sender —
+    // a clamp inside the client's send function would be invisible to DI-mode tests that stub it out.
+    const doSend = (accessToken: string): Promise<WeComSendMessageResult> => {
+      if (deepLink) {
+        // E3 parity: textcard whose button deep-links into the E2 container landing. Same
+        // title/content source as the text path — no per-msgtype drift.
+        return this.sendTextCardMessage(
+          accessToken,
+          {
+            userIds: [recipient.weComUserId],
+            title: clampWeComCharLength(title, WECOM_TEXTCARD_TITLE_MAX_CHARS),
+            description: clampWeComCharLength(content, WECOM_TEXTCARD_DESCRIPTION_MAX_CHARS),
+            url: deepLink,
+            btnTxt: '打开考勤',
+          },
+          config,
+        )
+      }
+      return this.sendTextMessage(
+        accessToken,
+        {
+          userIds: [recipient.weComUserId],
+          content: clampWeComByteLengthUtf8(content, WECOM_TEXT_CONTENT_MAX_BYTES),
+        },
+        config,
+      )
+    }
+
+    let accessToken: string
+    try {
+      accessToken = await this.fetchAccessToken(config)
+    } catch (error) {
+      return classifyWeComSendError(error)
+    }
+
+    let result: WeComSendMessageResult
+    try {
+      result = await doSend(accessToken)
+    } catch (error) {
+      // G3: a token-expired/invalid business error gets exactly ONE invalidate+refetch+retry; whatever
+      // happens on that retry (success or any failure) is final — no further retry loop here (the
+      // worker's own backoff handles subsequent attempts across outbox rows).
+      if (error instanceof WeComBusinessError && WECOM_TOKEN_EXPIRED_ERRCODES.has(error.errcode)) {
+        invalidateWeComAppAccessTokenCache(config)
+        try {
+          const freshToken = await this.fetchAccessToken(config)
+          result = await doSend(freshToken)
+        } catch (retryError) {
+          return classifyWeComSendError(retryError)
+        }
+      } else {
+        return classifyWeComSendError(error)
+      }
+    }
+
+    // G6: errcode===0 (overall success) can still carry `invaliduser` listing THIS recipient — a
+    // structural per-recipient failure inside an otherwise-successful call. Never thrown (errcode is
+    // 0), so it is only observable here, not via classifyWeComSendError.
+    if (result.invalidUserIds.includes(recipient.weComUserId)) {
+      return { ok: false, retryable: false, skip: true, error: 'wecom_recipient_invalid_user' }
+    }
+    return { ok: true }
+  }
+
+  private async resolveRecipient(message: AttendanceDeliveryMessage): Promise<
+    | { ok: true; integrationId: string; weComUserId: string }
+    | { ok: false; result: AttendanceDeliveryChannelResult }
+  > {
+    const { rows } = await this.query<WeComRecipientRow>(
+      `SELECT i.id::text AS integration_id,
+              a.external_user_id
+         FROM directory_account_links l
+         JOIN directory_accounts a
+           ON a.id = l.directory_account_id
+          AND a.provider = 'wecom'
+          AND a.is_active = true
+         JOIN directory_integrations i
+           ON i.id = a.integration_id
+          AND i.provider = 'wecom'
+          AND i.status = 'active'
+          AND i.org_id = $2
+        WHERE l.local_user_id = $1
+          AND l.link_status = 'linked'
+        ORDER BY i.updated_at DESC, a.updated_at DESC, a.id ASC
+        LIMIT 2`,
+      [message.recipientUserId, message.orgId],
+    )
+    if (rows.length === 0) {
+      // No linked+active WeCom binding at all — the ordinary "not onboarded to WeCom yet" state for a
+      // partially-adopted org (WeCom directory population is a named prerequisite outside this
+      // channel's scope — S4 design-lock G7). Structural, not a fault: terminate as `skipped`.
+      return {
+        ok: false,
+        result: { ok: false, retryable: false, skip: true, error: 'wecom_recipient_not_bound' },
+      }
+    }
+    if (rows.length > 1) {
+      // Same directory data-integrity reasoning as the DingTalk channel: worth an operator's
+      // attention (dedupe the links), so this stays `failed` (visible in the dead-letter counter)
+      // rather than `skipped`. Retrying will not help, hence retryable: false, but no `skip`.
+      return {
+        ok: false,
+        result: { ok: false, retryable: false, error: 'wecom_recipient_ambiguous' },
+      }
+    }
+    const weComUserId = String(rows[0].external_user_id ?? '').trim()
+    if (!weComUserId) {
+      return {
+        ok: false,
+        result: { ok: false, retryable: false, skip: true, error: 'wecom_recipient_external_user_id_missing' },
+      }
+    }
+    return {
+      ok: true,
+      integrationId: rows[0].integration_id,
+      weComUserId,
     }
   }
 }
@@ -692,6 +913,86 @@ function classifyDingTalkSendError(error: unknown): AttendanceDeliveryChannelRes
     ok: false,
     retryable: true,
     error: `dingtalk_send_failed: ${normalizeErrorText(error, 'DingTalk send failed')}`,
+  }
+}
+
+// ── WeCom error classification + redaction (design-lock G6) ────────────────────────────────────
+// Distinct bucketing from DingTalk's (different error-code space, different retry semantics):
+//  - retryable: HTTP transport error / timeout / 5xx, {42001,40014} (token-expired, but ONLY after
+//    the channel's own single invalidate+retry already ran — see WeComAttendanceDeliveryChannel.send),
+//    {45009,45033} (rate/concurrency limited).
+//  - structural skip (undeliverable to THIS recipient, not an operator fault): {81013,82001,40003}.
+//  - permanent config fault (worth operator attention, NOT skipped — dead-letter): {41001,40056,60020}
+//    plus "not configured" config-read failures.
+//  - any other/unrecognized WeCom business error: permanent, non-retryable (mirrors DingTalk's
+//    conservative default — do not spin forever against an unclassified business rule violation).
+const WECOM_RATE_LIMIT_ERRCODES: ReadonlySet<number> = new Set([45009, 45033])
+const WECOM_STRUCTURAL_SKIP_ERRCODES: ReadonlySet<number> = new Set([81013, 82001, 40003])
+const WECOM_PERMANENT_CONFIG_ERRCODES: ReadonlySet<number> = new Set([41001, 40056, 60020])
+
+function isRetryableWeComRequestStatus(statusCode: number): boolean {
+  return statusCode === 408 || statusCode === 429 || (statusCode >= 500 && statusCode < 600)
+}
+
+function redactWeComErrorText(text: string): string {
+  const redactedSecrets = text
+    .replace(/([?&](?:corpsecret|access_token|accessToken)=)[^&\s'")]+/gi, '$1[redacted]')
+    .replace(/((?:corpsecret|access_token|accessToken)\s*[:=]\s*)[^&\s'")]+/gi, '$1[redacted]')
+  return redactedSecrets.replace(/(?:https?:\/\/)?(?:[a-z0-9-]+\.)+[a-z]{2,}(?::\d+)?(?:\/[^\s'")]*)?/gi, '[redacted-url]')
+}
+
+function normalizeWeComErrorText(error: unknown, fallback: string): string {
+  const raw = error instanceof Error ? error.message : String(error ?? '')
+  const text = redactWeComErrorText(raw.trim() || fallback)
+  return text.length > 240 ? `${text.slice(0, 237)}...` : text
+}
+
+function classifyWeComConfigError(error: unknown): AttendanceDeliveryChannelResult {
+  const message = normalizeWeComErrorText(error, 'WeCom work-notification config unavailable')
+  const retryable = !/not configured/i.test(message)
+  return { ok: false, retryable, error: `wecom_work_notification_config_unavailable: ${message}` }
+}
+
+function classifyWeComSendError(error: unknown): AttendanceDeliveryChannelResult {
+  if (error instanceof WeComRequestError) {
+    return {
+      ok: false,
+      retryable: isRetryableWeComRequestStatus(error.statusCode),
+      error: `wecom_request_${error.statusCode}: ${normalizeWeComErrorText(error, 'WeCom request failed')}`,
+    }
+  }
+  if (error instanceof WeComBusinessError) {
+    const code = error.errcode
+    if (WECOM_STRUCTURAL_SKIP_ERRCODES.has(code)) {
+      return {
+        ok: false,
+        retryable: false,
+        skip: true,
+        error: `wecom_business_error_${code}: ${normalizeWeComErrorText(error, 'WeCom business error')}`,
+      }
+    }
+    if (WECOM_RATE_LIMIT_ERRCODES.has(code) || WECOM_TOKEN_EXPIRED_ERRCODES.has(code)) {
+      return {
+        ok: false,
+        retryable: true,
+        error: `wecom_business_error_${code}: ${normalizeWeComErrorText(error, 'WeCom business error')}`,
+      }
+    }
+    // WECOM_PERMANENT_CONFIG_ERRCODES (41001/40056/60020) and any OTHER unrecognized WeCom business
+    // error both land here: permanent, non-retryable, NOT skipped (worth an operator's attention —
+    // dead-lettered, never silently dropped). The explicit set membership check keeps the design-lock's
+    // G6 bucket boundaries visible in the persisted error text rather than relying on elimination.
+    const label = WECOM_PERMANENT_CONFIG_ERRCODES.has(code) ? 'WeCom permanent config error' : 'WeCom business error'
+    return {
+      ok: false,
+      retryable: false,
+      error: `wecom_business_error_${code}: ${normalizeWeComErrorText(error, label)}`,
+    }
+  }
+  return {
+    ok: false,
+    retryable: true,
+    error: `wecom_send_failed: ${normalizeWeComErrorText(error, 'WeCom send failed')}`,
   }
 }
 
