@@ -213,6 +213,25 @@ describe('DT-HARDEN-03 backfill — runBackfill', () => {
     expect(state.find((row) => row.id === 'victim')?.webhook_url).toBe(rotatedByAdmin)
   })
 
+  it('P3-1 CAS: the UPDATE itself carries the compare — SQL pins the WHERE, params carry the previous values', async () => {
+    // The fixture enforces CAS from the params, so it cannot see a WHERE-only revert;
+    // Postgres enforces it from the SQL, which cannot see a params-only revert. Pinning
+    // BOTH halves makes either revert red at unit level (the real-DB semantics of this
+    // exact clause shape are Postgres's own contract).
+    const { pool, queries } = makeFakePool([
+      { id: 'plain', webhook_url: 'https://oapi.dingtalk.com/robot/send?access_token=old', secret: 'SECplain' },
+    ])
+
+    await runBackfill(pool, { dryRun: false, allowFirstRun: true })
+
+    const update = queries.find((q) => /^\s*UPDATE/i.test(q.text))
+    expect(update).toBeDefined()
+    expect(update!.text).toContain('AND webhook_url = $4')
+    expect(update!.text).toContain('AND secret IS NOT DISTINCT FROM $5')
+    expect(update!.params?.[3]).toBe('https://oapi.dingtalk.com/robot/send?access_token=old')
+    expect(update!.params?.[4]).toBe('SECplain')
+  })
+
   it('dry-run performs zero writes', async () => {
     const canary = encryptStoredSecretValue('https://oapi.dingtalk.com/robot/send?access_token=already')
     const { pool, queries } = makeFakePool([
