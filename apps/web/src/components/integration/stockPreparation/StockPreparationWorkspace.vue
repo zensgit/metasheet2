@@ -45,16 +45,27 @@
         {{ bi(activeView.zhDesc, activeView.enDesc) }}
       </p>
       <p class="stock-prep__panel-endpoint" data-testid="stock-prep-panel-endpoint">
-        <span class="stock-prep__badge">{{ bi('只读', 'readonly') }} · GET</span>
+        <span class="stock-prep__badge">{{
+          activeView.confirmWrites ? bi('只读 + 人工确认', 'readonly + human confirm') : `${bi('只读', 'readonly')} · GET`
+        }}</span>
         <code>{{ activeView.endpoint }}</code>
       </p>
-      <!-- Views 1-2 are real readonly views; the other four tabs keep the placeholder. -->
+      <!-- Views 1-4 are real views; the remaining tabs keep the placeholder. Views 2-4 share the
+           shell-owned projectId context selected in view 1 (#4017 pattern). -->
       <StockPreparationProjectWorkspaceView
         v-if="activeKey === 'project-workspace'"
         @select-project="handleProjectSelect"
       />
       <StockPreparationSnapshotDiffView
         v-else-if="activeKey === 'bom-snapshot-diff'"
+        :project-id="selectedProjectId"
+      />
+      <StockPreparationMappingConfirmView
+        v-else-if="activeKey === 'material-mapping'"
+        :project-id="selectedProjectId"
+      />
+      <StockPreparationUnitConfirmView
+        v-else-if="activeKey === 'unit-conversion'"
         :project-id="selectedProjectId"
       />
       <p v-else class="stock-prep__panel-pending" data-testid="stock-prep-panel-pending">
@@ -81,6 +92,8 @@ import PageShell from '../../layout/PageShell.vue'
 import PageHeader from '../../layout/PageHeader.vue'
 import StockPreparationProjectWorkspaceView from './StockPreparationProjectWorkspaceView.vue'
 import StockPreparationSnapshotDiffView from './StockPreparationSnapshotDiffView.vue'
+import StockPreparationMappingConfirmView from './StockPreparationMappingConfirmView.vue'
+import StockPreparationUnitConfirmView from './StockPreparationUnitConfirmView.vue'
 
 const { locale } = useLocale()
 
@@ -104,8 +117,13 @@ interface StockPreparationViewTab {
   en: string
   zhDesc: string
   enDesc: string
-  /** The readonly (GET) summary endpoint the future view reads. Values-free path only. */
+  /** The readonly (GET) summary endpoint the view reads. Values-free path only. */
   endpoint: string
+  /**
+   * True for the two confirmation views whose row actions issue MULTITABLE-INTERNAL human-confirm
+   * writes (W3b). Still no external ERP/K3 write — the badge copy reflects the human-confirm nature.
+   */
+  confirmWrites?: boolean
 }
 
 // Tab order follows the MVP business loop (design §"MVP Goal"). Descriptions are values-free — they
@@ -134,6 +152,7 @@ const views: StockPreparationViewTab[] = [
     zhDesc: '将 PLM 图号/版本映射到 ERP 物料编码/内部 id;歧义或未匹配的行进入人工确认,不自动创建 ERP 物料。',
     enDesc: 'Map PLM drawing/version to ERP material code/internal id; ambiguous or unmatched rows go to manual confirmation, never auto-create ERP material.',
     endpoint: '/api/integration/stock-preparation/material-mappings/summary',
+    confirmWrites: true,
   },
   {
     key: 'unit-conversion',
@@ -142,6 +161,7 @@ const views: StockPreparationViewTab[] = [
     zhDesc: '将设计单位换算为 ERP 领用单位;无唯一有效规则时进入异常队列,不做静默猜测。',
     enDesc: 'Convert the design unit to the ERP issue unit; with no unique active rule the line enters the exception queue rather than a silent guess.',
     endpoint: '/api/integration/stock-preparation/unit-conversions/summary',
+    confirmWrites: true,
   },
   {
     key: 'prep-line',
