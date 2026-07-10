@@ -991,7 +991,7 @@ describe('AutomationExecutor', () => {
         status: 200,
         headers: { 'Content-Type': 'application/json' },
       }))
-      .mockResolvedValueOnce(new Response(JSON.stringify({ access_token: 'app-access-token' }), {
+      .mockResolvedValueOnce(new Response(JSON.stringify({ errcode: 0, errmsg: 'ok', access_token: 'app-access-token' }), {
         status: 200,
         headers: { 'Content-Type': 'application/json' },
       }))
@@ -1039,6 +1039,68 @@ describe('AutomationExecutor', () => {
     expect(insertArgs?.[2]).toBe('dt-user-1')
     expect(insertArgs?.[6]).toBe(true)
     expect(insertArgs?.[7]).toBe('success')
+  })
+
+  // PR #4046 Phase B: when the rule-creator ALERT send itself has an unknowable outcome (network
+  // error — real transport marks it), the person-delivery telemetry records the DISTINCT
+  // 'outcome_unknown' state instead of 'failed', and the alert is not resent.
+  it('records outcome_unknown telemetry when the rule-creator alert send outcome is unknowable (no resend)', async () => {
+    process.env.DINGTALK_APP_KEY = 'dt-app-key'
+    process.env.DINGTALK_APP_SECRET = 'dt-app-secret'
+    process.env.DINGTALK_AGENT_ID = '123456789'
+
+    const queryFn = vi.fn()
+      .mockResolvedValueOnce({
+        rows: [{ id: 'dt_1', name: 'Ops Group', webhook_url: 'https://oapi.dingtalk.com/robot/send?access_token=test', secret: null, enabled: true }],
+      })
+      .mockResolvedValueOnce({ rows: [], rowCount: 1 })
+      .mockResolvedValueOnce({ rows: [{ local_user_id: 'user_1', dingtalk_user_id: 'dt-user-1' }] })
+      .mockResolvedValue({ rows: [], rowCount: 1 })
+    const fetchFn = vi.fn()
+      // group robot send rejected by DingTalk → triggers the rule-creator alert path
+      .mockResolvedValueOnce(new Response(JSON.stringify({ errcode: 310000, errmsg: 'signature mismatch' }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ errcode: 0, errmsg: 'ok', access_token: 'app-access-token' }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }))
+      // the alert asyncsend REJECTS at network level → transport (send tier) marks outcome-unknown
+      .mockRejectedValueOnce(new TypeError('fetch failed')) as unknown as typeof fetch
+
+    deps = createMockDeps({ queryFn, fetchFn })
+    executor = new AutomationExecutor(deps)
+
+    const rule = createMockRule({
+      actions: [{
+        type: 'send_dingtalk_group_message',
+        config: {
+          destinationId: 'dt_1',
+          titleTemplate: 'Record {{record.title}} ready',
+          bodyTemplate: 'Status: {{record.status}}',
+        },
+      }],
+    })
+    const result = await executor.execute(rule, {
+      recordId: 'r1',
+      data: { title: 'Incident', status: 'open' },
+      sheetId: 'sheet_1',
+      actorId: 'user_2',
+    })
+
+    expect(result.status).toBe('failed')
+    expect(result.steps[0].output).toEqual(expect.objectContaining({
+      failureAlert: expect.objectContaining({ status: 'failed' }),
+    }))
+    // robot send + gettoken + ONE alert asyncsend attempt — never resent on ambiguity.
+    expect(fetchFn).toHaveBeenCalledTimes(3)
+    const personInsertCalls = queryFn.mock.calls.filter((call) => String(call[0]).includes('INSERT INTO dingtalk_person_deliveries'))
+    expect(personInsertCalls).toHaveLength(1)
+    const insertArgs = personInsertCalls[0]?.[1] as unknown[] | undefined
+    expect(insertArgs?.[1]).toBe('user_1')
+    expect(insertArgs?.[6]).toBe(false)
+    expect(insertArgs?.[7]).toBe('outcome_unknown')
   })
 
   it('audits a skipped rule-creator alert when the creator is not linked to DingTalk', async () => {
@@ -1349,7 +1411,7 @@ describe('AutomationExecutor', () => {
       })
       .mockResolvedValue({ rows: [] })
     const fetchFn = vi.fn()
-      .mockResolvedValueOnce(new Response(JSON.stringify({ access_token: 'app-access-token' }), {
+      .mockResolvedValueOnce(new Response(JSON.stringify({ errcode: 0, errmsg: 'ok', access_token: 'app-access-token' }), {
         status: 200,
         headers: { 'Content-Type': 'application/json' },
       }))
@@ -1417,7 +1479,7 @@ describe('AutomationExecutor', () => {
       .mockResolvedValue({ rows: [] })
 
     const fetchFn = vi.fn()
-      .mockResolvedValueOnce(new Response(JSON.stringify({ access_token: 'app-access-token' }), {
+      .mockResolvedValueOnce(new Response(JSON.stringify({ errcode: 0, errmsg: 'ok', access_token: 'app-access-token' }), {
         status: 200,
         headers: { 'Content-Type': 'application/json' },
       }))
@@ -1475,6 +1537,97 @@ describe('AutomationExecutor', () => {
 
     // Partial success is reported as a partial result.
     expect(result.steps[0]?.output).toMatchObject({ notifiedUsers: 100, failedRecipientCount: 50 })
+    // Definite rejection (errcode 88 envelope — the transport never marks HTTP-200 envelopes):
+    // NOTHING is outcome_unknown. Mutation guard for Phase B: classifying definite rejections as
+    // outcome_unknown would flip the 50 'failed' assertions above red.
+    expect((result.steps[0]?.output as { deliveryOutcomeUnknown?: boolean }).deliveryOutcomeUnknown).toBeUndefined()
+  })
+
+  // PR #4046 Phase B: a send whose outcome is UNKNOWABLE (network error — the real transport
+  // marks it isDingTalkOutcomeUnknown) records the DISTINCT `outcome_unknown` state for exactly
+  // the recipients of the batch that was IN FLIGHT. Batches never attempted have a KNOWN
+  // outcome (not sent) and stay `failed`; earlier successful batches keep success. Nobody is
+  // resent — the executor makes exactly one send attempt per batch, and the step output carries
+  // deliveryOutcomeUnknown for the execution record.
+  it('records ONLY the in-flight batch as outcome_unknown when the send outcome is unknowable (marker consumed; no resend)', async () => {
+    process.env.DINGTALK_APP_KEY = 'dt-app-key'
+    process.env.DINGTALK_APP_SECRET = 'dt-app-secret'
+    process.env.DINGTALK_AGENT_ID = '123456789'
+
+    const recipientCount = 250 // → three batches: 100 + 100 + 50
+    const recipientRows = Array.from({ length: recipientCount }, (_, i) => ({
+      local_user_id: `user_${i}`,
+      local_user_active: true,
+      dingtalk_user_id: `dt-user-${i}`,
+    }))
+
+    const queryFn = vi.fn()
+      .mockResolvedValueOnce({ rows: recipientRows })
+      .mockResolvedValue({ rows: [] })
+
+    const fetchFn = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ errcode: 0, errmsg: 'ok', access_token: 'app-access-token' }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }))
+      // batch 1 (100 recipients) succeeds
+      .mockResolvedValueOnce(new Response(JSON.stringify({ errcode: 0, errmsg: 'ok', task_id: 1 }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }))
+      // batch 2 (100 recipients): the fetch REJECTS at network level — the real client/transport
+      // (send tier) rethrows it marked outcome-unknown, with NO transport-level resend.
+      .mockRejectedValueOnce(new TypeError('fetch failed')) as unknown as typeof fetch
+
+    deps = createMockDeps({ queryFn, fetchFn })
+    executor = new AutomationExecutor(deps)
+
+    const rule = createMockRule({
+      actions: [{
+        type: 'send_dingtalk_person_message',
+        config: {
+          userIds: recipientRows.map((row) => row.local_user_id),
+          titleTemplate: 'T',
+          bodyTemplate: 'B',
+        },
+      }],
+    })
+    const result = await executor.execute(rule, {
+      recordId: 'r1',
+      data: {},
+      sheetId: 'sheet_1',
+      actorId: 'user_1',
+    })
+
+    expect(result.status).toBe('failed')
+    // token + batch1 + batch2 only — batch 2's failure is NOT resent and batch 3 is never sent.
+    expect(fetchFn).toHaveBeenCalledTimes(3)
+
+    const deliveryInserts = queryFn.mock.calls
+      .filter((call) => String(call[0]).includes('INSERT INTO dingtalk_person_deliveries'))
+      .map((call) => {
+        const params = call[1] as unknown[]
+        return { localUserId: String(params[1]), status: String(params[7]) }
+      })
+
+    const succeeded = deliveryInserts.filter((row) => row.status === 'success').map((row) => row.localUserId)
+    const outcomeUnknown = deliveryInserts.filter((row) => row.status === 'outcome_unknown').map((row) => row.localUserId)
+    const failed = deliveryInserts.filter((row) => row.status === 'failed').map((row) => row.localUserId)
+
+    expect(deliveryInserts).toHaveLength(recipientCount)
+    expect(succeeded).toHaveLength(100) // batch 1: sent, response seen
+    expect(outcomeUnknown).toHaveLength(100) // batch 2: attempted, outcome unknowable
+    expect(failed).toHaveLength(50) // batch 3: never attempted — KNOWN not sent
+    // the in-flight batch is exactly batch 2 (userIds preserve recipient order)
+    expect(outcomeUnknown).toEqual(recipientRows.slice(100, 200).map((row) => row.local_user_id))
+    expect(failed).toEqual(recipientRows.slice(200).map((row) => row.local_user_id))
+
+    expect(result.steps[0]?.output).toMatchObject({
+      notifiedUsers: 100,
+      failedRecipientCount: 50,
+      deliveryOutcomeUnknown: true,
+      outcomeUnknownRecipientCount: 100,
+    })
   })
 
   it('truncates an oversized title/body before sending a person message instead of failing delivery', async () => {
@@ -1489,7 +1642,7 @@ describe('AutomationExecutor', () => {
       })
       .mockResolvedValue({ rows: [] })
     const fetchFn = vi.fn()
-      .mockResolvedValueOnce(new Response(JSON.stringify({ access_token: 'app-access-token' }), {
+      .mockResolvedValueOnce(new Response(JSON.stringify({ errcode: 0, errmsg: 'ok', access_token: 'app-access-token' }), {
         status: 200,
         headers: { 'Content-Type': 'application/json' },
       }))
@@ -1550,7 +1703,7 @@ describe('AutomationExecutor', () => {
       })
       .mockResolvedValue({ rows: [] })
     const fetchFn = vi.fn()
-      .mockResolvedValueOnce(new Response(JSON.stringify({ access_token: 'tok' }), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ errcode: 0, errmsg: 'ok', access_token: 'tok' }), { status: 200, headers: { 'Content-Type': 'application/json' } }))
       .mockResolvedValueOnce(new Response(JSON.stringify({ errcode: 0, errmsg: 'ok' }), { status: 200, headers: { 'Content-Type': 'application/json' } })) as unknown as typeof fetch
 
     deps = createMockDeps({ queryFn, fetchFn })
@@ -1710,7 +1863,7 @@ describe('AutomationExecutor', () => {
       })
       .mockResolvedValue({ rows: [] })
     const fetchFn = vi.fn()
-      .mockResolvedValueOnce(new Response(JSON.stringify({ access_token: 'app-access-token' }), {
+      .mockResolvedValueOnce(new Response(JSON.stringify({ errcode: 0, errmsg: 'ok', access_token: 'app-access-token' }), {
         status: 200,
         headers: { 'Content-Type': 'application/json' },
       }))
@@ -1776,7 +1929,7 @@ describe('AutomationExecutor', () => {
       })
       .mockResolvedValue({ rows: [] })
     const fetchFn = vi.fn()
-      .mockResolvedValueOnce(new Response(JSON.stringify({ access_token: 'app-access-token' }), {
+      .mockResolvedValueOnce(new Response(JSON.stringify({ errcode: 0, errmsg: 'ok', access_token: 'app-access-token' }), {
         status: 200,
         headers: { 'Content-Type': 'application/json' },
       }))
@@ -1838,7 +1991,7 @@ describe('AutomationExecutor', () => {
       })
       .mockResolvedValue({ rows: [] })
     const fetchFn = vi.fn()
-      .mockResolvedValueOnce(new Response(JSON.stringify({ access_token: 'app-access-token' }), {
+      .mockResolvedValueOnce(new Response(JSON.stringify({ errcode: 0, errmsg: 'ok', access_token: 'app-access-token' }), {
         status: 200,
         headers: { 'Content-Type': 'application/json' },
       }))
@@ -1929,7 +2082,7 @@ describe('AutomationExecutor', () => {
       })
       .mockResolvedValue({ rows: [] })
     const fetchFn = vi.fn()
-      .mockResolvedValueOnce(new Response(JSON.stringify({ access_token: 'app-access-token' }), {
+      .mockResolvedValueOnce(new Response(JSON.stringify({ errcode: 0, errmsg: 'ok', access_token: 'app-access-token' }), {
         status: 200,
         headers: { 'Content-Type': 'application/json' },
       }))
@@ -2039,7 +2192,7 @@ describe('AutomationExecutor', () => {
       })
       .mockResolvedValue({ rows: [] })
     const fetchFn = vi.fn()
-      .mockResolvedValueOnce(new Response(JSON.stringify({ access_token: 'app-access-token' }), {
+      .mockResolvedValueOnce(new Response(JSON.stringify({ errcode: 0, errmsg: 'ok', access_token: 'app-access-token' }), {
         status: 200,
         headers: { 'Content-Type': 'application/json' },
       }))

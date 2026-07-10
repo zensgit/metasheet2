@@ -16,6 +16,7 @@ import {
   findDingTalkApprovalCardDeliveryById,
   insertDingTalkApprovalCardDelivery,
   markDingTalkApprovalCardDeliverySendFailed,
+  markDingTalkApprovalCardDeliverySendOutcomeUnknown,
   markDingTalkApprovalCardDeliverySent,
   supersedeDingTalkApprovalCardDeliveriesForInstance,
 } from '../../src/integrations/dingtalk/approval-card-deliveries'
@@ -160,6 +161,34 @@ describeIfDb('A-1 — dingtalk approval card delivery ledger (real DB)', () => {
     })
     await markDingTalkApprovalCardDeliverySent(q, delivered.id, null)
     expect((await claimDingTalkApprovalCardDeliveryActed(q, delivered.id, { action: 'reject', actedBy: 'user_p2c' }))?.card_state).toBe('acted')
+  })
+
+  it('PR #4046 Phase B: outcome_unknown persists via the new helper (pending-only guard), IS claimable, and the CHECK still rejects unknown send_status values', async () => {
+    const row = await insertDingTalkApprovalCardDelivery(q, {
+      instanceId: INSTANCE,
+      nodeKey: 'approval_1',
+      recipientUserId: 'user_ou',
+      recipientDingTalkUserId: 'dd_user_ou',
+      deliveryKind: 'work_notice_action_card',
+    })
+    const marked = await markDingTalkApprovalCardDeliverySendOutcomeUnknown(q, row.id, 'fetch failed (response lost)')
+    expect(marked?.send_status).toBe('outcome_unknown')
+    expect(marked?.send_error).toBe('fetch failed (response lost)')
+
+    // pending-only guard: a second transition attempt is a no-op (same discipline as markSent/markSendFailed)
+    expect(await markDingTalkApprovalCardDeliverySendOutcomeUnknown(q, row.id, 'again')).toBeNull()
+    expect(await markDingTalkApprovalCardDeliverySent(q, row.id, 'task_late')).toBeNull()
+
+    // possibly-delivered ⇒ claimable: a valid callback proves the card WAS delivered
+    const claimed = await claimDingTalkApprovalCardDeliveryActed(q, row.id, { action: 'approve', actedBy: 'user_ou' })
+    expect(claimed?.card_state).toBe('acted')
+    expect(claimed?.send_status).toBe('outcome_unknown') // send-time truth is preserved on the audit row
+
+    // widened CHECK stays closed to anything else
+    await expect(
+      q(`INSERT INTO dingtalk_approval_card_deliveries (id, instance_id, node_key, recipient_user_id, recipient_dingtalk_user_id, delivery_kind, send_status)
+         VALUES ('bad_send_status', $1, 'n1', 'u', 'dd', 'interactive_card', 'maybe_sent')`, [INSTANCE]),
+    ).rejects.toThrow()
   })
 
     it('DB CHECKs reject invalid delivery_kind / card_state / acted-audit inconsistency; FK rejects unknown instances', async () => {

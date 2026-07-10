@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { Logger } from '../../src/core/logger'
 import {
   DingTalkBusinessError,
+  DingTalkMalformedResponseError,
   DingTalkRequestError,
   DingTalkTimeoutError,
   __resetDingTalkAppAccessTokenCacheForTests,
@@ -311,6 +312,153 @@ describe('DingTalk transport resilience (roadmap §7.2)', () => {
         fetchFn,
       })).rejects.toMatchObject({ statusCode: 429 })
       expect(fetchFn).toHaveBeenCalledTimes(1)
+    })
+  })
+
+  describe('malformed 2xx responses — NEVER success (PR #4046 Phase B P1)', () => {
+    // Pre-fix: readJson swallowed a SyntaxError into `null` and the ok-path normalized
+    // `null` → `{}` → SUCCESS. An HTTP 200 whose body is HTML, empty, truncated JSON, a bare
+    // primitive, or (for oapi envelopes) a JSON object MISSING the errcode/code discriminator
+    // must never report success. Tier behaviors are pinned SEPARATELY (owner guardrail):
+    // read = retryable within the existing budget; exchange = never retried; send = never
+    // resent + outcome-unknown marker.
+    const MALFORMED_200_BODIES: Array<[label: string, body: string, contentType: string]> = [
+      ['HTML error page', '<html><body>Bad Gateway</body></html>', 'text/html'],
+      ['empty body', '', 'application/json'],
+      ['truncated JSON', '{"errcode": 0, "task_id"', 'application/json'],
+      ['bare primitive', '42', 'application/json'],
+      ['JSON without errcode/code discriminator', '{"task_id": 424242}', 'application/json'],
+    ]
+    const malformedResponse = (body: string, contentType: string) =>
+      new Response(body, { status: 200, headers: { 'Content-Type': contentType } })
+
+    it("send tier: every malformed-200 shape throws DingTalkMalformedResponseError, marked outcome-unknown, exactly ONE fetch (no resend)", async () => {
+      for (const [label, body, contentType] of MALFORMED_200_BODIES) {
+        const fetchFn = vi.fn(async () => malformedResponse(body, contentType)) as unknown as typeof fetch
+        let caught: unknown
+        try {
+          await sendDingTalkWorkNotification('tok', NOTIFICATION, MESSAGE_CONFIG, { fetchFn })
+        } catch (error) {
+          caught = error
+        }
+        expect({ label, name: (caught as Error | undefined)?.name }).toEqual({ label, name: 'DingTalkMalformedResponseError' })
+        expect({ label, outcomeUnknown: isDingTalkOutcomeUnknown(caught) }).toEqual({ label, outcomeUnknown: true })
+        expect({ label, calls: (fetchFn as ReturnType<typeof vi.fn>).mock.calls.length }).toEqual({ label, calls: 1 })
+      }
+      expect(retryLogs()).toEqual([])
+    })
+
+    it('read tier: every malformed-200 shape retries within the EXISTING attempt budget, then throws (never success, never outcome-unknown)', async () => {
+      vi.spyOn(Math, 'random').mockReturnValue(0) // zero jitter — no real sleeping
+      for (const [label, body, contentType] of MALFORMED_200_BODIES) {
+        warnSpy.mockClear()
+        const fetchMock = vi.fn(async () => malformedResponse(body, contentType))
+        vi.stubGlobal('fetch', fetchMock)
+        let caught: unknown
+        try {
+          await listDingTalkDepartments('tok', '1')
+        } catch (error) {
+          caught = error
+        }
+        expect({ label, name: (caught as Error | undefined)?.name }).toEqual({ label, name: 'DingTalkMalformedResponseError' })
+        expect({ label, outcomeUnknown: isDingTalkOutcomeUnknown(caught) }).toEqual({ label, outcomeUnknown: false })
+        // default budget: 3 attempts (2 retries) — malformed responses are retryable-on-read
+        expect({ label, calls: fetchMock.mock.calls.length }).toEqual({ label, calls: DINGTALK_TRANSPORT_DEFAULTS.maxAttempts })
+        expect({ label, retries: retryLogs().length }).toEqual({ label, retries: DINGTALK_TRANSPORT_DEFAULTS.maxAttempts - 1 })
+      }
+    })
+
+    it('read tier: a malformed body on attempt 1 recovers when attempt 2 returns a valid envelope (retry is real, not a rethrow loop)', async () => {
+      vi.spyOn(Math, 'random').mockReturnValue(0)
+      const fetchMock = vi.fn()
+        .mockResolvedValueOnce(malformedResponse('<html>oops</html>', 'text/html'))
+        .mockResolvedValueOnce(okDeptEnvelope())
+      vi.stubGlobal('fetch', fetchMock)
+      const departments = await listDingTalkDepartments('tok', '1')
+      expect(departments).toEqual([expect.objectContaining({ id: '1', name: '技术部' })])
+      expect(fetchMock).toHaveBeenCalledTimes(2)
+    })
+
+    it('exchange tier: every malformed-200 shape throws after exactly ONE fetch (never retried, never outcome-unknown)', async () => {
+      for (const [label, body, contentType] of MALFORMED_200_BODIES) {
+        const fetchMock = vi.fn(async () => malformedResponse(body, contentType))
+        vi.stubGlobal('fetch', fetchMock)
+        let caught: unknown
+        try {
+          await getDingTalkUserInfoByAuthCode('tok', 'auth-code')
+        } catch (error) {
+          caught = error
+        }
+        expect({ label, name: (caught as Error | undefined)?.name }).toEqual({ label, name: 'DingTalkMalformedResponseError' })
+        expect({ label, outcomeUnknown: isDingTalkOutcomeUnknown(caught) }).toEqual({ label, outcomeUnknown: false })
+        expect({ label, calls: fetchMock.mock.calls.length }).toEqual({ label, calls: 1 })
+      }
+      expect(retryLogs()).toEqual([])
+    })
+
+    it("envelope 'none' (v1.0, no errcode contract): unparseable body is malformed, but a JSON object WITHOUT errcode is still SUCCESS", async () => {
+      // The discriminator requirement is oapi-only — v1.0 endpoints (oauth2/userAccessToken,
+      // contact/users/me) have no errcode field on success, so requiring one there would break
+      // every healthy call. Unparseable bodies are still malformed for BOTH envelope kinds.
+      const malformedFetch = vi.fn(async () => malformedResponse('', 'application/json')) as unknown as typeof fetch
+      await expect(requestDingTalkTransportJson({
+        input: 'https://api.dingtalk.com/v1.0/contact/users/me',
+        init: { method: 'GET' },
+        fallbackError: 'failed',
+        kind: 'exchange',
+        envelope: 'none',
+        fetchFn: malformedFetch,
+      })).rejects.toMatchObject({ name: 'DingTalkMalformedResponseError' })
+      expect(malformedFetch).toHaveBeenCalledTimes(1)
+
+      const okFetch = vi.fn(async () => jsonResponse({ accessToken: 'v1-token', expireIn: 7200 })) as unknown as typeof fetch
+      await expect(requestDingTalkTransportJson({
+        input: 'https://api.dingtalk.com/v1.0/oauth2/userAccessToken',
+        init: { method: 'POST' },
+        fallbackError: 'failed',
+        kind: 'exchange',
+        envelope: 'none',
+        fetchFn: okFetch,
+      })).resolves.toMatchObject({ accessToken: 'v1-token' })
+      expect(okFetch).toHaveBeenCalledTimes(1)
+    })
+
+    it('a top-level JSON array on an oapi 200 is malformed (arrays are not envelopes)', async () => {
+      const fetchFn = vi.fn(async () => jsonResponse([{ task_id: 1 }])) as unknown as typeof fetch
+      let caught: unknown
+      try {
+        await sendDingTalkWorkNotification('tok', NOTIFICATION, MESSAGE_CONFIG, { fetchFn })
+      } catch (error) {
+        caught = error
+      }
+      expect((caught as Error | undefined)?.name).toBe('DingTalkMalformedResponseError')
+      expect(isDingTalkOutcomeUnknown(caught)).toBe(true)
+      expect(fetchFn).toHaveBeenCalledTimes(1)
+    })
+
+    it('malformed-200 on a NON-ok status is untouched: a 500 with an HTML body still throws DingTalkRequestError(500)', async () => {
+      // Guard the guard: the malformed classification applies to the OK path only; error
+      // statuses keep their original shape (responseBody: null) and tiering.
+      const fetchFn = vi.fn(async () => new Response('<html>boom</html>', { status: 500, headers: { 'Content-Type': 'text/html' } })) as unknown as typeof fetch
+      let caught: unknown
+      try {
+        await sendDingTalkWorkNotification('tok', NOTIFICATION, MESSAGE_CONFIG, { fetchFn })
+      } catch (error) {
+        caught = error
+      }
+      expect(caught).toBeInstanceOf(DingTalkRequestError)
+      expect(caught).toMatchObject({ statusCode: 500, responseBody: null })
+      expect(isDingTalkOutcomeUnknown(caught)).toBe(true) // send-tier 5xx stays outcome-unknown
+      expect(fetchFn).toHaveBeenCalledTimes(1)
+    })
+
+    it('DingTalkMalformedResponseError message carries NO body content (a garbled body could contain anything)', () => {
+      const err = new DingTalkMalformedResponseError('unparseable_body', 200, 'Failed to send')
+      expect(err.message).not.toContain('<html>')
+      expect(err.message).toContain('unusable')
+      expect(err.httpStatus).toBe(200)
+      const missing = new DingTalkMalformedResponseError('missing_errcode', 200, 'Failed to send')
+      expect(missing.message).toContain('errcode')
     })
   })
 

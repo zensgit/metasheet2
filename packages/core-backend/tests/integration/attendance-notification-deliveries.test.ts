@@ -3,6 +3,7 @@ import { randomUUID } from 'crypto'
 import { Kysely, PostgresDialect } from 'kysely'
 import { Pool } from 'pg'
 import { up as createAttendanceNotificationDeliveries } from '../../src/db/migrations/zzzz20260611120000_create_attendance_notification_deliveries'
+import { up as addOutcomeUnknownDeliveryStatus } from '../../src/db/migrations/zzzz20260710150000_add_outcome_unknown_delivery_status'
 import {
   AttendanceNotificationDeliveryWorker,
   buildAttendanceNotificationDeepLink,
@@ -12,7 +13,7 @@ import {
   WeComAttendanceDeliveryChannel,
   type AttendanceNotificationDeliveryQuery,
 } from '../../src/services/AttendanceNotificationDeliveryWorker'
-import type { DingTalkMessageConfig } from '../../src/integrations/dingtalk/client'
+import { sendDingTalkWorkNotification, type DingTalkMessageConfig } from '../../src/integrations/dingtalk/client'
 import type { WeComMessageConfig } from '../../src/integrations/wecom/client'
 
 const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
@@ -433,6 +434,119 @@ describeIfDatabase('Attendance C5 notification delivery outbox', () => {
         claim_worker_id: null,
         claim_expires_at: null,
       })
+    } finally {
+      await workerPool.end().catch(() => undefined)
+      await workerDb.destroy().catch(() => undefined)
+      await dropSchema(dbUrl, workerSchemaName).catch(() => undefined)
+    }
+  })
+
+  it('PR #4046 Phase B: an outcome-unknown DingTalk send terminates as outcome_unknown — zero retries, never re-claimed, never resent; an ordinary network error still retries', async () => {
+    if (!dbUrl) throw new Error('DATABASE_URL is required for this integration test')
+    const workerSchemaName = createIsolatedSchemaName()
+    await createSchema(dbUrl, workerSchemaName)
+    const workerDbUrl = withSearchPath(dbUrl, workerSchemaName)
+    const workerDb = createTestDb(workerDbUrl)
+    const workerPool = new Pool({ connectionString: workerDbUrl })
+    const runSuffix = Date.now().toString(36)
+    const orgId = `c5-outcome-unknown-${runSuffix}`
+    const sourceId = randomUUID()
+    const firstNow = new Date('2026-08-01T00:00:00.000Z')
+    // beyond computeDeliveryBackoffMs(1)=60s, so the retrying row is due again on batch 2
+    const secondNow = new Date('2026-08-01T00:05:00.000Z')
+    let now = firstNow
+    const query: AttendanceNotificationDeliveryQuery = async (sqlText, params) => {
+      const r = await workerPool.query(sqlText, params as unknown[])
+      return { rows: r.rows, rowCount: r.rowCount }
+    }
+    // Per-recipient send attempts — the resend-hazard counter.
+    const sendAttemptsByUser = new Map<string, number>()
+    try {
+      await createAttendanceNotificationDeliveries(workerDb)
+      // the migration under test: widens the status CHECK by 'outcome_unknown'
+      await addOutcomeUnknownDeliveryStatus(workerDb)
+      await requireTable(workerPool, 'attendance_notification_deliveries')
+
+      const insert = async (label: string) => (await workerPool.query<{ id: string }>(
+        `INSERT INTO attendance_notification_deliveries
+           (org_id, source_type, source_id, source_key, recipient_user_id, recipient_role, channel, payload)
+         VALUES ($1,'unscheduled_reminder',$2,$3,$4,'subject','dingtalk_work_notification','{}'::jsonb)
+         RETURNING id::text AS id`,
+        [orgId, sourceId, `outcome-unknown:${runSuffix}:${label}`, `u-${label}`],
+      )).rows[0].id
+      const unknownId = await insert('unknown')
+      const transientId = await insert('transient')
+
+      // Real DingTalkAttendanceDeliveryChannel; recipient resolution stubbed (unit-style DI — the
+      // directory JOIN is pinned elsewhere/C5-3), but the SEND for the outcome-unknown recipient
+      // goes through the REAL client + transport with a fetch that rejects at network level, so
+      // the outcome-unknown MARKING itself is the real transport behavior, not a hand-rolled flag.
+      const channel = new DingTalkAttendanceDeliveryChannel({
+        query: (async (sqlText: string, params?: unknown[]) => {
+          if (sqlText.includes('directory_account_links')) {
+            return { rows: [{ integration_id: 'integ-1', external_user_id: `dd_${String(params?.[0])}` }] }
+          }
+          return { rows: [{ org_has_active_integration: true }] }
+        }) as never,
+        readConfig: async () => ({ appKey: 'k', appSecret: 's', agentId: '42' }),
+        fetchAccessToken: async () => 'tok',
+        sendWorkNotification: async (accessToken, input, config) => {
+          const target = input.userIds[0]
+          sendAttemptsByUser.set(target, (sendAttemptsByUser.get(target) ?? 0) + 1)
+          if (target === 'dd_u-unknown') {
+            // network-level rejection → the real transport marks the rethrown error outcome-unknown
+            return sendDingTalkWorkNotification(accessToken, input, config, {
+              fetchFn: (async () => { throw new TypeError('fetch failed') }) as unknown as typeof fetch,
+            })
+          }
+          // ordinary transient failure WITHOUT the marker — must keep retrying (pinned unchanged)
+          throw new Error('ECONNRESET: transient blip')
+        },
+      })
+
+      const worker = new AttendanceNotificationDeliveryWorker({
+        query,
+        channels: [channel],
+        now: () => now,
+        leaseMs: 60_000,
+        maxAttempts: 5,
+        workerId: 'worker-outcome-unknown',
+      })
+
+      await expect(worker.runBatch()).resolves.toEqual({
+        claimed: 2, sent: 0, retrying: 1, failed: 0, skipped: 0, outcomeUnknown: 1,
+      })
+
+      const row = async (id: string) => (await workerPool.query(
+        `SELECT status, attempt_count, delivered_at, last_error, claim_expires_at, claim_worker_id
+           FROM attendance_notification_deliveries
+          WHERE id = $1`,
+        [id],
+      )).rows[0]
+
+      // Terminal distinct state against the REAL widened CHECK — not 'failed', lease released,
+      // attempt budget NOT burned beyond the single attempt.
+      expect(await row(unknownId)).toMatchObject({
+        status: 'outcome_unknown',
+        attempt_count: 1,
+        delivered_at: null,
+        claim_expires_at: null,
+        claim_worker_id: null,
+      })
+      expect(String((await row(unknownId)).last_error)).toMatch(/^dingtalk_send_outcome_unknown: /)
+      expect(await row(transientId)).toMatchObject({ status: 'retrying', attempt_count: 1 })
+
+      // Next batch (past the retry backoff): the outcome_unknown row is NOT re-claimed and NOT
+      // resent; the ordinary transient row IS retried (behavior pinned unchanged).
+      now = secondNow
+      await expect(worker.runBatch()).resolves.toEqual({
+        claimed: 1, sent: 0, retrying: 1, failed: 0, skipped: 0,
+      })
+      expect(await row(unknownId)).toMatchObject({ status: 'outcome_unknown', attempt_count: 1 })
+      expect(await row(transientId)).toMatchObject({ status: 'retrying', attempt_count: 2 })
+      // The resend-hazard assertion: exactly ONE send ever reached the outcome-unknown recipient.
+      expect(sendAttemptsByUser.get('dd_u-unknown')).toBe(1)
+      expect(sendAttemptsByUser.get('dd_u-transient')).toBe(2)
     } finally {
       await workerPool.end().catch(() => undefined)
       await workerDb.destroy().catch(() => undefined)
