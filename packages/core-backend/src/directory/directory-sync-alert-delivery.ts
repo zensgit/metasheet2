@@ -220,3 +220,232 @@ export async function getDirectoryManagerBindingCoverage(
     coverage: managerCount === 0 ? 1 : linkedManagerCount / managerCount,
   }
 }
+
+export type DirectoryInactiveLinkedSample = {
+  directoryAccountId: string
+  externalUserId: string
+  accountName: string | null
+  localUserId: string
+  localUserEmail: string | null
+  localUserName: string | null
+  inactiveSinceAt: string
+  inactiveDays: number
+}
+
+export type DirectoryInactiveLinkedMetric = {
+  thresholdDays: number
+  count: number
+  sample: DirectoryInactiveLinkedSample[]
+}
+
+const INACTIVE_LINKED_SAMPLE_LIMIT = 20
+
+/**
+ * roadmap §7.1 — the offboarding blind spot. `DIRECTORY_DEPROVISION_ENABLED` (DT-OPS-01) is
+ * default-OFF by owner decision, so a directory account going `is_active = false` (DingTalk
+ * removal / the deactivation sweep) does NOT touch the linked local user at all: password
+ * login keeps working indefinitely. The `inactive_linked` review-item filter
+ * (`directory-sync.ts` `buildReviewFilterSql`) surfaces these as a REVIEW QUEUE, but has no
+ * notion of how long an account has sat that way — this is the missing age dimension.
+ *
+ * "Linked" here matches the `inactive_linked` review-item's own definition exactly:
+ * `directory_account_links.local_user_id IS NOT NULL` (link_status is NOT required to be
+ * `'linked'` — a recorded candidate match is enough to mean "this local user inherits
+ * whatever the directory account grants"). We ALSO require the local user to still be
+ * `is_active = true`: a local user already deactivated by some other path is not part of
+ * this specific blind spot (there is nothing left to revoke).
+ *
+ * Anchor for "since when": `directory_accounts.updated_at`. There is no dedicated
+ * deactivation-transition column in this schema. Verified by grepping every write site
+ * that can touch `directory_accounts` in this codebase — there are exactly two, both in
+ * `directory-sync.ts`:
+ *   1. The re-sync upsert (`INSERT ... ON CONFLICT DO UPDATE SET is_active = true, ...,
+ *      updated_at = NOW()`) — only fires for accounts CURRENTLY present in the DingTalk
+ *      pull, and always sets is_active back to true (which takes the row OUT of this
+ *      metric's target set).
+ *   2. The deactivation sweep (`UPDATE directory_accounts SET is_active = false,
+ *      updated_at = NOW() WHERE ... AND is_active = true`) — guarded by `AND is_active =
+ *      true`, i.e. a genuine one-way transition, not a re-stamp. Once a row is inactive,
+ *      this statement's WHERE clause no longer matches it, so it cannot bump `updated_at`
+ *      again while the row stays inactive.
+ * No other module in `packages/core-backend/src` issues an UPDATE or INSERT against
+ * `directory_accounts` (every other reference is a read-only JOIN). So for a row that is
+ * CURRENTLY `is_active = false`, `updated_at` is exactly the timestamp of the transition
+ * into inactivity — an honest anchor, not an approximation, given the current schema.
+ */
+export async function getDirectoryInactiveLinkedMetric(
+  integrationId: string,
+  thresholdDays: number,
+  queryFn: typeof query = query,
+  sampleLimit: number = INACTIVE_LINKED_SAMPLE_LIMIT,
+): Promise<DirectoryInactiveLinkedMetric> {
+  const normalizedThresholdDays = Math.floor(thresholdDays)
+
+  const [countResult, sampleResult] = await Promise.all([
+    queryFn<{ total: number }>(
+      `SELECT COUNT(*)::int AS total
+         FROM directory_accounts a
+         JOIN directory_account_links l ON l.directory_account_id = a.id
+         JOIN users u ON u.id = l.local_user_id
+        WHERE a.integration_id = $1
+          AND a.is_active = FALSE
+          AND u.is_active = TRUE
+          AND a.updated_at <= NOW() - ($2 || ' days')::interval`,
+      [integrationId, normalizedThresholdDays],
+    ),
+    queryFn<{
+      directory_account_id: string
+      external_user_id: string
+      account_name: string | null
+      local_user_id: string
+      local_user_email: string | null
+      local_user_name: string | null
+      inactive_since_at: string
+      inactive_days: number
+    }>(
+      `SELECT a.id AS directory_account_id,
+              a.external_user_id,
+              a.name AS account_name,
+              u.id AS local_user_id,
+              u.email AS local_user_email,
+              u.name AS local_user_name,
+              a.updated_at AS inactive_since_at,
+              FLOOR(EXTRACT(EPOCH FROM (NOW() - a.updated_at)) / 86400)::int AS inactive_days
+         FROM directory_accounts a
+         JOIN directory_account_links l ON l.directory_account_id = a.id
+         JOIN users u ON u.id = l.local_user_id
+        WHERE a.integration_id = $1
+          AND a.is_active = FALSE
+          AND u.is_active = TRUE
+          AND a.updated_at <= NOW() - ($2 || ' days')::interval
+        ORDER BY a.updated_at ASC
+        LIMIT $3`,
+      [integrationId, normalizedThresholdDays, sampleLimit],
+    ),
+  ])
+
+  return {
+    thresholdDays: normalizedThresholdDays,
+    count: Number(countResult.rows[0]?.total ?? 0),
+    sample: sampleResult.rows.map((row) => ({
+      directoryAccountId: row.directory_account_id,
+      externalUserId: row.external_user_id,
+      accountName: row.account_name,
+      localUserId: row.local_user_id,
+      localUserEmail: row.local_user_email,
+      localUserName: row.local_user_name,
+      inactiveSinceAt: row.inactive_since_at,
+      inactiveDays: Number(row.inactive_days),
+    })),
+  }
+}
+
+/**
+ * `unset = off`, matching `DIRECTORY_SYNC_ALERT_WEBHOOK`'s own channel-gating discipline. A
+ * non-positive or non-integer value is treated as unset (logged once) rather than silently
+ * clamped, so a typo in ops config fails closed instead of alerting on a bogus threshold.
+ */
+export function readDirectoryInactiveLinkedAlertThresholdDays(): number | null {
+  const raw = String(process.env.DIRECTORY_INACTIVE_LINKED_ALERT_DAYS ?? '').trim()
+  if (!raw) return null
+  const parsed = Number(raw)
+  if (!Number.isInteger(parsed) || parsed <= 0) {
+    logger.warn(`DIRECTORY_INACTIVE_LINKED_ALERT_DAYS is set but not a positive integer: ${raw}`)
+    return null
+  }
+  return parsed
+}
+
+export function buildDirectoryInactiveLinkedAlertMessage(options: {
+  integrationName: string
+  metric: DirectoryInactiveLinkedMetric
+}): { subject: string; content: string } {
+  const { integrationName, metric } = options
+  const subject = `钉钉目录存在停用超 ${metric.thresholdDays} 天但本地账号仍激活的绑定`
+  const lines = [
+    `- 集成：${integrationName}`,
+    `- 阈值：${metric.thresholdDays} 天`,
+    `- 数量：${metric.count}`,
+  ]
+  const shown = Math.min(metric.sample.length, 5)
+  for (const item of metric.sample.slice(0, shown)) {
+    const label = item.localUserName || item.localUserEmail || item.localUserId
+    lines.push(`  - ${item.accountName || item.externalUserId} → ${label}（已停用 ${item.inactiveDays} 天）`)
+  }
+  // `metric.sample` is already capped (INACTIVE_LINKED_SAMPLE_LIMIT) upstream, so
+  // `count` can exceed `sample.length` even before this message's own 5-item cap —
+  // compare against what was actually SHOWN here, not the upstream sample size.
+  if (metric.count > shown) {
+    lines.push(`  - ……以及其他 ${metric.count - shown} 个账号`)
+  }
+  return { subject, content: lines.join('\n') }
+}
+
+/**
+ * §7.1 post-run informational alert. Best-effort and NEVER throws — this is a backlog
+ * digest, not a failure signal, and must not make a healthy sync look broken.
+ *
+ * Two independent env gates, both required, matching the `breach-channels` /
+ * `DIRECTORY_SYNC_ALERT_WEBHOOK` convention that a side channel exists only when configured:
+ *   - `DIRECTORY_INACTIVE_LINKED_ALERT_DAYS` turns THIS alert on and sets its threshold.
+ *   - `DIRECTORY_SYNC_ALERT_WEBHOOK` (+ optional secret) is the delivery channel, shared
+ *     with the sync-failure alert.
+ * The threshold-days check is the SOLE gate on computing/sending this alert (no second,
+ * redundant guard inside the metric query) — a query gate here as well would make the env
+ * guard unfalsifiable by mutation (removing it would still silently no-op downstream).
+ */
+export async function deliverDirectoryInactiveLinkedAlert(
+  options: {
+    integrationId: string
+    integrationName: string
+  },
+  deps: {
+    thresholdDays?: number | null
+    config?: DirectorySyncAlertDeliveryConfig | null
+    fetchFn?: typeof fetch
+    queryFn?: typeof query
+  } = {},
+): Promise<boolean> {
+  const thresholdDays = deps.thresholdDays !== undefined ? deps.thresholdDays : readDirectoryInactiveLinkedAlertThresholdDays()
+  if (!thresholdDays) return false
+
+  const config = deps.config !== undefined ? deps.config : readDirectorySyncAlertWebhookConfig()
+  if (!config) return false
+
+  const queryFn = deps.queryFn ?? query
+  const fetchFn = deps.fetchFn ?? fetch
+
+  try {
+    const metric = await getDirectoryInactiveLinkedMetric(options.integrationId, thresholdDays, queryFn)
+    if (metric.count === 0) return false
+
+    const { subject, content } = buildDirectoryInactiveLinkedAlertMessage({
+      integrationName: options.integrationName,
+      metric,
+    })
+
+    const signedUrl = buildSignedDingTalkWebhookUrl(config.webhookUrl, config.secret)
+    const response = await fetchFn(signedUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(buildDingTalkMarkdown(subject, content)),
+      signal: AbortSignal.timeout(10_000),
+    })
+
+    if (!response.ok) {
+      logger.warn(`Directory inactive-linked alert webhook returned HTTP ${response.status} (${maskDingTalkWebhookUrl(config.webhookUrl)})`)
+      return false
+    }
+    validateDingTalkRobotResponse(await response.json().catch(() => null))
+
+    logger.info(`Directory inactive-linked backlog alert delivered for integration ${options.integrationId} (${metric.count} accounts >= ${thresholdDays}d)`)
+    return true
+  } catch (error) {
+    // A backlog digest must never be made worse by a failed webhook — same discipline as
+    // deliverDirectorySyncFailureAlert.
+    logger.warn(
+      `Failed to deliver directory inactive-linked alert for integration ${options.integrationId}: ${error instanceof Error ? error.message : String(error)}`,
+    )
+    return false
+  }
+}
