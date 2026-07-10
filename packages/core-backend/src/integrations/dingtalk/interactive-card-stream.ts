@@ -6,7 +6,10 @@
  * is ever created, so no callback can execute.
  *
  * This module stays import-side-effect-free: the production callback executor (db pool +
- * ApprovalProductService) is materialized lazily via dynamic import on the first callback event.
+ * ApprovalProductService) is materialized lazily via dynamic import on the first callback event,
+ * and the production client factory (official `dingtalk-stream` SDK adapter,
+ * `interactive-card-stream-sdk.ts`) is materialized lazily via dynamic import only after the env
+ * gate resolved enabled.
  */
 import { Logger } from '../../core/logger'
 import type { DingTalkApprovalCardCallbackResult } from './interactive-card-callback'
@@ -78,6 +81,12 @@ export type DingTalkInteractiveCardStreamClientFactory = (
 
 export type DingTalkInteractiveCardStreamWorkerStatus =
   | { state: 'disabled'; reason: DingTalkInteractiveCardStreamDisabledReason }
+  // Review P2-2 (proved against the real SDK dist): the SDK's connect() RESOLVES even on total
+  // failure (bad credentials, unreachable endpoint) and retries internally forever — so 'active'
+  // means "worker running; connection lifecycle delegated to the SDK", NOT "connected". A
+  // misconfigured-but-enabled worker reports active while the SDK silently retries; real
+  // connectivity is a UAT checklist item (U12/U13), and 'client_start_failed' is reachable only
+  // through factory/setup throws, never through a connect() rejection.
   | { state: 'active' }
   | { state: 'failed'; reason: 'client_start_failed' | 'client_stop_failed' | 'sdk_unwired' }
 
@@ -121,8 +130,28 @@ export function resolveDingTalkInteractiveCardStreamConfig(
   }
 }
 
+/** Sentinel error message for a genuinely unavailable Stream SDK (worker maps it to `sdk_unwired`). */
+export const DINGTALK_INTERACTIVE_CARD_STREAM_SDK_UNWIRED_ERROR = 'DINGTALK_INTERACTIVE_CARD_STREAM_SDK_UNWIRED'
+
+/**
+ * Explicit unwired seam (tests / SDK-less builds): always fails with the `sdk_unwired` sentinel.
+ * Production defaults to `defaultDingTalkInteractiveCardStreamClientFactory` below instead.
+ */
 export const unwiredDingTalkInteractiveCardStreamClientFactory: DingTalkInteractiveCardStreamClientFactory = async () => {
-  throw new Error('DINGTALK_INTERACTIVE_CARD_STREAM_SDK_UNWIRED')
+  throw new Error(DINGTALK_INTERACTIVE_CARD_STREAM_SDK_UNWIRED_ERROR)
+}
+
+/**
+ * Production default: the official DingTalk Stream SDK adapter (`dingtalk-stream`), materialized
+ * via dynamic import ONLY when this factory runs — and the worker invokes its factory strictly
+ * after the env gate resolved enabled, so with the flag off (the default) neither the adapter
+ * module nor the SDK (ws/axios transport) is ever imported. If the SDK package is genuinely
+ * absent from the install, the adapter throws the `sdk_unwired` sentinel and the worker reports
+ * `{ state: 'failed', reason: 'sdk_unwired' }` instead of pretending to be active.
+ */
+export const defaultDingTalkInteractiveCardStreamClientFactory: DingTalkInteractiveCardStreamClientFactory = async (config, handlers) => {
+  const { createDingTalkInteractiveCardStreamSdkClient } = await import('./interactive-card-stream-sdk')
+  return createDingTalkInteractiveCardStreamSdkClient(config, handlers)
 }
 
 /**
@@ -160,6 +189,13 @@ export class DingTalkInteractiveCardStreamWorker {
   private client: DingTalkInteractiveCardStreamClient | null = null
   private initializing: Promise<DingTalkInteractiveCardStreamWorkerStatus> | null = null
   private status: DingTalkInteractiveCardStreamWorkerStatus = { state: 'disabled', reason: 'env_disabled' }
+  /**
+   * Shutdown latch (B-2 review P3-1, W1b-confirmed race): shutdown() sets this even when
+   * `this.client` is still null — exactly the state while initializeOnce() is awaiting the client
+   * factory / start(). The in-flight initialize re-checks the latch after every await and closes
+   * the client it just created instead of activating a worker that is supposed to be dead.
+   */
+  private shutdownRequested = false
 
   constructor(options: {
     logger?: Pick<Logger, 'info' | 'warn'>
@@ -168,7 +204,7 @@ export class DingTalkInteractiveCardStreamWorker {
     callbackExecutor?: DingTalkInteractiveCardCallbackExecutor
   } = {}) {
     this.logger = options.logger ?? new Logger('DingTalkInteractiveCardStreamWorker')
-    this.clientFactory = options.clientFactory ?? unwiredDingTalkInteractiveCardStreamClientFactory
+    this.clientFactory = options.clientFactory ?? defaultDingTalkInteractiveCardStreamClientFactory
     this.callbackExecutor = options.callbackExecutor ?? null
   }
 
@@ -180,6 +216,9 @@ export class DingTalkInteractiveCardStreamWorker {
     if (this.initializing) return this.initializing
     if (this.client && this.status.state === 'active') return this.status
 
+    // A fresh initialize (not piggybacking on an in-flight one) starts a new lifecycle: clear any
+    // latch left behind by an earlier shutdown so the worker can be deliberately restarted.
+    this.shutdownRequested = false
     this.initializing = this.initializeOnce(env).finally(() => {
       this.initializing = null
     })
@@ -201,8 +240,17 @@ export class DingTalkInteractiveCardStreamWorker {
           await this.handleEvent(event)
         },
       })
+      // Shutdown latch re-check after every await (B-2 review P3-1): a shutdown() that landed
+      // while this initialize was in flight must win — close what we created, never go active.
+      if (this.shutdownRequested) {
+        return this.abortInFlightInitialize(createdClient)
+      }
       await createdClient.start()
+      if (this.shutdownRequested) {
+        return this.abortInFlightInitialize(createdClient)
+      }
       this.client = createdClient
+      // 'active' = running-with-SDK-owned-connection, not proven-connected (see status type doc).
       this.status = { state: 'active' }
       this.logger.info('DingTalk interactive-card Stream worker started')
       return this.status
@@ -225,8 +273,35 @@ export class DingTalkInteractiveCardStreamWorker {
     }
   }
 
+  /**
+   * Closes the in-flight initialize's client after a raced shutdown() and finalizes status.
+   * Mirrors the normal shutdown() outcome shape so callers cannot tell the two paths apart.
+   */
+  private async abortInFlightInitialize(
+    createdClient: DingTalkInteractiveCardStreamClient,
+  ): Promise<DingTalkInteractiveCardStreamWorkerStatus> {
+    this.client = null
+    try {
+      await createdClient.close()
+      this.status = { state: 'disabled', reason: 'env_disabled' }
+      this.logger.info('DingTalk interactive-card Stream worker start aborted (shutdown_during_initialize)')
+    } catch {
+      this.status = { state: 'failed', reason: 'client_stop_failed' }
+      this.logger.warn('DingTalk interactive-card Stream worker failed to stop (client_stop_failed)')
+    }
+    return this.status
+  }
+
   async shutdown(): Promise<DingTalkInteractiveCardStreamWorkerStatus> {
-    if (!this.client) return this.status
+    this.shutdownRequested = true
+    if (!this.client) {
+      if (this.initializing) {
+        // In-flight initialize observes the latch after its awaited factory/start() and closes the
+        // client it created (abortInFlightInitialize); there is nothing to close from here yet.
+        this.logger.info('DingTalk interactive-card Stream worker shutdown latched during in-flight initialize')
+      }
+      return this.status
+    }
     try {
       await this.client.close()
       this.client = null
