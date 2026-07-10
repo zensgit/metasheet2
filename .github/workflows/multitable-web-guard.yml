@@ -132,6 +132,14 @@ on:
       # UI-P2-1c MtButton/MtPopover migration proof-specs (all *-migration.spec.ts) — fire the guard when
       # any of them changes so they actually carry CI weight (they were landing un-gated; #3769 failure mode).
       - 'apps/web/tests/*-migration.spec.ts'
+      # Formula catalog parity (12 scalar functions): web-side intent specs (12-present /
+      # COUNTIF-absent, 1a scalar-set, i18n labels, editor diagnostics incl. arity table)
+      - 'apps/web/src/multitable/utils/formula-docs.ts'
+      - 'apps/web/src/multitable/utils/meta-formula-labels.ts'
+      - 'apps/web/tests/multitable-formula-catalog-parity-12.spec.ts'
+      - 'apps/web/tests/multitable-formula-catalog-1a.spec.ts'
+      - 'apps/web/tests/meta-formula-labels.spec.ts'
+      - 'apps/web/tests/multitable-formula-editor.spec.ts'
       - '.github/workflows/multitable-web-guard.yml'
   push:
     branches: [main]
@@ -243,6 +251,14 @@ on:
       # UI-P2-1c MtButton/MtPopover migration proof-specs (all *-migration.spec.ts) — fire the guard when
       # any of them changes so they actually carry CI weight (they were landing un-gated; #3769 failure mode).
       - 'apps/web/tests/*-migration.spec.ts'
+      # Formula catalog parity (12 scalar functions): web-side intent specs (12-present /
+      # COUNTIF-absent, 1a scalar-set, i18n labels, editor diagnostics incl. arity table)
+      - 'apps/web/src/multitable/utils/formula-docs.ts'
+      - 'apps/web/src/multitable/utils/meta-formula-labels.ts'
+      - 'apps/web/tests/multitable-formula-catalog-parity-12.spec.ts'
+      - 'apps/web/tests/multitable-formula-catalog-1a.spec.ts'
+      - 'apps/web/tests/meta-formula-labels.spec.ts'
+      - 'apps/web/tests/multitable-formula-editor.spec.ts'
       - '.github/workflows/multitable-web-guard.yml'
 
 jobs:
@@ -305,4 +321,4 @@ jobs:
         # L1c: HistoryBatchChangesList.vue's only behavioral coverage — 3 specs that mount the real
         # component tree via HistoryCenterModal (inline-diff, ai-shortcut-label, pinned-batch-deeplink)
         # — were exercised in NO CI gate; added alongside their new path triggers above.
-        run: pnpm --filter @metasheet/web exec vitest run automation-action-summary automation-recipes automation-save-block-reasons automation-target-sheet-options AutomationExecutionsView meta-automation-labels meta-filter-group meta-grid-table meta-toolbar-filter-builder migration multitable-automation-manager multitable-automation-rule-editor multitable-cell-renderer-person-inactive multitable-conditional-formatting multitable-conditional-rule multitable-config-history-modal multitable-config-revert-refresh multitable-field-manager multitable-field-visibility multitable-grid multitable-history-center-ai-shortcut-label multitable-history-center-inline-diff multitable-history-center-pinned-batch-deeplink multitable-history-fe multitable-kanban-view multitable-person-picker multitable-record-permission-manager multitable-reorder-view-fields multitable-required-if multitable-reset-confirm-dialog multitable-reset-tsource-picker multitable-restore-batch-dialog multitable-restore-preview-dialog multitable-rollup-aggregation-fe multitable-sheet-cursor-state multitable-sheet-permission-manager multitable-trash-fe multitable-workbench-history-field-scope-wiring multitable-workbench-restore-wiring multitable-yjs-cell-editor multitable-yjs-scalar-cell parallelBranchRunsView statusTag --reporter=dot
+        run: pnpm --filter @metasheet/web exec vitest run automation-action-summary automation-recipes automation-save-block-reasons automation-target-sheet-options AutomationExecutionsView meta-automation-labels meta-filter-group meta-formula-labels meta-grid-table meta-toolbar-filter-builder migration multitable-automation-manager multitable-automation-rule-editor multitable-cell-renderer-person-inactive multitable-conditional-formatting multitable-conditional-rule multitable-config-history-modal multitable-config-revert-refresh multitable-field-manager multitable-field-visibility multitable-formula-catalog-1a multitable-formula-catalog-parity multitable-formula-editor multitable-grid multitable-history-center-ai-shortcut-label multitable-history-center-inline-diff multitable-history-center-pinned-batch-deeplink multitable-history-fe multitable-kanban-view multitable-person-picker multitable-record-permission-manager multitable-reorder-view-fields multitable-required-if multitable-reset-confirm-dialog multitable-reset-tsource-picker multitable-restore-batch-dialog multitable-restore-preview-dialog multitable-rollup-aggregation-fe multitable-sheet-cursor-state multitable-sheet-permission-manager multitable-trash-fe multitable-workbench-history-field-scope-wiring multitable-workbench-restore-wiring multitable-yjs-cell-editor multitable-yjs-scalar-cell parallelBranchRunsView statusTag --reporter=dot
