@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   getDingTalkWorkNotificationRuntimeStatus,
   readDingTalkMessageConfig,
+  sendDingTalkInteractiveApprovalCard,
   sendDingTalkWorkNotification,
 } from '../../src/integrations/dingtalk/client'
 
@@ -105,5 +106,141 @@ describe('dingtalk work notification client', () => {
     expect(payload.userid_list).toBe('dt-user-1,dt-user-2')
     expect(payload.msg.markdown.title).toBe('Ticket rec_1 ready')
     expect(payload.msg.markdown.text).toContain('Please review the latest changes.')
+  })
+
+  it('B-2 sends the official create-and-deliver shape and returns the carrier id', async () => {
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({
+      success: true,
+      result: {
+        outTrackId: 'delivery-1',
+        deliverResults: [{
+          success: true,
+          spaceType: 'IM_ROBOT',
+          spaceId: 'dt-user-1',
+          carrierId: 'carrier-1',
+        }],
+      },
+    }), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    const result = await sendDingTalkInteractiveApprovalCard(
+      'app-access-token',
+      {
+        userId: 'dt-user-1',
+        robotCode: 'ding-app-key',
+        cardTemplateId: 'template-1',
+        outTrackId: 'delivery-1',
+        title: '审批待办：差旅申请',
+        requestNo: 'REQ-1',
+        nodeName: '部门审批',
+        statusText: '等待你处理',
+        rejectUrl: 'https://ms.example.test/m/approval-decision?d=delivery-1&t=token',
+      },
+      { openApiBaseUrl: 'https://api.dingtalk.test/' },
+    )
+
+    expect(result.taskId).toBe('carrier-1')
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit]
+    expect(url).toBe('https://api.dingtalk.test/v1.0/card/instances/createAndDeliver')
+    expect(init.headers).toEqual({
+      'Content-Type': 'application/json',
+      'x-acs-dingtalk-access-token': 'app-access-token',
+    })
+    expect(JSON.parse(String(init.body))).toEqual({
+      userId: 'dt-user-1',
+      userIdType: 1,
+      cardTemplateId: 'template-1',
+      outTrackId: 'delivery-1',
+      callbackType: 'STREAM',
+      callbackRouteKey: 'approval_card',
+      cardData: {
+        cardParamMap: {
+          title: '审批待办：差旅申请',
+          requestNo: 'REQ-1',
+          nodeName: '部门审批',
+          statusText: '等待你处理',
+          approveText: '同意',
+          rejectText: '驳回',
+          rejectUrl: 'https://ms.example.test/m/approval-decision?d=delivery-1&t=token',
+        },
+      },
+      openSpaceId: 'dtv1.card//im_robot.dt-user-1',
+      imRobotOpenSpaceModel: { supportForward: false },
+      imRobotOpenDeliverModel: { robotCode: 'ding-app-key', spaceType: 'IM_ROBOT' },
+    })
+  })
+
+  it('B-2 fails closed when create-and-deliver returns HTTP 200 with a failed delivery', async () => {
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({
+      success: true,
+      result: {
+        outTrackId: 'delivery-1',
+        deliverResults: [{ success: false, errorMsg: 'template unpublished' }],
+      },
+    }), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    await expect(sendDingTalkInteractiveApprovalCard(
+      'app-access-token',
+      {
+        userId: 'dt-user-1',
+        robotCode: 'ding-app-key',
+        cardTemplateId: 'template-1',
+        outTrackId: 'delivery-1',
+        title: '审批待办',
+        nodeName: '审批',
+        statusText: '等待你处理',
+        rejectUrl: 'https://ms.example.test/m/approval-decision?d=delivery-1&t=token',
+      },
+    )).rejects.toThrow('template unpublished')
+  })
+
+  it('B-2 fails closed on top-level success=false even when nested delivery looks successful', async () => {
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({
+      success: false,
+      message: 'create-and-deliver rejected',
+      result: {
+        outTrackId: 'delivery-1',
+        deliverResults: [{ success: true, carrierId: 'misleading-carrier' }],
+      },
+    }), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    await expect(sendDingTalkInteractiveApprovalCard(
+      'app-access-token',
+      {
+        userId: 'dt-user-1',
+        robotCode: 'ding-app-key',
+        cardTemplateId: 'template-1',
+        outTrackId: 'delivery-1',
+        title: '审批待办',
+        nodeName: '审批',
+        statusText: '等待你处理',
+        rejectUrl: 'https://ms.example.test/m/approval-decision?d=delivery-1&t=token',
+      },
+    )).rejects.toThrow('create-and-deliver rejected')
+  })
+
+  it('B-2 fails closed when create-and-deliver omits delivery results', async () => {
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({
+      success: true,
+      result: { outTrackId: 'delivery-1', deliverResults: [] },
+    }), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    await expect(sendDingTalkInteractiveApprovalCard(
+      'app-access-token',
+      {
+        userId: 'dt-user-1',
+        robotCode: 'ding-app-key',
+        cardTemplateId: 'template-1',
+        outTrackId: 'delivery-1',
+        title: '审批待办',
+        nodeName: '审批',
+        statusText: '等待你处理',
+        rejectUrl: 'https://ms.example.test/m/approval-decision?d=delivery-1&t=token',
+      },
+    )).rejects.toThrow('contained no delivery result')
   })
 })

@@ -22,7 +22,7 @@ It deliberately does **not** send interactive cards, parse approval callback pay
 |---|---|---|
 | Config resolver | `packages/core-backend/src/integrations/dingtalk/interactive-card-stream.ts` | Requires explicit `DINGTALK_INTERACTIVE_CARD_STREAM_ENABLED=1`/`true` plus client id, client secret, and template id. Missing anything returns disabled with a reason code. |
 | Worker skeleton | same file | Calls an injected `clientFactory` only when fully configured; otherwise no Stream registration and no warning loop. |
-| Default factory | same file | Throws `DINGTALK_INTERACTIVE_CARD_STREAM_SDK_UNWIRED`; this is intentional until the real SDK adapter lands. If an operator enables B-1 early, startup fails closed with reason `client_start_failed`. |
+| Default factory | same file | Throws `DINGTALK_INTERACTIVE_CARD_STREAM_SDK_UNWIRED`; this is intentional until the real SDK adapter lands. B-2 classifies this separately as `sdk_unwired`, while real adapter failures remain `client_start_failed`. |
 | Event handler | same file | Logs a values-free "ignored by B-1 skeleton" message. No business callback parsing. |
 | Server lifecycle | `packages/core-backend/src/index.ts` | Instantiates the worker during startup and shuts it down with the other optional services. Default env keeps it disabled. |
 
@@ -48,7 +48,9 @@ Covered cases:
 3. full config calls the injected client factory and starts the client;
 4. B-1 event handler ignores events without invoking any approval action path;
 5. shutdown closes the injected client;
-6. client-factory failure returns `client_start_failed` and logs only a reason code, not SDK error text or secrets.
+6. default factory reports `sdk_unwired`; a real client-factory failure reports `client_start_failed`;
+7. a client whose `start()` fails is best-effort closed without logging SDK error text or secrets;
+8. concurrent/repeated initialization starts the client exactly once.
 
 ## 5. Next slices
 

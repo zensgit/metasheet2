@@ -803,6 +803,175 @@ export interface DingTalkWorkNotificationActionCardInput {
   singleUrl: string
 }
 
+export const DINGTALK_INTERACTIVE_APPROVAL_CARD_CALLBACK_ROUTE_KEY = 'approval_card'
+
+export interface DingTalkInteractiveApprovalCardInput {
+  /** Recipient DingTalk user id. B-2 uses one card per approver. */
+  userId: string
+  /** Robot/app code that owns the interactive-card Stream callback. */
+  robotCode: string
+  /** DingTalk interactive-card template id from the Stream-card env gate. */
+  cardTemplateId: string
+  /** Must equal dingtalk_approval_card_deliveries.id; callback payloads are never business anchors. */
+  outTrackId: string
+  title: string
+  requestNo?: string
+  nodeName: string
+  statusText: string
+  rejectUrl: string
+  callbackRouteKey?: string
+}
+
+export interface DingTalkInteractiveCardConfig {
+  openApiBaseUrl?: string
+}
+
+function normalizeDingTalkOpenApiBaseUrl(baseUrl?: string): string {
+  const normalized = typeof baseUrl === 'string' && baseUrl.trim().length > 0
+    ? baseUrl.trim()
+    : readStringEnv('DINGTALK_OPEN_API_BASE_URL') || 'https://api.dingtalk.com'
+  return normalized.replace(/\/+$/, '')
+}
+
+function readStringField(record: Record<string, unknown>, ...keys: string[]): string | undefined {
+  for (const key of keys) {
+    const value = record[key]
+    if (typeof value === 'string' && value.trim().length > 0) return value.trim()
+    if (typeof value === 'number' && Number.isFinite(value)) return String(value)
+  }
+  return undefined
+}
+
+function readFirstRecord(value: unknown): Record<string, unknown> | null {
+  if (value && typeof value === 'object' && !Array.isArray(value)) return value as Record<string, unknown>
+  if (Array.isArray(value)) {
+    const first = value[0]
+    if (first && typeof first === 'object' && !Array.isArray(first)) return first as Record<string, unknown>
+  }
+  return null
+}
+
+function readInteractiveCardTaskId(payload: Record<string, unknown>): string | undefined {
+  const result = readNestedPayload(payload)
+  const deliverResult = readFirstRecord(result.deliverResults ?? result.deliveryResults ?? payload.deliverResults)
+  return readStringField(result, 'taskId', 'task_id', 'cardInstanceId', 'card_instance_id', 'processQueryKey')
+    ?? readStringField(deliverResult ?? {}, 'taskId', 'task_id', 'cardInstanceId', 'card_instance_id', 'carrierId', 'deliverId')
+    ?? readStringField(payload, 'taskId', 'task_id', 'requestId', 'request_id')
+}
+
+function assertInteractiveCardDeliverySucceeded(payload: Record<string, unknown>): void {
+  if (payload.success !== true) {
+    throw new DingTalkBusinessError(
+      normalizeErrorMessage(payload, 'DingTalk interactive-card create-and-deliver failed'),
+      payload,
+    )
+  }
+
+  const result = readNestedPayload(payload)
+  const rawDeliverResults = result.deliverResults ?? result.deliveryResults
+  const deliverResults = Array.isArray(rawDeliverResults)
+    ? rawDeliverResults.filter((value): value is Record<string, unknown> => (
+        value !== null && typeof value === 'object' && !Array.isArray(value)
+      ))
+    : []
+  if (deliverResults.length === 0) {
+    throw new DingTalkBusinessError('DingTalk interactive-card response contained no delivery result', payload)
+  }
+
+  const failure = deliverResults.find((delivery) => delivery.success !== true)
+  if (failure) {
+    throw new DingTalkBusinessError(
+      readStringField(failure, 'errorMsg', 'errorMessage')
+        ?? 'DingTalk interactive-card delivery failed',
+      payload,
+    )
+  }
+}
+
+/**
+ * B-2 (interactive approval cards): create-and-deliver a DingTalk interactive card.
+ *
+ * This is SEND-ONLY. The approve button is represented as Stream callback metadata for B-3;
+ * reject still jumps to the Slice-A decision page because rejection comments remain mandatory.
+ */
+export async function sendDingTalkInteractiveApprovalCard(
+  accessToken: string,
+  input: DingTalkInteractiveApprovalCardInput,
+  config: DingTalkInteractiveCardConfig = {},
+  options?: DingTalkRequestOptions,
+): Promise<DingTalkWorkNotificationResult> {
+  const userId = input.userId.trim()
+  const robotCode = input.robotCode.trim()
+  const cardTemplateId = input.cardTemplateId.trim()
+  const outTrackId = input.outTrackId.trim()
+  const title = input.title.trim()
+  const nodeName = input.nodeName.trim()
+  const statusText = input.statusText.trim()
+  const rejectUrl = input.rejectUrl.trim()
+  const requestNo = typeof input.requestNo === 'string' ? input.requestNo.trim() : ''
+  const callbackRouteKey = (input.callbackRouteKey ?? DINGTALK_INTERACTIVE_APPROVAL_CARD_CALLBACK_ROUTE_KEY).trim()
+
+  if (!accessToken.trim()) throw new Error('DingTalk access token is required')
+  if (!userId) throw new Error('DingTalk userId is required')
+  if (!robotCode) throw new Error('DingTalk interactive-card robotCode is required')
+  if (!cardTemplateId) throw new Error('DingTalk interactive-card template id is required')
+  if (!outTrackId) throw new Error('DingTalk interactive-card outTrackId is required')
+  if (!title) throw new Error('DingTalk interactive-card title is required')
+  if (!nodeName) throw new Error('DingTalk interactive-card node name is required')
+  if (!statusText) throw new Error('DingTalk interactive-card status text is required')
+  if (!rejectUrl) throw new Error('DingTalk interactive-card reject url is required')
+  if (!callbackRouteKey) throw new Error('DingTalk interactive-card callback route key is required')
+
+  const openSpaceId = `dtv1.card//im_robot.${userId}`
+  const payload = await requestDingTalkJson(
+    `${normalizeDingTalkOpenApiBaseUrl(config.openApiBaseUrl)}/v1.0/card/instances/createAndDeliver`,
+    {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-acs-dingtalk-access-token': accessToken,
+      },
+      body: JSON.stringify({
+        userId,
+        userIdType: 1,
+        cardTemplateId,
+        outTrackId,
+        callbackType: 'STREAM',
+        callbackRouteKey,
+        cardData: {
+          cardParamMap: {
+            title,
+            requestNo,
+            nodeName,
+            statusText,
+            approveText: '同意',
+            rejectText: '驳回',
+            rejectUrl,
+          },
+        },
+        openSpaceId,
+        imRobotOpenSpaceModel: {
+          supportForward: false,
+        },
+        imRobotOpenDeliverModel: {
+          robotCode,
+          spaceType: 'IM_ROBOT',
+        },
+      }),
+    },
+    'Failed to send DingTalk interactive approval card',
+    options,
+  )
+
+  assertInteractiveCardDeliverySucceeded(payload)
+
+  return {
+    taskId: readInteractiveCardTaskId(payload) ?? outTrackId,
+    requestId: readStringField(payload, 'requestId', 'request_id'),
+    raw: payload,
+  }
+}
+
 export async function sendDingTalkWorkNotificationActionCard(
   accessToken: string,
   input: DingTalkWorkNotificationActionCardInput,
