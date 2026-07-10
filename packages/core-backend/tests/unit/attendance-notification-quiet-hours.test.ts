@@ -346,7 +346,7 @@ describe('AttendanceNotificationDeliveryWorker: quiet-hours env resolution at co
 
     const result = await worker.runBatch()
 
-    expect(result).toEqual({ claimed: 0, sent: 0, retrying: 0, failed: 0 })
+    expect(result).toEqual({ claimed: 0, sent: 0, retrying: 0, failed: 0, skipped: 0 })
     expect(query).not.toHaveBeenCalled()
   })
 })
