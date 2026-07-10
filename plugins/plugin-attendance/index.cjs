@@ -6927,15 +6927,68 @@ function normalizeCsvHeaderValue(value) {
   return text
 }
 
+// DT-HARDEN-10: the real header vocabulary — a work-date column and at least one
+// user/attendance context column — used by both header *detection* (which row is
+// the header) and upload *validation* (does the header carry enough columns to
+// import). Keeping a single pair of sets means the two checks cannot drift apart.
+const IMPORT_HEADER_DATE_KEYS = new Set(['日期', 'date', 'workdate'])
+const IMPORT_HEADER_CONTEXT_KEYS = new Set([
+  'userid',
+  '用户id',
+  'name',
+  '姓名',
+  '工号',
+  'empno',
+  'firstinat',
+  'lastoutat',
+  'status',
+  'attendancegroup',
+  'attendanceclass',
+  'shiftname',
+  '上班1打卡时间',
+  '下班1打卡时间',
+  '考勤结果',
+  '考勤组',
+  '班次',
+])
+
+// trim + lowercase + strip whitespace/underscore/hyphen so "Work Date", "work_date",
+// "姓 名" and "EMP_NO" all match the canonical keys above.
+function normalizeImportHeaderLookupKey(value) {
+  return String(value ?? '')
+    .trim()
+    .toLowerCase()
+    .replace(/[\s_-]+/g, '')
+}
+
+// DT-HARDEN-10: single source of truth for "does this row look like the import
+// header". A real header carries BOTH a date column and a user/attendance context
+// column (see the key sets above — not just a literal "name"/"姓名" cell; DingTalk's
+// own API-columns and manual-rows templates use workDate/userId with no "name"
+// column at all). DingTalk exports also prepend a title row that has neither, so
+// anything treating the first non-empty row as the header mis-reads those files —
+// the parser skips the title row while upload validation and header diagnostics
+// read it, which 400s the upload before the parser is ever reached.
+function isLikelyImportHeaderRow(normalizedCells) {
+  const row = Array.isArray(normalizedCells) ? normalizedCells.filter(Boolean) : []
+  if (!row.length) return false
+  const keys = row.map(normalizeImportHeaderLookupKey).filter(Boolean)
+  const hasDate = keys.some((key) => IMPORT_HEADER_DATE_KEYS.has(key))
+  const hasContext = keys.some((key) => IMPORT_HEADER_CONTEXT_KEYS.has(key))
+  return hasDate && hasContext
+}
+
+// Bound the header hunt so a headerless file cannot turn a cheap peek into a
+// full-file read; real title blocks are 1-3 rows.
+const IMPORT_HEADER_SCAN_MAX_ROWS = 50
+
 function detectCsvHeaderIndex(csvText, delimiter) {
   let detectedIndex = 0
   let found = false
   iterateCsvRows(csvText, delimiter, (rawRow, rowIndex) => {
-    const row = rawRow.map(normalizeCsvHeaderValue).filter(Boolean)
-    if (!row.length) return true
-    const hasName = row.some((cell) => cell === '姓名' || cell.toLowerCase() === 'name')
-    const hasDate = row.some((cell) => ['日期', 'date', 'workdate', 'work_date'].includes(cell.toLowerCase()))
-    if (hasName && hasDate) {
+    const row = rawRow.map(normalizeCsvHeaderValue)
+    if (!row.filter(Boolean).length) return true
+    if (isLikelyImportHeaderRow(row)) {
       detectedIndex = rowIndex
       found = true
       return false
@@ -7200,6 +7253,38 @@ async function iterateImportRowsFromCsvAsync({ csvText, csvOptions, maxRows, onR
   })
 }
 
+// DT-HARDEN-10: bounded peek to resolve which row is the header, without buffering
+// the file. The streaming parser below discards rows as it goes (it cannot rewind
+// once it decides row N is data), so it cannot reuse the old "trust row 0, or fall
+// back once nothing better turns up" single-pass trick the inline/text path used.
+// Instead this does a first bounded pass (capped at IMPORT_HEADER_SCAN_MAX_ROWS,
+// matching readImportCsvHeaderFromFile) to find the row index, then the caller
+// streams the real file a second time starting from a known header index — the
+// same seam an explicit `csvOptions.headerRowIndex` already used.
+async function detectCsvHeaderRowIndexFromFile(csvPath, delimiter) {
+  let detectedIndex = null
+  let firstNonEmptyIndex = null
+  let scanned = 0
+  const csvStream = fs.createReadStream(csvPath, { encoding: 'utf8' })
+  await iterateCsvRowsStreamAsync(csvStream, delimiter, (rawRow, rowIndex) => {
+    const normalized = rawRow.map(normalizeCsvHeaderValue)
+    if (!normalized.some((cell) => cell && String(cell).trim().length > 0)) return true
+    if (firstNonEmptyIndex === null) firstNonEmptyIndex = rowIndex
+    if (isLikelyImportHeaderRow(normalized)) {
+      detectedIndex = rowIndex
+      return false
+    }
+    scanned += 1
+    return scanned < IMPORT_HEADER_SCAN_MAX_ROWS
+  })
+  // Restore the tail fallback the inline path always had: a genuinely headerless
+  // file still resolves to a row (the first non-empty one) instead of yielding zero
+  // data rows forever, which used to 400 as "no non-empty data row" even though the
+  // file plainly had rows — it just had no row this function recognized as a header.
+  if (detectedIndex !== null) return detectedIndex
+  return firstNonEmptyIndex !== null ? firstNonEmptyIndex : 0
+}
+
 async function iterateImportRowsFromCsvFileAsync({ csvPath, csvOptions, maxRows, onRow }) {
   const delimiter = csvOptions?.delimiter || ','
   const resolvedMaxRowsRaw = Number(maxRows ?? ATTENDANCE_IMPORT_CSV_MAX_ROWS)
@@ -7210,28 +7295,18 @@ async function iterateImportRowsFromCsvFileAsync({ csvPath, csvOptions, maxRows,
     ? Math.max(0, Number(csvOptions.headerRowIndex))
     : null
 
+  const resolvedHeaderRowIndex = explicitHeaderRowIndex !== null
+    ? explicitHeaderRowIndex
+    : await detectCsvHeaderRowIndexFromFile(csvPath, delimiter)
+
   let seenRows = 0
   let header = []
   let rowCount = 0
   let limitExceeded = false
-  let resolvedHeaderRowIndex = explicitHeaderRowIndex
 
   const csvStream = fs.createReadStream(csvPath, { encoding: 'utf8' })
   await iterateCsvRowsStreamAsync(csvStream, delimiter, async (rawRow, rowIndex) => {
     seenRows += 1
-    if (resolvedHeaderRowIndex === null) {
-      const normalized = rawRow.map(normalizeCsvHeaderValue).filter(Boolean)
-      if (normalized.length > 0) {
-        const hasName = normalized.some((cell) => cell === '姓名' || cell.toLowerCase() === 'name')
-        const hasDate = normalized.some((cell) => ['日期', 'date', 'workdate', 'work_date'].includes(cell.toLowerCase()))
-        if (rowIndex === 0 || (hasName && hasDate)) {
-          resolvedHeaderRowIndex = rowIndex
-          header = rawRow.map(normalizeCsvHeaderValue)
-          return true
-        }
-      }
-      return true
-    }
     if (rowIndex < resolvedHeaderRowIndex) return true
     if (rowIndex === resolvedHeaderRowIndex) {
       if (!header.length) header = rawRow.map(normalizeCsvHeaderValue)
@@ -7259,60 +7334,48 @@ async function iterateImportRowsFromCsvFileAsync({ csvPath, csvOptions, maxRows,
   })
 }
 
-const IMPORT_HEADER_DATE_KEYS = new Set(['日期', 'date', 'workdate'])
-const IMPORT_HEADER_CONTEXT_KEYS = new Set([
-  'userid',
-  '用户id',
-  'name',
-  '姓名',
-  '工号',
-  'empno',
-  'firstinat',
-  'lastoutat',
-  'status',
-  'attendancegroup',
-  'attendanceclass',
-  'shiftname',
-  '上班1打卡时间',
-  '下班1打卡时间',
-  '考勤结果',
-  '考勤组',
-  '班次',
-])
-
-function normalizeImportHeaderLookupKey(value) {
-  return String(value ?? '')
-    .trim()
-    .toLowerCase()
-    .replace(/[\s_-]+/g, '')
-}
-
+// DT-HARDEN-10: prefer the detected header row (name+date) over the first
+// non-empty row, matching `detectCsvHeaderIndex` — otherwise a DingTalk export's
+// title row is read as the header, which 400s upload validation ("must include a
+// work date column") and makes header diagnostics report title cells as columns.
+// Falls back to the first non-empty row so a genuinely headerless file still
+// produces the same validation error it always did.
 async function readImportCsvHeaderFromFile(csvPath, delimiter = ',') {
-  let header = []
+  let firstNonEmpty = []
+  let detected = null
+  let scanned = 0
   const csvStream = fs.createReadStream(csvPath, { encoding: 'utf8' })
   await iterateCsvRowsStreamAsync(csvStream, delimiter, async (rawRow) => {
     const normalized = rawRow.map(normalizeCsvHeaderValue)
-    if (normalized.some((cell) => cell && String(cell).trim().length > 0)) {
-      header = normalized
+    if (!normalized.some((cell) => cell && String(cell).trim().length > 0)) return true
+    if (!firstNonEmpty.length) firstNonEmpty = normalized
+    if (isLikelyImportHeaderRow(normalized)) {
+      detected = normalized
       return false
     }
-    return true
+    scanned += 1
+    return scanned < IMPORT_HEADER_SCAN_MAX_ROWS
   })
-  return header
+  return detected ?? firstNonEmpty
 }
 
 function readImportCsvHeaderFromText(csvText, delimiter = ',') {
   if (typeof csvText !== 'string' || !csvText.trim()) return []
-  let header = []
+  let firstNonEmpty = []
+  let detected = null
+  let scanned = 0
   iterateCsvRows(csvText, delimiter, (rawRow) => {
     const normalized = rawRow.map(normalizeCsvHeaderValue)
-    if (normalized.some((cell) => cell && String(cell).trim().length > 0)) {
-      header = normalized
+    if (!normalized.some((cell) => cell && String(cell).trim().length > 0)) return true
+    if (!firstNonEmpty.length) firstNonEmpty = normalized
+    if (isLikelyImportHeaderRow(normalized)) {
+      detected = normalized
       return false
     }
-    return true
+    scanned += 1
+    return scanned < IMPORT_HEADER_SCAN_MAX_ROWS
   })
-  return header
+  return detected ?? firstNonEmpty
 }
 
 function summarizeImportDiagnosticValues(values, maxItems = 6) {
@@ -10565,6 +10628,18 @@ function partitionOvertimeBankGrantLots({ requestId, totalMinutes, segments, ove
 // admin gets a clean 400 at save-time, not a 500 on the next approval). Review P2-1.
 const MAX_LOT_VALIDITY_DAYS = 36500
 
+// Clamp a lot-validity-days input to a safe positive integer or null. expires_at
+// is now() + N×24h, and PG raises "interval out of range" (22008) past ~1.07e8
+// days. The S1 slice bounded overtimeBankPolicy.validityDays; this shares the
+// same clamp for compTimeFromOvertime.expiresInDays (its sibling knob) so a
+// legacy settings row saved before the zod .max still can't 500 a comp-time
+// grant. Out-of-range → MAX (preserve the "has an expiry" intent, no overflow).
+function clampLotValidityDays(raw) {
+  const n = Number(raw)
+  if (!Number.isInteger(n) || n <= 0) return null
+  return n <= MAX_LOT_VALIDITY_DAYS ? n : MAX_LOT_VALIDITY_DAYS
+}
+
 // 加班银行 S1 (overtime-bank-validity design-lock §2): which validity governs a BANKED (source-tagged) lot.
 // The bank card's `validityDays` wins when the bank is ENABLED and the value is a positive integer within
 // bounds; otherwise we fall back to compTimeFromOvertime.expiresInDays — the pre-S1 behaviour, byte-identical.
@@ -10578,6 +10653,21 @@ function resolveBankedLotExpiresInDays(overtimeBankPolicy, fallbackExpiresInDays
   if (!Number.isFinite(raw)) return fallback
   const days = Math.floor(raw)
   return days > 0 && days <= MAX_LOT_VALIDITY_DAYS ? days : fallback
+}
+
+// 加班银行 S1b (overtime-bank-cap design-lock §3): pure decision for the per-period (natural-month) BANKED
+// accrual cap. `maxMinutesPerPeriod` is the admin's "每周期加班银行上限(分钟, 0＝不限)". cap<=0 (unset/0) →
+// NEVER blocked (byte-identical to pre-S1b — invariant 3). Otherwise blocked when the projected total
+// (already-banked this period + this grant's pooled minutes) STRICTLY exceeds the cap; landing exactly on
+// the cap is allowed. Both inputs share the "pooled banked minutes"口径 (§6: statutory_holiday is must-pay,
+// never pooled), so the comparison is apples-to-apples. Kept pure (no I/O) so the boundary is unit-testable.
+function overtimeBankCapDecision({ maxMinutesPerPeriod, existingBanked, newBanked } = {}) {
+  const cap = Number(maxMinutesPerPeriod)
+  const existing = Math.max(0, Number(existingBanked) || 0)
+  const added = Math.max(0, Number(newBanked) || 0)
+  const projected = existing + added
+  if (!Number.isFinite(cap) || cap <= 0) return { blocked: false, cap: null, projected, existing, added }
+  return { blocked: projected > cap, cap, projected, existing, added }
 }
 
 function applyOvertimeSegmentationSnapshotToApprovedEntry(entry, snapshot) {
@@ -17294,6 +17384,31 @@ async function deductCompTimeBalance(trx, { orgId, userId, requestId, minutes })
   })
 }
 
+// 加班银行 S1b (overtime-bank-cap design-lock §3 D3): sum a user's already-POOLED banked comp-time minutes
+// for the natural month that [monthStart, monthEnd] delimits — the headroom baseline for the per-period cap.
+// Only source-tagged lots (overtime_source IS NOT NULL) count: that matches `newBanked = Σ pooled lots`
+// (§6 statutory_holiday never pooled), so headroom and the new grant use one口径 and dormant NULL-source
+// history (full-amount, statutory-inclusive) can't inflate the bank total. amount_minutes = GRANTED/accrued
+// (not remaining) — the cap is a per-period accrual ceiling, so spending then re-accruing must not reopen it.
+// The month is keyed off the SOURCE OT request's work_date, and excludeRequestId drops THIS request's own
+// lots (defense-in-depth for replay; the pending-status guard already blocks re-approve before grant).
+async function sumBankedOvertimeMinutesForMonth(trx, { orgId, userId, monthStart, monthEnd, excludeRequestId }) {
+  if (!orgId || !userId || !monthStart || !monthEnd) return 0
+  const rows = await trx.query(
+    `SELECT COALESCE(SUM(b.amount_minutes), 0)::int AS banked
+       FROM attendance_leave_balances b
+       JOIN attendance_requests r ON r.id::text = b.source_id
+      WHERE b.org_id = $1 AND b.user_id = $2
+        AND b.leave_type_code = 'comp_time'
+        AND b.source_type = 'overtime_conversion'
+        AND b.overtime_source IS NOT NULL
+        AND r.work_date >= $3 AND r.work_date <= $4
+        AND b.source_id <> $5`,
+    [orgId, userId, monthStart, monthEnd, excludeRequestId]
+  )
+  return Number(rows[0]?.banked) || 0
+}
+
 // #7 leave cancellation / 销假 (design-lock #3034): reverse the balance a leave's approval deducted, when
 // that approved leave is later cancelled. Keyed on the request's own deduct events (source_id = requestId,
 // event_type = 'deduct'), so it reverses WHATEVER was deducted — annual_leave AND comp_time_leave both
@@ -20465,6 +20580,12 @@ async function isApproverAllowed(db, userId, step, logger) {
 }
 
 module.exports = {
+  // Top-level so the integration harness's
+  // getAttendancePluginForTest().resetAttendanceSettingsCacheForTests?.() (in
+  // attendance-plugin.test.ts beforeEach) actually runs — it was previously only
+  // exported nested one bag down, so the top-level optional call silently no-op'd
+  // and the 60s settings cache leaked across tests in the shared attendance suite.
+  resetAttendanceSettingsCacheForTests,
   __attendanceLeaveCancellationForTests: {
     reverseLeaveBalanceDeduction,
   },
@@ -20472,6 +20593,20 @@ module.exports = {
     buildUnresolvedRowUserWarning,
     collectRowUserIdentityValues,
     resolveRowUserId,
+  },
+  __attendanceImportCsvHeaderForTests: {
+    detectCsvHeaderIndex,
+    detectCsvHeaderRowIndexFromFile,
+    isLikelyImportHeaderRow,
+    iterateImportRowsFromCsv,
+    iterateImportRowsFromCsvFileAsync,
+    readImportCsvHeaderFromFile,
+    readImportCsvHeaderFromText,
+    validateImportUploadCsvOrThrow,
+    IMPORT_MAPPING_PROFILES,
+    IMPORT_HEADER_DATE_KEYS,
+    IMPORT_HEADER_CONTEXT_KEYS,
+    normalizeImportHeaderLookupKey,
   },
   __attendanceAutoShiftForTests: {
     AUTO_SHIFT_AUTO_WRITE_SYSTEM_ROLE_TAG,
@@ -20501,6 +20636,8 @@ module.exports = {
     resolveOvertimeBankSourceMinutes,
     partitionOvertimeBankGrantLots,
     resolveBankedLotExpiresInDays,
+    clampLotValidityDays,
+    overtimeBankCapDecision,
     buildCycleSettlementRows,
   },
   __attendanceLeaveOffsetForTests: {
@@ -21685,7 +21822,7 @@ module.exports = {
       // or null = no expiry).
       compTimeFromOvertime: z.object({
         enabled: z.boolean().optional(),
-        expiresInDays: z.number().int().positive().nullable().optional(),
+        expiresInDays: z.number().int().positive().max(36500).nullable().optional(),
       }).optional(),
       // 加班银行 (overtime bank) — OvertimeBankPolicy v1-1a latent config. Round-trips through PUT/GET; no
       // runtime enforces it yet. pooledSources enum EXCLUDES statutory_holiday (compliance floor §6 — 法定
@@ -28683,7 +28820,7 @@ module.exports = {
                   // expires_at = granted_at + N×24h — a FIXED 24h-per-day duration, computed in SQL from
                   // the statement's now() (granted_at also defaults to now() → exact). null = no expiry
                   // (unchanged C2 behaviour). The AttendanceExpiryService (C4-1) reaps these.
-                  const expiresInDays = compTimeSettings.compTimeFromOvertime.expiresInDays ?? null
+                  const expiresInDays = clampLotValidityDays(compTimeSettings.compTimeFromOvertime.expiresInDays)
                   // 加班银行 v1-1b (design-lock §3 账1): gate per-source tagging on overtimeBankPolicy. DORMANT
                   // (default, every current org) keeps the EXISTING single overtime_conversion lot with
                   // overtime_source NULL — byte-identical to pre-v1-1b. ENABLED splits the rule-normalized
@@ -28718,6 +28855,47 @@ module.exports = {
                       ? { workdayMinutes: snap.workdayOvertimeMinutes, restdayMinutes: snap.restdayOvertimeMinutes, holidayMinutes: snap.holidayOvertimeMinutes }
                       : null
                     const { lots } = partitionOvertimeBankGrantLots({ requestId, totalMinutes: amountMinutes, segments, overtimeBankPolicy: bankPolicy })
+                    // 加班银行 S1b (overtime-bank-cap design-lock §3): enforce the per-period (natural-month)
+                    // BANKED accrual cap BEFORE any lot is inserted — a pre-check, so an over-cap grant throws
+                    // and the ENTIRE approval txn rolls back (0 lot side-effects, request stays pending). Runs
+                    // only when maxMinutesPerPeriod > 0 (unset/0 → byte-identical no-op, invariant 3) and only
+                    // on the banked branch (dormant never reaches here). newBanked = Σ pooled lots and the
+                    // headroom counts only pooled (source-tagged) lots — one口径 (§6: statutory never pooled).
+                    // The period is keyed off THIS OT request's own work_date; excludeRequestId drops its own
+                    // lots (replay defense-in-depth — the pending-status guard already blocks re-approve first).
+                    const bankCapMinutes = Number(bankPolicy.maxMinutesPerPeriod)
+                    if (Number.isFinite(bankCapMinutes) && bankCapMinutes > 0) {
+                      const newBanked = lots.reduce((sum, lot) => sum + (Number(lot.minutes) || 0), 0)
+                      const capMonthStart = attendanceMonthStartKey(requestRow.work_date)
+                      const capMonthEnd = attendanceMonthEndKey(capMonthStart)
+                      // Serialize concurrent banked grants for the SAME (org, user, month) so the cap can't be
+                      // overshot by a TOCTOU race: the approval only locks its OWN request row (FOR UPDATE), so
+                      // two different OT requests approved concurrently would each read headroom before either
+                      // commits and both pass. A txn-scoped advisory lock keyed on (org:user:month) makes the
+                      // second wait until the first commits, so its headroom read sees the first's lots. Taken
+                      // ONLY on the capped banked path (uncapped/dormant stays lock-free — invariant 3). Auto-
+                      // released at commit/rollback.
+                      await trx.query('SELECT pg_advisory_xact_lock(hashtext($1::text), hashtext($2::text))', [`attendance:otbank-cap:${orgId}:${requestRow.user_id}`, String(capMonthStart)])
+                      const existingBanked = await sumBankedOvertimeMinutesForMonth(trx, {
+                        orgId,
+                        userId: requestRow.user_id,
+                        monthStart: capMonthStart,
+                        monthEnd: capMonthEnd,
+                        excludeRequestId: requestId,
+                      })
+                      const capDecision = overtimeBankCapDecision({
+                        maxMinutesPerPeriod: bankCapMinutes,
+                        existingBanked,
+                        newBanked,
+                      })
+                      if (capDecision.blocked) {
+                        throw new HttpError(
+                          422,
+                          'OVERTIME_BANK_CAP_EXCEEDED',
+                          `Overtime bank monthly cap exceeded for ${capMonthStart ? capMonthStart.slice(0, 7) : 'period'}: cap ${capDecision.cap} min, already banked ${capDecision.existing} min, this grant ${capDecision.added} min would reach ${capDecision.projected} min`
+                        )
+                      }
+                    }
                     // 加班银行 S1 (overtime-bank-validity design-lock): the bank card owns the BANKED (source-
                     // tagged) lots' validity. `overtimeBankPolicy.validityDays`, when set, governs their
                     // expires_at and overrides compTimeFromOvertime.expiresInDays for THESE lots only; unset

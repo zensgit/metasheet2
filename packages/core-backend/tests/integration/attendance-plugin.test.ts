@@ -6117,6 +6117,46 @@ attendanceIntegrationDescribe(
       expect((await approve(dormId)).status).toBe(200)
       expect(await expiryDaysOf(dormId)).toEqual([{ overtime_source: null, days: 30 }])
 
+      // 5g — expiresInDays parity: the sibling knob is now bounded too, so an over-large value is rejected at
+      // save (400) — before this it had no zod .max and would 500 the comp-time grant just like validityDays did.
+      expect((await putSettings({ compTimeFromOvertime: { enabled: true, expiresInDays: 999999999 } })).status).toBe(400)
+
+      // 5h — legacy-row defense (review P2-1): a settings row saved BEFORE the zod .max (or seeded by another
+      // writer) can hold expiresInDays > MAX; the normalize-on-read path does NOT cap it, so the read-point
+      // clampLotValidityDays is the ONLY thing that stops it 500-ing the grant INSERT. Over-bind the persisted
+      // value directly (bypassing PUT/zod) and prove both the dormant and banked grant paths clamp to 36500
+      // instead of overflowing the PG interval.
+      const overbindPersistedExpiry = async () => {
+        await pool.query(
+          `UPDATE system_configs
+              SET value = jsonb_set(value::jsonb, '{compTimeFromOvertime,expiresInDays}', '999999999')::text
+            WHERE key = 'attendance.settings'`,
+        )
+        // the plugin caches settings for 60s — force a re-read of the over-bound row. (The reset helper is
+        // nested under __attendanceReportFieldCatalogForTests; the top-level `?.()` accessor is a silent no-op.)
+        const plugin = getAttendancePluginForTest() as unknown as { __attendanceReportFieldCatalogForTests?: { resetAttendanceSettingsCacheForTests?: () => void } }
+        plugin.__attendanceReportFieldCatalogForTests?.resetAttendanceSettingsCacheForTests?.()
+      }
+
+      // 5h-dormant: bank OFF, over-bound expiresInDays → single NULL-source lot clamps to 36500 days, 200 (was 500).
+      expect((await putSettings({ compTimeFromOvertime: { enabled: true, expiresInDays: 30 }, overtimeBankPolicy: { enabled: false, pooledSources: [], validityDays: null } })).status).toBe(200)
+      await overbindPersistedExpiry()
+      const legacyDormantId = await createOvertime('2026-09-16', 60)
+      expect((await approve(legacyDormantId)).status).toBe(200)
+      expect(await expiryDaysOf(legacyDormantId)).toEqual([{ overtime_source: null, days: 36500 }])
+
+      // 5h-banked: bank ON (validityDays null → falls back to expiresInDays), over-bound expiresInDays →
+      // source-tagged lot clamps to 36500 days via the resolveBankedLotExpiresInDays fallback, 200 (was 500).
+      expect((await putSettings({ compTimeFromOvertime: { enabled: true, expiresInDays: 30 }, overtimeBankPolicy: { enabled: true, pooledSources: ['workday'], validityDays: null } })).status).toBe(200)
+      await overbindPersistedExpiry()
+      const legacyBankedId = await createOvertime('2026-09-17', 60)
+      await pool.query(
+        `UPDATE attendance_requests SET metadata = jsonb_set(metadata, '{overtimeSegmentation}', $2::jsonb) WHERE id = $1`,
+        [legacyBankedId, JSON.stringify({ version: 1, engine: 'attendance_overtime_segmentation_v1', workDate: '2026-09-17', dayType: 'workday', segments: { workdayMinutes: 60, restdayMinutes: 0, holidayMinutes: 0 }, totalMinutes: 60, compTimeGrantMinutes: 60 })],
+      )
+      expect((await approve(legacyBankedId)).status).toBe(200)
+      expect(await expiryDaysOf(legacyBankedId)).toEqual([{ overtime_source: 'workday', days: 36500 }])
+
       // 5e — P2-1: an over-large validityDays is rejected at settings-save (400), so it can never reach the
       // banked INSERT and overflow the PG interval (was: 200 at PUT, then 500 on the next approval).
       expect((await putSettings({ overtimeBankPolicy: { enabled: true, pooledSources: ['workday'], validityDays: 999999999 } })).status).toBe(400)
@@ -6147,6 +6187,116 @@ attendanceIntegrationDescribe(
         `SELECT expires_at FROM attendance_leave_balances WHERE org_id='default' AND source_id=$1 AND leave_type_code='comp_time'`, [capId],
       )).rows[0].expires_at
       expect(new Date(afterExpiry).getTime()).toBe(new Date(beforeExpiry).getTime())
+
+      // ==========================================================================================
+      // (6) S1b 加班银行·每周期(自然月)上限强制 (overtime-bank-cap design-lock §3):
+      // `overtimeBankPolicy.maxMinutesPerPeriod` caps the BANKED (pooled, source-tagged) comp-time a user
+      // accrues per calendar month. An approval that would push the month's pooled total STRICTLY past the
+      // cap throws 422 OVERTIME_BANK_CAP_EXCEEDED and rolls the whole approval back (request stays pending,
+      // 0 lot). Headroom counts only pooled lots (§6: statutory never pools) whose SOURCE OT request's
+      // work_date falls in the month — so the cap is per-month, cross-month-isolated, and dormant-immune.
+      // BEFORE S1b this knob shipped in the admin UI but was read by nothing.
+      // ==========================================================================================
+      const segmentWorkday = async (rid: string, workDate: string, minutes: number) => {
+        await pool.query(
+          `UPDATE attendance_requests SET metadata = jsonb_set(metadata, '{overtimeSegmentation}', $2::jsonb) WHERE id = $1`,
+          [rid, JSON.stringify({ version: 1, engine: 'attendance_overtime_segmentation_v1', workDate, dayType: 'workday', segments: { workdayMinutes: minutes, restdayMinutes: 0, holidayMinutes: 0 }, totalMinutes: minutes, compTimeGrantMinutes: minutes })],
+        )
+      }
+      // pooled banked minutes for a month (same口径 as the runtime headroom: source-tagged lots, joined to
+      // the source OT request's work_date). Robust to per-source lot keys (…:workday) unlike lotsFor.
+      const bankedMinutesForMonth = async (monthPrefix: string) => (await pool.query(
+        `SELECT COALESCE(SUM(b.amount_minutes),0)::int AS banked
+           FROM attendance_leave_balances b JOIN attendance_requests r ON r.id::text = b.source_id
+          WHERE b.org_id='default' AND b.user_id=$1 AND b.leave_type_code='comp_time'
+            AND b.source_type='overtime_conversion' AND b.overtime_source IS NOT NULL
+            AND to_char(r.work_date, 'YYYY-MM') = $2`,
+        [userId, monthPrefix],
+      )).rows[0].banked as number
+      // count ANY comp_time lot for a request (matches per-source keys too) — for the "0 side-effect" assertion.
+      const compLotCount = async (rid: string) => (await pool.query(
+        `SELECT count(*)::int AS n FROM attendance_leave_balances WHERE org_id='default' AND source_id=$1 AND leave_type_code='comp_time'`,
+        [rid],
+      )).rows[0].n as number
+      const statusOf = async (rid: string) => (await pool.query(`SELECT status FROM attendance_requests WHERE id=$1`, [rid])).rows[0].status as string
+
+      // 6a — cap ON (maxMinutesPerPeriod=120): two Oct grants of 60 each land EXACTLY on the cap → both allowed.
+      expect((await putSettings({ compTimeFromOvertime: { enabled: true, expiresInDays: null }, overtimeBankPolicy: { enabled: true, pooledSources: ['workday'], maxMinutesPerPeriod: 120, validityDays: null } })).status).toBe(200)
+      const capA1 = await createOvertime('2026-10-05', 60)
+      await segmentWorkday(capA1, '2026-10-05', 60)
+      expect((await approve(capA1)).status).toBe(200)
+      const capA2 = await createOvertime('2026-10-20', 60)
+      await segmentWorkday(capA2, '2026-10-20', 60)
+      expect((await approve(capA2)).status).toBe(200)
+      expect(await bankedMinutesForMonth('2026-10')).toBe(120) // exactly on the cap → allowed
+
+      // 6b — cap EXCEEDED: a third Oct grant of 60 would reach 180 > 120 → 422, approval rolls back.
+      const capB = await createOvertime('2026-10-25', 60)
+      await segmentWorkday(capB, '2026-10-25', 60)
+      const blockedRes = await approve(capB)
+      expect(blockedRes.status).toBe(422)
+      expect((blockedRes.body as { error?: { code?: string } } | undefined)?.error?.code).toBe('OVERTIME_BANK_CAP_EXCEEDED')
+      expect(await statusOf(capB)).toBe('pending')             // approval rolled back — request unchanged
+      expect(await compLotCount(capB)).toBe(0)                 // 0 lot side-effect
+      expect(await bankedMinutesForMonth('2026-10')).toBe(120) // month total unchanged
+
+      // 6c — cap = 0 (no cap): a large single grant is never blocked.
+      expect((await putSettings({ compTimeFromOvertime: { enabled: true, expiresInDays: null }, overtimeBankPolicy: { enabled: true, pooledSources: ['workday'], maxMinutesPerPeriod: 0, validityDays: null } })).status).toBe(200)
+      const noCap = await createOvertime('2026-11-05', 600)
+      await segmentWorkday(noCap, '2026-11-05', 600)
+      expect((await approve(noCap)).status).toBe(200)
+      expect(await bankedMinutesForMonth('2026-11')).toBe(600)
+
+      // 6d — cross-month isolation: cap=120 again; Oct is full (120) but a Dec grant of 120 uses ONLY Dec's
+      // headroom (0) → lands on the cap → allowed. A leaked cross-month cap would have 422'd here.
+      expect((await putSettings({ compTimeFromOvertime: { enabled: true, expiresInDays: null }, overtimeBankPolicy: { enabled: true, pooledSources: ['workday'], maxMinutesPerPeriod: 120, validityDays: null } })).status).toBe(200)
+      const crossMonth = await createOvertime('2026-12-10', 120)
+      await segmentWorkday(crossMonth, '2026-12-10', 120)
+      expect((await approve(crossMonth)).status).toBe(200)
+      expect(await bankedMinutesForMonth('2026-12')).toBe(120)
+
+      // 6e — dormant immunity: bank OFF + a large grant → the cap never runs (dormant branch), a single
+      // NULL-source lot is granted. Proves the cap gates ONLY the banked branch (invariant 2).
+      expect((await putSettings({ compTimeFromOvertime: { enabled: true, expiresInDays: null }, overtimeBankPolicy: { enabled: false, pooledSources: [], maxMinutesPerPeriod: 120, validityDays: null } })).status).toBe(200)
+      const dormantBig = await createOvertime('2027-01-06', 600)
+      expect((await approve(dormantBig)).status).toBe(200)
+      const dormantLots = await lotsFor(dormantBig)
+      expect(dormantLots).toHaveLength(1)
+      expect(dormantLots[0].amount_minutes).toBe(600)
+
+      // 6f — month-boundary attribution: the FIRST day and the LAST day of a month must both attribute to
+      // THAT month (guards against a TZ/UTC off-by-one shifting a boundary work_date into an adjacent month).
+      // cap=120: Feb-01 (60) + Feb-28 (60) fill Feb exactly; a mid-Feb 60 then reaches 180>120 → 422. If the
+      // first-day leaked to Jan or the last-day to Mar, Feb headroom would be < 120 and the mid-Feb grant
+      // would NOT block — so the 422 proves both boundary lots attribute to Feb.
+      expect((await putSettings({ compTimeFromOvertime: { enabled: true, expiresInDays: null }, overtimeBankPolicy: { enabled: true, pooledSources: ['workday'], maxMinutesPerPeriod: 120, validityDays: null } })).status).toBe(200)
+      const febFirst = await createOvertime('2027-02-01', 60)
+      await segmentWorkday(febFirst, '2027-02-01', 60)
+      expect((await approve(febFirst)).status).toBe(200)
+      const febLast = await createOvertime('2027-02-28', 60)
+      await segmentWorkday(febLast, '2027-02-28', 60)
+      expect((await approve(febLast)).status).toBe(200)
+      expect(await bankedMinutesForMonth('2027-02')).toBe(120) // both boundary days counted in Feb
+      const febMid = await createOvertime('2027-02-15', 60)
+      await segmentWorkday(febMid, '2027-02-15', 60)
+      const febBlocked = await approve(febMid)
+      expect(febBlocked.status).toBe(422)
+      expect((febBlocked.body as { error?: { code?: string } } | undefined)?.error?.code).toBe('OVERTIME_BANK_CAP_EXCEEDED')
+
+      // 6g — dormant cross-contamination (proves the §6 `overtime_source IS NOT NULL` headroom filter is
+      // load-bearing, not neuter): an org that ran the bank DORMANT earlier in a month accrued a single
+      // NULL-source (un-pooled, full-amount, statutory-inclusive) lot. When the bank is later ENABLED with a
+      // cap mid-month, that dormant lot must NOT count toward the pooled headroom — else it would falsely
+      // block. Here: a dormant 600-min lot in Mar, then bank ON cap=120 + a workday 60 in Mar → 200 (dormant
+      // ignored; pooled headroom = 60, not 660). Drop the filter and this grant false-blocks with 422.
+      expect((await putSettings({ compTimeFromOvertime: { enabled: true, expiresInDays: null }, overtimeBankPolicy: { enabled: false, pooledSources: [], maxMinutesPerPeriod: 0, validityDays: null } })).status).toBe(200)
+      const marDormant = await createOvertime('2027-03-05', 600)
+      expect((await approve(marDormant)).status).toBe(200) // dormant → single NULL-source (un-pooled) lot
+      expect((await putSettings({ compTimeFromOvertime: { enabled: true, expiresInDays: null }, overtimeBankPolicy: { enabled: true, pooledSources: ['workday'], maxMinutesPerPeriod: 120, validityDays: null } })).status).toBe(200)
+      const marBanked = await createOvertime('2027-03-20', 60)
+      await segmentWorkday(marBanked, '2027-03-20', 60)
+      expect((await approve(marBanked)).status).toBe(200) // dormant 600 excluded from pooled headroom → 60<=120
+      expect(await bankedMinutesForMonth('2027-03')).toBe(60) // only the pooled workday lot, NOT 660
     } finally {
       if (token && Object.keys(originalSettings).length > 0) {
         await requestJson(`${baseUrl}/api/attendance/settings`, { method: 'PUT', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, body: JSON.stringify(originalSettings) }).catch(() => undefined)
@@ -6160,7 +6310,7 @@ attendanceIntegrationDescribe(
       else process.env.RBAC_BYPASS = previousRbacBypass
       await pool.end().catch(() => undefined)
     }
-  })
+  }, 120000)
 
   it('加班三段 O2 — opt-in request metadata snapshot is written and refreshed on final approval', async () => {
     if (!baseUrl) return
