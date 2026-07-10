@@ -1,5 +1,6 @@
 import { assertDingTalkCorpAllowed } from './runtime-policy'
 import {
+  DingTalkBusinessError,
   normalizeErrorMessage,
   readNumericField,
   requestDingTalkTransportJson,
@@ -898,6 +899,9 @@ export async function sendDingTalkInteractiveApprovalCard(
       }),
     },
     'Failed to send DingTalk interactive approval card',
+    // B-2 interactive card is a SIDE-EFFECT SEND: never resent on ambiguity; a lost
+    // response surfaces as outcome-unknown for the card ledger (same tier as asyncsend_v2).
+    'send',
     options,
   )
 
