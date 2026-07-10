@@ -8,17 +8,21 @@
  *    scopedAllFields covers ONLY this.
  * The original wiring used propertyVisibleGridFields (leaked RBAC-denied names); the first fix swapped to
  * scopedAllFields (owner P1: re-leaked property-hidden names). The correct wiring is the INTERSECTION —
- * `historyVisibleFields = filterPropertyVisibleFields(scopedAllFields)` — and this spec pins BOTH layers:
+ * `twoLayerVisibleFields = filterPropertyVisibleFields(scopedAllFields)` — and this spec pins BOTH layers:
  * either single-layer wiring turns exactly one assertion red. Backend already withholds VALUES (LOCK-3);
  * the label itself was the FE-side leak.
  *
- * This test does NOT mock HistoryCenterModal or HistoryBatchChangesList — it mounts the real
+ * R10: `twoLayerVisibleFields` (renamed from `historyVisibleFields`, #4007) now also feeds TrashModal's
+ * `:fields`, which was wired to `scopedAllFields` alone (layer-3-only) — a property-hidden field's VALUE
+ * could seed a trash-row TITLE via `pickRecordTitle`. The 'recycle bin' describe block below pins that.
+ *
+ * This test does NOT mock HistoryCenterModal, HistoryBatchChangesList, or TrashModal — it mounts the real
  * MultitableWorkbench (heavy siblings stubbed, same pattern as
  * multitable-workbench-permission-wiring.spec.ts).
  */
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest'
 import { createApp, defineComponent, h, nextTick, ref, computed, type App as VueApp, type Component } from 'vue'
-import type { HistoryBatchDetail, HistoryBatchSummary } from '../src/multitable/types'
+import type { HistoryBatchDetail, HistoryBatchSummary, MetaDeletedRecord } from '../src/multitable/types'
 
 function stubComponent(name: string) {
   return defineComponent({ name, render() { return h('div', { [`data-stub-${name}`]: 'true' }) } })
@@ -28,9 +32,10 @@ let workbenchMock: any
 let gridMock: any
 let capsMock: any
 
-const { mockListHistoryEvents, mockGetHistoryBatch } = vi.hoisted(() => ({
+const { mockListHistoryEvents, mockGetHistoryBatch, mockListDeletedRecords } = vi.hoisted(() => ({
   mockListHistoryEvents: vi.fn(),
   mockGetHistoryBatch: vi.fn(),
+  mockListDeletedRecords: vi.fn(),
 }))
 
 vi.mock('../src/multitable/api/client', async () => {
@@ -41,6 +46,7 @@ vi.mock('../src/multitable/api/client', async () => {
       ...actual.multitableClient,
       listHistoryEvents: mockListHistoryEvents,
       getHistoryBatch: mockGetHistoryBatch,
+      listDeletedRecords: mockListDeletedRecords,
     },
   }
 })
@@ -251,6 +257,8 @@ describe('MultitableWorkbench -> HistoryCenterModal field-scope wiring', () => {
   beforeEach(() => {
     mockListHistoryEvents.mockReset()
     mockGetHistoryBatch.mockReset()
+    mockListDeletedRecords.mockReset()
+    mockListDeletedRecords.mockResolvedValue({ records: [], total: 0 })
     mockListHistoryEvents.mockResolvedValue({ batches: [batch()], total: 1, nextCursor: null, searchTruncated: false })
     const detail: HistoryBatchDetail = {
       batchId: 'batch_1', actorId: 'user_1', source: 'rest', createdAt: new Date().toISOString(),
@@ -397,5 +405,86 @@ describe('MultitableWorkbench -> HistoryCenterModal field-scope wiring', () => {
     await flushUi()
     expect(workbenchMock.selectSheet).toHaveBeenCalledWith('sheet_2')
     expect(mockShowError).not.toHaveBeenCalled()
+  })
+})
+
+// R10: TrashModal shares the SAME `twoLayerVisibleFields` wiring as History Center (was `scopedAllFields`
+// alone, layer-3-only). TrashModal derives a trash-row TITLE from field VALUES via `pickRecordTitle` —
+// a property-hidden (layer-2) field leaking its NAME is bad enough; leaking its VALUE into a visible
+// title is worse. This pins both layers on the trash-row title, reusing the same `fields` fixture
+// (fld_1 visible-both-layers, fld_2 RBAC-denied/layer-3, fld_3 property-hidden/layer-2).
+describe('MultitableWorkbench -> TrashModal field-scope wiring', () => {
+  let app: VueApp | null = null
+  let container: HTMLDivElement | null = null
+
+  async function flushUi() {
+    await nextTick(); await nextTick()
+    await new Promise((r) => setTimeout(r, 20))
+    await nextTick()
+  }
+
+  function deletedRecord(): MetaDeletedRecord {
+    return {
+      recordId: 'rec_del_1',
+      sheetId: 'sheet_1',
+      // fld_1 (visible on both layers) is intentionally ABSENT/empty so title-resolution falls through
+      // to the next field by column order — exercising exactly the leak path: does it stop at the
+      // record-id fallback (correct) or fall through into fld_3's HIDDEN value (leak)?
+      data: { fld_2: 'Secret42000', fld_3: 'Hidden Value' },
+      originalVersion: 1,
+      createdBy: null,
+      deletedBy: 'user_1',
+      deletedAt: new Date().toISOString(),
+    }
+  }
+
+  beforeEach(() => {
+    mockListDeletedRecords.mockReset()
+    mockListDeletedRecords.mockResolvedValue({ records: [deletedRecord()], total: 1 })
+    workbenchMock = createWorkbenchMock()
+    gridMock = createGridMock()
+    capsMock = {
+      canRead: ref(true), canCreateRecord: ref(true), canEditRecord: ref(true),
+      canDeleteRecord: ref(true), canManageFields: ref(true), canManageSheetAccess: ref(true),
+      canManageViews: ref(true), canComment: ref(true), canManageAutomation: ref(false),
+      canExport: ref(true),
+    }
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    window.history.replaceState(null, '', window.location.pathname)
+  })
+
+  afterEach(() => {
+    if (app) app.unmount()
+    if (container) container.remove()
+    app = null; container = null
+    vi.clearAllMocks()
+  })
+
+  it('the trash-row title falls through a property-hidden field (layer-2) to the record-id fallback, and never shows the RBAC-denied field (layer-3) either', async () => {
+    const MultitableWorkbench = (await import('../src/multitable/views/MultitableWorkbench.vue')).default
+
+    app = createApp(defineComponent({
+      setup() { return () => h(MultitableWorkbench as Component) },
+    }))
+    app.mount(container!)
+    await flushUi()
+
+    const trashBtn = container!.querySelector<HTMLButtonElement>('[data-action="open-trash"]')
+    expect(trashBtn).toBeTruthy()
+    trashBtn!.click()
+    await flushUi()
+
+    expect(mockListDeletedRecords).toHaveBeenCalledWith('sheet_1', undefined)
+
+    const titleEl = container!.querySelector('[data-test="trash-record-title"]')
+    expect(titleEl).toBeTruthy()
+    // fld_1 is empty → skipped; fld_3 (layer-2 property-hidden) MUST NOT seed the title even though its
+    // value is present on the row — falls all the way through to the record-id fallback.
+    expect(titleEl!.textContent).toBe('#del_1')
+    expect(titleEl!.textContent).not.toContain('Hidden Value')
+    // fld_2 (layer-3 RBAC-denied) is excluded too — already covered by scopedAllFields itself, pinned
+    // here alongside the layer-2 case so a future regression on either layer fails in ONE place.
+    expect(titleEl!.textContent).not.toContain('Secret42000')
   })
 })

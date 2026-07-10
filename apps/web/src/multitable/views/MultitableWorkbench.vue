@@ -61,7 +61,7 @@
       <button class="mt-workbench__mgr-btn" :class="{ 'mt-workbench__mgr-btn--active': showDashboardView }" @click="showDashboardView = !showDashboardView" data-action="toggle-dashboard"><el-icon class="mt-workbench__mgr-btn-icon"><component :is="ICON.dashboard" /></el-icon> {{ wb('toolbar.dashboard', isZh) }}</button>
       <button v-if="activeViewType === 'form'" class="mt-workbench__mgr-btn" @click="showFormShareManager = true"><el-icon class="mt-workbench__mgr-btn-icon"><component :is="ICON.shareForm" /></el-icon> {{ wb('toolbar.shareForm', isZh) }}</button>
       <button class="mt-workbench__mgr-btn" @click="showApiTokenManager = true"><el-icon class="mt-workbench__mgr-btn-icon"><component :is="ICON.apiWebhooks" /></el-icon> {{ wb('toolbar.apiWebhooks', isZh) }}</button>
-      <button v-if="caps.canDeleteRecord.value" class="mt-workbench__mgr-btn" @click="showTrash = true"><el-icon class="mt-workbench__mgr-btn-icon"><component :is="ICON.trash" /></el-icon> {{ wb('toolbar.trash', isZh) }}</button>
+      <button v-if="caps.canDeleteRecord.value" class="mt-workbench__mgr-btn" data-action="open-trash" @click="showTrash = true"><el-icon class="mt-workbench__mgr-btn-icon"><component :is="ICON.trash" /></el-icon> {{ wb('toolbar.trash', isZh) }}</button>
       <button v-if="activeBaseId" class="mt-workbench__mgr-btn" data-action="open-history" @click="historyDeepLinkBatchId = null; showHistory = true"><el-icon class="mt-workbench__mgr-btn-icon"><component :is="ICON.history" /></el-icon> {{ isZh ? '历史' : 'History' }}</button>
       <button v-if="workbench.activeSheetId.value" class="mt-workbench__mgr-btn" data-action="open-config-history" @click="openConfigHistory"><el-icon class="mt-workbench__mgr-btn-icon"><component :is="ICON.configHistory" /></el-icon> {{ isZh ? '配置历史' : 'Config history' }}</button>
     </div>
@@ -525,7 +525,7 @@
     <TrashModal
       :open="showTrash"
       :sheet-id="workbench.activeSheetId.value"
-      :fields="scopedAllFields"
+      :fields="twoLayerVisibleFields"
       @close="showTrash = false"
       @restored="onTrashRestored"
     />
@@ -534,7 +534,7 @@
       :open="showHistory"
       :base-id="activeBaseId || ''"
       :sheet-id="workbench.activeSheetId.value"
-      :fields="historyVisibleFields"
+      :fields="twoLayerVisibleFields"
       :link-summaries="grid.linkSummaries.value"
       :person-summaries="grid.personSummaries.value"
       :initial-batch-id="historyDeepLinkBatchId"
@@ -1336,10 +1336,13 @@ const effectiveRowActions = computed<MetaRowActions>(() => {
 const scopedAllFields = computed(() =>
   grid.fields.value.filter((field) => effectiveFieldPermissions.value[field.id]?.visible !== false),
 )
-// History Center field list: BOTH visibility layers must filter — layer-2 property-hidden
-// (property.hidden / property.visible=false) ∩ layer-3 per-subject field_permissions (RBAC).
-// Either alone leaks the other layer's hidden field NAMES into the filter options / diff labels.
-const historyVisibleFields = computed(() => filterPropertyVisibleFields(scopedAllFields.value))
+// Two-layer-visible field list (History Center + TrashModal): BOTH visibility layers must filter —
+// layer-2 property-hidden (property.hidden / property.visible=false) ∩ layer-3 per-subject
+// field_permissions (RBAC, already applied by scopedAllFields). Either alone leaks the other layer:
+// History Center would leak hidden field NAMES into the filter options / diff labels; TrashModal's
+// pickRecordTitle would leak a hidden field's VALUE into a trash-row title (R10 fix — was wired to
+// scopedAllFields alone, layer-3-only).
+const twoLayerVisibleFields = computed(() => filterPropertyVisibleFields(scopedAllFields.value))
 const scopedGridFields = computed(() =>
   grid.visibleFields.value.filter((field) => effectiveFieldPermissions.value[field.id]?.visible !== false),
 )
