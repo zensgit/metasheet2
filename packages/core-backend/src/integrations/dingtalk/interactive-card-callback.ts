@@ -96,19 +96,24 @@ function asRecord(value: unknown): Record<string, unknown> | null {
 
 /**
  * Action ids submitted by the card button, read from the documented DingTalk card-callback
- * `content.cardPrivateData.actionIds` shape (string or pre-parsed object). Anything unreadable
- * yields `[]` — which the caller treats as unsupported, never as a guessed approve.
+ * `content.cardPrivateData.actionIds` shape (string or pre-parsed object).
+ *
+ * Review P3-1: returns `null` when content was PROVIDED but is unreadable (bad JSON / not an
+ * object) — the caller must fail-close on that even when an explicit `action` spelling is also
+ * present (an unreadable wire frame is a wire frame whose opinion we could not check, not the
+ * absence of one). `[]` = readable but carries no action ids (no wire opinion).
  */
-function readWireActionIds(content: unknown): string[] {
+function readWireActionIds(content: unknown): string[] | null {
   let record = asRecord(content)
   if (typeof content === 'string') {
     try {
       record = asRecord(JSON.parse(content))
     } catch {
-      return []
+      return null
     }
   }
-  const cardPrivateData = asRecord(record?.cardPrivateData)
+  if (record === null) return null
+  const cardPrivateData = asRecord(record.cardPrivateData)
   const actionIds = cardPrivateData?.actionIds
   if (!Array.isArray(actionIds)) return []
   return actionIds.filter((value): value is string => typeof value === 'string' && value.trim().length > 0)
@@ -141,9 +146,13 @@ export function parseDingTalkApprovalCardCallback(payload: unknown): DingTalkApp
   const explicitAction = readTrimmedString(record.action)
   const wireActionIds = 'content' in record && record.content !== undefined ? readWireActionIds(record.content) : []
   let action = ''
-  if (explicitAction && wireActionIds.length === 0) action = explicitAction
-  else if (!explicitAction && wireActionIds.length === 1) action = wireActionIds[0]
-  else if (explicitAction && wireActionIds.length === 1 && wireActionIds[0] === explicitAction) action = explicitAction
+  // Review P3-1: `null` = content provided but unreadable → fail-close (action stays ''), even
+  // with an explicit approve spelling alongside — never accept what we could not cross-check.
+  if (wireActionIds !== null) {
+    if (explicitAction && wireActionIds.length === 0) action = explicitAction
+    else if (!explicitAction && wireActionIds.length === 1) action = wireActionIds[0]
+    else if (explicitAction && wireActionIds.length === 1 && wireActionIds[0] === explicitAction) action = explicitAction
+  }
   if (action !== 'approve') return { ok: false, outcome: 'ignored_unsupported_action', outTrackId }
 
   // 3. operator — staff-userid namespace only, fail-closed on absence or conflicting spellings.

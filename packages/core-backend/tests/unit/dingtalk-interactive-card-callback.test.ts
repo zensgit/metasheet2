@@ -116,6 +116,11 @@ describe('parseDingTalkApprovalCardCallback (B-3 §B-3 shape gates)', () => {
       wirePayload({ content: undefined, action: 'reject' }),
       // explicit action conflicting with the wire action list → fail-closed no-op
       wirePayload({ action: 'approve', content: JSON.stringify({ cardPrivateData: { actionIds: ['reject'] } }) }),
+      // review P3-1: content PRESENT but unreadable + explicit approve → fail-closed no-op
+      // (an unreadable wire frame is an uncheckable opinion, not the absence of one).
+      wirePayload({ action: 'approve', content: 'not-json{{' }),
+      wirePayload({ action: 'approve', content: 42 }),
+      wirePayload({ action: 'approve', content: JSON.stringify(['approve']) }),
     ]
     for (const payload of cases) {
       expect(parseDingTalkApprovalCardCallback(payload)).toEqual({
