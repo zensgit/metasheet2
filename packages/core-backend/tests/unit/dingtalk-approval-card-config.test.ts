@@ -126,9 +126,14 @@ describe('approval card config resolvers (CFG-1)', () => {
     })
 
     it('verify pinned to corp B rejects a token signed under corp A (fail-closed cross-corp)', async () => {
-      // Every lookup for corp B yields corp B's secret; the token below is signed with corp A's.
-      dbMocks.query.mockResolvedValue({
-        rows: [{ id: 'dir-b', name: 'Corp B', status: 'active', config: { [APPROVAL_CARD_LINK_SECRET_CONFIG_KEY]: normalizeStoredSecretValue('corp-b-secret') } }],
+      // Anti-shadowing mock: the by-id lookup yields corp B, while the legacy LIMIT-1 global
+      // pick yields CORP A — if verify ever ignored the pinned integration and fell back to the
+      // global pick, tokenA would verify and tokenB would fail, flipping both assertions red.
+      dbMocks.query.mockImplementation(async (sql: string) => {
+        if (sql.includes('WHERE id = $1')) {
+          return { rows: [{ id: 'dir-b', name: 'Corp B', status: 'active', config: { [APPROVAL_CARD_LINK_SECRET_CONFIG_KEY]: normalizeStoredSecretValue('corp-b-secret') } }] }
+        }
+        return { rows: [{ config: { [APPROVAL_CARD_LINK_SECRET_CONFIG_KEY]: normalizeStoredSecretValue('corp-a-secret') } }] }
       })
       const deliveryId = 'card-delivery-r2'
       const tokenA = createHmac('sha256', 'corp-a-secret').update(deliveryId).digest('hex').slice(0, 32)

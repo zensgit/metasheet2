@@ -225,17 +225,22 @@ describeIfDatabase('A-4 card-delivery wrapper (real DB)', () => {
     delete process.env.APPROVAL_CARD_LINK_SECRET
     const secretA = `cdw-r2-corp-a-secret-${TS}`
     const secretB = `cdw-r2-corp-b-secret-${TS}`
-    const mkIntegration = async (label: string, secret: string): Promise<string> => {
+    const mkIntegration = async (label: string, secret: string, updatedAtSql: string): Promise<string> => {
       const inserted = await q(
         `INSERT INTO directory_integrations (name, provider, status, corp_id, config, updated_at)
-         VALUES ($1, 'dingtalk', 'active', $2, $3::jsonb, now())
+         VALUES ($1, 'dingtalk', 'active', $2, $3::jsonb, ${updatedAtSql})
          RETURNING id`,
         [`cdw-r2-${label}-${TS}`, `corp_cdw_r2_${label}_${TS}`, JSON.stringify({ approvalCardLinkSecret: normalizeStoredSecretValue(secret) })],
       )
       return (inserted.rows[0] as { id: string }).id
     }
-    const corpA = await mkIntegration('a', secretA)
-    const corpB = await mkIntegration('b', secretB)
+    // Anti-shadowing: corp A is deliberately the FRESHEST integration, so the legacy LIMIT-1
+    // global pick (active-first, updated_at DESC) lands on corp A — if verify ever fell back to
+    // that pick instead of the DELIVERY row's pinned corp B, corp A's token would verify and
+    // corp B's would fail, turning every assertion below red. now()-1min on corp B keeps both
+    // rows behind any real integration if a crash skips the finally.
+    const corpA = await mkIntegration('a', secretA, `now()`)
+    const corpB = await mkIntegration('b', secretB, `now() - interval '1 minute'`)
     try {
       const row = await insertDingTalkApprovalCardDelivery(q, {
         instanceId,

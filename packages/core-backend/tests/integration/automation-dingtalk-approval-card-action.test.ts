@@ -377,6 +377,16 @@ describeIfDatabase('A-2b send_dingtalk_approval_card action (real DB)', () => {
         WHERE id = $1`,
       [DD_INTEGRATION, normalizeStoredSecretValue(corpSecret)],
     )
+    // Anti-shadowing decoy: a FRESHER active dingtalk integration with a different secret, so the
+    // legacy LIMIT-1 global pick (active-first, updated_at DESC) lands on the DECOY — if the
+    // executor ever signed with that pick instead of the ASSIGNEE's integration, the token
+    // assertion below would go red. Deleted in finally; now() cannot permanently shadow.
+    const DECOY = randomUUID()
+    await q(
+      `INSERT INTO directory_integrations (id, name, provider, status, corp_id, config, updated_at)
+       VALUES ($1, $2, 'dingtalk', 'active', $3, $4::jsonb, now())`,
+      [DECOY, `card-r2-decoy-${TS}`, `corp_card_r2_decoy_${TS}`, JSON.stringify({ approvalCardLinkSecret: normalizeStoredSecretValue(`r2-decoy-secret-${TS}`) })],
+    )
     const rule = await svc.createRule(SHEET_ID, {
       name: 'card r2 corp secret', triggerType: 'approval.task_created', triggerConfig: { templateId },
       actionType: 'send_dingtalk_approval_card', actionConfig: {}, createdBy: CREATOR,
@@ -402,6 +412,7 @@ describeIfDatabase('A-2b send_dingtalk_approval_card action (real DB)', () => {
       expect(tokenMatch?.[1]).toBe(expected)
     } finally {
       await svc.deleteRule(rule.id, SHEET_ID).catch(() => {})
+      await q('DELETE FROM directory_integrations WHERE id = $1', [DECOY]).catch(() => {})
       await q(
         `UPDATE directory_integrations
             SET config = COALESCE(config, '{}'::jsonb) - 'approvalCardLinkSecret'
