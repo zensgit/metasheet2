@@ -36,6 +36,37 @@
 
 ---
 
+## ✅ 2026-07-10 余量池 Wave-1 落地回填（S8 之后读这里）
+
+> **#3925 计划的 decision-clean 池已清空。** 本波 9 个 PR 全 MERGED（每刀 design-lock RATIFIED → 实现 →
+> opus 对抗审 0 P1/P2 → merge → 验证 MD,mutation 自证累计 20+ 刀）:
+>
+> | 项 | PR / merge | 验证 MD |
+> |---|---|---|
+> | S1/S1b overtimeBank 双旋钮 | #3982 / #3993（前波已回填） | overtime-bank 两份 20260708/09 |
+> | **S2** requirePhoto 照片证据契约 | #4016 `0e118283b` | `attendance-outdoor-require-photo-s2-verification-20260710.md` |
+> | **S3** 年假计提 scheduler job | #4008 `e837c508f` | `attendance-annual-accrual-scheduler-s3-verification-20260710.md` |
+> | **S4** WeCom 通知渠道 adapter | #4028 `fd242899c` | `attendance-wecom-delivery-channel-s4-verification-20260710.md` |
+> | **S5** 报表 xlsx 导出 | #3961 `a8154c3b8` | `attendance-report-xlsx-export-s5-verification-20260710.md` |
+> | **S6** 年假余额批量调整 | #4023 `dbf23627a` | `attendance-bulk-balance-adjust-s6-verification-20260710.md` |
+> | **S8** tracker 刷新（记账债） | #3942 `a621a34ab` | （即上方 07-08 节） |
+> | R4 未绑定收件人→skipped | #3920 `d642b819d` | `attendance-r4-microapp-help-landing-verification-20260710.md` |
+> | E4 微应用帮助页+operator guide | #3966 `64312e255` | 同上 |
+>
+> **S2 附带三条 core 基底修正**（files 僵尸表接线 / userId 解析家族对齐 / 035 桥接 migration）并触发全仓
+> superseded-migrations 缺口审计（`superseded-legacy-migrations-gap-audit-20260710.md`,结论:其余缺口全为
+> 僵尸无立即高危;P0 建议 = CI 全新装 schema 护栏,owner 决策）。
+>
+> **余量（更新后口径）**:
+> 1. 🔒 **owner/operator 门不变**:S7 A2-resolver（等 A1 live 手感）· 五连 staging smoke · E4 真机注册 ·
+>    档 B 治理门 · T2 三项（§3.1 打卡切外勤 / #2 自助入口 / #8 多段夜班）。
+> 2. **P3 硬化小刀池（审阅产出,下波可自主）**:R4 P3-1（org 无 active 集成→retryable 非终态 skipped）·
+>    S2 P3-1（photo magic-byte 嗅探）· S2 P3-2（files delete 孤儿行/悬挂证据）。
+> 3. **命名前置（按需立项）**:wecom directory population 线 · comp_time 单人调整 primitive ·
+>    SMS 渠道（供应商选型 owner 门）· >50 org 计提 fairness 轮转。
+
+---
+
 ## 0. 三视野（北极星）
 
 | 视野 | 范围 | 量级 | 现在做？ |
