@@ -9,7 +9,7 @@
     "pactSpecification": {
       "version": "3.0.0"
     },
-    "claudeNote": "Hand-authored Wave 1 plus document-semantics Wave 2 contract per docs/PACT_FIRST_INTEGRATION_PLAN_20260407.md. Match-by-type, not match-by-value. Replace with @pact-foundation/pact generated artifact when that dep is approved. Wave 1 now includes the real schema-discovery call already used by mainline PLMAdapter.getItemMetadata in yuantus mode: GET /api/v1/aml/metadata/{type}. Wave 2 adds the real document semantics calls already used by PLMAdapter.getProductDocuments in yuantus mode: GET /api/v1/file/item/{item_id}, GET /api/v1/file/{file_id}, and POST /api/v1/aml/query with expand ['Document Part']. Wave 3 adds where-used, BOM compare schema, and ECO approval-history/action interactions. Wave 4 adds the real approval list/detail and BOM substitute calls already used by mainline getApprovals/getApprovalById/getBomSubstitutes/addBomSubstitute/removeBomSubstitute. Wave 5 adds the nine CAD endpoints already called on main: CAD properties, CAD view state, CAD review, CAD history, CAD diff, and CAD mesh stats. Release-readiness adds the governance drilldown endpoint already called on main: GET /api/v1/release-readiness/items/{item_id}. ECO Phase 0 adds the first two ERROR interactions (discriminated 409s on the governed write-back PATCH): lifecycle_locked (with eco_required boolean field) vs idempotency_conflict, discriminated by detail.code alone per docs/development/plm-collab-eco-phase0-contract-taskbook-20260704.md; detail.code and eco_required are exact-match (discriminator), message/state match-by-type."
+    "claudeNote": "Hand-authored Wave 1 plus document-semantics Wave 2 contract per docs/PACT_FIRST_INTEGRATION_PLAN_20260407.md. Match-by-type, not match-by-value. Replace with @pact-foundation/pact generated artifact when that dep is approved. Wave 1 now includes the real schema-discovery call already used by mainline PLMAdapter.getItemMetadata in yuantus mode: GET /api/v1/aml/metadata/{type}. Wave 2 adds the real document semantics calls already used by PLMAdapter.getProductDocuments in yuantus mode: GET /api/v1/file/item/{item_id}, GET /api/v1/file/{file_id}, and POST /api/v1/aml/query with expand ['Document Part']. Wave 3 adds where-used, BOM compare schema, and ECO approval-history/action interactions. Wave 4 adds the real approval list/detail and BOM substitute calls already used by mainline getApprovals/getApprovalById/getBomSubstitutes/addBomSubstitute/removeBomSubstitute. Wave 5 adds the nine CAD endpoints already called on main: CAD properties, CAD view state, CAD review, CAD history, CAD diff, and CAD mesh stats. Release-readiness adds the governance drilldown endpoint already called on main: GET /api/v1/release-readiness/items/{item_id}. ECO Phase 0 adds the first two ERROR interactions (discriminated 409s on the governed write-back PATCH): lifecycle_locked (with eco_required boolean field) vs idempotency_conflict, discriminated by detail.code alone per docs/development/plm-collab-eco-phase0-contract-taskbook-20260704.md; detail.code and eco_required are exact-match (discriminator), message/state match-by-type. #4020 (2026-07-09): the capabilities interaction now pins the provider-computed available formula (available = supported && (packaging==base || entitled)) on bom_multitable (entitled true, available true), plus two new keys discussion_core (base packaging, unlicensed: entitled false, available true) and metasheet_review (paid packaging, unlicensed under this fixture: entitled false, available false); entitled/available are exact-match (formula discriminators), everything else stays match-by-type."
   },
   "interactions": [
     {
@@ -3437,12 +3437,44 @@
               "supported": true,
               "api_version": "v1",
               "entitled": true,
+              "available": true,
               "scenarios": [
                 "bom_review"
               ],
               "cache_scope": {
                 "supported": "global",
-                "entitled": "tenant"
+                "entitled": "tenant",
+                "available": "tenant"
+              }
+            },
+            "discussion_core": {
+              "supported": true,
+              "api_version": "v1",
+              "entitled": false,
+              "available": true,
+              "scenarios": [
+                "object_discussion"
+              ],
+              "packaging": "base",
+              "cache_scope": {
+                "supported": "global",
+                "entitled": "tenant",
+                "available": "tenant"
+              }
+            },
+            "metasheet_review": {
+              "supported": true,
+              "api_version": "v1",
+              "entitled": false,
+              "available": false,
+              "scenarios": [
+                "bom_review"
+              ],
+              "packaging": "paid",
+              "cache_scope": {
+                "supported": "global",
+                "entitled": "tenant",
+                "available": "tenant"
               }
             }
           }
@@ -3477,13 +3509,6 @@
                 }
               ]
             },
-            "$.features.bom_multitable.entitled": {
-              "matchers": [
-                {
-                  "match": "type"
-                }
-              ]
-            },
             "$.features.bom_multitable.api_version": {
               "matchers": [
                 {
@@ -3506,6 +3531,111 @@
               ]
             },
             "$.features.bom_multitable.cache_scope.entitled": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.features.bom_multitable.cache_scope.available": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.features.discussion_core.supported": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.features.discussion_core.api_version": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.features.discussion_core.scenarios": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.features.discussion_core.packaging": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.features.discussion_core.cache_scope.supported": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.features.discussion_core.cache_scope.entitled": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.features.discussion_core.cache_scope.available": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.features.metasheet_review.supported": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.features.metasheet_review.api_version": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.features.metasheet_review.scenarios": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.features.metasheet_review.packaging": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.features.metasheet_review.cache_scope.supported": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.features.metasheet_review.cache_scope.entitled": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.features.metasheet_review.cache_scope.available": {
               "matchers": [
                 {
                   "match": "type"
