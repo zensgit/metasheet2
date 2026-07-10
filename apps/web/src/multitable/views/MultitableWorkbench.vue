@@ -534,7 +534,7 @@
       :open="showHistory"
       :base-id="activeBaseId || ''"
       :sheet-id="workbench.activeSheetId.value"
-      :fields="propertyVisibleGridFields"
+      :fields="scopedAllFields"
       :initial-batch-id="historyDeepLinkBatchId"
       @close="closeHistory"
     />
