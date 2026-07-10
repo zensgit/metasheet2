@@ -261,3 +261,159 @@ describe('HistoryCenterModal — inline masked per-field diff (detail expansion)
     }
   })
 })
+
+// ─── PR-B: record titles + type-aware link/person diff values ────────────────────────────────────────
+// Titles come from the change's OWN already-masked payload (after = full post-change snapshot, before =
+// pre-delete snapshot) via pickRecordTitle (TrashModal's heuristic); link/person diff values render
+// through the shared formatFieldDisplay fed by the grid's summary caches, with count/id fallbacks on
+// cache miss. Legacy {id,name}-only fields (all earlier tests above) keep the plain-text path — those
+// tests passing unchanged IS the regression proof for the legacy branch.
+
+function mountModalWithProps(props: Record<string, unknown>) {
+  const container = document.createElement('div')
+  document.body.appendChild(container)
+  const app = createApp(HistoryCenterModal, { open: true, baseId: 'base_1', ...props })
+  app.mount(container)
+  return { app, container }
+}
+
+const TYPED_FIELDS = [
+  { id: 'fld_title', name: 'Title', type: 'string', order: 0 },
+  { id: 'fld_link', name: 'Related', type: 'link', order: 1 },
+  { id: 'fld_person', name: 'Owner', type: 'person', order: 2 },
+]
+
+function detailWith(changes: HistoryBatchDetail['changes']): HistoryBatchDetail {
+  return {
+    batchId: 'batch_1', actorId: 'user_1', source: 'rest', createdAt: new Date().toISOString(),
+    visibleAffectedRecordCount: changes.length, visibleAffectedFieldCount: 1, changes,
+  }
+}
+
+describe('HistoryCenterModal — record titles from the masked payload (PR-B)', () => {
+  it('renders the record title from the after-snapshot and keeps the full id in the title attr', async () => {
+    mockListHistoryEvents.mockResolvedValue({ batches: [batch()], total: 1, nextCursor: null, searchTruncated: false })
+    mockGetHistoryBatch.mockResolvedValue(detailWith([{
+      sheetId: 'sheet_1', recordId: 'rec_abc12345', action: 'update', version: 2,
+      changedFieldIds: ['fld_title'],
+      before: { fld_title: 'Old' },
+      after: { fld_title: 'Quarterly Report', fld_link: ['rec_x'] },
+    }]))
+    const { app, container } = mountModalWithProps({ fields: TYPED_FIELDS })
+    try {
+      await flushPromises()
+      container.querySelector<HTMLButtonElement>('[data-test="hist-batch"]')!.click()
+      await flushPromises()
+      const label = container.querySelector<HTMLElement>('[data-test="hist-rec-label"]')!
+      expect(label.textContent).toBe('Quarterly Report')
+      expect(label.getAttribute('title')).toBe('rec_abc12345')
+    } finally { app.unmount(); container.remove() }
+  })
+
+  it('a DELETED record titles from its pre-delete before-snapshot', async () => {
+    mockListHistoryEvents.mockResolvedValue({ batches: [batch({ action: 'delete' })], total: 1, nextCursor: null, searchTruncated: false })
+    mockGetHistoryBatch.mockResolvedValue(detailWith([{
+      sheetId: 'sheet_1', recordId: 'rec_gone1234', action: 'delete', version: 3,
+      changedFieldIds: [],
+      before: { fld_title: 'Doomed Row' },
+      after: null,
+    }]))
+    const { app, container } = mountModalWithProps({ fields: TYPED_FIELDS })
+    try {
+      await flushPromises()
+      container.querySelector<HTMLButtonElement>('[data-test="hist-batch"]')!.click()
+      await flushPromises()
+      expect(container.querySelector('[data-test="hist-rec-label"]')?.textContent).toBe('Doomed Row')
+    } finally { app.unmount(); container.remove() }
+  })
+
+  it('falls back to the short record id when nothing in the masked payload is readable', async () => {
+    mockListHistoryEvents.mockResolvedValue({ batches: [batch()], total: 1, nextCursor: null, searchTruncated: false })
+    mockGetHistoryBatch.mockResolvedValue(detailWith([{
+      sheetId: 'sheet_1', recordId: 'rec_abcdefgh1234', action: 'update', version: 2,
+      changedFieldIds: ['fld_title'],
+      before: {},
+      after: {}, // LOCK-3 masked everything — title must NOT be derivable
+    }]))
+    const { app, container } = mountModalWithProps({ fields: TYPED_FIELDS })
+    try {
+      await flushPromises()
+      container.querySelector<HTMLButtonElement>('[data-test="hist-batch"]')!.click()
+      await flushPromises()
+      expect(container.querySelector('[data-test="hist-rec-label"]')?.textContent).toBe('#abcdefgh')
+    } finally { app.unmount(); container.remove() }
+  })
+})
+
+describe('HistoryCenterModal — type-aware link/person diff values (PR-B)', () => {
+  it('link diffs render resolved display names from the summary cache, never raw JSON', async () => {
+    mockListHistoryEvents.mockResolvedValue({ batches: [batch()], total: 1, nextCursor: null, searchTruncated: false })
+    mockGetHistoryBatch.mockResolvedValue(detailWith([{
+      sheetId: 'sheet_1', recordId: 'rec_1', action: 'update', version: 2,
+      changedFieldIds: ['fld_link'],
+      before: { fld_link: ['rec_a'] },
+      after: { fld_link: ['rec_a', 'rec_b'] },
+    }]))
+    const { app, container } = mountModalWithProps({
+      fields: TYPED_FIELDS,
+      linkSummaries: { rec_1: { fld_link: [
+        { id: 'rec_a', display: 'Alpha Task' },
+        { id: 'rec_b', display: 'Beta Task' },
+      ] } },
+    })
+    try {
+      await flushPromises()
+      container.querySelector<HTMLButtonElement>('[data-test="hist-batch"]')!.click()
+      await flushPromises()
+      const row = container.querySelector<HTMLElement>('[data-test="hist-diff-row"]')!
+      const after = row.querySelector('.meta-hist__diff-after')?.textContent ?? ''
+      expect(after).toContain('Alpha Task')
+      expect(after).toContain('Beta Task')
+      expect(after).not.toContain('[') // no JSON dump
+      expect(after).not.toContain('rec_a')
+    } finally { app.unmount(); container.remove() }
+  })
+
+  it('link diff cache-miss falls back to a count summary — still no JSON dump', async () => {
+    mockListHistoryEvents.mockResolvedValue({ batches: [batch()], total: 1, nextCursor: null, searchTruncated: false })
+    mockGetHistoryBatch.mockResolvedValue(detailWith([{
+      sheetId: 'sheet_1', recordId: 'rec_offpage', action: 'update', version: 2,
+      changedFieldIds: ['fld_link'],
+      before: null,
+      after: { fld_link: ['rec_a', 'rec_b'] },
+    }]))
+    const { app, container } = mountModalWithProps({ fields: TYPED_FIELDS, linkSummaries: {} })
+    try {
+      await flushPromises()
+      container.querySelector<HTMLButtonElement>('[data-test="hist-batch"]')!.click()
+      await flushPromises()
+      const after = container.querySelector('.meta-hist__diff-after')?.textContent ?? ''
+      expect(after).not.toContain('[')
+      expect(after).not.toContain('rec_a')
+      expect(after.length).toBeGreaterThan(0) // count-summary text from formatFieldDisplay
+    } finally { app.unmount(); container.remove() }
+  })
+
+  it('person diffs resolve display names from the cache and fall back to the raw id on miss', async () => {
+    mockListHistoryEvents.mockResolvedValue({ batches: [batch()], total: 1, nextCursor: null, searchTruncated: false })
+    mockGetHistoryBatch.mockResolvedValue(detailWith([{
+      sheetId: 'sheet_1', recordId: 'rec_1', action: 'update', version: 2,
+      changedFieldIds: ['fld_person'],
+      before: { fld_person: ['user_known'] },
+      after: { fld_person: ['user_known', 'user_unknown'] },
+    }]))
+    const { app, container } = mountModalWithProps({
+      fields: TYPED_FIELDS,
+      personSummaries: { rec_1: { fld_person: [{ id: 'user_known', display: 'Zhang San' }] } },
+    })
+    try {
+      await flushPromises()
+      container.querySelector<HTMLButtonElement>('[data-test="hist-batch"]')!.click()
+      await flushPromises()
+      const after = container.querySelector('.meta-hist__diff-after')?.textContent ?? ''
+      expect(after).toContain('Zhang San')
+      expect(after).toContain('user_unknown') // cache miss → raw id, not JSON
+      expect(after).not.toContain('[')
+    } finally { app.unmount(); container.remove() }
+  })
+})
