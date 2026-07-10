@@ -1507,7 +1507,8 @@ export interface DingTalkPersonDelivery {
   subject: string
   content: string
   success: boolean
-  status?: 'success' | 'failed' | 'skipped'
+  /** `outcome_unknown` (PR #4046 Phase B): send attempted, response lost — maybe delivered, never auto-resent. */
+  status?: 'success' | 'failed' | 'skipped' | 'outcome_unknown'
   httpStatus?: number
   responseBody?: string
   errorMessage?: string

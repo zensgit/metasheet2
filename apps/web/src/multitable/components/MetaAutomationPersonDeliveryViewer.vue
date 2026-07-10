@@ -13,6 +13,7 @@
             <option value="success">{{ automationStatusLabel('success', isZh) }}</option>
             <option value="failed">{{ automationStatusLabel('failed', isZh) }}</option>
             <option value="skipped">{{ automationLabel('delivery.statusSkippedUnbound', isZh) }}</option>
+            <option value="outcome_unknown">{{ automationStatusLabel('outcome_unknown', isZh) }}</option>
           </select>
           <MtButton class="meta-person-delivery__btn" data-action="refresh" :disabled="loading" @click="loadData">{{ automationLabel('log.refresh', isZh) }}</MtButton>
         </div>
@@ -89,12 +90,15 @@ const filteredDeliveries = computed(() => {
   return deliveries.value.filter((delivery) => deliveryStatus(delivery) === statusFilter.value)
 })
 
-type DeliveryStatus = 'success' | 'failed' | 'skipped'
+// 'outcome_unknown' (PR #4046 Phase B): the send was attempted and the response lost — the
+// message MAY have been delivered. Distinct badge/filter value; folding it into 'failed' would
+// erase the reconciliation signal.
+type DeliveryStatus = 'success' | 'failed' | 'skipped' | 'outcome_unknown'
 
 const UNBOUND_DINGTALK_REASON = 'DingTalk account is not linked or user is inactive'
 
 function deliveryStatus(delivery: DingTalkPersonDelivery): DeliveryStatus {
-  if (delivery.status === 'success' || delivery.status === 'failed' || delivery.status === 'skipped') return delivery.status
+  if (delivery.status === 'success' || delivery.status === 'failed' || delivery.status === 'skipped' || delivery.status === 'outcome_unknown') return delivery.status
   if (delivery.success) return 'success'
   if (!delivery.dingtalkUserId && delivery.errorMessage === UNBOUND_DINGTALK_REASON) return 'skipped'
   return 'failed'
@@ -285,6 +289,11 @@ watch(
 .meta-person-delivery__badge--skipped {
   background: #fef3c7;
   color: #b45309;
+}
+
+.meta-person-delivery__badge--outcome_unknown {
+  background: #e2e8f0;
+  color: #475569;
 }
 
 .meta-person-delivery__time {

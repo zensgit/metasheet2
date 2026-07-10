@@ -20,6 +20,8 @@ import {
 } from '../../src/services/ApprovalCardDeliveryAction'
 import {
   insertDingTalkApprovalCardDelivery,
+  markDingTalkApprovalCardDeliverySendFailed,
+  markDingTalkApprovalCardDeliverySendOutcomeUnknown,
   markDingTalkApprovalCardDeliverySent,
 } from '../../src/integrations/dingtalk/approval-card-deliveries'
 import { normalizeStoredSecretValue } from '../../src/security/encrypted-secrets'
@@ -294,6 +296,72 @@ describeIfDatabase('A-4 card-delivery wrapper (real DB)', () => {
       { deliveryId: row.id, token: tokenFor(row.id), decision: 'approve', actor: approverActor },
     )
     expect(outcome.status).toBe('stale')
+  })
+
+  test('PR #4046 Phase B: send_status=failed stays stale — the possibly-delivered widening is EXACTLY (sent, outcome_unknown), nothing else', async () => {
+    const instanceId = await newInstance()
+    const row = await insertDingTalkApprovalCardDelivery(q, {
+      instanceId, nodeKey: 'approval_1', recipientUserId: APPROVER, recipientDingTalkUserId: `dd_${APPROVER}`, deliveryKind: 'work_notice_action_card',
+    })
+    await markDingTalkApprovalCardDeliverySendFailed(q, row.id, 'ding: definite rejection')
+    const summary = await getApprovalCardDeliverySummary({ query: q }, { deliveryId: row.id, token: tokenFor(row.id), viewerUserId: APPROVER })
+    expect(summary.status).toBe('ok')
+    if (summary.status === 'ok') expect(summary.summary.actionable).toBe(false)
+    const outcome = await executeApprovalActionFromCardDelivery(
+      { query: q, approvals },
+      { deliveryId: row.id, token: tokenFor(row.id), decision: 'approve', actor: approverActor },
+    )
+    expect(outcome.status).toBe('stale')
+    // and the claim SQL is equally closed: the card was never claimed
+    const card = await q(`SELECT card_state, send_status FROM dingtalk_approval_card_deliveries WHERE id = $1`, [row.id])
+    expect(card.rows[0]).toMatchObject({ card_state: 'sent', send_status: 'failed' })
+  })
+
+  test('PR #4046 Phase B: outcome_unknown + valid HMAC token IS actionable — the token proves delivery; approve proceeds and claims the card', async () => {
+    // A card whose send outcome the client could not observe MAY have been delivered — and a
+    // valid deep-link token only ever existed inside the delivered card, so the callback is the
+    // delivery proof. The ledger's send-time uncertainty must not make the card inoperable.
+    const instanceId = await newInstance()
+    const row = await insertDingTalkApprovalCardDelivery(q, {
+      instanceId, nodeKey: 'approval_1', recipientUserId: APPROVER, recipientDingTalkUserId: `dd_${APPROVER}`, deliveryKind: 'work_notice_action_card',
+    })
+    await markDingTalkApprovalCardDeliverySendOutcomeUnknown(q, row.id, 'fetch failed (response lost)')
+
+    const summary = await getApprovalCardDeliverySummary({ query: q }, { deliveryId: row.id, token: tokenFor(row.id), viewerUserId: APPROVER })
+    expect(summary.status).toBe('ok')
+    if (summary.status === 'ok') {
+      expect(summary.summary.sendStatus).toBe('outcome_unknown')
+      expect(summary.summary.actionable).toBe(true)
+    }
+
+    const outcome = await executeApprovalActionFromCardDelivery(
+      { query: q, approvals },
+      { deliveryId: row.id, token: tokenFor(row.id), decision: 'approve', comment: '同意', actor: approverActor },
+    )
+    expect(outcome.status).toBe('ok')
+    if (outcome.status === 'ok') {
+      expect(outcome.summary.cardState).toBe('acted')
+      expect(outcome.summary.actedAction).toBe('approve')
+      expect(outcome.summary.approval.status).toBe('approved')
+      // the send-time record keeps its truth: uncertainty at send time is history, acted is the proof of delivery
+      expect(outcome.summary.sendStatus).toBe('outcome_unknown')
+    }
+
+    // engine untouched beyond the one approve; channel attribution intact (guards NOT restructured)
+    const record = await q(
+      `SELECT metadata FROM approval_records WHERE instance_id = $1 AND action = 'approve' ORDER BY created_at DESC LIMIT 1`,
+      [instanceId],
+    )
+    const metadata = (record.rows[0] as { metadata: Record<string, unknown> }).metadata
+    expect(metadata.channel).toBe('dingtalk_card')
+    expect(metadata.cardDeliveryId).toBe(row.id)
+
+    // an INVALID token against the same outcome_unknown delivery is still not_found — HMAC stays the authority
+    const forged = await executeApprovalActionFromCardDelivery(
+      { query: q, approvals },
+      { deliveryId: row.id, token: 'f'.repeat(32), decision: 'approve', actor: approverActor },
+    )
+    expect(forged.status).toBe('not_found')
   })
 
   test('approve: engine gates apply, channel attribution lands on approval_records, card claims acted', async () => {

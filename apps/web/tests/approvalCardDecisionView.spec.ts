@@ -132,6 +132,25 @@ describe('ApprovalCardDecisionView (A-3)', () => {
     expect((container!.querySelector('[data-testid="card-decision-reject"]') as HTMLButtonElement).disabled).toBe(false)
   })
 
+  it('PR #4046 Phase B: an actionable outcome_unknown card renders live buttons; a non-actionable one gets 已流转 — never 未成功投递', async () => {
+    // The valid deep-link token only ever existed inside the delivered card, so an
+    // outcome_unknown delivery whose instance is pending stays actionable server-side.
+    apiFetchMock.mockResolvedValueOnce(jsonResponse({ ok: true, data: summaryFixture({ sendStatus: 'outcome_unknown' }) }))
+    await mountView()
+    expect(container!.querySelector('[data-testid="card-decision-approve"]')).toBeTruthy()
+    expect(container!.querySelector('[data-testid="card-decision-stale"]')).toBeNull()
+    app!.unmount(); container!.remove()
+
+    // Non-actionable for ANOTHER reason (superseded): the accurate message is 已流转 —
+    // "未成功投递" is reserved for pending/failed sends, where non-delivery is KNOWN.
+    apiFetchMock.mockReset()
+    apiFetchMock.mockResolvedValueOnce(jsonResponse({ ok: true, data: summaryFixture({ sendStatus: 'outcome_unknown', cardState: 'superseded', actionable: false }) }))
+    await mountView()
+    const stale = container!.querySelector('[data-testid="card-decision-stale"]')
+    expect(stale?.getAttribute('data-title')).toContain('已流转')
+    expect(stale?.getAttribute('data-title')).not.toContain('未成功投递')
+  })
+
   it('approve submits to the card-delivery endpoint and renders the terminal state', async () => {
     apiFetchMock.mockResolvedValueOnce(jsonResponse({ ok: true, data: summaryFixture() }))
     await mountView()

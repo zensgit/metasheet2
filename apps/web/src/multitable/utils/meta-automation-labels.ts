@@ -288,6 +288,7 @@ export type AutomationLabelKey =
   | 'status.success'
   | 'status.failed'
   | 'status.skipped'
+  | 'status.outcomeUnknown'
   | 'status.running'
   | 'status.resolved'
   | 'status.queued'
@@ -560,6 +561,7 @@ export const AUTOMATION_LABEL_KEYS: readonly AutomationLabelKey[] = [
   'status.success',
   'status.failed',
   'status.skipped',
+  'status.outcomeUnknown',
   'status.running',
   'status.resolved',
   'status.queued',
@@ -881,6 +883,7 @@ const LABELS: Record<AutomationLabelKey, { en: string; zh: string }> = {
   'status.success': { en: 'success', zh: '成功' },
   'status.failed': { en: 'failed', zh: '失败' },
   'status.skipped': { en: 'skipped', zh: '跳过' },
+  'status.outcomeUnknown': { en: 'outcome unknown', zh: '结果未知' },
   'status.running': { en: 'running', zh: '运行中' },
   'status.resolved': { en: 'resolved', zh: '已完成' },
   'status.queued': { en: 'queued', zh: '排队中' },
@@ -936,6 +939,7 @@ export function automationStatusLabel(status: AutomationStatus | UnknownAutomati
   if (status === 'success') return automationLabel('status.success', isZh)
   if (status === 'failed') return automationLabel('status.failed', isZh)
   if (status === 'skipped') return automationLabel('status.skipped', isZh)
+  if (status === 'outcome_unknown') return automationLabel('status.outcomeUnknown', isZh)
   if (status === 'running') return automationLabel('status.running', isZh)
   if (status === 'resolved') return automationLabel('status.resolved', isZh)
   if (status === 'queued') return automationLabel('status.queued', isZh)
