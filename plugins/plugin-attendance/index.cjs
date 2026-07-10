@@ -21784,10 +21784,15 @@ module.exports = {
         weeklyMaxMinutes: z.number().int().positive().nullable().optional(),
         monthlyMaxMinutes: z.number().int().positive().nullable().optional(),
       }).optional(),
-      // Punch-policy group (#2203). S1 exposes unscheduled.mode = allow|block. S2 exposes merge
-      // controls for in/out card selection. S3 (#2304) exposes the outdoor approval controls —
-      // requireApproval / requireNote / approvalFlowId only. requirePhoto stays latent (normalized but
-      // NOT wire-settable until an attachment/photo contract exists — no fake security).
+      // Punch-policy group (#2203). S1 exposes unscheduled.mode = allow|block. S2 (#2333) exposes
+      // merge controls for in/out card selection. S3 (#2304) exposes the outdoor approval controls
+      // requireApproval / requireNote / approvalFlowId. S2 outdoor-punch-photo design-lock
+      // (2026-07-10) opens requirePhoto: the `files` table (core POST /api/files/upload,
+      // migration 035) now has a real writer (routes/files.ts INSERTs owner_id + content-type on
+      // every successful upload — previously it had none), so a photoFileId can be verified
+      // server-side (existence + image/* content-type + uploader === punching user) instead of
+      // trusted as a free-form client string. That verification is what makes requirePhoto a real
+      // enforcement knob rather than latent config with no contract behind it.
       punchPolicy: z.object({
         unscheduled: z.object({
           mode: z.enum(['allow', 'block']).optional(),
@@ -21799,6 +21804,7 @@ module.exports = {
         outdoor: z.object({
           requireApproval: z.boolean().optional(),
           requireNote: z.boolean().optional(),
+          requirePhoto: z.boolean().optional(),
           approvalFlowId: z.string().optional(),
         }).optional(),
       }).optional(),
@@ -21995,6 +22001,10 @@ module.exports = {
       location: z.record(z.unknown()).optional(),
       meta: z.record(z.unknown()).optional(),
       orgId: z.string().optional(),
+      // S2 outdoor-punch-photo design-lock (2026-07-10) G1: a `files` row id (core
+      // POST /api/files/upload), never a free-form URL/meta blob — G2 verifies it
+      // server-side (owner + image/* content-type) before it is trusted as evidence.
+      photoFileId: z.string().min(1).optional(),
     })
 
     const shiftCreateSchema = z.object({
@@ -24650,6 +24660,30 @@ module.exports = {
               res.status(422).json({ ok: false, error: { code: 'OUTDOOR_NOTE_REQUIRED', message: '外勤打卡需填写备注' } })
               return
             }
+            // S2 outdoor-punch-photo design-lock (2026-07-10) G3: requirePhoto is nested exactly like
+            // requireNote — both only ever apply to an ACCEPTED outdoor candidate (requireApproval=true
+            // is the precondition for outdoor punches existing at all; with it off, an outside-fence
+            // punch already 403s as LOCATION_RESTRICTED, so there is no "accepted outdoor punch" to
+            // attach evidence to — no separate enforcement path is opened for that case).
+            // G2: any photoFileId supplied is verified against the `files` table (row exists, owner_id
+            // is the punching user, meta.contentType is image/*) — never trusted as a bare client string.
+            const rawPhotoFileId = typeof parsed.data.photoFileId === 'string' ? parsed.data.photoFileId.trim() : ''
+            if (outdoorPolicy.requirePhoto === true && !rawPhotoFileId) {
+              res.status(422).json({ ok: false, error: { code: 'OUTDOOR_PHOTO_REQUIRED', message: '外勤打卡需上传照片证据' } })
+              return
+            }
+            let photoFileId = null
+            if (rawPhotoFileId) {
+              const photoRows = await db.query('SELECT id, owner_id, meta FROM files WHERE id = $1 LIMIT 1', [rawPhotoFileId])
+              const photoRow = photoRows[0] ?? null
+              const photoMeta = normalizeMetadata(photoRow?.meta)
+              const photoContentType = typeof photoMeta.contentType === 'string' ? photoMeta.contentType : ''
+              if (!photoRow || photoRow.owner_id !== userId || !photoContentType.startsWith('image/')) {
+                res.status(422).json({ ok: false, error: { code: 'OUTDOOR_PHOTO_INVALID', message: '照片证据无效' } })
+                return
+              }
+              photoFileId = rawPhotoFileId
+            }
             // Resolve + validate the outdoor_punch approval flow. No silent fall-back to auto-approved.
             const requestedFlowId = typeof outdoorPolicy.approvalFlowId === 'string' ? outdoorPolicy.approvalFlowId.trim() : ''
             let flow = null
@@ -24695,6 +24729,10 @@ module.exports = {
                   location: parsed.data.location ?? punchMeta.location ?? null,
                   note: note || null,
                   detection: outsideGeofence ? 'outside_geofence' : 'marker',
+                  // S2 outdoor-punch-photo design-lock (2026-07-10): photoFileId is written ONLY when a
+                  // verified photo was supplied, so a punch with requirePhoto=false and no photo produces
+                  // the pre-slice metadata.outdoorPunch shape byte-for-byte (no null-valued key added).
+                  ...(photoFileId ? { photoFileId } : {}),
                 },
                 approvalFlow: { id: flow.id, name: flow.name, steps: flow.steps, currentStep: 0 },
               },

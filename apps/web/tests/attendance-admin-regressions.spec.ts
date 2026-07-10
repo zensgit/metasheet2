@@ -4210,12 +4210,14 @@ describe('Attendance admin regressions', () => {
 
     const requireApproval = container!.querySelector<HTMLInputElement>('[data-outdoor="require-approval"]')
     const requireNote = container!.querySelector<HTMLInputElement>('[data-outdoor="require-note"]')
+    const requirePhoto = container!.querySelector<HTMLInputElement>('[data-outdoor="require-photo"]')
     const flow = container!.querySelector<HTMLSelectElement>('[data-outdoor="approval-flow"]')
-    expect(Boolean(requireApproval && requireNote && flow)).toBe(true)
+    expect(Boolean(requireApproval && requireNote && requirePhoto && flow)).toBe(true)
     // load: booleans → checkboxes; the saved flow id round-trips via the preserve-option even when it is not
     // in the active-flow list (so a previously-saved flow is never silently reset to '').
     expect(requireApproval!.checked).toBe(true)
     expect(requireNote!.checked).toBe(true)
+    expect(requirePhoto!.checked).toBe(false)
     expect(flow!.value).toBe('flow-out-7')
 
     const saveButton = container!.querySelector<HTMLButtonElement>('[data-outdoor="save"]')
@@ -4223,10 +4225,34 @@ describe('Attendance admin regressions', () => {
     saveButton!.click()
     await flushUi(6)
 
-    // EXACTLY { punchPolicy: { outdoor: { requireApproval, requireNote, approvalFlowId } } }: no requirePhoto,
+    // EXACTLY { punchPolicy: { outdoor: { requireApproval, requireNote, requirePhoto, approvalFlowId } } }:
     // no orgId, no sibling settings. toEqual (not toMatchObject) so any leak fails.
     expect(lastSettingsPutBody()).toEqual({
-      punchPolicy: { outdoor: { requireApproval: true, requireNote: true, approvalFlowId: 'flow-out-7' } },
+      punchPolicy: { outdoor: { requireApproval: true, requireNote: true, requirePhoto: false, approvalFlowId: 'flow-out-7' } },
+    })
+  })
+
+  it('toggling the outdoor require-photo checkbox sends requirePhoto: true in the save payload', async () => {
+    attendanceSettingsData = {
+      punchPolicy: { outdoor: { requireApproval: true, requireNote: false, requirePhoto: false, approvalFlowId: 'flow-out-7' } },
+    }
+    app = createApp(AttendanceView, { mode: 'admin' })
+    app.mount(container!)
+    await flushUi(16)
+
+    const requirePhoto = container!.querySelector<HTMLInputElement>('[data-outdoor="require-photo"]')
+    expect(requirePhoto).toBeTruthy()
+    expect(requirePhoto!.checked).toBe(false)
+    requirePhoto!.checked = true
+    requirePhoto!.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushUi(4)
+
+    const saveButton = container!.querySelector<HTMLButtonElement>('[data-outdoor="save"]')
+    saveButton!.click()
+    await flushUi(6)
+
+    expect(lastSettingsPutBody()).toEqual({
+      punchPolicy: { outdoor: { requireApproval: true, requireNote: false, requirePhoto: true, approvalFlowId: 'flow-out-7' } },
     })
   })
 
@@ -4298,7 +4324,7 @@ describe('Attendance admin regressions', () => {
     await flushUi(6)
 
     expect(lastSettingsPutBody()).toEqual({
-      punchPolicy: { outdoor: { requireApproval: true, requireNote: true, approvalFlowId: '' } },
+      punchPolicy: { outdoor: { requireApproval: true, requireNote: true, requirePhoto: false, approvalFlowId: '' } },
     })
   })
 
@@ -4317,7 +4343,7 @@ describe('Attendance admin regressions', () => {
     await flushUi(6)
 
     expect(lastSettingsPutBody()).toEqual({
-      punchPolicy: { outdoor: { requireApproval: false, requireNote: false, approvalFlowId: '' } },
+      punchPolicy: { outdoor: { requireApproval: false, requireNote: false, requirePhoto: false, approvalFlowId: '' } },
     })
   })
 
@@ -4345,7 +4371,7 @@ describe('Attendance admin regressions', () => {
     container!.querySelector<HTMLButtonElement>('[data-outdoor="save"]')!.click()
     await flushUi(6)
     expect(lastSettingsPutBody()).toEqual({
-      punchPolicy: { outdoor: { requireApproval: true, requireNote: false, approvalFlowId: 'flow-out-active' } },
+      punchPolicy: { outdoor: { requireApproval: true, requireNote: false, requirePhoto: false, approvalFlowId: 'flow-out-active' } },
     })
   })
 
