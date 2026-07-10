@@ -74,7 +74,6 @@ module.exports = {
         'src/views/approval/TemplateAuthoringView.vue',
         'src/views/approval/TemplateCenterView.vue',
         'src/views/approval/TemplateDetailView.vue',
-        'src/views/ApprovalInboxView.vue',
         'src/views/AutomationExecutionsView.vue',
         'src/views/WorkflowHubView.vue',
         'src/views/WorkflowDesigner.vue',

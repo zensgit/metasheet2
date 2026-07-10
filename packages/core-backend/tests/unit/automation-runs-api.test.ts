@@ -3,12 +3,13 @@
  * Surfaces the A1 execution snapshot through the C1 WorkflowJob vocabulary at the
  * READ boundary (toWorkflowJobView / toRunView); no storage change.
  */
-import { describe, it, expect, vi } from 'vitest'
+import { describe, it, expect, vi, beforeEach } from 'vitest'
 import express from 'express'
 import request from 'supertest'
 import { createAutomationRoutes } from '../../src/routes/automation'
 import { normalizeWorkflowJob } from '../../src/multitable/workflow-job-contract'
 import { requireAdminRole } from '../../src/guards/audit-integration'
+import { resolveExecutionNameMaps } from '../../src/multitable/automation-execution-names'
 
 // In prod the runs routes are gated by requireAdminRole() (platform-admin only).
 // Pass it through so the handler logic is testable — and separately assert the guard
@@ -17,6 +18,16 @@ import { requireAdminRole } from '../../src/guards/audit-integration'
 vi.mock('../../src/guards/audit-integration', () => ({
   requireAdminRole: vi.fn(() => (_req: unknown, _res: unknown, next: () => void) => next()),
 }))
+
+// B3-11 — the list route batches a rule/sheet name lookup via resolveExecutionNameMaps
+// (real `db` reads); mock the module so this stays a unit test (no real kysely instance)
+// while `executionDisplayNames` (the honest-fallback function) stays REAL/unmocked.
+vi.mock('../../src/multitable/automation-execution-names', async () => {
+  const actual = await vi.importActual<typeof import('../../src/multitable/automation-execution-names')>(
+    '../../src/multitable/automation-execution-names',
+  )
+  return { ...actual, resolveExecutionNameMaps: vi.fn() }
+})
 
 function buildApp(service: unknown) {
   const app = express()
@@ -67,6 +78,16 @@ function makeMockService(logsOverrides: Record<string, unknown> = {}, svcOverrid
   }
 }
 
+// B3-11 default: no names resolved (every existing test that doesn't care about
+// ruleName/sheetName gets the honest id-fallback, never an undefined-map throw).
+// mockReset (not just a fresh mockResolvedValue) also clears call history AND any
+// per-test override from the PREVIOUS test, so `toHaveBeenCalledTimes`/`-With`
+// assertions below see only the current test's call(s).
+beforeEach(() => {
+  vi.mocked(resolveExecutionNameMaps).mockReset()
+  vi.mocked(resolveExecutionNameMaps).mockResolvedValue({ ruleNames: new Map(), sheetNames: new Map() })
+})
+
 describe('A2 runs API — GET /automation-executions (list)', () => {
   it('returns { executions }; status emitted as C1 (success → resolved); snapshot omitted in list', async () => {
     const svc = makeMockService()
@@ -92,6 +113,52 @@ describe('A2 runs API — GET /automation-executions (list)', () => {
     expect(svc.logs.listExecutions).toHaveBeenCalledWith(
       expect.objectContaining({ sheetId: 'sheet-a', limit: 50 }),
     )
+  })
+
+  // B3-11 — additive ruleName/sheetName (batched, read-only): existing bare ruleId/sheetId
+  // are UNCHANGED; the new fields are purely additive.
+  it('B3-11: includes ruleName/sheetName resolved from the batched name lookup', async () => {
+    vi.mocked(resolveExecutionNameMaps).mockResolvedValue({
+      ruleNames: new Map([['rule-1', 'Notify Customers']]),
+      sheetNames: new Map([['sheet-a', 'Orders']]),
+    })
+    const svc = makeMockService()
+    const res = await request(buildApp(svc)).get('/api/multitable/automation-executions').expect(200)
+    const run = res.body.executions[0]
+    // pre-existing bare ids are untouched (backward compatible)
+    expect(run.ruleId).toBe('rule-1')
+    expect(run.sheetId).toBe('sheet-a')
+    // new additive fields
+    expect(run.ruleName).toBe('Notify Customers')
+    expect(run.sheetName).toBe('Orders')
+    // batched: called once with the FULL id arrays (never per-row / N+1)
+    expect(vi.mocked(resolveExecutionNameMaps)).toHaveBeenCalledTimes(1)
+    const [, ruleIdsArg, sheetIdsArg] = vi.mocked(resolveExecutionNameMaps).mock.calls[0]
+    expect(ruleIdsArg).toEqual(['rule-1'])
+    expect(sheetIdsArg).toEqual(['sheet-a'])
+  })
+
+  // Load-bearing honest-fallback: a rule/sheet that was DELETED (absent from the resolved
+  // maps — same observable shape as a real deleted row) must degrade to the raw id, and the
+  // list must still return 200 — never throw/500 because a name lookup came up empty.
+  it('B3-11: DEGRADES ruleName/sheetName to the raw id when the rule/sheet was deleted (honest fallback, no throw)', async () => {
+    vi.mocked(resolveExecutionNameMaps).mockResolvedValue({ ruleNames: new Map(), sheetNames: new Map() })
+    const svc = makeMockService()
+    const res = await request(buildApp(svc)).get('/api/multitable/automation-executions').expect(200)
+    const run = res.body.executions[0]
+    expect(run.ruleName).toBe('rule-1') // falls back to the raw ruleId
+    expect(run.sheetName).toBe('sheet-a') // falls back to the raw sheetId
+  })
+
+  // Same honest-fallback contract when the lookup itself THROWS (e.g. a transient DB error) —
+  // must not 500 the whole monitoring list; every row just falls back to its raw id.
+  it('B3-11: a name-lookup FAILURE never 500s the list — every row falls back to its raw id', async () => {
+    vi.mocked(resolveExecutionNameMaps).mockRejectedValue(new Error('automation_rules temporarily unavailable'))
+    const svc = makeMockService()
+    const res = await request(buildApp(svc)).get('/api/multitable/automation-executions').expect(200)
+    const run = res.body.executions[0]
+    expect(run.ruleName).toBe('rule-1')
+    expect(run.sheetName).toBe('sheet-a')
   })
 
   it('every step view passes the C1 normalizeWorkflowJob contract (error string-or-absent, never null)', async () => {

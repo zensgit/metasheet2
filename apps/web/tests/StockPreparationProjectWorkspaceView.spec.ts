@@ -94,8 +94,8 @@ describe('StockPreparationProjectWorkspaceView (readonly, values-free)', () => {
     vi.clearAllMocks()
   })
 
-  function mountView(): HTMLDivElement {
-    app = createApp(StockPreparationProjectWorkspaceView as Component)
+  function mountView(props: Record<string, unknown> = {}): HTMLDivElement {
+    app = createApp(StockPreparationProjectWorkspaceView as Component, props)
     app.mount(container!)
     return container!
   }
@@ -141,6 +141,26 @@ describe('StockPreparationProjectWorkspaceView (readonly, values-free)', () => {
     }
     // The GET was issued exactly once (readonly, no write retry loop).
     expect(h.getOverview).toHaveBeenCalledTimes(1)
+  })
+
+  it('emits select-project with the internal project handle when a row action is clicked', async () => {
+    h.getOverview.mockResolvedValue(overviewWithPlantedExtras())
+    const onSelectProject = vi.fn()
+    const root = mountView({ onSelectProject })
+    await flushUi()
+
+    const selectButtons = root.querySelectorAll('[data-testid="stock-prep-project-select"]')
+    expect(selectButtons.length).toBe(2)
+    ;(selectButtons[0] as HTMLButtonElement).click()
+    await flushUi()
+
+    // The internal MetaSheet handle is EMITTED (shared view1→view2 context), never rendered.
+    expect(onSelectProject).toHaveBeenCalledTimes(1)
+    expect(onSelectProject).toHaveBeenCalledWith('proj-alpha')
+    expect(root.textContent || '').not.toContain('proj-alpha')
+
+    ;(selectButtons[1] as HTMLButtonElement).click()
+    expect(onSelectProject).toHaveBeenCalledWith('proj-beta')
   })
 
   it('renders the empty state when no projects are synced yet', async () => {
