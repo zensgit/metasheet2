@@ -331,6 +331,13 @@ export function filesRouter(): Router {
       if (detail.record.state === 'active') {
         // F3 design-lock G3: serve the info response entirely from the DB row — no `getFileInfo(id)`
         // hit against the in-memory index (which the info route, like download, must not depend on).
+        // A row whose physical key can't be resolved to a servable object — a poisoned (`!f3-collision:`)
+        // row (owner guard D/G rule 2) or a traversal/unparseable url — is 404 here too, exactly like
+        // download: we must not leak its metadata when the object itself is unreachable/quarantined.
+        const resolved = resolveActiveStorageKey(detail)
+        if (!resolved) {
+          return res.status(404).json({ error: 'File not found' })
+        }
         // `path` is the storage key; `updatedAt` collapses to `created_at` because the `files` table has
         // no separate mtime column (behavior-change note in the PR body).
         res.json({
@@ -338,7 +345,7 @@ export function filesRouter(): Router {
           filename: metaString(detail.meta, 'filename') ?? null,
           size: metaNumber(detail.meta, 'size') ?? null,
           contentType: metaString(detail.meta, 'contentType') ?? null,
-          path: resolveActiveStorageKey(detail)?.key ?? null,
+          path: resolved.key,
           url: detail.url,
           metadata: detail.meta ?? {},
           createdAt: detail.createdAt,
