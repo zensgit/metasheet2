@@ -51,6 +51,9 @@ type InstanceRow = {
   last_synced_at: Date | null
   sync_status: string
   sync_error: string | null
+  // B3-03 (模板/时间筛选): optional so every pre-existing `baseInstance()` call keeps compiling
+  // unchanged; only tests that exercise the templateId filter set it.
+  template_id?: string | null
   created_at: Date
   updated_at: Date
 }
@@ -122,6 +125,9 @@ const routeState = vi.hoisted(() => {
     assignments: new Map<string, AssignmentRow>(),
     records: [] as ApprovalRecordRow[],
     recordId: 1,
+    // B3-02 (行级未读): `${userId} ${instanceId}` membership set standing in for an
+    // `approval_reads` row — presence means "read".
+    reads: new Set<string>(),
   }
 
   const now = () => new Date('2026-04-04T08:00:00.000Z')
@@ -172,6 +178,15 @@ const routeState = vi.hoisted(() => {
       const value = String(params[index++])
       rows = rows.filter((row) => row.status === value)
     }
+    // `completed`/`processed`'s own literal (non-parameterized) status conditions — no `$` bind
+    // param, so no `index` consumption; this is what actually distinguishes `processed` (ANY
+    // status) from `completed` (`status <> 'pending'` only) at the mock level.
+    if (sql.includes("status = 'pending'")) {
+      rows = rows.filter((row) => row.status === 'pending')
+    }
+    if (sql.includes("status <> 'pending'")) {
+      rows = rows.filter((row) => row.status !== 'pending')
+    }
     if (sql.includes('workflow_key = $')) {
       rows = rows.filter((row) => row.workflow_key === String(params[index++]))
     }
@@ -186,6 +201,27 @@ const routeState = vi.hoisted(() => {
           .map((row) => row.instance_id),
       )
       rows = rows.filter((row) => assignedInstanceIds.has(row.id))
+    }
+    // B3-03 (模板/时间筛选)
+    if (sql.includes('template_id = $')) {
+      const value = String(params[index++])
+      rows = rows.filter((row) => row.template_id === value)
+    }
+    if (sql.includes('created_at >= $')) {
+      const cutoff = new Date(String(params[index++])).getTime()
+      rows = rows.filter((row) => row.created_at.getTime() >= cutoff)
+    }
+    if (sql.includes('created_at <= $')) {
+      const cutoff = new Date(String(params[index++])).getTime()
+      rows = rows.filter((row) => row.created_at.getTime() <= cutoff)
+    }
+    // B3-01 (我已处理): reverse lookup on approval_records.actor_id, ANY status.
+    if (sql.includes('SELECT instance_id FROM approval_records WHERE actor_id = $')) {
+      const actorId = String(params[index++])
+      const actedInstanceIds = new Set(
+        state.records.filter((record) => record.actor_id === actorId).map((record) => record.instance_id),
+      )
+      rows = rows.filter((row) => actedInstanceIds.has(row.id))
     }
 
     return { rows, index }
@@ -235,9 +271,15 @@ const routeState = vi.hoisted(() => {
     }
 
     if (normalized.startsWith('SELECT * FROM approval_instances WHERE')) {
-      const { rows, index } = filterDynamicInstances(normalized, params)
-      const limit = Number(params[index])
-      const offset = Number(params[index + 1])
+      const { rows } = filterDynamicInstances(normalized, params)
+      // LIMIT/OFFSET's own `$N` placeholders are read directly off the SQL text rather than off
+      // `filterDynamicInstances`'s returned `index` — some tabs (e.g. `mine` / `processed`) push
+      // actorRoles/actorPermissions params that are never referenced by that tab's own condition
+      // text, so a naive "params consumed so far" counter under-counts and would slice against the
+      // wrong array positions once a tab stops referencing every pre-pushed param.
+      const limitOffsetMatch = normalized.match(/LIMIT \$(\d+) OFFSET \$(\d+)/)
+      const limit = limitOffsetMatch ? Number(params[Number(limitOffsetMatch[1]) - 1]) : rows.length
+      const offset = limitOffsetMatch ? Number(params[Number(limitOffsetMatch[2]) - 1]) : 0
       const sorted = rows.sort((left, right) => {
         const leftPrimary = (left.source_updated_at ?? left.updated_at).getTime()
         const rightPrimary = (right.source_updated_at ?? right.updated_at).getTime()
@@ -494,6 +536,19 @@ const routeState = vi.hoisted(() => {
       return { rows: [{ id: record.id }], rowCount: 1 }
     }
 
+    // B3-02 (行级未读): the pending-tab list issues a per-actor approval_reads lookup after the
+    // main query. Absence from `state.reads` means unread — mirrors the real LEFT JOIN ... IS NULL
+    // predicate for an actor who has not opened a given row.
+    if (normalized.startsWith('SELECT instance_id FROM approval_reads')) {
+      const userId = String(params[0])
+      const ids = new Set((params[1] as string[]) || [])
+      const rows = Array.from(state.reads)
+        .map((key) => key.split(' '))
+        .filter(([readUser, readInstance]) => readUser === userId && ids.has(readInstance))
+        .map(([, readInstance]) => ({ instance_id: readInstance }))
+      return { rows, rowCount: rows.length }
+    }
+
     throw new Error(`Unhandled SQL in approvals bridge test: ${normalized}`)
   })
 
@@ -510,6 +565,7 @@ const routeState = vi.hoisted(() => {
     state.assignments.clear()
     state.records = []
     state.recordId = 1
+    state.reads.clear()
     plmApprovals.splice(1)
     plmHistory.splice(1)
     plmApprovals[0].status = 'pending'
@@ -1113,5 +1169,192 @@ describe('approval bridge routes', () => {
 
     expect(response.body.total).toBe(1)
     expect(response.body.data[0].id).toBe('local-1')
+  })
+
+  // ---------------------------------------------------------------------------
+  // B3-01 (我已处理 5th tab): reverse lookup on approval_records.actor_id — every instance the
+  // actor recorded ANY action on, regardless of the instance's CURRENT status. This is deliberately
+  // NOT the same predicate as `completed` (which requires `status <> 'pending'`).
+  // ---------------------------------------------------------------------------
+  it('B3-01: tab=processed reverse-looks-up every instance the actor acted on, regardless of current status', async () => {
+    const now = new Date('2026-04-04T08:00:00.000Z')
+    // local-1 (default, pending, no approval_records row) stays OUT — the actor never acted on it.
+    routeState.state.instances.set('local-2', {
+      ...routeState.state.instances.get('local-1')!,
+      id: 'local-2',
+      status: 'approved',
+      title: 'Approved by the actor',
+    })
+    routeState.state.instances.set('local-3', {
+      ...routeState.state.instances.get('local-1')!,
+      id: 'local-3',
+      status: 'pending',
+      title: 'Still pending after the actor transferred it away',
+    })
+    routeState.state.instances.set('local-4', {
+      ...routeState.state.instances.get('local-1')!,
+      id: 'local-4',
+      status: 'approved',
+      title: 'Approved by someone else entirely',
+    })
+    routeState.state.records.push(
+      {
+        id: 1,
+        instance_id: 'local-2',
+        action: 'approve',
+        actor_id: 'test-user',
+        actor_name: 'Test User',
+        comment: null,
+        reason: null,
+        from_status: 'pending',
+        to_status: 'approved',
+        from_version: 0,
+        to_version: 1,
+        metadata: {},
+        occurred_at: now,
+        created_at: now,
+      },
+      {
+        id: 2,
+        instance_id: 'local-3',
+        action: 'transfer',
+        actor_id: 'test-user',
+        actor_name: 'Test User',
+        comment: null,
+        reason: null,
+        from_status: 'pending',
+        to_status: 'pending',
+        from_version: 0,
+        to_version: 1,
+        metadata: {},
+        occurred_at: now,
+        created_at: now,
+      },
+      {
+        id: 3,
+        instance_id: 'local-4',
+        action: 'approve',
+        actor_id: 'someone-else',
+        actor_name: 'Someone Else',
+        comment: null,
+        reason: null,
+        from_status: 'pending',
+        to_status: 'approved',
+        from_version: 0,
+        to_version: 1,
+        metadata: {},
+        occurred_at: now,
+        created_at: now,
+      },
+    )
+
+    const app = createApp(createPlmAdapterMock())
+    const response = await request(app).get('/api/approvals?tab=processed').expect(200)
+
+    expect(response.body.total).toBe(2)
+    expect(response.body.data.map((row: { id: string }) => row.id).sort()).toEqual(['local-2', 'local-3'])
+  })
+
+  // ---------------------------------------------------------------------------
+  // B3-02 (行级未读): isRead resolves ONLY on the pending tab, mirroring the pending-count badge's
+  // own unread predicate exactly — a row is unread iff the actor has no approval_reads row for it.
+  // ---------------------------------------------------------------------------
+  it('B3-02: pending tab resolves isRead per row from approval_reads; other tabs leave it unset', async () => {
+    const now = new Date('2026-04-04T08:00:00.000Z')
+    routeState.state.assignments.set('local-1:user:test-user:0', {
+      id: 'assign-read-1',
+      instance_id: 'local-1',
+      assignment_type: 'user',
+      assignee_id: 'test-user',
+      source_step: 0,
+      is_active: true,
+      metadata: {},
+      created_at: now,
+      updated_at: now,
+    })
+    routeState.state.instances.set('local-2', {
+      ...routeState.state.instances.get('local-1')!,
+      id: 'local-2',
+      title: 'Second pending row',
+    })
+    routeState.state.assignments.set('local-2:user:test-user:0', {
+      id: 'assign-read-2',
+      instance_id: 'local-2',
+      assignment_type: 'user',
+      assignee_id: 'test-user',
+      source_step: 0,
+      is_active: true,
+      metadata: {},
+      created_at: now,
+      updated_at: now,
+    })
+    // Only local-1 has an approval_reads row — local-2 stays unread.
+    routeState.state.reads.add('test-user local-1')
+
+    const app = createApp(createPlmAdapterMock())
+    const pendingResponse = await request(app).get('/api/approvals?tab=pending').expect(200)
+    const byId = new Map(pendingResponse.body.data.map((row: { id: string }) => [row.id, row]))
+    expect((byId.get('local-1') as { isRead?: boolean } | undefined)?.isRead).toBe(true)
+    expect((byId.get('local-2') as { isRead?: boolean } | undefined)?.isRead).toBe(false)
+
+    // Scoping: a non-pending tab never sets isRead — undefined (omitted key), never a guessed value.
+    const mineResponse = await request(app).get('/api/approvals?tab=mine').expect(200)
+    for (const row of mineResponse.body.data as Array<{ isRead?: boolean }>) {
+      expect(row.isRead).toBeUndefined()
+    }
+  })
+
+  // ---------------------------------------------------------------------------
+  // B3-03 (模板/时间筛选): templateId + createdFrom/createdTo — additive filters on GET /api/approvals.
+  // ---------------------------------------------------------------------------
+  it('B3-03: filters the list by templateId', async () => {
+    routeState.state.instances.set('local-2', {
+      ...routeState.state.instances.get('local-1')!,
+      id: 'local-2',
+      template_id: 'tpl-a',
+    })
+    routeState.state.instances.set('local-3', {
+      ...routeState.state.instances.get('local-1')!,
+      id: 'local-3',
+      template_id: 'tpl-b',
+    })
+
+    const app = createApp(createPlmAdapterMock())
+    const response = await request(app).get('/api/approvals?templateId=tpl-a').expect(200)
+
+    expect(response.body.total).toBe(1)
+    expect(response.body.data[0].id).toBe('local-2')
+  })
+
+  it('B3-03: filters the list by a createdFrom/createdTo window', async () => {
+    // Default local-1 created_at (2026-04-04T08:00:00.000Z) sits BEFORE the window below.
+    routeState.state.instances.set('local-2', {
+      ...routeState.state.instances.get('local-1')!,
+      id: 'local-2',
+      created_at: new Date('2026-06-01T00:00:00.000Z'),
+    })
+    routeState.state.instances.set('local-3', {
+      ...routeState.state.instances.get('local-1')!,
+      id: 'local-3',
+      created_at: new Date('2026-08-01T00:00:00.000Z'),
+    })
+
+    const app = createApp(createPlmAdapterMock())
+    const response = await request(app)
+      .get('/api/approvals?createdFrom=2026-05-01T00:00:00Z&createdTo=2026-06-30T23:59:59Z')
+      .expect(200)
+
+    expect(response.body.total).toBe(1)
+    expect(response.body.data[0].id).toBe('local-2')
+  })
+
+  it('B3-03: rejects a malformed createdFrom/createdTo with 400', async () => {
+    const app = createApp(createPlmAdapterMock())
+
+    const badFrom = await request(app).get('/api/approvals?createdFrom=not-a-date').expect(400)
+    expect(badFrom.body.error.code).toBe('APPROVAL_DATE_FILTER_INVALID')
+
+    const badTo = await request(app).get('/api/approvals?createdTo=also-not-a-date').expect(400)
+    expect(badTo.body.error.code).toBe('APPROVAL_DATE_FILTER_INVALID')
   })
 })
