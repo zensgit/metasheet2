@@ -71,6 +71,12 @@ jobs:
         run: |
           pnpm run verify:integration-k3wise:poc
 
+      - name: Run on-prem package apply and archive contract tests
+        run: |
+          node --test \
+            scripts/ops/onprem-windows-system-hardening.test.mjs \
+            scripts/ops/multitable-onprem-package-no-node-modules.test.mjs
+
   test:
     runs-on: ubuntu-latest
 
