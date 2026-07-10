@@ -91,8 +91,9 @@ vi.mock('../src/composables/useAuth', () => ({
     getAccessSnapshot: () => ({ userId: 'user_1', isAdmin: false, permissions: [] }),
   }),
 }))
+const { mockShowError, mockShowSuccess } = vi.hoisted(() => ({ mockShowError: vi.fn(), mockShowSuccess: vi.fn() }))
 vi.mock('../src/composables/useToast', () => ({
-  useToast: () => ({ showSuccess: vi.fn(), showError: vi.fn() }),
+  useToast: () => ({ showSuccess: mockShowSuccess, showError: mockShowError }),
 }))
 
 // Stub heavy sub-components that aren't under test — HistoryCenterModal (and its child
@@ -111,7 +112,17 @@ vi.mock('../src/multitable/components/MetaLinkPicker.vue', () => ({ default: stu
 vi.mock('../src/multitable/components/MetaFieldManager.vue', () => ({ default: stubComponent('MetaFieldManager') }))
 vi.mock('../src/multitable/components/MetaViewManager.vue', () => ({ default: stubComponent('MetaViewManager') }))
 vi.mock('../src/multitable/components/MetaImportModal.vue', () => ({ default: stubComponent('MetaImportModal') }))
-vi.mock('../src/multitable/components/MetaToast.vue', () => ({ default: stubComponent('MetaToast') }))
+// MetaToast must expose showError/showSuccess — the workbench's local showError() calls the TEMPLATE
+// REF's method (toastRef.value?.showError), not the useToast composable.
+vi.mock('../src/multitable/components/MetaToast.vue', () => ({
+  default: defineComponent({
+    name: 'MetaToast',
+    setup(_, { expose }) {
+      expose({ showError: mockShowError, showSuccess: mockShowSuccess })
+      return () => h('div', { 'data-stub-MetaToast': 'true' })
+    },
+  }),
+}))
 vi.mock('../src/multitable/components/MetaBasePicker.vue', () => ({ default: stubComponent('MetaBasePicker') }))
 
 vi.mock('../src/multitable/import/bulk-import', () => ({ bulkImportRecords: vi.fn() }))
@@ -179,6 +190,8 @@ function createWorkbenchMock() {
       updateFieldPermission: vi.fn().mockResolvedValue({}),
       listViewPermissions: vi.fn().mockResolvedValue({ items: [] }),
       updateViewPermission: vi.fn().mockResolvedValue({}),
+      getRecord: vi.fn().mockRejectedValue(new Error('not mocked')),
+      listCommentMentionSuggestions: vi.fn().mockResolvedValue({ items: [] }),
     },
   }
 }
@@ -263,6 +276,10 @@ describe('MultitableWorkbench -> HistoryCenterModal field-scope wiring', () => {
     }
     container = document.createElement('div')
     document.body.appendChild(container)
+    // The workbench mirrors the selected record into the URL hash (#recordId=…) and deep-link-
+    // bootstraps FROM it on mount — clear it so a prior test's selection can't auto-trigger
+    // resolveDeepLink in the next mount (jsdom shares one window across this file).
+    window.history.replaceState(null, '', window.location.pathname)
   })
 
   afterEach(() => {
@@ -306,5 +323,79 @@ describe('MultitableWorkbench -> HistoryCenterModal field-scope wiring', () => {
     await flushUi()
     const label = container!.querySelector('.meta-hist__diff-label')
     expect(label?.textContent).toContain('Title')
+  })
+
+  // ── PR-C: click-through from a batch-detail record chip to the record drawer ──
+  async function mountAndExpandBatch() {
+    const MultitableWorkbench = (await import('../src/multitable/views/MultitableWorkbench.vue')).default
+    app = createApp(defineComponent({
+      setup() { return () => h(MultitableWorkbench as Component) },
+    }))
+    app.mount(container!)
+    await flushUi()
+    container!.querySelector<HTMLButtonElement>('[data-action="open-history"]')!.click()
+    await flushUi()
+    container!.querySelector<HTMLButtonElement>('[data-test="hist-batch"]')!.click()
+    await flushUi()
+    const chip = container!.querySelector<HTMLButtonElement>('button[data-test="hist-rec-label"]')
+    expect(chip).toBeTruthy()
+    return chip!
+  }
+
+  it('PR-C hit: clicking a record chip closes the History Center and selects the loaded record (no fetch, no toast)', async () => {
+    gridMock.rows.value = [{ id: 'rec_1', version: 2, data: { fld_1: 'New' } }]
+    const chip = await mountAndExpandBatch()
+    chip.click()
+    await flushUi()
+    expect(container!.querySelector('[data-test="hist-filter-field"]')).toBeNull() // modal closed
+    expect(mockShowError).not.toHaveBeenCalled()
+    expect(workbenchMock.client.getRecord).not.toHaveBeenCalled() // in-page → no deep-link fetch
+    expect(workbenchMock.selectSheet).not.toHaveBeenCalled() // same sheet — no switch
+  })
+
+  it('PR-C off-page record: resolveDeepLink fetches it via getRecord (no toast on success)', async () => {
+    gridMock.rows.value = [] // rec_1 is NOT loaded → deep-link fetch path
+    workbenchMock.client.getRecord.mockResolvedValue({
+      record: { id: 'rec_1', version: 2, data: { fld_1: 'New' } },
+      linkSummaries: {}, personSummaries: {}, attachmentSummaries: {},
+      commentsScope: null, fieldPermissions: {}, viewPermissions: {}, rowActions: null,
+    })
+    const chip = await mountAndExpandBatch()
+    chip.click()
+    await flushUi()
+    expect(container!.querySelector('[data-test="hist-filter-field"]')).toBeNull()
+    expect(workbenchMock.client.getRecord).toHaveBeenCalledWith('rec_1', expect.anything())
+    expect(mockShowError).not.toHaveBeenCalled()
+  })
+
+  it('PR-C gone/denied record: getRecord failure surfaces the existing not-found toast', async () => {
+    gridMock.rows.value = []
+    workbenchMock.client.getRecord.mockRejectedValue(new Error('404'))
+    const chip = await mountAndExpandBatch()
+    chip.click()
+    await flushUi()
+    expect(mockShowError).toHaveBeenCalledTimes(1)
+    expect(String(mockShowError.mock.calls[0][0])).toContain('Record not found')
+  })
+
+  it('PR-C cross-sheet: switches the active sheet BEFORE locating (all-tables mode)', async () => {
+    mockGetHistoryBatch.mockResolvedValue({
+      batchId: 'batch_1', actorId: 'user_1', source: 'rest', createdAt: new Date().toISOString(),
+      visibleAffectedRecordCount: 1, visibleAffectedFieldCount: 1,
+      changes: [{
+        sheetId: 'sheet_2', recordId: 'rec_other', action: 'update', version: 1,
+        changedFieldIds: ['fld_1'], before: { fld_1: 'a' }, after: { fld_1: 'b' },
+      }],
+    } satisfies HistoryBatchDetail)
+    workbenchMock.client.getRecord.mockResolvedValue({
+      record: { id: 'rec_other', version: 1, data: { fld_1: 'b' } },
+      linkSummaries: {}, personSummaries: {}, attachmentSummaries: {},
+      commentsScope: null, fieldPermissions: {}, viewPermissions: {}, rowActions: null,
+    })
+    const chip = await mountAndExpandBatch()
+    chip.click()
+    await flushUi()
+    expect(workbenchMock.selectSheet).toHaveBeenCalledWith('sheet_2')
+    expect(mockShowError).not.toHaveBeenCalled()
   })
 })

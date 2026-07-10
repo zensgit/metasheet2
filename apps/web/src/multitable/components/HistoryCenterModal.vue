@@ -26,7 +26,7 @@
             <span class="meta-hist__when">{{ formatTime(pinnedDetail.createdAt) }}</span>
             <span class="meta-hist__counts" data-test="hist-pinned-counts">{{ countLabel(pinnedDetail) }}</span>
           </div>
-          <HistoryBatchChangesList :changes="pinnedDetail.changes" :fields="fields" :action-label="actionLabel" />
+          <HistoryBatchChangesList :changes="pinnedDetail.changes" :fields="fields" :link-summaries="linkSummaries" :person-summaries="personSummaries" :action-label="actionLabel" @open-record="emit('open-record', $event)" />
         </template>
       </div>
 
@@ -68,7 +68,7 @@
           <div v-if="expandedId === b.batchId" class="meta-hist__detail" data-test="hist-detail">
             <p v-if="detailLoading" class="meta-hist__hint">{{ t('加载中…', 'Loading…') }}</p>
             <p v-else-if="!detail" class="meta-hist__hint">{{ t('无法打开该批次', 'This batch is unavailable') }}</p>
-            <HistoryBatchChangesList v-else :changes="detail.changes" :fields="fields" :action-label="actionLabel" />
+            <HistoryBatchChangesList v-else :changes="detail.changes" :fields="fields" :link-summaries="linkSummaries" :person-summaries="personSummaries" :action-label="actionLabel" @open-record="emit('open-record', $event)" />
           </div>
         </li>
       </ul>
@@ -91,12 +91,18 @@ import { useLocale } from '../../composables/useLocale'
 import { useHistoryCenter } from '../composables/useHistoryCenter'
 import { historyActor } from '../utils/meta-record-labels'
 import HistoryBatchChangesList from './HistoryBatchChangesList.vue'
+import type { LinkedRecordSummary, PersonSummary } from '../types'
 
 const props = defineProps<{
   open: boolean
   baseId: string
   sheetId?: string
-  fields?: Array<{ id: string; name: string }>
+  /** `type`/`order`/`property` are optional extras consumed by HistoryBatchChangesList for record
+   *  titles + type-aware diff values; the modal itself only reads id/name (filter options). */
+  fields?: Array<{ id: string; name: string; type?: string; order?: number; property?: Record<string, unknown> }>
+  /** Best-effort grid display caches (recordId → fieldId → summaries), passed through to the change list. */
+  linkSummaries?: Record<string, Record<string, LinkedRecordSummary[]>>
+  personSummaries?: Record<string, Record<string, PersonSummary[]>>
   /**
    * W3-5/W3-5b: a commit toast's "view in history" deep-link sets this to the batch it just wrote. On open,
    * the modal loads the normal (unfiltered) list AND ALSO fetches this one batch's own detail via the SAME
@@ -109,7 +115,11 @@ const props = defineProps<{
    */
   initialBatchId?: string | null
 }>()
-const emit = defineEmits<{ (e: 'close'): void }>()
+const emit = defineEmits<{
+  (e: 'close'): void
+  /** PR-C: relayed verbatim from HistoryBatchChangesList — the workbench owns drawer/sheet concerns. */
+  (e: 'open-record', payload: { sheetId: string; recordId: string }): void
+}>()
 
 const { isZh } = useLocale()
 const t = (zh: string, en: string) => (isZh.value ? zh : en)
