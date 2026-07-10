@@ -11,7 +11,15 @@
     <li v-for="(c, i) in changes" :key="`${c.recordId}-${i}`" class="meta-hist__change" data-test="hist-change">
       <div class="meta-hist__change-summary">
         <span class="meta-hist__change-action" :data-action="c.action">{{ actionLabel(c.action) }}</span>
-        <span class="meta-hist__change-rec" :title="c.recordId" data-test="hist-rec-label">{{ recordDisplay(c) }}</span>
+        <button
+          v-if="c.action !== 'delete'"
+          type="button"
+          class="meta-hist__change-rec meta-hist__change-rec--link"
+          :title="c.recordId"
+          data-test="hist-rec-label"
+          @click="emit('open-record', { sheetId: c.sheetId, recordId: c.recordId })"
+        >{{ recordDisplay(c) }}</button>
+        <span v-else class="meta-hist__change-rec" :title="c.recordId" data-test="hist-rec-label">{{ recordDisplay(c) }}</span>
         <span class="meta-hist__change-fields">{{ fieldsLabel(c.changedFieldIds.length) }}</span>
       </div>
       <ul v-if="c.changedFieldIds.length" class="meta-hist__diff" data-test="hist-diff">
@@ -64,6 +72,11 @@ const props = defineProps<{
    *  on `sourceLabel` NOT applying here since this is a distinct map (per-change action, not source)). */
   actionLabel: (action: string) => string
 }>()
+
+// PR-C click-through: a non-delete change's record label is a button that asks the host to open the
+// record drawer (delete rows stay plain text — the record is gone). The list only EMITS; sheet
+// switching / drawer opening / not-found feedback are the workbench's concern.
+const emit = defineEmits<{ (e: 'open-record', payload: { sheetId: string; recordId: string }): void }>()
 
 const { isZh } = useLocale()
 
@@ -176,6 +189,8 @@ function diffMaskedLabel(): string {
 .meta-hist__change-summary { display: flex; gap: 10px; align-items: center; }
 .meta-hist__change-action { font-weight: 500; min-width: 48px; }
 .meta-hist__change-rec { color: var(--meta-text-secondary, #888); }
+.meta-hist__change-rec--link { background: none; border: none; padding: 0; font: inherit; cursor: pointer; text-decoration: underline dotted; }
+.meta-hist__change-rec--link:hover { color: var(--meta-text, #0f172a); }
 .meta-hist__change-fields { color: var(--meta-text-secondary, #888); }
 .meta-hist__diff { list-style: none; margin: 4px 0 0; padding: 0; }
 .meta-hist__diff-row { display: flex; align-items: baseline; gap: 8px; padding: 2px 0; }
