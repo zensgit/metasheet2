@@ -4,6 +4,10 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 // so `new DirectorySyncInProgressError(...)` here is the same constructor the
 // route's `instanceof` discriminates against in production.
 import { DirectorySyncInProgressError } from '../../src/directory/directory-sync'
+// NOT mocked below — these are the REAL multitable automation scheduler functions the
+// admin-directory routes reuse for schedule_cron save-time validation (roadmap §7.8). Importing them
+// directly here pins their actual acceptance semantics, independent of any route-level mock.
+import { cronHasNoMatchingDay, parseCronExpression } from '../../src/multitable/automation-scheduler'
 
 const rbacMocks = vi.hoisted(() => ({
   isRbacAdmin: vi.fn(),
@@ -468,6 +472,110 @@ describe('adminDirectoryRouter', () => {
     expect(response.statusCode).toBe(200)
     expect(directoryMocks.updateDirectoryIntegration).toHaveBeenCalledWith('dir-1', payload)
     expect(schedulerMocks.refreshDirectoryIntegrationSchedule).toHaveBeenCalledWith('dir-1')
+  })
+
+  // Roadmap §7.8 "Validate cron at save time". Before this, `scheduleCron` flowed straight into the DB with
+  // no validator anywhere on the create/update path; an invalid expression was only ever discovered later,
+  // silently, inside `directory-sync-scheduler.ts`'s catch-and-`logger.warn` around `scheduler.schedule()`.
+  describe('schedule_cron save-time validation (roadmap §7.8)', () => {
+    const basePayload = {
+      name: 'DingTalk CN',
+      corpId: 'dingcorp',
+      appKey: 'ding-app-key',
+      appSecret: 'secret',
+      syncEnabled: true,
+      memberGroupDefaultRoleIds: ['crm_user'],
+      memberGroupDefaultNamespaces: ['crm'],
+    }
+
+    it('rejects an invalid schedule_cron on create with 400 and never calls createDirectoryIntegration', async () => {
+      const response = await invokeRoute('post', '/integrations', {
+        body: { ...basePayload, scheduleCron: 'not a cron' },
+        user: { id: 'admin-1', role: 'admin' },
+      })
+
+      expect(response.statusCode).toBe(400)
+      expect(response.body).toMatchObject({
+        ok: false,
+        error: { code: 'DIRECTORY_SCHEDULE_CRON_INVALID' },
+      })
+      expect(directoryMocks.createDirectoryIntegration).not.toHaveBeenCalled()
+      expect(schedulerMocks.refreshDirectoryIntegrationSchedule).not.toHaveBeenCalled()
+    })
+
+    it('rejects a day-impossible schedule_cron on create (Feb 30th parses per-field but can never occur)', async () => {
+      const response = await invokeRoute('post', '/integrations', {
+        body: { ...basePayload, scheduleCron: '0 0 30 2 *' },
+        user: { id: 'admin-1', role: 'admin' },
+      })
+
+      expect(response.statusCode).toBe(400)
+      expect(response.body).toMatchObject({ error: { code: 'DIRECTORY_SCHEDULE_CRON_INVALID' } })
+      expect(directoryMocks.createDirectoryIntegration).not.toHaveBeenCalled()
+    })
+
+    it('rejects an invalid schedule_cron on update with 400 and never calls updateDirectoryIntegration', async () => {
+      const response = await invokeRoute('put', '/integrations/:integrationId', {
+        params: { integrationId: 'dir-1' },
+        body: { name: 'DingTalk CN', scheduleCron: '60 25 * * *' },
+        user: { id: 'admin-1', role: 'admin' },
+      })
+
+      expect(response.statusCode).toBe(400)
+      expect(response.body).toMatchObject({
+        ok: false,
+        error: { code: 'DIRECTORY_SCHEDULE_CRON_INVALID' },
+      })
+      expect(directoryMocks.updateDirectoryIntegration).not.toHaveBeenCalled()
+      expect(schedulerMocks.refreshDirectoryIntegrationSchedule).not.toHaveBeenCalled()
+    })
+
+    it('accepts a valid schedule_cron on create and passes it through unmodified', async () => {
+      directoryMocks.createDirectoryIntegration.mockResolvedValue({ id: 'dir-1', name: 'DingTalk CN' })
+
+      const payload = { ...basePayload, scheduleCron: '0 2 * * *' }
+      const response = await invokeRoute('post', '/integrations', {
+        body: payload,
+        user: { id: 'admin-1', role: 'admin' },
+      })
+
+      expect(response.statusCode).toBe(200)
+      expect(directoryMocks.createDirectoryIntegration).toHaveBeenCalledWith(payload)
+    })
+
+    it.each([
+      ['undefined (key omitted)', undefined],
+      ['null', null],
+      ['empty string', ''],
+      ['whitespace only', '   '],
+    ])('allows %s schedule_cron on create (= no schedule) without invoking the validator gate', async (_label, scheduleCron) => {
+      directoryMocks.createDirectoryIntegration.mockResolvedValue({ id: 'dir-1', name: 'DingTalk CN' })
+
+      const payload: Record<string, unknown> = { ...basePayload }
+      if (scheduleCron !== undefined) payload.scheduleCron = scheduleCron
+
+      const response = await invokeRoute('post', '/integrations', {
+        body: payload,
+        user: { id: 'admin-1', role: 'admin' },
+      })
+
+      expect(response.statusCode).toBe(200)
+      expect(directoryMocks.createDirectoryIntegration).toHaveBeenCalledWith(payload)
+    })
+
+    it('allows an empty schedule_cron on update (= clears the schedule)', async () => {
+      directoryMocks.updateDirectoryIntegration.mockResolvedValue({ id: 'dir-1', name: 'DingTalk CN' })
+
+      const payload = { name: 'DingTalk CN', scheduleCron: '' }
+      const response = await invokeRoute('put', '/integrations/:integrationId', {
+        params: { integrationId: 'dir-1' },
+        body: payload,
+        user: { id: 'admin-1', role: 'admin' },
+      })
+
+      expect(response.statusCode).toBe(200)
+      expect(directoryMocks.updateDirectoryIntegration).toHaveBeenCalledWith('dir-1', payload)
+    })
   })
 
   it('delegates sync to the directory service and returns its payload', async () => {
@@ -1664,5 +1772,49 @@ describe('adminDirectoryRouter', () => {
       resourceType: 'directory-sync-alert',
       resourceId: 'alert-1',
     }))
+  })
+})
+
+// Direct boundary-case pin for the multitable automation scheduler's cron grammar
+// (`packages/core-backend/src/multitable/automation-scheduler.ts`), which the admin-directory
+// create/update routes reuse (see `isDirectoryScheduleCronValid` in `../../src/routes/admin-directory`)
+// rather than adding a new cron-parsing dependency. `isValidPerRoute` below mirrors the route's own
+// combining logic exactly: `parseCronExpression(cron) && !cronHasNoMatchingDay(cron)`.
+describe('reused cron validator boundary semantics (multitable automation-scheduler)', () => {
+  function isValidPerRoute(cron: string): boolean {
+    return parseCronExpression(cron) !== null && !cronHasNoMatchingDay(cron)
+  }
+
+  it.each([
+    ['standard 5-field wildcard', '* * * * *', true],
+    ['every 5 minutes (step syntax)', '*/5 * * * *', true],
+    ['fixed daily time', '0 2 * * *', true],
+    ['comma list of minutes', '0,15,30,45 * * * *', true],
+    ['range with step', '0 9-17/2 * * *', true],
+    ['Sunday as 7 (cron convention)', '0 0 * * 7', true],
+    ['Feb 29th (leap day — reachable)', '0 0 29 2 *', true],
+    ['every Monday in February (DOM/DOW OR-semantics)', '0 0 30 2 1', true],
+    ['6-field with seconds is NOT accepted', '0 0 2 * * *', false],
+    ['4-field is NOT accepted', '0 2 * *', false],
+    ['nonsense text', 'not a cron', false],
+    ['out-of-range minute (60)', '60 2 * * *', false],
+    ['out-of-range hour (25)', '0 25 * * *', false],
+    ['out-of-range day-of-month (32)', '0 0 32 * *', false],
+    ['out-of-range month (13)', '0 0 1 13 *', false],
+    ['negative value', '-1 * * * *', false],
+    ['zero step', '*/0 * * * *', false],
+    ['Feb 30th (impossible calendar day)', '0 0 30 2 *', false],
+    ['empty string', '', false],
+    ['whitespace only', '   ', false],
+  ])('%s -> %s (%s)', (_label, cron, expected) => {
+    expect(isValidPerRoute(cron)).toBe(expected)
+  })
+
+  it('parseCronExpression alone does not catch the Feb 30th case (cronHasNoMatchingDay is load-bearing)', () => {
+    // Per-field bounds (day-of-month 1-31, month 1-12) are individually satisfied by "30 2" even
+    // though no February ever has a 30th — this is exactly why the route composes BOTH functions,
+    // not just parseCronExpression.
+    expect(parseCronExpression('0 0 30 2 *')).not.toBeNull()
+    expect(cronHasNoMatchingDay('0 0 30 2 *')).toBe(true)
   })
 })

@@ -38,6 +38,9 @@ import {
   saveApprovalCardPublicAppUrl,
 } from '../integrations/dingtalk/approval-card-config'
 import { refreshDirectoryIntegrationSchedule } from '../directory/directory-sync-scheduler'
+// Roadmap §7.8 "Validate cron at save time" reuses the multitable automation scheduler's cron grammar
+// instead of adding a new cron-parsing dependency — see `isDirectoryScheduleCronValid` below.
+import { cronHasNoMatchingDay, parseCronExpression } from '../multitable/automation-scheduler'
 import { isAdmin as isRbacAdmin } from '../rbac/service'
 import { jsonError, jsonOk, parsePagination } from '../util/response'
 
@@ -69,6 +72,46 @@ function readErrorMessage(error: unknown, fallback: string): string {
   if (error instanceof Error && error.message.trim().length > 0) return error.message
   return fallback
 }
+
+// Mirrors `directory-sync.ts`'s private `normalizeText` so the save-time gate below sees exactly the same
+// "is this actually empty" verdict the persistence layer will compute from the same field (empty/null/
+// undefined/non-string junk all normalize to '' = "no schedule", which stays allowed).
+function normalizeScheduleCronInput(value: unknown): string {
+  return typeof value === 'string' ? value.trim() : String(value ?? '').trim()
+}
+
+/**
+ * Roadmap §7.8 "Validate cron at save time": `schedule_cron` used to flow straight from the request body
+ * into `directory_integrations.schedule_cron` with no validator anywhere on this path. An invalid or
+ * unschedulable expression was silently accepted by the DB write, then silently swallowed again later —
+ * `directory-sync-scheduler.ts`'s `applySchedule` calls `scheduler.schedule()`/`reschedule()`, which throws
+ * on a bad expression; the catch block just does `logger.warn(...)` and leaves the job unscheduled. The
+ * admin believes they scheduled a sync and nothing ever runs, with no error surfaced anywhere.
+ *
+ * This reuses the multitable automation scheduler's cron grammar (`packages/core-backend/src/multitable/
+ * automation-scheduler.ts`) rather than adding a new cron-parsing dependency: `parseCronExpression` enforces
+ * the standard 5-field `minute hour dayOfMonth month dayOfWeek` grammar (the same field shape the directory
+ * scheduler's own parser — `SimpleCronExpression` in `services/SchedulerService.ts` — expects), and
+ * `cronHasNoMatchingDay` additionally rejects an expression that parses cleanly but can never land on a real
+ * calendar day (e.g. `0 0 30 2 *`, February 30th) so a "syntactically fine" cron doesn't sit silently
+ * unscheduled forever either.
+ *
+ * TIMEZONE: the directory sync scheduler always runs `schedule_cron` in UTC — `directory-sync-scheduler.ts`
+ * hardcodes `timezone: 'UTC'` at `applySchedule`. There is no per-integration timezone yet (roadmap §7.8
+ * "Add timezone support" is a separate, not-yet-built follow-up); a `schedule_cron` saved here is UTC
+ * wall-clock time, not the admin's local timezone.
+ */
+function isDirectoryScheduleCronValid(cron: string): boolean {
+  const parsed = parseCronExpression(cron)
+  if (!parsed) return false
+  return !cronHasNoMatchingDay(cron)
+}
+
+const DIRECTORY_SCHEDULE_CRON_ERROR_MESSAGE =
+  'scheduleCron is not a valid schedule. Expected a standard 5-field cron expression ' +
+  '(minute hour dayOfMonth month dayOfWeek — e.g. "0 2 * * *"); the expression must also resolve to at ' +
+  'least one real calendar day. DingTalk directory sync always runs on UTC wall-clock time — ' +
+  'per-integration timezones are not supported yet. Leave scheduleCron empty to disable the scheduled sync.'
 
 function getRequestUserId(req: Request): string {
   const raw = req.user as Record<string, unknown> | undefined
@@ -172,6 +215,12 @@ export function adminDirectoryRouter(): Router {
     const adminUserId = await ensurePlatformAdmin(req, res)
     if (!adminUserId) return
 
+    const scheduleCronInput = normalizeScheduleCronInput((req.body as Record<string, unknown> | undefined)?.scheduleCron)
+    if (scheduleCronInput && !isDirectoryScheduleCronValid(scheduleCronInput)) {
+      jsonError(res, 400, 'DIRECTORY_SCHEDULE_CRON_INVALID', DIRECTORY_SCHEDULE_CRON_ERROR_MESSAGE)
+      return
+    }
+
     try {
       const integration = await createDirectoryIntegration(req.body as Record<string, unknown> as never)
       await refreshDirectoryIntegrationSchedule(integration.id)
@@ -184,6 +233,12 @@ export function adminDirectoryRouter(): Router {
   router.put('/integrations/:integrationId', async (req: Request, res: Response) => {
     const adminUserId = await ensurePlatformAdmin(req, res)
     if (!adminUserId) return
+
+    const scheduleCronInput = normalizeScheduleCronInput((req.body as Record<string, unknown> | undefined)?.scheduleCron)
+    if (scheduleCronInput && !isDirectoryScheduleCronValid(scheduleCronInput)) {
+      jsonError(res, 400, 'DIRECTORY_SCHEDULE_CRON_INVALID', DIRECTORY_SCHEDULE_CRON_ERROR_MESSAGE)
+      return
+    }
 
     try {
       const integration = await updateDirectoryIntegration(req.params.integrationId, req.body as Record<string, unknown> as never)
