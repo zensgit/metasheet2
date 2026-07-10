@@ -12,6 +12,7 @@ import type {
   ApprovalTemplateListItemDTO,
   ApprovalTemplateVisibilityScope,
   ApprovalTemplateVersionDetailDTO,
+  ApprovalTemplateVersionSummaryDTO,
   ApprovalTemplateUsageDTO,
   ApprovalGraph,
   ApprovalMode,
@@ -160,6 +161,11 @@ type TemplateVersionRow = {
   status: 'draft' | 'published' | 'archived'
   form_schema: Record<string, unknown>
   approval_graph: Record<string, unknown>
+  /**
+   * B3-09 — optional free-text note captured at publish time. `null` for a still-draft version, a
+   * published-without-a-note version, or any version predating the column.
+   */
+  publish_note?: string | null
   created_at: Date
   updated_at: Date
 }
@@ -1671,6 +1677,7 @@ function toApprovalTemplateVersionDetailDTO(bundle: TemplateBundle): ApprovalTem
     approvalGraph: asApprovalGraph(bundle.version.approval_graph),
     runtimeGraph: bundle.publishedDefinition ? asRuntimeGraph(bundle.publishedDefinition.runtime_graph) : null,
     publishedDefinitionId: bundle.publishedDefinition?.id || null,
+    publishNote: bundle.version.publish_note ?? null,
     createdAt: bundle.version.created_at.toISOString(),
     updatedAt: bundle.version.updated_at.toISOString(),
   }
@@ -1770,6 +1777,29 @@ const APPROVAL_TEMPLATE_CATEGORY_MAX_LENGTH = 64
 const APPROVAL_TEMPLATE_VISIBILITY_ID_MAX_LENGTH = 128
 const APPROVAL_TEMPLATE_VISIBILITY_ID_MAX_COUNT = 100
 const APPROVAL_TEMPLATE_VISIBILITY_TYPES = new Set(['all', 'dept', 'role', 'user'])
+const APPROVAL_TEMPLATE_PUBLISH_NOTE_MAX_LENGTH = 2000
+
+/**
+ * B3-09 — publish-note normalization. Unlike category (which distinguishes "leave unchanged"
+ * `undefined` from "clear" `null`), a publish note has no prior value to preserve: every publish
+ * call is a fresh action, so `undefined` and `null` both mean "no note" and normalize to `null`.
+ */
+function normalizeTemplatePublishNote(value: unknown): string | null {
+  if (value === undefined || value === null) return null
+  if (typeof value !== 'string') {
+    throw new ServiceError('note must be a string', 400, 'VALIDATION_ERROR')
+  }
+  const trimmed = value.trim()
+  if (trimmed.length === 0) return null
+  if (trimmed.length > APPROVAL_TEMPLATE_PUBLISH_NOTE_MAX_LENGTH) {
+    throw new ServiceError(
+      `note must be at most ${APPROVAL_TEMPLATE_PUBLISH_NOTE_MAX_LENGTH} characters`,
+      400,
+      'VALIDATION_ERROR',
+    )
+  }
+  return trimmed
+}
 
 function normalizeTemplateCategory(value: unknown): string | null | undefined {
   if (value === undefined) return undefined
@@ -2774,6 +2804,44 @@ export class ApprovalProductService {
     return bundle ? toApprovalTemplateVersionDetailDTO(bundle) : null
   }
 
+  /**
+   * B3-09 (模板版本历史): every version of a template, newest first, with its publish note and
+   * (if it was ever published) the active published_definition id. Full formSchema/approvalGraph
+   * are intentionally omitted — callers fetch those on demand via getTemplateVersion.
+   */
+  async listTemplateVersions(templateId: string): Promise<ApprovalTemplateVersionSummaryDTO[]> {
+    if (!pool) throw new Error('Database not available')
+
+    const templateResult = await pool.query<{ id: string }>(
+      `SELECT id FROM approval_templates WHERE id = $1`,
+      [templateId],
+    )
+    if (!templateResult.rows[0]) {
+      throw new ServiceError('Approval template not found', 404, 'APPROVAL_TEMPLATE_NOT_FOUND')
+    }
+
+    const versionsResult = await pool.query<TemplateVersionRow & { published_definition_id: string | null }>(
+      `SELECT v.*, pd.id AS published_definition_id
+       FROM approval_template_versions v
+       LEFT JOIN approval_published_definitions pd
+         ON pd.template_version_id = v.id AND pd.is_active = TRUE
+       WHERE v.template_id = $1
+       ORDER BY v.version DESC`,
+      [templateId],
+    )
+
+    return versionsResult.rows.map((row) => ({
+      id: row.id,
+      templateId: row.template_id,
+      version: row.version,
+      status: row.status,
+      publishNote: row.publish_note ?? null,
+      publishedDefinitionId: row.published_definition_id ?? null,
+      createdAt: row.created_at.toISOString(),
+      updatedAt: row.updated_at.toISOString(),
+    }))
+  }
+
   async createTemplate(request: CreateApprovalTemplateRequest): Promise<ApprovalTemplateDetailDTO> {
     if (!pool) throw new Error('Database not available')
 
@@ -2997,6 +3065,9 @@ export class ApprovalProductService {
     if (!pool) throw new Error('Database not available')
 
     const policy = assertRuntimePolicy(request.policy)
+    // B3-09 — normalized BEFORE the transaction opens (fail fast on an over-length note without
+    // ever touching the DB), same ordering discipline as the policy/graph validators below.
+    const publishNote = normalizeTemplatePublishNote(request.note)
     let client: ApprovalDbClient | null = null
     try {
       client = await pool.connect()
@@ -3058,10 +3129,10 @@ export class ApprovalProductService {
 
       const updatedVersionResult = await client.query<TemplateVersionRow>(
         `UPDATE approval_template_versions
-         SET status = 'published', updated_at = now()
+         SET status = 'published', publish_note = $2, updated_at = now()
          WHERE id = $1
          RETURNING *`,
-        [version.id],
+        [version.id, publishNote],
       )
       const updatedVersion = updatedVersionResult.rows[0]
 

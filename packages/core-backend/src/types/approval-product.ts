@@ -537,6 +537,14 @@ export interface UpdateApprovalTemplateRequest {
 
 export interface PublishApprovalTemplateRequest {
   policy: RuntimePolicy
+  /**
+   * B3-09 (模板治理 — 发布说明): optional free-text note captured on THIS publish action and
+   * persisted on the version being published (`approval_template_versions.publish_note`). `null`/
+   * undefined/whitespace-only clears/omits it — a publish never requires a note. Older,
+   * already-published versions predate the column and surface `publishNote: null` (backward
+   * compatible).
+   */
+  note?: string | null
 }
 
 export interface ApprovalTemplateVersionDetailDTO {
@@ -547,6 +555,25 @@ export interface ApprovalTemplateVersionDetailDTO {
   formSchema: FormSchema
   approvalGraph: ApprovalGraph
   runtimeGraph: RuntimeGraph | null
+  publishedDefinitionId: string | null
+  /** B3-09 — see PublishApprovalTemplateRequest.note. */
+  publishNote: string | null
+  createdAt: string
+  updatedAt: string
+}
+
+/**
+ * B3-09 (模板版本历史) — a lightweight per-version row for the history list. Deliberately omits
+ * `formSchema` / `approvalGraph` (a template can accumulate many versions; the full graph/schema
+ * for one historical version is only fetched on demand via the existing
+ * `GET /:id/versions/:versionId` detail endpoint).
+ */
+export interface ApprovalTemplateVersionSummaryDTO {
+  id: string
+  templateId: string
+  version: number
+  status: ApprovalTemplateStatus
+  publishNote: string | null
   publishedDefinitionId: string | null
   createdAt: string
   updatedAt: string
