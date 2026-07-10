@@ -7,6 +7,7 @@ import {
   DINGTALK_INTERACTIVE_CARD_TEMPLATE_ID_ENV,
   DingTalkInteractiveCardStreamWorker,
   resolveDingTalkInteractiveCardStreamConfig,
+  unwiredDingTalkInteractiveCardStreamClientFactory,
   type DingTalkInteractiveCardCallbackExecutor,
   type DingTalkInteractiveCardStreamClient,
   type DingTalkInteractiveCardStreamClientFactory,
@@ -133,9 +134,15 @@ describe('DingTalk interactive-card Stream worker (B-1)', () => {
       expect(client.close).toHaveBeenCalledTimes(1)
     })
 
-    it('classifies the default unwired SDK seam separately from real client failures', async () => {
+    it('classifies the unwired SDK seam separately from real client failures', async () => {
+      // The default factory is now the real `dingtalk-stream` adapter (covered in
+      // dingtalk-interactive-card-stream-default-factory.test.ts); the explicit unwired seam
+      // keeps the honest `sdk_unwired` classification for SDK-less builds.
       const log = logger()
-      const worker = new DingTalkInteractiveCardStreamWorker({ logger: log })
+      const worker = new DingTalkInteractiveCardStreamWorker({
+        logger: log,
+        clientFactory: unwiredDingTalkInteractiveCardStreamClientFactory,
+      })
 
       await expect(worker.initialize(env({
         [DINGTALK_INTERACTIVE_CARD_STREAM_ENABLED_ENV]: '1',
