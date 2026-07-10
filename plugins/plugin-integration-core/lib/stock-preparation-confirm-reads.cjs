@@ -29,7 +29,7 @@ const {
   RULE_OUTCOMES,
   HELD_REASONS,
 } = require('./stock-preparation-unit-rule-match.cjs')
-const { MATCH_STATUSES, VERSION_POLICIES: MATCH_VERSION_POLICIES } = require('./stock-preparation-material-match.cjs')
+const { MATCH_STATUSES, MATCH_METHODS, VERSION_POLICIES: MATCH_VERSION_POLICIES } = require('./stock-preparation-material-match.cjs')
 const { VERSION_POLICIES } = require('./stock-preparation-mvp-generation.cjs')
 const { optionalString, isPlainObject } = require('./stock-preparation-common.cjs')
 
@@ -41,6 +41,9 @@ const MAX_LIST_ROWS = 2000
 // Enum vocabularies for the zero-filled count maps (FE renders fixed whitelists — every known key is
 // always present, junk stored values fold into `unknown` and the junk string itself never crosses).
 const MATCH_STATUS_VALUES = Object.freeze(Object.values(MATCH_STATUSES))
+// matchMethod vocabulary = engine methods + the confirm-writes manual marker (same fold-to-unknown
+// discipline as matchStatus/versionPolicy — a junk stored string never crosses the wire).
+const MATCH_METHOD_VALUES = Object.freeze([...Object.values(MATCH_METHODS), 'manual_confirm'])
 const VERSION_POLICY_VALUES = Object.freeze([...new Set([...Object.values(VERSION_POLICIES), ...Object.values(MATCH_VERSION_POLICIES)])])
 const SCOPE_TYPE_VALUES = Object.freeze(['material', 'category', 'generic'])
 const ROUNDING_RULE_VALUES = Object.freeze(['none', 'ceil', 'floor', 'nearest', 'pack_size'])
@@ -305,7 +308,7 @@ async function listMaterialMappingCandidates({ recordsApi, provisioning, targetP
   const projected = rows.map((data) => ({
     mappingId: optionalString(data.mappingId),
     matchStatus: MATCH_STATUS_VALUES.includes(optionalString(data.matchStatus)) ? optionalString(data.matchStatus) : 'unknown',
-    matchMethod: optionalString(data.matchMethod) || undefined,
+    matchMethod: MATCH_METHOD_VALUES.includes(optionalString(data.matchMethod)) ? optionalString(data.matchMethod) : (optionalString(data.matchMethod) ? 'unknown' : undefined),
     versionPolicy: VERSION_POLICY_VALUES.includes(optionalString(data.versionPolicy)) ? optionalString(data.versionPolicy) : 'unknown',
     confidence: toNumber(data.confidence),
     isActive: data.isActive !== false,

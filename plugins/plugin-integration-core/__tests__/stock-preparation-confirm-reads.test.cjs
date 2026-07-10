@@ -213,8 +213,11 @@ async function main() {
     api.seed(SHEET.mapping, { mappingId: 'c1', plmDrawingNo: `D_${SECRET}`, plmMaterialName: `N_${SECRET}`, plmSpec: `S_${SECRET}`, plmVersion: 'V1', erpMaterialCode: `E_${SECRET}`, erpMaterialInternalId: 'I1', matchStatus: 'pending_confirm', matchMethod: 'exact_code_candidate', versionPolicy: 'drawing_and_version', confidence: 0.95, isActive: true })
     api.seed(SHEET.mapping, { mappingId: 'c2', plmDrawingNo: 'D2', matchStatus: 'not_found', matchMethod: 'none', versionPolicy: 'drawing_only', confidence: 0, isActive: true })
     api.seed(SHEET.mapping, { mappingId: 'c3', plmDrawingNo: 'D3', matchStatus: 'matched', matchMethod: 'manual_confirm', versionPolicy: 'manual', confidence: 1, isActive: true, erpMaterialCode: 'E3', erpMaterialInternalId: 'I3', confirmedBy: OPERATOR, confirmedAt: 'x' })
+    api.seed(SHEET.mapping, { mappingId: 'c4', plmDrawingNo: 'D4', matchStatus: 'pending_confirm', matchMethod: `junk_${SECRET}`, versionPolicy: 'drawing_only', confidence: 0.5, isActive: true })
     const result = await listMaterialMappingCandidates(baseInput(api, makeProvisioning()))
-    assert.equal(result.rowCount, 3)
+    assert.equal(result.rowCount, 4)
+    assert.equal(result.rows.find((row) => row.mappingId === 'c4').matchMethod, 'unknown', 'junk matchMethod folds — the junk string never crosses')
+    assert.equal(result.rows.find((row) => row.mappingId === 'c3').matchMethod, 'manual_confirm')
     const first = result.rows.find((row) => row.mappingId === 'c1')
     assert.deepEqual(
       Object.keys(first).sort(),
@@ -251,6 +254,9 @@ async function main() {
     api.seed(SHEET.rule, { conversionRuleId: 'r1', plmUnit: `u_${SECRET}`, erpIssueUnit: 'g', conversionFactor: 1000, scopeType: 'generic', roundingRule: 'none', requiresConfirmation: true, isActive: true, confirmedBy: OPERATOR, confirmedAt: 'x' })
     api.seed(SHEET.rule, { conversionRuleId: 'r2', plmUnit: 'm', erpIssueUnit: 'mm', conversionFactor: 1000, scopeType: 'material', scopeKey: 'I1', roundingRule: 'ceil', requiresConfirmation: true, isActive: true })
     api.seed(SHEET.rule, { conversionRuleId: 'r3', plmUnit: 'kg', erpIssueUnit: 't', conversionFactor: 0.001, scopeType: 'category', roundingRule: 'none', requiresConfirmation: false, isActive: false })
+    // P2-C1 (review): a SECOND unstamped requires-confirmation row makes the count asymmetric (2 vs
+    // stamped 1) so inverting the !isStamped condition can no longer produce the same number.
+    api.seed(SHEET.rule, { conversionRuleId: 'r4', plmUnit: 'cm', erpIssueUnit: 'mm', conversionFactor: 10, scopeType: 'generic', roundingRule: 'none', requiresConfirmation: true, isActive: true })
     // complete batch whose single line has NO mapping => held missing_mapping (EXCLUDED from pending)
     seedCompleteBatch(api)
     const result = await getUnitConversionSummary(baseInput(api, makeProvisioning(), { projectId: BUSINESS_PROJECT_ID }))
@@ -259,9 +265,9 @@ async function main() {
       ['activeRuleCount', 'pendingUnitLineCount', 'requiresConfirmationCount', 'roundingRuleCounts', 'scopeTypeCounts', 'totalRuleCount'],
       'FE-pinned exact top-level key set',
     )
-    assert.equal(result.totalRuleCount, 3)
-    assert.equal(result.activeRuleCount, 2)
-    assert.equal(result.requiresConfirmationCount, 1, 'only the active UNSTAMPED requires-confirmation row')
+    assert.equal(result.totalRuleCount, 4)
+    assert.equal(result.activeRuleCount, 3)
+    assert.equal(result.requiresConfirmationCount, 2, 'exactly the active UNSTAMPED requires-confirmation rows (stamped r1 excluded)')
     for (const key of ['material', 'category', 'generic']) assert.ok(key in result.scopeTypeCounts)
     for (const key of ['none', 'ceil', 'floor', 'nearest', 'pack_size']) assert.ok(key in result.roundingRuleCounts)
     assert.equal(result.pendingUnitLineCount, 0, 'mapping-side held (missing_mapping) is view-3 work, not a pending unit line')
@@ -323,6 +329,16 @@ async function main() {
     const emptyApi = makeReadOnlyRecordsApi()
     await expectError(
       listUnitConversionCandidates(baseInput(emptyApi, makeProvisioning(), { projectId: BUSINESS_PROJECT_ID })),
+      { status: 404, code: 'CONFIRM_READS_BATCH_NOT_FOUND' },
+    )
+    // P2-C2 (review): an EXISTING complete batch that belongs to ANOTHER project must 404 through the
+    // explicit-id path — deleting the project-ownership guard now has a failing negative.
+    seedCompleteBatch(api, {
+      snapshotBatchId: 'other_proj_batch', projectId: 'proj_other',
+      lines: [{ snapshotLineId: 'op1', snapshotBatchId: 'other_proj_batch', projectId: 'proj_other', childDrawingNo: 'X', childVersion: 'V1', designUnit: 'pcs', designQty: 1 }],
+    })
+    await expectError(
+      listUnitConversionCandidates(baseInput(api, makeProvisioning(), { projectId: BUSINESS_PROJECT_ID, snapshotBatchId: 'other_proj_batch' })),
       { status: 404, code: 'CONFIRM_READS_BATCH_NOT_FOUND' },
     )
   })
