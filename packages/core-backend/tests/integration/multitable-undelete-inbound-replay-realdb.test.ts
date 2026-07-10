@@ -344,7 +344,7 @@ describeIfDatabase('4c-3 — record-undelete inbound-edge replay (real DB, RB ma
     expect(await edgeCount(F, N, R)).toBe(0)
   })
 
-  test('RB15 diag/INSERT drift tripwire: a concurrent neighbour-side write between the two statements folds into alreadyPresent — no over-insert, replayed always matches the DB (counts are advisory, not exact)', async () => {
+  test('RB15 diag/INSERT drift tripwire: a concurrent neighbour-side write between the two statements folds into alreadyPresent — no over-insert, replayed always matches the DB, and total keeps its replayed+sum(skipped) contract (only the skip LABEL is advisory)', async () => {
     const { F, R, N } = await fixture('rb15')
     expect((await httpDelete(R)).status).toBe(200)
     const trashRow = (await q('SELECT delete_revision_id FROM meta_records_trash WHERE record_id = $1', [R])).rows[0] as { delete_revision_id: string }
@@ -374,14 +374,20 @@ describeIfDatabase('4c-3 — record-undelete inbound-edge replay (real DB, RB ma
     // over-insert of stale-consent data.
     expect(result.replayed).toBe(0)
     expect(await edgeCount(F, N, R)).toBe(0)
-    // CURRENT (imprecise, pinned as-is — not redesigned): the diagnostic classified this row
+    // LABEL (imprecise, pinned as-is — not redesigned): the diagnostic classified this row
     // 'replayable' a moment before the race; the mismatch against the write's actual (0) count folds
-    // into `alreadyPresent`, not the row's true reason (`neighborDeclined`). `total` is computed BEFORE
-    // this fold and is not recomputed after — so it stays 0 here, undercounting the 1 real tombstone
-    // row for this anchor. Both are advisory diagnostics in this narrow race window, not a data-loss bug.
+    // into `alreadyPresent`, not the row's true reason (`neighborDeclined`). The label is advisory in
+    // this narrow race window — not a data-loss bug.
     expect(result.skipped.alreadyPresent).toBe(1)
     expect(result.skipped.neighborDeclined).toBe(0)
-    expect(result.total).toBe(0)
+    // CONTRACT (owner P2, R9 fix-forward): total === replayed + sum(skipped) must hold EVEN in the
+    // drift window — total is computed after the fold, so the 1 real tombstone row is counted (the
+    // pre-fold implementation returned 0 here, breaking the interface promise and the downstream
+    // `recoverable: replay.total > 0` derivation in record-service.ts).
+    expect(result.total).toBe(1)
+    expect(result.total).toBe(
+      result.replayed + Object.values(result.skipped).reduce((a: number, b: number) => a + b, 0),
+    )
   })
 
   test('RB16 duplicate tombstone triples under one anchor: NOT EXISTS cannot see the sibling row the SAME statement is about to add — a pre-existing duplicate edge replays as a faithful double, not a dedup', async () => {

@@ -150,7 +150,6 @@ export async function replayInboundLinks(
   )
 
   const replayed = ins.rowCount ?? 0
-  const total = replayed + Object.values(skipped).reduce((a, b) => a + b, 0)
   // Diagnostic/INSERT drift tripwire — HONEST SEMANTICS, not a correctness net (do not extend this to
   // "fix" the count; it is deliberately a same-day characterization, see NIT-1 in the absorption audit):
   // the diagnostic query above and the write below are two SEPARATE statements, each its own READ
@@ -165,13 +164,18 @@ export async function replayInboundLinks(
   // statements" bucket — it is a best-effort label, not necessarily the row's real disqualifying
   // precondition. This can never cause a wrong WRITE (the write's own predicates are re-checked in that
   // same statement against the then-current data, so it can never insert a row a live precondition
-  // disqualifies, and the NOT EXISTS guard still prevents any duplicate) — it only means the returned
-  // `skipped` breakdown, and `total` (already computed above from the pre-fold skip counts, and not
-  // recomputed after this adjustment), are advisory diagnostics in this narrow race window, not an
-  // exact ledger of every tombstone row's fate.
+  // disqualifies, and the NOT EXISTS guard rejects any duplicate already visible in that statement's
+  // snapshot — rows the SAME statement is inserting are invisible to it, so a pre-existing duplicate
+  // tombstone pair replays as a faithful pair, see RB16) — it only means the `skipped` breakdown's
+  // LABEL is advisory in this narrow race window, not an exact ledger of each row's disqualifying
+  // reason.
   if (replayed !== replayable) {
     skipped.alreadyPresent += Math.max(0, replayable - replayed)
   }
+  // The `total` CONTRACT (owner P2, R9 fix-forward): total === replayed + sum(skipped), always —
+  // computed AFTER the tripwire fold so the invariant holds even in the drift window (downstream
+  // derives `recoverable` from `total > 0`; a pre-fold total under-counted to 0 there and broke it).
+  const total = replayed + Object.values(skipped).reduce((a, b) => a + b, 0)
   return { replayed, skipped, total }
 }
 
