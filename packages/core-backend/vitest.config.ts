@@ -31,6 +31,17 @@ export default defineConfig({
       // INSERT when the bind throws after it. DATABASE_URL-gated; excluded here so the no-DB job
       // cannot skip-green it, and wired as a WHOLE FILE into the approval real-DB step.
       'tests/integration/directory-sync-admission-orphan-guard.db.test.ts',
+      // P2-1 (post-#3972 review): proves the create-time email existence check is
+      // case-insensitive and that batchAdmitDirectoryAccountUsers enforces server-side
+      // eligibility (no duplicate `users` row for a differently-cased email; no silent
+      // re-admission of an already-linked account). DATABASE_URL-gated; excluded here so the
+      // no-DB job cannot skip-green it, and wired as a WHOLE FILE into the approval real-DB step.
+      'tests/integration/directory-admission-case-insensitive-uniqueness.db.test.ts',
+      // DT-HARDEN-05 lease golden (real DB): proves the partial unique index makes the lease
+      // a database invariant and that COALESCE(last_heartbeat_at, started_at) staleness never
+      // reclaims a live long run. DATABASE_URL-gated; excluded here so the no-DB job cannot
+      // skip-green it, and wired as a WHOLE FILE into the approval real-DB step.
+      'tests/integration/directory-sync-run-lease.db.test.ts',
       'tests/integration/approval-manager-chain.db.test.ts',
       'tests/integration/approval-requester-department.db.test.ts',
       'tests/integration/approval-requester-title.db.test.ts',
@@ -78,6 +89,10 @@ export default defineConfig({
       'tests/integration/automation-approval-task-created-trigger.test.ts',
       // A-2b approval-card action chain: DATABASE_URL-gated. Same two-point wiring (no skip-green).
       'tests/integration/automation-dingtalk-approval-card-action.test.ts',
+      // DT-OPS-04 per-corp credential scoping: DATABASE_URL-gated. It deliberately UNSETS the
+      // DingTalk env vars (the env-first short-circuit is what hid the bug), so it must never run
+      // in the no-DB job. Wired as a WHOLE FILE into the multitable real-DB step.
+      'tests/integration/dingtalk-person-message-integration-scoping.db.test.ts',
       // A-4 card-delivery wrapper: DATABASE_URL-gated. Same two-point wiring (no skip-green).
       'tests/integration/approval-card-delivery-wrapper.db.test.ts',
       // DT-HARDEN-07 primary-department write → approval-routing golden: DATABASE_URL-gated
@@ -150,6 +165,11 @@ export default defineConfig({
       // T1-2 inbound webhook trigger: mounted-route + real-DB execution row. Excluded from the no-DB
       // default job so it does not skip-green, and wired as a WHOLE FILE into the multitable real-DB lane.
       'tests/integration/multitable-inbound-webhook-trigger.test.ts',
+      // R1 (DT-HARDEN-08 follow-up) dingtalk_group_deliveries retention sweep: DATABASE_URL-gated
+      // (describeIfDatabase). Excluded from the no-DB default job so it cannot skip-green, and wired
+      // as a WHOLE FILE into the `Run multitable real-DB integration` step in plugin-tests.yml where
+      // it runs against real Postgres every PR.
+      'tests/integration/dingtalk-group-delivery-retention.db.test.ts',
       // comments.api.test.ts needs setup.integration.ts + a live DB. It stays
       // CI-excluded (NOT wired) because 8 of its tests have a pre-existing real-wire
       // failure (CommentService.mapRowToComment drops containerId/targetId/
@@ -157,6 +177,13 @@ export default defineConfig({
       // keystone that used to live here moved to comment-reactions.api.test.ts.
       'tests/integration/comments.api.test.ts',
       'tests/integration/events-api.test.ts',
+      // multitable-attachments.api.test.ts self-mocks its DB pool (no live DB needed) and its own
+      // 12/12 pass standalone; it stays excluded here (unrelated to the comments.api.test.ts note
+      // above) and is NOT wired into the real-DB job. Its F2 security-critical subset (attachment
+      // download row-deny 404 / field-mask 403, #3973) is independently covered by a self-contained
+      // real-DB file, tests/integration/multitable-attachment-readgate.security.test.ts, wired as a
+      // WHOLE FILE into the `Run multitable real-DB integration` step in plugin-tests.yml — so F2
+      // has a live CI regression guard even though this parent file remains excluded/unwired.
       'tests/integration/multitable-attachments.api.test.ts',
       // multitable-context.api.test.ts needs setup.integration.ts + a live DB (its template
       // catalog/install routes go through rbacGuard, which 403s under the default setup). It

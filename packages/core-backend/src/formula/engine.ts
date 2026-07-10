@@ -379,6 +379,63 @@ export class FormulaEngine {
     this.functions.set('SECOND', (date: unknown) => { const d = this.coerceDateValue(date); return d ? d.getSeconds() : '#VALUE!' })
     // DAYS(end_date, start_date): integer calendar-day diff in Excel arg order (note: datedif is start,end).
     this.functions.set('DAYS', (endDate: unknown, startDate: unknown) => this.datedif(startDate, endDate, 'D'))
+
+    // ── Cluster-C path-1 batch 1: 13 standard scalar functions. All single-value-in/out or
+    // variadic-scalar (no range/array semantics — SUMIFS/COUNTIFS-style criteria funcs stay out). ──
+    // PRODUCT mirrors SUM's flatten + non-numeric→0 coercion, but the multiplicative identity is 1
+    // (not 0), so the reduce seed must be 1; the empty-args case is special-cased to 0 to match SUM's
+    // own empty-args convention (SUM() === 0).
+    this.functions.set('PRODUCT', (...args: unknown[]) => {
+      const values = this.flattenValues(args)
+      if (values.length === 0) return 0
+      return values.reduce<number>((acc, val) => acc * (parseFloat(String(val)) || 0), 1)
+    })
+    this.functions.set('SIGN', (x: unknown) => {
+      const n = Number(x); if (Number.isNaN(n)) return '#VALUE!'
+      return n > 0 ? 1 : n < 0 ? -1 : 0
+    })
+    this.functions.set('PI', () => Math.PI)
+    this.functions.set('RADIANS', (deg: unknown) => {
+      const n = Number(deg); return Number.isNaN(n) ? '#VALUE!' : n * (Math.PI / 180)
+    })
+    this.functions.set('DEGREES', (rad: unknown) => {
+      const n = Number(rad); return Number.isNaN(n) ? '#VALUE!' : n * (180 / Math.PI)
+    })
+    // GCD/LCM: non-negative integers, truncating any fractional part (Excel convention); negative →
+    // #NUM!, non-numeric → #VALUE!. GCD(0, 0) = 0. LCM short-circuits to 0 the moment a 0 appears.
+    this.functions.set('GCD', (...args: unknown[]) => this.gcdVariadic(args))
+    this.functions.set('LCM', (...args: unknown[]) => this.lcmVariadic(args))
+    this.functions.set('VALUE', (text: unknown) => {
+      if (typeof text === 'number') return Number.isNaN(text) ? '#VALUE!' : text
+      const s = String(text).trim()
+      if (s === '') return '#VALUE!'
+      const n = Number(s)
+      return Number.isNaN(n) ? '#VALUE!' : n
+    })
+    // PROPER: capitalize the first letter of every letter-run; non-letters (spaces, punctuation,
+    // apostrophes) reset the "start of word" boundary, matching the standard spreadsheet convention.
+    this.functions.set('PROPER', (text: unknown) =>
+      String(text).replace(/[A-Za-z]+/g, (word) => word.charAt(0).toUpperCase() + word.slice(1).toLowerCase())
+    )
+    // TEXTJOIN(delimiter, ignore_empty, text1, ...): ignore_empty drops '' entries (post-coercion)
+    // before joining; null/undefined coerce to '' like the rest of the text functions.
+    this.functions.set('TEXTJOIN', (delimiter: unknown, ignoreEmpty: unknown, ...rest: unknown[]) => {
+      const values = this.flattenValues(rest).map((v) => (v === null || v === undefined ? '' : String(v)))
+      const filtered = ignoreEmpty ? values.filter((v) => v !== '') : values
+      return filtered.join(String(delimiter))
+    })
+    // STDEVP/VARP: population variants of STDEV/VAR — divide by N, not N-1 (the only difference).
+    this.functions.set('STDEVP', this.stdevp.bind(this))
+    this.functions.set('VARP', this.variancep.bind(this))
+    // CHOOSE(index, v1, v2, ...): 1-based; a non-integer index is truncated toward zero (Excel
+    // convention, e.g. CHOOSE(2.7, ...) behaves as CHOOSE(2, ...)); out-of-range/non-numeric → #VALUE!.
+    this.functions.set('CHOOSE', (index: unknown, ...values: unknown[]) => {
+      const raw = Number(index)
+      if (Number.isNaN(raw)) return '#VALUE!'
+      const i = Math.trunc(raw)
+      if (i < 1 || i > values.length) return '#VALUE!'
+      return values[i - 1]
+    })
   }
 
   /** Timezone-stable date coercion: a bare 'YYYY-MM-DD' is parsed as LOCAL midnight (matching DATE()),
@@ -1180,6 +1237,59 @@ export class FormulaEngine {
     const mean = values.reduce((a, b) => a + b) / values.length
     const squaredDiffs = values.map(val => Math.pow(val - mean, 2))
     return squaredDiffs.reduce((a, b) => a + b) / (values.length - 1)
+  }
+
+  // Population variants of stdev/variance: identical shape, divide by N instead of N-1. A single
+  // value is a valid population (variance 0) — unlike the sample variant, which is undefined (NaN)
+  // for N<2; only 0 args is degenerate here, and it mirrors STDEV/VAR's own 0-arg behavior (propagates
+  // as a thrown error, caught by calculate() as '#ERROR!') rather than inventing a new sentinel.
+  private stdevp(...args: unknown[]): number {
+    return Math.sqrt(this.variancep(...args))
+  }
+
+  private variancep(...args: unknown[]): number {
+    const values = this.flattenValues(args).map(val => parseFloat(String(val)) || 0)
+    const mean = values.reduce((a, b) => a + b) / values.length
+    const squaredDiffs = values.map(val => Math.pow(val - mean, 2))
+    return squaredDiffs.reduce((a, b) => a + b) / values.length
+  }
+
+  // GCD/LCM helpers (Euclidean algorithm). Truncate to integer + reject negatives before folding.
+  private gcdTwo(a: number, b: number): number {
+    a = Math.abs(a); b = Math.abs(b)
+    while (b !== 0) { [a, b] = [b, a % b] }
+    return a
+  }
+
+  private lcmTwo(a: number, b: number): number {
+    if (a === 0 || b === 0) return 0
+    return Math.abs(a * b) / this.gcdTwo(a, b)
+  }
+
+  private coerceIntegerArgs(args: unknown[]): number[] | '#VALUE!' | '#NUM!' {
+    const values = this.flattenValues(args)
+    const nums: number[] = []
+    for (const v of values) {
+      const n = Number(v)
+      if (Number.isNaN(n)) return '#VALUE!'
+      if (n < 0) return '#NUM!'
+      nums.push(Math.trunc(n))
+    }
+    return nums
+  }
+
+  private gcdVariadic(args: unknown[]): number | string {
+    const nums = this.coerceIntegerArgs(args)
+    if (typeof nums === 'string') return nums
+    if (nums.length === 0) return '#VALUE!'
+    return nums.reduce((acc, n) => this.gcdTwo(acc, n), 0)
+  }
+
+  private lcmVariadic(args: unknown[]): number | string {
+    const nums = this.coerceIntegerArgs(args)
+    if (typeof nums === 'string') return nums
+    if (nums.length === 0) return '#VALUE!'
+    return nums.reduce((acc, n) => this.lcmTwo(acc, n), 1)
   }
 
   private median(...args: unknown[]): number {

@@ -38,6 +38,39 @@
             <el-option label="平台审批" value="platform" />
             <el-option label="PLM 审批" value="plm" />
           </el-select>
+          <!-- B3-03 (模板/时间筛选): additive filters composing with the existing status/source
+               filters above — templateId + a created-at window, mirroring the backend's own
+               GET /api/approvals query params. Also the landing point for the metrics dashboard's
+               看板钻取 deep links (see ApprovalMetricsView.vue), which pre-fill these two on mount
+               via the route query (see `applyDeepLinkFilters` below). -->
+          <el-select
+            v-model="templateFilter"
+            placeholder="模板筛选"
+            clearable
+            filterable
+            class="approval-center__toolbar-select approval-center__toolbar-select--wide"
+            data-testid="approval-template-filter"
+            @change="handleSearch"
+          >
+            <el-option
+              v-for="tpl in templateOptions"
+              :key="tpl.id"
+              :label="tpl.name"
+              :value="tpl.id"
+            />
+          </el-select>
+          <el-date-picker
+            v-model="createdRange"
+            type="daterange"
+            unlink-panels
+            range-separator="至"
+            start-placeholder="发起开始日期"
+            end-placeholder="发起结束日期"
+            value-format="YYYY-MM-DD"
+            class="approval-center__toolbar-daterange"
+            data-testid="approval-created-range-filter"
+            @change="handleSearch"
+          />
           <el-button
             v-if="canWrite"
             type="primary"
@@ -185,6 +218,7 @@
           show-selection
           :selectable="isRowBatchSelectable"
           show-wait-column
+          show-unread-dot
           :actions-width="150"
           @row-click="handleRowClick"
           @selection-change="handlePendingSelectionChange"
@@ -352,6 +386,41 @@
           @update:current-page="handlePageChange"
         />
       </el-tab-pane>
+
+      <!-- B3-01 (我已处理): every instance the actor recorded an ANY-status action on — a reverse
+           lookup, distinct from 已完成 (which is scoped to non-pending instances only). Shares the
+           same read-only table shape as 抄送我的/已完成 (no selection/wait/actions column: the
+           actor already acted, there is nothing left to do here). -->
+      <el-tab-pane label="我已处理" name="processed">
+        <ApprovalMobileList
+          v-if="isMobileLayout"
+          :approvals="store.processedApprovals"
+          :loading="store.loading"
+          :empty-text="mobileEmptyText.processed"
+          :template-schemas="templateSchemas"
+          @select="handleRowClick"
+        />
+        <div v-else-if="isFirstPaintLoading(store.processedApprovals)" class="approval-center__skeleton" data-testid="processed-skeleton">
+          <el-skeleton :rows="5" animated />
+        </div>
+        <ApprovalCenterTable
+          v-else
+          :rows="store.processedApprovals"
+          :loading="store.loading"
+          :empty-text="searchText ? '未找到匹配的审批' : '暂无已处理审批'"
+          :summary-line-for="summaryLineFor"
+          @row-click="handleRowClick"
+        />
+        <el-pagination
+          class="approval-center__pagination"
+          background
+          layout="total, prev, pager, next"
+          :total="store.totalProcessed"
+          :current-page="currentPage"
+          :page-size="pageSize"
+          @update:current-page="handlePageChange"
+        />
+      </el-tab-pane>
     </el-tabs>
 
     <!-- Batch reject: a comment is offered (some templates require one; a per-row failure is captured
@@ -468,13 +537,13 @@
 
 <script setup lang="ts">
 import { ref, computed, onMounted, watch } from 'vue'
-import { useRouter } from 'vue-router'
+import { useRouter, useRoute } from 'vue-router'
 import { Search } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 import type { UnifiedApprovalDTO, ApprovalStatus } from '../../types/approval'
 import { useApprovalStore } from '../../approvals/store'
 import { useApprovalPermissions } from '../../approvals/permissions'
-import { dispatchAction, getPendingCount, markAllApprovalsRead, remindApproval } from '../../approvals/api'
+import { dispatchAction, getPendingCount, markAllApprovalsRead, remindApproval, listTemplates } from '../../approvals/api'
 import { urgeButtonState } from '../../approvals/urgeButtonState'
 import { runApprovalBatchAction, type ApprovalBatchActionResult } from '../../approvals/useApprovalBatchActions'
 import { useApprovalCountsRealtime, type ApprovalCountsUpdatedPayload } from '../../approvals/useApprovalCountsRealtime'
@@ -490,6 +559,7 @@ import PageShell from '../../components/layout/PageShell.vue'
 import PageHeader from '../../components/layout/PageHeader.vue'
 
 const router = useRouter()
+const route = useRoute()
 const store = useApprovalStore()
 const { canWrite } = useApprovalPermissions()
 
@@ -504,6 +574,7 @@ const allVisibleApprovals = computed<UnifiedApprovalDTO[]>(() => [
   ...store.myApprovals,
   ...store.ccApprovals,
   ...store.completedApprovals,
+  ...store.processedApprovals,
 ])
 // `immediate: true` covers the case where a tab's data is already populated at setup time (e.g.
 // a fresh mount whose store was pre-loaded); every subsequent load (tab switch/page/search/filter)
@@ -534,6 +605,7 @@ const mobileEmptyText = computed(() => {
       mine: searchText.value ? '未找到匹配的审批' : '暂无我发起的审批',
       cc: searchText.value ? '未找到匹配的审批' : '暂无抄送我的审批',
       completed: searchText.value ? '未找到匹配的审批' : '暂无已完成审批',
+      processed: searchText.value ? '未找到匹配的审批' : '暂无已处理审批',
     }
   }
   return {
@@ -541,6 +613,7 @@ const mobileEmptyText = computed(() => {
     mine: searchText.value ? 'No matching approvals found' : 'No approvals initiated by you',
     cc: searchText.value ? 'No matching approvals found' : 'No approvals cc’d to you',
     completed: searchText.value ? 'No matching approvals found' : 'No completed approvals',
+    processed: searchText.value ? 'No matching approvals found' : 'No approvals you have processed',
   }
 })
 
@@ -884,15 +957,25 @@ async function handleMarkAllRead(): Promise<void> {
   }
 }
 
-const activeTab = ref<'pending' | 'mine' | 'cc' | 'completed'>('pending')
+const activeTab = ref<'pending' | 'mine' | 'cc' | 'completed' | 'processed'>('pending')
 const searchText = ref('')
 const statusFilter = ref<ApprovalStatus | ''>('')
 // Wave 2 WP2: source filter driving the `sourceSystem` query param on /api/approvals.
 // Default 'all' surfaces the unified feed; switching narrows to platform or PLM-mirrored rows.
 const sourceSystemFilter = ref<'all' | 'platform' | 'plm'>('all')
+// B3-03 (模板/时间筛选): `templateId` + a created-at window, additive alongside the filters above.
+const templateFilter = ref('')
+const templateOptions = ref<Array<{ id: string; name: string }>>([])
+const createdRange = ref<[string, string] | null>(null)
 const currentPage = ref(1)
 const pageSize = ref(10)
 const attendanceRequestsSection = 'attendance-overview-requests'
+
+// B3-03: `createdRange` holds plain `YYYY-MM-DD` day boundaries from the picker (or a deep link);
+// widen to inclusive day-start/day-end ISO timestamps for the server, the same convention
+// ApprovalMetricsView's own since/until range already uses.
+const createdFromQuery = computed(() => (createdRange.value?.[0] ? `${createdRange.value[0]}T00:00:00Z` : undefined))
+const createdToQuery = computed(() => (createdRange.value?.[1] ? `${createdRange.value[1]}T23:59:59Z` : undefined))
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -914,12 +997,16 @@ function loadCurrentTab() {
     page: currentPage.value,
     pageSize: pageSize.value,
     sourceSystem: sourceSystemFilter.value,
+    templateId: templateFilter.value || undefined,
+    createdFrom: createdFromQuery.value,
+    createdTo: createdToQuery.value,
   }
   switch (activeTab.value) {
     case 'pending': store.loadPending(query); break
     case 'mine': store.loadMine(query); break
     case 'cc': store.loadCc(query); break
     case 'completed': store.loadCompleted(query); break
+    case 'processed': store.loadProcessed(query); break
   }
   // G-B2-11: EVERY list reload re-baselines the pill, from the ONE place every reload passes
   // through. Hanging this off individual call sites is precisely what let handleSearch() and
@@ -996,9 +1083,60 @@ function openAttendanceApprovalQueue() {
   })
 }
 
+// B3-03 (看板钻取): ApprovalMetricsView's KPI tiles / per-template rows deep-link here with
+// `?templateId=...&createdFrom=...&createdTo=...`. Pre-fill the filter bar from those query
+// params BEFORE the first load, so the very first request already carries them (matches the
+// "钻取到已过滤好的列表" contract — no extra click needed). `createdFrom`/`createdTo` are full
+// ISO timestamps; the date-range picker only understands day boundaries, so only the date
+// portion is used to repopulate it — the resulting createdFrom/createdTo the picker's own
+// `@change`/query-building path derives are the SAME day-start/day-end convention either way.
+//
+// This is a full SYNC, not a merge: at every deep-link entry point (mount + the params-nav
+// watcher below) the route query is the source of truth — a key that is absent CLEARS its
+// filter. Otherwise navigating from a filtered drill-down to the bare 审批中心 menu entry
+// (query {}) would silently keep serving the old template/date-scoped list under an
+// unfiltered-looking URL.
+function applyDeepLinkFilters(): void {
+  const rawTemplateId = route.query.templateId
+  templateFilter.value = typeof rawTemplateId === 'string' ? rawTemplateId : ''
+  const rawCreatedFrom = route.query.createdFrom
+  const rawCreatedTo = route.query.createdTo
+  const fromDate = typeof rawCreatedFrom === 'string' && rawCreatedFrom ? rawCreatedFrom.slice(0, 10) : ''
+  const toDate = typeof rawCreatedTo === 'string' && rawCreatedTo ? rawCreatedTo.slice(0, 10) : ''
+  createdRange.value = fromDate && toDate ? [fromDate, toDate] : null
+}
+
+// B3-03: params-only navigation to /approvals (e.g. a second 看板钻取 link clicked while this
+// view is already mounted, or an in-app push carrying a different query) REUSES this component
+// instance — onMounted never re-runs, so without this watcher the new query would be silently
+// ignored. Re-sync the filter bar from the query and explicitly reload from page 1. The
+// route-name guard keeps the watcher inert while navigating AWAY (the global `route` object
+// mutates to the target route before this instance unmounts).
+watch(() => route.query, () => {
+  if (route.name !== 'approval-list') return
+  applyDeepLinkFilters()
+  currentPage.value = 1
+  clearPendingSelection()
+  loadCurrentTab()
+})
+
+// B2-04-style id→name lookup so the filter dropdown shows readable template names rather than
+// raw ids. Best-effort: a failed fetch just leaves the select empty (no crash, no blocking the
+// rest of the page — mirrors ApprovalMetricsView's own `loadTemplateNames`).
+async function loadTemplateOptions(): Promise<void> {
+  try {
+    const { data } = await listTemplates({ pageSize: 200 })
+    templateOptions.value = data.map((tpl) => ({ id: tpl.id, name: tpl.name }))
+  } catch {
+    templateOptions.value = []
+  }
+}
+
 onMounted(() => {
+  applyDeepLinkFilters()
   // The first load establishes the pill's initial baseline (no delta possible against itself).
   loadCurrentTab()
+  void loadTemplateOptions()
 })
 </script>
 
@@ -1023,6 +1161,16 @@ onMounted(() => {
 
 .approval-center__toolbar-select {
   width: 140px;
+}
+
+/* B3-03: template filter is wider than the fixed-option selects above (template names run
+   longer than status/source enum labels); the date-range picker keeps Element Plus's own width. */
+.approval-center__toolbar-select--wide {
+  width: 180px;
+}
+
+.approval-center__toolbar-daterange {
+  width: 260px;
 }
 
 .approval-center__error {
@@ -1201,6 +1349,7 @@ onMounted(() => {
      media-query rule (declared later in the cascade) overrides it without `!important`. */
   .approval-center__toolbar-search,
   .approval-center__toolbar-select,
+  .approval-center__toolbar-daterange,
   .approval-center__toolbar-button {
     width: 100%;
   }

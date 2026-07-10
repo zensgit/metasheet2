@@ -284,6 +284,21 @@ export class ApprovalBridgeService {
       params.push(`%${options.search}%`)
       paramIndex += 1
     }
+    // B3-03 (模板/时间筛选): template + created-at window. Additive filters that compose with every
+    // other filter (including tab) below — each pushed only when supplied, so the legacy feed is
+    // unchanged when none are provided.
+    if (options?.templateId) {
+      conditions.push(`template_id = $${paramIndex++}`)
+      params.push(options.templateId)
+    }
+    if (options?.createdFrom) {
+      conditions.push(`created_at >= $${paramIndex++}`)
+      params.push(options.createdFrom)
+    }
+    if (options?.createdTo) {
+      conditions.push(`created_at <= $${paramIndex++}`)
+      params.push(options.createdTo)
+    }
     const sourceSystem = options?.sourceSystem
     const includeExternalTabSources = options?.includeExternalTabSources === true
     if (options?.tab && options.actorId) {
@@ -312,6 +327,16 @@ export class ApprovalBridgeService {
           params.push(options.actorId)
         } else if (options.tab === 'completed') {
           conditions.push(`status <> 'pending'`)
+        } else if (options.tab === 'processed') {
+          // B3-01 (我已处理): every instance the actor recorded an action on, ANY current status.
+          conditions.push(
+            `id IN (
+              SELECT instance_id
+              FROM approval_records
+              WHERE actor_id = $${paramIndex++}
+            )`,
+          )
+          params.push(options.actorId)
         }
       } else if (includeExternalTabSources) {
         const actorIdParam = paramIndex++
@@ -393,6 +418,18 @@ export class ApprovalBridgeService {
               )
             )`,
           )
+        } else if (options.tab === 'processed') {
+          // B3-01 (我已处理): actor-recorded instances, ANY status/source. approval_records is
+          // platform-side only, so this naturally scopes to platform rows the actor acted on —
+          // consistent with `completed`'s own `approval_records` OR-arm above, minus the
+          // `status <> 'pending'` restriction (processed is NOT limited by current status).
+          conditions.push(
+            `id IN (
+              SELECT instance_id
+              FROM approval_records
+              WHERE actor_id = $${actorIdParam}
+            )`,
+          )
         }
       } else {
         const actorIdParam = paramIndex++
@@ -457,6 +494,16 @@ export class ApprovalBridgeService {
               )
             )`,
           )
+        } else if (options.tab === 'processed') {
+          // B3-01 (我已处理): platform instances the actor recorded ANY action on, ANY status — the
+          // `COALESCE(source_system, 'platform') = 'platform'` guard above already scopes source.
+          conditions.push(
+            `id IN (
+              SELECT instance_id
+              FROM approval_records
+              WHERE actor_id = $${actorIdParam}
+            )`,
+          )
         }
       }
     }
@@ -483,12 +530,39 @@ export class ApprovalBridgeService {
       instancesResult.rows.map((row) => row.published_definition_id),
     )
 
-    return {
-      data: instancesResult.rows.map((row) => toUnifiedDTO(
+    // B3-02 (行级未读): resolve `isRead` ONLY for the 待我处理 (pending) tab — the single surface
+    // the unread badge/dot semantics cover. A row is UNREAD (isRead=false) exactly when the actor
+    // has NO `approval_reads` row for it — byte-identical to the pending-count badge's own
+    // `FILTER (WHERE r.instance_id IS NULL)` predicate (see /api/approvals/pending-count above).
+    // A single id-scoped lookup gives the same result as folding a LEFT JOIN into the paginated
+    // list query, without widening that query's shape. Left `null` (→ DTO field omitted) on every
+    // other tab, so no dot is ever rendered there.
+    let readInstanceIds: Set<string> | null = null
+    if (options?.tab === 'pending' && options.actorId && instancesResult.rows.length > 0) {
+      const readResult = await pool.query<{ instance_id: string }>(
+        `SELECT instance_id
+         FROM approval_reads
+         WHERE user_id = $1
+           AND instance_id = ANY($2::text[])`,
+        [options.actorId, instancesResult.rows.map((row) => row.id)],
+      )
+      readInstanceIds = new Set(readResult.rows.map((row) => row.instance_id))
+    }
+
+    const data = instancesResult.rows.map((row) => {
+      const dto = toUnifiedDTO(
         row,
         assignmentsByInstance.get(row.id) || [],
         row.published_definition_id ? runtimeGraphsByDefinition.get(row.published_definition_id) ?? null : null,
-      )),
+      )
+      if (readInstanceIds) {
+        dto.isRead = readInstanceIds.has(row.id)
+      }
+      return dto
+    })
+
+    return {
+      data,
       total,
     }
   }

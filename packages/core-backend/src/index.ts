@@ -123,6 +123,12 @@ import {
   startLedgerRetentionScheduler,
   stopLedgerRetentionScheduler,
 } from './services/LedgerRetentionScheduler'
+import {
+  resolveDingTalkGroupDeliveryRetentionSchedulerIntervalMs,
+  resolveDingTalkGroupDeliveryRetentionSchedulerLeaderOptions,
+  startDingTalkGroupDeliveryRetentionScheduler,
+  stopDingTalkGroupDeliveryRetentionScheduler,
+} from './services/dingtalk-group-delivery-retention-scheduler'
 import { initWebhookEventBridge } from './multitable/webhook-event-bridge'
 import { ApprovalBreachNotifier } from './services/ApprovalBreachNotifier'
 import {
@@ -170,6 +176,7 @@ import { createMultitableButtonRoutes } from './routes/multitable-button'
 import { apiTokensRouter } from './routes/api-tokens'
 import { SnapshotService } from './services/SnapshotService'
 import { MetricsStreamService } from './services/MetricsStreamService'
+import { DingTalkInteractiveCardStreamWorker } from './integrations/dingtalk/interactive-card-stream'
 import { notificationService } from './services/NotificationService'
 import { AfterSalesApprovalBridgeService } from './services/AfterSalesApprovalBridgeService'
 import {
@@ -257,6 +264,7 @@ export class MetaSheetServer {
   private disableWorkflow = process.env.DISABLE_WORKFLOW === 'true'
   private disableEventBus = process.env.DISABLE_EVENT_BUS === 'true'
   private metricsStreamService?: MetricsStreamService
+  private dingtalkInteractiveCardStreamWorker?: DingTalkInteractiveCardStreamWorker
   
   // IoC Container
   private injector: Injector
@@ -1868,6 +1876,15 @@ export class MetaSheetServer {
       )
     }
 
+    // 0c. Shut down optional DingTalk interactive-card Stream worker
+    if (this.dingtalkInteractiveCardStreamWorker) {
+      shutdownTasks.push(
+        this.dingtalkInteractiveCardStreamWorker.shutdown().catch((err) => {
+          this.logger.warn(`DingTalk interactive-card Stream shutdown error: ${err instanceof Error ? err.message : String(err)}`)
+        }) as Promise<void>,
+      )
+    }
+
     // 1. Close HTTP server
     shutdownTasks.push(new Promise<void>((resolve) => {
       try {
@@ -1962,6 +1979,14 @@ export class MetaSheetServer {
         stopLedgerRetentionScheduler()
       } catch (err) {
         this.logger.warn(`Ledger retention scheduler shutdown failed: ${err instanceof Error ? err.message : String(err)}`)
+      }
+    })())
+
+    shutdownTasks.push((async () => {
+      try {
+        stopDingTalkGroupDeliveryRetentionScheduler()
+      } catch (err) {
+        this.logger.warn(`DingTalk group-delivery retention scheduler shutdown failed: ${err instanceof Error ? err.message : String(err)}`)
       }
     })())
 
@@ -2246,6 +2271,30 @@ export class MetaSheetServer {
       )
     } catch (e) {
       this.logger.error('AI usage ledger retention scheduler initialization failed; continuing in degraded mode', e as Error)
+    }
+
+    // DingTalk group-delivery retention sweep (R1, DT-HARDEN-08 follow-up): a
+    // periodic bounded DELETE of dingtalk_group_deliveries rows past the
+    // retention window (default 90d, env-overridable, floored at 7d). The
+    // table is write-once — every group-robot send attempt (automation rule
+    // firings AND manual test-sends) inserts a row with full message content
+    // and raw response bodies, so without this it grows unbounded. Reuses the
+    // generic LedgerRetentionScheduler (same pattern as the AI usage ledger
+    // sweep above); enabled by default (opt out via
+    // DINGTALK_GROUP_DELIVERY_RETENTION_DISABLED=1).
+    try {
+      const dingtalkDeliveryRetentionLeaderOptions = await resolveDingTalkGroupDeliveryRetentionSchedulerLeaderOptions()
+      const dingtalkDeliveryRetentionScheduler = startDingTalkGroupDeliveryRetentionScheduler({
+        leaderOptions: dingtalkDeliveryRetentionLeaderOptions,
+        intervalMs: resolveDingTalkGroupDeliveryRetentionSchedulerIntervalMs(),
+      })
+      this.logger.info(
+        dingtalkDeliveryRetentionScheduler
+          ? 'DingTalk group-delivery retention scheduler initialized'
+          : 'DingTalk group-delivery retention scheduler disabled (DINGTALK_GROUP_DELIVERY_RETENTION_DISABLED=1)',
+      )
+    } catch (e) {
+      this.logger.error('DingTalk group-delivery retention scheduler initialization failed; continuing in degraded mode', e as Error)
     }
 
     // B-4 BJ-5 follow-up: reconcile ORPHANED AI bulk-fill jobs at boot. A hard
@@ -2644,6 +2693,14 @@ export class MetaSheetServer {
       this.metricsStreamService.initialize(this.httpServer)
     } catch (e) {
       this.logger.error('Failed to initialize MetricsStreamService', e as Error)
+    }
+
+    // Initialize optional DingTalk interactive-card Stream worker (B-1 skeleton; default disabled).
+    try {
+      this.dingtalkInteractiveCardStreamWorker = new DingTalkInteractiveCardStreamWorker()
+      await this.dingtalkInteractiveCardStreamWorker.initialize()
+    } catch (e) {
+      this.logger.error('Failed to initialize DingTalkInteractiveCardStreamWorker', e as Error)
     }
 
     this.installGlobalErrorHandler()

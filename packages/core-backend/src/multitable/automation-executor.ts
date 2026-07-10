@@ -10,7 +10,7 @@ import { withAutomationEventId } from './automation-event-dedup'
 import { redactString } from './automation-log-redact'
 import { computeActionFingerprint } from './automation-suspension-service'
 import type { ConditionBranchResumeCursor } from './automation-resume-cursor'
-import { isRichLongTextProperty, sanitizeRichLongText } from './field-codecs'
+import { isRichLongTextProperty, normalizeJson, sanitizeRichLongText } from './field-codecs'
 import { ensureRecordNotLocked } from './record-lock'
 import { resolveCrossBaseWriteAuthority } from './cross-base-write-authority'
 import { publishMultitableSheetRealtime } from './realtime-publish'
@@ -25,6 +25,7 @@ import {
 import { readDingTalkMessageConfigFromRuntime } from '../integrations/dingtalk/work-notification-settings'
 import {
   resolveApprovalCardLinkSecret,
+  resolveApprovalCardLinkSecretForIntegration,
   resolveApprovalCardPublicAppUrl,
 } from '../integrations/dingtalk/approval-card-config'
 import {
@@ -41,6 +42,10 @@ import {
   normalizeDingTalkRobotWebhookUrl,
   validateDingTalkRobotResponse,
 } from '../integrations/dingtalk/robot'
+import {
+  decryptDingTalkDestinationSecret,
+  decryptDingTalkDestinationWebhookUrl,
+} from './dingtalk-group-destinations'
 import type {
   AutomationAction,
   AutomationActionType,
@@ -818,6 +823,9 @@ export async function consumeSharedCrossBaseWriteQuota(
 export interface AutomationDeps {
   eventBus: EventBus
   queryFn: (sql: string, params?: unknown[]) => Promise<{ rows: unknown[]; rowCount?: number | null }>
+  transaction?: <T>(
+    handler: (client: { query: AutomationDeps['queryFn'] }) => Promise<T>,
+  ) => Promise<T>
   fetchFn?: typeof fetch
   notificationService?: Pick<NotificationService, 'send'>
   /** Optional cross-base write quota override (limit/window/store). Omit → process-global default. */
@@ -1773,11 +1781,14 @@ export class AutomationExecutor {
     }
 
     const recipientResult = await this.deps.queryFn(
+      // DT-OPS-04: the rule creator's userid is only meaningful inside their own corp, so
+      // carry the integration they are bound under and notify them with its credentials.
       `SELECT u.id AS local_user_id,
-              linked.external_user_id AS dingtalk_user_id
+              linked.external_user_id AS dingtalk_user_id,
+              linked.integration_id AS integration_id
          FROM users u
          LEFT JOIN LATERAL (
-           SELECT a.external_user_id
+           SELECT a.external_user_id, a.integration_id::text AS integration_id
              FROM directory_account_links l
              JOIN directory_accounts a ON a.id = l.directory_account_id
             WHERE l.local_user_id = u.id
@@ -1794,6 +1805,7 @@ export class AutomationExecutor {
     )
     const row = (recipientResult.rows[0] ?? null) as Record<string, unknown> | null
     const dingtalkUserId = typeof row?.dingtalk_user_id === 'string' ? row.dingtalk_user_id.trim() : ''
+    const ruleCreatorIntegrationId = typeof row?.integration_id === 'string' ? row.integration_id.trim() : ''
 
     if (!row || !dingtalkUserId) {
       await recordDingTalkPersonDeliverySafely(this.deps.queryFn, {
@@ -1812,7 +1824,7 @@ export class AutomationExecutor {
     }
 
     try {
-      const messageConfig = await readDingTalkMessageConfigFromRuntime()
+      const messageConfig = await readDingTalkMessageConfigFromRuntime(ruleCreatorIntegrationId || undefined)
       const accessToken = await fetchDingTalkAppAccessToken(messageConfig, { fetchFn: this.deps.fetchFn })
       const result = await sendDingTalkWorkNotification(
         accessToken,
@@ -2252,77 +2264,79 @@ export class AutomationExecutor {
         effectiveRecordId = targetRecordId
       }
 
-      // Record-lock guard: you cannot delete a record locked by someone you can't unlock. The SELECT and
-      // the DELETE below BOTH read `effectiveSheetId`/`effectiveRecordId`, so a cross-base delete checks
-      // the TARGET record's lock (not the trigger record's) — lock priority over base-write.
-      // D-1: also fetch data+version here — same row, same predicate, zero extra query. The delete
-      // revision below needs the record's final snapshot, and after the DELETE the row is gone.
-      const lockRes = await this.deps.queryFn(
-        'SELECT locked, locked_by, created_by, data, version FROM meta_records WHERE id = $1 AND sheet_id = $2',
-        [effectiveRecordId, effectiveSheetId],
-      )
-      const lockRow = lockRes.rows[0] as
-        | { locked?: unknown; locked_by?: unknown; created_by?: unknown; data?: Record<string, unknown>; version?: unknown }
-        | undefined
-      // ②b claim==truth for the record: a cross-base delete must address a record that ACTUALLY lives in
-      // `targetSheetId`. No row → the targetRecordId does not exist there → fail-closed (never a silent
-      // no-op success). Same-base keeps its leniency (a missing trigger record yields a 0-row DELETE
-      // reported as success) to avoid any behavior regression vs the other same-base sinks.
-      if (gate.crossBase && !lockRow) {
-        return {
-          actionType: 'delete_record',
-          status: 'failed',
-          error: `Cross-base delete_record target record not found in target sheet: ${effectiveRecordId} ∉ ${effectiveSheetId}`,
+      const step = await this.withTransaction(async (query) => {
+        // Record-lock guard: you cannot delete a record locked by someone you can't unlock. The SELECT and
+        // the DELETE below BOTH read `effectiveSheetId`/`effectiveRecordId`, so a cross-base delete checks
+        // the TARGET record's lock (not the trigger record's) — lock priority over base-write.
+        //
+        // D-1: lock the row and capture version+data inside the SAME transaction as the hard delete and
+        // delete revision. Without the delete revision, point-in-time reconstruction kept treating
+        // automation-deleted records as alive forever.
+        const lockRes = await query(
+          `SELECT locked, locked_by, created_by, version, data
+             FROM meta_records
+            WHERE id = $1 AND sheet_id = $2
+            FOR UPDATE`,
+          [effectiveRecordId, effectiveSheetId],
+        )
+        const lockRow = lockRes.rows[0] as
+          | { locked?: unknown; locked_by?: unknown; created_by?: unknown; version?: unknown; data?: unknown }
+          | undefined
+        // ②b claim==truth for the record: a cross-base delete must address a record that ACTUALLY lives in
+        // `targetSheetId`. No row → the targetRecordId does not exist there → fail-closed (never a silent
+        // no-op success). Same-base keeps its leniency (a missing trigger record yields a 0-row DELETE
+        // reported as success) to avoid any behavior regression vs the other same-base sinks.
+        if (gate.crossBase && !lockRow) {
+          return {
+            actionType: 'delete_record',
+            status: 'failed',
+            error: `Cross-base delete_record target record not found in target sheet: ${effectiveRecordId} ∉ ${effectiveSheetId}`,
+          } satisfies AutomationStepResult
         }
-      }
-      if (lockRow) {
-        ensureRecordNotLocked(context.actorId ?? null, lockRow, () => new Error('Record is locked'))
-      }
+        if (lockRow) {
+          ensureRecordNotLocked(context.actorId ?? null, lockRow, () => new Error('Record is locked'))
+        }
 
-      // Clean up links FIRST (mirrors the same-base delete sinks `records.deleteRecord` /
-      // `RecordService.deleteRecord`): the FK cascade only covers the `record_id` side, so the
-      // `foreign_record_id` side must be deleted explicitly or it dangles. (This statement touches
-      // meta_links, NOT meta_records, so the cross-base write-guard regex does not match it.)
-      await this.deps.queryFn(
-        'DELETE FROM meta_links WHERE record_id = $1 OR foreign_record_id = $1',
-        [effectiveRecordId],
-      )
+        // Clean up links FIRST (mirrors the same-base delete sinks `records.deleteRecord` /
+        // `RecordService.deleteRecord`): the FK cascade only covers the `record_id` side, so the
+        // `foreign_record_id` side must be deleted explicitly or it dangles. (This statement touches
+        // meta_links, NOT meta_records, so the cross-base write-guard regex does not match it.)
+        await query(
+          'DELETE FROM meta_links WHERE record_id = $1 OR foreign_record_id = $1',
+          [effectiveRecordId],
+        )
 
-      // HARD delete — the system has NO soft-delete for records: `meta_records` has no `deleted_at`
-      // column and both same-base delete sinks (`records.ts`, `record-service.ts`) hard-`DELETE`. A
-      // soft-delete here would target a non-existent column AND would be a silent no-op (no read path
-      // filters `deleted_at`). So this mirrors the proven sinks. No `version = version + 1` (the row is
-      // gone); `sheet_id` scoping matches the update template.
-      // xbase-write-gated: routes through evaluateCrossBaseWrite (gate computed above) — a cross-base
-      // delete is rejected before this DELETE unless claim==truth + trigger-actor base-write.
-      // lock-guarded: automation delete_record (C2a) — ensureRecordNotLocked enforced just above.
-      const deleteRes = await this.deps.queryFn(
-        'DELETE FROM meta_records WHERE id = $1 AND sheet_id = $2',
-        [effectiveRecordId, effectiveSheetId],
-      )
+        if (lockRow) {
+          const version = Number(lockRow.version ?? 1)
+          await recordRecordRevision(query, {
+            sheetId: effectiveSheetId,
+            recordId: effectiveRecordId,
+            version: Number.isFinite(version) ? version : 1,
+            action: 'delete',
+            source: 'automation',
+            actorId: context.actorId ?? null,
+            changedFieldIds: [],
+            patch: {},
+            snapshot: normalizeJson(lockRow.data),
+          })
+        }
 
-      // D-1 (destruction-path gap audit, owner-ratified): emit the delete revision. PIT/as-of-T
-      // existence is derived PURELY from meta_record_revisions — before this, an automation-deleted
-      // record's last revision stayed create/update, so Global History and every PIT consumer treated
-      // it as alive forever. Emitted AFTER the hard delete (this lane has no enclosing transaction):
-      // if this INSERT fails we degrade to the old missing-revision behavior for one record — never
-      // the reverse lie of a delete revision for a row that still exists. Gated on the row having
-      // actually existed AND the DELETE having removed it (same-base keeps its 0-row-success leniency
-      // WITHOUT fabricating a revision for a record that was never there). Recoverability (trash /
-      // tombstone) is deliberately NOT added — that is the owner-gated D-2 rung.
-      if (lockRow && (deleteRes.rowCount ?? 0) > 0) {
-        await recordRecordRevision(this.deps.queryFn, {
-          sheetId: effectiveSheetId,
-          recordId: effectiveRecordId,
-          version: Number(lockRow.version ?? 1),
-          action: 'delete',
-          source: 'automation',
-          actorId: context.actorId ?? null,
-          changedFieldIds: [],
-          patch: {},
-          snapshot: lockRow.data ?? null,
-        })
-      }
+        // HARD delete — the system has NO soft-delete for records: `meta_records` has no `deleted_at`
+        // column and both same-base delete sinks (`records.ts`, `record-service.ts`) hard-`DELETE`. A
+        // soft-delete here would target a non-existent column AND would be a silent no-op (no read path
+        // filters `deleted_at`). So this mirrors the proven sinks. No `version = version + 1` (the row is
+        // gone); `sheet_id` scoping matches the update template.
+        // xbase-write-gated: routes through evaluateCrossBaseWrite (gate computed above) — a cross-base
+        // delete is rejected before this DELETE unless claim==truth + trigger-actor base-write.
+        // lock-guarded: automation delete_record (C2a) — ensureRecordNotLocked enforced just above.
+        await query(
+          'DELETE FROM meta_records WHERE id = $1 AND sheet_id = $2',
+          [effectiveRecordId, effectiveSheetId],
+        )
+
+        return null
+      })
+      if (step) return step
 
       // Emit event for chaining (mirrors the updated/created emits + the same-base delete sink's
       // `multitable.record.deleted` shape). C1 real-time invalidation fan-out to the target base's room
@@ -2341,6 +2355,15 @@ export class AutomationExecutor {
     } catch (err) {
       return { actionType: 'delete_record', status: 'failed', error: err instanceof Error ? err.message : String(err) }
     }
+  }
+
+  private async withTransaction<T>(
+    handler: (query: AutomationDeps['queryFn']) => Promise<T>,
+  ): Promise<T> {
+    if (this.deps.transaction) {
+      return this.deps.transaction(async ({ query }) => handler(query))
+    }
+    return handler(this.deps.queryFn)
   }
 
   private async executeCreateRecord(
@@ -2620,10 +2643,6 @@ export class AutomationExecutor {
     if (!baseUrl) {
       return { actionType, status: 'failed', error: 'PUBLIC_APP_URL or APP_BASE_URL (or the stored approval-card public app URL) is required for the approval decision link' }
     }
-    const linkSecret = await resolveApprovalCardLinkSecret(this.deps.queryFn)
-    if (!linkSecret) {
-      return { actionType, status: 'failed', error: 'APPROVAL_CARD_LINK_SECRET (env or stored approval-card link secret) is required for signed approval decision links' }
-    }
 
     // Instance metadata for the card summary — ids/title/request_no only, NO form values.
     const instanceResult = await this.deps.queryFn(
@@ -2641,10 +2660,11 @@ export class AutomationExecutor {
     const recipientResult = await this.deps.queryFn(
       `SELECT u.id AS local_user_id,
               u.is_active AS local_user_active,
-              linked.external_user_id AS dingtalk_user_id
+              linked.external_user_id AS dingtalk_user_id,
+              linked.integration_id AS integration_id
          FROM users u
          LEFT JOIN LATERAL (
-           SELECT a.external_user_id
+           SELECT a.external_user_id, a.integration_id::text AS integration_id
              FROM directory_account_links l
              JOIN directory_accounts a ON a.id = l.directory_account_id
             WHERE l.local_user_id = u.id
@@ -2657,8 +2677,13 @@ export class AutomationExecutor {
         WHERE u.id = $1`,
       [assigneeUserId],
     )
-    const recipientRow = (recipientResult.rows[0] ?? null) as { local_user_active?: boolean; dingtalk_user_id?: string | null } | null
+    const recipientRow = (recipientResult.rows[0] ?? null) as { local_user_active?: boolean; dingtalk_user_id?: string | null; integration_id?: string | null } | null
     const dingtalkUserId = typeof recipientRow?.dingtalk_user_id === 'string' ? recipientRow.dingtalk_user_id.trim() : ''
+    // DT-OPS-04: send the card with the assignee's own corp credentials. DT-R2 closed the
+    // remainder: the integration is persisted on the delivery row (integration_id) so the
+    // approve/reject callback resolves the SAME corp's secret; the deep-link token is signed
+    // with that integration's secret below (env override unchanged).
+    const assigneeIntegrationId = typeof recipientRow?.integration_id === 'string' ? recipientRow.integration_id.trim() : ''
     if (!recipientRow || recipientRow.local_user_active !== true || !dingtalkUserId) {
       await recordDingTalkPersonDeliverySafely(this.deps.queryFn, {
         localUserId: assigneeUserId,
@@ -2675,6 +2700,23 @@ export class AutomationExecutor {
       return { actionType, status: 'failed', error: 'Recipient has no linked, active DingTalk account (skipped — mappings are never guessed)' }
     }
 
+    // DT-R2 same-source signing: the deep-link token is signed with the ASSIGNEE integration's
+    // secret (env `APPROVAL_CARD_LINK_SECRET` still wins) and the integration is persisted on
+    // the delivery row, so the wrapper's verify resolves the identical source. No cross-corp
+    // fallback: a missing per-corp secret fail-closes the send BEFORE any ledger row is written.
+    const linkSecret = assigneeIntegrationId
+      ? await resolveApprovalCardLinkSecretForIntegration(assigneeIntegrationId, this.deps.queryFn)
+      : await resolveApprovalCardLinkSecret(this.deps.queryFn)
+    if (!linkSecret) {
+      return {
+        actionType,
+        status: 'failed',
+        error: assigneeIntegrationId
+          ? `APPROVAL_CARD_LINK_SECRET (env) or a stored approval-card link secret on the assignee's DingTalk integration (${assigneeIntegrationId}) is required for signed approval decision links`
+          : 'APPROVAL_CARD_LINK_SECRET (env or stored approval-card link secret) is required for signed approval decision links',
+      }
+    }
+
     // Ledger FIRST — the row is the only legitimate delivery → instance anchor.
     const entryEpochRaw = event.task?.entryEpoch
     const sourceStepRaw = event.task?.sourceStep
@@ -2684,6 +2726,7 @@ export class AutomationExecutor {
       recipientUserId: assigneeUserId,
       recipientDingTalkUserId: dingtalkUserId,
       deliveryKind: 'work_notice_action_card',
+      integrationId: assigneeIntegrationId || null,
     })
 
     const token = createHmac('sha256', linkSecret).update(delivery.id).digest('hex').slice(0, 32)
@@ -2697,7 +2740,7 @@ export class AutomationExecutor {
     ].filter(Boolean)
 
     try {
-      const messageConfig = await readDingTalkMessageConfigFromRuntime()
+      const messageConfig = await readDingTalkMessageConfigFromRuntime(assigneeIntegrationId || undefined)
       const accessToken = await fetchDingTalkAppAccessToken(messageConfig, { fetchFn: this.deps.fetchFn })
       const result = await sendDingTalkWorkNotificationActionCard(
         accessToken,
@@ -2939,12 +2982,17 @@ export class AutomationExecutor {
     }
 
     const recipientsResult = await this.deps.queryFn(
+      // DT-OPS-04: carry the integration the recipient is actually bound under. A
+      // DingTalk userid is only meaningful inside its own corp, so the credentials used
+      // to notify them must come from that integration — not from whichever integration
+      // happens to sort first as "latest active".
       `SELECT u.id AS local_user_id,
               u.is_active AS local_user_active,
-              linked.external_user_id AS dingtalk_user_id
+              linked.external_user_id AS dingtalk_user_id,
+              linked.integration_id AS integration_id
          FROM users u
          LEFT JOIN LATERAL (
-           SELECT a.external_user_id
+           SELECT a.external_user_id, a.integration_id::text AS integration_id
              FROM directory_account_links l
              JOIN directory_accounts a ON a.id = l.directory_account_id
             WHERE l.local_user_id = u.id
@@ -2958,13 +3006,14 @@ export class AutomationExecutor {
       [userIds],
     )
 
-    const recipientMap = new Map<string, { localUserId: string; dingtalkUserId: string }>()
+    const recipientMap = new Map<string, { localUserId: string; dingtalkUserId: string; integrationId: string }>()
     for (const row of recipientsResult.rows as Array<Record<string, unknown>>) {
       const localUserId = typeof row.local_user_id === 'string' ? row.local_user_id.trim() : ''
       const dingtalkUserId = typeof row.dingtalk_user_id === 'string' ? row.dingtalk_user_id.trim() : ''
+      const integrationId = typeof row.integration_id === 'string' ? row.integration_id.trim() : ''
       const isActive = row.local_user_active === true
       if (!localUserId || !isActive || !dingtalkUserId || recipientMap.has(localUserId)) continue
-      recipientMap.set(localUserId, { localUserId, dingtalkUserId })
+      recipientMap.set(localUserId, { localUserId, dingtalkUserId, integrationId })
     }
 
     const missingUserIds = userIds.filter((userId) => !recipientMap.has(userId))
@@ -2985,7 +3034,7 @@ export class AutomationExecutor {
 
     const resolvedRecipients = userIds
       .map((userId) => recipientMap.get(userId))
-      .filter((entry): entry is { localUserId: string; dingtalkUserId: string } => Boolean(entry))
+      .filter((entry): entry is { localUserId: string; dingtalkUserId: string; integrationId: string } => Boolean(entry))
     if (resolvedRecipients.length === 0) {
       return {
         actionType: 'send_dingtalk_person_message',
@@ -2998,7 +3047,24 @@ export class AutomationExecutor {
         },
       }
     }
-    const batches = chunkItems(resolvedRecipients, DINGTALK_PERSON_BATCH_SIZE)
+
+    // DT-OPS-04: a DingTalk userid only means anything inside its own corp, so each
+    // recipient must be notified with the credentials of the integration they are bound
+    // under. Recipients are grouped by integration and each group is sent with its own
+    // token — never refused. A rule whose audience spans two corps is a legitimate rule
+    // (a member group can hold both), and failing it would also abort the unrelated
+    // actions that follow it in `executeActions`, which fail-stops.
+    const recipientsByIntegration = new Map<string, typeof resolvedRecipients>()
+    for (const recipient of resolvedRecipients) {
+      const group = recipientsByIntegration.get(recipient.integrationId) ?? []
+      group.push(recipient)
+      recipientsByIntegration.set(recipient.integrationId, group)
+    }
+
+    const batches = Array.from(recipientsByIntegration.entries()).flatMap(
+      ([integrationId, recipients]) =>
+        chunkItems(recipients, DINGTALK_PERSON_BATCH_SIZE).map((batch) => ({ integrationId, batch })),
+    )
 
     // DT-HARDEN-06: recipients whose batch already reached DingTalk. A later batch
     // throwing must not re-mark them failed — that used to write BOTH a success and a
@@ -3006,19 +3072,31 @@ export class AutomationExecutor {
     const sentRecipients = new Set<(typeof resolvedRecipients)[number]>()
 
     try {
-      const messageConfig = await readDingTalkMessageConfigFromRuntime()
-      const accessToken = await fetchDingTalkAppAccessToken(messageConfig, { fetchFn: this.deps.fetchFn })
       let responseCount = 0
+      // One token per integration, fetched once and reused across that integration's batches.
+      type ResolvedCredentials = { messageConfig: Awaited<ReturnType<typeof readDingTalkMessageConfigFromRuntime>>; accessToken: string }
+      const configCache = new Map<string, ResolvedCredentials>()
 
-      for (const batch of batches) {
+      for (const { integrationId, batch } of batches) {
+        let credentials = configCache.get(integrationId)
+        if (!credentials) {
+          // Env-first resolution is preserved inside readDingTalkMessageConfigFromRuntime, so
+          // an env-configured deployment keeps its bootstrap behavior; only the stored-config
+          // path stops falling back to "latest active integration".
+          const messageConfig = await readDingTalkMessageConfigFromRuntime(integrationId)
+          const accessToken = await fetchDingTalkAppAccessToken(messageConfig, { fetchFn: this.deps.fetchFn })
+          credentials = { messageConfig, accessToken }
+          configCache.set(integrationId, credentials)
+        }
+
         const result = await sendDingTalkWorkNotification(
-          accessToken,
+          credentials.accessToken,
           {
             userIds: batch.map((recipient) => recipient.dingtalkUserId),
             title: renderedTitle,
             content: bodyWithLinks,
           },
-          messageConfig,
+          credentials.messageConfig,
           { fetchFn: this.deps.fetchFn },
         )
         const responseBody = stringifyResponseBody(result.raw)
@@ -3058,6 +3136,7 @@ export class AutomationExecutor {
           memberGroupRecipientFieldPath: memberGroupRecipientFieldPaths[0] ?? null,
           memberGroupRecipientFieldPaths,
           batchCount: batches.length,
+          integrationCount: recipientsByIntegration.size,
           linkCount: linkLines.length,
           responseCount,
         },
@@ -3379,9 +3458,14 @@ export class AutomationExecutor {
 
     for (const destination of orderedDestinations) {
       try {
+        // DT-HARDEN-03: destinations are stored encrypted; decrypt before URL
+        // validation and HMAC signing. Reading the raw column here would feed an
+        // `enc:` blob to normalizeDingTalkRobotWebhookUrl and fail every send.
         runtimeWebhookByDestinationId.set(destination.id, {
-          webhookUrl: normalizeDingTalkRobotWebhookUrl(destination.webhook_url),
-          secret: normalizeDingTalkRobotSecret(destination.secret ?? undefined),
+          webhookUrl: normalizeDingTalkRobotWebhookUrl(
+            decryptDingTalkDestinationWebhookUrl(destination.webhook_url),
+          ),
+          secret: normalizeDingTalkRobotSecret(decryptDingTalkDestinationSecret(destination.secret)),
         })
       } catch (err) {
         failedDestinations.push({

@@ -7,6 +7,78 @@
 
 ---
 
+## ⚠ 2026-07-08 审计校正 + 当前权威（S8 refresh — 读这里,别被下方历史注记误导）
+
+> **本账本正文写于 06-01,回填注记多停在 06-26,严重落后 origin/main。** 2026-07-08 三路审计
+> （账本档位 × refresh v3 阶梯 × **代码实证**）结论如下。下方 §0.x-§6 的历史注记是**准确的时点记录,不重写**,
+> 但**当前状态以本节 + 余量规划为权威**。基线更新:origin/main @ `8ec4da2a1`(2026-07-08)。
+>
+> **档位内能力 100% 闭环**（下方多处标 🟡 的 backfill 注记是过时快照,实际均已 ✅,勿重开发）:
+> - **C5 外发通知**:已 real DingTalk staging PASS 闭环 ✅（§0.3 表 L212;注记 L88/L90/L92「C5 保持 🟡」为历史）。
+> - **调度 D5 / 换班 SW5 / 小组织 SO3**:均 staging-proven ✅（§2 对账表 L213;各自 prep 注记「保持 🟡」为历史;
+>   2026-07-08 另在 on-prem 主机 222 对收官版 `972518a8f` 复证 PASS residue=0）。
+> - **HMR 人工缺卡提醒**:HMR-0..5 整线 ✅（HMR-5 于 on-prem 222 PASS `hmr5-smoke-run3` residue=0;§0.6）。
+> - MUST×6 / SHOULD×5 / OPTIONAL×3 / §0.5 四切片(RT/TA/销假/NS) / A2 自动写入 / 年假 L0-L6 / S2 内外勤 全 ✅。
+>
+> **真余量（= 当前目标池;详见 `attendance-benchmark-remaining-plan-20260708.md` #3925）**:
+> 1. **假配置落地缺陷**(admin UI 有旋钮、引擎零强制):**S1** overtimeBankPolicy.validityDays〔已修 #3927,与
+>    真旋钮 compTimeFromOvertime.expiresInDays 冲突〕→ **S1b** maxMinutesPerPeriod 每周期上限〔PROPOSED,3 分叉待 owner〕;
+>    **S2** requirePhoto 不在线上 zod;**S3** 年假计提无定时 job（手工路由触发）。
+> 2. **能力补齐**:S4 SMS/WeCom 渠道 · S5 报表 xlsx 导出 · S6 批量改余额 · **S7 A2 审批人 resolver**〔owner-gated,
+>    等看 A1 结构化审批编辑器 #3893 live 手感〕。
+> 3. **owner/operator 门**:五连 staging smoke（MP-6/HMR-5/AE-4/RD-4-5/OT-bank v1-8,harness 全备）· **E4 真机**（#3843,
+>    注册钉钉微应用）· 档 B 中央审批融合（治理门冻结）。
+> 4. **审计红线澄清**:服务端 `punchPolicy.geoFence` 经纬度围栏**已实现并 staging 实跑**（#2308）;§6 OUT 禁的是
+>    自研**原生/硬件级**围栏与设备绑定（WiFi/蓝牙/人脸/极速打卡/上班前推送均零命中,属新增能力须 owner 立项）。
+>
+> **方法红线（防再被坑）**:本账本的 backfill 注记 = 时点快照,常滞后;判断"还剩什么"**必须 `git log origin/main` +
+> 代码实证**,不可只读注记(本会话已两次被 stale 注记误导:S2、三条 staging 线)。
+
+---
+
+## ✅ 2026-07-10 余量池 Wave-1 落地回填（S8 之后读这里）
+
+> **#3925 计划的 decision-clean 池已清空。** 本波 9 个 PR 全 MERGED（每刀 design-lock RATIFIED → 实现 →
+> opus 对抗审 0 P1/P2 → merge → 验证 MD,mutation 自证累计 20+ 刀）:
+>
+> | 项 | PR / merge | 验证 MD |
+> |---|---|---|
+> | S1/S1b overtimeBank 双旋钮 | #3982 / #3993（前波已回填） | overtime-bank 两份 20260708/09 |
+> | **S2** requirePhoto 照片证据契约 | #4016 `0e118283b` | `attendance-outdoor-require-photo-s2-verification-20260710.md` |
+> | **S3** 年假计提 scheduler job | #4008 `e837c508f` | `attendance-annual-accrual-scheduler-s3-verification-20260710.md` |
+> | **S4** WeCom 通知渠道 adapter | #4028 `fd242899c` | `attendance-wecom-delivery-channel-s4-verification-20260710.md` |
+> | **S5** 报表 xlsx 导出 | #3961 `a8154c3b8` | `attendance-report-xlsx-export-s5-verification-20260710.md` |
+> | **S6** 年假余额批量调整 | #4023 `dbf23627a` | `attendance-bulk-balance-adjust-s6-verification-20260710.md` |
+> | **S8** tracker 刷新（记账债） | #3942 `a621a34ab` | （即上方 07-08 节） |
+> | R4 未绑定收件人→skipped | #3920 `d642b819d` | `attendance-r4-microapp-help-landing-verification-20260710.md` |
+> | E4 微应用帮助页+operator guide | #3966 `64312e255` | 同上 |
+>
+> **S2 附带三条 core 基底修正**（files 僵尸表接线 / userId 解析家族对齐 / 035 桥接 migration）并触发全仓
+> superseded-migrations 缺口审计（`superseded-legacy-migrations-gap-audit-20260710.md`,结论:其余缺口全为
+> 僵尸无立即高危;P0 建议 = CI 全新装 schema 护栏,owner 决策）。
+>
+> **余量（更新后口径）**:
+> 1. 🔒 **owner/operator 门不变**:S7 A2-resolver（等 A1 live 手感）· 五连 staging smoke · E4 真机注册 ·
+>    档 B 治理门 · T2 三项（§3.1 打卡切外勤 / #2 自助入口 / #8 多段夜班）。
+> 2. **P3 硬化小刀池 → Wave-2 两刀已合,但 owner 审阅（2026-07-10）REOPEN 硬化池,「已收口」口径作废**:
+>    H1 #4045 `4c0e11e2e` 判定成立 ✅;H2 #4044 `7a94997e5` 已合但暴露两个后续必修项——
+>    **F1〔P1〕文件资源级授权缺失**:files.ts 的 list/info/download/delete 只有 authenticate,任何登录用户可
+>    枚举/读取/删除他人考勤照片。属既有平台缺口,但 S2/H2 把敏感照片证据接入后**不得再作 OUT 排除**;
+>    owner 已明示授权开安全刀（至少 owner/org/业务 ACL 锁住四端点）。
+>    **F2〔P2〕删除顺序重造悬挂证据**:H2 的 delete 先 storage.delete 后删行——存储删成/DB 删败时二进制
+>    已消失而 files 行仍被 G2 当有效证据,恰是 H2 声称消灭的状态;改为 DB tombstone/失效**先行**,存储对象
+>    异步/补偿删除,并补 DB 删除失败注入测试。
+>    〔P3 措辞纠正〕magic-byte 是**格式前缀筛查**（BMP 仅 2 字节),不构成「文件为真实图片」的证明。
+>    **硬化池在 F1/F2 落地并复审通过前保持 OPEN**;考勤线亦非零待办（#4011 R8 quiet-hours 等仍 OPEN,
+>    属 DingTalk backlog 池车道）——本节口径 = 「本批主体实现已合」。
+> 3. **命名前置（按需立项）**:wecom directory population 线 · comp_time 单人调整 primitive ·
+>    SMS 渠道（供应商选型 owner 门）· >50 org 计提 fairness 轮转。
+> 4. **新增 owner 决策项（H1 审阅产出）**:never-configured vs suspended 收窄（`has_active/has_any` 双谓词,
+>    从未配集成的 org→安静 skip、仅 suspended→retryable）——收窄了已 ratify 的「无 active 行→retryable」
+>    决定,需 owner ack 后另刀。
+
+---
+
 ## 0. 三视野（北极星）
 
 | 视野 | 范围 | 量级 | 现在做？ |

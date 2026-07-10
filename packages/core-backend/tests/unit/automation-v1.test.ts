@@ -6,6 +6,7 @@ import { matchesTrigger, TRIGGER_TYPE_BY_EVENT, ALL_TRIGGER_TYPES } from '../../
 import type { AutomationTrigger, AutomationTriggerType } from '../../src/multitable/automation-triggers'
 import { EventBus } from '../../src/integration/events/event-bus'
 import { __resetDingTalkAppAccessTokenCacheForTests } from '../../src/integrations/dingtalk/client'
+import { encryptStoredSecretValue } from '../../src/security/encrypted-secrets'
 import { ALL_ACTION_TYPES, type AutomationAction } from '../../src/multitable/automation-actions'
 
 // ── DB mock for AutomationLogService ──────────────────────────────────────
@@ -644,6 +645,51 @@ describe('AutomationExecutor', () => {
     expect(payload.markdown.text).toContain('/multitable/sheet_1/view_grid?recordId=r1')
     expect(payload.markdown.text).toContain('处理权限：需登录系统并具备该表格/视图访问权限')
     expect((queryFn.mock.calls[3]?.[0] as string) ?? '').toContain('INSERT INTO dingtalk_group_deliveries')
+  })
+
+  // DT-HARDEN-03: destinations are stored encrypted. The send path must decrypt before
+  // URL validation + HMAC signing — reading the raw column would feed an `enc:` blob to
+  // normalizeDingTalkRobotWebhookUrl and break every group delivery in production.
+  it('decrypts an encrypted destination before signing and sending (DT-HARDEN-03)', async () => {
+    process.env.ENCRYPTION_KEY = process.env.ENCRYPTION_KEY || 'unit-test-key'
+    process.env.ENCRYPTION_SALT = process.env.ENCRYPTION_SALT || 'unit-test-salt'
+    const plainWebhook = 'https://oapi.dingtalk.com/robot/send?access_token=secret-token'
+    const encryptedWebhook = encryptStoredSecretValue(plainWebhook)
+    const encryptedSecret = encryptStoredSecretValue('SECunit0123456789')
+    expect(encryptedWebhook).not.toContain('secret-token')
+
+    const queryFn = vi.fn()
+      .mockResolvedValueOnce({
+        rows: [{ id: 'dt_1', name: 'Ops Group', webhook_url: encryptedWebhook, secret: encryptedSecret, enabled: true }],
+      })
+    const fetchFn = vi.fn(async () => new Response(JSON.stringify({ errcode: 0, errmsg: 'ok' }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    })) as unknown as typeof fetch
+
+    deps = createMockDeps({ queryFn, fetchFn })
+    executor = new AutomationExecutor(deps)
+
+    const rule = createMockRule({
+      actions: [{
+        type: 'send_dingtalk_group_message',
+        config: { destinationId: 'dt_1', titleTemplate: 'T', bodyTemplate: 'B' },
+      }],
+    })
+    const result = await executor.execute(rule, {
+      recordId: 'r1',
+      data: {},
+      sheetId: 'sheet_1',
+      actorId: 'user_1',
+    })
+
+    expect(result.status).toBe('success')
+    const [url] = fetchFn.mock.calls[0] as [string, RequestInit]
+    // Sent to the decrypted URL, signed with the decrypted secret.
+    expect(url).toContain('https://oapi.dingtalk.com/robot/send?access_token=secret-token')
+    expect(url).not.toContain('enc:')
+    expect(url).toContain('sign=')
+    expect(url).toContain('timestamp=')
   })
 
   it('fails send_dingtalk_group_message when the internal processing view is not in the sheet', async () => {
@@ -1485,6 +1531,78 @@ describe('AutomationExecutor', () => {
     expect(payload.msg.markdown.text.endsWith('…')).toBe(true)
     expect(payload.msg.markdown.text.length).toBeLessThan(oversizedBody.length)
     expect(payload.msg.markdown.text.length).toBeLessThan(20_200)
+  })
+
+  // DT-OPS-04. NOTE what this test can and cannot prove. It sets DINGTALK_APP_KEY, and
+  // `readDingTalkMessageConfigFromRuntime` returns env config BEFORE it consults the
+  // integrationId argument — so the scoping itself is INVISIBLE here, and the assertion below
+  // is a string pin on the SQL, nothing more. The behaviour (corp A's employee gets corp A's
+  // token, corp B's gets corp B's) is proved with no env vars and real stored credentials in
+  // `tests/integration/dingtalk-person-message-integration-scoping.db.test.ts`.
+  it('surfaces the binding integration_id in the recipient query (DT-OPS-04 SQL shape)', async () => {
+    process.env.DINGTALK_APP_KEY = 'dt-app-key'
+    process.env.DINGTALK_APP_SECRET = 'dt-app-secret'
+    process.env.DINGTALK_AGENT_ID = '123456789'
+
+    const queryFn = vi.fn()
+      .mockResolvedValueOnce({
+        rows: [{ local_user_id: 'user_1', local_user_active: true, dingtalk_user_id: 'dt-1', integration_id: 'dir-A' }],
+      })
+      .mockResolvedValue({ rows: [] })
+    const fetchFn = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ access_token: 'tok' }), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ errcode: 0, errmsg: 'ok' }), { status: 200, headers: { 'Content-Type': 'application/json' } })) as unknown as typeof fetch
+
+    deps = createMockDeps({ queryFn, fetchFn })
+    executor = new AutomationExecutor(deps)
+
+    const rule = createMockRule({
+      actions: [{ type: 'send_dingtalk_person_message', config: { userIds: ['user_1'], titleTemplate: 'T', bodyTemplate: 'B' } }],
+    })
+    const result = await executor.execute(rule, { recordId: 'r1', data: {}, sheetId: 'sheet_1', actorId: 'user_1' })
+
+    expect(result.status).toBe('success')
+    // The recipient query must surface the binding's integration so the config resolver
+    // can be scoped to it.
+    expect(String(queryFn.mock.calls[0]?.[0] ?? '')).toContain('integration_id')
+  })
+
+  // §7.5 asked for correct credentials, never for a refusal — and a refusal would ALSO abort
+  // the unrelated actions that follow, because `executeActions` fail-stops. Recipients are
+  // grouped by integration and each group is sent with its own token. Which token reaches
+  // which recipient is env-free and proved in the real-DB lane (see the note above).
+  it('splits a two-corp audience into one batch per integration rather than refusing (DT-OPS-04)', async () => {
+    process.env.DINGTALK_APP_KEY = 'dt-app-key'
+    process.env.DINGTALK_APP_SECRET = 'dt-app-secret'
+    process.env.DINGTALK_AGENT_ID = '123456789'
+
+    const queryFn = vi.fn()
+      .mockResolvedValueOnce({
+        rows: [
+          { local_user_id: 'user_1', local_user_active: true, dingtalk_user_id: 'dt-1', integration_id: 'dir-A' },
+          { local_user_id: 'user_2', local_user_active: true, dingtalk_user_id: 'dt-2', integration_id: 'dir-B' },
+        ],
+      })
+      .mockResolvedValue({ rows: [] })
+    const fetchFn = vi.fn()
+      .mockResolvedValue(new Response(JSON.stringify({ errcode: 0, errmsg: 'ok', access_token: 'tok', expires_in: 7200 }), { status: 200, headers: { 'Content-Type': 'application/json' } })) as unknown as typeof fetch
+
+    deps = createMockDeps({ queryFn, fetchFn })
+    executor = new AutomationExecutor(deps)
+
+    const rule = createMockRule({
+      actions: [{ type: 'send_dingtalk_person_message', config: { userIds: ['user_1', 'user_2'], titleTemplate: 'T', bodyTemplate: 'B' } }],
+    })
+    const result = await executor.execute(rule, { recordId: 'r1', data: {}, sheetId: 'sheet_1', actorId: 'user_1' })
+
+    expect(result.status).toBe('success')
+    expect(result.steps[0]?.output).toMatchObject({ notifiedUsers: 2, integrationCount: 2, batchCount: 2 })
+
+    // Two corps → two sends, and a corp's userid is never carried in the other corp's batch.
+    const sends = (fetchFn as unknown as ReturnType<typeof vi.fn>).mock.calls
+      .filter((call) => String(call[0] ?? '').includes('asyncsend'))
+      .map((call) => JSON.parse(String((call[1] as RequestInit).body ?? '{}')).userid_list as string)
+    expect(sends.sort()).toEqual(['dt-1', 'dt-2'])
   })
 
   it('fails send_dingtalk_person_message when the internal processing view is not in the sheet', async () => {
