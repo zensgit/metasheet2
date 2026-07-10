@@ -11,15 +11,21 @@ import { Logger } from '../core/logger'
 import { StorageServiceImpl } from '../services/StorageService'
 import { db } from '../db/db'
 import { sniffImageContentType } from '../services/imageMagicBytes'
-import { getFilesRequestUserId, isFilesRequestAdmin, filesAclAllowsAccess, type FilesAclRow } from '../services/filesAcl'
+import { getFilesRequestUserId, isFilesRequestAdmin, filesAclAllowsAccess, type FilesAclRecord } from '../services/filesAcl'
+import { deriveStorageKeyFromUrl, getFilesStorageBaseUrl, isPoisonedStorageKey } from '../services/filesStorageKey'
 import * as path from 'path'
 import { loadMulter, createUploadMiddleware } from '../types/multer'
 import type { RequestWithFiles } from '../types/multer'
 
 const logger = new Logger('FilesRouter')
 
-interface FilesOwnerRow {
+interface FilesRowRaw {
   owner_id: string | null
+  deleted_at: Date | null
+  storage_key: string | null
+  url: string | null
+  meta: Record<string, unknown> | null
+  created_at: Date
 }
 
 interface FilesListRow {
@@ -31,17 +37,77 @@ interface FilesListRow {
 }
 
 /**
- * F1 files-acl-tombstone design-lock (2026-07-10): the single row lookup every ACL-gated endpoint
- * (list/info/download/delete) uses to decide ownership. `deleted_at IS NULL` makes a tombstoned row
- * (F2) read as "no active row" here too — the same filter list/info/download/delete's own
- * consumption paths apply, so a deleted file is uniformly invisible everywhere, not just to G2.
+ * F3 files-storage-integrity design-lock (2026-07-10), G3 + G7: the single `files` row lookup every
+ * ACL-gated endpoint (info/download/delete) uses. Unlike F1's `loadActiveFileOwner` (which filtered
+ * `deleted_at IS NULL` and returned a binary null/row), this returns the THREE-state `FilesAclRecord`
+ * (missing / active / deleted) so `filesAclAllowsAccess` can deny a tombstoned file for everyone incl
+ * admin (G7). It ALSO returns `storage_key` / `url` / `meta` / `created_at` in the SAME query, so the
+ * download and info routes serve an active row entirely from THIS DB row — ACL + physical-key + response
+ * headers from one SELECT — never touching the storage provider's in-memory disk-scan index (G3: no
+ * warmup window, no id-drift). No `deleted_at IS NULL` filter here — the state is the discriminant.
  */
-async function loadActiveFileOwner(id: string): Promise<FilesAclRow | null> {
-  const result = await sql<FilesOwnerRow>`
-    SELECT owner_id FROM files WHERE id = ${id} AND deleted_at IS NULL
+interface FilesRowDetail {
+  record: FilesAclRecord
+  storageKey: string | null
+  url: string | null
+  meta: Record<string, unknown> | null
+  createdAt: Date | null
+}
+
+async function loadFileRecord(id: string): Promise<FilesRowDetail> {
+  const result = await sql<FilesRowRaw>`
+    SELECT owner_id, deleted_at, storage_key, url, meta, created_at FROM files WHERE id = ${id}
   `.execute(db)
   const row = result.rows[0]
-  return row ? { ownerId: row.owner_id } : null
+  if (!row) {
+    return { record: { state: 'missing' }, storageKey: null, url: null, meta: null, createdAt: null }
+  }
+  if (row.deleted_at != null) {
+    return { record: { state: 'deleted' }, storageKey: null, url: null, meta: null, createdAt: null }
+  }
+  return {
+    record: { state: 'active', ownerId: row.owner_id },
+    storageKey: row.storage_key,
+    url: row.url,
+    meta: row.meta,
+    createdAt: row.created_at,
+  }
+}
+
+/**
+ * G3/G5/E: resolve the physical storage key for an ACTIVE row. Prefers the persisted `storage_key`
+ * (authoritative for every file written after F3, and for rows the migration backfilled); falls back to
+ * deriving it from `url` via the controlled `deriveStorageKeyFromUrl` (owner guard E: same-origin only,
+ * raw+decoded traversal rejected) for extremely old rows the backfill did not reach. Returns `null` when
+ * neither yields a safe key (→ the route 404s, fail-closed). `derivedFromUrl` tells the caller whether to
+ * write the recovered key back so the next read is a direct `storage_key` hit (E).
+ */
+function resolveActiveStorageKey(detail: FilesRowDetail): { key: string; derivedFromUrl: boolean } | null {
+  const persisted = detail.storageKey
+  if (typeof persisted === 'string' && persisted.length > 0) {
+    // Owner guard D/G (poison), CORRECTNESS CORE: a quarantined row is fail-closed. Reject it HERE —
+    // before the url-fallback below and before any provider call — and NEVER re-derive a key from its
+    // (deliberately preserved) `url`, which would wash the poison away and re-expose the ambiguous blob.
+    if (isPoisonedStorageKey(persisted)) {
+      return null
+    }
+    return { key: persisted, derivedFromUrl: false }
+  }
+  const derived = deriveStorageKeyFromUrl(detail.url, getFilesStorageBaseUrl())
+  if (derived) {
+    return { key: derived, derivedFromUrl: true }
+  }
+  return null
+}
+
+function metaString(meta: Record<string, unknown> | null, key: string): string | undefined {
+  const value = meta?.[key]
+  return typeof value === 'string' ? value : undefined
+}
+
+function metaNumber(meta: Record<string, unknown> | null, key: string): number | undefined {
+  const value = meta?.[key]
+  return typeof value === 'number' ? value : undefined
 }
 
 // Storage service singleton - initialized lazily
@@ -121,8 +187,13 @@ export function filesRouter(): Router {
           // consumers (attendance G2) to decide what a miss means in their own domain.
           const sniffedContentType = sniffImageContentType(file.buffer)
           try {
+            // F3 design-lock G3: persist the server-derived `storage_key` (`<uuid>/<safeBasename>`) so
+            // every future download/info locates the physical object by this deterministic key straight
+            // from the DB row — never through the drifting in-memory disk-scan index. `result.storageKey`
+            // is set by the local provider; `result.path` is the same value (belt for any provider that
+            // only populated `path`).
             await sql`
-              INSERT INTO files (id, url, owner_id, meta, created_at)
+              INSERT INTO files (id, url, owner_id, meta, storage_key, created_at)
               VALUES (
                 ${result.id},
                 ${result.url},
@@ -134,6 +205,7 @@ export function filesRouter(): Router {
                   sniffed: true,
                   ...(sniffedContentType ? { sniffedContentType } : {})
                 })}::jsonb,
+                ${result.storageKey ?? result.path},
                 now()
               )
             `.execute(db)
@@ -177,31 +249,61 @@ export function filesRouter(): Router {
 
       // F1 files-acl-tombstone design-lock (2026-07-10): owner-or-admin, else 404 (not 403 — a 403
       // would confirm the id exists to a caller who isn't allowed to see it; 404 is indistinguishable
-      // from a genuinely nonexistent id).
+      // from a genuinely nonexistent id). F3 G7: a tombstoned (deleted) record is now 404 for everyone
+      // incl admin.
       const callerId = getFilesRequestUserId(req)
       const admin = await isFilesRequestAdmin(req)
-      const row = await loadActiveFileOwner(id)
-      if (!filesAclAllowsAccess({ admin, callerId, row })) {
+      const detail = await loadFileRecord(id)
+      if (!filesAclAllowsAccess({ admin, callerId, record: detail.record })) {
         return res.status(404).json({ error: 'File not found' })
       }
 
       const storage = getStorageService()
 
-      // Check if file exists
+      if (detail.record.state === 'active') {
+        // F3 design-lock G3: read the physical object by the DB `storage_key` directly. The old
+        // `getFileInfo(id)` precheck went through the in-memory disk-scan index; keeping it would 404 a
+        // valid file whenever that index is cold (a fresh process before/without `buildFileIndex`, an
+        // md5-drifted rebuild) BEFORE we ever reach the key read — silently defeating G3. So it is gone
+        // on this path: the DB row already told us the file is servable and gave us its key + headers.
+        const resolved = resolveActiveStorageKey(detail)
+        if (!resolved) {
+          return res.status(404).json({ error: 'File not found' })
+        }
+        const buffer = await storage.downloadByKey(resolved.key)
+
+        // Owner guard E: after a successful url-fallback read, write the recovered key back so the next
+        // read is a direct `storage_key` hit (no permanent dual-track). Best-effort — a unique-index
+        // rejection (a collision the migration should have caught) or any DB error is logged and
+        // swallowed; the read already succeeded and evidence integrity does not depend on the writeback.
+        if (resolved.derivedFromUrl) {
+          try {
+            await sql`
+              UPDATE files SET storage_key = ${resolved.key} WHERE id = ${id} AND storage_key IS NULL
+            `.execute(db)
+          } catch (writebackErr) {
+            logger.warn(`Failed to backfill storage_key for ${id} after url-fallback read`, writebackErr instanceof Error ? writebackErr : undefined)
+          }
+        }
+
+        res.setHeader('Content-Type', metaString(detail.meta, 'contentType') || 'application/octet-stream')
+        res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(metaString(detail.meta, 'filename') || 'download')}"`)
+        res.setHeader('Content-Length', buffer.length)
+        logger.info(`File downloaded: ${id}`)
+        return res.send(buffer)
+      }
+
+      // `missing` + admin (reached the gate only as admin): a legacy object with no `files` row and thus
+      // no `storage_key` — unchanged pre-F3 behavior, served via the legacy in-memory index path.
       const fileInfo = await storage.getFileInfo(id)
       if (!fileInfo) {
         return res.status(404).json({ error: 'File not found' })
       }
-
-      // Download file content
       const buffer = await storage.download(id)
-
-      // Set headers for download
       res.setHeader('Content-Type', fileInfo.contentType || 'application/octet-stream')
       res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(fileInfo.filename || 'download')}"`)
       res.setHeader('Content-Length', buffer.length)
-
-      logger.info(`File downloaded: ${id}`)
+      logger.info(`File downloaded (legacy no-row path): ${id}`)
       res.send(buffer)
     } catch (error) {
       logger.error('Failed to download file', error instanceof Error ? error : undefined)
@@ -215,24 +317,42 @@ export function filesRouter(): Router {
       const { id } = req.params
 
       // F1 files-acl-tombstone design-lock (2026-07-10): owner-or-admin, else 404 (see rationale on
-      // the download route above — same predicate, same anti-enumeration reasoning).
+      // the download route above — same predicate, same anti-enumeration reasoning). F3 G7: deleted → 404
+      // for everyone incl admin.
       const callerId = getFilesRequestUserId(req)
       const admin = await isFilesRequestAdmin(req)
-      const row = await loadActiveFileOwner(id)
-      if (!filesAclAllowsAccess({ admin, callerId, row })) {
+      const detail = await loadFileRecord(id)
+      if (!filesAclAllowsAccess({ admin, callerId, record: detail.record })) {
         return res.status(404).json({ error: 'File not found' })
       }
 
       const storage = getStorageService()
 
+      if (detail.record.state === 'active') {
+        // F3 design-lock G3: serve the info response entirely from the DB row — no `getFileInfo(id)`
+        // hit against the in-memory index (which the info route, like download, must not depend on).
+        // `path` is the storage key; `updatedAt` collapses to `created_at` because the `files` table has
+        // no separate mtime column (behavior-change note in the PR body).
+        res.json({
+          id,
+          filename: metaString(detail.meta, 'filename') ?? null,
+          size: metaNumber(detail.meta, 'size') ?? null,
+          contentType: metaString(detail.meta, 'contentType') ?? null,
+          path: resolveActiveStorageKey(detail)?.key ?? null,
+          url: detail.url,
+          metadata: detail.meta ?? {},
+          createdAt: detail.createdAt,
+          updatedAt: detail.createdAt
+        })
+        return
+      }
+
+      // `missing` + admin: legacy no-row object, unchanged pre-F3 behavior via the in-memory index.
       const fileInfo = await storage.getFileInfo(id)
       if (!fileInfo) {
         return res.status(404).json({ error: 'File not found' })
       }
-
-      // Get download URL
       const url = await storage.getFileUrl(id, { expiresIn: 3600 })
-
       res.json({
         id: fileInfo.id,
         filename: fileInfo.filename,
@@ -257,17 +377,19 @@ export function filesRouter(): Router {
       const callerId = getFilesRequestUserId(req)
 
       // F1 files-acl-tombstone design-lock (2026-07-10): owner-or-admin, else 404 (see rationale on
-      // the download route above). This lookup also doubles as F2's "does an active row exist"
-      // branch decision below — a caller who fails this gate never reaches storage either way.
+      // the download route above). F3 G7: `deleted` is 404 for everyone incl admin at THIS gate, so an
+      // already-tombstoned id never reaches the branch below — it is never double-tombstoned and its
+      // (compensating-cleanup) blob is never re-deleted here. Past the gate the state is therefore only
+      // `active` (owner or admin) or `missing` (admin only).
       const admin = await isFilesRequestAdmin(req)
-      const row = await loadActiveFileOwner(id)
-      if (!filesAclAllowsAccess({ admin, callerId, row })) {
+      const detail = await loadFileRecord(id)
+      if (!filesAclAllowsAccess({ admin, callerId, record: detail.record })) {
         return res.status(404).json({ error: 'File not found' })
       }
 
       const storage = getStorageService()
 
-      if (row) {
+      if (detail.record.state === 'active') {
         // F2 files-acl-tombstone design-lock (2026-07-10): tombstone-first delete order. The
         // previous order (storage.delete → `DELETE FROM files`) could split on a mid-operation
         // failure: storage succeeds, the row delete fails → the binary is gone but the row still
@@ -301,11 +423,10 @@ export function filesRouter(): Router {
         return res.json({ success: true, id })
       }
 
-      // No active `files` row for this id — a legacy object that predates the S2 writer (migration
-      // 035 never had one either) or an id that was already fully processed by the branch above.
-      // Unaffected by the tombstone change: unchanged pre-F2 behavior (storage-existence-gated
-      // delete, no row to tombstone). Reaching this branch already required admin (a non-admin with
-      // no matching row was rejected by the ACL gate above).
+      // `missing` state: no `files` row for this id — a legacy object that predates the S2 writer
+      // (migration 035 never had one either). Unchanged pre-F2 behavior (storage-existence-gated delete,
+      // no row to tombstone). Reaching this branch already required admin — a non-admin with a missing
+      // record, and everyone with a deleted record, were rejected by the ACL gate above.
       const exists = await storage.exists(id)
       if (!exists) {
         return res.status(404).json({ error: 'File not found' })
