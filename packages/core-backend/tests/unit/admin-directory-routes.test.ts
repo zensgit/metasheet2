@@ -4,10 +4,10 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 // so `new DirectorySyncInProgressError(...)` here is the same constructor the
 // route's `instanceof` discriminates against in production.
 import { DirectorySyncInProgressError } from '../../src/directory/directory-sync'
-// NOT mocked below — these are the REAL multitable automation scheduler functions the
-// admin-directory routes reuse for schedule_cron save-time validation (roadmap §7.8). Importing them
-// directly here pins their actual acceptance semantics, independent of any route-level mock.
-import { cronHasNoMatchingDay, parseCronExpression } from '../../src/multitable/automation-scheduler'
+// NOT mocked below — this is the REAL class the admin-directory routes reuse for schedule_cron save-time
+// validation (roadmap §7.8), and the SAME class `directory-sync-scheduler.ts` uses to actually run the
+// job. Importing it directly here pins its actual acceptance semantics, independent of any route-level mock.
+import { SimpleCronExpression } from '../../src/services/SchedulerService'
 
 const rbacMocks = vi.hoisted(() => ({
   isRbacAdmin: vi.fn(),
@@ -1775,14 +1775,21 @@ describe('adminDirectoryRouter', () => {
   })
 })
 
-// Direct boundary-case pin for the multitable automation scheduler's cron grammar
-// (`packages/core-backend/src/multitable/automation-scheduler.ts`), which the admin-directory
-// create/update routes reuse (see `isDirectoryScheduleCronValid` in `../../src/routes/admin-directory`)
-// rather than adding a new cron-parsing dependency. `isValidPerRoute` below mirrors the route's own
-// combining logic exactly: `parseCronExpression(cron) && !cronHasNoMatchingDay(cron)`.
-describe('reused cron validator boundary semantics (multitable automation-scheduler)', () => {
+// Direct boundary-case pin for `SimpleCronExpression` (`packages/core-backend/src/services/SchedulerService.ts`),
+// which the admin-directory create/update routes reuse for schedule_cron save-time validation (roadmap
+// §7.8; see `isDirectoryScheduleCronValid` in `../../src/routes/admin-directory`) — deliberately NOT the
+// multitable automation scheduler's own cron parser (`multitable/automation-scheduler.ts`), because that
+// parser disagrees with `SimpleCronExpression` on day-of-month + day-of-week combination semantics (OR vs
+// AND — see the second test below) and `SimpleCronExpression` is the class `directory-sync-scheduler.ts`
+// actually uses to run the job, so it's the one whose "would this ever fire" verdict must be pinned.
+// `isValidPerRoute` mirrors the route's own combining logic exactly.
+describe('reused cron validator boundary semantics (SimpleCronExpression / SchedulerService)', () => {
   function isValidPerRoute(cron: string): boolean {
-    return parseCronExpression(cron) !== null && !cronHasNoMatchingDay(cron)
+    try {
+      return new SimpleCronExpression(cron, 'UTC').hasNext()
+    } catch {
+      return false
+    }
   }
 
   it.each([
@@ -1792,8 +1799,7 @@ describe('reused cron validator boundary semantics (multitable automation-schedu
     ['comma list of minutes', '0,15,30,45 * * * *', true],
     ['range with step', '0 9-17/2 * * *', true],
     ['Sunday as 7 (cron convention)', '0 0 * * 7', true],
-    ['Feb 29th (leap day — reachable)', '0 0 29 2 *', true],
-    ['every Monday in February (DOM/DOW OR-semantics)', '0 0 30 2 1', true],
+    ['every Monday (day-of-month wildcard + weekday restricted)', '0 0 * * 1', true],
     ['6-field with seconds is NOT accepted', '0 0 2 * * *', false],
     ['4-field is NOT accepted', '0 2 * *', false],
     ['nonsense text', 'not a cron', false],
@@ -1803,18 +1809,27 @@ describe('reused cron validator boundary semantics (multitable automation-schedu
     ['out-of-range month (13)', '0 0 1 13 *', false],
     ['negative value', '-1 * * * *', false],
     ['zero step', '*/0 * * * *', false],
-    ['Feb 30th (impossible calendar day)', '0 0 30 2 *', false],
+    ['Feb 30th (impossible calendar day, day-of-week wildcard)', '0 0 30 2 *', false],
+    ['day-of-month 30 AND weekday Monday in February — impossible under AND-semantics', '0 0 30 2 1', false],
     ['empty string', '', false],
     ['whitespace only', '   ', false],
   ])('%s -> %s (%s)', (_label, cron, expected) => {
     expect(isValidPerRoute(cron)).toBe(expected)
   })
 
-  it('parseCronExpression alone does not catch the Feb 30th case (cronHasNoMatchingDay is load-bearing)', () => {
-    // Per-field bounds (day-of-month 1-31, month 1-12) are individually satisfied by "30 2" even
-    // though no February ever has a 30th — this is exactly why the route composes BOTH functions,
-    // not just parseCronExpression.
-    expect(parseCronExpression('0 0 30 2 *')).not.toBeNull()
-    expect(cronHasNoMatchingDay('0 0 30 2 *')).toBe(true)
+  it('documents WHY this reuses SimpleCronExpression instead of the multitable automation cron parser', async () => {
+    // The multitable parser (`multitable/automation-scheduler.ts`) uses standard cron OR-semantics for
+    // day-of-month + day-of-week: it would accept `0 0 30 2 1` as schedulable ("any Monday in February").
+    // `SimpleCronExpression` (what `directory-sync-scheduler.ts` actually runs on) ANDs every field
+    // instead, so it can NEVER match (no February 30th exists) and rejects it. Validating against the
+    // multitable parser would have let this save as "valid" while the real scheduler silently dropped it
+    // forever — exactly the bug roadmap §7.8 exists to close. This test fails loudly if the multitable
+    // parser's semantics ever change to match `SimpleCronExpression`'s (at which point this comment, and
+    // the design tradeoff it documents, should be revisited).
+    const { parseCronExpression, cronHasNoMatchingDay } = await import('../../src/multitable/automation-scheduler')
+    const cron = '0 0 30 2 1'
+    expect(parseCronExpression(cron)).not.toBeNull()
+    expect(cronHasNoMatchingDay(cron)).toBe(false) // multitable parser: OR-semantics -> "reachable"
+    expect(isValidPerRoute(cron)).toBe(false) // SimpleCronExpression: AND-semantics -> never fires
   })
 })

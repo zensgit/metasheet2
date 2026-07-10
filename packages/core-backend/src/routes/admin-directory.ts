@@ -38,10 +38,11 @@ import {
   saveApprovalCardPublicAppUrl,
 } from '../integrations/dingtalk/approval-card-config'
 import { refreshDirectoryIntegrationSchedule } from '../directory/directory-sync-scheduler'
-// Roadmap §7.8 "Validate cron at save time" reuses the multitable automation scheduler's cron grammar
-// instead of adding a new cron-parsing dependency — see `isDirectoryScheduleCronValid` below.
-import { cronHasNoMatchingDay, parseCronExpression } from '../multitable/automation-scheduler'
 import { isAdmin as isRbacAdmin } from '../rbac/service'
+// Roadmap §7.8 "Validate cron at save time" — see `isDirectoryScheduleCronValid` below for why this is
+// `SimpleCronExpression` (the SAME class `directory-sync-scheduler.ts` uses to actually run the job) rather
+// than the multitable automation scheduler's own cron parser.
+import { SimpleCronExpression } from '../services/SchedulerService'
 import { jsonError, jsonOk, parsePagination } from '../util/response'
 
 const logger = new Logger('AdminDirectoryRoutes')
@@ -88,30 +89,40 @@ function normalizeScheduleCronInput(value: unknown): string {
  * on a bad expression; the catch block just does `logger.warn(...)` and leaves the job unscheduled. The
  * admin believes they scheduled a sync and nothing ever runs, with no error surfaced anywhere.
  *
- * This reuses the multitable automation scheduler's cron grammar (`packages/core-backend/src/multitable/
- * automation-scheduler.ts`) rather than adding a new cron-parsing dependency: `parseCronExpression` enforces
- * the standard 5-field `minute hour dayOfMonth month dayOfWeek` grammar (the same field shape the directory
- * scheduler's own parser — `SimpleCronExpression` in `services/SchedulerService.ts` — expects), and
- * `cronHasNoMatchingDay` additionally rejects an expression that parses cleanly but can never land on a real
- * calendar day (e.g. `0 0 30 2 *`, February 30th) so a "syntactically fine" cron doesn't sit silently
- * unscheduled forever either.
+ * DELIBERATELY uses `SimpleCronExpression` (`services/SchedulerService.ts`) rather than the multitable
+ * automation scheduler's own cron parser (`multitable/automation-scheduler.ts`'s `parseCronExpression` /
+ * `cronHasNoMatchingDay`). Both parse the standard 5-field grammar, but they are two INDEPENDENT
+ * implementations that disagree on day-of-month + day-of-week combination semantics: the multitable parser
+ * uses standard cron OR-semantics (either restriction can match), while `SimpleCronExpression.matches()`
+ * ANDs every field. E.g. `0 0 30 2 1` (a Monday in February) is schedulable under OR-semantics but is
+ * IMPOSSIBLE under `SimpleCronExpression`'s AND-semantics (no February ever has a 30th, so `hasNext()` never
+ * finds a match) — `directory-sync-scheduler.ts` runs on `SimpleCronExpression`, so validating against the
+ * multitable parser would have let that expression save as "valid" while the scheduler silently dropped it
+ * forever, defeating the entire point of this gate. Reusing `SimpleCronExpression` itself — already the
+ * underlying lib the directory scheduler depends on (`directory-sync-scheduler.ts` → `SchedulerServiceImpl`
+ * → `SimpleCronExpression`) — guarantees byte-for-byte parity with what will actually be scheduled, at the
+ * cost of a bounded scan (up to ~366 days of minutes; ~40ms worst case, measured) instead of an O(1) check.
  *
  * TIMEZONE: the directory sync scheduler always runs `schedule_cron` in UTC — `directory-sync-scheduler.ts`
- * hardcodes `timezone: 'UTC'` at `applySchedule`. There is no per-integration timezone yet (roadmap §7.8
- * "Add timezone support" is a separate, not-yet-built follow-up); a `schedule_cron` saved here is UTC
- * wall-clock time, not the admin's local timezone.
+ * hardcodes `timezone: 'UTC'` at `applySchedule`, and this validates with the same fixed `'UTC'`. There is
+ * no per-integration timezone yet (roadmap §7.8 "Add timezone support" is a separate, not-yet-built
+ * follow-up); a `schedule_cron` saved here is UTC wall-clock time, not the admin's local timezone.
  */
 function isDirectoryScheduleCronValid(cron: string): boolean {
-  const parsed = parseCronExpression(cron)
-  if (!parsed) return false
-  return !cronHasNoMatchingDay(cron)
+  try {
+    return new SimpleCronExpression(cron, 'UTC').hasNext()
+  } catch {
+    return false
+  }
 }
 
 const DIRECTORY_SCHEDULE_CRON_ERROR_MESSAGE =
   'scheduleCron is not a valid schedule. Expected a standard 5-field cron expression ' +
-  '(minute hour dayOfMonth month dayOfWeek — e.g. "0 2 * * *"); the expression must also resolve to at ' +
-  'least one real calendar day. DingTalk directory sync always runs on UTC wall-clock time — ' +
-  'per-integration timezones are not supported yet. Leave scheduleCron empty to disable the scheduled sync.'
+  '(minute hour dayOfMonth month dayOfWeek — e.g. "0 2 * * *") that resolves to at least one execution ' +
+  'within the next year (day-of-month and day-of-week restrictions combine with AND, so e.g. a day-of-month ' +
+  'that never falls on the requested weekday is rejected). DingTalk directory sync always runs on UTC ' +
+  'wall-clock time — per-integration timezones are not supported yet. Leave scheduleCron empty to disable ' +
+  'the scheduled sync.'
 
 function getRequestUserId(req: Request): string {
   const raw = req.user as Record<string, unknown> | undefined
