@@ -605,6 +605,158 @@ describeIfDatabase('Attendance C5 notification delivery outbox', () => {
     }
   })
 
+  it('H1 (review #3920 P3-1): org has NO active integration (suspended, not absent) -> retryable failure lands `retrying`, NOT `skipped` — DingTalk + WeCom parity', async () => {
+    if (!dbUrl) throw new Error('DATABASE_URL is required for this integration test')
+    const publicPool = new Pool({ connectionString: dbUrl })
+    const runSuffix = Date.now().toString(36)
+    const orgId = `h1-org-inactive-${runSuffix}`
+    const dingTalkRecipientUserId = `u-h1-dingtalk-${runSuffix}`
+    const weComRecipientUserId = `u-h1-wecom-${runSuffix}`
+    const dingTalkIntegrationId = randomUUID()
+    const weComIntegrationId = randomUUID()
+    const dingTalkSourceId = randomUUID()
+    const weComSourceId = randomUUID()
+    let dingTalkDeliveryId = ''
+    let weComDeliveryId = ''
+    const dingTalkConfig: DingTalkMessageConfig = {
+      appKey: 'dt-app-key',
+      appSecret: 'dt-app-secret',
+      agentId: '123456789',
+      baseUrl: 'https://oapi.dingtalk.com',
+    }
+    const weComConfig: WeComMessageConfig = {
+      corpId: 'we-corp-h1',
+      corpSecret: 'we-corp-secret-h1',
+      agentId: '1000002',
+      baseUrl: 'https://qyapi.weixin.qq.com',
+    }
+    const query: AttendanceNotificationDeliveryQuery = async (sqlText, params) => {
+      const r = await publicPool.query(sqlText, params as unknown[])
+      return { rows: r.rows, rowCount: r.rowCount }
+    }
+    let dingTalkNetworkTouched = false
+    let weComNetworkTouched = false
+
+    try {
+      await requireTable(publicPool, 'directory_integrations')
+      await requireTable(publicPool, 'attendance_notification_deliveries')
+
+      // Both integration rows EXIST for this org but are `suspended`, not `active` — proves the
+      // EXISTS predicate filters on status, not mere row presence (stronger than an absent-row
+      // fixture, which would pass even against a bug that only checks "any row"). No
+      // directory_account_links row is created for either recipient (0-row cold path either way).
+      await publicPool.query(
+        `INSERT INTO directory_integrations (id, org_id, provider, name, status, corp_id, config)
+         VALUES ($1,$2,'dingtalk',$3,'suspended','corp-h1',$4::jsonb)`,
+        [dingTalkIntegrationId, orgId, `H1 DingTalk suspended ${runSuffix}`, JSON.stringify({})],
+      )
+      await publicPool.query(
+        `INSERT INTO directory_integrations (id, org_id, provider, name, status, corp_id, config)
+         VALUES ($1,$2,'wecom',$3,'suspended','we-corp-h1',$4::jsonb)`,
+        [weComIntegrationId, orgId, `H1 WeCom suspended ${runSuffix}`, JSON.stringify({})],
+      )
+
+      const dingTalkDelivery = await publicPool.query<{ id: string }>(
+        `INSERT INTO attendance_notification_deliveries
+           (org_id, source_type, source_id, source_key, recipient_user_id, recipient_role, channel, payload)
+         VALUES ($1,'unscheduled_reminder',$2,$3,$4,'subject','dingtalk_work_notification',$5::jsonb)
+         RETURNING id::text AS id`,
+        [
+          orgId,
+          dingTalkSourceId,
+          `h1-dingtalk:${dingTalkSourceId}:recipient:${dingTalkRecipientUserId}:channel:dingtalk_work_notification`,
+          dingTalkRecipientUserId,
+          JSON.stringify({ title: 'H1 DingTalk org-inactive', body: 'Should never send.' }),
+        ],
+      )
+      dingTalkDeliveryId = dingTalkDelivery.rows[0].id
+
+      const weComDelivery = await publicPool.query<{ id: string }>(
+        `INSERT INTO attendance_notification_deliveries
+           (org_id, source_type, source_id, source_key, recipient_user_id, recipient_role, channel, payload)
+         VALUES ($1,'unscheduled_reminder',$2,$3,$4,'subject','wecom_work_notification',$5::jsonb)
+         RETURNING id::text AS id`,
+        [
+          orgId,
+          weComSourceId,
+          `h1-wecom:${weComSourceId}:recipient:${weComRecipientUserId}:channel:wecom_work_notification`,
+          weComRecipientUserId,
+          JSON.stringify({ title: 'H1 WeCom org-inactive', body: 'Should never send.' }),
+        ],
+      )
+      weComDeliveryId = weComDelivery.rows[0].id
+
+      const dingTalkChannel = new DingTalkAttendanceDeliveryChannel({
+        query,
+        readConfig: async () => { dingTalkNetworkTouched = true; return dingTalkConfig },
+        fetchAccessToken: async () => { dingTalkNetworkTouched = true; return 'access-token' },
+        sendWorkNotification: async () => { dingTalkNetworkTouched = true; return { taskId: 'unused', raw: {} } },
+      })
+      const weComChannel = new WeComAttendanceDeliveryChannel({
+        query,
+        readConfig: async () => { weComNetworkTouched = true; return weComConfig },
+        fetchAccessToken: async () => { weComNetworkTouched = true; return 'access-token' },
+        sendTextMessage: async () => { weComNetworkTouched = true; return { errcode: 0, errmsg: 'ok', invalidUserIds: [], raw: {} } },
+      })
+      const worker = new AttendanceNotificationDeliveryWorker({
+        query,
+        channels: [dingTalkChannel, weComChannel],
+        now: () => new Date('2026-08-02T00:00:00.000Z'),
+        workerId: 'worker-h1-org-inactive',
+      })
+
+      // Neither recipient has a channel identity to resolve (0 recipient rows) AND neither org has an
+      // active integration (suspended, not active) — retryable:true, no skip: both land `retrying`,
+      // NOT `skipped`, and the worker's normal backoff will keep retrying rather than dropping them
+      // for good.
+      await expect(worker.runBatch()).resolves.toEqual({ claimed: 2, sent: 0, retrying: 2, failed: 0, skipped: 0 })
+      expect(dingTalkNetworkTouched).toBe(false)
+      expect(weComNetworkTouched).toBe(false)
+
+      const dingTalkRow = (await publicPool.query(
+        `SELECT status, delivered_at, last_error, attempt_count, claim_worker_id, claim_expires_at, next_attempt_at
+           FROM attendance_notification_deliveries
+          WHERE id = $1`,
+        [dingTalkDeliveryId],
+      )).rows[0]
+      expect(dingTalkRow).toMatchObject({
+        status: 'retrying',
+        delivered_at: null,
+        last_error: 'dingtalk_org_integration_inactive',
+        attempt_count: 1,
+        claim_worker_id: null,
+        claim_expires_at: null,
+      })
+      expect(dingTalkRow.next_attempt_at).toBeTruthy()
+
+      const weComRow = (await publicPool.query(
+        `SELECT status, delivered_at, last_error, attempt_count, claim_worker_id, claim_expires_at, next_attempt_at
+           FROM attendance_notification_deliveries
+          WHERE id = $1`,
+        [weComDeliveryId],
+      )).rows[0]
+      expect(weComRow).toMatchObject({
+        status: 'retrying',
+        delivered_at: null,
+        last_error: 'wecom_org_integration_inactive',
+        attempt_count: 1,
+        claim_worker_id: null,
+        claim_expires_at: null,
+      })
+      expect(weComRow.next_attempt_at).toBeTruthy()
+    } finally {
+      if (dingTalkDeliveryId) {
+        await publicPool.query('DELETE FROM attendance_notification_deliveries WHERE id = $1', [dingTalkDeliveryId]).catch(() => undefined)
+      }
+      if (weComDeliveryId) {
+        await publicPool.query('DELETE FROM attendance_notification_deliveries WHERE id = $1', [weComDeliveryId]).catch(() => undefined)
+      }
+      await publicPool.query('DELETE FROM directory_integrations WHERE id = $1', [dingTalkIntegrationId]).catch(() => undefined)
+      await publicPool.query('DELETE FROM directory_integrations WHERE id = $1', [weComIntegrationId]).catch(() => undefined)
+      await publicPool.end().catch(() => undefined)
+    }
+  })
+
   it('E3 deep-link: flag+base-URL send an actionCard whose button opens the container landing; missing URL falls back to text', async () => {
     if (!dbUrl) throw new Error('DATABASE_URL is required for this integration test')
     const publicPool = new Pool({ connectionString: dbUrl })

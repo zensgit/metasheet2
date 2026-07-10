@@ -369,10 +369,39 @@ export class DingTalkAttendanceDeliveryChannel implements AttendanceDeliveryChan
       [message.recipientUserId, message.orgId],
     )
     if (rows.length === 0) {
-      // No linked+active DingTalk binding at all — the ordinary "not onboarded to DingTalk yet" state
-      // for a partially-adopted org. Nothing about retrying (or alerting on this specific delivery)
-      // would help; the fix is a directory sync/linking action outside this worker's scope. Structural,
-      // not a fault: terminate as `skipped`, not `failed`.
+      // 0 rows conflates two different situations (H1 hardening — review #3920 P3-1): the ordinary
+      // "this user is not onboarded to DingTalk yet" gap for a partially-adopted org (SKIP — correct,
+      // unchanged), and "the org itself has no active DingTalk integration at all" because it was
+      // suspended/reconfigured/removed (directory_integrations has no status='active' row for this
+      // org). The latter is an org-level, typically RECOVERABLE outage: every delivery for that org
+      // would otherwise be silently and PERMANENTLY dropped via the `skipped` terminal state, and
+      // integration recovery would not self-heal anything already skipped. Disambiguate with one
+      // extra existence check — only reached on this cold 0-row path, never on the hot bound-recipient
+      // path.
+      const { rows: orgIntegrationRows } = await this.query<{ org_has_active_integration: boolean }>(
+        `SELECT EXISTS (
+           SELECT 1
+             FROM directory_integrations
+            WHERE org_id = $1
+              AND provider = 'dingtalk'
+              AND status = 'active'
+         ) AS org_has_active_integration`,
+        [message.orgId],
+      )
+      const orgHasActiveIntegration = Boolean(orgIntegrationRows[0]?.org_has_active_integration)
+      if (!orgHasActiveIntegration) {
+        // No active DingTalk integration exists for this org at all — not this one user's onboarding
+        // gap. Return a retryable failure (NOT skip) so the worker's normal backoff keeps retrying;
+        // if/when the integration is re-activated, the delivery self-heals instead of staying dropped.
+        return {
+          ok: false,
+          result: { ok: false, retryable: true, error: 'dingtalk_org_integration_inactive' },
+        }
+      }
+      // The org DOES have an active DingTalk integration — this really is just "this user is not
+      // onboarded yet". Nothing about retrying (or alerting on this specific delivery) would help; the
+      // fix is a directory sync/linking action outside this worker's scope. Structural, not a fault:
+      // terminate as `skipped`, not `failed`.
       return {
         ok: false,
         result: { ok: false, retryable: false, skip: true, error: 'dingtalk_recipient_not_bound' },
@@ -566,9 +595,37 @@ export class WeComAttendanceDeliveryChannel implements AttendanceDeliveryChannel
       [message.recipientUserId, message.orgId],
     )
     if (rows.length === 0) {
-      // No linked+active WeCom binding at all — the ordinary "not onboarded to WeCom yet" state for a
-      // partially-adopted org (WeCom directory population is a named prerequisite outside this
-      // channel's scope — S4 design-lock G7). Structural, not a fault: terminate as `skipped`.
+      // 0 rows conflates two different situations (H1 hardening — review #3920 P3-1, applied here for
+      // parity with the DingTalk channel — same shape, same fix): the ordinary "this user is not
+      // onboarded to WeCom yet" gap for a partially-adopted org (SKIP — correct, unchanged; WeCom
+      // directory population is a named prerequisite outside this channel's scope — S4 design-lock
+      // G7), and "the org itself has no active WeCom integration at all" because it was
+      // suspended/reconfigured/removed. The latter is an org-level, typically RECOVERABLE outage:
+      // every delivery for that org would otherwise be silently and PERMANENTLY dropped via the
+      // `skipped` terminal state. Disambiguate with one extra existence check — only reached on this
+      // cold 0-row path, never on the hot bound-recipient path.
+      const { rows: orgIntegrationRows } = await this.query<{ org_has_active_integration: boolean }>(
+        `SELECT EXISTS (
+           SELECT 1
+             FROM directory_integrations
+            WHERE org_id = $1
+              AND provider = 'wecom'
+              AND status = 'active'
+         ) AS org_has_active_integration`,
+        [message.orgId],
+      )
+      const orgHasActiveIntegration = Boolean(orgIntegrationRows[0]?.org_has_active_integration)
+      if (!orgHasActiveIntegration) {
+        // No active WeCom integration exists for this org at all — not this one user's onboarding
+        // gap. Return a retryable failure (NOT skip) so the worker's normal backoff keeps retrying;
+        // if/when the integration is re-activated, the delivery self-heals instead of staying dropped.
+        return {
+          ok: false,
+          result: { ok: false, retryable: true, error: 'wecom_org_integration_inactive' },
+        }
+      }
+      // The org DOES have an active WeCom integration — this really is just "this user is not
+      // onboarded yet". Structural, not a fault: terminate as `skipped`.
       return {
         ok: false,
         result: { ok: false, retryable: false, skip: true, error: 'wecom_recipient_not_bound' },
