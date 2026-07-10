@@ -123,6 +123,12 @@ import {
   startLedgerRetentionScheduler,
   stopLedgerRetentionScheduler,
 } from './services/LedgerRetentionScheduler'
+import {
+  resolveDingTalkGroupDeliveryRetentionSchedulerIntervalMs,
+  resolveDingTalkGroupDeliveryRetentionSchedulerLeaderOptions,
+  startDingTalkGroupDeliveryRetentionScheduler,
+  stopDingTalkGroupDeliveryRetentionScheduler,
+} from './services/dingtalk-group-delivery-retention-scheduler'
 import { initWebhookEventBridge } from './multitable/webhook-event-bridge'
 import { ApprovalBreachNotifier } from './services/ApprovalBreachNotifier'
 import {
@@ -1976,6 +1982,14 @@ export class MetaSheetServer {
       }
     })())
 
+    shutdownTasks.push((async () => {
+      try {
+        stopDingTalkGroupDeliveryRetentionScheduler()
+      } catch (err) {
+        this.logger.warn(`DingTalk group-delivery retention scheduler shutdown failed: ${err instanceof Error ? err.message : String(err)}`)
+      }
+    })())
+
     // 4. Destroy API Gateway resources (only if one was constructed during start()).
     shutdownTasks.push((async () => {
       try {
@@ -2257,6 +2271,30 @@ export class MetaSheetServer {
       )
     } catch (e) {
       this.logger.error('AI usage ledger retention scheduler initialization failed; continuing in degraded mode', e as Error)
+    }
+
+    // DingTalk group-delivery retention sweep (R1, DT-HARDEN-08 follow-up): a
+    // periodic bounded DELETE of dingtalk_group_deliveries rows past the
+    // retention window (default 90d, env-overridable, floored at 7d). The
+    // table is write-once — every group-robot send attempt (automation rule
+    // firings AND manual test-sends) inserts a row with full message content
+    // and raw response bodies, so without this it grows unbounded. Reuses the
+    // generic LedgerRetentionScheduler (same pattern as the AI usage ledger
+    // sweep above); enabled by default (opt out via
+    // DINGTALK_GROUP_DELIVERY_RETENTION_DISABLED=1).
+    try {
+      const dingtalkDeliveryRetentionLeaderOptions = await resolveDingTalkGroupDeliveryRetentionSchedulerLeaderOptions()
+      const dingtalkDeliveryRetentionScheduler = startDingTalkGroupDeliveryRetentionScheduler({
+        leaderOptions: dingtalkDeliveryRetentionLeaderOptions,
+        intervalMs: resolveDingTalkGroupDeliveryRetentionSchedulerIntervalMs(),
+      })
+      this.logger.info(
+        dingtalkDeliveryRetentionScheduler
+          ? 'DingTalk group-delivery retention scheduler initialized'
+          : 'DingTalk group-delivery retention scheduler disabled (DINGTALK_GROUP_DELIVERY_RETENTION_DISABLED=1)',
+      )
+    } catch (e) {
+      this.logger.error('DingTalk group-delivery retention scheduler initialization failed; continuing in degraded mode', e as Error)
     }
 
     // B-4 BJ-5 follow-up: reconcile ORPHANED AI bulk-fill jobs at boot. A hard

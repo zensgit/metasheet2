@@ -165,6 +165,11 @@ export default defineConfig({
       // T1-2 inbound webhook trigger: mounted-route + real-DB execution row. Excluded from the no-DB
       // default job so it does not skip-green, and wired as a WHOLE FILE into the multitable real-DB lane.
       'tests/integration/multitable-inbound-webhook-trigger.test.ts',
+      // R1 (DT-HARDEN-08 follow-up) dingtalk_group_deliveries retention sweep: DATABASE_URL-gated
+      // (describeIfDatabase). Excluded from the no-DB default job so it cannot skip-green, and wired
+      // as a WHOLE FILE into the `Run multitable real-DB integration` step in plugin-tests.yml where
+      // it runs against real Postgres every PR.
+      'tests/integration/dingtalk-group-delivery-retention.db.test.ts',
       // comments.api.test.ts needs setup.integration.ts + a live DB. It stays
       // CI-excluded (NOT wired) because 8 of its tests have a pre-existing real-wire
       // failure (CommentService.mapRowToComment drops containerId/targetId/
