@@ -99,6 +99,45 @@ describe('AutomationExecutionsView (A3 admin runs view)', () => {
     expect(mounted.container.textContent ?? '').toContain('resolved')
   })
 
+  // B3-11 — additive server-resolved ruleName/sheetName: render the resolved label as plain
+  // text instead of the raw <code> id.
+  it('B3-11: shows the resolved ruleName/sheetName as plain text (not the raw <code> id)', async () => {
+    const client = makeClient({
+      listAutomationRuns: vi.fn().mockResolvedValue([
+        { ...RUN_LIST, ruleName: 'Notify Customers', sheetName: 'Orders' },
+      ]),
+    })
+    mounted = mount(client)
+    await settle()
+    const ruleField = mounted.container.querySelector('[data-field="ruleName"]')
+    const sheetField = mounted.container.querySelector('[data-field="sheetName"]')
+    expect(ruleField?.textContent?.trim()).toBe('Notify Customers')
+    expect(sheetField?.textContent?.trim()).toBe('Orders')
+    // resolved names render as plain text — no honest-id <code> fallback in this row
+    expect(ruleField?.querySelector('[data-field="ruleId"]')).toBeNull()
+    expect(sheetField?.querySelector('[data-field="sheetId"]')).toBeNull()
+  })
+
+  // Honest fallback (mirrors the backend's degrade-to-id contract): an unresolved name (rule/
+  // sheet deleted server-side, surfaced as ruleName === ruleId) still renders the raw id via
+  // the same <code> treatment as a payload that never included ruleName/sheetName at all
+  // (backward compatible with an old cached response).
+  it('B3-11: DEGRADES to the raw <code> id when ruleName/sheetName is unresolved (equals the id) or absent', async () => {
+    const client = makeClient({
+      listAutomationRuns: vi.fn().mockResolvedValue([
+        { ...RUN_LIST, id: 'axe_gone', ruleName: 'rule-1', sheetName: 'sheet-a' }, // unresolved: name === id
+        { ...RUN_LIST, id: 'axe_old' }, // backward-compat: no ruleName/sheetName field at all
+      ]),
+    })
+    mounted = mount(client)
+    await settle()
+    for (const runId of ['axe_gone', 'axe_old']) {
+      const row = mounted.container.querySelector(`[data-run-id="${runId}"]`) as HTMLElement
+      expect(row.querySelector('[data-field="ruleId"]')?.textContent).toBe('rule-1')
+      expect(row.querySelector('[data-field="sheetId"]')?.textContent).toBe('sheet-a')
+    }
+  })
+
   it('shows the admin-only notice and does NOT call the API (list/detail/resume) when not admin', async () => {
     mockIsAdmin = false
     const client = makeClient({ resumeAutomation: vi.fn() })
