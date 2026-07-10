@@ -34,6 +34,7 @@ function createRequestLike(host: string = 'example.test', protocol: string = 'ht
 function createStorageMock(overrides: {
   upload?: ReturnType<typeof vi.fn>
   download?: ReturnType<typeof vi.fn>
+  downloadByKey?: ReturnType<typeof vi.fn>
   deleteFn?: ReturnType<typeof vi.fn>
 } = {}) {
   return {
@@ -43,12 +44,16 @@ function createStorageMock(overrides: {
       originalName: 'in.bin',
       mimeType: 'application/octet-stream',
       size: 4,
-      path: 'sheets_sheet_1/unassigned/out.bin',
-      url: 'http://localhost/files/file_123',
+      // F3 G1: the local provider now returns a server-derived key here (`<uuid>/<safeBasename>`); the
+      // mock keeps a representative value that storeAttachment persists as storage_path.
+      path: 'file_123/out.bin',
+      storageKey: 'file_123/out.bin',
+      url: 'http://localhost/files/file_123/out.bin',
       provider: 'local',
       createdAt: new Date('2026-04-23T00:00:00Z'),
     })),
     download: overrides.download ?? vi.fn(async () => Buffer.from('abcd')),
+    downloadByKey: overrides.downloadByKey ?? vi.fn(async () => Buffer.from('by-key')),
     delete: overrides.deleteFn ?? vi.fn(async () => undefined),
   } as any
 }
@@ -261,9 +266,11 @@ describe('attachment-service: buildAttachmentSummaries', () => {
 
 describe('attachment-service: storeAttachment', () => {
   it('uploads binary, inserts row, and returns the row + storage metadata', async () => {
+    let capturedParams: unknown[] | undefined
     const query = createQuery((sql, params) => {
       expect(sql).toContain('INSERT INTO multitable_attachments')
       expect(params?.[0]).toBe('att_fixed')
+      capturedParams = params
       return [
         {
           id: 'att_fixed',
@@ -294,6 +301,8 @@ describe('attachment-service: storeAttachment', () => {
     expect(storage.upload).toHaveBeenCalledTimes(1)
     expect(result.row.id).toBe('att_fixed')
     expect(result.uploaded.id).toBe('file_123')
+    // F3 G8: storage_path (INSERT param index 9) is the physical key the download path reads back by.
+    expect(capturedParams?.[9]).toBe('file_123/out.bin')
   })
 
   it('cleans up storage when the DB insert fails', async () => {
@@ -330,7 +339,7 @@ describe('attachment-service: readAttachmentMetadata & readAttachmentBinary', ()
     expect(result).toBeNull()
   })
 
-  it('maps the selected columns to the expected shape', async () => {
+  it('maps the selected columns to the expected shape (incl F3 G8 storage_path)', async () => {
     const query = createQuery(() => [
       {
         id: 'att_1',
@@ -338,6 +347,7 @@ describe('attachment-service: readAttachmentMetadata & readAttachmentBinary', ()
         record_id: 'rec_1',
         field_id: 'fld_files',
         storage_file_id: 'file_42',
+        storage_path: 'file_42/report.pdf',
         filename: 'report.pdf',
         original_name: 'Report.pdf',
         mime_type: 'application/pdf',
@@ -351,6 +361,7 @@ describe('attachment-service: readAttachmentMetadata & readAttachmentBinary', ()
       recordId: 'rec_1',
       fieldId: 'fld_files',
       storageFileId: 'file_42',
+      storagePath: 'file_42/report.pdf',
       filename: 'report.pdf',
       originalName: 'Report.pdf',
       mimeType: 'application/pdf',
@@ -358,11 +369,26 @@ describe('attachment-service: readAttachmentMetadata & readAttachmentBinary', ()
     })
   })
 
-  it('delegates readAttachmentBinary to the storage adapter', async () => {
-    const storage = createStorageMock({ download: vi.fn(async () => Buffer.from('payload')) as any })
-    const result = await readAttachmentBinary({ storage, storageFileId: 'file_42' })
+  it('F3 G8 — readAttachmentBinary reads by storage_path (index-free) when present', async () => {
+    const storage = createStorageMock({
+      download: vi.fn(async () => Buffer.from('via-index')) as any,
+      downloadByKey: vi.fn(async () => Buffer.from('via-key')) as any,
+    })
+    const result = await readAttachmentBinary({ storage, storageFileId: 'file_42', storagePath: 'file_42/report.pdf' })
+    expect(storage.downloadByKey).toHaveBeenCalledWith('file_42/report.pdf')
+    expect(storage.download).not.toHaveBeenCalled()
+    expect(result.toString()).toBe('via-key')
+  })
+
+  it('F3 G8 — readAttachmentBinary falls back to the id-based read for a legacy row without storage_path', async () => {
+    const storage = createStorageMock({
+      download: vi.fn(async () => Buffer.from('via-index')) as any,
+      downloadByKey: vi.fn(async () => Buffer.from('via-key')) as any,
+    })
+    const result = await readAttachmentBinary({ storage, storageFileId: 'file_42', storagePath: null })
     expect(storage.download).toHaveBeenCalledWith('file_42')
-    expect(result.toString()).toBe('payload')
+    expect(storage.downloadByKey).not.toHaveBeenCalled()
+    expect(result.toString()).toBe('via-index')
   })
 })
 

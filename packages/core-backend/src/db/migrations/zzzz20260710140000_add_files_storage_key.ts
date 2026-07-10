@@ -68,7 +68,7 @@ const COLLISION_POLICY: 'abort' | 'poison' = 'poison'
  * test (`filesStorageKey.test.ts`) asserts the two literals are identical so they can never drift. Kept a
  * local literal (not an import) so this migration stays a self-contained historical snapshot.
  */
-const QUARANTINE_PREFIX = '!f3-collision:'
+export const QUARANTINE_PREFIX = '!f3-collision:'
 
 type UnsafeReason = 'collision' | 'unparseable-url' | 'traversal-url'
 
