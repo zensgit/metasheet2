@@ -17774,10 +17774,12 @@ function isAnnualLeaveAccrualScheduledTriggerRuntimeEnabled() {
 }
 
 // G4 org fan-out throttle. Not exposed as an org-configurable setting (unlike reportSync's
-// maxOrgsPerRun) — the S3 lock's FE scope (G7) is a single enabled switch only, and unlike the report-sync
-// job's SAME-DAY completion requirement, an accrual tick's "due" window is a whole org-local calendar month
-// (G5), so a modest fixed per-tick cap still lets every due org get covered well within its due window
-// across ticks. 50 mirrors the reportSync zod schema's real maxOrgsPerRun ceiling.
+// maxOrgsPerRun) — the S3 lock's FE scope (G7) is a single enabled switch only. 50 mirrors the
+// reportSync zod schema's real maxOrgsPerRun ceiling. Precision note: the shared resolver returns a
+// deterministic ORDER BY org_id first-N with no cross-tick rotation, and the due-gate applies AFTER
+// the resolver — so with more than 50 orgs the tail (org #51+) is never reached by the scheduler and
+// needs the manual route (or a future rotation rung, deferred like reportSync's A2 fairness rung).
+// Deployments at or under the cap are fully covered; the resolver logger.warn()s on overflow.
 const ATTENDANCE_ANNUAL_LEAVE_ACCRUAL_SCHEDULED_TRIGGER_MAX_ORGS_PER_RUN = 50
 
 // G5 due-gate step 1 (pure, no DB): resolves the CURRENT org-local accrual period/periodKey/asOf-workDate
