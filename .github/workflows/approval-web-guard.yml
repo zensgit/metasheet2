@@ -163,6 +163,12 @@ on:
       - 'apps/web/tests/asyncStateBlock.spec.ts'
       - 'apps/web/tests/approvalDetailPolish.spec.ts'
       - 'apps/web/tests/helpers/approval-test-fixtures.ts'
+      # B3-03 (看板钻取): metrics drill-down + approvals-list filter-bar specs. ApprovalMetricsView/
+      # ApprovalCenterView sources are guarded above; these spec files themselves had no paths
+      # entry, so spec-only edits didn't trigger the guard.
+      - 'apps/web/tests/approval-center.spec.ts'
+      - 'apps/web/tests/approvalMetricsView.spec.ts'
+      - 'apps/web/tests/approvalMetricsTopnReport.spec.ts'
       - '.github/workflows/approval-web-guard.yml'
   push:
     branches: [main]
@@ -296,6 +302,11 @@ on:
       - 'apps/web/tests/asyncStateBlock.spec.ts'
       - 'apps/web/tests/approvalDetailPolish.spec.ts'
       - 'apps/web/tests/helpers/approval-test-fixtures.ts'
+      # B3-03 (看板钻取): metrics drill-down + approvals-list filter-bar specs (same set as the
+      # pull_request block above).
+      - 'apps/web/tests/approval-center.spec.ts'
+      - 'apps/web/tests/approvalMetricsView.spec.ts'
+      - 'apps/web/tests/approvalMetricsTopnReport.spec.ts'
       - '.github/workflows/approval-web-guard.yml'
 
 jobs:
@@ -383,4 +394,4 @@ jobs:
         # files and asserts zero static style= attributes and zero hex/rgb() literals inside
         # <style> blocks (var() references + transparent/inherit/currentColor/none allowed);
         # had no gate before this wiring.
-        run: pnpm --filter @metasheet/web exec vitest run approval-common-template-presets approvalTemplateAuthoring approval-detail-field approval-template-authoring-detail approval-template-authoring-graph-preserve approval-template-authoring-condition-edit approval-template-authoring-parallel-edit approval-template-authoring-cc-edit approval-template-authoring-approval-node-edit approval-template-authoring-complex-node-config-allowlist approval-graph-topology-edit approval-graph-layout approval-condition-summary amountAutoSum useAutoSumTotal approval-amount-in-words approval-form-draft lineDerivation approvalMobileI18n approvalMobileResponsive pageShell statusTag approval-e2e-lifecycle myDelegationView approvalDelegationView approvalDelegationStatus approval-e2e-permissions approvalCenterTable workflowHubView newTodoPill approval-urge-button-state approval-route-preview-controller approval-route-preview-summary approval-form-draft approval-amount-in-words approval-number-field-props approval-condition-summary approval-prefill-from-snapshot approval-upcoming-nodes approval-assignee-source approval-field-visibility templateGalleryFilter approvalTemplateCenterCategory approval-center approvalCenterRemindBadge approvalCenterUnreadBadge approvalCenterSourceFilter approval-graph-summary requesterPreviewFields routePreviewErrors approval-template-route-preview-api ui-foundation-style-guard uiFoundationTexture approval-template-authoring-linear-step-spine approvalDetailPolish asyncStateBlock --reporter=dot
+        run: pnpm --filter @metasheet/web exec vitest run approval-common-template-presets approvalTemplateAuthoring approval-detail-field approval-template-authoring-detail approval-template-authoring-graph-preserve approval-template-authoring-condition-edit approval-template-authoring-parallel-edit approval-template-authoring-cc-edit approval-template-authoring-approval-node-edit approval-template-authoring-complex-node-config-allowlist approval-graph-topology-edit approval-graph-layout approval-condition-summary amountAutoSum useAutoSumTotal approval-amount-in-words approval-form-draft lineDerivation approvalMobileI18n approvalMobileResponsive pageShell statusTag approval-e2e-lifecycle myDelegationView approvalDelegationView approvalDelegationStatus approval-e2e-permissions approvalCenterTable workflowHubView newTodoPill approval-urge-button-state approval-route-preview-controller approval-route-preview-summary approval-form-draft approval-amount-in-words approval-number-field-props approval-condition-summary approval-prefill-from-snapshot approval-upcoming-nodes approval-assignee-source approval-field-visibility templateGalleryFilter approvalTemplateCenterCategory approval-center approvalCenterRemindBadge approvalCenterUnreadBadge approvalCenterSourceFilter approval-graph-summary requesterPreviewFields routePreviewErrors approval-template-route-preview-api ui-foundation-style-guard uiFoundationTexture approval-template-authoring-linear-step-spine approvalDetailPolish asyncStateBlock approvalMetricsView approvalMetricsTopnReport --reporter=dot
