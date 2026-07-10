@@ -8,9 +8,9 @@
           打开 Base、继续清洗表或从模板开始。
         </p>
       </div>
-      <button class="multitable-home__refresh" :disabled="loading" @click="loadHomeData">
+      <MtButton class="multitable-home__refresh" :disabled="loading" @click="loadHomeData">
         {{ loading ? '刷新中...' : '刷新' }}
-      </button>
+      </MtButton>
     </header>
 
     <section class="multitable-home__create" aria-label="Create multitable base">
@@ -110,22 +110,22 @@
               <span v-if="base.lastOpenedAt">最近打开</span>
             </div>
           </div>
-          <button
-            type="button"
+          <MtButton
             class="multitable-home__favorite"
             :aria-pressed="base.isFavorite"
             :aria-label="base.isFavorite ? `取消收藏 ${base.name}` : `收藏 ${base.name}`"
             @click="toggleFavoriteBase(base.id)"
           >
             {{ base.isFavorite ? '已收藏' : '收藏' }}
-          </button>
-          <button
+          </MtButton>
+          <MtButton
+            variant="primary"
             class="multitable-home__open"
             :disabled="openingBaseId === base.id"
             @click="openBase(base)"
           >
             {{ openingBaseId === base.id ? '打开中...' : '打开' }}
-          </button>
+          </MtButton>
         </article>
       </div>
     </section>
@@ -154,6 +154,7 @@ import {
 import { AppRouteNames } from '../router/types'
 import MetaTemplateCard from '../multitable/components/MetaTemplateCard.vue'
 import { useTemplateInstall } from '../multitable/composables/useTemplateInstall'
+import { MtButton } from '../multitable/ui'
 
 const TemplateCenterRouteName = AppRouteNames.MULTITABLE_TEMPLATES
 
@@ -348,20 +349,19 @@ onMounted(loadHomeData)
   line-height: 1.7;
 }
 
-.multitable-home__refresh,
-.multitable-home__primary,
-.multitable-home__open {
+/* .multitable-home__refresh / .multitable-home__open: their only sharers (hero refresh + card open)
+   are now <MtButton> (refresh = default ghost, sanctioned surface drop as in batch-1; open =
+   variant="primary" — the bespoke #2563eb fill equals --ms-color-primary exactly). Their bespoke CSS
+   was removed from the selectors below to avoid double-styling the MtButton root; the classes are
+   kept on the elements only for selector stability. `.multitable-home__primary` (create-and-open) is
+   NOT migrated — it lives inside <form @submit.prevent> with implicit type="submit" (Enter-to-submit
+   semantics; MtButton hardcodes type="button", not byte-equivalent) — so its CSS stays. */
+.multitable-home__primary {
   border: 0;
   border-radius: 999px;
   padding: 10px 16px;
   font-weight: 700;
   cursor: pointer;
-}
-
-.multitable-home__refresh {
-  background: #fff;
-  color: #1e293b;
-  box-shadow: 0 10px 30px rgba(15, 23, 42, 0.08);
 }
 
 .multitable-home__create {
@@ -403,8 +403,7 @@ onMounted(loadHomeData)
   font-size: 14px;
 }
 
-.multitable-home__primary,
-.multitable-home__open {
+.multitable-home__primary {
   background: #2563eb;
   color: #fff;
 }
@@ -538,16 +537,11 @@ onMounted(loadHomeData)
   font-weight: 700;
 }
 
-.multitable-home__favorite {
-  border: 1px solid #bfdbfe;
-  border-radius: 999px;
-  padding: 9px 12px;
-  background: #eff6ff;
-  color: #1d4ed8;
-  font-weight: 700;
-  cursor: pointer;
-}
-
+/* .multitable-home__favorite: its only sharer (card favorite toggle) is now <MtButton> (default
+   ghost). The bespoke resting-state CSS was removed to avoid double-styling the MtButton root; the
+   class is kept on the element for selector stability. The `[aria-pressed='true']` state style below
+   is deliberately KEPT as an additive variant — MtButton has no pressed/toggled variant, so it
+   preserves the favorited-state tint (the label text 已收藏/收藏 stays the behavioral anchor). */
 .multitable-home__favorite[aria-pressed='true'] {
   border-color: #f59e0b;
   background: #fffbeb;
