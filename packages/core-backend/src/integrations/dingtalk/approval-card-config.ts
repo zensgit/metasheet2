@@ -9,8 +9,11 @@
  *
  * Invariants:
  * - SAME-SOURCE: the card sender (sign) and the card-delivery wrapper (verify) must both call
- *   these resolvers so a token signed on send always verifies on decision — guaranteed by
- *   "env first, else the one stored dingtalk integration".
+ *   these resolvers so a token signed on send always verifies on decision — guaranteed per
+ *   population: rows with a persisted `integration_id` (DT-R2) sign/verify through
+ *   `resolveApprovalCardLinkSecretForIntegration` pinned to THAT integration (env still wins,
+ *   never a cross-corp rescue); legacy rows with `integration_id IS NULL` sign/verify through
+ *   `resolveApprovalCardLinkSecret`'s env-first / LIMIT-1-stored fallback, same as before DT-R2.
  * - FAIL-CLOSED: any miss (no env, no row, decrypt failure, query failure) resolves to '' —
  *   the card action refuses to send and the wrapper refuses to verify. Never a fallback secret.
  */

@@ -19,9 +19,18 @@ export async function up(db: Kysely<unknown>): Promise<void> {
     ADD COLUMN IF NOT EXISTS integration_id UUID NULL
       REFERENCES directory_integrations(id) ON DELETE SET NULL
   `.execute(db)
+
+  // Without this, every `DELETE FROM directory_integrations` seq-scans this table to enforce
+  // the ON DELETE SET NULL above, and future per-corp ops queries (B-2/B-3) filtering by
+  // integration_id would too. Same naming convention as the sibling idx_dacd_* indexes.
+  await sql`
+    CREATE INDEX IF NOT EXISTS idx_dacd_integration
+    ON dingtalk_approval_card_deliveries(integration_id)
+  `.execute(db)
 }
 
 export async function down(db: Kysely<unknown>): Promise<void> {
+  await sql`DROP INDEX IF EXISTS idx_dacd_integration`.execute(db)
   await sql`
     ALTER TABLE dingtalk_approval_card_deliveries
     DROP COLUMN IF EXISTS integration_id

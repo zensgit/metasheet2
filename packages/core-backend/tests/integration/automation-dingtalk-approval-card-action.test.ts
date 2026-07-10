@@ -59,8 +59,10 @@ let templateId = ''
 const ruleIds: string[] = []
 const sentBodies: Array<Record<string, unknown>> = []
 let failNextSend = false
+let fetchCallCount = 0
 
 const fakeFetch: typeof fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+  fetchCallCount += 1
   const url = String(input)
   if (url.includes('/gettoken')) {
     return new Response(JSON.stringify({ errcode: 0, errmsg: 'ok', access_token: 'tok_test' }), { status: 200, headers: { 'Content-Type': 'application/json' } })
@@ -419,6 +421,68 @@ describeIfDatabase('A-2b send_dingtalk_approval_card action (real DB)', () => {
           WHERE id = $1`,
         [DD_INTEGRATION],
       ).catch(() => {})
+      if (prevSecret === undefined) delete process.env.APPROVAL_CARD_LINK_SECRET
+      else process.env.APPROVAL_CARD_LINK_SECRET = prevSecret
+    }
+  })
+
+  test('DT-R2 fail-close: assignee integration with no stored secret errors BEFORE any DingTalk call, writes NO card row, and the execution ledger records the actionable per-integration error', async () => {
+    const prevSecret = process.env.APPROVAL_CARD_LINK_SECRET
+    delete process.env.APPROVAL_CARD_LINK_SECRET
+    // Belt-and-suspenders: guarantee DD_INTEGRATION has no stored secret regardless of prior
+    // test ordering (the "same-source signing" test clears its own in `finally`, but this must
+    // not depend on that).
+    await q(
+      `UPDATE directory_integrations
+          SET config = COALESCE(config, '{}'::jsonb) - 'approvalCardLinkSecret'
+        WHERE id = $1`,
+      [DD_INTEGRATION],
+    )
+    // Anti-shadowing decoy: a FRESHER active integration WITH a secret. `resolveApprovalCardLinkSecretForIntegration`
+    // is scoped by id (no LIMIT-1 rescue — see approval-card-config.ts), so this proves the
+    // fail-close does NOT silently succeed by falling back to some other corp's secret: if a
+    // future regression reintroduced that rescue, this run would send successfully instead of
+    // failing, and the assertions below would go red.
+    const DECOY = randomUUID()
+    await q(
+      `INSERT INTO directory_integrations (id, name, provider, status, corp_id, config, updated_at)
+       VALUES ($1, $2, 'dingtalk', 'active', $3, $4::jsonb, now())`,
+      [DECOY, `card-r2-failclose-decoy-${TS}`, `corp_card_r2_failclose_decoy_${TS}`, JSON.stringify({ approvalCardLinkSecret: normalizeStoredSecretValue(`r2-failclose-decoy-secret-${TS}`) })],
+    )
+    const rule = await svc.createRule(SHEET_ID, {
+      name: 'card r2 fail-close', triggerType: 'approval.task_created', triggerConfig: { templateId },
+      actionType: 'send_dingtalk_approval_card', actionConfig: {}, createdBy: CREATOR,
+    } as never)
+    ruleIds.push(rule.id)
+    try {
+      sentBodies.length = 0
+      const fetchCountBefore = fetchCallCount
+      const dto = await approvals.createApproval({ templateId, formData: { summary: 'r2 fail-close run' } }, { userId: REQUESTER, userName: REQUESTER })
+      const instanceId = (dto as { id: string }).id
+
+      const executions = await waitFor(async () => {
+        const r = await q(
+          `SELECT status, error FROM multitable_automation_executions WHERE rule_id = $1 AND status = 'failed' ORDER BY triggered_at DESC`,
+          [rule.id],
+        )
+        return r.rows as Array<{ status: string; error: string | null }>
+      })
+      expect(executions).toHaveLength(1)
+      expect(String(executions[0].error)).toContain(
+        `stored approval-card link secret on the assignee's DingTalk integration (${DD_INTEGRATION})`,
+      )
+
+      // No ledger (delivery) row for this instance — the fail-close must fire BEFORE
+      // insertDingTalkApprovalCardDelivery, never a "sent" row with an unsignable link.
+      expect(await cardRows(instanceId)).toHaveLength(0)
+
+      // No outbound DingTalk call at all — not even /gettoken — since the fail-close short-circuits
+      // before token-fetch/send.
+      expect(fetchCallCount).toBe(fetchCountBefore)
+      expect(sentBodies).toHaveLength(0)
+    } finally {
+      await svc.deleteRule(rule.id, SHEET_ID).catch(() => {})
+      await q('DELETE FROM directory_integrations WHERE id = $1', [DECOY]).catch(() => {})
       if (prevSecret === undefined) delete process.env.APPROVAL_CARD_LINK_SECRET
       else process.env.APPROVAL_CARD_LINK_SECRET = prevSecret
     }
