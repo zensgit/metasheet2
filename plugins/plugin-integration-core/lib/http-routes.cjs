@@ -80,6 +80,9 @@ const ROUTES = [
   // values-free). List is exact-path; diff carries the batch id in the path.
   ['GET', '/api/integration/stock-preparation/snapshot-batches', 'stockPreparationSnapshotBatchList'],
   ['GET', '/api/integration/stock-preparation/snapshot-batches/:snapshotBatchId/diff', 'stockPreparationSnapshotDiff'],
+  // #3751 MVP W3 (diff rows): per-row diffType/changeTypes/reviewStatus browse for view 2 — closed
+  // 11-key projection, optional caller-chosen base pair, optional enum filters, capped fail-closed.
+  ['GET', '/api/integration/stock-preparation/snapshot-batches/:snapshotBatchId/diff/rows', 'stockPreparationSnapshotDiffRows'],
   // #3751 MVP W3 (confirm writes): candidate-sync feeds the mapping review queue; confirm/retire are
   // the human confirmation surface over the two confirmation tables (multitable-internal only,
   // admin-gated, server-stamped confirmedBy/confirmedAt, values-free).
@@ -266,7 +269,11 @@ const { persistStockPreparationSyncRun } = require('./stock-preparation-sync-run
 const {
   listSnapshotBatches,
   getSnapshotDiff,
+  listSnapshotDiffRows,
 } = require('./stock-preparation-snapshot-reads.cjs')
+// #3751 MVP W3 (diff rows): route-level enum gates for the diff-row filters come from the SAME frozen
+// vocabularies the engine exports (never re-typed literals).
+const { DIFF_TYPES: STOCK_PREPARATION_DIFF_TYPES, REVIEW_STATUSES: STOCK_PREPARATION_REVIEW_STATUSES } = require('./stock-preparation-snapshot-diff.cjs')
 // #3751 MVP W3: HUMAN CONFIRM writes for the material-mapping / unit-conversion-rule tables (plus the
 // candidate-sync that feeds the review queue). Multitable-internal only (target-scoped records API
 // over the frozen MVP sheets under the STAGING project); confirmedBy is the route user identity and
@@ -609,6 +616,22 @@ const VALID_STOCK_PREPARATION_SNAPSHOT_READ_QUERY_KEYS = new Set([
   'tenantId',
   'workspaceId',
   'projectId',
+])
+// #3751 MVP W3: the DIFF route additionally accepts a caller-chosen base batch id; the DIFF/ROWS
+// route adds the two enum filters. Separate Sets per route — extending DIFF must not widen LIST.
+const VALID_STOCK_PREPARATION_SNAPSHOT_DIFF_QUERY_KEYS = new Set([
+  'tenantId',
+  'workspaceId',
+  'projectId',
+  'baseSnapshotBatchId',
+])
+const VALID_STOCK_PREPARATION_SNAPSHOT_DIFF_ROWS_QUERY_KEYS = new Set([
+  'tenantId',
+  'workspaceId',
+  'projectId',
+  'baseSnapshotBatchId',
+  'reviewStatus',
+  'diffType',
 ])
 // #3751 MVP W3: closed request allowlists for the confirm-write routes — one Set per route (no
 // sharing that would widen a sibling parser). The confirmation stamps (confirmedBy / confirmedAt)
@@ -1015,20 +1038,20 @@ function stockPreparationMvpSyncPersistInput(rawInput = {}) {
 
 // #3751 MVP view 2: parse the readonly snapshot-read query against the CLOSED allowlist. Rejects any
 // unknown query field; returns only the tenant/workspace scope + the raw (business) projectId.
-function normalizeStockPreparationSnapshotReadQuery(input = {}, code) {
+function normalizeStockPreparationSnapshotReadQuery(input = {}, code, allowedKeys = VALID_STOCK_PREPARATION_SNAPSHOT_READ_QUERY_KEYS) {
   if (!isPlainObject(input)) {
     throw new HttpRouteError(400, code, 'request must be an object')
   }
   for (const key of Object.keys(input)) {
-    if (!VALID_STOCK_PREPARATION_SNAPSHOT_READ_QUERY_KEYS.has(key)) {
+    if (!allowedKeys.has(key)) {
       throw new HttpRouteError(400, code, `unsupported request field: ${key}`, { field: key })
     }
   }
-  return {
-    tenantId: firstString(input.tenantId),
-    workspaceId: firstString(input.workspaceId),
-    projectId: firstString(input.projectId),
+  const out = {}
+  for (const key of allowedKeys) {
+    out[key] = firstString(input[key])
   }
+  return out
 }
 
 // LIST: `projectId` is the PLM business project (REQUIRED — it filters + is echoed). `targetProjectId`
@@ -1053,7 +1076,7 @@ function stockPreparationSnapshotBatchListInput(req, rawQuery = {}) {
 // business project is read from the batch row server-side); `targetProjectId` is the STAGING locator
 // derived from the auth tenant.
 function stockPreparationSnapshotDiffInput(req, rawQuery = {}) {
-  const input = normalizeStockPreparationSnapshotReadQuery(rawQuery, 'STOCK_PREPARATION_SNAPSHOT_DIFF_REQUEST_INVALID')
+  const input = normalizeStockPreparationSnapshotReadQuery(rawQuery, 'STOCK_PREPARATION_SNAPSHOT_DIFF_REQUEST_INVALID', VALID_STOCK_PREPARATION_SNAPSHOT_DIFF_QUERY_KEYS)
   const tenantId = resolveTenantId(req, input)
   const snapshotBatchId = firstString(requestParams(req).snapshotBatchId)
   if (!snapshotBatchId) {
@@ -1064,6 +1087,34 @@ function stockPreparationSnapshotDiffInput(req, rawQuery = {}) {
     workspaceId: input.workspaceId,
     businessProjectId: input.projectId,
     snapshotBatchId,
+    baseSnapshotBatchId: input.baseSnapshotBatchId,
+    targetProjectId: resolveIntegrationStagingProjectId(tenantId, input.projectId),
+  }
+}
+
+// #3751 MVP W3: diff/rows query — DIFF keys + the two ENUM filters, gated against the engine's frozen
+// vocabularies at the route (values-free 400 with the field name only).
+function stockPreparationSnapshotDiffRowsInput(req, rawQuery = {}) {
+  const input = normalizeStockPreparationSnapshotReadQuery(rawQuery, 'STOCK_PREPARATION_SNAPSHOT_DIFF_ROWS_REQUEST_INVALID', VALID_STOCK_PREPARATION_SNAPSHOT_DIFF_ROWS_QUERY_KEYS)
+  const tenantId = resolveTenantId(req, input)
+  const snapshotBatchId = firstString(requestParams(req).snapshotBatchId)
+  if (!snapshotBatchId) {
+    throw new HttpRouteError(400, 'STOCK_PREPARATION_SNAPSHOT_DIFF_ROWS_REQUEST_INVALID', 'snapshotBatchId is required', { field: 'snapshotBatchId' })
+  }
+  if (input.reviewStatus && !Object.values(STOCK_PREPARATION_REVIEW_STATUSES).includes(input.reviewStatus)) {
+    throw new HttpRouteError(400, 'STOCK_PREPARATION_SNAPSHOT_DIFF_ROWS_REQUEST_INVALID', 'reviewStatus must be one of the review-status vocabulary', { field: 'reviewStatus' })
+  }
+  if (input.diffType && !Object.values(STOCK_PREPARATION_DIFF_TYPES).includes(input.diffType)) {
+    throw new HttpRouteError(400, 'STOCK_PREPARATION_SNAPSHOT_DIFF_ROWS_REQUEST_INVALID', 'diffType must be one of the diff-type vocabulary', { field: 'diffType' })
+  }
+  return {
+    tenantId,
+    workspaceId: input.workspaceId,
+    businessProjectId: input.projectId,
+    snapshotBatchId,
+    baseSnapshotBatchId: input.baseSnapshotBatchId,
+    reviewStatus: input.reviewStatus,
+    diffType: input.diffType,
     targetProjectId: resolveIntegrationStagingProjectId(tenantId, input.projectId),
   }
 }
@@ -3389,6 +3440,33 @@ function createHandlers(services, options = {}) {
         targetProjectId: input.targetProjectId,
         businessProjectId: input.businessProjectId,
         snapshotBatchId: input.snapshotBatchId,
+        baseSnapshotBatchId: input.baseSnapshotBatchId,
+        permission: 'admin',
+      })
+      return sendOk(res, result)
+    },
+
+    // #3751 MVP W3: values-free PER-ROW diff browse (view 2 rows: diffType / changeTypes /
+    // reviewStatus per row). Same read flow + base semantics as the counts diff; closed 11-key
+    // projection; optional enum filters; capped fail-closed.
+    async stockPreparationSnapshotDiffRows(req, res) {
+      requireAccess(req, 'admin')
+      const input = stockPreparationSnapshotDiffRowsInput(req, requestQuery(req))
+      const provisioning = context && context.api && context.api.multitable
+        ? context.api.multitable.provisioning
+        : undefined
+      if (!provisioning) {
+        throw new HttpRouteError(501, 'SNAPSHOT_READS_PROVISIONING_API_UNAVAILABLE', 'multitable provisioning API is not available')
+      }
+      const result = await listSnapshotDiffRows({
+        recordsApi: getMultitableRecordsApi(),
+        provisioning,
+        targetProjectId: input.targetProjectId,
+        businessProjectId: input.businessProjectId,
+        snapshotBatchId: input.snapshotBatchId,
+        baseSnapshotBatchId: input.baseSnapshotBatchId,
+        reviewStatus: input.reviewStatus,
+        diffType: input.diffType,
         permission: 'admin',
       })
       return sendOk(res, result)
