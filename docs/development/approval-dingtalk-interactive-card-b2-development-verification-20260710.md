@@ -71,6 +71,39 @@ The independent review approved B-2 with no P1. Its one P2 test gap is closed he
 top-level `success=false` and a misleading successful nested delivery must reject, so the top-level
 guard cannot be deleted while the suite remains green.
 
-Non-blocking follow-ups remain assigned to the next owning slice or UAT: shutdown-vs-initialize
-worker concurrency, an explicit single-corp Stream-env boundary note, an executor-level partial-config
-golden, and live confirmation of the lower-case `im_robot` space shape against DingTalk.
+The review's P3 (non-blocking) list is closed out by a follow-on hardening pack, status-honestly:
+
+- **executor-level partial-config → OA fallback golden (P3-3)**: landed. A direct real-DB case in
+  `automation-dingtalk-approval-card-action.test.ts` sets the interactive-card flag plus client id
+  and secret but leaves the template id unset, and asserts the executor still writes
+  `delivery_kind='work_notice_action_card'` — not `interactive_card`, not an error. Mutation-verified:
+  neutering the resolver's `missing_template_id` branch flips the ledger row to `interactive_card`
+  and turns the case red.
+- **shutdown × in-flight initialize race (P3-1)**: confirmed as a real race, not merely an
+  untested path. `DingTalkInteractiveCardStreamWorker.shutdown()` early-returns whenever
+  `this.client` is still `null`, which is exactly the state while an in-flight `initialize()` is
+  still awaiting the client factory / `start()`; if that initialize later resolves, it activates
+  the client with no knowledge shutdown() was ever called. A deterministic reproduction lives in
+  `packages/core-backend/tests/unit/dingtalk-interactive-card-stream-lifecycle.test.ts`, confirmed
+  red against the current runtime, then left `it.skip`ped — this pack is tests + docs only, so the
+  fix (make `shutdown()` await any in-flight `this.initializing` before deciding there is nothing to
+  close) stays with the SDK-adapter slice (B-3+) that next touches worker lifecycle.
+- **live confirmation of the lower-case `im_robot` space shape**: remains a UAT item (§5); no
+  additional test can substitute for a live DingTalk call.
+
+### Single-corp Stream-env boundary (P3-2, as-built clarification)
+
+The interactive-card send path resolves its Stream credentials from
+`resolveDingTalkInteractiveCardStreamConfig()` — the global-env four-setting gate defined in the
+design lock §4 (`DINGTALK_INTERACTIVE_CARD_STREAM_ENABLED`/`_CLIENT_ID`/`_CLIENT_SECRET`/`_TEMPLATE_ID`).
+That is one Stream app for the whole process, by design. The legacy OA ActionCard path, in contrast,
+still resolves its DingTalk credentials per corp via `readDingTalkMessageConfigFromRuntime(assigneeIntegrationId)`
+(`automation-executor.ts` around the interactive-card branch at lines 2721-2756). This is not a new
+constraint introduced by B-2 — it is the env shape the design lock already ratifies — but it is worth
+naming explicitly before B-3/B-4 or UAT: in a deployment with more than one DingTalk corp, enabling the
+interactive-card flag only stands up **one** corp's Stream app. An assignee whose approval routes
+through a different corp's `directory_integrations` row will not get an interactive card; the send
+falls through the same `enabled===true` gate to the OA fallback in the normal way (fail-closed and
+ledger-traceable via `integration_id`, never silent, never a guessed cross-corp credential swap). Slice
+B v1 should be read as "interactive cards for the single Stream-app corp," with per-corp Stream apps an
+explicit out-of-scope item for a future slice, not an oversight.

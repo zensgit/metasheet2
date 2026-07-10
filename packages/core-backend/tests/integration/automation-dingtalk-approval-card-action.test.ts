@@ -18,6 +18,7 @@ import {
   DINGTALK_INTERACTIVE_CARD_CLIENT_SECRET_ENV,
   DINGTALK_INTERACTIVE_CARD_STREAM_ENABLED_ENV,
   DINGTALK_INTERACTIVE_CARD_TEMPLATE_ID_ENV,
+  resolveDingTalkInteractiveCardStreamConfig,
 } from '../../src/integrations/dingtalk/interactive-card-stream'
 import { AutomationService } from '../../src/multitable/automation-service'
 import { ApprovalProductService } from '../../src/services/ApprovalProductService'
@@ -375,6 +376,46 @@ describeIfDatabase('A-2b send_dingtalk_approval_card action (real DB)', () => {
     expect(serialized).toMatch(/t=[0-9a-f]{32}/)
     expect(serialized).not.toContain(instanceId)
     expect(serialized).not.toContain('SECRET-INTERACTIVE-FORM-VALUE')
+
+    await svc.deleteRule(rule.id, SHEET_ID)
+  })
+
+  test('P3-3: interactive-card config PARTIALLY set (template id missing) falls back to the legacy OA action-card path — not interactive, not error', async () => {
+    await ensureDingTalkBinding()
+    // Partial config: flag + client id + client secret are present, but the template id is
+    // missing. resolveDingTalkInteractiveCardStreamConfig has no third ("degraded") state —
+    // any missing required field returns enabled:false — so the executor must take the exact
+    // same legacy OA branch as the fully-flag-off case, not error and not half-send interactive.
+    process.env[DINGTALK_INTERACTIVE_CARD_STREAM_ENABLED_ENV] = '1'
+    process.env[DINGTALK_INTERACTIVE_CARD_CLIENT_ID_ENV] = 'partial-app-key'
+    process.env[DINGTALK_INTERACTIVE_CARD_CLIENT_SECRET_ENV] = 'partial-app-secret'
+    delete process.env[DINGTALK_INTERACTIVE_CARD_TEMPLATE_ID_ENV]
+    expect(resolveDingTalkInteractiveCardStreamConfig()).toMatchObject({ enabled: false, reason: 'missing_template_id' })
+
+    const rule = await svc.createRule(SHEET_ID, {
+      name: 'card partial-config fallback', triggerType: 'approval.task_created', triggerConfig: { templateId },
+      actionType: 'send_dingtalk_approval_card', actionConfig: {}, createdBy: CREATOR,
+    } as never)
+    ruleIds.push(rule.id)
+
+    sentBodies.length = 0
+    interactiveBodies.length = 0
+    const dto = await approvals.createApproval(
+      { templateId, formData: { summary: 'partial config run' } },
+      { userId: REQUESTER, userName: REQUESTER },
+    )
+    const instanceId = (dto as { id: string }).id
+    const rows = await waitFor(async () => (await cardRows(instanceId)).filter((row) => row.send_status !== 'pending'))
+    expect(rows).toHaveLength(1)
+    const row = rows[0]
+    expect(row.delivery_kind).toBe('work_notice_action_card')
+    expect(row.card_state).toBe('sent')
+    expect(row.send_status).toBe('sent')
+
+    // The legacy OA send fired exactly once; the interactive createAndDeliver endpoint was never
+    // called (no half-sent interactive attempt, no silent double-send).
+    expect(sentBodies).toHaveLength(1)
+    expect(interactiveBodies).toHaveLength(0)
 
     await svc.deleteRule(rule.id, SHEET_ID)
   })
