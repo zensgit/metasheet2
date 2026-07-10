@@ -3,6 +3,7 @@ import { Router } from 'express'
 import { auditLog } from '../audit/audit'
 import { Logger } from '../core/logger'
 import {
+  DirectorySyncInProgressError,
   acknowledgeDirectorySyncAlert,
   admitDirectoryAccountUser,
   batchAdmitDirectoryAccountUsers,
@@ -319,6 +320,14 @@ export function adminDirectoryRouter(): Router {
         jsonOk(res, { accepted: true, runId, integrationId: req.params.integrationId })
         return
       } catch (error) {
+        // DT-HARDEN-05: the lease conflict is thrown by the claim, BEFORE onRunStarted
+        // ever fires, so it always lands in this catch — and it is the same benign
+        // "already running" state as in the non-async branch below. Map it identically:
+        // 409 with the active runId, never a 500 "sync failed" that monitoring pages on.
+        if (error instanceof DirectorySyncInProgressError) {
+          jsonError(res, error.statusCode, error.code, error.message, { activeRunId: error.activeRunId })
+          return
+        }
         const message = readErrorMessage(error, 'Failed to start directory sync')
         jsonError(res, /not found/i.test(message) ? 404 : 500, 'DIRECTORY_SYNC_FAILED', message)
         return
@@ -329,6 +338,12 @@ export function adminDirectoryRouter(): Router {
       const result = await syncDirectoryIntegration(req.params.integrationId, adminUserId)
       jsonOk(res, result)
     } catch (error) {
+      // DT-HARDEN-05: another sync already holds the lease. Return the active run so the
+      // admin UI can jump straight to it instead of re-triggering a duplicate API pull.
+      if (error instanceof DirectorySyncInProgressError) {
+        jsonError(res, error.statusCode, error.code, error.message, { activeRunId: error.activeRunId })
+        return
+      }
       const message = readErrorMessage(error, 'Failed to sync directory integration')
       jsonError(res, /not found/i.test(message) ? 404 : 500, 'DIRECTORY_SYNC_FAILED', message)
     }

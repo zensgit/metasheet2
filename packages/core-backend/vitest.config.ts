@@ -37,6 +37,11 @@ export default defineConfig({
       // re-admission of an already-linked account). DATABASE_URL-gated; excluded here so the
       // no-DB job cannot skip-green it, and wired as a WHOLE FILE into the approval real-DB step.
       'tests/integration/directory-admission-case-insensitive-uniqueness.db.test.ts',
+      // DT-HARDEN-05 lease golden (real DB): proves the partial unique index makes the lease
+      // a database invariant and that COALESCE(last_heartbeat_at, started_at) staleness never
+      // reclaims a live long run. DATABASE_URL-gated; excluded here so the no-DB job cannot
+      // skip-green it, and wired as a WHOLE FILE into the approval real-DB step.
+      'tests/integration/directory-sync-run-lease.db.test.ts',
       'tests/integration/approval-manager-chain.db.test.ts',
       'tests/integration/approval-requester-department.db.test.ts',
       'tests/integration/approval-requester-title.db.test.ts',
