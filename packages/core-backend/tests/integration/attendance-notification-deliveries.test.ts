@@ -9,9 +9,11 @@ import {
   DeterministicFakeAttendanceDeliveryChannel,
   DingTalkAttendanceDeliveryChannel,
   EmailAttendanceDeliveryChannel,
+  WeComAttendanceDeliveryChannel,
   type AttendanceNotificationDeliveryQuery,
 } from '../../src/services/AttendanceNotificationDeliveryWorker'
 import type { DingTalkMessageConfig } from '../../src/integrations/dingtalk/client'
+import type { WeComMessageConfig } from '../../src/integrations/wecom/client'
 
 const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
 const describeIfDatabase = dbUrl ? describe : describe.skip
@@ -770,6 +772,329 @@ describeIfDatabase('Attendance C5 notification delivery outbox', () => {
         .toBe('https://a.example/attendance?noticeSource=week%20end%2Freview')
       expect(buildAttendanceNotificationDeepLink('unscheduled_reminder', '')).toBeNull()
       expect(buildAttendanceNotificationDeepLink('unscheduled_reminder', undefined)).toBeNull()
+    } finally {
+      if (envSnapshot.flag === undefined) delete process.env.ATTENDANCE_NOTIFICATION_DEEP_LINK_ENABLED
+      else process.env.ATTENDANCE_NOTIFICATION_DEEP_LINK_ENABLED = envSnapshot.flag
+      if (envSnapshot.publicUrl === undefined) delete process.env.PUBLIC_APP_URL
+      else process.env.PUBLIC_APP_URL = envSnapshot.publicUrl
+      if (envSnapshot.baseUrl === undefined) delete process.env.APP_BASE_URL
+      else process.env.APP_BASE_URL = envSnapshot.baseUrl
+      for (const id of deliveryIds) {
+        await publicPool.query('DELETE FROM attendance_notification_deliveries WHERE id = $1', [id]).catch(() => undefined)
+      }
+      await publicPool.query('DELETE FROM directory_account_links WHERE directory_account_id = $1', [directoryAccountId]).catch(() => undefined)
+      await publicPool.query('DELETE FROM directory_accounts WHERE id = $1', [directoryAccountId]).catch(() => undefined)
+      await publicPool.query('DELETE FROM directory_integrations WHERE id = $1', [integrationId]).catch(() => undefined)
+      await publicPool.query('DELETE FROM users WHERE id = $1', [localUserId]).catch(() => undefined)
+      await publicPool.end().catch(() => undefined)
+    }
+  })
+
+  it('S4 WeCom channel resolves linked directory users (sent) and skips — not fails — an unbound recipient, without external network', async () => {
+    if (!dbUrl) throw new Error('DATABASE_URL is required for this integration test')
+    const publicPool = new Pool({ connectionString: dbUrl })
+    const runSuffix = Date.now().toString(36)
+    const orgId = `c5-wecom-${runSuffix}`
+    const localUserId = `u-c5-wecom-${runSuffix}`
+    const unboundUserId = `u-c5-wecom-unbound-${runSuffix}`
+    const integrationId = randomUUID()
+    const directoryAccountId = randomUUID()
+    const sourceId = randomUUID()
+    let deliveryId = ''
+    let unboundDeliveryId = ''
+    const config: WeComMessageConfig = {
+      corpId: 'we-corp-c5',
+      corpSecret: 'we-corp-secret-c5',
+      agentId: '1000002',
+      baseUrl: 'https://qyapi.weixin.qq.com',
+    }
+    const query: AttendanceNotificationDeliveryQuery = async (sqlText, params) => {
+      const r = await publicPool.query(sqlText, params as unknown[])
+      return { rows: r.rows, rowCount: r.rowCount }
+    }
+    const sentMessages: unknown[] = []
+
+    try {
+      await requireTable(publicPool, 'users')
+      await requireTable(publicPool, 'directory_integrations')
+      await requireTable(publicPool, 'directory_accounts')
+      await requireTable(publicPool, 'directory_account_links')
+      await requireTable(publicPool, 'attendance_notification_deliveries')
+
+      await publicPool.query(
+        `INSERT INTO users (id, email, password_hash, name, role, is_active)
+         VALUES ($1,$2,'hash',$3,'user',true)
+         ON CONFLICT (id) DO UPDATE SET is_active = EXCLUDED.is_active`,
+        [localUserId, `${localUserId}@example.test`, localUserId],
+      )
+      // provider='wecom' — same three-table shape as the DingTalk channel, zero new tables/columns
+      // (design-lock G5/G7).
+      await publicPool.query(
+        `INSERT INTO directory_integrations (id, org_id, provider, name, status, corp_id, config)
+         VALUES ($1,$2,'wecom',$3,'active','we-corp-c5',$4::jsonb)`,
+        [integrationId, orgId, `S4 WeCom ${runSuffix}`, JSON.stringify({})],
+      )
+      await publicPool.query(
+        `INSERT INTO directory_accounts
+           (id, integration_id, provider, corp_id, external_user_id, external_key, name, is_active)
+         VALUES ($1,$2,'wecom','we-corp-c5','we-user-c5','we-key-c5',$3,true)`,
+        [directoryAccountId, integrationId, localUserId],
+      )
+      await publicPool.query(
+        `INSERT INTO directory_account_links (directory_account_id, local_user_id, link_status, match_strategy)
+         VALUES ($1,$2,'linked','manual')`,
+        [directoryAccountId, localUserId],
+      )
+      const delivery = await publicPool.query<{ id: string }>(
+        `INSERT INTO attendance_notification_deliveries
+           (org_id, source_type, source_id, source_key, recipient_user_id, recipient_role, channel, payload)
+         VALUES ($1,'unscheduled_reminder',$2,$3,$4,'subject','wecom_work_notification',$5::jsonb)
+         RETURNING id::text AS id`,
+        [
+          orgId,
+          sourceId,
+          `c5-wecom:${sourceId}:recipient:${localUserId}:channel:wecom_work_notification`,
+          localUserId,
+          JSON.stringify({ title: 'S4 WeCom smoke', body: 'Please check the attendance reminder.' }),
+        ],
+      )
+      deliveryId = delivery.rows[0].id
+
+      // A second recipient with NO directory_account_links row at all — the ordinary "not onboarded to
+      // WeCom yet" gap (WeCom directory population is a named prerequisite outside this channel's
+      // scope). This delivery must land `skipped`, not `failed`, and must never reach
+      // readConfig/fetchAccessToken/send (no channel identity to resolve, so the real-network mocks
+      // below must not be invoked for this row).
+      const unboundDelivery = await publicPool.query<{ id: string }>(
+        `INSERT INTO attendance_notification_deliveries
+           (org_id, source_type, source_id, source_key, recipient_user_id, recipient_role, channel, payload)
+         VALUES ($1,'unscheduled_reminder',$2,$3,$4,'subject','wecom_work_notification',$5::jsonb)
+         RETURNING id::text AS id`,
+        [
+          orgId,
+          sourceId,
+          `c5-wecom:${sourceId}:recipient:${unboundUserId}:channel:wecom_work_notification`,
+          unboundUserId,
+          JSON.stringify({ title: 'S4 WeCom smoke (unbound)', body: 'Should never send.' }),
+        ],
+      )
+      unboundDeliveryId = unboundDelivery.rows[0].id
+
+      const channel = new WeComAttendanceDeliveryChannel({
+        query,
+        readConfig: async (receivedIntegrationId) => {
+          expect(receivedIntegrationId).toBe(integrationId)
+          return config
+        },
+        fetchAccessToken: async (receivedConfig) => {
+          expect(receivedConfig).toBe(config)
+          return 'access-token'
+        },
+        sendTextMessage: async (accessToken, input, receivedConfig) => {
+          sentMessages.push({ accessToken, input, receivedConfig })
+          return { errcode: 0, errmsg: 'ok', msgId: 'msg-c5-wecom', invalidUserIds: [], raw: {} }
+        },
+      })
+      const worker = new AttendanceNotificationDeliveryWorker({
+        query,
+        channels: [channel],
+        now: () => new Date('2026-08-02T00:00:00.000Z'),
+        workerId: 'worker-c5-wecom',
+      })
+
+      await expect(worker.runBatch()).resolves.toEqual({ claimed: 2, sent: 1, retrying: 0, failed: 0, skipped: 1 })
+
+      // Only the linked recipient's row reached the network mocks — the unbound recipient never did.
+      expect(sentMessages).toEqual([{
+        accessToken: 'access-token',
+        input: {
+          userIds: ['we-user-c5'],
+          content: 'Please check the attendance reminder.',
+        },
+        receivedConfig: config,
+      }])
+      const row = (await publicPool.query(
+        `SELECT status, delivered_at, last_error, attempt_count, claim_worker_id, claim_expires_at
+           FROM attendance_notification_deliveries
+          WHERE id = $1`,
+        [deliveryId],
+      )).rows[0]
+      expect(row).toMatchObject({
+        status: 'sent',
+        last_error: null,
+        attempt_count: 1,
+        claim_worker_id: null,
+        claim_expires_at: null,
+      })
+      expect(row.delivered_at).toBeTruthy()
+
+      const unboundRow = (await publicPool.query(
+        `SELECT status, delivered_at, last_error, attempt_count, claim_worker_id, claim_expires_at
+           FROM attendance_notification_deliveries
+          WHERE id = $1`,
+        [unboundDeliveryId],
+      )).rows[0]
+      expect(unboundRow).toMatchObject({
+        status: 'skipped',
+        delivered_at: null,
+        last_error: 'wecom_recipient_not_bound',
+        attempt_count: 1,
+        claim_worker_id: null,
+        claim_expires_at: null,
+      })
+    } finally {
+      if (deliveryId) {
+        await publicPool.query('DELETE FROM attendance_notification_deliveries WHERE id = $1', [deliveryId]).catch(() => undefined)
+      }
+      if (unboundDeliveryId) {
+        await publicPool.query('DELETE FROM attendance_notification_deliveries WHERE id = $1', [unboundDeliveryId]).catch(() => undefined)
+      }
+      await publicPool.query('DELETE FROM directory_account_links WHERE directory_account_id = $1', [directoryAccountId]).catch(() => undefined)
+      await publicPool.query('DELETE FROM directory_accounts WHERE id = $1', [directoryAccountId]).catch(() => undefined)
+      await publicPool.query('DELETE FROM directory_integrations WHERE id = $1', [integrationId]).catch(() => undefined)
+      await publicPool.query('DELETE FROM users WHERE id = $1', [localUserId]).catch(() => undefined)
+      await publicPool.end().catch(() => undefined)
+    }
+  })
+
+  it('S4 WeCom deep-link: flag+base-URL send a textcard whose button opens the container landing; missing URL falls back to text', async () => {
+    if (!dbUrl) throw new Error('DATABASE_URL is required for this integration test')
+    const publicPool = new Pool({ connectionString: dbUrl })
+    const runSuffix = Date.now().toString(36)
+    const orgId = `s4-wecom-deeplink-${runSuffix}`
+    const localUserId = `u-s4-wecom-deeplink-${runSuffix}`
+    const integrationId = randomUUID()
+    const directoryAccountId = randomUUID()
+    const sourceId = randomUUID()
+    const deliveryIds: string[] = []
+    const envSnapshot = {
+      flag: process.env.ATTENDANCE_NOTIFICATION_DEEP_LINK_ENABLED,
+      publicUrl: process.env.PUBLIC_APP_URL,
+      baseUrl: process.env.APP_BASE_URL,
+    }
+    const config: WeComMessageConfig = {
+      corpId: 'we-corp-s4',
+      corpSecret: 'we-corp-secret-s4',
+      agentId: '1000002',
+      baseUrl: 'https://qyapi.weixin.qq.com',
+    }
+    const query: AttendanceNotificationDeliveryQuery = async (sqlText, params) => {
+      const r = await publicPool.query(sqlText, params as unknown[])
+      return { rows: r.rows, rowCount: r.rowCount }
+    }
+
+    const insertDelivery = async (): Promise<string> => {
+      const row = await publicPool.query<{ id: string }>(
+        `INSERT INTO attendance_notification_deliveries
+           (org_id, source_type, source_id, source_key, recipient_user_id, recipient_role, channel, payload)
+         VALUES ($1,'unscheduled_reminder',$2,$3,$4,'subject','wecom_work_notification',$5::jsonb)
+         RETURNING id::text AS id`,
+        [
+          orgId,
+          sourceId,
+          `s4-wecom-deeplink:${sourceId}:recipient:${localUserId}:n:${deliveryIds.length}:${runSuffix}`,
+          localUserId,
+          JSON.stringify({ title: 'S4 WeCom deep-link smoke', body: 'Tap to open attendance.' }),
+        ],
+      )
+      deliveryIds.push(row.rows[0].id)
+      return row.rows[0].id
+    }
+
+    const buildChannel = (sink: { text: unknown[]; card: unknown[] }) => new WeComAttendanceDeliveryChannel({
+      query,
+      readConfig: async () => config,
+      fetchAccessToken: async () => 'access-token',
+      sendTextMessage: async (_accessToken, input) => {
+        sink.text.push(input)
+        return { errcode: 0, errmsg: 'ok', msgId: 'msg-text', invalidUserIds: [], raw: {} }
+      },
+      sendTextCardMessage: async (_accessToken, input) => {
+        sink.card.push(input)
+        return { errcode: 0, errmsg: 'ok', msgId: 'msg-card', invalidUserIds: [], raw: {} }
+      },
+    })
+
+    try {
+      await requireTable(publicPool, 'attendance_notification_deliveries')
+      await publicPool.query(
+        `INSERT INTO users (id, email, password_hash, name, role, is_active)
+         VALUES ($1,$2,'hash',$3,'user',true)
+         ON CONFLICT (id) DO UPDATE SET is_active = EXCLUDED.is_active`,
+        [localUserId, `${localUserId}@example.test`, localUserId],
+      )
+      await publicPool.query(
+        `INSERT INTO directory_integrations (id, org_id, provider, name, status, corp_id, config)
+         VALUES ($1,$2,'wecom',$3,'active','we-corp-s4',$4::jsonb)`,
+        [integrationId, orgId, `S4 WeCom deep-link ${runSuffix}`, JSON.stringify({})],
+      )
+      await publicPool.query(
+        `INSERT INTO directory_accounts
+           (id, integration_id, provider, corp_id, external_user_id, external_key, name, is_active)
+         VALUES ($1,$2,'wecom','we-corp-s4','we-user-s4','we-key-s4',$3,true)`,
+        [directoryAccountId, integrationId, localUserId],
+      )
+      await publicPool.query(
+        `INSERT INTO directory_account_links (directory_account_id, local_user_id, link_status, match_strategy)
+         VALUES ($1,$2,'linked','manual')`,
+        [directoryAccountId, localUserId],
+      )
+
+      // Case 1: flag + base URL -> textcard.
+      process.env.ATTENDANCE_NOTIFICATION_DEEP_LINK_ENABLED = 'true'
+      process.env.PUBLIC_APP_URL = 'https://app.example.test/'
+      delete process.env.APP_BASE_URL
+      await insertDelivery()
+      const cardSink = { text: [] as unknown[], card: [] as unknown[] }
+      const cardWorker = new AttendanceNotificationDeliveryWorker({
+        query,
+        channels: [buildChannel(cardSink)],
+        now: () => new Date('2026-08-02T00:00:00.000Z'),
+        workerId: 'worker-s4-wecom-card',
+      })
+      await expect(cardWorker.runBatch()).resolves.toEqual({ claimed: 1, sent: 1, retrying: 0, failed: 0, skipped: 0 })
+      expect(cardSink.text).toHaveLength(0)
+      expect(cardSink.card).toEqual([{
+        userIds: ['we-user-s4'],
+        title: 'S4 WeCom deep-link smoke',
+        description: 'Tap to open attendance.',
+        url: 'https://app.example.test/attendance?noticeSource=unscheduled_reminder',
+        btnTxt: '打开考勤',
+      }])
+
+      // Case 2: flag on but NO base URL -> text path, byte-identical fallback.
+      process.env.ATTENDANCE_NOTIFICATION_DEEP_LINK_ENABLED = 'true'
+      delete process.env.PUBLIC_APP_URL
+      delete process.env.APP_BASE_URL
+      await insertDelivery()
+      const textSink = { text: [] as unknown[], card: [] as unknown[] }
+      const textWorker = new AttendanceNotificationDeliveryWorker({
+        query,
+        channels: [buildChannel(textSink)],
+        now: () => new Date('2026-08-02T00:00:00.000Z'),
+        workerId: 'worker-s4-wecom-text',
+      })
+      await expect(textWorker.runBatch()).resolves.toEqual({ claimed: 1, sent: 1, retrying: 0, failed: 0, skipped: 0 })
+      expect(textSink.card).toHaveLength(0)
+      expect(textSink.text).toEqual([{
+        userIds: ['we-user-s4'],
+        content: 'Tap to open attendance.',
+      }])
+
+      // Case 3: base URL present but flag OFF -> text path (the flag is load-bearing).
+      delete process.env.ATTENDANCE_NOTIFICATION_DEEP_LINK_ENABLED
+      process.env.PUBLIC_APP_URL = 'https://app.example.test'
+      await insertDelivery()
+      const flagOffSink = { text: [] as unknown[], card: [] as unknown[] }
+      const flagOffWorker = new AttendanceNotificationDeliveryWorker({
+        query,
+        channels: [buildChannel(flagOffSink)],
+        now: () => new Date('2026-08-02T00:00:00.000Z'),
+        workerId: 'worker-s4-wecom-flagoff',
+      })
+      await expect(flagOffWorker.runBatch()).resolves.toEqual({ claimed: 1, sent: 1, retrying: 0, failed: 0, skipped: 0 })
+      expect(flagOffSink.card).toHaveLength(0)
+      expect(flagOffSink.text).toHaveLength(1)
     } finally {
       if (envSnapshot.flag === undefined) delete process.env.ATTENDANCE_NOTIFICATION_DEEP_LINK_ENABLED
       else process.env.ATTENDANCE_NOTIFICATION_DEEP_LINK_ENABLED = envSnapshot.flag
