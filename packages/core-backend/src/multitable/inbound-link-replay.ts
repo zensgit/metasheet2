@@ -57,9 +57,13 @@ export interface InboundReplaySkips {
 export interface InboundReplayResult {
   /** Edges actually inserted. */
   replayed: number
-  /** Tombstone rows for this anchor that were NOT replayed, by first failing precondition. */
+  /** Tombstone rows for this anchor that were NOT replayed, by first failing precondition. The
+   *  breakdown is ADVISORY in a concurrent-drift window: downward drift folds into
+   *  `alreadyPresent` (sum stays consistent with `total`); upward drift leaves a stale diagnostic
+   *  label behind (sum may exceed `total` by the drift amount) — see RB15/RB17. */
   skipped: InboundReplaySkips
-  /** Total tombstone rows found for the anchor (replayed + sum(skipped)). */
+  /** TRUE tombstone-row count under the anchor, locked from the diagnostic's single snapshot —
+   *  exact in both drift directions (NOT derived from replayed/skipped arithmetic). */
   total: number
 }
 
@@ -126,6 +130,13 @@ export async function replayInboundLinks(
     if (raw.verdict === 'replayable') replayable = raw.n
     else if (raw.verdict in skipped) skipped[raw.verdict as keyof InboundReplaySkips] = raw.n
   }
+  // TRUE anchor size, locked from the diagnostic's single snapshot (owner P2, upward-drift fix):
+  // every anchor row lands in exactly one CASE bucket, so this sum counts each tombstone row once.
+  // The anchor's tombstone set is stable across this function's two statements — rows are only ever
+  // inserted at capture (the record is currently deleted; no concurrent capture for this anchor) and
+  // only ever deleted by the retention sweep, whose floor keeps any group whose anchor still has a
+  // live meta_records_trash row (ours does: the caller holds it FOR UPDATE until restore commits).
+  const diagnosticTotal = replayable + Object.values(skipped).reduce((a, b) => a + b, 0)
 
   // The write: same anchor, all seven guards as INSERT predicates. `id` mirrors the outbound
   // replay's `lnk_<uuid>` shape ('lnk_' + 36 uuid chars = 40 ≤ its 50-char slice).
@@ -150,7 +161,6 @@ export async function replayInboundLinks(
   )
 
   const replayed = ins.rowCount ?? 0
-  const total = replayed + Object.values(skipped).reduce((a, b) => a + b, 0)
   // Diagnostic/INSERT drift tripwire — HONEST SEMANTICS, not a correctness net (do not extend this to
   // "fix" the count; it is deliberately a same-day characterization, see NIT-1 in the absorption audit):
   // the diagnostic query above and the write below are two SEPARATE statements, each its own READ
@@ -165,13 +175,26 @@ export async function replayInboundLinks(
   // statements" bucket — it is a best-effort label, not necessarily the row's real disqualifying
   // precondition. This can never cause a wrong WRITE (the write's own predicates are re-checked in that
   // same statement against the then-current data, so it can never insert a row a live precondition
-  // disqualifies, and the NOT EXISTS guard still prevents any duplicate) — it only means the returned
-  // `skipped` breakdown, and `total` (already computed above from the pre-fold skip counts, and not
-  // recomputed after this adjustment), are advisory diagnostics in this narrow race window, not an
-  // exact ledger of every tombstone row's fate.
+  // disqualifies, and the NOT EXISTS guard rejects any duplicate already visible in that statement's
+  // snapshot — rows the SAME statement is inserting are invisible to it, so a pre-existing duplicate
+  // tombstone pair replays as a faithful pair, see RB16) — it only means the `skipped` breakdown's
+  // LABEL is advisory in this narrow race window, not an exact ledger of each row's disqualifying
+  // reason.
   if (replayed !== replayable) {
     skipped.alreadyPresent += Math.max(0, replayable - replayed)
   }
+  // The `total` CONTRACT (owner P2, R9 fix-forward, both drift directions): total is the TRUE
+  // number of tombstone rows under the anchor — `diagnosticTotal`, locked from the diagnostic's
+  // single snapshot above — NEVER derived from replayed/skipped arithmetic. Deriving it breaks in
+  // both directions: pre-fold it under-counted downward drift to 0 (breaking the downstream
+  // `recoverable: total > 0` in record-service.ts); summed post-fold it OVER-counts upward drift
+  // (diag says neighborDeclined=1, neighbour re-consents in the gap, write inserts ⇒ replayed=1
+  // while the stale label still says 1 ⇒ a derived total of 2 for a 1-tombstone anchor — RB17).
+  // Accounting honesty: in DOWNWARD drift the fold above keeps replayed + sum(skipped) === total;
+  // in UPWARD drift the stale diagnostic label cannot be attributed away, so replayed +
+  // sum(skipped) may EXCEED total by the drift amount — the per-bucket breakdown is advisory in a
+  // drift window (RB15/RB17); `total` and `replayed` are always exact.
+  const total = diagnosticTotal
   return { replayed, skipped, total }
 }
 
