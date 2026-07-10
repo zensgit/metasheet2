@@ -684,6 +684,42 @@ async function main() {
     assert.equal(result2.status, 'matched')
   })
 
+  // ---- review follow-ups (#4015): direct guard tests ----
+  await run('groundRow strips excluded human fields even when the row carries them (belt-and-suspenders)', async () => {
+    const { __internals } = require(path.join(__dirname, '..', 'lib', 'stock-preparation-confirm-writes.cjs'))
+    const grounded = __internals.groundRow(
+      MAPPING_FIELD_IDS,
+      { mappingId: 'gm1', plmDrawingNo: 'D', confirmedBy: 'evil', confirmedAt: '2026-01-01T00:00:00.000Z', notes: 'evil-note' },
+      MAPPING_HUMAN_FIELD_IDS,
+    )
+    assert.equal(grounded.confirmedBy, undefined)
+    assert.equal(grounded.confirmedAt, undefined)
+    assert.equal(grounded.notes, undefined)
+    assert.equal(grounded.mappingId, 'gm1')
+  })
+
+  await run('R5 with a missing targetProjectId fails closed 422 before any IO', async () => {
+    const api = makeRecordsApi()
+    const provisioning = makeProvisioning()
+    await expectError(
+      syncMaterialMappingCandidates({ permission: 'admin', recordsApi: api, provisioning, targetProjectId: '', projectId: BUSINESS_PROJECT_ID, defaultVersionPolicy: 'drawing_only' }),
+      { status: 422, code: 'CONFIRM_CONFIG_INVALID' },
+    )
+    assert.equal(provisioning.findObjectSheetCalls, 0)
+    assert.equal(api.createCalls.length + api.patchCalls.length + api.queryCalls.length, 0)
+  })
+
+  await run('R6 create-confirmed honors top-level notes when mapping.notes is absent', async () => {
+    const api = makeRecordsApi()
+    const provisioning = makeProvisioning()
+    await confirmMaterialMapping({
+      permission: 'admin', recordsApi: api, provisioning, targetProjectId: STAGING_PROJECT_ID, confirmedBy: OPERATOR, notes: 'top-level note',
+      mapping: { plmDrawingNo: 'DN', erpMaterialCode: 'C9', erpMaterialInternalId: 'ITM_9', versionPolicy: 'drawing_only' },
+    })
+    const write = api.createCalls.find((call) => call.sheetId === SHEET.mapping)
+    assert.equal(write.data.notes, 'top-level note')
+  })
+
   const total = passed + failed
   console.log(`\nstock-preparation-confirm-writes: ${passed}/${total} passed`)
   if (failed > 0) {

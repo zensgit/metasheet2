@@ -254,12 +254,6 @@ function groundRow(fieldIds, row, excludeFields = []) {
   return out
 }
 
-function confirmationStamps(row) {
-  return {
-    confirmedByPresent: optionalString(readCell({ data: row }, 'confirmedBy')) !== null || optionalString(row.confirmedBy) !== null,
-  }
-}
-
 function isStamped(data) {
   return Boolean(optionalString(data.confirmedBy) || optionalString(data.confirmedAt))
 }
@@ -479,6 +473,9 @@ async function confirmMaterialMapping(input = {}) {
   const row = {
     ...mapping,
     mappingId,
+    // Top-level `notes` is honored when the mapping object carries none (both arrive through the
+    // same closed allowlists; the sub-object wins when both are present).
+    notes: optionalString(mapping.notes) || notes || undefined,
     matchStatus: MATCH_STATUSES.MATCHED,
     matchMethod: MANUAL_CONFIRM_MATCH_METHOD,
     confidence: 1,
