@@ -199,6 +199,22 @@ function verify_root_runtime_dependencies() {
   search_fixed_string '"packageManager": "pnpm@9.15.9"' "$package_json" || die "packaged root package.json must pin pnpm@9.15.9"
 }
 
+function verify_no_native_bcrypt_dependency() {
+  local root="$1"
+  local core_backend_package_json="${root}/packages/core-backend/package.json"
+  local lockfile="${root}/pnpm-lock.yaml"
+
+  [[ -f "$core_backend_package_json" ]] || die "core-backend package.json must be present"
+  [[ -f "$lockfile" ]] || die "pnpm-lock.yaml must be present"
+  search_fixed_string '"bcryptjs":' "$core_backend_package_json" || die "core-backend package.json must keep the portable bcryptjs runtime"
+  if search_fixed_string '"bcrypt":' "$core_backend_package_json" || search_fixed_string '"@types/bcrypt":' "$core_backend_package_json"; then
+    die "core-backend package.json must not depend on native bcrypt or its unused type package"
+  fi
+  if grep -Eq "^[[:space:]]+(bcrypt@|'@types/bcrypt@)" "$lockfile"; then
+    die "pnpm lockfile must not contain native bcrypt build dependencies"
+  fi
+}
+
 function verify_integration_plugin_runtime_dependencies() {
   local root="$1"
   local workspace_yaml="${root}/pnpm-workspace.yaml"
@@ -968,6 +984,7 @@ bootstrap_run_wrapper="$(find "$pkg_root" -maxdepth 1 -type f -name 'bootstrap-a
 [[ -n "$bootstrap_run_wrapper" ]] || die "Required package content missing: bootstrap-admin-<run>.bat"
 verify_windows_entrypoints "$pkg_root"
 verify_root_runtime_dependencies "$pkg_root"
+verify_no_native_bcrypt_dependency "$pkg_root"
 verify_integration_plugin_runtime_dependencies "$pkg_root"
 verify_deployable_artifact_contract "$pkg_root"
 verify_build_provenance "$pkg_root"
