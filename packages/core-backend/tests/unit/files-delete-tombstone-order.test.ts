@@ -10,12 +10,13 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 // the design-lock's own literal SQL), not `db.updateTable(...)`.
 //
 // The real-DB downstream consequences of a *successful* tombstone (G2 rejects the id, download 404s)
-// are covered by tests/integration/attendance-outdoor-punch.test.ts — those need a real Postgres row to
-// filter against and can't be faked here. This file only proves the ordering/error-handling shape.
+// are covered by tests/integration/attendance-outdoor-punch.test.ts and
+// tests/integration/attendance-files-acl.test.ts — those need a real Postgres row to filter against
+// and can't be faked here. This file only proves the ordering/error-handling shape.
 
 const kyselyMocks = vi.hoisted(() => {
   const state = {
-    hasActiveRow: true,
+    ownerRows: [] as Array<{ owner_id: string | null }>,
     updateShouldThrow: false,
     updateError: new Error('injected tombstone UPDATE failure'),
     callOrder: [] as string[],
@@ -37,7 +38,7 @@ vi.mock('kysely', async (importOriginal) => {
           return { rows: [] }
         }
         if (text.includes('SELECT owner_id FROM files')) {
-          return { rows: kyselyMocks.state.hasActiveRow ? [{ owner_id: 'owner-1' }] : [] }
+          return { rows: kyselyMocks.state.ownerRows }
         }
         // upload's INSERT and any other raw sql call this test doesn't exercise
         return { rows: [] }
@@ -65,11 +66,19 @@ vi.mock('../../src/services/StorageService', () => ({
   },
 }))
 
+const authMocks = vi.hoisted(() => ({
+  user: { id: 'owner-1' } as Record<string, unknown> | undefined,
+}))
+
 vi.mock('../../src/middleware/auth', () => ({
   authenticate: (req: express.Request, _res: express.Response, next: express.NextFunction) => {
-    req.user = { id: 'owner-1' } as never
+    req.user = authMocks.user as never
     next()
   },
+}))
+
+vi.mock('../../src/rbac/service', () => ({
+  isAdmin: async () => false,
 }))
 
 import { Logger } from '../../src/core/logger'
@@ -77,9 +86,10 @@ import { filesRouter } from '../../src/routes/files'
 
 describe('files.ts DELETE — F2 tombstone-first ordering (mocked db + storage)', () => {
   beforeEach(() => {
-    kyselyMocks.state.hasActiveRow = true
+    kyselyMocks.state.ownerRows = [{ owner_id: 'owner-1' }]
     kyselyMocks.state.updateShouldThrow = false
     kyselyMocks.state.callOrder = []
+    authMocks.user = { id: 'owner-1' }
     storageMocks.exists.mockClear()
     storageMocks.delete.mockClear()
     storageMocks.delete.mockImplementation(async () => {
@@ -133,5 +143,28 @@ describe('files.ts DELETE — F2 tombstone-first ordering (mocked db + storage)'
     expect(res.status).toBe(200)
     expect(res.body).toEqual({ success: true, id: 'photo-1' })
     expect(kyselyMocks.state.callOrder).toEqual(['tombstone-update', 'storage-delete'])
+  })
+
+  it('cross-user (non-owner, non-admin) delete request never reaches the tombstone UPDATE or storage at all — 404', async () => {
+    authMocks.user = { id: 'someone-else' }
+    const app = buildApp()
+
+    const res = await request(app).delete('/api/files/photo-1')
+
+    expect(res.status).toBe(404)
+    expect(res.body).toEqual({ error: 'File not found' })
+    expect(kyselyMocks.state.callOrder).toEqual([])
+    expect(storageMocks.delete).not.toHaveBeenCalled()
+  })
+
+  it('no active files row (legacy/no-DB-row object) + non-admin caller → 404, no storage call', async () => {
+    kyselyMocks.state.ownerRows = []
+    const app = buildApp()
+
+    const res = await request(app).delete('/api/files/legacy-1')
+
+    expect(res.status).toBe(404)
+    expect(storageMocks.exists).not.toHaveBeenCalled()
+    expect(storageMocks.delete).not.toHaveBeenCalled()
   })
 })
