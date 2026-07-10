@@ -803,6 +803,7 @@ export const FORMULA_FUNCTION_DOCS: FormulaFunctionDoc[] = [
     description: 'Returns the value at the given 1-based position from a list of values.',
     example: '=CHOOSE({fld_rank}, "Gold", "Silver", "Bronze")',
     insertText: 'CHOOSE(, )',
+  },
   // ── Catalog parity (audit-driven): 12 scalar functions the engine already registers but the
   // picker/autocomplete catalog never advertised — logic (error/blank/number predicates, multi-branch,
   // XOR), math (directional rounding), and date (weekday, second, month-shift, day-diff). ──
