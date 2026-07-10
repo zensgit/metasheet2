@@ -42,6 +42,22 @@ function runVerifierMacMetadataCheck(listEntries) {
   return runVerifierFunction('verify_no_macos_metadata_entries', listEntries)
 }
 
+function runStockPreparationVerifier(root) {
+  return spawnSync(
+    'bash',
+    ['-lc', 'source "$VERIFY"; verify_stock_preparation_mvp_contract "$PACKAGE_ROOT"'],
+    {
+      cwd: repoRoot,
+      env: {
+        ...process.env,
+        VERIFY: verifyScriptPath,
+        PACKAGE_ROOT: root,
+      },
+      encoding: 'utf8',
+    },
+  )
+}
+
 test('on-prem package build prunes copied workspace node_modules before archiving', () => {
   assert.match(
     buildScript,
@@ -231,4 +247,31 @@ test('on-prem package build emits first-hop Windows bootstrap sidecar assets', (
     /first-hop bootstrap release sidecar/,
     'package verifier should require the package metadata to describe the bootstrap sidecar',
   )
+})
+
+test('on-prem verifier rejects packages missing the stock-preparation smoke contract', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ms2-stock-prep-package-'))
+  const migrationPath = path.join(root, 'packages/core-backend/migrations/066_create_integration_stock_prep_audit.sql')
+  const smokePath = path.join(root, 'scripts/ops/stock-preparation-mvp-postdeploy-smoke.mjs')
+  fs.mkdirSync(path.dirname(migrationPath), { recursive: true })
+  fs.mkdirSync(path.dirname(smokePath), { recursive: true })
+  fs.writeFileSync(migrationPath, 'CREATE TABLE integration_stock_prep_audit ();\n')
+  fs.writeFileSync(smokePath, 'S.auditActionsCovered = "8/8"\nS.selfScanClean = true\nS.pass = true\n')
+
+  try {
+    const clean = runStockPreparationVerifier(root)
+    assert.equal(clean.status, 0, clean.stderr)
+
+    fs.rmSync(smokePath)
+    const missing = runStockPreparationVerifier(root)
+    assert.notEqual(missing.status, 0)
+    assert.match(missing.stderr, /stock-preparation MVP postdeploy smoke/)
+
+    fs.writeFileSync(smokePath, 'S.auditActionsCovered = "8/8"\nS.pass = true\n')
+    const incomplete = runStockPreparationVerifier(root)
+    assert.notEqual(incomplete.status, 0)
+    assert.match(incomplete.stderr, /values-free self scan/)
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
 })

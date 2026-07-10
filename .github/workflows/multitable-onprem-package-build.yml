@@ -38,7 +38,10 @@ jobs:
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
         with:
-          version: 9
+          # Keep this exact version aligned with PACKAGE_PNPM_VERSION in the
+          # build/apply contract. A major-only selector makes release lockfile
+          # compatibility depend on the build date.
+          version: 9.15.9
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -80,6 +83,17 @@ jobs:
           VERIFY_REPORT_JSON="$verify_zip_json" \
           VERIFY_REPORT_MD="$verify_zip_md" \
             scripts/ops/multitable-onprem-package-verify.sh "$pkg_zip"
+
+          dependency_preflight_root="$(mktemp -d)"
+          tar -xzf "$pkg_tgz" -C "$dependency_preflight_root"
+          dependency_preflight_package="$(find "$dependency_preflight_root" -mindepth 1 -maxdepth 1 -type d -print -quit)"
+          test -n "$dependency_preflight_package"
+          (
+            cd "$dependency_preflight_package"
+            pnpm install --frozen-lockfile --reporter=append-only
+          )
+          rm -rf "$dependency_preflight_root"
+
           echo "PACKAGE_FILE=$pkg_tgz" >> "$GITHUB_ENV"
           echo "PACKAGE_FILE_ZIP=$pkg_zip" >> "$GITHUB_ENV"
           echo "PACKAGE_META_FILE=$pkg_meta" >> "$GITHUB_ENV"
