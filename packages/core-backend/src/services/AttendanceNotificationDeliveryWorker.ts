@@ -5,6 +5,7 @@ import {
   DingTalkBusinessError,
   DingTalkRequestError,
   fetchDingTalkAppAccessToken,
+  isDingTalkOutcomeUnknown,
   sendDingTalkWorkNotification,
   sendDingTalkWorkNotificationActionCard,
   type DingTalkMessageConfig,
@@ -74,10 +75,19 @@ export interface AttendanceDeliveryMessage {
  * "this user has no channel identity yet" case does not pollute the dead-letter/failed counter that
  * exists to surface real delivery faults (API errors, timeouts, quota). Channels MUST NOT set `skip`
  * on a retryable result; the worker only consults it once `retryable` is already false.
+ *
+ * `outcomeUnknown` (PR #4046 Phase B) likewise only has meaning alongside `retryable: false`: the
+ * send was ATTEMPTED and the outcome is unknowable (network error/timeout/5xx/malformed 2xx — the
+ * recipient may well have received the message). The worker terminates it as the DISTINCT
+ * `outcome_unknown` status: it must NOT burn retries and must NOT be resent (owner doctrine — a
+ * resend on ambiguity is a duplicate-notification hazard; DingTalk's async-send result query only
+ * reconciles when a task_id exists, and a lost response has none). Only the DingTalk channel's
+ * classifier produces it today; WeCom/email transports do not emit the marker and are untouched.
+ * `skip` and `outcomeUnknown` are mutually exclusive; the worker checks `outcomeUnknown` first.
  */
 export type AttendanceDeliveryChannelResult =
   | { ok: true }
-  | { ok: false; retryable: boolean; error: string; skip?: boolean }
+  | { ok: false; retryable: boolean; error: string; skip?: boolean; outcomeUnknown?: boolean }
 
 export interface AttendanceDeliveryChannel {
   readonly name: string
@@ -148,6 +158,8 @@ export interface AttendanceNotificationDeliveryResult {
   failed: number
   skipped: number
   lostLease?: number
+  /** PR #4046 Phase B: rows terminated `outcome_unknown` this batch (present only when > 0, like lostLease). */
+  outcomeUnknown?: number
 }
 
 interface DeliveryRow {
@@ -883,19 +895,24 @@ export class AttendanceNotificationDeliveryWorker {
       const rows = await this.claimDueDeliveries()
       result.claimed = rows.length
       let lostLease = 0
+      let outcomeUnknown = 0
       for (const row of rows) {
         const outcome = await this.deliver(row)
         if (outcome === 'sent') result.sent += 1
         else if (outcome === 'retrying') result.retrying += 1
         else if (outcome === 'failed') result.failed += 1
         else if (outcome === 'skipped') result.skipped += 1
+        else if (outcome === 'outcome_unknown') outcomeUnknown += 1
         else lostLease += 1
       }
       if (lostLease > 0) {
         result.lostLease = lostLease
       }
+      if (outcomeUnknown > 0) {
+        result.outcomeUnknown = outcomeUnknown
+      }
       if (result.claimed > 0) {
-        this.logger.info(`Attendance deliveries claimed=${result.claimed} sent=${result.sent} retrying=${result.retrying} failed=${result.failed} skipped=${result.skipped} lostLease=${lostLease}`)
+        this.logger.info(`Attendance deliveries claimed=${result.claimed} sent=${result.sent} retrying=${result.retrying} failed=${result.failed} skipped=${result.skipped} outcomeUnknown=${outcomeUnknown} lostLease=${lostLease}`)
       }
       return result
     } finally {
@@ -903,7 +920,7 @@ export class AttendanceNotificationDeliveryWorker {
     }
   }
 
-  private async deliver(row: DeliveryRow): Promise<'sent' | 'retrying' | 'failed' | 'skipped' | 'lost-lease'> {
+  private async deliver(row: DeliveryRow): Promise<'sent' | 'retrying' | 'failed' | 'skipped' | 'outcome_unknown' | 'lost-lease'> {
     const channel = this.channelsByName.get(row.channel)
     const attemptCount = Number(row.attempt_count)
     if (!channel) {
@@ -937,6 +954,14 @@ export class AttendanceNotificationDeliveryWorker {
 
     const failure = channelResult as Extract<AttendanceDeliveryChannelResult, { ok: false }>
     if (!failure.retryable || attemptCount >= this.maxAttempts) {
+      // PR #4046 Phase B: an outcome-unknown send (attempted, response lost — maybe delivered)
+      // terminates as the DISTINCT `outcome_unknown` state on the FIRST such classification: it
+      // never burns further attempts and is never resent (a resend on ambiguity is a duplicate
+      // hazard). Sits strictly in this per-row post-send classification — the quiet-hours gate
+      // and the claim/lease CAS semantics above are untouched.
+      if (!failure.retryable && failure.outcomeUnknown) {
+        return await this.markOutcomeUnknown(row.id, failure.error, attemptCount) ? 'outcome_unknown' : 'lost-lease'
+      }
       // Only a genuinely non-retryable, channel-flagged-structural result skips the dead-letter bucket.
       // A retryable failure that merely ran out of attempts (attemptCount >= maxAttempts) always still
       // lands in `failed` — it was a real, repeated send failure, not something we should have skipped.
@@ -993,6 +1018,28 @@ export class AttendanceNotificationDeliveryWorker {
     const result = await this.query(
       `UPDATE attendance_notification_deliveries
           SET status = 'failed',
+              last_error = $2,
+              claim_expires_at = NULL,
+              claim_worker_id = NULL,
+              updated_at = $3::timestamptz
+        WHERE id = $1::uuid
+          AND status = 'sending'
+          AND claim_worker_id = $4
+          AND attempt_count = $5::int`,
+      [id, error.slice(0, 1000), now, this.workerId, attemptCount],
+    )
+    return Number(result.rowCount ?? 0) === 1
+  }
+
+  // Same terminal-state CAS guard as markFailed (only the lease holder, matching attempt_count, may
+  // write) — the only difference is the target status. See the AttendanceDeliveryChannelResult
+  // `outcomeUnknown` doc comment: the send may well have been delivered, so this row must never be
+  // re-claimed or resent; reconciliation is manual/ops via the distinct status + last_error.
+  private async markOutcomeUnknown(id: string, error: string, attemptCount: number): Promise<boolean> {
+    const now = this.now().toISOString()
+    const result = await this.query(
+      `UPDATE attendance_notification_deliveries
+          SET status = 'outcome_unknown',
               last_error = $2,
               claim_expires_at = NULL,
               claim_worker_id = NULL,
@@ -1100,6 +1147,23 @@ function isRetryableDingTalkErrorCode(code: number): boolean {
 }
 
 function classifyDingTalkSendError(error: unknown): AttendanceDeliveryChannelResult {
+  // PR #4046 Phase B — checked FIRST, before any shape-based bucket: the transport marks
+  // send-tier failures whose outcome is unknowable (network error/timeout/5xx/malformed 2xx)
+  // with isDingTalkOutcomeUnknown. Pre-fix these fell into the retryable buckets below and the
+  // outbox RESENT them — the duplicate-notification hazard the owner's doctrine forbids. They
+  // are terminal (`outcome_unknown`), never retried: a resend cannot be reconciled (a lost
+  // response carries no task_id for DingTalk's async-send result query). Definite rejections
+  // (429 pre-processing, flow-control errcodes, business errors) are NOT marked by the
+  // transport and keep their classification below. WeCom/email classifiers are untouched —
+  // their transports do not emit the marker.
+  if (isDingTalkOutcomeUnknown(error)) {
+    return {
+      ok: false,
+      retryable: false,
+      outcomeUnknown: true,
+      error: `dingtalk_send_outcome_unknown: ${normalizeErrorText(error, 'DingTalk send outcome unknown')}`,
+    }
+  }
   if (error instanceof DingTalkRequestError) {
     return {
       ok: false,

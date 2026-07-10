@@ -83,9 +83,11 @@ describe('DT-HARDEN-06 DingTalk request timeout', () => {
     expect(seenInit?.signal?.aborted).toBe(false)
   })
 
-  // NOTE on the spread-order precedence (`{ ...init, signal: init.signal ?? … }` vs
-  // `{ signal: …, ...init }`): it cannot be exercised through the public surface because no
-  // in-repo caller passes an `init.signal`, and `requestDingTalkJson` is not exported. The order
-  // in client.ts is correct (spread-first, caller-signal-wins); it is left structurally correct
-  // rather than tested through a re-implemented merge, which proves nothing.
+  // NOTE: since the §7.2 unified transport, the signal handed to fetch is composed in
+  // transport.ts (`composePerAttemptSignal`): a fresh AbortSignal.timeout PER ATTEMPT,
+  // AbortSignal.any-composed with the caller's overall signal when one is provided.
+  // Per-attempt freshness and caller-abort behavior are covered in
+  // dingtalk-transport-resilience.test.ts; this suite keeps pinning the H06 surface
+  // (a live signal reaches fetch; aborts surface as DingTalkTimeoutError; failures
+  // are never cached).
 })
