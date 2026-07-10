@@ -81,6 +81,7 @@ import { isDatabaseSchemaError } from './utils/database-errors'
 import { startOperationAuditRetention } from './audit/operation-audit-retention'
 import { startMultitableAttachmentCleanup } from './multitable/attachment-orphan-retention'
 import { startMetaRevisionRetention } from './multitable/meta-revision-retention'
+import { startFilesOrphanBlobRetention } from './services/files-orphan-blob-retention'
 import { isFieldAlwaysReadOnly, deriveFieldPermissions, isFieldWriteForbidden, FieldWritePermissionDeniedError } from './multitable/permission-derivation'
 import { AutomationService, setAutomationServiceInstance } from './multitable/automation-service'
 import { tenantContext } from './db/sharding/tenant-context'
@@ -252,6 +253,7 @@ export class MetaSheetServer {
   private stopOperationAuditRetention?: () => void
   private stopMultitableAttachmentCleanup?: () => void
   private stopMetaRevisionRetention?: () => void
+  private stopFilesOrphanBlobRetention?: () => void
   private automationService?: AutomationService
   private apiGateway?: APIGateway
   private yjsCleanupTimer?: NodeJS.Timeout
@@ -1858,6 +1860,13 @@ export class MetaSheetServer {
     }))
     shutdownTasks.push(Promise.resolve().then(() => {
       try {
+        this.stopFilesOrphanBlobRetention?.()
+      } catch (err) {
+        this.logger.warn(`Files orphan blob retention stop error: ${err instanceof Error ? err.message : String(err)}`)
+      }
+    }))
+    shutdownTasks.push(Promise.resolve().then(() => {
+      try {
         if (this.yjsCleanupTimer) {
           clearInterval(this.yjsCleanupTimer)
           this.yjsCleanupTimer = undefined
@@ -2750,6 +2759,7 @@ export class MetaSheetServer {
       this.stopOperationAuditRetention = startOperationAuditRetention({ logger: this.logger })
       this.stopMultitableAttachmentCleanup = startMultitableAttachmentCleanup({ logger: this.logger })
       this.stopMetaRevisionRetention = startMetaRevisionRetention({ logger: this.logger })
+      this.stopFilesOrphanBlobRetention = startFilesOrphanBlobRetention({ logger: this.logger })
     }
 
     // Register signal handlers only for real runtime, not test runners.
