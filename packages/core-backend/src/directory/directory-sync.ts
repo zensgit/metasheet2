@@ -2693,8 +2693,10 @@ async function loadMatchMaps(accounts: DirectoryAccountRow[]) {
 
 /**
  * DT-HARDEN-05 — how often a running sync proves it is alive by touching
- * `last_heartbeat_at` on its run row. Env-tunable, floored at 5 seconds so a
- * misconfiguration cannot hammer the pool.
+ * `last_heartbeat_at` on its run row. Env-tunable; any value that is not a finite
+ * number of at least 5000ms is IGNORED and the 60-second default applies (a sub-5s
+ * request is not floored up to 5s — it falls back entirely), so a misconfiguration
+ * cannot hammer the pool.
  */
 export const DIRECTORY_SYNC_HEARTBEAT_INTERVAL_MS = (() => {
   const raw = Number(process.env.DIRECTORY_SYNC_HEARTBEAT_INTERVAL_MS)

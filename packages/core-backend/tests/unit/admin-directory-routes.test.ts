@@ -51,7 +51,15 @@ vi.mock('../../src/audit/audit', () => ({
   auditLog: auditMocks.auditLog,
 }))
 
-vi.mock('../../src/directory/directory-sync', () => ({
+vi.mock('../../src/directory/directory-sync', async (importOriginal) => ({
+  // DT-HARDEN-05: the sync route discriminates lease conflicts with
+  // `error instanceof DirectorySyncInProgressError`. That check only works if this
+  // factory re-exports the REAL class — a factory that omits it leaves the route
+  // holding `undefined` (instanceof then THROWS a TypeError), and a factory-local
+  // stand-in class would make `instanceof` silently false for real errors. Both
+  // failure modes neuter exactly the mapping the 409 tests below pin.
+  DirectorySyncInProgressError: (await importOriginal<typeof import('../../src/directory/directory-sync')>())
+    .DirectorySyncInProgressError,
   acknowledgeDirectorySyncAlert: directoryMocks.acknowledgeDirectorySyncAlert,
   admitDirectoryAccountUser: directoryMocks.admitDirectoryAccountUser,
   batchAdmitDirectoryAccountUsers: directoryMocks.batchAdmitDirectoryAccountUsers,
