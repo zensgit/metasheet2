@@ -1908,6 +1908,205 @@ describe('Attendance admin regressions', () => {
     expect(card.querySelector('[data-annual-ops-error-adjust]')?.textContent || '').toContain('not an active member')
   })
 
+  // ===== #3925 S6 bulk annual-leave balance adjustment (design-lock 2026-07-10) =====
+  function addAnnualBulkAdjustTargetUser(section: HTMLElement, userId: string) {
+    selectUserPicker(section, '#attendance-annual-bulk-adjust-user-picker', userId)
+    section.querySelector<HTMLButtonElement>('[data-attendance-annual-bulk-adjust-add-user]')!.click()
+  }
+
+  function setAnnualBulkAdjustSharedFields(card: HTMLElement, deltaMinutes: string, reason: string) {
+    setInput(card, '[data-attendance-annual-bulk-adjust-delta]', deltaMinutes)
+    setInput(card, '[data-attendance-annual-bulk-adjust-reason]', reason)
+  }
+
+  it('bulk balance adjust: confirm gate — opening the confirm never posts; only confirm submit does', async () => {
+    const bodies: any[] = []
+    vi.mocked(apiFetch).mockImplementation(async (input, init) => {
+      const url = String(input)
+      if (url.includes('/api/attendance/annual-leave-manual-adjustment') && init?.method === 'POST') {
+        bodies.push(JSON.parse(String(init!.body)))
+        return jsonResponse(200, { ok: true, data: { id: `adj-${bodies.length}`, delta: 120, applied: true, alreadyApplied: false } })
+      }
+      if (url.includes('/api/attendance/settings')) return enabledPolicySettings()
+      return emptyAttendanceResponse()
+    })
+    app = createApp(AttendanceView, { mode: 'admin' })
+    app.mount(container!)
+    await flushUi(8)
+    const section = await openOpsSection()
+    const card = section.querySelector<HTMLElement>('[data-annual-ops-card="bulk-adjust"]')!
+    addAnnualBulkAdjustTargetUser(card, 'user-bulk-1')
+    await flushUi(2)
+    setAnnualBulkAdjustSharedFields(card, '120', 'batch fix')
+    await flushUi(2)
+
+    card.querySelector<HTMLButtonElement>('[data-attendance-annual-bulk-adjust-request]')!.click()
+    await flushUi(4)
+
+    expect(section.querySelector('[data-annual-ops-confirm]')).toBeTruthy() // in-DOM confirm, not window.confirm
+    expect(bodies).toHaveLength(0)
+
+    section.querySelector<HTMLButtonElement>('[data-annual-ops-confirm-submit]')!.click()
+    await flushUi(4)
+
+    expect(bodies).toHaveLength(1)
+  })
+
+  it('bulk balance adjust: N selected users produce N POSTs sharing delta/reason with distinct idempotencyKeys', async () => {
+    const bodies: any[] = []
+    vi.mocked(apiFetch).mockImplementation(async (input, init) => {
+      const url = String(input)
+      if (url.includes('/api/attendance/annual-leave-manual-adjustment') && init?.method === 'POST') {
+        const body = JSON.parse(String(init!.body))
+        bodies.push(body)
+        return jsonResponse(200, { ok: true, data: { id: `adj-${bodies.length}`, delta: body.deltaMinutes, applied: true, alreadyApplied: false } })
+      }
+      if (url.includes('/api/attendance/settings')) return enabledPolicySettings()
+      return emptyAttendanceResponse()
+    })
+    app = createApp(AttendanceView, { mode: 'admin' })
+    app.mount(container!)
+    await flushUi(8)
+    const section = await openOpsSection()
+    const card = section.querySelector<HTMLElement>('[data-annual-ops-card="bulk-adjust"]')!
+    addAnnualBulkAdjustTargetUser(card, 'user-a')
+    await flushUi(2)
+    addAnnualBulkAdjustTargetUser(card, 'user-b')
+    await flushUi(2)
+    setAnnualBulkAdjustSharedFields(card, '120', 'batch fix')
+    await flushUi(2)
+
+    card.querySelector<HTMLButtonElement>('[data-attendance-annual-bulk-adjust-request]')!.click()
+    await flushUi(4)
+    section.querySelector<HTMLButtonElement>('[data-annual-ops-confirm-submit]')!.click()
+    await flushUi(8)
+
+    expect(bodies).toEqual([
+      { userId: 'user-a', deltaMinutes: 120, reason: 'batch fix', idempotencyKey: expect.any(String) },
+      { userId: 'user-b', deltaMinutes: 120, reason: 'batch fix', idempotencyKey: expect.any(String) },
+    ])
+    expect(new Set(bodies.map(b => b.idempotencyKey)).size).toBe(2)
+    expect(card.querySelector('[data-attendance-annual-bulk-adjust-summary]')?.textContent).toContain('2 applied, 0 failed')
+  })
+
+  it('bulk balance adjust: a >50-user selection disables the request button, never silently truncating', async () => {
+    vi.mocked(apiFetch).mockImplementation(async (input) => {
+      const url = String(input)
+      if (url.includes('/api/attendance/settings')) return enabledPolicySettings()
+      return emptyAttendanceResponse()
+    })
+    app = createApp(AttendanceView, { mode: 'admin' })
+    app.mount(container!)
+    await flushUi(8)
+    const section = await openOpsSection()
+    const card = section.querySelector<HTMLElement>('[data-annual-ops-card="bulk-adjust"]')!
+    for (let i = 0; i < 51; i += 1) {
+      addAnnualBulkAdjustTargetUser(card, `user-${i}`)
+      await flushUi(1)
+    }
+    setAnnualBulkAdjustSharedFields(card, '60', 'cap test')
+    await flushUi(2)
+
+    const requestButton = card.querySelector<HTMLButtonElement>('[data-attendance-annual-bulk-adjust-request]')!
+    expect(requestButton.disabled).toBe(true)
+    expect(card.querySelector('[data-attendance-annual-bulk-adjust-disabled-reason]')?.textContent).toContain('at most 50')
+    expect(section.querySelector('[data-annual-ops-confirm]')).toBeNull()
+  })
+
+  it('bulk balance adjust: partial failure shows distinct per-row state/error-kind and never claims full success; retry only resubmits the failed user', async () => {
+    const bodies: any[] = []
+    let failAttempts = 0
+    vi.mocked(apiFetch).mockImplementation(async (input, init) => {
+      const url = String(input)
+      if (url.includes('/api/attendance/annual-leave-manual-adjustment') && init?.method === 'POST') {
+        const body = JSON.parse(String(init!.body))
+        bodies.push(body)
+        if (body.userId === 'user-fail') {
+          failAttempts += 1
+          if (failAttempts === 1) {
+            return jsonResponse(422, { ok: false, error: { code: 'ANNUAL_LEAVE_BALANCE_INSUFFICIENT', message: 'insufficient' } })
+          }
+        }
+        return jsonResponse(200, { ok: true, data: { id: `adj-${bodies.length}`, delta: body.deltaMinutes, applied: true, alreadyApplied: false } })
+      }
+      if (url.includes('/api/attendance/settings')) return enabledPolicySettings()
+      return emptyAttendanceResponse()
+    })
+    app = createApp(AttendanceView, { mode: 'admin' })
+    app.mount(container!)
+    await flushUi(8)
+    const section = await openOpsSection()
+    const card = section.querySelector<HTMLElement>('[data-annual-ops-card="bulk-adjust"]')!
+    addAnnualBulkAdjustTargetUser(card, 'user-fail')
+    await flushUi(2)
+    addAnnualBulkAdjustTargetUser(card, 'user-ok')
+    await flushUi(2)
+    setAnnualBulkAdjustSharedFields(card, '-60', 'deduction')
+    await flushUi(2)
+
+    card.querySelector<HTMLButtonElement>('[data-attendance-annual-bulk-adjust-request]')!.click()
+    await flushUi(4)
+    // negative delta gets the extra G3 irreversibility note on the shared confirm panel
+    expect(section.querySelector('[data-annual-ops-confirm]')?.textContent).toContain('reverse adjustment')
+    section.querySelector<HTMLButtonElement>('[data-annual-ops-confirm-submit]')!.click()
+    await flushUi(8)
+
+    expect(bodies).toHaveLength(2)
+    expect(card.querySelector('[data-attendance-annual-bulk-adjust-row-state="ok"]')).toBeTruthy()
+    expect(card.querySelector('[data-attendance-annual-bulk-adjust-row-state="error"]')).toBeTruthy()
+    expect(card.querySelector('[data-attendance-annual-bulk-adjust-row-error-kind="insufficient"]')).toBeTruthy()
+    expect(card.querySelector('[data-attendance-annual-bulk-adjust-outcome-error]')).toBeTruthy()
+    expect(card.querySelector('[data-attendance-annual-bulk-adjust-summary]')?.textContent).toContain('1 applied, 1 failed')
+
+    const retryButton = card.querySelector<HTMLButtonElement>('[data-attendance-annual-bulk-adjust-retry]')!
+    expect(retryButton.disabled).toBe(false)
+    retryButton.click()
+    await flushUi(8)
+
+    expect(bodies).toHaveLength(3)
+    expect(bodies.filter(b => b.userId === 'user-ok')).toHaveLength(1)
+    expect(bodies.filter(b => b.userId === 'user-fail')).toHaveLength(2)
+    // the retry must reuse the snapshot-frozen idempotency key — regenerating it would
+    // double-apply a delta whose first response was lost after the server had already
+    // committed (source_key is the only server-side dedupe key for balance deltas)
+    const failBodies = bodies.filter(b => b.userId === 'user-fail')
+    expect(failBodies[0].idempotencyKey).toBeTruthy()
+    expect(failBodies[1].idempotencyKey).toBe(failBodies[0].idempotencyKey)
+    expect(card.querySelector('[data-attendance-annual-bulk-adjust-outcome-error]')).toBeNull()
+    expect(card.querySelector('[data-attendance-annual-bulk-adjust-summary]')?.textContent).toContain('2 applied, 0 failed')
+  })
+
+  it('bulk balance adjust: policy off disables the request button and no write reaches the backend', async () => {
+    const writePosts: string[] = []
+    vi.mocked(apiFetch).mockImplementation(async (input, init) => {
+      const url = String(input)
+      if (url.includes('annual-leave-manual-adjustment') && init?.method === 'POST') {
+        writePosts.push(url)
+        return jsonResponse(200, { ok: true, data: {} })
+      }
+      if (url.includes('/api/attendance/settings')) {
+        return jsonResponse(200, { ok: true, data: { annualLeavePolicy: { enabled: false, tenureMode: 'cumulative_service', standardDayMinutes: 480, tiers: [], carryover: { enabled: false }, timezone: null } } })
+      }
+      return emptyAttendanceResponse()
+    })
+    app = createApp(AttendanceView, { mode: 'admin' })
+    app.mount(container!)
+    await flushUi(8)
+    const section = await openOpsSection()
+    const card = section.querySelector<HTMLElement>('[data-annual-ops-card="bulk-adjust"]')!
+    addAnnualBulkAdjustTargetUser(card, 'user-a')
+    await flushUi(2)
+    setAnnualBulkAdjustSharedFields(card, '60', 'policy off test')
+    await flushUi(2)
+
+    const requestButton = card.querySelector<HTMLButtonElement>('[data-attendance-annual-bulk-adjust-request]')!
+    expect(requestButton.disabled).toBe(true)
+    requestButton.click()
+    await flushUi(4)
+    expect(section.querySelector('[data-annual-ops-confirm]')).toBeNull()
+    expect(writePosts).toEqual([])
+  })
+
   it('warns when the attendance-group picker source is capped (no silent caps)', async () => {
     vi.mocked(apiFetch).mockImplementation(async (input) => {
       const url = String(input)
