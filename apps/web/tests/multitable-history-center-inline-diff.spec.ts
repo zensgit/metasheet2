@@ -346,7 +346,7 @@ describe('HistoryCenterModal — record titles from the masked payload (PR-B)', 
 })
 
 describe('HistoryCenterModal — type-aware link/person diff values (PR-B)', () => {
-  it('link diffs render resolved display names from the summary cache, never raw JSON', async () => {
+  it('link diffs render EACH SIDE from its own value ids (owner P2): before=[A] vs after=[A,B] differ', async () => {
     mockListHistoryEvents.mockResolvedValue({ batches: [batch()], total: 1, nextCursor: null, searchTruncated: false })
     mockGetHistoryBatch.mockResolvedValue(detailWith([{
       sheetId: 'sheet_1', recordId: 'rec_1', action: 'update', version: 2,
@@ -356,6 +356,8 @@ describe('HistoryCenterModal — type-aware link/person diff values (PR-B)', () 
     }]))
     const { app, container } = mountModalWithProps({
       fields: TYPED_FIELDS,
+      // The cache describes the CURRENT cell ([A,B]); each side must be filtered to its own ids —
+      // an unfiltered pass-through renders "Alpha Task, Beta Task" on BOTH sides.
       linkSummaries: { rec_1: { fld_link: [
         { id: 'rec_a', display: 'Alpha Task' },
         { id: 'rec_b', display: 'Beta Task' },
@@ -366,11 +368,37 @@ describe('HistoryCenterModal — type-aware link/person diff values (PR-B)', () 
       container.querySelector<HTMLButtonElement>('[data-test="hist-batch"]')!.click()
       await flushPromises()
       const row = container.querySelector<HTMLElement>('[data-test="hist-diff-row"]')!
+      const before = row.querySelector('.meta-hist__diff-before')?.textContent ?? ''
       const after = row.querySelector('.meta-hist__diff-after')?.textContent ?? ''
+      expect(before).toContain('Alpha Task')
+      expect(before).not.toContain('Beta Task') // before=[rec_a] only — the P2 regression
       expect(after).toContain('Alpha Task')
       expect(after).toContain('Beta Task')
       expect(after).not.toContain('[') // no JSON dump
       expect(after).not.toContain('rec_a')
+    } finally { app.unmount(); container.remove() }
+  })
+
+  it('link diff PARTIAL cache coverage falls back to the count summary, never an under-counted name list', async () => {
+    mockListHistoryEvents.mockResolvedValue({ batches: [batch()], total: 1, nextCursor: null, searchTruncated: false })
+    mockGetHistoryBatch.mockResolvedValue(detailWith([{
+      sheetId: 'sheet_1', recordId: 'rec_1', action: 'update', version: 2,
+      changedFieldIds: ['fld_link'],
+      before: null,
+      after: { fld_link: ['rec_a', 'rec_gone'] }, // rec_gone is NOT in the cache
+    }]))
+    const { app, container } = mountModalWithProps({
+      fields: TYPED_FIELDS,
+      linkSummaries: { rec_1: { fld_link: [{ id: 'rec_a', display: 'Alpha Task' }] } },
+    })
+    try {
+      await flushPromises()
+      container.querySelector<HTMLButtonElement>('[data-test="hist-batch"]')!.click()
+      await flushPromises()
+      const after = container.querySelector('.meta-hist__diff-after')?.textContent ?? ''
+      expect(after).not.toContain('Alpha Task') // "Alpha Task" alone would misread as a 1-link value
+      expect(after).not.toContain('[')
+      expect(after.length).toBeGreaterThan(0) // honest count-summary text
     } finally { app.unmount(); container.remove() }
   })
 

@@ -115,13 +115,27 @@ function formatDiffValue(v: unknown): string {
 // resolve to display names via the grid's already-fetched summary caches, with formatFieldDisplay's own
 // count/id fallbacks on cache miss (historical/deleted/off-page rows). Fields known only by id/name
 // (e.g. non-active sheets in all-tables mode) keep the legacy plain-text path above.
+//
+// Owner P2 (link sides): the cached link summaries describe the record's CURRENT cell, and
+// formatFieldDisplay renders the summaries VERBATIM when present — ignoring `value`. A history diff
+// renders two DIFFERENT values (before vs after) for the same cell, so each side must get only the
+// summaries for ITS OWN ids, in value order; otherwise before=[A] and after=[A,B] both display "A, B".
+// Full coverage of this side's ids → value-ordered summaries; any miss → null (formatFieldDisplay's
+// honest count fallback) rather than an under-counted name list.
+function linkSummariesForSide(c: HistoryChange, fieldId: string, v: unknown): LinkedRecordSummary[] | null {
+  const cached = props.linkSummaries?.[c.recordId]?.[fieldId]
+  if (!cached?.length || !Array.isArray(v)) return null
+  const byId = new Map(cached.map((s) => [s.id, s]))
+  const matched = v.map((id) => byId.get(String(id)))
+  return matched.every((s): s is LinkedRecordSummary => s !== undefined) ? matched : null
+}
 function formatDiffValueFor(c: HistoryChange, fieldId: string, v: unknown): string {
   const f = props.fields?.find((x) => x.id === fieldId)
   if (!f || typeof f.type !== 'string') return formatDiffValue(v)
   return formatFieldDisplay({
     field: f as MetaField,
     value: v,
-    linkSummaries: props.linkSummaries?.[c.recordId]?.[fieldId] ?? null,
+    linkSummaries: f.type === 'link' ? linkSummariesForSide(c, fieldId, v) : null,
     personSummaries: props.personSummaries?.[c.recordId]?.[fieldId] ?? null,
     isZh: isZh.value,
   })
