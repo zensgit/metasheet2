@@ -46,14 +46,23 @@ function okResult(overrides: Partial<WeComSendMessageResult> = {}): WeComSendMes
 function makeChannel(opts: {
   rows?: Array<{ integration_id: string; external_user_id: string }>
   queryThrows?: boolean
+  // H1 hardening (review #3920 P3-1, parity slice): the 0-row cold path now issues a SECOND query
+  // (an EXISTS check against directory_integrations) before deciding skip vs retryable. Default true
+  // preserves every pre-H1 fixture's behavior (org has an active integration -> stays skip) without
+  // needing to touch them; only the new H1 tests below set this to false.
+  orgHasActiveIntegration?: boolean
   readConfig?: () => Promise<WeComMessageConfig>
   fetchAccessToken?: () => Promise<string>
   sendTextMessage?: ReturnType<typeof vi.fn>
   sendTextCardMessage?: ReturnType<typeof vi.fn>
 }) {
-  const query = vi.fn(async (_sql: string, _params?: unknown[]) => {
+  const query = vi.fn(async (sql: string, _params?: unknown[]) => {
     if (opts.queryThrows) throw new Error('db connection lost')
-    return { rows: opts.rows ?? [{ integration_id: 'integ-1', external_user_id: 'we-user-1' }] }
+    if (sql.includes('directory_account_links')) {
+      return { rows: opts.rows ?? [{ integration_id: 'integ-1', external_user_id: 'we-user-1' }] }
+    }
+    // The org-level EXISTS check (only reached from the 0-row recipient path).
+    return { rows: [{ org_has_active_integration: opts.orgHasActiveIntegration ?? true }] }
   })
   const sendTextMessage = opts.sendTextMessage ?? vi.fn(async () => okResult())
   const sendTextCardMessage = opts.sendTextCardMessage ?? vi.fn(async () => okResult())
@@ -68,13 +77,30 @@ function makeChannel(opts: {
 }
 
 describe('WeComAttendanceDeliveryChannel.resolveRecipient (via send) — three-table JOIN, provider=wecom', () => {
-  it('0 rows -> skip wecom_recipient_not_bound; provider=wecom scoped in the SQL', async () => {
-    const { channel, query, sendTextMessage } = makeChannel({ rows: [] })
+  it('0 rows + org HAS an active integration -> skip wecom_recipient_not_bound; provider=wecom scoped in the SQL', async () => {
+    // Behavior-unchanged case (H1 hardening — review #3920 P3-1): org-level integration exists, so
+    // this really is just "this one user is not onboarded yet".
+    const { channel, query, sendTextMessage } = makeChannel({ rows: [], orgHasActiveIntegration: true })
     const result = await channel.send(MESSAGE)
     expect(result).toEqual({ ok: false, retryable: false, skip: true, error: 'wecom_recipient_not_bound' })
     expect(query).toHaveBeenCalledWith(expect.stringContaining("a.provider = 'wecom'"), [MESSAGE.recipientUserId, MESSAGE.orgId])
     expect(query).toHaveBeenCalledWith(expect.stringContaining("i.provider = 'wecom'"), expect.anything())
     expect(sendTextMessage).not.toHaveBeenCalled()
+  })
+
+  it('H1 (review #3920 P3-1): 0 rows + org has NO active integration -> retryable failure, NOT skip (org-level recoverable outage)', async () => {
+    const { channel, query, sendTextMessage } = makeChannel({ rows: [], orgHasActiveIntegration: false })
+    const result = await channel.send(MESSAGE)
+    expect(result).toEqual({ ok: false, retryable: true, error: 'wecom_org_integration_inactive' })
+    expect(sendTextMessage).not.toHaveBeenCalled()
+    // Pin both queries: the recipient JOIN AND the org-level existence check, scoped by
+    // provider='wecom' + status='active', parameterized by orgId only.
+    expect(query).toHaveBeenCalledWith(expect.stringContaining('directory_account_links'), [MESSAGE.recipientUserId, MESSAGE.orgId])
+    expect(query).toHaveBeenCalledWith(
+      expect.stringMatching(/FROM directory_integrations[\s\S]*provider = 'wecom'[\s\S]*status = 'active'/),
+      [MESSAGE.orgId],
+    )
+    expect(query).toHaveBeenCalledTimes(2)
   })
 
   it('>1 rows -> wecom_recipient_ambiguous, retryable:false, NOT skip (dead-letter, not skip)', async () => {
