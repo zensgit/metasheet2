@@ -7069,4 +7069,415 @@ describe('DirectoryManagementView', () => {
       expect(container?.textContent).toContain('publicAppUrl must be an absolute http(s) URL')
     })
   })
+
+  describe('Wave 2: 预览同步 / 后台同步 polling / R5 run-card stats', () => {
+    function mockInitialLoad(integration: Record<string, unknown>, runsPayload?: unknown): void {
+      apiFetchMock
+        .mockResolvedValueOnce(createJsonResponse({ ok: true, data: { items: [integration] } }))
+        .mockResolvedValueOnce(createJsonResponse(runsPayload ?? { ok: true, data: { items: [] } }))
+        .mockResolvedValueOnce(createJsonResponse(createScheduleSnapshotPayload()))
+        .mockResolvedValueOnce(createJsonResponse(createAlertListPayload([])))
+        .mockResolvedValueOnce(createJsonResponse(createReviewItemsPayload([])))
+        .mockResolvedValueOnce(createJsonResponse(createAccountListPayload([])))
+    }
+
+    function mockPostSyncRefresh(runsPayload: unknown): void {
+      apiFetchMock
+        .mockResolvedValueOnce(createJsonResponse({ ok: true, data: { items: [createIntegration()] } }))
+        .mockResolvedValueOnce(createJsonResponse(runsPayload))
+        .mockResolvedValueOnce(createJsonResponse(createScheduleSnapshotPayload()))
+        .mockResolvedValueOnce(createJsonResponse(createAlertListPayload([])))
+        .mockResolvedValueOnce(createJsonResponse(createReviewItemsPayload([])))
+        .mockResolvedValueOnce(createJsonResponse(createAccountListPayload([])))
+    }
+
+    function createPreviewPayload(overrides: Record<string, unknown> = {}) {
+      return {
+        ok: true,
+        data: {
+          preview: {
+            integrationId: 'dir-1',
+            integrationName: 'DingTalk CN',
+            departmentsSeen: 13,
+            accountsSeen: 99,
+            wouldCreateAccounts: 3,
+            wouldDeactivateAccounts: 2,
+            wouldDeactivateLinkedAccounts: 1,
+            autoAdmissionMode: 'auto_for_scoped_departments',
+            autoAdmissionCandidateCount: 2,
+            autoAdmissionSkippedMissingEmailCount: 1,
+            autoAdmissionExcludedCount: 1,
+            sampledNewAccounts: [{ externalUserId: 'ext-new-1', name: '新成员甲' }],
+            sampledDeactivations: [{ externalUserId: 'ext-gone-1', name: '离职乙', linked: true }],
+            ...overrides,
+          },
+        },
+      }
+    }
+
+    function createSyncInProgressResponse(activeRunId: string) {
+      return createJsonResponse({
+        ok: false,
+        error: {
+          code: 'DIRECTORY_SYNC_IN_PROGRESS',
+          message: `A directory sync is already running for this integration (run ${activeRunId})`,
+          details: { activeRunId },
+        },
+      }, 409)
+    }
+
+    function createBackgroundRun(status: string, overrides: Record<string, unknown> = {}) {
+      return {
+        id: 'run-bg-1',
+        status,
+        startedAt: '2026-07-10T01:00:00.000Z',
+        finishedAt: status === 'running' ? null : '2026-07-10T01:05:00.000Z',
+        stats: {},
+        errorMessage: null,
+        ...overrides,
+      }
+    }
+
+    function createRunsPayload(items: Record<string, unknown>[]) {
+      return { ok: true, data: { items } }
+    }
+
+    function mountView(): void {
+      app = createApp(DirectoryManagementView)
+      registerRouterLink(app!)
+      app!.mount(container!)
+    }
+
+    function findButton(label: string): HTMLButtonElement | undefined {
+      return Array.from(container!.querySelectorAll('button'))
+        .find((button) => button.textContent?.trim() === label) as HTMLButtonElement | undefined
+    }
+
+    function runsCallCount(): number {
+      return apiFetchMock.mock.calls.filter(([path]) => String(path).includes('/runs')).length
+    }
+
+    const autoAdmissionConfig = {
+      ...createIntegration().config as Record<string, unknown>,
+      admissionMode: 'auto_for_scoped_departments',
+      admissionDepartmentIds: ['100'],
+    }
+
+    it('预览同步 POSTs the exact preview path and renders counts + sampled lists in the card', async () => {
+      mockInitialLoad(createIntegration())
+      apiFetchMock.mockResolvedValueOnce(createJsonResponse(createPreviewPayload()))
+
+      mountView()
+      await flushUi()
+
+      const previewButton = findButton('预览同步')
+      expect(previewButton).toBeTruthy()
+      previewButton!.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+      await flushUi(8)
+
+      expect(apiFetchMock).toHaveBeenCalledWith(
+        '/api/admin/directory/integrations/dir-1/sync/preview',
+        expect.objectContaining({ method: 'POST' }),
+      )
+      expect(container?.textContent).toContain('同步预览（dry-run）')
+      expect(container?.textContent).toContain('将新增账号 3')
+      expect(container?.textContent).toContain('将停用 2')
+      expect(container?.textContent).toContain('其中已绑定 1')
+      expect(container?.textContent).toContain('符合条件 2 人 · 缺少邮箱跳过 1 人 · 命中排除部门 1 人')
+      expect(container?.textContent).toContain('新成员甲 (ext-new-1) 等 3 人')
+      expect(container?.textContent).toContain('离职乙 (ext-gone-1，已绑定本地用户) 等 2 人')
+      expect(container?.textContent).toContain('同步预览已生成（未写入任何数据）')
+    })
+
+    it('preview 409 (DIRECTORY_SYNC_IN_PROGRESS, #4049) shows 已有同步在进行中 with the active runId, not the raw error', async () => {
+      mockInitialLoad(createIntegration())
+      apiFetchMock.mockResolvedValueOnce(createSyncInProgressResponse('run-lease-9'))
+
+      mountView()
+      await flushUi()
+
+      findButton('预览同步')!.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+      await flushUi(8)
+
+      expect(container?.textContent).toContain('已有同步在进行中（运行 run-lease-9）')
+      expect(container?.textContent).not.toContain('A directory sync is already running')
+    })
+
+    it('后台同步 POSTs {async:true} (exact body), skips the confirm for manual_only, and enters the polling state', async () => {
+      mockInitialLoad(createIntegration())
+      apiFetchMock.mockResolvedValueOnce(createJsonResponse(
+        { ok: true, data: { accepted: true, runId: 'run-bg-1', integrationId: 'dir-1' } },
+        202,
+      ))
+      apiFetchMock.mockResolvedValue(createJsonResponse(createRunsPayload([createBackgroundRun('running')])))
+      const confirmSpy = vi.spyOn(ElMessageBox, 'confirm').mockResolvedValue('confirm' as never)
+
+      mountView()
+      await flushUi()
+
+      findButton('后台同步')!.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+      await flushUi(8)
+
+      expect(confirmSpy).not.toHaveBeenCalled()
+      expect(apiFetchMock).toHaveBeenCalledWith(
+        '/api/admin/directory/integrations/dir-1/sync',
+        expect.objectContaining({ method: 'POST', body: JSON.stringify({ async: true }) }),
+      )
+      expect(container?.textContent).toContain('后台同步进行中（运行 run-bg-1）')
+      // Both sync triggers lock while a background run is being tracked.
+      expect(findButton('手动同步')?.disabled).toBe(true)
+      expect(findButton('后台同步中...')?.disabled).toBe(true)
+
+      confirmSpy.mockRestore()
+    })
+
+    it('async 409 (DIRECTORY_SYNC_IN_PROGRESS) shows 已有同步在进行中 with the active runId and does NOT start polling', async () => {
+      mockInitialLoad(createIntegration())
+      apiFetchMock.mockResolvedValueOnce(createSyncInProgressResponse('run-lease-2'))
+
+      mountView()
+      await flushUi()
+
+      findButton('后台同步')!.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+      await flushUi(8)
+
+      expect(container?.textContent).toContain('已有同步在进行中（运行 run-lease-2）')
+      expect(container?.textContent).not.toContain('A directory sync is already running')
+      expect(container?.textContent).not.toContain('后台同步进行中')
+    })
+
+    it('auto-admission FAIL-SAFE: warns that async discards one-time temp-password packets; declining sends no request', async () => {
+      mockInitialLoad(createIntegration({ config: autoAdmissionConfig }))
+      const confirmSpy = vi.spyOn(ElMessageBox, 'confirm').mockRejectedValue(new Error('cancel'))
+
+      mountView()
+      await flushUi()
+
+      findButton('后台同步')!.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+      await flushUi(8)
+
+      expect(confirmSpy).toHaveBeenCalledWith(
+        expect.stringMatching(/一次性临时密码.*丢弃.*手动同步/),
+        '后台同步将丢弃临时凭据',
+        expect.objectContaining({ type: 'warning' }),
+      )
+      expect(apiFetchMock).not.toHaveBeenCalledWith(
+        '/api/admin/directory/integrations/dir-1/sync',
+        expect.anything(),
+      )
+
+      confirmSpy.mockRestore()
+    })
+
+    it('auto-admission FAIL-SAFE: confirming proceeds with the async POST', async () => {
+      mockInitialLoad(createIntegration({ config: autoAdmissionConfig }))
+      apiFetchMock.mockResolvedValueOnce(createJsonResponse(
+        { ok: true, data: { accepted: true, runId: 'run-bg-1', integrationId: 'dir-1' } },
+        202,
+      ))
+      apiFetchMock.mockResolvedValue(createJsonResponse(createRunsPayload([createBackgroundRun('running')])))
+      const confirmSpy = vi.spyOn(ElMessageBox, 'confirm').mockResolvedValue('confirm' as never)
+
+      mountView()
+      await flushUi()
+
+      findButton('后台同步')!.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+      await flushUi(8)
+
+      expect(confirmSpy).toHaveBeenCalled()
+      expect(apiFetchMock).toHaveBeenCalledWith(
+        '/api/admin/directory/integrations/dir-1/sync',
+        expect.objectContaining({ method: 'POST', body: JSON.stringify({ async: true }) }),
+      )
+      expect(container?.textContent).toContain('后台同步进行中（运行 run-bg-1）')
+
+      confirmSpy.mockRestore()
+    })
+
+    it('polls every 5s while running, stops at terminal completed, renders the summary, refreshes panels, and leaks no timer', async () => {
+      vi.useFakeTimers()
+      try {
+        const completedStats = {
+          accountsSynced: 99,
+          departmentsSynced: 13,
+          pendingCount: 3,
+          linkedCount: 89,
+          accountsCreatedCount: 4,
+          accountsUpdatedCount: 95,
+          accountsDeactivatedCount: 2,
+          autoAdmittedCount: 2,
+        }
+        mockInitialLoad(createIntegration())
+        apiFetchMock.mockResolvedValueOnce(createJsonResponse(
+          { ok: true, data: { accepted: true, runId: 'run-bg-1', integrationId: 'dir-1' } },
+          202,
+        ))
+        apiFetchMock.mockResolvedValueOnce(createJsonResponse(createRunsPayload([createBackgroundRun('running')])))
+        apiFetchMock.mockResolvedValueOnce(createJsonResponse(createRunsPayload([createBackgroundRun('running')])))
+        apiFetchMock.mockResolvedValueOnce(createJsonResponse(createRunsPayload([
+          createBackgroundRun('completed', { stats: completedStats }),
+        ])))
+        mockPostSyncRefresh(createRunsPayload([createBackgroundRun('completed', { stats: completedStats })]))
+
+        mountView()
+        await flushUi()
+        expect(runsCallCount()).toBe(1) // initial loadRuns only
+
+        findButton('后台同步')!.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+        await flushUi(8)
+        expect(runsCallCount()).toBe(2) // first poll fires immediately after the 202
+        expect(container?.textContent).toContain('后台同步进行中（运行 run-bg-1）')
+
+        await vi.advanceTimersByTimeAsync(5000)
+        await flushUi(4)
+        expect(runsCallCount()).toBe(3) // still running → kept polling
+        expect(container?.textContent).toContain('后台同步进行中（运行 run-bg-1）')
+
+        await vi.advanceTimersByTimeAsync(5000)
+        await flushUi(8)
+        // terminal poll + the post-sync refresh's loadRuns
+        expect(runsCallCount()).toBe(5)
+        expect(container?.textContent).toContain('后台同步已完成（运行 run-bg-1）')
+        expect(container?.textContent).toContain('本次新增账号 4，更新 95，停用 2')
+        expect(container?.textContent).toContain('自动准入 2 位成员（后台同步不返回一次性临时凭据）')
+        // Post-terminal refresh hit the surrounding panels too (integrations reloaded).
+        expect(
+          apiFetchMock.mock.calls.filter(([path]) => path === '/api/admin/directory/integrations').length,
+        ).toBe(2)
+        expect(container?.textContent).not.toContain('后台同步进行中')
+
+        // TIMER-LEAK TRIPWIRE: after terminal, NO further fetch of any kind may happen.
+        const settledCallCount = apiFetchMock.mock.calls.length
+        await vi.advanceTimersByTimeAsync(30_000)
+        await flushUi(4)
+        expect(apiFetchMock.mock.calls.length).toBe(settledCallCount)
+      } finally {
+        vi.useRealTimers()
+      }
+    })
+
+    it('stops polling at terminal failed and surfaces the run errorMessage', async () => {
+      vi.useFakeTimers()
+      try {
+        mockInitialLoad(createIntegration())
+        apiFetchMock.mockResolvedValueOnce(createJsonResponse(
+          { ok: true, data: { accepted: true, runId: 'run-bg-1', integrationId: 'dir-1' } },
+          202,
+        ))
+        apiFetchMock.mockResolvedValueOnce(createJsonResponse(createRunsPayload([createBackgroundRun('running')])))
+        apiFetchMock.mockResolvedValueOnce(createJsonResponse(createRunsPayload([
+          createBackgroundRun('failed', { errorMessage: '钉钉接口超时' }),
+        ])))
+        mockPostSyncRefresh(createRunsPayload([createBackgroundRun('failed', { errorMessage: '钉钉接口超时' })]))
+
+        mountView()
+        await flushUi()
+
+        findButton('后台同步')!.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+        await flushUi(8)
+
+        await vi.advanceTimersByTimeAsync(5000)
+        await flushUi(8)
+
+        expect(container?.textContent).toContain('后台同步失败（运行 run-bg-1）：钉钉接口超时')
+
+        const settledCallCount = apiFetchMock.mock.calls.length
+        await vi.advanceTimersByTimeAsync(30_000)
+        await flushUi(4)
+        expect(apiFetchMock.mock.calls.length).toBe(settledCallCount)
+      } finally {
+        vi.useRealTimers()
+      }
+    })
+
+    it('clears the poll timer on unmount — no fetch ever fires after the view is gone', async () => {
+      vi.useFakeTimers()
+      try {
+        mockInitialLoad(createIntegration())
+        apiFetchMock.mockResolvedValueOnce(createJsonResponse(
+          { ok: true, data: { accepted: true, runId: 'run-bg-1', integrationId: 'dir-1' } },
+          202,
+        ))
+        apiFetchMock.mockResolvedValue(createJsonResponse(createRunsPayload([createBackgroundRun('running')])))
+
+        mountView()
+        await flushUi()
+
+        findButton('后台同步')!.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+        await flushUi(8)
+        expect(runsCallCount()).toBe(2) // initial + immediate first poll
+
+        app!.unmount()
+        app = null
+
+        const settledCallCount = apiFetchMock.mock.calls.length
+        await vi.advanceTimersByTimeAsync(30_000)
+        await flushUi(4)
+        expect(apiFetchMock.mock.calls.length).toBe(settledCallCount)
+      } finally {
+        vi.useRealTimers()
+      }
+    })
+
+    it('renders R5 per-run change stats (#4054 keys) when present and omits them for pre-R5 runs', async () => {
+      mockInitialLoad(createIntegration(), createRunsPayload([
+        {
+          id: 'run-new',
+          status: 'completed',
+          startedAt: '2026-07-10T01:00:00.000Z',
+          finishedAt: '2026-07-10T01:05:00.000Z',
+          errorMessage: null,
+          stats: {
+            accountsSynced: 99,
+            departmentsSynced: 13,
+            pendingCount: 3,
+            linkedCount: 89,
+            accountsCreatedCount: 5,
+            accountsUpdatedCount: 94,
+            accountsDeactivatedCount: 2,
+            departmentsCreatedCount: 1,
+            departmentsUpdatedCount: 12,
+            departmentsDeactivatedCount: 0,
+            managerCount: 6,
+            linkedManagerCount: 5,
+            managerCoverage: 0.8333333333333334,
+            durationMs: 4230,
+          },
+        },
+        {
+          id: 'run-old',
+          status: 'completed',
+          startedAt: '2026-07-09T01:00:00.000Z',
+          finishedAt: '2026-07-09T01:05:00.000Z',
+          errorMessage: null,
+          stats: {
+            accountsSynced: 98,
+            departmentsSynced: 12,
+            pendingCount: 4,
+            linkedCount: 88,
+          },
+        },
+      ]))
+
+      mountView()
+      await flushUi()
+
+      const runCards = Array.from(container!.querySelectorAll('.directory-admin__run'))
+      expect(runCards.length).toBe(2)
+
+      const newCard = runCards[0].textContent ?? ''
+      expect(newCard).toContain('本次变更：账号 新增 5 · 更新 94 · 停用 2')
+      expect(newCard).toContain('部门 新增 1 · 更新 12 · 停用 0')
+      expect(newCard).toContain('主管绑定覆盖 83%（5/6）')
+      expect(newCard).toContain('耗时 4.2s')
+
+      // Pre-R5 run: keys ABSENT — the change-summary lines must not render at all
+      // (an all-zero "this run changed nothing" line would be a lie).
+      const oldCard = runCards[1].textContent ?? ''
+      expect(oldCard).toContain('账号 98')
+      expect(oldCard).not.toContain('本次变更')
+      expect(oldCard).not.toContain('主管绑定覆盖')
+      expect(oldCard).not.toContain('耗时')
+    })
+  })
 })
