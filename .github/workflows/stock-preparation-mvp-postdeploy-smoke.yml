@@ -7,6 +7,14 @@ name: Stock Preparation MVP Postdeploy Smoke
 # postdeploy smoke lanes). The fixture is self-contained — no external system id / sample key needed.
 # Mirrors the composition postdeploy smoke lane (same token resolver, secrets, and vars).
 
+# P2-1 (#4038 review): the smoke's candidate-id attribution and tenant-level cleanup assume SERIAL
+# runs — enforce it with a fixed concurrency group. cancel-in-progress stays false so a second
+# dispatch QUEUES behind the running one instead of killing it mid-chain (a cancelled run would leave
+# active smoke rows behind).
+concurrency:
+  group: stock-preparation-mvp-postdeploy-smoke
+  cancel-in-progress: false
+
 on:
   workflow_dispatch:
     inputs:

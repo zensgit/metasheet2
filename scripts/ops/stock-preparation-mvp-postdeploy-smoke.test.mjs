@@ -2,16 +2,29 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 
 import {
+  ALLOWED_ERROR_CODES,
+  ALLOWED_FIELD_NAMES,
+  ALLOWED_MODES,
+  ALLOWED_STATUS_VALUES,
   AUDIT_ACTIONS,
   DIFF_ROW_KEYS,
   ENGINE_MESSAGE_SENTINELS,
+  MISSING,
+  UNREGISTERED,
   buildOptionSetsFixture,
   buildSmokeFixture,
   diffRowProjectionValid,
   formatSummaryBlock,
   leakScan,
   newIds,
+  projectCounts,
   readyInvariantHolds,
+  safeCode,
+  safeCount,
+  safeField,
+  safeHandle,
+  safeMode,
+  safeStatus,
 } from './stock-preparation-mvp-postdeploy-smoke.mjs'
 
 test('buildSmokeFixture: salted, self-contained, and every value-bearing token is a sentinel', () => {
@@ -132,4 +145,85 @@ test('formatSummaryBlock is a flat values-free key=value block', () => {
   assert.equal(block.split('\n')[0], 'STOCK_PREPARATION_MVP_POSTDEPLOY_SMOKE')
   assert.ok(block.includes('pass=true'))
   assert.ok(block.includes('auditActionsCovered=8/8'))
+})
+
+// ── P2-2 (#4038 review): the sanitizing output layer, exercised with POISONED responses ───────────
+
+test('registries carry the vocabulary the smoke asserts on (registered literals pass through)', () => {
+  assert.equal(safeMode('created'), 'created')
+  assert.equal(safeMode('skipped_existing'), 'skipped_existing')
+  assert.equal(safeStatus('draft'), 'draft')
+  assert.equal(safeStatus('blocked'), 'blocked')
+  assert.equal(safeCode('EXCEPTION_BULK_MIXED_TYPES'), 'EXCEPTION_BULK_MIXED_TYPES')
+  assert.equal(safeCode('SNAPSHOT_DIFF_BASE_NOT_FOUND'), 'SNAPSHOT_DIFF_BASE_NOT_FOUND')
+  assert.equal(safeField('confirmedBy'), 'confirmedBy')
+  for (const registry of [ALLOWED_ERROR_CODES, ALLOWED_MODES, ALLOWED_STATUS_VALUES, ALLOWED_FIELD_NAMES]) {
+    assert.ok(registry.size > 0)
+  }
+  // Missing values print the missing marker, never an empty passthrough.
+  assert.equal(safeMode(undefined), MISSING)
+  assert.equal(safeCode(null), MISSING)
+  assert.equal(safeStatus(''), MISSING)
+})
+
+test('POISON INJECTION: a server echoing business values into mode/code/status/field cannot reach the output', () => {
+  // The owner's demonstrated exploitation path: a response carrying a material number / drawing text
+  // in fields the old formatter printed verbatim. Every accessor must collapse them to placeholders.
+  const poison = {
+    mode: 'MAT-001',
+    status: 'SECRET-DRAWING-7A',
+    code: 'M-001 材料图号',
+    field: 'materialNumber',
+    handle: 'MAT-001',
+  }
+  assert.equal(safeMode(poison.mode), UNREGISTERED)
+  assert.equal(safeStatus(poison.status), UNREGISTERED)
+  assert.equal(safeCode(poison.code), UNREGISTERED)
+  assert.equal(safeField(poison.field), UNREGISTERED)
+  assert.equal(safeHandle(poison.handle), UNREGISTERED)
+  // End-to-end through the summary block: no poison survives into the printed text.
+  const block = formatSummaryBlock({
+    persistMode: safeMode(poison.mode),
+    run1Status: safeStatus(poison.status),
+    probeCode: safeCode(poison.code),
+    probeField: safeField(poison.field),
+    batchHandle: safeHandle(poison.handle),
+  })
+  for (const value of Object.values(poison)) {
+    assert.ok(!block.includes(value), `poison value must not reach the summary block`)
+  }
+  assert.ok(block.includes(`persistMode=${UNREGISTERED}`))
+})
+
+test('POISON INJECTION: count objects are projected key-by-key, never stringified wholesale', () => {
+  const poisonedCreated = { batch: 1, lines: 2, run: 1, materialNumber: 'MAT-001', note: '图号 SECRET' }
+  const projected = projectCounts(poisonedCreated, ['batch', 'lines', 'run'])
+  assert.equal(projected, 'batch:1|lines:2|run:1')
+  assert.ok(!projected.includes('MAT-001'))
+  assert.ok(!projected.includes('materialNumber'))
+  // A known key carrying a poison STRING collapses to -1, never the string.
+  assert.equal(projectCounts({ batch: 'MAT-001', lines: 2 }, ['batch', 'lines']), 'batch:-1|lines:2')
+  // Non-object fragments never crash or leak.
+  assert.equal(projectCounts(null, ['batch']), 'batch:-1')
+  assert.equal(projectCounts('MAT-001', ['batch']), 'batch:-1')
+})
+
+test('safeCount admits finite numbers only; poison strings and null collapse to -1', () => {
+  assert.equal(safeCount(2), 2)
+  assert.equal(safeCount('2'), 2)
+  assert.equal(safeCount('MAT-001'), -1)
+  assert.equal(safeCount(null), -1)
+  assert.equal(safeCount(undefined), -1)
+  assert.equal(safeCount(true), -1)
+  assert.equal(safeCount(Infinity), -1)
+})
+
+test('safeHandle admits only platform handle shapes', () => {
+  assert.equal(safeHandle('smoke_batch_t1783651754'), 'smoke_batch_t1783651754')
+  assert.equal(safeHandle('stockprep_mapping_0123456789abcdef'), 'stockprep_mapping_0123456789abcdef')
+  assert.equal(safeHandle('0123456789abcdef'), '0123456789abcdef')
+  assert.equal(safeHandle('SMKDWG-A-t123'), UNREGISTERED) // a drawing number is NOT a handle
+  assert.equal(safeHandle('MAT-001'), UNREGISTERED)
+  assert.equal(safeHandle(''), MISSING)
+  assert.equal(safeHandle(42), UNREGISTERED)
 })
