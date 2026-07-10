@@ -647,6 +647,8 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
     try {
       const version = await productService.publishTemplate(req.params.id, {
         policy: req.body?.policy,
+        // B3-09 — optional publish note; the service normalizes (trim, empty->null, length cap).
+        note: req.body?.note,
       })
       res.json(version)
     } catch (error) {
@@ -655,6 +657,72 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
         error,
         'APPROVAL_TEMPLATE_PUBLISH_FAILED',
         'Failed to publish approval template',
+      )
+    }
+  })
+
+  // B3-08 (模板治理 — 用量/blast-radius): fetched by the FE archive confirm dialog BEFORE the
+  // archive call so the admin sees the instance count first (mirrors the ruleStats /
+  // automationDeleteRuleConfirmMessage precedent). Read-only; safe to call for a template of any
+  // status.
+  r.get('/api/approval-templates/:id/usage', authenticate, approvalTemplateAdminGuard, async (req: Request, res: Response) => {
+    try {
+      const usage = await productService.getTemplateUsage(req.params.id)
+      res.json(usage)
+    } catch (error) {
+      handleApprovalsError(
+        res,
+        error,
+        'APPROVAL_TEMPLATE_USAGE_FETCH_FAILED',
+        'Failed to fetch approval template usage',
+      )
+    }
+  })
+
+  // B3-08 (模板治理 — 停用/启用): PUBLISHED <-> ARCHIVED. Archived templates cannot be the target of
+  // a new createApproval/route-preview (assembleCreationContext's published-status gate already
+  // fails closed for any non-'published' status); already-running instances are untouched.
+  r.post('/api/approval-templates/:id/archive', authenticate, approvalTemplateAdminGuard, async (req: Request, res: Response) => {
+    try {
+      const template = await productService.archiveTemplate(req.params.id)
+      res.json(template)
+    } catch (error) {
+      handleApprovalsError(
+        res,
+        error,
+        'APPROVAL_TEMPLATE_ARCHIVE_FAILED',
+        'Failed to archive approval template',
+      )
+    }
+  })
+
+  r.post('/api/approval-templates/:id/unarchive', authenticate, approvalTemplateAdminGuard, async (req: Request, res: Response) => {
+    try {
+      const template = await productService.unarchiveTemplate(req.params.id)
+      res.json(template)
+    } catch (error) {
+      handleApprovalsError(
+        res,
+        error,
+        'APPROVAL_TEMPLATE_UNARCHIVE_FAILED',
+        'Failed to unarchive approval template',
+      )
+    }
+  })
+
+  // B3-09 (模板治理 — 版本历史): newest-first summary rows (no formSchema/approvalGraph payloads —
+  // the per-version detail endpoint below serves those on demand). Same admin guard as the rest
+  // of the template-authoring surface.
+  r.get('/api/approval-templates/:id/versions', authenticate, approvalTemplateAdminGuard, async (req: Request, res: Response) => {
+    try {
+      const versions = await productService.listTemplateVersions(req.params.id)
+      res.json({ versions })
+    } catch (error) {
+      handleApprovalsError(
+        res,
+        error,
+        'APPROVAL_TEMPLATE_VERSIONS_FETCH_FAILED',
+        'Failed to fetch approval template versions',
       )
     }
   })

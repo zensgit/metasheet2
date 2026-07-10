@@ -145,7 +145,7 @@
           {{ formatDate(row.createdAt) }}
         </template>
       </el-table-column>
-      <el-table-column label="操作" width="180" fixed="right">
+      <el-table-column label="操作" width="280" fixed="right">
         <template #default="{ row }">
           <el-button
             v-if="row.status === 'published' && canWrite"
@@ -163,6 +163,24 @@
             @click.stop="handleClone(row)"
           >
             克隆
+          </el-button>
+          <el-button
+            v-if="canManageTemplates && row.status === 'published'"
+            size="small"
+            :loading="archivingId === row.id"
+            data-testid="template-center-archive-button"
+            @click.stop="handleArchive(row)"
+          >
+            停用
+          </el-button>
+          <el-button
+            v-if="canManageTemplates && row.status === 'archived'"
+            size="small"
+            :loading="archivingId === row.id"
+            data-testid="template-center-unarchive-button"
+            @click.stop="handleUnarchive(row)"
+          >
+            启用
           </el-button>
         </template>
       </el-table-column>
@@ -250,14 +268,21 @@ import EmptyState from '../../components/status/EmptyState.vue'
 import { ref, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { Search } from '@element-plus/icons-vue'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import type { ApprovalTemplateListItemDTO, ApprovalTemplateStatus } from '../../types/approval'
 import { useApprovalTemplateStore } from '../../approvals/templateStore'
 import { useApprovalPermissions } from '../../approvals/permissions'
-import { cloneTemplate, listTemplateCategories } from '../../approvals/api'
+import {
+  cloneTemplate,
+  listTemplateCategories,
+  getTemplateUsage,
+  archiveTemplate,
+  unarchiveTemplate,
+} from '../../approvals/api'
 import { listRecentTemplates, type RecentTemplateEntry } from '../../approvals/recentTemplates'
 import { useAuth } from '../../composables/useAuth'
 import { filterGalleryTemplates } from '../../approvals/templateGalleryFilter'
+import { templateArchiveConfirmMessage, templateUnarchiveConfirmMessage } from '../../approvals/templateArchiveConfirm'
 
 const router = useRouter()
 const store = useApprovalTemplateStore()
@@ -270,6 +295,8 @@ const searchText = ref('')
 const categoryFilter = ref<string>('')
 const categories = ref<string[]>([])
 const cloningId = ref<string | null>(null)
+// B3-08 — 停用/启用 in-flight row id.
+const archivingId = ref<string | null>(null)
 const currentPage = ref(1)
 const pageSize = ref(10)
 
@@ -369,6 +396,62 @@ async function handleClone(row: ApprovalTemplateListItemDTO) {
     ElMessage.error(e?.message ?? '克隆模板失败')
   } finally {
     cloningId.value = null
+  }
+}
+
+// B3-08 (模板治理 — 停用): fetch the usage/blast-radius indicator first (best-effort — a failed
+// usage read still shows the confirm, just without the instance-count line), same flow as
+// TemplateDetailView's handleArchive. Refreshes the row in place from the response rather than
+// reloading the whole page.
+async function handleArchive(row: ApprovalTemplateListItemDTO) {
+  if (!canManageTemplates.value || archivingId.value) return
+  let usage
+  try {
+    usage = await getTemplateUsage(row.id)
+  } catch {
+    usage = undefined
+  }
+  try {
+    await ElMessageBox.confirm(
+      templateArchiveConfirmMessage(row.name, usage),
+      '停用模板',
+      { confirmButtonText: '停用', cancelButtonText: '取消', type: 'warning' },
+    )
+  } catch {
+    return
+  }
+  archivingId.value = row.id
+  try {
+    const updated = await archiveTemplate(row.id)
+    row.status = updated.status
+    ElMessage.success('已停用模板')
+  } catch (e: any) {
+    ElMessage.error(e?.message ?? '停用模板失败')
+  } finally {
+    archivingId.value = null
+  }
+}
+
+async function handleUnarchive(row: ApprovalTemplateListItemDTO) {
+  if (!canManageTemplates.value || archivingId.value) return
+  try {
+    await ElMessageBox.confirm(
+      templateUnarchiveConfirmMessage(row.name),
+      '启用模板',
+      { confirmButtonText: '启用', cancelButtonText: '取消', type: 'info' },
+    )
+  } catch {
+    return
+  }
+  archivingId.value = row.id
+  try {
+    const updated = await unarchiveTemplate(row.id)
+    row.status = updated.status
+    ElMessage.success('已启用模板')
+  } catch (e: any) {
+    ElMessage.error(e?.message ?? '启用模板失败')
+  } finally {
+    archivingId.value = null
   }
 }
 

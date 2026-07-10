@@ -10,6 +10,7 @@ import type {
   ApprovalTemplateListItemDTO,
   ApprovalTemplateDetailDTO,
   ApprovalTemplateVersionDetailDTO,
+  ApprovalTemplateVersionSummaryDTO,
   UnifiedApprovalDTO,
   UnifiedApprovalHistoryDTO,
   CreateApprovalRequest,
@@ -21,6 +22,7 @@ import type {
   CreateApprovalTemplateRequest,
   UpdateApprovalTemplateRequest,
   PublishApprovalTemplateRequest,
+  ApprovalTemplateUsageDTO,
   FormSchema,
 } from '../types/approval'
 
@@ -111,6 +113,7 @@ function mockVersionDetail(templateId: string, versionId: string): ApprovalTempl
       policy: { allowRevoke: true, revokeBeforeNodeKeys: ['approval_2'] },
     },
     publishedDefinitionId: 'def_1',
+    publishNote: null,
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
   }
@@ -807,6 +810,38 @@ export async function cloneTemplate(templateId: string): Promise<ApprovalTemplat
   return apiPost(`/api/approval-templates/${encodeURIComponent(templateId)}/clone`, {})
 }
 
+/**
+ * B3-08 (模板治理 — 用量/blast-radius): fetched by the archive confirm dialog BEFORE the archive
+ * call so the admin sees the instance count first.
+ */
+export async function getTemplateUsage(templateId: string): Promise<ApprovalTemplateUsageDTO> {
+  if (USE_MOCK) {
+    return { templateId, instanceCount: 0, activeInstanceCount: 0 }
+  }
+  return apiGet(`/api/approval-templates/${encodeURIComponent(templateId)}/usage`)
+}
+
+/**
+ * B3-08 (模板治理 — 停用): PUBLISHED -> ARCHIVED. Existing running instances are unaffected; the
+ * template just stops being a valid createApproval/route-preview target.
+ */
+export async function archiveTemplate(templateId: string): Promise<ApprovalTemplateDetailDTO> {
+  if (USE_MOCK) {
+    return { ...mockTemplateDetail(templateId), status: 'archived' }
+  }
+  return apiPost(`/api/approval-templates/${encodeURIComponent(templateId)}/archive`, {})
+}
+
+/**
+ * B3-08 (模板治理 — 启用): ARCHIVED -> PUBLISHED. Reverses archiveTemplate.
+ */
+export async function unarchiveTemplate(templateId: string): Promise<ApprovalTemplateDetailDTO> {
+  if (USE_MOCK) {
+    return { ...mockTemplateDetail(templateId), status: 'published' }
+  }
+  return apiPost(`/api/approval-templates/${encodeURIComponent(templateId)}/unarchive`, {})
+}
+
 export async function getTemplate(id: string): Promise<ApprovalTemplateDetailDTO> {
   if (USE_MOCK) return mockTemplateDetail(id)
   return apiGet(`/api/approval-templates/${id}`)
@@ -818,6 +853,34 @@ export async function getTemplateVersion(
 ): Promise<ApprovalTemplateVersionDetailDTO> {
   if (USE_MOCK) return mockVersionDetail(templateId, versionId)
   return apiGet(`/api/approval-templates/${templateId}/versions/${versionId}`)
+}
+
+/**
+ * B3-09 (模板治理 — 版本历史): newest-first summary rows. Server shape = `{ versions: [...] }` from
+ * GET /api/approval-templates/:id/versions (admin-guarded, same as the version detail endpoint).
+ */
+export async function listTemplateVersions(
+  templateId: string,
+): Promise<ApprovalTemplateVersionSummaryDTO[]> {
+  if (USE_MOCK) {
+    const detail = mockVersionDetail(templateId, `ver_${templateId}_1`)
+    return [
+      {
+        id: detail.id,
+        templateId: detail.templateId,
+        version: detail.version,
+        status: detail.status,
+        publishNote: detail.publishNote,
+        publishedDefinitionId: detail.publishedDefinitionId,
+        createdAt: detail.createdAt,
+        updatedAt: detail.updatedAt,
+      },
+    ]
+  }
+  const response = await apiGet<{ versions: ApprovalTemplateVersionSummaryDTO[] }>(
+    `/api/approval-templates/${encodeURIComponent(templateId)}/versions`,
+  )
+  return response.versions
 }
 
 export async function listApprovals(
