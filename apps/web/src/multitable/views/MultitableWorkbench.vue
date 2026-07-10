@@ -535,6 +535,8 @@
       :base-id="activeBaseId || ''"
       :sheet-id="workbench.activeSheetId.value"
       :fields="historyVisibleFields"
+      :link-summaries="grid.linkSummaries.value"
+      :person-summaries="grid.personSummaries.value"
       :initial-batch-id="historyDeepLinkBatchId"
       @close="closeHistory"
     />
