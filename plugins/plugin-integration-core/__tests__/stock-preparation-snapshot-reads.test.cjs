@@ -395,6 +395,38 @@ async function main() {
     await expectDiffError('nope', 404, 'SNAPSHOT_DIFF_BASE_NOT_FOUND')
     await expectDiffError('bx', 409, 'SNAPSHOT_DIFF_BASE_PROJECT_MISMATCH')
     await expectDiffError('b3', 400, 'SNAPSHOT_DIFF_BASE_INVALID')
+    // P2-A1 (review): a GHOST current batch with a caller-chosen base must fail closed 404 — never
+    // skip the project gate and never fabricate an all-removed diff of the base project's rows.
+    const expectGhostError = async (fn, base) => {
+      let caught = null
+      try {
+        await fn({
+          recordsApi: makeRecordsApi(rows),
+          provisioning: makeProvisioning(),
+          targetProjectId: STAGING_PROJECT,
+          snapshotBatchId: 'ghost_current',
+          baseSnapshotBatchId: base,
+          permission: 'admin',
+        })
+      } catch (error) {
+        caught = error
+      }
+      assert.ok(caught, 'ghost current + explicit base must not answer')
+      assert.equal(caught.status, 404)
+      assert.equal(caught.code, 'SNAPSHOT_DIFF_BASE_NOT_FOUND')
+    }
+    await expectGhostError(getSnapshotDiff, 'bx')
+    await expectGhostError(getSnapshotDiff, 'b1')
+    await expectGhostError(listSnapshotDiffRows, 'bx')
+    // Predecessor auto-pick path for a ghost current stays the #4002 graceful shape (no throw).
+    const ghostAuto = await getSnapshotDiff({
+      recordsApi: makeRecordsApi(rows),
+      provisioning: makeProvisioning(),
+      targetProjectId: STAGING_PROJECT,
+      snapshotBatchId: 'ghost_current',
+      permission: 'admin',
+    })
+    assert.equal(ghostAuto.baseSnapshotBatchId, null)
   })
 
   // ---- W3a: per-row diff browse ----

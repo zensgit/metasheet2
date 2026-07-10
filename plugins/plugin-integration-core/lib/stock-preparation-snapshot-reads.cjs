@@ -277,8 +277,14 @@ function pickPredecessor(batchRows, currentSnapshotBatchId, currentVersion) {
 // Resolve the diff BASE batch id. An EXPLICIT `requestedBase` is a caller-chosen pair and must be
 // validated (differ from current -> 400; exist -> 404; same business project -> 409). Without it the
 // predecessor rule applies unchanged (highest version strictly below current, same business project).
-async function resolveDiffBase(api, batchSheet, { currentSnapshotBatchId, projectId, currentVersion, requestedBase }) {
+async function resolveDiffBase(api, batchSheet, { currentSnapshotBatchId, projectId, currentVersion, requestedBase, currentBatchRowPresent }) {
   if (requestedBase) {
+    // P2-A1 (review #4019): a caller-chosen pair is only verifiable when the DIFFED batch row exists.
+    // Without this gate a ghost/stale current id skips the project-mismatch check entirely (projectId
+    // is empty) and another project's rows would surface as a fabricated all-removed diff.
+    if (!currentBatchRowPresent) {
+      throw new StockPreparationTargetProvisioningError(404, 'SNAPSHOT_DIFF_BASE_NOT_FOUND', 'a caller-chosen base pair requires an existing diffed batch', { field: 'snapshotBatchId' })
+    }
     if (requestedBase === currentSnapshotBatchId) {
       throw new StockPreparationTargetProvisioningError(400, 'SNAPSHOT_DIFF_BASE_INVALID', 'baseSnapshotBatchId must differ from the diffed batch', { field: 'baseSnapshotBatchId' })
     }
@@ -352,6 +358,7 @@ async function getSnapshotDiff({ recordsApi, provisioning, targetProjectId, busi
     projectId,
     currentVersion,
     requestedBase,
+    currentBatchRowPresent: Boolean(currentBatchRow),
   })
 
   // Lines for the current + predecessor batches (never mutated; passed straight to the diff engine).
@@ -452,10 +459,12 @@ async function listSnapshotDiffRows({ recordsApi, provisioning, targetProjectId,
 
   let projectId = optionalString(businessProjectId)
   let currentVersion = null
+  let currentBatchRowPresent = false
   if (batchSheet) {
     const currentRows = await queryAllRecords(api, batchSheet.id, { snapshotBatchId: currentSnapshotBatchId })
     const currentBatchRow = currentRows[0] || null
     if (currentBatchRow) {
+      currentBatchRowPresent = true
       projectId = optionalString(readCell(currentBatchRow, 'projectId')) || projectId
       currentVersion = toNumber(readCell(currentBatchRow, 'snapshotVersion'))
     }
@@ -466,6 +475,7 @@ async function listSnapshotDiffRows({ recordsApi, provisioning, targetProjectId,
     projectId,
     currentVersion,
     requestedBase,
+    currentBatchRowPresent,
   })
 
   const currentLines = lineSheet
