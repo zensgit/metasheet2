@@ -60,6 +60,29 @@ function runStockPreparationVerifier(root) {
   )
 }
 
+function runNativeBcryptVerifier(packageJson, lockfile) {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ms2-package-native-bcrypt-'))
+  const backendRoot = path.join(root, 'packages/core-backend')
+  fs.mkdirSync(backendRoot, { recursive: true })
+  fs.writeFileSync(path.join(backendRoot, 'package.json'), JSON.stringify(packageJson, null, 2))
+  fs.writeFileSync(path.join(root, 'pnpm-lock.yaml'), lockfile)
+  const result = spawnSync(
+    'bash',
+    ['-lc', 'source "$VERIFY"; verify_no_native_bcrypt_dependency "$PACKAGE_ROOT"'],
+    {
+      cwd: repoRoot,
+      env: {
+        ...process.env,
+        VERIFY: verifyScriptPath,
+        PACKAGE_ROOT: root,
+      },
+      encoding: 'utf8',
+    },
+  )
+  fs.rmSync(root, { recursive: true, force: true })
+  return result
+}
+
 test('on-prem package build prunes copied workspace node_modules before archiving', () => {
   assert.match(
     buildScript,
@@ -81,6 +104,57 @@ test('on-prem package build prunes copied workspace node_modules before archivin
     /prune_node_modules "\$PACKAGE_ROOT"/,
     'the final package root should be swept before archive creation',
   )
+})
+
+test('on-prem verifier rejects native bcrypt build dependencies', () => {
+  const clean = runNativeBcryptVerifier(
+    {
+      dependencies: { bcryptjs: '^3.0.3' },
+      devDependencies: {},
+    },
+    "lockfileVersion: '9.0'\n",
+  )
+  assert.equal(clean.status, 0, clean.stderr)
+
+  const nativeManifest = runNativeBcryptVerifier(
+    {
+      dependencies: { bcrypt: '^5.1.1', bcryptjs: '^3.0.3' },
+      devDependencies: { '@types/bcrypt': '^5.0.2' },
+    },
+    "lockfileVersion: '9.0'\n",
+  )
+  assert.notEqual(nativeManifest.status, 0, 'native bcrypt manifest entries must fail verification')
+  assert.match(nativeManifest.stderr, /must not depend on native bcrypt/)
+
+  const nativeTypeManifest = runNativeBcryptVerifier(
+    {
+      dependencies: { bcryptjs: '^3.0.3' },
+      devDependencies: { '@types/bcrypt': '^5.0.2' },
+    },
+    "lockfileVersion: '9.0'\n",
+  )
+  assert.notEqual(nativeTypeManifest.status, 0, 'unused native bcrypt type entries must fail verification')
+  assert.match(nativeTypeManifest.stderr, /must not depend on native bcrypt/)
+
+  const staleLock = runNativeBcryptVerifier(
+    {
+      dependencies: { bcryptjs: '^3.0.3' },
+      devDependencies: {},
+    },
+    "lockfileVersion: '9.0'\n\npackages:\n\n  bcrypt@5.1.1:\n    resolution: {}\n",
+  )
+  assert.notEqual(staleLock.status, 0, 'native bcrypt lockfile entries must fail verification')
+  assert.match(staleLock.stderr, /lockfile must not contain native bcrypt/)
+
+  const staleTypeLock = runNativeBcryptVerifier(
+    {
+      dependencies: { bcryptjs: '^3.0.3' },
+      devDependencies: {},
+    },
+    "lockfileVersion: '9.0'\n\npackages:\n\n  '@types/bcrypt@5.0.2':\n    resolution: {}\n",
+  )
+  assert.notEqual(staleTypeLock.status, 0, 'native bcrypt type lockfile entries must fail verification')
+  assert.match(staleTypeLock.stderr, /lockfile must not contain native bcrypt/)
 })
 
 test('on-prem verifier rejects archive lists that contain node_modules entries', () => {
