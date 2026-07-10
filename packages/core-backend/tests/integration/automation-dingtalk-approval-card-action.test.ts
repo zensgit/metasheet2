@@ -8,11 +8,17 @@
  * deep link carrying ONLY deliveryId + HMAC token (values-free — never the instanceId).
  * Placement gate: the card action saves ONLY on approval.task_created (create + update).
  */
-import { afterAll, beforeAll, describe, expect, test } from 'vitest'
+import { afterAll, afterEach, beforeAll, describe, expect, test } from 'vitest'
 
 import { poolManager } from '../../src/integration/db/connection-pool'
 import { db } from '../../src/db/db'
 import { eventBus as integrationEventBus } from '../../src/integration/events/event-bus'
+import {
+  DINGTALK_INTERACTIVE_CARD_CLIENT_ID_ENV,
+  DINGTALK_INTERACTIVE_CARD_CLIENT_SECRET_ENV,
+  DINGTALK_INTERACTIVE_CARD_STREAM_ENABLED_ENV,
+  DINGTALK_INTERACTIVE_CARD_TEMPLATE_ID_ENV,
+} from '../../src/integrations/dingtalk/interactive-card-stream'
 import { AutomationService } from '../../src/multitable/automation-service'
 import { ApprovalProductService } from '../../src/services/ApprovalProductService'
 
@@ -58,6 +64,7 @@ let approvals: ApprovalProductService
 let templateId = ''
 const ruleIds: string[] = []
 const sentBodies: Array<Record<string, unknown>> = []
+const interactiveBodies: Array<Record<string, unknown>> = []
 let failNextSend = false
 let fetchCallCount = 0
 
@@ -74,6 +81,22 @@ const fakeFetch: typeof fetch = (async (input: RequestInfo | URL, init?: Request
     }
     sentBodies.push(JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown>)
     return new Response(JSON.stringify({ errcode: 0, errmsg: 'ok', task_id: 424242 }), { status: 200, headers: { 'Content-Type': 'application/json' } })
+  }
+  if (url.includes('/v1.0/card/instances/createAndDeliver')) {
+    const body = JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown>
+    interactiveBodies.push(body)
+    return new Response(JSON.stringify({
+      success: true,
+      result: {
+        outTrackId: body.outTrackId,
+        deliverResults: [{
+          spaceType: 'IM_ROBOT',
+          spaceId: DD_USER_ID,
+          success: true,
+          carrierId: 'interactive-task-4242',
+        }],
+      },
+    }), { status: 200, headers: { 'Content-Type': 'application/json' } })
   }
   throw new Error(`unexpected fetch ${url}`)
 }) as typeof fetch
@@ -111,6 +134,36 @@ async function waitFor<T>(fn: () => Promise<T[]>, timeoutMs = 6000): Promise<T[]
   }
 }
 
+async function ensureDingTalkBinding(): Promise<void> {
+  await q(
+    `INSERT INTO directory_integrations (id, name, corp_id)
+     VALUES ($1, 'card-test', 'corp_card_test')
+     ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name, corp_id = EXCLUDED.corp_id`,
+    [DD_INTEGRATION],
+  )
+  await q(
+    `INSERT INTO directory_accounts
+       (id, integration_id, provider, external_user_id, external_key, name, is_active)
+     VALUES ($1, $2, 'dingtalk', $3, $3, 'Card Approver', TRUE)
+     ON CONFLICT (id) DO UPDATE
+       SET integration_id = EXCLUDED.integration_id,
+           external_user_id = EXCLUDED.external_user_id,
+           external_key = EXCLUDED.external_key,
+           name = EXCLUDED.name,
+           is_active = TRUE`,
+    [DD_ACCOUNT, DD_INTEGRATION, DD_USER_ID],
+  )
+  await q(
+    'DELETE FROM directory_account_links WHERE directory_account_id = $1 OR local_user_id = $2',
+    [DD_ACCOUNT, APPROVER],
+  )
+  await q(
+    `INSERT INTO directory_account_links (directory_account_id, local_user_id, link_status)
+     VALUES ($1, $2, 'linked')`,
+    [DD_ACCOUNT, APPROVER],
+  )
+}
+
 describeIfDatabase('A-2b send_dingtalk_approval_card action (real DB)', () => {
   const savedEnv: Record<string, string | undefined> = {}
   beforeAll(async () => {
@@ -123,6 +176,15 @@ describeIfDatabase('A-2b send_dingtalk_approval_card action (real DB)', () => {
     })) {
       savedEnv[k] = process.env[k]
       process.env[k] = v
+    }
+    for (const key of [
+      DINGTALK_INTERACTIVE_CARD_STREAM_ENABLED_ENV,
+      DINGTALK_INTERACTIVE_CARD_CLIENT_ID_ENV,
+      DINGTALK_INTERACTIVE_CARD_CLIENT_SECRET_ENV,
+      DINGTALK_INTERACTIVE_CARD_TEMPLATE_ID_ENV,
+    ]) {
+      savedEnv[key] = process.env[key]
+      delete process.env[key]
     }
 
     await q('INSERT INTO meta_bases (id, name) VALUES ($1,$2)', [BASE_ID, 'Card Base'])
@@ -143,6 +205,14 @@ describeIfDatabase('A-2b send_dingtalk_approval_card action (real DB)', () => {
 
     svc = new AutomationService(integrationEventBus, db as never, queryFn, fakeFetch as never)
     svc.init()
+  })
+
+  afterEach(() => {
+    delete process.env[DINGTALK_INTERACTIVE_CARD_STREAM_ENABLED_ENV]
+    delete process.env[DINGTALK_INTERACTIVE_CARD_CLIENT_ID_ENV]
+    delete process.env[DINGTALK_INTERACTIVE_CARD_CLIENT_SECRET_ENV]
+    delete process.env[DINGTALK_INTERACTIVE_CARD_TEMPLATE_ID_ENV]
+    interactiveBodies.length = 0
   })
 
   afterAll(async () => {
@@ -219,10 +289,7 @@ describeIfDatabase('A-2b send_dingtalk_approval_card action (real DB)', () => {
   })
 
   test('bound recipient: ledger-first send — sent card, task_id, signed values-free deep link', async () => {
-    await q(`INSERT INTO directory_integrations (id, name, corp_id) VALUES ($1, 'card-test', 'corp_card_test')`, [DD_INTEGRATION])
-    await q(`INSERT INTO directory_accounts (id, integration_id, provider, external_user_id, external_key, name, is_active)
-             VALUES ($1, $2, 'dingtalk', $3, $3, 'Card Approver', TRUE)`, [DD_ACCOUNT, DD_INTEGRATION, DD_USER_ID])
-    await q(`INSERT INTO directory_account_links (directory_account_id, local_user_id, link_status) VALUES ($1, $2, 'linked')`, [DD_ACCOUNT, APPROVER])
+    await ensureDingTalkBinding()
 
     const rule = await svc.createRule(SHEET_ID, {
       name: 'card bound', triggerType: 'approval.task_created', triggerConfig: { templateId },
@@ -231,6 +298,7 @@ describeIfDatabase('A-2b send_dingtalk_approval_card action (real DB)', () => {
     ruleIds.push(rule.id)
 
     sentBodies.length = 0
+    interactiveBodies.length = 0
     const dto = await approvals.createApproval({ templateId, formData: { summary: 'SECRET-FORM-VALUE' } }, { userId: REQUESTER, userName: REQUESTER })
     const instanceId = (dto as { id: string }).id
     const rows = await waitFor(() => cardRows(instanceId))
@@ -244,6 +312,7 @@ describeIfDatabase('A-2b send_dingtalk_approval_card action (real DB)', () => {
     expect(row.recipient_dingtalk_user_id).toBe(DD_USER_ID)
 
     expect(sentBodies).toHaveLength(1)
+    expect(interactiveBodies).toHaveLength(0)
     const body = sentBodies[0]
     expect(body.userid_list).toBe(DD_USER_ID)
     const msg = body.msg as { msgtype: string; action_card: { single_url: string; markdown: string; single_title: string } }
@@ -254,6 +323,59 @@ describeIfDatabase('A-2b send_dingtalk_approval_card action (real DB)', () => {
     expect(url).toMatch(/t=[0-9a-f]{32}/)
     expect(url).not.toContain(instanceId) // values-free deep link: ledger id + token ONLY
     expect(msg.action_card.markdown).not.toContain('SECRET-FORM-VALUE') // no form values on the card
+    await svc.deleteRule(rule.id, SHEET_ID)
+  })
+
+  test('B-2 opt-in: interactive card uses the ledger id as outTrackId and stays values-free', async () => {
+    await ensureDingTalkBinding()
+    process.env[DINGTALK_INTERACTIVE_CARD_STREAM_ENABLED_ENV] = '1'
+    process.env[DINGTALK_INTERACTIVE_CARD_CLIENT_ID_ENV] = 'stream-app-key'
+    process.env[DINGTALK_INTERACTIVE_CARD_CLIENT_SECRET_ENV] = 'stream-app-secret'
+    process.env[DINGTALK_INTERACTIVE_CARD_TEMPLATE_ID_ENV] = 'stream-card-template'
+
+    const rule = await svc.createRule(SHEET_ID, {
+      name: 'interactive card bound', triggerType: 'approval.task_created', triggerConfig: { templateId },
+      actionType: 'send_dingtalk_approval_card', actionConfig: {}, createdBy: CREATOR,
+    } as never)
+    ruleIds.push(rule.id)
+
+    sentBodies.length = 0
+    interactiveBodies.length = 0
+    const dto = await approvals.createApproval(
+      { templateId, formData: { summary: 'SECRET-INTERACTIVE-FORM-VALUE' } },
+      { userId: REQUESTER, userName: REQUESTER },
+    )
+    const instanceId = (dto as { id: string }).id
+    const rows = await waitFor(async () => (await cardRows(instanceId)).filter((row) => row.send_status !== 'pending'))
+    expect(rows).toHaveLength(1)
+    const row = rows[0]
+    expect(row.delivery_kind).toBe('interactive_card')
+    expect(row.integration_id).toBe(DD_INTEGRATION)
+    expect(row.card_state).toBe('sent')
+    expect(row.send_status).toBe('sent')
+    expect(row.task_id).toBe('interactive-task-4242')
+
+    expect(sentBodies).toHaveLength(0)
+    expect(interactiveBodies).toHaveLength(1)
+    const body = interactiveBodies[0]
+    expect(body.cardTemplateId).toBe('stream-card-template')
+    expect(body.outTrackId).toBe(row.id)
+    expect(body.callbackType).toBe('STREAM')
+    expect(body.callbackRouteKey).toBe('approval_card')
+    expect(body.userId).toBe(DD_USER_ID)
+    expect(body.openSpaceId).toBe(`dtv1.card//im_robot.${DD_USER_ID}`)
+    expect(body.imRobotOpenSpaceModel).toEqual({ supportForward: false })
+    expect(body.imRobotOpenDeliverModel).toEqual({ robotCode: 'stream-app-key', spaceType: 'IM_ROBOT' })
+    expect(body).not.toHaveProperty('openSpaceModel')
+    expect(body).not.toHaveProperty('openDeliverModel')
+
+    const serialized = JSON.stringify(body)
+    expect(serialized).toContain('/m/approval-decision')
+    expect(serialized).toContain(`d=${row.id}`)
+    expect(serialized).toMatch(/t=[0-9a-f]{32}/)
+    expect(serialized).not.toContain(instanceId)
+    expect(serialized).not.toContain('SECRET-INTERACTIVE-FORM-VALUE')
+
     await svc.deleteRule(rule.id, SHEET_ID)
   })
 

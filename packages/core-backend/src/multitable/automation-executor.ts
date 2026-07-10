@@ -19,9 +19,11 @@ import {
   DingTalkBusinessError,
   DingTalkRequestError,
   fetchDingTalkAppAccessToken,
+  sendDingTalkInteractiveApprovalCard,
   sendDingTalkWorkNotification,
   sendDingTalkWorkNotificationActionCard,
 } from '../integrations/dingtalk/client'
+import { resolveDingTalkInteractiveCardStreamConfig } from '../integrations/dingtalk/interactive-card-stream'
 import { readDingTalkMessageConfigFromRuntime } from '../integrations/dingtalk/work-notification-settings'
 import {
   resolveApprovalCardLinkSecret,
@@ -2716,6 +2718,8 @@ export class AutomationExecutor {
           : 'APPROVAL_CARD_LINK_SECRET (env or stored approval-card link secret) is required for signed approval decision links',
       }
     }
+    const interactiveCardConfig = resolveDingTalkInteractiveCardStreamConfig()
+    const useInteractiveCard = interactiveCardConfig.enabled === true
 
     // Ledger FIRST — the row is the only legitimate delivery → instance anchor.
     const entryEpochRaw = event.task?.entryEpoch
@@ -2725,7 +2729,7 @@ export class AutomationExecutor {
       nodeKey,
       recipientUserId: assigneeUserId,
       recipientDingTalkUserId: dingtalkUserId,
-      deliveryKind: 'work_notice_action_card',
+      deliveryKind: useInteractiveCard ? 'interactive_card' : 'work_notice_action_card',
       integrationId: assigneeIntegrationId || null,
     })
 
@@ -2740,20 +2744,48 @@ export class AutomationExecutor {
     ].filter(Boolean)
 
     try {
-      const messageConfig = await readDingTalkMessageConfigFromRuntime(assigneeIntegrationId || undefined)
-      const accessToken = await fetchDingTalkAppAccessToken(messageConfig, { fetchFn: this.deps.fetchFn })
-      const result = await sendDingTalkWorkNotificationActionCard(
-        accessToken,
-        {
-          userIds: [dingtalkUserId],
-          title: `审批待办：${approvalTitle}`,
-          markdown: markdownLines.join('\n'),
-          singleTitle: '查看并处理',
-          singleUrl: decisionUrl,
-        },
-        messageConfig,
-        { fetchFn: this.deps.fetchFn },
-      )
+      const result = await (async () => {
+        if (useInteractiveCard) {
+          const accessToken = await fetchDingTalkAppAccessToken(
+            {
+              appKey: interactiveCardConfig.clientId,
+              appSecret: interactiveCardConfig.clientSecret,
+            },
+            { fetchFn: this.deps.fetchFn },
+          )
+          return sendDingTalkInteractiveApprovalCard(
+            accessToken,
+            {
+              userId: dingtalkUserId,
+              robotCode: interactiveCardConfig.clientId,
+              cardTemplateId: interactiveCardConfig.templateId,
+              outTrackId: delivery.id,
+              title: `审批待办：${approvalTitle}`,
+              requestNo,
+              nodeName: nodeKey,
+              statusText: '等待你处理',
+              rejectUrl: decisionUrl,
+            },
+            {},
+            { fetchFn: this.deps.fetchFn },
+          )
+        }
+
+        const messageConfig = await readDingTalkMessageConfigFromRuntime(assigneeIntegrationId || undefined)
+        const accessToken = await fetchDingTalkAppAccessToken(messageConfig, { fetchFn: this.deps.fetchFn })
+        return sendDingTalkWorkNotificationActionCard(
+          accessToken,
+          {
+            userIds: [dingtalkUserId],
+            title: `审批待办：${approvalTitle}`,
+            markdown: markdownLines.join('\n'),
+            singleTitle: '查看并处理',
+            singleUrl: decisionUrl,
+          },
+          messageConfig,
+          { fetchFn: this.deps.fetchFn },
+        )
+      })()
       await markDingTalkApprovalCardDeliverySent(this.deps.queryFn, delivery.id, result.taskId ?? null)
       return {
         actionType,
@@ -2764,6 +2796,7 @@ export class AutomationExecutor {
           nodeKey,
           entryEpoch: typeof entryEpochRaw === 'number' ? entryEpochRaw : null,
           recipientUserId: assigneeUserId,
+          deliveryKind: useInteractiveCard ? 'interactive_card' : 'work_notice_action_card',
           taskId: result.taskId ?? null,
         },
       }
