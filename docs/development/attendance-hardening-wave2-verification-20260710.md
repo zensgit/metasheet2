@@ -51,9 +51,18 @@
   （magic 前缀拼接）在 lazy-forgery 威胁模型下接受；delete 两步非原子 = P3 既有边缘。
 - 实跑：29/29 + 全考勤门 268/268（fresh 库）· 单测 9/9 · tsc 0 · mutation 三刀（G2 判别/DELETE FROM/嗅探写入）+ P2 修复刀全红。
 
-## C. 硬化池收口后的余量口径（对 tracker 07-10 节的增量）
+## C. 余量口径（⚠ 2026-07-10 owner 审阅 CHANGES-REQUESTED 修订版）
 
-- P3 硬化池（R4-P3-1 / S2-P3-1 / S2-P3-2）**全部落地** ✅。
+> 本节原稿宣称「硬化池全部落地/收口」——**owner 审阅推翻该口径**（H1 判定成立；问题集中在 H2 文件证据边界）,
+> 修订如下。
+
+- Wave-2 两刀（H1 #4045 / H2 #4044）**主体已合**,但硬化池 **REOPEN**,新增两个必修项:
+  - **F1〔P1〕文件资源级授权**:files.ts 四端点（list/info/download/delete）仅 authenticate,无 owner/org/业务
+    ACL——任何登录用户可枚举并读取/删除他人考勤照片。既有平台缺口,但敏感照片证据接入后不得再作 OUT 排除。
+  - **F2〔P2〕删除顺序**:storage.delete 先行、DB 删行在后——存储删成/DB 删败时重造「二进制已消失、行仍被
+    G2 当有效证据」的悬挂态（恰是 H2 声称消灭的状态）。改 DB tombstone 先行 + 存储补偿删除 + DB 失败注入测试。
+- **措辞纠正**:本 MD 中「magic-byte 嗅探」应理解为**格式前缀筛查**（BMP 仅 2 字节、PNG/JPEG 短前缀,拼前缀
+  的伪造内容仍可通过）,是 lazy-forgery 威胁模型下的弱识别,**不构成文件为真实图片的证明**。
 - 新增 owner 决策项：H1 的 never-configured vs suspended 收窄（见 A 节）。
 - owner 门与命名前置不变（S7 / 五连 smoke / E4 真机 / 档 B / T2 三项 / wecom population /
-  comp_time primitive / SMS 选型 / >50 org 轮转）。
+  comp_time primitive / SMS 选型 / >50 org 轮转）。硬化池在 F1/F2 落地并复审通过前保持 OPEN。
