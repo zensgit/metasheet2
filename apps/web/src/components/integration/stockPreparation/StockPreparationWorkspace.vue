@@ -49,8 +49,14 @@
         <code>{{ activeView.endpoint }}</code>
       </p>
       <!-- Views 1-2 are real readonly views; the other four tabs keep the placeholder. -->
-      <StockPreparationProjectWorkspaceView v-if="activeKey === 'project-workspace'" />
-      <StockPreparationSnapshotDiffView v-else-if="activeKey === 'bom-snapshot-diff'" />
+      <StockPreparationProjectWorkspaceView
+        v-if="activeKey === 'project-workspace'"
+        @select-project="handleProjectSelect"
+      />
+      <StockPreparationSnapshotDiffView
+        v-else-if="activeKey === 'bom-snapshot-diff'"
+        :project-id="selectedProjectId"
+      />
       <p v-else class="stock-prep__panel-pending" data-testid="stock-prep-panel-pending">
         {{ bi('该视图将在后续 wave 落地,当前为容器占位。', 'This view lands in a later wave; this is a container placeholder for now.') }}
       </p>
@@ -69,6 +75,7 @@
 // and only renders values-free copy. NAMING — the snapshot surface uses 快照批次 / "snapshot batch"
 // to avoid colliding with PLM view-state "snapshot" and k3WiseSetup "mapping" vocabularies.
 import { computed, ref } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import { useLocale } from '../../../composables/useLocale'
 import PageShell from '../../layout/PageShell.vue'
 import PageHeader from '../../layout/PageHeader.vue'
@@ -156,6 +163,29 @@ const views: StockPreparationViewTab[] = [
 
 const activeKey = ref<StockPreparationViewKey>(views[0].key)
 const activeView = computed(() => views.find((view) => view.key === activeKey.value) ?? null)
+
+// Shared project context (view 1 → view 2). The shell is the single owner of the selected
+// projectId: view 1 emits it (row action), view 2 receives it as a prop, and the `?projectId=`
+// route query seeds/mirrors it so a reload or shared link keeps the same project scope. The
+// projectId is an internal MetaSheet handle — kept in state/URL, never rendered (values-free).
+const route = useRoute()
+const router = useRouter()
+
+function projectIdFromQuery(): string | undefined {
+  const raw = route.query?.projectId
+  const value = Array.isArray(raw) ? raw[0] : raw
+  return typeof value === 'string' && value.length > 0 ? value : undefined
+}
+
+const selectedProjectId = ref<string | undefined>(projectIdFromQuery())
+
+function handleProjectSelect(projectId: string): void {
+  selectedProjectId.value = projectId
+  // Jump straight into view 2 already scoped — no re-select there.
+  activeKey.value = 'bom-snapshot-diff'
+  // Mirror the handle into the query (replace: selecting is not a history step).
+  void router.replace({ query: { ...route.query, projectId } })
+}
 </script>
 
 <style scoped>
