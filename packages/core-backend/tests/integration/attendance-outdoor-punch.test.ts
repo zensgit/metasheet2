@@ -795,10 +795,13 @@ describeDb('② S3 outdoor punch approval (real DB, route-level)', () => {
       const fileId = uploadedFileId(up)
       expect(fileId).toBeTruthy()
       // the upload wrote a real files row owned by the uploader (Fix 1 resolution + Option-A INSERT + Fix 2 table)
-      const fileRow = (await pool.query(`SELECT owner_id, meta ->> 'contentType' AS content_type FROM files WHERE id = $1`, [fileId])).rows[0]
+      const fileRow = (await pool.query(`SELECT owner_id, meta FROM files WHERE id = $1`, [fileId])).rows[0]
       expect(fileRow).toBeTruthy()
       expect(fileRow.owner_id).toBe(u)
-      expect(fileRow.content_type).toBe('image/png')
+      expect(fileRow.meta.contentType).toBe('image/png')
+      // H2 P3-1: a real PNG buffer is magic-byte sniffed on upload — path marker + detected type both land
+      expect(fileRow.meta.sniffed).toBe(true)
+      expect(fileRow.meta.sniffedContentType).toBe('image/png')
       const r = await punch(t, { eventType: 'check_in', location: OUTSIDE, photoFileId: fileId })
       expect(r.status).toBe(202)
       expect((r.body as { data?: { pendingApproval?: boolean } })?.data?.pendingApproval).toBe(true)
@@ -829,6 +832,90 @@ describeDb('② S3 outdoor punch approval (real DB, route-level)', () => {
       )
       expect('photoFileId' in (op as Record<string, unknown>)).toBe(false)
     } finally {
+      await cleanupUser(u)
+    }
+  })
+
+  // ────────────────────────────────────────────────────────────────────────────────────────────────
+  // H2 photo-evidence-hardening design-lock (2026-07-10): P3-1 magic-byte sniffing (closes the
+  // forged-MIME gap where a client could declare `image/png` on a non-image body and pass G2's
+  // content-type check) + P3-2 orphan-row cleanup on delete (closes the dangling-evidence gap where
+  // a punch could cite a `photoFileId` whose underlying storage object was already deleted).
+
+  it('H2 P3-1: forged Content-Type — client declares image/png, body is non-image bytes → sniff misses on the new row → 422 OUTDOOR_PHOTO_INVALID', async () => {
+    await createOutdoorFlow()
+    await setOutdoorPhoto({ requireApproval: true, requirePhoto: true })
+    const u = photoUid('forgedmime')
+    const t = await mintToken(u, 'attendance:read,attendance:write')
+    try {
+      const up = await uploadFile(t, { filename: 'shot.png', contentType: 'image/png', content: Buffer.from('this is not actually a png, just text') })
+      expect(up.status).toBe(200)
+      const fileId = uploadedFileId(up)
+      expect(fileId).toBeTruthy()
+      // the client's forged declaration survives untouched in meta.contentType (the upload route never
+      // rejects a mismatched Content-Type — it stays a general-purpose upload) — but the sniff path
+      // marker is what G2 now trusts for a row written through this path, and the sniff missed.
+      const fileRow = (await pool.query(`SELECT meta FROM files WHERE id = $1`, [fileId])).rows[0]
+      expect(fileRow.meta.contentType).toBe('image/png')
+      expect(fileRow.meta.sniffed).toBe(true)
+      expect('sniffedContentType' in fileRow.meta).toBe(false)
+      const r = await punch(t, { eventType: 'check_in', location: OUTSIDE, photoFileId: fileId })
+      expect(r.status).toBe(422)
+      expect((r.body as { error?: { code?: string } })?.error?.code).toBe('OUTDOOR_PHOTO_INVALID')
+      expect((await counts(u)).outdoorReqs).toHaveLength(0)
+    } finally {
+      await cleanupPhotos(u)
+      await cleanupUser(u)
+    }
+  })
+
+  it('H2 P3-1: legacy files row (no `sniffed` key, only contentType asserted) → G2 falls back to the pre-slice check (punch passes)', async () => {
+    await createOutdoorFlow()
+    await setOutdoorPhoto({ requireApproval: true, requirePhoto: true })
+    const u = photoUid('legacyrow')
+    const t = await mintToken(u, 'attendance:read,attendance:write')
+    const legacyId = photoUid('legacy-id')
+    try {
+      await pool.query(
+        `INSERT INTO files (id, url, owner_id, meta, created_at) VALUES ($1, $2, $3, $4::jsonb, now())`,
+        [legacyId, 'https://example.invalid/legacy.png', u, JSON.stringify({ contentType: 'image/png', filename: 'legacy.png', size: 42 })],
+      )
+      const r = await punch(t, { eventType: 'check_in', location: OUTSIDE, photoFileId: legacyId })
+      expect(r.status).toBe(202)
+      const reqId = (r.body as { data?: { request?: { id?: string } } })?.data?.request?.id as string
+      expect(reqId).toBeTruthy()
+      const op = await outdoorPunchMeta(reqId)
+      expect(op?.photoFileId).toBe(legacyId)
+    } finally {
+      await pool.query(`DELETE FROM files WHERE id = $1`, [legacyId]).catch(() => undefined)
+      await cleanupUser(u)
+    }
+  })
+
+  it('H2 P3-2: delete removes the files row (orphan-row cleanup) and the id is no longer usable as evidence', async () => {
+    await createOutdoorFlow()
+    await setOutdoorPhoto({ requireApproval: true, requirePhoto: true })
+    const u = photoUid('delrow')
+    const t = await mintToken(u, 'attendance:read,attendance:write')
+    try {
+      const up = await uploadFile(t, { filename: 'evidence.png', contentType: 'image/png', content: PHOTO_PNG })
+      expect(up.status).toBe(200)
+      const fileId = uploadedFileId(up)
+      expect(fileId).toBeTruthy()
+      const before = (await pool.query(`SELECT id FROM files WHERE id = $1`, [fileId])).rows[0]
+      expect(before).toBeTruthy()
+      const del = await requestJson(`${baseUrl}/api/files/${fileId}`, { method: 'DELETE', headers: authHeaders(t) })
+      expect(del.status).toBe(200)
+      // P3-2: the files row is gone, not just the storage object
+      const after = (await pool.query(`SELECT id FROM files WHERE id = $1`, [fileId])).rows[0]
+      expect(after).toBeUndefined()
+      // dangling evidence: punching with the now-deleted fileId is rejected, not silently accepted
+      const r = await punch(t, { eventType: 'check_in', location: OUTSIDE, photoFileId: fileId })
+      expect(r.status).toBe(422)
+      expect((r.body as { error?: { code?: string } })?.error?.code).toBe('OUTDOOR_PHOTO_INVALID')
+      expect((await counts(u)).outdoorReqs).toHaveLength(0)
+    } finally {
+      await cleanupPhotos(u)
       await cleanupUser(u)
     }
   })
