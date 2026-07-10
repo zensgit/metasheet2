@@ -7017,8 +7017,52 @@ async function main() {
   await testCursorStringGuard()
   await testSampleLimitCap()
   await testListOffsetCap()
+  await testStockPreparationWritesRefuseWithoutAuditStore()
 
   console.log('http-routes: REST auth/list/upsert/run/dry-run/staging/replay tests passed')
+}
+
+// W5b (#3890) P2-1: the headline fail-closed claim — WITHOUT the audit store every stock-prep write
+// route refuses 501 AUDIT_STORE_UNAVAILABLE (gate fires BEFORE parsing/multitable access); WITH a
+// fake store present the same call proceeds past the gate (fails later on a DIFFERENT dependency),
+// proving the 501 comes from the audit gate specifically. Read routes stay unaffected.
+async function testStockPreparationWritesRefuseWithoutAuditStore() {
+  const { services } = createMockServices()
+  delete services.stockPreparationAuditStore
+  const { routes } = mountRoutes(services)
+  const admin = { id: 'admin_1', tenantId: 'tenant_1', permissions: ['integration:admin'] }
+  const writeCases = [
+    ['POST', '/api/integration/stock-preparation/material-mappings/candidates/sync', { projectId: 'proj_1', defaultVersionPolicy: 'drawing_only' }],
+    ['POST', '/api/integration/stock-preparation/material-mappings/confirm', { projectId: 'proj_1', mappingId: 'm1' }],
+    ['POST', '/api/integration/stock-preparation/material-mappings/retire', { projectId: 'proj_1', mappingId: 'm1' }],
+    ['POST', '/api/integration/stock-preparation/unit-conversions/confirm', { projectId: 'proj_1', conversionRuleId: 'r1' }],
+    ['POST', '/api/integration/stock-preparation/unit-conversions/retire', { projectId: 'proj_1', conversionRuleId: 'r1' }],
+    ['POST', '/api/integration/stock-preparation/generation/run', { projectId: 'proj_1' }],
+    ['POST', '/api/integration/stock-preparation/exceptions/resolve', { projectId: 'proj_1', exceptionId: 'e1', resolutionAction: 'manual_hold' }],
+    ['POST', '/api/integration/stock-preparation/exceptions/bulk-resolve', { projectId: 'proj_1', exceptionIds: ['e1'], resolutionAction: 'manual_hold' }],
+  ]
+  for (const [method, routePath, body] of writeCases) {
+    const res = await invoke(routes, method, routePath, { user: admin, body })
+    assert.equal(res.statusCode, 501, `${routePath} refuses without the audit store`)
+    assert.equal(res.body.error.code, 'AUDIT_STORE_UNAVAILABLE', `${routePath} names the audit gate`)
+  }
+  // The trail read requires the store too.
+  const listRes = await invoke(routes, 'GET', '/api/integration/stock-preparation/audit', { user: admin, query: {} })
+  assert.equal(listRes.statusCode, 501)
+  assert.equal(listRes.body.error.code, 'AUDIT_STORE_UNAVAILABLE')
+  // A stock-prep READ route stays unaffected by the missing store.
+  const readRes = await invoke(routes, 'GET', '/api/integration/stock-preparation/exceptions', { user: admin, query: { projectId: 'proj_1' } })
+  assert.notEqual(readRes.body && readRes.body.error && readRes.body.error.code, 'AUDIT_STORE_UNAVAILABLE', 'read routes never consult the audit gate')
+  // With a fake store present the gate passes: the SAME write call now fails on a DIFFERENT
+  // dependency (multitable API absent in this fixture) — never on the audit gate.
+  const appended = []
+  services.stockPreparationAuditStore = {
+    async append(entry) { appended.push(entry) },
+    async list() { return { rowCount: 0, entries: [] } },
+  }
+  const { routes: routesWithStore } = mountRoutes(services)
+  const res2 = await invoke(routesWithStore, 'POST', '/api/integration/stock-preparation/material-mappings/retire', { user: admin, body: { projectId: 'proj_1', mappingId: 'm1' } })
+  assert.notEqual(res2.body && res2.body.error && res2.body.error.code, 'AUDIT_STORE_UNAVAILABLE', 'with the store present the gate opens')
 }
 
 main().catch((err) => {

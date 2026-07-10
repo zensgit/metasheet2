@@ -254,6 +254,7 @@ describeIfDatabase('Attendance C5 notification delivery outbox', () => {
       const retryId = await insertDelivery('retry', { payload: { fakeDelivery: 'retry' } })
       const maxRetryId = await insertDelivery('maxretry', { attemptCount: 1, payload: { fakeDelivery: 'retry' } })
       const failId = await insertDelivery('fail', { payload: { fakeDelivery: 'fail' } })
+      const skipId = await insertDelivery('skip', { payload: { fakeDelivery: 'skip' } })
       const missingChannelId = await insertDelivery('missing-channel', { channel: 'unknown_channel' })
       const staleSendingId = await insertDelivery('stale-sending', {
         status: 'sending',
@@ -283,7 +284,7 @@ describeIfDatabase('Attendance C5 notification delivery outbox', () => {
         workerId: 'worker-test',
       })
 
-      await expect(worker.runBatch()).resolves.toEqual({ claimed: 6, sent: 2, retrying: 1, failed: 3 })
+      await expect(worker.runBatch()).resolves.toEqual({ claimed: 7, sent: 2, retrying: 1, failed: 3, skipped: 1 })
 
       const row = async (id: string) => (await workerPool.query(
         `SELECT status, attempt_count, delivered_at, next_attempt_at, last_error, claim_expires_at, claim_worker_id
@@ -330,6 +331,15 @@ describeIfDatabase('Attendance C5 notification delivery outbox', () => {
         claim_expires_at: null,
         claim_worker_id: null,
       })
+      // The structurally-undeliverable (skip: true) row lands `skipped`, not `failed` — and it must NOT
+      // have been counted toward the `failed` bucket in the runBatch() result asserted above.
+      expect(await row(skipId)).toMatchObject({
+        status: 'skipped',
+        attempt_count: 1,
+        last_error: 'fake_structural_skip',
+        claim_expires_at: null,
+        claim_worker_id: null,
+      })
       expect(await row(missingChannelId)).toMatchObject({
         status: 'failed',
         attempt_count: 1,
@@ -347,7 +357,7 @@ describeIfDatabase('Attendance C5 notification delivery outbox', () => {
         attempt_count: 0,
       })
 
-      await expect(worker.runBatch()).resolves.toEqual({ claimed: 0, sent: 0, retrying: 0, failed: 0 })
+      await expect(worker.runBatch()).resolves.toEqual({ claimed: 0, sent: 0, retrying: 0, failed: 0, skipped: 0 })
       expect(await row(okId)).toMatchObject({ status: 'sent', attempt_count: 1 })
       expect(await row(retryId)).toMatchObject({ status: 'retrying', attempt_count: 1 })
     } finally {
@@ -396,7 +406,7 @@ describeIfDatabase('Attendance C5 notification delivery outbox', () => {
         channels: [{
           name: 'dingtalk_work_notification',
           async send() {
-            await expect(workerB.runBatch()).resolves.toEqual({ claimed: 1, sent: 0, retrying: 1, failed: 0 })
+            await expect(workerB.runBatch()).resolves.toEqual({ claimed: 1, sent: 0, retrying: 1, failed: 0, skipped: 0 })
             return { ok: true }
           },
         }],
@@ -405,7 +415,7 @@ describeIfDatabase('Attendance C5 notification delivery outbox', () => {
         workerId: 'worker-a',
       })
 
-      await expect(workerA.runBatch()).resolves.toEqual({ claimed: 1, sent: 0, retrying: 0, failed: 0, lostLease: 1 })
+      await expect(workerA.runBatch()).resolves.toEqual({ claimed: 1, sent: 0, retrying: 0, failed: 0, skipped: 0, lostLease: 1 })
 
       const row = (await workerPool.query(
         `SELECT status, attempt_count, delivered_at, last_error, claim_worker_id, claim_expires_at
@@ -428,16 +438,18 @@ describeIfDatabase('Attendance C5 notification delivery outbox', () => {
     }
   })
 
-  it('C5-3 real DingTalk channel resolves linked directory users and lets the worker mark delivery sent without external network', async () => {
+  it('C5-3 real DingTalk channel resolves linked directory users (sent) and skips — not fails — an unbound recipient, without external network', async () => {
     if (!dbUrl) throw new Error('DATABASE_URL is required for this integration test')
     const publicPool = new Pool({ connectionString: dbUrl })
     const runSuffix = Date.now().toString(36)
     const orgId = `c5-dingtalk-${runSuffix}`
     const localUserId = `u-c5-dingtalk-${runSuffix}`
+    const unboundUserId = `u-c5-dingtalk-unbound-${runSuffix}`
     const integrationId = randomUUID()
     const directoryAccountId = randomUUID()
     const sourceId = randomUUID()
     let deliveryId = ''
+    let unboundDeliveryId = ''
     const config: DingTalkMessageConfig = {
       appKey: 'dt-app-key',
       appSecret: 'dt-app-secret',
@@ -494,6 +506,25 @@ describeIfDatabase('Attendance C5 notification delivery outbox', () => {
       )
       deliveryId = delivery.rows[0].id
 
+      // A second recipient with NO directory_account_links row at all — the ordinary "not onboarded to
+      // DingTalk yet" gap for a partially-adopted org. This delivery must land `skipped`, not `failed`,
+      // and must never reach readConfig/fetchAccessToken/sendWorkNotification (no channel identity to
+      // resolve, so the real-network mocks below must not be invoked for this row).
+      const unboundDelivery = await publicPool.query<{ id: string }>(
+        `INSERT INTO attendance_notification_deliveries
+           (org_id, source_type, source_id, source_key, recipient_user_id, recipient_role, channel, payload)
+         VALUES ($1,'unscheduled_reminder',$2,$3,$4,'subject','dingtalk_work_notification',$5::jsonb)
+         RETURNING id::text AS id`,
+        [
+          orgId,
+          sourceId,
+          `c5-dingtalk:${sourceId}:recipient:${unboundUserId}:channel:dingtalk_work_notification`,
+          unboundUserId,
+          JSON.stringify({ title: 'C5 DingTalk smoke (unbound)', body: 'Should never send.' }),
+        ],
+      )
+      unboundDeliveryId = unboundDelivery.rows[0].id
+
       const channel = new DingTalkAttendanceDeliveryChannel({
         query,
         readConfig: async (receivedIntegrationId) => {
@@ -516,8 +547,9 @@ describeIfDatabase('Attendance C5 notification delivery outbox', () => {
         workerId: 'worker-c5-dingtalk',
       })
 
-      await expect(worker.runBatch()).resolves.toEqual({ claimed: 1, sent: 1, retrying: 0, failed: 0 })
+      await expect(worker.runBatch()).resolves.toEqual({ claimed: 2, sent: 1, retrying: 0, failed: 0, skipped: 1 })
 
+      // Only the linked recipient's row reached the network mocks — the unbound recipient never did.
       expect(sentMessages).toEqual([{
         accessToken: 'access-token',
         input: {
@@ -541,9 +573,27 @@ describeIfDatabase('Attendance C5 notification delivery outbox', () => {
         claim_expires_at: null,
       })
       expect(row.delivered_at).toBeTruthy()
+
+      const unboundRow = (await publicPool.query(
+        `SELECT status, delivered_at, last_error, attempt_count, claim_worker_id, claim_expires_at
+           FROM attendance_notification_deliveries
+          WHERE id = $1`,
+        [unboundDeliveryId],
+      )).rows[0]
+      expect(unboundRow).toMatchObject({
+        status: 'skipped',
+        delivered_at: null,
+        last_error: 'dingtalk_recipient_not_bound',
+        attempt_count: 1,
+        claim_worker_id: null,
+        claim_expires_at: null,
+      })
     } finally {
       if (deliveryId) {
         await publicPool.query('DELETE FROM attendance_notification_deliveries WHERE id = $1', [deliveryId]).catch(() => undefined)
+      }
+      if (unboundDeliveryId) {
+        await publicPool.query('DELETE FROM attendance_notification_deliveries WHERE id = $1', [unboundDeliveryId]).catch(() => undefined)
       }
       await publicPool.query('DELETE FROM directory_account_links WHERE directory_account_id = $1', [directoryAccountId]).catch(() => undefined)
       await publicPool.query('DELETE FROM directory_accounts WHERE id = $1', [directoryAccountId]).catch(() => undefined)
@@ -648,7 +698,7 @@ describeIfDatabase('Attendance C5 notification delivery outbox', () => {
         now: () => new Date('2026-08-02T00:00:00.000Z'),
         workerId: 'worker-e3-card',
       })
-      await expect(cardWorker.runBatch()).resolves.toEqual({ claimed: 1, sent: 1, retrying: 0, failed: 0 })
+      await expect(cardWorker.runBatch()).resolves.toEqual({ claimed: 1, sent: 1, retrying: 0, failed: 0, skipped: 0 })
       expect(cardSink.text).toHaveLength(0)
       expect(cardSink.card).toEqual([{
         userIds: ['dt-user-e3'],
@@ -670,7 +720,7 @@ describeIfDatabase('Attendance C5 notification delivery outbox', () => {
         now: () => new Date('2026-08-02T00:00:00.000Z'),
         workerId: 'worker-e3-text',
       })
-      await expect(textWorker.runBatch()).resolves.toEqual({ claimed: 1, sent: 1, retrying: 0, failed: 0 })
+      await expect(textWorker.runBatch()).resolves.toEqual({ claimed: 1, sent: 1, retrying: 0, failed: 0, skipped: 0 })
       expect(textSink.card).toHaveLength(0)
       expect(textSink.text).toEqual([{
         userIds: ['dt-user-e3'],
@@ -691,7 +741,7 @@ describeIfDatabase('Attendance C5 notification delivery outbox', () => {
         now: () => new Date('2026-08-02T00:00:00.000Z'),
         workerId: 'worker-e3-appbase',
       })
-      await expect(fallbackWorker.runBatch()).resolves.toEqual({ claimed: 1, sent: 1, retrying: 0, failed: 0 })
+      await expect(fallbackWorker.runBatch()).resolves.toEqual({ claimed: 1, sent: 1, retrying: 0, failed: 0, skipped: 0 })
       expect(fallbackSink.text).toHaveLength(0)
       expect(fallbackSink.card).toHaveLength(1)
       expect((fallbackSink.card[0] as { singleUrl: string }).singleUrl)
@@ -709,7 +759,7 @@ describeIfDatabase('Attendance C5 notification delivery outbox', () => {
         now: () => new Date('2026-08-02T00:00:00.000Z'),
         workerId: 'worker-e3-flagoff',
       })
-      await expect(flagOffWorker.runBatch()).resolves.toEqual({ claimed: 1, sent: 1, retrying: 0, failed: 0 })
+      await expect(flagOffWorker.runBatch()).resolves.toEqual({ claimed: 1, sent: 1, retrying: 0, failed: 0, skipped: 0 })
       expect(flagOffSink.card).toHaveLength(0)
       expect(flagOffSink.text).toHaveLength(1)
 
@@ -814,7 +864,7 @@ describeIfDatabase('Attendance C5 notification delivery outbox', () => {
         workerId: 'worker-c5-email',
       })
 
-      await expect(worker.runBatch()).resolves.toEqual({ claimed: 3, sent: 1, retrying: 0, failed: 2 })
+      await expect(worker.runBatch()).resolves.toEqual({ claimed: 3, sent: 1, retrying: 0, failed: 2, skipped: 0 })
 
       const row = async (id: string) => (await publicPool.query(
         `SELECT status, delivered_at, last_error FROM attendance_notification_deliveries WHERE id = $1`,
