@@ -46,6 +46,8 @@ export interface BackfillOptions {
 export interface BackfillResult {
   encrypted: number
   alreadyEncrypted: number
+  /** Rows whose value changed between this script's SELECT and its UPDATE — left untouched. */
+  skippedConcurrent: number
   total: number
 }
 
@@ -106,6 +108,7 @@ export async function runBackfill(pool: QueryablePool, options: BackfillOptions)
 
   let encrypted = 0
   let alreadyEncrypted = 0
+  let skippedConcurrent = 0
 
   for (const row of rows) {
     const webhookNeedsEncrypting = !isEncryptedSecretValue(row.webhook_url)
@@ -118,27 +121,42 @@ export async function runBackfill(pool: QueryablePool, options: BackfillOptions)
       continue
     }
 
-    encrypted += 1
     if (options.dryRun) {
+      encrypted += 1
       console.log(`[dry-run] would encrypt destination ${row.id} (webhook=${webhookNeedsEncrypting}, secret=${secretNeedsEncrypting})`)
       continue
     }
 
-    await pool.query(
+    // Compare-and-swap on the exact values this run read: a credential rotated by an
+    // admin between the SELECT and this UPDATE must NOT be overwritten with the
+    // re-encryption of the stale value we are holding. (Encrypt-on-write means the
+    // concurrent writer already stored ciphertext — the row no longer needs us.)
+    const updated = await pool.query<{ id: string }>(
       `UPDATE dingtalk_group_destinations
           SET webhook_url = $2,
               secret = $3
-        WHERE id = $1`,
+        WHERE id = $1
+          AND webhook_url = $4
+          AND secret IS NOT DISTINCT FROM $5
+        RETURNING id`,
       [
         row.id,
         normalizeStoredSecretValue(row.webhook_url),
         row.secret ? normalizeStoredSecretValue(row.secret) : null,
+        row.webhook_url,
+        row.secret,
       ],
     )
+    if (updated.rows.length === 0) {
+      skippedConcurrent += 1
+      console.log(`skipped destination ${row.id}: concurrently modified since this run read it`)
+      continue
+    }
+    encrypted += 1
     console.log(`encrypted destination ${row.id}`)
   }
 
-  return { encrypted, alreadyEncrypted, total: rows.length }
+  return { encrypted, alreadyEncrypted, skippedConcurrent, total: rows.length }
 }
 
 async function main(): Promise<void> {
@@ -154,7 +172,8 @@ async function main(): Promise<void> {
     const result = await runBackfill(pool, { dryRun, allowFirstRun })
     console.log(
       `${dryRun ? '[dry-run] ' : ''}done: ${result.encrypted} row(s) ${dryRun ? 'would be' : ''} encrypted, ` +
-      `${result.alreadyEncrypted} already encrypted, ${result.total} total`,
+      `${result.alreadyEncrypted} already encrypted, ${result.skippedConcurrent} skipped (concurrently modified — re-run to re-check), ` +
+      `${result.total} total`,
     )
   } finally {
     await pool.end()
