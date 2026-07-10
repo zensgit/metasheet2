@@ -3192,6 +3192,18 @@
                     data-outdoor="require-note"
                   />
                 </label>
+                <label class="attendance__field attendance__field--checkbox" for="attendance-outdoor-require-photo">
+                  <span>{{ tr('Require a photo on the outdoor punch', '外勤打卡需上传照片证据') }}</span>
+                  <input
+                    id="attendance-outdoor-require-photo"
+                    v-model="outdoorForm.requirePhoto"
+                    type="checkbox"
+                    data-outdoor="require-photo"
+                  />
+                </label>
+                <p class="attendance__field-hint">
+                  {{ tr('Requires a photo-evidence upload attached to the outdoor punch; only takes effect for punch clients that submit a location or outdoor marker.', '要求外勤打卡附照片证据；对携带定位/外勤标记的打卡端生效。') }}
+                </p>
                 <label class="attendance__field" for="attendance-outdoor-flow">
                   <span>{{ tr('Approval flow', '审批流程') }}</span>
                   <select
@@ -10684,7 +10696,9 @@ interface AttendanceSettings {
     }
   }
   // ② S3 punch-policy outdoor approval (backend #2308). Frontend type only — the admin card reads/writes
-  // these via PUT { punchPolicy: { outdoor: ... } }. requirePhoto stays latent (no UI in S3-2).
+  // these via PUT { punchPolicy: { outdoor: ... } }. requirePhoto is wired (S2 outdoor-punch-photo
+  // design-lock, 2026-07-10): it takes effect only on punch clients that submit a location or an
+  // outdoor marker (the web hero-punch flow does neither — see punchOutcome.ts / UI-P0 #3806 §4).
   punchPolicy?: {
     outdoor?: {
       requireApproval?: boolean
@@ -15292,10 +15306,14 @@ const multiShiftDayForm = reactive({
 
 // ② S3-2 外勤打卡审批 (outdoor approval) config card. Mirrors shiftComplianceForm: saved via
 // saveOutdoorApproval, which PUTs ONLY { punchPolicy: { outdoor: ... } } so the backend per-key merge
-// leaves unscheduled / merge / the latent requirePhoto untouched. requireApproval=false ⇒ no regression.
+// leaves unscheduled / merge siblings untouched. requireApproval=false ⇒ no regression. requirePhoto
+// (S2 outdoor-punch-photo design-lock, 2026-07-10) is wired but only enforced for outdoor candidates
+// (outsideGeofence || outdoorMarker) — the web hero-punch flow never produces one, so this card alone
+// cannot cause a punch to actually require a photo (see punchOutcome.ts / UI-P0 #3806 §4).
 const outdoorForm = reactive({
   requireApproval: false,
   requireNote: false,
+  requirePhoto: false,
   approvalFlowId: '',
 })
 // ② S2-2 内外勤卡合并 (in/out merge) config card. Mirrors outdoorForm: saved via saveInOutMerge, which
@@ -22634,6 +22652,7 @@ function applyOutdoorToForm(settings: AttendanceSettings) {
   const outdoor = settings.punchPolicy?.outdoor || {}
   outdoorForm.requireApproval = outdoor.requireApproval === true
   outdoorForm.requireNote = outdoor.requireNote === true
+  outdoorForm.requirePhoto = outdoor.requirePhoto === true
   outdoorForm.approvalFlowId = typeof outdoor.approvalFlowId === 'string' ? outdoor.approvalFlowId : ''
 }
 
@@ -23062,13 +23081,15 @@ async function saveMultiShiftDay() {
 async function saveOutdoorApproval() {
   settingsLoading.value = true
   try {
-    // PUT ONLY punchPolicy.outdoor — the backend 2-level merge preserves unscheduled / merge siblings and
-    // the latent requirePhoto (not sent here). requireApproval=false ⇒ no change to existing punching.
+    // PUT ONLY punchPolicy.outdoor — the backend 2-level merge preserves unscheduled / merge siblings.
+    // requireApproval=false ⇒ no change to existing punching. requirePhoto only takes effect on outdoor
+    // candidates (see punchOutcome.ts / UI-P0 #3806 §4 — the web hero-punch flow never produces one).
     const payload = {
       punchPolicy: {
         outdoor: {
           requireApproval: outdoorForm.requireApproval === true,
           requireNote: outdoorForm.requireNote === true,
+          requirePhoto: outdoorForm.requirePhoto === true,
           approvalFlowId: String(outdoorForm.approvalFlowId || '').trim(),
         },
       },

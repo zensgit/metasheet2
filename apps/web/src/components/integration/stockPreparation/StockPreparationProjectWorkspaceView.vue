@@ -55,6 +55,7 @@
               <th scope="col">{{ bi('就绪备料行', 'Ready lines') }}</th>
               <th scope="col">{{ bi('暂挂备料行', 'Held lines') }}</th>
               <th scope="col">{{ bi('最近同步运行', 'Last sync run') }}</th>
+              <th scope="col" class="sp-project__col-action">{{ bi('操作', 'Actions') }}</th>
             </tr>
           </thead>
           <tbody>
@@ -77,6 +78,18 @@
                 <code class="sp-project__handle" data-testid="stock-prep-project-run-handle">{{
                   project.lastSyncRunId ?? '—'
                 }}</code>
+              </td>
+              <td class="sp-project__col-action">
+                <!-- Shared project context (view 1 → view 2): emits the internal projectId handle so
+                     the shell can open the snapshot-batch view already scoped — no re-select there. -->
+                <button
+                  type="button"
+                  class="sp-project__select"
+                  data-testid="stock-prep-project-select"
+                  @click="emit('select-project', project.projectId)"
+                >
+                  {{ bi('查看快照批次', 'View snapshot batches') }}
+                </button>
               </td>
             </tr>
           </tbody>
@@ -112,6 +125,14 @@ const props = withDefaults(
   }>(),
   { scope: () => ({}) },
 )
+
+const emit = defineEmits<{
+  /**
+   * Shared project context (view 1 → view 2): fired with the internal MetaSheet projectId handle
+   * when the operator picks a project row. The handle is emitted, never rendered (values-free).
+   */
+  (e: 'select-project', projectId: string): void
+}>()
 
 const { locale } = useLocale()
 
@@ -231,5 +252,25 @@ onMounted(load)
 .sp-project__handle {
   color: var(--ms-text-3);
   font-size: 12px;
+}
+
+.sp-project__col-action {
+  text-align: right;
+}
+
+/* Same light row-action idiom as view 2's diff entry (sp-snap__select). */
+.sp-project__select {
+  border: 1px solid var(--ms-border-light);
+  border-radius: 6px;
+  background: transparent;
+  padding: 2px 10px;
+  color: var(--ms-color-primary);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.sp-project__select:hover {
+  background: var(--el-fill-color-light);
 }
 </style>
