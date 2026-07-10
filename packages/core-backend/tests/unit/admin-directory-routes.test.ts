@@ -514,6 +514,21 @@ describe('adminDirectoryRouter', () => {
       expect(directoryMocks.createDirectoryIntegration).not.toHaveBeenCalled()
     })
 
+    it('rejects a day-of-month + day-of-week combo that can never occur under AND-semantics (0 0 30 2 1)', async () => {
+      // This is the exact case that ruled out reusing the multitable automation scheduler's cron parser:
+      // that parser's OR-semantics treats "any Monday in February" as reachable and would have accepted
+      // this, while the directory sync scheduler's actual runtime parser (SimpleCronExpression) ANDs every
+      // field — day-of-month 30 AND day-of-week Monday can never both hold in February, so it never fires.
+      const response = await invokeRoute('post', '/integrations', {
+        body: { ...basePayload, scheduleCron: '0 0 30 2 1' },
+        user: { id: 'admin-1', role: 'admin' },
+      })
+
+      expect(response.statusCode).toBe(400)
+      expect(response.body).toMatchObject({ error: { code: 'DIRECTORY_SCHEDULE_CRON_INVALID' } })
+      expect(directoryMocks.createDirectoryIntegration).not.toHaveBeenCalled()
+    })
+
     it('rejects an invalid schedule_cron on update with 400 and never calls updateDirectoryIntegration', async () => {
       const response = await invokeRoute('put', '/integrations/:integrationId', {
         params: { integrationId: 'dir-1' },
