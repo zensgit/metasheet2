@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
 import type { MetaSheetServer } from '../../src/index'
 import * as path from 'path'
+import { promises as fsp } from 'fs'
 import net from 'net'
 import http from 'http'
 import { randomUUID } from 'crypto'
@@ -340,6 +341,150 @@ describeDb('F1 files-acl-tombstone: resource-level ACL matrix (real DB, route-le
       await pool.query(`DELETE FROM attendance_approval_flows WHERE org_id = $1 AND request_type = 'outdoor_punch'`, [ORG]).catch(() => undefined)
       await pool.query(`DELETE FROM attendance_requests WHERE user_id = $1`, [owner]).catch(() => undefined)
       await cleanupFiles(owner)
+    }
+  })
+
+  // ---------------------------------------------------------------------------
+  // F3 files-storage-integrity design-lock (2026-07-10): route-level coverage that needs a real DB row +
+  // a real physical object, exercising the DB-`storage_key`-authoritative read path (G3), the controlled
+  // url-fallback + writeback (owner guard E), the poison read-path rejection (owner guard D/G rule 2), and
+  // the tombstone-404-for-all-incl-admin gate (G7). These reuse the running server + helpers above.
+  // ---------------------------------------------------------------------------
+  const STORAGE_ROOT = process.env.STORAGE_PATH || path.join(process.cwd(), 'uploads')
+  const STORAGE_BASE = (process.env.STORAGE_BASE_URL || 'http://localhost:8900/files').replace(/\/+$/, '')
+
+  async function seedFileRow(row: { id: string; owner: string; storageKey: string | null; urlKey: string | null; deletedAt?: boolean }): Promise<void> {
+    const url = row.urlKey === null ? null : `${STORAGE_BASE}/${row.urlKey}`
+    await pool.query(
+      `INSERT INTO files (id, url, owner_id, meta, storage_key, created_at, deleted_at)
+       VALUES ($1, $2, $3, $4::jsonb, $5, now(), ${row.deletedAt ? 'now()' : 'NULL'})`,
+      [row.id, url, row.owner, JSON.stringify({ contentType: 'image/png', filename: 'seed.png', size: PHOTO_PNG.length }), row.storageKey],
+    )
+  }
+  async function writePhysical(relKey: string, content: Buffer): Promise<string> {
+    const full = path.resolve(STORAGE_ROOT, relKey)
+    await fsp.mkdir(path.dirname(full), { recursive: true })
+    await fsp.writeFile(full, content)
+    return full
+  }
+  const storageKeyInDb = async (id: string): Promise<string | null> =>
+    (await pool.query<{ storage_key: string | null }>(`SELECT storage_key FROM files WHERE id = $1`, [id])).rows[0]?.storage_key ?? null
+  const pathExists = async (p: string): Promise<boolean> => fsp.access(p).then(() => true).catch(() => false)
+
+  it('G3 (test 3+5) — a directly-seeded row (physical object never seen by the in-memory index) still downloads: DB storage_key is authoritative, no warmup window', async () => {
+    const owner = uid('g3-direct')
+    const t = await mintUserToken(owner)
+    const id = randomUUID()
+    const key = `${id}/direct.png` // F3 layout <uuid>/<safeBasename>
+    const full = await writePhysical(key, PHOTO_PNG)
+    try {
+      await seedFileRow({ id, owner, storageKey: key, urlKey: key })
+
+      // download + info succeed even though this id was never uploaded through the running server (its
+      // storage singleton's disk-scan index never indexed it) — proof the read path goes through the DB
+      // storage_key, not the index.
+      const dl = await download(t, id)
+      expect(dl.status).toBe(200)
+      const infoRes = await info(t, id)
+      expect(infoRes.status).toBe(200)
+      expect((infoRes.body as { id?: string; path?: string })?.path).toBe(key)
+    } finally {
+      await fsp.unlink(full).catch(() => undefined)
+      await cleanupFiles(owner)
+    }
+  })
+
+  it('G5/E (test 6) — old-format row (storage_key NULL, url-derived) and new-format upload both download; the old row is backfilled on read', async () => {
+    const owner = uid('g5-old')
+    const t = await mintUserToken(owner)
+    const oldId = randomUUID()
+    const oldKey = `${oldId}-legacy.png` // old flat layout: physical file directly under the storage root
+    const full = await writePhysical(oldKey, PHOTO_PNG)
+    try {
+      // old row: no storage_key, only a url that resolves to the flat physical key
+      await seedFileRow({ id: oldId, owner, storageKey: null, urlKey: oldKey })
+      const oldDl = await download(t, oldId)
+      expect(oldDl.status).toBe(200)
+      // owner guard E: the recovered key is written back so the next read is a direct storage_key hit
+      expect(await storageKeyInDb(oldId)).toBe(oldKey)
+
+      // a new-format upload coexists and downloads fine
+      const up = await uploadFile(t, { filename: 'fresh.png', contentType: 'image/png', content: PHOTO_PNG })
+      expect(up.status).toBe(200)
+      const newId = uploadedFileId(up)
+      expect((await download(t, newId)).status).toBe(200)
+    } finally {
+      await fsp.unlink(full).catch(() => undefined)
+      await cleanupFiles(owner)
+    }
+  })
+
+  it('D/G rule 2 — a POISONED row is 404 BEFORE any url-fallback: the poison is not washed and the blob is not served', async () => {
+    const owner = uid('poison')
+    const t = await mintUserToken(owner)
+    const id = randomUUID()
+    // the poisoned row keeps its original url; the physical object it points to STILL EXISTS on disk, so a
+    // fallback that re-derived the key from the url WOULD serve it — the poison prefix must block that.
+    const washKey = `${id}-washme.png`
+    const full = await writePhysical(washKey, PHOTO_PNG)
+    try {
+      await seedFileRow({ id, owner, storageKey: `!f3-collision:${id}`, urlKey: washKey })
+
+      const dl = await download(t, id)
+      expect(dl.status).toBe(404)
+      const infoRes = await info(t, id)
+      expect(infoRes.status).toBe(404)
+
+      // the poison was NOT washed (storage_key unchanged) and the physical blob was never touched
+      expect(await storageKeyInDb(id)).toBe(`!f3-collision:${id}`)
+      expect(await pathExists(full)).toBe(true)
+    } finally {
+      await fsp.unlink(full).catch(() => undefined)
+      await cleanupFiles(owner)
+    }
+  })
+
+  it('E — a traversal url on a legacy row is rejected (404), never reading an out-of-root object', async () => {
+    const owner = uid('trav')
+    const t = await mintUserToken(owner)
+    const id = randomUUID()
+    // plant a real file OUTSIDE the storage root and point a legacy url at it via `..`
+    const outside = path.resolve(STORAGE_ROOT, '..', `f3-outside-${id}.png`)
+    await fsp.writeFile(outside, PHOTO_PNG)
+    try {
+      await seedFileRow({ id, owner, storageKey: null, urlKey: `../f3-outside-${id}.png` })
+      expect((await download(t, id)).status).toBe(404)
+      // storage_key stays NULL (no key was ever safely derived → nothing written back)
+      expect(await storageKeyInDb(id)).toBeNull()
+    } finally {
+      await fsp.unlink(outside).catch(() => undefined)
+      await cleanupFiles(owner)
+    }
+  })
+
+  it('G7 (test 4+8) — a tombstoned row with its blob still present is 404 for the owner AND for admin', async () => {
+    const owner = uid('tomb-owner')
+    const admin = uid('tomb-admin')
+    const tOwner = await mintUserToken(owner)
+    const tAdmin = await mintAdminToken(admin)
+    try {
+      const up = await uploadFile(tOwner, { filename: 'evidence.png', contentType: 'image/png', content: PHOTO_PNG })
+      expect(up.status).toBe(200)
+      const id = uploadedFileId(up)
+      const key = await storageKeyInDb(id)
+      expect(key).toBeTruthy()
+
+      // tombstone the ROW WITHOUT deleting the blob (models the compensating-cleanup-pending window)
+      await pool.query(`UPDATE files SET deleted_at = now() WHERE id = $1`, [id])
+      expect(await pathExists(path.resolve(STORAGE_ROOT, key!))).toBe(true) // blob still present
+
+      // owner: 404 on both info and download; admin: ALSO 404 (F3-3 fix — deleted denies even admin)
+      expect((await info(tOwner, id)).status).toBe(404)
+      expect((await download(tOwner, id)).status).toBe(404)
+      expect((await info(tAdmin, id)).status).toBe(404)
+      expect((await download(tAdmin, id)).status).toBe(404)
+    } finally {
+      await cleanupFiles(owner, admin)
     }
   })
 })

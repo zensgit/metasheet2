@@ -16,7 +16,9 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 const kyselyMocks = vi.hoisted(() => {
   const state = {
-    ownerRows: [] as Array<{ owner_id: string | null }>,
+    // F3: loadFileRecord now selects the full row (owner_id + deleted_at + storage_key + url + meta +
+    // created_at). An `active` row has deleted_at === null.
+    ownerRows: [] as Array<Record<string, unknown>>,
     updateShouldThrow: false,
     updateError: new Error('injected tombstone UPDATE failure'),
     callOrder: [] as string[],
@@ -37,7 +39,7 @@ vi.mock('kysely', async (importOriginal) => {
           }
           return { rows: [] }
         }
-        if (text.includes('SELECT owner_id FROM files')) {
+        if (text.includes('SELECT owner_id, deleted_at, storage_key')) {
           return { rows: kyselyMocks.state.ownerRows }
         }
         // upload's INSERT and any other raw sql call this test doesn't exercise
@@ -86,7 +88,7 @@ import { filesRouter } from '../../src/routes/files'
 
 describe('files.ts DELETE — F2 tombstone-first ordering (mocked db + storage)', () => {
   beforeEach(() => {
-    kyselyMocks.state.ownerRows = [{ owner_id: 'owner-1' }]
+    kyselyMocks.state.ownerRows = [{ owner_id: 'owner-1', deleted_at: null, storage_key: 'uuid-x/photo.jpg', url: null, meta: {}, created_at: new Date() }]
     kyselyMocks.state.updateShouldThrow = false
     kyselyMocks.state.callOrder = []
     authMocks.user = { id: 'owner-1' }
@@ -164,6 +166,22 @@ describe('files.ts DELETE — F2 tombstone-first ordering (mocked db + storage)'
     const res = await request(app).delete('/api/files/legacy-1')
 
     expect(res.status).toBe(404)
+    expect(storageMocks.exists).not.toHaveBeenCalled()
+    expect(storageMocks.delete).not.toHaveBeenCalled()
+  })
+
+  it('F3 G7 — a tombstoned (deleted) record is 404 even for ADMIN; never re-tombstoned, never touches storage', async () => {
+    // admin via the legacy JWT role claim; the row exists but is already tombstoned (deleted_at set).
+    authMocks.user = { id: 'admin-user', role: 'admin' }
+    kyselyMocks.state.ownerRows = [{ owner_id: 'someone-else', deleted_at: new Date(), storage_key: 'uuid-x/photo.jpg', url: null, meta: {}, created_at: new Date() }]
+    const app = buildApp()
+
+    const res = await request(app).delete('/api/files/photo-1')
+
+    expect(res.status).toBe(404)
+    expect(res.body).toEqual({ error: 'File not found' })
+    // never reached the tombstone UPDATE or any storage call — deleted is a hard 404 at the ACL gate.
+    expect(kyselyMocks.state.callOrder).toEqual([])
     expect(storageMocks.exists).not.toHaveBeenCalled()
     expect(storageMocks.delete).not.toHaveBeenCalled()
   })

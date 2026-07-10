@@ -98,6 +98,10 @@ export type ReadAttachmentMetadataResult = {
   recordId: string | null
   fieldId: string | null
   storageFileId: string
+  /** F3 design-lock G8: the physical storage key persisted at upload (`multitable_attachments.storage_path`).
+   * The download path reads the binary by THIS key (bypassing the storage provider's in-memory disk-scan
+   * index), so a restart / new instance never 404s a still-present attachment (F3-2). */
+  storagePath: string | null
   filename: string | null
   originalName: string | null
   mimeType: string
@@ -121,6 +125,9 @@ export type ReadAttachmentForDeleteResult = {
 export type ReadAttachmentBinaryInput = {
   storage: StorageServiceImpl
   storageFileId: string
+  /** F3 design-lock G8: the physical storage key. When present, the binary is read by key (direct,
+   * index-free); a legacy row without it falls back to the id-based read. */
+  storagePath?: string | null
 }
 
 export type SoftDeleteAttachmentInput = {
@@ -471,7 +478,7 @@ export async function readAttachmentMetadata(
 ): Promise<ReadAttachmentMetadataResult | null> {
   const { query, attachmentId } = input
   const result = await query(
-    `SELECT id, sheet_id, record_id, field_id, storage_file_id, filename, original_name, mime_type, size
+    `SELECT id, sheet_id, record_id, field_id, storage_file_id, storage_path, filename, original_name, mime_type, size
      FROM multitable_attachments
      WHERE id = $1 AND deleted_at IS NULL`,
     [attachmentId],
@@ -486,6 +493,7 @@ export async function readAttachmentMetadata(
     recordId: typeof row.record_id === 'string' ? row.record_id : null,
     fieldId: typeof row.field_id === 'string' ? row.field_id : null,
     storageFileId: String(row.storage_file_id),
+    storagePath: typeof row.storage_path === 'string' ? row.storage_path : null,
     filename: typeof row.filename === 'string' ? row.filename : null,
     originalName: typeof row.original_name === 'string' ? row.original_name : null,
     mimeType: typeof row.mime_type === 'string' ? row.mime_type : 'application/octet-stream',
@@ -493,11 +501,21 @@ export async function readAttachmentMetadata(
   }
 }
 
-/** Reads the binary bytes for the given storage file id. */
+/**
+ * Reads the binary bytes for an attachment. F3 design-lock G8: reads by the persisted physical
+ * `storage_path` (`downloadByKey`) — the SAME deterministic-key read files.ts uses — so a restart / new
+ * process never 404s a still-present attachment through the storage provider's drifting in-memory
+ * disk-scan index (F3-2). `storage_path` has been populated on every `storeAttachment` insert since the
+ * feature shipped, so this is the normal path; a row without it (defensive) falls back to the legacy
+ * id-based read.
+ */
 export async function readAttachmentBinary(
   input: ReadAttachmentBinaryInput,
 ): Promise<Buffer> {
-  const { storage, storageFileId } = input
+  const { storage, storageFileId, storagePath } = input
+  if (typeof storagePath === 'string' && storagePath.length > 0) {
+    return storage.downloadByKey(storagePath)
+  }
   return storage.download(storageFileId)
 }
 

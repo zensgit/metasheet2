@@ -109,11 +109,44 @@ interface S3Error extends Error {
 }
 
 /**
+ * F3 files-storage-integrity design-lock (2026-07-10), G1/G2: derive a display-only safe basename from
+ * a client-supplied filename. Normalizes `\` → `/` first so a Windows-style separator can't survive
+ * `path.basename`, strips any directory component, then removes control chars and leading dots (which
+ * would otherwise produce a hidden file that `scanDirectory` skips, or a `.`/`..` traversal segment).
+ * The result is used ONLY as the last segment of the server-generated `<uuid>/<safeBasename>` key — it
+ * can never widen the physical write location (the uuid dir is server-owned and containment-checked).
+ */
+export function toSafeStorageBasename(rawName: string): string {
+  const base = path.basename(String(rawName).replace(/\\/g, '/'))
+  // eslint-disable-next-line no-control-regex
+  const stripped = base.replace(/[\x00-\x1f\x7f]/g, '').replace(/^\.+/, '')
+  return stripped.length > 0 ? stripped : 'file'
+}
+
+/**
+ * F3 design-lock G2: containment hard floor. Resolves `key` against `basePath` and throws unless the
+ * result stays strictly inside `basePath` (and is not `basePath` itself). Applied on BOTH write and
+ * read — even though F3 server-generates the key, a corrupt/legacy/url-derived key must never let a
+ * read or write escape the storage root.
+ */
+export function resolveWithinBase(basePath: string, key: string): string {
+  const base = path.resolve(basePath)
+  const resolved = path.resolve(base, key)
+  if (resolved !== base && resolved.startsWith(base + path.sep)) {
+    return resolved
+  }
+  throw new Error('Storage key resolves outside the storage base path')
+}
+
+/**
  * 存储提供者接口
  */
 interface StorageProvider {
   upload(file: Buffer | Readable, options: UploadOptions): Promise<StorageFile>
   download(fileId: string): Promise<Buffer>
+  /** F3 design-lock G3: read a physical object by its deterministic storage key, bypassing the
+   * in-memory disk-scan index entirely (no warmup window, no id-drift). */
+  downloadByKey(storageKey: string): Promise<Buffer>
   delete(fileId: string): Promise<void>
   exists(fileId: string): Promise<boolean>
   getFileInfo(fileId: string): Promise<StorageFile | null>
@@ -183,7 +216,11 @@ class LocalStorageProvider implements StorageProvider {
         } else if (entry.isFile() && !entry.name.startsWith('.')) {
           // 跳过隐藏文件，添加普通文件
           const stats = await fs.stat(fullPath)
-          const fileId = this.generateFileId(currentRelativePath)
+          // F3 design-lock G4: for the F3 layout `<uuid>/<safeBasename>` the id is the uuid directory
+          // segment (deterministic — matches the id returned at upload time), so a rebuild no longer
+          // drifts to `md5(relpath)` for those files. Legacy flat files fall back to the historical
+          // md5 (vestigial — id lookups now go through the DB `storage_key`, not this index).
+          const fileId = this.deriveIdFromRelativePath(currentRelativePath)
 
           files.push({
             id: fileId,
@@ -207,24 +244,31 @@ class LocalStorageProvider implements StorageProvider {
   }
 
   async upload(file: Buffer | Readable, options: UploadOptions): Promise<StorageFile> {
-    const filename = options.filename || this.generateFilename()
-    const filePath = options.path ? path.join(options.path, filename) : filename
-    const fullPath = path.join(this.basePath, filePath)
-    const fileId = options.overwrite ? this.generateFileId(filePath) : this.generateUniqueFileId()
+    // F3 design-lock G1: the physical key is SERVER-generated. The client-supplied `options.path` NEVER
+    // decides the physical layout (that was F3-1: `../` traversal + same-name overwrite via a client
+    // path/filename); `options.filename` survives only as a display-only safe basename and in `url`.
+    // key = `<uuid>/<safeBasename>` — the uuid directory is unique so two uploads of the same name can
+    // never collide, and the id IS that uuid (deterministically recoverable from the key's parent
+    // segment), which is what lets a restart / new instance re-locate the object by DB `storage_key`
+    // without the drifting md5 disk-scan index (F3-2).
+    const displayName = options.filename || this.generateFilename()
+    const safeBasename = toSafeStorageBasename(displayName)
+    const uuid = this.generateUniqueFileId()
+    const storageKey = `${uuid}/${safeBasename}`
+    // G2: containment hard floor even though the key is server-generated (defense in depth).
+    const fullPath = resolveWithinBase(this.basePath, storageKey)
+    const fileId = uuid
 
     try {
       // 确保目录存在
       await fs.mkdir(path.dirname(fullPath), { recursive: true })
 
-      // 检查是否覆盖
-      if (!options.overwrite && await this.exists(fileId)) {
-        throw new Error('File already exists and overwrite is not allowed')
-      }
-
-      // 写入文件
+      // 写入文件 — G2: exclusive create (`wx`) on BOTH the Buffer and the stream-concat branch. The
+      // uuid directory makes a collision impossible in practice; `wx` is the belt-and-suspenders that
+      // turns any theoretical collision into a hard error instead of a silent overwrite.
       let fileSize: number
       if (Buffer.isBuffer(file)) {
-        await fs.writeFile(fullPath, file)
+        await fs.writeFile(fullPath, file, { flag: 'wx' })
         fileSize = file.length
       } else {
         // 处理流
@@ -233,30 +277,31 @@ class LocalStorageProvider implements StorageProvider {
           chunks.push(chunk)
         }
         const buffer = Buffer.concat(chunks)
-        await fs.writeFile(fullPath, buffer)
+        await fs.writeFile(fullPath, buffer, { flag: 'wx' })
         fileSize = buffer.length
       }
 
       const stats = await fs.stat(fullPath)
       const storageFile: StorageFile = {
         id: fileId,
-        filename,
+        filename: displayName,
         size: fileSize,
-        contentType: options.contentType || this.getContentType(filename),
-        path: filePath,
-        url: `${this.baseUrl}/${filePath}`,
+        contentType: options.contentType || this.getContentType(displayName),
+        path: storageKey,
+        storageKey,
+        url: `${this.baseUrl}/${storageKey}`,
         metadata: options.metadata || {},
         tags: options.tags || {},
         createdAt: stats.birthtime,
         updatedAt: stats.mtime
       }
 
-      // 更新索引
+      // 更新索引（进程内即时可用；重启后 id 查询走 DB storage_key，不依赖此索引 rebuild）
       this.fileIndex.set(fileId, storageFile)
 
       return storageFile
     } catch (error) {
-      this.logger.error(`Failed to upload file ${filename}`, error as Error)
+      this.logger.error(`Failed to upload file ${displayName}`, error as Error)
       throw error
     }
   }
@@ -267,12 +312,28 @@ class LocalStorageProvider implements StorageProvider {
       throw new Error('File not found')
     }
 
-    const fullPath = path.join(this.basePath, fileInfo.path)
+    const fullPath = resolveWithinBase(this.basePath, fileInfo.path)
 
     try {
       return await fs.readFile(fullPath)
     } catch (error) {
       this.logger.error(`Failed to download file ${fileId}`, error as Error)
+      throw error
+    }
+  }
+
+  // F3 design-lock G3: read a physical object by its deterministic storage key (from the DB
+  // `storage_key`/`storage_path` column), bypassing the in-memory `fileIndex` entirely. This is the
+  // read path that has no warmup window — a freshly constructed provider whose `buildFileIndex()` has
+  // not populated (or will never populate) this id still serves the object, because the key alone
+  // deterministically locates it. Containment is re-asserted (G2) so a corrupt/legacy/url-derived key
+  // can never escape the base path.
+  async downloadByKey(storageKey: string): Promise<Buffer> {
+    const fullPath = resolveWithinBase(this.basePath, storageKey)
+    try {
+      return await fs.readFile(fullPath)
+    } catch (error) {
+      this.logger.error(`Failed to download file by key ${storageKey}`, error as Error)
       throw error
     }
   }
@@ -447,6 +508,24 @@ class LocalStorageProvider implements StorageProvider {
     return crypto.randomUUID()
   }
 
+  /**
+   * F3 design-lock G4: recover the stable id from a relative path. The F3 layout is
+   * `<uuid>/<safeBasename>`, so the first segment — when it is a well-formed uuid AND a subdirectory
+   * exists — is the id assigned at upload time (deterministic, no md5 drift). Legacy flat files keep
+   * the historical `md5(relpath)`.
+   */
+  private deriveIdFromRelativePath(relativePath: string): string {
+    const normalized = relativePath.split(path.sep).join('/')
+    const slash = normalized.indexOf('/')
+    if (slash > 0) {
+      const first = normalized.slice(0, slash)
+      if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(first)) {
+        return first
+      }
+    }
+    return this.generateFileId(relativePath)
+  }
+
   private generateFilename(): string {
     const timestamp = Date.now()
     const random = Math.random().toString(36).substring(2, 8)
@@ -557,6 +636,14 @@ class S3StorageProvider implements StorageProvider {
       this.logger.error(`Failed to download file from S3: ${fileId}`, error as Error)
       throw error
     }
+  }
+
+  // F3 design-lock G6: for S3 the id IS the key IS the path (see `upload`: `id: key`), and there is no
+  // in-memory disk-scan index and no md5 rebuild — so `download(fileId)` already reads by key and the
+  // "fileId points to the same object after restart" invariant holds natively. `downloadByKey` is the
+  // same read, present so the provider interface is uniform and callers never branch on provider type.
+  async downloadByKey(storageKey: string): Promise<Buffer> {
+    return this.download(storageKey)
   }
 
   async delete(fileId: string): Promise<void> {
@@ -836,6 +923,21 @@ export class StorageServiceImpl extends EventEmitter implements StorageService {
     } catch (error) {
       this.logger.error(`Failed to download file: ${fileId}`, error as Error)
       this.emit('file:error', { operation: 'download', fileId, error })
+      throw error
+    }
+  }
+
+  // F3 design-lock G3: read a physical object by its deterministic storage key (DB `storage_key` /
+  // `storage_path`), bypassing the provider's in-memory index. Used by files.ts + multitable download
+  // so a restart / cold index never 404s a still-present object.
+  async downloadByKey(storageKey: string): Promise<Buffer> {
+    try {
+      const result = await this.provider.downloadByKey(storageKey)
+      this.emit('file:downloaded', { fileId: storageKey, size: result.length })
+      return result
+    } catch (error) {
+      this.logger.error(`Failed to download file by key: ${storageKey}`, error as Error)
+      this.emit('file:error', { operation: 'download', fileId: storageKey, error })
       throw error
     }
   }

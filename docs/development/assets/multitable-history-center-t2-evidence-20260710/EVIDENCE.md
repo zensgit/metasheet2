@@ -1,6 +1,6 @@
 # R10-C evidence — Global History Center browser screenshots (T2 acceptance debt)
 
-Date: 2026-07-10 · Lane: evidence (no PR) · Repo: zensgit/metasheet2 @ origin/main `9dba447fb`
+Date: 2026-07-10 · Lane: evidence (no lane PR — final archival landed via **#4064** `5d8b96487`) · Repo: zensgit/metasheet2 @ origin/main `9dba447fb`
 Debt item: `docs/development/multitable-time-machine-plus-todo-20260619.md:102` — T2 tests: "browser Path A screenshot for dense timeline layout" (never captured), plus §3 rule (line 314): "Browser evidence is required for the global history center timeline before calling the UI slice complete."
 Captured after R9 landed record titles + typed link/person diffs + click-through, so the evidence also covers those.
 
