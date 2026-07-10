@@ -57,13 +57,22 @@ const markAllApprovalsReadSpy = vi.fn().mockResolvedValue({ markedCount: 0 })
 const remindApprovalSpy = vi.fn().mockResolvedValue({ ok: true, data: {} })
 const getTemplateSpy = vi.fn().mockResolvedValue({ formSchema: { fields: [] } })
 
+// B3-03: the filter bar's template dropdown fetches options via listTemplates() on mount.
+const listTemplatesSpy = vi.fn().mockResolvedValue({ data: [], total: 0 })
+
 vi.mock('../src/approvals/api', () => ({
   dispatchAction: (...args: [string, unknown]) => dispatchActionSpy(...args),
   getPendingCount: (...args: unknown[]) => getPendingCountSpy(...args),
   markAllApprovalsRead: (...args: unknown[]) => markAllApprovalsReadSpy(...args),
   remindApproval: (...args: unknown[]) => remindApprovalSpy(...args),
   getTemplate: (...args: [string]) => getTemplateSpy(...args),
+  listTemplates: (...args: unknown[]) => listTemplatesSpy(...args),
 }))
+
+// B3-03: mutable so a deep-link test can set `?templateId=...&createdFrom=...&createdTo=...`
+// BEFORE mounting (mirrors landing here from an ApprovalMetricsView 看板钻取 link); every other
+// existing test leaves it at the default empty query, unchanged.
+let mockRouteQuery: Record<string, string> = {}
 
 vi.mock('vue-router', async () => {
   const actual = await vi.importActual<typeof import('vue-router')>('vue-router')
@@ -75,7 +84,7 @@ vi.mock('vue-router', async () => {
     }),
     useRoute: () => ({
       params: {},
-      query: {},
+      query: mockRouteQuery,
       path: '/approvals',
       meta: {},
     }),
@@ -413,6 +422,9 @@ describe('ApprovalCenterView', () => {
     remindApprovalSpy.mockResolvedValue({ ok: true, data: {} })
     getTemplateSpy.mockClear()
     getTemplateSpy.mockResolvedValue({ formSchema: { fields: [] } })
+    listTemplatesSpy.mockClear()
+    listTemplatesSpy.mockResolvedValue({ data: [], total: 0 })
+    mockRouteQuery = {}
 
     container = document.createElement('div')
     document.body.appendChild(container)
@@ -493,6 +505,31 @@ describe('ApprovalCenterView', () => {
     // an unrelated tab's mount either.
     expect(loadPendingSpy).toHaveBeenCalled()
     expect(loadProcessedSpy).not.toHaveBeenCalled()
+  })
+
+  // ---------------------------------------------------------------------------
+  // B3-03 (模板/时间筛选 + 看板钻取): templateId + createdFrom/createdTo — additive filter-bar
+  // params, and the ApprovalMetricsView deep-link pre-fill that lands here.
+  // ---------------------------------------------------------------------------
+  it('B3-03: a 看板钻取 deep link (templateId + createdFrom/createdTo query) pre-fills the filter bar before the first load', async () => {
+    mockRouteQuery = {
+      templateId: 'tpl-88',
+      createdFrom: '2026-05-01T00:00:00Z',
+      createdTo: '2026-06-30T23:59:59Z',
+    }
+    await mountView()
+
+    expect(loadPendingSpy).toHaveBeenCalledWith(expect.objectContaining({
+      templateId: 'tpl-88',
+      createdFrom: '2026-05-01T00:00:00Z',
+      createdTo: '2026-06-30T23:59:59Z',
+    }))
+  })
+
+  it('B3-03: fetches template options for the filter dropdown on mount', async () => {
+    listTemplatesSpy.mockResolvedValue({ data: [{ id: 'tpl-1', name: '采购审批' }], total: 1 })
+    await mountView()
+    expect(listTemplatesSpy).toHaveBeenCalledWith({ pageSize: 200 })
   })
 
   it('renders pending approvals with status tags', async () => {

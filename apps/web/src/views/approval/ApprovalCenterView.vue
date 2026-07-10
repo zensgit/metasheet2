@@ -38,6 +38,39 @@
             <el-option label="平台审批" value="platform" />
             <el-option label="PLM 审批" value="plm" />
           </el-select>
+          <!-- B3-03 (模板/时间筛选): additive filters composing with the existing status/source
+               filters above — templateId + a created-at window, mirroring the backend's own
+               GET /api/approvals query params. Also the landing point for the metrics dashboard's
+               看板钻取 deep links (see ApprovalMetricsView.vue), which pre-fill these two on mount
+               via the route query (see `applyDeepLinkFilters` below). -->
+          <el-select
+            v-model="templateFilter"
+            placeholder="模板筛选"
+            clearable
+            filterable
+            class="approval-center__toolbar-select approval-center__toolbar-select--wide"
+            data-testid="approval-template-filter"
+            @change="handleSearch"
+          >
+            <el-option
+              v-for="tpl in templateOptions"
+              :key="tpl.id"
+              :label="tpl.name"
+              :value="tpl.id"
+            />
+          </el-select>
+          <el-date-picker
+            v-model="createdRange"
+            type="daterange"
+            unlink-panels
+            range-separator="至"
+            start-placeholder="发起开始日期"
+            end-placeholder="发起结束日期"
+            value-format="YYYY-MM-DD"
+            class="approval-center__toolbar-daterange"
+            data-testid="approval-created-range-filter"
+            @change="handleSearch"
+          />
           <el-button
             v-if="canWrite"
             type="primary"
@@ -504,13 +537,13 @@
 
 <script setup lang="ts">
 import { ref, computed, onMounted, watch } from 'vue'
-import { useRouter } from 'vue-router'
+import { useRouter, useRoute } from 'vue-router'
 import { Search } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 import type { UnifiedApprovalDTO, ApprovalStatus } from '../../types/approval'
 import { useApprovalStore } from '../../approvals/store'
 import { useApprovalPermissions } from '../../approvals/permissions'
-import { dispatchAction, getPendingCount, markAllApprovalsRead, remindApproval } from '../../approvals/api'
+import { dispatchAction, getPendingCount, markAllApprovalsRead, remindApproval, listTemplates } from '../../approvals/api'
 import { urgeButtonState } from '../../approvals/urgeButtonState'
 import { runApprovalBatchAction, type ApprovalBatchActionResult } from '../../approvals/useApprovalBatchActions'
 import { useApprovalCountsRealtime, type ApprovalCountsUpdatedPayload } from '../../approvals/useApprovalCountsRealtime'
@@ -526,6 +559,7 @@ import PageShell from '../../components/layout/PageShell.vue'
 import PageHeader from '../../components/layout/PageHeader.vue'
 
 const router = useRouter()
+const route = useRoute()
 const store = useApprovalStore()
 const { canWrite } = useApprovalPermissions()
 
@@ -929,9 +963,19 @@ const statusFilter = ref<ApprovalStatus | ''>('')
 // Wave 2 WP2: source filter driving the `sourceSystem` query param on /api/approvals.
 // Default 'all' surfaces the unified feed; switching narrows to platform or PLM-mirrored rows.
 const sourceSystemFilter = ref<'all' | 'platform' | 'plm'>('all')
+// B3-03 (模板/时间筛选): `templateId` + a created-at window, additive alongside the filters above.
+const templateFilter = ref('')
+const templateOptions = ref<Array<{ id: string; name: string }>>([])
+const createdRange = ref<[string, string] | null>(null)
 const currentPage = ref(1)
 const pageSize = ref(10)
 const attendanceRequestsSection = 'attendance-overview-requests'
+
+// B3-03: `createdRange` holds plain `YYYY-MM-DD` day boundaries from the picker (or a deep link);
+// widen to inclusive day-start/day-end ISO timestamps for the server, the same convention
+// ApprovalMetricsView's own since/until range already uses.
+const createdFromQuery = computed(() => (createdRange.value?.[0] ? `${createdRange.value[0]}T00:00:00Z` : undefined))
+const createdToQuery = computed(() => (createdRange.value?.[1] ? `${createdRange.value[1]}T23:59:59Z` : undefined))
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -953,6 +997,9 @@ function loadCurrentTab() {
     page: currentPage.value,
     pageSize: pageSize.value,
     sourceSystem: sourceSystemFilter.value,
+    templateId: templateFilter.value || undefined,
+    createdFrom: createdFromQuery.value,
+    createdTo: createdToQuery.value,
   }
   switch (activeTab.value) {
     case 'pending': store.loadPending(query); break
@@ -1036,9 +1083,44 @@ function openAttendanceApprovalQueue() {
   })
 }
 
+// B3-03 (看板钻取): ApprovalMetricsView's KPI tiles / per-template rows deep-link here with
+// `?templateId=...&createdFrom=...&createdTo=...`. Pre-fill the filter bar from those query
+// params BEFORE the first load, so the very first request already carries them (matches the
+// "钻取到已过滤好的列表" contract — no extra click needed). `createdFrom`/`createdTo` are full
+// ISO timestamps; the date-range picker only understands day boundaries, so only the date
+// portion is used to repopulate it — the resulting createdFrom/createdTo the picker's own
+// `@change`/query-building path derives are the SAME day-start/day-end convention either way.
+function applyDeepLinkFilters(): void {
+  const rawTemplateId = route.query.templateId
+  if (typeof rawTemplateId === 'string' && rawTemplateId) {
+    templateFilter.value = rawTemplateId
+  }
+  const rawCreatedFrom = route.query.createdFrom
+  const rawCreatedTo = route.query.createdTo
+  const fromDate = typeof rawCreatedFrom === 'string' && rawCreatedFrom ? rawCreatedFrom.slice(0, 10) : ''
+  const toDate = typeof rawCreatedTo === 'string' && rawCreatedTo ? rawCreatedTo.slice(0, 10) : ''
+  if (fromDate && toDate) {
+    createdRange.value = [fromDate, toDate]
+  }
+}
+
+// B2-04-style id→name lookup so the filter dropdown shows readable template names rather than
+// raw ids. Best-effort: a failed fetch just leaves the select empty (no crash, no blocking the
+// rest of the page — mirrors ApprovalMetricsView's own `loadTemplateNames`).
+async function loadTemplateOptions(): Promise<void> {
+  try {
+    const { data } = await listTemplates({ pageSize: 200 })
+    templateOptions.value = data.map((tpl) => ({ id: tpl.id, name: tpl.name }))
+  } catch {
+    templateOptions.value = []
+  }
+}
+
 onMounted(() => {
+  applyDeepLinkFilters()
   // The first load establishes the pill's initial baseline (no delta possible against itself).
   loadCurrentTab()
+  void loadTemplateOptions()
 })
 </script>
 
@@ -1063,6 +1145,16 @@ onMounted(() => {
 
 .approval-center__toolbar-select {
   width: 140px;
+}
+
+/* B3-03: template filter is wider than the fixed-option selects above (template names run
+   longer than status/source enum labels); the date-range picker keeps Element Plus's own width. */
+.approval-center__toolbar-select--wide {
+  width: 180px;
+}
+
+.approval-center__toolbar-daterange {
+  width: 260px;
 }
 
 .approval-center__error {
@@ -1241,6 +1333,7 @@ onMounted(() => {
      media-query rule (declared later in the cascade) overrides it without `!important`. */
   .approval-center__toolbar-search,
   .approval-center__toolbar-select,
+  .approval-center__toolbar-daterange,
   .approval-center__toolbar-button {
     width: 100%;
   }
