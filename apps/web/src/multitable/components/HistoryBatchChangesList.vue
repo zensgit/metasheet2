@@ -11,7 +11,7 @@
     <li v-for="(c, i) in changes" :key="`${c.recordId}-${i}`" class="meta-hist__change" data-test="hist-change">
       <div class="meta-hist__change-summary">
         <span class="meta-hist__change-action" :data-action="c.action">{{ actionLabel(c.action) }}</span>
-        <span class="meta-hist__change-rec" :title="c.recordId">{{ shortRecordId(c.recordId) }}</span>
+        <span class="meta-hist__change-rec" :title="c.recordId" data-test="hist-rec-label">{{ recordDisplay(c) }}</span>
         <span class="meta-hist__change-fields">{{ fieldsLabel(c.changedFieldIds.length) }}</span>
       </div>
       <ul v-if="c.changedFieldIds.length" class="meta-hist__diff" data-test="hist-diff">
@@ -45,11 +45,20 @@
 <script setup lang="ts">
 import { useLocale } from '../../composables/useLocale'
 import { recordLabel } from '../utils/meta-record-labels'
-import type { HistoryChange } from '../types'
+import { formatFieldDisplay, pickRecordTitle } from '../utils/field-display'
+import type { HistoryChange, LinkedRecordSummary, MetaField, PersonSummary } from '../types'
 
 const props = defineProps<{
   changes: HistoryChange[]
-  fields?: Array<{ id: string; name: string }>
+  /** Field metadata for label/type-aware rendering. `type`/`order`/`property` are optional so legacy
+   *  callers that only carry {id,name} keep the plain-text rendering path; typed entries additionally
+   *  unlock record titles (pickRecordTitle) and type-aware diff values (formatFieldDisplay). */
+  fields?: Array<{ id: string; name: string; type?: string; order?: number; property?: Record<string, unknown> }>
+  /** Best-effort display caches, keyed recordId → fieldId → summaries (the grid's already-fetched maps).
+   *  Rows absent from the cache (historical/deleted/off-page records) fall back to formatFieldDisplay's
+   *  own count/id fallbacks — never a fetch, never un-masking. */
+  linkSummaries?: Record<string, Record<string, LinkedRecordSummary[]>>
+  personSummaries?: Record<string, Record<string, PersonSummary[]>>
   /** Reuses the caller's own action-label map (kept as a single source of truth in HistoryCenterModal.vue —
    *  this is prop-drilling, not a shared-module extraction, per the AI-fields S1 design-lock's constraint
    *  on `sourceLabel` NOT applying here since this is a distinct map (per-change action, not source)). */
@@ -64,6 +73,23 @@ function fieldsLabel(n: number): string {
 function shortRecordId(id: string): string {
   const trimmed = id.startsWith('rec_') ? id.slice(4) : id
   return `#${trimmed.slice(0, 8)}`
+}
+
+// Record label: human title when one is derivable from the change's OWN already-masked payload
+// (after = full post-change snapshot; before = prior/pre-delete snapshot — so deleted records title
+// from `before`), else the short record id. Reuses pickRecordTitle (TrashModal's heuristic: first
+// field in column order whose value renders non-empty; masked/unreadable fields render '—' and are
+// skipped) — leak-safe by construction, no fetch, no un-masking, full id stays in the title attr.
+const typedFields = (): MetaField[] =>
+  ((props.fields ?? []).filter((f) => typeof f.type === 'string') as MetaField[])
+function recordDisplay(c: HistoryChange): string {
+  const fields = typedFields()
+  const data = c.after ?? c.before
+  if (fields.length && data) {
+    const title = pickRecordTitle({ fields, data, isZh: isZh.value })
+    if (title) return title
+  }
+  return shortRecordId(c.recordId)
 }
 
 // --- Inline per-field diff (read-only detail expansion) ---
@@ -84,6 +110,22 @@ function formatDiffValue(v: unknown): string {
   }
   return String(v)
 }
+// Type-aware diff value: when the field's metadata (incl. `type`) is available, render through the
+// shared formatFieldDisplay (same renderer as the record drawer's history diffs) — link/person values
+// resolve to display names via the grid's already-fetched summary caches, with formatFieldDisplay's own
+// count/id fallbacks on cache miss (historical/deleted/off-page rows). Fields known only by id/name
+// (e.g. non-active sheets in all-tables mode) keep the legacy plain-text path above.
+function formatDiffValueFor(c: HistoryChange, fieldId: string, v: unknown): string {
+  const f = props.fields?.find((x) => x.id === fieldId)
+  if (!f || typeof f.type !== 'string') return formatDiffValue(v)
+  return formatFieldDisplay({
+    field: f as MetaField,
+    value: v,
+    linkSummaries: props.linkSummaries?.[c.recordId]?.[fieldId] ?? null,
+    personSummaries: props.personSummaries?.[c.recordId]?.[fieldId] ?? null,
+    isZh: isZh.value,
+  })
+}
 // Shape rule (per changed field id):
 //  - present on both sides           → 'changed' (normal before→after diff)
 //  - present only on the after side  → 'set'      (no prior value — e.g. a create, or a field just added)
@@ -98,8 +140,8 @@ function changeFieldDiffs(c: HistoryChange): FieldDiffRow[] {
     return {
       fieldId,
       shape,
-      before: beforeHas ? formatDiffValue((c.before as Record<string, unknown>)[fieldId]) : '',
-      after: afterHas ? formatDiffValue((c.after as Record<string, unknown>)[fieldId]) : '',
+      before: beforeHas ? formatDiffValueFor(c, fieldId, (c.before as Record<string, unknown>)[fieldId]) : '',
+      after: afterHas ? formatDiffValueFor(c, fieldId, (c.after as Record<string, unknown>)[fieldId]) : '',
     }
   })
 }
