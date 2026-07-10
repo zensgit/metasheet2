@@ -285,7 +285,9 @@ async function loadBatches(): Promise<void> {
 }
 
 async function selectBatch(batch: StockPreparationSnapshotBatchSummary): Promise<void> {
-  // Defense-in-depth behind the disabled button: never issue a diff GET for an incomplete batch.
+  // Defense-in-depth (Layer B). Layer A — the row button's `:disabled` binding — is the observable,
+  // tested guard, and today it is the ONLY caller, so this line has no reachable second path. It
+  // exists solely so any future caller also cannot issue a diff GET for an incomplete batch.
   if (batch.incomplete) return
   selectedBatchId.value = batch.snapshotBatchId
   diffLoading.value = true

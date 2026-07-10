@@ -251,16 +251,29 @@ describe('StockPreparationWorkspace shell', () => {
             ok: true,
             data: {
               projectId: 'proj-alpha',
-              batchCount: 1,
+              batchCount: 2,
               batches: [
                 {
                   snapshotBatchId: 'batch-alpha',
-                  snapshotVersion: 1,
+                  snapshotVersion: 2,
                   snapshotStatus: 'active',
                   syncRunId: 'sync-run-alpha',
                   lineCount: 3,
                   createdAtPresent: true,
                   incomplete: false,
+                },
+                {
+                  // incomplete:true through the REAL wire (#4002: zero lines / run row absent), so
+                  // the badge + disabled-diff rendering is proven end-to-end (apiFetch →
+                  // parseIntegrationResponse → real service module → view), not only via the
+                  // mocked-service view spec.
+                  snapshotBatchId: 'batch-beta',
+                  snapshotVersion: 1,
+                  snapshotStatus: 'superseded',
+                  syncRunId: null,
+                  lineCount: 0,
+                  createdAtPresent: true,
+                  incomplete: true,
                 },
               ],
             },
@@ -294,6 +307,16 @@ describe('StockPreparationWorkspace shell', () => {
     expect(batchListCalls.length).toBe(1)
     expect(batchListCalls[0]).toContain('projectId=proj-alpha')
     expect(root.querySelector('[data-testid="stock-prep-snapshot-overview"]')).not.toBeNull()
+
+    // NIT-1: close the incomplete wire→render loop — the REAL apiFetch fixture carries an
+    // incomplete:true batch, and exactly that row materializes the badge + disabled diff entry.
+    const incompleteBadges = root.querySelectorAll('[data-testid="stock-prep-snapshot-incomplete-badge"]')
+    expect(incompleteBadges.length).toBe(1)
+    expect(incompleteBadges[0].textContent).toContain('不完整')
+    const diffButtons = root.querySelectorAll('[data-testid="stock-prep-snapshot-batch-select"]')
+    expect(diffButtons.length).toBe(2)
+    expect((diffButtons[0] as HTMLButtonElement).disabled).toBe(false)
+    expect((diffButtons[1] as HTMLButtonElement).disabled).toBe(true)
 
     // The handle is mirrored into the route query (replace, not push) for reload/deep-link parity…
     expect(h.router.replace).toHaveBeenCalledWith(
