@@ -627,6 +627,26 @@ describe('adminDirectoryRouter', () => {
     expect(directoryMocks.previewDirectorySyncIntegration).not.toHaveBeenCalled()
   })
 
+  // R3: previewing while a real sync holds the lease doubles the shared DingTalk API quota
+  // the lease exists to bound. Same benign "already running" state as the sync-trigger
+  // branches above — mapped identically (409 + activeRunId, never a 500 that pages on-call).
+  it('maps a lease conflict to 409 with the active runId on the preview path', async () => {
+    directoryMocks.previewDirectorySyncIntegration.mockRejectedValue(new DirectorySyncInProgressError('run-live-3'))
+
+    const response = await invokeRoute('post', '/integrations/:integrationId/sync/preview', {
+      params: { integrationId: 'dir-1' },
+      user: { id: 'admin-1', role: 'admin' },
+    })
+
+    expect(response.statusCode).toBe(409)
+    expect(response.body).toMatchObject({
+      ok: false,
+      error: { code: 'DIRECTORY_SYNC_IN_PROGRESS', details: { activeRunId: 'run-live-3' } },
+    })
+    // The load-bearing property: a refused preview never falls through to the sync path.
+    expect(directoryMocks.syncDirectoryIntegration).not.toHaveBeenCalled()
+  })
+
   it('tests a saved integration by forwarding the integrationId and payload to the directory service', async () => {
     directoryMocks.testDirectoryIntegration.mockResolvedValue({
       corpId: 'dingcorp',
