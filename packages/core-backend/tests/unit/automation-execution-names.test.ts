@@ -2,23 +2,44 @@
  * B3-11 — batched ruleName/sheetName resolution for the automation-execution
  * monitoring list. Pure-function tests against a fake kysely-shaped `db` (no
  * real Postgres): verifies the batching (2 queries max, empty id sets skip
- * their query), and — load-bearing — the honest degrade-to-id fallback when a
- * rule/sheet was DELETED (its id is simply absent from the DB rows) or the
- * execution never had a sheetId at all.
+ * their query), that the sheet lookup targets `meta_sheets` (automation's
+ * `sheetId` is a meta_sheets id — NOT the legacy `sheets`/Univer-grid table;
+ * see `loaders.ts#loadSheetRow` and `automation-executor.ts`'s own
+ * `FROM meta_sheets` cross-base lookup), and — load-bearing — the honest
+ * degrade-to-id fallback when a rule/sheet was DELETED (hard-deleted: no row
+ * at all; OR soft-deleted: `deleted_at IS NOT NULL`) or the execution never
+ * had a sheetId at all.
  */
 import { describe, it, expect, vi } from 'vitest'
 import { executionDisplayNames, resolveExecutionNameMaps } from '../../src/multitable/automation-execution-names'
 
-type FakeRow = { id: string; name: string | null }
+type FakeRow = { id: string; name: string | null; deletedAt?: string | null }
 
-/** A minimal fake kysely `db` — only the chain shape resolveExecutionNameMaps calls. */
+/**
+ * A minimal fake kysely `db` — supports the chain shape resolveExecutionNameMaps
+ * calls: `selectFrom(table).select([...]).where('id','in',ids)` for rules, and an
+ * ADDITIONAL chained `.where('deleted_at','is',null)` for meta_sheets (mirrors the
+ * real soft-delete filter). Each `.where()` call narrows the in-flight row set.
+ */
 function makeFakeDb(tableRows: Record<string, FakeRow[]>) {
   const selectFrom = vi.fn((table: string) => {
-    const rows = tableRows[table] ?? []
-    const where = vi.fn((_col: string, _op: string, ids: string[]) => ({
-      execute: vi.fn(async () => rows.filter((r) => ids.includes(r.id))),
-    }))
-    return { select: vi.fn(() => ({ where })) }
+    const allRows = tableRows[table] ?? []
+    function makeQuery(rows: FakeRow[]) {
+      return {
+        where: vi.fn((col: string, op: string, value: unknown) => {
+          let next = rows
+          if (col === 'id' && op === 'in') {
+            const ids = value as string[]
+            next = next.filter((r) => ids.includes(r.id))
+          } else if (col === 'deleted_at' && op === 'is' && value === null) {
+            next = next.filter((r) => r.deletedAt == null)
+          }
+          return makeQuery(next)
+        }),
+        execute: vi.fn(async () => rows.map((r) => ({ id: r.id, name: r.name }))),
+      }
+    }
+    return { select: vi.fn(() => makeQuery(allRows)) }
   })
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   return { selectFrom } as any
@@ -31,20 +52,22 @@ describe('resolveExecutionNameMaps', () => {
         { id: 'rule-1', name: 'Notify Customers' },
         { id: 'rule-2', name: 'Archive Old Records' },
       ],
-      sheets: [{ id: 'sheet-a', name: 'Orders' }],
+      meta_sheets: [{ id: 'sheet-a', name: 'Orders' }],
     })
     const maps = await resolveExecutionNameMaps(db, ['rule-1', 'rule-1', 'rule-2'], ['sheet-a', 'sheet-a'])
     // selectFrom called exactly once per table, regardless of how many executions reference it
     expect(db.selectFrom).toHaveBeenCalledTimes(2)
     expect(db.selectFrom).toHaveBeenCalledWith('automation_rules')
-    expect(db.selectFrom).toHaveBeenCalledWith('sheets')
+    // automation's sheetId is a meta_sheets id — NOT the legacy `sheets` (Univer-grid) table.
+    expect(db.selectFrom).toHaveBeenCalledWith('meta_sheets')
+    expect(db.selectFrom).not.toHaveBeenCalledWith('sheets')
     expect(maps.ruleNames.get('rule-1')).toBe('Notify Customers')
     expect(maps.ruleNames.get('rule-2')).toBe('Archive Old Records')
     expect(maps.sheetNames.get('sheet-a')).toBe('Orders')
   })
 
   it('skips a table query entirely when its id set is empty (e.g. every execution is sheet-less)', async () => {
-    const db = makeFakeDb({ automation_rules: [{ id: 'rule-1', name: 'Notify' }], sheets: [] })
+    const db = makeFakeDb({ automation_rules: [{ id: 'rule-1', name: 'Notify' }], meta_sheets: [] })
     const maps = await resolveExecutionNameMaps(db, ['rule-1'], [null, undefined])
     expect(db.selectFrom).toHaveBeenCalledTimes(1)
     expect(db.selectFrom).toHaveBeenCalledWith('automation_rules')
@@ -52,16 +75,25 @@ describe('resolveExecutionNameMaps', () => {
   })
 
   it('a rule with a NULL name (schema allows it) is absent from the map, not mapped to null', async () => {
-    const db = makeFakeDb({ automation_rules: [{ id: 'rule-1', name: null }], sheets: [] })
+    const db = makeFakeDb({ automation_rules: [{ id: 'rule-1', name: null }], meta_sheets: [] })
     const maps = await resolveExecutionNameMaps(db, ['rule-1'], [])
     expect(maps.ruleNames.has('rule-1')).toBe(false)
   })
 
-  it('a DELETED rule/sheet (no matching row at all) is absent from the map', async () => {
-    const db = makeFakeDb({ automation_rules: [], sheets: [] })
+  it('a HARD-DELETED rule/sheet (no matching row at all) is absent from the map', async () => {
+    const db = makeFakeDb({ automation_rules: [], meta_sheets: [] })
     const maps = await resolveExecutionNameMaps(db, ['rule-deleted'], ['sheet-deleted'])
     expect(maps.ruleNames.has('rule-deleted')).toBe(false)
     expect(maps.sheetNames.has('sheet-deleted')).toBe(false)
+  })
+
+  it('a SOFT-DELETED sheet (row exists but deleted_at IS NOT NULL) is excluded from the map', async () => {
+    const db = makeFakeDb({
+      automation_rules: [],
+      meta_sheets: [{ id: 'sheet-soft-deleted', name: 'Old Orders', deletedAt: '2026-01-01T00:00:00.000Z' }],
+    })
+    const maps = await resolveExecutionNameMaps(db, [], ['sheet-soft-deleted'])
+    expect(maps.sheetNames.has('sheet-soft-deleted')).toBe(false)
   })
 })
 

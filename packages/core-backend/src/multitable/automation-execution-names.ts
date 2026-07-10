@@ -5,10 +5,18 @@
  * Purely additive: it only ADDS a display label alongside the existing bare
  * `ruleId`/`sheetId`; it never mutates an execution row or gates a read on the
  * lookup succeeding. Two batched queries (never N+1 per row) resolve the CURRENT
- * `automation_rules.name` / `sheets.name` for the set of ids referenced by a
- * page of executions. A rule/sheet that was DELETED (or an automation_rules row
- * with a null `name`) is simply ABSENT from the returned map — callers degrade
- * to the raw id, never throw.
+ * `automation_rules.name` / `meta_sheets.name` for the set of ids referenced by
+ * a page of executions. A rule/sheet that was DELETED (or an automation_rules
+ * row with a null `name`) is simply ABSENT from the returned map — callers
+ * degrade to the raw id, never throw.
+ *
+ * NOTE: automation's `sheetId` is a `meta_sheets` id, NOT the legacy `sheets`
+ * table (Univer-grid spreadsheets) — mirrors the existing canonical resolver
+ * `loadSheetRow` in `./loaders.ts` (`SELECT ... FROM meta_sheets WHERE id = $1
+ * AND deleted_at IS NULL`) and `automation-executor.ts`'s own
+ * `SELECT base_id FROM meta_sheets WHERE id = $1 AND deleted_at IS NULL`
+ * cross-base lookup. A soft-deleted (`deleted_at IS NOT NULL`) sheet is
+ * excluded — same "gone" treatment as a hard-deleted row (raw-id fallback).
  */
 import type { Kysely } from 'kysely'
 import type { Database } from '../db/types'
@@ -40,7 +48,12 @@ export async function resolveExecutionNameMaps(
       ? db.selectFrom('automation_rules').select(['id', 'name']).where('id', 'in', uniqueRuleIds).execute()
       : Promise.resolve([]),
     uniqueSheetIds.length
-      ? db.selectFrom('sheets').select(['id', 'name']).where('id', 'in', uniqueSheetIds).execute()
+      ? db
+          .selectFrom('meta_sheets')
+          .select(['id', 'name'])
+          .where('id', 'in', uniqueSheetIds)
+          .where('deleted_at', 'is', null)
+          .execute()
       : Promise.resolve([]),
   ])
 
