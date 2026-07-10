@@ -196,6 +196,32 @@ describe('dingtalk work notification client', () => {
     )).rejects.toThrow('template unpublished')
   })
 
+  it('B-2 fails closed on top-level success=false even when nested delivery looks successful', async () => {
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({
+      success: false,
+      message: 'create-and-deliver rejected',
+      result: {
+        outTrackId: 'delivery-1',
+        deliverResults: [{ success: true, carrierId: 'misleading-carrier' }],
+      },
+    }), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    await expect(sendDingTalkInteractiveApprovalCard(
+      'app-access-token',
+      {
+        userId: 'dt-user-1',
+        robotCode: 'ding-app-key',
+        cardTemplateId: 'template-1',
+        outTrackId: 'delivery-1',
+        title: '审批待办',
+        nodeName: '审批',
+        statusText: '等待你处理',
+        rejectUrl: 'https://ms.example.test/m/approval-decision?d=delivery-1&t=token',
+      },
+    )).rejects.toThrow('create-and-deliver rejected')
+  })
+
   it('B-2 fails closed when create-and-deliver omits delivery results', async () => {
     const fetchMock = vi.fn(async () => new Response(JSON.stringify({
       success: true,

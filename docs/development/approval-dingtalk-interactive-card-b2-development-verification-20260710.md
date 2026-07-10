@@ -43,7 +43,7 @@ The B-1 review left three non-blocking tails. They are closed here before a real
 ## 4. Verification
 
 - Backend type-check: `tsc --noEmit` clean.
-- Unit: `dingtalk-interactive-card-stream.test.ts` + `dingtalk-work-notification.test.ts`, 16/16.
+- Unit: `dingtalk-interactive-card-stream.test.ts` + `dingtalk-work-notification.test.ts`, 17/17.
 - Real DB: `automation-dingtalk-approval-card-action.test.ts`, 10/10 on an ephemeral database
   migrated with the same exclusion list as `plugin-tests.yml`.
 - Mutation proof: forcing the runtime branch back to the OA path makes the focused B-2 real-DB
@@ -64,3 +64,13 @@ stores the provider carrier id, retains `integration_id`, and emits no instance 
 
 The next slice must wire the official Stream SDK, accept only the ratified approve callback shape,
 and call `executeApprovalActionFromCardDelivery` without introducing a parallel approval path.
+
+## 6. Adversarial review follow-ups
+
+The independent review approved B-2 with no P1. Its one P2 test gap is closed here: a response with
+top-level `success=false` and a misleading successful nested delivery must reject, so the top-level
+guard cannot be deleted while the suite remains green.
+
+Non-blocking follow-ups remain assigned to the next owning slice or UAT: shutdown-vs-initialize
+worker concurrency, an explicit single-corp Stream-env boundary note, an executor-level partial-config
+golden, and live confirmation of the lower-case `im_robot` space shape against DingTalk.
