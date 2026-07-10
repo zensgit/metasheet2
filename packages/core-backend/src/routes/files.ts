@@ -350,7 +350,7 @@ export function filesRouter(): Router {
         : await sql<FilesListRow>`
             SELECT id, url, owner_id, meta, created_at
             FROM files
-            WHERE deleted_at IS NULL AND owner_id = ${callerId}
+            WHERE deleted_at IS NULL AND owner_id = ${callerId} AND owner_id <> 'anonymous'
             ORDER BY created_at DESC
             LIMIT ${limit} OFFSET ${offset}
           `.execute(db)

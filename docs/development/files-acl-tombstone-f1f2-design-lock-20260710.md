@@ -101,9 +101,10 @@ authorization quoted above.
      stringifies a numeric `id` claim (functionally identical after the TEXT-column round-trip).
    - `isFilesRequestAdmin(req)` — `hasLegacyAdminClaim(req) || await isRbacAdmin(userId)`. The
      legacy-claim check (`role === 'admin'` / `roles.includes('admin')` / `perms` includes
-     `'*:*'`/`'admin:all'`) is a byte-identical local copy of the pattern used by
-     `routes/admin-users.ts`'s `ensurePlatformAdmin`/`hasLegacyAdminClaim` and `routes/events.ts`'s
-     inline router-level gate; `isRbacAdmin` is `rbac/service.ts`'s exported `isAdmin` (same import
+     `'*:*'`/`'admin:all'`) is a byte-identical local copy of the authoritative
+     `routes/admin-users.ts` `ensurePlatformAdmin`/`hasLegacyAdminClaim` pattern (review NIT-2
+     precision: `routes/events.ts`'s inline gate is a looser sibling, NOT the copied source — this
+     file follows the stricter admin-users.ts shape); `isRbacAdmin` is `rbac/service.ts`'s exported `isAdmin` (same import
      used by `routes/permissions.ts`, `routes/events.ts`). Neither `admin-users.ts` nor `events.ts`
      exports its own copy of the claim check, so this file keeps its own too — matching the existing
      convention rather than introducing a new shared export.
