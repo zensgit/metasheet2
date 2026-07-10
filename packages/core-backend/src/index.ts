@@ -170,6 +170,7 @@ import { createMultitableButtonRoutes } from './routes/multitable-button'
 import { apiTokensRouter } from './routes/api-tokens'
 import { SnapshotService } from './services/SnapshotService'
 import { MetricsStreamService } from './services/MetricsStreamService'
+import { DingTalkInteractiveCardStreamWorker } from './integrations/dingtalk/interactive-card-stream'
 import { notificationService } from './services/NotificationService'
 import { AfterSalesApprovalBridgeService } from './services/AfterSalesApprovalBridgeService'
 import {
@@ -257,6 +258,7 @@ export class MetaSheetServer {
   private disableWorkflow = process.env.DISABLE_WORKFLOW === 'true'
   private disableEventBus = process.env.DISABLE_EVENT_BUS === 'true'
   private metricsStreamService?: MetricsStreamService
+  private dingtalkInteractiveCardStreamWorker?: DingTalkInteractiveCardStreamWorker
   
   // IoC Container
   private injector: Injector
@@ -1868,6 +1870,15 @@ export class MetaSheetServer {
       )
     }
 
+    // 0c. Shut down optional DingTalk interactive-card Stream worker
+    if (this.dingtalkInteractiveCardStreamWorker) {
+      shutdownTasks.push(
+        this.dingtalkInteractiveCardStreamWorker.shutdown().catch((err) => {
+          this.logger.warn(`DingTalk interactive-card Stream shutdown error: ${err instanceof Error ? err.message : String(err)}`)
+        }) as Promise<void>,
+      )
+    }
+
     // 1. Close HTTP server
     shutdownTasks.push(new Promise<void>((resolve) => {
       try {
@@ -2644,6 +2655,14 @@ export class MetaSheetServer {
       this.metricsStreamService.initialize(this.httpServer)
     } catch (e) {
       this.logger.error('Failed to initialize MetricsStreamService', e as Error)
+    }
+
+    // Initialize optional DingTalk interactive-card Stream worker (B-1 skeleton; default disabled).
+    try {
+      this.dingtalkInteractiveCardStreamWorker = new DingTalkInteractiveCardStreamWorker()
+      await this.dingtalkInteractiveCardStreamWorker.initialize()
+    } catch (e) {
+      this.logger.error('Failed to initialize DingTalkInteractiveCardStreamWorker', e as Error)
     }
 
     this.installGlobalErrorHandler()

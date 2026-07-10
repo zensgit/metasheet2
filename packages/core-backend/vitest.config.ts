@@ -31,6 +31,12 @@ export default defineConfig({
       // INSERT when the bind throws after it. DATABASE_URL-gated; excluded here so the no-DB job
       // cannot skip-green it, and wired as a WHOLE FILE into the approval real-DB step.
       'tests/integration/directory-sync-admission-orphan-guard.db.test.ts',
+      // P2-1 (post-#3972 review): proves the create-time email existence check is
+      // case-insensitive and that batchAdmitDirectoryAccountUsers enforces server-side
+      // eligibility (no duplicate `users` row for a differently-cased email; no silent
+      // re-admission of an already-linked account). DATABASE_URL-gated; excluded here so the
+      // no-DB job cannot skip-green it, and wired as a WHOLE FILE into the approval real-DB step.
+      'tests/integration/directory-admission-case-insensitive-uniqueness.db.test.ts',
       'tests/integration/approval-manager-chain.db.test.ts',
       'tests/integration/approval-requester-department.db.test.ts',
       'tests/integration/approval-requester-title.db.test.ts',
@@ -78,6 +84,10 @@ export default defineConfig({
       'tests/integration/automation-approval-task-created-trigger.test.ts',
       // A-2b approval-card action chain: DATABASE_URL-gated. Same two-point wiring (no skip-green).
       'tests/integration/automation-dingtalk-approval-card-action.test.ts',
+      // DT-OPS-04 per-corp credential scoping: DATABASE_URL-gated. It deliberately UNSETS the
+      // DingTalk env vars (the env-first short-circuit is what hid the bug), so it must never run
+      // in the no-DB job. Wired as a WHOLE FILE into the multitable real-DB step.
+      'tests/integration/dingtalk-person-message-integration-scoping.db.test.ts',
       // A-4 card-delivery wrapper: DATABASE_URL-gated. Same two-point wiring (no skip-green).
       'tests/integration/approval-card-delivery-wrapper.db.test.ts',
       // DT-HARDEN-07 primary-department write → approval-routing golden: DATABASE_URL-gated

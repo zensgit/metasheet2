@@ -72,6 +72,14 @@ const ROUTES = [
   ['GET', '/api/integration/stock-preparation/mvp/readiness', 'stockPreparationMvpReadiness'],
   ['POST', '/api/integration/stock-preparation/mvp/ensure', 'stockPreparationMvpEnsure'],
   ['POST', '/api/integration/stock-preparation/mvp/options/sync', 'stockPreparationMvpOptionsSync'],
+  ['POST', '/api/integration/stock-preparation/mvp/sync/plan', 'stockPreparationMvpSyncPlan'],
+  // #3751 MVP: COMMIT a previewed sync-run plan — persist its rows into the 9 internal MVP tables
+  // (internal-only via target-scoped records API, idempotent, immutable, admin-gated, values-free).
+  ['POST', '/api/integration/stock-preparation/mvp/sync/persist', 'stockPreparationMvpSyncPersist'],
+  // #3751 MVP view 2: readonly snapshot-batch LIST + DIFF reads (queryRecords-only, admin-gated,
+  // values-free). List is exact-path; diff carries the batch id in the path.
+  ['GET', '/api/integration/stock-preparation/snapshot-batches', 'stockPreparationSnapshotBatchList'],
+  ['GET', '/api/integration/stock-preparation/snapshot-batches/:snapshotBatchId/diff', 'stockPreparationSnapshotDiff'],
   // FOS-2: generic field-option-sync (preset-driven). Stock-prep route above is a compat alias.
   ['POST', '/api/integration/field-options/sync', 'fieldOptionsSync'],
   ['GET', '/api/integration/templates', 'templatesList'],
@@ -236,6 +244,21 @@ const {
   ensureStockPreparationMvpTargets,
   syncStockPreparationMvpOptions,
 } = require('./stock-preparation-mvp-provisioning.cjs')
+// #3751 MVP: readonly BOM-snapshot sync-RUN PLAN orchestrator. Pure/deterministic; composes the landed
+// mapper + diff engines into a values-free plan (batch + lines + run + diff + flags). Persists nothing,
+// admin-gated, no external/PLM/K3 write path.
+const { planBomSnapshotSyncRun } = require('./stock-preparation-sync-run-plan.cjs')
+// #3751 MVP: COMMIT step for a previewed sync-run plan. Recomputes the deterministic plan and persists
+// its batch + line + run rows into the internal MVP tables via a target-scoped records API — the FIRST
+// business-row write. Internal-only (structural), idempotent, immutable, admin-gated, values-free.
+const { persistStockPreparationSyncRun } = require('./stock-preparation-sync-run-persist.cjs')
+// #3751 MVP view 2: READONLY snapshot-batch LIST + DIFF read endpoints. queryRecords-only; admin-gated;
+// values-free; TWO-project split (staging locator via resolveIntegrationStagingProjectId vs business
+// project row filter). Persists nothing, no external / PLM / K3 write path.
+const {
+  listSnapshotBatches,
+  getSnapshotDiff,
+} = require('./stock-preparation-snapshot-reads.cjs')
 // FOS-4: canonical stock-prep objectId — readiness is bound per TARGET, so any preset targeting this
 // table (v1 replace + the disable-missing prove-the-path preset) reuses the canonical readiness check.
 const { STOCK_PREPARATION_MAIN_TABLE_TEMPLATE } = require('./stock-preparation-templates.cjs')
@@ -543,6 +566,30 @@ const VALID_STOCK_PREPARATION_MVP_OPTION_SYNC_REQUEST_KEYS = new Set([
   'optionSets',
   'optionSources',
   'configInfo',
+])
+// #3751 MVP: closed allowlist for the readonly sync-RUN PLAN route. Carries the readonly plan inputs
+// only — an already-produced expansion result + optional prior batch/lines + plan ids/version/source.
+// NEVER a credential, sheetId, or SQL. `projectId` here is the PLM business project id (preserved
+// verbatim into the plan row), not a workspace sheet id.
+const VALID_STOCK_PREPARATION_MVP_SYNC_PLAN_REQUEST_KEYS = new Set([
+  'projectId',
+  'syncRunId',
+  'snapshotBatchId',
+  'snapshotVersion',
+  'sourceSystem',
+  'expansionResult',
+  'previousSnapshotBatchId',
+  'previousLines',
+  'readPlan',
+  'defaultDesignUnit',
+])
+// #3751 MVP view 2: closed query allowlist for the readonly snapshot-batch LIST + DIFF reads. Only the
+// tenant/workspace scope + the (business) projectId; the batch id rides the DIFF route PATH, never the
+// query. Never a sheetId / credential / SQL.
+const VALID_STOCK_PREPARATION_SNAPSHOT_READ_QUERY_KEYS = new Set([
+  'tenantId',
+  'workspaceId',
+  'projectId',
 ])
 // FOS-2: generic field-option-sync request — closed allowlist. Operator names a preset (FOS-1
 // catalog) + supplies option sets keyed by the preset's source keys. No sheetId / credentials.
@@ -852,6 +899,113 @@ function stockPreparationMvpOptionSyncInput(req, rawInput = {}) {
     projectId,
     objectIds: input.objectIds,
     optionSets: input.optionSets,
+  }
+}
+
+// #3751 MVP: parse the readonly sync-RUN PLAN body against a CLOSED allowlist. Deep validation of the
+// plan inputs lives in the orchestrator; this only rejects unknown fields and passes the readonly plan
+// inputs through. `projectId` is NOT rewritten to a staging sheet id — it is the PLM business project
+// id and must reach the plan row verbatim.
+function stockPreparationMvpSyncPlanInput(rawInput = {}) {
+  if (!isPlainObject(rawInput)) {
+    throw new HttpRouteError(400, 'STOCK_PREPARATION_MVP_SYNC_PLAN_REQUEST_INVALID', 'request must be an object')
+  }
+  for (const key of Object.keys(rawInput)) {
+    if (!VALID_STOCK_PREPARATION_MVP_SYNC_PLAN_REQUEST_KEYS.has(key)) {
+      throw new HttpRouteError(400, 'STOCK_PREPARATION_MVP_SYNC_PLAN_REQUEST_INVALID', `unsupported request field: ${key}`, { field: key })
+    }
+  }
+  return {
+    projectId: rawInput.projectId,
+    syncRunId: rawInput.syncRunId,
+    snapshotBatchId: rawInput.snapshotBatchId,
+    snapshotVersion: rawInput.snapshotVersion,
+    sourceSystem: rawInput.sourceSystem,
+    expansionResult: rawInput.expansionResult,
+    previousSnapshotBatchId: rawInput.previousSnapshotBatchId,
+    previousLines: rawInput.previousLines,
+    readPlan: rawInput.readPlan,
+    defaultDesignUnit: rawInput.defaultDesignUnit,
+  }
+}
+
+// #3751 MVP: the COMMIT request allowlist is IDENTICAL to the sync-plan allowlist (same body the admin
+// previewed with /plan is replayed to /persist). Reuse the frozen key set; a persist-specific error code.
+function stockPreparationMvpSyncPersistInput(rawInput = {}) {
+  if (!isPlainObject(rawInput)) {
+    throw new HttpRouteError(400, 'STOCK_PREPARATION_MVP_SYNC_PERSIST_REQUEST_INVALID', 'request must be an object')
+  }
+  for (const key of Object.keys(rawInput)) {
+    if (!VALID_STOCK_PREPARATION_MVP_SYNC_PLAN_REQUEST_KEYS.has(key)) {
+      throw new HttpRouteError(400, 'STOCK_PREPARATION_MVP_SYNC_PERSIST_REQUEST_INVALID', `unsupported request field: ${key}`, { field: key })
+    }
+  }
+  return {
+    projectId: rawInput.projectId,
+    syncRunId: rawInput.syncRunId,
+    snapshotBatchId: rawInput.snapshotBatchId,
+    snapshotVersion: rawInput.snapshotVersion,
+    sourceSystem: rawInput.sourceSystem,
+    expansionResult: rawInput.expansionResult,
+    previousSnapshotBatchId: rawInput.previousSnapshotBatchId,
+    previousLines: rawInput.previousLines,
+    readPlan: rawInput.readPlan,
+    defaultDesignUnit: rawInput.defaultDesignUnit,
+  }
+}
+
+// #3751 MVP view 2: parse the readonly snapshot-read query against the CLOSED allowlist. Rejects any
+// unknown query field; returns only the tenant/workspace scope + the raw (business) projectId.
+function normalizeStockPreparationSnapshotReadQuery(input = {}, code) {
+  if (!isPlainObject(input)) {
+    throw new HttpRouteError(400, code, 'request must be an object')
+  }
+  for (const key of Object.keys(input)) {
+    if (!VALID_STOCK_PREPARATION_SNAPSHOT_READ_QUERY_KEYS.has(key)) {
+      throw new HttpRouteError(400, code, `unsupported request field: ${key}`, { field: key })
+    }
+  }
+  return {
+    tenantId: firstString(input.tenantId),
+    workspaceId: firstString(input.workspaceId),
+    projectId: firstString(input.projectId),
+  }
+}
+
+// LIST: `projectId` is the PLM business project (REQUIRED — it filters + is echoed). `targetProjectId`
+// is the STAGING locator the MVP tables were provisioned under, derived from the auth tenant (never
+// request-sourced) via the same resolveIntegrationStagingProjectId the ensure/readiness routes use.
+function stockPreparationSnapshotBatchListInput(req, rawQuery = {}) {
+  const input = normalizeStockPreparationSnapshotReadQuery(rawQuery, 'STOCK_PREPARATION_SNAPSHOT_BATCH_LIST_REQUEST_INVALID')
+  const tenantId = resolveTenantId(req, input)
+  const businessProjectId = input.projectId
+  if (!businessProjectId) {
+    throw new HttpRouteError(400, 'STOCK_PREPARATION_SNAPSHOT_BATCH_LIST_REQUEST_INVALID', 'projectId is required', { field: 'projectId' })
+  }
+  return {
+    tenantId,
+    workspaceId: input.workspaceId,
+    businessProjectId,
+    targetProjectId: resolveIntegrationStagingProjectId(tenantId, businessProjectId),
+  }
+}
+
+// DIFF: the batch id rides the PATH. `projectId` query is OPTIONAL (the FE diff call sends none — the
+// business project is read from the batch row server-side); `targetProjectId` is the STAGING locator
+// derived from the auth tenant.
+function stockPreparationSnapshotDiffInput(req, rawQuery = {}) {
+  const input = normalizeStockPreparationSnapshotReadQuery(rawQuery, 'STOCK_PREPARATION_SNAPSHOT_DIFF_REQUEST_INVALID')
+  const tenantId = resolveTenantId(req, input)
+  const snapshotBatchId = firstString(requestParams(req).snapshotBatchId)
+  if (!snapshotBatchId) {
+    throw new HttpRouteError(400, 'STOCK_PREPARATION_SNAPSHOT_DIFF_REQUEST_INVALID', 'snapshotBatchId is required', { field: 'snapshotBatchId' })
+  }
+  return {
+    tenantId,
+    workspaceId: input.workspaceId,
+    businessProjectId: input.projectId,
+    snapshotBatchId,
+    targetProjectId: resolveIntegrationStagingProjectId(tenantId, input.projectId),
   }
 }
 
@@ -1715,6 +1869,19 @@ function createHandlers(services, options = {}) {
       throw new HttpRouteError(501, 'TABLE_ACTION_RECORDS_API_UNAVAILABLE', 'multitable records API is not available')
     }
     return records
+  }
+
+  // #3751 MVP: multitable provisioning accessor for the sync-run PERSIST route (findObjectSheet resolves
+  // each MVP objectId -> sheetId). Same dep the MVP readiness/ensure paths use (context.api.multitable
+  // .provisioning); we only need findObjectSheet here (persist never creates a sheet).
+  function getMultitableProvisioning() {
+    const provisioning = context && context.api && context.api.multitable && context.api.multitable.provisioning
+    if (!provisioning || typeof provisioning.findObjectSheet !== 'function') {
+      throw new HttpRouteError(503, 'STOCK_PREPARATION_MVP_PROVISIONING_API_UNAVAILABLE', 'multitable provisioning API is not available', {
+        requiredMethods: ['findObjectSheet'],
+      })
+    }
+    return provisioning
   }
 
   // FOS-2: scoped multitable provisioning API for the generic field-option-sync route. Same dep the
@@ -3047,6 +3214,109 @@ function createHandlers(services, options = {}) {
         permission: 'admin',
         objectIds: input.objectIds,
         optionSets: input.optionSets,
+      })
+      return sendOk(res, result)
+    },
+
+    // #3751 MVP: readonly BOM-snapshot sync-RUN PLAN. Admin-gated; composes the landed mapper + diff
+    // engines into a values-free plan (batch + lines + run + diff + flags) from an already-produced
+    // expansion result + optional prior batch. Persists NOTHING and touches NO records / write API —
+    // structurally read-only. Returns 200 with the computed plan + values-free evidence.
+    async stockPreparationMvpSyncPlan(req, res) {
+      requireAccess(req, 'admin')
+      const input = stockPreparationMvpSyncPlanInput(requestBody(req))
+      const result = planBomSnapshotSyncRun({
+        permission: 'admin',
+        projectId: input.projectId,
+        syncRunId: input.syncRunId,
+        snapshotBatchId: input.snapshotBatchId,
+        snapshotVersion: input.snapshotVersion,
+        sourceSystem: input.sourceSystem,
+        expansionResult: input.expansionResult,
+        previousSnapshotBatchId: input.previousSnapshotBatchId,
+        previousLines: input.previousLines,
+        readPlan: input.readPlan,
+        defaultDesignUnit: input.defaultDesignUnit,
+      })
+      return sendOk(res, result)
+    },
+
+    // #3751 MVP: COMMIT a previewed BOM-snapshot sync-run PLAN — the FIRST slice that writes business
+    // rows. Admin-gated; recomputes the SAME deterministic plan the admin previewed with /plan, then
+    // persists the batch + line + run rows into the internal MVP tables through a TARGET-SCOPED records
+    // API (createTargetScopedRecordsApi) bound to each resolved MVP sheet, so a write can never leave an
+    // MVP sheet. Idempotent (an existing snapshotBatchId skips the whole commit) + immutable (createRecord
+    // only; old snapshots are never overwritten). Values-free evidence. 201 when it actually created,
+    // else 200 (skipped an already-persisted batch).
+    async stockPreparationMvpSyncPersist(req, res) {
+      requireAccess(req, 'admin')
+      const input = stockPreparationMvpSyncPersistInput(requestBody(req))
+      // The MVP tables were provisioned under the INTERNAL staging project (the same derivation the
+      // readiness/ensure routes use); the business `projectId` stays on the plan rows. Derive the staging
+      // targetProjectId server-side from the auth tenant — never from the request body.
+      const tenantId = resolveTenantId(req, input)
+      const targetProjectId = resolveIntegrationStagingProjectId(tenantId, input.projectId)
+      const result = await persistStockPreparationSyncRun({
+        context,
+        permission: 'admin',
+        recordsApi: getMultitableRecordsApi(),
+        provisioning: getMultitableProvisioning(),
+        targetProjectId,
+        projectId: input.projectId,
+        syncRunId: input.syncRunId,
+        snapshotBatchId: input.snapshotBatchId,
+        snapshotVersion: input.snapshotVersion,
+        sourceSystem: input.sourceSystem,
+        expansionResult: input.expansionResult,
+        previousSnapshotBatchId: input.previousSnapshotBatchId,
+        previousLines: input.previousLines,
+        readPlan: input.readPlan,
+        defaultDesignUnit: input.defaultDesignUnit,
+      })
+      return sendOk(res, result, result.persisted ? 201 : 200)
+    },
+
+    // #3751 MVP view 2: readonly LIST of the immutable BOM snapshot batches for a business project.
+    // Admin-gated; queryRecords-only (never a write); values-free. Uses the TWO-project split:
+    // findObjectSheet under the STAGING targetProjectId, row filter by the business projectId.
+    async stockPreparationSnapshotBatchList(req, res) {
+      requireAccess(req, 'admin')
+      const input = stockPreparationSnapshotBatchListInput(req, requestQuery(req))
+      const provisioning = context && context.api && context.api.multitable
+        ? context.api.multitable.provisioning
+        : undefined
+      if (!provisioning) {
+        throw new HttpRouteError(501, 'SNAPSHOT_READS_PROVISIONING_API_UNAVAILABLE', 'multitable provisioning API is not available')
+      }
+      const result = await listSnapshotBatches({
+        recordsApi: getMultitableRecordsApi(),
+        provisioning,
+        targetProjectId: input.targetProjectId,
+        businessProjectId: input.businessProjectId,
+        permission: 'admin',
+      })
+      return sendOk(res, result)
+    },
+
+    // #3751 MVP view 2: readonly values-free DIFF of a snapshot batch vs its immutable predecessor.
+    // Admin-gated; queryRecords-only; the batch id comes from the PATH. Predecessor + business project
+    // are derived from the batch row; sheets located under the STAGING targetProjectId.
+    async stockPreparationSnapshotDiff(req, res) {
+      requireAccess(req, 'admin')
+      const input = stockPreparationSnapshotDiffInput(req, requestQuery(req))
+      const provisioning = context && context.api && context.api.multitable
+        ? context.api.multitable.provisioning
+        : undefined
+      if (!provisioning) {
+        throw new HttpRouteError(501, 'SNAPSHOT_READS_PROVISIONING_API_UNAVAILABLE', 'multitable provisioning API is not available')
+      }
+      const result = await getSnapshotDiff({
+        recordsApi: getMultitableRecordsApi(),
+        provisioning,
+        targetProjectId: input.targetProjectId,
+        businessProjectId: input.businessProjectId,
+        snapshotBatchId: input.snapshotBatchId,
+        permission: 'admin',
       })
       return sendOk(res, result)
     },

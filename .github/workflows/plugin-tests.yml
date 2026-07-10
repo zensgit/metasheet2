@@ -2,6 +2,8 @@ name: Plugin System Tests
 
 on:
   workflow_dispatch:
+  merge_group:
+    types: [checks_requested]
   push:
     branches: [main, develop]
     paths:
@@ -230,6 +232,7 @@ jobs:
             tests/integration/multitable-history-audit-reveal-taint-realdb.test.ts \
             tests/integration/multitable-record-reconstructor-realdb.test.ts \
             tests/integration/multitable-d1-delete-revision-parity-realdb.test.ts \
+            tests/integration/multitable-d1-delete-revisions-realdb.test.ts \
             tests/integration/multitable-undelete-inbound-replay-realdb.test.ts \
             tests/integration/multitable-undelete-pit-inbound-replay-realdb.test.ts \
             tests/integration/multitable-undelete-inbound-resurrect-realdb.test.ts \
@@ -326,6 +329,7 @@ jobs:
             tests/integration/automation-approval-completed-trigger.test.ts \
             tests/integration/automation-approval-task-created-trigger.test.ts \
             tests/integration/automation-dingtalk-approval-card-action.test.ts \
+            tests/integration/dingtalk-person-message-integration-scoping.db.test.ts \
             tests/integration/approval-card-delivery-wrapper.db.test.ts \
             tests/integration/approval-projection-visibility.db.test.ts \
             tests/integration/approval-projection-participant-read.db.test.ts \
@@ -392,6 +396,7 @@ jobs:
             tests/integration/approval-node-signature-policy.api.test.ts \
             tests/integration/dingtalk-approval-card-deliveries.db.test.ts \
             tests/integration/dingtalk-container-login.db.test.ts \
+            tests/integration/directory-admission-case-insensitive-uniqueness.db.test.ts \
             tests/integration/directory-primary-department-write.db.test.ts \
             tests/integration/directory-primary-department-backfill.db.test.ts \
             tests/integration/directory-sync-preview-apply-parity.db.test.ts \

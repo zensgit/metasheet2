@@ -61,6 +61,33 @@ The `plm-adapter-yuantus.pact.test.ts` vitest test guards six things:
    response `embed_token`, `token_type`, `expires_in`, `jti`, `aud`, and
    `embed_origin`. Token and `jti` are matched by shape, never exact value.
 
+## PLM-COLLAB Discussion Phase 3 slice-1 (READ-ONLY) (2026-07-09)
+
+Adds 3 interactions (38 -> 41) for `PLMAdapter.getDiscussions()` /
+`PLMAdapter.getDiscussionThread()` against the provider's EXISTING
+`/api/v1/discussions` routes (Discussion Core R1 + Phase-2 + Phase-6,
+already shipped on Yuantus main -- this slice adds **no new provider
+route**, only the consumer read callsites):
+
+- `GET /api/v1/discussions` -- thread-list success for a readable target.
+- `GET /api/v1/discussions/{thread_id}` -- thread-detail success (comments +
+  the Phase-6 `include_history` merge).
+- `GET /api/v1/discussions` -- the no-leak 404 for a missing/unreadable
+  target (`{"detail": "discussion target not found"}`).
+
+Bearer-JWT + target-inherited permission only -- **not entitlement-gated**;
+this slice does no capability/SKU check (the `discussion_core` manifest key
+is a separate, not-yet-ratified owner fork per the design-lock taskbook
+`plm-collab-discussion-phase3-metasheet-consumer-taskbook-20260709.md` on
+the Yuantus side). Write routes (create thread / add comment / edit /
+delete / resolve / reopen) are a later, write-capable-consumer slice and are
+deliberately not added here.
+
+The three interactions sit at the END of the adapter-owned interaction
+list, immediately before the V1.2 parent-host-mediated embed-token mint, so
+the concatenated `PACT_PATHS` order in `plm-adapter-yuantus.pact.test.ts`
+still matches the pact JSON placement.
+
 ## aml/metadata is now live on main
 
 `GET /api/v1/aml/metadata/{item_type_name}` was previously parked outside the
