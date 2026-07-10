@@ -3,6 +3,11 @@
 > **性质**：R10 轮次记录（owner /goal「这条线余下开发」，owner 离机全程自动处理）。R9 正式闭环后的余下池 =
 > 无门控 hygiene/证据项 + 门控项推至 gate-front（PROPOSED 决策文档，零实现）。红线全程维持：#4004 D-2 实现、
 > 一切 flag 翻转、四个决策项的实现均未触碰。权威现状图仍为 `…verified-state-map…20260703.md`；本文只记 R10 增量。
+> **台账口径（owner P3 更正）**：本轮 = **3 个 PR（#4059/#4060/#4064）承载 4 项交付**（决策包/双层过滤/浏览器证据/轮记录）——
+> 证据车道自身不开 PR，其产物经 #4064 归档入 `docs/development/assets/…-t2-evidence-20260710/`。
+> **Ratify 状态更正（owner R10 深审 2026-07-10）**：#4059 四项中,地板-A 与 all-tables-B 可进入决策;
+> **回链与锚 A′ 需先修正文档再 ratify**（回链=legacy `/restore` 路由处置 OD-0 必选,不得固化 NULL golden;
+> 锚 A′=确定性排序契约 `created_at ASC, version ASC, id ASC` + 同毫秒 golden）——两处修正已由本轮 fix-forward 落入对应文档。
 
 ## §1 交付
 
@@ -19,7 +24,7 @@
 
 ## §3 诚实发现与携带项
 
-- **person diff before 侧 raw-id 回退**（证据 04 号图）：person-summary 缓存 miss 时 before 侧显示原始 user id（after 侧正常解析;link diff 两侧均正常）。定性=轻微 UX 缺口非 T2 阻塞项;进入下轮池候选（修法大概率与 linkSummariesForSide 同型：per-side 传递已有缓存）。
+- **person diff before 侧 raw-id 回退**（证据 04 号图）：person-summary 缓存 miss 时 before 侧显示原始 user id（after 侧正常解析;link diff 两侧均正常）。定性=轻微 UX 缺口非 T2 阻塞项;进入下轮池候选。**修法口径（owner P3 更正,取代本文初版「与 linkSummariesForSide 同型」的不准确描述）**：person 缓存是「当前记录当前单元格」粒度,历史 userId 即使出现在其它行也取不到——per-side 过滤帮不上;真正的修需要更宽的 userId→displayName 字典（成员目录级缓存）或服务端掩码 hydration,属小设计项而非同型速修。
 - **浏览器验证工程 traps**（EVIDENCE.md 详录,对未来 browser-verify CI 车道直接有用）：①`RBAC_TOKEN_TRUST=true`（注册用户 DB 角色覆盖 dev-token admin 声明）②person 字段受 sheet-member 校验（需 multitable:read/write 授权）+ 默认 `limitSingleRecord=true` ③**Playwright `page.screenshot()` 在此视图无限挂起（持续 layout/rAF 循环）,raw CDP `Page.captureScreenshot` 即时可用**。
 - **未做**（如实）：all-tables 跨表字段名（决策文档已备,等解锁词）;#4004 D-2 与 O-2 照旧等 owner。
 
