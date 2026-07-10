@@ -13,7 +13,14 @@ import { join } from 'node:path'
 const h = vi.hoisted(() => ({
   locale: 'zh-CN' as string,
   hasPerm: true,
-  route: { path: '/multitable', fullPath: '/multitable', meta: {} as Record<string, unknown> },
+  route: {
+    path: '/multitable',
+    fullPath: '/multitable',
+    meta: {} as Record<string, unknown>,
+    query: {} as Record<string, unknown>,
+  },
+  // Shared router double so tests can assert on replace (shell mirrors projectId into the query).
+  router: { push: vi.fn(), replace: vi.fn() },
   apiFetch: vi.fn(),
   loadProductFeatures: vi.fn().mockResolvedValue(undefined),
   fetchPlugins: vi.fn().mockResolvedValue(undefined),
@@ -24,7 +31,7 @@ vi.mock('vue-router', async () => {
   return {
     ...actual,
     useRoute: () => h.route,
-    useRouter: () => ({ push: vi.fn() }),
+    useRouter: () => h.router,
   }
 })
 
@@ -140,6 +147,7 @@ describe('StockPreparationWorkspace shell', () => {
 
   beforeEach(() => {
     h.locale = 'zh-CN'
+    h.route = { path: '/stock-prep', fullPath: '/stock-prep', meta: {}, query: {} }
     container = document.createElement('div')
     document.body.appendChild(container)
   })
@@ -210,6 +218,114 @@ describe('StockPreparationWorkspace shell', () => {
     expect(panelAfter.querySelector('[data-testid="stock-prep-desc-exception-queue"]')).not.toBeNull()
   })
 
+  // Shared project context (view 1 → view 2): values-free fixtures behind the REAL service modules
+  // (only apiFetch is mocked), so the projectId hand-off is asserted across the actual wiring.
+  function mockStockPrepReads(): void {
+    h.apiFetch.mockImplementation(async (url: string) => {
+      if (url.includes('/api/integration/stock-preparation/projects')) {
+        return new Response(
+          JSON.stringify({
+            ok: true,
+            data: {
+              projectCount: 1,
+              statusCounts: { active: 1 },
+              projects: [
+                {
+                  projectId: 'proj-alpha',
+                  projectStatus: 'active',
+                  lastSyncRunId: 'sync-run-alpha',
+                  snapshotBatchCount: 1,
+                  openExceptionCount: 0,
+                  readyLineCount: 0,
+                  heldLineCount: 0,
+                },
+              ],
+            },
+          }),
+          { status: 200 },
+        )
+      }
+      if (url.includes('/api/integration/stock-preparation/snapshot-batches')) {
+        return new Response(
+          JSON.stringify({
+            ok: true,
+            data: {
+              projectId: 'proj-alpha',
+              batchCount: 1,
+              batches: [
+                {
+                  snapshotBatchId: 'batch-alpha',
+                  snapshotVersion: 1,
+                  snapshotStatus: 'active',
+                  syncRunId: 'sync-run-alpha',
+                  lineCount: 3,
+                  createdAtPresent: true,
+                  incomplete: false,
+                },
+              ],
+            },
+          }),
+          { status: 200 },
+        )
+      }
+      return new Response(JSON.stringify({ ok: true, data: {} }), { status: 200 })
+    })
+  }
+
+  it('shares the projectId selected in view 1 with view 2 — no re-select needed', async () => {
+    mockStockPrepReads()
+    const root = await mountShell()
+    await flushUi(6)
+
+    // Pick a project in view 1.
+    const selectButton = root.querySelector('[data-testid="stock-prep-project-select"]') as HTMLButtonElement
+    expect(selectButton).not.toBeNull()
+    selectButton.click()
+    await flushUi(6)
+
+    // The shell jumps to view 2 already scoped: no select-a-project state, batch list GET issued
+    // with the SAME internal handle view 1 emitted.
+    const panel = root.querySelector('[data-testid="stock-prep-panel"]') as HTMLElement
+    expect(panel.getAttribute('data-active')).toBe('bom-snapshot-diff')
+    expect(root.querySelector('[data-testid="stock-prep-snapshot-no-project"]')).toBeNull()
+    const batchListCalls = h.apiFetch.mock.calls
+      .map((call) => String(call[0]))
+      .filter((url) => url.includes('/snapshot-batches'))
+    expect(batchListCalls.length).toBe(1)
+    expect(batchListCalls[0]).toContain('projectId=proj-alpha')
+    expect(root.querySelector('[data-testid="stock-prep-snapshot-overview"]')).not.toBeNull()
+
+    // The handle is mirrored into the route query (replace, not push) for reload/deep-link parity…
+    expect(h.router.replace).toHaveBeenCalledWith(
+      expect.objectContaining({ query: expect.objectContaining({ projectId: 'proj-alpha' }) }),
+    )
+    // …but stays values-free in the DOM: the internal handle is never rendered.
+    expect(root.textContent || '').not.toContain('proj-alpha')
+  })
+
+  it('seeds the shared project context from the ?projectId= route query (deep link / reload)', async () => {
+    mockStockPrepReads()
+    h.route = {
+      path: '/stock-prep',
+      fullPath: '/stock-prep?projectId=proj-alpha',
+      meta: {},
+      query: { projectId: 'proj-alpha' },
+    }
+    const root = await mountShell()
+
+    const snapshotTab = root.querySelector('[data-testid="stock-prep-tab-bom-snapshot-diff"]') as HTMLButtonElement
+    snapshotTab.click()
+    await flushUi(6)
+
+    // View 2 opens already scoped to the query's project handle — no re-select state.
+    expect(root.querySelector('[data-testid="stock-prep-snapshot-no-project"]')).toBeNull()
+    const batchListCalls = h.apiFetch.mock.calls
+      .map((call) => String(call[0]))
+      .filter((url) => url.includes('/snapshot-batches'))
+    expect(batchListCalls.length).toBe(1)
+    expect(batchListCalls[0]).toContain('projectId=proj-alpha')
+  })
+
   it('shell copy is values-free (no secrets, no long numeric runs) in both locales', async () => {
     for (const locale of ['zh-CN', 'en']) {
       h.locale = locale
@@ -248,7 +364,7 @@ describe('App nav entry for Stock Preparation', () => {
   beforeEach(() => {
     h.locale = 'zh-CN'
     h.hasPerm = true
-    h.route = { path: '/multitable', fullPath: '/multitable', meta: {} }
+    h.route = { path: '/multitable', fullPath: '/multitable', meta: {}, query: {} }
     window.localStorage.clear()
     window.localStorage.setItem('auth_token', 'session-token')
   })

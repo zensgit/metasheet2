@@ -72,6 +72,15 @@
                 <span class="sp-snap__status" data-testid="stock-prep-snapshot-status-chip">
                   {{ batch.snapshotStatus }}
                 </span>
+                <!-- Values-free completeness flag (#4002): boolean only — a batch whose persist path
+                     did not finish (zero lines or missing run row) is explicitly marked. -->
+                <span
+                  v-if="batch.incomplete"
+                  class="sp-snap__incomplete"
+                  data-testid="stock-prep-snapshot-incomplete-badge"
+                >
+                  {{ bi('不完整', 'incomplete') }}
+                </span>
               </td>
               <td class="sp-snap__num">{{ batch.lineCount }}</td>
               <td>
@@ -85,10 +94,18 @@
                 </span>
               </td>
               <td class="sp-snap__col-action">
+                <!-- Incomplete batches keep their diff entry visible but disabled: a diff against a
+                     half-persisted batch would be misleading (lighter than hiding the column). -->
                 <button
                   type="button"
                   class="sp-snap__select"
                   data-testid="stock-prep-snapshot-batch-select"
+                  :disabled="batch.incomplete"
+                  :title="
+                    batch.incomplete
+                      ? bi('批次不完整(缺批次行或缺同步运行),差异不可用。', 'Batch incomplete (no lines or missing sync run) — diff unavailable.')
+                      : undefined
+                  "
                   @click="selectBatch(batch)"
                 >
                   {{ bi('查看差异', 'View diff') }}
@@ -268,6 +285,8 @@ async function loadBatches(): Promise<void> {
 }
 
 async function selectBatch(batch: StockPreparationSnapshotBatchSummary): Promise<void> {
+  // Defense-in-depth behind the disabled button: never issue a diff GET for an incomplete batch.
+  if (batch.incomplete) return
   selectedBatchId.value = batch.snapshotBatchId
   diffLoading.value = true
   diffErrored.value = false
@@ -367,6 +386,18 @@ watch(() => props.projectId, loadBatches)
   font-size: 12px;
 }
 
+/* Same warning-chip idiom as the workbench sections (IntegrationObjectTemplateSection). */
+.sp-snap__incomplete {
+  display: inline-flex;
+  align-items: center;
+  margin-left: var(--ms-space-1);
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--el-color-warning-light-9);
+  color: var(--el-color-warning-dark-2);
+  font-size: 12px;
+}
+
 .sp-snap__handle {
   color: var(--ms-text-3);
   font-size: 12px;
@@ -394,6 +425,15 @@ watch(() => props.projectId, loadBatches)
 
 .sp-snap__select:hover {
   background: var(--el-fill-color-light);
+}
+
+.sp-snap__select:disabled {
+  color: var(--ms-text-3);
+  cursor: not-allowed;
+}
+
+.sp-snap__select:disabled:hover {
+  background: transparent;
 }
 
 .sp-snap__diff-wrap {
