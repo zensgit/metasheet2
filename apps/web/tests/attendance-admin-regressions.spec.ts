@@ -2066,6 +2066,12 @@ describe('Attendance admin regressions', () => {
     expect(bodies).toHaveLength(3)
     expect(bodies.filter(b => b.userId === 'user-ok')).toHaveLength(1)
     expect(bodies.filter(b => b.userId === 'user-fail')).toHaveLength(2)
+    // the retry must reuse the snapshot-frozen idempotency key — regenerating it would
+    // double-apply a delta whose first response was lost after the server had already
+    // committed (source_key is the only server-side dedupe key for balance deltas)
+    const failBodies = bodies.filter(b => b.userId === 'user-fail')
+    expect(failBodies[0].idempotencyKey).toBeTruthy()
+    expect(failBodies[1].idempotencyKey).toBe(failBodies[0].idempotencyKey)
     expect(card.querySelector('[data-attendance-annual-bulk-adjust-outcome-error]')).toBeNull()
     expect(card.querySelector('[data-attendance-annual-bulk-adjust-summary]')?.textContent).toContain('2 applied, 0 failed')
   })
