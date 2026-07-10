@@ -347,9 +347,12 @@ function Invoke-PnpmSingleLine {
   )
 
   # Corepack passthrough mode: the version-addressed spec token (pnpm@<pin>) rides FIRST so the
-  # launcher is corepack itself and PATH shadowing cannot substitute another pnpm.
+  # launcher is corepack itself and PATH shadowing cannot substitute another pnpm. Project-spec
+  # lookup is disabled so the probe is cwd-independent (a foreign packageManager pin in the ambient
+  # cwd can never fail-close an unrelated corepack passthrough call).
   if (-not [string]::IsNullOrWhiteSpace($PnpmSpecArg)) {
     $Arguments = @($PnpmSpecArg) + $Arguments
+    $env:COREPACK_ENABLE_PROJECT_SPEC = '0'
   }
 
   if ($PnpmPath.ToLowerInvariant().EndsWith('.ps1')) {
@@ -381,9 +384,12 @@ function New-DependencyRefreshCommandWrapper {
   } else {
     "call $quotedPnpmPath"
   }
-  # Corepack passthrough: the spec token (pnpm@<pin>) follows the launcher in every wrapper line.
+  # Corepack passthrough: the spec token (pnpm@<pin>) follows the launcher in every wrapper line,
+  # and project-spec lookup is disabled inside the wrapper so the pinned request is cwd-independent.
+  $corepackEnvLine = ''
   if (-not [string]::IsNullOrWhiteSpace($PnpmSpecArg)) {
     $pnpmPrefix = "$pnpmPrefix $PnpmSpecArg"
+    $corepackEnvLine = 'set "COREPACK_ENABLE_PROJECT_SPEC=0"'
   }
   $offlineFlag = if ($Offline) { ' --offline' } else { '' }
 
@@ -394,6 +400,7 @@ function New-DependencyRefreshCommandWrapper {
     'set "npm_config_yes=true"',
     'set "npm_config_confirm_modules_purge=false"',
     'set "PNPM_CONFIG_CONFIRM_MODULES_PURGE=false"',
+    $corepackEnvLine,
     'echo [dependency-refresh-wrapper] wrapper entered',
     'echo [dependency-refresh-wrapper] non-interactive env: CI=true npm_config_confirm_modules_purge=false PNPM_CONFIG_CONFIRM_MODULES_PURGE=false',
     "echo [dependency-refresh-wrapper] root=$quotedRootDir",

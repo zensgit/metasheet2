@@ -50,6 +50,9 @@ test('on-prem package build and apply use the same exact pnpm version', () => {
   // any PATH-based pnpm resolution can be shadowed by a profile pnpm of another version.
   assert.match(applyScript, /SpecArg = "pnpm@\$RequiredVersion"|\$specArg = "pnpm@\$RequiredVersion"/)
   assert.match(applyScript, /PnpmSpecArg/)
+  // The passthrough core line itself is load-bearing — deleting it silently reverts to PATH pnpm.
+  assert.match(applyScript, /\$Arguments = @\(\$PnpmSpecArg\) \+ \$Arguments/)
+  assert.match(applyScript, /COREPACK_ENABLE_PROJECT_SPEC/)
   // The PATH walk survives ONLY as the corepack-absent last resort, and must come after the
   // passthrough return inside Initialize-PinnedPnpm.
   const initStart = applyScript.indexOf('function Initialize-PinnedPnpm')
