@@ -2,7 +2,7 @@
 
 - **Status**: PROPOSED — docs-only；owner ratify 前零实现授权。R10 gate-front 工件（R9 UX-parity 审计 gated 项 (e)）。
 - **解锁词**：owner 对本文的明确点头（如「ratify 回链」）。
-- **难度/分派建议**：中（一列迁移 + 两处写路径穿线 + 投影面 + FE 渲染）→ Sonnet 5 建 + 对抗审。
+- **难度/分派建议**：中（一列迁移 + **按 OD-0 结果三路全穿线、或废弃 legacy 后两路穿线** + 投影面 + FE 渲染）→ Sonnet 5 建 + 对抗审。
 
 ## §1 问题（R9 审计原始证据，已对 origin/main 核验）
 
