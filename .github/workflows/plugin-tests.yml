@@ -152,6 +152,18 @@ jobs:
         run: |
           pnpm --filter @metasheet/core-backend exec vitest run tests/unit/richtext-longtext-sanitizer.test.ts --reporter=dot
 
+      - name: Run F3 storage-integrity canaries
+        # Security-critical (F3 path-traversal + storage integrity): the LocalStorageProvider
+        # server-key/containment/index-free read, the controlled url-fallback accept/reject, and the
+        # three-state ACL are the authoritative defenses. Run them explicitly (fail-fast) so they stay
+        # gated even if the default vitest discovery globs ever change.
+        run: |
+          pnpm --filter @metasheet/core-backend exec vitest run \
+            tests/unit/storageServiceLocalProvider.test.ts \
+            tests/unit/filesStorageKey.test.ts \
+            tests/unit/filesAcl.test.ts \
+            --reporter=dot
+
       - name: Start Postgres
         uses: ankane/setup-postgres@v1
         with:
@@ -489,6 +501,7 @@ jobs:
             tests/integration/attendance-unscheduled-reminder.test.ts \
             tests/integration/attendance-outdoor-punch.test.ts \
             tests/integration/attendance-files-acl.test.ts \
+            tests/integration/files-storage-key-migration.db.test.ts \
             tests/integration/attendance-import-template-prefs.test.ts \
             tests/integration/attendance-notification-deliveries.test.ts \
             tests/integration/attendance-comp-time-expiry-reminder.test.ts \
