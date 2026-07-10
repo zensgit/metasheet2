@@ -157,7 +157,7 @@ describe('buildDingTalkApprovalCardTerminalUpdate (§B-4 mapping table)', () => 
     })
     expect(notFound).toEqual({ outTrackId: DELIVERY_ID, statusText: DINGTALK_APPROVAL_CARD_NEUTRAL_UNPROCESSABLE_TEXT })
 
-    for (const reason of ['unlinked', 'inactive', 'ambiguous'] as const) {
+    for (const reason of ['unlinked', 'inactive', 'ambiguous', 'integration_unpinned'] as const) {
       const unresolved = buildDingTalkApprovalCardTerminalUpdate({
         outcome: 'operator_unresolved', deliveryId: DELIVERY_ID, reason,
       })

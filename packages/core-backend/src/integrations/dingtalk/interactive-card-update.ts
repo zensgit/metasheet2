@@ -187,20 +187,24 @@ export async function applyDingTalkApprovalCardTerminalUpdate(
   context: DingTalkApprovalCardTerminalUpdateContext = {},
   sender?: DingTalkApprovalCardUpdateSender,
 ): Promise<DingTalkApprovalCardTerminalUpdateOutcome> {
-  const update = buildDingTalkApprovalCardTerminalUpdate(result, context)
-  if (!update) return { status: 'skipped', reason: 'no_update_for_outcome' }
-
-  const send = sender ?? createDingTalkApprovalCardStreamUpdateSender()
-  if (!send) return { status: 'skipped', reason: 'stream_config_disabled' }
-
+  // Review P3-1: the copy builder and sender resolution sit INSIDE the try so "never throws" is
+  // structural, not incidental — both are total functions today, but a future edit to either must
+  // not be able to break the no-rollback invariant.
   try {
+    const update = buildDingTalkApprovalCardTerminalUpdate(result, context)
+    if (!update) return { status: 'skipped', reason: 'no_update_for_outcome' }
+
+    const send = sender ?? createDingTalkApprovalCardStreamUpdateSender()
+    if (!send) return { status: 'skipped', reason: 'stream_config_disabled' }
+
     await send(update)
     return { status: 'updated', outTrackId: update.outTrackId }
   } catch (error) {
     const reason = error instanceof Error ? error.name : 'UnknownError'
     // Values-free (lock §5.3): reason class + ledger id only — API error bodies and card payloads
     // never enter logs. The action itself is already committed and stays committed.
-    logger.warn(`DingTalk approval-card terminal update failed (card_update_failed:${reason}) delivery=${update.outTrackId}`)
-    return { status: 'failed', outTrackId: update.outTrackId, reason }
+    const outTrackId = 'deliveryId' in result ? result.deliveryId : ('outTrackId' in result ? result.outTrackId : 'unknown')
+    logger.warn(`DingTalk approval-card terminal update failed (card_update_failed:${reason}) delivery=${outTrackId}`)
+    return { status: 'failed', outTrackId, reason }
   }
 }
