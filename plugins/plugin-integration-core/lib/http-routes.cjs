@@ -80,6 +80,14 @@ const ROUTES = [
   // values-free). List is exact-path; diff carries the batch id in the path.
   ['GET', '/api/integration/stock-preparation/snapshot-batches', 'stockPreparationSnapshotBatchList'],
   ['GET', '/api/integration/stock-preparation/snapshot-batches/:snapshotBatchId/diff', 'stockPreparationSnapshotDiff'],
+  // #3751 MVP W3 (confirm writes): candidate-sync feeds the mapping review queue; confirm/retire are
+  // the human confirmation surface over the two confirmation tables (multitable-internal only,
+  // admin-gated, server-stamped confirmedBy/confirmedAt, values-free).
+  ['POST', '/api/integration/stock-preparation/material-mappings/candidates/sync', 'stockPreparationMaterialMappingCandidatesSync'],
+  ['POST', '/api/integration/stock-preparation/material-mappings/confirm', 'stockPreparationMaterialMappingConfirm'],
+  ['POST', '/api/integration/stock-preparation/material-mappings/retire', 'stockPreparationMaterialMappingRetire'],
+  ['POST', '/api/integration/stock-preparation/unit-conversions/confirm', 'stockPreparationUnitConversionConfirm'],
+  ['POST', '/api/integration/stock-preparation/unit-conversions/retire', 'stockPreparationUnitConversionRetire'],
   // FOS-2: generic field-option-sync (preset-driven). Stock-prep route above is a compat alias.
   ['POST', '/api/integration/field-options/sync', 'fieldOptionsSync'],
   ['GET', '/api/integration/templates', 'templatesList'],
@@ -259,6 +267,17 @@ const {
   listSnapshotBatches,
   getSnapshotDiff,
 } = require('./stock-preparation-snapshot-reads.cjs')
+// #3751 MVP W3: HUMAN CONFIRM writes for the material-mapping / unit-conversion-rule tables (plus the
+// candidate-sync that feeds the review queue). Multitable-internal only (target-scoped records API
+// over the frozen MVP sheets under the STAGING project); confirmedBy is the route user identity and
+// confirmedAt is stamped in the module — the request body can carry NEITHER (closed allowlists).
+const {
+  syncMaterialMappingCandidates,
+  confirmMaterialMapping,
+  retireMaterialMapping,
+  confirmUnitConversionRule,
+  retireUnitConversionRule,
+} = require('./stock-preparation-confirm-writes.cjs')
 // FOS-4: canonical stock-prep objectId — readiness is bound per TARGET, so any preset targeting this
 // table (v1 replace + the disable-missing prove-the-path preset) reuses the canonical readiness check.
 const { STOCK_PREPARATION_MAIN_TABLE_TEMPLATE } = require('./stock-preparation-templates.cjs')
@@ -590,6 +609,46 @@ const VALID_STOCK_PREPARATION_SNAPSHOT_READ_QUERY_KEYS = new Set([
   'tenantId',
   'workspaceId',
   'projectId',
+])
+// #3751 MVP W3: closed request allowlists for the confirm-write routes — one Set per route (no
+// sharing that would widen a sibling parser). The confirmation stamps (confirmedBy / confirmedAt)
+// are DELIBERATELY absent from every list: they are server-derived (route user identity + module
+// stamp time), so a body that supplies either is rejected as an unknown field.
+const VALID_STOCK_PREPARATION_MAPPING_CANDIDATES_SYNC_REQUEST_KEYS = new Set([
+  'tenantId',
+  'workspaceId',
+  'projectId',
+  'snapshotBatchId',
+  'defaultVersionPolicy',
+])
+const VALID_STOCK_PREPARATION_MAPPING_CONFIRM_REQUEST_KEYS = new Set([
+  'tenantId',
+  'workspaceId',
+  'projectId',
+  'mappingId',
+  'mapping',
+  'notes',
+])
+const VALID_STOCK_PREPARATION_MAPPING_RETIRE_REQUEST_KEYS = new Set([
+  'tenantId',
+  'workspaceId',
+  'projectId',
+  'mappingId',
+])
+const VALID_STOCK_PREPARATION_UNIT_CONFIRM_REQUEST_KEYS = new Set([
+  'tenantId',
+  'workspaceId',
+  'projectId',
+  'conversionRuleId',
+  'contextFingerprint',
+  'snapshotBatchId',
+  'rule',
+])
+const VALID_STOCK_PREPARATION_UNIT_RETIRE_REQUEST_KEYS = new Set([
+  'tenantId',
+  'workspaceId',
+  'projectId',
+  'conversionRuleId',
 ])
 // FOS-2: generic field-option-sync request — closed allowlist. Operator names a preset (FOS-1
 // catalog) + supplies option sets keyed by the preset's source keys. No sheetId / credentials.
@@ -1007,6 +1066,20 @@ function stockPreparationSnapshotDiffInput(req, rawQuery = {}) {
     snapshotBatchId,
     targetProjectId: resolveIntegrationStagingProjectId(tenantId, input.projectId),
   }
+}
+
+// #3751 MVP W3: parse a confirm-write body against ITS route's closed allowlist. Unknown fields
+// (including body-supplied confirmedBy / confirmedAt) are rejected with the field NAME only.
+function normalizeStockPreparationConfirmBody(input, allowedKeys, code) {
+  if (!isPlainObject(input)) {
+    throw new HttpRouteError(400, code, 'request must be an object')
+  }
+  for (const key of Object.keys(input)) {
+    if (!allowedKeys.has(key)) {
+      throw new HttpRouteError(400, code, `unsupported request field: ${key}`, { field: key })
+    }
+  }
+  return input
 }
 
 function normalizeFieldOptionSyncRequest(input = {}) {
@@ -3317,6 +3390,105 @@ function createHandlers(services, options = {}) {
         businessProjectId: input.businessProjectId,
         snapshotBatchId: input.snapshotBatchId,
         permission: 'admin',
+      })
+      return sendOk(res, result)
+    },
+
+    // #3751 MVP W3: run the landed candidate ladder over a COMPLETE snapshot batch and CREATE-ONLY
+    // persist the NEW pending mapping rows (existing ids skipped; human_preserved fields structurally
+    // stripped). Admin-gated; staging targetProjectId is server-derived, never request-trusted;
+    // defaultVersionPolicy is REQUIRED per request (OD2: no server default). 201 only when it created.
+    async stockPreparationMaterialMappingCandidatesSync(req, res) {
+      requireAccess(req, 'admin')
+      const input = normalizeStockPreparationConfirmBody(requestBody(req), VALID_STOCK_PREPARATION_MAPPING_CANDIDATES_SYNC_REQUEST_KEYS, 'STOCK_PREPARATION_MAPPING_CANDIDATES_SYNC_REQUEST_INVALID')
+      const tenantId = resolveTenantId(req, input)
+      const result = await syncMaterialMappingCandidates({
+        context,
+        permission: 'admin',
+        recordsApi: getMultitableRecordsApi(),
+        provisioning: getMultitableProvisioning(),
+        targetProjectId: resolveIntegrationStagingProjectId(tenantId, input.projectId),
+        projectId: input.projectId,
+        snapshotBatchId: input.snapshotBatchId,
+        defaultVersionPolicy: input.defaultVersionPolicy,
+      })
+      return sendOk(res, result, result.persisted ? 201 : 200)
+    },
+
+    // #3751 MVP W3: human mapping confirm — XOR body modes (mappingId = stamp an existing candidate
+    // matched / mapping = create a fully operator-specified confirmed row). confirmedBy is the ROUTE
+    // user identity; confirmedAt is stamped in the module — the body can carry neither.
+    async stockPreparationMaterialMappingConfirm(req, res) {
+      const user = requireAccess(req, 'admin')
+      const input = normalizeStockPreparationConfirmBody(requestBody(req), VALID_STOCK_PREPARATION_MAPPING_CONFIRM_REQUEST_KEYS, 'STOCK_PREPARATION_MAPPING_CONFIRM_REQUEST_INVALID')
+      const tenantId = resolveTenantId(req, input)
+      const result = await confirmMaterialMapping({
+        context,
+        permission: 'admin',
+        recordsApi: getMultitableRecordsApi(),
+        provisioning: getMultitableProvisioning(),
+        targetProjectId: resolveIntegrationStagingProjectId(tenantId, input.projectId),
+        mappingId: input.mappingId,
+        mapping: input.mapping,
+        notes: input.notes,
+        confirmedBy: user.id || user.email,
+      })
+      return sendOk(res, result, result.mode === 'created' ? 201 : 200)
+    },
+
+    // #3751 MVP W3: retire a mapping (patch EXACTLY isActive:false) — the recovery path for a wrong
+    // confirm. Audit-trail coverage is the Wave-5 role/audit slice.
+    async stockPreparationMaterialMappingRetire(req, res) {
+      requireAccess(req, 'admin')
+      const input = normalizeStockPreparationConfirmBody(requestBody(req), VALID_STOCK_PREPARATION_MAPPING_RETIRE_REQUEST_KEYS, 'STOCK_PREPARATION_MAPPING_RETIRE_REQUEST_INVALID')
+      const tenantId = resolveTenantId(req, input)
+      const result = await retireMaterialMapping({
+        context,
+        permission: 'admin',
+        recordsApi: getMultitableRecordsApi(),
+        provisioning: getMultitableProvisioning(),
+        targetProjectId: resolveIntegrationStagingProjectId(tenantId, input.projectId),
+        mappingId: input.mappingId,
+      })
+      return sendOk(res, result)
+    },
+
+    // #3751 MVP W3: human unit-rule confirm — tri-XOR body modes (conversionRuleId = stamp an existing
+    // manual rule / contextFingerprint = persist the server-derived 1:1 candidate / rule = fully
+    // user-entered values per OD3/OD4). Same server-stamp discipline as the mapping confirm.
+    async stockPreparationUnitConversionConfirm(req, res) {
+      const user = requireAccess(req, 'admin')
+      const input = normalizeStockPreparationConfirmBody(requestBody(req), VALID_STOCK_PREPARATION_UNIT_CONFIRM_REQUEST_KEYS, 'STOCK_PREPARATION_UNIT_CONFIRM_REQUEST_INVALID')
+      const tenantId = resolveTenantId(req, input)
+      const result = await confirmUnitConversionRule({
+        context,
+        permission: 'admin',
+        recordsApi: getMultitableRecordsApi(),
+        provisioning: getMultitableProvisioning(),
+        targetProjectId: resolveIntegrationStagingProjectId(tenantId, input.projectId),
+        projectId: input.projectId,
+        conversionRuleId: input.conversionRuleId,
+        contextFingerprint: input.contextFingerprint,
+        snapshotBatchId: input.snapshotBatchId,
+        rule: input.rule,
+        confirmedBy: user.id || user.email,
+      })
+      return sendOk(res, result, result.mode === 'created' ? 201 : 200)
+    },
+
+    // #3751 MVP W3: retire a unit rule (patch EXACTLY isActive:false) — required before re-creating a
+    // same-scope rule with a different factor (two active same-scope rules fail closed as a conflict).
+    async stockPreparationUnitConversionRetire(req, res) {
+      requireAccess(req, 'admin')
+      const input = normalizeStockPreparationConfirmBody(requestBody(req), VALID_STOCK_PREPARATION_UNIT_RETIRE_REQUEST_KEYS, 'STOCK_PREPARATION_UNIT_RETIRE_REQUEST_INVALID')
+      const tenantId = resolveTenantId(req, input)
+      const result = await retireUnitConversionRule({
+        context,
+        permission: 'admin',
+        recordsApi: getMultitableRecordsApi(),
+        provisioning: getMultitableProvisioning(),
+        targetProjectId: resolveIntegrationStagingProjectId(tenantId, input.projectId),
+        conversionRuleId: input.conversionRuleId,
       })
       return sendOk(res, result)
     },
