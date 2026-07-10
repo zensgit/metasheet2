@@ -87,12 +87,15 @@ const mockPendingApprovals = ref<any[]>([])
 const mockMyApprovals = ref<any[]>([])
 const mockCcApprovals = ref<any[]>([])
 const mockCompletedApprovals = ref<any[]>([])
+// B3-01 (我已处理 5th tab)
+const mockProcessedApprovals = ref<any[]>([])
 const mockLoading = ref(false)
 const mockError = ref<string | null>(null)
 const loadPendingSpy = vi.fn().mockResolvedValue(undefined)
 const loadMineSpy = vi.fn().mockResolvedValue(undefined)
 const loadCcSpy = vi.fn().mockResolvedValue(undefined)
 const loadCompletedSpy = vi.fn().mockResolvedValue(undefined)
+const loadProcessedSpy = vi.fn().mockResolvedValue(undefined)
 
 vi.mock('../src/approvals/store', () => ({
   useApprovalStore: () => ({
@@ -101,6 +104,7 @@ vi.mock('../src/approvals/store', () => ({
     get myApprovals() { return mockMyApprovals.value },
     get ccApprovals() { return mockCcApprovals.value },
     get completedApprovals() { return mockCompletedApprovals.value },
+    get processedApprovals() { return mockProcessedApprovals.value },
     get activeApproval() { return null },
     get history() { return [] },
     get loading() { return mockLoading.value },
@@ -109,12 +113,14 @@ vi.mock('../src/approvals/store', () => ({
     get totalMine() { return mockMyApprovals.value.length },
     get totalCc() { return mockCcApprovals.value.length },
     get totalCompleted() { return mockCompletedApprovals.value.length },
+    get totalProcessed() { return mockProcessedApprovals.value.length },
     get pendingCount() { return mockPendingApprovals.value.length },
     approvalById: () => undefined,
     loadPending: loadPendingSpy,
     loadMine: loadMineSpy,
     loadCc: loadCcSpy,
     loadCompleted: loadCompletedSpy,
+    loadProcessed: loadProcessedSpy,
     loadDetail: vi.fn(),
     loadHistory: vi.fn(),
     submitApproval: vi.fn(),
@@ -384,12 +390,14 @@ describe('ApprovalCenterView', () => {
     mockMyApprovals.value = []
     mockCcApprovals.value = []
     mockCompletedApprovals.value = []
+    mockProcessedApprovals.value = []
     mockLoading.value = false
     mockError.value = null
     loadPendingSpy.mockClear()
     loadMineSpy.mockClear()
     loadCcSpy.mockClear()
     loadCompletedSpy.mockClear()
+    loadProcessedSpy.mockClear()
     pushSpy.mockClear()
 
     elSuccessSpy.mockClear()
@@ -445,21 +453,46 @@ describe('ApprovalCenterView', () => {
     await flushUi()
   }
 
-  it('renders 4 tabs', async () => {
+  it('renders 5 tabs (B3-01 adds 我已处理)', async () => {
     await mountView()
     const panes = container!.querySelectorAll('[data-tab-pane]')
-    expect(panes.length).toBe(4)
+    expect(panes.length).toBe(5)
 
     const labels = Array.from(panes).map((p) => p.getAttribute('data-tab-label'))
     expect(labels).toContain('我发起的')
     expect(labels).toContain('抄送我的')
     expect(labels).toContain('已完成')
+    expect(labels).toContain('我已处理')
     expect(container!.textContent).toContain('待我处理')
   })
 
   it('calls loadPending on mount', async () => {
     await mountView()
     expect(loadPendingSpy).toHaveBeenCalled()
+  })
+
+  it('B3-01: renders 我已处理 rows from store.processedApprovals and calls loadPending on mount (loadProcessed only fires once that tab is active)', async () => {
+    mockProcessedApprovals.value = [
+      {
+        id: 'apv_processed_1',
+        requestNo: 'AP-200001',
+        title: '已处理的审批',
+        status: 'approved',
+        requester: { name: '李四' },
+        createdAt: '2026-04-01T00:00:00Z',
+      },
+    ]
+    await mountView()
+
+    const processedPane = container!.querySelector('[data-tab-pane="processed"]')
+    expect(processedPane).not.toBeNull()
+    expect(processedPane?.textContent).toContain('已处理的审批')
+    expect(processedPane?.textContent).toContain('李四')
+    // Default mount stays on the 待我处理 tab (unchanged default) — loadProcessed is wired into
+    // the same switch-case choke point as the other three non-default tabs, none of which fire on
+    // an unrelated tab's mount either.
+    expect(loadPendingSpy).toHaveBeenCalled()
+    expect(loadProcessedSpy).not.toHaveBeenCalled()
   })
 
   it('renders pending approvals with status tags', async () => {

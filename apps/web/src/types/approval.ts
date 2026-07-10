@@ -254,6 +254,12 @@ export interface UnifiedApprovalDTO {
    */
   currentNodeKeys?: string[] | null
   assignments: ApprovalAssignmentDTO[]
+  /**
+   * B3-02 (行级未读): per-viewer read state, populated ONLY on the 待我处理 (pending) tab — `true`
+   * once the actor has opened this row, `false` when they have not. `undefined` on every other
+   * tab; callers must treat that as "no dot", never guess a value.
+   */
+  isRead?: boolean
   createdAt: string
   updatedAt: string
 }

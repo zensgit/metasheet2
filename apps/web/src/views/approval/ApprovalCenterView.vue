@@ -352,6 +352,41 @@
           @update:current-page="handlePageChange"
         />
       </el-tab-pane>
+
+      <!-- B3-01 (我已处理): every instance the actor recorded an ANY-status action on — a reverse
+           lookup, distinct from 已完成 (which is scoped to non-pending instances only). Shares the
+           same read-only table shape as 抄送我的/已完成 (no selection/wait/actions column: the
+           actor already acted, there is nothing left to do here). -->
+      <el-tab-pane label="我已处理" name="processed">
+        <ApprovalMobileList
+          v-if="isMobileLayout"
+          :approvals="store.processedApprovals"
+          :loading="store.loading"
+          :empty-text="mobileEmptyText.processed"
+          :template-schemas="templateSchemas"
+          @select="handleRowClick"
+        />
+        <div v-else-if="isFirstPaintLoading(store.processedApprovals)" class="approval-center__skeleton" data-testid="processed-skeleton">
+          <el-skeleton :rows="5" animated />
+        </div>
+        <ApprovalCenterTable
+          v-else
+          :rows="store.processedApprovals"
+          :loading="store.loading"
+          :empty-text="searchText ? '未找到匹配的审批' : '暂无已处理审批'"
+          :summary-line-for="summaryLineFor"
+          @row-click="handleRowClick"
+        />
+        <el-pagination
+          class="approval-center__pagination"
+          background
+          layout="total, prev, pager, next"
+          :total="store.totalProcessed"
+          :current-page="currentPage"
+          :page-size="pageSize"
+          @update:current-page="handlePageChange"
+        />
+      </el-tab-pane>
     </el-tabs>
 
     <!-- Batch reject: a comment is offered (some templates require one; a per-row failure is captured
@@ -504,6 +539,7 @@ const allVisibleApprovals = computed<UnifiedApprovalDTO[]>(() => [
   ...store.myApprovals,
   ...store.ccApprovals,
   ...store.completedApprovals,
+  ...store.processedApprovals,
 ])
 // `immediate: true` covers the case where a tab's data is already populated at setup time (e.g.
 // a fresh mount whose store was pre-loaded); every subsequent load (tab switch/page/search/filter)
@@ -534,6 +570,7 @@ const mobileEmptyText = computed(() => {
       mine: searchText.value ? '未找到匹配的审批' : '暂无我发起的审批',
       cc: searchText.value ? '未找到匹配的审批' : '暂无抄送我的审批',
       completed: searchText.value ? '未找到匹配的审批' : '暂无已完成审批',
+      processed: searchText.value ? '未找到匹配的审批' : '暂无已处理审批',
     }
   }
   return {
@@ -541,6 +578,7 @@ const mobileEmptyText = computed(() => {
     mine: searchText.value ? 'No matching approvals found' : 'No approvals initiated by you',
     cc: searchText.value ? 'No matching approvals found' : 'No approvals cc’d to you',
     completed: searchText.value ? 'No matching approvals found' : 'No completed approvals',
+    processed: searchText.value ? 'No matching approvals found' : 'No approvals you have processed',
   }
 })
 
@@ -884,7 +922,7 @@ async function handleMarkAllRead(): Promise<void> {
   }
 }
 
-const activeTab = ref<'pending' | 'mine' | 'cc' | 'completed'>('pending')
+const activeTab = ref<'pending' | 'mine' | 'cc' | 'completed' | 'processed'>('pending')
 const searchText = ref('')
 const statusFilter = ref<ApprovalStatus | ''>('')
 // Wave 2 WP2: source filter driving the `sourceSystem` query param on /api/approvals.
@@ -920,6 +958,7 @@ function loadCurrentTab() {
     case 'mine': store.loadMine(query); break
     case 'cc': store.loadCc(query); break
     case 'completed': store.loadCompleted(query); break
+    case 'processed': store.loadProcessed(query); break
   }
   // G-B2-11: EVERY list reload re-baselines the pill, from the ONE place every reload passes
   // through. Hanging this off individual call sites is precisely what let handleSearch() and
