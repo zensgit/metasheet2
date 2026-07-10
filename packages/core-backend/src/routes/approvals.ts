@@ -647,6 +647,8 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
     try {
       const version = await productService.publishTemplate(req.params.id, {
         policy: req.body?.policy,
+        // B3-09 — optional publish note; the service normalizes (trim, empty->null, length cap).
+        note: req.body?.note,
       })
       res.json(version)
     } catch (error) {
