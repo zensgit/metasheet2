@@ -102,6 +102,45 @@ describe('AttendanceNotificationDeliveryWorker.runBatch quiet-hours gate', () =>
 
     expect(info).toHaveBeenCalledTimes(1)
   })
+
+  it('quietHoursLogged reset on window-exit is load-bearing: re-entering the window after exiting logs a SECOND deferral message', async () => {
+    // Mutation guard for the `this.quietHoursLogged = false` reset in runBatch() (the non-deferral
+    // branch). If that reset is deleted, quietHoursLogged latches `true` forever after the first
+    // deferral and a later re-entry into the window never logs again — this test is RED under that
+    // mutation because `info` stops incrementing on tick 3 below.
+    const info = vi.fn()
+    const warn = vi.fn()
+    const quietHours: AttendanceNotificationQuietHoursConfig = { start: '22:00', end: '08:00', timeZone: 'UTC' }
+    let current = new Date('2026-07-09T23:00:00Z') // inside window
+    const query = makeQuery()
+    const worker = new AttendanceNotificationDeliveryWorker({
+      query,
+      quietHours,
+      now: () => current,
+      logger: { info, warn } as unknown as Logger,
+    })
+
+    // Tick 1: enter window → defer + first deferral log, zero SQL.
+    const tick1 = await worker.runBatch()
+    expect(tick1).toEqual(ZERO_RESULT)
+    expect(info).toHaveBeenCalledTimes(1)
+    expect(query).not.toHaveBeenCalled()
+
+    // Tick 2: exit window → claims normally (real SQL issued); no additional deferral log (mock query
+    // returns 0 rows, so the separate "claimed=N" summary log — gated on claimed>0 — does not fire).
+    current = new Date('2026-07-09T12:00:00Z') // outside window
+    await worker.runBatch()
+    expect(info).toHaveBeenCalledTimes(1)
+    expect(query).toHaveBeenCalledTimes(1)
+
+    // Tick 3: re-enter window → SECOND deferral log. Only fires if the exit tick reset
+    // quietHoursLogged back to false; proves the reset is load-bearing, not deletable.
+    current = new Date('2026-07-09T23:30:00Z') // inside window again
+    const tick3 = await worker.runBatch()
+    expect(tick3).toEqual(ZERO_RESULT)
+    expect(info).toHaveBeenCalledTimes(2)
+    expect(query).toHaveBeenCalledTimes(1) // still deferred: no new SQL on tick 3
+  })
 })
 
 describe('resolveAttendanceNotificationQuietHours env parsing', () => {
@@ -139,6 +178,20 @@ describe('resolveAttendanceNotificationQuietHours env parsing', () => {
     expect(warn).toHaveBeenCalledTimes(1)
   })
 
+  it('start === end (e.g. "22:00-22:00") → INVALID config: off + one warn, not a zero-length or full-day window', () => {
+    const warn = vi.fn()
+    const env = { ATTENDANCE_NOTIFICATION_QUIET_HOURS: '22:00-22:00' } as NodeJS.ProcessEnv
+    expect(resolveAttendanceNotificationQuietHours(env, { warn })).toBeNull()
+    expect(warn).toHaveBeenCalledTimes(1)
+  })
+
+  it('start === end at midnight ("00:00-00:00") is also rejected, not silently treated as full-day-quiet', () => {
+    const warn = vi.fn()
+    const env = { ATTENDANCE_NOTIFICATION_QUIET_HOURS: '00:00-00:00' } as NodeJS.ProcessEnv
+    expect(resolveAttendanceNotificationQuietHours(env, { warn })).toBeNull()
+    expect(warn).toHaveBeenCalledTimes(1)
+  })
+
   it('valid window, TZ unset → defaults to Asia/Shanghai', () => {
     const env = { ATTENDANCE_NOTIFICATION_QUIET_HOURS: '22:00-08:00' } as NodeJS.ProcessEnv
     expect(resolveAttendanceNotificationQuietHours(env, { warn: vi.fn() })).toEqual({
@@ -170,6 +223,62 @@ describe('isAttendanceNotificationQuietHours timezone correctness', () => {
 
     expect(isAttendanceNotificationQuietHours(now, shanghai)).toBe(true)
     expect(isAttendanceNotificationQuietHours(now, utc)).toBe(false)
+  })
+})
+
+describe('isAttendanceNotificationQuietHours: broken Intl fails OPEN, not toward midnight', () => {
+  // If formatToParts unexpectedly omits hour/minute (broken ICU data — should not happen given the
+  // options passed, but is not impossible), the OLD behavior defaulted both to '00', which — inside a
+  // cross-midnight window like 22:00-08:00 — reads as "00:00", i.e. INSIDE the window: notifications
+  // would silently and permanently stop. The fix must fail OPEN (outside the window) instead.
+  const OriginalDateTimeFormat = Intl.DateTimeFormat
+
+  function stubBrokenIntl() {
+    // @ts-expect-error test-only stub: garbage formatToParts result missing hour/minute part types.
+    Intl.DateTimeFormat = vi.fn().mockImplementation(() => ({
+      formatToParts: () => [{ type: 'literal', value: '' }],
+      format: () => '00:00',
+    }))
+  }
+
+  afterEach(() => {
+    Intl.DateTimeFormat = OriginalDateTimeFormat
+  })
+
+  it('missing hour/minute parts → returns false (OUTSIDE the window) and warns once, even at what would be midnight', () => {
+    stubBrokenIntl()
+    const warn = vi.fn()
+    // A cross-midnight window where the old '00' fallback would have read as "inside".
+    const quietHours: AttendanceNotificationQuietHoursConfig = { start: '22:00', end: '08:00', timeZone: 'UTC' }
+
+    const result = isAttendanceNotificationQuietHours(
+      new Date('2026-07-09T00:00:00Z'),
+      quietHours,
+      { warn } as unknown as Pick<Logger, 'warn'>,
+    )
+
+    expect(result).toBe(false)
+    expect(warn).toHaveBeenCalledTimes(1)
+  })
+
+  it('runBatch: broken Intl → claims normally (real SQL issued) and warns, instead of silently deferring forever', async () => {
+    stubBrokenIntl()
+    const info = vi.fn()
+    const warn = vi.fn()
+    const query = makeQuery()
+    const quietHours: AttendanceNotificationQuietHoursConfig = { start: '22:00', end: '08:00', timeZone: 'UTC' }
+    const worker = new AttendanceNotificationDeliveryWorker({
+      query,
+      quietHours,
+      now: () => new Date('2026-07-09T00:00:00Z'),
+      logger: { info, warn } as unknown as Logger,
+    })
+
+    const result = await worker.runBatch()
+
+    expect(query).toHaveBeenCalledTimes(1) // claimed normally — NOT deferred
+    expect(result.claimed).toBe(0) // mock returns no rows, but the claim WAS attempted
+    expect(warn).toHaveBeenCalled()
   })
 })
 
