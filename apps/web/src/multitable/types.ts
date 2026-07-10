@@ -1179,6 +1179,18 @@ export interface AutomationRunView {
   steps: AutomationRunStepView[]
   triggerEvent?: unknown
   ruleSnapshot?: unknown
+  /**
+   * B3-11 — additive, LIST-ONLY display labels resolved server-side from the
+   * current `automation_rules`/`meta_sheets` name (batched lookup, never N+1).
+   * Optional because only the list endpoint (`GET /automation-executions`)
+   * populates them; detail/retry/resume responses omit them (unchanged).
+   * A deleted rule/sheet degrades HONESTLY to the raw id (never `undefined`) —
+   * `ruleName === ruleId` / `sheetName === sheetId` signals "unresolved", NOT
+   * "same value twice".
+   */
+  ruleName?: string
+  /** `null` when the execution never had a sheetId; the raw sheetId when unresolved. */
+  sheetName?: string | null
 }
 
 export interface AutomationStats {

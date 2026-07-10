@@ -7249,6 +7249,20 @@
                   <input type="checkbox" v-model="annualPolicyForm.carryoverEnabled" />
                 </label>
               </div>
+              <div class="attendance__admin-subsection" data-admin-card="annual-leave-scheduled-trigger">
+                <p class="attendance__field-hint">
+                  {{ tr('When on, the accrual engine runs automatically once a month per org (in addition to the manual run below) — no admin click required. Off (default) = accrual only ever runs when an admin manually triggers it.', '开启后，计提引擎每月为每个组织自动运行一次（在下方手工运行之外）——无需管理员点击。关闭（默认）＝计提仅在管理员手工触发时运行。') }}
+                </p>
+                <label class="attendance__field attendance__field--checkbox" for="attendance-annual-policy-scheduled-trigger">
+                  <span>{{ tr('Auto-run accrual monthly (scheduler)', '每月自动运行计提（调度器）') }}</span>
+                  <input
+                    id="attendance-annual-policy-scheduled-trigger"
+                    v-model="annualPolicyForm.scheduledTriggerEnabled"
+                    type="checkbox"
+                    data-annual-policy="scheduled-trigger"
+                  />
+                </label>
+              </div>
               <h5>{{ tr('Tier ladder (cumulative years → days)', '工龄阶梯 (累计工龄 → 天数)') }}</h5>
               <div class="attendance__table-wrapper">
                 <table class="attendance__table">
@@ -10576,6 +10590,9 @@ interface AttendanceSettings {
     tiers?: Array<{ minYears?: number; maxYears?: number | null; days?: number }>
     carryover?: { enabled?: boolean }
     timezone?: string | null
+    // S3 scheduler trigger (design-lock attendance-annual-leave-accrual-scheduler-s3-design-lock-20260710).
+    // The admin card reads/writes this via the SAME PUT { annualLeavePolicy: ... } payload.
+    scheduledTrigger?: { enabled?: boolean }
   }
 }
 
@@ -23873,6 +23890,8 @@ const annualPolicyForm = reactive<{
   tiers: AnnualLeaveTierRow[]
   carryoverEnabled: boolean
   timezone: string
+  // S3 scheduler trigger single opt-in switch (design-lock attendance-annual-leave-accrual-scheduler-s3-design-lock-20260710).
+  scheduledTriggerEnabled: boolean
 }>({
   enabled: false,
   tenureMode: 'cumulative_service',
@@ -23884,6 +23903,7 @@ const annualPolicyForm = reactive<{
   ],
   carryoverEnabled: false,
   timezone: '',
+  scheduledTriggerEnabled: false,
 })
 
 // Hydrate the policy form from a settings object — the idiomatic apply…ToForm pattern, called from loadSettings()
@@ -23905,6 +23925,7 @@ function applyAnnualPolicyToForm(settings: AttendanceSettings): void {
     }
     annualPolicyForm.carryoverEnabled = !!p.carryover?.enabled
     annualPolicyForm.timezone = p.timezone || ''
+    annualPolicyForm.scheduledTriggerEnabled = !!p.scheduledTrigger?.enabled
   }
   annualPolicyLoaded.value = true
 }
@@ -23986,6 +24007,7 @@ async function saveAnnualPolicy() {
         tiers: annualPolicyForm.tiers.map(t => ({ minYears: t.minYears, maxYears: t.maxYears, days: t.days })),
         carryover: { enabled: annualPolicyForm.carryoverEnabled },
         timezone: annualPolicyForm.timezone.trim() || null,
+        scheduledTrigger: { enabled: annualPolicyForm.scheduledTriggerEnabled },
       },
     }
     const response = await apiFetch('/api/attendance/settings', { method: 'PUT', body: JSON.stringify(payload) })

@@ -1642,6 +1642,54 @@ describe('Attendance admin regressions', () => {
     expect(savedPayload?.annualLeavePolicy?.tiers).toEqual([])
   })
 
+  // S3 scheduler trigger switch (design-lock attendance-annual-leave-accrual-scheduler-s3-design-lock-20260710 §G7).
+  it('annual-leave policy: scheduledTrigger.enabled hydrates from settings and round-trips both directions on save', async () => {
+    let savedPayload: any = null
+    vi.mocked(apiFetch).mockImplementation(async (input, init) => {
+      const url = String(input)
+      if (url.includes('/api/attendance/settings') && (init?.method ?? 'GET') === 'PUT') {
+        savedPayload = JSON.parse(String(init!.body))
+        return jsonResponse(200, { ok: true, data: {} })
+      }
+      if (url.includes('/api/attendance/settings')) {
+        return jsonResponse(200, {
+          ok: true,
+          data: {
+            annualLeavePolicy: {
+              enabled: true, tenureMode: 'cumulative_service', standardDayMinutes: 480,
+              tiers: [{ minYears: 1, maxYears: null, days: 5 }], carryover: { enabled: false },
+              timezone: 'Asia/Shanghai', scheduledTrigger: { enabled: true },
+            },
+          },
+        })
+      }
+      return emptyAttendanceResponse()
+    })
+
+    app = createApp(AttendanceView, { mode: 'admin' })
+    app.mount(container!)
+    await flushUi(8)
+
+    container!.querySelector<HTMLButtonElement>('[data-admin-anchor="attendance-admin-annual-leave-policy"]')!.click()
+    await flushUi(4)
+    const section = container!.querySelector<HTMLElement>('#attendance-admin-annual-leave-policy')!
+    const toggle = section.querySelector<HTMLInputElement>('[data-annual-policy="scheduled-trigger"]')!
+    expect(toggle.checked).toBe(true) // hydrated from settings, not the local `false` default
+    const saveBtn = Array.from(section.querySelectorAll<HTMLButtonElement>('button')).find(b => b.textContent?.includes('Save policy'))!
+
+    saveBtn.click()
+    await flushUi(4)
+    expect(savedPayload?.annualLeavePolicy?.scheduledTrigger).toEqual({ enabled: true })
+
+    // toggling off and saving again round-trips false too (not stuck sticky-true).
+    toggle.checked = false
+    toggle.dispatchEvent(new Event('change'))
+    await flushUi(2)
+    saveBtn.click()
+    await flushUi(4)
+    expect(savedPayload?.annualLeavePolicy?.scheduledTrigger).toEqual({ enabled: false })
+  })
+
   // ===== L5c admin operations =====
   const enabledPolicySettings = () => jsonResponse(200, {
     ok: true,
