@@ -254,6 +254,34 @@ function Resolve-CorepackCommand {
   return $null
 }
 
+function New-CorepackPnpmCommandWrapper {
+  param(
+    [string]$WrapperPath,
+    [string]$CorepackPath,
+    [string]$RequiredVersion
+  )
+
+  $resolvedCorepackPath = Resolve-NormalizedPath -Candidate $CorepackPath -Label 'Corepack command'
+  $quotedCorepackPath = ConvertTo-CmdQuoted -Value $resolvedCorepackPath
+  $corepackPrefix = if ($resolvedCorepackPath.ToLowerInvariant().EndsWith('.ps1')) {
+    "powershell.exe -NoProfile -ExecutionPolicy Bypass -File $quotedCorepackPath"
+  } elseif ($resolvedCorepackPath.ToLowerInvariant().EndsWith('.cmd') -or $resolvedCorepackPath.ToLowerInvariant().EndsWith('.bat')) {
+    "call $quotedCorepackPath"
+  } else {
+    $quotedCorepackPath
+  }
+
+  $lines = @(
+    '@echo off',
+    'setlocal EnableExtensions DisableDelayedExpansion',
+    "$corepackPrefix `"pnpm@$RequiredVersion`" %*",
+    'set "COREPACK_PNPM_EXIT=%ERRORLEVEL%"',
+    'exit /b %COREPACK_PNPM_EXIT%'
+  )
+  Set-Content -LiteralPath $WrapperPath -Value $lines -Encoding ASCII
+  return (Resolve-Path -LiteralPath $WrapperPath).Path
+}
+
 function Resolve-PackagePnpmVersion {
   param([string]$PackageRoot)
 
@@ -272,9 +300,13 @@ function Resolve-PackagePnpmVersion {
 }
 
 function Initialize-PinnedPnpm {
-  param([string]$RequiredVersion)
+  param(
+    [string]$RequiredVersion,
+    [string]$WrapperRoot
+  )
 
   $corepackPath = Resolve-CorepackCommand
+  $pnpmPath = $null
   if (-not [string]::IsNullOrWhiteSpace($corepackPath)) {
     Write-Info "Activate pinned pnpm via corepack prepare pnpm@$RequiredVersion --activate"
     $prepareOutput = & $corepackPath prepare "pnpm@$RequiredVersion" --activate 2>&1
@@ -283,11 +315,19 @@ function Initialize-PinnedPnpm {
     if ($prepareExit -ne 0) {
       throw "corepack failed to activate pnpm $RequiredVersion (exit=$prepareExit)"
     }
+    # Dispatch through this exact Corepack binary with an explicit pnpm
+    # version. A generic PATH/profile search here can select an unrelated
+    # pnpm.cmd and defeat the activation that just succeeded.
+    $corepackWrapperPath = Join-Path $WrapperRoot "pnpm-corepack-$RequiredVersion.cmd"
+    $pnpmPath = New-CorepackPnpmCommandWrapper `
+      -WrapperPath $corepackWrapperPath `
+      -CorepackPath $corepackPath `
+      -RequiredVersion $RequiredVersion
   } else {
     Write-Info 'corepack is unavailable; an already-installed exact pnpm version is required'
+    $pnpmPath = Resolve-PnpmInstallCommand
   }
 
-  $pnpmPath = Resolve-PnpmInstallCommand
   $actualVersion = Invoke-PnpmSingleLine -PnpmPath $pnpmPath -Arguments @('--version')
   if ([string]::IsNullOrWhiteSpace($actualVersion) -or $actualVersion.Trim() -ne $RequiredVersion) {
     throw "PNPM_VERSION_MISMATCH: package requires $RequiredVersion but resolved '$actualVersion' at $pnpmPath"
@@ -958,7 +998,9 @@ try {
 
   if ($InstallDeps -ne '0') {
     $requiredPnpmVersion = Resolve-PackagePnpmVersion -PackageRoot $packageRoot
-    $pnpmInstallPath = Initialize-PinnedPnpm -RequiredVersion $requiredPnpmVersion
+    $pnpmInstallPath = Initialize-PinnedPnpm `
+      -RequiredVersion $requiredPnpmVersion `
+      -WrapperRoot $extractRoot
     $dependencyTimeoutSec = Convert-PositiveInt -Value $DependencyRefreshTimeoutSec -Label 'DependencyRefreshTimeoutSec'
     $dependencyHeartbeatSec = Convert-PositiveInt -Value $DependencyRefreshHeartbeatSec -Label 'DependencyRefreshHeartbeatSec'
     # The deploy-local content-addressable store is cache-only state. Reusing it

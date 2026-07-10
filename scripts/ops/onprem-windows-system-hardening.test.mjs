@@ -20,8 +20,75 @@ test('Windows apply helper bootstraps SYSTEM-safe tool PATH and resolves pnpm fr
   assert.match(script, /Join-Path \$base 'nodejs'/)
   assert.match(script, /foreach \(\$leaf in @\('pnpm\.exe', 'pnpm\.cmd', 'pnpm\.ps1'\)\)/)
   assert.match(script, /Initialize-WindowsSystemToolPath/)
-  assert.match(script, /\$pnpmInstallPath = Initialize-PinnedPnpm -RequiredVersion \$requiredPnpmVersion/)
+  assert.match(script, /\$pnpmInstallPath = Initialize-PinnedPnpm/)
+  assert.match(script, /-RequiredVersion \$requiredPnpmVersion/)
+  assert.match(script, /-WrapperRoot \$extractRoot/)
   assert.match(script, /\$pnpmPath = Resolve-PnpmInstallCommand/)
+})
+
+test('Corepack activation uses an exact-version dispatcher instead of a shadowing profile binary', () => {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'ms2-corepack-pnpm-'))
+  const applyHelper = path.join(repoRoot, 'scripts/ops/multitable-onprem-apply-package.ps1')
+  const harness = String.raw`
+$ErrorActionPreference = 'Stop'
+$tokens = $null
+$errors = $null
+$ast = [System.Management.Automation.Language.Parser]::ParseFile($env:APPLY_HELPER, [ref]$tokens, [ref]$errors)
+if ($errors.Count -gt 0) { throw ($errors | ForEach-Object { $_.Message } | Out-String) }
+$functionText = $ast.FindAll({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $true) |
+  ForEach-Object { $_.Extent.Text }
+Invoke-Expression ($functionText -join [Environment]::NewLine)
+
+$corepackDir = Join-Path $env:TEST_ROOT 'corepack-bin'
+$profileDir = Join-Path $env:TEST_ROOT 'profile-bin'
+New-Item -ItemType Directory -Path $corepackDir, $profileDir -Force | Out-Null
+$corepackPath = Join-Path $corepackDir 'corepack.cmd'
+$shadowingPnpmPath = Join-Path $profileDir 'pnpm.cmd'
+$wrapperPath = Join-Path $env:TEST_ROOT 'pinned-pnpm.cmd'
+Set-Content -LiteralPath $corepackPath -Value '@echo off' -NoNewline
+Set-Content -LiteralPath $shadowingPnpmPath -Value '@echo 8.0.0' -NoNewline
+
+$resolved = New-CorepackPnpmCommandWrapper -WrapperPath $wrapperPath -CorepackPath $corepackPath -RequiredVersion '9.15.9'
+$wrapper = Get-Content -LiteralPath $resolved -Raw
+if (-not $wrapper.Contains([System.IO.Path]::GetFullPath($corepackPath))) { throw 'wrapper does not pin the Corepack path' }
+if (-not $wrapper.Contains('pnpm@9.15.9')) { throw 'wrapper does not pin the required pnpm version' }
+if (-not $wrapper.Contains('%*')) { throw 'wrapper does not forward pnpm arguments' }
+$expectedDispatch = 'call "' + [System.IO.Path]::GetFullPath($corepackPath) + '" "pnpm@9.15.9" %*'
+if (-not $wrapper.Contains($expectedDispatch)) { throw "wrapper command is not exact: $wrapper" }
+if (-not $wrapper.Contains('set "COREPACK_PNPM_EXIT=%ERRORLEVEL%"')) { throw 'wrapper does not capture the Corepack exit code' }
+if (-not $wrapper.Contains('exit /b %COREPACK_PNPM_EXIT%')) { throw 'wrapper does not propagate the Corepack exit code' }
+if ($wrapper.Contains([System.IO.Path]::GetFullPath($shadowingPnpmPath))) { throw 'wrapper captured the shadowing profile pnpm' }
+`
+
+  try {
+    const result = spawnSync('pwsh', ['-NoProfile', '-NonInteractive', '-Command', harness], {
+      cwd: repoRoot,
+      env: {
+        ...process.env,
+        APPLY_HELPER: applyHelper,
+        TEST_ROOT: tempRoot,
+      },
+      encoding: 'utf8',
+    })
+    assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`)
+
+    const script = readScript('scripts/ops/multitable-onprem-apply-package.ps1')
+    const initializer = script.slice(
+      script.indexOf('function Initialize-PinnedPnpm'),
+      script.indexOf('function Convert-PositiveInt'),
+    )
+    assert.match(initializer, /New-CorepackPnpmCommandWrapper/)
+    assert.match(initializer, /-WrapperPath \$corepackWrapperPath/)
+    assert.match(initializer, /-CorepackPath \$corepackPath/)
+    assert.match(initializer, /-RequiredVersion \$RequiredVersion/)
+    assert.match(
+      initializer,
+      /else \{[\s\S]*\$pnpmPath = Resolve-PnpmInstallCommand/,
+      'generic pnpm discovery should remain only as the no-Corepack fallback',
+    )
+  } finally {
+    fs.rmSync(tempRoot, { recursive: true, force: true })
+  }
 })
 
 test('on-prem package build and apply use the same exact pnpm version', () => {
