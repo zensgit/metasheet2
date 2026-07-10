@@ -15,6 +15,18 @@
  * both preconditions were ALREADY correctly implemented (precondition 2's `JOIN meta_records n` and
  * the `recoverable: replay.total > 0` computation in record-service.ts) but had no dedicated golden.
  * See `/tmp/pr3975-4c3-absorption-audit-claude-20260709.md`.
+ *
+ * RB15/RB16 (2026-07-10 NIT-1/NIT-2 goldens — test + comment-precision only, no product behaviour
+ * changed; see `/tmp/pr3975-4c3-absorption-audit-claude-20260709.md`):
+ *   RB15 pins the diag/INSERT drift tripwire's CURRENT honest semantics (a same-day characterization,
+ *   not a redesign) — calls `replayInboundLinks` directly with an instrumented query function that
+ *   injects a genuinely concurrent neighbour-side write into the gap between the function's two
+ *   statements, then asserts what IS guaranteed (no over-insert; `replayed` matches the DB) alongside
+ *   the current, imprecise skip-bucket fold this drift produces.
+ *   RB16 pins the single-statement write's NOT-EXISTS boundary: it cannot see sibling rows the SAME
+ *   statement is about to add, so pre-existing duplicate tombstone triples under one anchor (itself
+ *   only possible because neither `meta_links` nor `meta_link_tombstones` has a unique constraint on
+ *   the edge triple) replay as a faithful double, not a dedup.
  */
 import express, { type Express } from 'express'
 import request from 'supertest'
@@ -22,6 +34,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, test } from 'vitest'
 
 import { poolManager } from '../../src/integration/db/connection-pool'
 import { univerMetaRouter } from '../../src/routes/univer-meta'
+import { replayInboundLinks } from '../../src/multitable/inbound-link-replay'
 import {
   sweepLinkTombstoneRetention,
   type MetaRevisionRetentionConfig,
@@ -329,5 +342,78 @@ describeIfDatabase('4c-3 — record-undelete inbound-edge replay (real DB, RB ma
     expect(res.status).toBe(200)
     expect(res.body?.data?.inbound).toMatchObject({ replayed: 0, recoverable: false }) // honest, not fabricated
     expect(await edgeCount(F, N, R)).toBe(0)
+  })
+
+  test('RB15 diag/INSERT drift tripwire: a concurrent neighbour-side write between the two statements folds into alreadyPresent — no over-insert, replayed always matches the DB (counts are advisory, not exact)', async () => {
+    const { F, R, N } = await fixture('rb15')
+    expect((await httpDelete(R)).status).toBe(200)
+    const trashRow = (await q('SELECT delete_revision_id FROM meta_records_trash WHERE record_id = $1', [R])).rows[0] as { delete_revision_id: string }
+    const anchor = trashRow.delete_revision_id
+    expect(anchor).toBeTruthy()
+
+    // Instrumented query function: runs every statement normally, but the FIRST time it sees the
+    // diagnostic query (identified by its `GROUP BY 1`, unique among this function's two statements),
+    // it performs a genuinely separate, already-committed write — the neighbour un-declares the link —
+    // before returning. That write lands strictly BETWEEN the diagnostic statement and the one that
+    // follows, reproducing the race the tripwire comment now describes, deterministically.
+    let racedOnce = false
+    const racingQuery = async (sql: string, params?: unknown[]) => {
+      const res = await q(sql, params)
+      if (!racedOnce && sql.includes('GROUP BY 1')) {
+        racedOnce = true
+        await q(`UPDATE meta_records SET data = jsonb_set(data, $2, '[]'::jsonb) WHERE id = $1`, [N, `{${F}}`])
+      }
+      return res
+    }
+
+    const result = await replayInboundLinks(racingQuery, anchor)
+    expect(racedOnce).toBe(true) // sanity: the injected race actually fired
+
+    // GUARANTEED (what this NIT pins as safe): the write statement re-evaluates every precondition
+    // fresh, so the now-declined edge is never inserted — replayed matches DB reality exactly, no
+    // over-insert of stale-consent data.
+    expect(result.replayed).toBe(0)
+    expect(await edgeCount(F, N, R)).toBe(0)
+    // CURRENT (imprecise, pinned as-is — not redesigned): the diagnostic classified this row
+    // 'replayable' a moment before the race; the mismatch against the write's actual (0) count folds
+    // into `alreadyPresent`, not the row's true reason (`neighborDeclined`). `total` is computed BEFORE
+    // this fold and is not recomputed after — so it stays 0 here, undercounting the 1 real tombstone
+    // row for this anchor. Both are advisory diagnostics in this narrow race window, not a data-loss bug.
+    expect(result.skipped.alreadyPresent).toBe(1)
+    expect(result.skipped.neighborDeclined).toBe(0)
+    expect(result.total).toBe(0)
+  })
+
+  test('RB16 duplicate tombstone triples under one anchor: NOT EXISTS cannot see the sibling row the SAME statement is about to add — a pre-existing duplicate edge replays as a faithful double, not a dedup', async () => {
+    process.env[INBOUND_FLAG] = 'true'
+    const F = mkFieldId('rb16')
+    await insertField(SHEET_B, F)
+    const R = mkRecordId('rb16r')
+    await insertRecord(SHEET_A, R, {})
+    const N = mkRecordId('rb16n')
+    await insertRecord(SHEET_B, N, { [F]: [R] })
+    // Pre-existing DUPLICATE edge: the edge triple carries no unique constraint on either table (design-
+    // lock §2/§4 boundary note), so two identical rows CAN already coexist before any delete happens —
+    // e.g. a legacy double-write. Both get captured as their own tombstone row on delete.
+    await insertLink(F, N, R)
+    await insertLink(F, N, R)
+    expect(await edgeCount(F, N, R)).toBe(2)
+
+    expect((await httpDelete(R)).status).toBe(200)
+    const tombstoneRows = await q(
+      'SELECT 1 FROM meta_link_tombstones WHERE record_id = $1 AND field_id = $2 AND foreign_record_id = $3',
+      [N, F, R],
+    )
+    expect(tombstoneRows.rows).toHaveLength(2) // both duplicate edges captured, one tombstone row each
+    expect(await edgeCount(F, N, R)).toBe(0) // both destroyed by the delete
+
+    const res = await httpRestore(R)
+    expect(res.status).toBe(200)
+    // The boundary being pinned: the write statement's guard only sees rows committed before THIS
+    // statement began — never the sibling row this same statement is concurrently adding — so both
+    // duplicate tombstones independently pass the guard and BOTH get inserted. This is a faithful
+    // replay of a pre-existing duplicate, not new duplication invented by restore.
+    expect(res.body?.data?.inbound?.replayed).toBe(2)
+    expect(await edgeCount(F, N, R)).toBe(2)
   })
 })
