@@ -641,15 +641,26 @@ const YUANTUS_SUPPORTED_OPERATIONS = [
  * manifest returned by the provider's `GET /api/v1/integrations/capabilities`. ADVISORY
  * ONLY -- used to decide UI degradation / entry display; NEVER an authorization decision
  * (the PLM provider still enforces is_entitled at every feature endpoint).
+ *
+ * `available` (#4020, additive -- Yuantus provider #1156): the ONE provider-computed
+ * affordance-visibility signal, `available = supported && (packaging === 'base' ||
+ * entitled)`. A base-packaged feature (e.g. `discussion_core`) ships with base PLM and
+ * has no license row, so `entitled` reads false on an unlicensed deployment even though
+ * the affordance should stay visible -- `available` already accounts for that, so
+ * consumers must key visibility on it directly rather than re-deriving from `entitled`
+ * (billing state) or `supported` + a locally-guessed packaging rule. Optional because an
+ * older provider manifest (pre-#1156) omits it entirely -- see `isFeatureAvailable`.
  */
 export interface IntegrationFeatureCapability {
   supported: boolean;
   api_version: string | null;
   entitled: boolean;
-  cache_scope?: { supported?: string; entitled?: string };
+  available?: boolean;
+  cache_scope?: { supported?: string; entitled?: string; available?: string };
   scenarios?: string[];
   actions?: string[];
   action_status?: string;
+  packaging?: string;
 }
 
 export interface IntegrationCapabilityManifest {
@@ -657,6 +668,22 @@ export interface IntegrationCapabilityManifest {
   provider: string;
   advisory: boolean;
   features: Record<string, IntegrationFeatureCapability>;
+}
+
+/**
+ * #4020: the single affordance-visibility judgment every capability consumer should route
+ * through. Consumes the provider-computed `entry.available` DIRECTLY when present (the
+ * unified formula already resolves the base-vs-paid packaging distinction correctly).
+ * Falls back to the pre-#4020 derivation (`supported && entitled`) ONLY when `available`
+ * is absent -- an older provider manifest -- so a consumer talking to a not-yet-upgraded
+ * PLM sees no behavior change. A missing/undefined feature entry is never available.
+ */
+export function isFeatureAvailable(
+  entry: IntegrationFeatureCapability | null | undefined,
+): boolean {
+  if (!entry) return false;
+  if (typeof entry.available === 'boolean') return entry.available;
+  return entry.supported === true && entry.entitled === true;
 }
 
 /**

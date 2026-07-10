@@ -155,6 +155,47 @@ describe('plm-workbench BOM multi-table review route (PLM-COLLAB P3-C)', () => {
     expect(getBomMultitableContext).toHaveBeenCalledWith('P1')
   })
 
+  // #4020: the route is re-keyed through isFeatureAvailable, which consumes the manifest's
+  // `available` field DIRECTLY when the provider sends it, instead of the old raw `entitled`
+  // check. A supported-but-unentitled feature the provider marks `available: true` (the
+  // base-packaged shape, e.g. discussion_core) must proceed to query -- proving this branch no
+  // longer hides on `entitled` alone.
+  it('#4020: supported + entitled:false + available:true (base-packaged shape) -> queries the resource', async () => {
+    const getBomMultitableContext = vi.fn().mockResolvedValue({
+      feature_key: 'bom_multitable', entitled: true, upgrade: { available: false }, context: CONTEXT,
+    })
+    dsMocks.getDataSource.mockReturnValue({
+      getIntegrationCapabilities: vi.fn().mockResolvedValue({
+        available: true,
+        manifest: manifest({ supported: true, api_version: 'v1', entitled: false, available: true }),
+      }),
+      getBomMultitableContext,
+    })
+    const res = await request(app).get(URL)
+    expect(res.status).toBe(200)
+    expect(res.body).toEqual({ data_source_id: 'ds-1', available: true, entitled: true, context: CONTEXT })
+    expect(getBomMultitableContext).toHaveBeenCalledWith('P1')
+  })
+
+  // Symmetric edge-state check: `available` wins even in the direction old code would have
+  // let through -- an `available: false` manifest entry blocks the query WITHOUT consulting
+  // `entitled` at all, confirming the route never re-derives visibility from raw `entitled`
+  // once the provider sends `available`.
+  it('#4020: supported + entitled:true but available:false -> unentitled affordance WITHOUT querying', async () => {
+    const getBomMultitableContext = vi.fn()
+    dsMocks.getDataSource.mockReturnValue({
+      getIntegrationCapabilities: vi.fn().mockResolvedValue({
+        available: true,
+        manifest: manifest({ supported: true, api_version: 'v1', entitled: true, available: false }),
+      }),
+      getBomMultitableContext,
+    })
+    const res = await request(app).get(URL)
+    expect(res.status).toBe(200)
+    expect(res.body).toEqual({ data_source_id: 'ds-1', available: true, entitled: false, context: null })
+    expect(getBomMultitableContext).not.toHaveBeenCalled()
+  })
+
   it('reflects the provider gate: entitled manifest but provider returns unentitled -> null context', async () => {
     const getBomMultitableContext = vi.fn().mockResolvedValue({
       feature_key: 'bom_multitable', entitled: false, upgrade: { available: true }, context: null,
@@ -217,6 +258,30 @@ describe('plm-workbench BOM multi-table review route (PLM-COLLAB P3-C)', () => {
     expect(res.status).toBe(403)
     expect(res.body.reason).toBe('not-entitled')
     expect(updateBomMultitableLine).not.toHaveBeenCalled()
+  })
+
+  // #4020: the write gate is re-keyed through isFeatureAvailable too -- an entitled:false
+  // entry that the provider marks available:true (base-packaged shape) must be let through,
+  // proving this branch no longer reads raw `entitled` directly.
+  it('#4020: write route lets an entitled:false + available:true bom_multitable_writeback entry through', async () => {
+    const updateBomMultitableLine = vi.fn().mockResolvedValue({ data: [{ ok: true, bom_line_id: 'R1' }] })
+    dsMocks.getDataSource.mockReturnValue({
+      getIntegrationCapabilities: vi.fn().mockResolvedValue({
+        available: true,
+        manifest: manifest(
+          { supported: true, api_version: 'v1', entitled: true },
+          { bom_multitable_writeback: { supported: true, api_version: 'v1', entitled: false, available: true } },
+        ),
+      }),
+      getBomMultitableContext: vi.fn(),
+      updateBomMultitableLine,
+    })
+    const res = await request(app)
+      .patch(WRITE_URL)
+      .set('Idempotency-Key', 'submit-1')
+      .send({ quantity: 5 })
+    expect(res.status).toBe(200)
+    expect(updateBomMultitableLine).toHaveBeenCalledTimes(1)
   })
 
   it('write route rejects a missing Idempotency-Key before calling the provider', async () => {
@@ -519,6 +584,26 @@ describe('plm-workbench BOM ECO revision-intent relay (ECO Phase 3)', () => {
     expect(res.status).toBe(403)
     expect(res.body.reason).toBe('not-entitled')
     expect(requestBomEcoRevisionIntent).not.toHaveBeenCalled()
+  })
+
+  // #4020: the intent gate is re-keyed through isFeatureAvailable too -- an entitled:false
+  // entry the provider marks available:true (base-packaged shape) must be let through.
+  it('#4020: intent route lets an entitled:false + available:true bom_eco_revision entry through', async () => {
+    const requestBomEcoRevisionIntent = vi.fn().mockResolvedValue({
+      data: [{ eco_id: 'ECO-2', state: 'progress', attached: false, source_version_id: 'v1', target_version_id: 'v2' }],
+    })
+    dsMocks.getDataSource.mockReturnValue(intentAdapter({
+      getIntegrationCapabilities: vi.fn().mockResolvedValue({
+        available: true,
+        manifest: manifest(BOM_ENTITLED, {
+          bom_eco_revision: { ...ECO_INTENT_FEATURE, entitled: false, available: true },
+        }),
+      }),
+      requestBomEcoRevisionIntent,
+    }))
+    const res = await request(app).post(INTENT_URL)
+    expect(res.status).toBe(200)
+    expect(requestBomEcoRevisionIntent).toHaveBeenCalledTimes(1)
   })
 
   it('404 unsupported when the descriptor omits the eco_revision_intent action; intent never called', async () => {
