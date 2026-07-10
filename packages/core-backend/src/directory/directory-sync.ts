@@ -3476,12 +3476,31 @@ export async function syncDirectoryIntegration(
  * eligibility check alone, so preview no longer counts accounts that are already linked or
  * would merely be linked (not created).
  *
- * Residual known gap (fail-safe, over-counts only): apply mutates its match maps as it
- * auto-admits users within a single run, so two brand-new in-scope pulled users who share an
- * email/mobile count as 1 apply-created account but 2 preview candidates. Preview does not
- * simulate creation order. This does not affect the already-linked / matched / out-of-scope
- * cases this function was built to fix.
+ * Same-batch duplicates: apply mutates its match maps as it auto-admits users within a
+ * single run, so a second brand-new in-scope pulled account that shares an email/mobile/
+ * external-identity with one already counted resolves matched:'email'/'mobile'/
+ * 'external_identity' against the FIRST account's freshly-created user, not matched:'none'
+ * again. Preview mirrors that below with a sentinel userId (`'preview-would-admit'`)
+ * written into `identityMatchMaps` right after counting an in-scope candidate, using the
+ * same normalizeText/normalizeMobileIdentifier keying `resolveDirectoryIdentityMatch`
+ * itself uses — so the next iteration's cascade call sees exactly what apply's would see.
+ *
+ * Residual known gap (fail-safe, over-counts only): this cannot foresee an apply-side
+ * creation FAILURE (e.g. `createDirectoryAdmittedUserInTransaction` throwing mid-run) —
+ * apply's catch block skips its map mutation for a failed account, so a later same-batch
+ * duplicate would still resolve against it as a candidate on the apply side too, while
+ * preview (which cannot know a future apply run will fail) always mutates the maps. Preview
+ * and apply only diverge here when apply itself fails partway through a run.
  */
+
+/**
+ * Placeholder written into `identityMatchMaps` in place of a real `created.userId` (preview
+ * never creates anything). Only ever compared as a map VALUE by `matched-kind` branching —
+ * never read back as a real user id or returned in any preview response field. Distinctive on
+ * purpose so it is unmistakable in a debugger or log if that invariant is ever violated.
+ */
+const PREVIEW_ADMIT_SENTINEL_USER_ID = 'preview-would-admit'
+
 export type DirectorySyncPreview = {
   integrationId: string
   integrationName: string
@@ -3509,6 +3528,15 @@ type ExistingAccountPreviewRow = {
 export async function previewDirectorySyncIntegration(integrationId: string): Promise<DirectorySyncPreview> {
   const integration = await getIntegrationRow(integrationId)
   if (!integration) throw new Error('Directory integration not found')
+
+  // DT-OPS-02 / R3: refuse a preview while a real sync holds the lease for this
+  // integration. Preview pulls the FULL DingTalk directory (same API quota `syncDirectoryIntegration`
+  // consumes — see the doc-comment above) with no lease check at all; running one during an
+  // in-flight sync doubles the shared quota consumption the lease exists to bound. This is a
+  // READ-ONLY refusal: unlike apply, preview never calls `claimDirectorySyncRun` — it only asks
+  // whether a run is currently `running` and, if so, declines before making any outbound call.
+  const activeRunId = await findActiveDirectorySyncRunId(integrationId)
+  if (activeRunId) throw new DirectorySyncInProgressError(activeRunId)
 
   const config = parseIntegrationConfig(integration)
   const departments = await fetchAllDepartments(config, integration.name)
@@ -3592,6 +3620,33 @@ export async function previewDirectorySyncIntegration(integrationId: string): Pr
     // is true (independent of inScope) would over-count vs. apply here too.
     if (eligibility.inScope) {
       autoAdmissionCandidateCount += 1
+      // Same-batch duplicate fix: mirror apply's post-admit map mutations (see the
+      // `emailMap.set` / `mobileMap.set` / ambiguous-key deletes / identity-map sets right
+      // after `createDirectoryAdmittedUserInTransaction` succeeds, above) onto
+      // `identityMatchMaps` with a sentinel userId instead of a real one — preview writes
+      // nothing, so there is no real created.userId to use, only a placeholder that proves
+      // "an account was admitted here" to the next iteration's `resolveDirectoryIdentityMatch`
+      // call. Keyed with the SAME normalizeText/normalizeMobileIdentifier helpers
+      // `resolveDirectoryIdentityMatch` uses internally (lines ~1129-1130 above), so a later
+      // pulled account in this same pull that shares this one's email/mobile/external-identity
+      // resolves matched:'email'/'mobile'/'external_identity' against it — exactly as it would
+      // resolve against the real user apply creates for this account — instead of independently
+      // resolving matched:'none' and being double-counted.
+      const emailKey = normalizeText(account.email).toLowerCase()
+      const mobileKey = normalizeMobileIdentifier(account.mobile)
+      if (emailKey) {
+        identityMatchMaps.emailMap.set(emailKey, PREVIEW_ADMIT_SENTINEL_USER_ID)
+        identityMatchMaps.ambiguousEmailKeys.delete(emailKey)
+      }
+      if (mobileKey) {
+        identityMatchMaps.mobileMap.set(mobileKey, PREVIEW_ADMIT_SENTINEL_USER_ID)
+        identityMatchMaps.ambiguousMobileKeys.delete(mobileKey)
+      }
+      identityMatchMaps.externalIdentityMap.set(account.external_key, PREVIEW_ADMIT_SENTINEL_USER_ID)
+      const scopedOpenIdentityKey = buildScopedIdentityKey(account.corp_id, account.open_id)
+      if (scopedOpenIdentityKey) identityMatchMaps.scopedOpenIdentityMap.set(scopedOpenIdentityKey, PREVIEW_ADMIT_SENTINEL_USER_ID)
+      const scopedUnionIdentityKey = buildScopedIdentityKey(account.corp_id, account.union_id)
+      if (scopedUnionIdentityKey) identityMatchMaps.scopedUnionIdentityMap.set(scopedUnionIdentityKey, PREVIEW_ADMIT_SENTINEL_USER_ID)
     } else if (eligibility.missingEmail) {
       autoAdmissionSkippedMissingEmailCount += 1
     }
