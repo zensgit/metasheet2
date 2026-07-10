@@ -377,10 +377,17 @@ describe('Attendance C5 delivery worker primitives', () => {
       channel: 'dingtalk_work_notification',
       payload: {},
     }
-    // No linked+active binding at all: the ordinary "not onboarded to DingTalk yet" gap. Structural,
-    // not a fault — the worker must terminate this as `skipped`, so the channel flags skip: true.
+    // No linked+active binding at all, AND the org DOES have an active DingTalk integration (H1
+    // hardening — review #3920 P3-1: the 0-row cold path now runs a second EXISTS query before
+    // deciding skip vs retryable; content-discriminate the stub so both queries are answered
+    // correctly regardless of call order): the ordinary "not onboarded to DingTalk yet" gap.
+    // Structural, not a fault — the worker must terminate this as `skipped`, so the channel flags
+    // skip: true. This is the "behavior unchanged" case.
     const noBinding = new DingTalkAttendanceDeliveryChannel({
-      query: async () => ({ rows: [], rowCount: 0 }),
+      query: async (sql: string) => {
+        if (sql.includes('directory_account_links')) return { rows: [], rowCount: 0 }
+        return { rows: [{ org_has_active_integration: true }], rowCount: 1 }
+      },
       readConfig: async () => { throw new Error('should not read config') },
     })
     await expect(noBinding.send(base)).resolves.toEqual({
@@ -421,6 +428,43 @@ describe('Attendance C5 delivery worker primitives', () => {
       skip: true,
       error: 'dingtalk_recipient_external_user_id_missing',
     })
+  })
+
+  it('H1 (review #3920 P3-1): 0-row DingTalk recipient + org has NO active integration -> retryable failure, NOT skip (org-level recoverable outage)', async () => {
+    const base = {
+      id: 'delivery-1',
+      orgId: 'org-suspended',
+      sourceType: 'comp_time_expiry_reminder',
+      sourceId: 'balance-1',
+      sourceKey: 'balance-1:recipient:u1',
+      recipientUserId: 'u1',
+      recipientRole: 'subject',
+      channel: 'dingtalk_work_notification',
+      payload: {},
+    }
+    const queryCalls: Array<{ sql: string; params: unknown[] | undefined }> = []
+    const noOrgIntegration = new DingTalkAttendanceDeliveryChannel({
+      query: async (sql: string, params?: unknown[]) => {
+        queryCalls.push({ sql, params })
+        if (sql.includes('directory_account_links')) return { rows: [], rowCount: 0 }
+        return { rows: [{ org_has_active_integration: false }], rowCount: 1 }
+      },
+      readConfig: async () => { throw new Error('should not read config') },
+    })
+    await expect(noOrgIntegration.send(base)).resolves.toEqual({
+      ok: false,
+      retryable: true,
+      error: 'dingtalk_org_integration_inactive',
+    })
+    // Pin both the recipient query AND the second existence-check query — the predicate scopes on
+    // provider='dingtalk' + status='active', parameterized by orgId only.
+    expect(queryCalls).toHaveLength(2)
+    expect(queryCalls[0].sql).toContain('directory_account_links')
+    expect(queryCalls[0].params).toEqual(['u1', 'org-suspended'])
+    expect(queryCalls[1].sql).toContain('FROM directory_integrations')
+    expect(queryCalls[1].sql).toContain("provider = 'dingtalk'")
+    expect(queryCalls[1].sql).toContain("status = 'active'")
+    expect(queryCalls[1].params).toEqual(['org-suspended'])
   })
 
   it('real DingTalk channel classifies config, network, and DingTalk business failures', async () => {
