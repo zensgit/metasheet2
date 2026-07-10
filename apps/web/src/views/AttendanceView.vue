@@ -7315,6 +7315,127 @@
                 </div>
               </div>
 
+              <div class="attendance__admin-subsection" data-annual-ops-card="bulk-adjust">
+                <h5>{{ tr('Bulk manual adjustment', '批量手工调整') }}</h5>
+                <p class="attendance__field-hint">
+                  {{ tr(
+                    'Pick one or more users; they share the same delta and reason, but each is written as an independent, individually-audited adjustment.',
+                    '选择一个或多个用户；它们共享相同的变动量和原因，但每个用户都作为独立的、可单独审计的调整写入。',
+                  ) }}
+                </p>
+                <div class="attendance__admin-grid">
+                  <AttendanceUserPickerField
+                    v-model="annualBulkAdjustUserPickerValue"
+                    :tr="tr"
+                    :label="tr('Add user', '添加用户')"
+                    name="annualBulkAdjustUserPicker"
+                    :help-text="tr('Search and pick a user, then click Add.', '搜索并选择用户，然后点击添加。')"
+                    :search-placeholder="tr('Search users for bulk adjustment', '搜索批量调整用户')"
+                    :full-width="false"
+                    input-id="attendance-annual-bulk-adjust-user-picker"
+                  />
+                  <div class="attendance__field">
+                    <span>&nbsp;</span>
+                    <button
+                      class="attendance__btn"
+                      type="button"
+                      data-attendance-annual-bulk-adjust-add-user
+                      @click="addAnnualBulkAdjustUser"
+                    >
+                      {{ tr('Add to targets', '添加到目标') }}
+                    </button>
+                  </div>
+                  <label class="attendance__field"><span>{{ tr('Delta (minutes, ±, shared)', '变动(分钟,±,共享)') }}</span><input v-model.number="annualBulkAdjustForm.deltaMinutes" type="number" data-attendance-annual-bulk-adjust-delta /></label>
+                  <label class="attendance__field"><span>{{ tr('Reason (shared)', '原因(共享)') }}</span><input v-model="annualBulkAdjustForm.reason" type="text" maxlength="500" data-attendance-annual-bulk-adjust-reason /></label>
+                </div>
+                <div
+                  v-if="annualBulkAdjustUserIds.length > 0"
+                  class="attendance__bulk-apply-user-chips"
+                  data-attendance-annual-bulk-adjust-user-chips
+                >
+                  <span
+                    v-for="userId in annualBulkAdjustUserIds"
+                    :key="userId"
+                    class="attendance__scheduler-scope-chip"
+                    data-attendance-annual-bulk-adjust-user-chip
+                  >
+                    {{ userId }}
+                    <button
+                      class="attendance__btn attendance__btn--inline"
+                      type="button"
+                      :aria-label="tr(`Remove ${userId}`, `移除 ${userId}`)"
+                      @click="removeAnnualBulkAdjustUser(userId)"
+                    >
+                      &times;
+                    </button>
+                  </span>
+                </div>
+                <span class="attendance__field-hint" data-attendance-annual-bulk-adjust-selected-count>
+                  {{ tr(`Selected users: ${annualBulkAdjustUserIds.length} / ${BULK_BALANCE_ADJUST_MAX_USERS}`, `已选用户：${annualBulkAdjustUserIds.length} / ${BULK_BALANCE_ADJUST_MAX_USERS}`) }}
+                </span>
+                <div class="attendance__admin-actions">
+                  <button
+                    class="attendance__btn attendance__btn--primary"
+                    :disabled="Boolean(annualBulkAdjustSubmitDisabledReason)"
+                    :title="annualBulkAdjustSubmitDisabledReason || undefined"
+                    data-attendance-annual-bulk-adjust-request
+                    type="button"
+                    @click="requestAnnualBulkAdjust"
+                  >
+                    {{ tr('Bulk adjust balance', '批量调整余额') }}
+                  </button>
+                  <small
+                    v-if="annualBulkAdjustSubmitDisabledReason"
+                    class="attendance__field-hint"
+                    data-attendance-annual-bulk-adjust-disabled-reason
+                  >
+                    {{ annualBulkAdjustSubmitDisabledReason }}
+                  </small>
+                </div>
+                <p v-if="annualBulkAdjustError" class="attendance__error" data-attendance-annual-bulk-adjust-error>{{ annualBulkAdjustError }}</p>
+                <div v-if="annualBulkAdjustHasResults" class="attendance__annual-ops-result" data-attendance-annual-bulk-adjust-results>
+                  <span data-attendance-annual-bulk-adjust-summary>
+                    {{ tr(`${annualBulkAdjustAppliedCount} applied, ${annualBulkAdjustFailedCount} failed`, `${annualBulkAdjustAppliedCount} 成功，${annualBulkAdjustFailedCount} 失败`) }}
+                  </span>
+                  <table class="attendance__table">
+                    <thead><tr><th>{{ tr('User', '用户') }}</th><th>{{ tr('Result', '结果') }}</th></tr></thead>
+                    <tbody>
+                      <tr v-for="userId in annualBulkAdjustUserIds" :key="userId">
+                        <td>{{ userId }}</td>
+                        <td>
+                          <span
+                            v-if="annualBulkAdjust.results[userId]"
+                            class="attendance__status-chip"
+                            :data-attendance-annual-bulk-adjust-row-state="annualBulkAdjust.results[userId]?.state"
+                            :data-attendance-annual-bulk-adjust-row-error-kind="annualBulkAdjust.results[userId]?.errorKind"
+                          >
+                            {{ annualBulkAdjustRowResultText(userId) }}
+                          </span>
+                        </td>
+                      </tr>
+                    </tbody>
+                  </table>
+                  <p
+                    v-if="annualBulkAdjustOutcome === 'completed_with_errors'"
+                    class="attendance__error"
+                    data-attendance-annual-bulk-adjust-outcome-error
+                  >
+                    {{ tr('Some users failed. Retry the failed users, or start a new batch.', '部分用户失败。请重试失败用户，或开始新一批。') }}
+                  </p>
+                  <div class="attendance__admin-actions">
+                    <button
+                      class="attendance__btn"
+                      type="button"
+                      :disabled="annualBulkAdjust.submitting || annualBulkAdjustOutcome !== 'completed_with_errors'"
+                      data-attendance-annual-bulk-adjust-retry
+                      @click="retryAnnualBulkAdjust"
+                    >
+                      {{ annualBulkAdjust.submitting ? tr('Submitting...', '提交中...') : tr('Retry failed users', '重试失败用户') }}
+                    </button>
+                  </div>
+                </div>
+              </div>
+
               <div class="attendance__admin-subsection" data-annual-ops-card="backfill">
                 <h5>{{ tr('Expiry backfill', '过期回填') }}</h5>
                 <div class="attendance__admin-actions">
@@ -9879,6 +10000,17 @@ import {
   type BatchAnomalyRowResult,
   type BatchAnomalyRowSnapshot,
 } from './attendance/batchAnomalyResolution'
+import {
+  BULK_BALANCE_ADJUST_MAX_USERS,
+  bulkBalanceAdjustErrorText,
+  buildBulkBalanceAdjustRows,
+  canRunBulkBalanceAdjust,
+  runBulkBalanceAdjust,
+  summarizeBulkBalanceAdjustOutcome,
+  type BulkBalanceAdjustRowResult,
+  type BulkBalanceAdjustRowSnapshot,
+  type BulkBalanceAdjustSubmitOutcome,
+} from './attendance/bulkBalanceAdjust'
 import {
   buildRuleSetPreviewRecommendations,
   summarizeRuleSetPreviewResult,
@@ -24190,6 +24322,184 @@ async function submitAnnualAdjust(snapshot: { userId: string; deltaMinutes: numb
   } finally {
     annualAdjustSubmitting.value = false
   }
+}
+
+// -- Card 1b (S6 #3925 design-lock 2026-07-10): bulk manual adjustment — a client-side
+// sequential loop over the SAME single-user route as Card 1 above, sharing one
+// {deltaMinutes, reason} across a user-picker selection (annual only — G1). Kept as its own
+// state block (never entangled with the single-row annualAdjustForm) so a partial-failure
+// retry here can never touch Card 1's own in-flight request. G4: reuses annualOpsConfirm's
+// shape for the confirm step; the actual network loop only runs from onConfirm, mirroring
+// the bulk-apply-schedule / batch-anomaly two-step precedent.
+const annualBulkAdjustUserPickerValue = ref('')
+const annualBulkAdjustUserIds = ref<string[]>([])
+const annualBulkAdjustForm = reactive<{ deltaMinutes: number; reason: string }>({ deltaMinutes: 0, reason: '' })
+const annualBulkAdjustError = ref<string | null>(null)
+const annualBulkAdjust = reactive<{
+  submitting: boolean
+  rows: BulkBalanceAdjustRowSnapshot[]
+  results: Record<string, BulkBalanceAdjustRowResult>
+}>({ submitting: false, rows: [], results: {} })
+
+function addAnnualBulkAdjustUser(): void {
+  const userId = annualBulkAdjustUserPickerValue.value.trim()
+  if (!userId) return
+  if (!annualBulkAdjustUserIds.value.includes(userId)) {
+    annualBulkAdjustUserIds.value = [...annualBulkAdjustUserIds.value, userId]
+  }
+  annualBulkAdjustUserPickerValue.value = ''
+}
+
+function removeAnnualBulkAdjustUser(userId: string): void {
+  annualBulkAdjustUserIds.value = annualBulkAdjustUserIds.value.filter(id => id !== userId)
+}
+
+const annualBulkAdjustSubmitDisabledReason = computed(() => {
+  if (!annualOpsPolicyEnabled.value) {
+    return tr('The annual leave engine is disabled.', '年假引擎未启用。')
+  }
+  if (annualBulkAdjust.submitting) return tr('Bulk adjustment in progress...', '批量调整处理中...')
+  if (annualBulkAdjustUserIds.value.length === 0) return tr('Add at least one user.', '请至少添加一个用户。')
+  if (!canRunBulkBalanceAdjust(annualBulkAdjustUserIds.value.length)) {
+    return tr(
+      `Select at most ${BULK_BALANCE_ADJUST_MAX_USERS} users; narrow the selection.`,
+      `最多选择 ${BULK_BALANCE_ADJUST_MAX_USERS} 个用户；请缩小选择范围。`,
+    )
+  }
+  const delta = Number(annualBulkAdjustForm.deltaMinutes)
+  if (!Number.isInteger(delta) || delta === 0) {
+    return tr('Enter a non-zero whole number of minutes.', '请输入非零整数分钟。')
+  }
+  if (!annualBulkAdjustForm.reason.trim()) return tr('A reason is required.', '必须填写原因。')
+  return ''
+})
+
+const annualBulkAdjustOutcome = computed(() => summarizeBulkBalanceAdjustOutcome(Object.values(annualBulkAdjust.results)))
+const annualBulkAdjustHasResults = computed(() => Object.keys(annualBulkAdjust.results).length > 0)
+const annualBulkAdjustAppliedCount = computed(() => Object.values(annualBulkAdjust.results).filter(r => r.state === 'ok').length)
+const annualBulkAdjustFailedCount = computed(() => Object.values(annualBulkAdjust.results).filter(r => r.state === 'error').length)
+
+function annualBulkAdjustRowResultText(userId: string): string {
+  const result = annualBulkAdjust.results[userId]
+  if (!result) return ''
+  if (result.state === 'ok') return tr('Applied', '已应用')
+  if (result.state === 'error') return bulkBalanceAdjustErrorText(result.errorKind ?? 'generic', tr)
+  return tr('Submitting...', '提交中...')
+}
+
+// Phase 1 (selection -> confirm): builds the row snapshot and opens the SHARED annualOpsConfirm
+// panel only — this function must never call runBulkBalanceAdjust/apiFetch directly
+// (design §G4 confirm gate).
+function requestAnnualBulkAdjust(): void {
+  annualBulkAdjustError.value = null
+  const userIds = [...annualBulkAdjustUserIds.value]
+  const delta = Number(annualBulkAdjustForm.deltaMinutes)
+  const reason = annualBulkAdjustForm.reason.trim()
+  if (userIds.length === 0) {
+    annualBulkAdjustError.value = tr('Add at least one user', '请至少添加一个用户')
+    return
+  }
+  if (!canRunBulkBalanceAdjust(userIds.length)) {
+    annualBulkAdjustError.value = tr(
+      `Select at most ${BULK_BALANCE_ADJUST_MAX_USERS} users; narrow the selection.`,
+      `最多选择 ${BULK_BALANCE_ADJUST_MAX_USERS} 个用户；请缩小选择范围。`,
+    )
+    return
+  }
+  if (!Number.isInteger(delta) || delta === 0) {
+    annualBulkAdjustError.value = tr('The adjustment must be a non-zero whole number of minutes', '调整必须是非零整数分钟')
+    return
+  }
+  if (!reason) {
+    annualBulkAdjustError.value = tr('A reason is required', '必须填写原因')
+    return
+  }
+  // A brand-new confirmed request always starts a clean batch — a retry (below) reuses
+  // submitAnnualBulkAdjust directly against the already-built rows, never through here.
+  const rows = buildBulkBalanceAdjustRows(userIds, { deltaMinutes: delta, reason }, annualOpsIdempotencyKey)
+  annualBulkAdjust.results = {}
+  openAnnualOpsConfirm({
+    title: tr('Confirm bulk balance adjustment', '确认批量余额调整'),
+    lines: [
+      { label: tr('Users', '用户数'), value: String(rows.length) },
+      { label: tr('Delta (min, shared)', '变动(分钟,共享)'), value: (delta > 0 ? '+' : '') + delta },
+      { label: tr('Reason', '原因'), value: reason },
+      // G3 (override-import-guard design-lock, 2026-07-05): negative adjustments (deductions)
+      // get the same extra irreversibility note as the single-row Card 1 — pure copy, no
+      // behavior change.
+      ...(delta < 0 ? [buildManualAdjustDeductionLedgerLine(tr)] : []),
+    ],
+    onConfirm: () => { void submitAnnualBulkAdjust(rows) },
+  })
+}
+
+// Phase 2 (confirm -> submit): the ONLY function that calls runBulkBalanceAdjust / hits the
+// network. Also the REAL annualOpsPolicyEnabled gate (design §G4 — "批量入口受同一 FE
+// annualOpsPolicyEnabled 门"); the template's :disabled bindings are the proactive UX layer,
+// this is the handler-level guard a direct call cannot bypass (mirrors annualOpsPost's gate).
+async function submitAnnualBulkAdjust(rows: BulkBalanceAdjustRowSnapshot[]): Promise<void> {
+  if (!annualOpsPolicyEnabled.value) {
+    annualBulkAdjustError.value = annualOpsErrorLine('ANNUAL_LEAVE_NOT_ENABLED')
+    return
+  }
+  if (annualBulkAdjust.submitting) return
+  annualBulkAdjust.submitting = true
+  annualBulkAdjust.rows = rows
+  annualBulkAdjustError.value = null
+  const current = new Map<string, BulkBalanceAdjustRowResult>(Object.entries(annualBulkAdjust.results))
+  try {
+    const finalResults = await runBulkBalanceAdjust(
+      rows,
+      current,
+      async (row): Promise<BulkBalanceAdjustSubmitOutcome> => {
+        try {
+          const response = await apiFetch('/api/attendance/annual-leave-manual-adjustment', {
+            method: 'POST',
+            body: JSON.stringify({
+              orgId: normalizedOrgId(),
+              userId: row.userId,
+              deltaMinutes: row.deltaMinutes,
+              reason: row.reason,
+              idempotencyKey: row.idempotencyKey,
+            }),
+          })
+          const data = await response.json().catch(() => null)
+          if (!response.ok || !data?.ok) {
+            throw createApiError(response, data, tr('Bulk balance adjust failed', '批量余额调整失败'))
+          }
+          return {
+            ok: true as const,
+            result: { adjustmentId: data.data?.id, applied: data.data?.applied, alreadyApplied: data.data?.alreadyApplied },
+          }
+        } catch (error) {
+          // Per-row 404/422/409 are per-target results, not a global admin-forbidden state
+          // (design §G3 — "per-row 结果非全局中止"); this loop never sets adminForbidden.
+          return { ok: false as const, errorCode: (error as AttendanceApiError)?.code }
+        }
+      },
+      (userId, result) => {
+        annualBulkAdjust.results = { ...annualBulkAdjust.results, [userId]: result }
+      },
+    )
+    annualBulkAdjust.results = Object.fromEntries(finalResults)
+    const values = [...finalResults.values()]
+    const okCount = values.filter(r => r.state === 'ok').length
+    const errCount = values.filter(r => r.state === 'error').length
+    setStatus(
+      tr(`Bulk balance adjust: ${okCount} applied, ${errCount} failed.`, `批量余额调整：${okCount} 成功，${errCount} 失败。`),
+      errCount > 0 ? 'error' : undefined,
+    )
+  } finally {
+    annualBulkAdjust.submitting = false
+  }
+}
+
+// Retry: only re-submits rows not yet `ok` (design §G5) — reuses the same snapshot `rows`
+// built at confirm time (no re-prompt), so it stays independent of whatever the live form
+// currently shows.
+function retryAnnualBulkAdjust(): void {
+  if (annualBulkAdjust.rows.length === 0 || annualBulkAdjust.submitting) return
+  void submitAnnualBulkAdjust(annualBulkAdjust.rows)
 }
 
 // -- Card 2: expiry backfill (server dry-run; returns {scanned,updated,skipped,reasons{code→count}}) --
