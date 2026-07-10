@@ -17,7 +17,7 @@
 | #4007 `bd0c7da11` | 字段名泄漏修复：**layer-2 ∩ layer-3**（owner P1 修正后）`historyVisibleFields = filterPropertyVisibleFields(scopedAllFields)` | 真实挂载 spec 钉两层（HiddenNotes/SecretSalary）；两个单层突变各红对应断言 |
 | #4012 `555a21079` | 记录标题（pickRecordTitle over 已掩码 payload；删除行取 before）+ link/person 类型化 diff + **owner P2 修**：`linkSummariesForSide` 按侧 value ids 值序过滤，全覆盖或计数回退 | 6+2 新 spec；标题双突变；unfiltered 直传突变恰好双红（before 含 Beta Task / under-counted）|
 | #4018 `2dc5587ca` | 批次详情→记录抽屉 click-through（复刻 onNotificationNavigate：onSelectSheet→resolveDeepLink；零新端点/文案）| modal emit 契约 + workbench 四态（in-page/off-page fetch/gone toast/cross-sheet）；neuter emit 突变 5 红 |
-| #4025（head `519679bfa`，审毕 APPROVE，auto-merge 布防中——热 main 竞态，本文发布时可能已合入，以 PR 页为准） | 4c-3 NIT 金测：RB15（drift-tripwire 竞态诚实钉）+ RB16（NOT EXISTS 同语句盲区=忠实双放）+ 注释精化（tripwire 语义/tombstone-capture 路由枚举补 PIT-reset）；NIT-5a(SELECT *) 如实跳过 | 每金测独立突变（fold 移除→RB15 红；DISTINCT ON→RB16 红）；新鲜 pg 16/16+邻居 35/35 |
+| #4025 `ea45dde6a`（最终 head `7f48983a`；本行原记 auto-merge 布防中/旧 head `519679bfa`，由 R9 fix-forward 对账更正） | 4c-3 NIT 金测：RB15（drift-tripwire 竞态诚实钉）+ RB16（NOT EXISTS 同语句盲区=忠实双放）+ 注释精化（tripwire 语义/tombstone-capture 路由枚举补 PIT-reset）；NIT-5a(SELECT *) 如实跳过 | 每金测独立突变（fold 移除→RB15 红；DISTINCT ON→RB16 红）；新鲜 pg 16/16+邻居 35/35 |
 
 ## §2 Owner 深审（2P1+2P2）→ 修复 → 复审
 
@@ -26,6 +26,19 @@
 - **P2 #4012**：formatFieldDisplay 有摘要即无视 value —— 两侧同名单；修=按侧过滤。
 - **P2 #4004**：锁内四条款互相矛盾 —— 修=§1.11 真值表（SIDE_DOOR×CAPTURE×schema，每行 golden 钉）+ **schema 缺失+flag-on=fail-closed**（owner 裁决；与 UI 路径 never-fail 降级的不对称=显式 ratify 项）。
 - **复审**（独立对抗代理，突变全数自行复现，worktree 复原核验）：#4003/#4006/#4007/#4012/#4018 全 **LAND**，#4004 **RATIFY-gate**（真值表无矛盾、每行有 golden）。0 新 P1/P2。附带：TrashModal layer-2 标题播种=观察项（未修）；pickRecordTitle 无摘要 NIT；#4004 §1.8 可补 path-2 交叉引用 NIT。复审 MD=/tmp/r9-stack-rereview-claude-20260710.md。
+
+## §2b Owner 补审（#4025/#4042，2026-07-10）→ fix-forward
+
+轮末汇报曾把 #4025/#4042 与前六项并述——实际上二者当时**仅做了合并核验，未做 owner 内容深审**。补审结论：1 P2 + 2 P3，由本 fix-forward PR 同修：
+
+- **P2（行为修正，owner 裁决，两阶段）**：`InboundReplayResult.total` 原实现先算 `total` 再做 tripwire fold——DOWNWARD drift 窗口内 total 少计到 0，下游 `recoverable: replay.total > 0`（record-service.ts）随之失真，RB15 还把这一不一致固化为断言（`total===0`）。
+  - **首修**（后被推翻）：fold 完再派生 `total = replayed + sum(skipped)`，RB15 期望 `total===1` + 恒等断言——只解决 downward 方向。
+  - **复审发现 UPWARD drift 仍过计**（owner 反例）：diag 时 `neighborDeclined=1/replayable=0`，缝隙里邻居再同意、写入成功 ⇒ `replayed=1` + stale 标签 1 ⇒ 派生 total=2，而锚下真实只有 1 条 tombstone；恒等断言只证 `2===1+1` 的算术自洽，证不了 total 真实。
+  - **终修**：`total = diagnosticTotal`（诊断语句单快照锁定真值：每条锚行恰落一个 CASE 桶；锚 tombstone 集 in-txn 稳定——capture 不会对已删记录运行，retention 地板保住持有 FOR-UPDATE trash 行的组），**永不从 replayed/skipped 派生**；放弃 upward 方向的 sum 强契约（stale 标签不可归因，`skipped` breakdown 在 drift 窗口明文 advisory；`total`/`replayed` 恒精确）。**RB17** 钉住 upward：`replayed=1` 且 `total=1`（非 stale 膨胀的 2），sum-超出-total 边界诚实钉在 2；判别突变（total 改回派生）→ 恰 RB17 红、RB15 绿。RB15 改题 DOWNWARD（fold 保 sum 恒等=附带成立非承诺）。
+- **P3（注释自相矛盾）**：tripwire 注释称 NOT EXISTS「仍能阻止任何重复」，与 RB16 证明的同语句盲区矛盾——收窄为「拒绝语句快照中已可见的重复；同语句正在插入的兄弟行对其不可见（RB16）」。
+- **P3（本台账过时）**：§1 表 #4025 行原记旧 head `519679bfa`/auto-merge 中——已更正为合并 SHA `ea45dde6a`（最终 head `7f48983a`）。
+
+补审其余结论良好（RB15 注入确在两条 SQL 之间、RB16 确验同语句可见性边界、测试文件已在 real-DB CI 清单、#4025 全检查通过）。
 
 ## §3 D-2 设计锁（#4004, PROPOSED — owner ratify 前零实现授权）
 

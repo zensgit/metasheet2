@@ -60,10 +60,13 @@
 > **余量（更新后口径）**:
 > 1. 🔒 **owner/operator 门不变**:S7 A2-resolver（等 A1 live 手感）· 五连 staging smoke · E4 真机注册 ·
 >    档 B 治理门 · T2 三项（§3.1 打卡切外勤 / #2 自助入口 / #8 多段夜班）。
-> 2. **P3 硬化小刀池（审阅产出,下波可自主）**:R4 P3-1（org 无 active 集成→retryable 非终态 skipped）·
->    S2 P3-1（photo magic-byte 嗅探）· S2 P3-2（files delete 孤儿行/悬挂证据）。
+> 2. ~~**P3 硬化小刀池**~~ → **Wave-2 已全落地 ✅（2026-07-10 同日）**:R4 P3-1 = H1 #4045 `4c0e11e2e` ·
+>    S2 P3-1+P3-2 = H2 #4044 `7a94997e5`。验证 MD:`attendance-hardening-wave2-verification-20260710.md`。
 > 3. **命名前置（按需立项）**:wecom directory population 线 · comp_time 单人调整 primitive ·
 >    SMS 渠道（供应商选型 owner 门）· >50 org 计提 fairness 轮转。
+> 4. **新增 owner 决策项（H1 审阅产出）**:never-configured vs suspended 收窄（`has_active/has_any` 双谓词,
+>    从未配集成的 org→安静 skip、仅 suspended→retryable）——收窄了已 ratify 的「无 active 行→retryable」
+>    决定,需 owner ack 后另刀。
 
 ---
 

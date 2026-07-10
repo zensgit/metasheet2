@@ -344,7 +344,7 @@ describeIfDatabase('4c-3 — record-undelete inbound-edge replay (real DB, RB ma
     expect(await edgeCount(F, N, R)).toBe(0)
   })
 
-  test('RB15 diag/INSERT drift tripwire: a concurrent neighbour-side write between the two statements folds into alreadyPresent — no over-insert, replayed always matches the DB (counts are advisory, not exact)', async () => {
+  test('RB15 DOWNWARD drift (replayable→declined between the two statements): no over-insert, replayed matches the DB, fold keeps the sum consistent, and total stays the TRUE anchor count', async () => {
     const { F, R, N } = await fixture('rb15')
     expect((await httpDelete(R)).status).toBe(200)
     const trashRow = (await q('SELECT delete_revision_id FROM meta_records_trash WHERE record_id = $1', [R])).rows[0] as { delete_revision_id: string }
@@ -374,14 +374,65 @@ describeIfDatabase('4c-3 — record-undelete inbound-edge replay (real DB, RB ma
     // over-insert of stale-consent data.
     expect(result.replayed).toBe(0)
     expect(await edgeCount(F, N, R)).toBe(0)
-    // CURRENT (imprecise, pinned as-is — not redesigned): the diagnostic classified this row
+    // LABEL (imprecise, pinned as-is — not redesigned): the diagnostic classified this row
     // 'replayable' a moment before the race; the mismatch against the write's actual (0) count folds
-    // into `alreadyPresent`, not the row's true reason (`neighborDeclined`). `total` is computed BEFORE
-    // this fold and is not recomputed after — so it stays 0 here, undercounting the 1 real tombstone
-    // row for this anchor. Both are advisory diagnostics in this narrow race window, not a data-loss bug.
+    // into `alreadyPresent`, not the row's true reason (`neighborDeclined`). The label is advisory in
+    // this narrow race window — not a data-loss bug.
     expect(result.skipped.alreadyPresent).toBe(1)
     expect(result.skipped.neighborDeclined).toBe(0)
-    expect(result.total).toBe(0)
+    // CONTRACT (owner P2, R9 fix-forward): total is the TRUE tombstone count under the anchor —
+    // locked from the diagnostic snapshot, never derived from replayed/skipped arithmetic. Here the
+    // anchor holds exactly 1 tombstone, so total===1 (the original pre-fold derivation returned 0,
+    // breaking the downstream `recoverable: replay.total > 0` in record-service.ts). In DOWNWARD
+    // drift the fold also keeps the sum identity — pinned as a bonus, but see RB17: upward drift
+    // deliberately does NOT promise it.
+    expect(result.total).toBe(1)
+    expect(result.total).toBe(
+      result.replayed + Object.values(result.skipped).reduce((a: number, b: number) => a + b, 0),
+    )
+  })
+
+  test('RB17 UPWARD drift (declined→re-consented between the two statements): write inserts the edge, total stays the TRUE anchor count (1, not a stale-label-inflated 2)', async () => {
+    process.env[INBOUND_FLAG] = 'true'
+    const { F, R, N } = await fixture('rb17')
+    expect((await httpDelete(R)).status).toBe(200)
+    const trashRow = (await q('SELECT delete_revision_id FROM meta_records_trash WHERE record_id = $1', [R])).rows[0] as { delete_revision_id: string }
+    const anchor = trashRow.delete_revision_id
+    expect(anchor).toBeTruthy()
+
+    // Set up the DECLINED starting state: at diagnostic time the neighbour does NOT declare the
+    // link, so the diag classifies the row neighborDeclined (replayable=0).
+    await q(`UPDATE meta_records SET data = jsonb_set(data, $2, '[]'::jsonb) WHERE id = $1`, [N, `{${F}}`])
+
+    // Same injection shape as RB15, opposite direction: strictly between the diagnostic and the
+    // write, the neighbour RE-consents — the write's fresh precondition-6 then passes and inserts.
+    let racedOnce = false
+    const racingQuery = async (sql: string, params?: unknown[]) => {
+      const res = await q(sql, params)
+      if (!racedOnce && sql.includes('GROUP BY 1')) {
+        racedOnce = true
+        await q(`UPDATE meta_records SET data = jsonb_set(data, $2, $3::jsonb) WHERE id = $1`, [N, `{${F}}`, JSON.stringify([R])])
+      }
+      return res
+    }
+
+    const result = await replayInboundLinks(racingQuery, anchor)
+    expect(racedOnce).toBe(true)
+
+    // GUARANTEED: the write saw the re-consent and inserted exactly the one real edge.
+    expect(result.replayed).toBe(1)
+    expect(await edgeCount(F, N, R)).toBe(1)
+    // CONTRACT (owner P2, upward direction): the anchor holds exactly ONE tombstone row, and total
+    // must say so. A total derived as replayed + sum(skipped) would report 2 here (the stale
+    // neighborDeclined diagnostic label cannot be attributed away) — over-counting reality.
+    expect(result.total).toBe(1)
+    // LABEL (advisory, pinned honestly): the diag-time neighborDeclined label survives even though
+    // that row was in fact written — in UPWARD drift replayed + sum(skipped) EXCEEDS total by the
+    // drift amount. This is the documented boundary of the per-bucket breakdown, not a count bug.
+    expect(result.skipped.neighborDeclined).toBe(1)
+    expect(
+      result.replayed + Object.values(result.skipped).reduce((a: number, b: number) => a + b, 0),
+    ).toBe(2)
   })
 
   test('RB16 duplicate tombstone triples under one anchor: NOT EXISTS cannot see the sibling row the SAME statement is about to add — a pre-existing duplicate edge replays as a faithful double, not a dedup', async () => {
