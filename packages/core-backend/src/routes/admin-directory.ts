@@ -359,6 +359,13 @@ export function adminDirectoryRouter(): Router {
       const preview = await previewDirectorySyncIntegration(req.params.integrationId)
       jsonOk(res, { preview })
     } catch (error) {
+      // DT-HARDEN-05 / R3: a real sync holds the lease — same benign "already running" state
+      // as the two sync-trigger branches above, mapped identically (409 + the active runId,
+      // never a 500 that monitoring pages on).
+      if (error instanceof DirectorySyncInProgressError) {
+        jsonError(res, error.statusCode, error.code, error.message, { activeRunId: error.activeRunId })
+        return
+      }
       const message = readErrorMessage(error, 'Failed to preview directory sync')
       jsonError(res, /not found/i.test(message) ? 404 : 500, 'DIRECTORY_SYNC_PREVIEW_FAILED', message)
     }

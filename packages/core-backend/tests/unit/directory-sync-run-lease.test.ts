@@ -31,6 +31,7 @@ import {
   DIRECTORY_SYNC_LEASE_STALE_MINUTES,
   DirectorySyncInProgressError,
   DirectorySyncLeaseLostError,
+  previewDirectorySyncIntegration,
   reclaimStaleDirectorySyncRuns,
   syncDirectoryIntegration,
 } from '../../src/directory/directory-sync'
@@ -356,6 +357,66 @@ describe('DT-HARDEN-05 directory sync run lease', () => {
       expect(failureWrite).toBeDefined()
       expect(failureWrite?.params?.[0]).toBe(RUN_ID)
       expect(String(failureWrite?.params?.[1])).toContain('lost its lease while still alive')
+    })
+  })
+
+  /**
+   * R3 — preview must not double the shared DingTalk API quota the lease exists to bound.
+   * `previewDirectorySyncIntegration` pulls the FULL directory just like apply does, so
+   * running it while a real sync holds the lease consumes the same quota twice. Unlike
+   * apply, preview never claims the lease (`claimDirectorySyncRun`/`INSERT INTO
+   * directory_sync_runs` must never appear here) — it only asks `findActiveDirectorySyncRunId`
+   * whether a run is currently `running` and refuses, read-only, before any outbound call.
+   */
+  describe('previewDirectorySyncIntegration refuses while a run holds the lease (R3)', () => {
+    it('refuses a preview while a sync is running and never touches the DingTalk API', async () => {
+      pgMocks.query
+        // getIntegrationRow
+        .mockResolvedValueOnce({ rows: [INTEGRATION_ROW] })
+        // findActiveDirectorySyncRunId
+        .mockResolvedValueOnce({ rows: [{ id: 'run-active' }] })
+
+      await expect(previewDirectorySyncIntegration('dir-1'))
+        .rejects.toBeInstanceOf(DirectorySyncInProgressError)
+
+      // The load-bearing assertion: the expensive, quota-consuming pull never started.
+      expect(dingtalkMocks.fetchDingTalkAppAccessToken).not.toHaveBeenCalled()
+      expect(dingtalkMocks.listDingTalkDepartments).not.toHaveBeenCalled()
+    })
+
+    it('carries the active run id, and never claims a lease of its own', async () => {
+      pgMocks.query
+        .mockResolvedValueOnce({ rows: [INTEGRATION_ROW] })
+        .mockResolvedValueOnce({ rows: [{ id: 'run-active' }] })
+
+      const error = await previewDirectorySyncIntegration('dir-1').catch((err) => err)
+      expect(error).toBeInstanceOf(DirectorySyncInProgressError)
+      expect((error as DirectorySyncInProgressError).activeRunId).toBe('run-active')
+      expect((error as DirectorySyncInProgressError).statusCode).toBe(409)
+
+      // Preview is read-only: it must never attempt to claim the lease it is checking.
+      const insertedRunRow = pgMocks.query.mock.calls.some(([sql]) => String(sql).includes('INSERT INTO directory_sync_runs'))
+      expect(insertedRunRow).toBe(false)
+    })
+
+    it('proceeds with the pull when no run is active', async () => {
+      pgMocks.query.mockImplementation(async (sql: unknown) => {
+        const text = String(sql)
+        if (text.includes('FROM directory_integrations')) return { rows: [INTEGRATION_ROW] }
+        if (text.includes('FROM directory_sync_runs') && text.includes("status = 'running'")) return { rows: [] }
+        if (text.includes('FROM directory_accounts')) return { rows: [] }
+        return { rows: [] }
+      })
+      dingtalkMocks.fetchDingTalkAppAccessToken.mockResolvedValue('token')
+      dingtalkMocks.listDingTalkDepartments.mockResolvedValue([])
+      dingtalkMocks.getDingTalkDepartmentDetail.mockResolvedValue({ deptManagerUserIdList: [] })
+      dingtalkMocks.listDingTalkDepartmentUsers.mockResolvedValue({ users: [], hasMore: false, nextCursor: null })
+
+      const preview = await previewDirectorySyncIntegration('dir-1')
+
+      expect(preview.integrationId).toBe('dir-1')
+      // No active run this time — the pull proceeds.
+      expect(dingtalkMocks.fetchDingTalkAppAccessToken).toHaveBeenCalled()
     })
   })
 })

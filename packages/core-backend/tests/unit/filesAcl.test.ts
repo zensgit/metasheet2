@@ -28,30 +28,35 @@ describe('filesAcl: getFilesRequestUserId', () => {
   })
 })
 
-describe('filesAcl: filesAclAllowsAccess', () => {
-  it('admin is always allowed, regardless of row state', () => {
-    expect(filesAclAllowsAccess({ admin: true, callerId: 'someone', row: null })).toBe(true)
-    expect(filesAclAllowsAccess({ admin: true, callerId: 'someone', row: { ownerId: 'other-user' } })).toBe(true)
-    expect(filesAclAllowsAccess({ admin: true, callerId: 'someone', row: { ownerId: FILES_ANONYMOUS_OWNER_ID } })).toBe(true)
+describe('filesAcl: filesAclAllowsAccess (F3 G7 three-state)', () => {
+  it('admin is allowed for an active or missing record', () => {
+    expect(filesAclAllowsAccess({ admin: true, callerId: 'someone', record: { state: 'missing' } })).toBe(true)
+    expect(filesAclAllowsAccess({ admin: true, callerId: 'someone', record: { state: 'active', ownerId: 'other-user' } })).toBe(true)
+    expect(filesAclAllowsAccess({ admin: true, callerId: 'someone', record: { state: 'active', ownerId: FILES_ANONYMOUS_OWNER_ID } })).toBe(true)
   })
 
-  it('non-admin with no active row (never existed, or already tombstoned) is denied', () => {
-    expect(filesAclAllowsAccess({ admin: false, callerId: 'owner-1', row: null })).toBe(false)
+  it('F3-3 / test 8 — a DELETED (tombstoned) record is 404 for EVERYONE, including admin', () => {
+    expect(filesAclAllowsAccess({ admin: true, callerId: 'someone', record: { state: 'deleted' } })).toBe(false)
+    expect(filesAclAllowsAccess({ admin: false, callerId: 'someone', record: { state: 'deleted' } })).toBe(false)
   })
 
-  it('non-admin owner of the row is allowed', () => {
-    expect(filesAclAllowsAccess({ admin: false, callerId: 'owner-1', row: { ownerId: 'owner-1' } })).toBe(true)
+  it('non-admin with a missing record (never existed, or predates the S2 writer) is denied', () => {
+    expect(filesAclAllowsAccess({ admin: false, callerId: 'owner-1', record: { state: 'missing' } })).toBe(false)
   })
 
-  it('non-admin caller who is not the row owner is denied (cross-user access)', () => {
-    expect(filesAclAllowsAccess({ admin: false, callerId: 'owner-1', row: { ownerId: 'owner-2' } })).toBe(false)
+  it('non-admin owner of an active record is allowed', () => {
+    expect(filesAclAllowsAccess({ admin: false, callerId: 'owner-1', record: { state: 'active', ownerId: 'owner-1' } })).toBe(true)
+  })
+
+  it('non-admin caller who is not the active record owner is denied (cross-user access)', () => {
+    expect(filesAclAllowsAccess({ admin: false, callerId: 'owner-1', record: { state: 'active', ownerId: 'owner-2' } })).toBe(false)
   })
 
   it('the anonymous sentinel owner is never treated as "the caller owns it", even if callerId also resolved to the sentinel', () => {
-    expect(filesAclAllowsAccess({ admin: false, callerId: FILES_ANONYMOUS_OWNER_ID, row: { ownerId: FILES_ANONYMOUS_OWNER_ID } })).toBe(false)
+    expect(filesAclAllowsAccess({ admin: false, callerId: FILES_ANONYMOUS_OWNER_ID, record: { state: 'active', ownerId: FILES_ANONYMOUS_OWNER_ID } })).toBe(false)
   })
 
-  it('a null ownerId on an existing row (defensive, should not occur in practice) is denied for non-admins', () => {
-    expect(filesAclAllowsAccess({ admin: false, callerId: 'owner-1', row: { ownerId: null } })).toBe(false)
+  it('a null ownerId on an active record (defensive, should not occur in practice) is denied for non-admins', () => {
+    expect(filesAclAllowsAccess({ admin: false, callerId: 'owner-1', record: { state: 'active', ownerId: null } })).toBe(false)
   })
 })
