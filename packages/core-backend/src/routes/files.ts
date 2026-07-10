@@ -5,9 +5,11 @@
 
 import { Router } from 'express'
 import type { Request, Response } from 'express'
+import { sql } from 'kysely'
 import { authenticate } from '../middleware/auth'
 import { Logger } from '../core/logger'
 import { StorageServiceImpl } from '../services/StorageService'
+import { db } from '../db/db'
 import * as path from 'path'
 import { loadMulter, createUploadMiddleware } from '../types/multer'
 import type { RequestWithFiles } from '../types/multer'
@@ -58,7 +60,7 @@ export function filesRouter(): Router {
 
           const storage = getStorageService()
           const uploadPath = (req.body.path as string) || ''
-          const userId = req.user?.sub || req.user?.userId || 'anonymous'
+          const userId = req.user?.id ?? req.user?.userId ?? req.user?.sub ?? 'anonymous'
 
           const result = await storage.upload(file.buffer, {
             filename: file.originalname,
@@ -69,6 +71,39 @@ export function filesRouter(): Router {
               originalName: file.originalname
             }
           })
+
+          // S2 outdoor-punch-photo design-lock (2026-07-10), G2 substrate: the `files` table
+          // (migration 035) previously had no writer anywhere — this INSERT is what makes a
+          // fileId server-verifiable (owner + content-type) instead of a client-trusted string.
+          // A row MUST exist for every successful upload response: if the INSERT fails, the
+          // upload as a whole fails (storage object is rolled back) rather than returning
+          // success with no corresponding row, which would make every downstream fileId
+          // ownership/content-type check either wrongly reject a real upload or be unable to
+          // tell a real id from a forged one.
+          try {
+            await sql`
+              INSERT INTO files (id, url, owner_id, meta, created_at)
+              VALUES (
+                ${result.id},
+                ${result.url},
+                ${userId},
+                ${JSON.stringify({
+                  contentType: result.contentType,
+                  filename: result.filename,
+                  size: result.size
+                })}::jsonb,
+                now()
+              )
+            `.execute(db)
+          } catch (dbErr) {
+            logger.error(`Failed to persist files row for uploaded file ${result.id}; rolling back upload`, dbErr instanceof Error ? dbErr : undefined)
+            try {
+              await storage.delete(result.id)
+            } catch (cleanupErr) {
+              logger.error(`Failed to clean up orphaned upload ${result.id} after files-row insert failure`, cleanupErr instanceof Error ? cleanupErr : undefined)
+            }
+            return res.status(500).json({ error: 'Failed to record uploaded file' })
+          }
 
           logger.info(`File uploaded: ${result.id} by user ${userId}`)
           res.json({
@@ -165,7 +200,7 @@ export function filesRouter(): Router {
       }
 
       await storage.delete(id)
-      const userId = req.user?.sub || req.user?.userId || 'anonymous'
+      const userId = req.user?.id ?? req.user?.userId ?? req.user?.sub ?? 'anonymous'
 
       logger.info(`File deleted: ${id} by user ${userId}`)
       res.json({ success: true, id })
