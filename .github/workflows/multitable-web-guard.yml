@@ -129,6 +129,9 @@ on:
       - 'apps/web/tests/statusTag.spec.ts'
       - 'apps/web/tests/AutomationExecutionsView.spec.ts'
       - 'apps/web/tests/parallelBranchRunsView.spec.ts'
+      # UI-P2-1c MtButton/MtPopover migration proof-specs (all *-migration.spec.ts) — fire the guard when
+      # any of them changes so they actually carry CI weight (they were landing un-gated; #3769 failure mode).
+      - 'apps/web/tests/*-migration.spec.ts'
       - '.github/workflows/multitable-web-guard.yml'
   push:
     branches: [main]
@@ -237,6 +240,9 @@ on:
       - 'apps/web/tests/statusTag.spec.ts'
       - 'apps/web/tests/AutomationExecutionsView.spec.ts'
       - 'apps/web/tests/parallelBranchRunsView.spec.ts'
+      # UI-P2-1c MtButton/MtPopover migration proof-specs (all *-migration.spec.ts) — fire the guard when
+      # any of them changes so they actually carry CI weight (they were landing un-gated; #3769 failure mode).
+      - 'apps/web/tests/*-migration.spec.ts'
       - '.github/workflows/multitable-web-guard.yml'
 
 jobs:
@@ -296,7 +302,11 @@ jobs:
         # UF-3: status-color convergence — statusTag (StatusTag.vue + statusDomains.ts unit/mount
         # coverage), AutomationExecutionsView + parallelBranchRunsView (automationRun domain status
         # badges, run + step level, including the parallel-branch readability regression).
+<<<<<<< HEAD
+        run: pnpm --filter @metasheet/web exec vitest run migration multitable-rollup-aggregation-fe multitable-trash-fe multitable-history-fe multitable-kanban-view multitable-field-manager multitable-sheet-cursor-state multitable-record-permission-manager multitable-sheet-permission-manager multitable-yjs-scalar-cell multitable-yjs-cell-editor multitable-conditional-rule multitable-person-picker multitable-cell-renderer-person-inactive meta-toolbar-filter-builder meta-filter-group meta-grid-table multitable-grid multitable-reorder-view-fields multitable-restore-preview-dialog multitable-restore-batch-dialog multitable-config-history-modal multitable-workbench-restore-wiring multitable-config-revert-refresh multitable-reset-confirm-dialog multitable-reset-tsource-picker multitable-field-visibility multitable-required-if multitable-conditional-formatting statusTag AutomationExecutionsView parallelBranchRunsView automation-recipes meta-automation-labels multitable-automation-manager automation-save-block-reasons automation-action-summary automation-target-sheet-options multitable-automation-rule-editor --reporter=dot
+=======
         # L1c: HistoryBatchChangesList.vue's only behavioral coverage — 3 specs that mount the real
         # component tree via HistoryCenterModal (inline-diff, ai-shortcut-label, pinned-batch-deeplink)
         # — were exercised in NO CI gate; added alongside their new path triggers above.
         run: pnpm --filter @metasheet/web exec vitest run multitable-rollup-aggregation-fe multitable-trash-fe multitable-history-fe multitable-history-center-inline-diff multitable-history-center-ai-shortcut-label multitable-history-center-pinned-batch-deeplink multitable-workbench-history-field-scope-wiring multitable-kanban-view multitable-field-manager multitable-sheet-cursor-state multitable-record-permission-manager multitable-sheet-permission-manager multitable-yjs-scalar-cell multitable-yjs-cell-editor multitable-conditional-rule multitable-person-picker multitable-cell-renderer-person-inactive meta-toolbar-filter-builder meta-filter-group meta-grid-table multitable-grid multitable-reorder-view-fields multitable-restore-preview-dialog multitable-restore-batch-dialog multitable-config-history-modal multitable-workbench-restore-wiring multitable-config-revert-refresh multitable-reset-confirm-dialog multitable-reset-tsource-picker multitable-field-visibility multitable-required-if multitable-conditional-formatting statusTag AutomationExecutionsView parallelBranchRunsView automation-recipes meta-automation-labels multitable-automation-manager automation-save-block-reasons automation-action-summary automation-target-sheet-options multitable-automation-rule-editor --reporter=dot
+>>>>>>> origin/main
