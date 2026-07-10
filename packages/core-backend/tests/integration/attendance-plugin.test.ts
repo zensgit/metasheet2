@@ -9525,6 +9525,9 @@ attendanceIntegrationDescribe(
         tiers: [{ minYears: 0, maxYears: 5, days: 3 }, { minYears: 5, maxYears: null, days: 8 }],
         carryover: { enabled: true },
         timezone: 'Asia/Shanghai',
+        // S3 scheduler trigger sub-object (design-lock attendance-annual-leave-accrual-scheduler-s3-design-lock-20260710) —
+        // default off; this PUT never touched it.
+        scheduledTrigger: { enabled: false },
       })
       expect(reloaded?.overtimeSegmentation).toEqual({ enabled: true })
       expect(reloaded?.autoShiftMatching).toEqual({
@@ -17380,6 +17383,342 @@ attendanceIntegrationDescribe(
           method: 'PUT',
           headers,
           body: JSON.stringify({ reportSync: originalReportSync ?? { scheduledTrigger: { enabled: false } } }),
+        }).catch(() => undefined)
+      }
+    })
+  })
+
+  describe('attendance annual-leave accrual scheduled trigger (S3, design-lock attendance-annual-leave-accrual-scheduler-s3-design-lock-20260710)', () => {
+    // The auto-trigger for the L2b accrual engine, which previously had ONLY a manual admin route. This
+    // block covers ONLY the scheduling layer (double-gate no-op / due-gate / triggered_by='scheduler'
+    // provenance / no-double-grant when combined with a manual run) — the per-user eligibility/tier/
+    // proration math is already covered by the L2b describe block above. Job-isolation coverage (a throwing
+    // 'attendance-annual-leave-accrual' job never blocks siblings) lives in tests/unit/attendance-scheduler.test.ts;
+    // pure normalizer/period/due-gate coverage lives in tests/unit/attendance-annual-leave-accrual-scheduled-trigger.test.ts.
+    const annualSchedSeam = () => (getAttendancePluginForTest() as any).__attendanceReportFieldCatalogForTests
+
+    async function annualSchedAdminToken(uid: string): Promise<string | undefined> {
+      const res = await requestJson(
+        `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(uid)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`,
+      )
+      return (res.body as { token?: string } | undefined)?.token
+    }
+
+    async function putAnnualSchedPolicy(token: string, policy: Record<string, unknown>): Promise<HttpResponse> {
+      return requestJson(`${baseUrl}/api/attendance/settings`, {
+        method: 'PUT',
+        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ annualLeavePolicy: policy }),
+      })
+    }
+
+    function annualSchedPolicy(opts: {
+      enabled?: boolean
+      scheduledTriggerEnabled?: boolean
+      timezone?: string | null
+    } = {}): Record<string, unknown> {
+      return {
+        enabled: opts.enabled ?? true,
+        tenureMode: 'cumulative_service',
+        standardDayMinutes: 480,
+        tiers: [
+          { minYears: 1, maxYears: 10, days: 5 },
+          { minYears: 10, maxYears: 20, days: 10 },
+          { minYears: 20, maxYears: null, days: 15 },
+        ],
+        carryover: { enabled: false },
+        timezone: opts.timezone === undefined ? 'UTC' : opts.timezone,
+        scheduledTrigger: { enabled: opts.scheduledTriggerEnabled ?? true },
+      }
+    }
+
+    function withAnnualSchedTriggerEnv<T>(value: string | undefined, fn: () => Promise<T>): Promise<T> {
+      const prev = process.env.ATTENDANCE_ANNUAL_LEAVE_ACCRUAL_SCHEDULED_ENABLED
+      if (value === undefined) delete process.env.ATTENDANCE_ANNUAL_LEAVE_ACCRUAL_SCHEDULED_ENABLED
+      else process.env.ATTENDANCE_ANNUAL_LEAVE_ACCRUAL_SCHEDULED_ENABLED = value
+      return fn().finally(() => {
+        if (prev === undefined) delete process.env.ATTENDANCE_ANNUAL_LEAVE_ACCRUAL_SCHEDULED_ENABLED
+        else process.env.ATTENDANCE_ANNUAL_LEAVE_ACCRUAL_SCHEDULED_ENABLED = prev
+      })
+    }
+
+    async function seedAnnualSchedOrgRule(pool: Pool, orgId: string, timezone = 'UTC'): Promise<void> {
+      await pool.query(
+        `INSERT INTO attendance_rules
+           (id, org_id, name, timezone, work_start_time, work_end_time, late_grace_minutes, early_grace_minutes,
+            severe_late_threshold_minutes, absence_late_threshold_minutes, rounding_minutes, working_days, is_default)
+         VALUES ($1, $2, $3, $4, '09:00', '18:00', 5, 5, 30, 60, 1, '[1,2,3,4,5]'::jsonb, true)`,
+        [randomUUID(), orgId, `S3 annual accrual sched rule ${orgId}`, timezone],
+      )
+    }
+
+    async function seedAnnualSchedUser(pool: Pool, id: string, org: string, hireDate: string, cumulative: string): Promise<void> {
+      await pool.query(
+        `INSERT INTO users (id, email, password_hash, is_active, hire_date, cumulative_service_start_date)
+         VALUES ($1, $2, 'no-login', true, $3, $4)
+         ON CONFLICT (id) DO UPDATE SET is_active = true, hire_date = EXCLUDED.hire_date, cumulative_service_start_date = EXCLUDED.cumulative_service_start_date`,
+        [id, `${id}@example.com`, hireDate, cumulative],
+      )
+      await pool.query(
+        `INSERT INTO user_orgs (user_id, org_id, is_active) VALUES ($1, $2, true)
+         ON CONFLICT (user_id, org_id) DO UPDATE SET is_active = true`,
+        [id, org],
+      )
+    }
+
+    async function annualSchedRunsForOrgPeriod(
+      pool: Pool, orgId: string, periodKey: string,
+    ): Promise<Array<{ id: string; triggered_by: string; dry_run: boolean }>> {
+      return (await pool.query(
+        `SELECT id, triggered_by, dry_run FROM attendance_leave_accrual_runs
+          WHERE org_id = $1 AND period_key = $2 ORDER BY created_at ASC`,
+        [orgId, periodKey],
+      )).rows
+    }
+
+    async function annualSchedItemFor(pool: Pool, runId: string, userId: string): Promise<{ status: string } | undefined> {
+      return (await pool.query(
+        `SELECT status FROM attendance_leave_accrual_run_items WHERE run_id = $1 AND user_id = $2`,
+        [runId, userId],
+      )).rows[0]
+    }
+
+    async function annualSchedLotsForUser(pool: Pool, userId: string): Promise<Array<{ id: string; source_key: string }>> {
+      return (await pool.query(
+        `SELECT id, source_key FROM attendance_leave_balances WHERE user_id = $1 AND leave_type_code = 'annual'`,
+        [userId],
+      )).rows
+    }
+
+    async function cleanupAnnualSchedOrg(pool: Pool, org: string, userIds: string[]): Promise<void> {
+      await pool.query('DELETE FROM attendance_leave_balance_events WHERE org_id = $1', [org]).catch(() => undefined)
+      await pool.query('DELETE FROM attendance_leave_balances WHERE org_id = $1', [org]).catch(() => undefined)
+      await pool.query('DELETE FROM attendance_leave_accrual_run_items WHERE org_id = $1', [org]).catch(() => undefined)
+      await pool.query('DELETE FROM attendance_leave_accrual_runs WHERE org_id = $1', [org]).catch(() => undefined)
+      await pool.query('DELETE FROM attendance_rules WHERE org_id = $1', [org]).catch(() => undefined)
+      if (userIds.length) {
+        await pool.query('DELETE FROM user_orgs WHERE user_id = ANY($1::text[])', [userIds]).catch(() => undefined)
+        await pool.query('DELETE FROM users WHERE id = ANY($1::text[])', [userIds]).catch(() => undefined)
+      }
+    }
+
+    it('double-gate: env unset, then settings.scheduledTrigger.enabled left at its off default — zero run rows, zero writes either way', async () => {
+      if (!baseUrl) return
+      const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
+      if (!dbUrl) return
+      const runSuffix = Date.now().toString(36)
+      const org = `alsched-gate-${runSuffix}`
+      const uid = `alsched-gate-u-${runSuffix}`
+      const pool = new Pool({ connectionString: dbUrl })
+      const now = new Date('2026-07-10T12:00:00.000Z')
+      try {
+        await seedAnnualSchedOrgRule(pool, org)
+        await seedAnnualSchedUser(pool, uid, org, '2015-01-01', '2015-01-01')
+
+        const seam = annualSchedSeam()
+        const pluginDb = createPluginDbForTest(pool)
+        const logger = { warn() {}, error() {}, info() {} }
+
+        // (a) env flag unset (settings default enabled=false too, never PUT in this test) → byte-exact no-op.
+        const resEnvOff = await withAnnualSchedTriggerEnv(undefined, () =>
+          seam.runAnnualLeaveAccrualScheduledTriggerOnce(pluginDb, logger, { now }))
+        expect(resEnvOff).toEqual({ ran: false, reason: 'disabled', orgs: [] })
+        expect(await annualSchedRunsForOrgPeriod(pool, org, 'annual:2026')).toHaveLength(0)
+
+        // (b) env on, but settings.annualLeavePolicy.scheduledTrigger.enabled is still at its off default
+        // (never PUT true anywhere in THIS test) → still ran=false, still zero rows.
+        const resSettingsOff = await withAnnualSchedTriggerEnv('true', () =>
+          seam.runAnnualLeaveAccrualScheduledTriggerOnce(pluginDb, logger, { now }))
+        expect(resSettingsOff).toEqual({ ran: false, reason: 'disabled', orgs: [] })
+        expect(await annualSchedRunsForOrgPeriod(pool, org, 'annual:2026')).toHaveLength(0)
+      } finally {
+        await cleanupAnnualSchedOrg(pool, org, [uid])
+        await pool.end().catch(() => undefined)
+      }
+    })
+
+    it('double-gate: settings.enabled=true but env flag unset — still zero run rows, zero writes (the env-half of the gate, tested independently of the settings-half above)', async () => {
+      if (!baseUrl) return
+      const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
+      if (!dbUrl) return
+      const runSuffix = Date.now().toString(36)
+      const org = `alsched-gate-env-${runSuffix}`
+      const uid = `alsched-gate-env-u-${runSuffix}`
+      const adminToken = await annualSchedAdminToken(`alsched-gate-env-admin-${runSuffix}`)
+      expect(adminToken).toBeTruthy()
+      if (!adminToken) return
+      const pool = new Pool({ connectionString: dbUrl })
+      const now = new Date('2026-07-10T12:00:00.000Z')
+      let originalPolicy: unknown
+      try {
+        await seedAnnualSchedOrgRule(pool, org)
+        await seedAnnualSchedUser(pool, uid, org, '2015-01-01', '2015-01-01')
+
+        const origRes = await requestJson(`${baseUrl}/api/attendance/settings`, { headers: { Authorization: `Bearer ${adminToken}` } })
+        originalPolicy = (origRes.body as { data?: { annualLeavePolicy?: unknown } } | undefined)?.data?.annualLeavePolicy
+        const putStatus = (await putAnnualSchedPolicy(adminToken, annualSchedPolicy())).status
+        expect(putStatus).toBe(200)
+
+        const seam = annualSchedSeam()
+        const pluginDb = createPluginDbForTest(pool)
+        const logger = { warn() {}, error() {}, info() {} }
+
+        // settings.enabled=true + scheduledTrigger.enabled=true (just PUT above) but the env flag is unset
+        // → still a byte-exact no-op. Isolates the ENV half of the double-gate: the settings-off scenarios
+        // above would still no-op even if the env check were deleted entirely, so this scenario is the one
+        // that actually proves the env flag independently gates the runner.
+        const res = await withAnnualSchedTriggerEnv(undefined, () =>
+          seam.runAnnualLeaveAccrualScheduledTriggerOnce(pluginDb, logger, { now }))
+        expect(res).toEqual({ ran: false, reason: 'disabled', orgs: [] })
+        expect(await annualSchedRunsForOrgPeriod(pool, org, 'annual:2026')).toHaveLength(0)
+      } finally {
+        await putAnnualSchedPolicy(adminToken!, (originalPolicy as Record<string, unknown>) ?? { enabled: false }).catch(() => undefined)
+        await cleanupAnnualSchedOrg(pool, org, [uid])
+        await pool.end().catch(() => undefined)
+      }
+    })
+
+    it('gate open: scheduler run persists triggered_by=scheduler; a same-month repeat tick is a due-gate no-op; a same-period MANUAL run afterward does not double-grant the lot', async () => {
+      if (!baseUrl) return
+      const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
+      if (!dbUrl) return
+      const runSuffix = Date.now().toString(36)
+      const org = `alsched-open-${runSuffix}`
+      const uid = `alsched-open-u-${runSuffix}`
+      const adminToken = await annualSchedAdminToken(`alsched-open-admin-${runSuffix}`)
+      expect(adminToken).toBeTruthy()
+      if (!adminToken) return
+      const pool = new Pool({ connectionString: dbUrl })
+      // hire_date/cumulative_service_start_date 2015-01-01 → 11 completed years as-of 2026-07-10 → tier
+      // [10,20) → 10 days × 480min = 4800min entitlement (mirrors the L2b 'full' fixture above).
+      const now = new Date('2026-07-10T12:00:00.000Z')
+      let originalPolicy: unknown
+      try {
+        await seedAnnualSchedOrgRule(pool, org)
+        await seedAnnualSchedUser(pool, uid, org, '2015-01-01', '2015-01-01')
+
+        const origRes = await requestJson(`${baseUrl}/api/attendance/settings`, { headers: { Authorization: `Bearer ${adminToken}` } })
+        originalPolicy = (origRes.body as { data?: { annualLeavePolicy?: unknown } } | undefined)?.data?.annualLeavePolicy
+        expect((await putAnnualSchedPolicy(adminToken, annualSchedPolicy())).status).toBe(200)
+
+        const seam = annualSchedSeam()
+        const pluginDb = createPluginDbForTest(pool)
+        const logger = { warn() {}, error() {}, info() {} }
+        const emitted: Array<{ type: string; data: unknown }> = []
+        const emitEvent = (type: string, data: unknown) => emitted.push({ type, data })
+
+        // (1) first scheduler tick: due (no prior real run) → grants exactly one lot, stamps triggered_by='scheduler'.
+        const first = await withAnnualSchedTriggerEnv('true', () =>
+          seam.runAnnualLeaveAccrualScheduledTriggerOnce(pluginDb, logger, { now, emitEvent }))
+        expect(first.ran).toBe(true)
+        const mine = first.orgs.find((o: { orgId: string }) => o.orgId === org)
+        expect(mine).toMatchObject({
+          orgId: org, ran: true, period: 2026, periodKey: 'annual:2026',
+          granted: 1, skipped: 0, grantedMinutes: 4800, lotsCreated: 1, alreadyGranted: 0,
+        })
+        const runsAfterFirst = await annualSchedRunsForOrgPeriod(pool, org, 'annual:2026')
+        expect(runsAfterFirst).toHaveLength(1)
+        expect(runsAfterFirst[0]).toMatchObject({ triggered_by: 'scheduler', dry_run: false })
+        expect(await annualSchedItemFor(pool, runsAfterFirst[0].id, uid)).toEqual({ status: 'granted' })
+        const lotsAfterFirst = await annualSchedLotsForUser(pool, uid)
+        expect(lotsAfterFirst).toHaveLength(1)
+        expect(lotsAfterFirst[0].source_key).toBe(`annual_accrual:${uid}:annual:2026`)
+        expect(emitted).toHaveLength(1)
+        expect(emitted[0]).toMatchObject({
+          type: 'attendance.annual_leave_accrual.run',
+          data: { orgId: org, periodKey: 'annual:2026', dryRun: false, granted: 1, skipped: 0, triggeredBy: 'scheduler' },
+        })
+
+        // (2) second scheduler tick, SAME now (same org-local month) → due-gate no-op: zero new run rows,
+        // zero new lots, zero new events.
+        const second = await withAnnualSchedTriggerEnv('true', () =>
+          seam.runAnnualLeaveAccrualScheduledTriggerOnce(pluginDb, logger, { now, emitEvent }))
+        const mineAgain = second.orgs.find((o: { orgId: string }) => o.orgId === org)
+        expect(mineAgain).toEqual({ orgId: org, ran: false, reason: 'not_due', period: 2026, periodKey: 'annual:2026' })
+        expect(await annualSchedRunsForOrgPeriod(pool, org, 'annual:2026')).toHaveLength(1)
+        expect(await annualSchedLotsForUser(pool, uid)).toHaveLength(1)
+        expect(emitted).toHaveLength(1) // no second emit
+
+        // (3) a MANUAL run for the SAME period afterward (bypassing the scheduler's own due-gate entirely,
+        // since the manual route has none) proves the DEEPER lot-level idempotency (source_key) still holds:
+        // a NEW run row is written (manual has no due-gate) but the grant itself is a no-op.
+        const manualRes = await requestJson(`${baseUrl}/api/attendance/annual-leave-accrual/run`, {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${adminToken}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ period: 2026, asOf: '2026-07-10', dryRun: false, orgId: org }),
+        })
+        expect(manualRes.status, JSON.stringify(manualRes.body)).toBe(200)
+        const manualBody = manualRes.body as { data?: { runId?: string; granted?: number; lotsCreated?: number; alreadyGranted?: number } }
+        expect(manualBody.data).toMatchObject({ granted: 1, lotsCreated: 0, alreadyGranted: 1 })
+        const runsAfterManual = await annualSchedRunsForOrgPeriod(pool, org, 'annual:2026')
+        expect(runsAfterManual).toHaveLength(2)
+        expect(runsAfterManual[1]).toMatchObject({ triggered_by: 'manual', dry_run: false })
+        // still exactly one lot — the "不双发" proof: scheduler + manual for the SAME period never double-grant.
+        expect(await annualSchedLotsForUser(pool, uid)).toHaveLength(1)
+      } finally {
+        await putAnnualSchedPolicy(adminToken!, (originalPolicy as Record<string, unknown>) ?? { enabled: false }).catch(() => undefined)
+        await cleanupAnnualSchedOrg(pool, org, [uid])
+        await pool.end().catch(() => undefined)
+      }
+    })
+
+    it('PUT /api/attendance/settings round-trips annualLeavePolicy.scheduledTrigger without stripping siblings (#1829) and rejects a non-boolean enabled', async () => {
+      if (!baseUrl) return
+      const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
+      if (!dbUrl) return
+      const runSuffix = Date.now().toString(36)
+      const adminToken = await annualSchedAdminToken(`alsched-roundtrip-admin-${runSuffix}`)
+      expect(adminToken).toBeTruthy()
+      if (!adminToken) return
+      const headers = { Authorization: `Bearer ${adminToken}`, 'Content-Type': 'application/json' }
+      let originalPolicy: unknown
+      try {
+        const origRes = await requestJson(`${baseUrl}/api/attendance/settings`, { headers: { Authorization: `Bearer ${adminToken}` } })
+        originalPolicy = (origRes.body as { data?: { annualLeavePolicy?: unknown } } | undefined)?.data?.annualLeavePolicy
+
+        // a full policy PUT with scheduledTrigger.enabled=true round-trips it AND every sibling field.
+        const putRes = await requestJson(`${baseUrl}/api/attendance/settings`, {
+          method: 'PUT', headers,
+          body: JSON.stringify({ annualLeavePolicy: annualSchedPolicy({ timezone: 'Asia/Shanghai' }) }),
+        })
+        expect(putRes.status).toBe(200)
+        expect((putRes.body as { data?: { annualLeavePolicy?: unknown } } | undefined)?.data?.annualLeavePolicy).toEqual({
+          enabled: true, tenureMode: 'cumulative_service', standardDayMinutes: 480,
+          tiers: [{ minYears: 1, maxYears: 10, days: 5 }, { minYears: 10, maxYears: 20, days: 10 }, { minYears: 20, maxYears: null, days: 15 }],
+          carryover: { enabled: false }, timezone: 'Asia/Shanghai', scheduledTrigger: { enabled: true },
+        })
+
+        // re-GET (a fresh read, not just the PUT echo) proves it actually persisted.
+        const rt = await requestJson(`${baseUrl}/api/attendance/settings`, { headers: { Authorization: `Bearer ${adminToken}` } })
+        expect((rt.body as { data?: { annualLeavePolicy?: { scheduledTrigger?: unknown } } } | undefined)?.data?.annualLeavePolicy?.scheduledTrigger).toEqual({ enabled: true })
+
+        // a sibling-only partial update (untouched key) preserves annualLeavePolicy.scheduledTrigger.
+        const siblingPut = await requestJson(`${baseUrl}/api/attendance/settings`, {
+          method: 'PUT', headers, body: JSON.stringify({ minPunchIntervalMinutes: 2 }),
+        })
+        expect(siblingPut.status).toBe(200)
+        expect((siblingPut.body as { data?: { annualLeavePolicy?: { scheduledTrigger?: unknown } } } | undefined)?.data?.annualLeavePolicy?.scheduledTrigger).toEqual({ enabled: true })
+
+        // a partial annualLeavePolicy update touching only scheduledTrigger.enabled preserves the OTHER
+        // annualLeavePolicy fields (tenureMode/standardDayMinutes/tiers/timezone/carryover untouched).
+        const partialPut = await requestJson(`${baseUrl}/api/attendance/settings`, {
+          method: 'PUT', headers, body: JSON.stringify({ annualLeavePolicy: { scheduledTrigger: { enabled: false } } }),
+        })
+        expect(partialPut.status).toBe(200)
+        expect((partialPut.body as { data?: { annualLeavePolicy?: unknown } } | undefined)?.data?.annualLeavePolicy).toEqual({
+          enabled: true, tenureMode: 'cumulative_service', standardDayMinutes: 480,
+          tiers: [{ minYears: 1, maxYears: 10, days: 5 }, { minYears: 10, maxYears: 20, days: 10 }, { minYears: 20, maxYears: null, days: 15 }],
+          carryover: { enabled: false }, timezone: 'Asia/Shanghai', scheduledTrigger: { enabled: false },
+        })
+
+        // an invalid (non-boolean) scheduledTrigger.enabled is REJECTED (400), not silently coerced/dropped.
+        const badType = await requestJson(`${baseUrl}/api/attendance/settings`, {
+          method: 'PUT', headers, body: JSON.stringify({ annualLeavePolicy: { scheduledTrigger: { enabled: 'yes' } } }),
+        })
+        expect(badType.status).toBe(400)
+      } finally {
+        await requestJson(`${baseUrl}/api/attendance/settings`, {
+          method: 'PUT', headers, body: JSON.stringify({ annualLeavePolicy: originalPolicy ?? { enabled: false } }),
         }).catch(() => undefined)
       }
     })
