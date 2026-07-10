@@ -29,6 +29,11 @@ import {
   INBOUND_WEBHOOK_RATE_LIMIT_PER_MINUTE,
   INBOUND_WEBHOOK_RATE_LIMIT_WINDOW_MS,
 } from '../multitable/automation-inbound-webhook'
+import {
+  executionDisplayNames,
+  resolveExecutionNameMaps,
+  type ExecutionNameMaps,
+} from '../multitable/automation-execution-names'
 
 // ── A2 run-governance read mappers (boundary only — no storage change) ───────
 
@@ -163,6 +168,28 @@ async function safeGetPersistedExecution(
     return await svc.logs.getById(executionId)
   } catch {
     return undefined
+  }
+}
+
+/**
+ * B3-11 — batched ruleName/sheetName lookup for the monitoring LIST view, gated
+ * the same way as `safeGetPersistedExecution`/`safeListJobs`: a lookup failure
+ * (or a deleted rule/sheet, which just yields empty maps for that id) must never
+ * 500 the executions list — it only means every row falls back to displaying its
+ * raw id (via `executionDisplayNames`'s `?? id` fallback).
+ */
+async function safeResolveExecutionNameMaps(
+  svc: AutomationService,
+  executions: AutomationExecution[],
+): Promise<ExecutionNameMaps> {
+  try {
+    return await resolveExecutionNameMaps(
+      svc.dbClient,
+      executions.map((e) => e.ruleId),
+      executions.map((e) => e.sheetId),
+    )
+  } catch {
+    return { ruleNames: new Map(), sheetNames: new Map() }
   }
 }
 
@@ -316,7 +343,16 @@ export function createAutomationRoutes(
         status: statusFilter.kind === 'legacy' ? statusFilter.value : undefined,
         limit,
       })
-      return res.json({ executions: executions.map((e) => toRunView(e, { includeSnapshot: false })) })
+      // B3-11: additive ruleName/sheetName for the monitoring list — batched (not
+      // N+1), and a lookup failure never masks the underlying execution list (see
+      // safeResolveExecutionNameMaps); each row degrades to its raw id on its own.
+      const nameMaps = await safeResolveExecutionNameMaps(svc, executions)
+      return res.json({
+        executions: executions.map((e) => ({
+          ...toRunView(e, { includeSnapshot: false }),
+          ...executionDisplayNames(e.ruleId, e.sheetId, nameMaps),
+        })),
+      })
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Failed to load runs'
       return res.status(500).json({ error: message })
