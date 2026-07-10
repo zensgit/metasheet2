@@ -268,6 +268,34 @@ describeIfDatabase('A-2b send_dingtalk_approval_card action (real DB)', () => {
     expect(rows).toHaveLength(1)
     expect(rows[0].send_status).toBe('failed')
     expect(String(rows[0].send_error)).toContain('Failed to send DingTalk action-card work notification')
+
+    // Negative direction of DT-HARDEN-06 (gate hardening, #4009 P2): here the send fails but the
+    // ledger mark-failed write SUCCEEDS (no fault injection — failNextLedgerMarkFailed stays
+    // false) — send_status='failed' landed on the row above via the ordinary path. deliveryStuckPending
+    // /deliveryLedgerError are an exceptional signal reserved for when the bookkeeping write ITSELF
+    // failed, not a generic "send failed" flag. Without this assertion, hardcoding
+    // `deliveryStuckPending: true` unconditionally on every send-fail output would survive the whole
+    // suite: it would make every ordinary, correctly-ledgered failure scream "stuck pending" and kill
+    // the flag's signal value for operators chasing real stuck rows.
+    const executionRows = await waitFor(async () => {
+      const r = await q(
+        `SELECT steps FROM multitable_automation_executions WHERE rule_id = $1 ORDER BY created_at DESC`,
+        [rule.id],
+      )
+      return r.rows
+    })
+    expect(executionRows.length).toBeGreaterThan(0)
+    const rawSteps = (executionRows[0] as { steps: unknown }).steps
+    const steps = (typeof rawSteps === 'string' ? JSON.parse(rawSteps) : rawSteps) as Array<Record<string, unknown>>
+    const cardStep = steps.find((s) => s.actionType === 'send_dingtalk_approval_card') as
+      | { status: string; output?: { deliveryId?: string; deliveryStuckPending?: boolean; deliveryLedgerError?: string } }
+      | undefined
+    expect(cardStep).toBeDefined()
+    expect(cardStep!.status).toBe('failed')
+    expect(cardStep!.output?.deliveryId).toBeTruthy()
+    expect(cardStep!.output?.deliveryStuckPending).toBeUndefined()
+    expect(cardStep!.output?.deliveryLedgerError).toBeUndefined()
+
     await svc.deleteRule(rule.id, SHEET_ID)
   })
 
