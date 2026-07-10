@@ -36,6 +36,13 @@ type PublishedDefinitionRow = {
   published_at: Date
 }
 
+// B3-08 — a minimal approval_instances fixture, only used to prove the /usage endpoint's counts.
+type InstanceRow = {
+  id: string
+  template_id: string
+  status: string
+}
+
 const routeState = vi.hoisted(() => {
   const now = () => new Date('2026-04-11T12:00:00.000Z')
 
@@ -43,18 +50,33 @@ const routeState = vi.hoisted(() => {
     templates: new Map<string, TemplateRow>(),
     versions: new Map<string, TemplateVersionRow>(),
     publishedDefinitions: new Map<string, PublishedDefinitionRow>(),
+    instances: new Map<string, InstanceRow>(),
     templateSeq: 1,
     versionSeq: 1,
     publishedSeq: 1,
+    instanceSeq: 1,
   }
 
   function reset() {
     state.templates.clear()
     state.versions.clear()
     state.publishedDefinitions.clear()
+    state.instances.clear()
     state.templateSeq = 1
     state.versionSeq = 1
     state.publishedSeq = 1
+    state.instanceSeq = 1
+  }
+
+  function createInstanceFixture(templateId: string, overrides?: Partial<InstanceRow>) {
+    const instance: InstanceRow = {
+      id: `apr-${state.instanceSeq++}`,
+      template_id: templateId,
+      status: 'pending',
+      ...overrides,
+    }
+    state.instances.set(instance.id, instance)
+    return instance
   }
 
   function createTemplateFixture(overrides?: Partial<TemplateRow>) {
@@ -299,6 +321,35 @@ const routeState = vi.hoisted(() => {
       return { rows: [row], rowCount: 1 }
     }
 
+    // B3-08 — archiveTemplate/unarchiveTemplate's state-machine flip (transitionTemplateStatus).
+    // Distinct from the `INSERT`/generic `RETURNING *` UPDATE branches above: this one has no
+    // RETURNING clause (the caller reloads the full bundle via loadTemplateBundleWithClient right
+    // after), and is parameterized ($1 = new status) rather than the publish path's literal
+    // `'published'`.
+    if (normalized.startsWith('UPDATE approval_templates SET status = $1, updated_at = now() WHERE id = $2')) {
+      const row = state.templates.get(String(params[1]))
+      if (!row) return { rows: [], rowCount: 0 }
+      row.status = params[0] as TemplateRow['status']
+      row.updated_at = now()
+      return { rows: [], rowCount: 1 }
+    }
+
+    // B3-08 — getTemplateUsage's existence probe (lighter than the full-row SELECT * used
+    // elsewhere; intentionally a distinct column list so it needs its own branch).
+    if (normalized.startsWith('SELECT id FROM approval_templates WHERE id = $1')) {
+      const row = state.templates.get(String(params[0]))
+      return { rows: row ? [{ id: row.id }] : [], rowCount: row ? 1 : 0 }
+    }
+
+    // B3-08 — getTemplateUsage's instance-count query (total + still-in-flight, mirroring
+    // APPROVAL_TERMINAL_STATUSES = approved/rejected/revoked/cancelled).
+    if (normalized.startsWith('SELECT COUNT(*)::text AS total_count')) {
+      const terminal = new Set(['approved', 'rejected', 'revoked', 'cancelled'])
+      const rows = Array.from(state.instances.values()).filter((row) => row.template_id === String(params[0]))
+      const activeCount = rows.filter((row) => !terminal.has(row.status)).length
+      return { rows: [{ total_count: String(rows.length), active_count: String(activeCount) }], rowCount: 1 }
+    }
+
     throw new Error(`Unhandled query: ${normalized}`)
   })
 
@@ -315,6 +366,7 @@ const routeState = vi.hoisted(() => {
     state,
     createTemplateFixture,
     createVersionFixture,
+    createInstanceFixture,
     pool,
   }
 })
@@ -575,5 +627,116 @@ describe('approval template routes', () => {
     expect(versionResponse.status).toBe(200)
     expect(versionResponse.body.id).toBe(version.id)
     expect(versionResponse.body.runtimeGraph.policy.allowRevoke).toBe(false)
+  })
+
+  // B3-08 — 模板停用/启用 + 用量.
+  describe('template archive/unarchive + usage (B3-08)', () => {
+    it('archives a published template', async () => {
+      const template = routeState.createTemplateFixture({ status: 'published' })
+      const version = routeState.createVersionFixture(template.id, { status: 'published' })
+      template.latest_version_id = version.id
+      template.active_version_id = version.id
+
+      const app = createApp()
+      const response = await request(app).post(`/api/approval-templates/${template.id}/archive`)
+
+      expect(response.status).toBe(200)
+      expect(response.body.status).toBe('archived')
+      expect(routeState.state.templates.get(template.id)?.status).toBe('archived')
+    })
+
+    it('rejects archiving a draft template (state-machine guard)', async () => {
+      const template = routeState.createTemplateFixture({ status: 'draft' })
+      const version = routeState.createVersionFixture(template.id)
+      template.latest_version_id = version.id
+
+      const app = createApp()
+      const response = await request(app).post(`/api/approval-templates/${template.id}/archive`)
+
+      expect(response.status).toBe(409)
+      expect(response.body.error.code).toBe('APPROVAL_TEMPLATE_ARCHIVE_INVALID_STATUS')
+      // Non-vacuous: the template must still be 'draft' — the guard actually blocked the write.
+      expect(routeState.state.templates.get(template.id)?.status).toBe('draft')
+    })
+
+    it('unarchives an archived template back to published', async () => {
+      const template = routeState.createTemplateFixture({ status: 'archived' })
+      const version = routeState.createVersionFixture(template.id, { status: 'published' })
+      template.latest_version_id = version.id
+      template.active_version_id = version.id
+
+      const app = createApp()
+      const response = await request(app).post(`/api/approval-templates/${template.id}/unarchive`)
+
+      expect(response.status).toBe(200)
+      expect(response.body.status).toBe('published')
+      expect(routeState.state.templates.get(template.id)?.status).toBe('published')
+    })
+
+    it('rejects unarchiving a template that is not archived', async () => {
+      const template = routeState.createTemplateFixture({ status: 'published' })
+      const version = routeState.createVersionFixture(template.id, { status: 'published' })
+      template.latest_version_id = version.id
+      template.active_version_id = version.id
+
+      const app = createApp()
+      const response = await request(app).post(`/api/approval-templates/${template.id}/unarchive`)
+
+      expect(response.status).toBe(409)
+      expect(response.body.error.code).toBe('APPROVAL_TEMPLATE_UNARCHIVE_INVALID_STATUS')
+      expect(routeState.state.templates.get(template.id)?.status).toBe('published')
+    })
+
+    it('404s archiving/unarchiving a template that does not exist', async () => {
+      const app = createApp()
+      const archiveResponse = await request(app).post('/api/approval-templates/tpl-missing/archive')
+      expect(archiveResponse.status).toBe(404)
+      expect(archiveResponse.body.error.code).toBe('APPROVAL_TEMPLATE_NOT_FOUND')
+
+      const unarchiveResponse = await request(app).post('/api/approval-templates/tpl-missing/unarchive')
+      expect(unarchiveResponse.status).toBe(404)
+      expect(unarchiveResponse.body.error.code).toBe('APPROVAL_TEMPLATE_NOT_FOUND')
+    })
+
+    it('reports usage counts (total + still-in-flight) for the archive confirm dialog', async () => {
+      const template = routeState.createTemplateFixture({ status: 'published' })
+      routeState.createInstanceFixture(template.id, { status: 'pending' })
+      routeState.createInstanceFixture(template.id, { status: 'pending' })
+      routeState.createInstanceFixture(template.id, { status: 'approved' })
+      // A different template's instances must not leak into this count.
+      const otherTemplate = routeState.createTemplateFixture({ status: 'published' })
+      routeState.createInstanceFixture(otherTemplate.id, { status: 'pending' })
+
+      const app = createApp()
+      const response = await request(app).get(`/api/approval-templates/${template.id}/usage`)
+
+      expect(response.status).toBe(200)
+      expect(response.body).toEqual({
+        templateId: template.id,
+        instanceCount: 3,
+        activeInstanceCount: 2,
+      })
+    })
+
+    it('reports zero usage for a template with no instances', async () => {
+      const template = routeState.createTemplateFixture({ status: 'published' })
+
+      const app = createApp()
+      const response = await request(app).get(`/api/approval-templates/${template.id}/usage`)
+
+      expect(response.status).toBe(200)
+      expect(response.body).toEqual({
+        templateId: template.id,
+        instanceCount: 0,
+        activeInstanceCount: 0,
+      })
+    })
+
+    it('404s usage for a template that does not exist', async () => {
+      const app = createApp()
+      const response = await request(app).get('/api/approval-templates/tpl-missing/usage')
+      expect(response.status).toBe(404)
+      expect(response.body.error.code).toBe('APPROVAL_TEMPLATE_NOT_FOUND')
+    })
   })
 })

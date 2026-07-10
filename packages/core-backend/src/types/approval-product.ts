@@ -551,3 +551,18 @@ export interface ApprovalTemplateVersionDetailDTO {
   createdAt: string
   updatedAt: string
 }
+
+/**
+ * B3-08 (模板治理 — 停用/启用用量指标): the blast-radius indicator surfaced by the archive confirm
+ * dialog. `instanceCount` is every approval_instances row ever created from this template;
+ * `activeInstanceCount` is the subset still in flight (status outside APPROVAL_TERMINAL_STATUSES).
+ * Archiving never touches these instances — each one already carries its own frozen
+ * template_version_id / published_definition_id and keeps running regardless of the parent
+ * template's status. The number is purely informational: "these instances started from a template
+ * a future request can no longer use," not "these instances are at risk."
+ */
+export interface ApprovalTemplateUsageDTO {
+  templateId: string
+  instanceCount: number
+  activeInstanceCount: number
+}

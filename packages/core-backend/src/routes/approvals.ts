@@ -659,6 +659,55 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
     }
   })
 
+  // B3-08 (模板治理 — 用量/blast-radius): fetched by the FE archive confirm dialog BEFORE the
+  // archive call so the admin sees the instance count first (mirrors the ruleStats /
+  // automationDeleteRuleConfirmMessage precedent). Read-only; safe to call for a template of any
+  // status.
+  r.get('/api/approval-templates/:id/usage', authenticate, approvalTemplateAdminGuard, async (req: Request, res: Response) => {
+    try {
+      const usage = await productService.getTemplateUsage(req.params.id)
+      res.json(usage)
+    } catch (error) {
+      handleApprovalsError(
+        res,
+        error,
+        'APPROVAL_TEMPLATE_USAGE_FETCH_FAILED',
+        'Failed to fetch approval template usage',
+      )
+    }
+  })
+
+  // B3-08 (模板治理 — 停用/启用): PUBLISHED <-> ARCHIVED. Archived templates cannot be the target of
+  // a new createApproval/route-preview (assembleCreationContext's published-status gate already
+  // fails closed for any non-'published' status); already-running instances are untouched.
+  r.post('/api/approval-templates/:id/archive', authenticate, approvalTemplateAdminGuard, async (req: Request, res: Response) => {
+    try {
+      const template = await productService.archiveTemplate(req.params.id)
+      res.json(template)
+    } catch (error) {
+      handleApprovalsError(
+        res,
+        error,
+        'APPROVAL_TEMPLATE_ARCHIVE_FAILED',
+        'Failed to archive approval template',
+      )
+    }
+  })
+
+  r.post('/api/approval-templates/:id/unarchive', authenticate, approvalTemplateAdminGuard, async (req: Request, res: Response) => {
+    try {
+      const template = await productService.unarchiveTemplate(req.params.id)
+      res.json(template)
+    } catch (error) {
+      handleApprovalsError(
+        res,
+        error,
+        'APPROVAL_TEMPLATE_UNARCHIVE_FAILED',
+        'Failed to unarchive approval template',
+      )
+    }
+  })
+
   r.get('/api/approval-templates/:id/versions/:versionId', authenticate, approvalTemplateAdminGuard, async (req: Request, res: Response) => {
     try {
       const version = await productService.getTemplateVersion(req.params.id, req.params.versionId)

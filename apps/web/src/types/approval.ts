@@ -364,3 +364,15 @@ export interface UpdateApprovalTemplateRequest {
 export interface PublishApprovalTemplateRequest {
   policy: RuntimePolicy
 }
+
+/**
+ * B3-08 (模板治理 — 停用/启用用量指标): the archive confirm dialog's blast-radius indicator. See the
+ * backend `ApprovalTemplateUsageDTO` doc comment (packages/core-backend/src/types/approval-product.ts)
+ * for the exact semantics — archiving never touches these instances, the count is purely
+ * informational.
+ */
+export interface ApprovalTemplateUsageDTO {
+  templateId: string
+  instanceCount: number
+  activeInstanceCount: number
+}

@@ -21,6 +21,7 @@ import type {
   CreateApprovalTemplateRequest,
   UpdateApprovalTemplateRequest,
   PublishApprovalTemplateRequest,
+  ApprovalTemplateUsageDTO,
   FormSchema,
 } from '../types/approval'
 
@@ -805,6 +806,38 @@ export async function cloneTemplate(templateId: string): Promise<ApprovalTemplat
     }
   }
   return apiPost(`/api/approval-templates/${encodeURIComponent(templateId)}/clone`, {})
+}
+
+/**
+ * B3-08 (模板治理 — 用量/blast-radius): fetched by the archive confirm dialog BEFORE the archive
+ * call so the admin sees the instance count first.
+ */
+export async function getTemplateUsage(templateId: string): Promise<ApprovalTemplateUsageDTO> {
+  if (USE_MOCK) {
+    return { templateId, instanceCount: 0, activeInstanceCount: 0 }
+  }
+  return apiGet(`/api/approval-templates/${encodeURIComponent(templateId)}/usage`)
+}
+
+/**
+ * B3-08 (模板治理 — 停用): PUBLISHED -> ARCHIVED. Existing running instances are unaffected; the
+ * template just stops being a valid createApproval/route-preview target.
+ */
+export async function archiveTemplate(templateId: string): Promise<ApprovalTemplateDetailDTO> {
+  if (USE_MOCK) {
+    return { ...mockTemplateDetail(templateId), status: 'archived' }
+  }
+  return apiPost(`/api/approval-templates/${encodeURIComponent(templateId)}/archive`, {})
+}
+
+/**
+ * B3-08 (模板治理 — 启用): ARCHIVED -> PUBLISHED. Reverses archiveTemplate.
+ */
+export async function unarchiveTemplate(templateId: string): Promise<ApprovalTemplateDetailDTO> {
+  if (USE_MOCK) {
+    return { ...mockTemplateDetail(templateId), status: 'published' }
+  }
+  return apiPost(`/api/approval-templates/${encodeURIComponent(templateId)}/unarchive`, {})
 }
 
 export async function getTemplate(id: string): Promise<ApprovalTemplateDetailDTO> {

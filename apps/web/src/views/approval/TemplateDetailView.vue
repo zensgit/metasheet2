@@ -26,6 +26,22 @@
         >
           编辑模板
         </el-button>
+        <el-button
+          v-if="canManageTemplates && template.status === 'published'"
+          :loading="archiving"
+          data-testid="template-detail-archive-button"
+          @click="handleArchive"
+        >
+          停用
+        </el-button>
+        <el-button
+          v-if="canManageTemplates && template.status === 'archived'"
+          :loading="archiving"
+          data-testid="template-detail-unarchive-button"
+          @click="handleUnarchive"
+        >
+          启用
+        </el-button>
       </template>
     </PageHeader>
 
@@ -364,7 +380,7 @@ import {
   QuestionFilled,
   CircleCheckFilled,
 } from '@element-plus/icons-vue'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import type {
   ApprovalNodeType,
   FormFieldType,
@@ -375,8 +391,16 @@ import type {
 } from '../../types/approval'
 import { useApprovalTemplateStore } from '../../approvals/templateStore'
 import { useApprovalPermissions } from '../../approvals/permissions'
-import { updateTemplateCategory, updateTemplateSlaHours, updateTemplateVisibilityScope } from '../../approvals/api'
+import {
+  updateTemplateCategory,
+  updateTemplateSlaHours,
+  updateTemplateVisibilityScope,
+  getTemplateUsage,
+  archiveTemplate,
+  unarchiveTemplate,
+} from '../../approvals/api'
 import { describeFieldVisibilityRule } from '../../approvals/fieldVisibility'
+import { templateArchiveConfirmMessage, templateUnarchiveConfirmMessage } from '../../approvals/templateArchiveConfirm'
 
 const route = useRoute()
 const router = useRouter()
@@ -410,6 +434,8 @@ const visibilitySaving = ref(false)
 const editingSla = ref(false)
 const slaDraft = ref<number | null>(null)
 const slaSaving = ref(false)
+// B3-08 — 停用/启用 state.
+const archiving = ref(false)
 
 function beginEditSla() {
   if (!template.value) return
@@ -635,6 +661,63 @@ function startApproval() {
 function editTemplate() {
   if (!template.value || !canManageTemplates.value) return
   router.push({ path: `/approval-templates/${template.value.id}/edit` })
+}
+
+// B3-08 (模板治理 — 停用): fetches the usage/blast-radius indicator FIRST (best-effort — a failed
+// usage read still shows the confirm, just without the instance-count line) so the confirm dialog
+// can state it, mirroring the ruleStats / DelegationSettingsView.disable() precedent.
+async function handleArchive() {
+  if (!template.value || archiving.value) return
+  const current = template.value
+  let usage
+  try {
+    usage = await getTemplateUsage(current.id)
+  } catch {
+    usage = undefined
+  }
+  try {
+    await ElMessageBox.confirm(
+      templateArchiveConfirmMessage(current.name, usage),
+      '停用模板',
+      { confirmButtonText: '停用', cancelButtonText: '取消', type: 'warning' },
+    )
+  } catch {
+    return
+  }
+  archiving.value = true
+  try {
+    const updated = await archiveTemplate(current.id)
+    store.activeTemplate = updated
+    ElMessage.success('已停用模板')
+  } catch (e: any) {
+    ElMessage.error(e?.message ?? '停用模板失败')
+  } finally {
+    archiving.value = false
+  }
+}
+
+async function handleUnarchive() {
+  if (!template.value || archiving.value) return
+  const current = template.value
+  try {
+    await ElMessageBox.confirm(
+      templateUnarchiveConfirmMessage(current.name),
+      '启用模板',
+      { confirmButtonText: '启用', cancelButtonText: '取消', type: 'info' },
+    )
+  } catch {
+    return
+  }
+  archiving.value = true
+  try {
+    const updated = await unarchiveTemplate(current.id)
+    store.activeTemplate = updated
+    ElMessage.success('已启用模板')
+  } catch (e: any) {
+    ElMessage.error(e?.message ?? '启用模板失败')
+  } finally {
+    archiving.value = false
+  }
 }
 
 onMounted(() => {

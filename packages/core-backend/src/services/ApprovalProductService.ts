@@ -12,6 +12,7 @@ import type {
   ApprovalTemplateListItemDTO,
   ApprovalTemplateVisibilityScope,
   ApprovalTemplateVersionDetailDTO,
+  ApprovalTemplateUsageDTO,
   ApprovalGraph,
   ApprovalMode,
   ApprovalRequesterSnapshot,
@@ -3085,6 +3086,117 @@ export class ApprovalProductService {
       throw error
     } finally {
       client?.release()
+    }
+  }
+
+  /**
+   * B3-08 (模板治理 — 停用): PUBLISHED → ARCHIVED. This is the only supported way to REACH the
+   * `archived` status; once there, `assembleCreationContext`'s existing
+   * `bundle.template.status !== 'published'` gate (shared by createApproval + route-preview) fails
+   * closed for it exactly like it already does for `draft` — no new gate needed, only a new way to
+   * get a template into that state on purpose. Archiving is a pure metadata flip: it never touches
+   * `approval_published_definitions.is_active` or any `approval_instances` row, so every in-flight
+   * instance created from this template keeps running unaffected (dispatchAction resolves its
+   * runtime graph from the instance's own frozen published_definition_id, never from the parent
+   * template's current status).
+   */
+  async archiveTemplate(id: string): Promise<ApprovalTemplateDetailDTO> {
+    return this.transitionTemplateStatus(id, 'published', 'archived', {
+      code: 'APPROVAL_TEMPLATE_ARCHIVE_INVALID_STATUS',
+      message: 'Only a published approval template can be archived',
+    })
+  }
+
+  /**
+   * B3-08 (模板治理 — 启用): reverses archiveTemplate (ARCHIVED → PUBLISHED). Immediately reachable
+   * again for new createApproval / route-preview calls — the template's published_definition never
+   * had is_active toggled off, so nothing needs to be re-published.
+   */
+  async unarchiveTemplate(id: string): Promise<ApprovalTemplateDetailDTO> {
+    return this.transitionTemplateStatus(id, 'archived', 'published', {
+      code: 'APPROVAL_TEMPLATE_UNARCHIVE_INVALID_STATUS',
+      message: 'Only an archived approval template can be reactivated',
+    })
+  }
+
+  private async transitionTemplateStatus(
+    id: string,
+    fromStatus: 'draft' | 'published' | 'archived',
+    toStatus: 'draft' | 'published' | 'archived',
+    onInvalid: { code: string; message: string },
+  ): Promise<ApprovalTemplateDetailDTO> {
+    if (!pool) throw new Error('Database not available')
+
+    let client: ApprovalDbClient | null = null
+    try {
+      client = await pool.connect()
+      await client.query('BEGIN')
+
+      const templateResult = await client.query<TemplateRow>(
+        `SELECT * FROM approval_templates WHERE id = $1 FOR UPDATE`,
+        [id],
+      )
+      const template = templateResult.rows[0]
+      if (!template) {
+        throw new ServiceError('Approval template not found', 404, 'APPROVAL_TEMPLATE_NOT_FOUND')
+      }
+      // Fail-closed state machine: archive only from published, unarchive only from archived. A
+      // draft template is already unreachable via createApproval (the NOT_PUBLISHED gate covers it),
+      // so there is deliberately no draft->archived transition here — archiving is specifically the
+      // admin-visible "take a live template out of service" action.
+      if (template.status !== fromStatus) {
+        throw new ServiceError(onInvalid.message, 409, onInvalid.code)
+      }
+
+      await client.query(
+        `UPDATE approval_templates SET status = $1, updated_at = now() WHERE id = $2`,
+        [toStatus, id],
+      )
+
+      const bundle = await this.loadTemplateBundleWithClient(client, id, undefined, 'latest')
+      if (!bundle) {
+        throw new ServiceError('Approval template version not found', 404, 'APPROVAL_TEMPLATE_VERSION_NOT_FOUND')
+      }
+
+      await client.query('COMMIT')
+      return toApprovalTemplateDetailDTO(bundle)
+    } catch (error) {
+      await rollbackQuietly(client)
+      throw error
+    } finally {
+      client?.release()
+    }
+  }
+
+  /**
+   * B3-08 用量/blast-radius indicator — surfaced by the FE archive confirm dialog (mirrors the
+   * `automationDeleteRuleConfirmMessage` / DelegationSettingsView.disable() precedent: name the
+   * action, state the blast radius, note that in-flight work is unaffected). `activeInstanceCount`
+   * uses the SAME "not a terminal status" definition assertTemplateVersionDeletable already uses.
+   */
+  async getTemplateUsage(id: string): Promise<ApprovalTemplateUsageDTO> {
+    if (!pool) throw new Error('Database not available')
+
+    const templateResult = await pool.query<{ id: string }>(
+      `SELECT id FROM approval_templates WHERE id = $1`,
+      [id],
+    )
+    if (!templateResult.rows[0]) {
+      throw new ServiceError('Approval template not found', 404, 'APPROVAL_TEMPLATE_NOT_FOUND')
+    }
+
+    const usageResult = await pool.query<{ total_count: string; active_count: string }>(
+      `SELECT COUNT(*)::text AS total_count,
+              COUNT(*) FILTER (WHERE status <> ALL($2::text[]))::text AS active_count
+       FROM approval_instances
+       WHERE template_id = $1`,
+      [id, [...APPROVAL_TERMINAL_STATUSES]],
+    )
+    const row = usageResult.rows[0]
+    return {
+      templateId: id,
+      instanceCount: Number.parseInt(row?.total_count ?? '0', 10),
+      activeInstanceCount: Number.parseInt(row?.active_count ?? '0', 10),
     }
   }
 
