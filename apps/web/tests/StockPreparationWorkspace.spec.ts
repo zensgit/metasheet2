@@ -104,6 +104,20 @@ async function flushUi(cycles = 3): Promise<void> {
   }
 }
 
+// Bounded polling wait (same idiom as waitForText in the AfterSalesView specs) for DOM that appears
+// after a REAL Response body read: `new Response(...).json()` can take macrotask turns, so
+// microtask-only flushUi cycles are timing-fragile on slower CI runners. Each cycle yields one
+// macrotask + nextTick; throws on timeout so a missing element fails loudly, not as a null deref.
+async function waitForSelector(container: HTMLElement, selector: string, cycles = 40): Promise<Element> {
+  for (let i = 0; i < cycles; i += 1) {
+    const el = container.querySelector(selector)
+    if (el) return el
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    await nextTick()
+  }
+  throw new Error(`Timed out waiting for selector: ${selector}`)
+}
+
 const VIEW_KEYS = [
   'project-workspace',
   'bom-snapshot-diff',
@@ -288,16 +302,18 @@ describe('StockPreparationWorkspace shell', () => {
   it('shares the projectId selected in view 1 with view 2 — no re-select needed', async () => {
     mockStockPrepReads()
     const root = await mountShell()
-    await flushUi(6)
 
-    // Pick a project in view 1.
-    const selectButton = root.querySelector('[data-testid="stock-prep-project-select"]') as HTMLButtonElement
-    expect(selectButton).not.toBeNull()
+    // Pick a project in view 1 (its row renders after the REAL projects Response settles — poll).
+    const selectButton = (await waitForSelector(
+      root,
+      '[data-testid="stock-prep-project-select"]',
+    )) as HTMLButtonElement
     selectButton.click()
-    await flushUi(6)
 
     // The shell jumps to view 2 already scoped: no select-a-project state, batch list GET issued
-    // with the SAME internal handle view 1 emitted.
+    // with the SAME internal handle view 1 emitted. Wait for the settled data view, not a fixed
+    // number of flushes (real Response.json() timing differs between local and CI).
+    await waitForSelector(root, '[data-testid="stock-prep-snapshot-overview"]')
     const panel = root.querySelector('[data-testid="stock-prep-panel"]') as HTMLElement
     expect(panel.getAttribute('data-active')).toBe('bom-snapshot-diff')
     expect(root.querySelector('[data-testid="stock-prep-snapshot-no-project"]')).toBeNull()
@@ -306,7 +322,6 @@ describe('StockPreparationWorkspace shell', () => {
       .filter((url) => url.includes('/snapshot-batches'))
     expect(batchListCalls.length).toBe(1)
     expect(batchListCalls[0]).toContain('projectId=proj-alpha')
-    expect(root.querySelector('[data-testid="stock-prep-snapshot-overview"]')).not.toBeNull()
 
     // NIT-1: close the incomplete wire→render loop — the REAL apiFetch fixture carries an
     // incomplete:true batch, and exactly that row materializes the badge + disabled diff entry.
@@ -338,9 +353,10 @@ describe('StockPreparationWorkspace shell', () => {
 
     const snapshotTab = root.querySelector('[data-testid="stock-prep-tab-bom-snapshot-diff"]') as HTMLButtonElement
     snapshotTab.click()
-    await flushUi(6)
 
-    // View 2 opens already scoped to the query's project handle — no re-select state.
+    // View 2 opens already scoped to the query's project handle — no re-select state. Poll for the
+    // settled data view (real Response.json() timing differs between local and CI).
+    await waitForSelector(root, '[data-testid="stock-prep-snapshot-overview"]')
     expect(root.querySelector('[data-testid="stock-prep-snapshot-no-project"]')).toBeNull()
     const batchListCalls = h.apiFetch.mock.calls
       .map((call) => String(call[0]))
