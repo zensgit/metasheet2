@@ -13,7 +13,10 @@
  * `/v1.0/card/instances/callback`). The SDK's default wildcard EVENT subscription is dropped
  * before connecting so the gateway registration carries exactly that one CALLBACK subscription.
  * Frames are threaded into the worker's existing `handlers.onEvent` seam unchanged — semantic
- * parsing of the payload stays owned by the B-3 callback adapter.
+ * parsing of the payload stays owned by the B-3 callback adapter. The decoded `data` object is
+ * forwarded WHOLE (never field-filtered): the DingTalk card-callback business payload carries the
+ * platform-verified `corpId` at its top level, and the B-3 executor consumes it for the P1-2
+ * cross-corp gate — dropping fields here would blind that check.
  *
  * Reconnect: the SDK's built-in reconnect (`autoReconnect`, default on) owns retry after
  * transport drops and CONNECT failures; `close()` disables it BEFORE disconnecting so an
