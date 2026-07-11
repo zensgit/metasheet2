@@ -131,6 +131,12 @@ export default defineConfig({
       // step in plugin-tests.yml (alongside files-storage-key-migration.db.test.ts) where it runs
       // against real Postgres every PR.
       'tests/integration/files-orphan-blob-retention.db.test.ts',
+      // F9 owner CHANGES-REQUESTED (GF9-1/GF9-2): multitable_attachments blob_purged_at migration +
+      // deleteAttachmentBinary index-free delete + sweepMultitableAttachmentBlobPurge compensating-sweep
+      // matrix, same shape/rationale as the F5 entry immediately above (DATABASE_URL-gated describeDb,
+      // isolated per-test schema). Excluded from the no-DB default job so it doesn't skip-green, and
+      // wired as a WHOLE FILE into the `Run attendance integration tests` step in plugin-tests.yml.
+      'tests/integration/multitable-attachment-blob-purge.db.test.ts',
       'tests/integration/attendance-comp-time-expiry-reminder.test.ts',
       'tests/integration/attendance-expiry-service.test.ts',
       'tests/integration/attendance-notification-deliveries.test.ts',

@@ -15687,7 +15687,17 @@ export function univerMetaRouter(): Router {
       })
 
       const storage = getAttachmentStorageService()
-      await deleteAttachmentBinaryShared({ storage, storageFileId: attachmentRow.storageFileId })
+      // F9 design-lock GF9-1/GF9-2 (owner CHANGES-REQUESTED P2-1①/②): delete by the persisted
+      // storage_path (index-free, mirrors the download path's `:15569` storagePath usage above) instead
+      // of the drifting id-based index lookup, and pass query+attachmentId so a resolved delete stamps
+      // `blob_purged_at` for the compensating sweep.
+      await deleteAttachmentBinaryShared({
+        storage,
+        storageFileId: attachmentRow.storageFileId,
+        storagePath: attachmentRow.storagePath,
+        query: pool.query.bind(pool),
+        attachmentId,
+      })
 
       if (updatedRecordRealtimeScope) {
         publishMultitableSheetRealtime({

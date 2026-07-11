@@ -79,7 +79,7 @@ import { getPoolStats } from './db/pg'
 import { getBuildInfo } from './config/build-info'
 import { isDatabaseSchemaError } from './utils/database-errors'
 import { startOperationAuditRetention } from './audit/operation-audit-retention'
-import { startMultitableAttachmentCleanup } from './multitable/attachment-orphan-retention'
+import { startMultitableAttachmentCleanup, startMultitableAttachmentBlobPurge } from './multitable/attachment-orphan-retention'
 import { startMetaRevisionRetention } from './multitable/meta-revision-retention'
 import { startFilesOrphanBlobRetention } from './services/files-orphan-blob-retention'
 import { isFieldAlwaysReadOnly, deriveFieldPermissions, isFieldWriteForbidden, FieldWritePermissionDeniedError } from './multitable/permission-derivation'
@@ -254,6 +254,7 @@ export class MetaSheetServer {
   private stopMultitableAttachmentCleanup?: () => void
   private stopMetaRevisionRetention?: () => void
   private stopFilesOrphanBlobRetention?: () => void
+  private stopMultitableAttachmentBlobPurge?: () => void
   private automationService?: AutomationService
   private apiGateway?: APIGateway
   private yjsCleanupTimer?: NodeJS.Timeout
@@ -1867,6 +1868,13 @@ export class MetaSheetServer {
     }))
     shutdownTasks.push(Promise.resolve().then(() => {
       try {
+        this.stopMultitableAttachmentBlobPurge?.()
+      } catch (err) {
+        this.logger.warn(`Multitable attachment blob purge sweep stop error: ${err instanceof Error ? err.message : String(err)}`)
+      }
+    }))
+    shutdownTasks.push(Promise.resolve().then(() => {
+      try {
         if (this.yjsCleanupTimer) {
           clearInterval(this.yjsCleanupTimer)
           this.yjsCleanupTimer = undefined
@@ -2760,6 +2768,7 @@ export class MetaSheetServer {
       this.stopMultitableAttachmentCleanup = startMultitableAttachmentCleanup({ logger: this.logger })
       this.stopMetaRevisionRetention = startMetaRevisionRetention({ logger: this.logger })
       this.stopFilesOrphanBlobRetention = startFilesOrphanBlobRetention({ logger: this.logger })
+      this.stopMultitableAttachmentBlobPurge = startMultitableAttachmentBlobPurge({ logger: this.logger })
     }
 
     // Register signal handlers only for real runtime, not test runners.

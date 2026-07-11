@@ -2,7 +2,7 @@ import * as path from 'path'
 import { Logger } from '../core/logger'
 import { query } from '../db/pg'
 import { isDatabaseSchemaError } from '../utils/database-errors'
-import { isPoisonedStorageKey } from './filesStorageKey'
+import { FILES_POISON_KEY_PREFIX, isPoisonedStorageKey } from './filesStorageKey'
 import { StorageServiceImpl } from './StorageService'
 
 /**
@@ -113,16 +113,27 @@ export async function sweepOrphanFileBlobs(
     // own url-fallback already had its one chance at resolution time; the sweep does not repeat that
     // fallback, it only acts on a persisted key). Active rows (`deleted_at IS NULL`) are structurally
     // excluded — GF5-5's entry condition IS the tombstone.
+    //
+    // F9 design-lock GF9-4 (owner CHANGES-REQUESTED P2-3): `NOT starts_with(storage_key, $3)` excludes
+    // poisoned (`!f3-collision:`) rows at the SQL candidate stage, not just inside the loop below. Without
+    // this, `ORDER BY deleted_at ASC LIMIT batchSize` can select a full batch of nothing but poison rows
+    // (they satisfy every other predicate — non-null key, tombstoned, blob_purged_at forever NULL) and
+    // starve out older-but-still-purgeable rows behind them (head-of-line blocking). `starts_with` (not
+    // LIKE) needs no wildcard escaping and reads the prefix from the SAME constant `filesStorageKey.ts`
+    // exports (`FILES_POISON_KEY_PREFIX`), not a literal, so the two can never drift apart. The in-loop
+    // `isPoisonedStorageKey` skip below is KEPT as belt-and-suspenders (the unit-test mock queryFn does
+    // not execute this WHERE clause, so that test coverage still depends on the in-loop branch).
     const rows = await queryFn<OrphanBlobRow>(
       `SELECT id, storage_key
          FROM files
         WHERE deleted_at IS NOT NULL
           AND blob_purged_at IS NULL
           AND storage_key IS NOT NULL
+          AND NOT starts_with(storage_key, $3)
           AND deleted_at < now() - make_interval(hours => $1)
         ORDER BY deleted_at ASC
         LIMIT $2`,
-      [graceHours, batchSize],
+      [graceHours, batchSize, FILES_POISON_KEY_PREFIX],
     )
 
     let purged = 0
