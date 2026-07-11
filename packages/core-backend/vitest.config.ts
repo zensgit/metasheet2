@@ -42,6 +42,14 @@ export default defineConfig({
       // reclaims a live long run. DATABASE_URL-gated; excluded here so the no-DB job cannot
       // skip-green it, and wired as a WHOLE FILE into the approval real-DB step.
       'tests/integration/directory-sync-run-lease.db.test.ts',
+      // R1-L4 syncDirectoryIntegration orchestration harness (real DB): drives the REAL sync
+      // end-to-end (mocked DingTalk pull, real Postgres apply) to cover the CALL SITES the
+      // per-helper goldens cannot — heartbeat lifecycle/interval-cleared proof, H02 admission
+      // wiring + per-account SAVEPOINT, OPS-01 deprovision executor wiring (both arms), and
+      // the stale-lease reclaim composition (trigger path + scheduler boot sweep).
+      // DATABASE_URL-gated; excluded here so the no-DB job cannot skip-green it, and wired as
+      // a WHOLE FILE into the approval real-DB step in plugin-tests.yml.
+      'tests/integration/directory-sync-orchestration.db.test.ts',
       'tests/integration/approval-manager-chain.db.test.ts',
       'tests/integration/approval-requester-department.db.test.ts',
       'tests/integration/approval-requester-title.db.test.ts',
