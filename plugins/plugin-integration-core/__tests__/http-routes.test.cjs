@@ -7116,6 +7116,24 @@ async function testStockPreparationReadonlySourceRunRoutes() {
   assert.equal(Object.prototype.hasOwnProperty.call(plm.body.data, 'intake'), false)
   assert.equal(Object.prototype.hasOwnProperty.call(erp.body.data, 'intake'), false)
 
+  const readsBeforeInvalidVersion = sourceReadCalls.length
+  const invalidVersion = await invoke(routes, 'POST', '/api/integration/stock-preparation/mvp/source-runs/plm-bom', {
+    user: ADMIN_USER,
+    body: {
+      workspaceId: 'workspace_1',
+      projectId: 'business_project_1',
+      sourceProjectNo: 'SOURCE-PROJECT-SECRET',
+      readSourceConfigId: PLM_CONFIG_ID,
+      syncRunId: 'plm_source_run_invalid_version',
+      snapshotBatchId: 'plm_snapshot_invalid_version',
+      snapshotVersion: true,
+    },
+  })
+  assert.equal(invalidVersion.statusCode, 422)
+  assert.equal(invalidVersion.body.error.code, 'SOURCE_RUN_CONFIG_INVALID')
+  assert.equal(invalidVersion.body.error.details.field, 'snapshotVersion')
+  assert.equal(sourceReadCalls.length, readsBeforeInvalidVersion, 'invalid snapshot version fails before external read')
+
   const readsBeforeRejectedBody = sourceReadCalls.length
   for (const forbiddenInput of [
     { rawRows: [{ FNumber: RAW_ERP_VALUE }] },

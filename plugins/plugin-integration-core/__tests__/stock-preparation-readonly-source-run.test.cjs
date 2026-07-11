@@ -10,6 +10,7 @@ const { validateReadSourceConfig } = require(path.join(__dirname, '..', 'lib', '
 const { prepareConfiguredRead } = require(path.join(__dirname, '..', 'lib', 'read-source-read-runtime.cjs'))
 const {
   publicReadonlySourceRunResult,
+  SOURCE_PAGE_SIZE,
   StockPreparationReadonlySourceRunError,
   runErpMaterialReadonlySource,
   runPlmBomReadonlySource,
@@ -309,6 +310,132 @@ async function testDeclaredTotalCannotEndEarly() {
   assert.equal(runtime.writes.length, 0)
 }
 
+async function testDeclaredTotalMustRemainStableAcrossPages() {
+  let page = 0
+  const runtime = sourceRuntime('plm:yuantus-wrapper', () => {
+    page += 1
+    return {
+      records: [{}],
+      raw: { Rows: [{ path: `/root/part-${page}`, childCode: `PART-${page}`, quantity: 1 }] },
+      nextCursor: page === 1 ? 'offset:1' : null,
+      done: page > 1,
+      metadata: { totalCount: page === 1 ? 2 : 3 },
+    }
+  })
+  await assert.rejects(
+    () => runPlmBomReadonlySource({
+      permission: 'admin',
+      projectId: 'business_project_changed_total',
+      sourceProjectNo: 'project_changed_total',
+      syncRunId: 'plm_source_run_changed_total',
+      snapshotBatchId: 'snapshot_changed_total',
+      snapshotVersion: 1,
+      preparedRead: preparedRead('plm:yuantus-wrapper', [
+        { source: 'path', target: 'pathKey' },
+        { source: 'childCode', target: 'childDrawingNo' },
+        { source: 'quantity', target: 'designQty' },
+      ]),
+      ...runtime,
+    }),
+    (error) => error instanceof StockPreparationReadonlySourceRunError
+      && error.code === 'SOURCE_RUN_PAGINATION_INCONSISTENT'
+      && error.details.previousSourceTotal === 2
+      && error.details.sourceTotal === 3,
+  )
+  assert.equal(runtime.writes.length, 0)
+}
+
+async function testDeclaredTotalRemainsBindingWhenLaterPageOmitsIt() {
+  let page = 0
+  const runtime = sourceRuntime('plm:yuantus-wrapper', () => {
+    page += 1
+    return {
+      records: [{}],
+      raw: { Rows: [{ path: `/root/part-${page}`, childCode: `PART-${page}`, quantity: 1 }] },
+      nextCursor: page === 1 ? 'offset:1' : null,
+      done: page > 1,
+      metadata: page === 1 ? { totalCount: 3 } : {},
+    }
+  })
+  await assert.rejects(
+    () => runPlmBomReadonlySource({
+      permission: 'admin',
+      projectId: 'business_project_missing_total',
+      sourceProjectNo: 'project_missing_total',
+      syncRunId: 'plm_source_run_missing_total',
+      snapshotBatchId: 'snapshot_missing_total',
+      snapshotVersion: 1,
+      preparedRead: preparedRead('plm:yuantus-wrapper', [
+        { source: 'path', target: 'pathKey' },
+        { source: 'childCode', target: 'childDrawingNo' },
+        { source: 'quantity', target: 'designQty' },
+      ]),
+      ...runtime,
+    }),
+    (error) => error instanceof StockPreparationReadonlySourceRunError
+      && error.code === 'SOURCE_RUN_PAGINATION_INCOMPLETE'
+      && error.details.receivedRows === 2
+      && error.details.sourceTotal === 3,
+  )
+  assert.equal(runtime.writes.length, 0)
+}
+
+async function testUnknownTotalCannotEndOnAnAmbiguousFullPage() {
+  const rows = Array.from({ length: SOURCE_PAGE_SIZE }, (_, index) => ({
+    id: `material_internal_${index}`,
+    code: `MAT-${index}`,
+  }))
+  const runtime = sourceRuntime('data-source:sql-readonly', () => ({
+    records: rows.map(() => ({})),
+    raw: { Rows: rows },
+    done: true,
+  }))
+  await assert.rejects(
+    () => runErpMaterialReadonlySource({
+      permission: 'admin',
+      syncRunId: 'data_source_ambiguous_full_page',
+      preparedRead: preparedRead('data-source:sql-readonly', [
+        { source: 'id', target: 'erpMaterialInternalId' },
+        { source: 'code', target: 'erpMaterialCode' },
+      ]),
+      ...runtime,
+    }),
+    (error) => error instanceof StockPreparationReadonlySourceRunError
+      && error.code === 'SOURCE_RUN_PAGINATION_AMBIGUOUS'
+      && error.details.receivedRows === SOURCE_PAGE_SIZE,
+  )
+  assert.equal(runtime.writes.length, 0)
+}
+
+async function testSnapshotVersionRejectsNonIntegerJsonTypesBeforeRead() {
+  const runtime = sourceRuntime('plm:yuantus-wrapper', () => {
+    throw new Error('adapter must not run')
+  })
+  for (const snapshotVersion of [true, false, 0, -1, 1.5, {}, [], Number.MAX_SAFE_INTEGER + 1]) {
+    await assert.rejects(
+      () => runPlmBomReadonlySource({
+        permission: 'admin',
+        projectId: 'business_project_bad_version',
+        sourceProjectNo: 'project_bad_version',
+        syncRunId: 'plm_source_run_bad_version',
+        snapshotBatchId: 'snapshot_bad_version',
+        snapshotVersion,
+        preparedRead: preparedRead('plm:yuantus-wrapper', [
+          { source: 'path', target: 'pathKey' },
+          { source: 'childCode', target: 'childDrawingNo' },
+          { source: 'quantity', target: 'designQty' },
+        ]),
+        ...runtime,
+      }),
+      (error) => error instanceof StockPreparationReadonlySourceRunError
+        && error.code === 'SOURCE_RUN_CONFIG_INVALID'
+        && error.details.field === 'snapshotVersion',
+    )
+  }
+  assert.equal(runtime.reads.length, 0)
+  assert.equal(runtime.writes.length, 0)
+}
+
 async function testDisallowedKindFailsBeforeAdapter() {
   const runtime = sourceRuntime('http', () => {
     throw new Error('adapter must not run')
@@ -337,6 +464,10 @@ async function main() {
   await testBridgeAndConfiguredDataSourceKindsFeedTheSameContract()
   await testSourceRuntimeErrorsAreCoarse()
   await testDeclaredTotalCannotEndEarly()
+  await testDeclaredTotalMustRemainStableAcrossPages()
+  await testDeclaredTotalRemainsBindingWhenLaterPageOmitsIt()
+  await testUnknownTotalCannotEndOnAnAmbiguousFullPage()
+  await testSnapshotVersionRejectsNonIntegerJsonTypesBeforeRead()
   await testDisallowedKindFailsBeforeAdapter()
   console.log('stock-preparation readonly source-run tests: PASS')
 }

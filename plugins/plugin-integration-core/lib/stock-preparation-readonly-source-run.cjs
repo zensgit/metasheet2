@@ -54,8 +54,10 @@ function requiredString(value, field) {
 }
 
 function positiveInteger(value, field) {
-  const parsed = Number(value)
-  if (!Number.isInteger(parsed) || parsed < 1) {
+  const parsed = typeof value === 'number'
+    ? value
+    : (typeof value === 'string' && value.trim() ? Number(value) : Number.NaN)
+  if (!Number.isSafeInteger(parsed) || parsed < 1) {
     throw new StockPreparationReadonlySourceRunError(
       422,
       'SOURCE_RUN_CONFIG_INVALID',
@@ -173,6 +175,7 @@ async function readAllMappedRows({ preparedRead, system, createAdapter }) {
   const usesPageIndex = preparedRead.plan.mode === 'list_page'
     && preparedRead.plan.requiredKind === 'erp:k3-wise-webapi'
   let cursor = null
+  let declaredSourceTotal = null
 
   for (let page = 1; page <= SOURCE_MAX_PAGES; page += 1) {
     const execution = usesPageIndex
@@ -213,11 +216,39 @@ async function readAllMappedRows({ preparedRead, system, createAdapter }) {
     }
     rows.push(...pageRows)
 
-    const sourceTotal = outcome.page && outcome.page.sourceTotalCount
-    if (Number.isInteger(sourceTotal)) {
-      assertKnownSourceNotExceeded(sourceTotal, rows.length)
+    const reportedSourceTotal = outcome.page && outcome.page.sourceTotalCount
+    if (Number.isInteger(reportedSourceTotal)) {
+      if (declaredSourceTotal !== null && declaredSourceTotal !== reportedSourceTotal) {
+        throw new StockPreparationReadonlySourceRunError(
+          502,
+          'SOURCE_RUN_PAGINATION_INCONSISTENT',
+          'configured readonly source changed its declared row count during paging',
+          {
+            previousSourceTotal: declaredSourceTotal,
+            sourceTotal: reportedSourceTotal,
+          },
+        )
+      }
+      declaredSourceTotal = reportedSourceTotal
+      assertKnownSourceNotExceeded(declaredSourceTotal, rows.length)
+    }
+    const sourceTotal = declaredSourceTotal
+    const nextCursor = optionalString(outcome.page && outcome.page.nextCursor)
+    if (!usesPageIndex && outcome.page && outcome.page.done === true && nextCursor) {
+      throw new StockPreparationReadonlySourceRunError(
+        502,
+        'SOURCE_RUN_PAGINATION_INCONSISTENT',
+        'configured readonly source returned a terminal page with a continuation cursor',
+      )
     }
     if (Number.isInteger(sourceTotal) && rows.length === sourceTotal) {
+      if (!usesPageIndex && nextCursor) {
+        throw new StockPreparationReadonlySourceRunError(
+          502,
+          'SOURCE_RUN_PAGINATION_INCONSISTENT',
+          'configured readonly source returned a continuation cursor after its declared row count',
+        )
+      }
       return { rows, headerRows, pages: page, sourceTotalKnown: true }
     }
     if (usesPageIndex) {
@@ -228,12 +259,27 @@ async function readAllMappedRows({ preparedRead, system, createAdapter }) {
       continue
     }
     if (outcome.page && outcome.page.done === true) {
+      if (!Number.isInteger(sourceTotal) && pageRows.length >= pageSize) {
+        throw new StockPreparationReadonlySourceRunError(
+          502,
+          'SOURCE_RUN_PAGINATION_AMBIGUOUS',
+          'configured readonly source ended on a full page without a row count or continuation cursor',
+          { receivedRows: rows.length, pageSize },
+        )
+      }
       assertKnownSourceComplete(sourceTotal, rows.length)
       return { rows, headerRows, pages: page, sourceTotalKnown: Number.isInteger(sourceTotal) }
     }
 
-    const nextCursor = optionalString(outcome.page && outcome.page.nextCursor)
     if (!nextCursor) {
+      if (!Number.isInteger(sourceTotal) && pageRows.length >= pageSize) {
+        throw new StockPreparationReadonlySourceRunError(
+          502,
+          'SOURCE_RUN_PAGINATION_AMBIGUOUS',
+          'configured readonly source ended on a full page without a row count or continuation cursor',
+          { receivedRows: rows.length, pageSize },
+        )
+      }
       assertKnownSourceComplete(sourceTotal, rows.length)
       return { rows, headerRows, pages: page, sourceTotalKnown: Number.isInteger(sourceTotal) }
     }
