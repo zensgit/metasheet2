@@ -272,3 +272,69 @@ export async function supersedeDingTalkApprovalCardDeliveriesForInstance(
   )
   return (result.rows as Array<{ id: string }>).map((row) => row.id)
 }
+
+/**
+ * P1-1 legacy backfill (migrate-time, one-time, idempotent). The strict epoch binding — the wrapper
+ * pre-read AND the engine's in-txn card→round guard — now requires every actionable `sent` card to
+ * carry a NON-NULL entry_epoch equal to a live seat's epoch (the permissive null-pass dual-read was
+ * dropped in the P1-1 re-review). Cards sent BEFORE the entry_epoch column existed carry NULL and
+ * would be permanently un-actionable with no ledger expiry to retire them, so this reconciles them
+ * ONCE at migrate time:
+ *   - if the card's (instance_id, node_key, recipient_user_id) maps to EXACTLY ONE live active
+ *     `approval_assignments` seat carrying a NON-NULL entry_epoch → backfill the delivery's epoch from
+ *     that seat (the card stays actionable for its real round);
+ *   - otherwise (no live seat, an ambiguous >1 non-null-epoch match, or only null-epoch seats) → mark
+ *     the card `superseded` — FAIL-CLOSED: the card stops working and the recipient re-approves via web.
+ *
+ * Only `sent` + NULL-epoch rows are touched, so a re-run is a no-op (idempotent); `down()` dropping
+ * the column leaves superseded cards superseded (fail-closed stays closed — reversible-safe). The two
+ * statements carry NO bound parameters in the UNSCOPED (migration) path — `options.instanceIds` scopes
+ * BOTH (used only by the deterministic golden to avoid touching sibling fixtures in the shared test DB).
+ */
+export async function backfillDingTalkApprovalCardDeliveryEpochs(
+  query: QueryFn,
+  options: { instanceIds?: string[] } = {},
+): Promise<{ backfilledIds: string[]; supersededIds: string[] }> {
+  const scope = options.instanceIds
+  const scopeClause = scope ? ' AND d.instance_id = ANY($1::text[])' : ''
+  const scopeParams: unknown[] = scope ? [scope] : []
+
+  // Step 1 — backfill from the UNIQUE live non-null-epoch seat. The grouped subquery yields a seat
+  // ONLY when EXACTLY ONE non-null-epoch active seat exists for the card's (instance, node, recipient)
+  // — HAVING COUNT(*) = 1 over `entry_epoch IS NOT NULL` rows; a zero/ambiguous match produces no row,
+  // leaving the delivery's entry_epoch NULL for step 2.
+  const backfilled = await query(
+    `UPDATE dingtalk_approval_card_deliveries d
+        SET entry_epoch = seat.epoch, updated_at = NOW()
+       FROM (
+         SELECT aa.instance_id, aa.node_key, aa.assignee_id, MIN(aa.entry_epoch) AS epoch
+           FROM approval_assignments aa
+          WHERE aa.is_active = TRUE AND aa.entry_epoch IS NOT NULL
+          GROUP BY aa.instance_id, aa.node_key, aa.assignee_id
+         HAVING COUNT(*) = 1
+       ) seat
+      WHERE d.card_state = 'sent'
+        AND d.entry_epoch IS NULL
+        AND seat.instance_id = d.instance_id
+        AND seat.node_key = d.node_key
+        AND seat.assignee_id = d.recipient_user_id${scopeClause}
+      RETURNING d.id`,
+    scopeParams,
+  )
+
+  // Step 2 — any still-`sent` NULL-epoch card step 1 did NOT backfill (no unique live seat) is
+  // superseded (fail-closed).
+  const superseded = await query(
+    `UPDATE dingtalk_approval_card_deliveries d
+        SET card_state = 'superseded', updated_at = NOW()
+      WHERE d.card_state = 'sent'
+        AND d.entry_epoch IS NULL${scopeClause}
+      RETURNING d.id`,
+    scopeParams,
+  )
+
+  return {
+    backfilledIds: (backfilled.rows as Array<{ id: string }>).map((row) => row.id),
+    supersededIds: (superseded.rows as Array<{ id: string }>).map((row) => row.id),
+  }
+}

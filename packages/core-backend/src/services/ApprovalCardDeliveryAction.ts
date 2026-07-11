@@ -131,15 +131,18 @@ async function buildSummary(
   delivery: DingTalkApprovalCardDeliveryRow,
   viewerUserId: string,
 ): Promise<ApprovalCardDeliverySummary | null> {
-  // P1-1: bind actionability to a LIVE active assignment matching the delivery's node + recipient
-  // (+ epoch when the delivery carries one) — computed in the SAME round-trip as the instance read.
+  // P1-1: bind actionability to a LIVE active assignment matching the delivery's node + recipient +
+  // STRICT epoch — computed in the SAME round-trip as the instance read.
   //   - The node/assignee match closes FORWARD advance using live state: once node-1 is approved and
   //     the instance advances to node-2 (where the recipient is ALSO an assignee), node-1's assignment
-  //     row is is_active=FALSE, so a stale node-1 card no longer matches → NOT actionable. It never
-  //     stored an epoch, so it does not break legacy cards.
-  //   - The epoch clause closes SAME-NODE re-entry: a loop-back to the same node_key mints a FRESH
-  //     entry_epoch on a new active assignment, so the old-epoch card fails the equality. Dual-read: a
-  //     NULL delivery epoch (legacy card) SKIPS the epoch clause and relies on the node/assignee match.
+  //     row is is_active=FALSE, so a stale node-1 card no longer matches → NOT actionable.
+  //   - The STRICT epoch clause closes SAME-NODE re-entry: a loop-back to the same node_key mints a
+  //     FRESH entry_epoch on a new active assignment, so the old-epoch card fails the equality. There
+  //     is NO null-pass arm (the P1-1 re-review dropped the `$4 IS NULL` / `aa.entry_epoch IS NULL`
+  //     dual-read that let a legacy card re-enter the same node): the delivery MUST carry a NON-NULL
+  //     epoch equal to a NON-NULL live-seat epoch. A NULL delivery epoch (a card the migration failed
+  //     to backfill) → NOT actionable (fail-closed). Legacy in-flight cards are handled at migrate
+  //     time (backfilled from their unique live seat, else superseded), never by a permissive read.
   const result = await query(
     `SELECT i.id, i.title, i.request_no, i.status, i.current_node_key, i.policy_snapshot,
             EXISTS (
@@ -148,7 +151,8 @@ async function buildSummary(
                  AND aa.node_key = $2
                  AND aa.assignee_id = $3
                  AND aa.is_active = TRUE
-                 AND ($4::int IS NULL OR aa.entry_epoch IS NULL OR aa.entry_epoch = $4::int)
+                 AND aa.entry_epoch IS NOT NULL
+                 AND aa.entry_epoch = $4::int
             ) AS has_active_assignment
        FROM approval_instances i WHERE i.id = $1`,
     [delivery.instance_id, delivery.node_key, delivery.recipient_user_id, delivery.entry_epoch],
@@ -236,6 +240,13 @@ export async function executeApprovalActionFromCardDelivery(
       const fresh = await findDingTalkApprovalCardDeliveryById(deps.query, input.deliveryId)
       return fresh ? buildSummary(deps.query, fresh, input.actor.userId) : null
     })()) ?? preSummary
+    // P1-1 TOCTOU close: the engine's authoritative in-txn card→round binding threw because a
+    // concurrent advance (or same-node re-entry) raced the wrapper's pre-read — the card is stale,
+    // not "rejected". Report it as `stale` (matching the pre-read early-stale outcome) so a raced
+    // card renders the real terminal state, never a dead engine-error form.
+    if (err.code === 'APPROVAL_CARD_DELIVERY_STALE') {
+      return { status: 'stale', summary }
+    }
     return {
       status: 'engine_rejected',
       code: typeof err.code === 'string' ? err.code : 'APPROVAL_ACTION_FAILED',
