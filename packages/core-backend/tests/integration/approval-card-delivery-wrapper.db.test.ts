@@ -42,6 +42,30 @@ const APPROVER = `u_cdw_appr_${TS}`
 
 const q = (sqlText: string, params?: unknown[]) => poolManager.get().query(sqlText, params)
 
+const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms))
+
+/**
+ * Block until a backend is genuinely WAITING on the instance row lock (wait_event_type='Lock' on the
+ * `approval_instances … FOR UPDATE`) — the deterministic proof that the concurrent dispatchAction is
+ * parked behind the held lock, NOT a timer. Throws if it never blocks so the interleaving golden can
+ * never silently degrade into the sequential case (a vacuous green).
+ */
+async function waitUntilBlockedOnInstanceLock(timeoutMs = 5000): Promise<void> {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    const r = await q(
+      `SELECT COUNT(*)::int AS c FROM pg_stat_activity
+        WHERE datname = current_database()
+          AND wait_event_type = 'Lock'
+          AND query ILIKE '%approval_instances%'
+          AND query ILIKE '%for update%'`,
+    )
+    if ((r.rows[0] as { c: number }).c >= 1) return
+    await sleep(25)
+  }
+  throw new Error('concurrent dispatchAction never blocked on the instance row lock — interleaving did not occur')
+}
+
 let approvals: ApprovalProductService
 let templateId = ''
 // P1-1: a linear TWO-approval-node template (node1 → node2, SAME assignee) — the shape the
@@ -683,6 +707,72 @@ describeIfDatabase('A-4 card-delivery wrapper (real DB)', () => {
     const post = await q('SELECT status, current_node_key FROM approval_instances WHERE id = $1', [instanceId])
     expect(post.rows[0]).toMatchObject({ status: 'pending', current_node_key: 'approval_2' })
     const node2Approves = await q(`SELECT COUNT(*)::int AS c FROM approval_records WHERE instance_id = $1 AND action = 'approve' AND metadata->>'nodeKey' = 'approval_2'`, [instanceId])
+    expect((node2Approves.rows[0] as { c: number }).c).toBe(0)
+  })
+
+  test('P1-1 TOCTOU (REAL two-transaction interleaving): a node1 card ALREADY IN FLIGHT when the instance advances N1→N2 under a held lock resolves STALE — the guard reads post-advance state INSIDE the FOR UPDATE, never the pre-advance snapshot', async () => {
+    // The HEADLINE above advances FIRST, then dispatches — it proves the guard EXISTS but not that it
+    // lives INSIDE the lock (a guard moved outside would still see the already-committed advance). This
+    // golden constructs the real race the owner reproduced: a dedicated connection HOLDS the instance
+    // row lock and advances N1→N2 in-txn WHILE a node1 card dispatch is already parked behind that lock.
+    // Only a guard that re-reads under the FOR UPDATE observes node2 and refuses; a guard reading the
+    // pre-advance snapshot (outside the lock) sees node1 → passes → approves node2 (owner P1).
+    const instanceId = await newInstance(twoNodeTemplateId)
+    const node1Epoch = await activeEpoch(instanceId, 'approval_1')
+    const deliveryId = await newSentDelivery(instanceId, { nodeKey: 'approval_1', entryEpoch: node1Epoch })
+
+    const hold = await poolManager.get().getInternalPool().connect()
+    let bStarted = false
+    try {
+      // A: take and HOLD the instance row lock (same row dispatchAction locks FOR UPDATE).
+      await hold.query('BEGIN')
+      await hold.query(`SELECT id FROM approval_instances WHERE id = $1 AND COALESCE(source_system, 'platform') = 'platform' FOR UPDATE`, [instanceId])
+
+      // B: the stale node1 card driven directly into dispatchAction — it must block on B's own FOR UPDATE.
+      let bSettled = false
+      const bPromise = approvals
+        .dispatchAction(
+          instanceId,
+          { action: 'approve', comment: '同意', channelOrigin: { channel: 'dingtalk_card', cardDeliveryId: deliveryId } },
+          { userId: APPROVER, userName: APPROVER, roles: [] },
+        )
+        .then((v) => { bSettled = true; return v }, (e) => { bSettled = true; throw e })
+      bStarted = true
+
+      // Deterministic proof B is parked behind the lock (not a timer): wait for wait_event_type='Lock'.
+      await waitUntilBlockedOnInstanceLock()
+      expect(bSettled).toBe(false) // B cannot have resolved while A holds the lock
+
+      // A advances N1→N2 IN-TXN (deactivate node1 seat, mint the node2 seat at a fresh epoch, move the
+      // pointer) and COMMITs — B is still blocked, so this advance lands strictly before B re-reads.
+      const e2 = (node1Epoch as number) + 1
+      await hold.query(`UPDATE approval_assignments SET is_active = FALSE, updated_at = now() WHERE instance_id = $1 AND node_key = 'approval_1' AND is_active = TRUE`, [instanceId])
+      await hold.query(
+        `INSERT INTO approval_assignments (instance_id, assignment_type, assignee_id, source_step, node_key, is_active, entry_epoch, metadata, created_at, updated_at)
+         VALUES ($1, 'user', $2, 1, 'approval_2', TRUE, $3, '{}'::jsonb, now(), now())`,
+        [instanceId, APPROVER, e2],
+      )
+      await hold.query(`UPDATE approval_instances SET current_node_key = 'approval_2', node_activation_seq = $2, version = version + 1, updated_at = now() WHERE id = $1`, [instanceId, e2])
+      await hold.query('COMMIT')
+
+      // B unblocks, acquires the lock, re-reads current_node_key='approval_2' INSIDE its txn: the node1
+      // card no longer binds the current round → 409 STALE. RED-before (validate the binding against a
+      // PRE-lock read of current_node_key instead of the locked row): B saw node1 → approves node2.
+      await expect(bPromise).rejects.toMatchObject({ code: 'APPROVAL_CARD_DELIVERY_STALE', statusCode: 409 })
+    } catch (err) {
+      await hold.query('ROLLBACK').catch(() => {})
+      throw err
+    } finally {
+      hold.release()
+    }
+
+    // node2 was NEVER approved by the in-flight stale card; the instance is untouched at node2.
+    const post = await q('SELECT status, current_node_key FROM approval_instances WHERE id = $1', [instanceId])
+    expect(post.rows[0]).toMatchObject({ status: 'pending', current_node_key: 'approval_2' })
+    const node2Approves = await q(
+      `SELECT COUNT(*)::int AS c FROM approval_records WHERE instance_id = $1 AND action = 'approve' AND metadata->>'nodeKey' = 'approval_2'`,
+      [instanceId],
+    )
     expect((node2Approves.rows[0] as { c: number }).c).toBe(0)
   })
 

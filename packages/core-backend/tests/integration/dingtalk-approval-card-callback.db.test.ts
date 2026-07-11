@@ -76,6 +76,25 @@ async function newInstance(): Promise<string> {
   return (dto as { id: string }).id
 }
 
+/**
+ * The live node-entry epoch of the active seat for (instance, node, recipient). A DELIVERABLE card
+ * MUST be stamped with this (strict P1-1 binding: a NULL-epoch card is never actionable) — the real
+ * send path reads `task.entryEpoch` from the task_created event; the fixtures read it from the seat
+ * the engine minted so the card binds to its real round. Undeliverable negatives (pending/failed)
+ * keep NULL — they are unactionable by send_status alone, and stamping them would mask nothing.
+ */
+async function liveSeatEpoch(instanceId: string, nodeKey: string, recipientUserId: string): Promise<number> {
+  const res = await q(
+    `SELECT entry_epoch FROM approval_assignments
+      WHERE instance_id = $1 AND node_key = $2 AND assignee_id = $3 AND is_active = TRUE AND entry_epoch IS NOT NULL
+      ORDER BY entry_epoch DESC LIMIT 1`,
+    [instanceId, nodeKey, recipientUserId],
+  )
+  const epoch = (res.rows[0] as { entry_epoch: number } | undefined)?.entry_epoch
+  if (typeof epoch !== 'number') throw new Error(`no live non-null-epoch seat for ${instanceId}/${nodeKey}/${recipientUserId}`)
+  return epoch
+}
+
 async function newSentDelivery(instanceId: string, integrationId: string | null = INTEGRATION_A): Promise<string> {
   const row = await insertDingTalkApprovalCardDelivery(q, {
     instanceId,
@@ -84,6 +103,7 @@ async function newSentDelivery(instanceId: string, integrationId: string | null 
     recipientDingTalkUserId: DD_OP,
     deliveryKind: 'interactive_card',
     integrationId,
+    entryEpoch: await liveSeatEpoch(instanceId, 'approval_1', APPROVER),
   })
   await markDingTalkApprovalCardDeliverySent(q, row.id, `carrier_${row.id.slice(0, 8)}`)
   return row.id
@@ -338,6 +358,7 @@ describeIfDatabase('B-3 DingTalk card callback adapter (real DB)', () => {
     // so a globally-unique-but-wrong-corp id would have resolved (cross-corp collision face).
     const unpinned = await insertDingTalkApprovalCardDelivery(q, {
       instanceId, nodeKey: 'approval_1', recipientUserId: APPROVER, recipientDingTalkUserId: DD_DUP, deliveryKind: 'interactive_card', integrationId: null,
+      entryEpoch: await liveSeatEpoch(instanceId, 'approval_1', APPROVER),
     })
     await markDingTalkApprovalCardDeliverySent(q, unpinned.id, 'carrier_dup_unpinned')
     const refused = await executeDingTalkApprovalCardCallback(deps, payloadFor(unpinned.id, DD_DUP))
@@ -347,6 +368,7 @@ describeIfDatabase('B-3 DingTalk card callback adapter (real DB)', () => {
     // Corp-A-pinned delivery: the SAME external id resolves to corp A's link (APPROVER) → executes.
     const pinned = await insertDingTalkApprovalCardDelivery(q, {
       instanceId, nodeKey: 'approval_1', recipientUserId: APPROVER, recipientDingTalkUserId: DD_DUP, deliveryKind: 'interactive_card', integrationId: INTEGRATION_A,
+      entryEpoch: await liveSeatEpoch(instanceId, 'approval_1', APPROVER),
     })
     await markDingTalkApprovalCardDeliverySent(q, pinned.id, 'carrier_dup_pinned')
     const executed = await executeDingTalkApprovalCardCallback(deps, payloadFor(pinned.id, DD_DUP))
@@ -358,6 +380,7 @@ describeIfDatabase('B-3 DingTalk card callback adapter (real DB)', () => {
     const instanceId = await newInstance()
     const row = await insertDingTalkApprovalCardDelivery(q, {
       instanceId, nodeKey: 'approval_1', recipientUserId: APPROVER, recipientDingTalkUserId: DD_OP_B, deliveryKind: 'interactive_card', integrationId: INTEGRATION_B,
+      entryEpoch: await liveSeatEpoch(instanceId, 'approval_1', APPROVER),
     })
     await markDingTalkApprovalCardDeliverySent(q, row.id, 'carrier_corp_b')
 

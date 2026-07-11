@@ -12,7 +12,7 @@ import { randomUUID } from 'crypto'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { pool } from '../../src/db/pg'
 import {
-  backfillDingTalkApprovalCardDeliveryEpochs,
+  supersedeLegacyDingTalkApprovalCardDeliveries,
   claimDingTalkApprovalCardDeliveryActed,
   findDingTalkApprovalCardDeliveriesByTaskId,
   findDingTalkApprovalCardDeliveryById,
@@ -169,56 +169,47 @@ describeIfDb('A-1 — dingtalk approval card delivery ledger (real DB)', () => {
     await q(`DELETE FROM approval_assignments WHERE instance_id = $1`, [INSTANCE_CASCADE]).catch(() => {})
   })
 
-  it('P1-1 legacy backfill: a null-epoch sent card with a UNIQUE live non-null seat is backfilled; no-unique-seat and ambiguous cards are superseded (fail-closed); idempotent', async () => {
-    // Dedicated instance so the scoped backfill cannot touch sibling fixtures in this shared-DB file.
-    const INST = `apv_dacd_backfill_${Date.now()}`
+  it('P1-1 legacy reconcile (owner re-review repro): a null-epoch sent card is SUPERSEDED outright — NEVER re-authorized into a fresh same-node/same-recipient round via seat inference; idempotent', async () => {
+    // Dedicated instance so the scoped reconcile cannot touch sibling fixtures in this shared-DB file.
+    const INST = `apv_dacd_reentry_${Date.now()}`
     await q(`INSERT INTO approval_instances (id, status, current_node_key) VALUES ($1, 'pending', 'approval_1') ON CONFLICT (id) DO NOTHING`, [INST])
     try {
-      // (a) UNIQUE live non-null-epoch seat for (INST, approval_1, user_match) — epoch 7.
-      await q(`INSERT INTO approval_assignments (instance_id, assignment_type, assignee_id, source_step, node_key, is_active, entry_epoch) VALUES ($1,'user','user_match',0,'approval_1',TRUE,7)`, [INST])
-      // (c) AMBIGUOUS: two live non-null-epoch seats for (INST, approval_2, user_ambig). The active-seat
-      // unique index is (instance, assignment_type, assignee), so ambiguity needs DISTINCT types — the
-      // backfill groups by (instance, node, assignee), so COUNT(*)=2 here → HAVING fails → superseded.
-      await q(`INSERT INTO approval_assignments (instance_id, assignment_type, assignee_id, source_step, node_key, is_active, entry_epoch) VALUES ($1,'user','user_ambig',0,'approval_2',TRUE,3),($1,'role','user_ambig',0,'approval_2',TRUE,4)`, [INST])
-      // (d) NULL-EPOCH-ONLY seat for (INST, approval_3, user_nullseat): a live seat exists but its epoch
-      // is NULL, so the backfill (which counts only NON-NULL-epoch seats) finds no unique seat → superseded.
-      await q(`INSERT INTO approval_assignments (instance_id, assignment_type, assignee_id, source_step, node_key, is_active, entry_epoch) VALUES ($1,'user','user_nullseat',0,'approval_3',TRUE,NULL)`, [INST])
+      // (1) Legacy pre-column card — sent for round R0 of (INST, approval_1, user_reentry), entry_epoch NULL.
+      const legacy = await insertDingTalkApprovalCardDelivery(q, { instanceId: INST, nodeKey: 'approval_1', recipientUserId: 'user_reentry', recipientDingTalkUserId: 'dd_user_reentry', deliveryKind: 'work_notice_action_card' })
+      await markDingTalkApprovalCardDeliverySent(q, legacy.id, 'task_reentry')
 
-      const mkNullEpochSent = async (node: string, recipient: string): Promise<string> => {
-        const row = await insertDingTalkApprovalCardDelivery(q, { instanceId: INST, nodeKey: node, recipientUserId: recipient, recipientDingTalkUserId: `dd_${recipient}`, deliveryKind: 'work_notice_action_card' })
-        await markDingTalkApprovalCardDeliverySent(q, row.id, `task_${recipient}`)
-        return row.id
-      }
-      const matched = await mkNullEpochSent('approval_1', 'user_match')     // → backfilled to 7
-      const orphan = await mkNullEpochSent('approval_9', 'user_orphan')     // → superseded (no live seat)
-      const ambiguous = await mkNullEpochSent('approval_2', 'user_ambig')   // → superseded (>1 non-null seat)
-      const nullseat = await mkNullEpochSent('approval_3', 'user_nullseat') // → superseded (only null-epoch seat)
+      // (2) A FRESH round re-enters the SAME node for the SAME recipient — a NEW active seat at epoch 9.
+      //     This is the ONLY live non-null-epoch seat for (INST, approval_1, user_reentry). The DELETED
+      //     "infer epoch from the unique live seat" backfill would have adopted 9 and left the legacy card
+      //     sent + entry_epoch=9 → actionable in round-9 (owner re-review P1: same-node re-entry reopened).
+      await q(`INSERT INTO approval_assignments (instance_id, assignment_type, assignee_id, source_step, node_key, is_active, entry_epoch) VALUES ($1,'user','user_reentry',0,'approval_1',TRUE,9)`, [INST])
 
-      // All four start sent + null-epoch.
-      for (const id of [matched, orphan, ambiguous, nullseat]) {
+      // (3) An orphan legacy card with NO live seat at all — must also supersede.
+      const orphan = await insertDingTalkApprovalCardDelivery(q, { instanceId: INST, nodeKey: 'approval_9', recipientUserId: 'user_orphan', recipientDingTalkUserId: 'dd_user_orphan', deliveryKind: 'work_notice_action_card' })
+      await markDingTalkApprovalCardDeliverySent(q, orphan.id, 'task_orphan')
+
+      // Both start sent + null-epoch.
+      for (const id of [legacy.id, orphan.id]) {
         const row = await findDingTalkApprovalCardDeliveryById(q, id)
         expect(row?.card_state).toBe('sent')
         expect(row?.entry_epoch ?? null).toBeNull()
       }
 
-      const result = await backfillDingTalkApprovalCardDeliveryEpochs(q, { instanceIds: [INST] })
+      const result = await supersedeLegacyDingTalkApprovalCardDeliveries(q, { instanceIds: [INST] })
 
-      // matched → epoch backfilled from the unique seat (7), still sent (now strictly bindable).
-      // RED-before (remove the backfill step): entry_epoch stays null → card unrecoverable.
-      expect(result.backfilledIds).toEqual([matched])
-      const backfilledRow = await findDingTalkApprovalCardDeliveryById(q, matched)
-      expect(backfilledRow?.entry_epoch).toBe(7)
-      expect(backfilledRow?.card_state).toBe('sent')
+      // Both legacy cards are SUPERSEDED (fail-closed). RED-before (restore the seat-inference backfill):
+      // `legacy` becomes entry_epoch=9 + card_state='sent' → re-authorized into the wrong round.
+      expect(result.supersededIds.sort()).toEqual([legacy.id, orphan.id].sort())
+      const legacyRow = await findDingTalkApprovalCardDeliveryById(q, legacy.id)
+      expect(legacyRow?.card_state).toBe('superseded')
+      expect(legacyRow?.entry_epoch ?? null).toBeNull() // NOT adopted from the epoch-9 seat — provenance never inferred
+      expect((await findDingTalkApprovalCardDeliveryById(q, orphan.id))?.card_state).toBe('superseded')
 
-      // orphan + ambiguous + nullseat → superseded (fail-closed). RED-before (remove the supersede step): sent + null.
-      expect(result.supersededIds.sort()).toEqual([ambiguous, nullseat, orphan].sort())
-      for (const id of [orphan, ambiguous, nullseat]) {
-        expect((await findDingTalkApprovalCardDeliveryById(q, id))?.card_state).toBe('superseded')
-      }
+      // A superseded card is UNCLAIMABLE — the acted-claim requires card_state='sent'. Not actionable, full stop.
+      expect(await claimDingTalkApprovalCardDeliveryActed(q, legacy.id, { action: 'approve', actedBy: 'user_reentry' })).toBeNull()
 
-      // Idempotent: a second run touches neither (no sent + null-epoch rows remain).
-      const rerun = await backfillDingTalkApprovalCardDeliveryEpochs(q, { instanceIds: [INST] })
-      expect(rerun.backfilledIds).toEqual([])
+      // Idempotent: a second run touches nothing (no sent + null-epoch rows remain).
+      const rerun = await supersedeLegacyDingTalkApprovalCardDeliveries(q, { instanceIds: [INST] })
       expect(rerun.supersededIds).toEqual([])
     } finally {
       await q(`DELETE FROM dingtalk_approval_card_deliveries WHERE instance_id = $1`, [INST]).catch(() => {})

@@ -1549,7 +1549,7 @@ export interface DingTalkApprovalCardDeliveriesTable {
   task_id: string | null
   /** DT-R2: directory integration (corp) the card was sent through; NULL on legacy/env-only rows. */
   integration_id: string | null
-  /** P1-1: node-entry epoch (approval_assignments.entry_epoch) the card was sent for; NULL on legacy/backfill-skipped rows. */
+  /** P1-1: node-entry epoch (approval_assignments.entry_epoch) the card was sent for; NULL only on rows that can never be actionable (strict fail-closed — legacy pre-column rows are superseded at migrate time). */
   entry_epoch: number | null
   card_state: 'sent' | 'acted' | 'superseded' | 'expired' | 'revoked'
   acted_action: string | null
