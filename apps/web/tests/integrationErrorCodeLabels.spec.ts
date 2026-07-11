@@ -9,6 +9,7 @@ import { describe, expect, it } from 'vitest'
 // this module is not synced, this test fails RED — same discipline as
 // multitable-resolver-vocab-mirror.spec.ts / composition-vocab-mirror.spec.ts.
 import {
+  BRIDGE_AGENT_ERROR_CODES,
   DEAD_LETTER_MAINLINE_ERROR_CODES,
   K3_WISE_BOM_LIST_BY_MATERIAL_ERROR_CODES,
   integrationErrorCodeDisplayLabel,
@@ -25,6 +26,8 @@ const { READ_SOURCE_COMPOSITION_PLAN_ERROR_CODES: SERVER_COMPOSITION_ERROR_CODES
   require(path.join(pluginLib, 'read-source-composition-planner.cjs'))
 const { K3_WISE_BOM_LIST_BY_MATERIAL_ERROR_CODES: SERVER_BOM_LIST_ERROR_CODES } =
   require(path.join(pluginLib, 'read-source-bom-list-by-material-contract.cjs'))
+const { BRIDGE_AGENT_READONLY_ADAPTER_ERROR_CODES: SERVER_BRIDGE_AGENT_ERROR_CODES } =
+  require(path.join(pluginLib, 'adapters', 'bridge-agent-readonly-adapter.cjs'))
 
 function expectLabeled(code: string): void {
   const label = integrationErrorCodeLabel(code, 'en')
@@ -71,6 +74,15 @@ describe('errorCodeLabels coverage (mirror tripwire)', () => {
   it('every dead-letter known-mainline code (10) has a label', () => {
     expect(DEAD_LETTER_MAINLINE_ERROR_CODES.length).toBe(10)
     for (const code of DEAD_LETTER_MAINLINE_ERROR_CODES) expectLabeled(code)
+  })
+
+  // BA-UI-1 (docs/development/bridge-agent-admin-page-design-lock-20260707.md): the Bridge Agent
+  // readonly adapter's own error-code vocabulary (distinct from an operator's Bridge Agent HTTP
+  // response body, which may carry an arbitrary, unregistered `error.code`).
+  it('every server Bridge Agent adapter code (4) has a label, and the local mirror matches the server set', () => {
+    expect(SERVER_BRIDGE_AGENT_ERROR_CODES.length).toBe(4)
+    expect(new Set(BRIDGE_AGENT_ERROR_CODES)).toEqual(new Set(SERVER_BRIDGE_AGENT_ERROR_CODES))
+    for (const code of SERVER_BRIDGE_AGENT_ERROR_CODES) expectLabeled(code)
   })
 })
 

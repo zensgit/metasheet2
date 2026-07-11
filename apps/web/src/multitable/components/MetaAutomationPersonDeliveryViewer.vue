@@ -13,8 +13,9 @@
             <option value="success">{{ automationStatusLabel('success', isZh) }}</option>
             <option value="failed">{{ automationStatusLabel('failed', isZh) }}</option>
             <option value="skipped">{{ automationLabel('delivery.statusSkippedUnbound', isZh) }}</option>
+            <option value="outcome_unknown">{{ automationStatusLabel('outcome_unknown', isZh) }}</option>
           </select>
-          <button class="meta-person-delivery__btn" type="button" :disabled="loading" data-action="refresh" @click="loadData">{{ automationLabel('log.refresh', isZh) }}</button>
+          <MtButton class="meta-person-delivery__btn" data-action="refresh" :disabled="loading" @click="loadData">{{ automationLabel('log.refresh', isZh) }}</MtButton>
         </div>
 
         <div v-if="loading" class="meta-person-delivery__empty">{{ automationLabel('delivery.loading', isZh) }}</div>
@@ -65,6 +66,7 @@ import { useLocale } from '../../composables/useLocale'
 import type { DingTalkPersonDelivery } from '../types'
 import type { MultitableApiClient } from '../api/client'
 import { automationLabel, automationStatusLabel } from '../utils/meta-automation-labels'
+import { MtButton } from '../ui'
 
 const props = defineProps<{
   visible: boolean
@@ -88,12 +90,15 @@ const filteredDeliveries = computed(() => {
   return deliveries.value.filter((delivery) => deliveryStatus(delivery) === statusFilter.value)
 })
 
-type DeliveryStatus = 'success' | 'failed' | 'skipped'
+// 'outcome_unknown' (PR #4046 Phase B): the send was attempted and the response lost — the
+// message MAY have been delivered. Distinct badge/filter value; folding it into 'failed' would
+// erase the reconciliation signal.
+type DeliveryStatus = 'success' | 'failed' | 'skipped' | 'outcome_unknown'
 
 const UNBOUND_DINGTALK_REASON = 'DingTalk account is not linked or user is inactive'
 
 function deliveryStatus(delivery: DingTalkPersonDelivery): DeliveryStatus {
-  if (delivery.status === 'success' || delivery.status === 'failed' || delivery.status === 'skipped') return delivery.status
+  if (delivery.status === 'success' || delivery.status === 'failed' || delivery.status === 'skipped' || delivery.status === 'outcome_unknown') return delivery.status
   if (delivery.success) return 'success'
   if (!delivery.dingtalkUserId && delivery.errorMessage === UNBOUND_DINGTALK_REASON) return 'skipped'
   return 'failed'
@@ -222,15 +227,9 @@ watch(
   background: #fff;
 }
 
-.meta-person-delivery__btn {
-  border: 1px solid #cbd5e1;
-  border-radius: 8px;
-  padding: 6px 14px;
-  background: #fff;
-  color: #0f172a;
-  font-size: 13px;
-  cursor: pointer;
-}
+/* .meta-person-delivery__btn: the Refresh control is now <MtButton> (ghost, token-styled — it was a neutral
+   bordered-white secondary action). Bespoke hex CSS removed to avoid double-styling the MtButton root; class
+   + data-action kept for selector stability. The header close-× glyph stays bespoke. */
 
 .meta-person-delivery__empty {
   padding: 10px 12px;
@@ -290,6 +289,11 @@ watch(
 .meta-person-delivery__badge--skipped {
   background: #fef3c7;
   color: #b45309;
+}
+
+.meta-person-delivery__badge--outcome_unknown {
+  background: #e2e8f0;
+  color: #475569;
 }
 
 .meta-person-delivery__time {

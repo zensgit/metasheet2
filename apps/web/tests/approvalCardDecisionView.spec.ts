@@ -81,9 +81,22 @@ const stub = (name: string, tag = 'div') => defineComponent({
   },
 })
 
-async function flushUi(cycles = 6) {
+// The load path awaits getCurrentUserId → apiFetch → response.json(). Under Node 20's undici,
+// draining a Response body is several MACROTASK hops (not just microtasks), so a microtask-only
+// flush (await Promise.resolve()) settles on Node 25 but under-flushes on Node 20 / CI, leaving
+// summary.value null. Each cycle therefore drains a microtask, a macrotask (setTimeout(0)), and a
+// Vue tick; the higher cycle count is slack, not a race — assertions run only after the DOM is stable.
+// The load path awaits getCurrentUserId → apiFetch → response.json(). Draining an undici Response
+// body is microtask-bound but takes MORE hops under Node 20 (CI) than under the Node 25 dev
+// toolchain — a 6-cycle microtask-only flush settled locally yet left summary.value null on CI.
+// Each cycle now crosses a macrotask boundary (setTimeout(0)) as well, which forces the microtask
+// queue to drain to completion before the next tick, so the flush no longer depends on the exact
+// body-read hop count (a fixed microtask-only budget is what silently under-flushed on Node 20).
+// The cycle count is generous slack, not a race — assertions run only after the DOM is stable.
+async function flushUi(cycles = 12) {
   for (let i = 0; i < cycles; i += 1) {
     await Promise.resolve()
+    await new Promise((resolve) => setTimeout(resolve))
     await nextTick()
   }
 }
@@ -130,6 +143,25 @@ describe('ApprovalCardDecisionView (A-3)', () => {
     commentBox.dispatchEvent(new Event('input', { bubbles: true }))
     await flushUi()
     expect((container!.querySelector('[data-testid="card-decision-reject"]') as HTMLButtonElement).disabled).toBe(false)
+  })
+
+  it('PR #4046 Phase B: an actionable outcome_unknown card renders live buttons; a non-actionable one gets 已流转 — never 未成功投递', async () => {
+    // The valid deep-link token only ever existed inside the delivered card, so an
+    // outcome_unknown delivery whose instance is pending stays actionable server-side.
+    apiFetchMock.mockResolvedValueOnce(jsonResponse({ ok: true, data: summaryFixture({ sendStatus: 'outcome_unknown' }) }))
+    await mountView()
+    expect(container!.querySelector('[data-testid="card-decision-approve"]')).toBeTruthy()
+    expect(container!.querySelector('[data-testid="card-decision-stale"]')).toBeNull()
+    app!.unmount(); container!.remove()
+
+    // Non-actionable for ANOTHER reason (superseded): the accurate message is 已流转 —
+    // "未成功投递" is reserved for pending/failed sends, where non-delivery is KNOWN.
+    apiFetchMock.mockReset()
+    apiFetchMock.mockResolvedValueOnce(jsonResponse({ ok: true, data: summaryFixture({ sendStatus: 'outcome_unknown', cardState: 'superseded', actionable: false }) }))
+    await mountView()
+    const stale = container!.querySelector('[data-testid="card-decision-stale"]')
+    expect(stale?.getAttribute('data-title')).toContain('已流转')
+    expect(stale?.getAttribute('data-title')).not.toContain('未成功投递')
   })
 
   it('approve submits to the card-delivery endpoint and renders the terminal state', async () => {

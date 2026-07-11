@@ -10,6 +10,7 @@ import { createApp, nextTick } from 'vue'
 
 import ResetToPointPicker from '../src/multitable/components/ResetToPointPicker.vue'
 import { MultitableApiClient } from '../src/multitable/api/client'
+import { useLocale } from '../src/composables/useLocale'
 import type { HistoryBatchSummary } from '../src/multitable/types'
 
 const mounted: Array<{ unmount: () => void }> = []
@@ -50,7 +51,7 @@ const waitUntil = async (pred: () => boolean, tries = 100): Promise<void> => {
 }
 const setInput = (sel: string, val: string) => { const el = q(sel) as HTMLInputElement; el.value = val; el.dispatchEvent(new Event('input')) }
 const setSelect = (sel: string, val: string) => { const el = q(sel) as HTMLSelectElement; el.value = val; el.dispatchEvent(new Event('change')) }
-afterEach(() => { while (mounted.length) mounted.pop()!.unmount(); document.body.innerHTML = '' })
+afterEach(() => { while (mounted.length) mounted.pop()!.unmount(); document.body.innerHTML = ''; useLocale().setLocale('en') })
 
 describe('ResetToPointPicker — T8-2 Reset UI T-source', () => {
   it('(a) whole entry HIDDEN when pitResetEnabled false / absent (fail-closed)', async () => {
@@ -76,6 +77,43 @@ describe('ResetToPointPicker — T8-2 Reset UI T-source', () => {
     setInput('[data-test="reset-picker-input"]', '2099-01-01T00:00'); await flush()
     expect(q('[data-test="reset-picker-future"]')).toBeTruthy()
     expect(q('[data-test="reset-entry"]')).toBeFalsy()
+  })
+
+  it('(d1) P3-2 history load ERROR: listHistoryEvents rejects → error hint shown, manual fallback still mounts a dialog', async () => {
+    const listHistoryEvents = vi.fn(async () => { throw new Error('history service unavailable') })
+    mount({ listHistoryEvents }); await nextTick()
+    await waitUntil(() => !!q('[data-test="reset-picker-history-error"]'))
+    expect(q('[data-test="reset-picker-history-error"]')?.textContent).toBe('history service unavailable')
+    expect(q('[data-test="reset-picker-history-loading"]')).toBeFalsy()
+    expect(q('[data-test="reset-picker-history-empty"]')).toBeFalsy()
+    expect(q('[data-test="reset-picker-history-unavailable"]')).toBeFalsy()
+    // the manual/Advanced fallback isn't disabled by a history-load failure — it must still be able to
+    // source a T and mount the dialog (the whole point of keeping it as a fallback).
+    setInput('[data-test="reset-picker-input"]', '2020-01-16T12:00'); await flush()
+    expect(q('[data-test="reset-picker-target"]')).toBeTruthy()
+    await waitUntil(() => !!q('[data-test="reset-entry"]'))
+  })
+
+  it('(d2) P3-2 history EMPTY: canLoadHistory true + zero batches → empty hint (not the error or unavailable hint)', async () => {
+    const listHistoryEvents = vi.fn(async () => ({ batches: [], total: 0, nextCursor: null, searchTruncated: false }))
+    mount({ listHistoryEvents }); await nextTick()
+    await waitUntil(() => !!q('[data-test="reset-picker-history-empty"]'))
+    expect(q('[data-test="reset-picker-history-empty"]')?.textContent).toBe('No recent history batches found.')
+    expect(q('[data-test="reset-picker-history-error"]')).toBeFalsy()
+    expect(q('[data-test="reset-picker-history-unavailable"]')).toBeFalsy()
+    expect((q('[data-test="reset-picker-history-select"]') as HTMLSelectElement).options.length).toBe(1) // only the placeholder option
+  })
+
+  it('(d3) P3-2 history UNAVAILABLE: no usable baseId → unavailable hint (history-load never even attempted)', async () => {
+    const listHistoryEvents = vi.fn(async () => ({ batches: [], total: 0, nextCursor: null, searchTruncated: false }))
+    mount({ baseId: '', listHistoryEvents }); await nextTick(); await flush()
+    expect(q('[data-test="reset-picker-history-unavailable"]')?.textContent).toBe('History points unavailable.')
+    expect(q('[data-test="reset-picker-history-error"]')).toBeFalsy()
+    expect(q('[data-test="reset-picker-history-empty"]')).toBeFalsy()
+    expect(listHistoryEvents).not.toHaveBeenCalled() // canLoadHistory is false — no doomed fetch attempt
+    // the select + manual fallback are still present (fail-closed on THIS source only, not the whole picker)
+    expect(q('[data-test="reset-picker-history-select"]')).toBeTruthy()
+    expect(q('[data-test="reset-picker-input"]')).toBeTruthy()
   })
 
   it('(e) valid history batch T → shows local target + mounts the ResetConfirmDialog entry', async () => {
@@ -140,5 +178,46 @@ describe('ResetToPointPicker — T8-2 Reset UI T-source', () => {
     expect(String(fetchFn.mock.calls[1][0])).toContain('/reset-execute')
     expect(JSON.parse((fetchFn.mock.calls[1][1] as RequestInit).body as string).asOf).toBe(batchCreatedAt)
     await waitUntil(() => onDone.mock.calls.length >= 1) // the seam back to the workbench (grid refresh) fired
+  })
+
+  it('(h) R5b i18n: zh locale renders the typed zh labels (strings live in meta-record-labels, not inline)', async () => {
+    useLocale().setLocale('zh-CN')
+    mount(); await nextTick()
+    await waitUntil(() => (q('[data-test="reset-picker-history-select"]') as HTMLSelectElement | null)?.options.length === 3)
+    expect(q('.reset-picker__heading')?.textContent).toBe('将此表重置到某个全局历史点')
+    expect(q('[data-test="reset-picker-history"] .reset-picker__label > span')?.textContent).toBe('历史点')
+    expect((q('[data-test="reset-picker-history-select"]') as HTMLSelectElement).options[0].textContent).toBe('选择一个最近的历史批次')
+    // history option zh: record count uses the measure-word form; the wire `action` value and actor 'Ada'
+    // are data, rendered raw (only the missing-action/missing-actor FALLBACK literals are typed labels)
+    expect((q('[data-test="reset-picker-history-select"]') as HTMLSelectElement).options[1].textContent?.trim()).toContain('update - Ada - 1 条记录')
+    expect(q('[data-test="reset-picker-history-refresh"]')?.textContent?.trim()).toBe('刷新')
+    expect(q('[data-test="reset-picker-manual"] summary')?.textContent).toBe('高级：手动指定时间')
+    expect(q('[data-test="reset-picker-manual"] .reset-picker__label > span')?.textContent).toBe('手动指定时间点')
+    // future warn (manual T in the future)
+    setInput('[data-test="reset-picker-input"]', '2099-01-01T00:00'); await flush()
+    expect(q('[data-test="reset-picker-future"]')?.textContent?.trim()).toBe('请选择过去的时间——只能重置到更早的状态。')
+    // valid history T → zh target line
+    setSelect('[data-test="reset-picker-history-select"]', 'batch_new'); await flush()
+    const target = q('[data-test="reset-picker-target"]')?.textContent ?? ''
+    expect(target).toContain('目标：')
+    expect(target).toContain('（你的本地时间）')
+    expect(target).toContain('来自历史批次 batch_ne')
+  })
+
+  it('(h2) R5b i18n: zh empty/unavailable/loading-error hints render the typed zh labels', async () => {
+    useLocale().setLocale('zh-CN')
+    // empty
+    mount({ listHistoryEvents: vi.fn(async () => ({ batches: [], total: 0, nextCursor: null, searchTruncated: false })) }); await nextTick()
+    await waitUntil(() => !!q('[data-test="reset-picker-history-empty"]'))
+    expect(q('[data-test="reset-picker-history-empty"]')?.textContent).toBe('未找到最近的历史批次。')
+    mounted.pop()!.unmount(); document.body.innerHTML = ''
+    // unavailable (no baseId → history source off, fail-closed on this source only)
+    mount({ baseId: '' }); await nextTick(); await flush()
+    expect(q('[data-test="reset-picker-history-unavailable"]')?.textContent).toBe('历史点不可用。')
+    mounted.pop()!.unmount(); document.body.innerHTML = ''
+    // non-Error rejection → typed zh fallback copy (an Error's own message stays raw — covered by (d1))
+    mount({ listHistoryEvents: vi.fn(async () => { throw 'not-an-error' }) }); await nextTick()
+    await waitUntil(() => !!q('[data-test="reset-picker-history-error"]'))
+    expect(q('[data-test="reset-picker-history-error"]')?.textContent).toBe('加载历史点失败')
   })
 })

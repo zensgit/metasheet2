@@ -364,6 +364,13 @@ describe('IntegrationReadSourceConfigPanel', () => {
       render: () => h(IntegrationReadSourceConfigPanel, {
         scope: { tenantId: 'default', workspaceId: null },
         systems: SYSTEMS,
+        // IU-3 (design-lock integration-iu3-read-source-wizard-design-lock-20260707.md): the panel
+        // now defaults its new-config surface to the four-step wizard; every assertion in this file
+        // targets the pre-existing expert flat form's testids, so pin the panel to expert mode via
+        // the new prop. PROP ADDITION ONLY — no existing assertion in this file changed (design-lock
+        // §2 既有测试不变量). The wizard surface + the wizard↔expert toggle are covered by
+        // IntegrationReadSourceWizard.spec.ts, which mounts this same panel in its default mode.
+        initialViewMode: 'expert' as const,
       }),
     })
     app.mount(container)

@@ -742,6 +742,26 @@ describe('MetaAutomationRuleEditor', () => {
     expect(saved.mock.calls[0][0].executionMode).toBe('workflow_job_v1')
   })
 
+  it('G-B2-24: the execution-mode toggle starts COLLAPSED in Advanced for a plain rule (off the first screen)', async () => {
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields })
+    await flushPromises()
+    // The toggle still exists (queryable), but its Advanced panel is not expanded by default.
+    expect(container.querySelector('[data-field="executionModeToggle"]')).toBeTruthy()
+    expect(container.querySelectorAll('.meta-rule-editor__advanced .el-collapse-item.is-active')).toHaveLength(0)
+  })
+
+  it('G-B2-24: Advanced AUTO-EXPANDS when the rule requires job mode, so the forced-on toggle is never hidden', async () => {
+    const rule = {
+      id: 'atr_sa_expand', sheetId: 'sheet_1', name: 'sa', triggerType: 'form.submitted',
+      triggerConfig: {}, actionType: 'start_approval',
+      actionConfig: { templateId: 'tmpl_9', formDataMapping: { amount: 'fld_2' } },
+      enabled: true, executionMode: 'workflow_job_v1',
+    } as unknown as AutomationRule
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, rule })
+    await flushPromises()
+    expect(container.querySelectorAll('.meta-rule-editor__advanced .el-collapse-item.is-active')).toHaveLength(1)
+  })
+
   it('force-corrects a loaded LEGACY start_approval rule (executionMode: null) to workflow_job_v1 on save', async () => {
     const saved = vi.fn()
     const rule = {
@@ -986,6 +1006,30 @@ describe('MetaAutomationRuleEditor', () => {
 
     expect(saved).toHaveBeenCalledTimes(1)
     expect(saved.mock.calls[0][0].executionMode).toBe('workflow_job_v1')
+  })
+
+  it('G-B2-25: a LOADED (persisted) action starts COLLAPSED behind its one-line summary', async () => {
+    const rule: AutomationRule = {
+      id: 'atr_b225', sheetId: 'sheet_1', name: 'existing', triggerType: 'record.created',
+      triggerConfig: {}, actionType: 'update_record', actionConfig: { fieldUpdates: [] }, enabled: true,
+      executionMode: 'workflow_job_v1',
+    }
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, rule })
+    await flushPromises()
+    // The action config collapse is NOT active (folded) for a persisted action...
+    expect(container.querySelectorAll('.meta-rule-editor__action-collapse .el-collapse-item.is-active')).toHaveLength(0)
+    // ...but its one-line summary IS rendered (the whole point of folding).
+    const summary = container.querySelector('[data-field="actionSummary"]')
+    expect(summary).toBeTruthy()
+    expect((summary!.textContent || '').trim().length).toBeGreaterThan(0)
+    // ...and the config controls stay in the DOM (v-show), so existing selectors still resolve.
+    expect(container.querySelector('[data-field="actionConfigSection"]')).toBeTruthy()
+  })
+
+  it('G-B2-25: a FRESH rule\'s starter action starts EXPANDED (not hidden behind a summary)', async () => {
+    const { container } = mount({ visible: true, sheetId: 'sheet_1', fields })
+    await flushPromises()
+    expect(container.querySelectorAll('.meta-rule-editor__action-collapse .el-collapse-item.is-active').length).toBeGreaterThanOrEqual(1)
   })
 
   it('A6-1: reflects a saved opt-in rule (checked) and can toggle back to off (null)', async () => {

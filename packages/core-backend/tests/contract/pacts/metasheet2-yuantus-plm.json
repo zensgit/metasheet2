@@ -9,7 +9,7 @@
     "pactSpecification": {
       "version": "3.0.0"
     },
-    "claudeNote": "Hand-authored Wave 1 plus document-semantics Wave 2 contract per docs/PACT_FIRST_INTEGRATION_PLAN_20260407.md. Match-by-type, not match-by-value. Replace with @pact-foundation/pact generated artifact when that dep is approved. Wave 1 now includes the real schema-discovery call already used by mainline PLMAdapter.getItemMetadata in yuantus mode: GET /api/v1/aml/metadata/{type}. Wave 2 adds the real document semantics calls already used by PLMAdapter.getProductDocuments in yuantus mode: GET /api/v1/file/item/{item_id}, GET /api/v1/file/{file_id}, and POST /api/v1/aml/query with expand ['Document Part']. Wave 3 adds where-used, BOM compare schema, and ECO approval-history/action interactions. Wave 4 adds the real approval list/detail and BOM substitute calls already used by mainline getApprovals/getApprovalById/getBomSubstitutes/addBomSubstitute/removeBomSubstitute. Wave 5 adds the nine CAD endpoints already called on main: CAD properties, CAD view state, CAD review, CAD history, CAD diff, and CAD mesh stats. Release-readiness adds the governance drilldown endpoint already called on main: GET /api/v1/release-readiness/items/{item_id}. ECO Phase 0 adds the first two ERROR interactions (discriminated 409s on the governed write-back PATCH): lifecycle_locked (with eco_required boolean field) vs idempotency_conflict, discriminated by detail.code alone per docs/development/plm-collab-eco-phase0-contract-taskbook-20260704.md; detail.code and eco_required are exact-match (discriminator), message/state match-by-type."
+    "claudeNote": "Hand-authored Wave 1 plus document-semantics Wave 2 contract per docs/PACT_FIRST_INTEGRATION_PLAN_20260407.md. Match-by-type, not match-by-value. Replace with @pact-foundation/pact generated artifact when that dep is approved. Wave 1 now includes the real schema-discovery call already used by mainline PLMAdapter.getItemMetadata in yuantus mode: GET /api/v1/aml/metadata/{type}. Wave 2 adds the real document semantics calls already used by PLMAdapter.getProductDocuments in yuantus mode: GET /api/v1/file/item/{item_id}, GET /api/v1/file/{file_id}, and POST /api/v1/aml/query with expand ['Document Part']. Wave 3 adds where-used, BOM compare schema, and ECO approval-history/action interactions. Wave 4 adds the real approval list/detail and BOM substitute calls already used by mainline getApprovals/getApprovalById/getBomSubstitutes/addBomSubstitute/removeBomSubstitute. Wave 5 adds the nine CAD endpoints already called on main: CAD properties, CAD view state, CAD review, CAD history, CAD diff, and CAD mesh stats. Release-readiness adds the governance drilldown endpoint already called on main: GET /api/v1/release-readiness/items/{item_id}. ECO Phase 0 adds the first two ERROR interactions (discriminated 409s on the governed write-back PATCH): lifecycle_locked (with eco_required boolean field) vs idempotency_conflict, discriminated by detail.code alone per docs/development/plm-collab-eco-phase0-contract-taskbook-20260704.md; detail.code and eco_required are exact-match (discriminator), message/state match-by-type. #4020 (2026-07-09): the capabilities interaction now pins the provider-computed available formula (available = supported && (packaging==base || entitled)) on bom_multitable (entitled true, available true), plus two new keys discussion_core (base packaging, unlicensed: entitled false, available true) and metasheet_review (paid packaging, unlicensed under this fixture: entitled false, available false); entitled/available are exact-match (formula discriminators), everything else stays match-by-type."
   },
   "interactions": [
     {
@@ -3437,12 +3437,44 @@
               "supported": true,
               "api_version": "v1",
               "entitled": true,
+              "available": true,
               "scenarios": [
                 "bom_review"
               ],
               "cache_scope": {
                 "supported": "global",
-                "entitled": "tenant"
+                "entitled": "tenant",
+                "available": "tenant"
+              }
+            },
+            "discussion_core": {
+              "supported": true,
+              "api_version": "v1",
+              "entitled": false,
+              "available": true,
+              "scenarios": [
+                "object_discussion"
+              ],
+              "packaging": "base",
+              "cache_scope": {
+                "supported": "global",
+                "entitled": "tenant",
+                "available": "tenant"
+              }
+            },
+            "metasheet_review": {
+              "supported": true,
+              "api_version": "v1",
+              "entitled": false,
+              "available": false,
+              "scenarios": [
+                "bom_review"
+              ],
+              "packaging": "paid",
+              "cache_scope": {
+                "supported": "global",
+                "entitled": "tenant",
+                "available": "tenant"
               }
             }
           }
@@ -3477,13 +3509,6 @@
                 }
               ]
             },
-            "$.features.bom_multitable.entitled": {
-              "matchers": [
-                {
-                  "match": "type"
-                }
-              ]
-            },
             "$.features.bom_multitable.api_version": {
               "matchers": [
                 {
@@ -3506,6 +3531,111 @@
               ]
             },
             "$.features.bom_multitable.cache_scope.entitled": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.features.bom_multitable.cache_scope.available": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.features.discussion_core.supported": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.features.discussion_core.api_version": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.features.discussion_core.scenarios": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.features.discussion_core.packaging": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.features.discussion_core.cache_scope.supported": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.features.discussion_core.cache_scope.entitled": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.features.discussion_core.cache_scope.available": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.features.metasheet_review.supported": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.features.metasheet_review.api_version": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.features.metasheet_review.scenarios": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.features.metasheet_review.packaging": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.features.metasheet_review.cache_scope.supported": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.features.metasheet_review.cache_scope.entitled": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.features.metasheet_review.cache_scope.available": {
               "matchers": [
                 {
                   "match": "type"
@@ -3904,6 +4034,434 @@
       }
     },
     {
+      "description": "request an ECO revision intent for a lifecycle-locked part (attach-before-create)",
+      "providerStates": [
+        {
+          "name": "tenant-1 holds an active plm.bom_eco_revision license and part 01H000000000000000000000L1 is lifecycle-locked in state 'Released' with no open bom-ECO"
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "path": "/api/v1/bom/multitable/01H000000000000000000000L1/eco-intent",
+        "headers": {
+          "Authorization": "Bearer eyJhbGciOiJIUzI1NiJ9.example",
+          "x-tenant-id": "tenant-1"
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "body": {
+          "eco_id": "01H000000000000000000000E9",
+          "state": "progress",
+          "attached": false
+        },
+        "matchingRules": {
+          "body": {
+            "$.eco_id": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.state": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.attached": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "description": "list discussion threads bound to a readable PLM target",
+      "providerStates": [
+        {
+          "name": "tenant-1 can read item 01H000000000000000000000T1 and it has an open discussion thread 01H000000000000000000000T2"
+        }
+      ],
+      "request": {
+        "method": "GET",
+        "path": "/api/v1/discussions",
+        "query": {
+          "target_type": [
+            "item"
+          ],
+          "target_id": [
+            "01H000000000000000000000T1"
+          ],
+          "limit": [
+            "20"
+          ]
+        },
+        "headers": {
+          "Authorization": "Bearer eyJhbGciOiJIUzI1NiJ9.example",
+          "x-tenant-id": "tenant-1"
+        },
+        "matchingRules": {
+          "header": {
+            "$.Authorization": {
+              "matchers": [
+                {
+                  "match": "regex",
+                  "regex": "^Bearer .+"
+                }
+              ]
+            }
+          }
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "body": {
+          "threads": [
+            {
+              "id": "01H000000000000000000000T2",
+              "target_type": "item",
+              "target_id": "01H000000000000000000000T1",
+              "title": "Check tolerance on mounting hole",
+              "status": "open",
+              "created_by_id": 1,
+              "created_at": "2026-07-09T00:00:00.000Z",
+              "resolved_by_id": null,
+              "resolved_at": null,
+              "last_comment_at": "2026-07-09T00:05:00.000Z",
+              "comment_count": 2,
+              "anchor": null
+            }
+          ],
+          "next_cursor": null
+        },
+        "matchingRules": {
+          "body": {
+            "$.threads": {
+              "matchers": [
+                {
+                  "match": "type",
+                  "min": 1
+                }
+              ]
+            },
+            "$.threads[*].id": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.threads[*].target_type": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.threads[*].target_id": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.threads[*].status": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.threads[*].created_by_id": {
+              "matchers": [
+                {
+                  "match": "integer"
+                }
+              ]
+            },
+            "$.threads[*].created_at": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.threads[*].comment_count": {
+              "matchers": [
+                {
+                  "match": "integer",
+                  "min": 0
+                }
+              ]
+            },
+            "$.next_cursor": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.threads[*].last_comment_at": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "description": "fetch a discussion thread and its comments, including the read-only history merge",
+      "providerStates": [
+        {
+          "name": "tenant-1 can read discussion thread 01H000000000000000000000T2 on item 01H000000000000000000000T1 and it has one comment"
+        }
+      ],
+      "request": {
+        "method": "GET",
+        "path": "/api/v1/discussions/01H000000000000000000000T2",
+        "query": {
+          "include_history": [
+            "true"
+          ]
+        },
+        "headers": {
+          "Authorization": "Bearer eyJhbGciOiJIUzI1NiJ9.example",
+          "x-tenant-id": "tenant-1"
+        },
+        "matchingRules": {
+          "header": {
+            "$.Authorization": {
+              "matchers": [
+                {
+                  "match": "regex",
+                  "regex": "^Bearer .+"
+                }
+              ]
+            }
+          }
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "body": {
+          "id": "01H000000000000000000000T2",
+          "target_type": "item",
+          "target_id": "01H000000000000000000000T1",
+          "title": "Check tolerance on mounting hole",
+          "status": "open",
+          "created_by_id": 1,
+          "created_at": "2026-07-09T00:00:00.000Z",
+          "resolved_by_id": null,
+          "resolved_at": null,
+          "last_comment_at": "2026-07-09T00:05:00.000Z",
+          "comment_count": 1,
+          "anchor": null,
+          "comments": [
+            {
+              "id": "01H000000000000000000000T3",
+              "parent_comment_id": null,
+              "body": "Tolerance looks tight -- can we confirm with the vendor?",
+              "body_format": "text",
+              "author_user_id": 1,
+              "mentioned_user_ids": [],
+              "created_at": "2026-07-09T00:05:00.000Z",
+              "edited_at": null,
+              "deleted_at": null,
+              "anchor": null
+            }
+          ],
+          "history": [
+            {
+              "kind": "lifecycle_transition",
+              "at": "2026-07-08T00:00:00.000Z",
+              "actor_user_id": 1,
+              "from_state": "Draft",
+              "to_state": "Released",
+              "comment": null
+            }
+          ]
+        },
+        "matchingRules": {
+          "body": {
+            "$.id": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.target_type": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.target_id": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.status": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.created_by_id": {
+              "matchers": [
+                {
+                  "match": "integer"
+                }
+              ]
+            },
+            "$.created_at": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.comment_count": {
+              "matchers": [
+                {
+                  "match": "integer",
+                  "min": 0
+                }
+              ]
+            },
+            "$.comments": {
+              "matchers": [
+                {
+                  "match": "type",
+                  "min": 1
+                }
+              ]
+            },
+            "$.comments[*].id": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.comments[*].body": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.comments[*].body_format": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.comments[*].author_user_id": {
+              "matchers": [
+                {
+                  "match": "integer"
+                }
+              ]
+            },
+            "$.comments[*].created_at": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.history": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.last_comment_at": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "description": "list discussion threads for a missing or unreadable target returns the no-leak 404",
+      "providerStates": [
+        {
+          "name": "item 01H000000000000000000000T9 does not exist, or tenant-1 cannot read it (indistinguishable no-leak target)"
+        }
+      ],
+      "request": {
+        "method": "GET",
+        "path": "/api/v1/discussions",
+        "query": {
+          "target_type": [
+            "item"
+          ],
+          "target_id": [
+            "01H000000000000000000000T9"
+          ],
+          "limit": [
+            "20"
+          ]
+        },
+        "headers": {
+          "Authorization": "Bearer eyJhbGciOiJIUzI1NiJ9.example",
+          "x-tenant-id": "tenant-1"
+        },
+        "matchingRules": {
+          "header": {
+            "$.Authorization": {
+              "matchers": [
+                {
+                  "match": "regex",
+                  "regex": "^Bearer .+"
+                }
+              ]
+            }
+          }
+        }
+      },
+      "response": {
+        "status": 404,
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "body": {
+          "detail": "discussion target not found"
+        }
+      }
+    },
+    {
       "description": "mint a MetaSheet BOM review embed token for the Yuantus parent host",
       "providerStates": [
         {
@@ -4155,6 +4713,45 @@
           "detail": {
             "code": "idempotency_conflict",
             "message": "Idempotency-Key reused for a different write"
+          }
+        },
+        "matchingRules": {
+          "body": {
+            "$.detail.message": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "description": "attempt an ECO revision intent for a part that is NOT lifecycle-locked",
+      "providerStates": [
+        {
+          "name": "tenant-1 holds an active plm.bom_eco_revision license and part 01H000000000000000000000L2 is editable (Draft)"
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "path": "/api/v1/bom/multitable/01H000000000000000000000L2/eco-intent",
+        "headers": {
+          "Authorization": "Bearer eyJhbGciOiJIUzI1NiJ9.example",
+          "x-tenant-id": "tenant-1"
+        }
+      },
+      "response": {
+        "status": 409,
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "body": {
+          "detail": {
+            "code": "not_locked",
+            "message": "Part is not lifecycle-locked (state 'Draft'); use the direct edit path"
           }
         },
         "matchingRules": {

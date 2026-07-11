@@ -2,6 +2,13 @@
 
 const crypto = require('node:crypto')
 
+const {
+  firstValue,
+  isPlainObject,
+  optionalString,
+  sameText,
+} = require('./stock-preparation-common.cjs')
+
 const MATCH_STATUSES = Object.freeze({
   MATCHED: 'matched',
   PENDING_CONFIRM: 'pending_confirm',
@@ -30,22 +37,6 @@ class StockPreparationMaterialMatchError extends Error {
     this.name = 'StockPreparationMaterialMatchError'
     this.details = details
   }
-}
-
-function isPlainObject(value) {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return false
-  const prototype = Object.getPrototypeOf(value)
-  return prototype === Object.prototype || prototype === null
-}
-
-function optionalString(value) {
-  if (value === undefined || value === null) return null
-  if (typeof value === 'string') {
-    const trimmed = value.trim()
-    return trimmed ? trimmed : null
-  }
-  if (typeof value === 'number' || typeof value === 'boolean') return String(value)
-  return null
 }
 
 function requiredString(value, field) {
@@ -84,22 +75,6 @@ function mappingIdFor(drawingNo, version, method, materialKey = '') {
 function normalizeCode(value) {
   const text = optionalString(value)
   return text ? text.toLowerCase().replace(/[^a-z0-9]/g, '') : null
-}
-
-function sameText(left, right) {
-  const a = optionalString(left)
-  const b = optionalString(right)
-  if (a === null && b === null) return true
-  if (a === null || b === null) return false
-  return a.toLowerCase() === b.toLowerCase()
-}
-
-function firstValue(row, keys) {
-  for (const key of keys) {
-    const value = optionalString(row && row[key])
-    if (value !== null) return value
-  }
-  return null
 }
 
 function drawingNoOf(line) {

@@ -254,6 +254,12 @@ export interface UnifiedApprovalDTO {
    */
   currentNodeKeys?: string[] | null
   assignments: ApprovalAssignmentDTO[]
+  /**
+   * B3-02 (行级未读): per-viewer read state, populated ONLY on the 待我处理 (pending) tab — `true`
+   * once the actor has opened this row, `false` when they have not. `undefined` on every other
+   * tab; callers must treat that as "no dot", never guess a value.
+   */
+  isRead?: boolean
   createdAt: string
   updatedAt: string
 }
@@ -329,6 +335,24 @@ export interface ApprovalTemplateVersionDetailDTO {
   approvalGraph: ApprovalGraph
   runtimeGraph: RuntimeGraph | null
   publishedDefinitionId: string | null
+  /** B3-09 — optional note captured at publish time; null for drafts, note-less publishes, and pre-column versions. */
+  publishNote: string | null
+  createdAt: string
+  updatedAt: string
+}
+
+/**
+ * B3-09 (模板治理 — 版本历史): lightweight per-version row for the history list. Mirrors the backend
+ * `ApprovalTemplateVersionSummaryDTO` — deliberately no formSchema/approvalGraph (fetched on demand
+ * via getTemplateVersion when a specific version is opened).
+ */
+export interface ApprovalTemplateVersionSummaryDTO {
+  id: string
+  templateId: string
+  version: number
+  status: ApprovalTemplateStatus
+  publishNote: string | null
+  publishedDefinitionId: string | null
   createdAt: string
   updatedAt: string
 }
@@ -357,4 +381,22 @@ export interface UpdateApprovalTemplateRequest {
 
 export interface PublishApprovalTemplateRequest {
   policy: RuntimePolicy
+  /**
+   * B3-09 (模板治理 — 发布说明): optional free-text note for THIS publish action. The server
+   * normalizes (trim, empty→null, 2000-char cap → 400) — see backend
+   * PublishApprovalTemplateRequest.note. Never required.
+   */
+  note?: string | null
+}
+
+/**
+ * B3-08 (模板治理 — 停用/启用用量指标): the archive confirm dialog's blast-radius indicator. See the
+ * backend `ApprovalTemplateUsageDTO` doc comment (packages/core-backend/src/types/approval-product.ts)
+ * for the exact semantics — archiving never touches these instances, the count is purely
+ * informational.
+ */
+export interface ApprovalTemplateUsageDTO {
+  templateId: string
+  instanceCount: number
+  activeInstanceCount: number
 }

@@ -9,6 +9,53 @@
       <div class="integration-read-source__form" data-testid="read-source-form">
         <h3>新建 / 试配读取源</h3>
 
+        <!-- TC-1 (design-lock docs/development/integration-connector-template-catalog-design-lock-20260708.md,
+             #3879): an ADD-ONLY alternative entry point — collapsed by default, so the pre-existing
+             wizard/flat-form default surface and every existing assertion about it are untouched.
+             Selecting a card seeds `draft.mode` (the exact field IntegrationReadSourceWizard.vue's own
+             `selectMode()` sets) and forces the view back to the wizard, then falls through to the
+             SAME step-1/2/3/4 flow — no new state, no new path. -->
+        <IntegrationTemplateCatalogPicker
+          seeds-wizard="read-source"
+          testid-prefix="rsc"
+          @select="applyReadSourceTemplate"
+        />
+
+        <!-- IU-3 (design-lock docs/development/integration-iu3-read-source-wizard-design-lock-20260707.md):
+             the wizard is the DEFAULT surface; this toggle switches to the untouched full flat form
+             below (折叠≠删除 — expert mode is retained, never removed). Native <button>, not an
+             el-switch/el-radio-group: those Element Plus controls only toggle via their OWN internal
+             JS, which is a no-op when EP isn't globally registered (e.g. this file's existing spec's
+             bare `createApp()`) — a native button works identically everywhere. -->
+        <div class="integration-read-source__mode-toggle">
+          <button
+            type="button"
+            class="integration-read-source__mode-toggle-button"
+            data-testid="rsc-mode-toggle"
+            @click="toggleViewMode"
+          >
+            <el-icon><component :is="viewMode === 'wizard' ? Setting : MagicStick" /></el-icon>
+            {{ viewMode === 'wizard' ? bi('专家表单', 'Expert form') : bi('返回向导', 'Back to wizard') }}
+          </button>
+        </div>
+
+        <IntegrationReadSourceWizard
+          v-if="viewMode === 'wizard'"
+          :draft="draft"
+          :systems="systems"
+          :probing="probing"
+          :saving="saving"
+          :action-error="actionError"
+          :probe-evidence="probeEvidence"
+          :save-result="saveResult"
+          v-model:bounded-smoke="boundedSmoke"
+          v-model:probe-key="probeKey"
+          @run-probe="runProbe"
+          @save-version="saveVersion"
+          @approve-saved="approveSavedResult"
+        />
+
+        <template v-else>
         <label class="integration-read-source__field">
           <span>外部系统(systemId)</span>
           <select v-model="draft.systemId" data-testid="rsc-system" @change="onSystemChange">
@@ -244,6 +291,7 @@
         <p v-if="saveResult" class="integration-read-source__save-result" data-testid="rsc-save-result">
           {{ saveResult.reused ? `已复用现有版本 v${saveResult.version}` : `已保存新版本 v${saveResult.version}` }}(status: {{ saveResult.status }})
         </p>
+        </template>
       </div>
 
       <div class="integration-read-source__list" data-testid="read-source-list">
@@ -333,6 +381,7 @@
 // The probe evidence path is allowlist-normalized in the service layer, so row values or
 // field keys can never reach this template even from a malformed response.
 import { computed, reactive, ref, watch } from 'vue'
+import { MagicStick, Setting } from '@element-plus/icons-vue'
 import { useLocale } from '../../composables/useLocale'
 import { integrationErrorCodeDisplayLabel, integrationErrorCodeHint } from '../../services/integration/errorCodeLabels'
 import { integrationFieldHint, type IntegrationFieldHintKey } from '../../services/integration/fieldHints'
@@ -344,6 +393,7 @@ import {
   approveReadSourceConfig,
   buildReadSourceConfigPayload,
   createReadSourceConfigDraft,
+  deriveReadSourceProbeEvidenceContainers,
   listReadSourceConfigAudit,
   listReadSourceConfigs,
   probeReadSourceConfig,
@@ -356,11 +406,28 @@ import {
   type ReadSourceSaveResult,
   type ReadSourceStatus,
 } from '../../services/integration/readSourceConfigs'
+import {
+  isReadSourceTemplateEntry,
+  seedReadSourceDraft,
+  type IntegrationTemplateCatalogEntry,
+} from '../../services/integration/readSourceTemplateCatalog'
+import IntegrationReadSourceWizard from './IntegrationReadSourceWizard.vue'
+import IntegrationTemplateCatalogPicker from './IntegrationTemplateCatalogPicker.vue'
 
+// IU-3 (design-lock docs/development/integration-iu3-read-source-wizard-design-lock-20260707.md):
+// the wizard is the DEFAULT new-config surface; `initialViewMode` lets a caller (incl. this file's
+// own spec, which targets the pre-existing flat-form testids) pin the panel to 'expert' so it renders
+// today's full field-flat form with ZERO wizard indirection — no existing assertion had to change.
 const props = defineProps<{
   scope: IntegrationScope
   systems: WorkbenchExternalSystem[]
+  initialViewMode?: 'wizard' | 'expert'
 }>()
+
+const viewMode = ref<'wizard' | 'expert'>(props.initialViewMode ?? 'wizard')
+function toggleViewMode(): void {
+  viewMode.value = viewMode.value === 'wizard' ? 'expert' : 'wizard'
+}
 
 const { locale } = useLocale()
 
@@ -379,14 +446,7 @@ const auditConfigId = ref('')
 const auditRows = ref<ReadSourceAuditRow[]>([])
 
 const validationProblems = computed(() => validateReadSourceDraft(draft))
-const evidenceContainers = computed(() => {
-  const containers = probeEvidence.value?.containers
-  if (!containers) return []
-  return (['primary', 'header', 'lines'] as const).flatMap((alias) => {
-    const shape = containers[alias]
-    return shape ? [{ alias, shape }] : []
-  })
-})
+const evidenceContainers = computed(() => deriveReadSourceProbeEvidenceContainers(probeEvidence.value?.containers))
 // IU-1: humanized probe evidence errorCode label (+ optional hint). The raw code stays visible in a
 // demoted/secondary spot (data-testid="rsc-evidence-error-code") for expert troubleshooting — only the
 // backend's free-text errorMessage (which does not exist on this evidence shape) would be unsafe to
@@ -434,6 +494,18 @@ function addFieldMapRow(): void {
 
 function removeFieldMapRow(index: number): void {
   draft.fieldMap.splice(index, 1)
+}
+
+// TC-1 (design-lock docs/development/integration-connector-template-catalog-design-lock-20260708.md):
+// seed-then-present — the SAME shared `draft` the wizard/flat-form already bind to, mutated by exactly
+// one field (`seedReadSourceDraft` mirrors the wizard's own `selectMode()`), then the view is forced
+// back to 'wizard' so the pre-filled state is immediately visible on the surface it was seeded for.
+// The picker is wired with seeds-wizard="read-source" so only ReadSourceTemplateCatalogEntry values are
+// ever emitted here; the type guard is a defensive narrowing, not a behavior branch.
+function applyReadSourceTemplate(entry: IntegrationTemplateCatalogEntry): void {
+  if (!isReadSourceTemplateEntry(entry)) return
+  seedReadSourceDraft(draft, entry)
+  viewMode.value = 'wizard'
 }
 
 function statusLabel(status: ReadSourceStatus): string {
@@ -512,6 +584,23 @@ async function approve(row: ReadSourceConfigRow): Promise<void> {
   }
 }
 
+// IU-3 step 4 (审批): the wizard's "save version → submit for approval" flow saves via the SAME
+// `saveVersion()` above, then approves the just-saved id via the SAME `approveReadSourceConfig` +
+// `refresh()` service path the list-row `approve()` button already uses below — existing service
+// paths only, no new route/call shape (design-lock §2 hard lock).
+async function approveSavedResult(): Promise<void> {
+  const result = saveResult.value
+  if (!result) return
+  if (!window.confirm(`审批后运行时即可选用该读取源(${draft.object} v${result.version})。确认审批?`)) return
+  actionError.value = ''
+  try {
+    await approveReadSourceConfig(result.id, props.scope)
+    await refresh()
+  } catch (error) {
+    actionError.value = coarseErrorMessage(error)
+  }
+}
+
 async function retire(row: ReadSourceConfigRow): Promise<void> {
   actionError.value = ''
   try {
@@ -545,6 +634,29 @@ void refresh()
   color: #666;
   font-size: 13px;
   margin: 0 0 12px;
+}
+/* IU-3 (design-lock docs/development/integration-iu3-read-source-wizard-design-lock-20260707.md):
+   new markup only — token-only per §3 hard lock (the rules above/below this block are the
+   pre-existing IU-2-scope styles and are left untouched, hex and all). */
+.integration-read-source__mode-toggle {
+  display: flex;
+  justify-content: flex-end;
+  margin-bottom: var(--ms-space-3);
+}
+.integration-read-source__mode-toggle-button {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--ms-space-1);
+  padding: var(--ms-space-1) var(--ms-space-3);
+  border: 1px solid var(--ms-border);
+  border-radius: var(--ms-radius-sm);
+  background: var(--ms-bg-card);
+  color: var(--ms-color-primary);
+  font-size: 13px;
+  cursor: pointer;
+}
+.integration-read-source__mode-toggle-button:hover {
+  background: var(--ms-bg-page);
 }
 .integration-read-source__columns {
   display: grid;

@@ -304,3 +304,20 @@ export function buildImportColumnFormatRows(
   }
   return rows
 }
+
+/**
+ * Build the example-value row for a generated template header, so the
+ * downloaded "selected fields" template carries a concrete sample line (like
+ * the backend template.csv) — format-by-example per column. Columns without a
+ * known example emit an empty cell.
+ */
+export function buildTemplateExampleRow(
+  formatRows: readonly AttendanceImportColumnFormatRow[],
+  header: readonly string[],
+): string[] {
+  const exampleByColumn = new Map(formatRows.map(row => [row.column, row.example]))
+  return header.map(column => {
+    const example = exampleByColumn.get(column)
+    return example && example !== '—' ? example : ''
+  })
+}

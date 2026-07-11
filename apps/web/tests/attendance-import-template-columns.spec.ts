@@ -5,6 +5,7 @@ import { withCsvBom } from '../src/views/attendance/csvExport'
 import {
   IMPORT_TEMPLATE_BASE_COLUMNS,
   buildImportColumnFormatRows,
+  buildTemplateExampleRow,
   formatSpecForDataType,
   IMPORT_TEMPLATE_DEFAULT_SELECTED_KEYS,
   allSelectableImportFieldKeys,
@@ -172,6 +173,24 @@ describe('importTemplateColumns', () => {
     it('does not duplicate a supported column that shares a base column name', () => {
       const rows = buildImportColumnFormatRows(groups)
       expect(rows.filter(r => r.column === '日期')).toHaveLength(1)
+    })
+  })
+
+  describe('buildTemplateExampleRow', () => {
+    const groups = groupSupportedImportColumns([
+      { sourceField: '上班1打卡时间', targetField: 'firstInAt', dataType: 'datetime' },
+      { sourceField: '加班小时', targetField: 'overtimeHours', dataType: 'hours' },
+      { sourceField: '考勤结果', targetField: 'status', dataType: 'string' },
+    ])
+    const rows = buildImportColumnFormatRows(groups)
+    it('emits a concrete example per header column, empty for unknowns', () => {
+      const header = ['日期', '工号', '姓名', '上班1打卡时间', '加班小时', '考勤结果', '未知列']
+      const example = buildTemplateExampleRow(rows, header)
+      expect(example).toEqual(['2026-06-01', 'EMP001', '张三', '2026-06-01 09:00', '8.5', '正常', ''])
+    })
+    it('never emits the placeholder dash as an example value', () => {
+      const example = buildTemplateExampleRow([{ column: 'x', requirement: 'optional', formatEn: 'Text', formatZh: '文本', example: '—', meaningEn: '', meaningZh: '' }], ['x'])
+      expect(example).toEqual([''])
     })
   })
 })

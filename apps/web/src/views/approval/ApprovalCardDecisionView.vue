@@ -136,7 +136,11 @@ const staleTitle = computed(() => {
     return `该待办已处理（${s.actedAction === 'approve' ? '同意' : s.actedAction === 'reject' ? '驳回' : s.actedAction ?? ''}）。`
   }
   if (s.approval.status !== 'pending') return '该审批已办结，无需处理。'
-  if (s.sendStatus !== 'sent') return '该卡片未成功投递，无法在此处理。'
+  // outcome_unknown deliberately NOT here (PR #4046 Phase B): such a card MAY have been
+  // delivered, so while its instance is pending the server marks it actionable and this stale
+  // branch never renders; if it is non-actionable for another reason the generic 已流转 message
+  // below is the accurate one — not "未成功投递".
+  if (s.sendStatus === 'pending' || s.sendStatus === 'failed') return '该卡片未成功投递，无法在此处理。'
   return '该待办已流转（转办/新一轮），此卡片不再有效。'
 })
 

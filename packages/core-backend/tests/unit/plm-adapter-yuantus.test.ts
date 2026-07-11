@@ -1146,3 +1146,149 @@ describe('PLMAdapter Yuantus documents single-side failure + sources metadata', 
     expect(sources[1]).toMatchObject({ name: 'related_documents', ok: true, count: 1 })
   })
 })
+
+// PLM-COLLAB Discussion Phase 3 slice-1 (READ-ONLY): getDiscussions / getDiscussionThread call
+// the provider's EXISTING /api/v1/discussions routes -- no capability/SKU gate on this read
+// path (see the PLMAdapter.ts type-block docstring). A missing/unreadable target comes back as
+// the provider's indistinguishable 404, surfaced as `result.error`, never thrown.
+describe('PLMAdapter Yuantus discussion reads', () => {
+  it('lists discussion threads for a target, forwarding target/list query params to /api/v1/discussions', async () => {
+    const adapter = createAdapter()
+    const queryMock = vi.fn().mockResolvedValue({
+      data: [{
+        threads: [{
+          id: 'thread-1',
+          target_type: 'item',
+          target_id: 'item-1',
+          title: 'Check tolerance',
+          status: 'open',
+          created_by_id: 1,
+          created_at: '2026-07-09T00:00:00.000Z',
+          resolved_by_id: null,
+          resolved_at: null,
+          last_comment_at: '2026-07-09T00:05:00.000Z',
+          comment_count: 2,
+          anchor: null,
+        }],
+        next_cursor: null,
+      }],
+    })
+
+    ;(adapter as any).query = queryMock
+
+    const result = await adapter.getDiscussions(
+      { targetType: 'item', targetId: 'item-1' },
+      { includeResolved: true, includeChildren: true, limit: 20, cursor: 'cursor-abc' },
+    )
+
+    expect(queryMock).toHaveBeenCalledWith('/api/v1/discussions', [{
+      target_type: 'item',
+      target_id: 'item-1',
+      include_resolved: true,
+      include_children: true,
+      limit: 20,
+      cursor: 'cursor-abc',
+    }])
+    expect(result.data[0]).toMatchObject({
+      threads: [expect.objectContaining({ id: 'thread-1', status: 'open', comment_count: 2 })],
+      next_cursor: null,
+    })
+    expect(result.error).toBeUndefined()
+  })
+
+  it('omits optional list params when not supplied', async () => {
+    const adapter = createAdapter()
+    const queryMock = vi.fn().mockResolvedValue({ data: [{ threads: [], next_cursor: null }] })
+    ;(adapter as any).query = queryMock
+
+    await adapter.getDiscussions({ targetType: 'eco', targetId: 'eco-1' })
+
+    expect(queryMock).toHaveBeenCalledWith('/api/v1/discussions', [{
+      target_type: 'eco',
+      target_id: 'eco-1',
+    }])
+  })
+
+  it('fetches one discussion thread with its comments from /api/v1/discussions/{thread_id}', async () => {
+    const adapter = createAdapter()
+    const queryMock = vi.fn().mockResolvedValue({
+      data: [{
+        id: 'thread-1',
+        target_type: 'item',
+        target_id: 'item-1',
+        title: 'Check tolerance',
+        status: 'open',
+        created_by_id: 1,
+        created_at: '2026-07-09T00:00:00.000Z',
+        resolved_by_id: null,
+        resolved_at: null,
+        last_comment_at: '2026-07-09T00:05:00.000Z',
+        comment_count: 1,
+        anchor: null,
+        comments: [{
+          id: 'comment-1',
+          parent_comment_id: null,
+          body: 'Confirm with vendor',
+          body_format: 'text',
+          author_user_id: 1,
+          mentioned_user_ids: [],
+          created_at: '2026-07-09T00:05:00.000Z',
+          edited_at: null,
+          deleted_at: null,
+          anchor: null,
+        }],
+        history: [{ kind: 'lifecycle_transition', at: '2026-07-08T00:00:00.000Z' }],
+      }],
+    })
+
+    ;(adapter as any).query = queryMock
+
+    const result = await adapter.getDiscussionThread('thread-1', { includeHistory: true })
+
+    expect(queryMock).toHaveBeenCalledWith('/api/v1/discussions/thread-1', [{ include_history: true }])
+    expect(result.data[0]).toMatchObject({
+      id: 'thread-1',
+      comments: [expect.objectContaining({ id: 'comment-1', author_user_id: 1 })],
+      history: [expect.objectContaining({ kind: 'lifecycle_transition' })],
+    })
+    expect(result.error).toBeUndefined()
+  })
+
+  it('omits include_history when not requested', async () => {
+    const adapter = createAdapter()
+    const queryMock = vi.fn().mockResolvedValue({ data: [{ id: 'thread-1', comments: [] }] })
+    ;(adapter as any).query = queryMock
+
+    await adapter.getDiscussionThread('thread-1')
+
+    expect(queryMock).toHaveBeenCalledWith('/api/v1/discussions/thread-1', [{}])
+  })
+
+  it('surfaces the provider no-leak 404 as a QueryResult error, never a thrown exception, for a missing/unreadable target', async () => {
+    const adapter = createAdapter()
+    const notFoundError = Object.assign(new Error('Request failed with status code 404'), {
+      response: { status: 404, data: { detail: 'discussion target not found' } },
+    })
+    const queryMock = vi.fn().mockResolvedValue({ data: [], error: notFoundError })
+    ;(adapter as any).query = queryMock
+
+    const result = await adapter.getDiscussions({ targetType: 'item', targetId: 'missing-item' })
+
+    expect(result.data).toHaveLength(0)
+    expect(result.error).toBeDefined()
+    expect((result.error as any)?.response?.status).toBe(404)
+  })
+
+  it('is not gated by apiMode !== yuantus (legacy PLM has no discussion surface)', async () => {
+    const adapter = createAdapter()
+    ;(adapter as any).apiMode = 'legacy'
+
+    const result = await adapter.getDiscussions({ targetType: 'item', targetId: 'item-1' })
+    expect(result.data).toHaveLength(0)
+    expect(result.error).toBeDefined()
+
+    const detailResult = await adapter.getDiscussionThread('thread-1')
+    expect(detailResult.data).toHaveLength(0)
+    expect(detailResult.error).toBeDefined()
+  })
+})

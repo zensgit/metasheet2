@@ -6,6 +6,8 @@ import {
   META_REVISION_RETENTION_MIN_KEEP_N,
   resolveMetaRevisionRetentionConfig,
   startMetaRevisionRetention,
+  sweepFieldValueTombstoneRetention,
+  sweepLinkTombstoneRetention,
 } from '../../src/multitable/meta-revision-retention'
 
 const silentLogger = { info() {}, warn() {}, error() {}, debug() {} } as never
@@ -94,5 +96,43 @@ describe('meta-revision retention config', () => {
     // were never pruned by the scheduler even with retention enabled, despite #3168's
     // "same policy as records" / one-knob-ages-both intent).
     expect(joined).toContain('meta_config_revisions')
+    // 4c-2 C6: the two tombstone tables age under the SAME tick/knob.
+    expect(joined).toContain('meta_field_value_tombstones')
+    expect(joined).toContain('meta_link_tombstones')
+  })
+
+  // 4c-2 C6 — tombstone retention (keep-days ONLY; no keep-last-n concept, no never-delete-latest floor).
+  test('tombstone sweeps are no-ops when retention is disabled (default)', async () => {
+    let called = 0
+    const queryFn = (async () => { called++; return { rows: [], rowCount: 0 } }) as never
+    const config = resolveMetaRevisionRetentionConfig({})
+    expect(await sweepFieldValueTombstoneRetention(queryFn, config)).toBe(0)
+    expect(await sweepLinkTombstoneRetention(queryFn, config)).toBe(0)
+    expect(called).toBe(0) // disabled → never even queries
+  })
+
+  test('tombstone sweeps ALWAYS use keep-days age-based pruning, even when the shared policy knob is keep-last-n', async () => {
+    const seenSql: string[] = []
+    const queryFn = (async (sql: string) => { seenSql.push(String(sql)); return { rows: [], rowCount: 0 } }) as never
+    const config = resolveMetaRevisionRetentionConfig({
+      MULTITABLE_META_REVISION_RETENTION_ENABLED: '1',
+      MULTITABLE_META_REVISION_RETENTION_POLICY: 'keep-last-n', // deliberately NOT keep-days
+    })
+    await sweepFieldValueTombstoneRetention(queryFn, config)
+    await sweepLinkTombstoneRetention(queryFn, config)
+    // both statements are age-based (interval arithmetic), never a row_number()/rn>N partition query —
+    // "keep-last-n has no meaning for a tombstone" (design-lock C6).
+    for (const sql of seenSql) {
+      expect(sql).toContain("interval '1 day'")
+      expect(sql).not.toContain('row_number()')
+    }
+  })
+
+  test('tombstone sweep degrades to 0 (never throws) when the table predates the migration', async () => {
+    const queryFn = (async () => {
+      throw Object.assign(new Error('relation "meta_field_value_tombstones" does not exist'), { code: '42P01' })
+    }) as never
+    const config = resolveMetaRevisionRetentionConfig({ MULTITABLE_META_REVISION_RETENTION_ENABLED: '1' })
+    await expect(sweepFieldValueTombstoneRetention(queryFn, config)).resolves.toBe(0)
   })
 })

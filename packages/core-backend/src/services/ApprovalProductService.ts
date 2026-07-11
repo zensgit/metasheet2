@@ -12,6 +12,8 @@ import type {
   ApprovalTemplateListItemDTO,
   ApprovalTemplateVisibilityScope,
   ApprovalTemplateVersionDetailDTO,
+  ApprovalTemplateVersionSummaryDTO,
+  ApprovalTemplateUsageDTO,
   ApprovalGraph,
   ApprovalMode,
   ApprovalRequesterSnapshot,
@@ -159,6 +161,11 @@ type TemplateVersionRow = {
   status: 'draft' | 'published' | 'archived'
   form_schema: Record<string, unknown>
   approval_graph: Record<string, unknown>
+  /**
+   * B3-09 — optional free-text note captured at publish time. `null` for a still-draft version, a
+   * published-without-a-note version, or any version predating the column.
+   */
+  publish_note?: string | null
   created_at: Date
   updated_at: Date
 }
@@ -1670,6 +1677,7 @@ function toApprovalTemplateVersionDetailDTO(bundle: TemplateBundle): ApprovalTem
     approvalGraph: asApprovalGraph(bundle.version.approval_graph),
     runtimeGraph: bundle.publishedDefinition ? asRuntimeGraph(bundle.publishedDefinition.runtime_graph) : null,
     publishedDefinitionId: bundle.publishedDefinition?.id || null,
+    publishNote: bundle.version.publish_note ?? null,
     createdAt: bundle.version.created_at.toISOString(),
     updatedAt: bundle.version.updated_at.toISOString(),
   }
@@ -1769,6 +1777,29 @@ const APPROVAL_TEMPLATE_CATEGORY_MAX_LENGTH = 64
 const APPROVAL_TEMPLATE_VISIBILITY_ID_MAX_LENGTH = 128
 const APPROVAL_TEMPLATE_VISIBILITY_ID_MAX_COUNT = 100
 const APPROVAL_TEMPLATE_VISIBILITY_TYPES = new Set(['all', 'dept', 'role', 'user'])
+const APPROVAL_TEMPLATE_PUBLISH_NOTE_MAX_LENGTH = 2000
+
+/**
+ * B3-09 — publish-note normalization. Unlike category (which distinguishes "leave unchanged"
+ * `undefined` from "clear" `null`), a publish note has no prior value to preserve: every publish
+ * call is a fresh action, so `undefined` and `null` both mean "no note" and normalize to `null`.
+ */
+function normalizeTemplatePublishNote(value: unknown): string | null {
+  if (value === undefined || value === null) return null
+  if (typeof value !== 'string') {
+    throw new ServiceError('note must be a string', 400, 'VALIDATION_ERROR')
+  }
+  const trimmed = value.trim()
+  if (trimmed.length === 0) return null
+  if (trimmed.length > APPROVAL_TEMPLATE_PUBLISH_NOTE_MAX_LENGTH) {
+    throw new ServiceError(
+      `note must be at most ${APPROVAL_TEMPLATE_PUBLISH_NOTE_MAX_LENGTH} characters`,
+      400,
+      'VALIDATION_ERROR',
+    )
+  }
+  return trimmed
+}
 
 function normalizeTemplateCategory(value: unknown): string | null | undefined {
   if (value === undefined) return undefined
@@ -2402,6 +2433,21 @@ function buildApprovalAssignmentResolver(options: {
   })
 }
 
+/**
+ * Read-only route-preview result shared by B3-05 (previewApprovalRoute) and B3-06
+ * (previewTemplateRoute) — one walk implementation, one shape.
+ */
+export interface ApprovalRoutePreviewResult {
+  route: Array<{
+    nodeKey: string
+    nodeLabel: string
+    assignees: Array<{ id: string; name: string; assignmentType: 'user' | 'role' }>
+    resolveError?: string
+  }>
+  totalSteps: number
+  truncated: boolean
+}
+
 export class ApprovalProductService {
   /**
    * Wave 2 WP5 slice 1 — optional metrics service injection so tests can
@@ -2758,6 +2804,44 @@ export class ApprovalProductService {
     return bundle ? toApprovalTemplateVersionDetailDTO(bundle) : null
   }
 
+  /**
+   * B3-09 (模板版本历史): every version of a template, newest first, with its publish note and
+   * (if it was ever published) the active published_definition id. Full formSchema/approvalGraph
+   * are intentionally omitted — callers fetch those on demand via getTemplateVersion.
+   */
+  async listTemplateVersions(templateId: string): Promise<ApprovalTemplateVersionSummaryDTO[]> {
+    if (!pool) throw new Error('Database not available')
+
+    const templateResult = await pool.query<{ id: string }>(
+      `SELECT id FROM approval_templates WHERE id = $1`,
+      [templateId],
+    )
+    if (!templateResult.rows[0]) {
+      throw new ServiceError('Approval template not found', 404, 'APPROVAL_TEMPLATE_NOT_FOUND')
+    }
+
+    const versionsResult = await pool.query<TemplateVersionRow & { published_definition_id: string | null }>(
+      `SELECT v.*, pd.id AS published_definition_id
+       FROM approval_template_versions v
+       LEFT JOIN approval_published_definitions pd
+         ON pd.template_version_id = v.id AND pd.is_active = TRUE
+       WHERE v.template_id = $1
+       ORDER BY v.version DESC`,
+      [templateId],
+    )
+
+    return versionsResult.rows.map((row) => ({
+      id: row.id,
+      templateId: row.template_id,
+      version: row.version,
+      status: row.status,
+      publishNote: row.publish_note ?? null,
+      publishedDefinitionId: row.published_definition_id ?? null,
+      createdAt: row.created_at.toISOString(),
+      updatedAt: row.updated_at.toISOString(),
+    }))
+  }
+
   async createTemplate(request: CreateApprovalTemplateRequest): Promise<ApprovalTemplateDetailDTO> {
     if (!pool) throw new Error('Database not available')
 
@@ -2981,6 +3065,9 @@ export class ApprovalProductService {
     if (!pool) throw new Error('Database not available')
 
     const policy = assertRuntimePolicy(request.policy)
+    // B3-09 — normalized BEFORE the transaction opens (fail fast on an over-length note without
+    // ever touching the DB), same ordering discipline as the policy/graph validators below.
+    const publishNote = normalizeTemplatePublishNote(request.note)
     let client: ApprovalDbClient | null = null
     try {
       client = await pool.connect()
@@ -2996,6 +3083,16 @@ export class ApprovalProductService {
       }
       if (!template.latest_version_id) {
         throw new ServiceError('Approval template has no version to publish', 400, 'APPROVAL_TEMPLATE_VERSION_NOT_FOUND')
+      }
+      // B3-08 review fix (P3-1): publish previously flipped status to 'published' unconditionally,
+      // silently reactivating an ARCHIVED template — bypassing the explicit 启用 confirm that is the
+      // whole point of the archive state machine. Fail closed instead: unarchive first, then publish.
+      if (template.status === 'archived') {
+        throw new ServiceError(
+          'Approval template is archived — unarchive it before publishing',
+          409,
+          'APPROVAL_TEMPLATE_ARCHIVED',
+        )
       }
 
       const versionResult = await client.query<TemplateVersionRow>(
@@ -3042,10 +3139,10 @@ export class ApprovalProductService {
 
       const updatedVersionResult = await client.query<TemplateVersionRow>(
         `UPDATE approval_template_versions
-         SET status = 'published', updated_at = now()
+         SET status = 'published', publish_note = $2, updated_at = now()
          WHERE id = $1
          RETURNING *`,
-        [version.id],
+        [version.id, publishNote],
       )
       const updatedVersion = updatedVersionResult.rows[0]
 
@@ -3070,6 +3167,117 @@ export class ApprovalProductService {
       throw error
     } finally {
       client?.release()
+    }
+  }
+
+  /**
+   * B3-08 (模板治理 — 停用): PUBLISHED → ARCHIVED. This is the only supported way to REACH the
+   * `archived` status; once there, `assembleCreationContext`'s existing
+   * `bundle.template.status !== 'published'` gate (shared by createApproval + route-preview) fails
+   * closed for it exactly like it already does for `draft` — no new gate needed, only a new way to
+   * get a template into that state on purpose. Archiving is a pure metadata flip: it never touches
+   * `approval_published_definitions.is_active` or any `approval_instances` row, so every in-flight
+   * instance created from this template keeps running unaffected (dispatchAction resolves its
+   * runtime graph from the instance's own frozen published_definition_id, never from the parent
+   * template's current status).
+   */
+  async archiveTemplate(id: string): Promise<ApprovalTemplateDetailDTO> {
+    return this.transitionTemplateStatus(id, 'published', 'archived', {
+      code: 'APPROVAL_TEMPLATE_ARCHIVE_INVALID_STATUS',
+      message: 'Only a published approval template can be archived',
+    })
+  }
+
+  /**
+   * B3-08 (模板治理 — 启用): reverses archiveTemplate (ARCHIVED → PUBLISHED). Immediately reachable
+   * again for new createApproval / route-preview calls — the template's published_definition never
+   * had is_active toggled off, so nothing needs to be re-published.
+   */
+  async unarchiveTemplate(id: string): Promise<ApprovalTemplateDetailDTO> {
+    return this.transitionTemplateStatus(id, 'archived', 'published', {
+      code: 'APPROVAL_TEMPLATE_UNARCHIVE_INVALID_STATUS',
+      message: 'Only an archived approval template can be reactivated',
+    })
+  }
+
+  private async transitionTemplateStatus(
+    id: string,
+    fromStatus: 'draft' | 'published' | 'archived',
+    toStatus: 'draft' | 'published' | 'archived',
+    onInvalid: { code: string; message: string },
+  ): Promise<ApprovalTemplateDetailDTO> {
+    if (!pool) throw new Error('Database not available')
+
+    let client: ApprovalDbClient | null = null
+    try {
+      client = await pool.connect()
+      await client.query('BEGIN')
+
+      const templateResult = await client.query<TemplateRow>(
+        `SELECT * FROM approval_templates WHERE id = $1 FOR UPDATE`,
+        [id],
+      )
+      const template = templateResult.rows[0]
+      if (!template) {
+        throw new ServiceError('Approval template not found', 404, 'APPROVAL_TEMPLATE_NOT_FOUND')
+      }
+      // Fail-closed state machine: archive only from published, unarchive only from archived. A
+      // draft template is already unreachable via createApproval (the NOT_PUBLISHED gate covers it),
+      // so there is deliberately no draft->archived transition here — archiving is specifically the
+      // admin-visible "take a live template out of service" action.
+      if (template.status !== fromStatus) {
+        throw new ServiceError(onInvalid.message, 409, onInvalid.code)
+      }
+
+      await client.query(
+        `UPDATE approval_templates SET status = $1, updated_at = now() WHERE id = $2`,
+        [toStatus, id],
+      )
+
+      const bundle = await this.loadTemplateBundleWithClient(client, id, undefined, 'latest')
+      if (!bundle) {
+        throw new ServiceError('Approval template version not found', 404, 'APPROVAL_TEMPLATE_VERSION_NOT_FOUND')
+      }
+
+      await client.query('COMMIT')
+      return toApprovalTemplateDetailDTO(bundle)
+    } catch (error) {
+      await rollbackQuietly(client)
+      throw error
+    } finally {
+      client?.release()
+    }
+  }
+
+  /**
+   * B3-08 用量/blast-radius indicator — surfaced by the FE archive confirm dialog (mirrors the
+   * `automationDeleteRuleConfirmMessage` / DelegationSettingsView.disable() precedent: name the
+   * action, state the blast radius, note that in-flight work is unaffected). `activeInstanceCount`
+   * uses the SAME "not a terminal status" definition assertTemplateVersionDeletable already uses.
+   */
+  async getTemplateUsage(id: string): Promise<ApprovalTemplateUsageDTO> {
+    if (!pool) throw new Error('Database not available')
+
+    const templateResult = await pool.query<{ id: string }>(
+      `SELECT id FROM approval_templates WHERE id = $1`,
+      [id],
+    )
+    if (!templateResult.rows[0]) {
+      throw new ServiceError('Approval template not found', 404, 'APPROVAL_TEMPLATE_NOT_FOUND')
+    }
+
+    const usageResult = await pool.query<{ total_count: string; active_count: string }>(
+      `SELECT COUNT(*)::text AS total_count,
+              COUNT(*) FILTER (WHERE status <> ALL($2::text[]))::text AS active_count
+       FROM approval_instances
+       WHERE template_id = $1`,
+      [id, [...APPROVAL_TERMINAL_STATUSES]],
+    )
+    const row = usageResult.rows[0]
+    return {
+      templateId: id,
+      instanceCount: Number.parseInt(row?.total_count ?? '0', 10),
+      activeInstanceCount: Number.parseInt(row?.active_count ?? '0', 10),
     }
   }
 
@@ -3249,10 +3457,48 @@ export class ApprovalProductService {
     )
   }
 
-  async createApproval(request: CreateApprovalRequest, actor: CreateApprovalActor): Promise<UnifiedApprovalDTO> {
+  /**
+   * RP-1 (route-preview lock, RATIFIED — RP-0): the SINGLE assembly shared by createApproval and
+   * the read-only route preview. Everything from template-bundle load through executor
+   * construction lives here so preview can NEVER drift from create (the same normalization,
+   * wedge guards, org/role/delegation snapshot freezing and resolver wiring — one source).
+   * Persistence never happens here; the caller decides whether to write (create) or walk (preview).
+   */
+  private async assembleCreationContext(
+    request: { templateId: string; formData: Record<string, unknown> },
+    actor: CreateApprovalActor,
+    options: {
+      whitelistFormDataToSchema?: boolean
+      // RP-3 (B3-06 authoring 试运行): source the runtime graph from the LATEST (possibly draft)
+      // version, compiled on the fly with the SAME buildRuntimeGraph the publish path uses (no
+      // parallel impl) — lets an author dry-run un-published edits. Default 'active' = the
+      // published/active definition (create + B3-05, byte-identical).
+      previewSource?: 'active' | 'draft'
+      // RP-3 (B3-06): the admin caller may resolve the route AS a sample requester (owner order ③ —
+      // sampleRequesterId only reachable on the canManageTemplates endpoint). The `actor` still
+      // authorizes template access (visibility); only the requester SNAPSHOT is taken from here.
+      //
+      // IDENTITY ONLY, deliberately: every attribute routing actually consumes (directoryDepartment /
+      // directoryTitle / directoryRoles / manager chain) is re-resolved from the DB by this userId
+      // below. Widening this to accept department/roles/etc. would hand a caller an org-attribute
+      // injection channel — so the type structurally forbids it.
+      requesterOverride?: {
+        userId: string
+        userName?: string
+      }
+    } = {},
+  ): Promise<{
+    bundle: NonNullable<Awaited<ReturnType<ApprovalProductService['loadTemplateBundle']>>>
+    formSchema: FormSchema
+    normalizedFormData: Record<string, unknown>
+    runtimeGraph: RuntimeGraph
+    requesterSnapshot: ApprovalRequesterSnapshot
+    executor: ApprovalGraphExecutor
+  }> {
     if (!pool) throw new Error('Database not available')
 
-    const bundle = await this.loadTemplateBundle(request.templateId, undefined, 'active', {
+    const previewFromDraft = options.previewSource === 'draft'
+    const bundle = await this.loadTemplateBundle(request.templateId, undefined, previewFromDraft ? 'latest' : 'active', {
       userId: actor.userId,
       departmentIds: actor.departmentIds ?? (actor.department ? [actor.department] : []),
       roles: actor.roles ?? [],
@@ -3266,12 +3512,34 @@ export class ApprovalProductService {
     if (!bundle) {
       throw new ServiceError('Approval template not found', 404, 'APPROVAL_TEMPLATE_NOT_FOUND')
     }
-    if (bundle.template.status !== 'published' || !bundle.publishedDefinition || !bundle.publishedDefinition.is_active) {
+    // The published gate applies to the real create + B3-05 (which route on the frozen published
+    // runtime graph). A draft dry-run (B3-06) legitimately previews an un-published version, so it
+    // compiles the authoring graph below instead of requiring a published definition.
+    if (!previewFromDraft && (bundle.template.status !== 'published' || !bundle.publishedDefinition || !bundle.publishedDefinition.is_active)) {
       throw new ServiceError('Approval template is not published', 409, 'APPROVAL_TEMPLATE_NOT_PUBLISHED')
     }
+    // A never-published template has `publishedDefinition === null` — which the draft path
+    // deliberately tolerates (it compiles `bundle.version.approval_graph` below instead).
+    // `bundle.version` itself is always present: loadTemplateBundleWithClient returns null when it
+    // cannot resolve a version, and that already surfaced as the 404 above.
 
     const formSchema = asFormSchema(bundle.version.form_schema)
+    // NOTE: pruneHiddenFormData already restricts formData to VISIBLE declared fields, so undeclared
+    // keys are dropped here on BOTH the create and preview paths. The whitelist below is therefore
+    // REDUNDANT defense-in-depth for the owner's gate ③, not the sole enforcer — see the
+    // route-preview-api "HARD GATE ③" golden, which stays green if either layer holds and only
+    // flips if BOTH are removed.
     const normalizedFormData = pruneHiddenFormData(formSchema, request.formData)
+    // RP-1 hard gate (owner order, ratified lock): on the PREVIEW path formData is interpreted
+    // STRICTLY per the template field whitelist — unknown keys are dropped BEFORE validation,
+    // amount-check and graph evaluation, so a request body can never smuggle org-probing
+    // parameters through the read-only walk. The CREATE path never sets this flag (byte-identical).
+    if (options.whitelistFormDataToSchema) {
+      const allowedFieldIds = new Set((formSchema.fields ?? []).map((field) => field.id))
+      for (const key of Object.keys(normalizedFormData)) {
+        if (!allowedFieldIds.has(key)) delete normalizedFormData[key]
+      }
+    }
     const validationErrors = validateApprovalFormData(formSchema, normalizedFormData)
     if (validationErrors.length > 0) {
       throw new ServiceError(
@@ -3302,18 +3570,38 @@ export class ApprovalProductService {
     // walked only when the published graph uses a management-chain source
     // (continuous_managers or manager_at_level) — so the extra per-hop queries stay
     // off every approval. Absence falls through to the node's emptyAssigneePolicy.
-    const runtimeGraph = asRuntimeGraph(bundle.publishedDefinition.runtime_graph)
+    // Draft dry-run (B3-06) compiles the authoring graph with the SAME compiler the publish path
+    // uses; the default path reads the frozen published runtime graph (create + B3-05, unchanged).
+    // The `!` on the published branch is sound: the non-draft gate above already threw if absent.
+    const runtimeGraph = previewFromDraft
+      ? buildRuntimeGraph(asApprovalGraph(bundle.version.approval_graph), { allowRevoke: false })
+      : asRuntimeGraph(bundle.publishedDefinition!.runtime_graph)
+    // The requester whose org attributes drive routing. Defaults to the actor (create + B3-05); the
+    // B3-06 admin endpoint may override it with a sample requester (owner order ③). Template ACCESS
+    // was already authorized against `actor` above — only routing identity changes here.
+    const effectiveRequester: {
+      userId: string
+      userName?: string
+      email?: string
+      department?: string
+      roles?: string[]
+      permissions?: string[]
+    } = options.requesterOverride
+      // Identity only — the routing-authoritative attributes are re-resolved from the DB below, so
+      // the sample requester's org data can never be client-supplied (owner order ③).
+      ? { userId: options.requesterOverride.userId, userName: options.requesterOverride.userName || options.requesterOverride.userId }
+      : { userId: actor.userId, userName: actor.userName, email: actor.email, department: actor.department, roles: actor.roles, permissions: actor.permissions }
     const needsManagerChain = runtimeGraphUsesManagerChain(runtimeGraph)
     let orgRelations: ApprovalRequesterOrgRelations = {}
     let orgReadFailed = false
     try {
-      orgRelations = await resolveApprovalRequesterOrgRelations(actor.userId, pool.query.bind(pool), {
+      orgRelations = await resolveApprovalRequesterOrgRelations(effectiveRequester.userId, pool.query.bind(pool), {
         includeManagerChain: needsManagerChain,
       })
     } catch (error) {
       orgReadFailed = true
       metricsLogger.warn(
-        `Failed to resolve requester org relations for ${actor.userId}: ${
+        `Failed to resolve requester org relations for ${effectiveRequester.userId}: ${
           error instanceof Error ? error.message : 'unknown error'
         }`,
       )
@@ -3329,11 +3617,11 @@ export class ApprovalProductService {
     let roleReadFailed = false
     if (needsRequesterRoles) {
       try {
-        requesterRoleIds = await resolveApprovalRequesterRoleIds(actor.userId, pool.query.bind(pool))
+        requesterRoleIds = await resolveApprovalRequesterRoleIds(effectiveRequester.userId, pool.query.bind(pool))
       } catch (error) {
         roleReadFailed = true
         metricsLogger.warn(
-          `Failed to resolve requester roles for ${actor.userId}: ${
+          `Failed to resolve requester roles for ${effectiveRequester.userId}: ${
             error instanceof Error ? error.message : 'unknown error'
           }`,
         )
@@ -3416,18 +3704,18 @@ export class ApprovalProductService {
     }
 
     const requesterSnapshot: ApprovalRequesterSnapshot = {
-      id: actor.userId,
-      name: actor.userName || actor.userId,
-      email: actor.email,
-      department: actor.department,
+      id: effectiveRequester.userId,
+      name: effectiveRequester.userName || effectiveRequester.userId,
+      email: effectiveRequester.email,
+      department: effectiveRequester.department,
       ...(orgRelations.primaryDepartmentName ? { directoryDepartment: orgRelations.primaryDepartmentName } : {}),
       ...(orgRelations.primaryTitle ? { directoryTitle: orgRelations.primaryTitle } : {}),
       // RA-1b CURATED-VOCABULARY — FREEZE directoryRoles ALWAYS as an array, INCLUDING `[]`. Genuine-empty is
       // a valid predicate state (routes to DEFAULT), so it must NOT be omitted: an omitted field would thread
       // null at dispatch and fail-closed at eval instead of evaluating membership to false.
       directoryRoles: requesterRoleIds,
-      roles: actor.roles || [],
-      permissions: actor.permissions || [],
+      roles: effectiveRequester.roles || [],
+      permissions: effectiveRequester.permissions || [],
       ...(orgRelations.managerId ? { managerId: orgRelations.managerId } : {}),
       ...(orgRelations.deptHeadId ? { deptHeadId: orgRelations.deptHeadId } : {}),
       ...(orgRelations.managerChainIds ? { managerChainIds: orgRelations.managerChainIds } : {}),
@@ -3446,6 +3734,148 @@ export class ApprovalProductService {
         roles: requesterSnapshot.directoryRoles ?? [],
       },
     })
+    return { bundle, formSchema, normalizedFormData, runtimeGraph, requesterSnapshot, executor }
+  }
+
+  /**
+   * RP-1 (route-preview lock §3/§4, RATIFIED): read-only first-pass route walk over the SAME
+   * assembly createApproval uses. ZERO-WRITE BY CONSTRUCTION — this method touches no client,
+   * no INSERT, no epoch mint, no notification; it only iterates the pure executor. Per-node
+   * fault tolerance: a node whose assignment resolution yields nothing carries an
+   * `EMPTY_ASSIGNEES` marker instead of failing the call; a walk that cannot advance (or would
+   * exceed the node count) truncates honestly. Endpoints/UI arrive in RP-2/RP-3 — the B3-05
+   * consumer passes the SESSION actor as requester (never a caller-supplied one); the B3-06
+   * admin variant threads its sampleRequester through the same method under its own guard.
+   */
+  async previewApprovalRoute(
+    request: { templateId: string; formData: Record<string, unknown> },
+    actor: CreateApprovalActor,
+  ): Promise<ApprovalRoutePreviewResult> {
+    // B3-05: the requester IS the session actor; publish gate applies (active runtime graph).
+    const { runtimeGraph, executor } = await this.assembleCreationContext(request, actor, {
+      whitelistFormDataToSchema: true,
+    })
+    return this.walkPreviewRoute(runtimeGraph, executor)
+  }
+
+  /**
+   * RP-3 (B3-06 authoring 试运行): the template author's dry-run. Identical read-only walk +
+   * name enrichment as B3-05 (shared substrate — NO parallel impl), but it (a) sources the runtime
+   * graph from the LATEST/draft version so un-published edits are testable, and (b) may resolve the
+   * route AS an optional sample requester. Guarded by canManageTemplates at the route so
+   * sampleRequesterId — the org-structure probe surface — is unreachable to ordinary users
+   * (owner order ③). `actor` still authorizes template visibility inside assembleCreationContext.
+   */
+  async previewTemplateRoute(
+    request: { templateId: string; formData: Record<string, unknown> },
+    actor: CreateApprovalActor,
+    options: {
+      // Identity only — see assembleCreationContext.requesterOverride: the sample requester's org
+      // attributes are always re-resolved from the DB, never accepted from the caller.
+      sampleRequester?: { userId: string; userName?: string }
+    } = {},
+  ): Promise<ApprovalRoutePreviewResult> {
+    const { runtimeGraph, executor } = await this.assembleCreationContext(request, actor, {
+      whitelistFormDataToSchema: true,
+      previewSource: 'draft',
+      ...(options.sampleRequester ? { requesterOverride: options.sampleRequester } : {}),
+    })
+    return this.walkPreviewRoute(runtimeGraph, executor)
+  }
+
+  private async walkPreviewRoute(
+    runtimeGraph: RuntimeGraph,
+    executor: ApprovalGraphExecutor,
+  ): Promise<ApprovalRoutePreviewResult> {
+    const nodeLabel = (key: string): string => {
+      const node = runtimeGraph.nodes.find((entry) => entry.key === key)
+      return (node?.name && String(node.name).trim()) || key
+    }
+    const route: Array<{
+      nodeKey: string
+      nodeLabel: string
+      assignees: Array<{ id: string; name: string; assignmentType: 'user' | 'role' }>
+      resolveError?: string
+    }> = []
+    let truncated = false
+    const visited = new Set<string>()
+    let resolution: ApprovalGraphResolution
+    try {
+      resolution = executor.resolveInitialState()
+    } catch {
+      // Per-node fault tolerance floor: a template whose FIRST resolution throws (e.g.
+      // emptyAssigneePolicy 'error' with a runtime-empty node) previews as an honest empty
+      // truncated route — the create path keeps its own throw semantics untouched.
+      return { route: [], totalSteps: executor.totalSteps, truncated: true }
+    }
+    // Bounded by node count: a healthy DAG first-pass can never revisit a node; anything else
+    // (cycle, resolver loop) stops the walk with an honest truncation flag instead of spinning.
+    const maxSteps = runtimeGraph.nodes.length + 1
+    for (let step = 0; step < maxSteps; step += 1) {
+      if (resolution.status === 'approved' || !resolution.currentNodeKey) break
+      const frontier = resolution.currentNodeKeys && resolution.currentNodeKeys.length > 0
+        ? resolution.currentNodeKeys
+        : [resolution.currentNodeKey]
+      for (const nodeKey of frontier) {
+        if (visited.has(nodeKey)) continue
+        visited.add(nodeKey)
+        const assignments = resolution.assignments.filter((entry) => entry.nodeKey === nodeKey)
+        route.push({
+          nodeKey,
+          nodeLabel: nodeLabel(nodeKey),
+          assignees: assignments.map((entry) => ({ id: entry.assigneeId, name: entry.assigneeId, assignmentType: entry.assignmentType })),
+          ...(assignments.length === 0 ? { resolveError: 'EMPTY_ASSIGNEES' } : {}),
+        })
+      }
+      // Parallel frontier: advancing a multi-branch region node-by-node through
+      // resolveAfterApprove mirrors the runtime, but the preview only promises the FIRST-PASS
+      // node set — advance from the primary cursor; if the executor cannot advance, truncate.
+      try {
+        const next = executor.resolveAfterApprove(resolution.currentNodeKey)
+        if (next.currentNodeKey && visited.has(next.currentNodeKey) && next.status !== 'approved') {
+          truncated = true
+          break
+        }
+        resolution = next
+      } catch {
+        truncated = true
+        break
+      }
+    }
+    if (resolution.status !== 'approved' && !truncated && resolution.currentNodeKey) {
+      // Ran out of the step budget while still pending — cycle-shaped graph; honest flag.
+      truncated = true
+    }
+    // RP-2: display-name enrichment — one batched READ-ONLY lookup per type; a missing row keeps
+    // the honest id fallback (never blank, never a second query fan-out).
+    const userIds = [...new Set(route.flatMap((n) => n.assignees.filter((a) => a.assignmentType === 'user').map((a) => a.id)))]
+    const roleIds = [...new Set(route.flatMap((n) => n.assignees.filter((a) => a.assignmentType === 'role').map((a) => a.id)))]
+    const nameOf = new Map<string, string>()
+    if (userIds.length > 0) {
+      const users = await pool!.query('SELECT id, name FROM users WHERE id = ANY($1::text[])', [userIds])
+      for (const row of users.rows as Array<{ id: string; name: string | null }>) {
+        if (row.name && row.name.trim()) nameOf.set(`user:${row.id}`, row.name)
+      }
+    }
+    if (roleIds.length > 0) {
+      const roles = await pool!.query('SELECT id, name FROM roles WHERE id = ANY($1::text[])', [roleIds]).catch(() => ({ rows: [] as unknown[] }))
+      for (const row of roles.rows as Array<{ id: string; name: string | null }>) {
+        if (row.name && row.name.trim()) nameOf.set(`role:${row.id}`, row.name)
+      }
+    }
+    for (const node of route) {
+      for (const assignee of node.assignees) {
+        assignee.name = nameOf.get(`${assignee.assignmentType}:${assignee.id}`) ?? assignee.id
+      }
+    }
+    return { route, totalSteps: executor.totalSteps, truncated }
+  }
+
+  async createApproval(request: CreateApprovalRequest, actor: CreateApprovalActor): Promise<UnifiedApprovalDTO> {
+    if (!pool) throw new Error('Database not available')
+    // RP-1: prefix extracted verbatim into assembleCreationContext (shared with previewApprovalRoute).
+    const { bundle, normalizedFormData, runtimeGraph, requesterSnapshot, executor } =
+      await this.assembleCreationContext(request, actor)
     const instanceId = crypto.randomUUID()
     const initialResolution = executor.resolveInitialState()
     const initial = runtimeGraphHasAutoApprovalPolicy(runtimeGraph)

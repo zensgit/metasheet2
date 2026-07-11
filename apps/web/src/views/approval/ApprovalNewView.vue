@@ -29,7 +29,7 @@
           <template #header>
             <div class="approval-new__info-header">
               <h2>{{ template.name }}</h2>
-              <StatusTag domain="approvalTemplate" :status="template.status" size="sm" />
+              <StatusTag domain="approvalTemplate" :status="template.status" size="sm" force-locale="zh" />
             </div>
           </template>
           <p v-if="template.description" class="approval-new__info-desc">{{ template.description }}</p>
@@ -39,6 +39,19 @@
         <!-- UX B2-13 (再次提交): shown only once a `?fromInstance=` prefill actually applied at
              least one field (see `applyResubmitPrefill`) — a requester fixing a rejected/revoked/
              cancelled submission should know the form was pre-populated, not silently discover it. -->
+        <el-alert
+          v-if="draftRestoreVisible"
+          type="info"
+          :closable="false"
+          class="approval-new__draft-alert"
+          data-testid="approval-draft-restore"
+        >
+          <template #title>
+            检测到上次未提交的草稿，是否恢复？
+            <el-button size="small" type="primary" data-testid="approval-draft-restore-apply" @click="applyDraftRestore">恢复草稿</el-button>
+            <el-button size="small" data-testid="approval-draft-restore-discard" @click="discardDraftRestore">丢弃</el-button>
+          </template>
+        </el-alert>
         <el-alert
           v-if="prefillNoticeVisible"
           title="已从上一次申请预填，请检查后提交"
@@ -80,6 +93,49 @@
                 <span class="approval-new__flow-preview-chip-summary">{{ step.assigneeSummary }}</span>
               </span>
             </template>
+          </div>
+
+          <!-- RP-2 (B3-05): live route preview — resolves the ACTUAL path for the values typed so
+               far by walking the real create pipeline server-side (read-only). Compute-at-click,
+               and any later form edit clears the result so a stale path never misleads. -->
+          <div class="approval-new__route-preview" data-testid="approval-route-preview">
+            <el-button
+              size="small"
+              :loading="routePreviewLoading"
+              data-testid="approval-route-preview-btn"
+              @click="loadRoutePreview"
+            >
+              按当前表单预览路径
+            </el-button>
+            <div v-if="routePreviewError" class="approval-new__route-preview-error" data-testid="approval-route-preview-error">
+              {{ routePreviewError }}
+            </div>
+            <div v-else-if="routePreview" class="approval-new__flow-preview-row" data-testid="approval-route-preview-row">
+              <span class="approval-new__flow-preview-chip approval-new__flow-preview-chip--requester">
+                发起人
+              </span>
+              <template v-for="node in routePreview.route" :key="node.nodeKey">
+                <span class="approval-new__flow-preview-arrow">→</span>
+                <span
+                  class="approval-new__flow-preview-chip"
+                  :class="{ 'approval-new__flow-preview-chip--unresolved': !!node.resolveError }"
+                  data-testid="approval-route-preview-node"
+                >
+                  {{ node.nodeLabel }}
+                  <span class="approval-new__flow-preview-chip-summary">{{ routePreviewAssigneeSummary(node) }}</span>
+                </span>
+              </template>
+              <span
+                v-if="routePreview.truncated"
+                class="approval-new__route-preview-truncated"
+                data-testid="approval-route-preview-truncated"
+              >
+                （路径未能完整解析，以实际流转为准）
+              </span>
+              <span v-else-if="routePreview.route.length === 0" class="approval-new__route-preview-truncated">
+                （按当前表单将直接通过，无审批节点）
+              </span>
+            </div>
           </div>
         </el-card>
 
@@ -130,6 +186,15 @@
               v-bind="numberFieldProps(field)"
               class="ms-w-100pct"
             />
+            <!-- G-B2-16: 大写回显 — ONLY under the template-declared amount total (no label
+                 guessing); derived from the same value the backend total-check sees. -->
+            <div
+              v-if="field.type === 'number' && isAutoSummedTotal(field.id) && amountWordsFor(field.id)"
+              class="approval-new__amount-words"
+              data-testid="approval-amount-words"
+            >
+              大写：{{ amountWordsFor(field.id) }}
+            </div>
 
             <!-- date -->
             <el-date-picker
@@ -382,6 +447,8 @@ import { useAuth } from '../../composables/useAuth'
 import { useAutoSumTotal } from '../../approvals/useAutoSumTotal'
 import { isRowDerivationActive } from '../../approvals/lineDerivation'
 import { numberFieldProps } from '../../approvals/numberFieldProps'
+import { amountToChineseWords } from '../../approvals/amountInWords'
+import { clearFormDraft, formDraftKey, formSchemaSignature, loadFormDraft, saveFormDraft } from '../../approvals/formDraft'
 import ApprovalUserPicker from '../../approvals/components/ApprovalUserPicker.vue'
 import {
   createEmptyDetailRow,
@@ -390,6 +457,9 @@ import {
   validateDetailRows,
 } from '../../approvals/detailField'
 import { summarizeApprovalFlow, type ApprovalFlowStep } from '../../approvals/graphSummary'
+import { previewApprovalRoute, type ApprovalRoutePreview } from '../../approvals/api'
+import { routePreviewAssigneeSummary } from '../../approvals/routePreviewSummary'
+import { createRoutePreviewController } from '../../approvals/routePreviewController'
 import { getApproval } from '../../approvals/api'
 import { prefillFromSnapshot } from '../../approvals/prefillFromSnapshot'
 
@@ -404,6 +474,57 @@ const formData = reactive<Record<string, unknown>>({})
 // UX B2-13 (再次提交): true once a `?fromInstance=` prefill actually applied at least one field —
 // see `applyResubmitPrefill` below. Drives the "已从上一次申请预填" notice.
 const prefillNoticeVisible = ref(false)
+
+// G-B2-14: localStorage draft autosave/restore (per user+template; pure helpers in
+// approvals/formDraft.ts). The machinery arms only once BOTH the template and the user id are
+// known; a resubmit-prefill (B2-13) takes precedence — the restore offer is skipped entirely.
+const draftUserId = ref<string | null>(null)
+const draftRestoreVisible = ref(false)
+const pendingDraft = ref<Record<string, unknown> | null>(null)
+let draftSaveTimer: ReturnType<typeof setTimeout> | null = null
+let draftArmed = false
+
+function draftStorageKey(): string | null {
+  const templateId = route.params.templateId as string
+  if (!draftUserId.value || !templateId || !template.value) return null
+  return formDraftKey(draftUserId.value, templateId)
+}
+
+function offerDraftRestore(): void {
+  const key = draftStorageKey()
+  if (!key || !template.value) return
+  const draft = loadFormDraft(window.localStorage, key, formSchemaSignature(template.value.formSchema))
+  if (!draft) return
+  pendingDraft.value = draft
+  draftRestoreVisible.value = true
+}
+
+function applyDraftRestore(): void {
+  if (pendingDraft.value) Object.assign(formData, pendingDraft.value)
+  pendingDraft.value = null
+  draftRestoreVisible.value = false
+}
+
+function discardDraftRestore(): void {
+  const key = draftStorageKey()
+  if (key) clearFormDraft(window.localStorage, key)
+  pendingDraft.value = null
+  draftRestoreVisible.value = false
+}
+
+function scheduleDraftSave(): void {
+  if (!draftArmed) return
+  if (draftSaveTimer) clearTimeout(draftSaveTimer)
+  draftSaveTimer = setTimeout(() => {
+    const key = draftStorageKey()
+    if (!key || !template.value) return
+    // Same attachment-stripping the submit path uses — refs never persist.
+    const data = stripAttachmentFields(template.value.formSchema, { ...formData })
+    saveFormDraft(window.localStorage, key, formSchemaSignature(template.value.formSchema), data)
+  }, 800)
+}
+
+watch(formData, scheduleDraftSave, { deep: true })
 // UX B2-13: folded into the SAME `v-loading` overlay as the template/submit loads (below) so the
 // form can't be interacted with — and submitted un-prefilled — during the brief window between
 // the template finishing its own load and the source-instance prefill fetch resolving.
@@ -420,13 +541,38 @@ const visibleFieldIds = computed(() => visibleFields.value.map((field) => field.
 const flowPreviewSteps = computed<ApprovalFlowStep[]>(() => {
   const graph = template.value?.approvalGraph
   if (!graph) return []
-  return summarizeApprovalFlow(graph)
+  return summarizeApprovalFlow(graph, template.value?.formSchema ?? null)
 })
+
+// RP-2 (B3-05): live route preview state. Compute-at-click; any form edit invalidates the resolved
+// path (stale resolution must never keep rendering as if it matched the current values). The
+// generation race-guard lives in createRoutePreviewController so it is unit-testable.
+const routePreview = ref<ApprovalRoutePreview | null>(null)
+const routePreviewLoading = ref(false)
+const routePreviewError = ref('')
+
+const routePreviewController = createRoutePreviewController(previewApprovalRoute, (patch) => {
+  if ('preview' in patch) routePreview.value = patch.preview ?? null
+  if (patch.loading !== undefined) routePreviewLoading.value = patch.loading
+  if (patch.error !== undefined) routePreviewError.value = patch.error
+})
+
+async function loadRoutePreview() {
+  if (!template.value) return
+  await routePreviewController.run({ templateId: template.value.id, formData: { ...formData } })
+}
+
+watch(formData, () => routePreviewController.invalidate(), { deep: true })
 
 // Detail-row auto-sum (design-lock #3189, Gate B): when the template declares amountConsistencyCheck the
 // total field is derived from the detail rows (read-only) — auto-fill (UX) + backend total-check
 // (tamper-proof). FE-only. See useAutoSumTotal for the watch + the backend-identical mirror.
 const { isAutoSummedTotal } = useAutoSumTotal(template, formData)
+
+// G-B2-16: uppercase caption for the declared amount total.
+function amountWordsFor(fieldId: string): string {
+  return amountToChineseWords(formData[fieldId])
+}
 
 const formRules = computed<FormRules>(() => {
   const rules: FormRules = {}
@@ -576,6 +722,11 @@ async function handleSubmit() {
       formData: buildSubmitFormData(),
     })
     ElMessage.success('审批已提交')
+    // G-B2-14: a successful submit consumes the draft.
+    {
+      const key = draftStorageKey()
+      if (key) clearFormDraft(window.localStorage, key)
+    }
     // B1-08: best-effort 最近使用 record — must never delay or fail the navigation.
     const submittedTemplate = template.value
     if (submittedTemplate) {
@@ -640,6 +791,15 @@ onMounted(async () => {
     }
   }
   await applyResubmitPrefill()
+  // G-B2-14: arm the draft machinery once user id resolves; the restore offer only appears when
+  // NO resubmit prefill claimed the form (prefill wins — it is an explicit user intent).
+  try {
+    draftUserId.value = await useAuth().getCurrentUserId()
+  } catch {
+    draftUserId.value = null // drafting silently unavailable without an identity
+  }
+  if (!prefillNoticeVisible.value) offerDraftRestore()
+  draftArmed = true
 })
 
 function syncVisibleFormState() {
@@ -757,12 +917,43 @@ watch([visibleFieldIds, template], () => {
   font-size: 12px;
 }
 
+.approval-new__route-preview {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px dashed var(--el-border-color-lighter);
+}
+
+.approval-new__route-preview .approval-new__flow-preview-row {
+  margin-top: 8px;
+}
+
+.approval-new__flow-preview-chip--unresolved {
+  border: 1px dashed var(--el-color-danger);
+}
+
+.approval-new__route-preview-error {
+  margin-top: 8px;
+  font-size: 12px;
+  color: var(--el-color-danger);
+}
+
+.approval-new__route-preview-truncated {
+  font-size: 12px;
+  color: var(--el-text-color-secondary);
+}
+
 .approval-new__field-hint {
   display: block;
   font-size: 12px;
   font-weight: 400;
   color: var(--el-text-color-secondary);
   margin-top: 2px;
+}
+
+.approval-new__amount-words {
+  margin-top: var(--ms-space-1);
+  font-size: 12px;
+  color: var(--ms-text-3);
 }
 
 .approval-new__form {

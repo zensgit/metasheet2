@@ -28,7 +28,6 @@ const TARGET_FILES = [
   'src/views/approval/TemplateAuthoringView.vue',
   'src/views/approval/TemplateCenterView.vue',
   'src/views/approval/TemplateDetailView.vue',
-  'src/views/ApprovalInboxView.vue',
   'src/views/AutomationExecutionsView.vue',
   'src/views/WorkflowHubView.vue',
   'src/views/WorkflowDesigner.vue',
@@ -43,6 +42,37 @@ const TARGET_FILES = [
   // literals onto var(--ms-*)/--el-* and adds the new rail component clean from the start.
   'src/views/IntegrationWorkbenchView.vue',
   'src/components/integration/IntegrationWorkbenchRail.vue',
+  // IU-2b (docs/development/integration-ux-workbench-redesign-design-lock-20260706.md §2 IU-2,
+  // stage B — per-section extraction): the three new section components copy CSS rules verbatim
+  // from the (already token-only, UF-6-clean) parent, so they start clean too.
+  'src/components/integration/IntegrationMonitoringSection.vue',
+  'src/components/integration/IntegrationCleaningDatasetSection.vue',
+  'src/components/integration/IntegrationMappingRulesSection.vue',
+  // IU-2c (docs/development/integration-ux-workbench-redesign-design-lock-20260706.md §2 IU-2,
+  // stage C — round 2 per-section extraction): same verbatim-copy-from-token-only-parent pattern.
+  'src/components/integration/IntegrationObjectTemplateSection.vue',
+  'src/components/integration/IntegrationPayloadPreviewSection.vue',
+  'src/components/integration/IntegrationConnectionSection.vue',
+  // BA-UI-1 (docs/development/bridge-agent-admin-page-design-lock-20260707.md): the Bridge Agent
+  // read-only observability section is born token-only (var(--ms-*)/--el-* exclusively).
+  'src/components/integration/IntegrationBridgeAgentSection.vue',
+  // IU-2d (docs/development/integration-ux-workbench-redesign-design-lock-20260706.md §2 IU-2,
+  // stage D — run-push decomposition into five focused sub-panels): same
+  // verbatim-copy-from-token-only-parent pattern.
+  'src/components/integration/IntegrationPipelineRunSection.vue',
+  'src/components/integration/IntegrationStockPrepPanel.vue',
+  'src/components/integration/IntegrationExternalWritePanel.vue',
+  'src/components/integration/IntegrationTableActionsPanel.vue',
+  'src/components/integration/IntegrationFieldOptionSyncPanel.vue',
+  // IU-3 (docs/development/integration-iu3-read-source-wizard-design-lock-20260707.md, #3797):
+  // brand-new wizard component, clean from the start (no legacy hex to migrate).
+  'src/components/integration/IntegrationReadSourceWizard.vue',
+  // Integration lane F (same design-lock §3 hard locks, UF-1 token-only): the K3 WISE setup
+  // view's 107 hardcoded hex literals were mapped onto var(--ms-*)/--el-* tokens.
+  'src/views/IntegrationK3WiseSetupView.vue',
+  // IU-4 (docs/development/integration-iu4-composition-wizard-design-lock-20260707.md, #3803):
+  // sibling wizard, same "clean from the start" rule.
+  'src/components/integration/IntegrationCompositionWizard.vue',
 ] as const
 
 // Per-file allowlist for counts that are legitimately un-clearable. Keep this EMPTY unless a

@@ -1,7 +1,14 @@
-import { beforeEach, describe, expect, test, vi } from 'vitest'
+import { beforeAll, beforeEach, describe, expect, test, vi } from 'vitest'
 import type { Kysely } from 'kysely'
 import type { Database } from '../../src/db/types'
 import { DingTalkGroupDestinationService } from '../../src/multitable/dingtalk-group-destination-service'
+import { toDingTalkGroupDestinationResponse } from '../../src/multitable/dingtalk-group-destination-response'
+import { decryptStoredSecretValue, encryptStoredSecretValue, isEncryptedSecretValue } from '../../src/security/encrypted-secrets'
+
+beforeAll(() => {
+  process.env.ENCRYPTION_KEY = process.env.ENCRYPTION_KEY || 'unit-test-key'
+  process.env.ENCRYPTION_SALT = process.env.ENCRYPTION_SALT || 'unit-test-salt'
+})
 
 let executeQueue: unknown[]
 let executeTakeFirstQueue: unknown[]
@@ -79,6 +86,27 @@ function destinationRow(overrides: Record<string, unknown> = {}) {
   }
 }
 
+/**
+ * DT-HARDEN-03 P2-2 fixture-shadowing fix: `destinationRow()` above stores PLAINTEXT
+ * `webhook_url`/`secret`, so `decryptDingTalkDestination*` is a pass-through no-op on
+ * it and never actually exercises the decrypt path. Surfaces that read stored
+ * credentials (list/get, test-send) must be tested against a row that carries the
+ * SAME `enc:` ciphertext shape production data has, or a regression that reads the
+ * raw column instead of decrypting it would still pass.
+ */
+function encryptedDestinationRow(overrides: Record<string, unknown> = {}) {
+  const plainWebhookUrl = typeof overrides.plainWebhookUrl === 'string'
+    ? overrides.plainWebhookUrl
+    : 'https://oapi.dingtalk.com/robot/send?access_token=cipher-token'
+  const plainSecret = 'plainSecret' in overrides ? (overrides.plainSecret as string | null) : 'SECCIPHERTEST'
+  const { plainWebhookUrl: _pw, plainSecret: _ps, ...rest } = overrides
+  return destinationRow({
+    webhook_url: encryptStoredSecretValue(plainWebhookUrl),
+    secret: plainSecret ? encryptStoredSecretValue(plainSecret) : null,
+    ...rest,
+  })
+}
+
 function deliveryRow(overrides: Record<string, unknown> = {}) {
   return {
     id: 'dtd_1',
@@ -123,7 +151,17 @@ describe('DingTalkGroupDestinationService', () => {
     expect(created.sheetId).toBe('sheet_1')
     const insertChain = roots.insertInto.mock.results[0]?.value as MockChain | undefined
     const values = insertChain?.values?.mock.calls[0]?.[0] as Record<string, unknown> | undefined
-    expect(values?.secret).toBe('SEC123')
+    // DT-HARDEN-03: credentials are persisted encrypted, never as plain text. The
+    // returned domain object still carries plaintext (asserted above) so signing and
+    // sending keep working.
+    expect(isEncryptedSecretValue(values?.secret)).toBe(true)
+    expect(values?.secret).not.toBe('SEC123')
+    expect(decryptStoredSecretValue(values?.secret as string)).toBe('SEC123')
+    expect(isEncryptedSecretValue(values?.webhook_url)).toBe(true)
+    expect(String(values?.webhook_url)).not.toContain('test-token')
+    expect(decryptStoredSecretValue(values?.webhook_url as string)).toBe(
+      'https://oapi.dingtalk.com/robot/send?access_token=test-token',
+    )
     expect(values?.org_id).toBeNull()
 
     executeQueue.push([destinationRow({ sheet_id: 'sheet_1' }), destinationRow({ id: 'dt_legacy', sheet_id: null })])
@@ -270,6 +308,35 @@ describe('DingTalkGroupDestinationService', () => {
     expect(updated.name).toBe('Updated group')
     expect(updated.enabled).toBe(false)
     expect(updated.webhookUrl).toContain('access_token=next')
+  })
+
+  test('persists rotated credentials encrypted at rest on update (DT-HARDEN-03)', async () => {
+    const { db, roots } = createMockDb()
+    const service = new DingTalkGroupDestinationService(db, vi.fn())
+
+    executeTakeFirstQueue.push(destinationRow())
+    executeTakeFirstQueue.push(destinationRow({
+      webhook_url: 'https://oapi.dingtalk.com/robot/send?access_token=rotated',
+      secret: 'SEC_ROTATED',
+    }))
+
+    await service.updateDestination('dt_1', 'user_1', {
+      webhookUrl: 'https://oapi.dingtalk.com/robot/send?access_token=rotated',
+      secret: 'SEC_ROTATED',
+    })
+
+    // The returned domain object always carries plaintext by design; what matters is
+    // that the row written to `dingtalk_group_destinations` is ciphertext, never the
+    // plaintext webhook token / secret. Guards the encrypt-on-update path against a
+    // regression that would leave credentials at rest in the clear (DT-HARDEN-03 P2-2).
+    const updateChain = roots.updateTable.mock.results[0]?.value as MockChain | undefined
+    const setArg = updateChain?.set?.mock.calls[0]?.[0] as Record<string, unknown> | undefined
+    expect(isEncryptedSecretValue(setArg?.webhook_url)).toBe(true)
+    expect(decryptStoredSecretValue(setArg?.webhook_url as string)).toBe(
+      'https://oapi.dingtalk.com/robot/send?access_token=rotated',
+    )
+    expect(isEncryptedSecretValue(setArg?.secret)).toBe(true)
+    expect(decryptStoredSecretValue(setArg?.secret as string)).toBe('SEC_ROTATED')
   })
 
   test('rejects invalid DingTalk robot webhook URL on update', async () => {
@@ -423,5 +490,109 @@ describe('DingTalkGroupDestinationService', () => {
     const updateChain = roots.updateTable.mock.results[0]?.value as MockChain | undefined
     const setArg = updateChain?.set?.mock.calls[0]?.[0] as Record<string, unknown> | undefined
     expect(setArg?.last_test_status).toBe('success')
+  })
+
+  // DT-HARDEN-03 P2-2 — roadmap §6.3 names 5 surfaces (create, update, list, test-send,
+  // delivery send). create/update/delivery-send were already covered with real ciphertext;
+  // these two close list and test-send, against `encryptedDestinationRow()` (real `enc:`
+  // ciphertext), not the plaintext `destinationRow()` fixture that makes decrypt a no-op.
+
+  test('listDestinations decrypts real ciphertext at rest (DT-HARDEN-03 list surface)', async () => {
+    const { db } = createMockDb()
+    const service = new DingTalkGroupDestinationService(db, vi.fn())
+
+    executeQueue.push([
+      encryptedDestinationRow({
+        id: 'dt_cipher',
+        plainWebhookUrl: 'https://oapi.dingtalk.com/robot/send?access_token=list-surface-token',
+        plainSecret: 'SECLISTSURFACE',
+      }),
+    ])
+    const listed = await service.listDestinations('user_1')
+
+    expect(listed).toHaveLength(1)
+    // Guards against reading the raw `enc:` column: a regression that drops the decrypt
+    // in rowToDestination would leave this ciphertext (starts with `enc:`), never the
+    // plaintext access_token/secret asserted below.
+    expect(listed[0].webhookUrl).toBe('https://oapi.dingtalk.com/robot/send?access_token=list-surface-token')
+    expect(listed[0].secret).toBe('SECLISTSURFACE')
+    expect(listed[0].credentialUnreadable).toBeUndefined()
+  })
+
+  test('testSend decrypts real ciphertext before signing and sending (DT-HARDEN-03 test-send surface)', async () => {
+    const { db } = createMockDb()
+    const fetchFn = vi.fn(async () => new Response(
+      JSON.stringify({ errcode: 0, errmsg: 'ok' }),
+      { status: 200, headers: { 'Content-Type': 'application/json' } },
+    ))
+    const service = new DingTalkGroupDestinationService(db, fetchFn as typeof fetch)
+
+    executeTakeFirstQueue.push(encryptedDestinationRow({
+      plainWebhookUrl: 'https://oapi.dingtalk.com/robot/send?access_token=test-send-surface-token',
+      plainSecret: 'SECTESTSENDSURFACE',
+    }))
+    // A regression that reads the raw stored (ciphertext) webhook_url instead of
+    // decrypting it would fail DingTalk-URL validation before fetch is ever called —
+    // resolving {ok:true} + a signed plaintext token in the request URL is only
+    // possible if both webhook_url and secret were correctly decrypted first.
+    await expect(service.testSend('dt_1', 'user_1', {})).resolves.toEqual({ ok: true })
+
+    expect(fetchFn).toHaveBeenCalledTimes(1)
+    const calledUrl = fetchFn.mock.calls[0]?.[0] as string
+    expect(calledUrl).toContain('access_token=test-send-surface-token')
+    expect(calledUrl).toContain('&sign=')
+    expect(calledUrl).toContain('&timestamp=')
+  })
+
+  // DT-HARDEN-03 P3 — one undecryptable ciphertext row must not take down the whole
+  // response. rowToDestination is called from Array.map in listDestinations/
+  // getDestinationById, and the routes that call them (GET /dingtalk-groups, GET
+  // /dingtalk-groups/:id/deliveries) have no try/catch — an uncaught throw on ANY row
+  // hangs the request with no response, corrupt row or not.
+  test('listDestinations flags an undecryptable row instead of throwing, and leaves good rows intact', async () => {
+    const { db } = createMockDb()
+    const service = new DingTalkGroupDestinationService(db, vi.fn())
+
+    executeQueue.push([
+      encryptedDestinationRow({
+        id: 'dt_good',
+        plainWebhookUrl: 'https://oapi.dingtalk.com/robot/send?access_token=good-token',
+        plainSecret: 'SECGOOD',
+      }),
+      destinationRow({
+        id: 'dt_corrupt',
+        // Well-formed `enc:` prefix, but the payload cannot round-trip — simulates a
+        // wrong-key backfill, a key rotation, or on-disk corruption.
+        webhook_url: 'enc:not-valid-ciphertext-data',
+        secret: 'enc:also-not-valid-ciphertext-data',
+      }),
+    ])
+
+    const listed = await service.listDestinations('user_1')
+
+    expect(listed).toHaveLength(2)
+    const good = listed.find((d) => d.id === 'dt_good')
+    const corrupt = listed.find((d) => d.id === 'dt_corrupt')
+
+    expect(good?.webhookUrl).toBe('https://oapi.dingtalk.com/robot/send?access_token=good-token')
+    expect(good?.secret).toBe('SECGOOD')
+    expect(good?.credentialUnreadable).toBeUndefined()
+
+    expect(corrupt?.credentialUnreadable).toBe(true)
+    expect(corrupt?.secret).toBeUndefined()
+    // Must never fall back to the raw stored value — maskDingTalkWebhookUrl passes
+    // non-URL strings through VERBATIM, so leaking the `enc:` blob here would leak the
+    // ciphertext through what is meant to be a masked display field.
+    expect(corrupt?.webhookUrl).not.toContain('enc:')
+
+    // The API-facing shape must carry the flag too, and must never surface `enc:`.
+    const responses = listed.map((d) => toDingTalkGroupDestinationResponse(d))
+    const corruptResponse = responses.find((r) => r.id === 'dt_corrupt')
+    expect(corruptResponse?.credentialUnreadable).toBe(true)
+    expect(corruptResponse?.webhookUrl).not.toContain('enc:')
+    expect(corruptResponse?.hasSecret).toBe(false)
+    const goodResponse = responses.find((r) => r.id === 'dt_good')
+    expect(goodResponse?.webhookUrl).toContain('access_token=***')
+    expect(goodResponse?.credentialUnreadable).toBeUndefined()
   })
 })

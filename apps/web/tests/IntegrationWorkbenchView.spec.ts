@@ -115,8 +115,10 @@ describe('IntegrationWorkbenchView', () => {
 
   // IU-2a quality gate: the rail↔view WIRING is pinned here (the rail component's own spec uses
   // fixture groups, so without this a dropped group — or the whole rail — in the view would pass
-  // every existing test). Six groups, each anchoring an existing section id.
-  it('wires the six rail groups to real section anchors', async () => {
+  // every existing test). Six IU-2a groups + the BA-UI-1 bridge-agent group (add-only extension,
+  // docs/development/bridge-agent-admin-page-design-lock-20260707.md), each anchoring an existing
+  // section id.
+  it('wires the seven rail groups to real section anchors', async () => {
     localStorage.setItem('user_permissions', JSON.stringify(['integration:write']))
     apiFetchMock.mockImplementation(async (url: string) => {
       if (url === '/api/integration/adapters') return jsonResponse([])
@@ -141,13 +143,15 @@ describe('IntegrationWorkbenchView', () => {
       ['cleaning-mapping', 'int-sec-object-template'],
       ['run-push', 'int-sec-run-push'],
       ['monitoring', 'int-sec-monitoring'],
+      // BA-UI-1: 7th group (add-only — the six IU-2a pairs above are unchanged).
+      ['bridge-agent', 'int-sec-bridge-agent'],
     ]
     for (const [groupId, sectionId] of expected) {
       const item = root.querySelector(`[data-testid="integration-rail-${groupId}"]`)
       expect(item, `rail group ${groupId} must render`).not.toBeNull()
       expect(root.querySelector(`#${sectionId}`), `section ${sectionId} must exist for ${groupId}`).not.toBeNull()
     }
-    expect(root.querySelectorAll('[data-testid^="integration-rail-"]').length).toBe(6)
+    expect(root.querySelectorAll('[data-testid^="integration-rail-"]').length).toBe(7)
   })
 
   it('loads systems, object schemas, and previews a template payload', async () => {

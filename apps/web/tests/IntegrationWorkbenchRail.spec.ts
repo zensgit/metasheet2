@@ -48,6 +48,9 @@ const railGroups: IntegrationWorkbenchRailGroup[] = [
   { id: 'cleaning-mapping', label: '清洗映射', targetId: 'int-sec-object-template' },
   { id: 'run-push', label: '运行与推送', targetId: 'int-sec-run-push' },
   { id: 'monitoring', label: '监控与死信', targetId: 'int-sec-monitoring' },
+  // BA-UI-1 (docs/development/bridge-agent-admin-page-design-lock-20260707.md): 7th group —
+  // ADD-ONLY extension; the six IU-2a groups above are untouched.
+  { id: 'bridge-agent', label: 'Bridge Agent 观测', targetId: 'int-sec-bridge-agent' },
 ]
 
 describe('IntegrationWorkbenchRail (unit)', () => {
@@ -79,16 +82,18 @@ describe('IntegrationWorkbenchRail (unit)', () => {
     await flushUi(1)
   }
 
-  it('renders all six design-lock groups', async () => {
+  it('renders all seven groups (six IU-2a design-lock groups + the BA-UI-1 bridge-agent group)', async () => {
     await mountRail()
     const items = container!.querySelectorAll('.integration-workbench-rail__item')
-    expect(items.length).toBe(6)
+    expect(items.length).toBe(7)
     expect(container!.textContent).toContain('连接管理')
     expect(container!.textContent).toContain('读取源')
     expect(container!.textContent).toContain('组合')
     expect(container!.textContent).toContain('清洗映射')
     expect(container!.textContent).toContain('运行与推送')
     expect(container!.textContent).toContain('监控与死信')
+    // BA-UI-1: 7th group (add-only — the six assertions above are unchanged).
+    expect(container!.textContent).toContain('Bridge Agent 观测')
   })
 
   it('marks the active group via aria-current and the active class', async () => {
@@ -168,15 +173,18 @@ describe('IntegrationWorkbenchView — IU-2a chrome integration', () => {
     'int-sec-run-push',
     'int-sec-monitoring',
     'int-sec-preview',
+    // BA-UI-1 (docs/development/bridge-agent-admin-page-design-lock-20260707.md): 11th section
+    // anchor — add-only extension of the IU-2a ten.
+    'int-sec-bridge-agent',
   ]
 
-  it('renders PageShell (wide) + PageHeader chrome, the rail, and all ten section anchors', async () => {
+  it('renders PageShell (wide) + PageHeader chrome, the rail, and all eleven section anchors', async () => {
     await mountView()
     expect(container!.querySelector('.ms-page-shell')).toBeTruthy()
     expect(container!.querySelector('.ms-page-shell--wide')).toBeTruthy()
     expect(container!.querySelector('.ms-page-header__title')?.textContent).toBe('数据工厂')
     expect(container!.querySelector('[data-testid="integration-help-link"]')).toBeTruthy()
-    for (const groupId of ['connection', 'read-source', 'combination', 'cleaning-mapping', 'run-push', 'monitoring']) {
+    for (const groupId of ['connection', 'read-source', 'combination', 'cleaning-mapping', 'run-push', 'monitoring', 'bridge-agent']) {
       expect(container!.querySelector(`[data-testid="integration-rail-${groupId}"]`)).toBeTruthy()
     }
     for (const id of sectionIds) {

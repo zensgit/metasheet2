@@ -3,9 +3,11 @@ import { createApp, nextTick, type App as VueApp } from 'vue'
 
 const getContextMock = vi.fn()
 const updateLineMock = vi.fn()
+const ecoIntentMock = vi.fn()
 vi.mock('../src/services/integration/workbench', () => ({
   getPlmBomMultitableContext: (...args: unknown[]) => getContextMock(...args),
   updatePlmBomMultitableLine: (...args: unknown[]) => updateLineMock(...args),
+  requestPlmBomEcoRevisionIntent: (...args: unknown[]) => ecoIntentMock(...args),
 }))
 
 import PlmBomReviewPanel from '../src/components/plm/PlmBomReviewPanel.vue'
@@ -36,10 +38,10 @@ async function flushUi(cycles = 6): Promise<void> {
 let app: VueApp | null = null
 let container: HTMLDivElement
 
-function mountPanel(dataSourceId = 'plm-ds'): void {
+function mountPanel(dataSourceId = 'plm-ds', extraProps: Record<string, unknown> = {}): void {
   container = document.createElement('div')
   document.body.appendChild(container)
-  app = createApp(PlmBomReviewPanel, { dataSourceId })
+  app = createApp(PlmBomReviewPanel, { dataSourceId, ...extraProps })
   app.mount(container)
 }
 
@@ -62,6 +64,7 @@ afterEach(() => {
   container?.remove()
   getContextMock.mockReset()
   updateLineMock.mockReset()
+  ecoIntentMock.mockReset()
   vi.unstubAllGlobals()
 })
 
@@ -316,5 +319,130 @@ describe('PlmBomReviewPanel (P3-C BOM review + governed write-back)', () => {
     await setPartAndLoad('P1')
     expect(stateOf()).toBe('error')
     expect(container.querySelector('[data-testid="plm-bom-review-error"]')).not.toBeNull()
+  })
+})
+
+describe('ECO Phase 3: locked-BOM revision-intent CTA', () => {
+  function lockedContextResult() {
+    const locked = cloneContext()
+    locked.part.state = 'Released'
+    return { data_source_id: 'plm-ds', available: true, entitled: true, context: locked }
+  }
+
+  it('CTA hidden on a locked part when the capability pre-gate is OFF (prop absent)', async () => {
+    getContextMock.mockResolvedValue(lockedContextResult())
+    mountPanel()
+    await flushUi()
+    await setPartAndLoad('P1')
+    expect(container.querySelector('[data-testid="plm-bom-review-locked-hint"]')).not.toBeNull()
+    expect(container.querySelector('[data-testid="plm-bom-review-eco-intent"]')).toBeNull()
+  })
+
+  it('CTA shown at the advisory-locked banner when the capability pre-gate is ON', async () => {
+    getContextMock.mockResolvedValue(lockedContextResult())
+    mountPanel('plm-ds', { ecoIntentEnabled: true })
+    await flushUi()
+    await setPartAndLoad('P1')
+    expect(container.querySelector('[data-testid="plm-bom-review-eco-intent-cta"]')).not.toBeNull()
+  })
+
+  it('CTA surfaces REACTIVELY after a write-back lifecycle_locked 409 (advisory gate missed the lock)', async () => {
+    vi.stubGlobal('crypto', { randomUUID: () => 'submit-key-1' })
+    getContextMock.mockResolvedValue({ data_source_id: 'plm-ds', available: true, entitled: true, context: cloneContext() })
+    updateLineMock.mockResolvedValue({ ok: false, status: 409, reason: 'lifecycle_locked', message: 'locked' })
+    mountPanel('plm-ds', { ecoIntentEnabled: true })
+    await flushUi()
+    await setPartAndLoad('P1')
+    // root is Draft -> no CTA up front
+    expect(container.querySelector('[data-testid="plm-bom-review-eco-intent"]')).toBeNull()
+
+    const refdes = container.querySelector('[data-testid="plm-bom-review-refdes-input"]') as HTMLInputElement
+    refdes.value = 'R9'
+    refdes.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushUi()
+    ;(container.querySelector('[data-testid="plm-bom-review-save"]') as HTMLButtonElement).click()
+    await flushUi()
+
+    expect(container.querySelector('[data-testid="plm-bom-review-eco-intent-cta"]')).not.toBeNull()
+  })
+
+  it('create outcome: done message carries the new ECO id and the button disables', async () => {
+    getContextMock.mockResolvedValue(lockedContextResult())
+    ecoIntentMock.mockResolvedValue({ ok: true, eco_id: 'ECO-77', state: 'progress', attached: false })
+    mountPanel('plm-ds', { ecoIntentEnabled: true })
+    await flushUi()
+    await setPartAndLoad('P1')
+    ;(container.querySelector('[data-testid="plm-bom-review-eco-intent-cta"]') as HTMLButtonElement).click()
+    await flushUi()
+
+    expect(ecoIntentMock).toHaveBeenCalledWith('plm-ds', 'P1')
+    const msg = container.querySelector('[data-testid="plm-bom-review-eco-intent-message"]')
+    expect(msg?.textContent).toContain('ECO-77')
+    expect(msg?.textContent).toContain('已发起 ECO 修订')
+    expect((container.querySelector('[data-testid="plm-bom-review-eco-intent-cta"]') as HTMLButtonElement).disabled).toBe(true)
+  })
+
+  it('attach outcome: message names the EXISTING open ECO (anti-sprawl surfaced honestly)', async () => {
+    getContextMock.mockResolvedValue(lockedContextResult())
+    ecoIntentMock.mockResolvedValue({ ok: true, eco_id: 'ECO-OLD', state: 'draft', attached: true })
+    mountPanel('plm-ds', { ecoIntentEnabled: true })
+    await flushUi()
+    await setPartAndLoad('P1')
+    ;(container.querySelector('[data-testid="plm-bom-review-eco-intent-cta"]') as HTMLButtonElement).click()
+    await flushUi()
+
+    const msg = container.querySelector('[data-testid="plm-bom-review-eco-intent-message"]')
+    expect(msg?.textContent).toContain('ECO-OLD')
+    expect(msg?.textContent).toContain('已挂接')
+  })
+
+  it('not_locked outcome: resets the reactive lock, hides the button, KEEPS the explanation visible', async () => {
+    vi.stubGlobal('crypto', { randomUUID: () => 'submit-key-1' })
+    getContextMock.mockResolvedValue({ data_source_id: 'plm-ds', available: true, entitled: true, context: cloneContext() })
+    updateLineMock.mockResolvedValue({ ok: false, status: 409, reason: 'lifecycle_locked', message: 'locked' })
+    ecoIntentMock.mockResolvedValue({ ok: false, status: 409, reason: 'not_locked', message: 'editable' })
+    mountPanel('plm-ds', { ecoIntentEnabled: true })
+    await flushUi()
+    await setPartAndLoad('P1')
+    const refdes = container.querySelector('[data-testid="plm-bom-review-refdes-input"]') as HTMLInputElement
+    refdes.value = 'R9'
+    refdes.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushUi()
+    ;(container.querySelector('[data-testid="plm-bom-review-save"]') as HTMLButtonElement).click()
+    await flushUi()
+    ;(container.querySelector('[data-testid="plm-bom-review-eco-intent-cta"]') as HTMLButtonElement).click()
+    await flushUi()
+
+    expect(container.querySelector('[data-testid="plm-bom-review-eco-intent-cta"]')).toBeNull()
+    const msg = container.querySelector('[data-testid="plm-bom-review-eco-intent-message"]')
+    expect(msg?.textContent).toContain('未处于锁定状态')
+  })
+
+  it('eco_intent_rejected outcome: retry-able message, button back to idle', async () => {
+    getContextMock.mockResolvedValue(lockedContextResult())
+    ecoIntentMock.mockResolvedValue({ ok: false, status: 409, reason: 'eco_intent_rejected', message: 'race' })
+    mountPanel('plm-ds', { ecoIntentEnabled: true })
+    await flushUi()
+    await setPartAndLoad('P1')
+    ;(container.querySelector('[data-testid="plm-bom-review-eco-intent-cta"]') as HTMLButtonElement).click()
+    await flushUi()
+
+    expect(container.querySelector('[data-testid="plm-bom-review-eco-intent-message"]')?.textContent).toContain('被拒')
+    expect((container.querySelector('[data-testid="plm-bom-review-eco-intent-cta"]') as HTMLButtonElement).disabled).toBe(false)
+  })
+
+  it('a fresh load resets the CTA state machine (message + done state cleared)', async () => {
+    getContextMock.mockResolvedValue(lockedContextResult())
+    ecoIntentMock.mockResolvedValue({ ok: true, eco_id: 'ECO-77', state: 'progress', attached: false })
+    mountPanel('plm-ds', { ecoIntentEnabled: true })
+    await flushUi()
+    await setPartAndLoad('P1')
+    ;(container.querySelector('[data-testid="plm-bom-review-eco-intent-cta"]') as HTMLButtonElement).click()
+    await flushUi()
+    expect(container.querySelector('[data-testid="plm-bom-review-eco-intent-message"]')).not.toBeNull()
+
+    await setPartAndLoad('P1')
+    expect(container.querySelector('[data-testid="plm-bom-review-eco-intent-message"]')).toBeNull()
+    expect((container.querySelector('[data-testid="plm-bom-review-eco-intent-cta"]') as HTMLButtonElement).disabled).toBe(false)
   })
 })

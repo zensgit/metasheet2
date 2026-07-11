@@ -40,6 +40,14 @@ export interface UnifiedApprovalDTO {
    */
   currentNodeKeys?: string[] | null
   assignments: ApprovalAssignmentDTO[]
+  /**
+   * B3-02 (行级未读): per-viewer read state for the 待我处理 (pending) tab — `true` once the
+   * actor has an `approval_reads` row for this instance, `false` when they do not. Populated
+   * ONLY on the pending tab (the only surface the unread badge/dot semantics cover); `undefined`
+   * on every other tab, where callers must treat it as "no dot" (never assume unread).
+   * Mirrors the pending-count badge's unread predicate exactly (absence of an approval_reads row).
+   */
+  isRead?: boolean
   createdAt: string
   updatedAt: string
 }
@@ -95,7 +103,21 @@ export interface ApprovalQueryOptions {
   businessKey?: string
   assignee?: string
   search?: string
-  tab?: 'pending' | 'mine' | 'cc' | 'completed'
+  /**
+   * B3-03 (模板/时间筛选): narrow the feed to one published template + a created-at window.
+   * `templateId` matches `approval_instances.template_id`; `createdFrom`/`createdTo` are
+   * inclusive ISO timestamps compared against `approval_instances.created_at`. Additive — compose
+   * with `tab`/`sourceSystem`/every other filter, never replace them.
+   */
+  templateId?: string
+  createdFrom?: string
+  createdTo?: string
+  /**
+   * B3-01 adds `processed` (我已处理): every instance the actor has ANY `approval_records` row
+   * for (a reverse lookup on `actor_id`), regardless of the instance's CURRENT status — unlike
+   * `completed`, which is scoped to non-pending instances.
+   */
+  tab?: 'pending' | 'mine' | 'cc' | 'completed' | 'processed'
   includeExternalTabSources?: boolean
   actorId?: string
   actorRoles?: string[]

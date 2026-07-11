@@ -95,6 +95,43 @@ describe('multitable formula editor', () => {
     )).toEqual([])
   })
 
+  it('validates argument counts for the 12 catalog-parity functions (arity table)', () => {
+    // Regression coverage for the catalog-parity audit: FORMULA_FUNCTION_ARITY previously had no
+    // entries for these 12, so `=IFERROR({fld_a})` (1 arg, needs 2) produced no diagnostic at all —
+    // a silently wrong value rather than a caught mistake. `clean` uses exactly the documented
+    // minimum arg count (must produce zero error diagnostics); `short` drops one arg below that
+    // minimum (must produce the exact formulaMinArgs message).
+    const arityCases: Array<{ name: string; clean: string; short: string; minArgs: number }> = [
+      { name: 'IFERROR', clean: '=IFERROR(1, 0)', short: '=IFERROR(1)', minArgs: 2 },
+      { name: 'ISERROR', clean: '=ISERROR(1)', short: '=ISERROR()', minArgs: 1 },
+      { name: 'ISBLANK', clean: '=ISBLANK(1)', short: '=ISBLANK()', minArgs: 1 },
+      { name: 'ISNUMBER', clean: '=ISNUMBER(1)', short: '=ISNUMBER()', minArgs: 1 },
+      { name: 'IFS', clean: '=IFS(TRUE, 1)', short: '=IFS(TRUE)', minArgs: 2 },
+      { name: 'XOR', clean: '=XOR(1)', short: '=XOR()', minArgs: 1 },
+      { name: 'ROUNDUP', clean: '=ROUNDUP(1)', short: '=ROUNDUP()', minArgs: 1 },
+      { name: 'ROUNDDOWN', clean: '=ROUNDDOWN(1)', short: '=ROUNDDOWN()', minArgs: 1 },
+      { name: 'WEEKDAY', clean: '=WEEKDAY(1)', short: '=WEEKDAY()', minArgs: 1 },
+      { name: 'SECOND', clean: '=SECOND(1)', short: '=SECOND()', minArgs: 1 },
+      { name: 'EDATE', clean: '=EDATE(1)', short: '=EDATE()', minArgs: 1 },
+      { name: 'DAYS', clean: '=DAYS(1, 2)', short: '=DAYS(1)', minArgs: 2 },
+    ]
+
+    for (const { name, clean, short, minArgs } of arityCases) {
+      expect(
+        validateFormulaExpression(clean, []).filter((diagnostic) => diagnostic.severity === 'error'),
+        `${name} should validate clean (no error diagnostics) at its documented minimum arg count`,
+      ).toEqual([])
+
+      expect(
+        validateFormulaExpression(short, []),
+        `${name} should flag one argument below its documented minimum`,
+      ).toContainEqual({
+        severity: 'error',
+        message: `${name} expects at least ${minArgs} argument${minArgs === 1 ? '' : 's'}.`,
+      })
+    }
+  })
+
   it('builds categorized function catalog sections and insertion text', () => {
     const mathSections = getFormulaFunctionCatalog('round', 'math')
     expect(mathSections).toHaveLength(1)

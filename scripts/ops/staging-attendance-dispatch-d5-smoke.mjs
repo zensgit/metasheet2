@@ -17,6 +17,7 @@ const BASE_URL = (process.env.BASE_URL || process.env.BASE || '').replace(/\/$/,
 const DATABASE_URL = process.env.DATABASE_URL || ''
 const ORG_ID = process.env.ORG_ID || 'default'
 const DEPLOY_SHA = process.env.DEPLOY_SHA || process.env.EXPECTED_DEPLOY_SHA || ''
+const DATE_TIME_ZONE = process.env.ATTENDANCE_SMOKE_DATE_TIMEZONE || 'Asia/Shanghai'
 
 if (!BASE_URL || !DATABASE_URL) {
   console.error('FAIL: BASE_URL and DATABASE_URL are required.')
@@ -70,14 +71,55 @@ function addDays(date, days) {
 }
 
 function todayKey() {
-  const now = new Date()
-  return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate())).toISOString().slice(0, 10)
+  return new Date().toISOString().slice(0, 10)
 }
 
 function dateOnly(value) {
   if (!value) return null
-  if (typeof value === 'string') return value.slice(0, 10)
-  return new Date(value).toISOString().slice(0, 10)
+  if (typeof value === 'string') {
+    if (/^\d{4}-\d{2}-\d{2}$/.test(value)) return value.slice(0, 10)
+    const d = new Date(value)
+    if (Number.isNaN(d.getTime())) return null
+    return formatDateInTimeZone(d)
+  }
+  const d = new Date(value)
+  if (Number.isNaN(d.getTime())) return null
+  return formatDateInTimeZone(d)
+}
+
+function formatDateInTimeZone(date) {
+  try {
+    const parts = new Intl.DateTimeFormat('en-US', {
+      timeZone: DATE_TIME_ZONE,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+    }).formatToParts(date)
+    const year = parts.find(part => part.type === 'year')?.value
+    const month = parts.find(part => part.type === 'month')?.value
+    const day = parts.find(part => part.type === 'day')?.value
+    if (year && month && day) return `${year}-${month}-${day}`
+  } catch {
+    // Fall back to UTC if the smoke is invoked with an invalid timezone.
+  }
+  return date.toISOString().slice(0, 10)
+}
+
+function sanitizeSettingsForRestore(settings) {
+  const safe = JSON.parse(JSON.stringify(settings || {}))
+  normalizeNullErrorFields(safe)
+  return safe
+}
+
+function normalizeNullErrorFields(value) {
+  if (!value || typeof value !== 'object') return
+  for (const [key, child] of Object.entries(value)) {
+    if (key === 'error' && child === null) {
+      value[key] = ''
+      continue
+    }
+    normalizeNullErrorFields(child)
+  }
 }
 
 function jwtSubject(jwt) {
@@ -519,7 +561,8 @@ async function cleanup() {
 
   try {
     if (originalSettings) {
-      const restored = await api('/api/attendance/settings', { method: 'PUT', body: originalSettings })
+      const restorePayload = sanitizeSettingsForRestore(originalSettings)
+      const restored = await api('/api/attendance/settings', { method: 'PUT', body: restorePayload })
       ok(restored.status === 200, `restore original settings (status ${restored.status})`, restored.body)
     }
   } catch (error) {
