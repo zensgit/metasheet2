@@ -2737,6 +2737,10 @@ export class AutomationExecutor {
       recipientDingTalkUserId: dingtalkUserId,
       deliveryKind: useInteractiveCard ? 'interactive_card' : 'work_notice_action_card',
       integrationId: assigneeIntegrationId || null,
+      // P1-1: persist the node-entry epoch this card is sent for so the action wrapper can bind the
+      // card to the SAME round's active assignment (closes same-node re-entry). Legacy/epoch-less
+      // events pass null → the wrapper skips the epoch clause (dual-read).
+      entryEpoch: typeof entryEpochRaw === 'number' ? entryEpochRaw : null,
     })
 
     const token = createHmac('sha256', linkSecret).update(delivery.id).digest('hex').slice(0, 32)

@@ -82,6 +82,7 @@ import {
   type ApprovalTaskCreatedTaskSnapshot,
 } from './ApprovalTaskCreatedEvent'
 import { getApprovalRecordProjectionService } from '../multitable/approval-record-projection-service'
+import { supersedeDingTalkApprovalCardDeliveriesForInstance } from '../integrations/dingtalk/approval-card-deliveries'
 import { Logger } from '../core/logger'
 import { eventBus } from '../integration/events/event-bus'
 
@@ -5703,6 +5704,12 @@ export class ApprovalProductService {
 
       await client.query('COMMIT')
       await this.emitApprovalTaskCreatedEventsPostCommit(id, createdTaskEvents) // A-2a
+      // P1-1 defense-in-depth (NOT the safety mechanism — the wrapper's read-time active-assignment
+      // binding stands alone): the node just advanced past `currentNodeKey`, so sweep every still-`sent`
+      // card of this instance to `superseded`. The card that TRIGGERED this approve (card-originated
+      // path) is excluded — the wrapper claims it `acted` after dispatchAction returns. Best-effort:
+      // a card-ledger hiccup must never fail a committed approval.
+      await this.supersedeCardDeliveriesPostCommit(id, request.channelOrigin?.cardDeliveryId)
 
       // Wave 2 WP5 slice 1 — emit metrics after commit so rollback failures
       // never leave dangling breakdown entries. All hooks are guarded.
@@ -6049,6 +6056,27 @@ export class ApprovalProductService {
     } catch (error) {
       approvalProductLogger.warn(
         `approval.task_created post-commit emission failed for ${instanceId}: ${error instanceof Error ? error.message : String(error)}`,
+      )
+    }
+  }
+
+  /**
+   * P1-1 defense-in-depth: after a node advance commits, mark every still-`sent` DingTalk approval
+   * card of the instance `superseded` (its node is no longer active). `excludeId` spares the card
+   * that triggered the advance (card-originated path) so the wrapper can claim it `acted`. Best-effort
+   * by contract — the wrapper's read-time active-assignment binding is the authoritative stale-card
+   * guard, so a sweep failure here NEVER fails the approval.
+   */
+  private async supersedeCardDeliveriesPostCommit(instanceId: string, excludeId?: string): Promise<void> {
+    try {
+      await supersedeDingTalkApprovalCardDeliveriesForInstance(
+        (sql, params) => pool.query(sql, params),
+        instanceId,
+        excludeId ? { excludeId } : {},
+      )
+    } catch (error) {
+      approvalProductLogger.warn(
+        `approval card supersede sweep failed for ${instanceId}: ${error instanceof Error ? error.message : String(error)}`,
       )
     }
   }

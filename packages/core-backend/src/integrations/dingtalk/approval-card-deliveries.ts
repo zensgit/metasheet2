@@ -37,6 +37,14 @@ export interface DingTalkApprovalCardDeliveryRow {
    * legacy single-integration resolver for those).
    */
   integration_id: string | null
+  /**
+   * P1-1: the node-entry epoch (approval_assignments.entry_epoch) this card was sent for. NULL on
+   * legacy rows and env-only/epoch-less sends. The action wrapper's live-assignment binding uses it
+   * to close SAME-NODE re-entry (a loop-back mints a fresh epoch on a new active assignment, so an
+   * old-epoch card no longer matches); a NULL delivery epoch skips the epoch clause (dual-read) and
+   * relies on the node/assignee match alone, which still closes forward advance.
+   */
+  entry_epoch: number | null
   card_state: DingTalkApprovalCardState
   acted_action: string | null
   acted_by: string | null
@@ -57,7 +65,7 @@ export interface DingTalkApprovalCardDeliveryRow {
 type QueryFn = (sql: string, params?: unknown[]) => Promise<{ rows: unknown[] }>
 
 const RETURNING_COLUMNS =
-  'id, instance_id, node_key, recipient_user_id, recipient_dingtalk_user_id, delivery_kind, task_id, integration_id, card_state, acted_action, acted_by, acted_at, send_status, send_error, created_at, updated_at'
+  'id, instance_id, node_key, recipient_user_id, recipient_dingtalk_user_id, delivery_kind, task_id, integration_id, entry_epoch, card_state, acted_action, acted_by, acted_at, send_status, send_error, created_at, updated_at'
 
 export interface InsertDingTalkApprovalCardDeliveryInput {
   /** Optional caller-supplied id; defaults to a fresh UUID. Doubles as the interactive-card outTrackId (Slice B). */
@@ -71,6 +79,12 @@ export interface InsertDingTalkApprovalCardDeliveryInput {
   taskId?: string | null
   /** DT-R2: the assignee's directory integration id (uuid) — null/omitted for env-only sends. */
   integrationId?: string | null
+  /**
+   * P1-1: the node-entry epoch (from the task_created event's `task.entryEpoch`) this card is sent
+   * for. Omit/null for legacy or epoch-less sends — the wrapper then skips the epoch clause and
+   * binds on node/assignee alone.
+   */
+  entryEpoch?: number | null
 }
 
 export async function insertDingTalkApprovalCardDelivery(
@@ -82,10 +96,11 @@ export async function insertDingTalkApprovalCardDelivery(
     typeof input.integrationId === 'string' && input.integrationId.trim().length > 0
       ? input.integrationId.trim()
       : null
+  const entryEpoch = typeof input.entryEpoch === 'number' && Number.isInteger(input.entryEpoch) ? input.entryEpoch : null
   const result = await query(
     `INSERT INTO dingtalk_approval_card_deliveries
-       (id, instance_id, node_key, recipient_user_id, recipient_dingtalk_user_id, delivery_kind, task_id, integration_id)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+       (id, instance_id, node_key, recipient_user_id, recipient_dingtalk_user_id, delivery_kind, task_id, integration_id, entry_epoch)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
      RETURNING ${RETURNING_COLUMNS}`,
     [
       id,
@@ -96,6 +111,7 @@ export async function insertDingTalkApprovalCardDelivery(
       input.deliveryKind,
       input.taskId ?? null,
       integrationId,
+      entryEpoch,
     ],
   )
   return result.rows[0] as DingTalkApprovalCardDeliveryRow

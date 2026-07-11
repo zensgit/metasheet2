@@ -15,6 +15,13 @@
  *   exactly outcome_unknown — a send whose outcome the client could not observe MAY have been
  *   delivered, and a valid HMAC deep-link token is itself proof of delivery, so the ledger's
  *   send-time uncertainty must not make a delivered card inoperable. pending/failed stay stale.)
+ * - P1-1 stale-card binding: actionability ADDITIONALLY requires a LIVE active `approval_assignments`
+ *   row still matching the delivery's node_key + recipient (+ entry_epoch when the delivery carries
+ *   one). A card issued for node-1 must NOT approve node-2 after the instance advances (node-1's
+ *   assignment is deactivated → no match), nor re-approve the SAME node after a loop-back (a fresh
+ *   epoch on the new active assignment fails the old card's epoch match). The read-time binding is the
+ *   authoritative guard and stands alone even if the supersede sweep never runs; a NULL delivery
+ *   epoch (legacy) skips only the epoch clause and stays closed on the node/assignee match.
  */
 import { createHmac, timingSafeEqual } from 'crypto'
 
@@ -40,7 +47,11 @@ export interface ApprovalCardDeliverySummary {
   nodeKey: string
   recipientUserId: string
   viewerIsRecipient: boolean
-  /** card live + send possibly delivered ('sent'/'outcome_unknown') + instance still pending — the page may offer 同意/拒绝. */
+  /**
+   * card live + send possibly delivered ('sent'/'outcome_unknown') + instance still pending + the
+   * delivery's node/recipient(/epoch) still matches a LIVE active assignment (P1-1 stale-card
+   * binding) — the page may offer 同意/拒绝.
+   */
   actionable: boolean
   approval: {
     instanceId: string
@@ -97,6 +108,13 @@ interface InstanceSummaryRow {
   status: string
   current_node_key: string | null
   policy_snapshot: unknown
+  /**
+   * P1-1: TRUE iff an ACTIVE `approval_assignments` row still matches the delivery's node +
+   * recipient (+ epoch when the delivery carries one). This is the authoritative stale-card guard —
+   * see `buildSummary`. Computed in the same round-trip as the instance read so `actionable`
+   * reflects live assignment state, never just the instance status.
+   */
+  has_active_assignment: boolean
 }
 
 function rejectCommentRequiredFromPolicy(policySnapshot: unknown): boolean {
@@ -113,10 +131,27 @@ async function buildSummary(
   delivery: DingTalkApprovalCardDeliveryRow,
   viewerUserId: string,
 ): Promise<ApprovalCardDeliverySummary | null> {
+  // P1-1: bind actionability to a LIVE active assignment matching the delivery's node + recipient
+  // (+ epoch when the delivery carries one) — computed in the SAME round-trip as the instance read.
+  //   - The node/assignee match closes FORWARD advance using live state: once node-1 is approved and
+  //     the instance advances to node-2 (where the recipient is ALSO an assignee), node-1's assignment
+  //     row is is_active=FALSE, so a stale node-1 card no longer matches → NOT actionable. It never
+  //     stored an epoch, so it does not break legacy cards.
+  //   - The epoch clause closes SAME-NODE re-entry: a loop-back to the same node_key mints a FRESH
+  //     entry_epoch on a new active assignment, so the old-epoch card fails the equality. Dual-read: a
+  //     NULL delivery epoch (legacy card) SKIPS the epoch clause and relies on the node/assignee match.
   const result = await query(
-    `SELECT id, title, request_no, status, current_node_key, policy_snapshot
-       FROM approval_instances WHERE id = $1`,
-    [delivery.instance_id],
+    `SELECT i.id, i.title, i.request_no, i.status, i.current_node_key, i.policy_snapshot,
+            EXISTS (
+              SELECT 1 FROM approval_assignments aa
+               WHERE aa.instance_id = $1
+                 AND aa.node_key = $2
+                 AND aa.assignee_id = $3
+                 AND aa.is_active = TRUE
+                 AND ($4::int IS NULL OR aa.entry_epoch IS NULL OR aa.entry_epoch = $4::int)
+            ) AS has_active_assignment
+       FROM approval_instances i WHERE i.id = $1`,
+    [delivery.instance_id, delivery.node_key, delivery.recipient_user_id, delivery.entry_epoch],
   )
   const instance = (result.rows[0] ?? null) as InstanceSummaryRow | null
   if (!instance) return null
@@ -130,7 +165,8 @@ async function buildSummary(
     actionable:
       delivery.card_state === 'sent'
       && (delivery.send_status === 'sent' || delivery.send_status === 'outcome_unknown')
-      && instance.status === 'pending',
+      && instance.status === 'pending'
+      && instance.has_active_assignment === true,
     approval: {
       instanceId: instance.id,
       title: instance.title,
