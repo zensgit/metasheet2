@@ -83,8 +83,8 @@ function fieldScopeLabel(mentionedFieldIds: string[]): string {
 .meta-mention-popover__panel { position: absolute; top: 48px; left: 120px; width: 320px; max-height: 360px; background: #fff; border: 1px solid #ddd; border-radius: 8px; box-shadow: 0 4px 16px rgba(0,0,0,0.12); display: flex; flex-direction: column; overflow: hidden; }
 .meta-mention-popover__header { display: flex; align-items: center; justify-content: space-between; padding: 10px 14px; border-bottom: 1px solid #f0f0f0; }
 .meta-mention-popover__header strong { font-size: 14px; color: #333; }
-/* .meta-mention-popover__close: now <MtIconButton> (ghost, token-styled; the &times; glyph passes
-   through its default-slot icon fallback unchanged). Bespoke hardcoded CSS removed (UI-P2-1c T1
+/* .meta-mention-popover__close: now <MtIconButton> (ghost, token-styled; the &times; glyph char passes
+   through its default-slot icon fallback (size token-normalized to the icon control)). Bespoke hardcoded CSS removed (UI-P2-1c T1
    batch-1). Class kept on the element only for selector stability. */
 .meta-mention-popover__list { overflow-y: auto; flex: 1; }
 .meta-mention-popover__item { display: flex; align-items: center; gap: 8px; width: 100%; padding: 8px 14px; border: none; background: none; cursor: pointer; text-align: left; font-size: 13px; color: #333; }

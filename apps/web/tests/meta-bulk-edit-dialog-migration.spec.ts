@@ -11,8 +11,9 @@ import { useLocale } from '../src/composables/useLocale'
 //
 // UI-P2-1c T1 batch-1: the header close-× (`.meta-bulk-edit__close`) was additionally migrated from
 // a bespoke <button>&times;</button> to the shared MtIconButton primitive — the &times; glyph passes
-// through MtIconButton's default-slot icon fallback unchanged (T1 design-lock recommendation: keep
-// the glyph, only collapse padding/hover/focus-ring onto tokens), so there is ZERO visual change.
+// through MtIconButton's default-slot icon fallback (glyph char preserved, size token-normalized) (T1 design-lock recommendation: keep
+// the × glyph char, normalizing its size + control shape to the icon token — consistent with the
+// existing glyph-MtIconButton controls already on main).
 // Behavior-preservation proof: it stays a native, keyboard-operable <button>, keeps the SAME
 // aria-label (`b('bulk.close')`), and clicking it still calls the SAME onCancel() → emits `cancel`
 // (identical to the footer cancel button's handler). This is the only sharer of `.meta-bulk-edit__close`
@@ -82,7 +83,7 @@ describe('MetaBulkEditDialog — MtButton migration (UI-P2-1c)', () => {
     expect(btn.tagName).toBe('BUTTON')
     expect(btn.classList.contains('meta-bulk-edit__close')).toBe(true)
     expect(btn.getAttribute('aria-label')).toBe('Close')
-    expect(btn.textContent?.trim()).toBe('×') // glyph unchanged, zero visual change
+    expect(btn.textContent?.trim()).toBe('×') // × glyph char preserved (size token-normalized)
   })
 
   it('clicking the header close-× emits `cancel` (unchanged — same onCancel as the footer cancel button)', () => {

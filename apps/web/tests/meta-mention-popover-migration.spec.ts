@@ -1,8 +1,9 @@
 // UI-P2-1c T1 batch-1: MetaMentionPopover's header close-× (`.meta-mention-popover__close`) was
 // migrated from a bespoke <button>&times;</button> to the shared MtIconButton primitive — the
-// &times; glyph passes through MtIconButton's default-slot icon fallback unchanged (T1 design-lock
+// &times; glyph passes through MtIconButton's default-slot icon fallback (glyph char preserved, size token-normalized) (T1 design-lock
 // recommendation: keep the glyph, only collapse padding/hover/focus-ring onto tokens), so there is
-// ZERO visual change. Behavior-preservation proof: it stays a native, keyboard-operable <button>,
+// token-normalized (× glyph char preserved; glyph size + control shape normalized to the icon
+// token, consistent with the existing glyph-MtIconButton controls already on main). Behavior-preservation proof: it stays a native, keyboard-operable <button>,
 // keeps the SAME aria-label (`l('comment.closeMentions')`), and clicking it still emits the SAME
 // `close` event with no payload. This is the only sharer of `.meta-mention-popover__close` (single
 // button, single file) — its bespoke CSS was removed outright, no double-styling risk.
@@ -52,7 +53,7 @@ describe('MetaMentionPopover — close-× MtIconButton migration (UI-P2-1c T1 ba
     expect(closeBtn(container).getAttribute('aria-label')).toBe('关闭提及')
   })
 
-  it('renders the &times; glyph unchanged (zero visual change)', () => {
+  it('renders the &times; glyph char (token-normalized size)', () => {
     useLocale().setLocale('en')
     const container = mount()
     expect(closeBtn(container).textContent?.trim()).toBe('×')
