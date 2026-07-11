@@ -397,6 +397,57 @@ describe('adminDirectoryRouter', () => {
     })
   })
 
+  // #4046 P3-2: send-tier failures (network error/timeout/5xx/malformed-2xx) on the actual test
+  // send carry the transport's REAL isDingTalkOutcomeUnknown marker (imported unmocked from
+  // dingtalk/client — this is the same discriminator production code runs, not a stand-in). Before
+  // this fix both branches below folded into the same 400 DINGTALK_WORK_NOTIFICATION_TEST_FAILED
+  // code, telling an admin their Agent ID is broken for a message that may have actually arrived.
+  it('reports a distinct outcome-unknown code+message when the test send outcome is ambiguous', async () => {
+    const sendError = Object.assign(new Error('DingTalk request timed out after 10000ms'), {
+      outcomeUnknown: true,
+    })
+    workNotificationMocks.testDingTalkWorkNotificationAgentId.mockRejectedValue(sendError)
+
+    const payload = { integrationId: 'dir-1', agentId: '123456789', recipientUserId: 'user-1' }
+    const response = await invokeRoute('post', '/dingtalk/work-notification/test', {
+      body: payload,
+      user: { id: 'admin-1', role: 'admin' },
+    })
+
+    expect(response.statusCode).toBe(502)
+    expect(response.body).toMatchObject({
+      ok: false,
+      error: {
+        code: 'DINGTALK_TEST_SEND_OUTCOME_UNKNOWN',
+      },
+    })
+    const message = (response.body as { error: { message: string } }).error.message
+    expect(message).toContain('DingTalk request timed out after 10000ms')
+    expect(message.toLowerCase()).toContain('may still have been delivered')
+    expect(message.toLowerCase()).toContain('check the test message on the device')
+  })
+
+  it('keeps the generic failure shape for a plain (non-outcome-unknown) test-send error', async () => {
+    workNotificationMocks.testDingTalkWorkNotificationAgentId.mockRejectedValue(
+      new Error('DingTalk appSecret is required'),
+    )
+
+    const payload = { integrationId: 'dir-1', agentId: '123456789' }
+    const response = await invokeRoute('post', '/dingtalk/work-notification/test', {
+      body: payload,
+      user: { id: 'admin-1', role: 'admin' },
+    })
+
+    expect(response.statusCode).toBe(400)
+    expect(response.body).toMatchObject({
+      ok: false,
+      error: {
+        code: 'DINGTALK_WORK_NOTIFICATION_TEST_FAILED',
+        message: 'DingTalk appSecret is required',
+      },
+    })
+  })
+
   it('saves DingTalk work notification Agent ID and writes a redacted audit entry', async () => {
     workNotificationMocks.saveDingTalkWorkNotificationAgentId.mockResolvedValue({
       integration: { id: 'dir-1', name: 'DingTalk CN', status: 'active' },
