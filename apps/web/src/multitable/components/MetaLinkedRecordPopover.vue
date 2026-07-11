@@ -3,7 +3,7 @@
     <div class="meta-linked-record-popover__panel" role="dialog" :aria-label="l('linkedRecord.title')">
       <div class="meta-linked-record-popover__header">
         <strong>{{ l('linkedRecord.title') }}</strong>
-        <button class="meta-linked-record-popover__close" :aria-label="l('linkedRecord.close')" @click="emit('close')">&times;</button>
+        <MtIconButton class="meta-linked-record-popover__close" :aria-label="l('linkedRecord.close')" @click="emit('close')">&times;</MtIconButton>
       </div>
       <div class="meta-linked-record-popover__body">
         <div v-if="loading" class="meta-linked-record-popover__loading">{{ l('linkedRecord.loading') }}</div>
@@ -40,6 +40,7 @@ import { ref, watch } from 'vue'
 import type { MetaField, MetaRecordContext } from '../types'
 import { useLocale } from '../../composables/useLocale'
 import { metaCoreLabel, type MetaCoreLabelKey } from '../utils/meta-core-labels'
+import { MtIconButton } from '../ui'
 import MetaCellRenderer from './cells/MetaCellRenderer.vue'
 
 const props = defineProps<{
@@ -121,8 +122,9 @@ watch(
 .meta-linked-record-popover__panel { position: absolute; top: 64px; left: 50%; transform: translateX(-50%); width: 360px; max-height: 420px; background: #fff; border: 1px solid #ddd; border-radius: 8px; box-shadow: 0 4px 16px rgba(0,0,0,0.12); display: flex; flex-direction: column; overflow: hidden; }
 .meta-linked-record-popover__header { display: flex; align-items: center; justify-content: space-between; padding: 10px 14px; border-bottom: 1px solid #f0f0f0; }
 .meta-linked-record-popover__header strong { font-size: 14px; color: #333; }
-.meta-linked-record-popover__close { border: none; background: none; font-size: 18px; cursor: pointer; color: #999; padding: 0 2px; line-height: 1; }
-.meta-linked-record-popover__close:hover { color: #333; }
+/* .meta-linked-record-popover__close: now <MtIconButton> (ghost, token-styled; the &times; glyph char
+   passes through its default-slot icon fallback (size token-normalized to the icon control)). Bespoke hardcoded CSS removed (UI-P2-1c
+   T1 batch-1). Class kept on the element only for selector stability. */
 .meta-linked-record-popover__body { overflow-y: auto; flex: 1; padding: 8px 0; }
 .meta-linked-record-popover__loading,
 .meta-linked-record-popover__error,
