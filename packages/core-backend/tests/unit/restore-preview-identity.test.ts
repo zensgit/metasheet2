@@ -5,11 +5,13 @@
  * T6-1 is the mint/verify module ONLY — verified here against SYNTHETIC expected claims; the execute computing
  * the real diff → expected → verify → write is T6-2.
  */
-import { describe, expect, it } from 'vitest'
+import { createHash, createHmac } from 'node:crypto'
+import { afterEach, describe, expect, it } from 'vitest'
 
 import {
   hashDeleteSet,
   hashPermissionGrant,
+  hashLossSummary,
   hashPreviewChanges,
   hashResurrectSet,
   hashScope,
@@ -244,5 +246,55 @@ describe('restore preview identity — cross-strategy disjointness (all discrimi
     const result = verifier.verifyAsSelf(token)
     expect(result.valid).toBe(false)
     expect(result.reason).toBe('wrong_type')
+  })
+})
+
+// ── 4c-1: hashLossSummary must be KEYED (HMAC), never a plain digest ───────────────────────────────────────────
+// LOAD-BEARING, and previously untested: `lossHash` rides in a JWT payload the token holder can base64-decode, and
+// `entityId` (the fieldId) is a sibling claim in that same payload. Its only other inputs are three small integers.
+// A plain `sha256` would therefore be brute-forceable in milliseconds — turning ONE leaked preview token into an
+// exact "how many cells of that table get dropped" oracle for a table the holder may have no read access to. That
+// is precisely the counting oracle U-L8's full-read gate exists to eliminate, so the server key is what makes the
+// claim opaque (identical reasoning to hashUncreatePlan's `columnDataPresent` ~1-bit input).
+describe('4c-1 hashLossSummary — keyed HMAC, not a plain digest', () => {
+  const SECRET_ENV = 'RESTORE_PREVIEW_SECRET'
+  const original = process.env[SECRET_ENV]
+  afterEach(() => {
+    if (original === undefined) delete process.env[SECRET_ENV]
+    else process.env[SECRET_ENV] = original
+  })
+
+  const summary = { unchanged: 2, coerced: 1, dropped: 2 }
+
+  it('is a function of the SERVER SECRET — rotating the key changes the digest', () => {
+    process.env[SECRET_ENV] = 'secret-alpha-0123456789abcdef'
+    const a = hashLossSummary('fld_1', summary)
+    process.env[SECRET_ENV] = 'secret-bravo-0123456789abcdef'
+    const b = hashLossSummary('fld_1', summary)
+    expect(a).not.toBe(b)
+    process.env[SECRET_ENV] = 'secret-alpha-0123456789abcdef'
+    expect(hashLossSummary('fld_1', summary)).toBe(a) // deterministic under a fixed key
+  })
+
+  it('is NOT the unkeyed sha256 of its own canonical input (a swap to createHash must fail here)', () => {
+    process.env[SECRET_ENV] = 'secret-alpha-0123456789abcdef'
+    const canonical = JSON.stringify({ fieldId: 'fld_1', unchanged: 2, coerced: 1, dropped: 2 })
+    const plain = createHash('sha256').update(canonical).digest('hex')
+    expect(hashLossSummary('fld_1', summary)).not.toBe(plain)
+    // and the keyed digest IS reproducible only with the key
+    expect(hashLossSummary('fld_1', summary)).toBe(createHmac('sha256', 'secret-alpha-0123456789abcdef').update(canonical).digest('hex'))
+  })
+
+  it('binds the fieldId — the same counts on another field yield a different digest', () => {
+    process.env[SECRET_ENV] = 'secret-alpha-0123456789abcdef'
+    expect(hashLossSummary('fld_1', summary)).not.toBe(hashLossSummary('fld_2', summary))
+  })
+
+  it('binds every bucket — moving one cell between buckets changes the digest', () => {
+    process.env[SECRET_ENV] = 'secret-alpha-0123456789abcdef'
+    const base = hashLossSummary('fld_1', summary)
+    expect(hashLossSummary('fld_1', { unchanged: 3, coerced: 1, dropped: 2 })).not.toBe(base)
+    expect(hashLossSummary('fld_1', { unchanged: 2, coerced: 2, dropped: 2 })).not.toBe(base)
+    expect(hashLossSummary('fld_1', { unchanged: 2, coerced: 1, dropped: 3 })).not.toBe(base)
   })
 })

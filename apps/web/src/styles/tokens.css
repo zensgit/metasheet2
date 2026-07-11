@@ -1,0 +1,131 @@
+/**
+ * MetaSheet design tokens — SINGLE SOURCE OF TRUTH for color / spacing /
+ * radius / typography / container widths, per the UI foundation design-lock
+ * (docs/development/ui-foundation-design-lock-20260706.md, RATIFIED).
+ *
+ * Rules (design-lock §3.1):
+ * - Views take color/spacing/radius/type ONLY from these `--ms-*` tokens.
+ * - New hardcoded hex values in views are DEFECTS — add/consume a token instead.
+ *
+ * Element Plus mapping: the `--el-color-*` overrides below repaint the whole
+ * component library from the same palette (EP's official theming path).
+ * Derived shades are precomputed hex literals (no build-time theme tooling):
+ *   light-i : per-channel c' = round(c + (255 - c) * i / 10)   (mix toward white)
+ *   dark-2  : per-channel c' = round(c * 0.8)                  (mix 20% toward black)
+ */
+
+:root {
+  /* ---- Semantic colors (design-lock §4) ---- */
+  --ms-color-primary: #2563eb; /* single site-wide primary */
+  --ms-color-success: #16a34a; /* approved / success */
+  --ms-color-warning: #d97706; /* waiting / timeout warning */
+  --ms-color-danger: #dc2626;  /* rejected / failure */
+  --ms-color-info: #6b7280;    /* neutral / cancelled / skipped */
+
+  /* ---- Text (3-step gray scale) ---- */
+  --ms-text-1: #111827; /* titles */
+  --ms-text-2: #4b5563; /* body */
+  --ms-text-3: #9ca3af; /* auxiliary */
+
+  /* ---- Borders ---- */
+  --ms-border: #d1d5db;
+  --ms-border-light: #e5e7eb;
+
+  /* ---- Backgrounds ---- */
+  --ms-bg-page: #f5f6f8;
+  --ms-bg-card: #ffffff;
+
+  /* ---- Spacing scale ---- */
+  --ms-space-1: 4px;
+  --ms-space-2: 8px;
+  --ms-space-3: 12px;
+  --ms-space-4: 16px;
+  --ms-space-5: 24px;
+  --ms-space-6: 32px;
+
+  /* ---- Radius scale ---- */
+  --ms-radius-sm: 6px;
+  --ms-radius-md: 8px;
+  --ms-radius-lg: 12px;
+
+  /* ---- Typography ---- */
+  --ms-font-size-page-title: 20px;
+  --ms-font-weight-title: 600;
+  --ms-font-size-section-title: 16px;
+
+  /* ---- Container widths (PageShell tiers; wide = 100%) ---- */
+  --ms-page-narrow: 800px;
+  --ms-page-default: 1200px;
+
+  /* ================================================================
+   * Element Plus semantic-color mapping.
+   * Shades derived from the --ms-* base values above (formulas in the
+   * header comment); recompute if a base value ever changes.
+   * ================================================================ */
+
+  /* primary — base #2563eb */
+  --el-color-primary: var(--ms-color-primary);
+  --el-color-primary-light-3: #6692f1;
+  --el-color-primary-light-5: #92b1f5;
+  --el-color-primary-light-7: #bed0f9;
+  --el-color-primary-light-8: #d3e0fb;
+  --el-color-primary-light-9: #e9effd;
+  --el-color-primary-dark-2: #1e4fbc;
+
+  /* success — base #16a34a */
+  --el-color-success: var(--ms-color-success);
+  --el-color-success-light-3: #5cbf80;
+  --el-color-success-light-5: #8bd1a5;
+  --el-color-success-light-7: #b9e3c9;
+  --el-color-success-light-8: #d0eddb;
+  --el-color-success-light-9: #e8f6ed;
+  --el-color-success-dark-2: #12823b;
+
+  /* warning — base #d97706 */
+  --el-color-warning: var(--ms-color-warning);
+  --el-color-warning-light-3: #e4a051;
+  --el-color-warning-light-5: #ecbb83;
+  --el-color-warning-light-7: #f4d6b4;
+  --el-color-warning-light-8: #f7e4cd;
+  --el-color-warning-light-9: #fbf1e6;
+  --el-color-warning-dark-2: #ae5f05;
+
+  /* danger — base #dc2626 */
+  --el-color-danger: var(--ms-color-danger);
+  --el-color-danger-light-3: #e76767;
+  --el-color-danger-light-5: #ee9393;
+  --el-color-danger-light-7: #f5bebe;
+  --el-color-danger-light-8: #f8d4d4;
+  --el-color-danger-light-9: #fce9e9;
+  --el-color-danger-dark-2: #b01e1e;
+
+  /* error — Element Plus's alias family for danger (form validation text etc.);
+   * left unmapped it would keep EP's stock red beside our danger red. */
+  --el-color-error: var(--ms-color-danger);
+  --el-color-error-light-3: #e76767;
+  --el-color-error-light-5: #ee9393;
+  --el-color-error-light-7: #f5bebe;
+  --el-color-error-light-8: #f8d4d4;
+  --el-color-error-light-9: #fce9e9;
+  --el-color-error-dark-2: #b01e1e;
+
+  /* info — base #6b7280 */
+  --el-color-info: var(--ms-color-info);
+  --el-color-info-light-3: #979ca6;
+  --el-color-info-light-5: #b5b9c0;
+  --el-color-info-light-7: #d3d5d9;
+  --el-color-info-light-8: #e1e3e6;
+  --el-color-info-light-9: #f0f1f2;
+  --el-color-info-dark-2: #565b66;
+
+  /* ---- Elevation + control sizing ----
+   * Generic additions the UF-1 base set did not yet define; consumed first
+   * by the multitable grid line (design-lock §8, an independent line) but
+   * deliberately named generically (no grid-specific vocabulary) so they
+   * extend the single-source foundation rather than compete with it.
+   * Values follow the UF neutral palette. Dark-theme values are NOT defined
+   * here — dark theme is its own independent line under §8. */
+  --ms-control-height: 32px;
+  --ms-shadow-card: 0 1px 2px rgba(17,24,39,.04), 0 8px 24px rgba(17,24,39,.06);
+  --ms-shadow-pop: 0 6px 20px rgba(17,24,39,.12);
+}

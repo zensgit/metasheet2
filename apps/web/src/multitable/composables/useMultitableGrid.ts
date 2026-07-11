@@ -12,9 +12,11 @@ import type {
   MetaViewPermission,
   PatchResult,
   PersonSummary,
+  PersonalViewConfigOverlay,
 } from '../types'
 import { MultitableApiClient, multitableClient } from '../api/client'
 import { isPropertyHiddenField } from '../utils/field-permissions'
+import { writePersonalConfigMerged } from '../utils/personal-config-write'
 import { metaCoreLabel } from '../utils/meta-core-labels'
 import { resolveRollupFieldProperty, rollupResultType } from '../utils/field-config'
 
@@ -460,6 +462,13 @@ export function useMultitableGrid(opts: {
   viewId: Ref<string>
   client?: MultitableApiClient
   pageSize?: number
+  // Slice 3 (design-lock multitable-personal-views-slice3-fe-toggle-design-lock-20260706.md §3 P2 / G-FE-2):
+  // a single toggle-driven write-routing switch. When it returns true for the CURRENT viewId, the in-place
+  // config edits below (filter/sort/group/hidden) route to `putPersonalViewConfig` instead of the shared
+  // `updateView`. Absent/undefined (or false) ⇒ unchanged shared-write path — flag-off sessions never see
+  // this option set at all (usePersonalViewToggle.isPersonalMode is itself flag-gated), so a disabled
+  // session never emits a personal-config request from here (G-FE-4).
+  isPersonalMode?: (viewId: string) => boolean
 }) {
   const client = opts.client ?? multitableClient
   const pageSize = opts.pageSize ?? DEFAULT_PAGE_SIZE
@@ -489,6 +498,10 @@ export function useMultitableGrid(opts: {
   const accumulationCapped = ref(false)
   const error = ref<string | null>(null)
   const conflict = ref<GridConflictState | null>(null)
+  // W3-5: the batchId of the most recent successful commit (patchCell / bulkPatch), so a caller can
+  // surface a "view in history" deep-link without re-deriving it. Cleared on a failed commit (never
+  // stale-points at a PRIOR successful batch after a later failure); null before any commit this session.
+  const lastBatchId = ref<string | null>(null)
   // Monotonic request id shared by loadViewData (reset/replace) AND loadMore (append). A reset bumps it,
   // so any in-flight append re-checking it AFTER its await bails instead of appending stale, cross-filter
   // rows onto the freshly-reset set. This is the single guard that keeps the masked/filtered/sorted
@@ -502,13 +515,34 @@ export function useMultitableGrid(opts: {
 
   // Field visibility
   const hiddenFieldIds = ref<string[]>([])
-  const visibleFields = computed(() =>
-    fields.value.filter((f) =>
+  // Slice 3b — per-view (incl. per-user personal overlay) column order. The server already resolves the
+  // effective order onto `view.fieldOrder` (applyPersonalViewOverlay); this is the FE CONSUMER that renders
+  // columns in that order. Empty ⇒ natural field order (server `field.order`), unchanged from before.
+  const fieldOrder = ref<string[]>([])
+  const visibleFields = computed(() => {
+    const base = fields.value.filter((f) =>
       !hiddenFieldIds.value.includes(f.id)
       && !isPropertyHiddenField(f)
       && fieldPermissions.value[f.id]?.visible !== false,
-    ),
-  )
+    )
+    if (fieldOrder.value.length === 0) return base
+    // Apply fieldOrder as a presentation reorder, FAIL-SOFT (G-FE-5): an id in fieldOrder that no longer
+    // maps to a currently-visible field (deleted, hidden, permission-denied, or an unknown/stale id — the
+    // backend only whitelists string[], it does not validate sheet membership) is simply skipped — no
+    // crash, no blank column. Visible fields NOT named in fieldOrder keep their natural order, appended
+    // after the ordered ones, so a partial/stale order never drops a real column.
+    const byId = new Map(base.map((f) => [f.id, f]))
+    const seen = new Set<string>()
+    const ordered: typeof base = []
+    for (const id of fieldOrder.value) {
+      const f = byId.get(id)
+      if (f && !seen.has(id)) { ordered.push(f); seen.add(id) }
+    }
+    for (const f of base) {
+      if (!seen.has(f.id)) ordered.push(f)
+    }
+    return ordered
+  })
   const readOnlyFieldIds = computed(() =>
     fields.value
       .filter((field) => fieldPermissions.value[field.id]?.readOnly === true)
@@ -728,7 +762,7 @@ export function useMultitableGrid(opts: {
     }
   }
 
-  function syncFromView(view: { filterInfo?: Record<string, unknown>; sortInfo?: Record<string, unknown>; hiddenFieldIds?: string[] }) {
+  function syncFromView(view: { filterInfo?: Record<string, unknown>; sortInfo?: Record<string, unknown>; hiddenFieldIds?: string[]; fieldOrder?: string[] }) {
     // Parse server sort
     if (view.sortInfo && Array.isArray((view.sortInfo as any).rules)) {
       sortRules.value = ((view.sortInfo as any).rules as any[]).map((r: any) => ({
@@ -748,6 +782,11 @@ export function useMultitableGrid(opts: {
       nestedFilterNodes.value = tree && tree.nodes.some(isFilterGroup) ? tree.nodes : null
     }
     if (view.hiddenFieldIds) hiddenFieldIds.value = [...view.hiddenFieldIds]
+    // Slice 3b: capture the effective (server-resolved, personal-overlay-applied) column order for this view.
+    // Only string ids are kept; membership is NOT validated here — visibleFields fail-softs stale/unknown ids.
+    fieldOrder.value = Array.isArray(view.fieldOrder)
+      ? view.fieldOrder.filter((id): id is string => typeof id === 'string')
+      : []
     // Dual-read for back-compat: prefer the NEW ordered groupInfo.fieldIds; fall back to the legacy
     // single groupInfo.fieldId so views persisted before nested grouping keep their (one) group level.
     const gi = (view as any).groupInfo as { fieldId?: unknown; fieldIds?: unknown } | undefined
@@ -760,9 +799,24 @@ export function useMultitableGrid(opts: {
     sortFilterDirty.value = false
   }
 
+  // Slice 3 G-FE-2 write-routing: the ONE switch every in-place config edit below funnels through. ON (for
+  // this viewId) → PUT personal-config (actor-scoped, no identity in the request — see client.ts); OFF/absent
+  // → the shared updateView path, byte-identical to pre-Slice-3 behavior.
+  //
+  // Slice 3d: the personal write is ADDITIVE (read-merge-write) — a single-facet edit (e.g. { sortInfo }) must
+  // not wipe the actor's other personal facets, because the backend PUT replaces the whole row. See
+  // utils/personal-config-write.ts. The shared (updateView) path is unchanged.
+  async function persistViewConfig(vid: string, input: PersonalViewConfigOverlay) {
+    if (opts.isPersonalMode?.(vid)) {
+      await writePersonalConfigMerged(client, vid, input)
+    } else {
+      await client.updateView(vid, input)
+    }
+  }
+
   async function persistSortFilter(viewId: string) {
     try {
-      await client.updateView(viewId, {
+      await persistViewConfig(viewId, {
         sortInfo: buildSortInfo(sortRules.value) as Record<string, unknown> | undefined,
         filterInfo: (nestedFilterNodes.value
           ? buildFilterInfoFromNodes(nestedFilterNodes.value, filterConjunction.value)
@@ -820,7 +874,7 @@ export function useMultitableGrid(opts: {
     const vid = opts.viewId.value
     if (!vid) return
     try {
-      await client.updateView(vid, {
+      await persistViewConfig(vid, {
         groupInfo: next.length ? ({ fieldIds: next, fieldId: next[0] } as Record<string, unknown>) : undefined,
       })
     } catch { /* silent */ }
@@ -835,7 +889,7 @@ export function useMultitableGrid(opts: {
     const vid = opts.viewId.value
     if (!vid) return
     try {
-      await client.updateView(vid, { hiddenFieldIds: [...hiddenFieldIds.value] })
+      await persistViewConfig(vid, { hiddenFieldIds: [...hiddenFieldIds.value] })
     } catch { /* silent — will retry on next toggle */ }
   }
 
@@ -1023,6 +1077,9 @@ export function useMultitableGrid(opts: {
         changes: [{ recordId, fieldId, value, expectedVersion: version }],
       })
       applyPatchResult(result)
+      // W3-5: record the commit's batchId (undefined for a server that predates the seam) so a caller can
+      // offer a "view in history" deep-link for THIS commit only — never carries a prior commit's id forward.
+      lastBatchId.value = result.batchId ?? null
       // Push to undo history
       editHistory.value = editHistory.value.slice(0, historyIndex.value + 1)
       editHistory.value.push({ recordId, fieldId, oldValue, newValue: value, version, oldLinkSummaries, newLinkSummaries: nextLinkSummaries })
@@ -1031,6 +1088,7 @@ export function useMultitableGrid(opts: {
       // Revert optimistic update
       if (row) row.data[fieldId] = oldValue
       setLinkSummaries(recordId, fieldId, oldLinkSummaries)
+      lastBatchId.value = null
       if (e?.code === 'VERSION_CONFLICT') {
         conflict.value = {
           recordId,
@@ -1114,6 +1172,7 @@ export function useMultitableGrid(opts: {
       changes,
     })
     applyPatchResult(result)
+    lastBatchId.value = result.batchId ?? null
     const updated = (result.updated ?? []).map((u) => u.recordId)
     const failed = (result.failed ?? []).map((failure) => ({
       recordId: failure.recordId,
@@ -1331,7 +1390,7 @@ export function useMultitableGrid(opts: {
 
   return {
     // State
-    fields, rows, linkSummaries, personSummaries, attachmentSummaries, fieldPermissions, viewPermission, capabilityOrigin, rowActions, rowActionOverrides, loading, error, conflict, page, hiddenFieldIds, visibleFields, readOnlyFieldIds,
+    fields, rows, linkSummaries, personSummaries, attachmentSummaries, fieldPermissions, viewPermission, capabilityOrigin, rowActions, rowActionOverrides, loading, error, conflict, lastBatchId, page, hiddenFieldIds, fieldOrder, visibleFields, readOnlyFieldIds,
     // A1 infinite-scroll accumulation state
     loadingMore, accumulationCapped,
     sortRules, filterRules, filterConjunction, nestedFilterNodes, filterGroups, sortFilterDirty,

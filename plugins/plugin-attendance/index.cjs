@@ -237,6 +237,12 @@ const DEFAULT_SETTINGS = {
     ],
     carryover: { enabled: false },
     timezone: null,
+    // 年假/法定假 S3 scheduler trigger — LATENT config (design-lock
+    // attendance-annual-leave-accrual-scheduler-s3-design-lock-20260710). Default OFF; the
+    // 'attendance-annual-leave-accrual' scheduler job additionally requires the
+    // ATTENDANCE_ANNUAL_LEAVE_ACCRUAL_SCHEDULED_ENABLED env flag — env flag AND this enabled must BOTH be
+    // true, missing either is a byte-exact no-op (mirrors reportSync.scheduledTrigger's double-gate).
+    scheduledTrigger: { enabled: false },
   },
   // 加班三段引擎 (overtime segmentation) — O2 runtime switch. Default OFF means
   // overtime requests keep today's single total-minute metadata until an org opts in.
@@ -360,6 +366,7 @@ let importUploadCleanupInterval = null
 let autoShiftAutoWriteSchedulerUnregister = null
 let attendanceReportDigestSchedulerUnregister = null
 let reportSyncScheduledTriggerSchedulerUnregister = null
+let annualLeaveAccrualSchedulerUnregister = null
 let settingsCache = { value: DEFAULT_SETTINGS, loadedAt: 0 }
 const templateLibraryCache = new Map()
 const templateLibraryVersionCache = new Map()
@@ -5452,6 +5459,12 @@ function buildImportTemplateCsv(profile) {
   return `${header}\n${row}\n`
 }
 
+// CSV download BOM (import-section-ux lock §6 addendum): Excel misreads
+// BOM-less UTF-8 CSV as ANSI/GBK (乱码); WPS auto-detects. Download exits only.
+function withCsvBom(text) {
+  return String(text ?? '').startsWith('\ufeff') ? text : `\ufeff${text}`
+}
+
 function buildImportTemplateFilename(profile) {
   const seed = String(profile?.id || profile?.source || 'attendance')
     .trim()
@@ -6921,15 +6934,68 @@ function normalizeCsvHeaderValue(value) {
   return text
 }
 
+// DT-HARDEN-10: the real header vocabulary — a work-date column and at least one
+// user/attendance context column — used by both header *detection* (which row is
+// the header) and upload *validation* (does the header carry enough columns to
+// import). Keeping a single pair of sets means the two checks cannot drift apart.
+const IMPORT_HEADER_DATE_KEYS = new Set(['日期', 'date', 'workdate'])
+const IMPORT_HEADER_CONTEXT_KEYS = new Set([
+  'userid',
+  '用户id',
+  'name',
+  '姓名',
+  '工号',
+  'empno',
+  'firstinat',
+  'lastoutat',
+  'status',
+  'attendancegroup',
+  'attendanceclass',
+  'shiftname',
+  '上班1打卡时间',
+  '下班1打卡时间',
+  '考勤结果',
+  '考勤组',
+  '班次',
+])
+
+// trim + lowercase + strip whitespace/underscore/hyphen so "Work Date", "work_date",
+// "姓 名" and "EMP_NO" all match the canonical keys above.
+function normalizeImportHeaderLookupKey(value) {
+  return String(value ?? '')
+    .trim()
+    .toLowerCase()
+    .replace(/[\s_-]+/g, '')
+}
+
+// DT-HARDEN-10: single source of truth for "does this row look like the import
+// header". A real header carries BOTH a date column and a user/attendance context
+// column (see the key sets above — not just a literal "name"/"姓名" cell; DingTalk's
+// own API-columns and manual-rows templates use workDate/userId with no "name"
+// column at all). DingTalk exports also prepend a title row that has neither, so
+// anything treating the first non-empty row as the header mis-reads those files —
+// the parser skips the title row while upload validation and header diagnostics
+// read it, which 400s the upload before the parser is ever reached.
+function isLikelyImportHeaderRow(normalizedCells) {
+  const row = Array.isArray(normalizedCells) ? normalizedCells.filter(Boolean) : []
+  if (!row.length) return false
+  const keys = row.map(normalizeImportHeaderLookupKey).filter(Boolean)
+  const hasDate = keys.some((key) => IMPORT_HEADER_DATE_KEYS.has(key))
+  const hasContext = keys.some((key) => IMPORT_HEADER_CONTEXT_KEYS.has(key))
+  return hasDate && hasContext
+}
+
+// Bound the header hunt so a headerless file cannot turn a cheap peek into a
+// full-file read; real title blocks are 1-3 rows.
+const IMPORT_HEADER_SCAN_MAX_ROWS = 50
+
 function detectCsvHeaderIndex(csvText, delimiter) {
   let detectedIndex = 0
   let found = false
   iterateCsvRows(csvText, delimiter, (rawRow, rowIndex) => {
-    const row = rawRow.map(normalizeCsvHeaderValue).filter(Boolean)
-    if (!row.length) return true
-    const hasName = row.some((cell) => cell === '姓名' || cell.toLowerCase() === 'name')
-    const hasDate = row.some((cell) => ['日期', 'date', 'workdate', 'work_date'].includes(cell.toLowerCase()))
-    if (hasName && hasDate) {
+    const row = rawRow.map(normalizeCsvHeaderValue)
+    if (!row.filter(Boolean).length) return true
+    if (isLikelyImportHeaderRow(row)) {
       detectedIndex = rowIndex
       found = true
       return false
@@ -7194,6 +7260,38 @@ async function iterateImportRowsFromCsvAsync({ csvText, csvOptions, maxRows, onR
   })
 }
 
+// DT-HARDEN-10: bounded peek to resolve which row is the header, without buffering
+// the file. The streaming parser below discards rows as it goes (it cannot rewind
+// once it decides row N is data), so it cannot reuse the old "trust row 0, or fall
+// back once nothing better turns up" single-pass trick the inline/text path used.
+// Instead this does a first bounded pass (capped at IMPORT_HEADER_SCAN_MAX_ROWS,
+// matching readImportCsvHeaderFromFile) to find the row index, then the caller
+// streams the real file a second time starting from a known header index — the
+// same seam an explicit `csvOptions.headerRowIndex` already used.
+async function detectCsvHeaderRowIndexFromFile(csvPath, delimiter) {
+  let detectedIndex = null
+  let firstNonEmptyIndex = null
+  let scanned = 0
+  const csvStream = fs.createReadStream(csvPath, { encoding: 'utf8' })
+  await iterateCsvRowsStreamAsync(csvStream, delimiter, (rawRow, rowIndex) => {
+    const normalized = rawRow.map(normalizeCsvHeaderValue)
+    if (!normalized.some((cell) => cell && String(cell).trim().length > 0)) return true
+    if (firstNonEmptyIndex === null) firstNonEmptyIndex = rowIndex
+    if (isLikelyImportHeaderRow(normalized)) {
+      detectedIndex = rowIndex
+      return false
+    }
+    scanned += 1
+    return scanned < IMPORT_HEADER_SCAN_MAX_ROWS
+  })
+  // Restore the tail fallback the inline path always had: a genuinely headerless
+  // file still resolves to a row (the first non-empty one) instead of yielding zero
+  // data rows forever, which used to 400 as "no non-empty data row" even though the
+  // file plainly had rows — it just had no row this function recognized as a header.
+  if (detectedIndex !== null) return detectedIndex
+  return firstNonEmptyIndex !== null ? firstNonEmptyIndex : 0
+}
+
 async function iterateImportRowsFromCsvFileAsync({ csvPath, csvOptions, maxRows, onRow }) {
   const delimiter = csvOptions?.delimiter || ','
   const resolvedMaxRowsRaw = Number(maxRows ?? ATTENDANCE_IMPORT_CSV_MAX_ROWS)
@@ -7204,28 +7302,18 @@ async function iterateImportRowsFromCsvFileAsync({ csvPath, csvOptions, maxRows,
     ? Math.max(0, Number(csvOptions.headerRowIndex))
     : null
 
+  const resolvedHeaderRowIndex = explicitHeaderRowIndex !== null
+    ? explicitHeaderRowIndex
+    : await detectCsvHeaderRowIndexFromFile(csvPath, delimiter)
+
   let seenRows = 0
   let header = []
   let rowCount = 0
   let limitExceeded = false
-  let resolvedHeaderRowIndex = explicitHeaderRowIndex
 
   const csvStream = fs.createReadStream(csvPath, { encoding: 'utf8' })
   await iterateCsvRowsStreamAsync(csvStream, delimiter, async (rawRow, rowIndex) => {
     seenRows += 1
-    if (resolvedHeaderRowIndex === null) {
-      const normalized = rawRow.map(normalizeCsvHeaderValue).filter(Boolean)
-      if (normalized.length > 0) {
-        const hasName = normalized.some((cell) => cell === '姓名' || cell.toLowerCase() === 'name')
-        const hasDate = normalized.some((cell) => ['日期', 'date', 'workdate', 'work_date'].includes(cell.toLowerCase()))
-        if (rowIndex === 0 || (hasName && hasDate)) {
-          resolvedHeaderRowIndex = rowIndex
-          header = rawRow.map(normalizeCsvHeaderValue)
-          return true
-        }
-      }
-      return true
-    }
     if (rowIndex < resolvedHeaderRowIndex) return true
     if (rowIndex === resolvedHeaderRowIndex) {
       if (!header.length) header = rawRow.map(normalizeCsvHeaderValue)
@@ -7253,60 +7341,48 @@ async function iterateImportRowsFromCsvFileAsync({ csvPath, csvOptions, maxRows,
   })
 }
 
-const IMPORT_HEADER_DATE_KEYS = new Set(['日期', 'date', 'workdate'])
-const IMPORT_HEADER_CONTEXT_KEYS = new Set([
-  'userid',
-  '用户id',
-  'name',
-  '姓名',
-  '工号',
-  'empno',
-  'firstinat',
-  'lastoutat',
-  'status',
-  'attendancegroup',
-  'attendanceclass',
-  'shiftname',
-  '上班1打卡时间',
-  '下班1打卡时间',
-  '考勤结果',
-  '考勤组',
-  '班次',
-])
-
-function normalizeImportHeaderLookupKey(value) {
-  return String(value ?? '')
-    .trim()
-    .toLowerCase()
-    .replace(/[\s_-]+/g, '')
-}
-
+// DT-HARDEN-10: prefer the detected header row (name+date) over the first
+// non-empty row, matching `detectCsvHeaderIndex` — otherwise a DingTalk export's
+// title row is read as the header, which 400s upload validation ("must include a
+// work date column") and makes header diagnostics report title cells as columns.
+// Falls back to the first non-empty row so a genuinely headerless file still
+// produces the same validation error it always did.
 async function readImportCsvHeaderFromFile(csvPath, delimiter = ',') {
-  let header = []
+  let firstNonEmpty = []
+  let detected = null
+  let scanned = 0
   const csvStream = fs.createReadStream(csvPath, { encoding: 'utf8' })
   await iterateCsvRowsStreamAsync(csvStream, delimiter, async (rawRow) => {
     const normalized = rawRow.map(normalizeCsvHeaderValue)
-    if (normalized.some((cell) => cell && String(cell).trim().length > 0)) {
-      header = normalized
+    if (!normalized.some((cell) => cell && String(cell).trim().length > 0)) return true
+    if (!firstNonEmpty.length) firstNonEmpty = normalized
+    if (isLikelyImportHeaderRow(normalized)) {
+      detected = normalized
       return false
     }
-    return true
+    scanned += 1
+    return scanned < IMPORT_HEADER_SCAN_MAX_ROWS
   })
-  return header
+  return detected ?? firstNonEmpty
 }
 
 function readImportCsvHeaderFromText(csvText, delimiter = ',') {
   if (typeof csvText !== 'string' || !csvText.trim()) return []
-  let header = []
+  let firstNonEmpty = []
+  let detected = null
+  let scanned = 0
   iterateCsvRows(csvText, delimiter, (rawRow) => {
     const normalized = rawRow.map(normalizeCsvHeaderValue)
-    if (normalized.some((cell) => cell && String(cell).trim().length > 0)) {
-      header = normalized
+    if (!normalized.some((cell) => cell && String(cell).trim().length > 0)) return true
+    if (!firstNonEmpty.length) firstNonEmpty = normalized
+    if (isLikelyImportHeaderRow(normalized)) {
+      detected = normalized
       return false
     }
-    return true
+    scanned += 1
+    return scanned < IMPORT_HEADER_SCAN_MAX_ROWS
   })
-  return header
+  return detected ?? firstNonEmpty
 }
 
 function summarizeImportDiagnosticValues(values, maxItems = 6) {
@@ -10553,6 +10629,54 @@ function partitionOvertimeBankGrantLots({ requestId, totalMinutes, segments, ove
   return { lots, perSource }
 }
 
+// Upper bound for lot validity: expires_at = now() + N × 24h, and PG rejects an
+// interval past ~1.07e8 days (SQLSTATE 22008). 100 years is beyond any legitimate
+// comp-time validity, so cap here (defence-in-depth) AND at the zod layer (so the
+// admin gets a clean 400 at save-time, not a 500 on the next approval). Review P2-1.
+const MAX_LOT_VALIDITY_DAYS = 36500
+
+// Clamp a lot-validity-days input to a safe positive integer or null. expires_at
+// is now() + N×24h, and PG raises "interval out of range" (22008) past ~1.07e8
+// days. The S1 slice bounded overtimeBankPolicy.validityDays; this shares the
+// same clamp for compTimeFromOvertime.expiresInDays (its sibling knob) so a
+// legacy settings row saved before the zod .max still can't 500 a comp-time
+// grant. Out-of-range → MAX (preserve the "has an expiry" intent, no overflow).
+function clampLotValidityDays(raw) {
+  const n = Number(raw)
+  if (!Number.isInteger(n) || n <= 0) return null
+  return n <= MAX_LOT_VALIDITY_DAYS ? n : MAX_LOT_VALIDITY_DAYS
+}
+
+// 加班银行 S1 (overtime-bank-validity design-lock §2): which validity governs a BANKED (source-tagged) lot.
+// The bank card's `validityDays` wins when the bank is ENABLED and the value is a positive integer within
+// bounds; otherwise we fall back to compTimeFromOvertime.expiresInDays — the pre-S1 behaviour, byte-identical.
+// The dormant path (bank disabled → single NULL-source lot) never calls this. Returns days (positive int) or
+// null (no expiry). Floors BEFORE the positivity/bound check (review P2-2), so 0<raw<1 → 0 → fallback, not a
+// dead-on-arrival lot; and raw > MAX → fallback, not a PG interval overflow.
+function resolveBankedLotExpiresInDays(overtimeBankPolicy, fallbackExpiresInDays) {
+  const fallback = Number.isInteger(fallbackExpiresInDays) && fallbackExpiresInDays > 0 ? fallbackExpiresInDays : null
+  if (!overtimeBankPolicy || overtimeBankPolicy.enabled !== true) return fallback
+  const raw = Number(overtimeBankPolicy.validityDays)
+  if (!Number.isFinite(raw)) return fallback
+  const days = Math.floor(raw)
+  return days > 0 && days <= MAX_LOT_VALIDITY_DAYS ? days : fallback
+}
+
+// 加班银行 S1b (overtime-bank-cap design-lock §3): pure decision for the per-period (natural-month) BANKED
+// accrual cap. `maxMinutesPerPeriod` is the admin's "每周期加班银行上限(分钟, 0＝不限)". cap<=0 (unset/0) →
+// NEVER blocked (byte-identical to pre-S1b — invariant 3). Otherwise blocked when the projected total
+// (already-banked this period + this grant's pooled minutes) STRICTLY exceeds the cap; landing exactly on
+// the cap is allowed. Both inputs share the "pooled banked minutes"口径 (§6: statutory_holiday is must-pay,
+// never pooled), so the comparison is apples-to-apples. Kept pure (no I/O) so the boundary is unit-testable.
+function overtimeBankCapDecision({ maxMinutesPerPeriod, existingBanked, newBanked } = {}) {
+  const cap = Number(maxMinutesPerPeriod)
+  const existing = Math.max(0, Number(existingBanked) || 0)
+  const added = Math.max(0, Number(newBanked) || 0)
+  const projected = existing + added
+  if (!Number.isFinite(cap) || cap <= 0) return { blocked: false, cap: null, projected, existing, added }
+  return { blocked: projected > cap, cap, projected, existing, added }
+}
+
 function applyOvertimeSegmentationSnapshotToApprovedEntry(entry, snapshot) {
   if (!entry || !snapshot) return
   entry.workdayOvertimeMinutes += snapshot.workdayOvertimeMinutes
@@ -12481,6 +12605,7 @@ function normalizeAnnualLeavePolicySetting(raw) {
     : fallback.standardDayMinutes
   const carryoverRaw = config.carryover && typeof config.carryover === 'object' ? config.carryover : {}
   const timezoneRaw = typeof config.timezone === 'string' ? config.timezone.trim() : ''
+  const scheduledTriggerRaw = config.scheduledTrigger && typeof config.scheduledTrigger === 'object' ? config.scheduledTrigger : {}
   return {
     enabled: typeof config.enabled === 'boolean' ? config.enabled : fallback.enabled,
     tenureMode,
@@ -12490,6 +12615,11 @@ function normalizeAnnualLeavePolicySetting(raw) {
       enabled: typeof carryoverRaw.enabled === 'boolean' ? carryoverRaw.enabled : fallback.carryover.enabled,
     },
     timezone: timezoneRaw.length > 0 ? timezoneRaw : null,
+    // S3 scheduler trigger sub-object — normalized the same shallow way as reportSync.scheduledTrigger's
+    // `enabled` field (only a real boolean is honoured; anything else falls back to the off default).
+    scheduledTrigger: {
+      enabled: typeof scheduledTriggerRaw.enabled === 'boolean' ? scheduledTriggerRaw.enabled : fallback.scheduledTrigger.enabled,
+    },
   }
 }
 
@@ -12826,10 +12956,12 @@ function normalizeOvertimeBankPolicySetting(raw) {
       pooledSources.push(item)
     }
   }
-  const validityRaw = value.validityDays
-  const validityDays = validityRaw === null || validityRaw === undefined
-    ? null
-    : (Math.max(0, parseNumber(validityRaw, 0)) || null)
+  // validityDays normalizes to a POSITIVE INTEGER or null — matching the
+  // compTimeFromOvertime.expiresInDays sibling (:12479) so the two expiry knobs
+  // share one integrality contract, and so design-lock §3's "正整数或 null" claim
+  // is actually enforced here rather than two layers away in zod (review P2-2).
+  const validityRaw = Number(value.validityDays)
+  const validityDays = Number.isInteger(validityRaw) && validityRaw > 0 ? validityRaw : null
   return {
     enabled: parseBoolean(value.enabled, false),
     pooledSources,
@@ -13307,6 +13439,11 @@ function mergeSettings(base, update) {
       carryover: {
         ...(base?.annualLeavePolicy?.carryover || {}),
         ...(update?.annualLeavePolicy?.carryover || {}),
+      },
+      // S3: deep-merge scheduledTrigger so a partial update elsewhere in annualLeavePolicy never strips it.
+      scheduledTrigger: {
+        ...(base?.annualLeavePolicy?.scheduledTrigger || {}),
+        ...(update?.annualLeavePolicy?.scheduledTrigger || {}),
       },
     },
     overtimeSegmentation: {
@@ -17265,6 +17402,31 @@ async function deductCompTimeBalance(trx, { orgId, userId, requestId, minutes })
   })
 }
 
+// 加班银行 S1b (overtime-bank-cap design-lock §3 D3): sum a user's already-POOLED banked comp-time minutes
+// for the natural month that [monthStart, monthEnd] delimits — the headroom baseline for the per-period cap.
+// Only source-tagged lots (overtime_source IS NOT NULL) count: that matches `newBanked = Σ pooled lots`
+// (§6 statutory_holiday never pooled), so headroom and the new grant use one口径 and dormant NULL-source
+// history (full-amount, statutory-inclusive) can't inflate the bank total. amount_minutes = GRANTED/accrued
+// (not remaining) — the cap is a per-period accrual ceiling, so spending then re-accruing must not reopen it.
+// The month is keyed off the SOURCE OT request's work_date, and excludeRequestId drops THIS request's own
+// lots (defense-in-depth for replay; the pending-status guard already blocks re-approve before grant).
+async function sumBankedOvertimeMinutesForMonth(trx, { orgId, userId, monthStart, monthEnd, excludeRequestId }) {
+  if (!orgId || !userId || !monthStart || !monthEnd) return 0
+  const rows = await trx.query(
+    `SELECT COALESCE(SUM(b.amount_minutes), 0)::int AS banked
+       FROM attendance_leave_balances b
+       JOIN attendance_requests r ON r.id::text = b.source_id
+      WHERE b.org_id = $1 AND b.user_id = $2
+        AND b.leave_type_code = 'comp_time'
+        AND b.source_type = 'overtime_conversion'
+        AND b.overtime_source IS NOT NULL
+        AND r.work_date >= $3 AND r.work_date <= $4
+        AND b.source_id <> $5`,
+    [orgId, userId, monthStart, monthEnd, excludeRequestId]
+  )
+  return Number(rows[0]?.banked) || 0
+}
+
 // #7 leave cancellation / 销假 (design-lock #3034): reverse the balance a leave's approval deducted, when
 // that approved leave is later cancelled. Keyed on the request's own deduct events (source_id = requestId,
 // event_type = 'deduct'), so it reverses WHATEVER was deducted — annual_leave AND comp_time_leave both
@@ -17500,7 +17662,12 @@ function annualLeaveLotExpiryUtc(period, carryoverEnabled, timezone) {
   return new Date(zonedTimeToUtc({ year, month: 1, day: 1, hour: 0, minute: 0, second: 0 }, timezone))
 }
 
-async function runAnnualLeaveAccrual(trx, { orgId, period, asOf, dryRun }) {
+// G2 (S3 design-lock): triggeredBy is parameterized so the scheduler job can stamp 'scheduler' on the run
+// header instead of the previously-hardcoded 'manual' literal. Any caller that omits it (or passes anything
+// other than the literal 'scheduler') keeps the pre-S3 behaviour — 'manual' — so the existing manual route
+// (which passes 'manual' explicitly) is byte-exact unchanged.
+async function runAnnualLeaveAccrual(trx, { orgId, period, asOf, dryRun, triggeredBy }) {
+  const resolvedTriggeredBy = triggeredBy === 'scheduler' ? 'scheduler' : 'manual'
   const settings = await getSettings(trx)
   const policy = settings?.annualLeavePolicy
   if (!policy || policy.enabled !== true) {
@@ -17521,9 +17688,9 @@ async function runAnnualLeaveAccrual(trx, { orgId, period, asOf, dryRun }) {
   const runRows = await trx.query(
     `INSERT INTO attendance_leave_accrual_runs
        (org_id, period_key, leave_type_code, policy_version, tenure_mode, timezone, standard_day_minutes, tiers, triggered_by, dry_run, as_of)
-     VALUES ($1, $2, 'annual', $3, $4, $5, $6, $7::jsonb, 'manual', $8, $9)
+     VALUES ($1, $2, 'annual', $3, $4, $5, $6, $7::jsonb, $8, $9, $10)
      RETURNING id`,
-    [orgId, periodKey, annualLeavePolicyVersion(policy), policy.tenureMode, policy.timezone, policy.standardDayMinutes, JSON.stringify(policy.tiers ?? []), !!dryRun, asOfParts.str]
+    [orgId, periodKey, annualLeavePolicyVersion(policy), policy.tenureMode, policy.timezone, policy.standardDayMinutes, JSON.stringify(policy.tiers ?? []), resolvedTriggeredBy, !!dryRun, asOfParts.str]
   )
   const runId = runRows[0].id
   // Org-scoped (via user_orgs) — only THIS org's active members. NOT the global users table, else an
@@ -17589,6 +17756,143 @@ async function runAnnualLeaveAccrual(trx, { orgId, period, asOf, dryRun }) {
     }
   }
   return summary
+}
+
+// ==========================================================================================
+// 年假/法定假 S3 — annual-leave accrual scheduler job (design-lock
+// attendance-annual-leave-accrual-scheduler-s3-design-lock-20260710). The engine + run provenance above
+// (L2b) are complete, but the ONLY entrypoint was the manual admin route
+// (POST /api/attendance/annual-leave-accrual/run) — if nobody clicks it, accrual never happens. This block
+// adds a scheduler-driven auto-trigger, mirroring the A2 report-sync-scheduled-trigger shape exactly (G1).
+// ==========================================================================================
+
+// G3 double-gate half #1 (env). Default OFF — missing this OR
+// settings.annualLeavePolicy.scheduledTrigger.enabled=false is a byte-exact no-op (mirrors
+// ATTENDANCE_REPORT_SYNC_SCHEDULED_TRIGGER_ENABLED / isAttendanceReportSyncScheduledTriggerRuntimeEnabled).
+function isAnnualLeaveAccrualScheduledTriggerRuntimeEnabled() {
+  return parseBoolean(process.env.ATTENDANCE_ANNUAL_LEAVE_ACCRUAL_SCHEDULED_ENABLED, false)
+}
+
+// G4 org fan-out throttle. Not exposed as an org-configurable setting (unlike reportSync's
+// maxOrgsPerRun) — the S3 lock's FE scope (G7) is a single enabled switch only. 50 mirrors the
+// reportSync zod schema's real maxOrgsPerRun ceiling. Precision note: the shared resolver returns a
+// deterministic ORDER BY org_id first-N with no cross-tick rotation, and the due-gate applies AFTER
+// the resolver — so with more than 50 orgs the tail (org #51+) is never reached by the scheduler and
+// needs the manual route (or a future rotation rung, deferred like reportSync's A2 fairness rung).
+// Deployments at or under the cap are fully covered; the resolver logger.warn()s on overflow.
+const ATTENDANCE_ANNUAL_LEAVE_ACCRUAL_SCHEDULED_TRIGGER_MAX_ORGS_PER_RUN = 50
+
+// G5 due-gate step 1 (pure, no DB): resolves the CURRENT org-local accrual period/periodKey/asOf-workDate
+// for a scheduled tick. period = org-local YEAR via getZonedParts — deliberately NOT the UTC year, so a
+// tick that lands right around the Dec 31 / Jan 1 org-tz boundary classifies against the correct year.
+// workDate = org-local today (toWorkDate), the SAME YYYY-MM-DD format runAnnualLeaveAccrual's asOf
+// validator expects — this is also the manual route's own default-asOf semantics (new Date() when asOf is
+// omitted), just resolved in the org's timezone instead of the process's.
+function resolveAnnualLeaveAccrualScheduledTriggerPeriod(now, timezone) {
+  const period = getZonedParts(now, timezone).year
+  return { period, periodKey: `annual:${period}`, workDate: toWorkDate(now, timezone) }
+}
+
+// G5 due-gate step 2 (pure, no DB): an org is due for a scheduled tick UNLESS a REAL (non-dryRun) run for
+// the current period already has a created_at within the CURRENT org-local calendar month. dryRun runs
+// never count — a preview run must never block a later real grant. This bounds the scheduler to at most
+// ~12 real runs/org/year while a monthly re-check still picks up employees who become newly eligible
+// (or newly hired) mid-year — the run's own idempotent per-user source_key makes every extra monthly tick
+// a safe no-op for users already granted.
+function isAnnualLeaveAccrualScheduledTriggerDue(now, timezone, lastRealRunCreatedAt) {
+  if (!(lastRealRunCreatedAt instanceof Date) || Number.isNaN(lastRealRunCreatedAt.getTime())) return true
+  const nowParts = getZonedParts(now, timezone)
+  const lastParts = getZonedParts(lastRealRunCreatedAt, timezone)
+  return !(lastParts.year === nowParts.year && lastParts.month === nowParts.month)
+}
+
+// G5: the DB half of the due-gate — the most recent REAL (dry_run = false) run's created_at for this
+// org+period, or null when none exists yet (always due). dryRun runs are excluded by the WHERE clause so
+// they can never satisfy the due-gate (mirrors the summary comment above).
+async function loadAnnualLeaveAccrualLatestRealRunCreatedAt(db, orgId, periodKey) {
+  const rows = await db.query(
+    `SELECT created_at FROM attendance_leave_accrual_runs
+      WHERE org_id = $1 AND period_key = $2 AND leave_type_code = 'annual' AND dry_run = false
+      ORDER BY created_at DESC LIMIT 1`,
+    [orgId, periodKey],
+  )
+  const raw = rows[0]?.created_at
+  if (!raw) return null
+  const parsed = raw instanceof Date ? raw : new Date(raw)
+  return Number.isNaN(parsed.getTime()) ? null : parsed
+}
+
+// Per-org worker: exported standalone (in addition to the top-level runAnnualLeaveAccrualScheduledTriggerOnce)
+// so tests can exercise the policy-gate/due-gate/run-once behavior against ONE known org without depending on
+// resolveAttendanceReportSyncScheduledTriggerOrgIds's cross-test-shared attendance_rules scan (mirrors
+// runAttendanceReportSyncScheduledTriggerForOrg). Caller supplies the transaction (`trx`) — the whole
+// gate-check + run is one atomic unit per org, matching the manual route's own db.transaction wrapping.
+async function runAnnualLeaveAccrualScheduledTriggerForOrg(trx, orgId, now, logger, emitEvent) {
+  const settings = await getSettings(trx)
+  const policy = settings?.annualLeavePolicy
+  // G3 gate ③: the engine's OWN existing gates (enabled + timezone present/valid) — unchanged, just
+  // checked here BEFORE the due-lookup so a misconfigured org never even queries for a prior run.
+  if (!policy || policy.enabled !== true || !policy.timezone || !isValidTimeZoneIdentifier(policy.timezone)) {
+    return { orgId, ran: false, reason: 'policy_not_ready' }
+  }
+  const { period, periodKey, workDate } = resolveAnnualLeaveAccrualScheduledTriggerPeriod(now, policy.timezone)
+  const lastRealRunCreatedAt = await loadAnnualLeaveAccrualLatestRealRunCreatedAt(trx, orgId, periodKey)
+  if (!isAnnualLeaveAccrualScheduledTriggerDue(now, policy.timezone, lastRealRunCreatedAt)) {
+    return { orgId, ran: false, reason: 'not_due', period, periodKey }
+  }
+  const summary = await runAnnualLeaveAccrual(trx, { orgId, period, asOf: workDate, dryRun: false, triggeredBy: 'scheduler' })
+  emitEvent?.('attendance.annual_leave_accrual.run', {
+    orgId,
+    periodKey: summary.periodKey,
+    asOf: summary.asOf,
+    dryRun: summary.dryRun,
+    granted: summary.granted,
+    skipped: summary.skipped,
+    triggeredBy: 'scheduler',
+  })
+  return {
+    orgId,
+    ran: true,
+    period,
+    periodKey,
+    runId: summary.runId,
+    granted: summary.granted,
+    skipped: summary.skipped,
+    grantedMinutes: summary.grantedMinutes,
+    lotsCreated: summary.lotsCreated,
+    alreadyGranted: summary.alreadyGranted,
+  }
+}
+
+// The scheduler job entrypoint — registered on AttendanceScheduler as 'attendance-annual-leave-accrual'
+// (mirrors 'attendance-report-sync-scheduled'). G3 double-gate: the env flag AND
+// settings.annualLeavePolicy.scheduledTrigger.enabled must BOTH be true, else this is a byte-exact no-op —
+// zero org lookups, zero DB writes. G4: org fan-out reuses resolveAttendanceReportSyncScheduledTriggerOrgIds
+// verbatim (its SELECT DISTINCT org_id FROM attendance_rules scan is leave-type-agnostic — see that
+// function's own "not a new pattern" comment) with its own throttle constant; a per-org try/catch means one
+// org's failure never blocks the rest.
+async function runAnnualLeaveAccrualScheduledTriggerOnce(db, logger = console, options = {}) {
+  const now = options.now instanceof Date ? options.now : new Date()
+  const settings = await getSettings(db)
+  const trigger = settings?.annualLeavePolicy?.scheduledTrigger
+  if (!isAnnualLeaveAccrualScheduledTriggerRuntimeEnabled() || trigger?.enabled !== true) {
+    return { ran: false, reason: 'disabled', orgs: [] }
+  }
+  const orgIds = await resolveAttendanceReportSyncScheduledTriggerOrgIds(
+    db, ATTENDANCE_ANNUAL_LEAVE_ACCRUAL_SCHEDULED_TRIGGER_MAX_ORGS_PER_RUN, logger,
+  )
+  const orgs = []
+  for (const orgId of orgIds) {
+    try {
+      const result = await db.transaction((trx) => runAnnualLeaveAccrualScheduledTriggerForOrg(trx, orgId, now, logger, options.emitEvent))
+      orgs.push(result)
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      logger?.warn?.('annual leave accrual scheduled trigger failed for org', { orgId, error: message })
+      orgs.push({ orgId, ran: false, reason: 'error', error: message })
+    }
+  }
+  return { ran: true, orgs }
 }
 
 // 年假/法定假 L2c: apply an admin manual ± to a user's annual balance via LOT mutation (never event-only).
@@ -20436,6 +20740,12 @@ async function isApproverAllowed(db, userId, step, logger) {
 }
 
 module.exports = {
+  // Top-level so the integration harness's
+  // getAttendancePluginForTest().resetAttendanceSettingsCacheForTests?.() (in
+  // attendance-plugin.test.ts beforeEach) actually runs — it was previously only
+  // exported nested one bag down, so the top-level optional call silently no-op'd
+  // and the 60s settings cache leaked across tests in the shared attendance suite.
+  resetAttendanceSettingsCacheForTests,
   __attendanceLeaveCancellationForTests: {
     reverseLeaveBalanceDeduction,
   },
@@ -20443,6 +20753,20 @@ module.exports = {
     buildUnresolvedRowUserWarning,
     collectRowUserIdentityValues,
     resolveRowUserId,
+  },
+  __attendanceImportCsvHeaderForTests: {
+    detectCsvHeaderIndex,
+    detectCsvHeaderRowIndexFromFile,
+    isLikelyImportHeaderRow,
+    iterateImportRowsFromCsv,
+    iterateImportRowsFromCsvFileAsync,
+    readImportCsvHeaderFromFile,
+    readImportCsvHeaderFromText,
+    validateImportUploadCsvOrThrow,
+    IMPORT_MAPPING_PROFILES,
+    IMPORT_HEADER_DATE_KEYS,
+    IMPORT_HEADER_CONTEXT_KEYS,
+    normalizeImportHeaderLookupKey,
   },
   __attendanceAutoShiftForTests: {
     AUTO_SHIFT_AUTO_WRITE_SYSTEM_ROLE_TAG,
@@ -20471,6 +20795,9 @@ module.exports = {
     normalizeOvertimeBankPolicySetting,
     resolveOvertimeBankSourceMinutes,
     partitionOvertimeBankGrantLots,
+    resolveBankedLotExpiresInDays,
+    clampLotValidityDays,
+    overtimeBankCapDecision,
     buildCycleSettlementRows,
   },
   __attendanceLeaveOffsetForTests: {
@@ -20624,6 +20951,16 @@ module.exports = {
     claimOrCreateAttendanceReportSyncScheduledJob,
     runAttendanceReportSyncScheduledTriggerForOrg,
     runAttendanceReportSyncScheduledTriggerOnce,
+    // S3 annual-leave accrual scheduler (design-lock attendance-annual-leave-accrual-scheduler-s3-design-lock-20260710)
+    normalizeAnnualLeavePolicySetting,
+    runAnnualLeaveAccrual,
+    ATTENDANCE_ANNUAL_LEAVE_ACCRUAL_SCHEDULED_TRIGGER_MAX_ORGS_PER_RUN,
+    isAnnualLeaveAccrualScheduledTriggerRuntimeEnabled,
+    resolveAnnualLeaveAccrualScheduledTriggerPeriod,
+    isAnnualLeaveAccrualScheduledTriggerDue,
+    loadAnnualLeaveAccrualLatestRealRunCreatedAt,
+    runAnnualLeaveAccrualScheduledTriggerForOrg,
+    runAnnualLeaveAccrualScheduledTriggerOnce,
     normalizeAttendanceResultEditPolicySetting,
     applyAttendanceResultEdit,
     applyResultEditMetricNormalization,
@@ -21617,10 +21954,15 @@ module.exports = {
         weeklyMaxMinutes: z.number().int().positive().nullable().optional(),
         monthlyMaxMinutes: z.number().int().positive().nullable().optional(),
       }).optional(),
-      // Punch-policy group (#2203). S1 exposes unscheduled.mode = allow|block. S2 exposes merge
-      // controls for in/out card selection. S3 (#2304) exposes the outdoor approval controls —
-      // requireApproval / requireNote / approvalFlowId only. requirePhoto stays latent (normalized but
-      // NOT wire-settable until an attachment/photo contract exists — no fake security).
+      // Punch-policy group (#2203). S1 exposes unscheduled.mode = allow|block. S2 (#2333) exposes
+      // merge controls for in/out card selection. S3 (#2304) exposes the outdoor approval controls
+      // requireApproval / requireNote / approvalFlowId. S2 outdoor-punch-photo design-lock
+      // (2026-07-10) opens requirePhoto: the `files` table (core POST /api/files/upload,
+      // migration 035) now has a real writer (routes/files.ts INSERTs owner_id + content-type on
+      // every successful upload — previously it had none), so a photoFileId can be verified
+      // server-side (existence + image/* content-type + uploader === punching user) instead of
+      // trusted as a free-form client string. That verification is what makes requirePhoto a real
+      // enforcement knob rather than latent config with no contract behind it.
       punchPolicy: z.object({
         unscheduled: z.object({
           mode: z.enum(['allow', 'block']).optional(),
@@ -21632,6 +21974,7 @@ module.exports = {
         outdoor: z.object({
           requireApproval: z.boolean().optional(),
           requireNote: z.boolean().optional(),
+          requirePhoto: z.boolean().optional(),
           approvalFlowId: z.string().optional(),
         }).optional(),
       }).optional(),
@@ -21655,7 +21998,7 @@ module.exports = {
       // or null = no expiry).
       compTimeFromOvertime: z.object({
         enabled: z.boolean().optional(),
-        expiresInDays: z.number().int().positive().nullable().optional(),
+        expiresInDays: z.number().int().positive().max(36500).nullable().optional(),
       }).optional(),
       // 加班银行 (overtime bank) — OvertimeBankPolicy v1-1a latent config. Round-trips through PUT/GET; no
       // runtime enforces it yet. pooledSources enum EXCLUDES statutory_holiday (compliance floor §6 — 法定
@@ -21664,7 +22007,7 @@ module.exports = {
         enabled: z.boolean().optional(),
         pooledSources: z.array(z.enum(['workday', 'restday'])).optional(),
         maxMinutesPerPeriod: z.number().int().min(0).optional(),
-        validityDays: z.number().int().positive().nullable().optional(),
+        validityDays: z.number().int().positive().max(36500).nullable().optional(),
       }).optional(),
       // 加班银行 v1-2a — LeaveOffsetPolicy latent config. Round-trips through PUT/GET; v1-2b wiring consumes it.
       // deductFrom enum = the余额池; v1 locks single-pool (deductFrom[0]), cross-pool order is v2.
@@ -21757,6 +22100,13 @@ module.exports = {
           enabled: z.boolean().optional(),
         }).optional(),
         timezone: z.string().nullable().optional(),
+        // S3 scheduler trigger (design-lock attendance-annual-leave-accrual-scheduler-s3-design-lock-20260710).
+        // Kept in this SAME schema (not a separate one) so a PUT omitting annualLeavePolicy.scheduledTrigger
+        // never strips it — see #1829 (a settings key added to the normalizer but not this zod schema is
+        // silently stripped on the next PUT round-trip).
+        scheduledTrigger: z.object({
+          enabled: z.boolean().optional(),
+        }).optional(),
       }).optional(),
       // 加班三段引擎 O2: request metadata snapshot switch. Default false preserves
       // today's total-only overtime metadata; later slices consume the snapshot.
@@ -21828,6 +22178,10 @@ module.exports = {
       location: z.record(z.unknown()).optional(),
       meta: z.record(z.unknown()).optional(),
       orgId: z.string().optional(),
+      // S2 outdoor-punch-photo design-lock (2026-07-10) G1: a `files` row id (core
+      // POST /api/files/upload), never a free-form URL/meta blob — G2 verifies it
+      // server-side (owner + image/* content-type) before it is trusted as evidence.
+      photoFileId: z.string().min(1).optional(),
     })
 
     const shiftCreateSchema = z.object({
@@ -24483,6 +24837,53 @@ module.exports = {
               res.status(422).json({ ok: false, error: { code: 'OUTDOOR_NOTE_REQUIRED', message: '外勤打卡需填写备注' } })
               return
             }
+            // S2 outdoor-punch-photo design-lock (2026-07-10) G3: requirePhoto is nested exactly like
+            // requireNote — both only ever apply to an ACCEPTED outdoor candidate (requireApproval=true
+            // is the precondition for outdoor punches existing at all; with it off, an outside-fence
+            // punch already 403s as LOCATION_RESTRICTED, so there is no "accepted outdoor punch" to
+            // attach evidence to — no separate enforcement path is opened for that case).
+            // G2: any photoFileId supplied is verified against the `files` table (row exists, owner_id
+            // is the punching user, meta.contentType is image/*) — never trusted as a bare client string.
+            const rawPhotoFileId = typeof parsed.data.photoFileId === 'string' ? parsed.data.photoFileId.trim() : ''
+            if (outdoorPolicy.requirePhoto === true && !rawPhotoFileId) {
+              res.status(422).json({ ok: false, error: { code: 'OUTDOOR_PHOTO_REQUIRED', message: '外勤打卡需上传照片证据' } })
+              return
+            }
+            let photoFileId = null
+            if (rawPhotoFileId) {
+              // F2 files-acl-tombstone design-lock (2026-07-10): `DELETE /api/files/:id` now tombstones
+              // the row (`deleted_at`) instead of hard-deleting it — this filter is what makes a
+              // tombstoned id read as "no such evidence" here, same as the pre-tombstone hard-delete did.
+              const photoRows = await db.query('SELECT id, owner_id, meta FROM files WHERE id = $1 AND deleted_at IS NULL LIMIT 1', [rawPhotoFileId])
+              const photoRow = photoRows[0] ?? null
+              const photoMeta = normalizeMetadata(photoRow?.meta)
+              // H2 photo-evidence-hardening design-lock (2026-07-10) P3-1 AMENDMENT: `meta.contentType`
+              // is client-asserted (multer trusts the multipart part's Content-Type header as-is), so a
+              // forged `image/png` declaration on a non-image body previously passed this check. Rows
+              // written by the sniff-aware upload path (core routes/files.ts) carry `meta.sniffed ===
+              // true` — a PATH MARKER, not a content-type value — and ONLY those rows are held to the
+              // sniffed verdict: `meta.sniffedContentType` must be present and start with `image/`, else
+              // invalid (a magic-byte miss on a real upload is rejected here — this is what closes the
+              // forged-MIME gap). Rows with no `sniffed` key predate this slice and fall back to the
+              // pre-existing `meta.contentType` check byte-for-byte — old evidence is not retroactively
+              // invalidated. (Considered writing `sniffedContentType` unconditionally with a null
+              // sentinel on a miss instead of this separate marker — rejected: JSON key-present-but-null
+              // vs key-absent is a classic wire-format footgun, and a plain boolean path marker is more
+              // explicit and reusable by any future consumer of this table.)
+              let photoContentTypeValid
+              if (photoMeta.sniffed === true) {
+                const sniffedContentType = typeof photoMeta.sniffedContentType === 'string' ? photoMeta.sniffedContentType : ''
+                photoContentTypeValid = sniffedContentType.startsWith('image/')
+              } else {
+                const photoContentType = typeof photoMeta.contentType === 'string' ? photoMeta.contentType : ''
+                photoContentTypeValid = photoContentType.startsWith('image/')
+              }
+              if (!photoRow || photoRow.owner_id !== userId || !photoContentTypeValid) {
+                res.status(422).json({ ok: false, error: { code: 'OUTDOOR_PHOTO_INVALID', message: '照片证据无效' } })
+                return
+              }
+              photoFileId = rawPhotoFileId
+            }
             // Resolve + validate the outdoor_punch approval flow. No silent fall-back to auto-approved.
             const requestedFlowId = typeof outdoorPolicy.approvalFlowId === 'string' ? outdoorPolicy.approvalFlowId.trim() : ''
             let flow = null
@@ -24528,6 +24929,10 @@ module.exports = {
                   location: parsed.data.location ?? punchMeta.location ?? null,
                   note: note || null,
                   detection: outsideGeofence ? 'outside_geofence' : 'marker',
+                  // S2 outdoor-punch-photo design-lock (2026-07-10): photoFileId is written ONLY when a
+                  // verified photo was supplied, so a punch with requirePhoto=false and no photo produces
+                  // the pre-slice metadata.outdoorPunch shape byte-for-byte (no null-valued key added).
+                  ...(photoFileId ? { photoFileId } : {}),
                 },
                 approvalFlow: { id: flow.id, name: flow.name, steps: flow.steps, currentStep: 0 },
               },
@@ -28653,7 +29058,7 @@ module.exports = {
                   // expires_at = granted_at + N×24h — a FIXED 24h-per-day duration, computed in SQL from
                   // the statement's now() (granted_at also defaults to now() → exact). null = no expiry
                   // (unchanged C2 behaviour). The AttendanceExpiryService (C4-1) reaps these.
-                  const expiresInDays = compTimeSettings.compTimeFromOvertime.expiresInDays ?? null
+                  const expiresInDays = clampLotValidityDays(compTimeSettings.compTimeFromOvertime.expiresInDays)
                   // 加班银行 v1-1b (design-lock §3 账1): gate per-source tagging on overtimeBankPolicy. DORMANT
                   // (default, every current org) keeps the EXISTING single overtime_conversion lot with
                   // overtime_source NULL — byte-identical to pre-v1-1b. ENABLED splits the rule-normalized
@@ -28688,6 +29093,54 @@ module.exports = {
                       ? { workdayMinutes: snap.workdayOvertimeMinutes, restdayMinutes: snap.restdayOvertimeMinutes, holidayMinutes: snap.holidayOvertimeMinutes }
                       : null
                     const { lots } = partitionOvertimeBankGrantLots({ requestId, totalMinutes: amountMinutes, segments, overtimeBankPolicy: bankPolicy })
+                    // 加班银行 S1b (overtime-bank-cap design-lock §3): enforce the per-period (natural-month)
+                    // BANKED accrual cap BEFORE any lot is inserted — a pre-check, so an over-cap grant throws
+                    // and the ENTIRE approval txn rolls back (0 lot side-effects, request stays pending). Runs
+                    // only when maxMinutesPerPeriod > 0 (unset/0 → byte-identical no-op, invariant 3) and only
+                    // on the banked branch (dormant never reaches here). newBanked = Σ pooled lots and the
+                    // headroom counts only pooled (source-tagged) lots — one口径 (§6: statutory never pooled).
+                    // The period is keyed off THIS OT request's own work_date; excludeRequestId drops its own
+                    // lots (replay defense-in-depth — the pending-status guard already blocks re-approve first).
+                    const bankCapMinutes = Number(bankPolicy.maxMinutesPerPeriod)
+                    if (Number.isFinite(bankCapMinutes) && bankCapMinutes > 0) {
+                      const newBanked = lots.reduce((sum, lot) => sum + (Number(lot.minutes) || 0), 0)
+                      const capMonthStart = attendanceMonthStartKey(requestRow.work_date)
+                      const capMonthEnd = attendanceMonthEndKey(capMonthStart)
+                      // Serialize concurrent banked grants for the SAME (org, user, month) so the cap can't be
+                      // overshot by a TOCTOU race: the approval only locks its OWN request row (FOR UPDATE), so
+                      // two different OT requests approved concurrently would each read headroom before either
+                      // commits and both pass. A txn-scoped advisory lock keyed on (org:user:month) makes the
+                      // second wait until the first commits, so its headroom read sees the first's lots. Taken
+                      // ONLY on the capped banked path (uncapped/dormant stays lock-free — invariant 3). Auto-
+                      // released at commit/rollback.
+                      await trx.query('SELECT pg_advisory_xact_lock(hashtext($1::text), hashtext($2::text))', [`attendance:otbank-cap:${orgId}:${requestRow.user_id}`, String(capMonthStart)])
+                      const existingBanked = await sumBankedOvertimeMinutesForMonth(trx, {
+                        orgId,
+                        userId: requestRow.user_id,
+                        monthStart: capMonthStart,
+                        monthEnd: capMonthEnd,
+                        excludeRequestId: requestId,
+                      })
+                      const capDecision = overtimeBankCapDecision({
+                        maxMinutesPerPeriod: bankCapMinutes,
+                        existingBanked,
+                        newBanked,
+                      })
+                      if (capDecision.blocked) {
+                        throw new HttpError(
+                          422,
+                          'OVERTIME_BANK_CAP_EXCEEDED',
+                          `Overtime bank monthly cap exceeded for ${capMonthStart ? capMonthStart.slice(0, 7) : 'period'}: cap ${capDecision.cap} min, already banked ${capDecision.existing} min, this grant ${capDecision.added} min would reach ${capDecision.projected} min`
+                        )
+                      }
+                    }
+                    // 加班银行 S1 (overtime-bank-validity design-lock): the bank card owns the BANKED (source-
+                    // tagged) lots' validity. `overtimeBankPolicy.validityDays`, when set, governs their
+                    // expires_at and overrides compTimeFromOvertime.expiresInDays for THESE lots only; unset
+                    // falls back to expiresInDays (byte-identical to pre-S1). The dormant branch above is
+                    // untouched. Before S1 this knob was shipped in the admin UI but read by nothing, while
+                    // expiresInDays silently governed expiry — two conflicting switches.
+                    const bankedExpiresInDays = resolveBankedLotExpiresInDays(bankPolicy, expiresInDays)
                     for (const lot of lots) {
                       const lotRows = await trx.query(
                         `INSERT INTO attendance_leave_balances
@@ -28696,7 +29149,7 @@ module.exports = {
                                  CASE WHEN $6::int IS NULL THEN NULL ELSE now() + ($6::int * interval '24 hours') END, $7)
                          ON CONFLICT (org_id, source_key) DO NOTHING
                          RETURNING id`,
-                        [orgId, requestRow.user_id, lot.minutes, requestId, lot.sourceKey, expiresInDays, lot.source]
+                        [orgId, requestRow.user_id, lot.minutes, requestId, lot.sourceKey, bankedExpiresInDays, lot.source]
                       )
                       const newLotId = lotRows[0]?.id
                       if (newLotId) {
@@ -31767,7 +32220,7 @@ module.exports = {
 
           res.setHeader('Content-Type', 'text/csv; charset=utf-8')
           res.setHeader('Content-Disposition', `attachment; filename="${buildImportTemplateFilename(profile)}"`)
-          res.send(csvText)
+          res.send(withCsvBom(csvText))
           return
         }
         res.json({
@@ -31795,7 +32248,98 @@ module.exports = {
 
         res.setHeader('Content-Type', 'text/csv; charset=utf-8')
         res.setHeader('Content-Disposition', `attachment; filename="${buildImportTemplateFilename(profile)}"`)
-        res.send(csvText)
+        res.send(withCsvBom(csvText))
+	      })
+	    )
+
+	    // Per-user field-picker memory (attendance-import-template-prefs design-lock
+	    // §2, RATIFIED 2026-07-07). Governance: the actor is ALWAYS req.user — the
+	    // legacy x-user-id header fallback in getUserId() is deliberately NOT used
+	    // here (personal-views lock §7 Q1 anti-pattern). org stays a legitimate
+	    // client dimension (multi-org admins), mirroring getOrgId().
+	    const getTemplatePrefsActorId = (req) => {
+	      const user = req.user
+	      const raw = user?.id ?? user?.sub ?? user?.userId
+	      if (typeof raw === 'string' && raw.trim().length > 0) return raw.trim()
+	      if (typeof raw === 'number' && Number.isFinite(raw)) return String(raw)
+	      return null
+	    }
+	    const TEMPLATE_PREFS_MAX_KEYS = 64
+	    const TEMPLATE_PREFS_MAX_KEY_LENGTH = 128
+
+	    context.api.http.addRoute(
+	      'GET',
+	      '/api/attendance/import/template-prefs',
+	      withAttendanceImportPermission(async (req, res) => {
+	        const actorId = getTemplatePrefsActorId(req)
+	        if (!actorId) {
+	          res.status(401).json({ ok: false, error: { code: 'UNAUTHORIZED', message: 'Authenticated user required' } })
+	          return
+	        }
+	        const orgId = getOrgId(req)
+	        const rows = await db.query(
+	          `SELECT selected_keys FROM attendance_import_template_prefs WHERE org_id = $1 AND user_id = $2`,
+	          [orgId, actorId]
+	        )
+	        const stored = rows?.[0]?.selected_keys
+	        const selectedKeys = Array.isArray(stored)
+	          ? stored.filter((key) => typeof key === 'string' && key.trim().length > 0)
+	          : []
+	        res.json({ ok: true, data: { selectedKeys } })
+	      })
+	    )
+
+	    context.api.http.addRoute(
+	      'PUT',
+	      '/api/attendance/import/template-prefs',
+	      withAttendanceImportPermission(async (req, res) => {
+	        const actorId = getTemplatePrefsActorId(req)
+	        if (!actorId) {
+	          res.status(401).json({ ok: false, error: { code: 'UNAUTHORIZED', message: 'Authenticated user required' } })
+	          return
+	        }
+	        const orgId = getOrgId(req)
+	        const raw = req.body?.selectedKeys
+	        if (raw !== null && raw !== undefined && !Array.isArray(raw)) {
+	          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'selectedKeys must be an array of field keys (or null/[] to clear)' } })
+	          return
+	        }
+	        const cleaned = Array.isArray(raw)
+	          ? Array.from(new Set(raw
+	              .filter((key) => typeof key === 'string')
+	              .map((key) => key.trim())
+	              .filter((key) => key.length > 0)))
+	          : []
+	        if (Array.isArray(raw) && raw.some((key) => typeof key !== 'string')) {
+	          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'selectedKeys must contain strings only' } })
+	          return
+	        }
+	        if (cleaned.some((key) => key.length > TEMPLATE_PREFS_MAX_KEY_LENGTH)) {
+	          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: `selectedKeys entries must be at most ${TEMPLATE_PREFS_MAX_KEY_LENGTH} characters` } })
+	          return
+	        }
+	        if (cleaned.length > TEMPLATE_PREFS_MAX_KEYS) {
+	          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: `selectedKeys exceeds the ${TEMPLATE_PREFS_MAX_KEYS}-key limit` } })
+	          return
+	        }
+	        if (cleaned.length === 0) {
+	          // Clear semantics (恢复默认): drop the row so future default-set
+	          // upgrades flow to the user instead of being pinned by an old save.
+	          await db.query(
+	            `DELETE FROM attendance_import_template_prefs WHERE org_id = $1 AND user_id = $2`,
+	            [orgId, actorId]
+	          )
+	          res.json({ ok: true, data: { selectedKeys: [] } })
+	          return
+	        }
+	        await db.query(
+	          `INSERT INTO attendance_import_template_prefs (org_id, user_id, selected_keys, updated_at)
+	           VALUES ($1, $2, $3::jsonb, NOW())
+	           ON CONFLICT (org_id, user_id)
+	           DO UPDATE SET selected_keys = EXCLUDED.selected_keys, updated_at = NOW()`,
+	          [orgId, actorId, JSON.stringify(cleaned)]
+	        )
+	        res.json({ ok: true, data: { selectedKeys: cleaned } })
 	      })
 	    )
 
@@ -35394,7 +35938,7 @@ module.exports = {
 	          const filename = `attendance-import-${String(batchId).slice(0, 8)}-${type}-${stamp}.csv`
 	          res.setHeader('Content-Type', 'text/csv; charset=utf-8')
 	          res.setHeader('Content-Disposition', `attachment; filename=\"${filename}\"`)
-	          res.send(lines.join('\n'))
+	          res.send(withCsvBom(lines.join('\n')))
 	        } catch (error) {
 	          if (error instanceof HttpError) {
 	            res.status(error.status).json({ ok: false, error: { code: error.code, message: error.message } })
@@ -36404,7 +36948,7 @@ module.exports = {
 
           res.setHeader('Content-Type', 'text/csv; charset=utf-8')
           res.setHeader('Content-Disposition', `attachment; filename="${filename}"`)
-          res.status(200).send(csv)
+          res.status(200).send(withCsvBom(csv))
         } catch (error) {
           if (isDatabaseSchemaError(error)) {
             res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
@@ -41738,7 +42282,7 @@ module.exports = {
         const asOf = parsed.data.asOf || new Date().toISOString().slice(0, 10)
         const dryRun = parsed.data.dryRun ?? false
         try {
-          const summary = await db.transaction(async (trx) => runAnnualLeaveAccrual(trx, { orgId, period: parsed.data.period, asOf, dryRun }))
+          const summary = await db.transaction(async (trx) => runAnnualLeaveAccrual(trx, { orgId, period: parsed.data.period, asOf, dryRun, triggeredBy: 'manual' }))
           emitEvent('attendance.annual_leave_accrual.run', { orgId, periodKey: summary.periodKey, asOf: summary.asOf, dryRun: summary.dryRun, granted: summary.granted, skipped: summary.skipped })
           res.json({ ok: true, data: summary })
         } catch (error) {
@@ -41941,7 +42485,7 @@ module.exports = {
           res.setHeader('Content-Type', 'text/csv')
           res.setHeader('Content-Disposition', `attachment; filename="${filename}"`)
           setAttendanceReportFieldConfigHeaders(res, reportFieldConfig)
-          res.status(200).send(csv)
+          res.status(200).send(withCsvBom(csv))
         } catch (error) {
           if (isDatabaseSchemaError(error)) {
             res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
@@ -41989,6 +42533,20 @@ module.exports = {
 	        name: 'attendance-report-sync-scheduled',
 	        run: () => runAttendanceReportSyncScheduledTriggerOnce(context, db, logger, { emitEvent }),
 	      }) ?? null
+	      // S3 annual-leave accrual scheduled trigger (design-lock
+	      // attendance-annual-leave-accrual-scheduler-s3-design-lock-20260710). Registration is harmless — the
+	      // job is dormant until BOTH ATTENDANCE_ANNUAL_LEAVE_ACCRUAL_SCHEDULED_ENABLED=true (env) AND
+	      // settings.annualLeavePolicy.scheduledTrigger.enabled=true (org policy) — missing either is a
+	      // byte-exact no-op. Independently registered (own name, own try/catch inside
+	      // AttendanceScheduler.runCycle) so a failure here never skips expiry / the other scheduled jobs.
+	      if (annualLeaveAccrualSchedulerUnregister) {
+	        annualLeaveAccrualSchedulerUnregister()
+	        annualLeaveAccrualSchedulerUnregister = null
+	      }
+	      annualLeaveAccrualSchedulerUnregister = context.services?.attendanceScheduler?.registerJob?.({
+	        name: 'attendance-annual-leave-accrual',
+	        run: () => runAnnualLeaveAccrualScheduledTriggerOnce(db, logger, { emitEvent }),
+	      }) ?? null
 	    } catch (error) {
 	      logger.warn('Attendance settings preload failed', error)
 	    }
@@ -42018,6 +42576,10 @@ module.exports = {
 	    if (reportSyncScheduledTriggerSchedulerUnregister) {
 	      reportSyncScheduledTriggerSchedulerUnregister()
 	      reportSyncScheduledTriggerSchedulerUnregister = null
+	    }
+	    if (annualLeaveAccrualSchedulerUnregister) {
+	      annualLeaveAccrualSchedulerUnregister()
+	      annualLeaveAccrualSchedulerUnregister = null
 	    }
 	  }
 }

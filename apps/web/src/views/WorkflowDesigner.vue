@@ -862,42 +862,10 @@ watch(isDirty, (dirty) => {
   align-items: center;
   gap: 8px;
   padding: 8px 16px;
-  background: #f4f8ff;
-  border-bottom: 1px solid #d9e7ff;
-  color: #315ea8;
+  background: var(--el-color-primary-light-9);
+  border-bottom: 1px solid var(--el-color-primary-light-8);
+  color: var(--el-color-primary-dark-2);
   font-size: 13px;
-}
-
-/* Header */
-.designer-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 12px 16px;
-  background: var(--el-bg-color);
-  border-bottom: 1px solid var(--el-border-color-light);
-}
-
-.header-left {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-}
-
-.workflow-name {
-  font-size: 16px;
-  font-weight: 500;
-}
-
-.header-center {
-  display: flex;
-  align-items: center;
-}
-
-.header-right {
-  display: flex;
-  align-items: center;
-  gap: 8px;
 }
 
 /* Main Content */
@@ -908,111 +876,13 @@ watch(isDirty, (dirty) => {
   position: relative;
 }
 
-/* Tool Palette */
-.tool-palette {
-  width: 200px;
-  background: var(--el-bg-color);
-  border-right: 1px solid var(--el-border-color-light);
-  overflow-y: auto;
-  padding: 12px;
-}
-
-.palette-section {
-  margin-bottom: 16px;
-}
-
-.section-title {
-  font-size: 12px;
-  font-weight: 600;
-  color: var(--el-text-color-secondary);
-  text-transform: uppercase;
-  margin-bottom: 8px;
-  padding-left: 4px;
-}
-
-.palette-item {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 8px;
-  border-radius: 6px;
-  cursor: grab;
-  transition: background 0.2s;
-  margin-bottom: 4px;
-}
-
-.palette-item:hover {
-  background: var(--el-fill-color-light);
-}
-
-.palette-item:active {
-  cursor: grabbing;
-}
-
-.item-icon {
-  width: 28px;
-  height: 28px;
-  border-radius: 6px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  color: white;
-  font-size: 14px;
-}
-
-.item-label {
-  font-size: 13px;
-  color: var(--el-text-color-regular);
-}
-
-/* Canvas Container */
-.canvas-container {
-  flex: 1;
-  position: relative;
-  overflow: hidden;
-}
-
-.bpmn-canvas {
-  width: 100%;
-  height: 100%;
-}
-
-.drop-zone {
-  position: absolute;
-  inset: 0;
-  background: rgba(64, 158, 255, 0.1);
-  border: 2px dashed var(--el-color-primary);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 18px;
-  color: var(--el-color-primary);
-  pointer-events: all;
-}
-
-/* Properties Panel */
-.properties-panel {
-  width: 280px;
-  background: var(--el-bg-color);
-  border-left: 1px solid var(--el-border-color-light);
-  display: flex;
-  flex-direction: column;
-}
-
-.panel-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 12px 16px;
-  border-bottom: 1px solid var(--el-border-color-light);
-  font-weight: 500;
-}
-
-.panel-content {
-  flex: 1;
-  padding: 16px;
-  overflow-y: auto;
-}
+/* dead CSS removed (UF-6): .designer-header/.header-left/.workflow-name/.header-center/
+   .header-right/.tool-palette/.palette-section/.section-title/.palette-item/.item-icon/
+   .item-label/.canvas-container/.bpmn-canvas/.drop-zone/.properties-panel/.panel-header/
+   .panel-content styled nothing — this markup was extracted into WorkflowDesignerToolbar,
+   WorkflowPalette, WorkflowCanvasShell and WorkflowPropertyPanel; verified zero template
+   references to these class names before deletion (design-lock §8 allows dead-CSS deletion
+   here without touching the canvas body itself). */
 
 /* Slide animation */
 .slide-right-enter-active,
@@ -1090,8 +960,8 @@ watch(isDirty, (dirty) => {
 .template-dialog__recent {
   padding: 14px;
   border-radius: 12px;
-  border: 1px solid #dbeafe;
-  background: linear-gradient(180deg, #f8fbff 0%, #eef6ff 100%);
+  border: 1px solid var(--el-color-primary-light-8);
+  background: linear-gradient(180deg, var(--ms-bg-card) 0%, var(--el-color-primary-light-9) 100%);
 }
 
 .template-dialog__toolbar,
@@ -1116,7 +986,7 @@ watch(isDirty, (dirty) => {
   padding: 14px;
   border-radius: 12px;
   border: 1px solid var(--el-border-color-light);
-  background: #fff;
+  background: var(--ms-bg-card);
   text-align: left;
   display: grid;
   gap: 10px;
@@ -1125,7 +995,7 @@ watch(isDirty, (dirty) => {
 
 .template-dialog__item.is-active {
   border-color: var(--el-color-primary);
-  box-shadow: 0 0 0 1px rgba(64, 158, 255, 0.12);
+  box-shadow: 0 0 0 1px var(--el-color-primary-light-7);
 }
 
 .template-dialog__item p,
@@ -1155,25 +1025,25 @@ watch(isDirty, (dirty) => {
 }
 
 .template-dialog__badge {
-  background: #eff6ff;
-  color: #1d4ed8;
+  background: var(--el-color-primary-light-9);
+  color: var(--el-color-primary-dark-2);
 }
 
 .template-dialog__badge[data-source='builtin'] {
-  background: #ecfccb;
-  color: #3f6212;
+  background: var(--el-color-success-light-9);
+  color: var(--el-color-success-dark-2);
 }
 
 .template-dialog__badge[data-source='database'] {
-  background: #ede9fe;
-  color: #7c3aed;
+  background: var(--el-color-info-light-9);
+  color: var(--el-color-info-dark-2);
 }
 
 .template-dialog__detail {
   border: 1px solid var(--el-border-color-light);
   border-radius: 14px;
   padding: 16px;
-  background: linear-gradient(180deg, #ffffff 0%, #f8fafc 100%);
+  background: linear-gradient(180deg, var(--ms-bg-card) 0%, var(--ms-bg-page) 100%);
 }
 
 .template-dialog__detail-header {
@@ -1204,24 +1074,24 @@ watch(isDirty, (dirty) => {
 }
 
 .template-dialog__tag {
-  background: #f3f4f6;
-  color: #374151;
+  background: var(--ms-bg-page);
+  color: var(--ms-text-2);
 }
 
 .template-dialog__recent-chip {
-  border: 1px solid #dbeafe;
-  background: #fff;
+  border: 1px solid var(--el-color-primary-light-8);
+  background: var(--ms-bg-card);
   border-radius: 999px;
   padding: 8px 12px;
   display: inline-flex;
   align-items: center;
   gap: 8px;
   cursor: pointer;
-  color: #1f2937;
+  color: var(--ms-text-1);
 }
 
 .template-dialog__recent-chip small {
-  color: #64748b;
+  color: var(--ms-text-2);
   text-transform: uppercase;
 }
 
@@ -1229,13 +1099,13 @@ watch(isDirty, (dirty) => {
 .template-dialog__error {
   padding: 18px;
   border-radius: 12px;
-  background: #f8fafc;
-  color: #475569;
+  background: var(--ms-bg-page);
+  color: var(--ms-text-2);
 }
 
 .template-dialog__error {
-  background: #fef2f2;
-  color: #b91c1c;
+  background: var(--el-color-danger-light-9);
+  color: var(--el-color-danger-dark-2);
 }
 
 @media (max-width: 960px) {

@@ -1376,14 +1376,29 @@ function onKeydown(e: KeyboardEvent) {
 </script>
 
 <style scoped>
-.meta-grid { position: relative; display: flex; flex-direction: column; flex: 1; min-height: 0; outline: none; }
+.meta-grid {
+  position: relative; display: flex; flex-direction: column; flex: 1; min-height: 0; outline: none;
+  border: 1px solid var(--ms-border-light, #e7e8ec);
+  border-radius: var(--ms-radius-lg, 12px);
+  background: var(--ms-bg-card, #fff);
+  box-shadow: var(--ms-shadow-card, 0 1px 2px rgba(31,35,41,.04), 0 8px 24px rgba(31,35,41,.06));
+  overflow: hidden;
+}
 .meta-grid__table-wrap { flex: 1; overflow: auto; }
+/* Header-only refinements: target thead specifically so the shared
+   row-num/check-col classes (also used on body td) keep their existing
+   body-row appearance — only the header cells adopt the panel/token look. */
+thead .meta-grid__row-num,
+thead .meta-grid__check-col {
+  background: var(--ms-bg-card, #fff);
+  border-bottom: 1px solid var(--ms-border-light, #e7e8ec);
+}
 .meta-grid__table { width: 100%; border-collapse: collapse; font-size: 13px; }
 .meta-grid__row-num { width: 56px; min-width: 56px; text-align: center; color: #999; font-size: 12px; background: #f9fafb; border-bottom: 1px solid #eee; border-right: 1px solid #eee; padding: 6px 4px; position: sticky; left: 0; z-index: 1; }
 .meta-grid__row-num > span { display: inline-flex; align-items: center; justify-content: center; }
 .meta-grid__check-col { position: sticky; z-index: 1; }
 .meta-grid__row { transition: background 0.1s; content-visibility: auto; contain-intrinsic-size: auto 36px; }
-.meta-grid__row:hover { background: #f5f7fa; }
+.meta-grid__row:hover { background: var(--ms-bg-page, #f5f6f8); }
 .meta-grid__row--selected, .meta-grid__row--focused { background: #ecf5ff; }
 .meta-grid__cell { position: relative; padding: 6px 12px; border-bottom: 1px solid #eee; overflow: hidden; text-overflow: ellipsis; cursor: default; }
 .meta-grid__cell--editing { padding: 2px 4px; background: #fff; }

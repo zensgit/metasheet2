@@ -14,8 +14,9 @@
  *      interactions plus the release-readiness governance interaction plus
  *      the BOM-analysis / ECO-approval Wave 3 interactions plus the approval
  *      list/detail / BOM-substitute Wave 4 interactions plus the CAD
- *      review/workspace Wave 5 interactions that PLMAdapter currently calls
- *      are present, in the documented order.
+ *      review/workspace Wave 5 interactions plus the PLM-COLLAB Discussion
+ *      Phase 3 slice-1 (READ-ONLY) interactions that PLMAdapter currently
+ *      calls are present, in the documented order.
  *      including `aml/metadata`, now that PLMAdapter calls the dedicated
  *      metadata route for item-type schema discovery.
  *   3. PLMAdapter actually calls every adapter-owned endpoint declared in the
@@ -118,10 +119,24 @@ const PLM_ADAPTER_PACT_PATHS = [
   { method: 'GET', path: '/api/v1/bom/multitable/01H000000000000000000000P1/context' },
   // PLM-COLLAB P3 (方案1) governed BOM multitable write-back: re-added in its AMENDED form now that
   // the Yuantus provider (#905) honors a GOVERNED, Idempotency-Key-gated write-back (entitlement
-  // plm.bom_multitable_writeback). It MUST sit at the END of the adapter-owned list — immediately
-  // before the V1.2 parent-host embed-token — so the concatenated PACT_PATHS order matches the
-  // corresponding placement of the interaction in the pact JSON. PLMAdapter.ts owns the callsite.
+  // plm.bom_multitable_writeback). PLMAdapter.ts owns the callsite.
   { method: 'PATCH', path: '/api/v1/bom/multitable/01H000000000000000000000W1/lines/01H000000000000000000000W3' },
+  // ECO Phase 3 (Yuantus provider #973): the locked-BOM revision-intent seam the Phase-0
+  // discriminated 409 (eco_required) points at. POST with NO body and NO Idempotency-Key —
+  // idempotency is the provider's attach-before-create (at most one open intent per part).
+  // It MUST sit at the END of the adapter-owned list — immediately before the V1.2 parent-host
+  // embed-token — so the concatenated PACT_PATHS order matches the pact JSON placement.
+  { method: 'POST', path: '/api/v1/bom/multitable/01H000000000000000000000L1/eco-intent' },
+  // PLM-COLLAB Discussion Phase 3 slice-1 (READ-ONLY, design-lock taskbook
+  // plm-collab-discussion-phase3-metasheet-consumer-taskbook-20260709.md): the provider routes
+  // already exist on Yuantus main (Discussion Core R1 + Phase-2 + Phase-6) — this slice adds NO
+  // new provider route, only the consumer read callsites. Bearer-JWT + target-inherited
+  // permission only, NOT entitlement-gated. Per the taskbook's §3.4 template, these three sit at
+  // the END of the adapter-owned list: a representative thread-list success, a thread-detail
+  // success, and the no-leak 404 for a missing/unreadable target.
+  { method: 'GET', path: '/api/v1/discussions' },
+  { method: 'GET', path: '/api/v1/discussions/01H000000000000000000000T2' },
+  { method: 'GET', path: '/api/v1/discussions' },
 ] as const
 
 const PARENT_HOST_PACT_PATHS = [
@@ -140,6 +155,11 @@ const ERROR_CONTRACT_PACT_PATHS = [
   // write-back — no new consumer callsite.
   { method: 'PATCH', path: '/api/v1/bom/multitable/01H000000000000000000000W4/lines/01H000000000000000000000W6' },
   { method: 'PATCH', path: '/api/v1/bom/multitable/01H000000000000000000000W7/lines/01H000000000000000000000W9' },
+  // ECO Phase 3: the intent seam's own discriminated 409 namespace, pinned via its most
+  // consumer-branched code — not_locked (the CTA resets to the direct-edit path on it). The
+  // sibling code eco_intent_rejected shares the same envelope and stays consumer-tested only
+  // (its recovery is a generic retry; pinning one code freezes the namespace shape).
+  { method: 'POST', path: '/api/v1/bom/multitable/01H000000000000000000000L2/eco-intent' },
 ] as const
 
 const PACT_PATHS = [
@@ -221,12 +241,57 @@ describe('Pact: Metasheet2 consumer -> YuantusPLM provider (Wave 1 + Wave 2 docu
       '/api/v1/integrations/capabilities',
       '/api/v1/bom/multitable/${partId}/context',
       '/api/v1/bom/multitable/${partId}/lines/${bomLineId}',
+      '/api/v1/bom/multitable/${partId}/eco-intent',
+      // PLM-COLLAB Discussion Phase 3 slice-1 (READ-ONLY)
+      '/api/v1/discussions',
+      '/api/v1/discussions/${threadId}',
     ]
     for (const ep of endpointsToFind) {
       expect(
         adapterSrc.includes(ep),
         `PLMAdapter.ts no longer references ${ep}; pact has drifted from the consumer.`,
       ).toBe(true)
+    }
+  })
+
+  // #4020 (PLM-COLLAB C1 follow-up): the provider now computes a unified per-feature
+  // `available` field -- `available = supported && (packaging === 'base' || entitled)`
+  // (Yuantus provider #1156). Pins the formula for bom_multitable (paid, licensed under this
+  // fixture's tenant-1 provider state), discussion_core (base packaging -- available stays
+  // true even though entitled is false, since a base deployment ships no license row -- the
+  // exact bug #4020 fixes), and metasheet_review (paid packaging, unlicensed under this same
+  // fixture -- entitled false AND available false). entitled/available are EXACT-matched (the
+  // formula's own discriminators); everything else on these entries stays match-by-type.
+  it('#4020: the capabilities interaction pins the provider-computed available formula', () => {
+    const pact = loadPact()
+    const interaction = pact.interactions.find(
+      i => i.request.path === '/api/v1/integrations/capabilities',
+    )
+    expect(interaction).toBeDefined()
+    const body = interaction!.response.body as {
+      features: Record<string, { supported: boolean; entitled: boolean; available?: boolean }>
+    }
+
+    expect(body.features.bom_multitable.supported).toBe(true)
+    expect(body.features.bom_multitable.entitled).toBe(true)
+    expect(body.features.bom_multitable.available).toBe(true)
+
+    // base-packaged: unlicensed (entitled false) but STILL available -- the bug #4020 fixes
+    expect(body.features.discussion_core.supported).toBe(true)
+    expect(body.features.discussion_core.entitled).toBe(false)
+    expect(body.features.discussion_core.available).toBe(true)
+
+    // paid-packaged, unlicensed under this fixture: available follows entitled (both false)
+    expect(body.features.metasheet_review.supported).toBe(true)
+    expect(body.features.metasheet_review.entitled).toBe(false)
+    expect(body.features.metasheet_review.available).toBe(false)
+
+    // entitled/available are the formula's discriminators -- must be EXACT-matched, never
+    // loosened to a type matcher (a type matcher would erase the pinned true/false split)
+    const rules = interaction!.response.matchingRules?.body ?? {}
+    for (const key of ['bom_multitable', 'discussion_core', 'metasheet_review']) {
+      expect(rules).not.toHaveProperty(`$.features.${key}.entitled`)
+      expect(rules).not.toHaveProperty(`$.features.${key}.available`)
     }
   })
 
@@ -287,6 +352,120 @@ describe('Pact: Metasheet2 consumer -> YuantusPLM provider (Wave 1 + Wave 2 docu
       ok: true,
       bom_line_id: '01H000000000000000000000W3',
     })
+  })
+
+  // ECO Phase 3 (Yuantus provider #973): the locked-BOM revision-intent seam.
+  it('ECO Phase 3: the eco-intent contract is body-less, key-less, entitlement-stated, minimal-enveloped', () => {
+    const pact = loadPact()
+    const success = pact.interactions.find(
+      i => i.request.method === 'POST' && i.request.path === '/api/v1/bom/multitable/01H000000000000000000000L1/eco-intent',
+    )
+    expect(success).toBeDefined()
+
+    // provider state names the intent entitlement + the locked precondition
+    expect(success!.providerStates![0].name).toContain('plm.bom_eco_revision')
+    expect(success!.providerStates![0].name).toContain('lifecycle-locked')
+
+    // NO body, NO Idempotency-Key (provider attach-before-create owns idempotency), NO Content-Type
+    expect(success!.request.body).toBeUndefined()
+    const headers = (success!.request.headers ?? {}) as Record<string, string>
+    expect(Object.keys(headers)).not.toContain('Idempotency-Key')
+    expect(Object.keys(headers)).not.toContain('Content-Type')
+
+    // minimal success envelope: the three consumer-branched keys only (source/target_version_id
+    // stay provider-additive, deliberately unpinned)
+    expect(success!.response.status).toBe(200)
+    expect(Object.keys(success!.response.body as Record<string, unknown>).sort()).toEqual([
+      'attached', 'eco_id', 'state',
+    ])
+
+    // the intent seam's own 409 namespace: not_locked pinned as a dedicated error fixture,
+    // discriminated by detail.code alone (exact value, message type-matched)
+    const notLocked = pact.interactions.find(
+      i => i.request.method === 'POST' && i.request.path === '/api/v1/bom/multitable/01H000000000000000000000L2/eco-intent',
+    )
+    expect(notLocked).toBeDefined()
+    expect(notLocked!.response.status).toBe(409)
+    const detail = (notLocked!.response.body as { detail: Record<string, unknown> }).detail
+    expect(detail.code).toBe('not_locked')
+  })
+
+  // PLM-COLLAB Discussion Phase 3 slice-1 (READ-ONLY): the provider routes already exist on
+  // Yuantus main (Discussion Core R1 + Phase-2 + Phase-6); this slice adds no new provider
+  // route, only the consumer read callsites (getDiscussions / getDiscussionThread). Bearer-JWT
+  // + target-inherited permission only -- NOT entitlement-gated (no capability/SKU check).
+  it('Discussion Phase 3 slice-1: thread-list success, thread-detail success, and the no-leak 404 are locked', () => {
+    const pact = loadPact()
+    const discussionInteractions = pact.interactions.filter(
+      i => i.request.path === '/api/v1/discussions' || i.request.path === '/api/v1/discussions/01H000000000000000000000T2',
+    )
+    // exactly the three read interactions this slice adds (list success, detail success, 404)
+    expect(discussionInteractions).toHaveLength(3)
+
+    const listSuccess = pact.interactions.find(
+      i => i.request.path === '/api/v1/discussions' && i.response.status === 200,
+    )
+    const detailSuccess = pact.interactions.find(
+      i => i.request.path === '/api/v1/discussions/01H000000000000000000000T2',
+    )
+    const listNotFound = pact.interactions.find(
+      i => i.request.path === '/api/v1/discussions' && i.response.status === 404,
+    )
+
+    expect(listSuccess).toBeDefined()
+    expect(detailSuccess).toBeDefined()
+    expect(listNotFound).toBeDefined()
+
+    // thread-list request shape: target_type/target_id are required query params.
+    // include_resolved/include_children are OMITTED here (not just "false") because the
+    // adapter's guard is truthy-only (`if (options?.includeResolved) ...`), matching the
+    // provider's own false defaults -- the pact must describe what the adapter actually sends.
+    expect(listSuccess!.request.method).toBe('GET')
+    expect(listSuccess!.request.query).toEqual({
+      target_type: ['item'],
+      target_id: ['01H000000000000000000000T1'],
+      limit: ['20'],
+    })
+    expect(listSuccess!.providerStates![0].name).toContain('01H000000000000000000000T1')
+    // envelope is {threads, next_cursor} -- NOT a bare array (unlike the ECO list endpoint)
+    const listBody = listSuccess!.response.body as { threads: unknown[]; next_cursor: unknown }
+    expect(Array.isArray(listBody.threads)).toBe(true)
+    expect(listBody.threads[0]).toMatchObject({
+      id: '01H000000000000000000000T2',
+      target_type: 'item',
+      target_id: '01H000000000000000000000T1',
+      status: 'open',
+    })
+    expect(listBody).toHaveProperty('next_cursor')
+
+    // thread-detail request shape + comment envelope
+    expect(detailSuccess!.request.method).toBe('GET')
+    expect(detailSuccess!.request.query).toEqual({ include_history: ['true'] })
+    const detailBody = detailSuccess!.response.body as Record<string, unknown> & { comments: unknown[] }
+    expect(detailBody.id).toBe('01H000000000000000000000T2')
+    expect(Array.isArray(detailBody.comments)).toBe(true)
+    expect(detailBody.comments[0]).toMatchObject({
+      id: expect.any(String),
+      author_user_id: expect.any(Number),
+      body: expect.any(String),
+    })
+    // Phase-6 include_history merge, present because include_history=true was requested
+    expect(Array.isArray(detailBody.history)).toBe(true)
+
+    // the no-leak 404: a missing/unreadable target is indistinguishable, no existence leak
+    expect(listNotFound!.request.query).toEqual({
+      target_type: ['item'],
+      target_id: ['01H000000000000000000000T9'],
+      limit: ['20'],
+    })
+    expect(listNotFound!.response.status).toBe(404)
+    expect(listNotFound!.response.body).toEqual({ detail: 'discussion target not found' })
+
+    // every discussion interaction is bearer-JWT authenticated (no entitlement/capability header)
+    for (const interaction of discussionInteractions) {
+      const headers = (interaction.request.headers ?? {}) as Record<string, string>
+      expect(headers.Authorization).toBeDefined()
+    }
   })
 
   // ECO Phase 0: the discriminated-409 error contract (Yuantus provider #968 taskbook + #969 impl).

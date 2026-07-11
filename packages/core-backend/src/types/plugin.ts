@@ -1676,7 +1676,6 @@ export interface StorageService {
   getFileInfo(fileId: string): Promise<StorageFile | null>
   getFileUrl(fileId: string, options?: GetUrlOptions): Promise<string>
   getPresignedUploadUrl(options: PresignedUploadOptions): Promise<PresignedUpload>
-  listFiles(prefix?: string, options?: ListOptions): Promise<StorageFile[]>
   createFolder(path: string): Promise<void>
   deleteFolder(path: string, recursive?: boolean): Promise<void>
   getStorageUsage(): Promise<StorageUsage>
@@ -1687,6 +1686,10 @@ export interface StorageFile {
   name?: string
   filename?: string    // alias for name
   path: string
+  /** F3 (2026-07-10): server-derived physical storage key (`<uuid>/<safe-basename>` for the local
+   * provider). Equal to `path` for the local provider; carried explicitly so callers persist the
+   * key that `downloadByKey` re-reads without depending on `path`'s legacy client-derived meaning. */
+  storageKey?: string
   url?: string         // file URL
   size: number
   mimeType?: string
@@ -1728,21 +1731,6 @@ export interface PresignedUpload {
   fileId?: string
   fields?: Record<string, string>
   expiresAt?: Date
-}
-
-export interface ListOptions {
-  limit?: number
-  offset?: number
-  recursive?: boolean
-  sortBy?: 'name' | 'size' | 'createdAt' | 'updatedAt'
-  sortOrder?: 'asc' | 'desc'
-  filter?: {
-    contentType?: string
-    sizeMin?: number
-    sizeMax?: number
-    createdAfter?: Date
-    createdBefore?: Date
-  }
 }
 
 export interface StorageUsage {

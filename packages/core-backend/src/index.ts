@@ -13,7 +13,7 @@ import crypto from 'crypto'
 import { EventEmitter } from 'eventemitter3'
 import { Injector } from '@wendellhu/redi' // IoC Container
 import { createContainer } from './di/container'
-import { IConfigService, ILogger, ICollabService, ICoreAPI, IPluginLoader, ICollectionManager, IPLMAdapter, IAthenaAdapter, IDedupCADAdapter, ICADMLAdapter, IVisionAdapter, IFormulaService } from './di/identifiers'
+import { IConfigService, ILogger, ICollabService, ICoreAPI, IPluginLoader, ICollectionManager, IPLMAdapter, IAthenaAdapter, IDedupCADAdapter, ICADMLAdapter, IVisionAdapter, IFormulaService, ICommentService } from './di/identifiers'
 import { PluginLoader, type LoadedPlugin } from './core/plugin-loader'
 import { Logger, setLogContext } from './core/logger'
 import {
@@ -65,6 +65,7 @@ import {
   type MultitableRecordsQueryFn,
 } from './multitable/records'
 import { resolveSheetCapabilitiesForUser } from './multitable/sheet-capabilities'
+import { isRecordReadDeniedForUser, loadRowLevelReadDenyEnabled } from './multitable/permission-service'
 import {
   assertPluginOwnsObject,
   assertPluginOwnsSheet,
@@ -78,9 +79,10 @@ import { getPoolStats } from './db/pg'
 import { getBuildInfo } from './config/build-info'
 import { isDatabaseSchemaError } from './utils/database-errors'
 import { startOperationAuditRetention } from './audit/operation-audit-retention'
-import { startMultitableAttachmentCleanup } from './multitable/attachment-orphan-retention'
+import { startMultitableAttachmentCleanup, startMultitableAttachmentBlobPurge } from './multitable/attachment-orphan-retention'
 import { startMetaRevisionRetention } from './multitable/meta-revision-retention'
-import { isFieldAlwaysReadOnly } from './multitable/permission-derivation'
+import { startFilesOrphanBlobRetention } from './services/files-orphan-blob-retention'
+import { isFieldAlwaysReadOnly, deriveFieldPermissions, isFieldWriteForbidden, FieldWritePermissionDeniedError } from './multitable/permission-derivation'
 import { AutomationService, setAutomationServiceInstance } from './multitable/automation-service'
 import { tenantContext } from './db/sharding/tenant-context'
 import { attendanceAuditMiddleware, attendanceSecurityMiddleware } from './middleware/attendance-production'
@@ -122,6 +124,12 @@ import {
   startLedgerRetentionScheduler,
   stopLedgerRetentionScheduler,
 } from './services/LedgerRetentionScheduler'
+import {
+  resolveDingTalkGroupDeliveryRetentionSchedulerIntervalMs,
+  resolveDingTalkGroupDeliveryRetentionSchedulerLeaderOptions,
+  startDingTalkGroupDeliveryRetentionScheduler,
+  stopDingTalkGroupDeliveryRetentionScheduler,
+} from './services/dingtalk-group-delivery-retention-scheduler'
 import { initWebhookEventBridge } from './multitable/webhook-event-bridge'
 import { ApprovalBreachNotifier } from './services/ApprovalBreachNotifier'
 import {
@@ -169,6 +177,7 @@ import { createMultitableButtonRoutes } from './routes/multitable-button'
 import { apiTokensRouter } from './routes/api-tokens'
 import { SnapshotService } from './services/SnapshotService'
 import { MetricsStreamService } from './services/MetricsStreamService'
+import { DingTalkInteractiveCardStreamWorker } from './integrations/dingtalk/interactive-card-stream'
 import { notificationService } from './services/NotificationService'
 import { AfterSalesApprovalBridgeService } from './services/AfterSalesApprovalBridgeService'
 import {
@@ -244,6 +253,8 @@ export class MetaSheetServer {
   private stopOperationAuditRetention?: () => void
   private stopMultitableAttachmentCleanup?: () => void
   private stopMetaRevisionRetention?: () => void
+  private stopFilesOrphanBlobRetention?: () => void
+  private stopMultitableAttachmentBlobPurge?: () => void
   private automationService?: AutomationService
   private apiGateway?: APIGateway
   private yjsCleanupTimer?: NodeJS.Timeout
@@ -256,6 +267,7 @@ export class MetaSheetServer {
   private disableWorkflow = process.env.DISABLE_WORKFLOW === 'true'
   private disableEventBus = process.env.DISABLE_EVENT_BUS === 'true'
   private metricsStreamService?: MetricsStreamService
+  private dingtalkInteractiveCardStreamWorker?: DingTalkInteractiveCardStreamWorker
   
   // IoC Container
   private injector: Injector
@@ -1849,6 +1861,20 @@ export class MetaSheetServer {
     }))
     shutdownTasks.push(Promise.resolve().then(() => {
       try {
+        this.stopFilesOrphanBlobRetention?.()
+      } catch (err) {
+        this.logger.warn(`Files orphan blob retention stop error: ${err instanceof Error ? err.message : String(err)}`)
+      }
+    }))
+    shutdownTasks.push(Promise.resolve().then(() => {
+      try {
+        this.stopMultitableAttachmentBlobPurge?.()
+      } catch (err) {
+        this.logger.warn(`Multitable attachment blob purge sweep stop error: ${err instanceof Error ? err.message : String(err)}`)
+      }
+    }))
+    shutdownTasks.push(Promise.resolve().then(() => {
+      try {
         if (this.yjsCleanupTimer) {
           clearInterval(this.yjsCleanupTimer)
           this.yjsCleanupTimer = undefined
@@ -1863,6 +1889,15 @@ export class MetaSheetServer {
       shutdownTasks.push(
         this.metricsStreamService.shutdown().catch((err) => {
           this.logger.warn(`MetricsStreamService shutdown error: ${err instanceof Error ? err.message : String(err)}`)
+        }) as Promise<void>,
+      )
+    }
+
+    // 0c. Shut down optional DingTalk interactive-card Stream worker
+    if (this.dingtalkInteractiveCardStreamWorker) {
+      shutdownTasks.push(
+        this.dingtalkInteractiveCardStreamWorker.shutdown().catch((err) => {
+          this.logger.warn(`DingTalk interactive-card Stream shutdown error: ${err instanceof Error ? err.message : String(err)}`)
         }) as Promise<void>,
       )
     }
@@ -1961,6 +1996,14 @@ export class MetaSheetServer {
         stopLedgerRetentionScheduler()
       } catch (err) {
         this.logger.warn(`Ledger retention scheduler shutdown failed: ${err instanceof Error ? err.message : String(err)}`)
+      }
+    })())
+
+    shutdownTasks.push((async () => {
+      try {
+        stopDingTalkGroupDeliveryRetentionScheduler()
+      } catch (err) {
+        this.logger.warn(`DingTalk group-delivery retention scheduler shutdown failed: ${err instanceof Error ? err.message : String(err)}`)
       }
     })())
 
@@ -2247,6 +2290,30 @@ export class MetaSheetServer {
       this.logger.error('AI usage ledger retention scheduler initialization failed; continuing in degraded mode', e as Error)
     }
 
+    // DingTalk group-delivery retention sweep (R1, DT-HARDEN-08 follow-up): a
+    // periodic bounded DELETE of dingtalk_group_deliveries rows past the
+    // retention window (default 90d, env-overridable, floored at 7d). The
+    // table is write-once — every group-robot send attempt (automation rule
+    // firings AND manual test-sends) inserts a row with full message content
+    // and raw response bodies, so without this it grows unbounded. Reuses the
+    // generic LedgerRetentionScheduler (same pattern as the AI usage ledger
+    // sweep above); enabled by default (opt out via
+    // DINGTALK_GROUP_DELIVERY_RETENTION_DISABLED=1).
+    try {
+      const dingtalkDeliveryRetentionLeaderOptions = await resolveDingTalkGroupDeliveryRetentionSchedulerLeaderOptions()
+      const dingtalkDeliveryRetentionScheduler = startDingTalkGroupDeliveryRetentionScheduler({
+        leaderOptions: dingtalkDeliveryRetentionLeaderOptions,
+        intervalMs: resolveDingTalkGroupDeliveryRetentionSchedulerIntervalMs(),
+      })
+      this.logger.info(
+        dingtalkDeliveryRetentionScheduler
+          ? 'DingTalk group-delivery retention scheduler initialized'
+          : 'DingTalk group-delivery retention scheduler disabled (DINGTALK_GROUP_DELIVERY_RETENTION_DISABLED=1)',
+      )
+    } catch (e) {
+      this.logger.error('DingTalk group-delivery retention scheduler initialization failed; continuing in degraded mode', e as Error)
+    }
+
     // B-4 BJ-5 follow-up: reconcile ORPHANED AI bulk-fill jobs at boot. A hard
     // restart drops the in-process worker + plan registry, so a job left
     // `queued`/`running` can never progress yet keeps blocking a fresh start for
@@ -2296,6 +2363,44 @@ export class MetaSheetServer {
           return false
         }
       })
+      collabService.setCommentRoomAuthChecker(async ({ spreadsheetId, rowId, userId }) => {
+        try {
+          const pool = poolManager.get()
+          const query = pool.query.bind(pool)
+          const { capabilities, isAdminRole } = await resolveSheetCapabilitiesForUser(
+            query,
+            spreadsheetId,
+            userId,
+          )
+          if (!capabilities.canRead) return false
+          if (isAdminRole) return true
+          if (rowId) {
+            return !(await isRecordReadDeniedForUser(query, spreadsheetId, rowId, userId))
+          }
+          // Sheet-wide comment rooms receive unfilterable full-comment broadcasts.
+          // Under row-level deny, non-admin users must subscribe to row rooms only.
+          return !(await loadRowLevelReadDenyEnabled(query, spreadsheetId))
+        } catch {
+          return false
+        }
+      })
+      const commentService = this.injector.get(ICommentService)
+      commentService.setCommentTargetReadChecker(async ({ spreadsheetId, rowId, userId }) => {
+        try {
+          const pool = poolManager.get()
+          const query = pool.query.bind(pool)
+          const { capabilities, isAdminRole } = await resolveSheetCapabilitiesForUser(
+            query,
+            spreadsheetId,
+            userId,
+          )
+          if (!capabilities.canRead) return false
+          if (isAdminRole) return true
+          return !(await isRecordReadDeniedForUser(query, spreadsheetId, rowId, userId))
+        } catch {
+          return false
+        }
+      })
       collabService.initialize(this.httpServer)
     } catch (e) {
       this.logger.error('Failed to initialize WebSocket service', e as Error)
@@ -2311,8 +2416,9 @@ export class MetaSheetServer {
       const { YjsSyncService } = await import('./collab/yjs-sync-service')
       const { YjsWebSocketAdapter } = await import('./collab/yjs-websocket-adapter')
       const { YjsRecordBridge } = await import('./collab/yjs-record-bridge')
+      const { canReadEveryYjsFieldForUser } = await import('./collab/yjs-field-read-access')
       const { RecordWriteService } = await import('./multitable/record-write-service')
-      const { loadSheetMemberUserIdSet } = await import('./multitable/permission-service')
+      const { loadSheetMemberUserIdSet, loadFieldPermissionScopeMap } = await import('./multitable/permission-service')
       const { createYjsInvalidationPostCommitHook } = await import('./multitable/post-commit-hooks')
       const { db: kyselyDbYjs } = await import('./db/db')
       const collabIO = this.injector.get(ICollabService).getIO()
@@ -2355,6 +2461,7 @@ export class MetaSheetServer {
         // Auth gate: uses the same sheet + record-level capability resolution as REST
         const sheetCaps = await import('./multitable/sheet-capabilities')
         const { resolveSheetCapabilitiesForUser, canWriteRecord } = sheetCaps
+        const { isRecordReadDeniedForUser } = await import('./multitable/permission-service')
         yjsWsAdapter.setAuthChecker(async (userId, recordId) => {
           try {
             const pool = poolManager.get()
@@ -2372,8 +2479,18 @@ export class MetaSheetServer {
               sheetId,
               userId,
             )
+            // T36-1 review P1: sheet-level canRead is not enough — the doc seeder loads the
+            // record's FULL data, so a row-level-denied record (projection non-participant row,
+            // or any row-deny-flagged sheet) must not be subscribable at all. DENY-WINS.
+            if (!isAdminRole && capabilities.canRead
+              && (await isRecordReadDeniedForUser(pool.query.bind(pool), sheetId, recordId, userId))) {
+              return { canRead: false, canWrite: false }
+            }
+            const canReadAllFields = capabilities.canRead
+              ? await canReadEveryYjsFieldForUser(pool.query.bind(pool), sheetId, userId, capabilities)
+              : false
             const canWrite = canWriteRecord(capabilities, sheetScope, isAdminRole, userId, createdBy)
-            return { canRead: capabilities.canRead, canWrite }
+            return { canRead: capabilities.canRead, canWrite, canReadAllFields }
           } catch {
             return null
           }
@@ -2381,6 +2498,10 @@ export class MetaSheetServer {
 
         // Bridge: Y.Text changes → RecordWriteService.patchRecords()
         const pool = poolManager.get()
+        // W1-1 (design-lock 2026-07-05 §2 LOCK-F, F1): the actor-based recompute sibling lives in
+        // univer-meta.ts (its two req-consumers — the taint resolver + relation-aggregation — are
+        // chokepoint-guarded to that file), imported here just for this wiring.
+        const { recalculateFormulaFieldsForActor } = await import('./routes/univer-meta')
         const recordWriteService = new RecordWriteService(pool, eventBus, {
           normalizeLinkIds: (v) => (Array.isArray(v) ? v.map(String) : []),
           normalizeAttachmentIds: (v) => (Array.isArray(v) ? v.map(String) : []),
@@ -2397,12 +2518,19 @@ export class MetaSheetServer {
           filterRecordFieldSummaryMap: (map) => map,
           serializeLinkSummaryMap: () => ({}),
           serializeAttachmentSummaryMap: () => ({}),
+          // W1-1 (design-lock §2 LOCK-F, F4): lookup/rollup fan-out stays a DELIBERATE stub — they
+          // are computed-on-read (no persistent stale value), so a collab edit only misses the
+          // cross-record ECHO, never a stale materialized value. Named residual; a separate gated
+          // slice if demand names it (GF9 pins this stays stubbed).
           applyLookupRollup: async () => {},
           computeDependentLookupRollupRecords: async () => [],
-          // Yjs-bridge writes intentionally skip computed-field recompute (lookup/
-          // rollup are stubbed above); formula recalc stays scoped to the REST PATCH
-          // path for now and is stubbed here for the same reason.
-          recalculateFormulaFields: async () => [],
+          // W1-1 (design-lock §2 LOCK-F, F1/F3): formula recalc is NO LONGER stubbed. The bridge has
+          // no Express `req`, so it calls the actor-based sibling of the REST recompute — same
+          // taint discipline, byte-for-byte (the SAME function body runs under a synthetic
+          // writer-taint context keyed on the real flushing actor id instead of a request; no
+          // system/full-access bypass).
+          recalculateFormulaFields: (q, sid, f, ids, changed, hydrated, actorId) =>
+            recalculateFormulaFieldsForActor(actorId ?? null, q, sid, f, ids, changed, hydrated),
           loadLinkValuesByRecord: async () => new Map(),
           buildLinkSummaries: async () => new Map(),
           buildAttachmentSummaries: async () => new Map(),
@@ -2472,6 +2600,28 @@ export class MetaSheetServer {
               const { capabilities, sheetScope, isAdminRole, permissions: actorPerms } =
                 await resolveSheetCapabilitiesForUser(pool.query.bind(pool), sheetId, actorId)
 
+              // W1-3 (multitable-per-subject-field-write-gate-w13-designlock-20260705, LOCK-F1/F3/F4):
+              // Layer-3 per-subject field-WRITE gate. `RecordWriteService.patchRecords` (below, via
+              // `yjs-record-bridge.ts`'s executePatch) enforces only PROPERTY-level guards (fieldById
+              // above); it does NOT enforce per-subject `field_permissions.read_only` — so a field marked
+              // read-only for THIS actor specifically would otherwise be writable through the collab
+              // channel even though the everyday grid `/patch` route blocks it. Derive `fieldPermissions`
+              // via the SAME composite the grid gate uses (`deriveFieldPermissions` + a per-subject scope
+              // read), reusing `visibleFields` already loaded above (only the scope-map read is new — one
+              // extra indexed `field_permissions` read per debounced flush build, not per keystroke).
+              const fieldScopeMap = await loadFieldPermissionScopeMap(pool.query.bind(pool), sheetId, actorId)
+              const fieldPermissions = deriveFieldPermissions(visibleFields as any, capabilities, { fieldScopeMap })
+              const forbiddenWriteFieldIds = Object.keys(patch).filter((fid) => isFieldWriteForbidden(fieldPermissions[fid]))
+              if (forbiddenWriteFieldIds.length > 0) {
+                // Fail-closed + atomic (F4): THROW a coarse, values-free error rather than returning null.
+                // `executePatch` maps a null input to `return false`, which lands in flushNow's
+                // `.then(applied => …)` branch and increments NEITHER success nor failure counter — a
+                // per-subject deny would be metric-invisible. Throwing routes to the `.catch` branch
+                // instead, so the deny increments `flushFailureCount` and is coarsely logged, matching how
+                // a genuine write failure is observed on this entry point (there is no HTTP response here).
+                throw new FieldWritePermissionDeniedError()
+              }
+
               return {
                 sheetId,
                 changesByRecord,
@@ -2492,6 +2642,12 @@ export class MetaSheetServer {
                 source: 'yjs-bridge' as const,
               }
             } catch (err) {
+              // W1-3 F4: a per-subject field-write denial must propagate as a rejection (see the throw
+              // above), NOT be folded into this generic "context unavailable" catch — otherwise it would
+              // become a null return here too and the deny would be metric-invisible. Every OTHER error
+              // (DB unavailable, record deleted mid-build, etc.) keeps the existing coarse-log + null-return
+              // behavior.
+              if (err instanceof FieldWritePermissionDeniedError) throw err
               console.error(`[yjs-bridge] Failed to build write input for ${recordId}:`, err)
               return null
             }
@@ -2556,6 +2712,14 @@ export class MetaSheetServer {
       this.logger.error('Failed to initialize MetricsStreamService', e as Error)
     }
 
+    // Initialize optional DingTalk interactive-card Stream worker (B-1 skeleton; default disabled).
+    try {
+      this.dingtalkInteractiveCardStreamWorker = new DingTalkInteractiveCardStreamWorker()
+      await this.dingtalkInteractiveCardStreamWorker.initialize()
+    } catch (e) {
+      this.logger.error('Failed to initialize DingTalkInteractiveCardStreamWorker', e as Error)
+    }
+
     this.installGlobalErrorHandler()
 
     this.logger.info('Starting HTTP server listen phase...')
@@ -2603,6 +2767,8 @@ export class MetaSheetServer {
       this.stopOperationAuditRetention = startOperationAuditRetention({ logger: this.logger })
       this.stopMultitableAttachmentCleanup = startMultitableAttachmentCleanup({ logger: this.logger })
       this.stopMetaRevisionRetention = startMetaRevisionRetention({ logger: this.logger })
+      this.stopFilesOrphanBlobRetention = startFilesOrphanBlobRetention({ logger: this.logger })
+      this.stopMultitableAttachmentBlobPurge = startMultitableAttachmentBlobPurge({ logger: this.logger })
     }
 
     // Register signal handlers only for real runtime, not test runners.

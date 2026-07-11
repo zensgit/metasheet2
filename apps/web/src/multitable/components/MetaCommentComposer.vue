@@ -51,9 +51,9 @@
     </div>
     <div class="meta-comment-composer__footer">
       <span class="meta-comment-composer__hint">{{ composerHint }}</span>
-      <button class="meta-comment-composer__submit" :disabled="submitting || disabled || !modelValue.trim()" type="button" @click="submit">
+      <MtButton variant="primary" class="meta-comment-composer__submit" :disabled="submitting || disabled || !modelValue.trim()" @click="submit">
         {{ submitButtonLabel }}
-      </button>
+      </MtButton>
     </div>
   </div>
 </template>
@@ -63,6 +63,7 @@ import { computed, nextTick, ref, watch } from 'vue'
 import { useLocale } from '../../composables/useLocale'
 import type { MetaCommentMentionSuggestion } from '../types'
 import { commentLabel, type MetaCommentLabelKey } from '../utils/meta-comment-labels'
+import { MtButton } from '../ui'
 
 const props = withDefaults(defineProps<{
   modelValue: string
@@ -295,15 +296,8 @@ function submit() {
 .meta-comment-composer__suggestion small { color: #64748b; }
 .meta-comment-composer__footer { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .meta-comment-composer__hint { color: #6b7280; font-size: 12px; }
-.meta-comment-composer__submit {
-  padding: 6px 14px;
-  background: #2563eb;
-  color: #fff;
-  border: none;
-  border-radius: 6px;
-  cursor: pointer;
-  font-size: 12px;
-}
-.meta-comment-composer__submit:disabled,
+/* .meta-comment-composer__submit: the submit control is now <MtButton variant="primary"> (token-styled
+   via --ms-color-primary); its bespoke hardcoded-hex CSS was removed (P2-1c). Class kept for selector
+   stability. mention-chip stays bespoke (a domain chip, not a generic action button). */
 .meta-comment-composer__mention-chip:disabled { opacity: 0.5; cursor: not-allowed; }
 </style>

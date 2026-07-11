@@ -483,7 +483,9 @@ describe('useAttendanceAdminImportBatches', () => {
 
     expect(downloadCsv).toHaveBeenCalledWith(
       'attendance-import-batch-a-all-2026-03-12.csv',
-      'batchId,itemId\nbatch-a,item-1',
+      // Response.text() strips the backend BOM, so the composable re-adds it
+      // before download (review #3776 P2-1) — the BOM here IS the regression lock.
+      '\ufeffbatchId,itemId\nbatch-a,item-1',
     )
     expect(apiFetch).toHaveBeenCalledTimes(1)
     expect(batches.importStatusMessage.value).toBe('CSV exported.')
@@ -559,6 +561,7 @@ describe('useAttendanceAdminImportBatches', () => {
     expect(downloadCsv).toHaveBeenCalledTimes(1)
     const [filename, csvText] = downloadCsv.mock.calls[0]!
     expect(filename).toBe('attendance-import-batch-a-anomalies-2026-03-12.csv')
+    expect(String(csvText).startsWith('\ufeff'), 'fallback export carries the Excel BOM').toBe(true)
     expect(csvText).toContain('batchId,itemId,workDate,userId,recordId,status,workMinutes,lateMinutes,earlyLeaveMinutes,leaveMinutes,overtimeMinutes,warnings')
     expect(csvText).toContain('batch-a,item-2,2026-03-12,user-2,,late,480,15,0,0,0,late arrival')
     expect(csvText).not.toContain('item-1')

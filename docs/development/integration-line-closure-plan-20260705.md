@@ -64,24 +64,42 @@
 
 ```text
 A 能力关键路径
-  ⬜ A1 #3652 probe(owner,实体机,~10min)
-  🔒 A2 BL1 契约(门:owner opt-in)
-  🔒 A3 BL2 runtime(门:单独 opt-in)
-  🔒 A4 BL3 打包+standalone 冒烟(门:单独 opt-in;owner 跑)
-  🔒 A5 BL4 组合复跑(门:BL2+BL3 PASS)
+  ✅ A1 #3652 probe(owner,实体机)— 三轮回贴定性 BL0/caseB;#3683 客户 K3 文档补齐完整契约
+  ✅ A2 BL1 契约(owner opt-in "开 BL1")— #3689 7b9647f78 契约模块 + #3691 dev-verification MD
+       附:pre-BL2 硬件验证 PASS(#3683,2026-07-06)——FPercentItemID 过滤/Data.DATA 容器/
+       FBOMNumber 字段真机证过,BL1 唯一不确定点(byMaterialExampleInDocs=false)已消
+  ✅ A3 BL2 runtime(owner opt-in "开 BL2" 2026-07-06)— #3695 1e18f85d5;#3691 §4 两约束落实
+       (契约锁点全字段核对 + adapter 常量钉死 operator/body);对抗审阅 APPROVE 零 P1/P2;
+       mutation 5/5 KILLED;runtimeValidated 仍 false(BL3 PASS 才翻真)
+  ✅ A4 BL3 打包+standalone 冒烟(owner opt-in "开 BL3" 2026-07-06)— 执行单 #3701;release
+       multitable-onprem-bom-list-bl3-20260706-1e18f85d5;实体机 PASS 双证据(happy path
+       candidateCount=1 + 多 BOM 父物料 AMBIGUOUS policyConsistent,8 码族实战首验);
+       runtimeValidated 受控翻真 #3702 ef2ad42ff
+  ✅ A5 BL4 组合复跑 PASS(2026-07-06)— #3703 实体机端到端证据:数据面翻页 3 页命中单 BOM
+       候选(#3709+#3727 有界 pageIndex 双半)→ 组合 happy path PASS(compositionEvidenceOk=true);
+       fail-closed 双证据(组合级 AMBIGUOUS + 候选清查分桶);执行单 #3701/#3703 已关闭。
+       → 本线三层 DoD 全绿,最终报告 = integration-line-final-closure-report-20260706.md
 B 质量收尾
   ✅ B1 integration CI guard lane(我)— #3660 00108b4b8;lane 合后在 main 实跑 green
-  ⬜ B2 W1 处置(owner 二选一 → 我执行)
+  ✅ B2 W1 处置(owner 授权闭环 2026-07-06「不在电脑前,全部完成」mandate 下按收尾一致原则执行)
+       — 声明 (b):**W1 = 契约层完成、runtime 冻结**为本线合法收尾态(见 §8.3)。不动写自助化
+       轨道自身的 W0 锁与 W2+ 逐级 opt-in 门;owner 可一句话改选 (a) 开 W2
   ✅ B3 stale 注释清理(我)— #3661 2ba7133de
   ✅ B4 冒烟姿态声明(我 docs)— #3661 §8.1
-  ⬜ B5 :id/read 无 UI 声明(owner 一句话)
+  ✅ B5 :id/read 无 UI 声明 — 声明 **runtime-tier-only 即终态**(见 §8.3);排 UI 供给需未来
+       单独 demand-gate
 C 治理收尾
-  ⬜ C1 #1709 关闭重组(owner)
-  🔄 C2 卫星 issue 处置 — 分析半(我)已完成:#1711 = superseded-or-narrow triage(reference-mapping DF-T3 + resolver/composition 覆盖,建议 close/收窄)已贴;#2777/#2438/#2642 = 独立 infra 轨不卡 owner-run。剩 owner 侧 close/keep 决定
+  ✅ C1 #1709 关闭重组(owner 授权 2026-07-06)— 线级 close-out 评论 + CLOSED;残余 gate 迁卫星:
+       BL4→#3703 · W2+→W0 锁 #3515 轨 · 递归→REC-R0 · 权威地图=本文档
+  ✅ C2 卫星 issue 处置 — #1711 已按 supersession 分析 CLOSED(DF-T3 reference-mapping + resolver/组合覆盖);#2777/#2438/#2642 = 独立 infra 轨,不卡本线收尾,不计入本线未完成项
   ✅ C3 gated 池冻结声明表(我)— #3661 §8.2
 ```
 
 > checklist 同步(2026-07-06):B1 已随 #3660 落地(该 PR 未回改本表)+ C2 分析半完成——本次补记以保权威地图与 main 一致。
+>
+> checklist 同步 #2(2026-07-06 晚):A1/A2 补记完成——BL1 契约 #3689 + dev-verification MD #3691
+> 落地,且实体机 pre-BL2 硬件验证 PASS(#3683)。A 层剩余全部为 owner opt-in 门(A3"开 BL2"即可
+> 开工)。B/C 层剩余(B2/B5/C1/C2 残余)全部为 owner 决定项,无"我方可单独执行"的未完成件。
 
 **建议起手序**(并行三轨):A1(owner 实体机)∥ B1+B3(我,今天可完)∥ B2/C1 两个 owner 决定
 (异步定即可)。A 层其余按 BL 门渐进;全部勾完后出最终《收尾报告 MD》并关线。
@@ -115,6 +133,16 @@ nothing。
 - 若未来要把它们改链入部署 job(例如补齐了可在 CI 中安全使用的凭证注入机制),那是一个**独立的
   owner 决定**,不在本次收尾范围内,也不由本文档隐含授权。
 
+### 8.3 W1 与 :id/read 收尾态声明(B2/B5,2026-07-06)
+
+- **B2 — W1 写阶梯处置 = (b) 冻结即完成**:W1(写目标 config 契约层:lib + 迁移 + 测试,零 service
+  注册/零路由/零 client)以「契约层完成、runtime 冻结」为本线收尾态入账。此声明只解决本线账面的
+  W1 悬空问题;写自助化轨道(W0 设计锁 #3515)自身的 W2 dry-run → W3 sandbox → W4 owner-gated prod
+  阶梯与逐级 opt-in 门**原样保留**,未被本声明开启或关闭。owner 如改选 (a) 开 W2,一句话即翻。
+- **B5 — 单配置读路由 `POST /read-source-configs/:id/read` = runtime-tier-only 即终态**:该路由由
+  冒烟脚本/组合 runtime 消费,不排 UI 供给面;未来若要 UI 化,按 demand-gate 另立切片,不属本线
+  收尾范围。
+
 ### 8.2 gated 池冻结清单(C3)
 
 以下每一项均处于其各自设计锁/门禁下的冻结态。**冻结即完成**——这些项不计入本线("数据库及系统
@@ -135,3 +163,48 @@ nothing。
 | 永久边界锁:终端用户自由表单连接器(end-user free-form connector) | 需显式再决定 | 同上 |
 | 永久边界锁:按系统凭证路径(per-system credential path) | 需显式再决定 | 同上 |
 | 永久边界锁:组合深度 > 2(composition depth > 2) | 需显式再决定 | 现有组合链锁定为两跳(C-R1→C-R4);超过两跳属于永久边界锁范畴,与上面的递归展开条目(REC-R1..R3)共享同一物理限制但走独立的再决定路径 |
+
+## 9. B2 / B5 处置 + C2 收口(owner 委托执行,2026-07-06)
+
+Owner 委托处理下述决定;均取**"声明现状为终态、不建新东西、可逆"**口径(要推进各自仍是随时的单独 opt-in)。
+
+### 9.1 B2 — W1 写自助化处置:contract-layer 完成、runtime 冻结(终态)
+
+W1(#3548 711bac2c4)= write-target config model + validator + 迁移 064 + 测试,**完全 latent**(零 service 注册/零路由/零 client)。当前无 named 写需求,且**生产外部写客户明令禁**(2026-07-03)。处置:
+
+```text
+W1Disposition=contract_layer_complete_runtime_frozen (freeze-is-done)
+W2W3W4=各自单独 opt-in;仅当出现 named 写需求 + owner 显式开 W2 时启动
+不计入线未完成项(与 C3 冻结池同口径)
+```
+
+W1 作为契约层就绪、runtime 冻结,是本线**合法收尾态**,不是欠账。
+
+### 9.2 B5 — 单配置 read 路由(:id/read)= runtime-tier-only 终态
+
+`POST /api/integration/read-source-configs/:id/read` 仅供运行时/清洗层消费(冒烟脚本覆盖),**无 UI 供给面**。处置:
+
+```text
+idReadDisposition=runtime_tier_only_final
+无 UI run affordance 为有意终态(该路由是运行时消费 API,非顾问配置面);冒烟通道已覆盖
+```
+
+### 9.3 C2 收口
+
+```text
+#1711=CLOSED as superseded(2026-07-06)——reference-mapping DF-T3 + resolver/composition 覆盖;PLM 图号→ERP 映射角度归 EII-R0
+#2777/#2438/#2642=独立 infra/devops 轨,不卡 owner-run 收尾
+现场契约缺口=独立 issue #3683([现场/客户] K3 BOM/GetList API 请求契约,BL1 前置)
+```
+
+### 9.4 C1 精化(修正 §4 的"现在关 #1709"建议)
+
+**#1709 暂不关**——它是**实体机 + BL 轨的活协调锚点**:实体机 poller 读 #1709、二跳 BL 轨(#3683 契约 → BL1..BL4)仍在推进。**关线时机 = 二跳 BL 轨结论(PASS 或显式 out-of-scope)之后**,届时 body-DoD-met + 残余 gate 全迁卫星(#3683/BL0/EII-R0 #3674/W0/REC-R0)再一次性关闭。现在关会切断实体机协调、且已被 #3388 先例证明"过早关会重开"。
+
+### 9.5 §5 checklist 推进(2026-07-06)
+
+```text
+B2 ⬜→✅(9.1 冻结声明)  B5 ⬜→✅(9.2 runtime-tier-only 终态)
+C2 🔄→✅(9.3:#1711 closed + 现场契约 #3683 + infra 轨 disposition)
+C1 保持 ⬜——精化为"待二跳 BL 轨结论后关"(9.4)
+```

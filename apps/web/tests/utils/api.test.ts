@@ -5,6 +5,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   apiFetch,
+  apiGet,
   authHeaders,
   clearStoredAuthState,
   getApiBase,
@@ -249,6 +250,35 @@ describe('API Utils', () => {
       })
 
       expect(window.localStorage.getItem('auth_token')).toBe('expired-token')
+      expect(replace).not.toHaveBeenCalled()
+    })
+
+    it('apiGet preserves auth state when unauthorized redirect suppression is enabled', async () => {
+      const replace = vi.fn()
+      Object.defineProperty(window, 'location', {
+        value: {
+          pathname: '/apps',
+          search: '',
+          hash: '',
+          replace,
+          href: 'https://app.example.com/apps',
+          origin: 'https://app.example.com',
+        },
+        writable: true,
+        configurable: true,
+      })
+
+      window.localStorage.setItem('auth_token', 'runtime-token')
+      vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('{}', {
+        status: 401,
+        statusText: 'Unauthorized',
+      }))
+
+      await expect(apiGet('/api/after-sales/projects/current', {
+        suppressUnauthorizedRedirect: true,
+      })).rejects.toThrow('API error: 401 Unauthorized')
+
+      expect(window.localStorage.getItem('auth_token')).toBe('runtime-token')
       expect(replace).not.toHaveBeenCalled()
     })
 

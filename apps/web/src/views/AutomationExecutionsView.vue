@@ -35,10 +35,12 @@
         </button>
       </div>
 
-      <div v-if="loading" class="automation-runs__empty">{{ automationLabel('log.loading', isZh) }}</div>
-      <div v-else-if="!loadError && runs.length === 0" class="automation-runs__empty" data-empty="true">
-        {{ automationLabel('log.empty', isZh) }}
-      </div>
+      <EmptyState v-if="loading" :title="automationLabel('log.loading', isZh)" />
+      <EmptyState
+        v-else-if="!loadError && runs.length === 0"
+        data-empty="true"
+        :title="automationLabel('log.empty', isZh)"
+      />
 
       <div
         v-for="run in runs"
@@ -49,11 +51,15 @@
       >
         <div class="automation-runs__summary">
           <span class="automation-runs__time">{{ formatTime(run.triggeredAt) }}</span>
-          <span class="automation-runs__badge" :class="`automation-runs__badge--${run.status}`" :data-status="run.status">
-            {{ automationStatusLabel(run.status, isZh) }}
+          <StatusTag domain="automationRun" :status="run.status" />
+          <span class="automation-runs__rule" data-field="ruleName">
+            <template v-if="run.ruleName && run.ruleName !== run.ruleId">{{ run.ruleName }}</template>
+            <code v-else class="automation-runs__code" data-field="ruleId">{{ run.ruleId }}</code>
           </span>
-          <span class="automation-runs__rule" data-field="ruleId">{{ run.ruleId }}</span>
-          <span v-if="run.sheetId" class="automation-runs__sheet" data-field="sheetId">{{ run.sheetId }}</span>
+          <span v-if="run.sheetId" class="automation-runs__sheet" data-field="sheetName">
+            <template v-if="run.sheetName && run.sheetName !== run.sheetId">{{ run.sheetName }}</template>
+            <code v-else class="automation-runs__code" data-field="sheetId">{{ run.sheetId }}</code>
+          </span>
           <span class="automation-runs__trigger" data-field="triggeredBy">{{ run.triggeredBy }}</span>
           <span class="automation-runs__duration">{{ run.duration ?? '-' }}ms</span>
         </div>
@@ -75,9 +81,7 @@
               <span v-else-if="parallelChildStep(step.stepKey)" class="automation-runs__branch-child" data-field="parallel-child">
                 ↳ {{ automationLabel('runs.parallelBranchStep', isZh) }} {{ parallelChildStep(step.stepKey)?.branchKey }} · #{{ parallelChildStep(step.stepKey)?.actionIndex }}
               </span>
-              <span class="automation-runs__badge automation-runs__badge--sm" :class="`automation-runs__badge--${step.status}`">
-                {{ automationStatusLabel(step.status, isZh) }}
-              </span>
+              <StatusTag domain="automationRun" :status="step.status" size="sm" />
               <!-- A6-2: resume a suspended step (admin detail only; token used internally, never shown). -->
               <button
                 v-if="step.status === 'suspended' && step.suspend?.resumeToken"
@@ -121,12 +125,15 @@
 
 <script setup lang="ts">
 import { ref } from 'vue'
+import { ElMessageBox } from 'element-plus'
 import { useLocale } from '../composables/useLocale'
 import { useAuth } from '../composables/useAuth'
 import { multitableClient, type MultitableApiClient } from '../multitable/api/client'
 import type { AutomationRunView, AutomationRunStepView, WorkflowJobStatus } from '../multitable/types'
 import { automationLabel, automationStatusLabel, type AutomationLabelKey } from '../multitable/utils/meta-automation-labels'
 import { redactString, redactValue, summarizeStepError, summarizeStepOutput } from '../multitable/utils/automation-log-redact'
+import StatusTag from '../components/status/StatusTag.vue'
+import EmptyState from '../components/status/EmptyState.vue'
 
 const props = defineProps<{ client?: MultitableApiClient }>()
 const client = props.client ?? multitableClient
@@ -257,6 +264,20 @@ function mapResumeError(err: unknown): string {
   return redactString(msg) || automationLabel('runs.resumeError.generic', isZh.value)
 }
 
+// UF-8: ElMessageBox.confirm replaces window.confirm (design-lock §3.6).
+async function confirmResumeStep(): Promise<boolean> {
+  try {
+    await ElMessageBox.confirm(
+      automationLabel('runs.resumeConfirm', isZh.value),
+      automationLabel('runs.resumeConfirmTitle', isZh.value),
+      { type: 'warning', confirmButtonText: automationLabel('runs.resume', isZh.value), cancelButtonText: automationLabel('editor.cancel', isZh.value) },
+    )
+    return true
+  } catch {
+    return false
+  }
+}
+
 /**
  * A6-2: resume a suspended step. Confirm-gated (the remaining actions re-run, with possible external
  * side effects — same mental model as A5 retry's confirmSideEffects). The token is used internally and
@@ -264,7 +285,7 @@ function mapResumeError(err: unknown): string {
  */
 async function resumeStep(step: AutomationRunStepView) {
   if (resuming.value || !step.suspend?.resumeToken) return
-  if (!window.confirm(automationLabel('runs.resumeConfirm', isZh.value))) return
+  if (!(await confirmResumeStep())) return
   const runId = expandedId.value
   resumeError.value = null
   resuming.value = step.id
@@ -310,36 +331,39 @@ if (isAdmin) void loadData()
 <style scoped>
 .automation-runs { padding: 20px 24px; max-width: 1000px; margin: 0 auto; }
 .automation-runs__header { margin-bottom: 16px; }
-.automation-runs__title { margin: 0; font-size: 20px; font-weight: 700; color: #0f172a; }
-.automation-runs__subtitle { margin: 4px 0 0; font-size: 13px; color: #64748b; }
-.automation-runs__denied { padding: 14px 16px; border-radius: 10px; background: #fef2f2; color: #b91c1c; font-size: 14px; }
+.automation-runs__title { margin: 0; font-size: 20px; font-weight: 700; color: var(--ms-text-1); }
+.automation-runs__subtitle { margin: 4px 0 0; font-size: 13px; color: var(--ms-text-2); }
+.automation-runs__denied { padding: 14px 16px; border-radius: 10px; background: var(--el-color-danger-light-9); color: var(--el-color-danger-dark-2); font-size: 14px; }
 .automation-runs__toolbar { display: flex; gap: 8px; align-items: center; margin-bottom: 12px; flex-wrap: wrap; }
-.automation-runs__select, .automation-runs__input { border: 1px solid #cbd5e1; border-radius: 8px; padding: 6px 10px; font-size: 13px; background: #fff; }
-.automation-runs__btn { border: 1px solid #cbd5e1; border-radius: 8px; padding: 6px 14px; background: #fff; color: #0f172a; font-size: 13px; cursor: pointer; }
-.automation-runs__empty { padding: 10px 12px; border-radius: 10px; font-size: 13px; background: #f8fafc; color: #64748b; }
-.automation-runs__error { padding: 10px 12px; border-radius: 10px; font-size: 13px; background: #fef2f2; color: #b91c1c; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 12px; }
-.automation-runs__item { border: 1px solid #e2e8f0; border-radius: 8px; padding: 10px 12px; cursor: pointer; margin-bottom: 8px; }
-.automation-runs__item:hover { background: #f8fafc; }
+.automation-runs__select, .automation-runs__input { border: 1px solid var(--ms-border); border-radius: 8px; padding: 6px 10px; font-size: 13px; background: var(--ms-bg-card); }
+.automation-runs__btn { border: 1px solid var(--ms-border); border-radius: 8px; padding: 6px 14px; background: var(--ms-bg-card); color: var(--ms-text-1); font-size: 13px; cursor: pointer; }
+.automation-runs__empty { padding: 10px 12px; border-radius: 10px; font-size: 13px; background: var(--ms-bg-page); color: var(--ms-text-2); }
+.automation-runs__error { padding: 10px 12px; border-radius: 10px; font-size: 13px; background: var(--el-color-danger-light-9); color: var(--el-color-danger-dark-2); display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 12px; }
+.automation-runs__item { border: 1px solid var(--ms-border-light); border-radius: 8px; padding: 10px 12px; cursor: pointer; margin-bottom: 8px; }
+.automation-runs__item:hover { background: var(--ms-bg-page); }
 .automation-runs__summary { display: flex; align-items: center; gap: 10px; font-size: 13px; flex-wrap: wrap; }
-.automation-runs__time { color: #64748b; min-width: 150px; }
-.automation-runs__rule { color: #334155; font-weight: 600; }
-.automation-runs__sheet { color: #475569; }
-.automation-runs__trigger { color: #475569; }
-.automation-runs__duration { margin-left: auto; color: #94a3b8; }
-.automation-runs__badge { display: inline-block; padding: 2px 8px; border-radius: 6px; font-size: 11px; font-weight: 600; text-transform: uppercase; background: #f1f5f9; color: #475569; }
-.automation-runs__badge--resolved { background: #dcfce7; color: #16a34a; }
-.automation-runs__badge--failed, .automation-runs__badge--errored, .automation-runs__badge--rejected { background: #fef2f2; color: #dc2626; }
-.automation-runs__badge--skipped { background: #f1f5f9; color: #64748b; }
-.automation-runs__badge--running, .automation-runs__badge--queued, .automation-runs__badge--suspended { background: #eff6ff; color: #2563eb; }
-.automation-runs__badge--sm { font-size: 10px; padding: 1px 6px; }
-.automation-runs__detail { margin-top: 8px; padding-top: 8px; border-top: 1px solid #e2e8f0; display: flex; flex-direction: column; gap: 6px; }
-.automation-runs__detail-h { margin: 6px 0 2px; font-size: 12px; font-weight: 700; color: #475569; text-transform: uppercase; }
+.automation-runs__time { color: var(--ms-text-2); min-width: 150px; }
+.automation-runs__rule { color: var(--ms-text-2); font-weight: 600; }
+.automation-runs__sheet { color: var(--ms-text-2); }
+/* B3-11: the list payload now resolves ruleName/sheetName via a batched server-side lookup
+   (UF-8's prior "no lookup available" constraint is lifted). A resolved name renders as plain
+   text; an UNRESOLVED one (rule/sheet deleted, or name === id) still degrades to the honest
+   <code> id fallback — it names the value as a machine id instead of dressing it up as a
+   plain label (design-lock §3.5). */
+.automation-runs__code { font-family: monospace; font-size: 11px; background: var(--ms-bg-page); padding: 1px 4px; border-radius: var(--ms-radius-sm); }
+.automation-runs__trigger { color: var(--ms-text-2); }
+.automation-runs__duration { margin-left: auto; color: var(--ms-text-3); }
+/* UF-3: the run/step status badges are now <StatusTag domain="automationRun"> (utils/
+   statusDomains.ts) — this file's own uppercase/hex badge palette (one of six independent
+   status-color implementations the UI foundation design-lock audit found) is removed. */
+.automation-runs__detail { margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--ms-border-light); display: flex; flex-direction: column; gap: 6px; }
+.automation-runs__detail-h { margin: 6px 0 2px; font-size: 12px; font-weight: 700; color: var(--ms-text-2); text-transform: uppercase; }
 .automation-runs__step { display: flex; align-items: center; gap: 8px; font-size: 12px; flex-wrap: wrap; }
-.automation-runs__step-key { font-weight: 700; color: #2563eb; }
-.automation-runs__step--branch-child { margin-left: 20px; border-left: 2px solid #e2e8f0; padding-left: 8px; }
-.automation-runs__branch-child { color: #64748b; font-size: 11px; }
-.automation-runs__branch-selection { width: 100%; padding: 4px 8px; background: #eff6ff; color: #1d4ed8; border-radius: 4px; font-size: 11px; font-weight: 600; }
-.automation-runs__step-error { width: 100%; padding: 4px 8px; background: #fef2f2; color: #dc2626; border-radius: 4px; font-size: 11px; }
-.automation-runs__step-output { width: 100%; padding: 4px 8px; background: #f8fafc; color: #475569; border-radius: 4px; font-size: 11px; word-break: break-all; }
-.automation-runs__json { width: 100%; margin: 0; padding: 8px; background: #f8fafc; color: #334155; border-radius: 6px; font-size: 11px; white-space: pre-wrap; word-break: break-all; max-height: 200px; overflow: auto; }
+.automation-runs__step-key { font-weight: 700; color: var(--ms-color-primary); }
+.automation-runs__step--branch-child { margin-left: 20px; border-left: 2px solid var(--ms-border-light); padding-left: 8px; }
+.automation-runs__branch-child { color: var(--ms-text-2); font-size: 11px; }
+.automation-runs__branch-selection { width: 100%; padding: 4px 8px; background: var(--el-color-primary-light-9); color: var(--el-color-primary-dark-2); border-radius: 4px; font-size: 11px; font-weight: 600; }
+.automation-runs__step-error { width: 100%; padding: 4px 8px; background: var(--el-color-danger-light-9); color: var(--ms-color-danger); border-radius: 4px; font-size: 11px; }
+.automation-runs__step-output { width: 100%; padding: 4px 8px; background: var(--ms-bg-page); color: var(--ms-text-2); border-radius: 4px; font-size: 11px; word-break: break-all; }
+.automation-runs__json { width: 100%; margin: 0; padding: 8px; background: var(--ms-bg-page); color: var(--ms-text-2); border-radius: 6px; font-size: 11px; white-space: pre-wrap; word-break: break-all; max-height: 200px; overflow: auto; }
 </style>

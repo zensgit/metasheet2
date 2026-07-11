@@ -7,9 +7,9 @@
         <span>{{ conflictMessage }}</span>
       </div>
       <div class="mt-workbench__conflict-actions">
-        <button class="mt-workbench__conflict-btn" @click="onReloadConflict">{{ wb('conflict.reload', isZh) }}</button>
-        <button class="mt-workbench__conflict-btn mt-workbench__conflict-btn--primary" @click="onRetryConflict">{{ wb('conflict.retry', isZh) }}</button>
-        <button class="mt-workbench__conflict-btn" @click="grid.dismissConflict()">{{ wb('conflict.dismiss', isZh) }}</button>
+        <MtButton class="mt-workbench__conflict-btn" @click="onReloadConflict">{{ wb('conflict.reload', isZh) }}</MtButton>
+        <MtButton class="mt-workbench__conflict-btn mt-workbench__conflict-btn--primary" @click="onRetryConflict">{{ wb('conflict.retry', isZh) }}</MtButton>
+        <MtButton class="mt-workbench__conflict-btn" @click="grid.dismissConflict()">{{ wb('conflict.dismiss', isZh) }}</MtButton>
       </div>
     </div>
     <div v-if="basePickerBases.length" class="mt-workbench__base-bar">
@@ -22,7 +22,7 @@
         @toggle-favorite="onToggleFavoriteBase"
       />
     </div>
-    <MetaViewTabBar :sheets="workbench.sheets.value" :views="visibleWorkbenchViews" :active-sheet-id="workbench.activeSheetId.value" :active-view-id="workbench.activeViewId.value" :can-create-sheet="canCreateBasesAndSheets" @select-sheet="onSelectSheet" @select-view="onSelectView" @create-sheet="onCreateSheet" />
+    <MetaViewTabBar :sheets="workbench.sheets.value" :views="visibleWorkbenchViews" :active-sheet-id="workbench.activeSheetId.value" :active-view-id="workbench.activeViewId.value" :can-create-sheet="canCreateBasesAndSheets" :personal-views-enabled="personalViewsEnabled" :is-personal-mode="personalView.isPersonalMode" @select-sheet="onSelectSheet" @select-view="onSelectView" @create-sheet="onCreateSheet" @toggle-personal="onTogglePersonalView" />
     <div class="mt-workbench__actions">
       <div
         v-if="sheetPresenceState.activeCollaboratorCount.value > 0"
@@ -38,7 +38,7 @@
         :class="{ 'mt-workbench__mention-chip--unread': mentionInboxState.unreadMentionCount.value > 0 }"
         @click="onMentionChipClick"
       >
-        &#x1F4EC; {{ wb('toolbar.mentions', isZh) }} <strong>{{ mentionInboxState.unreadMentionCount.value || mentionInboxState.summary.value.unresolvedMentionCount }}</strong>
+        <el-icon class="mt-workbench__mgr-btn-icon"><component :is="ICON.mentions" /></el-icon> {{ wb('toolbar.mentions', isZh) }} <strong>{{ mentionInboxState.unreadMentionCount.value || mentionInboxState.summary.value.unresolvedMentionCount }}</strong>
         <span v-if="mentionInboxState.unreadMentionCount.value > 0" class="mt-workbench__mention-chip-unread">{{ fmtMentionsUnread(mentionInboxState.unreadMentionCount.value, isZh) }}</span>
         <span class="mt-workbench__mention-chip-records">{{ fmtMentionsRecords(mentionInboxState.summary.value.mentionedRecordCount, isZh) }}</span>
       </button>
@@ -48,27 +48,29 @@
         :title="fmtCommentInboxTitle(commentInboxBadgeCount, isZh)"
         @click="openCommentInbox()"
       >
-        &#x1F4AC; {{ wb('toolbar.commentInbox', isZh) }}
+        <el-icon class="mt-workbench__mgr-btn-icon"><component :is="ICON.commentInbox" /></el-icon> {{ wb('toolbar.commentInbox', isZh) }}
         <span v-if="commentInboxBadgeCount > 0" class="mt-workbench__mgr-badge">{{ commentInboxBadgeCount }}</span>
       </button>
       <MetaNotificationBell :api-client="workbench.client" @navigate="onNotificationNavigate" />
-      <button v-if="caps.canManageFields.value" class="mt-workbench__mgr-btn" @click="showFieldManager = true">&#x2699; {{ wb('toolbar.fields', isZh) }}</button>
-      <button v-if="caps.canManageSheetAccess.value" class="mt-workbench__mgr-btn" @click="showPermissionManager = true; void loadPermissionEntries()">&#x1F512; {{ wb('toolbar.access', isZh) }}</button>
-      <button v-if="caps.canManageViews.value && canConfigureCurrentView" class="mt-workbench__mgr-btn" @click="showViewManager = true">&#x2630; {{ wb('toolbar.views', isZh) }}</button>
-      <button v-if="canOpenWorkflowDesigner" class="mt-workbench__mgr-btn" @click="openWorkflowDesigner()">&#x2699; {{ wb('toolbar.workflow', isZh) }}</button>
-      <button v-if="caps.canManageAutomation.value" class="mt-workbench__mgr-btn" @click="showAutomationManager = true">&#x26A1; {{ wb('toolbar.automations', isZh) }}</button>
-      <button v-if="canCreateBasesAndSheets" class="mt-workbench__mgr-btn" data-action="open-template-library" @click="openTemplateLibrary">&#x1F5C2; {{ wb('toolbar.templates', isZh) }}</button>
-      <button class="mt-workbench__mgr-btn" :class="{ 'mt-workbench__mgr-btn--active': showDashboardView }" @click="showDashboardView = !showDashboardView" data-action="toggle-dashboard">&#x1F4CA; {{ wb('toolbar.dashboard', isZh) }}</button>
-      <button v-if="activeViewType === 'form'" class="mt-workbench__mgr-btn" @click="showFormShareManager = true">&#x1F517; {{ wb('toolbar.shareForm', isZh) }}</button>
-      <button class="mt-workbench__mgr-btn" @click="showApiTokenManager = true">&#x1F511; {{ wb('toolbar.apiWebhooks', isZh) }}</button>
-      <button v-if="caps.canDeleteRecord.value" class="mt-workbench__mgr-btn" @click="showTrash = true">&#x1F5D1; {{ wb('toolbar.trash', isZh) }}</button>
-      <button v-if="activeBaseId" class="mt-workbench__mgr-btn" data-action="open-history" @click="showHistory = true">&#x1F570; {{ isZh ? '历史' : 'History' }}</button>
-      <button v-if="workbench.activeSheetId.value" class="mt-workbench__mgr-btn" data-action="open-config-history" @click="openConfigHistory">&#x2699; {{ isZh ? '配置历史' : 'Config history' }}</button>
+      <button v-if="caps.canManageFields.value" class="mt-workbench__mgr-btn" @click="showFieldManager = true"><el-icon class="mt-workbench__mgr-btn-icon"><component :is="ICON.fields" /></el-icon> {{ wb('toolbar.fields', isZh) }}</button>
+      <button v-if="caps.canManageSheetAccess.value" class="mt-workbench__mgr-btn" @click="showPermissionManager = true; void loadPermissionEntries()"><el-icon class="mt-workbench__mgr-btn-icon"><component :is="ICON.access" /></el-icon> {{ wb('toolbar.access', isZh) }}</button>
+      <button v-if="caps.canManageViews.value && canConfigureCurrentView" class="mt-workbench__mgr-btn" @click="showViewManager = true"><el-icon class="mt-workbench__mgr-btn-icon"><component :is="ICON.views" /></el-icon> {{ wb('toolbar.views', isZh) }}</button>
+      <button v-if="canOpenWorkflowDesigner" class="mt-workbench__mgr-btn" @click="openWorkflowDesigner()"><el-icon class="mt-workbench__mgr-btn-icon"><component :is="ICON.workflow" /></el-icon> {{ wb('toolbar.workflow', isZh) }}</button>
+      <button v-if="caps.canManageAutomation.value" class="mt-workbench__mgr-btn" @click="showAutomationManager = true"><el-icon class="mt-workbench__mgr-btn-icon"><component :is="ICON.automations" /></el-icon> {{ wb('toolbar.automations', isZh) }}</button>
+      <button v-if="canCreateBasesAndSheets" class="mt-workbench__mgr-btn" data-action="open-template-library" @click="openTemplateLibrary"><el-icon class="mt-workbench__mgr-btn-icon"><component :is="ICON.templates" /></el-icon> {{ wb('toolbar.templates', isZh) }}</button>
+      <button class="mt-workbench__mgr-btn" :class="{ 'mt-workbench__mgr-btn--active': showDashboardView }" @click="showDashboardView = !showDashboardView" data-action="toggle-dashboard"><el-icon class="mt-workbench__mgr-btn-icon"><component :is="ICON.dashboard" /></el-icon> {{ wb('toolbar.dashboard', isZh) }}</button>
+      <button v-if="activeViewType === 'form'" class="mt-workbench__mgr-btn" @click="showFormShareManager = true"><el-icon class="mt-workbench__mgr-btn-icon"><component :is="ICON.shareForm" /></el-icon> {{ wb('toolbar.shareForm', isZh) }}</button>
+      <button class="mt-workbench__mgr-btn" @click="showApiTokenManager = true"><el-icon class="mt-workbench__mgr-btn-icon"><component :is="ICON.apiWebhooks" /></el-icon> {{ wb('toolbar.apiWebhooks', isZh) }}</button>
+      <button v-if="caps.canDeleteRecord.value" class="mt-workbench__mgr-btn" data-action="open-trash" @click="showTrash = true"><el-icon class="mt-workbench__mgr-btn-icon"><component :is="ICON.trash" /></el-icon> {{ wb('toolbar.trash', isZh) }}</button>
+      <button v-if="activeBaseId" class="mt-workbench__mgr-btn" data-action="open-history" @click="historyDeepLinkBatchId = null; showHistory = true"><el-icon class="mt-workbench__mgr-btn-icon"><component :is="ICON.history" /></el-icon> {{ isZh ? '历史' : 'History' }}</button>
+      <button v-if="workbench.activeSheetId.value" class="mt-workbench__mgr-btn" data-action="open-config-history" @click="openConfigHistory"><el-icon class="mt-workbench__mgr-btn-icon"><component :is="ICON.configHistory" /></el-icon> {{ isZh ? '配置历史' : 'Config history' }}</button>
     </div>
     <ResetToPointPicker
       v-if="workbench.activeSheetId.value"
       :pit-reset-enabled="pitResetEnabled"
+      :base-id="activeBaseId || ''"
       :sheet-id="workbench.activeSheetId.value"
+      :list-history-events="listHistoryEventsWire"
       :reset-preview="resetPreviewWire"
       :reset-execute="resetExecuteWire"
       :on-done="onResetDone"
@@ -135,9 +137,11 @@
       @add-filter-group="grid.addFilterGroup" @update-filter-group="grid.updateFilterGroup" @remove-filter-group="grid.removeFilterGroup"
       :group-field-ids="grid.groupFieldIds.value"
       :search-text="searchText" :total-rows="grid.page.value.total" :row-density="rowDensity"
+      :can-reset-to-shared="canResetToShared"
       @apply-sort-filter="grid.applySortFilter" @add-record="onAddRecord" @undo="grid.undo" @redo="grid.redo"
       @set-group-fields="onSetGroupFields" @export-csv="onExportCsv" @export-xlsx="onExportXlsx" @import="onOpenImportModal" @update:search-text="onSearchTextUpdate"
       @print="onPrint" @set-row-density="onSetRowDensity" @auto-fit-columns="onAutoFitColumns"
+      @reset-to-shared="onResetToShared"
     />
     <div class="mt-workbench__content">
       <div class="mt-workbench__main">
@@ -521,7 +525,7 @@
     <TrashModal
       :open="showTrash"
       :sheet-id="workbench.activeSheetId.value"
-      :fields="scopedAllFields"
+      :fields="twoLayerVisibleFields"
       @close="showTrash = false"
       @restored="onTrashRestored"
     />
@@ -530,8 +534,12 @@
       :open="showHistory"
       :base-id="activeBaseId || ''"
       :sheet-id="workbench.activeSheetId.value"
-      :fields="propertyVisibleGridFields"
-      @close="showHistory = false"
+      :fields="twoLayerVisibleFields"
+      :link-summaries="grid.linkSummaries.value"
+      :person-summaries="grid.personSummaries.value"
+      :initial-batch-id="historyDeepLinkBatchId"
+      @close="closeHistory"
+      @open-record="onHistoryOpenRecord"
     />
     <MetaConfigHistoryModal
       :visible="configHistory.visible"
@@ -616,6 +624,8 @@ import type { SortRule, FilterConjunction } from '../composables/useMultitableGr
 import { useMultitableWorkbench } from '../composables/useMultitableWorkbench'
 import { useMultitableGrid } from '../composables/useMultitableGrid'
 import { useMultitableCapabilities } from '../composables/useMultitableCapabilities'
+import { usePersonalViewToggle } from '../composables/usePersonalViewToggle'
+import { reorderViewFields } from '../utils/reorder-view-fields'
 import { useMultitableComments } from '../composables/useMultitableComments'
 import { useMultitableCommentPresence } from '../composables/useMultitableCommentPresence'
 import { useMultitableCommentInbox } from '../composables/useMultitableCommentInbox'
@@ -630,7 +640,7 @@ import MetaGridTable from '../components/MetaGridTable.vue'
 import MetaExportDialog, { type ExportConfirmPayload } from '../components/MetaExportDialog.vue'
 import RestorePreviewDialog from '../components/RestorePreviewDialog.vue'
 import RestoreBatchDialog from '../components/RestoreBatchDialog.vue'
-import type { RestorePreviewChange, RestoreBatchPreviewRecord, RestoreBatchExecuteRecord } from '../api/client'
+import type { ConfigRestoreExecuteConfirm, RestorePreviewChange, RestoreBatchPreviewRecord, RestoreBatchExecuteRecord } from '../api/client'
 import { buildBatchExpectedVersions } from '../utils/batch-restore-expected-versions'
 import { resolveSelectionLabels } from '../utils/batch-restore-labels'
 import MetaFormView from '../components/MetaFormView.vue'
@@ -660,11 +670,12 @@ import MetaCalendarView from '../components/MetaCalendarView.vue'
 import MetaTimelineView from '../components/MetaTimelineView.vue'
 import MetaGanttView from '../components/MetaGanttView.vue'
 import MetaHierarchyView from '../components/MetaHierarchyView.vue'
-import MetaToast from '../components/MetaToast.vue'
+import MetaToast, { type ToastAction } from '../components/MetaToast.vue'
 import MetaImportModal from '../components/MetaImportModal.vue'
 import MetaBulkEditDialog from '../components/MetaBulkEditDialog.vue'
 import MetaMentionPopover from '../components/MetaMentionPopover.vue'
 import MetaDashboardView from '../components/MetaDashboardView.vue'
+import { MtButton } from '../ui'
 import type { MetaBase } from '../types'
 import { bulkImportRecords } from '../import/bulk-import'
 import { extractImportTokens, type ImportBuildFailure, type ImportBuildResult, type ImportValueResolver } from '../import/delimited'
@@ -696,6 +707,44 @@ import {
   rememberRecentBaseOpen,
   toggleFavoriteBaseId,
 } from '../utils/base-local-state'
+import { ElIcon } from 'element-plus'
+import {
+  MessageBox as IconMentions,
+  ChatDotRound as IconCommentInbox,
+  Setting as IconFields,
+  Lock as IconAccess,
+  Menu as IconViews,
+  Setting as IconWorkflow,
+  Lightning as IconAutomations,
+  Files as IconTemplates,
+  DataBoard as IconDashboard,
+  Link as IconShareForm,
+  Key as IconApiWebhooks,
+  Delete as IconTrash,
+  Clock as IconHistory,
+  Setting as IconConfigHistory,
+} from '@element-plus/icons-vue'
+
+// Feature-row chrome icon map (UI-P1b). Same idiom as MetaToolbar's ICON map (UI-P1 slice-1): keyed by
+// action so the template reads `ICON.trash` etc. `fields`/`workflow`/`configHistory` intentionally share
+// the Setting glyph — the source markup already rendered the same gear character (&#x2699;) for all three,
+// so this is a like-for-like swap, not a new distinction.
+const ICON = {
+  mentions: IconMentions,
+  commentInbox: IconCommentInbox,
+  fields: IconFields,
+  access: IconAccess,
+  views: IconViews,
+  workflow: IconWorkflow,
+  automations: IconAutomations,
+  templates: IconTemplates,
+  dashboard: IconDashboard,
+  shareForm: IconShareForm,
+  apiWebhooks: IconApiWebhooks,
+  trash: IconTrash,
+  history: IconHistory,
+  configHistory: IconConfigHistory,
+} as const
 
 const props = defineProps<{ sheetId?: string; viewId?: string; baseId?: string; recordId?: string; commentId?: string; fieldId?: string; openComments?: boolean; mode?: string; role?: MultitableRole }>()
 const emit = defineEmits<{
@@ -726,15 +775,62 @@ const featureFlags = useFeatureFlags()
 const canOpenWorkflowDesigner = computed(
   () => caps.canManageAutomation.value && featureFlags.hasFeature('workflow'),
 )
-const grid = useMultitableGrid({ sheetId: workbench.activeSheetId, viewId: workbench.activeViewId })
+// Slice 3 personal-views "My view" toggle (design-lock multitable-personal-views-slice3-fe-toggle-design-
+// lock-20260706.md). `enabled()` mirrors the flag-derived session capability (never a client-side env const)
+// so a flag-off session can never latch a view into personal mode (G-FE-4). Instantiated BEFORE the grid so
+// its `isPersonalMode` getter can be threaded into useMultitableGrid's write-routing switch (G-FE-2).
+const personalViewsEnabled = computed(() => capabilitySource.value?.personalViewsEnabled === true)
+const personalView = usePersonalViewToggle({ client: workbench.client, enabled: () => personalViewsEnabled.value })
+const grid = useMultitableGrid({ sheetId: workbench.activeSheetId, viewId: workbench.activeViewId, isPersonalMode: personalView.isPersonalMode })
 
 // T8-2 Reset UI T-source entry wiring (#3250/#3251 flagged the missing T-source). Gate on the flag-derived
-// pitResetEnabled signal alone (it already encodes canManageSheetAccess); pass the raw client signatures so the
-// picker owns + tests the (sheetId, asOf) composition; refresh the grid after a successful reset.
+// pitResetEnabled signal alone (it already encodes canManageSheetAccess); pass Global History listing plus the raw
+// reset client signatures so the picker owns + tests the (sheetId, asOf) composition; refresh the grid after success.
 const pitResetEnabled = computed(() => capabilitySource.value?.pitResetEnabled === true)
+const listHistoryEventsWire = (
+  baseId: string,
+  params?: Parameters<typeof workbench.client.listHistoryEvents>[1],
+) => workbench.client.listHistoryEvents(baseId, params)
 const resetPreviewWire = (sid: string, asOf: string) => workbench.client.resetPreview(sid, asOf)
 const resetExecuteWire = (sid: string, asOf: string, previewIdentity: string) => workbench.client.resetExecute(sid, asOf, previewIdentity)
 const onResetDone = () => { void grid.reloadCurrentPage() }
+
+// Slice 3: per-view personal-toggle click + "reset to shared". Reset deletes the actor's own personal-config
+// row then re-fetches via loadSheetMeta so the rendered config becomes whatever the server now resolves
+// (shared, since the override row is gone) — G-FE-3. Never touches the shared view itself.
+const canResetToShared = computed(() =>
+  personalViewsEnabled.value && personalView.isPersonalMode(workbench.activeViewId.value),
+)
+// Refetch used after an ON→OFF reset: reload the effective (now shared) view config from /context, then
+// reload the grid page so the rows reflect it. Only runs on the reset path (see handleToggleClick).
+function refetchAfterReset(viewId: string) {
+  return async () => {
+    const sheetId = workbench.activeSheetId.value
+    if (sheetId) await workbench.loadSheetMeta(sheetId, { viewId })
+    await grid.reloadCurrentPage()
+  }
+}
+// Toggle semantics owned by the composable (design-lock §1-B/§1-C): ON→OFF = delete personal row + refetch;
+// OFF→ON = enter personal mode (row created lazily on first edit). The toolbar "Reset to shared" is the same
+// reset path.
+async function onTogglePersonalView(viewId: string) {
+  await personalView.handleToggleClick(viewId, refetchAfterReset(viewId))
+}
+async function onResetToShared() {
+  const viewId = workbench.activeViewId.value
+  if (!viewId) return
+  await personalView.resetToShared(viewId, refetchAfterReset(viewId))
+}
+// Initialize/re-sync the toggle from the server's persisted override set (/context personalOverrideViewIds) on
+// every context (re)load, so a saved personal row shows the toggle ON after refresh — mode reflects server
+// state, not local guesswork (P1). Flag-off clears it (G-FE-4, enforced inside syncFromServer).
+watch(
+  // `?.` so a partial embedding/test-stub of the workbench that omits this ref degrades to "no personal
+  // overrides" instead of throwing at setup; the real useMultitableWorkbench always exposes it.
+  () => workbench.personalOverrideViewIds?.value,
+  (ids) => personalView.syncFromServer(ids ?? []),
+  { immediate: true },
+)
 const commentsState = useMultitableComments()
 const commentPresenceState = useMultitableCommentPresence()
 const commentInboxState = useMultitableCommentInbox()
@@ -896,6 +992,31 @@ const showFormShareManager = ref(false)
 const showApiTokenManager = ref(false)
 const showTrash = ref(false)
 const showHistory = ref(false)
+// W3-5: set by a commit toast's "view in history" action — deep-links the History Center straight to the
+// batch that toast is about. Cleared on close so re-opening the modal manually (toolbar button) shows the
+// normal unfiltered list, not a stale deep-link from a previous toast.
+const historyDeepLinkBatchId = ref<string | null>(null)
+function openHistoryForBatch(batchId: string) {
+  historyDeepLinkBatchId.value = batchId
+  showHistory.value = true
+}
+// PR-C: click-through from a History Center change row to the record drawer — same shape as the
+// Notification Center's click-to-locate (onNotificationNavigate): switch to the change's sheet first
+// (resolveDeepLink resolves against the active sheet; a declined unsaved-changes discard aborts, so we
+// never look the record up in the wrong sheet), then locate via resolveDeepLink (loaded row → drawer;
+// off-page → getRecord fetch; gone/denied → the existing not-found toast).
+async function onHistoryOpenRecord(payload: { sheetId: string; recordId: string }) {
+  if (payload.sheetId && payload.sheetId !== workbench.activeSheetId.value) {
+    if (!onSelectSheet(payload.sheetId)) return
+  }
+  closeHistory()
+  await resolveDeepLink(payload.recordId)
+}
+
+function closeHistory() {
+  showHistory.value = false
+  historyDeepLinkBatchId.value = null
+}
 
 // T9-R4: config/schema-change history view. The server gates per entity type — the FE renders what it returns
 // (faithful client; no client-side security filtering). The entity-type filter only narrows within the gated set.
@@ -922,8 +1043,8 @@ async function loadConfigHistory(entityType: string) {
 function configRestorePreview(revisionId: string) {
   return workbench.client.getConfigRestorePreview(workbench.activeSheetId.value, revisionId)
 }
-function configRestoreExecute(revisionId: string, previewToken: string) {
-  return workbench.client.executeConfigRestore(workbench.activeSheetId.value, revisionId, previewToken)
+function configRestoreExecute(revisionId: string, previewToken: string, confirm?: ConfigRestoreExecuteConfirm) {
+  return workbench.client.executeConfigRestore(workbench.activeSheetId.value, revisionId, previewToken, confirm)
 }
 async function onConfigReverted() {
   // A revert changes field name/order or view filter/config — reload sheet meta + grid so the field
@@ -1062,8 +1183,16 @@ function showError(msg: string) {
   toastRef.value?.showError(msg)
 }
 
-function showSuccess(msg: string) {
-  toastRef.value?.showSuccess(msg)
+function showSuccess(msg: string, action?: ToastAction) {
+  toastRef.value?.showSuccess(msg, action)
+}
+
+// W3-5: a commit toast's "View in history" action — deep-links straight to the batch this commit wrote.
+// Omitted (no action) when the server response carried no batchId (e.g. a server predating the seam, or a
+// no-op commit where nothing was actually written).
+function historyLinkAction(batchId: string | null): ToastAction | undefined {
+  if (!batchId) return undefined
+  return { label: wb('toast.viewInHistory', isZh.value), onClick: () => openHistoryForBatch(batchId) }
 }
 
 function ensureCanCreateRecord(): boolean {
@@ -1208,6 +1337,13 @@ const effectiveRowActions = computed<MetaRowActions>(() => {
 const scopedAllFields = computed(() =>
   grid.fields.value.filter((field) => effectiveFieldPermissions.value[field.id]?.visible !== false),
 )
+// Two-layer-visible field list (History Center + TrashModal): BOTH visibility layers must filter —
+// layer-2 property-hidden (property.hidden / property.visible=false) ∩ layer-3 per-subject
+// field_permissions (RBAC, already applied by scopedAllFields). Either alone leaks the other layer:
+// History Center would leak hidden field NAMES into the filter options / diff labels; TrashModal's
+// pickRecordTitle would leak a hidden field's VALUE into a trash-row title (R10 fix — was wired to
+// scopedAllFields alone, layer-3-only).
+const twoLayerVisibleFields = computed(() => filterPropertyVisibleFields(scopedAllFields.value))
 const scopedGridFields = computed(() =>
   grid.visibleFields.value.filter((field) => effectiveFieldPermissions.value[field.id]?.visible !== false),
 )
@@ -2198,7 +2334,7 @@ async function onDrawerPatch(fieldId: string, value: unknown) {
       data: { ...deepLinkedRecord.value.data, [fieldId]: value },
     }
   }
-  showSuccess(wb('toast.recordUpdated', isZh.value))
+  showSuccess(wb('toast.recordUpdated', isZh.value), historyLinkAction(grid.lastBatchId.value))
 }
 
 async function onFormSubmit(data: Record<string, unknown>) {
@@ -3273,16 +3409,20 @@ function onAutoFitColumns() {
 }
 
 // --- Field reorder ---
+// Slice 3c: route by personal-vs-shared. Personal mode ON → write ONLY personal-config.fieldOrder (never the
+// shared field.order); OFF → the unchanged shared path. Logic + goldens live in utils/reorder-view-fields.ts.
 function onReorderField(fromId: string, toId: string) {
-  const arr = [...grid.fields.value]
-  const fromIdx = arr.findIndex((f) => f.id === fromId)
-  const toIdx = arr.findIndex((f) => f.id === toId)
-  if (fromIdx < 0 || toIdx < 0) return
-  const [moved] = arr.splice(fromIdx, 1)
-  arr.splice(toIdx, 0, moved)
-  grid.fields.value = arr
-  // Persist order through field.order until backend exposes a dedicated view column-order contract.
-  Promise.all(arr.map((field, index) => workbench.client.updateField(field.id, { order: index }))).catch(() => {})
+  void reorderViewFields({
+    fromId,
+    toId,
+    isPersonal: personalViewsEnabled.value && personalView.isPersonalMode(workbench.activeViewId.value),
+    viewId: workbench.activeViewId.value,
+    sharedFields: grid.fields.value,
+    visibleFieldIds: grid.visibleFields.value.map((f) => f.id),
+    client: workbench.client,
+    onSharedOrder: (arr) => { grid.fields.value = arr },
+    onPersonalOrder: (ids) => { grid.fieldOrder.value = ids },
+  })
 }
 
 // --- Bulk import ---
@@ -4197,49 +4337,60 @@ defineExpose({
 }
 .mt-workbench__conflict-copy { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: #8a5a00; }
 .mt-workbench__conflict-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-.mt-workbench__conflict-btn {
-  padding: 6px 10px;
-  border: 1px solid #d9b56d;
-  border-radius: 8px;
-  background: #fff;
-  color: #8a5a00;
-  cursor: pointer;
-  font-size: 12px;
-}
+/* .mt-workbench__conflict-btn: all three sharers (reload / retry / dismiss in the conflict banner)
+   are now <MtButton> (token-styled; reload/dismiss = default ghost, sanctioned border drop as in
+   batch-1). The bespoke base CSS was removed to avoid double-styling the MtButton root; the class is
+   kept on the elements only for selector stability (the existing workbench spec queries it). The
+   `--primary` amber variant below is deliberately KEPT as an additive class — MtButton has no
+   warning/amber variant, so it preserves the banner's attention fill on the retry action. */
 .mt-workbench__conflict-btn--primary { background: #f59e0b; border-color: #f59e0b; color: #fff; }
 .mt-workbench__actions { display: flex; gap: 6px; padding: 4px 16px 0; }
 .mt-workbench__capability-banner {
   margin: 8px 16px 0;
-  padding: 8px 12px;
-  border: 1px solid #d9d9d9;
-  border-radius: 10px;
-  background: #fafafa;
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
+  padding: 3px 10px;
+  border: 1px solid var(--ms-border-light, #e7e8ec);
+  border-radius: 999px;
+  background: var(--ms-bg-page, #f5f6f8);
+  display: inline-flex;
+  align-self: flex-start;
+  align-items: center;
+  gap: 6px;
   font-size: 12px;
-  color: #595959;
+  line-height: 1.6;
+  color: var(--ms-text-2, #646a73);
+  max-width: 100%;
 }
-.mt-workbench__capability-banner strong { font-weight: 600; color: inherit; }
-.mt-workbench__capability-banner--admin {
-  border-color: #87e8de;
-  background: #f6ffed;
-  color: #135200;
+.mt-workbench__capability-banner::before {
+  content: '\1F512';
+  font-size: 10px;
+  line-height: 1;
+  opacity: 0.7;
 }
+.mt-workbench__capability-banner strong {
+  font-weight: 600;
+  color: var(--ms-text-1, #1f2329);
+}
+.mt-workbench__capability-banner span {
+  color: var(--ms-text-2, #646a73);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.mt-workbench__capability-banner--admin,
 .mt-workbench__capability-banner--global-rbac {
-  border-color: #b7eb8f;
-  background: #f6ffed;
-  color: #237804;
+  border-color: var(--ms-border-light, #e7e8ec);
+  background: var(--ms-bg-page, #f5f6f8);
+  color: var(--ms-text-2, #646a73);
 }
 .mt-workbench__capability-banner--sheet-grant {
-  border-color: #91d5ff;
-  background: #e6f4ff;
-  color: #0958d9;
+  border-color: var(--el-color-primary-light-9, #eef3ff);
+  background: var(--el-color-primary-light-9, #eef3ff);
+  color: var(--el-color-primary-dark-2, #1e4fc0);
 }
 .mt-workbench__capability-banner--sheet-scope {
-  border-color: #ffd591;
-  background: #fff7e6;
-  color: #ad6800;
+  border-color: var(--ms-border-light, #e7e8ec);
+  background: var(--ms-bg-page, #f5f6f8);
+  color: var(--ms-text-2, #646a73);
 }
 .mt-workbench__presence-chip { display: inline-flex; align-items: center; gap: 4px; padding: 3px 10px; border: 1px solid #91caff; border-radius: 12px; background: #e6f4ff; color: #0958d9; font-size: 12px; }
 .mt-workbench__presence-chip strong { font-weight: 600; color: #003eb3; }
@@ -4249,9 +4400,10 @@ defineExpose({
 .mt-workbench__mention-chip--unread { border-color: #d48806; background: #faecd8; }
 .mt-workbench__mention-chip-unread { color: #d48806; font-size: 11px; font-weight: 600; }
 .mt-workbench__mention-chip-records { color: #999; font-size: 11px; }
-.mt-workbench__mgr-btn { padding: 3px 10px; border: 1px solid #ddd; border-radius: 4px; background: #fff; font-size: 12px; cursor: pointer; color: #666; }
+.mt-workbench__mgr-btn { display: inline-flex; align-items: center; gap: 4px; padding: 3px 10px; border: 1px solid #ddd; border-radius: 4px; background: #fff; font-size: 12px; cursor: pointer; color: #666; }
 .mt-workbench__mgr-btn:hover { background: #f5f7fa; color: #409eff; border-color: #c0d8f0; }
 .mt-workbench__mgr-btn--attention { border-color: #f59e0b; color: #92400e; background: #fffbeb; }
+.mt-workbench__mgr-btn-icon { font-size: 15px; color: currentColor; }
 .mt-workbench__mgr-badge { display: inline-flex; align-items: center; justify-content: center; min-width: 18px; height: 18px; margin-left: 6px; padding: 0 6px; border-radius: 999px; background: #f59e0b; color: #fff; font-size: 11px; font-weight: 600; }
 .mt-workbench__base-bar { padding: 8px 16px 0; border-bottom: 1px solid #f0f0f0; }
 .mt-template-library {

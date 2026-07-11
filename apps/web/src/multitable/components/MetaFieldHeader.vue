@@ -97,7 +97,7 @@ const headerStyle = computed(() => {
     style.position = 'sticky'
     style.left = `${props.frozenLeft}px`
     style.zIndex = '4'
-    style.background = '#f9fafb'
+    style.background = 'var(--ms-bg-card, #fff)'
   }
   return Object.keys(style).length ? style : undefined
 })
@@ -121,11 +121,11 @@ function onResizeStart(e: MouseEvent) {
 <style scoped>
 .meta-field-header {
   padding: 8px 12px; text-align: left; font-weight: 500; font-size: 13px;
-  border-bottom: 2px solid #e5e7eb; background: #f9fafb; white-space: nowrap;
+  border-bottom: 1px solid var(--ms-border-light, #e7e8ec); background: var(--ms-bg-card, #fff); white-space: nowrap;
   user-select: none; position: sticky; top: 0; z-index: 1; position: relative;
 }
 .meta-field-header--sortable { cursor: pointer; }
-.meta-field-header--sortable:hover { background: #f0f2f5; }
+.meta-field-header--sortable:hover { background: var(--ms-bg-page, #f5f6f8); }
 .meta-field-header__icon { display: inline-block; width: 22px; text-align: center; color: #999; font-size: 12px; margin-right: 4px; }
 .meta-field-header__name { overflow: hidden; text-overflow: ellipsis; }
 .meta-field-header__sort { margin-left: 4px; font-size: 10px; color: #409eff; }

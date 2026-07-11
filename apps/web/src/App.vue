@@ -35,6 +35,8 @@
             <router-link v-if="canManageUsers" to="/admin/automation-executions" class="nav-link">{{ navLabels.automationRuns }}</router-link>
             <router-link v-if="canManageUsers" to="/approvals/metrics" class="nav-link">{{ navLabels.approvalMetrics }}</router-link>
             <router-link v-if="canUseIntegration" to="/integrations/workbench" class="nav-link">{{ navLabels.systemIntegration }}</router-link>
+            <router-link v-if="canUseIntegration" to="/stock-prep" class="nav-link">{{ navLabels.stockPreparation }}</router-link>
+            <router-link v-if="canUseIntegration" to="/data-sources" class="nav-link">{{ navLabels.dataSources }}</router-link>
             <router-link v-if="isAdmin" to="/admin/plugins" class="nav-link">{{ navLabels.plugins }}</router-link>
             <router-link v-if="canUsePlm" to="/plm" class="nav-link">{{ navLabels.plm }}</router-link>
             <router-link v-if="canUsePlm" to="/plm/audit" class="nav-link">{{ navLabels.audit }}</router-link>
@@ -132,6 +134,8 @@ const navLabels = computed(() => {
       automationRuns: '自动化运行',
       approvalMetrics: '审批 SLA',
       systemIntegration: '数据工厂',
+      stockPreparation: '备料工作台',
+      dataSources: '外接数据源',
       plugins: '插件',
       plm: 'PLM',
       audit: '审计',
@@ -154,6 +158,8 @@ const navLabels = computed(() => {
     automationRuns: 'Automation Runs',
     approvalMetrics: 'Approval SLA',
     systemIntegration: 'Data Factory',
+    stockPreparation: 'Stock Preparation',
+    dataSources: 'Data Sources',
     plugins: 'Plugins',
     plm: 'PLM',
     audit: 'Audit',
@@ -237,7 +243,7 @@ html, body {
   font-size: 14px;
   line-height: 1.5;
   color: #333;
-  background-color: #f5f5f5;
+  background-color: var(--ms-bg-page);
 }
 
 #app {
@@ -268,7 +274,7 @@ html, body {
 .brand-text {
   font-size: 18px;
   font-weight: 600;
-  color: #1976d2;
+  color: var(--ms-color-primary);
   white-space: nowrap;
 }
 
@@ -350,8 +356,8 @@ html, body {
 }
 
 .nav-link.router-link-active {
-  background-color: #e3f2fd;
-  color: #1976d2;
+  background-color: var(--el-color-primary-light-9);
+  color: var(--ms-color-primary);
 }
 
 .app-main {

@@ -4,8 +4,11 @@
  * Full lifecycle coverage: template -> publish -> initiate -> approve/reject/transfer/comment/revoke
  * Uses the same component-level E2E pattern as approval-center.spec.ts.
  */
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { computed, createApp, defineComponent, h, nextTick, ref, type App as VueApp } from 'vue'
+import { useLocale } from '../src/composables/useLocale'
 import {
   mockPendingApproval,
   mockApprovedApproval,
@@ -55,6 +58,7 @@ const mockPendingApprovals = ref<any[]>([])
 const mockMyApprovals = ref<any[]>([])
 const mockCcApprovals = ref<any[]>([])
 const mockCompletedApprovals = ref<any[]>([])
+const mockProcessedApprovals = ref<any[]>([])
 
 const loadDetailSpy = vi.fn().mockResolvedValue(undefined)
 const loadHistorySpy = vi.fn().mockResolvedValue(undefined)
@@ -64,6 +68,7 @@ const loadPendingSpy = vi.fn().mockResolvedValue(undefined)
 const loadMineSpy = vi.fn().mockResolvedValue(undefined)
 const loadCcSpy = vi.fn().mockResolvedValue(undefined)
 const loadCompletedSpy = vi.fn().mockResolvedValue(undefined)
+const loadProcessedSpy = vi.fn().mockResolvedValue(undefined)
 
 vi.mock('../src/approvals/store', () => ({
   useApprovalStore: () => ({
@@ -72,6 +77,7 @@ vi.mock('../src/approvals/store', () => ({
     get myApprovals() { return mockMyApprovals.value },
     get ccApprovals() { return mockCcApprovals.value },
     get completedApprovals() { return mockCompletedApprovals.value },
+    get processedApprovals() { return mockProcessedApprovals.value },
     get activeApproval() { return mockActiveApproval.value },
     get history() { return mockHistory.value },
     get loading() { return mockLoading.value },
@@ -80,18 +86,40 @@ vi.mock('../src/approvals/store', () => ({
     get totalMine() { return mockMyApprovals.value.length },
     get totalCc() { return mockCcApprovals.value.length },
     get totalCompleted() { return mockCompletedApprovals.value.length },
+    get totalProcessed() { return mockProcessedApprovals.value.length },
     get pendingCount() { return mockPendingApprovals.value.length },
     approvalById: () => undefined,
     loadPending: loadPendingSpy,
     loadMine: loadMineSpy,
     loadCc: loadCcSpy,
     loadCompleted: loadCompletedSpy,
+    loadProcessed: loadProcessedSpy,
     loadDetail: loadDetailSpy,
     loadHistory: loadHistorySpy,
     submitApproval: submitApprovalSpy,
     executeAction: executeActionSpy,
   }),
 }))
+
+// ---------------------------------------------------------------------------
+// B3-04 D-2 — participant directory picker mock. ApprovalUserPicker (used by the transfer /
+// add-sign dialogs below) fetches its option list through `searchApprovalDirectoryUsers`; the
+// fixture below preserves the SAME ids (user_2/user_3/user_4) the deleted hardcoded 李四/王五/赵六
+// option lists used to hardcode, so the pre-existing `select.value = 'user_2'` / `'user_3'`
+// assertions further down keep working unchanged. `vi.importActual` keeps every OTHER export
+// (dispatchAction, ApprovalApiError, ...) real — only this one function is overridden.
+// ---------------------------------------------------------------------------
+vi.mock('../src/approvals/api', async () => {
+  const actual = await vi.importActual<typeof import('../src/approvals/api')>('../src/approvals/api')
+  return {
+    ...actual,
+    searchApprovalDirectoryUsers: vi.fn().mockResolvedValue([
+      { id: 'user_2', name: '李四', email: '' },
+      { id: 'user_3', name: '王五', email: '' },
+      { id: 'user_4', name: '赵六', email: '' },
+    ]),
+  }
+})
 
 // ---------------------------------------------------------------------------
 // Template store mock
@@ -496,6 +524,12 @@ describe('Approval E2E Lifecycle', () => {
   let container: HTMLDivElement | null = null
 
   beforeEach(() => {
+    // UF-3: the header status tag is now locale-aware (<StatusTag domain="approvalInstance">,
+    // via useLocale()/isZh) rather than the previous hardcoded-Chinese-always literal map. This
+    // whole spec's fixtures/assertions are Chinese, so pin the locale explicitly rather than
+    // relying on jsdom's default `navigator.language`.
+    useLocale().setLocale('zh-CN')
+
     // Reset all reactive state
     mockActiveApproval.value = null
     mockHistory.value = []
@@ -800,7 +834,9 @@ describe('Approval E2E Lifecycle', () => {
       const h1 = container!.querySelector('.approval-detail__header h1')
       expect(h1?.textContent).toBe('出差报销申请')
 
-      const tag = container!.querySelector('.approval-detail__header [data-el-tag]')
+      // UF-3: the header status tag is now <StatusTag> (framework-free by design, not `<el-tag>`)
+      // — select it by its `data-status` attribute instead of the ElTag test stub's `data-el-tag`.
+      const tag = container!.querySelector('.approval-detail__header [data-status]')
       expect(tag?.textContent).toContain('待处理')
     })
 
@@ -1174,11 +1210,11 @@ describe('Approval E2E Lifecycle', () => {
       await flushUi()
 
       const dialog = container!.querySelector('[data-dialog-visible="true"][data-el-dialog="加签"]')!
-      // Multiple-select: selecting an option emits the array shape the v-model
-      // binds (the stub wraps the chosen value into a string[]). A single
-      // <select> can only hold one option value, so we pick one — enough to
-      // assert the array contract reaches the action.
-      const select = dialog.querySelector('[data-el-select-multiple="true"]') as HTMLSelectElement
+      // B3-04 D-2: add-sign now uses ApprovalUserPicker's REPEATED-PICK pattern (single-select,
+      // picking one appends it to `addSignUserIds` and resets the picker) instead of a multi-select
+      // dropdown. Picking one user is enough to assert the array contract (`targetUserIds`) reaches
+      // the action — the picker component itself owns the "pick several" UX (chips + reset).
+      const select = dialog.querySelector('[data-el-select]') as HTMLSelectElement
       select.value = 'user_2'
       select.dispatchEvent(new Event('change', { bubbles: true }))
       await flushUi()
@@ -1257,6 +1293,62 @@ describe('Approval E2E Lifecycle', () => {
   })
 
   // =========================================================================
+  // B3-04 D-2 — real participant pickers replace the hardcoded fake people
+  // (production correctness defect: transfer/add-sign used to offer 李四/王五/赵六/张三,
+  // ids that were never real users).
+  // =========================================================================
+  describe('B3-04 D-2: real participant pickers (transfer / add-sign)', () => {
+    const DETAIL_VIEW_SRC = readFileSync(
+      join(__dirname, '../src/views/approval/ApprovalDetailView.vue'),
+      'utf8',
+    )
+
+    it('static tripwire: the view source no longer contains the hardcoded fake-people literals', () => {
+      for (const fakeName of ['李四', '王五', '赵六', '张三']) {
+        expect(DETAIL_VIEW_SRC, `should not contain fake fixture name "${fakeName}"`).not.toContain(fakeName)
+      }
+    })
+
+    it('the transfer dialog renders the real ApprovalUserPicker', async () => {
+      routeParams = { id: 'apv_pending_1' }
+      mockActiveApproval.value = mockPendingApproval()
+      await mountDetailView()
+
+      const transferBtn = Array.from(container!.querySelectorAll('.approval-detail__actions button'))
+        .find((b) => b.textContent?.trim() === '转交')
+      transferBtn!.click()
+      await flushUi()
+
+      const dialog = container!.querySelector('[data-dialog-visible="true"][data-el-dialog="转交审批"]')
+      expect(dialog?.querySelector('[data-testid="approval-user-picker"]')).toBeTruthy()
+    })
+
+    it('the add-sign dialog renders the real ApprovalUserPicker and accumulates a pick as a labeled chip', async () => {
+      routeParams = { id: 'apv_pending_1' }
+      mockActiveApproval.value = mockPendingApproval()
+      await mountDetailView()
+
+      const addBtn = Array.from(container!.querySelectorAll('.approval-detail__actions button'))
+        .find((b) => b.textContent?.trim() === '加签')
+      addBtn!.click()
+      await flushUi()
+
+      const dialog = container!.querySelector('[data-dialog-visible="true"][data-el-dialog="加签"]')!
+      expect(dialog.querySelector('[data-testid="approval-user-picker"]')).toBeTruthy()
+
+      const select = dialog.querySelector('[data-el-select]') as HTMLSelectElement
+      select.value = 'user_2'
+      select.dispatchEvent(new Event('change', { bubbles: true }))
+      await flushUi()
+
+      // Picked via the real directory fixture (id user_2 -> name 李四) — the chip shows the
+      // friendly name, not the raw id, proving the `select` event's richer option payload wired
+      // through to the label map.
+      expect(dialog.querySelector('[data-testid="approval-add-sign-chips"]')?.textContent).toContain('李四')
+    })
+  })
+
+  // =========================================================================
   // 6. Comment flow (via approve action with comment-only intent)
   // =========================================================================
   describe('Comment flow', () => {
@@ -1331,25 +1423,37 @@ describe('Approval E2E Lifecycle', () => {
       expect(loadHistorySpy).toHaveBeenCalledWith('apv_pending_1')
     })
 
-    it('revoked approval does not show action buttons', async () => {
+    it('revoked approval does not show action buttons (except UX B2-13\'s own-requester 再次提交)', async () => {
       routeParams = { id: 'apv_revoked_1' }
       mockActiveApproval.value = mockRevokedApproval()
       await mountDetailView()
 
       const actions = container!.querySelector('.approval-detail__actions')
       expect(actions).toBeTruthy()
-      expect(actions?.querySelectorAll('button').length).toBe(0)
+      // UX B2-13: this fixture's requester ('user_1') IS the mocked session user above, and
+      // 'revoked' is one of the resubmit-eligible terminal statuses, so 再次提交 now renders here
+      // too — carve it out of the "no action buttons" check instead of asserting a magic total, so
+      // a REAL regression (an approve/reject/etc. button leaking through for a terminal instance)
+      // still fails this test.
+      const otherButtons = Array.from(actions?.querySelectorAll('button') ?? [])
+        .filter((button) => button.getAttribute('data-testid') !== 'approval-resubmit-button')
+      expect(otherButtons.length).toBe(0)
+      expect(actions?.querySelector('[data-testid="approval-resubmit-button"]')).toBeTruthy()
       expect(actions?.querySelector('[data-el-alert="info"]')?.textContent).toContain('该审批已结束')
     })
 
-    it('rejected approval does not show action buttons', async () => {
+    it('rejected approval does not show action buttons (except UX B2-13\'s own-requester 再次提交)', async () => {
       routeParams = { id: 'apv_rejected_1' }
       mockActiveApproval.value = mockRejectedApproval()
       await mountDetailView()
 
       const actions = container!.querySelector('.approval-detail__actions')
       expect(actions).toBeTruthy()
-      expect(actions?.querySelectorAll('button').length).toBe(0)
+      // UX B2-13: same carve-out as the revoked case above — 'rejected' is also resubmit-eligible.
+      const otherButtons = Array.from(actions?.querySelectorAll('button') ?? [])
+        .filter((button) => button.getAttribute('data-testid') !== 'approval-resubmit-button')
+      expect(otherButtons.length).toBe(0)
+      expect(actions?.querySelector('[data-testid="approval-resubmit-button"]')).toBeTruthy()
       expect(actions?.querySelector('[data-el-alert="info"]')?.textContent).toContain('该审批已结束')
     })
   })
@@ -1537,6 +1641,81 @@ describe('Approval E2E Lifecycle', () => {
       // ...yet the real history item count (what `queryHistoryItems` / several OTHER guard
       // specs rely on) is untouched.
       expect(container!.querySelectorAll('.el-timeline-item').length).toBe(2)
+    })
+  })
+
+  // =========================================================================
+  // G-B2-09 / G-B2-10 — timeline de-ID tails + next-pending entry
+  // =========================================================================
+  describe('G-B2-09/10 detail tails', () => {
+    it('cc history action renders 抄送 (not raw cc) and actors get initial-letter avatars', async () => {
+      routeParams = { id: 'apv_pending_1' }
+      mockActiveApproval.value = mockPendingApproval()
+      mockHistory.value = [
+        {
+          id: 'hist_cc_1',
+          action: 'cc',
+          actorId: 'user_9',
+          actorName: '王五',
+          comment: null,
+          fromStatus: 'pending',
+          toStatus: 'pending',
+          occurredAt: new Date().toISOString(),
+          metadata: { nodeKey: 'cc_1' },
+        },
+      ] as never
+      await mountDetailView()
+
+      expect(container!.textContent).toContain('抄送')
+      expect(container!.textContent).not.toMatch(/\bcc\b/)
+      const avatar = container!.querySelector('.approval-detail__actor-avatar')
+      expect(avatar?.textContent?.trim()).toBe('王')
+    })
+
+    it('after a successful approve, 下一条 → appears when another pending item exists and navigates to it', async () => {
+      routeParams = { id: 'apv_pending_1' }
+      mockActiveApproval.value = mockPendingApproval()
+      executeActionSpy.mockResolvedValue(mockApprovedApproval())
+      mockPendingApprovals.value = [
+        { id: 'apv_pending_1' },
+        { id: 'apv_pending_2' },
+      ] as never
+      await mountDetailView()
+
+      const approveBtn = Array.from(container!.querySelectorAll('.approval-detail__actions button'))
+        .find((b) => b.textContent?.trim() === '通过')
+      approveBtn!.click()
+      await flushUi()
+      const dialog = container!.querySelector('[data-dialog-visible="true"]')
+      const confirmBtn = Array.from(dialog!.querySelectorAll('button'))
+        .find((b) => b.textContent?.trim() === '确认')
+      confirmBtn!.click()
+      await flushUi()
+
+      const nextBtn = container!.querySelector('[data-testid="approval-next-pending"]') as HTMLButtonElement | null
+      expect(nextBtn).not.toBeNull()
+      nextBtn!.click()
+      await flushUi()
+      // Exclude-current rule: the target is the OTHER pending item, never the acted one.
+      expect(pushSpy).toHaveBeenCalledWith({ name: 'approval-detail', params: { id: 'apv_pending_2' } })
+    })
+
+    it('no 下一条 when the pending list only contains the current instance (exclude-current guard)', async () => {
+      routeParams = { id: 'apv_pending_1' }
+      mockActiveApproval.value = mockPendingApproval()
+      executeActionSpy.mockResolvedValue(mockApprovedApproval())
+      mockPendingApprovals.value = [{ id: 'apv_pending_1' }] as never
+      await mountDetailView()
+
+      const approveBtn = Array.from(container!.querySelectorAll('.approval-detail__actions button'))
+        .find((b) => b.textContent?.trim() === '通过')
+      approveBtn!.click()
+      await flushUi()
+      const dialog = container!.querySelector('[data-dialog-visible="true"]')
+      Array.from(dialog!.querySelectorAll('button')).find((b) => b.textContent?.trim() === '确认')!.click()
+      await flushUi()
+
+      expect(container!.querySelector('[data-testid="approval-next-pending"]')).toBeNull()
     })
   })
 })

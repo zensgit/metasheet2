@@ -10,6 +10,7 @@ import type {
   ApprovalTemplateListItemDTO,
   ApprovalTemplateDetailDTO,
   ApprovalTemplateVersionDetailDTO,
+  ApprovalTemplateVersionSummaryDTO,
   UnifiedApprovalDTO,
   UnifiedApprovalHistoryDTO,
   CreateApprovalRequest,
@@ -21,6 +22,7 @@ import type {
   CreateApprovalTemplateRequest,
   UpdateApprovalTemplateRequest,
   PublishApprovalTemplateRequest,
+  ApprovalTemplateUsageDTO,
   FormSchema,
 } from '../types/approval'
 
@@ -111,6 +113,7 @@ function mockVersionDetail(templateId: string, versionId: string): ApprovalTempl
       policy: { allowRevoke: true, revokeBeforeNodeKeys: ['approval_2'] },
     },
     publishedDefinitionId: 'def_1',
+    publishNote: null,
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
   }
@@ -321,7 +324,11 @@ export interface TemplateListQuery {
 }
 
 export interface ApprovalListQuery {
-  tab?: 'pending' | 'mine' | 'cc' | 'completed'
+  /**
+   * B3-01 adds `processed` (我已处理): every instance the actor has ANY approval_records row for,
+   * regardless of the instance's CURRENT status — distinct from `completed` (status <> 'pending').
+   */
+  tab?: 'pending' | 'mine' | 'cc' | 'completed' | 'processed'
   status?: ApprovalStatus
   search?: string
   page?: number
@@ -333,6 +340,13 @@ export interface ApprovalListQuery {
    *   - 'plm'      → PLM-mirrored only
    */
   sourceSystem?: 'all' | 'platform' | 'plm'
+  /**
+   * B3-03 (模板/时间筛选): narrow the feed to one published template + a created-at window.
+   * Additive — composes with `tab`/`sourceSystem`/every other filter.
+   */
+  templateId?: string
+  createdFrom?: string
+  createdTo?: string
 }
 
 // ---------------------------------------------------------------------------
@@ -796,6 +810,38 @@ export async function cloneTemplate(templateId: string): Promise<ApprovalTemplat
   return apiPost(`/api/approval-templates/${encodeURIComponent(templateId)}/clone`, {})
 }
 
+/**
+ * B3-08 (模板治理 — 用量/blast-radius): fetched by the archive confirm dialog BEFORE the archive
+ * call so the admin sees the instance count first.
+ */
+export async function getTemplateUsage(templateId: string): Promise<ApprovalTemplateUsageDTO> {
+  if (USE_MOCK) {
+    return { templateId, instanceCount: 0, activeInstanceCount: 0 }
+  }
+  return apiGet(`/api/approval-templates/${encodeURIComponent(templateId)}/usage`)
+}
+
+/**
+ * B3-08 (模板治理 — 停用): PUBLISHED -> ARCHIVED. Existing running instances are unaffected; the
+ * template just stops being a valid createApproval/route-preview target.
+ */
+export async function archiveTemplate(templateId: string): Promise<ApprovalTemplateDetailDTO> {
+  if (USE_MOCK) {
+    return { ...mockTemplateDetail(templateId), status: 'archived' }
+  }
+  return apiPost(`/api/approval-templates/${encodeURIComponent(templateId)}/archive`, {})
+}
+
+/**
+ * B3-08 (模板治理 — 启用): ARCHIVED -> PUBLISHED. Reverses archiveTemplate.
+ */
+export async function unarchiveTemplate(templateId: string): Promise<ApprovalTemplateDetailDTO> {
+  if (USE_MOCK) {
+    return { ...mockTemplateDetail(templateId), status: 'published' }
+  }
+  return apiPost(`/api/approval-templates/${encodeURIComponent(templateId)}/unarchive`, {})
+}
+
 export async function getTemplate(id: string): Promise<ApprovalTemplateDetailDTO> {
   if (USE_MOCK) return mockTemplateDetail(id)
   return apiGet(`/api/approval-templates/${id}`)
@@ -809,6 +855,34 @@ export async function getTemplateVersion(
   return apiGet(`/api/approval-templates/${templateId}/versions/${versionId}`)
 }
 
+/**
+ * B3-09 (模板治理 — 版本历史): newest-first summary rows. Server shape = `{ versions: [...] }` from
+ * GET /api/approval-templates/:id/versions (admin-guarded, same as the version detail endpoint).
+ */
+export async function listTemplateVersions(
+  templateId: string,
+): Promise<ApprovalTemplateVersionSummaryDTO[]> {
+  if (USE_MOCK) {
+    const detail = mockVersionDetail(templateId, `ver_${templateId}_1`)
+    return [
+      {
+        id: detail.id,
+        templateId: detail.templateId,
+        version: detail.version,
+        status: detail.status,
+        publishNote: detail.publishNote,
+        publishedDefinitionId: detail.publishedDefinitionId,
+        createdAt: detail.createdAt,
+        updatedAt: detail.updatedAt,
+      },
+    ]
+  }
+  const response = await apiGet<{ versions: ApprovalTemplateVersionSummaryDTO[] }>(
+    `/api/approval-templates/${encodeURIComponent(templateId)}/versions`,
+  )
+  return response.versions
+}
+
 export async function listApprovals(
   query?: ApprovalListQuery,
 ): Promise<{ data: UnifiedApprovalDTO[]; total: number }> {
@@ -818,11 +892,19 @@ export async function listApprovals(
     else if (query?.tab === 'mine') items = items.filter((a) => a.requester?.id === 'user_1')
     else if (query?.tab === 'cc') items = items.slice(0, 3)
     else if (query?.tab === 'completed') items = items.filter((a) => ['approved', 'rejected', 'revoked'].includes(a.status))
+    // B3-01: dev-preview stand-in only (the real predicate is a server-side approval_records
+    // reverse lookup this mock has no per-item action history to replicate) — a fixed slice so
+    // the 我已处理 tab renders SOME rows in mock mode, ANY status, matching the real "not limited
+    // by current status" contract in spirit.
+    else if (query?.tab === 'processed') items = items.slice(3, 9)
     if (query?.status) items = items.filter((a) => a.status === query.status)
     if (query?.search) {
       const q = query.search.toLowerCase()
       items = items.filter((a) => (a.title ?? '').toLowerCase().includes(q) || (a.requestNo ?? '').toLowerCase().includes(q))
     }
+    if (query?.templateId) items = items.filter((a) => a.templateId === query.templateId)
+    if (query?.createdFrom) items = items.filter((a) => a.createdAt >= query.createdFrom!)
+    if (query?.createdTo) items = items.filter((a) => a.createdAt <= query.createdTo!)
     const page = query?.page ?? 1
     const pageSize = query?.pageSize ?? 10
     const start = (page - 1) * pageSize
@@ -835,6 +917,9 @@ export async function listApprovals(
   if (query?.page) params.set('page', String(query.page))
   if (query?.pageSize) params.set('pageSize', String(query.pageSize))
   if (query?.sourceSystem) params.set('sourceSystem', query.sourceSystem)
+  if (query?.templateId) params.set('templateId', query.templateId)
+  if (query?.createdFrom) params.set('createdFrom', query.createdFrom)
+  if (query?.createdTo) params.set('createdTo', query.createdTo)
   const qs = params.toString()
   return apiGet(`/api/approvals${qs ? `?${qs}` : ''}`)
 }
@@ -903,6 +988,52 @@ async function postApprovalJson<T>(path: string, payload: unknown): Promise<T> {
     await approvalRequestError(response)
   }
   return response.json()
+}
+
+/**
+ * RP-2 (route-preview lock, B3-05): read-only live route preview for the requester's CURRENT
+ * form values — the backend walks the real create pipeline (same validation/branch resolution/
+ * delegation substitution) without writing anything. Assignee `name` is display-enriched
+ * server-side with an honest id fallback.
+ */
+export interface ApprovalRoutePreviewNode {
+  nodeKey: string
+  nodeLabel: string
+  assignees: Array<{ id: string; name: string; assignmentType: 'user' | 'role' }>
+  resolveError?: string
+}
+
+export interface ApprovalRoutePreview {
+  route: ApprovalRoutePreviewNode[]
+  truncated: boolean
+}
+
+export async function previewApprovalRoute(req: CreateApprovalRequest): Promise<ApprovalRoutePreview> {
+  if (USE_MOCK) return { route: [], truncated: false }
+  return postApprovalJson('/api/approvals/preview', req)
+}
+
+/**
+ * RP-3 (route-preview lock, B3-06): the template AUTHOR's read-only dry-run of the LAST-SAVED
+ * draft version, optionally driven by a sample requester id (the only surface the design-lock
+ * allows an org-structure probe on — guarded server-side by `canManageTemplates`). Same output
+ * shape as `previewApprovalRoute` (shared substrate, no parallel impl).
+ *
+ * `templateRoutePreviewPath` is split out purely so the templateId URL-encoding is independently
+ * unit-testable: `USE_MOCK` is `import.meta.env.DEV || ...` and DEV is always `true` under this
+ * project's Vitest run (see `approvalApiErrorSurfacing.spec.ts`), so calling
+ * `previewTemplateRoute` itself in a test can only ever exercise the mock branch below.
+ */
+export function templateRoutePreviewPath(templateId: string): string {
+  return `/api/approval-templates/${encodeURIComponent(templateId)}/route-preview`
+}
+
+export async function previewTemplateRoute(
+  templateId: string,
+  body: { sampleFormData: Record<string, unknown>; sampleRequesterId?: string },
+): Promise<ApprovalRoutePreview> {
+  if (USE_MOCK) return { route: [], truncated: false }
+  return postApprovalJson(templateRoutePreviewPath(templateId), body)
 }
 
 export async function createApproval(req: CreateApprovalRequest): Promise<UnifiedApprovalDTO> {
@@ -1084,4 +1215,55 @@ export async function dispatchAction(
     return { ...base, status: statusMap[req.action] ?? base.status }
   }
   return postApprovalJson(`/api/approvals/${id}/actions`, req)
+}
+
+// ---------------------------------------------------------------------------
+// B3-04 D-2 — participant directory picker (transfer / add-sign / fill-form user field /
+// delegation delegatee). Wraps the D-1 endpoint (#3664) GET /api/approvals/directory/users,
+// guarded server-side by the least-privilege union approvals:read|write|act — the SAME
+// endpoint any approval participant (not just a template author) can reach.
+//
+// Deliberately UNGATED by USE_MOCK, unlike almost everything else in this file: this is a
+// read-only, degrade-to-empty-safely lookup, not a CRUD path that needs a dev-mode fixture.
+// Every failure mode (network error, non-OK response, malformed JSON, malformed entries)
+// resolves to `[]` instead of throwing — a picker with no options degrades to manual entry,
+// it never crashes the surrounding form. This is a candidate directory, NOT an authorization
+// fact: the downstream dispatchAction/createApproval/delegation-create calls still gate the
+// real action against the real candidate.
+// ---------------------------------------------------------------------------
+export interface ApprovalDirectoryUser {
+  id: string
+  name: string
+  email: string
+}
+
+export async function searchApprovalDirectoryUsers(
+  q: string,
+  limit = 20,
+): Promise<ApprovalDirectoryUser[]> {
+  try {
+    const params = new URLSearchParams()
+    const normalized = q.trim()
+    if (normalized) params.set('q', normalized)
+    params.set('limit', String(limit))
+    const response = await apiFetch(`/api/approvals/directory/users?${params.toString()}`)
+    if (!response.ok) return []
+    const payload = await response.json().catch(() => null) as { users?: unknown } | null
+    if (!payload || !Array.isArray(payload.users)) return []
+    const users: ApprovalDirectoryUser[] = []
+    for (const entry of payload.users) {
+      if (!entry || typeof entry !== 'object') continue
+      const record = entry as Record<string, unknown>
+      const id = typeof record.id === 'string' ? record.id : ''
+      if (!id) continue
+      users.push({
+        id,
+        name: typeof record.name === 'string' ? record.name : '',
+        email: typeof record.email === 'string' ? record.email : '',
+      })
+    }
+    return users
+  } catch {
+    return []
+  }
 }

@@ -256,6 +256,12 @@ export interface RecordPatchInput {
    */
   source?: RecordPostCommitContext['source']
   /**
+   * R11 restore back-reference (OD-0=(a)): the SOURCE record-version this patch restored from. Set ONLY by
+   * the three record-version restore routes (which call patchRecords with source='restore'); threaded onto
+   * the resulting revision's `restored_from_version`. Every other caller omits it ⇒ NULL.
+   */
+  restoredFromVersion?: number | null
+  /**
    * AI-fields S1 (LOCK-B1, design-lock `multitable-ai-write-provenance-batch-grouping-s1-designlock-20260705.md`):
    * OPTIONAL commit-action batch grouping seam. Absent (every existing caller) → behavior is
    * BYTE-IDENTICAL to before this seam existed: a fresh `randomUUID()` per `patchRecords` call (LOCK-12,
@@ -307,6 +313,15 @@ export interface RecordPatchResult {
   linkSummaries?: Record<string, unknown>
   attachmentSummaries?: Record<string, unknown>
   relatedRecords?: Array<{ sheetId: string; recordId: string; data: Record<string, unknown> }>
+  /**
+   * W3-5: the batch grouping id this call's revision(s) were stamped with (LOCK-B1/B2 seam) — the caller's
+   * explicit `batchId` if supplied, else the fresh `randomUUID()` this call minted (`bulkBatchId`). Echoed
+   * back so a REST/grid caller can deep-link into the History Center for exactly this commit (read-only;
+   * echoing an already-server-minted, already-persisted id changes no write-path semantics — LOCK-B5).
+   * Omitted (not merely undefined-valued) when `updated` is empty (nothing was actually written, e.g. every
+   * change was a same-value no-op), so a caller never deep-links to a batch that has no revisions.
+   */
+  batchId?: string
 }
 
 // ---------------------------------------------------------------------------
@@ -385,6 +400,13 @@ export interface RecordWriteHelpers {
     // A-min (design #2246): optional pre-hydrated row data per record (lookup/rollup resolved
     // in-memory) so formula-over-lookup evals against the actual value. Absent → raw reload.
     hydratedDataByRecord?: Map<string, Record<string, unknown>>,
+    // W1-1 (design-lock 2026-07-05 §2 LOCK-F, F1): optional trailing actor id — the WRITING actor
+    // for this patch. The REST implementation ignores it (its `req` closure is already the
+    // authoritative writer-taint context; zero behavior change). The Yjs-bridge implementation
+    // (index.ts) has no Express `req` and uses this to derive the SAME writer-taint context via
+    // `recalculateFormulaFieldsForActor` (univer-meta.ts), so a collaborative edit gets the
+    // byte-identical taint-skip discipline as a REST write by the same actor.
+    actorId?: string | null,
   ) => Promise<Array<{ recordId: string; data: Record<string, unknown> }>>
   loadLinkValuesByRecord: (
     query: QueryFn,
@@ -636,11 +658,22 @@ export class RecordWriteService {
       sheetScope,
       access,
       source,
+      restoredFromVersion,
       batchId,
       authorizationPreValidated,
     } = input
 
     const h = this.helpers
+
+    // Global-history T1 (LOCK-12): one bulk patchRecords call = ONE user action = ONE batch. Share a single
+    // batch_id across every record's revision so the history projection groups them as one batch, not many
+    // unrelated ones. AI-fields S1 (LOCK-B1/B2): a caller MAY supply its own batchId to group MULTIPLE
+    // patchRecords calls into one commit-action batch — absent, this is the same fresh randomUUID() as
+    // before the seam existed (byte-identical default for every non-AI caller). Hoisted above the mutation
+    // transaction (W3-5) so the RESULT can echo it back for a caller's history deep-link — it is otherwise
+    // unreachable outside the transaction closure. Purely a value computation with no side effect ordering
+    // dependency on running inside the transaction.
+    const bulkBatchId = batchId ?? randomUUID()
 
     // -----------------------------------------------------------------------
     // Step 0: Validate changes (field writability + value constraints)
@@ -761,12 +794,7 @@ export class RecordWriteService {
         if (fid && ids.length > 0) personRestrictByFieldId.set(fid, ids)
       }
 
-      // Global-history T1 (LOCK-12): one bulk patchRecords call = ONE user action = ONE batch. Share a
-      // single batch_id across every record's revision so the history projection groups them as one batch,
-      // not many unrelated ones. AI-fields S1 (LOCK-B1/B2): a caller MAY supply its own batchId to group
-      // MULTIPLE patchRecords calls into one commit-action batch — absent, this is the same fresh
-      // randomUUID() as before the seam existed (byte-identical default for every non-AI caller).
-      const bulkBatchId = batchId ?? randomUUID()
+      // bulkBatchId is computed above (hoisted, W3-5) — shared by every record this call writes.
       for (const [recordId, changes] of changesByRecord.entries()) {
         const expectedVersion = Array.from(
           new Set(changes.map((c) => c.expectedVersion).filter((v): v is number => typeof v === 'number')),
@@ -973,6 +1001,7 @@ export class RecordWriteService {
           version: nextVersion,
           action: 'update',
           source: source ?? 'rest',
+          restoredFromVersion: restoredFromVersion ?? null,
           actorId,
           changedFieldIds: [...Object.keys(patch), ...unsetIds],
           patch: revisionPatch,
@@ -1273,6 +1302,9 @@ export class RecordWriteService {
               updates.map((update) => update.recordId),
               changedFieldIds,
               hydratedDataByRecord,
+              // W1-1 (design-lock §2 LOCK-F, F1): pass the writing actor through so the Yjs-bridge
+              // helper can derive its writer-taint context from it (the REST helper ignores this).
+              actorId,
             )
           ).map((record) => ({
             recordId: record.recordId,
@@ -1401,6 +1433,9 @@ export class RecordWriteService {
       ...(patchLinkSummaries ? { linkSummaries: patchLinkSummaries } : {}),
       ...(patchAttachmentSummaries ? { attachmentSummaries: patchAttachmentSummaries } : {}),
       ...(crossSheetRelated.length > 0 ? { relatedRecords: crossSheetRelated } : {}),
+      // W3-5: only echo the batchId when something was actually written under it (never point a caller's
+      // history deep-link at a batch with zero revisions).
+      ...(updates.length > 0 ? { batchId: bulkBatchId } : {}),
     }
   }
 

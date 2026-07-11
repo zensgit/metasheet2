@@ -1,27 +1,45 @@
 <template>
   <div class="meta-toolbar" role="toolbar" :aria-label="l('toolbar.aria')">
     <div class="meta-toolbar__left">
-      <!-- Hide Fields -->
-      <div class="meta-toolbar__dropdown">
-        <button class="meta-toolbar__btn" @click="showFieldPicker = !showFieldPicker">
-          <span class="meta-toolbar__btn-icon">&#x2630;</span> {{ l('toolbar.fields') }}
-          <span v-if="hiddenCount" class="meta-toolbar__badge">{{ hiddenCount }}</span>
-        </button>
-        <div v-if="showFieldPicker" class="meta-toolbar__panel" @keydown.escape="showFieldPicker = false">
+      <!--
+        Hide Fields (UI-P2-1c slice-3: migrated to shared MtPopover, NOT MtMenu — this is a
+        multi-toggle field list, so toggling one field must NOT close the panel, unlike MtMenu's
+        select-and-close row semantics). Open/close + click-outside/Escape now come from MtPopover;
+        the toggle rows stay native <label>/<input type="checkbox"> (not MtMenuItem).
+      -->
+      <MtPopover v-model:open="showFieldPicker">
+        <template #trigger>
+          <MtButton :title="l('toolbar.fields')" :aria-label="l('toolbar.fields')">
+            <template #icon><el-icon><component :is="ICON.fields" /></el-icon></template>
+            {{ l('toolbar.fields') }}
+            <span v-if="hiddenCount" class="meta-toolbar__badge">{{ hiddenCount }}</span>
+          </MtButton>
+        </template>
+        <div class="meta-toolbar__field-panel">
           <label v-for="field in fields" :key="field.id" class="meta-toolbar__field-toggle">
             <input type="checkbox" :checked="!hiddenFieldIds.includes(field.id)" @change="emit('toggle-field', field.id)" />
             <span>{{ field.name }}</span>
           </label>
         </div>
-      </div>
+      </MtPopover>
 
-      <!-- Sort -->
-      <div class="meta-toolbar__dropdown">
-        <button class="meta-toolbar__btn" @click="showSortPanel = !showSortPanel">
-          <span class="meta-toolbar__btn-icon">&#x2195;</span> {{ l('toolbar.sort') }}
-          <span v-if="sortRules.length" class="meta-toolbar__badge">{{ sortRules.length }}</span>
-        </button>
-        <div v-if="showSortPanel" class="meta-toolbar__panel" @keydown.escape="showSortPanel = false">
+      <!--
+        Sort (UI-P2-1c slice-4: migrated to shared MtPopover — this is a COMPLEX BUILDER (add/remove/
+        update sort-rule rows + apply), not a simple toggle/menu, so the panel content is preserved
+        verbatim (native <select>s + add/remove/apply <button>s, NOT MtMenuItem rows); only the
+        open/close mechanics move from a hand-rolled `showSortPanel` ref + `.meta-toolbar__panel` to
+        MtPopover's `v-model:open` + built-in click-outside/Escape. The panel's own `@keydown.escape`
+        handler is dropped — MtPopover's document-level Escape listener now covers it.
+      -->
+      <MtPopover v-model:open="showSortPanel">
+        <template #trigger>
+          <MtButton :title="l('toolbar.sort')" :aria-label="l('toolbar.sort')">
+            <template #icon><el-icon><component :is="ICON.sort" /></el-icon></template>
+            {{ l('toolbar.sort') }}
+            <span v-if="sortRules.length" class="meta-toolbar__badge">{{ sortRules.length }}</span>
+          </MtButton>
+        </template>
+        <div class="meta-toolbar__sort-panel">
           <div v-for="(rule, idx) in sortRules" :key="idx" class="meta-toolbar__sort-rule">
             <select :value="rule.fieldId" @change="onSortFieldChange(idx, ($event.target as HTMLSelectElement).value)">
               <option v-for="f in fields" :key="f.id" :value="f.id">{{ f.name }}</option>
@@ -35,15 +53,32 @@
           <button v-if="fields.length" class="meta-toolbar__add" @click="emit('add-sort', { fieldId: fields[0].id, direction: 'asc' })">{{ l('toolbar.addSort') }}</button>
           <button v-if="sortRules.length" class="meta-toolbar__apply" @click="emit('apply-sort-filter')">{{ l('toolbar.apply') }}</button>
         </div>
-      </div>
+      </MtPopover>
 
-      <!-- Filter -->
-      <div class="meta-toolbar__dropdown">
-        <button class="meta-toolbar__btn" @click="showFilterPanel = !showFilterPanel">
-          <span class="meta-toolbar__btn-icon">&#x2A01;</span> {{ l('toolbar.filter') }}
-          <span v-if="filterRules.length + filterGroups.length" class="meta-toolbar__badge">{{ filterRules.length + filterGroups.length }}</span>
-        </button>
-        <div v-if="showFilterPanel" class="meta-toolbar__panel meta-toolbar__panel--filter" @keydown.escape="showFilterPanel = false">
+      <!--
+        Filter (UI-P2-1c slice-5: migrated to shared MtPopover — the MOST COMPLEX builder here
+        (nested field/operator/value controls, recursive AND/OR condition groups via
+        MetaFilterConditionRow/MetaFilterGroup), so the panel content is preserved verbatim (same
+        sub-components + same props/events, NOT MtMenuItem rows); only the open/close mechanics
+        move from a hand-rolled `showFilterPanel` ref + `.meta-toolbar__panel` to MtPopover's
+        `v-model:open` + built-in click-outside/Escape. The panel's own `@keydown.escape` handler is
+        dropped — MtPopover's document-level Escape listener now covers it.
+        NESTED-OVERLAY note: every inner field/operator/value control rendered by
+        MetaFilterConditionRow and MetaFilterGroup (recursively) is a native <select>/<input> — none
+        of them Teleports its own menu outside MtPopover's panel — so MtPopover's
+        `panelRef.contains(target)` outside-click check always sees these interactions as "inside"
+        and the popover safely stays open through editing (verified by
+        meta-toolbar-filter-builder-mtpopover-migration.spec.ts).
+      -->
+      <MtPopover v-model:open="showFilterPanel">
+        <template #trigger>
+          <MtButton :title="l('toolbar.filter')" :aria-label="l('toolbar.filter')">
+            <template #icon><el-icon><component :is="ICON.filter" /></el-icon></template>
+            {{ l('toolbar.filter') }}
+            <span v-if="filterRules.length + filterGroups.length" class="meta-toolbar__badge">{{ filterRules.length + filterGroups.length }}</span>
+          </MtButton>
+        </template>
+        <div class="meta-toolbar__filter-panel meta-toolbar__panel--filter">
           <div v-if="(filterRules.length + filterGroups.length) > 1" class="meta-toolbar__conjunction">
             <span>{{ l('toolbar.where') }}</span>
             <select :value="filterConjunction" @change="emit('set-conjunction', ($event.target as HTMLSelectElement).value as 'and'|'or')">
@@ -78,15 +113,22 @@
           <button v-if="filterRules.length || filterGroups.length" class="meta-toolbar__apply" @click="emit('apply-sort-filter')">{{ applyButtonLabel }}</button>
           <p v-if="filterRules.length && sortFilterDirty" class="meta-toolbar__apply-hint">{{ l('toolbar.stagedHint') }}</p>
         </div>
-      </div>
+      </MtPopover>
 
-      <!-- Group By (nested / multi-level: ordered 1-3 levels) -->
-      <div class="meta-toolbar__dropdown">
-        <button class="meta-toolbar__btn" @click="showGroupPanel = !showGroupPanel">
-          <span class="meta-toolbar__btn-icon">&#x229E;</span> {{ l('toolbar.group') }}
-          <span v-if="activeGroupFieldIds.length" class="meta-toolbar__badge">{{ activeGroupFieldIds.length }}</span>
-        </button>
-        <div v-if="showGroupPanel" class="meta-toolbar__panel meta-toolbar__panel--group" @keydown.escape="showGroupPanel = false">
+      <!-- Group By (nested / multi-level: ordered 1-3 levels) — UI-P2-1c slice-6: migrated to shared
+           MtPopover (the LAST MetaToolbar dropdown). Inner controls are native <select>/<button> (no
+           Teleport), so MtPopover's `panelRef.contains(target)` treats edits as inside → the panel
+           stays open during multi-level editing. The panel's own `@keydown.escape` is dropped;
+           MtPopover's document-level Escape + click-outside now cover it. -->
+      <MtPopover v-model:open="showGroupPanel">
+        <template #trigger>
+          <MtButton :title="l('toolbar.group')" :aria-label="l('toolbar.group')">
+            <template #icon><el-icon><component :is="ICON.group" /></el-icon></template>
+            {{ l('toolbar.group') }}
+            <span v-if="activeGroupFieldIds.length" class="meta-toolbar__badge">{{ activeGroupFieldIds.length }}</span>
+          </MtButton>
+        </template>
+        <div class="meta-toolbar__group-panel meta-toolbar__panel--group">
           <div v-for="(levelId, levelIndex) in groupLevels" :key="levelIndex" class="meta-toolbar__group-level">
             <span class="meta-toolbar__group-level-prefix">{{ levelIndex === 0 ? l('toolbar.group') : l('toolbar.groupThenBy') }}</span>
             <select
@@ -114,35 +156,77 @@
             @click="onAddGroupLevel"
           >{{ l('toolbar.groupAddLevel') }}</button>
         </div>
-      </div>
+      </MtPopover>
 
-      <!-- Undo/Redo -->
-      <button class="meta-toolbar__btn" :disabled="!canUndo" :title="l('toolbar.undoTitle')" :aria-label="l('toolbar.undo')" @click="emit('undo')">&#x21A9;</button>
-      <button class="meta-toolbar__btn" :disabled="!canRedo" :title="l('toolbar.redoTitle')" :aria-label="l('toolbar.redo')" @click="emit('redo')">&#x21AA;</button>
+      <!-- Undo/Redo (UI-P2-1c: migrated to shared MtIconButton — ghost, icon-only) -->
+      <span class="meta-toolbar__divider" aria-hidden="true"></span>
+      <MtIconButton :icon="ICON.undo" :disabled="!canUndo" :title="l('toolbar.undoTitle')" :aria-label="l('toolbar.undo')" @click="emit('undo')" />
+      <MtIconButton :icon="ICON.redo" :disabled="!canRedo" :title="l('toolbar.redoTitle')" :aria-label="l('toolbar.redo')" @click="emit('redo')" />
+      <!--
+        Slice 3 personal-views "reset to shared" (design-lock multitable-personal-views-slice3-fe-toggle-
+        design-lock-20260706.md §3 P1 + G-FE-3 / G-FE-4): rendered ONLY while the personal toggle is ON for
+        the active view (implies the session capability is on too — the caller only ever passes true when
+        both hold). Deletes the actor's own personal-config row, never the shared view (§1-B parent lock).
+      -->
+      <button
+        v-if="canResetToShared"
+        class="meta-toolbar__btn meta-toolbar__btn--reset-personal"
+        data-testid="reset-to-shared"
+        :title="resetToSharedLabel"
+        @click="emit('reset-to-shared')"
+      >{{ resetToSharedLabel }}</button>
     </div>
     <div class="meta-toolbar__right">
       <div class="meta-toolbar__search" :class="{ 'meta-toolbar__search--active': !!searchText }" role="search">
-        <span class="meta-toolbar__search-icon" aria-hidden="true">&#x1F50D;</span>
+        <el-icon class="meta-toolbar__search-icon" aria-hidden="true"><component :is="ICON.search" /></el-icon>
         <input class="meta-toolbar__search-input" type="search" :placeholder="l('toolbar.searchPlaceholder')" :aria-label="l('toolbar.searchAria')" :value="searchText" @input="emit('update:search-text', ($event.target as HTMLInputElement).value)" />
         <button v-if="searchText" class="meta-toolbar__search-clear" :aria-label="l('toolbar.clearSearch')" @click="emit('update:search-text', '')">&times;</button>
       </div>
       <span v-if="totalRows !== undefined" class="meta-toolbar__row-count">{{ rowCount(totalRows, isZh) }}</span>
-      <!-- Row density -->
-      <div class="meta-toolbar__dropdown">
-        <button class="meta-toolbar__btn" :title="l('toolbar.rowHeight')" :aria-label="l('toolbar.rowHeight')" @click="showDensityPanel = !showDensityPanel">&#x2195; {{ l('toolbar.rows') }}</button>
-        <div v-if="showDensityPanel" class="meta-toolbar__panel meta-toolbar__panel--density" @keydown.escape="showDensityPanel = false">
-          <label v-for="d in DENSITIES" :key="d.value" class="meta-toolbar__field-toggle">
-            <input type="radio" name="density" :checked="rowDensity === d.value" @change="emit('set-row-density', d.value); showDensityPanel = false" />
-            <span>{{ l(d.labelKey) }}</span>
-          </label>
-        </div>
-      </div>
-      <button class="meta-toolbar__btn" :title="l('toolbar.autoFitColumns')" :aria-label="l('toolbar.autoFitColumns')" @click="emit('auto-fit-columns')">&#x2194; {{ l('toolbar.fit') }}</button>
-      <button class="meta-toolbar__btn" :title="l('toolbar.print')" :aria-label="l('toolbar.printGrid')" @click="emit('print')">&#x1F5A8; {{ l('toolbar.print') }}</button>
-      <button v-if="canCreateRecord" class="meta-toolbar__btn" :title="l('toolbar.importRecords')" :aria-label="l('toolbar.importRecords')" @click="emit('import')">&#x2B71; {{ l('toolbar.import') }}</button>
-      <button v-if="canExport" class="meta-toolbar__btn" :title="l('toolbar.exportCsv')" :aria-label="l('toolbar.exportCsv')" @click="emit('export-csv')">&#x2B73; {{ l('toolbar.exportCsv') }}</button>
-      <button v-if="canExport" class="meta-toolbar__btn" :title="l('toolbar.exportExcelXlsx')" :aria-label="l('toolbar.exportExcel')" @click="emit('export-xlsx')">&#x2B73; {{ l('toolbar.exportXlsx') }}</button>
-      <button v-if="canCreateRecord" class="meta-toolbar__btn meta-toolbar__btn--primary" @click="emit('add-record')">{{ l('toolbar.newRecord') }}</button>
+      <span class="meta-toolbar__divider" aria-hidden="true"></span>
+      <!-- Row density (UI-P2-1c slice-2: migrated to shared MtMenu/MtMenuItem, built on MtPopover) -->
+      <MtMenu>
+        <template #trigger>
+          <MtButton :title="l('toolbar.rowHeight')" :aria-label="l('toolbar.rowHeight')">
+            <template #icon><el-icon><component :is="ICON.rowHeight" /></el-icon></template>
+            {{ l('toolbar.rows') }}
+          </MtButton>
+        </template>
+        <MtMenuItem
+          v-for="d in DENSITIES"
+          :key="d.value"
+          class="meta-toolbar__density-item"
+          :class="{ 'meta-toolbar__density-item--active': rowDensity === d.value }"
+          :aria-current="rowDensity === d.value ? 'true' : undefined"
+          @select="emit('set-row-density', d.value)"
+        >
+          <template #icon><el-icon v-if="rowDensity === d.value"><component :is="ICON.check" /></el-icon></template>
+          {{ l(d.labelKey) }}
+        </MtMenuItem>
+      </MtMenu>
+      <!-- UI-P2-1c: standalone action buttons (icon+label) migrated to shared MtButton (ghost). -->
+      <MtButton :title="l('toolbar.autoFitColumns')" :aria-label="l('toolbar.autoFitColumns')" @click="emit('auto-fit-columns')">
+        <template #icon><el-icon><component :is="ICON.fit" /></el-icon></template>
+        {{ l('toolbar.fit') }}
+      </MtButton>
+      <MtButton :title="l('toolbar.print')" :aria-label="l('toolbar.printGrid')" @click="emit('print')">
+        <template #icon><el-icon><component :is="ICON.print" /></el-icon></template>
+        {{ l('toolbar.print') }}
+      </MtButton>
+      <MtButton v-if="canCreateRecord" :title="l('toolbar.importRecords')" :aria-label="l('toolbar.importRecords')" @click="emit('import')">
+        <template #icon><el-icon><component :is="ICON.import" /></el-icon></template>
+        {{ l('toolbar.import') }}
+      </MtButton>
+      <MtButton v-if="canExport" :title="l('toolbar.exportCsv')" :aria-label="l('toolbar.exportCsv')" @click="emit('export-csv')">
+        <template #icon><el-icon><component :is="ICON.export" /></el-icon></template>
+        {{ l('toolbar.exportCsv') }}
+      </MtButton>
+      <MtButton v-if="canExport" :title="l('toolbar.exportExcelXlsx')" :aria-label="l('toolbar.exportExcel')" @click="emit('export-xlsx')">
+        <template #icon><el-icon><component :is="ICON.export" /></el-icon></template>
+        {{ l('toolbar.exportXlsx') }}
+      </MtButton>
+      <!-- UI-P2-1c: primary CTA migrated to shared MtButton variant="primary". -->
+      <MtButton v-if="canCreateRecord" variant="primary" @click="emit('add-record')">{{ l('toolbar.newRecord') }}</MtButton>
     </div>
   </div>
 </template>
@@ -154,12 +238,59 @@ import type { SortRule, FilterRule, FilterGroup, FilterConjunction } from '../co
 import { useLocale } from '../../composables/useLocale'
 import MetaFilterConditionRow from './MetaFilterConditionRow.vue'
 import MetaFilterGroup from './MetaFilterGroup.vue'
+// UI-P2-1c: migrate standalone action buttons (undo/redo/fit/print/import/export/new-record) onto
+// the shared UI primitives (multitable-ui-p2-structure-designlock-20260706.md §2 P2-1). Slice-2
+// additionally migrates the row-density dropdown onto MtMenu/MtMenuItem (built on MtPopover), so
+// its open/close + click-outside/Escape no longer need a hand-rolled `showDensityPanel` ref.
+// Slice-3 migrates the hide-fields dropdown onto MtPopover directly (NOT MtMenu — it's a
+// multi-toggle list, so selecting a row must not auto-close it). Slice-4 migrates the sort dropdown
+// onto MtPopover the same way (NOT MtMenu — it's a complex add/remove/update/apply builder, so its
+// panel content is preserved verbatim). Slice-5 migrates the filter dropdown the same way — the
+// most complex builder (nested field/operator/value controls + recursive AND/OR condition groups
+// via MetaFilterConditionRow/MetaFilterGroup), content preserved verbatim. The remaining dropdown
+// trigger that opens a `.meta-toolbar__panel` (group) is NOT touched in this slice — deferred to a
+// later slice.
+import { MtButton, MtIconButton, MtMenu, MtMenuItem, MtPopover } from '../ui'
 import { seedFilterCondition } from '../utils/filter-condition-seed'
 import {
   metaCoreLabel,
   rowCount,
   type MetaCoreLabelKey,
 } from '../utils/meta-core-labels'
+import { ElIcon } from 'element-plus'
+import {
+  Menu as IconFields,
+  Sort as IconSort,
+  Filter as IconFilter,
+  Operation as IconGroup,
+  RefreshLeft as IconUndo,
+  RefreshRight as IconRedo,
+  Search as IconSearch,
+  Rank as IconRowHeight,
+  ScaleToOriginal as IconFit,
+  Printer as IconPrint,
+  Upload as IconImport,
+  Download as IconExport,
+  Check as IconCheck,
+} from '@element-plus/icons-vue'
+
+// Reusable monochrome icon map for toolbar buttons (UI-P1 slice-1). Keyed by toolbar action so the
+// template can reference `ICON.sort` etc. instead of scattering per-icon imports around the markup.
+const ICON = {
+  fields: IconFields,
+  sort: IconSort,
+  filter: IconFilter,
+  group: IconGroup,
+  undo: IconUndo,
+  redo: IconRedo,
+  search: IconSearch,
+  rowHeight: IconRowHeight,
+  fit: IconFit,
+  print: IconPrint,
+  import: IconImport,
+  export: IconExport,
+  check: IconCheck,
+} as const
 
 const props = withDefaults(defineProps<{
   fields: MetaField[]
@@ -178,6 +309,9 @@ const props = withDefaults(defineProps<{
   totalRows?: number
   rowDensity?: RowDensity
   sortFilterDirty?: boolean
+  // Slice 3: true only when personal views are enabled for the session AND the personal toggle is ON for
+  // the active view — absent/false hides the action entirely (no request can ever originate from it).
+  canResetToShared?: boolean
 }>(), { filterGroups: () => [] })
 
 const emit = defineEmits<{
@@ -205,16 +339,17 @@ const emit = defineEmits<{
   (e: 'print'): void
   (e: 'set-row-density', density: RowDensity): void
   (e: 'auto-fit-columns'): void
+  (e: 'reset-to-shared'): void
 }>()
 
 const { isZh } = useLocale()
 const l = (key: MetaCoreLabelKey) => metaCoreLabel(key, isZh.value)
+const resetToSharedLabel = computed(() => (isZh.value ? '恢复为共享视图' : 'Reset to shared'))
 
 const showFieldPicker = ref(false)
 const showSortPanel = ref(false)
 const showFilterPanel = ref(false)
 const showGroupPanel = ref(false)
-const showDensityPanel = ref(false)
 const DENSITIES: Array<{ value: RowDensity; labelKey: MetaCoreLabelKey }> = [
   { value: 'compact', labelKey: 'density.compact' },
   { value: 'normal', labelKey: 'density.normal' },
@@ -299,21 +434,42 @@ function onAddFilterGroup() {
 </script>
 
 <style scoped>
-.meta-toolbar { display: flex; justify-content: space-between; align-items: center; padding: 6px 12px; border-bottom: 1px solid #e5e7eb; background: #fff; }
-.meta-toolbar__left { display: flex; gap: 4px; align-items: center; }
-.meta-toolbar__right { display: flex; gap: 4px; }
-.meta-toolbar__btn { display: inline-flex; align-items: center; gap: 4px; padding: 4px 10px; font-size: 13px; border: 1px solid #ddd; border-radius: 4px; background: #fff; cursor: pointer; color: #555; }
-.meta-toolbar__btn:hover:not(:disabled) { background: #f5f5f5; border-color: #ccc; }
+.meta-toolbar { display: flex; justify-content: space-between; align-items: center; padding: 6px 12px; border-bottom: 1px solid var(--ms-border-light, #e7e8ec); background: var(--ms-bg-card, #fff); }
+.meta-toolbar__left { display: flex; gap: 2px; align-items: center; }
+.meta-toolbar__right { display: flex; gap: 4px; align-items: center; }
+.meta-toolbar__divider { display: inline-block; width: 1px; align-self: stretch; margin: 4px 6px; background: var(--ms-border-light, #e7e8ec); flex-shrink: 0; }
+.meta-toolbar__btn {
+  display: inline-flex; align-items: center; gap: 4px; height: var(--ms-control-height, 32px); box-sizing: border-box;
+  padding: 0 10px; font-size: 13px; border: 1px solid transparent; border-radius: var(--ms-radius-sm, 6px);
+  background: transparent; cursor: pointer; color: var(--ms-text-2, #646a73);
+}
+.meta-toolbar__btn:hover:not(:disabled) { background: var(--ms-bg-page, #f5f6f8); color: var(--ms-text-1, #1f2329); }
 .meta-toolbar__btn:disabled { opacity: 0.35; cursor: not-allowed; }
-.meta-toolbar__btn--primary { background: #409eff; color: #fff; border-color: #409eff; }
-.meta-toolbar__btn--primary:hover { background: #66b1ff; }
-.meta-toolbar__btn-icon { font-size: 14px; }
-.meta-toolbar__badge { font-size: 10px; background: #409eff; color: #fff; padding: 0 5px; border-radius: 8px; min-width: 16px; text-align: center; }
+.meta-toolbar__btn--primary { background: var(--ms-color-primary, #245bdb); color: #fff; border-color: var(--ms-color-primary, #245bdb); }
+.meta-toolbar__btn--primary:hover:not(:disabled) { background: var(--el-color-primary-dark-2, #1e4fc0); color: #fff; }
+.meta-toolbar__btn--reset-personal { color: #067647; border-color: #6ce9a6; background: #ecfdf3; }
+.meta-toolbar__btn--reset-personal:hover { background: #d1fadf; }
+.meta-toolbar__btn-icon { font-size: 15px; color: currentColor; }
+.meta-toolbar__badge { font-size: 10px; background: var(--ms-color-primary, #245bdb); color: #fff; padding: 0 5px; border-radius: 8px; min-width: 16px; text-align: center; }
 .meta-toolbar__dropdown { position: relative; }
-.meta-toolbar__panel { position: absolute; top: 100%; left: 0; z-index: 20; min-width: 200px; background: #fff; border: 1px solid #ddd; border-radius: 4px; box-shadow: 0 4px 12px rgba(0,0,0,.1); padding: 8px; margin-top: 4px; }
+.meta-toolbar__panel { position: absolute; top: 100%; left: 0; z-index: 20; min-width: 200px; background: var(--ms-bg-card, #fff); border: 1px solid var(--ms-border-light, #e7e8ec); border-radius: var(--ms-radius-sm, 6px); box-shadow: var(--ms-shadow-pop, 0 4px 12px rgba(0,0,0,.1)); padding: 8px; margin-top: 4px; }
 .meta-toolbar__panel--filter { min-width: 420px; }
-.meta-toolbar__panel--density { min-width: 120px; }
+/* Hide-fields panel (UI-P2-1c slice-3): hosted inside MtPopover's own `.mt-popover` surface (which
+   only pads top/bottom), so this class supplies the horizontal breathing room the old
+   `.meta-toolbar__panel { padding: 8px }` gave the toggle rows — same 8px, all sides. */
+.meta-toolbar__field-panel { padding: var(--ms-space-2); min-width: 200px; box-sizing: border-box; }
 .meta-toolbar__field-toggle { display: flex; align-items: center; gap: 8px; padding: 4px 0; font-size: 13px; cursor: pointer; }
+/* Sort builder panel (UI-P2-1c slice-4): same rationale as the hide-fields panel above — hosted
+   inside MtPopover's own `.mt-popover` surface (which only pads top/bottom), so this class supplies
+   the horizontal breathing room the old `.meta-toolbar__panel { padding: 8px }` gave the rows. */
+.meta-toolbar__sort-panel { padding: var(--ms-space-2); min-width: 200px; box-sizing: border-box; }
+/* Filter builder panel (UI-P2-1c slice-5): same rationale as the hide-fields/sort panels above —
+   hosted inside MtPopover's own `.mt-popover` surface (which only pads top/bottom), so this class
+   supplies the horizontal breathing room the old `.meta-toolbar__panel { padding: 8px }` gave the
+   builder rows. Combined with the pre-existing `.meta-toolbar__panel--filter` class (kept for its
+   `min-width: 420px`, and so it stays a stable selector for the filter-builder tests). */
+.meta-toolbar__filter-panel { padding: var(--ms-space-2); box-sizing: border-box; }
+.meta-toolbar__group-panel { padding: var(--ms-space-2); box-sizing: border-box; }
 .meta-toolbar__sort-rule, .meta-toolbar__filter-rule { display: flex; gap: 4px; margin-bottom: 4px; align-items: center; }
 .meta-toolbar__sort-rule select, .meta-toolbar__filter-rule select { padding: 2px 6px; font-size: 12px; border: 1px solid #ddd; border-radius: 3px; }
 .meta-toolbar__filter-value { flex: 1; min-width: 80px; padding: 2px 6px; font-size: 12px; border: 1px solid #ddd; border-radius: 3px; }
@@ -326,8 +482,8 @@ function onAddFilterGroup() {
 .meta-toolbar__add { border: none; background: none; color: #409eff; cursor: pointer; font-size: 12px; padding: 4px 0; }
 .meta-toolbar__add:hover { text-decoration: underline; }
 .meta-toolbar__add--danger { color: #f56c6c; }
-.meta-toolbar__apply { display: block; width: 100%; margin-top: 8px; padding: 5px 0; background: #409eff; color: #fff; border: none; border-radius: 3px; font-size: 12px; cursor: pointer; }
-.meta-toolbar__apply:hover { background: #66b1ff; }
+.meta-toolbar__apply { display: block; width: 100%; margin-top: 8px; padding: 5px 0; background: var(--ms-color-primary, #245bdb); color: #fff; border: none; border-radius: var(--ms-radius-sm, 6px); font-size: 12px; cursor: pointer; }
+.meta-toolbar__apply:hover { background: var(--el-color-primary-dark-2, #1e4fc0); }
 .meta-toolbar__apply-hint { margin: 6px 0 0; color: #777; font-size: 11px; }
 .meta-toolbar__group-none { color: #999; }
 .meta-toolbar__field-type { font-size: 10px; color: #aaa; margin-left: auto; }
@@ -339,14 +495,16 @@ function onAddFilterGroup() {
 .meta-toolbar__group-remove:hover { color: #f56c6c; }
 .meta-toolbar__group-add { border: none; background: none; color: #409eff; cursor: pointer; font-size: 12px; padding: 4px 0; }
 .meta-toolbar__group-add:hover { text-decoration: underline; }
-.meta-toolbar__search { display: flex; align-items: center; gap: 4px; border: 1px solid #ddd; border-radius: 4px; padding: 2px 8px; background: #fafafa; transition: border-color 0.2s, background 0.2s; }
-.meta-toolbar__search:focus-within { border-color: #409eff; background: #fff; }
-.meta-toolbar__search--active { border-color: #409eff; background: #ecf5ff; }
+.meta-toolbar__search { display: flex; align-items: center; gap: 4px; height: var(--ms-control-height, 32px); box-sizing: border-box; border: 1px solid var(--ms-border-light, #e7e8ec); border-radius: var(--ms-radius-sm, 6px); padding: 0 8px; background: var(--ms-bg-page, #f5f6f8); transition: border-color 0.2s, background 0.2s; }
+.meta-toolbar__search:focus-within { border-color: var(--ms-color-primary, #245bdb); background: var(--ms-bg-card, #fff); }
+.meta-toolbar__search--active { border-color: var(--ms-color-primary, #245bdb); background: var(--el-color-primary-light-9, #eef3ff); }
 .meta-toolbar__search-icon { font-size: 12px; opacity: 0.5; }
 .meta-toolbar__search-input { border: none; outline: none; font-size: 12px; width: 140px; background: transparent; color: #333; }
 .meta-toolbar__search-input::placeholder { color: #bbb; }
 .meta-toolbar__search-clear { border: none; background: none; color: #999; cursor: pointer; font-size: 14px; padding: 0 2px; line-height: 1; }
 .meta-toolbar__search-clear:hover { color: #f56c6c; }
 .meta-toolbar__row-count { font-size: 11px; color: #999; white-space: nowrap; }
+/* Row-density menu (UI-P2-1c slice-2): current selection indicator, replaces the old radio `checked`. */
+.meta-toolbar__density-item--active { color: var(--ms-color-primary); font-weight: 600; }
 @media print { .meta-toolbar { display: none !important; } }
 </style>

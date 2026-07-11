@@ -1,1134 +1,336 @@
 <template>
-  <section class="integration-workbench">
-    <header class="integration-workbench__header">
-      <div>
-        <p class="integration-workbench__eyebrow">Data Factory</p>
-        <h1>数据工厂</h1>
-        <p class="integration-workbench__lead">连接任意 CRM / PLM / ERP / SRM / HTTP / SQL 系统，把数据落到多维表清洗后，先 dry-run，再导出或 Save-only 推送。</p>
-      </div>
-      <router-link class="integration-workbench__k3-link" to="/integrations/k3-wise">K3 WISE 预设模板</router-link>
-    </header>
-
-    <nav class="integration-workbench__flow" aria-label="data factory flow" data-testid="data-factory-flow">
-      <div v-for="step in flowSteps" :key="step.title" class="integration-workbench__flow-step">
-        <strong>{{ step.title }}</strong>
-        <span>{{ step.description }}</span>
-      </div>
-    </nav>
-    <div class="integration-workbench__quick-flow" data-testid="data-factory-quick-flow">
-      <strong>操作路径</strong>
-      <span>1. 选来源系统 -> 2. 选来源数据集 -> 3. 选目标系统 -> 4. 选目标数据集 -> 5. 配映射 -> 6. Dry-run -> 7. 推送</span>
-    </div>
-
-    <div v-if="statusMessage" class="integration-workbench__status" :data-kind="statusKind">
-      {{ statusMessage }}
-    </div>
-
-    <section class="integration-workbench__panel">
-      <div class="integration-workbench__panel-head">
-        <div>
-          <h2>连接系统 / 数据源</h2>
-          <p>普通用户选择已配置连接；SQL 通道是高级连接，只用于 allowlist 表、视图或中间表。</p>
-        </div>
-        <button type="button" class="integration-workbench__button" data-testid="refresh-systems" @click="refreshBootstrap">
-          刷新连接
-        </button>
-      </div>
-
-      <div class="integration-workbench__onboarding" data-testid="connection-onboarding">
-        <div>
-          <strong>新增或管理连接</strong>
-          <p>这是页面内连接设置区，不会跳到独立设置页。业务用户可从 K3 WISE 预设开始，实施人员再展开 SQL / 高级连接。</p>
-        </div>
-        <div class="integration-workbench__onboarding-actions">
-          <router-link class="integration-workbench__button" to="/integrations/k3-wise" data-testid="k3-preset-entry">
-            使用 K3 WISE 预设
-          </router-link>
-          <button type="button" class="integration-workbench__button" data-testid="connect-new-system" @click="showConnectionGuide">
-            新增连接草稿
-          </button>
-          <button type="button" class="integration-workbench__button" data-testid="show-sql-setup" @click="showSqlSetup">
-            展开 SQL / 高级连接
-          </button>
-        </div>
-      </div>
-
-      <button
-        type="button"
-        class="integration-workbench__inventory-toggle"
-        data-testid="toggle-inventory-overview"
-        :aria-expanded="inventoryExpanded ? 'true' : 'false'"
-        @click="inventoryExpanded = !inventoryExpanded"
-      >
-        {{ inventorySummary }} <span>{{ inventoryExpanded ? '收起' : '展开' }}</span>
-      </button>
-
-      <div v-if="inventoryExpanded" class="integration-workbench__inventory" data-testid="inventory-overview">
-        <div>
-          <h3>已配置连接</h3>
-          <p class="integration-workbench__muted">在这里编辑、复制、停用 / 启用或删除连接；删除仅限未被清洗流程引用的连接。</p>
-          <div v-if="systems.length === 0" class="integration-workbench__empty">暂无连接。请使用 K3 WISE 预设或后续连接向导创建。</div>
-          <ul v-else class="integration-workbench__inventory-list">
-            <li v-for="system in systems" :key="system.id">
-              <strong>{{ system.name }}</strong>
-              <span>{{ system.kind }} · {{ system.role }} · {{ connectionStatusLabel(system) }}</span>
-              <small v-if="runtimeBlockerForSystem(system)">{{ runtimeBlockerForSystem(system) }}</small>
-              <div class="integration-workbench__actions integration-workbench__actions--inline">
-                <button type="button" class="integration-workbench__icon-button" :data-testid="`edit-connection-${system.id}`" @click="editConnection(system)">
-                  编辑
-                </button>
-                <button type="button" class="integration-workbench__icon-button" :data-testid="`copy-connection-${system.id}`" @click="copyConnection(system)">
-                  复制
-                </button>
-                <button v-if="system.status !== 'inactive'" type="button" class="integration-workbench__icon-button" :data-testid="`deactivate-connection-${system.id}`" @click="deactivateConnection(system)">
-                  停用
-                </button>
-                <button v-else type="button" class="integration-workbench__icon-button" :data-testid="`activate-connection-${system.id}`" @click="activateConnection(system)">
-                  启用
-                </button>
-                <button type="button" class="integration-workbench__icon-button" :data-testid="`delete-connection-${system.id}`" :disabled="deletingConnectionId === system.id" title="只能删除未被 pipeline 引用的连接" @click="deleteConnection(system)">
-                  {{ deletingConnectionId === system.id ? '删除中' : '删除' }}
-                </button>
-              </div>
-            </li>
-          </ul>
-        </div>
-        <div>
-          <h3>可用适配器</h3>
-          <ul class="integration-workbench__inventory-list">
-            <li v-for="adapter in adapters" :key="adapter.kind">
-              <strong>{{ adapter.label }}</strong>
-              <span>{{ adapter.kind }} · {{ adapter.roles.join('/') }}</span>
-              <small>{{ adapter.advanced ? '高级 / 实施人员使用' : '普通连接' }}</small>
-            </li>
-          </ul>
-        </div>
-        <div>
-          <h3>Staging 多维表</h3>
-          <ul class="integration-workbench__inventory-list">
-            <li v-for="descriptor in stagingDatasetCards" :key="descriptor.id">
-              <strong>{{ descriptor.name }}</strong>
-              <span>{{ descriptor.area }} · {{ descriptor.fieldCount }} 个字段</span>
-              <small>{{ descriptor.openLink ? '可打开多维表' : '等待安装后返回打开链接' }}</small>
-            </li>
-          </ul>
-        </div>
-      </div>
-
-      <div class="integration-workbench__adapter-list">
-        <span
-          v-for="adapter in visibleAdapters"
-          :key="adapter.kind"
-          class="integration-workbench__adapter"
-          :data-advanced="adapter.advanced ? 'true' : 'false'"
-        >
-          {{ adapter.label }}
-          <small v-if="adapter.advanced">高级</small>
-        </span>
-      </div>
-
-      <label class="integration-workbench__advanced-toggle">
-        <input v-model="showAdvancedConnectors" type="checkbox" data-testid="show-advanced-connectors" />
-        <span>显示 SQL / 高级连接（实施人员或管理员使用）</span>
-      </label>
-      <div v-if="!showAdvancedConnectors && hiddenAdvancedSystemCount > 0" class="integration-workbench__hint" data-testid="advanced-hidden-hint">
-        已隐藏 {{ hiddenAdvancedSystemCount }} 个高级连接。SQL 通道默认不进入业务用户连接列表。
-      </div>
-      <div v-if="showAdvancedConnectors" class="integration-workbench__hint" data-testid="advanced-visible-hint">
-        高级连接只用于 allowlist 表/视图读取或中间表写入；不要把核心业务表直写暴露给普通用户。
-      </div>
-
-      <div class="integration-workbench__connection-manager" data-testid="connection-manager">
-        <div>
-          <strong>{{ connectionDraftTitle }}</strong>
-          <p>这是内嵌连接设置面板：保存后会回到上方“已配置连接”和下方来源/目标选择器。真实账号、密码、Token 仍通过各系统预设向导或后端凭证库处理。</p>
-        </div>
-        <div class="integration-workbench__grid integration-workbench__grid--compact">
-          <label>
-            <span>连接名称</span>
-            <input v-model="connectionDraft.name" data-testid="connection-draft-name" placeholder="例如 K3 WISE WebAPI" />
-          </label>
-          <label>
-            <span>连接类型</span>
-            <select v-model="connectionDraft.kind" data-testid="connection-draft-kind">
-              <option value="">请选择 adapter</option>
-              <option v-for="adapter in connectionDraftAdapterOptions" :key="adapter.kind" :value="adapter.kind">
-                {{ adapter.label }} · {{ adapter.kind }}
-              </option>
-            </select>
-          </label>
-          <label>
-            <span>连接角色</span>
-            <select v-model="connectionDraft.role" data-testid="connection-draft-role">
-              <option value="source">数据源 source</option>
-              <option value="target">目标 target</option>
-              <option value="bidirectional">双向 bidirectional</option>
-            </select>
-          </label>
-          <label>
-            <span>状态</span>
-            <select v-model="connectionDraft.status" data-testid="connection-draft-status">
-              <option value="active">active</option>
-              <option value="inactive">inactive</option>
-              <option value="error">error</option>
-            </select>
-          </label>
-        </div>
-        <div v-if="isDataSourceBridgeKind" class="integration-workbench__grid integration-workbench__grid--compact" data-testid="data-source-bridge-picker">
-          <label>
-            <span>数据源(只读)</span>
-            <select v-model="connectionDraft.dataSourceId" data-testid="data-source-bridge-id" @change="onBridgeDataSourceChange">
-              <option value="">请选择已配置的数据源</option>
-              <option v-for="ds in bridgeDataSources" :key="ds.id" :value="ds.id">{{ ds.name }} · {{ ds.type }}</option>
-            </select>
-          </label>
-          <label>
-            <span>对象(表 / 视图)</span>
-            <select
-              v-model="connectionDraft.dataSourceObject"
-              data-testid="data-source-bridge-object"
-              :disabled="bridgeDataSourceObjectsLoading || !connectionDraft.dataSourceId || bridgeDataSourceObjectOptions.length === 0"
-            >
-              <option value="">{{ bridgeDataSourceObjectOptions.length > 0 ? '请选择表 / 视图' : '请先加载表 / 视图列表' }}</option>
-              <option v-for="object in bridgeDataSourceObjectOptions" :key="object.value" :value="object.value">
-                {{ object.label }}
-              </option>
-            </select>
-          </label>
-          <p v-if="bridgeDataSourceObjectsLoading" class="integration-workbench__hint" data-testid="data-source-bridge-object-loading">正在加载表 / 视图列表...</p>
-          <p v-if="!bridgeDataSourceObjectsLoading && connectionDraft.dataSourceId && bridgeDataSourceObjectOptions.length === 0 && !bridgeDataSourceObjectsError" class="integration-workbench__hint" data-testid="data-source-bridge-object-empty">没有可选表 / 视图；请回 /data-sources 检查权限或 schema。</p>
-          <p v-if="selectedBridgeObjectSummary" class="integration-workbench__hint" data-testid="data-source-bridge-object-summary">{{ selectedBridgeObjectSummary }}</p>
-          <p class="integration-workbench__hint" data-testid="data-source-bridge-hint">凭据由 /data-sources 管理,这里只引用 dataSourceId,不复制账号密码。</p>
-          <p v-if="bridgeDataSourcesError" class="integration-workbench__hint integration-workbench__hint--strong" data-testid="data-source-bridge-error">{{ bridgeDataSourcesError }}</p>
-          <p v-if="bridgeDataSourceObjectsError" class="integration-workbench__hint integration-workbench__hint--strong" data-testid="data-source-bridge-object-error">{{ bridgeDataSourceObjectsError }}</p>
-        </div>
-        <div v-if="connectionDraftDuplicateWarning" class="integration-workbench__hint integration-workbench__hint--strong" data-testid="connection-duplicate-warning">
-          {{ connectionDraftDuplicateWarning }}
-        </div>
-        <div v-if="connectionDraftRoleWarning" class="integration-workbench__hint integration-workbench__hint--strong" data-testid="connection-role-warning">
-          {{ connectionDraftRoleWarning }}
-        </div>
-        <details v-if="!isDataSourceBridgeKind" class="integration-workbench__details">
-          <summary>高级 JSON 配置（不会显示或保存凭证）</summary>
-          <div class="integration-workbench__grid integration-workbench__grid--compact">
-            <label>
-              <span>config JSON</span>
-              <textarea v-model="connectionDraft.configText" data-testid="connection-draft-config"></textarea>
-            </label>
-            <label>
-              <span>capabilities JSON</span>
-              <textarea v-model="connectionDraft.capabilitiesText" data-testid="connection-draft-capabilities"></textarea>
-            </label>
+  <PageShell width="wide">
+    <section class="integration-workbench">
+      <p class="integration-workbench__eyebrow">Data Factory</p>
+      <PageHeader title="数据工厂" subtitle="连接任意 CRM / PLM / ERP / SRM / HTTP / SQL 系统，把数据落到多维表清洗后，先 dry-run，再导出或 Save-only 推送。">
+        <template #actions>
+          <div class="integration-workbench__header-links">
+            <router-link class="integration-workbench__k3-link" to="/integrations/k3-wise">K3 WISE 预设模板</router-link>
+            <router-link class="integration-workbench__k3-link" to="/help/integration" data-testid="integration-help-link">
+              {{ bi('帮助', 'Help') }}
+            </router-link>
           </div>
-        </details>
-        <div v-if="connectionDraftJsonError" class="integration-workbench__hint integration-workbench__hint--strong" data-testid="connection-json-error">
-          {{ connectionDraftJsonError }}
+        </template>
+      </PageHeader>
+
+      <nav class="integration-workbench__flow" aria-label="data factory flow" data-testid="data-factory-flow">
+        <div v-for="step in flowSteps" :key="step.title" class="integration-workbench__flow-step">
+          <strong>{{ step.title }}</strong>
+          <span>{{ step.description }}</span>
         </div>
-        <div class="integration-workbench__actions">
-          <button type="button" class="integration-workbench__button" data-testid="save-connection-draft" :disabled="savingConnectionDraft || !canSaveConnectionDraft" @click="saveConnectionDraft">
-            {{ savingConnectionDraft ? '保存中' : '保存连接设置' }}
-          </button>
-          <button type="button" class="integration-workbench__button" data-testid="reset-connection-draft" @click="resetConnectionDraft">
-            清空草稿
-          </button>
-        </div>
+      </nav>
+      <div class="integration-workbench__quick-flow" data-testid="data-factory-quick-flow">
+        <strong>操作路径</strong>
+        <span>1. 选来源系统 -> 2. 选来源数据集 -> 3. 选目标系统 -> 4. 选目标数据集 -> 5. 配映射 -> 6. Dry-run -> 7. 推送</span>
       </div>
 
-      <div class="integration-workbench__grid">
-        <label>
-          <span>Tenant ID</span>
-          <input v-model="scope.tenantId" data-testid="tenant-id" />
-        </label>
-        <label>
-          <span>Workspace ID</span>
-          <input v-model="workspaceInput" data-testid="workspace-id" placeholder="可选" />
-        </label>
+      <div v-if="statusMessage" class="integration-workbench__status" :data-kind="statusKind">
+        {{ statusMessage }}
       </div>
-    </section>
 
-    <section class="integration-workbench__panel">
-      <div class="integration-workbench__panel-head">
-        <div>
-          <h2>读取源配置(顾问自助)</h2>
+      <div class="integration-workbench__body">
+        <IntegrationWorkbenchRail
+          :groups="railGroups"
+          :active-group-id="activeRailGroupId"
+          :tr="bi"
+          @select="scrollToRailGroup"
+        />
+        <div class="integration-workbench__sections">
+
+    <IntegrationConnectionSection
+      :bi="bi"
+      :refresh-bootstrap="refreshBootstrap"
+      :show-connection-guide="showConnectionGuide"
+      :show-sql-setup="showSqlSetup"
+      :inventory-summary="inventorySummary"
+      :systems="systems"
+      :connection-status-label="connectionStatusLabel"
+      :runtime-blocker-for-system="runtimeBlockerForSystem"
+      :edit-connection="editConnection"
+      :copy-connection="copyConnection"
+      :deactivate-connection="deactivateConnection"
+      :activate-connection="activateConnection"
+      :delete-connection="deleteConnection"
+      :deleting-connection-id="deletingConnectionId"
+      :adapters="adapters"
+      :staging-dataset-cards="stagingDatasetCards"
+      :visible-adapters="visibleAdapters"
+      :hidden-advanced-system-count="hiddenAdvancedSystemCount"
+      :connection-draft-title="connectionDraftTitle"
+      :connection-draft="connectionDraft"
+      :connection-draft-adapter-options="connectionDraftAdapterOptions"
+      :is-data-source-bridge-kind="isDataSourceBridgeKind"
+      :on-bridge-data-source-change="onBridgeDataSourceChange"
+      :bridge-data-sources="bridgeDataSources"
+      :bridge-data-source-objects-loading="bridgeDataSourceObjectsLoading"
+      :bridge-data-source-object-options="bridgeDataSourceObjectOptions"
+      :bridge-data-source-objects-error="bridgeDataSourceObjectsError"
+      :selected-bridge-object-summary="selectedBridgeObjectSummary"
+      :bridge-data-sources-error="bridgeDataSourcesError"
+      :connection-draft-duplicate-warning="connectionDraftDuplicateWarning"
+      :connection-draft-role-warning="connectionDraftRoleWarning"
+      :connection-draft-json-error="connectionDraftJsonError"
+      :saving-connection-draft="savingConnectionDraft"
+      :can-save-connection-draft="canSaveConnectionDraft"
+      :save-connection-draft="saveConnectionDraft"
+      :reset-connection-draft="resetConnectionDraft"
+      :scope="scope"
+      v-model:inventory-expanded="inventoryExpanded"
+      v-model:show-advanced-connectors="showAdvancedConnectors"
+      v-model:workspace-input="workspaceInput"
+    />
+
+    <section id="int-sec-read-source" class="integration-workbench__panel">
+      <el-card shadow="never">
+        <template #header>
+          <div class="integration-workbench__panel-head">
+            <div>
+              <h2>读取源配置(顾问自助)</h2>
           <p>标准化第三方 API 只读读取源:S1 结构校验 → 定位容器探测 → 内容寻址保存版本 → 审批。运行时只消费已审批版本;本面板不含写入 / 删除。</p>
         </div>
       </div>
+        </template>
+
       <IntegrationReadSourceConfigPanel :scope="currentScope()" :systems="systems" />
+      </el-card>
     </section>
 
-    <section class="integration-workbench__panel">
-      <div class="integration-workbench__panel-head">
-        <div>
-          <h2>读取源组合配置(顾问/管理员自助)</h2>
+    <section id="int-sec-combination-config" class="integration-workbench__panel">
+      <el-card shadow="never">
+        <template #header>
+          <div class="integration-workbench__panel-head">
+            <div>
+              <h2>读取源组合配置(顾问/管理员自助)</h2>
           <p>选择两个已审批的 resolver_lookup 读取源,组装成两跳组合:保存版本(内容寻址,幂等)→ 审批后运行时才可选用。本面板不含写入外部系统的能力。</p>
         </div>
       </div>
+        </template>
+
       <IntegrationReadSourceCompositionAuthoringPanel :scope="currentScope()" />
+      </el-card>
     </section>
 
-    <section class="integration-workbench__panel">
-      <div class="integration-workbench__panel-head">
-        <div>
-          <h2>读取源组合运行(顾问/操作员自助)</h2>
+    <section id="int-sec-combination-run" class="integration-workbench__panel">
+      <el-card shadow="never">
+        <template #header>
+          <div class="integration-workbench__panel-head">
+            <div>
+              <h2>读取源组合运行(顾问/操作员自助)</h2>
           <p>选择已审批的组合链,提供首个业务 key 后运行:中间键由平台派生,证据 values-free,数据仅末跳输出。本面板不含配置编写或写入。</p>
         </div>
       </div>
+        </template>
+
       <IntegrationReadSourceCompositionPanel :scope="currentScope()" />
+      </el-card>
     </section>
 
-    <section class="integration-workbench__panel">
-      <div class="integration-workbench__panel-head">
-        <div>
-          <h2>选择系统与数据集</h2>
-          <p>来源对象决定从哪里取数，目标模板决定写到哪里。先选系统，再加载可选数据集或模板。</p>
-        </div>
-      </div>
-      <div class="integration-workbench__grid integration-workbench__grid--systems">
-        <div class="integration-workbench__system-column">
-          <h2>1. 来源对象选择</h2>
-          <label>
-            <span>数据源系统</span>
-            <select v-model="sourceSystemId" data-testid="source-system" @change="handleSourceSystemChange">
-              <option value="">请选择数据源系统</option>
-              <option
-                v-for="system in sourceSystems"
-                :key="system.id"
-                :value="system.id"
-                :disabled="isSourceOptionDisabled(system)"
-                :data-disabled="isSourceOptionDisabled(system) ? 'true' : 'false'"
-                :data-testid="`source-system-option-${system.id}`"
-              >
-                {{ system.name }} · {{ system.kind }}
-              </option>
-            </select>
-          </label>
-          <div class="integration-workbench__hint" data-testid="source-selector-explanation">
-            {{ sourceSelectorExplanation }}
-          </div>
-          <div
-            v-if="selectedPlmApprovalCapabilityEntry"
-            class="integration-workbench__capability-entry"
-            :data-state="selectedPlmApprovalCapabilityEntry.state"
-            :data-action-status="selectedPlmApprovalCapabilityEntry.actionStatus || 'none'"
-            data-testid="plm-approval-capability-entry"
-          >
+    <IntegrationObjectTemplateSection
+      :source-systems="sourceSystems"
+      :is-source-option-disabled="isSourceOptionDisabled"
+      :handle-source-system-change="handleSourceSystemChange"
+      :source-selector-explanation="sourceSelectorExplanation"
+      :selected-plm-approval-capability-entry="selectedPlmApprovalCapabilityEntry"
+      :selected-plm-bom-multitable-capability-entry="selectedPlmBomMultitableCapabilityEntry"
+      :selected-plm-bom-eco-intent-enabled="selectedPlmBomEcoIntentEnabled"
+      :selected-source-plm-data-source-id="selectedSourcePlmDataSourceId"
+      :has-runnable-source-system="hasRunnableSourceSystem"
+      :show-staging-setup="showStagingSetup"
+      :show-sql-setup="showSqlSetup"
+      :source-runtime-blocker="sourceRuntimeBlocker"
+      :k3-web-api-read-gate-notice="k3WebApiReadGateNotice"
+      :sql-channel-disabled-hint="sqlChannelDisabledHint"
+      :source-connection-status="sourceConnectionStatus"
+      :source-connection-label="sourceConnectionLabel"
+      :test-system="testSystem"
+      :load-objects="loadObjects"
+      :handle-source-object-change="handleSourceObjectChange"
+      :source-objects="sourceObjects"
+      :source-schema="sourceSchema"
+      :target-systems="targetSystems"
+      :target-selector-explanation="targetSelectorExplanation"
+      :target-connection-status="targetConnectionStatus"
+      :target-connection-label="targetConnectionLabel"
+      :load-schema="loadSchema"
+      :target-objects="targetObjects"
+      :target-schema="targetSchema"
+      :same-system-notice="sameSystemNotice"
+      :protocol-split-notice="protocolSplitNotice"
+      :staging-target-mismatch-notice="stagingTargetMismatchNotice"
+      :recommended-staging-source-object="recommendedStagingSourceObject"
+      :staging-dataset-copy="stagingDatasetCopy"
+      :use-recommended-staging-source="useRecommendedStagingSource"
+      v-model:source-system-id="sourceSystemId"
+      v-model:source-object-name="sourceObjectName"
+      v-model:target-system-id="targetSystemId"
+      v-model:target-object-name="targetObjectName"
+    />
+
+    <IntegrationCleaningDatasetSection
+      :source-dataset-title="sourceDatasetTitle"
+      :source-dataset-description="sourceDatasetDescription"
+      :source-schema="sourceSchema"
+      :source-connection-label="sourceConnectionLabel"
+      :selected-staging-descriptor="selectedStagingDescriptor"
+      :staging-descriptors="stagingDescriptors"
+      :get-staging-area-label="getStagingAreaLabel"
+      :target-dataset-title="targetDatasetTitle"
+      :target-dataset-description="targetDatasetDescription"
+      :target-schema="targetSchema"
+      :required-target-field-count="requiredTargetFieldCount"
+      :staging-dataset-cards="stagingDatasetCards"
+      :installing-staging="installingStaging"
+      :staging-project-id="stagingProjectId"
+      :staging-project-id-scope-status="stagingProjectIdScopeStatus"
+      :staging-project-id-scope-warning="stagingProjectIdScopeWarning"
+      :staging-install-result-text="stagingInstallResultText"
+      :install-staging-tables="installStagingTables"
+      :use-staging-as-source="useStagingAsSource"
+      :use-staging-as-target="useStagingAsTarget"
+      :focus-staging-install="focusStagingInstall"
+      :on-staging-project-id-input="onStagingProjectIdInput"
+      :normalize-staging-project-id-to-scope="normalizeStagingProjectIdToScope"
+      v-model:staging-base-id="stagingBaseId"
+    />
+
+    <IntegrationMappingRulesSection
+      :mappings="mappings"
+      :has-source-field-options="hasSourceFieldOptions"
+      :source-field-options-for-mapping="sourceFieldOptionsForMapping"
+      :source-field-option-text="sourceFieldOptionText"
+      :transform-options="transformOptions"
+      :mapping-summary="mappingSummary"
+      :mapping-detail="mappingDetail"
+      :add-mapping="addMapping"
+      :remove-mapping="removeMapping"
+    />
+
+    <section id="int-sec-run-push" class="integration-workbench__panel">
+      <el-card shadow="never">
+        <template #header>
+          <div class="integration-workbench__panel-head">
             <div>
-              <span class="integration-workbench__badge" :data-status="selectedPlmApprovalCapabilityEntry.state">
-                {{ selectedPlmApprovalCapabilityEntry.badge }}
-              </span>
-              <strong>{{ selectedPlmApprovalCapabilityEntry.title }}</strong>
-            </div>
-            <p>{{ selectedPlmApprovalCapabilityEntry.detail }}</p>
-            <small v-if="selectedPlmApprovalCapabilityEntry.apiVersion">
-              {{ PLM_APPROVAL_AUTOMATION_FEATURE_KEY }} · API {{ selectedPlmApprovalCapabilityEntry.apiVersion }}
-            </small>
-          </div>
-          <div
-            v-if="selectedPlmBomMultitableCapabilityEntry"
-            class="integration-workbench__capability-entry"
-            :data-state="selectedPlmBomMultitableCapabilityEntry.state"
-            data-testid="plm-bom-multitable-capability-entry"
-          >
-            <div>
-              <span class="integration-workbench__badge" :data-status="selectedPlmBomMultitableCapabilityEntry.state">
-                {{ selectedPlmBomMultitableCapabilityEntry.badge }}
-              </span>
-              <strong>{{ selectedPlmBomMultitableCapabilityEntry.title }}</strong>
-            </div>
-            <p>{{ selectedPlmBomMultitableCapabilityEntry.detail }}</p>
-            <small v-if="selectedPlmBomMultitableCapabilityEntry.apiVersion">
-              {{ PLM_BOM_MULTITABLE_FEATURE_KEY }} · API {{ selectedPlmBomMultitableCapabilityEntry.apiVersion }}
-            </small>
-            <PlmBomReviewPanel
-              v-if="selectedPlmBomMultitableCapabilityEntry.state === 'enabled' && selectedSourcePlmDataSourceId"
-              :data-source-id="selectedSourcePlmDataSourceId"
-            />
-          </div>
-          <div v-if="!hasRunnableSourceSystem" class="integration-workbench__empty integration-workbench__empty--actionable" data-testid="source-empty-state">
-            <strong>还没有可读取的数据源。</strong>
-            <p>连接 PLM、HTTP API 或启用 SQL 只读通道后，可将数据导入 staging 多维表再清洗。</p>
-            <div class="integration-workbench__actions">
-              <router-link class="integration-workbench__button" to="/integrations/k3-wise">使用 K3 WISE 预设</router-link>
-              <button type="button" class="integration-workbench__button" data-testid="show-staging-setup" @click="showStagingSetup">创建 staging 多维表作为来源</button>
-              <button type="button" class="integration-workbench__button" @click="showSqlSetup">启用 SQL 只读通道</button>
-            </div>
-          </div>
-          <div v-if="sourceRuntimeBlocker" class="integration-workbench__hint integration-workbench__hint--strong" data-testid="source-runtime-blocker">
-            {{ sourceRuntimeBlocker }}
-          </div>
-          <div v-if="k3WebApiReadGateNotice" class="integration-workbench__hint integration-workbench__hint--strong" data-testid="k3-webapi-read-gate-notice">
-            {{ k3WebApiReadGateNotice }}
-          </div>
-          <div v-if="sqlChannelDisabledHint" class="integration-workbench__hint" data-testid="sql-channel-disabled-hint">
-            {{ sqlChannelDisabledHint }}
-          </div>
-          <div class="integration-workbench__connection-row">
-            <span class="integration-workbench__badge" :data-status="sourceConnectionStatus">{{ sourceConnectionLabel }}</span>
-            <button type="button" class="integration-workbench__button" data-testid="test-source-system" @click="testSystem('source')">
-              测试来源连接
-            </button>
-            <button type="button" class="integration-workbench__button" data-testid="load-source-objects" @click="loadObjects('source')">
-              加载来源对象
-            </button>
-          </div>
-          <label>
-            <span>来源数据集（从哪里取数）</span>
-            <select v-model="sourceObjectName" data-testid="source-object" @change="handleSourceObjectChange">
-              <option value="">请选择来源数据集</option>
-              <option v-for="object in sourceObjects" :key="object.name" :value="object.name">
-                {{ object.label || object.name }}
-              </option>
-            </select>
-          </label>
-          <ul class="integration-workbench__schema-list">
-            <li v-for="field in sourceSchema.fields" :key="field.name">
-              {{ field.label || field.name }} <code>{{ field.name }}</code>
-            </li>
-          </ul>
-        </div>
-
-        <div class="integration-workbench__system-column">
-          <h2>2. 目标模板选择</h2>
-          <label>
-            <span>目标系统</span>
-            <select v-model="targetSystemId" data-testid="target-system">
-              <option value="">请选择目标系统</option>
-              <option v-for="system in targetSystems" :key="system.id" :value="system.id">
-                {{ system.name }} · {{ system.kind }}
-              </option>
-            </select>
-          </label>
-          <div class="integration-workbench__hint" data-testid="target-selector-explanation">
-            {{ targetSelectorExplanation }}
-          </div>
-          <div class="integration-workbench__connection-row">
-            <span class="integration-workbench__badge" :data-status="targetConnectionStatus">{{ targetConnectionLabel }}</span>
-            <button type="button" class="integration-workbench__button" data-testid="test-target-system" @click="testSystem('target')">
-              测试目标连接
-            </button>
-            <button type="button" class="integration-workbench__button" data-testid="load-target-objects" @click="loadObjects('target')">
-              加载目标模板
-            </button>
-          </div>
-          <label>
-            <span>目标数据集 / 模板（写到哪里）</span>
-            <select v-model="targetObjectName" data-testid="target-object" @change="loadSchema('target')">
-              <option value="">请选择目标数据集</option>
-              <option v-for="object in targetObjects" :key="object.name" :value="object.name">
-                {{ object.label || object.name }}
-              </option>
-            </select>
-          </label>
-          <ul class="integration-workbench__schema-list">
-            <li v-for="field in targetSchema.fields" :key="field.name">
-              {{ field.label || field.name }} <code>{{ field.name }}</code>
-              <strong v-if="field.required">必填</strong>
-            </li>
-          </ul>
-        </div>
-      </div>
-      <div v-if="sameSystemNotice" class="integration-workbench__hint integration-workbench__hint--strong" data-testid="same-system-notice">
-        {{ sameSystemNotice }}
-      </div>
-      <div v-if="protocolSplitNotice" class="integration-workbench__hint" data-testid="protocol-split-notice">
-        {{ protocolSplitNotice }}
-      </div>
-      <div v-if="stagingTargetMismatchNotice" class="integration-workbench__hint integration-workbench__hint--strong" data-testid="source-target-mismatch-notice">
-        <span>{{ stagingTargetMismatchNotice }}</span>
-        <button
-          v-if="recommendedStagingSourceObject"
-          type="button"
-          class="integration-workbench__button"
-          data-testid="use-recommended-staging-source"
-          @click="useRecommendedStagingSource"
-        >
-          切换到 {{ stagingDatasetCopy[recommendedStagingSourceObject]?.name || recommendedStagingSourceObject }}
-        </button>
-      </div>
-    </section>
-
-    <section class="integration-workbench__panel">
-      <div class="integration-workbench__panel-head">
-        <div>
-          <h2>数据集与多维表清洗</h2>
-          <p>数据源和目标系统只负责读写；业务清洗、审核、修正发生在多维表里。未安装清洗表时，可在这里创建 staging 多维表。</p>
-        </div>
-      </div>
-
-      <div class="integration-workbench__dataset-grid" data-testid="dataset-cards">
-        <article class="integration-workbench__dataset-card" data-testid="source-dataset-card">
-          <div class="integration-workbench__dataset-head">
-            <span class="integration-workbench__dataset-kind">数据源</span>
-            <strong>{{ sourceDatasetTitle }}</strong>
-          </div>
-          <p>{{ sourceDatasetDescription }}</p>
-          <div class="integration-workbench__metric-row">
-            <span>{{ sourceSchema.fields.length }} 个字段</span>
-            <span>{{ sourceConnectionLabel }}</span>
-          </div>
-        </article>
-
-        <article class="integration-workbench__dataset-card" data-testid="staging-dataset-card">
-          <div class="integration-workbench__dataset-head">
-            <span class="integration-workbench__dataset-kind">多维表清洗区</span>
-            <strong>{{ selectedStagingDescriptor?.name || '未绑定 staging 表' }}</strong>
-          </div>
-          <p>原始区、清洗区和回写区都在多维表中呈现，业务人员不需要直接维护 JSON。</p>
-          <div class="integration-workbench__metric-row">
-            <span>{{ stagingDescriptors.length }} 张表</span>
-            <span>{{ selectedStagingDescriptor ? getStagingAreaLabel(selectedStagingDescriptor.id) : '待选择' }}</span>
-          </div>
-        </article>
-
-        <article class="integration-workbench__dataset-card" data-testid="target-dataset-card">
-          <div class="integration-workbench__dataset-head">
-            <span class="integration-workbench__dataset-kind">目标系统</span>
-            <strong>{{ targetDatasetTitle }}</strong>
-          </div>
-          <p>{{ targetDatasetDescription }}</p>
-          <div class="integration-workbench__metric-row">
-            <span>{{ targetSchema.fields.length }} 个字段</span>
-            <span>{{ requiredTargetFieldCount }} 个必填</span>
-          </div>
-        </article>
-      </div>
-
-      <div v-if="stagingDescriptors.length" class="integration-workbench__staging-list" data-testid="staging-dataset-list">
-        <article v-for="descriptor in stagingDatasetCards" :key="descriptor.id" class="integration-workbench__staging-card">
-          <div>
-            <strong>{{ descriptor.name }}</strong>
-            <p>{{ descriptor.description }}</p>
-            <small>{{ descriptor.id }} · {{ descriptor.fieldCount }} 个字段 · {{ descriptor.area }}</small>
-          </div>
-          <div class="integration-workbench__actions integration-workbench__actions--inline">
-            <a
-              v-if="descriptor.openLink"
-              class="integration-workbench__button"
-              :href="descriptor.openLink"
-              target="_blank"
-              rel="noopener noreferrer"
-              :data-testid="`open-staging-${descriptor.id}`"
-            >
-              打开多维表（新建记录入口）
-            </a>
-            <button
-              v-else
-              type="button"
-              class="integration-workbench__button"
-              :disabled="installingStaging"
-              :data-testid="`refresh-staging-link-${descriptor.id}`"
-              @click="installStagingTables"
-            >
-              {{ installingStaging ? '生成中' : '生成打开链接' }}
-            </button>
-            <button
-              type="button"
-              class="integration-workbench__button"
-              :disabled="!descriptor.openLink"
-              :data-testid="`use-staging-source-${descriptor.id}`"
-              @click="useStagingAsSource(descriptor.id)"
-            >
-              作为 Dry-run 来源
-            </button>
-            <button
-              type="button"
-              class="integration-workbench__button"
-              :disabled="!descriptor.openLink"
-              :data-testid="`use-multitable-target-${descriptor.id}`"
-              @click="useStagingAsTarget(descriptor.id)"
-            >
-              作为目标多维表
-            </button>
-          </div>
-          <small v-if="descriptor.openLink" class="integration-workbench__staging-note">
-            使用此 /multitable 链接进入真正的多维表工具栏，再点击 + New Record 验证必填字段 toast。
-          </small>
-          <small v-else class="integration-workbench__staging-note integration-workbench__staging-note--warning">
-            不要手写 /grid 或 /spreadsheets/{{ descriptor.id }}；先生成后端返回的 /multitable sheet/view 打开链接。
-          </small>
-        </article>
-      </div>
-      <div v-else class="integration-workbench__empty integration-workbench__empty--actionable" data-testid="staging-empty">
-        <strong>暂未加载 staging 契约。</strong>
-        <p>点击「创建清洗表」即可生成 staging 多维表；创建完成后可在 staging 卡片上「作为 Dry-run 来源」。</p>
-        <div class="integration-workbench__actions">
-          <button type="button" class="integration-workbench__button" data-testid="staging-empty-focus-install" @click="focusStagingInstall">创建清洗表</button>
-        </div>
-      </div>
-
-      <div class="integration-workbench__grid integration-workbench__grid--compact">
-        <label>
-          <span>Project ID（高级，可选）</span>
-          <input
-            :value="stagingProjectId"
-            data-testid="staging-project-id"
-            placeholder="留空自动使用 tenant:integration-core"
-            @input="onStagingProjectIdInput"
-            @change="onStagingProjectIdInput"
-            @blur="onStagingProjectIdInput"
-          />
-          <small class="integration-workbench__staging-note" data-testid="staging-project-id-scope-status">
-            {{ stagingProjectIdScopeStatus }}
-          </small>
-        </label>
-        <label>
-          <span>Base ID（可选）</span>
-          <input v-model="stagingBaseId" data-testid="staging-base-id" placeholder="留空使用默认 base" />
-        </label>
-      </div>
-      <div v-if="stagingProjectIdScopeWarning" class="integration-workbench__hint integration-workbench__hint--strong" data-testid="staging-project-id-scope-warning">
-        {{ stagingProjectIdScopeWarning }}
-        <button type="button" class="integration-workbench__button" data-testid="normalize-staging-project-id" @click="normalizeStagingProjectIdToScope">
-          规范化为 integration 作用域
-        </button>
-      </div>
-      <div class="integration-workbench__actions">
-        <button type="button" class="integration-workbench__button" data-testid="install-staging" :disabled="installingStaging" @click="installStagingTables">
-          {{ installingStaging ? '创建中' : '创建清洗表' }}
-        </button>
-      </div>
-      <pre v-if="stagingInstallResultText" data-testid="staging-install-result">{{ stagingInstallResultText }}</pre>
-    </section>
-
-    <section class="integration-workbench__panel">
-      <div class="integration-workbench__panel-head">
-        <div>
-          <h2>清洗映射规则</h2>
-          <p>一行就是一条清洗内容：从来源字段取值，经过白名单转换后写入目标字段。默认映射可直接用，也允许新增自定义清洗项。</p>
-        </div>
-        <button type="button" class="integration-workbench__button" data-testid="add-mapping" @click="addMapping">
-          新增自定义清洗项
-        </button>
-      </div>
-
-      <div class="integration-workbench__mapping-list" data-testid="mapping-rule-list">
-        <details v-for="(mapping, index) in mappings" :key="mapping.id" class="integration-workbench__mapping-card" open>
-          <summary :data-testid="`mapping-summary-${index}`">
-            <span>{{ mappingSummary(mapping, index) }}</span>
-            <small>{{ mappingDetail(mapping) }}</small>
-          </summary>
-          <div class="integration-workbench__mapping-editor">
-            <label>
-              <span>源字段</span>
-              <select
-                v-if="hasSourceFieldOptions"
-                v-model="mapping.sourceField"
-                :data-testid="`source-field-${index}`"
-              >
-                <option value="">请选择来源字段</option>
-                <option
-                  v-for="option in sourceFieldOptionsForMapping(mapping)"
-                  :key="`${option.stale ? 'stale' : 'schema'}:${option.value}`"
-                  :value="option.value"
-                >
-                  {{ sourceFieldOptionText(option) }}
-                </option>
-              </select>
-              <input v-else v-model="mapping.sourceField" :data-testid="`source-field-${index}`" placeholder="例如 code" />
-              <small v-if="hasSourceFieldOptions" class="integration-workbench__field-help" :data-testid="`source-field-picker-help-${index}`">
-                字段来自来源 schema；这里只保存字段名，不显示行值。
-              </small>
-            </label>
-            <label>
-              <span>目标字段</span>
-              <input v-model="mapping.targetField" :data-testid="`target-field-${index}`" placeholder="例如 FNumber" />
-            </label>
-            <label>
-              <span>转换</span>
-              <select v-model="mapping.transformFn" :data-testid="`transform-fn-${index}`">
-                <option v-for="option in transformOptions" :key="option.value" :value="option.value">
-                  {{ option.label }}
-                </option>
-              </select>
-              <small class="integration-workbench__field-help">只允许 trim、upper、lower、toNumber、dictMap；不允许用户脚本或 raw SQL。</small>
-              <textarea
-                v-if="mapping.transformFn === 'dictMap'"
-                v-model="mapping.dictMapText"
-                :data-testid="`dict-map-${index}`"
-                placeholder="EA=Pcs&#10;KG=Kg"
-              ></textarea>
-            </label>
-            <div>
-              <label class="integration-workbench__mapping-check">
-                <input v-model="mapping.required" type="checkbox" :data-testid="`required-${index}`" />
-                <span>必填；缺值会进入 dead letter，不中断整批。</span>
-              </label>
-              <div class="integration-workbench__mapping-rules">
-                <input v-model="mapping.minValueText" :data-testid="`validation-min-${index}`" placeholder="最小值 min" />
-                <input v-model="mapping.maxValueText" :data-testid="`validation-max-${index}`" placeholder="最大值 max" />
-              </div>
-            </div>
-            <button type="button" class="integration-workbench__icon-button" @click="removeMapping(index)">删除</button>
-          </div>
-        </details>
-      </div>
-    </section>
-
-    <section class="integration-workbench__panel">
-      <div class="integration-workbench__panel-head">
-        <div>
-          <h2>运行与推送</h2>
+              <h2>运行与推送</h2>
           <p>先保存清洗流程，再做 dry-run；确认无误后才 Save-only 推送到目标系统。默认不会 Submit / Audit。</p>
         </div>
         <button type="button" class="integration-workbench__button" data-testid="save-pipeline" :disabled="savingPipeline || !canSavePipeline" @click="savePipeline">
           {{ savingPipeline ? '保存中' : '保存清洗流程' }}
         </button>
       </div>
-
-      <div class="integration-workbench__grid">
-        <label>
-          <span>清洗流程名称</span>
-          <input v-model="pipelineName" data-testid="pipeline-name" :placeholder="generatedPipelineName" />
-          <small class="integration-workbench__field-help" data-testid="pipeline-name-hint">留空自动生成：{{ generatedPipelineName }}；也可以手动改成业务名称。</small>
-          <button type="button" class="integration-workbench__inline-action" data-testid="use-generated-pipeline-name" @click="useGeneratedPipelineName">
-            使用自动名称
-          </button>
-        </label>
-        <label>
-          <span>清洗流程模式</span>
-          <select v-model="pipelineMode" data-testid="pipeline-mode">
-            <option value="manual">manual</option>
-            <option value="incremental">incremental</option>
-            <option value="full">full</option>
-          </select>
-          <small class="integration-workbench__field-help" data-testid="pipeline-mode-help">manual 手工触发；incremental 用水位增量；full 重新扫描来源数据集。</small>
-        </label>
-        <div v-if="showWatermarkConfig" class="integration-workbench__watermark-config" data-testid="watermark-config">
-          <div class="integration-workbench__grid integration-workbench__grid--compact">
-            <label>
-              <span>水位类型</span>
-              <select v-model="watermarkType" data-testid="watermark-type">
-                <option value="updated_at">updated_at</option>
-                <option value="monotonic_id">monotonic_id</option>
-              </select>
-            </label>
-            <label>
-              <span>水位字段</span>
-              <select v-if="hasSourceFieldOptions" v-model="watermarkField" data-testid="watermark-field">
-                <option value="">请选择水位字段</option>
-                <option
-                  v-for="option in sourceFieldOptionsForValue(watermarkField)"
-                  :key="`${option.stale ? 'stale' : 'schema'}:${option.value}`"
-                  :value="option.value"
-                >
-                  {{ sourceFieldOptionText(option) }}
-                </option>
-              </select>
-              <input v-else v-model="watermarkField" data-testid="watermark-field" placeholder="updated_at" />
-            </label>
-            <label v-if="watermarkType === 'updated_at'">
-              <span>并列判别字段</span>
-              <select v-if="hasSourceFieldOptions" v-model="watermarkTiebreaker" data-testid="watermark-tiebreaker">
-                <option value="">请选择 tiebreaker</option>
-                <option
-                  v-for="option in sourceFieldOptionsForValue(watermarkTiebreaker)"
-                  :key="`${option.stale ? 'stale' : 'schema'}:${option.value}`"
-                  :value="option.value"
-                >
-                  {{ sourceFieldOptionText(option) }}
-                </option>
-              </select>
-              <input v-else v-model="watermarkTiebreaker" data-testid="watermark-tiebreaker" placeholder="id" />
-            </label>
-          </div>
-          <p class="integration-workbench__hint" data-testid="watermark-config-help">
-            保存只写入增量读取配置；不读取数据库、不推进水位、不写外部系统。updated_at 对 SQL 只读源必须配置不同的 tiebreaker。
-          </p>
-          <p v-if="watermarkConfigError" class="integration-workbench__hint integration-workbench__hint--strong" data-testid="watermark-config-error">
-            {{ watermarkConfigError }}
-          </p>
-        </div>
-        <label>
-          <span>幂等字段</span>
-          <input v-model="idempotencyFieldsText" data-testid="idempotency-fields" placeholder="code 或 sourceId,revision" />
-          <small class="integration-workbench__field-help" data-testid="idempotency-fields-help">用于识别同一业务记录，避免重复写入；物料通常用 code，BOM 可用 parentCode,childCode,sequence。</small>
-        </label>
-        <label>
-          <span>清洗 staging 表</span>
-          <select v-model="stagingSheetId" data-testid="staging-sheet">
-            <option value="">不绑定 staging 表</option>
-            <option v-for="descriptor in stagingDescriptors" :key="descriptor.id" :value="descriptor.id">
-              {{ descriptor.name }} · {{ descriptor.id }}
-            </option>
-          </select>
-        </label>
-        <label>
-          <span>已保存流程 ID</span>
-          <input v-model="savedPipelineId" data-testid="pipeline-id" placeholder="保存后自动回填，也可粘贴已有 ID" />
-          <small class="integration-workbench__field-help" data-testid="pipeline-id-help">这是后端 pipeline ID。新建时留空，保存成功后自动回填；排障或复跑时可粘贴已有 ID。</small>
-        </label>
-        <label>
-          <span>运行模式</span>
-          <select v-model="pipelineRunMode" data-testid="pipeline-run-mode">
-            <option value="manual">manual</option>
-            <option value="incremental">incremental</option>
-            <option value="full">full</option>
-          </select>
-        </label>
-        <label>
-          <span>Dry-run 样本数</span>
-          <input v-model="pipelineSampleLimit" data-testid="sample-limit" inputmode="numeric" />
-        </label>
-      </div>
-
-      <div class="integration-workbench__run-explainer" data-testid="run-push-explainer">
-        <strong>运行时会发生什么</strong>
-        <ul>
-          <li>Dry-run 只读取来源数据并生成目标 payload preview，不写 K3 或其他外部系统。</li>
-          <li>Save-only 只调用目标系统保存接口；默认不 Submit、不 Audit，也不覆盖来源多维表。</li>
-          <li>成功后展示写入数、外部 ID 或单据号；失败会写入 dead letter，可从异常区打开排查。</li>
-          <li>导出清洗结果只使用已脱敏 preview，可用于人工复核或交接。</li>
-        </ul>
-      </div>
-
-      <label class="integration-workbench__inline-check">
-        <input v-model="allowSaveOnlyRun" type="checkbox" data-testid="allow-save-only-run" />
-        <span>允许本次 Save-only 推送。保持 Submit / Audit 关闭。</span>
-      </label>
-
-      <div class="integration-workbench__readiness" data-testid="pipeline-readiness">
-        <div>
-          <strong>保存清洗流程前置条件</strong>
-          <p data-testid="save-readiness-summary">{{ savePipelineBlockedSummary }}</p>
-          <strong>运行前置条件</strong>
-          <p data-testid="dry-run-readiness-summary">{{ dryRunBlockedSummary }}</p>
-        </div>
-        <ul>
-          <li v-for="item in dryRunReadinessItems" :key="item.id" :data-ready="item.ready ? 'true' : 'false'">
-            <span>{{ item.ready ? '已完成' : '待处理' }}</span>
-            <strong>{{ item.label }}</strong>
-            <small>{{ item.detail }}</small>
-          </li>
-        </ul>
-      </div>
-
-      <div class="integration-workbench__actions">
-        <button type="button" class="integration-workbench__button" data-testid="run-dry-run" :disabled="runningPipeline !== '' || !canRunPipeline" @click="executePipeline(true)">
-          {{ runningPipeline === 'dry-run' ? 'Dry-run 中' : 'Dry-run' }}
-        </button>
-        <button type="button" class="integration-workbench__button integration-workbench__button--danger" data-testid="run-save-only" :disabled="runningPipeline !== '' || !allowSaveOnlyRun || !canRunPipeline" @click="executePipeline(false)">
-          {{ runningPipeline === 'run' ? '推送中' : 'Save-only 推送' }}
-        </button>
-      </div>
-      <div v-if="dryRunEmptyPreviewNotice" class="integration-workbench__hint integration-workbench__hint--strong" data-testid="dry-run-empty-preview-notice">
-        {{ dryRunEmptyPreviewNotice }}
-      </div>
-
-      <div v-if="auth.hasPermission('integration:admin')" class="integration-workbench__table-action" data-testid="stock-preparation-s1-panel">
-        <div class="integration-workbench__panel-head">
-          <div>
-            <h3>标准备料表 S1</h3>
-            <p>创建或绑定 `plm.stock-preparation.main.v1` 标准备料表，并检查目标 readiness；本步骤只处理元数据。</p>
-          </div>
-          <span class="integration-workbench__badge">admin · metadata-only</span>
-        </div>
-        <div class="integration-workbench__grid integration-workbench__grid--compact">
-          <label>
-            <span>目标 baseId（可选，仅创建/绑定时使用）</span>
-            <input v-model="stockPreparationTargetBaseId" data-testid="stock-preparation-s1-base-id" :disabled="stockPreparationTargetRunning !== ''" placeholder="创建或绑定时可填写目标 baseId；readiness 检查针对已绑定目标，不受此输入影响" />
-          </label>
-        </div>
-        <p class="integration-workbench__hint" data-testid="stock-preparation-s1-boundary">
-          只调用 target readiness / ensure；不读取 PLM，不写业务行，不执行 table action，不触发 Apply，不调用 K3 Save / Submit / Audit / BOM write。
-        </p>
-        <div class="integration-workbench__actions">
-          <button
-            type="button"
-            class="integration-workbench__button"
-            data-testid="stock-preparation-s1-readiness"
-            :disabled="stockPreparationTargetRunning !== ''"
-            @click="checkStockPreparationTargetReadiness"
-          >
-            {{ stockPreparationTargetRunning === 'readiness' ? '检查中' : '检查 readiness' }}
-          </button>
-          <button
-            type="button"
-            class="integration-workbench__button"
-            data-testid="stock-preparation-s1-ensure"
-            :disabled="stockPreparationTargetRunning !== ''"
-            @click="ensureStockPreparationTarget"
-          >
-            {{ stockPreparationTargetRunning === 'ensure' ? '处理中' : '创建或绑定标准表' }}
-          </button>
-        </div>
-        <div v-if="stockPreparationTargetResult" class="integration-workbench__table-action-review" data-testid="stock-preparation-s1-result">
-          <strong>{{ stockPreparationTargetSummary }}</strong>
-          <div class="integration-workbench__metric-row" data-testid="stock-preparation-s1-metrics">
-            <span v-for="metric in stockPreparationTargetMetrics" :key="metric.id">{{ metric.label }} {{ metric.value }}</span>
-          </div>
-          <p class="integration-workbench__hint" data-testid="stock-preparation-s1-token-state">
-            target binding 仅用于当前租户运行时；公开证据只贴 readiness status / mode / counts / missingFields。
-          </p>
-          <pre v-if="stockPreparationTargetEvidenceText" data-testid="stock-preparation-s1-evidence">{{ stockPreparationTargetEvidenceText }}</pre>
-        </div>
-      </div>
-
-      <div class="integration-workbench__table-action" data-testid="external-write-panel">
-        <div class="integration-workbench__panel-head">
-          <div>
-            <h3>外部写入 C6</h3>
-            <p>先 dry-run 复核计数，再用一次性 token apply；浏览器不提供 source、target、plan、payload 或 sheet scope。</p>
-          </div>
-          <span class="integration-workbench__badge" data-testid="external-write-permission-note">dry-run=read · apply=write/admin</span>
-        </div>
-        <p class="integration-workbench__hint" data-testid="external-write-boundary">
-          仅展示 status/count/error token；dry-run token 只保存在内存中，不显示、不复制到证据。
-        </p>
-        <div class="integration-workbench__actions">
-          <button
-            type="button"
-            class="integration-workbench__button"
-            data-testid="external-write-dry-run"
-            :disabled="!externalWriteCanDryRun"
-            @click="dryRunExternalWrite"
-          >
-            {{ runningExternalWrite === 'dry-run' ? '外部写 dry-run 中' : '外部写 dry-run' }}
-          </button>
-          <button
-            type="button"
-            class="integration-workbench__button integration-workbench__button--danger"
-            data-testid="external-write-apply"
-            :disabled="!externalWriteCanApply"
-            @click="applyExternalWrite"
-          >
-            {{ runningExternalWrite === 'apply' ? '外部写 apply 中' : 'Apply external write' }}
-          </button>
-        </div>
-        <div v-if="externalWriteDryRunResult" class="integration-workbench__table-action-review" data-testid="external-write-review">
-          <strong>{{ externalWriteReviewSummary }}</strong>
-          <div class="integration-workbench__metric-row">
-            <span v-for="metric in externalWriteDryRunMetrics" :key="metric.id">{{ metric.label }} {{ metric.value }}</span>
-          </div>
-          <p class="integration-workbench__hint" data-testid="external-write-token-state">
-            {{ externalWriteDryRunToken ? 'token 已签发（隐藏）' : '未签发可 apply token' }}
-          </p>
-          <label class="integration-workbench__inline-check">
-            <input v-model="externalWriteAcceptReview" type="checkbox" data-testid="external-write-accept-review" />
-            <span>我已复核 dry-run counts / status / error token；apply 将使用本次 dry-run token，服务端会重新计算并校验 revision。</span>
-          </label>
-          <pre v-if="externalWriteEvidenceText" data-testid="external-write-evidence">{{ externalWriteEvidenceText }}</pre>
-        </div>
-        <div v-if="externalWriteApplyResult" class="integration-workbench__table-action-review" data-testid="external-write-apply-result">
-          <strong>apply {{ externalWriteApplyResult.status || 'unknown' }}</strong>
-          <div class="integration-workbench__metric-row">
-            <span v-for="metric in externalWriteApplyMetrics" :key="metric.id">{{ metric.label }} {{ metric.value }}</span>
-          </div>
-          <p v-if="externalWriteApplyRunId" class="integration-workbench__hint">run {{ externalWriteApplyRunId }}</p>
-        </div>
-      </div>
-
-      <div class="integration-workbench__table-action" data-testid="table-action-panel">
-        <div class="integration-workbench__panel-head">
-          <div>
-            <h3>参数化表动作</h3>
-            <p>面向已由管理员配置的安全动作。浏览器只填写 allowlist 参数；来源、目标表和写入计划由服务端决定。</p>
-          </div>
-          <span class="integration-workbench__badge" data-testid="table-action-permission-note">dry-run=read · apply=write/admin</span>
-        </div>
-        <div v-if="tableActions.length === 0" class="integration-workbench__empty" data-testid="table-action-empty">
-          当前部署没有暴露表动作。
-        </div>
-        <template v-else>
-          <div class="integration-workbench__grid integration-workbench__grid--compact">
-            <label>
-              <span>动作</span>
-              <select v-model="selectedTableActionId" data-testid="table-action-id">
-                <option v-for="action in tableActions" :key="action.actionId" :value="action.actionId">
-                  {{ tableActionOptionLabel(action) }} · {{ action.configured ? '已配置' : '未配置' }}
-                </option>
-              </select>
-            </label>
-            <label>
-              <span>项目号 projectNo</span>
-              <input v-model="tableActionProjectNo" data-testid="table-action-project-no" placeholder="例如 P2026-001" />
-            </label>
-          </div>
-          <p class="integration-workbench__hint" data-testid="table-action-boundary">
-            不提供 raw SQL、source/object、sheetId、C3 plan 或 C4 payload 输入；apply 会用 dry-run token 触发服务端重新计算。
-          </p>
-          <p v-if="tableActionDisplayContextItems.length" class="integration-workbench__hint" data-testid="table-action-display-context">
-            {{ tableActionDisplayContextItems.join(' · ') }}
-          </p>
-          <div class="integration-workbench__actions">
-            <button
-              type="button"
-              class="integration-workbench__button"
-              data-testid="table-action-dry-run"
-              :disabled="!tableActionCanDryRun"
-              @click="dryRunTableAction"
-            >
-              {{ runningTableAction === 'dry-run' ? 'Dry-run 中' : 'Dry-run 表动作' }}
-            </button>
-            <button
-              type="button"
-              class="integration-workbench__button integration-workbench__button--danger"
-              data-testid="table-action-apply"
-              :disabled="!tableActionCanApply"
-              @click="applyTableAction"
-            >
-              {{ runningTableAction === 'apply' ? 'Apply 中' : tableActionApplyCommandLabel }}
-            </button>
-          </div>
-          <div v-if="tableActionDryRunResult" class="integration-workbench__table-action-review" data-testid="table-action-review">
-            <strong>{{ tableActionReviewSummary }}</strong>
-            <div class="integration-workbench__metric-row">
-              <span>add {{ tableActionCounts.add || 0 }}</span>
-              <span>update {{ tableActionCounts.update || 0 }}</span>
-              <span>skip {{ tableActionCounts.skip || 0 }}</span>
-              <span>inactive {{ tableActionCounts.inactive || 0 }}</span>
-              <span>manual {{ tableActionCounts.manual_confirm || 0 }}</span>
-            </div>
-            <div v-if="tableActionLargeBomBounded" class="integration-workbench__bounded-preview" data-testid="table-action-large-bom-bounded">
-              <div>
-                <strong>大 BOM 有界预览</strong>
-                <span class="integration-workbench__badge" data-status="error">Apply blocked</span>
-              </div>
-              <p>本次只展开了有界子集，冲突/重复计数不是完整计划；不会签发 dry-run token。</p>
-              <div class="integration-workbench__metric-row">
-                <span v-for="metric in tableActionBoundedPreviewMetrics" :key="metric.id">{{ metric.label }} {{ metric.value }}</span>
-              </div>
-              <p v-if="tableActionBoundedErrorTypes.length" class="integration-workbench__hint">
-                errorTypes: {{ tableActionBoundedErrorTypes.join(', ') }}
-              </p>
-            </div>
-            <div v-if="tableActionDuplicateDiagnostics" class="integration-workbench__bounded-preview" data-testid="table-action-duplicate-diagnostics">
-              <div>
-                <strong>重复行分组待处理</strong>
-                <span class="integration-workbench__badge" data-status="warning">manual_confirm</span>
-              </div>
-              <p>重复行策略只在 fresh dry-run evidence 中生效；已解决的分组仍需本次显式确认后才能 apply，未解决分组保持不写。</p>
-              <div class="integration-workbench__metric-row">
-                <span v-for="metric in tableActionDuplicateMetrics" :key="metric.id">{{ metric.label }} {{ metric.value }}</span>
-              </div>
-              <p v-if="tableActionDuplicatePolicies.length" class="integration-workbench__hint">
-                policies: {{ tableActionDuplicatePolicies.join(', ') }}
-              </p>
-              <p class="integration-workbench__hint" data-testid="table-action-duplicate-policy-scope">
-                本表已保存策略 {{ tableActionStoredConflictPolicyCount }} 条；本次 dry-run 已解决 {{ tableActionResolvedDuplicateGroupCount }} 组，仍 hold {{ tableActionHeldDuplicateGroupCount }} 组；未选择时默认 hold。
-              </p>
-              <div v-if="tableActionHeldReasonMetrics.length" class="integration-workbench__metric-row" data-testid="table-action-held-reason-summary">
-                <span v-for="metric in tableActionHeldReasonMetrics" :key="metric.id">heldReason {{ metric.label }} {{ metric.value }}</span>
-              </div>
-              <ul v-if="tableActionDuplicateGroups.length" class="integration-workbench__mini-list">
-                <li v-for="group in tableActionDuplicateGroups" :key="group.fingerprint">
-                  <div>
-                    #{{ group.ordinal }} {{ group.fingerprint }} · rows {{ group.rowCount }} · {{ group.parentShape }} · quantity {{ group.quantityShape }} · attrs {{ group.attributeShape }} · stable {{ group.stableDiscriminator }}
-                  </div>
-                  <div class="integration-workbench__connection-row">
-                    <label class="integration-workbench__inline-field">
-                      <span>策略</span>
-                      <select
-                        :value="group.draftPolicy"
-                        data-testid="table-action-duplicate-policy-select"
-                        @change="onDuplicatePolicyDraftChange(group.fingerprint, $event)"
-                      >
-                        <option v-for="policy in tableActionDuplicatePolicies" :key="policy" :value="policy">
-                          {{ policy }}
-                        </option>
-                      </select>
-                    </label>
-                    <span class="integration-workbench__hint">当前 {{ group.currentPolicy }} · {{ group.currentScope }} · {{ group.resolutionLabel }}</span>
-                    <button
-                      type="button"
-                      class="integration-workbench__button"
-                      data-testid="table-action-duplicate-run-only"
-                      @click="setDuplicateRunOnlyPolicy(group)"
-                    >
-                      只此次有效
-                    </button>
-                    <button
-                      v-if="auth.hasPermission('integration:admin')"
-                      type="button"
-                      class="integration-workbench__button"
-                      data-testid="table-action-duplicate-table-save"
-                      :disabled="tableActionConflictPolicySaving === group.fingerprint"
-                      @click="saveDuplicateTableScopePolicy(group)"
-                    >
-                      保存为本表策略
-                    </button>
-                    <button
-                      v-if="auth.hasPermission('integration:admin')"
-                      type="button"
-                      class="integration-workbench__button"
-                      data-testid="table-action-duplicate-table-revoke"
-                      :disabled="tableActionConflictPolicySaving === group.fingerprint"
-                      @click="revokeDuplicateTableScopePolicy(group)"
-                    >
-                      撤销本表策略
-                    </button>
-                  </div>
-                </li>
-              </ul>
-            </div>
-            <p class="integration-workbench__hint" data-testid="table-action-token-state">
-              {{ tableActionDryRunToken ? 'dry-run token 已签发；token 仅保存在当前页面内存，不展示、不复制到 evidence。' : '本次 dry-run 不可 apply；请处理失败项后重跑。' }}
-            </p>
-            <label v-if="tableActionManualConfirmCount > 0" class="integration-workbench__inline-check">
-              <input v-model="tableActionAcceptManualConfirmHold" type="checkbox" data-testid="table-action-accept-manual-hold" />
-              <span>确认 manual_confirm 行保持不写，只应用 clean add/update/inactive 决策。</span>
-            </label>
-            <label v-if="tableActionResolvedDuplicateGroupCount > 0" class="integration-workbench__inline-check">
-              <input v-model="tableActionAcceptDuplicateResolution" type="checkbox" data-testid="table-action-accept-duplicate-resolution" />
-              <span>确认已复核本次自动解决的重复分组，只应用 dry-run evidence 中列出的解决结果。</span>
-            </label>
-          </div>
-          <div v-if="tableActionApplyResult" class="integration-workbench__table-action-review" data-testid="table-action-apply-result">
-            <strong>apply {{ tableActionApplyResult.status }}</strong>
-            <p class="integration-workbench__hint">已消费 dry-run token；如需再次 apply，必须重新 dry-run。</p>
-          </div>
-          <pre v-if="tableActionEvidenceText" data-testid="table-action-evidence">{{ tableActionEvidenceText }}</pre>
-          <p class="integration-workbench__hint">Issue / 客户证据只粘贴 values-free summary counts、status、error code；不要粘贴 PLM 行、备料表值或 payload。</p>
         </template>
-      </div>
 
-      <div v-if="auth.hasPermission('integration:admin')" class="integration-workbench__table-action" data-testid="stock-option-sync-panel">
-        <div class="integration-workbench__panel-head">
-          <div>
-            <h3>字段选项同步</h3>
-            <p>管理员按预设把 select/dropdown 字段选项元数据写入对应字段；只改字段定义，不写业务行。</p>
-          </div>
-          <span class="integration-workbench__badge">admin · metadata-only</span>
-        </div>
-        <label class="integration-workbench__inline-field">
-          <span>同步预设</span>
-          <select v-model="fieldOptionSyncPresetId" data-testid="field-options-preset">
-            <option v-for="preset in fieldOptionSyncPresets" :key="preset.presetId" :value="preset.presetId">
-              {{ preset.label }}
-            </option>
-          </select>
-        </label>
-        <label>
-          <span>optionSets JSON</span>
-          <textarea
-            v-model="stockPreparationOptionSyncText"
-            data-testid="stock-option-sync-json"
-            rows="8"
-            :placeholder="stockPreparationOptionSyncPlaceholder"
-          />
-        </label>
-        <p class="integration-workbench__hint" data-testid="stock-option-sync-boundary">
-          这里只写字段选项元数据；不执行动作，不接受 SQL/JS/URL/function body，不写 PLM/K3/业务行。带 actionBindings 的选项走备料兼容路径（动作绑定泛化待 FOS-4）。
-        </p>
-        <div class="integration-workbench__actions">
-          <button
-            type="button"
-            class="integration-workbench__button"
-            data-testid="field-options-sync-run"
-            :disabled="!stockPreparationOptionSyncCanRun"
-            @click="syncFieldOptions"
-          >
-            {{ syncingStockPreparationOptions ? '同步中' : '同步字段选项' }}
-          </button>
-        </div>
-        <p
-          v-if="fieldOptionSyncPathNote"
-          class="integration-workbench__hint"
-          data-testid="field-options-sync-path"
-        >
-          {{ fieldOptionSyncPathNote }}
-        </p>
-        <pre v-if="stockPreparationOptionSyncEvidenceText" data-testid="stock-option-sync-evidence">{{ stockPreparationOptionSyncEvidenceText }}</pre>
-      </div>
+
+      <IntegrationPipelineRunSection
+        :generated-pipeline-name="generatedPipelineName"
+        :show-watermark-config="showWatermarkConfig"
+        :has-source-field-options="hasSourceFieldOptions"
+        :source-field-options-for-value="sourceFieldOptionsForValue"
+        :source-field-option-text="sourceFieldOptionText"
+        :watermark-config-error="watermarkConfigError"
+        :staging-descriptors="stagingDescriptors"
+        :save-pipeline-blocked-summary="savePipelineBlockedSummary"
+        :dry-run-blocked-summary="dryRunBlockedSummary"
+        :dry-run-readiness-items="dryRunReadinessItems"
+        :running-pipeline="runningPipeline"
+        :can-run-pipeline="canRunPipeline"
+        :dry-run-empty-preview-notice="dryRunEmptyPreviewNotice"
+        :use-generated-pipeline-name="useGeneratedPipelineName"
+        :execute-pipeline="executePipeline"
+        v-model:pipeline-name="pipelineName"
+        v-model:pipeline-mode="pipelineMode"
+        v-model:watermark-type="watermarkType"
+        v-model:watermark-field="watermarkField"
+        v-model:watermark-tiebreaker="watermarkTiebreaker"
+        v-model:idempotency-fields-text="idempotencyFieldsText"
+        v-model:staging-sheet-id="stagingSheetId"
+        v-model:saved-pipeline-id="savedPipelineId"
+        v-model:pipeline-run-mode="pipelineRunMode"
+        v-model:pipeline-sample-limit="pipelineSampleLimit"
+        v-model:allow-save-only-run="allowSaveOnlyRun"
+      />
+
+      <IntegrationStockPrepPanel
+        :has-integration-admin="auth.hasPermission('integration:admin')"
+        :stock-preparation-target-running="stockPreparationTargetRunning"
+        :stock-preparation-target-result="stockPreparationTargetResult"
+        :stock-preparation-target-summary="stockPreparationTargetSummary"
+        :stock-preparation-target-metrics="stockPreparationTargetMetrics"
+        :stock-preparation-target-evidence-text="stockPreparationTargetEvidenceText"
+        :check-stock-preparation-target-readiness="checkStockPreparationTargetReadiness"
+        :ensure-stock-preparation-target="ensureStockPreparationTarget"
+        v-model:stock-preparation-target-base-id="stockPreparationTargetBaseId"
+      />
+
+      <IntegrationExternalWritePanel
+        :external-write-can-dry-run="externalWriteCanDryRun"
+        :running-external-write="runningExternalWrite"
+        :external-write-can-apply="externalWriteCanApply"
+        :external-write-dry-run-result="externalWriteDryRunResult"
+        :external-write-review-summary="externalWriteReviewSummary"
+        :external-write-dry-run-metrics="externalWriteDryRunMetrics"
+        :external-write-dry-run-token="externalWriteDryRunToken"
+        :external-write-evidence-text="externalWriteEvidenceText"
+        :external-write-apply-result="externalWriteApplyResult"
+        :external-write-apply-metrics="externalWriteApplyMetrics"
+        :external-write-apply-run-id="externalWriteApplyRunId"
+        :dry-run-external-write="dryRunExternalWrite"
+        :apply-external-write="applyExternalWrite"
+        v-model:external-write-accept-review="externalWriteAcceptReview"
+      />
+
+      <IntegrationTableActionsPanel
+        :table-actions="tableActions"
+        :bi="bi"
+        :table-action-option-label="tableActionOptionLabel"
+        :table-action-display-context-items="tableActionDisplayContextItems"
+        :table-action-can-dry-run="tableActionCanDryRun"
+        :running-table-action="runningTableAction"
+        :table-action-can-apply="tableActionCanApply"
+        :table-action-apply-command-label="tableActionApplyCommandLabel"
+        :table-action-dry-run-result="tableActionDryRunResult"
+        :table-action-review-summary="tableActionReviewSummary"
+        :table-action-counts="tableActionCounts"
+        :table-action-large-bom-bounded="tableActionLargeBomBounded"
+        :table-action-bounded-preview-metrics="tableActionBoundedPreviewMetrics"
+        :table-action-bounded-error-types="tableActionBoundedErrorTypes"
+        :table-action-duplicate-diagnostics="tableActionDuplicateDiagnostics"
+        :table-action-duplicate-metrics="tableActionDuplicateMetrics"
+        :table-action-duplicate-policies="tableActionDuplicatePolicies"
+        :table-action-stored-conflict-policy-count="tableActionStoredConflictPolicyCount"
+        :table-action-resolved-duplicate-group-count="tableActionResolvedDuplicateGroupCount"
+        :table-action-held-duplicate-group-count="tableActionHeldDuplicateGroupCount"
+        :table-action-held-reason-metrics="tableActionHeldReasonMetrics"
+        :table-action-duplicate-groups="tableActionDuplicateGroups"
+        :table-action-conflict-policy-saving="tableActionConflictPolicySaving"
+        :table-action-dry-run-token="tableActionDryRunToken"
+        :table-action-manual-confirm-count="tableActionManualConfirmCount"
+        :table-action-apply-result="tableActionApplyResult"
+        :table-action-evidence-text="tableActionEvidenceText"
+        :has-permission="auth.hasPermission"
+        :dry-run-table-action="dryRunTableAction"
+        :apply-table-action="applyTableAction"
+        :on-duplicate-policy-draft-change="onDuplicatePolicyDraftChange"
+        :set-duplicate-run-only-policy="setDuplicateRunOnlyPolicy"
+        :save-duplicate-table-scope-policy="saveDuplicateTableScopePolicy"
+        :revoke-duplicate-table-scope-policy="revokeDuplicateTableScopePolicy"
+        v-model:selected-table-action-id="selectedTableActionId"
+        v-model:table-action-project-no="tableActionProjectNo"
+        v-model:table-action-accept-manual-confirm-hold="tableActionAcceptManualConfirmHold"
+        v-model:table-action-accept-duplicate-resolution="tableActionAcceptDuplicateResolution"
+      />
+
+      <IntegrationFieldOptionSyncPanel
+        :has-integration-admin="auth.hasPermission('integration:admin')"
+        :field-option-sync-presets="fieldOptionSyncPresets"
+        :stock-preparation-option-sync-placeholder="stockPreparationOptionSyncPlaceholder"
+        :stock-preparation-option-sync-can-run="stockPreparationOptionSyncCanRun"
+        :syncing-stock-preparation-options="syncingStockPreparationOptions"
+        :field-option-sync-path-note="fieldOptionSyncPathNote"
+        :stock-preparation-option-sync-evidence-text="stockPreparationOptionSyncEvidenceText"
+        :sync-field-options="syncFieldOptions"
+        v-model:field-option-sync-preset-id="fieldOptionSyncPresetId"
+        v-model:stock-preparation-option-sync-text="stockPreparationOptionSyncText"
+      />
 
       <div class="integration-workbench__export">
         <div>
@@ -1158,258 +360,73 @@
       </div>
 
       <pre data-testid="pipeline-result">{{ pipelineResultText }}</pre>
+      </el-card>
     </section>
 
-    <section class="integration-workbench__panel">
-      <div class="integration-workbench__panel-head">
-        <div>
-          <h2>运行监控</h2>
-          <p>{{ observationSummary }}。展示最近 5 条 run（状态 / 写入 / 失败 + 行级结果）与 open dead letters（可重放），便于清洗后回看失败原因。</p>
-        </div>
-        <button type="button" class="integration-workbench__button" data-testid="refresh-observation" :disabled="observingPipeline" @click="refreshPipelineObservation(false)">
-          {{ observingPipeline ? '刷新中' : '刷新监控' }}
-        </button>
-      </div>
+    <IntegrationMonitoringSection
+      :observation-summary="observationSummary"
+      :observing-pipeline="observingPipeline"
+      :pipeline-runs="pipelineRuns"
+      :dead-letters="deadLetters"
+      :bi="bi"
+      :run-row-summaries="runRowSummaries"
+      :is-run-expanded="isRunExpanded"
+      :dead-letter-error-label="deadLetterErrorLabel"
+      :dead-letter-error-hint="deadLetterErrorHint"
+      :is-dead-letter-replayable="isDeadLetterReplayable"
+      :confirm-replay-dead-letter-id="confirmReplayDeadLetterId"
+      :replaying-dead-letter-id="replayingDeadLetterId"
+      :can-view-row-provenance="canViewRowProvenance"
+      :is-row-provenance-expanded="isRowProvenanceExpanded"
+      :is-row-provenance-loading="isRowProvenanceLoading"
+      :row-provenance-error="rowProvenanceError"
+      :row-provenance-timeline="rowProvenanceTimeline"
+      :row-provenance-attrs-summary="rowProvenanceAttrsSummary"
+      :refresh-pipeline-observation="refreshPipelineObservation"
+      :toggle-run-summaries="toggleRunSummaries"
+      :request-replay="requestReplay"
+      :cancel-replay="cancelReplay"
+      :replay-dead-letter="replayDeadLetter"
+      :toggle-dead-letter-provenance="toggleDeadLetterProvenance"
+    />
 
-      <div class="integration-workbench__observation">
-        <div>
-          <h3>最近运行</h3>
-          <div v-if="pipelineRuns.length === 0" class="integration-workbench__empty">暂无运行记录。</div>
-          <ol v-else class="integration-workbench__record-list" data-testid="pipeline-runs">
-            <li v-for="run in pipelineRuns" :key="run.id" :data-testid="`pipeline-run-${run.id}`">
-              <div class="integration-workbench__run-head">
-                <strong :class="`integration-workbench__run-status integration-workbench__run-status--${run.status}`" :data-testid="`run-status-${run.id}`">{{ run.status }}</strong>
-                <span>{{ run.mode }}</span>
-                <span v-if="run.triggeredBy">by {{ run.triggeredBy }}</span>
-              </div>
-              <div class="integration-workbench__run-metrics">
-                <span>read {{ run.rowsRead }}</span>
-                <span>clean {{ run.rowsCleaned }}</span>
-                <span class="integration-workbench__run-metric--write">write {{ run.rowsWritten }}</span>
-                <span class="integration-workbench__run-metric--fail">fail {{ run.rowsFailed }}</span>
-                <span v-if="run.durationMs != null">{{ run.durationMs }}ms</span>
-              </div>
-              <small>{{ run.startedAt || run.createdAt || run.id }}<template v-if="run.finishedAt"> → {{ run.finishedAt }}</template></small>
-              <p v-if="run.errorSummary" class="integration-workbench__run-error" :data-testid="`run-error-${run.id}`">{{ run.errorSummary }}</p>
-              <div v-if="runRowSummaries(run).length > 0" class="integration-workbench__run-summaries">
-                <button type="button" class="integration-workbench__link-button" :data-testid="`toggle-run-summaries-${run.id}`" @click="toggleRunSummaries(run.id)">
-                  {{ isRunExpanded(run.id) ? '收起行级结果' : `展开行级结果（${runRowSummaries(run).length}）` }}
-                </button>
-                <pre v-if="isRunExpanded(run.id)" :data-testid="`run-row-summaries-${run.id}`">{{ JSON.stringify(runRowSummaries(run), null, 2) }}</pre>
-              </div>
-            </li>
-          </ol>
-        </div>
-        <div>
-          <h3>Open Dead Letters</h3>
-          <div v-if="deadLetters.length === 0" class="integration-workbench__empty">暂无 open dead letters。</div>
-          <ol v-else class="integration-workbench__record-list" data-testid="dead-letters">
-            <li v-for="deadLetter in deadLetters" :key="deadLetter.id" :data-testid="`dead-letter-${deadLetter.id}`">
-              <strong>{{ deadLetter.errorCode }}</strong>
-              <span>{{ deadLetter.errorMessage }}</span>
-              <small>
-                {{ deadLetter.status }} · {{ deadLetter.createdAt || deadLetter.id }}<template v-if="deadLetter.retryCount"> · retries {{ deadLetter.retryCount }}</template><template v-if="deadLetter.idempotencyKey"> · key {{ deadLetter.idempotencyKey }}</template>
-              </small>
-              <div class="integration-workbench__dead-letter-actions">
-                <span
-                  :class="['integration-workbench__badge', isDeadLetterReplayable(deadLetter) ? 'integration-workbench__badge--retryable' : '']"
-                  :data-testid="`dead-letter-retryable-${deadLetter.id}`"
-                >{{ isDeadLetterReplayable(deadLetter) ? '可重放' : '不可重放' }}</span>
-                <template v-if="isDeadLetterReplayable(deadLetter)">
-                  <button
-                    v-if="confirmReplayDeadLetterId !== deadLetter.id"
-                    type="button"
-                    class="integration-workbench__button integration-workbench__button--ghost"
-                    :data-testid="`replay-dead-letter-${deadLetter.id}`"
-                    :disabled="replayingDeadLetterId === deadLetter.id"
-                    @click="requestReplay(deadLetter.id)"
-                  >准备 Replay</button>
-                  <template v-else>
-                    <button
-                      type="button"
-                      class="integration-workbench__button integration-workbench__button--danger"
-                      :data-testid="`confirm-replay-dead-letter-${deadLetter.id}`"
-                      :disabled="replayingDeadLetterId === deadLetter.id"
-                      @click="replayDeadLetter(deadLetter)"
-                    >{{ replayingDeadLetterId === deadLetter.id ? 'Replay 中…' : '确认 Replay（会真实写入）' }}</button>
-                    <button
-                      type="button"
-                      class="integration-workbench__link-button"
-                      :data-testid="`cancel-replay-dead-letter-${deadLetter.id}`"
-                      :disabled="replayingDeadLetterId === deadLetter.id"
-                      @click="cancelReplay"
-                    >取消</button>
-                  </template>
-                </template>
-              </div>
-              <div class="integration-workbench__dead-letter-provenance">
-                <button
-                  type="button"
-                  class="integration-workbench__link-button"
-                  :data-testid="`toggle-dead-letter-provenance-${deadLetter.id}`"
-                  :disabled="!canViewRowProvenance(deadLetter)"
-                  :title="canViewRowProvenance(deadLetter) ? '查看该行(rowId)跨 run 的写入血缘（只读）' : '该 dead letter 无 idempotency key（rowId），无法查询血缘'"
-                  @click="toggleDeadLetterProvenance(deadLetter)"
-                >{{ isRowProvenanceExpanded(deadLetter.id) ? '收起血缘' : '查看跨-run 血缘' }}</button>
-                <span
-                  v-if="!canViewRowProvenance(deadLetter)"
-                  class="integration-workbench__hint"
-                  :data-testid="`dead-letter-provenance-unavailable-${deadLetter.id}`"
-                >无 rowId（idempotency key），不可查血缘</span>
-                <div
-                  v-if="isRowProvenanceExpanded(deadLetter.id)"
-                  class="integration-workbench__provenance-timeline"
-                  :data-testid="`dead-letter-provenance-${deadLetter.id}`"
-                >
-                  <div
-                    v-if="isRowProvenanceLoading(deadLetter.id)"
-                    class="integration-workbench__hint"
-                    :data-testid="`dead-letter-provenance-loading-${deadLetter.id}`"
-                  >血缘加载中…</div>
-                  <div
-                    v-else-if="rowProvenanceError(deadLetter.id)"
-                    class="integration-workbench__hint integration-workbench__hint--strong"
-                    :data-testid="`dead-letter-provenance-error-${deadLetter.id}`"
-                  >{{ rowProvenanceError(deadLetter.id) }}</div>
-                  <ol
-                    v-else-if="rowProvenanceTimeline(deadLetter.id).length > 0"
-                    class="integration-workbench__record-list"
-                    :data-testid="`dead-letter-provenance-timeline-${deadLetter.id}`"
-                  >
-                    <li
-                      v-for="(entry, index) in rowProvenanceTimeline(deadLetter.id)"
-                      :key="`${entry.runId}-${entry.eventIndex}`"
-                      :data-testid="`provenance-entry-${deadLetter.id}-${index}`"
-                    >
-                      <div class="integration-workbench__provenance-event-head">
-                        <strong>{{ entry.eventType }}</strong>
-                        <span
-                          class="integration-workbench__run-status"
-                          :class="`integration-workbench__run-status--${entry.runStatus}`"
-                        >run {{ entry.runStatus }}</span>
-                        <span>{{ entry.runCreatedAt || entry.at }}</span>
-                      </div>
-                      <small>runId {{ entry.runId }} · pipeline {{ entry.pipelineId }} · {{ entry.runMode }}</small>
-                      <p
-                        v-if="rowProvenanceAttrsSummary(entry.attrs)"
-                        class="integration-workbench__provenance-attrs"
-                      >{{ rowProvenanceAttrsSummary(entry.attrs) }}</p>
-                    </li>
-                  </ol>
-                  <div
-                    v-else
-                    class="integration-workbench__empty"
-                    :data-testid="`dead-letter-provenance-empty-${deadLetter.id}`"
-                  >暂无血缘事件。</div>
-                  <p class="integration-workbench__hint">只读：仅展示脱敏后的事件，不含 payload 原文，不触发任何写入/重放。</p>
-                </div>
-              </div>
-            </li>
-          </ol>
+    <IntegrationPayloadPreviewSection
+      :reference-mapping-domains="referenceMappingDomains"
+      :reference-mapping-bindings="referenceMappingBindings"
+      :staging-systems="stagingSystems"
+      :on-ref-mapping-system-change="onRefMappingSystemChange"
+      :on-ref-mapping-object-change="onRefMappingObjectChange"
+      :deriving-draft="derivingDraft"
+      :derive-error="deriveError"
+      :derive-template-draft="deriveTemplateDraft"
+      :authored-gated-fields="authoredGatedFields"
+      :source-read-only-boundary-notice="sourceReadOnlyBoundaryNotice"
+      :preview-payload="previewPayload"
+      :preview-text="previewText"
+      :preview-provenance="previewProvenance"
+      :provenance-source-label="provenanceSourceLabel"
+      v-model:sample-record-text="sampleRecordText"
+      v-model:payload-template-text="payloadTemplateText"
+      v-model:authored-field-rules="authoredFieldRules"
+    />
+
+    <!-- BA-UI-1 (docs/development/bridge-agent-admin-page-design-lock-20260707.md): read-only
+         Bridge Agent observability. Self-contained section (owns its own service calls to the three
+         existing read-only generic routes); the view only hands down the shared systems list + scope. -->
+    <IntegrationBridgeAgentSection :systems="systems" :scope="currentScope()" />
         </div>
       </div>
     </section>
-
-    <section class="integration-workbench__panel integration-workbench__preview">
-      <div>
-        <h2>样例记录</h2>
-        <textarea v-model="sampleRecordText" data-testid="sample-record" spellcheck="false"></textarea>
-        <h2>目标模板 JSON</h2>
-        <textarea
-          v-model="payloadTemplateText"
-          data-testid="payload-template"
-          spellcheck="false"
-          placeholder='{ "FNumber": "&lt;code&gt;", "FName": "&lt;name&gt;" }'
-        ></textarea>
-        <small class="integration-workbench__hint">可选。填写后使用 DF-T1 no-write payloadTemplate 预览；留空则保持 legacy preview。</small>
-        <h2>引用映射来源(各 domain 绑定 staging 表)</h2>
-        <div v-if="referenceMappingDomains.length > 0" data-testid="reference-mapping-picker">
-          <div
-            v-for="domain in referenceMappingDomains"
-            :key="domain"
-            class="integration-workbench__ref-mapping-row"
-            :data-testid="`ref-mapping-row-${domain}`"
-          >
-            <code>{{ domain }}</code>
-            <select
-              :data-testid="`ref-mapping-system-${domain}`"
-              :value="referenceMappingBindings[domain]?.systemId || ''"
-              @change="onRefMappingSystemChange(domain, ($event.target as HTMLSelectElement).value)"
-            >
-              <option value="">— staging 系统 —</option>
-              <option v-for="system in stagingSystems" :key="system.id" :value="system.id">{{ system.name }}</option>
-            </select>
-            <input
-              :data-testid="`ref-mapping-object-${domain}`"
-              :value="referenceMappingBindings[domain]?.object || ''"
-              placeholder="对象/表名"
-              @input="onRefMappingObjectChange(domain, ($event.target as HTMLInputElement).value)"
-            />
-          </div>
-        </div>
-        <small class="integration-workbench__hint">将 reference 字段授权为「从映射表解析」并选 domain 后,这里按 domain 绑定其 staging 映射表(系统按名称选,对象填表名);预览会实时 bulk-read 解析。sourceCode 列在上方字段规则里填。</small>
-        <button
-          type="button"
-          class="integration-workbench__button"
-          data-testid="derive-template-draft"
-          :disabled="derivingDraft"
-          @click="deriveTemplateDraft"
-        >{{ derivingDraft ? '派生中…' : '从模板派生字段规则草案' }}</button>
-        <p v-if="deriveError" class="integration-workbench__hint integration-workbench__hint--strong" data-testid="derive-error">{{ deriveError }}</p>
-        <MetaIntegrationFieldRuleAuthoring
-          v-if="authoredFieldRules.length > 0"
-          v-model="authoredFieldRules"
-          :gated-fields="authoredGatedFields"
-        />
-      </div>
-      <div>
-        <div class="integration-workbench__panel-head">
-          <div>
-            <h2>Payload 预览</h2>
-            <p>预览只做纯计算，不写数据库，也不会调用 ERP/CRM/PLM/SRM。</p>
-          </div>
-          <button type="button" class="integration-workbench__button" data-testid="preview-payload" @click="previewPayload">
-            生成 JSON 预览
-          </button>
-        </div>
-        <p
-          v-if="sourceReadOnlyBoundaryNotice"
-          class="integration-workbench__hint integration-workbench__hint--strong"
-          data-testid="source-readonly-boundary-notice"
-        >
-          {{ sourceReadOnlyBoundaryNotice }}
-        </p>
-        <pre data-testid="payload-preview">{{ previewText }}</pre>
-        <div
-          v-if="previewProvenance"
-          class="integration-workbench__provenance"
-          data-testid="preview-provenance"
-        >
-          <h3 class="integration-workbench__provenance-title">字段来源</h3>
-          <p class="integration-workbench__provenance-stats" data-testid="preview-provenance-stats">
-            <span
-              v-for="stat in previewProvenance.stats"
-              :key="stat.source"
-              class="integration-workbench__provenance-badge"
-              :data-source="stat.source"
-            >{{ provenanceSourceLabel(stat.source) }}: {{ stat.count }}</span>
-          </p>
-          <ul class="integration-workbench__provenance-list">
-            <li v-for="entry in previewProvenance.entries" :key="entry.field" :data-field="entry.field">
-              <code>{{ entry.field }}</code>
-              <span class="integration-workbench__provenance-badge" :data-source="entry.source">{{ provenanceSourceLabel(entry.source) }}</span>
-            </li>
-          </ul>
-          <p class="integration-workbench__hint">仅显示字段名与来源，不含字段值。</p>
-        </div>
-      </div>
-    </section>
-  </section>
+  </PageShell>
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { useAuth } from '../composables/useAuth'
+import { useLocale } from '../composables/useLocale'
+import PageShell from '../components/layout/PageShell.vue'
+import PageHeader from '../components/layout/PageHeader.vue'
+import { integrationErrorCodeDisplayLabel, integrationErrorCodeHint } from '../services/integration/errorCodeLabels'
 import { buildXlsxBuffer } from '../multitable/import/xlsx-mapping'
 import { getDataSourceSchema, listDataSources } from '../data-sources/api'
 import type { DataSourceListItem, DataSourceTableInfo } from '../data-sources/types'
@@ -1486,6 +503,21 @@ import IntegrationReadSourceConfigPanel from '../components/integration/Integrat
 import IntegrationReadSourceCompositionPanel from '../components/integration/IntegrationReadSourceCompositionPanel.vue'
 import IntegrationReadSourceCompositionAuthoringPanel from '../components/integration/IntegrationReadSourceCompositionAuthoringPanel.vue'
 import PlmBomReviewPanel from '../components/plm/PlmBomReviewPanel.vue'
+import IntegrationWorkbenchRail, {
+  type IntegrationWorkbenchRailGroup,
+} from '../components/integration/IntegrationWorkbenchRail.vue'
+import IntegrationMonitoringSection from '../components/integration/IntegrationMonitoringSection.vue'
+import IntegrationCleaningDatasetSection from '../components/integration/IntegrationCleaningDatasetSection.vue'
+import IntegrationMappingRulesSection from '../components/integration/IntegrationMappingRulesSection.vue'
+import IntegrationObjectTemplateSection from '../components/integration/IntegrationObjectTemplateSection.vue'
+import IntegrationPayloadPreviewSection from '../components/integration/IntegrationPayloadPreviewSection.vue'
+import IntegrationConnectionSection from '../components/integration/IntegrationConnectionSection.vue'
+import IntegrationBridgeAgentSection from '../components/integration/IntegrationBridgeAgentSection.vue'
+import IntegrationPipelineRunSection from '../components/integration/IntegrationPipelineRunSection.vue'
+import IntegrationStockPrepPanel from '../components/integration/IntegrationStockPrepPanel.vue'
+import IntegrationExternalWritePanel from '../components/integration/IntegrationExternalWritePanel.vue'
+import IntegrationTableActionsPanel from '../components/integration/IntegrationTableActionsPanel.vue'
+import IntegrationFieldOptionSyncPanel from '../components/integration/IntegrationFieldOptionSyncPanel.vue'
 
 type WorkbenchSide = 'source' | 'target'
 type TransformFn = '' | 'trim' | 'upper' | 'lower' | 'toNumber' | 'dictMap'
@@ -1598,6 +630,86 @@ const flowSteps = [
   { title: '4. Dry-run / 推送', description: '预览 payload 后导出或 Save-only 写回' },
 ]
 const auth = useAuth()
+const { locale } = useLocale()
+
+// IU-6a: bilingual guidance copy helper — same locale pattern as the IU-1 error labels elsewhere in
+// this file (deadLetterErrorLabel/deadLetterErrorHint read `locale.value`); safe to call directly from
+// the template without a dedicated computed per string.
+function bi(zh: string, en: string): string {
+  return locale.value === 'zh-CN' ? zh : en
+}
+
+// IU-2a (design-lock §2 IU-2): sticky left rail — six fixed groups mirroring the design-lock's
+// 连接管理/读取源/组合/清洗映射/运行与推送/监控与死信 taxonomy. Anchor-navigation only in this slice:
+// clicking scrolls the target section into view; the active highlight tracks scroll position via
+// IntersectionObserver (feature-detected below — jsdom/older browsers without it simply never
+// update the highlight, no crash). Every section stays rendered (no v-if/show-hide) — that is the
+// zero-behavior-change invariant this slice is built on.
+//
+// Some rail groups cover more than one physical <section> (e.g. "组合" spans the composition
+// config + run panels; "清洗映射" spans object/template selection, dataset cleaning, mapping
+// rules, and the JSON/field-rule/payload-preview panel at the very end of the DOM). The rail
+// button scrolls to the FIRST section id in its group; `sectionGroupIds` below drives the active
+// highlight for every section id that belongs to a group, regardless of DOM position.
+const railGroups = computed<IntegrationWorkbenchRailGroup[]>(() => [
+  { id: 'connection', label: bi('连接管理', 'Connections'), targetId: 'int-sec-connection' },
+  { id: 'read-source', label: bi('读取源', 'Read Sources'), targetId: 'int-sec-read-source' },
+  { id: 'combination', label: bi('组合', 'Composition'), targetId: 'int-sec-combination-config' },
+  { id: 'cleaning-mapping', label: bi('清洗映射', 'Cleansing & Mapping'), targetId: 'int-sec-object-template' },
+  { id: 'run-push', label: bi('运行与推送', 'Run & Push'), targetId: 'int-sec-run-push' },
+  { id: 'monitoring', label: bi('监控与死信', 'Monitoring & Dead Letters'), targetId: 'int-sec-monitoring' },
+  // BA-UI-1 (docs/development/bridge-agent-admin-page-design-lock-20260707.md): 7th rail group —
+  // ADD-ONLY extension of the IU-2a six (the design-lock says the observability page rides the
+  // IU-2 skeleton as a new section, not a separate shell).
+  { id: 'bridge-agent', label: bi('Bridge Agent 观测', 'Bridge Agent'), targetId: 'int-sec-bridge-agent' },
+])
+
+const sectionGroupIds: Record<string, string> = {
+  'int-sec-connection': 'connection',
+  'int-sec-read-source': 'read-source',
+  'int-sec-combination-config': 'combination',
+  'int-sec-combination-run': 'combination',
+  'int-sec-object-template': 'cleaning-mapping',
+  'int-sec-cleaning-dataset': 'cleaning-mapping',
+  'int-sec-cleaning-rules': 'cleaning-mapping',
+  'int-sec-run-push': 'run-push',
+  'int-sec-monitoring': 'monitoring',
+  'int-sec-preview': 'cleaning-mapping',
+  'int-sec-bridge-agent': 'bridge-agent',
+}
+
+const activeRailGroupId = ref('connection')
+let workbenchSectionObserver: IntersectionObserver | null = null
+
+function scrollToRailGroup(group: IntegrationWorkbenchRailGroup): void {
+  activeRailGroupId.value = group.id
+  if (typeof document === 'undefined') return
+  document.getElementById(group.targetId)?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+}
+
+onMounted(() => {
+  if (typeof document === 'undefined' || typeof IntersectionObserver === 'undefined') return
+  const elements = Object.keys(sectionGroupIds)
+    .map((id) => document.getElementById(id))
+    .filter((el): el is HTMLElement => el !== null)
+  if (elements.length === 0) return
+  workbenchSectionObserver = new IntersectionObserver(
+    (entries) => {
+      const visible = entries.filter((entry) => entry.isIntersecting)
+      if (visible.length === 0) return
+      const mostVisible = visible.reduce((a, b) => (a.intersectionRatio >= b.intersectionRatio ? a : b))
+      const groupId = sectionGroupIds[mostVisible.target.id]
+      if (groupId) activeRailGroupId.value = groupId
+    },
+    { rootMargin: '-96px 0px -60% 0px', threshold: [0, 0.25, 0.5, 0.75, 1] },
+  )
+  elements.forEach((el) => workbenchSectionObserver?.observe(el))
+})
+
+onBeforeUnmount(() => {
+  workbenchSectionObserver?.disconnect()
+  workbenchSectionObserver = null
+})
 
 const stagingDatasetCopy: Record<string, { area: string; name: string; description: string }> = {
   plm_raw_items: {
@@ -1719,6 +831,18 @@ const stockPreparationOptionSyncResult = ref<IntegrationStockPreparationOptionSy
 const syncingStockPreparationOptions = ref(false)
 const pipelineRuns = ref<IntegrationPipelineRun[]>([])
 const deadLetters = ref<IntegrationDeadLetter[]>([])
+// IU-1 (RATIFIED addendum): the raw `errorMessage` free-text field must NEVER reach the DOM — it is
+// scrubbed for secret-shaped values only at dead-letter *write* time (see
+// plugins/plugin-integration-core/lib/dead-letter.cjs scrubSecretStringValue), so rendering it here would
+// be a leak-hole. The humanized label (generic-unknown fallback for unregistered codes) is the prominent
+// text; the raw `errorCode` (a registered, values-free vocabulary, safe to show) stays available in a
+// demoted/secondary spot for expert troubleshooting.
+function deadLetterErrorLabel(deadLetter: IntegrationDeadLetter): string {
+  return integrationErrorCodeDisplayLabel(deadLetter.errorCode, locale.value)
+}
+function deadLetterErrorHint(deadLetter: IntegrationDeadLetter): string | null {
+  return integrationErrorCodeHint(deadLetter.errorCode, locale.value)
+}
 const expandedRunIds = ref<Set<string>>(new Set())
 // DF-N2-3 (read-only): per-dead-letter cross-run provenance timeline, fetched lazily
 // on expand by the row's idempotency key (rowId). No write/replay affordance here.
@@ -2060,6 +1184,19 @@ const selectedBomMultitableFeature = computed<PlmIntegrationCapabilityFeature | 
   if (!result?.available) return null
   const feature = result.manifest.features[PLM_BOM_MULTITABLE_FEATURE_KEY]
   return feature && typeof feature === 'object' ? feature : null
+})
+// ECO Phase 3: advisory pre-gate for the locked-BOM ECO-revision CTA. True iff the provider's
+// capabilities manifest advertises bom_eco_revision as supported + entitled AND its actions
+// include eco_revision_intent (Phase-0 Lock 3: availability discovery is the advisory, never
+// the error payload). Advisory only — the relay + provider re-gate authoritatively.
+const selectedPlmBomEcoIntentEnabled = computed<boolean>(() => {
+  const result = selectedSourcePlmCapabilities.value
+  if (!result?.available) return false
+  const feature = result.manifest.features.bom_eco_revision
+  if (!feature || typeof feature !== 'object') return false
+  if (feature.supported !== true || feature.entitled !== true) return false
+  const actions = Array.isArray(feature.actions) ? feature.actions : []
+  return actions.includes('eco_revision_intent')
 })
 const selectedPlmBomMultitableCapabilityEntry = computed<PlmBomCapabilityEntry | null>(() => {
   if (!selectedSourcePlmDataSourceId.value) return null
@@ -4901,16 +4038,16 @@ watch(selectedTableActionId, (actionId) => {
   padding: 1px 8px;
   border-radius: 10px;
   font-size: 12px;
-  background: #eef2ff;
-  color: #3730a3;
+  background: var(--el-color-primary-light-9);
+  color: var(--el-color-primary-dark-2);
 }
 
 .integration-workbench__table-action {
   margin: 16px 0;
   padding: 14px;
-  border: 1px solid #d8e0e8;
+  border: 1px solid var(--ms-border-light);
   border-radius: 8px;
-  background: #f8fbff;
+  background: var(--ms-bg-page);
 }
 
 .integration-workbench__table-action h3 {
@@ -4926,9 +4063,9 @@ watch(selectedTableActionId, (actionId) => {
   display: grid;
   gap: 6px;
   padding: 12px;
-  border: 1px solid #d7deea;
+  border: 1px solid var(--ms-border-light);
   border-radius: 8px;
-  background: #f8fbff;
+  background: var(--ms-bg-page);
 }
 
 .integration-workbench__capability-entry > div {
@@ -4939,13 +4076,13 @@ watch(selectedTableActionId, (actionId) => {
 }
 
 .integration-workbench__capability-entry strong {
-  color: #1f3551;
+  color: var(--ms-text-1);
 }
 
 .integration-workbench__capability-entry p,
 .integration-workbench__capability-entry small {
   margin: 0;
-  color: #5c6878;
+  color: var(--ms-text-2);
   font-size: 13px;
   line-height: 1.45;
 }
@@ -4961,9 +4098,9 @@ watch(selectedTableActionId, (actionId) => {
   display: grid;
   gap: 8px;
   padding: 10px;
-  border: 1px solid #f3c8a8;
+  border: 1px solid var(--el-color-warning-light-7);
   border-radius: 6px;
-  background: #fff7ed;
+  background: var(--el-color-warning-light-9);
 }
 
 .integration-workbench__bounded-preview > div:first-child {
@@ -4974,7 +4111,7 @@ watch(selectedTableActionId, (actionId) => {
 }
 
 .integration-workbench__bounded-preview strong {
-  color: #7c2d12;
+  color: var(--el-color-warning-dark-2);
 }
 
 .integration-workbench__mini-list {
@@ -4987,23 +4124,22 @@ watch(selectedTableActionId, (actionId) => {
 
 .integration-workbench__mini-list li {
   padding: 8px;
-  border: 1px solid #f3d8bd;
+  border: 1px solid var(--el-color-warning-light-7);
   border-radius: 6px;
-  background: #fffaf5;
-  color: #5b3417;
+  background: var(--el-color-warning-light-9);
+  color: var(--el-color-warning-dark-2);
   font-size: 12px;
   line-height: 1.45;
   overflow-wrap: anywhere;
 }
 
+/* IU-2a: outer container box model (max-width/margin/padding) now lives on PageShell
+   (width="wide"); this class stays as the descendant-selector scope for h2/input/select/
+   textarea/code/pre/panel rules below. */
 .integration-workbench {
-  max-width: 1280px;
-  margin: 0 auto;
-  padding: 24px;
-  color: #17202a;
+  color: var(--ms-text-1);
 }
 
-.integration-workbench__header,
 .integration-workbench__panel-head {
   display: flex;
   align-items: flex-start;
@@ -5011,8 +4147,31 @@ watch(selectedTableActionId, (actionId) => {
   gap: 16px;
 }
 
-.integration-workbench__header {
-  margin-bottom: 18px;
+/* IU-6c: header help-center link — new wrapper styling only, tokens per UF-1. */
+.integration-workbench__header-links {
+  display: flex;
+  align-items: center;
+  gap: var(--ms-space-2);
+  flex-wrap: wrap;
+}
+
+/* IU-2a: rail + sections layout — the workbench body now splits into a sticky left rail
+   (IntegrationWorkbenchRail.vue) and the scrollable section stack. */
+.integration-workbench__body {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--ms-space-5);
+}
+
+.integration-workbench__sections {
+  flex: 1;
+  min-width: 0;
+}
+
+@media (max-width: 960px) {
+  .integration-workbench__body {
+    flex-direction: column;
+  }
 }
 
 .integration-workbench__flow {
@@ -5025,9 +4184,9 @@ watch(selectedTableActionId, (actionId) => {
 .integration-workbench__flow-step,
 .integration-workbench__dataset-card,
 .integration-workbench__staging-card {
-  border: 1px solid #d8e0e8;
+  border: 1px solid var(--ms-border-light);
   border-radius: 8px;
-  background: #ffffff;
+  background: var(--ms-bg-card);
 }
 
 .integration-workbench__flow-step {
@@ -5037,12 +4196,12 @@ watch(selectedTableActionId, (actionId) => {
 }
 
 .integration-workbench__flow-step strong {
-  color: #1f3551;
+  color: var(--ms-text-1);
   font-size: 13px;
 }
 
 .integration-workbench__flow-step span {
-  color: #5c6878;
+  color: var(--ms-text-2);
   font-size: 12px;
   line-height: 1.4;
 }
@@ -5054,16 +4213,16 @@ watch(selectedTableActionId, (actionId) => {
   gap: 8px;
   margin: -4px 0 16px;
   padding: 10px 12px;
-  border: 1px solid #d8e0e8;
+  border: 1px solid var(--ms-border-light);
   border-radius: 8px;
-  background: #f8fbff;
-  color: #3c4b60;
+  background: var(--ms-bg-page);
+  color: var(--ms-text-2);
   font-size: 13px;
   line-height: 1.45;
 }
 
 .integration-workbench__quick-flow strong {
-  color: #1f3551;
+  color: var(--ms-text-1);
 }
 
 .integration-workbench__quick-flow span {
@@ -5072,39 +4231,30 @@ watch(selectedTableActionId, (actionId) => {
 
 .integration-workbench__eyebrow {
   margin: 0 0 6px;
-  color: #54637a;
+  color: var(--ms-text-2);
   font-size: 13px;
   font-weight: 700;
   text-transform: uppercase;
 }
 
-.integration-workbench h1,
 .integration-workbench h2 {
   margin: 0;
-}
-
-.integration-workbench h1 {
-  font-size: 28px;
-}
-
-.integration-workbench h2 {
   font-size: 17px;
 }
 
-.integration-workbench__lead,
 .integration-workbench__panel p {
   margin: 8px 0 0;
-  color: #5c6878;
+  color: var(--ms-text-2);
   line-height: 1.5;
 }
 
 .integration-workbench__k3-link,
 .integration-workbench__button,
 .integration-workbench__icon-button {
-  border: 1px solid #bfccd9;
+  border: 1px solid var(--ms-border);
   border-radius: 6px;
-  background: #ffffff;
-  color: #233246;
+  background: var(--ms-bg-card);
+  color: var(--ms-text-1);
   cursor: pointer;
   font-weight: 700;
   text-decoration: none;
@@ -5122,7 +4272,7 @@ watch(selectedTableActionId, (actionId) => {
 .integration-workbench__button:hover,
 .integration-workbench__icon-button:hover,
 .integration-workbench__k3-link:hover {
-  border-color: #357abd;
+  border-color: var(--ms-color-primary);
 }
 
 .integration-workbench__button:disabled,
@@ -5132,34 +4282,34 @@ watch(selectedTableActionId, (actionId) => {
 }
 
 .integration-workbench__button--danger {
-  border-color: #c77777;
-  color: #8f1d1d;
+  border-color: var(--el-color-danger-light-3);
+  color: var(--el-color-danger);
 }
 
 .integration-workbench__status {
   margin-bottom: 14px;
   padding: 10px 12px;
   border-radius: 6px;
-  background: #eef4fb;
-  color: #24476b;
+  background: var(--el-color-primary-light-9);
+  color: var(--ms-text-1);
 }
 
 .integration-workbench__status[data-kind="error"] {
-  background: #fff0f0;
-  color: #9b1c1c;
+  background: var(--el-color-danger-light-9);
+  color: var(--el-color-danger);
 }
 
 .integration-workbench__status[data-kind="success"] {
-  background: #edf7ef;
-  color: #17622f;
+  background: var(--el-color-success-light-9);
+  color: var(--el-color-success-dark-2);
 }
 
 .integration-workbench__panel {
   margin-bottom: 16px;
   padding: 16px;
-  border: 1px solid #d8e0e8;
+  border: 1px solid var(--ms-border-light);
   border-radius: 8px;
-  background: #ffffff;
+  background: var(--ms-bg-card);
 }
 
 .integration-workbench__adapter-list {
@@ -5177,20 +4327,20 @@ watch(selectedTableActionId, (actionId) => {
   gap: 16px;
   margin-top: 14px;
   padding: 12px;
-  border: 1px solid #d7deea;
+  border: 1px solid var(--ms-border-light);
   border-radius: 8px;
-  background: #f8fafc;
+  background: var(--ms-bg-page);
 }
 
 .integration-workbench__onboarding strong,
 .integration-workbench__readiness strong {
-  color: #1f3551;
+  color: var(--ms-text-1);
 }
 
 .integration-workbench__onboarding p,
 .integration-workbench__readiness p {
   margin: 4px 0 0;
-  color: #5c6878;
+  color: var(--ms-text-2);
   font-size: 13px;
   line-height: 1.5;
 }
@@ -5207,30 +4357,30 @@ watch(selectedTableActionId, (actionId) => {
   gap: 12px;
   margin-top: 14px;
   padding: 12px;
-  border: 1px solid #d7deea;
+  border: 1px solid var(--ms-border-light);
   border-radius: 8px;
-  background: #fbfcfe;
+  background: var(--ms-bg-card);
 }
 
 .integration-workbench__connection-manager strong {
-  color: #1f3551;
+  color: var(--ms-text-1);
 }
 
 .integration-workbench__connection-manager p {
   margin: 4px 0 0;
-  color: #5c6878;
+  color: var(--ms-text-2);
   font-size: 13px;
   line-height: 1.5;
 }
 
 .integration-workbench__details {
-  border-top: 1px solid #e4ebf2;
+  border-top: 1px solid var(--el-border-color-lighter);
   padding-top: 10px;
 }
 
 .integration-workbench__details summary {
   cursor: pointer;
-  color: #1f3551;
+  color: var(--ms-text-1);
   font-weight: 700;
 }
 
@@ -5242,10 +4392,10 @@ watch(selectedTableActionId, (actionId) => {
   gap: 12px;
   margin-top: 14px;
   padding: 10px 12px;
-  border: 1px solid #d8e0e8;
+  border: 1px solid var(--ms-border-light);
   border-radius: 8px;
-  background: #ffffff;
-  color: #233246;
+  background: var(--ms-bg-card);
+  color: var(--ms-text-1);
   cursor: pointer;
   font: inherit;
   font-weight: 700;
@@ -5253,7 +4403,7 @@ watch(selectedTableActionId, (actionId) => {
 }
 
 .integration-workbench__inventory-toggle span {
-  color: #357abd;
+  color: var(--ms-color-primary);
   font-size: 13px;
 }
 
@@ -5276,14 +4426,14 @@ watch(selectedTableActionId, (actionId) => {
   display: grid;
   gap: 4px;
   padding: 10px;
-  border: 1px solid #e4ebf2;
+  border: 1px solid var(--el-border-color-lighter);
   border-radius: 6px;
-  background: #ffffff;
+  background: var(--ms-bg-card);
 }
 
 .integration-workbench__inventory-list span,
 .integration-workbench__inventory-list small {
-  color: #5c6878;
+  color: var(--ms-text-2);
   font-size: 12px;
   line-height: 1.4;
 }
@@ -5293,14 +4443,14 @@ watch(selectedTableActionId, (actionId) => {
   align-items: center;
   gap: 6px;
   padding: 5px 8px;
-  border: 1px solid #d8e0e8;
+  border: 1px solid var(--ms-border-light);
   border-radius: 999px;
-  color: #35465c;
+  color: var(--ms-text-1);
   font-size: 13px;
 }
 
 .integration-workbench__adapter small {
-  color: #8a4d00;
+  color: var(--el-color-warning-dark-2);
   font-weight: 700;
 }
 
@@ -5318,7 +4468,7 @@ watch(selectedTableActionId, (actionId) => {
 
 .integration-workbench__hint {
   margin-top: 10px;
-  color: #5c6878;
+  color: var(--ms-text-2);
   font-size: 13px;
   line-height: 1.5;
 }
@@ -5326,8 +4476,8 @@ watch(selectedTableActionId, (actionId) => {
 .integration-workbench__hint--strong {
   padding: 10px 12px;
   border-radius: 6px;
-  background: #fff8e8;
-  color: #744600;
+  background: var(--el-color-warning-light-9);
+  color: var(--el-color-warning-dark-2);
 }
 
 .integration-workbench__connection-row {
@@ -5343,40 +4493,40 @@ watch(selectedTableActionId, (actionId) => {
   max-width: 100%;
   padding: 5px 8px;
   border-radius: 999px;
-  background: #eef2f7;
-  color: #3c4b60;
+  background: var(--el-fill-color-light);
+  color: var(--ms-text-2);
   font-size: 12px;
   font-weight: 700;
 }
 
 .integration-workbench__badge[data-status="active"] {
-  background: #edf7ef;
-  color: #17622f;
+  background: var(--el-color-success-light-9);
+  color: var(--el-color-success-dark-2);
 }
 
 .integration-workbench__badge[data-status="error"] {
-  background: #fff0f0;
-  color: #9b1c1c;
+  background: var(--el-color-danger-light-9);
+  color: var(--el-color-danger);
 }
 
 .integration-workbench__badge[data-status="warning"] {
-  background: #fff8e8;
-  color: #744600;
+  background: var(--el-color-warning-light-9);
+  color: var(--el-color-warning-dark-2);
 }
 
 .integration-workbench__badge[data-status="enabled"] {
-  background: #edf7ef;
-  color: #17622f;
+  background: var(--el-color-success-light-9);
+  color: var(--el-color-success-dark-2);
 }
 
 .integration-workbench__badge[data-status="upgrade"] {
-  background: #fff8e8;
-  color: #744600;
+  background: var(--el-color-warning-light-9);
+  color: var(--el-color-warning-dark-2);
 }
 
 .integration-workbench__badge[data-status="loading"] {
-  background: #eef2f7;
-  color: #3c4b60;
+  background: var(--el-fill-color-light);
+  color: var(--ms-text-2);
 }
 
 .integration-workbench__grid {
@@ -5397,9 +4547,9 @@ watch(selectedTableActionId, (actionId) => {
 .integration-workbench__watermark-config {
   grid-column: 1 / -1;
   padding: 12px;
-  border: 1px solid #d7deea;
+  border: 1px solid var(--ms-border-light);
   border-radius: 8px;
-  background: #f8fafc;
+  background: var(--ms-bg-page);
 }
 
 .integration-workbench__dataset-grid {
@@ -5421,20 +4571,20 @@ watch(selectedTableActionId, (actionId) => {
 }
 
 .integration-workbench__dataset-kind {
-  color: #5c6878;
+  color: var(--ms-text-2);
   font-size: 12px;
   font-weight: 700;
 }
 
 .integration-workbench__dataset-card strong,
 .integration-workbench__staging-card strong {
-  color: #1f3551;
+  color: var(--ms-text-1);
 }
 
 .integration-workbench__dataset-card p,
 .integration-workbench__staging-card p {
   margin: 0;
-  color: #5c6878;
+  color: var(--ms-text-2);
   line-height: 1.5;
 }
 
@@ -5447,7 +4597,7 @@ watch(selectedTableActionId, (actionId) => {
 .integration-workbench__metric-row span,
 .integration-workbench__staging-card small {
   display: inline-flex;
-  color: #5c6878;
+  color: var(--ms-text-2);
   font-size: 12px;
 }
 
@@ -5469,12 +4619,12 @@ watch(selectedTableActionId, (actionId) => {
 .integration-workbench__staging-note {
   grid-column: 1 / -1;
   display: block;
-  color: #5c6878;
+  color: var(--ms-text-2);
   line-height: 1.45;
 }
 
 .integration-workbench__staging-note--warning {
-  color: #92400e;
+  color: var(--el-color-warning-dark-2);
 }
 
 .integration-workbench__system-column {
@@ -5485,7 +4635,7 @@ watch(selectedTableActionId, (actionId) => {
 .integration-workbench label {
   display: grid;
   gap: 6px;
-  color: #35465c;
+  color: var(--ms-text-1);
   font-size: 13px;
   font-weight: 700;
 }
@@ -5495,10 +4645,10 @@ watch(selectedTableActionId, (actionId) => {
 .integration-workbench textarea {
   width: 100%;
   box-sizing: border-box;
-  border: 1px solid #bfccd9;
+  border: 1px solid var(--ms-border);
   border-radius: 6px;
   padding: 8px 10px;
-  color: #17202a;
+  color: var(--ms-text-1);
   font: inherit;
 }
 
@@ -5512,9 +4662,9 @@ watch(selectedTableActionId, (actionId) => {
   min-height: 84px;
   margin: 0;
   padding: 10px 12px;
-  border: 1px solid #e4ebf2;
+  border: 1px solid var(--el-border-color-lighter);
   border-radius: 6px;
-  background: #f8fafc;
+  background: var(--ms-bg-page);
   list-style: none;
 }
 
@@ -5524,16 +4674,16 @@ watch(selectedTableActionId, (actionId) => {
   justify-content: space-between;
   gap: 8px;
   padding: 4px 0;
-  color: #42536a;
+  color: var(--ms-text-2);
 }
 
 .integration-workbench code {
-  color: #1f5f99;
+  color: var(--ms-color-primary);
   font-size: 12px;
 }
 
 .integration-workbench__schema-list strong {
-  color: #9b1c1c;
+  color: var(--el-color-danger);
   font-size: 12px;
 }
 
@@ -5550,9 +4700,9 @@ watch(selectedTableActionId, (actionId) => {
 }
 
 .integration-workbench__mapping-card {
-  border: 1px solid #d8e0e8;
+  border: 1px solid var(--ms-border-light);
   border-radius: 8px;
-  background: #fbfcfe;
+  background: var(--ms-bg-card);
 }
 
 .integration-workbench__mapping-card summary {
@@ -5560,13 +4710,13 @@ watch(selectedTableActionId, (actionId) => {
   grid-template-columns: minmax(0, 1fr) auto;
   gap: 12px;
   padding: 10px 12px;
-  color: #1f3551;
+  color: var(--ms-text-1);
   cursor: pointer;
   font-weight: 700;
 }
 
 .integration-workbench__mapping-card summary small {
-  color: #5c6878;
+  color: var(--ms-text-2);
   font-weight: 600;
 }
 
@@ -5581,12 +4731,12 @@ watch(selectedTableActionId, (actionId) => {
 .integration-workbench__mapping-table th,
 .integration-workbench__mapping-table td {
   padding: 8px;
-  border-bottom: 1px solid #e4ebf2;
+  border-bottom: 1px solid var(--el-border-color-lighter);
   text-align: left;
 }
 
 .integration-workbench__mapping-table th {
-  color: #5c6878;
+  color: var(--ms-text-2);
   font-size: 12px;
 }
 
@@ -5634,7 +4784,7 @@ watch(selectedTableActionId, (actionId) => {
   width: max-content;
   border: 0;
   background: transparent;
-  color: #1f5f99;
+  color: var(--ms-color-primary);
   cursor: pointer;
   font: inherit;
   font-weight: 700;
@@ -5643,7 +4793,7 @@ watch(selectedTableActionId, (actionId) => {
 }
 
 .integration-workbench__field-help {
-  color: #5c6878;
+  color: var(--ms-text-2);
   font-size: 12px;
   font-weight: 500;
   line-height: 1.45;
@@ -5652,13 +4802,13 @@ watch(selectedTableActionId, (actionId) => {
 .integration-workbench__run-explainer {
   margin-top: 14px;
   padding: 12px;
-  border: 1px solid #d7deea;
+  border: 1px solid var(--ms-border-light);
   border-radius: 8px;
-  background: #f8fafc;
+  background: var(--ms-bg-page);
 }
 
 .integration-workbench__run-explainer strong {
-  color: #1f3551;
+  color: var(--ms-text-1);
 }
 
 .integration-workbench__run-explainer ul {
@@ -5666,7 +4816,7 @@ watch(selectedTableActionId, (actionId) => {
   gap: 6px;
   margin: 8px 0 0;
   padding-left: 18px;
-  color: #5c6878;
+  color: var(--ms-text-2);
   line-height: 1.5;
 }
 
@@ -5700,28 +4850,28 @@ watch(selectedTableActionId, (actionId) => {
   display: grid;
   gap: 4px;
   padding: 8px;
-  border: 1px solid #e4ebf2;
+  border: 1px solid var(--el-border-color-lighter);
   border-radius: 6px;
-  background: #ffffff;
+  background: var(--ms-bg-card);
 }
 
 .integration-workbench__readiness li[data-ready="true"] {
-  border-color: #b9dfc4;
-  background: #f3fbf5;
+  border-color: var(--el-color-success-light-7);
+  background: var(--el-color-success-light-9);
 }
 
 .integration-workbench__readiness li > span {
-  color: #7a4a00;
+  color: var(--el-color-warning-dark-2);
   font-size: 12px;
   font-weight: 700;
 }
 
 .integration-workbench__readiness li[data-ready="true"] > span {
-  color: #17622f;
+  color: var(--el-color-success-dark-2);
 }
 
 .integration-workbench__readiness small {
-  color: #5c6878;
+  color: var(--ms-text-2);
   font-size: 12px;
   line-height: 1.4;
 }
@@ -5733,9 +4883,9 @@ watch(selectedTableActionId, (actionId) => {
   gap: 12px;
   margin-top: 14px;
   padding: 12px;
-  border: 1px solid #d7deea;
+  border: 1px solid var(--ms-border-light);
   border-radius: 8px;
-  background: #f8fafc;
+  background: var(--ms-bg-page);
 }
 
 .integration-workbench__export strong,
@@ -5745,7 +4895,7 @@ watch(selectedTableActionId, (actionId) => {
 
 .integration-workbench__export p {
   margin-top: 4px;
-  color: #5c6878;
+  color: var(--ms-text-2);
   font-size: 13px;
   line-height: 1.5;
 }
@@ -5764,16 +4914,16 @@ watch(selectedTableActionId, (actionId) => {
 
 .integration-workbench__muted {
   margin: -4px 0 10px;
-  color: #5c6878;
+  color: var(--ms-text-2);
   font-size: 13px;
   line-height: 1.5;
 }
 
 .integration-workbench__empty {
   padding: 12px;
-  border: 1px dashed #cbd5e1;
+  border: 1px dashed var(--ms-border);
   border-radius: 6px;
-  color: #5c6878;
+  color: var(--ms-text-2);
 }
 
 .integration-workbench__empty--actionable {
@@ -5781,7 +4931,7 @@ watch(selectedTableActionId, (actionId) => {
 }
 
 .integration-workbench__empty strong {
-  color: #1f3551;
+  color: var(--ms-text-1);
 }
 
 .integration-workbench__empty p {
@@ -5800,13 +4950,13 @@ watch(selectedTableActionId, (actionId) => {
   display: grid;
   gap: 4px;
   padding: 10px;
-  border: 1px solid #e4ebf2;
+  border: 1px solid var(--el-border-color-lighter);
   border-radius: 6px;
-  background: #f8fafc;
+  background: var(--ms-bg-page);
 }
 
 .integration-workbench__record-list small {
-  color: #5c6878;
+  color: var(--ms-text-2);
 }
 
 .integration-workbench__run-head {
@@ -5821,16 +4971,16 @@ watch(selectedTableActionId, (actionId) => {
   flex-wrap: wrap;
   gap: 8px;
   font-size: 12px;
-  color: #5c6878;
+  color: var(--ms-text-2);
 }
 
 .integration-workbench__run-metric--write {
-  color: #1f6f43;
+  color: var(--el-color-success-dark-2);
   font-weight: 600;
 }
 
 .integration-workbench__run-metric--fail {
-  color: #8f1d1d;
+  color: var(--el-color-danger);
   font-weight: 600;
 }
 
@@ -5840,30 +4990,30 @@ watch(selectedTableActionId, (actionId) => {
   letter-spacing: 0.04em;
   padding: 1px 6px;
   border-radius: 4px;
-  background: #e7eef6;
-  color: #24476b;
+  background: var(--el-color-primary-light-9);
+  color: var(--ms-text-1);
 }
 
 .integration-workbench__run-status--succeeded {
-  background: #e3f3e8;
-  color: #1f6f43;
+  background: var(--el-color-success-light-9);
+  color: var(--el-color-success-dark-2);
 }
 
 .integration-workbench__run-status--partial {
-  background: #fdf3e0;
-  color: #8a5a12;
+  background: var(--el-color-warning-light-9);
+  color: var(--el-color-warning-dark-2);
 }
 
 .integration-workbench__run-status--failed,
 .integration-workbench__run-status--cancelled {
-  background: #fbe7e7;
-  color: #8f1d1d;
+  background: var(--el-color-danger-light-9);
+  color: var(--el-color-danger);
 }
 
 .integration-workbench__run-error {
   margin: 0;
   font-size: 12px;
-  color: #8f1d1d;
+  color: var(--el-color-danger);
 }
 
 .integration-workbench__run-summaries {
@@ -5909,13 +5059,13 @@ watch(selectedTableActionId, (actionId) => {
 .integration-workbench__provenance-attrs {
   margin: 2px 0 0;
   font-size: 12px;
-  color: #5a6473;
+  color: var(--ms-text-2);
   word-break: break-word;
 }
 
 .integration-workbench__badge--retryable {
-  background: #e3f3e8;
-  color: #1f6f43;
+  background: var(--el-color-success-light-9);
+  color: var(--el-color-success-dark-2);
 }
 
 .integration-workbench__button--ghost {
@@ -5926,7 +5076,7 @@ watch(selectedTableActionId, (actionId) => {
   border: none;
   background: none;
   padding: 0;
-  color: #357abd;
+  color: var(--ms-color-primary);
   cursor: pointer;
   font: inherit;
   text-decoration: underline;
@@ -5949,16 +5099,15 @@ watch(selectedTableActionId, (actionId) => {
   overflow: auto;
   margin: 12px 0 0;
   padding: 12px;
-  border: 1px solid #d8e0e8;
+  border: 1px solid var(--ms-border-light);
   border-radius: 6px;
-  background: #111827;
-  color: #e5edf7;
+  background: var(--ms-text-1);
+  color: var(--el-color-primary-light-9);
   font-size: 12px;
   line-height: 1.5;
 }
 
 @media (max-width: 900px) {
-  .integration-workbench__header,
   .integration-workbench__panel-head,
   .integration-workbench__preview,
   .integration-workbench__observation,
@@ -5975,7 +5124,6 @@ watch(selectedTableActionId, (actionId) => {
     grid-template-columns: 1fr;
   }
 
-  .integration-workbench__header,
   .integration-workbench__panel-head {
     display: grid;
   }

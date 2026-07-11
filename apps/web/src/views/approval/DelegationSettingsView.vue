@@ -1,26 +1,34 @@
 <template>
-  <div class="delegation-settings">
-    <div class="header">
-      <div>
-        <h2>委托设置</h2>
-        <p class="sub">为审批人配置时间窗内的委托（委托人 → 被委托人）。同一委托人 + 范围目标仅允许一条生效委托。</p>
-      </div>
-      <div class="actions">
-        <el-switch
-          v-model="includeInactive"
-          data-testid="delegation-history-toggle"
-          active-text="显示历史"
-          @change="load"
-        />
-        <el-button type="primary" :disabled="!canManage" data-testid="delegation-new" @click="openCreate">新建委托</el-button>
-      </div>
-    </div>
+  <PageShell width="default">
+    <PageHeader
+      title="委托管理"
+      subtitle="为审批人配置时间窗内的委托（委托人 → 被委托人）。同一委托人 + 范围目标仅允许一条生效委托。"
+    >
+      <template #actions>
+        <div class="actions">
+          <el-switch
+            v-model="includeInactive"
+            data-testid="delegation-history-toggle"
+            active-text="显示历史"
+            @change="load"
+          />
+          <el-button type="primary" :disabled="!canManage" data-testid="delegation-new" @click="openCreate">新建委托</el-button>
+        </div>
+      </template>
+    </PageHeader>
 
     <el-alert v-if="!canManage" type="info" :closable="false" title="需要审批模板管理权限才能配置委托" />
 
     <el-table v-loading="loading" :data="delegations" data-testid="delegation-table" :empty-text="includeInactive ? '暂无委托' : '暂无生效委托'">
-      <el-table-column label="委托人" prop="delegatorUserId" />
-      <el-table-column label="被委托人" prop="delegateeUserId" />
+      <!-- UF-8: no display-name field on DelegationRecord (raw user IDs only) — a name/picker
+           lookup is the flagged B3-04-tail follow-up, out of scope for this presentation-only
+           slice. Honest <code> fallback names these as machine values (design-lock §3.5). -->
+      <el-table-column label="委托人">
+        <template #default="{ row }"><code class="delegation-code">{{ row.delegatorUserId }}</code></template>
+      </el-table-column>
+      <el-table-column label="被委托人">
+        <template #default="{ row }"><code class="delegation-code">{{ row.delegateeUserId }}</code></template>
+      </el-table-column>
       <el-table-column label="范围">
         <template #default="{ row }">{{ row.scope === 'template' ? `指定模板：${row.scopeTemplateId}` : '全部审批' }}</template>
       </el-table-column>
@@ -29,9 +37,7 @@
       </el-table-column>
       <el-table-column label="状态" width="150">
         <template #default="{ row }">
-          <el-tag :type="DELEGATION_STATUS_TAG_TYPE[delegationDisplayStatus(row).status]" size="small">
-            {{ delegationDisplayStatus(row).status }}
-          </el-tag>
+          <StatusTag domain="delegation" :status="delegationDisplayStatus(row).status" force-locale="zh" />
           <span v-if="delegationDisplayStatus(row).expiringSoon" class="expiring-soon-hint">即将到期</span>
         </template>
       </el-table-column>
@@ -47,13 +53,29 @@
       </el-table-column>
     </el-table>
 
+    <!-- B3-04-tail — this ADMIN dialog's 委托人/被委托人 fields now use the same real
+         ApprovalUserPicker MyDelegationView's 被委托人 field got in B3-04 D-2, replacing the raw
+         user-id text inputs. Unlike MyDelegationView (delegatee-only — delegator is forced to the
+         caller server-side), the admin can legitimately pick ANY user as delegator, so both
+         fields are pickable here. `data-testid` is overridden per-field (fallthrough onto the
+         picker's root el-select) since both pickers render in the same dialog and the component's
+         own default testid ("approval-user-picker") would collide between them; the override
+         reuses this dialog's PRE-EXISTING testids so no downstream selector needs to change. -->
     <el-dialog v-model="dialogOpen" title="新建委托" width="480px">
       <el-form label-width="92px">
         <el-form-item label="委托人">
-          <el-input v-model="form.delegatorUserId" placeholder="委托人用户 ID" data-testid="delegation-delegator" />
+          <ApprovalUserPicker
+            data-testid="delegation-delegator"
+            :model-value="form.delegatorUserId || null"
+            @update:model-value="form.delegatorUserId = $event ?? ''"
+          />
         </el-form-item>
         <el-form-item label="被委托人">
-          <el-input v-model="form.delegateeUserId" placeholder="被委托人用户 ID" data-testid="delegation-delegatee" />
+          <ApprovalUserPicker
+            data-testid="delegation-delegatee"
+            :model-value="form.delegateeUserId || null"
+            @update:model-value="form.delegateeUserId = $event ?? ''"
+          />
         </el-form-item>
         <el-form-item label="范围">
           <el-select v-model="form.scope" data-testid="delegation-scope">
@@ -76,13 +98,16 @@
         <el-button type="primary" :loading="saving" data-testid="delegation-submit" @click="submit">保存</el-button>
       </template>
     </el-dialog>
-  </div>
+  </PageShell>
 </template>
 
 <script setup lang="ts">
 import { onMounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import PageShell from '../../components/layout/PageShell.vue'
+import PageHeader from '../../components/layout/PageHeader.vue'
 import { useApprovalPermissions } from '../../approvals/permissions'
+import ApprovalUserPicker from '../../approvals/components/ApprovalUserPicker.vue'
 import {
   listDelegations,
   createDelegation,
@@ -92,7 +117,8 @@ import {
   type DelegationRecord,
   type DelegationForm,
 } from '../../approvals/delegations'
-import { delegationDisplayStatus, DELEGATION_STATUS_TAG_TYPE } from '../../approvals/delegationStatus'
+import { delegationDisplayStatus } from '../../approvals/delegationStatus'
+import StatusTag from '../../components/status/StatusTag.vue'
 
 const { canManageTemplates: canManage } = useApprovalPermissions()
 const delegations = ref<DelegationRecord[]>([])
@@ -175,15 +201,18 @@ onMounted(load)
 </script>
 
 <style scoped>
-.delegation-settings { padding: 16px; }
-.header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 12px; }
-.header h2 { margin: 0; }
 .actions { display: flex; align-items: center; gap: 12px; }
-.sub { color: var(--el-text-color-secondary); font-size: 13px; margin: 4px 0 0; }
 .expiring-soon-hint {
   display: block;
   margin-top: 2px;
   font-size: 12px;
-  color: var(--el-color-warning, #e6a23c);
+  color: var(--el-color-warning);
+}
+.delegation-code {
+  font-family: monospace;
+  font-size: 12px;
+  background: var(--ms-bg-page);
+  padding: 1px 4px;
+  border-radius: var(--ms-radius-sm);
 }
 </style>

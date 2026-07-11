@@ -5,7 +5,7 @@ Discipline: each phase is a SEPARATE opt-in. 🔒 = gated (needs explicit go); �
 predecessor lands; ✅ = shipped. Nothing past D-0 starts without the design-lock RATIFIED + a per-phase go.
 
 ## D-0 — design-lock
-- ⬜ Ratify scope / principles / phasing (this doc + the design-lock). **Awaiting owner ratification.**
+- ✅ Ratify scope / principles / phasing — **ratified-in-effect**: D-1..D-6 全部按 per-phase go 实建落地（本文件下方各阶段 ✅ 即证）；D-0 勾选栏漏翻，2026-07-07 对账补翻。
 
 ## D-1 — visual canvas render  ✅ (bespoke SVG/HTML; library spike decided = bespoke for testability)
 - ✅ `graphLayout.ts` longest-path layered layout (pure) → positioned node boxes + SVG edges, topology

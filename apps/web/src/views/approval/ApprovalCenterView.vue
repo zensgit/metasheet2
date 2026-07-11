@@ -1,53 +1,87 @@
 <template>
-  <section class="approval-center">
-    <header class="approval-center__header">
-      <h1>审批中心</h1>
-      <div class="approval-center__toolbar">
-        <el-input
-          v-model="searchText"
-          placeholder="搜索审批编号或标题"
-          clearable
-          style="width: 240px"
-          @clear="handleSearch"
-          @keyup.enter="handleSearch"
-        >
-          <template #prefix>
-            <el-icon><Search /></el-icon>
-          </template>
-        </el-input>
-        <el-select
-          v-model="statusFilter"
-          placeholder="状态筛选"
-          clearable
-          style="width: 140px; margin-left: 12px"
-          @change="handleSearch"
-        >
-          <el-option label="待处理" value="pending" />
-          <el-option label="已通过" value="approved" />
-          <el-option label="已驳回" value="rejected" />
-          <el-option label="已撤回" value="revoked" />
-        </el-select>
-        <el-select
-          v-model="sourceSystemFilter"
-          placeholder="来源系统"
-          style="width: 140px; margin-left: 12px"
-          data-testid="approval-source-filter"
-          @change="handleSourceSystemChange"
-        >
-          <el-option label="全部来源" value="all" />
-          <el-option label="平台审批" value="platform" />
-          <el-option label="PLM 审批" value="plm" />
-        </el-select>
-        <el-button
-          v-if="canWrite"
-          type="primary"
-          style="margin-left: 12px"
-          @click="router.push({ name: 'approval-template-list' })"
-        >
-          发起审批
-        </el-button>
-      </div>
-    </header>
+  <PageShell width="default">
+    <PageHeader class="approval-center__header" title="审批中心">
+      <template #actions>
+        <div class="approval-center__toolbar">
+          <el-input
+            v-model="searchText"
+            placeholder="搜索审批编号或标题"
+            clearable
+            class="approval-center__toolbar-search"
+            @clear="handleSearch"
+            @keyup.enter="handleSearch"
+          >
+            <template #prefix>
+              <el-icon><Search /></el-icon>
+            </template>
+          </el-input>
+          <el-select
+            v-model="statusFilter"
+            placeholder="状态筛选"
+            clearable
+            class="approval-center__toolbar-select"
+            @change="handleSearch"
+          >
+            <el-option label="待处理" value="pending" />
+            <el-option label="已通过" value="approved" />
+            <el-option label="已驳回" value="rejected" />
+            <el-option label="已撤回" value="revoked" />
+          </el-select>
+          <el-select
+            v-model="sourceSystemFilter"
+            placeholder="来源系统"
+            class="approval-center__toolbar-select"
+            data-testid="approval-source-filter"
+            @change="handleSourceSystemChange"
+          >
+            <el-option label="全部来源" value="all" />
+            <el-option label="平台审批" value="platform" />
+            <el-option label="PLM 审批" value="plm" />
+          </el-select>
+          <!-- B3-03 (模板/时间筛选): additive filters composing with the existing status/source
+               filters above — templateId + a created-at window, mirroring the backend's own
+               GET /api/approvals query params. Also the landing point for the metrics dashboard's
+               看板钻取 deep links (see ApprovalMetricsView.vue), which pre-fill these two on mount
+               via the route query (see `applyDeepLinkFilters` below). -->
+          <el-select
+            v-model="templateFilter"
+            placeholder="模板筛选"
+            clearable
+            filterable
+            class="approval-center__toolbar-select approval-center__toolbar-select--wide"
+            data-testid="approval-template-filter"
+            @change="handleSearch"
+          >
+            <el-option
+              v-for="tpl in templateOptions"
+              :key="tpl.id"
+              :label="tpl.name"
+              :value="tpl.id"
+            />
+          </el-select>
+          <el-date-picker
+            v-model="createdRange"
+            type="daterange"
+            unlink-panels
+            range-separator="至"
+            start-placeholder="发起开始日期"
+            end-placeholder="发起结束日期"
+            value-format="YYYY-MM-DD"
+            class="approval-center__toolbar-daterange"
+            data-testid="approval-created-range-filter"
+            @change="handleSearch"
+          />
+          <el-button
+            v-if="canWrite"
+            type="primary"
+            class="approval-center__toolbar-button"
+            @click="router.push({ name: 'approval-template-list' })"
+          >
+            发起审批
+          </el-button>
+        </div>
+      </template>
+    </PageHeader>
 
     <el-alert
       v-if="store.error"
@@ -88,6 +122,22 @@
             </el-tooltip>
           </span>
         </template>
+        <!-- G-B2-11 (新待办到达刷新 pill): the badge above can go stale relative to the list below
+             it (badge 5 / list 3) once new pending items land server-side after the list was last
+             loaded. We deliberately do NOT auto-refresh the list when that happens — a silent
+             reload would clear the operator's in-progress 批量通过/批量驳回 selection with no
+             warning. Instead this pill only appears here (待我处理 only) once `newTodoPill.visible`
+             flips true, and reloads solely on the operator's own click. See
+             src/approvals/newTodoPill.ts for the count-vs-loaded-rows pitfall this avoids. -->
+        <button
+          v-if="newTodoPill.visible"
+          type="button"
+          class="approval-center__new-todo-pill"
+          data-testid="approval-new-todo-pill"
+          @click="handleNewTodoPillClick"
+        >
+          {{ newTodoPill.delta }} 条新待办 · 点击刷新
+        </button>
         <!-- Wave 2 WP3 slice 2 — bulk 全部标记已读. Disabled until the server
              reports at least one unread row for the current filter so clicking
              never issues a no-op round-trip.
@@ -155,117 +205,61 @@
           :template-schemas="templateSchemas"
           @select="handleRowClick"
         />
-        <el-table
+        <div v-else-if="isFirstPaintLoading(store.pendingApprovals)" class="approval-center__skeleton" data-testid="pending-skeleton">
+          <el-skeleton :rows="5" animated />
+        </div>
+        <ApprovalCenterTable
           v-else
           ref="pendingTableRef"
-          v-loading="store.loading"
-          :data="store.pendingApprovals"
-          style="width: 100%"
-          max-height="560"
-          stripe
-          highlight-current-row
-          :row-key="rowKey"
+          :rows="store.pendingApprovals"
+          :loading="store.loading"
+          :empty-text="searchText ? '未找到匹配的审批' : '暂无待处理审批'"
+          :summary-line-for="summaryLineFor"
+          show-selection
+          :selectable="isRowBatchSelectable"
+          show-wait-column
+          show-unread-dot
+          :actions-width="150"
           @row-click="handleRowClick"
           @selection-change="handlePendingSelectionChange"
         >
-          <el-table-column
-            type="selection"
-            width="44"
-            :selectable="isRowBatchSelectable"
-          />
-          <el-table-column prop="requestNo" label="审批编号" width="180" />
-          <el-table-column label="标题" min-width="200">
-            <!-- B2-01: key-field summary — a muted second line under the title so common items
-                 are decidable without opening (top 2-3 non-attachment/non-detail leaf fields from
-                 the LIVE template schema; see useApprovalListFieldSummary.ts for the live-label
-                 drift caveat). Absent for rows with no templateId or no cached schema yet. -->
-            <template #default="{ row }">
-              {{ row.title }}
-              <div
-                v-if="summaryLineFor(row)"
-                class="approval-center__row-summary"
-                :title="summaryLineFor(row)"
-              >
-                {{ summaryLineFor(row) }}
-              </div>
-            </template>
-          </el-table-column>
-          <el-table-column label="发起人" width="120">
-            <template #default="{ row }">
-              {{ row.requester?.name ?? '-' }}
-            </template>
-          </el-table-column>
-          <el-table-column label="状态" width="100">
-            <template #default="{ row }">
-              <el-tag :type="statusTagType(row.status)" size="small" :data-status="row.status">
-                {{ statusLabel(row.status) }}
-              </el-tag>
-            </template>
-          </el-table-column>
-          <el-table-column label="发起时间" width="180">
-            <template #default="{ row }">
-              {{ formatDate(row.createdAt) }}
-            </template>
-          </el-table-column>
-          <!-- B1-03 (part 2): 已等待 aging — glanceable severity (>3d warn / >7d urgent) so a
-               reviewer can triage the oldest requests first. The 第 X/Y 步 sub-line only renders
-               when both numbers are present (mirrors ApprovalDetailView's "进度" meta item). -->
-          <el-table-column label="已等待" width="140">
-            <template #default="{ row }">
-              <span :class="waitClass(row.createdAt)">{{ formatRelativeWait(row.createdAt) }}</span>
-              <div
-                v-if="row.currentStep != null && row.totalSteps != null"
-                class="approval-center__wait-progress"
-              >
-                第 {{ row.currentStep }}/{{ row.totalSteps }} 步
-              </div>
-            </template>
-          </el-table-column>
           <!-- B1-03 (part 1): inline approve/reject hot path — only for platform-native pending
                rows (reuses `isRowBatchSelectable`; attendance-bridged rows keep routing to the
                attendance module via row-click and never show these). @click.stop on every
                reference so opening the popconfirm / reject dialog never also navigates the row. -->
-          <el-table-column label="操作" width="150" fixed="right">
-            <template #default="{ row }">
-              <template v-if="isRowBatchSelectable(row)">
-                <el-popconfirm
-                  :title="`确认通过「${row.title}」？`"
-                  confirm-button-text="确认"
-                  cancel-button-text="取消"
-                  @confirm="handleInlineApprove(row)"
-                >
-                  <template #reference>
-                    <el-button
-                      type="primary"
-                      link
-                      :loading="inlineApprovingId === row.id"
-                      :disabled="inlineApprovingId !== null"
-                      :data-testid="`approval-row-approve-${row.id}`"
-                      @click.stop
-                    >
-                      通过
-                    </el-button>
-                  </template>
-                </el-popconfirm>
-                <el-button
-                  type="danger"
-                  link
-                  :disabled="inlineApprovingId !== null"
-                  :data-testid="`approval-row-reject-${row.id}`"
-                  @click.stop="openRowReject(row)"
-                >
-                  驳回
-                </el-button>
-              </template>
+          <template #actions="{ row }">
+            <template v-if="isRowBatchSelectable(row)">
+              <el-popconfirm
+                :title="`确认通过「${row.title}」？`"
+                confirm-button-text="确认"
+                cancel-button-text="取消"
+                @confirm="handleInlineApprove(row)"
+              >
+                <template #reference>
+                  <el-button
+                    type="primary"
+                    link
+                    :loading="inlineApprovingId === row.id"
+                    :disabled="inlineApprovingId !== null"
+                    :data-testid="`approval-row-approve-${row.id}`"
+                    @click.stop
+                  >
+                    通过
+                  </el-button>
+                </template>
+              </el-popconfirm>
+              <el-button
+                type="danger"
+                link
+                :disabled="inlineApprovingId !== null"
+                :data-testid="`approval-row-reject-${row.id}`"
+                @click.stop="openRowReject(row)"
+              >
+                驳回
+              </el-button>
             </template>
-          </el-table-column>
-          <template #empty>
-            <el-empty
-              :description="searchText ? '未找到匹配的审批' : '暂无待处理审批'"
-              :image-size="100"
-            />
           </template>
-        </el-table>
+        </ApprovalCenterTable>
         <el-pagination
           class="approval-center__pagination"
           background
@@ -286,79 +280,40 @@
           :template-schemas="templateSchemas"
           @select="handleRowClick"
         />
-        <el-table
+        <div v-else-if="isFirstPaintLoading(store.myApprovals)" class="approval-center__skeleton" data-testid="mine-skeleton">
+          <el-skeleton :rows="5" animated />
+        </div>
+        <ApprovalCenterTable
           v-else
-          v-loading="store.loading"
-          :data="store.myApprovals"
-          style="width: 100%"
-          max-height="560"
-          stripe
-          highlight-current-row
+          :rows="store.myApprovals"
+          :loading="store.loading"
+          :empty-text="searchText ? '未找到匹配的审批' : '暂无我发起的审批'"
+          :summary-line-for="summaryLineFor"
+          :actions-width="170"
           @row-click="handleRowClick"
         >
-          <el-table-column prop="requestNo" label="审批编号" width="180" />
-          <el-table-column label="标题" min-width="200">
-            <!-- B2-01: key-field summary — a muted second line under the title so common items
-                 are decidable without opening (top 2-3 non-attachment/non-detail leaf fields from
-                 the LIVE template schema; see useApprovalListFieldSummary.ts for the live-label
-                 drift caveat). Absent for rows with no templateId or no cached schema yet. -->
-            <template #default="{ row }">
-              {{ row.title }}
-              <div
-                v-if="summaryLineFor(row)"
-                class="approval-center__row-summary"
-                :title="summaryLineFor(row)"
-              >
-                {{ summaryLineFor(row) }}
-              </div>
-            </template>
-          </el-table-column>
-          <el-table-column label="发起人" width="120">
-            <template #default="{ row }">
-              {{ row.requester?.name ?? '-' }}
-            </template>
-          </el-table-column>
-          <el-table-column label="状态" width="100">
-            <template #default="{ row }">
-              <el-tag :type="statusTagType(row.status)" size="small" :data-status="row.status">
-                {{ statusLabel(row.status) }}
-              </el-tag>
-            </template>
-          </el-table-column>
-          <el-table-column label="发起时间" width="180">
-            <template #default="{ row }">
-              {{ formatDate(row.createdAt) }}
-            </template>
-          </el-table-column>
           <!-- 催办: a requester nudge to the current approver, only meaningful while the instance is
                still pending. Server-side rate-limited (1/instance/user/hour); 429 surfaces gracefully.
                B1-03: 已等待 sits right next to it — the longer a request has waited, the more it
                motivates the requester to actually click 催办. -->
-          <el-table-column label="操作" width="170" fixed="right">
-            <template #default="{ row }">
-              <span v-if="row.status === 'pending'" :class="waitClass(row.createdAt)">
-                已等待 {{ formatRelativeWait(row.createdAt) }}
-              </span>
-              <el-button
-                v-if="row.status === 'pending'"
-                type="primary"
-                link
-                :loading="remindingId === row.id"
-                :disabled="remindingId !== null"
-                :data-testid="`approval-urge-${row.id}`"
-                @click.stop="handleUrge(row)"
-              >
-                催办
-              </el-button>
-            </template>
-          </el-table-column>
-          <template #empty>
-            <el-empty
-              :description="searchText ? '未找到匹配的审批' : '暂无我发起的审批'"
-              :image-size="100"
-            />
+          <template #actions="{ row }">
+            <span v-if="row.status === 'pending'" :class="waitClass(row.createdAt)">
+              已等待 {{ formatRelativeWait(row.createdAt) }}
+            </span>
+            <el-button
+              v-if="row.status === 'pending'"
+              type="primary"
+              link
+              :loading="urgeState(row.id).loading"
+              :disabled="urgeState(row.id).disabled"
+              :title="urgeState(row.id).title"
+              :data-testid="`approval-urge-${row.id}`"
+              @click.stop="handleUrge(row)"
+            >
+              {{ urgeState(row.id).label }}
+            </el-button>
           </template>
-        </el-table>
+        </ApprovalCenterTable>
         <el-pagination
           class="approval-center__pagination"
           background
@@ -379,57 +334,17 @@
           :template-schemas="templateSchemas"
           @select="handleRowClick"
         />
-        <el-table
+        <div v-else-if="isFirstPaintLoading(store.ccApprovals)" class="approval-center__skeleton" data-testid="cc-skeleton">
+          <el-skeleton :rows="5" animated />
+        </div>
+        <ApprovalCenterTable
           v-else
-          v-loading="store.loading"
-          :data="store.ccApprovals"
-          style="width: 100%"
-          max-height="560"
-          stripe
-          highlight-current-row
+          :rows="store.ccApprovals"
+          :loading="store.loading"
+          :empty-text="searchText ? '未找到匹配的审批' : '暂无抄送我的审批'"
+          :summary-line-for="summaryLineFor"
           @row-click="handleRowClick"
-        >
-          <el-table-column prop="requestNo" label="审批编号" width="180" />
-          <el-table-column label="标题" min-width="200">
-            <!-- B2-01: key-field summary — a muted second line under the title so common items
-                 are decidable without opening (top 2-3 non-attachment/non-detail leaf fields from
-                 the LIVE template schema; see useApprovalListFieldSummary.ts for the live-label
-                 drift caveat). Absent for rows with no templateId or no cached schema yet. -->
-            <template #default="{ row }">
-              {{ row.title }}
-              <div
-                v-if="summaryLineFor(row)"
-                class="approval-center__row-summary"
-                :title="summaryLineFor(row)"
-              >
-                {{ summaryLineFor(row) }}
-              </div>
-            </template>
-          </el-table-column>
-          <el-table-column label="发起人" width="120">
-            <template #default="{ row }">
-              {{ row.requester?.name ?? '-' }}
-            </template>
-          </el-table-column>
-          <el-table-column label="状态" width="100">
-            <template #default="{ row }">
-              <el-tag :type="statusTagType(row.status)" size="small" :data-status="row.status">
-                {{ statusLabel(row.status) }}
-              </el-tag>
-            </template>
-          </el-table-column>
-          <el-table-column label="发起时间" width="180">
-            <template #default="{ row }">
-              {{ formatDate(row.createdAt) }}
-            </template>
-          </el-table-column>
-          <template #empty>
-            <el-empty
-              :description="searchText ? '未找到匹配的审批' : '暂无抄送我的审批'"
-              :image-size="100"
-            />
-          </template>
-        </el-table>
+        />
         <el-pagination
           class="approval-center__pagination"
           background
@@ -450,62 +365,57 @@
           :template-schemas="templateSchemas"
           @select="handleRowClick"
         />
-        <el-table
+        <div v-else-if="isFirstPaintLoading(store.completedApprovals)" class="approval-center__skeleton" data-testid="completed-skeleton">
+          <el-skeleton :rows="5" animated />
+        </div>
+        <ApprovalCenterTable
           v-else
-          v-loading="store.loading"
-          :data="store.completedApprovals"
-          style="width: 100%"
-          max-height="560"
-          stripe
-          highlight-current-row
+          :rows="store.completedApprovals"
+          :loading="store.loading"
+          :empty-text="searchText ? '未找到匹配的审批' : '暂无已完成审批'"
+          :summary-line-for="summaryLineFor"
           @row-click="handleRowClick"
-        >
-          <el-table-column prop="requestNo" label="审批编号" width="180" />
-          <el-table-column label="标题" min-width="200">
-            <!-- B2-01: key-field summary — a muted second line under the title so common items
-                 are decidable without opening (top 2-3 non-attachment/non-detail leaf fields from
-                 the LIVE template schema; see useApprovalListFieldSummary.ts for the live-label
-                 drift caveat). Absent for rows with no templateId or no cached schema yet. -->
-            <template #default="{ row }">
-              {{ row.title }}
-              <div
-                v-if="summaryLineFor(row)"
-                class="approval-center__row-summary"
-                :title="summaryLineFor(row)"
-              >
-                {{ summaryLineFor(row) }}
-              </div>
-            </template>
-          </el-table-column>
-          <el-table-column label="发起人" width="120">
-            <template #default="{ row }">
-              {{ row.requester?.name ?? '-' }}
-            </template>
-          </el-table-column>
-          <el-table-column label="状态" width="100">
-            <template #default="{ row }">
-              <el-tag :type="statusTagType(row.status)" size="small" :data-status="row.status">
-                {{ statusLabel(row.status) }}
-              </el-tag>
-            </template>
-          </el-table-column>
-          <el-table-column label="发起时间" width="180">
-            <template #default="{ row }">
-              {{ formatDate(row.createdAt) }}
-            </template>
-          </el-table-column>
-          <template #empty>
-            <el-empty
-              :description="searchText ? '未找到匹配的审批' : '暂无已完成审批'"
-              :image-size="100"
-            />
-          </template>
-        </el-table>
+        />
         <el-pagination
           class="approval-center__pagination"
           background
           layout="total, prev, pager, next"
           :total="store.totalCompleted"
+          :current-page="currentPage"
+          :page-size="pageSize"
+          @update:current-page="handlePageChange"
+        />
+      </el-tab-pane>
+
+      <!-- B3-01 (我已处理): every instance the actor recorded an ANY-status action on — a reverse
+           lookup, distinct from 已完成 (which is scoped to non-pending instances only). Shares the
+           same read-only table shape as 抄送我的/已完成 (no selection/wait/actions column: the
+           actor already acted, there is nothing left to do here). -->
+      <el-tab-pane label="我已处理" name="processed">
+        <ApprovalMobileList
+          v-if="isMobileLayout"
+          :approvals="store.processedApprovals"
+          :loading="store.loading"
+          :empty-text="mobileEmptyText.processed"
+          :template-schemas="templateSchemas"
+          @select="handleRowClick"
+        />
+        <div v-else-if="isFirstPaintLoading(store.processedApprovals)" class="approval-center__skeleton" data-testid="processed-skeleton">
+          <el-skeleton :rows="5" animated />
+        </div>
+        <ApprovalCenterTable
+          v-else
+          :rows="store.processedApprovals"
+          :loading="store.loading"
+          :empty-text="searchText ? '未找到匹配的审批' : '暂无已处理审批'"
+          :summary-line-for="summaryLineFor"
+          @row-click="handleRowClick"
+        />
+        <el-pagination
+          class="approval-center__pagination"
+          background
+          layout="total, prev, pager, next"
+          :total="store.totalProcessed"
           :current-page="currentPage"
           :page-size="pageSize"
           @update:current-page="handlePageChange"
@@ -622,28 +532,34 @@
         </el-button>
       </template>
     </el-dialog>
-  </section>
+  </PageShell>
 </template>
 
 <script setup lang="ts">
 import { ref, computed, onMounted, watch } from 'vue'
-import { useRouter } from 'vue-router'
+import { useRouter, useRoute } from 'vue-router'
 import { Search } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 import type { UnifiedApprovalDTO, ApprovalStatus } from '../../types/approval'
 import { useApprovalStore } from '../../approvals/store'
 import { useApprovalPermissions } from '../../approvals/permissions'
-import { dispatchAction, getPendingCount, markAllApprovalsRead, remindApproval } from '../../approvals/api'
+import { dispatchAction, getPendingCount, markAllApprovalsRead, remindApproval, listTemplates } from '../../approvals/api'
+import { urgeButtonState } from '../../approvals/urgeButtonState'
 import { runApprovalBatchAction, type ApprovalBatchActionResult } from '../../approvals/useApprovalBatchActions'
 import { useApprovalCountsRealtime, type ApprovalCountsUpdatedPayload } from '../../approvals/useApprovalCountsRealtime'
 import { useApprovalListFieldSummary } from '../../approvals/useApprovalListFieldSummary'
+import { newTodoPillState } from '../../approvals/newTodoPill'
 import { useFeatureFlags } from '../../stores/featureFlags'
 import { useMobileViewport } from '../../composables/useMobileViewport'
 import { useLocale } from '../../composables/useLocale'
 import { formatRelativeWait, waitSeverity } from '../../approvals/relativeWait'
 import ApprovalMobileList from './ApprovalMobileList.vue'
+import ApprovalCenterTable from './ApprovalCenterTable.vue'
+import PageShell from '../../components/layout/PageShell.vue'
+import PageHeader from '../../components/layout/PageHeader.vue'
 
 const router = useRouter()
+const route = useRoute()
 const store = useApprovalStore()
 const { canWrite } = useApprovalPermissions()
 
@@ -658,6 +574,7 @@ const allVisibleApprovals = computed<UnifiedApprovalDTO[]>(() => [
   ...store.myApprovals,
   ...store.ccApprovals,
   ...store.completedApprovals,
+  ...store.processedApprovals,
 ])
 // `immediate: true` covers the case where a tab's data is already populated at setup time (e.g.
 // a fresh mount whose store was pre-loaded); every subsequent load (tab switch/page/search/filter)
@@ -688,6 +605,7 @@ const mobileEmptyText = computed(() => {
       mine: searchText.value ? '未找到匹配的审批' : '暂无我发起的审批',
       cc: searchText.value ? '未找到匹配的审批' : '暂无抄送我的审批',
       completed: searchText.value ? '未找到匹配的审批' : '暂无已完成审批',
+      processed: searchText.value ? '未找到匹配的审批' : '暂无已处理审批',
     }
   }
   return {
@@ -695,6 +613,7 @@ const mobileEmptyText = computed(() => {
     mine: searchText.value ? 'No matching approvals found' : 'No approvals initiated by you',
     cc: searchText.value ? 'No matching approvals found' : 'No approvals cc’d to you',
     completed: searchText.value ? 'No matching approvals found' : 'No completed approvals',
+    processed: searchText.value ? 'No matching approvals found' : 'No approvals you have processed',
   }
 })
 
@@ -705,22 +624,36 @@ const batchRunning = ref(false)
 const batchAction = ref<'approve' | 'reject' | null>(null)
 const batchRejectDialogVisible = ref(false)
 const batchRejectComment = ref('')
-const remindingId = ref<string | null>(null)
+// G-B2-12: 催办 is gated PER ROW (a nudge on one request must not freeze every other row's button).
+// `remindingIds` = this row's own request is in flight; `remindedIds` = session memory of rows
+// already nudged. Both are reactive Sets; see urgeButtonState for the precedence + why the memory
+// is deliberately not persisted.
+const remindingIds = ref<Set<string>>(new Set())
+const remindedIds = ref<Set<string>>(new Set())
 
-// B1-03: 已等待 aging severity class — shared by the pending table's column and the 我发起的
-// tab's inline hint next to 催办 (same warn/urgent palette everywhere it appears).
-function waitClass(createdAt: string): string {
-  return `approval-center__wait approval-center__wait--${waitSeverity(createdAt)}`
+function urgeState(rowId: string) {
+  return urgeButtonState(rowId, remindingIds.value, remindedIds.value)
 }
 
-function rowKey(row: UnifiedApprovalDTO): string {
-  return row.id
+// B1-03: 已等待 aging severity class — the 我发起的 tab's inline hint next to 催办 (same
+// warn/urgent palette as ApprovalCenterTable's own internal 已等待 column, kept separate since
+// this one lives in this view's `actions` slot content rather than the shared table body).
+function waitClass(createdAt: string): string {
+  return `approval-center__wait approval-center__wait--${waitSeverity(createdAt)}`
 }
 
 // Only platform-native pending rows are batch-actionable here; attendance-backed approvals live in the
 // attendance module (their row-click routes away), so excluding them keeps the batch honest.
 function isRowBatchSelectable(row: UnifiedApprovalDTO): boolean {
   return row.status === 'pending' && !isAttendanceApproval(row)
+}
+
+// UF-8 (design-lock §3.6 "状态 = 首屏骨架屏"): first paint only — `store.loading` is a single
+// shared flag across all 4 tabs, so this checks the ACTIVE tab's own row list. Once any data has
+// arrived (or the tab was already loaded), a subsequent refresh keeps the existing `v-loading`
+// spinner-over-table behavior (ApprovalCenterTable), never re-showing the skeleton.
+function isFirstPaintLoading(rows: UnifiedApprovalDTO[]): boolean {
+  return store.loading && rows.length === 0
 }
 
 function handlePendingSelectionChange(rows: UnifiedApprovalDTO[]): void {
@@ -792,7 +725,6 @@ async function dispatchBatchAndHandleResult(
   }
   clearPendingSelection()
   loadCurrentTab()
-  void refreshPendingBadgeCount()
 }
 
 async function runBatch(action: 'approve' | 'reject', comment: string): Promise<void> {
@@ -855,8 +787,10 @@ async function handleBatchReject(): Promise<void> {
 
 // ── B1-03 (part 1): inline approve/reject hot path on the pending list ─────
 // `inlineApprovingId` gates every row's approve button (not just the clicked row) while a
-// request is in flight — mirrors the existing `remindingId`-gates-every-催办-button convention
-// below, so a slow request can't be raced by mashing a different row.
+// request is in flight, so a slow request can't be raced by mashing a different row. This global
+// gate is deliberate HERE and NOT shared with 催办 (G-B2-12): approve/reject MUTATES an approval,
+// so racing two rows is a correctness hazard, whereas 催办 is a server-rate-limited nudge and is
+// gated per row.
 const inlineApprovingId = ref<string | null>(null)
 
 async function handleInlineApprove(row: UnifiedApprovalDTO): Promise<void> {
@@ -866,7 +800,6 @@ async function handleInlineApprove(row: UnifiedApprovalDTO): Promise<void> {
     await dispatchAction(row.id, { action: 'approve' })
     ElMessage.success('审批已通过')
     loadCurrentTab()
-    void refreshPendingBadgeCount()
   } catch (error) {
     ElMessage.error(error instanceof Error && error.message ? error.message : '操作失败，请重试')
   } finally {
@@ -905,7 +838,6 @@ async function submitRowReject(): Promise<void> {
     ElMessage.success('审批已驳回')
     rowRejectDialogVisible.value = false
     loadCurrentTab()
-    void refreshPendingBadgeCount()
   } catch (error) {
     // Mirrors B1-04's dialog-scoped inline error: keep the dialog open with the server's own
     // reason instead of a toast, so the typed comment is never lost on a retry-in-place.
@@ -916,13 +848,18 @@ async function submitRowReject(): Promise<void> {
 }
 
 async function handleUrge(row: UnifiedApprovalDTO): Promise<void> {
-  if (remindingId.value) return
-  remindingId.value = row.id
+  // Only this row's own state gates it — other rows may be nudged concurrently.
+  if (remindingIds.value.has(row.id) || remindedIds.value.has(row.id)) return
+  remindingIds.value.add(row.id)
   try {
     const result = await remindApproval(row.id)
     if (result.ok) {
+      remindedIds.value.add(row.id)
       ElMessage.success('已发送催办提醒')
     } else if (result.status === 429) {
+      // 429 means the server's hourly window already holds a nudge for this instance+user, so the
+      // row genuinely IS 已催办 — recording it stops the user re-clicking into the same rejection.
+      remindedIds.value.add(row.id)
       const retry = result.error.retryAfterSeconds
       ElMessage.warning(retry ? `催办过于频繁，请 ${Math.ceil(retry / 60)} 分钟后再试` : '催办过于频繁，请稍后再试')
     } else {
@@ -931,7 +868,7 @@ async function handleUrge(row: UnifiedApprovalDTO): Promise<void> {
   } catch {
     ElMessage.error('催办失败，请重试')
   } finally {
-    remindingId.value = null
+    remindingIds.value.delete(row.id)
   }
 }
 
@@ -946,10 +883,16 @@ function applyPendingBadgeCount(count: number, unreadCount: number): void {
   pendingTotalCount.value = Number.isFinite(count) ? count : 0
 }
 
-async function refreshPendingBadgeCount(): Promise<void> {
+// G-B2-11: `resnapshot` ties a fresh server count to "the list was just (re)loaded" — see
+// `pendingCountAtLoad` below. Only call sites that ALSO reload the pending list (or are the very
+// first load) pass this; a bare badge poll must never move the baseline the pill compares against.
+async function refreshPendingBadgeCount(options?: { resnapshot?: boolean }): Promise<void> {
   try {
     const result = await getPendingCount(sourceSystemFilter.value)
     applyPendingBadgeCount(result.count, result.unreadCount)
+    if (options?.resnapshot) {
+      pendingCountAtLoad.value = result.count
+    }
   } catch {
     // Badge is decorative — do not surface errors here; the tab itself
     // surfaces list-load failures via `store.error`.
@@ -960,12 +903,40 @@ async function refreshPendingBadgeCount(): Promise<void> {
 
 function handleRealtimeCountsUpdated(payload: ApprovalCountsUpdatedPayload): void {
   const scopedCounts = payload.countsBySourceSystem?.[sourceSystemFilter.value] ?? payload
+  // Deliberately NOT resnapshotted: a realtime push updates the live count (and can therefore
+  // surface the G-B2-11 pill below) without ever moving `pendingCountAtLoad` — the whole point of
+  // the pill is to notice this push happened while the list itself sat unrefreshed.
   applyPendingBadgeCount(scopedCounts.count, scopedCounts.unreadCount)
 }
 
 useApprovalCountsRealtime({
   onCountsUpdated: handleRealtimeCountsUpdated,
 })
+
+// G-B2-11 (新待办到达刷新 pill) — see src/approvals/newTodoPill.ts for the full design rationale.
+// `pendingCountAtLoad` is a snapshot of the server's pending `count`, taken at the moment the
+// pending list was last explicitly (re)loaded (mount / tab switch / source-system change / batch
+// action reload / the pill's own click). `null` until the very first load completes, so the pill
+// can never render before there is a baseline to compare against.
+//
+// This is intentionally compared against `pendingTotalCount` (the server's authoritative total),
+// NEVER against `store.pendingApprovals.length` (rows loaded on the current page) — the list is
+// paged, so "server total > rows on this page" would be true forever and misreport ordinary paging
+// as new arrivals.
+const pendingCountAtLoad = ref<number | null>(null)
+const newTodoPill = computed(() => newTodoPillState({
+  activeTab: activeTab.value,
+  pendingCountAtLoad: pendingCountAtLoad.value,
+  currentPendingCount: pendingTotalCount.value,
+}))
+
+// Deliberately NOT an automatic refresh: silently reloading the list out from under the operator
+// would clear whatever rows they currently have checked in the 批量通过/批量驳回 multi-select
+// (`selectedPending`) with no explanation. The pill only reloads when the operator clicks it.
+function handleNewTodoPillClick(): void {
+  clearPendingSelection()
+  loadCurrentTab()
+}
 
 // Wave 2 WP3 slice 2 — bulk 全部标记已读. Honours the current sourceSystem tab
 // so the button's effect matches the tooltip the user is looking at.
@@ -986,45 +957,35 @@ async function handleMarkAllRead(): Promise<void> {
   }
 }
 
-const activeTab = ref<'pending' | 'mine' | 'cc' | 'completed'>('pending')
+const activeTab = ref<'pending' | 'mine' | 'cc' | 'completed' | 'processed'>('pending')
 const searchText = ref('')
 const statusFilter = ref<ApprovalStatus | ''>('')
 // Wave 2 WP2: source filter driving the `sourceSystem` query param on /api/approvals.
 // Default 'all' surfaces the unified feed; switching narrows to platform or PLM-mirrored rows.
 const sourceSystemFilter = ref<'all' | 'platform' | 'plm'>('all')
+// B3-03 (模板/时间筛选): `templateId` + a created-at window, additive alongside the filters above.
+const templateFilter = ref('')
+const templateOptions = ref<Array<{ id: string; name: string }>>([])
+const createdRange = ref<[string, string] | null>(null)
 const currentPage = ref(1)
 const pageSize = ref(10)
 const attendanceRequestsSection = 'attendance-overview-requests'
 
+// B3-03: `createdRange` holds plain `YYYY-MM-DD` day boundaries from the picker (or a deep link);
+// widen to inclusive day-start/day-end ISO timestamps for the server, the same convention
+// ApprovalMetricsView's own since/until range already uses.
+const createdFromQuery = computed(() => (createdRange.value?.[0] ? `${createdRange.value[0]}T00:00:00Z` : undefined))
+const createdToQuery = computed(() => (createdRange.value?.[1] ? `${createdRange.value[1]}T23:59:59Z` : undefined))
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-function statusTagType(status: string) {
-  const map: Record<string, string> = {
-    pending: 'warning',
-    approved: 'success',
-    rejected: 'danger',
-    revoked: 'info',
-    cancelled: 'info',
-  }
-  return map[status] ?? ''
-}
-
-function statusLabel(status: string) {
-  const map: Record<string, string> = {
-    pending: '待处理',
-    approved: '已通过',
-    rejected: '已驳回',
-    revoked: '已撤回',
-    cancelled: '已取消',
-  }
-  return map[status] ?? status
-}
-
-function formatDate(dateStr: string) {
-  if (!dateStr) return '-'
-  return new Date(dateStr).toLocaleString('zh-CN')
-}
+// UF-3: status coloring/labels now come from <StatusTag domain="approvalInstance"> (see
+// utils/statusDomains.ts) — the local statusTagType/statusLabel maps this file used to declare
+// were one of six independent status-color implementations audited in the UI foundation
+// design-lock and are removed here.
+// UF-5: the per-row `发起时间` date formatter moved into ApprovalCenterTable.vue along with the
+// table markup that was its only caller.
 
 // ---------------------------------------------------------------------------
 // Handlers
@@ -1036,22 +997,29 @@ function loadCurrentTab() {
     page: currentPage.value,
     pageSize: pageSize.value,
     sourceSystem: sourceSystemFilter.value,
+    templateId: templateFilter.value || undefined,
+    createdFrom: createdFromQuery.value,
+    createdTo: createdToQuery.value,
   }
   switch (activeTab.value) {
     case 'pending': store.loadPending(query); break
     case 'mine': store.loadMine(query); break
     case 'cc': store.loadCc(query); break
     case 'completed': store.loadCompleted(query); break
+    case 'processed': store.loadProcessed(query); break
   }
+  // G-B2-11: EVERY list reload re-baselines the pill, from the ONE place every reload passes
+  // through. Hanging this off individual call sites is precisely what let handleSearch() and
+  // handlePageChange() skip it — leaving a pill still urging "N 条新待办 · 点击刷新" for todos the
+  // reload had already fetched. A choke point cannot be forgotten by the next call site.
+  void refreshPendingBadgeCount({ resnapshot: true })
 }
 
 function handleTabChange() {
   currentPage.value = 1
   clearPendingSelection()
+  // loadCurrentTab() refreshes the badge and re-baselines the G-B2-11 pill (see its choke point).
   loadCurrentTab()
-  // Refresh badge whenever the user re-enters the 待办 tab so recent actions
-  // reflect immediately.
-  void refreshPendingBadgeCount()
 }
 
 function handleSearch() {
@@ -1063,8 +1031,9 @@ function handleSearch() {
 function handleSourceSystemChange() {
   currentPage.value = 1
   clearPendingSelection()
+  // The source-system switch changes what `count` even means (a different scope); the reload's
+  // own re-baseline inside loadCurrentTab() handles it.
   loadCurrentTab()
-  void refreshPendingBadgeCount()
 }
 
 function handlePageChange(page: number) {
@@ -1114,35 +1083,94 @@ function openAttendanceApprovalQueue() {
   })
 }
 
-onMounted(() => {
+// B3-03 (看板钻取): ApprovalMetricsView's KPI tiles / per-template rows deep-link here with
+// `?templateId=...&createdFrom=...&createdTo=...`. Pre-fill the filter bar from those query
+// params BEFORE the first load, so the very first request already carries them (matches the
+// "钻取到已过滤好的列表" contract — no extra click needed). `createdFrom`/`createdTo` are full
+// ISO timestamps; the date-range picker only understands day boundaries, so only the date
+// portion is used to repopulate it — the resulting createdFrom/createdTo the picker's own
+// `@change`/query-building path derives are the SAME day-start/day-end convention either way.
+//
+// This is a full SYNC, not a merge: at every deep-link entry point (mount + the params-nav
+// watcher below) the route query is the source of truth — a key that is absent CLEARS its
+// filter. Otherwise navigating from a filtered drill-down to the bare 审批中心 menu entry
+// (query {}) would silently keep serving the old template/date-scoped list under an
+// unfiltered-looking URL.
+function applyDeepLinkFilters(): void {
+  const rawTemplateId = route.query.templateId
+  templateFilter.value = typeof rawTemplateId === 'string' ? rawTemplateId : ''
+  const rawCreatedFrom = route.query.createdFrom
+  const rawCreatedTo = route.query.createdTo
+  const fromDate = typeof rawCreatedFrom === 'string' && rawCreatedFrom ? rawCreatedFrom.slice(0, 10) : ''
+  const toDate = typeof rawCreatedTo === 'string' && rawCreatedTo ? rawCreatedTo.slice(0, 10) : ''
+  createdRange.value = fromDate && toDate ? [fromDate, toDate] : null
+}
+
+// B3-03: params-only navigation to /approvals (e.g. a second 看板钻取 link clicked while this
+// view is already mounted, or an in-app push carrying a different query) REUSES this component
+// instance — onMounted never re-runs, so without this watcher the new query would be silently
+// ignored. Re-sync the filter bar from the query and explicitly reload from page 1. The
+// route-name guard keeps the watcher inert while navigating AWAY (the global `route` object
+// mutates to the target route before this instance unmounts).
+watch(() => route.query, () => {
+  if (route.name !== 'approval-list') return
+  applyDeepLinkFilters()
+  currentPage.value = 1
+  clearPendingSelection()
   loadCurrentTab()
-  void refreshPendingBadgeCount()
+})
+
+// B2-04-style id→name lookup so the filter dropdown shows readable template names rather than
+// raw ids. Best-effort: a failed fetch just leaves the select empty (no crash, no blocking the
+// rest of the page — mirrors ApprovalMetricsView's own `loadTemplateNames`).
+async function loadTemplateOptions(): Promise<void> {
+  try {
+    const { data } = await listTemplates({ pageSize: 200 })
+    templateOptions.value = data.map((tpl) => ({ id: tpl.id, name: tpl.name }))
+  } catch {
+    templateOptions.value = []
+  }
+}
+
+onMounted(() => {
+  applyDeepLinkFilters()
+  // The first load establishes the pill's initial baseline (no delta possible against itself).
+  loadCurrentTab()
+  void loadTemplateOptions()
 })
 </script>
 
 <style scoped>
-.approval-center {
-  max-width: 1200px;
-  margin: 0 auto;
-  padding: 24px;
-}
-
-.approval-center__header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin-bottom: 20px;
-}
-
-.approval-center__header h1 {
-  font-size: 22px;
-  font-weight: 600;
-  margin: 0;
+/* UF-8 (design-lock §3.6): first-paint skeleton for the pending/mine/cc/completed tabs — only
+   shown while `store.loading` is true AND the active tab has no rows yet (see
+   `isFirstPaintLoading`); a later refresh with data already on screen keeps the existing
+   ApprovalCenterTable `v-loading` spinner-over-table behavior untouched. */
+.approval-center__skeleton {
+  padding: var(--ms-space-4) 0;
 }
 
 .approval-center__toolbar {
   display: flex;
   align-items: center;
+  gap: var(--ms-space-3);
+}
+
+.approval-center__toolbar-search {
+  width: 240px;
+}
+
+.approval-center__toolbar-select {
+  width: 140px;
+}
+
+/* B3-03: template filter is wider than the fixed-option selects above (template names run
+   longer than status/source enum labels); the date-range picker keeps Element Plus's own width. */
+.approval-center__toolbar-select--wide {
+  width: 180px;
+}
+
+.approval-center__toolbar-daterange {
+  width: 260px;
 }
 
 .approval-center__error {
@@ -1169,6 +1197,26 @@ onMounted(() => {
   margin-left: 4px;
 }
 
+/* G-B2-11: 新待办到达刷新 pill — a deliberately clickable, un-missable affordance (not a passive
+   badge) since it is the ONLY way this new count ever reaches the list; there is no auto-refresh. */
+.approval-center__new-todo-pill {
+  display: inline-flex;
+  align-items: center;
+  margin-bottom: 12px;
+  padding: 4px 12px;
+  border: 1px solid var(--el-color-primary-light-5);
+  border-radius: 999px;
+  background: var(--el-color-primary-light-9);
+  color: var(--el-color-primary);
+  font-size: 13px;
+  line-height: 1.6;
+  cursor: pointer;
+}
+
+.approval-center__new-todo-pill:hover {
+  border-color: var(--el-color-primary);
+}
+
 .approval-center__tab-toolbar {
   display: flex;
   justify-content: flex-end;
@@ -1179,13 +1227,13 @@ onMounted(() => {
 
 .approval-center__selection-count {
   margin-right: auto;
-  color: #4b5563;
+  color: var(--ms-text-2);
   font-size: 13px;
 }
 
 .approval-center__batch-reject-summary {
   margin: 0 0 12px;
-  color: #4b5563;
+  color: var(--ms-text-2);
   font-size: 14px;
 }
 
@@ -1194,39 +1242,20 @@ onMounted(() => {
   display: inline-block;
   margin-right: 8px;
   font-size: 13px;
-  color: #606266;
+  color: var(--el-text-color-regular);
 }
 
 .approval-center__wait--warn {
-  color: #e6a23c;
+  color: var(--el-color-warning);
 }
 
 .approval-center__wait--urgent {
-  color: #f56c6c;
-}
-
-.approval-center__wait-progress {
-  margin-top: 2px;
-  font-size: 12px;
-  color: #909399;
-}
-
-/* B2-01: key-field summary line — muted, single-line, ellipsis-truncated so a long value never
-   wraps the row or blows out the column width; the full text is still available via the native
-   `:title` tooltip. */
-.approval-center__row-summary {
-  margin-top: 2px;
-  max-width: 100%;
-  overflow: hidden;
-  white-space: nowrap;
-  text-overflow: ellipsis;
-  font-size: 12px;
-  color: #909399;
+  color: var(--el-color-danger);
 }
 
 .approval-center__row-reject-summary {
   margin: 0 0 12px;
-  color: #4b5563;
+  color: var(--ms-text-2);
   font-size: 14px;
 }
 
@@ -1236,7 +1265,7 @@ onMounted(() => {
 
 .approval-center__batch-result-summary {
   margin: 0 0 12px;
-  color: #4b5563;
+  color: var(--ms-text-2);
   font-size: 14px;
 }
 
@@ -1250,7 +1279,7 @@ onMounted(() => {
 
 .approval-center__batch-result-item {
   padding: 8px 0;
-  border-bottom: 1px solid #ebeef5;
+  border-bottom: 1px solid var(--el-border-color-lighter);
 }
 
 .approval-center__batch-result-item:last-child {
@@ -1259,13 +1288,13 @@ onMounted(() => {
 
 .approval-center__batch-result-item-title {
   font-size: 14px;
-  color: #303133;
+  color: var(--el-text-color-primary);
 }
 
 .approval-center__batch-result-item-message {
   margin-top: 2px;
   font-size: 13px;
-  color: #f56c6c;
+  color: var(--el-color-danger);
 }
 
 .approval-center__attendance-entry {
@@ -1275,9 +1304,9 @@ onMounted(() => {
   gap: 16px;
   padding: 14px 16px;
   margin-bottom: 12px;
-  border: 1px solid #dbeafe;
+  border: 1px solid var(--el-color-primary-light-8);
   border-radius: 8px;
-  background: #eff6ff;
+  background: var(--el-color-primary-light-9);
 }
 
 .approval-center__attendance-entry-copy {
@@ -1286,13 +1315,13 @@ onMounted(() => {
 }
 
 .approval-center__attendance-entry-copy strong {
-  color: #1f2937;
+  color: var(--ms-text-1);
   font-size: 14px;
 }
 
 .approval-center__attendance-entry-copy p {
   margin: 0;
-  color: #4b5563;
+  color: var(--ms-text-2);
   font-size: 13px;
   line-height: 1.5;
 }
@@ -1309,29 +1338,19 @@ onMounted(() => {
    should reflow on any narrow viewport so the search + filters never overflow
    horizontally. */
 @media (max-width: 768px) {
-  .approval-center {
-    padding: 16px 12px;
-  }
-
-  .approval-center__header {
-    flex-direction: column;
-    align-items: stretch;
-    gap: 12px;
-  }
-
   .approval-center__toolbar {
     flex-wrap: wrap;
-    gap: 8px;
+    gap: var(--ms-space-2);
   }
 
-  .approval-center__toolbar :deep(.el-input),
-  .approval-center__toolbar :deep(.el-select) {
-    width: 100% !important;
-    margin-left: 0 !important;
-  }
-
-  .approval-center__toolbar :deep(.el-button) {
-    margin-left: 0 !important;
+  /* UF-5: these three classes previously carried the fixed desktop widths as inline `style=`
+     attributes, which forced the `!important` overrides below (an inline style always wins over
+     a plain class rule). Now that the width lives in a class rule of ordinary specificity, this
+     media-query rule (declared later in the cascade) overrides it without `!important`. */
+  .approval-center__toolbar-search,
+  .approval-center__toolbar-select,
+  .approval-center__toolbar-daterange,
+  .approval-center__toolbar-button {
     width: 100%;
   }
 

@@ -14,6 +14,7 @@ import {
   type RecordPermissionScope,
   isFieldAlwaysReadOnly,
   isFieldPermissionHidden,
+  isFieldWriteForbidden,
 } from '../multitable/permission-derivation'
 import { validateAiShortcutFieldProperty } from '../multitable/ai-shortcut-config'
 import { withFieldRequiredWhenRule, withFieldVisibilityRule } from '../multitable/field-visibility-rule'
@@ -73,7 +74,7 @@ import { createPersonMemberResolver, personRestrictGroupIds, resolvePersonAssign
 import { resolveUserDisplayNames } from '../multitable/user-display'
 import { loadHistoryBatchSummaries, loadHistoryBatchDetail, estimateHistoryHasMore } from '../multitable/history-projection'
 import { reconstructRecordsAtT } from '../multitable/record-reconstructor'
-import { hashPreviewChanges, hashScope, hashResurrectSet, hashDeleteSet, mintRestorePreviewIdentity, mintScopedRestorePreviewIdentity, verifyRestorePreviewIdentity, verifyScopedRestorePreviewIdentity, mintPitRevertPreviewIdentity, verifyPitRevertPreviewIdentity, mintPitResetPreviewIdentity, verifyPitResetPreviewIdentity, mintConfigRestorePreviewIdentity, verifyConfigRestorePreviewIdentity, type UncreatePlan, hashUncreatePlan, mintConfigUncreatePreviewIdentity, verifyConfigUncreatePreviewIdentity, type UndeletePlan, hashUndeletePlan, mintConfigUndeletePreviewIdentity, verifyConfigUndeletePreviewIdentity, hashPermissionGrant, mintConfigPermissionRevertPreviewIdentity, verifyConfigPermissionRevertPreviewIdentity } from '../multitable/restore-preview-identity'
+import { hashPreviewChanges, hashScope, hashResurrectSet, hashDeleteSet, mintRestorePreviewIdentity, mintScopedRestorePreviewIdentity, verifyRestorePreviewIdentity, verifyScopedRestorePreviewIdentity, mintPitRevertPreviewIdentity, verifyPitRevertPreviewIdentity, mintPitResetPreviewIdentity, verifyPitResetPreviewIdentity, mintConfigRestorePreviewIdentity, verifyConfigRestorePreviewIdentity, hashLossSummary, type UncreatePlan, hashUncreatePlan, mintConfigUncreatePreviewIdentity, verifyConfigUncreatePreviewIdentity, type UndeletePlan, hashUndeletePlan, mintConfigUndeletePreviewIdentity, verifyConfigUndeletePreviewIdentity, hashPermissionGrant, mintConfigPermissionRevertPreviewIdentity, verifyConfigPermissionRevertPreviewIdentity } from '../multitable/restore-preview-identity'
 import {
   recordConfigRevision,
   recordFieldOrderShifts,
@@ -83,7 +84,29 @@ import {
   fieldCreateDiff,
   fieldUpdateDiff,
   fieldDeleteDiff,
+  fieldDeleteDiffWithSequence,
 } from '../multitable/config-revision-recorder'
+import {
+  isTombstoneCaptureEnabled,
+  countFieldDeleteCaptureRows,
+  assertWithinCaptureCap,
+  insertFieldValueTombstones,
+  insertFieldLinkTombstones,
+  readAutoNumberNextValue,
+  captureLossyRetypePreImageRows,
+  TombstoneCaptureCapExceededError,
+} from '../multitable/tombstone-capture'
+import { resolveSheetRevertMaxRecords } from '../multitable/restore-caps'
+import {
+  type CellLossOutcome,
+  type LossSummary,
+  computeLossOutcomes,
+  isLossyPropertyRetypeRevertShape,
+  isLossyRetypeRevertEnabled,
+  isLossyRetypeSupportedFieldType,
+  summarizeLoss,
+  LOSSY_RETYPE_PREVIEW_NOTE,
+} from '../multitable/lossy-retype-oracle'
 import {
   type ConfigRevisionRow,
   classifyRevert,
@@ -211,6 +234,16 @@ import {
   type YjsInvalidator,
 } from '../multitable/post-commit-hooks'
 import { listRecordRevisions, recordRecordRevision, type RecordRevisionEntry } from '../multitable/record-history-service'
+import { replayInboundLinks, isRecordUndeleteInboundEnabled } from '../multitable/inbound-link-replay'
+import { countInboundLinkCaptureRows, insertInboundLinkTombstones } from '../multitable/tombstone-capture'
+
+// 4c-3: pre-migration deploy window guard for the delete_revision_id column (mirrors record-service).
+function isUndefinedColumnError42703(err: unknown, columnName: string): boolean {
+  const code = (err as { code?: string } | null)?.code
+  const msg = err instanceof Error ? err.message : String(err)
+  if (code === '42703') return msg.includes(columnName)
+  return msg.includes(`column "${columnName}" does not exist`)
+}
 import {
   isPersonalViewsEnabled,
   applyPersonalViewOverlay,
@@ -418,6 +451,9 @@ type UniverMetaViewConfig = {
   sortInfo?: Record<string, unknown>
   groupInfo?: Record<string, unknown>
   hiddenFieldIds?: string[]
+  // slice 2: per-user personal field order, served only when the personal-views flag is on and this
+  // actor has a fieldOrder override (via applyPersonalViewOverlay). Absent otherwise — sheet-global order stands.
+  fieldOrder?: string[]
   config?: Record<string, unknown>
 }
 
@@ -2788,49 +2824,67 @@ async function recalculateFormulaFields(
   // formula-over-lookup sees the actual lookup value instead of the absent-on-reload `0`.
   // Same-record / same-sheet only; absent → raw reload (unchanged for form-submit).
   hydratedDataByRecord?: Map<string, Record<string, unknown>>,
+  // W1-1 (design-lock 2026-07-05 §3 LOCK-B, B3): explicit recompute-target override for the
+  // expression-change bulk recompute. The bulk-recompute route KNOWS which formula field must be
+  // recomputed (ITS OWN expression just changed) — it must not rely on the changedFieldIds
+  // dependency-graph discovery below, which only ever finds DOWNSTREAM formulas that reference
+  // changedFieldIds as an input (formula_dependencies.field_id = the dependent formula,
+  // .depends_on_field_id = its input) and would silently no-op for the changed field itself
+  // (never "depends on itself") — including the zero-field-reference case (e.g. `=TODAY()`),
+  // which has no formula_dependencies rows at all. When provided, this REPLACES graph discovery
+  // with the given set (narrowed to actual formula fields); changedFieldIds may then be `[]`.
+  // Everything downstream (taint skip, relation-agg/pure split, per-record materialization) is
+  // unchanged — the SAME taint discipline applies byte-for-byte to both callers.
+  explicitFormulaFieldIds?: Set<string>,
 ): Promise<Array<{ recordId: string; data: Record<string, unknown> }>> {
-  if (updatedRecordIds.length === 0 || changedFieldIds.length === 0) return []
+  if (updatedRecordIds.length === 0) return []
+  if (!explicitFormulaFieldIds && changedFieldIds.length === 0) return []
   const formulaFieldIds = fields.filter((f) => f.type === 'formula').map((f) => f.id)
   if (formulaFieldIds.length === 0) return []
-
-  // A-min trigger: a lookup/rollup's value changes when its underlying LINK field is edited, but
-  // changedFieldIds carries the link id, not the derived lookup id — so the dependency gate
-  // (formula → lookup) would miss. Expand the changed set with the SAME-RECORD lookup/rollup ids
-  // whose linkFieldId is in changedFieldIds. This stays bounded to updatedRecordIds (the patched
-  // records) → it never reaches foreign/related records' formulas (that is A-full, gated).
-  const changedSet = new Set(changedFieldIds)
-  const effectiveChangedFieldIds = [...changedSet]
-  for (const field of fields) {
-    if (field.type !== 'lookup' && field.type !== 'rollup') continue
-    if (changedSet.has(field.id)) continue
-    const cfg = field.type === 'lookup' ? parseLookupFieldConfig(field.property) : parseRollupFieldConfig(field.property)
-    if (cfg && changedSet.has(cfg.linkFieldId)) {
-      effectiveChangedFieldIds.push(field.id)
-    }
-  }
-
-  // Gate: only recompute when a changed (or dependent-lookup) field actually feeds a formula here.
-  // The returned field ids are ALSO the recompute allowlist (F1, review of #2450): hydration is
-  // actor-scoped, so a formula whose inputs did not change must not be re-evaluated — it could
-  // be clobbered with a permission-degraded value (unreadable foreign sheet → lookup []).
-  const depRes = await query(
-    `SELECT DISTINCT field_id FROM formula_dependencies
-     WHERE depends_on_field_id = ANY($1::text[])
-       AND (depends_on_sheet_id IS NULL OR depends_on_sheet_id = $2)
-       AND sheet_id = $2`,
-    [effectiveChangedFieldIds, sheetId],
-  )
   const formulaFieldIdSet = new Set(formulaFieldIds)
-  const dependentFormulaFieldIds = new Set(
-    (depRes.rows as any[]).map((row) => String(row.field_id)).filter((id) => formulaFieldIdSet.has(id)),
-  )
-  if (dependentFormulaFieldIds.size === 0) {
-    // Older/stale configs can be missing formula_dependencies rows even though
-    // field.property.expression is authoritative for evaluation. Fall back to
-    // expression refs so a PATCH still materializes dependent formulas.
-    const changedIdSet = new Set(effectiveChangedFieldIds)
-    for (const id of formulaFieldsReferencingChangedFields(fields, formulaFieldIdSet, changedIdSet)) {
-      dependentFormulaFieldIds.add(id)
+
+  let dependentFormulaFieldIds: Set<string>
+  if (explicitFormulaFieldIds) {
+    dependentFormulaFieldIds = new Set([...explicitFormulaFieldIds].filter((id) => formulaFieldIdSet.has(id)))
+  } else {
+    // A-min trigger: a lookup/rollup's value changes when its underlying LINK field is edited, but
+    // changedFieldIds carries the link id, not the derived lookup id — so the dependency gate
+    // (formula → lookup) would miss. Expand the changed set with the SAME-RECORD lookup/rollup ids
+    // whose linkFieldId is in changedFieldIds. This stays bounded to updatedRecordIds (the patched
+    // records) → it never reaches foreign/related records' formulas (that is A-full, gated).
+    const changedSet = new Set(changedFieldIds)
+    const effectiveChangedFieldIds = [...changedSet]
+    for (const field of fields) {
+      if (field.type !== 'lookup' && field.type !== 'rollup') continue
+      if (changedSet.has(field.id)) continue
+      const cfg = field.type === 'lookup' ? parseLookupFieldConfig(field.property) : parseRollupFieldConfig(field.property)
+      if (cfg && changedSet.has(cfg.linkFieldId)) {
+        effectiveChangedFieldIds.push(field.id)
+      }
+    }
+
+    // Gate: only recompute when a changed (or dependent-lookup) field actually feeds a formula here.
+    // The returned field ids are ALSO the recompute allowlist (F1, review of #2450): hydration is
+    // actor-scoped, so a formula whose inputs did not change must not be re-evaluated — it could
+    // be clobbered with a permission-degraded value (unreadable foreign sheet → lookup []).
+    const depRes = await query(
+      `SELECT DISTINCT field_id FROM formula_dependencies
+       WHERE depends_on_field_id = ANY($1::text[])
+         AND (depends_on_sheet_id IS NULL OR depends_on_sheet_id = $2)
+         AND sheet_id = $2`,
+      [effectiveChangedFieldIds, sheetId],
+    )
+    dependentFormulaFieldIds = new Set(
+      (depRes.rows as any[]).map((row) => String(row.field_id)).filter((id) => formulaFieldIdSet.has(id)),
+    )
+    if (dependentFormulaFieldIds.size === 0) {
+      // Older/stale configs can be missing formula_dependencies rows even though
+      // field.property.expression is authoritative for evaluation. Fall back to
+      // expression refs so a PATCH still materializes dependent formulas.
+      const changedIdSet = new Set(effectiveChangedFieldIds)
+      for (const id of formulaFieldsReferencingChangedFields(fields, formulaFieldIdSet, changedIdSet)) {
+        dependentFormulaFieldIds.add(id)
+      }
     }
   }
   if (dependentFormulaFieldIds.size === 0) return []
@@ -2901,6 +2955,61 @@ async function recalculateFormulaFields(
     if (Object.keys(formulaData).length > 0) results.push({ recordId, data: formulaData })
   }
   return results
+}
+
+/**
+ * W1-1 (design-lock 2026-07-05 §2 LOCK-F, F2) — "writer-taint context: one value, two
+ * constructors". Every req-based resolver `recalculateFormulaFields` consults —
+ * `resolveTaintedFormulaFieldIds` and (transitively, via `resolveRelationAggregation`)
+ * `resolveForeignFieldReadability` / `resolveReadableSheetIds` / `resolveBaseReadable` /
+ * `resolveSheetReadableCapabilities` — bottoms out at `resolveRequestAccess(req)`, which reads
+ * ONLY `req.user?.{id,sub,userId,roles,perms,permissions,role}`; nothing in this call graph
+ * touches cookies, headers, or any other Express-specific surface (verified: `access.ts`'s only
+ * `req.*` access lives inside `resolveRequestAccess`). So constructor 1 (REST) is the real
+ * Express `Request` (unchanged); constructor 2 (bridge) is this function — a minimal
+ * `Request`-shaped stand-in whose `user` carries only the flushing actor's id. Passing it into
+ * the UNCHANGED `recalculateFormulaFields` reproduces REST's taint discipline byte-for-byte (the
+ * same function body runs — no parallel re-implementation to drift): `resolveRequestAccess` falls
+ * through to its own DB-authoritative branch (`listUserPermissions` / `isAdmin`), exactly the path
+ * a REST request whose JWT carries no baked-in role/permission claims already takes. A null
+ * actorId (no authenticated flushing actor) resolves to an empty/non-admin access — fail-closed,
+ * never a bypass; there is no "system context" here that could launder a masked value.
+ */
+function buildWriterTaintContext(actorId: string | null): Request {
+  return { user: actorId ? { id: actorId } : undefined } as unknown as Request
+}
+
+/**
+ * W1-1 (design-lock 2026-07-05 §2 LOCK-F, F1) — the Yjs-bridge counterpart of
+ * `recalculateFormulaFields`. The bridge (index.ts) has no Express `req` (a collaborative flush
+ * originates from a WebSocket actor, not an HTTP request) but must apply the SAME write-side
+ * taint skip (F2) and same-record recompute scope (F3, including relation-aggregation-backed
+ * formulas — both req-consumers are covered by the synthetic context) as REST Step 4c. This is
+ * the ONLY new call site the resolver chokepoint gains: it delegates to the existing
+ * `recalculateFormulaFields` unchanged (no new direct call to `resolveTaintedFormulaFieldIds` /
+ * `resolveRelationAggregation` — the structural guard's frozen call count is untouched), so the
+ * taint logic is reused byte-for-byte rather than re-implemented in parallel. Exported for
+ * `index.ts`'s Yjs-bridge `RecordWriteHelpers` wiring; not used by any REST path (the REST helper
+ * keeps its own `req`-closure implementation — see `createRecordWriteHelpers`).
+ */
+export async function recalculateFormulaFieldsForActor(
+  actorId: string | null,
+  query: QueryFn,
+  sheetId: string,
+  fields: UniverMetaField[],
+  updatedRecordIds: string[],
+  changedFieldIds: string[],
+  hydratedDataByRecord?: Map<string, Record<string, unknown>>,
+): Promise<Array<{ recordId: string; data: Record<string, unknown> }>> {
+  return recalculateFormulaFields(
+    buildWriterTaintContext(actorId),
+    query,
+    sheetId,
+    fields,
+    updatedRecordIds,
+    changedFieldIds,
+    hydratedDataByRecord,
+  )
 }
 
 /**
@@ -5752,6 +5861,22 @@ class RecordLockedError extends Error {
   }
 }
 
+/**
+ * W1-1 (design-lock 2026-07-05 §3 LOCK-B, B2): thrown INSIDE the field-update transaction when an
+ * expression-change PATCH's sheet has more live records than the bulk-recompute cap — aborts the
+ * WHOLE transaction (fail-closed, BS-6 posture: no silent partial/truncated recompute, config NOT
+ * saved) so the route's catch block can map it to 422 `FORMULA_EXPRESSION_BULK_OVER_CAP`.
+ */
+class FormulaExpressionBulkOverCapError extends Error {
+  constructor(
+    public total: number,
+    public max: number,
+  ) {
+    super(`Sheet has ${total} live records, above the ${max}-record formula bulk-recompute ceiling`)
+    this.name = 'FormulaExpressionBulkOverCapError'
+  }
+}
+
 type PatchFailurePayload = {
   recordId: string
   code: string
@@ -5976,13 +6101,34 @@ async function dropFieldCascade(query: TxnQuery, opts: {
   const { sheetId, fieldId, fieldRow, actorId } = opts
   const order = Number(fieldRow.order ?? 0)
   const configBatchId = randomUUID() // one batchId — the deleted field + the order-shift of later fields share it
+
+  // 4c-2 forward tombstone-capture (design-lock 2026-07-07/#3809+#3830, ratified). MUST run before the very
+  // first destructive statement below: `DELETE FROM meta_fields WHERE id = $1` cascade-deletes
+  // meta_links(field_id) and meta_field_auto_number_sequences(field_id) (both `ON DELETE CASCADE` to
+  // meta_fields) — so anything "captured before DELETE FROM meta_links/...sequences" textually below
+  // would already be too late. The field-delete revision's id is pre-generated so the tombstone rows'
+  // causal anchor (config_revision_id) matches the revision recordConfigRevision is about to write.
+  const captureEnabled = isTombstoneCaptureEnabled()
+  const fieldDeleteRevisionId = randomUUID()
+  let capturedLastValue: number | null = null
+  if (captureEnabled) {
+    const totalToCapture = await countFieldDeleteCaptureRows(query, sheetId, fieldId)
+    assertWithinCaptureCap(totalToCapture) // fail-closed 422 (via caller's catch) — never a partial capture.
+    await insertFieldValueTombstones(query, { sheetId, fieldId, configRevisionId: fieldDeleteRevisionId })
+    await insertFieldLinkTombstones(query, { sheetId, fieldId, configRevisionId: fieldDeleteRevisionId })
+    capturedLastValue = await readAutoNumberNextValue(query, fieldId)
+  }
+
   await query('DELETE FROM meta_fields WHERE id = $1', [fieldId])
   await query('DELETE FROM meta_field_auto_number_sequences WHERE field_id = $1', [fieldId])
   await recordConfigRevision(query, {
     sheetId, entityType: 'field', entityId: fieldId, action: 'delete',
-    ...fieldDeleteDiff({ name: String(fieldRow.name), type: String(fieldRow.type), property: fieldRow.property, order }),
+    ...(captureEnabled
+      ? fieldDeleteDiffWithSequence({ name: String(fieldRow.name), type: String(fieldRow.type), property: fieldRow.property, order }, capturedLastValue)
+      : fieldDeleteDiff({ name: String(fieldRow.name), type: String(fieldRow.type), property: fieldRow.property, order })),
     batchId: configBatchId, actorId,
     source: opts.source ?? 'mutation', restoredFromId: opts.restoredFromId ?? null,
+    id: fieldDeleteRevisionId,
   })
   try {
     await query('DELETE FROM meta_links WHERE field_id = $1', [fieldId])
@@ -6087,9 +6233,241 @@ async function computeUndeletePlan(query: TxnQuery, rev: ConfigRevisionRow): Pro
   return { idFree: !occupied, insertOrder, trailingShiftIds, targetConfigHash }
 }
 
-/** U4-L2/L3: recreate a deleted FIELD from its `before` (DEFINITION-ONLY) at its original order (trailing shift +1). */
+// ── 4c-1 lossy / value-transform retype revert helpers (design-lock 2026-07-07 #3812; ratified 2026-07-08) ─────
+
+interface LossyRetypeFieldRow { id: string; sheetId: string; type: string }
+
+/** The live field row the loss oracle reasons about. `FOR UPDATE` only inside the execute txn (caller decides). */
+async function loadLossyRetypeFieldRow(query: TxnQuery, fieldId: string, forUpdate: boolean): Promise<LossyRetypeFieldRow | null> {
+  const res = (await query(`SELECT id, sheet_id, type FROM meta_fields WHERE id = $1${forUpdate ? ' FOR UPDATE' : ''}`, [fieldId])) as any
+  const row = res.rows[0] as { id: unknown; sheet_id: unknown; type: unknown } | undefined
+  if (!row) return null
+  return { id: String(row.id), sheetId: String(row.sheet_id), type: String(row.type ?? '') }
+}
+
+/**
+ * 4c-1 P1-1 — TYPE-ERA GUARD. `changed_keys` for a property-only revert is `['property']`, and BOTH drift controls
+ * key off `changed_keys` alone (`computeRevertPreview`'s `driftConflict` and `configBaselineHash`), so a `type`
+ * change landing BETWEEN the reverted revision and now is invisible to them. That matters because
+ * `sanitizeFieldProperty` is the IDENTITY for url/email/phone/barcode/qrcode/location, so a `string → url`
+ * type-only PATCH preserves `property` byte-for-byte and a stale `string`-era property revert does NOT drift.
+ * Reverting it would then coerce every cell under the NEW type — a forward `text → url` value migration smuggled
+ * in through the revert door, which lock §7 puts explicitly OUT OF BOUNDS.
+ *
+ * Lock §2.1 says "同 type 的 property 变换" — SAME type. This enforces it: if the field's `type` changed at any
+ * point strictly AFTER the revision being reverted, the revision belongs to a different type era and the revert is
+ * refused (422). Ordering uses this table's EXISTING deterministic order — `(created_at, id)`, the ascending twin
+ * of the `ORDER BY created_at DESC, id DESC` the config-history read surface uses — not a home-grown one.
+ *
+ * Also catches a delete→undelete cycle that recreated the field at a different type: `fieldDeleteDiff` /
+ * `fieldCreateDiff` both put `type` in `changed_keys`. A type change that was later changed BACK still trips this
+ * (the era is "unbroken", not "endpoint-equal") — deliberately fail-closed, and it only ever refuses.
+ */
+async function hasFieldTypeChangeSince(query: TxnQuery, sheetId: string, fieldId: string, revisionId: string): Promise<boolean> {
+  const res = (await query(
+    `SELECT 1 FROM meta_config_revisions r
+     WHERE r.sheet_id = $1 AND r.entity_type = 'field' AND r.entity_id = $2
+       AND 'type' = ANY(r.changed_keys)
+       AND (r.created_at, r.id) > (SELECT a.created_at, a.id FROM meta_config_revisions a WHERE a.id = $3)
+     LIMIT 1`,
+    [sheetId, fieldId, revisionId],
+  )) as any
+  return res.rows.length > 0
+}
+
+const FIELD_TYPE_ERA_MISMATCH = {
+  code: 'FIELD_TYPE_ERA_MISMATCH',
+  // No counts, no bucket names, no record/value information — the same no-oracle discipline as every other
+  // refusal on this surface (and it is reached only AFTER the full-read gate has already passed).
+  message: "This field's type changed after the revision being reverted, so restoring its old configuration would re-interpret every cell under a different type. Refused.",
+} as const
+
+/**
+ * 4c-1 defense-in-depth: normalize the `before.property` this revert is about to write THROUGH the live type's
+ * sanitizer, and use that same normalized value for the oracle, the preview's `target`, and the write. Reasons:
+ *   • `applyConfigRevert` writes `before[k]` RAW. It is shared with Tier-1/Tier-2, so it is NOT changed here — we
+ *     hand the lossy branch (and only the lossy branch) a derived revision instead. Other tiers are untouched.
+ *   • On real data this is a NO-OP: every stored property was written through `normalizeFieldWriteInput`, so a
+ *     recorded `before.property` is already sanitizer-shaped, and `sanitizeFieldProperty` is idempotent. It only
+ *     bites on a hand-crafted / legacy / plugin-written property, where writing it raw would leave the field
+ *     holding a malformed property for its type.
+ *   • Because `preview.target` is derived from the SAME value, whatever normalization happens is DISCLOSED to the
+ *     actor in the preview rather than applied silently.
+ * Safe by construction: `driftConflict` compares `current` against `after` (untouched) and `baselineHash` hashes
+ * the CURRENT snapshot (untouched), so neither drift control is perturbed.
+ *
+ * Uses the ROUTE-LOCAL `sanitizeFieldProperty` (with the same `as UniverMetaField['type']` cast the forward
+ * `normalizeFieldWriteInput` uses) rather than field-codecs' — write-path parity: it is the route-local one that
+ * shapes every property the forward PATCH stores, and it additionally applies `applyFieldValidationNormalisation`.
+ * The cast is sound: the caller has already proven `liveType ∈ BATCH1_FIELD_TYPES ⊂ UniverMetaField['type']`.
+ */
+function lossyRetypeDerivedRevision(rev: ConfigRevisionRow, liveType: string): ConfigRevisionRow {
+  const before = rev.before ?? {}
+  return { ...rev, before: { ...before, property: sanitizeFieldProperty(liveType as UniverMetaField['type'], before.property) } }
+}
+
+/** The property the oracle coerces AGAINST: the (normalized) `before.property` this revert restores. */
+function lossyRetypeTargetProperty(rev: ConfigRevisionRow): Record<string, unknown> | undefined {
+  const raw = (rev.before ?? {}).property
+  return isPlainObject(raw) ? raw : undefined
+}
+
+/**
+ * 4c-1 U-L8 — the FULL-READ GATE (owner ratification 2026-07-08 §2, overriding the design-lock's alternative (ii)).
+ *
+ * An actor who cannot read EVERY record × field of this sheet is refused the whole surface (403 on preview AND
+ * execute); no scoped loss counts, no `undisclosedPresent` marker, hence NO oracle surface at all — C2 is satisfied
+ * by a gate rather than by a marker, which is the strongest available reading.
+ *
+ * CRITICAL: every input here is CONFIG-derived, never DATA-derived. `loadDeniedRecordIds` would have been the
+ * obvious row-axis primitive, but its rule-deny arm evaluates predicates against LIVE record data — so gating on
+ * "the denied set happens to be empty right now" would turn the 403/200 boundary into exactly the 1-bit data probe
+ * U-L8 forbids. We gate on the sheet's row-level-read SWITCH instead (`loadRowLevelReadDenyEnabled`, plus the same
+ * admin bypass every read surface applies): constant with respect to the data, conservative (a sheet with the switch
+ * on but zero effective denials is still refused), and impossible to use as a probe.
+ *
+ * Three axes, all of which must be clean — reusing the multitable-local permission primitives only (C7: the central
+ * rbac/auth is not touched):
+ *   1. ROW: the sheet's row-level read-deny switch is off for this actor (or the actor is an admin role).
+ *   2. FIELD: the actor's field_permissions scope masks nothing — the allowed set with the per-subject scope applied
+ *      equals the set with that axis lifted.
+ *   3. FORMULA TAINT: no allowed field is dropped by the §2a.3 stored-data taint mask.
+ */
+async function hasFullTableReadAccess(
+  req: Request,
+  query: QueryFn,
+  sheetId: string,
+  access: { userId: string | null; isAdminRole: boolean },
+  capabilities: MultitableCapabilities,
+): Promise<boolean> {
+  if (!access.userId) return false // anonymous/unscoped → fail closed
+  if (!access.isAdminRole && (await loadRowLevelReadDenyEnabled(query, sheetId))) return false
+  const fields = (await loadFieldsForSheet(query, sheetId)) as UniverMetaField[]
+  const scopeMap = await loadFieldPermissionScopeMap(query, sheetId, access.userId)
+  const scoped = computeAllowedFieldIds(fields, capabilities, scopeMap)
+  const unscoped = computeAllowedFieldIds(fields, capabilities, new Map<string, FieldPermissionScope>())
+  if (scoped.size !== unscoped.size) return false
+  for (const id of unscoped) if (!scoped.has(id)) return false
+  const masked = await maskStoredRecordFieldIds(req, query, sheetId, undefined, scoped)
+  return masked.size === scoped.size
+}
+
+/**
+ * Live cells for one field: exactly the records whose `data` CARRIES the key (a missing key has nothing to lose).
+ * `FOR UPDATE` (execute only) locks the exact rows the oracle is about to judge, so the loss magnitude verified
+ * against the token cannot change between the re-computation and the rewrite (§2.3).
+ */
+async function loadLossyRetypeCells(query: TxnQuery, sheetId: string, fieldId: string, forUpdate: boolean): Promise<Array<{ recordId: string; value: unknown; data: Record<string, unknown> }>> {
+  const res = (await query(
+    `SELECT id, data FROM meta_records WHERE sheet_id = $1 AND data ? $2 ORDER BY id${forUpdate ? ' FOR UPDATE' : ''}`,
+    [sheetId, fieldId],
+  )) as any
+  return (res.rows as Array<{ id: unknown; data: unknown }>).map((r) => {
+    const data = normalizeJson(r.data)
+    return { recordId: String(r.id), value: data[fieldId], data }
+  })
+}
+
+/** C4 write-symmetric cap input: the rows the oracle must SCAN = the sheet's live records (not just cells present). */
+async function countLossyRetypeScanRows(query: TxnQuery, sheetId: string): Promise<number> {
+  const res = (await query('SELECT count(*)::int AS c FROM meta_records WHERE sheet_id = $1', [sheetId])) as any
+  return Number((res.rows[0] as { c?: number } | undefined)?.c ?? 0)
+}
+
+const lossyRetypeTooLargeMessage = (recordCount: number, cap: number): string =>
+  `This sheet has ${recordCount} records, above the ${cap}-record ceiling for a value-transforming field revert; a revert of this size is refused.`
+
+/**
+ * The lossy revert's WRITE half: capture the pre-image (4c-2 seam), then rewrite every coerced/dropped cell in ONE
+ * batched statement, then record ONE record revision per changed cell. Same txn as the `meta_fields` config revert.
+ */
+async function applyLossyRetypeCellRewrite(query: TxnQuery, opts: {
+  sheetId: string
+  fieldId: string
+  /** THIS revert's own config-revision id — the 4c-2 "回指触发行" anchor (§2 capture point 3 / 4c-1 §3). */
+  lossyRevisionId: string
+  changed: ReadonlyArray<CellLossOutcome>
+  cellByRecordId: ReadonlyMap<string, { data: Record<string, unknown> }>
+  actorId: string | null
+}): Promise<void> {
+  const { sheetId, fieldId, lossyRevisionId, changed, cellByRecordId, actorId } = opts
+  if (changed.length === 0) return
+
+  // 4c-2 pre-image capture (double-ratify linkage, design-lock §3 / C6). Same txn, BEFORE the overwrite, anchored to
+  // THIS revert's own config revision so a later revert-of-revert can recover the TRUE pre-coerce values rather than
+  // re-coercing. Gated by MULTITABLE_TOMBSTONE_CAPTURE_ENABLED; over its cap the capture THROWS and the whole revert
+  // rolls back (fail-closed: "capture on ⇒ every destruction is already captured" is never violated).
+  // `value jsonb NOT NULL` on meta_field_value_tombstones: a null pre-image is impossible here (coerce(null)===null
+  // ⇒ `unchanged` ⇒ never in `changed`), but filter defensively rather than trip a constraint at runtime.
+  if (isTombstoneCaptureEnabled()) {
+    const preImages = changed
+      .filter((c) => c.before !== null && c.before !== undefined)
+      .map((c) => ({ recordId: c.recordId, value: c.before }))
+    assertWithinCaptureCap(preImages.length)
+    await captureLossyRetypePreImageRows(query, preImages, { sheetId, fieldId, configRevisionId: lossyRevisionId })
+  }
+
+  // `COALESCE(item.value, 'null'::jsonb)` below is load-bearing: `jsonb_to_recordset` maps a JSON `null` to SQL NULL,
+  // and `jsonb_set(data, path, NULL)` returns NULL for the WHOLE `data` column — a dropped cell would wipe the record.
+  // A single batched statement (never a per-row round trip), matching the tombstone-capture module's discipline.
+  const payload = changed.map((c) => ({ record_id: c.recordId, value: c.after ?? null }))
+  // lock-exempt: 4c-1 lossy retype revert — schema op rewriting the reverted field's key sheet-wide under the
+  // config-restore canManageFields gate (mirrors the field-delete column strip / field-undelete rehydration);
+  const rewritten = (await query(
+    `UPDATE meta_records AS m
+     SET data = jsonb_set(m.data, ARRAY[$2::text], COALESCE(item.value, 'null'::jsonb), true),
+         version = m.version + 1,
+         updated_at = now()
+     FROM jsonb_to_recordset($3::jsonb) AS item(record_id text, value jsonb)
+     WHERE m.sheet_id = $1 AND m.id = item.record_id
+     RETURNING m.id, m.version`,
+    [sheetId, fieldId, JSON.stringify(payload)],
+  )) as any
+  const updatedRows = rewritten.rows as Array<{ id: unknown; version: unknown }>
+  // The cells were locked FOR UPDATE before the oracle ran, so a short write is a real invariant break, not a race.
+  if (updatedRows.length !== changed.length) {
+    throw new Error(`lossy retype revert rewrote ${updatedRows.length} of ${changed.length} cells; aborting`)
+  }
+
+  // C5 history completeness: ONE record revision per changed cell, sharing one batchId (LOCK-12 — one user action =
+  // one batch). This is what makes the lossy revert itself undoable through the ordinary record-version restore.
+  const outcomeByRecordId = new Map(changed.map((c) => [c.recordId, c]))
+  const recordBatchId = randomUUID()
+  for (const row of updatedRows) {
+    const recordId = String(row.id)
+    const outcome = outcomeByRecordId.get(recordId)
+    const previous = cellByRecordId.get(recordId)
+    if (!outcome || !previous) throw new Error(`lossy retype revert lost track of record ${recordId}; aborting`)
+    const nextValue = outcome.after ?? null
+    await recordRecordRevision(query, {
+      sheetId,
+      recordId,
+      version: Number(row.version) || 0,
+      action: 'update',
+      source: 'restore',
+      actorId,
+      changedFieldIds: [fieldId],
+      patch: { [fieldId]: nextValue },
+      snapshot: { ...previous.data, [fieldId]: nextValue },
+      batchId: recordBatchId,
+    })
+  }
+}
+
+/**
+ * U4-L2/L3: recreate a deleted FIELD from its `before` at its original order (trailing shift +1).
+ * 4c-2 R1: when the delete that produced `before` has a matching tombstone set (`opts.deleteRevisionId` —
+ * the field-delete revision's own id), also rehydrate: column values (only into records that don't
+ * already have the key — never clobber a value written after this recreate), link edges (only between
+ * two currently-alive records), and the auto-number sequence's `next_value`. With NO tombstone (data
+ * destroyed before the capture flag was ever on, or `deleteRevisionId` unavailable) this stays exactly
+ * the pre-4c-2 DEFINITION-ONLY recreate — values/links/auto-number are NOT recovered (C1 forward-only).
+ */
 async function recreateFieldFromConfig(query: TxnQuery, opts: {
   sheetId: string; fieldId: string; before: Record<string, unknown>; actorId: string | null; source?: 'mutation' | 'restore'; restoredFromId?: string | null
+  /** The field-delete revision's own id (`rev.id` at the undelete-execute call site) — scopes which
+   * tombstone rows (if any) belong to THIS delete cycle, not a stray earlier/later capture for the same id. */
+  deleteRevisionId?: string | null
 }): Promise<void> {
   const { sheetId, fieldId, before, actorId } = opts
   const name = String(before.name ?? '')
@@ -6106,14 +6484,70 @@ async function recreateFieldFromConfig(query: TxnQuery, opts: {
     if ((e as { code?: string })?.code === '23505') throw new RecordServiceRestoreConflictError(`Config entity id is occupied, cannot undelete: ${fieldId}`)
     throw e
   }
-  // DEFINITION-ONLY (U4-L3): column values / meta_links / auto-number are NOT recovered; the field is NOT re-added to
-  // any view config (lazy view re-integration). Record the recreate as a `create` revision (source='restore').
+  // DEFINITION-ONLY (U4-L3) baseline: column values / meta_links / auto-number are NOT recovered by
+  // default; the field is NOT re-added to any view config (lazy view re-integration, unaffected by 4c-2).
+  // Record the recreate as a `create` revision (source='restore').
   await recordConfigRevision(query, {
     sheetId, entityType: 'field', entityId: fieldId, action: 'create',
     ...fieldCreateDiff({ name, type, property, order }),
     batchId: configBatchId, actorId,
     source: opts.source ?? 'mutation', restoredFromId: opts.restoredFromId ?? null,
   })
+
+  // 4c-2 R1 rehydration (additive; presence-gated, NOT flag-gated — a tombstone captured while the flag was
+  // on stays restorable even if the flag is later turned off; conversely no tombstone → no rehydration
+  // regardless of the flag's current state). Scoped to deleteRevisionId so a same-id delete→undelete→delete
+  // →undelete cycle can never rehydrate from the WRONG cycle's captures.
+  const deleteRevisionId = opts.deleteRevisionId ?? null
+  if (deleteRevisionId) {
+    // Values: only into records that do NOT already carry this key (never overwrite a value written after
+    // this recreate — the recreate above just happened in THIS same transaction, so the only way a record
+    // could already have the key is a value legitimately written since — this WHERE clause is the guard).
+    // lock-exempt: field-undelete schema op — rehydrates the recreated field's key sheet-wide (mirror of
+    // the field-delete drop at ~6116); not a per-record user edit, and NOT(data?key) never clobbers.
+    await query(
+      `UPDATE meta_records m
+       SET data = data || jsonb_build_object($3::text, t.value)
+       FROM meta_field_value_tombstones t
+       WHERE m.id = t.record_id
+         AND m.sheet_id = $2
+         AND t.config_revision_id = $1
+         AND t.field_id = $3
+         AND t.reason = 'field_delete'
+         AND NOT (m.data ? $3)`,
+      [deleteRevisionId, sheetId, fieldId],
+    )
+    // Link edges: only between two records that are BOTH currently alive (design-lock §4 R1).
+    // Idempotence: meta_links has no unique on (field_id, record_id, foreign_record_id) (PK is the
+    // random `id` only), so a repeat rehydration would silently duplicate edges. Guard with NOT
+    // EXISTS, mirroring the value-side `NOT (m.data ? $3)` guard. Unreachable in current flows
+    // (rehydration runs only after the edges are gone) but load-bearing once 4c-3 replays inbound edges.
+    await query(
+      `INSERT INTO meta_links (field_id, record_id, foreign_record_id)
+       SELECT t.field_id, t.record_id, t.foreign_record_id
+       FROM meta_link_tombstones t
+       JOIN meta_records r1 ON r1.id = t.record_id
+       JOIN meta_records r2 ON r2.id = t.foreign_record_id
+       WHERE t.source_revision_id = $1 AND t.field_id = $2 AND t.reason = 'field_delete'
+         AND NOT EXISTS (
+           SELECT 1 FROM meta_links ml
+           WHERE ml.field_id = t.field_id
+             AND ml.record_id = t.record_id
+             AND ml.foreign_record_id = t.foreign_record_id
+         )`,
+      [deleteRevisionId, fieldId],
+    )
+    // Auto-number sequence: only for an autoNumber field whose delete revision carried a captured lastValue.
+    const lastValue = (before as { lastValue?: unknown }).lastValue
+    if (type === 'autoNumber' && typeof lastValue === 'number' && Number.isFinite(lastValue)) {
+      await query(
+        `INSERT INTO meta_field_auto_number_sequences (field_id, sheet_id, next_value)
+         VALUES ($1, $2, $3)
+         ON CONFLICT (field_id) DO UPDATE SET next_value = EXCLUDED.next_value, updated_at = now()`,
+        [fieldId, sheetId, lastValue],
+      )
+    }
+  }
 }
 
 /** U4-L2: recreate a deleted VIEW from its `before` (clean, non-lossy). */
@@ -6612,10 +7046,28 @@ export function univerMetaRouter(): Router {
         hiddenFieldIds: normalizeJsonArray(row.hidden_field_ids),
         config: normalizeJson(row.config),
       }))
-      const selectedView = viewId
-        ? serializedViews.find((view: UniverMetaViewConfig) => view.id === viewId) ?? null
-        : serializedViews[0] ?? null
       const viewIds = serializedViews.map((v: UniverMetaViewConfig) => v.id)
+      // Personal (per-user) view overlay on the MAIN load path — Slice 1/Slice 3 P1 fix. The Workbench
+      // loads via /context (loadContext → ctx.views), NOT GET /views, so the overlay MUST also run here or
+      // a saved personal row is invisible on the main grid. Same contract as GET /views: flag-on + actor
+      // ⇒ this actor's personal override ELSE shared (§1-C); actor = access.userId (§1-B), never a client
+      // id. Runs BEFORE selectedView / fieldPermissions / redaction so (a) personal hidden/order flow into
+      // the derived metadata exactly as the shared view's own facets do, and (b) redaction runs on the
+      // personal filterInfo too (no personal-filter literal leak). Absent override / flag-off ⇒
+      // effectiveViews === serializedViews (byte-identical). `personalOverrideViewIds` is the FE-init
+      // signal: which views have a persisted personal row, so the "My view" toggle reflects server state.
+      let effectiveViews: UniverMetaViewConfig[] = serializedViews
+      let personalOverrideViewIds: string[] = []
+      if (isPersonalViewsEnabled() && access.userId) {
+        const overlays = await fetchPersonalViewConfigsForViews(pool.query.bind(pool), viewIds, access.userId)
+        if (overlays.size > 0) {
+          personalOverrideViewIds = viewIds.filter((id: string) => overlays.has(id))
+          effectiveViews = serializedViews.map((view: UniverMetaViewConfig) => applyPersonalViewOverlay(view, overlays.get(view.id)))
+        }
+      }
+      const selectedView = viewId
+        ? effectiveViews.find((view: UniverMetaViewConfig) => view.id === viewId) ?? null
+        : effectiveViews[0] ?? null
       const viewScopeMap = access.userId ? await loadViewPermissionScopeMap(pool.query.bind(pool), viewIds, access.userId) : new Map()
       // #2052 (b): bind fieldScopeMap to effectiveSheetId (NOT resolvedSheetId) — on a base-only ?baseId=
       // request resolvedSheetId is null but the returned views bind to effectiveSheetId; gating off
@@ -6628,7 +7080,7 @@ export function univerMetaRouter(): Router {
       // #2052 (b): allowed-field set for redacting filter literals — BOTH inputs keyed to effectiveSheetId
       // (activeFields above + this fieldScopeMap), so the redaction matches the sheet whose views ship.
       const allowedFieldIds = computeAllowedFieldIds(activeFields, capabilities, fieldScopeMap)
-      const viewPermissions = deriveViewPermissions(serializedViews, capabilities, viewScopeMap)
+      const viewPermissions = deriveViewPermissions(effectiveViews, capabilities, viewScopeMap)
 
       return res.json({
         ok: true,
@@ -6651,11 +7103,24 @@ export function univerMetaRouter(): Router {
             !isSystemPeopleSheetDescription(row.description)
             && readableSheetRows.some((visibleRow) => String(visibleRow.id) === String(row.id)),
           ),
-          views: serializedViews.map((view: UniverMetaViewConfig) => redactViewConfigFilterLiterals(view, allowedFieldIds)),
+          views: effectiveViews.map((view: UniverMetaViewConfig) => redactViewConfigFilterLiterals(view, allowedFieldIds)),
+          // Slice 3 P1: which of the returned views have a persisted personal override for THIS actor, so the
+          // FE "My view" toggle initializes from server state (not local guesswork). Empty when flag-off / no
+          // override / no actor. Actor-scoped (§1-B) — never reflects another user's rows.
+          personalOverrideViewIds,
           // T8-2 Reset UI flag-visibility contract (#3239): a flag-derived, FE-readable signal so the Reset entry can be
           // truly HIDDEN when off (not a phantom flag read on the client). True iff MULTITABLE_ENABLE_PIT_RESET is on AND
           // the actor is a sheet-admin — mirrors the reset routes' PIT_RESET_ENABLED() + canManageSheetAccess gate.
-          capabilities: { ...capabilities, pitResetEnabled: (String(process.env.MULTITABLE_ENABLE_PIT_RESET ?? '').trim().toLowerCase() === 'true') && capabilities.canManageSheetAccess === true },
+          //
+          // Slice 3 (design-lock multitable-personal-views-slice3-fe-toggle-design-lock-20260706.md §7 Q1):
+          // the personal-views "My view" toggle is gated on this SAME flag-derived-capability pattern — no
+          // client-side env const. Available to every actor who can read (P1: presentation-only, no per-view
+          // opt-in), so unlike pitResetEnabled this is not additionally ANDed with a management capability.
+          capabilities: {
+            ...capabilities,
+            pitResetEnabled: (String(process.env.MULTITABLE_ENABLE_PIT_RESET ?? '').trim().toLowerCase() === 'true') && capabilities.canManageSheetAccess === true,
+            personalViewsEnabled: isPersonalViewsEnabled(),
+          },
           capabilityOrigin,
           fieldPermissions,
           viewPermissions,
@@ -8140,11 +8605,33 @@ export function univerMetaRouter(): Router {
           undeleteHash: hashUndeletePlan(plan), actorId: access.userId,
         })
         const entityName = typeof (rev.before as { name?: unknown })?.name === 'string' ? ((rev.before as { name?: string }).name as string) : undefined
+        // 4c-2: the pre-4c-2 note ("gone and are NOT restored") is a LIE once a tombstone exists for this
+        // exact delete revision — R1 rehydration WILL restore values/links/sequence at execute time. Check
+        // presence (boolean only — no counts, still U4-L5 no-oracle) so the preview stays honest either way.
+        let tombstoneAvailable = false
+        if (rev.entity_type === 'field') {
+          try {
+            const [valueRes, linkRes] = await Promise.all([
+              pool.query('SELECT 1 FROM meta_field_value_tombstones WHERE config_revision_id = $1 LIMIT 1', [rev.id]),
+              pool.query('SELECT 1 FROM meta_link_tombstones WHERE source_revision_id = $1 AND reason = $2 LIMIT 1', [rev.id, 'field_delete']),
+            ])
+            const hasLastValue = typeof (rev.before as { lastValue?: unknown } | null)?.lastValue === 'number'
+            tombstoneAvailable = valueRes.rows.length > 0 || linkRes.rows.length > 0 || hasLastValue
+          } catch (err) {
+            if (!isUndefinedTableError(err, 'meta_field_value_tombstones') && !isUndefinedTableError(err, 'meta_link_tombstones')) throw err
+          }
+        }
         const note = rev.entity_type === 'field'
-          ? 'Undeleting recreates this field definition (name/type/config) at its original position. Its previous cell values, link references, and auto-number counter are gone and are NOT restored.'
+          ? (tombstoneAvailable
+            ? 'Undeleting recreates this field definition (name/type/config) at its original position. A captured tombstone exists for this deletion: previous cell values, link references (to still-alive records), and the auto-number counter will be restored where still applicable.'
+            : 'Undeleting recreates this field definition (name/type/config) at its original position. Its previous cell values, link references, and auto-number counter are gone and are NOT restored.')
           : 'Undeleting recreates this view with its saved configuration.'
-        // U4-L5 no-oracle: name + losses note + an id-collision flag; NO counts, NO raw plan fields.
-        return res.json({ ok: true, data: { undelete: { entityType: rev.entity_type, entityId: rev.entity_id, entityName, note, idCollision: !plan.idFree }, previewToken } })
+        // U4-L5 no-oracle: name + losses note + an id-collision flag + (only when true) a tombstone-availability
+        // flag; NO counts, NO raw plan fields. Omitted-when-false (rather than always present) keeps the
+        // response shape IDENTICAL to pre-4c-2 for every revision with no tombstone — including every revision
+        // from before the capture flag ever existed — so no pre-existing consumer's exact-key-set expectation
+        // (e.g. the undelete opacity golden) can be perturbed by a feature that, for that revision, did nothing.
+        return res.json({ ok: true, data: { undelete: { entityType: rev.entity_type, entityId: rev.entity_id, entityName, note, idCollision: !plan.idFree, ...(tombstoneAvailable ? { tombstoneAvailable: true } : {}) }, previewToken } })
       }
       // T9-W permission-revert (de-escalation-only). The cap block above already requires canManageSheetAccess for
       // permission. Open ONLY when restoring `before` reduces access vs the LIVE grant; escalation/noop is surfaced
@@ -8165,6 +8652,49 @@ export function univerMetaRouter(): Router {
       // field revert (name/order only) is unaffected and stays on the existing safe path.
       if (isFieldRetypeRevert(rev) && process.env.MULTITABLE_ENABLE_FIELD_RETYPE_REVERT !== 'true') {
         return res.status(403).json({ ok: false, error: { code: 'FIELD_RETYPE_REVERT_DISABLED', message: 'field type/property revert is disabled (MULTITABLE_ENABLE_FIELD_RETYPE_REVERT off).' } })
+      }
+      // ── 4c-1 LOSSY / value-transform retype revert PREVIEW (design-lock #3812; owner-ratified 2026-07-08) ────
+      // Second flag, default off, AND requires the base Tier-2 flag (403'd immediately above ⇒ base off = 403 for
+      // the whole surface, the "双闸串联" of §2.1). Flag off ⇒ this branch is never entered ⇒ a property-only field
+      // revert keeps today's behavior byte-for-byte (gated preview here, 422 at execute). Envelope = property-only
+      // reverts on a Batch-1-typed field; see lossy-retype-oracle.ts for why the type-changing arm of §2.1 is read
+      // fail-closed. Preview is a PURE READ: it writes nothing and only re-plays the record-write codec.
+      if (isLossyPropertyRetypeRevertShape(rev) && isLossyRetypeRevertEnabled()) {
+        const fieldRow = await loadLossyRetypeFieldRow(pool.query.bind(pool), rev.entity_id, false)
+        if (!fieldRow) return res.status(409).json({ ok: false, error: { code: 'ENTITY_GONE', message: 'The config entity no longer exists; cannot preview a revert.' } })
+        if (fieldRow.sheetId !== sheetId) return res.status(400).json({ ok: false, error: { code: 'INVALID_REVISION', message: 'field revision entity does not belong to this sheet.' } })
+        // Outside the Batch-1 type envelope → fall through to the pre-existing gated preview (execute 422s it).
+        if (isLossyRetypeSupportedFieldType(fieldRow.type)) {
+          // U-L8 FULL-READ GATE (owner ruling): no full-table read ⇒ 403 for the whole surface. Runs BEFORE any
+          // counting, so no response on this path can ever carry a scoped count or an undisclosed marker.
+          if (!(await hasFullTableReadAccess(req, pool.query.bind(pool), sheetId, access, capabilities))) {
+            return res.status(403).json({ ok: false, error: { code: 'FULL_TABLE_READ_REQUIRED', message: 'A value-transforming field revert requires unrestricted read access to every record and field of this sheet.' } })
+          }
+          // P1-1 TYPE-ERA GUARD (§2.1 "同 type"): a `type` change after this revision puts it in a different era,
+          // and neither driftConflict nor baselineHash can see it (both key off `changed_keys` = ['property']).
+          if (await hasFieldTypeChangeSince(pool.query.bind(pool), sheetId, rev.entity_id, rev.id)) {
+            return res.status(422).json({ ok: false, error: { ...FIELD_TYPE_ERA_MISMATCH } })
+          }
+          // C4 write-symmetric cap — the SAME ceiling the sheet-wide revert uses, checked on BOTH sides, fail-closed
+          // (never a silent truncation, never a partial transform).
+          const cap = resolveSheetRevertMaxRecords()
+          const scanRows = await countLossyRetypeScanRows(pool.query.bind(pool), sheetId)
+          if (scanRows > cap) return res.status(413).json({ ok: false, error: { code: 'SHEET_TOO_LARGE', message: lossyRetypeTooLargeMessage(scanRows, cap) } })
+          const snapshot = await loadEntityConfigSnapshot(pool.query.bind(pool), rev)
+          if (!snapshot) return res.status(409).json({ ok: false, error: { code: 'ENTITY_GONE', message: 'The config entity no longer exists; cannot preview a revert.' } })
+          const cells = await loadLossyRetypeCells(pool.query.bind(pool), sheetId, rev.entity_id, false)
+          const derived = lossyRetypeDerivedRevision(rev, fieldRow.type)
+          const lossSummary = summarizeLoss(computeLossOutcomes(cells, fieldRow.type, lossyRetypeTargetProperty(derived), rev.entity_id))
+          const preview = computeRevertPreview(derived, snapshot)
+          // classifyRevert stays PURE (it gates every field property revert); the flag opens exactly this subset.
+          preview.opKind = 'safe'
+          delete preview.gatedReason
+          const previewToken = mintConfigRestorePreviewIdentity({
+            sheetId, revisionId, entityType: rev.entity_type, entityId: rev.entity_id,
+            baselineHash: preview.baselineHash, lossHash: hashLossSummary(rev.entity_id, lossSummary), actorId: access.userId,
+          })
+          return res.json({ ok: true, data: { preview, previewToken, lossSummary, lossNote: LOSSY_RETYPE_PREVIEW_NOTE, confirm: 'revert-retype-lossy' } })
+        }
       }
       // T9-W Tier 1 (U-L1): sheet_config revert is behind a per-tier flag (default off) — refuse preview AND execute.
       if (rev.entity_type === 'sheet_config') {
@@ -8342,7 +8872,7 @@ export function univerMetaRouter(): Router {
               return { status: 401, code: 'PREVIEW_IDENTITY_INVALID', message: 'A valid server-minted preview identity is required; preview before undeleting.' }
             }
             if (rev.entity_type === 'field') {
-              await recreateFieldFromConfig(query, { sheetId: undeleteSheetId, fieldId: rev.entity_id, before, actorId: getRequestActorId(req), source: 'restore', restoredFromId: rev.id })
+              await recreateFieldFromConfig(query, { sheetId: undeleteSheetId, fieldId: rev.entity_id, before, actorId: getRequestActorId(req), source: 'restore', restoredFromId: rev.id, deleteRevisionId: rev.id })
             } else {
               await recreateViewFromConfig(query, { sheetId: undeleteSheetId, viewId: rev.entity_id, before, actorId: getRequestActorId(req), source: 'restore', restoredFromId: rev.id })
             }
@@ -8400,6 +8930,90 @@ export function univerMetaRouter(): Router {
         if (failure) return res.status(failure.status).json({ ok: false, error: { code: failure.code, message: failure.message } })
         return res.json({ ok: true, data: { permissionReverted: { scope: parsedPerm.scope, entityId: rev.entity_id } } })
       }
+      // ── 4c-1 LOSSY / value-transform retype revert EXECUTE (design-lock #3812; owner-ratified 2026-07-08) ────
+      // ONE txn: lock the field + its cells (FOR UPDATE) → re-check the envelope, the U-L8 full-read gate and the
+      // write-symmetric cap → RE-COMPUTE the loss magnitude and verify the token's opaque lossHash (divergence ⇒ 409
+      // PLAN_DRIFT) → capture the 4c-2 pre-image → apply the config revert → rewrite the coerced/dropped cells →
+      // one record revision per changed cell → the source='restore' config revision (whose id anchors the pre-image).
+      // Any guard returns the failure object with ZERO writes; any throw rolls the whole thing back (C5/L7 atomicity).
+      if (isLossyPropertyRetypeRevertShape(rev) && isLossyRetypeRevertEnabled()) {
+        const liveField = await loadLossyRetypeFieldRow(pool.query.bind(pool), rev.entity_id, false)
+        if (!liveField) return res.status(409).json({ ok: false, error: { code: 'ENTITY_GONE', message: 'The config entity no longer exists; cannot restore.' } })
+        if (liveField.sheetId !== sheetId) return res.status(400).json({ ok: false, error: { code: 'INVALID_REVISION', message: 'field revision entity does not belong to this sheet.' } })
+        // Outside the Batch-1 type envelope → fall through to the generic gated 422 below (fail-closed, C1).
+        if (isLossyRetypeSupportedFieldType(liveField.type)) {
+          // Typed confirm — mirrors the uncreate / undelete / permission-revert destructive tiers on THIS route,
+          // which all answer a missing/incorrect confirm with 400 CONFIRM_REQUIRED (design-lock §2.4 "镜像
+          // uncreate/undelete 模式"). See the PR body: §4's L9 table shorthand says 422; the normative §2.4 mirror
+          // instruction and same-endpoint consistency win, and this is a one-line change if the owner rules otherwise.
+          const confirm = typeof req.body?.confirm === 'string' ? req.body.confirm : ''
+          if (confirm.trim() !== 'revert-retype-lossy') {
+            return res.status(400).json({ ok: false, error: { code: 'CONFIRM_REQUIRED', message: 'Type "revert-retype-lossy" to confirm a value-transforming field revert (cells may be rewritten or emptied).' } })
+          }
+          const lossyRevisionId = randomUUID() // pre-generated: the 4c-2 pre-image anchors to THIS revert's revision
+          let lossyExecuteSummary: LossSummary = { unchanged: 0, coerced: 0, dropped: 0 }
+          const failure = await pool.transaction(async ({ query }): Promise<{ status: number; code: string; message: string } | null> => {
+            const fieldRow = await loadLossyRetypeFieldRow(query, rev.entity_id, true)
+            if (!fieldRow) return { status: 409, code: 'ENTITY_GONE', message: 'The field no longer exists; cannot restore.' }
+            if (fieldRow.sheetId !== sheetId) return { status: 400, code: 'INVALID_REVISION', message: 'field revision entity does not belong to this sheet.' }
+            // Re-check inside the lock: the field could have been retyped out of the envelope since the preview.
+            if (!isLossyRetypeSupportedFieldType(fieldRow.type)) return { status: 422, code: 'RESTORE_NOT_SUPPORTED', message: 'This field revert is not a supported value-transforming revert.' }
+            if (!(await hasFullTableReadAccess(req, query as unknown as QueryFn, sheetId, access, capabilities))) {
+              return { status: 403, code: 'FULL_TABLE_READ_REQUIRED', message: 'A value-transforming field revert requires unrestricted read access to every record and field of this sheet.' }
+            }
+            // P1-1 TYPE-ERA GUARD, re-checked INSIDE the lock alongside the lossSummary recompute: a `type` change
+            // could have landed between preview and execute, and no other control on this path can see it.
+            if (await hasFieldTypeChangeSince(query, sheetId, rev.entity_id, rev.id)) {
+              return { status: 422, ...FIELD_TYPE_ERA_MISMATCH }
+            }
+            const cap = resolveSheetRevertMaxRecords()
+            const scanRows = await countLossyRetypeScanRows(query, sheetId)
+            if (scanRows > cap) return { status: 413, code: 'SHEET_TOO_LARGE', message: lossyRetypeTooLargeMessage(scanRows, cap) }
+            const snapshot = await loadEntityConfigSnapshot(query, rev)
+            if (!snapshot) return { status: 409, code: 'ENTITY_GONE', message: 'The config entity no longer exists; cannot restore.' }
+            const cells = await loadLossyRetypeCells(query, sheetId, rev.entity_id, true)
+            const derived = lossyRetypeDerivedRevision(rev, fieldRow.type)
+            const outcomes = computeLossOutcomes(cells, fieldRow.type, lossyRetypeTargetProperty(derived), rev.entity_id)
+            const lossSummary = summarizeLoss(outcomes)
+            const preview = computeRevertPreview(derived, snapshot)
+            // §2.3: the token binds BOTH the config baseline AND the loss magnitude. The full-read gate makes the
+            // re-computation range identical to the preview's (the whole table), so this is a like-for-like compare.
+            const verdict = verifyConfigRestorePreviewIdentity(previewToken, {
+              sheetId, revisionId, entityType: rev.entity_type, entityId: rev.entity_id,
+              baselineHash: preview.baselineHash, lossHash: hashLossSummary(rev.entity_id, lossSummary), actorId: access.userId,
+            })
+            if (!verdict.valid) {
+              if (verdict.reason === 'loss_drift') return { status: 409, code: 'PLAN_DRIFT', message: 'The values this revert would transform changed since preview; re-preview before reverting.' }
+              if (verdict.reason === 'mismatch_baselineHash') return { status: 409, code: 'PREVIEW_STALE', message: 'The config changed since preview; re-preview before restoring.' }
+              if (verdict.reason === 'expired') return { status: 410, code: 'PREVIEW_EXPIRED', message: 'The preview identity expired; re-preview.' }
+              return { status: 401, code: 'PREVIEW_IDENTITY_INVALID', message: 'A valid server-minted preview identity is required; preview before restoring.' }
+            }
+            if (preview.driftConflict) return { status: 409, code: 'CONFIG_DRIFT', message: 'The config was changed after this revision; cannot safely revert without re-previewing.' }
+            // `derived` (not `rev`): the property written is the sanitizer-normalized one the preview disclosed.
+            // `applyConfigRevert` itself is UNCHANGED — Tier-1/Tier-2 keep passing their raw revision.
+            await applyConfigRevert(query, derived)
+            await applyLossyRetypeCellRewrite(query, {
+              sheetId,
+              fieldId: rev.entity_id,
+              lossyRevisionId,
+              changed: outcomes.filter((o) => o.bucket !== 'unchanged'),
+              cellByRecordId: new Map(cells.map((c) => [c.recordId, c])),
+              actorId: getRequestActorId(req),
+            })
+            await recordConfigRevision(query, {
+              sheetId, entityType: 'field', entityId: rev.entity_id, action: 'update',
+              before: preview.current, after: preview.target, changedKeys: rev.changed_keys,
+              batchId: randomUUID(), actorId: getRequestActorId(req), source: 'restore', restoredFromId: rev.id,
+              id: lossyRevisionId,
+            })
+            lossyExecuteSummary = lossSummary
+            return null
+          })
+          if (failure) return res.status(failure.status).json({ ok: false, error: { code: failure.code, message: failure.message } })
+          invalidateFieldCache(sheetId)
+          return res.json({ ok: true, data: { restored: { revisionId, entityType: rev.entity_type, entityId: rev.entity_id, changedKeys: rev.changed_keys }, lossSummary: lossyExecuteSummary } })
+        }
+      }
       const classify = classifyRevert(rev)
       // classifyRevert stays PURE; the route SUPPORTS only the flag-opened supported subsets — Tier-1 sheet_config
       // (isSupportedSheetConfigRevert) and Tier-2 scalar field retype (isSupportedFieldRetypeRevert) — so it must NOT
@@ -8434,8 +9048,22 @@ export function univerMetaRouter(): Router {
         return null
       })
       if (failure) return res.status(failure.status).json({ ok: false, error: { code: failure.code, message: failure.message } })
+      // D-6: this Tier-1 (sheet_config)/Tier-2 (field name/order/type/property) revert path applies a real
+      // meta_fields UPDATE on success but — unlike the uncreate (:8832) / undelete (:8878) / 4c-1 lossy-retype
+      // (:9003) branches above — never invalidated metaFieldCache. loadSheetFields (:4183) is the ONLY loader
+      // backed by that cache (loadFieldsForSheet, used by RecordService/form-submit for actual write-side
+      // coercion, always queries fresh — unaffected), but loadSheetFields itself feeds GET /view's field list,
+      // the create/duplicate echo mask, and recalcNewRecordFormulas' record-creation formula recompute. A
+      // successful field type/property revert would leave the process serving the PRE-revert field definition
+      // to all of those until the cache happened to be invalidated for an unrelated reason. Same shape as the
+      // sibling branches: only on a real field change, only after the write commits (never on preview/failure/
+      // gated-422 paths above).
+      if (rev.entity_type === 'field') invalidateFieldCache(sheetId)
       return res.json({ ok: true, data: { restored: { revisionId, entityType: rev.entity_type, entityId: rev.entity_id, changedKeys: rev.changed_keys } } })
     } catch (err: unknown) {
+      if (err instanceof TombstoneCaptureCapExceededError) {
+        return res.status(422).json({ ok: false, error: { code: 'TOMBSTONE_CAPTURE_CAP_EXCEEDED', message: err.message } })
+      }
       const hint = getDbNotReadyMessage(err)
       if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
       console.error('[univer-meta] config-restore execute failed:', err)
@@ -8894,7 +9522,7 @@ export function univerMetaRouter(): Router {
         const guard = fieldById.get(ch.fieldId)
         const perm = fieldPermissions[ch.fieldId]
         const staticOk = !!guard && !guard.hidden && guard.readOnly !== true
-        const layer3Ok = !!perm && perm.visible !== false && perm.readOnly !== true
+        const layer3Ok = !isFieldWriteForbidden(perm) // W1-3 LOCK-F2: shared predicate, same invariant
         return !staticOk || !layer3Ok
       })
       if (hasForbidden) {
@@ -8931,6 +9559,7 @@ export function univerMetaRouter(): Router {
           sheetScope,
           access,
           source: 'restore',
+          restoredFromVersion: targetVersion, // R11 back-reference (OD-0=(a)): legacy /restore is the 3rd version-restore path
         })
         const newVersion = result.updated.find((u) => u.recordId === recordId)?.version ?? currentVersion + 1
         return res.json({ ok: true, data: { recordId, newVersion, noop: false, restoredFieldIds, skippedFieldIds: [] } })
@@ -9051,7 +9680,7 @@ export function univerMetaRouter(): Router {
         const guard = fieldById.get(ch.fieldId)
         const perm = fieldPermissions[ch.fieldId]
         const staticOk = !!guard && !guard.hidden && guard.readOnly !== true
-        const layer3Ok = !!perm && perm.visible !== false && perm.readOnly !== true
+        const layer3Ok = !isFieldWriteForbidden(perm) // W1-3 LOCK-F2: shared predicate, same invariant
         return !staticOk || !layer3Ok
       })
       if (hasForbidden) return res.status(403).json({ ok: false, error: { code: 'RESTORE_FORBIDDEN', message: 'Not permitted to restore one or more fields in this revision' } })
@@ -9072,6 +9701,7 @@ export function univerMetaRouter(): Router {
           sheetScope,
           access,
           source: 'restore',
+          restoredFromVersion: targetVersion, // R11 back-reference (OD-0=(a)): record-restore-execute
         })
         const newVersion = result.updated.find((u) => u.recordId === recordId)?.version ?? currentVersion + 1
         return res.json({ ok: true, data: { recordId, newVersion, noop: false, restoredFieldIds: selectedDiff.map((c) => c.fieldId) } })
@@ -9194,7 +9824,7 @@ export function univerMetaRouter(): Router {
         const guard = fieldById.get(ch.fieldId)
         const perm = fieldPermissions[ch.fieldId]
         const staticOk = !!guard && !guard.hidden && guard.readOnly !== true
-        const layer3Ok = !!perm && perm.visible !== false && perm.readOnly !== true
+        const layer3Ok = !isFieldWriteForbidden(perm) // W1-3 LOCK-F2: shared predicate, same invariant
         return !staticOk || !layer3Ok
       })
       const writeHelpers: RecordWriteHelpers = createRecordWriteHelpers(req, pool)
@@ -9223,7 +9853,7 @@ export function univerMetaRouter(): Router {
           const result = await recordWriteService.patchRecords({
             sheetId, changesByRecord: new Map(contributing.map((c) => [c.recordId, c.diff])), actorId: getRequestActorId(req),
             fields, visiblePropertyFields: readableEchoFields, visiblePropertyFieldIds: readableEchoFieldIds,
-            attachmentFields, fieldById, capabilities, sheetScope, access, source: 'restore',
+            attachmentFields, fieldById, capabilities, sheetScope, access, source: 'restore', restoredFromVersion: targetVersion, // R11 back-reference: restore-batch-execute (all-or-nothing)
           })
           const versionByRecord = new Map(result.updated.map((u) => [u.recordId, u.version]))
           const records: Outcome[] = contributing.map((c) => ({ recordId: c.recordId, status: 'restored', newVersion: versionByRecord.get(c.recordId), restoredFieldIds: c.diff.map((d) => d.fieldId) }))
@@ -9251,7 +9881,7 @@ export function univerMetaRouter(): Router {
           const result = await recordWriteService.patchRecords({
             sheetId, changesByRecord: new Map([[c.recordId, c.diff]]), actorId: getRequestActorId(req),
             fields, visiblePropertyFields: readableEchoFields, visiblePropertyFieldIds: readableEchoFieldIds,
-            attachmentFields, fieldById, capabilities, sheetScope, access, source: 'restore',
+            attachmentFields, fieldById, capabilities, sheetScope, access, source: 'restore', restoredFromVersion: targetVersion, // R11 back-reference: restore-batch-execute (per-record)
           })
           outcomes.push({ recordId: c.recordId, status: 'restored', newVersion: result.updated.find((u) => u.recordId === c.recordId)?.version, restoredFieldIds: c.diff.map((d) => d.fieldId) })
         } catch (err) {
@@ -9283,8 +9913,9 @@ export function univerMetaRouter(): Router {
   type RevertSheetCaps = Awaited<ReturnType<typeof resolveSheetCapabilities>>
   // D3 / PIT-6 hard ceiling: a whole-sheet revert above this many records is REFUSED fail-closed (not processed
   // synchronously, never truncated). Async-above-threshold is a follow-up; v1 hard-refuses. Env-overridable.
-  const SHEET_REVERT_MAX_RECORDS = Number(process.env.MULTITABLE_SHEET_REVERT_MAX_RECORDS) > 0
-    ? Math.floor(Number(process.env.MULTITABLE_SHEET_REVERT_MAX_RECORDS)) : 5000
+  // Resolved ONCE here (router construction), exactly as the pre-extraction route-local const did; the shared
+  // resolver now also backs the 4c-1 lossy-retype write-symmetric cap (C4 — same ceiling, one definition).
+  const SHEET_REVERT_MAX_RECORDS = resolveSheetRevertMaxRecords()
   type SheetRevertTooLarge = { tooLarge: true; recordCount: number; scope: 'live_sheet' | 'effective_write_set' }
   const sheetRevertTooLargeMessage = (computed: SheetRevertTooLarge) => {
     if (computed.scope === 'effective_write_set') return `This revert would touch ${computed.recordCount} records, above the ${SHEET_REVERT_MAX_RECORDS}-record revert ceiling; a sheet-wide revert of this size is refused.`
@@ -9507,6 +10138,7 @@ export function univerMetaRouter(): Router {
       // rebuilds OUTBOUND meta_links (L3; NO inbound — L4 A: inbound re-appears on the linking record's next save), and
       // appends a 'restore' create-revision (the Time Machine source, NOT a plain 'rest' create). Realtime post-commit.
       const resurrectedIds: string[] = []
+      const undeleteInboundTotals = { replayed: 0, total: 0 }
       if (resurrects.length > 0) {
         // Mirror-read-only hardening (C2/I-1): resurrect only WRITABLE (forward) links, never the mirror side of a
         // twoWay link (the patchContext guard's `readOnly` = `isFieldAlwaysReadOnly` ⇒ `mirrorOf`). Explicit skip so
@@ -9532,6 +10164,48 @@ export function univerMetaRouter(): Router {
                 }
               }
               await recordRecordRevision(query, { sheetId, recordId: r.recordId, version: 1, action: 'create', source: 'restore', changedFieldIds: Object.keys(r.snapshot), patch: r.snapshot, snapshot: r.snapshot, actorId: undeleteActorId })
+              // 4c-3 §7: the SECOND resurrection surface reuses the SAME replay helper — never a
+              // parallel inbound semantic. Anchor derivation (R11 A′, ratified 2026-07-11 — replaces the
+              // R8 `created_at DESC` latest-delete heuristic): resurrect has no trash row to read an
+              // anchor off (unlike restoreRecord's `meta_records_trash.delete_revision_id`), but the
+              // revert already carries `asOf` T on the wire and the semantics are "restore the record as
+              // it existed at T". A record is in the resurrect set precisely because its latest revision
+              // with `created_at <= T` is NOT a delete (reconstructRecordsAtT, delete-aware), so the
+              // deletion that removed that T-era record is the FIRST 'delete' revision strictly AFTER T.
+              // Deriving the anchor from T (below) is therefore vintage-EXACT: under multi-vintage churn
+              // (delete → restore → delete → resurrect an OLDER vintage via PIT asOf) it anchors to THAT
+              // vintage's deletion and replays exactly that vintage's captured edges — never a later
+              // vintage's, never a cross-vintage union. The deterministic tiebreak
+              // `created_at ASC, version ASC, id ASC` (LOCK-11 parity, complement of reconstruct's
+              // `created_at <= T ... DESC`) makes the choice unique and stable even when two delete
+              // revisions share a millisecond (version is the exercised discriminator; id is
+              // belt-and-suspenders — the version index is not UNIQUE). A delete at exactly
+              // `created_at == T` that is the record's latest `<= T` revision ⇒ absent at T ⇒ not in the
+              // resurrect set (golden E). The STRICTNESS of `> T` (vs `>= T`) is load-bearing in the
+              // inverse case: a re-create at exactly T makes the record PRESENT at T, so its removing
+              // delete is a strictly-later one — `>= T` would mis-anchor to the prior vintage's
+              // same-instant delete (golden F). If the deletion
+              // happened while capture was off (or its tombstones aged out via retention) the anchor
+              // still resolves but carries zero tombstones ⇒ zero replay — silent and honest, never
+              // fabricated. OVER-replay stays impossible regardless, because precondition 6 (neighbour
+              // consent — replay only what N's OWN live `data` still declares) gates every edge
+              // independently of the anchor. See `multitable-undelete-inbound-resurrect-realdb.test.ts`
+              // for the vintage-exact + same-ms tiebreak + boundary goldens. Runs AFTER the outbound
+              // loop (NOT EXISTS must see those rows; self-link stays single).
+              if (isRecordUndeleteInboundEnabled()) {
+                const anchorRes = await query(
+                  `SELECT id FROM meta_record_revisions
+                    WHERE sheet_id = $1 AND record_id = $2 AND action = 'delete' AND created_at > $3
+                    ORDER BY created_at ASC, version ASC, id ASC LIMIT 1`,
+                  [sheetId, r.recordId, asOfIso],
+                )
+                const anchorId = ((anchorRes.rows as Array<{ id?: string }>)[0]?.id) ?? null
+                if (anchorId) {
+                  const replay = await replayInboundLinks(query, anchorId)
+                  undeleteInboundTotals.replayed += replay.replayed
+                  undeleteInboundTotals.total += replay.total
+                }
+              }
               resurrectedIds.push(r.recordId)
             }
           })
@@ -9553,7 +10227,8 @@ export function univerMetaRouter(): Router {
         if (deniedIds.has(c.recordId)) { outcomes.push({ recordId: c.recordId, status: 'skipped', skipReason: 'denied' }); continue }
         const hasForbidden = c.diff.some((ch) => {
           const guard = fieldById.get(ch.fieldId); const perm = fieldPermissions[ch.fieldId]
-          return !(guard && !guard.hidden && guard.readOnly !== true) || !(perm && perm.visible !== false && perm.readOnly !== true)
+          // W1-3 LOCK-F2: shared predicate for the layer-3 clause, same invariant as before.
+          return !(guard && !guard.hidden && guard.readOnly !== true) || isFieldWriteForbidden(perm)
         })
         if (hasForbidden) { outcomes.push({ recordId: c.recordId, status: 'skipped', skipReason: 'forbidden' }); continue }
         try {
@@ -9567,7 +10242,7 @@ export function univerMetaRouter(): Router {
         }
       }
       const revertedCount = outcomes.filter((o) => o.status === 'reverted').length
-      return res.json({ ok: true, data: { asOf: asOfIso, strategy: 'revert', records: outcomes, revertedCount, skippedCount: outcomes.length - revertedCount, resurrectedCount: resurrectedIds.length, undeleteRecordIds: resurrectedIds } })
+      return res.json({ ok: true, data: { asOf: asOfIso, strategy: 'revert', records: outcomes, revertedCount, skippedCount: outcomes.length - revertedCount, resurrectedCount: resurrectedIds.length, undeleteRecordIds: resurrectedIds, ...(isRecordUndeleteInboundEnabled() && resurrectedIds.length > 0 ? { undeleteInbound: undeleteInboundTotals } : {}) } })
     } catch (err) {
       if (isUndefinedTableError(err, 'meta_record_revisions')) return res.status(404).json({ ok: false, error: { code: 'VERSION_NOT_FOUND', message: 'No revision history available' } })
       const hint = getDbNotReadyMessage(err)
@@ -9586,9 +10261,18 @@ export function univerMetaRouter(): Router {
   // writes happen in ONE transaction; a single denied/forbidden/locked/conflicted target aborts the whole Reset with
   // zero writes/deletes/revisions.
   const PIT_RESET_ENABLED = () => String(process.env.MULTITABLE_ENABLE_PIT_RESET ?? '').trim().toLowerCase() === 'true'
+  const PIT_RESET_RETENTION_BLOCKED = () => String(process.env.MULTITABLE_META_REVISION_RETENTION_ENABLED ?? '').trim() === '1'
+  const sendPitResetRetentionBlocked = (res: Response) => res.status(409).json({
+    ok: false,
+    error: {
+      code: 'RESET_RETENTION_CONFLICT',
+      message: 'Reset-to-T is refused while meta revision retention is enabled; disable MULTITABLE_META_REVISION_RETENTION_ENABLED before using PIT reset.',
+    },
+  })
 
   router.post('/sheets/:sheetId/reset-preview', async (req: Request, res: Response) => {
     if (!PIT_RESET_ENABLED()) return res.status(403).json({ ok: false, error: { code: 'RESET_DISABLED', message: 'Reset-to-T is disabled (MULTITABLE_ENABLE_PIT_RESET is off).' } })
+    if (PIT_RESET_RETENTION_BLOCKED()) return sendPitResetRetentionBlocked(res)
     const sheetId = typeof req.params.sheetId === 'string' ? req.params.sheetId.trim() : ''
     const parsed = z.object({ asOf: z.string().min(1) }).safeParse(req.body)
     if (!sheetId || !parsed.success) return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'sheetId and asOf are required' } })
@@ -9629,6 +10313,7 @@ export function univerMetaRouter(): Router {
 
   router.post('/sheets/:sheetId/reset-execute', async (req: Request, res: Response) => {
     if (!PIT_RESET_ENABLED()) return res.status(403).json({ ok: false, error: { code: 'RESET_DISABLED', message: 'Reset-to-T is disabled (MULTITABLE_ENABLE_PIT_RESET is off).' } })
+    if (PIT_RESET_RETENTION_BLOCKED()) return sendPitResetRetentionBlocked(res)
     const sheetId = typeof req.params.sheetId === 'string' ? req.params.sheetId.trim() : ''
     // D4: a typed two-step confirm — Reset (destructive) cannot be triggered by a stray Revert-shaped call.
     const parsed = z.object({ asOf: z.string().min(1), previewIdentity: z.string().min(1), confirm: z.literal('reset') }).safeParse(req.body)
@@ -9785,6 +10470,18 @@ export function univerMetaRouter(): Router {
               throw new ServiceValidationError('Record deletion is not allowed', 'FORBIDDEN')
             }
             const snapshot = normalizeJson(row.data)
+            // 4c-3 §7 (D-3): this inline delete wrote trash + a delete revision but never CAPTURED —
+            // it was the second resurrection surface whose inbound edges were silently lost forever.
+            // Pre-generate the revision id so the tombstones can anchor to it (same shape as
+            // record-service.deleteRecord); capture MUST run before the links DELETE below destroys
+            // the rows. Cap breach throws (TombstoneCaptureCapExceededError) → whole reset rolls
+            // back, fail-closed — never a half-captured destruction.
+            const resetDeleteRevisionId = randomUUID()
+            if (isTombstoneCaptureEnabled()) {
+              const totalToCapture = await countInboundLinkCaptureRows(query, candidate.recordId)
+              assertWithinCaptureCap(totalToCapture)
+              await insertInboundLinkTombstones(query, { sheetId, recordId: candidate.recordId, sourceRevisionId: resetDeleteRevisionId })
+            }
             await query('DELETE FROM meta_links WHERE record_id = $1 OR foreign_record_id = $1', [candidate.recordId])
             await recordRecordRevision(query, {
               sheetId,
@@ -9797,13 +10494,24 @@ export function univerMetaRouter(): Router {
               patch: {},
               snapshot,
               batchId,
+              id: resetDeleteRevisionId,
             })
-            await query(
-              `INSERT INTO meta_records_trash
-                 (record_id, sheet_id, base_id, data, original_version, created_by, deleted_by, original_created_at, original_updated_at)
-               VALUES ($1, $2, $3, $4::jsonb, $5, $6, $7, $8, $9)`,
-              [candidate.recordId, sheetId, baseId, JSON.stringify(snapshot), serverVersion, createdBy, actorId, row.created_at ?? null, row.updated_at ?? null],
-            )
+            try {
+              await query(
+                `INSERT INTO meta_records_trash
+                   (record_id, sheet_id, base_id, data, original_version, created_by, deleted_by, original_created_at, original_updated_at, delete_revision_id)
+                 VALUES ($1, $2, $3, $4::jsonb, $5, $6, $7, $8, $9, $10)`,
+                [candidate.recordId, sheetId, baseId, JSON.stringify(snapshot), serverVersion, createdBy, actorId, row.created_at ?? null, row.updated_at ?? null, resetDeleteRevisionId],
+              )
+            } catch (err) {
+              if (!isUndefinedColumnError42703(err, 'delete_revision_id')) throw err
+              await query(
+                `INSERT INTO meta_records_trash
+                   (record_id, sheet_id, base_id, data, original_version, created_by, deleted_by, original_created_at, original_updated_at)
+                 VALUES ($1, $2, $3, $4::jsonb, $5, $6, $7, $8, $9)`,
+                [candidate.recordId, sheetId, baseId, JSON.stringify(snapshot), serverVersion, createdBy, actorId, row.created_at ?? null, row.updated_at ?? null],
+              )
+            }
             // lock-guarded: PIT Reset deletes in the same transaction after ensureRecordNotLocked above.
             await query('DELETE FROM meta_records WHERE sheet_id = $1 AND id = $2', [sheetId, candidate.recordId])
             deletedRecordIds.push(candidate.recordId)
@@ -9815,6 +10523,11 @@ export function univerMetaRouter(): Router {
         }
         if (err instanceof ServiceValidationError || err instanceof RecordServiceValidationError || err instanceof ServiceFieldForbiddenError || err instanceof RecordServiceFieldForbiddenError) {
           return res.status(409).json({ ok: false, error: { code: 'RESET_BLOCKED', message: 'Reset is all-or-nothing: a target is forbidden/locked, so nothing was written.' } })
+        }
+        // 4c-3 c4 (review P3-1): a cap breach inside the reset txn rolls the WHOLE reset back
+        // (fail-closed) — map it to the same 422 the delete route uses instead of a generic 500.
+        if (err instanceof TombstoneCaptureCapExceededError) {
+          return res.status(422).json({ ok: false, error: { code: 'TOMBSTONE_CAPTURE_CAP_EXCEEDED', message: err.message } })
         }
         throw err
       }
@@ -10517,6 +11230,11 @@ export function univerMetaRouter(): Router {
       const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), preflightSheetId)
       if (!capabilities.canManageFields) return sendForbidden(res)
       let sheetId = ''
+      // W1-1 (design-lock 2026-07-05 §3 LOCK-B, B2/B3): set INSIDE the transaction when this PATCH
+      // triggers the expression-change bulk recompute; the snapshot of live record ids is reused
+      // for BOTH the pre-commit cap check and the post-commit chunked recompute (B3) so the
+      // response counts are internally consistent (no re-query drift between the two).
+      let bulkRecomputeRecordIds: string[] | null = null
       const updated = await pool.transaction(async ({ query }) => {
         const existing = await query(
           'SELECT id, sheet_id, name, type, property, "order" FROM meta_fields WHERE id = $1',
@@ -10648,6 +11366,28 @@ export function univerMetaRouter(): Router {
           throw new ValidationError(hierarchyParentMutationError)
         }
 
+        // W1-1 (design-lock §3 LOCK-B, B1/B2): an expression-change PATCH bulk-recomputes every
+        // live record afterward (B3). B1 trigger = the request explicitly CARRIES
+        // `property.expression` on a (or newly-converted-to) formula field — fires on BOTH an
+        // actual-change AND a same-expression re-save (the re-save is the deliberate GF8 recovery
+        // lever; B1 is "expression present", never "value differs"). Bound BEFORE committing the
+        // config (BS-6 fail-closed posture): over the cap aborts the WHOLE transaction so the
+        // config change itself never lands — no silent partial/truncated recompute.
+        if (nextType === 'formula' && expressionInPayload) {
+          const maxRows = Number(process.env.MULTITABLE_FORMULA_BULK_RECOMPUTE_MAX_ROWS) > 0
+            ? Math.floor(Number(process.env.MULTITABLE_FORMULA_BULK_RECOMPUTE_MAX_ROWS))
+            : 1000
+          // ORDER BY for deterministic chunk composition (B3) — a stable processing order makes a
+          // partial mid-chunk failure's "what already persisted" set reproducible; it does not
+          // change WHICH records are in scope, only the order they are chunked/attempted in.
+          const liveRes = await query('SELECT id FROM meta_records WHERE sheet_id = $1 ORDER BY id ASC', [sheetId])
+          const liveRecordIds = ((liveRes as any).rows as Array<{ id: unknown }>).map((r) => String(r.id))
+          if (liveRecordIds.length > maxRows) {
+            throw new FormulaExpressionBulkOverCapError(liveRecordIds.length, maxRows)
+          }
+          bulkRecomputeRecordIds = liveRecordIds
+        }
+
         if (typeof desiredOrder === 'number' && desiredOrder !== currentOrder) {
           // T9-R1: a reorder shifts the fields BETWEEN old and new position — record each shifted field's order too.
           if (desiredOrder < currentOrder) {
@@ -10710,13 +11450,74 @@ export function univerMetaRouter(): Router {
       })
 
       invalidateFieldCache(sheetId)
-      return res.json({ ok: true, data: { field: updated } })
+
+      // W1-1 (design-lock §3 LOCK-B, B3): AFTER the config transaction commits, in the SAME
+      // request — a recompute failure can never roll back the already-committed config (B6).
+      // Chunked (pages of 200) via the SAME recalculateFormulaFields the REST write-path uses
+      // (B4: under the EDITING ACTOR's own `req`, so the write-side taint skip applies verbatim —
+      // no system/full-access bypass) with an explicit target override (B3) since the route
+      // already knows which field must be recomputed. B5's write posture (raw derived UPDATE, no
+      // version bump, no meta_record_revisions row) is inherited unchanged from that helper.
+      let bulkRecompute:
+        | { attempted: number; recomputed: number; taintSkipped: number; failed: boolean; error?: string }
+        | undefined
+      if (bulkRecomputeRecordIds) {
+        const BULK_RECOMPUTE_CHUNK_SIZE = 200
+        const freshFields = await loadSheetFields({ query: pool.query.bind(pool) }, sheetId)
+        const explicitFormulaFieldIds = new Set([fieldId])
+        let recomputed = 0
+        let processedCount = 0
+        let failed = false
+        let errorCode: string | undefined
+        for (let i = 0; i < bulkRecomputeRecordIds.length; i += BULK_RECOMPUTE_CHUNK_SIZE) {
+          const chunk = bulkRecomputeRecordIds.slice(i, i + BULK_RECOMPUTE_CHUNK_SIZE)
+          try {
+            const results = await recalculateFormulaFields(
+              req,
+              pool.query.bind(pool),
+              sheetId,
+              freshFields,
+              chunk,
+              [],
+              undefined,
+              explicitFormulaFieldIds,
+            )
+            recomputed += results.length
+            processedCount += chunk.length
+          } catch (err) {
+            // B6: abort remaining chunks; the committed config stands; un-recomputed rows remain
+            // on the pre-slice lazy-refresh behavior (strictly no worse than today). Recovery = a
+            // same-expression re-save (B1 fires on expression-present, not expression-changed).
+            console.error('[univer-meta] expression-change bulk recompute failed mid-chunk:', err)
+            failed = true
+            errorCode = 'BULK_RECOMPUTE_FAILED'
+            break
+          }
+        }
+        bulkRecompute = {
+          attempted: bulkRecomputeRecordIds.length,
+          recomputed,
+          taintSkipped: processedCount - recomputed,
+          failed,
+          ...(errorCode ? { error: errorCode } : {}),
+        }
+      }
+
+      return res.json({ ok: true, data: { field: updated, ...(bulkRecompute ? { bulkRecompute } : {}) } })
     } catch (err: any) {
       if (err instanceof NotFoundError) {
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: err.message } })
       }
       if (err instanceof PermissionError) {
         return sendForbidden(res, err.message)
+      }
+      if (err instanceof FormulaExpressionBulkOverCapError) {
+        // B2: fail-closed, config NOT saved (the transaction already rolled back) — no silent
+        // partial/truncated recompute.
+        return res.status(422).json({
+          ok: false,
+          error: { code: 'FORMULA_EXPRESSION_BULK_OVER_CAP', message: err.message, total: err.total, max: err.max },
+        })
       }
       if (err instanceof ValidationError) {
         return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: err.message } })
@@ -10764,6 +11565,9 @@ export function univerMetaRouter(): Router {
     } catch (err: any) {
       if (err instanceof NotFoundError) {
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: err.message } })
+      }
+      if (err instanceof TombstoneCaptureCapExceededError) {
+        return res.status(422).json({ ok: false, error: { code: 'TOMBSTONE_CAPTURE_CAP_EXCEEDED', message: err.message } })
       }
       const hint = getDbNotReadyMessage(err)
       if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
@@ -13895,6 +14699,26 @@ export function univerMetaRouter(): Router {
       }
       if (!capabilities.canEditRecord) return sendForbidden(res)
 
+      // W1-3 (multitable-per-subject-field-write-gate-w13-designlock-20260705, LOCK-F1/F3/F4): Layer-3
+      // per-subject field-WRITE gate, parity with grid `/patch` (`buildRecordPatchContext` is the SAME
+      // factory that gate uses). `RecordService.patchRecord` (below) enforces only PROPERTY-level guards
+      // (readOnly/hidden/computed); it never loads `field_permissions` at all. This route serves BOTH
+      // `mst_` token AND session/JWT callers — `apiTokenAuth` only intercepts `mst_`-prefixed bearer
+      // tokens and calls `next()` for everything else (middleware/api-token-auth.ts), so an ordinary
+      // session-authenticated single-record edit reaches this same handler too. Gate fail-closed, before
+      // any write. Field ids here are caller-submitted (this request's own `data` keys), so echoing the
+      // rejected ones back leaks nothing beyond what the caller already sent — same posture as `/patch`.
+      const patchContext = await buildRecordPatchContext(req, pool.query.bind(pool), sheetId, access, capabilities)
+      if (!patchContext) {
+        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
+      }
+      const forbiddenWriteFieldIds = [...new Set(Object.keys(parsed.data.data ?? {}))].filter((fid) =>
+        isFieldWriteForbidden(patchContext.fieldPermissions[fid]),
+      )
+      if (forbiddenWriteFieldIds.length > 0) {
+        return sendForbidden(res, `Field(s) not writable for this user: ${forbiddenWriteFieldIds.join(', ')}`)
+      }
+
       const recordService = new RecordService(pool, eventBus)
       if (yjsInvalidator) {
         recordService.setPostCommitHooks([createYjsInvalidationPostCommitHook(yjsInvalidator)])
@@ -14584,6 +15408,51 @@ export function univerMetaRouter(): Router {
     }
   })
 
+  async function ensureAttachmentDownloadReadable(
+    req: Request,
+    res: Response,
+    query: QueryFn,
+    metadata: {
+      id: string
+      sheetId: string
+      recordId: string | null
+      fieldId: string | null
+    },
+  ): Promise<boolean> {
+    if (!metadata.sheetId) {
+      res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Attachment not found: ${metadata.id}` } })
+      return false
+    }
+
+    const { access, capabilities } = await resolveSheetReadableCapabilities(req, query, metadata.sheetId)
+    if (!access.userId) {
+      res.status(401).json({ error: 'Authentication required' })
+      return false
+    }
+    if (!capabilities.canRead) {
+      sendForbidden(res)
+      return false
+    }
+
+    if (metadata.recordId && !access.isAdminRole && await loadRowLevelReadDenyEnabled(query, metadata.sheetId)) {
+      const denied = await loadDeniedRecordIds(query, metadata.sheetId, access.userId)
+      if (denied.has(metadata.recordId)) {
+        res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Attachment not found: ${metadata.id}` } })
+        return false
+      }
+    }
+
+    if (metadata.fieldId) {
+      const allowedFieldIds = await loadAllowedFieldIds(query, metadata.sheetId, access.userId, capabilities)
+      if (!allowedFieldIds.has(metadata.fieldId)) {
+        res.status(403).json({ ok: false, error: { code: 'FIELD_FORBIDDEN', message: 'Attachment field is not readable' } })
+        return false
+      }
+    }
+
+    return true
+  }
+
   router.post('/attachments', async (req: Request, res: Response) => {
     try {
       if (!multitableUpload) {
@@ -14703,16 +15572,13 @@ export function univerMetaRouter(): Router {
       if (!metadata) {
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Attachment not found: ${attachmentId}` } })
       }
-      if (metadata.sheetId) {
-        const { access, capabilities } = await resolveSheetReadableCapabilities(req, pool.query.bind(pool), metadata.sheetId)
-        if (!access.userId) {
-          return res.status(401).json({ error: 'Authentication required' })
-        }
-        if (!capabilities.canRead) return sendForbidden(res)
-      }
+      const query = pool.query.bind(pool)
+      if (!await ensureAttachmentDownloadReadable(req, res, query, metadata)) return
 
       const storage = getAttachmentStorageService()
-      const buffer = await readAttachmentBinaryShared({ storage, storageFileId: metadata.storageFileId })
+      // F3 design-lock G8: read by the persisted physical storage_path (index-free direct read) so a
+      // restart never 404s a still-present attachment; storageFileId is the legacy fallback.
+      const buffer = await readAttachmentBinaryShared({ storage, storageFileId: metadata.storageFileId, storagePath: metadata.storagePath })
       const mimeType = metadata.mimeType
       const fileName = metadata.filename ?? metadata.originalName ?? attachmentId
       const forceInline = req.query.thumbnail === 'true' || isImageMimeType(mimeType)
@@ -14833,7 +15699,17 @@ export function univerMetaRouter(): Router {
       })
 
       const storage = getAttachmentStorageService()
-      await deleteAttachmentBinaryShared({ storage, storageFileId: attachmentRow.storageFileId })
+      // F9 design-lock GF9-1/GF9-2 (owner CHANGES-REQUESTED P2-1①/②): delete by the persisted
+      // storage_path (index-free, mirrors the download path's `:15569` storagePath usage above) instead
+      // of the drifting id-based index lookup, and pass query+attachmentId so a resolved delete stamps
+      // `blob_purged_at` for the compensating sweep.
+      await deleteAttachmentBinaryShared({
+        storage,
+        storageFileId: attachmentRow.storageFileId,
+        storagePath: attachmentRow.storagePath,
+        query: pool.query.bind(pool),
+        attachmentId,
+      })
 
       if (updatedRecordRealtimeScope) {
         publishMultitableSheetRealtime({
@@ -15169,6 +16045,9 @@ export function univerMetaRouter(): Router {
           },
         })
       }
+      if (err instanceof TombstoneCaptureCapExceededError) {
+        return res.status(422).json({ ok: false, error: { code: 'TOMBSTONE_CAPTURE_CAP_EXCEEDED', message: err.message } })
+      }
       const hint = getDbNotReadyMessage(err)
       if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
       console.error('[univer-meta] delete record failed:', err)
@@ -15296,7 +16175,8 @@ export function univerMetaRouter(): Router {
           return { capabilities, ...(sheetScope ? { sheetScope } : {}) }
         },
       })
-      return res.json({ ok: true, data: { restored: result.recordId, sheetId: result.sheetId } })
+      // 4c-3 §6 honest signal (omitted-when-off/absent — flag-off responses stay byte-identical):
+      return res.json({ ok: true, data: { restored: result.recordId, sheetId: result.sheetId, ...(result.inbound ? { inbound: result.inbound } : {}) } })
     } catch (err) {
       if (err instanceof RecordServicePermissionError) {
         return sendForbidden(res, err.message)
@@ -15730,10 +16610,10 @@ export function univerMetaRouter(): Router {
       // entry means not-visible/unknown ⇒ forbidden, never a false block of a normal field. `/patch`
       // fieldIds are caller-submitted, so naming the rejected ids leaks nothing (nonexistent and
       // read-masked fields are indistinguishable here — both fail the same way, so no existence oracle).
-      const forbiddenWriteFieldIds = [...new Set(parsed.data.changes.map((c) => c.fieldId))].filter((fid) => {
-        const perm = fieldPermissions[fid]
-        return !perm || perm.visible === false || perm.readOnly === true
-      })
+      // W1-3 LOCK-F2: shared predicate (`isFieldWriteForbidden`), same invariant as before.
+      const forbiddenWriteFieldIds = [...new Set(parsed.data.changes.map((c) => c.fieldId))].filter((fid) =>
+        isFieldWriteForbidden(fieldPermissions[fid]),
+      )
       if (forbiddenWriteFieldIds.length > 0) {
         return sendForbidden(res, `Field(s) not writable for this user: ${forbiddenWriteFieldIds.join(', ')}`)
       }
@@ -15751,6 +16631,13 @@ export function univerMetaRouter(): Router {
       if (yjsInvalidator) {
         recordWriteService.setPostCommitHooks([createYjsInvalidationPostCommitHook(yjsInvalidator)])
       }
+
+      // LOCK-12: one bulk `/patch` request = one History Center batch. Minted ONCE here (before the
+      // all-or-nothing / partialSuccess branch split) and threaded explicitly into EVERY patchRecords
+      // call below — including each per-record call in the partialSuccess branch — so every record this
+      // request actually applies shares one batch_id, regardless of how many patchRecords calls it takes
+      // to apply them. Skipped/denied records are simply never written under it (no oracle change).
+      const batchId = randomUUID()
 
       if (parsed.data.partialSuccess === true) {
         const updated: Array<{ recordId: string; version: number }> = []
@@ -15775,6 +16662,9 @@ export function univerMetaRouter(): Router {
               sheetScope,
               access,
               oapiAudit: buildOapiAuditContext(req, 'upsert', 'records:write'),
+              // LOCK-12: shared across every per-record call in this loop (see batchId comment above) —
+              // all surviving records in this partial-success request land in ONE History Center batch.
+              batchId,
             })
             updated.push(...result.updated)
             if (result.records) records.push(...(result.records as Array<{ recordId: string; data: Record<string, unknown> }>))
@@ -15818,6 +16708,9 @@ export function univerMetaRouter(): Router {
         sheetScope,
         access,
         oapiAudit: buildOapiAuditContext(req, 'upsert', 'records:write'),
+        // LOCK-12: same shared batchId minted above — a no-op change for this single-call branch (it was
+        // already one batch), kept explicit for symmetry with the partialSuccess branch.
+        batchId,
       })
 
       return res.json({
@@ -15828,6 +16721,12 @@ export function univerMetaRouter(): Router {
           ...(result.linkSummaries ? { linkSummaries: result.linkSummaries } : {}),
           ...(result.attachmentSummaries ? { attachmentSummaries: result.attachmentSummaries } : {}),
           ...(result.relatedRecords ? { relatedRecords: result.relatedRecords } : {}),
+          // W3-5: echo the batchId so a REST/grid caller can deep-link into the History Center for exactly
+          // this commit. LOCK-12: the `partialSuccess` branch above now shares this SAME batchId across
+          // every per-record patchRecords call, so a bulk paste/fill with some records skipped/denied still
+          // lands its surviving records in one History Center batch (see the batchId comment above the
+          // branch split).
+          ...(result.batchId ? { batchId: result.batchId } : {}),
         },
       })
     } catch (err) {

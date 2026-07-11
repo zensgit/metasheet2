@@ -23,7 +23,7 @@ const rev = (over: Partial<MetaConfigRevision>): MetaConfigRevision => ({
 type Props = {
   visible: boolean; items: MetaConfigRevision[]; loading: boolean; entityType: string
   recordLabelOf: (id: string) => string; isZh: boolean; onClose: () => void; onFilterChange: (t: string) => void
-  previewRevert?: (id: string) => Promise<ConfigRestorePreview>; executeRevert?: (id: string, h: string) => Promise<void>; onReverted?: () => void
+  previewRevert?: (id: string) => Promise<ConfigRestorePreview>; executeRevert?: (id: string, h: string, confirm?: string) => Promise<void>; onReverted?: () => void
 }
 const mounted: Array<{ unmount: () => void }> = []
 function mountModal(over: Partial<Props>) {
@@ -36,6 +36,12 @@ function mountModal(over: Partial<Props>) {
 }
 const q = (s: string) => document.body.querySelector(s) as HTMLElement | null
 const flush = async () => { await Promise.resolve(); await nextTick(); await Promise.resolve(); await nextTick() }
+const typeInto = async (selector: string, value: string) => {
+  const input = q(selector) as HTMLInputElement
+  input.value = value
+  input.dispatchEvent(new Event('input'))
+  await flush()
+}
 // Poll until a condition holds (CI-robust): the real client's fetch→text→parse→render chain takes a variable number
 // of ticks, so a fixed `flush()` count races in CI. Retry-with-flush until the predicate is true (or time out).
 const waitUntil = async (pred: () => boolean, tries = 100): Promise<void> => {
@@ -239,8 +245,213 @@ describe('MetaConfigHistoryModal — T9-W revert action (server-gated, FE render
     expect(document.body.textContent).toContain('Old') // target
     ;(q('[data-test="config-restore-confirm-btn"]') as HTMLButtonElement).click()
     await flush()
-    expect(executeRevert).toHaveBeenCalledWith('a', 'tok1') // the server-minted previewToken, NOT a client hash
+    expect(executeRevert).toHaveBeenCalledWith('a', 'tok1', undefined) // the server-minted previewToken, NOT a client hash
     expect(onReverted).toHaveBeenCalledTimes(1)
+  })
+
+  it('UNCREATE: create rows open server preview, show the server note, and require typed confirm before execute', async () => {
+    const previewRevert = vi.fn(async (): Promise<ConfigRestorePreview> => ({
+      revisionId: 'create-1',
+      previewToken: 'uncreate-token',
+      uncreate: {
+        entityType: 'field',
+        entityId: 'fld_created',
+        entityName: 'Temporary field',
+        note: 'Server says this permanently drops the created field and values.',
+      },
+    }))
+    const executeRevert = vi.fn(async () => {})
+    mountModal({
+      items: [rev({ id: 'create-1', action: 'create', entityId: 'fld_created', after: { name: 'Temporary field' } })],
+      previewRevert,
+      executeRevert,
+    })
+    await nextTick()
+    ;(q('[data-test="config-history-revert"]') as HTMLButtonElement).click()
+    await flush()
+
+    expect(previewRevert).toHaveBeenCalledWith('create-1')
+    expect(document.body.textContent).toContain('Server says this permanently drops')
+    expect(document.body.textContent).toContain('Temporary field')
+    expect((q('[data-test="config-restore-confirm-btn"]') as HTMLButtonElement).disabled).toBe(true)
+
+    await typeInto('[data-test="config-restore-type-input"]', 'uncreate')
+    expect((q('[data-test="config-restore-confirm-btn"]') as HTMLButtonElement).disabled).toBe(false)
+    ;(q('[data-test="config-restore-confirm-btn"]') as HTMLButtonElement).click()
+    await flush()
+    expect(executeRevert).toHaveBeenCalledWith('create-1', 'uncreate-token', 'uncreate')
+  })
+
+  it('DESTRUCTIVE execute FAILURE (P3-4): a server 409/422 rejection surfaces config-restore-error, modal stays open', async () => {
+    // Runbook (multitable-config-tier-acceptance-runbook-20260705.md §§ii-iv) defines destructive-tier
+    // execute-time server rejections (GRANT_DRIFT/PLAN_DRIFT/ID_COLLISION/RESTORE_NOT_SUPPORTED, all
+    // non-2xx). The FE surfaces raw e.message generically via confirmRevert's catch — this was never
+    // exercised. Drive a real execute-time rejection and assert the error renders + the dialog doesn't
+    // silently close (the operator can see what happened, not just an unhandled-rejection void).
+    const previewRevert = vi.fn(async (): Promise<ConfigRestorePreview> => ({
+      revisionId: 'create-fail',
+      previewToken: 'uncreate-token-fail',
+      uncreate: {
+        entityType: 'field',
+        entityId: 'fld_created_fail',
+        entityName: 'Field to uncreate',
+        note: 'Server says this permanently drops the created field and values.',
+      },
+    }))
+    const executeRevert = vi.fn(async () => { throw new Error('ID_COLLISION: an entity with this id already exists') })
+    const onReverted = vi.fn()
+    mountModal({
+      items: [rev({ id: 'create-fail', action: 'create', entityId: 'fld_created_fail', after: { name: 'Field to uncreate' } })],
+      previewRevert,
+      executeRevert,
+      onReverted,
+    })
+    await nextTick()
+    ;(q('[data-test="config-history-revert"]') as HTMLButtonElement).click()
+    await flush()
+    await typeInto('[data-test="config-restore-type-input"]', 'uncreate')
+    ;(q('[data-test="config-restore-confirm-btn"]') as HTMLButtonElement).click()
+    await flush()
+
+    expect(executeRevert).toHaveBeenCalledWith('create-fail', 'uncreate-token-fail', 'uncreate')
+    expect(q('[data-test="config-restore-error"]')?.textContent).toBe('ID_COLLISION: an entity with this id already exists')
+    expect(q('[data-test="config-restore-confirm"]')).toBeTruthy() // the dialog stays open, not silently dismissed
+    expect(onReverted).not.toHaveBeenCalled() // no false "success" emission on a failed execute
+  })
+
+  it('UNDELETE collision: delete rows show note + idCollision and fail closed without execute', async () => {
+    mountModal({
+      items: [rev({ id: 'delete-1', action: 'delete', before: { name: 'Deleted field' }, after: null })],
+      previewRevert: vi.fn(async (): Promise<ConfigRestorePreview> => ({
+        revisionId: 'delete-1',
+        previewToken: 'undelete-token',
+        undelete: {
+          entityType: 'field',
+          entityId: 'fld_deleted',
+          entityName: 'Deleted field',
+          note: 'Definition only; values are not restored.',
+          idCollision: true,
+        },
+      })),
+      executeRevert: vi.fn(),
+    })
+    await nextTick()
+    ;(q('[data-test="config-history-revert"]') as HTMLButtonElement).click()
+    await flush()
+
+    expect(document.body.textContent).toContain('Definition only')
+    expect(document.body.textContent).toContain('ID collision')
+    expect(document.body.textContent).toContain('yes')
+    expect(q('[data-test="config-restore-type-input"]')).toBeFalsy()
+    expect(q('[data-test="config-restore-confirm-btn"]')).toBeFalsy()
+  })
+
+  it('UNDELETE non-collision (P3-3): idCollision:false → executable, typed "undelete" confirm executes', async () => {
+    // Only the idCollision:true (blocked) branch was ever exercised. This is the executable positive
+    // path: idCollision:false must pass canExecutePreview, require the typed "undelete" confirm, and
+    // call executeRevert(id, previewToken, 'undelete') — mirroring the UNCREATE test's shape above.
+    const previewRevert = vi.fn(async (): Promise<ConfigRestorePreview> => ({
+      revisionId: 'delete-2',
+      previewToken: 'undelete-token-2',
+      undelete: {
+        entityType: 'field',
+        entityId: 'fld_deleted_2',
+        entityName: 'Deleted field 2',
+        note: 'Definition only; values are not restored.',
+        idCollision: false,
+      },
+    }))
+    const executeRevert = vi.fn(async () => {})
+    mountModal({
+      items: [rev({ id: 'delete-2', action: 'delete', before: { name: 'Deleted field 2' }, after: null })],
+      previewRevert,
+      executeRevert,
+    })
+    await nextTick()
+    ;(q('[data-test="config-history-revert"]') as HTMLButtonElement).click()
+    await flush()
+
+    expect(previewRevert).toHaveBeenCalledWith('delete-2')
+    expect(document.body.textContent).toContain('Definition only')
+    // exact-text assertion (not a loose substring — "no" would also match inside "note"/"not"): find the
+    // ID-collision row specifically and check its rendered value is exactly "no".
+    const idCollisionRow = Array.from(document.body.querySelectorAll('[data-test="config-restore-changes"] .cfg-history__change'))
+      .find((row) => row.querySelector('.cfg-history__key')?.textContent === 'ID collision')
+    expect(idCollisionRow?.querySelector('.cfg-history__after')?.textContent).toBe('no')
+    expect(q('[data-test="config-restore-gated"]')).toBeFalsy() // NOT blocked, unlike the collision case
+    expect((q('[data-test="config-restore-confirm-btn"]') as HTMLButtonElement).disabled).toBe(true)
+
+    await typeInto('[data-test="config-restore-type-input"]', 'undelete')
+    expect((q('[data-test="config-restore-confirm-btn"]') as HTMLButtonElement).disabled).toBe(false)
+    ;(q('[data-test="config-restore-confirm-btn"]') as HTMLButtonElement).click()
+    await flush()
+    expect(executeRevert).toHaveBeenCalledWith('delete-2', 'undelete-token-2', 'undelete')
+  })
+
+  it('PERMISSION revert: permission rows show direction/note and require revert-permission confirm', async () => {
+    const executeRevert = vi.fn(async () => {})
+    mountModal({
+      items: [rev({ id: 'perm-1', entityType: 'permission', entityId: 'sheet:[\"user\",\"u1\"]', action: 'create' })],
+      previewRevert: vi.fn(async (): Promise<ConfigRestorePreview> => ({
+        revisionId: 'perm-1',
+        previewToken: 'permission-token',
+        permissionRevert: {
+          scope: 'sheet',
+          direction: 'de-escalation',
+          supported: true,
+          note: "Server says this reduces the subject's access.",
+        },
+      })),
+      executeRevert,
+    })
+    await nextTick()
+    ;(q('[data-test="config-history-revert"]') as HTMLButtonElement).click()
+    await flush()
+
+    expect(document.body.textContent).toContain('Direction')
+    expect(document.body.textContent).toContain('de-escalation')
+    expect(document.body.textContent).toContain('reduces the subject')
+    ;(q('[data-test="config-restore-confirm-btn"]') as HTMLButtonElement).click()
+    await flush()
+    expect(executeRevert).not.toHaveBeenCalled()
+
+    await typeInto('[data-test="config-restore-type-input"]', 'revert-permission')
+    ;(q('[data-test="config-restore-confirm-btn"]') as HTMLButtonElement).click()
+    await flush()
+    expect(executeRevert).toHaveBeenCalledWith('perm-1', 'permission-token', 'revert-permission')
+  })
+
+  it('PERMISSION revert NOT SUPPORTED (P3-1): supported:false + escalation → blocked note shown, no confirm/type surface', async () => {
+    // canExecutePreview() reads preview.permissionRevert.supported === true; only the SAFE-supported
+    // case above was ever exercised. This is the negative gate: an escalating, server-unsupported revert
+    // must render as blocked (the reason) and expose NEITHER the typed-confirm input NOR the confirm button.
+    const previewRevert = vi.fn(async (): Promise<ConfigRestorePreview> => ({
+      revisionId: 'perm-2',
+      previewToken: 'permission-token-2',
+      permissionRevert: {
+        scope: 'sheet',
+        direction: 'escalation',
+        supported: false,
+        note: 'Server says this would escalate the subject beyond what revert supports.',
+      },
+    }))
+    const executeRevert = vi.fn(async () => {})
+    mountModal({
+      items: [rev({ id: 'perm-2', entityType: 'permission', entityId: 'sheet:[\"user\",\"u2\"]', action: 'create' })],
+      previewRevert,
+      executeRevert,
+    })
+    await nextTick()
+    ;(q('[data-test="config-history-revert"]') as HTMLButtonElement).click()
+    await flush()
+
+    expect(previewRevert).toHaveBeenCalledWith('perm-2')
+    expect(document.body.textContent).toContain('escalation')
+    expect(q('[data-test="config-restore-gated"]')).toBeTruthy() // blockedReason() rendered
+    expect(document.body.textContent).toContain('would escalate the subject beyond what revert supports')
+    expect(q('[data-test="config-restore-type-input"]')).toBeFalsy()
+    expect(q('[data-test="config-restore-confirm-btn"]')).toBeFalsy()
+    expect(executeRevert).not.toHaveBeenCalled()
   })
 
   it('END-TO-END wire: Revert button → real client → config-restore-preview then -execute with the SERVER previewToken', async () => {
@@ -260,7 +471,7 @@ describe('MetaConfigHistoryModal — T9-W revert action (server-gated, FE render
     mountModal({
       items: [updateRev()], onReverted,
       previewRevert: (id: string) => client.getConfigRestorePreview('sheet_1', id),
-      executeRevert: (id: string, token: string) => client.executeConfigRestore('sheet_1', id, token),
+      executeRevert: (id: string, token: string, confirm) => client.executeConfigRestore('sheet_1', id, token, confirm),
     })
     await nextTick()
     ;(q('[data-test="config-history-revert"]') as HTMLButtonElement).click()
@@ -273,6 +484,46 @@ describe('MetaConfigHistoryModal — T9-W revert action (server-gated, FE render
     // the execute body carries the SERVER-minted token (not a client hash) — preview-first can't be bypassed via the UI
     const execBody = JSON.parse((fetchFn.mock.calls[1][1] as RequestInit).body as string)
     expect(execBody.previewToken).toBe('server-token-xyz')
+    expect(execBody.baselineHash).toBeUndefined()
+    expect(onReverted).toHaveBeenCalledTimes(1)
+  })
+
+  it('DESTRUCTIVE wire: real client carries previewToken + confirm:"uncreate" to execute', async () => {
+    const fetchFn = vi.fn(async (url: string) => {
+      if (url.includes('config-restore-preview')) {
+        return new Response(JSON.stringify({ ok: true, data: {
+          uncreate: {
+            entityType: 'field',
+            entityId: 'fld_created',
+            entityName: 'Created Field',
+            note: 'Server destructive note.',
+          },
+          previewToken: 'server-uncreate-token',
+        } }), { status: 200 })
+      }
+      return new Response(JSON.stringify({ ok: true, data: { uncreated: { entityType: 'field', entityId: 'fld_created' } } }), { status: 200 })
+    })
+    const client = new MultitableApiClient({ fetchFn })
+    const onReverted = vi.fn()
+    mountModal({
+      items: [rev({ id: 'create-1', action: 'create', entityId: 'fld_created', after: { name: 'Created Field' } })],
+      onReverted,
+      previewRevert: (id: string) => client.getConfigRestorePreview('sheet_1', id),
+      // Workbench-style forwarder: the modal passes the destructive confirm explicitly while safe update bodies stay unchanged.
+      executeRevert: (id: string, token: string, confirm) => client.executeConfigRestore('sheet_1', id, token, confirm),
+    })
+    await nextTick()
+    ;(q('[data-test="config-history-revert"]') as HTMLButtonElement).click()
+    await waitUntil(() => !!q('[data-test="config-restore-type-input"]'))
+    await typeInto('[data-test="config-restore-type-input"]', 'uncreate')
+    ;(q('[data-test="config-restore-confirm-btn"]') as HTMLButtonElement).click()
+    await waitUntil(() => fetchFn.mock.calls.length >= 2 && onReverted.mock.calls.length >= 1)
+
+    expect(fetchFn.mock.calls[0][0]).toContain('/config-restore-preview')
+    expect(fetchFn.mock.calls[1][0]).toContain('/config-restore-execute')
+    const execBody = JSON.parse((fetchFn.mock.calls[1][1] as RequestInit).body as string)
+    expect(execBody.previewToken).toBe('server-uncreate-token')
+    expect(execBody.confirm).toBe('uncreate')
     expect(execBody.baselineHash).toBeUndefined()
     expect(onReverted).toHaveBeenCalledTimes(1)
   })

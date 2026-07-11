@@ -31,11 +31,24 @@ export interface DingTalkApprovalCardDeliveryRow {
   recipient_dingtalk_user_id: string
   delivery_kind: DingTalkApprovalCardDeliveryKind
   task_id: string | null
+  /**
+   * DT-R2: the directory integration (corp) the card was sent through — the callback path's
+   * credential/secret anchor. NULL on legacy rows and env-only sends (verify falls back to the
+   * legacy single-integration resolver for those).
+   */
+  integration_id: string | null
   card_state: DingTalkApprovalCardState
   acted_action: string | null
   acted_by: string | null
   acted_at: Date | string | null
-  send_status: 'pending' | 'sent' | 'failed'
+  /**
+   * `outcome_unknown` (PR #4046 Phase B): the send threw with the transport's
+   * isDingTalkOutcomeUnknown marker — DingTalk may well have delivered the card even though the
+   * client saw no usable response. NEVER auto-resent (owner doctrine); reconciliation is
+   * manual/ops, and a valid HMAC callback (the token only exists inside the delivered card's
+   * deep link) is itself proof of delivery, so outcome_unknown rows stay claimable.
+   */
+  send_status: 'pending' | 'sent' | 'failed' | 'outcome_unknown'
   send_error: string | null
   created_at: Date | string
   updated_at: Date | string
@@ -44,7 +57,7 @@ export interface DingTalkApprovalCardDeliveryRow {
 type QueryFn = (sql: string, params?: unknown[]) => Promise<{ rows: unknown[] }>
 
 const RETURNING_COLUMNS =
-  'id, instance_id, node_key, recipient_user_id, recipient_dingtalk_user_id, delivery_kind, task_id, card_state, acted_action, acted_by, acted_at, send_status, send_error, created_at, updated_at'
+  'id, instance_id, node_key, recipient_user_id, recipient_dingtalk_user_id, delivery_kind, task_id, integration_id, card_state, acted_action, acted_by, acted_at, send_status, send_error, created_at, updated_at'
 
 export interface InsertDingTalkApprovalCardDeliveryInput {
   /** Optional caller-supplied id; defaults to a fresh UUID. Doubles as the interactive-card outTrackId (Slice B). */
@@ -56,6 +69,8 @@ export interface InsertDingTalkApprovalCardDeliveryInput {
   deliveryKind: DingTalkApprovalCardDeliveryKind
   /** asyncsend_v2 task id — recorded after the send call returns (Slice A). */
   taskId?: string | null
+  /** DT-R2: the assignee's directory integration id (uuid) — null/omitted for env-only sends. */
+  integrationId?: string | null
 }
 
 export async function insertDingTalkApprovalCardDelivery(
@@ -63,10 +78,14 @@ export async function insertDingTalkApprovalCardDelivery(
   input: InsertDingTalkApprovalCardDeliveryInput,
 ): Promise<DingTalkApprovalCardDeliveryRow> {
   const id = input.id && input.id.trim().length > 0 ? input.id.trim() : randomUUID()
+  const integrationId =
+    typeof input.integrationId === 'string' && input.integrationId.trim().length > 0
+      ? input.integrationId.trim()
+      : null
   const result = await query(
     `INSERT INTO dingtalk_approval_card_deliveries
-       (id, instance_id, node_key, recipient_user_id, recipient_dingtalk_user_id, delivery_kind, task_id)
-     VALUES ($1, $2, $3, $4, $5, $6, $7)
+       (id, instance_id, node_key, recipient_user_id, recipient_dingtalk_user_id, delivery_kind, task_id, integration_id)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
      RETURNING ${RETURNING_COLUMNS}`,
     [
       id,
@@ -76,6 +95,7 @@ export async function insertDingTalkApprovalCardDelivery(
       input.recipientDingTalkUserId,
       input.deliveryKind,
       input.taskId ?? null,
+      integrationId,
     ],
   )
   return result.rows[0] as DingTalkApprovalCardDeliveryRow
@@ -93,11 +113,41 @@ export async function findDingTalkApprovalCardDeliveryById(
 }
 
 /**
+ * §7.6 Delivery Closure — task_id trace accessor. An operator holding a DingTalk asyncsend_v2
+ * `task_id` (the receipt of an accepted async message) resolves it back to the delivery row(s) —
+ * instance, recipient, send_status — so "was this async approval-card message accepted, and under
+ * what task_id" is answerable without reading logs. Backed by the partial index idx_dacd_task_id.
+ *
+ * Returns an array (newest first): task_id is NOT enforced UNIQUE — each send records its own, so
+ * in practice one row per task_id, but a lost-then-reconciled or re-sent card could share one, and
+ * the trace surface must surface all matches rather than silently pick one. A blank task_id never
+ * matches (the partial index excludes NULLs; an empty string is short-circuited here).
+ */
+export async function findDingTalkApprovalCardDeliveriesByTaskId(
+  query: QueryFn,
+  taskId: string,
+): Promise<DingTalkApprovalCardDeliveryRow[]> {
+  const trimmed = taskId.trim()
+  if (trimmed.length === 0) return []
+  const result = await query(
+    `SELECT ${RETURNING_COLUMNS}
+       FROM dingtalk_approval_card_deliveries
+      WHERE task_id = $1
+      ORDER BY created_at DESC`,
+    [trimmed],
+  )
+  return result.rows as DingTalkApprovalCardDeliveryRow[]
+}
+
+/**
  * Atomic acted-claim: succeeds for exactly one caller while the card is still `sent` AND was
- * actually delivered (`send_status='sent'` — review P2: a pending/failed send never produced a
- * live button, so nothing may claim it). Returns the updated row for the winner, `null` for
- * everyone else (duplicate callback, double tap, undelivered card, or a card already
- * superseded/expired) — losers re-read via `find…ById` to render the real terminal state.
+ * possibly delivered (`send_status IN ('sent','outcome_unknown')` — review P2: a pending/failed
+ * send never produced a live button, so nothing may claim it; PR #4046 Phase B widened the set by
+ * exactly `outcome_unknown`, whose card MAY in fact have been delivered — a valid HMAC callback
+ * proves it was, so the ledger's send-time uncertainty must not make a delivered card inoperable).
+ * Returns the updated row for the winner, `null` for everyone else (duplicate callback, double
+ * tap, undelivered card, or a card already superseded/expired) — losers re-read via `find…ById`
+ * to render the real terminal state.
  */
 export async function claimDingTalkApprovalCardDeliveryActed(
   query: QueryFn,
@@ -107,7 +157,7 @@ export async function claimDingTalkApprovalCardDeliveryActed(
   const result = await query(
     `UPDATE dingtalk_approval_card_deliveries
      SET card_state = 'acted', acted_action = $2, acted_by = $3, acted_at = NOW(), updated_at = NOW()
-     WHERE id = $1 AND card_state = 'sent' AND send_status = 'sent'
+     WHERE id = $1 AND card_state = 'sent' AND send_status IN ('sent', 'outcome_unknown')
      RETURNING ${RETURNING_COLUMNS}`,
     [id, input.action, input.actedBy],
   )
@@ -139,6 +189,28 @@ export async function markDingTalkApprovalCardDeliverySendFailed(
   const result = await query(
     `UPDATE dingtalk_approval_card_deliveries
      SET send_status = 'failed', send_error = $2, updated_at = NOW()
+     WHERE id = $1 AND send_status = 'pending'
+     RETURNING ${RETURNING_COLUMNS}`,
+    [id, error],
+  )
+  return (result.rows[0] as DingTalkApprovalCardDeliveryRow | undefined) ?? null
+}
+
+/**
+ * PR #4046 Phase B: records a send whose outcome is UNKNOWN (network error / timeout / 5xx /
+ * malformed 2xx — the transport's isDingTalkOutcomeUnknown marker). Distinct from `failed`
+ * (definite rejection): the card may well have reached the recipient, so this state is never
+ * auto-resent AND stays claimable by a valid HMAC callback. Same pending-only guard as the
+ * other A-2b transitions.
+ */
+export async function markDingTalkApprovalCardDeliverySendOutcomeUnknown(
+  query: QueryFn,
+  id: string,
+  error: string,
+): Promise<DingTalkApprovalCardDeliveryRow | null> {
+  const result = await query(
+    `UPDATE dingtalk_approval_card_deliveries
+     SET send_status = 'outcome_unknown', send_error = $2, updated_at = NOW()
      WHERE id = $1 AND send_status = 'pending'
      RETURNING ${RETURNING_COLUMNS}`,
     [id, error],

@@ -1,6 +1,9 @@
 import { computed, reactive, ref, watch, type Ref } from 'vue'
 import { apiFetch as baseApiFetch } from '../../utils/api'
 import { normalizeImportPayloadColumns } from './attendanceImportPayload'
+import { blockedSpreadsheetMessage, detectSpreadsheetByName, inspectImportFile } from './importFileGuard'
+import { convertXlsxFileToCsvText, isDirectConvertibleXlsxName, xlsxConvertFailureMessage } from './importXlsxConvert'
+import { withCsvBom } from './csvExport'
 
 type ApiFetchFn = typeof baseApiFetch
 type Translate = (en: string, zh: string) => string
@@ -921,6 +924,9 @@ export function useAttendanceAdminImportWorkflow({
   const importMode = ref<AttendanceImportMode>('override')
   const importMappingProfiles = ref<AttendanceImportMappingProfile[]>([])
   const importCsvFile = ref<File | null>(null)
+  // X1 xlsx direct import: converted CSV text for a selected .xlsx.
+  const importCsvConvertedText = ref('')
+  const importCsvConvertedSheetName = ref('')
   const importCsvFileName = ref('')
   const importCsvFileId = ref('')
   const importCsvFileRowCountHint = ref<number | null>(null)
@@ -1312,14 +1318,65 @@ export function useAttendanceAdminImportWorkflow({
 
   function setImportCsvFile(file: File | null) {
     importCsvFile.value = file
+    // Any (re)selection invalidates a previous xlsx conversion — the convert
+    // path writes the fresh text back AFTER calling this (review #3755 P2-1:
+    // clearing only on null let a stale conversion shadow a directly-set CSV).
+    importCsvConvertedText.value = ''
+    importCsvConvertedSheetName.value = ''
     importCsvFileName.value = file?.name ?? ''
     importCsvFileId.value = ''
     importCsvFileRowCountHint.value = null
     importCsvFileExpiresAt.value = ''
   }
 
-  function handleImportCsvChange(event: Event) {
-    setImportCsvFile(extractFileFromEvent(event))
+  async function handleImportCsvChange(event: Event) {
+    const file = extractFileFromEvent(event)
+    importCsvConvertedText.value = ''
+    importCsvConvertedSheetName.value = ''
+    if (file) {
+      const verdict = await inspectImportFile(file)
+      // Rapid re-selection race (xlsx-guard lock §7): if the input no longer
+      // holds this file, a newer selection owns the state — drop this stale
+      // verdict (accepting OR blocking) instead of clobbering it.
+      if (extractFileFromEvent(event) !== file) return
+      if (!verdict.ok) {
+        // X1 (xlsx-direct lock, D1=A/D2): a plain `.xlsx` converts in-browser.
+        if (verdict.kind === 'xlsx' && isDirectConvertibleXlsxName(file.name)) {
+          const converted = await convertXlsxFileToCsvText(file)
+          if (extractFileFromEvent(event) !== file) return
+          if (converted.ok) {
+            setImportCsvFile(file)
+            importCsvConvertedText.value = converted.csvText
+            importCsvConvertedSheetName.value = converted.sheetName
+            reportStatus(tr(
+              `Excel converted: sheet "${converted.sheetName}" is ready as CSV.`,
+              `Excel 已转换：工作表「${converted.sheetName}」已就绪为 CSV。`,
+            ))
+            return
+          }
+          const failure = xlsxConvertFailureMessage(converted.reason)
+          setImportCsvFile(null)
+          reportStatus(tr(failure.en, failure.zh), 'error', {
+            context: 'import-preview',
+            action: 'retry-preview-import',
+          })
+          const input = event.target as HTMLInputElement | null
+          if (input) input.value = ''
+          return
+        }
+        setImportCsvFile(null)
+        const blocked = blockedSpreadsheetMessage(verdict.kind)
+        reportStatus(tr(blocked.en, blocked.zh), 'error', {
+          context: 'import-preview',
+          hint: tr('Save the file as CSV, then re-select it.', '请另存为 CSV 后重新选择文件。'),
+          action: 'retry-preview-import',
+        })
+        const input = event.target as HTMLInputElement | null
+        if (input) input.value = ''
+        return
+      }
+    }
+    setImportCsvFile(file)
   }
 
   async function loadImportUserMapFile(file: File | null) {
@@ -1400,7 +1457,7 @@ export function useAttendanceAdminImportWorkflow({
         const csvText = await response.text()
         if (csvText.trim()) {
           const source = normalizeIdentifier(selectedImportProfile.value?.source ?? importTemplateGuide.value?.source ?? 'attendance') ?? 'attendance'
-          downloadText(`attendance-import-template-${source}.csv`, csvText, 'text/csv;charset=utf-8')
+          downloadText(`attendance-import-template-${source}.csv`, withCsvBom(csvText), 'text/csv;charset=utf-8')
           reportStatus(tr('CSV template downloaded.', 'CSV 模板已下载。'))
           return
         }
@@ -1441,7 +1498,7 @@ export function useAttendanceAdminImportWorkflow({
     }
 
     const source = normalizeIdentifier(guide.source) ?? 'attendance'
-    downloadText(`attendance-import-template-${source}.csv`, csvText, 'text/csv;charset=utf-8')
+    downloadText(`attendance-import-template-${source}.csv`, withCsvBom(csvText), 'text/csv;charset=utf-8')
     reportStatus(tr('CSV template downloaded.', 'CSV 模板已下载。'))
   }
 
@@ -1488,6 +1545,8 @@ export function useAttendanceAdminImportWorkflow({
       method: 'POST',
       body: file as unknown as BodyInit,
       headers: {
+        // Upstream importFileGuard already blocks spreadsheets, so normalizing a
+        // Windows .csv's application/vnd.ms-excel MIME to text/csv here is safe.
         'Content-Type': file?.type && file.type.toLowerCase().includes('csv') ? file.type : 'text/csv',
       },
     })
@@ -1523,6 +1582,16 @@ export function useAttendanceAdminImportWorkflow({
 
     try {
       const file = importCsvFile.value
+      const blockedKind = detectSpreadsheetByName(file?.name)
+      // X1: a converted .xlsx is legitimate here — its CSV text substitutes below.
+      if (blockedKind && !importCsvConvertedText.value) {
+        const blocked = blockedSpreadsheetMessage(blockedKind)
+        reportStatus(tr(blocked.en, blocked.zh), 'error', {
+          context: 'import-preview',
+          action: 'retry-preview-import',
+        })
+        return
+      }
       const base = parseAttendanceImportJsonConfig(importForm.payload) ?? {}
       const next: Record<string, any> = {
         ...base,
@@ -1543,9 +1612,14 @@ export function useAttendanceAdminImportWorkflow({
       }
       if (Object.keys(csvOptions).length) next.csvOptions = csvOptions
 
-      const shouldUpload = importDebugOptions.forceUploadCsv || file.size >= IMPORT_CSV_UPLOAD_THRESHOLD_BYTES
+      const convertedText = importCsvConvertedText.value
+      const effectiveSize = convertedText ? convertedText.length : file.size
+      const shouldUpload = importDebugOptions.forceUploadCsv || effectiveSize >= IMPORT_CSV_UPLOAD_THRESHOLD_BYTES
       if (shouldUpload) {
-        const uploaded = await uploadImportCsvFile(file)
+        const uploadFile = convertedText
+          ? new File([convertedText], file.name.replace(/\.xlsx$/i, '.csv'), { type: 'text/csv' })
+          : file
+        const uploaded = await uploadImportCsvFile(uploadFile)
         importCsvFileId.value = uploaded.fileId
         importCsvFileRowCountHint.value = Number.isFinite(uploaded.rowCount) && uploaded.rowCount > 0 ? uploaded.rowCount : null
         importCsvFileExpiresAt.value = uploaded.expiresAt
@@ -1556,7 +1630,7 @@ export function useAttendanceAdminImportWorkflow({
           `CSV 已上传：${importCsvFileName.value || '文件'}（${importCsvFileRowCountHint.value ?? '未知'} 行）。`
         ))
       } else {
-        const csvText = await readFileText(file)
+        const csvText = convertedText || await readFileText(file)
         importCsvFileId.value = ''
         importCsvFileRowCountHint.value = null
         importCsvFileExpiresAt.value = ''
@@ -2271,6 +2345,8 @@ export function useAttendanceAdminImportWorkflow({
     importTemplateGuide,
     selectedImportProfileGuide,
     importCsvFile,
+    importCsvConvertedText,
+    importCsvConvertedSheetName,
     importCsvFileName,
     importCsvFileId,
     importCsvFileRowCountHint,

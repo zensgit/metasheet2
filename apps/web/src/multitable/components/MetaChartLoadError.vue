@@ -3,18 +3,18 @@
        (or timeout) would otherwise leave the panel silently empty; this surfaces it + offers retry. -->
   <div class="meta-chart-load-error" data-chart-load-error="true">
     <span class="meta-chart-load-error__msg">{{ viewRenderLabel('dashboard.chartLoadFailed', isZh) }}</span>
-    <button
-      type="button"
+    <MtButton
       class="meta-chart-load-error__retry"
       data-action="retry-chart-load"
       @click="onRetry"
-    >{{ viewRenderLabel('dashboard.retry', isZh) }}</button>
+    >{{ viewRenderLabel('dashboard.retry', isZh) }}</MtButton>
   </div>
 </template>
 
 <script setup lang="ts">
 import { useLocale } from '../../composables/useLocale'
 import { viewRenderLabel } from '../utils/meta-view-render-labels'
+import { MtButton } from '../ui'
 
 const { isZh } = useLocale()
 
@@ -46,17 +46,9 @@ function onRetry(): void {
   min-height: 120px;
   padding: 16px;
   font-size: 12px;
-  color: #b91c1c;
+  color: var(--ms-color-danger, #b91c1c);
   text-align: center;
 }
-
-.meta-chart-load-error__retry {
-  border: 1px solid #cbd5e1;
-  border-radius: 8px;
-  padding: 4px 12px;
-  background: #fff;
-  color: #0f172a;
-  font-size: 12px;
-  cursor: pointer;
-}
+/* .meta-chart-load-error__retry: the retry control is now <MtButton> (token-styled); its bespoke
+   button CSS was removed (P2-1c). The class is kept on the element only for selector stability. */
 </style>

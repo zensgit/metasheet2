@@ -1529,4 +1529,118 @@ describe('Attendance self-service dashboard', () => {
     expect(container!.textContent).not.toContain('Makeup-punch quota for this cycle has been used.')
     expect(container!.textContent).not.toContain('Code: MAKEUP_PUNCH_QUOTA_EXCEEDED')
   })
+
+  it('UI-P0 hero punch card: live clock renders and punch buttons keep their contract', async () => {
+    const apiFetchMock = vi.mocked(apiFetch)
+    apiFetchMock.mockImplementation(async () => jsonResponse(200, { ok: true, data: { items: [], summary: null } }))
+
+    app = createApp(AttendanceView, { mode: 'overview' })
+    app.mount(container!)
+    await flushUi(4)
+
+    const hero = container!.querySelector('[data-testid="attendance-hero-punch"]') as HTMLElement | null
+    expect(hero, 'expected hero punch card in overview mode').toBeTruthy()
+    const time = hero!.querySelector('[data-testid="attendance-hero-time"]') as HTMLElement
+    expect(time.textContent).toMatch(/^\d{2}:\d{2}:\d{2}$/)
+
+    const checkIn = Array.from(hero!.querySelectorAll('button')).find(
+      candidate => candidate.textContent?.trim() === 'Check In'
+    )
+    expect(checkIn, 'Check In stays findable by copy').toBeTruthy()
+    expect(checkIn!.classList.contains('attendance__btn')).toBe(true)
+    expect(checkIn!.classList.contains('attendance__btn--primary')).toBe(true)
+    expect(checkIn!.classList.contains('attendance__btn--hero')).toBe(true)
+    const checkOut = Array.from(hero!.querySelectorAll('button')).find(
+      candidate => candidate.textContent?.trim() === 'Check Out'
+    )
+    expect(checkOut, 'Check Out stays findable by copy').toBeTruthy()
+    expect(checkOut!.classList.contains('attendance__btn')).toBe(true)
+  })
+
+  it('UI-P0 hero punch card: absent outside overview mode', async () => {
+    const apiFetchMock = vi.mocked(apiFetch)
+    apiFetchMock.mockImplementation(async () => jsonResponse(200, { ok: true, data: { items: [], summary: null } }))
+
+    app = createApp(AttendanceView, { mode: 'reports' })
+    app.mount(container!)
+    await flushUi(4)
+
+    expect(container!.querySelector('[data-testid="attendance-hero-punch"]')).toBeNull()
+  })
+
+  it('UI-P1: hero today timeline renders both punches from the current-day record', async () => {
+    app = createApp(AttendanceView, { mode: 'overview' })
+    app.mount(container!)
+    await flushUi()
+
+    const timeline = container!.querySelector('[data-testid="attendance-hero-timeline"]') as HTMLElement | null
+    expect(timeline, 'expected today timeline in hero card').toBeTruthy()
+    const pad = (n: number) => String(n).padStart(2, '0')
+    const timeOf = (iso: string) => { const d = new Date(iso); return `${pad(d.getHours())}:${pad(d.getMinutes())}` }
+    expect(timeline!.textContent).toContain(timeOf('2026-04-15T09:18:00+08:00'))
+    expect(timeline!.textContent).toContain(timeOf('2026-04-15T17:42:00+08:00'))
+    expect(timeline!.querySelectorAll('.attendance__hero-timeline-node--pending')).toHaveLength(0)
+  })
+
+  it('UI-P1: stat cards keep their copy and color late/early as warning', async () => {
+    app = createApp(AttendanceView, { mode: 'overview' })
+    app.mount(container!)
+    await flushUi()
+
+    const summary = container!.querySelector('.attendance__summary--workbench') as HTMLElement
+    expect(summary.textContent).toContain('Latest punch')
+    expect(summary.textContent).toContain('Work minutes')
+    expect(summary.textContent).toContain('Late / Early')
+    expect(summary.textContent).toContain('Attention items')
+    const warning = summary.querySelector('.attendance__summary-value--warning') as HTMLElement | null
+    expect(warning, 'late/early 18/18 should color as warning').toBeTruthy()
+    expect(warning!.textContent).toContain('18 / 18')
+  })
+
+  it('UI-P1: no timeline when the active record is not from today', async () => {
+    const apiFetchMock = vi.mocked(apiFetch)
+    const baseImpl = apiFetchMock.getMockImplementation()!
+    apiFetchMock.mockImplementation(async (input: unknown, init?: unknown) => {
+      const url = String(input)
+      if (url.includes('/api/attendance/records?')) {
+        return jsonResponse(200, {
+          ok: true,
+          data: {
+            items: [{
+              id: 'record-yesterday',
+              work_date: '2026-04-14',
+              first_in_at: '2026-04-14T09:00:00+08:00',
+              last_out_at: '2026-04-14T18:06:00+08:00',
+              work_minutes: 486,
+              late_minutes: 0,
+              early_leave_minutes: 0,
+              status: 'adjusted',
+              meta: {},
+            }],
+            total: 1,
+          },
+        })
+      }
+      return baseImpl(input as never, init as never)
+    })
+
+    app = createApp(AttendanceView, { mode: 'overview' })
+    app.mount(container!)
+    await flushUi()
+
+    expect(container!.querySelector('[data-testid="attendance-hero-timeline"]')).toBeNull()
+  })
+
+  it('UI-P1 768px targets exist: stat-card container class + filter fields (selector-preservation guard)', async () => {
+    app = createApp(AttendanceView, { mode: 'overview' })
+    app.mount(container!)
+    await flushUi()
+
+    // The 768px media rules key off these; assert the selectors' DOM targets
+    // survive (the media query itself is verified on-device per E4).
+    expect(container!.querySelector('.attendance__summary--stat'), 'stat-card container').toBeTruthy()
+    const filterFields = container!.querySelectorAll('.attendance__filters .attendance__field')
+    expect(filterFields.length, 'filter fields present').toBeGreaterThan(0)
+    expect(container!.querySelector('.attendance__hero-timeline'), 'hero timeline present').toBeTruthy()
+  })
 })

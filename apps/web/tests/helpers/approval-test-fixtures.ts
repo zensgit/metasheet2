@@ -90,7 +90,11 @@ export function mockPendingApproval(overrides?: Partial<UnifiedApprovalDTO>): Un
     status: 'pending',
     requester: { id: REQUESTER_USER_ID, name: '张三', department: '研发部', title: '工程师' },
     subject: null,
-    policy: { rejectCommentRequired: true },
+    // Mirrors the backend's instance-creation policy write (ApprovalProductService):
+    // { rejectCommentRequired, allowRevoke: <runtime graph policy>, sourceOfTruth } — B3-13
+    // made ApprovalDetailView consume `allowRevoke` (revoke affordance hidden unless true),
+    // so the platform fixture carries the flag a platform-created instance actually has.
+    policy: { rejectCommentRequired: true, allowRevoke: true, sourceOfTruth: 'platform' },
     currentStep: 1,
     totalSteps: 2,
     templateId: 'tpl_1',

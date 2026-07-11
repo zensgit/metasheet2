@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createApp, nextTick, type App as VueApp, type Component } from 'vue'
+import { useLocale } from '../src/composables/useLocale'
 
 const apiFetchMock = vi.fn()
 
@@ -92,6 +93,10 @@ function mockIntegrationApi(): void {
 async function flushUi(cycles = 4): Promise<void> {
   for (let i = 0; i < cycles; i += 1) {
     await Promise.resolve()
+    // Macrotask hop: drain timer-scheduled continuations too. Microtask+nextTick alone is enough on
+    // newer Node schedulers but NOT on Node 20 (the CI runtime) — these specs' first CI run exposed
+    // that the fetch-mock chains need a timer turn before the view leaves its loading state.
+    await new Promise((resolve) => setTimeout(resolve, 0))
     await nextTick()
   }
 }
@@ -125,6 +130,8 @@ describe('IntegrationK3WiseSetupView', () => {
     if (container) container.remove()
     app = null
     container = null
+    // Lane F zh assertions flip the shared locale singleton — always restore the jsdom default.
+    useLocale().setLocale('en')
   })
 
   it('keeps first-run K3 setup focused while folding expert controls', async () => {
@@ -418,5 +425,267 @@ describe('IntegrationK3WiseSetupView', () => {
     expect(materialLink?.getAttribute('href')).toBe('/multitable/sheet_standard_materials/view_standard_materials?baseId=base_k3')
     expect(materialLink?.textContent).toContain('打开多维表')
     expect(bomLink?.getAttribute('href')).toBe('/multitable/sheet_bom_cleanse/view_bom_cleanse?baseId=base_k3')
+  })
+
+  it('IU-1: humanizes dead-letter errorCode in the K3 setup mini-list and NEVER renders the raw errorMessage (RATIFIED addendum)', async () => {
+    apiFetchMock.mockImplementation(async (url: string) => {
+      if (url.startsWith('/api/integration/external-systems?')) return jsonResponse([])
+      if (url === '/api/integration/staging/descriptors') return jsonResponse([])
+      if (url.startsWith('/api/integration/runs?') && url.includes('pipelineId=pipe_iu1')) return jsonResponse([])
+      if (url.startsWith('/api/integration/dead-letters?') && url.includes('pipelineId=pipe_iu1')) {
+        return jsonResponse([
+          {
+            id: 'dl_k3_known',
+            tenantId: 'default',
+            workspaceId: null,
+            pipelineId: 'pipe_iu1',
+            runId: 'run_iu1',
+            idempotencyKey: 'K-1',
+            errorCode: 'VALIDATION_FAILED',
+            errorMessage: 'SENTINEL-RAW-MESSAGE-K3',
+            retryCount: 0,
+            status: 'open',
+          },
+          {
+            id: 'dl_k3_unknown',
+            tenantId: 'default',
+            workspaceId: null,
+            pipelineId: 'pipe_iu1',
+            runId: 'run_iu1',
+            idempotencyKey: 'K-2',
+            errorCode: 'TOTALLY_UNKNOWN_CODE',
+            errorMessage: 'ANOTHER-SENTINEL-K3',
+            retryCount: 0,
+            status: 'open',
+          },
+        ])
+      }
+      return jsonResponse({})
+    })
+
+    const View = (await import('../src/views/IntegrationK3WiseSetupView.vue')).default
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    app = createApp(View as Component)
+    registerRouterLinkStub(app)
+    app.mount(container)
+    await flushUi()
+
+    const materialPipelineInput = inputByLabel(container, '物料 Pipeline ID')
+    materialPipelineInput.value = 'pipe_iu1'
+    materialPipelineInput.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushUi()
+
+    const refreshButton = Array.from(container.querySelectorAll('button')).find((item) => item.textContent?.includes('刷新物料状态')) as HTMLButtonElement
+    expect(refreshButton).toBeDefined()
+    expect(refreshButton.disabled).toBe(false)
+    refreshButton.click()
+    await flushUi(8)
+
+    // Test environment defaults useLocale() to 'en' (jsdom navigator.language, no localStorage override).
+    const knownLabel = container.querySelector('[data-testid="k3-dead-letter-label-dl_k3_known"]') as HTMLElement
+    expect(knownLabel).not.toBeNull()
+    expect(knownLabel.textContent).toContain('Data validation failed.')
+    expect(container.querySelector('[data-testid="k3-dead-letter-code-dl_k3_known"]')?.textContent).toContain('VALIDATION_FAILED')
+    expect(container.textContent).not.toContain('SENTINEL-RAW-MESSAGE')
+    expect(container.innerHTML).not.toContain('SENTINEL-RAW-MESSAGE')
+
+    // Unregistered code falls back to the generic unknown label in the PROMINENT slot; raw code stays
+    // in the secondary/collapsed spot (expert retention).
+    const unknownLabel = container.querySelector('[data-testid="k3-dead-letter-label-dl_k3_unknown"]') as HTMLElement
+    expect(unknownLabel).not.toBeNull()
+    expect(unknownLabel.textContent).toContain('Unknown error')
+    expect(unknownLabel.textContent).not.toContain('TOTALLY_UNKNOWN_CODE')
+    expect(container.querySelector('[data-testid="k3-dead-letter-code-dl_k3_unknown"]')?.textContent).toContain('TOTALLY_UNKNOWN_CODE')
+    expect(container.textContent).not.toContain('ANOTHER-SENTINEL-K3')
+  })
+
+  it('lane F: run.errorSummary never renders raw — registered errorCode label or fixed values-free fallback (zh+en)', async () => {
+    const runBase = {
+      tenantId: 'default',
+      workspaceId: null,
+      pipelineId: 'pipe_f',
+      mode: 'manual',
+      status: 'failed',
+      rowsRead: 3,
+      rowsCleaned: 2,
+      rowsWritten: 0,
+      rowsFailed: 3,
+      startedAt: '2026-07-07T01:00:00.000Z',
+    }
+    apiFetchMock.mockImplementation(async (url: string) => {
+      if (url.startsWith('/api/integration/external-systems?')) return jsonResponse([])
+      if (url === '/api/integration/staging/descriptors') return jsonResponse([])
+      if (url.startsWith('/api/integration/runs?') && url.includes('pipelineId=pipe_f')) {
+        return jsonResponse([
+          // No errorCode anywhere → the FIXED values-free fallback copy must render.
+          { ...runBase, id: 'run_f_fallback', errorSummary: 'SENTINEL-RAW-🙅 secret=hunter2' },
+          // Paired REGISTERED errorCode → its humanized label must render instead.
+          { ...runBase, id: 'run_f_coded', errorSummary: 'SENTINEL-RAW-🙅-COKED', errorCode: 'VALIDATION_FAILED' },
+        ])
+      }
+      if (url.startsWith('/api/integration/dead-letters?') && url.includes('pipelineId=pipe_f')) return jsonResponse([])
+      return jsonResponse({})
+    })
+
+    const View = (await import('../src/views/IntegrationK3WiseSetupView.vue')).default
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    app = createApp(View as Component)
+    registerRouterLinkStub(app)
+    app.mount(container)
+    await flushUi()
+
+    const materialPipelineInput = inputByLabel(container, '物料 Pipeline ID')
+    materialPipelineInput.value = 'pipe_f'
+    materialPipelineInput.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushUi()
+
+    const refreshButton = Array.from(container.querySelectorAll('button')).find((item) => item.textContent?.includes('刷新物料状态')) as HTMLButtonElement
+    refreshButton.click()
+    await flushUi(8)
+
+    // Sentinel must be absent from the ENTIRE rendered DOM (text and markup alike).
+    expect(container.textContent).not.toContain('SENTINEL-RAW-🙅')
+    expect(container.innerHTML).not.toContain('SENTINEL-RAW-🙅')
+    expect(container.textContent).not.toContain('hunter2')
+
+    // jsdom defaults useLocale() to 'en'.
+    const fallback = container.querySelector('[data-testid="k3-run-error-run_f_fallback"]') as HTMLElement
+    expect(fallback).not.toBeNull()
+    expect(fallback.textContent).toContain('Run failed — see server logs/diagnostics for details.')
+
+    const coded = container.querySelector('[data-testid="k3-run-error-run_f_coded"]') as HTMLElement
+    expect(coded).not.toBeNull()
+    expect(coded.textContent).toContain('Data validation failed.')
+    expect(coded.textContent).not.toContain('VALIDATION_FAILED')
+
+    // zh: same closed layer, zh copy (fixed fallback + zh label).
+    useLocale().setLocale('zh-CN')
+    await flushUi()
+    expect(fallback.textContent).toContain('运行失败，详情见服务端日志/诊断。')
+    expect(coded.textContent).toContain('数据校验未通过')
+    expect(container.textContent).not.toContain('SENTINEL-RAW-🙅')
+    useLocale().setLocale('en')
+  })
+
+  it('lane F: saved-system lastError and the WebAPI status line render only fixed values-free copy', async () => {
+    const sentinel = 'SENTINEL-RAW-🙅 Login failed for user sa'
+    const webApiSystem = {
+      id: 'k3_sys_leak',
+      tenantId: 'default',
+      workspaceId: null,
+      name: 'K3 WISE WebAPI',
+      kind: 'erp:k3-wise-webapi',
+      role: 'target',
+      status: 'error',
+      hasCredentials: true,
+      config: { version: 'K3 WISE 15.x', baseUrl: 'http://k3.local' },
+      capabilities: {},
+      lastError: sentinel,
+    }
+    const sqlSystem = {
+      id: 'k3_sql_leak',
+      tenantId: 'default',
+      workspaceId: null,
+      name: 'K3 WISE SQL Server',
+      kind: 'erp:k3-wise-sqlserver',
+      role: 'source',
+      status: 'error',
+      hasCredentials: true,
+      config: { mode: 'readonly', server: 'sql.local', database: 'AIS', allowedTables: ['dbo.t_ICItem'] },
+      lastError: 'SQLSERVER_EXECUTOR_MISSING: inject queryExecutor SENTINEL-RAW-🙅',
+    }
+    apiFetchMock.mockImplementation(async (url: string) => {
+      if (url.startsWith('/api/integration/external-systems?kind=erp%3Ak3-wise-webapi')) return jsonResponse([webApiSystem])
+      if (url.startsWith('/api/integration/external-systems?kind=erp%3Ak3-wise-sqlserver')) return jsonResponse([sqlSystem])
+      if (url === '/api/integration/staging/descriptors') return jsonResponse([])
+      return jsonResponse({})
+    })
+
+    const View = (await import('../src/views/IntegrationK3WiseSetupView.vue')).default
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    app = createApp(View as Component)
+    registerRouterLinkStub(app)
+    app.mount(container)
+    await flushUi(8)
+
+    expect(container.textContent).not.toContain('SENTINEL-RAW-🙅')
+    expect(container.innerHTML).not.toContain('SENTINEL-RAW-🙅')
+    expect(container.textContent).not.toContain('Login failed for user')
+
+    // Generic backend lastError → fixed fallback copy (en default in jsdom).
+    const savedError = container.querySelector('[data-testid="k3-saved-system-error-k3_sys_leak"]') as HTMLElement
+    expect(savedError).not.toBeNull()
+    expect(savedError.textContent).toContain('Last connection test failed — see server logs and the diagnostics JSON.')
+
+    // Executor-missing lastError → the pre-existing fixed safe-reason copy (regex-mapped, not echoed).
+    const sqlSavedError = container.querySelector('[data-testid="k3-saved-system-error-k3_sql_leak"]') as HTMLElement
+    expect(sqlSavedError).not.toBeNull()
+    expect(sqlSavedError.textContent).toContain('当前部署未注入 SQL 执行器')
+    expect(sqlSavedError.textContent).not.toContain('inject queryExecutor')
+
+    // The WebAPI status line (failed branch keyed off system.lastError) is fixed copy too.
+    expect(container.textContent).toContain('Last connection test failed — see server logs and the diagnostics JSON.')
+  })
+
+  it('lane F: connection-test failure keeps the summary values-free and scrubs free-text keys from the diagnostics JSON', async () => {
+    const sentinel = 'SENTINEL-RAW-🙅 TLS handshake to 10.0.0.8 failed'
+    const system = {
+      id: 'k3_sys_t',
+      tenantId: 'default',
+      workspaceId: null,
+      name: 'K3 WISE WebAPI',
+      kind: 'erp:k3-wise-webapi',
+      role: 'target',
+      status: 'active',
+      hasCredentials: true,
+      config: { version: 'K3 WISE 15.x', baseUrl: 'http://k3.local' },
+      capabilities: {},
+    }
+    apiFetchMock.mockImplementation(async (url: string) => {
+      if (url.startsWith('/api/integration/external-systems?kind=erp%3Ak3-wise-webapi')) return jsonResponse([system])
+      if (url.startsWith('/api/integration/external-systems?kind=erp%3Ak3-wise-sqlserver')) return jsonResponse([])
+      if (url === '/api/integration/external-systems/k3_sys_t/test?tenantId=default') {
+        return jsonResponse({
+          ok: false,
+          code: 'K3_WISE_TEST_FAILED',
+          message: sentinel,
+          diagnostics: { server: 'k3.local' },
+          system: { ...system, status: 'error', lastError: sentinel },
+        })
+      }
+      if (url === '/api/integration/staging/descriptors') return jsonResponse([])
+      return jsonResponse({})
+    })
+
+    const View = (await import('../src/views/IntegrationK3WiseSetupView.vue')).default
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    app = createApp(View as Component)
+    registerRouterLinkStub(app)
+    app.mount(container)
+    await flushUi()
+
+    const button = Array.from(container.querySelectorAll('button')).find((item) => item.textContent?.includes('测试 WebAPI')) as HTMLButtonElement
+    expect(button.disabled).toBe(false)
+    button.click()
+    await flushUi(8)
+
+    // Neither the prominent summary nor the collapsed diagnostics JSON may carry the raw message.
+    expect(container.textContent).not.toContain('SENTINEL-RAW-🙅')
+    expect(container.innerHTML).not.toContain('SENTINEL-RAW-🙅')
+    expect(container.textContent).not.toContain('TLS handshake')
+
+    const summary = container.querySelector('[data-testid="connection-test-summary"]') as HTMLElement
+    expect(summary).not.toBeNull()
+    expect(summary.textContent).toContain('WebAPI 测试失败：服务端错误详情已按 values-free 纪律收起')
+
+    // The expert JSON panel is retained (structure, codes) — free-text keys are placeholder-scrubbed.
+    const diagnostics = container.querySelector('[data-testid="connection-test-diagnostics"]') as HTMLDetailsElement
+    expect(diagnostics).not.toBeNull()
+    expect(diagnostics.textContent).toContain('K3_WISE_TEST_FAILED')
+    expect(diagnostics.textContent).toContain('已按 values-free 纪律隐藏')
   })
 })

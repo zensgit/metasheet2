@@ -217,6 +217,7 @@ describe('Multitable sheet-scoped permissions API', () => {
       canExport: true,
       canSendNotification: false,
       pitResetEnabled: false, // T8-2: flag-off default ⇒ false (this actor is also not a sheet-admin, so false regardless)
+      personalViewsEnabled: false, // Slice 3: flag-off default ⇒ false (available to all readers when the flag is on)
     })
     expect(contextResponse.body.data.viewPermissions).toEqual({
       view_grid: {

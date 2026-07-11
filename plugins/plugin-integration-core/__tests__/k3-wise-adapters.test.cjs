@@ -1024,6 +1024,21 @@ async function testK3WebApiMaterialListReadSmoke() {
   assert.equal(wildcardKey.records.length, 2, 'LIST wildcard-shaped key still runs as a bounded internal input')
   const wildcardCall = calls.filter((call) => call.pathname === '/K3API/Material/GetList').at(-1)
   assert.equal(wildcardCall.body.Data.Filter, "FNumber like '%MAT_001%'", 'LIST key uses K3 freeform quoting instead of T-SQL bracket escaping')
+  // Bounded pageIndex (#3703): the requested page reaches the K3 body and the values-free paging echo.
+  const pagedRead = await adapter.read(buildMarkedListRequest({ object: 'material', mode: 'list', pageIndex: 3 }))
+  const pagedCall = calls.filter((call) => call.pathname === '/K3API/Material/GetList').at(-1)
+  assert.equal(pagedCall.body.Data.PageIndex, 3, 'bounded pageIndex reaches the K3 request body')
+  assert.equal(pagedCall.body.Data.Top, 2, 'paged LIST keeps the bounded Top')
+  assert.equal(pagedCall.body.Data.PageSize, 2, 'paged LIST keeps the bounded PageSize')
+  assert.equal(pagedRead.metadata.requestedPageIndex, 3, 'paged LIST surfaces the requested page in the echo')
+  // Out-of-bound / non-integer pageIndex fails closed BEFORE any K3 call (defense-in-depth re-guard).
+  for (const badPage of [0, 11, 1.5, '3', null]) {
+    const before = calls.filter((call) => call.pathname === '/K3API/Material/GetList').length
+    const rejected = await adapter.read(markedListRequestWith({ options: Object.assign(buildMarkedListRequest().options, { listPageIndex: badPage }) })).catch((error) => error)
+    assert.ok(rejected instanceof AdapterValidationError, `pageIndex ${JSON.stringify(badPage)} must be rejected`)
+    assert.equal(rejected.details.code, 'K3_WISE_READ_LIST_PAGE_INDEX_INVALID')
+    assert.equal(calls.filter((call) => call.pathname === '/K3API/Material/GetList').length, before, 'rejected pageIndex produces no K3 GetList call')
+  }
   assert.equal(calls.some((call) => call.pathname === '/K3API/Material/Save'), false, 'LIST smoke must not Save')
   assert.equal(calls.some((call) => call.pathname === '/K3API/Material/Submit'), false, 'LIST smoke must not Submit')
   assert.equal(calls.some((call) => call.pathname === '/K3API/Material/Audit'), false, 'LIST smoke must not Audit')

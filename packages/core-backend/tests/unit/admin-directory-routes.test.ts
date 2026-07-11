@@ -1,5 +1,13 @@
 import type { Request, Response } from 'express'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+// Resolves through the vi.mock factory below, which re-exports the REAL class —
+// so `new DirectorySyncInProgressError(...)` here is the same constructor the
+// route's `instanceof` discriminates against in production.
+import { DirectorySyncInProgressError } from '../../src/directory/directory-sync'
+// NOT mocked below — this is the REAL class the admin-directory routes reuse for schedule_cron save-time
+// validation (roadmap §7.8), and the SAME class `directory-sync-scheduler.ts` uses to actually run the
+// job. Importing it directly here pins its actual acceptance semantics, independent of any route-level mock.
+import { SimpleCronExpression } from '../../src/services/SchedulerService'
 
 const rbacMocks = vi.hoisted(() => ({
   isRbacAdmin: vi.fn(),
@@ -12,6 +20,7 @@ const auditMocks = vi.hoisted(() => ({
 const directoryMocks = vi.hoisted(() => ({
   acknowledgeDirectorySyncAlert: vi.fn(),
   admitDirectoryAccountUser: vi.fn(),
+  batchAdmitDirectoryAccountUsers: vi.fn(),
   batchBindDirectoryAccounts: vi.fn(),
   batchUnbindDirectoryAccounts: vi.fn(),
   bindDirectoryAccount: vi.fn(),
@@ -26,6 +35,7 @@ const directoryMocks = vi.hoisted(() => ({
   listDirectorySyncAlerts: vi.fn(),
   listDirectorySyncRuns: vi.fn(),
   syncDirectoryIntegration: vi.fn(),
+  previewDirectorySyncIntegration: vi.fn(),
   testDirectoryIntegration: vi.fn(),
   unbindDirectoryAccount: vi.fn(),
   updateDirectoryIntegration: vi.fn(),
@@ -49,9 +59,18 @@ vi.mock('../../src/audit/audit', () => ({
   auditLog: auditMocks.auditLog,
 }))
 
-vi.mock('../../src/directory/directory-sync', () => ({
+vi.mock('../../src/directory/directory-sync', async (importOriginal) => ({
+  // DT-HARDEN-05: the sync route discriminates lease conflicts with
+  // `error instanceof DirectorySyncInProgressError`. That check only works if this
+  // factory re-exports the REAL class — a factory that omits it leaves the route
+  // holding `undefined` (instanceof then THROWS a TypeError), and a factory-local
+  // stand-in class would make `instanceof` silently false for real errors. Both
+  // failure modes neuter exactly the mapping the 409 tests below pin.
+  DirectorySyncInProgressError: (await importOriginal<typeof import('../../src/directory/directory-sync')>())
+    .DirectorySyncInProgressError,
   acknowledgeDirectorySyncAlert: directoryMocks.acknowledgeDirectorySyncAlert,
   admitDirectoryAccountUser: directoryMocks.admitDirectoryAccountUser,
+  batchAdmitDirectoryAccountUsers: directoryMocks.batchAdmitDirectoryAccountUsers,
   batchBindDirectoryAccounts: directoryMocks.batchBindDirectoryAccounts,
   batchUnbindDirectoryAccounts: directoryMocks.batchUnbindDirectoryAccounts,
   bindDirectoryAccount: directoryMocks.bindDirectoryAccount,
@@ -66,6 +85,7 @@ vi.mock('../../src/directory/directory-sync', () => ({
   listDirectorySyncAlerts: directoryMocks.listDirectorySyncAlerts,
   listDirectorySyncRuns: directoryMocks.listDirectorySyncRuns,
   syncDirectoryIntegration: directoryMocks.syncDirectoryIntegration,
+  previewDirectorySyncIntegration: directoryMocks.previewDirectorySyncIntegration,
   testDirectoryIntegration: directoryMocks.testDirectoryIntegration,
   unbindDirectoryAccount: directoryMocks.unbindDirectoryAccount,
   updateDirectoryIntegration: directoryMocks.updateDirectoryIntegration,
@@ -75,10 +95,32 @@ vi.mock('../../src/directory/directory-sync-scheduler', () => ({
   refreshDirectoryIntegrationSchedule: schedulerMocks.refreshDirectoryIntegrationSchedule,
 }))
 
+const alertDeliveryMocks = vi.hoisted(() => ({
+  getDirectoryManagerBindingCoverage: vi.fn(),
+  getDirectoryInactiveLinkedMetric: vi.fn(),
+}))
+
+vi.mock('../../src/directory/directory-sync-alert-delivery', () => ({
+  getDirectoryManagerBindingCoverage: alertDeliveryMocks.getDirectoryManagerBindingCoverage,
+  getDirectoryInactiveLinkedMetric: alertDeliveryMocks.getDirectoryInactiveLinkedMetric,
+}))
+
+const approvalCardConfigMocks = vi.hoisted(() => ({
+  generateApprovalCardLinkSecret: vi.fn(),
+  getApprovalCardConfigStatus: vi.fn(),
+  saveApprovalCardPublicAppUrl: vi.fn(),
+}))
+
 vi.mock('../../src/integrations/dingtalk/work-notification-settings', () => ({
   getDingTalkWorkNotificationRuntimeStatusFromStore: workNotificationMocks.getDingTalkWorkNotificationRuntimeStatusFromStore,
   saveDingTalkWorkNotificationAgentId: workNotificationMocks.saveDingTalkWorkNotificationAgentId,
   testDingTalkWorkNotificationAgentId: workNotificationMocks.testDingTalkWorkNotificationAgentId,
+}))
+
+vi.mock('../../src/integrations/dingtalk/approval-card-config', () => ({
+  generateApprovalCardLinkSecret: approvalCardConfigMocks.generateApprovalCardLinkSecret,
+  getApprovalCardConfigStatus: approvalCardConfigMocks.getApprovalCardConfigStatus,
+  saveApprovalCardPublicAppUrl: approvalCardConfigMocks.saveApprovalCardPublicAppUrl,
 }))
 
 import { adminDirectoryRouter } from '../../src/routes/admin-directory'
@@ -156,6 +198,8 @@ describe('adminDirectoryRouter', () => {
     auditMocks.auditLog.mockReset()
     directoryMocks.acknowledgeDirectorySyncAlert.mockReset()
     directoryMocks.admitDirectoryAccountUser.mockReset()
+    directoryMocks.previewDirectorySyncIntegration.mockReset()
+    directoryMocks.syncDirectoryIntegration.mockReset()
     directoryMocks.batchBindDirectoryAccounts.mockReset()
     directoryMocks.batchUnbindDirectoryAccounts.mockReset()
     directoryMocks.bindDirectoryAccount.mockReset()
@@ -174,9 +218,96 @@ describe('adminDirectoryRouter', () => {
     directoryMocks.unbindDirectoryAccount.mockReset()
     directoryMocks.updateDirectoryIntegration.mockReset()
     schedulerMocks.refreshDirectoryIntegrationSchedule.mockReset()
+    alertDeliveryMocks.getDirectoryManagerBindingCoverage.mockReset()
+    alertDeliveryMocks.getDirectoryInactiveLinkedMetric.mockReset()
     workNotificationMocks.getDingTalkWorkNotificationRuntimeStatusFromStore.mockReset()
     workNotificationMocks.saveDingTalkWorkNotificationAgentId.mockReset()
     workNotificationMocks.testDingTalkWorkNotificationAgentId.mockReset()
+    approvalCardConfigMocks.generateApprovalCardLinkSecret.mockReset()
+    approvalCardConfigMocks.getApprovalCardConfigStatus.mockReset()
+    approvalCardConfigMocks.saveApprovalCardPublicAppUrl.mockReset()
+  })
+
+  describe('approval-card config (CFG-2)', () => {
+    const CARD_STATUS = {
+      integration: { id: 'dir-1', name: 'DingTalk CN', status: 'active' },
+      linkSecret: { configured: true, source: 'stored', envOverrideActive: false, valuePrinted: false },
+      publicAppUrl: { storedValue: 'https://app.example.com', source: 'stored', envOverrideActive: false },
+    }
+
+    it('admin-gates all three routes (403 for non-admin)', async () => {
+      rbacMocks.isRbacAdmin.mockResolvedValue(false)
+      for (const [method, path] of [
+        ['get', '/integrations/:integrationId/approval-card-config'],
+        ['post', '/integrations/:integrationId/approval-card-config/secret/generate'],
+        ['put', '/integrations/:integrationId/approval-card-config'],
+      ] as const) {
+        const response = await invokeRoute(method, path, {
+          params: { integrationId: 'dir-1' },
+          user: { id: 'user-1' },
+        })
+        expect(response.statusCode).toBe(403)
+      }
+      expect(approvalCardConfigMocks.generateApprovalCardLinkSecret).not.toHaveBeenCalled()
+      expect(approvalCardConfigMocks.getApprovalCardConfigStatus).not.toHaveBeenCalled()
+      expect(approvalCardConfigMocks.saveApprovalCardPublicAppUrl).not.toHaveBeenCalled()
+    })
+
+    it('generates the secret with a redacted audit entry and never echoes a value', async () => {
+      approvalCardConfigMocks.generateApprovalCardLinkSecret.mockResolvedValue(CARD_STATUS)
+
+      const response = await invokeRoute('post', '/integrations/:integrationId/approval-card-config/secret/generate', {
+        params: { integrationId: 'dir-1' },
+        user: { id: 'admin-1', role: 'admin' },
+      })
+
+      expect(response.statusCode).toBe(200)
+      expect(response.body).toMatchObject({ ok: true, data: { status: { linkSecret: { configured: true, valuePrinted: false } } } })
+      // No 64-hex plaintext anywhere in the wire response.
+      expect(JSON.stringify(response.body)).not.toMatch(/[0-9a-f]{64}/)
+      expect(auditMocks.auditLog).toHaveBeenCalledWith(expect.objectContaining({
+        resourceType: 'approval-card-config',
+        meta: expect.objectContaining({ operation: 'generate_link_secret', valuePrinted: false }),
+      }))
+    })
+
+    it('returns 404 for an unknown integration', async () => {
+      approvalCardConfigMocks.generateApprovalCardLinkSecret.mockResolvedValue(null)
+      const response = await invokeRoute('post', '/integrations/:integrationId/approval-card-config/secret/generate', {
+        params: { integrationId: 'ghost' },
+        user: { id: 'admin-1', role: 'admin' },
+      })
+      expect(response.statusCode).toBe(404)
+    })
+
+    it('saves the public app URL and surfaces validation failures as 400', async () => {
+      approvalCardConfigMocks.saveApprovalCardPublicAppUrl.mockResolvedValue(CARD_STATUS)
+      const ok = await invokeRoute('put', '/integrations/:integrationId/approval-card-config', {
+        params: { integrationId: 'dir-1' },
+        body: { publicAppUrl: 'https://app.example.com' },
+        user: { id: 'admin-1', role: 'admin' },
+      })
+      expect(ok.statusCode).toBe(200)
+      expect(approvalCardConfigMocks.saveApprovalCardPublicAppUrl).toHaveBeenCalledWith('dir-1', 'https://app.example.com')
+
+      approvalCardConfigMocks.saveApprovalCardPublicAppUrl.mockRejectedValue(new Error('publicAppUrl must use http or https'))
+      const bad = await invokeRoute('put', '/integrations/:integrationId/approval-card-config', {
+        params: { integrationId: 'dir-1' },
+        body: { publicAppUrl: 'javascript:alert(1)' },
+        user: { id: 'admin-1', role: 'admin' },
+      })
+      expect(bad.statusCode).toBe(400)
+    })
+
+    it('rejects a PUT missing publicAppUrl instead of silently clearing', async () => {
+      const response = await invokeRoute('put', '/integrations/:integrationId/approval-card-config', {
+        params: { integrationId: 'dir-1' },
+        body: {},
+        user: { id: 'admin-1', role: 'admin' },
+      })
+      expect(response.statusCode).toBe(400)
+      expect(approvalCardConfigMocks.saveApprovalCardPublicAppUrl).not.toHaveBeenCalled()
+    })
   })
 
   it('rejects unauthenticated requests', async () => {
@@ -266,6 +397,57 @@ describe('adminDirectoryRouter', () => {
     })
   })
 
+  // #4046 P3-2: send-tier failures (network error/timeout/5xx/malformed-2xx) on the actual test
+  // send carry the transport's REAL isDingTalkOutcomeUnknown marker (imported unmocked from
+  // dingtalk/client — this is the same discriminator production code runs, not a stand-in). Before
+  // this fix both branches below folded into the same 400 DINGTALK_WORK_NOTIFICATION_TEST_FAILED
+  // code, telling an admin their Agent ID is broken for a message that may have actually arrived.
+  it('reports a distinct outcome-unknown code+message when the test send outcome is ambiguous', async () => {
+    const sendError = Object.assign(new Error('DingTalk request timed out after 10000ms'), {
+      outcomeUnknown: true,
+    })
+    workNotificationMocks.testDingTalkWorkNotificationAgentId.mockRejectedValue(sendError)
+
+    const payload = { integrationId: 'dir-1', agentId: '123456789', recipientUserId: 'user-1' }
+    const response = await invokeRoute('post', '/dingtalk/work-notification/test', {
+      body: payload,
+      user: { id: 'admin-1', role: 'admin' },
+    })
+
+    expect(response.statusCode).toBe(502)
+    expect(response.body).toMatchObject({
+      ok: false,
+      error: {
+        code: 'DINGTALK_TEST_SEND_OUTCOME_UNKNOWN',
+      },
+    })
+    const message = (response.body as { error: { message: string } }).error.message
+    expect(message).toContain('DingTalk request timed out after 10000ms')
+    expect(message.toLowerCase()).toContain('may still have been delivered')
+    expect(message.toLowerCase()).toContain('check the test message on the device')
+  })
+
+  it('keeps the generic failure shape for a plain (non-outcome-unknown) test-send error', async () => {
+    workNotificationMocks.testDingTalkWorkNotificationAgentId.mockRejectedValue(
+      new Error('DingTalk appSecret is required'),
+    )
+
+    const payload = { integrationId: 'dir-1', agentId: '123456789' }
+    const response = await invokeRoute('post', '/dingtalk/work-notification/test', {
+      body: payload,
+      user: { id: 'admin-1', role: 'admin' },
+    })
+
+    expect(response.statusCode).toBe(400)
+    expect(response.body).toMatchObject({
+      ok: false,
+      error: {
+        code: 'DINGTALK_WORK_NOTIFICATION_TEST_FAILED',
+        message: 'DingTalk appSecret is required',
+      },
+    })
+  })
+
   it('saves DingTalk work notification Agent ID and writes a redacted audit entry', async () => {
     workNotificationMocks.saveDingTalkWorkNotificationAgentId.mockResolvedValue({
       integration: { id: 'dir-1', name: 'DingTalk CN', status: 'active' },
@@ -346,6 +528,125 @@ describe('adminDirectoryRouter', () => {
     expect(schedulerMocks.refreshDirectoryIntegrationSchedule).toHaveBeenCalledWith('dir-1')
   })
 
+  // Roadmap §7.8 "Validate cron at save time". Before this, `scheduleCron` flowed straight into the DB with
+  // no validator anywhere on the create/update path; an invalid expression was only ever discovered later,
+  // silently, inside `directory-sync-scheduler.ts`'s catch-and-`logger.warn` around `scheduler.schedule()`.
+  describe('schedule_cron save-time validation (roadmap §7.8)', () => {
+    const basePayload = {
+      name: 'DingTalk CN',
+      corpId: 'dingcorp',
+      appKey: 'ding-app-key',
+      appSecret: 'secret',
+      syncEnabled: true,
+      memberGroupDefaultRoleIds: ['crm_user'],
+      memberGroupDefaultNamespaces: ['crm'],
+    }
+
+    it('rejects an invalid schedule_cron on create with 400 and never calls createDirectoryIntegration', async () => {
+      const response = await invokeRoute('post', '/integrations', {
+        body: { ...basePayload, scheduleCron: 'not a cron' },
+        user: { id: 'admin-1', role: 'admin' },
+      })
+
+      expect(response.statusCode).toBe(400)
+      expect(response.body).toMatchObject({
+        ok: false,
+        error: { code: 'DIRECTORY_SCHEDULE_CRON_INVALID' },
+      })
+      expect(directoryMocks.createDirectoryIntegration).not.toHaveBeenCalled()
+      expect(schedulerMocks.refreshDirectoryIntegrationSchedule).not.toHaveBeenCalled()
+    })
+
+    it('rejects a day-impossible schedule_cron on create (Feb 30th parses per-field but can never occur)', async () => {
+      const response = await invokeRoute('post', '/integrations', {
+        body: { ...basePayload, scheduleCron: '0 0 30 2 *' },
+        user: { id: 'admin-1', role: 'admin' },
+      })
+
+      expect(response.statusCode).toBe(400)
+      expect(response.body).toMatchObject({ error: { code: 'DIRECTORY_SCHEDULE_CRON_INVALID' } })
+      expect(directoryMocks.createDirectoryIntegration).not.toHaveBeenCalled()
+    })
+
+    it('rejects a day-of-month + day-of-week combo that can never occur under AND-semantics (0 0 30 2 1)', async () => {
+      // This is the exact case that ruled out reusing the multitable automation scheduler's cron parser:
+      // that parser's OR-semantics treats "any Monday in February" as reachable and would have accepted
+      // this, while the directory sync scheduler's actual runtime parser (SimpleCronExpression) ANDs every
+      // field — day-of-month 30 AND day-of-week Monday can never both hold in February, so it never fires.
+      const response = await invokeRoute('post', '/integrations', {
+        body: { ...basePayload, scheduleCron: '0 0 30 2 1' },
+        user: { id: 'admin-1', role: 'admin' },
+      })
+
+      expect(response.statusCode).toBe(400)
+      expect(response.body).toMatchObject({ error: { code: 'DIRECTORY_SCHEDULE_CRON_INVALID' } })
+      expect(directoryMocks.createDirectoryIntegration).not.toHaveBeenCalled()
+    })
+
+    it('rejects an invalid schedule_cron on update with 400 and never calls updateDirectoryIntegration', async () => {
+      const response = await invokeRoute('put', '/integrations/:integrationId', {
+        params: { integrationId: 'dir-1' },
+        body: { name: 'DingTalk CN', scheduleCron: '60 25 * * *' },
+        user: { id: 'admin-1', role: 'admin' },
+      })
+
+      expect(response.statusCode).toBe(400)
+      expect(response.body).toMatchObject({
+        ok: false,
+        error: { code: 'DIRECTORY_SCHEDULE_CRON_INVALID' },
+      })
+      expect(directoryMocks.updateDirectoryIntegration).not.toHaveBeenCalled()
+      expect(schedulerMocks.refreshDirectoryIntegrationSchedule).not.toHaveBeenCalled()
+    })
+
+    it('accepts a valid schedule_cron on create and passes it through unmodified', async () => {
+      directoryMocks.createDirectoryIntegration.mockResolvedValue({ id: 'dir-1', name: 'DingTalk CN' })
+
+      const payload = { ...basePayload, scheduleCron: '0 2 * * *' }
+      const response = await invokeRoute('post', '/integrations', {
+        body: payload,
+        user: { id: 'admin-1', role: 'admin' },
+      })
+
+      expect(response.statusCode).toBe(200)
+      expect(directoryMocks.createDirectoryIntegration).toHaveBeenCalledWith(payload)
+    })
+
+    it.each([
+      ['undefined (key omitted)', undefined],
+      ['null', null],
+      ['empty string', ''],
+      ['whitespace only', '   '],
+    ])('allows %s schedule_cron on create (= no schedule) without invoking the validator gate', async (_label, scheduleCron) => {
+      directoryMocks.createDirectoryIntegration.mockResolvedValue({ id: 'dir-1', name: 'DingTalk CN' })
+
+      const payload: Record<string, unknown> = { ...basePayload }
+      if (scheduleCron !== undefined) payload.scheduleCron = scheduleCron
+
+      const response = await invokeRoute('post', '/integrations', {
+        body: payload,
+        user: { id: 'admin-1', role: 'admin' },
+      })
+
+      expect(response.statusCode).toBe(200)
+      expect(directoryMocks.createDirectoryIntegration).toHaveBeenCalledWith(payload)
+    })
+
+    it('allows an empty schedule_cron on update (= clears the schedule)', async () => {
+      directoryMocks.updateDirectoryIntegration.mockResolvedValue({ id: 'dir-1', name: 'DingTalk CN' })
+
+      const payload = { name: 'DingTalk CN', scheduleCron: '' }
+      const response = await invokeRoute('put', '/integrations/:integrationId', {
+        params: { integrationId: 'dir-1' },
+        body: payload,
+        user: { id: 'admin-1', role: 'admin' },
+      })
+
+      expect(response.statusCode).toBe(200)
+      expect(directoryMocks.updateDirectoryIntegration).toHaveBeenCalledWith('dir-1', payload)
+    })
+  })
+
   it('delegates sync to the directory service and returns its payload', async () => {
     directoryMocks.syncDirectoryIntegration.mockResolvedValue({
       integration: { id: 'dir-1', name: 'DingTalk CN' },
@@ -388,6 +689,139 @@ describe('adminDirectoryRouter', () => {
         ],
       },
     })
+  })
+
+  // DT-OPS-02: async is opt-in precisely because the synchronous response carries the
+  // auto-admission onboarding packets (one-time temporary passwords, never persisted).
+  // A default 202 would silently throw them away — the test above pins that.
+  it('answers 202 with the runId when async is requested, without waiting for the pull', async () => {
+    let resolveSync: (value: unknown) => void = () => {}
+    directoryMocks.syncDirectoryIntegration.mockImplementation(
+      (_id: string, _actor: string, _source: string, hooks: { onRunStarted?: (runId: string) => void }) => {
+        // The run row exists; the DingTalk walk has not finished (and never does here).
+        hooks?.onRunStarted?.('run-async-1')
+        return new Promise((resolve) => { resolveSync = resolve })
+      },
+    )
+
+    const response = await invokeRoute('post', '/integrations/:integrationId/sync', {
+      params: { integrationId: 'dir-1' },
+      body: { async: true },
+      user: { id: 'admin-1', role: 'admin' },
+    })
+
+    expect(response.statusCode).toBe(202)
+    expect(response.body).toMatchObject({ ok: true, data: { accepted: true, runId: 'run-async-1', integrationId: 'dir-1' } })
+    // The request returned while the sync is still in flight.
+    resolveSync({ run: { id: 'run-async-1' } })
+  })
+
+  it('surfaces an error when an async sync fails before the run row exists', async () => {
+    directoryMocks.syncDirectoryIntegration.mockRejectedValue(new Error('Directory integration not found'))
+
+    const response = await invokeRoute('post', '/integrations/:integrationId/sync', {
+      params: { integrationId: 'missing' },
+      body: { async: true },
+      user: { id: 'admin-1', role: 'admin' },
+    })
+
+    expect(response.statusCode).toBe(404)
+  })
+
+  // DT-HARDEN-05 gate P2-1: a lease conflict is a benign "already running" state and must
+  // map to 409 + the active runId on BOTH trigger paths — never a 500 that monitoring
+  // pages on. The async branch regressed exactly this way once (its catch knew only
+  // /not found/→404, else 500), so each branch gets its own pin.
+  it('maps a lease conflict to 409 with the active runId on the synchronous path', async () => {
+    directoryMocks.syncDirectoryIntegration.mockRejectedValue(new DirectorySyncInProgressError('run-live-1'))
+
+    const response = await invokeRoute('post', '/integrations/:integrationId/sync', {
+      params: { integrationId: 'dir-1' },
+      user: { id: 'admin-1', role: 'admin' },
+    })
+
+    expect(response.statusCode).toBe(409)
+    expect(response.body).toMatchObject({
+      ok: false,
+      error: { code: 'DIRECTORY_SYNC_IN_PROGRESS', details: { activeRunId: 'run-live-1' } },
+    })
+  })
+
+  it('maps a lease conflict to 409 with the active runId on the async path too', async () => {
+    directoryMocks.syncDirectoryIntegration.mockRejectedValue(new DirectorySyncInProgressError('run-live-2'))
+
+    const response = await invokeRoute('post', '/integrations/:integrationId/sync', {
+      params: { integrationId: 'dir-1' },
+      body: { async: true },
+      user: { id: 'admin-1', role: 'admin' },
+    })
+
+    expect(response.statusCode).toBe(409)
+    expect(response.body).toMatchObject({
+      ok: false,
+      error: { code: 'DIRECTORY_SYNC_IN_PROGRESS', details: { activeRunId: 'run-live-2' } },
+    })
+  })
+
+  it('previews a sync without applying it', async () => {
+    directoryMocks.previewDirectorySyncIntegration.mockResolvedValue({
+      integrationId: 'dir-1',
+      integrationName: 'CN',
+      departmentsSeen: 3,
+      accountsSeen: 12,
+      wouldCreateAccounts: 2,
+      wouldDeactivateAccounts: 1,
+      wouldDeactivateLinkedAccounts: 1,
+      autoAdmissionMode: 'auto_for_scoped_departments',
+      autoAdmissionCandidateCount: 2,
+      autoAdmissionSkippedMissingEmailCount: 0,
+      autoAdmissionExcludedCount: 0,
+      sampledNewAccounts: [],
+      sampledDeactivations: [],
+    })
+
+    const response = await invokeRoute('post', '/integrations/:integrationId/sync/preview', {
+      params: { integrationId: 'dir-1' },
+      user: { id: 'admin-1', role: 'admin' },
+    })
+
+    expect(response.statusCode).toBe(200)
+    expect(directoryMocks.previewDirectorySyncIntegration).toHaveBeenCalledWith('dir-1')
+    // The load-bearing property: previewing must never apply.
+    expect(directoryMocks.syncDirectoryIntegration).not.toHaveBeenCalled()
+    expect(response.body).toMatchObject({
+      ok: true,
+      data: { preview: { wouldCreateAccounts: 2, wouldDeactivateLinkedAccounts: 1 } },
+    })
+  })
+
+  it('requires platform admin for the preview endpoint', async () => {
+    const response = await invokeRoute('post', '/integrations/:integrationId/sync/preview', {
+      params: { integrationId: 'dir-1' },
+      user: { id: 'not-admin' },
+    })
+    expect(response.statusCode).toBe(403)
+    expect(directoryMocks.previewDirectorySyncIntegration).not.toHaveBeenCalled()
+  })
+
+  // R3: previewing while a real sync holds the lease doubles the shared DingTalk API quota
+  // the lease exists to bound. Same benign "already running" state as the sync-trigger
+  // branches above — mapped identically (409 + activeRunId, never a 500 that pages on-call).
+  it('maps a lease conflict to 409 with the active runId on the preview path', async () => {
+    directoryMocks.previewDirectorySyncIntegration.mockRejectedValue(new DirectorySyncInProgressError('run-live-3'))
+
+    const response = await invokeRoute('post', '/integrations/:integrationId/sync/preview', {
+      params: { integrationId: 'dir-1' },
+      user: { id: 'admin-1', role: 'admin' },
+    })
+
+    expect(response.statusCode).toBe(409)
+    expect(response.body).toMatchObject({
+      ok: false,
+      error: { code: 'DIRECTORY_SYNC_IN_PROGRESS', details: { activeRunId: 'run-live-3' } },
+    })
+    // The load-bearing property: a refused preview never falls through to the sync path.
+    expect(directoryMocks.syncDirectoryIntegration).not.toHaveBeenCalled()
   })
 
   it('tests a saved integration by forwarding the integrationId and payload to the directory service', async () => {
@@ -650,6 +1084,125 @@ describe('adminDirectoryRouter', () => {
           },
         ],
       },
+    })
+  })
+
+  it('returns directory manager binding coverage for an integration (DT-OPS-03)', async () => {
+    alertDeliveryMocks.getDirectoryManagerBindingCoverage.mockResolvedValue({
+      managerCount: 4,
+      linkedManagerCount: 3,
+      coverage: 0.75,
+    })
+
+    const response = await invokeRoute('get', '/integrations/:integrationId/manager-coverage', {
+      params: { integrationId: 'dir-1' },
+      user: { id: 'admin-1', role: 'admin' },
+    })
+
+    expect(response.statusCode).toBe(200)
+    expect(alertDeliveryMocks.getDirectoryManagerBindingCoverage).toHaveBeenCalledWith('dir-1')
+    expect(response.body).toMatchObject({
+      ok: true,
+      data: {
+        coverage: { managerCount: 4, linkedManagerCount: 3, coverage: 0.75 },
+      },
+    })
+  })
+
+  it('admin-gates the manager binding coverage route (403 for non-admin)', async () => {
+    rbacMocks.isRbacAdmin.mockResolvedValue(false)
+
+    const response = await invokeRoute('get', '/integrations/:integrationId/manager-coverage', {
+      params: { integrationId: 'dir-1' },
+      user: { id: 'user-1', role: 'user' },
+    })
+
+    expect(response.statusCode).toBe(403)
+    expect(alertDeliveryMocks.getDirectoryManagerBindingCoverage).not.toHaveBeenCalled()
+  })
+
+  it('surfaces manager binding coverage failures as 500', async () => {
+    alertDeliveryMocks.getDirectoryManagerBindingCoverage.mockRejectedValue(new Error('db unreachable'))
+
+    const response = await invokeRoute('get', '/integrations/:integrationId/manager-coverage', {
+      params: { integrationId: 'dir-1' },
+      user: { id: 'admin-1', role: 'admin' },
+    })
+
+    expect(response.statusCode).toBe(500)
+    expect(response.body).toMatchObject({
+      ok: false,
+      error: { code: 'DIRECTORY_MANAGER_COVERAGE_FAILED', message: 'db unreachable' },
+    })
+  })
+
+  it('returns the directory inactive-linked backlog metric for an integration (§7.1)', async () => {
+    alertDeliveryMocks.getDirectoryInactiveLinkedMetric.mockResolvedValue({
+      thresholdDays: 30,
+      count: 2,
+      sample: [{ directoryAccountId: 'acc-1', externalUserId: 'ext-1', accountName: 'Alice', localUserId: 'u-1', localUserEmail: 'a@example.com', localUserName: 'Alice', inactiveSinceAt: '2026-06-01T00:00:00.000Z', inactiveDays: 40 }],
+    })
+
+    const response = await invokeRoute('get', '/integrations/:integrationId/inactive-linked', {
+      params: { integrationId: 'dir-1' },
+      query: { days: '30' },
+      user: { id: 'admin-1', role: 'admin' },
+    })
+
+    expect(response.statusCode).toBe(200)
+    expect(alertDeliveryMocks.getDirectoryInactiveLinkedMetric).toHaveBeenCalledWith('dir-1', 30)
+    expect(response.body).toMatchObject({
+      ok: true,
+      data: { metric: { thresholdDays: 30, count: 2 } },
+    })
+  })
+
+  it('defaults the inactive-linked threshold to 30 days when the query param is missing or invalid', async () => {
+    alertDeliveryMocks.getDirectoryInactiveLinkedMetric.mockResolvedValue({ thresholdDays: 30, count: 0, sample: [] })
+
+    await invokeRoute('get', '/integrations/:integrationId/inactive-linked', {
+      params: { integrationId: 'dir-1' },
+      query: { days: 'not-a-number' },
+      user: { id: 'admin-1', role: 'admin' },
+    })
+
+    expect(alertDeliveryMocks.getDirectoryInactiveLinkedMetric).toHaveBeenCalledWith('dir-1', 30)
+  })
+
+  it('rejects an unauthenticated inactive-linked request (401)', async () => {
+    const response = await invokeRoute('get', '/integrations/:integrationId/inactive-linked', {
+      params: { integrationId: 'dir-1' },
+    })
+
+    expect(response.statusCode).toBe(401)
+    expect(response.body).toMatchObject({ ok: false, error: { code: 'UNAUTHENTICATED' } })
+    expect(alertDeliveryMocks.getDirectoryInactiveLinkedMetric).not.toHaveBeenCalled()
+  })
+
+  it('admin-gates the inactive-linked route (403 for non-admin)', async () => {
+    rbacMocks.isRbacAdmin.mockResolvedValue(false)
+
+    const response = await invokeRoute('get', '/integrations/:integrationId/inactive-linked', {
+      params: { integrationId: 'dir-1' },
+      user: { id: 'user-1', role: 'user' },
+    })
+
+    expect(response.statusCode).toBe(403)
+    expect(alertDeliveryMocks.getDirectoryInactiveLinkedMetric).not.toHaveBeenCalled()
+  })
+
+  it('surfaces inactive-linked metric failures as 500', async () => {
+    alertDeliveryMocks.getDirectoryInactiveLinkedMetric.mockRejectedValue(new Error('db unreachable'))
+
+    const response = await invokeRoute('get', '/integrations/:integrationId/inactive-linked', {
+      params: { integrationId: 'dir-1' },
+      user: { id: 'admin-1', role: 'admin' },
+    })
+
+    expect(response.statusCode).toBe(500)
+    expect(response.body).toMatchObject({
+      ok: false,
+      error: { code: 'DIRECTORY_INACTIVE_LINKED_FAILED', message: 'db unreachable' },
     })
   })
 
@@ -969,7 +1522,7 @@ describe('adminDirectoryRouter', () => {
   })
 
   it('batch binds directory accounts', async () => {
-    directoryMocks.batchBindDirectoryAccounts.mockResolvedValue([
+    directoryMocks.batchBindDirectoryAccounts.mockResolvedValue({ failed: [], succeeded: [
       {
         account: {
           id: 'account-1',
@@ -996,7 +1549,7 @@ describe('adminDirectoryRouter', () => {
         },
         previousLocalUser: null,
       },
-    ])
+    ] })
 
     const response = await invokeRoute('post', '/accounts/batch-bind', {
       body: {
@@ -1043,6 +1596,196 @@ describe('adminDirectoryRouter', () => {
     })
   })
 
+  // DT-HARDEN-04: the batch used to fail fast. Items already COMMITTED never got their
+  // audit entry (the route audited only after the whole batch returned) and the caller
+  // got one error instead of per-item results.
+  it('audits committed items and reports per-item failures when part of a batch-bind fails', async () => {
+    directoryMocks.batchBindDirectoryAccounts.mockResolvedValue({
+      succeeded: [
+        {
+          account: { id: 'account-1', integrationId: 'dir-1', corpId: 'dingcorp', externalUserId: 'ext-1', localUser: { id: 'u1', email: 'alpha@example.com' } },
+          previousLocalUser: null,
+        },
+      ],
+      failed: [{ accountId: 'account-2', error: 'DingTalk account is already bound to another local user' }],
+    })
+
+    const response = await invokeRoute('post', '/accounts/batch-bind', {
+      body: {
+        bindings: [
+          { accountId: 'account-1', localUserRef: 'alpha@example.com' },
+          { accountId: 'account-2', localUserRef: 'beta@example.com' },
+        ],
+      },
+      user: { id: 'admin-1', role: 'admin' },
+    })
+
+    // Partial failure is a normal batch result, not a total HTTP failure.
+    expect(response.statusCode).toBe(200)
+    // The load-bearing assertion: the committed item still produced an audit entry.
+    expect(auditMocks.auditLog).toHaveBeenCalledTimes(1)
+    expect(auditMocks.auditLog).toHaveBeenCalledWith(expect.objectContaining({
+      action: 'bind',
+      resourceId: 'account-1',
+    }))
+    expect(response.body).toMatchObject({
+      ok: true,
+      data: {
+        items: [{ id: 'account-1' }],
+        updatedCount: 1,
+        failedCount: 1,
+        failed: [{ accountId: 'account-2', error: expect.stringContaining('already bound') }],
+      },
+    })
+  })
+
+  it('keeps the historical error mapping when a batch-bind commits nothing', async () => {
+    directoryMocks.batchBindDirectoryAccounts.mockResolvedValue({
+      succeeded: [],
+      failed: [{ accountId: 'account-1', error: 'DingTalk account is already bound to another local user' }],
+    })
+
+    const response = await invokeRoute('post', '/accounts/batch-bind', {
+      body: { bindings: [{ accountId: 'account-1', localUserRef: 'alpha@example.com' }] },
+      user: { id: 'admin-1', role: 'admin' },
+    })
+
+    expect(response.statusCode).toBe(409)
+    expect(auditMocks.auditLog).not.toHaveBeenCalled()
+  })
+
+  it('batch-creates and binds directory accounts with grant disabled by default', async () => {
+    directoryMocks.batchAdmitDirectoryAccountUsers.mockResolvedValue({
+      succeeded: [
+        {
+          account: {
+            id: 'account-1',
+            integrationId: 'dir-1',
+            corpId: 'dingcorp',
+            externalUserId: '0447654442691174',
+            localUser: {
+              id: 'user-1',
+              email: null,
+              username: 'dt_0447654442691174_account1',
+            },
+          },
+          previousLocalUser: null,
+          user: {
+            id: 'user-1',
+            email: null,
+            username: 'dt_0447654442691174_account1',
+            name: '林岚',
+            mobile: '13900001234',
+            role: 'user',
+            is_active: true,
+          },
+          temporaryPassword: 'Temp#123456',
+          inviteToken: null,
+          onboarding: {
+            accountLabel: 'dt_0447654442691174_account1',
+            acceptInviteUrl: '',
+            inviteMessage: '账号：dt_0447654442691174_account1',
+          },
+        },
+      ],
+      failed: [{ accountId: 'account-2', error: 'User with this username already exists' }],
+    })
+
+    const response = await invokeRoute('post', '/accounts/batch-admit-users', {
+      body: {
+        accountIds: ['account-1', 'account-2'],
+      },
+      user: { id: 'admin-1', role: 'admin' },
+    })
+
+    expect(response.statusCode).toBe(200)
+    expect(directoryMocks.batchAdmitDirectoryAccountUsers).toHaveBeenCalledWith(['account-1', 'account-2'], {
+      adminUserId: 'admin-1',
+      enableDingTalkGrant: false,
+    })
+    expect(auditMocks.auditLog).toHaveBeenCalledTimes(2)
+    expect(auditMocks.auditLog).toHaveBeenCalledWith(expect.objectContaining({
+      action: 'create',
+      resourceType: 'user',
+      resourceId: 'user-1',
+      meta: expect.objectContaining({
+        source: 'directory_bulk_manual_admission',
+        mode: 'bulk_manual_admission',
+        selectionSize: 2,
+      }),
+    }))
+    expect(auditMocks.auditLog).toHaveBeenCalledWith(expect.objectContaining({
+      action: 'bind',
+      resourceType: 'directory-account-link',
+      resourceId: 'account-1',
+      meta: expect.objectContaining({
+        enableDingTalkGrant: false,
+        mode: 'bulk_manual_admission',
+        selectionSize: 2,
+      }),
+    }))
+    expect(response.body).toMatchObject({
+      ok: true,
+      data: {
+        items: [{ id: 'account-1' }],
+        users: [{ id: 'user-1', username: 'dt_0447654442691174_account1' }],
+        onboardingPackets: [{
+          userId: 'user-1',
+          username: 'dt_0447654442691174_account1',
+          temporaryPassword: 'Temp#123456',
+        }],
+        updatedCount: 1,
+        failedCount: 1,
+        failed: [{ accountId: 'account-2', error: expect.stringContaining('username') }],
+        enableDingTalkGrant: false,
+      },
+    })
+  })
+
+  it('keeps the historical error mapping when a batch admission commits nothing', async () => {
+    directoryMocks.batchAdmitDirectoryAccountUsers.mockResolvedValue({
+      succeeded: [],
+      failed: [{ accountId: 'account-1', error: 'User with this username already exists' }],
+    })
+
+    const response = await invokeRoute('post', '/accounts/batch-admit-users', {
+      body: { accountIds: ['account-1'] },
+      user: { id: 'admin-1', role: 'admin' },
+    })
+
+    expect(response.statusCode).toBe(409)
+    expect(response.body).toMatchObject({
+      ok: false,
+      error: { code: 'DIRECTORY_BATCH_ADMISSION_FAILED' },
+    })
+    expect(auditMocks.auditLog).not.toHaveBeenCalled()
+  })
+
+  it('audits committed items when part of a batch-unbind fails', async () => {
+    directoryMocks.batchUnbindDirectoryAccounts.mockResolvedValue({
+      succeeded: [
+        {
+          account: { id: 'account-1', integrationId: 'dir-1', corpId: 'dingcorp', externalUserId: 'ext-1', localUser: null },
+          previousLocalUser: { id: 'u1', email: 'alpha@example.com', name: 'Alpha' },
+        },
+      ],
+      failed: [{ accountId: 'account-2', error: 'Directory account not found' }],
+    })
+
+    const response = await invokeRoute('post', '/accounts/batch-unbind', {
+      body: { accountIds: ['account-1', 'account-2'] },
+      user: { id: 'admin-1', role: 'admin' },
+    })
+
+    expect(response.statusCode).toBe(200)
+    expect(auditMocks.auditLog).toHaveBeenCalledTimes(1)
+    expect(auditMocks.auditLog).toHaveBeenCalledWith(expect.objectContaining({ action: 'unbind', resourceId: 'account-1' }))
+    expect(response.body).toMatchObject({
+      ok: true,
+      data: { updatedCount: 1, failedCount: 1, failed: [{ accountId: 'account-2' }] },
+    })
+  })
+
   it('unbinds a directory account', async () => {
     directoryMocks.unbindDirectoryAccount.mockResolvedValue({
       account: {
@@ -1081,7 +1824,7 @@ describe('adminDirectoryRouter', () => {
   })
 
   it('batch unbinds directory accounts', async () => {
-    directoryMocks.batchUnbindDirectoryAccounts.mockResolvedValue([
+    directoryMocks.batchUnbindDirectoryAccounts.mockResolvedValue({ failed: [], succeeded: [
       {
         account: {
           id: 'account-1',
@@ -1110,7 +1853,7 @@ describe('adminDirectoryRouter', () => {
           name: 'Beta',
         },
       },
-    ])
+    ] })
 
     const response = await invokeRoute('post', '/accounts/batch-unbind', {
       body: {
@@ -1168,5 +1911,64 @@ describe('adminDirectoryRouter', () => {
       resourceType: 'directory-sync-alert',
       resourceId: 'alert-1',
     }))
+  })
+})
+
+// Direct boundary-case pin for `SimpleCronExpression` (`packages/core-backend/src/services/SchedulerService.ts`),
+// which the admin-directory create/update routes reuse for schedule_cron save-time validation (roadmap
+// §7.8; see `isDirectoryScheduleCronValid` in `../../src/routes/admin-directory`) — deliberately NOT the
+// multitable automation scheduler's own cron parser (`multitable/automation-scheduler.ts`), because that
+// parser disagrees with `SimpleCronExpression` on day-of-month + day-of-week combination semantics (OR vs
+// AND — see the second test below) and `SimpleCronExpression` is the class `directory-sync-scheduler.ts`
+// actually uses to run the job, so it's the one whose "would this ever fire" verdict must be pinned.
+// `isValidPerRoute` mirrors the route's own combining logic exactly.
+describe('reused cron validator boundary semantics (SimpleCronExpression / SchedulerService)', () => {
+  function isValidPerRoute(cron: string): boolean {
+    try {
+      return new SimpleCronExpression(cron, 'UTC').hasNext()
+    } catch {
+      return false
+    }
+  }
+
+  it.each([
+    ['standard 5-field wildcard', '* * * * *', true],
+    ['every 5 minutes (step syntax)', '*/5 * * * *', true],
+    ['fixed daily time', '0 2 * * *', true],
+    ['comma list of minutes', '0,15,30,45 * * * *', true],
+    ['range with step', '0 9-17/2 * * *', true],
+    ['Sunday as 7 (cron convention)', '0 0 * * 7', true],
+    ['every Monday (day-of-month wildcard + weekday restricted)', '0 0 * * 1', true],
+    ['6-field with seconds is NOT accepted', '0 0 2 * * *', false],
+    ['4-field is NOT accepted', '0 2 * *', false],
+    ['nonsense text', 'not a cron', false],
+    ['out-of-range minute (60)', '60 2 * * *', false],
+    ['out-of-range hour (25)', '0 25 * * *', false],
+    ['out-of-range day-of-month (32)', '0 0 32 * *', false],
+    ['out-of-range month (13)', '0 0 1 13 *', false],
+    ['negative value', '-1 * * * *', false],
+    ['zero step', '*/0 * * * *', false],
+    ['Feb 30th (impossible calendar day, day-of-week wildcard)', '0 0 30 2 *', false],
+    ['day-of-month 30 AND weekday Monday in February — impossible under AND-semantics', '0 0 30 2 1', false],
+    ['empty string', '', false],
+    ['whitespace only', '   ', false],
+  ])('%s -> %s (%s)', (_label, cron, expected) => {
+    expect(isValidPerRoute(cron)).toBe(expected)
+  })
+
+  it('documents WHY this reuses SimpleCronExpression instead of the multitable automation cron parser', async () => {
+    // The multitable parser (`multitable/automation-scheduler.ts`) uses standard cron OR-semantics for
+    // day-of-month + day-of-week: it would accept `0 0 30 2 1` as schedulable ("any Monday in February").
+    // `SimpleCronExpression` (what `directory-sync-scheduler.ts` actually runs on) ANDs every field
+    // instead, so it can NEVER match (no February 30th exists) and rejects it. Validating against the
+    // multitable parser would have let this save as "valid" while the real scheduler silently dropped it
+    // forever — exactly the bug roadmap §7.8 exists to close. This test fails loudly if the multitable
+    // parser's semantics ever change to match `SimpleCronExpression`'s (at which point this comment, and
+    // the design tradeoff it documents, should be revisited).
+    const { parseCronExpression, cronHasNoMatchingDay } = await import('../../src/multitable/automation-scheduler')
+    const cron = '0 0 30 2 1'
+    expect(parseCronExpression(cron)).not.toBeNull()
+    expect(cronHasNoMatchingDay(cron)).toBe(false) // multitable parser: OR-semantics -> "reachable"
+    expect(isValidPerRoute(cron)).toBe(false) // SimpleCronExpression: AND-semantics -> never fires
   })
 })

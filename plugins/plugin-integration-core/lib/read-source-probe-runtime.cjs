@@ -20,16 +20,41 @@ const {
   readSourceProbeEvidence,
 } = require('./read-source-probe-contract.cjs')
 const { applyReadSmokePresetOverlay } = require('./read-smoke.cjs')
-const { READ_SMOKE_LIST_REQUEST_MARKER, READ_SMOKE_BOM_REQUEST_MARKER } = require('./read-smoke-marker.cjs')
+const {
+  READ_SMOKE_LIST_REQUEST_MARKER,
+  READ_SMOKE_BOM_REQUEST_MARKER,
+  READ_SMOKE_BOM_LIST_BY_MATERIAL_REQUEST_MARKER,
+} = require('./read-smoke-marker.cjs')
+// BL2 (#1709): by-material BOM-list preset identity + registered error family. The contract layer
+// (read-source-probe-contract) has already fail-closed any drifted preset config before a plan exists,
+// so a plan matching this identity is guaranteed contract-locked here.
+const {
+  K3WISE_BOM_LIST_BY_MATERIAL_PRESET,
+  K3_WISE_BOM_LIST_BY_MATERIAL_ERROR_CODES,
+} = require('./read-source-bom-list-by-material-contract.cjs')
+
+const K3_WISE_BOM_LIST_BY_MATERIAL_ERROR_CODE_SET = new Set(K3_WISE_BOM_LIST_BY_MATERIAL_ERROR_CODES)
+
+function isBomListByMaterialPlan(plan) {
+  return plan.mode === K3WISE_BOM_LIST_BY_MATERIAL_PRESET.mode
+    && plan.requiredKind === K3WISE_BOM_LIST_BY_MATERIAL_PRESET.requiredKind
+    && plan.object === K3WISE_BOM_LIST_BY_MATERIAL_PRESET.object
+}
 
 // Route-level body keys: the S2-a contract (config, boundedSmoke) plus `inputs` — execution-time named
 // inputs (the plan's requiredNamedInputs) ride BESIDE the frozen contract, never inside it, so the S2-a
 // top-key allowlist stays untouched.
 const READ_SOURCE_PROBE_BODY_INPUT_KEY = 'inputs'
-const READ_SOURCE_PROBE_INPUT_KEYS = Object.freeze(['key'])
+const READ_SOURCE_PROBE_INPUT_KEYS = Object.freeze(['key', 'pageIndex'])
 // A named key input is a bound business VALUE (e.g. a material number): bounded, control-char-free, and —
 // like the read-smoke key — never echoed into any error or evidence.
 const READ_SOURCE_PROBE_KEY_MAX_LENGTH = 128
+// Bounded LIST page input (#3703, owner-approved 2026-07-06 — the data-plane half of the same bounded
+// pageIndex authorization already shipped for the evidence-only read-smoke route in #3709): list_page
+// configured reads may name a page, integer 1..10 only, so an authorized operator can walk bounded pages
+// through the EXISTING fieldMap data plane. Not a filter/body/field surface; rejected on any other mode;
+// the adapter re-guards the same bound.
+const READ_SOURCE_PROBE_MAX_PAGE_INDEX = 10
 
 class ReadSourceProbeRuntimeError extends Error {
   constructor(reason) {
@@ -64,17 +89,32 @@ function normalizeReadSourceProbeInputs(plan, inputs) {
   if (!Object.keys(source).every((key) => READ_SOURCE_PROBE_INPUT_KEYS.includes(key))) {
     throw new ReadSourceProbeContractError('inputs_unexpected_field')
   }
+  // Bounded LIST page input (#3703): list_page only; integer 1..MAX only; fail-closed on any other mode
+  // (never silently dropped) and on any non-conforming value.
+  let pageIndex
+  if (source.pageIndex !== undefined) {
+    if (plan.mode !== 'list_page') {
+      throw new ReadSourceProbeContractError('page_index_not_allowed')
+    }
+    if (typeof source.pageIndex !== 'number' || !Number.isInteger(source.pageIndex)
+      || source.pageIndex < 1 || source.pageIndex > READ_SOURCE_PROBE_MAX_PAGE_INDEX) {
+      throw new ReadSourceProbeContractError('page_index_invalid')
+    }
+    pageIndex = source.pageIndex
+  }
   if (plan.requiredNamedInputs.includes('key')) {
     if (!isBoundedProbeKeyValue(source.key)) {
       throw new ReadSourceProbeContractError('key_required')
     }
-    return Object.freeze({ key: String(source.key).trim() })
+    const normalized = { key: String(source.key).trim() }
+    if (pageIndex !== undefined) normalized.pageIndex = pageIndex
+    return Object.freeze(normalized)
   }
   // Fail-closed the other way too: a key supplied to a keyless plan is rejected, not silently dropped.
   if (source.key !== undefined) {
     throw new ReadSourceProbeContractError('key_not_allowed')
   }
-  return Object.freeze({})
+  return Object.freeze(pageIndex !== undefined ? { pageIndex } : {})
 }
 
 // Split the route body into { contract, inputs }, normalize the contract through the S2-a normalizer
@@ -114,6 +154,12 @@ function buildReadSourceProbeOverlayPreset(plan) {
     objectOverlay.readMode = 'bom'
     if (plan.keyField) objectOverlay.readBomParentKeyField = plan.keyField
   }
+  // BL2: the by-material BOM-list preset is the ONLY resolver_lookup shape with its own adapter read
+  // mode. Everything K3-facing beyond path/method (body root, field list, filter operator, SelectPage)
+  // is pinned INSIDE the adapter mode — the overlay carries no filter/body configuration at all.
+  if (isBomListByMaterialPlan(plan)) {
+    objectOverlay.readMode = 'bom_list_by_material'
+  }
   return {
     readConfigOverlay: {
       objects: {
@@ -126,6 +172,9 @@ function buildReadSourceProbeOverlayPreset(plan) {
 function buildReadSourceProbeRequest(plan, inputs) {
   if (plan.mode === 'list_page') {
     const request = { object: plan.object, limit: plan.rowCap, options: { k3ReadMode: 'list' } }
+    // Bounded page input (#3703): contract-validated 1..MAX above; the adapter re-guards the same bound
+    // (K3_WISE_READ_LIST_PAGE_INDEX_INVALID). Absent → adapter default page 1 (shipped behavior unchanged).
+    if (inputs.pageIndex !== undefined) request.options.listPageIndex = inputs.pageIndex
     Object.defineProperty(request.options, READ_SMOKE_LIST_REQUEST_MARKER, { value: true, enumerable: true })
     return request
   }
@@ -135,6 +184,14 @@ function buildReadSourceProbeRequest(plan, inputs) {
     const request = { object: plan.object, options }
     Object.defineProperty(request.options, READ_SMOKE_BOM_REQUEST_MARKER, { value: true, enumerable: true })
     return request
+  }
+  // BL2: by-material BOM-list lookup. The key rides as a dedicated option (numeric FItemID; the adapter
+  // fail-closes a non-digits key before any K3 call), never as a raw filter/body — the request carries
+  // NO endpoint, filter expression, field list, or container path (BL0 request-contract lock).
+  if (isBomListByMaterialPlan(plan)) {
+    const options = { k3ReadMode: 'bom_list_by_material', bomListMaterialKey: inputs.key }
+    Object.defineProperty(options, READ_SMOKE_BOM_LIST_BY_MATERIAL_REQUEST_MARKER, { value: true, enumerable: true })
+    return { object: plan.object, limit: plan.rowCap, options }
   }
   // single_record / resolver_lookup: keyed detail read. keyField and the key input are both guaranteed
   // (S1 mode-required field + requiredNamedInputs validation above).
@@ -181,6 +238,10 @@ function classifyProbeErrorCode(error) {
   const code = typeof error?.code === 'string'
     ? error.code
     : (typeof error?.details?.code === 'string' ? error.details.code : '')
+  // BL2: the by-material BOM-list family passes through as EXACT registered members (BL0 taxonomy) so a
+  // second-hop list failure keeps its own family in evidence. Set membership only — a family-looking but
+  // unregistered token falls through to the generic classification below, never a prefix pass.
+  if (K3_WISE_BOM_LIST_BY_MATERIAL_ERROR_CODE_SET.has(code)) return code
   if (/LOGIN|TOKEN|AUTH|CREDENTIAL/.test(code)) return 'READ_SOURCE_PROBE_AUTH_FAILED'
   if (/BUSINESS/.test(code)) return 'READ_SOURCE_PROBE_RESPONSE_UNRECOGNIZED'
   if (name === 'AdapterValidationError' || name === 'UnsupportedAdapterOperationError') return 'READ_SOURCE_PROBE_REJECTED'

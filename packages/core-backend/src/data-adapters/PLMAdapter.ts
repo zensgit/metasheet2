@@ -632,6 +632,8 @@ const YUANTUS_SUPPORTED_OPERATIONS = [
   'cad_properties_update',
   'cad_view_state_update',
   'cad_review_update',
+  // PLM-COLLAB Discussion Phase 3 slice-1 (READ-ONLY): getDiscussions/getDiscussionThread.
+  'discussions',
 ]
 
 /**
@@ -639,15 +641,26 @@ const YUANTUS_SUPPORTED_OPERATIONS = [
  * manifest returned by the provider's `GET /api/v1/integrations/capabilities`. ADVISORY
  * ONLY -- used to decide UI degradation / entry display; NEVER an authorization decision
  * (the PLM provider still enforces is_entitled at every feature endpoint).
+ *
+ * `available` (#4020, additive -- Yuantus provider #1156): the ONE provider-computed
+ * affordance-visibility signal, `available = supported && (packaging === 'base' ||
+ * entitled)`. A base-packaged feature (e.g. `discussion_core`) ships with base PLM and
+ * has no license row, so `entitled` reads false on an unlicensed deployment even though
+ * the affordance should stay visible -- `available` already accounts for that, so
+ * consumers must key visibility on it directly rather than re-deriving from `entitled`
+ * (billing state) or `supported` + a locally-guessed packaging rule. Optional because an
+ * older provider manifest (pre-#1156) omits it entirely -- see `isFeatureAvailable`.
  */
 export interface IntegrationFeatureCapability {
   supported: boolean;
   api_version: string | null;
   entitled: boolean;
-  cache_scope?: { supported?: string; entitled?: string };
+  available?: boolean;
+  cache_scope?: { supported?: string; entitled?: string; available?: string };
   scenarios?: string[];
   actions?: string[];
   action_status?: string;
+  packaging?: string;
 }
 
 export interface IntegrationCapabilityManifest {
@@ -655,6 +668,22 @@ export interface IntegrationCapabilityManifest {
   provider: string;
   advisory: boolean;
   features: Record<string, IntegrationFeatureCapability>;
+}
+
+/**
+ * #4020: the single affordance-visibility judgment every capability consumer should route
+ * through. Consumes the provider-computed `entry.available` DIRECTLY when present (the
+ * unified formula already resolves the base-vs-paid packaging distinction correctly).
+ * Falls back to the pre-#4020 derivation (`supported && entitled`) ONLY when `available`
+ * is absent -- an older provider manifest -- so a consumer talking to a not-yet-upgraded
+ * PLM sees no behavior change. A missing/undefined feature entry is never available.
+ */
+export function isFeatureAvailable(
+  entry: IntegrationFeatureCapability | null | undefined,
+): boolean {
+  if (!entry) return false;
+  if (typeof entry.available === 'boolean') return entry.available;
+  return entry.supported === true && entry.entitled === true;
 }
 
 /**
@@ -752,6 +781,19 @@ export interface BomMultitableLineUpdateOptions {
   ifMatch?: string;
 }
 
+// ECO Phase 3: response of the provider's locked-BOM revision-intent seam
+// (POST /api/v1/bom/multitable/{part_id}/eco-intent). `attached: true` means an already-open
+// bom-ECO for this part was reused (the provider's attach-before-create anti-sprawl — that is
+// also the idempotency story: a double-click attaches instead of spawning a second ECO, so the
+// request deliberately carries NO Idempotency-Key header and NO body).
+export interface BomEcoRevisionIntentResult {
+  eco_id: string;
+  state: string;
+  attached: boolean;
+  source_version_id?: string | null;
+  target_version_id?: string | null;
+}
+
 // Field guard for the governed BOM multi-table context. Validates EVERY field declared on
 // BomMultitableLine / BomMultitablePart / BomMultitableContext — both the structural keys
 // (bom_line_id, part_id, level, path, ...) AND the displayed cells (item_number, name, state,
@@ -812,6 +854,83 @@ function isBomMultitableContext(value: unknown): value is BomMultitableContext {
   if (typeof c.sync_status !== 'string') return false;
   if (typeof c.template_key !== 'string') return false;
   return true;
+}
+
+/**
+ * PLM-COLLAB Discussion Phase 3 slice-1 (READ-ONLY) consumer types: object-bound discussion
+ * threads/comments served by the provider's EXISTING `/api/v1/discussions` routes (Discussion
+ * Core R1 + Phase-2 + Phase-6, already shipped on Yuantus main -- this slice adds NO new
+ * provider route). Bearer-JWT (`get_current_user`) + target-inherited permission via the
+ * provider's closed resolver registry (item / item_version / file / eco / pdm_relationship) --
+ * NOT entitlement-gated: this slice deliberately does no capability/SKU check (the
+ * `discussion_core` manifest key is a separate, not-yet-ratified owner fork). A missing OR
+ * unreadable target/thread is the provider's INDISTINGUISHABLE 404 (no existence leak) --
+ * surfaced here as `QueryResult.error`, never thrown, so a degrading panel can treat "no
+ * threads" and "target unreadable" identically without probing which one happened. Write
+ * routes (create thread / add comment / edit / delete / resolve / reopen) are a LATER slice,
+ * gated on the write-session-credential design, and are deliberately NOT added here.
+ */
+export type DiscussionTargetType = 'item' | 'item_version' | 'file' | 'eco' | 'pdm_relationship';
+
+export interface DiscussionTarget {
+  targetType: DiscussionTargetType;
+  targetId: string;
+}
+
+export interface DiscussionListOptions {
+  includeResolved?: boolean;
+  // Phase-6: item targets only -- also aggregates one-level current-assembly BOM-children
+  // threads (provider's WP1.2 /pdm "ASSEMBLY" containment vocabulary).
+  includeChildren?: boolean;
+  limit?: number;
+  cursor?: string;
+}
+
+export interface DiscussionThreadOptions {
+  // Phase-6: read-only lifecycle/version history merge, item-backed targets only; file/eco
+  // targets come back with no history entries.
+  includeHistory?: boolean;
+}
+
+export interface DiscussionThreadSummary {
+  id: string;
+  target_type: string;
+  target_id: string;
+  title: string | null;
+  status: string;
+  created_by_id: number;
+  created_at: string;
+  resolved_by_id: number | null;
+  resolved_at: string | null;
+  last_comment_at: string | null;
+  comment_count: number;
+  anchor: Record<string, unknown> | null;
+}
+
+export interface DiscussionThreadListResult {
+  threads: DiscussionThreadSummary[];
+  next_cursor: string | null;
+}
+
+export interface DiscussionComment {
+  id: string;
+  parent_comment_id: string | null;
+  // Soft-deleted comments keep their row (audit) but are redacted at the provider's API
+  // surface: body/anchor -> null, mentioned_user_ids -> [].
+  body: string | null;
+  body_format: string;
+  author_user_id: number;
+  mentioned_user_ids: number[];
+  created_at: string;
+  edited_at: string | null;
+  deleted_at: string | null;
+  anchor: Record<string, unknown> | null;
+}
+
+export interface DiscussionThreadDetail extends DiscussionThreadSummary {
+  comments: DiscussionComment[];
+  // Present only when include_history=true was requested (Phase-6 merge).
+  history?: Array<Record<string, unknown>>;
 }
 
 export class PLMAdapter extends HTTPAdapter {
@@ -1215,6 +1334,18 @@ export class PLMAdapter extends HTTPAdapter {
               entitled: true,
               cache_scope: { supported: 'global', entitled: 'tenant' },
               scenarios: ['bom_review'],
+            },
+            // ECO Phase 3: mock the lit bom_eco_revision SKU so mock-mode dev can exercise the
+            // locked-BOM "发起 ECO 修订" CTA end to end (the CTA pre-gates on this descriptor,
+            // per Phase-0 Lock 3: availability discovery is the capabilities advisory).
+            bom_eco_revision: {
+              supported: true,
+              api_version: 'v1',
+              entitled: true,
+              cache_scope: { supported: 'global', entitled: 'tenant' },
+              scenarios: ['bom_review'],
+              actions: ['eco_revision_intent'],
+              action_status: 'governed',
             },
           },
         },
@@ -2266,6 +2397,108 @@ export class PLMAdapter extends HTTPAdapter {
       data: payload,
       headers,
     })
+  }
+
+  // ECO Phase 3 consumer callsite: opt-in that opens (or attaches to) a PENDING ECO revision
+  // for a lifecycle-LOCKED part — the door the Phase-0 discriminated 409 (`eco_required: true`)
+  // points at. Provider contract (POST /api/v1/bom/multitable/{part_id}/eco-intent, no body):
+  // 200 {eco_id, state, attached, source_version_id, target_version_id};
+  // 409 {detail:{code: 'not_locked' | 'eco_intent_rejected', message}}; entitlement-first 403.
+  // Idempotency = the provider's attach-before-create (at most ONE open intent per part), so no
+  // Idempotency-Key header is minted here (mirrors the provider docstring, NOT the write PATCH).
+  async requestBomEcoRevisionIntent(partId: string): Promise<QueryResult<BomEcoRevisionIntentResult>> {
+    if (this.mockMode) {
+      return {
+        data: [
+          {
+            eco_id: `mock-eco-${partId}`,
+            state: 'progress',
+            attached: false,
+            source_version_id: 'mock-v1',
+            target_version_id: 'mock-v2',
+          },
+        ],
+        metadata: { totalCount: 1 },
+      }
+    }
+    if (this.apiMode !== 'yuantus') {
+      return { data: [], error: new Error('BOM ECO revision intent is not supported for this PLM API mode') }
+    }
+    return this.select<BomEcoRevisionIntentResult>(`/api/v1/bom/multitable/${partId}/eco-intent`, {
+      method: 'POST',
+    })
+  }
+
+  /**
+   * PLM-COLLAB Discussion Phase 3 slice-1 (READ-ONLY): list discussion threads bound to a PLM
+   * target (the provider's `GET /api/v1/discussions`). No capability/SKU gate on this read
+   * path -- see the type-block docstring above. A missing/unreadable target comes back as the
+   * provider's indistinguishable 404, surfaced as `result.error` (never thrown).
+   */
+  async getDiscussions(
+    target: DiscussionTarget,
+    options?: DiscussionListOptions
+  ): Promise<QueryResult<DiscussionThreadListResult>> {
+    if (this.mockMode) {
+      return {
+        data: [{ threads: [], next_cursor: null }],
+        metadata: { totalCount: 1 },
+      }
+    }
+    if (this.apiMode !== 'yuantus') {
+      return { data: [], error: new Error('Discussions are not supported for this PLM API mode') }
+    }
+
+    const params: Record<string, unknown> = {
+      target_type: target.targetType,
+      target_id: target.targetId,
+    }
+    if (options?.includeResolved) params.include_resolved = options.includeResolved
+    if (options?.includeChildren) params.include_children = options.includeChildren
+    if (typeof options?.limit === 'number') params.limit = options.limit
+    if (options?.cursor) params.cursor = options.cursor
+
+    return this.query<DiscussionThreadListResult>('/api/v1/discussions', [params])
+  }
+
+  /**
+   * PLM-COLLAB Discussion Phase 3 slice-1 (READ-ONLY): fetch one discussion thread with its
+   * comments (the provider's `GET /api/v1/discussions/{thread_id}`). Same no-leak contract as
+   * getDiscussions -- an absent thread id and an unreadable target both come back as the
+   * provider's indistinguishable 404.
+   */
+  async getDiscussionThread(
+    threadId: string,
+    options?: DiscussionThreadOptions
+  ): Promise<QueryResult<DiscussionThreadDetail>> {
+    if (this.mockMode) {
+      return {
+        data: [{
+          id: threadId,
+          target_type: 'item',
+          target_id: 'mock-item-1',
+          title: 'Mock discussion thread',
+          status: 'open',
+          created_by_id: 1,
+          created_at: new Date().toISOString(),
+          resolved_by_id: null,
+          resolved_at: null,
+          last_comment_at: null,
+          comment_count: 0,
+          anchor: null,
+          comments: [],
+        }],
+        metadata: { totalCount: 1 },
+      }
+    }
+    if (this.apiMode !== 'yuantus') {
+      return { data: [], error: new Error('Discussions are not supported for this PLM API mode') }
+    }
+
+    const params: Record<string, unknown> = {}
+    if (options?.includeHistory) params.include_history = options.includeHistory
+
+    return this.query<DiscussionThreadDetail>(`/api/v1/discussions/${threadId}`, [params])
   }
 
   async getApprovals(options?: ApprovalQueryOptions): Promise<QueryResult<ApprovalRequest>> {

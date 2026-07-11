@@ -1,7 +1,8 @@
 /**
  * T8-2: Point-in-Time Reset-to-T (DESTRUCTIVE sheet rollback) — real DB. Reset = Revert (surviving records → their
  * T-state) + SOFT-DELETE the records created after T. Goldens: (a) flag-off → inert 403; (b) flag-on → post-T-created
- * SOFT-DELETED (to recycle-bin trash) + survivors reverted (source=restore); (c) PIT-2 all-or-nothing — a LOCKED
+ * SOFT-DELETED (to recycle-bin trash) + survivors reverted (source=restore); (b2) retention guard refuses Reset
+ * while meta revision retention is enabled; (c) PIT-2 all-or-nothing — a LOCKED
  * delete-target → 409 RESET_BLOCKED with ZERO writes (mutation-proven: drop the not-locked preflight check → D is
  * deleted → this golden fails); (d) row-deny added after preview → 409 RESET_BLOCKED with ZERO writes and no blocker
  * details; (e) ceiling → 413; (f) typed confirm:'reset' required → 400; (g) delete-set divergence — a record created
@@ -67,11 +68,13 @@ describeIfDatabase('multitable T8-2 Reset-to-T (DESTRUCTIVE, real DB)', () => {
     await q('DELETE FROM meta_sheets WHERE id = $1', [SHEET]).catch(() => {})
     await q('DELETE FROM meta_bases WHERE id = $1', [BASE]).catch(() => {})
     await q('DELETE FROM users WHERE id = $1', [ACTOR]).catch(() => {})
+    delete process.env.MULTITABLE_META_REVISION_RETENTION_ENABLED
   })
   beforeEach(async () => {
     curRoles = ['member']
     curPerms = ['multitable:read', 'multitable:write', 'multitable:share']
     process.env.MULTITABLE_ENABLE_PIT_RESET = 'true' // flag ON for most tests; (a) turns it off
+    delete process.env.MULTITABLE_META_REVISION_RETENTION_ENABLED
     await q('UPDATE meta_sheets SET row_level_read_permissions_enabled = false WHERE id = $1', [SHEET])
     await q('DELETE FROM meta_records_trash WHERE sheet_id = $1', [SHEET]).catch(() => {})
     await q('DELETE FROM meta_record_revisions WHERE sheet_id = $1', [SHEET])
@@ -104,6 +107,25 @@ describeIfDatabase('multitable T8-2 Reset-to-T (DESTRUCTIVE, real DB)', () => {
     expect(await inTrash(D)).toBe(true) // ...recoverable in the recycle bin (NOT hard-deleted)
     const restoreRevs = (await q(`SELECT count(*)::int AS c FROM meta_record_revisions WHERE sheet_id = $1 AND source = 'restore'`, [SHEET])).rows[0] as { c: number }
     expect(restoreRevs.c).toBeGreaterThanOrEqual(2) // the reverts wrote source=restore forward revisions
+  })
+
+  test('(b2) retention guard: PIT_RESET + meta revision retention enabled → 409 RESET_RETENTION_CONFLICT, ZERO writes', async () => {
+    process.env.MULTITABLE_META_REVISION_RETENTION_ENABLED = '1'
+    const pv = await resetPreview()
+    expect(pv.status).toBe(409)
+    expect(pv.body?.error?.code).toBe('RESET_RETENTION_CONFLICT')
+    const ex = await resetExecute({ asOf: T1, previewIdentity: 'x', confirm: 'reset' })
+    expect(ex.status).toBe(409)
+    expect(ex.body?.error?.code).toBe('RESET_RETENTION_CONFLICT')
+    for (const id of [A, B]) {
+      const r = await recordRow(id)
+      expect(r?.data?.[NAME]).toBe('new')
+      expect(r?.version).toBe(2)
+    }
+    expect(await recordRow(D)).toBeTruthy()
+    expect(await inTrash(D)).toBe(false)
+    const restoreRevs = (await q(`SELECT count(*)::int AS c FROM meta_record_revisions WHERE sheet_id = $1 AND source = 'restore'`, [SHEET])).rows[0] as { c: number }
+    expect(restoreRevs.c).toBe(0)
   })
 
   test('(c) PIT-2 all-or-nothing: a LOCKED post-T-created target → 409 RESET_BLOCKED, ZERO writes', async () => {

@@ -64,6 +64,40 @@ assert.deepEqual(normalizeReadSmokeContract({
   key: 'MAT-',
 }, 'LIST key is trimmed and preserved only as an internal FNumber filter input')
 
+// --- bounded LIST pageIndex (#3703): integer 1..10 only, list-mode only ---
+assert.deepEqual(normalizeReadSmokeContract({
+  presetId: 'k3wise.material-list.v1',
+  intent: { object: 'material', mode: 'list', pageIndex: 3 },
+}), {
+  presetId: 'k3wise.material-list.v1',
+  object: 'material',
+  mode: 'list',
+  pageIndex: 3,
+}, 'LIST accepts a bounded integer pageIndex')
+assert.deepEqual(normalizeReadSmokeContract({
+  presetId: 'k3wise.material-list.v1',
+  intent: { object: 'material', mode: 'list', key: 'MAT-', pageIndex: 10 },
+}), {
+  presetId: 'k3wise.material-list.v1',
+  object: 'material',
+  mode: 'list',
+  pageIndex: 10,
+  key: 'MAT-',
+}, 'LIST pageIndex composes with the internal filter key; the max bound (10) is accepted')
+for (const badPage of [0, 11, -1, 1.5, '3', ' 3', null, true, {}, [], Number.NaN, Infinity]) {
+  assert.throws(
+    () => normalizeReadSmokeContract({ presetId: 'k3wise.material-list.v1', intent: { object: 'material', mode: 'list', pageIndex: badPage } }),
+    isErr('page_index_invalid'),
+    `LIST pageIndex ${JSON.stringify(badPage)} must fail closed`,
+  )
+}
+// pageIndex on a non-list mode is rejected, never silently dropped
+assert.throws(
+  () => normalizeReadSmokeContract({ presetId: 'k3wise.material-detail.v1', intent: { object: 'material', mode: 'single_record_detail', key: 'M-001', pageIndex: 2 } }),
+  isErr('page_index_not_allowed'),
+  'detail-mode pageIndex must be rejected',
+)
+
 // --- fail-closed ---
 assert.throws(() => normalizeReadSmokeContract(null), isErr('not_object'))
 assert.throws(() => normalizeReadSmokeContract('x'), isErr('not_object'))

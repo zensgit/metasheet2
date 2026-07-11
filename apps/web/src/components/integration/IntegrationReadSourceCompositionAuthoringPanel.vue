@@ -10,8 +10,55 @@
       <div class="integration-read-source-composition-authoring__form" data-testid="rscauth-form">
         <h3>新建组合</h3>
 
+        <!-- TC-1 (design-lock docs/development/integration-connector-template-catalog-design-lock-20260708.md,
+             #3879): ADD-ONLY alternative entry point, collapsed by default — the pre-existing
+             wizard/flat-form default surface and every existing assertion about it are untouched.
+             Selecting a card seeds `draft.sourceTarget` (mirrors this panel's own pre-existing default
+             assignment below) and forces the view back to the wizard. -->
+        <IntegrationTemplateCatalogPicker
+          seeds-wizard="composition"
+          testid-prefix="rscauth"
+          @select="applyCompositionTemplate"
+        />
+
+        <!-- IU-4 (design-lock docs/development/integration-iu4-composition-wizard-design-lock-20260707.md,
+             #3803, sibling of IU-3): the wizard is the DEFAULT surface; this toggle switches to the
+             untouched full flat form below (折叠≠删除 — expert mode is retained, never removed).
+             Native <button>, same rationale as IU-3's rsc-mode-toggle (IntegrationReadSourceConfigPanel.vue)
+             — Element Plus is not globally registered in every host that mounts this component in tests. -->
+        <div class="integration-read-source-composition-authoring__mode-toggle">
+          <button
+            type="button"
+            class="integration-read-source-composition-authoring__mode-toggle-button"
+            data-testid="rscauth-mode-toggle"
+            @click="toggleViewMode"
+          >
+            <el-icon><component :is="viewMode === 'wizard' ? Setting : MagicStick" /></el-icon>
+            {{ viewMode === 'wizard' ? bi('专家表单', 'Expert form') : bi('返回向导', 'Back to wizard') }}
+          </button>
+        </div>
+
+        <IntegrationCompositionWizard
+          v-if="viewMode === 'wizard'"
+          :draft="draft"
+          :resolver-configs="resolverConfigs"
+          :picker-loading="pickerLoading"
+          :picker-error="pickerError"
+          :can-write="canWrite"
+          :saving="saving"
+          :approving="approving"
+          :action-error="actionError"
+          :save-field-errors="saveFieldErrors"
+          :saved-row="savedRow"
+          @save="save"
+          @approve="approve"
+        />
+
+        <template v-else>
         <label class="integration-read-source-composition-authoring__field">
-          <span>第一跳读取源(已审批 resolver_lookup)</span>
+          <el-tooltip :content="fieldHint('composition.step1ConfigId')" placement="top" data-testid="rscauth-hint-step1">
+            <span>第一跳读取源(已审批 resolver_lookup)</span>
+          </el-tooltip>
           <select v-model="draft.step1ConfigId" data-testid="rscauth-step1">
             <option value="">请选择第一跳读取源…</option>
             <option v-for="row in resolverConfigs" :key="row.id" :value="row.id">
@@ -21,7 +68,9 @@
         </label>
 
         <label class="integration-read-source-composition-authoring__field">
-          <span>第二跳读取源(已审批 resolver_lookup)</span>
+          <el-tooltip :content="fieldHint('composition.step2ConfigId')" placement="top" data-testid="rscauth-hint-step2">
+            <span>第二跳读取源(已审批 resolver_lookup)</span>
+          </el-tooltip>
           <select v-model="draft.step2ConfigId" data-testid="rscauth-step2">
             <option value="">请选择第二跳读取源…</option>
             <option v-for="row in resolverConfigs" :key="row.id" :value="row.id">
@@ -31,12 +80,16 @@
         </label>
 
         <label class="integration-read-source-composition-authoring__field">
-          <span>name(组合标识符)</span>
+          <el-tooltip :content="fieldHint('composition.name')" placement="top" data-testid="rscauth-hint-name">
+            <span>name(组合标识符)</span>
+          </el-tooltip>
           <input v-model="draft.name" data-testid="rscauth-name" placeholder="material_to_bom_v1" />
         </label>
 
         <label class="integration-read-source-composition-authoring__field">
-          <span>sourceTarget(第一跳输出字段名,交接给第二跳作为 key)</span>
+          <el-tooltip :content="fieldHint('composition.sourceTarget')" placement="top" data-testid="rscauth-hint-source-target">
+            <span>sourceTarget(第一跳输出字段名,交接给第二跳作为 key)</span>
+          </el-tooltip>
           <input v-model="draft.sourceTarget" data-testid="rscauth-source-target" placeholder="internal_id" />
         </label>
 
@@ -66,15 +119,27 @@
         </div>
 
         <p v-if="pickerError" class="integration-read-source-composition-authoring__error" data-testid="rscauth-picker-error">{{ pickerError }}</p>
-        <p v-if="!pickerLoading && resolverConfigs.length === 0" class="integration-read-source-composition-authoring__empty" data-testid="rscauth-empty">
-          暂无已审批的 resolver_lookup 读取源,请先在上方"读取源配置"面板配置并审批两个读取源。
-        </p>
+        <div
+          v-if="!pickerLoading && resolverConfigs.length === 0"
+          class="integration-read-source-composition-authoring__empty integration-read-source-composition-authoring__empty--guided"
+          data-testid="rscauth-empty"
+        >
+          <strong data-testid="rscauth-empty-what">{{ bi(
+            '这里把两个已审批的"解析定位"读取源组装成一条两跳链，用于从一个业务键派生到另一个关联记录。',
+            'This assembles two APPROVED resolver-lookup read sources into a two-hop chain, deriving one linked record from a business key.',
+          ) }}</strong>
+          <p data-testid="rscauth-empty-first-step">{{ bi(
+            '第一步：请先在上方"读取源配置"面板配置并审批两个 resolver_lookup 读取源，审批后即可在这里选用。',
+            'First step: configure and approve two resolver_lookup read sources in the "read-source config" panel above — once approved, they become selectable here.',
+          ) }}</p>
+        </div>
 
         <p v-if="actionError" class="integration-read-source-composition-authoring__error" data-testid="rscauth-error">{{ actionError }}</p>
 
         <ul v-if="saveFieldErrors.length > 0" class="integration-read-source-composition-authoring__problems" data-testid="rscauth-field-errors">
           <li v-for="(entry, index) in saveFieldErrors" :key="index">{{ entry.code }} · {{ entry.field }} · {{ entry.reason }}</li>
         </ul>
+        </template>
       </div>
 
       <div v-if="savedRow" class="integration-read-source-composition-authoring__saved" data-testid="rscauth-saved">
@@ -134,7 +199,10 @@
 // guard, auth.hasPermission('integration:write')) — list/audit stay read-tier and ungated, mirroring the
 // server's requireAccess('read') vs requireAccess('write') split in read-source-compositions HTTP routes.
 import { computed, reactive, ref, watch } from 'vue'
+import { MagicStick, Setting } from '@element-plus/icons-vue'
 import { useAuth } from '../../composables/useAuth'
+import { useLocale } from '../../composables/useLocale'
+import { integrationFieldHint, type IntegrationFieldHintKey } from '../../services/integration/fieldHints'
 import type { IntegrationScope } from '../../services/integration/workbench'
 import { listReadSourceConfigs, ReadSourceApiError, type ReadSourceConfigRow } from '../../services/integration/readSourceConfigs'
 import {
@@ -150,12 +218,42 @@ import {
   type ReadSourceCompositionFieldError,
   type ReadSourceCompositionSaveResult,
 } from '../../services/integration/readSourceCompositions'
+import {
+  isCompositionTemplateEntry,
+  seedCompositionDraft,
+  type IntegrationTemplateCatalogEntry,
+} from '../../services/integration/readSourceTemplateCatalog'
+import IntegrationCompositionWizard from './IntegrationCompositionWizard.vue'
+import IntegrationTemplateCatalogPicker from './IntegrationTemplateCatalogPicker.vue'
 
+// IU-4 (design-lock docs/development/integration-iu4-composition-wizard-design-lock-20260707.md,
+// #3803): the wizard is the DEFAULT new-composition surface; `initialViewMode` lets a caller (incl.
+// this file's own spec, which targets the pre-existing flat-form testids) pin the panel to 'expert'
+// so it renders today's full field-flat form with ZERO wizard indirection — no existing assertion
+// had to change (same pattern as IU-3's IntegrationReadSourceConfigPanel.vue `initialViewMode`).
 const props = defineProps<{
   scope: IntegrationScope
+  initialViewMode?: 'wizard' | 'expert'
 }>()
 
+const viewMode = ref<'wizard' | 'expert'>(props.initialViewMode ?? 'wizard')
+function toggleViewMode(): void {
+  viewMode.value = viewMode.value === 'wizard' ? 'expert' : 'wizard'
+}
+
 const auth = useAuth()
+const { locale } = useLocale()
+
+// IU-6b: field-level hint copy (values-free, zh+en) for the composition step-wiring fields —
+// exact-key lookup against the dedicated fieldHints module (shared with the read-source config panel).
+function fieldHint(key: IntegrationFieldHintKey): string {
+  return integrationFieldHint(key, locale.value)
+}
+
+// IU-6a: bilingual guidance copy helper — same locale pattern as `fieldHint` above.
+function bi(zh: string, en: string): string {
+  return locale.value === 'zh-CN' ? zh : en
+}
 // Same permission the server requires for save/approve/retire (requireAccess(req, 'write') in
 // readSourceCompositionsSave/Approve/Retire) and the same string the workbench's other apply-tier
 // actions gate on (dry-run=read · apply=write/admin badge).
@@ -199,6 +297,17 @@ watch(savedRow, () => {
   auditOpen.value = false
   auditRows.value = []
 })
+
+// TC-1 (design-lock docs/development/integration-connector-template-catalog-design-lock-20260708.md):
+// same seed-then-present pattern as the read-source panel's applyReadSourceTemplate — mutates only
+// `sourceTarget` on the SAME shared draft, then forces the view back to 'wizard'. The picker is wired
+// with seeds-wizard="composition" so only CompositionTemplateCatalogEntry values are ever emitted here;
+// the type guard is a defensive narrowing, not a behavior branch.
+function applyCompositionTemplate(entry: IntegrationTemplateCatalogEntry): void {
+  if (!isCompositionTemplateEntry(entry)) return
+  seedCompositionDraft(draft, entry)
+  viewMode.value = 'wizard'
+}
 
 function statusLabel(status: CompositionStatus): string {
   if (status === 'approved') return '已审批'
@@ -359,6 +468,30 @@ void refreshPickers()
 .integration-read-source-composition-authoring__hint--strong {
   color: #b45309;
 }
+/* IU-4 (design-lock docs/development/integration-iu4-composition-wizard-design-lock-20260707.md):
+   new markup only — token-only per §2 hard lock (the rules above/below this block are the pre-existing
+   styles and are left untouched, hex and all — same convention as IU-3's mode-toggle addition to
+   IntegrationReadSourceConfigPanel.vue). */
+.integration-read-source-composition-authoring__mode-toggle {
+  display: flex;
+  justify-content: flex-end;
+  margin-bottom: var(--ms-space-3);
+}
+.integration-read-source-composition-authoring__mode-toggle-button {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--ms-space-1);
+  padding: var(--ms-space-1) var(--ms-space-3);
+  border: 1px solid var(--ms-border);
+  border-radius: var(--ms-radius-sm);
+  background: var(--ms-bg-card);
+  color: var(--ms-color-primary);
+  font-size: 13px;
+  cursor: pointer;
+}
+.integration-read-source-composition-authoring__mode-toggle-button:hover {
+  background: var(--ms-bg-page);
+}
 .integration-read-source-composition-authoring__columns {
   display: grid;
   grid-template-columns: minmax(320px, 1fr) minmax(360px, 1.2fr);
@@ -394,6 +527,18 @@ void refreshPickers()
 .integration-read-source-composition-authoring__empty {
   color: #888;
   font-size: 13px;
+}
+/* IU-6a guided empty state: "what this is" + "first step" — new styling only, tokens per UF-1. */
+.integration-read-source-composition-authoring__empty--guided {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ms-space-1);
+}
+.integration-read-source-composition-authoring__empty--guided strong {
+  color: var(--ms-text-1);
+}
+.integration-read-source-composition-authoring__empty--guided p {
+  margin: 0;
 }
 .integration-read-source-composition-authoring__saved {
   border: 1px solid #e0e0e0;

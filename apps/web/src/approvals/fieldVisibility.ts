@@ -1,6 +1,9 @@
 import type { FormField, FormFieldVisibilityRule, FormSchema } from '../types/approval'
 
-function isEmptyValue(value: unknown): boolean {
+// Exported (UX B2-15) so `detailField.ts`'s `validateDetailRows` can reuse the exact same
+// empty-value semantics as visibility's `isEmpty`/`notEmpty` operators instead of redefining a
+// third copy alongside `formRules`' own inline version in `ApprovalNewView.vue`.
+export function isEmptyValue(value: unknown): boolean {
   return value === null
     || value === undefined
     || value === ''

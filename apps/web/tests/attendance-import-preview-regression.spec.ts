@@ -2,6 +2,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createApp, nextTick, ref, type App } from 'vue'
 import AttendanceView from '../src/views/AttendanceView.vue'
 import { apiFetch } from '../src/utils/api'
+import { useLocale } from '../src/composables/useLocale'
+import * as XLSX from 'xlsx'
 
 vi.mock('../src/composables/usePlugins', () => ({
   usePlugins: () => ({
@@ -248,5 +250,633 @@ describe('Attendance import preview regression', () => {
         method: 'POST',
       }),
     )
+  })
+
+  it('blocks selecting a macro workbook (.xlsm) in the CSV import input: no import API call, actionable zh guidance', async () => {
+    const { locale, setLocale } = useLocale()
+    const previousLocale = locale.value
+    setLocale('zh-CN')
+    try {
+      const apiFetchMock = vi.mocked(apiFetch)
+      apiFetchMock.mockImplementation(async () => jsonResponse(200, {
+        ok: true,
+        data: { items: [], summary: null },
+      }))
+
+      app = createApp(AttendanceView, { mode: 'admin' })
+      const vm = app.mount(container!)
+      await flushUi(6)
+      apiFetchMock.mockClear()
+
+      const input = container!.querySelector('#attendance-import-csv') as HTMLInputElement | null
+      expect(input, 'expected csv file input').toBeTruthy()
+
+      const xlsx = new File([new Uint8Array([0x50, 0x4b, 0x03, 0x04])], '6月考勤(5).xlsm', {
+        type: 'application/vnd.ms-excel.sheet.macroEnabled.12',
+      })
+      Object.defineProperty(input!, 'files', { value: [xlsx], configurable: true })
+      input!.dispatchEvent(new Event('change'))
+      await flushUi(6)
+
+      const importApiCalls = apiFetchMock.mock.calls.filter(call =>
+        String(call[0]).includes('/api/attendance/import'))
+      expect(importApiCalls).toHaveLength(0)
+
+      const setupState = (vm as any).$?.setupState as Record<string, unknown>
+      expect(unwrapRef<File | null>(setupState.importCsvFile)).toBeNull()
+      expect(unwrapRef<string>(setupState.importCsvFileName)).toBe('')
+      expect(container!.textContent).toContain('检测到 Excel 文件')
+      expect(container!.textContent).toContain('另存为')
+      expect(unwrapRef<Record<string, unknown> | null>(setupState.statusMeta)?.action).toBe('retry-preview-import')
+      expect(container!.querySelector('[data-testid="attendance-import-recognition"]'), 'no recognition panel for a blocked file').toBeNull()
+    } finally {
+      setLocale(previousLocale)
+    }
+  })
+
+  it('maps import VALIDATION_ERROR to actionable zh copy per server diagnostic, keeping the code chip', async () => {
+    const { locale, setLocale } = useLocale()
+    const previousLocale = locale.value
+    setLocale('zh-CN')
+    try {
+      const apiFetchMock = vi.mocked(apiFetch)
+      let previewRequestCount = 0
+      apiFetchMock.mockImplementation(async (path: string) => {
+        const url = String(path)
+        if (url.startsWith('/api/attendance/import/prepare')) {
+          return jsonResponse(200, {
+            ok: true,
+            data: { commitToken: 'token-validation', expiresAt: '2099-01-01T00:00:00.000Z' },
+          })
+        }
+        if (url.startsWith('/api/attendance/import/preview')) {
+          previewRequestCount += 1
+          return jsonResponse(400, {
+            ok: false,
+            error: {
+              code: 'VALIDATION_ERROR',
+              message: previewRequestCount === 1
+                ? 'No rows to preview. CSV content did not yield any non-empty rows.'
+                : 'CSV header must include a work date column and at least one user or attendance column',
+            },
+          })
+        }
+        return jsonResponse(200, { ok: true, data: { items: [], summary: null } })
+      })
+
+      app = createApp(AttendanceView, { mode: 'admin' })
+      app.mount(container!)
+      await flushUi(6)
+
+      const zhHeading = Array.from(container!.querySelectorAll('h4')).find(
+        candidate => candidate.textContent?.includes('导入（钉钉')
+      )
+      expect(zhHeading, 'expected zh import section heading').toBeTruthy()
+      const importSection = zhHeading!.closest('.attendance__admin-section') as HTMLElement
+
+      // Server "No rows to preview…" → row-specific zh copy + Save-As-CSV hint.
+      findButton(importSection, '预览').click()
+      await flushUi(6)
+      expect(container!.textContent).toContain('文件未解析出可导入的数据行')
+      expect(container!.textContent).toContain('另存为 → CSV')
+      expect(container!.textContent).toContain('VALIDATION_ERROR')
+
+      // Server header-missing diagnostic → header-specific zh copy.
+      findButton(importSection, '预览').click()
+      await flushUi(6)
+      expect(previewRequestCount).toBe(2)
+      expect(container!.textContent).toContain('CSV 表头缺少必需列')
+      expect(container!.textContent).toContain('VALIDATION_ERROR')
+    } finally {
+      setLocale(previousLocale)
+    }
+  })
+
+  function mockTemplateEndpoint(): ReturnType<typeof vi.mocked<typeof apiFetch>> {
+    const apiFetchMock = vi.mocked(apiFetch)
+    apiFetchMock.mockImplementation(async (path: string) => {
+      const url = String(path)
+      if (url.startsWith('/api/attendance/import/template')) {
+        return jsonResponse(200, {
+          ok: true,
+          data: {
+            payloadExample: {
+              source: 'dingtalk_csv',
+              mode: 'override',
+              columns: ['日期', '工号', '姓名', '考勤组', '上班1打卡时间', '下班1打卡时间', '考勤结果', '异常原因'],
+              requiredFields: ['日期'],
+            },
+            mappingProfiles: [],
+            mapping: {
+              columns: [
+                { sourceField: '上班1打卡时间', targetField: 'firstInAt', dataType: 'time' },
+                { sourceField: '下班1打卡时间', targetField: 'lastOutAt', dataType: 'time' },
+                { sourceField: '考勤结果', targetField: 'status', dataType: 'string' },
+                { sourceField: '异常原因', targetField: 'exceptionReason', dataType: 'string' },
+                { sourceField: '加班小时', targetField: 'overtimeHours', dataType: 'hours' },
+                { sourceField: '考勤组', targetField: 'attendanceGroup', dataType: 'string' },
+              ],
+            },
+          },
+        })
+      }
+      return jsonResponse(200, { ok: true, data: { items: [], summary: null } })
+    })
+    return apiFetchMock
+  }
+
+  function stubObjectUrl() {
+    const createObjectURL = vi.fn(() => 'blob:mock')
+    const revokeObjectURL = vi.fn()
+    Object.defineProperty(URL, 'createObjectURL', { value: createObjectURL, configurable: true })
+    Object.defineProperty(URL, 'revokeObjectURL', { value: revokeObjectURL, configurable: true })
+    return { createObjectURL, revokeObjectURL }
+  }
+
+  it('field picker: load template renders grouped checkboxes and selection drives the header preview + download', async () => {
+    mockTemplateEndpoint()
+    const { createObjectURL } = stubObjectUrl()
+
+    app = createApp(AttendanceView, { mode: 'admin' })
+    app.mount(container!)
+    await flushUi(6)
+
+    const importSection = findImportSection(container!)
+    findButton(importSection, 'Load template').click()
+    await flushUi(6)
+
+    const picker = container!.querySelector('[data-testid="attendance-import-field-picker"]') as HTMLElement | null
+    expect(picker, 'expected field picker card').toBeTruthy()
+    expect(picker!.textContent).toContain('Punch times')
+
+    const preview = () => (container!.querySelector('[data-testid="attendance-import-header-preview"]') as HTMLElement).textContent ?? ''
+    expect(preview()).toBe('日期,工号,姓名,上班1打卡时间,下班1打卡时间,考勤结果,异常原因,考勤组')
+
+    const overtime = Array.from(picker!.querySelectorAll('label')).find(
+      candidate => candidate.textContent?.trim() === '加班小时'
+    )
+    expect(overtime, 'expected 加班小时 option').toBeTruthy()
+    ;(overtime!.querySelector('input') as HTMLInputElement).click()
+    await flushUi(2)
+    expect(preview()).toContain('加班小时')
+
+    findButton(picker!, 'Download template (selected fields)').click()
+    await flushUi(2)
+    expect(createObjectURL).toHaveBeenCalledTimes(1)
+    expect(container!.textContent).toContain('CSV template downloaded (9 columns, with an example row).')
+    const downloadedBlob = createObjectURL.mock.calls[0][0] as Blob
+    // readAsText strips the BOM during decode (per spec) — check raw bytes.
+    const downloadedBytes = await new Promise<Uint8Array>((resolve) => {
+      const reader = new FileReader()
+      reader.onload = () => resolve(new Uint8Array(reader.result as ArrayBuffer))
+      reader.readAsArrayBuffer(downloadedBlob)
+    })
+    expect([downloadedBytes[0], downloadedBytes[1], downloadedBytes[2]], 'download carries the Excel BOM (EF BB BF)')
+      .toEqual([0xef, 0xbb, 0xbf])
+    // The download now carries a second (example) row, not an empty line.
+    const downloadedText = new TextDecoder('utf-8').decode(downloadedBytes)
+    const lines = downloadedText.replace(/^﻿/, '').split('\n').filter(Boolean)
+    expect(lines).toHaveLength(2)
+    expect(lines[1]).toContain('2026-06-01')
+    expect(lines[1]).toContain('EMP001')
+    expect(lines[1]).toContain('张三')
+    // dataType-derived example on the real wire (review NIT-1): 加班小时 is
+    // hours → 8.5 must land in the example row, not just base-column values.
+    expect(lines[1]).toContain('8.5')
+  })
+
+  it('one-click template download: works from a cold panel by auto-loading first', async () => {
+    const apiFetchMock = mockTemplateEndpoint()
+    const { createObjectURL } = stubObjectUrl()
+
+    app = createApp(AttendanceView, { mode: 'admin' })
+    app.mount(container!)
+    await flushUi(6)
+    apiFetchMock.mockClear()
+
+    const importSection = findImportSection(container!)
+    const download = findButton(importSection, 'Download CSV template')
+    expect(download.disabled).toBe(false)
+    download.click()
+    await flushUi(8)
+
+    expect(apiFetchMock.mock.calls.some(call => String(call[0]).startsWith('/api/attendance/import/template'))).toBe(true)
+    expect(createObjectURL).toHaveBeenCalledTimes(1)
+    expect(container!.textContent).toContain('CSV template downloaded.')
+
+    // The fallback download exit also ships an example row (#3793 NIT-3
+    // harmonization) — not an empty line.
+    const fallbackBlob = createObjectURL.mock.calls[0][0] as Blob
+    const fallbackBytes = await new Promise<Uint8Array>((resolve) => {
+      const reader = new FileReader()
+      reader.onload = () => resolve(new Uint8Array(reader.result as ArrayBuffer))
+      reader.readAsArrayBuffer(fallbackBlob)
+    })
+    const fallbackLines = new TextDecoder('utf-8').decode(fallbackBytes).replace(/^\ufeff/, '').split('\n').filter(Boolean)
+    expect(fallbackLines).toHaveLength(2)
+    expect(fallbackLines[1]).toContain('2026-06-01')
+    expect(fallbackLines[1]).toContain('EMP001')
+    expect(fallbackLines[1]).toContain('2026-06-01 09:00')
+  })
+
+  it('one-click download never destroys a hand-edited payload: errors instead of auto-loading', async () => {
+    const apiFetchMock = mockTemplateEndpoint()
+    stubObjectUrl()
+
+    app = createApp(AttendanceView, { mode: 'admin' })
+    const vm = app.mount(container!)
+    await flushUi(6)
+    const setupState = (vm as any).$?.setupState as Record<string, unknown>
+    const editedPayload = '{"source":"manual","rows":['
+    ;(setupState.importForm as { payload: string }).payload = editedPayload
+    await flushUi(2)
+    apiFetchMock.mockClear()
+
+    const importSection = findImportSection(container!)
+    findButton(importSection, 'Download CSV template').click()
+    await flushUi(6)
+
+    expect(apiFetchMock.mock.calls.some(call => String(call[0]).startsWith('/api/attendance/import/template'))).toBe(false)
+    expect((setupState.importForm as { payload: string }).payload).toBe(editedPayload)
+    expect(container!.textContent).toContain('Payload JSON has content but no template columns')
+  })
+
+  async function selectImportCsv(content: string, name = 'attendance.csv') {
+    const input = container!.querySelector('#attendance-import-csv') as HTMLInputElement
+    expect(input, 'expected csv file input').toBeTruthy()
+    const file = new File([content], name, { type: 'text/csv' })
+    Object.defineProperty(input, 'files', { value: [file], configurable: true })
+    input.dispatchEvent(new Event('change'))
+    // FileReader (the jsdom read path) resolves on the macrotask queue, so
+    // microtask-only flushes are not enough — poll briefly on real timers.
+    for (let i = 0; i < 40; i += 1) {
+      await new Promise(resolve => setTimeout(resolve, 5))
+      await flushUi(2)
+      if (container!.querySelector('[data-testid="attendance-import-recognition"]')) break
+    }
+  }
+
+  it('column recognition: selecting a csv shows green recognized / grey ignored chips at once', async () => {
+    mockTemplateEndpoint()
+
+    app = createApp(AttendanceView, { mode: 'admin' })
+    app.mount(container!)
+    await flushUi(6)
+
+    await selectImportCsv('姓名,日期,加班小时,自定义列\n张三,2026-06-01,1,x\n')
+
+    const panel = container!.querySelector('[data-testid="attendance-import-recognition"]') as HTMLElement | null
+    expect(panel, 'expected recognition panel').toBeTruthy()
+    expect(container!.querySelector('[data-testid="attendance-import-recognition-warning"]')).toBeNull()
+    const okChipEls = Array.from(panel!.querySelectorAll('.attendance__import-recognition-chip--ok'))
+    const okChips = okChipEls.map(chip => chip.textContent?.trim())
+    expect(okChips).toContain('加班小时')
+    expect(okChips).toContain('日期')
+    const overtimeChip = okChipEls.find(chip => chip.textContent?.trim() === '加班小时')
+    expect(overtimeChip?.getAttribute('title')).toBe('Imports as a record field')
+    const nameChip = okChipEls.find(chip => chip.textContent?.trim() === '姓名')
+    expect(nameChip?.getAttribute('title')).toBe('Used for header detection / user matching')
+    const greyChips = Array.from(panel!.querySelectorAll('.attendance__import-recognition-chip'))
+      .filter(chip => !chip.className.includes('--ok'))
+      .map(chip => chip.textContent?.trim())
+    expect(greyChips).toEqual(['自定义列'])
+  })
+
+  it('column recognition: a csv without a date column shows the red required warning', async () => {
+    mockTemplateEndpoint()
+
+    app = createApp(AttendanceView, { mode: 'admin' })
+    app.mount(container!)
+    await flushUi(6)
+
+    await selectImportCsv('姓名,加班小时\n张三,1\n')
+
+    const warning = container!.querySelector('[data-testid="attendance-import-recognition-warning"]') as HTMLElement | null
+    expect(warning, 'expected required-column warning').toBeTruthy()
+    expect(warning!.textContent).toContain('No date column found')
+  })
+
+  it('race guard: a stale sniff verdict cannot clobber a newer selection in the shell handler', async () => {
+    mockTemplateEndpoint()
+
+    app = createApp(AttendanceView, { mode: 'admin' })
+    const vm = app.mount(container!)
+    await flushUi(6)
+    const setupState = (vm as any).$?.setupState as Record<string, any>
+
+    let releaseSlow!: (buffer: ArrayBuffer) => void
+    const slowFile = {
+      name: 'slow.csv',
+      slice: () => ({ arrayBuffer: () => new Promise<ArrayBuffer>(resolve => { releaseSlow = resolve }) }),
+    }
+    const fastFile = new File(['姓名,日期\n张三,2026-06-01\n'], 'fast.csv', { type: 'text/csv' })
+
+    const sharedInput = { files: [slowFile], value: 'slow.csv' }
+    const pending = setupState.handleImportCsvChange({ target: sharedInput })
+    sharedInput.files = [fastFile]
+    sharedInput.value = 'fast.csv'
+    await setupState.handleImportCsvChange({ target: sharedInput })
+
+    releaseSlow(new Uint8Array([0x50, 0x4b, 0x03, 0x04]).buffer)
+    await pending
+    await flushUi(4)
+
+    expect(unwrapRef<File | null>(setupState.importCsvFile)).toBe(fastFile)
+    expect(unwrapRef<string>(setupState.importCsvFileName)).toBe('fast.csv')
+    expect(sharedInput.value).toBe('fast.csv')
+    expect(container!.textContent).not.toContain('This looks like an Excel file')
+  })
+
+  it('advanced options collapse by default; core fields stay visible; toggle expands', async () => {
+    mockTemplateEndpoint()
+
+    app = createApp(AttendanceView, { mode: 'admin' })
+    app.mount(container!)
+    await flushUi(6)
+
+    const advanced = container!.querySelector('[data-testid="attendance-import-advanced"]') as HTMLElement | null
+    expect(advanced, 'expected advanced group container').toBeTruthy()
+    expect(advanced!.style.display).toBe('none')
+    expect(container!.querySelector('#attendance-import-csv'), 'core csv input stays visible').toBeTruthy()
+    expect(advanced!.querySelector('#attendance-import-payload'), 'payload JSON lives in advanced').toBeTruthy()
+
+    const toggle = container!.querySelector('[data-testid="attendance-import-advanced-toggle"]') as HTMLButtonElement
+    expect(toggle.getAttribute('aria-expanded')).toBe('false')
+    toggle.click()
+    await flushUi(2)
+    expect(advanced!.style.display).not.toBe('none')
+    expect(toggle.getAttribute('aria-expanded')).toBe('true')
+  })
+
+  it('X1: selecting a real .xlsx converts to CSV — status, hint, recognition, and Load CSV all run on the converted text', async () => {
+    mockTemplateEndpoint()
+
+    app = createApp(AttendanceView, { mode: 'admin' })
+    const vm = app.mount(container!)
+    await flushUi(6)
+    const setupState = (vm as any).$?.setupState as Record<string, any>
+
+    const workbook = XLSX.utils.book_new()
+    XLSX.utils.book_append_sheet(workbook, XLSX.utils.aoa_to_sheet([
+      ['日期', '工号', '姓名', '加班小时', '自定义列'],
+      ['2026-06-01', 'EMP001', '张三', '1', 'x'],
+    ]), '打卡日报')
+    const buffer = XLSX.write(workbook, { type: 'array', bookType: 'xlsx' }) as ArrayBuffer
+    const file = new File([buffer], '6月考勤(5).xlsx', {
+      type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    })
+    const input = container!.querySelector('#attendance-import-csv') as HTMLInputElement
+    Object.defineProperty(input, 'files', { value: [file], configurable: true })
+    input.dispatchEvent(new Event('change'))
+    for (let i = 0; i < 60; i += 1) {
+      await new Promise(resolve => setTimeout(resolve, 10))
+      await flushUi(2)
+      if (container!.querySelector('[data-testid="attendance-import-recognition"]')) break
+    }
+
+    expect(container!.textContent).toContain('Excel converted')
+    expect(container!.querySelector('[data-testid="attendance-import-converted-hint"]')?.textContent).toContain('打卡日报')
+    const panel = container!.querySelector('[data-testid="attendance-import-recognition"]')
+    expect(panel, 'recognition runs on converted text').toBeTruthy()
+    expect(panel!.textContent).toContain('加班小时')
+    expect(container!.querySelector('[data-testid="attendance-import-recognition-warning"]')).toBeNull()
+
+    findButton(findImportSection(container!), 'Load CSV').click()
+    await flushUi(6)
+    const payload = JSON.parse((setupState.importForm as { payload: string }).payload)
+    expect(String(payload.csvText)).toContain('日期,工号,姓名,加班小时,自定义列')
+    expect(String(payload.csvText)).toContain('2026-06-01,EMP001,张三,1,x')
+  })
+
+  function mockTemplateEndpointWithPrefs(savedKeys: string[]) {
+    const prefsPuts: Array<Record<string, unknown>> = []
+    const apiFetchMock = vi.mocked(apiFetch)
+    apiFetchMock.mockImplementation(async (path: string, init?: RequestInit) => {
+      const url = String(path)
+      if (url.startsWith('/api/attendance/import/template-prefs')) {
+        if (init?.method === 'PUT') {
+          prefsPuts.push(JSON.parse(String(init.body ?? '{}')))
+          return jsonResponse(200, { ok: true, data: { selectedKeys: [] } })
+        }
+        return jsonResponse(200, { ok: true, data: { selectedKeys: savedKeys } })
+      }
+      if (url.startsWith('/api/attendance/import/template')) {
+        return jsonResponse(200, {
+          ok: true,
+          data: {
+            payloadExample: {
+              source: 'dingtalk_csv',
+              mode: 'override',
+              columns: ['日期', '工号', '姓名'],
+              requiredFields: ['日期'],
+            },
+            mappingProfiles: [],
+            mapping: {
+              columns: [
+                { sourceField: '上班1打卡时间', targetField: 'firstInAt' },
+                { sourceField: '下班1打卡时间', targetField: 'lastOutAt' },
+                { sourceField: '考勤结果', targetField: 'status' },
+                { sourceField: '加班小时', targetField: 'overtimeHours' },
+              ],
+            },
+          },
+        })
+      }
+      return jsonResponse(200, { ok: true, data: { items: [], summary: null } })
+    })
+    return { apiFetchMock, prefsPuts }
+  }
+
+  it('PR-B: saved picker prefs restore on template load, ghost keys dropped', async () => {
+    mockTemplateEndpointWithPrefs(['overtimeHours', 'ghostKey'])
+
+    app = createApp(AttendanceView, { mode: 'admin' })
+    const vm = app.mount(container!)
+    await flushUi(6)
+    findButton(findImportSection(container!), 'Load template').click()
+    await flushUi(8)
+
+    const preview = (container!.querySelector('[data-testid="attendance-import-header-preview"]') as HTMLElement).textContent ?? ''
+    expect(preview).toBe('日期,工号,姓名,加班小时')
+    // The header builder drops unknown keys anyway — the intersection guard is
+    // locked at the SELECTION-SET level, where a ghost key would otherwise hide.
+    const setupState = (vm as any).$?.setupState as Record<string, any>
+    const selected = Array.from(unwrapRef<Set<string>>(setupState.importTemplateFieldKeys))
+    expect(selected).toEqual(['overtimeHours'])
+  })
+
+  it('PR-B: toggling persists the selection; reset clears the server record', async () => {
+    const { prefsPuts } = mockTemplateEndpointWithPrefs([])
+
+    app = createApp(AttendanceView, { mode: 'admin' })
+    app.mount(container!)
+    await flushUi(6)
+    findButton(findImportSection(container!), 'Load template').click()
+    await flushUi(8)
+
+    const picker = container!.querySelector('[data-testid="attendance-import-field-picker"]') as HTMLElement
+    const overtime = Array.from(picker.querySelectorAll('label')).find(
+      candidate => candidate.textContent?.trim() === '加班小时'
+    )
+    ;(overtime!.querySelector('input') as HTMLInputElement).click()
+    await flushUi(2)
+    expect(prefsPuts.length).toBeGreaterThan(0)
+    expect(prefsPuts.at(-1)?.selectedKeys).toContain('overtimeHours')
+
+    findButton(picker, 'Reset to default').click()
+    await flushUi(2)
+    expect(prefsPuts.at(-1)?.selectedKeys).toEqual([])
+  })
+
+  it('PR-B hardening: a late restore cannot overwrite what the user just clicked (generation guard)', async () => {
+    const apiFetchMock = vi.mocked(apiFetch)
+    let releasePrefs!: (value: unknown) => void
+    apiFetchMock.mockImplementation(async (path: string, init?: RequestInit) => {
+      const url = String(path)
+      if (url.startsWith('/api/attendance/import/template-prefs')) {
+        if (init?.method === 'PUT') return jsonResponse(200, { ok: true, data: { selectedKeys: [] } })
+        return new Promise((resolve) => { releasePrefs = resolve }) as Promise<Response>
+      }
+      if (url.startsWith('/api/attendance/import/template')) {
+        return jsonResponse(200, {
+          ok: true,
+          data: {
+            payloadExample: { source: 'dingtalk_csv', mode: 'override', columns: ['日期', '工号', '姓名'], requiredFields: ['日期'] },
+            mappingProfiles: [],
+            mapping: { columns: [
+              { sourceField: '上班1打卡时间', targetField: 'firstInAt' },
+              { sourceField: '加班小时', targetField: 'overtimeHours' },
+            ] },
+          },
+        })
+      }
+      return jsonResponse(200, { ok: true, data: { items: [], summary: null } })
+    })
+
+    app = createApp(AttendanceView, { mode: 'admin' })
+    const vm = app.mount(container!)
+    await flushUi(6)
+    findButton(findImportSection(container!), 'Load template').click()
+    await flushUi(6)
+
+    // GET is still pending; the user toggles a field now.
+    const setupState = (vm as any).$?.setupState as Record<string, any>
+    setupState.toggleImportTemplateField('overtimeHours')
+    await flushUi(2)
+    const before = Array.from(unwrapRef<Set<string>>(setupState.importTemplateFieldKeys)).sort()
+
+    // Late restore arrives with a different server-side selection — must be dropped.
+    releasePrefs(jsonResponse(200, { ok: true, data: { selectedKeys: ['firstInAt'] } }))
+    await flushUi(4)
+    const after = Array.from(unwrapRef<Set<string>>(setupState.importTemplateFieldKeys)).sort()
+    expect(after).toEqual(before)
+    expect(after).toContain('overtimeHours')
+  })
+
+  it('PR-B hardening: rapid toggles serialize PUTs last-write-wins (no reorder persistence)', async () => {
+    const puts: Array<{ payload: Record<string, unknown>; release: (v: unknown) => void }> = []
+    const apiFetchMock = vi.mocked(apiFetch)
+    apiFetchMock.mockImplementation(async (path: string, init?: RequestInit) => {
+      const url = String(path)
+      if (url.startsWith('/api/attendance/import/template-prefs')) {
+        if (init?.method === 'PUT') {
+          return new Promise((resolve) => {
+            puts.push({ payload: JSON.parse(String(init.body ?? '{}')), release: resolve })
+          }) as Promise<Response>
+        }
+        return jsonResponse(200, { ok: true, data: { selectedKeys: [] } })
+      }
+      if (url.startsWith('/api/attendance/import/template')) {
+        return jsonResponse(200, {
+          ok: true,
+          data: {
+            payloadExample: { source: 'dingtalk_csv', mode: 'override', columns: ['日期'], requiredFields: ['日期'] },
+            mappingProfiles: [],
+            mapping: { columns: [
+              { sourceField: '上班1打卡时间', targetField: 'firstInAt' },
+              { sourceField: '下班1打卡时间', targetField: 'lastOutAt' },
+              { sourceField: '加班小时', targetField: 'overtimeHours' },
+            ] },
+          },
+        })
+      }
+      return jsonResponse(200, { ok: true, data: { items: [], summary: null } })
+    })
+
+    app = createApp(AttendanceView, { mode: 'admin' })
+    const vm = app.mount(container!)
+    await flushUi(6)
+    findButton(findImportSection(container!), 'Load template').click()
+    await flushUi(6)
+    const setupState = (vm as any).$?.setupState as Record<string, any>
+
+    // three rapid changes while the first PUT is held open
+    setupState.toggleImportTemplateField('overtimeHours')
+    setupState.toggleImportTemplateField('firstInAt')
+    setupState.toggleImportTemplateField('lastOutAt')
+    await flushUi(2)
+
+    expect(puts).toHaveLength(1)
+    puts[0].release(jsonResponse(200, { ok: true, data: { selectedKeys: [] } }))
+    await flushUi(4)
+
+    // queued last-write-wins: exactly one follow-up PUT carrying the FINAL set
+    expect(puts).toHaveLength(2)
+    const finalSet = Array.from(unwrapRef<Set<string>>(setupState.importTemplateFieldKeys)).sort()
+    expect((puts[1].payload.selectedKeys as string[]).slice().sort()).toEqual(finalSet)
+    puts[1].release(jsonResponse(200, { ok: true, data: { selectedKeys: [] } }))
+  })
+
+  it('column formats table: shows required/identity/optional badges, formats, and examples', async () => {
+    const apiFetchMock = vi.mocked(apiFetch)
+    apiFetchMock.mockImplementation(async (path: string) => {
+      const url = String(path)
+      if (url.startsWith('/api/attendance/import/template-prefs')) {
+        return jsonResponse(200, { ok: true, data: { selectedKeys: [] } })
+      }
+      if (url.startsWith('/api/attendance/import/template')) {
+        return jsonResponse(200, {
+          ok: true,
+          data: {
+            payloadExample: { source: 'dingtalk_csv', mode: 'override', columns: ['日期', '工号', '姓名'], requiredFields: ['日期'] },
+            mappingProfiles: [],
+            mapping: { columns: [
+              { sourceField: '上班1打卡时间', targetField: 'firstInAt', dataType: 'datetime' },
+              { sourceField: '加班小时', targetField: 'overtimeHours', dataType: 'hours' },
+              { sourceField: '考勤结果', targetField: 'status', dataType: 'string' },
+            ] },
+          },
+        })
+      }
+      return jsonResponse(200, { ok: true, data: { items: [], summary: null } })
+    })
+
+    app = createApp(AttendanceView, { mode: 'admin' })
+    app.mount(container!)
+    await flushUi(6)
+    findButton(findImportSection(container!), 'Load template').click()
+    await flushUi(8)
+
+    const table = container!.querySelector('[data-testid="attendance-import-column-formats"]') as HTMLElement | null
+    expect(table, 'expected column formats table').toBeTruthy()
+    const rowText = (col: string) => {
+      const codes = Array.from(table!.querySelectorAll('tbody tr'))
+      const row = codes.find(tr => tr.querySelector('td code')?.textContent?.trim() === col)
+      return row?.textContent ?? ''
+    }
+    // required date column with its exact format + example
+    const dateRow = rowText('日期')
+    expect(dateRow).toContain('Required')
+    expect(dateRow).toContain('YYYY-MM-DD')
+    expect(dateRow).toContain('2026-06-01')
+    // identity pair
+    expect(rowText('工号')).toContain('ID (one of)')
+    expect(rowText('姓名')).toContain('ID (one of)')
+    // optional supported column with dataType-derived format + example
+    const overtimeRow = rowText('加班小时')
+    expect(overtimeRow).toContain('Optional')
+    expect(overtimeRow).toContain('8.5')
+    // datetime format
+    expect(rowText('上班1打卡时间')).toContain('HH:mm')
   })
 })

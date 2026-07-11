@@ -12,16 +12,16 @@
       </div>
       <div v-else-if="loadError" class="public-multitable-form__state public-multitable-form__state--error">
         <p class="public-multitable-form__state-message">{{ loadError }}</p>
-        <button
+        <MtButton
           v-if="canLaunchDingTalkBinding"
-          type="button"
           class="public-multitable-form__button public-multitable-form__button--error"
+          variant="danger"
           data-dingtalk-bind
           :disabled="bindingToDingTalk"
           @click="launchDingTalkBinding"
         >
           Bind DingTalk and return to this form
-        </button>
+        </MtButton>
       </div>
       <div v-else-if="submitted && submissionResult" class="public-multitable-form__state public-multitable-form__state--success">
         <!-- A4: author-customizable thank-you. Title/body are author DATA and
@@ -33,9 +33,9 @@
         <p v-if="submissionResult.record?.id" class="public-multitable-form__record-id">
           Record ID: <code>{{ submissionResult.record.id }}</code>
         </p>
-        <button type="button" class="public-multitable-form__button" @click="resetForm">
+        <MtButton class="public-multitable-form__button" variant="primary" @click="resetForm">
           Submit another response
-        </button>
+        </MtButton>
       </div>
       <MetaFormView
         v-else-if="context"
@@ -66,6 +66,7 @@ import MetaFormView from '../multitable/components/MetaFormView.vue'
 import { apiFetch } from '../utils/api'
 import { parsePrefillQuery, safeRedirectPath } from '../multitable/utils/form-layout'
 import { isSystemField } from '../multitable/utils/system-fields'
+import { MtButton } from '../multitable/ui'
 
 const props = defineProps<{
   sheetId?: string
@@ -429,30 +430,15 @@ watch(
   color: #166534;
 }
 
+/* .public-multitable-form__button / --error: both sharers of the base class (the success-state "Submit
+   another response" reset control and the error-state DingTalk-bind retry) are now <MtButton> — base =
+   variant="primary" (the bespoke #14532d fill is normalized to the single --ms-color-primary token, same
+   category as the sanctioned #409eff → primary shade normalization, e.g. MultitableCommentInboxView's
+   #111827 → primary), --error = variant="danger" (the bespoke #be123c fill is a semantic danger match).
+   Bespoke resting/hover/disabled CSS removed to avoid double-styling the MtButton root; only the LAYOUT
+   property (justify-self: start — both parent state panels are display:grid and would otherwise stretch
+   the button to the grid column width) is kept. Classes kept for selector stability. */
 .public-multitable-form__button {
   justify-self: start;
-  border: none;
-  border-radius: 999px;
-  padding: 10px 16px;
-  background: #14532d;
-  color: #fff;
-  cursor: pointer;
-}
-
-.public-multitable-form__button:hover {
-  background: #166534;
-}
-
-.public-multitable-form__button--error {
-  background: #be123c;
-}
-
-.public-multitable-form__button--error:hover {
-  background: #9f1239;
-}
-
-.public-multitable-form__button:disabled {
-  cursor: not-allowed;
-  opacity: 0.72;
 }
 </style>

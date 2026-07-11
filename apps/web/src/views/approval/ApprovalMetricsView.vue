@@ -1,24 +1,26 @@
 <template>
-  <section class="approval-metrics">
-    <header class="approval-metrics__header">
-      <h1>审批 SLA 与耗时</h1>
-      <div class="approval-metrics__toolbar">
-        <el-date-picker
-          v-model="dateRange"
-          type="daterange"
-          unlink-panels
-          range-separator="至"
-          start-placeholder="开始日期"
-          end-placeholder="结束日期"
-          value-format="YYYY-MM-DD"
-          :shortcuts="DATE_RANGE_SHORTCUTS"
-          @change="loadAll"
-        />
-        <el-button type="primary" @click="loadAll" :loading="loading">
-          刷新
-        </el-button>
-      </div>
-    </header>
+  <PageShell width="default">
+    <div class="approval-metrics">
+      <PageHeader class="approval-metrics__header" title="审批 SLA 与耗时">
+        <template #actions>
+          <div class="approval-metrics__toolbar">
+            <el-date-picker
+              v-model="dateRange"
+              type="daterange"
+              unlink-panels
+              range-separator="至"
+              start-placeholder="开始日期"
+              end-placeholder="结束日期"
+              value-format="YYYY-MM-DD"
+              :shortcuts="DATE_RANGE_SHORTCUTS"
+              @change="loadAll"
+            />
+            <el-button type="primary" @click="loadAll" :loading="loading">
+              刷新
+            </el-button>
+          </div>
+        </template>
+      </PageHeader>
 
     <el-alert
       v-if="errorMessage"
@@ -34,11 +36,20 @@
         <div class="metric-label">总量</div>
         <div class="metric-value" data-testid="metric-total">{{ summary.total }}</div>
         <div class="metric-sub">运行中 {{ summary.running }}</div>
+        <!-- B3-03 (看板钻取): every KPI tile deep-links into the approvals list, carrying the
+             SAME createdFrom/createdTo the tile's own numbers were computed over (the toolbar's
+             date range above) — never a status filter, since none of these tiles maps to one. -->
+        <el-link type="primary" class="approval-metrics__drill-link" data-testid="metric-total-drill" @click="goApprovalsList()">
+          查看列表
+        </el-link>
       </el-card>
       <el-card shadow="hover">
         <div class="metric-label">通过率</div>
         <div class="metric-value" data-testid="metric-approval-rate">{{ approvalRatePercent }}</div>
         <div class="metric-sub">通过 {{ summary.approved }} · 驳回 {{ summary.rejected }}</div>
+        <el-link type="primary" class="approval-metrics__drill-link" data-testid="metric-approval-rate-drill" @click="goApprovalsList()">
+          查看列表
+        </el-link>
       </el-card>
       <el-card shadow="hover">
         <div class="metric-label">平均耗时</div>
@@ -46,11 +57,17 @@
         <div class="metric-sub">
           P50 {{ formatDuration(summary.p50DurationSeconds) }} · P95 {{ formatDuration(summary.p95DurationSeconds) }}
         </div>
+        <el-link type="primary" class="approval-metrics__drill-link" data-testid="metric-avg-duration-drill" @click="goApprovalsList()">
+          查看列表
+        </el-link>
       </el-card>
       <el-card shadow="hover" class="approval-metrics__card--breach">
         <div class="metric-label">SLA 超时率</div>
         <div class="metric-value" data-testid="metric-sla-rate">{{ slaBreachRatePercent }}</div>
         <div class="metric-sub">{{ summary.slaBreachCount }} / {{ slaCandidateCount }}</div>
+        <el-link type="primary" class="approval-metrics__drill-link" data-testid="metric-sla-rate-drill" @click="goApprovalsList()">
+          查看列表
+        </el-link>
       </el-card>
     </div>
 
@@ -84,6 +101,20 @@
         <el-table-column label="SLA 超时率" width="160">
           <template #default="{ row }">
             {{ formatPercent(row.slaBreachRate) }}
+          </template>
+        </el-table-column>
+        <!-- B3-03 (看板钻取): per-template drill-down — templateId + the SAME date range as the
+             row's own aggregation, into the filtered approvals list. -->
+        <el-table-column label="操作" width="100">
+          <template #default="{ row }">
+            <el-link
+              v-if="row.templateId"
+              type="primary"
+              :data-testid="`metric-template-drill-${row.templateId}`"
+              @click="goApprovalsList(row.templateId)"
+            >
+              查看列表
+            </el-link>
           </template>
         </el-table-column>
       </el-table>
@@ -241,10 +272,13 @@
         </el-table>
       </el-card>
     </div>
-  </section>
+    </div>
+  </PageShell>
 </template>
 
 <script setup lang="ts">
+import PageShell from '../../components/layout/PageShell.vue'
+import PageHeader from '../../components/layout/PageHeader.vue'
 import { computed, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { useAuth } from '../../composables/useAuth'
@@ -469,6 +503,19 @@ function goTemplate(templateId: string): void {
   router.push({ name: 'approval-template-detail', params: { id: templateId } })
 }
 
+// B3-03 (看板钻取): drill from a KPI tile / per-template row into the approvals list, carrying
+// forward the SAME date range (`createdFrom`/`createdTo`, the exact convention `rangeQuery()`
+// above already uses for since/until) the metric itself was computed over, plus an optional
+// `templateId`. ApprovalCenterView.vue reads both off the route query on mount and pre-fills its
+// filter bar before the first load (see `applyDeepLinkFilters` there).
+function goApprovalsList(templateId?: string): void {
+  const query: Record<string, string> = {}
+  if (templateId) query.templateId = templateId
+  if (dateRange.value && dateRange.value[0]) query.createdFrom = `${dateRange.value[0]}T00:00:00Z`
+  if (dateRange.value && dateRange.value[1]) query.createdTo = `${dateRange.value[1]}T23:59:59Z`
+  router.push({ name: 'approval-list', query })
+}
+
 onMounted(() => {
   void loadAll()
   void loadTemplateNames()
@@ -477,17 +524,9 @@ onMounted(() => {
 
 <style scoped>
 .approval-metrics {
-  padding: 24px;
   display: flex;
   flex-direction: column;
   gap: 20px;
-}
-.approval-metrics__header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  gap: 16px;
-  flex-wrap: wrap;
 }
 .approval-metrics__toolbar {
   display: flex;
@@ -499,25 +538,32 @@ onMounted(() => {
   gap: 16px;
 }
 .approval-metrics__card--breach :deep(.el-card__body) {
-  background: #fff7e6;
+  background: var(--el-color-warning-light-9);
 }
 .metric-label {
   font-size: 13px;
-  color: #6b7280;
+  color: var(--ms-text-2);
   margin-bottom: 8px;
 }
 .metric-value {
   font-size: 28px;
   font-weight: 600;
-  color: #1f2937;
+  color: var(--ms-text-1);
 }
 .metric-sub {
   font-size: 12px;
-  color: #9ca3af;
+  color: var(--ms-text-3);
   margin-top: 6px;
 }
 .metric-muted {
-  color: #9ca3af;
+  color: var(--ms-text-3);
+}
+/* B3-03 (看板钻取): the KPI tile's own drill-down link — a quiet affordance under metric-sub,
+   never competing visually with the primary metric-value number. */
+.approval-metrics__drill-link {
+  display: block;
+  margin-top: 8px;
+  font-size: 12px;
 }
 .approval-metrics__section {
   width: 100%;
@@ -537,17 +583,17 @@ onMounted(() => {
   min-width: 48px;
   height: 8px;
   border-radius: 4px;
-  background: #f0f0f0;
+  background: var(--ms-bg-page);
   overflow: hidden;
 }
 .metric-bar__fill {
   height: 100%;
   border-radius: 4px;
-  background: #f59e0b;
+  background: var(--ms-color-warning);
 }
 .metric-bar__label {
   font-size: 12px;
-  color: #4b5563;
+  color: var(--ms-text-2);
   min-width: 44px;
   text-align: right;
 }

@@ -13,8 +13,9 @@
  * BEFORE the direction re-check). Apply mirrors the forward grant write (target=null ⇒ revoke) and records a
  * source='restore' permission revision (live → target).
  *
- * Goldens (a)-(l): (a) flag-off 403 (preview+execute) · (b) canManageSheetAccess floor 403 · (c) happy SHEET
- * de-escalation (admin→read + restore revision) · (d) happy REVOKE (revert a `create`, before=null) · (e) escalation
+ * Goldens (a)-(m) + (c2): (a) flag-off 403 (preview+execute) · (b) canManageSheetAccess floor 403 · (c) happy SHEET
+ * de-escalation (admin→read + restore revision) · (c2) partial UPDATE snapshot accepted (entity_id is authoritative)
+ * · (d) happy REVOKE (revert a `create`, before=null) · (e) escalation
  * refused 422 · (f) noop refused 422 · (g) LIVE re-check load-bearing 422 (uses live, not recorded after) · (h) grant
  * drift 409 · (i) FIELD de-escalation (read-write→read-only) · (j) VIEW de-escalation (admin→read) · (k) typed-confirm
  * 400/200 · (l) no-oracle preview shape. Runs only with DATABASE_URL.
@@ -185,6 +186,30 @@ describeIfDatabase('multitable permission-revert — T9-W de-escalation-only (re
     // grant LOWERED admin → read (the single managed code is now spreadsheet:read = deriveSheetAccessLevel 'read').
     expect(await sheetCodes(s, subj)).toEqual(['spreadsheet:read'])
     // a source='restore' permission revision back-references the reverted revision (assert it so a silent no-diff regresses).
+    expect(await restoreRevCount(s, eid, rev)).toBe(1)
+  })
+
+  test('(c2) UPDATE revisions may store changed keys only: before lacks subject keys but execute still de-escalates via entity_id', async () => {
+    process.env[FLAG] = 'true'
+    const s = await freshSheet('c2')
+    const subj = mkSubject('c2')
+    await seedSheetGrant(s, subj, 'write') // LIVE = write (rank 3)
+    const eid = sheetEntityId(subj)
+    // Mirrors the forward recorder's update shape observed in staging: changed keys only, identity lives in entity_id.
+    const rev = await insertPermissionRev(s, eid, {
+      action: 'update',
+      before: { accessLevel: 'read' },
+      after: { accessLevel: 'write' },
+      changedKeys: ['accessLevel'],
+    })
+
+    const p = await preview(s, rev)
+    expect(p.status).toBe(200)
+    expect(p.body?.data?.permissionRevert).toMatchObject({ scope: 'sheet', direction: 'de-escalation', supported: true })
+    const ok = await execute(s, { revisionId: rev, previewToken: p.body.data.previewToken, confirm: 'revert-permission' })
+    expect(ok.status).toBe(200)
+    expect(ok.body?.data?.permissionReverted).toMatchObject({ scope: 'sheet', entityId: eid })
+    expect(await sheetCodes(s, subj)).toEqual(['spreadsheet:read'])
     expect(await restoreRevCount(s, eid, rev)).toBe(1)
   })
 
