@@ -523,6 +523,11 @@ describeIfDatabase('DT-OPS-02 preview/apply parity — intra-batch identity dupl
     // that real count is what got written to the run record.
     expect(detailCallsThisRun).toBeGreaterThan(0)
     expect(stats.externalUserDetailCalls).toBe(detailCallsThisRun)
+    // CURRENT-N+1 CANARY (expected to break with the §7.7 staging fix): this equality holds
+    // only while EVERY user takes a `user/get`. When `user/list` becomes the primary field
+    // source (detail only when fields are missing), `externalUserDetailCalls` will drop BELOW
+    // `accountsSynced` — that is the fix working, not a regression. Relax this line to
+    // `toBeLessThanOrEqual` (and assert the drop) when that flip lands.
     expect(stats.externalUserDetailCalls).toBe(stats.accountsSynced)
 
     // The other pull categories are present and positive (departments are walked + detailed,
