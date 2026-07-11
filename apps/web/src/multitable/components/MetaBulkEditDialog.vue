@@ -4,7 +4,7 @@
       <div class="meta-bulk-edit-modal" role="dialog" :aria-label="title">
         <div class="meta-bulk-edit__header">
           <strong>{{ title }}</strong>
-          <button class="meta-bulk-edit__close" :aria-label="b('bulk.close')" @click="onCancel">&times;</button>
+          <MtIconButton class="meta-bulk-edit__close" :aria-label="b('bulk.close')" @click="onCancel">&times;</MtIconButton>
         </div>
 
         <div class="meta-bulk-edit__body">
@@ -76,7 +76,7 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
 import { useLocale } from '../../composables/useLocale'
-import { MtButton } from '../ui'
+import { MtButton, MtIconButton } from '../ui'
 import type { MetaField } from '../types'
 import {
   bulkClearHintPrefix,
@@ -172,8 +172,9 @@ function onCancel() {
 .meta-bulk-edit-overlay { position: fixed; inset: 0; z-index: 110; background: rgba(0,0,0,.3); display: flex; align-items: center; justify-content: center; }
 .meta-bulk-edit-modal { background: #fff; border-radius: 6px; min-width: 420px; max-width: 540px; box-shadow: 0 10px 40px rgba(0,0,0,.18); display: flex; flex-direction: column; }
 .meta-bulk-edit__header { display: flex; align-items: center; justify-content: space-between; padding: 12px 16px; border-bottom: 1px solid #ebedf0; }
-.meta-bulk-edit__close { background: transparent; border: none; font-size: 22px; line-height: 1; cursor: pointer; color: #909399; }
-.meta-bulk-edit__close:hover { color: #303133; }
+/* .meta-bulk-edit__close: now <MtIconButton> (ghost, token-styled; the &times; glyph passes through
+   its default-slot icon fallback unchanged). Bespoke hardcoded CSS removed (UI-P2-1c T1 batch-1).
+   Class kept on the element only for selector stability. */
 .meta-bulk-edit__body { padding: 16px; display: flex; flex-direction: column; gap: 12px; }
 .meta-bulk-edit__hint { color: #606266; font-size: 13px; margin: 0; }
 .meta-bulk-edit__hint--muted { color: #909399; font-style: italic; }

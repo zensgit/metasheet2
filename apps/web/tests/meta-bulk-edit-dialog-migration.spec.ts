@@ -8,6 +8,15 @@ import { useLocale } from '../src/composables/useLocale'
 // proof: they stay native, keyboard-operable <button>s; the disabled binding survives; and clicking
 // them still emits the SAME `cancel` / `apply` events with the SAME payload. The dialog teleports to
 // <body>, so queries hit `document`, not the mount container.
+//
+// UI-P2-1c T1 batch-1: the header close-× (`.meta-bulk-edit__close`) was additionally migrated from
+// a bespoke <button>&times;</button> to the shared MtIconButton primitive — the &times; glyph passes
+// through MtIconButton's default-slot icon fallback unchanged (T1 design-lock recommendation: keep
+// the glyph, only collapse padding/hover/focus-ring onto tokens), so there is ZERO visual change.
+// Behavior-preservation proof: it stays a native, keyboard-operable <button>, keeps the SAME
+// aria-label (`b('bulk.close')`), and clicking it still calls the SAME onCancel() → emits `cancel`
+// (identical to the footer cancel button's handler). This is the only sharer of `.meta-bulk-edit__close`
+// (single button, single file) — its bespoke CSS was removed outright, no double-styling risk.
 
 const mounts: Array<{ app: App<Element>; container: HTMLDivElement }> = []
 afterEach(() => {
@@ -65,5 +74,23 @@ describe('MetaBulkEditDialog — MtButton migration (UI-P2-1c)', () => {
     applyBtn().click()
     expect(onApply).toHaveBeenCalledTimes(1)
     expect(onApply).toHaveBeenCalledWith({ mode: 'clear', fieldId: 'f1', value: null, recordIds: ['r1', 'r2'] })
+  })
+
+  it('renders the header close-× as a native <button> (MtIconButton) keeping the class + aria-label', () => {
+    mount(baseProps())
+    const btn = document.querySelector('.meta-bulk-edit__close') as HTMLButtonElement
+    expect(btn.tagName).toBe('BUTTON')
+    expect(btn.classList.contains('meta-bulk-edit__close')).toBe(true)
+    expect(btn.getAttribute('aria-label')).toBe('Close')
+    expect(btn.textContent?.trim()).toBe('×') // glyph unchanged, zero visual change
+  })
+
+  it('clicking the header close-× emits `cancel` (unchanged — same onCancel as the footer cancel button)', () => {
+    const onCancel = vi.fn()
+    mount(baseProps(), { onCancel })
+    const btn = document.querySelector('.meta-bulk-edit__close') as HTMLButtonElement
+    btn.click()
+    expect(onCancel).toHaveBeenCalledTimes(1)
+    expect(onCancel).toHaveBeenCalledWith()
   })
 })
