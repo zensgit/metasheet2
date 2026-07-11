@@ -65,7 +65,8 @@ function writeMinimumPackage(pkgRoot, options = {}) {
     [
       'const marker = "MIGRATION_INCLUDE_SUPERSEDED_LEGACY_SQL";',
       'const legacy = "032_create_approval_records";',
-      'module.exports = { marker, legacy };',
+      'const audit = "20250926_create_audit_tables";',
+      'module.exports = { marker, legacy, audit };',
       '',
     ].join('\n')
   )
