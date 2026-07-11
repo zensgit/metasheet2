@@ -30,7 +30,8 @@ export interface RecordRevisionInput {
    * the three record-version restore routes (via patchRecords) — every other caller (create/update/delete,
    * automation, plugin, and the non-version-restore `source='restore'` emitters: PIT-resurrect, PIT-reset,
    * lossy-retype-revert) omits it ⇒ column stays NULL. The History Center badge keys on NON-NULL, never on
-   * `source='restore'`. Column added by migration 067; a pre-migration deploy window degrades to the base
+   * `source='restore'`. Column added by migration zzzz20260711000000_add_meta_record_revisions_restored_from_version;
+   * a pre-migration deploy window degrades to the base
    * INSERT (value silently NULL), never failing the write.
    */
   restoredFromVersion?: number | null
@@ -58,7 +59,7 @@ export interface RecordRevisionEntry {
   createdAt: string
 }
 
-// R11 deploy-window guard for restored_from_version (migration 067). recordRecordRevision runs INSIDE
+// R11 deploy-window guard for restored_from_version (migration zzzz20260711000000_add_meta_record_revisions_restored_from_version). recordRecordRevision runs INSIDE
 // patchRecords' transaction, so a 42703 from an extended INSERT would POISON the txn (a try/catch fallback
 // then fails with "current transaction is aborted"). Instead, probe the column's existence with a SELECT
 // (never poisons) and pick the INSERT shape. Cache only the POSITIVE result: once the column exists it never

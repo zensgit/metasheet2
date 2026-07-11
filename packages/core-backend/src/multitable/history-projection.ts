@@ -616,7 +616,7 @@ export async function loadHistoryBatchDetail(
 ): Promise<HistoryBatchDetail | null> {
   if (sheetIds.length === 0) return null
   // R11 back-reference: select restored_from_version too, with a deploy-window fallback — a rolling deploy
-  // where this read ships before migration 067 degrades to the base column set (restoredFromVersion → null)
+  // where this read ships before the restored_from_version migration degrades to the base column set (restoredFromVersion → null)
   // instead of 500ing the whole batch-detail endpoint (mirrors record-service's delete_revision_id read).
   const detailSelect = (withRestored: boolean) =>
     query(
