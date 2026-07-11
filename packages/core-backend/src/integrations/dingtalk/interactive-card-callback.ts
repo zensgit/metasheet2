@@ -140,35 +140,72 @@ async function resolveIntegrationCorpId(query: QueryFn, integrationId: string): 
 }
 
 /**
- * Action ids submitted by the card button, read from the documented DingTalk card-callback
- * `content.cardPrivateData.actionIds` shape (string or pre-parsed object).
+ * The action a card button submitted, read from the documented DingTalk card-callback `content`
+ * frame (string or pre-parsed object). Two channels are read from the SAME parse of `content`:
  *
- * Review P3-1: returns `null` when content was PROVIDED but is unreadable (bad JSON / not an
- * object) — the caller must fail-close on that even when an explicit `action` spelling is also
- * present (an unreadable wire frame is a wire frame whose opinion we could not check, not the
- * absence of one). `[]` = readable but carries no action ids (no wire opinion).
+ * - `cardPrivateData.params.action` — the OFFICIAL/PRIMARY channel DingTalk's approval-template
+ *   callback handler fills (P2-2). A single action string.
+ * - `cardPrivateData.actionIds` — the SECONDARY/backward-compat channel (depends on the operator
+ *   configuring the component's actionId literally, e.g. `approve`). A list; a single entry is the
+ *   clicked action, an empty/multi list carries no clean single opinion.
+ *
+ * The caller reconciles the two (they must AGREE when both are present) — see
+ * `parseDingTalkApprovalCardCallback`.
+ *
+ * Review P3-1: returns `{ readable: false }` when content was PROVIDED but is unreadable (bad JSON
+ * / not an object) — the caller must fail-close on that even when an explicit `action` spelling or
+ * a `params.action` would otherwise be present (an unreadable wire frame is a frame whose opinion
+ * we could not check, not the absence of one). `{ readable: true, ... }` with an empty
+ * `paramsAction` and `[]` actionIds = readable but carrying no wire opinion.
  */
-function readWireActionIds(content: unknown): string[] | null {
+type WireActionRead =
+  | { readable: false }
+  | { readable: true; paramsAction: string; actionIds: string[] }
+
+function readWireAction(content: unknown): WireActionRead {
   let record = asRecord(content)
   if (typeof content === 'string') {
     try {
       record = asRecord(JSON.parse(content))
     } catch {
-      return null
+      return { readable: false }
     }
   }
-  if (record === null) return null
+  if (record === null) return { readable: false }
   const cardPrivateData = asRecord(record.cardPrivateData)
-  const actionIds = cardPrivateData?.actionIds
-  if (!Array.isArray(actionIds)) return []
-  return actionIds.filter((value): value is string => typeof value === 'string' && value.trim().length > 0)
+  const paramsAction = readTrimmedString(asRecord(cardPrivateData?.params)?.action)
+  const rawActionIds = cardPrivateData?.actionIds
+  const actionIds = Array.isArray(rawActionIds)
+    ? rawActionIds.filter((value): value is string => typeof value === 'string' && value.trim().length > 0)
+    : []
+  return { readable: true, paramsAction, actionIds }
+}
+
+/**
+ * Reduces the readable wire frame to a single action opinion by reconciling the PRIMARY
+ * (`params.action`) and SECONDARY (`actionIds`) channels:
+ * - a multi-entry `actionIds` list is an ambiguous multi-button signal → `conflict` (no clean pick);
+ * - otherwise both present channels must AGREE (disagreement → `conflict`, fail-closed no-op);
+ * - either one alone is used; neither present → empty opinion (`''`).
+ */
+function resolveWireAction(read: { paramsAction: string; actionIds: string[] }): { action: string } | { conflict: true } {
+  if (read.actionIds.length > 1) return { conflict: true }
+  const idAction = read.actionIds.length === 1 ? read.actionIds[0] : ''
+  if (read.paramsAction && idAction && read.paramsAction !== idAction) return { conflict: true }
+  return { action: read.paramsAction || idAction }
 }
 
 /**
  * Parses/normalizes an incoming callback payload into the ratified triple. Accepts either the
  * pre-normalized business shape (`action`/`operatorDingTalkUserId`) or the documented DingTalk
- * wire frame (`userId` + `content.cardPrivateData.actionIds`); when both spellings are present
- * they must agree — disagreement fail-closes instead of picking a side.
+ * wire frame (`userId` + `content.cardPrivateData.{params.action | actionIds}`).
+ *
+ * Action channels (P2-2): `content.cardPrivateData.params.action` is the OFFICIAL PRIMARY channel
+ * DingTalk's approval-template callback fills; `content.cardPrivateData.actionIds` is SECONDARY
+ * (backward-compat). Whenever more than one spelling is present — the two wire channels, or the
+ * wire opinion vs the pre-normalized `action` — they must AGREE; any disagreement fail-closes to a
+ * recorded no-op instead of picking a side. A template that fills only `params.action` (with or
+ * without `actionIds`) is accepted; a single `actionIds` entry with no `params.action` still works.
  *
  * Validation order per lock §B-3: outTrackId UUID gate → action approve-only → operator present.
  * The transport frame's remaining fields are NEVER read.
@@ -187,16 +224,26 @@ export function parseDingTalkApprovalCardCallback(payload: unknown): DingTalkApp
   const outTrackId = rawOutTrackId.toLowerCase()
 
   // 2. action — exactly 'approve'; anything else (including ambiguity or unreadable content) is a
-  //    recorded no-op, never mapped heuristically.
+  //    recorded no-op, never mapped heuristically. The action opinion is reconciled across three
+  //    possible spellings: the pre-normalized business `action`, the PRIMARY wire channel
+  //    `content.cardPrivateData.params.action`, and the SECONDARY `content.cardPrivateData.actionIds`.
   const explicitAction = readTrimmedString(record.action)
-  const wireActionIds = 'content' in record && record.content !== undefined ? readWireActionIds(record.content) : []
+  // No `content` key → a readable frame with no wire opinion (the pre-normalized business shape).
+  const wire: WireActionRead = 'content' in record && record.content !== undefined
+    ? readWireAction(record.content)
+    : { readable: true, paramsAction: '', actionIds: [] }
   let action = ''
-  // Review P3-1: `null` = content provided but unreadable → fail-close (action stays ''), even
-  // with an explicit approve spelling alongside — never accept what we could not cross-check.
-  if (wireActionIds !== null) {
-    if (explicitAction && wireActionIds.length === 0) action = explicitAction
-    else if (!explicitAction && wireActionIds.length === 1) action = wireActionIds[0]
-    else if (explicitAction && wireActionIds.length === 1 && wireActionIds[0] === explicitAction) action = explicitAction
+  // Review P3-1: content provided but unreadable (bad JSON / not an object) → fail-close (action
+  // stays ''), even with an explicit approve spelling alongside — never accept what we could not
+  // cross-check. A READABLE frame carrying a valid `params.action` is NOT rejected by this gate.
+  if (wire.readable) {
+    const resolved = resolveWireAction(wire)
+    if (!('conflict' in resolved)) {
+      const wireAction = resolved.action
+      // The pre-normalized `action` and the resolved wire opinion must agree when both present.
+      if (explicitAction && wireAction && explicitAction !== wireAction) action = ''
+      else action = explicitAction || wireAction
+    }
   }
   if (action !== 'approve') return { ok: false, outcome: 'ignored_unsupported_action', outTrackId }
 
