@@ -1676,7 +1676,6 @@ export interface StorageService {
   getFileInfo(fileId: string): Promise<StorageFile | null>
   getFileUrl(fileId: string, options?: GetUrlOptions): Promise<string>
   getPresignedUploadUrl(options: PresignedUploadOptions): Promise<PresignedUpload>
-  listFiles(prefix?: string, options?: ListOptions): Promise<StorageFile[]>
   createFolder(path: string): Promise<void>
   deleteFolder(path: string, recursive?: boolean): Promise<void>
   getStorageUsage(): Promise<StorageUsage>
@@ -1732,21 +1731,6 @@ export interface PresignedUpload {
   fileId?: string
   fields?: Record<string, string>
   expiresAt?: Date
-}
-
-export interface ListOptions {
-  limit?: number
-  offset?: number
-  recursive?: boolean
-  sortBy?: 'name' | 'size' | 'createdAt' | 'updatedAt'
-  sortOrder?: 'asc' | 'desc'
-  filter?: {
-    contentType?: string
-    sizeMin?: number
-    sizeMax?: number
-    createdAfter?: Date
-    createdBefore?: Date
-  }
 }
 
 export interface StorageUsage {
