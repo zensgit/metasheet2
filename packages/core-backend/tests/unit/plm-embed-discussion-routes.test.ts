@@ -177,22 +177,24 @@ describe('PLM embed discussion WRITE relay (Discussion Phase-3 write-relay, Opti
     expect(serializedHeaders).not.toContain(SESSION_TOKEN)
   })
 
-  it('NO CACHING: two sequential requests (two fresh embed tokens) both call exchangeDiscussionSession -- no cred is reused/cached', async () => {
+  it('NO CACHING: two sequential requests (two fresh embed tokens) both call exchangeDiscussionSession with THEIR OWN raw token -- no cred is reused/cached', async () => {
     const exchangeDiscussionSession = vi.fn().mockResolvedValue(credentialResult())
     const createDiscussionThread = vi.fn().mockResolvedValue({ data: [THREAD_DETAIL], metadata: { totalCount: 1 } })
     dsMocks.getDataSource.mockReturnValue(fullAdapter({ exchangeDiscussionSession, createDiscussionThread }))
 
     const app = buildApp()
-    const res1 = await request(app).post(THREADS_URL).set('X-PLM-Embed-Token', mint()).send(CREATE_BODY)
-    const res2 = await request(app).post(THREADS_URL).set('X-PLM-Embed-Token', mint()).send(CREATE_BODY)
+    const token1 = mint()
+    const token2 = mint()
+    const res1 = await request(app).post(THREADS_URL).set('X-PLM-Embed-Token', token1).send(CREATE_BODY)
+    const res2 = await request(app).post(THREADS_URL).set('X-PLM-Embed-Token', token2).send(CREATE_BODY)
 
     expect(res1.status).toBe(200)
     expect(res2.status).toBe(200)
     expect(exchangeDiscussionSession).toHaveBeenCalledTimes(2) // fired on BOTH, not cached after the first
-    // each exchange used a DIFFERENT raw token (distinct jti-bearing mints), never a reused value
-    const [firstArg] = exchangeDiscussionSession.mock.calls[0]
-    const [secondArg] = exchangeDiscussionSession.mock.calls[1]
-    expect(firstArg).not.toEqual(secondArg)
+    // each exchange was called with THIS REQUEST's actual raw embed JWT -- not a fixed/reused value
+    expect(exchangeDiscussionSession).toHaveBeenNthCalledWith(1, token1)
+    expect(exchangeDiscussionSession).toHaveBeenNthCalledWith(2, token2)
+    expect(token1).not.toEqual(token2)
   })
 
   // --- exchange failure -> uniform 401 ---
