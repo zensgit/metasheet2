@@ -7252,6 +7252,23 @@ describe('DirectoryManagementView', () => {
       expect(container?.textContent).not.toContain('后台同步进行中')
     })
 
+    it('手动同步 409 (DirectorySyncInProgressError) shows 已有同步在进行中 with the active runId, not a generic 目录同步失败', async () => {
+      mockInitialLoad(createIntegration())
+      apiFetchMock.mockResolvedValueOnce(createSyncInProgressResponse('run-lease-7'))
+
+      mountView()
+      await flushUi()
+
+      findButton('手动同步')!.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+      await flushUi(8)
+
+      expect(container?.textContent).toContain('已有同步在进行中（运行 run-lease-7）')
+      expect(container?.textContent).not.toContain('A directory sync is already running')
+      expect(container?.textContent).not.toContain('目录同步失败')
+      // busy resets on the benign-lease-refusal path, so the trigger is re-enabled (not a dead form).
+      expect(findButton('手动同步')?.disabled).toBe(false)
+    })
+
     it('auto-admission FAIL-SAFE: warns that async discards one-time temp-password packets; declining sends no request', async () => {
       mockInitialLoad(createIntegration({ config: autoAdmissionConfig }))
       const confirmSpy = vi.spyOn(ElMessageBox, 'confirm').mockRejectedValue(new Error('cancel'))
