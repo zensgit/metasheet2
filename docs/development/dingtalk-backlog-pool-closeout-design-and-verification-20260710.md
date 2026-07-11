@@ -31,6 +31,8 @@
 
 尾巴（非池内）：#3998 邮箱大小写唯一性 ✅、#4001 纠错台账 ✅。
 
+**计数勘误（owner 审阅，2026-07-10）**：本文落地时的 PR/squash headline 写了「14/14 gated+landed」——失真。诚实口径：**13/13 实现 PR 落地（上表，逐票对抗 gate + mutation 重放）+ 1 份收官 MD 落地（本文，docs-only，无 gate 无 mutation，不计入 gated 票数）**。#3998 不事后收编为第 14 票——那正是 §2 批评的叙事收编。
+
 ## 4. 设计裁决记录（owner ratified / 主循环代决）
 
 - **重试按业务语义分级，不按 HTTP 动词**（owner）：read 预算内可重试 / exchange 绝不 / send 绝不重发标 outcome_unknown；网络错误 ≠ 未执行；task_id 不能当幂等键；malformed-2xx 三类分离都不得成功；进程内限流=best-effort。
