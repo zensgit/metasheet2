@@ -15,7 +15,6 @@ import type {
   GetUrlOptions,
   PresignedUploadOptions,
   PresignedUpload,
-  ListOptions,
   StorageUsage
 } from '../types/plugin'
 import { Logger } from '../core/logger'
@@ -73,7 +72,6 @@ interface StorageProvider {
   getFileInfo(fileId: string): Promise<StorageFile | null>
   getFileUrl(fileId: string, options?: GetUrlOptions): Promise<string>
   getPresignedUploadUrl(options: PresignedUploadOptions): Promise<PresignedUpload>
-  listFiles(prefix?: string, options?: ListOptions): Promise<StorageFile[]>
   createFolder(path: string): Promise<void>
   deleteFolder(path: string, recursive?: boolean): Promise<void>
   getStorageUsage(): Promise<StorageUsage>
@@ -348,54 +346,6 @@ class LocalStorageProvider implements StorageProvider {
     }
   }
 
-  async listFiles(prefix?: string, options?: ListOptions): Promise<StorageFile[]> {
-    let files = Array.from(this.fileIndex.values())
-
-    // 应用前缀过滤
-    if (prefix) {
-      files = files.filter(file => file.path.startsWith(prefix))
-    }
-
-    // 应用过滤器
-    if (options?.filter) {
-      const filter = options.filter
-      files = files.filter(file => {
-        if (filter.contentType && file.contentType !== filter.contentType) return false
-        if (filter.sizeMin && file.size < filter.sizeMin) return false
-        if (filter.sizeMax && file.size > filter.sizeMax) return false
-        if (filter.createdAfter && file.createdAt < filter.createdAfter) return false
-        if (filter.createdBefore && file.createdAt > filter.createdBefore) return false
-        return true
-      })
-    }
-
-    // 排序
-    if (options?.sortBy) {
-      const sortBy = options.sortBy
-      const sortOrder = options.sortOrder || 'asc'
-      files.sort((a, b) => {
-        const aRaw = a[sortBy]
-        const bRaw = b[sortBy]
-        let aValue: string | number | Date = aRaw ?? ''
-        let bValue: string | number | Date = bRaw ?? ''
-
-        // Convert Date objects to timestamps for comparison
-        if (sortBy === 'createdAt' || sortBy === 'updatedAt') {
-          aValue = (aValue as Date).getTime()
-          bValue = (bValue as Date).getTime()
-        }
-
-        const comparison = aValue < bValue ? -1 : aValue > bValue ? 1 : 0
-        return sortOrder === 'asc' ? comparison : -comparison
-      })
-    }
-
-    // 分页
-    const offset = options?.offset || 0
-    const limit = options?.limit || files.length
-    return files.slice(offset, offset + limit)
-  }
-
   async createFolder(dirPath: string): Promise<void> {
     const fullPath = path.join(this.basePath, dirPath)
     try {
@@ -630,10 +580,6 @@ export class StorageServiceImpl extends EventEmitter implements StorageService {
       this.logger.error('Failed to delete multiple files', error as Error)
       throw error
     }
-  }
-
-  async listFiles(prefix?: string, options?: ListOptions): Promise<StorageFile[]> {
-    return this.provider.listFiles(prefix, options)
   }
 
   async createFolder(path: string): Promise<void> {
