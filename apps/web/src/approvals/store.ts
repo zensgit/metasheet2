@@ -29,6 +29,8 @@ export const useApprovalStore = defineStore('approval', () => {
   const myApprovals = ref<UnifiedApprovalDTO[]>([])
   const ccApprovals = ref<UnifiedApprovalDTO[]>([])
   const completedApprovals = ref<UnifiedApprovalDTO[]>([])
+  // B3-01 (我已处理 5th tab): every instance the actor has ANY approval_records row for, ANY status.
+  const processedApprovals = ref<UnifiedApprovalDTO[]>([])
   const activeApproval = ref<UnifiedApprovalDTO | null>(null)
   const history = ref<UnifiedApprovalHistoryDTO[]>([])
   const loading = ref(false)
@@ -37,6 +39,7 @@ export const useApprovalStore = defineStore('approval', () => {
   const totalMine = ref(0)
   const totalCc = ref(0)
   const totalCompleted = ref(0)
+  const totalProcessed = ref(0)
 
   // ---------------------------------------------------------------------------
   // Getters
@@ -105,6 +108,20 @@ export const useApprovalStore = defineStore('approval', () => {
     }
   }
 
+  async function loadProcessed(query?: Omit<ApprovalListQuery, 'tab'>) {
+    loading.value = true
+    error.value = null
+    try {
+      const result = await listApprovals({ ...query, tab: 'processed' })
+      processedApprovals.value = result.data
+      totalProcessed.value = result.total
+    } catch (e: any) {
+      error.value = e.message ?? '加载我已处理的审批失败'
+    } finally {
+      loading.value = false
+    }
+  }
+
   async function loadDetail(id: string) {
     loading.value = true
     error.value = null
@@ -165,6 +182,7 @@ export const useApprovalStore = defineStore('approval', () => {
     myApprovals,
     ccApprovals,
     completedApprovals,
+    processedApprovals,
     activeApproval,
     history,
     loading,
@@ -173,6 +191,7 @@ export const useApprovalStore = defineStore('approval', () => {
     totalMine,
     totalCc,
     totalCompleted,
+    totalProcessed,
     // Getters
     pendingCount,
     approvalById,
@@ -181,6 +200,7 @@ export const useApprovalStore = defineStore('approval', () => {
     loadMine,
     loadCc,
     loadCompleted,
+    loadProcessed,
     loadDetail,
     loadHistory,
     submitApproval,

@@ -286,6 +286,9 @@ describe('DingTalk OAuth state store', () => {
   it('refuses auto-provision when a local account already exists with the same email', async () => {
     vi.stubEnv('DINGTALK_AUTH_AUTO_LINK_EMAIL', '0')
     vi.stubEnv('DINGTALK_AUTH_AUTO_PROVISION', '1')
+    // Auto-provision requires a non-empty corp allowlist (DT-HARDEN-09); this
+    // test exercises the email-conflict guard downstream of that gate.
+    vi.stubEnv('DINGTALK_ALLOWED_CORP_IDS', 'ding-corp-1')
     vi.mocked(exchangeCodeForUserAccessToken).mockResolvedValue({
       accessToken: 'access-token',
     })
@@ -411,6 +414,8 @@ describe('DingTalk OAuth state store', () => {
 
   it('writes a password hash when auto-provisioning a new DingTalk user', async () => {
     vi.stubEnv('DINGTALK_AUTH_AUTO_PROVISION', '1')
+    // Auto-provision requires a non-empty corp allowlist (DT-HARDEN-09).
+    vi.stubEnv('DINGTALK_ALLOWED_CORP_IDS', 'ding-corp-1')
     vi.mocked(exchangeCodeForUserAccessToken).mockResolvedValue({
       accessToken: 'access-token',
     })

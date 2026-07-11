@@ -39,7 +39,7 @@
 
 ## W3 — 顺手批(单项 ≤半天;排在 W0 清空之后)
 
-- ⬜ **W3-5 batchId===null real-DB golden + FE batchId 消费**(commit toast → History Center 批次深链)— 前置 #3584 已合,**ready**;Sonnet 5。
+- 🔒 **W3-5 batchId===null real-DB golden + FE batchId 消费**(commit toast → History Center 批次深链)— **非"已解锁可执行"**(2026-07-07 取证):①**跨窗口面**——深链目标 `HistoryCenterModal.vue`/`useHistoryCenter.ts` 属历史/恢复窗口文件面(池边界"不进入其文件面"),且正被其 4c 系列活跃改动(#3812 open、#3807/#3809 刚落);②**无 clear-spec**——仅本行一句,深链接口(commit-toast 如何以 batchId 打开 History Center)未定义,非 L2 clear-spec;③real-DB golden(仅 `plugin-tests.yml` DATABASE_URL 步可观测,无本地 DB)。**解锁前置**:与历史窗口约定深链接口契约(design-lock)、其 4c 系列收敛、real-DB CI 可观测。前置 #3584 已合但非唯一门。Sonnet 5(解锁后)。
 - 🔒 **W3-6 仪表盘 B4 非图表 widgets 批** — 先核 goal-todo 台账 browser-gated 语义再解锁;Sonnet 5。
 
 ## 🔒 owner 决策区(不排队列,仅列示)

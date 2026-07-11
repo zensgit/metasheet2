@@ -125,7 +125,7 @@ turning anything on.
 | Q9 | Non-approved outcomes | Project all terminal outcomes to the neutral read-model; source-record W7 semantics stay separate. | ⏸ |
 | Q10 | Base placement | One system-owned base/sheet per template family, provisioned lazily; cross-base projection is a non-goal in the first slice. | ⏸ |
 
-**T3-6 — HELD 2026-07-05 (owner vote): all lines ⏸ hold.** The S-band "approval as first-class multitable records"
+**T3-6 — HELD 2026-07-05 (owner vote at the time); SUPERSEDED by later owner decisions（2026-07-07 对账）**: 投影 base+admin fence #3537（A-lock as-built）→ per-row 锁 #3687 RATIFIED-Plan-A → T36-1 #3758 + T36-2 #3779 落地。现行唯一 🔒 = T36-3（中间审批人/cc）。原文保留如下供溯源：**all lines ⏸ hold.** The S-band "approval as first-class multitable records"
 strategic line is deliberately NOT started — no projection work begins until the owner explicitly un-holds. Held to
 keep the broadest data-model line from being opened prematurely by an autonomous loop or a session.
 

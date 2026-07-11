@@ -55,6 +55,7 @@ export interface ICollabService {
   initialize(httpServer: HttpServer): void;
   setTokenVerifier(verifier: (token: string) => Promise<string | null>): void;
   setSheetRoomAuthChecker(checker: (input: { sheetId: string; userId: string; socketId: string }) => Promise<boolean>): void;
+  setCommentRoomAuthChecker(checker: (input: { spreadsheetId: string; rowId?: string; userId: string; socketId: string }) => Promise<boolean>): void;
   broadcast(event: string, data: unknown): void;
   broadcastTo(room: string, event: string, data: unknown): void;
   sendTo(userId: string, event: string, data: unknown): void;
@@ -63,6 +64,8 @@ export interface ICollabService {
   onConnection(handler: (socket: Socket) => void): void;
   /** Return user IDs currently present in the given Socket.IO room. */
   getRoomMembers(room: string): Promise<string[]>;
+  /** Return user IDs that currently joined the comment inbox stream. */
+  getCommentInboxSubscriberIds(): string[];
 }
 
 export interface ICollectionManager {
@@ -187,6 +190,12 @@ export interface CommentQueryOptions {
      * reaction summary. Omitted → `reactedByMe` is false for all reactions.
      */
     viewerId?: string;
+    /**
+     * Internal row-level read-deny filter. Route/service callers pass row IDs the
+     * actor cannot read; comment queries must exclude them before counting or
+     * paging. This is not a public API query parameter.
+     */
+    excludeRowIds?: string[];
 }
 
 /** Aggregated emoji-reaction summary attached to a comment (B6). */
@@ -376,6 +385,7 @@ export interface CommentUnreadSummary {
 }
 
 export interface ICommentService {
+    setCommentTargetReadChecker(checker: (input: { spreadsheetId: string; rowId: string; userId: string }) => Promise<boolean>): void;
     /**
      * Create a comment.
      *
@@ -423,9 +433,10 @@ export interface ICommentService {
       spreadsheetId: string,
       rowIds?: string[],
       mentionUserId?: string,
+      excludeRowIds?: string[],
     ): Promise<{ items: CommentPresenceSummaryRecord[]; total: number }>;
-    getMentionSummary(spreadsheetId: string, mentionUserId: string): Promise<CommentMentionSummary>;
-    markMentionsRead(spreadsheetId: string, userId: string): Promise<void>;
+    getMentionSummary(spreadsheetId: string, mentionUserId: string, excludeRowIds?: string[]): Promise<CommentMentionSummary>;
+    markMentionsRead(spreadsheetId: string, userId: string, excludeRowIds?: string[]): Promise<void>;
     resolveComment(commentId: string): Promise<void>;
     /**
      * Mark every unread comment in a spreadsheet as read for the given user.
@@ -433,7 +444,7 @@ export interface ICommentService {
      *
      * @returns The number of comments that were newly marked as read.
      */
-    markAllCommentsRead(spreadsheetId: string, userId: string): Promise<number>;
+    markAllCommentsRead(spreadsheetId: string, userId: string, excludeRowIds?: string[]): Promise<number>;
     /**
      * Return comment presence summary, optionally enriched with current room
      * viewers when `includeViewers` is true.
@@ -443,6 +454,7 @@ export interface ICommentService {
       rowIds?: string[],
       mentionUserId?: string,
       includeViewers?: boolean,
+      excludeRowIds?: string[],
     ): Promise<{ items: CommentPresenceSummaryRecord[]; total: number; viewers?: CommentPresenceViewer[] }>;
 }
 

@@ -335,7 +335,13 @@ function hasLegacyAdminClaim(req: Request): boolean {
   return false
 }
 
-async function ensurePlatformAdmin(req: Request, res: Response): Promise<string | null> {
+// Exported IN PLACE (not extracted to a shared guard module — there is no such module today;
+// the sibling `requireOrgMemberAccess` is itself a local function in routes/api-tokens.ts) so the
+// attendance-admin redelivery route can reuse the SAME platform-admin check rather than
+// reimplementing it. Two drifting admin checks would be an auth bug. Behavior and the ~20 existing
+// in-file call sites are unchanged. Contract: returns the userId on success, or null AFTER already
+// writing the 401/403 response — callers MUST return early on null.
+export async function ensurePlatformAdmin(req: Request, res: Response): Promise<string | null> {
   const userId = getRequestUserId(req)
   if (!userId) {
     jsonError(res, 401, 'UNAUTHENTICATED', 'Authentication required')

@@ -25,6 +25,14 @@
            view and passed down here as a resolved `summaryLineFor(row)` function since its
            template-schema cache is shared across all four tabs). -->
       <template #default="{ row }: { row: UnifiedApprovalDTO }">
+        <!-- B3-02 (行级未读): a dot ONLY when the caller opts in (pending tab) AND the server
+             resolved this row as unread (`isRead === false`, never a guessed/inverted default —
+             `undefined` on every other tab renders no dot). -->
+        <span
+          v-if="showUnreadDot && row.isRead === false"
+          class="approval-center__unread-dot"
+          data-testid="approval-row-unread-dot"
+        />
         {{ row.title }}
         <div
           v-if="summaryLineFor(row)"
@@ -110,12 +118,19 @@ withDefaults(
     actionsWidth?: string | number
     /** Shared row-summary lookup owned by the parent (see useApprovalListFieldSummary.ts). */
     summaryLineFor: (row: UnifiedApprovalDTO) => string
+    /**
+     * B3-02 (行级未读): renders a dot next to the title for rows the server resolved as unread
+     * (`row.isRead === false`). Pending tab only — the caller must NOT pass this on any other
+     * tab, since `isRead` is only ever populated there.
+     */
+    showUnreadDot?: boolean
   }>(),
   {
     showSelection: false,
     selectable: undefined,
     showWaitColumn: false,
     actionsWidth: 150,
+    showUnreadDot: false,
   },
 )
 
@@ -166,6 +181,19 @@ defineExpose({
   text-overflow: ellipsis;
   font-size: 12px;
   color: var(--el-text-color-secondary);
+}
+
+/* B3-02 (行级未读): a small red dot before the title — same danger tone as the rest of this file's
+   urgency cues (已等待--urgent / batch-result failures), never rendered on a row whose isRead is
+   `true` or `undefined`. */
+.approval-center__unread-dot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  margin-right: 6px;
+  border-radius: 50%;
+  background: var(--el-color-danger);
+  vertical-align: middle;
 }
 
 /* B1-03: 已等待 aging severity — normal inherits the surrounding text color; warn/urgent escalate. */

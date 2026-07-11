@@ -198,6 +198,9 @@ describe('usePlatformApps', () => {
       })
 
     await fetchApps({ force: true })
+    expect(apiGetMock).toHaveBeenNthCalledWith(2, '/api/after-sales/projects/current', {
+      suppressUnauthorizedRedirect: true,
+    })
     expect(resolvePlatformAppInstallState(apps.value[0]!)).toBe('partial')
 
     localStorage.setItem('tenantId', 'tenant_beta')
@@ -213,6 +216,9 @@ describe('usePlatformApps', () => {
       .mockRejectedValueOnce(new Error('current unavailable'))
 
     await fetchApps({ force: true })
+    expect(apiGetMock).toHaveBeenNthCalledWith(4, '/api/after-sales/projects/current', {
+      suppressUnauthorizedRedirect: true,
+    })
     expect(resolvePlatformAppInstallState(apps.value[0]!)).toBe('not-installed')
   })
 })

@@ -158,27 +158,31 @@ The packaged root now includes a fixed deploy entrypoint for corrective rerolls:
 
 For Windows Server, these wrappers delegate to `scripts/ops/multitable-onprem-apply-package.ps1`; the `.sh` helper remains available for Linux/WSL flows. The apply helper:
 
-1. extracts the archive into a temporary directory,
-2. copies the package contents into the current deploy root,
-3. refreshes dependencies, runs migrations, and restarts PM2,
-4. preserves the existing `docker/app.env`.
+1. extracts the archive into a short staging directory,
+2. activates the package-pinned pnpm version and completes a frozen dependency
+   install in staging,
+3. snapshots the files and workspace `node_modules` that the live activation
+   can replace,
+4. overlays the package and activates the already-prefetched dependencies
+   offline; an activation failure restores both snapshots before aborting,
+5. runs migrations and restarts PM2 only after dependency activation commits,
+6. preserves the existing `docker/app.env`.
 
 `node_modules` is intentionally excluded from the archive. The apply helper's
-default `InstallDeps=1` refreshes dependencies with
-`pnpm install --frozen-lockfile` on every package apply. This keeps corrective
-rerolls safe when the deploy root already has `node_modules` but the new package
-adds a workspace runtime dependency. Manual file-copy deployments must run the
-same command before migrations, PM2 restart, or admin bootstrap.
+default `InstallDeps=1` uses the exact pnpm version recorded in
+`PACKAGE-METADATA.json` and the packaged root `packageManager`. Corrective
+rerolls must use `deploy.bat` or the PowerShell apply helper; hand-copying files
+or using `--no-frozen-lockfile` bypasses the preflight/rollback contract.
 
-On Windows, dependency refresh is a logged child process. The apply helper logs
-the resolved `pnpm` path/version, writes stdout/stderr to
-`output\logs\dependency-refresh-*.stdout.log` and
-`output\logs\dependency-refresh-*.stderr.log`, emits heartbeat progress while
-the install is still running, and fails the deployment after the configured
-timeout instead of hanging forever. Defaults are
+On Windows, both dependency phases are logged child processes. The apply helper
+logs the resolved `pnpm` path/version, writes staging preflight logs to
+`output\logs\dependency-preflight-*` and live activation logs to
+`output\logs\dependency-activate-*`, emits heartbeat progress, and fails after
+the configured timeout instead of hanging forever. Defaults are
 `DependencyRefreshTimeoutSec=1800` and `DependencyRefreshHeartbeatSec=60`.
-The child process is a generated `dependency-refresh-*.cmd` wrapper launched
-through `cmd.exe`; it prefers `pnpm.cmd`, uses `--reporter=append-only`, and
-pins pnpm's store to deploy-root `.pnpm-store` with `--store-dir`.
+Each child process uses a generated `.cmd` wrapper through `cmd.exe`,
+`--reporter=append-only`, and the deploy-local content-addressable
+`.pnpm-store`. The second phase adds `--offline`, so network or registry
+availability cannot change after the live overlay begins.
 
 For a fresh Windows-only install, use `bootstrap-admin.bat` after `deploy.bat` so the customer can create the first admin account without needing bash or WSL.

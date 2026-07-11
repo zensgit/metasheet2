@@ -53,7 +53,7 @@
             <option value="month">{{ viewZoomLabel('month', isZh) }}</option>
           </select>
         </label>
-        <button v-if="canCreate" class="meta-gantt__create" @click="onQuickCreate">{{ viewRenderLabel('gantt.addTask', isZh) }}</button>
+        <MtButton v-if="canCreate" variant="primary" class="meta-gantt__create" @click="onQuickCreate">{{ viewRenderLabel('gantt.addTask', isZh) }}</MtButton>
       </div>
 
       <div v-if="!startFieldId || !endFieldId" class="meta-gantt__placeholder">
@@ -150,6 +150,7 @@ import { useLocale } from '../../composables/useLocale'
 import { formatFieldDisplay } from '../utils/field-display'
 import { isSelfTableLinkField, resolveGanttViewConfig } from '../utils/view-config'
 import { managerLabel } from '../utils/meta-manager-labels'
+import { MtButton } from '../ui'
 import {
   ganttResizeAria,
   unscheduledCount,
@@ -562,7 +563,10 @@ function onQuickCreate() {
 .meta-gantt__toolbar { display: flex; flex-wrap: wrap; gap: 10px; padding: 12px 16px; border-bottom: 1px solid #e2e8f0; background: #fff; }
 .meta-gantt__control { display: flex; flex-direction: column; gap: 4px; min-width: 118px; font-size: 11px; color: #64748b; }
 .meta-gantt__control select { padding: 6px 8px; border: 1px solid #cbd5e1; border-radius: 6px; background: #fff; color: #334155; }
-.meta-gantt__create { align-self: end; padding: 7px 12px; border: 1px solid #2563eb; border-radius: 6px; background: #2563eb; color: #fff; cursor: pointer; }
+/* .meta-gantt__create: the Add-task control is now <MtButton variant="primary"> (bespoke #2563eb ==
+   --ms-color-primary); its bespoke hex CSS was removed to avoid double-styling the MtButton root. Only the
+   toolbar LAYOUT property (align-self) is kept — MtButton doesn't provide it. Class kept for selectors. */
+.meta-gantt__create { align-self: end; }
 .meta-gantt__head { display: grid; grid-template-columns: 260px 1fr; min-height: 40px; border-bottom: 1px solid #e2e8f0; background: #f1f5f9; }
 .meta-gantt__task-col { padding: 8px 12px; border-right: 1px solid #e2e8f0; text-align: left; }
 .meta-gantt__task-col strong, .meta-gantt__task-col small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

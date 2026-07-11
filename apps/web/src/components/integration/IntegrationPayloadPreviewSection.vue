@@ -4,6 +4,11 @@
     <div>
       <h2>样例记录</h2>
       <textarea v-model="sampleRecordText" data-testid="sample-record" spellcheck="false"></textarea>
+      <JsonAssist
+        v-model="sampleRecordText"
+        test-id="sample-record"
+        :placeholder-example="sampleRecordExample"
+      />
       <h2>目标模板 JSON</h2>
       <textarea
         v-model="payloadTemplateText"
@@ -11,6 +16,11 @@
         spellcheck="false"
         placeholder='{ "FNumber": "&lt;code&gt;", "FName": "&lt;name&gt;" }'
       ></textarea>
+      <JsonAssist
+        v-model="payloadTemplateText"
+        test-id="payload-template"
+        :placeholder-example="payloadTemplateExample"
+      />
       <small class="integration-workbench__hint">可选。填写后使用 DF-T1 no-write payloadTemplate 预览；留空则保持 legacy preview。</small>
       <h2>引用映射来源(各 domain 绑定 staging 表)</h2>
       <div v-if="referenceMappingDomains.length > 0" data-testid="reference-mapping-picker">
@@ -120,6 +130,7 @@ import type {
   IntegrationFieldRule,
   WorkbenchExternalSystem,
 } from '../../services/integration/workbench'
+import JsonAssist from './JsonAssist.vue'
 import MetaIntegrationFieldRuleAuthoring from './MetaIntegrationFieldRuleAuthoring.vue'
 
 defineProps<{
@@ -142,6 +153,18 @@ defineProps<{
 const sampleRecordText = defineModel<string>('sampleRecordText', { default: '' })
 const payloadTemplateText = defineModel<string>('payloadTemplateText', { default: '' })
 const authoredFieldRules = defineModel<IntegrationFieldRule[]>('authoredFieldRules', { default: () => [] })
+
+// IU-5a (design-lock §2 IU-5, site 3 "sample-record" + site 4 "payload-template" disposition:
+// "JSON-assist only" — both are naturally free-form, no structured form). JsonAssist is a
+// side-mounted format+validate strip beside the existing raw textareas above (both keep their
+// data-testids and remain untouched). Values-free placeholder shapes only — `sampleRecordExample`
+// is fully generic (a sample record's shape is whatever the source system happens to send, so no
+// field names are implied); `payloadTemplateExample` mirrors the textarea's own existing
+// `placeholder` attribute shape above (FNumber/FName are the same illustrative K3 target-field
+// names already used there, not real business values — only the surrounding values are
+// placeholders).
+const sampleRecordExample = '{ "<field-name>": "<field-value>" }'
+const payloadTemplateExample = '{ "FNumber": "<code>", "FName": "<name>" }'
 </script>
 
 <style scoped>
