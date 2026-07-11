@@ -31,8 +31,11 @@
  *    non-delivery. An ambiguous DingTalk result never reaches markFailed — deliver() routes it to
  *    markOutcomeUnknown, which leaves redelivery_safe=false — so this gate can never resend an
  *    ambiguous row. Requeuing flips the SAME row `failed → pending` (attempt_count reset to 0 for a
- *    fresh operator-requested cycle, next_attempt_at = now); the worker's deliver() calls
- *    channel.send() before any attempt-count classification, so exactly ONE genuine new send follows.
+ *    fresh operator-requested cycle, next_attempt_at = now). The invariant is per-CYCLE, not
+ *    per-send: each operator action creates exactly ONE redelivery cycle; the worker's deliver()
+ *    calls channel.send() once per attempt, and the fresh retry budget means a *retryable* failure
+ *    may span several worker attempts within that one cycle. An ambiguous result is NEVER retried —
+ *    it routes to markOutcomeUnknown (not markFailed), so no ambiguous send can be resent.
  *
  *  - source_key dedup is honored BY CONSTRUCTION: (org_id, source_key) is UNIQUE, so there is at
  *    most one row per logical destination. We flip that existing row's status — we NEVER insert a
