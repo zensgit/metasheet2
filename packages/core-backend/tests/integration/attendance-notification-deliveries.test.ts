@@ -4,6 +4,9 @@ import { Kysely, PostgresDialect } from 'kysely'
 import { Pool } from 'pg'
 import { up as createAttendanceNotificationDeliveries } from '../../src/db/migrations/zzzz20260611120000_create_attendance_notification_deliveries'
 import { up as addOutcomeUnknownDeliveryStatus } from '../../src/db/migrations/zzzz20260710150000_add_outcome_unknown_delivery_status'
+// markFailed always writes redelivery_safe (PR #4102), so every isolated-schema harness below that
+// runs the worker must chain this follow-up migration after the create — mirroring the full stack.
+import { up as addRedeliverySafe } from '../../src/db/migrations/zzzz20260711120000_add_redelivery_safe_to_attendance_notification_deliveries'
 import {
   AttendanceNotificationDeliveryWorker,
   buildAttendanceNotificationDeepLink,
@@ -97,6 +100,7 @@ describeIfDatabase('Attendance C5 notification delivery outbox', () => {
     testDb = createTestDb(isolatedDbUrl)
     pool = new Pool({ connectionString: isolatedDbUrl })
     await createAttendanceNotificationDeliveries(testDb)
+    await addRedeliverySafe(testDb)
   })
 
   afterAll(async () => {
@@ -251,6 +255,7 @@ describeIfDatabase('Attendance C5 notification delivery outbox', () => {
     }
     try {
       await createAttendanceNotificationDeliveries(workerDb)
+      await addRedeliverySafe(workerDb)
       await requireTable(workerPool, 'attendance_notification_deliveries')
 
       const okId = await insertDelivery('ok')
@@ -387,6 +392,7 @@ describeIfDatabase('Attendance C5 notification delivery outbox', () => {
     }
     try {
       await createAttendanceNotificationDeliveries(workerDb)
+      await addRedeliverySafe(workerDb)
       await requireTable(workerPool, 'attendance_notification_deliveries')
       const insert = await workerPool.query<{ id: string }>(
         `INSERT INTO attendance_notification_deliveries
@@ -465,6 +471,8 @@ describeIfDatabase('Attendance C5 notification delivery outbox', () => {
       await createAttendanceNotificationDeliveries(workerDb)
       // the migration under test: widens the status CHECK by 'outcome_unknown'
       await addOutcomeUnknownDeliveryStatus(workerDb)
+      // markFailed writes redelivery_safe on the definite-failure branch this test also exercises.
+      await addRedeliverySafe(workerDb)
       await requireTable(workerPool, 'attendance_notification_deliveries')
 
       const insert = async (label: string) => (await workerPool.query<{ id: string }>(
