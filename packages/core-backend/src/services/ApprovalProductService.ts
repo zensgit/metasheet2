@@ -4882,8 +4882,8 @@ export class ApprovalProductService {
       //   `currentNodeKey` is the actor's EFFECTIVE node — `actorBranchNodeKey` in a parallel region,
       //   else `storedCurrentNodeKey` (both already resolved into `currentNodeKey` above).
       //   STRICT epoch (no null-pass arm): the card must carry a NON-NULL entry_epoch equal to a
-      //   NON-NULL epoch on a live seat the actor holds at that node. A NULL delivery epoch (a legacy
-      //   card the migration failed to backfill) is NOT actionable — fail-closed.
+      //   NON-NULL epoch on a live seat the actor holds at that node. A NULL delivery epoch (a
+      //   pre-column legacy card, which the migration supersedes outright) is NOT actionable — fail-closed.
       if (request.channelOrigin?.channel === 'dingtalk_card') {
         // Review NIT (defense-in-depth): a card-channel action MUST carry the delivery id — the
         // whole point of the binding is that a card action is bound to its delivery. A dingtalk_card

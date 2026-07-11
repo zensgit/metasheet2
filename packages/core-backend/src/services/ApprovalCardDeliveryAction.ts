@@ -140,9 +140,10 @@ async function buildSummary(
   //     FRESH entry_epoch on a new active assignment, so the old-epoch card fails the equality. There
   //     is NO null-pass arm (the P1-1 re-review dropped the `$4 IS NULL` / `aa.entry_epoch IS NULL`
   //     dual-read that let a legacy card re-enter the same node): the delivery MUST carry a NON-NULL
-  //     epoch equal to a NON-NULL live-seat epoch. A NULL delivery epoch (a card the migration failed
-  //     to backfill) → NOT actionable (fail-closed). Legacy in-flight cards are handled at migrate
-  //     time (backfilled from their unique live seat, else superseded), never by a permissive read.
+  //     epoch equal to a NON-NULL live-seat epoch. A NULL delivery epoch (a pre-column legacy card)
+  //     → NOT actionable (fail-closed). Legacy in-flight cards are retired at migrate time — SUPERSEDED
+  //     outright (no epoch inference: a pre-column card has no provable original-round anchor), never
+  //     re-authorized by a permissive read.
   const result = await query(
     `SELECT i.id, i.title, i.request_no, i.status, i.current_node_key, i.policy_snapshot,
             EXISTS (
