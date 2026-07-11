@@ -16,7 +16,7 @@
       <div v-if="initialBatchId && !pinnedDismissed" class="meta-hist__pinned" data-test="hist-pinned-batch">
         <div class="meta-hist__pinned-head">
           <span class="meta-hist__pinned-label">{{ t('已定位到该批次', 'Jumped to this batch') }}</span>
-          <button class="meta-hist__pinned-dismiss" type="button" data-test="hist-pinned-dismiss" @click="dismissPinned">{{ t('清除定位', 'Clear') }}</button>
+          <MtButton class="meta-hist__pinned-dismiss" data-test="hist-pinned-dismiss" @click="dismissPinned">{{ t('清除定位', 'Clear') }}</MtButton>
         </div>
         <p v-if="pinnedLoading" class="meta-hist__hint">{{ t('加载中…', 'Loading…') }}</p>
         <p v-else-if="!pinnedDetail" class="meta-hist__hint">{{ t('无法打开该批次', 'This batch is unavailable') }}</p>
@@ -26,7 +26,7 @@
             <span class="meta-hist__when">{{ formatTime(pinnedDetail.createdAt) }}</span>
             <span class="meta-hist__counts" data-test="hist-pinned-counts">{{ countLabel(pinnedDetail) }}</span>
           </div>
-          <HistoryBatchChangesList :changes="pinnedDetail.changes" :fields="fields" :action-label="actionLabel" />
+          <HistoryBatchChangesList :changes="pinnedDetail.changes" :fields="fields" :field-names="pinnedDetail.fieldNames" :link-summaries="linkSummaries" :person-summaries="personSummaries" :action-label="actionLabel" @open-record="emit('open-record', $event)" />
         </template>
       </div>
 
@@ -49,7 +49,7 @@
         <label v-if="sheetId" class="meta-hist__scope" data-test="hist-filter-scope">
           <input v-model="scopeAllSheets" type="checkbox" @change="reload" />{{ t('全部表', 'All tables') }}
         </label>
-        <button class="meta-hist__apply" type="button" data-test="hist-apply" @click="reload">{{ t('筛选', 'Filter') }}</button>
+        <MtButton class="meta-hist__apply" data-test="hist-apply" @click="reload">{{ t('筛选', 'Filter') }}</MtButton>
       </div>
 
       <p v-if="error" class="meta-hist__error" role="alert">{{ error }}</p>
@@ -68,19 +68,18 @@
           <div v-if="expandedId === b.batchId" class="meta-hist__detail" data-test="hist-detail">
             <p v-if="detailLoading" class="meta-hist__hint">{{ t('加载中…', 'Loading…') }}</p>
             <p v-else-if="!detail" class="meta-hist__hint">{{ t('无法打开该批次', 'This batch is unavailable') }}</p>
-            <HistoryBatchChangesList v-else :changes="detail.changes" :fields="fields" :action-label="actionLabel" />
+            <HistoryBatchChangesList v-else :changes="detail.changes" :fields="fields" :field-names="detail.fieldNames" :link-summaries="linkSummaries" :person-summaries="personSummaries" :action-label="actionLabel" @open-record="emit('open-record', $event)" />
           </div>
         </li>
       </ul>
       <p v-else class="meta-hist__hint">{{ t('暂无历史记录', 'No history yet') }}</p>
-      <button
+      <MtButton
         v-if="nextCursor && !loading"
         class="meta-hist__more"
-        type="button"
         data-test="hist-load-more"
         :disabled="loadingMore"
         @click="loadMore"
-      >{{ loadingMore ? t('加载中…', 'Loading…') : t('加载更多', 'Load more') }}</button>
+      >{{ loadingMore ? t('加载中…', 'Loading…') : t('加载更多', 'Load more') }}</MtButton>
     </div>
   </div>
 </template>
@@ -91,12 +90,19 @@ import { useLocale } from '../../composables/useLocale'
 import { useHistoryCenter } from '../composables/useHistoryCenter'
 import { historyActor } from '../utils/meta-record-labels'
 import HistoryBatchChangesList from './HistoryBatchChangesList.vue'
+import { MtButton } from '../ui'
+import type { LinkedRecordSummary, PersonSummary } from '../types'
 
 const props = defineProps<{
   open: boolean
   baseId: string
   sheetId?: string
-  fields?: Array<{ id: string; name: string }>
+  /** `type`/`order`/`property` are optional extras consumed by HistoryBatchChangesList for record
+   *  titles + type-aware diff values; the modal itself only reads id/name (filter options). */
+  fields?: Array<{ id: string; name: string; type?: string; order?: number; property?: Record<string, unknown> }>
+  /** Best-effort grid display caches (recordId → fieldId → summaries), passed through to the change list. */
+  linkSummaries?: Record<string, Record<string, LinkedRecordSummary[]>>
+  personSummaries?: Record<string, Record<string, PersonSummary[]>>
   /**
    * W3-5/W3-5b: a commit toast's "view in history" deep-link sets this to the batch it just wrote. On open,
    * the modal loads the normal (unfiltered) list AND ALSO fetches this one batch's own detail via the SAME
@@ -109,7 +115,11 @@ const props = defineProps<{
    */
   initialBatchId?: string | null
 }>()
-const emit = defineEmits<{ (e: 'close'): void }>()
+const emit = defineEmits<{
+  (e: 'close'): void
+  /** PR-C: relayed verbatim from HistoryBatchChangesList — the workbench owns drawer/sheet concerns. */
+  (e: 'open-record', payload: { sheetId: string; recordId: string }): void
+}>()
 
 const { isZh } = useLocale()
 const t = (zh: string, en: string) => (isZh.value ? zh : en)
@@ -217,7 +227,10 @@ function formatTime(iso: string): string {
 .meta-hist__close { background: none; border: none; font-size: 20px; line-height: 1; cursor: pointer; color: inherit; }
 .meta-hist__filters { display: flex; gap: 8px; margin-bottom: 12px; flex-wrap: wrap; }
 .meta-hist__filter { font-size: 12px; padding: 4px 6px; border: 1px solid var(--meta-border, #ddd); border-radius: 4px; }
-.meta-hist__apply { cursor: pointer; font-size: 12px; }
+/* .meta-hist__apply / .meta-hist__more (below): the Filter and Load-more controls are now <MtButton>
+   (ghost, token-styled — both were unstyled/browser-default-appearance secondary actions). The former
+   `.meta-hist__apply { cursor: pointer; font-size: 12px; }` rule was removed (MtButton already sets both);
+   `.meta-hist__more` never had bespoke CSS. Classes + data-test kept for selector stability. */
 .meta-hist__list { list-style: none; margin: 0; padding: 0; }
 .meta-hist__row { border-bottom: 1px solid var(--meta-border, #eee); }
 .meta-hist__summary { display: flex; align-items: center; gap: 12px; width: 100%; padding: 8px 0; background: none; border: none; cursor: pointer; text-align: left; color: inherit; }
@@ -233,8 +246,9 @@ function formatTime(iso: string): string {
 .meta-hist__pinned { border: 1px solid var(--ms-border); border-left: 3px solid var(--ms-color-primary); border-radius: var(--ms-radius-md); padding: var(--ms-space-3); margin-bottom: var(--ms-space-4); background: var(--ms-bg-card); }
 .meta-hist__pinned-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: var(--ms-space-2); }
 .meta-hist__pinned-label { font-size: 12px; font-weight: 600; color: var(--ms-color-primary); }
-.meta-hist__pinned-dismiss { font-size: 12px; padding: 2px 8px; border: 1px solid var(--ms-border); border-radius: var(--ms-radius-sm); background: none; color: var(--ms-text-2); cursor: pointer; }
-.meta-hist__pinned-dismiss:hover { background: var(--ms-bg-page); }
+/* .meta-hist__pinned-dismiss: the Clear control is now <MtButton> (ghost, token-styled — it was already a
+   neutral --ms-* bordered secondary action, so this is a like-for-like swap). Its bespoke CSS was removed;
+   class + data-test kept for selector stability. */
 .meta-hist__pinned-summary { display: flex; gap: 12px; align-items: center; margin-bottom: var(--ms-space-2); }
 .meta-hist__error { color: var(--meta-danger, #c0392b); margin: 0 0 8px; }
 .meta-hist__hint { color: var(--meta-text-secondary, #888); padding: 12px 0; }

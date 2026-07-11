@@ -121,6 +121,8 @@ export type AutomationLabelKey =
   | 'condition.removeConditionTitle'
   | 'actionConfig.targetSheetId'
   | 'actionConfig.sheetIdPlaceholder'
+  | 'actionConfig.targetSheetManualToggle'
+  | 'actionConfig.targetSheetUseListToggle'
   | 'actionConfig.fieldIdPlaceholder'
   | 'actionConfig.url'
   | 'actionConfig.method'
@@ -178,6 +180,14 @@ export type AutomationLabelKey =
   | 'manager.quickLegacyForm'
   | 'manager.loading'
   | 'manager.empty'
+  | 'manager.recipeSectionTitle'
+  | 'manager.recipeOrBlank'
+  | 'recipe.createdNotifyTitle'
+  | 'recipe.createdNotifyDesc'
+  | 'recipe.updatedNotifyTitle'
+  | 'recipe.updatedNotifyDesc'
+  | 'recipe.fieldChangedUpdateTitle'
+  | 'recipe.fieldChangedUpdateDesc'
   | 'manager.enabled'
   | 'manager.disabled'
   | 'manager.allowedAudiencePrefix'
@@ -278,6 +288,7 @@ export type AutomationLabelKey =
   | 'status.success'
   | 'status.failed'
   | 'status.skipped'
+  | 'status.outcomeUnknown'
   | 'status.running'
   | 'status.resolved'
   | 'status.queued'
@@ -386,6 +397,8 @@ export const AUTOMATION_LABEL_KEYS: readonly AutomationLabelKey[] = [
   'condition.removeConditionTitle',
   'actionConfig.targetSheetId',
   'actionConfig.sheetIdPlaceholder',
+  'actionConfig.targetSheetManualToggle',
+  'actionConfig.targetSheetUseListToggle',
   'actionConfig.fieldIdPlaceholder',
   'actionConfig.url',
   'actionConfig.method',
@@ -440,6 +453,14 @@ export const AUTOMATION_LABEL_KEYS: readonly AutomationLabelKey[] = [
   'manager.quickLegacyForm',
   'manager.loading',
   'manager.empty',
+  'manager.recipeSectionTitle',
+  'manager.recipeOrBlank',
+  'recipe.createdNotifyTitle',
+  'recipe.createdNotifyDesc',
+  'recipe.updatedNotifyTitle',
+  'recipe.updatedNotifyDesc',
+  'recipe.fieldChangedUpdateTitle',
+  'recipe.fieldChangedUpdateDesc',
   'manager.enabled',
   'manager.disabled',
   'manager.allowedAudiencePrefix',
@@ -540,6 +561,7 @@ export const AUTOMATION_LABEL_KEYS: readonly AutomationLabelKey[] = [
   'status.success',
   'status.failed',
   'status.skipped',
+  'status.outcomeUnknown',
   'status.running',
   'status.resolved',
   'status.queued',
@@ -668,6 +690,10 @@ const LABELS: Record<AutomationLabelKey, { en: string; zh: string }> = {
   'condition.removeConditionTitle': { en: 'Remove condition', zh: '移除条件' },
   'actionConfig.targetSheetId': { en: 'Target sheet ID', zh: '目标工作表 ID' },
   'actionConfig.sheetIdPlaceholder': { en: 'Sheet ID', zh: '工作表 ID' },
+  // G-B2-27: escape hatch next to the target-sheet dropdown — listSheets() may omit
+  // cross-base/future sheets, so typing the ID directly stays available on demand.
+  'actionConfig.targetSheetManualToggle': { en: 'Enter ID manually', zh: '手动输入 ID' },
+  'actionConfig.targetSheetUseListToggle': { en: 'Choose from list', zh: '从列表选择' },
   'actionConfig.fieldIdPlaceholder': { en: 'Field ID', zh: '字段 ID' },
   'actionConfig.url': { en: 'URL', zh: 'URL' },
   'actionConfig.method': { en: 'Method', zh: '方法' },
@@ -749,6 +775,14 @@ const LABELS: Record<AutomationLabelKey, { en: string; zh: string }> = {
   'manager.quickLegacyForm': { en: 'Quick legacy form', zh: '快速旧版表单' },
   'manager.loading': { en: 'Loading automations...', zh: '正在加载自动化...' },
   'manager.empty': { en: 'No automations yet. Create your first automation rule.', zh: '暂无自动化。创建第一条自动化规则。' },
+  'manager.recipeSectionTitle': { en: 'Start from a recipe', zh: '从配方开始' },
+  'manager.recipeOrBlank': { en: 'or start from blank', zh: '或从空白开始' },
+  'recipe.createdNotifyTitle': { en: 'Notify on new record', zh: '新记录时通知' },
+  'recipe.createdNotifyDesc': { en: 'When a record is created, send an in-app notification.', zh: '记录创建时，发送站内通知。' },
+  'recipe.updatedNotifyTitle': { en: 'Notify on record update', zh: '记录更新时通知' },
+  'recipe.updatedNotifyDesc': { en: 'When a record is updated, send an in-app notification.', zh: '记录更新时，发送站内通知。' },
+  'recipe.fieldChangedUpdateTitle': { en: 'Update a field on change', zh: '字段变更时回填' },
+  'recipe.fieldChangedUpdateDesc': { en: 'When a field changes, write a value into another field.', zh: '字段变更时，向另一字段写入值。' },
   'manager.enabled': { en: 'Enabled', zh: '已启用' },
   'manager.disabled': { en: 'Disabled', zh: '已停用' },
   'manager.allowedAudiencePrefix': { en: 'Allowed audience:', zh: '允许范围：' },
@@ -849,6 +883,7 @@ const LABELS: Record<AutomationLabelKey, { en: string; zh: string }> = {
   'status.success': { en: 'success', zh: '成功' },
   'status.failed': { en: 'failed', zh: '失败' },
   'status.skipped': { en: 'skipped', zh: '跳过' },
+  'status.outcomeUnknown': { en: 'outcome unknown', zh: '结果未知' },
   'status.running': { en: 'running', zh: '运行中' },
   'status.resolved': { en: 'resolved', zh: '已完成' },
   'status.queued': { en: 'queued', zh: '排队中' },
@@ -904,6 +939,7 @@ export function automationStatusLabel(status: AutomationStatus | UnknownAutomati
   if (status === 'success') return automationLabel('status.success', isZh)
   if (status === 'failed') return automationLabel('status.failed', isZh)
   if (status === 'skipped') return automationLabel('status.skipped', isZh)
+  if (status === 'outcome_unknown') return automationLabel('status.outcomeUnknown', isZh)
   if (status === 'running') return automationLabel('status.running', isZh)
   if (status === 'resolved') return automationLabel('status.resolved', isZh)
   if (status === 'queued') return automationLabel('status.queued', isZh)

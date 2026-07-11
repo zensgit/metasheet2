@@ -68,6 +68,48 @@ const ROUTES = [
   ['GET', '/api/integration/stock-preparation/sandbox-target/readiness', 'stockPreparationSandboxTargetReadiness'],
   ['POST', '/api/integration/stock-preparation/sandbox-target/ensure', 'stockPreparationSandboxTargetEnsure'],
   ['POST', '/api/integration/stock-preparation/options/sync', 'stockPreparationOptionsSync'],
+  // #3751 MVP: provision the 9 frozen MVP tables (readonly-internal, structure-only, admin-gated).
+  ['GET', '/api/integration/stock-preparation/mvp/readiness', 'stockPreparationMvpReadiness'],
+  ['POST', '/api/integration/stock-preparation/mvp/ensure', 'stockPreparationMvpEnsure'],
+  ['POST', '/api/integration/stock-preparation/mvp/options/sync', 'stockPreparationMvpOptionsSync'],
+  ['POST', '/api/integration/stock-preparation/mvp/sync/plan', 'stockPreparationMvpSyncPlan'],
+  // #3751 MVP: COMMIT a previewed sync-run plan — persist its rows into the 9 internal MVP tables
+  // (internal-only via target-scoped records API, idempotent, immutable, admin-gated, values-free).
+  ['POST', '/api/integration/stock-preparation/mvp/sync/persist', 'stockPreparationMvpSyncPersist'],
+  // #3751 MVP view 2: readonly snapshot-batch LIST + DIFF reads (queryRecords-only, admin-gated,
+  // values-free). List is exact-path; diff carries the batch id in the path.
+  ['GET', '/api/integration/stock-preparation/snapshot-batches', 'stockPreparationSnapshotBatchList'],
+  ['GET', '/api/integration/stock-preparation/snapshot-batches/:snapshotBatchId/diff', 'stockPreparationSnapshotDiff'],
+  // #3751 MVP W3 (diff rows): per-row diffType/changeTypes/reviewStatus browse for view 2 — closed
+  // 11-key projection, optional caller-chosen base pair, optional enum filters, capped fail-closed.
+  ['GET', '/api/integration/stock-preparation/snapshot-batches/:snapshotBatchId/diff/rows', 'stockPreparationSnapshotDiffRows'],
+  // #3751 MVP W3 (confirm reads): values-free confirmation-state summaries + review-queue lists for
+  // FE views 3/4 (queryRecords-only; unit candidates COMPUTED per read, never persisted).
+  ['GET', '/api/integration/stock-preparation/material-mappings/summary', 'stockPreparationMaterialMappingSummary'],
+  ['GET', '/api/integration/stock-preparation/material-mappings/candidates', 'stockPreparationMaterialMappingCandidates'],
+  ['GET', '/api/integration/stock-preparation/unit-conversions/summary', 'stockPreparationUnitConversionSummary'],
+  ['GET', '/api/integration/stock-preparation/unit-conversions/candidates', 'stockPreparationUnitConversionCandidates'],
+  // #3751 MVP W3 (confirm writes): candidate-sync feeds the mapping review queue; confirm/retire are
+  // the human confirmation surface over the two confirmation tables (multitable-internal only,
+  // admin-gated, server-stamped confirmedBy/confirmedAt, values-free).
+  ['POST', '/api/integration/stock-preparation/material-mappings/candidates/sync', 'stockPreparationMaterialMappingCandidatesSync'],
+  ['POST', '/api/integration/stock-preparation/material-mappings/confirm', 'stockPreparationMaterialMappingConfirm'],
+  ['POST', '/api/integration/stock-preparation/material-mappings/retire', 'stockPreparationMaterialMappingRetire'],
+  ['POST', '/api/integration/stock-preparation/unit-conversions/confirm', 'stockPreparationUnitConversionConfirm'],
+  ['POST', '/api/integration/stock-preparation/unit-conversions/retire', 'stockPreparationUnitConversionRetire'],
+  // #3751 MVP W4 (generation runtime): run the landed generation engine over CONFIRMED inputs and
+  // persist draft prep lines + blocking exceptions + a run record (multitable-internal only); human
+  // exception resolution single + bulk (same-reason gate). ready is computed SERVER-SIDE: engine
+  // 'ready' AND zero unresolved blocking exceptions — never frontend-derived.
+  ['POST', '/api/integration/stock-preparation/generation/run', 'stockPreparationGenerationRun'],
+  ['POST', '/api/integration/stock-preparation/exceptions/resolve', 'stockPreparationExceptionResolve'],
+  ['POST', '/api/integration/stock-preparation/exceptions/bulk-resolve', 'stockPreparationExceptionBulkResolve'],
+  // #3751 MVP W5 (queue reads): values-free exception queue (view 6) + prep-line summary (view 5).
+  // Value-bearing detail reads (drawing numbers / quantities / unit symbols) stay OWNER-GATED.
+  ['GET', '/api/integration/stock-preparation/exceptions', 'stockPreparationExceptionList'],
+  ['GET', '/api/integration/stock-preparation/prep-lines', 'stockPreparationPrepLineList'],
+  // #3751 MVP W5b (#3890): values-free audit trail over the stock-prep write surface.
+  ['GET', '/api/integration/stock-preparation/audit', 'stockPreparationAuditList'],
   // FOS-2: generic field-option-sync (preset-driven). Stock-prep route above is a compat alias.
   ['POST', '/api/integration/field-options/sync', 'fieldOptionsSync'],
   ['GET', '/api/integration/templates', 'templatesList'],
@@ -225,6 +267,61 @@ const {
   syncStockPreparationSandboxOptions,
   optionSetsFromInput,
 } = require('./stock-preparation-option-sync.cjs')
+// #3751 MVP: readiness / ensure / option-sync for the 9 frozen MVP tables. Metadata-only,
+// structure-only (rows always []), admin-gated, values-free evidence, no external write.
+const {
+  inspectStockPreparationMvpTargets,
+  ensureStockPreparationMvpTargets,
+  syncStockPreparationMvpOptions,
+} = require('./stock-preparation-mvp-provisioning.cjs')
+// #3751 MVP: readonly BOM-snapshot sync-RUN PLAN orchestrator. Pure/deterministic; composes the landed
+// mapper + diff engines into a values-free plan (batch + lines + run + diff + flags). Persists nothing,
+// admin-gated, no external/PLM/K3 write path.
+const { planBomSnapshotSyncRun } = require('./stock-preparation-sync-run-plan.cjs')
+// #3751 MVP: COMMIT step for a previewed sync-run plan. Recomputes the deterministic plan and persists
+// its batch + line + run rows into the internal MVP tables via a target-scoped records API — the FIRST
+// business-row write. Internal-only (structural), idempotent, immutable, admin-gated, values-free.
+const { persistStockPreparationSyncRun } = require('./stock-preparation-sync-run-persist.cjs')
+// #3751 MVP view 2: READONLY snapshot-batch LIST + DIFF read endpoints. queryRecords-only; admin-gated;
+// values-free; TWO-project split (staging locator via resolveIntegrationStagingProjectId vs business
+// project row filter). Persists nothing, no external / PLM / K3 write path.
+const {
+  listSnapshotBatches,
+  getSnapshotDiff,
+  listSnapshotDiffRows,
+} = require('./stock-preparation-snapshot-reads.cjs')
+// #3751 MVP W3 (diff rows): route-level enum gates for the diff-row filters come from the SAME frozen
+// vocabularies the engine exports (never re-typed literals).
+const { DIFF_TYPES: STOCK_PREPARATION_DIFF_TYPES, REVIEW_STATUSES: STOCK_PREPARATION_REVIEW_STATUSES } = require('./stock-preparation-snapshot-diff.cjs')
+// #3751 MVP W3: HUMAN CONFIRM writes for the material-mapping / unit-conversion-rule tables (plus the
+// candidate-sync that feeds the review queue). Multitable-internal only (target-scoped records API
+// over the frozen MVP sheets under the STAGING project); confirmedBy is the route user identity and
+// confirmedAt is stamped in the module — the request body can carry NEITHER (closed allowlists).
+const {
+  syncMaterialMappingCandidates,
+  confirmMaterialMapping,
+  retireMaterialMapping,
+  confirmUnitConversionRule,
+  retireUnitConversionRule,
+} = require('./stock-preparation-confirm-writes.cjs')
+// #3751 MVP W3: READONLY confirmation-state reads for FE views 3/4 (summaries + review queues;
+// queryRecords-only; unit candidates computed per read; values-free rows).
+const {
+  getMaterialMappingSummary,
+  listMaterialMappingCandidates,
+  getUnitConversionSummary,
+  listUnitConversionCandidates,
+  listStockPreparationExceptions,
+  listStockPreparationPrepLines,
+} = require('./stock-preparation-confirm-reads.cjs')
+// #3751 MVP W4: generation run + human exception resolution. resolvedBy is the route user identity;
+// resolvedAt is stamped in the module — the body can carry neither (closed allowlists).
+const {
+  runStockPreparationGeneration,
+  resolveStockPreparationException,
+  bulkResolveStockPreparationExceptions,
+} = require('./stock-preparation-generation-runtime.cjs')
+const { MATCH_STATUSES: STOCK_PREPARATION_MATCH_STATUSES } = require('./stock-preparation-material-match.cjs')
 // FOS-4: canonical stock-prep objectId — readiness is bound per TARGET, so any preset targeting this
 // table (v1 replace + the disable-missing prove-the-path preset) reuses the canonical readiness check.
 const { STOCK_PREPARATION_MAIN_TABLE_TEMPLATE } = require('./stock-preparation-templates.cjs')
@@ -515,6 +612,172 @@ const VALID_STOCK_PREPARATION_OPTION_SYNC_REQUEST_KEYS = new Set([
   'optionSources',
   'configInfo',
 ])
+// #3751 MVP: closed allowlists for the MVP readiness/ensure + option-sync routes. `objectIds`
+// (optional) scopes to a subset of the 9 frozen MVP tables; never a sheetId / credentials.
+const VALID_STOCK_PREPARATION_MVP_TARGET_REQUEST_KEYS = new Set([
+  'tenantId',
+  'workspaceId',
+  'projectId',
+  'baseId',
+  'objectIds',
+])
+const VALID_STOCK_PREPARATION_MVP_OPTION_SYNC_REQUEST_KEYS = new Set([
+  'tenantId',
+  'workspaceId',
+  'projectId',
+  'objectIds',
+  'optionSets',
+  'optionSources',
+  'configInfo',
+])
+// #3751 MVP: closed allowlist for the readonly sync-RUN PLAN route. Carries the readonly plan inputs
+// only — an already-produced expansion result + optional prior batch/lines + plan ids/version/source.
+// NEVER a credential, sheetId, or SQL. `projectId` here is the PLM business project id (preserved
+// verbatim into the plan row), not a workspace sheet id.
+const VALID_STOCK_PREPARATION_MVP_SYNC_PLAN_REQUEST_KEYS = new Set([
+  'projectId',
+  'syncRunId',
+  'snapshotBatchId',
+  'snapshotVersion',
+  'sourceSystem',
+  'expansionResult',
+  'previousSnapshotBatchId',
+  'previousLines',
+  'readPlan',
+  'defaultDesignUnit',
+])
+// #3751 MVP view 2: closed query allowlist for the readonly snapshot-batch LIST + DIFF reads. Only the
+// tenant/workspace scope + the (business) projectId; the batch id rides the DIFF route PATH, never the
+// query. Never a sheetId / credential / SQL.
+const VALID_STOCK_PREPARATION_SNAPSHOT_READ_QUERY_KEYS = new Set([
+  'tenantId',
+  'workspaceId',
+  'projectId',
+])
+// #3751 MVP W3: the DIFF route additionally accepts a caller-chosen base batch id; the DIFF/ROWS
+// route adds the two enum filters. Separate Sets per route — extending DIFF must not widen LIST.
+const VALID_STOCK_PREPARATION_SNAPSHOT_DIFF_QUERY_KEYS = new Set([
+  'tenantId',
+  'workspaceId',
+  'projectId',
+  'baseSnapshotBatchId',
+])
+const VALID_STOCK_PREPARATION_SNAPSHOT_DIFF_ROWS_QUERY_KEYS = new Set([
+  'tenantId',
+  'workspaceId',
+  'projectId',
+  'baseSnapshotBatchId',
+  'reviewStatus',
+  'diffType',
+])
+// #3751 MVP W3 (confirm reads): closed query allowlists — one Set per route.
+const VALID_STOCK_PREPARATION_MAPPING_SUMMARY_QUERY_KEYS = new Set([
+  'tenantId',
+  'workspaceId',
+  'projectId',
+])
+const VALID_STOCK_PREPARATION_MAPPING_CANDIDATES_QUERY_KEYS = new Set([
+  'tenantId',
+  'workspaceId',
+  'projectId',
+  'matchStatus',
+])
+const VALID_STOCK_PREPARATION_UNIT_SUMMARY_QUERY_KEYS = new Set([
+  'tenantId',
+  'workspaceId',
+  'projectId',
+])
+const VALID_STOCK_PREPARATION_UNIT_CANDIDATES_QUERY_KEYS = new Set([
+  'tenantId',
+  'workspaceId',
+  'projectId',
+  'snapshotBatchId',
+])
+// #3751 MVP W3: closed request allowlists for the confirm-write routes — one Set per route (no
+// sharing that would widen a sibling parser). The confirmation stamps (confirmedBy / confirmedAt)
+// are DELIBERATELY absent from every list: they are server-derived (route user identity + module
+// stamp time), so a body that supplies either is rejected as an unknown field.
+const VALID_STOCK_PREPARATION_MAPPING_CANDIDATES_SYNC_REQUEST_KEYS = new Set([
+  'tenantId',
+  'workspaceId',
+  'projectId',
+  'snapshotBatchId',
+  'defaultVersionPolicy',
+])
+const VALID_STOCK_PREPARATION_MAPPING_CONFIRM_REQUEST_KEYS = new Set([
+  'tenantId',
+  'workspaceId',
+  'projectId',
+  'mappingId',
+  'mapping',
+  'notes',
+])
+const VALID_STOCK_PREPARATION_MAPPING_RETIRE_REQUEST_KEYS = new Set([
+  'tenantId',
+  'workspaceId',
+  'projectId',
+  'mappingId',
+])
+const VALID_STOCK_PREPARATION_UNIT_CONFIRM_REQUEST_KEYS = new Set([
+  'tenantId',
+  'workspaceId',
+  'projectId',
+  'conversionRuleId',
+  'contextFingerprint',
+  'snapshotBatchId',
+  'rule',
+])
+const VALID_STOCK_PREPARATION_UNIT_RETIRE_REQUEST_KEYS = new Set([
+  'tenantId',
+  'workspaceId',
+  'projectId',
+  'conversionRuleId',
+])
+// #3751 MVP W4: closed allowlists for the generation/exception routes. The resolution stamps
+// (resolvedBy / resolvedAt) are DELIBERATELY absent — server-derived, body-supplied => 400.
+const VALID_STOCK_PREPARATION_GENERATION_RUN_REQUEST_KEYS = new Set([
+  'tenantId',
+  'workspaceId',
+  'projectId',
+  'snapshotBatchId',
+])
+const VALID_STOCK_PREPARATION_EXCEPTION_RESOLVE_REQUEST_KEYS = new Set([
+  'tenantId',
+  'workspaceId',
+  'projectId',
+  'exceptionId',
+  'resolutionAction',
+])
+const VALID_STOCK_PREPARATION_EXCEPTION_BULK_RESOLVE_REQUEST_KEYS = new Set([
+  'tenantId',
+  'workspaceId',
+  'projectId',
+  'exceptionIds',
+  'resolutionAction',
+])
+const VALID_STOCK_PREPARATION_EXCEPTION_LIST_QUERY_KEYS = new Set([
+  'tenantId',
+  'workspaceId',
+  'projectId',
+  'snapshotBatchId',
+  'status',
+  'exceptionType',
+  'severity',
+])
+const VALID_STOCK_PREPARATION_AUDIT_LIST_QUERY_KEYS = new Set([
+  'tenantId',
+  'workspaceId',
+  'projectId',
+  'action',
+  'limit',
+])
+const VALID_STOCK_PREPARATION_PREP_LINE_LIST_QUERY_KEYS = new Set([
+  'tenantId',
+  'workspaceId',
+  'projectId',
+  'snapshotBatchId',
+  'prepStatus',
+])
 // FOS-2: generic field-option-sync request — closed allowlist. Operator names a preset (FOS-1
 // catalog) + supplies option sets keyed by the preset's source keys. No sheetId / credentials.
 const VALID_FIELD_OPTION_SYNC_REQUEST_KEYS = new Set([
@@ -748,6 +1011,246 @@ function stockPreparationOptionSyncInput(req, rawInput = {}) {
     projectId,
     optionSets: input.optionSets,
   }
+}
+
+// #3751 MVP: `objectIds` may arrive as a JSON array (POST body) or a
+// comma-separated query string (GET). Collapse to a trimmed string[] or
+// undefined (undefined => all 9 MVP tables). The module validates membership.
+function normalizeRequestedMvpObjectIds(raw) {
+  if (raw === undefined || raw === null) return undefined
+  const list = Array.isArray(raw) ? raw : typeof raw === 'string' ? raw.split(',') : [raw]
+  const cleaned = []
+  for (const value of list) {
+    const objectId = firstString(value)
+    if (objectId) cleaned.push(objectId)
+  }
+  return cleaned.length ? cleaned : undefined
+}
+
+function normalizeStockPreparationMvpTargetRequest(input = {}) {
+  if (!isPlainObject(input)) {
+    throw new HttpRouteError(400, 'STOCK_PREPARATION_MVP_TARGET_REQUEST_INVALID', 'request must be an object')
+  }
+  for (const key of Object.keys(input)) {
+    if (!VALID_STOCK_PREPARATION_MVP_TARGET_REQUEST_KEYS.has(key)) {
+      throw new HttpRouteError(400, 'STOCK_PREPARATION_MVP_TARGET_REQUEST_INVALID', `unsupported request field: ${key}`, { field: key })
+    }
+  }
+  return {
+    tenantId: firstString(input.tenantId),
+    workspaceId: firstString(input.workspaceId),
+    projectId: firstString(input.projectId),
+    baseId: firstString(input.baseId),
+    objectIds: normalizeRequestedMvpObjectIds(input.objectIds),
+  }
+}
+
+function stockPreparationMvpTargetInput(req, rawInput = {}) {
+  const input = normalizeStockPreparationMvpTargetRequest(rawInput)
+  const tenantId = resolveTenantId(req, input)
+  const projectId = resolveIntegrationStagingProjectId(tenantId, input.projectId)
+  return {
+    tenantId,
+    workspaceId: input.workspaceId,
+    projectId,
+    baseId: input.baseId,
+    objectIds: input.objectIds,
+  }
+}
+
+function normalizeStockPreparationMvpOptionSyncRequest(input = {}) {
+  if (!isPlainObject(input)) {
+    throw new HttpRouteError(400, 'STOCK_PREPARATION_MVP_OPTION_SYNC_REQUEST_INVALID', 'request must be an object')
+  }
+  for (const key of Object.keys(input)) {
+    if (!VALID_STOCK_PREPARATION_MVP_OPTION_SYNC_REQUEST_KEYS.has(key)) {
+      throw new HttpRouteError(400, 'STOCK_PREPARATION_MVP_OPTION_SYNC_REQUEST_INVALID', `unsupported request field: ${key}`, { field: key })
+    }
+  }
+  return {
+    tenantId: firstString(input.tenantId),
+    workspaceId: firstString(input.workspaceId),
+    projectId: firstString(input.projectId),
+    objectIds: normalizeRequestedMvpObjectIds(input.objectIds),
+    optionSets: optionSetAliasValue(input, 'STOCK_PREPARATION_MVP_OPTION_SYNC_REQUEST_INVALID'),
+  }
+}
+
+function stockPreparationMvpOptionSyncInput(req, rawInput = {}) {
+  const input = normalizeStockPreparationMvpOptionSyncRequest(rawInput)
+  const tenantId = resolveTenantId(req, input)
+  const projectId = resolveIntegrationStagingProjectId(tenantId, input.projectId)
+  return {
+    tenantId,
+    workspaceId: input.workspaceId,
+    projectId,
+    objectIds: input.objectIds,
+    optionSets: input.optionSets,
+  }
+}
+
+// #3751 MVP: parse the readonly sync-RUN PLAN body against a CLOSED allowlist. Deep validation of the
+// plan inputs lives in the orchestrator; this only rejects unknown fields and passes the readonly plan
+// inputs through. `projectId` is NOT rewritten to a staging sheet id — it is the PLM business project
+// id and must reach the plan row verbatim.
+function stockPreparationMvpSyncPlanInput(rawInput = {}) {
+  if (!isPlainObject(rawInput)) {
+    throw new HttpRouteError(400, 'STOCK_PREPARATION_MVP_SYNC_PLAN_REQUEST_INVALID', 'request must be an object')
+  }
+  for (const key of Object.keys(rawInput)) {
+    if (!VALID_STOCK_PREPARATION_MVP_SYNC_PLAN_REQUEST_KEYS.has(key)) {
+      throw new HttpRouteError(400, 'STOCK_PREPARATION_MVP_SYNC_PLAN_REQUEST_INVALID', `unsupported request field: ${key}`, { field: key })
+    }
+  }
+  return {
+    projectId: rawInput.projectId,
+    syncRunId: rawInput.syncRunId,
+    snapshotBatchId: rawInput.snapshotBatchId,
+    snapshotVersion: rawInput.snapshotVersion,
+    sourceSystem: rawInput.sourceSystem,
+    expansionResult: rawInput.expansionResult,
+    previousSnapshotBatchId: rawInput.previousSnapshotBatchId,
+    previousLines: rawInput.previousLines,
+    readPlan: rawInput.readPlan,
+    defaultDesignUnit: rawInput.defaultDesignUnit,
+  }
+}
+
+// #3751 MVP: the COMMIT request allowlist is IDENTICAL to the sync-plan allowlist (same body the admin
+// previewed with /plan is replayed to /persist). Reuse the frozen key set; a persist-specific error code.
+function stockPreparationMvpSyncPersistInput(rawInput = {}) {
+  if (!isPlainObject(rawInput)) {
+    throw new HttpRouteError(400, 'STOCK_PREPARATION_MVP_SYNC_PERSIST_REQUEST_INVALID', 'request must be an object')
+  }
+  for (const key of Object.keys(rawInput)) {
+    if (!VALID_STOCK_PREPARATION_MVP_SYNC_PLAN_REQUEST_KEYS.has(key)) {
+      throw new HttpRouteError(400, 'STOCK_PREPARATION_MVP_SYNC_PERSIST_REQUEST_INVALID', `unsupported request field: ${key}`, { field: key })
+    }
+  }
+  return {
+    projectId: rawInput.projectId,
+    syncRunId: rawInput.syncRunId,
+    snapshotBatchId: rawInput.snapshotBatchId,
+    snapshotVersion: rawInput.snapshotVersion,
+    sourceSystem: rawInput.sourceSystem,
+    expansionResult: rawInput.expansionResult,
+    previousSnapshotBatchId: rawInput.previousSnapshotBatchId,
+    previousLines: rawInput.previousLines,
+    readPlan: rawInput.readPlan,
+    defaultDesignUnit: rawInput.defaultDesignUnit,
+  }
+}
+
+// #3751 MVP view 2: parse the readonly snapshot-read query against the CLOSED allowlist. Rejects any
+// unknown query field; returns only the tenant/workspace scope + the raw (business) projectId.
+function normalizeStockPreparationSnapshotReadQuery(input = {}, code, allowedKeys = VALID_STOCK_PREPARATION_SNAPSHOT_READ_QUERY_KEYS) {
+  if (!isPlainObject(input)) {
+    throw new HttpRouteError(400, code, 'request must be an object')
+  }
+  for (const key of Object.keys(input)) {
+    if (!allowedKeys.has(key)) {
+      throw new HttpRouteError(400, code, `unsupported request field: ${key}`, { field: key })
+    }
+  }
+  const out = {}
+  for (const key of allowedKeys) {
+    out[key] = firstString(input[key])
+  }
+  return out
+}
+
+// LIST: `projectId` is the PLM business project (REQUIRED — it filters + is echoed). `targetProjectId`
+// is the STAGING locator the MVP tables were provisioned under, derived from the auth tenant (never
+// request-sourced) via the same resolveIntegrationStagingProjectId the ensure/readiness routes use.
+function stockPreparationSnapshotBatchListInput(req, rawQuery = {}) {
+  const input = normalizeStockPreparationSnapshotReadQuery(rawQuery, 'STOCK_PREPARATION_SNAPSHOT_BATCH_LIST_REQUEST_INVALID')
+  const tenantId = resolveTenantId(req, input)
+  const businessProjectId = input.projectId
+  if (!businessProjectId) {
+    throw new HttpRouteError(400, 'STOCK_PREPARATION_SNAPSHOT_BATCH_LIST_REQUEST_INVALID', 'projectId is required', { field: 'projectId' })
+  }
+  return {
+    tenantId,
+    workspaceId: input.workspaceId,
+    businessProjectId,
+    targetProjectId: resolveIntegrationStagingProjectId(tenantId, businessProjectId),
+  }
+}
+
+// DIFF: the batch id rides the PATH. `projectId` query is OPTIONAL (the FE diff call sends none — the
+// business project is read from the batch row server-side); `targetProjectId` is the STAGING locator
+// derived from the auth tenant.
+function stockPreparationSnapshotDiffInput(req, rawQuery = {}) {
+  const input = normalizeStockPreparationSnapshotReadQuery(rawQuery, 'STOCK_PREPARATION_SNAPSHOT_DIFF_REQUEST_INVALID', VALID_STOCK_PREPARATION_SNAPSHOT_DIFF_QUERY_KEYS)
+  const tenantId = resolveTenantId(req, input)
+  const snapshotBatchId = firstString(requestParams(req).snapshotBatchId)
+  if (!snapshotBatchId) {
+    throw new HttpRouteError(400, 'STOCK_PREPARATION_SNAPSHOT_DIFF_REQUEST_INVALID', 'snapshotBatchId is required', { field: 'snapshotBatchId' })
+  }
+  return {
+    tenantId,
+    workspaceId: input.workspaceId,
+    businessProjectId: input.projectId,
+    snapshotBatchId,
+    baseSnapshotBatchId: input.baseSnapshotBatchId,
+    targetProjectId: resolveIntegrationStagingProjectId(tenantId, input.projectId),
+  }
+}
+
+// #3751 MVP W3: diff/rows query — DIFF keys + the two ENUM filters, gated against the engine's frozen
+// vocabularies at the route (values-free 400 with the field name only).
+function stockPreparationSnapshotDiffRowsInput(req, rawQuery = {}) {
+  const input = normalizeStockPreparationSnapshotReadQuery(rawQuery, 'STOCK_PREPARATION_SNAPSHOT_DIFF_ROWS_REQUEST_INVALID', VALID_STOCK_PREPARATION_SNAPSHOT_DIFF_ROWS_QUERY_KEYS)
+  const tenantId = resolveTenantId(req, input)
+  const snapshotBatchId = firstString(requestParams(req).snapshotBatchId)
+  if (!snapshotBatchId) {
+    throw new HttpRouteError(400, 'STOCK_PREPARATION_SNAPSHOT_DIFF_ROWS_REQUEST_INVALID', 'snapshotBatchId is required', { field: 'snapshotBatchId' })
+  }
+  if (input.reviewStatus && !Object.values(STOCK_PREPARATION_REVIEW_STATUSES).includes(input.reviewStatus)) {
+    throw new HttpRouteError(400, 'STOCK_PREPARATION_SNAPSHOT_DIFF_ROWS_REQUEST_INVALID', 'reviewStatus must be one of the review-status vocabulary', { field: 'reviewStatus' })
+  }
+  if (input.diffType && !Object.values(STOCK_PREPARATION_DIFF_TYPES).includes(input.diffType)) {
+    throw new HttpRouteError(400, 'STOCK_PREPARATION_SNAPSHOT_DIFF_ROWS_REQUEST_INVALID', 'diffType must be one of the diff-type vocabulary', { field: 'diffType' })
+  }
+  return {
+    tenantId,
+    workspaceId: input.workspaceId,
+    businessProjectId: input.projectId,
+    snapshotBatchId,
+    baseSnapshotBatchId: input.baseSnapshotBatchId,
+    reviewStatus: input.reviewStatus,
+    diffType: input.diffType,
+    targetProjectId: resolveIntegrationStagingProjectId(tenantId, input.projectId),
+  }
+}
+
+// #3751 MVP W3 (confirm reads): shared parse for the four read routes. `projectId` is REQUIRED on
+// every one (FE always sends it; #4002-LIST parity) even where the table is tenant-scoped.
+function stockPreparationConfirmReadInput(req, rawQuery, allowedKeys, code) {
+  const input = normalizeStockPreparationSnapshotReadQuery(rawQuery, code, allowedKeys)
+  const tenantId = resolveTenantId(req, input)
+  if (!input.projectId) {
+    throw new HttpRouteError(400, code, 'projectId is required', { field: 'projectId' })
+  }
+  return {
+    ...input,
+    tenantId,
+    targetProjectId: resolveIntegrationStagingProjectId(tenantId, input.projectId),
+  }
+}
+
+// #3751 MVP W3: parse a confirm-write body against ITS route's closed allowlist. Unknown fields
+// (including body-supplied confirmedBy / confirmedAt) are rejected with the field NAME only.
+function normalizeStockPreparationConfirmBody(input, allowedKeys, code) {
+  if (!isPlainObject(input)) {
+    throw new HttpRouteError(400, code, 'request must be an object')
+  }
+  for (const key of Object.keys(input)) {
+    if (!allowedKeys.has(key)) {
+      throw new HttpRouteError(400, code, `unsupported request field: ${key}`, { field: key })
+    }
+  }
+  return input
 }
 
 function normalizeFieldOptionSyncRequest(input = {}) {
@@ -1585,6 +2088,16 @@ function createHandlers(services, options = {}) {
   }
 
   const externalSystems = requireService('externalSystemRegistry', ['upsertExternalSystem', 'getExternalSystem', 'deleteExternalSystem', 'listExternalSystems'])
+  // W5b (#3890): the stock-prep audit store is OPTIONAL at registration (environments without the
+  // SQL db can still register read routes), but every stock-prep WRITE op fails closed without it —
+  // an unaudited confirm/generation/resolve is refused, not silently allowed.
+  const stockPreparationAudit = services.stockPreparationAuditStore || null
+  function requireStockPreparationAudit() {
+    if (!stockPreparationAudit || typeof stockPreparationAudit.append !== 'function') {
+      throw new HttpRouteError(501, 'AUDIT_STORE_UNAVAILABLE', 'stock-preparation audit store is not available; writes are refused without an audit trail')
+    }
+    return stockPreparationAudit
+  }
   const adapterRegistry = requireService('adapterRegistry', ['createAdapter', 'listAdapterKinds'])
   const pipelineRegistry = requireService('pipelineRegistry', ['upsertPipeline', 'getPipeline', 'listPipelines', 'listPipelineRuns'])
   const runner = requireService('pipelineRunner', ['runPipeline'])
@@ -1610,6 +2123,19 @@ function createHandlers(services, options = {}) {
       throw new HttpRouteError(501, 'TABLE_ACTION_RECORDS_API_UNAVAILABLE', 'multitable records API is not available')
     }
     return records
+  }
+
+  // #3751 MVP: multitable provisioning accessor for the sync-run PERSIST route (findObjectSheet resolves
+  // each MVP objectId -> sheetId). Same dep the MVP readiness/ensure paths use (context.api.multitable
+  // .provisioning); we only need findObjectSheet here (persist never creates a sheet).
+  function getMultitableProvisioning() {
+    const provisioning = context && context.api && context.api.multitable && context.api.multitable.provisioning
+    if (!provisioning || typeof provisioning.findObjectSheet !== 'function') {
+      throw new HttpRouteError(503, 'STOCK_PREPARATION_MVP_PROVISIONING_API_UNAVAILABLE', 'multitable provisioning API is not available', {
+        requiredMethods: ['findObjectSheet'],
+      })
+    }
+    return provisioning
   }
 
   // FOS-2: scoped multitable provisioning API for the generic field-option-sync route. Same dep the
@@ -2897,6 +3423,586 @@ function createHandlers(services, options = {}) {
         projectId: input.projectId,
         permission: 'admin',
         optionSets: input.optionSets,
+      })
+      return sendOk(res, result)
+    },
+
+    // #3751 MVP: readiness of the 9 frozen MVP tables (or the objectIds subset). Admin-gated;
+    // metadata-only inspection; values-free evidence. Delegates to the MVP provisioning module.
+    async stockPreparationMvpReadiness(req, res) {
+      requireAccess(req, 'admin')
+      const input = stockPreparationMvpTargetInput(req, requestQuery(req))
+      const result = await inspectStockPreparationMvpTargets({
+        context,
+        projectId: input.projectId,
+        permission: 'admin',
+        objectIds: input.objectIds,
+      })
+      return sendOk(res, result)
+    },
+
+    // #3751 MVP: ensure (create) the MVP tables as MetaSheet-internal structure-only tables
+    // (rows always []). No external/PLM/K3 write. 201 when any table was created, else 200.
+    async stockPreparationMvpEnsure(req, res) {
+      requireAccess(req, 'admin')
+      const input = stockPreparationMvpTargetInput(req, requestBody(req))
+      const result = await ensureStockPreparationMvpTargets({
+        context,
+        projectId: input.projectId,
+        baseId: input.baseId,
+        permission: 'admin',
+        objectIds: input.objectIds,
+      })
+      const created = result.tables.some((table) => table.created)
+      return sendOk(res, result, created ? 201 : 200)
+    },
+
+    // #3751 MVP: sync caller-supplied option sets onto the MVP tables' select fields (field
+    // metadata only). Values-free evidence; a table with no option fields is a no-op.
+    async stockPreparationMvpOptionsSync(req, res) {
+      requireAccess(req, 'admin')
+      const input = stockPreparationMvpOptionSyncInput(req, requestBody(req))
+      const result = await syncStockPreparationMvpOptions({
+        context,
+        projectId: input.projectId,
+        permission: 'admin',
+        objectIds: input.objectIds,
+        optionSets: input.optionSets,
+      })
+      return sendOk(res, result)
+    },
+
+    // #3751 MVP: readonly BOM-snapshot sync-RUN PLAN. Admin-gated; composes the landed mapper + diff
+    // engines into a values-free plan (batch + lines + run + diff + flags) from an already-produced
+    // expansion result + optional prior batch. Persists NOTHING and touches NO records / write API —
+    // structurally read-only. Returns 200 with the computed plan + values-free evidence.
+    async stockPreparationMvpSyncPlan(req, res) {
+      requireAccess(req, 'admin')
+      const input = stockPreparationMvpSyncPlanInput(requestBody(req))
+      const result = planBomSnapshotSyncRun({
+        permission: 'admin',
+        projectId: input.projectId,
+        syncRunId: input.syncRunId,
+        snapshotBatchId: input.snapshotBatchId,
+        snapshotVersion: input.snapshotVersion,
+        sourceSystem: input.sourceSystem,
+        expansionResult: input.expansionResult,
+        previousSnapshotBatchId: input.previousSnapshotBatchId,
+        previousLines: input.previousLines,
+        readPlan: input.readPlan,
+        defaultDesignUnit: input.defaultDesignUnit,
+      })
+      return sendOk(res, result)
+    },
+
+    // #3751 MVP: COMMIT a previewed BOM-snapshot sync-run PLAN — the FIRST slice that writes business
+    // rows. Admin-gated; recomputes the SAME deterministic plan the admin previewed with /plan, then
+    // persists the batch + line + run rows into the internal MVP tables through a TARGET-SCOPED records
+    // API (createTargetScopedRecordsApi) bound to each resolved MVP sheet, so a write can never leave an
+    // MVP sheet. Idempotent (an existing snapshotBatchId skips the whole commit) + immutable (createRecord
+    // only; old snapshots are never overwritten). Values-free evidence. 201 when it actually created,
+    // else 200 (skipped an already-persisted batch).
+    async stockPreparationMvpSyncPersist(req, res) {
+      requireAccess(req, 'admin')
+      const input = stockPreparationMvpSyncPersistInput(requestBody(req))
+      // The MVP tables were provisioned under the INTERNAL staging project (the same derivation the
+      // readiness/ensure routes use); the business `projectId` stays on the plan rows. Derive the staging
+      // targetProjectId server-side from the auth tenant — never from the request body.
+      const tenantId = resolveTenantId(req, input)
+      const targetProjectId = resolveIntegrationStagingProjectId(tenantId, input.projectId)
+      const result = await persistStockPreparationSyncRun({
+        context,
+        permission: 'admin',
+        recordsApi: getMultitableRecordsApi(),
+        provisioning: getMultitableProvisioning(),
+        targetProjectId,
+        projectId: input.projectId,
+        syncRunId: input.syncRunId,
+        snapshotBatchId: input.snapshotBatchId,
+        snapshotVersion: input.snapshotVersion,
+        sourceSystem: input.sourceSystem,
+        expansionResult: input.expansionResult,
+        previousSnapshotBatchId: input.previousSnapshotBatchId,
+        previousLines: input.previousLines,
+        readPlan: input.readPlan,
+        defaultDesignUnit: input.defaultDesignUnit,
+      })
+      return sendOk(res, result, result.persisted ? 201 : 200)
+    },
+
+    // #3751 MVP view 2: readonly LIST of the immutable BOM snapshot batches for a business project.
+    // Admin-gated; queryRecords-only (never a write); values-free. Uses the TWO-project split:
+    // findObjectSheet under the STAGING targetProjectId, row filter by the business projectId.
+    async stockPreparationSnapshotBatchList(req, res) {
+      requireAccess(req, 'admin')
+      const input = stockPreparationSnapshotBatchListInput(req, requestQuery(req))
+      const provisioning = context && context.api && context.api.multitable
+        ? context.api.multitable.provisioning
+        : undefined
+      if (!provisioning) {
+        throw new HttpRouteError(501, 'SNAPSHOT_READS_PROVISIONING_API_UNAVAILABLE', 'multitable provisioning API is not available')
+      }
+      const result = await listSnapshotBatches({
+        recordsApi: getMultitableRecordsApi(),
+        provisioning,
+        targetProjectId: input.targetProjectId,
+        businessProjectId: input.businessProjectId,
+        permission: 'admin',
+      })
+      return sendOk(res, result)
+    },
+
+    // #3751 MVP view 2: readonly values-free DIFF of a snapshot batch vs its immutable predecessor.
+    // Admin-gated; queryRecords-only; the batch id comes from the PATH. Predecessor + business project
+    // are derived from the batch row; sheets located under the STAGING targetProjectId.
+    async stockPreparationSnapshotDiff(req, res) {
+      requireAccess(req, 'admin')
+      const input = stockPreparationSnapshotDiffInput(req, requestQuery(req))
+      const provisioning = context && context.api && context.api.multitable
+        ? context.api.multitable.provisioning
+        : undefined
+      if (!provisioning) {
+        throw new HttpRouteError(501, 'SNAPSHOT_READS_PROVISIONING_API_UNAVAILABLE', 'multitable provisioning API is not available')
+      }
+      const result = await getSnapshotDiff({
+        recordsApi: getMultitableRecordsApi(),
+        provisioning,
+        targetProjectId: input.targetProjectId,
+        businessProjectId: input.businessProjectId,
+        snapshotBatchId: input.snapshotBatchId,
+        baseSnapshotBatchId: input.baseSnapshotBatchId,
+        permission: 'admin',
+      })
+      return sendOk(res, result)
+    },
+
+    // #3751 MVP W3: values-free PER-ROW diff browse (view 2 rows: diffType / changeTypes /
+    // reviewStatus per row). Same read flow + base semantics as the counts diff; closed 11-key
+    // projection; optional enum filters; capped fail-closed.
+    async stockPreparationSnapshotDiffRows(req, res) {
+      requireAccess(req, 'admin')
+      const input = stockPreparationSnapshotDiffRowsInput(req, requestQuery(req))
+      const provisioning = context && context.api && context.api.multitable
+        ? context.api.multitable.provisioning
+        : undefined
+      if (!provisioning) {
+        throw new HttpRouteError(501, 'SNAPSHOT_READS_PROVISIONING_API_UNAVAILABLE', 'multitable provisioning API is not available')
+      }
+      const result = await listSnapshotDiffRows({
+        recordsApi: getMultitableRecordsApi(),
+        provisioning,
+        targetProjectId: input.targetProjectId,
+        businessProjectId: input.businessProjectId,
+        snapshotBatchId: input.snapshotBatchId,
+        baseSnapshotBatchId: input.baseSnapshotBatchId,
+        reviewStatus: input.reviewStatus,
+        diffType: input.diffType,
+        permission: 'admin',
+      })
+      return sendOk(res, result)
+    },
+
+    // #3751 MVP W3: values-free material-mapping confirmation summary (FE view 3 header).
+    async stockPreparationMaterialMappingSummary(req, res) {
+      requireAccess(req, 'admin')
+      const input = stockPreparationConfirmReadInput(req, requestQuery(req), VALID_STOCK_PREPARATION_MAPPING_SUMMARY_QUERY_KEYS, 'STOCK_PREPARATION_MAPPING_SUMMARY_REQUEST_INVALID')
+      const provisioning = context && context.api && context.api.multitable
+        ? context.api.multitable.provisioning
+        : undefined
+      if (!provisioning) {
+        throw new HttpRouteError(501, 'CONFIRM_READS_PROVISIONING_API_UNAVAILABLE', 'multitable provisioning API is not available')
+      }
+      const result = await getMaterialMappingSummary({
+        recordsApi: getMultitableRecordsApi(),
+        provisioning,
+        targetProjectId: input.targetProjectId,
+        permission: 'admin',
+      })
+      return sendOk(res, result)
+    },
+
+    // #3751 MVP W3: values-free mapping review queue (handle + enums + booleans + confidence only).
+    async stockPreparationMaterialMappingCandidates(req, res) {
+      requireAccess(req, 'admin')
+      const input = stockPreparationConfirmReadInput(req, requestQuery(req), VALID_STOCK_PREPARATION_MAPPING_CANDIDATES_QUERY_KEYS, 'STOCK_PREPARATION_MAPPING_CANDIDATES_REQUEST_INVALID')
+      if (input.matchStatus && !Object.values(STOCK_PREPARATION_MATCH_STATUSES).includes(input.matchStatus)) {
+        throw new HttpRouteError(400, 'STOCK_PREPARATION_MAPPING_CANDIDATES_REQUEST_INVALID', 'matchStatus must be one of the match-status vocabulary', { field: 'matchStatus' })
+      }
+      const provisioning = context && context.api && context.api.multitable
+        ? context.api.multitable.provisioning
+        : undefined
+      if (!provisioning) {
+        throw new HttpRouteError(501, 'CONFIRM_READS_PROVISIONING_API_UNAVAILABLE', 'multitable provisioning API is not available')
+      }
+      const result = await listMaterialMappingCandidates({
+        recordsApi: getMultitableRecordsApi(),
+        provisioning,
+        targetProjectId: input.targetProjectId,
+        matchStatus: input.matchStatus,
+        permission: 'admin',
+      })
+      return sendOk(res, result)
+    },
+
+    // #3751 MVP W3: values-free unit-conversion confirmation summary (FE view 4 header). The pending
+    // unit-line count is COMPUTED over the latest complete batch of the business project.
+    async stockPreparationUnitConversionSummary(req, res) {
+      requireAccess(req, 'admin')
+      const input = stockPreparationConfirmReadInput(req, requestQuery(req), VALID_STOCK_PREPARATION_UNIT_SUMMARY_QUERY_KEYS, 'STOCK_PREPARATION_UNIT_SUMMARY_REQUEST_INVALID')
+      const provisioning = context && context.api && context.api.multitable
+        ? context.api.multitable.provisioning
+        : undefined
+      if (!provisioning) {
+        throw new HttpRouteError(501, 'CONFIRM_READS_PROVISIONING_API_UNAVAILABLE', 'multitable provisioning API is not available')
+      }
+      const result = await getUnitConversionSummary({
+        recordsApi: getMultitableRecordsApi(),
+        provisioning,
+        targetProjectId: input.targetProjectId,
+        projectId: input.projectId,
+        permission: 'admin',
+      })
+      return sendOk(res, result)
+    },
+
+    // #3751 MVP W3: COMPUTED unit-rule candidate list (values stripped — only hasCandidate crosses;
+    // a candidate is confirmable via the unit-conversions/confirm fingerprint mode).
+    async stockPreparationUnitConversionCandidates(req, res) {
+      requireAccess(req, 'admin')
+      const input = stockPreparationConfirmReadInput(req, requestQuery(req), VALID_STOCK_PREPARATION_UNIT_CANDIDATES_QUERY_KEYS, 'STOCK_PREPARATION_UNIT_CANDIDATES_REQUEST_INVALID')
+      const provisioning = context && context.api && context.api.multitable
+        ? context.api.multitable.provisioning
+        : undefined
+      if (!provisioning) {
+        throw new HttpRouteError(501, 'CONFIRM_READS_PROVISIONING_API_UNAVAILABLE', 'multitable provisioning API is not available')
+      }
+      const result = await listUnitConversionCandidates({
+        recordsApi: getMultitableRecordsApi(),
+        provisioning,
+        targetProjectId: input.targetProjectId,
+        projectId: input.projectId,
+        snapshotBatchId: input.snapshotBatchId,
+        permission: 'admin',
+      })
+      return sendOk(res, result)
+    },
+
+    // #3751 MVP W3: run the landed candidate ladder over a COMPLETE snapshot batch and CREATE-ONLY
+    // persist the NEW pending mapping rows (existing ids skipped; human_preserved fields structurally
+    // stripped). Admin-gated; staging targetProjectId is server-derived, never request-trusted;
+    // defaultVersionPolicy is REQUIRED per request (OD2: no server default). 201 only when it created.
+    async stockPreparationMaterialMappingCandidatesSync(req, res) {
+      const user = requireAccess(req, 'admin')
+      const audit = requireStockPreparationAudit()
+      const input = normalizeStockPreparationConfirmBody(requestBody(req), VALID_STOCK_PREPARATION_MAPPING_CANDIDATES_SYNC_REQUEST_KEYS, 'STOCK_PREPARATION_MAPPING_CANDIDATES_SYNC_REQUEST_INVALID')
+      const tenantId = resolveTenantId(req, input)
+      const result = await syncMaterialMappingCandidates({
+        context,
+        permission: 'admin',
+        recordsApi: getMultitableRecordsApi(),
+        provisioning: getMultitableProvisioning(),
+        targetProjectId: resolveIntegrationStagingProjectId(tenantId, input.projectId),
+        projectId: input.projectId,
+        snapshotBatchId: input.snapshotBatchId,
+        defaultVersionPolicy: input.defaultVersionPolicy,
+      })
+      await audit.append({
+        tenantId,
+        workspaceId: input.workspaceId,
+        projectId: input.projectId,
+        action: 'mapping_candidates_sync',
+        subjectId: result.snapshotBatchId,
+        mode: result.mode,
+        actor: user.id || user.email,
+        detail: { created: result.created.mappings, skippedExisting: result.skipped.existing, skippedMatched: result.skipped.matched, status: result.status },
+      })
+      return sendOk(res, result, result.persisted ? 201 : 200)
+    },
+
+    // #3751 MVP W3: human mapping confirm — XOR body modes (mappingId = stamp an existing candidate
+    // matched / mapping = create a fully operator-specified confirmed row). confirmedBy is the ROUTE
+    // user identity; confirmedAt is stamped in the module — the body can carry neither.
+    async stockPreparationMaterialMappingConfirm(req, res) {
+      const user = requireAccess(req, 'admin')
+      const audit = requireStockPreparationAudit()
+      const input = normalizeStockPreparationConfirmBody(requestBody(req), VALID_STOCK_PREPARATION_MAPPING_CONFIRM_REQUEST_KEYS, 'STOCK_PREPARATION_MAPPING_CONFIRM_REQUEST_INVALID')
+      const tenantId = resolveTenantId(req, input)
+      const result = await confirmMaterialMapping({
+        context,
+        permission: 'admin',
+        recordsApi: getMultitableRecordsApi(),
+        provisioning: getMultitableProvisioning(),
+        targetProjectId: resolveIntegrationStagingProjectId(tenantId, input.projectId),
+        mappingId: input.mappingId,
+        mapping: input.mapping,
+        notes: input.notes,
+        confirmedBy: user.id || user.email,
+      })
+      await audit.append({
+        tenantId,
+        workspaceId: input.workspaceId,
+        projectId: input.projectId,
+        action: 'mapping_confirm',
+        subjectId: result.mappingId,
+        mode: result.mode,
+        actor: user.id || user.email,
+        detail: { persisted: result.persisted },
+      })
+      return sendOk(res, result, result.mode === 'created' ? 201 : 200)
+    },
+
+    // #3751 MVP W3: retire a mapping (patch EXACTLY isActive:false) — the recovery path for a wrong
+    // confirm. Audit-trail coverage is the Wave-5 role/audit slice.
+    async stockPreparationMaterialMappingRetire(req, res) {
+      const user = requireAccess(req, 'admin')
+      const audit = requireStockPreparationAudit()
+      const input = normalizeStockPreparationConfirmBody(requestBody(req), VALID_STOCK_PREPARATION_MAPPING_RETIRE_REQUEST_KEYS, 'STOCK_PREPARATION_MAPPING_RETIRE_REQUEST_INVALID')
+      const tenantId = resolveTenantId(req, input)
+      const result = await retireMaterialMapping({
+        context,
+        permission: 'admin',
+        recordsApi: getMultitableRecordsApi(),
+        provisioning: getMultitableProvisioning(),
+        targetProjectId: resolveIntegrationStagingProjectId(tenantId, input.projectId),
+        mappingId: input.mappingId,
+      })
+      await audit.append({
+        tenantId,
+        workspaceId: input.workspaceId,
+        projectId: input.projectId,
+        action: 'mapping_retire',
+        subjectId: result.mappingId,
+        mode: result.mode,
+        actor: user.id || user.email,
+        detail: { persisted: result.persisted },
+      })
+      return sendOk(res, result)
+    },
+
+    // #3751 MVP W3: human unit-rule confirm — tri-XOR body modes (conversionRuleId = stamp an existing
+    // manual rule / contextFingerprint = persist the server-derived 1:1 candidate / rule = fully
+    // user-entered values per OD3/OD4). Same server-stamp discipline as the mapping confirm.
+    async stockPreparationUnitConversionConfirm(req, res) {
+      const user = requireAccess(req, 'admin')
+      const audit = requireStockPreparationAudit()
+      const input = normalizeStockPreparationConfirmBody(requestBody(req), VALID_STOCK_PREPARATION_UNIT_CONFIRM_REQUEST_KEYS, 'STOCK_PREPARATION_UNIT_CONFIRM_REQUEST_INVALID')
+      const tenantId = resolveTenantId(req, input)
+      const result = await confirmUnitConversionRule({
+        context,
+        permission: 'admin',
+        recordsApi: getMultitableRecordsApi(),
+        provisioning: getMultitableProvisioning(),
+        targetProjectId: resolveIntegrationStagingProjectId(tenantId, input.projectId),
+        projectId: input.projectId,
+        conversionRuleId: input.conversionRuleId,
+        contextFingerprint: input.contextFingerprint,
+        snapshotBatchId: input.snapshotBatchId,
+        rule: input.rule,
+        confirmedBy: user.id || user.email,
+      })
+      await audit.append({
+        tenantId,
+        workspaceId: input.workspaceId,
+        projectId: input.projectId,
+        action: 'unit_confirm',
+        subjectId: result.conversionRuleId,
+        mode: result.mode,
+        actor: user.id || user.email,
+        detail: { persisted: result.persisted },
+      })
+      return sendOk(res, result, result.mode === 'created' ? 201 : 200)
+    },
+
+    // #3751 MVP W3: retire a unit rule (patch EXACTLY isActive:false) — required before re-creating a
+    // same-scope rule with a different factor (two active same-scope rules fail closed as a conflict).
+    async stockPreparationUnitConversionRetire(req, res) {
+      const user = requireAccess(req, 'admin')
+      const audit = requireStockPreparationAudit()
+      const input = normalizeStockPreparationConfirmBody(requestBody(req), VALID_STOCK_PREPARATION_UNIT_RETIRE_REQUEST_KEYS, 'STOCK_PREPARATION_UNIT_RETIRE_REQUEST_INVALID')
+      const tenantId = resolveTenantId(req, input)
+      const result = await retireUnitConversionRule({
+        context,
+        permission: 'admin',
+        recordsApi: getMultitableRecordsApi(),
+        provisioning: getMultitableProvisioning(),
+        targetProjectId: resolveIntegrationStagingProjectId(tenantId, input.projectId),
+        conversionRuleId: input.conversionRuleId,
+      })
+      await audit.append({
+        tenantId,
+        workspaceId: input.workspaceId,
+        projectId: input.projectId,
+        action: 'unit_retire',
+        subjectId: result.conversionRuleId,
+        mode: result.mode,
+        actor: user.id || user.email,
+        detail: { persisted: result.persisted },
+      })
+      return sendOk(res, result)
+    },
+
+    // #3751 MVP W4: generation run — engine over confirmed inputs; draft prep lines UPSERT; blocking
+    // exceptions create-only (human resolution preserved); run record create-only. `ready` is the
+    // server-computed invariant verdict (engine ready AND zero unresolved blocking exceptions).
+    async stockPreparationGenerationRun(req, res) {
+      const user = requireAccess(req, 'admin')
+      const audit = requireStockPreparationAudit()
+      const input = normalizeStockPreparationConfirmBody(requestBody(req), VALID_STOCK_PREPARATION_GENERATION_RUN_REQUEST_KEYS, 'STOCK_PREPARATION_GENERATION_RUN_REQUEST_INVALID')
+      const tenantId = resolveTenantId(req, input)
+      const result = await runStockPreparationGeneration({
+        context,
+        permission: 'admin',
+        recordsApi: getMultitableRecordsApi(),
+        provisioning: getMultitableProvisioning(),
+        targetProjectId: resolveIntegrationStagingProjectId(tenantId, input.projectId),
+        projectId: input.projectId,
+        snapshotBatchId: input.snapshotBatchId,
+      })
+      await audit.append({
+        tenantId,
+        workspaceId: input.workspaceId,
+        projectId: input.projectId,
+        action: 'generation_run',
+        subjectId: result.snapshotBatchId,
+        mode: result.mode,
+        actor: user.id || user.email,
+        detail: {
+          status: result.status,
+          ready: result.ready,
+          unresolvedBlocking: result.unresolvedBlockingExceptionCount,
+          linesCreated: result.created.lines,
+          linesPatched: result.patched.lines,
+          exceptionsCreated: result.created.exceptions,
+        },
+      })
+      return sendOk(res, result, result.created && (result.created.lines + result.created.exceptions + result.created.run) > 0 ? 201 : 200)
+    },
+
+    // #3751 MVP W4: single exception resolve — patch EXACTLY the resolution quartet, server-stamped.
+    async stockPreparationExceptionResolve(req, res) {
+      const user = requireAccess(req, 'admin')
+      const audit = requireStockPreparationAudit()
+      const input = normalizeStockPreparationConfirmBody(requestBody(req), VALID_STOCK_PREPARATION_EXCEPTION_RESOLVE_REQUEST_KEYS, 'STOCK_PREPARATION_EXCEPTION_RESOLVE_REQUEST_INVALID')
+      const tenantId = resolveTenantId(req, input)
+      const result = await resolveStockPreparationException({
+        context,
+        permission: 'admin',
+        recordsApi: getMultitableRecordsApi(),
+        provisioning: getMultitableProvisioning(),
+        targetProjectId: resolveIntegrationStagingProjectId(tenantId, input.projectId),
+        exceptionId: input.exceptionId,
+        resolutionAction: input.resolutionAction,
+        resolvedBy: user.id || user.email,
+      })
+      await audit.append({
+        tenantId,
+        workspaceId: input.workspaceId,
+        projectId: input.projectId,
+        action: 'exception_resolve',
+        subjectId: result.exceptionId,
+        mode: result.mode,
+        actor: user.id || user.email,
+        detail: { resolutionAction: input.resolutionAction, persisted: result.persisted },
+      })
+      return sendOk(res, result)
+    },
+
+    // #3751 MVP W4: bulk exception resolve — SAME-REASON gate (#3890) refuses mixed exceptionTypes
+    // before any patch; bounded id list.
+    async stockPreparationExceptionBulkResolve(req, res) {
+      const user = requireAccess(req, 'admin')
+      const audit = requireStockPreparationAudit()
+      const input = normalizeStockPreparationConfirmBody(requestBody(req), VALID_STOCK_PREPARATION_EXCEPTION_BULK_RESOLVE_REQUEST_KEYS, 'STOCK_PREPARATION_EXCEPTION_BULK_RESOLVE_REQUEST_INVALID')
+      const tenantId = resolveTenantId(req, input)
+      const result = await bulkResolveStockPreparationExceptions({
+        context,
+        permission: 'admin',
+        recordsApi: getMultitableRecordsApi(),
+        provisioning: getMultitableProvisioning(),
+        targetProjectId: resolveIntegrationStagingProjectId(tenantId, input.projectId),
+        exceptionIds: input.exceptionIds,
+        resolutionAction: input.resolutionAction,
+        resolvedBy: user.id || user.email,
+      })
+      await audit.append({
+        tenantId,
+        workspaceId: input.workspaceId,
+        projectId: input.projectId,
+        action: 'exception_bulk_resolve',
+        mode: result.mode,
+        actor: user.id || user.email,
+        detail: { resolutionAction: input.resolutionAction, resolved: result.resolved, skipped: result.skipped, exceptionType: result.exceptionType },
+      })
+      return sendOk(res, result)
+    },
+
+    // #3751 MVP W5: values-free exception queue for view 6 (message text never crosses).
+    async stockPreparationExceptionList(req, res) {
+      requireAccess(req, 'admin')
+      const input = stockPreparationConfirmReadInput(req, requestQuery(req), VALID_STOCK_PREPARATION_EXCEPTION_LIST_QUERY_KEYS, 'STOCK_PREPARATION_EXCEPTION_LIST_REQUEST_INVALID')
+      const provisioning = context && context.api && context.api.multitable
+        ? context.api.multitable.provisioning
+        : undefined
+      if (!provisioning) {
+        throw new HttpRouteError(501, 'CONFIRM_READS_PROVISIONING_API_UNAVAILABLE', 'multitable provisioning API is not available')
+      }
+      const result = await listStockPreparationExceptions({
+        recordsApi: getMultitableRecordsApi(),
+        provisioning,
+        targetProjectId: input.targetProjectId,
+        projectId: input.projectId,
+        snapshotBatchId: input.snapshotBatchId,
+        status: input.status,
+        exceptionType: input.exceptionType,
+        severity: input.severity,
+        permission: 'admin',
+      })
+      return sendOk(res, result)
+    },
+
+    // #3751 MVP W5: values-free prep-line summary for view 5 (value-bearing detail stays owner-gated).
+    async stockPreparationPrepLineList(req, res) {
+      requireAccess(req, 'admin')
+      const input = stockPreparationConfirmReadInput(req, requestQuery(req), VALID_STOCK_PREPARATION_PREP_LINE_LIST_QUERY_KEYS, 'STOCK_PREPARATION_PREP_LINE_LIST_REQUEST_INVALID')
+      const provisioning = context && context.api && context.api.multitable
+        ? context.api.multitable.provisioning
+        : undefined
+      if (!provisioning) {
+        throw new HttpRouteError(501, 'CONFIRM_READS_PROVISIONING_API_UNAVAILABLE', 'multitable provisioning API is not available')
+      }
+      const result = await listStockPreparationPrepLines({
+        recordsApi: getMultitableRecordsApi(),
+        provisioning,
+        targetProjectId: input.targetProjectId,
+        projectId: input.projectId,
+        snapshotBatchId: input.snapshotBatchId,
+        prepStatus: input.prepStatus,
+        permission: 'admin',
+      })
+      return sendOk(res, result)
+    },
+
+    // #3751 MVP W5b (#3890): values-free audit trail read — entries are values-free BY CONSTRUCTION
+    // (the store's structural gate refused anything else at append time).
+    async stockPreparationAuditList(req, res) {
+      requireAccess(req, 'admin')
+      const rawQuery = requestQuery(req)
+      if (!isPlainObject(rawQuery)) {
+        throw new HttpRouteError(400, 'STOCK_PREPARATION_AUDIT_LIST_REQUEST_INVALID', 'request must be an object')
+      }
+      for (const key of Object.keys(rawQuery)) {
+        if (!VALID_STOCK_PREPARATION_AUDIT_LIST_QUERY_KEYS.has(key)) {
+          throw new HttpRouteError(400, 'STOCK_PREPARATION_AUDIT_LIST_REQUEST_INVALID', `unsupported request field: ${key}`, { field: key })
+        }
+      }
+      const tenantId = resolveTenantId(req, { tenantId: firstString(rawQuery.tenantId) })
+      const audit = requireStockPreparationAudit()
+      const result = await audit.list({
+        tenantId,
+        workspaceId: firstString(rawQuery.workspaceId),
+        projectId: firstString(rawQuery.projectId),
+        action: firstString(rawQuery.action),
+        limit: firstString(rawQuery.limit),
       })
       return sendOk(res, result)
     },

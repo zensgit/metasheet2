@@ -9,8 +9,11 @@
  *
  * Invariants:
  * - SAME-SOURCE: the card sender (sign) and the card-delivery wrapper (verify) must both call
- *   these resolvers so a token signed on send always verifies on decision — guaranteed by
- *   "env first, else the one stored dingtalk integration".
+ *   these resolvers so a token signed on send always verifies on decision — guaranteed per
+ *   population: rows with a persisted `integration_id` (DT-R2) sign/verify through
+ *   `resolveApprovalCardLinkSecretForIntegration` pinned to THAT integration (env still wins,
+ *   never a cross-corp rescue); legacy rows with `integration_id IS NULL` sign/verify through
+ *   `resolveApprovalCardLinkSecret`'s env-first / LIMIT-1-stored fallback, same as before DT-R2.
  * - FAIL-CLOSED: any miss (no env, no row, decrypt failure, query failure) resolves to '' —
  *   the card action refuses to send and the wrapper refuses to verify. Never a fallback secret.
  */
@@ -67,6 +70,35 @@ export async function resolveApprovalCardLinkSecret(queryFn: QueryFn = query): P
   if (fromEnv) return fromEnv
   try {
     const config = await loadStoredApprovalCardConfig(queryFn)
+    const stored = normalizeText(config[APPROVAL_CARD_LINK_SECRET_CONFIG_KEY])
+    if (!stored) return ''
+    return decryptStoredSecretValue(stored).trim()
+  } catch {
+    // Fail-closed: an unreadable/undecryptable stored secret must never sign or verify.
+    return ''
+  }
+}
+
+/**
+ * DT-R2 per-corp variant: the deep-link HMAC secret of ONE SPECIFIC integration — env
+ * `APPROVAL_CARD_LINK_SECRET` still wins (global override, unchanged), else THAT integration's
+ * stored (encrypted-at-rest) `approvalCardLinkSecret`, else '' (fail-closed).
+ *
+ * Deliberately NO fallback to the legacy "one stored dingtalk integration" pick: a token pinned
+ * to corp A must never sign or verify with corp B's secret. Callers with no integration id
+ * (legacy NULL delivery rows) use `resolveApprovalCardLinkSecret` instead — same source the
+ * legacy rows were signed with, preserving the sign/verify same-source invariant per population.
+ */
+export async function resolveApprovalCardLinkSecretForIntegration(
+  integrationId: string,
+  queryFn: QueryFn = query,
+): Promise<string> {
+  const fromEnv = (process.env.APPROVAL_CARD_LINK_SECRET ?? '').trim()
+  if (fromEnv) return fromEnv
+  try {
+    const row = await loadIntegrationById(queryFn, integrationId)
+    if (!row) return ''
+    const config = parseJsonRecord(row.config)
     const stored = normalizeText(config[APPROVAL_CARD_LINK_SECRET_CONFIG_KEY])
     if (!stored) return ''
     return decryptStoredSecretValue(stored).trim()

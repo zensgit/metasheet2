@@ -40,4 +40,30 @@ describe('MetaAutomationPersonDeliveryViewer — MtButton migration (UI-P2-1c)',
     expect(get).toHaveBeenCalledTimes(1)
     expect(get).toHaveBeenCalledWith('s1', 'r1', 50)
   })
+
+  it('PR #4046 Phase B: an outcome_unknown delivery renders its own badge + reason (not folded into failed) and the filter offers the state', async () => {
+    const delivery = {
+      id: 'd1',
+      localUserId: 'u1',
+      dingtalkUserId: 'dd1',
+      sourceType: 'automation',
+      subject: 'S',
+      content: 'C',
+      success: false,
+      status: 'outcome_unknown',
+      errorMessage: 'dingtalk_send_outcome_unknown: fetch failed',
+      createdAt: new Date().toISOString(),
+      localUserIsActive: true,
+    }
+    mount({ getAutomationDingTalkPersonDeliveries: vi.fn().mockResolvedValue([delivery]) })
+    await flush()
+    const badge = container!.querySelector('.meta-person-delivery__badge') as HTMLElement
+    expect(badge.getAttribute('data-status')).toBe('outcome_unknown')
+    expect(badge.textContent?.trim()).toBe('outcome unknown') // en locale label, NOT 'failed'
+    // the send-uncertainty reason stays visible (status !== success renders the error line)
+    expect(container!.querySelector('.meta-person-delivery__error')?.textContent).toContain('outcome_unknown')
+    // admin-side list filter: the new state is selectable, not silently excluded by the IN-list
+    const options = Array.from(container!.querySelectorAll('[data-field="statusFilter"] option')).map((o) => (o as HTMLOptionElement).value)
+    expect(options).toContain('outcome_unknown')
+  })
 })

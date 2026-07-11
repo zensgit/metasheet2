@@ -835,7 +835,7 @@
                   :disabled="readOnly"
                   class="ms-w-240"
                   data-testid="approval-node-source-kind"
-                  @update:model-value="(kind: ApprovalAssigneeSourceKind) => setApprovalSourceKind(node.key, kind)"
+                  @update:model-value="(kind: ApprovalAssigneeSourceKind) => { setApprovalSourceKind(node.key, kind); syncApprovalNodeOptions(node.key) }"
                 >
                   <el-option
                     v-for="opt in APPROVAL_NODE_SOURCE_KINDS"
@@ -845,24 +845,65 @@
                   />
                 </el-select>
               </el-form-item>
-              <el-form-item
-                v-if="approvalSourceKind(node.key) === 'static_user' || approvalSourceKind(node.key) === 'static_role'"
-                :label="approvalSourceKind(node.key) === 'static_user' ? '用户 ID' : '角色 ID'"
-              >
-                <el-select
-                  :model-value="approvalSourceIds(node.key)"
-                  multiple
-                  filterable
-                  allow-create
-                  default-first-option
-                  size="small"
-                  :disabled="readOnly"
-                  class="ms-w-360"
-                  placeholder="输入 ID 后回车"
-                  data-testid="approval-node-source-ids"
-                  @update:model-value="(ids: string[]) => setApprovalSourceIds(node.key, ids)"
-                />
-              </el-form-item>
+              <!-- G-B2-18: same directory typeahead as the linear-step picker (line ~973) — the
+                   composable is shared (one users/roles fetch backs both surfaces), only the
+                   template wiring is duplicated per editor. The manual-ID input stays as the
+                   advanced fallback (directory search doesn't guarantee full id coverage). -->
+              <template v-if="approvalSourceKind(node.key) === 'static_user' || approvalSourceKind(node.key) === 'static_role'">
+                <el-form-item v-if="approvalSourceKind(node.key) === 'static_user'" label="选择用户">
+                  <el-select
+                    :model-value="approvalSourceIds(node.key)"
+                    multiple
+                    filterable
+                    remote
+                    :remote-method="onUserSearch"
+                    :loading="directory.usersLoading.value"
+                    size="small"
+                    :disabled="readOnly"
+                    class="ms-w-360"
+                    placeholder="搜索用户名 / 邮箱 / ID"
+                    data-testid="approval-node-source-user-picker"
+                    @update:model-value="(ids: string[]) => setApprovalSourceIdsFromPicker(node.key, ids)"
+                    @visible-change="(visible: boolean) => visible && onUserSearch('')"
+                  >
+                    <el-option
+                      v-for="user in directory.users.value"
+                      :key="user.id"
+                      :label="directory.formatUserLabel(user)"
+                      :value="user.id"
+                    />
+                  </el-select>
+                </el-form-item>
+                <el-form-item v-else label="选择角色">
+                  <el-select
+                    :model-value="approvalSourceIds(node.key)"
+                    multiple
+                    filterable
+                    size="small"
+                    :disabled="readOnly"
+                    class="ms-w-360"
+                    placeholder="选择角色"
+                    data-testid="approval-node-source-role-picker"
+                    @update:model-value="(ids: string[]) => setApprovalSourceIdsFromPicker(node.key, ids)"
+                  >
+                    <el-option
+                      v-for="role in directory.roles.value"
+                      :key="role.id"
+                      :label="directory.formatRoleLabel(role)"
+                      :value="role.id"
+                    />
+                  </el-select>
+                </el-form-item>
+                <el-form-item label="手动输入 ID（高级）">
+                  <el-input
+                    :model-value="approvalSourceIdsText(node.key)"
+                    :disabled="readOnly"
+                    placeholder="逗号或换行分隔"
+                    data-testid="approval-node-source-ids-text"
+                    @update:model-value="(text: string) => setApprovalSourceIdsText(node.key, text)"
+                  />
+                </el-form-item>
+              </template>
               <el-form-item
                 v-else-if="approvalSourceKind(node.key) === 'form_field_user'"
                 label="表单用户字段 ID"
@@ -916,11 +957,46 @@
           </div>
         </div>
 
+        <!-- G-B2-06 read-only flow spine (LINEAR templates only — a preserved complex graph keeps
+             its own structured/canvas views above, untouched): 发起人 → 步骤1 → 步骤2 → …, derived
+             straight from draft.steps (see linearStepSpine.ts). Not editable here; clicking a step
+             chip scrolls to and briefly highlights the matching card below. -->
+        <div
+          v-if="!graphReadOnly"
+          class="template-authoring__spine"
+          data-testid="approval-template-step-spine"
+        >
+          <template v-for="(chip, chipIndex) in linearStepSpine" :key="chip.key">
+            <button
+              type="button"
+              class="template-authoring__spine-chip"
+              :class="{
+                'template-authoring__spine-chip--requester': chip.role === 'requester',
+                'template-authoring__spine-chip--unresolved': !chip.resolvable,
+              }"
+              :data-testid="chip.role === 'requester' ? 'approval-spine-chip-requester' : 'approval-spine-chip-step'"
+              :data-step-index="chip.stepIndex ?? undefined"
+              :title="chip.stepIndex ? `第 ${chip.stepIndex} 步 · 点击定位到对应步骤卡` : '发起人：提交表单'"
+              @click="focusStepCard(chip)"
+            >
+              <strong>{{ chip.label }}</strong>
+              <span v-if="chip.sourceSummary" class="template-authoring__spine-chip-source">{{ chip.sourceSummary }}</span>
+            </button>
+            <span
+              v-if="chipIndex < linearStepSpine.length - 1"
+              class="template-authoring__spine-arrow"
+              aria-hidden="true"
+            >→</span>
+          </template>
+        </div>
+
         <div
           v-for="(step, index) in draft.steps"
           v-show="!graphReadOnly"
+          :id="`approval-step-card-${step.localId}`"
           :key="step.localId"
           class="template-authoring__item"
+          :class="{ 'template-authoring__item--highlighted': highlightedStepLocalId === step.localId }"
           data-testid="approval-template-step-row"
         >
           <div class="template-authoring__item-toolbar">
@@ -928,6 +1004,14 @@
             <div>
               <el-button size="small" :disabled="readOnly || index === 0" @click="moveStep(index, -1)">上移</el-button>
               <el-button size="small" :disabled="readOnly || index === draft.steps.length - 1" @click="moveStep(index, 1)">下移</el-button>
+              <el-button
+                size="small"
+                :disabled="readOnly"
+                :data-testid="`approval-step-insert-after-${step.localId}`"
+                @click="insertStep(index)"
+              >
+                在下方插入步骤
+              </el-button>
               <el-button size="small" type="danger" :disabled="readOnly || draft.steps.length === 1" @click="removeStep(index)">删除</el-button>
             </div>
           </div>
@@ -1337,6 +1421,18 @@
           <span v-if="!item.ok && item.detail" class="template-authoring__publish-checklist-detail">{{ item.detail }}</span>
         </li>
       </ul>
+      <!-- B3-09 (发布说明): optional; server trims + caps at 2000 chars (maxlength mirrors it so a
+           long paste fails visibly here instead of a 400 at confirm). Cleared when the dialog
+           reopens so a note never silently carries over to the NEXT publish. -->
+      <el-input
+        v-model="publishNote"
+        type="textarea"
+        :rows="2"
+        :maxlength="2000"
+        show-word-limit
+        placeholder="发布说明（可选）：本次发布改了什么"
+        data-testid="approval-publish-note-input"
+      />
       <template #footer>
         <el-button @click="publishChecklistVisible = false">取消</el-button>
         <el-button
@@ -1375,6 +1471,7 @@ import { createRoutePreviewController } from '../../approvals/routePreviewContro
 import { routePreviewAssigneeSummary } from '../../approvals/routePreviewSummary'
 import { describeRoutePreviewError } from '../../approvals/routePreviewErrors'
 import { computeRequesterPreviewFields } from '../../approvals/requesterPreviewFields'
+import { buildLinearStepSpine, type LinearStepSpineChip } from '../../approvals/linearStepSpine'
 import ApprovalUserPicker from '../../approvals/components/ApprovalUserPicker.vue'
 import {
   buildApprovalGraph,
@@ -1388,6 +1485,7 @@ import {
   DETAIL_LEAF_FIELD_TYPES,
   draftFromTemplate,
   graphReadOnlyReason,
+  insertStepAt,
   parseIdsText,
   stepFieldAccess,
   setStepFieldPermission,
@@ -1482,6 +1580,22 @@ const canSave = computed(() => canManageTemplates.value && !unsupportedReason.va
 // G-1 read-only structured render of a preserved complex graph: a per-node summary of the
 // config the v1 editor doesn't yet author, so authors can SEE the flow they're preserving.
 const graphPreviewNodes = computed<ApprovalNode[]>(() => draft.value.preservedGraph?.nodes ?? [])
+
+// G-B2-06 read-only flow spine for a LINEAR template (see `linearStepSpine.ts`) — 发起人 → 步骤1 →
+// 步骤2 → …, derived straight from `draft.value.steps`. Never used for a preserved complex graph
+// (rendered instead, unchanged, via `graphPreviewNodes` above): the view gates it on `!graphReadOnly`.
+const linearStepSpine = computed<LinearStepSpineChip[]>(() => buildLinearStepSpine(draft.value.steps))
+// Read-only-spine → step-card affordance: clicking a step chip briefly highlights (and scrolls to)
+// its matching card below. Purely cosmetic — no editing happens on the spine itself.
+const highlightedStepLocalId = ref<string | null>(null)
+let highlightStepTimer: ReturnType<typeof setTimeout> | undefined
+function focusStepCard(chip: LinearStepSpineChip): void {
+  if (chip.role !== 'step') return
+  highlightedStepLocalId.value = chip.key
+  if (highlightStepTimer) clearTimeout(highlightStepTimer)
+  highlightStepTimer = setTimeout(() => { highlightedStepLocalId.value = null }, 1600)
+  document.getElementById(`approval-step-card-${chip.key}`)?.scrollIntoView?.({ behavior: 'smooth', block: 'center' })
+}
 
 const NODE_TYPE_LABELS: Record<string, string> = {
   start: '发起',
@@ -1876,6 +1990,8 @@ const publishChecklist = computed<PublishChecklistItem[]>(() => [
 ])
 const canConfirmPublish = computed(() => publishChecklist.value.every((item) => item.ok))
 const publishChecklistVisible = ref(false)
+// B3-09 (发布说明) — optional free text bound to the checklist dialog's textarea.
+const publishNote = ref('')
 const canvasEdgeLines = computed(() => {
   const pos = new Map(canvasLayout.value.nodes.map((n) => [n.key, n]))
   return canvasEffectiveGraph.value.edges.map((edge) => {
@@ -1913,6 +2029,26 @@ function setApprovalSourceIds(nodeKey: string, ids: string[]): void {
   const kind = approvalSourceKind(nodeKey)
   if (kind === 'static_user') setApprovalNodeSource(nodeKey, { kind, userIds: ids })
   else if (kind === 'static_role') setApprovalNodeSource(nodeKey, { kind, roleIds: ids })
+}
+// G-B2-18 manual-ID advanced fallback for the complex-node picker. Unlike the linear step (whose
+// idsText is a real persisted draft field — the SOLE carrier, only parsed into ids at save time),
+// the node model carries just the ids array (no raw-text sibling): a naive `ids.join(', ')` getter
+// re-derived on every keystroke fights the controlled <el-input> — it resets the DOM to the
+// re-derived text on next tick whenever that differs from what was just typed, so a trailing
+// separator is silently swallowed and a second id can never be typed. This transient per-node text
+// buffer is the raw carrier instead (never part of node.config / the saved graph): read back
+// verbatim once the author has touched the field, falling back to the derived join before that
+// (hydrate / a node nobody has edited yet).
+function approvalSourceIdsText(nodeKey: string): string {
+  const v = approvalSourceIds(nodeKey).join(', ')
+  console.log('DEBUG approvalSourceIdsText call ->', JSON.stringify(v), 'ids=', JSON.stringify(approvalSourceIds(nodeKey)))
+  return v
+}
+function setApprovalSourceIdsText(nodeKey: string, text: string): void {
+  setApprovalSourceIds(nodeKey, parseIdsText(text))
+}
+function setApprovalSourceIdsFromPicker(nodeKey: string, ids: string[]): void {
+  setApprovalSourceIds(nodeKey, ids)
 }
 function approvalSourceFieldId(nodeKey: string): string {
   const source = approvalNodeFirstSource(nodeKey)
@@ -1969,10 +2105,16 @@ function setStepIds(step: ApprovalStepDraft, ids: string[]): void {
 
 async function onUserSearch(query: string): Promise<void> {
   await directory.searchUsers(query)
-  // Keep already-selected ids visible as chips even if the new search page omits them.
+  // Keep already-selected ids visible as chips even if the new search page omits them —
+  // across BOTH pickers that share this one composable instance (linear steps + G-B2-18
+  // complex-graph nodes).
   for (const step of draft.value.steps) {
     if (step.sourceKind !== 'static_user') continue
     for (const id of parseIdsText(step.idsText)) directory.ensureUserOptionVisible(id)
+  }
+  for (const nodeKey of Object.keys(draft.value.approvalNodeEdits ?? {})) {
+    if (approvalSourceKind(nodeKey) !== 'static_user') continue
+    for (const id of approvalSourceIds(nodeKey)) directory.ensureUserOptionVisible(id)
   }
 }
 
@@ -1988,6 +2130,24 @@ function syncStepOptions(step: ApprovalStepDraft): void {
 
 function syncAllStepOptions(): void {
   for (const step of draft.value.steps) syncStepOptions(step)
+}
+
+// G-B2-18: same hydrate-time visibility sync as syncStepOptions, applied to the complex-graph
+// approval-node assignee sources (approvalNodeEdits is keyed by nodeKey, one entry per editable
+// approval node — see approvalNodeEditFor). Also re-seeds (or clears) the manual-ID text buffer
+// so a source-KIND switch never leaves the OTHER kind's stale typed text showing — the buffer is
+// keyed only by nodeKey, not by (nodeKey, kind), so it must be reset whenever kind changes.
+function syncApprovalNodeOptions(nodeKey: string): void {
+  const kind = approvalSourceKind(nodeKey)
+  if (kind === 'static_user') {
+    for (const id of approvalSourceIds(nodeKey)) directory.ensureUserOptionVisible(id)
+  } else if (kind === 'static_role') {
+    for (const id of approvalSourceIds(nodeKey)) directory.ensureRoleOptionVisible(id)
+  }
+}
+
+function syncAllApprovalNodeOptions(): void {
+  for (const nodeKey of Object.keys(draft.value.approvalNodeEdits ?? {})) syncApprovalNodeOptions(nodeKey)
 }
 
 function clearErrors() {
@@ -2069,6 +2229,13 @@ function addStep() {
   draft.value.steps = [...draft.value.steps, createEmptyStepDraft(draft.value.steps.length + 1)]
 }
 
+// G-B2-06 — insert (not just append): a fresh blank step lands right after `index`, and any
+// STILL-DEFAULT-named trailing step is renumbered to stay self-consistent (see `insertStepAt`'s
+// own doc in templateAuthoring.ts for exactly what counts as "still default").
+function insertStep(index: number) {
+  draft.value.steps = insertStepAt(draft.value.steps, index)
+}
+
 function removeStep(index: number) {
   if (draft.value.steps.length === 1) return
   draft.value.steps = draft.value.steps.filter((_, i) => i !== index)
@@ -2094,6 +2261,7 @@ async function loadTemplateForEdit() {
     graphReadOnlyMessage.value = graphReadOnlyReason(template)
     draft.value = draftFromTemplate(template)
     syncAllStepOptions()
+    syncAllApprovalNodeOptions()
     snapshotDraft()
   } catch (error: any) {
     loadError.value = error?.message ?? '加载审批模板失败'
@@ -2148,6 +2316,7 @@ async function createFromPreset(presetId: CommonApprovalTemplatePresetId) {
     unsupportedReason.value = unsupportedTemplateAuthoringReason(created)
     graphReadOnlyMessage.value = graphReadOnlyReason(created)
     syncAllStepOptions()
+    syncAllApprovalNodeOptions()
     snapshotDraft() // before the route replace so the leave guard stays quiet
     await router.replace({ path: `/approval-templates/${created.id}/edit` })
     ElMessage.success('模板草稿已创建')
@@ -2172,6 +2341,8 @@ async function handleSave() {
 // SAME persistDraft → publishTemplate → success-routing sequence as before this change.
 function openPublishChecklist() {
   if (!canSave.value || publishing.value) return
+  // B3-09 — a publish note describes ONE publish action; never carry it into the next one.
+  publishNote.value = ''
   publishChecklistVisible.value = true
 }
 
@@ -2182,7 +2353,13 @@ async function confirmPublish() {
   try {
     const saved = await persistDraft()
     if (!saved) return
-    await publishTemplate(saved.id, { policy: { allowRevoke: draft.value.allowRevoke } })
+    // B3-09 — whitespace-only normalizes to null server-side; send undefined to keep the wire
+    // payload identical to pre-B3-09 publishes when the admin typed nothing.
+    const note = publishNote.value.trim()
+    await publishTemplate(saved.id, {
+      policy: { allowRevoke: draft.value.allowRevoke },
+      ...(note ? { note } : {}),
+    })
     ElMessage.success('模板已发布')
     await router.push({ path: `/approval-templates/${saved.id}` })
   } catch (error: any) {
@@ -2318,6 +2495,7 @@ watch(isDraftDirty, (dirty) => {
 
 onUnmounted(() => {
   window.onbeforeunload = null
+  if (highlightStepTimer) clearTimeout(highlightStepTimer)
 })
 </script>
 
@@ -2426,10 +2604,71 @@ onUnmounted(() => {
   padding: 14px;
   border: 1px solid var(--el-border-color-lighter);
   border-radius: 8px;
+  transition: border-color 0.2s ease, box-shadow 0.2s ease;
 }
 
 .template-authoring__item + .template-authoring__item {
   margin-top: 12px;
+}
+
+/* G-B2-06 — brief highlight when a step card is reached via a flow-spine chip click. */
+.template-authoring__item--highlighted {
+  border-color: var(--el-color-primary);
+  box-shadow: 0 0 0 2px var(--el-color-primary-light-5);
+}
+
+/* G-B2-06 read-only linear flow spine. */
+.template-authoring__spine {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 14px;
+  padding: 10px 12px;
+  border: 1px solid var(--el-border-color-lighter);
+  border-radius: 8px;
+  background: var(--el-fill-color-light);
+}
+
+.template-authoring__spine-chip {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  padding: 6px 10px;
+  border: 1px solid var(--el-border-color);
+  border-radius: 6px;
+  background: var(--ms-bg-card);
+  color: var(--el-text-color-primary);
+  font: inherit;
+  cursor: pointer;
+}
+
+.template-authoring__spine-chip:hover {
+  border-color: var(--el-color-primary);
+}
+
+.template-authoring__spine-chip--requester {
+  background: var(--el-fill-color);
+  cursor: default;
+}
+
+.template-authoring__spine-chip--requester:hover {
+  border-color: var(--el-border-color);
+}
+
+.template-authoring__spine-chip--unresolved {
+  border-style: dashed;
+  border-color: var(--el-color-warning);
+}
+
+.template-authoring__spine-chip-source {
+  font-size: 12px;
+  color: var(--el-text-color-secondary);
+}
+
+.template-authoring__spine-arrow {
+  color: var(--el-text-color-secondary);
 }
 
 .template-authoring__item-toolbar {

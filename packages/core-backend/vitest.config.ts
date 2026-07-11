@@ -27,6 +27,29 @@ export default defineConfig({
       'tests/integration/approval-direct-manager.api.test.ts',
       'tests/integration/approval-postgate-acceptance.api.test.ts',
       'tests/integration/dept-head-sync-plumbing.test.ts',
+      // DT-HARDEN-02 orphan guard (real DB): proves the admission SAVEPOINT rolls back a users
+      // INSERT when the bind throws after it. DATABASE_URL-gated; excluded here so the no-DB job
+      // cannot skip-green it, and wired as a WHOLE FILE into the approval real-DB step.
+      'tests/integration/directory-sync-admission-orphan-guard.db.test.ts',
+      // P2-1 (post-#3972 review): proves the create-time email existence check is
+      // case-insensitive and that batchAdmitDirectoryAccountUsers enforces server-side
+      // eligibility (no duplicate `users` row for a differently-cased email; no silent
+      // re-admission of an already-linked account). DATABASE_URL-gated; excluded here so the
+      // no-DB job cannot skip-green it, and wired as a WHOLE FILE into the approval real-DB step.
+      'tests/integration/directory-admission-case-insensitive-uniqueness.db.test.ts',
+      // DT-HARDEN-05 lease golden (real DB): proves the partial unique index makes the lease
+      // a database invariant and that COALESCE(last_heartbeat_at, started_at) staleness never
+      // reclaims a live long run. DATABASE_URL-gated; excluded here so the no-DB job cannot
+      // skip-green it, and wired as a WHOLE FILE into the approval real-DB step.
+      'tests/integration/directory-sync-run-lease.db.test.ts',
+      // R1-L4 syncDirectoryIntegration orchestration harness (real DB): drives the REAL sync
+      // end-to-end (mocked DingTalk pull, real Postgres apply) to cover the CALL SITES the
+      // per-helper goldens cannot — heartbeat lifecycle/interval-cleared proof, H02 admission
+      // wiring + per-account SAVEPOINT, OPS-01 deprovision executor wiring (both arms), and
+      // the stale-lease reclaim composition (trigger path + scheduler boot sweep).
+      // DATABASE_URL-gated; excluded here so the no-DB job cannot skip-green it, and wired as
+      // a WHOLE FILE into the approval real-DB step in plugin-tests.yml.
+      'tests/integration/directory-sync-orchestration.db.test.ts',
       'tests/integration/approval-manager-chain.db.test.ts',
       'tests/integration/approval-requester-department.db.test.ts',
       'tests/integration/approval-requester-title.db.test.ts',
@@ -63,14 +86,37 @@ export default defineConfig({
       // a WHOLE FILE into the `Run approval real-DB integration` step in plugin-tests.yml where it
       // runs against real Postgres every PR.
       'tests/integration/dingtalk-approval-card-deliveries.db.test.ts',
+      // §7.6 Delivery Closure — operator-initiated redelivery of a FAILED attendance-notification
+      // outbox row: DATABASE_URL-gated (describeIfDb). Excluded from the no-DB default job so it
+      // cannot skip-green, and wired as a WHOLE FILE into the `Run approval real-DB integration`
+      // step in plugin-tests.yml where it runs against real Postgres every PR.
+      'tests/integration/attendance-notification-redelivery.db.test.ts',
+      // §7.6 Delivery Closure — HTTP route-level tests for the platform-admin-gated redelivery
+      // endpoint (403/400/409/200 + values-free PII-free audit row). DATABASE_URL-gated
+      // (describeIfDb). Excluded from the no-DB default job so it cannot skip-green, and wired as a
+      // WHOLE FILE into the `Run approval real-DB integration` step in plugin-tests.yml.
+      'tests/integration/attendance-notification-redelivery-route.db.test.ts',
+      // DT-OPS-02 P2 follow-up: preview/apply auto-admission-candidate-count parity.
+      // DATABASE_URL-gated (describeIfDatabase). Excluded from the no-DB default job so it
+      // doesn't skip-green, and wired as a WHOLE FILE into the `Run approval real-DB
+      // integration` step in plugin-tests.yml where it runs against real Postgres every PR.
+      'tests/integration/directory-sync-preview-apply-parity.db.test.ts',
       // A-2a approval.task_created trigger chain: DATABASE_URL-gated (describeIfDatabase). Excluded
       // from the no-DB default job so it doesn't skip-green, and wired as a WHOLE FILE into the
       // automation real-DB step in plugin-tests.yml where it runs against real Postgres every PR.
       'tests/integration/automation-approval-task-created-trigger.test.ts',
       // A-2b approval-card action chain: DATABASE_URL-gated. Same two-point wiring (no skip-green).
       'tests/integration/automation-dingtalk-approval-card-action.test.ts',
+      // DT-OPS-04 per-corp credential scoping: DATABASE_URL-gated. It deliberately UNSETS the
+      // DingTalk env vars (the env-first short-circuit is what hid the bug), so it must never run
+      // in the no-DB job. Wired as a WHOLE FILE into the multitable real-DB step.
+      'tests/integration/dingtalk-person-message-integration-scoping.db.test.ts',
       // A-4 card-delivery wrapper: DATABASE_URL-gated. Same two-point wiring (no skip-green).
       'tests/integration/approval-card-delivery-wrapper.db.test.ts',
+      // B-3 interactive-card callback adapter: DATABASE_URL-gated, and its per-corp test UNSETS
+      // APPROVAL_CARD_LINK_SECRET (env-first short-circuit would hide the stored-secret path).
+      // Same two-point wiring (no skip-green) — whole file in the multitable real-DB step.
+      'tests/integration/dingtalk-approval-card-callback.db.test.ts',
       // DT-HARDEN-07 primary-department write → approval-routing golden: DATABASE_URL-gated
       // (describeIfDatabase). Excluded from the no-DB default job so it cannot skip-green, and
       // wired as a WHOLE FILE into the `Run approval real-DB integration` step in plugin-tests.yml.
@@ -78,6 +124,11 @@ export default defineConfig({
       // DT-HARDEN-07 backfill idempotence + dry-run honesty: DATABASE_URL-gated. Same two-point
       // wiring — the script had zero coverage, which is how a non-idempotent backfill shipped.
       'tests/integration/directory-primary-department-backfill.db.test.ts',
+      // DT-OPS-01 deprovision selection: DATABASE_URL-gated (describeIfDatabase). These goldens
+      // exist *because* a fake client made the selection SQL untestable — running them without a
+      // DB would skip-green and restore exactly that hole. Excluded here, wired as a WHOLE FILE
+      // into the `Run approval real-DB integration` step in plugin-tests.yml.
+      'tests/integration/directory-deprovision-selection.db.test.ts',
       // T36-1: projection per-row participant read + the #3537 fence goldens (both were previously
       // wired into NO workflow — skip-green; now run in plugin-tests' approval real-DB step).
       'tests/integration/approval-projection-visibility.db.test.ts',
@@ -86,6 +137,24 @@ export default defineConfig({
       'tests/integration/approval-route-preview-substrate.db.test.ts',
       'tests/integration/approval-route-preview-api.db.test.ts',
       'tests/integration/approval-template-route-preview-api.db.test.ts',
+      // DT-OPS-03 P2-2: manager-binding coverage CTE + failure-streak ORDER BY are mock-only in
+      // every unit test (corrupting either leaves all 13 unit tests green). DATABASE_URL-gated
+      // (describeIfDatabase). Excluded from the no-DB default job so it doesn't skip-green, and
+      // wired as a WHOLE FILE into the `Run approval real-DB integration` step in
+      // plugin-tests.yml where it runs against real Postgres every PR.
+      'tests/integration/directory-sync-alert-coverage.db.test.ts',
+      // F5 files-orphan-blob-retention (blob_purged_at migration + sweepOrphanFileBlobs GF5-8 matrix):
+      // DATABASE_URL-gated (describeDb), isolated per-test schema. Excluded from the no-DB default job
+      // so it doesn't skip-green, and wired as a WHOLE FILE into the `Run attendance integration tests`
+      // step in plugin-tests.yml (alongside files-storage-key-migration.db.test.ts) where it runs
+      // against real Postgres every PR.
+      'tests/integration/files-orphan-blob-retention.db.test.ts',
+      // F9 owner CHANGES-REQUESTED (GF9-1/GF9-2): multitable_attachments blob_purged_at migration +
+      // deleteAttachmentBinary index-free delete + sweepMultitableAttachmentBlobPurge compensating-sweep
+      // matrix, same shape/rationale as the F5 entry immediately above (DATABASE_URL-gated describeDb,
+      // isolated per-test schema). Excluded from the no-DB default job so it doesn't skip-green, and
+      // wired as a WHOLE FILE into the `Run attendance integration tests` step in plugin-tests.yml.
+      'tests/integration/multitable-attachment-blob-purge.db.test.ts',
       'tests/integration/attendance-comp-time-expiry-reminder.test.ts',
       'tests/integration/attendance-expiry-service.test.ts',
       'tests/integration/attendance-notification-deliveries.test.ts',
@@ -102,6 +171,19 @@ export default defineConfig({
       // re-add/self-scoped DELETE/reader-deny 403/cascade) is no longer invisible debt.
       'tests/integration/comment-reactions.api.test.ts',
       'tests/integration/multitable-oapi1-comments-read-realdb.test.ts',
+      // D-1 delete-revision parity goldens: real Postgres only (describeIfDatabase would merely
+      // skip-green here, re-opening the "real-DB spec silently skips in the no-DB lane" hole) —
+      // whole-file wired into `Run multitable real-DB integration` in plugin-tests.yml.
+      'tests/integration/multitable-d1-delete-revision-parity-realdb.test.ts',
+      // 4c-3 RB matrix: real Postgres only — whole-file wired into `Run multitable real-DB
+      // integration` in plugin-tests.yml (describeIfDatabase alone would skip-green here).
+      'tests/integration/multitable-undelete-inbound-replay-realdb.test.ts',
+      'tests/integration/multitable-undelete-pit-inbound-replay-realdb.test.ts',
+      // 4c-3 §7 R8 absorption-audit hardening (P3-1/P3-2): PIT-resurrect inbound-replay anchor
+      // heuristic goldens + PIT-reset inline-delete inbound-capture goldens. Real Postgres only —
+      // whole-file wired into `Run multitable real-DB integration` in plugin-tests.yml.
+      'tests/integration/multitable-undelete-inbound-resurrect-realdb.test.ts',
+      'tests/integration/multitable-reset-pit-inbound-capture-realdb.test.ts',
       // W6 full-HTTP-path approve->resume seam: mounts authRouter + approvalsRouter on an
       // ephemeral port against real Postgres, so it is excluded from the default run and wired
       // into the dedicated `Run multitable real-DB integration` job in plugin-tests.yml.
@@ -117,6 +199,11 @@ export default defineConfig({
       // T1-2 inbound webhook trigger: mounted-route + real-DB execution row. Excluded from the no-DB
       // default job so it does not skip-green, and wired as a WHOLE FILE into the multitable real-DB lane.
       'tests/integration/multitable-inbound-webhook-trigger.test.ts',
+      // R1 (DT-HARDEN-08 follow-up) dingtalk_group_deliveries retention sweep: DATABASE_URL-gated
+      // (describeIfDatabase). Excluded from the no-DB default job so it cannot skip-green, and wired
+      // as a WHOLE FILE into the `Run multitable real-DB integration` step in plugin-tests.yml where
+      // it runs against real Postgres every PR.
+      'tests/integration/dingtalk-group-delivery-retention.db.test.ts',
       // comments.api.test.ts needs setup.integration.ts + a live DB. It stays
       // CI-excluded (NOT wired) because 8 of its tests have a pre-existing real-wire
       // failure (CommentService.mapRowToComment drops containerId/targetId/
@@ -124,6 +211,13 @@ export default defineConfig({
       // keystone that used to live here moved to comment-reactions.api.test.ts.
       'tests/integration/comments.api.test.ts',
       'tests/integration/events-api.test.ts',
+      // multitable-attachments.api.test.ts self-mocks its DB pool (no live DB needed) and its own
+      // 12/12 pass standalone; it stays excluded here (unrelated to the comments.api.test.ts note
+      // above) and is NOT wired into the real-DB job. Its F2 security-critical subset (attachment
+      // download row-deny 404 / field-mask 403, #3973) is independently covered by a self-contained
+      // real-DB file, tests/integration/multitable-attachment-readgate.security.test.ts, wired as a
+      // WHOLE FILE into the `Run multitable real-DB integration` step in plugin-tests.yml — so F2
+      // has a live CI regression guard even though this parent file remains excluded/unwired.
       'tests/integration/multitable-attachments.api.test.ts',
       // multitable-context.api.test.ts needs setup.integration.ts + a live DB (its template
       // catalog/install routes go through rbacGuard, which 403s under the default setup). It

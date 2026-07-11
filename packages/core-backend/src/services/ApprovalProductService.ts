@@ -12,6 +12,8 @@ import type {
   ApprovalTemplateListItemDTO,
   ApprovalTemplateVisibilityScope,
   ApprovalTemplateVersionDetailDTO,
+  ApprovalTemplateVersionSummaryDTO,
+  ApprovalTemplateUsageDTO,
   ApprovalGraph,
   ApprovalMode,
   ApprovalRequesterSnapshot,
@@ -159,6 +161,11 @@ type TemplateVersionRow = {
   status: 'draft' | 'published' | 'archived'
   form_schema: Record<string, unknown>
   approval_graph: Record<string, unknown>
+  /**
+   * B3-09 — optional free-text note captured at publish time. `null` for a still-draft version, a
+   * published-without-a-note version, or any version predating the column.
+   */
+  publish_note?: string | null
   created_at: Date
   updated_at: Date
 }
@@ -1670,6 +1677,7 @@ function toApprovalTemplateVersionDetailDTO(bundle: TemplateBundle): ApprovalTem
     approvalGraph: asApprovalGraph(bundle.version.approval_graph),
     runtimeGraph: bundle.publishedDefinition ? asRuntimeGraph(bundle.publishedDefinition.runtime_graph) : null,
     publishedDefinitionId: bundle.publishedDefinition?.id || null,
+    publishNote: bundle.version.publish_note ?? null,
     createdAt: bundle.version.created_at.toISOString(),
     updatedAt: bundle.version.updated_at.toISOString(),
   }
@@ -1769,6 +1777,29 @@ const APPROVAL_TEMPLATE_CATEGORY_MAX_LENGTH = 64
 const APPROVAL_TEMPLATE_VISIBILITY_ID_MAX_LENGTH = 128
 const APPROVAL_TEMPLATE_VISIBILITY_ID_MAX_COUNT = 100
 const APPROVAL_TEMPLATE_VISIBILITY_TYPES = new Set(['all', 'dept', 'role', 'user'])
+const APPROVAL_TEMPLATE_PUBLISH_NOTE_MAX_LENGTH = 2000
+
+/**
+ * B3-09 — publish-note normalization. Unlike category (which distinguishes "leave unchanged"
+ * `undefined` from "clear" `null`), a publish note has no prior value to preserve: every publish
+ * call is a fresh action, so `undefined` and `null` both mean "no note" and normalize to `null`.
+ */
+function normalizeTemplatePublishNote(value: unknown): string | null {
+  if (value === undefined || value === null) return null
+  if (typeof value !== 'string') {
+    throw new ServiceError('note must be a string', 400, 'VALIDATION_ERROR')
+  }
+  const trimmed = value.trim()
+  if (trimmed.length === 0) return null
+  if (trimmed.length > APPROVAL_TEMPLATE_PUBLISH_NOTE_MAX_LENGTH) {
+    throw new ServiceError(
+      `note must be at most ${APPROVAL_TEMPLATE_PUBLISH_NOTE_MAX_LENGTH} characters`,
+      400,
+      'VALIDATION_ERROR',
+    )
+  }
+  return trimmed
+}
 
 function normalizeTemplateCategory(value: unknown): string | null | undefined {
   if (value === undefined) return undefined
@@ -2773,6 +2804,44 @@ export class ApprovalProductService {
     return bundle ? toApprovalTemplateVersionDetailDTO(bundle) : null
   }
 
+  /**
+   * B3-09 (模板版本历史): every version of a template, newest first, with its publish note and
+   * (if it was ever published) the active published_definition id. Full formSchema/approvalGraph
+   * are intentionally omitted — callers fetch those on demand via getTemplateVersion.
+   */
+  async listTemplateVersions(templateId: string): Promise<ApprovalTemplateVersionSummaryDTO[]> {
+    if (!pool) throw new Error('Database not available')
+
+    const templateResult = await pool.query<{ id: string }>(
+      `SELECT id FROM approval_templates WHERE id = $1`,
+      [templateId],
+    )
+    if (!templateResult.rows[0]) {
+      throw new ServiceError('Approval template not found', 404, 'APPROVAL_TEMPLATE_NOT_FOUND')
+    }
+
+    const versionsResult = await pool.query<TemplateVersionRow & { published_definition_id: string | null }>(
+      `SELECT v.*, pd.id AS published_definition_id
+       FROM approval_template_versions v
+       LEFT JOIN approval_published_definitions pd
+         ON pd.template_version_id = v.id AND pd.is_active = TRUE
+       WHERE v.template_id = $1
+       ORDER BY v.version DESC`,
+      [templateId],
+    )
+
+    return versionsResult.rows.map((row) => ({
+      id: row.id,
+      templateId: row.template_id,
+      version: row.version,
+      status: row.status,
+      publishNote: row.publish_note ?? null,
+      publishedDefinitionId: row.published_definition_id ?? null,
+      createdAt: row.created_at.toISOString(),
+      updatedAt: row.updated_at.toISOString(),
+    }))
+  }
+
   async createTemplate(request: CreateApprovalTemplateRequest): Promise<ApprovalTemplateDetailDTO> {
     if (!pool) throw new Error('Database not available')
 
@@ -2996,6 +3065,9 @@ export class ApprovalProductService {
     if (!pool) throw new Error('Database not available')
 
     const policy = assertRuntimePolicy(request.policy)
+    // B3-09 — normalized BEFORE the transaction opens (fail fast on an over-length note without
+    // ever touching the DB), same ordering discipline as the policy/graph validators below.
+    const publishNote = normalizeTemplatePublishNote(request.note)
     let client: ApprovalDbClient | null = null
     try {
       client = await pool.connect()
@@ -3011,6 +3083,16 @@ export class ApprovalProductService {
       }
       if (!template.latest_version_id) {
         throw new ServiceError('Approval template has no version to publish', 400, 'APPROVAL_TEMPLATE_VERSION_NOT_FOUND')
+      }
+      // B3-08 review fix (P3-1): publish previously flipped status to 'published' unconditionally,
+      // silently reactivating an ARCHIVED template — bypassing the explicit 启用 confirm that is the
+      // whole point of the archive state machine. Fail closed instead: unarchive first, then publish.
+      if (template.status === 'archived') {
+        throw new ServiceError(
+          'Approval template is archived — unarchive it before publishing',
+          409,
+          'APPROVAL_TEMPLATE_ARCHIVED',
+        )
       }
 
       const versionResult = await client.query<TemplateVersionRow>(
@@ -3057,10 +3139,10 @@ export class ApprovalProductService {
 
       const updatedVersionResult = await client.query<TemplateVersionRow>(
         `UPDATE approval_template_versions
-         SET status = 'published', updated_at = now()
+         SET status = 'published', publish_note = $2, updated_at = now()
          WHERE id = $1
          RETURNING *`,
-        [version.id],
+        [version.id, publishNote],
       )
       const updatedVersion = updatedVersionResult.rows[0]
 
@@ -3085,6 +3167,117 @@ export class ApprovalProductService {
       throw error
     } finally {
       client?.release()
+    }
+  }
+
+  /**
+   * B3-08 (模板治理 — 停用): PUBLISHED → ARCHIVED. This is the only supported way to REACH the
+   * `archived` status; once there, `assembleCreationContext`'s existing
+   * `bundle.template.status !== 'published'` gate (shared by createApproval + route-preview) fails
+   * closed for it exactly like it already does for `draft` — no new gate needed, only a new way to
+   * get a template into that state on purpose. Archiving is a pure metadata flip: it never touches
+   * `approval_published_definitions.is_active` or any `approval_instances` row, so every in-flight
+   * instance created from this template keeps running unaffected (dispatchAction resolves its
+   * runtime graph from the instance's own frozen published_definition_id, never from the parent
+   * template's current status).
+   */
+  async archiveTemplate(id: string): Promise<ApprovalTemplateDetailDTO> {
+    return this.transitionTemplateStatus(id, 'published', 'archived', {
+      code: 'APPROVAL_TEMPLATE_ARCHIVE_INVALID_STATUS',
+      message: 'Only a published approval template can be archived',
+    })
+  }
+
+  /**
+   * B3-08 (模板治理 — 启用): reverses archiveTemplate (ARCHIVED → PUBLISHED). Immediately reachable
+   * again for new createApproval / route-preview calls — the template's published_definition never
+   * had is_active toggled off, so nothing needs to be re-published.
+   */
+  async unarchiveTemplate(id: string): Promise<ApprovalTemplateDetailDTO> {
+    return this.transitionTemplateStatus(id, 'archived', 'published', {
+      code: 'APPROVAL_TEMPLATE_UNARCHIVE_INVALID_STATUS',
+      message: 'Only an archived approval template can be reactivated',
+    })
+  }
+
+  private async transitionTemplateStatus(
+    id: string,
+    fromStatus: 'draft' | 'published' | 'archived',
+    toStatus: 'draft' | 'published' | 'archived',
+    onInvalid: { code: string; message: string },
+  ): Promise<ApprovalTemplateDetailDTO> {
+    if (!pool) throw new Error('Database not available')
+
+    let client: ApprovalDbClient | null = null
+    try {
+      client = await pool.connect()
+      await client.query('BEGIN')
+
+      const templateResult = await client.query<TemplateRow>(
+        `SELECT * FROM approval_templates WHERE id = $1 FOR UPDATE`,
+        [id],
+      )
+      const template = templateResult.rows[0]
+      if (!template) {
+        throw new ServiceError('Approval template not found', 404, 'APPROVAL_TEMPLATE_NOT_FOUND')
+      }
+      // Fail-closed state machine: archive only from published, unarchive only from archived. A
+      // draft template is already unreachable via createApproval (the NOT_PUBLISHED gate covers it),
+      // so there is deliberately no draft->archived transition here — archiving is specifically the
+      // admin-visible "take a live template out of service" action.
+      if (template.status !== fromStatus) {
+        throw new ServiceError(onInvalid.message, 409, onInvalid.code)
+      }
+
+      await client.query(
+        `UPDATE approval_templates SET status = $1, updated_at = now() WHERE id = $2`,
+        [toStatus, id],
+      )
+
+      const bundle = await this.loadTemplateBundleWithClient(client, id, undefined, 'latest')
+      if (!bundle) {
+        throw new ServiceError('Approval template version not found', 404, 'APPROVAL_TEMPLATE_VERSION_NOT_FOUND')
+      }
+
+      await client.query('COMMIT')
+      return toApprovalTemplateDetailDTO(bundle)
+    } catch (error) {
+      await rollbackQuietly(client)
+      throw error
+    } finally {
+      client?.release()
+    }
+  }
+
+  /**
+   * B3-08 用量/blast-radius indicator — surfaced by the FE archive confirm dialog (mirrors the
+   * `automationDeleteRuleConfirmMessage` / DelegationSettingsView.disable() precedent: name the
+   * action, state the blast radius, note that in-flight work is unaffected). `activeInstanceCount`
+   * uses the SAME "not a terminal status" definition assertTemplateVersionDeletable already uses.
+   */
+  async getTemplateUsage(id: string): Promise<ApprovalTemplateUsageDTO> {
+    if (!pool) throw new Error('Database not available')
+
+    const templateResult = await pool.query<{ id: string }>(
+      `SELECT id FROM approval_templates WHERE id = $1`,
+      [id],
+    )
+    if (!templateResult.rows[0]) {
+      throw new ServiceError('Approval template not found', 404, 'APPROVAL_TEMPLATE_NOT_FOUND')
+    }
+
+    const usageResult = await pool.query<{ total_count: string; active_count: string }>(
+      `SELECT COUNT(*)::text AS total_count,
+              COUNT(*) FILTER (WHERE status <> ALL($2::text[]))::text AS active_count
+       FROM approval_instances
+       WHERE template_id = $1`,
+      [id, [...APPROVAL_TERMINAL_STATUSES]],
+    )
+    const row = usageResult.rows[0]
+    return {
+      templateId: id,
+      instanceCount: Number.parseInt(row?.total_count ?? '0', 10),
+      activeInstanceCount: Number.parseInt(row?.active_count ?? '0', 10),
     }
   }
 

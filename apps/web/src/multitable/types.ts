@@ -389,6 +389,9 @@ export interface HistoryChange {
   changedFieldIds: string[]
   before: Record<string, unknown> | null
   after: Record<string, unknown> | null
+  /** R11 back-reference: the source record-version this `source='restore'` change restored from, else
+   *  null/absent. Optional so a pre-R11 backend payload still typechecks. The badge renders only when non-null. */
+  restoredFromVersion?: number | null
 }
 
 export interface HistoryBatchDetail {
@@ -400,6 +403,10 @@ export interface HistoryBatchDetail {
   visibleAffectedRecordCount: number
   visibleAffectedFieldCount: number
   changes: HistoryChange[]
+  /** all-tables-B (R11): server-masked field-id → display-name map, keyed by sheetId, for the fields that
+   *  appear in this batch's (post-mask) changes across ALL involved sheets. Optional so a pre-R11 backend
+   *  payload still typechecks; the FE degrades to raw ids / active-table names when absent. */
+  fieldNames?: Record<string, Record<string, string>>
 }
 
 export interface MetaRecordSubscription {
@@ -1179,6 +1186,18 @@ export interface AutomationRunView {
   steps: AutomationRunStepView[]
   triggerEvent?: unknown
   ruleSnapshot?: unknown
+  /**
+   * B3-11 — additive, LIST-ONLY display labels resolved server-side from the
+   * current `automation_rules`/`meta_sheets` name (batched lookup, never N+1).
+   * Optional because only the list endpoint (`GET /automation-executions`)
+   * populates them; detail/retry/resume responses omit them (unchanged).
+   * A deleted rule/sheet degrades HONESTLY to the raw id (never `undefined`) —
+   * `ruleName === ruleId` / `sheetName === sheetId` signals "unresolved", NOT
+   * "same value twice".
+   */
+  ruleName?: string
+  /** `null` when the execution never had a sheetId; the raw sheetId when unresolved. */
+  sheetName?: string | null
 }
 
 export interface AutomationStats {
@@ -1495,7 +1514,8 @@ export interface DingTalkPersonDelivery {
   subject: string
   content: string
   success: boolean
-  status?: 'success' | 'failed' | 'skipped'
+  /** `outcome_unknown` (PR #4046 Phase B): send attempted, response lost — maybe delivered, never auto-resent. */
+  status?: 'success' | 'failed' | 'skipped' | 'outcome_unknown'
   httpStatus?: number
   responseBody?: string
   errorMessage?: string

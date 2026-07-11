@@ -44,6 +44,7 @@ import {
 import { isFieldAlwaysReadOnly, isFieldPermissionHidden } from './permission-derivation'
 import { publishMultitableSheetRealtime } from './realtime-publish'
 import { recordRecordRevision } from './record-history-service'
+import { replayInboundLinks, isRecordUndeleteInboundEnabled, type InboundReplayResult } from './inbound-link-replay'
 import {
   notifyRecordSubscribersBestEffort,
   type NotifyRecordSubscribersInput,
@@ -239,6 +240,15 @@ export type RecordPatchResult = {
   version: number
   fields: UniverMetaField[]
   patch: Record<string, unknown>
+}
+
+// 4c-3: mirrors permission-service's 42703 guard — lets a deploy window where the code ships before
+// the delete_revision_id migration degrade to the legacy trash INSERT instead of failing the delete.
+function isUndefinedColumnError(err: unknown, columnName: string): boolean {
+  const code = (err as { code?: string } | null)?.code
+  const message = err instanceof Error ? err.message : String(err)
+  if (code === '42703') return message.includes(columnName)
+  return false
 }
 
 function isUndefinedTableError(err: unknown, tableName: string): boolean {
@@ -853,12 +863,27 @@ export class RecordService {
           | Record<string, unknown>
           | undefined
         const baseId = baseRow && typeof baseRow.base_id === 'string' ? baseRow.base_id : null
-        await query(
-          `INSERT INTO meta_records_trash
-             (record_id, sheet_id, base_id, data, original_version, created_by, deleted_by, original_created_at, original_updated_at)
-           VALUES ($1, $2, $3, $4::jsonb, $5, $6, $7, $8, $9)`,
-          [recordId, sheetId, baseId, JSON.stringify(snapshot), serverVersion, createdBy, actorId, originalCreatedAt, originalUpdatedAt],
-        )
+        // 4c-3 anchor (§2): record the delete revision's pre-generated id so restore can NAME this
+        // deletion's inbound-link tombstones (`WHERE source_revision_id = … AND reason='record_delete'`).
+        // A deploy window where this code runs against a pre-migration schema degrades to the legacy
+        // INSERT shape (delete_revision_id stays NULL ⇒ restore honestly reports
+        // inboundEdgesRecoverable=false) — the delete itself must never fail on the anchor column.
+        try {
+          await query(
+            `INSERT INTO meta_records_trash
+               (record_id, sheet_id, base_id, data, original_version, created_by, deleted_by, original_created_at, original_updated_at, delete_revision_id)
+             VALUES ($1, $2, $3, $4::jsonb, $5, $6, $7, $8, $9, $10)`,
+            [recordId, sheetId, baseId, JSON.stringify(snapshot), serverVersion, createdBy, actorId, originalCreatedAt, originalUpdatedAt, recordDeleteRevisionId],
+          )
+        } catch (err) {
+          if (!isUndefinedColumnError(err, 'delete_revision_id')) throw err
+          await query(
+            `INSERT INTO meta_records_trash
+               (record_id, sheet_id, base_id, data, original_version, created_by, deleted_by, original_created_at, original_updated_at)
+             VALUES ($1, $2, $3, $4::jsonb, $5, $6, $7, $8, $9)`,
+            [recordId, sheetId, baseId, JSON.stringify(snapshot), serverVersion, createdBy, actorId, originalCreatedAt, originalUpdatedAt],
+          )
+        }
       } catch (err) {
         if (!isUndefinedTableError(err, 'meta_records_trash')) throw err
       }
@@ -905,7 +930,7 @@ export class RecordService {
     // cardinality of hidden trashed records (deny-aware count, not just deny-filtered rows).
     excludeRecordIds?: string[]
   }): Promise<{
-    records: Array<{ recordId: string; sheetId: string; data: Record<string, unknown>; originalVersion: number; createdBy: string | null; deletedBy: string | null; deletedAt: string }>
+    records: Array<{ recordId: string; sheetId: string; data: Record<string, unknown>; originalVersion: number; createdBy: string | null; deletedBy: string | null; deletedAt: string; inboundEdgesRecoverable?: boolean }>
     total: number
   }> {
     const { sheetId, access, resolveSheetAccess } = input
@@ -931,13 +956,41 @@ export class RecordService {
       const totalRes = await this.pool.query(countSql, countParams)
       const total = Number((totalRes.rows[0] as { n?: number } | undefined)?.n ?? 0)
       const pageParams: unknown[] = [sheetId, limit, offset]
-      let pageSql = `SELECT record_id, sheet_id, data, original_version, created_by, deleted_by, deleted_at
+      // 4c-3: SELECT * (schema-tolerant) so delete_revision_id is available for the §6 signal on a
+      // migrated DB and simply absent (→ signal omitted) on a pre-migration one.
+      let pageSql = `SELECT *
          FROM meta_records_trash WHERE sheet_id = $1`
       if (ownOnly) { pageParams.push(access.userId); pageSql += ` AND created_by = $${pageParams.length}` }
       if (excludeIds) { pageParams.push(excludeIds); pageSql += ` AND record_id <> ALL($${pageParams.length}::text[])` }
       pageSql += ' ORDER BY deleted_at DESC LIMIT $2 OFFSET $3'
       const rowsRes = await this.pool.query(pageSql, pageParams)
-      const records = (rowsRes.rows as Array<Record<string, unknown>>).map((r) => ({
+      const pageRows = rowsRes.rows as Array<Record<string, unknown>>
+      // 4c-3 §6 honest signal: inboundEdgesRecoverable per trash row — true only when the row has a
+      // delete_revision_id anchor AND its tombstones still exist (retention may have removed them,
+      // pre-migration rows have no anchor). One batched existence query; omitted-when-false so the
+      // response shape for legacy rows (and with the flag off) is unchanged.
+      const recoverableAnchors = new Set<string>()
+      if (isRecordUndeleteInboundEnabled()) {
+        const anchors = pageRows
+          .map((r) => (typeof r.delete_revision_id === 'string' ? r.delete_revision_id : null))
+          .filter((v): v is string => !!v)
+        if (anchors.length > 0) {
+          const tombRes = await this.pool
+            .query(
+              `SELECT DISTINCT source_revision_id FROM meta_link_tombstones
+                WHERE source_revision_id = ANY($1::uuid[]) AND reason = 'record_delete'`,
+              [anchors],
+            )
+            .catch((err: unknown) => {
+              if (isUndefinedTableError(err, 'meta_link_tombstones')) return { rows: [] as unknown[] }
+              throw err
+            })
+          for (const row of tombRes.rows as Array<{ source_revision_id?: string }>) {
+            if (row.source_revision_id) recoverableAnchors.add(row.source_revision_id)
+          }
+        }
+      }
+      const records = pageRows.map((r) => ({
         recordId: String(r.record_id),
         sheetId: String(r.sheet_id),
         data: normalizeJson(r.data),
@@ -945,6 +998,9 @@ export class RecordService {
         createdBy: typeof r.created_by === 'string' ? r.created_by : null,
         deletedBy: typeof r.deleted_by === 'string' ? r.deleted_by : null,
         deletedAt: r.deleted_at instanceof Date ? r.deleted_at.toISOString() : String(r.deleted_at ?? ''),
+        ...(typeof r.delete_revision_id === 'string' && recoverableAnchors.has(r.delete_revision_id)
+          ? { inboundEdgesRecoverable: true as const }
+          : {}),
       }))
       return { records, total }
     } catch (err) {
@@ -960,12 +1016,13 @@ export class RecordService {
     actorId: string | null
     access: AccessInfo
     resolveSheetAccess: RecordDeleteInput['resolveSheetAccess']
-  }): Promise<{ recordId: string; sheetId: string }> {
+  }): Promise<{ recordId: string; sheetId: string; inbound?: InboundReplayResult & { recoverable: boolean } }> {
     const { recordId, actorId, access, resolveSheetAccess } = input
+    // 4c-3: SELECT * so the read is schema-tolerant — on a pre-migration DB `delete_revision_id`
+    // is simply absent (→ undefined → no inbound replay, honest), instead of a 42703 failure.
     const trashRes = await this.pool
       .query(
-        `SELECT id, record_id, sheet_id, data, created_by, original_created_at, original_updated_at
-         FROM meta_records_trash WHERE record_id = $1 ORDER BY deleted_at DESC LIMIT 1`,
+        `SELECT * FROM meta_records_trash WHERE record_id = $1 ORDER BY deleted_at DESC LIMIT 1`,
         [recordId],
       )
       .catch((err: unknown) => {
@@ -1008,7 +1065,18 @@ export class RecordService {
     // must not depend on snapshot hygiene; an explicit skip makes it structural.
     const linkFieldIds = sheetFields.filter((f) => f.type === 'link' && !isFieldAlwaysReadOnly(f)).map((f) => f.id)
 
+    let inboundOut: (InboundReplayResult & { recoverable: boolean }) | undefined
+    const inboundEnabled = isRecordUndeleteInboundEnabled()
     await this.pool.transaction(async ({ query }) => {
+      // 4c-3 C4: the trash row is re-read FOR UPDATE inside the txn — two concurrent restores of the
+      // same record serialize here; the loser sees the row gone (winner deleted it on success) and
+      // gets a clean 409 instead of racing to a duplicate insert / double replay.
+      const locked = await query('SELECT * FROM meta_records_trash WHERE id = $1 FOR UPDATE', [trashPk])
+      if ((locked.rows as unknown[]).length === 0) {
+        throw new RecordRestoreConflictError(`Record already restored by a concurrent request: ${recordId}`)
+      }
+      const lockedRow = locked.rows[0] as Record<string, unknown>
+      const deleteRevisionId = typeof lockedRow.delete_revision_id === 'string' ? lockedRow.delete_revision_id : null
       const occupied = await query('SELECT 1 FROM meta_records WHERE id = $1 FOR UPDATE', [recordId])
       if (occupied.rows.length > 0) {
         throw new RecordRestoreConflictError(`Record id is occupied, cannot restore: ${recordId}`)
@@ -1039,6 +1107,20 @@ export class RecordService {
           )
         }
       }
+      // 4c-3: inbound-edge replay — MUST run after the outbound loop above (the NOT EXISTS guard
+      // must see outbound-inserted rows so a self-link is not doubled). Flag default OFF (C7):
+      // off ⇒ this whole block is skipped and restore behaves byte-identically to today.
+      // C1 forward-only: a NULL anchor (pre-migration trash row) or an anchor with no tombstones
+      // (capture flag was off at delete time, or retention removed them) ⇒ zero replay +
+      // recoverable=false — reported honestly, never reconstructed from heuristics.
+      if (inboundEnabled) {
+        if (deleteRevisionId) {
+          const replay = await replayInboundLinks(query, deleteRevisionId)
+          inboundOut = { ...replay, recoverable: replay.total > 0 }
+        } else {
+          inboundOut = { replayed: 0, skipped: { neighborGone: 0, fieldGone: 0, fieldNotLink: 0, fieldMirror: 0, neighborDeclined: 0, alreadyPresent: 0 }, total: 0, recoverable: false }
+        }
+      }
       const restoredVersion = Number((inserted.rows[0] as { version?: number } | undefined)?.version ?? 1)
       await recordRecordRevision(query, {
         sheetId,
@@ -1064,7 +1146,7 @@ export class RecordService {
     })
     this.eventBus.emit('multitable.record.created', withAutomationEventId({ sheetId, recordId, actorId }))
 
-    return { recordId, sheetId }
+    return { recordId, sheetId, ...(inboundOut ? { inbound: inboundOut } : {}) }
   }
 
   async patchRecord(input: RecordPatchInput): Promise<RecordPatchResult> {

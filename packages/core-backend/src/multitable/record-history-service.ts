@@ -26,6 +26,16 @@ export interface RecordRevisionInput {
    */
   batchId?: string | null
   /**
+   * R11 restore back-reference (OD-0=(a)): the SOURCE record-version this write restored from. Set ONLY by
+   * the three record-version restore routes (via patchRecords) — every other caller (create/update/delete,
+   * automation, plugin, and the non-version-restore `source='restore'` emitters: PIT-resurrect, PIT-reset,
+   * lossy-retype-revert) omits it ⇒ column stays NULL. The History Center badge keys on NON-NULL, never on
+   * `source='restore'`. Column added by migration zzzz20260711000000_add_meta_record_revisions_restored_from_version;
+   * a pre-migration deploy window degrades to the base
+   * INSERT (value silently NULL), never failing the write.
+   */
+  restoredFromVersion?: number | null
+  /**
    * 4c-2: pre-generate the row's own id when a caller needs to know it BEFORE this INSERT runs — e.g.
    * `deleteRecord` anchors an inbound-link tombstone's `source_revision_id` to this delete's OWN revision
    * id, captured earlier in the same transaction than this call. Omitted → random uuid (identical to
@@ -49,37 +59,69 @@ export interface RecordRevisionEntry {
   createdAt: string
 }
 
+// R11 deploy-window guard for restored_from_version (migration zzzz20260711000000_add_meta_record_revisions_restored_from_version). recordRecordRevision runs INSIDE
+// patchRecords' transaction, so a 42703 from an extended INSERT would POISON the txn (a try/catch fallback
+// then fails with "current transaction is aborted"). Instead, probe the column's existence with a SELECT
+// (never poisons) and pick the INSERT shape. Cache only the POSITIVE result: once the column exists it never
+// disappears, so we stop probing; a negative is re-checked (the migration may land mid-process in a rolling
+// deploy). Only reached when restoredFromVersion is non-null (the three record-version restore routes).
+let restoredFromVersionColumnPresent = false
+async function hasRestoredFromVersionColumn(query: QueryFn): Promise<boolean> {
+  if (restoredFromVersionColumnPresent) return true
+  // Scope to the active search-path schemas (current_schemas(false) = effective search_path, resolution order) so a
+  // meta_record_revisions in ANOTHER schema that HAS the column can't false-positive us into an extended INSERT
+  // against a search-path table that lacks it — which would 42703-poison the txn the guard exists to protect (the
+  // module-level positive cache would make such a mismatch sticky across a shared-bundle process). Single-schema
+  // prod is unaffected (public is on the path). Defense-in-depth (PR #4124 review NIT).
+  const res = await query(
+    `SELECT 1 FROM information_schema.columns WHERE table_name = 'meta_record_revisions' AND column_name = 'restored_from_version' AND table_schema = ANY(current_schemas(false)) LIMIT 1`,
+  )
+  if ((res.rows as unknown[]).length > 0) {
+    restoredFromVersionColumnPresent = true
+    return true
+  }
+  return false
+}
+
 export async function recordRecordRevision(query: QueryFn, input: RecordRevisionInput): Promise<string> {
   const id = input.id ?? randomUUID()
   const changedFieldIds = Array.from(new Set((input.changedFieldIds ?? []).filter(Boolean)))
+  const baseCols = [
+    id,
+    input.sheetId,
+    input.recordId,
+    input.version,
+    input.action,
+    input.source ?? 'rest',
+    input.actorId ?? null,
+    changedFieldIds,
+    JSON.stringify(input.patch ?? {}),
+    input.snapshot === undefined ? null : JSON.stringify(input.snapshot),
+    input.batchId ?? id,
+  ]
+  const baseInsert = () =>
+    query(
+      `INSERT INTO meta_record_revisions (
+         id, sheet_id, record_id, version, action, source, actor_id, changed_field_ids, patch, snapshot, batch_id
+      )
+       VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, $8::text[], $9::jsonb, $10::jsonb, $11)`,
+      baseCols,
+    )
+  // Base INSERT is the default for every write (zero deploy-window risk). Only a record-version restore
+  // (restoredFromVersion non-null) uses the extended INSERT, gated by a txn-safe column-existence probe so a
+  // pre-migration deploy window degrades to the base shape (restored_from_version silently NULL) rather than
+  // poisoning the enclosing transaction.
+  const restoredFromVersion = input.restoredFromVersion ?? null
+  if (restoredFromVersion === null || !(await hasRestoredFromVersionColumn(query))) {
+    await baseInsert()
+    return id
+  }
   await query(
     `INSERT INTO meta_record_revisions (
-       id,
-       sheet_id,
-       record_id,
-       version,
-       action,
-       source,
-       actor_id,
-       changed_field_ids,
-       patch,
-       snapshot,
-       batch_id
+       id, sheet_id, record_id, version, action, source, actor_id, changed_field_ids, patch, snapshot, batch_id, restored_from_version
     )
-     VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, $8::text[], $9::jsonb, $10::jsonb, $11)`,
-    [
-      id,
-      input.sheetId,
-      input.recordId,
-      input.version,
-      input.action,
-      input.source ?? 'rest',
-      input.actorId ?? null,
-      changedFieldIds,
-      JSON.stringify(input.patch ?? {}),
-      input.snapshot === undefined ? null : JSON.stringify(input.snapshot),
-      input.batchId ?? id,
-    ],
+     VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, $8::text[], $9::jsonb, $10::jsonb, $11, $12)`,
+    [...baseCols, restoredFromVersion],
   )
   return id
 }

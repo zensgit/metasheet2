@@ -10,7 +10,8 @@ import { apiFetch } from '../utils/api'
 export interface ApprovalCardSummary {
   deliveryId: string
   cardState: 'sent' | 'acted' | 'superseded' | 'expired' | 'revoked'
-  sendStatus: 'pending' | 'sent' | 'failed'
+  /** 'outcome_unknown' (PR #4046 Phase B): send attempted, response lost — the card MAY be delivered; the server keeps it actionable. */
+  sendStatus: 'pending' | 'sent' | 'failed' | 'outcome_unknown'
   nodeKey: string
   recipientUserId: string
   viewerIsRecipient: boolean

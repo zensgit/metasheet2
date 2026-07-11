@@ -125,6 +125,86 @@ describe('dingtalk oauth login gates', () => {
     })
   })
 
+  it('bootstraps a missing openId for an existing union-linked identity before strict grant rejection', async () => {
+    vi.stubEnv('DINGTALK_AUTH_REQUIRE_GRANT', '1')
+    const txCalls: Array<{ sql: string; params: unknown[] }> = []
+    pgMocks.transaction.mockImplementation(async (callback: (client: { query: typeof pgMocks.query }) => Promise<unknown>) => {
+      const txQuery = vi.fn(async (sql: string, params: unknown[]) => {
+        txCalls.push({ sql: String(sql), params })
+        if (String(sql).includes('SELECT local_user_id')) return { rows: [] }
+        return { rows: [] }
+      })
+      return callback({ query: txQuery as unknown as typeof pgMocks.query })
+    })
+    pgMocks.query
+      .mockResolvedValueOnce({
+        rows: [{
+          id: 'user-1',
+          email: 'alpha@example.com',
+          name: 'Alpha',
+          role: 'user',
+          is_active: true,
+        }],
+      })
+      .mockResolvedValueOnce({ rows: [] })
+
+    await expect(exchangeCodeForUser('code-openid-bootstrap')).rejects.toMatchObject({
+      name: 'DingTalkLoginPolicyError',
+      statusCode: 403,
+      code: 'grant_required',
+      message: 'DingTalk login is not enabled for this user',
+    })
+
+    const update = txCalls.find(call => call.sql.includes('UPDATE user_external_identities'))
+    expect(update, 'expected rejected login to enrich the missing openId').toBeTruthy()
+    expect(update!.sql).toContain('provider_open_id = $5')
+    expect(update!.sql).not.toContain('last_login_at')
+    expect(update!.sql).toContain("COALESCE(provider_open_id, '') = ''")
+    expect(update!.params).toEqual([
+      'dingtalk',
+      'user-1',
+      'ding-corp:open-1',
+      'union-1',
+      'open-1',
+      'ding-corp',
+      expect.stringContaining('"openId":"open-1"'),
+    ])
+  })
+
+  it('does not bootstrap openId when the OAuth identity already belongs to another local user', async () => {
+    vi.stubEnv('DINGTALK_AUTH_REQUIRE_GRANT', '1')
+    const txCalls: Array<{ sql: string; params: unknown[] }> = []
+    pgMocks.transaction.mockImplementation(async (callback: (client: { query: typeof pgMocks.query }) => Promise<unknown>) => {
+      const txQuery = vi.fn(async (sql: string, params: unknown[]) => {
+        txCalls.push({ sql: String(sql), params })
+        if (String(sql).includes('SELECT local_user_id')) {
+          return { rows: [{ local_user_id: 'other-user' }] }
+        }
+        return { rows: [] }
+      })
+      return callback({ query: txQuery as unknown as typeof pgMocks.query })
+    })
+    pgMocks.query
+      .mockResolvedValueOnce({
+        rows: [{
+          id: 'user-1',
+          email: 'alpha@example.com',
+          name: 'Alpha',
+          role: 'user',
+          is_active: true,
+        }],
+      })
+      .mockResolvedValueOnce({ rows: [] })
+
+    await expect(exchangeCodeForUser('code-openid-conflict')).rejects.toMatchObject({
+      name: 'DingTalkLoginPolicyError',
+      statusCode: 409,
+      code: 'identity_already_bound',
+    })
+
+    expect(txCalls.some(call => call.sql.includes('UPDATE user_external_identities'))).toBe(false)
+  })
+
   it('allows email-linked login when strict grant mode is enabled and grant is present', async () => {
     vi.stubEnv('DINGTALK_AUTH_REQUIRE_GRANT', '1')
     vi.stubEnv('DINGTALK_AUTH_AUTO_LINK_EMAIL', '1')

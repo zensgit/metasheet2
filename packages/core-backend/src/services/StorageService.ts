@@ -1,6 +1,6 @@
 /**
  * 存储服务实现
- * 支持本地文件系统、AWS S3、阿里云OSS等多种存储后端
+ * 支持本地文件系统存储后端（S3 骨架代码已作为死码于 F6 移除，refs #3925）
  */
 
 import * as fs from 'fs/promises'
@@ -15,97 +15,38 @@ import type {
   GetUrlOptions,
   PresignedUploadOptions,
   PresignedUpload,
-  ListOptions,
   StorageUsage
 } from '../types/plugin'
 import { Logger } from '../core/logger'
 
 /**
- * AWS S3 Client interface for type safety
+ * F3 files-storage-integrity design-lock (2026-07-10), G1/G2: derive a display-only safe basename from
+ * a client-supplied filename. Normalizes `\` → `/` first so a Windows-style separator can't survive
+ * `path.basename`, strips any directory component, then removes control chars and leading dots (which
+ * would otherwise produce a hidden file that `scanDirectory` skips, or a `.`/`..` traversal segment).
+ * The result is used ONLY as the last segment of the server-generated `<uuid>/<safeBasename>` key — it
+ * can never widen the physical write location (the uuid dir is server-owned and containment-checked).
  */
-interface S3Client {
-  upload(params: S3UploadParams): { promise(): Promise<S3UploadResult> }
-  getObject(params: S3GetObjectParams): { promise(): Promise<S3GetObjectResult> }
-  deleteObject(params: S3DeleteParams): { promise(): Promise<unknown> }
-  headObject(params: S3HeadObjectParams): { promise(): Promise<S3HeadObjectResult> }
-  getSignedUrl(operation: string, params: Record<string, unknown>): Promise<string> | string
-  listObjectsV2(params: S3ListParams): { promise(): Promise<S3ListResult> }
-  deleteObjects(params: S3DeleteMultipleParams): { promise(): Promise<unknown> }
+export function toSafeStorageBasename(rawName: string): string {
+  const base = path.basename(String(rawName).replace(/\\/g, '/'))
+  // eslint-disable-next-line no-control-regex
+  const stripped = base.replace(/[\x00-\x1f\x7f]/g, '').replace(/^\.+/, '')
+  return stripped.length > 0 ? stripped : 'file'
 }
 
-interface S3UploadParams {
-  Bucket: string
-  Key: string
-  Body: Buffer
-  ContentType?: string
-  Metadata?: Record<string, string>
-  TagSet?: Array<{ Key: string; Value: string }>
-}
-
-interface S3UploadResult {
-  Location: string
-  Bucket: string
-  Key: string
-  ETag?: string
-}
-
-interface S3GetObjectParams {
-  Bucket: string
-  Key: string
-}
-
-interface S3GetObjectResult {
-  Body: Buffer
-  ContentType?: string
-  ContentLength?: number
-}
-
-interface S3DeleteParams {
-  Bucket: string
-  Key: string
-}
-
-interface S3HeadObjectParams {
-  Bucket: string
-  Key: string
-}
-
-interface S3HeadObjectResult {
-  ContentLength: number
-  ContentType: string
-  LastModified: string | Date
-  Metadata?: Record<string, string>
-}
-
-interface S3ListParams {
-  Bucket: string
-  MaxKeys?: number
-  Prefix?: string
-  ContinuationToken?: string
-}
-
-interface S3ListObject {
-  Key: string
-  Size: number
-  LastModified: string | Date
-  ETag?: string
-}
-
-interface S3ListResult {
-  Contents: S3ListObject[]
-  IsTruncated?: boolean
-  NextContinuationToken?: string
-}
-
-interface S3DeleteMultipleParams {
-  Bucket: string
-  Delete: {
-    Objects: Array<{ Key: string }>
+/**
+ * F3 design-lock G2: containment hard floor. Resolves `key` against `basePath` and throws unless the
+ * result stays strictly inside `basePath` (and is not `basePath` itself). Applied on BOTH write and
+ * read — even though F3 server-generates the key, a corrupt/legacy/url-derived key must never let a
+ * read or write escape the storage root.
+ */
+export function resolveWithinBase(basePath: string, key: string): string {
+  const base = path.resolve(basePath)
+  const resolved = path.resolve(base, key)
+  if (resolved !== base && resolved.startsWith(base + path.sep)) {
+    return resolved
   }
-}
-
-interface S3Error extends Error {
-  code?: string
+  throw new Error('Storage key resolves outside the storage base path')
 }
 
 /**
@@ -114,12 +55,23 @@ interface S3Error extends Error {
 interface StorageProvider {
   upload(file: Buffer | Readable, options: UploadOptions): Promise<StorageFile>
   download(fileId: string): Promise<Buffer>
+  /** F3 design-lock G3: read a physical object by its deterministic storage key, bypassing the
+   * in-memory disk-scan index entirely (no warmup window, no id-drift). */
+  downloadByKey(storageKey: string): Promise<Buffer>
+  /** F5 files-orphan-blob-retention design-lock (2026-07-10), GF5-2: delete a physical object by its
+   * deterministic storage key — the symmetric write-side counterpart to `downloadByKey`, and the ONLY
+   * safe way to physically delete an object outside the process that uploaded it (the in-memory
+   * disk-scan index a bare `delete(fileId)` depends on is keyed by `md5(relpath)` after a rebuild, not
+   * the uuid `fileId`, so it silently fails to locate the object in any other process — see F3's root-
+   * cause note on `files.ts`'s DELETE route). Idempotent: deleting an already-gone key (ENOENT) resolves
+   * successfully rather than throwing, so both the delete route and the F5 sweep can treat "delete" and
+   * "confirm already deleted" as the same outcome. */
+  deleteByKey(storageKey: string): Promise<void>
   delete(fileId: string): Promise<void>
   exists(fileId: string): Promise<boolean>
   getFileInfo(fileId: string): Promise<StorageFile | null>
   getFileUrl(fileId: string, options?: GetUrlOptions): Promise<string>
   getPresignedUploadUrl(options: PresignedUploadOptions): Promise<PresignedUpload>
-  listFiles(prefix?: string, options?: ListOptions): Promise<StorageFile[]>
   createFolder(path: string): Promise<void>
   deleteFolder(path: string, recursive?: boolean): Promise<void>
   getStorageUsage(): Promise<StorageUsage>
@@ -183,7 +135,11 @@ class LocalStorageProvider implements StorageProvider {
         } else if (entry.isFile() && !entry.name.startsWith('.')) {
           // 跳过隐藏文件，添加普通文件
           const stats = await fs.stat(fullPath)
-          const fileId = this.generateFileId(currentRelativePath)
+          // F3 design-lock G4: for the F3 layout `<uuid>/<safeBasename>` the id is the uuid directory
+          // segment (deterministic — matches the id returned at upload time), so a rebuild no longer
+          // drifts to `md5(relpath)` for those files. Legacy flat files fall back to the historical
+          // md5 (vestigial — id lookups now go through the DB `storage_key`, not this index).
+          const fileId = this.deriveIdFromRelativePath(currentRelativePath)
 
           files.push({
             id: fileId,
@@ -207,24 +163,31 @@ class LocalStorageProvider implements StorageProvider {
   }
 
   async upload(file: Buffer | Readable, options: UploadOptions): Promise<StorageFile> {
-    const filename = options.filename || this.generateFilename()
-    const filePath = options.path ? path.join(options.path, filename) : filename
-    const fullPath = path.join(this.basePath, filePath)
-    const fileId = options.overwrite ? this.generateFileId(filePath) : this.generateUniqueFileId()
+    // F3 design-lock G1: the physical key is SERVER-generated. The client-supplied `options.path` NEVER
+    // decides the physical layout (that was F3-1: `../` traversal + same-name overwrite via a client
+    // path/filename); `options.filename` survives only as a display-only safe basename and in `url`.
+    // key = `<uuid>/<safeBasename>` — the uuid directory is unique so two uploads of the same name can
+    // never collide, and the id IS that uuid (deterministically recoverable from the key's parent
+    // segment), which is what lets a restart / new instance re-locate the object by DB `storage_key`
+    // without the drifting md5 disk-scan index (F3-2).
+    const displayName = options.filename || this.generateFilename()
+    const safeBasename = toSafeStorageBasename(displayName)
+    const uuid = this.generateUniqueFileId()
+    const storageKey = `${uuid}/${safeBasename}`
+    // G2: containment hard floor even though the key is server-generated (defense in depth).
+    const fullPath = resolveWithinBase(this.basePath, storageKey)
+    const fileId = uuid
 
     try {
       // 确保目录存在
       await fs.mkdir(path.dirname(fullPath), { recursive: true })
 
-      // 检查是否覆盖
-      if (!options.overwrite && await this.exists(fileId)) {
-        throw new Error('File already exists and overwrite is not allowed')
-      }
-
-      // 写入文件
+      // 写入文件 — G2: exclusive create (`wx`) on BOTH the Buffer and the stream-concat branch. The
+      // uuid directory makes a collision impossible in practice; `wx` is the belt-and-suspenders that
+      // turns any theoretical collision into a hard error instead of a silent overwrite.
       let fileSize: number
       if (Buffer.isBuffer(file)) {
-        await fs.writeFile(fullPath, file)
+        await fs.writeFile(fullPath, file, { flag: 'wx' })
         fileSize = file.length
       } else {
         // 处理流
@@ -233,30 +196,31 @@ class LocalStorageProvider implements StorageProvider {
           chunks.push(chunk)
         }
         const buffer = Buffer.concat(chunks)
-        await fs.writeFile(fullPath, buffer)
+        await fs.writeFile(fullPath, buffer, { flag: 'wx' })
         fileSize = buffer.length
       }
 
       const stats = await fs.stat(fullPath)
       const storageFile: StorageFile = {
         id: fileId,
-        filename,
+        filename: displayName,
         size: fileSize,
-        contentType: options.contentType || this.getContentType(filename),
-        path: filePath,
-        url: `${this.baseUrl}/${filePath}`,
+        contentType: options.contentType || this.getContentType(displayName),
+        path: storageKey,
+        storageKey,
+        url: `${this.baseUrl}/${storageKey}`,
         metadata: options.metadata || {},
         tags: options.tags || {},
         createdAt: stats.birthtime,
         updatedAt: stats.mtime
       }
 
-      // 更新索引
+      // 更新索引（进程内即时可用；重启后 id 查询走 DB storage_key，不依赖此索引 rebuild）
       this.fileIndex.set(fileId, storageFile)
 
       return storageFile
     } catch (error) {
-      this.logger.error(`Failed to upload file ${filename}`, error as Error)
+      this.logger.error(`Failed to upload file ${displayName}`, error as Error)
       throw error
     }
   }
@@ -267,12 +231,50 @@ class LocalStorageProvider implements StorageProvider {
       throw new Error('File not found')
     }
 
-    const fullPath = path.join(this.basePath, fileInfo.path)
+    const fullPath = resolveWithinBase(this.basePath, fileInfo.path)
 
     try {
       return await fs.readFile(fullPath)
     } catch (error) {
       this.logger.error(`Failed to download file ${fileId}`, error as Error)
+      throw error
+    }
+  }
+
+  // F3 design-lock G3: read a physical object by its deterministic storage key (from the DB
+  // `storage_key`/`storage_path` column), bypassing the in-memory `fileIndex` entirely. This is the
+  // read path that has no warmup window — a freshly constructed provider whose `buildFileIndex()` has
+  // not populated (or will never populate) this id still serves the object, because the key alone
+  // deterministically locates it. Containment is re-asserted (G2) so a corrupt/legacy/url-derived key
+  // can never escape the base path.
+  async downloadByKey(storageKey: string): Promise<Buffer> {
+    const fullPath = resolveWithinBase(this.basePath, storageKey)
+    try {
+      return await fs.readFile(fullPath)
+    } catch (error) {
+      this.logger.error(`Failed to download file by key ${storageKey}`, error as Error)
+      throw error
+    }
+  }
+
+  // F5 files-orphan-blob-retention design-lock (2026-07-10), GF5-2: delete a physical object by its
+  // deterministic storage key. Containment (G2) is re-asserted first, exactly like `downloadByKey` —
+  // a corrupt/legacy/derived key can never unlink outside the base path. ENOENT is swallowed (the
+  // object is already gone, which IS the target state) so both the delete route (GF5-7) and the sweep
+  // (GF5-6) can treat "deleted" and "confirmed already deleted" as one successful outcome and stamp
+  // `blob_purged_at` either way — this is the ONLY place that ENOENT-as-success decision is made; every
+  // caller of `deleteByKey` sees a plain resolve/reject and does not need to re-inspect the error code.
+  // Any OTHER error (EACCES/EIO/etc.) is rethrown so callers leave `blob_purged_at` unset and retry.
+  async deleteByKey(storageKey: string): Promise<void> {
+    const fullPath = resolveWithinBase(this.basePath, storageKey)
+    try {
+      await fs.unlink(fullPath)
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException)?.code
+      if (code === 'ENOENT') {
+        return
+      }
+      this.logger.error(`Failed to delete file by key ${storageKey}`, error as Error)
       throw error
     }
   }
@@ -344,54 +346,6 @@ class LocalStorageProvider implements StorageProvider {
     }
   }
 
-  async listFiles(prefix?: string, options?: ListOptions): Promise<StorageFile[]> {
-    let files = Array.from(this.fileIndex.values())
-
-    // 应用前缀过滤
-    if (prefix) {
-      files = files.filter(file => file.path.startsWith(prefix))
-    }
-
-    // 应用过滤器
-    if (options?.filter) {
-      const filter = options.filter
-      files = files.filter(file => {
-        if (filter.contentType && file.contentType !== filter.contentType) return false
-        if (filter.sizeMin && file.size < filter.sizeMin) return false
-        if (filter.sizeMax && file.size > filter.sizeMax) return false
-        if (filter.createdAfter && file.createdAt < filter.createdAfter) return false
-        if (filter.createdBefore && file.createdAt > filter.createdBefore) return false
-        return true
-      })
-    }
-
-    // 排序
-    if (options?.sortBy) {
-      const sortBy = options.sortBy
-      const sortOrder = options.sortOrder || 'asc'
-      files.sort((a, b) => {
-        const aRaw = a[sortBy]
-        const bRaw = b[sortBy]
-        let aValue: string | number | Date = aRaw ?? ''
-        let bValue: string | number | Date = bRaw ?? ''
-
-        // Convert Date objects to timestamps for comparison
-        if (sortBy === 'createdAt' || sortBy === 'updatedAt') {
-          aValue = (aValue as Date).getTime()
-          bValue = (bValue as Date).getTime()
-        }
-
-        const comparison = aValue < bValue ? -1 : aValue > bValue ? 1 : 0
-        return sortOrder === 'asc' ? comparison : -comparison
-      })
-    }
-
-    // 分页
-    const offset = options?.offset || 0
-    const limit = options?.limit || files.length
-    return files.slice(offset, offset + limit)
-  }
-
   async createFolder(dirPath: string): Promise<void> {
     const fullPath = path.join(this.basePath, dirPath)
     try {
@@ -447,6 +401,24 @@ class LocalStorageProvider implements StorageProvider {
     return crypto.randomUUID()
   }
 
+  /**
+   * F3 design-lock G4: recover the stable id from a relative path. The F3 layout is
+   * `<uuid>/<safeBasename>`, so the first segment — when it is a well-formed uuid AND a subdirectory
+   * exists — is the id assigned at upload time (deterministic, no md5 drift). Legacy flat files keep
+   * the historical `md5(relpath)`.
+   */
+  private deriveIdFromRelativePath(relativePath: string): string {
+    const normalized = relativePath.split(path.sep).join('/')
+    const slash = normalized.indexOf('/')
+    if (slash > 0) {
+      const first = normalized.slice(0, slash)
+      if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(first)) {
+        return first
+      }
+    }
+    return this.generateFileId(relativePath)
+  }
+
   private generateFilename(): string {
     const timestamp = Date.now()
     const random = Math.random().toString(36).substring(2, 8)
@@ -476,318 +448,6 @@ class LocalStorageProvider implements StorageProvider {
       '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
       '.xls': 'application/vnd.ms-excel',
       '.xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
-    }
-
-    return mimeTypes[ext] || 'application/octet-stream'
-  }
-}
-
-/**
- * AWS S3 存储提供者（示例实现）
- */
-class S3StorageProvider implements StorageProvider {
-  private s3Client: S3Client
-  private bucket: string
-  private region: string
-  private logger: Logger
-
-  constructor(s3Client: S3Client, bucket: string, region: string) {
-    this.s3Client = s3Client
-    this.bucket = bucket
-    this.region = region
-    this.logger = new Logger('S3StorageProvider')
-  }
-
-  async upload(file: Buffer | Readable, options: UploadOptions): Promise<StorageFile> {
-    const key = options.path ? `${options.path}/${options.filename}` : options.filename || this.generateKey()
-
-    try {
-      let body: Buffer
-      if (Buffer.isBuffer(file)) {
-        body = file
-      } else {
-        const chunks: Buffer[] = []
-        for await (const chunk of file) {
-          chunks.push(chunk)
-        }
-        body = Buffer.concat(chunks)
-      }
-
-      const uploadParams: S3UploadParams = {
-        Bucket: this.bucket,
-        Key: key,
-        Body: body,
-        ContentType: options.contentType || this.getContentType(key),
-        Metadata: options.metadata as Record<string, string> | undefined,
-        TagSet: Object.entries(options.tags || {}).map(([Key, Value]) => ({ Key, Value }))
-      }
-
-      const result = await this.s3Client.upload(uploadParams).promise()
-
-      const fileInfo: StorageFile = {
-        id: key,
-        filename: path.basename(key),
-        size: body.length,
-        contentType: uploadParams.ContentType,
-        path: key,
-        url: result.Location,
-        metadata: options.metadata || {},
-        tags: options.tags || {},
-        createdAt: new Date(),
-        updatedAt: new Date()
-      }
-
-      return fileInfo
-    } catch (error) {
-      this.logger.error(`Failed to upload file to S3: ${key}`, error as Error)
-      throw error
-    }
-  }
-
-  async download(fileId: string): Promise<Buffer> {
-    try {
-      const params: S3GetObjectParams = {
-        Bucket: this.bucket,
-        Key: fileId
-      }
-
-      const result = await this.s3Client.getObject(params).promise()
-      return result.Body
-    } catch (error) {
-      this.logger.error(`Failed to download file from S3: ${fileId}`, error as Error)
-      throw error
-    }
-  }
-
-  async delete(fileId: string): Promise<void> {
-    try {
-      const params: S3DeleteParams = {
-        Bucket: this.bucket,
-        Key: fileId
-      }
-
-      await this.s3Client.deleteObject(params).promise()
-    } catch (error) {
-      this.logger.error(`Failed to delete file from S3: ${fileId}`, error as Error)
-      throw error
-    }
-  }
-
-  async exists(fileId: string): Promise<boolean> {
-    try {
-      const params: S3HeadObjectParams = {
-        Bucket: this.bucket,
-        Key: fileId
-      }
-
-      await this.s3Client.headObject(params).promise()
-      return true
-    } catch (error) {
-      const s3Error = error as S3Error
-      if (s3Error.code === 'NotFound') {
-        return false
-      }
-      throw error
-    }
-  }
-
-  async getFileInfo(fileId: string): Promise<StorageFile | null> {
-    try {
-      const params: S3HeadObjectParams = {
-        Bucket: this.bucket,
-        Key: fileId
-      }
-
-      const result = await this.s3Client.headObject(params).promise()
-
-      return {
-        id: fileId,
-        filename: path.basename(fileId),
-        size: result.ContentLength,
-        contentType: result.ContentType,
-        path: fileId,
-        url: `https://${this.bucket}.s3.${this.region}.amazonaws.com/${fileId}`,
-        metadata: result.Metadata || {},
-        tags: {},
-        createdAt: new Date(result.LastModified),
-        updatedAt: new Date(result.LastModified)
-      }
-    } catch (error) {
-      const s3Error = error as S3Error
-      if (s3Error.code === 'NotFound') {
-        return null
-      }
-      throw error
-    }
-  }
-
-  async getFileUrl(fileId: string, options?: GetUrlOptions): Promise<string> {
-    const params = {
-      Bucket: this.bucket,
-      Key: fileId,
-      Expires: options?.expiresIn || 3600
-    }
-
-    const result = this.s3Client.getSignedUrl('getObject', params)
-    return typeof result === 'string' ? result : await result
-  }
-
-  async getPresignedUploadUrl(options: PresignedUploadOptions): Promise<PresignedUpload> {
-    const key = options.filename
-    const params: Record<string, unknown> = {
-      Bucket: this.bucket,
-      Key: key,
-      Expires: options.expiresIn || 3600
-    }
-
-    if (options.contentType) {
-      params.ContentType = options.contentType
-    }
-
-    if (options.maxSize) {
-      params.ContentLengthRange = [0, options.maxSize]
-    }
-
-    const uploadUrlResult = this.s3Client.getSignedUrl('putObject', params)
-    const uploadUrl = typeof uploadUrlResult === 'string' ? uploadUrlResult : await uploadUrlResult
-
-    const fields: Record<string, string> = {}
-    if (options.contentType) {
-      fields['Content-Type'] = options.contentType
-    }
-
-    return {
-      uploadUrl,
-      fileId: key,
-      fields
-    }
-  }
-
-  async listFiles(prefix?: string, options?: ListOptions): Promise<StorageFile[]> {
-    try {
-      const params: S3ListParams = {
-        Bucket: this.bucket,
-        MaxKeys: options?.limit || 1000
-      }
-
-      if (prefix) {
-        params.Prefix = prefix
-      }
-
-      if (options?.offset) {
-        // S3 doesn't support offset directly, would need continuation token logic
-        // This is a simplified implementation
-      }
-
-      const result = await this.s3Client.listObjectsV2(params).promise()
-
-      const files: StorageFile[] = result.Contents.map((obj: S3ListObject) => ({
-        id: obj.Key,
-        filename: path.basename(obj.Key),
-        size: obj.Size,
-        contentType: this.getContentType(obj.Key),
-        path: obj.Key,
-        url: `https://${this.bucket}.s3.${this.region}.amazonaws.com/${obj.Key}`,
-        metadata: {},
-        tags: {},
-        createdAt: new Date(obj.LastModified),
-        updatedAt: new Date(obj.LastModified)
-      }))
-
-      return files
-    } catch (error) {
-      this.logger.error('Failed to list files from S3', error as Error)
-      throw error
-    }
-  }
-
-  async createFolder(dirPath: string): Promise<void> {
-    // S3 doesn't have real folders, but we can create a placeholder object
-    const key = dirPath.endsWith('/') ? dirPath : `${dirPath}/`
-
-    try {
-      const params: S3UploadParams = {
-        Bucket: this.bucket,
-        Key: key,
-        Body: Buffer.from(''),
-        ContentType: 'application/x-directory'
-      }
-
-      await this.s3Client.upload(params).promise()
-    } catch (error) {
-      this.logger.error(`Failed to create folder in S3: ${dirPath}`, error as Error)
-      throw error
-    }
-  }
-
-  async deleteFolder(dirPath: string, recursive?: boolean): Promise<void> {
-    if (!recursive) {
-      // Just delete the folder marker
-      await this.delete(dirPath.endsWith('/') ? dirPath : `${dirPath}/`)
-      return
-    }
-
-    try {
-      // List all objects with the prefix
-      const listParams: S3ListParams = {
-        Bucket: this.bucket,
-        Prefix: dirPath.endsWith('/') ? dirPath : `${dirPath}/`
-      }
-
-      const objects = await this.s3Client.listObjectsV2(listParams).promise()
-
-      if (objects.Contents.length === 0) return
-
-      // Delete all objects
-      const deleteParams: S3DeleteMultipleParams = {
-        Bucket: this.bucket,
-        Delete: {
-          Objects: objects.Contents.map((obj: S3ListObject) => ({ Key: obj.Key }))
-        }
-      }
-
-      await this.s3Client.deleteObjects(deleteParams).promise()
-    } catch (error) {
-      this.logger.error(`Failed to delete folder from S3: ${dirPath}`, error as Error)
-      throw error
-    }
-  }
-
-  async getStorageUsage(): Promise<StorageUsage> {
-    try {
-      // This would require CloudWatch metrics or iterating all objects
-      // For now, return placeholder values
-      return {
-        totalFiles: 0,
-        totalSize: 0,
-        usedQuota: 0,
-        availableQuota: -1 // S3 has virtually unlimited storage
-      }
-    } catch (error) {
-      this.logger.error('Failed to get S3 storage usage', error as Error)
-      throw error
-    }
-  }
-
-  private generateKey(): string {
-    const timestamp = Date.now()
-    const random = crypto.randomBytes(8).toString('hex')
-    return `files/${timestamp}/${random}`
-  }
-
-  private getContentType(key: string): string {
-    const ext = path.extname(key).toLowerCase()
-    const mimeTypes: Record<string, string> = {
-      '.txt': 'text/plain',
-      '.html': 'text/html',
-      '.css': 'text/css',
-      '.js': 'application/javascript',
-      '.json': 'application/json',
-      '.pdf': 'application/pdf',
-      '.jpg': 'image/jpeg',
-      '.jpeg': 'image/jpeg',
-      '.png': 'image/png',
-      '.gif': 'image/gif'
     }
 
     return mimeTypes[ext] || 'application/octet-stream'
@@ -840,6 +500,21 @@ export class StorageServiceImpl extends EventEmitter implements StorageService {
     }
   }
 
+  // F3 design-lock G3: read a physical object by its deterministic storage key (DB `storage_key` /
+  // `storage_path`), bypassing the provider's in-memory index. Used by files.ts + multitable download
+  // so a restart / cold index never 404s a still-present object.
+  async downloadByKey(storageKey: string): Promise<Buffer> {
+    try {
+      const result = await this.provider.downloadByKey(storageKey)
+      this.emit('file:downloaded', { fileId: storageKey, size: result.length })
+      return result
+    } catch (error) {
+      this.logger.error(`Failed to download file by key: ${storageKey}`, error as Error)
+      this.emit('file:error', { operation: 'download', fileId: storageKey, error })
+      throw error
+    }
+  }
+
   async delete(fileId: string): Promise<void> {
     try {
       await this.provider.delete(fileId)
@@ -847,6 +522,23 @@ export class StorageServiceImpl extends EventEmitter implements StorageService {
     } catch (error) {
       this.logger.error(`Failed to delete file: ${fileId}`, error as Error)
       this.emit('file:error', { operation: 'delete', fileId, error })
+      throw error
+    }
+  }
+
+  // F5 design-lock GF5-2: delete a physical object by its deterministic storage key (DB `storage_key`),
+  // bypassing the provider's in-memory index. Used by files.ts's delete route (GF5-7, the root-cause fix
+  // for the id-drift `storage.delete(id)` had) and the orphan-blob sweep (GF5-6).
+  async deleteByKey(storageKey: string): Promise<void> {
+    try {
+      await this.provider.deleteByKey(storageKey)
+      // F6 note (refs #3925): on this byKey path `fileId` actually carries the storage key, not a uuid
+      // (the caller never resolved one). `file:deleted` has zero listeners in-repo today (only
+      // `file:uploaded` is consumed, by plugin-service-factory.ts), so this is currently inert either way.
+      this.emit('file:deleted', { fileId: storageKey })
+    } catch (error) {
+      this.logger.error(`Failed to delete file by key: ${storageKey}`, error as Error)
+      this.emit('file:error', { operation: 'delete', fileId: storageKey, error })
       throw error
     }
   }
@@ -888,10 +580,6 @@ export class StorageServiceImpl extends EventEmitter implements StorageService {
       this.logger.error('Failed to delete multiple files', error as Error)
       throw error
     }
-  }
-
-  async listFiles(prefix?: string, options?: ListOptions): Promise<StorageFile[]> {
-    return this.provider.listFiles(prefix, options)
   }
 
   async createFolder(path: string): Promise<void> {
@@ -940,13 +628,6 @@ export class StorageServiceImpl extends EventEmitter implements StorageService {
   static createLocalService(basePath: string, baseUrl?: string): StorageServiceImpl {
     return new StorageServiceImpl(new LocalStorageProvider(basePath, baseUrl))
   }
-
-  /**
-   * 创建 S3 存储服务
-   */
-  static createS3Service(s3Client: S3Client, bucket: string, region: string): StorageServiceImpl {
-    return new StorageServiceImpl(new S3StorageProvider(s3Client, bucket, region))
-  }
 }
 
-export { LocalStorageProvider, S3StorageProvider }
+export { LocalStorageProvider }
