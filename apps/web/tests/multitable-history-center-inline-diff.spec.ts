@@ -486,3 +486,34 @@ describe('HistoryCenterModal — record click-through emit (PR-C)', () => {
     } finally { app.unmount(); container.remove() }
   })
 })
+
+// all-tables-B (R11): a batch can span multiple sheets, but the `fields` prop only carries the ACTIVE
+// sheet's fields. diffFieldName resolves the active sheet via `fields` (byte-identical to pre-R11), a
+// non-active sheet via the server-masked `fieldNames` map, and neither → the raw id.
+describe('HistoryCenterModal — all-tables-B cross-table field-name resolution', () => {
+  it('active sheet uses `fields` prop; non-active sheet uses the masked fieldNames map; neither → raw id', async () => {
+    mockListHistoryEvents.mockResolvedValue({ batches: [batch()], total: 1, nextCursor: null, searchTruncated: false })
+    const detail: HistoryBatchDetail = {
+      batchId: 'batch_1', actorId: 'user_1', source: 'rest', createdAt: new Date().toISOString(),
+      visibleAffectedRecordCount: 2, visibleAffectedFieldCount: 3,
+      changes: [
+        { sheetId: 'sheet_active', recordId: 'rec_a', action: 'update', version: 2,
+          changedFieldIds: ['fld_active'], before: { fld_active: 'x' }, after: { fld_active: 'y' } },
+        { sheetId: 'sheet_other', recordId: 'rec_o', action: 'update', version: 2,
+          changedFieldIds: ['fld_other', 'fld_orphan'],
+          before: { fld_other: 'p', fld_orphan: 'm' }, after: { fld_other: 'q', fld_orphan: 'n' } },
+      ],
+      // active field's map name is DIFFERENT from its prop name, to prove props win for the active sheet.
+      fieldNames: { sheet_active: { fld_active: 'ActiveMap' }, sheet_other: { fld_other: 'OtherName' } },
+    }
+    mockGetHistoryBatch.mockResolvedValue(detail)
+    const { app, container } = mountModal([{ id: 'fld_active', name: 'ActiveProp' }])
+    try {
+      await flushPromises()
+      container.querySelector<HTMLButtonElement>('[data-test="hist-batch"]')!.click()
+      await flushPromises()
+      const labels = Array.from(container.querySelectorAll<HTMLElement>('.meta-hist__diff-label')).map((n) => n.textContent?.trim())
+      expect(labels).toEqual(['ActiveProp', 'OtherName', 'fld_orphan'])
+    } finally { app.unmount(); container.remove() }
+  })
+})
