@@ -1,6 +1,7 @@
-# Global History — field-value tombstone 留存地板 — 决策 one-pager (PROPOSED)
+# Global History — field-value tombstone 留存地板 — 决策 one-pager (RATIFIED — A · 决策定案)
 
-- **Status**: PROPOSED 决策文档；任何构建选项都需 owner 单项签核。R10 gate-front 工件（R9 审计残差 L2）。
+- **Status**: **RATIFIED 2026-07-11（owner R11 directive: 「ratify 地板-A」）→ 选项 A（接受边界，维持现状，零代码）。** field-value tombstone 的 keep-days 清扫无地板这一边界被正式接受为文档化边界，而非缺陷；仅在「4c-1/4c-2 capture flag 生产开启 **且** retention 生产开启」的组合世界才有实际影响，O-2 阶梯已把该组合列为联动注意事项（本轮把复议触发条件显式写入 O-2 阶梯 L4/L5 与 §5）。**复议触发**：任一 4c 系 capture/revert flag 在生产开启且 retention 计划在生产开启时，本决策自动回到 owner 桌面（O-2 阶梯 §5 交叉引用本文）。
+- ~~PROPOSED~~ 原始状态（保留供审计）：任何构建选项都需 owner 单项签核。R10 gate-front 工件（R9 审计残差 L2）。
 - **现状（真库核验）**：`meta-revision-retention.ts` 的 `floorPredicate` 仅对 link-tombstone 表生效（引用 `meta_records_trash.delete_revision_id` 锚——trash 行不灭则组不灭）；`meta_field_value_tombstones` 的 keep-days 清扫**无地板**。O-2 阶梯文档已如实记为边界（footgun 注记在案）。
 - **何时会咬人**：仅当 4c-1/4c-2 flag 在生产开启 **且** retention 同时开启——field-delete/lossy-retype 的值恢复窗口=keep-days，过期即 4d 化（字节消失）。
 
@@ -17,4 +18,4 @@
 
 **A**。理由：该边界只在「capture flag 开 + retention 开」的组合世界存在,而 O-2 阶梯本就把这一组合列为联动注意事项;B 是伪地板,C 的成本与当前零生产启用不成比例。**复议触发条件（写入 O-2 阶梯）**：任一 4c 系 capture/revert flag 在生产开启且 retention 计划开启时,本决策自动回到 owner 桌面。
 
-- **解锁词**：owner 选 B/C/D 之一并点头;选 A 仅需在本文所附 PR 上确认（或沉默视为维持现状——A 即现状,无代码）。
+- **解锁词**：~~owner 选 B/C/D 之一并点头;选 A 仅需在本文所附 PR 上确认~~ **已定案 → A（owner R11 directive 2026-07-11）。** 复议仅由上述「capture+retention 双开于生产」触发条件重新打开。
