@@ -53,6 +53,11 @@
 
 ## C. 余量口径（⚠ 2026-07-10 owner 审阅 CHANGES-REQUESTED 修订版）
 
+> **✅ 收官更新（2026-07-11）**：本节 REOPEN 的**文件证据 / 存储完整性硬化池已 CLOSED**——F1/F2/F3/F5/F6/F8/F9/F10
+> 全 on main，owner 2026-07-11 基于 `origin/main@320d37f66` 独立复核 **APPROVE 0 P1 / 0 P2**。收官对账见
+> `file-evidence-security-line-pool-closeout-20260711.md`（含未交付后续：F4 权限层仍 gated、retention env 仍属 operator 动作）。
+> 下方原 REOPEN 记录保留作历史。
+
 > 本节原稿宣称「硬化池全部落地/收口」——**owner 审阅推翻该口径**（H1 判定成立；问题集中在 H2 文件证据边界）,
 > 修订如下。
 
@@ -65,4 +70,5 @@
   的伪造内容仍可通过）,是 lazy-forgery 威胁模型下的弱识别,**不构成文件为真实图片的证明**。
 - 新增 owner 决策项：H1 的 never-configured vs suspended 收窄（见 A 节）。
 - owner 门与命名前置不变（S7 / 五连 smoke / E4 真机 / 档 B / T2 三项 / wecom population /
-  comp_time primitive / SMS 选型 / >50 org 轮转）。硬化池在 F1/F2 落地并复审通过前保持 OPEN。
+  comp_time primitive / SMS 选型 / >50 org 轮转）。~~硬化池在 F1/F2 落地并复审通过前保持 OPEN。~~
+  **→ 已满足并 CLOSED（2026-07-11，见节首收官更新）；owner 门与命名前置本身不变，仅硬化池文件证据/存储完整性余量收口。**
