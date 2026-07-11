@@ -171,4 +171,5 @@ root **外**文件被真实删除。
    deploy-before-migrate 窗口优雅降级不崩、迁移后自愈，仅日志文案影响。
 
 ## 部署提示
-本线引入两个新迁移。按 deploy SOP：镜像拉取部署前 diff pending migrations、**先迁移后代码**、验证一次 auth round-trip。
+本线引入**三个**新迁移（`zzzz20260710140000_add_files_storage_key` F3 · `zzzz20260710150000_add_files_blob_purged_at` F5 ·
+`zzzz20260711090000_add_multitable_attachments_blob_purged_at` F9）。按 deploy SOP：镜像拉取部署前 diff pending migrations、**先迁移后代码**、验证一次 auth round-trip。
