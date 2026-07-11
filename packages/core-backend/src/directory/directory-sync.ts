@@ -21,6 +21,11 @@ import {
   mergeDeptManagerIntoRaw,
   resolveManagerListForDept,
 } from './department-manager-enrichment'
+import {
+  createDirectorySyncApiCallCounters,
+  summarizeDirectorySyncApiCalls,
+  type DirectorySyncApiCallCounters,
+} from './directory-sync-api-telemetry'
 import { assertDingTalkCorpAllowed } from '../integrations/dingtalk/runtime-policy'
 import {
   deriveDelegatedAdminNamespace,
@@ -2405,7 +2410,13 @@ export async function testDirectoryIntegration(input: DirectoryIntegrationTestIn
   }
 }
 
-async function fetchAllDepartments(config: DirectoryIntegrationConfig, integrationName: string): Promise<Map<string, DingTalkDepartment>> {
+export async function fetchAllDepartments(
+  config: DirectoryIntegrationConfig,
+  integrationName: string,
+  // §7.7 telemetry: increment per external directory-pull call so the N+1 is ops-visible on
+  // the run record. Optional — the preview path (no run row) omits it.
+  apiCalls?: DirectorySyncApiCallCounters,
+): Promise<Map<string, DingTalkDepartment>> {
   const accessToken = await fetchDingTalkAppAccessToken({
     appKey: config.appKey,
     appSecret: config.appSecret,
@@ -2424,6 +2435,7 @@ async function fetchAllDepartments(config: DirectoryIntegrationConfig, integrati
   while (queue.length > 0) {
     const current = queue.shift()
     if (!current) continue
+    if (apiCalls) apiCalls.departmentListCalls += 1
     const children = await listDingTalkDepartments(accessToken, current, { baseUrl: config.baseUrl })
     for (const child of children) {
       const existing = departments.get(child.id)
@@ -2439,7 +2451,10 @@ async function fetchAllDepartments(config: DirectoryIntegrationConfig, integrati
   // the prior dept_manager_userid_list forward instead of wiping it.
   await enrichDepartmentsWithManagers(
     departments.values(),
-    (deptId) => getDingTalkDepartmentDetail(accessToken, deptId, { baseUrl: config.baseUrl }),
+    (deptId) => {
+      if (apiCalls) apiCalls.departmentDetailCalls += 1
+      return getDingTalkDepartmentDetail(accessToken, deptId, { baseUrl: config.baseUrl })
+    },
     (deptId, error) =>
       logger.warn(
         `dept-head: department/get failed for dept ${deptId} (integration ${integrationName}); carrying prior forward: ${readErrorMessage(error, 'unknown error')}`,
@@ -2453,9 +2468,12 @@ function mergeDepartmentIds(primary: string[], secondary: string[]): string[] {
   return Array.from(new Set([...primary, ...secondary].filter(Boolean)))
 }
 
-async function fetchAllUsers(
+export async function fetchAllUsers(
   config: DirectoryIntegrationConfig,
   departmentMap: Map<string, DingTalkDepartment>,
+  // §7.7 telemetry: `userDetailCalls` is THE N+1 metric — one `user/get` per unique user.
+  // Optional — the preview path (no run row) omits it.
+  apiCalls?: DirectorySyncApiCallCounters,
 ): Promise<Map<string, DingTalkDirectoryUser>> {
   const accessToken = await fetchDingTalkAppAccessToken({
     appKey: config.appKey,
@@ -2469,6 +2487,7 @@ async function fetchAllUsers(
     let cursor = 0
     let hasMore = true
     while (hasMore) {
+      if (apiCalls) apiCalls.userListPageCalls += 1
       const response = await listDingTalkDepartmentUsers(
         accessToken,
         departmentId,
@@ -2479,6 +2498,9 @@ async function fetchAllUsers(
       for (const summary of response.users) {
         const existing = users.get(summary.userId)
         if (!existing) {
+          // The N+1: a per-user detail fetch, issued once per UNIQUE user (this branch only
+          // runs on first sight — a user in two departments is fetched once).
+          if (apiCalls) apiCalls.userDetailCalls += 1
           const detail = await getDingTalkUserDetail(accessToken, summary.userId, { baseUrl: config.baseUrl })
           users.set(summary.userId, {
             ...detail,
@@ -2883,14 +2905,18 @@ export async function syncDirectoryIntegration(
   }, DIRECTORY_SYNC_HEARTBEAT_INTERVAL_MS)
   heartbeat.unref?.()
 
+  // §7.7 telemetry: one counter set per run, incremented at each external directory-pull call
+  // site (departments + users) so the N+1 detail fan-out is measurable on the run record.
+  const apiCallCounters = createDirectorySyncApiCallCounters()
+
   try {
-    const departments = await fetchAllDepartments(config, integration.name)
+    const departments = await fetchAllDepartments(config, integration.name, apiCallCounters)
     const departmentPathMap = buildDepartmentPathMap(departments)
     // dept-head plumbing: capture last-known-good dept_manager_userid_list BEFORE the
     // whole-column upsert (raw = EXCLUDED.raw) overwrites raw, so a failed department/get
     // (managerUserIds left undefined) carries the prior value forward instead of wiping it.
     const priorDeptManagers = await capturePriorDeptManagers(integrationId, query)
-    const users = await fetchAllUsers(config, departments)
+    const users = await fetchAllUsers(config, departments, apiCallCounters)
 
     let directoryDiagnosticStats: JsonRecord = {}
     if (triggerSource === 'manual') {
@@ -3357,6 +3383,11 @@ export async function syncDirectoryIntegration(
       const stats = {
         departmentsSynced: departments.size,
         accountsSynced: users.size,
+        // §7.7 sync-performance telemetry — external directory-pull call counts for THIS run.
+        // `externalUserDetailCalls` is the N+1: compare it against `accountsSynced` (≈ equal
+        // means one `user/get` per account). Makes the eventual `user/list` staging fix
+        // provable via before/after on this number. Additive; all pre-existing keys kept.
+        ...summarizeDirectorySyncApiCalls(apiCallCounters),
         // R5 per-run change summary — all additive; every pre-existing key above/below is kept.
         departmentsCreatedCount,
         departmentsUpdatedCount,
