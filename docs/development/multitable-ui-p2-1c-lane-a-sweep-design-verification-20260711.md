@@ -48,7 +48,7 @@ tail 设计锁 #3866(PROPOSED 未 ratify)定义的 T1-T5 gated 面本波**一律
 ## 6. 剩余与不主张
 
 - **Lane-A 剩余**:tail 设计锁 #3866 的 T1-T5 全部**等 owner ratify + 变体决定**(尤其 T2 需 MtButton 加 plain/tinted 变体——当前只有 primary/ghost/danger,属 Opus-reviewed 原语扩展)。这些是设计裁量,不在自合线。
-- 不主张 Lane-A「完成」——clean 单一 class + cleanly-mountable 的**未 gated 面本波已扫净**;剩余全部落在 #3866 的 gated 尾部,等 owner。
+- 不主张 Lane-A「完成」或 raw `<button>` 已「耗尽」——multitable 里 raw `<button>` 仍很多。准确口径:**clean 单一 class + cleanly-mountable 的未 gated 面已扫净**;剩余 raw `<button>` 落 **#3866 gated tail(T1-T5)** 或 **deliberate-verbatim / type=submit / behind-flow 等排除类**,均需 owner ratify #3866 + 拍 T1-T5/T2 变体后才动。
 - 不主张任何 gated 项已解锁;不碰权限/AI/删除逻辑(batch 只动按钮 + CSS)。
 
 ## 7. 方法学
