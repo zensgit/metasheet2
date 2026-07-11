@@ -274,6 +274,34 @@ export function createEmptyStepDraft(index = 1): ApprovalStepDraft {
   }
 }
 
+/** True when `name` is still the untouched default `createEmptyStepDraft`/`buildApprovalGraph`
+ * would give a step at 1-based `position` (`审批人 <position>`) — used by `insertStepAt` to tell
+ * an author-renamed step apart from one that never got a custom name. */
+export function isDefaultStepName(name: string, position: number): boolean {
+  return name.trim() === `审批人 ${position}`
+}
+
+/**
+ * G-B2-06 — insert a fresh blank step AFTER the existing step at `index` (0-based, matching the
+ * `v-for="(step, index) in draft.steps"` position in `TemplateAuthoringView.vue`), instead of
+ * `createEmptyStepDraft` being reachable only via end-of-list `addStep`. Any step AFTER the
+ * insertion point whose `name` is still the untouched default for its OLD 1-based position gets
+ * renumbered to match its new position, so the `审批人 N` numbering stays self-consistent after a
+ * middle insert; a step the author has renamed is left untouched — insertion never overwrites
+ * author-authored text. `moveStep`/`removeStep` are unaffected (separate functions, unchanged).
+ */
+export function insertStepAt(steps: ApprovalStepDraft[], index: number): ApprovalStepDraft[] {
+  const insertAt = Math.min(Math.max(index + 1, 0), steps.length)
+  const before = steps.slice(0, insertAt)
+  const after = steps.slice(insertAt).map((step, offset) => {
+    const oldPosition = insertAt + offset + 1
+    const newPosition = oldPosition + 1
+    return isDefaultStepName(step.name, oldPosition) ? { ...step, name: `审批人 ${newPosition}` } : step
+  })
+  const inserted = createEmptyStepDraft(insertAt + 1)
+  return [...before, inserted, ...after]
+}
+
 export function createEmptyTemplateDraft(): TemplateAuthoringDraft {
   return {
     key: '',
@@ -871,7 +899,10 @@ export function buildFormSchema(draft: TemplateAuthoringDraft): FormSchema {
   }
 }
 
-function sourceFromStep(step: ApprovalStepDraft): ApprovalAssigneeSource {
+/** Exported (G-B2-06) so `linearStepSpine.ts` can derive the same `ApprovalAssigneeSource` the
+ * saved graph would carry and feed it to the shared `assigneeSourceSummary` humanizer, instead of
+ * re-deriving a second sourceKind→text switch that could drift from this one. */
+export function sourceFromStep(step: ApprovalStepDraft): ApprovalAssigneeSource {
   if (step.sourceKind === 'static_user') {
     return { kind: 'static_user', userIds: parseIdsText(step.idsText) }
   }

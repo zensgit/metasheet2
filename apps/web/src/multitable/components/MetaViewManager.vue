@@ -399,8 +399,8 @@
         </div>
 
         <div class="meta-view-mgr__config-actions">
-          <button class="meta-view-mgr__btn-cancel" @click="closeConfig">{{ ml('action.cancel') }}</button>
-          <button class="meta-view-mgr__btn-add" :disabled="Boolean(viewConfigBlockingReason)" @click="saveConfig">{{ ml('view.saveSettings') }}</button>
+          <MtButton class="meta-view-mgr__btn-cancel" @click="closeConfig">{{ ml('action.cancel') }}</MtButton>
+          <MtButton variant="primary" class="meta-view-mgr__btn-add" :disabled="Boolean(viewConfigBlockingReason)" @click="saveConfig">{{ ml('view.saveSettings') }}</MtButton>
         </div>
       </div>
 
@@ -415,15 +415,15 @@
           <select v-model="newViewType" class="meta-view-mgr__select">
             <option v-for="t in VIEW_TYPES" :key="t" :value="t">{{ viewTypeLabel(t, isZh) }}</option>
           </select>
-          <button class="meta-view-mgr__btn-add" :disabled="!newViewName.trim()" @click="onAddView">{{ ml('view.addButton') }}</button>
+          <MtButton variant="primary" class="meta-view-mgr__btn-add" :disabled="!newViewName.trim()" @click="onAddView">{{ ml('view.addButton') }}</MtButton>
         </div>
       </div>
 
       <div v-if="deleteTarget" class="meta-view-mgr__confirm">
         <p>{{ deleteViewConfirm(deleteTarget.name, isZh) }}</p>
         <div class="meta-view-mgr__confirm-actions">
-          <button class="meta-view-mgr__btn-cancel" @click="deleteTargetId = null">{{ ml('action.cancel') }}</button>
-          <button class="meta-view-mgr__btn-delete" @click="confirmDelete">{{ ml('action.delete') }}</button>
+          <MtButton class="meta-view-mgr__btn-cancel" @click="deleteTargetId = null">{{ ml('action.cancel') }}</MtButton>
+          <MtButton variant="danger" class="meta-view-mgr__btn-delete" @click="confirmDelete">{{ ml('action.delete') }}</MtButton>
         </div>
       </div>
     </div>
@@ -499,6 +499,7 @@ import {
 } from '../utils/meta-manager-labels'
 import ConditionalFormattingDialog from './ConditionalFormattingDialog.vue'
 import ScaleFormattingDialog from './ScaleFormattingDialog.vue'
+import { MtButton } from '../ui'
 
 const VIEW_TYPES = ['grid', 'form', 'kanban', 'gallery', 'calendar', 'timeline', 'gantt', 'hierarchy'] as const
 const VIEW_ICONS: Record<string, string> = {
@@ -1449,13 +1450,16 @@ onBeforeUnmount(() => {
 .meta-view-mgr__add-row { display: flex; gap: 8px; }
 .meta-view-mgr__input, .meta-view-mgr__select { width: 100%; padding: 5px 10px; border: 1px solid #ddd; border-radius: 4px; font-size: 13px; background: #fff; }
 .meta-view-mgr__select--compact { width: auto; min-width: 130px; }
-.meta-view-mgr__btn-add { padding: 5px 14px; background: #409eff; color: #fff; border: none; border-radius: 4px; cursor: pointer; font-size: 12px; }
-.meta-view-mgr__btn-add:disabled { opacity: 0.4; cursor: not-allowed; }
-.meta-view-mgr__btn-add:hover:not(:disabled) { background: #66b1ff; }
+/* .meta-view-mgr__btn-add: both uses (add-section addView + config-panel saveConfig) are now <MtButton
+   variant="primary">; the bespoke #409eff fill is normalized to --ms-color-primary (intended UF-1 token
+   convergence). Bespoke CSS removed to avoid double-styling the MtButton root; class kept for selector
+   stability (existing spec queries .meta-view-mgr__btn-add). The __btn-inline buttons stay bespoke
+   (T3-GATED). UI-P2-1c batch-3: .meta-view-mgr__btn-cancel (both sharers: config-panel + delete-confirm)
+   and .meta-view-mgr__btn-delete (its only sharer) are now <MtButton> (default ghost / variant="danger");
+   both classes' FULL sharer sets were migrated at once, so their bespoke CSS below is removed (no
+   double-styling); classes kept as additive for selector stability (existing specs query them). */
 .meta-view-mgr__btn-inline { align-self: flex-start; padding: 4px 10px; border: 1px dashed #cbd5e1; border-radius: 4px; background: #fff; color: #475569; cursor: pointer; font-size: 12px; }
 .meta-view-mgr__confirm { padding: 12px 16px; border-top: 1px solid #eee; background: #fef0f0; }
 .meta-view-mgr__confirm p { margin: 0 0 8px; font-size: 13px; color: #333; }
 .meta-view-mgr__confirm-actions, .meta-view-mgr__config-actions { display: flex; gap: 8px; justify-content: flex-end; }
-.meta-view-mgr__btn-cancel { padding: 4px 12px; border: 1px solid #ddd; border-radius: 3px; background: #fff; cursor: pointer; font-size: 12px; }
-.meta-view-mgr__btn-delete { padding: 4px 12px; background: #f56c6c; color: #fff; border: none; border-radius: 3px; cursor: pointer; font-size: 12px; }
 </style>

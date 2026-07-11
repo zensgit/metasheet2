@@ -125,6 +125,86 @@ describe('dingtalk oauth login gates', () => {
     })
   })
 
+  it('bootstraps a missing openId for an existing union-linked identity before strict grant rejection', async () => {
+    vi.stubEnv('DINGTALK_AUTH_REQUIRE_GRANT', '1')
+    const txCalls: Array<{ sql: string; params: unknown[] }> = []
+    pgMocks.transaction.mockImplementation(async (callback: (client: { query: typeof pgMocks.query }) => Promise<unknown>) => {
+      const txQuery = vi.fn(async (sql: string, params: unknown[]) => {
+        txCalls.push({ sql: String(sql), params })
+        if (String(sql).includes('SELECT local_user_id')) return { rows: [] }
+        return { rows: [] }
+      })
+      return callback({ query: txQuery as unknown as typeof pgMocks.query })
+    })
+    pgMocks.query
+      .mockResolvedValueOnce({
+        rows: [{
+          id: 'user-1',
+          email: 'alpha@example.com',
+          name: 'Alpha',
+          role: 'user',
+          is_active: true,
+        }],
+      })
+      .mockResolvedValueOnce({ rows: [] })
+
+    await expect(exchangeCodeForUser('code-openid-bootstrap')).rejects.toMatchObject({
+      name: 'DingTalkLoginPolicyError',
+      statusCode: 403,
+      code: 'grant_required',
+      message: 'DingTalk login is not enabled for this user',
+    })
+
+    const update = txCalls.find(call => call.sql.includes('UPDATE user_external_identities'))
+    expect(update, 'expected rejected login to enrich the missing openId').toBeTruthy()
+    expect(update!.sql).toContain('provider_open_id = $5')
+    expect(update!.sql).not.toContain('last_login_at')
+    expect(update!.sql).toContain("COALESCE(provider_open_id, '') = ''")
+    expect(update!.params).toEqual([
+      'dingtalk',
+      'user-1',
+      'ding-corp:open-1',
+      'union-1',
+      'open-1',
+      'ding-corp',
+      expect.stringContaining('"openId":"open-1"'),
+    ])
+  })
+
+  it('does not bootstrap openId when the OAuth identity already belongs to another local user', async () => {
+    vi.stubEnv('DINGTALK_AUTH_REQUIRE_GRANT', '1')
+    const txCalls: Array<{ sql: string; params: unknown[] }> = []
+    pgMocks.transaction.mockImplementation(async (callback: (client: { query: typeof pgMocks.query }) => Promise<unknown>) => {
+      const txQuery = vi.fn(async (sql: string, params: unknown[]) => {
+        txCalls.push({ sql: String(sql), params })
+        if (String(sql).includes('SELECT local_user_id')) {
+          return { rows: [{ local_user_id: 'other-user' }] }
+        }
+        return { rows: [] }
+      })
+      return callback({ query: txQuery as unknown as typeof pgMocks.query })
+    })
+    pgMocks.query
+      .mockResolvedValueOnce({
+        rows: [{
+          id: 'user-1',
+          email: 'alpha@example.com',
+          name: 'Alpha',
+          role: 'user',
+          is_active: true,
+        }],
+      })
+      .mockResolvedValueOnce({ rows: [] })
+
+    await expect(exchangeCodeForUser('code-openid-conflict')).rejects.toMatchObject({
+      name: 'DingTalkLoginPolicyError',
+      statusCode: 409,
+      code: 'identity_already_bound',
+    })
+
+    expect(txCalls.some(call => call.sql.includes('UPDATE user_external_identities'))).toBe(false)
+  })
+
   it('allows email-linked login when strict grant mode is enabled and grant is present', async () => {
     vi.stubEnv('DINGTALK_AUTH_REQUIRE_GRANT', '1')
     vi.stubEnv('DINGTALK_AUTH_AUTO_LINK_EMAIL', '1')
@@ -172,6 +252,49 @@ describe('dingtalk oauth login gates', () => {
       code: 'unlinked_enabled_local_user',
       message: 'DingTalk account beta@example.com is not linked to an enabled local user',
     })
+  })
+
+  it('refuses auto-provision when DINGTALK_ALLOWED_CORP_IDS is unset (unscoped allowlist guard, DT-HARDEN-09)', async () => {
+    vi.stubEnv('DINGTALK_AUTH_AUTO_PROVISION', '1')
+    // DINGTALK_ALLOWED_CORP_IDS deliberately left unset: isDingTalkCorpAllowed
+    // is permissive when empty, so auto-provision must refuse to create a
+    // local user rather than silently onboard any corp's OAuth user.
+    pgMocks.query
+      .mockResolvedValueOnce({ rows: [] }) // findIdentityUser: no existing identity link
+
+    await expect(exchangeCodeForUser('code-4')).rejects.toMatchObject({
+      name: 'DingTalkLoginPolicyError',
+      statusCode: 403,
+      code: 'unlinked_local_user',
+      message: 'DingTalk account alpha@example.com is not linked to a local user',
+    })
+    expect(pgMocks.query.mock.calls.some((call) => String(call[0]).includes('INSERT INTO users'))).toBe(false)
+  })
+
+  it('auto-provisions a local user when DINGTALK_ALLOWED_CORP_IDS is configured (existing behavior unaffected)', async () => {
+    vi.stubEnv('DINGTALK_AUTH_AUTO_PROVISION', '1')
+    vi.stubEnv('DINGTALK_ALLOWED_CORP_IDS', 'ding-corp')
+    pgMocks.query
+      .mockResolvedValueOnce({ rows: [] }) // findIdentityUser: no existing identity link
+      .mockResolvedValueOnce({ rows: [] }) // findUserByEmail: no conflicting local account
+      .mockResolvedValueOnce({
+        rows: [{
+          id: 'user-new',
+          email: 'alpha@example.com',
+          name: 'Alpha',
+          role: 'user',
+          is_active: true,
+        }],
+      }) // INSERT INTO users
+
+    const result = await exchangeCodeForUser('code-5')
+
+    expect(result).toMatchObject({
+      localUserId: 'user-new',
+      localUserEmail: 'alpha@example.com',
+      isNewUser: true,
+    })
+    expect(pgMocks.query.mock.calls.some((call) => String(call[0]).includes('INSERT INTO users'))).toBe(true)
   })
 
   it('reports runtime status with grant mode and allowlist details', () => {

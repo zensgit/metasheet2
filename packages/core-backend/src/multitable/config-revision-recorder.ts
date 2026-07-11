@@ -8,6 +8,8 @@
  * → null, the caller records nothing — no rename-to-same spam).
  */
 
+import { randomUUID } from 'crypto'
+
 type QueryFn = (text: string, params: unknown[]) => Promise<unknown>
 
 export type ConfigEntityType = 'field' | 'permission' | 'view' | 'sheet_config'
@@ -29,13 +31,22 @@ export interface ConfigRevisionInput {
   source?: 'mutation' | 'restore'
   /** T9-W-L1: when source='restore', the id of the meta_config_revisions row that was reverted (back-reference). */
   restoredFromId?: string | null
+  /**
+   * 4c-2: pre-generate the row's own id when a caller needs to know it BEFORE this INSERT runs (e.g. a
+   * tombstone capture that anchors `config_revision_id` to the field-delete revision it's about to create,
+   * written earlier in the same transaction than this call). Omitted → random uuid, as before (identical
+   * behavior to every pre-existing call site).
+   */
+  id?: string
 }
 
-export async function recordConfigRevision(query: QueryFn, input: ConfigRevisionInput): Promise<void> {
+export async function recordConfigRevision(query: QueryFn, input: ConfigRevisionInput): Promise<string> {
+  const id = input.id ?? randomUUID()
   await query(
-    `INSERT INTO meta_config_revisions (sheet_id, entity_type, entity_id, action, before, after, changed_keys, batch_id, actor_id, source, restored_from_id)
-     VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb, $7::text[], $8, $9, $10, $11)`,
+    `INSERT INTO meta_config_revisions (id, sheet_id, entity_type, entity_id, action, before, after, changed_keys, batch_id, actor_id, source, restored_from_id)
+     VALUES ($1::uuid, $2, $3, $4, $5, $6::jsonb, $7::jsonb, $8::text[], $9, $10, $11, $12)`,
     [
+      id,
       input.sheetId,
       input.entityType,
       input.entityId,
@@ -49,6 +60,7 @@ export async function recordConfigRevision(query: QueryFn, input: ConfigRevision
       input.restoredFromId ?? null,
     ],
   )
+  return id
 }
 
 /** The config-relevant keys of a field (identity keys id/sheet_id are excluded — they are not config changes). */
@@ -112,6 +124,25 @@ export function fieldCreateDiff(after: FieldConfigSnapshot): FieldDiff {
 }
 export function fieldDeleteDiff(before: FieldConfigSnapshot): FieldDiff {
   return configDeleteDiff(before as unknown as Record<string, unknown>, FIELD_CONFIG_KEYS as ReadonlyArray<string>)
+}
+
+/**
+ * 4c-2: the field-delete diff, extended to carry the auto-number sequence's `next_value` (the design-lock's
+ * "序列 last_value") in `before` — the ONE piece of destroyed state this feature does NOT put in a tombstone
+ * table (§2: "定义级小数据", piggybacked on the field's own delete revision instead). `lastValue` is
+ * DELIBERATELY excluded from `changedKeys`: it must not perturb any existing consumer that keys off
+ * `changed_keys` to know which of `before`/`after` to read per field (config-restore.ts's
+ * `applyConfigRevert`, `MetaConfigHistoryModal.vue`'s `renderedChanges`) — those iterate `changedKeys` and
+ * would never touch an unlisted key anyway, so adding it to `before` only (not `changedKeys`) is invisible
+ * to every existing reader and additive-only for the new one (`recreateFieldFromConfig`'s R1 rehydration,
+ * which reads `before.lastValue` directly, not via changedKeys).
+ * `lastValue === null` (no auto-number sequence row existed, or capture is off) leaves `before` IDENTICAL
+ * to the plain `fieldDeleteDiff` — so a non-autoNumber field's delete revision is byte-for-byte unaffected.
+ */
+export function fieldDeleteDiffWithSequence(before: FieldConfigSnapshot, lastValue: number | null): FieldDiff {
+  const diff = configDeleteDiff(before as unknown as Record<string, unknown>, FIELD_CONFIG_KEYS as ReadonlyArray<string>)
+  if (lastValue === null) return diff
+  return { ...diff, before: { ...(diff.before ?? {}), lastValue } }
 }
 /**
  * Record the order-only side-effect of a bulk reorder: a field mutation (insert-in-middle / reorder / delete)

@@ -135,6 +135,10 @@ function resolveAttendanceOperation(req: Request, normalizedRoute: string): stri
   if (method === 'POST' && normalizedRoute === '/api/attendance/punch') return 'punch'
   if (method === 'POST' && normalizedRoute === '/api/attendance-admin/users/batch/roles/assign') return 'admin_batch_assign'
   if (method === 'POST' && normalizedRoute === '/api/attendance-admin/users/batch/roles/unassign') return 'admin_batch_unassign'
+  // §7.6 operator-initiated redelivery of a single failed attendance-notification delivery. This is
+  // a send-triggering, platform-admin-only mutation — give it a first-class operation label instead
+  // of the `other` bucket so the audit trail (and metrics) name the action.
+  if (method === 'POST' && normalizedRoute === '/api/attendance-admin/notification-deliveries/:id/redeliver') return 'notification_redeliver'
   return 'other'
 }
 
@@ -196,6 +200,10 @@ function extractResourceId(req: Request, captured: { batchId?: string; requestId
   // /api/attendance-admin/users/:userId/...
   const usersIdx = parts.indexOf('users')
   if (usersIdx >= 0 && parts[usersIdx + 1]) return parts[usersIdx + 1]
+  // /api/attendance-admin/notification-deliveries/:deliveryId/redeliver — extract the delivery id so
+  // the §7.6 redelivery audit row is keyed to the exact row acted on, not NULL.
+  const ndIdx = parts.indexOf('notification-deliveries')
+  if (ndIdx >= 0 && parts[ndIdx + 1]) return parts[ndIdx + 1]
   return null
 }
 
@@ -343,8 +351,15 @@ export function attendanceAuditMiddleware(): RequestHandler {
         const action = `attendance_http:${method}:${normalizedRoute}`
         const resourceType = 'attendance'
         const resourceId = extractResourceId(req, captured)
+        // Values-free per-operation audit extras a handler may attach via res.locals (e.g. the §7.6
+        // redelivery route records org_id / channel / old_status / result). Never PII by contract —
+        // the handler is responsible for putting only enums/ids-of-scope here, no recipient/body.
+        const auditExtra = (res.locals && typeof res.locals.attendanceAuditExtra === 'object' && res.locals.attendanceAuditExtra !== null)
+          ? res.locals.attendanceAuditExtra as Record<string, unknown>
+          : null
         const meta = {
           ok: responseOk,
+          operation: op,
           error: errorCode ? { code: errorCode, message: errorMessage } : null,
           request: {
             method,
@@ -353,6 +368,7 @@ export function attendanceAuditMiddleware(): RequestHandler {
             queryKeys: Object.keys(req.query || {}).slice(0, 50),
             bodyKeys: redactBodyKeys(req.body),
           },
+          ...(auditExtra ? { redelivery: auditExtra } : {}),
         }
 
         // Best effort insert; do not block the request lifecycle on audit issues.

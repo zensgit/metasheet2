@@ -59,6 +59,7 @@ const mockPendingApprovals = ref<any[]>([])
 const mockMyApprovals = ref<any[]>([])
 const mockCcApprovals = ref<any[]>([])
 const mockCompletedApprovals = ref<any[]>([])
+const mockProcessedApprovals = ref<any[]>([])
 const mockLoading = ref(false)
 const loadPendingSpy = vi.fn().mockResolvedValue(undefined)
 
@@ -69,6 +70,7 @@ vi.mock('../src/approvals/store', () => ({
     get myApprovals() { return mockMyApprovals.value },
     get ccApprovals() { return mockCcApprovals.value },
     get completedApprovals() { return mockCompletedApprovals.value },
+    get processedApprovals() { return mockProcessedApprovals.value },
     get activeApproval() { return null },
     get history() { return [] },
     get loading() { return mockLoading.value },
@@ -77,12 +79,14 @@ vi.mock('../src/approvals/store', () => ({
     get totalMine() { return mockMyApprovals.value.length },
     get totalCc() { return mockCcApprovals.value.length },
     get totalCompleted() { return mockCompletedApprovals.value.length },
+    get totalProcessed() { return mockProcessedApprovals.value.length },
     get pendingCount() { return mockPendingApprovals.value.length },
     approvalById: () => undefined,
     loadPending: loadPendingSpy,
     loadMine: vi.fn(),
     loadCc: vi.fn(),
     loadCompleted: vi.fn(),
+    loadProcessed: vi.fn().mockResolvedValue(undefined),
     loadDetail: vi.fn(),
     loadHistory: vi.fn(),
     submitApproval: vi.fn(),

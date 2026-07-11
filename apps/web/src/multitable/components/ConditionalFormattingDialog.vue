@@ -108,33 +108,31 @@
               </label>
             </div>
             <div class="cf-dlg__rule-row cf-dlg__rule-row--actions">
-              <button
-                type="button"
+              <MtButton
                 class="cf-dlg__btn cf-dlg__btn--ghost"
                 :disabled="index === 0"
                 @click="moveRule(index, -1)"
-              >{{ ml('formatting.up') }}</button>
-              <button
-                type="button"
+              >{{ ml('formatting.up') }}</MtButton>
+              <MtButton
                 class="cf-dlg__btn cf-dlg__btn--ghost"
                 :disabled="index === draftRules.length - 1"
                 @click="moveRule(index, 1)"
-              >{{ ml('formatting.down') }}</button>
-              <button type="button" class="cf-dlg__btn cf-dlg__btn--danger" @click="removeRule(index)">{{ ml('action.remove') }}</button>
+              >{{ ml('formatting.down') }}</MtButton>
+              <MtButton variant="danger" class="cf-dlg__btn cf-dlg__btn--danger" @click="removeRule(index)">{{ ml('action.remove') }}</MtButton>
             </div>
           </div>
         </div>
-        <button
-          type="button"
+        <MtButton
+          variant="primary"
           class="cf-dlg__btn cf-dlg__btn--primary"
           :disabled="draftRules.length >= ruleLimit || !selectableFields.length"
           @click="addRule"
-        >{{ ml('formatting.addRule') }}</button>
+        >{{ ml('formatting.addRule') }}</MtButton>
         <p v-if="!selectableFields.length" class="cf-dlg__hint">{{ ml('formatting.noFieldsHint') }}</p>
       </div>
       <div class="cf-dlg__footer">
-        <button type="button" class="cf-dlg__btn" @click="close">{{ ml('action.cancel') }}</button>
-        <button type="button" class="cf-dlg__btn cf-dlg__btn--primary" :disabled="!dirty" @click="save">{{ ml('formatting.saveRules') }}</button>
+        <MtButton class="cf-dlg__btn" @click="close">{{ ml('action.cancel') }}</MtButton>
+        <MtButton variant="primary" class="cf-dlg__btn cf-dlg__btn--primary" :disabled="!dirty" @click="save">{{ ml('formatting.saveRules') }}</MtButton>
       </div>
     </div>
   </div>
@@ -155,6 +153,7 @@ import {
   formattingPickColor,
   managerLabel,
 } from '../utils/meta-manager-labels'
+import { MtButton } from '../ui'
 
 const props = defineProps<{
   visible: boolean
@@ -420,14 +419,10 @@ function save() {
 .cf-dlg__swatch--active { box-shadow: 0 0 0 2px #1d4ed8; }
 .cf-dlg__hex { width: 90px; padding: 3px 6px; border: 1px solid #d0d5dc; border-radius: 4px; font-size: 12px; }
 .cf-dlg__check-inline { display: flex; align-items: center; gap: 4px; font-size: 12px; color: #444; cursor: pointer; }
-.cf-dlg__btn { padding: 5px 12px; border: 1px solid #d0d5dc; border-radius: 4px; background: #fff; cursor: pointer; font-size: 12px; color: #333; }
-.cf-dlg__btn:hover:not(:disabled) { background: #f3f4f6; }
-.cf-dlg__btn:disabled { opacity: 0.4; cursor: not-allowed; }
-.cf-dlg__btn--primary { background: #2563eb; border-color: #2563eb; color: #fff; }
-.cf-dlg__btn--primary:hover:not(:disabled) { background: #1d4ed8; }
-.cf-dlg__btn--danger { color: #b91c1c; border-color: #fecaca; }
-.cf-dlg__btn--danger:hover:not(:disabled) { background: #fef2f2; }
-.cf-dlg__btn--ghost { border-color: transparent; }
+/* .cf-dlg__btn / --primary / --danger / --ghost: all six action controls (up/down/remove/addRule/cancel/save)
+   are now <MtButton> (token-styled, variant primary/danger/ghost). The bespoke hardcoded-hex button CSS was
+   removed to avoid double-styling the MtButton root; the classes are kept on the elements only for selector
+   stability. --primary was #2563eb == --ms-color-primary, so MtButton variant="primary" is an exact match. */
 .cf-dlg__hint { font-size: 12px; color: #888; margin: 0; }
 .cf-dlg__footer { display: flex; gap: 8px; justify-content: flex-end; padding: 12px 16px; border-top: 1px solid #eee; }
 </style>

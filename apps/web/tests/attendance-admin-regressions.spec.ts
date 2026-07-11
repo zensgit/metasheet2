@@ -1394,7 +1394,16 @@ describe('Attendance admin regressions', () => {
     const requestType = container!.querySelector<HTMLSelectElement>('#attendance-approval-type')
     expect(name).toBeTruthy()
     expect(requestType).toBeTruthy()
-    expect(Array.from(requestType!.options).map(option => option.value)).toContain('shift_swap')
+    const typeValues = Array.from(requestType!.options).map(option => option.value)
+    expect(typeValues).toContain('shift_swap')
+    // A1 wire-level fix: the dropdown must now expose every backend REQUEST_TYPE,
+    // including the two that were missing (outdoor_punch / schedule_dispatch).
+    expect(typeValues).toContain('outdoor_punch')
+    expect(typeValues).toContain('schedule_dispatch')
+    // A1 structured editor + preview replace the raw JSON textarea.
+    expect(container!.querySelector('[data-testid="attendance-approval-steps-editor"]')).toBeTruthy()
+    expect(container!.querySelector('[data-testid="attendance-approval-steps-preview"]')).toBeTruthy()
+    expect(container!.querySelector('#attendance-approval-steps')).toBeNull()
 
     name!.value = 'Shift swap approval'
     name!.dispatchEvent(new Event('input', { bubbles: true }))
@@ -1633,6 +1642,54 @@ describe('Attendance admin regressions', () => {
     expect(savedPayload?.annualLeavePolicy?.tiers).toEqual([])
   })
 
+  // S3 scheduler trigger switch (design-lock attendance-annual-leave-accrual-scheduler-s3-design-lock-20260710 §G7).
+  it('annual-leave policy: scheduledTrigger.enabled hydrates from settings and round-trips both directions on save', async () => {
+    let savedPayload: any = null
+    vi.mocked(apiFetch).mockImplementation(async (input, init) => {
+      const url = String(input)
+      if (url.includes('/api/attendance/settings') && (init?.method ?? 'GET') === 'PUT') {
+        savedPayload = JSON.parse(String(init!.body))
+        return jsonResponse(200, { ok: true, data: {} })
+      }
+      if (url.includes('/api/attendance/settings')) {
+        return jsonResponse(200, {
+          ok: true,
+          data: {
+            annualLeavePolicy: {
+              enabled: true, tenureMode: 'cumulative_service', standardDayMinutes: 480,
+              tiers: [{ minYears: 1, maxYears: null, days: 5 }], carryover: { enabled: false },
+              timezone: 'Asia/Shanghai', scheduledTrigger: { enabled: true },
+            },
+          },
+        })
+      }
+      return emptyAttendanceResponse()
+    })
+
+    app = createApp(AttendanceView, { mode: 'admin' })
+    app.mount(container!)
+    await flushUi(8)
+
+    container!.querySelector<HTMLButtonElement>('[data-admin-anchor="attendance-admin-annual-leave-policy"]')!.click()
+    await flushUi(4)
+    const section = container!.querySelector<HTMLElement>('#attendance-admin-annual-leave-policy')!
+    const toggle = section.querySelector<HTMLInputElement>('[data-annual-policy="scheduled-trigger"]')!
+    expect(toggle.checked).toBe(true) // hydrated from settings, not the local `false` default
+    const saveBtn = Array.from(section.querySelectorAll<HTMLButtonElement>('button')).find(b => b.textContent?.includes('Save policy'))!
+
+    saveBtn.click()
+    await flushUi(4)
+    expect(savedPayload?.annualLeavePolicy?.scheduledTrigger).toEqual({ enabled: true })
+
+    // toggling off and saving again round-trips false too (not stuck sticky-true).
+    toggle.checked = false
+    toggle.dispatchEvent(new Event('change'))
+    await flushUi(2)
+    saveBtn.click()
+    await flushUi(4)
+    expect(savedPayload?.annualLeavePolicy?.scheduledTrigger).toEqual({ enabled: false })
+  })
+
   // ===== L5c admin operations =====
   const enabledPolicySettings = () => jsonResponse(200, {
     ok: true,
@@ -1849,6 +1906,205 @@ describe('Attendance admin regressions', () => {
     await flushUi(4)
     // the structured code maps to its human line, not a raw "raw"/generic failure
     expect(card.querySelector('[data-annual-ops-error-adjust]')?.textContent || '').toContain('not an active member')
+  })
+
+  // ===== #3925 S6 bulk annual-leave balance adjustment (design-lock 2026-07-10) =====
+  function addAnnualBulkAdjustTargetUser(section: HTMLElement, userId: string) {
+    selectUserPicker(section, '#attendance-annual-bulk-adjust-user-picker', userId)
+    section.querySelector<HTMLButtonElement>('[data-attendance-annual-bulk-adjust-add-user]')!.click()
+  }
+
+  function setAnnualBulkAdjustSharedFields(card: HTMLElement, deltaMinutes: string, reason: string) {
+    setInput(card, '[data-attendance-annual-bulk-adjust-delta]', deltaMinutes)
+    setInput(card, '[data-attendance-annual-bulk-adjust-reason]', reason)
+  }
+
+  it('bulk balance adjust: confirm gate — opening the confirm never posts; only confirm submit does', async () => {
+    const bodies: any[] = []
+    vi.mocked(apiFetch).mockImplementation(async (input, init) => {
+      const url = String(input)
+      if (url.includes('/api/attendance/annual-leave-manual-adjustment') && init?.method === 'POST') {
+        bodies.push(JSON.parse(String(init!.body)))
+        return jsonResponse(200, { ok: true, data: { id: `adj-${bodies.length}`, delta: 120, applied: true, alreadyApplied: false } })
+      }
+      if (url.includes('/api/attendance/settings')) return enabledPolicySettings()
+      return emptyAttendanceResponse()
+    })
+    app = createApp(AttendanceView, { mode: 'admin' })
+    app.mount(container!)
+    await flushUi(8)
+    const section = await openOpsSection()
+    const card = section.querySelector<HTMLElement>('[data-annual-ops-card="bulk-adjust"]')!
+    addAnnualBulkAdjustTargetUser(card, 'user-bulk-1')
+    await flushUi(2)
+    setAnnualBulkAdjustSharedFields(card, '120', 'batch fix')
+    await flushUi(2)
+
+    card.querySelector<HTMLButtonElement>('[data-attendance-annual-bulk-adjust-request]')!.click()
+    await flushUi(4)
+
+    expect(section.querySelector('[data-annual-ops-confirm]')).toBeTruthy() // in-DOM confirm, not window.confirm
+    expect(bodies).toHaveLength(0)
+
+    section.querySelector<HTMLButtonElement>('[data-annual-ops-confirm-submit]')!.click()
+    await flushUi(4)
+
+    expect(bodies).toHaveLength(1)
+  })
+
+  it('bulk balance adjust: N selected users produce N POSTs sharing delta/reason with distinct idempotencyKeys', async () => {
+    const bodies: any[] = []
+    vi.mocked(apiFetch).mockImplementation(async (input, init) => {
+      const url = String(input)
+      if (url.includes('/api/attendance/annual-leave-manual-adjustment') && init?.method === 'POST') {
+        const body = JSON.parse(String(init!.body))
+        bodies.push(body)
+        return jsonResponse(200, { ok: true, data: { id: `adj-${bodies.length}`, delta: body.deltaMinutes, applied: true, alreadyApplied: false } })
+      }
+      if (url.includes('/api/attendance/settings')) return enabledPolicySettings()
+      return emptyAttendanceResponse()
+    })
+    app = createApp(AttendanceView, { mode: 'admin' })
+    app.mount(container!)
+    await flushUi(8)
+    const section = await openOpsSection()
+    const card = section.querySelector<HTMLElement>('[data-annual-ops-card="bulk-adjust"]')!
+    addAnnualBulkAdjustTargetUser(card, 'user-a')
+    await flushUi(2)
+    addAnnualBulkAdjustTargetUser(card, 'user-b')
+    await flushUi(2)
+    setAnnualBulkAdjustSharedFields(card, '120', 'batch fix')
+    await flushUi(2)
+
+    card.querySelector<HTMLButtonElement>('[data-attendance-annual-bulk-adjust-request]')!.click()
+    await flushUi(4)
+    section.querySelector<HTMLButtonElement>('[data-annual-ops-confirm-submit]')!.click()
+    await flushUi(8)
+
+    expect(bodies).toEqual([
+      { userId: 'user-a', deltaMinutes: 120, reason: 'batch fix', idempotencyKey: expect.any(String) },
+      { userId: 'user-b', deltaMinutes: 120, reason: 'batch fix', idempotencyKey: expect.any(String) },
+    ])
+    expect(new Set(bodies.map(b => b.idempotencyKey)).size).toBe(2)
+    expect(card.querySelector('[data-attendance-annual-bulk-adjust-summary]')?.textContent).toContain('2 applied, 0 failed')
+  })
+
+  it('bulk balance adjust: a >50-user selection disables the request button, never silently truncating', async () => {
+    vi.mocked(apiFetch).mockImplementation(async (input) => {
+      const url = String(input)
+      if (url.includes('/api/attendance/settings')) return enabledPolicySettings()
+      return emptyAttendanceResponse()
+    })
+    app = createApp(AttendanceView, { mode: 'admin' })
+    app.mount(container!)
+    await flushUi(8)
+    const section = await openOpsSection()
+    const card = section.querySelector<HTMLElement>('[data-annual-ops-card="bulk-adjust"]')!
+    for (let i = 0; i < 51; i += 1) {
+      addAnnualBulkAdjustTargetUser(card, `user-${i}`)
+      await flushUi(1)
+    }
+    setAnnualBulkAdjustSharedFields(card, '60', 'cap test')
+    await flushUi(2)
+
+    const requestButton = card.querySelector<HTMLButtonElement>('[data-attendance-annual-bulk-adjust-request]')!
+    expect(requestButton.disabled).toBe(true)
+    expect(card.querySelector('[data-attendance-annual-bulk-adjust-disabled-reason]')?.textContent).toContain('at most 50')
+    expect(section.querySelector('[data-annual-ops-confirm]')).toBeNull()
+  })
+
+  it('bulk balance adjust: partial failure shows distinct per-row state/error-kind and never claims full success; retry only resubmits the failed user', async () => {
+    const bodies: any[] = []
+    let failAttempts = 0
+    vi.mocked(apiFetch).mockImplementation(async (input, init) => {
+      const url = String(input)
+      if (url.includes('/api/attendance/annual-leave-manual-adjustment') && init?.method === 'POST') {
+        const body = JSON.parse(String(init!.body))
+        bodies.push(body)
+        if (body.userId === 'user-fail') {
+          failAttempts += 1
+          if (failAttempts === 1) {
+            return jsonResponse(422, { ok: false, error: { code: 'ANNUAL_LEAVE_BALANCE_INSUFFICIENT', message: 'insufficient' } })
+          }
+        }
+        return jsonResponse(200, { ok: true, data: { id: `adj-${bodies.length}`, delta: body.deltaMinutes, applied: true, alreadyApplied: false } })
+      }
+      if (url.includes('/api/attendance/settings')) return enabledPolicySettings()
+      return emptyAttendanceResponse()
+    })
+    app = createApp(AttendanceView, { mode: 'admin' })
+    app.mount(container!)
+    await flushUi(8)
+    const section = await openOpsSection()
+    const card = section.querySelector<HTMLElement>('[data-annual-ops-card="bulk-adjust"]')!
+    addAnnualBulkAdjustTargetUser(card, 'user-fail')
+    await flushUi(2)
+    addAnnualBulkAdjustTargetUser(card, 'user-ok')
+    await flushUi(2)
+    setAnnualBulkAdjustSharedFields(card, '-60', 'deduction')
+    await flushUi(2)
+
+    card.querySelector<HTMLButtonElement>('[data-attendance-annual-bulk-adjust-request]')!.click()
+    await flushUi(4)
+    // negative delta gets the extra G3 irreversibility note on the shared confirm panel
+    expect(section.querySelector('[data-annual-ops-confirm]')?.textContent).toContain('reverse adjustment')
+    section.querySelector<HTMLButtonElement>('[data-annual-ops-confirm-submit]')!.click()
+    await flushUi(8)
+
+    expect(bodies).toHaveLength(2)
+    expect(card.querySelector('[data-attendance-annual-bulk-adjust-row-state="ok"]')).toBeTruthy()
+    expect(card.querySelector('[data-attendance-annual-bulk-adjust-row-state="error"]')).toBeTruthy()
+    expect(card.querySelector('[data-attendance-annual-bulk-adjust-row-error-kind="insufficient"]')).toBeTruthy()
+    expect(card.querySelector('[data-attendance-annual-bulk-adjust-outcome-error]')).toBeTruthy()
+    expect(card.querySelector('[data-attendance-annual-bulk-adjust-summary]')?.textContent).toContain('1 applied, 1 failed')
+
+    const retryButton = card.querySelector<HTMLButtonElement>('[data-attendance-annual-bulk-adjust-retry]')!
+    expect(retryButton.disabled).toBe(false)
+    retryButton.click()
+    await flushUi(8)
+
+    expect(bodies).toHaveLength(3)
+    expect(bodies.filter(b => b.userId === 'user-ok')).toHaveLength(1)
+    expect(bodies.filter(b => b.userId === 'user-fail')).toHaveLength(2)
+    // the retry must reuse the snapshot-frozen idempotency key — regenerating it would
+    // double-apply a delta whose first response was lost after the server had already
+    // committed (source_key is the only server-side dedupe key for balance deltas)
+    const failBodies = bodies.filter(b => b.userId === 'user-fail')
+    expect(failBodies[0].idempotencyKey).toBeTruthy()
+    expect(failBodies[1].idempotencyKey).toBe(failBodies[0].idempotencyKey)
+    expect(card.querySelector('[data-attendance-annual-bulk-adjust-outcome-error]')).toBeNull()
+    expect(card.querySelector('[data-attendance-annual-bulk-adjust-summary]')?.textContent).toContain('2 applied, 0 failed')
+  })
+
+  it('bulk balance adjust: policy off disables the request button and no write reaches the backend', async () => {
+    const writePosts: string[] = []
+    vi.mocked(apiFetch).mockImplementation(async (input, init) => {
+      const url = String(input)
+      if (url.includes('annual-leave-manual-adjustment') && init?.method === 'POST') {
+        writePosts.push(url)
+        return jsonResponse(200, { ok: true, data: {} })
+      }
+      if (url.includes('/api/attendance/settings')) {
+        return jsonResponse(200, { ok: true, data: { annualLeavePolicy: { enabled: false, tenureMode: 'cumulative_service', standardDayMinutes: 480, tiers: [], carryover: { enabled: false }, timezone: null } } })
+      }
+      return emptyAttendanceResponse()
+    })
+    app = createApp(AttendanceView, { mode: 'admin' })
+    app.mount(container!)
+    await flushUi(8)
+    const section = await openOpsSection()
+    const card = section.querySelector<HTMLElement>('[data-annual-ops-card="bulk-adjust"]')!
+    addAnnualBulkAdjustTargetUser(card, 'user-a')
+    await flushUi(2)
+    setAnnualBulkAdjustSharedFields(card, '60', 'policy off test')
+    await flushUi(2)
+
+    const requestButton = card.querySelector<HTMLButtonElement>('[data-attendance-annual-bulk-adjust-request]')!
+    expect(requestButton.disabled).toBe(true)
+    requestButton.click()
+    await flushUi(4)
+    expect(section.querySelector('[data-annual-ops-confirm]')).toBeNull()
+    expect(writePosts).toEqual([])
   })
 
   it('warns when the attendance-group picker source is capped (no silent caps)', async () => {
@@ -4201,12 +4457,14 @@ describe('Attendance admin regressions', () => {
 
     const requireApproval = container!.querySelector<HTMLInputElement>('[data-outdoor="require-approval"]')
     const requireNote = container!.querySelector<HTMLInputElement>('[data-outdoor="require-note"]')
+    const requirePhoto = container!.querySelector<HTMLInputElement>('[data-outdoor="require-photo"]')
     const flow = container!.querySelector<HTMLSelectElement>('[data-outdoor="approval-flow"]')
-    expect(Boolean(requireApproval && requireNote && flow)).toBe(true)
+    expect(Boolean(requireApproval && requireNote && requirePhoto && flow)).toBe(true)
     // load: booleans → checkboxes; the saved flow id round-trips via the preserve-option even when it is not
     // in the active-flow list (so a previously-saved flow is never silently reset to '').
     expect(requireApproval!.checked).toBe(true)
     expect(requireNote!.checked).toBe(true)
+    expect(requirePhoto!.checked).toBe(false)
     expect(flow!.value).toBe('flow-out-7')
 
     const saveButton = container!.querySelector<HTMLButtonElement>('[data-outdoor="save"]')
@@ -4214,10 +4472,34 @@ describe('Attendance admin regressions', () => {
     saveButton!.click()
     await flushUi(6)
 
-    // EXACTLY { punchPolicy: { outdoor: { requireApproval, requireNote, approvalFlowId } } }: no requirePhoto,
+    // EXACTLY { punchPolicy: { outdoor: { requireApproval, requireNote, requirePhoto, approvalFlowId } } }:
     // no orgId, no sibling settings. toEqual (not toMatchObject) so any leak fails.
     expect(lastSettingsPutBody()).toEqual({
-      punchPolicy: { outdoor: { requireApproval: true, requireNote: true, approvalFlowId: 'flow-out-7' } },
+      punchPolicy: { outdoor: { requireApproval: true, requireNote: true, requirePhoto: false, approvalFlowId: 'flow-out-7' } },
+    })
+  })
+
+  it('toggling the outdoor require-photo checkbox sends requirePhoto: true in the save payload', async () => {
+    attendanceSettingsData = {
+      punchPolicy: { outdoor: { requireApproval: true, requireNote: false, requirePhoto: false, approvalFlowId: 'flow-out-7' } },
+    }
+    app = createApp(AttendanceView, { mode: 'admin' })
+    app.mount(container!)
+    await flushUi(16)
+
+    const requirePhoto = container!.querySelector<HTMLInputElement>('[data-outdoor="require-photo"]')
+    expect(requirePhoto).toBeTruthy()
+    expect(requirePhoto!.checked).toBe(false)
+    requirePhoto!.checked = true
+    requirePhoto!.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushUi(4)
+
+    const saveButton = container!.querySelector<HTMLButtonElement>('[data-outdoor="save"]')
+    saveButton!.click()
+    await flushUi(6)
+
+    expect(lastSettingsPutBody()).toEqual({
+      punchPolicy: { outdoor: { requireApproval: true, requireNote: false, requirePhoto: true, approvalFlowId: 'flow-out-7' } },
     })
   })
 
@@ -4289,7 +4571,7 @@ describe('Attendance admin regressions', () => {
     await flushUi(6)
 
     expect(lastSettingsPutBody()).toEqual({
-      punchPolicy: { outdoor: { requireApproval: true, requireNote: true, approvalFlowId: '' } },
+      punchPolicy: { outdoor: { requireApproval: true, requireNote: true, requirePhoto: false, approvalFlowId: '' } },
     })
   })
 
@@ -4308,7 +4590,7 @@ describe('Attendance admin regressions', () => {
     await flushUi(6)
 
     expect(lastSettingsPutBody()).toEqual({
-      punchPolicy: { outdoor: { requireApproval: false, requireNote: false, approvalFlowId: '' } },
+      punchPolicy: { outdoor: { requireApproval: false, requireNote: false, requirePhoto: false, approvalFlowId: '' } },
     })
   })
 
@@ -4336,7 +4618,7 @@ describe('Attendance admin regressions', () => {
     container!.querySelector<HTMLButtonElement>('[data-outdoor="save"]')!.click()
     await flushUi(6)
     expect(lastSettingsPutBody()).toEqual({
-      punchPolicy: { outdoor: { requireApproval: true, requireNote: false, approvalFlowId: 'flow-out-active' } },
+      punchPolicy: { outdoor: { requireApproval: true, requireNote: false, requirePhoto: false, approvalFlowId: 'flow-out-active' } },
     })
   })
 

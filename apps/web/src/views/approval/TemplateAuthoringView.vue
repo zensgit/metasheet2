@@ -545,7 +545,7 @@
                 data-testid="approval-condition-branch"
               >
                 <div class="template-authoring__condition-branch-head">
-                  <span>分支 → {{ branch.edgeKey }}</span>
+                  <span>分支「{{ liveBranchSummary(branch) }}」→ {{ branch.edgeKey }}</span>
                   <el-select
                     :model-value="branch.predicateMode"
                     size="small"
@@ -835,7 +835,7 @@
                   :disabled="readOnly"
                   class="ms-w-240"
                   data-testid="approval-node-source-kind"
-                  @update:model-value="(kind: ApprovalAssigneeSourceKind) => setApprovalSourceKind(node.key, kind)"
+                  @update:model-value="(kind: ApprovalAssigneeSourceKind) => { setApprovalSourceKind(node.key, kind); syncApprovalNodeOptions(node.key) }"
                 >
                   <el-option
                     v-for="opt in APPROVAL_NODE_SOURCE_KINDS"
@@ -845,24 +845,65 @@
                   />
                 </el-select>
               </el-form-item>
-              <el-form-item
-                v-if="approvalSourceKind(node.key) === 'static_user' || approvalSourceKind(node.key) === 'static_role'"
-                :label="approvalSourceKind(node.key) === 'static_user' ? '用户 ID' : '角色 ID'"
-              >
-                <el-select
-                  :model-value="approvalSourceIds(node.key)"
-                  multiple
-                  filterable
-                  allow-create
-                  default-first-option
-                  size="small"
-                  :disabled="readOnly"
-                  class="ms-w-360"
-                  placeholder="输入 ID 后回车"
-                  data-testid="approval-node-source-ids"
-                  @update:model-value="(ids: string[]) => setApprovalSourceIds(node.key, ids)"
-                />
-              </el-form-item>
+              <!-- G-B2-18: same directory typeahead as the linear-step picker (line ~973) — the
+                   composable is shared (one users/roles fetch backs both surfaces), only the
+                   template wiring is duplicated per editor. The manual-ID input stays as the
+                   advanced fallback (directory search doesn't guarantee full id coverage). -->
+              <template v-if="approvalSourceKind(node.key) === 'static_user' || approvalSourceKind(node.key) === 'static_role'">
+                <el-form-item v-if="approvalSourceKind(node.key) === 'static_user'" label="选择用户">
+                  <el-select
+                    :model-value="approvalSourceIds(node.key)"
+                    multiple
+                    filterable
+                    remote
+                    :remote-method="onUserSearch"
+                    :loading="directory.usersLoading.value"
+                    size="small"
+                    :disabled="readOnly"
+                    class="ms-w-360"
+                    placeholder="搜索用户名 / 邮箱 / ID"
+                    data-testid="approval-node-source-user-picker"
+                    @update:model-value="(ids: string[]) => setApprovalSourceIdsFromPicker(node.key, ids)"
+                    @visible-change="(visible: boolean) => visible && onUserSearch('')"
+                  >
+                    <el-option
+                      v-for="user in directory.users.value"
+                      :key="user.id"
+                      :label="directory.formatUserLabel(user)"
+                      :value="user.id"
+                    />
+                  </el-select>
+                </el-form-item>
+                <el-form-item v-else label="选择角色">
+                  <el-select
+                    :model-value="approvalSourceIds(node.key)"
+                    multiple
+                    filterable
+                    size="small"
+                    :disabled="readOnly"
+                    class="ms-w-360"
+                    placeholder="选择角色"
+                    data-testid="approval-node-source-role-picker"
+                    @update:model-value="(ids: string[]) => setApprovalSourceIdsFromPicker(node.key, ids)"
+                  >
+                    <el-option
+                      v-for="role in directory.roles.value"
+                      :key="role.id"
+                      :label="directory.formatRoleLabel(role)"
+                      :value="role.id"
+                    />
+                  </el-select>
+                </el-form-item>
+                <el-form-item label="手动输入 ID（高级）">
+                  <el-input
+                    :model-value="approvalSourceIdsText(node.key)"
+                    :disabled="readOnly"
+                    placeholder="逗号或换行分隔"
+                    data-testid="approval-node-source-ids-text"
+                    @update:model-value="(text: string) => setApprovalSourceIdsText(node.key, text)"
+                  />
+                </el-form-item>
+              </template>
               <el-form-item
                 v-else-if="approvalSourceKind(node.key) === 'form_field_user'"
                 label="表单用户字段 ID"
@@ -916,11 +957,46 @@
           </div>
         </div>
 
+        <!-- G-B2-06 read-only flow spine (LINEAR templates only — a preserved complex graph keeps
+             its own structured/canvas views above, untouched): 发起人 → 步骤1 → 步骤2 → …, derived
+             straight from draft.steps (see linearStepSpine.ts). Not editable here; clicking a step
+             chip scrolls to and briefly highlights the matching card below. -->
+        <div
+          v-if="!graphReadOnly"
+          class="template-authoring__spine"
+          data-testid="approval-template-step-spine"
+        >
+          <template v-for="(chip, chipIndex) in linearStepSpine" :key="chip.key">
+            <button
+              type="button"
+              class="template-authoring__spine-chip"
+              :class="{
+                'template-authoring__spine-chip--requester': chip.role === 'requester',
+                'template-authoring__spine-chip--unresolved': !chip.resolvable,
+              }"
+              :data-testid="chip.role === 'requester' ? 'approval-spine-chip-requester' : 'approval-spine-chip-step'"
+              :data-step-index="chip.stepIndex ?? undefined"
+              :title="chip.stepIndex ? `第 ${chip.stepIndex} 步 · 点击定位到对应步骤卡` : '发起人：提交表单'"
+              @click="focusStepCard(chip)"
+            >
+              <strong>{{ chip.label }}</strong>
+              <span v-if="chip.sourceSummary" class="template-authoring__spine-chip-source">{{ chip.sourceSummary }}</span>
+            </button>
+            <span
+              v-if="chipIndex < linearStepSpine.length - 1"
+              class="template-authoring__spine-arrow"
+              aria-hidden="true"
+            >→</span>
+          </template>
+        </div>
+
         <div
           v-for="(step, index) in draft.steps"
           v-show="!graphReadOnly"
+          :id="`approval-step-card-${step.localId}`"
           :key="step.localId"
           class="template-authoring__item"
+          :class="{ 'template-authoring__item--highlighted': highlightedStepLocalId === step.localId }"
           data-testid="approval-template-step-row"
         >
           <div class="template-authoring__item-toolbar">
@@ -928,6 +1004,14 @@
             <div>
               <el-button size="small" :disabled="readOnly || index === 0" @click="moveStep(index, -1)">上移</el-button>
               <el-button size="small" :disabled="readOnly || index === draft.steps.length - 1" @click="moveStep(index, 1)">下移</el-button>
+              <el-button
+                size="small"
+                :disabled="readOnly"
+                :data-testid="`approval-step-insert-after-${step.localId}`"
+                @click="insertStep(index)"
+              >
+                在下方插入步骤
+              </el-button>
               <el-button size="small" type="danger" :disabled="readOnly || draft.steps.length === 1" @click="removeStep(index)">删除</el-button>
             </div>
           </div>
@@ -1108,6 +1192,210 @@
           </el-collapse-item>
         </el-collapse>
       </el-card>
+
+      <!-- RP-3 (route-preview lock, B3-06) FE 试运行面板: read-only dry-run of the LAST-SAVED
+           draft graph — never writes an instance/assignment/notification. Compute-at-click via
+           the shared race-guard controller (RP-2's createRoutePreviewController, made generic). -->
+      <el-card
+        v-if="canManageTemplates"
+        class="template-authoring__panel"
+        shadow="never"
+        data-testid="approval-template-tryrun-panel"
+      >
+        <template #header>
+          <div class="template-authoring__panel-header">
+            <strong>试运行</strong>
+            <span class="template-authoring__hint">按样例表单值只读走一遍审批路径，不创建任何审批实例。</span>
+          </div>
+        </template>
+
+        <p class="template-authoring__hint" data-testid="approval-template-tryrun-draft-note">
+          试运行按最后保存的草稿图解析；未策展角色的路由以发布校验为准。
+        </p>
+
+        <el-form label-position="top" class="template-authoring__grid">
+          <el-form-item label="样例发起人（留空 = 以当前管理员身份预览）">
+            <ApprovalUserPicker
+              v-model="sampleRequesterId"
+              placeholder="搜索用户名 / 邮箱 / ID（可留空）"
+              data-testid="approval-template-tryrun-requester-picker"
+            />
+          </el-form-item>
+        </el-form>
+
+        <div v-if="templateFormFields.length === 0" class="template-authoring__hint">
+          请先在上方添加表单字段，再试运行。
+        </div>
+        <!-- G-B2-21 发起人视角: only fields a requester would SEE for the current sample values are
+             rendered here (visibility resolved by the same getVisibleFormFields the submit page and
+             the backend prune use). Editing a sample value flips visibility live. -->
+        <el-form v-else label-position="top" class="template-authoring__grid">
+          <template v-for="field in requesterVisibleFields" :key="field.id">
+            <el-form-item
+              v-if="!sampleFieldUnsupportedReason(field)"
+              :label="field.label || field.id"
+              data-testid="approval-template-tryrun-field"
+            >
+              <!-- text -->
+              <el-input
+                v-if="field.type === 'text'"
+                v-model="sampleFormData[field.id]"
+                :placeholder="field.placeholder || `请输入${field.label}`"
+              />
+              <!-- textarea -->
+              <el-input
+                v-else-if="field.type === 'textarea'"
+                v-model="sampleFormData[field.id]"
+                type="textarea"
+                :rows="2"
+                :placeholder="field.placeholder || `请输入${field.label}`"
+              />
+              <!-- number -->
+              <el-input-number
+                v-else-if="field.type === 'number'"
+                v-model="sampleFormData[field.id]"
+                class="ms-w-100pct"
+              />
+              <!-- date -->
+              <el-date-picker
+                v-else-if="field.type === 'date'"
+                v-model="sampleFormData[field.id]"
+                type="date"
+                :placeholder="field.placeholder || `请选择${field.label}`"
+                class="ms-w-100pct"
+              />
+              <!-- datetime -->
+              <el-date-picker
+                v-else-if="field.type === 'datetime'"
+                v-model="sampleFormData[field.id]"
+                type="datetime"
+                :placeholder="field.placeholder || `请选择${field.label}`"
+                class="ms-w-100pct"
+              />
+              <!-- select -->
+              <el-select
+                v-else-if="field.type === 'select'"
+                v-model="sampleFormData[field.id]"
+                :placeholder="field.placeholder || `请选择${field.label}`"
+                class="ms-w-100pct"
+              >
+                <el-option
+                  v-for="opt in (field.options || [])"
+                  :key="opt.value"
+                  :label="opt.label"
+                  :value="opt.value"
+                />
+              </el-select>
+              <!-- multi-select -->
+              <el-select
+                v-else-if="field.type === 'multi-select'"
+                v-model="sampleFormData[field.id]"
+                multiple
+                :placeholder="field.placeholder || `请选择${field.label}`"
+                class="ms-w-100pct"
+              >
+                <el-option
+                  v-for="opt in (field.options || [])"
+                  :key="opt.value"
+                  :label="opt.label"
+                  :value="opt.value"
+                />
+              </el-select>
+              <!-- user -->
+              <ApprovalUserPicker
+                v-else-if="field.type === 'user'"
+                :model-value="(sampleFormData[field.id] as string | null | undefined) ?? null"
+                @update:model-value="sampleFormData[field.id] = $event"
+              />
+            </el-form-item>
+            <div
+              v-else
+              class="template-authoring__hint template-authoring__wide"
+              data-testid="approval-template-tryrun-field-unsupported"
+            >
+              {{ field.label || field.id }}：{{ sampleFieldUnsupportedReason(field) }}
+            </div>
+          </template>
+        </el-form>
+
+        <!-- G-B2-21: fields the current sample values HIDE from a requester — shown (not silently
+             dropped) with WHY, so the author can verify their visibilityRule. Their sample values
+             stay in sampleFormData but the backend prunes hidden fields before routing, so they do
+             not participate in condition evaluation. -->
+        <el-collapse v-if="requesterHiddenFields.length > 0" class="template-authoring__tryrun-hidden">
+          <el-collapse-item
+            :title="`发起人视角下当前隐藏 ${requesterHiddenFields.length} 个字段（不参与走图）`"
+            name="hidden"
+            data-testid="approval-template-tryrun-hidden"
+          >
+            <ul class="template-authoring__tryrun-hidden-list">
+              <li
+                v-for="entry in requesterHiddenFields"
+                :key="entry.field.id"
+                data-testid="approval-template-tryrun-hidden-field"
+              >
+                <span class="template-authoring__tryrun-hidden-label">{{ entry.field.label || entry.field.id }}</span>
+                <span class="template-authoring__tryrun-hidden-reason">{{ entry.reason }}</span>
+              </li>
+            </ul>
+          </el-collapse-item>
+        </el-collapse>
+
+        <div class="template-authoring__tryrun-actions">
+          <el-tooltip v-if="tryRunDisabledReason" :content="tryRunDisabledReason" placement="top">
+            <span>
+              <el-button :loading="routePreviewLoading" disabled data-testid="approval-template-tryrun-button">
+                试运行
+              </el-button>
+            </span>
+          </el-tooltip>
+          <el-button
+            v-else
+            :loading="routePreviewLoading"
+            data-testid="approval-template-tryrun-button"
+            @click="runTemplateRoutePreview"
+          >
+            试运行
+          </el-button>
+        </div>
+
+        <div v-if="routePreviewError" class="template-authoring__tryrun-error" data-testid="approval-template-tryrun-error">
+          {{ routePreviewError }}
+        </div>
+        <div v-else-if="routePreview" class="template-authoring__tryrun-row" data-testid="approval-template-tryrun-result">
+          <span class="template-authoring__tryrun-chip template-authoring__tryrun-chip--requester">发起人</span>
+          <template v-for="node in routePreview.route" :key="node.nodeKey">
+            <span class="template-authoring__tryrun-arrow">→</span>
+            <span
+              class="template-authoring__tryrun-chip"
+              :class="{ 'template-authoring__tryrun-chip--unresolved': !!node.resolveError }"
+              data-testid="approval-template-tryrun-node"
+            >
+              {{ node.nodeLabel }}
+              <span class="template-authoring__tryrun-chip-summary">{{ routePreviewAssigneeSummary(node) }}</span>
+            </span>
+          </template>
+          <span
+            v-if="routePreview.truncated"
+            class="template-authoring__tryrun-truncated"
+            data-testid="approval-template-tryrun-truncated"
+          >
+            （路径未能完整解析，以实际流转为准）
+          </span>
+          <span v-else-if="routePreview.route.length === 0" class="template-authoring__tryrun-truncated">
+            （按当前样例将直接通过，无审批节点）
+          </span>
+        </div>
+
+        <div v-if="conditionNodeSummaries.length" class="template-authoring__tryrun-conditions" data-testid="approval-template-tryrun-conditions">
+          <strong>条件分支规则</strong>
+          <ul class="template-authoring__node-summary">
+            <li v-for="cond in conditionNodeSummaries" :key="cond.key">
+              {{ cond.label }}：{{ cond.lines.join('；') }}
+            </li>
+          </ul>
+        </div>
+      </el-card>
     </div>
 
     <!-- B2-03: publish pre-flight checklist — replaces the old "confirm first, validate after"
@@ -1133,6 +1421,18 @@
           <span v-if="!item.ok && item.detail" class="template-authoring__publish-checklist-detail">{{ item.detail }}</span>
         </li>
       </ul>
+      <!-- B3-09 (发布说明): optional; server trims + caps at 2000 chars (maxlength mirrors it so a
+           long paste fails visibly here instead of a 400 at confirm). Cleared when the dialog
+           reopens so a note never silently carries over to the NEXT publish. -->
+      <el-input
+        v-model="publishNote"
+        type="textarea"
+        :rows="2"
+        :maxlength="2000"
+        show-word-limit
+        placeholder="发布说明（可选）：本次发布改了什么"
+        data-testid="approval-publish-note-input"
+      />
       <template #footer>
         <el-button @click="publishChecklistVisible = false">取消</el-button>
         <el-button
@@ -1157,13 +1457,22 @@ import { onBeforeRouteLeave, useRoute, useRouter } from 'vue-router'
 import { Plus } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useApprovalPermissions } from '../../approvals/permissions'
+import { summarizeConditionBranch, summarizeConditionNode } from '../../approvals/conditionSummary'
 import {
   createTemplate,
   dryRunApprovalConditionFormula,
   getTemplate,
+  previewTemplateRoute,
   publishTemplate,
   updateTemplate,
+  type ApprovalRoutePreview,
 } from '../../approvals/api'
+import { createRoutePreviewController } from '../../approvals/routePreviewController'
+import { routePreviewAssigneeSummary } from '../../approvals/routePreviewSummary'
+import { describeRoutePreviewError } from '../../approvals/routePreviewErrors'
+import { computeRequesterPreviewFields } from '../../approvals/requesterPreviewFields'
+import { buildLinearStepSpine, type LinearStepSpineChip } from '../../approvals/linearStepSpine'
+import ApprovalUserPicker from '../../approvals/components/ApprovalUserPicker.vue'
 import {
   buildApprovalGraph,
   buildCreateTemplatePayload,
@@ -1176,6 +1485,7 @@ import {
   DETAIL_LEAF_FIELD_TYPES,
   draftFromTemplate,
   graphReadOnlyReason,
+  insertStepAt,
   parseIdsText,
   stepFieldAccess,
   setStepFieldPermission,
@@ -1221,6 +1531,7 @@ import type {
   ApprovalNode,
   CcNodeConfig,
   ConditionNodeConfig,
+  FormField,
   NodeFieldAccess,
   ParallelJoinMode,
   ParallelNodeConfig,
@@ -1270,6 +1581,22 @@ const canSave = computed(() => canManageTemplates.value && !unsupportedReason.va
 // config the v1 editor doesn't yet author, so authors can SEE the flow they're preserving.
 const graphPreviewNodes = computed<ApprovalNode[]>(() => draft.value.preservedGraph?.nodes ?? [])
 
+// G-B2-06 read-only flow spine for a LINEAR template (see `linearStepSpine.ts`) — 发起人 → 步骤1 →
+// 步骤2 → …, derived straight from `draft.value.steps`. Never used for a preserved complex graph
+// (rendered instead, unchanged, via `graphPreviewNodes` above): the view gates it on `!graphReadOnly`.
+const linearStepSpine = computed<LinearStepSpineChip[]>(() => buildLinearStepSpine(draft.value.steps))
+// Read-only-spine → step-card affordance: clicking a step chip briefly highlights (and scrolls to)
+// its matching card below. Purely cosmetic — no editing happens on the spine itself.
+const highlightedStepLocalId = ref<string | null>(null)
+let highlightStepTimer: ReturnType<typeof setTimeout> | undefined
+function focusStepCard(chip: LinearStepSpineChip): void {
+  if (chip.role !== 'step') return
+  highlightedStepLocalId.value = chip.key
+  if (highlightStepTimer) clearTimeout(highlightStepTimer)
+  highlightStepTimer = setTimeout(() => { highlightedStepLocalId.value = null }, 1600)
+  document.getElementById(`approval-step-card-${chip.key}`)?.scrollIntoView?.({ behavior: 'smooth', block: 'center' })
+}
+
 const NODE_TYPE_LABELS: Record<string, string> = {
   start: '发起',
   approval: '审批',
@@ -1293,14 +1620,8 @@ function nodeConfigSummary(node: ApprovalNode): string[] {
   const config = node.config as Record<string, unknown>
   if (node.type === 'condition') {
     const cfg = config as unknown as ConditionNodeConfig
-    const lines = (cfg.branches ?? []).map((branch) => {
-      const rules = (branch.rules ?? [])
-        .map((rule) => `${rule.fieldId} ${rule.operator}${rule.value === undefined ? '' : ` ${JSON.stringify(rule.value)}`}`)
-        .join(` ${branch.conjunction ?? 'and'} `)
-      return `分支 → ${branch.edgeKey}：${rules || '（无规则）'}`
-    })
-    if (cfg.defaultEdgeKey) lines.push(`默认分支 → ${cfg.defaultEdgeKey}`)
-    return lines
+    // G-B2-19: readable predicates（「金额 > 5000」）lead; edge keys stay as secondary provenance.
+    return summarizeConditionNode(cfg, buildFormSchema(draft.value))
   }
   if (node.type === 'parallel') {
     const cfg = config as unknown as ParallelNodeConfig
@@ -1328,6 +1649,20 @@ function nodeConfigSummary(node: ApprovalNode): string[] {
 // The editable model lives on `draft.conditionEdits[nodeKey]`, seeded 1:1 from the preserved
 // condition nodes. The controls below mutate ONLY rules / conjunction / defaultEdgeKey;
 // `buildApprovalGraph` re-applies them onto a COPY of the graph (all other nodes + edges untouched).
+// G-B2-19: live readable summary for a branch being edited (adapter from the edit model to the
+// persisted ConditionBranch shape; display only).
+function liveBranchSummary(branch: ConditionBranchEdit): string {
+  return summarizeConditionBranch(
+    {
+      edgeKey: branch.edgeKey,
+      rules: branch.rules.map((rule) => ({ fieldId: rule.fieldId, operator: rule.operator, ...(rule.value === undefined ? {} : { value: rule.value }) })),
+      conjunction: branch.conjunction,
+      ...(branch.predicateMode === 'formula' && branch.formulaExpression ? { formula: { expression: branch.formulaExpression } } : {}),
+    },
+    buildFormSchema(draft.value),
+  )
+}
+
 function conditionEditFor(nodeKey: string): ConditionNodeEdit | undefined {
   return draft.value.conditionEdits?.[nodeKey]
 }
@@ -1655,6 +1990,8 @@ const publishChecklist = computed<PublishChecklistItem[]>(() => [
 ])
 const canConfirmPublish = computed(() => publishChecklist.value.every((item) => item.ok))
 const publishChecklistVisible = ref(false)
+// B3-09 (发布说明) — optional free text bound to the checklist dialog's textarea.
+const publishNote = ref('')
 const canvasEdgeLines = computed(() => {
   const pos = new Map(canvasLayout.value.nodes.map((n) => [n.key, n]))
   return canvasEffectiveGraph.value.edges.map((edge) => {
@@ -1692,6 +2029,26 @@ function setApprovalSourceIds(nodeKey: string, ids: string[]): void {
   const kind = approvalSourceKind(nodeKey)
   if (kind === 'static_user') setApprovalNodeSource(nodeKey, { kind, userIds: ids })
   else if (kind === 'static_role') setApprovalNodeSource(nodeKey, { kind, roleIds: ids })
+}
+// G-B2-18 manual-ID advanced fallback for the complex-node picker. Unlike the linear step (whose
+// idsText is a real persisted draft field — the SOLE carrier, only parsed into ids at save time),
+// the node model carries just the ids array (no raw-text sibling): a naive `ids.join(', ')` getter
+// re-derived on every keystroke fights the controlled <el-input> — it resets the DOM to the
+// re-derived text on next tick whenever that differs from what was just typed, so a trailing
+// separator is silently swallowed and a second id can never be typed. This transient per-node text
+// buffer is the raw carrier instead (never part of node.config / the saved graph): read back
+// verbatim once the author has touched the field, falling back to the derived join before that
+// (hydrate / a node nobody has edited yet).
+function approvalSourceIdsText(nodeKey: string): string {
+  const v = approvalSourceIds(nodeKey).join(', ')
+  console.log('DEBUG approvalSourceIdsText call ->', JSON.stringify(v), 'ids=', JSON.stringify(approvalSourceIds(nodeKey)))
+  return v
+}
+function setApprovalSourceIdsText(nodeKey: string, text: string): void {
+  setApprovalSourceIds(nodeKey, parseIdsText(text))
+}
+function setApprovalSourceIdsFromPicker(nodeKey: string, ids: string[]): void {
+  setApprovalSourceIds(nodeKey, ids)
 }
 function approvalSourceFieldId(nodeKey: string): string {
   const source = approvalNodeFirstSource(nodeKey)
@@ -1748,10 +2105,16 @@ function setStepIds(step: ApprovalStepDraft, ids: string[]): void {
 
 async function onUserSearch(query: string): Promise<void> {
   await directory.searchUsers(query)
-  // Keep already-selected ids visible as chips even if the new search page omits them.
+  // Keep already-selected ids visible as chips even if the new search page omits them —
+  // across BOTH pickers that share this one composable instance (linear steps + G-B2-18
+  // complex-graph nodes).
   for (const step of draft.value.steps) {
     if (step.sourceKind !== 'static_user') continue
     for (const id of parseIdsText(step.idsText)) directory.ensureUserOptionVisible(id)
+  }
+  for (const nodeKey of Object.keys(draft.value.approvalNodeEdits ?? {})) {
+    if (approvalSourceKind(nodeKey) !== 'static_user') continue
+    for (const id of approvalSourceIds(nodeKey)) directory.ensureUserOptionVisible(id)
   }
 }
 
@@ -1767,6 +2130,24 @@ function syncStepOptions(step: ApprovalStepDraft): void {
 
 function syncAllStepOptions(): void {
   for (const step of draft.value.steps) syncStepOptions(step)
+}
+
+// G-B2-18: same hydrate-time visibility sync as syncStepOptions, applied to the complex-graph
+// approval-node assignee sources (approvalNodeEdits is keyed by nodeKey, one entry per editable
+// approval node — see approvalNodeEditFor). Also re-seeds (or clears) the manual-ID text buffer
+// so a source-KIND switch never leaves the OTHER kind's stale typed text showing — the buffer is
+// keyed only by nodeKey, not by (nodeKey, kind), so it must be reset whenever kind changes.
+function syncApprovalNodeOptions(nodeKey: string): void {
+  const kind = approvalSourceKind(nodeKey)
+  if (kind === 'static_user') {
+    for (const id of approvalSourceIds(nodeKey)) directory.ensureUserOptionVisible(id)
+  } else if (kind === 'static_role') {
+    for (const id of approvalSourceIds(nodeKey)) directory.ensureRoleOptionVisible(id)
+  }
+}
+
+function syncAllApprovalNodeOptions(): void {
+  for (const nodeKey of Object.keys(draft.value.approvalNodeEdits ?? {})) syncApprovalNodeOptions(nodeKey)
 }
 
 function clearErrors() {
@@ -1848,6 +2229,13 @@ function addStep() {
   draft.value.steps = [...draft.value.steps, createEmptyStepDraft(draft.value.steps.length + 1)]
 }
 
+// G-B2-06 — insert (not just append): a fresh blank step lands right after `index`, and any
+// STILL-DEFAULT-named trailing step is renumbered to stay self-consistent (see `insertStepAt`'s
+// own doc in templateAuthoring.ts for exactly what counts as "still default").
+function insertStep(index: number) {
+  draft.value.steps = insertStepAt(draft.value.steps, index)
+}
+
 function removeStep(index: number) {
   if (draft.value.steps.length === 1) return
   draft.value.steps = draft.value.steps.filter((_, i) => i !== index)
@@ -1873,6 +2261,7 @@ async function loadTemplateForEdit() {
     graphReadOnlyMessage.value = graphReadOnlyReason(template)
     draft.value = draftFromTemplate(template)
     syncAllStepOptions()
+    syncAllApprovalNodeOptions()
     snapshotDraft()
   } catch (error: any) {
     loadError.value = error?.message ?? '加载审批模板失败'
@@ -1927,6 +2316,7 @@ async function createFromPreset(presetId: CommonApprovalTemplatePresetId) {
     unsupportedReason.value = unsupportedTemplateAuthoringReason(created)
     graphReadOnlyMessage.value = graphReadOnlyReason(created)
     syncAllStepOptions()
+    syncAllApprovalNodeOptions()
     snapshotDraft() // before the route replace so the leave guard stays quiet
     await router.replace({ path: `/approval-templates/${created.id}/edit` })
     ElMessage.success('模板草稿已创建')
@@ -1951,6 +2341,8 @@ async function handleSave() {
 // SAME persistDraft → publishTemplate → success-routing sequence as before this change.
 function openPublishChecklist() {
   if (!canSave.value || publishing.value) return
+  // B3-09 — a publish note describes ONE publish action; never carry it into the next one.
+  publishNote.value = ''
   publishChecklistVisible.value = true
 }
 
@@ -1961,7 +2353,13 @@ async function confirmPublish() {
   try {
     const saved = await persistDraft()
     if (!saved) return
-    await publishTemplate(saved.id, { policy: { allowRevoke: draft.value.allowRevoke } })
+    // B3-09 — whitespace-only normalizes to null server-side; send undefined to keep the wire
+    // payload identical to pre-B3-09 publishes when the admin typed nothing.
+    const note = publishNote.value.trim()
+    await publishTemplate(saved.id, {
+      policy: { allowRevoke: draft.value.allowRevoke },
+      ...(note ? { note } : {}),
+    })
     ElMessage.success('模板已发布')
     await router.push({ path: `/approval-templates/${saved.id}` })
   } catch (error: any) {
@@ -1970,6 +2368,102 @@ async function confirmPublish() {
     publishing.value = false
   }
 }
+
+// RP-3 (route-preview lock, B3-06 FE 试运行面板) — template AUTHOR's read-only dry-run of the
+// LAST-SAVED draft (previewSource: 'draft' server-side — an editor with unsaved changes must save
+// first, enforced below via tryRunDisabledReason). Compute-at-click; any change to the sample
+// requester or sample form values invalidates the stale result — the SAME race-guard controller
+// RP-2's ApprovalNewView uses, now generic so this DIFFERENT request shape (`sampleFormData` +
+// optional `sampleRequesterId`, vs RP-2's `templateId` + `formData`) can reuse it verbatim instead
+// of a second hand-rolled loading/race implementation.
+const sampleRequesterId = ref<string | null>(null)
+const sampleFormData = ref<Record<string, unknown>>({})
+const routePreview = ref<ApprovalRoutePreview | null>(null)
+const routePreviewLoading = ref(false)
+const routePreviewError = ref('')
+
+// The template must exist server-side before it has an id to preview against.
+// `draft.value.templateId` is set by persistDraft() immediately on create/update (before the
+// router.replace even resolves), so it is the authoritative id source — not the route param,
+// which only updates once that navigation lands.
+const templateIdForPreview = computed(() => draft.value.templateId ?? '')
+
+const tryRunDisabledReason = computed<string>(() => {
+  if (!templateIdForPreview.value) return '请先保存草稿以获取模板 ID，才能试运行'
+  if (isDraftDirty.value) return '有未保存的更改，请先保存再试运行'
+  return ''
+})
+
+const routePreviewController = createRoutePreviewController(
+  async (req: { sampleFormData: Record<string, unknown>; sampleRequesterId?: string }) => {
+    try {
+      return await previewTemplateRoute(templateIdForPreview.value, req)
+    } catch (error) {
+      // Wedge-guard machine codes (422 *_REQUIRED / 503 *_UNRESOLVED) get an actionable Chinese
+      // message here instead of surfacing as a generic failure flash — the controller only ever
+      // reads `.message` off a caught error, so the code → message translation must happen
+      // before it does (describeRoutePreviewError is unit-tested independently).
+      throw new Error(describeRoutePreviewError(error))
+    }
+  },
+  (patch) => {
+    if ('preview' in patch) routePreview.value = patch.preview ?? null
+    if (patch.loading !== undefined) routePreviewLoading.value = patch.loading
+    if (patch.error !== undefined) routePreviewError.value = patch.error
+  },
+)
+
+async function runTemplateRoutePreview() {
+  if (tryRunDisabledReason.value) return
+  await routePreviewController.run({
+    sampleFormData: { ...sampleFormData.value },
+    ...(sampleRequesterId.value ? { sampleRequesterId: sampleRequesterId.value } : {}),
+  })
+}
+
+watch(sampleFormData, () => routePreviewController.invalidate(), { deep: true })
+watch(sampleRequesterId, () => routePreviewController.invalidate())
+// A draft-graph edit invalidates a prior result too — the ratified "stale path never misleads"
+// contract otherwise breaks the moment isDraftDirty flips true: the button greys out (see
+// tryRunDisabledReason), but the OLD chip row would keep rendering as if it still matched the
+// (now-unsaved) graph.
+watch(isDraftDirty, (dirty) => {
+  if (dirty) routePreviewController.invalidate()
+})
+
+// The sample form renders off the SAME formSchema the template actually routes on
+// (buildFormSchema(draft.value) — identical source as the "JSON 预览" card above), so an author
+// never types a sample value the template can't see. `detail` (repeating sub-form rows) and
+// `attachment` (no working upload pipeline yet — see ApprovalNewView's own honest stopgap) are
+// skipped with an inline note rather than faked; every other field type gets a plain input.
+const templateFormFields = computed<FormField[]>(() => buildFormSchema(draft.value).fields)
+
+// G-B2-21: the requester-view split for the 试运行 sample values. Delegates visibility to the
+// shared getVisibleFormFields (see requesterPreviewFields) so the panel, the submit page, and the
+// backend prune never disagree. templateFormFields stays the FULL field list for the other callers.
+const requesterPreview = computed(() => computeRequesterPreviewFields(buildFormSchema(draft.value), sampleFormData.value))
+const requesterVisibleFields = computed<FormField[]>(() => requesterPreview.value.visible)
+const requesterHiddenFields = computed(() => requesterPreview.value.hidden)
+
+function sampleFieldUnsupportedReason(field: FormField): string | null {
+  if (field.type === 'detail') return '试运行暂不支持明细子表单的样例值，已跳过（不影响其余字段的走图）'
+  if (field.type === 'attachment') return '试运行暂不支持附件类型的样例值，已跳过'
+  return null
+}
+
+// G-B2-19 condition summaries for the panel's static "条件分支规则" note — read straight off the
+// preserved graph (same source as the read-only structured node list above), NOT off the
+// route-preview response: the endpoint only ever returns `{ route, truncated }` (§3) — it does not
+// echo which branch a condition node took — so this can only show the RULE, never "which one fired".
+const conditionNodeSummaries = computed(() =>
+  graphPreviewNodes.value
+    .filter((node) => node.type === 'condition')
+    .map((node) => ({
+      key: node.key,
+      label: node.name || node.key,
+      lines: nodeConfigSummary(node),
+    })),
+)
 
 onMounted(() => {
   if (!canManageTemplates.value) return
@@ -2001,6 +2495,7 @@ watch(isDraftDirty, (dirty) => {
 
 onUnmounted(() => {
   window.onbeforeunload = null
+  if (highlightStepTimer) clearTimeout(highlightStepTimer)
 })
 </script>
 
@@ -2109,10 +2604,71 @@ onUnmounted(() => {
   padding: 14px;
   border: 1px solid var(--el-border-color-lighter);
   border-radius: 8px;
+  transition: border-color 0.2s ease, box-shadow 0.2s ease;
 }
 
 .template-authoring__item + .template-authoring__item {
   margin-top: 12px;
+}
+
+/* G-B2-06 — brief highlight when a step card is reached via a flow-spine chip click. */
+.template-authoring__item--highlighted {
+  border-color: var(--el-color-primary);
+  box-shadow: 0 0 0 2px var(--el-color-primary-light-5);
+}
+
+/* G-B2-06 read-only linear flow spine. */
+.template-authoring__spine {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 14px;
+  padding: 10px 12px;
+  border: 1px solid var(--el-border-color-lighter);
+  border-radius: 8px;
+  background: var(--el-fill-color-light);
+}
+
+.template-authoring__spine-chip {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  padding: 6px 10px;
+  border: 1px solid var(--el-border-color);
+  border-radius: 6px;
+  background: var(--ms-bg-card);
+  color: var(--el-text-color-primary);
+  font: inherit;
+  cursor: pointer;
+}
+
+.template-authoring__spine-chip:hover {
+  border-color: var(--el-color-primary);
+}
+
+.template-authoring__spine-chip--requester {
+  background: var(--el-fill-color);
+  cursor: default;
+}
+
+.template-authoring__spine-chip--requester:hover {
+  border-color: var(--el-border-color);
+}
+
+.template-authoring__spine-chip--unresolved {
+  border-style: dashed;
+  border-color: var(--el-color-warning);
+}
+
+.template-authoring__spine-chip-source {
+  font-size: 12px;
+  color: var(--el-text-color-secondary);
+}
+
+.template-authoring__spine-arrow {
+  color: var(--el-text-color-secondary);
 }
 
 .template-authoring__item-toolbar {
@@ -2304,5 +2860,91 @@ pre {
   flex-wrap: wrap;
   gap: 4px;
   margin-top: 4px;
+}
+
+/* RP-3 (route-preview lock, B3-06) 试运行面板 — chip styling mirrors ApprovalNewView's RP-2 live
+   route preview (same visual language for "resolved path", different scoped class prefix since
+   Vue's `<style scoped>` is per-SFC). */
+.template-authoring__tryrun-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 12px;
+}
+
+.template-authoring__tryrun-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-top: 10px;
+}
+
+.template-authoring__tryrun-chip {
+  display: inline-flex;
+  flex-direction: column;
+  padding: 4px 10px;
+  border-radius: 6px;
+  background: var(--el-fill-color-light);
+  color: var(--el-text-color-regular);
+  font-size: 13px;
+}
+
+.template-authoring__tryrun-chip--requester {
+  background: var(--el-color-primary-light-9);
+  color: var(--el-color-primary);
+  font-weight: 500;
+}
+
+.template-authoring__tryrun-chip--unresolved {
+  border: 1px dashed var(--el-color-danger);
+}
+
+.template-authoring__tryrun-chip-summary {
+  font-size: 11px;
+  color: var(--el-text-color-placeholder);
+}
+
+.template-authoring__tryrun-arrow {
+  color: var(--el-text-color-placeholder);
+  font-size: 12px;
+}
+
+.template-authoring__tryrun-error {
+  margin-top: 10px;
+  font-size: 12px;
+  color: var(--el-color-danger);
+}
+
+.template-authoring__tryrun-hidden {
+  margin-top: 10px;
+}
+
+.template-authoring__tryrun-hidden-list {
+  margin: 0;
+  padding-left: 18px;
+}
+
+.template-authoring__tryrun-hidden-list li {
+  margin-bottom: 4px;
+  font-size: 12px;
+}
+
+.template-authoring__tryrun-hidden-label {
+  color: var(--el-text-color-primary);
+  margin-right: 8px;
+}
+
+.template-authoring__tryrun-hidden-reason {
+  color: var(--el-text-color-secondary);
+}
+
+.template-authoring__tryrun-truncated {
+  font-size: 12px;
+  color: var(--el-text-color-secondary);
+}
+
+.template-authoring__tryrun-conditions {
+  margin-top: 12px;
+  font-size: 13px;
 }
 </style>

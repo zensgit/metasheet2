@@ -280,7 +280,7 @@
               />
               <button type="button" class="meta-field-mgr__icon-btn" :aria-label="ml('action.remove')" @click="removeRollupFilter(i)">×</button>
             </div>
-            <button type="button" class="meta-field-mgr__add-btn" @click="addRollupFilter">{{ ml('field.rollupFilterAdd') }}</button>
+            <MtButton class="meta-field-mgr__add-btn" @click="addRollupFilter">{{ ml('field.rollupFilterAdd') }}</MtButton>
           </div>
         </template>
 
@@ -352,19 +352,18 @@
                 {{ ml('field.formulaDryRun.invalidNumber') }}
               </div>
             </div>
-            <button type="button" class="meta-field-mgr__dryrun-btn" :disabled="!dryRunCanEvaluate" @click="runDryRun">
+            <MtButton class="meta-field-mgr__dryrun-btn" :disabled="!dryRunCanEvaluate" @click="runDryRun">
               {{ dryRunRunning ? ml('field.formulaDryRun.evaluating') : ml('field.formulaDryRun.test') }}
-            </button>
-            <button
+            </MtButton>
+            <MtButton
               v-if="dryRunHasRecord"
-              type="button"
               class="meta-field-mgr__dryrun-btn meta-field-mgr__dryrun-btn--record"
               :disabled="!dryRunCanEvaluate"
               :title="ml('field.formulaDryRun.recordHint')"
               @click="runDryRunWithRecord"
             >
               {{ dryRunRunning ? ml('field.formulaDryRun.evaluating') : ml('field.formulaDryRun.testWithRecord') }}
-            </button>
+            </MtButton>
             <div v-if="dryRunTransportError" class="meta-field-mgr__dryrun-result meta-field-mgr__dryrun-result--error">{{ dryRunTransportError }}</div>
             <div v-else-if="dryRunResult" class="meta-field-mgr__dryrun-result">
               <div class="meta-field-mgr__dryrun-result-head">
@@ -685,15 +684,14 @@
               <div class="meta-field-mgr__hint">
                 {{ ml('field.ai.previewRealCallHint') }} {{ ml('field.ai.previewDraftHint') }}
               </div>
-              <button
-                type="button"
+              <MtButton
                 class="meta-field-mgr__dryrun-btn"
                 :disabled="!aiPreviewCanRun"
                 data-test="ai-shortcut-preview-btn"
                 @click="runAiPreview"
               >
                 {{ aiPreviewRunning ? ml('field.ai.previewing') : ml('field.ai.previewWithRecord') }}
-              </button>
+              </MtButton>
               <div v-if="!currentRecordId" class="meta-field-mgr__hint">{{ ml('field.ai.previewNeedsRecord') }}</div>
               <div v-if="aiPreviewError" class="meta-field-mgr__formula-diagnostic meta-field-mgr__formula-diagnostic--error" data-test="ai-shortcut-preview-error">{{ aiPreviewError }}</div>
               <div v-else-if="aiPreviewData" class="meta-field-mgr__dryrun-result" data-test="ai-shortcut-preview-result">
@@ -706,8 +704,7 @@
             </div>
             <!-- B-3: AI bulk-fill (whole-column) trigger — runs the PERSISTED config across the view. -->
             <div v-if="aiBulkFillVisible" class="meta-field-mgr__ai-bulk" data-test="ai-bulk-fill-trigger-row">
-              <button
-                type="button"
+              <MtButton
                 class="meta-field-mgr__dryrun-btn"
                 :disabled="!aiBulkFillEnabled"
                 :title="aiBulkFillDisabledHint || aiBulkFillTriggerTitle"
@@ -715,7 +712,7 @@
                 @click="onBulkFill"
               >
                 {{ aiBulkFillTriggerLabel }}
-              </button>
+              </MtButton>
               <div v-if="aiBulkFillDisabledHint" class="meta-field-mgr__hint" data-test="ai-bulk-fill-disabled-hint">{{ aiBulkFillDisabledHint }}</div>
             </div>
           </template>
@@ -741,8 +738,8 @@
         />
         <div v-if="fieldConfigError" class="meta-field-mgr__error">{{ fieldConfigError }}</div>
         <div class="meta-field-mgr__config-actions">
-          <button class="meta-field-mgr__btn-cancel" @click="closeConfig">{{ ml('action.cancel') }}</button>
-          <button class="meta-field-mgr__btn-add" :disabled="Boolean(fieldConfigBlockingReason)" @click="saveConfig">{{ configTarget ? ml('field.saveSettings') : ml('field.applyDefaults') }}</button>
+          <MtButton class="meta-field-mgr__btn-cancel" @click="closeConfig">{{ ml('action.cancel') }}</MtButton>
+          <MtButton variant="primary" class="meta-field-mgr__btn-add" :disabled="Boolean(fieldConfigBlockingReason)" @click="saveConfig">{{ configTarget ? ml('field.saveSettings') : ml('field.applyDefaults') }}</MtButton>
         </div>
       </div>
 
@@ -760,11 +757,12 @@
           <select v-model="newFieldType" class="meta-field-mgr__select" @change="openNewFieldConfigIfNeeded">
             <option v-for="t in FIELD_TYPES" :key="t" :value="t">{{ fieldTypeLabel(t, isZh) }}</option>
           </select>
-          <button
+          <MtButton
+            variant="primary"
             class="meta-field-mgr__btn-add"
             :disabled="!newFieldName.trim() || addNameConflict"
             @click="onAddField"
-          >{{ ml('field.addButton') }}</button>
+          >{{ ml('field.addButton') }}</MtButton>
         </div>
         <div
           v-if="addNameConflict"
@@ -781,8 +779,8 @@
       <div v-if="deleteTarget" class="meta-field-mgr__confirm">
         <p>{{ deleteFieldConfirm(deleteTarget.name, isZh) }}</p>
         <div class="meta-field-mgr__confirm-actions">
-          <button class="meta-field-mgr__btn-cancel" @click="deleteTargetId = null">{{ ml('action.cancel') }}</button>
-          <button class="meta-field-mgr__btn-delete" @click="confirmDelete">{{ ml('action.delete') }}</button>
+          <MtButton class="meta-field-mgr__btn-cancel" @click="deleteTargetId = null">{{ ml('action.cancel') }}</MtButton>
+          <MtButton variant="danger" class="meta-field-mgr__btn-delete" @click="confirmDelete">{{ ml('action.delete') }}</MtButton>
         </div>
       </div>
     </div>
@@ -858,6 +856,7 @@ import {
 } from '../composables/useAiShortcut'
 import type { AiShortcutConfigInput, AiShortcutKind, AiShortcutPreviewData, AiUsageSummary } from '../api/client'
 import MetaFieldValidationPanel from './MetaFieldValidationPanel.vue'
+import { MtButton } from '../ui'
 
 /** Field types where the validation panel is configurable. */
 const VALIDATION_PANEL_TYPES: ReadonlySet<string> = new Set(['string', 'longText', 'number', 'select', 'multiSelect'])
@@ -2763,15 +2762,23 @@ onBeforeUnmount(() => {
 .meta-field-mgr__add-row { display: flex; gap: 8px; }
 .meta-field-mgr__input, .meta-field-mgr__select, .meta-field-mgr__textarea { width: 100%; padding: 5px 10px; border: 1px solid #ddd; border-radius: 4px; font-size: 13px; background: #fff; }
 .meta-field-mgr__textarea { min-height: 88px; resize: vertical; }
-.meta-field-mgr__btn-add { padding: 5px 14px; background: #409eff; color: #fff; border: none; border-radius: 4px; cursor: pointer; font-size: 12px; }
-.meta-field-mgr__btn-add:disabled { opacity: 0.4; cursor: not-allowed; }
-.meta-field-mgr__btn-add:hover:not(:disabled) { background: #66b1ff; }
+/* UI-P2-1c batch-3: .meta-field-mgr__btn-add (both sharers: config-panel save/apply-defaults +
+   add-section add-field), .meta-field-mgr__btn-cancel (both sharers: config-panel + delete-confirm) and
+   .meta-field-mgr__btn-delete (its only sharer) are now <MtButton> (variant="primary" / default ghost /
+   variant="danger"); the bespoke #409eff / #f56c6c fills normalize to --ms-color-primary /
+   --ms-color-danger (sanctioned token convergence). Each class's FULL sharer set was migrated at once,
+   so its bespoke CSS below is removed (no double-styling); classes kept as additive for selector
+   stability (existing specs query them). .meta-field-mgr__dryrun-btn (its "Test" / "Test with record" /
+   AI-preview / AI-bulk-fill sharers) and .meta-field-mgr__add-btn (its rollup-filter-add sharer) are
+   ALSO now <MtButton> but never carried any bespoke CSS (plain unstyled buttons) — no rule to remove.
+   .meta-field-mgr__dryrun-btn's remaining 4 sharers (NL-formula-suggest generate/accept/reject/
+   regenerate) stay bespoke <button> — deferred as behind-flow (a 2-hop async reveal: generate must
+   resolve before accept/reject/regenerate even render, unlike the single-hop dry-run/preview/bulk-fill
+   triggers). __btn-inline stays bespoke (T3-GATED). */
 .meta-field-mgr__btn-inline { align-self: flex-start; padding: 4px 10px; border: 1px dashed #cbd5e1; border-radius: 4px; background: #fff; color: #475569; cursor: pointer; font-size: 12px; }
 .meta-field-mgr__confirm { padding: 12px 16px; border-top: 1px solid #eee; background: #fef0f0; }
 .meta-field-mgr__confirm p { margin: 0 0 8px; font-size: 13px; color: #333; }
 .meta-field-mgr__confirm-actions, .meta-field-mgr__config-actions { display: flex; gap: 8px; justify-content: flex-end; }
-.meta-field-mgr__btn-cancel { padding: 4px 12px; border: 1px solid #ddd; border-radius: 3px; background: #fff; cursor: pointer; font-size: 12px; }
-.meta-field-mgr__btn-delete { padding: 4px 12px; background: #f56c6c; color: #fff; border: none; border-radius: 3px; cursor: pointer; font-size: 12px; }
 .meta-field-mgr__error { color: #f56c6c; font-size: 12px; }
 .meta-field-mgr__validation { margin-top: 4px; }
 /* A3: AI shortcut config section */

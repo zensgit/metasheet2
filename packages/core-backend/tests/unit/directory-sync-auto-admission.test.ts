@@ -4,7 +4,26 @@ import {
   buildUniqueLocalUserMatchMap,
   evaluateDirectoryAutoAdmissionEligibility,
   isDirectoryUserWithinAdmissionScope,
+  resolveDirectoryAutoAdmissionCanGrantDingTalkLogin,
 } from '../../src/directory/directory-sync'
+
+describe('DT-HARDEN-02 auto-admission grant feasibility', () => {
+  it('grants a corp-scoped account that has an openId', () => {
+    expect(resolveDirectoryAutoAdmissionCanGrantDingTalkLogin({ corp_id: 'corpA', open_id: 'open-1' })).toBe(true)
+  })
+
+  it('withholds the grant for a corp-scoped account missing an openId (the would-be orphan case)', () => {
+    // Pre-DT-HARDEN-02 this path hardcoded grant=true, so the bind assertion threw
+    // AFTER the users row was inserted and the swallowing catch committed an orphan.
+    expect(resolveDirectoryAutoAdmissionCanGrantDingTalkLogin({ corp_id: 'corpA', open_id: null })).toBe(false)
+    expect(resolveDirectoryAutoAdmissionCanGrantDingTalkLogin({ corp_id: 'corpA', open_id: '  ' })).toBe(false)
+  })
+
+  it('grants a non-corp account even without an openId (identity keys on unionId)', () => {
+    expect(resolveDirectoryAutoAdmissionCanGrantDingTalkLogin({ corp_id: null, open_id: null })).toBe(true)
+    expect(resolveDirectoryAutoAdmissionCanGrantDingTalkLogin({ corp_id: '', open_id: null })).toBe(true)
+  })
+})
 
 describe('directory auto admission scope', () => {
   it('matches descendants of an allowlisted department', () => {

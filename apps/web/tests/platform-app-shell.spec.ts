@@ -170,7 +170,9 @@ describe('PlatformAppShellView', () => {
     app.mount(container)
     await flushUi()
 
-    expect(apiGetMock).toHaveBeenCalledWith('/api/after-sales/projects/current')
+    expect(apiGetMock).toHaveBeenCalledWith('/api/after-sales/projects/current', {
+      suppressUnauthorizedRedirect: true,
+    })
     expect(container.textContent).toContain('Runtime diagnostics')
     expect(container.textContent).toContain('ledger_1')
     expect(container.textContent).toContain('platform app instance registration failed')

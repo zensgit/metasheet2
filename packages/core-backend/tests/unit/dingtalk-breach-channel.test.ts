@@ -99,6 +99,34 @@ describe('ApprovalBreachDingTalkChannel', () => {
     expect(result.error).toContain('keyword not in content')
   })
 
+  it('treats a malformed 200 response (e.g. proxy-hijacked HTML) as a failure, not success', async () => {
+    const fetchFn = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      statusText: 'OK',
+      text: async () => '<html><head><title>Captive Portal</title></head><body>Sign in to continue</body></html>',
+    } as unknown as Response) as unknown as typeof fetch
+
+    const channel = new ApprovalBreachDingTalkChannel({ webhookUrl: VALID_WEBHOOK, fetchFn })
+    const result = await channel.send(sampleMessage())
+    expect(result.ok).toBe(false)
+    expect(result.error).toBeTruthy()
+  })
+
+  it('treats a string errcode (not a number) as a failure', async () => {
+    const fetchFn = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      statusText: 'OK',
+      text: async () => '{"errcode":"0","errmsg":"ok"}',
+    } as unknown as Response) as unknown as typeof fetch
+
+    const channel = new ApprovalBreachDingTalkChannel({ webhookUrl: VALID_WEBHOOK, fetchFn })
+    const result = await channel.send(sampleMessage())
+    expect(result.ok).toBe(false)
+    expect(result.error).toBeTruthy()
+  })
+
   it('captures network errors without throwing', async () => {
     const fetchFn = vi.fn().mockRejectedValue(new Error('connect ECONNREFUSED')) as unknown as typeof fetch
     const channel = new ApprovalBreachDingTalkChannel({ webhookUrl: VALID_WEBHOOK, fetchFn })

@@ -10,6 +10,51 @@
       <div class="integration-read-source-composition-authoring__form" data-testid="rscauth-form">
         <h3>新建组合</h3>
 
+        <!-- TC-1 (design-lock docs/development/integration-connector-template-catalog-design-lock-20260708.md,
+             #3879): ADD-ONLY alternative entry point, collapsed by default — the pre-existing
+             wizard/flat-form default surface and every existing assertion about it are untouched.
+             Selecting a card seeds `draft.sourceTarget` (mirrors this panel's own pre-existing default
+             assignment below) and forces the view back to the wizard. -->
+        <IntegrationTemplateCatalogPicker
+          seeds-wizard="composition"
+          testid-prefix="rscauth"
+          @select="applyCompositionTemplate"
+        />
+
+        <!-- IU-4 (design-lock docs/development/integration-iu4-composition-wizard-design-lock-20260707.md,
+             #3803, sibling of IU-3): the wizard is the DEFAULT surface; this toggle switches to the
+             untouched full flat form below (折叠≠删除 — expert mode is retained, never removed).
+             Native <button>, same rationale as IU-3's rsc-mode-toggle (IntegrationReadSourceConfigPanel.vue)
+             — Element Plus is not globally registered in every host that mounts this component in tests. -->
+        <div class="integration-read-source-composition-authoring__mode-toggle">
+          <button
+            type="button"
+            class="integration-read-source-composition-authoring__mode-toggle-button"
+            data-testid="rscauth-mode-toggle"
+            @click="toggleViewMode"
+          >
+            <el-icon><component :is="viewMode === 'wizard' ? Setting : MagicStick" /></el-icon>
+            {{ viewMode === 'wizard' ? bi('专家表单', 'Expert form') : bi('返回向导', 'Back to wizard') }}
+          </button>
+        </div>
+
+        <IntegrationCompositionWizard
+          v-if="viewMode === 'wizard'"
+          :draft="draft"
+          :resolver-configs="resolverConfigs"
+          :picker-loading="pickerLoading"
+          :picker-error="pickerError"
+          :can-write="canWrite"
+          :saving="saving"
+          :approving="approving"
+          :action-error="actionError"
+          :save-field-errors="saveFieldErrors"
+          :saved-row="savedRow"
+          @save="save"
+          @approve="approve"
+        />
+
+        <template v-else>
         <label class="integration-read-source-composition-authoring__field">
           <el-tooltip :content="fieldHint('composition.step1ConfigId')" placement="top" data-testid="rscauth-hint-step1">
             <span>第一跳读取源(已审批 resolver_lookup)</span>
@@ -94,6 +139,7 @@
         <ul v-if="saveFieldErrors.length > 0" class="integration-read-source-composition-authoring__problems" data-testid="rscauth-field-errors">
           <li v-for="(entry, index) in saveFieldErrors" :key="index">{{ entry.code }} · {{ entry.field }} · {{ entry.reason }}</li>
         </ul>
+        </template>
       </div>
 
       <div v-if="savedRow" class="integration-read-source-composition-authoring__saved" data-testid="rscauth-saved">
@@ -153,6 +199,7 @@
 // guard, auth.hasPermission('integration:write')) — list/audit stay read-tier and ungated, mirroring the
 // server's requireAccess('read') vs requireAccess('write') split in read-source-compositions HTTP routes.
 import { computed, reactive, ref, watch } from 'vue'
+import { MagicStick, Setting } from '@element-plus/icons-vue'
 import { useAuth } from '../../composables/useAuth'
 import { useLocale } from '../../composables/useLocale'
 import { integrationFieldHint, type IntegrationFieldHintKey } from '../../services/integration/fieldHints'
@@ -171,10 +218,28 @@ import {
   type ReadSourceCompositionFieldError,
   type ReadSourceCompositionSaveResult,
 } from '../../services/integration/readSourceCompositions'
+import {
+  isCompositionTemplateEntry,
+  seedCompositionDraft,
+  type IntegrationTemplateCatalogEntry,
+} from '../../services/integration/readSourceTemplateCatalog'
+import IntegrationCompositionWizard from './IntegrationCompositionWizard.vue'
+import IntegrationTemplateCatalogPicker from './IntegrationTemplateCatalogPicker.vue'
 
+// IU-4 (design-lock docs/development/integration-iu4-composition-wizard-design-lock-20260707.md,
+// #3803): the wizard is the DEFAULT new-composition surface; `initialViewMode` lets a caller (incl.
+// this file's own spec, which targets the pre-existing flat-form testids) pin the panel to 'expert'
+// so it renders today's full field-flat form with ZERO wizard indirection — no existing assertion
+// had to change (same pattern as IU-3's IntegrationReadSourceConfigPanel.vue `initialViewMode`).
 const props = defineProps<{
   scope: IntegrationScope
+  initialViewMode?: 'wizard' | 'expert'
 }>()
+
+const viewMode = ref<'wizard' | 'expert'>(props.initialViewMode ?? 'wizard')
+function toggleViewMode(): void {
+  viewMode.value = viewMode.value === 'wizard' ? 'expert' : 'wizard'
+}
 
 const auth = useAuth()
 const { locale } = useLocale()
@@ -232,6 +297,17 @@ watch(savedRow, () => {
   auditOpen.value = false
   auditRows.value = []
 })
+
+// TC-1 (design-lock docs/development/integration-connector-template-catalog-design-lock-20260708.md):
+// same seed-then-present pattern as the read-source panel's applyReadSourceTemplate — mutates only
+// `sourceTarget` on the SAME shared draft, then forces the view back to 'wizard'. The picker is wired
+// with seeds-wizard="composition" so only CompositionTemplateCatalogEntry values are ever emitted here;
+// the type guard is a defensive narrowing, not a behavior branch.
+function applyCompositionTemplate(entry: IntegrationTemplateCatalogEntry): void {
+  if (!isCompositionTemplateEntry(entry)) return
+  seedCompositionDraft(draft, entry)
+  viewMode.value = 'wizard'
+}
 
 function statusLabel(status: CompositionStatus): string {
   if (status === 'approved') return '已审批'
@@ -391,6 +467,30 @@ void refreshPickers()
 }
 .integration-read-source-composition-authoring__hint--strong {
   color: #b45309;
+}
+/* IU-4 (design-lock docs/development/integration-iu4-composition-wizard-design-lock-20260707.md):
+   new markup only — token-only per §2 hard lock (the rules above/below this block are the pre-existing
+   styles and are left untouched, hex and all — same convention as IU-3's mode-toggle addition to
+   IntegrationReadSourceConfigPanel.vue). */
+.integration-read-source-composition-authoring__mode-toggle {
+  display: flex;
+  justify-content: flex-end;
+  margin-bottom: var(--ms-space-3);
+}
+.integration-read-source-composition-authoring__mode-toggle-button {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--ms-space-1);
+  padding: var(--ms-space-1) var(--ms-space-3);
+  border: 1px solid var(--ms-border);
+  border-radius: var(--ms-radius-sm);
+  background: var(--ms-bg-card);
+  color: var(--ms-color-primary);
+  font-size: 13px;
+  cursor: pointer;
+}
+.integration-read-source-composition-authoring__mode-toggle-button:hover {
+  background: var(--ms-bg-page);
 }
 .integration-read-source-composition-authoring__columns {
   display: grid;
