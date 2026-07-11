@@ -67,8 +67,13 @@ export interface RecordRevisionEntry {
 let restoredFromVersionColumnPresent = false
 async function hasRestoredFromVersionColumn(query: QueryFn): Promise<boolean> {
   if (restoredFromVersionColumnPresent) return true
+  // Scope to the active search-path schemas (current_schemas(false) = effective search_path, resolution order) so a
+  // meta_record_revisions in ANOTHER schema that HAS the column can't false-positive us into an extended INSERT
+  // against a search-path table that lacks it — which would 42703-poison the txn the guard exists to protect (the
+  // module-level positive cache would make such a mismatch sticky across a shared-bundle process). Single-schema
+  // prod is unaffected (public is on the path). Defense-in-depth (PR #4124 review NIT).
   const res = await query(
-    `SELECT 1 FROM information_schema.columns WHERE table_name = 'meta_record_revisions' AND column_name = 'restored_from_version' LIMIT 1`,
+    `SELECT 1 FROM information_schema.columns WHERE table_name = 'meta_record_revisions' AND column_name = 'restored_from_version' AND table_schema = ANY(current_schemas(false)) LIMIT 1`,
   )
   if ((res.rows as unknown[]).length > 0) {
     restoredFromVersionColumnPresent = true

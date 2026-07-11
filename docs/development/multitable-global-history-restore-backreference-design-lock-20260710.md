@@ -18,7 +18,7 @@
 2. **写路径穿线**：restore 语义写路径**共三条**（owner P2 更正——见 §2.5 的处置决策 OD-0），全部或按 OD-0 处置后剩余的路径在生成新 revision 时携带 targetVersion；非 restore 写入点不触碰（列缺省 NULL）。字段级子集恢复（fieldIds）同样携带——回链语义 = 「本次 restore 以版本 N 为源」。
 3. **投影面**：`HistoryChange` / `HistoryBatchDetail` 增加可选 `restoredFromVersion`；LOCK-3 口径：版本号与 `changedFieldIds` 同级=元数据，不含字段值，无掩码增量，但仍走既有投影管道（不得旁路）。
 4. **FE**：`HistoryBatchChangesList` 对 `source='restore'` 的变更行渲染「从版本 N 恢复」（typed label，i18n strict-zero 走 meta-record-labels 既有模式）；无版本可回链（NULL）时不渲染该徽标。
-5. **legacy `/restore` 路由处置 = ratify 前必选项（owner P2 更正，取代本文初版的「永久 NULL 出界」处置）**：`POST …/records/:recordId/restore`（univer-meta.ts ~:9362）是**仍存活的第三条 restore 写路径**——持有 targetVersion（:9369）、写 `source='restore'`（:9561），client 方法 `restoreRecordVersion`（client.ts ~:2232）与集成测试（multitable-record-restore.test.ts / multitable-record-recycle-bin.test.ts）俱在；「当前 FE 无调用方」是事实但不构成永久写 NULL 的依据——那会制造两类语义不一致的 restore 历史（同为 `source='restore'`，一类可回链一类不可）。**OD-0 二选一**：
+5. **§2.5 决策记录（legacy `/restore` 路由处置）✅ RESOLVED = (a)——见段末 AS-BUILT；下为决策留痕**（owner P2 更正，取代本文初版的「永久 NULL 出界」处置）：`POST …/records/:recordId/restore`（univer-meta.ts ~:9362）是**仍存活的第三条 restore 写路径**——持有 targetVersion（:9369）、写 `source='restore'`（:9561），client 方法 `restoreRecordVersion`（client.ts ~:2232）与集成测试（multitable-record-restore.test.ts / multitable-record-recycle-bin.test.ts）俱在；「当前 FE 无调用方」是事实但不构成永久写 NULL 的依据——那会制造两类语义不一致的 restore 历史（同为 `source='restore'`，一类可回链一类不可）。**OD-0 二选一**：
    - **(a) 三路全穿线**：legacy 路由同样携带 targetVersion——G1 扩展覆盖它；
    - **(b) 正式废弃 legacy 路由**：独立 deprecation rung（路由移除或 410 + client 方法删除 + 两个集成测试迁移/删除），本锁只穿线两条 preview→execute 路径。
    任一选择下,「NULL 意图 golden」不复存在。其余出界项不变：跨批次深链跳转（源版本≠源批次 id）；PIT 族回链（revert/reset 已有各自的 preview-identity 语义）。
@@ -33,11 +33,17 @@
 
 ## §3 Goldens（实现 PR 必带，mutation-verified）
 
-- G1 execute 写入：record-restore-execute 后新 revision 行携带 `restored_from_version = targetVersion`（真库）；restore-batch 同。
-- G2（AS-BUILT）非 version-restore 写恒 NULL：`recordRecordRevision` 直接调用——① 普通 update（`source='rest'`）② **PIT-resurrect 形状**（`source='restore' action='create'`，无 restoredFromVersion）③ **PIT-reset 形状**（`source='restore' action='delete'`）——三者 `restored_from_version` 均 NULL。**这钉住「badge 键于非 NULL 而非 source='restore'」的核心契约**（§2.6）。legacy 路由进 G1 的穿线断言（OD-0=(a)）。
+- **三路 end-to-end 覆盖（审阅 P2-1 补齐 · mutation-verified per-site）**：三条 version-restore 路由**各有**一条 HTTP 端到端 golden 断言新 revision 行携带 `restored_from_version = targetVersion`——
+  - **G1** legacy `/restore`（路由1，OD-0=(a) 穿线）；
+  - **G1b** `recordRecordRevision` 写原语（三路共享的 seam）：`restoredFromVersion=N ⇒ column=N`；
+  - **G1c** `restore-execute`（路由2，**FE 实际调用**）preview→execute（穿线点 :9704）；
+  - **G1d** `restore-batch-execute` all-or-nothing（路由3a，**FE 实际调用**）preview→execute（:9856）；
+  - **G1e** `restore-batch-execute` per-record/PARTIAL（路由3b，**FE 实际调用**）preview→execute（:9884）。
+  legacy 无 live FE 调用方，故两条 live 路由**必须**各带自己的 e2e golden（否则其穿线可被静默删除而全绿——审阅实证）。
+- G2（AS-BUILT）非 version-restore 写恒 NULL：`recordRecordRevision` 直接调用——① 普通 update（`source='rest'`）② **PIT-resurrect 形状**（`source='restore' action='create'`，无 restoredFromVersion）③ **PIT-reset 形状**（`source='restore' action='delete'`）——三者 `restored_from_version` 均 NULL。**这钉住「badge 键于非 NULL 而非 source='restore'」的核心契约**（§2.6）。
 - G3 投影携带：批次详情 payload 含 `restoredFromVersion`，且掩码路径不变（LOCK-3 邻测不红）。
 - G4 FE 渲染 + NULL 不渲染；两侧 shape-lock wire 测试同步（wire 形状变更=两侧全扫，家规）。
-- G5 突变：去掉穿线 ⇒ G1 红；投影漏字段 ⇒ G3 红。
+- G5 突变（per-site，实证）：neuter :9704 ⇒ **仅 G1c 红**；neuter :9856 ⇒ **仅 G1d 红**；neuter :9884 ⇒ **仅 G1e 红**；neuter legacy :9562 ⇒ G1+G3 红；投影漏字段 ⇒ G3 红。每条 golden 精确命中其自身路由的穿线点，无交叉覆盖。
 
 ## §4 Owner 决策点
 
