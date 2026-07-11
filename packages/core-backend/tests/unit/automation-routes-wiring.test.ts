@@ -16,6 +16,17 @@ import express from 'express'
 import request from 'supertest'
 import { createAutomationRoutes } from '../../src/routes/automation'
 
+// G8: the /test route now enforces canManageAutomation on the sheet. These wiring tests exercise
+// the AUTHORIZED path (they assert response redaction/shape, not the auth gate — that gate has its
+// own suite in automation-testrun-gate.test.ts), so grant the capability and stub the pool.
+vi.mock('../../src/multitable/permission-service', () => ({
+  resolveSheetCapabilities: vi.fn().mockResolvedValue({ capabilities: { canManageAutomation: true } }),
+}))
+vi.mock('../../src/integration/db/connection-pool', () => {
+  const client = { query: vi.fn().mockResolvedValue({ rows: [] }), getInternalPool: () => null }
+  return { poolManager: { get: () => client } }
+})
+
 function buildApp(service: unknown) {
   const app = express()
   app.use(express.json())
