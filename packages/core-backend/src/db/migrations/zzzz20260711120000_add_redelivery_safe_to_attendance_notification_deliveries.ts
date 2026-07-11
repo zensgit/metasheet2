@@ -17,8 +17,10 @@
  * up(): ADD COLUMN redelivery_safe boolean NOT NULL DEFAULT false. All pre-existing rows become
  * `false`, which is correct by design — every historical `failed` row (multi-channel, pre-flag) is
  * NOT eligible for redelivery. On PostgreSQL 11+ `ADD COLUMN ... NOT NULL DEFAULT <constant>` is a
- * metadata-only change (catalog default, no table rewrite / full-table lock), so this is cheap even
- * on a large outbox.
+ * metadata-only change (the constant is stored as a catalog default, so no full-table REWRITE and no
+ * per-row scan). ALTER TABLE still briefly takes an ACCESS EXCLUSIVE lock to update the catalog, but
+ * because it neither rewrites nor scans the table that lock is held only momentarily — cheap even on
+ * a large outbox.
  *
  * Guarded by checkTableExists so partial-schema test harnesses (isolated-schema suites that run only
  * the migrations they need) can apply this migration too, mirroring the sibling
