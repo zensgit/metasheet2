@@ -3,6 +3,7 @@ import * as path from 'path'
 import { Logger } from '../core/logger'
 import { query } from '../db/pg'
 import { isDatabaseSchemaError } from '../utils/database-errors'
+import { resolveWithinBase } from '../services/StorageService'
 
 export type MultitableAttachmentCleanupOptions = {
   retentionHours?: number
@@ -27,10 +28,23 @@ type AttachmentCleanupResult = {
   skipped: number
 }
 
-const DEFAULT_ATTACHMENT_PATH = process.env.ATTACHMENT_PATH || path.join(process.cwd(), 'data', 'attachments')
+// F10 design-lock (2026-07-11), GF10-1 — owner P1 finding: this base MUST be read lazily (call-time, not
+// module-load-time) so `resolveWithinBase` below is exercised against whatever `ATTACHMENT_PATH` is
+// active when the deleter actually runs (tests included) — a frozen module-load constant would silently
+// re-introduce an untestable default. No production behavior change: `ATTACHMENT_PATH` is set before the
+// process starts either way.
+function getDefaultAttachmentPath(): string {
+  return process.env.ATTACHMENT_PATH || path.join(process.cwd(), 'data', 'attachments')
+}
 
+// F10 design-lock (2026-07-11), GF10-1 — owner P1 root-escape fix: F9 introduced these default deleters
+// with a bare `path.join(base, storagePath)`, which lets a `storagePath` containing `../` (malformed,
+// corrupt, or legacy data) resolve OUTSIDE the attachment storage root before `fs.unlink` — deleting an
+// arbitrary file on the host. `resolveWithinBase` (the same containment floor F3 already enforces for
+// `files.ts`/`StorageService.ts`) throws instead of resolving once the escape is detected. Containment:
+// NEVER unlink a path outside the storage base — no exceptions, no join fallback.
 async function deleteLocalAttachment(_storageFileId: string, storagePath: string): Promise<void> {
-  const fullPath = path.join(DEFAULT_ATTACHMENT_PATH, storagePath)
+  const fullPath = resolveWithinBase(getDefaultAttachmentPath(), storagePath)
   await fs.unlink(fullPath)
 }
 
@@ -181,8 +195,10 @@ export type MultitableAttachmentBlobPurgeResult = {
   skipped: number
 }
 
+// F10 design-lock (2026-07-11), GF10-1 — owner P1 root-escape fix (same containment floor as
+// `deleteLocalAttachment` above): never unlink a path outside the storage base.
 async function deleteLocalAttachmentByKey(storagePath: string): Promise<void> {
-  const fullPath = path.join(DEFAULT_ATTACHMENT_PATH, storagePath)
+  const fullPath = resolveWithinBase(getDefaultAttachmentPath(), storagePath)
   await fs.unlink(fullPath)
 }
 

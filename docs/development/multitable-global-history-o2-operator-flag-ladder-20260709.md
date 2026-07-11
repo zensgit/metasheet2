@@ -62,6 +62,11 @@ tombstone 数据是惰性的——关 flag 不删数据，重开后继续可用�
 ## 5. 未做/边界（如实）
 
 - field-value tombstones（4c-1 恢复力）**无 retention 地板**（link 侧才有）——若 retention 上线且
-  4c-1 恢复窗口重要，需单独补地板（新 rung，不在本文）。
+  4c-1 恢复窗口重要，需单独补地板（新 rung，不在本文）。**此边界已经 owner RATIFIED 为地板-A（接受边界，
+  维持现状，零代码）**，见 `multitable-global-history-fieldvalue-tombstone-floor-decision-20260710.md`。
+  **⚠ 复议触发（O-2 联动）**：一旦在 **生产** 走到 L4（retention，值 `'1'`）**且** 任一 4c 系
+  capture/revert flag（`TOMBSTONE_CAPTURE_ENABLED` / `ENABLE_RECORD_UNDELETE_INBOUND` /
+  `ENABLE_FIELD_RETYPE_REVERT`）已在生产开启，地板-A 决策自动回到 owner 桌面——此时 field-value 值恢复窗口
+  = keep-days，过期即 4d 化。operator 在 L4/L5 勾选前必须显式确认这一联动（或保持 retention 关闭）。
 - automation / plugin-SDK 删除仍**无捕获**（不可恢复=D-2，owner-gated）；4c-3 可达边界不含它们。
 - 4d 红线不变：已删字段列值的值级恢复永不承诺。

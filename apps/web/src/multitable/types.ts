@@ -389,6 +389,9 @@ export interface HistoryChange {
   changedFieldIds: string[]
   before: Record<string, unknown> | null
   after: Record<string, unknown> | null
+  /** R11 back-reference: the source record-version this `source='restore'` change restored from, else
+   *  null/absent. Optional so a pre-R11 backend payload still typechecks. The badge renders only when non-null. */
+  restoredFromVersion?: number | null
 }
 
 export interface HistoryBatchDetail {
@@ -400,6 +403,10 @@ export interface HistoryBatchDetail {
   visibleAffectedRecordCount: number
   visibleAffectedFieldCount: number
   changes: HistoryChange[]
+  /** all-tables-B (R11): server-masked field-id → display-name map, keyed by sheetId, for the fields that
+   *  appear in this batch's (post-mask) changes across ALL involved sheets. Optional so a pre-R11 backend
+   *  payload still typechecks; the FE degrades to raw ids / active-table names when absent. */
+  fieldNames?: Record<string, Record<string, string>>
 }
 
 export interface MetaRecordSubscription {

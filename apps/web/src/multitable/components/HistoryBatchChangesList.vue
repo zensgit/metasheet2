@@ -21,10 +21,15 @@
         >{{ recordDisplay(c) }}</button>
         <span v-else class="meta-hist__change-rec" :title="c.recordId" data-test="hist-rec-label">{{ recordDisplay(c) }}</span>
         <span class="meta-hist__change-fields">{{ fieldsLabel(c.changedFieldIds.length) }}</span>
+        <span
+          v-if="c.restoredFromVersion != null"
+          class="meta-hist__change-restored"
+          data-test="hist-restored-from"
+        >{{ restoredFromLabel(c.restoredFromVersion) }}</span>
       </div>
       <ul v-if="c.changedFieldIds.length" class="meta-hist__diff" data-test="hist-diff">
         <li v-for="d in changeFieldDiffs(c)" :key="d.fieldId" class="meta-hist__diff-row" data-test="hist-diff-row">
-          <span class="meta-hist__diff-label" :title="diffFieldName(d.fieldId)">{{ diffFieldName(d.fieldId) }}</span>
+          <span class="meta-hist__diff-label" :title="diffFieldName(d.fieldId, c.sheetId)">{{ diffFieldName(d.fieldId, c.sheetId) }}</span>
           <span class="meta-hist__diff-values">
             <template v-if="d.shape === 'masked'">
               <span class="meta-hist__diff-masked" data-test="hist-diff-masked">{{ diffMaskedLabel() }}</span>
@@ -52,7 +57,7 @@
 
 <script setup lang="ts">
 import { useLocale } from '../../composables/useLocale'
-import { recordLabel } from '../utils/meta-record-labels'
+import { recordLabel, restoredFromVersionBadge } from '../utils/meta-record-labels'
 import { formatFieldDisplay, pickRecordTitle } from '../utils/field-display'
 import type { HistoryChange, LinkedRecordSummary, MetaField, PersonSummary } from '../types'
 
@@ -67,6 +72,12 @@ const props = defineProps<{
    *  own count/id fallbacks — never a fetch, never un-masking. */
   linkSummaries?: Record<string, Record<string, LinkedRecordSummary[]>>
   personSummaries?: Record<string, Record<string, PersonSummary[]>>
+  /** all-tables-B (R11): server-masked field-id → display-name map, keyed by sheetId, from the batch-detail
+   *  payload (`HistoryBatchDetail.fieldNames`). Lets a change row on a NON-active sheet (all-tables mode)
+   *  show its field name instead of a raw id. Already two-layer-masked server-side (layer-2 property-hidden ∩
+   *  layer-3 field_permissions), so it carries only names the actor may see — the FE never re-derives the
+   *  mask (the #4007 footgun). Active-table rows still resolve via `fields`; both sources are masked. */
+  fieldNames?: Record<string, Record<string, string>>
   /** Reuses the caller's own action-label map (kept as a single source of truth in HistoryCenterModal.vue —
    *  this is prop-drilling, not a shared-module extraction, per the AI-fields S1 design-lock's constraint
    *  on `sourceLabel` NOT applying here since this is a distinct map (per-change action, not source)). */
@@ -82,6 +93,10 @@ const { isZh } = useLocale()
 
 function fieldsLabel(n: number): string {
   return isZh.value ? `${n} 个字段` : `${n} field(s)`
+}
+// R11 back-reference: badge shown only for a restore change carrying a source version (non-null).
+function restoredFromLabel(version: number): string {
+  return restoredFromVersionBadge(version, isZh.value)
 }
 function shortRecordId(id: string): string {
   const trimmed = id.startsWith('rec_') ? id.slice(4) : id
@@ -172,8 +187,12 @@ function changeFieldDiffs(c: HistoryChange): FieldDiffRow[] {
     }
   })
 }
-function diffFieldName(fieldId: string): string {
-  return props.fields?.find((f) => f.id === fieldId)?.name ?? fieldId
+// all-tables-B: the active sheet still resolves via the `fields` prop (byte-identical to pre-R11, no #4007
+// regression — `fields` only ever carries the ACTIVE sheet's fields, and field ids are globally unique so it
+// can't match another sheet's id). A change row on a NON-active sheet falls through to the server-masked,
+// sheet-scoped `fieldNames` map, then to the raw id. Both name sources are already two-layer-masked server-side.
+function diffFieldName(fieldId: string, sheetId: string): string {
+  return props.fields?.find((f) => f.id === fieldId)?.name ?? props.fieldNames?.[sheetId]?.[fieldId] ?? fieldId
 }
 function diffOpLabel(shape: 'set' | 'cleared'): string {
   return recordLabel(shape === 'set' ? 'record.restorePreviewSet' : 'record.restorePreviewUnset', isZh.value)
