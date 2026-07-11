@@ -352,7 +352,7 @@
                 <button class="meta-view-mgr__action meta-view-mgr__action--danger" @click="removeFilterRule(idx)">&times;</button>
               </div>
             </div>
-            <button v-if="configTargetFields.length" class="meta-view-mgr__btn-inline" @click="addFilterRule">{{ ml('view.addFilter') }}</button>
+            <MtLink v-if="configTargetFields.length" data-filter-add="true" @click="addFilterRule">{{ ml('view.addFilter') }}</MtLink>
             <p v-if="filterDraft.groups.length" class="meta-view-mgr__nested-note" data-nested-groups-note="true">
               &#x1F512; {{ filterDraft.groups.length }} {{ ml('view.nestedGroupsReadOnly') }}
             </p>
@@ -386,7 +386,7 @@
                 <button class="meta-view-mgr__action meta-view-mgr__action--danger" @click="removeSortRule(idx)">&times;</button>
               </div>
             </div>
-            <button v-if="configTargetFields.length" class="meta-view-mgr__btn-inline" @click="addSortRule">{{ ml('view.addSort') }}</button>
+            <MtLink v-if="configTargetFields.length" data-sort-add="true" @click="addSortRule">{{ ml('view.addSort') }}</MtLink>
           </div>
 
           <label v-if="configTarget.type !== 'kanban' && configTarget.type !== 'gantt' && configTarget.type !== 'hierarchy'" class="meta-view-mgr__field">
@@ -499,7 +499,7 @@ import {
 } from '../utils/meta-manager-labels'
 import ConditionalFormattingDialog from './ConditionalFormattingDialog.vue'
 import ScaleFormattingDialog from './ScaleFormattingDialog.vue'
-import { MtButton } from '../ui'
+import { MtButton, MtLink } from '../ui'
 
 const VIEW_TYPES = ['grid', 'form', 'kanban', 'gallery', 'calendar', 'timeline', 'gantt', 'hierarchy'] as const
 const VIEW_ICONS: Record<string, string> = {
@@ -1453,11 +1453,17 @@ onBeforeUnmount(() => {
 /* .meta-view-mgr__btn-add: both uses (add-section addView + config-panel saveConfig) are now <MtButton
    variant="primary">; the bespoke #409eff fill is normalized to --ms-color-primary (intended UF-1 token
    convergence). Bespoke CSS removed to avoid double-styling the MtButton root; class kept for selector
-   stability (existing spec queries .meta-view-mgr__btn-add). The __btn-inline buttons stay bespoke
-   (T3-GATED). UI-P2-1c batch-3: .meta-view-mgr__btn-cancel (both sharers: config-panel + delete-confirm)
-   and .meta-view-mgr__btn-delete (its only sharer) are now <MtButton> (default ghost / variant="danger");
-   both classes' FULL sharer sets were migrated at once, so their bespoke CSS below is removed (no
-   double-styling); classes kept as additive for selector stability (existing specs query them). */
+   stability (existing spec queries .meta-view-mgr__btn-add). UI-P2-1c batch-3: .meta-view-mgr__btn-cancel
+   (both sharers: config-panel + delete-confirm) and .meta-view-mgr__btn-delete (its only sharer) are now
+   <MtButton> (default ghost / variant="danger"); both classes' FULL sharer sets were migrated at once, so
+   their bespoke CSS below is removed (no double-styling); classes kept as additive for selector stability
+   (existing specs query them).
+   UI-P2-1c T3 (multitable-ui-p2-1c-tail-resolution-designlock-20260707.md §2-T3, RATIFIED): only TWO of
+   this class's four sharers are in the T3-ratified range — addFilterRule ("+ Add filter") and addSortRule
+   ("+ Add sort") — and are now <MtLink> (bespoke #409eff→#475569-ish dashed-box styling normalized to the
+   MtLink primary-text-link look). reloadLatestConfig ("Reload latest") and dismissLiveRefreshNotice
+   ("Dismiss") are NOT in scope and stay on this bespoke class — so the rule below is kept (partial-sharer
+   migration: CSS removal is gated on ALL sharers migrating, per design-lock §4). */
 .meta-view-mgr__btn-inline { align-self: flex-start; padding: 4px 10px; border: 1px dashed #cbd5e1; border-radius: 4px; background: #fff; color: #475569; cursor: pointer; font-size: 12px; }
 .meta-view-mgr__confirm { padding: 12px 16px; border-top: 1px solid #eee; background: #fef0f0; }
 .meta-view-mgr__confirm p { margin: 0 0 8px; font-size: 13px; color: #333; }

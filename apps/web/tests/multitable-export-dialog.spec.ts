@@ -83,7 +83,7 @@ describe('MetaExportDialog', () => {
     const { app, root } = mountDialog({ onConfirm })
     await nextTick()
 
-    ;(root.querySelector('.meta-export__link:last-child') as HTMLButtonElement).click() // Clear all
+    ;(root.querySelector('.meta-export__bulk .mt-link:last-child') as HTMLButtonElement).click() // Clear all (UI-P2-1c T3: now MtLink)
     await nextTick()
 
     const btn = root.querySelector('.meta-export__btn--primary') as HTMLButtonElement
