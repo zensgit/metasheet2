@@ -1,8 +1,9 @@
-# AI 字段 L0.5 · 租户级 live 闸 + 租户级配额主体 · 设计锁（PROPOSED）
+# AI 字段 L0.5 · 租户级 live 闸 + 租户级配额主体 · 设计锁（RATIFIED）
 
-> 状态：**PROPOSED — 待 owner ratify**。docs-only；不改 runtime、不发 live 请求、不翻任何生产 env。
+> 状态：**RATIFIED（owner directive 2026-07-11；与 #3796 联批,排序条件满足）**。docs-only；不改 runtime、不发 live 请求、不翻任何生产 env。
+> **RATIFIED — owner directive 2026-07-11**（批 12 把 merge-tree-clean 锁,与 #3796 联批）。header 由 owner 决定翻转、Claude 机械执行(非自我批准)。锁内 per-tier owner 子决定(env-cap/权限点亮)仍留待 owner。
 > 前置 / 依据：**AI 点亮阶梯锁**（#3796 `multitable-ai-dark-to-ga-lighting-designlock-20260707.md` §3）**点名 L0.5 为"真单租户点亮"的 runtime 前置**。本锁把它展开。
-> Ratify 排序：本锁与 #3796（其本身亦为 PROPOSED）**一起或在其之后** ratify——L0.5 的存在理由定义于该锁 §3，不得先于它单独 ratify。
+> Ratify 排序：本锁与 #3796（现已 RATIFIED 2026-07-11）**联批完成**;排序条件(不先于 #3796)满足——L0.5 的存在理由定义于该锁 §3，不得先于它单独 ratify。
 > 模型分档：设计 = Fable/Opus；runtime = Sonnet；点亮/权限相关 = Opus 对抗审阅。
 
 ## 1. 原则（为什么需要 L0.5）
