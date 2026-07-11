@@ -119,6 +119,11 @@ export type ReadAttachmentForDeleteResult = {
   recordId: string | null
   fieldId: string | null
   storageFileId: string
+  /** F9 design-lock GF9-1 (owner CHANGES-REQUESTED P2-1①): the persisted physical storage key
+   * (`multitable_attachments.storage_path`), mirroring the download path's `ReadAttachmentMetadataResult`
+   * (`:104`) so the delete path can also delete the blob index-free (`deleteByKey`) instead of the
+   * in-memory disk-scan `storage.delete(storageFileId)`, which drifts on restart/new-instance/rebuild. */
+  storagePath: string | null
   createdBy: string | null
 }
 
@@ -138,6 +143,20 @@ export type SoftDeleteAttachmentInput = {
 export type DeleteAttachmentBinaryInput = {
   storage: StorageServiceImpl
   storageFileId: string
+  /** F9 design-lock GF9-1: the persisted physical storage key. When present, the delete is index-free
+   * (`deleteByKey`) — mirrors `readAttachmentBinary`'s storagePath branch. Optional/defensive only:
+   * `multitable_attachments.storage_path` is NOT NULL on every row, so the `storage.delete(storageFileId)`
+   * fallback below is not reachable via any real row — it exists for legacy/mocked callers that omit it. */
+  storagePath?: string | null
+  /** F9 design-lock GF9-2 (owner CHANGES-REQUESTED P2-1②, Option A): when BOTH `query` and `attachmentId`
+   * are supplied, a physical delete that resolves without throwing (a real delete, or `deleteByKey`'s
+   * internal ENOENT-as-success — see `StorageService.deleteByKey`) stamps `blob_purged_at = now()` on the
+   * row, so it drops out of the compensating sweep's (`sweepMultitableAttachmentBlobPurge`) candidate set.
+   * A genuine non-ENOENT failure (still swallowed here, matching existing best-effort/no-rollback
+   * behavior) leaves `blob_purged_at` NULL for the sweep to retry. Optional so callers that only need the
+   * physical delete (no DB handle) keep compiling unchanged. */
+  query?: AttachmentQueryFn
+  attachmentId?: string
 }
 
 export type BuildAttachmentSummariesInput = {
@@ -529,7 +548,7 @@ export async function readAttachmentForDelete(
 ): Promise<ReadAttachmentForDeleteResult | null> {
   const { query, attachmentId } = input
   const result = await query(
-    `SELECT id, sheet_id, record_id, field_id, storage_file_id, created_by
+    `SELECT id, sheet_id, record_id, field_id, storage_file_id, storage_path, created_by
      FROM multitable_attachments
      WHERE id = $1 AND deleted_at IS NULL`,
     [attachmentId],
@@ -542,6 +561,7 @@ export async function readAttachmentForDelete(
     recordId: typeof row.record_id === 'string' ? row.record_id : null,
     fieldId: typeof row.field_id === 'string' ? row.field_id : null,
     storageFileId: String(row.storage_file_id),
+    storagePath: typeof row.storage_path === 'string' ? row.storage_path : null,
     createdBy: typeof row.created_by === 'string' ? row.created_by : null,
   }
 }
@@ -570,14 +590,44 @@ export async function softDeleteAttachmentRow(
  * Best-effort removal of the underlying storage blob. Intentionally
  * swallows errors to mirror the route-layer behavior where a failed
  * storage delete must not roll back the DB soft-delete.
+ *
+ * F9 design-lock GF9-1 (owner CHANGES-REQUESTED P2-1①, mirrors F5's files.ts root-cause fix): deletes by
+ * the persisted `storagePath` (`storage.deleteByKey`, index-free) when present, instead of the in-memory
+ * disk-scan `storage.delete(storageFileId)`, which drifts (misses) after a restart/new instance/index
+ * rebuild — not just on a genuine storage failure. `storagePath` is NOT NULL on every real row; the
+ * `storage.delete` branch is a defensive fallback for legacy/mocked callers only.
+ *
+ * GF9-2 (Option A): when the caller also supplies `query` + `attachmentId`, a delete that resolves
+ * without throwing (a real delete, or `deleteByKey`'s own ENOENT-as-success) stamps
+ * `blob_purged_at = now()` so the compensating sweep (`sweepMultitableAttachmentBlobPurge`) never
+ * re-selects this row. The stamp itself is best-effort too — a failed UPDATE here just means the sweep
+ * retries the (already idempotent) physical delete next tick.
  */
 export async function deleteAttachmentBinary(
   input: DeleteAttachmentBinaryInput,
 ): Promise<void> {
-  const { storage, storageFileId } = input
+  const { storage, storageFileId, storagePath, query, attachmentId } = input
   try {
-    await storage.delete(storageFileId)
+    if (typeof storagePath === 'string' && storagePath.length > 0) {
+      await storage.deleteByKey(storagePath)
+    } else {
+      await storage.delete(storageFileId)
+    }
   } catch {
-    // best-effort cleanup; mirrors route behavior
+    // best-effort cleanup; mirrors route behavior. A genuine (non-ENOENT) physical-delete failure leaves
+    // blob_purged_at unstamped below — never reached — so the compensating sweep retries it.
+    return
+  }
+
+  if (query && attachmentId) {
+    try {
+      await query(
+        'UPDATE multitable_attachments SET blob_purged_at = now() WHERE id = $1 AND blob_purged_at IS NULL',
+        [attachmentId],
+      )
+    } catch {
+      // best-effort stamp; a failed UPDATE is not a data-integrity issue — the compensating sweep will
+      // simply pick this row up next tick and retry the (idempotent) delete.
+    }
   }
 }

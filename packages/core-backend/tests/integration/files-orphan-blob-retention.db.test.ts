@@ -193,15 +193,18 @@ describeDb('F5 files-orphan-blob-retention (real DB, isolated schema)', () => {
       expect(await blobPurgedAtOf('row-5')).toBeNull()
     })
 
-    it('#6 — a POISONED storage_key row is skipped: never resolved, never deleted, blob_purged_at stays NULL', async () => {
+    it('#6 — a POISONED storage_key row is excluded at the SQL candidate stage (GF9-4): never a candidate, never deleted, blob_purged_at stays NULL', async () => {
       const deleteSpy = vi.spyOn(storage, 'deleteByKey')
       await insertRow({ id: 'row-6', storageKey: '!f3-collision:row-6', deletedAt: hoursAgo(48) })
 
       const result = await sweepOrphanFileBlobs({ queryFn, storage, graceHours: 24 })
 
-      // the poisoned key IS non-null, so it IS a SQL-level candidate (inspected=1) — the skip happens
-      // inside the loop (GF5-3), not at the query level. Never touches storage.
-      expect(result).toEqual({ inspected: 1, purged: 0, skipped: 1 })
+      // F9 design-lock GF9-4 (owner CHANGES-REQUESTED P2-3): the poisoned key is now excluded by the
+      // `NOT starts_with(storage_key, ...)` SQL predicate itself — it is no longer a SQL-level candidate
+      // at all (inspected=0, skipped=0), unlike the pre-fix behavior where it WAS selected and then
+      // skipped inside the loop (inspected=1, skipped=1). This is the fix for the head-of-line-blocking
+      // bug: a batch of nothing but poison rows used to starve out older-but-purgeable rows behind them.
+      expect(result).toEqual({ inspected: 0, purged: 0, skipped: 0 })
       expect(deleteSpy).not.toHaveBeenCalled()
       expect(await blobPurgedAtOf('row-6')).toBeNull()
     })
@@ -245,6 +248,31 @@ describeDb('F5 files-orphan-blob-retention (real DB, isolated schema)', () => {
       expect(await blobPurgedAtOf('dup-b')).toBeNull()
     })
 
+    it('GF9-4 owner-named test — batchSize=1 + oldest-row-is-poison + newer-row-is-valid: the valid row is still processed (poison no longer head-of-line-blocks)', async () => {
+      const validKey = `${randomUUID()}/ok.jpg`
+      const validFull = await writePhysical(validKey)
+      // Oldest (deletedAt further in the past) is poison; a newer, genuinely purgeable row follows it.
+      // Pre-GF9-4, `ORDER BY deleted_at ASC LIMIT 1` would select ONLY the poison row every tick (it
+      // satisfies every other predicate), so the valid row behind it would never be reached — this test
+      // fails on the pre-fix query (poison would occupy the sole batch slot; valid would show
+      // inspected:0, purged:0, skipped:0 forever). Post-fix, poison is excluded at the SQL stage, so with
+      // batchSize=1 the single slot goes to the valid row.
+      await insertRow({ id: 'poison-oldest', storageKey: '!f3-collision:poison-oldest', deletedAt: hoursAgo(72) })
+      await insertRow({ id: 'valid-newer', storageKey: validKey, deletedAt: hoursAgo(48) })
+
+      const result = await sweepOrphanFileBlobs({ queryFn, storage, graceHours: 24, batchSize: 1 })
+
+      expect(result).toEqual({ inspected: 1, purged: 1, skipped: 0 })
+      expect(await pathExists(validFull)).toBe(false)
+      expect(await blobPurgedAtOf('valid-newer')).not.toBeNull()
+      expect(await blobPurgedAtOf('poison-oldest')).toBeNull()
+
+      // second sweep: valid row already purged and dropped out of the candidate set; poison row is
+      // permanently excluded by the SQL predicate — nothing left to inspect.
+      const second = await sweepOrphanFileBlobs({ queryFn, storage, graceHours: 24, batchSize: 1 })
+      expect(second).toEqual({ inspected: 0, purged: 0, skipped: 0 })
+    })
+
     it('a batch mixes a purgeable row and a within-grace row: only the eligible one is swept', async () => {
       const eligibleKey = `${randomUUID()}/eligible.jpg`
       const graceKey = `${randomUUID()}/in-grace.jpg`
@@ -260,6 +288,80 @@ describeDb('F5 files-orphan-blob-retention (real DB, isolated schema)', () => {
       expect(await pathExists(graceFull)).toBe(true)
       expect(await blobPurgedAtOf('batch-eligible')).not.toBeNull()
       expect(await blobPurgedAtOf('batch-grace')).toBeNull()
+    })
+
+    describe('GF9-3 atomic tombstone write-back (owner CHANGES-REQUESTED P2-2, real Postgres COALESCE semantics)', () => {
+      async function storageKeyOf(id: string): Promise<string | null> {
+        const r = await sql<{ storage_key: string | null }>`SELECT storage_key FROM files WHERE id = ${id}`.execute(testDb)
+        return r.rows[0]?.storage_key ?? null
+      }
+
+      async function deletedAtOf(id: string): Promise<Date | null> {
+        const r = await sql<{ deleted_at: Date | null }>`SELECT deleted_at FROM files WHERE id = ${id}`.execute(testDb)
+        return r.rows[0]?.deleted_at ?? null
+      }
+
+      // Mirrors the EXACT SQL shape `routes/files.ts`'s delete route now runs (GF9-3): a single atomic
+      // UPDATE that tombstones AND folds a url-derived fallback key into `storage_key` via COALESCE,
+      // guarded by `deleted_at IS NULL` so it only ever fires against an active row.
+      async function runAtomicTombstone(id: string, derivedKey: string | null): Promise<void> {
+        await sql`
+          UPDATE files SET deleted_at = now(), storage_key = COALESCE(storage_key, ${derivedKey})
+          WHERE id = ${id} AND deleted_at IS NULL
+        `.execute(testDb)
+      }
+
+      it('a NULL storage_key row: the atomic tombstone UPDATE persists the derived key (COALESCE fallback applies)', async () => {
+        await insertRow({ id: 'p22-null', storageKey: null, deletedAt: null })
+
+        await runAtomicTombstone('p22-null', 'legacy/derived-key.jpg')
+
+        expect(await storageKeyOf('p22-null')).toBe('legacy/derived-key.jpg')
+        expect(await deletedAtOf('p22-null')).not.toBeNull()
+      })
+
+      it('a row with an EXISTING persisted storage_key: COALESCE keeps it — the fallback param never overwrites a real key', async () => {
+        await insertRow({ id: 'p22-persisted', storageKey: 'uuid-real/photo.jpg', deletedAt: null })
+
+        // The route computes derivedKey=null whenever resolveActiveStorageKey found a persisted
+        // (non-poisoned) key (derivedFromUrl === false) — this call mirrors that.
+        await runAtomicTombstone('p22-persisted', null)
+
+        expect(await storageKeyOf('p22-persisted')).toBe('uuid-real/photo.jpg')
+      })
+
+      it('an ALREADY-TOMBSTONED row: the `deleted_at IS NULL` guard makes a repeat call a no-op (never double-tombstones, never re-derives)', async () => {
+        await insertRow({ id: 'p22-repeat', storageKey: null, deletedAt: null })
+        await runAtomicTombstone('p22-repeat', 'first-derived.jpg')
+        const firstDeletedAt = await deletedAtOf('p22-repeat')
+
+        // A second call (simulating what a POST-tombstone separate writeback UPDATE using the SAME
+        // `deleted_at IS NULL` guard would have silently no-op'd on for the FIRST call too — the exact bug
+        // GF9-3 closes) must not overwrite anything on an already-tombstoned row.
+        await runAtomicTombstone('p22-repeat', 'second-derived-should-not-apply.jpg')
+
+        expect(await storageKeyOf('p22-repeat')).toBe('first-derived.jpg')
+        expect(await deletedAtOf('p22-repeat')).toEqual(firstDeletedAt)
+      })
+
+      it('end-to-end with the sweep: a NULL-storage_key row tombstoned via the atomic write-back is later picked up and purged by sweepOrphanFileBlobs (proves the row is no longer permanently excluded by `storage_key IS NOT NULL`)', async () => {
+        const derivedKey = `${randomUUID()}/recovered.jpg`
+        const full = await writePhysical(derivedKey)
+        await insertRow({ id: 'p22-e2e', storageKey: null, deletedAt: null })
+
+        await runAtomicTombstone('p22-e2e', derivedKey)
+        // Backdate deleted_at past grace — the route's `now()` tombstone would otherwise be within grace.
+        await sql`UPDATE files SET deleted_at = ${hoursAgo(48)} WHERE id = ${'p22-e2e'}`.execute(testDb)
+
+        expect(await storageKeyOf('p22-e2e')).toBe(derivedKey)
+        expect(await blobPurgedAtOf('p22-e2e')).toBeNull()
+
+        const result = await sweepOrphanFileBlobs({ queryFn, storage, graceHours: 24 })
+
+        expect(result.purged).toBeGreaterThanOrEqual(1)
+        expect(await pathExists(full)).toBe(false)
+        expect(await blobPurgedAtOf('p22-e2e')).not.toBeNull()
+      })
     })
   })
 })

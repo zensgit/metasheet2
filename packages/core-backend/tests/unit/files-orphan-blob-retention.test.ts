@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import { Logger } from '../../src/core/logger'
 import { sweepOrphanFileBlobs } from '../../src/services/files-orphan-blob-retention'
+import { FILES_POISON_KEY_PREFIX } from '../../src/services/filesStorageKey'
 
 // F5 files-orphan-blob-retention design-lock (2026-07-10), GF5-8: logic-level coverage with a mocked
 // queryFn + mocked storage (mirrors tests/unit/multitable-attachment-cleanup.test.ts). This proves the
@@ -26,8 +27,8 @@ describe('sweepOrphanFileBlobs', () => {
     expect(result).toEqual({ inspected: 1, purged: 1, skipped: 0 })
     expect(storage.deleteByKey).toHaveBeenCalledTimes(1)
     expect(storage.deleteByKey).toHaveBeenCalledWith('uuid-1/photo.jpg')
-    // candidate SELECT carries grace hours + batch size
-    expect(queryFn.mock.calls[0]?.[1]).toEqual([24, 10])
+    // candidate SELECT carries grace hours + batch size + the poison-prefix exclusion param (GF9-4)
+    expect(queryFn.mock.calls[0]?.[1]).toEqual([24, 10, FILES_POISON_KEY_PREFIX])
     // UPDATE targets this row's id
     expect(queryFn.mock.calls[2]?.[1]).toEqual(['f-1'])
   })
