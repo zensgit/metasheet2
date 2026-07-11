@@ -92,6 +92,28 @@ GF6-3 修迁移注释第三处 stale `'abort' (DEFAULT)`→poison；GF6-4 注释
 
 ---
 
+## §F8 — vestigial 接口/契约清理（最后一刀，纯删除）
+
+存储完整性修完（F1–F6 + owner 复审后的 F9）后，线上只剩一处**零功能**的接口卫生：几个零调用者的 vestigial
+storage 接口/契约方法。F8 = **纯删除 112 行 / 3 文件**，不碰任何鉴权、存储机制或活底物。
+
+| 删除 | 位置 | 零引用铁证 |
+|---|---|---|
+| `listFiles` + `ListOptions`（GF8-1） | `StorageService.ts`（StorageProvider 接口 + LocalStorageProvider 实现 + StorageServiceImpl 实现/委托）、`types/plugin.ts`（StorageService 接口声明 + `ListOptions` 类型） | `GET /api/files`（F1 起）已改查 DB 不用 `storage.listFiles`；全仓零方法调用；`ListOptions` 删 listFiles 后零引用 |
+| `setStorage`/`getStorage` + `storageCache`（GF8-2） | `enhanced-plugin-context.ts`（EnhancedPluginContext 接口声明 + 实现 + 孤儿 Map） | 全仓零调用者 |
+
+**GF8-2 是本刀安全闸重点**（移除 plugin-context 契约方法）。opus 对抗审给出比"仓内零调用者"更强的**结构性不可达**证据链：
+`EnhancedPluginContext` 只由 `plugin-manager.ts` 创建并存入一个**从不被 `.get` 读取**的 Map，而 `PluginManager` 本身
+零 importer（未接线的死脚手架）；真正交给插件的是 `PluginContext`，其存储面是 `context.storage: PluginStorage`
+（get/set/consume/delete/list），**从来不暴露** setStorage/getStorage。→ 判 **landed-ok**。
+
+**审阅的一个纠偏（如实记录）**：风险方向在类型层其实相反——**GF8-1 的 `listFiles` 才是碰到声明的插件 API 类型契约**
+（`PluginServices.storage: StorageService`），比 GF8-2 更"对外"。但仍零风险：运行时 `createPluginContext` 的 `services`
+对象根本没填 `storage` 字段（`as unknown as PluginServices` 双 cast 掩盖），`context.services.storage` 运行期是
+`undefined`，任何 `.listFiles()` 都会 TypeError；且该类型未从包入口导出、零仓内调用者、底层 disk-scan 索引早已（F1）改查 DB。
+
+**收官口径**：F8 = vestigial 接口清理，非安全/功能修；tracker 仍 OPEN。
+
 ## 落地清单
 | 刀 | PR | main sha | 模型 | opus 审 |
 |---|---|---|---|---|
@@ -100,6 +122,7 @@ GF6-3 修迁移注释第三处 stale `'abort' (DEFAULT)`→poison；GF6-4 注释
 | F5 | #4072 | `0012422fe` | sonnet impl | APPROVE 0 P1/P2·7/7 mutation 红 |
 | F6 | #4076 | `a9ceef97e` | sonnet impl | APPROVE 0 P1/P2 |
 | **F9**（owner-P2 修复） | #4094 | `66f9edae5` | sonnet impl | APPROVE 0 P1/**0 新** P2·4/4 mutation 红·Part-2 再猎无第四类 |
+| **F8**（vestigial 接口清理） | #4103 | `befcbebaf` | sonnet impl | APPROVE **含 GF8-2** 0 P1/P2/P3·结构性不可达证据链·tsc 0 |
 
 迁移 on `main`：`zzzz20260710140000_add_files_storage_key.ts`（F3）+ `zzzz20260710150000_add_files_blob_purged_at.ts`（F5）
 + `zzzz20260711090000_add_multitable_attachments_blob_purged_at.ts`（F9）。
@@ -112,8 +135,7 @@ GF6-3 修迁移注释第三处 stale `'abort' (DEFAULT)`→poison；GF6-4 注释
 3. **retention env prod 启用**（ops）：`FILES_ORPHAN_BLOB_RETENTION_ENABLED` / `MULTITABLE_ATTACHMENT_BLOB_RETENTION_ENABLED`
    默认 OFF；启用兜住残留真失败尾（**不影响主修生效**——主修 always-on）。
 4. **F7 深度图片校验**：owner 已接受 lazy-forgery 威胁为 P3 → 默认不做。
-5. **listFiles 接口移除 + setStorage/getStorage plugin 契约移除**（F8，cosmetic）：公开接口/插件契约收窄，非局部死码，留 owner 决策；暂停。
-6. **N1 NIT（后补）**：`isDatabaseSchemaError` 未认 42703（undefined_column）；F9 后 default-ON 草稿 sweep 耦合新列，
+5. **N1 NIT（后补）**：`isDatabaseSchemaError` 未认 42703（undefined_column）；F9 后 default-ON 草稿 sweep 耦合新列，
    deploy-before-migrate 窗口优雅降级不崩、迁移后自愈，仅日志文案影响。
 
 ## 部署提示
