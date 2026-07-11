@@ -1,6 +1,7 @@
 # 多维表 — 手动排序基座 设计锁（DESIGN LOCK）
 
-状态：PROPOSED — 待 owner ratify
+状态：RATIFIED（owner directive 2026-07-11）
+> **RATIFIED — owner directive 2026-07-11**（批 12 把 merge-tree-clean 锁）。header 状态由 owner 决定翻转、Claude 机械执行(非自我批准)。锁内 per-tier owner 子决定(如变体/env-cap/storage opt-in)仍各自留待 owner。
 类型：设计锁（docs-only，零 runtime）。**✅ 已经独立对抗门禁（MERGE_CLEAN，2026-07-08）**——四个载重声明（行序无基座 · 字段重排是整数-shift · 看板收窄 · 仪表盘排除）全部在代码里坐实，权限引用真实、每环 mutation 载重、seam 与 #3928/#3931 干净；报告 `/tmp/ordering-substrate-lock-gate-20260708.md`。门禁两个 P3 硬化已并入本文（§1.1 休眠 `row_order` 澄清、§4 primitive 类为约束锁死）。
 
 - **Baseline**: `origin/main` @ `7e7798a34`（引用行号会随 `[MUTEX:BE]` 流量漂移；实现前须按当时 HEAD 重核）。
