@@ -84,7 +84,7 @@ diff 实测三处差异(均已缓解,记录于此以免后续误判):
 - **runtime 验收余项(本文范围内)**:实体机装 corrective-5 包跑 smoke 回贴 `mvpSmoke.pass=true` +
   `auditActionsCovered=8/8` + `selfScanClean=true`。此为**唯一的 runtime 验收余项**;PASS 后
   前序 W3-W6 MD 补 addendum,**W3-W6 on-prem 包 runtime 验收弧**闭环。
-- **包保障(本文范围外,仍 open)**:#4086 是 #4084 之后的**包验证器增量**——两个 on-prem 包验证器
+- **包保障(本文范围外,已 MERGED `458373d54`)**:#4086 是 #4084 之后的**包验证器增量**——两个 on-prem 包验证器
   都须强制 superseded audit marker 在场。它是独立的代码审阅/合并项,不被实体机 smoke 覆盖。
 - **更广 follow-up(本文范围外,仍 open)**:#4093(#3889 下的 PLM/ERP/K3 只读 feeder)与
   原始只读同步验收重叠,仍在开发。**本文不关闭整个功能 epic。**
@@ -94,5 +94,5 @@ diff 实测三处差异(均已缓解,记录于此以免后续误判):
 (实体机验收追踪单)+ 本 W3-W6 corrective 弧 MD**,不再指向 #3751。
 
 因此:**「本线转全线闭环」是过宽表述,已收回。** 正确口径 = 实体机 smoke PASS 只结**已合并的
-W3-W6 on-prem 包 runtime 验收弧**;#4086 包保障与 #4093 只读 feeder 各自独立推进。runtime 产品面
+W3-W6 on-prem 包 runtime 验收弧**;#4086 包保障已 MERGED、#4093 只读 feeder 仍独立推进。runtime 产品面
 未因本弧改动。
