@@ -113,6 +113,33 @@ export async function findDingTalkApprovalCardDeliveryById(
 }
 
 /**
+ * §7.6 Delivery Closure — task_id trace accessor. An operator holding a DingTalk asyncsend_v2
+ * `task_id` (the receipt of an accepted async message) resolves it back to the delivery row(s) —
+ * instance, recipient, send_status — so "was this async approval-card message accepted, and under
+ * what task_id" is answerable without reading logs. Backed by the partial index idx_dacd_task_id.
+ *
+ * Returns an array (newest first): task_id is NOT enforced UNIQUE — each send records its own, so
+ * in practice one row per task_id, but a lost-then-reconciled or re-sent card could share one, and
+ * the trace surface must surface all matches rather than silently pick one. A blank task_id never
+ * matches (the partial index excludes NULLs; an empty string is short-circuited here).
+ */
+export async function findDingTalkApprovalCardDeliveriesByTaskId(
+  query: QueryFn,
+  taskId: string,
+): Promise<DingTalkApprovalCardDeliveryRow[]> {
+  const trimmed = taskId.trim()
+  if (trimmed.length === 0) return []
+  const result = await query(
+    `SELECT ${RETURNING_COLUMNS}
+       FROM dingtalk_approval_card_deliveries
+      WHERE task_id = $1
+      ORDER BY created_at DESC`,
+    [trimmed],
+  )
+  return result.rows as DingTalkApprovalCardDeliveryRow[]
+}
+
+/**
  * Atomic acted-claim: succeeds for exactly one caller while the card is still `sent` AND was
  * possibly delivered (`send_status IN ('sent','outcome_unknown')` — review P2: a pending/failed
  * send never produced a live button, so nothing may claim it; PR #4046 Phase B widened the set by

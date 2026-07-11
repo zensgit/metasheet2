@@ -13,6 +13,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { pool } from '../../src/db/pg'
 import {
   claimDingTalkApprovalCardDeliveryActed,
+  findDingTalkApprovalCardDeliveriesByTaskId,
   findDingTalkApprovalCardDeliveryById,
   insertDingTalkApprovalCardDelivery,
   markDingTalkApprovalCardDeliverySendFailed,
@@ -274,6 +275,50 @@ describeIfDb('A-1 — dingtalk approval card delivery ledger (real DB)', () => {
     } finally {
       await q(`DELETE FROM directory_integrations WHERE id = $1`, [integrationId]).catch(() => {})
     }
+  })
+
+  // §7.6 Delivery Closure — task_id is now queryable: the trace index + lookup-by-task_id accessor
+  // let an operator resolve a DingTalk asyncsend_v2 receipt back to the delivery (instance, recipient,
+  // send status). task_id was already persisted (insert + markSent); this locks it as queryable.
+  it('§7.6 trace: findByTaskId resolves an accepted async message; blank/unknown → []', async () => {
+    const taskId = `trace_task_${randomUUID()}`
+    const inserted = await insertDingTalkApprovalCardDelivery(q, {
+      instanceId: INSTANCE,
+      nodeKey: 'approval_1',
+      recipientUserId: 'user_trace',
+      recipientDingTalkUserId: 'dd_user_trace',
+      deliveryKind: 'work_notice_action_card',
+      taskId,
+    })
+
+    const found = await findDingTalkApprovalCardDeliveriesByTaskId(q, taskId)
+    expect(found.map((r) => r.id)).toContain(inserted.id)
+    expect(found.every((r) => r.task_id === taskId)).toBe(true)
+
+    // A receipt recorded via markSent (the real asyncsend_v2 success path) is equally traceable.
+    const pending = await insertDingTalkApprovalCardDelivery(q, {
+      instanceId: INSTANCE,
+      nodeKey: 'approval_1',
+      recipientUserId: 'user_trace2',
+      recipientDingTalkUserId: 'dd_user_trace2',
+      deliveryKind: 'interactive_card',
+    })
+    const markTaskId = `trace_marked_${randomUUID()}`
+    await markDingTalkApprovalCardDeliverySent(q, pending.id, markTaskId)
+    const foundMarked = await findDingTalkApprovalCardDeliveriesByTaskId(q, markTaskId)
+    expect(foundMarked.map((r) => r.id)).toContain(pending.id)
+
+    // Unknown task_id and blank input never match (the partial index excludes NULL task_ids).
+    expect(await findDingTalkApprovalCardDeliveriesByTaskId(q, `nope_${randomUUID()}`)).toEqual([])
+    expect(await findDingTalkApprovalCardDeliveriesByTaskId(q, '   ')).toEqual([])
+  })
+
+  it('§7.6 trace: the partial task_id index exists (migration applied)', async () => {
+    const res = await q(
+      `SELECT indexdef FROM pg_indexes WHERE indexname = 'idx_dacd_task_id' AND tablename = 'dingtalk_approval_card_deliveries'`,
+    )
+    expect(res.rows.length).toBe(1)
+    expect(String((res.rows[0] as { indexdef: string }).indexdef)).toMatch(/task_id/)
   })
 
   it('ON DELETE CASCADE removes ledger rows with their instance', async () => {
