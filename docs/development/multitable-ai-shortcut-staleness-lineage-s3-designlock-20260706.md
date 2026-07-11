@@ -1,6 +1,7 @@
-# Multitable AI-shortcut staleness lineage — flag-don't-auto-spend — S3 DESIGN LOCK (PROPOSED)
+# Multitable AI-shortcut staleness lineage — flag-don't-auto-spend — S3 DESIGN LOCK (RATIFIED)
 
-- **Status**: PROPOSED — awaiting owner ratification. Runtime slice; needs ONE narrow migration (§3 LOCK-B, gated sub-decision).
+- **Status**: RATIFIED (owner directive 2026-07-11). Runtime slice; needs ONE narrow migration (§3 LOCK-B, gated sub-decision).
+> **RATIFIED — owner directive 2026-07-11** (batch-ratify of the 12 merge-tree-clean locks). Header flipped by owner's decision, executed mechanically by Claude (not self-approval). Per-lock owner sub-decisions (variant / env-cap / storage opt-in) remain individually owner-gated.
 - **Slice**: S3 of the AI-fields arc (S1 provenance ✅ → S2 prompt-config-history ✅ → **S3 staleness lineage (this)** → S4 cost visibility [#3673] → S5 normalize kind). Sibling contrast: **W1-1 formula freshness** (merged `26af7a560`) AUTO-recomputes formulas on write because it's cheap/deterministic; S3 does the OPPOSITE for AI outputs — **flag stale, never auto-recompute** — because an AI re-run costs money/tokens and hits a provider.
 - **What S3 is NOT**: not auto-recompute of AI outputs (the entire point is to NOT silently spend); not a new AI kind; not the S4 cost surface (cross-ref #3673); not the DARK→GA lighting decision; not a write-path fan-out (see LOCK-D — staleness is read-time-derived, so an ordinary source edit does ZERO extra write work); **not config-staleness** — the fingerprint covers source VALUES only (§2 A1), so editing the shortcut's own `kind`/`params` does NOT flag existing cells as stale-against-new-config (that history is S2 prompt-config-history territory; S3 = source-VALUE staleness only); **not a stored dependency-edge graph** — "lineage" in the title means the per-cell generated-against value fingerprint; no edge graph is introduced or stored.
 
