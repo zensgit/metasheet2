@@ -268,7 +268,7 @@ if (Test-Path -LiteralPath (Join-Path $liveRoot 'apps/web/node_modules/new.txt')
   }
 })
 
-test('on-prem archive contract includes migration 066 and the documented stock-preparation smoke', () => {
+test('on-prem archive contract includes migration 066 and the documented postdeploy smokes', () => {
   const buildScript = readScript('scripts/ops/multitable-onprem-package-build.sh')
   const verifyScript = readScript('scripts/ops/multitable-onprem-package-verify.sh')
 
@@ -282,9 +282,14 @@ test('on-prem archive contract includes migration 066 and the documented stock-p
     buildScript.includes('"scripts/ops/stock-preparation-mvp-postdeploy-smoke.mjs"'),
     'build must package the stock-preparation smoke',
   )
+  assert.ok(
+    buildScript.includes('"scripts/ops/multitable-permission-lists-postdeploy-smoke.mjs"'),
+    'build must package the permission-list closeout smoke',
+  )
   for (const relativePath of [
     'packages/core-backend/migrations/066_create_integration_stock_prep_audit.sql',
     'scripts/ops/stock-preparation-mvp-postdeploy-smoke.mjs',
+    'scripts/ops/multitable-permission-lists-postdeploy-smoke.mjs',
   ]) {
     assert.ok(verifyScript.includes(`"${relativePath}"`), `verifier must require ${relativePath}`)
   }

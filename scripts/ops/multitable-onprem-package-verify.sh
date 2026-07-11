@@ -889,6 +889,7 @@ required=(
   "scripts/ops/integration-k3wise-postdeploy-summary.mjs"
   "scripts/ops/integration-k3wise-gate-contract-check.mjs"
   "scripts/ops/stock-preparation-mvp-postdeploy-smoke.mjs"
+  "scripts/ops/multitable-permission-lists-postdeploy-smoke.mjs"
   "scripts/ops/bridge-agent-driver-smoke.ps1"
   "scripts/ops/fixtures/bridge-agent-driver-smoke/evidence.template.json"
   "scripts/ops/fixtures/bridge-agent-driver-smoke/evidence.template.md"
