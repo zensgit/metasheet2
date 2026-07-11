@@ -111,7 +111,7 @@ interface PlmDiscussionProvider {
 > read-side `metasheet_review` gate in §6. Consumer implementation: Lane C
 > (`PLMAdapter.exchangeDiscussionSession` + the 6 write methods).
 
-> **Write-relay (server-side): Option A shipped, Option B deferred.**
+> **Write-relay (server-side): Option A (PROPOSED — owner-recommended, pending ratification), Option B deferred.**
 > `routes/plm-embed-discussion.ts` wires Lane C's adapter methods into the
 > actual `/api/plm-embed/discussion/...` HTTP surface an embedded BOM-review
 > writes through. Two designs were considered for how the discussion-session
