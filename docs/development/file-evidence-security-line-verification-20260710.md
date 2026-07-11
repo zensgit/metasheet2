@@ -161,7 +161,7 @@ root **外**文件被真实删除。
 
 ## 余下 = owner 决策 / ops / 红线（**非自主开发项**；自主开发层已尽）
 > 说明：以下**不是**我在拖延的「开发」——是定义上非自主的项（红线只 owner 能解、tracker 是 owner 的账、env 是部署动作）。
-1. **硬化池关闭 / tracker 状态**：owner 复审后判定；本文与自主层**均未触碰 tracker**、未宣布关池（状态仍 OPEN）。
+1. **硬化池关闭 / tracker 状态**：~~owner 复审后判定；未宣布关池（状态仍 OPEN）~~ → **owner 2026-07-11 复核 APPROVE 0 P1/0 P2 并授权收官,池已 CLOSED**；收官对账见 `file-evidence-security-line-pool-closeout-20260711.md`（含 F4/retention env 未交付口径）。
 2. **F4 审批人 read grant 实现**：新授权路径（权限层，须 owner 逐刀显式授权）+ 无活需求方（审批 UI 未渲染照片）→ 设计已定
    （见 §owner 决策项引用的 f4-design-lock；机制 A，复用批准门 `assertAttendanceRequestApprovalAllowed`，与本线零碰撞），**实现 gated**。
 3. **retention env prod 启用**（ops）：`FILES_ORPHAN_BLOB_RETENTION_ENABLED` / `MULTITABLE_ATTACHMENT_BLOB_RETENTION_ENABLED`
