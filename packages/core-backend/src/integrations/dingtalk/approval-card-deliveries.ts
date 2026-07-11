@@ -235,9 +235,15 @@ export async function markDingTalkApprovalCardDeliverySendOutcomeUnknown(
 }
 
 /**
- * Marks every still-`sent` card of an instance `superseded` (node advanced past them, or the
- * instance reached a terminal state). `excludeId` spares the delivery that triggered the
- * transition (it is claimed `acted` separately). Returns the swept ids.
+ * Marks still-`sent` cards of an instance `superseded` when their node/seat is no longer live
+ * (node advanced past them, or the instance reached a terminal state). `excludeId` spares the
+ * delivery that triggered the transition (it is claimed `acted` separately). Returns the swept ids.
+ *
+ * Review P2-1: a card whose (node_key, recipient) STILL has an active `approval_assignments` seat
+ * MUST NOT be superseded — otherwise approving branch A of a `joinMode:'all'` parallel fork would
+ * false-stale branch B's legitimately-live card. The `NOT EXISTS` clause keeps this sweep in exact
+ * agreement with the wrapper's read-time active-assignment binding: a card is superseded iff no
+ * live seat matches it.
  */
 export async function supersedeDingTalkApprovalCardDeliveriesForInstance(
   query: QueryFn,
@@ -254,6 +260,13 @@ export async function supersedeDingTalkApprovalCardDeliveriesForInstance(
     `UPDATE dingtalk_approval_card_deliveries
      SET card_state = 'superseded', updated_at = NOW()
      WHERE instance_id = $1 AND card_state = 'sent'${excludeClause}
+       AND NOT EXISTS (
+         SELECT 1 FROM approval_assignments aa
+          WHERE aa.instance_id = dingtalk_approval_card_deliveries.instance_id
+            AND aa.node_key = dingtalk_approval_card_deliveries.node_key
+            AND aa.assignee_id = dingtalk_approval_card_deliveries.recipient_user_id
+            AND aa.is_active = TRUE
+       )
      RETURNING id`,
     params,
   )

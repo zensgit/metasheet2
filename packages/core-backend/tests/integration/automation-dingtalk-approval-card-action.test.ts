@@ -365,6 +365,16 @@ describeIfDatabase('A-2b send_dingtalk_approval_card action (real DB)', () => {
     expect(row.card_state).toBe('sent')
     expect(row.send_status).toBe('sent')
     expect(row.task_id).toBe('interactive-task-4242')
+    // P2-2: the executor MUST persist the task's entry epoch onto the delivery row (this is what
+    // powers the wrapper's same-node re-entry binding). Pinned to the live seat's epoch so a
+    // regression that drops the capture (persists null) fails HERE, not silently.
+    const seatEpoch = await q(
+      `SELECT entry_epoch FROM approval_assignments WHERE instance_id = $1 AND is_active = TRUE ORDER BY created_at ASC LIMIT 1`,
+      [instanceId],
+    )
+    const expectedEpoch = (seatEpoch.rows[0] as { entry_epoch: number | null } | undefined)?.entry_epoch ?? null
+    expect(expectedEpoch).not.toBeNull()
+    expect(row.entry_epoch).toBe(expectedEpoch)
 
     expect(sentBodies).toHaveLength(0)
     expect(interactiveBodies).toHaveLength(1)

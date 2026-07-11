@@ -130,6 +130,44 @@ describeIfDb('A-1 — dingtalk approval card delivery ledger (real DB)', () => {
     expect(sweptAll).toEqual([keep.id])
   })
 
+  it('P2-1: supersede NEVER sweeps a card whose (node,recipient) seat is still ACTIVE (parallel-fork sibling)', async () => {
+    // Model a joinMode:'all' parallel fork: two live seats on distinct branch nodes. Approving
+    // branch A advances past its own node but branch B's seat stays active — sweeping the instance
+    // must NOT false-stale branch B's live card.
+    const liveSeatCard = await insertDingTalkApprovalCardDelivery(q, {
+      instanceId: INSTANCE_CASCADE,
+      nodeKey: 'branch_b',
+      recipientUserId: 'user_live',
+      recipientDingTalkUserId: 'dd_user_live',
+      deliveryKind: 'work_notice_action_card',
+    })
+    await markDingTalkApprovalCardDeliverySent(q, liveSeatCard.id, 'task_live_seat')
+    const deadSeatCard = await insertDingTalkApprovalCardDelivery(q, {
+      instanceId: INSTANCE_CASCADE,
+      nodeKey: 'branch_a',
+      recipientUserId: 'user_dead',
+      recipientDingTalkUserId: 'dd_user_dead',
+      deliveryKind: 'work_notice_action_card',
+    })
+    await markDingTalkApprovalCardDeliverySent(q, deadSeatCard.id, 'task_dead_seat')
+    // branch B's seat is ACTIVE; branch A's seat was consumed (is_active = FALSE).
+    await q(
+      `INSERT INTO approval_assignments (instance_id, assignment_type, assignee_id, source_step, node_key, is_active)
+       VALUES ($1, 'user', 'user_live', 0, 'branch_b', TRUE), ($1, 'user', 'user_dead', 0, 'branch_a', FALSE)`,
+      [INSTANCE_CASCADE],
+    )
+
+    const swept = await supersedeDingTalkApprovalCardDeliveriesForInstance(q, INSTANCE_CASCADE)
+
+    // Only the dead-seat card is superseded; the live parallel-sibling card is spared.
+    expect(swept).toContain(deadSeatCard.id)
+    expect(swept).not.toContain(liveSeatCard.id)
+    expect((await findDingTalkApprovalCardDeliveryById(q, liveSeatCard.id))?.card_state).toBe('sent')
+    expect((await findDingTalkApprovalCardDeliveryById(q, deadSeatCard.id))?.card_state).toBe('superseded')
+
+    await q(`DELETE FROM approval_assignments WHERE instance_id = $1`, [INSTANCE_CASCADE]).catch(() => {})
+  })
+
   it('P2: pending/failed sends are NEVER claimable — only a delivered card is actionable', async () => {
     const pending = await insertDingTalkApprovalCardDelivery(q, {
       instanceId: INSTANCE,
