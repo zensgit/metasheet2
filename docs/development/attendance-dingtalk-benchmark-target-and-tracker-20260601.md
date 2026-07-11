@@ -73,7 +73,7 @@
 >    异步/补偿删除,并补 DB 删除失败注入测试。
 >    〔P3 措辞纠正〕magic-byte 是**格式前缀筛查**（BMP 仅 2 字节),不构成「文件为真实图片」的证明。
 >    ~~硬化池在 F1/F2 落地并复审通过前保持 OPEN~~ → **已满足并 CLOSED（2026-07-11）**;
->    但**考勤线本身仍非零待办**（#4011 R8 quiet-hours 等仍 OPEN,属 DingTalk backlog 池车道）——收官仅限文件证据/存储完整性池,非整条考勤线。
+>    但**考勤线本身仍非零待办**（DingTalk backlog 池等车道另行跟踪）——收官仅限文件证据/存储完整性池,非整条考勤线,不对更广考勤路线作收口声明。
 > 3. **命名前置（按需立项）**:wecom directory population 线 · comp_time 单人调整 primitive ·
 >    SMS 渠道（供应商选型 owner 门）· >50 org 计提 fairness 轮转。
 > 4. **新增 owner 决策项（H1 审阅产出）**:never-configured vs suspended 收窄（`has_active/has_any` 双谓词,
