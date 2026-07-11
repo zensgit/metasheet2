@@ -139,6 +139,17 @@ class SimpleCronExpression implements CronExpression {
 }
 
 /**
+ * Node clamps setTimeout delays greater than 2^31-1 ms (~24.86 days) down to 1ms. Passed
+ * a raw far-future delay (e.g. a yearly cron saved mid-year, ~175 days out), that clamp
+ * would make the job fire immediately and hot-loop — re-scheduling itself right back into
+ * the same clamp — gated only by whatever the handler itself does (e.g. a sync lease).
+ * Arm delays above this safe ceiling in repeated max-size chunks: wait out one chunk,
+ * recompute the remaining delay against the fixed target time, and re-arm. Only once the
+ * remaining delay fits under the ceiling does the real fire-the-job timeout get set.
+ */
+const MAX_SAFE_TIMEOUT_MS = 2 ** 31 - 1 - 1_000_000 // headroom under Node's ~24.86-day clamp point
+
+/**
  * 调度作业管理器
  */
 class JobScheduler extends EventEmitter {
@@ -238,7 +249,6 @@ class JobScheduler extends EventEmitter {
       }
 
       job.nextRun = nextRun
-      const delayMs = nextRun.getTime() - Date.now()
       const jobName = job.name || job.id || ''
 
       // 清理旧的定时器
@@ -247,19 +257,41 @@ class JobScheduler extends EventEmitter {
         clearTimeout(oldCronJob.timeout)
       }
 
-      const timeout = setTimeout(async () => {
-        await this.executeJob(job)
-        // 执行完成后重新调度下一次
-        this.scheduleCronJob(job)
-      }, delayMs)
-
-      this.cronJobs.set(jobName, { expression, timeout })
+      this.armCronTimeout(job, jobName, expression, nextRun)
 
       this.logger.debug(`Cron job ${jobName} scheduled for ${nextRun.toISOString()}`)
     } catch (error) {
       this.logger.error(`Failed to schedule cron job ${job.name}`, error as Error)
       this.emit('job:error', job, error)
     }
+  }
+
+  /**
+   * Arms the timer for a job's next cron fire, chunking delays that exceed
+   * MAX_SAFE_TIMEOUT_MS so a single setTimeout call is never handed a value Node would
+   * silently clamp. `nextRun` is the fixed target time computed once by scheduleCronJob;
+   * each chunk re-derives the remaining delay from it rather than re-parsing the cron.
+   * Always writes the latest timeout handle into `cronJobs` so removeJob/destroy can
+   * cancel mid-chain — a job unscheduled between chunks must not fire.
+   */
+  private armCronTimeout(job: ScheduledJob, jobName: string, expression: CronExpression, nextRun: Date): void {
+    const remainingMs = nextRun.getTime() - Date.now()
+
+    if (remainingMs > MAX_SAFE_TIMEOUT_MS) {
+      const timeout = setTimeout(() => {
+        this.armCronTimeout(job, jobName, expression, nextRun)
+      }, MAX_SAFE_TIMEOUT_MS)
+      this.cronJobs.set(jobName, { expression, timeout })
+      return
+    }
+
+    const timeout = setTimeout(async () => {
+      await this.executeJob(job)
+      // 执行完成后重新调度下一次
+      this.scheduleCronJob(job)
+    }, Math.max(remainingMs, 0))
+
+    this.cronJobs.set(jobName, { expression, timeout })
   }
 
   private scheduleDelayedJob(job: ScheduledJob): void {

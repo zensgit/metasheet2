@@ -12,27 +12,25 @@
         <router-link class="multitable-templates__back" :to="{ name: HomeRouteName }">
           ← 返回多维表首页
         </router-link>
-        <button class="multitable-templates__refresh" :disabled="loading" @click="loadTemplates">
+        <MtButton class="multitable-templates__refresh" :disabled="loading" @click="loadTemplates">
           {{ loading ? '加载中...' : '刷新' }}
-        </button>
+        </MtButton>
       </div>
     </header>
 
     <section class="multitable-templates__controls" aria-label="筛选与搜索">
       <nav v-if="categories.length" class="multitable-templates__categories" aria-label="分类筛选">
-        <button
-          type="button"
+        <MtButton
           class="multitable-templates__category-btn"
           :class="{ 'multitable-templates__category-btn--active': activeCategory === ALL_CATEGORY }"
           @click="activeCategory = ALL_CATEGORY"
         >
           全部
           <span class="multitable-templates__category-count">{{ templates.length }}</span>
-        </button>
-        <button
+        </MtButton>
+        <MtButton
           v-for="cat in categories"
           :key="cat.value"
-          type="button"
           class="multitable-templates__category-btn"
           :class="{ 'multitable-templates__category-btn--active': activeCategory === cat.value }"
           :data-category-value="cat.value"
@@ -40,7 +38,7 @@
         >
           {{ cat.label }}
           <span class="multitable-templates__category-count">{{ cat.count }}</span>
-        </button>
+        </MtButton>
       </nav>
       <label class="multitable-templates__search">
         <span>搜索模板</span>
@@ -59,7 +57,7 @@
 
     <p v-if="errorMessage" class="multitable-templates__error" role="alert">
       {{ errorMessage }}
-      <button class="multitable-templates__retry" @click="loadTemplates">重试</button>
+      <MtButton class="multitable-templates__retry" @click="loadTemplates">重试</MtButton>
     </p>
 
     <p v-if="installError" class="multitable-templates__warning" role="status">
@@ -98,6 +96,7 @@ import { useTemplateInstall } from '../multitable/composables/useTemplateInstall
 import { categoryLabel } from '../multitable/utils/category-labels'
 import type { MetaTemplate } from '../multitable/types'
 import { AppRouteNames } from '../router/types'
+import { MtButton } from '../multitable/ui'
 
 const ALL_CATEGORY = '__all__'
 const HomeRouteName = AppRouteNames.MULTITABLE_HOME
@@ -232,20 +231,9 @@ onMounted(() => {
   text-decoration: underline;
 }
 
-.multitable-templates__refresh {
-  border: 1px solid #cbd5e1;
-  background: #ffffff;
-  color: #0f172a;
-  padding: 0.375rem 0.875rem;
-  border-radius: 6px;
-  cursor: pointer;
-  font-size: 0.875rem;
-}
-
-.multitable-templates__refresh:disabled {
-  opacity: 0.6;
-  cursor: progress;
-}
+/* .multitable-templates__refresh: the hero refresh control is now <MtButton> (default ghost — sanctioned
+   border drop, same family as batch-1/batch-3 refresh migrations). Bespoke resting/disabled CSS removed to
+   avoid double-styling the MtButton root; class kept on the element for selector stability. */
 
 .multitable-templates__controls {
   display: flex;
@@ -260,35 +248,30 @@ onMounted(() => {
   overflow-x: auto;
 }
 
-.multitable-templates__category-btn {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.375rem;
-  border: 1px solid #cbd5e1;
-  background: #ffffff;
-  color: #0f172a;
-  padding: 0.375rem 0.75rem;
-  border-radius: 999px;
-  font-size: 0.875rem;
-  cursor: pointer;
-  white-space: nowrap;
-}
-
-.multitable-templates__category-btn:hover {
-  border-color: #94a3b8;
-}
-
-.multitable-templates__category-btn--active {
+/* .multitable-templates__category-btn: the "全部" + per-category filter chips are now <MtButton> (default
+   ghost, both sharers of this class migrated together per the shared-class rule). The bespoke resting/hover
+   CSS was removed to avoid double-styling the MtButton root; classes are kept on the elements for selector
+   stability. The `--active` rule below is deliberately KEPT as an additive overlay — same pattern as
+   MultitableHomeView's `.multitable-home__favorite[aria-pressed='true']` — since MtButton has no
+   selected/active variant and the active category still needs a persistent visual cue beyond the (behavioral,
+   unchanged) label text. */
+/* Specificity (0,3,0) so the active tint robustly beats MtButton's own `.mt-button--ghost` (0,2,0)
+   base rule rather than relying on stylesheet source order (gate P3-1). */
+.mt-button.multitable-templates__category-btn--active {
   border-color: #2563eb;
   background: #eff6ff;
   color: #1d4ed8;
 }
 
+/* margin-left (was the parent button's `gap: 0.375rem` between the label text and the count badge) — the
+   count badge is now nested one level deeper inside MtButton's `.mt-button__label` wrapper, which has no
+   gap of its own, so the spacing is reproduced here instead (layout-only, same visual result). */
 .multitable-templates__category-count {
   font-size: 0.75rem;
   background: rgba(15, 23, 42, 0.06);
   border-radius: 999px;
   padding: 0 0.5rem;
+  margin-left: 0.375rem;
 }
 
 .multitable-templates__category-btn--active .multitable-templates__category-count {
@@ -331,15 +314,9 @@ onMounted(() => {
   gap: 0.5rem;
 }
 
-.multitable-templates__retry {
-  background: transparent;
-  border: 1px solid #b91c1c;
-  color: #b91c1c;
-  border-radius: 6px;
-  padding: 0.25rem 0.625rem;
-  font-size: 0.75rem;
-  cursor: pointer;
-}
+/* .multitable-templates__retry: now <MtButton> (default ghost — retry's red accent dropped, same sanctioned
+   normalization as MetaChartLoadError #3823 / MetaAutomationLogViewer `__btn--retry` #4089). Bespoke CSS
+   removed; class kept for selector stability. */
 
 .multitable-templates__warning {
   margin: 0;

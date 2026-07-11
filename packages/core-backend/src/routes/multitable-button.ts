@@ -62,6 +62,18 @@ import { Logger } from '../core/logger'
 type PoolLike = ConnectionPool & { query: QueryFn }
 const logger = new Logger('MultitableButton')
 
+function asExecutorQuery(
+  query: (sql: string, params?: unknown[]) => Promise<{ rows?: unknown[]; rowCount?: number | null }>,
+): QueryFn {
+  return async (sql, params) => {
+    const result = await query(sql, params)
+    return {
+      rows: Array.isArray(result.rows) ? result.rows : [],
+      rowCount: typeof result.rowCount === 'number' ? result.rowCount : result.rowCount ?? undefined,
+    }
+  }
+}
+
 // B1-S1 D0-A enabled actions. `record_click` = executor-owned INERT (read-gated,
 // requestId-optional, NO confirm). `send_notification` = first side-effecting
 // action (notify-gated via canSendNotification, durable + deduped + audited in one route transaction).
@@ -626,7 +638,11 @@ export function createMultitableButtonRoutes(): Router {
         actorId: access.userId,
         triggerEvent: { _trigger: 'button', fieldId, requestId },
       }
-      const executor = new AutomationExecutor({ eventBus, queryFn: query })
+      const executor = new AutomationExecutor({
+        eventBus,
+        queryFn: query,
+        transaction: async (handler) => pool.transaction(async ({ query: txq }) => handler({ query: asExecutorQuery(txq) })),
+      })
       const step = await executor.runSingleAction(
         { type: policy.dispatchType, config: normalizeJson(property.actionConfig) },
         context,

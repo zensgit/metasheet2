@@ -98,7 +98,8 @@ function verify_windows_entrypoints() {
   if search_fixed_string 'Write-Output "[multitable-onprem-apply-package] $Message"' "$apply_helper"; then
     die "PowerShell apply helper must not log through Write-Output; PowerShell success-stream output pollutes helper return values such as the staging root"
   fi
-  search_fixed_string 'Refresh dependencies (cmd.exe /c pnpm install --frozen-lockfile)' "$apply_helper" || die "PowerShell apply helper must refresh dependencies on package apply through cmd.exe"
+  search_fixed_string 'Preflight dependencies in staging (pinned pnpm, frozen lockfile)' "$apply_helper" || die "PowerShell apply helper must complete a pinned frozen dependency preflight before touching the live root"
+  search_fixed_string 'Activate preflighted dependencies in live root (offline, rollback protected)' "$apply_helper" || die "PowerShell apply helper must activate only preflighted dependencies inside the rollback transaction"
   search_fixed_string "defaulting to short Windows staging root" "$apply_helper" || die "PowerShell apply helper must default to a short Windows staging root when METASHEET_ONPREM_STAGING_ROOT is unset"
   search_fixed_string "C:\ms-tmp" "$apply_helper" || die "PowerShell apply helper must use C:\\ms-tmp as the built-in short Windows staging default"
   search_fixed_string 'System.IO.Compression.ZipFile' "$apply_helper" || die "PowerShell apply helper must use .NET ZipFile for zip extraction instead of Expand-Archive"
@@ -110,16 +111,21 @@ function verify_windows_entrypoints() {
   search_fixed_string 'DependencyRefreshHeartbeatSec' "$apply_helper" || die "PowerShell apply helper must expose dependency refresh heartbeat"
   search_fixed_string 'METASHEET_ONPREM_STAGING_ROOT' "$apply_helper" || die "PowerShell apply helper must support METASHEET_ONPREM_STAGING_ROOT for short Windows extraction paths"
   search_fixed_string 'Staging base:' "$apply_helper" || die "PowerShell apply helper must log the resolved staging base"
-  search_fixed_string 'dependency-refresh-' "$apply_helper" || die "PowerShell apply helper must write dependency refresh stdout/stderr logs"
+  search_fixed_string 'dependency-preflight-' "$apply_helper" || die "PowerShell apply helper must write dependency preflight stdout/stderr logs"
+  search_fixed_string 'dependency-activate-' "$apply_helper" || die "PowerShell apply helper must write live dependency activation stdout/stderr logs"
   search_fixed_string 'pnpm path:' "$apply_helper" || die "PowerShell apply helper must log pnpm path before dependency refresh"
   search_fixed_string 'pnpm version:' "$apply_helper" || die "PowerShell apply helper must log pnpm version before dependency refresh"
   search_fixed_string 'Resolve-PnpmInstallCommand' "$apply_helper" || die "PowerShell apply helper must resolve a dedicated pnpm install command"
+  search_fixed_string "\$SupportedPackagePnpmVersion = '9.15.9'" "$apply_helper" || die "PowerShell apply helper must pin the package-supported pnpm version to 9.15.9"
+  search_fixed_string 'prepare "pnpm@$RequiredVersion" --activate' "$apply_helper" || die "PowerShell apply helper must activate the pinned pnpm version through corepack when available"
+  search_fixed_string 'PNPM_VERSION_MISMATCH' "$apply_helper" || die "PowerShell apply helper must reject a resolved pnpm version that differs from package metadata"
   search_fixed_string 'pnpm.cmd' "$apply_helper" || die "PowerShell apply helper must prefer pnpm.cmd for Windows scheduled-task install"
   search_fixed_string 'cmd.exe' "$apply_helper" || die "PowerShell apply helper must run dependency refresh through cmd.exe"
   search_fixed_string 'dependency-refresh-wrapper' "$apply_helper" || die "PowerShell apply helper must generate a dependency refresh command wrapper"
   search_fixed_string 'CI=true' "$apply_helper" || die "PowerShell apply helper must force dependency refresh into non-interactive CI mode"
   search_fixed_string 'PNPM_CONFIG_CONFIRM_MODULES_PURGE=false' "$apply_helper" || die "PowerShell apply helper must disable pnpm module purge confirmation"
   search_fixed_string '--reporter=append-only' "$apply_helper" || die "PowerShell apply helper must use append-only pnpm reporter for deploy logs"
+  search_fixed_string '--offline' "$apply_helper" || die "PowerShell apply helper must activate the staging-prefetched dependency set offline"
   search_fixed_string '--store-dir' "$apply_helper" || die "PowerShell apply helper must pin a deploy-local pnpm store"
   search_fixed_string '.pnpm-store' "$apply_helper" || die "PowerShell apply helper must create a deploy-local pnpm store"
   search_fixed_string 'config get registry' "$apply_helper" || die "PowerShell apply helper must log pnpm registry diagnostics"
@@ -129,6 +135,15 @@ function verify_windows_entrypoints() {
   search_fixed_string 'timed out after' "$apply_helper" || die "PowerShell apply helper must fail dependency refresh with a timeout"
   search_fixed_string 'Get-DependencyRefreshExitCodeFromLog' "$apply_helper" || die "PowerShell apply helper must recover the wrapper exit marker when Start-Process exit code is blank"
   search_fixed_string 'WaitForExit()' "$apply_helper" || die "PowerShell apply helper must wait for process exit before reading ExitCode"
+  search_fixed_string 'New-PackageOverlayTransaction' "$apply_helper" || die "PowerShell apply helper must snapshot overwritten package files before live activation"
+  search_fixed_string 'Move-WorkspaceNodeModulesForRollback' "$apply_helper" || die "PowerShell apply helper must preserve existing workspace node_modules before live activation"
+  search_fixed_string 'Restore-WorkspaceNodeModules' "$apply_helper" || die "PowerShell apply helper must restore existing workspace node_modules after activation failure"
+  search_fixed_string 'Restore-PackageOverlay' "$apply_helper" || die "PowerShell apply helper must restore package files after activation failure"
+  search_fixed_string 'PACKAGE_DEPENDENCY_ROLLBACK_FAILED' "$apply_helper" || die "PowerShell apply helper must fail distinctly when rollback itself is incomplete"
+  local preflight_line overlay_line
+  preflight_line="$(grep -nF 'Preflight dependencies in staging (pinned pnpm, frozen lockfile)' "$apply_helper" | tail -n 1 | cut -d: -f1)"
+  overlay_line="$(grep -nF 'Copy-PackageOverlay -Transaction $overlayTransaction' "$apply_helper" | tail -n 1 | cut -d: -f1)"
+  [[ -n "$preflight_line" && -n "$overlay_line" && "$preflight_line" -lt "$overlay_line" ]] || die "PowerShell apply helper must run dependency preflight before the live package overlay"
   if search_fixed_string "-not (Test-Path -LiteralPath (Join-Path \$resolvedRoot 'node_modules'))" "$apply_helper"; then
     die "PowerShell apply helper must not skip dependency refresh just because root node_modules already exists"
   fi
@@ -181,12 +196,30 @@ function verify_root_runtime_dependencies() {
   local package_json="${root}/package.json"
 
   search_fixed_string '"bcryptjs"' "$package_json" || die "root package.json must include bcryptjs for Windows bootstrap compatibility"
+  search_fixed_string '"packageManager": "pnpm@9.15.9"' "$package_json" || die "packaged root package.json must pin pnpm@9.15.9"
+}
+
+function verify_no_native_bcrypt_dependency() {
+  local root="$1"
+  local core_backend_package_json="${root}/packages/core-backend/package.json"
+  local lockfile="${root}/pnpm-lock.yaml"
+
+  [[ -f "$core_backend_package_json" ]] || die "core-backend package.json must be present"
+  [[ -f "$lockfile" ]] || die "pnpm-lock.yaml must be present"
+  search_fixed_string '"bcryptjs":' "$core_backend_package_json" || die "core-backend package.json must keep the portable bcryptjs runtime"
+  if search_fixed_string '"bcrypt":' "$core_backend_package_json" || search_fixed_string '"@types/bcrypt":' "$core_backend_package_json"; then
+    die "core-backend package.json must not depend on native bcrypt or its unused type package"
+  fi
+  if grep -Eq "^[[:space:]]+(bcrypt@|'@types/bcrypt@)" "$lockfile"; then
+    die "pnpm lockfile must not contain native bcrypt build dependencies"
+  fi
 }
 
 function verify_integration_plugin_runtime_dependencies() {
   local root="$1"
   local workspace_yaml="${root}/pnpm-workspace.yaml"
   local lockfile="${root}/pnpm-lock.yaml"
+  local web_package_json="${root}/apps/web/package.json"
   local core_backend_package_json="${root}/packages/core-backend/package.json"
   local generic_sqlserver_smoke="${root}/packages/core-backend/scripts/smoke-sqlserver.ts"
   local plugin_package_json="${root}/plugins/plugin-integration-core/package.json"
@@ -195,9 +228,11 @@ function verify_integration_plugin_runtime_dependencies() {
   local c5_sqlserver_smoke_runbook="${root}/docs/operations/data-source-system-integration-c5-k3-mssql-smoke-runbook-20260615.md"
   local mssql_helper_package_json="${root}/packages/mssql-readonly-utils/package.json"
   local mssql_helper="${root}/packages/mssql-readonly-utils/index.cjs"
+  local sdk_package_json="${root}/packages/openapi/dist-sdk/package.json"
   local plugin_entry="${root}/plugins/plugin-integration-core/index.cjs"
 
   search_fixed_string '"smoke:sqlserver": "tsx scripts/smoke-sqlserver.ts"' "$core_backend_package_json" || die "core-backend package.json must expose the generic SQL Server smoke command"
+  search_fixed_string '"@metasheet/sdk": "workspace:*"' "$web_package_json" || die "web package.json must keep the packaged workspace SDK dependency"
   search_fixed_string 'export function buildConfig' "$generic_sqlserver_smoke" || die "generic SQL Server smoke script must be packaged and export buildConfig for its test seam"
   search_fixed_string '../dist/src/data-adapters/MSSQLAdapter.js' "$generic_sqlserver_smoke" || die "generic SQL Server smoke script must load the deployable compiled MSSQLAdapter path"
   search_fixed_string '../src/data-adapters/MSSQLAdapter.ts' "$generic_sqlserver_smoke" || die "generic SQL Server smoke script must keep a local source fallback for development/tests"
@@ -213,8 +248,10 @@ function verify_integration_plugin_runtime_dependencies() {
   search_fixed_string "  - 'packages/*'" "$workspace_yaml" || die "pnpm-workspace.yaml must include packages/* so workspace helper packages resolve during deploy dependency refresh"
   search_fixed_string 'version: link:../mssql-readonly-utils' "$lockfile" || die "pnpm-lock.yaml must link core-backend to packages/mssql-readonly-utils for frozen deploy installs"
   search_fixed_string 'version: link:../../packages/mssql-readonly-utils' "$lockfile" || die "pnpm-lock.yaml must link plugin-integration-core to packages/mssql-readonly-utils for frozen deploy installs"
+  search_fixed_string 'version: link:../../packages/openapi/dist-sdk' "$lockfile" || die "pnpm-lock.yaml must link the web app to the packaged SDK for frozen deploy installs"
   search_fixed_string '"name": "@metasheet/mssql-readonly-utils"' "$mssql_helper_package_json" || die "shared MSSQL helper package.json must declare @metasheet/mssql-readonly-utils"
   search_fixed_string '"main": "index.cjs"' "$mssql_helper_package_json" || die "shared MSSQL helper package.json must expose index.cjs as its runtime main"
+  search_fixed_string '"name": "@metasheet/sdk"' "$sdk_package_json" || die "packaged SDK package.json must declare @metasheet/sdk"
   search_fixed_string 'createK3WiseSqlServerReadOnlyExecutor' "$sql_executor" || die "SQL Server read-only executor must be packaged"
   search_fixed_string 'buildSharedSimpleSelectQuery' "$sql_executor" || die "SQL Server executor must call the shared bounded read-only SELECT helper"
   search_fixed_string 'function buildSimpleSelectQuery' "$mssql_helper" || die "shared MSSQL helper must package the bounded SELECT builder"
@@ -245,6 +282,9 @@ function verify_deployable_artifact_contract() {
   search_fixed_string '"directReplaceSafe": false' "$metadata_json" || die "PACKAGE-METADATA.json must mark direct replacement unsafe"
   search_fixed_string '"nodeModulesBundled": false' "$metadata_json" || die "PACKAGE-METADATA.json must document node_modules policy"
   search_fixed_string '"dependencyInstallMode": "refresh-on-apply"' "$metadata_json" || die "PACKAGE-METADATA.json must document dependency refresh policy"
+  search_fixed_string '"pnpmVersion": "9.15.9"' "$metadata_json" || die "PACKAGE-METADATA.json must pin pnpm 9.15.9"
+  search_fixed_string '"dependencyPreflight": "staging-full-install-before-live-overlay"' "$metadata_json" || die "PACKAGE-METADATA.json must document staging dependency preflight"
+  search_fixed_string '"dependencyFailureRollback": true' "$metadata_json" || die "PACKAGE-METADATA.json must document dependency failure rollback"
   search_fixed_string '"windowsEntryPoint": "deploy.bat <package.zip|package.tgz>"' "$metadata_json" || die "PACKAGE-METADATA.json must document the Windows entrypoint"
   search_fixed_string '"windowsFirstHopBootstrap": "release sidecar:' "$metadata_json" || die "PACKAGE-METADATA.json must document the first-hop bootstrap release sidecar"
   search_fixed_string '"windowsFirstHopBootstrapWrapper": "release sidecar:' "$metadata_json" || die "PACKAGE-METADATA.json must document the first-hop bootstrap wrapper release sidecar"
@@ -304,12 +344,24 @@ function verify_migration_bridge_contract() {
 
   search_fixed_string 'MIGRATION_INCLUDE_SUPERSEDED_LEGACY_SQL' "$provider" || die "migration-provider.js must expose the superseded legacy SQL opt-in"
   search_fixed_string '032_create_approval_records' "$provider" || die "migration-provider.js must carry the superseded legacy SQL skip list"
+  search_fixed_string '20250926_create_audit_tables' "$provider" || die "migration-provider.js must no-op the superseded audit SQL on upgraded on-prem databases"
   search_fixed_string '037_add_gallery_form_support' "$provider" || die "migration-provider.js must no-op superseded gallery/form SQL on upgraded on-prem DBs"
   search_fixed_string '038_config_and_secrets' "$provider" || die "migration-provider.js must no-op superseded config/secrets SQL on upgraded on-prem DBs"
   search_fixed_string "to_regclass('public.users') IS NOT NULL" "$legacy_must_change" || die "056_add_users_must_change_password.sql must no-op when users table is absent"
   search_fixed_string 'must_change_password' "$timestamp_must_change" || die "timestamp users must_change_password bridge migration must be packaged"
   search_fixed_string 'meta_record_revisions' "$onprem_record_create_repair" || die "on-prem record-create repair migration must create meta_record_revisions"
   search_fixed_string 'plugin_multitable_object_registry' "$onprem_record_create_repair" || die "on-prem record-create repair migration must repair integration staging field validation"
+}
+
+function verify_stock_preparation_mvp_contract() {
+  local root="$1"
+  local migration="${root}/packages/core-backend/migrations/066_create_integration_stock_prep_audit.sql"
+  local smoke="${root}/scripts/ops/stock-preparation-mvp-postdeploy-smoke.mjs"
+
+  search_fixed_string 'integration_stock_prep_audit' "$migration" || die "migration 066 must create the stock-preparation audit surface"
+  search_fixed_string 'auditActionsCovered' "$smoke" || die "stock-preparation MVP postdeploy smoke must report audit action coverage"
+  search_fixed_string 'selfScanClean' "$smoke" || die "stock-preparation MVP postdeploy smoke must report its values-free self scan"
+  search_fixed_string 'S.pass =' "$smoke" || die "stock-preparation MVP postdeploy smoke must emit the final pass flag"
 }
 
 function verify_generic_integration_workbench_contract() {
@@ -809,10 +861,13 @@ required=(
   "packages/core-backend/dist/src/db/migrations/zzzz20260516113000_repair_onprem_multitable_record_create.js"
   "packages/core-backend/package.json"
   "packages/core-backend/scripts/smoke-sqlserver.ts"
+  "packages/openapi/dist-sdk/package.json"
+  "packages/openapi/dist-sdk/index.js"
   "packages/core-backend/migrations/056_add_users_must_change_password.sql"
   "packages/core-backend/migrations/057_create_integration_core_tables.sql"
   "packages/core-backend/migrations/058_integration_runs_running_unique.sql"
   "packages/core-backend/migrations/059_integration_runs_history_index.sql"
+  "packages/core-backend/migrations/066_create_integration_stock_prep_audit.sql"
   "bootstrap-admin.bat"
   "deploy.bat"
   "deploy-remote.bat"
@@ -834,6 +889,7 @@ required=(
   "scripts/ops/integration-issue1542-seed-workbench-systems.mjs"
   "scripts/ops/integration-k3wise-postdeploy-summary.mjs"
   "scripts/ops/integration-k3wise-gate-contract-check.mjs"
+  "scripts/ops/stock-preparation-mvp-postdeploy-smoke.mjs"
   "scripts/ops/bridge-agent-driver-smoke.ps1"
   "scripts/ops/fixtures/bridge-agent-driver-smoke/evidence.template.json"
   "scripts/ops/fixtures/bridge-agent-driver-smoke/evidence.template.md"
@@ -929,11 +985,13 @@ bootstrap_run_wrapper="$(find "$pkg_root" -maxdepth 1 -type f -name 'bootstrap-a
 [[ -n "$bootstrap_run_wrapper" ]] || die "Required package content missing: bootstrap-admin-<run>.bat"
 verify_windows_entrypoints "$pkg_root"
 verify_root_runtime_dependencies "$pkg_root"
+verify_no_native_bcrypt_dependency "$pkg_root"
 verify_integration_plugin_runtime_dependencies "$pkg_root"
 verify_deployable_artifact_contract "$pkg_root"
 verify_build_provenance "$pkg_root"
 verify_integration_fix_markers "$pkg_root"
 verify_migration_bridge_contract "$pkg_root"
+verify_stock_preparation_mvp_contract "$pkg_root"
 verify_generic_integration_workbench_contract "$pkg_root"
 verify_bridge_agent_tooling_contract "$pkg_root"
 

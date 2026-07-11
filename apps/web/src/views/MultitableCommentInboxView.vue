@@ -5,9 +5,9 @@
         <h1>Multitable Comment Inbox</h1>
         <p>Mentions and unread comments from other collaborators, pulled from <code>/api/comments/inbox</code>.</p>
       </div>
-      <button class="mt-comment-inbox__refresh" type="button" :disabled="loading" @click="() => void refreshInbox()">
+      <MtButton class="mt-comment-inbox__refresh" variant="primary" :disabled="loading" @click="() => void refreshInbox()">
         {{ loading ? 'Refreshing...' : 'Refresh' }}
-      </button>
+      </MtButton>
     </header>
 
     <div class="mt-comment-inbox__stats">
@@ -52,12 +52,12 @@
         <div class="mt-comment-inbox__footer">
           <span>{{ formatTime(item.createdAt) }}</span>
           <div class="mt-comment-inbox__actions">
-            <button class="mt-comment-inbox__button" type="button" :disabled="openingId === item.id" @click="onOpen(item.id)">
+            <MtButton class="mt-comment-inbox__button" variant="primary" :disabled="openingId === item.id" @click="onOpen(item.id)">
               {{ openingId === item.id ? 'Opening...' : 'Open' }}
-            </button>
-            <button class="mt-comment-inbox__button" type="button" :disabled="!item.unread || busyIds.includes(item.id) || openingId === item.id" @click="onMarkRead(item.id)">
+            </MtButton>
+            <MtButton class="mt-comment-inbox__button" variant="primary" :disabled="!item.unread || busyIds.includes(item.id) || openingId === item.id" @click="onMarkRead(item.id)">
               {{ busyIds.includes(item.id) ? 'Saving...' : item.unread ? 'Mark read' : 'Read' }}
-            </button>
+            </MtButton>
           </div>
         </div>
       </article>
@@ -73,6 +73,7 @@ import { useMultitableCommentInboxRealtime } from '../multitable/composables/use
 import { multitableClient } from '../multitable/api/client'
 import type { MultitableCommentInboxItem } from '../multitable/types'
 import { AppRouteNames } from '../router/types'
+import { MtButton } from '../multitable/ui'
 
 const inboxState = useMultitableCommentInbox(multitableClient)
 const busyIds = ref<string[]>([])
@@ -214,18 +215,13 @@ onMounted(() => {
   color: #6b7280;
 }
 
-.mt-comment-inbox__refresh,
-.mt-comment-inbox__button {
-  border: none;
-  border-radius: 999px;
-  padding: 8px 14px;
-  cursor: pointer;
-}
-
-.mt-comment-inbox__refresh {
-  background: linear-gradient(135deg, #4f7cff, #6f63ff);
-  color: #fff;
-}
+/* .mt-comment-inbox__refresh / .mt-comment-inbox__button: ALL sharers of both classes (header
+   refresh + per-card Open / Mark-read) are now <MtButton variant="primary"> — the bespoke fills
+   (blue gradient / #111827) are normalized to the single --ms-color-primary token fill (intended
+   UF-1 token convergence, same category as the sanctioned #409eff → primary shade normalization).
+   The bespoke CSS (incl. the shared pill base and :disabled rules — MtButton owns disabled styling)
+   was removed to avoid double-styling the MtButton root; the classes are kept on the elements only
+   for selector stability. */
 
 .mt-comment-inbox__stats {
   display: grid;
@@ -337,16 +333,6 @@ onMounted(() => {
 .mt-comment-inbox__actions {
   display: flex;
   gap: 8px;
-}
-
-.mt-comment-inbox__button {
-  background: #111827;
-  color: #fff;
-}
-
-.mt-comment-inbox__button:disabled {
-  opacity: 0.45;
-  cursor: not-allowed;
 }
 
 @media (max-width: 720px) {

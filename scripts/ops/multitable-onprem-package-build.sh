@@ -11,6 +11,7 @@ BUILD_BACKEND="${BUILD_BACKEND:-0}"
 PACKAGE_PREFIX="${PACKAGE_PREFIX:-metasheet-multitable-onprem}"
 PACKAGE_VERSION="${PACKAGE_VERSION:-$(node -p "require('./package.json').version" 2>/dev/null || echo unknown)}"
 PACKAGE_TAG="${PACKAGE_TAG:-$(date +%Y%m%d-%H%M%S)}"
+PACKAGE_PNPM_VERSION="9.15.9"
 PACKAGE_NAME="${PACKAGE_PREFIX}-v${PACKAGE_VERSION}-${PACKAGE_TAG}"
 BUILD_ROOT="${OUTPUT_DIR}/.build/${PACKAGE_NAME}"
 PACKAGE_ROOT="${BUILD_ROOT}/${PACKAGE_NAME}"
@@ -40,6 +41,7 @@ REQUIRED_PATHS=(
   "packages/core-backend/package.json"
   "packages/core-backend/scripts/smoke-sqlserver.ts"
   "packages/mssql-readonly-utils"
+  "packages/openapi/dist-sdk"
   # The packaged migration runner loads SQL migrations from
   # packages/core-backend/migrations via migration-provider.ts. Keep this
   # source directory in the package so Windows/on-prem installs apply
@@ -82,6 +84,7 @@ REQUIRED_PATHS=(
   "scripts/ops/integration-issue1542-seed-workbench-systems.mjs"
   "scripts/ops/integration-k3wise-postdeploy-summary.mjs"
   "scripts/ops/integration-k3wise-gate-contract-check.mjs"
+  "scripts/ops/stock-preparation-mvp-postdeploy-smoke.mjs"
   "scripts/ops/fixtures/integration-k3wise"
   # Legacy SQL readonly Bridge Agent tooling. BA-M0.5 proves the approved
   # Windows SQL driver can connect with SELECT @@VERSION only. BA-M1 then
@@ -408,11 +411,12 @@ Upgrade / corrective reroll:
 
 Dependency policy:
   node_modules are intentionally not bundled. The apply helper defaults to
-  InstallDeps=1 and refreshes dependencies with pnpm install --frozen-lockfile
-  on every package apply. This is deliberate for corrective rerolls: an
-  existing deploy root may already have node_modules while the new package adds
-  a workspace runtime dependency. Manual deployments must run the same command
-  before migrations, PM2 restart, or admin bootstrap.
+  InstallDeps=1 and uses pnpm ${PACKAGE_PNPM_VERSION}, the exact version used by
+  the package build. It first performs a full frozen install in staging. Only a
+  successful preflight may enter the live-root overlay/dependency transaction;
+  a live dependency activation failure restores both package files and the
+  previous workspace node_modules before migrations or restart. Do not bypass
+  this contract with --no-frozen-lockfile.
 
 Verification:
   A valid delivery asset passes:
@@ -429,6 +433,9 @@ EOF
   "directReplaceSafe": false,
   "nodeModulesBundled": false,
   "dependencyInstallMode": "refresh-on-apply",
+  "pnpmVersion": "${PACKAGE_PNPM_VERSION}",
+  "dependencyPreflight": "staging-full-install-before-live-overlay",
+  "dependencyFailureRollback": true,
   "windowsEntryPoint": "deploy.bat <package.zip|package.tgz>",
   "windowsFirstHopBootstrap": "release sidecar: ${PACKAGE_NAME}-deploy-bootstrap.ps1",
   "windowsFirstHopBootstrapWrapper": "release sidecar: ${PACKAGE_NAME}-deploy-bootstrap.bat",
@@ -440,6 +447,7 @@ EOF
     "packages/core-backend/dist",
     "packages/core-backend/migrations",
     "packages/mssql-readonly-utils",
+    "packages/openapi/dist-sdk",
     "plugins",
     "scripts/ops",
     "docker",
@@ -529,6 +537,18 @@ fs.writeFileSync(file, `${JSON.stringify(json, null, 2)}\n`, 'utf8')
 EOF
 }
 
+function stamp_packaged_package_manager() {
+  local file="${PACKAGE_ROOT}/package.json"
+  node - "$file" "$PACKAGE_PNPM_VERSION" <<'EOF'
+const fs = require('fs')
+
+const [, , file, pnpmVersion] = process.argv
+const json = JSON.parse(fs.readFileSync(file, 'utf8'))
+json.packageManager = `pnpm@${pnpmVersion}`
+fs.writeFileSync(file, `${JSON.stringify(json, null, 2)}\n`, 'utf8')
+EOF
+}
+
 if [[ "$INSTALL_DEPS" == "1" ]]; then
   run pnpm install --frozen-lockfile
 fi
@@ -560,6 +580,7 @@ prune_node_modules "$PACKAGE_ROOT"
 
 stamp_packaged_version "package.json"
 stamp_packaged_version "packages/core-backend/package.json"
+stamp_packaged_package_manager
 write_windows_entrypoints
 write_deployment_guides
 write_build_provenance
@@ -649,11 +670,10 @@ Legacy SQL readonly Bridge Agent tools (Windows bridge host only):
 
 Runtime dependencies:
   node_modules are intentionally not bundled. deploy.bat defaults to
-  InstallDeps=1 and refreshes dependencies with pnpm install --frozen-lockfile
-  on every package apply. This prevents upgrade roots with existing
-  node_modules from missing newly added workspace runtime dependencies. If
-  applying files manually without deploy.bat, run pnpm install --frozen-lockfile
-  from the package root before migrations/bootstrap.
+  InstallDeps=1 and activates dependencies with pinned pnpm ${PACKAGE_PNPM_VERSION}.
+  The helper first runs the complete frozen install in staging; only then does
+  it enter a rollback-protected live overlay and offline dependency activation.
+  Do not hand-copy files or use --no-frozen-lockfile.
 
 Windows staging root:
   The Windows helpers default staging to C:\ms-tmp when no override is supplied.
@@ -702,6 +722,9 @@ cat > "${METADATA_JSON_TMP_PATH}" <<EOF
   "deployMode": "fresh-extract-or-existing-root-apply",
   "directReplaceSafe": false,
   "nodeModulesBundled": false,
+  "pnpmVersion": "${PACKAGE_PNPM_VERSION}",
+  "dependencyPreflight": "staging-full-install-before-live-overlay",
+  "dependencyFailureRollback": true,
   "windowsEntryPoint": "deploy.bat <package.zip|package.tgz>",
   "windowsFirstHopBootstrap": "$(basename "$BOOTSTRAP_PS1_PATH")",
   "windowsFirstHopBootstrapWrapper": "$(basename "$BOOTSTRAP_BAT_PATH")",

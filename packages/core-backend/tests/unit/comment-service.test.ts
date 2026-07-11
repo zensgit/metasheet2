@@ -80,6 +80,7 @@ const mockCollabService = {
   join: vi.fn(),
   leave: vi.fn(),
   onConnection: vi.fn(),
+  getCommentInboxSubscriberIds: vi.fn(() => ['user-inbox']),
 }
 
 const mockLogger: ILogger = {
@@ -161,6 +162,7 @@ describe('CommentService', () => {
     queueExec.length = 0
     queueTakeFirst.length = 0
     mockNotifyRecordSubscribersWithKysely.mockResolvedValue({ inserted: 0, userIds: [] })
+    mockCollabService.getCommentInboxSubscriberIds.mockReturnValue(['user-inbox'])
     service = new CommentService(
       mockCollabService as unknown as CollabService,
       mockLogger,
@@ -501,6 +503,23 @@ describe('CommentService', () => {
       expect(payload.kind).toBe('deleted')
     })
 
+    it('only emits comment:activity to inbox subscribers that can read the target record', async () => {
+      mockCollabService.getCommentInboxSubscriberIds.mockReturnValue(['user-allowed', 'user-denied'])
+      service.setCommentTargetReadChecker(async ({ userId }) => userId === 'user-allowed')
+      const row = makeCommentRow({ id: 'cmt_del_acl', author_id: 'user-author' })
+      pushTakeFirst(row)
+      pushTakeFirst(undefined)
+
+      await service.deleteComment('cmt_del_acl', 'user-author')
+
+      const activityCalls = mockCollabService.broadcastTo.mock.calls.filter(
+        (call: unknown[]) => call[1] === 'comment:activity',
+      )
+      expect(activityCalls).toHaveLength(1)
+      expect(activityCalls[0][0]).toBe('comments-inbox:user-allowed')
+      expect(JSON.stringify(activityCalls)).not.toContain('user-denied')
+    })
+
     it('rejects deletion by non-author', async () => {
       const row = makeCommentRow({ id: 'cmt_nope', author_id: 'user-author' })
       pushTakeFirst(row)
@@ -565,6 +584,36 @@ describe('CommentService', () => {
       const mentionedUserIds = sendToCalls.map((call: unknown[]) => call[0])
       expect(mentionedUserIds).toContain('user-new')
       expect(mentionedUserIds).not.toContain('user-old')
+    })
+
+    it('does not send a new mention notification when the mentioned user cannot read the target row', async () => {
+      service.setCommentTargetReadChecker(async ({ userId }) => userId !== 'user-denied')
+      const existingRow = makeCommentRow({
+        id: 'cmt_up_denied',
+        author_id: 'user-author',
+        mentions: JSON.stringify([]),
+      })
+      const updatedRow = makeCommentRow({
+        id: 'cmt_up_denied',
+        author_id: 'user-author',
+        row_id: 'row-secret',
+        target_id: 'row-secret',
+        content: '@[Denied](user-denied)',
+        mentions: JSON.stringify(['user-denied']),
+      })
+
+      pushTakeFirst(existingRow) // getRequiredCommentRow
+      pushExec([])               // updateTable execute
+      pushTakeFirst(updatedRow)  // getComment reload
+
+      await service.updateComment('cmt_up_denied', 'user-author', {
+        content: '@[Denied](user-denied)',
+      })
+
+      const sendToCalls = mockCollabService.sendTo.mock.calls.filter(
+        (call: unknown[]) => call[1] === 'comment:mention',
+      )
+      expect(sendToCalls.map((call: unknown[]) => call[0])).not.toContain('user-denied')
     })
   })
 

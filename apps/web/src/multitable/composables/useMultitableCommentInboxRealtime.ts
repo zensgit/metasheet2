@@ -59,11 +59,15 @@ export function useMultitableCommentInboxRealtime(options: UseMultitableCommentI
         const userId = await auth.getCurrentUserId().catch(() => null)
         if (disconnected) return null
         currentUserId = userId
+        // The inbox join now requires a verified identity server-side — present the caller's token
+        // (the query userId is spoofable and no longer sufficient on its own).
+        const token = auth.getToken()
 
         const nextSocket = io(resolveMultitableCommentsRealtimeBaseUrl(), {
           path: '/socket.io',
           transports: ['websocket', 'polling'],
           query: userId ? { userId } : undefined,
+          auth: token ? { token } : undefined,
         })
 
         nextSocket.on('connect', () => {

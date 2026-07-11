@@ -1547,11 +1547,13 @@ export interface DingTalkApprovalCardDeliveriesTable {
   recipient_dingtalk_user_id: string
   delivery_kind: 'work_notice_action_card' | 'interactive_card'
   task_id: string | null
+  /** DT-R2: directory integration (corp) the card was sent through; NULL on legacy/env-only rows. */
+  integration_id: string | null
   card_state: 'sent' | 'acted' | 'superseded' | 'expired' | 'revoked'
   acted_action: string | null
   acted_by: string | null
   acted_at: NullableTimestamp
-  send_status: 'pending' | 'sent' | 'failed'
+  send_status: 'pending' | 'sent' | 'failed' | 'outcome_unknown'
   send_error: string | null
   created_at: CreatedAt
   updated_at: CreatedAt
@@ -1565,7 +1567,7 @@ export interface DingTalkPersonDeliveriesTable {
   subject: string
   content: string
   success: boolean
-  status: 'success' | 'failed' | 'skipped'
+  status: 'success' | 'failed' | 'skipped' | 'outcome_unknown'
   http_status: number | null
   response_body: string | null
   error_message: string | null

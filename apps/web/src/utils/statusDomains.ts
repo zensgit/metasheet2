@@ -40,8 +40,8 @@ export interface StatusDisplayResult {
 
 // ---------------------------------------------------------------------------
 // approvalInstance — the shared instance-status vocabulary rendered by
-// ApprovalCenterView (all 4 tabs), ApprovalMobileList, ApprovalDetailView's header tag, and
-// ApprovalInboxView's status column. Enumerated from what those views' now-deleted local
+// ApprovalCenterView (all 4 tabs), ApprovalMobileList, and ApprovalDetailView's header tag.
+// Enumerated from what those views' now-deleted local
 // `statusTagType`/`statusLabel` maps actually handled (pending/approved/rejected/revoked/
 // cancelled) — `ApprovalStatus` also allows `draft`, and the underlying instance model separately
 // tracks a `returned` terminal state (approvals/api.ts `terminalState`), but neither ever reached
