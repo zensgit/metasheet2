@@ -241,6 +241,9 @@ importers:
       socket.io:
         specifier: ^4.6.1
         version: 4.8.1
+      uuid:
+        specifier: ^9.0.1
+        version: 9.0.1
       winston:
         specifier: ^3.17.0
         version: 3.18.3
@@ -305,9 +308,6 @@ importers:
       typescript:
         specifier: ^5.3.3
         version: 5.8.3
-      uuid:
-        specifier: ^9.0.1
-        version: 9.0.1
       vitest:
         specifier: ^1.1.0
         version: 1.6.1(@types/node@20.19.25)(jsdom@27.2.0)(less@4.4.2)
