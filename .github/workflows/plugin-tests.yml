@@ -428,6 +428,7 @@ jobs:
             tests/integration/directory-sync-orchestration.db.test.ts \
             tests/integration/attendance-csv-export-bom.test.ts \
             tests/integration/attendance-notification-redelivery.db.test.ts \
+            tests/integration/attendance-notification-redelivery-route.db.test.ts \
             --reporter=dot
 
       - name: Run comment-reaction keystone (real wire, real PG)

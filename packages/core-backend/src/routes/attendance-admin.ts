@@ -5,6 +5,7 @@ import { isAdmin as isRbacAdmin, listUserPermissions } from '../rbac/service'
 import { query } from '../db/pg'
 import { jsonError, jsonOk, parsePagination } from '../util/response'
 import { redeliverFailedAttendanceNotification } from '../services/AttendanceNotificationRedelivery'
+import { ensurePlatformAdmin } from './admin-users'
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
@@ -821,15 +822,43 @@ export function attendanceAdminRouter(): Router {
   //   requeued            → 200 (failed → pending; worker sends exactly once)
   //   already_delivered   → 200 (sent row → no-op; destination already received it, nothing sent)
   //   refused_outcome_unknown → 409 (may already have been delivered; never resent — manual review)
-  //   not_eligible        → 409 (pending/sending/retrying/skipped — not a redelivery target)
+  //   not_eligible        → 409 (failed-but-not-safe / non-dingtalk / pending / sending / retrying /
+  //                              skipped — not a redelivery target)
   //   not_found           → 404
   r.post('/api/attendance-admin/notification-deliveries/:deliveryId/redeliver', async (req: Request, res: Response) => {
+    // AUTH DIVERGENCE — READ BEFORE "FIXING" THIS BACK TO attendance:admin.
+    // Every OTHER route on this router is deliberately guarded by attendance:admin (see the
+    // r.use(rbacGuard('attendance','admin')) note above): an attendance-scoped admin surface tenants
+    // can delegate. This ONE route is different because it TRIGGERS AN EXTERNAL SEND (the worker
+    // re-sends a DingTalk work notification to a real recipient). `attendance:admin` cannot currently
+    // prove org-boundedness — user_roles carries no org_id — so an attendance admin of org A could
+    // otherwise redeliver a row belonging to org B. Owner transitional ruling (2026-07-11): until the
+    // org-scoped-RBAC governance line lands, ONLY a platform admin may invoke this send-triggering
+    // route. requireOrgMemberAccess was explicitly REJECTED by the owner for this seam. Reuse the
+    // single-source platform-admin check (exported in place from admin-users.ts) so there is no second
+    // drifting auth check. It writes the 401/403 response itself and returns null — RETURN EARLY.
+    const platformAdminId = await ensurePlatformAdmin(req, res)
+    if (!platformAdminId) return
+
     try {
       const deliveryId = String(req.params.deliveryId || '').trim()
       if (!UUID_RE.test(deliveryId)) {
         return jsonError(res, 400, 'DELIVERY_ID_INVALID', 'deliveryId must be a UUID')
       }
       const result = await redeliverFailedAttendanceNotification(query, deliveryId)
+
+      // VALUES-FREE audit metadata for the attendance audit middleware (which writes ONE audit row on
+      // res 'finish'). Passed via res.locals so it never leaks into the client-facing response body
+      // and is guaranteed PII-free: org_id, channel, and the prior/result status enums only — NEVER
+      // recipient id / phone / source_key / message body. The middleware records it under
+      // meta.redelivery + keys resource_id off the :deliveryId param.
+      res.locals.attendanceAuditExtra = {
+        org_id: result.orgId,
+        channel: result.channel,
+        old_status: result.previousStatus,
+        result: result.outcome,
+      }
+
       switch (result.outcome) {
         case 'requeued':
           return jsonOk(res, { outcome: result.outcome, deliveryId, status: result.status })
@@ -839,7 +868,7 @@ export function attendanceAdminRouter(): Router {
         case 'refused_outcome_unknown':
           return jsonError(res, 409, 'DELIVERY_OUTCOME_UNKNOWN', 'Delivery outcome is unknown (possibly already delivered); not resent. Reconcile manually.', { deliveryId, status: result.status })
         case 'not_eligible':
-          return jsonError(res, 409, 'DELIVERY_NOT_ELIGIBLE', `Delivery is not a failed row (status=${result.status}); only failed deliveries can be redelivered.`, { deliveryId, status: result.status })
+          return jsonError(res, 409, 'DELIVERY_NOT_ELIGIBLE', `Delivery is not a redelivery-safe DingTalk failure (status=${result.status}); only definite DingTalk failures can be redelivered.`, { deliveryId, status: result.status })
         case 'not_found':
         default:
           return jsonError(res, 404, 'DELIVERY_NOT_FOUND', 'No such notification delivery')
