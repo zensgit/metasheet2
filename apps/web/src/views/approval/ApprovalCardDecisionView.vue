@@ -22,7 +22,7 @@
       <header class="card-decision__header">
         <h1 data-testid="card-decision-title">{{ summary.approval.title ?? '审批待办' }}</h1>
         <p v-if="summary.approval.requestNo" class="card-decision__meta">编号：{{ summary.approval.requestNo }}</p>
-        <p class="card-decision__meta">节点：{{ summary.nodeKey }}</p>
+        <p class="card-decision__meta">节点：<code class="card-decision__code">{{ summary.nodeKey }}</code></p>
       </header>
 
       <!-- Terminal / stale states render the REAL ledger state instead of dead buttons. -->
@@ -136,7 +136,11 @@ const staleTitle = computed(() => {
     return `该待办已处理（${s.actedAction === 'approve' ? '同意' : s.actedAction === 'reject' ? '驳回' : s.actedAction ?? ''}）。`
   }
   if (s.approval.status !== 'pending') return '该审批已办结，无需处理。'
-  if (s.sendStatus !== 'sent') return '该卡片未成功投递，无法在此处理。'
+  // outcome_unknown deliberately NOT here (PR #4046 Phase B): such a card MAY have been
+  // delivered, so while its instance is pending the server marks it actionable and this stale
+  // branch never renders; if it is non-actionable for another reason the generic 已流转 message
+  // below is the accurate one — not "未成功投递".
+  if (s.sendStatus === 'pending' || s.sendStatus === 'failed') return '该卡片未成功投递，无法在此处理。'
   return '该待办已流转（转办/新一轮），此卡片不再有效。'
 })
 
@@ -246,15 +250,27 @@ onMounted(load)
 }
 
 .card-decision__meta {
-  color: var(--el-text-color-secondary, #909399);
+  color: var(--el-text-color-secondary);
   font-size: 13px;
   margin: 2px 0;
+}
+
+/* UF-8: the card-delivery summary carries only the raw nodeKey (this page deliberately has no
+   template-store import — see cardDecision.ts — so there is no node name to resolve without a
+   new API call, out of scope for a presentation-only slice); honest <code> fallback names it as
+   a machine value instead of plain inline text (design-lock §3.5). */
+.card-decision__code {
+  font-family: monospace;
+  font-size: 12px;
+  background: var(--ms-bg-page);
+  padding: 1px 4px;
+  border-radius: var(--ms-radius-sm);
 }
 
 .card-decision__label {
   display: block;
   font-size: 13px;
-  color: var(--el-text-color-secondary, #909399);
+  color: var(--el-text-color-secondary);
   margin-bottom: 6px;
 }
 
@@ -264,7 +280,7 @@ onMounted(load)
   position: sticky;
   bottom: 0;
   padding: 8px 0 calc(8px + env(safe-area-inset-bottom));
-  background: var(--el-bg-color, #fff);
+  background: var(--el-bg-color);
 }
 
 .card-decision__actions .el-button {
@@ -273,7 +289,7 @@ onMounted(load)
 }
 
 .card-decision__hint {
-  color: var(--el-text-color-secondary, #909399);
+  color: var(--el-text-color-secondary);
   font-size: 12px;
   margin: 0;
 }

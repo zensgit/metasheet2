@@ -11,6 +11,9 @@ export function toDingTalkGroupDestinationResponse(
   const { secret: _secret, ...rest } = destination
   return {
     ...rest,
+    // DT-HARDEN-03 P3: an unreadable row's webhookUrl is the empty-string placeholder
+    // set in rowToDestination, never the raw `enc:` ciphertext — maskDingTalkWebhookUrl
+    // passes non-URL strings through verbatim, so masking alone would leak it.
     webhookUrl: maskDingTalkWebhookUrl(destination.webhookUrl),
     hasSecret: Boolean(destination.secret),
   }

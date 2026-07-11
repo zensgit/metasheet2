@@ -25,15 +25,11 @@
 
 ## W1 — 起草车道(W0 批次清空后启动;docs-only 零碰撞)
 
-- ⬜ **W1-1 formula freshness / live-reactive audit design-lock**(Fable 5,audit-first)
-  口径修正(2026-07-05,替代旧"grid 编辑触发公式重算"提法——该缺口已被超越):写路径 REST spine 的公式重算 **已存在**(`record-write-service.ts` Step 4c:物化回写 + 响应/实时补丁刷新),restore 亦经 canonical spine 触发重算(`univer-meta.ts:8880` 注释明确)。本项先 **audit** 界定剩余真缺口,再锁:
-  (a) on-save vs live-reactive(输入过程中的实时预览)的产品口径;
-  (b) **Yjs bridge 边界**——scalar CRDT flush 路径是否触发 Step 4c 或绕过;
-  (c) restore/PIT 各边缘路径的重算覆盖面;
-  (d) 跨记录/多跳传播深度(FOL fan-out 语义的跳数与失效边界)。
-  产出:audit 结论 + design-lock(若 audit 证明缺口不成立则如实关闭,不硬造 slice)。
-- ⬜ **W1-2 权限金矩阵主体 spec**(spec=Fable 5 → 套件生成=Sonnet 5)
-  Tier-B #5 主体(#3574 仅 slice 1):row×field×base×OAPI 组合矩阵 spec 先行;显式排除历史窗口正在点亮的 flag 面,避免 golden 追逐移动目标。
+- ✅ **W1-1 formula freshness / live-reactive audit design-lock** — 已交付(audit `multitable-formula-freshness-audit-20260705.md` + design-lock `multitable-formula-freshness-designlock-20260705.md`;`LOCK-F` F1/F3 已在 `index.ts` Yjs bridge 落地、F4 故意留桩 + golden GF9、N4/N5 doc-only 锁定)。
+  > 2026-07-07 独立 8-agent 代码级复审重导出同 4 条结论;唯一"新缺口"(recycle-bin undelete 无重算)**已被 N4 裁定**:undelete/reset 写入的是 PIT T-自洽物化值,**doc-only 锁定、不加重算**——再开"补算 slice"会**推翻已批 owner 决策**,故如实关闭,不建 slice。
+  口径存档(勿复用为待办):写路径 REST spine 重算 **已存在**(`record-write-service.ts` Step 4c);(a) on-save vs live-reactive = 产品口径(无半成品 live 路径)· (b) Yjs 同表重算 = 有(taint parity),跨表 fan-out = F4/GF9 故意留桩 · (c) restore 家族过 spine,唯 undelete 快照回放 = N4 doc-only · (d) 单跳边界 = C1 RFC + FOL-3 已锁。
+- ✅ **W1-2 权限金矩阵主体 spec** — 已交付(`multitable-w1-2-permission-matrix-spec-20260705.md`;row×field×base×OAPI 组合矩阵 + G-1…G-8 格子清单,§72-75)。Tier-B #5 主体(#3574 仅 slice 1)。
+- 🔒 **W1-2-B B1–B4 权限 golden 生成** — 已有 spec(§72-75:B1 侧门×写修饰符/B2 oracle 泄漏/B3 管理面 403 矩阵/B4 差分×评论),但**执行需 owner/coordination go,非"已解锁可执行"**(权限膜/L3-leaning)。前置三条:①**#3789 合并后**(池纪律"先清审后开新");②**real-DB CI 可观测**——goldens 硬依赖 `DATABASE_URL` + sentinel(无本地 DB 跑不动,现只有旧 `d3d1/d3d2` real-DB 功能 golden);③**历史窗口 flag-set 冻结**(spec 要求排除其正点亮的 flag 面,避免 golden 追移动目标)。**多为 green-pinning 权限回归 goldens,不默认要求 observed-RED**;若要 fail-first 需逐格人工选择判别器。解锁后 = Sonnet 5 套件生成。
 
 ## W2 — build 车道(各自 lock ratify 后解锁)
 
@@ -43,7 +39,7 @@
 
 ## W3 — 顺手批(单项 ≤半天;排在 W0 清空之后)
 
-- ⬜ **W3-5 batchId===null real-DB golden + FE batchId 消费**(commit toast → History Center 批次深链)— 前置 #3584 已合,**ready**;Sonnet 5。
+- 🔒 **W3-5 batchId===null real-DB golden + FE batchId 消费**(commit toast → History Center 批次深链)— **非"已解锁可执行"**(2026-07-07 取证):①**跨窗口面**——深链目标 `HistoryCenterModal.vue`/`useHistoryCenter.ts` 属历史/恢复窗口文件面(池边界"不进入其文件面"),且正被其 4c 系列活跃改动(#3812 open、#3807/#3809 刚落);②**无 clear-spec**——仅本行一句,深链接口(commit-toast 如何以 batchId 打开 History Center)未定义,非 L2 clear-spec;③real-DB golden(仅 `plugin-tests.yml` DATABASE_URL 步可观测,无本地 DB)。**解锁前置**:与历史窗口约定深链接口契约(design-lock)、其 4c 系列收敛、real-DB CI 可观测。前置 #3584 已合但非唯一门。Sonnet 5(解锁后)。
 - 🔒 **W3-6 仪表盘 B4 非图表 widgets 批** — 先核 goal-todo 台账 browser-gated 语义再解锁;Sonnet 5。
 
 ## 🔒 owner 决策区(不排队列,仅列示)

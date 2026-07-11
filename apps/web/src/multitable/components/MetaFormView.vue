@@ -341,7 +341,7 @@
           >
             {{ submitting ? l('form.saving') : (record ? l('form.save') : l('form.create')) }}
           </button>
-          <button v-if="record" type="button" class="meta-form-view__reset" @click="resetForm">{{ l('form.reset') }}</button>
+          <MtButton v-if="record" class="meta-form-view__reset" @click="resetForm">{{ l('form.reset') }}</MtButton>
         </div>
       </form>
     </template>
@@ -407,6 +407,7 @@ import {
 import { isSystemField } from '../utils/system-fields'
 import { isFieldConditionallyRequired, isFieldVisible } from '../utils/field-visibility'
 import { resolveFormPages } from '../utils/form-layout'
+import { MtButton } from '../ui'
 
 const props = defineProps<{
   fields: MetaField[]
@@ -964,15 +965,28 @@ function isSameFormValue(left: unknown, right: unknown): boolean {
 .meta-form-view__page-indicator { font-size: 12px; color: #94a3b8; white-space: nowrap; }
 .meta-form-view__page-description { margin: 0 0 16px; font-size: 13px; color: #64748b; }
 .meta-form-view__actions { display: flex; gap: 8px; margin-top: 16px; }
+/* .meta-form-view__nav / __nav--next: left bespoke (UI-P2-1c batch7 scope decision). Both share the
+   base `.meta-form-view__nav` class (shared-class rule: all sharers migrate together or the group
+   defers), and __nav--next is a soft-tinted variant (#ecf5ff bg / #409eff border+text) with no clean
+   MtButton mapping — primary(filled)/ghost(borderless) are both a visible, subjective change, same
+   deferred category as the soft-tinted `create` buttons in MetaGalleryView/Kanban/Timeline (see
+   multitable-ui-p2-1c-completion-verification-20260707.md §3). Migrating __nav alone (dropping the
+   shared class) would leave prev/next visually inconsistent within the same actions row, so the pair
+   stays bespoke pending an owner-decided soft variant. */
 .meta-form-view__nav { padding: 8px 18px; border: 1px solid #cbd5e1; border-radius: 4px; background: #fff; font-size: 13px; cursor: pointer; color: #334155; }
 .meta-form-view__nav:hover { background: #f1f5f9; }
 .meta-form-view__nav--next { border-color: #409eff; color: #409eff; background: #ecf5ff; }
 .meta-form-view__nav--next:hover { background: #d9ecff; }
+/* .meta-form-view__submit: left bespoke — `type="submit"` (relies on native form submission via
+   @submit.prevent="onSubmit" on the <form>); MtButton always renders `type="button"`, so swapping it
+   in would NOT be byte-equivalent (native browser submit semantics — e.g. Enter-key-triggered submit
+   from a focused text input — would silently stop working). Out of scope by design (UI-P2-1c batch7). */
 .meta-form-view__submit { padding: 8px 24px; background: #409eff; color: #fff; border: none; border-radius: 4px; font-size: 14px; cursor: pointer; }
 .meta-form-view__submit:hover:not(:disabled) { background: #66b1ff; }
 .meta-form-view__submit:disabled { opacity: 0.6; cursor: not-allowed; }
-.meta-form-view__reset { padding: 8px 16px; border: 1px solid #ddd; border-radius: 4px; background: #fff; font-size: 13px; cursor: pointer; color: #666; }
-.meta-form-view__reset:hover { background: #f5f7fa; }
+/* .meta-form-view__reset: the Reset control is now <MtButton> (ghost, token-styled) — UI-P2-1c batch7.
+   Its bespoke hex CSS was removed to avoid double-styling the MtButton root; class kept for selector
+   stability (no test currently selects it, but existing multitable-form-view.spec.ts does). */
 .meta-form-view__rating { display: inline-flex; gap: 2px; align-items: center; }
 .meta-form-view__rating-star {
   border: none; background: none; padding: 0 1px; cursor: pointer;

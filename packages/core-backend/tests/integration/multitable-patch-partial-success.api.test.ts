@@ -128,6 +128,12 @@ describe('Multitable POST /patch partialSuccess', () => {
     expect(patchRecordsMock).toHaveBeenCalledTimes(2)
     expect([...patchRecordsMock.mock.calls[0][0].changesByRecord.keys()]).toEqual(['rec_ok'])
     expect([...patchRecordsMock.mock.calls[1][0].changesByRecord.keys()]).toEqual(['rec_stale'])
+    // LOCK-12: both per-record patchRecords calls in this loop must share ONE server-minted batchId, so
+    // a single bulk /patch request (even one with a per-record failure) lands in one History Center batch.
+    const batchIdOk = patchRecordsMock.mock.calls[0][0].batchId
+    const batchIdStale = patchRecordsMock.mock.calls[1][0].batchId
+    expect(batchIdOk).toBeTruthy()
+    expect(batchIdStale).toBe(batchIdOk)
   })
 
   test('preserves all-or-nothing mode when partialSuccess is not requested', async () => {

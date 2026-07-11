@@ -24,13 +24,30 @@
             }}
           </p>
         </div>
-        <div v-if="showOverview" class="attendance__actions">
-          <button class="attendance__btn attendance__btn--primary" :disabled="punching" @click="punch('check_in')">
-            {{ punching ? tr('Working...', '处理中...') : tr('Check In', '上班打卡') }}
-          </button>
-          <button class="attendance__btn" :disabled="punching" @click="punch('check_out')">
-            {{ punching ? tr('Working...', '处理中...') : tr('Check Out', '下班打卡') }}
-          </button>
+        <div v-if="showOverview" class="attendance__hero-punch" data-testid="attendance-hero-punch">
+          <div class="attendance__hero-clock">
+            <span class="attendance__hero-time" data-testid="attendance-hero-time">{{ heroClockTime }}</span>
+            <span class="attendance__hero-date">{{ heroClockDate }}</span>
+          </div>
+          <div class="attendance__actions attendance__hero-actions">
+            <button class="attendance__btn attendance__btn--primary attendance__btn--hero" :disabled="punching" @click="punch('check_in')">
+              {{ punching ? tr('Working...', '处理中...') : tr('Check In', '上班打卡') }}
+            </button>
+            <button class="attendance__btn attendance__btn--hero-secondary" :disabled="punching" @click="punch('check_out')">
+              {{ punching ? tr('Working...', '处理中...') : tr('Check Out', '下班打卡') }}
+            </button>
+          </div>
+          <div v-if="heroTodayTimeline" class="attendance__hero-timeline" data-testid="attendance-hero-timeline">
+            <span class="attendance__hero-timeline-node" :class="{ 'attendance__hero-timeline-node--pending': !heroTodayTimeline.checkIn }">
+              <span class="attendance__hero-timeline-dot" />
+              {{ tr('In', '上班') }} {{ heroTodayTimeline.checkIn ?? '--:--' }}
+            </span>
+            <span class="attendance__hero-timeline-rail" />
+            <span class="attendance__hero-timeline-node" :class="{ 'attendance__hero-timeline-node--pending': !heroTodayTimeline.checkOut }">
+              <span class="attendance__hero-timeline-dot" />
+              {{ tr('Out', '下班') }} {{ heroTodayTimeline.checkOut ?? '--:--' }}
+            </span>
+          </div>
         </div>
         <div v-else class="attendance__chip-list attendance__chip-list--header">
           <span class="attendance__status-chip">
@@ -159,22 +176,26 @@
           <p class="attendance__selfservice-lead">
             {{ activeWorkbenchStatusDescription }}
           </p>
-          <div class="attendance__summary attendance__summary--workbench">
-            <div class="attendance__summary-item">
+          <div class="attendance__summary attendance__summary--workbench attendance__summary--stat">
+            <div class="attendance__summary-item attendance__summary-item--stat">
+              <svg class="attendance__summary-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="9" /><path d="M12 7v5l3 2" /></svg>
               <span>{{ tr('Latest punch', '最近一次打卡') }}</span>
-              <strong>{{ activeWorkbenchLatestPunchLabel }}</strong>
+              <strong class="attendance__summary-value">{{ activeWorkbenchLatestPunchLabel }}</strong>
             </div>
-            <div class="attendance__summary-item">
+            <div class="attendance__summary-item attendance__summary-item--stat">
+              <svg class="attendance__summary-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M10 2h4M12 2v4" /><circle cx="12" cy="14" r="7" /><path d="M12 14l2.5-2.5" /></svg>
               <span>{{ tr('Work minutes', '工时分钟') }}</span>
-              <strong>{{ activeWorkbenchRecord?.work_minutes ?? 0 }}</strong>
+              <strong class="attendance__summary-value">{{ activeWorkbenchRecord?.work_minutes ?? 0 }}</strong>
             </div>
-            <div class="attendance__summary-item">
+            <div class="attendance__summary-item attendance__summary-item--stat">
+              <svg class="attendance__summary-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M12 3l10 18H2z" /><path d="M12 10v5M12 18.5v.5" /></svg>
               <span>{{ tr('Late / Early', '迟到 / 早退') }}</span>
-              <strong>{{ activeWorkbenchLateEarlyLabel }}</strong>
+              <strong class="attendance__summary-value" :class="{ 'attendance__summary-value--warning': activeWorkbenchHasLateEarly }">{{ activeWorkbenchLateEarlyLabel }}</strong>
             </div>
-            <div class="attendance__summary-item">
+            <div class="attendance__summary-item attendance__summary-item--stat">
+              <svg class="attendance__summary-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M8 6h13M8 12h13M8 18h13" /><path d="M3 6h.01M3 12h.01M3 18h.01" /></svg>
               <span>{{ tr('Attention items', '需处理事项') }}</span>
-              <strong>{{ activeWorkbenchAttentionCount }}</strong>
+              <strong class="attendance__summary-value" :class="{ 'attendance__summary-value--danger': activeWorkbenchAttentionCount > 0 }">{{ activeWorkbenchAttentionCount }}</strong>
             </div>
           </div>
           <p class="attendance__field-hint attendance__field-hint--strong">
@@ -1362,6 +1383,9 @@
             </label>
             <button class="attendance__btn" :disabled="exporting || loading || reportsExportBlocked" @click="exportCsv">
               {{ exporting ? tr('Exporting...', '导出中...') : tr('Export CSV', '导出 CSV') }}
+            </button>
+            <button class="attendance__btn" data-testid="attendance-export-xlsx" :disabled="exportingXlsx || loading || reportsExportBlocked" @click="exportXlsx">
+              {{ exportingXlsx ? tr('Exporting...', '导出中...') : tr('Export Excel', '导出 Excel') }}
             </button>
           </div>
         </div>
@@ -3001,6 +3025,9 @@
                     data-overtime-bank="cap"
                     :placeholder="tr('0 = no cap', '0＝不限')"
                   />
+                  <small class="attendance__field-hint" data-overtime-bank-hint="cap">
+                    {{ tr('Caps the comp-time banked from overtime per calendar month. An approval that would push the month past this cap is blocked. 0 = no cap.', '限制每自然月由加班转入调休池的额度上限。若某次审批会使当月超过该上限，则阻断该审批。0＝不限。') }}
+                  </small>
                 </label>
                 <label class="attendance__field" for="attendance-overtime-bank-validity">
                   <span>{{ tr('Lot validity (days, empty = no expiry)', '额度有效期（天，留空＝不过期）') }}</span>
@@ -3013,6 +3040,9 @@
                     data-overtime-bank="validity"
                     :placeholder="tr('Empty = no expiry', '留空＝不过期')"
                   />
+                  <small class="attendance__field-hint" data-overtime-bank-hint="validity">
+                    {{ tr('Applies to banked (source-tagged) lots; overrides the comp-time conversion validity. Empty = fall back to it.', '作用于加班银行的分源额度，覆盖调休转换的有效期；留空则回落到该有效期。') }}
+                  </small>
                 </label>
                 <button
                   class="attendance__btn attendance__btn--primary"
@@ -3162,6 +3192,18 @@
                     data-outdoor="require-note"
                   />
                 </label>
+                <label class="attendance__field attendance__field--checkbox" for="attendance-outdoor-require-photo">
+                  <span>{{ tr('Require a photo on the outdoor punch', '外勤打卡需上传照片证据') }}</span>
+                  <input
+                    id="attendance-outdoor-require-photo"
+                    v-model="outdoorForm.requirePhoto"
+                    type="checkbox"
+                    data-outdoor="require-photo"
+                  />
+                </label>
+                <p class="attendance__field-hint">
+                  {{ tr('Requires a photo-evidence upload attached to the outdoor punch; only takes effect for punch clients that submit a location or outdoor marker.', '要求外勤打卡附照片证据；对携带定位/外勤标记的打卡端生效。') }}
+                </p>
                 <label class="attendance__field" for="attendance-outdoor-flow">
                   <span>{{ tr('Approval flow', '审批流程') }}</span>
                   <select
@@ -5832,11 +5874,14 @@
                   <button class="attendance__btn" :disabled="importLoading" @click="loadImportTemplate">
                     {{ importLoading ? tr('Loading...', '加载中...') : tr('Load template', '加载模板') }}
                   </button>
-                  <button class="attendance__btn" :disabled="importLoading || !importTemplateGuide" @click="downloadImportTemplateCsv">
+                  <button class="attendance__btn" :disabled="importLoading" @click="downloadImportTemplateCsv">
                     {{ tr('Download CSV template', '下载 CSV 模板') }}
                   </button>
                 </div>
               </div>
+              <small v-if="!importTemplateGuide" class="attendance__field-hint attendance__import-template-hint">
+                {{ tr('Click "Load template" to pick fields and generate an import template.', '点击「加载模板」可勾选字段生成导入模板。') }}
+              </small>
               <div v-if="importTemplateGuide" class="attendance__template-guide">
                 <div class="attendance__template-guide-header">
                   <strong>{{ tr('Template guide', '模板说明') }}</strong>
@@ -5925,6 +5970,78 @@
                       </tbody>
                     </table>
                   </div>
+                  <div v-if="importFieldGroups.length" class="attendance__template-guide-card attendance__template-guide-card--full attendance__field-picker" data-testid="attendance-import-field-picker">
+                    <div class="attendance__template-guide-title">{{ tr('Pick fields to generate a template', '选择字段，生成导入模板') }}</div>
+                    <div class="attendance__field-picker-groups">
+                      <div v-for="group in importFieldGroups" :key="group.key" class="attendance__field-picker-group">
+                        <div class="attendance__field-picker-group-label">{{ tr(group.labelEn, group.labelZh) }}</div>
+                        <div class="attendance__field-picker-options">
+                          <label
+                            v-for="option in group.options"
+                            :key="option.key"
+                            class="attendance__field-picker-option"
+                            :title="tr(option.meaningEn, option.meaningZh)"
+                          >
+                            <input
+                              type="checkbox"
+                              :checked="importTemplateFieldKeys.has(option.key)"
+                              @change="toggleImportTemplateField(option.key)"
+                            />
+                            <span>{{ option.columnName }}</span>
+                          </label>
+                        </div>
+                      </div>
+                    </div>
+                    <div class="attendance__field-picker-preview">
+                      <span>{{ tr('Header preview (required columns locked)', '表头预览（必填列已锁定）') }}:</span>
+                      <code data-testid="attendance-import-header-preview">{{ importTemplateHeaderPreview.join(',') }}</code>
+                    </div>
+                    <div class="attendance__admin-actions">
+                      <button class="attendance__btn" type="button" @click="downloadImportSelectedTemplateCsv">
+                        {{ tr('Download template (selected fields)', '下载模板（所选列）') }}
+                      </button>
+                      <button class="attendance__btn" type="button" @click="copyImportTemplateHeader">
+                        {{ tr('Copy header', '复制表头') }}
+                      </button>
+                      <button class="attendance__btn" type="button" @click="selectAllImportTemplateFields">
+                        {{ tr('Select all', '全选') }}
+                      </button>
+                      <button class="attendance__btn" type="button" @click="resetImportTemplateFields">
+                        {{ tr('Reset to default', '恢复默认') }}
+                      </button>
+                    </div>
+                  </div>
+                  <div v-if="importFieldGroups.length" class="attendance__template-guide-card attendance__template-guide-card--full attendance__column-formats" data-testid="attendance-import-column-formats">
+                    <div class="attendance__template-guide-title">{{ tr('Column formats', '列格式说明') }}</div>
+                    <small class="attendance__field-hint">{{ tr('Each column: whether it is required, the accepted format, and an example.', '每列：是否必填、可接受的格式、以及示例。') }}</small>
+                    <div class="attendance__column-formats-scroll">
+                      <table class="attendance__template-table attendance__column-formats-table">
+                        <thead>
+                          <tr>
+                            <th>{{ tr('Column', '列名') }}</th>
+                            <th>{{ tr('Required', '必填') }}</th>
+                            <th>{{ tr('Format', '格式') }}</th>
+                            <th>{{ tr('Example', '示例') }}</th>
+                            <th>{{ tr('Notes', '说明') }}</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          <tr v-for="row in importColumnFormatRows" :key="row.column">
+                            <td><code>{{ row.column }}</code></td>
+                            <td>
+                              <span
+                                class="attendance__column-formats-badge"
+                                :class="`attendance__column-formats-badge--${row.requirement}`"
+                              >{{ importColumnRequirementLabel(row.requirement) }}</span>
+                            </td>
+                            <td>{{ tr(row.formatEn, row.formatZh) }}</td>
+                            <td><code>{{ row.example }}</code></td>
+                            <td>{{ tr(row.meaningEn, row.meaningZh) }}</td>
+                          </tr>
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
                 </div>
               </div>
               <div class="attendance__admin-grid">
@@ -5977,11 +6094,69 @@
                   <input
                     id="attendance-import-csv"
                     type="file"
-                    accept=".csv,text/csv"
+                    accept=".csv,.xlsx,text/csv"
                     @change="handleImportCsvChange"
                   />
                   <small v-if="importCsvFileName" class="attendance__field-hint">{{ tr('Selected', '已选择') }}: {{ importCsvFileName }}</small>
+                  <small v-if="importCsvConvertedSheetName" class="attendance__field-hint" data-testid="attendance-import-converted-hint">
+                    {{ tr('Converted from Excel — sheet', '已从 Excel 转换——工作表') }}: {{ importCsvConvertedSheetName }}
+                  </small>
                 </label>
+                <div
+                  v-if="importCsvRecognition"
+                  class="attendance__field attendance__field--full attendance__import-recognition"
+                  data-testid="attendance-import-recognition"
+                >
+                  <div
+                    v-if="importCsvRecognition.missingDate || importCsvRecognition.missingContext"
+                    class="attendance__import-recognition-warning"
+                    data-testid="attendance-import-recognition-warning"
+                  >
+                    <template v-if="importCsvRecognition.missingDate">
+                      {{ tr('No date column found (e.g. 日期) — the import will be rejected. ', '未找到日期列（如「日期」）——导入将被拒绝。') }}
+                    </template>
+                    <template v-if="importCsvRecognition.missingContext">
+                      {{ tr('No people/attendance column found (e.g. 姓名/工号) — add one before importing. ', '未找到人员/考勤列（如「姓名/工号」）——请补充后再导入。') }}
+                    </template>
+                  </div>
+                  <div v-if="importCsvRecognition.recognized.length" class="attendance__import-recognition-row">
+                    <span class="attendance__import-recognition-label">{{ tr('Recognized', '已识别') }} ({{ importCsvRecognition.recognized.length }}):</span>
+                    <span
+                      v-for="item in importCsvRecognition.recognized"
+                      :key="`rec-${item.column}`"
+                      class="attendance__import-recognition-chip attendance__import-recognition-chip--ok"
+                      :title="item.viaVocabulary
+                        ? tr('Imports as a record field', '将作为记录字段导入')
+                        : tr('Used for header detection / user matching', '用于表头识别/人员匹配')"
+                    >{{ item.column }}</span>
+                  </div>
+                  <div v-if="importCsvRecognition.unknown.length" class="attendance__import-recognition-row">
+                    <span class="attendance__import-recognition-label">{{ tr('Ignored (still usable by rules)', '将忽略（仍可用于规则匹配）') }} ({{ importCsvRecognition.unknown.length }}):</span>
+                    <span
+                      v-for="column in importCsvRecognition.unknown"
+                      :key="`unk-${column}`"
+                      class="attendance__import-recognition-chip"
+                      :title="tr('Not imported as a field; visible to rule matching', '不作为字段导入；规则匹配可见')"
+                    >{{ column }}</span>
+                  </div>
+                </div>
+              </div>
+              <div class="attendance__import-advanced-toggle">
+                <button
+                  class="attendance__btn"
+                  type="button"
+                  data-testid="attendance-import-advanced-toggle"
+                  :aria-expanded="importAdvancedOpen ? 'true' : 'false'"
+                  @click="importAdvancedOpen = !importAdvancedOpen"
+                >
+                  {{ importAdvancedOpen ? tr('Hide advanced options', '收起高级选项') : tr('Advanced options', '高级选项') }}
+                  <span v-if="importAdvancedActiveCount > 0" class="attendance__import-advanced-badge">{{ importAdvancedActiveCount }}</span>
+                </button>
+                <small v-if="!importAdvancedOpen" class="attendance__field-hint">
+                  {{ tr('Header row, delimiter, user map, grouping, payload JSON.', '表头行、分隔符、用户映射、分组、负载 JSON。') }}
+                </small>
+              </div>
+              <div v-show="importAdvancedOpen" class="attendance__admin-grid attendance__import-advanced" data-testid="attendance-import-advanced">
                 <label class="attendance__field" for="attendance-import-csv-header">
                   <span>{{ tr('CSV header row', 'CSV 表头行') }}</span>
                   <input
@@ -7074,6 +7249,20 @@
                   <input type="checkbox" v-model="annualPolicyForm.carryoverEnabled" />
                 </label>
               </div>
+              <div class="attendance__admin-subsection" data-admin-card="annual-leave-scheduled-trigger">
+                <p class="attendance__field-hint">
+                  {{ tr('When on, the accrual engine runs automatically once a month per org (in addition to the manual run below) — no admin click required. Off (default) = accrual only ever runs when an admin manually triggers it.', '开启后，计提引擎每月为每个组织自动运行一次（在下方手工运行之外）——无需管理员点击。关闭（默认）＝计提仅在管理员手工触发时运行。') }}
+                </p>
+                <label class="attendance__field attendance__field--checkbox" for="attendance-annual-policy-scheduled-trigger">
+                  <span>{{ tr('Auto-run accrual monthly (scheduler)', '每月自动运行计提（调度器）') }}</span>
+                  <input
+                    id="attendance-annual-policy-scheduled-trigger"
+                    v-model="annualPolicyForm.scheduledTriggerEnabled"
+                    type="checkbox"
+                    data-annual-policy="scheduled-trigger"
+                  />
+                </label>
+              </div>
               <h5>{{ tr('Tier ladder (cumulative years → days)', '工龄阶梯 (累计工龄 → 天数)') }}</h5>
               <div class="attendance__table-wrapper">
                 <table class="attendance__table">
@@ -7135,6 +7324,127 @@
                   <span v-else-if="annualAdjustResult.alreadyApplied">↻ {{ tr('Already applied (no change)', '已应用(无变化)') }}</span>
                   <span>{{ tr('Delta', '变动') }}: {{ annualAdjustResult.delta }} {{ tr('min', '分钟') }}</span>
                   <span>{{ tr('Adjustment id', '调整 id') }}: {{ annualAdjustResult.id }}</span>
+                </div>
+              </div>
+
+              <div class="attendance__admin-subsection" data-annual-ops-card="bulk-adjust">
+                <h5>{{ tr('Bulk manual adjustment', '批量手工调整') }}</h5>
+                <p class="attendance__field-hint">
+                  {{ tr(
+                    'Pick one or more users; they share the same delta and reason, but each is written as an independent, individually-audited adjustment.',
+                    '选择一个或多个用户；它们共享相同的变动量和原因，但每个用户都作为独立的、可单独审计的调整写入。',
+                  ) }}
+                </p>
+                <div class="attendance__admin-grid">
+                  <AttendanceUserPickerField
+                    v-model="annualBulkAdjustUserPickerValue"
+                    :tr="tr"
+                    :label="tr('Add user', '添加用户')"
+                    name="annualBulkAdjustUserPicker"
+                    :help-text="tr('Search and pick a user, then click Add.', '搜索并选择用户，然后点击添加。')"
+                    :search-placeholder="tr('Search users for bulk adjustment', '搜索批量调整用户')"
+                    :full-width="false"
+                    input-id="attendance-annual-bulk-adjust-user-picker"
+                  />
+                  <div class="attendance__field">
+                    <span>&nbsp;</span>
+                    <button
+                      class="attendance__btn"
+                      type="button"
+                      data-attendance-annual-bulk-adjust-add-user
+                      @click="addAnnualBulkAdjustUser"
+                    >
+                      {{ tr('Add to targets', '添加到目标') }}
+                    </button>
+                  </div>
+                  <label class="attendance__field"><span>{{ tr('Delta (minutes, ±, shared)', '变动(分钟,±,共享)') }}</span><input v-model.number="annualBulkAdjustForm.deltaMinutes" type="number" data-attendance-annual-bulk-adjust-delta /></label>
+                  <label class="attendance__field"><span>{{ tr('Reason (shared)', '原因(共享)') }}</span><input v-model="annualBulkAdjustForm.reason" type="text" maxlength="500" data-attendance-annual-bulk-adjust-reason /></label>
+                </div>
+                <div
+                  v-if="annualBulkAdjustUserIds.length > 0"
+                  class="attendance__bulk-apply-user-chips"
+                  data-attendance-annual-bulk-adjust-user-chips
+                >
+                  <span
+                    v-for="userId in annualBulkAdjustUserIds"
+                    :key="userId"
+                    class="attendance__scheduler-scope-chip"
+                    data-attendance-annual-bulk-adjust-user-chip
+                  >
+                    {{ userId }}
+                    <button
+                      class="attendance__btn attendance__btn--inline"
+                      type="button"
+                      :aria-label="tr(`Remove ${userId}`, `移除 ${userId}`)"
+                      @click="removeAnnualBulkAdjustUser(userId)"
+                    >
+                      &times;
+                    </button>
+                  </span>
+                </div>
+                <span class="attendance__field-hint" data-attendance-annual-bulk-adjust-selected-count>
+                  {{ tr(`Selected users: ${annualBulkAdjustUserIds.length} / ${BULK_BALANCE_ADJUST_MAX_USERS}`, `已选用户：${annualBulkAdjustUserIds.length} / ${BULK_BALANCE_ADJUST_MAX_USERS}`) }}
+                </span>
+                <div class="attendance__admin-actions">
+                  <button
+                    class="attendance__btn attendance__btn--primary"
+                    :disabled="Boolean(annualBulkAdjustSubmitDisabledReason)"
+                    :title="annualBulkAdjustSubmitDisabledReason || undefined"
+                    data-attendance-annual-bulk-adjust-request
+                    type="button"
+                    @click="requestAnnualBulkAdjust"
+                  >
+                    {{ tr('Bulk adjust balance', '批量调整余额') }}
+                  </button>
+                  <small
+                    v-if="annualBulkAdjustSubmitDisabledReason"
+                    class="attendance__field-hint"
+                    data-attendance-annual-bulk-adjust-disabled-reason
+                  >
+                    {{ annualBulkAdjustSubmitDisabledReason }}
+                  </small>
+                </div>
+                <p v-if="annualBulkAdjustError" class="attendance__error" data-attendance-annual-bulk-adjust-error>{{ annualBulkAdjustError }}</p>
+                <div v-if="annualBulkAdjustHasResults" class="attendance__annual-ops-result" data-attendance-annual-bulk-adjust-results>
+                  <span data-attendance-annual-bulk-adjust-summary>
+                    {{ tr(`${annualBulkAdjustAppliedCount} applied, ${annualBulkAdjustFailedCount} failed`, `${annualBulkAdjustAppliedCount} 成功，${annualBulkAdjustFailedCount} 失败`) }}
+                  </span>
+                  <table class="attendance__table">
+                    <thead><tr><th>{{ tr('User', '用户') }}</th><th>{{ tr('Result', '结果') }}</th></tr></thead>
+                    <tbody>
+                      <tr v-for="userId in annualBulkAdjustUserIds" :key="userId">
+                        <td>{{ userId }}</td>
+                        <td>
+                          <span
+                            v-if="annualBulkAdjust.results[userId]"
+                            class="attendance__status-chip"
+                            :data-attendance-annual-bulk-adjust-row-state="annualBulkAdjust.results[userId]?.state"
+                            :data-attendance-annual-bulk-adjust-row-error-kind="annualBulkAdjust.results[userId]?.errorKind"
+                          >
+                            {{ annualBulkAdjustRowResultText(userId) }}
+                          </span>
+                        </td>
+                      </tr>
+                    </tbody>
+                  </table>
+                  <p
+                    v-if="annualBulkAdjustOutcome === 'completed_with_errors'"
+                    class="attendance__error"
+                    data-attendance-annual-bulk-adjust-outcome-error
+                  >
+                    {{ tr('Some users failed. Retry the failed users, or start a new batch.', '部分用户失败。请重试失败用户，或开始新一批。') }}
+                  </p>
+                  <div class="attendance__admin-actions">
+                    <button
+                      class="attendance__btn"
+                      type="button"
+                      :disabled="annualBulkAdjust.submitting || annualBulkAdjustOutcome !== 'completed_with_errors'"
+                      data-attendance-annual-bulk-adjust-retry
+                      @click="retryAnnualBulkAdjust"
+                    >
+                      {{ annualBulkAdjust.submitting ? tr('Submitting...', '提交中...') : tr('Retry failed users', '重试失败用户') }}
+                    </button>
+                  </div>
                 </div>
               </div>
 
@@ -7343,12 +7653,7 @@
                 <label class="attendance__field" for="attendance-approval-type">
                   <span>{{ tr('Request type', '申请类型') }}</span>
                   <select id="attendance-approval-type" name="approvalType" v-model="approvalFlowForm.requestType">
-                    <option value="missed_check_in">{{ tr('Missed check-in', '漏打上班卡') }}</option>
-                    <option value="missed_check_out">{{ tr('Missed check-out', '漏打下班卡') }}</option>
-                    <option value="time_correction">{{ tr('Time correction', '时间更正') }}</option>
-                    <option value="leave">{{ tr('Leave', '请假') }}</option>
-                    <option value="overtime">{{ tr('Overtime', '加班') }}</option>
-                    <option value="shift_swap">{{ tr('Shift swap', '换班') }}</option>
+                    <option v-for="type in approvalFlowRequestTypeOptions" :key="type" :value="type">{{ formatRequestType(type) }}</option>
                   </select>
                 </label>
                 <label class="attendance__field attendance__field--checkbox" for="attendance-approval-active">
@@ -7360,16 +7665,18 @@
                     type="checkbox"
                   />
                 </label>
-                <label class="attendance__field attendance__field--full" for="attendance-approval-steps">
-                  <span>{{ tr('Steps (JSON)', '步骤（JSON）') }}</span>
-                  <textarea
-                    id="attendance-approval-steps"
-                    name="approvalSteps"
-                    v-model="approvalFlowForm.steps"
-                    rows="3"
-                    placeholder='[{"name":"Manager","approverRoleIds":["manager"]}]'
-                  />
-                </label>
+                <div class="attendance__field attendance__field--full">
+                  <span>{{ tr('Approval steps', '审批步骤') }}</span>
+                  <AttendanceApprovalFlowStepsEditor v-model="approvalFlowSteps" :tr="tr" />
+                  <p v-for="(warn, i) in approvalFlowStepWarnings" :key="i" class="attendance__hint attendance__hint--warning" data-testid="attendance-approval-flow-warning">
+                    <template v-if="warn.code === 'no_steps'">{{ tr('No steps configured — requests of this type may auto-pass.', '未配置任何步骤——该类型申请可能自动通过。') }}</template>
+                    <template v-else>{{ tr(`Step ${(warn.stepIndex ?? 0) + 1} has no approver.`, `第 ${(warn.stepIndex ?? 0) + 1} 级未配置审批人。`) }}</template>
+                  </p>
+                  <details class="attendance__approval-preview" data-testid="attendance-approval-steps-preview">
+                    <summary>{{ tr('Preview steps JSON (what will be saved)', '预览步骤 JSON（即将保存的内容）') }}</summary>
+                    <pre><code>{{ approvalFlowStepsPreview }}</code></pre>
+                  </details>
+                </div>
               </div>
               <div class="attendance__admin-actions">
                 <button
@@ -9604,7 +9911,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, onMounted, reactive, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import AttendanceAdminRail from './attendance/AttendanceAdminRail.vue'
 import AttendanceCalendarPolicyQuickAdd from './attendance/AttendanceCalendarPolicyQuickAdd.vue'
 import AttendanceCalendarPolicyPreviewPanel from './attendance/AttendanceCalendarPolicyPreviewPanel.vue'
@@ -9612,6 +9919,15 @@ import AttendanceImportBatchesSection from './attendance/AttendanceImportBatches
 import AttendanceTeamAvailabilitySection from './attendance/AttendanceTeamAvailabilitySection.vue'
 import AttendanceHolidayDataSection from './attendance/AttendanceHolidayDataSection.vue'
 import AttendanceUserPickerField from './attendance/AttendanceUserPickerField.vue'
+import AttendanceApprovalFlowStepsEditor from './attendance/AttendanceApprovalFlowStepsEditor.vue'
+import {
+  ATTENDANCE_APPROVAL_REQUEST_TYPES,
+  collectAuthoringWarnings,
+  normalizeSteps as normalizeApprovalSteps,
+  stepsPreviewJson,
+  toPayloadSteps as toApprovalPayloadSteps,
+  type AttendanceApprovalStep as AttendanceApprovalStepModel,
+} from './attendance/attendanceApprovalSteps'
 import AttendanceReportFieldsSection from './attendance/AttendanceReportFieldsSection.vue'
 import {
   buildCalendarPolicyOverrideDiagnostics,
@@ -9638,6 +9954,34 @@ import {
   type ImportOverrideConfirmLine,
   type ImportPreviewRangeSummary,
 } from './attendance/importOverrideGuard'
+import {
+  blockedSpreadsheetMessage,
+  detectSpreadsheetByName,
+  inspectImportFile,
+} from './attendance/importFileGuard'
+import {
+  IMPORT_TEMPLATE_DEFAULT_SELECTED_KEYS,
+  allSelectableImportFieldKeys,
+  buildImportColumnFormatRows,
+  buildTemplateExampleRow,
+  buildTemplateHeaderFromSelection,
+  groupSupportedImportColumns,
+  type AttendanceImportColumnRequirement,
+  type AttendanceImportMappingColumnLike,
+} from './attendance/importTemplateColumns'
+import { withCsvBom } from './attendance/csvExport'
+import { REPORT_XLSX_MIME, csvTextToXlsxArrayBuffer, xlsxFilenameFromCsv } from './attendance/reportXlsxExport'
+import {
+  parseCsvHeaderFromText,
+  readBlobHeadText,
+  recognizeImportHeader,
+  type AttendanceImportHeaderRecognition,
+} from './attendance/importHeaderRecognition'
+import {
+  convertXlsxFileToCsvText,
+  isDirectConvertibleXlsxName,
+  xlsxConvertFailureMessage,
+} from './attendance/importXlsxConvert'
 import { resolveMakeupPunchRequestStatusCopy } from './attendance/makeupPunchRequestStatus'
 import {
   buildPunchRetryWithNotePayload,
@@ -9668,6 +10012,17 @@ import {
   type BatchAnomalyRowResult,
   type BatchAnomalyRowSnapshot,
 } from './attendance/batchAnomalyResolution'
+import {
+  BULK_BALANCE_ADJUST_MAX_USERS,
+  bulkBalanceAdjustErrorText,
+  buildBulkBalanceAdjustRows,
+  canRunBulkBalanceAdjust,
+  runBulkBalanceAdjust,
+  summarizeBulkBalanceAdjustOutcome,
+  type BulkBalanceAdjustRowResult,
+  type BulkBalanceAdjustRowSnapshot,
+  type BulkBalanceAdjustSubmitOutcome,
+} from './attendance/bulkBalanceAdjust'
 import {
   buildRuleSetPreviewRecommendations,
   summarizeRuleSetPreviewResult,
@@ -10341,7 +10696,9 @@ interface AttendanceSettings {
     }
   }
   // ② S3 punch-policy outdoor approval (backend #2308). Frontend type only — the admin card reads/writes
-  // these via PUT { punchPolicy: { outdoor: ... } }. requirePhoto stays latent (no UI in S3-2).
+  // these via PUT { punchPolicy: { outdoor: ... } }. requirePhoto is wired (S2 outdoor-punch-photo
+  // design-lock, 2026-07-10): it takes effect only on punch clients that submit a location or an
+  // outdoor marker (the web hero-punch flow does neither — see punchOutcome.ts / UI-P0 #3806 §4).
   punchPolicy?: {
     outdoor?: {
       requireApproval?: boolean
@@ -10365,6 +10722,9 @@ interface AttendanceSettings {
     tiers?: Array<{ minYears?: number; maxYears?: number | null; days?: number }>
     carryover?: { enabled?: boolean }
     timezone?: string | null
+    // S3 scheduler trigger (design-lock attendance-annual-leave-accrual-scheduler-s3-design-lock-20260710).
+    // The admin card reads/writes this via the SAME PUT { annualLeavePolicy: ... } payload.
+    scheduledTrigger?: { enabled?: boolean }
   }
 }
 
@@ -11241,6 +11601,29 @@ function readImportDebugOptions(): AttendanceImportDebugOptions {
 
 const loading = ref(false)
 const punching = ref(false)
+
+// UI-P0′ hero punch card (attendance-ui-p0-hero-punch design-lock): live
+// clock, display-only — punch handlers/copy/classes above are untouched.
+const heroClockNow = ref(new Date())
+let heroClockTimer: ReturnType<typeof setInterval> | null = null
+onMounted(() => {
+  heroClockTimer = setInterval(() => { heroClockNow.value = new Date() }, 1000)
+})
+onUnmounted(() => {
+  if (heroClockTimer) clearInterval(heroClockTimer)
+})
+const heroClockTime = computed(() => {
+  const now = heroClockNow.value
+  const pad = (value: number) => String(value).padStart(2, '0')
+  return `${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`
+})
+const heroClockDate = computed(() => {
+  const now = heroClockNow.value
+  const pad = (value: number) => String(value).padStart(2, '0')
+  const weekdayZh = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'][now.getDay()]
+  const weekdayEn = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'][now.getDay()]
+  return `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())} · ${tr(weekdayEn, weekdayZh)}`
+})
 // Punch outcome clarity (frontend-only, 2026-07-05 design-lock, G2): inline
 // outdoor-punch note retry state. See
 // docs/development/attendance-punch-outcome-clarity-design-lock-20260705.md.
@@ -11323,6 +11706,7 @@ const statusMeta = ref<AttendanceStatusMeta | null>(null)
 const calendarMonth = ref(new Date())
 const pluginsLoaded = ref(false)
 const exporting = ref(false)
+const exportingXlsx = ref(false)
 const exportCsvHeaderMode = ref<'label' | 'code'>('label')
 const settingsLoading = ref(false)
 const attendanceSettings = ref<AttendanceSettings | null>(null)
@@ -12484,6 +12868,24 @@ const activeWorkbenchRecord = computed<AttendanceRecord | null>(() =>
   records.value.find(record => record.work_date === todayWorkDateKey.value) ?? latestAttendanceRecord.value
 )
 
+// UI-P1 (ui-p1-remainder design-lock D1): today's two-node punch timeline for
+// the hero card — reuses activeWorkbenchRecord, renders only for TODAY's row.
+const heroTodayTimeline = computed(() => {
+  const record = activeWorkbenchRecord.value
+  if (!record || record.work_date !== todayWorkDateKey.value) return null
+  const timeOf = (value: string | null | undefined) => {
+    if (!value) return null
+    const parsed = new Date(value)
+    if (Number.isNaN(parsed.getTime())) return null
+    const pad = (n: number) => String(n).padStart(2, '0')
+    return `${pad(parsed.getHours())}:${pad(parsed.getMinutes())}`
+  }
+  return {
+    checkIn: timeOf(record.first_in_at),
+    checkOut: timeOf(record.last_out_at),
+  }
+})
+
 const activeWorkbenchLatestPunchLabel = computed(() => {
   const record = activeWorkbenchRecord.value
   if (!record) return '--'
@@ -12498,6 +12900,11 @@ const activeWorkbenchStatusDescription = computed(() =>
     )
     : describeAttendanceStatus(activeWorkbenchRecord.value?.status)
 )
+
+const activeWorkbenchHasLateEarly = computed(() => {
+  const record = activeWorkbenchRecord.value
+  return Boolean(record && ((record.late_minutes ?? 0) > 0 || (record.early_leave_minutes ?? 0) > 0))
+})
 
 const activeWorkbenchLateEarlyLabel = computed(() => {
   const record = activeWorkbenchRecord.value
@@ -13013,6 +13420,98 @@ const payrollCycleSummary = ref<AttendanceSummary | null>(null)
 const importProfileId = ref('')
 const importMode = ref<'override' | 'merge'>('override')
 const importMappingProfiles = ref<AttendanceImportMappingProfile[]>([])
+// D3 field-picker (import-section-ux design-lock): raw mapping columns from
+// /api/attendance/import/template (previously discarded) → grouped options.
+const importMappingColumnsRaw = ref<AttendanceImportMappingColumnLike[]>([])
+const importCsvRecognition = ref<AttendanceImportHeaderRecognition | null>(null)
+// X1 xlsx direct import (xlsx-direct design-lock, RATIFIED): converted CSV
+// text for a selected .xlsx — feeds the existing csvText pipeline untouched.
+const importCsvConvertedText = ref('')
+const importCsvConvertedSheetName = ref('')
+const importFieldGroups = computed(() => groupSupportedImportColumns(importMappingColumnsRaw.value))
+// Column-formats reference (column-formats design-lock): per-column required
+// flag + format + example, so the user knows how to fill each column.
+const importColumnFormatRows = computed(() => buildImportColumnFormatRows(importFieldGroups.value))
+function importColumnRequirementLabel(requirement: AttendanceImportColumnRequirement): string {
+  if (requirement === 'required') return tr('Required', '必填')
+  if (requirement === 'identity') return tr('ID (one of)', '身份·二选一')
+  return tr('Optional', '选填')
+}
+const importTemplateFieldKeys = ref<Set<string>>(new Set(IMPORT_TEMPLATE_DEFAULT_SELECTED_KEYS))
+const importTemplateHeaderPreview = computed(() =>
+  buildTemplateHeaderFromSelection(importFieldGroups.value, importTemplateFieldKeys.value))
+// Per-user picker memory (template-prefs design-lock §3, PR-B): restore on
+// open (intersected with the current vocabulary so ghost keys drop out),
+// save on change, clear on reset. All calls are silent — prefs must never
+// block the picker.
+// Review #3782 P3-1: any user interaction (or a newer restore) bumps the
+// generation, so a late-arriving GET can never overwrite what the user just
+// clicked. P3-2: PUTs are serialized last-write-wins, so rapid toggles cannot
+// persist a stale selection via HTTP reordering.
+let importTemplatePrefsGeneration = 0
+async function restoreImportTemplateFieldPrefs() {
+  const generation = ++importTemplatePrefsGeneration
+  try {
+    const response = await apiFetch(`/api/attendance/import/template-prefs?orgId=${encodeURIComponent(normalizedOrgId() ?? '')}`)
+    const data = await response.json().catch(() => ({} as any))
+    if (generation !== importTemplatePrefsGeneration) return
+    const saved = Array.isArray(data?.data?.selectedKeys) ? data.data.selectedKeys : []
+    if (!response.ok || saved.length === 0) return
+    const available = new Set(allSelectableImportFieldKeys(importFieldGroups.value))
+    const restored = saved.filter((key: unknown): key is string => typeof key === 'string' && available.has(key))
+    if (restored.length > 0) importTemplateFieldKeys.value = new Set(restored)
+  } catch {
+    // silent — defaults stay
+  }
+}
+let importTemplatePrefsPutInFlight = false
+let importTemplatePrefsPutQueued: string[] | null = null
+async function flushImportTemplatePrefsPut(payload: string[]): Promise<void> {
+  importTemplatePrefsPutInFlight = true
+  try {
+    await apiFetch('/api/attendance/import/template-prefs', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ orgId: normalizedOrgId(), selectedKeys: payload }),
+    })
+  } catch {
+    // silent — prefs must never block the picker
+  } finally {
+    importTemplatePrefsPutInFlight = false
+    if (importTemplatePrefsPutQueued) {
+      const next = importTemplatePrefsPutQueued
+      importTemplatePrefsPutQueued = null
+      void flushImportTemplatePrefsPut(next)
+    }
+  }
+}
+function persistImportTemplateFieldPrefs(keys: ReadonlySet<string>) {
+  importTemplatePrefsGeneration += 1
+  const payload = Array.from(keys)
+  if (importTemplatePrefsPutInFlight) {
+    importTemplatePrefsPutQueued = payload
+    return
+  }
+  void flushImportTemplatePrefsPut(payload)
+}
+function toggleImportTemplateField(key: string) {
+  const next = new Set(importTemplateFieldKeys.value)
+  if (next.has(key)) next.delete(key)
+  else next.add(key)
+  importTemplateFieldKeys.value = next
+  persistImportTemplateFieldPrefs(next)
+}
+function selectAllImportTemplateFields() {
+  const next = new Set(allSelectableImportFieldKeys(importFieldGroups.value))
+  importTemplateFieldKeys.value = next
+  persistImportTemplateFieldPrefs(next)
+}
+function resetImportTemplateFields() {
+  importTemplateFieldKeys.value = new Set(IMPORT_TEMPLATE_DEFAULT_SELECTED_KEYS)
+  // Clear semantics: [] drops the server row so future default-set upgrades
+  // flow to the user instead of being pinned by an old save.
+  persistImportTemplateFieldPrefs(new Set())
+}
 const selectedImportProfile = computed(() => {
   if (!importProfileId.value) return null
   return importMappingProfiles.value.find(profile => profile.id === importProfileId.value) ?? null
@@ -13651,6 +14150,25 @@ const importGroupAutoCreate = ref(false)
 const importGroupAutoAssign = ref(false)
 const importGroupRuleSetId = ref('')
 const importGroupTimezone = ref('')
+// D1 core/advanced grouping (import-section-ux design-lock): advanced fields
+// collapse behind a toggle; count tracks non-default advanced settings so the
+// badge (and initial auto-expand) reflect hidden active configuration.
+const importAdvancedOpen = ref(false)
+const importAdvancedActiveCount = computed(() => {
+  let count = 0
+  if (String(importCsvHeaderRow.value ?? '').trim() !== '') count += 1
+  if (importCsvDelimiter.value && importCsvDelimiter.value !== ',') count += 1
+  if (importUserMap.value) count += 1
+  if (importGroupAutoCreate.value) count += 1
+  if (importGroupAutoAssign.value) count += 1
+  if (importGroupRuleSetId.value) count += 1
+  if (importGroupTimezone.value) count += 1
+  if (String(importForm.userId ?? '').trim() !== '') count += 1
+  return count
+})
+onMounted(() => {
+  if (importAdvancedActiveCount.value > 0) importAdvancedOpen.value = true
+})
 const importCommitToken = ref('')
 const importCommitTokenExpiresAt = ref('')
 const attendanceImportBatchStorageKey = computed(() =>
@@ -14788,10 +15306,14 @@ const multiShiftDayForm = reactive({
 
 // ② S3-2 外勤打卡审批 (outdoor approval) config card. Mirrors shiftComplianceForm: saved via
 // saveOutdoorApproval, which PUTs ONLY { punchPolicy: { outdoor: ... } } so the backend per-key merge
-// leaves unscheduled / merge / the latent requirePhoto untouched. requireApproval=false ⇒ no regression.
+// leaves unscheduled / merge siblings untouched. requireApproval=false ⇒ no regression. requirePhoto
+// (S2 outdoor-punch-photo design-lock, 2026-07-10) is wired but only enforced for outdoor candidates
+// (outsideGeofence || outdoorMarker) — the web hero-punch flow never produces one, so this card alone
+// cannot cause a punch to actually require a photo (see punchOutcome.ts / UI-P0 #3806 §4).
 const outdoorForm = reactive({
   requireApproval: false,
   requireNote: false,
+  requirePhoto: false,
   approvalFlowId: '',
 })
 // ② S2-2 内外勤卡合并 (in/out merge) config card. Mirrors outdoorForm: saved via saveInOutMerge, which
@@ -15018,9 +15540,15 @@ const overtimeRuleForm = reactive({
 const approvalFlowForm = reactive({
   name: '',
   requestType: 'leave',
-  steps: '',
   isActive: true,
 })
+// A1 structured step editor (approval-flow-editor design-lock): the working
+// step model behind the editor. The old approvalFlowForm.steps JSON string is
+// gone; the persisted payload shape is unchanged (built by toApprovalPayloadSteps).
+const approvalFlowSteps = ref<AttendanceApprovalStepModel[]>([])
+const approvalFlowStepsPreview = computed(() => stepsPreviewJson(approvalFlowSteps.value))
+const approvalFlowRequestTypeOptions = ATTENDANCE_APPROVAL_REQUEST_TYPES
+const approvalFlowStepWarnings = computed(() => collectAuthoringWarnings(approvalFlowSteps.value))
 
 const rotationRuleForm = reactive({
   name: '',
@@ -15498,7 +16026,9 @@ function formatRequestType(value: string): string {
         time_correction: '时间更正',
         leave: '请假申请',
         overtime: '加班申请',
+        outdoor_punch: '外勤打卡',
         shift_swap: '换班申请',
+        schedule_dispatch: '调度申请',
       }
     : {
         missed_check_in: 'Missed check-in',
@@ -15506,7 +16036,9 @@ function formatRequestType(value: string): string {
         time_correction: 'Time correction',
         leave: 'Leave request',
         overtime: 'Overtime request',
+        outdoor_punch: 'Outdoor punch',
         shift_swap: 'Shift-swap request',
+        schedule_dispatch: 'Schedule dispatch',
       }
   return map[value] ?? value
 }
@@ -16257,17 +16789,6 @@ function parseShiftSequenceInput(value: string): string[] {
   return parseAttendanceRotationSequenceInput(value)
 }
 
-function parseApprovalStepsInput(value: string): AttendanceApprovalStep[] | null {
-  if (!value.trim()) return []
-  try {
-    const parsed = JSON.parse(value)
-    if (!Array.isArray(parsed)) return null
-    return parsed.filter(item => item && typeof item === 'object') as AttendanceApprovalStep[]
-  } catch {
-    return null
-  }
-}
-
 function parseUserIdList(value: string): string[] {
   if (!value) return []
   return Array.from(new Set(
@@ -16294,10 +16815,6 @@ function comprehensiveHoursStatusClass(status: AttendanceComprehensiveHoursStatu
   if (status === 'violation') return 'attendance__status-chip--late_early'
   if (status === 'warning') return 'attendance__status-chip--late'
   return 'attendance__status-chip--normal'
-}
-
-function formatApprovalSteps(steps: AttendanceApprovalStep[]): string {
-  return JSON.stringify(steps ?? [], null, 2)
 }
 
 function formatMetaMinutes(meta: Record<string, any> | undefined, key: 'leave' | 'overtime'): string {
@@ -17910,6 +18427,8 @@ async function loadImportTemplate() {
     importMode.value = payloadExample?.mode === 'merge' ? 'merge' : 'override'
     importForm.payload = JSON.stringify(payloadExample, null, 2)
     importMappingProfiles.value = Array.isArray(data.data?.mappingProfiles) ? data.data.mappingProfiles : []
+    importMappingColumnsRaw.value = Array.isArray(data.data?.mapping?.columns) ? data.data.mapping.columns : []
+    void restoreImportTemplateFieldPrefs()
     setStatus(tr('Import template loaded.', '导入模板已加载。'))
   } catch (error) {
     setStatus(readErrorMessage(error, tr('Failed to load import template', '加载导入模板失败')), 'error')
@@ -17918,7 +18437,26 @@ async function loadImportTemplate() {
   }
 }
 
-function downloadImportTemplateCsv() {
+async function downloadImportTemplateCsv() {
+  // One-click (import-section-ux design-lock D2): auto-load the template first
+  // instead of erroring, so the download works from a cold panel. Guard: only
+  // when the payload is untouched — loadImportTemplate overwrites
+  // importForm.payload, and a hand-edited (or mid-edit, unparseable) payload
+  // must never be silently destroyed by a template download.
+  if (!importTemplateGuide.value) {
+    const rawPayload = String(importForm.payload ?? '').trim()
+    if (rawPayload && rawPayload !== '{}') {
+      setStatus(
+        tr(
+          'Payload JSON has content but no template columns — fix or clear it, or click "Load template" to replace it.',
+          '负载 JSON 已有内容但无法生成模板——请修正/清空后再试，或点「加载模板」覆盖当前负载。',
+        ),
+        'error',
+      )
+      return
+    }
+    await loadImportTemplate()
+  }
   const guide = importTemplateGuide.value
   if (!guide) {
     setStatus(tr('Load the import template before downloading CSV guidance.', '请先加载导入模板，再下载 CSV 模板。'), 'error')
@@ -17931,8 +18469,11 @@ function downloadImportTemplateCsv() {
     setStatus(tr('The current template does not expose CSV header guidance yet.', '当前模板尚未提供 CSV 表头指导。'), 'error')
     return
   }
-  const csv = `${columns.map(escapeCsvCell).join(',')}\n${columns.map(() => '').join(',')}\n`
-  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' })
+  // Harmonized with the selected-fields download (#3793 review NIT-3): ship a
+  // concrete example row instead of an empty line.
+  const exampleRow = buildTemplateExampleRow(importColumnFormatRows.value, columns)
+  const csv = `${columns.map(escapeCsvCell).join(',')}\n${exampleRow.map(escapeCsvCell).join(',')}\n`
+  const blob = new Blob([withCsvBom(csv)], { type: 'text/csv;charset=utf-8' })
   const url = URL.createObjectURL(blob)
   const link = document.createElement('a')
   const source = normalizeText(selectedImportProfile.value?.source ?? guide.source) || 'attendance'
@@ -17943,6 +18484,55 @@ function downloadImportTemplateCsv() {
   document.body.removeChild(link)
   URL.revokeObjectURL(url)
   setStatus(tr('CSV template downloaded.', 'CSV 模板已下载。'))
+}
+
+function triggerImportCsvDownload(filename: string, csv: string) {
+  const blob = new Blob([withCsvBom(csv)], { type: 'text/csv;charset=utf-8' })
+  const url = URL.createObjectURL(blob)
+  const link = document.createElement('a')
+  try {
+    link.href = url
+    link.download = filename
+    document.body.appendChild(link)
+    link.click()
+  } finally {
+    link.remove()
+    URL.revokeObjectURL(url)
+  }
+}
+
+// D3 field-picker actions: build the header from the current selection.
+function downloadImportSelectedTemplateCsv() {
+  const header = importTemplateHeaderPreview.value
+  if (header.length === 0) {
+    setStatus(tr('Load the import template to pick fields first.', '请先加载导入模板并勾选字段。'), 'error')
+    return
+  }
+  // Ship a concrete example row per selected column (template-example-row
+  // design-lock), like the backend template.csv — so the picked-fields
+  // template shows the format by example, not an empty line.
+  const exampleRow = buildTemplateExampleRow(importColumnFormatRows.value, header)
+  const csv = `${header.map(escapeCsvCell).join(',')}\n${exampleRow.map(escapeCsvCell).join(',')}\n`
+  triggerImportCsvDownload('attendance-import-template-selected.csv', csv)
+  setStatus(tr(
+    `CSV template downloaded (${header.length} columns, with an example row).`,
+    `CSV 模板已下载（${header.length} 列，含示例行）。`,
+  ))
+}
+
+async function copyImportTemplateHeader() {
+  const headerLine = importTemplateHeaderPreview.value.join(',')
+  if (!headerLine) {
+    setStatus(tr('Load the import template to pick fields first.', '请先加载导入模板并勾选字段。'), 'error')
+    return
+  }
+  try {
+    if (!navigator.clipboard?.writeText) throw new Error('clipboard unavailable')
+    await navigator.clipboard.writeText(headerLine)
+    setStatus(tr('Template header copied.', '模板表头已复制。'))
+  } catch {
+    setStatus(tr('Copy failed — please copy the header preview manually.', '复制失败——请手动复制表头预览。'), 'error')
+  }
 }
 
 function applyImportProfile() {
@@ -18011,14 +18601,113 @@ function normalizeUserMapPayload(payload: any, keyField: string): Record<string,
   return null
 }
 
-function handleImportCsvChange(event: Event) {
+async function handleImportCsvChange(event: Event) {
   const target = event.target as HTMLInputElement
   const file = target?.files?.[0] ?? null
+  importCsvRecognition.value = null
+  importCsvConvertedText.value = ''
+  importCsvConvertedSheetName.value = ''
+  if (file) {
+    const verdict = await inspectImportFile(file)
+    // Rapid re-selection race (xlsx-guard lock §7): the sniff is async — if the
+    // input no longer holds this file, a newer selection owns the state now;
+    // drop this stale verdict (accepting OR blocking) instead of clobbering it.
+    if ((target?.files?.[0] ?? null) !== file) return
+    if (!verdict.ok) {
+      // X1 (xlsx-direct lock, D1=A/D2): a plain `.xlsx` converts in-browser to
+      // CSV text and feeds the existing pipeline; .xls/.xlsm/.xlsb and renamed
+      // spreadsheets keep the save-as guidance below.
+      if (verdict.kind === 'xlsx' && isDirectConvertibleXlsxName(file.name)) {
+        const converted = await convertXlsxFileToCsvText(file)
+        if ((target?.files?.[0] ?? null) !== file) return
+        if (converted.ok) {
+          importCsvFile.value = file
+          importCsvFileName.value = file.name
+          importCsvFileId.value = ''
+          importCsvFileRowCountHint.value = null
+          importCsvFileExpiresAt.value = ''
+          importCsvConvertedText.value = converted.csvText
+          importCsvConvertedSheetName.value = converted.sheetName
+          setStatus(tr(
+            `Excel converted: sheet "${converted.sheetName}"${converted.sheetCount > 1 ? ` (first non-empty of ${converted.sheetCount})` : ''} is ready as CSV.`,
+            `Excel 已转换：工作表「${converted.sheetName}」${converted.sheetCount > 1 ? `（共 ${converted.sheetCount} 表，取首个非空）` : ''}已就绪为 CSV。`,
+          ))
+          void analyzeImportCsvHeader(file, converted.csvText)
+          return
+        }
+        const failure = xlsxConvertFailureMessage(converted.reason)
+        importCsvFile.value = null
+        importCsvFileName.value = ''
+        importCsvFileId.value = ''
+        importCsvFileRowCountHint.value = null
+        importCsvFileExpiresAt.value = ''
+        setStatus(tr(failure.en, failure.zh), 'error', { action: 'retry-preview-import' })
+        if (target) target.value = ''
+        return
+      }
+      importCsvFile.value = null
+      importCsvFileName.value = ''
+      importCsvFileId.value = ''
+      importCsvFileRowCountHint.value = null
+      importCsvFileExpiresAt.value = ''
+      const blocked = blockedSpreadsheetMessage(verdict.kind)
+      setStatus(tr(blocked.en, blocked.zh), 'error', {
+        hint: tr('Save the file as CSV, then re-select it.', '请另存为 CSV 后重新选择文件。'),
+        action: 'retry-preview-import',
+      })
+      if (target) target.value = ''
+      return
+    }
+  }
   importCsvFile.value = file
   importCsvFileName.value = file?.name ?? ''
   importCsvFileId.value = ''
   importCsvFileRowCountHint.value = null
   importCsvFileExpiresAt.value = ''
+  if (file) void analyzeImportCsvHeader(file)
+}
+
+// Column recognition (column-recognition design-lock): read-only vocabulary
+// fetch — unlike loadImportTemplate it must NOT touch payload/mode/profiles.
+let importMappingColumnsFetch: Promise<void> | null = null
+async function ensureImportMappingColumns(): Promise<void> {
+  if (importMappingColumnsRaw.value.length > 0) return
+  if (!importMappingColumnsFetch) {
+    importMappingColumnsFetch = (async () => {
+      try {
+        const response = await apiFetch('/api/attendance/import/template')
+        const data = await response.json().catch(() => ({} as any))
+        if (response.ok && data?.ok && Array.isArray(data.data?.mapping?.columns)) {
+          importMappingColumnsRaw.value = data.data.mapping.columns
+        }
+      } catch {
+        // vocabulary unavailable — recognition degrades to required-key checks
+      } finally {
+        importMappingColumnsFetch = null
+      }
+    })()
+  }
+  await importMappingColumnsFetch
+}
+
+async function analyzeImportCsvHeader(file: File, textOverride?: string): Promise<void> {
+  try {
+    const [text] = await Promise.all([
+      textOverride !== undefined ? Promise.resolve(textOverride) : readBlobHeadText(file),
+      ensureImportMappingColumns(),
+    ])
+    if (importCsvFile.value !== file) return
+    const rowIndexRaw = Number(importCsvHeaderRow.value)
+    const header = parseCsvHeaderFromText(text, {
+      delimiter: importCsvDelimiter.value || ',',
+      headerRowIndex: importCsvHeaderRow.value !== '' && Number.isFinite(rowIndexRaw) && rowIndexRaw >= 0
+        ? rowIndexRaw
+        : null,
+    })
+    importCsvRecognition.value = recognizeImportHeader(header, importMappingColumnsRaw.value)
+  } catch {
+    importCsvRecognition.value = null
+  }
 }
 
 async function handleImportUserMapChange(event: Event) {
@@ -18060,6 +18749,8 @@ async function uploadImportCsvFile(file: File): Promise<{ fileId: string; rowCou
     method: 'POST',
     body: file,
     headers: {
+      // Upstream importFileGuard already blocks spreadsheets, so normalizing a
+      // Windows .csv's application/vnd.ms-excel MIME to text/csv here is safe.
       'Content-Type': file?.type && file.type.toLowerCase().includes('csv') ? file.type : 'text/csv',
     },
   })
@@ -18086,6 +18777,13 @@ async function applyImportCsvFile() {
   }
   try {
     const file = importCsvFile.value
+    const blockedKind = detectSpreadsheetByName(file?.name)
+    // X1: a converted .xlsx is legitimate here — its CSV text substitutes below.
+    if (blockedKind && !importCsvConvertedText.value) {
+      const blocked = blockedSpreadsheetMessage(blockedKind)
+      setStatus(tr(blocked.en, blocked.zh), 'error', { action: 'retry-preview-import' })
+      return
+    }
     const base = parseJsonConfig(importForm.payload) ?? {}
     const next: Record<string, any> = {
       ...base,
@@ -18106,9 +18804,16 @@ async function applyImportCsvFile() {
     }
     if (Object.keys(csvOptions).length) next.csvOptions = csvOptions
 
-    const shouldUpload = importDebugOptions.forceUploadCsv || file.size >= IMPORT_CSV_UPLOAD_THRESHOLD_BYTES
+    // X1: for a converted .xlsx the effective payload is the CSV text, so both
+    // the size split and the upload body must use it, not the binary workbook.
+    const convertedText = importCsvConvertedText.value
+    const effectiveSize = convertedText ? convertedText.length : file.size
+    const shouldUpload = importDebugOptions.forceUploadCsv || effectiveSize >= IMPORT_CSV_UPLOAD_THRESHOLD_BYTES
     if (shouldUpload) {
-      const uploaded = await uploadImportCsvFile(file)
+      const uploadFile = convertedText
+        ? new File([convertedText], file.name.replace(/\.xlsx$/i, '.csv'), { type: 'text/csv' })
+        : file
+      const uploaded = await uploadImportCsvFile(uploadFile)
       importCsvFileId.value = uploaded.fileId
       importCsvFileRowCountHint.value = Number.isFinite(uploaded.rowCount) && uploaded.rowCount > 0 ? uploaded.rowCount : null
       importCsvFileExpiresAt.value = uploaded.expiresAt
@@ -18121,7 +18826,7 @@ async function applyImportCsvFile() {
         )
       )
     } else {
-      const csvText = await file.text()
+      const csvText = convertedText || await file.text()
       importCsvFileId.value = ''
       importCsvFileRowCountHint.value = null
       importCsvFileExpiresAt.value = ''
@@ -18939,7 +19644,7 @@ async function exportImportOverrideBackup(): Promise<void> {
 }
 
 function downloadCsvText(filename: string, csvText: string) {
-  const blob = new Blob([csvText], { type: 'text/csv' })
+  const blob = new Blob([withCsvBom(csvText)], { type: 'text/csv' })
   const url = URL.createObjectURL(blob)
   const link = document.createElement('a')
   link.href = url
@@ -19162,6 +19867,27 @@ function classifyStatusError(
       : tr('CSV upload exceeds server size limit.', 'CSV 上传超过服务端大小限制。')
     meta.hint = tr('Use a smaller file or split the CSV by date/user range, then retry.', '请缩小文件或按日期/用户拆分 CSV 后重试。')
     meta.action = 'reload-import-csv'
+  } else if (
+    (context === 'import-preview' || context === 'import-run')
+    && code === 'VALIDATION_ERROR'
+  ) {
+    // The server sends a descriptive English diagnostic ("No rows to import…" /
+    // "CSV header must include…"), but localizeRuntimeErrorMessage drops
+    // unmatched Latin-only text under a zh UI, leaving only the bare code chip.
+    // Surface an actionable message instead (meta.code stays set above, so the
+    // support-facing code chip is unchanged).
+    if (/no rows to (import|preview)/i.test(originalMessage)) {
+      message = tr('The file produced no importable rows.', '文件未解析出可导入的数据行。')
+    } else if (/header must include/i.test(originalMessage)) {
+      message = tr('The CSV header is missing required columns.', 'CSV 表头缺少必需列。')
+    } else {
+      message = tr('Import content failed validation.', '导入内容校验未通过。')
+    }
+    meta.hint = tr(
+      'Make sure the file is a CSV (not Excel .xlsx/.xls) and includes date and name/user-id columns; for a DingTalk export, use Save As → CSV first.',
+      '请确认为 CSV 文件（非 Excel .xlsx/.xls），且包含「日期」与「姓名/工号」列；若是钉钉导出的 Excel，请先「另存为 → CSV」。',
+    )
+    meta.action = context === 'import-run' ? 'retry-run-import' : 'retry-preview-import'
   } else if (code === 'IMPORT_JOB_TIMEOUT') {
     message = tr('Async import job is still running in background.', '异步导入任务仍在后台运行。')
     meta.hint = tr('Use "Resume import job" to continue polling, or open the async job card for manual controls.', '可点击“恢复导入任务”继续轮询，或在异步任务卡片中手动处理。')
@@ -21215,7 +21941,7 @@ async function exportCsv() {
     const disposition = response.headers.get('content-disposition')
     const match = disposition?.match(/filename="?([^";]+)"?/)
     const filename = match?.[1] || 'attendance-export.csv'
-    const blob = new Blob([text], { type: 'text/csv' })
+    const blob = new Blob([withCsvBom(text)], { type: 'text/csv' })
     const url = URL.createObjectURL(blob)
     const link = document.createElement('a')
     link.href = url
@@ -21258,6 +21984,65 @@ async function exportCsv() {
     )
   } finally {
     exporting.value = false
+  }
+}
+
+// S5: same server report CSV (identical fields/filters/fingerprint) rendered to
+// a real .xlsx client-side — Excel opens it without the ANSI/GBK 乱码 guess.
+async function exportXlsx() {
+  if (reportsExportBlocked.value) {
+    setStatus(
+      appendStatusContext(
+        reportsUnavailable.value
+          ? tr('Reload the report before exporting.', '请先重载报表再导出。')
+          : tr('Filters changed. Reload the report before exporting.', '筛选条件已变化，请先重载报表再导出。'),
+        recordsTimezoneContextHint.value,
+      ),
+      'error',
+    )
+    return
+  }
+  exportingXlsx.value = true
+  try {
+    const query = buildQuery({
+      from: fromDate.value,
+      to: toDate.value,
+      orgId: normalizedOrgId(),
+      userId: normalizedUserId(),
+      header: exportCsvHeaderMode.value,
+    })
+    const response = await apiFetch(`/api/attendance/export?${query.toString()}`)
+    const text = await response.text()
+    if (!response.ok) {
+      let message = tr('Export failed', '导出失败')
+      try {
+        message = readErrorMessage(JSON.parse(text), message)
+      } catch {
+        message = text || message
+      }
+      throw new Error(message)
+    }
+    const disposition = response.headers.get('content-disposition')
+    const match = disposition?.match(/filename="?([^";]+)"?/)
+    const filename = xlsxFilenameFromCsv(match?.[1] || 'attendance-export.csv')
+    const bytes = await csvTextToXlsxArrayBuffer(text)
+    const blob = new Blob([bytes], { type: REPORT_XLSX_MIME })
+    const url = URL.createObjectURL(blob)
+    const link = document.createElement('a')
+    link.href = url
+    link.download = filename
+    document.body.appendChild(link)
+    link.click()
+    link.remove()
+    URL.revokeObjectURL(url)
+    setStatus(appendStatusContext(tr('Excel export ready.', 'Excel 导出完成。'), recordsTimezoneContextHint.value))
+  } catch (error: any) {
+    setStatus(
+      appendStatusContext(readErrorMessage(error, tr('Export failed', '导出失败')), recordsTimezoneContextHint.value),
+      'error',
+    )
+  } finally {
+    exportingXlsx.value = false
   }
 }
 
@@ -21867,6 +22652,7 @@ function applyOutdoorToForm(settings: AttendanceSettings) {
   const outdoor = settings.punchPolicy?.outdoor || {}
   outdoorForm.requireApproval = outdoor.requireApproval === true
   outdoorForm.requireNote = outdoor.requireNote === true
+  outdoorForm.requirePhoto = outdoor.requirePhoto === true
   outdoorForm.approvalFlowId = typeof outdoor.approvalFlowId === 'string' ? outdoor.approvalFlowId : ''
 }
 
@@ -22295,13 +23081,15 @@ async function saveMultiShiftDay() {
 async function saveOutdoorApproval() {
   settingsLoading.value = true
   try {
-    // PUT ONLY punchPolicy.outdoor — the backend 2-level merge preserves unscheduled / merge siblings and
-    // the latent requirePhoto (not sent here). requireApproval=false ⇒ no change to existing punching.
+    // PUT ONLY punchPolicy.outdoor — the backend 2-level merge preserves unscheduled / merge siblings.
+    // requireApproval=false ⇒ no change to existing punching. requirePhoto only takes effect on outdoor
+    // candidates (see punchOutcome.ts / UI-P0 #3806 §4 — the web hero-punch flow never produces one).
     const payload = {
       punchPolicy: {
         outdoor: {
           requireApproval: outdoorForm.requireApproval === true,
           requireNote: outdoorForm.requireNote === true,
+          requirePhoto: outdoorForm.requirePhoto === true,
           approvalFlowId: String(outdoorForm.approvalFlowId || '').trim(),
         },
       },
@@ -23234,6 +24022,8 @@ const annualPolicyForm = reactive<{
   tiers: AnnualLeaveTierRow[]
   carryoverEnabled: boolean
   timezone: string
+  // S3 scheduler trigger single opt-in switch (design-lock attendance-annual-leave-accrual-scheduler-s3-design-lock-20260710).
+  scheduledTriggerEnabled: boolean
 }>({
   enabled: false,
   tenureMode: 'cumulative_service',
@@ -23245,6 +24035,7 @@ const annualPolicyForm = reactive<{
   ],
   carryoverEnabled: false,
   timezone: '',
+  scheduledTriggerEnabled: false,
 })
 
 // Hydrate the policy form from a settings object — the idiomatic apply…ToForm pattern, called from loadSettings()
@@ -23266,6 +24057,7 @@ function applyAnnualPolicyToForm(settings: AttendanceSettings): void {
     }
     annualPolicyForm.carryoverEnabled = !!p.carryover?.enabled
     annualPolicyForm.timezone = p.timezone || ''
+    annualPolicyForm.scheduledTriggerEnabled = !!p.scheduledTrigger?.enabled
   }
   annualPolicyLoaded.value = true
 }
@@ -23347,6 +24139,7 @@ async function saveAnnualPolicy() {
         tiers: annualPolicyForm.tiers.map(t => ({ minYears: t.minYears, maxYears: t.maxYears, days: t.days })),
         carryover: { enabled: annualPolicyForm.carryoverEnabled },
         timezone: annualPolicyForm.timezone.trim() || null,
+        scheduledTrigger: { enabled: annualPolicyForm.scheduledTriggerEnabled },
       },
     }
     const response = await apiFetch('/api/attendance/settings', { method: 'PUT', body: JSON.stringify(payload) })
@@ -23550,6 +24343,184 @@ async function submitAnnualAdjust(snapshot: { userId: string; deltaMinutes: numb
   } finally {
     annualAdjustSubmitting.value = false
   }
+}
+
+// -- Card 1b (S6 #3925 design-lock 2026-07-10): bulk manual adjustment — a client-side
+// sequential loop over the SAME single-user route as Card 1 above, sharing one
+// {deltaMinutes, reason} across a user-picker selection (annual only — G1). Kept as its own
+// state block (never entangled with the single-row annualAdjustForm) so a partial-failure
+// retry here can never touch Card 1's own in-flight request. G4: reuses annualOpsConfirm's
+// shape for the confirm step; the actual network loop only runs from onConfirm, mirroring
+// the bulk-apply-schedule / batch-anomaly two-step precedent.
+const annualBulkAdjustUserPickerValue = ref('')
+const annualBulkAdjustUserIds = ref<string[]>([])
+const annualBulkAdjustForm = reactive<{ deltaMinutes: number; reason: string }>({ deltaMinutes: 0, reason: '' })
+const annualBulkAdjustError = ref<string | null>(null)
+const annualBulkAdjust = reactive<{
+  submitting: boolean
+  rows: BulkBalanceAdjustRowSnapshot[]
+  results: Record<string, BulkBalanceAdjustRowResult>
+}>({ submitting: false, rows: [], results: {} })
+
+function addAnnualBulkAdjustUser(): void {
+  const userId = annualBulkAdjustUserPickerValue.value.trim()
+  if (!userId) return
+  if (!annualBulkAdjustUserIds.value.includes(userId)) {
+    annualBulkAdjustUserIds.value = [...annualBulkAdjustUserIds.value, userId]
+  }
+  annualBulkAdjustUserPickerValue.value = ''
+}
+
+function removeAnnualBulkAdjustUser(userId: string): void {
+  annualBulkAdjustUserIds.value = annualBulkAdjustUserIds.value.filter(id => id !== userId)
+}
+
+const annualBulkAdjustSubmitDisabledReason = computed(() => {
+  if (!annualOpsPolicyEnabled.value) {
+    return tr('The annual leave engine is disabled.', '年假引擎未启用。')
+  }
+  if (annualBulkAdjust.submitting) return tr('Bulk adjustment in progress...', '批量调整处理中...')
+  if (annualBulkAdjustUserIds.value.length === 0) return tr('Add at least one user.', '请至少添加一个用户。')
+  if (!canRunBulkBalanceAdjust(annualBulkAdjustUserIds.value.length)) {
+    return tr(
+      `Select at most ${BULK_BALANCE_ADJUST_MAX_USERS} users; narrow the selection.`,
+      `最多选择 ${BULK_BALANCE_ADJUST_MAX_USERS} 个用户；请缩小选择范围。`,
+    )
+  }
+  const delta = Number(annualBulkAdjustForm.deltaMinutes)
+  if (!Number.isInteger(delta) || delta === 0) {
+    return tr('Enter a non-zero whole number of minutes.', '请输入非零整数分钟。')
+  }
+  if (!annualBulkAdjustForm.reason.trim()) return tr('A reason is required.', '必须填写原因。')
+  return ''
+})
+
+const annualBulkAdjustOutcome = computed(() => summarizeBulkBalanceAdjustOutcome(Object.values(annualBulkAdjust.results)))
+const annualBulkAdjustHasResults = computed(() => Object.keys(annualBulkAdjust.results).length > 0)
+const annualBulkAdjustAppliedCount = computed(() => Object.values(annualBulkAdjust.results).filter(r => r.state === 'ok').length)
+const annualBulkAdjustFailedCount = computed(() => Object.values(annualBulkAdjust.results).filter(r => r.state === 'error').length)
+
+function annualBulkAdjustRowResultText(userId: string): string {
+  const result = annualBulkAdjust.results[userId]
+  if (!result) return ''
+  if (result.state === 'ok') return tr('Applied', '已应用')
+  if (result.state === 'error') return bulkBalanceAdjustErrorText(result.errorKind ?? 'generic', tr)
+  return tr('Submitting...', '提交中...')
+}
+
+// Phase 1 (selection -> confirm): builds the row snapshot and opens the SHARED annualOpsConfirm
+// panel only — this function must never call runBulkBalanceAdjust/apiFetch directly
+// (design §G4 confirm gate).
+function requestAnnualBulkAdjust(): void {
+  annualBulkAdjustError.value = null
+  const userIds = [...annualBulkAdjustUserIds.value]
+  const delta = Number(annualBulkAdjustForm.deltaMinutes)
+  const reason = annualBulkAdjustForm.reason.trim()
+  if (userIds.length === 0) {
+    annualBulkAdjustError.value = tr('Add at least one user', '请至少添加一个用户')
+    return
+  }
+  if (!canRunBulkBalanceAdjust(userIds.length)) {
+    annualBulkAdjustError.value = tr(
+      `Select at most ${BULK_BALANCE_ADJUST_MAX_USERS} users; narrow the selection.`,
+      `最多选择 ${BULK_BALANCE_ADJUST_MAX_USERS} 个用户；请缩小选择范围。`,
+    )
+    return
+  }
+  if (!Number.isInteger(delta) || delta === 0) {
+    annualBulkAdjustError.value = tr('The adjustment must be a non-zero whole number of minutes', '调整必须是非零整数分钟')
+    return
+  }
+  if (!reason) {
+    annualBulkAdjustError.value = tr('A reason is required', '必须填写原因')
+    return
+  }
+  // A brand-new confirmed request always starts a clean batch — a retry (below) reuses
+  // submitAnnualBulkAdjust directly against the already-built rows, never through here.
+  const rows = buildBulkBalanceAdjustRows(userIds, { deltaMinutes: delta, reason }, annualOpsIdempotencyKey)
+  annualBulkAdjust.results = {}
+  openAnnualOpsConfirm({
+    title: tr('Confirm bulk balance adjustment', '确认批量余额调整'),
+    lines: [
+      { label: tr('Users', '用户数'), value: String(rows.length) },
+      { label: tr('Delta (min, shared)', '变动(分钟,共享)'), value: (delta > 0 ? '+' : '') + delta },
+      { label: tr('Reason', '原因'), value: reason },
+      // G3 (override-import-guard design-lock, 2026-07-05): negative adjustments (deductions)
+      // get the same extra irreversibility note as the single-row Card 1 — pure copy, no
+      // behavior change.
+      ...(delta < 0 ? [buildManualAdjustDeductionLedgerLine(tr)] : []),
+    ],
+    onConfirm: () => { void submitAnnualBulkAdjust(rows) },
+  })
+}
+
+// Phase 2 (confirm -> submit): the ONLY function that calls runBulkBalanceAdjust / hits the
+// network. Also the REAL annualOpsPolicyEnabled gate (design §G4 — "批量入口受同一 FE
+// annualOpsPolicyEnabled 门"); the template's :disabled bindings are the proactive UX layer,
+// this is the handler-level guard a direct call cannot bypass (mirrors annualOpsPost's gate).
+async function submitAnnualBulkAdjust(rows: BulkBalanceAdjustRowSnapshot[]): Promise<void> {
+  if (!annualOpsPolicyEnabled.value) {
+    annualBulkAdjustError.value = annualOpsErrorLine('ANNUAL_LEAVE_NOT_ENABLED')
+    return
+  }
+  if (annualBulkAdjust.submitting) return
+  annualBulkAdjust.submitting = true
+  annualBulkAdjust.rows = rows
+  annualBulkAdjustError.value = null
+  const current = new Map<string, BulkBalanceAdjustRowResult>(Object.entries(annualBulkAdjust.results))
+  try {
+    const finalResults = await runBulkBalanceAdjust(
+      rows,
+      current,
+      async (row): Promise<BulkBalanceAdjustSubmitOutcome> => {
+        try {
+          const response = await apiFetch('/api/attendance/annual-leave-manual-adjustment', {
+            method: 'POST',
+            body: JSON.stringify({
+              orgId: normalizedOrgId(),
+              userId: row.userId,
+              deltaMinutes: row.deltaMinutes,
+              reason: row.reason,
+              idempotencyKey: row.idempotencyKey,
+            }),
+          })
+          const data = await response.json().catch(() => null)
+          if (!response.ok || !data?.ok) {
+            throw createApiError(response, data, tr('Bulk balance adjust failed', '批量余额调整失败'))
+          }
+          return {
+            ok: true as const,
+            result: { adjustmentId: data.data?.id, applied: data.data?.applied, alreadyApplied: data.data?.alreadyApplied },
+          }
+        } catch (error) {
+          // Per-row 404/422/409 are per-target results, not a global admin-forbidden state
+          // (design §G3 — "per-row 结果非全局中止"); this loop never sets adminForbidden.
+          return { ok: false as const, errorCode: (error as AttendanceApiError)?.code }
+        }
+      },
+      (userId, result) => {
+        annualBulkAdjust.results = { ...annualBulkAdjust.results, [userId]: result }
+      },
+    )
+    annualBulkAdjust.results = Object.fromEntries(finalResults)
+    const values = [...finalResults.values()]
+    const okCount = values.filter(r => r.state === 'ok').length
+    const errCount = values.filter(r => r.state === 'error').length
+    setStatus(
+      tr(`Bulk balance adjust: ${okCount} applied, ${errCount} failed.`, `批量余额调整：${okCount} 成功，${errCount} 失败。`),
+      errCount > 0 ? 'error' : undefined,
+    )
+  } finally {
+    annualBulkAdjust.submitting = false
+  }
+}
+
+// Retry: only re-submits rows not yet `ok` (design §G5) — reuses the same snapshot `rows`
+// built at confirm time (no re-prompt), so it stays independent of whatever the live form
+// currently shows.
+function retryAnnualBulkAdjust(): void {
+  if (annualBulkAdjust.rows.length === 0 || annualBulkAdjust.submitting) return
+  void submitAnnualBulkAdjust(annualBulkAdjust.rows)
 }
 
 // -- Card 2: expiry backfill (server dry-run; returns {scanned,updated,skipped,reasons{code→count}}) --
@@ -23864,7 +24835,7 @@ function resetApprovalFlowForm() {
   approvalFlowEditingId.value = null
   approvalFlowForm.name = ''
   approvalFlowForm.requestType = 'leave'
-  approvalFlowForm.steps = ''
+  approvalFlowSteps.value = []
   approvalFlowForm.isActive = true
 }
 
@@ -23872,7 +24843,7 @@ function editApprovalFlow(flow: AttendanceApprovalFlow) {
   approvalFlowEditingId.value = flow.id
   approvalFlowForm.name = flow.name
   approvalFlowForm.requestType = flow.requestType
-  approvalFlowForm.steps = formatApprovalSteps(flow.steps)
+  approvalFlowSteps.value = normalizeApprovalSteps(flow.steps)
   approvalFlowForm.isActive = flow.isActive
 }
 
@@ -23905,10 +24876,10 @@ async function saveApprovalFlow() {
     if (!approvalFlowForm.name.trim()) {
       throw new Error(tr('Name is required', '名称为必填项'))
     }
-    const steps = parseApprovalStepsInput(approvalFlowForm.steps)
-    if (steps === null) {
-      throw new Error(tr('Invalid steps JSON', '步骤 JSON 格式无效'))
-    }
+    // A1: steps now come from the structured editor's working model (payload
+    // shape unchanged — same {name,approverUserIds,approverRoleIds}, unknown
+    // keys on existing flows preserved via toApprovalPayloadSteps).
+    const steps = toApprovalPayloadSteps(approvalFlowSteps.value)
     const payload = {
       name: approvalFlowForm.name.trim(),
       requestType: approvalFlowForm.requestType,
@@ -27626,7 +28597,7 @@ const holidaySectionBindings = {
 }
 
 .attendance__rotation-sequence-preview {
-  border: 1px solid #d1d5db;
+  border: 1px solid var(--ms-border);
   background: #f9fafb;
   border-radius: 6px;
   padding: 10px 12px;
@@ -28004,7 +28975,7 @@ const holidaySectionBindings = {
   display: inline-flex;
   align-items: center;
   gap: 4px;
-  color: #4b5563;
+  color: var(--ms-text-2);
   font-size: 12px;
 }
 
@@ -28429,7 +29400,7 @@ const holidaySectionBindings = {
 .attendance__code {
   margin-top: 8px;
   padding: 12px;
-  background: #f5f6f8;
+  background: var(--ms-bg-page);
   border-radius: 8px;
   font-size: 12px;
   white-space: pre-wrap;
@@ -28990,7 +29961,7 @@ const holidaySectionBindings = {
   flex-direction: column;
   gap: 8px;
   padding: 12px;
-  border: 1px solid #e5e7eb;
+  border: 1px solid var(--ms-border-light);
   border-radius: 12px;
   background: #fff;
 }
@@ -29047,7 +30018,7 @@ const holidaySectionBindings = {
   display: flex;
   flex-wrap: wrap;
   gap: 10px 16px;
-  color: #4b5563;
+  color: var(--ms-text-2);
   font-size: 12px;
 }
 
@@ -29419,7 +30390,7 @@ const holidaySectionBindings = {
   gap: 12px;
   width: 100%;
   padding: 10px;
-  border: 1px solid #e5e7eb;
+  border: 1px solid var(--ms-border-light);
   border-radius: 8px;
   background: #f9fafb;
   color: inherit;
@@ -29471,7 +30442,7 @@ const holidaySectionBindings = {
 .attendance__group-detail-header h5,
 .attendance__group-panel h6 {
   margin: 0;
-  color: #111827;
+  color: var(--ms-text-1);
 }
 
 .attendance__group-panel {
@@ -29526,7 +30497,7 @@ const holidaySectionBindings = {
 }
 
 .attendance__group-member-identity strong {
-  color: #111827;
+  color: var(--ms-text-1);
   font-size: 13px;
 }
 
@@ -29549,7 +30520,7 @@ const holidaySectionBindings = {
   z-index: 1;
   margin: 0 -14px -14px;
   padding: 12px 14px;
-  border-top: 1px solid #e5e7eb;
+  border-top: 1px solid var(--ms-border-light);
   background: rgba(255, 255, 255, 0.96);
 }
 
@@ -29566,7 +30537,7 @@ const holidaySectionBindings = {
 }
 
 .attendance__group-summary span {
-  color: #111827;
+  color: var(--ms-text-1);
   font-size: 13px;
 }
 
@@ -29628,7 +30599,7 @@ const holidaySectionBindings = {
 
 .attendance__work-time-drawer-header h6 {
   margin: 0;
-  color: #111827;
+  color: var(--ms-text-1);
 }
 
 .attendance__work-time-type-list {
@@ -29661,7 +30632,7 @@ const holidaySectionBindings = {
 
 .attendance__work-time-type-option span,
 .attendance__work-time-drawer-body strong {
-  color: #111827;
+  color: var(--ms-text-1);
   font-weight: 700;
 }
 
@@ -29699,7 +30670,7 @@ const holidaySectionBindings = {
 }
 
 .attendance__work-time-holiday-callout strong {
-  color: #111827;
+  color: var(--ms-text-1);
   font-weight: 700;
 }
 
@@ -29776,7 +30747,7 @@ const holidaySectionBindings = {
   margin-top: 12px;
   padding: 12px;
   border-radius: 12px;
-  border: 1px dashed #d1d5db;
+  border: 1px dashed var(--ms-border);
   background: #fafafa;
 }
 
@@ -29787,7 +30758,7 @@ const holidaySectionBindings = {
 .attendance__details-summary {
   cursor: pointer;
   font-weight: 600;
-  color: #111827;
+  color: var(--ms-text-1);
 }
 
 @media (max-width: 768px) {
@@ -30110,14 +31081,14 @@ const holidaySectionBindings = {
   gap: 6px;
   margin: 12px 0;
   font-size: 13px;
-  color: #4b5563;
+  color: var(--ms-text-2);
 }
 .attendance__result-edit-form textarea {
   min-height: 72px;
   resize: vertical;
 }
 .attendance__admin-subsection {
-  border-top: 1px solid var(--border, #e5e7eb);
+  border-top: 1px solid var(--border, var(--ms-border-light));
   padding-top: 12px;
   margin-top: 12px;
 }
@@ -30126,5 +31097,330 @@ const holidaySectionBindings = {
   flex-direction: column;
   gap: 4px;
   margin-top: 8px;
+}
+
+/* Import section UX (import-section-ux design-lock 20260706) — all values
+   from UF --ms-* tokens; new hardcoded hex here would be a defect. */
+.attendance__import-template-hint {
+  display: block;
+  margin: var(--ms-space-1) 0 var(--ms-space-2);
+  color: var(--ms-text-3);
+}
+
+.attendance__field-picker-groups {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ms-space-3);
+  margin-top: var(--ms-space-2);
+}
+
+.attendance__field-picker-group-label {
+  font-weight: var(--ms-font-weight-title);
+  color: var(--ms-text-2);
+  margin-bottom: var(--ms-space-1);
+  font-size: 12px;
+}
+
+.attendance__field-picker-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--ms-space-2);
+}
+
+.attendance__field-picker-option {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--ms-space-1);
+  padding: var(--ms-space-1) var(--ms-space-2);
+  border: 1px solid var(--ms-border-light);
+  border-radius: var(--ms-radius-sm);
+  background: var(--ms-bg-card);
+  cursor: pointer;
+  font-size: 12px;
+  color: var(--ms-text-2);
+}
+
+.attendance__field-picker-option:has(input:checked) {
+  border-color: var(--ms-color-primary);
+  color: var(--ms-color-primary);
+}
+
+.attendance__field-picker-preview {
+  margin: var(--ms-space-3) 0 var(--ms-space-2);
+  font-size: 12px;
+  color: var(--ms-text-2);
+  word-break: break-all;
+}
+
+.attendance__field-picker-preview code {
+  background: var(--ms-bg-page);
+  padding: var(--ms-space-1) var(--ms-space-2);
+  border-radius: var(--ms-radius-sm);
+}
+
+/* Column formats table (column-formats design-lock) */
+.attendance__column-formats-scroll {
+  overflow-x: auto;
+  margin-top: var(--ms-space-2);
+}
+
+.attendance__column-formats-table {
+  width: 100%;
+  font-size: 12px;
+}
+
+.attendance__column-formats-table code {
+  background: var(--ms-bg-page);
+  padding: 0 var(--ms-space-1);
+  border-radius: var(--ms-radius-sm);
+}
+
+.attendance__column-formats-badge {
+  display: inline-block;
+  padding: 0 var(--ms-space-2);
+  border-radius: 999px;
+  font-size: 11px;
+  line-height: 18px;
+  white-space: nowrap;
+  border: 1px solid var(--ms-border-light);
+  color: var(--ms-text-3);
+}
+
+.attendance__column-formats-badge--required {
+  border-color: var(--ms-color-danger);
+  color: var(--ms-color-danger);
+}
+
+.attendance__column-formats-badge--identity {
+  border-color: var(--ms-color-warning);
+  color: var(--ms-color-warning);
+}
+
+.attendance__import-advanced-toggle {
+  display: flex;
+  align-items: center;
+  gap: var(--ms-space-3);
+  margin: var(--ms-space-3) 0 var(--ms-space-2);
+}
+
+.attendance__import-advanced-badge {
+  display: inline-block;
+  margin-left: var(--ms-space-1);
+  min-width: 16px;
+  padding: 0 var(--ms-space-1);
+  border-radius: 999px;
+  background: var(--ms-color-primary);
+  color: var(--ms-bg-card);
+  font-size: 11px;
+  line-height: 16px;
+  text-align: center;
+}
+
+.attendance__import-advanced {
+  margin-top: var(--ms-space-2);
+  padding-top: var(--ms-space-3);
+  border-top: 1px dashed var(--ms-border-light);
+}
+
+/* Selection-time column recognition (column-recognition design-lock 20260706) */
+.attendance__import-recognition {
+  gap: var(--ms-space-2);
+  padding: var(--ms-space-2) var(--ms-space-3);
+  border: 1px solid var(--ms-border-light);
+  border-radius: var(--ms-radius-md);
+  background: var(--ms-bg-page);
+}
+
+.attendance__import-recognition-warning {
+  color: var(--ms-color-danger);
+  font-size: 12px;
+  font-weight: var(--ms-font-weight-title);
+}
+
+.attendance__import-recognition-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--ms-space-1);
+  font-size: 12px;
+}
+
+.attendance__import-recognition-label {
+  color: var(--ms-text-2);
+  margin-right: var(--ms-space-1);
+}
+
+.attendance__import-recognition-chip {
+  display: inline-block;
+  padding: 0 var(--ms-space-2);
+  border: 1px solid var(--ms-border-light);
+  border-radius: 999px;
+  background: var(--ms-bg-card);
+  color: var(--ms-text-3);
+  line-height: 18px;
+}
+
+.attendance__import-recognition-chip--ok {
+  border-color: var(--ms-color-success);
+  color: var(--ms-color-success);
+}
+
+/* UI-P0′ hero punch card (attendance-ui-p0-hero-punch design-lock 20260706).
+   All values from UF --ms-* tokens; new hardcoded hex here would be a defect. */
+.attendance__hero-punch {
+  display: flex;
+  align-items: center;
+  gap: var(--ms-space-5);
+  padding: var(--ms-space-4) var(--ms-space-5);
+  border: 1px solid var(--ms-border-light);
+  border-radius: var(--ms-radius-lg);
+  background: var(--ms-bg-card);
+  box-shadow: var(--ms-shadow-card);
+}
+
+.attendance__hero-clock {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ms-space-1);
+  min-width: 132px;
+}
+
+.attendance__hero-time {
+  font-size: 32px;
+  font-weight: var(--ms-font-weight-title);
+  line-height: 1.1;
+  color: var(--ms-text-1);
+  font-variant-numeric: tabular-nums;
+}
+
+.attendance__hero-date {
+  font-size: 12px;
+  color: var(--ms-text-3);
+}
+
+.attendance__hero-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--ms-space-3);
+}
+
+.attendance__btn--hero {
+  min-height: 56px;
+  min-width: 160px;
+  font-size: 16px;
+  font-weight: var(--ms-font-weight-title);
+  border-radius: var(--ms-radius-md);
+}
+
+.attendance__btn--hero-secondary {
+  min-height: 56px;
+  min-width: 132px;
+  font-size: 15px;
+  border-radius: var(--ms-radius-md);
+  border-color: var(--ms-color-primary);
+  color: var(--ms-color-primary);
+}
+
+.attendance__hero-timeline {
+  display: flex;
+  align-items: center;
+  gap: var(--ms-space-2);
+  font-size: 12px;
+  color: var(--ms-text-2);
+  font-variant-numeric: tabular-nums;
+}
+
+.attendance__hero-timeline-node {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--ms-space-1);
+}
+
+.attendance__hero-timeline-node--pending {
+  color: var(--ms-text-3);
+}
+
+.attendance__hero-timeline-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--ms-color-success);
+}
+
+.attendance__hero-timeline-node--pending .attendance__hero-timeline-dot {
+  background: var(--ms-border);
+}
+
+.attendance__hero-timeline-rail {
+  flex: 0 0 32px;
+  height: 2px;
+  background: var(--ms-border-light);
+  border-radius: 1px;
+}
+
+/* UI-P1 stat cards (ui-p1-remainder design-lock D2) */
+.attendance__summary--stat {
+  gap: var(--ms-space-3);
+}
+
+.attendance__summary-item--stat {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: var(--ms-space-1);
+  padding: var(--ms-space-3) var(--ms-space-4);
+  border: 1px solid var(--ms-border-light);
+  border-radius: var(--ms-radius-md);
+  background: var(--ms-bg-card);
+  box-shadow: var(--ms-shadow-card);
+}
+
+.attendance__summary-icon {
+  width: 18px;
+  height: 18px;
+  color: var(--ms-color-primary);
+}
+
+.attendance__summary-value {
+  font-size: 22px;
+  line-height: 1.2;
+  font-weight: var(--ms-font-weight-title);
+  color: var(--ms-text-1);
+  font-variant-numeric: tabular-nums;
+}
+
+.attendance__summary-value--warning {
+  color: var(--ms-color-warning);
+}
+
+.attendance__summary-value--danger {
+  color: var(--ms-color-danger);
+}
+
+@media (max-width: 768px) {
+  .attendance__hero-punch {
+    flex-direction: column;
+    align-items: stretch;
+    gap: var(--ms-space-3);
+  }
+
+  .attendance__hero-actions {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  /* UI-P1 768px 紧凑自助面 (ui-p1-768 design-lock): touch-friendly landing for
+     the mobile/container self-service surface. */
+  .attendance__filters .attendance__field {
+    width: 100%;
+  }
+
+  .attendance__summary--stat {
+    grid-template-columns: repeat(2, 1fr);
+  }
+
+  .attendance__hero-timeline {
+    flex-wrap: wrap;
+  }
 }
 </style>

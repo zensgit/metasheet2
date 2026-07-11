@@ -1,48 +1,79 @@
 <template>
-  <section class="approval-detail">
-    <header class="approval-detail__header">
-      <el-button text @click="goBack">
-        <el-icon><ArrowLeft /></el-icon>
-        返回列表
-      </el-button>
-      <h1 v-if="approval">{{ approval.title ?? '审批详情' }}</h1>
-      <el-tag
-        v-if="approval"
-        :type="statusTagType(approval.status)"
-        size="large"
-      >
-        {{ statusLabel(approval.status) }}
-      </el-tag>
-      <!-- B1-03: 已等待 aging — glanceable next to the status tag, only while still pending. -->
-      <el-tag
-        v-if="approval && approval.status === 'pending'"
-        :type="waitChipType"
-        size="large"
-        effect="plain"
-        data-testid="approval-wait-chip"
-      >
-        已等待 {{ waitChipLabel }}
-      </el-tag>
-      <el-tag
-        v-if="approval && isInParallelRegion"
-        type="warning"
-        size="large"
-        class="approval-detail__parallel-badge"
-        effect="light"
-      >
-        并行中 · {{ parallelBranchNodeKeys.map(nodeLabel).join(' / ') }}
-      </el-tag>
-      <!-- B1-01: my-turn cue — the reader is an active assignee at the current node(s). -->
-      <el-tag
-        v-if="approval && isMyTurn"
-        type="success"
-        size="large"
-        effect="light"
-        data-testid="approval-my-turn-badge"
-      >
-        等待你处理
-      </el-tag>
-    </header>
+  <PageShell width="default">
+    <PageHeader
+      class="approval-detail__header"
+      :title="headerTitle"
+      back
+      back-label="返回列表"
+      @back="goBack"
+    >
+      <template #actions>
+        <!-- B3-13 打印/复制: display-only utilities — copy the key fields + link as a plain-text
+             summary, or open the browser print dialog (the @media print block below hides the
+             interactive chrome). Both hidden until the detail is loaded (nothing to copy/print). -->
+        <el-button
+          v-if="approval"
+          plain
+          class="approval-detail__hide-on-print"
+          data-testid="approval-copy-summary-button"
+          @click="handleCopySummary"
+        >
+          复制摘要
+        </el-button>
+        <el-button
+          v-if="approval"
+          plain
+          class="approval-detail__hide-on-print"
+          data-testid="approval-print-button"
+          @click="handlePrint"
+        >
+          打印
+        </el-button>
+        <!-- G-B2-10: appears only after a successful approve/reject AND with another pending
+             item available in the store list (deep-link entries with no list render nothing). -->
+        <el-button
+          v-if="showNextEntry && nextPendingApproval"
+          type="primary"
+          class="approval-detail__hide-on-print"
+          data-testid="approval-next-pending"
+          @click="goNextPending"
+        >
+          下一条 →
+        </el-button>
+      </template>
+      <template v-if="approval" #meta>
+        <StatusTag domain="approvalInstance" :status="approval.status" force-locale="zh" />
+        <!-- B1-03: 已等待 aging — glanceable next to the status tag, only while still pending. -->
+        <el-tag
+          v-if="approval.status === 'pending'"
+          :type="waitChipType"
+          size="large"
+          effect="plain"
+          data-testid="approval-wait-chip"
+        >
+          已等待 {{ waitChipLabel }}
+        </el-tag>
+        <el-tag
+          v-if="isInParallelRegion"
+          type="warning"
+          size="large"
+          class="approval-detail__parallel-badge"
+          effect="light"
+        >
+          并行中 · {{ parallelBranchNodeKeys.map(nodeLabel).join(' / ') }}
+        </el-tag>
+        <!-- B1-01: my-turn cue — the reader is an active assignee at the current node(s). -->
+        <el-tag
+          v-if="isMyTurn"
+          type="success"
+          size="large"
+          effect="light"
+          data-testid="approval-my-turn-badge"
+        >
+          等待你处理
+        </el-tag>
+      </template>
+    </PageHeader>
 
     <el-alert
       v-if="store.error"
@@ -58,7 +89,34 @@
       </template>
     </el-alert>
 
-    <div v-loading="store.loading" class="approval-detail__content-wrapper">
+    <div v-loading="store.loading && !!approval" class="approval-detail__content-wrapper">
+      <!-- UF-8 (design-lock §3.6): first paint only — no `approval` yet AND still loading. Once
+           data arrives, `v-loading` above takes over for subsequent refreshes. B3-13: the two
+           inline el-skeleton blocks (3-row form + 6-row timeline) moved verbatim into the shared
+           AsyncStateBlock; same texture, one reusable renderer. -->
+      <AsyncStateBlock
+        v-if="!approval && store.loading"
+        state="loading"
+        :skeleton-rows="[3, 6]"
+        data-testid="detail-skeleton"
+      />
+      <!-- B3-13 空态 CTA: deep link to a deleted/foreign/unreachable instance previously rendered
+           a BLANK content area (only the top error alert). `getApproval` either resolves a DTO or
+           throws, so "not loading and still no approval" IS the not-found/failed-load state. -->
+      <AsyncStateBlock
+        v-else-if="!approval"
+        state="empty"
+        title="未找到该审批"
+        hint="该审批可能已被删除、链接有误或暂时无法加载"
+        data-testid="detail-not-found"
+      >
+        <template #action>
+          <el-button type="primary" data-testid="approval-not-found-retry" @click="retryLoad">
+            重新加载
+          </el-button>
+          <el-button data-testid="approval-not-found-back" @click="goBack">返回列表</el-button>
+        </template>
+      </AsyncStateBlock>
       <div v-if="approval" class="approval-detail__body">
         <!-- Left: form snapshot -->
         <div class="approval-detail__form">
@@ -165,7 +223,7 @@
                   >
                     <div class="approval-detail__timeline-content">
                       <div class="approval-detail__timeline-header">
-                        <strong>{{ item.metadata?.autoApproved ? '系统自动审批' : (item.actorName ?? '系统') }}</strong>
+                        <span class="approval-detail__actor-avatar" aria-hidden="true">{{ actorInitial(item) }}</span><strong>{{ item.metadata?.autoApproved ? '系统自动审批' : (item.actorName ?? '系统') }}</strong>
                         <el-tag :type="timelineActionTagType(item.action, item.metadata)" size="small">
                           {{ actionLabel(item.action, item.metadata) }}
                         </el-tag>
@@ -190,7 +248,7 @@
                           退回至: {{ nodeLabel(item.metadata.targetNodeKey as string) }}
                         </span>
                         <span v-if="item.metadata?.nodeKey" class="approval-detail__meta-badge">
-                          节点: {{ item.metadata.nodeKey }}
+                          节点: {{ nodeLabel(item.metadata.nodeKey as string) }}
                         </span>
                       </div>
                     </div>
@@ -211,7 +269,7 @@
               >
                 <div class="approval-detail__timeline-content">
                   <div class="approval-detail__timeline-header">
-                    <strong>{{ item.metadata?.autoApproved ? '系统自动审批' : (item.actorName ?? '系统') }}</strong>
+                    <span class="approval-detail__actor-avatar" aria-hidden="true">{{ actorInitial(item) }}</span><strong>{{ item.metadata?.autoApproved ? '系统自动审批' : (item.actorName ?? '系统') }}</strong>
                     <el-tag :type="timelineActionTagType(item.action, item.metadata)" size="small">
                       {{ actionLabel(item.action, item.metadata) }}
                     </el-tag>
@@ -236,7 +294,7 @@
                       退回至: {{ nodeLabel(item.metadata.targetNodeKey as string) }}
                     </span>
                     <span v-if="item.metadata?.nodeKey" class="approval-detail__meta-badge">
-                      节点: {{ item.metadata.nodeKey }}
+                      节点: {{ nodeLabel(item.metadata.nodeKey as string) }}
                     </span>
                   </div>
                 </div>
@@ -287,11 +345,16 @@
       <!-- Action bar -->
       <div v-if="approval" class="approval-detail__actions">
         <template v-if="approval.status === 'pending'">
+          <!-- B3-13 按动作 loading: every action button binds to `inFlightAction === '<its own
+               action>'` instead of the store-global `loading` flag, so only the button whose
+               request is actually in flight spins/disables — the rest of the bar stays usable
+               (and a detail/history refresh no longer spins the whole bar). -->
           <div class="approval-detail__actions-primary">
             <el-button
               v-if="canAct"
               type="success"
-              :loading="store.loading"
+              :loading="inFlightAction === 'approve'"
+              data-testid="approval-approve-button"
               @click="openActionDialog('approve')"
             >
               通过
@@ -299,7 +362,8 @@
             <el-button
               v-if="canAct"
               type="danger"
-              :loading="store.loading"
+              :loading="inFlightAction === 'reject'"
+              data-testid="approval-reject-button"
               @click="openActionDialog('reject')"
             >
               驳回
@@ -314,7 +378,8 @@
             <el-button
               v-if="canAct && !isMobileLayout && returnableNodes.length > 0"
               type="warning"
-              :loading="store.loading"
+              :loading="inFlightAction === 'return'"
+              data-testid="approval-return-button"
               @click="openReturnDialog"
             >
               退回
@@ -322,7 +387,8 @@
             <el-button
               v-if="canAct && !isMobileLayout"
               type="warning"
-              :loading="store.loading"
+              :loading="inFlightAction === 'transfer'"
+              data-testid="approval-transfer-button"
               @click="openTransferDialog"
             >
               转交
@@ -332,7 +398,7 @@
               v-if="canAct && !isMobileLayout"
               type="primary"
               plain
-              :loading="store.loading"
+              :loading="inFlightAction === 'add_sign'"
               data-testid="approval-add-sign-button"
               @click="openAddSignDialog"
             >
@@ -344,7 +410,7 @@
               v-if="canAct && !isMobileLayout && reducibleAssignees.length > 0"
               type="primary"
               plain
-              :loading="store.loading"
+              :loading="inFlightAction === 'reduce_sign'"
               data-testid="approval-reduce-sign-button"
               @click="openReduceSignDialog"
             >
@@ -361,20 +427,39 @@
               data-testid="approval-remind-button"
               @click="handleRemind"
             >
-              <el-icon style="margin-right: 4px"><Bell /></el-icon>催一下
+              <el-icon class="ms-mr-4"><Bell /></el-icon>催一下
             </el-button>
+            <!-- B3-13 撤回策略感知: the instance policy snapshot's `allowRevoke` (frozen from the
+                 published runtime graph at creation; enforced fail-closed server-side with a 409
+                 APPROVAL_REVOKE_DISABLED) finally gates the affordance — a 撤回-disabled template
+                 no longer shows a button that can only fail at click time. Strict `=== true`
+                 check via `allowRevoke` below: absent/legacy/null policy hides it (fail-closed,
+                 mirroring the backend default-deny for instances without a runtime graph). -->
             <el-popconfirm
-              v-if="isRequester && !isMobileLayout"
+              v-if="isRequester && !isMobileLayout && allowRevoke"
               title="确认撤回此审批？"
               confirm-button-text="确认"
               cancel-button-text="取消"
               @confirm="handleRevoke"
             >
               <template #reference>
-                <el-button type="info" :loading="store.loading">撤回</el-button>
+                <el-button
+                  type="info"
+                  :loading="inFlightAction === 'revoke'"
+                  data-testid="approval-revoke-button"
+                >
+                  撤回
+                </el-button>
               </template>
             </el-popconfirm>
-            <el-button plain :loading="store.loading" @click="openCommentDialog">评论</el-button>
+            <el-button
+              plain
+              :loading="inFlightAction === 'comment'"
+              data-testid="approval-comment-button"
+              @click="openCommentDialog"
+            >
+              评论
+            </el-button>
           </div>
         </template>
         <template v-else>
@@ -383,7 +468,7 @@
             type="info"
             show-icon
             :closable="false"
-            style="flex: 1"
+            class="ms-flex-1"
           />
           <!-- UX B2-13: 再次提交 — own+terminal (rejected/revoked/cancelled) only; see
                `canResubmit`/`handleResubmit`. -->
@@ -446,8 +531,9 @@
         <el-button @click="actionDialogVisible = false">取消</el-button>
         <el-button
           :type="currentAction === 'approve' ? 'success' : 'danger'"
-          :loading="store.loading"
+          :loading="inFlightAction === currentAction"
           :disabled="actionConfirmDisabled"
+          data-testid="approval-action-dialog-confirm"
           @click="submitAction"
         >
           确认
@@ -480,7 +566,12 @@
       </el-form>
       <template #footer>
         <el-button @click="transferDialogVisible = false">取消</el-button>
-        <el-button type="warning" :loading="store.loading" @click="submitTransfer">
+        <el-button
+          type="warning"
+          :loading="inFlightAction === 'transfer'"
+          data-testid="approval-transfer-submit"
+          @click="submitTransfer"
+        >
           确认转交
         </el-button>
       </template>
@@ -534,7 +625,7 @@
         <el-button @click="addSignDialogVisible = false">取消</el-button>
         <el-button
           type="primary"
-          :loading="store.loading"
+          :loading="inFlightAction === 'add_sign'"
           :disabled="addSignUserIds.length === 0"
           data-testid="approval-add-sign-submit"
           @click="submitAddSign"
@@ -556,7 +647,7 @@
             v-model="reduceSignUserId"
             filterable
             placeholder="选择要移除的加签人"
-            style="width: 100%"
+            class="ms-w-100pct"
             data-testid="approval-reduce-sign-user"
           >
             <el-option
@@ -580,7 +671,7 @@
         <el-button @click="reduceSignDialogVisible = false">取消</el-button>
         <el-button
           type="primary"
-          :loading="store.loading"
+          :loading="inFlightAction === 'reduce_sign'"
           :disabled="!reduceSignUserId"
           data-testid="approval-reduce-sign-submit"
           @click="submitReduceSign"
@@ -631,7 +722,12 @@
       </el-form>
       <template #footer>
         <el-button @click="commentDialogVisible = false">取消</el-button>
-        <el-button type="primary" :loading="store.loading" @click="submitComment">
+        <el-button
+          type="primary"
+          :loading="inFlightAction === 'comment'"
+          data-testid="approval-comment-submit"
+          @click="submitComment"
+        >
           提交评论
         </el-button>
       </template>
@@ -645,7 +741,7 @@
     >
       <el-form>
         <el-form-item label="退回至节点">
-          <el-select v-model="returnTargetNodeKey" placeholder="选择退回目标节点" style="width: 100%">
+          <el-select v-model="returnTargetNodeKey" placeholder="选择退回目标节点" class="ms-w-100pct">
             <el-option
               v-for="node in returnableNodes"
               :key="node.key"
@@ -665,20 +761,26 @@
       </el-form>
       <template #footer>
         <el-button @click="returnDialogVisible = false">取消</el-button>
-        <el-button type="warning" :loading="store.loading" @click="submitReturn">
+        <el-button
+          type="warning"
+          :loading="inFlightAction === 'return'"
+          data-testid="approval-return-submit"
+          @click="submitReturn"
+        >
           确认退回
         </el-button>
       </template>
     </el-dialog>
-  </section>
+  </PageShell>
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
+import PageShell from '../../components/layout/PageShell.vue'
+import PageHeader from '../../components/layout/PageHeader.vue'
 import {
-  ArrowLeft,
   Check,
   Close,
   Right,
@@ -707,6 +809,9 @@ import {
 import { phrasesForAction, recentPhrases, rememberPhrase } from '../../approvals/quickPhrases'
 import { formatRelativeWait, waitSeverity } from '../../approvals/relativeWait'
 import { buildUpcomingNodes, type UpcomingApprovalNode } from '../../approvals/upcomingNodes'
+import StatusTag from '../../components/status/StatusTag.vue'
+import AsyncStateBlock from '../../components/status/AsyncStateBlock.vue'
+import { resolveStatusDisplay } from '../../utils/statusDomains'
 
 const route = useRoute()
 const router = useRouter()
@@ -726,6 +831,9 @@ const { isMobile } = useMobileViewport()
 const isMobileLayout = computed(() => hasFeature('approvalMobile') && isMobile.value)
 
 const approval = computed(() => store.activeApproval)
+// PageHeader requires a non-optional title; before the detail loads (or on error) fall back to
+// the same generic copy the original hand-rolled `<h1 v-if="approval">` used.
+const headerTitle = computed(() => approval.value?.title ?? '审批详情')
 
 // B1-03: 已等待 chip — a glanceable "how long has this been sitting" cue next to the status tag,
 // only meaningful while the instance is still pending (once resolved, `updatedAt`/the history
@@ -778,6 +886,15 @@ const currentUserId = ref<string | null>(((): string | null => {
 const isRequester = computed(() => {
   return !!currentUserId.value && approval.value?.requester?.id === currentUserId.value
 })
+
+// B3-13 撤回策略感知: the instance DTO's `policy` snapshot carries `allowRevoke`, written at
+// creation from the published runtime graph (backend ApprovalProductService — the same flag the
+// server enforces fail-closed on the revoke action with 409 APPROVAL_REVOKE_DISABLED). It had 0
+// FE consumers: every requester saw a 撤回 button that, on a 撤回-disabled template, could only
+// fail at click time. STRICT `=== true`: an absent/legacy/null policy (e.g. externally-synced
+// instances) hides the affordance — fail-closed, mirroring the backend's default-deny for
+// instances without a runtime graph. Consumes the existing flag only; no new policy invented.
+const allowRevoke = computed(() => approval.value?.policy?.allowRevoke === true)
 
 // UX B2-13 (再次提交) — the reject→fix→resubmit loop is a requester's biggest-friction moment
 // today (hand-retype the whole form). Eligible ONLY for the CURRENT USER'S OWN instance (reuses
@@ -920,7 +1037,7 @@ const upcomingTimelineNodes = computed<UpcomingApprovalNode[]>(() => {
   if (!currentNodeKey) return []
   const graph = pinnedGraph.value
   if (!graph) return []
-  return buildUpcomingNodes(graph, currentNodeKey)
+  return buildUpcomingNodes(graph, currentNodeKey, approval.value?.formSchema ?? null)
 })
 
 const actionDialogVisible = ref(false)
@@ -935,6 +1052,13 @@ const actionComment = ref('')
 // typed comment — the dialog stays open (see `submitAction`/`submitComment`). Non-dialog actions
 // (revoke's popconfirm) are unaffected and keep their existing toast.
 const actionDialogError = ref<string | null>(null)
+// B3-13 按动作 loading: which action's request is in flight right now (null = none). Each action
+// button/dialog-confirm binds `:loading` to `inFlightAction === '<its action>'` so ONLY the
+// button whose request is running spins/disables — the store-global `loading` flag (also set by
+// plain detail/history refreshes) no longer freezes the whole bar. Every submit helper sets it
+// in a try/finally, so it clears on success AND failure; the shared early-return below keeps the
+// previous one-action-at-a-time behavior without visually disabling the other buttons.
+const inFlightAction = ref<ApprovalActionType | null>(null)
 const transferUserId = ref('')
 const returnTargetNodeKey = ref('')
 // P1-B 加签/减签 dialog state.
@@ -1030,6 +1154,12 @@ function rememberQuickPhraseIfOffered(comment: string): void {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+// UF-3: the header status tag now renders via <StatusTag domain="approvalInstance"> (see
+// utils/statusDomains.ts). `statusTagType` stays — it's still used below by
+// `timelineActionTagType` to color the timeline's per-entry ACTION tag (approve/reject/pending
+// are borrowed here as an action-outcome palette, not a rendered instance status — the timeline's
+// own event-kind badges like 自动审批/会签完成/退回 are a separate, out-of-scope concept; see
+// `.approval-detail__meta-badge*`).
 function statusTagType(status: string) {
   const map: Record<string, string> = {
     pending: 'warning',
@@ -1039,17 +1169,6 @@ function statusTagType(status: string) {
     cancelled: 'info',
   }
   return map[status] ?? ''
-}
-
-function statusLabel(status: string) {
-  const map: Record<string, string> = {
-    pending: '待处理',
-    approved: '已通过',
-    rejected: '已驳回',
-    revoked: '已撤回',
-    cancelled: '已取消',
-  }
-  return map[status] ?? status
 }
 
 function actionLabel(action: string, metadata?: Record<string, unknown>) {
@@ -1066,8 +1185,16 @@ function actionLabel(action: string, metadata?: Record<string, unknown>) {
     sign: '签字',
     add_sign: '加签',
     reduce_sign: '减签',
+    cc: '抄送',
   }
   return map[action] ?? action
+}
+
+// G-B2-09: initial-letter avatar for timeline actors — display only, token-styled.
+function actorInitial(item: { actorName?: string | null; metadata?: Record<string, unknown> | null }): string {
+  if (item.metadata?.autoApproved) return '系'
+  const name = (item.actorName ?? '').trim()
+  return name ? Array.from(name)[0]! : '系'
 }
 
 function timelineItemType(action: string, toStatus: string): string {
@@ -1158,6 +1285,24 @@ function goBack() {
   router.push({ name: 'approval-list' })
 }
 
+// G-B2-10: after a successful approve/reject, offer the next pending item — clearing N items
+// costs N×(back+scan+click) without it. Target computed at CLICK time from the store's pending
+// list (freshest view), always excluding the just-acted instance; deep-link entries with an
+// empty/unloaded list simply render no button (no new fetch — display only).
+const showNextEntry = ref(false)
+
+const nextPendingApproval = computed(() => {
+  const currentId = route.params.id as string
+  return store.pendingApprovals.find((entry) => entry.id !== currentId) ?? null
+})
+
+function goNextPending() {
+  const next = nextPendingApproval.value
+  if (!next) return
+  showNextEntry.value = false
+  router.push({ name: 'approval-detail', params: { id: next.id } })
+}
+
 function retryLoad() {
   const id = route.params.id as string
   store.error = null
@@ -1244,8 +1389,10 @@ async function refreshAfterStaleMobileAction(id: string, error: unknown): Promis
 
 async function submitAction() {
   if (actionConfirmDisabled.value) return
+  if (inFlightAction.value) return
   const id = route.params.id as string
   actionDialogError.value = null
+  inFlightAction.value = currentAction.value
   try {
     await store.executeAction(id, {
       action: currentAction.value,
@@ -1254,18 +1401,23 @@ async function submitAction() {
     ElMessage.success(currentAction.value === 'approve' ? '审批已通过' : '审批已驳回')
     rememberQuickPhraseIfOffered(actionComment.value)
     actionDialogVisible.value = false
+    showNextEntry.value = true
     await store.loadHistory(id)
   } catch (error) {
     // B1-04: keep the dialog open + show the server's own reason inline instead of a generic
     // toast (see `actionDialogError` above); non-dialog actions further down keep their toasts.
     actionDialogError.value = dialogErrorMessage(error, '操作失败，请重试')
     await refreshAfterStaleMobileAction(id, error)
+  } finally {
+    inFlightAction.value = null
   }
 }
 
 async function submitTransfer() {
   if (!transferUserId.value) return
+  if (inFlightAction.value) return
   const id = route.params.id as string
+  inFlightAction.value = 'transfer'
   try {
     await store.executeAction(id, {
       action: 'transfer',
@@ -1277,6 +1429,8 @@ async function submitTransfer() {
     await store.loadHistory(id)
   } catch {
     ElMessage.error('转交失败，请重试')
+  } finally {
+    inFlightAction.value = null
   }
 }
 
@@ -1307,7 +1461,9 @@ function removeAddSignUser(id: string): void {
 
 async function submitAddSign() {
   if (addSignUserIds.value.length === 0) return
+  if (inFlightAction.value) return
   const id = route.params.id as string
+  inFlightAction.value = 'add_sign'
   try {
     await store.executeAction(id, {
       action: 'add_sign',
@@ -1320,6 +1476,8 @@ async function submitAddSign() {
     await store.loadHistory(id)
   } catch {
     ElMessage.error('加签失败，请重试')
+  } finally {
+    inFlightAction.value = null
   }
 }
 
@@ -1331,7 +1489,9 @@ function openReduceSignDialog() {
 
 async function submitReduceSign() {
   if (!reduceSignUserId.value) return
+  if (inFlightAction.value) return
   const id = route.params.id as string
+  inFlightAction.value = 'reduce_sign'
   try {
     await store.executeAction(id, {
       action: 'reduce_sign',
@@ -1343,13 +1503,17 @@ async function submitReduceSign() {
     await store.loadHistory(id)
   } catch {
     ElMessage.error('减签失败，请重试')
+  } finally {
+    inFlightAction.value = null
   }
 }
 
 async function submitComment() {
   if (!actionComment.value.trim()) return
+  if (inFlightAction.value) return
   const id = route.params.id as string
   actionDialogError.value = null
+  inFlightAction.value = 'comment'
   try {
     await store.executeAction(id, {
       action: 'comment',
@@ -1363,12 +1527,16 @@ async function submitComment() {
     // B1-04: same dialog-scoped inline error as `submitAction` above.
     actionDialogError.value = dialogErrorMessage(error, '评论提交失败，请重试')
     await refreshAfterStaleMobileAction(id, error)
+  } finally {
+    inFlightAction.value = null
   }
 }
 
 async function submitReturn() {
   if (!returnTargetNodeKey.value) return
+  if (inFlightAction.value) return
   const id = route.params.id as string
+  inFlightAction.value = 'return'
   try {
     await store.executeAction(id, {
       action: 'return',
@@ -1380,18 +1548,64 @@ async function submitReturn() {
     await store.loadHistory(id)
   } catch {
     ElMessage.error('退回失败，请重试')
+  } finally {
+    inFlightAction.value = null
   }
 }
 
 async function handleRevoke() {
+  if (inFlightAction.value) return
   const id = route.params.id as string
+  inFlightAction.value = 'revoke'
   try {
     await store.executeAction(id, { action: 'revoke' })
     ElMessage.success('审批已撤回')
     await store.loadHistory(id)
   } catch {
     ElMessage.error('撤回失败，请重试')
+  } finally {
+    inFlightAction.value = null
   }
+}
+
+// ---------------------------------------------------------------------------
+// B3-13 打印/复制 — display-only utilities in the page header.
+// ---------------------------------------------------------------------------
+// 复制摘要: the approval's key fields + a link back to this detail route as plain text, for
+// pasting into chat/email when asking someone to handle or unblock an approval. Status label
+// reuses the shared statusDomains vocabulary (same table the header StatusTag renders from) —
+// no second status→label map. Field values reuse the exact formatters the visible meta grid
+// uses, so the copied text always matches what the reader sees on screen.
+function buildApprovalSummary(): string | null {
+  const detail = approval.value
+  if (!detail) return null
+  return [
+    `审批：${detail.title ?? '-'}`,
+    `编号：${detail.requestNo ?? '-'}`,
+    `状态：${resolveStatusDisplay('approvalInstance', detail.status, true).label}`,
+    `发起人：${detail.requester?.name ?? '-'}`,
+    `发起时间：${formatDate(detail.createdAt)}`,
+    `进度：${detail.currentStep ?? '-'} / ${detail.totalSteps ?? '-'}`,
+    `链接：${window.location.href}`,
+  ].join('\n')
+}
+
+async function handleCopySummary() {
+  const text = buildApprovalSummary()
+  if (!text) return
+  try {
+    await navigator.clipboard.writeText(text)
+    ElMessage.success('审批摘要已复制')
+  } catch {
+    // Clipboard API unavailable (insecure context / older browser) or permission denied.
+    ElMessage.error('复制失败，请重试')
+  }
+}
+
+// 打印: hand off to the browser's print dialog; the scoped `@media print` block hides the
+// sticky action bar + header buttons and collapses the two-column body (see <style>).
+function handlePrint() {
+  window.print()
 }
 
 // Wave 2 WP3 slice 1: 催办. Loading state is local to this button so the main
@@ -1434,7 +1648,9 @@ async function handleRemind() {
 // ---------------------------------------------------------------------------
 // Lifecycle
 // ---------------------------------------------------------------------------
-onMounted(async () => {
+// G-B2-10: extracted from onMounted so detail→detail navigation (下一条 →) reloads — the router
+// reuses this component instance on a params-only change, so onMounted alone would show stale data.
+async function loadDetailPage() {
   const id = route.params.id as string
   // Wave 2 WP3 slice 2 — fire-and-forget mark-read. Runs in parallel with the
   // detail load so the unread badge drops immediately while the detail view
@@ -1469,30 +1685,23 @@ onMounted(async () => {
     }
     await Promise.all(templateFetches)
   }
-})
+}
+
+onMounted(loadDetailPage)
+
+// Params-only navigation (下一条 →): reset the next-entry offer and reload for the new instance.
+watch(
+  () => route.params.id,
+  (next, prev) => {
+    if (typeof next === 'string' && next && next !== prev) {
+      showNextEntry.value = false
+      void loadDetailPage()
+    }
+  },
+)
 </script>
 
 <style scoped>
-.approval-detail {
-  max-width: 1200px;
-  margin: 0 auto;
-  padding: 24px;
-}
-
-.approval-detail__header {
-  display: flex;
-  align-items: center;
-  gap: 16px;
-  margin-bottom: 20px;
-}
-
-.approval-detail__header h1 {
-  font-size: 20px;
-  font-weight: 600;
-  margin: 0;
-  flex: 1;
-}
-
 .approval-detail__error {
   margin-bottom: 16px;
 }
@@ -1506,6 +1715,9 @@ onMounted(async () => {
   min-height: 200px;
 }
 
+/* UF-8: first-paint skeleton (form snapshot + timeline) — markup + spacing now live in the
+   shared AsyncStateBlock (see the wrapper's v-if/v-loading split). */
+
 .approval-detail__body {
   display: grid;
   grid-template-columns: 1fr 400px;
@@ -1513,9 +1725,24 @@ onMounted(async () => {
 }
 
 .approval-detail__form,
+.approval-detail__actor-avatar {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  margin-right: var(--ms-space-2);
+  border-radius: 50%;
+  background: var(--el-color-primary-light-9);
+  color: var(--el-color-primary);
+  font-size: 12px;
+  font-weight: 600;
+  vertical-align: middle;
+}
+
 .approval-detail__timeline {
-  background: #fff;
-  border: 1px solid var(--el-border-color-lighter, #e4e7ed);
+  background: var(--ms-bg-card);
+  border: 1px solid var(--el-border-color-lighter);
   border-radius: 8px;
   padding: 20px;
 }
@@ -1541,7 +1768,7 @@ onMounted(async () => {
 
 .approval-detail__label {
   font-size: 12px;
-  color: var(--el-text-color-secondary, #909399);
+  color: var(--el-text-color-secondary);
 }
 
 .approval-detail__snapshot {
@@ -1591,7 +1818,7 @@ onMounted(async () => {
 
 .approval-detail__timeline-comment {
   margin: 4px 0 0;
-  color: var(--el-text-color-regular, #606266);
+  color: var(--el-text-color-regular);
   font-size: 13px;
 }
 
@@ -1607,23 +1834,23 @@ onMounted(async () => {
   font-size: 11px;
   padding: 1px 6px;
   border-radius: 4px;
-  background: var(--el-fill-color-light, #f5f7fa);
-  color: var(--el-text-color-secondary, #909399);
+  background: var(--el-fill-color-light);
+  color: var(--el-text-color-secondary);
 }
 
 .approval-detail__meta-badge--auto {
-  background: #e6f7ff;
-  color: #1890ff;
+  background: var(--el-color-primary-light-9);
+  color: var(--el-color-primary);
 }
 
 .approval-detail__meta-badge--complete {
-  background: #f6ffed;
-  color: #52c41a;
+  background: var(--el-color-success-light-9);
+  color: var(--el-color-success);
 }
 
 .approval-detail__meta-badge--return {
-  background: #fff7e6;
-  color: #fa8c16;
+  background: var(--el-color-warning-light-9);
+  color: var(--el-color-warning);
 }
 
 .approval-detail__parallel-badge {
@@ -1633,11 +1860,11 @@ onMounted(async () => {
 }
 
 .approval-detail__timeline-group {
-  border: 1px solid var(--el-border-color-lighter, #e4e7ed);
+  border: 1px solid var(--el-border-color-lighter);
   border-radius: 6px;
   padding: 12px 16px;
   margin-bottom: 12px;
-  background: var(--el-fill-color-blank, #fff);
+  background: var(--el-fill-color-blank);
 }
 
 .approval-detail__timeline-group-header {
@@ -1646,17 +1873,17 @@ onMounted(async () => {
   justify-content: space-between;
   margin-bottom: 8px;
   padding-bottom: 6px;
-  border-bottom: 1px dashed var(--el-border-color-lighter, #ebedf0);
+  border-bottom: 1px dashed var(--el-border-color-lighter);
 }
 
 .approval-detail__timeline-group-label {
   font-weight: 600;
-  color: var(--el-text-color-primary, #303133);
+  color: var(--el-text-color-primary);
 }
 
 .approval-detail__timeline-group-count {
   font-size: 12px;
-  color: var(--el-text-color-secondary, #606266);
+  color: var(--el-text-color-secondary);
 }
 
 /* UX B2-08: synthesized "current handler + upcoming nodes" rail, appended after the real
@@ -1666,7 +1893,7 @@ onMounted(async () => {
 .approval-detail__timeline-upcoming {
   margin-top: 16px;
   padding-top: 12px;
-  border-top: 1px dashed var(--el-border-color-lighter, #e4e7ed);
+  border-top: 1px dashed var(--el-border-color-lighter);
   display: flex;
   flex-direction: column;
   gap: 10px;
@@ -1686,20 +1913,20 @@ onMounted(async () => {
   height: 8px;
   margin-top: 4px;
   border-radius: 50%;
-  background: var(--el-color-primary, #409eff);
+  background: var(--el-color-primary);
 }
 
 .approval-detail__timeline-upcoming-item--future .approval-detail__timeline-upcoming-dot {
-  background: var(--el-text-color-placeholder, #c0c4cc);
+  background: var(--el-text-color-placeholder);
 }
 
 .approval-detail__timeline-upcoming-item--current .approval-detail__timeline-upcoming-text {
-  color: var(--el-text-color-primary, #303133);
+  color: var(--el-text-color-primary);
   font-weight: 500;
 }
 
 .approval-detail__timeline-upcoming-item--future .approval-detail__timeline-upcoming-text {
-  color: var(--el-text-color-placeholder, #909399);
+  color: var(--el-text-color-placeholder);
 }
 
 .approval-detail__timeline-upcoming-summary {
@@ -1713,8 +1940,8 @@ onMounted(async () => {
   margin-top: 24px;
   padding: 16px 20px;
   padding-bottom: calc(8px + env(safe-area-inset-bottom));
-  background: var(--el-bg-color, #fff);
-  border: 1px solid var(--el-border-color-lighter, #e4e7ed);
+  background: var(--el-bg-color);
+  border: 1px solid var(--el-border-color-lighter);
   border-radius: 8px;
   display: flex;
   align-items: center;
@@ -1740,10 +1967,6 @@ onMounted(async () => {
    approve/reject/comment (deferred actions hidden), so the remaining controls
    are laid out as full-width, comfortably tappable rows. */
 @media (max-width: 768px) {
-  .approval-detail {
-    padding: 16px 12px;
-  }
-
   .approval-detail__body {
     grid-template-columns: 1fr;
   }
@@ -1780,6 +2003,21 @@ onMounted(async () => {
   .approval-detail__actions-secondary :deep(.el-button) {
     width: 100%;
     margin-left: 0;
+  }
+}
+
+/* B3-13 打印: paper gets the form snapshot + timeline only — the sticky action bar and the
+   header's utility buttons (复制摘要/打印/下一条) are interactive chrome with no meaning on
+   paper, and the two-column grid collapses so the timeline prints below the form instead of
+   being crushed into a 400px rail. */
+@media print {
+  .approval-detail__actions,
+  .approval-detail__hide-on-print {
+    display: none;
+  }
+
+  .approval-detail__body {
+    grid-template-columns: 1fr;
   }
 }
 </style>

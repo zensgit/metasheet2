@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createApp, nextTick, type App } from 'vue'
+import { ElMessageBox } from 'element-plus'
 import DirectoryManagementView from '../src/views/DirectoryManagementView.vue'
 
 const apiFetchMock = vi.fn()
@@ -3488,6 +3489,177 @@ describe('DirectoryManagementView', () => {
     expect(container?.textContent).toContain('暂无待处理项')
   })
 
+  it('reports a partial-failure status when batch-bind commits some items but not all', async () => {
+    apiFetchMock
+      .mockResolvedValueOnce(createJsonResponse({
+        ok: true,
+        data: {
+          items: [createIntegration()],
+        },
+      }))
+      .mockResolvedValueOnce(createJsonResponse({
+        ok: true,
+        data: { items: [] },
+      }))
+      .mockResolvedValueOnce(createJsonResponse(
+        createScheduleSnapshotPayload(),
+      ))
+      .mockResolvedValueOnce(createJsonResponse(
+        createAlertListPayload([]),
+      ))
+      .mockResolvedValueOnce(createJsonResponse(
+        createReviewItemsPayload([
+          {
+            kind: 'pending_binding',
+            reason: '目录成员尚未绑定本地用户。',
+            account: createAccount({
+              id: 'account-1',
+              name: '成员一',
+              externalUserId: '0447654442691174',
+            }),
+            flags: {
+              missingUnionId: false,
+              missingOpenId: true,
+            },
+            actionable: {
+              canBatchUnbind: false,
+            },
+          },
+          {
+            kind: 'pending_binding',
+            reason: '目录成员尚未绑定本地用户。',
+            account: createAccount({
+              id: 'account-2',
+              name: '成员二',
+              externalUserId: '0447654442691175',
+            }),
+            flags: {
+              missingUnionId: true,
+              missingOpenId: false,
+            },
+            actionable: {
+              canBatchUnbind: false,
+            },
+          },
+        ]),
+      ))
+      .mockResolvedValueOnce(createJsonResponse(
+        createAccountListPayload([
+          createAccount({
+            id: 'account-1',
+            name: '成员一',
+          }),
+          createAccount({
+            id: 'account-2',
+            name: '成员二',
+          }),
+        ]),
+      ))
+      .mockResolvedValueOnce(createJsonResponse({
+        ok: true,
+        data: {
+          items: [
+            {
+              accountId: 'account-1',
+              localUserRef: 'alpha@example.com',
+              enableDingTalkGrant: true,
+            },
+          ],
+          updatedCount: 1,
+          failedCount: 1,
+          failed: [
+            { accountId: 'account-2', error: 'Directory account is already linked to a local user' },
+          ],
+        },
+      }))
+      .mockResolvedValueOnce(createJsonResponse({
+        ok: true,
+        data: {
+          items: [createIntegration()],
+        },
+      }))
+      .mockResolvedValueOnce(createJsonResponse(
+        createReviewItemsPayload([]),
+      ))
+      .mockResolvedValueOnce(createJsonResponse(
+        createAccountListPayload([
+          createAccount({
+            id: 'account-1',
+            name: '成员一',
+            linkStatus: 'linked',
+            matchStrategy: 'manual_admin',
+            localUser: {
+              id: 'user-1',
+              email: 'alpha@example.com',
+              name: 'Alpha',
+            },
+          }),
+          createAccount({
+            id: 'account-2',
+            name: '成员二',
+          }),
+        ]),
+      ))
+
+    app = createApp(DirectoryManagementView)
+    app.component('RouterLink', {
+      props: ['to'],
+      template: '<a><slot /></a>',
+    })
+    app.mount(container!)
+    await flushUi()
+
+    const pendingInputs = Array.from(container!.querySelectorAll('.directory-admin__review-item input[placeholder="例如 user-123 或 alpha@example.com"]')) as HTMLInputElement[]
+    expect(pendingInputs).toHaveLength(2)
+    pendingInputs[0].value = 'alpha@example.com'
+    pendingInputs[0].dispatchEvent(new Event('input', { bubbles: true }))
+    pendingInputs[1].value = 'beta@example.com'
+    pendingInputs[1].dispatchEvent(new Event('input', { bubbles: true }))
+    await flushUi(2)
+
+    const reviewCheckboxes = Array.from(container!.querySelectorAll('.directory-admin__review-item .directory-admin__review-select input[type="checkbox"]')) as HTMLInputElement[]
+    reviewCheckboxes[0].checked = true
+    reviewCheckboxes[0].dispatchEvent(new Event('change', { bubbles: true }))
+    reviewCheckboxes[1].checked = true
+    reviewCheckboxes[1].dispatchEvent(new Event('change', { bubbles: true }))
+    await flushUi(2)
+
+    const batchButton = Array.from(container!.querySelectorAll('button')).find((button) => button.textContent?.includes('批量绑定'))
+    expect(batchButton).toBeTruthy()
+    batchButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await flushUi(8)
+
+    expect(apiFetchMock).toHaveBeenCalledWith(
+      '/api/admin/directory/accounts/batch-bind',
+      expect.objectContaining({
+        method: 'POST',
+        body: JSON.stringify({
+          bindings: [
+            {
+              accountId: 'account-1',
+              localUserRef: 'alpha@example.com',
+              enableDingTalkGrant: true,
+            },
+            {
+              accountId: 'account-2',
+              localUserRef: 'beta@example.com',
+              enableDingTalkGrant: true,
+            },
+          ],
+        }),
+      }),
+    )
+    // Must NOT claim blanket success for a batch that only partially committed.
+    expect(container?.textContent).not.toContain('已完成 2 个目录成员的批量绑定')
+    expect(container?.textContent).toContain('已绑定 1 个目录成员，另有 1 个失败')
+    expect(container?.textContent).toContain('account-2')
+    expect(container?.textContent).toContain('Directory account is already linked to a local user')
+
+    const statusEl = container!.querySelector('.directory-admin__status')
+    expect(statusEl).toBeTruthy()
+    expect(statusEl?.className).toContain('directory-admin__status--error')
+  })
+
   it('batch-confirms recommended pending bindings', async () => {
     apiFetchMock
       .mockResolvedValueOnce(createJsonResponse({
@@ -3689,6 +3861,204 @@ describe('DirectoryManagementView', () => {
     expect(container?.textContent).toContain('推荐绑定确认')
     expect(container?.textContent).toContain('已完成')
     expect(container?.textContent).toContain('进度 2 / 2')
+  })
+
+  it('reports a partial-failure status when batch-confirming recommended pending bindings commits some items but not all', async () => {
+    apiFetchMock
+      .mockResolvedValueOnce(createJsonResponse({
+        ok: true,
+        data: {
+          items: [createIntegration()],
+        },
+      }))
+      .mockResolvedValueOnce(createJsonResponse({
+        ok: true,
+        data: { items: [] },
+      }))
+      .mockResolvedValueOnce(createJsonResponse(
+        createScheduleSnapshotPayload(),
+      ))
+      .mockResolvedValueOnce(createJsonResponse(
+        createAlertListPayload([]),
+      ))
+      .mockResolvedValueOnce(createJsonResponse(
+        createReviewItemsPayload([
+          {
+            kind: 'pending_binding',
+            reason: '目录成员尚未绑定本地用户。',
+            account: createAccount({
+              id: 'account-1',
+              name: '成员一',
+            }),
+            recommendations: [{
+              localUser: {
+                id: 'user-1',
+                email: 'alpha@example.com',
+                name: 'Alpha',
+                role: 'user',
+                isActive: true,
+              },
+              reasons: ['email'],
+            }],
+            recommendationStatus: {
+              code: 'recommended',
+              message: '已命中唯一精确候选，可直接确认推荐绑定。',
+            },
+            flags: {
+              missingUnionId: false,
+              missingOpenId: false,
+            },
+            actionable: {
+              canBatchUnbind: false,
+              canConfirmRecommendation: true,
+            },
+          },
+          {
+            kind: 'pending_binding',
+            reason: '目录成员尚未绑定本地用户。',
+            account: createAccount({
+              id: 'account-2',
+              name: '成员二',
+              externalUserId: '0447654442691175',
+            }),
+            recommendations: [{
+              localUser: {
+                id: 'user-2',
+                email: 'beta@example.com',
+                name: 'Beta',
+                role: 'user',
+                isActive: true,
+              },
+              reasons: ['mobile'],
+            }],
+            recommendationStatus: {
+              code: 'recommended',
+              message: '已命中唯一精确候选，可直接确认推荐绑定。',
+            },
+            flags: {
+              missingUnionId: false,
+              missingOpenId: false,
+            },
+            actionable: {
+              canBatchUnbind: false,
+              canConfirmRecommendation: true,
+            },
+          },
+        ]),
+      ))
+      .mockResolvedValueOnce(createJsonResponse(
+        createAccountListPayload([
+          createAccount({
+            id: 'account-1',
+            name: '成员一',
+          }),
+          createAccount({
+            id: 'account-2',
+            name: '成员二',
+            externalUserId: '0447654442691175',
+          }),
+        ]),
+      ))
+      .mockResolvedValueOnce(createJsonResponse({
+        ok: true,
+        data: {
+          items: [
+            {
+              id: 'account-1',
+              localUser: {
+                id: 'user-1',
+                email: 'alpha@example.com',
+              },
+            },
+          ],
+          updatedCount: 1,
+          failedCount: 1,
+          failed: [
+            { accountId: 'account-2', error: 'Directory account is already linked to a local user' },
+          ],
+        },
+      }))
+      .mockResolvedValueOnce(createJsonResponse({
+        ok: true,
+        data: {
+          items: [createIntegration()],
+        },
+      }))
+      .mockResolvedValueOnce(createJsonResponse(
+        createReviewItemsPayload([]),
+      ))
+      .mockResolvedValueOnce(createJsonResponse(
+        createAccountListPayload([
+          createAccount({
+            id: 'account-1',
+            name: '成员一',
+            linkStatus: 'linked',
+            matchStrategy: 'manual_admin',
+            localUser: {
+              id: 'user-1',
+              email: 'alpha@example.com',
+              name: 'Alpha',
+            },
+          }),
+          createAccount({
+            id: 'account-2',
+            name: '成员二',
+            externalUserId: '0447654442691175',
+          }),
+        ]),
+      ))
+
+    app = createApp(DirectoryManagementView)
+    app.component('RouterLink', {
+      props: ['to'],
+      template: '<a><slot /></a>',
+    })
+    app.mount(container!)
+    await flushUi()
+
+    const reviewCheckboxes = Array.from(container!.querySelectorAll('.directory-admin__review-item .directory-admin__review-select input[type="checkbox"]')) as HTMLInputElement[]
+    expect(reviewCheckboxes).toHaveLength(2)
+
+    reviewCheckboxes[0].checked = true
+    reviewCheckboxes[0].dispatchEvent(new Event('change', { bubbles: true }))
+    reviewCheckboxes[1].checked = true
+    reviewCheckboxes[1].dispatchEvent(new Event('change', { bubbles: true }))
+    await flushUi(2)
+
+    const batchConfirmButton = Array.from(container!.querySelectorAll('button')).find((button) => button.textContent?.includes('批量确认推荐'))
+    expect(batchConfirmButton).toBeTruthy()
+    batchConfirmButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await flushUi(8)
+
+    expect(apiFetchMock).toHaveBeenCalledWith(
+      '/api/admin/directory/accounts/batch-bind',
+      expect.objectContaining({
+        method: 'POST',
+        body: JSON.stringify({
+          bindings: [
+            {
+              accountId: 'account-1',
+              localUserRef: 'user-1',
+              enableDingTalkGrant: true,
+            },
+            {
+              accountId: 'account-2',
+              localUserRef: 'user-2',
+              enableDingTalkGrant: true,
+            },
+          ],
+        }),
+      }),
+    )
+    // Must NOT claim blanket success for a batch that only partially committed.
+    expect(container?.textContent).not.toContain('已完成 2 个目录成员的推荐绑定确认')
+    expect(container?.textContent).toContain('已绑定 1 个目录成员，另有 1 个失败')
+    expect(container?.textContent).toContain('account-2')
+    expect(container?.textContent).toContain('Directory account is already linked to a local user')
+
+    const statusEl = container!.querySelector('.directory-admin__status')
+    expect(statusEl).toBeTruthy()
+    expect(statusEl?.className).toContain('directory-admin__status--error')
   })
 
   it('shows visible progress while batch-confirming recommended pending bindings', async () => {
@@ -5289,6 +5659,413 @@ describe('DirectoryManagementView', () => {
     expect(container?.textContent).toContain('暂无待处理项')
   })
 
+  it('batch-creates local users for manual pending review items without enabling DingTalk grants', async () => {
+    apiFetchMock
+      .mockResolvedValueOnce(createJsonResponse({
+        ok: true,
+        data: {
+          items: [createIntegration()],
+        },
+      }))
+      .mockResolvedValueOnce(createJsonResponse({
+        ok: true,
+        data: { items: [] },
+      }))
+      .mockResolvedValueOnce(createJsonResponse(
+        createScheduleSnapshotPayload(),
+      ))
+      .mockResolvedValueOnce(createJsonResponse(
+        createAlertListPayload([]),
+      ))
+      .mockResolvedValueOnce(createJsonResponse(
+        createReviewItemsPayload([
+          {
+            kind: 'pending_binding',
+            reason: '目录成员尚未绑定本地用户。',
+            account: createAccount({
+              id: 'account-1',
+              name: '林岚',
+              email: null,
+              openId: null,
+            }),
+            recommendations: [],
+            recommendationStatus: {
+              code: 'no_exact_match',
+              message: '未命中唯一的邮箱或手机号精确匹配，请人工搜索本地用户。',
+            },
+            flags: {
+              missingUnionId: false,
+              missingOpenId: true,
+            },
+            actionable: {
+              canBatchUnbind: false,
+              canConfirmRecommendation: false,
+            },
+          },
+          {
+            kind: 'pending_binding',
+            reason: '目录成员尚未绑定本地用户。',
+            account: createAccount({
+              id: 'account-2',
+              externalUserId: '0447654442691175',
+              name: '次页成员',
+              email: null,
+              openId: null,
+            }),
+            recommendations: [],
+            recommendationStatus: {
+              code: 'no_exact_match',
+              message: '未命中唯一的邮箱或手机号精确匹配，请人工搜索本地用户。',
+            },
+            flags: {
+              missingUnionId: false,
+              missingOpenId: true,
+            },
+            actionable: {
+              canBatchUnbind: false,
+              canConfirmRecommendation: false,
+            },
+          },
+        ]),
+      ))
+      .mockResolvedValueOnce(createJsonResponse(
+        createAccountListPayload([
+          createAccount({ id: 'account-1', openId: null }),
+          createAccount({ id: 'account-2', externalUserId: '0447654442691175', name: '次页成员', openId: null }),
+        ]),
+      ))
+      .mockResolvedValueOnce(createJsonResponse({
+        ok: true,
+        data: {
+          items: [
+            {
+              id: 'account-1',
+              localUser: {
+                id: 'user-1',
+                username: 'dt_0447654442691174_account',
+              },
+            },
+            {
+              id: 'account-2',
+              localUser: {
+                id: 'user-2',
+                username: 'dt_0447654442691175_account',
+              },
+            },
+          ],
+          onboardingPackets: [
+            {
+              userId: 'user-1',
+              name: '林岚',
+              email: null,
+              username: 'dt_0447654442691174_account',
+              mobile: '13900001234',
+              temporaryPassword: 'Temp#123456',
+              onboarding: {
+                inviteMessage: '账号：dt_0447654442691174_account',
+              },
+            },
+            {
+              userId: 'user-2',
+              name: '次页成员',
+              email: null,
+              username: 'dt_0447654442691175_account',
+              mobile: '13900001235',
+              temporaryPassword: 'Temp#234567',
+              onboarding: {
+                inviteMessage: '账号：dt_0447654442691175_account',
+              },
+            },
+          ],
+          updatedCount: 2,
+          failedCount: 0,
+          failed: [],
+          enableDingTalkGrant: false,
+        },
+      }))
+      .mockResolvedValueOnce(createJsonResponse({
+        ok: true,
+        data: {
+          items: [createIntegration({
+            stats: {
+              departmentCount: 12,
+              accountCount: 98,
+              pendingLinkCount: 0,
+              linkedCount: 92,
+              lastRunStatus: 'completed',
+            },
+          })],
+        },
+      }))
+      .mockResolvedValueOnce(createJsonResponse(
+        createReviewItemsPayload([]),
+      ))
+      .mockResolvedValueOnce(createJsonResponse(
+        createAccountListPayload([
+          createAccount({
+            id: 'account-1',
+            openId: null,
+            linkStatus: 'linked',
+            matchStrategy: 'manual_admin',
+            localUser: {
+              id: 'user-1',
+              username: 'dt_0447654442691174_account',
+              email: null,
+              name: '林岚',
+            },
+          }),
+          createAccount({
+            id: 'account-2',
+            externalUserId: '0447654442691175',
+            name: '次页成员',
+            openId: null,
+            linkStatus: 'linked',
+            matchStrategy: 'manual_admin',
+            localUser: {
+              id: 'user-2',
+              username: 'dt_0447654442691175_account',
+              email: null,
+              name: '次页成员',
+            },
+          }),
+        ]),
+      ))
+
+    app = createApp(DirectoryManagementView)
+    registerRouterLink(app)
+    app.mount(container!)
+    await flushUi()
+
+    const manualButton = Array.from(container!.querySelectorAll('button')).find((button) => button.textContent?.includes('人工处理'))
+    expect(manualButton).toBeTruthy()
+    manualButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await flushUi(2)
+
+    const reviewCheckboxes = Array.from(container!.querySelectorAll('.directory-admin__review-item .directory-admin__review-select input[type="checkbox"]')) as HTMLInputElement[]
+    expect(reviewCheckboxes).toHaveLength(2)
+    reviewCheckboxes[0].checked = true
+    reviewCheckboxes[0].dispatchEvent(new Event('change', { bubbles: true }))
+    reviewCheckboxes[1].checked = true
+    reviewCheckboxes[1].dispatchEvent(new Event('change', { bubbles: true }))
+    await flushUi(2)
+
+    const batchAdmitButton = Array.from(container!.querySelectorAll('button')).find((button) => button.textContent?.includes('批量创建并绑定'))
+    expect(batchAdmitButton?.textContent).toContain('(2)')
+    batchAdmitButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await flushUi(8)
+
+    expect(apiFetchMock).toHaveBeenCalledWith(
+      '/api/admin/directory/accounts/batch-admit-users',
+      expect.objectContaining({
+        method: 'POST',
+        body: JSON.stringify({
+          accountIds: ['account-1', 'account-2'],
+          enableDingTalkGrant: false,
+        }),
+      }),
+    )
+    expect(container?.textContent).toContain('批量创建临时凭据')
+    expect(container?.textContent).toContain('扫码登录授权默认未开启')
+    expect(container?.textContent).toContain('dt_0447654442691174_account')
+    expect(container?.textContent).toContain('Temp#123456')
+    expect(container?.textContent).toContain('批量创建并绑定')
+    expect(container?.textContent).toContain('已完成')
+    expect(container?.textContent).toContain('进度 2 / 2')
+    expect(container?.textContent).toContain('暂无待处理项')
+  })
+
+  it('reports a partial-failure status when batch-admit-users commits some items but not all', async () => {
+    apiFetchMock
+      .mockResolvedValueOnce(createJsonResponse({
+        ok: true,
+        data: {
+          items: [createIntegration()],
+        },
+      }))
+      .mockResolvedValueOnce(createJsonResponse({
+        ok: true,
+        data: { items: [] },
+      }))
+      .mockResolvedValueOnce(createJsonResponse(
+        createScheduleSnapshotPayload(),
+      ))
+      .mockResolvedValueOnce(createJsonResponse(
+        createAlertListPayload([]),
+      ))
+      .mockResolvedValueOnce(createJsonResponse(
+        createReviewItemsPayload([
+          {
+            kind: 'pending_binding',
+            reason: '目录成员尚未绑定本地用户。',
+            account: createAccount({
+              id: 'account-1',
+              name: '林岚',
+              email: null,
+              openId: null,
+            }),
+            recommendations: [],
+            recommendationStatus: {
+              code: 'no_exact_match',
+              message: '未命中唯一的邮箱或手机号精确匹配，请人工搜索本地用户。',
+            },
+            flags: {
+              missingUnionId: false,
+              missingOpenId: true,
+            },
+            actionable: {
+              canBatchUnbind: false,
+              canConfirmRecommendation: false,
+            },
+          },
+          {
+            kind: 'pending_binding',
+            reason: '目录成员尚未绑定本地用户。',
+            account: createAccount({
+              id: 'account-2',
+              externalUserId: '0447654442691175',
+              name: '次页成员',
+              email: null,
+              openId: null,
+            }),
+            recommendations: [],
+            recommendationStatus: {
+              code: 'no_exact_match',
+              message: '未命中唯一的邮箱或手机号精确匹配，请人工搜索本地用户。',
+            },
+            flags: {
+              missingUnionId: false,
+              missingOpenId: true,
+            },
+            actionable: {
+              canBatchUnbind: false,
+              canConfirmRecommendation: false,
+            },
+          },
+        ]),
+      ))
+      .mockResolvedValueOnce(createJsonResponse(
+        createAccountListPayload([
+          createAccount({ id: 'account-1', openId: null }),
+          createAccount({ id: 'account-2', externalUserId: '0447654442691175', name: '次页成员', openId: null }),
+        ]),
+      ))
+      .mockResolvedValueOnce(createJsonResponse({
+        ok: true,
+        data: {
+          items: [
+            {
+              id: 'account-1',
+              localUser: {
+                id: 'user-1',
+                username: 'dt_0447654442691174_account',
+              },
+            },
+          ],
+          onboardingPackets: [
+            {
+              userId: 'user-1',
+              name: '林岚',
+              email: null,
+              username: 'dt_0447654442691174_account',
+              mobile: '13900001234',
+              temporaryPassword: 'Temp#123456',
+              onboarding: {
+                inviteMessage: '账号：dt_0447654442691174_account',
+              },
+            },
+          ],
+          updatedCount: 1,
+          failedCount: 1,
+          failed: [
+            { accountId: 'account-2', error: 'Directory account is already linked to a local user' },
+          ],
+          enableDingTalkGrant: false,
+        },
+      }))
+      .mockResolvedValueOnce(createJsonResponse({
+        ok: true,
+        data: {
+          items: [createIntegration({
+            stats: {
+              departmentCount: 12,
+              accountCount: 98,
+              pendingLinkCount: 1,
+              linkedCount: 91,
+              lastRunStatus: 'completed',
+            },
+          })],
+        },
+      }))
+      .mockResolvedValueOnce(createJsonResponse(
+        createReviewItemsPayload([]),
+      ))
+      .mockResolvedValueOnce(createJsonResponse(
+        createAccountListPayload([
+          createAccount({
+            id: 'account-1',
+            openId: null,
+            linkStatus: 'linked',
+            matchStrategy: 'manual_admin',
+            localUser: {
+              id: 'user-1',
+              username: 'dt_0447654442691174_account',
+              email: null,
+              name: '林岚',
+            },
+          }),
+          createAccount({
+            id: 'account-2',
+            externalUserId: '0447654442691175',
+            name: '次页成员',
+            openId: null,
+          }),
+        ]),
+      ))
+
+    app = createApp(DirectoryManagementView)
+    registerRouterLink(app)
+    app.mount(container!)
+    await flushUi()
+
+    const manualButton = Array.from(container!.querySelectorAll('button')).find((button) => button.textContent?.includes('人工处理'))
+    expect(manualButton).toBeTruthy()
+    manualButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await flushUi(2)
+
+    const reviewCheckboxes = Array.from(container!.querySelectorAll('.directory-admin__review-item .directory-admin__review-select input[type="checkbox"]')) as HTMLInputElement[]
+    expect(reviewCheckboxes).toHaveLength(2)
+    reviewCheckboxes[0].checked = true
+    reviewCheckboxes[0].dispatchEvent(new Event('change', { bubbles: true }))
+    reviewCheckboxes[1].checked = true
+    reviewCheckboxes[1].dispatchEvent(new Event('change', { bubbles: true }))
+    await flushUi(2)
+
+    const batchAdmitButton = Array.from(container!.querySelectorAll('button')).find((button) => button.textContent?.includes('批量创建并绑定'))
+    expect(batchAdmitButton?.textContent).toContain('(2)')
+    batchAdmitButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await flushUi(8)
+
+    expect(apiFetchMock).toHaveBeenCalledWith(
+      '/api/admin/directory/accounts/batch-admit-users',
+      expect.objectContaining({
+        method: 'POST',
+        body: JSON.stringify({
+          accountIds: ['account-1', 'account-2'],
+          enableDingTalkGrant: false,
+        }),
+      }),
+    )
+    // Must NOT claim blanket success for a batch that only partially committed.
+    expect(container?.textContent).not.toContain('已创建并绑定 2 个目录成员')
+    expect(container?.textContent).toContain('已创建并绑定 1 个目录成员，另有 1 个失败')
+    expect(container?.textContent).toContain('account-2')
+    expect(container?.textContent).toContain('Directory account is already linked to a local user')
+
+    const statusEl = container!.querySelector('.directory-admin__status')
+    expect(statusEl).toBeTruthy()
+    expect(statusEl?.className).toContain('directory-admin__status--error')
+  })
+
   it('tests a saved integration with diagnostics and reuses the saved secret on the backend', async () => {
     apiFetchMock
       .mockResolvedValueOnce(createJsonResponse({
@@ -6029,5 +6806,869 @@ describe('DirectoryManagementView', () => {
     expect(container?.textContent).toContain('根部门子部门 4')
     expect(container?.textContent).toContain('根部门直属成员 1')
     expect(container?.textContent).not.toContain('根部门 1 当前仅返回 1 个直属成员')
+  })
+
+  describe('CFG-3 approval card config', () => {
+    function mockInitialLoad(integration: Record<string, unknown>): void {
+      apiFetchMock
+        .mockResolvedValueOnce(createJsonResponse({ ok: true, data: { items: [integration] } }))
+        .mockResolvedValueOnce(createJsonResponse({ ok: true, data: { items: [] } }))
+        .mockResolvedValueOnce(createJsonResponse(createScheduleSnapshotPayload()))
+        .mockResolvedValueOnce(createJsonResponse(createAlertListPayload([])))
+        .mockResolvedValueOnce(createJsonResponse(createReviewItemsPayload([])))
+        .mockResolvedValueOnce(createJsonResponse(createAccountListPayload([])))
+    }
+
+    function mockSelectIntegrationRefresh(integration: Record<string, unknown>): void {
+      apiFetchMock
+        .mockResolvedValueOnce(createJsonResponse({ ok: true, data: { items: [integration] } }))
+        .mockResolvedValueOnce(createJsonResponse({ ok: true, data: { items: [] } }))
+        .mockResolvedValueOnce(createJsonResponse(createScheduleSnapshotPayload()))
+        .mockResolvedValueOnce(createJsonResponse(createAlertListPayload([])))
+        .mockResolvedValueOnce(createJsonResponse(createReviewItemsPayload([])))
+        .mockResolvedValueOnce(createJsonResponse(createAccountListPayload([])))
+    }
+
+    function createApprovalCardStatusPayload(overrides: Record<string, unknown> = {}) {
+      return {
+        ok: true,
+        data: {
+          status: {
+            integration: { id: 'dir-1', name: 'DingTalk CN', status: 'active' },
+            linkSecret: { configured: true, source: 'stored', envOverrideActive: false, valuePrinted: false },
+            publicAppUrl: { storedValue: null, source: 'missing', envOverrideActive: false },
+            ...overrides,
+          },
+        },
+      }
+    }
+
+    it('renders the "未生成" chip and 生成随机密钥 label when approvalCardLinkSecretConfigured is false', async () => {
+      mockInitialLoad(createIntegration())
+
+      app = createApp(DirectoryManagementView)
+      registerRouterLink(app)
+      app.mount(container!)
+      await flushUi()
+
+      expect(container?.textContent).toContain('未生成')
+      expect(container?.textContent).not.toContain('密钥已生成')
+      const generateButton = Array.from(container!.querySelectorAll('button'))
+        .find((button) => button.textContent?.trim() === '生成随机密钥')
+      expect(generateButton).toBeTruthy()
+      const regenerateButton = Array.from(container!.querySelectorAll('button'))
+        .find((button) => button.textContent?.trim() === '重新生成密钥')
+      expect(regenerateButton).toBeFalsy()
+    })
+
+    it('renders the "密钥已生成" chip and 重新生成密钥 label, plus the saved public URL, when configured', async () => {
+      mockInitialLoad(createIntegration({
+        config: {
+          ...createIntegration().config,
+          approvalCardLinkSecretConfigured: true,
+          approvalCardPublicAppUrl: 'https://cards.example.com/',
+        },
+      }))
+
+      app = createApp(DirectoryManagementView)
+      registerRouterLink(app)
+      app.mount(container!)
+      await flushUi()
+
+      expect(container?.textContent).toContain('密钥已生成')
+      const regenerateButton = Array.from(container!.querySelectorAll('button'))
+        .find((button) => button.textContent?.trim() === '重新生成密钥')
+      expect(regenerateButton).toBeTruthy()
+      const urlInput = Array.from(container!.querySelectorAll('input'))
+        .find((input) => input.getAttribute('placeholder')?.includes('一键卡片深链的对外可达地址')) as HTMLInputElement | undefined
+      expect(urlInput?.value).toBe('https://cards.example.com/')
+    })
+
+    it('requires confirmation before regenerating an already-configured secret; declining sends no request', async () => {
+      mockInitialLoad(createIntegration({
+        config: { ...createIntegration().config, approvalCardLinkSecretConfigured: true },
+      }))
+      const confirmSpy = vi.spyOn(ElMessageBox, 'confirm').mockRejectedValue(new Error('cancel'))
+
+      app = createApp(DirectoryManagementView)
+      registerRouterLink(app)
+      app.mount(container!)
+      await flushUi()
+
+      const regenerateButton = Array.from(container!.querySelectorAll('button'))
+        .find((button) => button.textContent?.trim() === '重新生成密钥')
+      expect(regenerateButton).toBeTruthy()
+      regenerateButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+      await flushUi()
+
+      expect(confirmSpy).toHaveBeenCalledWith(
+        '重新生成将使已发出但未处理的审批卡片链接失效，确定吗？',
+        '重新生成密钥',
+        expect.objectContaining({ type: 'warning' }),
+      )
+      expect(apiFetchMock).not.toHaveBeenCalledWith(
+        '/api/admin/directory/integrations/dir-1/approval-card-config/secret/generate',
+        expect.anything(),
+      )
+
+      confirmSpy.mockRestore()
+    })
+
+    it('regenerates after confirmation, calling the generate endpoint and flipping the chip after refresh', async () => {
+      mockInitialLoad(createIntegration({
+        config: { ...createIntegration().config, approvalCardLinkSecretConfigured: true },
+      }))
+      apiFetchMock.mockResolvedValueOnce(createJsonResponse(createApprovalCardStatusPayload()))
+      mockSelectIntegrationRefresh(createIntegration({
+        config: { ...createIntegration().config, approvalCardLinkSecretConfigured: true },
+      }))
+      const confirmSpy = vi.spyOn(ElMessageBox, 'confirm').mockResolvedValue('confirm' as never)
+
+      app = createApp(DirectoryManagementView)
+      registerRouterLink(app)
+      app.mount(container!)
+      await flushUi()
+
+      const regenerateButton = Array.from(container!.querySelectorAll('button'))
+        .find((button) => button.textContent?.trim() === '重新生成密钥')
+      regenerateButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+      await flushUi(10)
+
+      expect(confirmSpy).toHaveBeenCalledWith(
+        '重新生成将使已发出但未处理的审批卡片链接失效，确定吗？',
+        '重新生成密钥',
+        expect.objectContaining({ type: 'warning' }),
+      )
+      expect(apiFetchMock).toHaveBeenCalledWith(
+        '/api/admin/directory/integrations/dir-1/approval-card-config/secret/generate',
+        expect.objectContaining({ method: 'POST' }),
+      )
+      expect(container?.textContent).toContain('已生成新的一键卡片密钥')
+      expect(container?.textContent).toContain('密钥已生成')
+
+      confirmSpy.mockRestore()
+    })
+
+    it('generates a secret with no confirmation when not yet configured, and never echoes the secret value (no-echo tripwire)', async () => {
+      mockInitialLoad(createIntegration())
+      apiFetchMock.mockResolvedValueOnce(createJsonResponse(createApprovalCardStatusPayload()))
+      mockSelectIntegrationRefresh(createIntegration({
+        config: { ...createIntegration().config, approvalCardLinkSecretConfigured: true },
+      }))
+      const confirmSpy = vi.spyOn(ElMessageBox, 'confirm').mockResolvedValue('confirm' as never)
+
+      app = createApp(DirectoryManagementView)
+      registerRouterLink(app)
+      app.mount(container!)
+      await flushUi()
+
+      const generateButton = Array.from(container!.querySelectorAll('button'))
+        .find((button) => button.textContent?.trim() === '生成随机密钥')
+      expect(generateButton).toBeTruthy()
+      generateButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+      await flushUi(10)
+
+      expect(confirmSpy).not.toHaveBeenCalled()
+      expect(apiFetchMock).toHaveBeenCalledWith(
+        '/api/admin/directory/integrations/dir-1/approval-card-config/secret/generate',
+        expect.objectContaining({ method: 'POST' }),
+      )
+      expect(container?.textContent).toContain('密钥已生成')
+
+      // NO-ECHO TRIPWIRE: the mocked backend response and all fixtures carry only booleans/enums —
+      // no secret value ever exists to bind. Assert the rendered DOM never contains anything
+      // shaped like a 64-char hex secret or an encrypted-blob marker.
+      expect(container?.innerHTML).not.toMatch(/[0-9a-f]{64}/)
+      expect(container?.innerHTML).not.toContain('enc:')
+
+      confirmSpy.mockRestore()
+    })
+
+    it('shows an env-override hint when the generate response reports envOverrideActive', async () => {
+      mockInitialLoad(createIntegration())
+      apiFetchMock.mockResolvedValueOnce(createJsonResponse(createApprovalCardStatusPayload({
+        linkSecret: { configured: true, source: 'env', envOverrideActive: true, valuePrinted: false },
+      })))
+      mockSelectIntegrationRefresh(createIntegration({
+        config: { ...createIntegration().config, approvalCardLinkSecretConfigured: true },
+      }))
+
+      app = createApp(DirectoryManagementView)
+      registerRouterLink(app)
+      app.mount(container!)
+      await flushUi()
+
+      const generateButton = Array.from(container!.querySelectorAll('button'))
+        .find((button) => button.textContent?.trim() === '生成随机密钥')
+      generateButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+      await flushUi(10)
+
+      expect(container?.textContent).toContain('部署环境变量已设置，页面生成的密钥暂不生效（环境变量优先）。')
+    })
+
+    it('saves the approval card public app URL via PUT with the entered value', async () => {
+      mockInitialLoad(createIntegration())
+      apiFetchMock.mockResolvedValueOnce(createJsonResponse(createApprovalCardStatusPayload({
+        publicAppUrl: { storedValue: 'https://newcard.example.com/', source: 'stored', envOverrideActive: false },
+      })))
+      mockSelectIntegrationRefresh(createIntegration({
+        config: { ...createIntegration().config, approvalCardPublicAppUrl: 'https://newcard.example.com/' },
+      }))
+
+      app = createApp(DirectoryManagementView)
+      registerRouterLink(app)
+      app.mount(container!)
+      await flushUi()
+
+      const urlInput = Array.from(container!.querySelectorAll('input'))
+        .find((input) => input.getAttribute('placeholder')?.includes('一键卡片深链的对外可达地址')) as HTMLInputElement | undefined
+      expect(urlInput).toBeTruthy()
+      urlInput!.value = 'https://newcard.example.com/'
+      urlInput!.dispatchEvent(new Event('input', { bubbles: true }))
+      await flushUi(2)
+
+      const saveButton = Array.from(container!.querySelectorAll('button'))
+        .find((button) => button.textContent?.trim() === '保存对外访问地址')
+      expect(saveButton).toBeTruthy()
+      saveButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+      await flushUi(10)
+
+      expect(apiFetchMock).toHaveBeenCalledWith(
+        '/api/admin/directory/integrations/dir-1/approval-card-config',
+        expect.objectContaining({
+          method: 'PUT',
+          body: JSON.stringify({ publicAppUrl: 'https://newcard.example.com/' }),
+        }),
+      )
+      expect(container?.textContent).toContain('一键卡片对外访问地址已保存')
+    })
+
+    it('surfaces the backend 400 validation message when the public app URL is rejected', async () => {
+      mockInitialLoad(createIntegration())
+      apiFetchMock.mockResolvedValueOnce(createJsonResponse({
+        ok: false,
+        error: { code: 'APPROVAL_CARD_CONFIG_SAVE_FAILED', message: 'publicAppUrl must be an absolute http(s) URL' },
+      }, 400))
+
+      app = createApp(DirectoryManagementView)
+      registerRouterLink(app)
+      app.mount(container!)
+      await flushUi()
+
+      const urlInput = Array.from(container!.querySelectorAll('input'))
+        .find((input) => input.getAttribute('placeholder')?.includes('一键卡片深链的对外可达地址')) as HTMLInputElement | undefined
+      urlInput!.value = 'not-a-url'
+      urlInput!.dispatchEvent(new Event('input', { bubbles: true }))
+      await flushUi(2)
+
+      const saveButton = Array.from(container!.querySelectorAll('button'))
+        .find((button) => button.textContent?.trim() === '保存对外访问地址')
+      saveButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+      await flushUi(6)
+
+      expect(container?.textContent).toContain('publicAppUrl must be an absolute http(s) URL')
+    })
+  })
+
+  describe('Wave 2: 预览同步 / 后台同步 polling / R5 run-card stats', () => {
+    function mockInitialLoad(integration: Record<string, unknown>, runsPayload?: unknown): void {
+      apiFetchMock
+        .mockResolvedValueOnce(createJsonResponse({ ok: true, data: { items: [integration] } }))
+        .mockResolvedValueOnce(createJsonResponse(runsPayload ?? { ok: true, data: { items: [] } }))
+        .mockResolvedValueOnce(createJsonResponse(createScheduleSnapshotPayload()))
+        .mockResolvedValueOnce(createJsonResponse(createAlertListPayload([])))
+        .mockResolvedValueOnce(createJsonResponse(createReviewItemsPayload([])))
+        .mockResolvedValueOnce(createJsonResponse(createAccountListPayload([])))
+    }
+
+    function mockPostSyncRefresh(runsPayload: unknown): void {
+      apiFetchMock
+        .mockResolvedValueOnce(createJsonResponse({ ok: true, data: { items: [createIntegration()] } }))
+        .mockResolvedValueOnce(createJsonResponse(runsPayload))
+        .mockResolvedValueOnce(createJsonResponse(createScheduleSnapshotPayload()))
+        .mockResolvedValueOnce(createJsonResponse(createAlertListPayload([])))
+        .mockResolvedValueOnce(createJsonResponse(createReviewItemsPayload([])))
+        .mockResolvedValueOnce(createJsonResponse(createAccountListPayload([])))
+    }
+
+    function createPreviewPayload(overrides: Record<string, unknown> = {}) {
+      return {
+        ok: true,
+        data: {
+          preview: {
+            integrationId: 'dir-1',
+            integrationName: 'DingTalk CN',
+            departmentsSeen: 13,
+            accountsSeen: 99,
+            wouldCreateAccounts: 3,
+            wouldDeactivateAccounts: 2,
+            wouldDeactivateLinkedAccounts: 1,
+            autoAdmissionMode: 'auto_for_scoped_departments',
+            autoAdmissionCandidateCount: 2,
+            autoAdmissionSkippedMissingEmailCount: 1,
+            autoAdmissionExcludedCount: 1,
+            sampledNewAccounts: [{ externalUserId: 'ext-new-1', name: '新成员甲' }],
+            sampledDeactivations: [{ externalUserId: 'ext-gone-1', name: '离职乙', linked: true }],
+            ...overrides,
+          },
+        },
+      }
+    }
+
+    function createSyncInProgressResponse(activeRunId: string) {
+      return createJsonResponse({
+        ok: false,
+        error: {
+          code: 'DIRECTORY_SYNC_IN_PROGRESS',
+          message: `A directory sync is already running for this integration (run ${activeRunId})`,
+          details: { activeRunId },
+        },
+      }, 409)
+    }
+
+    function createBackgroundRun(status: string, overrides: Record<string, unknown> = {}) {
+      return {
+        id: 'run-bg-1',
+        status,
+        startedAt: '2026-07-10T01:00:00.000Z',
+        finishedAt: status === 'running' ? null : '2026-07-10T01:05:00.000Z',
+        stats: {},
+        errorMessage: null,
+        ...overrides,
+      }
+    }
+
+    function createRunsPayload(items: Record<string, unknown>[]) {
+      return { ok: true, data: { items } }
+    }
+
+    function mountView(): void {
+      app = createApp(DirectoryManagementView)
+      registerRouterLink(app!)
+      app!.mount(container!)
+    }
+
+    function findButton(label: string): HTMLButtonElement | undefined {
+      return Array.from(container!.querySelectorAll('button'))
+        .find((button) => button.textContent?.trim() === label) as HTMLButtonElement | undefined
+    }
+
+    // Integration-list items are multi-line buttons (name + corpId + stats) — match by substring.
+    function findIntegrationButton(name: string): HTMLButtonElement | undefined {
+      return Array.from(container!.querySelectorAll('.directory-admin__item'))
+        .find((item) => item.textContent?.includes(name)) as HTMLButtonElement | undefined
+    }
+
+    function runsCallCount(): number {
+      return apiFetchMock.mock.calls.filter(([path]) => String(path).includes('/runs')).length
+    }
+
+    const autoAdmissionConfig = {
+      ...createIntegration().config as Record<string, unknown>,
+      admissionMode: 'auto_for_scoped_departments',
+      admissionDepartmentIds: ['100'],
+    }
+
+    it('预览同步 POSTs the exact preview path and renders counts + sampled lists in the card', async () => {
+      mockInitialLoad(createIntegration())
+      apiFetchMock.mockResolvedValueOnce(createJsonResponse(createPreviewPayload()))
+
+      mountView()
+      await flushUi()
+
+      const previewButton = findButton('预览同步')
+      expect(previewButton).toBeTruthy()
+      previewButton!.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+      await flushUi(8)
+
+      expect(apiFetchMock).toHaveBeenCalledWith(
+        '/api/admin/directory/integrations/dir-1/sync/preview',
+        expect.objectContaining({ method: 'POST' }),
+      )
+      expect(container?.textContent).toContain('同步预览（dry-run）')
+      expect(container?.textContent).toContain('将新增账号 3')
+      expect(container?.textContent).toContain('将停用 2')
+      expect(container?.textContent).toContain('其中已绑定 1')
+      expect(container?.textContent).toContain('符合条件 2 人 · 缺少邮箱跳过 1 人 · 命中排除部门 1 人')
+      expect(container?.textContent).toContain('新成员甲 (ext-new-1) 等 3 人')
+      expect(container?.textContent).toContain('离职乙 (ext-gone-1，已绑定本地用户) 等 2 人')
+      expect(container?.textContent).toContain('同步预览已生成（未写入任何数据）')
+    })
+
+    it('preview 409 (DIRECTORY_SYNC_IN_PROGRESS, #4049) shows 已有同步在进行中 with the active runId, not the raw error', async () => {
+      mockInitialLoad(createIntegration())
+      apiFetchMock.mockResolvedValueOnce(createSyncInProgressResponse('run-lease-9'))
+
+      mountView()
+      await flushUi()
+
+      findButton('预览同步')!.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+      await flushUi(8)
+
+      expect(container?.textContent).toContain('已有同步在进行中（运行 run-lease-9）')
+      expect(container?.textContent).not.toContain('A directory sync is already running')
+    })
+
+    it('后台同步 POSTs {async:true} (exact body), skips the confirm for manual_only, and enters the polling state', async () => {
+      mockInitialLoad(createIntegration())
+      apiFetchMock.mockResolvedValueOnce(createJsonResponse(
+        { ok: true, data: { accepted: true, runId: 'run-bg-1', integrationId: 'dir-1' } },
+        202,
+      ))
+      apiFetchMock.mockResolvedValue(createJsonResponse(createRunsPayload([createBackgroundRun('running')])))
+      const confirmSpy = vi.spyOn(ElMessageBox, 'confirm').mockResolvedValue('confirm' as never)
+
+      mountView()
+      await flushUi()
+
+      findButton('后台同步')!.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+      await flushUi(8)
+
+      expect(confirmSpy).not.toHaveBeenCalled()
+      expect(apiFetchMock).toHaveBeenCalledWith(
+        '/api/admin/directory/integrations/dir-1/sync',
+        expect.objectContaining({ method: 'POST', body: JSON.stringify({ async: true }) }),
+      )
+      expect(container?.textContent).toContain('后台同步进行中（运行 run-bg-1）')
+      // Both sync triggers lock while a background run is being tracked.
+      expect(findButton('手动同步')?.disabled).toBe(true)
+      expect(findButton('后台同步中...')?.disabled).toBe(true)
+
+      confirmSpy.mockRestore()
+    })
+
+    it('async 409 (DIRECTORY_SYNC_IN_PROGRESS) shows 已有同步在进行中 with the active runId and does NOT start polling', async () => {
+      mockInitialLoad(createIntegration())
+      apiFetchMock.mockResolvedValueOnce(createSyncInProgressResponse('run-lease-2'))
+
+      mountView()
+      await flushUi()
+
+      findButton('后台同步')!.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+      await flushUi(8)
+
+      expect(container?.textContent).toContain('已有同步在进行中（运行 run-lease-2）')
+      expect(container?.textContent).not.toContain('A directory sync is already running')
+      expect(container?.textContent).not.toContain('后台同步进行中')
+    })
+
+    it('手动同步 409 (DirectorySyncInProgressError) shows 已有同步在进行中 with the active runId, not a generic 目录同步失败', async () => {
+      mockInitialLoad(createIntegration())
+      apiFetchMock.mockResolvedValueOnce(createSyncInProgressResponse('run-lease-7'))
+
+      mountView()
+      await flushUi()
+
+      findButton('手动同步')!.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+      await flushUi(8)
+
+      expect(container?.textContent).toContain('已有同步在进行中（运行 run-lease-7）')
+      expect(container?.textContent).not.toContain('A directory sync is already running')
+      expect(container?.textContent).not.toContain('目录同步失败')
+      // busy resets on the benign-lease-refusal path, so the trigger is re-enabled (not a dead form).
+      expect(findButton('手动同步')?.disabled).toBe(false)
+    })
+
+    it('auto-admission FAIL-SAFE: warns that async discards one-time temp-password packets; declining sends no request', async () => {
+      mockInitialLoad(createIntegration({ config: autoAdmissionConfig }))
+      const confirmSpy = vi.spyOn(ElMessageBox, 'confirm').mockRejectedValue(new Error('cancel'))
+
+      mountView()
+      await flushUi()
+
+      findButton('后台同步')!.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+      await flushUi(8)
+
+      expect(confirmSpy).toHaveBeenCalledWith(
+        expect.stringMatching(/一次性临时密码.*丢弃.*手动同步/),
+        '后台同步将丢弃临时凭据',
+        expect.objectContaining({ type: 'warning' }),
+      )
+      expect(apiFetchMock).not.toHaveBeenCalledWith(
+        '/api/admin/directory/integrations/dir-1/sync',
+        expect.anything(),
+      )
+
+      confirmSpy.mockRestore()
+    })
+
+    it('auto-admission FAIL-SAFE: confirming proceeds with the async POST', async () => {
+      mockInitialLoad(createIntegration({ config: autoAdmissionConfig }))
+      apiFetchMock.mockResolvedValueOnce(createJsonResponse(
+        { ok: true, data: { accepted: true, runId: 'run-bg-1', integrationId: 'dir-1' } },
+        202,
+      ))
+      apiFetchMock.mockResolvedValue(createJsonResponse(createRunsPayload([createBackgroundRun('running')])))
+      const confirmSpy = vi.spyOn(ElMessageBox, 'confirm').mockResolvedValue('confirm' as never)
+
+      mountView()
+      await flushUi()
+
+      findButton('后台同步')!.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+      await flushUi(8)
+
+      expect(confirmSpy).toHaveBeenCalled()
+      expect(apiFetchMock).toHaveBeenCalledWith(
+        '/api/admin/directory/integrations/dir-1/sync',
+        expect.objectContaining({ method: 'POST', body: JSON.stringify({ async: true }) }),
+      )
+      expect(container?.textContent).toContain('后台同步进行中（运行 run-bg-1）')
+
+      confirmSpy.mockRestore()
+    })
+
+    it('polls every 5s while running, stops at terminal completed, renders the summary, refreshes panels, and leaks no timer', async () => {
+      vi.useFakeTimers()
+      try {
+        const completedStats = {
+          accountsSynced: 99,
+          departmentsSynced: 13,
+          pendingCount: 3,
+          linkedCount: 89,
+          accountsCreatedCount: 4,
+          accountsUpdatedCount: 95,
+          accountsDeactivatedCount: 2,
+          autoAdmittedCount: 2,
+        }
+        mockInitialLoad(createIntegration())
+        apiFetchMock.mockResolvedValueOnce(createJsonResponse(
+          { ok: true, data: { accepted: true, runId: 'run-bg-1', integrationId: 'dir-1' } },
+          202,
+        ))
+        apiFetchMock.mockResolvedValueOnce(createJsonResponse(createRunsPayload([createBackgroundRun('running')])))
+        apiFetchMock.mockResolvedValueOnce(createJsonResponse(createRunsPayload([createBackgroundRun('running')])))
+        apiFetchMock.mockResolvedValueOnce(createJsonResponse(createRunsPayload([
+          createBackgroundRun('completed', { stats: completedStats }),
+        ])))
+        mockPostSyncRefresh(createRunsPayload([createBackgroundRun('completed', { stats: completedStats })]))
+
+        mountView()
+        await flushUi()
+        expect(runsCallCount()).toBe(1) // initial loadRuns only
+
+        findButton('后台同步')!.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+        await flushUi(8)
+        expect(runsCallCount()).toBe(2) // first poll fires immediately after the 202
+        expect(container?.textContent).toContain('后台同步进行中（运行 run-bg-1）')
+
+        await vi.advanceTimersByTimeAsync(5000)
+        await flushUi(4)
+        expect(runsCallCount()).toBe(3) // still running → kept polling
+        expect(container?.textContent).toContain('后台同步进行中（运行 run-bg-1）')
+
+        await vi.advanceTimersByTimeAsync(5000)
+        await flushUi(8)
+        // terminal poll + the post-sync refresh's loadRuns
+        expect(runsCallCount()).toBe(5)
+        expect(container?.textContent).toContain('后台同步已完成（运行 run-bg-1）')
+        expect(container?.textContent).toContain('本次新增账号 4，更新 95，停用 2')
+        expect(container?.textContent).toContain('自动准入 2 位成员（后台同步不返回一次性临时凭据）')
+        // Post-terminal refresh hit the surrounding panels too (integrations reloaded).
+        expect(
+          apiFetchMock.mock.calls.filter(([path]) => path === '/api/admin/directory/integrations').length,
+        ).toBe(2)
+        expect(container?.textContent).not.toContain('后台同步进行中')
+
+        // TIMER-LEAK TRIPWIRE: after terminal, NO further fetch of any kind may happen.
+        const settledCallCount = apiFetchMock.mock.calls.length
+        await vi.advanceTimersByTimeAsync(30_000)
+        await flushUi(4)
+        expect(apiFetchMock.mock.calls.length).toBe(settledCallCount)
+      } finally {
+        vi.useRealTimers()
+      }
+    })
+
+    it('stops polling at terminal failed and surfaces the run errorMessage', async () => {
+      vi.useFakeTimers()
+      try {
+        mockInitialLoad(createIntegration())
+        apiFetchMock.mockResolvedValueOnce(createJsonResponse(
+          { ok: true, data: { accepted: true, runId: 'run-bg-1', integrationId: 'dir-1' } },
+          202,
+        ))
+        apiFetchMock.mockResolvedValueOnce(createJsonResponse(createRunsPayload([createBackgroundRun('running')])))
+        apiFetchMock.mockResolvedValueOnce(createJsonResponse(createRunsPayload([
+          createBackgroundRun('failed', { errorMessage: '钉钉接口超时' }),
+        ])))
+        mockPostSyncRefresh(createRunsPayload([createBackgroundRun('failed', { errorMessage: '钉钉接口超时' })]))
+
+        mountView()
+        await flushUi()
+
+        findButton('后台同步')!.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+        await flushUi(8)
+
+        await vi.advanceTimersByTimeAsync(5000)
+        await flushUi(8)
+
+        expect(container?.textContent).toContain('后台同步失败（运行 run-bg-1）：钉钉接口超时')
+
+        const settledCallCount = apiFetchMock.mock.calls.length
+        await vi.advanceTimersByTimeAsync(30_000)
+        await flushUi(4)
+        expect(apiFetchMock.mock.calls.length).toBe(settledCallCount)
+      } finally {
+        vi.useRealTimers()
+      }
+    })
+
+    it('clears the poll timer on unmount — no fetch ever fires after the view is gone', async () => {
+      vi.useFakeTimers()
+      try {
+        mockInitialLoad(createIntegration())
+        apiFetchMock.mockResolvedValueOnce(createJsonResponse(
+          { ok: true, data: { accepted: true, runId: 'run-bg-1', integrationId: 'dir-1' } },
+          202,
+        ))
+        apiFetchMock.mockResolvedValue(createJsonResponse(createRunsPayload([createBackgroundRun('running')])))
+
+        mountView()
+        await flushUi()
+
+        findButton('后台同步')!.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+        await flushUi(8)
+        expect(runsCallCount()).toBe(2) // initial + immediate first poll
+
+        app!.unmount()
+        app = null
+
+        const settledCallCount = apiFetchMock.mock.calls.length
+        await vi.advanceTimersByTimeAsync(30_000)
+        await flushUi(4)
+        expect(apiFetchMock.mock.calls.length).toBe(settledCallCount)
+      } finally {
+        vi.useRealTimers()
+      }
+    })
+
+    // Gate P2-1 (adversarial review of #4069): the existing unmount test above settles the poll's
+    // /runs GET BEFORE unmounting, so it never exercises the race the `runPollToken` check exists
+    // for — a GET that is still in flight when the poll is torn down. Deleting
+    // `if (token !== runPollToken) return` in pollAsyncRun leaves all other tests green; this one
+    // pins the exact zombie-continuation failure mode described in the review.
+    it('a poll GET still in flight when switching integration must not resurrect the loop for the OLD integration (kills a deleted runPollToken check)', async () => {
+      vi.useFakeTimers()
+      try {
+        const integrationA = createIntegration()
+        const integrationB = createIntegration({ id: 'dir-2', name: 'DingTalk CN 2', corpId: 'dingcorp-2' })
+
+        apiFetchMock
+          .mockResolvedValueOnce(createJsonResponse({ ok: true, data: { items: [integrationA, integrationB] } }))
+          .mockResolvedValueOnce(createJsonResponse(createRunsPayload([])))
+          .mockResolvedValueOnce(createJsonResponse(createScheduleSnapshotPayload()))
+          .mockResolvedValueOnce(createJsonResponse(createAlertListPayload([])))
+          .mockResolvedValueOnce(createJsonResponse(createReviewItemsPayload([])))
+          .mockResolvedValueOnce(createJsonResponse(createAccountListPayload([])))
+
+        mountView()
+        await flushUi()
+
+        apiFetchMock.mockResolvedValueOnce(createJsonResponse(
+          { ok: true, data: { accepted: true, runId: 'run-bg-1', integrationId: 'dir-1' } },
+          202,
+        ))
+        // The poll's first /runs GET is deliberately left unresolved — it is still "in flight"
+        // when we switch integration below.
+        let resolveStalePoll: (value: unknown) => void = () => {}
+        const stalePoll = new Promise((resolve) => { resolveStalePoll = resolve })
+        apiFetchMock.mockImplementationOnce(() => stalePoll)
+
+        findButton('后台同步')!.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+        await flushUi(8)
+        expect(container?.textContent).toContain('后台同步进行中（运行 run-bg-1）')
+
+        // Switch to a second integration WHILE the poll GET above is still pending.
+        apiFetchMock
+          .mockResolvedValueOnce(createJsonResponse(createRunsPayload([])))
+          .mockResolvedValueOnce(createJsonResponse(createScheduleSnapshotPayload({ integrationId: 'dir-2' })))
+          .mockResolvedValueOnce(createJsonResponse(createAlertListPayload([])))
+          .mockResolvedValueOnce(createJsonResponse(createReviewItemsPayload([])))
+          .mockResolvedValueOnce(createJsonResponse(createAccountListPayload([])))
+        findIntegrationButton('DingTalk CN 2')!.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+        await flushUi(8)
+        expect(container?.textContent).not.toContain('后台同步进行中')
+
+        const callCountBeforeStaleResolve = apiFetchMock.mock.calls.length
+
+        // NOW the stale GET resolves — with a TERMINAL run belonging to the OLD integration A.
+        resolveStalePoll(createJsonResponse(createRunsPayload([
+          createBackgroundRun('completed', { stats: { accountsSynced: 777 } }),
+        ])))
+        await flushUi(8)
+
+        // Must NOT write A's stale runs into the (now-B) panel.
+        expect(container?.textContent).not.toContain('777')
+        // Must NOT call refreshAfterDirectorySync(A) — that would fire ~6 more fetches.
+        expect(apiFetchMock.mock.calls.length).toBe(callCountBeforeStaleResolve)
+
+        // Must NOT re-arm the timer either (terminal branch shouldn't, but pin it explicitly).
+        await vi.advanceTimersByTimeAsync(30_000)
+        await flushUi(4)
+        expect(apiFetchMock.mock.calls.length).toBe(callCountBeforeStaleResolve)
+      } finally {
+        vi.useRealTimers()
+      }
+    })
+
+    // Gate P2-2 (adversarial review of #4069): both integration-switch hygiene lines added at the
+    // top of selectIntegration (stop the OLD poll, clear the OLD preview) are individually
+    // deletable with the rest of the suite green. One test, two independent assertions — either
+    // deleted line turns a different assertion below RED.
+    it('switching to a second integration mid-poll stops the OLD poll and clears the OLD preview card', async () => {
+      vi.useFakeTimers()
+      try {
+        const integrationA = createIntegration()
+        const integrationB = createIntegration({ id: 'dir-2', name: 'DingTalk CN 2', corpId: 'dingcorp-2' })
+
+        apiFetchMock
+          .mockResolvedValueOnce(createJsonResponse({ ok: true, data: { items: [integrationA, integrationB] } }))
+          .mockResolvedValueOnce(createJsonResponse(createRunsPayload([])))
+          .mockResolvedValueOnce(createJsonResponse(createScheduleSnapshotPayload()))
+          .mockResolvedValueOnce(createJsonResponse(createAlertListPayload([])))
+          .mockResolvedValueOnce(createJsonResponse(createReviewItemsPayload([])))
+          .mockResolvedValueOnce(createJsonResponse(createAccountListPayload([])))
+
+        mountView()
+        await flushUi()
+
+        // Render a preview card for A (the footer 预览同步 button, not gated on pollingRunId yet).
+        apiFetchMock.mockResolvedValueOnce(createJsonResponse(createPreviewPayload({ wouldCreateAccounts: 3 })))
+        findButton('预览同步')!.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+        await flushUi(8)
+        expect(container?.textContent).toContain('将新增账号 3')
+
+        // Start a background poll for A too (independent of the preview).
+        apiFetchMock.mockResolvedValueOnce(createJsonResponse(
+          { ok: true, data: { accepted: true, runId: 'run-bg-1', integrationId: 'dir-1' } },
+          202,
+        ))
+        apiFetchMock.mockResolvedValueOnce(createJsonResponse(createRunsPayload([createBackgroundRun('running')])))
+        findButton('后台同步')!.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+        await flushUi(8)
+        expect(container?.textContent).toContain('后台同步进行中（运行 run-bg-1）')
+
+        // Switch to B.
+        apiFetchMock
+          .mockResolvedValueOnce(createJsonResponse(createRunsPayload([])))
+          .mockResolvedValueOnce(createJsonResponse(createScheduleSnapshotPayload({ integrationId: 'dir-2' })))
+          .mockResolvedValueOnce(createJsonResponse(createAlertListPayload([])))
+          .mockResolvedValueOnce(createJsonResponse(createReviewItemsPayload([])))
+          .mockResolvedValueOnce(createJsonResponse(createAccountListPayload([])))
+        findIntegrationButton('DingTalk CN 2')!.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+        await flushUi(8)
+
+        // Preview hygiene: A's stale preview card must not render under B's header.
+        expect(container?.textContent).not.toContain('将新增账号 3')
+        expect(container?.textContent).not.toContain('同步预览（dry-run）')
+
+        // Poll hygiene: the OLD poll must not keep firing against A after the switch.
+        const settledCallCount = apiFetchMock.mock.calls.length
+        await vi.advanceTimersByTimeAsync(10_000)
+        await flushUi(4)
+        expect(apiFetchMock.mock.calls.length).toBe(settledCallCount)
+      } finally {
+        vi.useRealTimers()
+      }
+    })
+
+    // Gate P3-1 (adversarial review of #4069, author-flagged): a crashed worker with the
+    // scheduler disabled leaves a run row 'running' forever, and this tab locks its own
+    // sync/preview buttons on pollingRunId — the very action that would reclaim the lease —
+    // so it would otherwise poll every 5s indefinitely. Bound it.
+    it('stops polling after ~10 minutes if the run never reaches terminal, surfaces guidance, and unlocks the buttons', async () => {
+      vi.useFakeTimers()
+      try {
+        mockInitialLoad(createIntegration())
+        apiFetchMock.mockResolvedValueOnce(createJsonResponse(
+          { ok: true, data: { accepted: true, runId: 'run-bg-1', integrationId: 'dir-1' } },
+          202,
+        ))
+        apiFetchMock.mockResolvedValue(createJsonResponse(createRunsPayload([createBackgroundRun('running')])))
+
+        mountView()
+        await flushUi()
+
+        findButton('后台同步')!.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+        await flushUi(8)
+
+        // Cross the 10-minute cap (120 ticks of the 5s interval would otherwise run forever).
+        await vi.advanceTimersByTimeAsync(10 * 60 * 1000 + 5_000)
+        await flushUi(8)
+
+        expect(container?.textContent).toContain('已停止自动轮询')
+        expect(container?.textContent).toContain('运行记录')
+        expect(container?.textContent).not.toContain('后台同步进行中')
+        expect(findButton('后台同步')?.disabled).toBe(false)
+
+        const settledCallCount = apiFetchMock.mock.calls.length
+        await vi.advanceTimersByTimeAsync(30_000)
+        await flushUi(4)
+        expect(apiFetchMock.mock.calls.length).toBe(settledCallCount)
+      } finally {
+        vi.useRealTimers()
+      }
+    })
+
+    it('renders R5 per-run change stats (#4054 keys) when present and omits them for pre-R5 runs', async () => {
+      mockInitialLoad(createIntegration(), createRunsPayload([
+        {
+          id: 'run-new',
+          status: 'completed',
+          startedAt: '2026-07-10T01:00:00.000Z',
+          finishedAt: '2026-07-10T01:05:00.000Z',
+          errorMessage: null,
+          stats: {
+            accountsSynced: 99,
+            departmentsSynced: 13,
+            pendingCount: 3,
+            linkedCount: 89,
+            accountsCreatedCount: 5,
+            accountsUpdatedCount: 94,
+            accountsDeactivatedCount: 2,
+            departmentsCreatedCount: 1,
+            departmentsUpdatedCount: 12,
+            departmentsDeactivatedCount: 0,
+            managerCount: 6,
+            linkedManagerCount: 5,
+            managerCoverage: 0.8333333333333334,
+            durationMs: 4230,
+          },
+        },
+        {
+          id: 'run-old',
+          status: 'completed',
+          startedAt: '2026-07-09T01:00:00.000Z',
+          finishedAt: '2026-07-09T01:05:00.000Z',
+          errorMessage: null,
+          stats: {
+            accountsSynced: 98,
+            departmentsSynced: 12,
+            pendingCount: 4,
+            linkedCount: 88,
+          },
+        },
+      ]))
+
+      mountView()
+      await flushUi()
+
+      const runCards = Array.from(container!.querySelectorAll('.directory-admin__run'))
+      expect(runCards.length).toBe(2)
+
+      const newCard = runCards[0].textContent ?? ''
+      expect(newCard).toContain('本次变更：账号 新增 5 · 更新 94 · 停用 2')
+      expect(newCard).toContain('部门 新增 1 · 更新 12 · 停用 0')
+      expect(newCard).toContain('主管绑定覆盖 83%（5/6）')
+      expect(newCard).toContain('耗时 4.2s')
+
+      // Pre-R5 run: keys ABSENT — the change-summary lines must not render at all
+      // (an all-zero "this run changed nothing" line would be a lie).
+      const oldCard = runCards[1].textContent ?? ''
+      expect(oldCard).toContain('账号 98')
+      expect(oldCard).not.toContain('本次变更')
+      expect(oldCard).not.toContain('主管绑定覆盖')
+      expect(oldCard).not.toContain('耗时')
+    })
   })
 })

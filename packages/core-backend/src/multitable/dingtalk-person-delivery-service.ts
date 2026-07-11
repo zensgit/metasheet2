@@ -6,7 +6,8 @@ export interface DingTalkPersonDelivery {
   subject: string
   content: string
   success: boolean
-  status: 'success' | 'failed' | 'skipped'
+  /** `outcome_unknown` (PR #4046 Phase B): send attempted, response lost — maybe delivered, never auto-resent. */
+  status: 'success' | 'failed' | 'skipped' | 'outcome_unknown'
   httpStatus?: number
   responseBody?: string
   errorMessage?: string
@@ -45,7 +46,9 @@ type DeliveryRow = {
 }
 
 function normalizeDeliveryStatus(status: string | null, success: boolean): DingTalkPersonDelivery['status'] {
-  if (status === 'success' || status === 'failed' || status === 'skipped') return status
+  // outcome_unknown passes through unfolded (PR #4046 Phase B) — folding it into 'failed' would
+  // erase the reconciliation signal the distinct state exists for.
+  if (status === 'success' || status === 'failed' || status === 'skipped' || status === 'outcome_unknown') return status
   return success ? 'success' : 'failed'
 }
 

@@ -7,6 +7,7 @@ const {
   UnsupportedAdapterOperationError,
 } = require(path.join(__dirname, '..', 'lib', 'contracts.cjs'))
 const {
+  BRIDGE_AGENT_READONLY_ADAPTER_ERROR_CODES,
   BridgeAgentReadonlyAdapterError,
   createBridgeAgentReadonlyAdapter,
 } = require(path.join(__dirname, '..', 'lib', 'adapters', 'bridge-agent-readonly-adapter.cjs'))
@@ -283,6 +284,42 @@ async function main() {
     const httpErr = await http500.listObjects().then(() => null, (e) => e)
     assert.ok(httpErr, 'a 500 from a reachable agent still errors')
     assert.notEqual(httpErr.code, 'BRIDGE_AGENT_UNREACHABLE', 'a reachable-agent HTTP error is NOT labeled unreachable')
+  }
+
+  // --- 8. BA-UI-1: the exported adapter-owned error-code vocabulary is exactly the codes this
+  // adapter itself assigns (never a code an operator's own Bridge Agent HTTP body supplies via
+  // `error.code` — see step 5/7's 'BRIDGE_AGENT_ERROR'/'UNKNOWN_OBJECT' fixtures, which are NOT in
+  // this list). The web client mirrors this exact array in errorCodeLabels.ts with a require()-based
+  // tripwire test, so a future addition/removal here must be synced there before it goes green.
+  {
+    assert.deepEqual(
+      [...BRIDGE_AGENT_READONLY_ADAPTER_ERROR_CODES].sort(),
+      ['BRIDGE_AGENT_REQUEST_FAILED', 'BRIDGE_AGENT_TEST_FAILED', 'BRIDGE_AGENT_TIMEOUT', 'BRIDGE_AGENT_UNREACHABLE'].sort(),
+    )
+
+    // BRIDGE_AGENT_TIMEOUT: an AbortError from the fetch layer (simulates the adapter's own
+    // AbortController firing on config.timeoutMs).
+    const timeoutAdapter = createBridgeAgentReadonlyAdapter({
+      system: createSystem(),
+      fetchImpl: async () => {
+        const err = new Error('The operation was aborted')
+        err.name = 'AbortError'
+        throw err
+      },
+    })
+    const timeoutResult = await timeoutAdapter.testConnection()
+    assert.equal(timeoutResult.ok, false)
+    assert.equal(timeoutResult.code, 'BRIDGE_AGENT_TIMEOUT')
+
+    // BRIDGE_AGENT_REQUEST_FAILED: a non-2xx response whose body carries no error.code at all (the
+    // adapter's own fallback default in bridgeErrorCode(), distinct from an agent-supplied code).
+    const noCodeAdapter = createBridgeAgentReadonlyAdapter({
+      system: createSystem(),
+      fetchImpl: async () => jsonResponse(500, { message: 'boom, no error.code here' }),
+    })
+    const noCodeErr = await noCodeAdapter.listObjects().then(() => null, (e) => e)
+    assert.ok(noCodeErr instanceof BridgeAgentReadonlyAdapterError)
+    assert.equal(noCodeErr.code, 'BRIDGE_AGENT_REQUEST_FAILED')
   }
 
   console.log('✓ bridge-agent-readonly-adapter: BA-M2 source contract tests passed')

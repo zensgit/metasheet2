@@ -85,6 +85,8 @@ export type AutomationLabelKey =
   | 'editor.saving'
   | 'editor.cancel'
   | 'editor.discardConfirm'
+  | 'editor.discardConfirmTitle'
+  | 'editor.discardConfirmButton'
   | 'editor.actions'
   | 'editor.actionStepHint'
   | 'editor.addField'
@@ -95,6 +97,8 @@ export type AutomationLabelKey =
   | 'editor.executionModeLabel'
   | 'editor.executionModeHint'
   | 'editor.executionModeRequiredHint'
+  | 'editor.advancedSection'
+  | 'editor.saveBlockedTitle'
   | 'trigger.title'
   | 'trigger.watchField'
   | 'trigger.selectField'
@@ -117,6 +121,8 @@ export type AutomationLabelKey =
   | 'condition.removeConditionTitle'
   | 'actionConfig.targetSheetId'
   | 'actionConfig.sheetIdPlaceholder'
+  | 'actionConfig.targetSheetManualToggle'
+  | 'actionConfig.targetSheetUseListToggle'
   | 'actionConfig.fieldIdPlaceholder'
   | 'actionConfig.url'
   | 'actionConfig.method'
@@ -158,6 +164,7 @@ export type AutomationLabelKey =
   | 'parallelBranch.addBranch'
   | 'testRun.warning'
   | 'testRun.confirmSuffix'
+  | 'testRun.confirmTitle'
   | 'testRun.unsavedHint'
   | 'testRun.button'
   | 'testRun.running'
@@ -173,15 +180,25 @@ export type AutomationLabelKey =
   | 'manager.quickLegacyForm'
   | 'manager.loading'
   | 'manager.empty'
+  | 'manager.recipeSectionTitle'
+  | 'manager.recipeOrBlank'
+  | 'recipe.createdNotifyTitle'
+  | 'recipe.createdNotifyDesc'
+  | 'recipe.updatedNotifyTitle'
+  | 'recipe.updatedNotifyDesc'
+  | 'recipe.fieldChangedUpdateTitle'
+  | 'recipe.fieldChangedUpdateDesc'
   | 'manager.enabled'
   | 'manager.disabled'
   | 'manager.allowedAudiencePrefix'
   | 'manager.statOk'
   | 'manager.statFail'
+  | 'manager.lastRunNone'
   | 'manager.edit'
   | 'manager.viewLogs'
   | 'manager.viewDeliveries'
   | 'manager.delete'
+  | 'manager.deleteConfirmTitle'
   | 'manager.cardPublicForm'
   | 'manager.cardInternalProcessing'
   | 'manager.cardOpenPublicForm'
@@ -271,6 +288,7 @@ export type AutomationLabelKey =
   | 'status.success'
   | 'status.failed'
   | 'status.skipped'
+  | 'status.outcomeUnknown'
   | 'status.running'
   | 'status.resolved'
   | 'status.queued'
@@ -292,6 +310,7 @@ export type AutomationLabelKey =
   | 'runs.loadingDetail'
   | 'runs.resume'
   | 'runs.resumeConfirm'
+  | 'runs.resumeConfirmTitle'
   | 'runs.resumeError.notFound'
   | 'runs.resumeError.alreadyResumed'
   | 'runs.resumeError.ruleChanged'
@@ -342,6 +361,8 @@ export const AUTOMATION_LABEL_KEYS: readonly AutomationLabelKey[] = [
   'editor.saving',
   'editor.cancel',
   'editor.discardConfirm',
+  'editor.discardConfirmTitle',
+  'editor.discardConfirmButton',
   'editor.actions',
   'editor.actionStepHint',
   'editor.addField',
@@ -352,6 +373,8 @@ export const AUTOMATION_LABEL_KEYS: readonly AutomationLabelKey[] = [
   'editor.executionModeLabel',
   'editor.executionModeHint',
   'editor.executionModeRequiredHint',
+  'editor.advancedSection',
+  'editor.saveBlockedTitle',
   'trigger.title',
   'trigger.watchField',
   'trigger.selectField',
@@ -374,6 +397,8 @@ export const AUTOMATION_LABEL_KEYS: readonly AutomationLabelKey[] = [
   'condition.removeConditionTitle',
   'actionConfig.targetSheetId',
   'actionConfig.sheetIdPlaceholder',
+  'actionConfig.targetSheetManualToggle',
+  'actionConfig.targetSheetUseListToggle',
   'actionConfig.fieldIdPlaceholder',
   'actionConfig.url',
   'actionConfig.method',
@@ -412,6 +437,7 @@ export const AUTOMATION_LABEL_KEYS: readonly AutomationLabelKey[] = [
   'parallelBranch.addBranch',
   'testRun.warning',
   'testRun.confirmSuffix',
+  'testRun.confirmTitle',
   'testRun.unsavedHint',
   'testRun.button',
   'testRun.running',
@@ -427,15 +453,25 @@ export const AUTOMATION_LABEL_KEYS: readonly AutomationLabelKey[] = [
   'manager.quickLegacyForm',
   'manager.loading',
   'manager.empty',
+  'manager.recipeSectionTitle',
+  'manager.recipeOrBlank',
+  'recipe.createdNotifyTitle',
+  'recipe.createdNotifyDesc',
+  'recipe.updatedNotifyTitle',
+  'recipe.updatedNotifyDesc',
+  'recipe.fieldChangedUpdateTitle',
+  'recipe.fieldChangedUpdateDesc',
   'manager.enabled',
   'manager.disabled',
   'manager.allowedAudiencePrefix',
   'manager.statOk',
   'manager.statFail',
+  'manager.lastRunNone',
   'manager.edit',
   'manager.viewLogs',
   'manager.viewDeliveries',
   'manager.delete',
+  'manager.deleteConfirmTitle',
   'manager.cardPublicForm',
   'manager.cardInternalProcessing',
   'manager.cardOpenPublicForm',
@@ -525,6 +561,7 @@ export const AUTOMATION_LABEL_KEYS: readonly AutomationLabelKey[] = [
   'status.success',
   'status.failed',
   'status.skipped',
+  'status.outcomeUnknown',
   'status.running',
   'status.resolved',
   'status.queued',
@@ -546,6 +583,7 @@ export const AUTOMATION_LABEL_KEYS: readonly AutomationLabelKey[] = [
   'runs.loadingDetail',
   'runs.resume',
   'runs.resumeConfirm',
+  'runs.resumeConfirmTitle',
   'runs.resumeError.notFound',
   'runs.resumeError.alreadyResumed',
   'runs.resumeError.ruleChanged',
@@ -599,6 +637,8 @@ const LABELS: Record<AutomationLabelKey, { en: string; zh: string }> = {
     en: 'You have unsaved changes; closing will discard them. Continue?',
     zh: '有未保存的更改，关闭将丢弃这些更改。是否继续？',
   },
+  'editor.discardConfirmTitle': { en: 'Discard changes?', zh: '放弃更改？' },
+  'editor.discardConfirmButton': { en: 'Discard', zh: '放弃' },
   'editor.actions': { en: 'Actions', zh: '动作' },
   'editor.actionStepHint': { en: '(1-3 steps)', zh: '（1-3 步）' },
   'editor.addField': { en: '+ Field', zh: '+ 字段' },
@@ -606,6 +646,10 @@ const LABELS: Record<AutomationLabelKey, { en: string; zh: string }> = {
   'editor.moveUpTitle': { en: 'Move up', zh: '上移' },
   'editor.moveDownTitle': { en: 'Move down', zh: '下移' },
   'editor.removeActionTitle': { en: 'Remove action', zh: '移除动作' },
+  'editor.advancedSection': {
+    en: 'Advanced',
+    zh: '高级设置',
+  },
   'editor.executionModeLabel': {
     en: 'Persist a per-action run record (advanced)',
     zh: '持久化每步运行记录（高级）',
@@ -617,6 +661,12 @@ const LABELS: Record<AutomationLabelKey, { en: string; zh: string }> = {
   'editor.executionModeRequiredHint': {
     en: 'Required and locked on: this rule has an action that requires durable WorkflowJob records (wait for callback, condition branch, or parallel branch).',
     zh: '已强制开启并锁定：本规则包含需要持久 WorkflowJob 记录的动作（等待回调、条件分支或并行分支），无法关闭。',
+  },
+  // G-B2-22: title above the save-block reasons list — shown only while Save is disabled by a
+  // validation guard, never while merely mid-save.
+  'editor.saveBlockedTitle': {
+    en: "Can't save yet — fix the following:",
+    zh: '暂时无法保存，请先解决以下问题：',
   },
   'trigger.title': { en: 'Trigger', zh: '触发器' },
   'trigger.watchField': { en: 'Watch field', zh: '监听字段' },
@@ -640,6 +690,10 @@ const LABELS: Record<AutomationLabelKey, { en: string; zh: string }> = {
   'condition.removeConditionTitle': { en: 'Remove condition', zh: '移除条件' },
   'actionConfig.targetSheetId': { en: 'Target sheet ID', zh: '目标工作表 ID' },
   'actionConfig.sheetIdPlaceholder': { en: 'Sheet ID', zh: '工作表 ID' },
+  // G-B2-27: escape hatch next to the target-sheet dropdown — listSheets() may omit
+  // cross-base/future sheets, so typing the ID directly stays available on demand.
+  'actionConfig.targetSheetManualToggle': { en: 'Enter ID manually', zh: '手动输入 ID' },
+  'actionConfig.targetSheetUseListToggle': { en: 'Choose from list', zh: '从列表选择' },
   'actionConfig.fieldIdPlaceholder': { en: 'Field ID', zh: '字段 ID' },
   'actionConfig.url': { en: 'URL', zh: 'URL' },
   'actionConfig.method': { en: 'Method', zh: '方法' },
@@ -705,6 +759,7 @@ const LABELS: Record<AutomationLabelKey, { en: string; zh: string }> = {
   'parallelBranch.addBranch': { en: '+ Branch', zh: '+ 分支' },
   'testRun.warning': { en: 'Test Run executes the saved rule and can send real DingTalk messages to configured groups or users.', zh: '测试运行会执行已保存规则，并可能向已配置的钉钉群或用户发送真实消息。' },
   'testRun.confirmSuffix': { en: 'Unsaved changes are not included. Continue?', zh: '未保存的更改不会包含在内。是否继续？' },
+  'testRun.confirmTitle': { en: 'Run test?', zh: '运行测试？' },
   'testRun.unsavedHint': { en: 'Save this automation before running a test.', zh: '请先保存此自动化，再运行测试。' },
   'testRun.button': { en: 'Test Run', zh: '测试运行' },
   'testRun.running': { en: 'Running...', zh: '正在运行...' },
@@ -720,15 +775,25 @@ const LABELS: Record<AutomationLabelKey, { en: string; zh: string }> = {
   'manager.quickLegacyForm': { en: 'Quick legacy form', zh: '快速旧版表单' },
   'manager.loading': { en: 'Loading automations...', zh: '正在加载自动化...' },
   'manager.empty': { en: 'No automations yet. Create your first automation rule.', zh: '暂无自动化。创建第一条自动化规则。' },
+  'manager.recipeSectionTitle': { en: 'Start from a recipe', zh: '从配方开始' },
+  'manager.recipeOrBlank': { en: 'or start from blank', zh: '或从空白开始' },
+  'recipe.createdNotifyTitle': { en: 'Notify on new record', zh: '新记录时通知' },
+  'recipe.createdNotifyDesc': { en: 'When a record is created, send an in-app notification.', zh: '记录创建时，发送站内通知。' },
+  'recipe.updatedNotifyTitle': { en: 'Notify on record update', zh: '记录更新时通知' },
+  'recipe.updatedNotifyDesc': { en: 'When a record is updated, send an in-app notification.', zh: '记录更新时，发送站内通知。' },
+  'recipe.fieldChangedUpdateTitle': { en: 'Update a field on change', zh: '字段变更时回填' },
+  'recipe.fieldChangedUpdateDesc': { en: 'When a field changes, write a value into another field.', zh: '字段变更时，向另一字段写入值。' },
   'manager.enabled': { en: 'Enabled', zh: '已启用' },
   'manager.disabled': { en: 'Disabled', zh: '已停用' },
   'manager.allowedAudiencePrefix': { en: 'Allowed audience:', zh: '允许范围：' },
   'manager.statOk': { en: 'ok', zh: '成功' },
   'manager.statFail': { en: 'fail', zh: '失败' },
+  'manager.lastRunNone': { en: 'Not run yet', zh: '尚未运行' },
   'manager.edit': { en: 'Edit', zh: '编辑' },
   'manager.viewLogs': { en: 'View Logs', zh: '查看日志' },
   'manager.viewDeliveries': { en: 'View Deliveries', zh: '查看投递记录' },
   'manager.delete': { en: 'Delete', zh: '删除' },
+  'manager.deleteConfirmTitle': { en: 'Delete rule', zh: '删除规则' },
   'manager.cardPublicForm': { en: 'Public form', zh: '公开表单' },
   'manager.cardInternalProcessing': { en: 'Internal processing', zh: '内部处理' },
   'manager.cardOpenPublicForm': { en: 'Open public form', zh: '打开公开表单' },
@@ -818,6 +883,7 @@ const LABELS: Record<AutomationLabelKey, { en: string; zh: string }> = {
   'status.success': { en: 'success', zh: '成功' },
   'status.failed': { en: 'failed', zh: '失败' },
   'status.skipped': { en: 'skipped', zh: '跳过' },
+  'status.outcomeUnknown': { en: 'outcome unknown', zh: '结果未知' },
   'status.running': { en: 'running', zh: '运行中' },
   'status.resolved': { en: 'resolved', zh: '已完成' },
   'status.queued': { en: 'queued', zh: '排队中' },
@@ -842,6 +908,7 @@ const LABELS: Record<AutomationLabelKey, { en: string; zh: string }> = {
     en: 'Resume this run? It continues the remaining actions and may cause external side effects.',
     zh: '恢复这条执行？将继续执行剩余动作，可能产生外部副作用。',
   },
+  'runs.resumeConfirmTitle': { en: 'Resume run?', zh: '恢复执行？' },
   'runs.resumeError.notFound': { en: 'Resume token not found.', zh: '恢复令牌不存在。' },
   'runs.resumeError.alreadyResumed': { en: 'This run was already resumed.', zh: '该执行已被恢复。' },
   'runs.resumeError.ruleChanged': { en: 'The rule changed since it was suspended; cannot resume safely.', zh: '规则在挂起后已变更，无法安全恢复。' },
@@ -872,6 +939,7 @@ export function automationStatusLabel(status: AutomationStatus | UnknownAutomati
   if (status === 'success') return automationLabel('status.success', isZh)
   if (status === 'failed') return automationLabel('status.failed', isZh)
   if (status === 'skipped') return automationLabel('status.skipped', isZh)
+  if (status === 'outcome_unknown') return automationLabel('status.outcomeUnknown', isZh)
   if (status === 'running') return automationLabel('status.running', isZh)
   if (status === 'resolved') return automationLabel('status.resolved', isZh)
   if (status === 'queued') return automationLabel('status.queued', isZh)
@@ -1060,6 +1128,67 @@ export function automationCardLinkSummary(variant: AutomationCardLinkVariant, vi
 export function automationCardStats(count: number, status: AutomationCardStatType, isZh: boolean): string {
   const key = status === 'ok' ? 'manager.statOk' : 'manager.statFail'
   return `${count} ${automationLabel(key, isZh)}`
+}
+
+const LAST_RUN_MINUTE_MS = 60 * 1000
+const LAST_RUN_HOUR_MS = 60 * LAST_RUN_MINUTE_MS
+const LAST_RUN_DAY_MS = 24 * LAST_RUN_HOUR_MS
+
+/**
+ * G-B2-23: relative-time text for a rule card's "last run" chip, e.g. "3 分钟前" /
+ * "3 minutes ago". Returns '' for an unparseable `iso` timestamp so callers can fail
+ * quiet instead of rendering "NaN minutes ago". A timestamp slightly in the future
+ * (clock skew between browser and backend) clamps to "just now" rather than a negative
+ * duration.
+ */
+export function automationLastRunRelativeTime(iso: string, now: Date, isZh: boolean): string {
+  const thenMs = new Date(iso).getTime()
+  if (Number.isNaN(thenMs)) return ''
+  const elapsedMs = Math.max(0, now.getTime() - thenMs)
+  if (elapsedMs < LAST_RUN_MINUTE_MS) return isZh ? '刚刚' : 'just now'
+  if (elapsedMs < LAST_RUN_HOUR_MS) {
+    const minutes = Math.floor(elapsedMs / LAST_RUN_MINUTE_MS)
+    return isZh ? `${minutes} 分钟前` : `${minutes} ${minutes === 1 ? 'minute' : 'minutes'} ago`
+  }
+  if (elapsedMs < LAST_RUN_DAY_MS) {
+    const hours = Math.floor(elapsedMs / LAST_RUN_HOUR_MS)
+    return isZh ? `${hours} 小时前` : `${hours} ${hours === 1 ? 'hour' : 'hours'} ago`
+  }
+  const days = Math.floor(elapsedMs / LAST_RUN_DAY_MS)
+  return isZh ? `${days} 天前` : `${days} ${days === 1 ? 'day' : 'days'} ago`
+}
+
+/** Which status color a rule card's "last run" chip keys off of; `'none'` = never run. */
+export type AutomationLastRunChipStatus = AutomationExecution['status'] | 'none'
+
+export interface AutomationLastRunChip {
+  status: AutomationLastRunChipStatus
+  text: string
+}
+
+/**
+ * G-B2-23: rule card "last run" chip — glanceable status + relative time, without a
+ * separate serial round-trip per rule (see `automation-rule-concurrent-merge.ts` for the
+ * concurrent fetch/merge that feeds this).
+ *
+ * `executions` is the most-recent-first page from `getAutomationLogs(sheetId, ruleId, 1)`
+ * (0 or 1 entries — this function only ever looks at index 0). An empty array is a
+ * *confirmed* "this rule has never run" — distinct from "we haven't fetched yet", which
+ * is the caller's `v-if` concern before this function is ever invoked — so it renders the
+ * honest "Not run yet" copy rather than a blank chip or a fabricated timestamp.
+ */
+export function automationLastRunChip(
+  executions: readonly AutomationExecution[],
+  now: Date,
+  isZh: boolean,
+): AutomationLastRunChip {
+  const latest = executions[0]
+  if (!latest) {
+    return { status: 'none', text: automationLabel('manager.lastRunNone', isZh) }
+  }
+  const statusText = automationStatusLabel(latest.status, isZh)
+  const relative = automationLastRunRelativeTime(latest.triggeredAt, now, isZh)
+  return { status: latest.status, text: relative ? `${statusText} · ${relative}` : statusText }
 }
 
 /**

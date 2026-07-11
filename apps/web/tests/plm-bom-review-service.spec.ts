@@ -116,3 +116,60 @@ describe('updatePlmBomMultitableLine (Phase 7 consumer write-back service)', () 
     expect(apiFetchMock).not.toHaveBeenCalled()
   })
 })
+
+describe('requestPlmBomEcoRevisionIntent (ECO Phase 3 consumer service)', () => {
+  beforeEach(() => apiFetchMock.mockReset())
+
+  it('does not fetch when dataSourceId or partId is empty', async () => {
+    const { requestPlmBomEcoRevisionIntent } = await import('../src/services/integration/workbench')
+    const r = await requestPlmBomEcoRevisionIntent('ds-1', '  ')
+    expect(r).toEqual({ ok: false, status: 400, reason: 'invalid-request', message: 'ECO revision request is incomplete' })
+    expect(apiFetchMock).not.toHaveBeenCalled()
+  })
+
+  it('POSTs the intent relay with suppressUnauthorizedRedirect and NO body', async () => {
+    const { requestPlmBomEcoRevisionIntent } = await import('../src/services/integration/workbench')
+    apiFetchMock.mockResolvedValue(rawJsonResponse({ eco_id: 'ECO-1', state: 'progress', attached: false }))
+    const r = await requestPlmBomEcoRevisionIntent('ds-1', 'P1')
+    expect(apiFetchMock).toHaveBeenCalledWith(
+      '/api/plm-workbench/data-sources/ds-1/bom-multitable/P1/eco-intent',
+      { method: 'POST', suppressUnauthorizedRedirect: true },
+    )
+    expect(r).toEqual({ ok: true, eco_id: 'ECO-1', state: 'progress', attached: false })
+  })
+
+  it('relays the attach outcome (attached: true)', async () => {
+    const { requestPlmBomEcoRevisionIntent } = await import('../src/services/integration/workbench')
+    apiFetchMock.mockResolvedValue(rawJsonResponse({ eco_id: 'ECO-OLD', state: 'draft', attached: true }))
+    const r = await requestPlmBomEcoRevisionIntent('ds-1', 'P1')
+    expect(r).toEqual({ ok: true, eco_id: 'ECO-OLD', state: 'draft', attached: true })
+  })
+
+  it('surfaces the relayed reason on a non-ok status (not_locked)', async () => {
+    const { requestPlmBomEcoRevisionIntent } = await import('../src/services/integration/workbench')
+    apiFetchMock.mockResolvedValue(rawJsonResponse({ error: 'conflict', reason: 'not_locked' }, 409))
+    const r = await requestPlmBomEcoRevisionIntent('ds-1', 'P1')
+    expect(r).toEqual({ ok: false, status: 409, reason: 'not_locked', message: 'conflict' })
+  })
+
+  it('falls back to intent-failed when the error body carries no reason', async () => {
+    const { requestPlmBomEcoRevisionIntent } = await import('../src/services/integration/workbench')
+    apiFetchMock.mockResolvedValue(new Response('oops', { status: 503 }))
+    const r = await requestPlmBomEcoRevisionIntent('ds-1', 'P1')
+    expect(r.ok).toBe(false)
+    if (!r.ok) {
+      expect(r.status).toBe(503)
+      expect(r.reason).toBe('intent-failed')
+    }
+  })
+
+  it('502 malformed-response when a 200 body lacks the contract keys', async () => {
+    const { requestPlmBomEcoRevisionIntent } = await import('../src/services/integration/workbench')
+    apiFetchMock.mockResolvedValue(rawJsonResponse({ eco_id: 'ECO-1' }))
+    const r = await requestPlmBomEcoRevisionIntent('ds-1', 'P1')
+    expect(r).toEqual({
+      ok: false, status: 502, reason: 'malformed-response',
+      message: 'ECO revision intent returned a malformed response',
+    })
+  })
+})

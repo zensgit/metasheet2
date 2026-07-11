@@ -26,7 +26,14 @@ const {
   normalizeTemplate,
 } = require('./k3-wise-document-templates.cjs')
 const crypto = require('node:crypto')
-const { READ_SMOKE_LIST_REQUEST_MARKER, READ_SMOKE_BOM_REQUEST_MARKER } = require('../read-smoke-marker.cjs')
+const {
+  READ_SMOKE_LIST_REQUEST_MARKER,
+  READ_SMOKE_BOM_REQUEST_MARKER,
+  READ_SMOKE_BOM_LIST_BY_MATERIAL_REQUEST_MARKER,
+} = require('../read-smoke-marker.cjs')
+// BL2 (#1709): numeric-key validation for the by-material BOM-list read (BL0 lock: non-numeric input
+// fails before any K3 call). Pure predicate from the BL1 contract module.
+const { isBomListByMaterialKeyValid } = require('../read-source-bom-list-by-material-contract.cjs')
 const { scrubSecretStringValue } = require('../payload-redaction.cjs')
 // DF-T1-0: single source of truth for Save-body composition, shared with the no-write
 // preview (http-routes.cjs). Placeholder detection (findUnfilledPlaceholders) is shared; the
@@ -44,6 +51,9 @@ class K3WiseWebApiAdapterError extends Error {
 
 const DEFAULT_OBJECTS = getK3WiseDocumentObjectDefaults()
 const DEFAULT_MATERIAL_LIST_MAX_LIMIT = 10
+// Bounded LIST page selection (#3703, owner-approved 2026-07-06): mirrors READ_SMOKE_LIST_MAX_PAGE_INDEX
+// in read-smoke.cjs — the adapter re-guards the same 1..10 bound (defense in depth, never wider).
+const MAX_MATERIAL_LIST_PAGE_INDEX = 10
 // C4 BOM read (#1709): GetDetail has no paging, so a large bill returns every line. Bound the records we
 // retain and the line count we report so a values-free read-smoke stays bounded regardless of bill size.
 const DEFAULT_MATERIAL_BOM_MAX_LINES = 1000
@@ -644,6 +654,24 @@ function resolveMaterialReadMode(request, objectConfig) {
     }
     return mode
   }
+  // BL2 (#1709): by-material BOM-list lookup. Same Symbol-marker route gate as LIST/BOM — a JSON body,
+  // persisted adapter config, or source-action config cannot manufacture the marker, so this mode is
+  // reachable ONLY through the read-source runtime builders. Family codes (BL0 taxonomy) from here down.
+  if (mode === 'bom_list_by_material') {
+    if (request.options[READ_SMOKE_BOM_LIST_BY_MATERIAL_REQUEST_MARKER] !== true) {
+      throw new AdapterValidationError('K3 WISE BOM list-by-material read is only available through the read-source runtime', {
+        code: 'K3_WISE_BOM_LIST_BY_MATERIAL_REJECTED',
+        object: request.object,
+      })
+    }
+    if (configMode !== 'bom_list_by_material') {
+      throw new AdapterValidationError('K3 WISE BOM list-by-material read requires a matching object config', {
+        code: 'K3_WISE_BOM_LIST_BY_MATERIAL_NOT_CONFIGURED',
+        object: request.object,
+      })
+    }
+    return mode
+  }
   throw new AdapterValidationError('K3 WISE Material read mode is not supported', {
     code: 'K3_WISE_READ_MODE_UNSUPPORTED',
     object: request.object,
@@ -679,7 +707,7 @@ function assertMaterialListReadOnlyScope(request, objectConfig) {
       fields: Object.keys(request.filters),
     })
   }
-  const allowedOptionKeys = new Set(['k3ReadMode', 'listKey'])
+  const allowedOptionKeys = new Set(['k3ReadMode', 'listKey', 'listPageIndex'])
   const unknownOptions = Object.keys(request.options || {}).filter((key) => !allowedOptionKeys.has(key))
   if (unknownOptions.length > 0) {
     throw new AdapterValidationError('K3 WISE Material LIST smoke does not accept request-supplied options', {
@@ -687,6 +715,19 @@ function assertMaterialListReadOnlyScope(request, objectConfig) {
       object: request.object,
       fields: unknownOptions,
     })
+  }
+  // Bounded page selection (#3703, owner-approved 2026-07-06): defense-in-depth re-guard of the contract
+  // bound — a plain integer 1..MAX only. Anything else fails closed before any outbound call.
+  if (request.options.listPageIndex !== undefined) {
+    const pageIndex = request.options.listPageIndex
+    if (typeof pageIndex !== 'number' || !Number.isInteger(pageIndex) || pageIndex < 1 || pageIndex > MAX_MATERIAL_LIST_PAGE_INDEX) {
+      throw new AdapterValidationError('K3 WISE Material LIST smoke pageIndex is out of the fixed bound', {
+        code: 'K3_WISE_READ_LIST_PAGE_INDEX_INVALID',
+        object: request.object,
+        field: 'listPageIndex',
+        maxPageIndex: MAX_MATERIAL_LIST_PAGE_INDEX,
+      })
+    }
   }
   const maxLimit = toPositiveNumber(objectConfig.maxListLimit) || DEFAULT_MATERIAL_LIST_MAX_LIMIT
   if (request.limit > maxLimit) {
@@ -747,6 +788,94 @@ function assertMaterialBomReadOnlyScope(request) {
       object: request.object,
       field: 'bomKey',
     })
+  }
+}
+
+// BL2 (#1709): by-material BOM-list scope guard — read-only, single GetList call, one platform-derived
+// numeric material id, no request-supplied filters/cursor/watermark, bounded page. Mirrors the LIST/BOM
+// guards; failure codes are the registered K3_WISE_BOM_LIST_BY_MATERIAL_* family (BL0 taxonomy) so a
+// second-hop failure surfaces as its own family in values-free evidence.
+const DEFAULT_BOM_LIST_BY_MATERIAL_MAX_LIMIT = 10
+
+function assertBomListByMaterialReadOnlyScope(request) {
+  if (request.object !== 'material-bom-list') {
+    throw new UnsupportedAdapterOperationError('K3 WISE WebAPI BOM list-by-material supports only material-bom-list reads', {
+      kind: 'erp:k3-wise-webapi',
+      object: request.object,
+      operation: 'read',
+    })
+  }
+  if (request.cursor) {
+    throw new AdapterValidationError('K3 WISE BOM list-by-material read does not support cursor pagination', {
+      code: 'K3_WISE_BOM_LIST_BY_MATERIAL_REJECTED',
+      object: request.object,
+      field: 'cursor',
+    })
+  }
+  if (Object.keys(request.watermark || {}).length > 0) {
+    throw new AdapterValidationError('K3 WISE BOM list-by-material read does not support watermark reads', {
+      code: 'K3_WISE_BOM_LIST_BY_MATERIAL_REJECTED',
+      object: request.object,
+      field: 'watermark',
+    })
+  }
+  // The material id rides ONLY as the dedicated option below — a request-supplied raw filter (or any
+  // other filter key) is rejected outright (BL0 request-contract lock).
+  if (Object.keys(request.filters || {}).length > 0) {
+    throw new AdapterValidationError('K3 WISE BOM list-by-material read does not accept request-supplied filters', {
+      code: 'K3_WISE_BOM_LIST_BY_MATERIAL_REJECTED',
+      object: request.object,
+      fields: Object.keys(request.filters),
+    })
+  }
+  const allowedOptionKeys = new Set(['k3ReadMode', 'bomListMaterialKey'])
+  const unknownOptions = Object.keys(request.options || {}).filter((key) => !allowedOptionKeys.has(key))
+  if (unknownOptions.length > 0) {
+    throw new AdapterValidationError('K3 WISE BOM list-by-material read does not accept request-supplied options', {
+      code: 'K3_WISE_BOM_LIST_BY_MATERIAL_REJECTED',
+      object: request.object,
+      fields: unknownOptions,
+    })
+  }
+  if (request.limit > DEFAULT_BOM_LIST_BY_MATERIAL_MAX_LIMIT) {
+    throw new AdapterValidationError('K3 WISE BOM list-by-material read limit exceeds the fixed bound', {
+      code: 'K3_WISE_BOM_LIST_BY_MATERIAL_REJECTED',
+      object: request.object,
+      limit: request.limit,
+      maxLimit: DEFAULT_BOM_LIST_BY_MATERIAL_MAX_LIMIT,
+    })
+  }
+  // BL0 lock: the confirmed contract's key is the material's numeric FItemID — non-numeric input fails
+  // BEFORE any K3 call (no login, no outbound). Digits-only also means the filter below embeds a bare
+  // validated number: no quoting, no escaping, no expression-injection surface.
+  if (!isBomListByMaterialKeyValid(request.options.bomListMaterialKey)) {
+    throw new AdapterValidationError('K3 WISE BOM list-by-material read requires a numeric material id key', {
+      code: 'K3_WISE_BOM_LIST_BY_MATERIAL_KEY_INVALID',
+      object: request.object,
+      field: 'bomListMaterialKey',
+    })
+  }
+}
+
+// BL2 PINNED request body (owner review of #3689, constraint 2 — the runtime filter operator and body
+// field list are pinned HERE, not config-owned; the config cannot express any of this). Confirmed live
+// contract (#3683 customer K3 WebAPI docs + 2026-07-06 pre-BL2 hardware confirmation PASS):
+//   POST BOM/GetList  body root `Data`  keys {Top, PageSize, PageIndex, Filter, OrderBy, SelectPage, Fields}
+//   Filter dialect `[<fieldKey>] <op> <value>` — pinned operator `=`, pinned column [FPercentItemID],
+//   value = the digits-validated FItemID (bare numeric literal, no quoting/escaping surface)
+//   SelectPage=2 (data page), Fields pinned to the single resolver output column FBOMNumber.
+function buildBomListByMaterialReadBody(request) {
+  const key = String(request.options.bomListMaterialKey).trim()
+  return {
+    Data: {
+      Top: request.limit,
+      PageSize: request.limit,
+      PageIndex: 1,
+      Filter: `[FPercentItemID] = ${key}`,
+      OrderBy: '',
+      SelectPage: 2,
+      Fields: 'FBOMNumber',
+    },
   }
 }
 
@@ -811,10 +940,13 @@ function buildListReadBody(request, objectConfig) {
     ? objectConfig.topField.trim()
     : 'Top'
   const container = isPlainObject(template[bodyKey]) ? template[bodyKey] : {}
+  // Bounded page selection (#3703): the scope guard has already enforced integer 1..MAX; absent → the
+  // shipped fixed page 1 (unchanged default).
+  const pageIndex = typeof request.options.listPageIndex === 'number' ? request.options.listPageIndex : 1
   template[bodyKey] = {
     ...container,
     [topField]: request.limit,
-    [pageIndexField]: 1,
+    [pageIndexField]: pageIndex,
     [pageSizeField]: request.limit,
   }
   const listFields = Array.isArray(objectConfig.readListFields)
@@ -1592,11 +1724,12 @@ function createK3WiseWebApiAdapter({ system, fetchImpl = globalThis.fetch, logge
       const listShapeProbe = materialListShapeProbe(readResponse.data)
       const dataDataPresent = listShapeProbe.dataData || listShapeProbe.dataLowerData || listShapeProbe.dataPascalData
       const dataRowCount = materialListRowCount(readResponse.data)
-      // Paging echo: what K3 reports it applied, vs what we requested (Top=PageSize=request.limit, PageIndex=1).
+      // Paging echo: what K3 reports it applied, vs what we requested (Top=PageSize=request.limit;
+      // PageIndex = the bounded requested page, default 1 — #3703).
       const dataPageSize = materialListPageSize(readResponse.data)
       const dataPageIndex = materialListPageIndex(readResponse.data)
       const requestedLimit = request.limit
-      const requestedPageIndex = 1
+      const requestedPageIndex = typeof request.options.listPageIndex === 'number' ? request.options.listPageIndex : 1
       const responseShapeProbe = materialListResponseShapeProbe(readResponse.data)
       if (!materialListBusinessSuccess(readResponse.data, config)) {
         const failureCode = materialListBusinessFailureCode(readResponse.data)
@@ -1704,6 +1837,80 @@ function createK3WiseWebApiAdapter({ system, fetchImpl = globalThis.fetch, logge
           bomLineCount: lineCount,
           bomShapeProbe: bomShape,
           bomResponseShapeProbe: bomResponseShape,
+          readPath,
+          readOnly: true,
+        },
+      })
+    }
+
+    // BL2 (#1709): by-material BOM-list lookup — ONE read-only BOM/GetList call. No GetDetail, no
+    // recursion, no write method, no reference resolution. The adapter returns the bounded candidate
+    // rows + raw envelope; multiplicity selection (unique-only fail-closed) belongs to the shared
+    // resolver evaluator in the read runtime, never "first row wins" here.
+    if (readMode === 'bom_list_by_material') {
+      assertBomListByMaterialReadOnlyScope(request)
+      const readPath = objectConfig.readPath
+        ? assertRelativePath(objectConfig.readPath, 'object.readPath')
+        : null
+      if (!readPath) {
+        throw new K3WiseWebApiAdapterError('K3 WISE BOM list-by-material endpoint is not configured', {
+          code: 'K3_WISE_BOM_LIST_BY_MATERIAL_NOT_CONFIGURED',
+          object: request.object,
+        })
+      }
+
+      const authContext = await login()
+      let readResponse
+      try {
+        readResponse = await requestJson(readPath, {
+          method: objectConfig.readMethod || 'POST',
+          query: authContext.query,
+          headers: authContext.headers,
+          body: buildBomListByMaterialReadBody(request),
+        })
+      } catch (error) {
+        throw new K3WiseWebApiAdapterError(`K3 WISE WebAPI BOM list-by-material read failed: ${error && error.message ? error.message : String(error)}`, {
+          code: 'K3_WISE_BOM_LIST_BY_MATERIAL_FAILED',
+          object: request.object,
+          status: error && error.status,
+          path: readPath,
+        })
+      }
+
+      // Values-free envelope diagnostics (the C3 lesson: the original live failure was a scalar-Data
+      // status envelope — surface presence/type/counts, never values or K3 message text in evidence).
+      const listShapeProbe = materialListShapeProbe(readResponse.data)
+      const dataRowCount = materialListRowCount(readResponse.data)
+      const responseShapeProbe = materialListResponseShapeProbe(readResponse.data)
+      if (!businessSuccess(readResponse.data, config)) {
+        throw new K3WiseWebApiAdapterError(String(responseMessage(readResponse.data, config, 'K3 WISE BOM list-by-material business response failed')), {
+          code: 'K3_WISE_BOM_LIST_BY_MATERIAL_REJECTED',
+          object: request.object,
+          responseCode: responseFailureCode(readResponse.data, config, 'K3_WISE_BOM_LIST_BY_MATERIAL_REJECTED'),
+          dataRowCount,
+          listShapeProbe,
+          responseShapeProbe,
+        })
+      }
+
+      // Confirmed container ONLY (#3683 + hardware confirmation: rows live at Data.DATA, uppercase).
+      // No case-compat fallbacks here — the resolver evaluator walks the contract-locked containerPaths
+      // (['Data.DATA']) on the raw envelope; a drifted container is a SHAPE_MISMATCH, not a guess.
+      const containerRows = getPath(readResponse.data, 'Data.DATA')
+      const records = Array.isArray(containerRows)
+        ? containerRows.filter(isPlainObject).map((row) => cloneJson(row)).slice(0, request.limit)
+        : []
+      return createReadResult({
+        records,
+        raw: readResponse.data,
+        metadata: {
+          object: request.object,
+          mode: 'material-bom-list-by-material',
+          requestedLimit: request.limit,
+          returnedRecordCount: records.length,
+          dataRowCount,
+          listShapeProbe,
+          responseShapeProbe,
           readPath,
           readOnly: true,
         },

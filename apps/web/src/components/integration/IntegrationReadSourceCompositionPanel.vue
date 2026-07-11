@@ -42,9 +42,20 @@
 
         <p v-if="listError" class="integration-read-source-composition__error" data-testid="rscomp-list-error">{{ listError }}</p>
         <p v-if="runError" class="integration-read-source-composition__error" data-testid="rscomp-error">{{ runError }}</p>
-        <p v-if="!loading && compositions.length === 0" class="integration-read-source-composition__empty" data-testid="rscomp-empty">
-          暂无已审批组合。
-        </p>
+        <div
+          v-if="!loading && compositions.length === 0"
+          class="integration-read-source-composition__empty integration-read-source-composition__empty--guided"
+          data-testid="rscomp-empty"
+        >
+          <strong data-testid="rscomp-empty-what">{{ bi(
+            '这里运行已审批的两跳读取源组合（例如从一个业务键派生到另一个关联记录）。',
+            'This runs an APPROVED two-hop read-source composition (e.g. deriving one linked record from a business key).',
+          ) }}</strong>
+          <p data-testid="rscomp-empty-first-step">{{ bi(
+            '第一步：请先在上方"读取源组合配置"面板保存并审批一条组合，审批后会出现在这里的下拉列表中。',
+            'First step: save and approve a composition in the "composition config" panel above — once approved, it will appear in the dropdown here.',
+          ) }}</p>
+        </div>
       </div>
 
       <div v-if="result" class="integration-read-source-composition__evidence" data-testid="rscomp-result">
@@ -54,15 +65,16 @@
           <li v-if="result.evidence.failedStep !== null" data-testid="rscomp-evidence-failed-step">
             failedStep: {{ result.evidence.failedStep }}
           </li>
-          <li v-if="result.evidence.errorCode" data-testid="rscomp-evidence-error-code">
-            errorCode: {{ result.evidence.errorCode }}
+          <li v-if="result.evidence.errorCode" data-testid="rscomp-evidence-error-label">
+            {{ resultErrorLabel }}<template v-if="resultErrorHint"> — {{ resultErrorHint }}</template>
+            <small data-testid="rscomp-evidence-error-code">errorCode: {{ result.evidence.errorCode }}</small>
           </li>
           <li
             v-for="step in result.evidence.steps"
             :key="step.step"
             :data-testid="`rscomp-step-${step.step}`"
           >
-            step {{ step.step }}: ok={{ step.ok ? 'true' : 'false' }}<template v-if="step.rule">, rule={{ step.rule }}</template><template v-if="step.errorCode">, errorCode={{ step.errorCode }}</template>
+            step {{ step.step }}: ok={{ step.ok ? 'true' : 'false' }}<template v-if="step.rule">, rule={{ step.rule }}</template><template v-if="step.errorCode">, errorCode={{ step.errorCode }} ({{ stepErrorLabel(step.errorCode) }})</template>
           </li>
           <li v-for="(entry, index) in result.evidence.planErrors ?? []" :key="index" data-testid="rscomp-plan-error">
             {{ entry.code }} · {{ entry.field }} · {{ entry.reason }}
@@ -84,7 +96,9 @@
 // key, and renders the values-free chain evidence + last-hop-only output. No authoring/approval, no
 // write path; the server + client normalizer already enforce values-free — this panel renders exactly
 // what they return, nothing more.
-import { ref, watch } from 'vue'
+import { computed, ref, watch } from 'vue'
+import { useLocale } from '../../composables/useLocale'
+import { integrationErrorCodeDisplayLabel, integrationErrorCodeHint } from '../../services/integration/errorCodeLabels'
 import type { IntegrationScope } from '../../services/integration/workbench'
 import {
   listReadSourceCompositions,
@@ -97,6 +111,8 @@ const props = defineProps<{
   scope: IntegrationScope
 }>()
 
+const { locale } = useLocale()
+
 const compositions = ref<ReadSourceCompositionRow[]>([])
 const selectedId = ref('')
 const businessKey = ref('')
@@ -105,6 +121,23 @@ const running = ref(false)
 const listError = ref('')
 const runError = ref('')
 const result = ref<CompositionRunResult | null>(null)
+
+// IU-1: humanized chain-evidence errorCode label (+ optional hint). The raw code stays visible in a
+// demoted spot (data-testid="rscomp-evidence-error-code") — no errorMessage field exists on this
+// evidence shape, so there is nothing unsafe to hide here; the code is a registered, values-free
+// vocabulary.
+const resultErrorLabel = computed(() => integrationErrorCodeDisplayLabel(result.value?.evidence.errorCode, locale.value))
+const resultErrorHint = computed(() => integrationErrorCodeHint(result.value?.evidence.errorCode, locale.value))
+function stepErrorLabel(errorCode: string | undefined): string | null {
+  if (!errorCode) return null
+  return integrationErrorCodeDisplayLabel(errorCode, locale.value)
+}
+
+// IU-6a: bilingual guidance copy helper — same locale pattern as the IU-1 error labels above (reads
+// `locale.value` synchronously; safe to call directly from the template without a dedicated computed).
+function bi(zh: string, en: string): string {
+  return locale.value === 'zh-CN' ? zh : en
+}
 
 watch(selectedId, () => {
   result.value = null
@@ -180,6 +213,18 @@ void refresh()
 .integration-read-source-composition__empty {
   color: #888;
   font-size: 13px;
+}
+/* IU-6a guided empty state: "what this is" + "first step" — new styling only, tokens per UF-1. */
+.integration-read-source-composition__empty--guided {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ms-space-1);
+}
+.integration-read-source-composition__empty--guided strong {
+  color: var(--ms-text-1);
+}
+.integration-read-source-composition__empty--guided p {
+  margin: 0;
 }
 .integration-read-source-composition__evidence {
   border: 1px solid #e0e0e0;

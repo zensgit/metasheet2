@@ -1,7 +1,24 @@
-import { Logger } from '../../core/logger'
 import { assertDingTalkCorpAllowed } from './runtime-policy'
+import {
+  DingTalkBusinessError,
+  normalizeErrorMessage,
+  readNumericField,
+  requestDingTalkTransportJson,
+  type DingTalkCallKind,
+} from './transport'
 
-const logger = new Logger('DingTalkClient')
+// Error shapes and the H06 timeout knob moved to the unified transport (roadmap
+// §7.2) — re-exported so existing callers keep importing them from this module.
+// isDingTalkOutcomeUnknown lets ledger writers distinguish "maybe delivered"
+// send failures (network/timeout/5xx) from definite rejections.
+export {
+  DINGTALK_REQUEST_TIMEOUT_MS,
+  DingTalkBusinessError,
+  DingTalkMalformedResponseError,
+  DingTalkRequestError,
+  DingTalkTimeoutError,
+  isDingTalkOutcomeUnknown,
+} from './transport'
 
 export interface DingTalkOauthConfig {
   clientId: string
@@ -73,6 +90,10 @@ export interface DingTalkWorkNotificationResult {
 
 interface DingTalkRequestOptions {
   fetchFn?: typeof fetch
+  /** Override the default per-request timeout (DT-HARDEN-06); applies PER ATTEMPT. */
+  timeoutMs?: number
+  /** Overall abort signal: cancels the in-flight attempt AND any retry backoff immediately. */
+  signal?: AbortSignal
 }
 
 export interface DingTalkDepartment {
@@ -115,28 +136,6 @@ export interface DingTalkDirectoryUser {
   source: Record<string, unknown>
 }
 
-export class DingTalkRequestError extends Error {
-  statusCode: number
-  responseBody: Record<string, unknown> | null
-
-  constructor(message: string, statusCode: number, responseBody: Record<string, unknown> | null) {
-    super(message)
-    this.name = 'DingTalkRequestError'
-    this.statusCode = statusCode
-    this.responseBody = responseBody
-  }
-}
-
-export class DingTalkBusinessError extends Error {
-  responseBody: Record<string, unknown> | null
-
-  constructor(message: string, responseBody: Record<string, unknown> | null) {
-    super(message)
-    this.name = 'DingTalkBusinessError'
-    this.responseBody = responseBody
-  }
-}
-
 function readStringEnv(...keys: string[]): string {
   for (const key of keys) {
     const value = process.env[key]
@@ -165,72 +164,9 @@ function readEnvStatus<const T extends readonly string[]>(
   }
 }
 
-function normalizeErrorMessage(payload: Record<string, unknown> | null, fallback: string): string {
-  if (!payload) return fallback
-  const candidates = [
-    payload.message,
-    payload.msg,
-    payload.error_description,
-    payload.errorDescription,
-    payload.error,
-  ]
-  for (const candidate of candidates) {
-    if (typeof candidate === 'string' && candidate.trim().length > 0) {
-      return candidate.trim()
-    }
-  }
-  return fallback
-}
-
-async function readJson(response: Response): Promise<Record<string, unknown> | null> {
-  try {
-    const payload = await response.json()
-    return payload && typeof payload === 'object' ? payload as Record<string, unknown> : null
-  } catch {
-    return null
-  }
-}
-
-async function requestDingTalkJson(
-  input: string,
-  init: RequestInit,
-  fallbackError: string,
-  options?: DingTalkRequestOptions,
-): Promise<Record<string, unknown>> {
-  const response = await (options?.fetchFn ?? fetch)(input, init)
-  const payload = await readJson(response)
-
-  if (!response.ok) {
-    const message = normalizeErrorMessage(payload, fallbackError)
-    logger.warn(`DingTalk request failed (${response.status}): ${message}`)
-    throw new DingTalkRequestError(message, response.status, payload)
-  }
-
-  return payload ?? {}
-}
-
-function readNumericField(payload: Record<string, unknown>, ...keys: string[]): number | null {
-  for (const key of keys) {
-    const value = payload[key]
-    if (typeof value === 'number') return value
-    if (typeof value === 'string' && value.trim().length > 0 && !Number.isNaN(Number(value))) {
-      return Number(value)
-    }
-  }
-  return null
-}
-
 function readNestedPayload(payload: Record<string, unknown>, key = 'result'): Record<string, unknown> {
   const nested = payload[key]
   return nested && typeof nested === 'object' ? nested as Record<string, unknown> : {}
-}
-
-function normalizeDingTalkApiPayload(payload: Record<string, unknown>, fallbackError: string): Record<string, unknown> {
-  const errcode = readNumericField(payload, 'errcode', 'code')
-  if (errcode !== null && errcode !== 0) {
-    throw new DingTalkBusinessError(normalizeErrorMessage(payload, fallbackError), payload)
-  }
-  return payload
 }
 
 function normalizeDirectoryBaseUrl(baseUrl?: string): string {
@@ -240,20 +176,54 @@ function normalizeDirectoryBaseUrl(baseUrl?: string): string {
   return normalized.replace(/\/+$/, '')
 }
 
+/**
+ * v1.0 api.dingtalk.com endpoints (HTTP-status based, no errcode envelope). All
+ * timeout/retry/backoff/flow-control handling lives in the shared transport seam
+ * (roadmap §7.2); `kind` is the explicit business-semantics tier every call site
+ * must declare (read / exchange / send) — see DingTalkCallKind in ./transport.
+ */
+async function requestDingTalkJson(
+  input: string,
+  init: RequestInit,
+  fallbackError: string,
+  kind: DingTalkCallKind,
+  options?: DingTalkRequestOptions,
+): Promise<Record<string, unknown>> {
+  return requestDingTalkTransportJson({
+    input,
+    init,
+    fallbackError,
+    kind,
+    envelope: 'none',
+    fetchFn: options?.fetchFn,
+    timeoutMs: options?.timeoutMs,
+    signal: options?.signal,
+  })
+}
+
+/**
+ * Legacy oapi.dingtalk.com envelope endpoints: an `errcode !== 0` inside an HTTP-200
+ * body surfaces as DingTalkBusinessError. The envelope is checked INSIDE the
+ * transport's retry loop so flow-control errcodes back off on idempotent reads.
+ */
 async function requestDingTalkDirectoryJson(
   path: string,
   init: RequestInit,
   fallbackError: string,
+  kind: DingTalkCallKind,
   baseUrl?: string,
   options?: DingTalkRequestOptions,
 ): Promise<Record<string, unknown>> {
-  const payload = await requestDingTalkJson(
-    `${normalizeDirectoryBaseUrl(baseUrl)}${path}`,
+  return requestDingTalkTransportJson({
+    input: `${normalizeDirectoryBaseUrl(baseUrl)}${path}`,
     init,
     fallbackError,
-    options,
-  )
-  return normalizeDingTalkApiPayload(payload, fallbackError)
+    kind,
+    envelope: 'oapi',
+    fetchFn: options?.fetchFn,
+    timeoutMs: options?.timeoutMs,
+    signal: options?.signal,
+  })
 }
 
 export function readDingTalkOauthConfig(): DingTalkOauthConfig {
@@ -353,6 +323,9 @@ export async function exchangeCodeForUserAccessToken(
       }),
     },
     'Failed to obtain access token from DingTalk',
+    // One-shot authorization-code exchange: a retry after ANY ambiguous failure
+    // burns or double-redeems the single-use code — never retried.
+    'exchange',
   )
 
   const accessToken = typeof payload.accessToken === 'string'
@@ -392,6 +365,7 @@ export async function fetchDingTalkCurrentUser(accessToken: string): Promise<Din
       },
     },
     'Failed to get current user info from DingTalk',
+    'read',
   )
 
   const openId = typeof payload.openId === 'string'
@@ -429,10 +403,37 @@ export async function fetchDingTalkCurrentUser(accessToken: string): Promise<Din
   }
 }
 
-export async function fetchDingTalkAppAccessToken(
+// App access-token cache (dingtalk-app-token-cache design-lock, 2026-07-07):
+// tokens are valid ~7200s but every caller used to refetch per request,
+// multiplying load on the SHARED gettoken quota (directory-sync, work
+// notifications, automation executor, attendance delivery worker, E1
+// container login). Keyed by appKey|baseUrl; expires_in minus a 120s margin
+// (conservative 3300s fallback); failures are never cached; concurrent
+// callers share one in-flight request. Known trade-off (lock §2): a secret
+// rotated mid-TTL keeps failing until expiry/invalidate/restart.
+const APP_TOKEN_EXPIRY_MARGIN_MS = 120 * 1000
+const APP_TOKEN_FALLBACK_TTL_MS = 3300 * 1000
+const appTokenCache = new Map<string, { token: string; expiresAt: number }>()
+const appTokenInFlight = new Map<string, Promise<string>>()
+
+function appTokenCacheKey(config: DingTalkDirectoryConfig): string {
+  return `${config.appKey}|${normalizeDirectoryBaseUrl(config.baseUrl)}`
+}
+
+export function invalidateDingTalkAppAccessTokenCache(config?: DingTalkDirectoryConfig): void {
+  if (config) appTokenCache.delete(appTokenCacheKey(config))
+  else appTokenCache.clear()
+}
+
+export function __resetDingTalkAppAccessTokenCacheForTests(): void {
+  appTokenCache.clear()
+  appTokenInFlight.clear()
+}
+
+async function fetchDingTalkAppAccessTokenUncached(
   config: DingTalkDirectoryConfig,
   options?: DingTalkRequestOptions,
-): Promise<string> {
+): Promise<{ token: string; expiresInSeconds: number | null }> {
   const baseUrl = normalizeDirectoryBaseUrl(config.baseUrl)
   const payload = await requestDingTalkDirectoryJson(
     `/gettoken?appkey=${encodeURIComponent(config.appKey)}&appsecret=${encodeURIComponent(config.appSecret)}`,
@@ -443,6 +444,7 @@ export async function fetchDingTalkAppAccessToken(
       },
     },
     'Failed to obtain DingTalk app access token',
+    'read',
     baseUrl,
     options,
   )
@@ -457,7 +459,38 @@ export async function fetchDingTalkAppAccessToken(
     throw new Error(normalizeErrorMessage(payload, 'Failed to obtain DingTalk app access token'))
   }
 
-  return token
+  const expiresRaw = Number(payload.expires_in ?? payload.expiresIn)
+  return { token, expiresInSeconds: Number.isFinite(expiresRaw) && expiresRaw > 0 ? expiresRaw : null }
+}
+
+export async function fetchDingTalkAppAccessToken(
+  config: DingTalkDirectoryConfig,
+  options?: DingTalkRequestOptions,
+): Promise<string> {
+  const key = appTokenCacheKey(config)
+  const cached = appTokenCache.get(key)
+  if (cached && cached.expiresAt > Date.now()) {
+    return cached.token
+  }
+  appTokenCache.delete(key)
+
+  const inFlight = appTokenInFlight.get(key)
+  if (inFlight) return inFlight
+
+  const request = (async () => {
+    const { token, expiresInSeconds } = await fetchDingTalkAppAccessTokenUncached(config, options)
+    const ttlMs = expiresInSeconds !== null
+      ? Math.max(expiresInSeconds * 1000 - APP_TOKEN_EXPIRY_MARGIN_MS, 30 * 1000)
+      : APP_TOKEN_FALLBACK_TTL_MS
+    appTokenCache.set(key, { token, expiresAt: Date.now() + ttlMs })
+    return token
+  })()
+  appTokenInFlight.set(key, request)
+  try {
+    return await request
+  } finally {
+    appTokenInFlight.delete(key)
+  }
 }
 
 export async function listDingTalkDepartments(
@@ -475,6 +508,8 @@ export async function listDingTalkDepartments(
       }),
     },
     'Failed to list DingTalk departments',
+    // POST-verb but a query-shaped read — safe to retry.
+    'read',
     config?.baseUrl,
   )
 
@@ -515,6 +550,7 @@ export async function getDingTalkDepartmentDetail(
       }),
     },
     'Failed to read DingTalk department detail',
+    'read',
     config?.baseUrl,
   )
 
@@ -551,6 +587,7 @@ export async function listDingTalkDepartmentUsers(
       }),
     },
     'Failed to list DingTalk department users',
+    'read',
     config?.baseUrl,
   )
 
@@ -606,6 +643,7 @@ export async function getDingTalkUserDetail(
       }),
     },
     'Failed to read DingTalk user detail',
+    'read',
     config?.baseUrl,
   )
 
@@ -642,6 +680,53 @@ export async function getDingTalkUserDetail(
 }
 
 /**
+ * E1 container login (attendance-e1-container-login design-lock §1.4): exchange
+ * an in-container enterprise 免登 authCode for the corp userid. Distinct grant
+ * from the v1.0 web-OAuth userAccessToken exchange above — this one runs on the
+ * APP access token (fetchDingTalkAppAccessToken) via the legacy topapi shape.
+ */
+export interface DingTalkContainerUserInfo {
+  userId: string
+  unionId?: string
+  sysLevel?: number
+  source: Record<string, unknown>
+}
+
+export async function getDingTalkUserInfoByAuthCode(
+  accessToken: string,
+  authCode: string,
+  config?: { baseUrl?: string },
+): Promise<DingTalkContainerUserInfo> {
+  const payload = await requestDingTalkDirectoryJson(
+    `/topapi/v2/user/getuserinfo?access_token=${encodeURIComponent(accessToken)}`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ code: authCode }),
+    },
+    'Failed to exchange DingTalk container auth code',
+    // One-shot container authCode: a retry after ANY ambiguous failure burns or
+    // double-redeems the single-use code — never retried.
+    'exchange',
+    config?.baseUrl,
+  )
+
+  const result = readNestedPayload(payload)
+  const userId = String(result.userid ?? result.userId ?? '').trim()
+  if (!userId) {
+    throw new Error('DingTalk container auth code exchange returned no userid')
+  }
+  const unionIdRaw = result.unionid ?? result.unionId
+  const sysLevelRaw = Number(result.sys_level ?? result.sysLevel)
+  return {
+    userId,
+    unionId: typeof unionIdRaw === 'string' && unionIdRaw.trim() ? unionIdRaw.trim() : undefined,
+    sysLevel: Number.isFinite(sysLevelRaw) ? sysLevelRaw : undefined,
+    source: result,
+  }
+}
+
+/**
  * A-2b (one-tap lock #3594): action_card work notification — same corp-app channel as the markdown
  * variant, but the OA `action_card` msgtype renders a tappable button (URL jump; in-chat callback
  * buttons are the Slice-B interactive-card upgrade). Single-button form only.
@@ -655,6 +740,249 @@ export interface DingTalkWorkNotificationActionCardInput {
   singleTitle: string
   /** Button target URL — the signed decision deep link. */
   singleUrl: string
+}
+
+export const DINGTALK_INTERACTIVE_APPROVAL_CARD_CALLBACK_ROUTE_KEY = 'approval_card'
+
+export interface DingTalkInteractiveApprovalCardInput {
+  /** Recipient DingTalk user id. B-2 uses one card per approver. */
+  userId: string
+  /** Robot/app code that owns the interactive-card Stream callback. */
+  robotCode: string
+  /** DingTalk interactive-card template id from the Stream-card env gate. */
+  cardTemplateId: string
+  /** Must equal dingtalk_approval_card_deliveries.id; callback payloads are never business anchors. */
+  outTrackId: string
+  title: string
+  requestNo?: string
+  nodeName: string
+  statusText: string
+  rejectUrl: string
+  callbackRouteKey?: string
+}
+
+export interface DingTalkInteractiveCardConfig {
+  openApiBaseUrl?: string
+}
+
+function normalizeDingTalkOpenApiBaseUrl(baseUrl?: string): string {
+  const normalized = typeof baseUrl === 'string' && baseUrl.trim().length > 0
+    ? baseUrl.trim()
+    : readStringEnv('DINGTALK_OPEN_API_BASE_URL') || 'https://api.dingtalk.com'
+  return normalized.replace(/\/+$/, '')
+}
+
+function readStringField(record: Record<string, unknown>, ...keys: string[]): string | undefined {
+  for (const key of keys) {
+    const value = record[key]
+    if (typeof value === 'string' && value.trim().length > 0) return value.trim()
+    if (typeof value === 'number' && Number.isFinite(value)) return String(value)
+  }
+  return undefined
+}
+
+function readFirstRecord(value: unknown): Record<string, unknown> | null {
+  if (value && typeof value === 'object' && !Array.isArray(value)) return value as Record<string, unknown>
+  if (Array.isArray(value)) {
+    const first = value[0]
+    if (first && typeof first === 'object' && !Array.isArray(first)) return first as Record<string, unknown>
+  }
+  return null
+}
+
+function readInteractiveCardTaskId(payload: Record<string, unknown>): string | undefined {
+  const result = readNestedPayload(payload)
+  const deliverResult = readFirstRecord(result.deliverResults ?? result.deliveryResults ?? payload.deliverResults)
+  return readStringField(result, 'taskId', 'task_id', 'cardInstanceId', 'card_instance_id', 'processQueryKey')
+    ?? readStringField(deliverResult ?? {}, 'taskId', 'task_id', 'cardInstanceId', 'card_instance_id', 'carrierId', 'deliverId')
+    ?? readStringField(payload, 'taskId', 'task_id', 'requestId', 'request_id')
+}
+
+function assertInteractiveCardDeliverySucceeded(payload: Record<string, unknown>): void {
+  if (payload.success !== true) {
+    throw new DingTalkBusinessError(
+      normalizeErrorMessage(payload, 'DingTalk interactive-card create-and-deliver failed'),
+      payload,
+    )
+  }
+
+  const result = readNestedPayload(payload)
+  const rawDeliverResults = result.deliverResults ?? result.deliveryResults
+  const deliverResults = Array.isArray(rawDeliverResults)
+    ? rawDeliverResults.filter((value): value is Record<string, unknown> => (
+        value !== null && typeof value === 'object' && !Array.isArray(value)
+      ))
+    : []
+  if (deliverResults.length === 0) {
+    throw new DingTalkBusinessError('DingTalk interactive-card response contained no delivery result', payload)
+  }
+
+  const failure = deliverResults.find((delivery) => delivery.success !== true)
+  if (failure) {
+    throw new DingTalkBusinessError(
+      readStringField(failure, 'errorMsg', 'errorMessage')
+        ?? 'DingTalk interactive-card delivery failed',
+      payload,
+    )
+  }
+}
+
+/**
+ * B-2 (interactive approval cards): create-and-deliver a DingTalk interactive card.
+ *
+ * This is SEND-ONLY. The approve button is represented as Stream callback metadata for B-3;
+ * reject still jumps to the Slice-A decision page because rejection comments remain mandatory.
+ */
+export async function sendDingTalkInteractiveApprovalCard(
+  accessToken: string,
+  input: DingTalkInteractiveApprovalCardInput,
+  config: DingTalkInteractiveCardConfig = {},
+  options?: DingTalkRequestOptions,
+): Promise<DingTalkWorkNotificationResult> {
+  const userId = input.userId.trim()
+  const robotCode = input.robotCode.trim()
+  const cardTemplateId = input.cardTemplateId.trim()
+  const outTrackId = input.outTrackId.trim()
+  const title = input.title.trim()
+  const nodeName = input.nodeName.trim()
+  const statusText = input.statusText.trim()
+  const rejectUrl = input.rejectUrl.trim()
+  const requestNo = typeof input.requestNo === 'string' ? input.requestNo.trim() : ''
+  const callbackRouteKey = (input.callbackRouteKey ?? DINGTALK_INTERACTIVE_APPROVAL_CARD_CALLBACK_ROUTE_KEY).trim()
+
+  if (!accessToken.trim()) throw new Error('DingTalk access token is required')
+  if (!userId) throw new Error('DingTalk userId is required')
+  if (!robotCode) throw new Error('DingTalk interactive-card robotCode is required')
+  if (!cardTemplateId) throw new Error('DingTalk interactive-card template id is required')
+  if (!outTrackId) throw new Error('DingTalk interactive-card outTrackId is required')
+  if (!title) throw new Error('DingTalk interactive-card title is required')
+  if (!nodeName) throw new Error('DingTalk interactive-card node name is required')
+  if (!statusText) throw new Error('DingTalk interactive-card status text is required')
+  if (!rejectUrl) throw new Error('DingTalk interactive-card reject url is required')
+  if (!callbackRouteKey) throw new Error('DingTalk interactive-card callback route key is required')
+
+  const openSpaceId = `dtv1.card//im_robot.${userId}`
+  const payload = await requestDingTalkJson(
+    `${normalizeDingTalkOpenApiBaseUrl(config.openApiBaseUrl)}/v1.0/card/instances/createAndDeliver`,
+    {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-acs-dingtalk-access-token': accessToken,
+      },
+      body: JSON.stringify({
+        userId,
+        userIdType: 1,
+        cardTemplateId,
+        outTrackId,
+        callbackType: 'STREAM',
+        callbackRouteKey,
+        cardData: {
+          cardParamMap: {
+            title,
+            requestNo,
+            nodeName,
+            statusText,
+            approveText: '同意',
+            rejectText: '驳回',
+            rejectUrl,
+          },
+        },
+        openSpaceId,
+        imRobotOpenSpaceModel: {
+          supportForward: false,
+        },
+        imRobotOpenDeliverModel: {
+          robotCode,
+          spaceType: 'IM_ROBOT',
+        },
+      }),
+    },
+    'Failed to send DingTalk interactive approval card',
+    // B-2 interactive card is a SIDE-EFFECT SEND: never resent on ambiguity; a lost
+    // response surfaces as outcome-unknown for the card ledger (same tier as asyncsend_v2).
+    'send',
+    options,
+  )
+
+  assertInteractiveCardDeliverySucceeded(payload)
+
+  return {
+    taskId: readInteractiveCardTaskId(payload) ?? outTrackId,
+    requestId: readStringField(payload, 'requestId', 'request_id'),
+    raw: payload,
+  }
+}
+
+/**
+ * B-4 (interactive approval cards): update a delivered interactive card in place.
+ *
+ * Official card-instances update endpoint (`PUT /v1.0/card/instances`), addressed by the SAME
+ * `outTrackId` the B-2 send used (= the ledger delivery id). The update is a PRESENTATION
+ * follow-up only: it carries exactly one param — the terminal `statusText` — with
+ * `updateCardDataByKey` so every other card param (title/requestNo/nodeName/buttons) stays as
+ * sent. Values-free by construction (B-2 §5 fence): no form data can ride this call.
+ *
+ * HTTP-200 business failures fail closed (`success !== true` throws), same discipline as
+ * create-and-deliver above — callers must never treat an unacknowledged update as applied.
+ */
+export interface DingTalkInteractiveApprovalCardUpdateInput {
+  /** Must equal dingtalk_approval_card_deliveries.id — the only card ↔ ledger anchor. */
+  outTrackId: string
+  /** Terminal status copy (values-free, built server-side by interactive-card-update.ts). */
+  statusText: string
+}
+
+export async function updateDingTalkInteractiveApprovalCard(
+  accessToken: string,
+  input: DingTalkInteractiveApprovalCardUpdateInput,
+  config: DingTalkInteractiveCardConfig = {},
+  options?: DingTalkRequestOptions,
+): Promise<{ requestId?: string; raw: Record<string, unknown> }> {
+  const outTrackId = input.outTrackId.trim()
+  const statusText = input.statusText.trim()
+
+  if (!accessToken.trim()) throw new Error('DingTalk access token is required')
+  if (!outTrackId) throw new Error('DingTalk interactive-card outTrackId is required')
+  if (!statusText) throw new Error('DingTalk interactive-card status text is required')
+
+  const payload = await requestDingTalkJson(
+    `${normalizeDingTalkOpenApiBaseUrl(config.openApiBaseUrl)}/v1.0/card/instances`,
+    {
+      method: 'PUT',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-acs-dingtalk-access-token': accessToken,
+      },
+      body: JSON.stringify({
+        outTrackId,
+        cardData: {
+          cardParamMap: {
+            statusText,
+          },
+        },
+        cardUpdateOptions: { updateCardDataByKey: true },
+      }),
+    },
+    'Failed to update DingTalk interactive approval card',
+    // B-4 terminal update is a SIDE-EFFECT SEND tier (same as createAndDeliver above): although
+    // the PUT is an idempotent statusText overwrite, we never auto-resend on ambiguity — a lost
+    // update is non-critical by design (duplicate clicks converge via the stale summary).
+    'send',
+    options,
+  )
+
+  if (payload.success !== true) {
+    throw new DingTalkBusinessError(
+      normalizeErrorMessage(payload, 'DingTalk interactive-card update failed'),
+      payload,
+    )
+  }
+
+  return {
+    requestId: readStringField(payload, 'requestId', 'request_id'),
+    raw: payload,
+  }
 }
 
 export async function sendDingTalkWorkNotificationActionCard(
@@ -699,6 +1027,10 @@ export async function sendDingTalkWorkNotificationActionCard(
       }),
     },
     'Failed to send DingTalk action-card work notification',
+    // Side-effect send: never auto-retried. A lost response has no task_id, so
+    // DingTalk's async-send result query cannot serve as an idempotency key —
+    // uncertain outcomes surface via isDingTalkOutcomeUnknown instead.
+    'send',
     config.baseUrl,
     options,
   )
@@ -758,6 +1090,10 @@ export async function sendDingTalkWorkNotification(
       }),
     },
     'Failed to send DingTalk work notification',
+    // Side-effect send: never auto-retried. A lost response has no task_id, so
+    // DingTalk's async-send result query cannot serve as an idempotency key —
+    // uncertain outcomes surface via isDingTalkOutcomeUnknown instead.
+    'send',
     config.baseUrl,
     options,
   )

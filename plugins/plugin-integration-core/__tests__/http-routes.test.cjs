@@ -11,6 +11,8 @@ const { STOCK_PREPARATION_MAIN_TABLE_TEMPLATE } = require(path.join(__dirname, '
 const { READ_SMOKE_LIST_REQUEST_MARKER } = require(path.join(__dirname, '..', 'lib', 'read-smoke-marker.cjs'))
 const { createReadSourceConfigStore, ReadSourceConfigNotApprovedError } = require(path.join(__dirname, '..', 'lib', 'read-source-config-store.cjs'))
 const { ReadSourceCompositionConfigNotApprovedError } = require(path.join(__dirname, '..', 'lib', 'read-source-composition-config-store.cjs'))
+// BA-APPLY-2a: the real store, driven through the routes against a mock db (no network, no Agent).
+const { createBridgeAgentChecklistStore } = require(path.join(__dirname, '..', 'lib', 'bridge-agent-change-checklist-store.cjs'))
 // S4: adapter self-described metadata — the mock registry serves the REAL per-module metadata
 // so the /adapters route assertions verify the actual shipped values (no duplicated literal).
 const ADAPTER_METADATA_BY_KIND = {
@@ -320,6 +322,26 @@ function createMockServices(overrides = {}) {
       async listAudit(input) {
         calls.push(['readSourceCompositionListAudit', input])
         return []
+      },
+    },
+    // BA-APPLY-2a: default mock so requireService('bridgeAgentChecklistStore', ...) mounts for every
+    // test. Only the four route-called methods are needed (save/approve/retire/getForApply).
+    bridgeAgentChecklistStore: {
+      async saveVersion(input) {
+        calls.push(['bridgeAgentChecklistSaveVersion', input])
+        return { id: 'bac_1', version: 1, status: 'draft', contentKey: 'ck', reused: false, checklist: {} }
+      },
+      async approve(input) {
+        calls.push(['bridgeAgentChecklistApprove', input])
+        return { id: input.id, status: 'approved' }
+      },
+      async retire(input) {
+        calls.push(['bridgeAgentChecklistRetire', input])
+        return { id: input.id, status: 'retired' }
+      },
+      async getForApply(input) {
+        calls.push(['bridgeAgentChecklistGetForApply', input])
+        return { id: input.id, status: 'approved', checklist: { schemaVersion: 1, operations: [] } }
       },
     },
     adapterRegistry: {
@@ -6782,6 +6804,164 @@ async function testReadSourceCompositionRoutes() {
   console.log('  testReadSourceCompositionRoutes OK')
 }
 
+// BA-APPLY-2a: the bridge-agent change-checklist routes, driven end-to-end through the REAL store
+// against a mock db. Proves: permission gate (write-tier for save/approve/retire), approval gate
+// (GET returns approved-only, fail-closed on draft/retired), values-free responses/errors, and — the
+// core hard lock — that NO route contacts the Bridge Agent (no adapter created, no external system
+// touched).
+async function testBridgeAgentChecklistRoutes() {
+  const dbTables = {
+    integration_bridge_agent_checklists: [],
+    integration_bridge_agent_checklist_audit: [],
+  }
+  function matchesWhere(row, where) {
+    return Object.entries(where || {}).every(([key, value]) => {
+      if (value === null || value === undefined) return row[key] === null || row[key] === undefined
+      return row[key] === value
+    })
+  }
+  let idSeq = 0
+  const store = createBridgeAgentChecklistStore({
+    db: {
+      async selectOne(table, where) { return dbTables[table].find((row) => matchesWhere(row, where)) || null },
+      async insertOne(table, row) {
+        const stored = { ...row, created_at: '2026-07-08T00:00:00.000Z', updated_at: '2026-07-08T00:00:00.000Z' }
+        dbTables[table].push(stored)
+        return [stored]
+      },
+      async updateRow(table, set, where) {
+        const row = dbTables[table].find((candidate) => matchesWhere(candidate, where))
+        if (!row) return []
+        Object.assign(row, set)
+        return [row]
+      },
+      async select(table, options = {}) {
+        const filtered = dbTables[table].filter((row) => matchesWhere(row, options.where || {}))
+        return filtered.slice(options.offset || 0, (options.offset || 0) + (options.limit || 1000))
+      },
+      async transaction(callback) { return callback(this) },
+    },
+    idGenerator: () => `bac_${++idSeq}`,
+  })
+  const { calls, services } = createMockServices({ bridgeAgentChecklistStore: store })
+  const { routes } = mountRoutes(services)
+
+  const checklist = {
+    schemaVersion: 1,
+    operations: [
+      { op: 'add_readonly_object', objectName: 'material', fieldKeys: [] },
+      { op: 'add_readonly_field', objectName: 'bom_child', fieldKeys: ['FQty'] },
+    ],
+  }
+
+  // save → 201 new draft v1 (write tier)
+  const created = await invoke(routes, 'POST', '/api/integration/bridge-agent-checklists', {
+    user: WRITE_USER, query: { workspaceId: 'workspace_1' }, body: { checklist },
+  })
+  assertOkResponse(created, 201)
+  assert.equal(created.body.data.version, 1)
+  assert.equal(created.body.data.status, 'draft')
+  assert.equal(created.body.data.reused, false)
+  const checklistId = created.body.data.id
+
+  // identical save → 200 reused
+  const reused = await invoke(routes, 'POST', '/api/integration/bridge-agent-checklists', {
+    user: WRITE_USER, query: { workspaceId: 'workspace_1' }, body: { checklist },
+  })
+  assertOkResponse(reused, 200)
+  assert.equal(reused.body.data.reused, true)
+  assert.equal(dbTables.integration_bridge_agent_checklists.length, 1)
+
+  // PERMISSION GATE: read tier cannot save/approve/retire (write tier only)
+  for (const [method, route] of [
+    ['POST', '/api/integration/bridge-agent-checklists'],
+    ['POST', '/api/integration/bridge-agent-checklists/:id/approve'],
+    ['POST', '/api/integration/bridge-agent-checklists/:id/retire'],
+  ]) {
+    const denied = await invoke(routes, method, route, {
+      user: READ_USER, params: { id: checklistId }, query: { workspaceId: 'workspace_1' }, body: { checklist },
+    })
+    assert.equal(denied.statusCode, 403, `${route} requires integration write`)
+  }
+
+  // OP-WHITELIST HARD LOCK: a delete/make-writable op is rejected 400, values-free
+  const badOp = await invoke(routes, 'POST', '/api/integration/bridge-agent-checklists', {
+    user: WRITE_USER, query: { workspaceId: 'workspace_1' },
+    body: { checklist: { schemaVersion: 1, operations: [{ op: 'delete_object', objectName: 'material', fieldKeys: [] }] } },
+  })
+  assert.equal(badOp.statusCode, 400)
+  assert.equal(badOp.body.error.code, 'BRIDGE_AGENT_CHECKLIST_INVALID')
+  assert.ok(badOp.body.error.details.errors.some((e) => e.code === 'BRIDGE_AGENT_CHECKLIST_OP_NOT_ALLOWED'))
+
+  // VALUES-FREE / SENTINEL: a host/secret pasted into an object name is rejected and never echoed
+  const sentinel = await invoke(routes, 'POST', '/api/integration/bridge-agent-checklists', {
+    user: WRITE_USER, query: { workspaceId: 'workspace_1' },
+    body: { checklist: { schemaVersion: 1, operations: [{ op: 'add_readonly_object', objectName: 'server=10.0.0.9;pwd=SENTINEL_S3cr3t', fieldKeys: [] }] } },
+  })
+  assert.equal(sentinel.statusCode, 400)
+  const sentinelStr = JSON.stringify(sentinel.body)
+  for (const leak of ['SENTINEL_S3cr3t', '10.0.0.9', 'server=']) {
+    assert.ok(!sentinelStr.includes(leak), `checklist 400 must not echo the submitted value (${leak})`)
+  }
+
+  // APPROVAL GATE: GET a draft → fail-closed 409 NOT_APPROVED (status-only, no content)
+  const draftGet = await invoke(routes, 'GET', '/api/integration/bridge-agent-checklists/:id', {
+    user: READ_USER, params: { id: checklistId }, query: { workspaceId: 'workspace_1' },
+  })
+  assert.equal(draftGet.statusCode, 409)
+  assert.equal(draftGet.body.error.code, 'BRIDGE_AGENT_CHECKLIST_NOT_APPROVED')
+  assert.equal(draftGet.body.error.details.status, 'draft')
+  assert.ok(!JSON.stringify(draftGet.body).includes('material'), 'draft-gate 409 must not leak checklist content')
+
+  // NOT_FOUND on unknown id
+  const missing = await invoke(routes, 'GET', '/api/integration/bridge-agent-checklists/:id', {
+    user: READ_USER, params: { id: 'bac_missing' }, query: { workspaceId: 'workspace_1' },
+  })
+  assert.equal(missing.statusCode, 404)
+  assert.equal(missing.body.error.code, 'BRIDGE_AGENT_CHECKLIST_NOT_FOUND')
+
+  // lifecycle: retire a draft → 409; approve → 200; GET now returns the approved checklist content
+  const earlyRetire = await invoke(routes, 'POST', '/api/integration/bridge-agent-checklists/:id/retire', {
+    user: WRITE_USER, params: { id: checklistId }, query: { workspaceId: 'workspace_1' },
+  })
+  assert.equal(earlyRetire.statusCode, 409)
+  assert.equal(earlyRetire.body.error.code, 'BRIDGE_AGENT_CHECKLIST_STATUS_CONFLICT')
+
+  const approved = await invoke(routes, 'POST', '/api/integration/bridge-agent-checklists/:id/approve', {
+    user: WRITE_USER, params: { id: checklistId }, query: { workspaceId: 'workspace_1' },
+  })
+  assertOkResponse(approved, 200)
+  assert.equal(approved.body.data.status, 'approved')
+
+  // APPROVAL GATE: GET an approved checklist → the apply consumer receives the values-free checklist
+  const approvedGet = await invoke(routes, 'GET', '/api/integration/bridge-agent-checklists/:id', {
+    user: READ_USER, params: { id: checklistId }, query: { workspaceId: 'workspace_1' },
+  })
+  assertOkResponse(approvedGet, 200)
+  assert.equal(approvedGet.body.data.status, 'approved')
+  assert.deepEqual(approvedGet.body.data.checklist.operations.map((o) => o.op), ['add_readonly_object', 'add_readonly_field'])
+
+  // retire → 200; GET now fail-closed again (retired terminal)
+  const retired = await invoke(routes, 'POST', '/api/integration/bridge-agent-checklists/:id/retire', {
+    user: WRITE_USER, params: { id: checklistId }, query: { workspaceId: 'workspace_1' },
+  })
+  assertOkResponse(retired, 200)
+  assert.equal(retired.body.data.status, 'retired')
+  const retiredGet = await invoke(routes, 'GET', '/api/integration/bridge-agent-checklists/:id', {
+    user: READ_USER, params: { id: checklistId }, query: { workspaceId: 'workspace_1' },
+  })
+  assert.equal(retiredGet.statusCode, 409)
+  assert.equal(retiredGet.body.error.details.status, 'retired')
+
+  // ZERO-AGENT-WRITE: the whole checklist surface never creates an adapter and never touches
+  // external-system storage — nothing here can contact / write the Bridge Agent.
+  assert.equal(findCalls(calls, 'createAdapter').length, 0, 'no adapter is created by checklist routes')
+  assert.equal(findCalls(calls, 'upsertExternalSystem').length, 0, 'external systems are never modified')
+  assert.equal(findCalls(calls, 'getExternalSystemForAdapter').length, 0, 'no external system is loaded for a checklist route')
+
+  console.log('  testBridgeAgentChecklistRoutes OK')
+}
+
 async function main() {
   await testTemplatesCrudRoutes()
   await testUnauthenticatedWriteRequestIsRejected()
@@ -6808,6 +6988,7 @@ async function main() {
   await testReadSourceConfiguredReadRoute()
   await testReadSourceResolverReadRoute()
   await testReadSourceCompositionRoutes()
+  await testBridgeAgentChecklistRoutes()
   await testExternalSystemUpsertPreservesObjectSchema()
   await testExternalSystemTestPersistsFailureAndPreservesInactive()
   await testExternalSystemTestClearsErrorToActiveOnSuccess()
@@ -6836,8 +7017,52 @@ async function main() {
   await testCursorStringGuard()
   await testSampleLimitCap()
   await testListOffsetCap()
+  await testStockPreparationWritesRefuseWithoutAuditStore()
 
   console.log('http-routes: REST auth/list/upsert/run/dry-run/staging/replay tests passed')
+}
+
+// W5b (#3890) P2-1: the headline fail-closed claim — WITHOUT the audit store every stock-prep write
+// route refuses 501 AUDIT_STORE_UNAVAILABLE (gate fires BEFORE parsing/multitable access); WITH a
+// fake store present the same call proceeds past the gate (fails later on a DIFFERENT dependency),
+// proving the 501 comes from the audit gate specifically. Read routes stay unaffected.
+async function testStockPreparationWritesRefuseWithoutAuditStore() {
+  const { services } = createMockServices()
+  delete services.stockPreparationAuditStore
+  const { routes } = mountRoutes(services)
+  const admin = { id: 'admin_1', tenantId: 'tenant_1', permissions: ['integration:admin'] }
+  const writeCases = [
+    ['POST', '/api/integration/stock-preparation/material-mappings/candidates/sync', { projectId: 'proj_1', defaultVersionPolicy: 'drawing_only' }],
+    ['POST', '/api/integration/stock-preparation/material-mappings/confirm', { projectId: 'proj_1', mappingId: 'm1' }],
+    ['POST', '/api/integration/stock-preparation/material-mappings/retire', { projectId: 'proj_1', mappingId: 'm1' }],
+    ['POST', '/api/integration/stock-preparation/unit-conversions/confirm', { projectId: 'proj_1', conversionRuleId: 'r1' }],
+    ['POST', '/api/integration/stock-preparation/unit-conversions/retire', { projectId: 'proj_1', conversionRuleId: 'r1' }],
+    ['POST', '/api/integration/stock-preparation/generation/run', { projectId: 'proj_1' }],
+    ['POST', '/api/integration/stock-preparation/exceptions/resolve', { projectId: 'proj_1', exceptionId: 'e1', resolutionAction: 'manual_hold' }],
+    ['POST', '/api/integration/stock-preparation/exceptions/bulk-resolve', { projectId: 'proj_1', exceptionIds: ['e1'], resolutionAction: 'manual_hold' }],
+  ]
+  for (const [method, routePath, body] of writeCases) {
+    const res = await invoke(routes, method, routePath, { user: admin, body })
+    assert.equal(res.statusCode, 501, `${routePath} refuses without the audit store`)
+    assert.equal(res.body.error.code, 'AUDIT_STORE_UNAVAILABLE', `${routePath} names the audit gate`)
+  }
+  // The trail read requires the store too.
+  const listRes = await invoke(routes, 'GET', '/api/integration/stock-preparation/audit', { user: admin, query: {} })
+  assert.equal(listRes.statusCode, 501)
+  assert.equal(listRes.body.error.code, 'AUDIT_STORE_UNAVAILABLE')
+  // A stock-prep READ route stays unaffected by the missing store.
+  const readRes = await invoke(routes, 'GET', '/api/integration/stock-preparation/exceptions', { user: admin, query: { projectId: 'proj_1' } })
+  assert.notEqual(readRes.body && readRes.body.error && readRes.body.error.code, 'AUDIT_STORE_UNAVAILABLE', 'read routes never consult the audit gate')
+  // With a fake store present the gate passes: the SAME write call now fails on a DIFFERENT
+  // dependency (multitable API absent in this fixture) — never on the audit gate.
+  const appended = []
+  services.stockPreparationAuditStore = {
+    async append(entry) { appended.push(entry) },
+    async list() { return { rowCount: 0, entries: [] } },
+  }
+  const { routes: routesWithStore } = mountRoutes(services)
+  const res2 = await invoke(routesWithStore, 'POST', '/api/integration/stock-preparation/material-mappings/retire', { user: admin, body: { projectId: 'proj_1', mappingId: 'm1' } })
+  assert.notEqual(res2.body && res2.body.error && res2.body.error.code, 'AUDIT_STORE_UNAVAILABLE', 'with the store present the gate opens')
 }
 
 main().catch((err) => {

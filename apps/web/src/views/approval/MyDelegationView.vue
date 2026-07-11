@@ -1,12 +1,13 @@
 <template>
-  <div class="my-delegation">
-    <div class="header">
-      <div>
-        <h2>我的委托</h2>
-        <p class="sub">设置或取消你自己的审批委托（委托人恒为你本人）。同一范围目标仅允许一条生效委托。</p>
-      </div>
-      <el-button type="primary" data-testid="my-delegation-new" @click="openCreate">新建委托</el-button>
-    </div>
+  <PageShell width="default">
+    <PageHeader
+      title="我的委托"
+      subtitle="设置或取消你自己的审批委托（委托人恒为你本人）。同一范围目标仅允许一条生效委托。"
+    >
+      <template #actions>
+        <el-button type="primary" data-testid="my-delegation-new" @click="openCreate">新建委托</el-button>
+      </template>
+    </PageHeader>
 
     <el-table v-loading="loading" :data="delegations" data-testid="my-delegation-table" empty-text="暂无委托">
       <el-table-column label="被委托人" prop="delegateeUserId" />
@@ -18,9 +19,7 @@
       </el-table-column>
       <el-table-column label="状态" width="150">
         <template #default="{ row }">
-          <el-tag :type="DELEGATION_STATUS_TAG_TYPE[delegationDisplayStatus(row).status]" size="small">
-            {{ delegationDisplayStatus(row).status }}
-          </el-tag>
+          <StatusTag domain="delegation" :status="delegationDisplayStatus(row).status" force-locale="zh" />
           <span v-if="delegationDisplayStatus(row).expiringSoon" class="expiring-soon-hint">即将到期</span>
         </template>
       </el-table-column>
@@ -65,12 +64,14 @@
         <el-button type="primary" :loading="saving" data-testid="my-delegation-submit" @click="submit">保存</el-button>
       </template>
     </el-dialog>
-  </div>
+  </PageShell>
 </template>
 
 <script setup lang="ts">
 import { onMounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import PageShell from '../../components/layout/PageShell.vue'
+import PageHeader from '../../components/layout/PageHeader.vue'
 import {
   listOwnDelegations,
   createOwnDelegation,
@@ -80,8 +81,9 @@ import {
   type DelegationRecord,
   type OwnDelegationForm,
 } from '../../approvals/delegations'
-import { delegationDisplayStatus, DELEGATION_STATUS_TAG_TYPE } from '../../approvals/delegationStatus'
+import { delegationDisplayStatus } from '../../approvals/delegationStatus'
 import ApprovalUserPicker from '../../approvals/components/ApprovalUserPicker.vue'
+import StatusTag from '../../components/status/StatusTag.vue'
 
 const delegations = ref<DelegationRecord[]>([])
 const loading = ref(false)
@@ -160,14 +162,10 @@ onMounted(load)
 </script>
 
 <style scoped>
-.my-delegation { padding: 16px; }
-.header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 12px; }
-.header h2 { margin: 0; }
-.sub { color: var(--el-text-color-secondary); font-size: 13px; margin: 4px 0 0; }
 .expiring-soon-hint {
   display: block;
   margin-top: 2px;
   font-size: 12px;
-  color: var(--el-color-warning, #e6a23c);
+  color: var(--el-color-warning);
 }
 </style>

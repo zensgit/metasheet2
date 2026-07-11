@@ -4,6 +4,7 @@ import { createApp, h, nextTick } from 'vue'
 import MetaAutomationRuleEditor from '../src/multitable/components/MetaAutomationRuleEditor.vue'
 import { useLocale } from '../src/composables/useLocale'
 import type { AutomationRule } from '../src/multitable/types'
+import { epOptions, epSelectValue, epSelectValues, epSetSelect } from './helpers/epControls'
 
 function flush() {
   return new Promise<void>((r) => setTimeout(r, 0)).then(() => nextTick())
@@ -28,9 +29,8 @@ function setInput(container: HTMLElement, selector: string, value: string) {
   el.dispatchEvent(new Event('input'))
 }
 function selectAction0(container: HTMLElement, type: string) {
-  const sel = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header select') as HTMLSelectElement
-  sel.value = type
-  sel.dispatchEvent(new Event('change'))
+  const sel = container.querySelector('[data-action-index="0"] .meta-rule-editor__action-header .el-select') as HTMLElement
+  epSetSelect(sel, type)
 }
 function ruleWithBranch(config: Record<string, unknown>): AutomationRule {
   return {
@@ -51,7 +51,7 @@ describe('A6-3-2a condition_branch editor', () => {
     setInput(container, '[data-field="name"]', 'Branch rule')
     selectAction0(container, 'condition_branch')
     await flush()
-    const toggle = container.querySelector('[data-field="executionMode"]') as HTMLInputElement
+    const toggle = container.querySelector('[data-field="executionModeToggle"] input') as HTMLInputElement
     expect(toggle.checked).toBe(true)
     expect(toggle.disabled).toBe(true)
     const saveBtn = container.querySelector('[data-action="save"]') as HTMLButtonElement
@@ -74,18 +74,18 @@ describe('A6-3-2a condition_branch editor', () => {
     ;(container.querySelector('[data-branch-index="0"] [data-action="add-branch-condition"]') as HTMLButtonElement).click()
     await flush()
     const condRow = container.querySelector('[data-branch-index="0"] [data-branch-condition-index="0"]') as HTMLElement
-    const fieldSel = condRow.querySelector('select') as HTMLSelectElement
-    fieldSel.value = 'fld_2'; fieldSel.dispatchEvent(new Event('change'))
+    const fieldSel = condRow.querySelector('.el-select') as HTMLElement
+    epSetSelect(fieldSel, 'fld_2')
     await flush()
-    const valInput = condRow.querySelector('input') as HTMLInputElement
+    const valInput = condRow.querySelector('.el-input__inner') as HTMLInputElement
     valInput.value = 'vip'; valInput.dispatchEvent(new Event('input'))
     // branch_1 action 0 (update_record default): add a field pair Status=done
     ;(container.querySelector('[data-branch-index="0"] [data-action="add-branch-field"]') as HTMLButtonElement).click()
     await flush()
     const pair = container.querySelector('[data-branch-index="0"] .meta-rule-editor__field-pair') as HTMLElement
-    const pairField = pair.querySelector('select') as HTMLSelectElement
-    pairField.value = 'fld_1'; pairField.dispatchEvent(new Event('change'))
-    const pairVal = pair.querySelector('input') as HTMLInputElement
+    const pairField = pair.querySelector('.el-select') as HTMLElement
+    epSetSelect(pairField, 'fld_1')
+    const pairVal = pair.querySelector('.el-input__inner') as HTMLInputElement
     pairVal.value = 'done'; pairVal.dispatchEvent(new Event('input'))
     await flush()
     ;(container.querySelector('[data-action="save"]') as HTMLButtonElement).click()
@@ -153,10 +153,10 @@ describe('A6-3-2a condition_branch editor', () => {
     setInput(container, '[data-field="name"]', 'Switch')
     selectAction0(container, 'condition_branch')
     await flush()
-    expect((container.querySelector('[data-field="executionMode"]') as HTMLInputElement).disabled).toBe(true)
+    expect((container.querySelector('[data-field="executionModeToggle"] input') as HTMLInputElement).disabled).toBe(true)
     selectAction0(container, 'update_record')
     await flush()
-    expect((container.querySelector('[data-field="executionMode"]') as HTMLInputElement).disabled).toBe(false)
+    expect((container.querySelector('[data-field="executionModeToggle"] input') as HTMLInputElement).disabled).toBe(false)
   })
 })
 
@@ -170,9 +170,9 @@ describe('A6-3-3b branch-local wait_for_callback editor', () => {
     selectAction0(container, 'condition_branch')
     await flush()
     const branchActionSelect = container.querySelector(
-      '[data-action-config="condition_branch"] [data-branch-action-index="0"] select',
-    ) as HTMLSelectElement
-    const options = Array.from(branchActionSelect.options).map((o) => o.value)
+      '[data-action-config="condition_branch"] [data-branch-action-index="0"] .el-select',
+    ) as HTMLElement
+    const options = epOptions(branchActionSelect).map((o) => o.value)
     expect(options).toContain('wait_for_callback')
     expect(options).toContain('update_record')
     expect(options).toContain('send_notification')
@@ -190,15 +190,14 @@ describe('A6-3-3b branch-local wait_for_callback editor', () => {
     selectAction0(container, 'condition_branch')
     await flush()
     // auto-lock is already in effect because the rule action is condition_branch
-    const toggle = container.querySelector('[data-field="executionMode"]') as HTMLInputElement
+    const toggle = container.querySelector('[data-field="executionModeToggle"] input') as HTMLInputElement
     expect(toggle.checked).toBe(true)
     expect(toggle.disabled).toBe(true)
     // branch_1 action 0: switch its type select to wait_for_callback
     const branchActionSelect = container.querySelector(
-      '[data-action-config="condition_branch"] [data-branch-action-index="0"] select',
-    ) as HTMLSelectElement
-    branchActionSelect.value = 'wait_for_callback'
-    branchActionSelect.dispatchEvent(new Event('change'))
+      '[data-action-config="condition_branch"] [data-branch-action-index="0"] .el-select',
+    ) as HTMLElement
+    epSetSelect(branchActionSelect, 'wait_for_callback')
     await flush()
     // the zero-param hint renders (no fields to author for a wait)
     expect(

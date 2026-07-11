@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createApp, defineComponent, h, inject, nextTick, provide, reactive, type App as VueApp, type Slot } from 'vue'
 import type { DelegationRecord } from '../src/approvals/delegations'
+import { useLocale } from '../src/composables/useLocale'
 
 // B2-05 — DelegationSettingsView (admin 委托设置) MOUNTED-component coverage. Neither
 // approvalDelegationForm.spec.ts nor approvalDelegationRoute.spec.ts (the only pre-existing specs
@@ -37,6 +38,19 @@ vi.mock('element-plus', () => ({
   ElMessage: { success: vi.fn(), warning: vi.fn(), error: (...a: unknown[]) => messageErrorSpy(...a) },
   ElMessageBox: { confirm: (...a: unknown[]) => confirmSpy(...a) },
 }))
+
+// B3-04-tail — the 新建委托 dialog's 委托人/被委托人 fields now use the real ApprovalUserPicker
+// (participant directory), replacing the manual free-text id inputs. Mirrors the mock
+// myDelegationView.spec.ts uses for its (delegatee-only) picker. `vi.importActual` keeps every
+// other export of `../src/approvals/api` real.
+const searchApprovalDirectoryUsersSpy = vi.fn().mockResolvedValue([])
+vi.mock('../src/approvals/api', async () => {
+  const actual = await vi.importActual<typeof import('../src/approvals/api')>('../src/approvals/api')
+  return {
+    ...actual,
+    searchApprovalDirectoryUsers: (...args: unknown[]) => searchApprovalDirectoryUsersSpy(...args),
+  }
+})
 
 type ColumnRegistryEntry = { key: string; prop?: string; label?: string; defaultSlot?: Slot }
 type ColumnRegistry = { columns: ColumnRegistryEntry[]; register: (entry: ColumnRegistryEntry) => void }
@@ -137,9 +151,48 @@ function passthrough(name: string, tag = 'div') {
 const ElForm = passthrough('ElForm', 'form')
 const ElFormItem = passthrough('ElFormItem', 'label')
 const ElInput = passthrough('ElInput', 'input')
-const ElSelect = passthrough('ElSelect', 'select')
-const ElOption = passthrough('ElOption', 'option')
-const ElDatePicker = passthrough('ElDatePicker', 'input')
+
+// B3-04-tail — unlike the other dialog fields (never interacted with pre-tail, since the dialog
+// itself was never opened by this spec), the new ApprovalUserPicker call sites need a REAL v-model
+// round trip to prove "selection writes the id into the form model" end-to-end, so ElSelect/
+// ElOption/ElDatePicker are upgraded here from inert passthroughs to minimal interactive stubs
+// (native <select>/<option>/<input> with actual value + change/input wiring). This also makes the
+// pre-existing 范围 (scope) select interactive, which is a strict capability superset — no
+// existing assertion in this file exercises it, so behavior for them is unchanged.
+const ElSelect = defineComponent({
+  name: 'ElSelect',
+  props: { modelValue: { type: [String, Number], default: undefined } },
+  emits: ['update:modelValue', 'visible-change'],
+  render() {
+    const attrs = this.$attrs as Record<string, unknown>
+    return h('select', {
+      'data-testid': attrs['data-testid'],
+      value: this.modelValue ?? '',
+      onChange: (e: Event) => {
+        const v = (e.target as HTMLSelectElement).value
+        this.$emit('update:modelValue', v || null)
+      },
+    }, this.$slots.default?.())
+  },
+})
+const ElOption = defineComponent({
+  name: 'ElOption',
+  props: { label: String, value: { type: [String, Number], default: undefined } },
+  render() {
+    return h('option', { value: this.value }, this.label)
+  },
+})
+const ElDatePicker = defineComponent({
+  name: 'ElDatePicker',
+  props: { modelValue: String },
+  emits: ['update:modelValue'],
+  render() {
+    return h('input', {
+      value: this.modelValue ?? '',
+      onInput: (e: Event) => this.$emit('update:modelValue', (e.target as HTMLInputElement).value),
+    })
+  },
+})
 
 // Visibility-gated, matching the real component: content only renders while open (the 新建委托
 // dialog is never opened in these tests, so its inner ElForm/ElInput/etc. never need stubs).
@@ -181,6 +234,12 @@ describe('DelegationSettingsView (admin 委托设置) — B2-05 status tag + dis
   let container: HTMLDivElement | null = null
 
   beforeEach(() => {
+    // UF-3: the status cell is now locale-aware (<StatusTag domain="delegation">, via
+    // useLocale()/isZh) rather than the previous hardcoded-Chinese-always
+    // `delegationDisplayStatus().status` literal. This suite's fixtures/assertions are Chinese,
+    // so pin the locale explicitly rather than relying on jsdom's default `navigator.language`.
+    useLocale().setLocale('zh-CN')
+
     canManageTemplates.value = true
     listDelegationsSpy.mockReset()
     disableDelegationSpy.mockReset().mockResolvedValue(undefined)
@@ -243,7 +302,9 @@ describe('DelegationSettingsView (admin 委托设置) — B2-05 status tag + dis
     for (const [index, label, tagType] of expectations) {
       const cell = statusCell(index)
       expect(cell.textContent, `row ${index} label`).toContain(label)
-      expect(cell.querySelector('[data-el-tag-type]')?.getAttribute('data-el-tag-type'), `row ${index} tag type`).toBe(tagType)
+      // UF-3: the status cell now renders <StatusTag domain="delegation"> (not `<el-tag>`) —
+      // select its tone by `data-tone` instead of the ElTag test stub's `data-el-tag-type`.
+      expect(cell.querySelector('[data-tone]')?.getAttribute('data-tone'), `row ${index} tag type`).toBe(tagType)
     }
   })
 
@@ -286,5 +347,79 @@ describe('DelegationSettingsView (admin 委托设置) — B2-05 status tag + dis
     expect(confirmSpy).toHaveBeenCalledTimes(1)
     expect(disableDelegationSpy).not.toHaveBeenCalled()
     expect(listDelegationsSpy).toHaveBeenCalledTimes(1) // no reload — disable never ran
+  })
+
+  // ---------------------------------------------------------------------------
+  // B3-04-tail — the 新建委托 dialog's 委托人/被委托人 fields now use the real ApprovalUserPicker
+  // instead of manual free-text id inputs (mirrors MyDelegationView's B3-04 D-2 delegatee field;
+  // this admin view additionally makes the delegator field pickable, since an admin may
+  // legitimately pick ANY user as delegator).
+  // ---------------------------------------------------------------------------
+  it('the 新建委托 dialog renders TWO distinct real ApprovalUserPickers (delegator + delegatee), not manual id inputs', async () => {
+    await mountView([])
+
+    const newButton = container!.querySelector('[data-testid="delegation-new"]') as HTMLButtonElement
+    newButton.click()
+    await flushUi()
+
+    const delegator = container!.querySelector('[data-testid="delegation-delegator"]')
+    const delegatee = container!.querySelector('[data-testid="delegation-delegatee"]')
+    expect(delegator).not.toBeNull()
+    expect(delegatee).not.toBeNull()
+    expect(delegator).not.toBe(delegatee)
+    // The old manual inputs were plain <input> elements; the picker's root is the (stubbed)
+    // <select> — this distinguishes "picker swapped in" from "same testid, still a text input".
+    expect(delegator!.tagName).toBe('SELECT')
+    expect(delegatee!.tagName).toBe('SELECT')
+  })
+
+  it('picking a delegator/delegatee writes the id into the form model; submit sends the unchanged CreateDelegationPayload shape (ids, not names)', async () => {
+    const users = [
+      { id: 'alice-id', name: 'Alice', email: 'alice@example.com' },
+      { id: 'bob-id', name: 'Bob', email: 'bob@example.com' },
+    ]
+    searchApprovalDirectoryUsersSpy.mockResolvedValue(users)
+    await mountView([])
+
+    const newButton = container!.querySelector('[data-testid="delegation-new"]') as HTMLButtonElement
+    newButton.click()
+    await flushUi()
+
+    const delegatorSelect = container!.querySelector('[data-testid="delegation-delegator"]') as HTMLSelectElement
+    const delegateeSelect = container!.querySelector('[data-testid="delegation-delegatee"]') as HTMLSelectElement
+
+    delegatorSelect.value = 'alice-id'
+    delegatorSelect.dispatchEvent(new Event('change'))
+    await flushUi()
+
+    delegateeSelect.value = 'bob-id'
+    delegateeSelect.dispatchEvent(new Event('change'))
+    await flushUi()
+
+    // Scope stays the default ('all'), so only the start/end date pickers remain to fill — they
+    // are the only plain <input> elements left inside the dialog (the pickers render as <select>).
+    const dateInputs = container!.querySelectorAll('[data-el-dialog] input') as NodeListOf<HTMLInputElement>
+    expect(dateInputs.length).toBe(2)
+    const startAt = '2026-07-01T09:00'
+    const endAt = '2026-07-02T09:00'
+    dateInputs[0].value = startAt
+    dateInputs[0].dispatchEvent(new Event('input'))
+    dateInputs[1].value = endAt
+    dateInputs[1].dispatchEvent(new Event('input'))
+    await flushUi()
+
+    const submitButton = container!.querySelector('[data-testid="delegation-submit"]') as HTMLButtonElement
+    submitButton.click()
+    await flushUi()
+
+    expect(createDelegationSpy).toHaveBeenCalledTimes(1)
+    expect(createDelegationSpy).toHaveBeenCalledWith({
+      delegatorUserId: 'alice-id',
+      delegateeUserId: 'bob-id',
+      scope: 'all',
+      scopeTemplateId: null,
+      startAt: new Date(startAt).toISOString(),
+      endAt: new Date(endAt).toISOString(),
+    })
   })
 })

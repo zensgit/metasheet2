@@ -48,15 +48,15 @@
         :placeholder="p('condRule.value')"
         :aria-label="p('condRule.value')"
       />
-      <button type="button" class="meta-cond-rule__add-btn" data-testid="cond-rule-add" :disabled="!canAdd" @click="addRule">
+      <MtButton class="meta-cond-rule__add-btn" data-testid="cond-rule-add" :disabled="!canAdd" @click="addRule">
         {{ p('condRule.add') }}
-      </button>
+      </MtButton>
     </div>
 
     <div class="meta-cond-rule__actions">
-      <button type="button" class="meta-cond-rule__save" data-testid="cond-rule-save" :disabled="saving" @click="save">
+      <MtButton class="meta-cond-rule__save" data-testid="cond-rule-save" :disabled="saving" @click="save">
         {{ p('condRule.save') }}
-      </button>
+      </MtButton>
       <span v-if="savedFlash" class="meta-cond-rule__saved" data-testid="cond-rule-saved">{{ p('condRule.saved') }}</span>
       <span v-if="error" class="meta-cond-rule__error" role="alert" data-testid="cond-rule-error">{{ error }}</span>
     </div>
@@ -69,6 +69,7 @@ import { useLocale } from '../../composables/useLocale'
 import type { MultitableApiClient } from '../api/client'
 import type { MetaField } from '../types'
 import { permissionLabel, type MetaPermissionLabelKey } from '../utils/meta-permission-labels'
+import { MtButton } from '../ui'
 import {
   coerceRuleValue,
   fieldTypeSupportsRule,
@@ -194,8 +195,10 @@ watch(() => props.sheetId, load)
 .meta-cond-rule__remove { border: none; background: none; color: var(--meta-danger, #dc2626); cursor: pointer; font-size: 12px; }
 .meta-cond-rule__add { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-bottom: 8px; }
 .meta-cond-rule__select, .meta-cond-rule__input { font-size: 12px; padding: 4px 6px; border: 1px solid var(--meta-border, #d1d5db); border-radius: 6px; }
-.meta-cond-rule__add-btn, .meta-cond-rule__save { font-size: 12px; padding: 4px 10px; border: 1px solid var(--meta-border, #d1d5db); border-radius: 6px; cursor: pointer; background: var(--meta-surface, #fff); }
-.meta-cond-rule__add-btn:disabled, .meta-cond-rule__save:disabled { opacity: 0.5; cursor: not-allowed; }
+/* .meta-cond-rule__add-btn / __save: both are now <MtButton> (ghost, token-styled — they were neutral
+   bordered-white secondary actions, no primary/soft fill). Their bespoke CSS (+ shared :disabled) was
+   removed; MtButton provides styling + disabled state. Classes + data-testid kept for selector stability.
+   The per-rule __remove button stays bespoke. */
 .meta-cond-rule__actions { display: flex; align-items: center; gap: 12px; }
 .meta-cond-rule__saved { font-size: 12px; color: var(--meta-success, #059669); }
 .meta-cond-rule__error { font-size: 12px; color: var(--meta-danger, #dc2626); }

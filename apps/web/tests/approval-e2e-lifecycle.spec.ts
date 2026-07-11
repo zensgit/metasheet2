@@ -8,6 +8,7 @@ import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { computed, createApp, defineComponent, h, nextTick, ref, type App as VueApp } from 'vue'
+import { useLocale } from '../src/composables/useLocale'
 import {
   mockPendingApproval,
   mockApprovedApproval,
@@ -57,6 +58,7 @@ const mockPendingApprovals = ref<any[]>([])
 const mockMyApprovals = ref<any[]>([])
 const mockCcApprovals = ref<any[]>([])
 const mockCompletedApprovals = ref<any[]>([])
+const mockProcessedApprovals = ref<any[]>([])
 
 const loadDetailSpy = vi.fn().mockResolvedValue(undefined)
 const loadHistorySpy = vi.fn().mockResolvedValue(undefined)
@@ -66,6 +68,7 @@ const loadPendingSpy = vi.fn().mockResolvedValue(undefined)
 const loadMineSpy = vi.fn().mockResolvedValue(undefined)
 const loadCcSpy = vi.fn().mockResolvedValue(undefined)
 const loadCompletedSpy = vi.fn().mockResolvedValue(undefined)
+const loadProcessedSpy = vi.fn().mockResolvedValue(undefined)
 
 vi.mock('../src/approvals/store', () => ({
   useApprovalStore: () => ({
@@ -74,6 +77,7 @@ vi.mock('../src/approvals/store', () => ({
     get myApprovals() { return mockMyApprovals.value },
     get ccApprovals() { return mockCcApprovals.value },
     get completedApprovals() { return mockCompletedApprovals.value },
+    get processedApprovals() { return mockProcessedApprovals.value },
     get activeApproval() { return mockActiveApproval.value },
     get history() { return mockHistory.value },
     get loading() { return mockLoading.value },
@@ -82,12 +86,14 @@ vi.mock('../src/approvals/store', () => ({
     get totalMine() { return mockMyApprovals.value.length },
     get totalCc() { return mockCcApprovals.value.length },
     get totalCompleted() { return mockCompletedApprovals.value.length },
+    get totalProcessed() { return mockProcessedApprovals.value.length },
     get pendingCount() { return mockPendingApprovals.value.length },
     approvalById: () => undefined,
     loadPending: loadPendingSpy,
     loadMine: loadMineSpy,
     loadCc: loadCcSpy,
     loadCompleted: loadCompletedSpy,
+    loadProcessed: loadProcessedSpy,
     loadDetail: loadDetailSpy,
     loadHistory: loadHistorySpy,
     submitApproval: submitApprovalSpy,
@@ -518,6 +524,12 @@ describe('Approval E2E Lifecycle', () => {
   let container: HTMLDivElement | null = null
 
   beforeEach(() => {
+    // UF-3: the header status tag is now locale-aware (<StatusTag domain="approvalInstance">,
+    // via useLocale()/isZh) rather than the previous hardcoded-Chinese-always literal map. This
+    // whole spec's fixtures/assertions are Chinese, so pin the locale explicitly rather than
+    // relying on jsdom's default `navigator.language`.
+    useLocale().setLocale('zh-CN')
+
     // Reset all reactive state
     mockActiveApproval.value = null
     mockHistory.value = []
@@ -822,7 +834,9 @@ describe('Approval E2E Lifecycle', () => {
       const h1 = container!.querySelector('.approval-detail__header h1')
       expect(h1?.textContent).toBe('出差报销申请')
 
-      const tag = container!.querySelector('.approval-detail__header [data-el-tag]')
+      // UF-3: the header status tag is now <StatusTag> (framework-free by design, not `<el-tag>`)
+      // — select it by its `data-status` attribute instead of the ElTag test stub's `data-el-tag`.
+      const tag = container!.querySelector('.approval-detail__header [data-status]')
       expect(tag?.textContent).toContain('待处理')
     })
 
@@ -1627,6 +1641,81 @@ describe('Approval E2E Lifecycle', () => {
       // ...yet the real history item count (what `queryHistoryItems` / several OTHER guard
       // specs rely on) is untouched.
       expect(container!.querySelectorAll('.el-timeline-item').length).toBe(2)
+    })
+  })
+
+  // =========================================================================
+  // G-B2-09 / G-B2-10 — timeline de-ID tails + next-pending entry
+  // =========================================================================
+  describe('G-B2-09/10 detail tails', () => {
+    it('cc history action renders 抄送 (not raw cc) and actors get initial-letter avatars', async () => {
+      routeParams = { id: 'apv_pending_1' }
+      mockActiveApproval.value = mockPendingApproval()
+      mockHistory.value = [
+        {
+          id: 'hist_cc_1',
+          action: 'cc',
+          actorId: 'user_9',
+          actorName: '王五',
+          comment: null,
+          fromStatus: 'pending',
+          toStatus: 'pending',
+          occurredAt: new Date().toISOString(),
+          metadata: { nodeKey: 'cc_1' },
+        },
+      ] as never
+      await mountDetailView()
+
+      expect(container!.textContent).toContain('抄送')
+      expect(container!.textContent).not.toMatch(/\bcc\b/)
+      const avatar = container!.querySelector('.approval-detail__actor-avatar')
+      expect(avatar?.textContent?.trim()).toBe('王')
+    })
+
+    it('after a successful approve, 下一条 → appears when another pending item exists and navigates to it', async () => {
+      routeParams = { id: 'apv_pending_1' }
+      mockActiveApproval.value = mockPendingApproval()
+      executeActionSpy.mockResolvedValue(mockApprovedApproval())
+      mockPendingApprovals.value = [
+        { id: 'apv_pending_1' },
+        { id: 'apv_pending_2' },
+      ] as never
+      await mountDetailView()
+
+      const approveBtn = Array.from(container!.querySelectorAll('.approval-detail__actions button'))
+        .find((b) => b.textContent?.trim() === '通过')
+      approveBtn!.click()
+      await flushUi()
+      const dialog = container!.querySelector('[data-dialog-visible="true"]')
+      const confirmBtn = Array.from(dialog!.querySelectorAll('button'))
+        .find((b) => b.textContent?.trim() === '确认')
+      confirmBtn!.click()
+      await flushUi()
+
+      const nextBtn = container!.querySelector('[data-testid="approval-next-pending"]') as HTMLButtonElement | null
+      expect(nextBtn).not.toBeNull()
+      nextBtn!.click()
+      await flushUi()
+      // Exclude-current rule: the target is the OTHER pending item, never the acted one.
+      expect(pushSpy).toHaveBeenCalledWith({ name: 'approval-detail', params: { id: 'apv_pending_2' } })
+    })
+
+    it('no 下一条 when the pending list only contains the current instance (exclude-current guard)', async () => {
+      routeParams = { id: 'apv_pending_1' }
+      mockActiveApproval.value = mockPendingApproval()
+      executeActionSpy.mockResolvedValue(mockApprovedApproval())
+      mockPendingApprovals.value = [{ id: 'apv_pending_1' }] as never
+      await mountDetailView()
+
+      const approveBtn = Array.from(container!.querySelectorAll('.approval-detail__actions button'))
+        .find((b) => b.textContent?.trim() === '通过')
+      approveBtn!.click()
+      await flushUi()
+      const dialog = container!.querySelector('[data-dialog-visible="true"]')
+      Array.from(dialog!.querySelectorAll('button')).find((b) => b.textContent?.trim() === '确认')!.click()
+      await flushUi()
+
+      expect(container!.querySelector('[data-testid="approval-next-pending"]')).toBeNull()
     })
   })
 })

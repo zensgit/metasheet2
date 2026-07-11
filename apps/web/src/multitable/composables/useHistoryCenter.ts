@@ -99,5 +99,34 @@ export function useHistoryCenter(client: HistoryClient = multitableClient) {
     }
   }
 
-  return { batches, loading, loadingMore, error, nextCursor, searchTruncated, expandedId, detail, detailLoading, load, loadMore, toggle }
+
+  // W3-5b: an INDEPENDENT batch-detail fetch for a commit toast's "view in history" deep-link — decoupled
+  // from the per-row expandedId/detail pair above so a manual row click elsewhere never clobbers (or is
+  // clobbered by) the pinned banner, and the pinned banner keeps showing even after the user expands/
+  // collapses unrelated rows. Same never-throw contract as toggle(): a failure surfaces via a null
+  // pinnedDetail, never an unhandled rejection.
+  const pinnedDetail = ref<HistoryBatchDetail | null>(null)
+  const pinnedLoading = ref(false)
+
+  async function loadPinned(baseId: string, batchId: string): Promise<void> {
+    pinnedLoading.value = true
+    pinnedDetail.value = null
+    try {
+      pinnedDetail.value = await client.getHistoryBatch(baseId, batchId)
+    } catch {
+      pinnedDetail.value = null
+    } finally {
+      pinnedLoading.value = false
+    }
+  }
+  function clearPinned(): void {
+    pinnedDetail.value = null
+    pinnedLoading.value = false
+  }
+
+  return {
+    batches, loading, loadingMore, error, nextCursor, searchTruncated, expandedId, detail, detailLoading, load, loadMore, toggle,
+    // W3-5b pinned-batch banner (deep-link display, independent of the paged list / row-expansion state)
+    pinnedDetail, pinnedLoading, loadPinned, clearPinned,
+  }
 }

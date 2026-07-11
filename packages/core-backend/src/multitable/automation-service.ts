@@ -52,6 +52,7 @@ import {
 } from './automation-scheduler'
 import { RedisLeaderLock, type RedisLeaderLockClient } from './redis-leader-lock'
 import { getRedisClient } from '../db/redis'
+import { poolManager } from '../integration/db/connection-pool'
 import { randomBytes } from 'crypto'
 import { AutomationLogService } from './automation-log-service'
 import { AutomationJobService } from './automation-job-service'
@@ -836,6 +837,20 @@ export class AutomationService {
     const deps: AutomationDeps = {
       eventBus,
       queryFn,
+      transaction: async (handler) => poolManager.get().transaction(async ({ query }) => {
+        const txQuery: AutomationQueryFn = async (sqlText, params) => {
+          const result = await query(sqlText, params)
+          return {
+            rows: Array.isArray((result as { rows?: unknown[] }).rows)
+              ? (result as { rows: unknown[] }).rows
+              : [],
+            rowCount: typeof (result as { rowCount?: number }).rowCount === 'number'
+              ? (result as { rowCount: number }).rowCount
+              : undefined,
+          }
+        }
+        return handler({ query: txQuery })
+      }),
       fetchFn,
       notificationService,
     }
@@ -865,6 +880,17 @@ export class AutomationService {
 
   get jobs(): AutomationJobService {
     return this.jobService
+  }
+
+  /**
+   * B3-11 — expose the Kysely client for READ-ONLY name lookups at the route
+   * boundary (`resolveExecutionNameMaps`). No new capability: routes already
+   * reach the same tables indirectly via `getRule`/`listRules`; this just lets
+   * the read-only runs-list route batch a rule/sheet name lookup without adding
+   * a bespoke passthrough method here for every future read-only enrichment.
+   */
+  get dbClient(): Kysely<Database> {
+    return this.db
   }
 
   /** Expose executor for manual test runs */
@@ -2935,7 +2961,11 @@ export class AutomationService {
    */
   async testRun(ruleId: string, sheetId: string): Promise<AutomationExecution> {
     const rule = await this.getRule(ruleId)
-    if (!rule || !rule.enabled) {
+    // G8 hardening (review P3): the route gates `canManageAutomation` on the PATH `sheetId`, but
+    // getRule(ruleId) is not sheet-bound — so a caller authorized on sheet A could otherwise run a
+    // rule owned by sheet B. Bind the rule to the gated sheet, mirroring updateRule/deleteRule
+    // (`existing.sheet_id !== sheetId → not found`).
+    if (!rule || rule.sheet_id !== sheetId || !rule.enabled) {
       throw new Error(`Rule ${ruleId} not found or not enabled`)
     }
     const execRule = toExecutorRule(rule)

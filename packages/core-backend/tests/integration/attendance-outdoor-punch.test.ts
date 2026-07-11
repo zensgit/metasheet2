@@ -632,4 +632,299 @@ describeDb('② S3 outdoor punch approval (real DB, route-level)', () => {
       await cleanupUser(u)
     }
   })
+
+  // ────────────────────────────────────────────────────────────────────────────────────────────────
+  // S2 outdoor-punch-photo design-lock (2026-07-10): photo-evidence contract + requirePhoto enforcement.
+  // These run AFTER the S3 / S2-1 cases above and ALWAYS send requirePhoto explicitly (setOutdoorPhoto)
+  // so a value never leaks forward through the per-key mergeSettings. The upload cases drive the REAL
+  // core POST /api/files/upload route (multipart) → a real `files` row (owner_id + meta.contentType) →
+  // punch, so the server-side ownership + image/* content-type verification is proven end-to-end against
+  // the same running server + migrated DB (Fix 1 userId resolution + Option-A INSERT + Fix 2 bridge
+  // migration are all exercised natively here — no direct table-insert scaffolding).
+  const PHOTO_PNG = Buffer.from(
+    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==',
+    'base64',
+  )
+  const photoUid = (tag: string) => `out-photo-${tag}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
+  // Always send all four outdoor fields (incl. requirePhoto) so no prior value survives the per-key merge.
+  const setOutdoorPhoto = (outdoor: Record<string, unknown>) =>
+    putSettings({ geoFence: FENCE, punchPolicy: { outdoor: { requireApproval: false, requireNote: false, requirePhoto: false, approvalFlowId: '', ...outdoor } } })
+  // Raw multipart POST to the real upload route (this integration file uses http, not supertest).
+  function uploadFile(token: string, part: { filename: string; contentType: string; content: Buffer }): Promise<HttpResponse> {
+    return new Promise((resolve, reject) => {
+      const boundary = `----ms2s2photo${Math.random().toString(36).slice(2)}`
+      const head = Buffer.from(
+        `--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="${part.filename}"\r\nContent-Type: ${part.contentType}\r\n\r\n`,
+      )
+      const tail = Buffer.from(`\r\n--${boundary}--\r\n`)
+      const body = Buffer.concat([head, part.content, tail])
+      const target = new URL(`${baseUrl}/api/files/upload`)
+      const req = http.request(
+        {
+          method: 'POST',
+          hostname: target.hostname,
+          port: target.port,
+          path: target.pathname,
+          headers: {
+            Authorization: `Bearer ${token}`,
+            'Content-Type': `multipart/form-data; boundary=${boundary}`,
+            'Content-Length': body.length,
+          },
+        },
+        (res) => {
+          let data = ''
+          res.on('data', (chunk) => { data += chunk })
+          res.on('end', () => {
+            let parsed: unknown
+            try { parsed = data ? JSON.parse(data) : undefined } catch { parsed = undefined }
+            resolve({ status: res.statusCode || 0, body: parsed, raw: data })
+          })
+        },
+      )
+      req.on('error', reject)
+      req.write(body)
+      req.end()
+    })
+  }
+  const uploadedFileId = (res: HttpResponse) => (res.body as { file?: { id?: string } } | undefined)?.file?.id ?? ''
+  const outdoorPunchMeta = async (reqId: string) =>
+    ((await pool.query(`SELECT metadata -> 'outdoorPunch' AS op FROM attendance_requests WHERE id = $1`, [reqId])).rows[0]?.op ?? null) as Record<string, unknown> | null
+  const cleanupPhotos = (userId: string) => pool.query(`DELETE FROM files WHERE owner_id = $1`, [userId]).catch(() => undefined)
+
+  it('S2-photo: requirePhoto survives the settings PUT→GET round-trip (not stripped by normalization)', async () => {
+    const flowId = await createOutdoorFlow()
+    await putSettings({ punchPolicy: { outdoor: { requireApproval: true, requireNote: false, requirePhoto: true, approvalFlowId: flowId } } })
+    const got = await getSettings()
+    const outdoor = (got.body as { data?: { punchPolicy?: { outdoor?: Record<string, unknown> } } })?.data?.punchPolicy?.outdoor
+    expect(outdoor).toMatchObject({ requireApproval: true, requireNote: false, requirePhoto: true, approvalFlowId: flowId })
+    // toggling back to false also round-trips (not sticky-true)
+    await putSettings({ punchPolicy: { outdoor: { requireApproval: true, requireNote: false, requirePhoto: false, approvalFlowId: flowId } } })
+    const got2 = await getSettings()
+    expect((got2.body as { data?: { punchPolicy?: { outdoor?: { requirePhoto?: unknown } } } })?.data?.punchPolicy?.outdoor?.requirePhoto).toBe(false)
+  })
+
+  it('S2-photo: a non-boolean requirePhoto is rejected at the settings gate (400 VALIDATION_ERROR, no silent coerce)', async () => {
+    const res = await putSettings({ punchPolicy: { outdoor: { requirePhoto: 'yes' } } })
+    expect(res.status).toBe(400)
+    expect((res.body as { error?: { code?: string } })?.error?.code).toBe('VALIDATION_ERROR')
+  })
+
+  it('S2-photo: requirePhoto=true with no photoFileId → 422 OUTDOOR_PHOTO_REQUIRED, writes nothing', async () => {
+    await createOutdoorFlow()
+    await setOutdoorPhoto({ requireApproval: true, requirePhoto: true })
+    const u = photoUid('req')
+    const t = await mintToken(u, 'attendance:read,attendance:write')
+    try {
+      const r = await punch(t, { eventType: 'check_in', location: OUTSIDE })
+      expect(r.status).toBe(422)
+      expect((r.body as { error?: { code?: string } })?.error?.code).toBe('OUTDOOR_PHOTO_REQUIRED')
+      const c = await counts(u)
+      expect(c.outdoorReqs).toHaveLength(0)
+      expect(c.events).toHaveLength(0)
+    } finally {
+      await cleanupUser(u)
+    }
+  })
+
+  it('S2-photo: a photoFileId with no matching files row → 422 OUTDOOR_PHOTO_INVALID (forged id rejected)', async () => {
+    await createOutdoorFlow()
+    await setOutdoorPhoto({ requireApproval: true, requirePhoto: false })
+    const u = photoUid('forged')
+    const t = await mintToken(u, 'attendance:read,attendance:write')
+    try {
+      const r = await punch(t, { eventType: 'check_in', location: OUTSIDE, photoFileId: randomUUID() })
+      expect(r.status).toBe(422)
+      expect((r.body as { error?: { code?: string } })?.error?.code).toBe('OUTDOOR_PHOTO_INVALID')
+      expect((await counts(u)).outdoorReqs).toHaveLength(0)
+    } finally {
+      await cleanupUser(u)
+    }
+  })
+
+  it('S2-photo: a real non-image upload used as photoFileId → 422 OUTDOOR_PHOTO_INVALID (content-type enforced)', async () => {
+    await createOutdoorFlow()
+    await setOutdoorPhoto({ requireApproval: true, requirePhoto: true })
+    const u = photoUid('nonimg')
+    const t = await mintToken(u, 'attendance:read,attendance:write')
+    try {
+      const up = await uploadFile(t, { filename: 'note.txt', contentType: 'text/plain', content: Buffer.from('not an image') })
+      expect(up.status).toBe(200)
+      const fileId = uploadedFileId(up)
+      expect(fileId).toBeTruthy()
+      const r = await punch(t, { eventType: 'check_in', location: OUTSIDE, photoFileId: fileId })
+      expect(r.status).toBe(422)
+      expect((r.body as { error?: { code?: string } })?.error?.code).toBe('OUTDOOR_PHOTO_INVALID')
+      expect((await counts(u)).outdoorReqs).toHaveLength(0)
+    } finally {
+      await cleanupPhotos(u)
+      await cleanupUser(u)
+    }
+  })
+
+  it('S2-photo: a photo owned by another user → 422 OUTDOOR_PHOTO_INVALID (uploader must equal punching user)', async () => {
+    await createOutdoorFlow()
+    await setOutdoorPhoto({ requireApproval: true, requirePhoto: true })
+    const owner = photoUid('owner')
+    const puncher = photoUid('puncher')
+    const tOwner = await mintToken(owner, 'attendance:read,attendance:write')
+    const tPuncher = await mintToken(puncher, 'attendance:read,attendance:write')
+    try {
+      const up = await uploadFile(tOwner, { filename: 'shot.png', contentType: 'image/png', content: PHOTO_PNG })
+      expect(up.status).toBe(200)
+      const fileId = uploadedFileId(up)
+      expect(fileId).toBeTruthy()
+      const r = await punch(tPuncher, { eventType: 'check_in', location: OUTSIDE, photoFileId: fileId })
+      expect(r.status).toBe(422)
+      expect((r.body as { error?: { code?: string } })?.error?.code).toBe('OUTDOOR_PHOTO_INVALID')
+      expect((await counts(puncher)).outdoorReqs).toHaveLength(0)
+    } finally {
+      await cleanupPhotos(owner)
+      await cleanupUser(owner)
+      await cleanupUser(puncher)
+    }
+  })
+
+  it('S2-photo E2E: upload a real image → punch with photoFileId → pending request carries metadata.outdoorPunch.photoFileId', async () => {
+    await createOutdoorFlow()
+    await setOutdoorPhoto({ requireApproval: true, requirePhoto: true })
+    const u = photoUid('e2e')
+    const t = await mintToken(u, 'attendance:read,attendance:write')
+    try {
+      const up = await uploadFile(t, { filename: 'evidence.png', contentType: 'image/png', content: PHOTO_PNG })
+      expect(up.status).toBe(200)
+      const fileId = uploadedFileId(up)
+      expect(fileId).toBeTruthy()
+      // the upload wrote a real files row owned by the uploader (Fix 1 resolution + Option-A INSERT + Fix 2 table)
+      const fileRow = (await pool.query(`SELECT owner_id, meta FROM files WHERE id = $1`, [fileId])).rows[0]
+      expect(fileRow).toBeTruthy()
+      expect(fileRow.owner_id).toBe(u)
+      expect(fileRow.meta.contentType).toBe('image/png')
+      // H2 P3-1: a real PNG buffer is magic-byte sniffed on upload — path marker + detected type both land
+      expect(fileRow.meta.sniffed).toBe(true)
+      expect(fileRow.meta.sniffedContentType).toBe('image/png')
+      const r = await punch(t, { eventType: 'check_in', location: OUTSIDE, photoFileId: fileId })
+      expect(r.status).toBe(202)
+      expect((r.body as { data?: { pendingApproval?: boolean } })?.data?.pendingApproval).toBe(true)
+      const reqId = (r.body as { data?: { request?: { id?: string } } })?.data?.request?.id as string
+      expect(reqId).toBeTruthy()
+      const op = await outdoorPunchMeta(reqId)
+      expect(op?.photoFileId).toBe(fileId)
+    } finally {
+      await cleanupPhotos(u)
+      await cleanupUser(u)
+    }
+  })
+
+  it('S2-photo: requirePhoto=false + no photo → metadata.outdoorPunch is byte-identical to pre-slice (no photoFileId key)', async () => {
+    await createOutdoorFlow()
+    await setOutdoorPhoto({ requireApproval: true, requireNote: false, requirePhoto: false })
+    const u = photoUid('byteid')
+    const t = await mintToken(u, 'attendance:read,attendance:write')
+    try {
+      const r = await punch(t, { eventType: 'check_in', location: OUTSIDE })
+      expect(r.status).toBe(202)
+      const reqId = (r.body as { data?: { request?: { id?: string } } })?.data?.request?.id as string
+      const op = await outdoorPunchMeta(reqId)
+      expect(op).toBeTruthy()
+      // exact pre-slice key set — a stray photoFileId:null key would fail this (proves the conditional write)
+      expect(Object.keys(op as Record<string, unknown>).sort()).toEqual(
+        ['detection', 'eventType', 'location', 'note', 'occurredAt', 'source', 'timezone', 'version', 'workDate'],
+      )
+      expect('photoFileId' in (op as Record<string, unknown>)).toBe(false)
+    } finally {
+      await cleanupUser(u)
+    }
+  })
+
+  // ────────────────────────────────────────────────────────────────────────────────────────────────
+  // H2 photo-evidence-hardening design-lock (2026-07-10): P3-1 magic-byte sniffing (closes the
+  // forged-MIME gap where a client could declare `image/png` on a non-image body and pass G2's
+  // content-type check) + P3-2 orphan-row cleanup on delete (closes the dangling-evidence gap where
+  // a punch could cite a `photoFileId` whose underlying storage object was already deleted).
+
+  it('H2 P3-1: forged Content-Type — client declares image/png, body is non-image bytes → sniff misses on the new row → 422 OUTDOOR_PHOTO_INVALID', async () => {
+    await createOutdoorFlow()
+    await setOutdoorPhoto({ requireApproval: true, requirePhoto: true })
+    const u = photoUid('forgedmime')
+    const t = await mintToken(u, 'attendance:read,attendance:write')
+    try {
+      const up = await uploadFile(t, { filename: 'shot.png', contentType: 'image/png', content: Buffer.from('this is not actually a png, just text') })
+      expect(up.status).toBe(200)
+      const fileId = uploadedFileId(up)
+      expect(fileId).toBeTruthy()
+      // the client's forged declaration survives untouched in meta.contentType (the upload route never
+      // rejects a mismatched Content-Type — it stays a general-purpose upload) — but the sniff path
+      // marker is what G2 now trusts for a row written through this path, and the sniff missed.
+      const fileRow = (await pool.query(`SELECT meta FROM files WHERE id = $1`, [fileId])).rows[0]
+      expect(fileRow.meta.contentType).toBe('image/png')
+      expect(fileRow.meta.sniffed).toBe(true)
+      expect('sniffedContentType' in fileRow.meta).toBe(false)
+      const r = await punch(t, { eventType: 'check_in', location: OUTSIDE, photoFileId: fileId })
+      expect(r.status).toBe(422)
+      expect((r.body as { error?: { code?: string } })?.error?.code).toBe('OUTDOOR_PHOTO_INVALID')
+      expect((await counts(u)).outdoorReqs).toHaveLength(0)
+    } finally {
+      await cleanupPhotos(u)
+      await cleanupUser(u)
+    }
+  })
+
+  it('H2 P3-1: legacy files row (no `sniffed` key, only contentType asserted) → G2 falls back to the pre-slice check (punch passes)', async () => {
+    await createOutdoorFlow()
+    await setOutdoorPhoto({ requireApproval: true, requirePhoto: true })
+    const u = photoUid('legacyrow')
+    const t = await mintToken(u, 'attendance:read,attendance:write')
+    const legacyId = photoUid('legacy-id')
+    try {
+      await pool.query(
+        `INSERT INTO files (id, url, owner_id, meta, created_at) VALUES ($1, $2, $3, $4::jsonb, now())`,
+        [legacyId, 'https://example.invalid/legacy.png', u, JSON.stringify({ contentType: 'image/png', filename: 'legacy.png', size: 42 })],
+      )
+      const r = await punch(t, { eventType: 'check_in', location: OUTSIDE, photoFileId: legacyId })
+      expect(r.status).toBe(202)
+      const reqId = (r.body as { data?: { request?: { id?: string } } })?.data?.request?.id as string
+      expect(reqId).toBeTruthy()
+      const op = await outdoorPunchMeta(reqId)
+      expect(op?.photoFileId).toBe(legacyId)
+    } finally {
+      await pool.query(`DELETE FROM files WHERE id = $1`, [legacyId]).catch(() => undefined)
+      await cleanupUser(u)
+    }
+  })
+
+  it('H2 P3-2 + F2 tombstone: delete marks the files row deleted_at (not a hard delete) and the id is no longer usable as evidence', async () => {
+    await createOutdoorFlow()
+    await setOutdoorPhoto({ requireApproval: true, requirePhoto: true })
+    const u = photoUid('delrow')
+    const t = await mintToken(u, 'attendance:read,attendance:write')
+    try {
+      const up = await uploadFile(t, { filename: 'evidence.png', contentType: 'image/png', content: PHOTO_PNG })
+      expect(up.status).toBe(200)
+      const fileId = uploadedFileId(up)
+      expect(fileId).toBeTruthy()
+      const before = (await pool.query(`SELECT id, deleted_at FROM files WHERE id = $1`, [fileId])).rows[0]
+      expect(before).toBeTruthy()
+      expect(before.deleted_at).toBeNull()
+      const del = await requestJson(`${baseUrl}/api/files/${fileId}`, { method: 'DELETE', headers: authHeaders(t) })
+      expect(del.status).toBe(200)
+      // F2 files-acl-tombstone design-lock (2026-07-10): the row is TOMBSTONED, not hard-deleted — it
+      // remains as an audit record + compensating-delete pointer, invisible to every consumer via the
+      // `deleted_at IS NULL` filter (G2, this file's own info/download/list).
+      const after = (await pool.query(`SELECT id, deleted_at FROM files WHERE id = $1`, [fileId])).rows[0]
+      expect(after).toBeTruthy()
+      expect(after.deleted_at).not.toBeNull()
+      // download 404s the same as if the row had truly vanished (F1's ACL + F2's tombstone filter
+      // compose: a tombstoned row reads as "no active row" for the owner too, same as a stranger).
+      const dl = await requestJson(`${baseUrl}/api/files/${fileId}/download`, { headers: authHeaders(t) })
+      expect(dl.status).toBe(404)
+      // dangling evidence: punching with the now-tombstoned fileId is rejected, not silently accepted
+      const r = await punch(t, { eventType: 'check_in', location: OUTSIDE, photoFileId: fileId })
+      expect(r.status).toBe(422)
+      expect((r.body as { error?: { code?: string } })?.error?.code).toBe('OUTDOOR_PHOTO_INVALID')
+      expect((await counts(u)).outdoorReqs).toHaveLength(0)
+    } finally {
+      await cleanupPhotos(u)
+      await cleanupUser(u)
+    }
+  })
 })

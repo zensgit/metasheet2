@@ -1,35 +1,49 @@
 <template>
-  <section class="template-detail">
-    <header class="template-detail__header">
-      <el-button text @click="goBack">
-        <el-icon><ArrowLeft /></el-icon>
-        返回模板列表
-      </el-button>
-      <h1 v-if="template">{{ template.name }}</h1>
-      <el-tag
-        v-if="template"
-        :type="statusTagType(template.status)"
-        size="large"
-        :effect="template.status === 'published' ? 'dark' : 'light'"
-      >
-        {{ statusLabel(template.status) }}
-      </el-tag>
-      <el-button
-        v-if="template && template.status === 'published' && canWrite"
-        type="primary"
-        :loading="store.loading"
-        @click="startApproval"
-      >
-        发起审批
-      </el-button>
-      <el-button
-        v-if="template && canManageTemplates"
-        data-testid="template-detail-edit-button"
-        @click="editTemplate"
-      >
-        编辑模板
-      </el-button>
-    </header>
+  <PageShell width="default">
+    <PageHeader
+      class="template-detail__header"
+      :title="headerTitle"
+      back
+      back-label="返回模板列表"
+      @back="goBack"
+    >
+      <template v-if="template" #meta>
+        <StatusTag domain="approvalTemplate" :status="template.status" force-locale="zh" />
+      </template>
+      <template v-if="template" #actions>
+        <el-button
+          v-if="template.status === 'published' && canWrite"
+          type="primary"
+          :loading="store.loading"
+          @click="startApproval"
+        >
+          发起审批
+        </el-button>
+        <el-button
+          v-if="canManageTemplates"
+          data-testid="template-detail-edit-button"
+          @click="editTemplate"
+        >
+          编辑模板
+        </el-button>
+        <el-button
+          v-if="canManageTemplates && template.status === 'published'"
+          :loading="archiving"
+          data-testid="template-detail-archive-button"
+          @click="handleArchive"
+        >
+          停用
+        </el-button>
+        <el-button
+          v-if="canManageTemplates && template.status === 'archived'"
+          :loading="archiving"
+          data-testid="template-detail-unarchive-button"
+          @click="handleUnarchive"
+        >
+          启用
+        </el-button>
+      </template>
+    </PageHeader>
 
     <el-alert
       v-if="store.error"
@@ -76,7 +90,7 @@
                 text
                 size="small"
                 data-testid="template-detail-category-edit-button"
-                style="margin-left: 8px"
+                class="ms-ml-8"
                 @click="beginEditCategory"
               >
                 编辑
@@ -87,7 +101,7 @@
                 v-model="categoryDraft"
                 size="small"
                 placeholder="分组标识，用于模板中心筛选，留空表示未分组"
-                style="width: 240px; margin-right: 8px"
+                class="ms-w-240 ms-mr-8"
                 maxlength="64"
                 data-testid="template-detail-category-input"
                 @keyup.enter="saveCategory"
@@ -130,7 +144,7 @@
                 text
                 size="small"
                 data-testid="template-detail-visibility-edit-button"
-                style="margin-left: 8px"
+                class="ms-ml-8"
                 @click="beginEditVisibility"
               >
                 编辑
@@ -140,7 +154,7 @@
               <el-select
                 v-model="visibilityTypeDraft"
                 size="small"
-                style="width: 120px; margin-right: 8px"
+                class="ms-w-120 ms-mr-8"
                 data-testid="template-detail-visibility-type"
               >
                 <el-option label="全员" value="all" />
@@ -152,7 +166,7 @@
                 v-model="visibilityIdsDraft"
                 size="small"
                 placeholder="逗号分隔 id，如 dept-finance, role-manager"
-                style="width: 320px; margin-right: 8px"
+                class="ms-w-320 ms-mr-8"
                 :disabled="visibilityTypeDraft === 'all'"
                 data-testid="template-detail-visibility-ids-input"
                 @keyup.enter="saveVisibility"
@@ -201,7 +215,7 @@
                 text
                 size="small"
                 data-testid="template-detail-sla-edit-button"
-                style="margin-left: 8px"
+                class="ms-ml-8"
                 @click="beginEditSla"
               >
                 编辑
@@ -213,7 +227,7 @@
                 :min="1"
                 :max="8760"
                 size="small"
-                style="width: 160px; margin-right: 8px"
+                class="ms-w-160 ms-mr-8"
                 data-testid="template-detail-sla-input"
                 placeholder="留空清除"
                 :controls="false"
@@ -249,7 +263,7 @@
           <!-- Form schema section -->
           <div class="template-detail__section">
             <h2>表单字段</h2>
-            <el-table :data="template.formSchema.fields" style="width: 100%" max-height="400" stripe>
+            <el-table :data="template.formSchema.fields" class="ms-w-100pct" max-height="400" stripe>
               <el-table-column prop="label" label="字段名" min-width="160" />
               <el-table-column label="类型" width="120">
                 <template #default="{ row }">
@@ -288,7 +302,7 @@
               description="暂无字段显隐规则"
               :image-size="60"
             />
-            <el-table v-else :data="visibilityRuleSummaries" style="width: 100%" stripe>
+            <el-table v-else :data="visibilityRuleSummaries" class="ms-w-100pct" stripe>
               <el-table-column label="字段" min-width="160">
                 <template #default="{ row }">
                   {{ row.field.label }}
@@ -345,26 +359,84 @@
             </el-timeline>
             <el-empty v-else description="暂无审批节点" :image-size="60" />
           </div>
+
+          <!-- B3-09 (模板治理 — 版本历史): admin-only (the endpoint sits behind the same
+               template-admin guard as publish/archive; non-admins never fetch, so no 403 noise).
+               Summary rows only — full schema/graph of one version stays an on-demand detail
+               fetch, not part of this list. -->
+          <div
+            v-if="canManageTemplates"
+            class="template-detail__section"
+            data-testid="template-detail-version-history"
+          >
+            <h2>版本历史</h2>
+            <el-alert
+              v-if="versionHistoryError"
+              type="warning"
+              :title="versionHistoryError"
+              :closable="false"
+            />
+            <el-table
+              v-else
+              :data="versionHistory"
+              class="ms-w-100pct"
+              max-height="320"
+              stripe
+            >
+              <el-table-column label="版本" width="90">
+                <template #default="{ row }">v{{ row.version }}</template>
+              </el-table-column>
+              <el-table-column label="状态" width="140">
+                <template #default="{ row }">
+                  <el-tag size="small" :type="versionStatusTagType(row.status)">
+                    {{ versionStatusLabel(row.status) }}
+                  </el-tag>
+                  <el-tag
+                    v-if="row.publishedDefinitionId"
+                    size="small"
+                    type="success"
+                    class="template-detail__version-active-tag"
+                  >
+                    当前生效
+                  </el-tag>
+                </template>
+              </el-table-column>
+              <el-table-column label="发布说明" min-width="240">
+                <template #default="{ row }">
+                  <span v-if="row.publishNote" class="template-detail__version-note">{{ row.publishNote }}</span>
+                  <span v-else>-</span>
+                </template>
+              </el-table-column>
+              <el-table-column label="更新时间" width="180">
+                <template #default="{ row }">{{ formatDate(row.updatedAt) }}</template>
+              </el-table-column>
+              <template #empty>
+                <el-empty description="暂无版本记录" :image-size="60" />
+              </template>
+            </el-table>
+          </div>
         </div>
       </div>
 
       <el-empty v-else-if="!store.loading" description="未找到模板" />
     </div>
-  </section>
+  </PageShell>
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
+import PageShell from '../../components/layout/PageShell.vue'
+import PageHeader from '../../components/layout/PageHeader.vue'
+import StatusTag from '../../components/status/StatusTag.vue'
 import { useRoute, useRouter } from 'vue-router'
 import {
-  ArrowLeft,
   Flag,
   UserFilled,
   Message,
   QuestionFilled,
   CircleCheckFilled,
 } from '@element-plus/icons-vue'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import type {
   ApprovalNodeType,
   FormFieldType,
@@ -372,11 +444,22 @@ import type {
   EmptyAssigneePolicy,
   ApprovalTemplateVisibilityScope,
   ApprovalTemplateVisibilityType,
+  ApprovalTemplateVersionSummaryDTO,
+  ApprovalTemplateStatus,
 } from '../../types/approval'
 import { useApprovalTemplateStore } from '../../approvals/templateStore'
 import { useApprovalPermissions } from '../../approvals/permissions'
-import { updateTemplateCategory, updateTemplateSlaHours, updateTemplateVisibilityScope } from '../../approvals/api'
+import {
+  updateTemplateCategory,
+  updateTemplateSlaHours,
+  updateTemplateVisibilityScope,
+  getTemplateUsage,
+  archiveTemplate,
+  unarchiveTemplate,
+  listTemplateVersions,
+} from '../../approvals/api'
 import { describeFieldVisibilityRule } from '../../approvals/fieldVisibility'
+import { templateArchiveConfirmMessage, templateUnarchiveConfirmMessage } from '../../approvals/templateArchiveConfirm'
 
 const route = useRoute()
 const router = useRouter()
@@ -384,6 +467,9 @@ const store = useApprovalTemplateStore()
 const { canWrite, canManageTemplates } = useApprovalPermissions()
 
 const template = computed(() => store.activeTemplate)
+// PageHeader requires a non-optional title; before the template loads (or on error) fall back to
+// generic copy — the original hand-rolled `<h1 v-if="template">` rendered nothing at all here.
+const headerTitle = computed(() => template.value?.name ?? '审批模板')
 const visibilityRuleSummaries = computed(() => {
   const currentTemplate = template.value
   if (!currentTemplate) return []
@@ -407,6 +493,8 @@ const visibilitySaving = ref(false)
 const editingSla = ref(false)
 const slaDraft = ref<number | null>(null)
 const slaSaving = ref(false)
+// B3-08 — 停用/启用 state.
+const archiving = ref(false)
 
 function beginEditSla() {
   if (!template.value) return
@@ -534,24 +622,6 @@ async function saveVisibility() {
   }
 }
 
-function statusTagType(status: string) {
-  const map: Record<string, string> = {
-    published: 'success',
-    draft: 'warning',
-    archived: 'info',
-  }
-  return map[status] ?? ''
-}
-
-function statusLabel(status: string) {
-  const map: Record<string, string> = {
-    published: '已发布',
-    draft: '草稿',
-    archived: '已归档',
-  }
-  return map[status] ?? status
-}
-
 function fieldTypeLabel(type: FormFieldType) {
   const map: Record<FormFieldType, string> = {
     text: '文本',
@@ -652,6 +722,107 @@ function editTemplate() {
   router.push({ path: `/approval-templates/${template.value.id}/edit` })
 }
 
+// B3-08 (模板治理 — 停用): fetches the usage/blast-radius indicator FIRST (best-effort — a failed
+// usage read still shows the confirm, just without the instance-count line) so the confirm dialog
+// can state it, mirroring the ruleStats / DelegationSettingsView.disable() precedent.
+async function handleArchive() {
+  if (!template.value || archiving.value) return
+  const current = template.value
+  let usage
+  try {
+    usage = await getTemplateUsage(current.id)
+  } catch {
+    usage = undefined
+  }
+  try {
+    await ElMessageBox.confirm(
+      templateArchiveConfirmMessage(current.name, usage),
+      '停用模板',
+      { confirmButtonText: '停用', cancelButtonText: '取消', type: 'warning' },
+    )
+  } catch {
+    return
+  }
+  archiving.value = true
+  try {
+    const updated = await archiveTemplate(current.id)
+    store.activeTemplate = updated
+    ElMessage.success('已停用模板')
+  } catch (e: any) {
+    ElMessage.error(e?.message ?? '停用模板失败')
+  } finally {
+    archiving.value = false
+  }
+}
+
+async function handleUnarchive() {
+  if (!template.value || archiving.value) return
+  const current = template.value
+  try {
+    await ElMessageBox.confirm(
+      templateUnarchiveConfirmMessage(current.name),
+      '启用模板',
+      { confirmButtonText: '启用', cancelButtonText: '取消', type: 'info' },
+    )
+  } catch {
+    return
+  }
+  archiving.value = true
+  try {
+    const updated = await unarchiveTemplate(current.id)
+    store.activeTemplate = updated
+    ElMessage.success('已启用模板')
+  } catch (e: any) {
+    ElMessage.error(e?.message ?? '启用模板失败')
+  } finally {
+    archiving.value = false
+  }
+}
+
+// B3-09 (模板治理 — 版本历史) — admin-only fetch. `canManageTemplates` resolves asynchronously
+// (refreshApprovalAccess), so a mount-time check would race a slow permission load to a permanently
+// empty section; instead watch it and fetch ONCE when it turns true. Non-admins never fire the
+// request (the endpoint would 403 them anyway).
+const versionHistory = ref<ApprovalTemplateVersionSummaryDTO[]>([])
+const versionHistoryError = ref('')
+let versionHistoryFetched = false
+
+const VERSION_STATUS_LABELS: Record<ApprovalTemplateStatus, string> = {
+  draft: '草稿',
+  published: '已发布',
+  archived: '已停用',
+}
+
+function versionStatusLabel(status: ApprovalTemplateStatus): string {
+  return VERSION_STATUS_LABELS[status] ?? status
+}
+
+function versionStatusTagType(status: ApprovalTemplateStatus): 'primary' | 'info' | 'warning' {
+  if (status === 'published') return 'primary'
+  if (status === 'archived') return 'warning'
+  return 'info'
+}
+
+async function loadVersionHistory() {
+  if (versionHistoryFetched) return
+  versionHistoryFetched = true
+  try {
+    versionHistory.value = await listTemplateVersions(route.params.id as string)
+    versionHistoryError.value = ''
+  } catch (e: any) {
+    // Load failure degrades to an inline warning — never blocks the rest of the detail page.
+    versionHistoryError.value = e?.message ?? '版本历史加载失败'
+  }
+}
+
+watch(
+  canManageTemplates,
+  (isAdmin) => {
+    if (isAdmin) void loadVersionHistory()
+  },
+  { immediate: true },
+)
+
 onMounted(() => {
   const id = route.params.id as string
   store.loadTemplate(id)
@@ -659,26 +830,6 @@ onMounted(() => {
 </script>
 
 <style scoped>
-.template-detail {
-  max-width: 1000px;
-  margin: 0 auto;
-  padding: 24px;
-}
-
-.template-detail__header {
-  display: flex;
-  align-items: center;
-  gap: 16px;
-  margin-bottom: 20px;
-}
-
-.template-detail__header h1 {
-  font-size: 20px;
-  font-weight: 600;
-  margin: 0;
-  flex: 1;
-}
-
 .template-detail__error {
   margin-bottom: 16px;
 }
@@ -692,7 +843,7 @@ onMounted(() => {
 }
 
 .template-detail__info p {
-  color: var(--el-text-color-regular, #606266);
+  color: var(--el-text-color-regular);
   margin: 0 0 12px;
 }
 
@@ -700,7 +851,7 @@ onMounted(() => {
   display: flex;
   gap: 24px;
   font-size: 13px;
-  color: var(--el-text-color-secondary, #909399);
+  color: var(--el-text-color-secondary);
   flex-wrap: wrap;
 }
 
@@ -715,16 +866,16 @@ onMounted(() => {
 }
 
 .template-detail__category-label {
-  color: var(--el-text-color-regular, #606266);
+  color: var(--el-text-color-regular);
   margin-right: 4px;
 }
 
 .template-detail__category-empty {
-  color: var(--el-text-color-secondary, #909399);
+  color: var(--el-text-color-secondary);
 }
 
 .template-detail__visibility-ids {
-  color: var(--el-text-color-secondary, #909399);
+  color: var(--el-text-color-secondary);
 }
 
 .template-detail__content {
@@ -734,8 +885,8 @@ onMounted(() => {
 }
 
 .template-detail__section {
-  background: #fff;
-  border: 1px solid var(--el-border-color-lighter, #e4e7ed);
+  background: var(--ms-bg-card);
+  border: 1px solid var(--el-border-color-lighter);
   border-radius: 8px;
   padding: 20px;
 }
@@ -755,12 +906,22 @@ onMounted(() => {
 
 .template-detail__node-assignee {
   font-size: 12px;
-  color: var(--el-text-color-regular, #606266);
+  color: var(--el-text-color-regular);
 }
 
 .template-detail__node-mode,
 .template-detail__node-policy {
   margin-left: 4px;
+}
+
+/* B3-09 — version-history rows */
+.template-detail__version-active-tag {
+  margin-left: 8px;
+}
+
+.template-detail__version-note {
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 
 @media (max-width: 768px) {

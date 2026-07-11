@@ -20,8 +20,16 @@ import {
 } from '../../src/services/ApprovalCardDeliveryAction'
 import {
   insertDingTalkApprovalCardDelivery,
+  markDingTalkApprovalCardDeliverySendFailed,
+  markDingTalkApprovalCardDeliverySendOutcomeUnknown,
   markDingTalkApprovalCardDeliverySent,
 } from '../../src/integrations/dingtalk/approval-card-deliveries'
+import { normalizeStoredSecretValue } from '../../src/security/encrypted-secrets'
+import {
+  generateApprovalCardLinkSecret,
+  resolveApprovalCardLinkSecret,
+} from '../../src/integrations/dingtalk/approval-card-config'
+import { updateDirectoryIntegration } from '../../src/directory/directory-sync'
 import { createHmac } from 'crypto'
 
 const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
@@ -121,8 +129,8 @@ describeIfDatabase('A-4 card-delivery wrapper (real DB)', () => {
     const instanceId = await newInstance()
     const deliveryId = await newSentDelivery(instanceId)
 
-    expect(verifyApprovalCardLinkToken(deliveryId, tokenFor(deliveryId))).toBe(true)
-    expect(verifyApprovalCardLinkToken(deliveryId, 'f'.repeat(32))).toBe(false)
+    expect(await verifyApprovalCardLinkToken(deliveryId, tokenFor(deliveryId))).toBe(true)
+    expect(await verifyApprovalCardLinkToken(deliveryId, 'f'.repeat(32))).toBe(false)
 
     expect((await getApprovalCardDeliverySummary({ query: q }, { deliveryId, token: 'f'.repeat(32), viewerUserId: APPROVER })).status).toBe('not_found')
     const ghost = randomUUID()
@@ -137,6 +145,147 @@ describeIfDatabase('A-4 card-delivery wrapper (real DB)', () => {
     }
   })
 
+  test('CFG-1 stored-secret fallback: env unset → wrapper verifies a token signed with the stored (encrypted) secret', async () => {
+    const instanceId = await newInstance()
+    const deliveryId = await newSentDelivery(instanceId)
+    const storedSecret = `cdw-stored-secret-${TS}`
+    const prev = process.env.APPROVAL_CARD_LINK_SECRET
+    delete process.env.APPROVAL_CARD_LINK_SECRET
+    // Freshest updated_at (now()) so the resolver's "active first, most recent" pick lands on this
+    // row in the shared plugin-tests database; removed in finally (shared-DB fixture discipline).
+    // Deliberately NOT far-future: if a crash ever skips the finally, a now() row cannot
+    // permanently shadow later-updated real integrations.
+    const inserted = await q(
+      `INSERT INTO directory_integrations (name, provider, status, corp_id, config, updated_at)
+       VALUES ($1, 'dingtalk', 'active', $2, $3::jsonb, now())
+       RETURNING id`,
+      [`cdw-card-config-${TS}`, `corp_cdw_${TS}`, JSON.stringify({ approvalCardLinkSecret: normalizeStoredSecretValue(storedSecret) })],
+    )
+    const integrationId = (inserted.rows[0] as { id: string }).id
+    try {
+      const storedToken = createHmac('sha256', storedSecret).update(deliveryId).digest('hex').slice(0, 32)
+      // Same-source invariant at the DB level: sign with the stored secret, verify through the wrapper.
+      expect(await verifyApprovalCardLinkToken(deliveryId, storedToken, q)).toBe(true)
+      expect((await getApprovalCardDeliverySummary({ query: q }, { deliveryId, token: storedToken, viewerUserId: APPROVER })).status).toBe('ok')
+      // The env-signed token no longer matches — stored source is authoritative when env is unset.
+      expect(await verifyApprovalCardLinkToken(deliveryId, tokenFor(deliveryId), q)).toBe(false)
+    } finally {
+      await q('DELETE FROM directory_integrations WHERE id = $1', [integrationId]).catch(() => {})
+      if (prev === undefined) delete process.env.APPROVAL_CARD_LINK_SECRET
+      else process.env.APPROVAL_CARD_LINK_SECRET = prev
+    }
+  })
+
+  test('CFG-2 closed loop: generate → resolver → sign → wrapper verifies; generic integration save does NOT wipe the secret', async () => {
+    const instanceId = await newInstance()
+    const deliveryId = await newSentDelivery(instanceId)
+    const prev = process.env.APPROVAL_CARD_LINK_SECRET
+    delete process.env.APPROVAL_CARD_LINK_SECRET
+    const fixtureName = `cdw-cfg2-${TS}`
+    const inserted = await q(
+      `INSERT INTO directory_integrations (name, provider, status, corp_id, config, updated_at)
+       VALUES ($1, 'dingtalk', 'active', $2, $3::jsonb, now())
+       RETURNING id`,
+      [fixtureName, `corp_cfg2_${TS}`, JSON.stringify({ appKey: 'cfg2-key', appSecret: normalizeStoredSecretValue('cfg2-secret') })],
+    )
+    const integrationId = (inserted.rows[0] as { id: string }).id
+    try {
+      // Generate server-side: response carries presence only, never the value.
+      const status = await generateApprovalCardLinkSecret(integrationId, q)
+      expect(status?.linkSecret).toMatchObject({ configured: true, source: 'stored', valuePrinted: false })
+      expect(JSON.stringify(status)).not.toMatch(/[0-9a-f]{64}/)
+
+      // Same-source closed loop: what the resolver yields signs a token the wrapper verifies.
+      const secret = await resolveApprovalCardLinkSecret(q)
+      expect(secret).toMatch(/^[0-9a-f]{64}$/)
+      const token = createHmac('sha256', secret).update(deliveryId).digest('hex').slice(0, 32)
+      expect(await verifyApprovalCardLinkToken(deliveryId, token, q)).toBe(true)
+      expect((await getApprovalCardDeliverySummary({ query: q }, { deliveryId, token, viewerUserId: APPROVER })).status).toBe('ok')
+
+      // WIPE REGRESSION (carry-through proof): the generic integration-form save rebuilds the
+      // config JSONB from a whitelist — without carry-through it would silently drop the secret
+      // and every in-flight card link would die. RED-before: remove the carry-through in
+      // updateDirectoryIntegration and this assertion fails.
+      const updatedSummary = await updateDirectoryIntegration(integrationId, {
+        name: fixtureName,
+        corpId: `corp_cfg2_${TS}`,
+        appKey: 'cfg2-key',
+      } as never)
+      expect(updatedSummary?.config.approvalCardLinkSecretConfigured).toBe(true)
+      expect(await resolveApprovalCardLinkSecret(q)).toBe(secret)
+      expect(await verifyApprovalCardLinkToken(deliveryId, token, q)).toBe(true)
+    } finally {
+      await q('DELETE FROM directory_integrations WHERE id = $1', [integrationId]).catch(() => {})
+      if (prev === undefined) delete process.env.APPROVAL_CARD_LINK_SECRET
+      else process.env.APPROVAL_CARD_LINK_SECRET = prev
+    }
+  })
+
+  test('DT-R2 per-corp verify: a token signed under corp A fail-closes against a delivery pinned to corp B; the pinned corp verifies; env override still wins', async () => {
+    const instanceId = await newInstance()
+    const prev = process.env.APPROVAL_CARD_LINK_SECRET
+    delete process.env.APPROVAL_CARD_LINK_SECRET
+    const secretA = `cdw-r2-corp-a-secret-${TS}`
+    const secretB = `cdw-r2-corp-b-secret-${TS}`
+    const mkIntegration = async (label: string, secret: string, updatedAtSql: string): Promise<string> => {
+      const inserted = await q(
+        `INSERT INTO directory_integrations (name, provider, status, corp_id, config, updated_at)
+         VALUES ($1, 'dingtalk', 'active', $2, $3::jsonb, ${updatedAtSql})
+         RETURNING id`,
+        [`cdw-r2-${label}-${TS}`, `corp_cdw_r2_${label}_${TS}`, JSON.stringify({ approvalCardLinkSecret: normalizeStoredSecretValue(secret) })],
+      )
+      return (inserted.rows[0] as { id: string }).id
+    }
+    // Anti-shadowing: corp A is deliberately the FRESHEST integration, so the legacy LIMIT-1
+    // global pick (active-first, updated_at DESC) lands on corp A — if verify ever fell back to
+    // that pick instead of the DELIVERY row's pinned corp B, corp A's token would verify and
+    // corp B's would fail, turning every assertion below red. now()-1min on corp B keeps both
+    // rows behind any real integration if a crash skips the finally.
+    const corpA = await mkIntegration('a', secretA, `now()`)
+    const corpB = await mkIntegration('b', secretB, `now() - interval '1 minute'`)
+    try {
+      const row = await insertDingTalkApprovalCardDelivery(q, {
+        instanceId,
+        nodeKey: 'approval_1',
+        recipientUserId: APPROVER,
+        recipientDingTalkUserId: `dd_${APPROVER}`,
+        deliveryKind: 'work_notice_action_card',
+        integrationId: corpB,
+      })
+      await markDingTalkApprovalCardDeliverySent(q, row.id, 'task_r2')
+      expect(row.integration_id).toBe(corpB)
+
+      const signWith = (secret: string) => createHmac('sha256', secret).update(row.id).digest('hex').slice(0, 32)
+
+      // Fail-closed cross-corp: corp A's secret must never open a corp-B delivery.
+      expect(await verifyApprovalCardLinkToken(row.id, signWith(secretA), q, corpB)).toBe(false)
+      expect((await getApprovalCardDeliverySummary({ query: q }, { deliveryId: row.id, token: signWith(secretA), viewerUserId: APPROVER })).status).toBe('not_found')
+      const crossCorpAction = await executeApprovalActionFromCardDelivery(
+        { query: q, approvals },
+        { deliveryId: row.id, token: signWith(secretA), decision: 'approve', comment: '越权', actor: approverActor },
+      )
+      expect(crossCorpAction.status).toBe('not_found')
+
+      // Same-source: the DELIVERY row's own integration secret verifies through the real wrapper.
+      expect(await verifyApprovalCardLinkToken(row.id, signWith(secretB), q, corpB)).toBe(true)
+      expect((await getApprovalCardDeliverySummary({ query: q }, { deliveryId: row.id, token: signWith(secretB), viewerUserId: APPROVER })).status).toBe('ok')
+
+      // Env override is global and unchanged: with env set, the env-signed token wins even on a pinned row.
+      process.env.APPROVAL_CARD_LINK_SECRET = SECRET
+      expect((await getApprovalCardDeliverySummary({ query: q }, { deliveryId: row.id, token: tokenFor(row.id), viewerUserId: APPROVER })).status).toBe('ok')
+      delete process.env.APPROVAL_CARD_LINK_SECRET
+
+      // A pinned integration with NO stored secret fail-closes (no LIMIT-1 fallback, no cross-corp rescue).
+      await q(`UPDATE directory_integrations SET config = COALESCE(config, '{}'::jsonb) - 'approvalCardLinkSecret' WHERE id = $1`, [corpB])
+      expect(await verifyApprovalCardLinkToken(row.id, signWith(secretB), q, corpB)).toBe(false)
+      expect(await verifyApprovalCardLinkToken(row.id, signWith(secretA), q, corpB)).toBe(false)
+    } finally {
+      await q('DELETE FROM directory_integrations WHERE id = ANY($1::uuid[])', [[corpA, corpB]]).catch(() => {})
+      if (prev === undefined) delete process.env.APPROVAL_CARD_LINK_SECRET
+      else process.env.APPROVAL_CARD_LINK_SECRET = prev
+    }
+  })
+
   test('undelivered card (send_status=pending) is stale — never actionable', async () => {
     const instanceId = await newInstance()
     const row = await insertDingTalkApprovalCardDelivery(q, {
@@ -147,6 +296,72 @@ describeIfDatabase('A-4 card-delivery wrapper (real DB)', () => {
       { deliveryId: row.id, token: tokenFor(row.id), decision: 'approve', actor: approverActor },
     )
     expect(outcome.status).toBe('stale')
+  })
+
+  test('PR #4046 Phase B: send_status=failed stays stale — the possibly-delivered widening is EXACTLY (sent, outcome_unknown), nothing else', async () => {
+    const instanceId = await newInstance()
+    const row = await insertDingTalkApprovalCardDelivery(q, {
+      instanceId, nodeKey: 'approval_1', recipientUserId: APPROVER, recipientDingTalkUserId: `dd_${APPROVER}`, deliveryKind: 'work_notice_action_card',
+    })
+    await markDingTalkApprovalCardDeliverySendFailed(q, row.id, 'ding: definite rejection')
+    const summary = await getApprovalCardDeliverySummary({ query: q }, { deliveryId: row.id, token: tokenFor(row.id), viewerUserId: APPROVER })
+    expect(summary.status).toBe('ok')
+    if (summary.status === 'ok') expect(summary.summary.actionable).toBe(false)
+    const outcome = await executeApprovalActionFromCardDelivery(
+      { query: q, approvals },
+      { deliveryId: row.id, token: tokenFor(row.id), decision: 'approve', actor: approverActor },
+    )
+    expect(outcome.status).toBe('stale')
+    // and the claim SQL is equally closed: the card was never claimed
+    const card = await q(`SELECT card_state, send_status FROM dingtalk_approval_card_deliveries WHERE id = $1`, [row.id])
+    expect(card.rows[0]).toMatchObject({ card_state: 'sent', send_status: 'failed' })
+  })
+
+  test('PR #4046 Phase B: outcome_unknown + valid HMAC token IS actionable — the token proves delivery; approve proceeds and claims the card', async () => {
+    // A card whose send outcome the client could not observe MAY have been delivered — and a
+    // valid deep-link token only ever existed inside the delivered card, so the callback is the
+    // delivery proof. The ledger's send-time uncertainty must not make the card inoperable.
+    const instanceId = await newInstance()
+    const row = await insertDingTalkApprovalCardDelivery(q, {
+      instanceId, nodeKey: 'approval_1', recipientUserId: APPROVER, recipientDingTalkUserId: `dd_${APPROVER}`, deliveryKind: 'work_notice_action_card',
+    })
+    await markDingTalkApprovalCardDeliverySendOutcomeUnknown(q, row.id, 'fetch failed (response lost)')
+
+    const summary = await getApprovalCardDeliverySummary({ query: q }, { deliveryId: row.id, token: tokenFor(row.id), viewerUserId: APPROVER })
+    expect(summary.status).toBe('ok')
+    if (summary.status === 'ok') {
+      expect(summary.summary.sendStatus).toBe('outcome_unknown')
+      expect(summary.summary.actionable).toBe(true)
+    }
+
+    const outcome = await executeApprovalActionFromCardDelivery(
+      { query: q, approvals },
+      { deliveryId: row.id, token: tokenFor(row.id), decision: 'approve', comment: '同意', actor: approverActor },
+    )
+    expect(outcome.status).toBe('ok')
+    if (outcome.status === 'ok') {
+      expect(outcome.summary.cardState).toBe('acted')
+      expect(outcome.summary.actedAction).toBe('approve')
+      expect(outcome.summary.approval.status).toBe('approved')
+      // the send-time record keeps its truth: uncertainty at send time is history, acted is the proof of delivery
+      expect(outcome.summary.sendStatus).toBe('outcome_unknown')
+    }
+
+    // engine untouched beyond the one approve; channel attribution intact (guards NOT restructured)
+    const record = await q(
+      `SELECT metadata FROM approval_records WHERE instance_id = $1 AND action = 'approve' ORDER BY created_at DESC LIMIT 1`,
+      [instanceId],
+    )
+    const metadata = (record.rows[0] as { metadata: Record<string, unknown> }).metadata
+    expect(metadata.channel).toBe('dingtalk_card')
+    expect(metadata.cardDeliveryId).toBe(row.id)
+
+    // an INVALID token against the same outcome_unknown delivery is still not_found — HMAC stays the authority
+    const forged = await executeApprovalActionFromCardDelivery(
+      { query: q, approvals },
+      { deliveryId: row.id, token: 'f'.repeat(32), decision: 'approve', actor: approverActor },
+    )
+    expect(forged.status).toBe('not_found')
   })
 
   test('approve: engine gates apply, channel attribution lands on approval_records, card claims acted', async () => {

@@ -141,6 +141,9 @@ describe('A6-3-4/W3-2b parallel_branch runs readability', () => {
     expect(childRows[1]?.textContent ?? '').toContain('parallel branch tail')
     expect(childRows[1]?.textContent ?? '').toContain('#1')
     expect(c.textContent ?? '').toContain('skipped')
-    expect(c.querySelectorAll('.automation-runs__badge--skipped').length).toBeGreaterThanOrEqual(2)
+    // UF-3: step-status badges are now <StatusTag domain="automationRun"> (utils/statusDomains.ts),
+    // not a per-status `.automation-runs__badge--<status>` CSS class — select by the tag's own
+    // `data-status` attribute instead (still present: StatusTag always emits it).
+    expect(c.querySelectorAll('[data-status="skipped"]').length).toBeGreaterThanOrEqual(2)
   })
 })

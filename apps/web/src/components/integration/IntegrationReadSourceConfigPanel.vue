@@ -9,6 +9,53 @@
       <div class="integration-read-source__form" data-testid="read-source-form">
         <h3>新建 / 试配读取源</h3>
 
+        <!-- TC-1 (design-lock docs/development/integration-connector-template-catalog-design-lock-20260708.md,
+             #3879): an ADD-ONLY alternative entry point — collapsed by default, so the pre-existing
+             wizard/flat-form default surface and every existing assertion about it are untouched.
+             Selecting a card seeds `draft.mode` (the exact field IntegrationReadSourceWizard.vue's own
+             `selectMode()` sets) and forces the view back to the wizard, then falls through to the
+             SAME step-1/2/3/4 flow — no new state, no new path. -->
+        <IntegrationTemplateCatalogPicker
+          seeds-wizard="read-source"
+          testid-prefix="rsc"
+          @select="applyReadSourceTemplate"
+        />
+
+        <!-- IU-3 (design-lock docs/development/integration-iu3-read-source-wizard-design-lock-20260707.md):
+             the wizard is the DEFAULT surface; this toggle switches to the untouched full flat form
+             below (折叠≠删除 — expert mode is retained, never removed). Native <button>, not an
+             el-switch/el-radio-group: those Element Plus controls only toggle via their OWN internal
+             JS, which is a no-op when EP isn't globally registered (e.g. this file's existing spec's
+             bare `createApp()`) — a native button works identically everywhere. -->
+        <div class="integration-read-source__mode-toggle">
+          <button
+            type="button"
+            class="integration-read-source__mode-toggle-button"
+            data-testid="rsc-mode-toggle"
+            @click="toggleViewMode"
+          >
+            <el-icon><component :is="viewMode === 'wizard' ? Setting : MagicStick" /></el-icon>
+            {{ viewMode === 'wizard' ? bi('专家表单', 'Expert form') : bi('返回向导', 'Back to wizard') }}
+          </button>
+        </div>
+
+        <IntegrationReadSourceWizard
+          v-if="viewMode === 'wizard'"
+          :draft="draft"
+          :systems="systems"
+          :probing="probing"
+          :saving="saving"
+          :action-error="actionError"
+          :probe-evidence="probeEvidence"
+          :save-result="saveResult"
+          v-model:bounded-smoke="boundedSmoke"
+          v-model:probe-key="probeKey"
+          @run-probe="runProbe"
+          @save-version="saveVersion"
+          @approve-saved="approveSavedResult"
+        />
+
+        <template v-else>
         <label class="integration-read-source__field">
           <span>外部系统(systemId)</span>
           <select v-model="draft.systemId" data-testid="rsc-system" @change="onSystemChange">
@@ -20,7 +67,9 @@
         </label>
 
         <label class="integration-read-source__field">
-          <span>requiredKind(随所选系统)</span>
+          <el-tooltip :content="fieldHint('readSource.requiredKind')" placement="top" data-testid="rsc-hint-required-kind">
+            <span>requiredKind(随所选系统)</span>
+          </el-tooltip>
           <input :value="draft.requiredKind" data-testid="rsc-required-kind" readonly placeholder="选择系统后自动填充" />
         </label>
 
@@ -30,14 +79,18 @@
         </label>
 
         <label class="integration-read-source__field">
-          <span>mode(四种已验证读取模式)</span>
+          <el-tooltip :content="fieldHint('readSource.mode')" placement="top" data-testid="rsc-hint-mode">
+            <span>mode(四种已验证读取模式)</span>
+          </el-tooltip>
           <select v-model="draft.mode" data-testid="rsc-mode">
             <option v-for="mode in READ_SOURCE_MODES" :key="mode" :value="mode">{{ mode }}</option>
           </select>
         </label>
 
         <label class="integration-read-source__field">
-          <span>readPath(仅相对路径;绝对 URL、%、\、.. 会被拒绝)</span>
+          <el-tooltip :content="fieldHint('readSource.readPath')" placement="top" data-testid="rsc-hint-read-path">
+            <span>readPath(仅相对路径;绝对 URL、%、\、.. 会被拒绝)</span>
+          </el-tooltip>
           <input v-model="draft.readPath" data-testid="rsc-read-path" placeholder="/K3API/Material/GetDetail" />
         </label>
 
@@ -60,11 +113,15 @@
 
         <template v-if="showKeyField">
           <label class="integration-read-source__field">
-            <span>keyField{{ keyFieldRequired ? '(必填)' : '(可选)' }}</span>
+            <el-tooltip :content="fieldHint('readSource.keyField')" placement="top" data-testid="rsc-hint-key-field">
+              <span>keyField{{ keyFieldRequired ? '(必填)' : '(可选)' }}</span>
+            </el-tooltip>
             <input v-model="draft.keyField" data-testid="rsc-key-field" placeholder="FNumber" />
           </label>
           <label class="integration-read-source__field">
-            <span>keyEncoding(可选)</span>
+            <el-tooltip :content="fieldHint('readSource.keyEncoding')" placement="top" data-testid="rsc-hint-key-encoding">
+              <span>keyEncoding(可选)</span>
+            </el-tooltip>
             <select v-model="draft.keyEncoding" data-testid="rsc-key-encoding">
               <option value="">(不指定)</option>
               <option v-for="encoding in READ_SOURCE_KEY_ENCODINGS" :key="encoding" :value="encoding">{{ encoding }}</option>
@@ -74,7 +131,9 @@
 
         <template v-if="draft.mode === 'resolver_lookup'">
           <label class="integration-read-source__field">
-            <span>resolverRule(必填)</span>
+            <el-tooltip :content="fieldHint('readSource.resolverRule')" placement="top" data-testid="rsc-hint-resolver-rule">
+              <span>resolverRule(必填)</span>
+            </el-tooltip>
             <select v-model="draft.resolverRule" data-testid="rsc-resolver-rule">
               <option value="">选择解析规则…</option>
               <option value="exactly_one">exactly_one(唯一命中)</option>
@@ -84,11 +143,15 @@
           </label>
           <!-- first_when_sorted: sort field + direction. exactly_one shows none of these three. -->
           <label v-if="draft.resolverRule === 'first_when_sorted'" class="integration-read-source__field">
-            <span>multiplicityRuleField(排序字段,必填)</span>
+            <el-tooltip :content="fieldHint('readSource.resolverSortField')" placement="top" data-testid="rsc-hint-resolver-sort-field">
+              <span>multiplicityRuleField(排序字段,必填)</span>
+            </el-tooltip>
             <input v-model="draft.multiplicityRuleField" data-testid="rsc-resolver-sort-field" placeholder="FVersion" />
           </label>
           <label v-if="draft.resolverRule === 'first_when_sorted'" class="integration-read-source__field">
-            <span>resolverSortDirection(必填)</span>
+            <el-tooltip :content="fieldHint('readSource.resolverSortDirection')" placement="top" data-testid="rsc-hint-resolver-sort-direction">
+              <span>resolverSortDirection(必填)</span>
+            </el-tooltip>
             <select v-model="draft.resolverSortDirection" data-testid="rsc-resolver-sort-direction">
               <option value="">选择方向…</option>
               <option value="asc">asc(升序取首)</option>
@@ -97,34 +160,46 @@
           </label>
           <!-- field_equals: discriminator field + bounded token value. -->
           <label v-if="draft.resolverRule === 'field_equals'" class="integration-read-source__field">
-            <span>multiplicityRuleField(判别字段,必填)</span>
+            <el-tooltip :content="fieldHint('readSource.resolverDiscriminatorField')" placement="top" data-testid="rsc-hint-resolver-discriminator-field">
+              <span>multiplicityRuleField(判别字段,必填)</span>
+            </el-tooltip>
             <input v-model="draft.multiplicityRuleField" data-testid="rsc-resolver-discriminator-field" placeholder="FIsCurrent" />
           </label>
           <label v-if="draft.resolverRule === 'field_equals'" class="integration-read-source__field">
-            <span>resolverDiscriminatorValue(有界枚举样 token,必填)</span>
+            <el-tooltip :content="fieldHint('readSource.resolverDiscriminatorValue')" placement="top" data-testid="rsc-hint-resolver-discriminator-value">
+              <span>resolverDiscriminatorValue(有界枚举样 token,必填)</span>
+            </el-tooltip>
             <input v-model="draft.resolverDiscriminatorValue" data-testid="rsc-resolver-discriminator-value" placeholder="Y" />
           </label>
         </template>
 
         <label v-if="draft.mode !== 'detail_with_lines'" class="integration-read-source__field">
-          <span>containerPaths(逗号/换行分隔的点号路径,必填)</span>
+          <el-tooltip :content="fieldHint('readSource.containerPaths')" placement="top" data-testid="rsc-hint-container-paths">
+            <span>containerPaths(逗号/换行分隔的点号路径,必填)</span>
+          </el-tooltip>
           <input v-model="draft.containerPaths" data-testid="rsc-container-paths" placeholder="Data.Data, Data.DATA" />
         </label>
 
         <template v-if="draft.mode === 'detail_with_lines'">
           <label class="integration-read-source__field">
-            <span>headerContainerPaths(必填)</span>
+            <el-tooltip :content="fieldHint('readSource.headerContainerPaths')" placement="top" data-testid="rsc-hint-header-container-paths">
+              <span>headerContainerPaths(必填)</span>
+            </el-tooltip>
             <input v-model="draft.headerContainerPaths" data-testid="rsc-header-container-paths" placeholder="Data.Page1" />
           </label>
           <label class="integration-read-source__field">
-            <span>lineContainerPaths(必填)</span>
+            <el-tooltip :content="fieldHint('readSource.lineContainerPaths')" placement="top" data-testid="rsc-hint-line-container-paths">
+              <span>lineContainerPaths(必填)</span>
+            </el-tooltip>
             <input v-model="draft.lineContainerPaths" data-testid="rsc-line-container-paths" placeholder="Data.Page2" />
           </label>
         </template>
 
         <div class="integration-read-source__field-map">
           <div class="integration-read-source__field-map-head">
-            <span>fieldMap(数据面字段映射,可选;source=响应字段路径,target=清洗列)</span>
+            <el-tooltip :content="fieldHint('readSource.fieldMap')" placement="top" data-testid="rsc-hint-field-map">
+              <span>fieldMap(数据面字段映射,可选;source=响应字段路径,target=清洗列)</span>
+            </el-tooltip>
             <button type="button" class="integration-workbench__button" data-testid="rsc-field-map-add" @click="addFieldMapRow">
               添加映射行
             </button>
@@ -150,7 +225,9 @@
         <div class="integration-read-source__probe-controls">
           <label class="integration-read-source__inline">
             <input v-model="boundedSmoke" type="checkbox" data-testid="rsc-bounded-smoke" />
-            <span>bounded smoke(受平台上限约束的试读计数)</span>
+            <el-tooltip :content="fieldHint('readSource.boundedSmoke')" placement="top" data-testid="rsc-hint-bounded-smoke">
+              <span>bounded smoke(受平台上限约束的试读计数)</span>
+            </el-tooltip>
           </label>
           <label v-if="probeNeedsKey" class="integration-read-source__inline">
             <span>探测 key(业务键值,仅用于本次探测,不会保存)</span>
@@ -203,7 +280,10 @@
             <li v-if="probeEvidence.timeoutReached !== undefined" data-testid="rsc-evidence-timeout">
               timeoutReached: {{ probeEvidence.timeoutReached ? 'true' : 'false' }}
             </li>
-            <li v-if="probeEvidence.errorCode" data-testid="rsc-evidence-error-code">errorCode: {{ probeEvidence.errorCode }}</li>
+            <li v-if="probeEvidence.errorCode" data-testid="rsc-evidence-error-label">
+              {{ probeEvidenceErrorLabel }}<template v-if="probeEvidenceErrorHint"> — {{ probeEvidenceErrorHint }}</template>
+              <small data-testid="rsc-evidence-error-code">errorCode: {{ probeEvidence.errorCode }}</small>
+            </li>
             <li v-if="probeEvidence.errorType" data-testid="rsc-evidence-error-type">errorType: {{ probeEvidence.errorType }}</li>
           </ul>
         </div>
@@ -211,6 +291,7 @@
         <p v-if="saveResult" class="integration-read-source__save-result" data-testid="rsc-save-result">
           {{ saveResult.reused ? `已复用现有版本 v${saveResult.version}` : `已保存新版本 v${saveResult.version}` }}(status: {{ saveResult.status }})
         </p>
+        </template>
       </div>
 
       <div class="integration-read-source__list" data-testid="read-source-list">
@@ -221,9 +302,20 @@
           </button>
         </div>
         <p v-if="listError" class="integration-read-source__error" data-testid="rsc-list-error">{{ listError }}</p>
-        <p v-if="!loading && configs.length === 0" class="integration-read-source__empty" data-testid="rsc-empty">
-          暂无读取源配置。
-        </p>
+        <div
+          v-if="!loading && configs.length === 0"
+          class="integration-read-source__empty integration-read-source__empty--guided"
+          data-testid="rsc-empty"
+        >
+          <strong data-testid="rsc-empty-what">{{ bi(
+            '这里展示已保存的读取源版本（草稿 / 已审批 / 已停用）。',
+            'This list shows saved read-source versions (draft / approved / retired).',
+          ) }}</strong>
+          <p data-testid="rsc-empty-first-step">{{ bi(
+            '第一步：在左侧表单选系统、填必填字段并「定位容器探测」，通过后「保存版本」即可出现在此列表。',
+            'First step: pick a system on the left, fill in the required fields, run "locate container probe", then "save version" — it will then appear in this list.',
+          ) }}</p>
+        </div>
         <table v-if="configs.length > 0" class="integration-read-source__table">
           <thead>
             <tr>
@@ -289,6 +381,10 @@
 // The probe evidence path is allowlist-normalized in the service layer, so row values or
 // field keys can never reach this template even from a malformed response.
 import { computed, reactive, ref, watch } from 'vue'
+import { MagicStick, Setting } from '@element-plus/icons-vue'
+import { useLocale } from '../../composables/useLocale'
+import { integrationErrorCodeDisplayLabel, integrationErrorCodeHint } from '../../services/integration/errorCodeLabels'
+import { integrationFieldHint, type IntegrationFieldHintKey } from '../../services/integration/fieldHints'
 import type { IntegrationScope, WorkbenchExternalSystem } from '../../services/integration/workbench'
 import {
   READ_SOURCE_KEY_ENCODINGS,
@@ -297,6 +393,7 @@ import {
   approveReadSourceConfig,
   buildReadSourceConfigPayload,
   createReadSourceConfigDraft,
+  deriveReadSourceProbeEvidenceContainers,
   listReadSourceConfigAudit,
   listReadSourceConfigs,
   probeReadSourceConfig,
@@ -309,11 +406,30 @@ import {
   type ReadSourceSaveResult,
   type ReadSourceStatus,
 } from '../../services/integration/readSourceConfigs'
+import {
+  isReadSourceTemplateEntry,
+  seedReadSourceDraft,
+  type IntegrationTemplateCatalogEntry,
+} from '../../services/integration/readSourceTemplateCatalog'
+import IntegrationReadSourceWizard from './IntegrationReadSourceWizard.vue'
+import IntegrationTemplateCatalogPicker from './IntegrationTemplateCatalogPicker.vue'
 
+// IU-3 (design-lock docs/development/integration-iu3-read-source-wizard-design-lock-20260707.md):
+// the wizard is the DEFAULT new-config surface; `initialViewMode` lets a caller (incl. this file's
+// own spec, which targets the pre-existing flat-form testids) pin the panel to 'expert' so it renders
+// today's full field-flat form with ZERO wizard indirection — no existing assertion had to change.
 const props = defineProps<{
   scope: IntegrationScope
   systems: WorkbenchExternalSystem[]
+  initialViewMode?: 'wizard' | 'expert'
 }>()
+
+const viewMode = ref<'wizard' | 'expert'>(props.initialViewMode ?? 'wizard')
+function toggleViewMode(): void {
+  viewMode.value = viewMode.value === 'wizard' ? 'expert' : 'wizard'
+}
+
+const { locale } = useLocale()
 
 const draft = reactive(createReadSourceConfigDraft())
 const boundedSmoke = ref(false)
@@ -330,14 +446,30 @@ const auditConfigId = ref('')
 const auditRows = ref<ReadSourceAuditRow[]>([])
 
 const validationProblems = computed(() => validateReadSourceDraft(draft))
-const evidenceContainers = computed(() => {
-  const containers = probeEvidence.value?.containers
-  if (!containers) return []
-  return (['primary', 'header', 'lines'] as const).flatMap((alias) => {
-    const shape = containers[alias]
-    return shape ? [{ alias, shape }] : []
-  })
-})
+const evidenceContainers = computed(() => deriveReadSourceProbeEvidenceContainers(probeEvidence.value?.containers))
+// IU-1: humanized probe evidence errorCode label (+ optional hint). The raw code stays visible in a
+// demoted/secondary spot (data-testid="rsc-evidence-error-code") for expert troubleshooting — only the
+// backend's free-text errorMessage (which does not exist on this evidence shape) would be unsafe to
+// render; the code itself is a registered, values-free vocabulary.
+const probeEvidenceErrorLabel = computed(() =>
+  integrationErrorCodeDisplayLabel(probeEvidence.value?.errorCode, locale.value),
+)
+const probeEvidenceErrorHint = computed(() =>
+  integrationErrorCodeHint(probeEvidence.value?.errorCode, locale.value),
+)
+// IU-6b: field-level hint copy (values-free, zh+en) for the highest-confusion fields. Exact-key
+// lookup against the dedicated fieldHints module — no copy lives in this component.
+function fieldHint(key: IntegrationFieldHintKey): string {
+  return integrationFieldHint(key, locale.value)
+}
+
+// IU-6a: bilingual guidance copy helper — same locale pattern as `fieldHint`/the IU-1 error labels
+// (reads `locale.value` synchronously; Vue's render tracking makes template calls to this reactive
+// without needing a dedicated `computed` per string).
+function bi(zh: string, en: string): string {
+  return locale.value === 'zh-CN' ? zh : en
+}
+
 const showKeyField = computed(() => draft.mode !== 'list_page')
 const keyFieldRequired = computed(() => draft.mode === 'single_record' || draft.mode === 'resolver_lookup')
 // The S2-b runtime requires inputs.key exactly when the config declares a keyField.
@@ -362,6 +494,18 @@ function addFieldMapRow(): void {
 
 function removeFieldMapRow(index: number): void {
   draft.fieldMap.splice(index, 1)
+}
+
+// TC-1 (design-lock docs/development/integration-connector-template-catalog-design-lock-20260708.md):
+// seed-then-present — the SAME shared `draft` the wizard/flat-form already bind to, mutated by exactly
+// one field (`seedReadSourceDraft` mirrors the wizard's own `selectMode()`), then the view is forced
+// back to 'wizard' so the pre-filled state is immediately visible on the surface it was seeded for.
+// The picker is wired with seeds-wizard="read-source" so only ReadSourceTemplateCatalogEntry values are
+// ever emitted here; the type guard is a defensive narrowing, not a behavior branch.
+function applyReadSourceTemplate(entry: IntegrationTemplateCatalogEntry): void {
+  if (!isReadSourceTemplateEntry(entry)) return
+  seedReadSourceDraft(draft, entry)
+  viewMode.value = 'wizard'
 }
 
 function statusLabel(status: ReadSourceStatus): string {
@@ -440,6 +584,23 @@ async function approve(row: ReadSourceConfigRow): Promise<void> {
   }
 }
 
+// IU-3 step 4 (审批): the wizard's "save version → submit for approval" flow saves via the SAME
+// `saveVersion()` above, then approves the just-saved id via the SAME `approveReadSourceConfig` +
+// `refresh()` service path the list-row `approve()` button already uses below — existing service
+// paths only, no new route/call shape (design-lock §2 hard lock).
+async function approveSavedResult(): Promise<void> {
+  const result = saveResult.value
+  if (!result) return
+  if (!window.confirm(`审批后运行时即可选用该读取源(${draft.object} v${result.version})。确认审批?`)) return
+  actionError.value = ''
+  try {
+    await approveReadSourceConfig(result.id, props.scope)
+    await refresh()
+  } catch (error) {
+    actionError.value = coarseErrorMessage(error)
+  }
+}
+
 async function retire(row: ReadSourceConfigRow): Promise<void> {
   actionError.value = ''
   try {
@@ -473,6 +634,29 @@ void refresh()
   color: #666;
   font-size: 13px;
   margin: 0 0 12px;
+}
+/* IU-3 (design-lock docs/development/integration-iu3-read-source-wizard-design-lock-20260707.md):
+   new markup only — token-only per §3 hard lock (the rules above/below this block are the
+   pre-existing IU-2-scope styles and are left untouched, hex and all). */
+.integration-read-source__mode-toggle {
+  display: flex;
+  justify-content: flex-end;
+  margin-bottom: var(--ms-space-3);
+}
+.integration-read-source__mode-toggle-button {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--ms-space-1);
+  padding: var(--ms-space-1) var(--ms-space-3);
+  border: 1px solid var(--ms-border);
+  border-radius: var(--ms-radius-sm);
+  background: var(--ms-bg-card);
+  color: var(--ms-color-primary);
+  font-size: 13px;
+  cursor: pointer;
+}
+.integration-read-source__mode-toggle-button:hover {
+  background: var(--ms-bg-page);
 }
 .integration-read-source__columns {
   display: grid;
@@ -566,6 +750,18 @@ void refresh()
 .integration-read-source__empty {
   color: #888;
   font-size: 13px;
+}
+/* IU-6a guided empty state: "what this is" + "first step" — new styling only, tokens per UF-1. */
+.integration-read-source__empty--guided {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ms-space-1);
+}
+.integration-read-source__empty--guided strong {
+  color: var(--ms-text-1);
+}
+.integration-read-source__empty--guided p {
+  margin: 0;
 }
 .integration-read-source__audit {
   margin: 4px 0;

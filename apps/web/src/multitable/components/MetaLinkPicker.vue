@@ -35,8 +35,8 @@
       <div class="meta-link-picker__footer">
         <span class="meta-link-picker__count">{{ selectedCountText }}</span>
         <div class="meta-link-picker__actions">
-          <button class="meta-link-picker__cancel" @click="emit('close')">{{ lp('linkPicker.cancel') }}</button>
-          <button class="meta-link-picker__confirm" @click="onConfirm">{{ lp('linkPicker.confirm') }}</button>
+          <MtButton class="meta-link-picker__cancel" @click="emit('close')">{{ lp('linkPicker.cancel') }}</MtButton>
+          <MtButton variant="primary" class="meta-link-picker__confirm" @click="onConfirm">{{ lp('linkPicker.confirm') }}</MtButton>
         </div>
       </div>
     </div>
@@ -46,6 +46,7 @@
 <script setup lang="ts">
 import { computed, reactive, ref, watch } from 'vue'
 import { useLocale } from '../../composables/useLocale'
+import { MtButton } from '../ui'
 import type { LinkedRecordSummary, MetaField } from '../types'
 import { multitableClient } from '../api/client'
 import { linkPickerSearchPlaceholder, linkPickerTitle } from '../utils/link-fields'
@@ -189,7 +190,4 @@ function onConfirm() {
 .meta-link-picker__footer { display: flex; justify-content: space-between; align-items: center; padding: 10px 16px; border-top: 1px solid #eee; }
 .meta-link-picker__count { font-size: 12px; color: #666; }
 .meta-link-picker__actions { display: flex; gap: 8px; }
-.meta-link-picker__cancel { padding: 6px 12px; background: #fff; color: #606266; border: 1px solid #dcdfe6; border-radius: 4px; cursor: pointer; font-size: 13px; }
-.meta-link-picker__confirm { padding: 6px 18px; background: #409eff; color: #fff; border: none; border-radius: 4px; cursor: pointer; font-size: 13px; }
-.meta-link-picker__confirm:hover { background: #66b1ff; }
 </style>

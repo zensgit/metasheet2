@@ -63,10 +63,10 @@
             <p v-if="revert.loading" class="cfg-history__hint" data-test="config-restore-loading">{{ l('record.configHistoryLoading') }}</p>
             <p v-else-if="revert.error" class="cfg-restore-error" data-test="config-restore-error">{{ revert.error }}</p>
             <template v-else-if="revert.preview">
-              <p v-if="revert.preview.opKind === 'gated'" class="cfg-restore-gated" data-test="config-restore-gated">
+              <p v-if="isUpdatePreview(revert.preview) && revert.preview.opKind === 'gated'" class="cfg-restore-gated" data-test="config-restore-gated">
                 {{ revert.preview.gatedReason || l('record.configRestoreGated') }}
               </p>
-              <template v-else>
+              <template v-else-if="isUpdatePreview(revert.preview)">
                 <p v-if="revert.preview.driftConflict" class="cfg-restore-drift" data-test="config-restore-drift">{{ l('record.configRestoreDrift') }}</p>
                 <p class="cfg-restore-summary">{{ l('record.configRestoreWillRevert') }}</p>
                 <ul class="cfg-restore-changes" data-test="config-restore-changes">
@@ -78,14 +78,34 @@
                   </li>
                 </ul>
               </template>
+              <template v-else>
+                <p class="cfg-restore-summary" data-test="config-restore-destructive-summary">{{ l('record.configRestoreServerSummary') }}</p>
+                <ul class="cfg-restore-changes" data-test="config-restore-changes">
+                  <li v-for="row in destructiveSummaryRows(revert.preview)" :key="row.key" class="cfg-history__change">
+                    <span class="cfg-history__key">{{ row.key }}</span>
+                    <span class="cfg-history__after">{{ row.value }}</span>
+                  </li>
+                </ul>
+                <p v-if="!canExecutePreview(revert.preview)" class="cfg-restore-gated" data-test="config-restore-gated">
+                  {{ blockedReason(revert.preview) }}
+                </p>
+                <label v-else class="cfg-restore-type" data-test="config-restore-type-label">
+                  {{ configRestoreTypedConfirm(requiredConfirm(revert.preview) ?? '', isZh) }}
+                  <input
+                    v-model="revert.typedConfirm"
+                    data-test="config-restore-type-input"
+                    :aria-label="configRestoreTypedConfirm(requiredConfirm(revert.preview) ?? '', isZh)"
+                  />
+                </label>
+              </template>
             </template>
             <div class="cfg-restore-actions">
               <button type="button" data-test="config-restore-cancel" @click="cancelRevert">{{ l('record.configRestoreCancel') }}</button>
               <button
-                v-if="revert.preview && revert.preview.opKind === 'safe'"
+                v-if="revert.preview && canExecutePreview(revert.preview)"
                 type="button"
                 data-test="config-restore-confirm-btn"
-                :disabled="revert.preview.driftConflict || revert.executing"
+                :disabled="!canConfirmCurrentPreview || revert.executing"
                 @click="confirmRevert"
               >{{ l('record.configRestoreConfirm') }}</button>
             </div>
@@ -97,11 +117,11 @@
 </template>
 
 <script setup lang="ts">
-import { ref } from 'vue'
+import { computed, ref } from 'vue'
 
-import type { MetaConfigRevision, ConfigRestorePreview } from '../api/client'
+import type { MetaConfigRevision, ConfigRestoreExecuteConfirm, ConfigRestorePreview, ConfigRestoreUpdatePreview } from '../api/client'
 import { redactString } from '../utils/automation-log-redact'
-import { recordLabel, type MetaRecordLabelKey } from '../utils/meta-record-labels'
+import { recordLabel, configRestoreTypedConfirm, type MetaRecordLabelKey } from '../utils/meta-record-labels'
 
 const props = defineProps<{
   visible: boolean
@@ -114,7 +134,7 @@ const props = defineProps<{
   isZh: boolean
   /** T9-W: when provided, an update row gets a Revert action wired through these (the workbench owns the client). */
   previewRevert?: (revisionId: string) => Promise<ConfigRestorePreview>
-  executeRevert?: (revisionId: string, previewToken: string) => Promise<void>
+  executeRevert?: (revisionId: string, previewToken: string, confirm?: ConfigRestoreExecuteConfirm) => Promise<void>
 }>()
 
 const emit = defineEmits<{ (e: 'close'): void; (e: 'filter-change', entityType: string): void; (e: 'reverted'): void }>()
@@ -273,33 +293,114 @@ function formatAiShortcutParam(value: unknown): string {
 }
 
 // --- T9-W revert flow (the gate stays server-side; this only shows the server's preview + confirms) ---
-interface RevertState { visible: boolean; loading: boolean; executing: boolean; error: string; preview: ConfigRestorePreview | null }
-const revert = ref<RevertState>({ visible: false, loading: false, executing: false, error: '', preview: null })
-const canRevert = (rev: MetaConfigRevision): boolean => typeof props.previewRevert === 'function' && rev.action === 'update'
+interface RevertState {
+  visible: boolean
+  loading: boolean
+  executing: boolean
+  error: string
+  preview: ConfigRestorePreview | null
+  typedConfirm: string
+}
+const emptyRevertState = (): RevertState => ({
+  visible: false,
+  loading: false,
+  executing: false,
+  error: '',
+  preview: null,
+  typedConfirm: '',
+})
+const revert = ref<RevertState>(emptyRevertState())
+const canRevert = (_rev: MetaConfigRevision): boolean => typeof props.previewRevert === 'function'
+const canConfirmCurrentPreview = computed(() => {
+  const preview = revert.value.preview
+  if (!preview || !canExecutePreview(preview)) return false
+  if (isUpdatePreview(preview)) return preview.opKind === 'safe' && !preview.driftConflict
+  const confirm = requiredConfirm(preview)
+  return !confirm || revert.value.typedConfirm.trim() === confirm
+})
 
 async function openRevert(rev: MetaConfigRevision): Promise<void> {
   if (!props.previewRevert) return
-  revert.value = { visible: true, loading: true, executing: false, error: '', preview: null }
+  revert.value = { ...emptyRevertState(), visible: true, loading: true }
   try {
     const preview = await props.previewRevert(rev.id)
-    revert.value = { visible: true, loading: false, executing: false, error: '', preview }
+    revert.value = { visible: true, loading: false, executing: false, error: '', preview, typedConfirm: '' }
   } catch (e) {
-    revert.value = { visible: true, loading: false, executing: false, error: (e as Error)?.message ?? l('record.configRestoreError'), preview: null }
+    revert.value = {
+      visible: true,
+      loading: false,
+      executing: false,
+      error: (e as Error)?.message ?? l('record.configRestoreError'),
+      preview: null,
+      typedConfirm: '',
+    }
   }
 }
 async function confirmRevert(): Promise<void> {
   const preview = revert.value.preview
-  if (!preview || !props.executeRevert) return
+  if (!preview || !props.executeRevert || !canConfirmCurrentPreview.value) return
   revert.value = { ...revert.value, executing: true, error: '' }
   try {
-    await props.executeRevert(preview.revisionId, preview.previewToken)
-    revert.value = { visible: false, loading: false, executing: false, error: '', preview: null }
+    await props.executeRevert(preview.revisionId, preview.previewToken, requiredConfirm(preview))
+    revert.value = emptyRevertState()
     emit('reverted')
   } catch (e) {
     revert.value = { ...revert.value, executing: false, error: (e as Error)?.message ?? l('record.configRestoreError') }
   }
 }
-function cancelRevert(): void { revert.value = { visible: false, loading: false, executing: false, error: '', preview: null } }
+function cancelRevert(): void { revert.value = emptyRevertState() }
+
+function isUpdatePreview(preview: ConfigRestorePreview): preview is ConfigRestoreUpdatePreview {
+  return 'opKind' in preview
+}
+
+function requiredConfirm(preview: ConfigRestorePreview): ConfigRestoreExecuteConfirm | undefined {
+  if ('uncreate' in preview) return 'uncreate'
+  if ('undelete' in preview) return 'undelete'
+  if ('permissionRevert' in preview) return 'revert-permission'
+  return undefined
+}
+
+function canExecutePreview(preview: ConfigRestorePreview): boolean {
+  if (isUpdatePreview(preview)) return preview.opKind === 'safe'
+  if ('undelete' in preview) return preview.undelete.idCollision !== true
+  if ('permissionRevert' in preview) return preview.permissionRevert.supported === true
+  return 'uncreate' in preview
+}
+
+function blockedReason(preview: ConfigRestorePreview): string {
+  if ('permissionRevert' in preview) return preview.permissionRevert.note || l('record.configRestoreBlocked')
+  if ('undelete' in preview && preview.undelete.idCollision === true) return l('record.configRestoreIdCollisionBlocked')
+  return l('record.configRestoreBlocked')
+}
+
+function destructiveSummaryRows(preview: ConfigRestorePreview): Array<{ key: string; value: string }> {
+  if ('uncreate' in preview) {
+    return [
+      { key: l('record.configRestoreEntity'), value: entitySummary(preview.uncreate.entityType, preview.uncreate.entityId, preview.uncreate.entityName) },
+      { key: l('record.configRestoreNote'), value: preview.uncreate.note || l('record.configRestoreBlocked') },
+    ]
+  }
+  if ('undelete' in preview) {
+    return [
+      { key: l('record.configRestoreEntity'), value: entitySummary(preview.undelete.entityType, preview.undelete.entityId, preview.undelete.entityName) },
+      { key: l('record.configRestoreNote'), value: preview.undelete.note || l('record.configRestoreBlocked') },
+      { key: l('record.configRestoreIdCollision'), value: l(preview.undelete.idCollision === true ? 'record.configRestoreBoolYes' : 'record.configRestoreBoolNo') },
+    ]
+  }
+  if ('permissionRevert' in preview) {
+    return [
+      { key: l('record.configRestoreScope'), value: preview.permissionRevert.scope },
+      { key: l('record.configRestoreDirection'), value: preview.permissionRevert.direction },
+      { key: l('record.configRestoreNote'), value: preview.permissionRevert.note || l('record.configRestoreBlocked') },
+    ]
+  }
+  return []
+}
+
+function entitySummary(entityType: string, entityId: string, entityName?: string): string {
+  return entityName ? `${entityLabel(entityType)} ${entityName} (${entityId})` : `${entityLabel(entityType)} ${entityId}`
+}
 </script>
 
 <style scoped>
@@ -337,6 +438,8 @@ function cancelRevert(): void { revert.value = { visible: false, loading: false,
 .cfg-restore-drift { margin: 0; color: var(--warning, #b45309); font-size: 12px; }
 .cfg-restore-summary { margin: 0; font-size: 12px; color: var(--text-secondary, #64748b); }
 .cfg-restore-changes { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 3px; }
+.cfg-restore-type { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--text-secondary, #64748b); }
+.cfg-restore-type input { width: 100%; box-sizing: border-box; padding: 5px 8px; border: 1px solid var(--border, #cbd5e1); border-radius: 6px; font-size: 13px; color: var(--text-primary, #0f172a); }
 .cfg-restore-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 4px; }
 .cfg-restore-actions button { padding: 4px 12px; border-radius: 6px; border: 1px solid var(--border, #cbd5e1); background: var(--surface, #fff); cursor: pointer; font-size: 13px; }
 .cfg-restore-actions button[disabled] { opacity: 0.5; cursor: not-allowed; }
