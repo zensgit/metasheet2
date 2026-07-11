@@ -505,4 +505,43 @@ describeIfDatabase('DT-OPS-02 preview/apply parity — intra-batch identity dupl
     )
     expect(newUserCount.rows[0].n).toBe('3')
   })
+
+  // §7.7 Sync Performance — the N+1 `user/get` fan-out must be OPS-VISIBLE: its count has to
+  // land in the persisted run `stats` (which `summarizeRun` returns verbatim to the runs API).
+  // Non-tautological anchor: the persisted `externalUserDetailCalls` is pinned to the ACTUAL
+  // per-run `getDingTalkUserDetail` mock invocation delta AND to `accountsSynced` — a stale or
+  // wrong counter can't satisfy all three at once.
+  it('persists external directory-pull call telemetry in run stats, with externalUserDetailCalls = one user/get per synced account (the N+1)', async () => {
+    const detailCallsBefore = clientMocks.getDingTalkUserDetail.mock.calls.length
+
+    const result = await syncDirectoryIntegration(integrationId, 'system:dt3915-telemetry-test')
+    const stats = result.run.stats as Record<string, number>
+
+    const detailCallsThisRun = clientMocks.getDingTalkUserDetail.mock.calls.length - detailCallsBefore
+
+    // The N+1, made measurable: this run issued exactly one user/get per unique account, and
+    // that real count is what got written to the run record.
+    expect(detailCallsThisRun).toBeGreaterThan(0)
+    expect(stats.externalUserDetailCalls).toBe(detailCallsThisRun)
+    // CURRENT-N+1 CANARY (expected to break with the §7.7 staging fix): this equality holds
+    // only while EVERY user takes a `user/get`. When `user/list` becomes the primary field
+    // source (detail only when fields are missing), `externalUserDetailCalls` will drop BELOW
+    // `accountsSynced` — that is the fix working, not a regression. Relax this line to
+    // `toBeLessThanOrEqual` (and assert the drop) when that flip lands.
+    expect(stats.externalUserDetailCalls).toBe(stats.accountsSynced)
+
+    // The other pull categories are present and positive (departments are walked + detailed,
+    // users are listed page-by-page).
+    expect(stats.externalDepartmentListCalls).toBeGreaterThan(0)
+    expect(stats.externalDepartmentDetailCalls).toBeGreaterThan(0)
+    expect(stats.externalUserListPageCalls).toBeGreaterThan(0)
+
+    // The aggregate is the honest sum of the four pull categories (not a mislabeled "total").
+    expect(stats.externalDirectoryPullCalls).toBe(
+      stats.externalDepartmentListCalls +
+        stats.externalDepartmentDetailCalls +
+        stats.externalUserListPageCalls +
+        stats.externalUserDetailCalls,
+    )
+  })
 })

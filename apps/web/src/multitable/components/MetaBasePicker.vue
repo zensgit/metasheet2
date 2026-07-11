@@ -52,7 +52,12 @@
           :placeholder="l('basePicker.newBasePlaceholder')"
           @keydown.enter="onCreate"
         />
-        <button class="meta-base-picker__create-btn" :disabled="!newBaseName.trim()" @click="onCreate">+</button>
+        <MtIconButton
+          class="meta-base-picker__create-btn"
+          variant="primary"
+          :disabled="!newBaseName.trim()"
+          @click="onCreate"
+        >+</MtIconButton>
       </div>
     </div>
   </div>
@@ -63,6 +68,7 @@ import { ref, computed } from 'vue'
 import { useLocale } from '../../composables/useLocale'
 import type { DecoratedBase } from '../utils/base-local-state'
 import { basePickerLabel, favoriteAriaLabel } from '../utils/meta-base-picker-labels'
+import { MtIconButton } from '../ui'
 
 const props = defineProps<{
   bases: DecoratedBase[]
@@ -132,6 +138,8 @@ function onToggleFavorite(baseId: string) {
 .meta-base-picker__empty { padding: 16px; text-align: center; color: #999; font-size: 12px; }
 .meta-base-picker__create { display: flex; gap: 6px; padding: 8px; border-top: 1px solid #eee; }
 .meta-base-picker__create-input { flex: 1; padding: 4px 8px; border: 1px solid #ddd; border-radius: 4px; font-size: 12px; }
-.meta-base-picker__create-btn { width: 28px; height: 28px; border: none; background: #409eff; color: #fff; border-radius: 4px; cursor: pointer; font-size: 16px; }
-.meta-base-picker__create-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+/* UI-P2-1c batch-3: .meta-base-picker__create-btn (its only sharer, glyph-only "+") is now
+   <MtIconButton variant="primary">; the bespoke #409eff fill is normalized to --ms-color-primary
+   (sanctioned token convergence). Bespoke CSS removed to avoid double-styling the MtButton root; class
+   kept as additive for selector stability. */
 </style>

@@ -399,7 +399,7 @@
         </div>
 
         <div class="meta-view-mgr__config-actions">
-          <button class="meta-view-mgr__btn-cancel" @click="closeConfig">{{ ml('action.cancel') }}</button>
+          <MtButton class="meta-view-mgr__btn-cancel" @click="closeConfig">{{ ml('action.cancel') }}</MtButton>
           <MtButton variant="primary" class="meta-view-mgr__btn-add" :disabled="Boolean(viewConfigBlockingReason)" @click="saveConfig">{{ ml('view.saveSettings') }}</MtButton>
         </div>
       </div>
@@ -422,8 +422,8 @@
       <div v-if="deleteTarget" class="meta-view-mgr__confirm">
         <p>{{ deleteViewConfirm(deleteTarget.name, isZh) }}</p>
         <div class="meta-view-mgr__confirm-actions">
-          <button class="meta-view-mgr__btn-cancel" @click="deleteTargetId = null">{{ ml('action.cancel') }}</button>
-          <button class="meta-view-mgr__btn-delete" @click="confirmDelete">{{ ml('action.delete') }}</button>
+          <MtButton class="meta-view-mgr__btn-cancel" @click="deleteTargetId = null">{{ ml('action.cancel') }}</MtButton>
+          <MtButton variant="danger" class="meta-view-mgr__btn-delete" @click="confirmDelete">{{ ml('action.delete') }}</MtButton>
         </div>
       </div>
     </div>
@@ -1453,12 +1453,13 @@ onBeforeUnmount(() => {
 /* .meta-view-mgr__btn-add: both uses (add-section addView + config-panel saveConfig) are now <MtButton
    variant="primary">; the bespoke #409eff fill is normalized to --ms-color-primary (intended UF-1 token
    convergence). Bespoke CSS removed to avoid double-styling the MtButton root; class kept for selector
-   stability (existing spec queries .meta-view-mgr__btn-add). The separate-class cancel/delete/inline
-   buttons stay bespoke. */
+   stability (existing spec queries .meta-view-mgr__btn-add). The __btn-inline buttons stay bespoke
+   (T3-GATED). UI-P2-1c batch-3: .meta-view-mgr__btn-cancel (both sharers: config-panel + delete-confirm)
+   and .meta-view-mgr__btn-delete (its only sharer) are now <MtButton> (default ghost / variant="danger");
+   both classes' FULL sharer sets were migrated at once, so their bespoke CSS below is removed (no
+   double-styling); classes kept as additive for selector stability (existing specs query them). */
 .meta-view-mgr__btn-inline { align-self: flex-start; padding: 4px 10px; border: 1px dashed #cbd5e1; border-radius: 4px; background: #fff; color: #475569; cursor: pointer; font-size: 12px; }
 .meta-view-mgr__confirm { padding: 12px 16px; border-top: 1px solid #eee; background: #fef0f0; }
 .meta-view-mgr__confirm p { margin: 0 0 8px; font-size: 13px; color: #333; }
 .meta-view-mgr__confirm-actions, .meta-view-mgr__config-actions { display: flex; gap: 8px; justify-content: flex-end; }
-.meta-view-mgr__btn-cancel { padding: 4px 12px; border: 1px solid #ddd; border-radius: 3px; background: #fff; cursor: pointer; font-size: 12px; }
-.meta-view-mgr__btn-delete { padding: 4px 12px; background: #f56c6c; color: #fff; border: none; border-radius: 3px; cursor: pointer; font-size: 12px; }
 </style>

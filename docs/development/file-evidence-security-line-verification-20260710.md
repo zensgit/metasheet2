@@ -67,6 +67,53 @@ GF6-3 修迁移注释第三处 stale `'abort' (DEFAULT)`→poison；GF6-4 注释
 
 ---
 
+## §owner 复审 + F9 修复 — owner CHANGES-REQUESTED（2026-07-10）
+
+前批（F1–F6）各过独立 opus 对抗审 0 P1/P2 后，**owner 亲自复审又挖出 3 个 P2**——opus 两轮都漏。
+如实记录（不留「全 opus-clean」的假象）：
+
+| owner 挖出（P2） | 本质 | F9 修法 |
+|---|---|---|
+| **P2-1** multitable 正常删除仍走漂移内存索引 + cleanup 不回收正常软删行 | 我在 F5 把 multitable delete 显式 OUT = **sibling 半修** | `deleteAttachmentBinary` 改 `deleteByKey(storage_path)`（消漂移）+ Option A 补偿（新 `blob_purged_at` 列 + 补偿 sweep，草稿 sweep 连带 stamp） |
+| **P2-2** files delete 的 URL fallback key 未回写 → 失败后 `storage_key=NULL` 被 F5 sweep 排除永不重试 | F5 delete↔sweep 交互洞 | resolve 上移 + 原子 `UPDATE … deleted_at=now(), storage_key=COALESCE(…) WHERE deleted_at IS NULL`（避开「tombstone 后独立 UPDATE→no-op」坑） |
+| **P2-3** F5 sweep poison/shared-key 只 skip 不写终态 → head-of-line 饿死后面可清理 blob | F5 sweep 批次逻辑洞 | SQL 候选阶段 `NOT starts_with(storage_key, FILES_POISON_KEY_PREFIX)` 排除 poison；owner 点名 `batchSize=1 + oldest-poison + newer-valid` 测已加 |
+
+外加 P3（test NUL 字节转义 + F5 四 env 进 .env.example）。
+
+**F9 = PR #4094 → main `66f9edae5`**（Sonnet impl）：opus **深审 APPROVE 0 P1 / 0 新 P2**，4/4 mutation 红→还原；
+且专门做了 **Part-2「同类再猎」——无第四类**（无别的 sibling 漂移删路径、无新 sweep 饿死、回收洞 airtight）。
+审 MD `/tmp/pr4094-f9-review-claude-20260710.md`。
+
+**教训（进本线永久记录）**：
+1. **opus「0 P1/P2」在本线不足以预测 owner 验收**——owner 更深复审三次挖出 opus 漏的问题（F1/F2→F3、F5→3 P2）。
+2. **「已在别处修」≠「这条平行路径也修了」**——sibling delete 路径必须一起修，否则半修 = P2（P2-1 即此）。
+3. 补偿 sweep 默认 OFF 是**故意**（复用默认-ON 的 cleanup flag 会在下次 deploy 静默删每条历史软删 blob）；主修（deleteByKey +
+   交互同步 stamp）是 always-on，与 gate 无关；仅残留真失败尾的补偿受 env 门。
+
+---
+
+## §F8 — vestigial 接口/契约清理（最后一刀，纯删除）
+
+存储完整性修完（F1–F6 + owner 复审后的 F9）后，线上只剩一处**零功能**的接口卫生：几个零调用者的 vestigial
+storage 接口/契约方法。F8 = **纯删除 112 行 / 3 文件**，不碰任何鉴权、存储机制或活底物。
+
+| 删除 | 位置 | 零引用铁证 |
+|---|---|---|
+| `listFiles` + `ListOptions`（GF8-1） | `StorageService.ts`（StorageProvider 接口 + LocalStorageProvider 实现 + StorageServiceImpl 实现/委托）、`types/plugin.ts`（StorageService 接口声明 + `ListOptions` 类型） | `GET /api/files`（F1 起）已改查 DB 不用 `storage.listFiles`；全仓零方法调用；`ListOptions` 删 listFiles 后零引用 |
+| `setStorage`/`getStorage` + `storageCache`（GF8-2） | `enhanced-plugin-context.ts`（EnhancedPluginContext 接口声明 + 实现 + 孤儿 Map） | 全仓零调用者 |
+
+**GF8-2 是本刀安全闸重点**（移除 plugin-context 契约方法）。opus 对抗审给出比"仓内零调用者"更强的**结构性不可达**证据链：
+`EnhancedPluginContext` 只由 `plugin-manager.ts` 创建并存入一个**从不被 `.get` 读取**的 Map，而 `PluginManager` 本身
+零 importer（未接线的死脚手架）；真正交给插件的是 `PluginContext`，其存储面是 `context.storage: PluginStorage`
+（get/set/consume/delete/list），**从来不暴露** setStorage/getStorage。→ 判 **landed-ok**。
+
+**审阅的一个纠偏（如实记录）**：风险方向在类型层其实相反——**GF8-1 的 `listFiles` 才是碰到声明的插件 API 类型契约**
+（`PluginServices.storage: StorageService`），比 GF8-2 更"对外"。但仍零风险：运行时 `createPluginContext` 的 `services`
+对象根本没填 `storage` 字段（`as unknown as PluginServices` 双 cast 掩盖），`context.services.storage` 运行期是
+`undefined`，任何 `.listFiles()` 都会 TypeError；且该类型未从包入口导出、零仓内调用者、底层 disk-scan 索引早已（F1）改查 DB。
+
+**收官口径**：F8 = vestigial 接口清理，非安全/功能修；tracker 仍 OPEN。
+
 ## 落地清单
 | 刀 | PR | main sha | 模型 | opus 审 |
 |---|---|---|---|---|
@@ -74,16 +121,22 @@ GF6-3 修迁移注释第三处 stale `'abort' (DEFAULT)`→poison；GF6-4 注释
 | F3 | #4063 | `7d4cb8027` | opus impl | APPROVE 0 P1/P2·M1-M6 红 |
 | F5 | #4072 | `0012422fe` | sonnet impl | APPROVE 0 P1/P2·7/7 mutation 红 |
 | F6 | #4076 | `a9ceef97e` | sonnet impl | APPROVE 0 P1/P2 |
+| **F9**（owner-P2 修复） | #4094 | `66f9edae5` | sonnet impl | APPROVE 0 P1/**0 新** P2·4/4 mutation 红·Part-2 再猎无第四类 |
+| **F8**（vestigial 接口清理） | #4103 | `befcbebaf` | sonnet impl | APPROVE **含 GF8-2** 0 P1/P2/P3·结构性不可达证据链·tsc 0 |
 
-迁移 on `main`：`zzzz20260710140000_add_files_storage_key.ts`（F3）+ `zzzz20260710150000_add_files_blob_purged_at.ts`（F5）。
+迁移 on `main`：`zzzz20260710140000_add_files_storage_key.ts`（F3）+ `zzzz20260710150000_add_files_blob_purged_at.ts`（F5）
++ `zzzz20260711090000_add_multitable_attachments_blob_purged_at.ts`（F9）。
 
-## 余下 owner 决策项（不阻塞已落地部分；本线自主层已尽）
-1. **硬化池关闭 / tracker 状态**：owner 复审后判定；本文与本次自主层**未触碰 tracker**、未宣布关池。
-2. **F4 审批人 approval-scoped read grant**：新授权路径（权限层，须 owner 逐刀显式授权）+ 当前无活需求方（审批 UI 未
-   渲染照片）→ 未自动开工。若授权：机制 A（plugin 端点 `/api/attendance/requests/:id/evidence`，复用批准门
-   `assertAttendanceRequestApprovalAllowed`，正向核对 + status 生命周期，与本线零碰撞）。
-3. **F7 深度图片校验**：owner 已接受 lazy-forgery 威胁为 P3 → 默认不做。
-4. **listFiles 接口移除 + setStorage/getStorage plugin 契约移除**：属公开接口/插件契约变更（非局部死码），留 owner 决策。
+## 余下 = owner 决策 / ops / 红线（**非自主开发项**；自主开发层已尽）
+> 说明：以下**不是**我在拖延的「开发」——是定义上非自主的项（红线只 owner 能解、tracker 是 owner 的账、env 是部署动作）。
+1. **硬化池关闭 / tracker 状态**：owner 复审后判定；本文与自主层**均未触碰 tracker**、未宣布关池（状态仍 OPEN）。
+2. **F4 审批人 read grant 实现**：新授权路径（权限层，须 owner 逐刀显式授权）+ 无活需求方（审批 UI 未渲染照片）→ 设计已定
+   （见 §owner 决策项引用的 f4-design-lock；机制 A，复用批准门 `assertAttendanceRequestApprovalAllowed`，与本线零碰撞），**实现 gated**。
+3. **retention env prod 启用**（ops）：`FILES_ORPHAN_BLOB_RETENTION_ENABLED` / `MULTITABLE_ATTACHMENT_BLOB_RETENTION_ENABLED`
+   默认 OFF；启用兜住残留真失败尾（**不影响主修生效**——主修 always-on）。
+4. **F7 深度图片校验**：owner 已接受 lazy-forgery 威胁为 P3 → 默认不做。
+5. **N1 NIT（后补）**：`isDatabaseSchemaError` 未认 42703（undefined_column）；F9 后 default-ON 草稿 sweep 耦合新列，
+   deploy-before-migrate 窗口优雅降级不崩、迁移后自愈，仅日志文案影响。
 
 ## 部署提示
 本线引入两个新迁移。按 deploy SOP：镜像拉取部署前 diff pending migrations、**先迁移后代码**、验证一次 auth round-trip。
