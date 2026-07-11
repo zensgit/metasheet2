@@ -264,10 +264,18 @@ export function createAutomationRoutes(
       }
     } catch (err) {
       // A capability-resolution failure (e.g. DB not ready) must fail CLOSED — never fall through
-      // to an ungated testRun. Report it as a service/DB error, not as authorization success.
-      const message = err instanceof Error ? err.message : 'Failed to resolve permissions'
-      const code = /not ready|unavailable|connect/i.test(message) ? 503 : 500
-      return res.status(code).json({ ok: false, error: { code: 'PERMISSION_CHECK_FAILED', message } })
+      // to an ungated testRun. Review P3: never echo the raw error message (it can carry DB
+      // host/port/user) — surface a generic, values-free message. A connection / not-ready error
+      // is a transient 503; anything else is a 500. Either way the real run never fired.
+      const raw = err instanceof Error ? err.message : ''
+      const transient = /ECONNREFUSED|ETIMEDOUT|not ready|unavailable|Connection terminated|too many clients|does not exist/i.test(raw)
+      return res.status(transient ? 503 : 500).json({
+        ok: false,
+        error: {
+          code: transient ? 'DB_NOT_READY' : 'PERMISSION_CHECK_FAILED',
+          message: transient ? 'Service temporarily unavailable' : 'Failed to resolve permissions',
+        },
+      })
     }
 
     const svc = getService(res)

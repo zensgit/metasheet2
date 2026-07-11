@@ -60,6 +60,9 @@ function createMockDb(rules: AutomationRule[]) {
     chain[method] = vi.fn(chainFn)
   }
   chain.execute = vi.fn(async () => rules)
+  // getRule() uses .executeTakeFirst(); the chain doesn't model the id filter, so return the first
+  // seeded rule (tests that exercise getRule seed exactly the rule under test).
+  chain.executeTakeFirst = vi.fn(async () => rules[0])
   return {
     selectFrom: vi.fn(() => chain),
   }
@@ -351,6 +354,23 @@ describe('AutomationService', () => {
       })
 
       expect(emitSpy).not.toHaveBeenCalled()
+    })
+  })
+
+  describe('testRun sheet binding (G8 hardening)', () => {
+    it('refuses a rule that does not belong to the gated sheet — never executes (cross-sheet guard)', async () => {
+      // The route gates canManageAutomation on the PATH sheetId; testRun must bind the rule to
+      // that same sheet so a caller authorized on sheet1 cannot run a rule owned by sheet2.
+      const rule = createMockRule({ id: 'atr_x', sheet_id: 'sheet1', enabled: true })
+      const query = createMockQuery([rule])
+      service = new AutomationService(bus, createMockDb([rule]) as never, query)
+
+      const emitSpy = vi.spyOn(bus, 'emit')
+
+      await expect(service.testRun('atr_x', 'sheet2')).rejects.toThrow(/not found or not enabled/)
+      // the real execution never ran
+      expect(emitSpy).not.toHaveBeenCalled()
+      expect(automationLogMocks.record).not.toHaveBeenCalled()
     })
   })
 

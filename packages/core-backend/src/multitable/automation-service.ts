@@ -2961,7 +2961,11 @@ export class AutomationService {
    */
   async testRun(ruleId: string, sheetId: string): Promise<AutomationExecution> {
     const rule = await this.getRule(ruleId)
-    if (!rule || !rule.enabled) {
+    // G8 hardening (review P3): the route gates `canManageAutomation` on the PATH `sheetId`, but
+    // getRule(ruleId) is not sheet-bound — so a caller authorized on sheet A could otherwise run a
+    // rule owned by sheet B. Bind the rule to the gated sheet, mirroring updateRule/deleteRule
+    // (`existing.sheet_id !== sheetId → not found`).
+    if (!rule || rule.sheet_id !== sheetId || !rule.enabled) {
       throw new Error(`Rule ${ruleId} not found or not enabled`)
     }
     const execRule = toExecutorRule(rule)

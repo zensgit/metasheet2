@@ -78,8 +78,8 @@ describe('G8 — test-run route capability gate', () => {
     expect(svc.testRun).toHaveBeenCalledWith('rule-1', 'sheet-a')
   })
 
-  it('fails CLOSED when capability resolution throws — never falls through to an ungated testRun', async () => {
-    resolveSheetCapabilities.mockRejectedValue(new Error('database not ready'))
+  it('fails CLOSED (503, values-free) when capability resolution throws a transient error — never an ungated testRun', async () => {
+    resolveSheetCapabilities.mockRejectedValue(new Error('Connection terminated to db.internal.host:5432 as user pg_app'))
     const svc = makeService()
 
     const res = await request(buildApp(svc))
@@ -87,7 +87,23 @@ describe('G8 — test-run route capability gate', () => {
       .send({})
 
     expect(res.status).toBe(503)
+    expect(res.body?.error?.code).toBe('DB_NOT_READY')
+    // Review P3: the raw error (host/port/user) must NOT leak into the response body.
+    expect(JSON.stringify(res.body)).not.toMatch(/db\.internal\.host|5432|pg_app/)
+    expect(svc.testRun).not.toHaveBeenCalled()
+  })
+
+  it('fails CLOSED (500, values-free) on a non-transient resolution error', async () => {
+    resolveSheetCapabilities.mockRejectedValue(new Error('unexpected TypeError: cannot read x of undefined at /srv/app/secret-path'))
+    const svc = makeService()
+
+    const res = await request(buildApp(svc))
+      .post('/api/multitable/sheets/sheet-a/automations/rule-1/test')
+      .send({})
+
+    expect(res.status).toBe(500)
     expect(res.body?.error?.code).toBe('PERMISSION_CHECK_FAILED')
+    expect(JSON.stringify(res.body)).not.toMatch(/secret-path|TypeError/)
     expect(svc.testRun).not.toHaveBeenCalled()
   })
 })
