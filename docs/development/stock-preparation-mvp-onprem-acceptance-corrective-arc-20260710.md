@@ -1,0 +1,71 @@
+# 备料 MVP(#3751)— 实体机(Windows on-prem)验收 corrective 弧 — 设计与验证记录 — 2026-07-10
+
+> 承接 `stock-preparation-mvp-w3-w6-dev-verification-20260710.md`(W3-W6 代码侧完成)。本文记录
+> **代码侧完成之后、实体机验收 PASS 之前**的 corrective 弧:每一轮实体机 dispatch 暴露的 on-prem
+> 打包/部署缺陷、其根因、修复 PR、以及重发的验收包。这些缺陷**不在产品运行时路径上**——全部是
+> Windows on-prem 交付管道(pnpm 固定、深路径清理、迁移基线)的加固。**本文是记录,不是授权。**
+
+## 0. 口径
+
+- 备料 MVP 的 **runtime 代码**在 W3-W6 弧全部 MERGED(13 实现 PR),见前序 MD。
+- 本弧的每个修复都由**实体机 dispatch 的 values-free 证据块**驱动(操作员只回贴迁移名/SQLSTATE/
+  对象类型/失败类,无业务值),对抗审阅后落地,再重切包。
+- **PASS 判据**:操作员回贴 `mvpSmoke.pass=true` + `auditActionsCovered=8/8` + `selfScanClean=true`。
+  在此之前口径恒为「代码侧完成 + 验收进行中」,不称全线闭环。
+
+## 1. corrective 轮次台账
+
+| 轮 | 实体机证据(values-free) | 根因 | 修复 PR | 验收包 |
+|---|---|---|---|---|
+| corrective-1 | 首包 dispatch 前置检查 | on-prem 包缺 frozen-lockfile 前置/回滚安全 | (#4050 前序轮) | `…-corrective-20260710-94d0bb964` |
+| corrective-2..4 | `resolvedPnpmVersion=other` · `failureClass=PNPM_VERSION_MISMATCH` | `corepack prepare --activate` **不写 shim**(仅 `enable` 写);apply helper 从 PATH 解析 pnpm → 撞 profile 影子 pnpm.cmd(他版本),fail-closed 拦停 | **#4061**(corepack 版本寻址 dispatcher wrapper `corepack pnpm@<pin> %*`;PATH 影子结构性无关)+ #4073(深路径清理 SYSTEM-safe) | `…-corrective2-20260710-d6489851d` … `-4` |
+| corrective-5 | `failedMigrationName=20250926_create_audit_tables` · `42P07`(duplicate_table)· `table` | 实体机先跑幂等孪生 `zz20251231_create_audit_tables.ts`(allowUnorderedMigrations 历史);同名更早的 raw `.sql` 后合入被当 pending 重放 → 裸 `CREATE TABLE audit_logs` 撞已存在对象 | **#4084**(`.sql` 名加入 `SUPERSEDED_LEGACY_SQL_MIGRATIONS` no-op 名单) | `…-corrective5-20260710-698acd918` |
+
+> 说明:#4062 与 #4061 是并行的同修法,#4062 在审阅确认机制等价后作为 superseded 关闭。
+
+## 2. corrective-5 根因与修复(本轮主体)
+
+**拓扑**:core-backend 迁移 runner(kysely,`allowUnorderedMigrations: true`)对乱序历史的机器
+放行"补跑仍缺失的迁移"。实体机的 audit 表由幂等孪生 `zz20251231_create_audit_tables.ts` 先建;
+`20250926_create_audit_tables.sql`(裸 DDL、无 `IF NOT EXISTS`)对该机是 pending → 重放 → 42P07。
+
+**修复(#4084,一条名单项,零吞错)**:`migration-provider.ts` 的 `SUPERSEDED_LEGACY_SQL_MIGRATIONS`
+是**专为此类问题建的 no-op 机制**——名字保留可见(kysely 对跑过它的机器仍能校验历史),raw DDL
+永不重放。三类机器矩阵**在真 PG16 + 真 provider + 真 kysely 0.28.8 上实证**(对抗审阅执行):
+
+| 机器 | 结果 |
+|---|---|
+| 跑过 `.sql` 的(台账含该名) | `migrateToLatest` 0 pending / 0 error(no-op 保名过历史校验) |
+| 实体机(跑过 zz、缺该名) | 恰跑 1 个 no-op 迁移盖戳,**零业务 DDL** |
+| 全新安装 | 全量 257 成功 / 0 错误,`audit_logs.created_at=timestamptz` 证明对象来自孪生 |
+
+**无全局吞错**:名单是**名字精确匹配**,无模式匹配;42P07 对任何名单外迁移仍 fatal。
+
+## 3. 孪生超集性 — 诚实差异记录(审阅 P3-1)
+
+孪生 `zz20251231_create_audit_tables.ts` 覆盖 `.sql` 的对象,但**非字面同构**,双 fresh DB 全 catalog
+diff 实测三处差异(均已缓解,记录于此以免后续误判):
+
+1. **16 个时间戳列 `TIMESTAMP` → `TIMESTAMPTZ`**:舰队双模;孪生 2026-01 落地时既有,非本轮引入。
+2. **分区策略**:`.sql` 硬编码 2025_01-03 三个月分区 → 孪生仅建当月动态分区(带 `IF NOT EXISTS`
+   守卫)。运行时由 `AuditRepository.ensureCurrentMonthPartition` 插入时自愈,不缺分区。
+3. **`audit_logs_archive` 二级索引**:孪生路少 11 个(`LIKE INCLUDING ALL` 语句顺序差异)。冷归档表,
+   无按非 PK 列过滤的代码读者,纯性能项 → 拆 follow-up 后补(非验收阻断)。
+
+## 4. 实体机操作(corrective-5 包)
+
+1. 下载 `…-corrective5-20260710-698acd918.zip` + `SHA256SUMS` + 匹配 bootstrap sidecars,核校验和。
+2. 经 release-sidecar `.bat` 装(勿手拷、勿 `--no-frozen-lockfile`)。
+3. 依赖前置检查(pnpm 现由 corepack dispatcher 定版,`resolvedPnpmVersion=9.15.9` 应 PASS)。
+4. **migration 066**(备料审计表)+ **迁移基线**(20250926 现为 no-op,42P07 应消失)。
+5. PM2 重启 + 健康检查。
+6. 打包内 values-free smoke:`METASHEET_AUTH_TOKEN=<admin> node scripts/ops/stock-preparation-mvp-postdeploy-smoke.mjs --base-url http://localhost:<port>`。
+
+**即时解锁杠杆(可选,不等发包)**:实体机设 `MIGRATION_EXCLUDE=20250926_create_audit_tables` 即可
+跳过该迁移当场继续。**适用限定(审阅 P3-2)**:仅对**台账不含该名**的机器安全(实体机正属此类);
+台账**含**该名的机器设此值会 fatal(`corrupted migrations: … is missing`)——勿在跑过 `.sql` 的机器用。
+
+## 5. 状态
+
+代码侧完成 + on-prem 交付管道经 corrective-1..5 加固。**唯一余项 = 实体机装 corrective-5 包跑
+smoke 回贴 PASS**;PASS 后前序 W3-W6 MD 补 addendum、本线转全线闭环。runtime 产品面未因本弧改动。
