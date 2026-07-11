@@ -14,9 +14,11 @@
  * even though both fields ARE listed in the raw `changed_field_ids`. One golden per layer, on a DIFFERENT
  * sheet each, so a regression that masks one layer but not the other is caught.
  *
- * A mutation that builds `fieldNames` from the raw (pre-mask) changed_field_ids, or that queries meta_fields
- * without the `allowed`-set re-check, would surface `AlphaSecret` / `BetaSecret` — the whole-body assertion
- * at the end pins that neither string can appear anywhere in the response.
+ * The masking here is redundant defense-in-depth: (i) `involvedFieldsBySheet` accumulates from the POST-mask
+ * `fields`, and (ii) the name loop re-checks `allowed.has`. Breaking EITHER alone still blocks the leak (the
+ * other guard catches it); only breaking BOTH — raw pre-mask accumulation AND no re-check — surfaces
+ * `AlphaSecret` / `BetaSecret`. The whole-body assertion at the end pins that neither string can appear
+ * anywhere in the response (verified: only the both-broken mutation reds these three tests).
  *
  * Runs only with DATABASE_URL. (plugin-tests.yml whitelist.)
  */
