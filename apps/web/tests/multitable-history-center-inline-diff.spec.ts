@@ -517,3 +517,31 @@ describe('HistoryCenterModal — all-tables-B cross-table field-name resolution'
     } finally { app.unmount(); container.remove() }
   })
 })
+
+// R11 restore back-reference: a change carrying restoredFromVersion renders a "Restored from vN" badge;
+// a change with null/absent restoredFromVersion renders no badge (the badge keys on NON-NULL).
+describe('HistoryCenterModal — restore back-reference badge', () => {
+  it('renders "Restored from vN" only for a change with a non-null restoredFromVersion', async () => {
+    mockListHistoryEvents.mockResolvedValue({ batches: [batch()], total: 1, nextCursor: null, searchTruncated: false })
+    const detail: HistoryBatchDetail = {
+      batchId: 'batch_1', actorId: 'user_1', source: 'restore', createdAt: new Date().toISOString(),
+      visibleAffectedRecordCount: 2, visibleAffectedFieldCount: 2,
+      changes: [
+        { sheetId: 'sheet_1', recordId: 'rec_restored', action: 'update', version: 4,
+          changedFieldIds: ['fld_name'], before: { fld_name: 'old' }, after: { fld_name: 'new' }, restoredFromVersion: 5 },
+        { sheetId: 'sheet_1', recordId: 'rec_plain', action: 'update', version: 2,
+          changedFieldIds: ['fld_name'], before: { fld_name: 'a' }, after: { fld_name: 'b' }, restoredFromVersion: null },
+      ],
+    }
+    mockGetHistoryBatch.mockResolvedValue(detail)
+    const { app, container } = mountModal([{ id: 'fld_name', name: 'Name' }])
+    try {
+      await flushPromises()
+      container.querySelector<HTMLButtonElement>('[data-test="hist-batch"]')!.click()
+      await flushPromises()
+      const badges = Array.from(container.querySelectorAll<HTMLElement>('[data-test="hist-restored-from"]'))
+      expect(badges.length).toBe(1) // exactly one change carries a source version
+      expect(badges[0].textContent).toContain('v5')
+    } finally { app.unmount(); container.remove() }
+  })
+})

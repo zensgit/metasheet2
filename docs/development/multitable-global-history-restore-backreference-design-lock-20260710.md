@@ -1,8 +1,9 @@
-# Global History — restore 批次回链（restored-from back-reference）— MINI DESIGN LOCK (PROPOSED)
+# Global History — restore 批次回链（restored-from back-reference）— MINI DESIGN LOCK (RATIFIED · AS-BUILT R11)
 
-- **Status**: PROPOSED — docs-only；owner ratify 前零实现授权。R10 gate-front 工件（R9 UX-parity 审计 gated 项 (e)）。
-- **解锁词**：owner 对本文的明确点头（如「ratify 回链」）。
-- **难度/分派建议**：中（一列迁移 + **按 OD-0 结果三路全穿线、或废弃 legacy 后两路穿线** + 投影面 + FE 渲染）→ Sonnet 5 建 + 对抗审。
+- **Status**: **RATIFIED 2026-07-11（owner R11 directive: 「实现 restore 回链，OD-0 选 (a) 三路全穿线」）。AS-BUILT**：迁移 067 加 `meta_record_revisions.restored_from_version`（int nullable, forward-only, 无回填）；`restoredFromVersion` 经 `RecordWriteService.patchRecords` → `recordRecordRevision` 单一 seam 穿三条 version-restore 路由（legacy `/restore`、`/restore-execute`、`/restore-batch-execute` 的两处 patchRecords）；投影 `HistoryChange.restoredFromVersion` + FE 「从版本 N 恢复」徽标（仅非 NULL 渲染）。**OD-0=(a)（三路全穿线）· OD-1=版本号 · OD-2=上线即显（只读元数据，无 flag）。**
+- **关键契约（审阅 Q2 补入）**：`restored_from_version` 非 NULL **当且仅当** 该写入是携带 `targetVersion` 的 record-version restore（= 上述三路）。其余所有 `source='restore'` 发射点均为 **NULL by design**（见 §2.6），FE 徽标**键于非 NULL，绝不键于 `source='restore'`**——否则会制造 #4074 那类「两类语义不一致」的残迹。
+- **部署窗口（txn-safe）**：`recordRecordRevision` 在 `patchRecords` 事务内运行，42703 会毒化事务（try/catch 回退会二次失败）——故用**列存在性 SELECT 探测**（information_schema，只缓存 present 正结果）择 INSERT 形状，而非 catch。投影读侧走非事务 pool query，try/catch 回退安全。二者均在预迁移窗口降级为 base 形状（值静默 NULL），永不失败写入/500 读取。手动核验通过（round MD §Lane3 记录；共享 realdb bundle 的 module 级缓存不可复位，故不加会 order-flaky 的改 schema CI 测试）。
+- **难度/分派建议**：中（一列迁移 + 三路穿线 + 投影面 + FE 渲染）→ 本轮 Opus 实现 + 对抗审（Fable 不可用）。
 
 ## §1 问题（R9 审计原始证据，已对 origin/main 核验）
 
@@ -21,17 +22,25 @@
    - **(a) 三路全穿线**：legacy 路由同样携带 targetVersion——G1 扩展覆盖它；
    - **(b) 正式废弃 legacy 路由**：独立 deprecation rung（路由移除或 410 + client 方法删除 + 两个集成测试迁移/删除），本锁只穿线两条 preview→execute 路径。
    任一选择下,「NULL 意图 golden」不复存在。其余出界项不变：跨批次深链跳转（源版本≠源批次 id）；PIT 族回链（revert/reset 已有各自的 preview-identity 语义）。
+   **AS-BUILT 决策 = (a)**：legacy `/restore` 的 patchRecords（univer-meta.ts:9549）同样携带 `restoredFromVersion: targetVersion`；G1 端到端覆盖它（realdb HTTP）。未废弃 legacy 路由（更兼容、无行为变更）。
+
+6. **§2.6 `source='restore'` 全发射点分类（审阅 Q2 补入，AS-BUILT 核验）**：`recordRecordRevision` 是唯一 revision 写原语；穿线只发生在 `patchRecords` seam（三条 version-restore 路由）。其余 `source='restore'` 直接调用 `recordRecordRevision` 且**不传** `restoredFromVersion` ⇒ 恒 NULL：
+   - **PIT-resurrect / undelete**（univer-meta.ts:10164，`action='create' version=1`）——T-快照复活，无源版本 ⇒ NULL；
+   - **PIT-reset 存活项**（~:10380，`action='update'`）——按时间重置，无 per-record 源版本 ⇒ NULL；
+   - **PIT-reset after-T 删除**（~:10462，`action='delete'`）⇒ NULL；
+   - **lossy-retype-revert**（~:6442，`action='update'`）——回滚字段类型，无 record 版本 ⇒ NULL。
+   规则：`restored_from_version` 非 NULL ⟺ 携带 `targetVersion` 的 version-restore（= 三路）。**FE 徽标键于非 NULL**，故上述 NULL 项不渲染徽标（无「两类不一致」残迹）。
 
 ## §3 Goldens（实现 PR 必带，mutation-verified）
 
 - G1 execute 写入：record-restore-execute 后新 revision 行携带 `restored_from_version = targetVersion`（真库）；restore-batch 同。
-- G2 非 restore 写路径恒 NULL（create/update/delete/automation/plugin 各一抽查）。**legacy 路由不在此列**（owner P2）：按 OD-0 (a) 它进 G1 的穿线断言；按 (b) 它获得废弃 golden（路由 410/移除 + client 方法不存在）——两种情况下都不存在「restore 语义却恒 NULL」的 golden。
+- G2（AS-BUILT）非 version-restore 写恒 NULL：`recordRecordRevision` 直接调用——① 普通 update（`source='rest'`）② **PIT-resurrect 形状**（`source='restore' action='create'`，无 restoredFromVersion）③ **PIT-reset 形状**（`source='restore' action='delete'`）——三者 `restored_from_version` 均 NULL。**这钉住「badge 键于非 NULL 而非 source='restore'」的核心契约**（§2.6）。legacy 路由进 G1 的穿线断言（OD-0=(a)）。
 - G3 投影携带：批次详情 payload 含 `restoredFromVersion`，且掩码路径不变（LOCK-3 邻测不红）。
 - G4 FE 渲染 + NULL 不渲染；两侧 shape-lock wire 测试同步（wire 形状变更=两侧全扫，家规）。
 - G5 突变：去掉穿线 ⇒ G1 红；投影漏字段 ⇒ G3 红。
 
 ## §4 Owner 决策点
 
-- **OD-0（ratify 前必选，owner P2）**：legacy `/restore` 路由处置——(a) 三路全穿线 或 (b) 正式废弃（独立 deprecation rung）。见 §2.5。
-- OD-1：列名/语义确认（`restored_from_version` vs 记源 revision id——推荐版本号：与 restore 请求的 `targetVersion` 同物，无需反查 revision id）。
-- OD-2：FE 徽标是否上线即显（推荐：是——只读元数据，无 flag 必要）。
+- **OD-0 ✅ RESOLVED = (a)**（owner R11 directive）：三路全穿线（legacy 未废弃）。见 §2.5 AS-BUILT。
+- **OD-1 ✅ RESOLVED = 版本号**：`restored_from_version` = restore 请求的 `targetVersion`，无需反查 revision id。
+- **OD-2 ✅ RESOLVED = 上线即显**：只读元数据，无 flag（AS-BUILT：徽标随投影下发，键于非 NULL）。
