@@ -114,6 +114,37 @@ storage 接口/契约方法。F8 = **纯删除 112 行 / 3 文件**，不碰任�
 
 **收官口径**：F8 = vestigial 接口清理，非安全/功能修；tracker 仍 OPEN。
 
+## §F10 — P1 root-escape 修复（owner 亲手 repro；F9 引入的洞）
+
+owner 复核 F9 后**接受原三项 P2**，但在 `origin/main` 亲手 repro 出**新 P1**：F9 给 multitable sweep 加的两个**默认删除器**
+用裸 `path.join(root, storagePath)` + `fs.unlink`，**绕过 F3 的 `resolveWithinBase` containment**。生产 `start*({ logger })`
+只传 logger → 走默认分支；现有 real-DB 测都注入**安全的** `StorageServiceImpl`（其 `deleteByKey` 本就过 containment）→
+**未覆盖生产默认删除器**（假绿盲区）。owner 实测：`storage_path='../victim.txt'` → sweep `inspected=1, purged=1, skipped=0`，
+root **外**文件被真实删除。
+
+| 默认删除器 | 喂给 | 生产触发 |
+|---|---|---|
+| `deleteLocalAttachment` | 草稿 cleanup | `isEnabled()` = `NODE_ENV==='production'` → **默认 ON** |
+| `deleteLocalAttachmentByKey` | 补偿 sweep | env-gated 默认 OFF |
+
+**修法（GF10-1，复用 F3 审计边界，不 hand-roll 第二份）**：两默认删除器都改
+`fs.unlink(resolveWithinBase(getDefaultAttachmentPath(), storagePath))`——逃逸即 throw；既有 per-row catch 的
+`isMissingStorageFile` 对该 throw 为 false → `skipped++; continue` → **不 stamp、victim 从未被 unlink**（= owner 要求的
+「文件保留、DB 不 stamp」，由现有 catch 天然产出）。`DEFAULT_ATTACHMENT_PATH` module-const 改惰性 `getDefaultAttachmentPath()`
+（call-time 读 env）纯 testability，无行为回归（opus 核对生产 blob 存于同一 base → containment base == unlink target，非安全剧场）。
+
+**测试（GF10-2，专打默认删除器，不注入 storage）**：`multitable-attachment-root-escape.db.test.ts` 4 测（real PG + real fs）：
+补偿 sweep 逃逸 + 草稿 cleanup 逃逸各锁 `purged/deleted=0, skipped=1` + victim 仍存 + 行终态列仍 NULL；正路径 contained key
+真删 + stamp；wired 进 `plugin-tests.yml` real-DB 白名单。
+
+**教训（进本线永久记录）**：**注入安全实现的测试会掩盖生产默认路径的漏洞**——F9 的 real-DB 测注入 `StorageServiceImpl`
+（已过 containment），使 opus + 我重验都没看见裸 `path.join` 的默认删除器。安全修的测试必须**跑生产实际会走的分支**（此处 =
+不注入 storage 的默认删除器），否则是 airtight-looking 的假绿。**opus 0 P1/P2 在本线第四次不足以预测 owner 验收。**
+
+**可接受残留（honest）**：`../` storagePath 在 server-derived key 下 should-never-exist；修后逃逸行 = 永久 benign skip
+（每 tick throw、不 stamp、victim 存），理论上老逃逸行可 head-of-line 补偿 sweep（≤1 slot/tick、sweep 默认 OFF、须先有 malformed
+行=另一 bug）；symlink 逃逸 = F3 既有词法 containment 边界，非 F10 范围。安全优先级 = 绝不删 root 外，按 owner spec 走「不 stamp」。
+
 ## 落地清单
 | 刀 | PR | main sha | 模型 | opus 审 |
 |---|---|---|---|---|
@@ -123,6 +154,7 @@ storage 接口/契约方法。F8 = **纯删除 112 行 / 3 文件**，不碰任�
 | F6 | #4076 | `a9ceef97e` | sonnet impl | APPROVE 0 P1/P2 |
 | **F9**（owner-P2 修复） | #4094 | `66f9edae5` | sonnet impl | APPROVE 0 P1/**0 新** P2·4/4 mutation 红·Part-2 再猎无第四类 |
 | **F8**（vestigial 接口清理） | #4103 | `befcbebaf` | sonnet impl | APPROVE **含 GF8-2** 0 P1/P2/P3·结构性不可达证据链·tsc 0 |
+| **F10**（P1 root-escape 修·owner repro） | #4122 | `af822d1d7` | sonnet impl | APPROVE 0 P1/P2·三闸问亲手实证(测真打默认删除器/base 同源/mutation per-guard 红) |
 
 迁移 on `main`：`zzzz20260710140000_add_files_storage_key.ts`（F3）+ `zzzz20260710150000_add_files_blob_purged_at.ts`（F5）
 + `zzzz20260711090000_add_multitable_attachments_blob_purged_at.ts`（F9）。
