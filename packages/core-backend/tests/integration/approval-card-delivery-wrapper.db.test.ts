@@ -686,6 +686,22 @@ describeIfDatabase('A-4 card-delivery wrapper (real DB)', () => {
     expect((node2Approves.rows[0] as { c: number }).c).toBe(0)
   })
 
+  test('P1-1 NIT: a dingtalk_card channelOrigin with NO cardDeliveryId is treated as STALE, never silently skipped', async () => {
+    // Defense-in-depth: even for a legitimately-actionable node1 seat (actorCanAct TRUE), a card
+    // channel that carries no delivery id can never be bound — the guard must fail-close, not skip.
+    const instanceId = await newInstance(twoNodeTemplateId)
+    await expect(
+      approvals.dispatchAction(
+        instanceId,
+        { action: 'approve', comment: '同意', channelOrigin: { channel: 'dingtalk_card' } as never },
+        { userId: APPROVER, userName: APPROVER, roles: [] },
+      ),
+    ).rejects.toMatchObject({ code: 'APPROVAL_CARD_DELIVERY_STALE', statusCode: 409 })
+    // node1 was NOT approved by the malformed card channel.
+    const rec = await q(`SELECT COUNT(*)::int AS c FROM approval_records WHERE instance_id = $1 AND action = 'approve'`, [instanceId])
+    expect((rec.rows[0] as { c: number }).c).toBe(0)
+  })
+
   test('P1-1 wrapper maps the engine STALE code to `stale` (not engine_rejected) — FIX 2', async () => {
     // A deterministic non-concurrent DB state cannot make the wrapper pre-read PASS while the engine's
     // in-txn guard throws (the active-assignment unique index limits an assignee to ONE active seat per

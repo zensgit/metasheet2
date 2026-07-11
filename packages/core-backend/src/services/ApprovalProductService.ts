@@ -4884,8 +4884,21 @@ export class ApprovalProductService {
       //   STRICT epoch (no null-pass arm): the card must carry a NON-NULL entry_epoch equal to a
       //   NON-NULL epoch on a live seat the actor holds at that node. A NULL delivery epoch (a legacy
       //   card the migration failed to backfill) is NOT actionable — fail-closed.
-      if (request.channelOrigin?.channel === 'dingtalk_card' && request.channelOrigin.cardDeliveryId) {
+      if (request.channelOrigin?.channel === 'dingtalk_card') {
+        // Review NIT (defense-in-depth): a card-channel action MUST carry the delivery id — the
+        // whole point of the binding is that a card action is bound to its delivery. A dingtalk_card
+        // origin with no cardDeliveryId can never be validated, so treat it as STALE rather than
+        // silently skipping the guard. (Not reachable today — the wrapper is the sole producer and
+        // always sets it, and the HTTP route never forwards channelOrigin — but the guard must not
+        // depend on that invariant holding forever.)
         const cardDeliveryId = request.channelOrigin.cardDeliveryId
+        if (!cardDeliveryId) {
+          throw new ServiceError(
+            'Approval card is no longer valid for the current node',
+            409,
+            'APPROVAL_CARD_DELIVERY_STALE',
+          )
+        }
         const deliveryResult = await client.query<{
           instance_id: string
           node_key: string

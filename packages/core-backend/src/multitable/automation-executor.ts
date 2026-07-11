@@ -2730,6 +2730,15 @@ export class AutomationExecutor {
     // Ledger FIRST — the row is the only legitimate delivery → instance anchor.
     const entryEpochRaw = event.task?.entryEpoch
     const sourceStepRaw = event.task?.sourceStep
+    if (typeof entryEpochRaw !== 'number') {
+      // Review P3-1: a card with no node-entry epoch is dead-on-arrival under the strict binding
+      // (never actionable). Surface it (values-free: ids + node only) instead of shipping silently.
+      logger.warn('DingTalk approval card sent with no node-entry epoch — will not be actionable (fail-closed)', {
+        instanceId,
+        nodeKey,
+        ruleId: context.ruleId,
+      })
+    }
     const delivery = await insertDingTalkApprovalCardDelivery(this.deps.queryFn, {
       instanceId,
       nodeKey,
@@ -2737,9 +2746,11 @@ export class AutomationExecutor {
       recipientDingTalkUserId: dingtalkUserId,
       deliveryKind: useInteractiveCard ? 'interactive_card' : 'work_notice_action_card',
       integrationId: assigneeIntegrationId || null,
-      // P1-1: persist the node-entry epoch this card is sent for so the action wrapper can bind the
-      // card to the SAME round's active assignment (closes same-node re-entry). Legacy/epoch-less
-      // events pass null → the wrapper skips the epoch clause (dual-read).
+      // P1-1: persist the node-entry epoch this card is sent for so the action wrapper + the engine's
+      // in-txn binding can bind the card to the SAME round's active assignment (closes same-node
+      // re-entry). Review P3-1: under the STRICT binding a NULL epoch is NOT actionable (fail-closed
+      // dead-on-arrival), so a null here means this card will never be clickable — warn (values-free)
+      // rather than silently ship a dead card. Expected only for pre-epoch/legacy task events.
       entryEpoch: typeof entryEpochRaw === 'number' ? entryEpochRaw : null,
     })
 
