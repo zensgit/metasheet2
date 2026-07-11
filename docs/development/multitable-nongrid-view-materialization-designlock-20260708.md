@@ -1,11 +1,12 @@
 # Multitable — 非网格视图物化（Non-Grid View Materialization） — DESIGN LOCK
 
-状态：PROPOSED — 待 owner ratify
+状态：RATIFIED（owner directive 2026-07-11）
+> **RATIFIED — owner directive 2026-07-11**（批 12 把 merge-tree-clean 锁）。header 状态由 owner 决定翻转、Claude 机械执行(非自我批准)。锁内 per-tier owner 子决定(如变体/env-cap/storage opt-in)仍各自留待 owner。
 
 - 本文件为**纯文档**；未经 owner ratify 不得开工任何运行时切片。本锁不自我批准。
 - **✅ 已经独立对抗门禁（MERGE_CLEAN，2026-07-08）**——载重声明全部代码坐实（五视图共绑同一页无分页/工具栏对每视图显示 pre-deny total/层级丢弃已加载行/甘特坐标系是截断的函数/画廊有翻页器故排除/INV-3 pre-deny 且不碰权限码），无 P1/P2。门禁 P3 已并入：INV-4 补「行否决残差第四态」+ §5.1-B/B 行补该态判据与 mount 断言。报告 `/tmp/nongrid-materialization-lock-gate-20260708.md`。
 - **基线**：`origin/main` @ `3c7c97111`。下文每条"现状"断言均给出 `file:line`，均在该 commit 上逐条复核过。
-- **姊妹锁**：`docs/development/multitable-crosspage-grouping-datamodel-designlock-20260708.md`（PROPOSED）。
+- **姊妹锁**：`docs/development/multitable-crosspage-grouping-datamodel-designlock-20260708.md`（RATIFIED）。
   两锁的接缝在 §0 明确划定；凡涉及**分组真值**的问题，一律以姊妹锁为唯一真源，本锁不另立词汇。
 - **变更面（ratify 后按梯子分切片）**：`apps/web/src/multitable/components/Meta{Kanban,Calendar,Gantt,Timeline,Hierarchy}View.vue`、
   `apps/web/src/multitable/views/MultitableWorkbench.vue`（**共享装配热文件**，见 §5.0）、
