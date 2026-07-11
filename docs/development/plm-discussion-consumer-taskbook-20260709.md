@@ -95,6 +95,22 @@ interface PlmDiscussionProvider {
    mentionable-users` (tenant-safe, id+username only) — no client-side
    identity caching or scraping.
 
+> **Gate-2 REWORKED contract (owner-ratified, Yuantus provider #1188, live).**
+> Supersedes the "dedicated `aud`, target-scoped, refreshable" sketch in point
+> 1 above with the shipped shape: the session credential is **type-restricted**
+> (`typ=discussion_session`, `aud=discussion`) and **scope-bound** to
+> `part_id`/`feature_key`/`embed_origin` (baked into the token, re-checked
+> **route-scoped** on each of the 6 write routes individually — never accepted
+> on the shared session-JWT funnel/middleware). The mint is
+> `POST /api/v1/auth/embed/discussion-session`, dark-flag gated
+> (`DISCUSSION_SESSION_ENABLED`, default **OFF**); while off, every exchange —
+> valid or invalid embed token alike — returns the same uniform 401. **There is
+> NO refresh in v1**: a caller whose credential expires re-exchanges from a
+> fresh embed token. Write-time entitlement is a dedicated own-SKU,
+> **`metasheet_review_writeback`** (freshly checked per write) — **not** the
+> read-side `metasheet_review` gate in §6. Consumer implementation: Lane C
+> (`PLMAdapter.exchangeDiscussionSession` + the 6 write methods).
+
 ## 5. Notifications
 
 - Cross-system dedup key = the Yuantus outbox occurrence nonce
@@ -114,6 +130,12 @@ interface PlmDiscussionProvider {
   absent, zero broken UI; discussion data remains in Yuantus and stays
   readable on PLM surfaces ("data outlives the add-on") — assert both in the
   downgrade tests.
+- **Gate-2 REWORKED contract note:** the `metasheet_review` gate above is
+  READ-ONLY. Write-time (C2/Lane C) gates on the **separate, own-SKU**
+  `metasheet_review_writeback` entitlement, freshly checked by the provider on
+  every write call — a caller entitled to read discussions is not
+  automatically entitled to write them. See §4's Gate-2 callout for the full
+  session-credential shape this gate sits behind.
 
 ## 7. Pact sequencing
 

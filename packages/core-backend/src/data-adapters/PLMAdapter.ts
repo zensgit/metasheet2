@@ -933,6 +933,54 @@ export interface DiscussionThreadDetail extends DiscussionThreadSummary {
   history?: Array<Record<string, unknown>>;
 }
 
+/**
+ * PLM-COLLAB Discussion Phase 3 slice-2 (WRITE) consumer types: the discussion-session
+ * credential exchange plus the six write routes it authorizes. Gate-2 REWORKED contract
+ * (owner-ratified rework of Yuantus provider #1188): the credential is minted from the SAME
+ * BOM-review embed token (feature_key="bom_multitable") via a dedicated pre-auth exchange
+ * (`POST /api/v1/auth/embed/discussion-session`, no Authorization header, JSON body). The
+ * minted access_token is type-restricted (`typ=discussion_session`) and scope-bound
+ * (part_id/feature_key/embed_origin), checked ROUTE-SCOPED on each of the 6 write routes only
+ * -- never accepted on the shared session-JWT funnel/middleware. There is NO refresh in v1: a
+ * caller whose credential expires must re-exchange from a fresh embed token. Write-time
+ * entitlement is the credential's OWN SKU `metasheet_review_writeback` (freshly checked per
+ * write; distinct from the read-side `metasheet_review`). The whole exchange is dark-flag gated
+ * server-side (`DISCUSSION_SESSION_ENABLED`, default OFF); while off, EVERY exchange attempt
+ * (valid or invalid embed token alike) returns the SAME uniform 401 -- this consumer must never
+ * try to distinguish "flag off" from "bad token".
+ */
+export interface DiscussionSessionCredential {
+  access_token: string;
+  token_type: string;
+  expires_in: number;
+  aud: string;
+}
+
+export interface CreateThreadRequest {
+  target_type: DiscussionTargetType;
+  target_id: string;
+  title?: string;
+  body: string;
+  mentioned_user_ids?: number[];
+  anchor?: Record<string, unknown> | null;
+}
+
+export interface AddCommentRequest {
+  body: string;
+  parent_comment_id?: string;
+  mentioned_user_ids?: number[];
+  anchor?: Record<string, unknown> | null;
+}
+
+export interface EditCommentRequest {
+  body: string;
+}
+
+export interface ThreadTransitionRequest {
+  comment?: string;
+  mentioned_user_ids?: number[];
+}
+
 export class PLMAdapter extends HTTPAdapter {
   private mockMode = false;
   private apiMode: PLMApiMode = 'legacy';
@@ -2499,6 +2547,363 @@ export class PLMAdapter extends HTTPAdapter {
     if (options?.includeHistory) params.include_history = options.includeHistory
 
     return this.query<DiscussionThreadDetail>(`/api/v1/discussions/${threadId}`, [params])
+  }
+
+  /**
+   * PLM-COLLAB Discussion Phase 3 slice-2 (WRITE): shared raw-fetch transport for the
+   * discussion-session exchange and the six write routes. Deliberately bypasses
+   * `this.select`/`this.query` -- HTTPAdapter's request interceptor (see `connect()` above)
+   * unconditionally overwrites `Authorization` with the adapter's own service token, which
+   * would silently replace the caller-supplied discussion-session bearer token with the wrong
+   * credential. `headers.Authorization`, when present, is therefore set by the CALLER on each
+   * invocation -- never cached on `this`. Never throws: network failures and non-2xx responses
+   * alike come back as `QueryResult.error`, mirroring the envelope the read methods return.
+   */
+  private async yuantusDiscussionFetch<T>(
+    path: string,
+    init: { method: string; headers?: Record<string, string>; body?: unknown },
+  ): Promise<QueryResult<T>> {
+    const baseUrl = this.config.connection.baseURL || this.config.connection.url
+    if (!baseUrl) {
+      return { data: [], error: new Error('PLM base URL is not configured') }
+    }
+
+    let response: Awaited<ReturnType<typeof fetch>>
+    try {
+      response = await fetch(`${baseUrl}${path}`, {
+        method: init.method,
+        headers: {
+          'Content-Type': 'application/json',
+          ...(init.headers || {}),
+        },
+        body: init.body !== undefined ? JSON.stringify(init.body) : undefined,
+      })
+    } catch (err) {
+      return { data: [], error: err instanceof Error ? err : new Error(String(err)) }
+    }
+
+    let payload: unknown
+    try {
+      payload = await response.json()
+    } catch {
+      payload = undefined
+    }
+
+    if (!response.ok) {
+      const detail = payload && typeof payload === 'object' && 'detail' in (payload as Record<string, unknown>)
+        ? (payload as Record<string, unknown>).detail
+        : undefined
+      const message = typeof detail === 'string'
+        ? detail
+        : `PLM discussion request failed with status ${response.status}`
+      return {
+        data: [],
+        error: Object.assign(new Error(message), { response: { status: response.status, data: payload } }),
+      }
+    }
+
+    return { data: [payload as T], metadata: { totalCount: 1 } }
+  }
+
+  /**
+   * PLM-COLLAB Discussion Phase 3 slice-2 (WRITE): exchange the BOM-review embed token
+   * (feature_key="bom_multitable") for a discussion-session credential
+   * (`POST /api/v1/auth/embed/discussion-session`). Pre-auth -- sends NO Authorization header.
+   * Fail-closed and uniform: dark-flag-off and an invalid/expired embed token both come back as
+   * the SAME 401, surfaced as `QueryResult.error`, never thrown. The returned `access_token`
+   * MUST be passed explicitly to every write method below; this adapter never stores it.
+   */
+  async exchangeDiscussionSession(embedToken: string): Promise<QueryResult<DiscussionSessionCredential>> {
+    if (this.mockMode) {
+      return {
+        data: [{ access_token: 'mock-discussion-session-token', token_type: 'bearer', expires_in: 300, aud: 'discussion' }],
+        metadata: { totalCount: 1 },
+      }
+    }
+    if (this.apiMode !== 'yuantus') {
+      return { data: [], error: new Error('Discussion writes are not supported for this PLM API mode') }
+    }
+
+    return this.yuantusDiscussionFetch<DiscussionSessionCredential>('/api/v1/auth/embed/discussion-session', {
+      method: 'POST',
+      body: { embed_token: embedToken },
+    })
+  }
+
+  /**
+   * PLM-COLLAB Discussion Phase 3 slice-2 (WRITE): open a new discussion thread
+   * (`POST /api/v1/discussions`). `sessionToken` is the `access_token` from
+   * `exchangeDiscussionSession`, passed explicitly on every call -- see the type-block docstring
+   * above for why it is never cached on the adapter instance.
+   */
+  async createDiscussionThread(
+    sessionToken: string,
+    req: CreateThreadRequest,
+  ): Promise<QueryResult<DiscussionThreadDetail>> {
+    if (this.mockMode) {
+      return {
+        data: [{
+          id: 'mock-thread-1',
+          target_type: req.target_type,
+          target_id: req.target_id,
+          title: req.title ?? null,
+          status: 'open',
+          created_by_id: 1,
+          created_at: new Date().toISOString(),
+          resolved_by_id: null,
+          resolved_at: null,
+          last_comment_at: new Date().toISOString(),
+          comment_count: 1,
+          anchor: req.anchor ?? null,
+          comments: [],
+        }],
+        metadata: { totalCount: 1 },
+      }
+    }
+    if (this.apiMode !== 'yuantus') {
+      return { data: [], error: new Error('Discussion writes are not supported for this PLM API mode') }
+    }
+
+    return this.yuantusDiscussionFetch<DiscussionThreadDetail>('/api/v1/discussions', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${sessionToken}` },
+      body: req,
+    })
+  }
+
+  /**
+   * PLM-COLLAB Discussion Phase 3 slice-2 (WRITE): reply on an existing thread
+   * (`POST /api/v1/discussions/{threadId}/comments`).
+   */
+  async addDiscussionComment(
+    sessionToken: string,
+    threadId: string,
+    req: AddCommentRequest,
+  ): Promise<QueryResult<DiscussionThreadDetail>> {
+    if (this.mockMode) {
+      return {
+        data: [{
+          id: threadId,
+          target_type: 'item',
+          target_id: 'mock-item-1',
+          title: 'Mock discussion thread',
+          status: 'open',
+          created_by_id: 1,
+          created_at: new Date().toISOString(),
+          resolved_by_id: null,
+          resolved_at: null,
+          last_comment_at: new Date().toISOString(),
+          comment_count: 1,
+          anchor: null,
+          comments: [{
+            id: 'mock-comment-1',
+            parent_comment_id: req.parent_comment_id ?? null,
+            body: req.body,
+            body_format: 'text',
+            author_user_id: 1,
+            mentioned_user_ids: req.mentioned_user_ids ?? [],
+            created_at: new Date().toISOString(),
+            edited_at: null,
+            deleted_at: null,
+            anchor: req.anchor ?? null,
+          }],
+        }],
+        metadata: { totalCount: 1 },
+      }
+    }
+    if (this.apiMode !== 'yuantus') {
+      return { data: [], error: new Error('Discussion writes are not supported for this PLM API mode') }
+    }
+
+    return this.yuantusDiscussionFetch<DiscussionThreadDetail>(`/api/v1/discussions/${threadId}/comments`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${sessionToken}` },
+      body: req,
+    })
+  }
+
+  /**
+   * PLM-COLLAB Discussion Phase 3 slice-2 (WRITE): edit a comment's body
+   * (`PATCH /api/v1/discussions/{threadId}/comments/{commentId}`).
+   */
+  async editDiscussionComment(
+    sessionToken: string,
+    threadId: string,
+    commentId: string,
+    req: EditCommentRequest,
+  ): Promise<QueryResult<DiscussionThreadDetail>> {
+    if (this.mockMode) {
+      return {
+        data: [{
+          id: threadId,
+          target_type: 'item',
+          target_id: 'mock-item-1',
+          title: 'Mock discussion thread',
+          status: 'open',
+          created_by_id: 1,
+          created_at: new Date().toISOString(),
+          resolved_by_id: null,
+          resolved_at: null,
+          last_comment_at: new Date().toISOString(),
+          comment_count: 1,
+          anchor: null,
+          comments: [{
+            id: commentId,
+            parent_comment_id: null,
+            body: req.body,
+            body_format: 'text',
+            author_user_id: 1,
+            mentioned_user_ids: [],
+            created_at: new Date().toISOString(),
+            edited_at: new Date().toISOString(),
+            deleted_at: null,
+            anchor: null,
+          }],
+        }],
+        metadata: { totalCount: 1 },
+      }
+    }
+    if (this.apiMode !== 'yuantus') {
+      return { data: [], error: new Error('Discussion writes are not supported for this PLM API mode') }
+    }
+
+    return this.yuantusDiscussionFetch<DiscussionThreadDetail>(`/api/v1/discussions/${threadId}/comments/${commentId}`, {
+      method: 'PATCH',
+      headers: { Authorization: `Bearer ${sessionToken}` },
+      body: req,
+    })
+  }
+
+  /**
+   * PLM-COLLAB Discussion Phase 3 slice-2 (WRITE): soft-delete a comment (body/anchor redacted
+   * to null server-side, row kept for audit) -- `DELETE
+   * /api/v1/discussions/{threadId}/comments/{commentId}`. No request body.
+   */
+  async deleteDiscussionComment(
+    sessionToken: string,
+    threadId: string,
+    commentId: string,
+  ): Promise<QueryResult<DiscussionThreadDetail>> {
+    if (this.mockMode) {
+      return {
+        data: [{
+          id: threadId,
+          target_type: 'item',
+          target_id: 'mock-item-1',
+          title: 'Mock discussion thread',
+          status: 'open',
+          created_by_id: 1,
+          created_at: new Date().toISOString(),
+          resolved_by_id: null,
+          resolved_at: null,
+          last_comment_at: new Date().toISOString(),
+          comment_count: 1,
+          anchor: null,
+          comments: [{
+            id: commentId,
+            parent_comment_id: null,
+            body: null,
+            body_format: 'text',
+            author_user_id: 1,
+            mentioned_user_ids: [],
+            created_at: new Date().toISOString(),
+            edited_at: null,
+            deleted_at: new Date().toISOString(),
+            anchor: null,
+          }],
+        }],
+        metadata: { totalCount: 1 },
+      }
+    }
+    if (this.apiMode !== 'yuantus') {
+      return { data: [], error: new Error('Discussion writes are not supported for this PLM API mode') }
+    }
+
+    return this.yuantusDiscussionFetch<DiscussionThreadDetail>(`/api/v1/discussions/${threadId}/comments/${commentId}`, {
+      method: 'DELETE',
+      headers: { Authorization: `Bearer ${sessionToken}` },
+    })
+  }
+
+  /**
+   * PLM-COLLAB Discussion Phase 3 slice-2 (WRITE): transition a thread to resolved
+   * (`POST /api/v1/discussions/{threadId}/resolve`). `req` is optional -- an empty object is
+   * sent when the caller resolves without a closing comment/mentions.
+   */
+  async resolveDiscussionThread(
+    sessionToken: string,
+    threadId: string,
+    req?: ThreadTransitionRequest,
+  ): Promise<QueryResult<DiscussionThreadDetail>> {
+    if (this.mockMode) {
+      return {
+        data: [{
+          id: threadId,
+          target_type: 'item',
+          target_id: 'mock-item-1',
+          title: 'Mock discussion thread',
+          status: 'resolved',
+          created_by_id: 1,
+          created_at: new Date().toISOString(),
+          resolved_by_id: 1,
+          resolved_at: new Date().toISOString(),
+          last_comment_at: new Date().toISOString(),
+          comment_count: 1,
+          anchor: null,
+          comments: [],
+        }],
+        metadata: { totalCount: 1 },
+      }
+    }
+    if (this.apiMode !== 'yuantus') {
+      return { data: [], error: new Error('Discussion writes are not supported for this PLM API mode') }
+    }
+
+    return this.yuantusDiscussionFetch<DiscussionThreadDetail>(`/api/v1/discussions/${threadId}/resolve`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${sessionToken}` },
+      body: req ?? {},
+    })
+  }
+
+  /**
+   * PLM-COLLAB Discussion Phase 3 slice-2 (WRITE): transition a resolved thread back to open
+   * (`POST /api/v1/discussions/{threadId}/reopen`). `req` is optional, same shape as resolve.
+   */
+  async reopenDiscussionThread(
+    sessionToken: string,
+    threadId: string,
+    req?: ThreadTransitionRequest,
+  ): Promise<QueryResult<DiscussionThreadDetail>> {
+    if (this.mockMode) {
+      return {
+        data: [{
+          id: threadId,
+          target_type: 'item',
+          target_id: 'mock-item-1',
+          title: 'Mock discussion thread',
+          status: 'open',
+          created_by_id: 1,
+          created_at: new Date().toISOString(),
+          resolved_by_id: null,
+          resolved_at: null,
+          last_comment_at: new Date().toISOString(),
+          comment_count: 1,
+          anchor: null,
+          comments: [],
+        }],
+        metadata: { totalCount: 1 },
+      }
+    }
+    if (this.apiMode !== 'yuantus') {
+      return { data: [], error: new Error('Discussion writes are not supported for this PLM API mode') }
+    }
+
+    return this.yuantusDiscussionFetch<DiscussionThreadDetail>(`/api/v1/discussions/${threadId}/reopen`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${sessionToken}` },
+      body: req ?? {},
+    })
   }
 
   async getApprovals(options?: ApprovalQueryOptions): Promise<QueryResult<ApprovalRequest>> {

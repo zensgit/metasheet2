@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from 'vitest'
+import { describe, it, expect, vi, beforeEach, type Mock } from 'vitest'
 import { PLMAdapter } from '../../src/data-adapters/PLMAdapter'
 
 const createAdapter = () => {
@@ -1290,5 +1290,308 @@ describe('PLMAdapter Yuantus discussion reads', () => {
     const detailResult = await adapter.getDiscussionThread('thread-1')
     expect(detailResult.data).toHaveLength(0)
     expect(detailResult.error).toBeDefined()
+  })
+})
+
+// PLM-COLLAB Discussion Phase 3 slice-2 (WRITE): exchangeDiscussionSession + the six write
+// methods. AUTH IS DIFFERENT FROM THE READS ABOVE -- these bypass this.select/this.query (the
+// HTTPAdapter request interceptor unconditionally overwrites Authorization with the adapter's
+// own service token) and issue a raw fetch() instead, carrying the discussion-session bearer
+// token as an EXPLICIT per-call parameter that is never cached on the adapter instance.
+describe('PLMAdapter Yuantus discussion writes', () => {
+  const jsonResponse = (status: number, body: unknown) => ({
+    ok: status >= 200 && status < 300,
+    status,
+    json: async () => body,
+  })
+
+  const threadDetail = (overrides: Record<string, unknown> = {}) => ({
+    id: 'thread-1',
+    target_type: 'item',
+    target_id: 'item-1',
+    title: 'Check tolerance',
+    status: 'open',
+    created_by_id: 1,
+    created_at: '2026-07-09T00:00:00.000Z',
+    resolved_by_id: null,
+    resolved_at: null,
+    last_comment_at: '2026-07-09T00:05:00.000Z',
+    comment_count: 1,
+    anchor: null,
+    comments: [],
+    ...overrides,
+  })
+
+  beforeEach(() => {
+    ;(fetch as Mock).mockClear()
+  })
+
+  it('exchanges a valid embed token for a discussion-session credential, sending NO Authorization header', async () => {
+    const adapter = createAdapter()
+    const fetchMock = fetch as Mock
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, {
+      access_token: 'session-token-abc',
+      token_type: 'bearer',
+      expires_in: 300,
+      aud: 'discussion',
+    }))
+
+    const result = await adapter.exchangeDiscussionSession('embed-token-1')
+
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    const [url, init] = fetchMock.mock.calls[0]
+    expect(url).toBe('http://localhost:8001/api/v1/auth/embed/discussion-session')
+    expect(init.method).toBe('POST')
+    expect(JSON.parse(init.body)).toEqual({ embed_token: 'embed-token-1' })
+    expect(init.headers).not.toHaveProperty('Authorization')
+
+    expect(result.error).toBeUndefined()
+    expect(result.data[0]).toMatchObject({ access_token: 'session-token-abc', aud: 'discussion' })
+  })
+
+  it('fails closed and uniform on a 401 exchange (dark-flag-off and an invalid token are indistinguishable)', async () => {
+    const adapter = createAdapter()
+    const fetchMock = fetch as Mock
+    fetchMock.mockResolvedValueOnce(jsonResponse(401, { detail: 'invalid or expired embed token' }))
+
+    const result = await adapter.exchangeDiscussionSession('bad-embed-token')
+
+    expect(result.data).toHaveLength(0)
+    expect(result.error).toBeDefined()
+    expect((result.error as any)?.response?.status).toBe(401)
+  })
+
+  it('creates a discussion thread, carrying the caller-supplied bearer token', async () => {
+    const adapter = createAdapter()
+    const fetchMock = fetch as Mock
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, threadDetail({ id: 'thread-new' })))
+
+    const result = await adapter.createDiscussionThread('session-token-1', {
+      target_type: 'item',
+      target_id: 'item-1',
+      title: 'New thread',
+      body: 'first comment',
+    })
+
+    const [url, init] = fetchMock.mock.calls[0]
+    expect(url).toBe('http://localhost:8001/api/v1/discussions')
+    expect(init.method).toBe('POST')
+    expect(init.headers.Authorization).toBe('Bearer session-token-1')
+    expect(JSON.parse(init.body)).toEqual({
+      target_type: 'item',
+      target_id: 'item-1',
+      title: 'New thread',
+      body: 'first comment',
+    })
+    expect(result.error).toBeUndefined()
+    expect(result.data[0]).toMatchObject({ id: 'thread-new', status: 'open' })
+  })
+
+  it('rejects an invalid create-thread payload (422) as a QueryResult error, never throwing', async () => {
+    const adapter = createAdapter()
+    const fetchMock = fetch as Mock
+    fetchMock.mockResolvedValueOnce(jsonResponse(422, { detail: 'unknown target_type' }))
+
+    const result = await adapter.createDiscussionThread('session-token-1', {
+      target_type: 'item',
+      target_id: 'item-1',
+      body: '',
+    })
+
+    expect(result.data).toHaveLength(0)
+    expect(result.error).toBeDefined()
+    expect((result.error as any)?.response?.status).toBe(422)
+  })
+
+  it('adds a comment to an existing thread', async () => {
+    const adapter = createAdapter()
+    const fetchMock = fetch as Mock
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, threadDetail({
+      comment_count: 2,
+      comments: [{
+        id: 'comment-new',
+        parent_comment_id: null,
+        body: 'Confirmed with vendor',
+        body_format: 'text',
+        author_user_id: 1,
+        mentioned_user_ids: [],
+        created_at: '2026-07-09T00:06:00.000Z',
+        edited_at: null,
+        deleted_at: null,
+        anchor: null,
+      }],
+    })))
+
+    const result = await adapter.addDiscussionComment('session-token-1', 'thread-1', {
+      body: 'Confirmed with vendor',
+    })
+
+    const [url, init] = fetchMock.mock.calls[0]
+    expect(url).toBe('http://localhost:8001/api/v1/discussions/thread-1/comments')
+    expect(init.method).toBe('POST')
+    expect(init.headers.Authorization).toBe('Bearer session-token-1')
+    expect(JSON.parse(init.body)).toEqual({ body: 'Confirmed with vendor' })
+    expect(result.error).toBeUndefined()
+    expect(result.data[0].comments[0]).toMatchObject({ id: 'comment-new', body: 'Confirmed with vendor' })
+  })
+
+  it('surfaces a forbidden comment write (out-of-scope / no can_comment) as a QueryResult error, never throwing', async () => {
+    const adapter = createAdapter()
+    const fetchMock = fetch as Mock
+    fetchMock.mockResolvedValueOnce(jsonResponse(403, { detail: 'not permitted to comment on this discussion' }))
+
+    const result = await adapter.addDiscussionComment('session-token-1', 'thread-1', { body: 'hi' })
+
+    expect(result.data).toHaveLength(0)
+    expect(result.error).toBeDefined()
+    expect((result.error as any)?.response?.status).toBe(403)
+  })
+
+  it('edits a comment', async () => {
+    const adapter = createAdapter()
+    const fetchMock = fetch as Mock
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, threadDetail({
+      comments: [{
+        id: 'comment-1',
+        parent_comment_id: null,
+        body: 'Updated body',
+        body_format: 'text',
+        author_user_id: 1,
+        mentioned_user_ids: [],
+        created_at: '2026-07-09T00:05:00.000Z',
+        edited_at: '2026-07-09T00:07:00.000Z',
+        deleted_at: null,
+        anchor: null,
+      }],
+    })))
+
+    const result = await adapter.editDiscussionComment('session-token-1', 'thread-1', 'comment-1', {
+      body: 'Updated body',
+    })
+
+    const [url, init] = fetchMock.mock.calls[0]
+    expect(url).toBe('http://localhost:8001/api/v1/discussions/thread-1/comments/comment-1')
+    expect(init.method).toBe('PATCH')
+    expect(init.headers.Authorization).toBe('Bearer session-token-1')
+    expect(JSON.parse(init.body)).toEqual({ body: 'Updated body' })
+    expect(result.error).toBeUndefined()
+    expect(result.data[0].comments[0]).toMatchObject({ id: 'comment-1', body: 'Updated body' })
+  })
+
+  it('deletes (soft) a comment, sending DELETE with no request body', async () => {
+    const adapter = createAdapter()
+    const fetchMock = fetch as Mock
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, threadDetail({
+      comments: [{
+        id: 'comment-1',
+        parent_comment_id: null,
+        body: null,
+        body_format: 'text',
+        author_user_id: 1,
+        mentioned_user_ids: [],
+        created_at: '2026-07-09T00:05:00.000Z',
+        edited_at: null,
+        deleted_at: '2026-07-09T00:08:00.000Z',
+        anchor: null,
+      }],
+    })))
+
+    const result = await adapter.deleteDiscussionComment('session-token-1', 'thread-1', 'comment-1')
+
+    const [url, init] = fetchMock.mock.calls[0]
+    expect(url).toBe('http://localhost:8001/api/v1/discussions/thread-1/comments/comment-1')
+    expect(init.method).toBe('DELETE')
+    expect(init.headers.Authorization).toBe('Bearer session-token-1')
+    expect(init.body).toBeUndefined()
+    expect(result.error).toBeUndefined()
+    expect(result.data[0].comments[0]).toMatchObject({ id: 'comment-1', body: null, deleted_at: expect.any(String) })
+  })
+
+  it('surfaces a missing/unreadable thread as a no-leak 404 QueryResult error on delete, never throwing', async () => {
+    const adapter = createAdapter()
+    const fetchMock = fetch as Mock
+    fetchMock.mockResolvedValueOnce(jsonResponse(404, { detail: 'discussion target not found' }))
+
+    const result = await adapter.deleteDiscussionComment('session-token-1', 'thread-missing', 'comment-1')
+
+    expect(result.data).toHaveLength(0)
+    expect(result.error).toBeDefined()
+    expect((result.error as any)?.response?.status).toBe(404)
+  })
+
+  it('resolves a thread', async () => {
+    const adapter = createAdapter()
+    const fetchMock = fetch as Mock
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, threadDetail({
+      status: 'resolved',
+      resolved_by_id: 1,
+      resolved_at: '2026-07-09T00:09:00.000Z',
+    })))
+
+    const result = await adapter.resolveDiscussionThread('session-token-1', 'thread-1', { comment: 'Done' })
+
+    const [url, init] = fetchMock.mock.calls[0]
+    expect(url).toBe('http://localhost:8001/api/v1/discussions/thread-1/resolve')
+    expect(init.method).toBe('POST')
+    expect(init.headers.Authorization).toBe('Bearer session-token-1')
+    expect(JSON.parse(init.body)).toEqual({ comment: 'Done' })
+    expect(result.error).toBeUndefined()
+    expect(result.data[0]).toMatchObject({ status: 'resolved' })
+  })
+
+  it('resolves a thread with no closing comment, sending an empty JSON body', async () => {
+    const adapter = createAdapter()
+    const fetchMock = fetch as Mock
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, threadDetail({ status: 'resolved' })))
+
+    await adapter.resolveDiscussionThread('session-token-1', 'thread-1')
+
+    const [, init] = fetchMock.mock.calls[0]
+    expect(JSON.parse(init.body)).toEqual({})
+  })
+
+  it('reopens a thread', async () => {
+    const adapter = createAdapter()
+    const fetchMock = fetch as Mock
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, threadDetail({ status: 'open' })))
+
+    const result = await adapter.reopenDiscussionThread('session-token-1', 'thread-1', { comment: 'Reopening' })
+
+    const [url, init] = fetchMock.mock.calls[0]
+    expect(url).toBe('http://localhost:8001/api/v1/discussions/thread-1/reopen')
+    expect(init.method).toBe('POST')
+    expect(init.headers.Authorization).toBe('Bearer session-token-1')
+    expect(JSON.parse(init.body)).toEqual({ comment: 'Reopening' })
+    expect(result.error).toBeUndefined()
+    expect(result.data[0]).toMatchObject({ status: 'open' })
+  })
+
+  it('never caches a session token between calls -- concurrent embed sessions each carry their own bearer token', async () => {
+    const adapter = createAdapter()
+    const fetchMock = fetch as Mock
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, threadDetail({ id: 'thread-a' })))
+    await adapter.addDiscussionComment('token-A', 'thread-a', { body: 'from A' })
+
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, threadDetail({ id: 'thread-b' })))
+    await adapter.addDiscussionComment('token-B', 'thread-b', { body: 'from B' })
+
+    expect(fetchMock.mock.calls).toHaveLength(2)
+    expect(fetchMock.mock.calls[0][1].headers.Authorization).toBe('Bearer token-A')
+    expect(fetchMock.mock.calls[1][1].headers.Authorization).toBe('Bearer token-B')
+  })
+
+  it('is not gated by apiMode !== yuantus (legacy PLM has no discussion write surface)', async () => {
+    const adapter = createAdapter()
+    ;(adapter as any).apiMode = 'legacy'
+    const fetchMock = fetch as Mock
+
+    const exchangeResult = await adapter.exchangeDiscussionSession('embed-token-1')
+    expect(exchangeResult.error).toBeDefined()
+
+    const writeResult = await adapter.addDiscussionComment('session-token-1', 'thread-1', { body: 'hi' })
+    expect(writeResult.error).toBeDefined()
+
+    // never reaches the network in legacy mode
+    expect(fetchMock).not.toHaveBeenCalled()
   })
 })

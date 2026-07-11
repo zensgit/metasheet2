@@ -137,6 +137,17 @@ const PLM_ADAPTER_PACT_PATHS = [
   { method: 'GET', path: '/api/v1/discussions' },
   { method: 'GET', path: '/api/v1/discussions/01H000000000000000000000T2' },
   { method: 'GET', path: '/api/v1/discussions' },
+  // PLM-COLLAB Discussion Phase 3 slice-2 (WRITE, Gate-2 REWORKED contract): the
+  // discussion-session credential exchange plus a representative write success/forbidden pair.
+  // Only interactions backed by a provider PRE-REGISTERED state (named verbatim in the
+  // taskbook) are pact-frozen here -- the contract-first principle above forbids inventing a
+  // state name the provider does not actually expose. The adapter itself implements all 6
+  // write routes (see `endpointsToFind` below, which checks source presence, not pact
+  // interactions); the other 5 write routes share this same exchange + entitlement shape and
+  // are exercised at the unit-test layer (plm-adapter-yuantus.test.ts) instead of here.
+  { method: 'POST', path: '/api/v1/auth/embed/discussion-session' },
+  { method: 'POST', path: '/api/v1/discussions/01H000000000000000000000T2/comments' },
+  { method: 'POST', path: '/api/v1/discussions/01H000000000000000000000T2/comments' },
 ] as const
 
 const PARENT_HOST_PACT_PATHS = [
@@ -245,6 +256,15 @@ describe('Pact: Metasheet2 consumer -> YuantusPLM provider (Wave 1 + Wave 2 docu
       // PLM-COLLAB Discussion Phase 3 slice-1 (READ-ONLY)
       '/api/v1/discussions',
       '/api/v1/discussions/${threadId}',
+      // PLM-COLLAB Discussion Phase 3 slice-2 (WRITE): the exchange path + the write route
+      // templates. '/api/v1/discussions' (createDiscussionThread's POST target) is already
+      // covered by the read-slice entry above -- these are the remaining 6 write path
+      // templates (5 distinct templates: edit/delete share one) + the exchange path = 7.
+      '/api/v1/auth/embed/discussion-session',
+      '/api/v1/discussions/${threadId}/comments',
+      '/api/v1/discussions/${threadId}/comments/${commentId}',
+      '/api/v1/discussions/${threadId}/resolve',
+      '/api/v1/discussions/${threadId}/reopen',
     ]
     for (const ep of endpointsToFind) {
       expect(
@@ -466,6 +486,60 @@ describe('Pact: Metasheet2 consumer -> YuantusPLM provider (Wave 1 + Wave 2 docu
       const headers = (interaction.request.headers ?? {}) as Record<string, string>
       expect(headers.Authorization).toBeDefined()
     }
+  })
+
+  // PLM-COLLAB Discussion Phase 3 slice-2 (WRITE, Gate-2 REWORKED contract): the
+  // discussion-session credential exchange (pre-auth, NO Authorization header) plus a
+  // representative write success/forbidden pair on the same comments route -- mirrors the
+  // read-slice's own shape (one distinct exchange path, one write path exercised twice).
+  it('Discussion Phase 3 slice-2: the session exchange and a write success/forbidden pair are locked', () => {
+    const pact = loadPact()
+    const exchange = pact.interactions.find(
+      i => i.request.path === '/api/v1/auth/embed/discussion-session',
+    )
+    const writeInteractions = pact.interactions.filter(
+      i => i.request.path === '/api/v1/discussions/01H000000000000000000000T2/comments',
+    )
+    expect(exchange).toBeDefined()
+    expect(writeInteractions).toHaveLength(2)
+
+    // exchange: pre-auth, NO Authorization header, body is {embed_token}
+    expect(exchange!.request.method).toBe('POST')
+    expect(exchange!.request.headers?.Authorization).toBeUndefined()
+    expect(exchange!.request.body).toEqual({ embed_token: expect.any(String) })
+    expect(exchange!.response.status).toBe(200)
+    const credential = exchange!.response.body as Record<string, unknown>
+    expect(credential).toMatchObject({
+      access_token: expect.any(String),
+      token_type: expect.any(String),
+      expires_in: expect.any(Number),
+      aud: 'discussion',
+    })
+    expect(exchange!.providerStates![0].name).toBe(
+      'a valid embed token exchanges for a discussion-session credential',
+    )
+
+    // write success: Bearer-authorized with the exchanged credential, response is a thread detail
+    const writeSuccess = writeInteractions.find(i => i.response.status === 200)
+    expect(writeSuccess).toBeDefined()
+    expect(writeSuccess!.request.method).toBe('POST')
+    const successHeaders = (writeSuccess!.request.headers ?? {}) as Record<string, string>
+    expect(successHeaders.Authorization).toBeDefined()
+    const successRules = (writeSuccess!.request as unknown as { matchingRules?: { header?: Record<string, unknown> } })
+      .matchingRules
+    expect(successRules?.header).toHaveProperty('$.Authorization')
+    expect((writeSuccess!.response.body as Record<string, unknown>).comments).toBeDefined()
+    expect(writeSuccess!.providerStates![0].name).toBe(
+      'the discussion-session credential authorizes a comment write (can_comment true)',
+    )
+
+    // forbidden write: same route, same credential shape, provider denies (can_comment false)
+    const writeForbidden = writeInteractions.find(i => i.response.status === 403)
+    expect(writeForbidden).toBeDefined()
+    expect(writeForbidden!.providerStates![0].name).toBe(
+      'the discussion-session credential is forbidden from writing (can_comment false)',
+    )
+    expect(writeForbidden!.response.body).toEqual({ detail: expect.any(String) })
   })
 
   // ECO Phase 0: the discriminated-409 error contract (Yuantus provider #968 taskbook + #969 impl).
