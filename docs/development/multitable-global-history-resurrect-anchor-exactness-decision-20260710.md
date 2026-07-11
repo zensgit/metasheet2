@@ -1,7 +1,8 @@
-# Global History — PIT-resurrect 锚精确化 + response-shape — 决策 one-pager (PROPOSED)
+# Global History — PIT-resurrect 锚精确化 + response-shape — 决策 one-pager (RATIFIED — A′ · AS-BUILT R11)
 
-- **Status**: PROPOSED 决策文档；owner ratify 前零实现授权。R10 gate-front 工件（4c-3 wave 验证 §4 项 (1)(2)）。
-- **现状（R8 已诚实钉住）**：PIT-undelete 的 resurrect 侧无 trash 行可携锚，采用「该记录最新 `action='delete'` revision」启发式选锚（univer-meta.ts ~:10183）；多 vintage 场景**只会 under-replay 不会 over-replay**（R8 多 vintage/未捕获 vintage goldens + 注释诚实化已落 main）。restore 侧（trash 路径）锚精确，无此问题。
+- **Status**: **RATIFIED 2026-07-11（owner R11 directive: 「ratify 锚 A′ 并优先实现」）→ 选项 A′（服务端按 `asOf` T 推导锚）。AS-BUILT**：impl 落在本轮 anchor 分支——`univer-meta.ts` resurrect 锚查询由 `created_at DESC` latest-delete 启发式改为 `WHERE action='delete' AND created_at > $asOfIso ORDER BY created_at ASC, version ASC, id ASC LIMIT 1`；R8 goldens 翻断言为 vintage-exact + 新增同毫秒 tiebreak(D) + 边界(E) goldens（`multitable-undelete-inbound-resurrect-realdb.test.ts`）。零 wire、零 schema。**边界正确性核验（ratify 前）**：`reconstructRecordsAtT` 用 `created_at <= T`（record-reconstructor.ts:53），故 record 在 resurrect 集 ⟺ 其移除性 delete 严格 `> T`——锁定的 `> T` 是该边界的精确补集；`created_at == T` 的 delete ⇒ 该记录在 T 已不存在 ⇒ 本就不在 resurrect 集（golden E 钉住）。
+- ~~PROPOSED~~ 原始状态（保留供审计）：R10 gate-front 工件（4c-3 wave 验证 §4 项 (1)(2)）。
+- **历史现状（R8，已被本轮 A′ AS-BUILT 取代——保留供审计）**：PIT-undelete 的 resurrect 侧无 trash 行可携锚，R8 采用「该记录最新 `action='delete'` revision」`created_at DESC` 启发式选锚（univer-meta.ts ~:10183）；多 vintage 场景**只会 under-replay 不会 over-replay**（R8 多 vintage/未捕获 vintage goldens + 注释诚实化已落 main）。restore 侧（trash 路径）锚精确，无此问题。**R11 后**：resurrect 侧改为 asOf-derived vintage-exact 锚，under-replay 边界消除；restore 侧不变。
 
 ## 选项
 
@@ -19,4 +20,4 @@
 - 找不到时的语义：找不到 = 该记录 T 时刻未删，resurrect 集合本就不含它；以 goldens 钉边界（不回退启发式）。
 - Goldens：R8 的多 vintage/未捕获 vintage goldens 翻断言为精确重放；**新增同毫秒 golden**（两条 delete revision `created_at` 相同 → version/id tiebreak 选定且跨运行稳定）；锚选择突变（改回 latest-delete 启发式，或去掉任一 tiebreak 键）⇒ 对应 golden 红。
 
-- **解锁词**：owner 点头选项（A′/A/B/C）。选 C=关闭本项,从 owner 菜单划除。
+- **解锁词**：~~owner 点头选项（A′/A/B/C）~~ **已解锁 → A′（owner R11 directive 2026-07-11）**。本项从 owner 菜单出列（AS-BUILT）。
