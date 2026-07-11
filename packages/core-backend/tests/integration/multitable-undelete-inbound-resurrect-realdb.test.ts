@@ -19,8 +19,12 @@
  *   (C) flag OFF: byte-identical to pre-4c-3 (no undeleteInbound field).
  *   (D) same-millisecond tiebreak: two delete revisions share `created_at`; `version ASC, id ASC`
  *       selects a unique, stable anchor (mutation: `version DESC` flips which neighbour replays).
- *   (E) boundary: a delete at exactly `created_at == T` ⇒ record absent at T ⇒ NOT resurrected
- *       (the strict `> T` complements reconstruct's `<= T`).
+ *   (E) boundary — absent-at-T: a delete at exactly `created_at == T` is the record's latest revision ⇒
+ *       absent at T ⇒ NOT resurrected. Pins reconstruct's `<= T` EXCLUSION (the record never reaches the
+ *       anchor query), NOT the anchor's `> T` strictness.
+ *   (F) boundary — strict `> T` is load-bearing: a re-create at exactly T makes the record PRESENT at T, so
+ *       its removing delete is a LATER one; `>= T` would mis-anchor to the prior vintage's same-instant
+ *       delete. This is the ONLY golden that reds under `> T` → `>= T`.
  * Over-replay stays impossible regardless of which delete revision anchors, because precondition 6
  * (neighbour consent — replay only what N's OWN live data still declares) gates every edge
  * independently of the anchor.
@@ -51,6 +55,7 @@ const T0_5 = '2026-01-01T12:00:00.000Z'
 const T1 = '2026-01-02T00:00:00.000Z'
 const T1_5 = '2026-01-02T12:00:00.000Z'
 const T2 = '2026-01-03T00:00:00.000Z'
+const T3 = '2026-01-04T00:00:00.000Z'
 
 const q = (sql: string, params?: unknown[]) => poolManager.get().query(sql, params)
 let app: Express
@@ -264,5 +269,44 @@ describeIfDatabase('4c-3 §7 — PIT-resurrect inbound-edge replay heuristic anc
     expect(pv.status).toBe(200)
     expect(pv.body?.data?.undeleteRecordIds ?? []).not.toContain(R)
     expect(await edgeCount(F, N, R)).toBe(0) // never resurrected, so no inbound edge replayed
+  })
+
+  test('(F) strict > T is load-bearing: a re-create at exactly T means the removing delete is a LATER one — >= T would mis-anchor to the prior vintage\'s delete', async () => {
+    // The one shape golden (E) does NOT cover: at exactly T the record EXISTS (a re-create landed at T with
+    // a higher version than the same-instant delete of the previous vintage), so it IS in the resurrect set.
+    // reconstruct (`created_at <= T`, DISTINCT ON ... version DESC) picks the v3 CREATE as the state at T.
+    // The deletion that removed THAT vintage is v4 (T3), strictly after T. Shipped `created_at > T` anchors to
+    // v4 (correct). Mutating the query to `created_at >= T` would anchor to v2 (the T2 delete of the OLD
+    // vintage) and replay the wrong neighbour — this golden is the ONLY one that reds under `>=`.
+    process.env[INBOUND_FLAG] = 'true'
+    const F = mkFieldId('f')
+    await insertField(SHEET_B, F)
+    const R = mkRecordId('f_r')
+    const Nv2 = mkRecordId('f_nv2') // edge captured under v2 (the T2 delete of the OLD, un-resurrected vintage)
+    const Nv4 = mkRecordId('f_nv4') // edge captured under v4 (the T3 delete of the RESURRECTED vintage)
+    await insertRecord(SHEET_B, Nv2, { [F]: [R] })
+    await insertRecord(SHEET_B, Nv4, { [F]: [R] })
+
+    const SNAP_V1 = { [NAME]: 'v1' }
+    const SNAP_V3 = { [NAME]: 'v3' }
+    await rev(SHEET_A, R, 1, 'create', SNAP_V1, T0)
+    const dv2 = await rev(SHEET_A, R, 2, 'delete', SNAP_V1, T2) // delete of vintage-1, exactly at T2
+    await insertTombstone(SHEET_A, F, Nv2, R, dv2)
+    await rev(SHEET_A, R, 3, 'create', SNAP_V3, T2) // re-create at exactly T2 (higher version ⇒ latest <= T2)
+    const dv4 = await rev(SHEET_A, R, 4, 'delete', SNAP_V3, T3) // delete of vintage-3, later
+    await insertTombstone(SHEET_A, F, Nv4, R, dv4)
+
+    const pv = await preview(T2)
+    expect(pv.status).toBe(200)
+    expect(pv.body?.data?.undeleteRecordIds).toEqual([R])
+    const ex = await execute(T2, pv.body?.data?.previewIdentity)
+    expect(ex.status).toBe(200)
+    expect(ex.body?.data?.resurrectedCount).toBe(1)
+    const live = await liveRow(R)
+    expect(live?.data?.[NAME]).toBe('v3') // the AT-T (re-created) vintage was resurrected, not vintage-1
+    // strict `> T2` anchors to v4 (vintage-3's own delete) → Nv4 replays, Nv2 does not.
+    expect(await edgeCount(F, Nv4, R)).toBe(1)
+    expect(await edgeCount(F, Nv2, R)).toBe(0)
+    expect(ex.body?.data?.undeleteInbound).toMatchObject({ replayed: 1 })
   })
 })

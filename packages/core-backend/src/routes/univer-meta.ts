@@ -10176,9 +10176,13 @@ export function univerMetaRouter(): Router {
               // vintage's, never a cross-vintage union. The deterministic tiebreak
               // `created_at ASC, version ASC, id ASC` (LOCK-11 parity, complement of reconstruct's
               // `created_at <= T ... DESC`) makes the choice unique and stable even when two delete
-              // revisions share a millisecond; no implementation may drop a tiebreak key. A delete at
-              // exactly `created_at == T` means the record is absent at T (reconstruct includes it) and
-              // is never in the resurrect set — the strict `> T` correctly excludes it. If the deletion
+              // revisions share a millisecond (version is the exercised discriminator; id is
+              // belt-and-suspenders — the version index is not UNIQUE). A delete at exactly
+              // `created_at == T` that is the record's latest `<= T` revision ⇒ absent at T ⇒ not in the
+              // resurrect set (golden E). The STRICTNESS of `> T` (vs `>= T`) is load-bearing in the
+              // inverse case: a re-create at exactly T makes the record PRESENT at T, so its removing
+              // delete is a strictly-later one — `>= T` would mis-anchor to the prior vintage's
+              // same-instant delete (golden F). If the deletion
               // happened while capture was off (or its tombstones aged out via retention) the anchor
               // still resolves but carries zero tombstones ⇒ zero replay — silent and honest, never
               // fabricated. OVER-replay stays impossible regardless, because precondition 6 (neighbour
