@@ -11,11 +11,14 @@ import { describe, expect, it } from 'vitest'
 // crashes on boot (uuid was declared only in core-backend devDependencies while WorkflowDesigner /
 // BPMNWorkflowEngine / DelayService import it at module load).
 //
-// This guard statically BFS-walks the real startup graph from `src/index.ts`, following relative
-// imports, and asserts every external top-level import resolves to a prod dependency of either
-// core-backend or the workspace root (hoisting reality). Lazy `require()` / `await import()` inside
-// functions (the optional adapters: mongodb, aws-sdk, @opentelemetry, …) are NOT eager, are NOT in
-// the startup graph, and are correctly not flagged — so the check is precise, not a blanket sweep.
+// This guard statically BFS-walks the startup graph from `src/index.ts`, following every STATIC
+// edge — `import … from`, side-effect `import '…'`, and `export … from` barrel re-exports, each
+// single- or multi-line, with comments stripped — and asserts every external eager import resolves
+// to a prod dependency of either core-backend or the workspace root (hoisting reality). Lazy
+// `require()` / `await import()` inside functions (the optional adapters: mongodb, aws-sdk,
+// @opentelemetry, …) are NOT eager, are NOT in the graph, and are correctly not flagged — so the
+// check is precise, not a blanket sweep. A file-count floor guards against a parser regression
+// silently shrinking the walk.
 
 const CORE_BACKEND = path.resolve(__dirname, '..', '..')
 const REPO_ROOT = path.resolve(CORE_BACKEND, '..', '..')
@@ -58,8 +61,34 @@ function rootModule(spec: string): string {
   return spec.startsWith('@') ? spec.split('/').slice(0, 2).join('/') : spec.split('/')[0]
 }
 
+// Strip block + line comments so commented-out imports never match. (String literals containing
+// import-like text are vanishingly rare for module specifiers and not a real false-source here.)
+function stripComments(source: string): string {
+  return source
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .replace(/(^|[^:])\/\/[^\n]*/g, '$1')
+}
+
+// Every static module specifier that makes a file part of the EAGER graph:
+//   - `import … from '…'`      (default / named / namespace, single- or multi-line)
+//   - `import '…'`             (side-effect)
+//   - `export … from '…'`      (barrel re-export — pulls the target in at load)
+// excluding the type-only forms (`import type …` / `export type …`, erased at compile time) and the
+// lazy forms (`import('…')` / `require('…')` — those live inside functions and are NOT eager).
+function* staticSpecifiers(source: string): Generator<string> {
+  const clean = stripComments(source)
+  // `s` flag: the clause may span newlines (multi-line import/export blocks).
+  const importFrom = /\bimport\s+(?!type[\s{])[^;'"]*?\bfrom\s*['"]([^'"]+)['"]/gs
+  const exportFrom = /\bexport\s+(?!type[\s{])[^;'"]*?\bfrom\s*['"]([^'"]+)['"]/gs
+  const sideEffect = /\bimport\s+['"]([^'"]+)['"]/g
+  for (const re of [importFrom, exportFrom, sideEffect]) {
+    let m: RegExpExecArray | null
+    while ((m = re.exec(clean)) !== null) yield m[1]
+  }
+}
+
 // BFS the eager startup import graph; return external top-level modules mapped to an example file.
-function collectStartupExternals(): Map<string, string> {
+function collectStartupExternals(): { externals: Map<string, string>; filesVisited: number } {
   const seen = new Set<string>()
   const externals = new Map<string, string>()
   const queue: string[] = [ENTRY]
@@ -67,11 +96,7 @@ function collectStartupExternals(): Map<string, string> {
     const file = queue.shift()!
     if (seen.has(file) || !existsSync(file)) continue
     seen.add(file)
-    for (const line of readFileSync(file, 'utf8').split('\n')) {
-      // Top-level static import only (column 0), excluding `import type …`.
-      const match = line.match(/^import\s+(?!type[\s{])(?:[^'"]*\sfrom\s+)?['"]([^'"]+)['"]/)
-      if (!match) continue
-      const spec = match[1]
+    for (const spec of staticSpecifiers(readFileSync(file, 'utf8'))) {
       if (spec.startsWith('.')) {
         const resolved = resolveRelative(file, spec)
         if (resolved) queue.push(resolved)
@@ -83,13 +108,16 @@ function collectStartupExternals(): Map<string, string> {
       if (!externals.has(mod)) externals.set(mod, path.relative(CORE_BACKEND, file))
     }
   }
-  return externals
+  return { externals, filesVisited: seen.size }
 }
 
 describe('runtime dependency classification (production-install startup contract)', () => {
   it('every eagerly-imported external module in the startup graph is a production dependency', () => {
     const prod = prodDependencyNames()
-    const externals = collectStartupExternals()
+    const { externals, filesVisited } = collectStartupExternals()
+    // Guard against silent coverage collapse: the eager startup graph is a few hundred files; if a
+    // parser regression makes the walk visit almost nothing the "0 missing" result is meaningless.
+    expect(filesVisited).toBeGreaterThan(150)
     const missing = [...externals.entries()]
       .filter(([mod]) => !prod.has(mod))
       .map(([mod, file]) => `${mod} (eager import e.g. ${file})`)
