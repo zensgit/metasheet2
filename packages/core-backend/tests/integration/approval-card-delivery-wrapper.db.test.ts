@@ -748,4 +748,27 @@ describeIfDatabase('A-4 card-delivery wrapper (real DB)', () => {
     const approves = await q(`SELECT COUNT(*)::int AS c FROM approval_records WHERE instance_id = $1 AND action = 'approve'`, [instanceId])
     expect((approves.rows[0] as { c: number }).c).toBe(0)
   })
+
+  test('P1-1 FIX 3 strict predicate: a NULL-epoch card is NOT actionable even with a live non-null seat (no null-pass arm)', async () => {
+    // Owner's 2nd P1: the wrapper pre-read dropped BOTH permissive arms ($delivery IS NULL /
+    // aa.entry_epoch IS NULL). A card that carries NO epoch (legacy, escaped the migration) must
+    // fail-closed — never re-enter the same node on the node/assignee match alone. Live seat has a
+    // NON-NULL epoch; the card's epoch is NULL. RED-before (restore either null-pass arm): actionable.
+    const instanceId = await newInstance()
+    const liveEpoch = await activeEpoch(instanceId, 'approval_1')
+    expect(typeof liveEpoch).toBe('number') // the seat IS non-null — only the card is null
+    const deliveryId = await newSentDelivery(instanceId, { nodeKey: 'approval_1', entryEpoch: null })
+
+    const summary = await getApprovalCardDeliverySummary({ query: q }, { deliveryId, token: tokenFor(deliveryId), viewerUserId: APPROVER })
+    expect(summary.status).toBe('ok')
+    if (summary.status === 'ok') expect(summary.summary.actionable).toBe(false)
+
+    const outcome = await executeApprovalActionFromCardDelivery(
+      { query: q, approvals },
+      { deliveryId, token: tokenFor(deliveryId), decision: 'approve', comment: '同意', actor: approverActor },
+    )
+    expect(outcome.status).toBe('stale')
+    const approves = await q(`SELECT COUNT(*)::int AS c FROM approval_records WHERE instance_id = $1 AND action = 'approve'`, [instanceId])
+    expect((approves.rows[0] as { c: number }).c).toBe(0)
+  })
 })
