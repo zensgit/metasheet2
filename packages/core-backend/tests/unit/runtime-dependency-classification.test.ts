@@ -1,5 +1,6 @@
 import { readFileSync, existsSync } from 'fs'
 import path from 'path'
+import ts from 'typescript'
 import { describe, expect, it } from 'vitest'
 
 // Production-install startup contract (#3751 corrective-6, entity-machine failureClass=
@@ -11,14 +12,16 @@ import { describe, expect, it } from 'vitest'
 // crashes on boot (uuid was declared only in core-backend devDependencies while WorkflowDesigner /
 // BPMNWorkflowEngine / DelayService import it at module load).
 //
-// This guard statically BFS-walks the startup graph from `src/index.ts`, following every STATIC
-// edge — `import … from`, side-effect `import '…'`, and `export … from` barrel re-exports, each
-// single- or multi-line, with comments stripped — and asserts every external eager import resolves
-// to a prod dependency of either core-backend or the workspace root (hoisting reality). Lazy
-// `require()` / `await import()` inside functions (the optional adapters: mongodb, aws-sdk,
-// @opentelemetry, …) are NOT eager, are NOT in the graph, and are correctly not flagged — so the
-// check is precise, not a blanket sweep. A file-count floor guards against a parser regression
-// silently shrinking the walk.
+// This guard BFS-walks the startup graph from `src/index.ts` using the TypeScript AST (not regex):
+// each file is parsed and its top-level `ImportDeclaration` / `ExportDeclaration` (re-export) nodes
+// are read, skipping the type-only forms (`import type` / `export type`, erased at compile time).
+// Every external eager import must resolve to a prod dependency of core-backend or the workspace
+// root (hoisting reality). Lazy `require()` / `await import()` inside functions (the optional
+// adapters: mongodb, aws-sdk, @opentelemetry, …) are call expressions, NOT declarations, so the AST
+// never treats them as eager — the check is precise, not a blanket sweep. The AST handles
+// single-line, multi-line, default/named/namespace, side-effect, and barrel re-export forms
+// uniformly, so there is no line-based blind spot. A file-count floor + an explicit
+// multi-line-edge regression test guard against a traversal regression.
 
 const CORE_BACKEND = path.resolve(__dirname, '..', '..')
 const REPO_ROOT = path.resolve(CORE_BACKEND, '..', '..')
@@ -61,42 +64,48 @@ function rootModule(spec: string): string {
   return spec.startsWith('@') ? spec.split('/').slice(0, 2).join('/') : spec.split('/')[0]
 }
 
-// Strip block + line comments so commented-out imports never match. (String literals containing
-// import-like text are vanishingly rare for module specifiers and not a real false-source here.)
-function stripComments(source: string): string {
-  return source
-    .replace(/\/\*[\s\S]*?\*\//g, '')
-    .replace(/(^|[^:])\/\/[^\n]*/g, '$1')
-}
-
-// Every static module specifier that makes a file part of the EAGER graph:
-//   - `import … from '…'`      (default / named / namespace, single- or multi-line)
-//   - `import '…'`             (side-effect)
-//   - `export … from '…'`      (barrel re-export — pulls the target in at load)
-// excluding the type-only forms (`import type …` / `export type …`, erased at compile time) and the
-// lazy forms (`import('…')` / `require('…')` — those live inside functions and are NOT eager).
-function* staticSpecifiers(source: string): Generator<string> {
-  const clean = stripComments(source)
-  // `s` flag: the clause may span newlines (multi-line import/export blocks).
-  const importFrom = /\bimport\s+(?!type[\s{])[^;'"]*?\bfrom\s*['"]([^'"]+)['"]/gs
-  const exportFrom = /\bexport\s+(?!type[\s{])[^;'"]*?\bfrom\s*['"]([^'"]+)['"]/gs
-  const sideEffect = /\bimport\s+['"]([^'"]+)['"]/g
-  for (const re of [importFrom, exportFrom, sideEffect]) {
-    let m: RegExpExecArray | null
-    while ((m = re.exec(clean)) !== null) yield m[1]
+// Every static module specifier that makes a file part of the EAGER graph, read from the AST:
+//   - `import … from '…'`   ImportDeclaration (default / named / namespace / side-effect)
+//   - `export … from '…'`   ExportDeclaration with a moduleSpecifier (barrel re-export)
+// skipping the type-only forms. `import(…)` / `require(…)` are CallExpressions, never Import/Export
+// Declarations, so they are structurally excluded — no eager/lazy heuristic needed.
+function staticSpecifiersOf(file: string): string[] {
+  const source = ts.createSourceFile(
+    file,
+    readFileSync(file, 'utf8'),
+    ts.ScriptTarget.Latest,
+    /*setParentNodes*/ false,
+    file.endsWith('.tsx') ? ts.ScriptKind.TSX : ts.ScriptKind.TS,
+  )
+  const specs: string[] = []
+  for (const stmt of source.statements) {
+    if (ts.isImportDeclaration(stmt)) {
+      if (stmt.importClause?.isTypeOnly) continue // `import type …`
+      if (ts.isStringLiteral(stmt.moduleSpecifier)) specs.push(stmt.moduleSpecifier.text)
+    } else if (ts.isExportDeclaration(stmt)) {
+      if (stmt.isTypeOnly) continue // `export type … from …`
+      if (stmt.moduleSpecifier && ts.isStringLiteral(stmt.moduleSpecifier)) {
+        specs.push(stmt.moduleSpecifier.text)
+      }
+    }
   }
+  return specs
 }
 
-// BFS the eager startup import graph; return external top-level modules mapped to an example file.
-function collectStartupExternals(): { externals: Map<string, string>; filesVisited: number } {
-  const seen = new Set<string>()
+// BFS the eager startup import graph; return external top-level modules mapped to an example file,
+// plus the full set of visited (resolved) files.
+function walkStartupGraph(): {
+  externals: Map<string, string>
+  visited: Set<string>
+} {
+  const visited = new Set<string>()
   const externals = new Map<string, string>()
   const queue: string[] = [ENTRY]
   while (queue.length > 0) {
     const file = queue.shift()!
-    if (seen.has(file) || !existsSync(file)) continue
-    seen.add(file)
-    for (const spec of staticSpecifiers(readFileSync(file, 'utf8'))) {
+    if (visited.has(file) || !existsSync(file)) continue
+    visited.add(file)
+    for (const spec of staticSpecifiersOf(file)) {
       if (spec.startsWith('.')) {
         const resolved = resolveRelative(file, spec)
         if (resolved) queue.push(resolved)
@@ -108,16 +117,16 @@ function collectStartupExternals(): { externals: Map<string, string>; filesVisit
       if (!externals.has(mod)) externals.set(mod, path.relative(CORE_BACKEND, file))
     }
   }
-  return { externals, filesVisited: seen.size }
+  return { externals, visited }
 }
 
 describe('runtime dependency classification (production-install startup contract)', () => {
   it('every eagerly-imported external module in the startup graph is a production dependency', () => {
     const prod = prodDependencyNames()
-    const { externals, filesVisited } = collectStartupExternals()
+    const { externals, visited } = walkStartupGraph()
     // Guard against silent coverage collapse: the eager startup graph is a few hundred files; if a
-    // parser regression makes the walk visit almost nothing the "0 missing" result is meaningless.
-    expect(filesVisited).toBeGreaterThan(150)
+    // parser/traversal regression makes the walk visit almost nothing the "0 missing" is meaningless.
+    expect(visited.size).toBeGreaterThan(150)
     const missing = [...externals.entries()]
       .filter(([mod]) => !prod.has(mod))
       .map(([mod, file]) => `${mod} (eager import e.g. ${file})`)
@@ -126,6 +135,19 @@ describe('runtime dependency classification (production-install startup contract
       `these modules are imported at startup but are not production dependencies — a --prod install ` +
         `would omit them and crash the backend on boot:\n  ${missing.join('\n  ')}`,
     ).toEqual([])
+  })
+
+  it('traverses modules reachable only through a MULTI-LINE import edge (regression: #4126)', () => {
+    // src/index.ts:19 imports ./core/workday-calendar-port via a multi-line `import { … } from`.
+    // A line-based matcher missed multi-line edges, so a dev-only import hidden behind one passed
+    // silently. The AST walk must visit this target — proving multi-line edges are followed.
+    const { visited } = walkStartupGraph()
+    const target = resolveRelative(ENTRY, './core/workday-calendar-port')
+    expect(target, 'the multi-line-imported target must resolve').toBeTruthy()
+    expect(
+      visited.has(target as string),
+      'a module reachable only via a multi-line import edge must be traversed',
+    ).toBe(true)
   })
 
   it('uuid specifically is a production dependency (corrective-6 regression lock)', () => {
