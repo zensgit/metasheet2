@@ -177,6 +177,9 @@ describeIfDb('§7.6 — attendance notification redelivery (operator-initiated, 
   })
 
   it('(6) no auto/background path: worker runBatch NEVER requeues or sends a failed row', async () => {
+    // The delivery worker's claim is DB-global (no org filter), so isolate: the ONLY row it could
+    // see is this one failed row. If the worker had any failed→pending path, it would claim+send it.
+    await q(`DELETE FROM attendance_notification_deliveries WHERE org_id = $1`, [ORG])
     const failedId = await seed('failed', { sourceKey: `sk_worker_failed_${randomUUID()}` })
     const channel = new RecordingChannel()
     const worker = new AttendanceNotificationDeliveryWorker({
@@ -196,6 +199,8 @@ describeIfDb('§7.6 — attendance notification redelivery (operator-initiated, 
   })
 
   it('(6-control) worker liveness: the SAME worker DOES claim+send a pending row (so (6) is not vacuous)', async () => {
+    // Same global-claim isolation: the only row the worker can see is this due pending row.
+    await q(`DELETE FROM attendance_notification_deliveries WHERE org_id = $1`, [ORG])
     const pendingId = await seed('pending', { sourceKey: `sk_worker_pending_${randomUUID()}` })
     const channel = new RecordingChannel()
     const worker = new AttendanceNotificationDeliveryWorker({
