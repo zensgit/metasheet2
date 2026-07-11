@@ -43,30 +43,49 @@ const q = (sqlText: string, params?: unknown[]) => poolManager.get().query(sqlTe
 
 let approvals: ApprovalProductService
 let templateId = ''
+// P1-1: a linear TWO-approval-node template (node1 → node2, SAME assignee) — the shape the
+// stale-card node-binding fix is proven against (a card issued for node1 must not approve node2).
+let twoNodeTemplateId = ''
 const SECRET = 'cdw-test-secret'
 
 function tokenFor(deliveryId: string): string {
   return createHmac('sha256', SECRET).update(deliveryId).digest('hex').slice(0, 32)
 }
 
-async function newInstance(): Promise<string> {
+async function newInstance(tid: string = templateId): Promise<string> {
   const dto = await approvals.createApproval(
-    { templateId, formData: { summary: 'wrapper test' } },
+    { templateId: tid, formData: { summary: 'wrapper test' } },
     { userId: REQUESTER, userName: REQUESTER },
   )
   return (dto as { id: string }).id
 }
 
-async function newSentDelivery(instanceId: string): Promise<string> {
+async function newSentDelivery(
+  instanceId: string,
+  opts: { nodeKey?: string; entryEpoch?: number | null } = {},
+): Promise<string> {
   const row = await insertDingTalkApprovalCardDelivery(q, {
     instanceId,
-    nodeKey: 'approval_1',
+    nodeKey: opts.nodeKey ?? 'approval_1',
     recipientUserId: APPROVER,
     recipientDingTalkUserId: `dd_${APPROVER}`,
     deliveryKind: 'work_notice_action_card',
+    entryEpoch: opts.entryEpoch ?? null,
   })
   await markDingTalkApprovalCardDeliverySent(q, row.id, 'task_cdw')
   return row.id
+}
+
+/** The live entry_epoch of the node's still-active assignment for APPROVER (the round a card binds to). */
+async function activeEpoch(instanceId: string, nodeKey: string): Promise<number | null> {
+  const r = await q(
+    `SELECT entry_epoch FROM approval_assignments
+      WHERE instance_id = $1 AND node_key = $2 AND assignee_id = $3 AND is_active = TRUE
+      ORDER BY created_at DESC LIMIT 1`,
+    [instanceId, nodeKey, APPROVER],
+  )
+  const raw = (r.rows[0] as { entry_epoch: number | string | null } | undefined)?.entry_epoch
+  return raw === null || raw === undefined ? null : Number(raw)
 }
 
 const approverActor = { userId: '', userName: '' }
@@ -106,17 +125,39 @@ describeIfDatabase('A-4 card-delivery wrapper (real DB)', () => {
     } as never)
     templateId = (template as { id: string }).id
     await approvals.publishTemplate(templateId, { policy: { allowRevoke: true } } as never)
+
+    // P1-1 two-node linear template: node1 → node2, SAME approver on both nodes.
+    const twoNode = await approvals.createTemplate({
+      key: `cdw2-${TS}`,
+      name: 'Card Wrapper Two-Node Template',
+      formSchema: { fields: [{ id: 'summary', type: 'text', label: 'Summary', required: true }] },
+      approvalGraph: {
+        nodes: [
+          { key: 'start', type: 'start', name: 'Start', config: {} },
+          { key: 'approval_1', type: 'approval', name: 'First', config: { mode: 'any', assigneeSources: [{ kind: 'static_user', userIds: [APPROVER] }] } },
+          { key: 'approval_2', type: 'approval', name: 'Second', config: { mode: 'any', assigneeSources: [{ kind: 'static_user', userIds: [APPROVER] }] } },
+          { key: 'end', type: 'end', name: 'End', config: {} },
+        ],
+        edges: [
+          { key: 'edge-start-approval_1', source: 'start', target: 'approval_1' },
+          { key: 'edge-approval_1-approval_2', source: 'approval_1', target: 'approval_2' },
+          { key: 'edge-approval_2-end', source: 'approval_2', target: 'end' },
+        ],
+      },
+    } as never)
+    twoNodeTemplateId = (twoNode as { id: string }).id
+    await approvals.publishTemplate(twoNodeTemplateId, { policy: { allowRevoke: true } } as never)
   })
 
   afterAll(async () => {
-    const instances = await q('SELECT id FROM approval_instances WHERE template_id = $1', [templateId]).catch(() => ({ rows: [] as unknown[] }))
+    const instances = await q('SELECT id FROM approval_instances WHERE template_id = ANY($1::text[])', [[templateId, twoNodeTemplateId]]).catch(() => ({ rows: [] as unknown[] }))
     for (const row of instances.rows as Array<{ id: string }>) {
       await q('DELETE FROM dingtalk_approval_card_deliveries WHERE instance_id = $1', [row.id]).catch(() => {})
       await q('DELETE FROM approval_assignments WHERE instance_id = $1', [row.id]).catch(() => {})
       await q('DELETE FROM approval_records WHERE instance_id = $1', [row.id]).catch(() => {})
       await q('DELETE FROM approval_instances WHERE id = $1', [row.id]).catch(() => {})
     }
-    await q('DELETE FROM approval_templates WHERE id = $1', [templateId]).catch(() => {})
+    await q('DELETE FROM approval_templates WHERE id = ANY($1::text[])', [[templateId, twoNodeTemplateId]]).catch(() => {})
     await q('DELETE FROM user_permissions WHERE user_id = ANY($1::text[])', [[CREATOR, REQUESTER, APPROVER]]).catch(() => {})
     await q('DELETE FROM users WHERE id = ANY($1::text[])', [[CREATOR, REQUESTER, APPROVER]]).catch(() => {})
     if (savedSecret === undefined) delete process.env.APPROVAL_CARD_LINK_SECRET
@@ -480,5 +521,119 @@ describeIfDatabase('A-4 card-delivery wrapper (real DB)', () => {
     )
     expect(outcome.status).toBe('engine_rejected')
     if (outcome.status === 'engine_rejected') expect(outcome.summary.cardState).toBe('sent')
+  })
+
+  // ─── P1-1 stale-card node/epoch binding — RED-before goldens (real two-node state) ────────────
+  //
+  // The class this closes was missed by mock-only review: on origin/main a card issued for NODE 1,
+  // after node 1 is approved and the instance advances to NODE 2 (where the recipient is ALSO the
+  // assignee), returns `ok` and silently approves node 2 — the approver never saw node 2's context.
+  // These construct REAL two-node / re-entry state and assert `stale` + zero cross-node writes.
+
+  test('P1-1 TWO-NODE web-first: a node1 card is STALE after the instance advances to node2 (same assignee) — never approves node2', async () => {
+    const instanceId = await newInstance(twoNodeTemplateId)
+    // The card is issued for node1's round (persist its live epoch, exactly as the send path does).
+    const node1Epoch = await activeEpoch(instanceId, 'approval_1')
+    const deliveryId = await newSentDelivery(instanceId, { nodeKey: 'approval_1', entryEpoch: node1Epoch })
+
+    // While node1 is still active the card IS actionable (baseline — the binding matches the live seat).
+    const before = await getApprovalCardDeliverySummary({ query: q }, { deliveryId, token: tokenFor(deliveryId), viewerUserId: APPROVER })
+    expect(before.status).toBe('ok')
+    if (before.status === 'ok') expect(before.summary.actionable).toBe(true)
+
+    // Approve node1 through the ENGINE (web-first) → the instance advances to node2, where APPROVER is
+    // ALSO the active assignee. node1's assignment flips is_active=FALSE.
+    await approvals.dispatchAction(instanceId, { action: 'approve', comment: '同意' }, { userId: APPROVER, userName: APPROVER, roles: [] })
+    const advanced = await q('SELECT status, current_node_key FROM approval_instances WHERE id = $1', [instanceId])
+    expect(advanced.rows[0]).toMatchObject({ status: 'pending', current_node_key: 'approval_2' })
+
+    // Defense-in-depth: the post-commit supersede sweep flipped the still-sent node1 card to superseded.
+    const swept = await q('SELECT card_state FROM dingtalk_approval_card_deliveries WHERE id = $1', [deliveryId])
+    expect((swept.rows[0] as { card_state: string }).card_state).toBe('superseded')
+
+    // ISOLATE THE BINDING (must stand alone even if supersede never runs): force the card back to
+    // 'sent' so card_state cannot mask the read-time active-assignment binding. RED-before: with the
+    // binding reverted this card is actionable and dispatchAction approves node2.
+    await q(`UPDATE dingtalk_approval_card_deliveries SET card_state = 'sent' WHERE id = $1`, [deliveryId])
+    const summary = await getApprovalCardDeliverySummary({ query: q }, { deliveryId, token: tokenFor(deliveryId), viewerUserId: APPROVER })
+    expect(summary.status).toBe('ok')
+    if (summary.status === 'ok') expect(summary.summary.actionable).toBe(false) // node1 seat is gone
+
+    const outcome = await executeApprovalActionFromCardDelivery(
+      { query: q, approvals },
+      { deliveryId, token: tokenFor(deliveryId), decision: 'approve', comment: '同意', actor: approverActor },
+    )
+    expect(outcome.status).toBe('stale')
+
+    // node2 was NEVER approved by the stale node1 card: instance still pending at node2, and there is
+    // ZERO approve record carrying node2's key.
+    const post = await q('SELECT status, current_node_key FROM approval_instances WHERE id = $1', [instanceId])
+    expect(post.rows[0]).toMatchObject({ status: 'pending', current_node_key: 'approval_2' })
+    const node2Approves = await q(
+      `SELECT COUNT(*)::int AS c FROM approval_records WHERE instance_id = $1 AND action = 'approve' AND metadata->>'nodeKey' = 'approval_2'`,
+      [instanceId],
+    )
+    expect((node2Approves.rows[0] as { c: number }).c).toBe(0)
+  })
+
+  test('P1-1 SAME-NODE re-entry: an old-epoch card is STALE after the same node re-activates with a fresh epoch (needs the persisted delivery epoch)', async () => {
+    const instanceId = await newInstance()
+    const e1 = await activeEpoch(instanceId, 'approval_1')
+    expect(typeof e1).toBe('number')
+    // Card carries the FIRST round's epoch.
+    const deliveryId = await newSentDelivery(instanceId, { nodeKey: 'approval_1', entryEpoch: e1 })
+
+    // Matching-epoch baseline: while round e1 is the live round, the card is actionable.
+    const before = await getApprovalCardDeliverySummary({ query: q }, { deliveryId, token: tokenFor(deliveryId), viewerUserId: APPROVER })
+    expect(before.status).toBe('ok')
+    if (before.status === 'ok') expect(before.summary.actionable).toBe(true)
+
+    // Model a loop-back that RE-ENTERS the SAME node_key on a FRESH epoch: deactivate the current
+    // seat and mint a new active seat at approval_1 with epoch e1+1 (what a real return/jump does),
+    // and advance the instance's activation sequence to match. node_key is unchanged; only the epoch is.
+    const e2 = (e1 as number) + 1
+    await q(`UPDATE approval_assignments SET is_active = FALSE, updated_at = now() WHERE instance_id = $1 AND node_key = 'approval_1' AND is_active = TRUE`, [instanceId])
+    await q(
+      `INSERT INTO approval_assignments (instance_id, assignment_type, assignee_id, source_step, node_key, is_active, entry_epoch, metadata, created_at, updated_at)
+       VALUES ($1, 'user', $2, 1, 'approval_1', TRUE, $3, '{}'::jsonb, now(), now())`,
+      [instanceId, APPROVER, e2],
+    )
+    await q(`UPDATE approval_instances SET node_activation_seq = $2, updated_at = now() WHERE id = $1`, [instanceId, e2])
+
+    // The old-epoch card (e1) no longer matches the live seat (e2) → stale. RED-before: with the
+    // epoch clause reverted the card is actionable and approves the NEW round it never belonged to.
+    const summary = await getApprovalCardDeliverySummary({ query: q }, { deliveryId, token: tokenFor(deliveryId), viewerUserId: APPROVER })
+    expect(summary.status).toBe('ok')
+    if (summary.status === 'ok') expect(summary.summary.actionable).toBe(false)
+
+    const outcome = await executeApprovalActionFromCardDelivery(
+      { query: q, approvals },
+      { deliveryId, token: tokenFor(deliveryId), decision: 'approve', comment: '同意', actor: approverActor },
+    )
+    expect(outcome.status).toBe('stale')
+    // No approve record was written for this instance (the stale card never reached the engine).
+    const approves = await q(`SELECT COUNT(*)::int AS c FROM approval_records WHERE instance_id = $1 AND action = 'approve'`, [instanceId])
+    expect((approves.rows[0] as { c: number }).c).toBe(0)
+  })
+
+  test('P1-1 POSITIVE (happy path unchanged): a node1 card whose persisted epoch matches the live active seat still approves node1', async () => {
+    const instanceId = await newInstance()
+    const e1 = await activeEpoch(instanceId, 'approval_1')
+    const deliveryId = await newSentDelivery(instanceId, { nodeKey: 'approval_1', entryEpoch: e1 })
+
+    const summary = await getApprovalCardDeliverySummary({ query: q }, { deliveryId, token: tokenFor(deliveryId), viewerUserId: APPROVER })
+    expect(summary.status).toBe('ok')
+    if (summary.status === 'ok') expect(summary.summary.actionable).toBe(true)
+
+    const outcome = await executeApprovalActionFromCardDelivery(
+      { query: q, approvals },
+      { deliveryId, token: tokenFor(deliveryId), decision: 'approve', comment: '同意', actor: approverActor },
+    )
+    expect(outcome.status).toBe('ok')
+    if (outcome.status === 'ok') {
+      expect(outcome.summary.cardState).toBe('acted')
+      expect(outcome.summary.actedAction).toBe('approve')
+      expect(outcome.summary.approval.status).toBe('approved')
+    }
   })
 })
