@@ -18,7 +18,9 @@
 | 轮 | 实体机证据(values-free) | 根因 | 修复 PR | 验收包 |
 |---|---|---|---|---|
 | corrective-1 | 首包 dispatch 前置检查 | on-prem 包缺 frozen-lockfile 前置/回滚安全 | (#4050 前序轮) | `…-corrective-20260710-94d0bb964` |
-| corrective-2..4 | `resolvedPnpmVersion=other` · `failureClass=PNPM_VERSION_MISMATCH` | `corepack prepare --activate` **不写 shim**(仅 `enable` 写);apply helper 从 PATH 解析 pnpm → 撞 profile 影子 pnpm.cmd(他版本),fail-closed 拦停 | **#4061**(corepack 版本寻址 dispatcher wrapper `corepack pnpm@<pin> %*`;PATH 影子结构性无关)+ #4073(深路径清理 SYSTEM-safe) | `…-corrective2-20260710-d6489851d` … `-4` |
+| corrective-2 | `resolvedPnpmVersion=other` · `failureClass=PNPM_VERSION_MISMATCH` | `corepack prepare --activate` **不写 shim**(仅 `enable` 写);apply helper 从 PATH 解析 pnpm → 撞 profile 影子 pnpm.cmd(他版本),fail-closed 拦停 | **#4061**(corepack 版本寻址 dispatcher wrapper `corepack pnpm@<pin> %*`;PATH 影子结构性无关)| `…-corrective2-20260710-d6489851d` |
+| corrective-3 | Node 24 尝试为**未使用的原生 `bcrypt@5.1.1`** 构建,无兼容 prebuilt 二进制/工具链 → 安装失败 | 该原生依赖从未被运行时用到(运行时用可移植的 `bcryptjs`)→ **移除 `bcrypt` + `@types/bcrypt`**,并在包验证器加回归守卫(`verify_no_native_bcrypt_dependency`:必须保 bcryptjs、禁 native bcrypt) | **#4068**(`4290b08c5`) | `…-corrective3-20260711-4290b08c5` |
+| corrective-4 | 交付管道深路径清理残留 | staging `node_modules` 清理 SYSTEM-safe(长路径/深嵌套) | **#4073** | `…-corrective4-…` |
 | corrective-5 | `failedMigrationName=20250926_create_audit_tables` · `42P07`(duplicate_table)· `table` | 实体机先跑幂等孪生 `zz20251231_create_audit_tables.ts`(allowUnorderedMigrations 历史);同名更早的 raw `.sql` 后合入被当 pending 重放 → 裸 `CREATE TABLE audit_logs` 撞已存在对象 | **#4084**(`.sql` 名加入 `SUPERSEDED_LEGACY_SQL_MIGRATIONS` no-op 名单) | `…-corrective5-20260710-698acd918` |
 
 > 说明:#4062 与 #4061 是并行的同修法,#4062 在审阅确认机制等价后作为 superseded 关闭。
@@ -65,7 +67,18 @@ diff 实测三处差异(均已缓解,记录于此以免后续误判):
 跳过该迁移当场继续。**适用限定(审阅 P3-2)**:仅对**台账不含该名**的机器安全(实体机正属此类);
 台账**含**该名的机器设此值会 fatal(`corrupted migrations: … is missing`)——勿在跑过 `.sql` 的机器用。
 
-## 5. 状态
+## 5. 状态与范围边界(审阅纠正)
 
-代码侧完成 + on-prem 交付管道经 corrective-1..5 加固。**唯一余项 = 实体机装 corrective-5 包跑
-smoke 回贴 PASS**;PASS 后前序 W3-W6 MD 补 addendum、本线转全线闭环。runtime 产品面未因本弧改动。
+**本文的关闭范围 = W3-W6 on-prem 包的 *runtime 验收* 弧,不是整个 #3751 epic。** 明确划界:
+
+- **runtime 验收余项(本文范围内)**:实体机装 corrective-5 包跑 smoke 回贴 `mvpSmoke.pass=true` +
+  `auditActionsCovered=8/8` + `selfScanClean=true`。此为**唯一的 runtime 验收余项**;PASS 后
+  前序 W3-W6 MD 补 addendum,**W3-W6 on-prem 包 runtime 验收弧**闭环。
+- **包保障(本文范围外,仍 open)**:#4086 是 #4084 之后的**包验证器增量**——两个 on-prem 包验证器
+  都须强制 superseded audit marker 在场。它是独立的代码审阅/合并项,不被实体机 smoke 覆盖。
+- **#3751 更广 follow-up(本文范围外,仍 open)**:#4093(#3889 下的 PLM/ERP/K3 只读 feeder)与
+  原 #3751 只读同步验收重叠,仍在开发。**本文不关闭整个 #3751 epic。**
+
+因此:**「本线转全线闭环」是过宽表述,已收回。** 正确口径 = 实体机 smoke PASS 只结**已合并的
+W3-W6 on-prem 包 runtime 验收弧**;#4086 包保障与 #4093 只读 feeder 各自独立推进。runtime 产品面
+未因本弧改动。
