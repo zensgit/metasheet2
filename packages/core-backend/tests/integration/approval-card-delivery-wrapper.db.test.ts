@@ -13,6 +13,7 @@ import { randomUUID } from 'crypto'
 
 import { poolManager } from '../../src/integration/db/connection-pool'
 import { ApprovalProductService } from '../../src/services/ApprovalProductService'
+import { ServiceError } from '../../src/services/ApprovalBridgeService'
 import {
   executeApprovalActionFromCardDelivery,
   getApprovalCardDeliverySummary,
@@ -642,5 +643,109 @@ describeIfDatabase('A-4 card-delivery wrapper (real DB)', () => {
       expect(outcome.summary.actedAction).toBe('approve')
       expect(outcome.summary.approval.status).toBe('approved')
     }
+  })
+
+  // ─── P1-1 re-review: authoritative IN-TXN card→round binding (the TOCTOU close) ───────────────
+  //
+  // The wrapper's pre-read binding runs OUTSIDE dispatchAction's FOR UPDATE txn. A concurrent advance
+  // can slip a stale card past it into the engine, where actorCanAct only proves "assignee of the
+  // CURRENT node", never "this CARD was issued for the current round". These goldens drive
+  // dispatchAction DIRECTLY (bypassing the pre-read) to prove the in-txn guard is the authoritative
+  // close — a mock/sequential review of the wrapper alone could not see this class.
+
+  test('P1-1 TOCTOU (in-txn guard, HEADLINE): a node1 card driven DIRECTLY into dispatchAction after the instance advanced to node2 → APPROVAL_CARD_DELIVERY_STALE, node2 NEVER approved', async () => {
+    const instanceId = await newInstance(twoNodeTemplateId)
+    const node1Epoch = await activeEpoch(instanceId, 'approval_1')
+    const deliveryId = await newSentDelivery(instanceId, { nodeKey: 'approval_1', entryEpoch: node1Epoch })
+
+    // Advance N1 → N2 via a REAL approve of node1 (the concurrent advance the stale card races). The
+    // N1 recipient is ALSO the active N2 assignee, so actorCanAct is TRUE at node2 — WITHOUT the
+    // in-txn card→round binding the engine would silently approve node2.
+    await approvals.dispatchAction(instanceId, { action: 'approve', comment: '同意' }, { userId: APPROVER, userName: APPROVER, roles: [] })
+    const advanced = await q('SELECT status, current_node_key FROM approval_instances WHERE id = $1', [instanceId])
+    expect(advanced.rows[0]).toMatchObject({ status: 'pending', current_node_key: 'approval_2' })
+    const beforeN2 = await q(`SELECT COUNT(*)::int AS c FROM approval_records WHERE instance_id = $1 AND action = 'approve' AND metadata->>'nodeKey' = 'approval_2'`, [instanceId])
+    expect((beforeN2.rows[0] as { c: number }).c).toBe(0)
+
+    // Drive the guard DIRECTLY: card.node_key ('approval_1') ≠ currentNodeKey ('approval_2') → the
+    // in-txn guard throws BEFORE any record insert. RED-before (revert FIX 1): this resolves and
+    // approves node2 (the owner's reproduced bug).
+    await expect(
+      approvals.dispatchAction(
+        instanceId,
+        { action: 'approve', comment: '同意', channelOrigin: { channel: 'dingtalk_card', cardDeliveryId: deliveryId } },
+        { userId: APPROVER, userName: APPROVER, roles: [] },
+      ),
+    ).rejects.toMatchObject({ code: 'APPROVAL_CARD_DELIVERY_STALE', statusCode: 409 })
+
+    // node2 was NEVER approved by the stale node1 card — zero new approve records for node2, instance
+    // still pending at node2.
+    const post = await q('SELECT status, current_node_key FROM approval_instances WHERE id = $1', [instanceId])
+    expect(post.rows[0]).toMatchObject({ status: 'pending', current_node_key: 'approval_2' })
+    const node2Approves = await q(`SELECT COUNT(*)::int AS c FROM approval_records WHERE instance_id = $1 AND action = 'approve' AND metadata->>'nodeKey' = 'approval_2'`, [instanceId])
+    expect((node2Approves.rows[0] as { c: number }).c).toBe(0)
+  })
+
+  test('P1-1 wrapper maps the engine STALE code to `stale` (not engine_rejected) — FIX 2', async () => {
+    // A deterministic non-concurrent DB state cannot make the wrapper pre-read PASS while the engine's
+    // in-txn guard throws (the active-assignment unique index limits an assignee to ONE active seat per
+    // instance, so the pre-read and the guard agree unless a real advance races between them — the very
+    // TOCTOU window). So this isolates FIX 2 faithfully: a REAL actionable card (pre-read passes → the
+    // wrapper proceeds to dispatch), with the engine standing in for the raced-advance outcome by
+    // throwing the exact ServiceError the in-txn guard raises. The wrapper MUST map it to `stale`, not
+    // engine_rejected. The real end-to-end throw is proven by the HEADLINE golden driving dispatchAction
+    // directly; here we pin the catch mapping. RED-before (revert FIX 2): status is engine_rejected.
+    const instanceId = await newInstance()
+    const e1 = await activeEpoch(instanceId, 'approval_1')
+    const deliveryId = await newSentDelivery(instanceId, { nodeKey: 'approval_1', entryEpoch: e1 })
+
+    const pre = await getApprovalCardDeliverySummary({ query: q }, { deliveryId, token: tokenFor(deliveryId), viewerUserId: APPROVER })
+    expect(pre.status).toBe('ok')
+    if (pre.status === 'ok') expect(pre.summary.actionable).toBe(true)
+
+    const stalingApprovals = {
+      dispatchAction: async () => {
+        throw new ServiceError('Approval card is no longer valid for the current node', 409, 'APPROVAL_CARD_DELIVERY_STALE')
+      },
+    }
+    const outcome = await executeApprovalActionFromCardDelivery(
+      { query: q, approvals: stalingApprovals },
+      { deliveryId, token: tokenFor(deliveryId), decision: 'approve', comment: '同意', actor: approverActor },
+    )
+    expect(outcome.status).toBe('stale')
+    // No approve record was written (the guard threw before any insert; the stub performed no engine work).
+    const approves = await q(`SELECT COUNT(*)::int AS c FROM approval_records WHERE instance_id = $1 AND action = 'approve'`, [instanceId])
+    expect((approves.rows[0] as { c: number }).c).toBe(0)
+  })
+
+  test('P1-1 STRICT epoch (in-txn guard): an old-epoch card driven DIRECTLY into dispatchAction after the SAME node re-activated with a fresh epoch → APPROVAL_CARD_DELIVERY_STALE', async () => {
+    const instanceId = await newInstance()
+    const e1 = await activeEpoch(instanceId, 'approval_1')
+    expect(typeof e1).toBe('number')
+    const deliveryId = await newSentDelivery(instanceId, { nodeKey: 'approval_1', entryEpoch: e1 })
+
+    // Re-enter the SAME node on a FRESH epoch: deactivate the current seat, mint a new active seat at
+    // approval_1 with epoch e1+1, advance the activation sequence. node_key is unchanged; only epoch is.
+    const e2 = (e1 as number) + 1
+    await q(`UPDATE approval_assignments SET is_active = FALSE, updated_at = now() WHERE instance_id = $1 AND node_key = 'approval_1' AND is_active = TRUE`, [instanceId])
+    await q(
+      `INSERT INTO approval_assignments (instance_id, assignment_type, assignee_id, source_step, node_key, is_active, entry_epoch, metadata, created_at, updated_at)
+       VALUES ($1, 'user', $2, 1, 'approval_1', TRUE, $3, '{}'::jsonb, now(), now())`,
+      [instanceId, APPROVER, e2],
+    )
+    await q(`UPDATE approval_instances SET node_activation_seq = $2, updated_at = now() WHERE id = $1`, [instanceId, e2])
+
+    // Direct dispatch: node_key matches (approval_1 = current) and actorCanAct is TRUE (the fresh e2
+    // seat), but the card's epoch e1 ≠ the live seat epoch e2 → STALE. RED-before (remove the strict
+    // epoch from the in-txn guard): the card approves the new round it never belonged to.
+    await expect(
+      approvals.dispatchAction(
+        instanceId,
+        { action: 'approve', comment: '同意', channelOrigin: { channel: 'dingtalk_card', cardDeliveryId: deliveryId } },
+        { userId: APPROVER, userName: APPROVER, roles: [] },
+      ),
+    ).rejects.toMatchObject({ code: 'APPROVAL_CARD_DELIVERY_STALE' })
+    const approves = await q(`SELECT COUNT(*)::int AS c FROM approval_records WHERE instance_id = $1 AND action = 'approve'`, [instanceId])
+    expect((approves.rows[0] as { c: number }).c).toBe(0)
   })
 })
