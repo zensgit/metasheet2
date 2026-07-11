@@ -1,6 +1,7 @@
-# AI 字段 S5 · 按 kind 规整输出 + classify→select rider · 设计锁（PROPOSED）
+# AI 字段 S5 · 按 kind 规整输出 + classify→select rider · 设计锁（RATIFIED）
 
-> 状态：**PROPOSED — 待 owner ratify**。docs-only；不改 runtime、不发 live 请求。
+> 状态：**RATIFIED（owner directive 2026-07-11）**。docs-only；不改 runtime、不发 live 请求。
+> **RATIFIED — owner directive 2026-07-11**（批 12 把 merge-tree-clean 锁）。header 状态由 owner 决定翻转、Claude 机械执行(非自我批准)。锁内 per-tier owner 子决定(如变体/env-cap/storage opt-in)仍各自留待 owner。
 > 前置（已落 main）：AI-shortcut config（kind/sourceFieldIds/params，`ai-shortcut-config.ts`）· AI 输出=不可信写入源 design-lock（`multitable-ai-output-untrusted-write-source-designlock-20260705.md`）· S1 写入血缘 · S2 prompt-config history。
 > 模型分档：设计 = Fable；runtime 实现 = Sonnet；点亮相关的对抗审阅 = Opus。
 
