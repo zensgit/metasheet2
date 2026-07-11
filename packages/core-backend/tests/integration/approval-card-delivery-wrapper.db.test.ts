@@ -64,13 +64,18 @@ async function newSentDelivery(
   instanceId: string,
   opts: { nodeKey?: string; entryEpoch?: number | null } = {},
 ): Promise<string> {
+  const nodeKey = opts.nodeKey ?? 'approval_1'
+  // P1-1 STRICT epoch: an actionable card MUST carry the round's non-null epoch (the real send path
+  // now persists it). Default to the live seat's epoch so a plain newSentDelivery is actionable, and
+  // let callers pass an explicit epoch (or null) to exercise the stale/legacy paths.
+  const entryEpoch = opts.entryEpoch === undefined ? await activeEpoch(instanceId, nodeKey) : opts.entryEpoch
   const row = await insertDingTalkApprovalCardDelivery(q, {
     instanceId,
-    nodeKey: opts.nodeKey ?? 'approval_1',
+    nodeKey,
     recipientUserId: APPROVER,
     recipientDingTalkUserId: `dd_${APPROVER}`,
     deliveryKind: 'work_notice_action_card',
-    entryEpoch: opts.entryEpoch ?? null,
+    entryEpoch,
   })
   await markDingTalkApprovalCardDeliverySent(q, row.id, 'task_cdw')
   return row.id
@@ -364,7 +369,9 @@ describeIfDatabase('A-4 card-delivery wrapper (real DB)', () => {
     // delivery proof. The ledger's send-time uncertainty must not make the card inoperable.
     const instanceId = await newInstance()
     const row = await insertDingTalkApprovalCardDelivery(q, {
+      // P1-1 STRICT epoch: bind to the live round so actionability turns on send_status, not a null epoch.
       instanceId, nodeKey: 'approval_1', recipientUserId: APPROVER, recipientDingTalkUserId: `dd_${APPROVER}`, deliveryKind: 'work_notice_action_card',
+      entryEpoch: await activeEpoch(instanceId, 'approval_1'),
     })
     await markDingTalkApprovalCardDeliverySendOutcomeUnknown(q, row.id, 'fetch failed (response lost)')
 
