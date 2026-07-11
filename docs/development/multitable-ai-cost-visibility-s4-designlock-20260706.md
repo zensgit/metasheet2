@@ -1,6 +1,7 @@
-# Multitable AI cost visibility — pre-run estimate surface + per-field cost dimension — S4 DESIGN LOCK (PROPOSED)
+# Multitable AI cost visibility — pre-run estimate surface + per-field cost dimension — S4 DESIGN LOCK (RATIFIED)
 
-- **Status**: PROPOSED — awaiting owner ratification. Docs-only; no runtime ships here.
+- **Status**: RATIFIED (owner directive 2026-07-11). Docs-only; no runtime ships here.
+> **RATIFIED — owner directive 2026-07-11** (batch-ratify of the 12 merge-tree-clean locks). Header flipped by owner's decision, executed mechanically by Claude (not self-approval). Per-lock owner sub-decisions (variant / env-cap / storage opt-in) remain individually owner-gated.
 - **Slice**: S4 of the AI-fields governance arc (`docs/development/multitable-ai-write-provenance-batch-grouping-s1-designlock-20260705.md` §8: "cost visibility polish — estimate UI + per-field/per-run usage dimensions"). Grounded on origin/main.
 - **What S4 is NOT**: not new accounting (reserve-then-settle charge machinery is untouched); not a new billing system; not a ledger-schema change; not the DARK→GA lighting decision (owner's); not S3/S5. **Per-RUN cost is explicitly SPLIT OUT to a gated S4b — see §4 — because the ledger has no run key today** (a migration, not a visibility slice).
 
