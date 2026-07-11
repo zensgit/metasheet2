@@ -40,6 +40,11 @@ const INACTIVE = `u_cb_inactive_${TS}`
 
 const INTEGRATION_A = randomUUID()
 const INTEGRATION_B = randomUUID()
+// P1-2: the DingTalk corp each integration belongs to (directory_integrations.corp_id). The
+// callback corp cross-check requires the payload's official corpId to equal the corp the DELIVERY
+// row's integration belongs to.
+const CORP_A = `corp_b3cb_a_${TS}`
+const CORP_B = `corp_b3cb_b_${TS}`
 const DD_OP = `dd_cb_op_${TS}` // → APPROVER (corp A)
 const DD_REQ = `dd_cb_req_${TS}` // → REQUESTER (corp A) — mapped but non-assignee
 const DD_INACTIVE = `dd_cb_inactive_${TS}` // → INACTIVE user (corp A)
@@ -57,15 +62,25 @@ let approvals: ApprovalProductService
 let templateId = ''
 const deps = { query: q, approvals: null as unknown as ApprovalProductService }
 
-function payloadFor(outTrackId: string, operator: string, extra: Record<string, unknown> = {}, action = 'approve') {
-  return {
+// P1-2: `corpId` is the official clicker corp the callback carries. It defaults to CORP_A (the
+// corp the default INTEGRATION_A deliveries belong to) so the happy path passes the corp
+// cross-check; corp-B deliveries and the cross-corp goldens pass it explicitly. `corpId: null`
+// omits the field entirely (the ABSENT-corpId fail-closed case).
+function payloadFor(
+  outTrackId: string,
+  operator: string,
+  extra: Record<string, unknown> = {},
+  action = 'approve',
+  corpId: string | null = CORP_A,
+): Record<string, unknown> {
+  const base: Record<string, unknown> = {
     outTrackId,
     userId: operator,
     userIdType: 1,
     content: JSON.stringify({ cardPrivateData: { actionIds: [action], params: {} } }),
-    corpId: 'corp_transport_metadata',
-    ...extra,
   }
+  if (corpId !== null) base.corpId = corpId
+  return { ...base, ...extra }
 }
 
 async function newInstance(): Promise<string> {
@@ -170,12 +185,12 @@ describeIfDatabase('B-3 DingTalk card callback adapter (real DB)', () => {
     await q(
       `INSERT INTO directory_integrations (id, name, provider, status, corp_id, config, updated_at)
        VALUES ($1, $2, 'dingtalk', 'active', $3, $4::jsonb, now())`,
-      [INTEGRATION_A, `b3cb-corp-a-${TS}`, `corp_b3cb_a_${TS}`, JSON.stringify({ approvalCardLinkSecret: normalizeStoredSecretValue(STORED_SECRET_A) })],
+      [INTEGRATION_A, `b3cb-corp-a-${TS}`, CORP_A, JSON.stringify({ approvalCardLinkSecret: normalizeStoredSecretValue(STORED_SECRET_A) })],
     )
     await q(
       `INSERT INTO directory_integrations (id, name, provider, status, corp_id, config, updated_at)
        VALUES ($1, $2, 'dingtalk', 'active', $3, $4::jsonb, now() - interval '1 minute')`,
-      [INTEGRATION_B, `b3cb-corp-b-${TS}`, `corp_b3cb_b_${TS}`, JSON.stringify({ approvalCardLinkSecret: normalizeStoredSecretValue(STORED_SECRET_B) })],
+      [INTEGRATION_B, `b3cb-corp-b-${TS}`, CORP_B, JSON.stringify({ approvalCardLinkSecret: normalizeStoredSecretValue(STORED_SECRET_B) })],
     )
 
     await linkAccount(ACCOUNTS.op, INTEGRATION_A, DD_OP, APPROVER)
@@ -376,6 +391,36 @@ describeIfDatabase('B-3 DingTalk card callback adapter (real DB)', () => {
     expect(await approveRecordCount(instanceId)).toBe(1)
   })
 
+  test('P1-2 corp cross-check: a corp-A click (userId collision) on a corp-B delivery is refused (corp_mismatch); missing corpId is refused; the matching corp executes', async () => {
+    const instanceId = await newInstance()
+    // Delivery pinned to corp B; the assignee APPROVER is linked under corp B as DD_OP_B.
+    const row = await insertDingTalkApprovalCardDelivery(q, {
+      instanceId, nodeKey: 'approval_1', recipientUserId: APPROVER, recipientDingTalkUserId: DD_OP_B, deliveryKind: 'interactive_card', integrationId: INTEGRATION_B,
+    })
+    await markDingTalkApprovalCardDeliverySent(q, row.id, 'carrier_corp_xcheck')
+
+    // The cross-corp collision face: the click carries the corp-B assignee's userId (DD_OP_B) but
+    // the OFFICIAL corpId is corp A — a corp-A clicker whose id collides with the corp-B assignee.
+    // On main (no corp check) resolveOperatorLocalUser(DD_OP_B, INTEGRATION_B) → APPROVER and the
+    // corp-A clicker APPROVES the corp-B task. The gate refuses it before any operator lookup.
+    const mismatch = await executeDingTalkApprovalCardCallback(deps, payloadFor(row.id, DD_OP_B, {}, 'approve', CORP_A))
+    expect(mismatch).toEqual({ outcome: 'operator_unresolved', deliveryId: row.id, reason: 'corp_mismatch' })
+    expect(await approveRecordCount(instanceId)).toBe(0)
+    expect(await cardState(row.id)).toBe('sent')
+
+    // Fail-closed on an ABSENT payload corpId (the field is omitted entirely), never skipped.
+    const absent = await executeDingTalkApprovalCardCallback(deps, payloadFor(row.id, DD_OP_B, {}, 'approve', null))
+    expect(absent).toEqual({ outcome: 'operator_unresolved', deliveryId: row.id, reason: 'corp_mismatch' })
+    expect(await approveRecordCount(instanceId)).toBe(0)
+    expect(await cardState(row.id)).toBe('sent')
+
+    // Matching corpId (the delivery's own corp B) passes the gate and executes end-to-end.
+    const match = await executeDingTalkApprovalCardCallback(deps, payloadFor(row.id, DD_OP_B, {}, 'approve', CORP_B))
+    expect(match.outcome).toBe('executed')
+    expect(await approveRecordCount(instanceId)).toBe(1)
+    expect(await cardState(row.id)).toBe('acted')
+  })
+
   test('per-corp stored secret (env unset): a corp-B-pinned delivery signs and verifies through corp B\'s stored secret end-to-end', async () => {
     const instanceId = await newInstance()
     const row = await insertDingTalkApprovalCardDelivery(q, {
@@ -387,12 +432,14 @@ describeIfDatabase('B-3 DingTalk card callback adapter (real DB)', () => {
     const prev = process.env.APPROVAL_CARD_LINK_SECRET
     delete process.env.APPROVAL_CARD_LINK_SECRET
     try {
-      // Cross-corp identity fail-closed: corp A's operator id is NOT linked under corp B.
-      const crossCorp = await executeDingTalkApprovalCardCallback(deps, payloadFor(row.id, DD_OP))
+      // Cross-corp identity fail-closed: corp A's operator id is NOT linked under corp B. (The
+      // callback presents corp B's own corpId so the P1-2 corp gate passes and the refusal is
+      // proven to come from the identity lookup, not the corp cross-check.)
+      const crossCorp = await executeDingTalkApprovalCardCallback(deps, payloadFor(row.id, DD_OP, {}, 'approve', CORP_B))
       expect(crossCorp).toEqual({ outcome: 'operator_unresolved', deliveryId: row.id, reason: 'unlinked' })
 
       // Corp B's own linked operator executes; token threading used corp B's stored secret.
-      const result = await executeDingTalkApprovalCardCallback(deps, payloadFor(row.id, DD_OP_B))
+      const result = await executeDingTalkApprovalCardCallback(deps, payloadFor(row.id, DD_OP_B, {}, 'approve', CORP_B))
       expect(result.outcome).toBe('executed')
       const record = await q(
         `SELECT metadata FROM approval_records WHERE instance_id = $1 AND action = 'approve' ORDER BY created_at DESC LIMIT 1`,
