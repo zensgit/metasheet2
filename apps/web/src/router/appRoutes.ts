@@ -241,10 +241,26 @@ export const appRoutes: RouteRecordRaw[] = [
     meta: { title: 'Integration Help', titleZh: '集成帮助中心', requiresAuth: true },
   },
   {
+    path: '/help/attendance/dingtalk-microapp',
+    name: 'attendance-dingtalk-microapp-help',
+    component: () => import('../views/AttendanceDingTalkMicroappHelpView.vue'),
+    meta: { title: 'DingTalk Microapp Help', titleZh: '钉钉微应用配置帮助', requiresAuth: true },
+  },
+  {
     path: '/integrations/k3-wise',
     name: AppRouteNames.INTEGRATION_K3_WISE,
     component: () => import('../views/IntegrationK3WiseSetupView.vue'),
     meta: { title: 'K3 WISE Preset', titleZh: 'K3 WISE 预设', requiresAuth: true, permissions: ['integration:write'] }
+  },
+  {
+    // Stock Preparation MVP (#3751, docs/development/stock-preparation-mvp-design-20260707.md):
+    // readonly-first, tabbed operator workspace. Deliberately a SEPARATE routed shell (not crammed
+    // into the admin IntegrationWorkbenchView) so the six MVP views land later in disjoint files.
+    // Reuses the integration:write gate (same as the Data Factory workbench) — no broader access.
+    path: '/stock-prep',
+    name: AppRouteNames.INTEGRATION_STOCK_PREPARATION,
+    component: () => import('../components/integration/stockPreparation/StockPreparationWorkspace.vue'),
+    meta: { title: 'Stock Preparation', titleZh: '备料工作台', requiresAuth: true, permissions: ['integration:write'] }
   },
   {
     path: '/workflows',

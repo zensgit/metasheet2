@@ -541,6 +541,9 @@ function summarizeSnapshotDiffForEvidence(plan = {}) {
 module.exports = {
   DIFF_TYPES,
   CHANGE_TYPES,
+  // The single held/ready policy source (currently: EVERY change type blocks). Exported so the diff
+  // read surface / generation / FE consume THIS array instead of forking the policy.
+  BLOCKING_CHANGE_TYPES,
   REVIEW_STATUSES,
   StockPreparationSnapshotDiffError,
   planBomSnapshotDiff,

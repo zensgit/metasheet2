@@ -644,7 +644,7 @@ export function summarizeFieldProvenance(
   return { entries, stats }
 }
 
-async function parseIntegrationResponse<T>(response: Response): Promise<T> {
+export async function parseIntegrationResponse<T>(response: Response): Promise<T> {
   let payload: IntegrationApiEnvelope<T> | null = null
   try {
     payload = await response.json() as IntegrationApiEnvelope<T>
@@ -733,7 +733,7 @@ function normalizePlmBomMultitableResult(
   return { data_source_id: resolvedId, available: true, entitled, context, ...(reason ? { reason } : {}) }
 }
 
-function buildQueryString(input: Record<string, unknown>): string {
+export function buildQueryString(input: Record<string, unknown>): string {
   const params = new URLSearchParams()
   for (const [key, value] of Object.entries(input)) {
     if (value === undefined || value === null || value === '') continue

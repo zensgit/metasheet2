@@ -2381,6 +2381,260 @@ describe('ApprovalProductService', () => {
     expect(insertInstance?.[1]?.[12]).toBe('pub-2')
   })
 
+  // B3-08 (模板治理 — 停用/启用 + 用量): archiveTemplate/unarchiveTemplate is the only way to REACH
+  // (or leave) the `archived` status; the pre-existing `bundle.template.status !== 'published'` gate
+  // in assembleCreationContext (exercised above) already fails closed for it. These tests prove (a)
+  // the transition itself is a real, transactional status flip and (b) chaining it into createApproval
+  // is non-vacuous — the create-time gate only actually fires because the stored row changed.
+  describe('B3-08 template archive/unarchive + usage', () => {
+    function mockArchiveTransactionClient(templateRow: Record<string, unknown>, versionRow: Record<string, unknown>) {
+      pgState.client.query.mockImplementation(async (sql: string, params: unknown[] = []) => {
+        const statement = normalize(sql)
+        if (statement === 'BEGIN' || statement === 'COMMIT' || statement === 'ROLLBACK') {
+          return { rows: [], rowCount: 0 }
+        }
+        // Must be checked BEFORE the plain (no FOR UPDATE) branch below — the FOR UPDATE text is a
+        // superset prefix match of the plain one.
+        if (statement.startsWith('SELECT * FROM approval_templates WHERE id = $1 FOR UPDATE')) {
+          return { rows: [templateRow], rowCount: 1 }
+        }
+        if (statement.startsWith('UPDATE approval_templates SET status = $1, updated_at = now() WHERE id = $2')) {
+          templateRow.status = params[0]
+          return { rows: [], rowCount: 1 }
+        }
+        if (statement.startsWith('SELECT * FROM approval_templates WHERE id = $1')) {
+          return { rows: [templateRow], rowCount: 1 }
+        }
+        if (statement.startsWith('SELECT * FROM approval_template_versions WHERE id = $1 AND template_id = $2')) {
+          return { rows: [versionRow], rowCount: 1 }
+        }
+        if (statement.startsWith('SELECT * FROM approval_published_definitions')) {
+          return { rows: [], rowCount: 0 }
+        }
+        throw new Error(`Unhandled client query: ${statement}`)
+      })
+    }
+
+    function buildTemplateRow(overrides: Record<string, unknown> = {}) {
+      return {
+        id: 'tpl-1',
+        key: 'travel',
+        name: 'Travel Approval',
+        description: null,
+        category: null,
+        visibility_scope: { type: 'all', ids: [] },
+        sla_hours: null,
+        status: 'published',
+        active_version_id: 'ver-2',
+        latest_version_id: 'ver-2',
+        created_at: new Date(),
+        updated_at: new Date(),
+        ...overrides,
+      }
+    }
+
+    function buildVersionRow(runtimeGraph: Record<string, unknown>, overrides: Record<string, unknown> = {}) {
+      return {
+        id: 'ver-2',
+        template_id: 'tpl-1',
+        version: 2,
+        status: 'published',
+        form_schema: { fields: [] },
+        approval_graph: runtimeGraph,
+        created_at: new Date(),
+        updated_at: new Date(),
+        ...overrides,
+      }
+    }
+
+    it('archives a published template', async () => {
+      const templateRow = buildTemplateRow({ status: 'published' })
+      const versionRow = buildVersionRow(buildRuntimeGraph())
+      mockArchiveTransactionClient(templateRow, versionRow)
+
+      const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+      const service = new ApprovalProductService(buildNoopMetrics() as never)
+
+      const updated = await service.archiveTemplate('tpl-1')
+      expect(updated.status).toBe('archived')
+      expect(templateRow.status).toBe('archived')
+    })
+
+    it('rejects archiving a template that is not published (state-machine guard, no write happens)', async () => {
+      const templateRow = buildTemplateRow({ status: 'draft' })
+      const versionRow = buildVersionRow(buildRuntimeGraph())
+      mockArchiveTransactionClient(templateRow, versionRow)
+
+      const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+      const service = new ApprovalProductService(buildNoopMetrics() as never)
+
+      await expect(service.archiveTemplate('tpl-1')).rejects.toMatchObject({
+        statusCode: 409,
+        code: 'APPROVAL_TEMPLATE_ARCHIVE_INVALID_STATUS',
+      })
+      // Non-vacuous: the guard must reject BEFORE issuing the UPDATE.
+      expect(templateRow.status).toBe('draft')
+      const updateCall = pgState.client.query.mock.calls.find(([sql]) =>
+        normalize(sql as string).startsWith('UPDATE approval_templates SET status = $1'))
+      expect(updateCall).toBeUndefined()
+    })
+
+    it('unarchives an archived template and lets a subsequent createApproval succeed again', async () => {
+      const runtimeGraph = buildRuntimeGraph()
+      const templateRow = buildTemplateRow({ status: 'archived' })
+      const versionRow = buildVersionRow(runtimeGraph)
+      mockArchiveTransactionClient(templateRow, versionRow)
+
+      const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+      const service = new ApprovalProductService(buildNoopMetrics() as never)
+
+      const updated = await service.unarchiveTemplate('tpl-1')
+      expect(updated.status).toBe('published')
+      expect(templateRow.status).toBe('published')
+
+      // Reversibility: createApproval reads through `pool.query` (not `client.query`) for the
+      // template bundle — mock it to return the SAME now-published row.
+      pgState.pool.query.mockImplementation(async (sql: string) => {
+        const statement = normalize(sql)
+        if (statement.startsWith('SELECT * FROM approval_templates WHERE id = $1')) {
+          return { rows: [templateRow], rowCount: 1 }
+        }
+        if (statement.startsWith('SELECT * FROM approval_template_versions WHERE id = $1')) {
+          return { rows: [versionRow], rowCount: 1 }
+        }
+        if (statement.startsWith('SELECT * FROM approval_published_definitions')) {
+          return {
+            rows: [{
+              id: 'pub-2',
+              template_id: 'tpl-1',
+              template_version_id: 'ver-2',
+              runtime_graph: runtimeGraph,
+              is_active: true,
+              published_at: new Date(),
+            }],
+            rowCount: 1,
+          }
+        }
+        if (statement.startsWith(`SELECT 'AP-' || nextval('approval_request_no_seq')::text AS request_no`)) {
+          return { rows: [{ request_no: 'AP-101002' }], rowCount: 1 }
+        }
+        throw new Error(`Unhandled pool query: ${statement}`)
+      })
+      pgState.client.query.mockImplementation(async (sql: string) => {
+        const statement = normalize(sql)
+        if (statement === 'BEGIN' || statement === 'COMMIT' || statement === 'ROLLBACK') return { rows: [], rowCount: 0 }
+        if (statement.startsWith('INSERT INTO approval_instances')) return { rows: [], rowCount: 1 }
+        if (statement.startsWith('INSERT INTO approval_assignments')) return { rows: [], rowCount: 1 }
+        if (statement.startsWith('INSERT INTO approval_records')) return { rows: [], rowCount: 1 }
+        { const epochResult = epochMockResult(statement); if (epochResult) return epochResult } throw new Error(`Unhandled client query: ${statement}`)
+      })
+      // createApproval's final step re-reads the freshly-inserted instance via getApproval — stub
+      // it out (as the existing "creates new approvals..." test above does) since exercising THAT
+      // read is not what this test is about.
+      vi.spyOn(service, 'getApproval').mockResolvedValue(buildApprovalDto({
+        templateVersionId: 'ver-2',
+        publishedDefinitionId: 'pub-2',
+      }))
+
+      await expect(service.createApproval(
+        { templateId: 'tpl-1', formData: {} },
+        { userId: 'requester-1' },
+      )).resolves.toBeDefined()
+    })
+
+    it('rejects unarchiving a template that is not archived', async () => {
+      const templateRow = buildTemplateRow({ status: 'published' })
+      const versionRow = buildVersionRow(buildRuntimeGraph())
+      mockArchiveTransactionClient(templateRow, versionRow)
+
+      const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+      const service = new ApprovalProductService(buildNoopMetrics() as never)
+
+      await expect(service.unarchiveTemplate('tpl-1')).rejects.toMatchObject({
+        statusCode: 409,
+        code: 'APPROVAL_TEMPLATE_UNARCHIVE_INVALID_STATUS',
+      })
+      expect(templateRow.status).toBe('published')
+    })
+
+    it('mutation-proof: archiving a template is what makes createApproval reject it — the create-time gate only fires because the stored status actually flipped', async () => {
+      const runtimeGraph = buildRuntimeGraph()
+      const templateRow = buildTemplateRow({ status: 'published' })
+      const versionRow = buildVersionRow(runtimeGraph)
+      mockArchiveTransactionClient(templateRow, versionRow)
+
+      const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+      const service = new ApprovalProductService(buildNoopMetrics() as never)
+
+      await service.archiveTemplate('tpl-1')
+      expect(templateRow.status).toBe('archived')
+
+      pgState.pool.query.mockImplementation(async (sql: string) => {
+        const statement = normalize(sql)
+        if (statement.startsWith('SELECT * FROM approval_templates WHERE id = $1')) {
+          return { rows: [templateRow], rowCount: 1 }
+        }
+        if (statement.startsWith('SELECT * FROM approval_template_versions WHERE id = $1')) {
+          return { rows: [versionRow], rowCount: 1 }
+        }
+        if (statement.startsWith('SELECT * FROM approval_published_definitions')) {
+          return { rows: [], rowCount: 0 }
+        }
+        throw new Error(`Unhandled pool query: ${statement}`)
+      })
+
+      await expect(service.createApproval(
+        { templateId: 'tpl-1', formData: {} },
+        { userId: 'requester-1' },
+      )).rejects.toMatchObject({
+        statusCode: 409,
+        code: 'APPROVAL_TEMPLATE_NOT_PUBLISHED',
+      })
+    })
+
+    it('getTemplateUsage reports total + still-in-flight instance counts scoped to the template', async () => {
+      pgState.pool.query.mockImplementation(async (sql: string, params: unknown[] = []) => {
+        const statement = normalize(sql)
+        if (statement.startsWith('SELECT id FROM approval_templates WHERE id = $1')) {
+          return { rows: [{ id: 'tpl-1' }], rowCount: 1 }
+        }
+        if (statement.startsWith('SELECT COUNT(*)::text AS total_count')) {
+          expect(params[0]).toBe('tpl-1')
+          expect(params[1]).toEqual(['approved', 'rejected', 'revoked', 'cancelled'])
+          return { rows: [{ total_count: '5', active_count: '2' }], rowCount: 1 }
+        }
+        throw new Error(`Unhandled pool query: ${statement}`)
+      })
+
+      const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+      const service = new ApprovalProductService(buildNoopMetrics() as never)
+
+      await expect(service.getTemplateUsage('tpl-1')).resolves.toEqual({
+        templateId: 'tpl-1',
+        instanceCount: 5,
+        activeInstanceCount: 2,
+      })
+    })
+
+    it('getTemplateUsage 404s for a template that does not exist', async () => {
+      pgState.pool.query.mockImplementation(async (sql: string) => {
+        const statement = normalize(sql)
+        if (statement.startsWith('SELECT id FROM approval_templates WHERE id = $1')) {
+          return { rows: [], rowCount: 0 }
+        }
+        throw new Error(`Unhandled pool query: ${statement}`)
+      })
+
+      const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+      const service = new ApprovalProductService(buildNoopMetrics() as never)
+
+      await expect(service.getTemplateUsage('tpl-missing')).rejects.toMatchObject({
+        statusCode: 404,
+        code: 'APPROVAL_TEMPLATE_NOT_FOUND',
+      })
+    })
+  })
+
   // RA-1a wedge guard (error-vs-empty split): a transient directory-read failure must not freeze an
   // absent department into a downstream requester.department condition (which would wedge every later
   // approval, admin-cancel only). A read that THROWS fails the create fast; a read that SUCCEEDS with no

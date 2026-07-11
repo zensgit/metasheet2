@@ -26,8 +26,6 @@ export interface EnhancedPluginContext {
   // Storage helpers
   getConfig<T = unknown>(key: string): T | undefined
   setConfig<T = unknown>(key: string, value: T): Promise<void>
-  getStorage<T = unknown>(key: string): Promise<T | undefined>
-  setStorage<T = unknown>(key: string, value: T): Promise<void>
 
   // Event helpers
   emit(event: string, data: unknown): Promise<void>
@@ -39,7 +37,6 @@ export function createEnhancedPluginContext(config: EnhancedPluginContextConfig)
   const pluginId = config.manifest.name // use name as id
   const logger = new Logger(`Plugin:${pluginId}`)
   const configStore = new Map<string, unknown>()
-  const storageCache = new Map<string, unknown>()
   const eventHandlers = new Map<string, Set<(data: unknown) => void>>()
 
   const capabilities: PluginCapabilities = {
@@ -69,45 +66,6 @@ export function createEnhancedPluginContext(config: EnhancedPluginContextConfig)
 
     async setConfig<T = unknown>(key: string, value: T): Promise<void> {
       configStore.set(key, value)
-    },
-
-    async getStorage<T = unknown>(key: string): Promise<T | undefined> {
-      // Check cache first
-      if (storageCache.has(key)) {
-        return storageCache.get(key) as T | undefined
-      }
-
-      // Load from storage service if available
-      if (config.services.storage) {
-        try {
-          const file = await config.services.storage.getFileInfo(`plugin:${pluginId}:${key}`)
-          if (file) {
-            const data = await config.services.storage.download(file.id)
-            const value = JSON.parse(data.toString())
-            storageCache.set(key, value)
-            return value as T | undefined
-          }
-        } catch (error) {
-          logger.error(`Failed to get storage key '${key}':`, error instanceof Error ? error : undefined)
-        }
-      }
-      return undefined
-    },
-
-    async setStorage<T = unknown>(key: string, value: T): Promise<void> {
-      storageCache.set(key, value)
-
-      if (config.services.storage) {
-        try {
-          const data = Buffer.from(JSON.stringify(value))
-          await config.services.storage.upload(data, {
-            filename: `plugin:${pluginId}:${key}`,
-            overwrite: true
-          })
-        } catch (error) {
-          logger.error(`Failed to set storage key '${key}':`, error instanceof Error ? error : undefined)
-        }
-      }
     },
 
     async emit(event: string, data: unknown): Promise<void> {

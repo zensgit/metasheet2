@@ -34,7 +34,9 @@ function createRequestLike(host: string = 'example.test', protocol: string = 'ht
 function createStorageMock(overrides: {
   upload?: ReturnType<typeof vi.fn>
   download?: ReturnType<typeof vi.fn>
+  downloadByKey?: ReturnType<typeof vi.fn>
   deleteFn?: ReturnType<typeof vi.fn>
+  deleteByKeyFn?: ReturnType<typeof vi.fn>
 } = {}) {
   return {
     upload: overrides.upload ?? vi.fn(async () => ({
@@ -43,13 +45,20 @@ function createStorageMock(overrides: {
       originalName: 'in.bin',
       mimeType: 'application/octet-stream',
       size: 4,
-      path: 'sheets_sheet_1/unassigned/out.bin',
-      url: 'http://localhost/files/file_123',
+      // F3 G1: the local provider now returns a server-derived key here (`<uuid>/<safeBasename>`); the
+      // mock keeps a representative value that storeAttachment persists as storage_path.
+      path: 'file_123/out.bin',
+      storageKey: 'file_123/out.bin',
+      url: 'http://localhost/files/file_123/out.bin',
       provider: 'local',
       createdAt: new Date('2026-04-23T00:00:00Z'),
     })),
     download: overrides.download ?? vi.fn(async () => Buffer.from('abcd')),
+    downloadByKey: overrides.downloadByKey ?? vi.fn(async () => Buffer.from('by-key')),
     delete: overrides.deleteFn ?? vi.fn(async () => undefined),
+    // F9 design-lock GF9-1 (owner CHANGES-REQUESTED P2-1①): the index-free delete `deleteAttachmentBinary`
+    // now prefers when a `storagePath` is present.
+    deleteByKey: overrides.deleteByKeyFn ?? vi.fn(async () => undefined),
   } as any
 }
 
@@ -261,9 +270,11 @@ describe('attachment-service: buildAttachmentSummaries', () => {
 
 describe('attachment-service: storeAttachment', () => {
   it('uploads binary, inserts row, and returns the row + storage metadata', async () => {
+    let capturedParams: unknown[] | undefined
     const query = createQuery((sql, params) => {
       expect(sql).toContain('INSERT INTO multitable_attachments')
       expect(params?.[0]).toBe('att_fixed')
+      capturedParams = params
       return [
         {
           id: 'att_fixed',
@@ -294,6 +305,8 @@ describe('attachment-service: storeAttachment', () => {
     expect(storage.upload).toHaveBeenCalledTimes(1)
     expect(result.row.id).toBe('att_fixed')
     expect(result.uploaded.id).toBe('file_123')
+    // F3 G8: storage_path (INSERT param index 9) is the physical key the download path reads back by.
+    expect(capturedParams?.[9]).toBe('file_123/out.bin')
   })
 
   it('cleans up storage when the DB insert fails', async () => {
@@ -330,12 +343,15 @@ describe('attachment-service: readAttachmentMetadata & readAttachmentBinary', ()
     expect(result).toBeNull()
   })
 
-  it('maps the selected columns to the expected shape', async () => {
+  it('maps the selected columns to the expected shape (incl F3 G8 storage_path)', async () => {
     const query = createQuery(() => [
       {
         id: 'att_1',
         sheet_id: 's1',
+        record_id: 'rec_1',
+        field_id: 'fld_files',
         storage_file_id: 'file_42',
+        storage_path: 'file_42/report.pdf',
         filename: 'report.pdf',
         original_name: 'Report.pdf',
         mime_type: 'application/pdf',
@@ -346,7 +362,10 @@ describe('attachment-service: readAttachmentMetadata & readAttachmentBinary', ()
     expect(result).toEqual({
       id: 'att_1',
       sheetId: 's1',
+      recordId: 'rec_1',
+      fieldId: 'fld_files',
       storageFileId: 'file_42',
+      storagePath: 'file_42/report.pdf',
       filename: 'report.pdf',
       originalName: 'Report.pdf',
       mimeType: 'application/pdf',
@@ -354,11 +373,26 @@ describe('attachment-service: readAttachmentMetadata & readAttachmentBinary', ()
     })
   })
 
-  it('delegates readAttachmentBinary to the storage adapter', async () => {
-    const storage = createStorageMock({ download: vi.fn(async () => Buffer.from('payload')) as any })
-    const result = await readAttachmentBinary({ storage, storageFileId: 'file_42' })
+  it('F3 G8 — readAttachmentBinary reads by storage_path (index-free) when present', async () => {
+    const storage = createStorageMock({
+      download: vi.fn(async () => Buffer.from('via-index')) as any,
+      downloadByKey: vi.fn(async () => Buffer.from('via-key')) as any,
+    })
+    const result = await readAttachmentBinary({ storage, storageFileId: 'file_42', storagePath: 'file_42/report.pdf' })
+    expect(storage.downloadByKey).toHaveBeenCalledWith('file_42/report.pdf')
+    expect(storage.download).not.toHaveBeenCalled()
+    expect(result.toString()).toBe('via-key')
+  })
+
+  it('F3 G8 — readAttachmentBinary falls back to the id-based read for a legacy row without storage_path', async () => {
+    const storage = createStorageMock({
+      download: vi.fn(async () => Buffer.from('via-index')) as any,
+      downloadByKey: vi.fn(async () => Buffer.from('via-key')) as any,
+    })
+    const result = await readAttachmentBinary({ storage, storageFileId: 'file_42', storagePath: null })
     expect(storage.download).toHaveBeenCalledWith('file_42')
-    expect(result.toString()).toBe('payload')
+    expect(storage.downloadByKey).not.toHaveBeenCalled()
+    expect(result.toString()).toBe('via-index')
   })
 })
 
@@ -389,6 +423,35 @@ describe('attachment-service: readAttachmentForDelete', () => {
       recordId: 'rec_1',
       fieldId: 'fld_att',
       storageFileId: 'file_7',
+      storagePath: null,
+      createdBy: 'user_1',
+    })
+  })
+
+  it('F9 GF9-1 (owner CHANGES-REQUESTED P2-1①) — SELECTs and returns storage_path, mirroring readAttachmentMetadata', async () => {
+    const query = createQuery((sqlText) => {
+      expect(sqlText).toContain('storage_path')
+      return [
+        {
+          id: 'att_1',
+          sheet_id: 's1',
+          record_id: 'rec_1',
+          field_id: 'fld_att',
+          storage_file_id: 'file_7',
+          storage_path: 'file_7/report.pdf',
+          created_by: 'user_1',
+        },
+      ]
+    })
+    await expect(
+      readAttachmentForDelete({ query, attachmentId: 'att_1' }),
+    ).resolves.toEqual({
+      id: 'att_1',
+      sheetId: 's1',
+      recordId: 'rec_1',
+      fieldId: 'fld_att',
+      storageFileId: 'file_7',
+      storagePath: 'file_7/report.pdf',
       createdBy: 'user_1',
     })
   })
@@ -414,5 +477,86 @@ describe('attachment-service: soft delete and binary delete', () => {
       deleteAttachmentBinary({ storage, storageFileId: 'file_bad' }),
     ).resolves.toBeUndefined()
     expect(storage.delete).toHaveBeenCalledWith('file_bad')
+  })
+
+  it('F9 GF9-1 (owner CHANGES-REQUESTED P2-1①) — with a storagePath, deletes index-free via deleteByKey and never calls the id-keyed delete', async () => {
+    const storage = createStorageMock()
+    await deleteAttachmentBinary({ storage, storageFileId: 'file_7', storagePath: 'file_7/report.pdf' })
+    expect(storage.deleteByKey).toHaveBeenCalledWith('file_7/report.pdf')
+    expect(storage.delete).not.toHaveBeenCalled()
+  })
+
+  it('F9 GF9-1 — without a storagePath (legacy/defensive), falls back to the id-keyed delete', async () => {
+    const storage = createStorageMock()
+    await deleteAttachmentBinary({ storage, storageFileId: 'file_7', storagePath: null })
+    expect(storage.delete).toHaveBeenCalledWith('file_7')
+    expect(storage.deleteByKey).not.toHaveBeenCalled()
+  })
+
+  it('F9 GF9-1 — deleteByKey throwing (a genuine, non-ENOENT physical failure) is swallowed, same best-effort contract as the delete() fallback', async () => {
+    const storage = createStorageMock({
+      deleteByKeyFn: vi.fn(async () => {
+        throw new Error('EACCES: permission denied')
+      }) as any,
+    })
+    await expect(
+      deleteAttachmentBinary({ storage, storageFileId: 'file_7', storagePath: 'file_7/report.pdf' }),
+    ).resolves.toBeUndefined()
+  })
+
+  it('F9 GF9-2 (owner CHANGES-REQUESTED P2-1②, Option A) — a resolved deleteByKey, with query + attachmentId supplied, stamps blob_purged_at', async () => {
+    const storage = createStorageMock()
+    const query = createQuery((sqlText, params) => {
+      expect(sqlText).toContain('UPDATE multitable_attachments SET blob_purged_at')
+      expect(params).toEqual(['att_1'])
+      return []
+    })
+    await deleteAttachmentBinary({
+      storage,
+      storageFileId: 'file_7',
+      storagePath: 'file_7/report.pdf',
+      query,
+      attachmentId: 'att_1',
+    })
+    expect(query).toHaveBeenCalledTimes(1)
+  })
+
+  it('F9 GF9-2 — a genuine (non-ENOENT) physical delete failure never stamps blob_purged_at (leaves it NULL for the compensating sweep)', async () => {
+    const storage = createStorageMock({
+      deleteByKeyFn: vi.fn(async () => {
+        throw new Error('EACCES: permission denied')
+      }) as any,
+    })
+    const query = vi.fn(async () => ({ rows: [] })) as unknown as AttachmentQueryFn
+    await deleteAttachmentBinary({
+      storage,
+      storageFileId: 'file_7',
+      storagePath: 'file_7/report.pdf',
+      query,
+      attachmentId: 'att_1',
+    })
+    expect(query).not.toHaveBeenCalled()
+  })
+
+  it('F9 GF9-2 — omitting query/attachmentId (legacy callers) skips the stamp attempt entirely; the physical delete still runs', async () => {
+    const storage = createStorageMock()
+    await deleteAttachmentBinary({ storage, storageFileId: 'file_7', storagePath: 'file_7/report.pdf' })
+    expect(storage.deleteByKey).toHaveBeenCalledWith('file_7/report.pdf')
+  })
+
+  it('F9 GF9-2 — the blob_purged_at stamp UPDATE itself failing is swallowed (best-effort; the sweep will simply retry)', async () => {
+    const storage = createStorageMock()
+    const query = vi.fn(async () => {
+      throw new Error('connection reset')
+    }) as unknown as AttachmentQueryFn
+    await expect(
+      deleteAttachmentBinary({
+        storage,
+        storageFileId: 'file_7',
+        storagePath: 'file_7/report.pdf',
+        query,
+        attachmentId: 'att_1',
+      }),
+    ).resolves.toBeUndefined()
   })
 })

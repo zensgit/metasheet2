@@ -44,13 +44,22 @@
           <label class="invite-field">
             <span>新密码</span>
             <input
+              id="invite-new-password"
               v-model="password"
               type="password"
               autocomplete="new-password"
+              aria-describedby="invite-password-requirements"
               placeholder="至少 8 位，包含大小写字母和数字"
               required
             />
           </label>
+
+          <div id="invite-password-requirements" class="invite-password-requirements" data-testid="password-requirements">
+            <strong>{{ passwordRequirementCopy.title }}</strong>
+            <ul>
+              <li v-for="item in passwordRequirementCopy.items" :key="item">{{ item }}</li>
+            </ul>
+          </div>
 
           <label class="invite-field">
             <span>确认密码</span>
@@ -85,6 +94,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { useAuth } from '../composables/useAuth'
 import { useFeatureFlags } from '../stores/featureFlags'
 import { getApiBase } from '../utils/api'
+import { getPasswordRequirementCopy } from '../utils/passwordRequirements'
 
 type InvitePreview = {
   user: {
@@ -119,6 +129,7 @@ const preview = ref<InvitePreview | null>(null)
 const name = ref('')
 const password = ref('')
 const confirmPassword = ref('')
+const passwordRequirementCopy = getPasswordRequirementCopy('zh')
 
 function currentInviteToken(): string {
   const token = Array.isArray(route.query.token) ? route.query.token[0] : route.query.token
@@ -327,6 +338,24 @@ onMounted(() => {
   border-radius: 10px;
   padding: 0 12px;
   font-size: 14px;
+}
+
+.invite-password-requirements {
+  border: 1px solid #dbeafe;
+  border-radius: 10px;
+  background: #eff6ff;
+  color: #1e3a8a;
+  display: grid;
+  gap: 6px;
+  padding: 10px 12px;
+  font-size: 13px;
+}
+
+.invite-password-requirements ul {
+  margin: 0;
+  padding-left: 18px;
+  display: grid;
+  gap: 4px;
 }
 
 .invite-submit {

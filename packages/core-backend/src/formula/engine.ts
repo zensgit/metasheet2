@@ -379,6 +379,215 @@ export class FormulaEngine {
     this.functions.set('SECOND', (date: unknown) => { const d = this.coerceDateValue(date); return d ? d.getSeconds() : '#VALUE!' })
     // DAYS(end_date, start_date): integer calendar-day diff in Excel arg order (note: datedif is start,end).
     this.functions.set('DAYS', (endDate: unknown, startDate: unknown) => this.datedif(startDate, endDate, 'D'))
+
+    // ── Cluster-C path-1 batch 1: 13 standard scalar functions. All single-value-in/out or
+    // variadic-scalar (no range/array semantics — SUMIFS/COUNTIFS-style criteria funcs stay out). ──
+    // PRODUCT mirrors SUM's flatten + non-numeric→0 coercion, but the multiplicative identity is 1
+    // (not 0), so the reduce seed must be 1; the empty-args case is special-cased to 0 to match SUM's
+    // own empty-args convention (SUM() === 0).
+    this.functions.set('PRODUCT', (...args: unknown[]) => {
+      const values = this.flattenValues(args)
+      if (values.length === 0) return 0
+      return values.reduce<number>((acc, val) => acc * (parseFloat(String(val)) || 0), 1)
+    })
+    this.functions.set('SIGN', (x: unknown) => {
+      const n = Number(x); if (Number.isNaN(n)) return '#VALUE!'
+      return n > 0 ? 1 : n < 0 ? -1 : 0
+    })
+    this.functions.set('PI', () => Math.PI)
+    this.functions.set('RADIANS', (deg: unknown) => {
+      const n = Number(deg); return Number.isNaN(n) ? '#VALUE!' : n * (Math.PI / 180)
+    })
+    this.functions.set('DEGREES', (rad: unknown) => {
+      const n = Number(rad); return Number.isNaN(n) ? '#VALUE!' : n * (180 / Math.PI)
+    })
+    // GCD/LCM: non-negative integers, truncating any fractional part (Excel convention); negative →
+    // #NUM!, non-numeric → #VALUE!. GCD(0, 0) = 0. LCM short-circuits to 0 the moment a 0 appears.
+    this.functions.set('GCD', (...args: unknown[]) => this.gcdVariadic(args))
+    this.functions.set('LCM', (...args: unknown[]) => this.lcmVariadic(args))
+    this.functions.set('VALUE', (text: unknown) => {
+      if (typeof text === 'number') return Number.isNaN(text) ? '#VALUE!' : text
+      const s = String(text).trim()
+      if (s === '') return '#VALUE!'
+      const n = Number(s)
+      return Number.isNaN(n) ? '#VALUE!' : n
+    })
+    // PROPER: capitalize the first letter of every letter-run; non-letters (spaces, punctuation,
+    // apostrophes) reset the "start of word" boundary, matching the standard spreadsheet convention.
+    this.functions.set('PROPER', (text: unknown) =>
+      String(text).replace(/[A-Za-z]+/g, (word) => word.charAt(0).toUpperCase() + word.slice(1).toLowerCase())
+    )
+    // TEXTJOIN(delimiter, ignore_empty, text1, ...): ignore_empty drops '' entries (post-coercion)
+    // before joining; null/undefined coerce to '' like the rest of the text functions.
+    this.functions.set('TEXTJOIN', (delimiter: unknown, ignoreEmpty: unknown, ...rest: unknown[]) => {
+      const values = this.flattenValues(rest).map((v) => (v === null || v === undefined ? '' : String(v)))
+      const filtered = ignoreEmpty ? values.filter((v) => v !== '') : values
+      return filtered.join(String(delimiter))
+    })
+    // STDEVP/VARP: population variants of STDEV/VAR — divide by N, not N-1 (the only difference).
+    this.functions.set('STDEVP', this.stdevp.bind(this))
+    this.functions.set('VARP', this.variancep.bind(this))
+    // CHOOSE(index, v1, v2, ...): 1-based; a non-integer index is truncated toward zero (Excel
+    // convention, e.g. CHOOSE(2.7, ...) behaves as CHOOSE(2, ...)); out-of-range/non-numeric → #VALUE!.
+    this.functions.set('CHOOSE', (index: unknown, ...values: unknown[]) => {
+      const raw = Number(index)
+      if (Number.isNaN(raw)) return '#VALUE!'
+      const i = Math.trunc(raw)
+      if (i < 1 || i > values.length) return '#VALUE!'
+      return values[i - 1]
+    })
+
+    // ── Cluster-C path-1 batch 2: 26 standard scalar functions — trig/math (SIN/COS/TAN/ASIN/ACOS/
+    // ATAN/ATAN2/LOG10/EVEN/ODD/FACT/QUOTIENT/MROUND), numeric predicates (ISEVEN/ISODD), text
+    // (EXACT/CHAR/CODE/CLEAN/ISTEXT), and date/time (DATEVALUE/TIMEVALUE/TIME/ISOWEEKNUM/YEARFRAC/
+    // NETWORKDAYS). All single-value-in/out — no range/array semantics (COUNTIFS/SUMIFS-style criteria
+    // funcs stay out, same rule as batch 1). ──
+    this.functions.set('SIN', (x: unknown) => { const n = Number(x); return Number.isNaN(n) ? '#VALUE!' : Math.sin(n) })
+    this.functions.set('COS', (x: unknown) => { const n = Number(x); return Number.isNaN(n) ? '#VALUE!' : Math.cos(n) })
+    this.functions.set('TAN', (x: unknown) => { const n = Number(x); return Number.isNaN(n) ? '#VALUE!' : Math.tan(n) })
+    // ASIN/ACOS domain is [-1, 1]; outside it is a numeric-domain error (#NUM!, matching LN/LOG10's own
+    // domain-error sentinel), distinct from #VALUE! (non-numeric input).
+    this.functions.set('ASIN', (x: unknown) => {
+      const n = Number(x); if (Number.isNaN(n)) return '#VALUE!'
+      return (n < -1 || n > 1) ? '#NUM!' : Math.asin(n)
+    })
+    this.functions.set('ACOS', (x: unknown) => {
+      const n = Number(x); if (Number.isNaN(n)) return '#VALUE!'
+      return (n < -1 || n > 1) ? '#NUM!' : Math.acos(n)
+    })
+    this.functions.set('ATAN', (x: unknown) => { const n = Number(x); return Number.isNaN(n) ? '#VALUE!' : Math.atan(n) })
+    // ATAN2(x_num, y_num): Excel's arg order is the (x, y) coordinate order, NOT JS's atan2(y, x). Per
+    // Excel's own docs, "ATAN2(a,b) equals ATAN(b/a)", i.e. result = atan(y_num / x_num) =
+    // Math.atan2(y_num, x_num) in JS's (y, x) convention. Locked by a worked MS-doc example: ATAN2(1,
+    // -1) = -0.785398163 (the angle to point (1,-1) is -45°). Both-zero → #DIV/0! (documented Excel
+    // behavior), reusing the engine's existing division-error sentinel.
+    this.functions.set('ATAN2', (x: unknown, y: unknown) => {
+      const xn = Number(x); const yn = Number(y)
+      if (Number.isNaN(xn) || Number.isNaN(yn)) return '#VALUE!'
+      if (xn === 0 && yn === 0) return '#DIV/0!'
+      return Math.atan2(yn, xn)
+    })
+    this.functions.set('LOG10', (x: unknown) => {
+      const n = Number(x); if (Number.isNaN(n)) return '#VALUE!'
+      return n <= 0 ? '#NUM!' : Math.log10(n)
+    })
+    // EVEN/ODD round AWAY FROM ZERO to the nearest even/odd integer (Excel convention: magnitude only
+    // grows, sign is preserved). EVEN(0) = 0; ODD(0) = 1 (0 is even, so the nearest odd away from zero
+    // steps up to 1).
+    this.functions.set('EVEN', (x: unknown) => {
+      const n = Number(x); if (Number.isNaN(n)) return '#VALUE!'
+      const sign = n < 0 ? -1 : 1
+      const abs = Math.ceil(Math.abs(n))
+      return sign * (abs % 2 === 1 ? abs + 1 : abs)
+    })
+    this.functions.set('ODD', (x: unknown) => {
+      const n = Number(x); if (Number.isNaN(n)) return '#VALUE!'
+      const sign = n < 0 ? -1 : 1
+      const abs = Math.ceil(Math.abs(n))
+      return sign * (abs % 2 === 0 ? abs + 1 : abs)
+    })
+    // FACT is stricter than real Excel (which silently truncates a fractional input): this batch treats
+    // BOTH a negative AND a non-integer input as a numeric-domain error (#NUM!), giving the audited set
+    // an explicit hard-reject-on-malformed-domain case rather than a silent truncation.
+    this.functions.set('FACT', (x: unknown) => {
+      const n = Number(x); if (Number.isNaN(n)) return '#VALUE!'
+      if (n < 0 || !Number.isInteger(n)) return '#NUM!'
+      let result = 1
+      for (let k = 2; k <= n; k++) result *= k
+      return result
+    })
+    this.functions.set('QUOTIENT', (numerator: unknown, denominator: unknown) => {
+      const n = Number(numerator); const d = Number(denominator)
+      if (Number.isNaN(n) || Number.isNaN(d)) return '#VALUE!'
+      return d === 0 ? '#DIV/0!' : Math.trunc(n / d)
+    })
+    // MROUND(number, multiple): number and multiple must share sign (Excel convention: opposite signs →
+    // #NUM!); multiple = 0 short-circuits to 0.
+    this.functions.set('MROUND', (x: unknown, multiple: unknown) => {
+      const n = Number(x); const m = Number(multiple)
+      if (Number.isNaN(n) || Number.isNaN(m)) return '#VALUE!'
+      if (m === 0) return 0
+      if ((n < 0) !== (m < 0)) return '#NUM!'
+      return Math.round(n / m) * m
+    })
+    // ISEVEN/ISODD truncate a non-integer input toward zero before testing parity (Excel convention).
+    this.functions.set('ISEVEN', (x: unknown) => {
+      const n = Number(x); if (Number.isNaN(n)) return '#VALUE!'
+      return Math.trunc(n) % 2 === 0
+    })
+    this.functions.set('ISODD', (x: unknown) => {
+      const n = Number(x); if (Number.isNaN(n)) return '#VALUE!'
+      return Math.trunc(n) % 2 !== 0
+    })
+    // EXACT is case-SENSITIVE equality — distinct from the '=' operator and from COUNTIF's
+    // case-INSENSITIVE text match.
+    this.functions.set('EXACT', (a: unknown, b: unknown) => String(a) === String(b))
+    // CHAR/CODE: documented scalar subset covering the classic 1..255 single-byte range (not full
+    // Unicode — that would be UNICHAR/UNICODE, out of scope). Out-of-range CHAR is the audited
+    // "CHAR 越界" error path.
+    this.functions.set('CHAR', (x: unknown) => {
+      const n = Number(x); if (Number.isNaN(n)) return '#VALUE!'
+      const i = Math.trunc(n)
+      return (i < 1 || i > 255) ? '#VALUE!' : String.fromCharCode(i)
+    })
+    this.functions.set('CODE', (text: unknown) => {
+      const s = String(text)
+      return s.length === 0 ? '#VALUE!' : s.charCodeAt(0)
+    })
+    this.functions.set('CLEAN', (text: unknown) => String(text).replace(/[\x00-\x1F]/g, ''))
+    this.functions.set('ISTEXT', (value: unknown) => typeof value === 'string')
+    // DATEVALUE/TIME/TIMEVALUE: this engine represents every date/time value as a real JS Date object
+    // (never an Excel-style fractional serial number), so a "time-only" value is a Date anchored at the
+    // Unix epoch (1970-01-01 local midnight) carrying just the h/m/s — composable with the existing
+    // HOUR/MINUTE/SECOND extractors, same as every other date function in this file.
+    this.functions.set('DATEVALUE', (text: unknown) => {
+      const d = this.coerceDateValue(text); return d ? d : '#VALUE!'
+    })
+    this.functions.set('TIME', (hour: unknown, minute: unknown, second: unknown) => {
+      const h = Number(hour); const m = Number(minute); const s = Number(second)
+      if (Number.isNaN(h) || Number.isNaN(m) || Number.isNaN(s)) return '#VALUE!'
+      return new Date(1970, 0, 1, Math.trunc(h), Math.trunc(m), Math.trunc(s))
+    })
+    this.functions.set('TIMEVALUE', (text: unknown) => {
+      const m = String(text).trim().match(/^(\d{1,2}):(\d{2})(?::(\d{2}))?$/)
+      if (!m) return '#VALUE!'
+      const h = Number(m[1]); const mi = Number(m[2]); const se = m[3] ? Number(m[3]) : 0
+      return (h > 23 || mi > 59 || se > 59) ? '#VALUE!' : new Date(1970, 0, 1, h, mi, se)
+    })
+    // ISOWEEKNUM shares WEEKNUM's algorithm verbatim: WEEKNUM (registered above) already implements
+    // ISO-8601 week numbering (Monday-first, week 1 holds the first Thursday) per its own comment, so
+    // ISOWEEKNUM delegates to the live registry entry instead of duplicating the Thursday-anchor math.
+    this.functions.set('ISOWEEKNUM', (date: unknown) => this.functions.get('WEEKNUM')!(date))
+    // YEARFRAC(start, end, [basis]): only basis 0 (US/NASD 30/360, the Excel default) is implemented;
+    // any other explicit basis is REJECTED (#VALUE!) rather than silently computing the wrong day-count
+    // convention. Dates are order-independent (matches Excel: the fraction is always non-negative
+    // regardless of which date is passed first).
+    this.functions.set('YEARFRAC', (start: unknown, end: unknown, basis: unknown = 0) => {
+      const b = Number(basis)
+      if (Number.isNaN(b) || Math.trunc(b) !== 0) return '#VALUE!'
+      const s = this.coerceDateValue(start); const e = this.coerceDateValue(end)
+      if (!s || !e) return '#VALUE!'
+      const [from, to] = s.getTime() <= e.getTime() ? [s, e] : [e, s]
+      return this.days360US(from, to) / 360
+    })
+    // NETWORKDAYS: 2-arg scalar core only — inclusive Mon-Fri count between two dates. A holidays-range
+    // 3rd argument is explicitly OUT OF SCOPE for this batch (the {fld} single-value-reference model has
+    // no range semantics to express it); sign follows Excel (negative when start_date > end_date).
+    this.functions.set('NETWORKDAYS', (start: unknown, end: unknown) => {
+      const s = this.coerceDateValue(start); const e = this.coerceDateValue(end)
+      if (!s || !e) return '#VALUE!'
+      const sign = s.getTime() <= e.getTime() ? 1 : -1
+      const [from, to] = sign === 1 ? [s, e] : [e, s]
+      let count = 0
+      const cur = new Date(from.getFullYear(), from.getMonth(), from.getDate())
+      const last = new Date(to.getFullYear(), to.getMonth(), to.getDate())
+      while (cur.getTime() <= last.getTime()) {
+        const dow = cur.getDay()
+        if (dow !== 0 && dow !== 6) count++
+        cur.setDate(cur.getDate() + 1)
+      }
+      return sign * count
+    })
   }
 
   /** Timezone-stable date coercion: a bare 'YYYY-MM-DD' is parsed as LOCAL midnight (matching DATE()),
@@ -1180,6 +1389,76 @@ export class FormulaEngine {
     const mean = values.reduce((a, b) => a + b) / values.length
     const squaredDiffs = values.map(val => Math.pow(val - mean, 2))
     return squaredDiffs.reduce((a, b) => a + b) / (values.length - 1)
+  }
+
+  // Population variants of stdev/variance: identical shape, divide by N instead of N-1. A single
+  // value is a valid population (variance 0) — unlike the sample variant, which is undefined (NaN)
+  // for N<2; only 0 args is degenerate here, and it mirrors STDEV/VAR's own 0-arg behavior (propagates
+  // as a thrown error, caught by calculate() as '#ERROR!') rather than inventing a new sentinel.
+  private stdevp(...args: unknown[]): number {
+    return Math.sqrt(this.variancep(...args))
+  }
+
+  private variancep(...args: unknown[]): number {
+    const values = this.flattenValues(args).map(val => parseFloat(String(val)) || 0)
+    const mean = values.reduce((a, b) => a + b) / values.length
+    const squaredDiffs = values.map(val => Math.pow(val - mean, 2))
+    return squaredDiffs.reduce((a, b) => a + b) / values.length
+  }
+
+  // GCD/LCM helpers (Euclidean algorithm). Truncate to integer + reject negatives before folding.
+  private gcdTwo(a: number, b: number): number {
+    a = Math.abs(a); b = Math.abs(b)
+    while (b !== 0) { [a, b] = [b, a % b] }
+    return a
+  }
+
+  private lcmTwo(a: number, b: number): number {
+    if (a === 0 || b === 0) return 0
+    return Math.abs(a * b) / this.gcdTwo(a, b)
+  }
+
+  private coerceIntegerArgs(args: unknown[]): number[] | '#VALUE!' | '#NUM!' {
+    const values = this.flattenValues(args)
+    const nums: number[] = []
+    for (const v of values) {
+      const n = Number(v)
+      if (Number.isNaN(n)) return '#VALUE!'
+      if (n < 0) return '#NUM!'
+      nums.push(Math.trunc(n))
+    }
+    return nums
+  }
+
+  private gcdVariadic(args: unknown[]): number | string {
+    const nums = this.coerceIntegerArgs(args)
+    if (typeof nums === 'string') return nums
+    if (nums.length === 0) return '#VALUE!'
+    return nums.reduce((acc, n) => this.gcdTwo(acc, n), 0)
+  }
+
+  private lcmVariadic(args: unknown[]): number | string {
+    const nums = this.coerceIntegerArgs(args)
+    if (typeof nums === 'string') return nums
+    if (nums.length === 0) return '#VALUE!'
+    return nums.reduce((acc, n) => this.lcmTwo(acc, n), 1)
+  }
+
+  // YEARFRAC basis-0 (US/NASD 30/360) date adjustment: D1=31→30; D2=31→30 only when the ORIGINAL D1
+  // (before its own adjustment) was 30 or 31, per the standard 30/360-US rule ordering. Deliberately
+  // does NOT special-case start/end dates on the last day of February (the classic "30/360 US EOM"
+  // rule) — Excel's own documentation admits basis-0 "may return an incorrect result ... when
+  // start_date is the last day in February", so this does not attempt to out-guess an
+  // admittedly-inconsistent host convention.
+  private days360US(start: Date, end: Date): number {
+    const d1Orig = start.getDate()
+    let d1 = d1Orig
+    let d2 = end.getDate()
+    const m1 = start.getMonth() + 1; const y1 = start.getFullYear()
+    const m2 = end.getMonth() + 1; const y2 = end.getFullYear()
+    if (d2 === 31 && (d1Orig === 30 || d1Orig === 31)) d2 = 30
+    if (d1 === 31) d1 = 30
+    return (y2 - y1) * 360 + (m2 - m1) * 30 + (d2 - d1)
   }
 
   private median(...args: unknown[]): number {

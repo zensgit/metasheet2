@@ -14,13 +14,22 @@
         <label class="force-password-field">
           <span>{{ isZh ? '新密码' : 'New password' }}</span>
           <input
+            id="force-password-new"
             v-model="password"
             type="password"
             autocomplete="new-password"
+            aria-describedby="force-password-requirements"
             :placeholder="isZh ? '至少 8 位，包含大小写字母和数字' : 'At least 8 characters with upper/lowercase letters and numbers'"
             required
           />
         </label>
+
+        <div id="force-password-requirements" class="force-password-requirements" data-testid="password-requirements">
+          <strong>{{ passwordRequirementCopy.title }}</strong>
+          <ul>
+            <li v-for="item in passwordRequirementCopy.items" :key="item">{{ item }}</li>
+          </ul>
+        </div>
 
         <label class="force-password-field">
           <span>{{ isZh ? '确认密码' : 'Confirm password' }}</span>
@@ -55,6 +64,7 @@ import { useLocale } from '../composables/useLocale'
 import { useFeatureFlags } from '../stores/featureFlags'
 import { ROUTE_PATHS } from '../router/types'
 import { apiFetch, clearStoredAuthState } from '../utils/api'
+import { getPasswordRequirementCopy } from '../utils/passwordRequirements'
 
 type AuthUserRecord = {
   email?: unknown
@@ -73,6 +83,7 @@ const submitting = ref(false)
 const loggingOut = ref(false)
 const error = ref('')
 const accountEmail = ref('')
+const passwordRequirementCopy = computed(() => getPasswordRequirementCopy(isZh.value ? 'zh' : 'en'))
 
 function requiresPasswordChange(user: unknown): boolean {
   if (!user || typeof user !== 'object') return false
@@ -241,6 +252,27 @@ onMounted(() => {
   outline: none;
   border-color: #3b82f6;
   box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.16);
+}
+
+.force-password-requirements {
+  border: 1px solid #dbeafe;
+  border-radius: 10px;
+  background: #eff6ff;
+  padding: 10px 12px;
+  color: #1e3a8a;
+  font-size: 13px;
+}
+
+.force-password-requirements strong {
+  display: block;
+  margin-bottom: 6px;
+}
+
+.force-password-requirements ul {
+  margin: 0;
+  padding-left: 18px;
+  display: grid;
+  gap: 4px;
 }
 
 .force-password-submit {

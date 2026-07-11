@@ -368,6 +368,11 @@ export function resetPickerRecordCount(count: number, isZh: boolean): string {
   return count === 1 ? '1 record' : `${count} records`
 }
 
+// R11 back-reference: History Center badge for a `source='restore'` change that carries a source version.
+export function restoredFromVersionBadge(version: number, isZh: boolean): string {
+  return isZh ? `从版本 ${version} 恢复` : `Restored from v${version}`
+}
+
 // --- ResetConfirmDialog.vue interpolation helpers (R5c) ---
 // `asOf` is the wire point-in-time value (display + API `asOf`) and record counts are wire summary
 // numbers — both always interpolated raw, never translated. Each helper below reconstructs one

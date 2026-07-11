@@ -75,12 +75,19 @@ export function buildSignedDingTalkWebhookUrl(baseUrl: string, secret?: string):
 }
 
 export function validateDingTalkRobotResponse(payload: unknown): void {
-  const data = payload as DingTalkRobotResponse | null
-  if (!data || typeof data !== 'object') return
-  const errcode = typeof data.errcode === 'number' ? data.errcode : 0
-  if (errcode === 0) return
+  // A malformed/unparseable body (e.g. a proxy intercepting the webhook and
+  // returning a 200 HTML page instead of DingTalk's JSON) must NOT be treated
+  // as success — require a real object with a numeric errcode of exactly 0.
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+    throw new DingTalkRobotResponseError('DingTalk robot response was not a valid JSON object')
+  }
+  const data = payload as DingTalkRobotResponse
+  if (typeof data.errcode === 'number' && data.errcode === 0) return
   const errmsg = typeof data.errmsg === 'string' && data.errmsg.trim().length > 0
     ? data.errmsg.trim()
     : 'DingTalk robot request failed'
-  throw new DingTalkRobotResponseError(`DingTalk errcode ${errcode}: ${errmsg}`)
+  const errcodeDisplay = typeof data.errcode === 'number'
+    ? String(data.errcode)
+    : JSON.stringify((data as Record<string, unknown>).errcode)
+  throw new DingTalkRobotResponseError(`DingTalk errcode ${errcodeDisplay}: ${errmsg}`)
 }

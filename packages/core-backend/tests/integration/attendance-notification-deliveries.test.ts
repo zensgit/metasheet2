@@ -3,15 +3,21 @@ import { randomUUID } from 'crypto'
 import { Kysely, PostgresDialect } from 'kysely'
 import { Pool } from 'pg'
 import { up as createAttendanceNotificationDeliveries } from '../../src/db/migrations/zzzz20260611120000_create_attendance_notification_deliveries'
+import { up as addOutcomeUnknownDeliveryStatus } from '../../src/db/migrations/zzzz20260710150000_add_outcome_unknown_delivery_status'
+// markFailed always writes redelivery_safe (PR #4102), so every isolated-schema harness below that
+// runs the worker must chain this follow-up migration after the create — mirroring the full stack.
+import { up as addRedeliverySafe } from '../../src/db/migrations/zzzz20260711120000_add_redelivery_safe_to_attendance_notification_deliveries'
 import {
   AttendanceNotificationDeliveryWorker,
   buildAttendanceNotificationDeepLink,
   DeterministicFakeAttendanceDeliveryChannel,
   DingTalkAttendanceDeliveryChannel,
   EmailAttendanceDeliveryChannel,
+  WeComAttendanceDeliveryChannel,
   type AttendanceNotificationDeliveryQuery,
 } from '../../src/services/AttendanceNotificationDeliveryWorker'
-import type { DingTalkMessageConfig } from '../../src/integrations/dingtalk/client'
+import { sendDingTalkWorkNotification, type DingTalkMessageConfig } from '../../src/integrations/dingtalk/client'
+import type { WeComMessageConfig } from '../../src/integrations/wecom/client'
 
 const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
 const describeIfDatabase = dbUrl ? describe : describe.skip
@@ -94,6 +100,7 @@ describeIfDatabase('Attendance C5 notification delivery outbox', () => {
     testDb = createTestDb(isolatedDbUrl)
     pool = new Pool({ connectionString: isolatedDbUrl })
     await createAttendanceNotificationDeliveries(testDb)
+    await addRedeliverySafe(testDb)
   })
 
   afterAll(async () => {
@@ -248,12 +255,14 @@ describeIfDatabase('Attendance C5 notification delivery outbox', () => {
     }
     try {
       await createAttendanceNotificationDeliveries(workerDb)
+      await addRedeliverySafe(workerDb)
       await requireTable(workerPool, 'attendance_notification_deliveries')
 
       const okId = await insertDelivery('ok')
       const retryId = await insertDelivery('retry', { payload: { fakeDelivery: 'retry' } })
       const maxRetryId = await insertDelivery('maxretry', { attemptCount: 1, payload: { fakeDelivery: 'retry' } })
       const failId = await insertDelivery('fail', { payload: { fakeDelivery: 'fail' } })
+      const skipId = await insertDelivery('skip', { payload: { fakeDelivery: 'skip' } })
       const missingChannelId = await insertDelivery('missing-channel', { channel: 'unknown_channel' })
       const staleSendingId = await insertDelivery('stale-sending', {
         status: 'sending',
@@ -283,7 +292,7 @@ describeIfDatabase('Attendance C5 notification delivery outbox', () => {
         workerId: 'worker-test',
       })
 
-      await expect(worker.runBatch()).resolves.toEqual({ claimed: 6, sent: 2, retrying: 1, failed: 3 })
+      await expect(worker.runBatch()).resolves.toEqual({ claimed: 7, sent: 2, retrying: 1, failed: 3, skipped: 1 })
 
       const row = async (id: string) => (await workerPool.query(
         `SELECT status, attempt_count, delivered_at, next_attempt_at, last_error, claim_expires_at, claim_worker_id
@@ -330,6 +339,15 @@ describeIfDatabase('Attendance C5 notification delivery outbox', () => {
         claim_expires_at: null,
         claim_worker_id: null,
       })
+      // The structurally-undeliverable (skip: true) row lands `skipped`, not `failed` — and it must NOT
+      // have been counted toward the `failed` bucket in the runBatch() result asserted above.
+      expect(await row(skipId)).toMatchObject({
+        status: 'skipped',
+        attempt_count: 1,
+        last_error: 'fake_structural_skip',
+        claim_expires_at: null,
+        claim_worker_id: null,
+      })
       expect(await row(missingChannelId)).toMatchObject({
         status: 'failed',
         attempt_count: 1,
@@ -347,7 +365,7 @@ describeIfDatabase('Attendance C5 notification delivery outbox', () => {
         attempt_count: 0,
       })
 
-      await expect(worker.runBatch()).resolves.toEqual({ claimed: 0, sent: 0, retrying: 0, failed: 0 })
+      await expect(worker.runBatch()).resolves.toEqual({ claimed: 0, sent: 0, retrying: 0, failed: 0, skipped: 0 })
       expect(await row(okId)).toMatchObject({ status: 'sent', attempt_count: 1 })
       expect(await row(retryId)).toMatchObject({ status: 'retrying', attempt_count: 1 })
     } finally {
@@ -374,6 +392,7 @@ describeIfDatabase('Attendance C5 notification delivery outbox', () => {
     }
     try {
       await createAttendanceNotificationDeliveries(workerDb)
+      await addRedeliverySafe(workerDb)
       await requireTable(workerPool, 'attendance_notification_deliveries')
       const insert = await workerPool.query<{ id: string }>(
         `INSERT INTO attendance_notification_deliveries
@@ -396,7 +415,7 @@ describeIfDatabase('Attendance C5 notification delivery outbox', () => {
         channels: [{
           name: 'dingtalk_work_notification',
           async send() {
-            await expect(workerB.runBatch()).resolves.toEqual({ claimed: 1, sent: 0, retrying: 1, failed: 0 })
+            await expect(workerB.runBatch()).resolves.toEqual({ claimed: 1, sent: 0, retrying: 1, failed: 0, skipped: 0 })
             return { ok: true }
           },
         }],
@@ -405,7 +424,7 @@ describeIfDatabase('Attendance C5 notification delivery outbox', () => {
         workerId: 'worker-a',
       })
 
-      await expect(workerA.runBatch()).resolves.toEqual({ claimed: 1, sent: 0, retrying: 0, failed: 0, lostLease: 1 })
+      await expect(workerA.runBatch()).resolves.toEqual({ claimed: 1, sent: 0, retrying: 0, failed: 0, skipped: 0, lostLease: 1 })
 
       const row = (await workerPool.query(
         `SELECT status, attempt_count, delivered_at, last_error, claim_worker_id, claim_expires_at
@@ -428,16 +447,133 @@ describeIfDatabase('Attendance C5 notification delivery outbox', () => {
     }
   })
 
-  it('C5-3 real DingTalk channel resolves linked directory users and lets the worker mark delivery sent without external network', async () => {
+  it('PR #4046 Phase B: an outcome-unknown DingTalk send terminates as outcome_unknown — zero retries, never re-claimed, never resent; an ordinary network error still retries', async () => {
+    if (!dbUrl) throw new Error('DATABASE_URL is required for this integration test')
+    const workerSchemaName = createIsolatedSchemaName()
+    await createSchema(dbUrl, workerSchemaName)
+    const workerDbUrl = withSearchPath(dbUrl, workerSchemaName)
+    const workerDb = createTestDb(workerDbUrl)
+    const workerPool = new Pool({ connectionString: workerDbUrl })
+    const runSuffix = Date.now().toString(36)
+    const orgId = `c5-outcome-unknown-${runSuffix}`
+    const sourceId = randomUUID()
+    const firstNow = new Date('2026-08-01T00:00:00.000Z')
+    // beyond computeDeliveryBackoffMs(1)=60s, so the retrying row is due again on batch 2
+    const secondNow = new Date('2026-08-01T00:05:00.000Z')
+    let now = firstNow
+    const query: AttendanceNotificationDeliveryQuery = async (sqlText, params) => {
+      const r = await workerPool.query(sqlText, params as unknown[])
+      return { rows: r.rows, rowCount: r.rowCount }
+    }
+    // Per-recipient send attempts — the resend-hazard counter.
+    const sendAttemptsByUser = new Map<string, number>()
+    try {
+      await createAttendanceNotificationDeliveries(workerDb)
+      // the migration under test: widens the status CHECK by 'outcome_unknown'
+      await addOutcomeUnknownDeliveryStatus(workerDb)
+      // markFailed writes redelivery_safe on the definite-failure branch this test also exercises.
+      await addRedeliverySafe(workerDb)
+      await requireTable(workerPool, 'attendance_notification_deliveries')
+
+      const insert = async (label: string) => (await workerPool.query<{ id: string }>(
+        `INSERT INTO attendance_notification_deliveries
+           (org_id, source_type, source_id, source_key, recipient_user_id, recipient_role, channel, payload)
+         VALUES ($1,'unscheduled_reminder',$2,$3,$4,'subject','dingtalk_work_notification','{}'::jsonb)
+         RETURNING id::text AS id`,
+        [orgId, sourceId, `outcome-unknown:${runSuffix}:${label}`, `u-${label}`],
+      )).rows[0].id
+      const unknownId = await insert('unknown')
+      const transientId = await insert('transient')
+
+      // Real DingTalkAttendanceDeliveryChannel; recipient resolution stubbed (unit-style DI — the
+      // directory JOIN is pinned elsewhere/C5-3), but the SEND for the outcome-unknown recipient
+      // goes through the REAL client + transport with a fetch that rejects at network level, so
+      // the outcome-unknown MARKING itself is the real transport behavior, not a hand-rolled flag.
+      const channel = new DingTalkAttendanceDeliveryChannel({
+        query: (async (sqlText: string, params?: unknown[]) => {
+          if (sqlText.includes('directory_account_links')) {
+            return { rows: [{ integration_id: 'integ-1', external_user_id: `dd_${String(params?.[0])}` }] }
+          }
+          return { rows: [{ org_has_active_integration: true }] }
+        }) as never,
+        readConfig: async () => ({ appKey: 'k', appSecret: 's', agentId: '42' }),
+        fetchAccessToken: async () => 'tok',
+        sendWorkNotification: async (accessToken, input, config) => {
+          const target = input.userIds[0]
+          sendAttemptsByUser.set(target, (sendAttemptsByUser.get(target) ?? 0) + 1)
+          if (target === 'dd_u-unknown') {
+            // network-level rejection → the real transport marks the rethrown error outcome-unknown
+            return sendDingTalkWorkNotification(accessToken, input, config, {
+              fetchFn: (async () => { throw new TypeError('fetch failed') }) as unknown as typeof fetch,
+            })
+          }
+          // ordinary transient failure WITHOUT the marker — must keep retrying (pinned unchanged)
+          throw new Error('ECONNRESET: transient blip')
+        },
+      })
+
+      const worker = new AttendanceNotificationDeliveryWorker({
+        query,
+        channels: [channel],
+        now: () => now,
+        leaseMs: 60_000,
+        maxAttempts: 5,
+        workerId: 'worker-outcome-unknown',
+      })
+
+      await expect(worker.runBatch()).resolves.toEqual({
+        claimed: 2, sent: 0, retrying: 1, failed: 0, skipped: 0, outcomeUnknown: 1,
+      })
+
+      const row = async (id: string) => (await workerPool.query(
+        `SELECT status, attempt_count, delivered_at, last_error, claim_expires_at, claim_worker_id
+           FROM attendance_notification_deliveries
+          WHERE id = $1`,
+        [id],
+      )).rows[0]
+
+      // Terminal distinct state against the REAL widened CHECK — not 'failed', lease released,
+      // attempt budget NOT burned beyond the single attempt.
+      expect(await row(unknownId)).toMatchObject({
+        status: 'outcome_unknown',
+        attempt_count: 1,
+        delivered_at: null,
+        claim_expires_at: null,
+        claim_worker_id: null,
+      })
+      expect(String((await row(unknownId)).last_error)).toMatch(/^dingtalk_send_outcome_unknown: /)
+      expect(await row(transientId)).toMatchObject({ status: 'retrying', attempt_count: 1 })
+
+      // Next batch (past the retry backoff): the outcome_unknown row is NOT re-claimed and NOT
+      // resent; the ordinary transient row IS retried (behavior pinned unchanged).
+      now = secondNow
+      await expect(worker.runBatch()).resolves.toEqual({
+        claimed: 1, sent: 0, retrying: 1, failed: 0, skipped: 0,
+      })
+      expect(await row(unknownId)).toMatchObject({ status: 'outcome_unknown', attempt_count: 1 })
+      expect(await row(transientId)).toMatchObject({ status: 'retrying', attempt_count: 2 })
+      // The resend-hazard assertion: exactly ONE send ever reached the outcome-unknown recipient.
+      expect(sendAttemptsByUser.get('dd_u-unknown')).toBe(1)
+      expect(sendAttemptsByUser.get('dd_u-transient')).toBe(2)
+    } finally {
+      await workerPool.end().catch(() => undefined)
+      await workerDb.destroy().catch(() => undefined)
+      await dropSchema(dbUrl, workerSchemaName).catch(() => undefined)
+    }
+  })
+
+  it('C5-3 real DingTalk channel resolves linked directory users (sent) and skips — not fails — an unbound recipient, without external network', async () => {
     if (!dbUrl) throw new Error('DATABASE_URL is required for this integration test')
     const publicPool = new Pool({ connectionString: dbUrl })
     const runSuffix = Date.now().toString(36)
     const orgId = `c5-dingtalk-${runSuffix}`
     const localUserId = `u-c5-dingtalk-${runSuffix}`
+    const unboundUserId = `u-c5-dingtalk-unbound-${runSuffix}`
     const integrationId = randomUUID()
     const directoryAccountId = randomUUID()
     const sourceId = randomUUID()
     let deliveryId = ''
+    let unboundDeliveryId = ''
     const config: DingTalkMessageConfig = {
       appKey: 'dt-app-key',
       appSecret: 'dt-app-secret',
@@ -494,6 +630,25 @@ describeIfDatabase('Attendance C5 notification delivery outbox', () => {
       )
       deliveryId = delivery.rows[0].id
 
+      // A second recipient with NO directory_account_links row at all — the ordinary "not onboarded to
+      // DingTalk yet" gap for a partially-adopted org. This delivery must land `skipped`, not `failed`,
+      // and must never reach readConfig/fetchAccessToken/sendWorkNotification (no channel identity to
+      // resolve, so the real-network mocks below must not be invoked for this row).
+      const unboundDelivery = await publicPool.query<{ id: string }>(
+        `INSERT INTO attendance_notification_deliveries
+           (org_id, source_type, source_id, source_key, recipient_user_id, recipient_role, channel, payload)
+         VALUES ($1,'unscheduled_reminder',$2,$3,$4,'subject','dingtalk_work_notification',$5::jsonb)
+         RETURNING id::text AS id`,
+        [
+          orgId,
+          sourceId,
+          `c5-dingtalk:${sourceId}:recipient:${unboundUserId}:channel:dingtalk_work_notification`,
+          unboundUserId,
+          JSON.stringify({ title: 'C5 DingTalk smoke (unbound)', body: 'Should never send.' }),
+        ],
+      )
+      unboundDeliveryId = unboundDelivery.rows[0].id
+
       const channel = new DingTalkAttendanceDeliveryChannel({
         query,
         readConfig: async (receivedIntegrationId) => {
@@ -516,8 +671,9 @@ describeIfDatabase('Attendance C5 notification delivery outbox', () => {
         workerId: 'worker-c5-dingtalk',
       })
 
-      await expect(worker.runBatch()).resolves.toEqual({ claimed: 1, sent: 1, retrying: 0, failed: 0 })
+      await expect(worker.runBatch()).resolves.toEqual({ claimed: 2, sent: 1, retrying: 0, failed: 0, skipped: 1 })
 
+      // Only the linked recipient's row reached the network mocks — the unbound recipient never did.
       expect(sentMessages).toEqual([{
         accessToken: 'access-token',
         input: {
@@ -541,14 +697,184 @@ describeIfDatabase('Attendance C5 notification delivery outbox', () => {
         claim_expires_at: null,
       })
       expect(row.delivered_at).toBeTruthy()
+
+      const unboundRow = (await publicPool.query(
+        `SELECT status, delivered_at, last_error, attempt_count, claim_worker_id, claim_expires_at
+           FROM attendance_notification_deliveries
+          WHERE id = $1`,
+        [unboundDeliveryId],
+      )).rows[0]
+      expect(unboundRow).toMatchObject({
+        status: 'skipped',
+        delivered_at: null,
+        last_error: 'dingtalk_recipient_not_bound',
+        attempt_count: 1,
+        claim_worker_id: null,
+        claim_expires_at: null,
+      })
     } finally {
       if (deliveryId) {
         await publicPool.query('DELETE FROM attendance_notification_deliveries WHERE id = $1', [deliveryId]).catch(() => undefined)
+      }
+      if (unboundDeliveryId) {
+        await publicPool.query('DELETE FROM attendance_notification_deliveries WHERE id = $1', [unboundDeliveryId]).catch(() => undefined)
       }
       await publicPool.query('DELETE FROM directory_account_links WHERE directory_account_id = $1', [directoryAccountId]).catch(() => undefined)
       await publicPool.query('DELETE FROM directory_accounts WHERE id = $1', [directoryAccountId]).catch(() => undefined)
       await publicPool.query('DELETE FROM directory_integrations WHERE id = $1', [integrationId]).catch(() => undefined)
       await publicPool.query('DELETE FROM users WHERE id = $1', [localUserId]).catch(() => undefined)
+      await publicPool.end().catch(() => undefined)
+    }
+  })
+
+  it('H1 (review #3920 P3-1): org has NO active integration (suspended, not absent) -> retryable failure lands `retrying`, NOT `skipped` — DingTalk + WeCom parity', async () => {
+    if (!dbUrl) throw new Error('DATABASE_URL is required for this integration test')
+    const publicPool = new Pool({ connectionString: dbUrl })
+    const runSuffix = Date.now().toString(36)
+    const orgId = `h1-org-inactive-${runSuffix}`
+    const dingTalkRecipientUserId = `u-h1-dingtalk-${runSuffix}`
+    const weComRecipientUserId = `u-h1-wecom-${runSuffix}`
+    const dingTalkIntegrationId = randomUUID()
+    const weComIntegrationId = randomUUID()
+    const dingTalkSourceId = randomUUID()
+    const weComSourceId = randomUUID()
+    let dingTalkDeliveryId = ''
+    let weComDeliveryId = ''
+    const dingTalkConfig: DingTalkMessageConfig = {
+      appKey: 'dt-app-key',
+      appSecret: 'dt-app-secret',
+      agentId: '123456789',
+      baseUrl: 'https://oapi.dingtalk.com',
+    }
+    const weComConfig: WeComMessageConfig = {
+      corpId: 'we-corp-h1',
+      corpSecret: 'we-corp-secret-h1',
+      agentId: '1000002',
+      baseUrl: 'https://qyapi.weixin.qq.com',
+    }
+    const query: AttendanceNotificationDeliveryQuery = async (sqlText, params) => {
+      const r = await publicPool.query(sqlText, params as unknown[])
+      return { rows: r.rows, rowCount: r.rowCount }
+    }
+    let dingTalkNetworkTouched = false
+    let weComNetworkTouched = false
+
+    try {
+      await requireTable(publicPool, 'directory_integrations')
+      await requireTable(publicPool, 'attendance_notification_deliveries')
+
+      // Both integration rows EXIST for this org but are `suspended`, not `active` — proves the
+      // EXISTS predicate filters on status, not mere row presence (stronger than an absent-row
+      // fixture, which would pass even against a bug that only checks "any row"). No
+      // directory_account_links row is created for either recipient (0-row cold path either way).
+      await publicPool.query(
+        `INSERT INTO directory_integrations (id, org_id, provider, name, status, corp_id, config)
+         VALUES ($1,$2,'dingtalk',$3,'suspended','corp-h1',$4::jsonb)`,
+        [dingTalkIntegrationId, orgId, `H1 DingTalk suspended ${runSuffix}`, JSON.stringify({})],
+      )
+      await publicPool.query(
+        `INSERT INTO directory_integrations (id, org_id, provider, name, status, corp_id, config)
+         VALUES ($1,$2,'wecom',$3,'suspended','we-corp-h1',$4::jsonb)`,
+        [weComIntegrationId, orgId, `H1 WeCom suspended ${runSuffix}`, JSON.stringify({})],
+      )
+
+      const dingTalkDelivery = await publicPool.query<{ id: string }>(
+        `INSERT INTO attendance_notification_deliveries
+           (org_id, source_type, source_id, source_key, recipient_user_id, recipient_role, channel, payload)
+         VALUES ($1,'unscheduled_reminder',$2,$3,$4,'subject','dingtalk_work_notification',$5::jsonb)
+         RETURNING id::text AS id`,
+        [
+          orgId,
+          dingTalkSourceId,
+          `h1-dingtalk:${dingTalkSourceId}:recipient:${dingTalkRecipientUserId}:channel:dingtalk_work_notification`,
+          dingTalkRecipientUserId,
+          JSON.stringify({ title: 'H1 DingTalk org-inactive', body: 'Should never send.' }),
+        ],
+      )
+      dingTalkDeliveryId = dingTalkDelivery.rows[0].id
+
+      const weComDelivery = await publicPool.query<{ id: string }>(
+        `INSERT INTO attendance_notification_deliveries
+           (org_id, source_type, source_id, source_key, recipient_user_id, recipient_role, channel, payload)
+         VALUES ($1,'unscheduled_reminder',$2,$3,$4,'subject','wecom_work_notification',$5::jsonb)
+         RETURNING id::text AS id`,
+        [
+          orgId,
+          weComSourceId,
+          `h1-wecom:${weComSourceId}:recipient:${weComRecipientUserId}:channel:wecom_work_notification`,
+          weComRecipientUserId,
+          JSON.stringify({ title: 'H1 WeCom org-inactive', body: 'Should never send.' }),
+        ],
+      )
+      weComDeliveryId = weComDelivery.rows[0].id
+
+      const dingTalkChannel = new DingTalkAttendanceDeliveryChannel({
+        query,
+        readConfig: async () => { dingTalkNetworkTouched = true; return dingTalkConfig },
+        fetchAccessToken: async () => { dingTalkNetworkTouched = true; return 'access-token' },
+        sendWorkNotification: async () => { dingTalkNetworkTouched = true; return { taskId: 'unused', raw: {} } },
+      })
+      const weComChannel = new WeComAttendanceDeliveryChannel({
+        query,
+        readConfig: async () => { weComNetworkTouched = true; return weComConfig },
+        fetchAccessToken: async () => { weComNetworkTouched = true; return 'access-token' },
+        sendTextMessage: async () => { weComNetworkTouched = true; return { errcode: 0, errmsg: 'ok', invalidUserIds: [], raw: {} } },
+      })
+      const worker = new AttendanceNotificationDeliveryWorker({
+        query,
+        channels: [dingTalkChannel, weComChannel],
+        now: () => new Date('2026-08-02T00:00:00.000Z'),
+        workerId: 'worker-h1-org-inactive',
+      })
+
+      // Neither recipient has a channel identity to resolve (0 recipient rows) AND neither org has an
+      // active integration (suspended, not active) — retryable:true, no skip: both land `retrying`,
+      // NOT `skipped`, and the worker's normal backoff will keep retrying rather than dropping them
+      // for good.
+      await expect(worker.runBatch()).resolves.toEqual({ claimed: 2, sent: 0, retrying: 2, failed: 0, skipped: 0 })
+      expect(dingTalkNetworkTouched).toBe(false)
+      expect(weComNetworkTouched).toBe(false)
+
+      const dingTalkRow = (await publicPool.query(
+        `SELECT status, delivered_at, last_error, attempt_count, claim_worker_id, claim_expires_at, next_attempt_at
+           FROM attendance_notification_deliveries
+          WHERE id = $1`,
+        [dingTalkDeliveryId],
+      )).rows[0]
+      expect(dingTalkRow).toMatchObject({
+        status: 'retrying',
+        delivered_at: null,
+        last_error: 'dingtalk_org_integration_inactive',
+        attempt_count: 1,
+        claim_worker_id: null,
+        claim_expires_at: null,
+      })
+      expect(dingTalkRow.next_attempt_at).toBeTruthy()
+
+      const weComRow = (await publicPool.query(
+        `SELECT status, delivered_at, last_error, attempt_count, claim_worker_id, claim_expires_at, next_attempt_at
+           FROM attendance_notification_deliveries
+          WHERE id = $1`,
+        [weComDeliveryId],
+      )).rows[0]
+      expect(weComRow).toMatchObject({
+        status: 'retrying',
+        delivered_at: null,
+        last_error: 'wecom_org_integration_inactive',
+        attempt_count: 1,
+        claim_worker_id: null,
+        claim_expires_at: null,
+      })
+      expect(weComRow.next_attempt_at).toBeTruthy()
+    } finally {
+      if (dingTalkDeliveryId) {
+        await publicPool.query('DELETE FROM attendance_notification_deliveries WHERE id = $1', [dingTalkDeliveryId]).catch(() => undefined)
+      }
+      if (weComDeliveryId) {
+        await publicPool.query('DELETE FROM attendance_notification_deliveries WHERE id = $1', [weComDeliveryId]).catch(() => undefined)
+      }
+      await publicPool.query('DELETE FROM directory_integrations WHERE id = $1', [dingTalkIntegrationId]).catch(() => undefined)
+      await publicPool.query('DELETE FROM directory_integrations WHERE id = $1', [weComIntegrationId]).catch(() => undefined)
       await publicPool.end().catch(() => undefined)
     }
   })
@@ -648,7 +974,7 @@ describeIfDatabase('Attendance C5 notification delivery outbox', () => {
         now: () => new Date('2026-08-02T00:00:00.000Z'),
         workerId: 'worker-e3-card',
       })
-      await expect(cardWorker.runBatch()).resolves.toEqual({ claimed: 1, sent: 1, retrying: 0, failed: 0 })
+      await expect(cardWorker.runBatch()).resolves.toEqual({ claimed: 1, sent: 1, retrying: 0, failed: 0, skipped: 0 })
       expect(cardSink.text).toHaveLength(0)
       expect(cardSink.card).toEqual([{
         userIds: ['dt-user-e3'],
@@ -670,7 +996,7 @@ describeIfDatabase('Attendance C5 notification delivery outbox', () => {
         now: () => new Date('2026-08-02T00:00:00.000Z'),
         workerId: 'worker-e3-text',
       })
-      await expect(textWorker.runBatch()).resolves.toEqual({ claimed: 1, sent: 1, retrying: 0, failed: 0 })
+      await expect(textWorker.runBatch()).resolves.toEqual({ claimed: 1, sent: 1, retrying: 0, failed: 0, skipped: 0 })
       expect(textSink.card).toHaveLength(0)
       expect(textSink.text).toEqual([{
         userIds: ['dt-user-e3'],
@@ -691,7 +1017,7 @@ describeIfDatabase('Attendance C5 notification delivery outbox', () => {
         now: () => new Date('2026-08-02T00:00:00.000Z'),
         workerId: 'worker-e3-appbase',
       })
-      await expect(fallbackWorker.runBatch()).resolves.toEqual({ claimed: 1, sent: 1, retrying: 0, failed: 0 })
+      await expect(fallbackWorker.runBatch()).resolves.toEqual({ claimed: 1, sent: 1, retrying: 0, failed: 0, skipped: 0 })
       expect(fallbackSink.text).toHaveLength(0)
       expect(fallbackSink.card).toHaveLength(1)
       expect((fallbackSink.card[0] as { singleUrl: string }).singleUrl)
@@ -709,7 +1035,7 @@ describeIfDatabase('Attendance C5 notification delivery outbox', () => {
         now: () => new Date('2026-08-02T00:00:00.000Z'),
         workerId: 'worker-e3-flagoff',
       })
-      await expect(flagOffWorker.runBatch()).resolves.toEqual({ claimed: 1, sent: 1, retrying: 0, failed: 0 })
+      await expect(flagOffWorker.runBatch()).resolves.toEqual({ claimed: 1, sent: 1, retrying: 0, failed: 0, skipped: 0 })
       expect(flagOffSink.card).toHaveLength(0)
       expect(flagOffSink.text).toHaveLength(1)
 
@@ -720,6 +1046,329 @@ describeIfDatabase('Attendance C5 notification delivery outbox', () => {
         .toBe('https://a.example/attendance?noticeSource=week%20end%2Freview')
       expect(buildAttendanceNotificationDeepLink('unscheduled_reminder', '')).toBeNull()
       expect(buildAttendanceNotificationDeepLink('unscheduled_reminder', undefined)).toBeNull()
+    } finally {
+      if (envSnapshot.flag === undefined) delete process.env.ATTENDANCE_NOTIFICATION_DEEP_LINK_ENABLED
+      else process.env.ATTENDANCE_NOTIFICATION_DEEP_LINK_ENABLED = envSnapshot.flag
+      if (envSnapshot.publicUrl === undefined) delete process.env.PUBLIC_APP_URL
+      else process.env.PUBLIC_APP_URL = envSnapshot.publicUrl
+      if (envSnapshot.baseUrl === undefined) delete process.env.APP_BASE_URL
+      else process.env.APP_BASE_URL = envSnapshot.baseUrl
+      for (const id of deliveryIds) {
+        await publicPool.query('DELETE FROM attendance_notification_deliveries WHERE id = $1', [id]).catch(() => undefined)
+      }
+      await publicPool.query('DELETE FROM directory_account_links WHERE directory_account_id = $1', [directoryAccountId]).catch(() => undefined)
+      await publicPool.query('DELETE FROM directory_accounts WHERE id = $1', [directoryAccountId]).catch(() => undefined)
+      await publicPool.query('DELETE FROM directory_integrations WHERE id = $1', [integrationId]).catch(() => undefined)
+      await publicPool.query('DELETE FROM users WHERE id = $1', [localUserId]).catch(() => undefined)
+      await publicPool.end().catch(() => undefined)
+    }
+  })
+
+  it('S4 WeCom channel resolves linked directory users (sent) and skips — not fails — an unbound recipient, without external network', async () => {
+    if (!dbUrl) throw new Error('DATABASE_URL is required for this integration test')
+    const publicPool = new Pool({ connectionString: dbUrl })
+    const runSuffix = Date.now().toString(36)
+    const orgId = `c5-wecom-${runSuffix}`
+    const localUserId = `u-c5-wecom-${runSuffix}`
+    const unboundUserId = `u-c5-wecom-unbound-${runSuffix}`
+    const integrationId = randomUUID()
+    const directoryAccountId = randomUUID()
+    const sourceId = randomUUID()
+    let deliveryId = ''
+    let unboundDeliveryId = ''
+    const config: WeComMessageConfig = {
+      corpId: 'we-corp-c5',
+      corpSecret: 'we-corp-secret-c5',
+      agentId: '1000002',
+      baseUrl: 'https://qyapi.weixin.qq.com',
+    }
+    const query: AttendanceNotificationDeliveryQuery = async (sqlText, params) => {
+      const r = await publicPool.query(sqlText, params as unknown[])
+      return { rows: r.rows, rowCount: r.rowCount }
+    }
+    const sentMessages: unknown[] = []
+
+    try {
+      await requireTable(publicPool, 'users')
+      await requireTable(publicPool, 'directory_integrations')
+      await requireTable(publicPool, 'directory_accounts')
+      await requireTable(publicPool, 'directory_account_links')
+      await requireTable(publicPool, 'attendance_notification_deliveries')
+
+      await publicPool.query(
+        `INSERT INTO users (id, email, password_hash, name, role, is_active)
+         VALUES ($1,$2,'hash',$3,'user',true)
+         ON CONFLICT (id) DO UPDATE SET is_active = EXCLUDED.is_active`,
+        [localUserId, `${localUserId}@example.test`, localUserId],
+      )
+      // provider='wecom' — same three-table shape as the DingTalk channel, zero new tables/columns
+      // (design-lock G5/G7).
+      await publicPool.query(
+        `INSERT INTO directory_integrations (id, org_id, provider, name, status, corp_id, config)
+         VALUES ($1,$2,'wecom',$3,'active','we-corp-c5',$4::jsonb)`,
+        [integrationId, orgId, `S4 WeCom ${runSuffix}`, JSON.stringify({})],
+      )
+      await publicPool.query(
+        `INSERT INTO directory_accounts
+           (id, integration_id, provider, corp_id, external_user_id, external_key, name, is_active)
+         VALUES ($1,$2,'wecom','we-corp-c5','we-user-c5','we-key-c5',$3,true)`,
+        [directoryAccountId, integrationId, localUserId],
+      )
+      await publicPool.query(
+        `INSERT INTO directory_account_links (directory_account_id, local_user_id, link_status, match_strategy)
+         VALUES ($1,$2,'linked','manual')`,
+        [directoryAccountId, localUserId],
+      )
+      const delivery = await publicPool.query<{ id: string }>(
+        `INSERT INTO attendance_notification_deliveries
+           (org_id, source_type, source_id, source_key, recipient_user_id, recipient_role, channel, payload)
+         VALUES ($1,'unscheduled_reminder',$2,$3,$4,'subject','wecom_work_notification',$5::jsonb)
+         RETURNING id::text AS id`,
+        [
+          orgId,
+          sourceId,
+          `c5-wecom:${sourceId}:recipient:${localUserId}:channel:wecom_work_notification`,
+          localUserId,
+          JSON.stringify({ title: 'S4 WeCom smoke', body: 'Please check the attendance reminder.' }),
+        ],
+      )
+      deliveryId = delivery.rows[0].id
+
+      // A second recipient with NO directory_account_links row at all — the ordinary "not onboarded to
+      // WeCom yet" gap (WeCom directory population is a named prerequisite outside this channel's
+      // scope). This delivery must land `skipped`, not `failed`, and must never reach
+      // readConfig/fetchAccessToken/send (no channel identity to resolve, so the real-network mocks
+      // below must not be invoked for this row).
+      const unboundDelivery = await publicPool.query<{ id: string }>(
+        `INSERT INTO attendance_notification_deliveries
+           (org_id, source_type, source_id, source_key, recipient_user_id, recipient_role, channel, payload)
+         VALUES ($1,'unscheduled_reminder',$2,$3,$4,'subject','wecom_work_notification',$5::jsonb)
+         RETURNING id::text AS id`,
+        [
+          orgId,
+          sourceId,
+          `c5-wecom:${sourceId}:recipient:${unboundUserId}:channel:wecom_work_notification`,
+          unboundUserId,
+          JSON.stringify({ title: 'S4 WeCom smoke (unbound)', body: 'Should never send.' }),
+        ],
+      )
+      unboundDeliveryId = unboundDelivery.rows[0].id
+
+      const channel = new WeComAttendanceDeliveryChannel({
+        query,
+        readConfig: async (receivedIntegrationId) => {
+          expect(receivedIntegrationId).toBe(integrationId)
+          return config
+        },
+        fetchAccessToken: async (receivedConfig) => {
+          expect(receivedConfig).toBe(config)
+          return 'access-token'
+        },
+        sendTextMessage: async (accessToken, input, receivedConfig) => {
+          sentMessages.push({ accessToken, input, receivedConfig })
+          return { errcode: 0, errmsg: 'ok', msgId: 'msg-c5-wecom', invalidUserIds: [], raw: {} }
+        },
+      })
+      const worker = new AttendanceNotificationDeliveryWorker({
+        query,
+        channels: [channel],
+        now: () => new Date('2026-08-02T00:00:00.000Z'),
+        workerId: 'worker-c5-wecom',
+      })
+
+      await expect(worker.runBatch()).resolves.toEqual({ claimed: 2, sent: 1, retrying: 0, failed: 0, skipped: 1 })
+
+      // Only the linked recipient's row reached the network mocks — the unbound recipient never did.
+      expect(sentMessages).toEqual([{
+        accessToken: 'access-token',
+        input: {
+          userIds: ['we-user-c5'],
+          content: 'Please check the attendance reminder.',
+        },
+        receivedConfig: config,
+      }])
+      const row = (await publicPool.query(
+        `SELECT status, delivered_at, last_error, attempt_count, claim_worker_id, claim_expires_at
+           FROM attendance_notification_deliveries
+          WHERE id = $1`,
+        [deliveryId],
+      )).rows[0]
+      expect(row).toMatchObject({
+        status: 'sent',
+        last_error: null,
+        attempt_count: 1,
+        claim_worker_id: null,
+        claim_expires_at: null,
+      })
+      expect(row.delivered_at).toBeTruthy()
+
+      const unboundRow = (await publicPool.query(
+        `SELECT status, delivered_at, last_error, attempt_count, claim_worker_id, claim_expires_at
+           FROM attendance_notification_deliveries
+          WHERE id = $1`,
+        [unboundDeliveryId],
+      )).rows[0]
+      expect(unboundRow).toMatchObject({
+        status: 'skipped',
+        delivered_at: null,
+        last_error: 'wecom_recipient_not_bound',
+        attempt_count: 1,
+        claim_worker_id: null,
+        claim_expires_at: null,
+      })
+    } finally {
+      if (deliveryId) {
+        await publicPool.query('DELETE FROM attendance_notification_deliveries WHERE id = $1', [deliveryId]).catch(() => undefined)
+      }
+      if (unboundDeliveryId) {
+        await publicPool.query('DELETE FROM attendance_notification_deliveries WHERE id = $1', [unboundDeliveryId]).catch(() => undefined)
+      }
+      await publicPool.query('DELETE FROM directory_account_links WHERE directory_account_id = $1', [directoryAccountId]).catch(() => undefined)
+      await publicPool.query('DELETE FROM directory_accounts WHERE id = $1', [directoryAccountId]).catch(() => undefined)
+      await publicPool.query('DELETE FROM directory_integrations WHERE id = $1', [integrationId]).catch(() => undefined)
+      await publicPool.query('DELETE FROM users WHERE id = $1', [localUserId]).catch(() => undefined)
+      await publicPool.end().catch(() => undefined)
+    }
+  })
+
+  it('S4 WeCom deep-link: flag+base-URL send a textcard whose button opens the container landing; missing URL falls back to text', async () => {
+    if (!dbUrl) throw new Error('DATABASE_URL is required for this integration test')
+    const publicPool = new Pool({ connectionString: dbUrl })
+    const runSuffix = Date.now().toString(36)
+    const orgId = `s4-wecom-deeplink-${runSuffix}`
+    const localUserId = `u-s4-wecom-deeplink-${runSuffix}`
+    const integrationId = randomUUID()
+    const directoryAccountId = randomUUID()
+    const sourceId = randomUUID()
+    const deliveryIds: string[] = []
+    const envSnapshot = {
+      flag: process.env.ATTENDANCE_NOTIFICATION_DEEP_LINK_ENABLED,
+      publicUrl: process.env.PUBLIC_APP_URL,
+      baseUrl: process.env.APP_BASE_URL,
+    }
+    const config: WeComMessageConfig = {
+      corpId: 'we-corp-s4',
+      corpSecret: 'we-corp-secret-s4',
+      agentId: '1000002',
+      baseUrl: 'https://qyapi.weixin.qq.com',
+    }
+    const query: AttendanceNotificationDeliveryQuery = async (sqlText, params) => {
+      const r = await publicPool.query(sqlText, params as unknown[])
+      return { rows: r.rows, rowCount: r.rowCount }
+    }
+
+    const insertDelivery = async (): Promise<string> => {
+      const row = await publicPool.query<{ id: string }>(
+        `INSERT INTO attendance_notification_deliveries
+           (org_id, source_type, source_id, source_key, recipient_user_id, recipient_role, channel, payload)
+         VALUES ($1,'unscheduled_reminder',$2,$3,$4,'subject','wecom_work_notification',$5::jsonb)
+         RETURNING id::text AS id`,
+        [
+          orgId,
+          sourceId,
+          `s4-wecom-deeplink:${sourceId}:recipient:${localUserId}:n:${deliveryIds.length}:${runSuffix}`,
+          localUserId,
+          JSON.stringify({ title: 'S4 WeCom deep-link smoke', body: 'Tap to open attendance.' }),
+        ],
+      )
+      deliveryIds.push(row.rows[0].id)
+      return row.rows[0].id
+    }
+
+    const buildChannel = (sink: { text: unknown[]; card: unknown[] }) => new WeComAttendanceDeliveryChannel({
+      query,
+      readConfig: async () => config,
+      fetchAccessToken: async () => 'access-token',
+      sendTextMessage: async (_accessToken, input) => {
+        sink.text.push(input)
+        return { errcode: 0, errmsg: 'ok', msgId: 'msg-text', invalidUserIds: [], raw: {} }
+      },
+      sendTextCardMessage: async (_accessToken, input) => {
+        sink.card.push(input)
+        return { errcode: 0, errmsg: 'ok', msgId: 'msg-card', invalidUserIds: [], raw: {} }
+      },
+    })
+
+    try {
+      await requireTable(publicPool, 'attendance_notification_deliveries')
+      await publicPool.query(
+        `INSERT INTO users (id, email, password_hash, name, role, is_active)
+         VALUES ($1,$2,'hash',$3,'user',true)
+         ON CONFLICT (id) DO UPDATE SET is_active = EXCLUDED.is_active`,
+        [localUserId, `${localUserId}@example.test`, localUserId],
+      )
+      await publicPool.query(
+        `INSERT INTO directory_integrations (id, org_id, provider, name, status, corp_id, config)
+         VALUES ($1,$2,'wecom',$3,'active','we-corp-s4',$4::jsonb)`,
+        [integrationId, orgId, `S4 WeCom deep-link ${runSuffix}`, JSON.stringify({})],
+      )
+      await publicPool.query(
+        `INSERT INTO directory_accounts
+           (id, integration_id, provider, corp_id, external_user_id, external_key, name, is_active)
+         VALUES ($1,$2,'wecom','we-corp-s4','we-user-s4','we-key-s4',$3,true)`,
+        [directoryAccountId, integrationId, localUserId],
+      )
+      await publicPool.query(
+        `INSERT INTO directory_account_links (directory_account_id, local_user_id, link_status, match_strategy)
+         VALUES ($1,$2,'linked','manual')`,
+        [directoryAccountId, localUserId],
+      )
+
+      // Case 1: flag + base URL -> textcard.
+      process.env.ATTENDANCE_NOTIFICATION_DEEP_LINK_ENABLED = 'true'
+      process.env.PUBLIC_APP_URL = 'https://app.example.test/'
+      delete process.env.APP_BASE_URL
+      await insertDelivery()
+      const cardSink = { text: [] as unknown[], card: [] as unknown[] }
+      const cardWorker = new AttendanceNotificationDeliveryWorker({
+        query,
+        channels: [buildChannel(cardSink)],
+        now: () => new Date('2026-08-02T00:00:00.000Z'),
+        workerId: 'worker-s4-wecom-card',
+      })
+      await expect(cardWorker.runBatch()).resolves.toEqual({ claimed: 1, sent: 1, retrying: 0, failed: 0, skipped: 0 })
+      expect(cardSink.text).toHaveLength(0)
+      expect(cardSink.card).toEqual([{
+        userIds: ['we-user-s4'],
+        title: 'S4 WeCom deep-link smoke',
+        description: 'Tap to open attendance.',
+        url: 'https://app.example.test/attendance?noticeSource=unscheduled_reminder',
+        btnTxt: '打开考勤',
+      }])
+
+      // Case 2: flag on but NO base URL -> text path, byte-identical fallback.
+      process.env.ATTENDANCE_NOTIFICATION_DEEP_LINK_ENABLED = 'true'
+      delete process.env.PUBLIC_APP_URL
+      delete process.env.APP_BASE_URL
+      await insertDelivery()
+      const textSink = { text: [] as unknown[], card: [] as unknown[] }
+      const textWorker = new AttendanceNotificationDeliveryWorker({
+        query,
+        channels: [buildChannel(textSink)],
+        now: () => new Date('2026-08-02T00:00:00.000Z'),
+        workerId: 'worker-s4-wecom-text',
+      })
+      await expect(textWorker.runBatch()).resolves.toEqual({ claimed: 1, sent: 1, retrying: 0, failed: 0, skipped: 0 })
+      expect(textSink.card).toHaveLength(0)
+      expect(textSink.text).toEqual([{
+        userIds: ['we-user-s4'],
+        content: 'Tap to open attendance.',
+      }])
+
+      // Case 3: base URL present but flag OFF -> text path (the flag is load-bearing).
+      delete process.env.ATTENDANCE_NOTIFICATION_DEEP_LINK_ENABLED
+      process.env.PUBLIC_APP_URL = 'https://app.example.test'
+      await insertDelivery()
+      const flagOffSink = { text: [] as unknown[], card: [] as unknown[] }
+      const flagOffWorker = new AttendanceNotificationDeliveryWorker({
+        query,
+        channels: [buildChannel(flagOffSink)],
+        now: () => new Date('2026-08-02T00:00:00.000Z'),
+        workerId: 'worker-s4-wecom-flagoff',
+      })
+      await expect(flagOffWorker.runBatch()).resolves.toEqual({ claimed: 1, sent: 1, retrying: 0, failed: 0, skipped: 0 })
+      expect(flagOffSink.card).toHaveLength(0)
+      expect(flagOffSink.text).toHaveLength(1)
     } finally {
       if (envSnapshot.flag === undefined) delete process.env.ATTENDANCE_NOTIFICATION_DEEP_LINK_ENABLED
       else process.env.ATTENDANCE_NOTIFICATION_DEEP_LINK_ENABLED = envSnapshot.flag
@@ -814,7 +1463,7 @@ describeIfDatabase('Attendance C5 notification delivery outbox', () => {
         workerId: 'worker-c5-email',
       })
 
-      await expect(worker.runBatch()).resolves.toEqual({ claimed: 3, sent: 1, retrying: 0, failed: 2 })
+      await expect(worker.runBatch()).resolves.toEqual({ claimed: 3, sent: 1, retrying: 0, failed: 2, skipped: 0 })
 
       const row = async (id: string) => (await publicPool.query(
         `SELECT status, delivered_at, last_error FROM attendance_notification_deliveries WHERE id = $1`,
