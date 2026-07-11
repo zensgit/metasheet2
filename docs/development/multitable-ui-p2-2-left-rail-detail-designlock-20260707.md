@@ -1,6 +1,7 @@
-# 多维表 UI P2-2 · 左侧导航栏（表→视图树） · 细化设计锁（PROPOSED）
+# 多维表 UI P2-2 · 左侧导航栏（表→视图树） · 细化设计锁（RATIFIED）
 
-> 状态：**PROPOSED — 待 owner ratify**。docs-only。
+> 状态：**RATIFIED（owner directive 2026-07-11）**。docs-only。
+> **RATIFIED — owner directive 2026-07-11**（批 12 把 merge-tree-clean 锁）。header 状态由 owner 决定翻转、Claude 机械执行(非自我批准)。锁内 per-tier owner 子决定(如变体/env-cap/storage opt-in)仍各自留待 owner。
 > 前置：**UI-P2 结构锁**（`multitable-ui-p2-structure-designlock-20260706.md` §2 P2-2，RATIFIED #3742）把左侧栏列为**结构性支柱、需自己的细化锁 + Opus 对抗审阅**——本锁即是。UI-P2-1a/1b 共享原语已落；UI-P2-1c MetaToolbar 迁移已闭环。
 > 模型分档：设计 = Fable/Opus；实现 = Sonnet；**结构性 → Opus 对抗审阅前置**（这不是 presentation-only）。
 
