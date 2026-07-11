@@ -4,6 +4,9 @@ import { rbacGuard } from '../rbac/rbac'
 import { isAdmin as isRbacAdmin, listUserPermissions } from '../rbac/service'
 import { query } from '../db/pg'
 import { jsonError, jsonOk, parsePagination } from '../util/response'
+import { redeliverFailedAttendanceNotification } from '../services/AttendanceNotificationRedelivery'
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
 type AttendanceRoleTemplateId = 'employee' | 'approver' | 'importer' | 'admin'
 
@@ -809,6 +812,40 @@ export function attendanceAdminRouter(): Router {
       })
     } catch (error) {
       return jsonError(res, 500, 'AUDIT_LOGS_SUMMARY_FAILED', (error as Error)?.message || 'Failed to load audit summary')
+    }
+  })
+
+  // §7.6 Delivery Closure — OPERATOR-INITIATED redelivery of a single FAILED attendance-notification
+  // delivery. Explicit operator request only (there is no background/auto path — see
+  // AttendanceNotificationRedelivery doctrine header). Doctrine outcomes map to HTTP:
+  //   requeued            → 200 (failed → pending; worker sends exactly once)
+  //   already_delivered   → 200 (sent row → no-op; destination already received it, nothing sent)
+  //   refused_outcome_unknown → 409 (may already have been delivered; never resent — manual review)
+  //   not_eligible        → 409 (pending/sending/retrying/skipped — not a redelivery target)
+  //   not_found           → 404
+  r.post('/api/attendance-admin/notification-deliveries/:deliveryId/redeliver', async (req: Request, res: Response) => {
+    try {
+      const deliveryId = String(req.params.deliveryId || '').trim()
+      if (!UUID_RE.test(deliveryId)) {
+        return jsonError(res, 400, 'DELIVERY_ID_INVALID', 'deliveryId must be a UUID')
+      }
+      const result = await redeliverFailedAttendanceNotification(query, deliveryId)
+      switch (result.outcome) {
+        case 'requeued':
+          return jsonOk(res, { outcome: result.outcome, deliveryId, status: result.status })
+        case 'already_delivered':
+          // Idempotent no-op: the destination already succeeded; nothing was sent. 200, not an error.
+          return jsonOk(res, { outcome: result.outcome, deliveryId, status: result.status })
+        case 'refused_outcome_unknown':
+          return jsonError(res, 409, 'DELIVERY_OUTCOME_UNKNOWN', 'Delivery outcome is unknown (possibly already delivered); not resent. Reconcile manually.', { deliveryId, status: result.status })
+        case 'not_eligible':
+          return jsonError(res, 409, 'DELIVERY_NOT_ELIGIBLE', `Delivery is not a failed row (status=${result.status}); only failed deliveries can be redelivered.`, { deliveryId, status: result.status })
+        case 'not_found':
+        default:
+          return jsonError(res, 404, 'DELIVERY_NOT_FOUND', 'No such notification delivery')
+      }
+    } catch (error) {
+      return jsonError(res, 500, 'DELIVERY_REDELIVER_FAILED', (error as Error)?.message || 'Failed to redeliver notification')
     }
   })
 

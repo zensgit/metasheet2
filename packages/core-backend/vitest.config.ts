@@ -86,6 +86,11 @@ export default defineConfig({
       // a WHOLE FILE into the `Run approval real-DB integration` step in plugin-tests.yml where it
       // runs against real Postgres every PR.
       'tests/integration/dingtalk-approval-card-deliveries.db.test.ts',
+      // §7.6 Delivery Closure — operator-initiated redelivery of a FAILED attendance-notification
+      // outbox row: DATABASE_URL-gated (describeIfDb). Excluded from the no-DB default job so it
+      // cannot skip-green, and wired as a WHOLE FILE into the `Run approval real-DB integration`
+      // step in plugin-tests.yml where it runs against real Postgres every PR.
+      'tests/integration/attendance-notification-redelivery.db.test.ts',
       // DT-OPS-02 P2 follow-up: preview/apply auto-admission-candidate-count parity.
       // DATABASE_URL-gated (describeIfDatabase). Excluded from the no-DB default job so it
       // doesn't skip-green, and wired as a WHOLE FILE into the `Run approval real-DB
