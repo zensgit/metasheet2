@@ -5,8 +5,8 @@
 > `attendance-hardening-wave2-verification-20260710.md` §C 与 `attendance-dingtalk-benchmark-target-and-tracker-20260601.md`
 > §2 记为「F1/F2 落地并复审通过前保持 OPEN」的那部分。该前置条件已满足并经 owner 复核通过 → 本池 CLOSED。
 >
-> **范围界定（勿过度声张）**：本收官**仅**关闭文件证据 / 存储完整性硬化池。**更广的考勤线仍非零待办**
-> （benchmark tracker 里 #4011 R8 quiet-hours 等仍 OPEN，owner 门与命名前置不变）——不在本文覆盖内。
+> **范围界定（勿过度声张）**：本收官**仅**关闭文件证据 / 存储完整性硬化池。**更广的考勤线有其独立待办**
+> （owner 门与命名前置、DingTalk backlog 池等车道另行跟踪）——**本文不对更广考勤路线作任何收口声明**，不在覆盖内。
 
 ## 1. 收官依据 = owner 复核轨迹（如实，不留假象）
 
@@ -50,7 +50,8 @@
   `deleteByKey` + 交互同步 stamp）always-on、不依赖该 env**。是否启用是**部署方的运维决定**，本池**不代为启用、不冒称已交付**。
 - **F7 深度图片校验** = owner 已接受 lazy-forgery 为 **P3**，默认不做。
 - **N1**（`isDatabaseSchemaError` 未认 42703）= **不修**：cosmetic 日志文案、默认配置零暴露；「清爽修法」把 42703 加进
-  共享 util 是净负（会静默吞其它模块的真列名 typo）。详 `scratchpad/n1-recon-resolution.md`。
+  共享 util 是净负（会静默吞其它模块的真列名 typo）——默认-ON 草稿 sweep 的 UPDATE 42703 报文含「of relation…does not exist」
+  已被现有 message-fallback 兜住，仅 env-gated（默认 OFF）补偿 sweep 的裸 SELECT 落通用 warn 分支，两者均 benign 自愈。
 
 ## 5. 结论
 
