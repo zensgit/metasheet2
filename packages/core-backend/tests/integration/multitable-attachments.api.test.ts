@@ -709,7 +709,7 @@ describe('Multitable attachment API', () => {
       const { app, publishSpy } = await createApp({
         attachmentPath,
         queryHandler: async (sql, params) => {
-          if (sql.includes('SELECT id, sheet_id, record_id, field_id, storage_file_id, created_by')) {
+          if (sql.includes('SELECT id, sheet_id, record_id, field_id, storage_file_id, storage_path, created_by')) {
             expect(params).toEqual(['att_sheet_write'])
             return {
               rows: [{
@@ -799,7 +799,7 @@ describe('Multitable attachment API', () => {
       const { app } = await createApp({
         attachmentPath,
         queryHandler: async (sql, params) => {
-          if (sql.includes('SELECT id, sheet_id, record_id, field_id, storage_file_id, created_by')) {
+          if (sql.includes('SELECT id, sheet_id, record_id, field_id, storage_file_id, storage_path, created_by')) {
             expect(params).toEqual(['att_draft_own'])
             return {
               rows: [{
@@ -852,7 +852,7 @@ describe('Multitable attachment API', () => {
       const { app } = await createApp({
         attachmentPath,
         queryHandler: async (sql, params) => {
-          if (sql.includes('SELECT id, sheet_id, record_id, field_id, storage_file_id, created_by')) {
+          if (sql.includes('SELECT id, sheet_id, record_id, field_id, storage_file_id, storage_path, created_by')) {
             expect(params).toEqual(['att_draft_blocked'])
             return {
               rows: [{

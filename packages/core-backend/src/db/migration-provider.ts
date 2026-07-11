@@ -48,6 +48,12 @@ const SUPERSEDED_LEGACY_SQL_MIGRATIONS = [
   '053_create_protection_rules',
   '054_create_users_table',
   '055_create_attendance_import_tokens',
+  // #3751 entity-machine baseline conflict (42P07 duplicate_table on audit_logs): this legacy raw
+  // SQL migration is fully superseded by the idempotent zz20251231_create_audit_tables.ts twin
+  // (same 10 tables + 3 views + partitioned audit_logs with guarded dynamic monthly partitions).
+  // Machines that executed the zz twin first (allowUnorderedMigrations histories) must never
+  // replay this earlier-named file; fresh installs get every object from the twin.
+  '20250926_create_audit_tables',
 ]
 
 function dedupe(values: string[]): string[] {

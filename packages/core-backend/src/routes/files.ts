@@ -406,15 +406,6 @@ export function filesRouter(): Router {
         // (G2's `deleted_at IS NULL` filter, this file's own list/info/download filters) treats the
         // id as gone regardless of what happens to the storage object next — there is no window
         // where the row still looks valid but the blob is gone.
-        try {
-          await sql`
-            UPDATE files SET deleted_at = now() WHERE id = ${id} AND deleted_at IS NULL
-          `.execute(db)
-        } catch (updateErr) {
-          logger.error(`Failed to tombstone files row ${id}; storage object left untouched`, updateErr instanceof Error ? updateErr : undefined)
-          return res.status(500).json({ error: 'Failed to delete file' })
-        }
-
         // F5 files-orphan-blob-retention design-lock (2026-07-10), GF5-7 (root-cause fix, mirrors the F3
         // read-path fix): the old `storage.delete(id)` here located the physical object through the
         // provider's in-memory disk-scan index, keyed by `md5(relpath)` after any index rebuild — NOT by
@@ -425,7 +416,30 @@ export function filesRouter(): Router {
         // one from `url` via the controlled fallback — and rejects (`null`) a poisoned or unresolvable
         // key so it is never guessed at. `deleteByKey` then deletes by that key directly, with no index
         // dependency, and treats an already-gone object (ENOENT) as success.
+        //
+        // F9 design-lock GF9-3 (owner CHANGES-REQUESTED P2-2): resolved BEFORE the tombstone (not after)
+        // so the url-derived fallback key can be folded into the SAME atomic tombstone UPDATE below via
+        // `COALESCE(storage_key, ...)`. Writing it back with a SEPARATE UPDATE ... WHERE deleted_at IS
+        // NULL AFTER this tombstone would silently no-op (the row is already tombstoned at that point) —
+        // that was the exact bug: a pre-F3 row with a NULL persisted `storage_key` whose `deleteByKey`
+        // below then failed carried `storage_key = NULL` forever, permanently excluded from the F5 sweep's
+        // `storage_key IS NOT NULL` candidate filter (`files-orphan-blob-retention.ts`). `derivedKey` is
+        // only non-null when the key came from the url-fallback (`derivedFromUrl`); a persisted
+        // `storage_key` (derivedFromUrl === false) or a poisoned/unresolvable key (resolved === null)
+        // both leave it null, so `COALESCE(storage_key, null)` is a no-op — no write-back for those rows,
+        // exactly like the pre-fix behavior.
         const resolved = resolveActiveStorageKey(detail)
+        const derivedKey = resolved?.derivedFromUrl ? resolved.key : null
+        try {
+          await sql`
+            UPDATE files SET deleted_at = now(), storage_key = COALESCE(storage_key, ${derivedKey})
+            WHERE id = ${id} AND deleted_at IS NULL
+          `.execute(db)
+        } catch (updateErr) {
+          logger.error(`Failed to tombstone files row ${id}; storage object left untouched`, updateErr instanceof Error ? updateErr : undefined)
+          return res.status(500).json({ error: 'Failed to delete file' })
+        }
+
         if (resolved) {
           try {
             await storage.deleteByKey(resolved.key)

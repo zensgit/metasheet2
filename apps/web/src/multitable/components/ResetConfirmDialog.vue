@@ -25,7 +25,7 @@
             <!-- Non-destructive path: nothing created after T → plain Revert-equivalent, no typed confirm. -->
             <template v-if="deleteCount === 0">
               <p class="reset-confirm__hint" data-test="reset-confirm-revert-equiv">{{ ' ' }}{{ resetConfirmRevertEquivIntro(asOf, revertCount, isZh) }} <strong>{{ l('record.resetConfirmRevertWord') }}</strong>.{{ ' ' }}</p>
-              <button class="reset-confirm__btn" data-test="reset-confirm-btn" :disabled="!hasIdentity" @click="onConfirm">{{ ' ' }}{{ resetConfirmRevertButtonLabel(asOf, isZh) }}</button>
+              <MtButton class="reset-confirm__btn" data-test="reset-confirm-btn" :disabled="!hasIdentity" @click="onConfirm">{{ ' ' }}{{ resetConfirmRevertButtonLabel(asOf, isZh) }}</MtButton>
             </template>
 
             <!-- Destructive path: typed two-step confirm (type `reset` AND acknowledge the deleted-count). -->
@@ -38,8 +38,8 @@
               <label class="reset-confirm__type">{{ ' ' }}{{ l('record.resetConfirmTypePrefix') }} <code>reset</code> {{ l('record.resetConfirmTypeSuffix') }}
                 <input data-test="reset-confirm-type" v-model="typed" :aria-label="l('record.resetConfirmTypeAria')" />
               </label>
-              <button class="reset-confirm__btn reset-confirm__btn--destructive" data-test="reset-confirm-btn"
-                      :disabled="!canConfirm" @click="onConfirm">{{ ' ' }}{{ resetConfirmDestructiveButtonLabel(deleteCount, isZh) }}{{ ' ' }}</button>
+              <MtButton class="reset-confirm__btn reset-confirm__btn--destructive" variant="danger" data-test="reset-confirm-btn"
+                      :disabled="!canConfirm" @click="onConfirm">{{ ' ' }}{{ resetConfirmDestructiveButtonLabel(deleteCount, isZh) }}{{ ' ' }}</MtButton>
             </template>
           </template>
         </div>
@@ -53,6 +53,7 @@ import { computed, ref } from 'vue'
 
 import type { ResetPreview, ResetResult } from '../api/client'
 import { useLocale } from '../../composables/useLocale'
+import { MtButton } from '../ui'
 import {
   recordLabel, resetConfirmEntryLabel, resetConfirmTitle, resetConfirmResultSummary,
   resetConfirmRevertEquivIntro, resetConfirmRevertButtonLabel, resetConfirmDestructiveButtonLabel,
@@ -135,8 +136,11 @@ function onCancel(): void { open.value = false }
 .reset-confirm__warn { background: #fef3f2; border: 1px solid #fda29b; color: #912018; border-radius: 6px; padding: 12px; }
 .reset-confirm__ack { display: block; margin: 12px 0; }
 .reset-confirm__type { display: block; margin: 8px 0 16px; }
-.reset-confirm__btn { padding: 8px 14px; border-radius: 6px; border: 1px solid #ccc; cursor: pointer; }
-.reset-confirm__btn--destructive { background: #d92d20; color: #fff; border-color: #d92d20; }
-.reset-confirm__btn:disabled { opacity: 0.5; cursor: not-allowed; }
+/* .reset-confirm__btn / .reset-confirm__btn--destructive: both the non-destructive (Revert-equivalent) and
+   destructive (typed-confirm Reset) footer buttons are now <MtButton> — ghost (default variant, was a plain
+   #ccc-bordered neutral action) and danger (variant="danger", was solid #d92d20 fill) respectively. Their
+   bespoke CSS (incl. the shared :disabled rule) was removed; both classes — including `--destructive`, kept
+   as an additional identity class rather than a styling hook — remain on the elements for selector
+   stability. */
 .reset-confirm__hint--warn { color: #b42318; }
 </style>

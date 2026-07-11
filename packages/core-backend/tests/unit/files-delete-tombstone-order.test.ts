@@ -22,6 +22,10 @@ const kyselyMocks = vi.hoisted(() => {
     updateShouldThrow: false,
     updateError: new Error('injected tombstone UPDATE failure'),
     callOrder: [] as string[],
+    // F9 design-lock GF9-3 (owner CHANGES-REQUESTED P2-2): the `${derivedKey}` value passed to the
+    // atomic tombstone UPDATE's `COALESCE(storage_key, ...)`, so tests can assert it directly instead of
+    // parsing the SQL text.
+    tombstoneValues: [] as unknown[],
   }
   return { state }
 })
@@ -34,6 +38,7 @@ vi.mock('kysely', async (importOriginal) => {
       execute: async (_executor: unknown) => {
         if (text.includes('UPDATE files SET deleted_at')) {
           kyselyMocks.state.callOrder.push('tombstone-update')
+          kyselyMocks.state.tombstoneValues = _values
           if (kyselyMocks.state.updateShouldThrow) {
             throw kyselyMocks.state.updateError
           }
@@ -165,6 +170,59 @@ describe('files.ts DELETE — F2 tombstone-first ordering (mocked db + storage)'
     // proves the route no longer depends on the id-keyed in-memory disk-scan index.
     expect(storageMocks.deleteByKey).toHaveBeenCalledWith('uuid-x/photo.jpg')
     expect(storageMocks.delete).not.toHaveBeenCalled()
+    // GF9-3: a row that already has a persisted storage_key never has anything folded into COALESCE —
+    // the fallback param is null, so `COALESCE(storage_key, null)` is a no-op that preserves it.
+    expect(kyselyMocks.state.tombstoneValues[0]).toBeNull()
+  })
+
+  it('GF9-3 (owner CHANGES-REQUESTED P2-2) — a NULL storage_key with a resolvable url: the url-derived key is folded into the SAME atomic tombstone UPDATE via COALESCE, resolved BEFORE tombstoning (not written back afterward)', async () => {
+    kyselyMocks.state.ownerRows = [{
+      owner_id: 'owner-1',
+      deleted_at: null,
+      storage_key: null,
+      url: 'http://localhost:8900/files/legacy/photo.jpg',
+      meta: {},
+      created_at: new Date(),
+    }]
+    const app = buildApp()
+
+    const res = await request(app).delete('/api/files/photo-1')
+
+    expect(res.status).toBe(200)
+    expect(res.body).toEqual({ success: true, id: 'photo-1' })
+    // single tombstone UPDATE call (not tombstone + a second separate writeback UPDATE) carries the
+    // derived key as its COALESCE fallback value.
+    expect(kyselyMocks.state.callOrder).toEqual(['tombstone-update', 'storage-deleteByKey', 'blob-purged-update'])
+    expect(kyselyMocks.state.tombstoneValues[0]).toBe('legacy/photo.jpg')
+    // the SAME resolved key (not the stale null) is what deleteByKey is called with.
+    expect(storageMocks.deleteByKey).toHaveBeenCalledWith('legacy/photo.jpg')
+  })
+
+  it('GF9-3 — NULL storage_key + resolvable url + deleteByKey fails (non-ENOENT): the tombstone UPDATE still persisted the derived key (via COALESCE) so the row is NOT stuck with storage_key=NULL for the F5 sweep', async () => {
+    kyselyMocks.state.ownerRows = [{
+      owner_id: 'owner-1',
+      deleted_at: null,
+      storage_key: null,
+      url: 'http://localhost:8900/files/legacy/photo.jpg',
+      meta: {},
+      created_at: new Date(),
+    }]
+    storageMocks.deleteByKey.mockImplementation(async (_key: string) => {
+      kyselyMocks.state.callOrder.push('storage-deleteByKey')
+      throw new Error('injected storage delete failure')
+    })
+    const app = buildApp()
+
+    const res = await request(app).delete('/api/files/photo-1')
+
+    expect(res.status).toBe(200)
+    // the tombstone UPDATE (which already wrote the COALESCE-derived storage_key) ran BEFORE the failed
+    // deleteByKey — the persisted value does not depend on deleteByKey succeeding.
+    expect(kyselyMocks.state.callOrder).toEqual(['tombstone-update', 'storage-deleteByKey'])
+    expect(kyselyMocks.state.tombstoneValues[0]).toBe('legacy/photo.jpg')
+    // blob_purged_at is never stamped on a failed delete — the row is left for the compensating sweep,
+    // which can now find it because storage_key is no longer NULL.
+    expect(kyselyMocks.state.callOrder).not.toContain('blob-purged-update')
   })
 
   it('GF5-3/GF5-7 — a POISONED storage_key skips the physical delete entirely: no deleteByKey call, no blob_purged_at stamp, still 200', async () => {
@@ -180,6 +238,9 @@ describe('files.ts DELETE — F2 tombstone-first ordering (mocked db + storage)'
     expect(storageMocks.deleteByKey).not.toHaveBeenCalled()
     const warnCall = warnSpy.mock.calls.find(([msg]) => typeof msg === 'string' && msg.includes('photo-1') && msg.includes('no safe storage key'))
     expect(warnCall).toBeDefined()
+    // GF9-3 ⚠ — a poisoned key is never washed via the url-fallback COALESCE: resolved is null for a
+    // poison row, so the fallback param is null too (no write-back, not even the poisoned value itself).
+    expect(kyselyMocks.state.tombstoneValues[0]).toBeNull()
   })
 
   it('GF5-7 — a NULL storage_key with no resolvable url skips the physical delete: no deleteByKey call, no blob_purged_at stamp, still 200', async () => {
@@ -192,6 +253,8 @@ describe('files.ts DELETE — F2 tombstone-first ordering (mocked db + storage)'
     expect(res.body).toEqual({ success: true, id: 'photo-1' })
     expect(kyselyMocks.state.callOrder).toEqual(['tombstone-update'])
     expect(storageMocks.deleteByKey).not.toHaveBeenCalled()
+    // GF9-3 — nothing resolvable to fold back either: fallback param stays null.
+    expect(kyselyMocks.state.tombstoneValues[0]).toBeNull()
   })
 
   it('cross-user (non-owner, non-admin) delete request never reaches the tombstone UPDATE or storage at all — 404', async () => {

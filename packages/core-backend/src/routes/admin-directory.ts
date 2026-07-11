@@ -27,6 +27,7 @@ import {
   updateDirectoryIntegration,
 } from '../directory/directory-sync'
 import { getDirectoryInactiveLinkedMetric, getDirectoryManagerBindingCoverage } from '../directory/directory-sync-alert-delivery'
+import { isDingTalkOutcomeUnknown } from '../integrations/dingtalk/client'
 import {
   getDingTalkWorkNotificationRuntimeStatusFromStore,
   saveDingTalkWorkNotificationAgentId,
@@ -190,6 +191,22 @@ export function adminDirectoryRouter(): Router {
       const result = await testDingTalkWorkNotificationAgentId(req.body as never)
       jsonOk(res, { result })
     } catch (error) {
+      // #4046 send-tier: network error/timeout/5xx/malformed-2xx on the actual send carries the
+      // transport's isDingTalkOutcomeUnknown marker — DingTalk may well have delivered the test
+      // message even though this request saw no (usable) response. Folding that into the generic
+      // "failed" code below would tell an admin their Agent ID is broken when the message may in
+      // fact have arrived. This is the interactive test-send path — there is no ledger row to mark
+      // outcome_unknown on (by design), so the ambiguity is surfaced directly to the caller instead.
+      if (isDingTalkOutcomeUnknown(error)) {
+        const reason = readErrorMessage(error, 'DingTalk did not confirm the outcome')
+        jsonError(
+          res,
+          502,
+          'DINGTALK_TEST_SEND_OUTCOME_UNKNOWN',
+          `${reason}. The test message may still have been delivered — check the test message on the device before retrying.`,
+        )
+        return
+      }
       jsonError(res, 400, 'DINGTALK_WORK_NOTIFICATION_TEST_FAILED', readErrorMessage(error, 'Failed to test DingTalk work notification Agent ID'))
     }
   })
