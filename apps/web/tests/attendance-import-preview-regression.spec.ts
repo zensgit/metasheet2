@@ -369,12 +369,12 @@ describe('Attendance import preview regression', () => {
             mappingProfiles: [],
             mapping: {
               columns: [
-                { sourceField: '上班1打卡时间', targetField: 'firstInAt' },
-                { sourceField: '下班1打卡时间', targetField: 'lastOutAt' },
-                { sourceField: '考勤结果', targetField: 'status' },
-                { sourceField: '异常原因', targetField: 'exceptionReason' },
-                { sourceField: '加班小时', targetField: 'overtimeHours' },
-                { sourceField: '考勤组', targetField: 'attendanceGroup' },
+                { sourceField: '上班1打卡时间', targetField: 'firstInAt', dataType: 'time' },
+                { sourceField: '下班1打卡时间', targetField: 'lastOutAt', dataType: 'time' },
+                { sourceField: '考勤结果', targetField: 'status', dataType: 'string' },
+                { sourceField: '异常原因', targetField: 'exceptionReason', dataType: 'string' },
+                { sourceField: '加班小时', targetField: 'overtimeHours', dataType: 'hours' },
+                { sourceField: '考勤组', targetField: 'attendanceGroup', dataType: 'string' },
               ],
             },
           },
@@ -440,6 +440,9 @@ describe('Attendance import preview regression', () => {
     expect(lines[1]).toContain('2026-06-01')
     expect(lines[1]).toContain('EMP001')
     expect(lines[1]).toContain('张三')
+    // dataType-derived example on the real wire (review NIT-1): 加班小时 is
+    // hours → 8.5 must land in the example row, not just base-column values.
+    expect(lines[1]).toContain('8.5')
   })
 
   it('one-click template download: works from a cold panel by auto-loading first', async () => {
@@ -460,6 +463,20 @@ describe('Attendance import preview regression', () => {
     expect(apiFetchMock.mock.calls.some(call => String(call[0]).startsWith('/api/attendance/import/template'))).toBe(true)
     expect(createObjectURL).toHaveBeenCalledTimes(1)
     expect(container!.textContent).toContain('CSV template downloaded.')
+
+    // The fallback download exit also ships an example row (#3793 NIT-3
+    // harmonization) — not an empty line.
+    const fallbackBlob = createObjectURL.mock.calls[0][0] as Blob
+    const fallbackBytes = await new Promise<Uint8Array>((resolve) => {
+      const reader = new FileReader()
+      reader.onload = () => resolve(new Uint8Array(reader.result as ArrayBuffer))
+      reader.readAsArrayBuffer(fallbackBlob)
+    })
+    const fallbackLines = new TextDecoder('utf-8').decode(fallbackBytes).replace(/^\ufeff/, '').split('\n').filter(Boolean)
+    expect(fallbackLines).toHaveLength(2)
+    expect(fallbackLines[1]).toContain('2026-06-01')
+    expect(fallbackLines[1]).toContain('EMP001')
+    expect(fallbackLines[1]).toContain('2026-06-01 09:00')
   })
 
   it('one-click download never destroys a hand-edited payload: errors instead of auto-loading', async () => {

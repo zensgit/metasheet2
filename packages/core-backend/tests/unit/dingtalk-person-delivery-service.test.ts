@@ -98,4 +98,39 @@ describe('dingtalk person delivery service', () => {
       },
     ])
   })
+
+  it("passes 'outcome_unknown' through UNFOLDED (PR #4046 Phase B) while unknown junk still folds by success", async () => {
+    const base = {
+      local_user_id: 'user_1',
+      dingtalk_user_id: 'dt_1',
+      source_type: 'automation',
+      subject: 'S',
+      content: 'C',
+      http_status: null,
+      response_body: null,
+      error_message: 'dingtalk_send_outcome_unknown: fetch failed',
+      automation_rule_id: 'rule_1',
+      record_id: 'rec_1',
+      initiated_by: 'user_2',
+      created_at: '2026-07-10T12:00:00.000Z',
+      delivered_at: null,
+      local_user_name: 'Lin Lan',
+      local_user_email: null,
+      local_user_is_active: true,
+    }
+    const queryFn = vi.fn(async () => ({
+      rows: [
+        { ...base, id: 'dpd_ou', success: false, status: 'outcome_unknown' },
+        // legacy/garbage status still folds by the success boolean (unchanged behavior)
+        { ...base, id: 'dpd_junk', success: false, status: 'totally_bogus', error_message: 'x' },
+      ],
+    }))
+    const deliveries = await listAutomationDingTalkPersonDeliveries(queryFn, 'rule_1')
+    // Folding outcome_unknown into 'failed' would erase the reconciliation signal the
+    // distinct state exists for — the API surface must carry it verbatim.
+    expect(deliveries.map((d) => ({ id: d.id, status: d.status }))).toEqual([
+      { id: 'dpd_ou', status: 'outcome_unknown' },
+      { id: 'dpd_junk', status: 'failed' },
+    ])
+  })
 })

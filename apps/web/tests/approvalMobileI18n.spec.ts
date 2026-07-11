@@ -12,7 +12,7 @@ import ApprovalMobileList from '../src/views/approval/ApprovalMobileList.vue'
 // status/title-fallback copy as Chinese-only literals with no locale
 // awareness (self-flagged by that PR as an open must-fix). This spec locks
 // the retrofit: labels must track `useLocale()`'s `isZh`, mirroring the app's
-// existing `isZh` computed-dictionary convention (see ApprovalInboxView.vue).
+// existing `isZh` computed-dictionary convention (see ApprovalDetailView.vue).
 //
 // RED-before: reverting ApprovalMobileList.vue to the pre-retrofit hardcoded
 // strings makes the "renders English labels" test fail — the component would

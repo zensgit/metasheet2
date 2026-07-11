@@ -21,6 +21,8 @@ import {
   automationDingTalkPresetLabel,
   automationDingTalkTemplateTokenLabel,
   automationLabel,
+  automationLastRunChip,
+  automationLastRunRelativeTime,
   automationStatusLabel,
   automationTestRunFailed,
   automationTestRunRequestFailed,
@@ -163,6 +165,58 @@ describe('meta-automation-labels', () => {
 
     expect(automationCardStats(1, 'ok', false)).toBe('1 ok')
     expect(automationCardStats(3, 'fail', true)).toBe('3 失败')
+  })
+
+  it('G-B2-23: formats last-run relative time in minute/hour/day buckets with EN pluralization', () => {
+    const now = new Date('2026-07-08T12:00:00.000Z')
+    expect(automationLastRunRelativeTime('2026-07-08T11:59:59.500Z', now, false)).toBe('just now')
+    expect(automationLastRunRelativeTime('2026-07-08T11:59:59.500Z', now, true)).toBe('刚刚')
+    // Clock skew: a timestamp slightly in the future clamps to "just now" instead of negative.
+    expect(automationLastRunRelativeTime('2026-07-08T12:00:05.000Z', now, false)).toBe('just now')
+
+    expect(automationLastRunRelativeTime('2026-07-08T11:59:00.000Z', now, false)).toBe('1 minute ago')
+    expect(automationLastRunRelativeTime('2026-07-08T11:57:00.000Z', now, false)).toBe('3 minutes ago')
+    expect(automationLastRunRelativeTime('2026-07-08T11:57:00.000Z', now, true)).toBe('3 分钟前')
+
+    expect(automationLastRunRelativeTime('2026-07-08T11:00:00.000Z', now, false)).toBe('1 hour ago')
+    expect(automationLastRunRelativeTime('2026-07-08T09:00:00.000Z', now, false)).toBe('3 hours ago')
+    expect(automationLastRunRelativeTime('2026-07-08T09:00:00.000Z', now, true)).toBe('3 小时前')
+
+    expect(automationLastRunRelativeTime('2026-07-07T12:00:00.000Z', now, false)).toBe('1 day ago')
+    expect(automationLastRunRelativeTime('2026-07-05T12:00:00.000Z', now, false)).toBe('3 days ago')
+    expect(automationLastRunRelativeTime('2026-07-05T12:00:00.000Z', now, true)).toBe('3 天前')
+
+    // Unparseable timestamp fails quiet rather than rendering "NaN ... ago".
+    expect(automationLastRunRelativeTime('not-a-date', now, false)).toBe('')
+  })
+
+  it('G-B2-23: rule-card last-run chip covers none / success / failed / skipped', () => {
+    const now = new Date('2026-07-08T12:00:00.000Z')
+
+    expect(automationLastRunChip([], now, false)).toEqual({ status: 'none', text: 'Not run yet' })
+    expect(automationLastRunChip([], now, true)).toEqual({ status: 'none', text: '尚未运行' })
+
+    const success = {
+      id: 'e1', ruleId: 'r1', status: 'success' as const, triggeredBy: 'event',
+      triggeredAt: '2026-07-08T11:57:00.000Z',
+    }
+    expect(automationLastRunChip([success], now, false)).toEqual({ status: 'success', text: 'success · 3 minutes ago' })
+    expect(automationLastRunChip([success], now, true)).toEqual({ status: 'success', text: '成功 · 3 分钟前' })
+
+    const failed = { ...success, id: 'e2', status: 'failed' as const, triggeredAt: '2026-07-08T09:00:00.000Z' }
+    expect(automationLastRunChip([failed], now, false)).toEqual({ status: 'failed', text: 'failed · 3 hours ago' })
+
+    const skipped = { ...success, id: 'e3', status: 'skipped' as const, triggeredAt: '2026-07-05T12:00:00.000Z' }
+    expect(automationLastRunChip([skipped], now, true)).toEqual({ status: 'skipped', text: '跳过 · 3 天前' })
+
+    // Only the most-recent (index 0) execution is consulted, matching
+    // `getAutomationLogs(sheetId, ruleId, 1)`'s newest-first contract.
+    expect(automationLastRunChip([success, failed], now, false).status).toBe('success')
+
+    // Unparseable triggeredAt: status still renders, relative-time segment is dropped
+    // rather than showing "success · " with a dangling separator.
+    const badTimestamp = { ...success, triggeredAt: 'not-a-date' }
+    expect(automationLastRunChip([badTimestamp], now, false)).toEqual({ status: 'success', text: 'success' })
   })
 
   it('B1-06: composes delete-rule confirm copy with optional run-count blast radius', () => {

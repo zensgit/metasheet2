@@ -198,14 +198,30 @@
       </div>
       <details v-if="!isDataSourceBridgeKind" class="integration-workbench__details">
         <summary>高级 JSON 配置（不会显示或保存凭证）</summary>
+        <p v-if="isK3WiseWebapiKind" class="integration-workbench__hint" data-testid="connection-draft-k3-setup-hint">
+          {{ bi('该类型有专页配置：', 'This connection type has its own dedicated setup page: ') }}
+          <router-link to="/integrations/k3-wise" data-testid="connection-draft-k3-setup-link">
+            {{ bi('前往 K3 WISE 设置向导', 'Open the K3 WISE setup wizard') }}
+          </router-link>
+        </p>
         <div class="integration-workbench__grid integration-workbench__grid--compact">
           <label>
             <span>config JSON</span>
             <textarea v-model="connectionDraft.configText" data-testid="connection-draft-config"></textarea>
+            <JsonAssist
+              v-model="connectionDraft.configText"
+              test-id="connection-draft-config"
+              :placeholder-example="connectionConfigExample"
+            />
           </label>
           <label>
             <span>capabilities JSON</span>
             <textarea v-model="connectionDraft.capabilitiesText" data-testid="connection-draft-capabilities"></textarea>
+            <JsonAssist
+              v-model="connectionDraft.capabilitiesText"
+              test-id="connection-draft-capabilities"
+              :placeholder-example="connectionCapabilitiesExample"
+            />
           </label>
         </div>
       </details>
@@ -259,6 +275,7 @@
 // `scope.workspaceId`) rather than a plain `ref` — Vue's `v-model` binds to any ref-like target,
 // so `v-model:workspace-input="workspaceInput"` at the call site works identically whether the
 // parent hands over a `ref` or a writable `computed`.
+import { computed } from 'vue'
 import type { DataSourceListItem } from '../../data-sources/types'
 import type { IntegrationAdapterMetadata, WorkbenchExternalSystem } from '../../services/integration/workbench'
 import type {
@@ -267,8 +284,9 @@ import type {
   IntegrationScopeState,
   StagingDatasetCard,
 } from './integrationWorkbenchSectionTypes'
+import JsonAssist from './JsonAssist.vue'
 
-defineProps<{
+const props = defineProps<{
   bi: (zh: string, en: string) => string
   refreshBootstrap: () => Promise<void>
   showConnectionGuide: () => void
@@ -311,6 +329,41 @@ defineProps<{
 const inventoryExpanded = defineModel<boolean>('inventoryExpanded', { default: false })
 const showAdvancedConnectors = defineModel<boolean>('showAdvancedConnectors', { default: false })
 const workspaceInput = defineModel<string>('workspaceInput', { default: '' })
+
+// IU-5a (design-lock §2 IU-5, site 1 "connection-draft-config" + site 2
+// "connection-draft-capabilities" disposition): JsonAssist is a side-mounted format+validate
+// strip, not a replacement for the raw textareas above (both textareas and their data-testids
+// stay exactly as they were). K3_WISE_WEBAPI_KIND drives the one extra per-site rule the
+// disposition calls for — a hint pointing at the dedicated K3 WISE setup wizard (existing route,
+// see router/appRoutes.ts) when that adapter kind is selected, since that kind has its own
+// full-page config flow and the raw JSON editor here is a rarely-needed advanced override.
+const K3_WISE_WEBAPI_KIND = 'erp:k3-wise-webapi'
+const K3_WISE_SQLSERVER_KIND = 'erp:k3-wise-sqlserver'
+
+const isK3WiseWebapiKind = computed(() => props.connectionDraft.kind === K3_WISE_WEBAPI_KIND)
+
+// Values-free (no real hosts/tokens/IDs) placeholder shapes, one per adapter-kind family, purely
+// to give the JSON-assist status line something concrete to show while the field is empty — never
+// a claim about the exact backend contract (that lives in the K3 setup wizard / adapter docs).
+const connectionConfigExample = computed(() => {
+  const kind = props.connectionDraft.kind
+  if (kind === K3_WISE_WEBAPI_KIND || kind === K3_WISE_SQLSERVER_KIND) {
+    return JSON.stringify({ note: props.bi('<建议改用 K3 WISE 设置向导>', '<prefer the K3 WISE setup wizard>') })
+  }
+  if (kind.startsWith('metasheet:')) {
+    return JSON.stringify({ baseId: '<staging-base-id>', tableId: '<staging-table-id>' })
+  }
+  if (kind.startsWith('http')) {
+    return JSON.stringify({ baseUrl: '<https://example.internal/api>', authHeaderName: '<header-name>' })
+  }
+  return JSON.stringify({ '<config-key>': '<config-value>' })
+})
+
+const connectionCapabilitiesExample = JSON.stringify({
+  read: '<true|false>',
+  upsert: '<true|false>',
+  rateLimitPerMinute: '<number>',
+})
 </script>
 
 <style scoped>

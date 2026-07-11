@@ -1,4 +1,4 @@
-import type { ApprovalGraph } from '../types/approval'
+import type { ApprovalGraph , FormSchema } from '../types/approval'
 import { buildUpcomingNodes, type UpcomingApprovalNode } from './upcomingNodes'
 
 /**
@@ -31,8 +31,8 @@ export type ApprovalFlowStep = UpcomingApprovalNode
  * immediately (e.g. a single-node graph with no outgoing edge, or an empty graph) — never throws
  * on a malformed/empty graph.
  */
-export function summarizeApprovalFlow(graph: ApprovalGraph): ApprovalFlowStep[] {
+export function summarizeApprovalFlow(graph: ApprovalGraph, schema?: FormSchema | null): ApprovalFlowStep[] {
   const startKey = graph.nodes.find((node) => node.type === 'start')?.key
   if (!startKey) return []
-  return buildUpcomingNodes(graph, startKey)
+  return buildUpcomingNodes(graph, startKey, schema)
 }

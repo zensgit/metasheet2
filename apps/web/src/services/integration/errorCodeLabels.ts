@@ -25,6 +25,14 @@
 //     NOT YET WIRED to any UI display site (no BOM-list-by-material UI exists yet as of IU-1) — labeled
 //     here for completeness/future use per design-lock IU-1 scope. Mirrored locally (below) rather than
 //     added to readSourceConfigs.ts, since nothing there references it today.
+//   - Bridge Agent readonly adapter (4): plugins/plugin-integration-core/lib/adapters/
+//     bridge-agent-readonly-adapter.cjs BRIDGE_AGENT_READONLY_ADAPTER_ERROR_CODES. Wired to
+//     IntegrationBridgeAgentSection.vue (BA-UI-1, docs/development/
+//     bridge-agent-admin-page-design-lock-20260707.md) — the ONLY adapter-owned codes this family
+//     covers; an operator's own Bridge Agent HTTP response body may carry an arbitrary `error.code`
+//     (e.g. a custom allowlist/validation code from scripts/ops/bridge-agent-readonly.ps1), and that
+//     is DELIBERATELY left unregistered so it degrades to the generic unknown-error label rather than
+//     rendering dynamic, agent-supplied text.
 //   - Dead-letter mainline (10): plugins/plugin-integration-core/lib/pipeline-runner.cjs (the mainline
 //     pipeline path) plus generic fallbacks used there and in external-write-dry-run.cjs. Dead-letter
 //     `errorCode` is fed from multiple origins and is NOT one closed server-exported array, so only the
@@ -57,6 +65,15 @@ export const K3_WISE_BOM_LIST_BY_MATERIAL_ERROR_CODES = [
   'K3_WISE_BOM_LIST_BY_MATERIAL_NOT_FOUND',
   'K3_WISE_BOM_LIST_BY_MATERIAL_AMBIGUOUS',
   'K3_WISE_BOM_LIST_BY_MATERIAL_FIELD_MISSING',
+] as const
+
+// Bridge Agent readonly adapter — local mirror of the server's exported
+// BRIDGE_AGENT_READONLY_ADAPTER_ERROR_CODES (bridge-agent-readonly-adapter.cjs). See module header.
+export const BRIDGE_AGENT_ERROR_CODES = [
+  'BRIDGE_AGENT_UNREACHABLE',
+  'BRIDGE_AGENT_TIMEOUT',
+  'BRIDGE_AGENT_REQUEST_FAILED',
+  'BRIDGE_AGENT_TEST_FAILED',
 ] as const
 
 // Dead-letter "known mainline" codes — not a single server-exported array (dead-letter `errorCode` is
@@ -109,6 +126,8 @@ export type IntegrationErrorCode =
   | 'READ_SOURCE_COMPOSITION_STEP_OUTPUT_NOT_SCALAR'
   // K3 WISE BOM-list-by-material (8) — see K3_WISE_BOM_LIST_BY_MATERIAL_ERROR_CODES above
   | (typeof K3_WISE_BOM_LIST_BY_MATERIAL_ERROR_CODES)[number]
+  // Bridge Agent readonly adapter (4) — see BRIDGE_AGENT_ERROR_CODES above
+  | (typeof BRIDGE_AGENT_ERROR_CODES)[number]
   // Dead-letter known mainline (10) — see DEAD_LETTER_MAINLINE_ERROR_CODES above
   | (typeof DEAD_LETTER_MAINLINE_ERROR_CODES)[number]
 
@@ -282,6 +301,29 @@ export const INTEGRATION_ERROR_CODE_LABELS: Record<IntegrationErrorCode, Integra
   K3_WISE_BOM_LIST_BY_MATERIAL_FIELD_MISSING: {
     zh: '所需字段缺失',
     en: 'A required field is missing.',
+  },
+
+  // --- Bridge Agent readonly adapter (4) ---
+  BRIDGE_AGENT_UNREACHABLE: {
+    zh: '无法连接到 Bridge Agent',
+    en: 'Cannot reach the Bridge Agent.',
+    hint: {
+      zh: '本机 Bridge Agent 服务可能未启动；请检查其计划任务/进程后重新检查连接。',
+      en: 'The local Bridge Agent service may not be running; check its scheduled task or process, then re-check the connection.',
+    },
+  },
+  BRIDGE_AGENT_TIMEOUT: {
+    zh: '连接 Bridge Agent 超时',
+    en: 'The connection to the Bridge Agent timed out.',
+    hint: { zh: '本机服务可能繁忙或无响应，可稍后重试。', en: 'The local service may be busy or unresponsive; retry later.' },
+  },
+  BRIDGE_AGENT_REQUEST_FAILED: {
+    zh: 'Bridge Agent 请求失败',
+    en: 'The Bridge Agent request failed.',
+  },
+  BRIDGE_AGENT_TEST_FAILED: {
+    zh: '连接测试执行失败',
+    en: 'The connection test failed to execute.',
   },
 
   // --- Dead-letter known mainline (10) ---

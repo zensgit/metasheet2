@@ -84,6 +84,7 @@ const mockPendingApprovals = ref<any[]>([])
 const mockMyApprovals = ref<any[]>([])
 const mockCcApprovals = ref<any[]>([])
 const mockCompletedApprovals = ref<any[]>([])
+const mockProcessedApprovals = ref<any[]>([])
 
 const loadDetailSpy = vi.fn().mockResolvedValue(undefined)
 const loadHistorySpy = vi.fn().mockResolvedValue(undefined)
@@ -93,6 +94,7 @@ const loadPendingSpy = vi.fn().mockResolvedValue(undefined)
 const loadMineSpy = vi.fn().mockResolvedValue(undefined)
 const loadCcSpy = vi.fn().mockResolvedValue(undefined)
 const loadCompletedSpy = vi.fn().mockResolvedValue(undefined)
+const loadProcessedSpy = vi.fn().mockResolvedValue(undefined)
 
 vi.mock('../src/approvals/store', () => ({
   useApprovalStore: () => ({
@@ -101,6 +103,7 @@ vi.mock('../src/approvals/store', () => ({
     get myApprovals() { return mockMyApprovals.value },
     get ccApprovals() { return mockCcApprovals.value },
     get completedApprovals() { return mockCompletedApprovals.value },
+    get processedApprovals() { return mockProcessedApprovals.value },
     get activeApproval() { return mockActiveApproval.value },
     get history() { return mockHistoryRef.value },
     get loading() { return mockLoading.value },
@@ -109,12 +112,14 @@ vi.mock('../src/approvals/store', () => ({
     get totalMine() { return mockMyApprovals.value.length },
     get totalCc() { return mockCcApprovals.value.length },
     get totalCompleted() { return mockCompletedApprovals.value.length },
+    get totalProcessed() { return mockProcessedApprovals.value.length },
     get pendingCount() { return mockPendingApprovals.value.length },
     approvalById: () => undefined,
     loadPending: loadPendingSpy,
     loadMine: loadMineSpy,
     loadCc: loadCcSpy,
     loadCompleted: loadCompletedSpy,
+    loadProcessed: loadProcessedSpy,
     loadDetail: loadDetailSpy,
     loadHistory: loadHistorySpy,
     submitApproval: submitApprovalSpy,
@@ -577,8 +582,9 @@ describe('Approval E2E Permissions', () => {
     it('can see approval list tabs', async () => {
       setMockPermissions(['approvals:read'])
       await mountCenterView()
+      // B3-01 adds a 5th tab (我已处理).
       const panes = container!.querySelectorAll('[data-tab-pane]')
-      expect(panes.length).toBe(4)
+      expect(panes.length).toBe(5)
     })
 
     it('detail page with non-pending status shows NO action buttons', async () => {
@@ -610,20 +616,23 @@ describe('Approval E2E Permissions', () => {
       expect(historyItems.length).toBe(2)
     })
 
-    it('template center renders without "发起审批" button for draft templates', async () => {
+    it('template center renders the requester card gallery (not the admin table), with no "发起申请" button for a draft template', async () => {
       setMockPermissions(['approvals:read'])
-      // Template center shows a table. Only published templates have a "发起审批" link button.
-      // Draft templates should not show it. We verify by providing only draft templates.
+      // G-B2-17: !canManageTemplates users get the requester card gallery instead of the admin
+      // table. A draft template is never actionable, so its card shows no "发起申请" button
+      // (mirrors the admin table's row.status === 'published' gate on "发起审批").
       mockTemplates.value = [
         { ...mockDraftTemplate(), id: 'tpl_d1', name: '草稿模板' },
       ]
       await mountTemplateCenterView()
 
-      // The table renders. Since the column uses scoped slots that are not invoked by our stub,
-      // we verify the table exists and loadTemplates was called.
       expect(loadTemplatesSpy).toHaveBeenCalled()
-      const table = container!.querySelector('[data-el-table]')
-      expect(table).toBeTruthy()
+      expect(container!.querySelector('[data-el-table]')).toBeFalsy()
+      expect(container!.querySelector('[data-testid="template-center-gallery"]')).toBeTruthy()
+
+      const startButtons = Array.from(container!.querySelectorAll('button'))
+        .filter((b) => b.textContent?.includes('发起申请'))
+      expect(startButtons.length).toBe(0)
     })
   })
 
@@ -704,6 +713,23 @@ describe('Approval E2E Permissions', () => {
       const visibleLabels = Array.from(container!.querySelectorAll('[data-el-form-item] label'))
         .map((label) => label.textContent?.trim())
       expect(visibleLabels).toContain('补充说明')
+    })
+
+    it('template center gallery shows "发起申请" for a published template and routes to the same start-approval path as the admin table', async () => {
+      // G-B2-17: writer (non-manager) sees the gallery; its primary action reuses the exact
+      // same `/approvals/new/:id` route the admin table's "发起审批" button pushes to.
+      setMockPermissions(['approvals:read', 'approvals:write'])
+      mockTemplates.value = [mockPublishedTemplate({ id: 'tpl_pub_1', name: '出差申请' })]
+      await mountTemplateCenterView()
+
+      const startBtn = Array.from(container!.querySelectorAll('button'))
+        .find((b) => b.textContent?.includes('发起申请'))
+      expect(startBtn).toBeTruthy()
+
+      startBtn!.click()
+      await flushUi()
+
+      expect(pushSpy).toHaveBeenCalledWith({ path: '/approvals/new/tpl_pub_1' })
     })
 
     it('writer viewing a pending approval with no assignment sees action buttons (view-level)', async () => {

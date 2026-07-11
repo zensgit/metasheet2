@@ -33,8 +33,8 @@
       <div class="meta-person-picker__footer">
         <span class="meta-person-picker__count">{{ selectedCountText }}</span>
         <div class="meta-person-picker__actions">
-          <button class="meta-person-picker__cancel" @click="emit('close')">{{ pp('personPicker.cancel') }}</button>
-          <button class="meta-person-picker__confirm" data-test="person-picker-confirm" @click="onConfirm">{{ pp('personPicker.confirm') }}</button>
+          <MtButton class="meta-person-picker__cancel" @click="emit('close')">{{ pp('personPicker.cancel') }}</MtButton>
+          <MtButton variant="primary" class="meta-person-picker__confirm" data-test="person-picker-confirm" @click="onConfirm">{{ pp('personPicker.confirm') }}</MtButton>
         </div>
       </div>
     </div>
@@ -44,6 +44,7 @@
 <script setup lang="ts">
 import { computed, reactive, ref, watch } from 'vue'
 import { useLocale } from '../../composables/useLocale'
+import { MtButton } from '../ui'
 import type { MetaField, PersonSummary } from '../types'
 import { multitableClient } from '../api/client'
 import { isPersonSingleRecordField } from '../utils/person-fields'
@@ -203,7 +204,6 @@ function onConfirm() {
 .meta-person-picker__footer { display: flex; justify-content: space-between; align-items: center; padding: 10px 16px; border-top: 1px solid #eee; }
 .meta-person-picker__count { font-size: 12px; color: #666; }
 .meta-person-picker__actions { display: flex; gap: 8px; }
-.meta-person-picker__cancel { padding: 6px 12px; background: #fff; color: #606266; border: 1px solid #dcdfe6; border-radius: 4px; cursor: pointer; font-size: 13px; }
-.meta-person-picker__confirm { padding: 6px 18px; background: #409eff; color: #fff; border: none; border-radius: 4px; cursor: pointer; font-size: 13px; }
-.meta-person-picker__confirm:hover { background: #66b1ff; }
+/* .meta-person-picker__cancel / __confirm: the footer action controls are now <MtButton>
+   (token-styled; confirm = variant="primary"). Bespoke button rules removed in UI-P2-1c. */
 </style>

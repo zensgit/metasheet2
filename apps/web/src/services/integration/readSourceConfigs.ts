@@ -507,6 +507,20 @@ export function normalizeReadSourceProbeEvidence(value: unknown): ReadSourceProb
   return evidence
 }
 
+// IU-3 (design-lock docs/development/integration-iu3-read-source-wizard-design-lock-20260707.md):
+// pure shaping helper extracted from IntegrationReadSourceConfigPanel.vue's `evidenceContainers`
+// computed so both the expert form and the new wizard's step-3 evidence card render the exact same
+// {alias, shape}[] list from the same allowlisted evidence — zero behavior change, single source.
+export function deriveReadSourceProbeEvidenceContainers(
+  containers: ReadSourceProbeEvidence['containers'] | undefined,
+): Array<{ alias: 'primary' | 'header' | 'lines'; shape: ReadSourceProbeContainerShape }> {
+  if (!containers) return []
+  return EVIDENCE_CONTAINER_ALIASES.flatMap((alias) => {
+    const shape = containers[alias]
+    return shape ? [{ alias, shape }] : []
+  })
+}
+
 export function normalizeReadSourceConfigRow(value: unknown): ReadSourceConfigRow | null {
   if (!isPlainObject(value)) return null
   if (typeof value.id !== 'string' || !value.id) return null

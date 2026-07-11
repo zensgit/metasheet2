@@ -626,8 +626,31 @@
 
         <!-- Rule list -->
         <div v-if="loading" class="meta-automation__empty">{{ l('manager.loading') }}</div>
+        <!-- G-B2-26: the empty state guides instead of just announcing emptiness. The bare
+             `manager.empty` line is kept (tests + a11y) and recipe cards sit above it — each
+             pre-fills the quick-form draft with a common trigger→action pair, so the first rule is
+             one click plus light editing rather than a blank form. "Start from blank" preserves the
+             original empty-form path. The two raw add-buttons above are left in place (deliberately
+             not removed — a demote, not a delete). -->
         <div v-else-if="!rules.length && !showForm" class="meta-automation__empty" data-automation-empty="true">
-          {{ l('manager.empty') }}
+          <div class="meta-automation__recipe-title">{{ l('manager.recipeSectionTitle') }}</div>
+          <div class="meta-automation__recipe-grid">
+            <button
+              v-for="recipe in automationRecipes"
+              :key="recipe.key"
+              type="button"
+              class="meta-automation__recipe-card"
+              :data-automation-recipe="recipe.key"
+              @click="applyRecipe(recipe)"
+            >
+              <span class="meta-automation__recipe-card-title">{{ l(recipe.titleKey) }}</span>
+              <span class="meta-automation__recipe-card-desc">{{ l(recipe.descriptionKey) }}</span>
+            </button>
+          </div>
+          <button type="button" class="meta-automation__recipe-blank" data-automation-recipe="__blank" @click="openCreateForm">
+            {{ l('manager.recipeOrBlank') }}
+          </button>
+          <p class="meta-automation__recipe-empty-note">{{ l('manager.empty') }}</p>
         </div>
         <div
           v-for="rule in rules"
@@ -695,6 +718,15 @@
           <div v-if="ruleStats[rule.id]" class="meta-automation__card-stats">
             <span class="meta-automation__stat meta-automation__stat--success">{{ automationCardStats(ruleStats[rule.id].success, 'ok', isZh) }}</span>
             <span class="meta-automation__stat meta-automation__stat--failed">{{ automationCardStats(ruleStats[rule.id].failed, 'fail', isZh) }}</span>
+          </div>
+          <div
+            v-if="ruleLastRun[rule.id]"
+            class="meta-automation__last-run-chip"
+            :class="`meta-automation__last-run-chip--${ruleLastRunChipFor(rule.id).status}`"
+            :data-automation-last-run="rule.id"
+            :data-status="ruleLastRunChipFor(rule.id).status"
+          >
+            {{ ruleLastRunChipFor(rule.id).text }}
           </div>
           <div
             v-if="ruleTestRunStates[rule.id]"
@@ -824,13 +856,17 @@ import {
   automationDingTalkPersonSubjectLabel,
   automationDingTalkPresetLabel,
   automationLabel,
+  automationLastRunChip,
   automationTestRunFailed,
   automationTestRunRequestFailed,
   automationTestRunSkipped,
   automationTestRunSucceeded,
   automationTriggerTypeLabel,
   type AutomationLabelKey,
+  type AutomationLastRunChip,
 } from '../utils/meta-automation-labels'
+import { loadRuleEntriesConcurrently, mergeRuleEntries } from '../utils/automation-rule-concurrent-merge'
+import { AUTOMATION_RECIPES, applyRecipeToDraft, type AutomationRecipe } from '../automationRecipes'
 
 const props = defineProps<{
   visible: boolean
@@ -1521,6 +1557,12 @@ const groupDeliveryViewerRuleId = ref('')
 const showPersonDeliveryViewer = ref(false)
 const personDeliveryViewerRuleId = ref('')
 const ruleStats = ref<Record<string, AutomationStats>>({})
+// G-B2-23: most-recent-first execution page (0 or 1 entries) per rule, feeding the card's
+// "last run" chip. Absent key = not fetched yet (component v-ifs the chip away); a rule
+// whose fetch failed is simply omitted this round rather than recorded as an error state,
+// same "skip on failure" semantics `ruleStats` already had (a stale/missing chip is an
+// honest degrade — see `loadRuleLastRuns` below — not a rendering error for the whole list).
+const ruleLastRun = ref<Record<string, AutomationExecution[]>>({})
 const ruleTestRunStates = ref<Record<string, AutomationTestRunState>>({})
 const activeRuleTestRunState = computed(() => {
   const ruleId = editingRule.value?.id
@@ -1573,7 +1615,7 @@ async function onTestRule(ruleId: string) {
   try {
     const execution = await props.client.testAutomationRule(props.sheetId, ruleId)
     setRuleTestRunState(ruleId, describeTestRunExecution(execution))
-    await loadRuleStatsForRule(ruleId)
+    await refreshRuleCardData(ruleId)
   } catch (err: unknown) {
     setRuleTestRunState(ruleId, {
       status: 'failed',
@@ -1627,20 +1669,67 @@ function describeTestRunExecution(execution: AutomationExecution): AutomationTes
   }
 }
 
-async function loadRuleStatsForRule(ruleId: string) {
-  if (!props.client) return
-  try {
-    const st = await props.client.getAutomationStats(props.sheetId, ruleId)
-    ruleStats.value = { ...ruleStats.value, [ruleId]: st }
-  } catch {
-    // skip
-  }
-}
-
+// G-B2-23: stats used to load one rule at a time (`for (const rule of rules.value) await
+// loadRuleStatsForRule(rule.id)`), paying every rule's request round-trip serially — N
+// rules meant N sequential network waits before the last card's stats appeared. Fetching
+// concurrently and folding the results into `ruleStats` in a single assignment (via
+// `loadRuleEntriesConcurrently` / `mergeRuleEntries`, see automation-rule-concurrent-merge.ts
+// for why the merge must happen in one pass) removes that serial tax without reintroducing
+// the "N separate `ruleStats.value = {...ruleStats.value, [id]: st}` writes" shape that
+// function is built to avoid. A rule whose stats fetch fails is simply left out of this
+// round's merge — matches the previous per-rule try/catch's "skip on failure" behavior.
 async function loadRuleStats() {
   if (!props.client) return
-  for (const rule of rules.value) {
-    await loadRuleStatsForRule(rule.id)
+  const client = props.client
+  const sheetId = props.sheetId
+  ruleStats.value = await loadRuleEntriesConcurrently(
+    ruleStats.value,
+    rules.value.map((rule) => rule.id),
+    (ruleId) => client.getAutomationStats(sheetId, ruleId),
+  )
+}
+
+// G-B2-23: "last run" chip data — same concurrent-fetch-then-one-shot-merge shape as
+// `loadRuleStats` above, requesting just the newest execution per rule
+// (`getAutomationLogs(sheetId, ruleId, 1)`, newest-first per the backend contract) rather
+// than the full log page the log viewer needs.
+async function loadRuleLastRuns() {
+  if (!props.client) return
+  const client = props.client
+  const sheetId = props.sheetId
+  ruleLastRun.value = await loadRuleEntriesConcurrently(
+    ruleLastRun.value,
+    rules.value.map((rule) => rule.id),
+    (ruleId) => client.getAutomationLogs(sheetId, ruleId, 1),
+  )
+}
+
+function ruleLastRunChipFor(ruleId: string): AutomationLastRunChip {
+  return automationLastRunChip(ruleLastRun.value[ruleId] ?? [], new Date(), isZh.value)
+}
+
+/**
+ * Refresh a single rule's stats + last-run chip after a manual test run creates a fresh
+ * execution for it. Each fetch is independently merged with `mergeRuleEntries` (a plain
+ * one-entry batch) and independently swallowed on failure, so a stats-fetch failure can't
+ * suppress the last-run chip update or vice versa — same "one bad fetch doesn't blank
+ * data we already have" rule the concurrent multi-rule loaders follow.
+ */
+async function refreshRuleCardData(ruleId: string) {
+  if (!props.client) return
+  const client = props.client
+  const sheetId = props.sheetId
+  try {
+    const st = await client.getAutomationStats(sheetId, ruleId)
+    ruleStats.value = mergeRuleEntries(ruleStats.value, [[ruleId, st]])
+  } catch {
+    // skip — leave whatever stats we already had for this rule in place
+  }
+  try {
+    const executions = await client.getAutomationLogs(sheetId, ruleId, 1)
+    ruleLastRun.value = mergeRuleEntries(ruleLastRun.value, [[ruleId, executions]])
+  } catch {
+    // skip — leave whatever last-run chip we already had for this rule in place
   }
 }
 
@@ -1675,6 +1764,20 @@ const canSave = computed(() => {
   }
   return true
 })
+
+// G-B2-26: recipe cards in the empty state. `automationRecipes` feeds the v-for; `applyRecipe`
+// mirrors openCreateForm's reset but overlays the recipe's trigger/action onto the fresh draft, so
+// the quick form opens pre-filled. The recipe only sets triggerType/actionType — every other field
+// keeps its emptyDraft default, so the result is a complete, form-renderable draft.
+const automationRecipes = AUTOMATION_RECIPES
+function applyRecipe(recipe: AutomationRecipe) {
+  editingRuleId.value = null
+  draft.value = applyRecipeToDraft(emptyDraft(), recipe)
+  dingtalkPersonUserSearch.value = ''
+  dingtalkPersonUserSuggestions.value = []
+  dingtalkPersonUserSearchError.value = ''
+  showForm.value = true
+}
 
 function openCreateForm() {
   editingRuleId.value = null
@@ -1937,6 +2040,7 @@ watch(
       await loadRules(props.sheetId)
       cancelForm()
       void loadRuleStats()
+      void loadRuleLastRuns()
     }
   },
   { immediate: true },
@@ -1966,6 +2070,62 @@ watch(
   font-size: 13px;
   background: var(--el-color-danger-light-9);
   color: var(--el-color-danger-dark-2);
+}
+
+.meta-automation__recipe-title {
+  font-size: 13px;
+  font-weight: 600;
+  margin-bottom: 8px;
+  color: var(--el-text-color-primary);
+}
+
+.meta-automation__recipe-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.meta-automation__recipe-card {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 10px 12px;
+  border: 1px solid var(--el-border-color);
+  border-radius: 8px;
+  background: var(--ms-bg-card);
+  cursor: pointer;
+  text-align: left;
+}
+
+.meta-automation__recipe-card:hover {
+  border-color: var(--el-color-primary);
+}
+
+.meta-automation__recipe-card-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--el-text-color-primary);
+}
+
+.meta-automation__recipe-card-desc {
+  font-size: 12px;
+  color: var(--el-text-color-secondary);
+}
+
+.meta-automation__recipe-blank {
+  border: none;
+  background: none;
+  padding: 0;
+  cursor: pointer;
+  font-size: 12px;
+  color: var(--el-color-primary);
+}
+
+.meta-automation__recipe-empty-note {
+  margin: 8px 0 0;
+  font-size: 12px;
+  color: var(--el-text-color-secondary);
 }
 
 .meta-automation__empty {
@@ -2229,6 +2389,21 @@ watch(
 .meta-automation__stat { font-weight: 600; }
 .meta-automation__stat--success { color: var(--ms-color-success); }
 .meta-automation__stat--failed { color: var(--ms-color-danger); }
+
+/* G-B2-23: rule card "last run" chip — same pill shape as .meta-automation__card-link-access. */
+.meta-automation__last-run-chip {
+  display: inline-flex;
+  align-self: flex-start;
+  border-radius: 999px;
+  font-size: 12px;
+  line-height: 1;
+  padding: 5px 8px;
+}
+
+.meta-automation__last-run-chip--success { background: var(--el-color-success-light-9); color: var(--el-color-success-dark-2); }
+.meta-automation__last-run-chip--failed { background: var(--el-color-danger-light-9); color: var(--el-color-danger-dark-2); }
+.meta-automation__last-run-chip--skipped { background: var(--el-color-warning-light-9); color: var(--el-color-warning-dark-2); }
+.meta-automation__last-run-chip--none { background: var(--ms-bg-page); color: var(--ms-text-2); }
 
 .meta-automation__test-run-status {
   font-size: 12px;

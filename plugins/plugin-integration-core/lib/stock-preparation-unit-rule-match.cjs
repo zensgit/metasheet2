@@ -2,6 +2,13 @@
 
 const crypto = require('node:crypto')
 
+const {
+  firstValue,
+  isPlainObject,
+  optionalString,
+  sameText,
+} = require('./stock-preparation-common.cjs')
+
 const RULE_OUTCOMES = Object.freeze({
   REUSED: 'reused',
   CANDIDATE: 'candidate',
@@ -35,22 +42,6 @@ class StockPreparationUnitRuleMatchError extends Error {
   }
 }
 
-function isPlainObject(value) {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return false
-  const prototype = Object.getPrototypeOf(value)
-  return prototype === Object.prototype || prototype === null
-}
-
-function optionalString(value) {
-  if (value === undefined || value === null) return null
-  if (typeof value === 'string') {
-    const trimmed = value.trim()
-    return trimmed ? trimmed : null
-  }
-  if (typeof value === 'number' || typeof value === 'boolean') return String(value)
-  return null
-}
-
 function asArray(value, field) {
   if (value === undefined || value === null) return []
   if (!Array.isArray(value)) {
@@ -74,22 +65,6 @@ function stableHash(value) {
 
 function conversionRuleIdFor(plmUnit, issueUnit, scopeType, scopeKey) {
   return `stockprep_unit_rule_${stableHash(`${plmUnit}|${issueUnit}|${scopeType}|${scopeKey || ''}`)}`
-}
-
-function sameText(left, right) {
-  const a = optionalString(left)
-  const b = optionalString(right)
-  if (a === null && b === null) return true
-  if (a === null || b === null) return false
-  return a.toLowerCase() === b.toLowerCase()
-}
-
-function firstValue(row, keys) {
-  for (const key of keys) {
-    const value = optionalString(row && row[key])
-    if (value !== null) return value
-  }
-  return null
 }
 
 function drawingNoOf(line) {

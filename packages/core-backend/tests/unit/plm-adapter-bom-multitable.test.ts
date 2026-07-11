@@ -319,3 +319,67 @@ describe('PLMAdapter.updateBomMultitableLine (PLM-COLLAB P3 — thin success-onl
     expect(select).not.toHaveBeenCalled()
   })
 })
+
+describe('PLMAdapter.requestBomEcoRevisionIntent (ECO Phase 3)', () => {
+  it('yuantus: POSTs the eco-intent endpoint with NO body and NO Idempotency-Key (provider owns idempotency)', async () => {
+    const adapter = createAdapter('yuantus')
+    const select = vi.fn().mockResolvedValue({
+      data: [{ eco_id: 'ECO-9', state: 'progress', attached: false, source_version_id: 'v1', target_version_id: 'v2' }],
+    })
+    ;(adapter as never as { select: unknown }).select = select
+
+    const result = await adapter.requestBomEcoRevisionIntent('P1')
+
+    expect(select).toHaveBeenCalledWith('/api/v1/bom/multitable/P1/eco-intent', { method: 'POST' })
+    // structural: no data payload, no headers key at all -> no Idempotency-Key can ride along
+    const options = select.mock.calls[0][1] as Record<string, unknown>
+    expect('data' in options).toBe(false)
+    expect('headers' in options).toBe(false)
+    expect(result.data?.[0]?.eco_id).toBe('ECO-9')
+    expect(result.data?.[0]?.attached).toBe(false)
+  })
+
+  it('yuantus: relays the attach outcome (attached: true) untouched', async () => {
+    const adapter = createAdapter('yuantus')
+    ;(adapter as never as { select: unknown }).select = vi.fn().mockResolvedValue({
+      data: [{ eco_id: 'ECO-EXISTING', state: 'draft', attached: true }],
+    })
+    const result = await adapter.requestBomEcoRevisionIntent('P1')
+    expect(result.data?.[0]).toEqual({ eco_id: 'ECO-EXISTING', state: 'draft', attached: true })
+  })
+
+  it('mock mode: canned success WITHOUT a request', async () => {
+    const adapter = createAdapter('mock')
+    const select = vi.fn()
+    ;(adapter as never as { select: unknown }).select = select
+
+    const result = await adapter.requestBomEcoRevisionIntent('P7')
+
+    expect(select).not.toHaveBeenCalled()
+    expect(result.data?.[0]?.eco_id).toBe('mock-eco-P7')
+    expect(result.data?.[0]?.attached).toBe(false)
+  })
+
+  it('mock manifest advertises bom_eco_revision with the eco_revision_intent action (CTA pre-gate demoable)', async () => {
+    const adapter = createAdapter('mock')
+    const capabilities = await adapter.getIntegrationCapabilities()
+    expect(capabilities.available).toBe(true)
+    if (!capabilities.available) return
+    const feature = capabilities.manifest.features.bom_eco_revision as Record<string, unknown>
+    expect(feature.supported).toBe(true)
+    expect(feature.entitled).toBe(true)
+    expect(feature.actions).toEqual(['eco_revision_intent'])
+  })
+
+  it('legacy mode: unsupported affordance WITHOUT a request', async () => {
+    const adapter = createAdapter('legacy')
+    const select = vi.fn()
+    ;(adapter as never as { select: unknown }).select = select
+
+    const result = await adapter.requestBomEcoRevisionIntent('P1')
+
+    expect(result.data).toEqual([])
+    expect(result.error).toBeInstanceOf(Error)
+    expect(select).not.toHaveBeenCalled()
+  })
+})

@@ -42,7 +42,7 @@
           </div>
         </details>
         <button v-if="canCreate" class="meta-kanban__header-add" @click="emit('create-record', {})">{{ viewRenderLabel('common.addRecord', isZh) }}</button>
-        <button class="meta-kanban__change-btn" @click="onClearGroupField">{{ viewRenderLabel('kanban.clear', isZh) }}</button>
+        <MtButton variant="ghost" class="meta-kanban__change-btn" @click="onClearGroupField">{{ viewRenderLabel('kanban.clear', isZh) }}</MtButton>
       </div>
 
       <div class="meta-kanban__board" :class="{ 'meta-kanban__board--swimlaned': !!swimlaneField }">
@@ -137,6 +137,7 @@ import { formatFieldDisplay } from '../utils/field-display'
 import { useLocale } from '../../composables/useLocale'
 import MetaCommentActionChip from './MetaCommentActionChip.vue'
 import MetaCommentAffordance from './MetaCommentAffordance.vue'
+import { MtButton } from '../ui'
 import {
   handleCommentAffordanceKeydown,
   resolveCommentAffordanceStateClass,
@@ -456,7 +457,7 @@ function onCardKeydown(e: KeyboardEvent, cardId: string) {
 .meta-kanban__header-field { display: flex; align-items: center; gap: 6px; font-size: 12px; color: #64748b; }
 .meta-kanban__header-add { padding: 5px 10px; border: 1px solid #c7ddff; border-radius: 6px; background: #ecf5ff; color: #2563eb; font-size: 12px; cursor: pointer; }
 .meta-kanban__header-add:hover { background: #dbeafe; }
-.meta-kanban__change-btn { padding: 2px 8px; border: 1px solid #ddd; border-radius: 3px; background: #fff; cursor: pointer; font-size: 11px; color: #409eff; }
+/* .meta-kanban__change-btn: now <MtButton variant="ghost">; bespoke CSS removed (UI-P2-1c batch6). */
 .meta-kanban__field-picker { margin-left: auto; }
 .meta-kanban__field-picker summary { list-style: none; cursor: pointer; font-size: 12px; color: #409eff; user-select: none; }
 .meta-kanban__field-picker summary::-webkit-details-marker { display: none; }

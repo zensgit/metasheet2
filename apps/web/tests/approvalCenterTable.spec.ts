@@ -308,6 +308,62 @@ describe('ApprovalCenterTable', () => {
     expect(cell?.querySelector('.approval-center__wait--urgent')).toBeTruthy()
   })
 
+  // ---------------------------------------------------------------------------
+  // B3-02 (行级未读): a dot next to the title, gated on BOTH `showUnreadDot` (caller opt-in,
+  // pending tab only) AND `row.isRead === false` (server-resolved unread) — never a guessed
+  // default from an absent/true isRead.
+  // ---------------------------------------------------------------------------
+  it('B3-02: showUnreadDot + isRead===false renders the unread dot', async () => {
+    const rows = [buildRow({ isRead: false } as Partial<UnifiedApprovalDTO>)]
+    await mountTable({
+      rows,
+      loading: false,
+      emptyText: 'empty',
+      summaryLineFor: () => '',
+      showUnreadDot: true,
+    })
+    const cell = container!.querySelector('[data-el-cell="标题"]')
+    expect(cell?.querySelector('[data-testid="approval-row-unread-dot"]')).toBeTruthy()
+  })
+
+  it('B3-02: showUnreadDot + isRead===true renders NO unread dot', async () => {
+    const rows = [buildRow({ isRead: true } as Partial<UnifiedApprovalDTO>)]
+    await mountTable({
+      rows,
+      loading: false,
+      emptyText: 'empty',
+      summaryLineFor: () => '',
+      showUnreadDot: true,
+    })
+    const cell = container!.querySelector('[data-el-cell="标题"]')
+    expect(cell?.querySelector('[data-testid="approval-row-unread-dot"]')).toBeNull()
+  })
+
+  it('B3-02: isRead===false but showUnreadDot NOT passed renders NO dot (non-pending tabs never opt in)', async () => {
+    const rows = [buildRow({ isRead: false } as Partial<UnifiedApprovalDTO>)]
+    await mountTable({
+      rows,
+      loading: false,
+      emptyText: 'empty',
+      summaryLineFor: () => '',
+    })
+    const cell = container!.querySelector('[data-el-cell="标题"]')
+    expect(cell?.querySelector('[data-testid="approval-row-unread-dot"]')).toBeNull()
+  })
+
+  it('B3-02: showUnreadDot + isRead===undefined renders NO dot (absence is never treated as unread)', async () => {
+    const rows = [buildRow()] // isRead left undefined
+    await mountTable({
+      rows,
+      loading: false,
+      emptyText: 'empty',
+      summaryLineFor: () => '',
+      showUnreadDot: true,
+    })
+    const cell = container!.querySelector('[data-el-cell="标题"]')
+    expect(cell?.querySelector('[data-testid="approval-row-unread-dot"]')).toBeNull()
+  })
+
   it('the actions slot renders the 操作 column; omitting the slot omits the column (cc/completed-tab shape)', async () => {
     const rows = [buildRow()]
     await mountTable(

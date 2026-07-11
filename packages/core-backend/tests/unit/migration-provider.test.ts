@@ -122,6 +122,13 @@ describe('createCoreBackendMigrationProvider', () => {
       path.join(legacySqlDir, '057_create_integration_core_tables.sql'),
       'create table if not exists integration_external_systems (id uuid primary key);'
     )
+    // #3751: superseded name substitution must apply by NAME across ALL source folders — this one
+    // lives in src/db/migrations (kysely dir), not the legacy dir, and its raw body is a
+    // NON-idempotent CREATE TABLE that must never execute.
+    await writeFile(
+      path.join(sourceMigrationsDir, '20250926_create_audit_tables.sql'),
+      'create table audit_logs (id bigserial primary key);'
+    )
 
     const provider = createCoreBackendMigrationProvider({ runtimeDir })
     const migrations = await provider.getMigrations()
@@ -133,6 +140,7 @@ describe('createCoreBackendMigrationProvider', () => {
       '055_create_attendance_import_tokens',
       '056_add_users_must_change_password',
       '057_create_integration_core_tables',
+      '20250926_create_audit_tables',
       'zzzz20260119100000_create_users_table',
     ])
     await expect(
@@ -143,6 +151,11 @@ describe('createCoreBackendMigrationProvider', () => {
     ).resolves.toBeUndefined()
     await expect(
       migrations['038_config_and_secrets']?.up({} as never)
+    ).resolves.toBeUndefined()
+    // The audit .sql is a no-op marker: up() with a null db must resolve without touching anything —
+    // if the raw CREATE TABLE body ever executed it would throw on the {} fake immediately.
+    await expect(
+      migrations['20250926_create_audit_tables']?.up({} as never)
     ).resolves.toBeUndefined()
   })
 
