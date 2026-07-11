@@ -57,13 +57,31 @@ const markAllApprovalsReadSpy = vi.fn().mockResolvedValue({ markedCount: 0 })
 const remindApprovalSpy = vi.fn().mockResolvedValue({ ok: true, data: {} })
 const getTemplateSpy = vi.fn().mockResolvedValue({ formSchema: { fields: [] } })
 
+// B3-03: the filter bar's template dropdown fetches options via listTemplates() on mount.
+const listTemplatesSpy = vi.fn().mockResolvedValue({ data: [], total: 0 })
+
 vi.mock('../src/approvals/api', () => ({
   dispatchAction: (...args: [string, unknown]) => dispatchActionSpy(...args),
   getPendingCount: (...args: unknown[]) => getPendingCountSpy(...args),
   markAllApprovalsRead: (...args: unknown[]) => markAllApprovalsReadSpy(...args),
   remindApproval: (...args: unknown[]) => remindApprovalSpy(...args),
   getTemplate: (...args: [string]) => getTemplateSpy(...args),
+  listTemplates: (...args: unknown[]) => listTemplatesSpy(...args),
 }))
+
+// B3-03: REACTIVE so a deep-link test can set `?templateId=...&createdFrom=...&createdTo=...`
+// BEFORE mounting (mirrors landing here from an ApprovalMetricsView 看板钻取 link) AND mutate it
+// AFTER mounting (mirrors a params-only navigation reusing the mounted instance — the view's
+// `watch(() => route.query, ...)` must observe the change). `name` matches the real
+// `approval-list` route because the view's watcher is route-name-guarded. Every other existing
+// test leaves the query at its default {} from beforeEach, unchanged.
+const mockRoute = reactive({
+  name: 'approval-list' as string | undefined,
+  params: {},
+  query: {} as Record<string, string>,
+  path: '/approvals',
+  meta: {},
+})
 
 vi.mock('vue-router', async () => {
   const actual = await vi.importActual<typeof import('vue-router')>('vue-router')
@@ -73,12 +91,7 @@ vi.mock('vue-router', async () => {
       push: pushSpy,
       back: vi.fn(),
     }),
-    useRoute: () => ({
-      params: {},
-      query: {},
-      path: '/approvals',
-      meta: {},
-    }),
+    useRoute: () => mockRoute,
   }
 })
 
@@ -87,12 +100,15 @@ const mockPendingApprovals = ref<any[]>([])
 const mockMyApprovals = ref<any[]>([])
 const mockCcApprovals = ref<any[]>([])
 const mockCompletedApprovals = ref<any[]>([])
+// B3-01 (我已处理 5th tab)
+const mockProcessedApprovals = ref<any[]>([])
 const mockLoading = ref(false)
 const mockError = ref<string | null>(null)
 const loadPendingSpy = vi.fn().mockResolvedValue(undefined)
 const loadMineSpy = vi.fn().mockResolvedValue(undefined)
 const loadCcSpy = vi.fn().mockResolvedValue(undefined)
 const loadCompletedSpy = vi.fn().mockResolvedValue(undefined)
+const loadProcessedSpy = vi.fn().mockResolvedValue(undefined)
 
 vi.mock('../src/approvals/store', () => ({
   useApprovalStore: () => ({
@@ -101,6 +117,7 @@ vi.mock('../src/approvals/store', () => ({
     get myApprovals() { return mockMyApprovals.value },
     get ccApprovals() { return mockCcApprovals.value },
     get completedApprovals() { return mockCompletedApprovals.value },
+    get processedApprovals() { return mockProcessedApprovals.value },
     get activeApproval() { return null },
     get history() { return [] },
     get loading() { return mockLoading.value },
@@ -109,12 +126,14 @@ vi.mock('../src/approvals/store', () => ({
     get totalMine() { return mockMyApprovals.value.length },
     get totalCc() { return mockCcApprovals.value.length },
     get totalCompleted() { return mockCompletedApprovals.value.length },
+    get totalProcessed() { return mockProcessedApprovals.value.length },
     get pendingCount() { return mockPendingApprovals.value.length },
     approvalById: () => undefined,
     loadPending: loadPendingSpy,
     loadMine: loadMineSpy,
     loadCc: loadCcSpy,
     loadCompleted: loadCompletedSpy,
+    loadProcessed: loadProcessedSpy,
     loadDetail: vi.fn(),
     loadHistory: vi.fn(),
     submitApproval: vi.fn(),
@@ -299,7 +318,34 @@ const ElSelect = defineComponent({
   props: { modelValue: [String, Array], placeholder: String, clearable: Boolean, multiple: Boolean, filterable: Boolean },
   emits: ['update:modelValue', 'change'],
   render() {
-    return h('select', { 'data-el-select': 'true' }, this.$slots.default?.())
+    // B3-03: a native `change` drives v-model + @change (like the real component) so tests can
+    // exercise the filter bar's own reload path, not just deep-link prefill.
+    return h('select', {
+      'data-el-select': 'true',
+      onChange: (e: Event) => {
+        const value = (e.target as HTMLSelectElement).value
+        this.$emit('update:modelValue', value)
+        this.$emit('change', value)
+      },
+    }, this.$slots.default?.())
+  },
+})
+
+// B3-03: interactive stand-in for the created-range picker (same pattern as
+// approvalMetricsView.spec.ts's set-date-range stub) — clicking commits a fixed
+// YYYY-MM-DD day-boundary range through v-model + @change.
+const ElDatePicker = defineComponent({
+  name: 'ElDatePicker',
+  props: { modelValue: { type: Array, default: null } },
+  emits: ['update:modelValue', 'change'],
+  render() {
+    return h('button', {
+      onClick: () => {
+        const range = ['2026-05-01', '2026-06-30']
+        this.$emit('update:modelValue', range)
+        this.$emit('change', range)
+      },
+    }, 'created-range')
   },
 })
 
@@ -384,12 +430,14 @@ describe('ApprovalCenterView', () => {
     mockMyApprovals.value = []
     mockCcApprovals.value = []
     mockCompletedApprovals.value = []
+    mockProcessedApprovals.value = []
     mockLoading.value = false
     mockError.value = null
     loadPendingSpy.mockClear()
     loadMineSpy.mockClear()
     loadCcSpy.mockClear()
     loadCompletedSpy.mockClear()
+    loadProcessedSpy.mockClear()
     pushSpy.mockClear()
 
     elSuccessSpy.mockClear()
@@ -405,6 +453,10 @@ describe('ApprovalCenterView', () => {
     remindApprovalSpy.mockResolvedValue({ ok: true, data: {} })
     getTemplateSpy.mockClear()
     getTemplateSpy.mockResolvedValue({ formSchema: { fields: [] } })
+    listTemplatesSpy.mockClear()
+    listTemplatesSpy.mockResolvedValue({ data: [], total: 0 })
+    mockRoute.name = 'approval-list'
+    mockRoute.query = {}
 
     container = document.createElement('div')
     document.body.appendChild(container)
@@ -434,6 +486,7 @@ describe('ApprovalCenterView', () => {
     app.component('ElInput', ElInput)
     app.component('ElSelect', ElSelect)
     app.component('ElOption', ElOption)
+    app.component('ElDatePicker', ElDatePicker)
     app.component('ElPagination', ElPagination)
     app.component('ElButton', ElButton)
     app.component('ElAlert', ElAlert)
@@ -445,21 +498,162 @@ describe('ApprovalCenterView', () => {
     await flushUi()
   }
 
-  it('renders 4 tabs', async () => {
+  it('renders 5 tabs (B3-01 adds 我已处理)', async () => {
     await mountView()
     const panes = container!.querySelectorAll('[data-tab-pane]')
-    expect(panes.length).toBe(4)
+    expect(panes.length).toBe(5)
 
     const labels = Array.from(panes).map((p) => p.getAttribute('data-tab-label'))
     expect(labels).toContain('我发起的')
     expect(labels).toContain('抄送我的')
     expect(labels).toContain('已完成')
+    expect(labels).toContain('我已处理')
     expect(container!.textContent).toContain('待我处理')
   })
 
   it('calls loadPending on mount', async () => {
     await mountView()
     expect(loadPendingSpy).toHaveBeenCalled()
+  })
+
+  it('B3-01: renders 我已处理 rows from store.processedApprovals and calls loadPending on mount (loadProcessed only fires once that tab is active)', async () => {
+    mockProcessedApprovals.value = [
+      {
+        id: 'apv_processed_1',
+        requestNo: 'AP-200001',
+        title: '已处理的审批',
+        status: 'approved',
+        requester: { name: '李四' },
+        createdAt: '2026-04-01T00:00:00Z',
+      },
+    ]
+    await mountView()
+
+    const processedPane = container!.querySelector('[data-tab-pane="processed"]')
+    expect(processedPane).not.toBeNull()
+    expect(processedPane?.textContent).toContain('已处理的审批')
+    expect(processedPane?.textContent).toContain('李四')
+    // Default mount stays on the 待我处理 tab (unchanged default) — loadProcessed is wired into
+    // the same switch-case choke point as the other three non-default tabs, none of which fire on
+    // an unrelated tab's mount either.
+    expect(loadPendingSpy).toHaveBeenCalled()
+    expect(loadProcessedSpy).not.toHaveBeenCalled()
+  })
+
+  // ---------------------------------------------------------------------------
+  // B3-03 (模板/时间筛选 + 看板钻取): templateId + createdFrom/createdTo — additive filter-bar
+  // params, and the ApprovalMetricsView deep-link pre-fill that lands here.
+  // ---------------------------------------------------------------------------
+  it('B3-03: a 看板钻取 deep link (templateId + createdFrom/createdTo query) pre-fills the filter bar before the first load', async () => {
+    mockRoute.query = {
+      templateId: 'tpl-88',
+      createdFrom: '2026-05-01T00:00:00Z',
+      createdTo: '2026-06-30T23:59:59Z',
+    }
+    await mountView()
+
+    expect(loadPendingSpy).toHaveBeenCalledWith(expect.objectContaining({
+      templateId: 'tpl-88',
+      createdFrom: '2026-05-01T00:00:00Z',
+      createdTo: '2026-06-30T23:59:59Z',
+    }))
+  })
+
+  it('B3-03: fetches template options for the filter dropdown on mount', async () => {
+    listTemplatesSpy.mockResolvedValue({ data: [{ id: 'tpl-1', name: '采购审批' }], total: 1 })
+    await mountView()
+    expect(listTemplatesSpy).toHaveBeenCalledWith({ pageSize: 200 })
+  })
+
+  it('B3-03: driving the filter bar (template select + created range) reloads with the server params — same day-boundary convention as the deep link', async () => {
+    listTemplatesSpy.mockResolvedValue({ data: [{ id: 'tpl-7', name: '费用报销' }], total: 1 })
+    await mountView()
+    expect(loadPendingSpy).toHaveBeenCalledTimes(1)
+
+    const select = container!.querySelector<HTMLSelectElement>('[data-testid="approval-template-filter"]')
+    expect(select, 'the template filter select renders').toBeTruthy()
+    select!.value = 'tpl-7'
+    select!.dispatchEvent(new Event('change'))
+    await flushUi()
+
+    expect(loadPendingSpy).toHaveBeenLastCalledWith(expect.objectContaining({
+      templateId: 'tpl-7',
+      page: 1,
+    }))
+
+    const picker = container!.querySelector<HTMLButtonElement>('[data-testid="approval-created-range-filter"]')
+    expect(picker, 'the created-range picker renders').toBeTruthy()
+    picker!.click()
+    await flushUi()
+
+    // Plain YYYY-MM-DD picker days widen to the inclusive day-start/day-end ISO window the
+    // server's `created_at >= / <=` predicate expects — identical to the deep-link convention.
+    expect(loadPendingSpy).toHaveBeenLastCalledWith(expect.objectContaining({
+      templateId: 'tpl-7',
+      createdFrom: '2026-05-01T00:00:00Z',
+      createdTo: '2026-06-30T23:59:59Z',
+      page: 1,
+    }))
+  })
+
+  it('B3-03: a params-only navigation (query change on the mounted instance) re-syncs the filters and explicitly reloads', async () => {
+    await mountView()
+    expect(loadPendingSpy).toHaveBeenCalledTimes(1)
+    expect(loadPendingSpy).toHaveBeenCalledWith(expect.objectContaining({
+      templateId: undefined,
+      createdFrom: undefined,
+      createdTo: undefined,
+    }))
+
+    // The router reuses this instance for /approvals?templateId=... — only the query changes.
+    mockRoute.query = {
+      templateId: 'tpl-42',
+      createdFrom: '2026-05-01T00:00:00Z',
+      createdTo: '2026-06-30T23:59:59Z',
+    }
+    await flushUi()
+
+    expect(loadPendingSpy).toHaveBeenCalledTimes(2)
+    expect(loadPendingSpy).toHaveBeenLastCalledWith(expect.objectContaining({
+      templateId: 'tpl-42',
+      createdFrom: '2026-05-01T00:00:00Z',
+      createdTo: '2026-06-30T23:59:59Z',
+      page: 1,
+    }))
+  })
+
+  it('B3-03: a params-nav to the BARE list (empty query) clears previously deep-linked filters — full sync, not merge', async () => {
+    mockRoute.query = {
+      templateId: 'tpl-88',
+      createdFrom: '2026-05-01T00:00:00Z',
+      createdTo: '2026-06-30T23:59:59Z',
+    }
+    await mountView()
+    expect(loadPendingSpy).toHaveBeenLastCalledWith(expect.objectContaining({ templateId: 'tpl-88' }))
+
+    // e.g. clicking the 审批中心 menu entry while already on the filtered list.
+    mockRoute.query = {}
+    await flushUi()
+
+    expect(loadPendingSpy).toHaveBeenCalledTimes(2)
+    expect(loadPendingSpy).toHaveBeenLastCalledWith(expect.objectContaining({
+      templateId: undefined,
+      createdFrom: undefined,
+      createdTo: undefined,
+      page: 1,
+    }))
+  })
+
+  it('B3-03: the query watcher stays inert while navigating AWAY from approval-list (route-name guard)', async () => {
+    await mountView()
+    expect(loadPendingSpy).toHaveBeenCalledTimes(1)
+
+    // Navigation to another route mutates the global route object BEFORE this instance unmounts.
+    mockRoute.name = 'attendance'
+    mockRoute.query = { section: 'attendance-overview-requests' }
+    await flushUi()
+
+    expect(loadPendingSpy).toHaveBeenCalledTimes(1)
   })
 
   it('renders pending approvals with status tags', async () => {

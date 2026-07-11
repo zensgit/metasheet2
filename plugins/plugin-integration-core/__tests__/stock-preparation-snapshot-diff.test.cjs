@@ -9,6 +9,7 @@ const path = require('node:path')
 const {
   CHANGE_TYPES,
   DIFF_TYPES,
+  BLOCKING_CHANGE_TYPES,
   REVIEW_STATUSES,
   StockPreparationSnapshotDiffError,
   planBomSnapshotDiff,
@@ -187,6 +188,38 @@ function main() {
     StockPreparationSnapshotDiffError,
     'array contract is enforced',
   )
+
+  // W3a: BLOCKING_CHANGE_TYPES is the exported single policy source — frozen, and (currently) the
+  // FULL change-type vocabulary: every single change type alone yields a HELD row; no changes => ready.
+  assert.ok(Object.isFrozen(BLOCKING_CHANGE_TYPES), 'blocking policy array is frozen')
+  assert.deepEqual(
+    [...BLOCKING_CHANGE_TYPES].sort(),
+    Object.values(CHANGE_TYPES).sort(),
+    'blocking policy currently blocks on every change type',
+  )
+  for (const changeType of [CHANGE_TYPES.QUANTITY_CHANGED, CHANGE_TYPES.VERSION_CHANGED, CHANGE_TYPES.UNIT_CHANGED]) {
+    const previousLine = { snapshotLineId: 'bp1', childDrawingNo: 'BLK', childVersion: 'V1', pathKey: '/root/BLK', designQty: 1, designUnit: 'pcs' }
+    const currentLine = { ...previousLine, snapshotLineId: 'bc1' }
+    if (changeType === CHANGE_TYPES.QUANTITY_CHANGED) currentLine.designQty = 2
+    if (changeType === CHANGE_TYPES.VERSION_CHANGED) currentLine.childVersion = 'V2'
+    if (changeType === CHANGE_TYPES.UNIT_CHANGED) currentLine.designUnit = 'kg'
+    const plan = planBomSnapshotDiff({
+      previousSnapshotBatchId: 'bb1',
+      currentSnapshotBatchId: 'bb2',
+      previousLines: [previousLine],
+      currentLines: [currentLine],
+    })
+    const changed = plan.diffs.find((diff) => diff.changeTypes.includes(changeType))
+    assert.ok(changed, `a ${changeType} diff row surfaces`)
+    assert.equal(changed.reviewStatus, REVIEW_STATUSES.HELD, `${changeType} alone holds the row`)
+  }
+  const unchangedPlan = planBomSnapshotDiff({
+    previousSnapshotBatchId: 'bb1',
+    currentSnapshotBatchId: 'bb2',
+    previousLines: [{ snapshotLineId: 'u1', childDrawingNo: 'BLK', childVersion: 'V1', pathKey: '/root/BLK', designQty: 1 }],
+    currentLines: [{ snapshotLineId: 'u2', childDrawingNo: 'BLK', childVersion: 'V1', pathKey: '/root/BLK', designQty: 1 }],
+  })
+  assert.ok(unchangedPlan.diffs.every((diff) => diff.reviewStatus === REVIEW_STATUSES.READY), 'no change types => ready')
 
   console.log('stock-preparation-snapshot-diff.test.cjs OK')
 }

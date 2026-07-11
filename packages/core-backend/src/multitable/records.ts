@@ -1,4 +1,5 @@
 import { randomUUID } from 'crypto'
+import { recordRecordRevision } from './record-history-service'
 
 import {
   acquireAutoNumberSheetWriteLock,
@@ -553,6 +554,21 @@ export async function deleteRecord(
   // be deleted via the SDK (it must be unlocked first through the explicit unlock action).
   await guardRecordNotLockedForPlugin(query, input.sheetId, input.recordId)
 
+  // D-1 (destruction-path gap audit, owner-ratified): read the row BEFORE destroying anything so the
+  // delete revision below can carry the record's final snapshot. PIT/as-of-T existence is derived
+  // PURELY from meta_record_revisions — without a delete revision this path left the record "alive"
+  // in Global History and every PIT consumer forever.
+  const snapshotRes = await query(
+    'SELECT data, version FROM meta_records WHERE id = $1 AND sheet_id = $2',
+    [input.recordId, input.sheetId],
+  )
+  const snapshotRow = (snapshotRes.rows as any[])[0] as { data?: Record<string, unknown>; version?: unknown } | undefined
+
+  // 4c-2 scope boundary (design-lock §8) + D-1 update: this plugin-SDK delete path now EMITS the
+  // delete revision (source:'plugin' — PIT correctness, D-1) but remains intentionally NOT wired to
+  // tombstone-capture or meta_records_trash: the row is still irrecoverable, independent of
+  // MULTITABLE_TOMBSTONE_CAPTURE_ENABLED. Trash+capture parity (recoverability) is the separate
+  // owner-gated D-2 rung, not D-1.
   await query('DELETE FROM meta_links WHERE record_id = $1 OR foreign_record_id = $1', [input.recordId])
 
   // lock-guarded: plugin-SDK deleteRecord (M1) — guardRecordNotLockedForPlugin(actor=null) rejected above.
@@ -566,6 +582,22 @@ export async function deleteRecord(
   if (!row) {
     throw new MultitableRecordNotFoundError(`Record not found: ${input.recordId}`)
   }
+
+  // D-1: emit AFTER the hard delete (this path has no enclosing transaction guarantee): if this INSERT
+  // fails we degrade to today's missing-revision behavior for one record — never the reverse lie of a
+  // delete revision for a row that still exists. Gated on the DELETE having actually removed a row.
+  await recordRecordRevision(query, {
+    sheetId: input.sheetId,
+    recordId: input.recordId,
+    version: Number(row.version ?? 1),
+    action: 'delete',
+    source: 'plugin',
+    actorId: null,
+    changedFieldIds: [],
+    patch: {},
+    snapshot: snapshotRow?.data ?? null,
+  })
+
   return {
     id: input.recordId,
     sheetId: input.sheetId,

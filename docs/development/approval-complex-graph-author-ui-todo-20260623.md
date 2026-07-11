@@ -112,8 +112,8 @@
   pending a concrete scenario).
 - ⚠️ **`joinMode='any'` authoring was listed here / in design-lock §7 as deferred, but G-3 SHIPS it**
   because the empirical backend pre-check (above) shows `'any'` is accepted + runtime-executed; the
-  doc's deferral premise was factually wrong. Re-scoped OUT of "out of scope" — pending owner
-  ratification (see the G-3 PR body). The OTHER parallel limits (nested parallel, editing
+  doc's deferral premise was factually wrong. Re-scoped OUT of "out of scope"; **G-3 已发货（as-built）**，
+  owner 对该 re-scope 的追认仍挂账（owner 菜单项，见 G-3 PR body；2026-07-07 对账标注）. The OTHER parallel limits (nested parallel, editing
   branches/joinNodeKey topology) remain out of scope.
 - ✅ **FOLLOW-UP DONE — cc / condition / parallel config unknown-key fail-closed.**
   `complexNodeConfigHasBackendDrop` generalises the approval shape-check to EVERY node type: cc →

@@ -256,6 +256,12 @@ export interface RecordPatchInput {
    */
   source?: RecordPostCommitContext['source']
   /**
+   * R11 restore back-reference (OD-0=(a)): the SOURCE record-version this patch restored from. Set ONLY by
+   * the three record-version restore routes (which call patchRecords with source='restore'); threaded onto
+   * the resulting revision's `restored_from_version`. Every other caller omits it ⇒ NULL.
+   */
+  restoredFromVersion?: number | null
+  /**
    * AI-fields S1 (LOCK-B1, design-lock `multitable-ai-write-provenance-batch-grouping-s1-designlock-20260705.md`):
    * OPTIONAL commit-action batch grouping seam. Absent (every existing caller) → behavior is
    * BYTE-IDENTICAL to before this seam existed: a fresh `randomUUID()` per `patchRecords` call (LOCK-12,
@@ -652,6 +658,7 @@ export class RecordWriteService {
       sheetScope,
       access,
       source,
+      restoredFromVersion,
       batchId,
       authorizationPreValidated,
     } = input
@@ -994,6 +1001,7 @@ export class RecordWriteService {
           version: nextVersion,
           action: 'update',
           source: source ?? 'rest',
+          restoredFromVersion: restoredFromVersion ?? null,
           actorId,
           changedFieldIds: [...Object.keys(patch), ...unsetIds],
           patch: revisionPatch,

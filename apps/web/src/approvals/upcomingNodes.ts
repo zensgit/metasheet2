@@ -1,4 +1,4 @@
-import type { ApprovalGraph, ApprovalNode } from '../types/approval'
+import type { ApprovalGraph, ApprovalNode , FormSchema } from '../types/approval'
 import { nodeAssigneeSourceSummary } from './assigneeSource'
 
 export interface UpcomingApprovalNode {
@@ -26,7 +26,7 @@ export interface UpcomingApprovalNode {
  * authored/validated as DAGs (see `graphLayout.graphHasCycle`) — so this walk stays safe even
  * against a malformed one.
  */
-export function buildUpcomingNodes(graph: ApprovalGraph, currentNodeKey: string): UpcomingApprovalNode[] {
+export function buildUpcomingNodes(graph: ApprovalGraph, currentNodeKey: string, schema?: FormSchema | null): UpcomingApprovalNode[] {
   const nodesByKey = new Map(graph.nodes.map((node) => [node.key, node]))
   const outgoingByNode = new Map<string, string[]>()
   for (const edge of graph.edges) {
@@ -50,7 +50,7 @@ export function buildUpcomingNodes(graph: ApprovalGraph, currentNodeKey: string)
     result.push({
       key: node.key,
       name: node.name?.trim() || node.key,
-      assigneeSummary: nodeAssigneeSourceSummary(node),
+      assigneeSummary: nodeAssigneeSourceSummary(node, schema),
       isConditional: node.type === 'condition',
     })
     if (node.type === 'end') break

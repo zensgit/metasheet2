@@ -132,6 +132,7 @@
       :source-selector-explanation="sourceSelectorExplanation"
       :selected-plm-approval-capability-entry="selectedPlmApprovalCapabilityEntry"
       :selected-plm-bom-multitable-capability-entry="selectedPlmBomMultitableCapabilityEntry"
+      :selected-plm-bom-eco-intent-enabled="selectedPlmBomEcoIntentEnabled"
       :selected-source-plm-data-source-id="selectedSourcePlmDataSourceId"
       :has-runnable-source-system="hasRunnableSourceSystem"
       :show-staging-setup="showStagingSetup"
@@ -219,467 +220,117 @@
         </template>
 
 
-      <div class="integration-workbench__grid">
-        <label>
-          <span>清洗流程名称</span>
-          <input v-model="pipelineName" data-testid="pipeline-name" :placeholder="generatedPipelineName" />
-          <small class="integration-workbench__field-help" data-testid="pipeline-name-hint">留空自动生成：{{ generatedPipelineName }}；也可以手动改成业务名称。</small>
-          <button type="button" class="integration-workbench__inline-action" data-testid="use-generated-pipeline-name" @click="useGeneratedPipelineName">
-            使用自动名称
-          </button>
-        </label>
-        <label>
-          <span>清洗流程模式</span>
-          <select v-model="pipelineMode" data-testid="pipeline-mode">
-            <option value="manual">manual</option>
-            <option value="incremental">incremental</option>
-            <option value="full">full</option>
-          </select>
-          <small class="integration-workbench__field-help" data-testid="pipeline-mode-help">manual 手工触发；incremental 用水位增量；full 重新扫描来源数据集。</small>
-        </label>
-        <div v-if="showWatermarkConfig" class="integration-workbench__watermark-config" data-testid="watermark-config">
-          <div class="integration-workbench__grid integration-workbench__grid--compact">
-            <label>
-              <span>水位类型</span>
-              <select v-model="watermarkType" data-testid="watermark-type">
-                <option value="updated_at">updated_at</option>
-                <option value="monotonic_id">monotonic_id</option>
-              </select>
-            </label>
-            <label>
-              <span>水位字段</span>
-              <select v-if="hasSourceFieldOptions" v-model="watermarkField" data-testid="watermark-field">
-                <option value="">请选择水位字段</option>
-                <option
-                  v-for="option in sourceFieldOptionsForValue(watermarkField)"
-                  :key="`${option.stale ? 'stale' : 'schema'}:${option.value}`"
-                  :value="option.value"
-                >
-                  {{ sourceFieldOptionText(option) }}
-                </option>
-              </select>
-              <input v-else v-model="watermarkField" data-testid="watermark-field" placeholder="updated_at" />
-            </label>
-            <label v-if="watermarkType === 'updated_at'">
-              <span>并列判别字段</span>
-              <select v-if="hasSourceFieldOptions" v-model="watermarkTiebreaker" data-testid="watermark-tiebreaker">
-                <option value="">请选择 tiebreaker</option>
-                <option
-                  v-for="option in sourceFieldOptionsForValue(watermarkTiebreaker)"
-                  :key="`${option.stale ? 'stale' : 'schema'}:${option.value}`"
-                  :value="option.value"
-                >
-                  {{ sourceFieldOptionText(option) }}
-                </option>
-              </select>
-              <input v-else v-model="watermarkTiebreaker" data-testid="watermark-tiebreaker" placeholder="id" />
-            </label>
-          </div>
-          <p class="integration-workbench__hint" data-testid="watermark-config-help">
-            保存只写入增量读取配置；不读取数据库、不推进水位、不写外部系统。updated_at 对 SQL 只读源必须配置不同的 tiebreaker。
-          </p>
-          <p v-if="watermarkConfigError" class="integration-workbench__hint integration-workbench__hint--strong" data-testid="watermark-config-error">
-            {{ watermarkConfigError }}
-          </p>
-        </div>
-        <label>
-          <span>幂等字段</span>
-          <input v-model="idempotencyFieldsText" data-testid="idempotency-fields" placeholder="code 或 sourceId,revision" />
-          <small class="integration-workbench__field-help" data-testid="idempotency-fields-help">用于识别同一业务记录，避免重复写入；物料通常用 code，BOM 可用 parentCode,childCode,sequence。</small>
-        </label>
-        <label>
-          <span>清洗 staging 表</span>
-          <select v-model="stagingSheetId" data-testid="staging-sheet">
-            <option value="">不绑定 staging 表</option>
-            <option v-for="descriptor in stagingDescriptors" :key="descriptor.id" :value="descriptor.id">
-              {{ descriptor.name }} · {{ descriptor.id }}
-            </option>
-          </select>
-        </label>
-        <label>
-          <span>已保存流程 ID</span>
-          <input v-model="savedPipelineId" data-testid="pipeline-id" placeholder="保存后自动回填，也可粘贴已有 ID" />
-          <small class="integration-workbench__field-help" data-testid="pipeline-id-help">这是后端 pipeline ID。新建时留空，保存成功后自动回填；排障或复跑时可粘贴已有 ID。</small>
-        </label>
-        <label>
-          <span>运行模式</span>
-          <select v-model="pipelineRunMode" data-testid="pipeline-run-mode">
-            <option value="manual">manual</option>
-            <option value="incremental">incremental</option>
-            <option value="full">full</option>
-          </select>
-        </label>
-        <label>
-          <span>Dry-run 样本数</span>
-          <input v-model="pipelineSampleLimit" data-testid="sample-limit" inputmode="numeric" />
-        </label>
-      </div>
+      <IntegrationPipelineRunSection
+        :generated-pipeline-name="generatedPipelineName"
+        :show-watermark-config="showWatermarkConfig"
+        :has-source-field-options="hasSourceFieldOptions"
+        :source-field-options-for-value="sourceFieldOptionsForValue"
+        :source-field-option-text="sourceFieldOptionText"
+        :watermark-config-error="watermarkConfigError"
+        :staging-descriptors="stagingDescriptors"
+        :save-pipeline-blocked-summary="savePipelineBlockedSummary"
+        :dry-run-blocked-summary="dryRunBlockedSummary"
+        :dry-run-readiness-items="dryRunReadinessItems"
+        :running-pipeline="runningPipeline"
+        :can-run-pipeline="canRunPipeline"
+        :dry-run-empty-preview-notice="dryRunEmptyPreviewNotice"
+        :use-generated-pipeline-name="useGeneratedPipelineName"
+        :execute-pipeline="executePipeline"
+        v-model:pipeline-name="pipelineName"
+        v-model:pipeline-mode="pipelineMode"
+        v-model:watermark-type="watermarkType"
+        v-model:watermark-field="watermarkField"
+        v-model:watermark-tiebreaker="watermarkTiebreaker"
+        v-model:idempotency-fields-text="idempotencyFieldsText"
+        v-model:staging-sheet-id="stagingSheetId"
+        v-model:saved-pipeline-id="savedPipelineId"
+        v-model:pipeline-run-mode="pipelineRunMode"
+        v-model:pipeline-sample-limit="pipelineSampleLimit"
+        v-model:allow-save-only-run="allowSaveOnlyRun"
+      />
 
-      <div class="integration-workbench__run-explainer" data-testid="run-push-explainer">
-        <strong>运行时会发生什么</strong>
-        <ul>
-          <li>Dry-run 只读取来源数据并生成目标 payload preview，不写 K3 或其他外部系统。</li>
-          <li>Save-only 只调用目标系统保存接口；默认不 Submit、不 Audit，也不覆盖来源多维表。</li>
-          <li>成功后展示写入数、外部 ID 或单据号；失败会写入 dead letter，可从异常区打开排查。</li>
-          <li>导出清洗结果只使用已脱敏 preview，可用于人工复核或交接。</li>
-        </ul>
-      </div>
+      <IntegrationStockPrepPanel
+        :has-integration-admin="auth.hasPermission('integration:admin')"
+        :stock-preparation-target-running="stockPreparationTargetRunning"
+        :stock-preparation-target-result="stockPreparationTargetResult"
+        :stock-preparation-target-summary="stockPreparationTargetSummary"
+        :stock-preparation-target-metrics="stockPreparationTargetMetrics"
+        :stock-preparation-target-evidence-text="stockPreparationTargetEvidenceText"
+        :check-stock-preparation-target-readiness="checkStockPreparationTargetReadiness"
+        :ensure-stock-preparation-target="ensureStockPreparationTarget"
+        v-model:stock-preparation-target-base-id="stockPreparationTargetBaseId"
+      />
 
-      <label class="integration-workbench__inline-check">
-        <input v-model="allowSaveOnlyRun" type="checkbox" data-testid="allow-save-only-run" />
-        <span>允许本次 Save-only 推送。保持 Submit / Audit 关闭。</span>
-      </label>
+      <IntegrationExternalWritePanel
+        :external-write-can-dry-run="externalWriteCanDryRun"
+        :running-external-write="runningExternalWrite"
+        :external-write-can-apply="externalWriteCanApply"
+        :external-write-dry-run-result="externalWriteDryRunResult"
+        :external-write-review-summary="externalWriteReviewSummary"
+        :external-write-dry-run-metrics="externalWriteDryRunMetrics"
+        :external-write-dry-run-token="externalWriteDryRunToken"
+        :external-write-evidence-text="externalWriteEvidenceText"
+        :external-write-apply-result="externalWriteApplyResult"
+        :external-write-apply-metrics="externalWriteApplyMetrics"
+        :external-write-apply-run-id="externalWriteApplyRunId"
+        :dry-run-external-write="dryRunExternalWrite"
+        :apply-external-write="applyExternalWrite"
+        v-model:external-write-accept-review="externalWriteAcceptReview"
+      />
 
-      <div class="integration-workbench__readiness" data-testid="pipeline-readiness">
-        <div>
-          <strong>保存清洗流程前置条件</strong>
-          <p data-testid="save-readiness-summary">{{ savePipelineBlockedSummary }}</p>
-          <strong>运行前置条件</strong>
-          <p data-testid="dry-run-readiness-summary">{{ dryRunBlockedSummary }}</p>
-        </div>
-        <ul>
-          <li v-for="item in dryRunReadinessItems" :key="item.id" :data-ready="item.ready ? 'true' : 'false'">
-            <span>{{ item.ready ? '已完成' : '待处理' }}</span>
-            <strong>{{ item.label }}</strong>
-            <small>{{ item.detail }}</small>
-          </li>
-        </ul>
-      </div>
+      <IntegrationTableActionsPanel
+        :table-actions="tableActions"
+        :bi="bi"
+        :table-action-option-label="tableActionOptionLabel"
+        :table-action-display-context-items="tableActionDisplayContextItems"
+        :table-action-can-dry-run="tableActionCanDryRun"
+        :running-table-action="runningTableAction"
+        :table-action-can-apply="tableActionCanApply"
+        :table-action-apply-command-label="tableActionApplyCommandLabel"
+        :table-action-dry-run-result="tableActionDryRunResult"
+        :table-action-review-summary="tableActionReviewSummary"
+        :table-action-counts="tableActionCounts"
+        :table-action-large-bom-bounded="tableActionLargeBomBounded"
+        :table-action-bounded-preview-metrics="tableActionBoundedPreviewMetrics"
+        :table-action-bounded-error-types="tableActionBoundedErrorTypes"
+        :table-action-duplicate-diagnostics="tableActionDuplicateDiagnostics"
+        :table-action-duplicate-metrics="tableActionDuplicateMetrics"
+        :table-action-duplicate-policies="tableActionDuplicatePolicies"
+        :table-action-stored-conflict-policy-count="tableActionStoredConflictPolicyCount"
+        :table-action-resolved-duplicate-group-count="tableActionResolvedDuplicateGroupCount"
+        :table-action-held-duplicate-group-count="tableActionHeldDuplicateGroupCount"
+        :table-action-held-reason-metrics="tableActionHeldReasonMetrics"
+        :table-action-duplicate-groups="tableActionDuplicateGroups"
+        :table-action-conflict-policy-saving="tableActionConflictPolicySaving"
+        :table-action-dry-run-token="tableActionDryRunToken"
+        :table-action-manual-confirm-count="tableActionManualConfirmCount"
+        :table-action-apply-result="tableActionApplyResult"
+        :table-action-evidence-text="tableActionEvidenceText"
+        :has-permission="auth.hasPermission"
+        :dry-run-table-action="dryRunTableAction"
+        :apply-table-action="applyTableAction"
+        :on-duplicate-policy-draft-change="onDuplicatePolicyDraftChange"
+        :set-duplicate-run-only-policy="setDuplicateRunOnlyPolicy"
+        :save-duplicate-table-scope-policy="saveDuplicateTableScopePolicy"
+        :revoke-duplicate-table-scope-policy="revokeDuplicateTableScopePolicy"
+        v-model:selected-table-action-id="selectedTableActionId"
+        v-model:table-action-project-no="tableActionProjectNo"
+        v-model:table-action-accept-manual-confirm-hold="tableActionAcceptManualConfirmHold"
+        v-model:table-action-accept-duplicate-resolution="tableActionAcceptDuplicateResolution"
+      />
 
-      <div class="integration-workbench__actions">
-        <button type="button" class="integration-workbench__button" data-testid="run-dry-run" :disabled="runningPipeline !== '' || !canRunPipeline" @click="executePipeline(true)">
-          {{ runningPipeline === 'dry-run' ? 'Dry-run 中' : 'Dry-run' }}
-        </button>
-        <button type="button" class="integration-workbench__button integration-workbench__button--danger" data-testid="run-save-only" :disabled="runningPipeline !== '' || !allowSaveOnlyRun || !canRunPipeline" @click="executePipeline(false)">
-          {{ runningPipeline === 'run' ? '推送中' : 'Save-only 推送' }}
-        </button>
-      </div>
-      <div v-if="dryRunEmptyPreviewNotice" class="integration-workbench__hint integration-workbench__hint--strong" data-testid="dry-run-empty-preview-notice">
-        {{ dryRunEmptyPreviewNotice }}
-      </div>
-
-      <div v-if="auth.hasPermission('integration:admin')" class="integration-workbench__table-action" data-testid="stock-preparation-s1-panel">
-        <div class="integration-workbench__panel-head">
-          <div>
-            <h3>标准备料表 S1</h3>
-            <p>创建或绑定 `plm.stock-preparation.main.v1` 标准备料表，并检查目标 readiness；本步骤只处理元数据。</p>
-          </div>
-          <span class="integration-workbench__badge">admin · metadata-only</span>
-        </div>
-        <div class="integration-workbench__grid integration-workbench__grid--compact">
-          <label>
-            <span>目标 baseId（可选，仅创建/绑定时使用）</span>
-            <input v-model="stockPreparationTargetBaseId" data-testid="stock-preparation-s1-base-id" :disabled="stockPreparationTargetRunning !== ''" placeholder="创建或绑定时可填写目标 baseId；readiness 检查针对已绑定目标，不受此输入影响" />
-          </label>
-        </div>
-        <p class="integration-workbench__hint" data-testid="stock-preparation-s1-boundary">
-          只调用 target readiness / ensure；不读取 PLM，不写业务行，不执行 table action，不触发 Apply，不调用 K3 Save / Submit / Audit / BOM write。
-        </p>
-        <div class="integration-workbench__actions">
-          <button
-            type="button"
-            class="integration-workbench__button"
-            data-testid="stock-preparation-s1-readiness"
-            :disabled="stockPreparationTargetRunning !== ''"
-            @click="checkStockPreparationTargetReadiness"
-          >
-            {{ stockPreparationTargetRunning === 'readiness' ? '检查中' : '检查 readiness' }}
-          </button>
-          <button
-            type="button"
-            class="integration-workbench__button"
-            data-testid="stock-preparation-s1-ensure"
-            :disabled="stockPreparationTargetRunning !== ''"
-            @click="ensureStockPreparationTarget"
-          >
-            {{ stockPreparationTargetRunning === 'ensure' ? '处理中' : '创建或绑定标准表' }}
-          </button>
-        </div>
-        <div v-if="stockPreparationTargetResult" class="integration-workbench__table-action-review" data-testid="stock-preparation-s1-result">
-          <strong>{{ stockPreparationTargetSummary }}</strong>
-          <div class="integration-workbench__metric-row" data-testid="stock-preparation-s1-metrics">
-            <span v-for="metric in stockPreparationTargetMetrics" :key="metric.id">{{ metric.label }} {{ metric.value }}</span>
-          </div>
-          <p class="integration-workbench__hint" data-testid="stock-preparation-s1-token-state">
-            target binding 仅用于当前租户运行时；公开证据只贴 readiness status / mode / counts / missingFields。
-          </p>
-          <pre v-if="stockPreparationTargetEvidenceText" data-testid="stock-preparation-s1-evidence">{{ stockPreparationTargetEvidenceText }}</pre>
-        </div>
-      </div>
-
-      <div class="integration-workbench__table-action" data-testid="external-write-panel">
-        <div class="integration-workbench__panel-head">
-          <div>
-            <h3>外部写入 C6</h3>
-            <p>先 dry-run 复核计数，再用一次性 token apply；浏览器不提供 source、target、plan、payload 或 sheet scope。</p>
-          </div>
-          <span class="integration-workbench__badge" data-testid="external-write-permission-note">dry-run=read · apply=write/admin</span>
-        </div>
-        <p class="integration-workbench__hint" data-testid="external-write-boundary">
-          仅展示 status/count/error token；dry-run token 只保存在内存中，不显示、不复制到证据。
-        </p>
-        <div class="integration-workbench__actions">
-          <button
-            type="button"
-            class="integration-workbench__button"
-            data-testid="external-write-dry-run"
-            :disabled="!externalWriteCanDryRun"
-            @click="dryRunExternalWrite"
-          >
-            {{ runningExternalWrite === 'dry-run' ? '外部写 dry-run 中' : '外部写 dry-run' }}
-          </button>
-          <button
-            type="button"
-            class="integration-workbench__button integration-workbench__button--danger"
-            data-testid="external-write-apply"
-            :disabled="!externalWriteCanApply"
-            @click="applyExternalWrite"
-          >
-            {{ runningExternalWrite === 'apply' ? '外部写 apply 中' : 'Apply external write' }}
-          </button>
-        </div>
-        <div v-if="externalWriteDryRunResult" class="integration-workbench__table-action-review" data-testid="external-write-review">
-          <strong>{{ externalWriteReviewSummary }}</strong>
-          <div class="integration-workbench__metric-row">
-            <span v-for="metric in externalWriteDryRunMetrics" :key="metric.id">{{ metric.label }} {{ metric.value }}</span>
-          </div>
-          <p class="integration-workbench__hint" data-testid="external-write-token-state">
-            {{ externalWriteDryRunToken ? 'token 已签发（隐藏）' : '未签发可 apply token' }}
-          </p>
-          <label class="integration-workbench__inline-check">
-            <input v-model="externalWriteAcceptReview" type="checkbox" data-testid="external-write-accept-review" />
-            <span>我已复核 dry-run counts / status / error token；apply 将使用本次 dry-run token，服务端会重新计算并校验 revision。</span>
-          </label>
-          <pre v-if="externalWriteEvidenceText" data-testid="external-write-evidence">{{ externalWriteEvidenceText }}</pre>
-        </div>
-        <div v-if="externalWriteApplyResult" class="integration-workbench__table-action-review" data-testid="external-write-apply-result">
-          <strong>apply {{ externalWriteApplyResult.status || 'unknown' }}</strong>
-          <div class="integration-workbench__metric-row">
-            <span v-for="metric in externalWriteApplyMetrics" :key="metric.id">{{ metric.label }} {{ metric.value }}</span>
-          </div>
-          <p v-if="externalWriteApplyRunId" class="integration-workbench__hint">run {{ externalWriteApplyRunId }}</p>
-        </div>
-      </div>
-
-      <div class="integration-workbench__table-action" data-testid="table-action-panel">
-        <div class="integration-workbench__panel-head">
-          <div>
-            <h3>参数化表动作</h3>
-            <p>面向已由管理员配置的安全动作。浏览器只填写 allowlist 参数；来源、目标表和写入计划由服务端决定。</p>
-          </div>
-          <span class="integration-workbench__badge" data-testid="table-action-permission-note">dry-run=read · apply=write/admin</span>
-        </div>
-        <div v-if="tableActions.length === 0" class="integration-workbench__empty" data-testid="table-action-empty">
-          <strong data-testid="table-action-empty-what">{{ bi(
-            '参数化表动作是管理员预先配置好的安全写入操作，浏览器只填 allowlist 参数，来源/目标由服务端决定。',
-            'Parameterized table actions are safe write operations pre-configured by an admin — the browser only fills allowlisted parameters; source/target are decided server-side.',
-          ) }}</strong>
-          <p data-testid="table-action-empty-first-step">{{ bi(
-            '当前部署没有暴露表动作；如需要，请联系管理员在后端配置。',
-            'This deployment does not expose any table actions; contact an admin to configure one on the backend if needed.',
-          ) }}</p>
-        </div>
-        <template v-else>
-          <div class="integration-workbench__grid integration-workbench__grid--compact">
-            <label>
-              <span>动作</span>
-              <select v-model="selectedTableActionId" data-testid="table-action-id">
-                <option v-for="action in tableActions" :key="action.actionId" :value="action.actionId">
-                  {{ tableActionOptionLabel(action) }} · {{ action.configured ? '已配置' : '未配置' }}
-                </option>
-              </select>
-            </label>
-            <label>
-              <span>项目号 projectNo</span>
-              <input v-model="tableActionProjectNo" data-testid="table-action-project-no" placeholder="例如 P2026-001" />
-            </label>
-          </div>
-          <p class="integration-workbench__hint" data-testid="table-action-boundary">
-            不提供 raw SQL、source/object、sheetId、C3 plan 或 C4 payload 输入；apply 会用 dry-run token 触发服务端重新计算。
-          </p>
-          <p v-if="tableActionDisplayContextItems.length" class="integration-workbench__hint" data-testid="table-action-display-context">
-            {{ tableActionDisplayContextItems.join(' · ') }}
-          </p>
-          <div class="integration-workbench__actions">
-            <button
-              type="button"
-              class="integration-workbench__button"
-              data-testid="table-action-dry-run"
-              :disabled="!tableActionCanDryRun"
-              @click="dryRunTableAction"
-            >
-              {{ runningTableAction === 'dry-run' ? 'Dry-run 中' : 'Dry-run 表动作' }}
-            </button>
-            <button
-              type="button"
-              class="integration-workbench__button integration-workbench__button--danger"
-              data-testid="table-action-apply"
-              :disabled="!tableActionCanApply"
-              @click="applyTableAction"
-            >
-              {{ runningTableAction === 'apply' ? 'Apply 中' : tableActionApplyCommandLabel }}
-            </button>
-          </div>
-          <div v-if="tableActionDryRunResult" class="integration-workbench__table-action-review" data-testid="table-action-review">
-            <strong>{{ tableActionReviewSummary }}</strong>
-            <div class="integration-workbench__metric-row">
-              <span>add {{ tableActionCounts.add || 0 }}</span>
-              <span>update {{ tableActionCounts.update || 0 }}</span>
-              <span>skip {{ tableActionCounts.skip || 0 }}</span>
-              <span>inactive {{ tableActionCounts.inactive || 0 }}</span>
-              <span>manual {{ tableActionCounts.manual_confirm || 0 }}</span>
-            </div>
-            <div v-if="tableActionLargeBomBounded" class="integration-workbench__bounded-preview" data-testid="table-action-large-bom-bounded">
-              <div>
-                <strong>大 BOM 有界预览</strong>
-                <span class="integration-workbench__badge" data-status="error">Apply blocked</span>
-              </div>
-              <p>本次只展开了有界子集，冲突/重复计数不是完整计划；不会签发 dry-run token。</p>
-              <div class="integration-workbench__metric-row">
-                <span v-for="metric in tableActionBoundedPreviewMetrics" :key="metric.id">{{ metric.label }} {{ metric.value }}</span>
-              </div>
-              <p v-if="tableActionBoundedErrorTypes.length" class="integration-workbench__hint">
-                errorTypes: {{ tableActionBoundedErrorTypes.join(', ') }}
-              </p>
-            </div>
-            <div v-if="tableActionDuplicateDiagnostics" class="integration-workbench__bounded-preview" data-testid="table-action-duplicate-diagnostics">
-              <div>
-                <strong>重复行分组待处理</strong>
-                <span class="integration-workbench__badge" data-status="warning">manual_confirm</span>
-              </div>
-              <p>重复行策略只在 fresh dry-run evidence 中生效；已解决的分组仍需本次显式确认后才能 apply，未解决分组保持不写。</p>
-              <div class="integration-workbench__metric-row">
-                <span v-for="metric in tableActionDuplicateMetrics" :key="metric.id">{{ metric.label }} {{ metric.value }}</span>
-              </div>
-              <p v-if="tableActionDuplicatePolicies.length" class="integration-workbench__hint">
-                policies: {{ tableActionDuplicatePolicies.join(', ') }}
-              </p>
-              <p class="integration-workbench__hint" data-testid="table-action-duplicate-policy-scope">
-                本表已保存策略 {{ tableActionStoredConflictPolicyCount }} 条；本次 dry-run 已解决 {{ tableActionResolvedDuplicateGroupCount }} 组，仍 hold {{ tableActionHeldDuplicateGroupCount }} 组；未选择时默认 hold。
-              </p>
-              <div v-if="tableActionHeldReasonMetrics.length" class="integration-workbench__metric-row" data-testid="table-action-held-reason-summary">
-                <span v-for="metric in tableActionHeldReasonMetrics" :key="metric.id">heldReason {{ metric.label }} {{ metric.value }}</span>
-              </div>
-              <ul v-if="tableActionDuplicateGroups.length" class="integration-workbench__mini-list">
-                <li v-for="group in tableActionDuplicateGroups" :key="group.fingerprint">
-                  <div>
-                    #{{ group.ordinal }} {{ group.fingerprint }} · rows {{ group.rowCount }} · {{ group.parentShape }} · quantity {{ group.quantityShape }} · attrs {{ group.attributeShape }} · stable {{ group.stableDiscriminator }}
-                  </div>
-                  <div class="integration-workbench__connection-row">
-                    <label class="integration-workbench__inline-field">
-                      <span>策略</span>
-                      <select
-                        :value="group.draftPolicy"
-                        data-testid="table-action-duplicate-policy-select"
-                        @change="onDuplicatePolicyDraftChange(group.fingerprint, $event)"
-                      >
-                        <option v-for="policy in tableActionDuplicatePolicies" :key="policy" :value="policy">
-                          {{ policy }}
-                        </option>
-                      </select>
-                    </label>
-                    <span class="integration-workbench__hint">当前 {{ group.currentPolicy }} · {{ group.currentScope }} · {{ group.resolutionLabel }}</span>
-                    <button
-                      type="button"
-                      class="integration-workbench__button"
-                      data-testid="table-action-duplicate-run-only"
-                      @click="setDuplicateRunOnlyPolicy(group)"
-                    >
-                      只此次有效
-                    </button>
-                    <button
-                      v-if="auth.hasPermission('integration:admin')"
-                      type="button"
-                      class="integration-workbench__button"
-                      data-testid="table-action-duplicate-table-save"
-                      :disabled="tableActionConflictPolicySaving === group.fingerprint"
-                      @click="saveDuplicateTableScopePolicy(group)"
-                    >
-                      保存为本表策略
-                    </button>
-                    <button
-                      v-if="auth.hasPermission('integration:admin')"
-                      type="button"
-                      class="integration-workbench__button"
-                      data-testid="table-action-duplicate-table-revoke"
-                      :disabled="tableActionConflictPolicySaving === group.fingerprint"
-                      @click="revokeDuplicateTableScopePolicy(group)"
-                    >
-                      撤销本表策略
-                    </button>
-                  </div>
-                </li>
-              </ul>
-            </div>
-            <p class="integration-workbench__hint" data-testid="table-action-token-state">
-              {{ tableActionDryRunToken ? 'dry-run token 已签发；token 仅保存在当前页面内存，不展示、不复制到 evidence。' : '本次 dry-run 不可 apply；请处理失败项后重跑。' }}
-            </p>
-            <label v-if="tableActionManualConfirmCount > 0" class="integration-workbench__inline-check">
-              <input v-model="tableActionAcceptManualConfirmHold" type="checkbox" data-testid="table-action-accept-manual-hold" />
-              <span>确认 manual_confirm 行保持不写，只应用 clean add/update/inactive 决策。</span>
-            </label>
-            <label v-if="tableActionResolvedDuplicateGroupCount > 0" class="integration-workbench__inline-check">
-              <input v-model="tableActionAcceptDuplicateResolution" type="checkbox" data-testid="table-action-accept-duplicate-resolution" />
-              <span>确认已复核本次自动解决的重复分组，只应用 dry-run evidence 中列出的解决结果。</span>
-            </label>
-          </div>
-          <div v-if="tableActionApplyResult" class="integration-workbench__table-action-review" data-testid="table-action-apply-result">
-            <strong>apply {{ tableActionApplyResult.status }}</strong>
-            <p class="integration-workbench__hint">已消费 dry-run token；如需再次 apply，必须重新 dry-run。</p>
-          </div>
-          <pre v-if="tableActionEvidenceText" data-testid="table-action-evidence">{{ tableActionEvidenceText }}</pre>
-          <p class="integration-workbench__hint">Issue / 客户证据只粘贴 values-free summary counts、status、error code；不要粘贴 PLM 行、备料表值或 payload。</p>
-        </template>
-      </div>
-
-      <div v-if="auth.hasPermission('integration:admin')" class="integration-workbench__table-action" data-testid="stock-option-sync-panel">
-        <div class="integration-workbench__panel-head">
-          <div>
-            <h3>字段选项同步</h3>
-            <p>管理员按预设把 select/dropdown 字段选项元数据写入对应字段；只改字段定义，不写业务行。</p>
-          </div>
-          <span class="integration-workbench__badge">admin · metadata-only</span>
-        </div>
-        <label class="integration-workbench__inline-field">
-          <span>同步预设</span>
-          <select v-model="fieldOptionSyncPresetId" data-testid="field-options-preset">
-            <option v-for="preset in fieldOptionSyncPresets" :key="preset.presetId" :value="preset.presetId">
-              {{ preset.label }}
-            </option>
-          </select>
-        </label>
-        <label>
-          <span>optionSets JSON</span>
-          <textarea
-            v-model="stockPreparationOptionSyncText"
-            data-testid="stock-option-sync-json"
-            rows="8"
-            :placeholder="stockPreparationOptionSyncPlaceholder"
-          />
-        </label>
-        <p class="integration-workbench__hint" data-testid="stock-option-sync-boundary">
-          这里只写字段选项元数据；不执行动作，不接受 SQL/JS/URL/function body，不写 PLM/K3/业务行。带 actionBindings 的选项走备料兼容路径（动作绑定泛化待 FOS-4）。
-        </p>
-        <div class="integration-workbench__actions">
-          <button
-            type="button"
-            class="integration-workbench__button"
-            data-testid="field-options-sync-run"
-            :disabled="!stockPreparationOptionSyncCanRun"
-            @click="syncFieldOptions"
-          >
-            {{ syncingStockPreparationOptions ? '同步中' : '同步字段选项' }}
-          </button>
-        </div>
-        <p
-          v-if="fieldOptionSyncPathNote"
-          class="integration-workbench__hint"
-          data-testid="field-options-sync-path"
-        >
-          {{ fieldOptionSyncPathNote }}
-        </p>
-        <pre v-if="stockPreparationOptionSyncEvidenceText" data-testid="stock-option-sync-evidence">{{ stockPreparationOptionSyncEvidenceText }}</pre>
-      </div>
+      <IntegrationFieldOptionSyncPanel
+        :has-integration-admin="auth.hasPermission('integration:admin')"
+        :field-option-sync-presets="fieldOptionSyncPresets"
+        :stock-preparation-option-sync-placeholder="stockPreparationOptionSyncPlaceholder"
+        :stock-preparation-option-sync-can-run="stockPreparationOptionSyncCanRun"
+        :syncing-stock-preparation-options="syncingStockPreparationOptions"
+        :field-option-sync-path-note="fieldOptionSyncPathNote"
+        :stock-preparation-option-sync-evidence-text="stockPreparationOptionSyncEvidenceText"
+        :sync-field-options="syncFieldOptions"
+        v-model:field-option-sync-preset-id="fieldOptionSyncPresetId"
+        v-model:stock-preparation-option-sync-text="stockPreparationOptionSyncText"
+      />
 
       <div class="integration-workbench__export">
         <div>
@@ -758,6 +409,11 @@
       v-model:payload-template-text="payloadTemplateText"
       v-model:authored-field-rules="authoredFieldRules"
     />
+
+    <!-- BA-UI-1 (docs/development/bridge-agent-admin-page-design-lock-20260707.md): read-only
+         Bridge Agent observability. Self-contained section (owns its own service calls to the three
+         existing read-only generic routes); the view only hands down the shared systems list + scope. -->
+    <IntegrationBridgeAgentSection :systems="systems" :scope="currentScope()" />
         </div>
       </div>
     </section>
@@ -856,6 +512,12 @@ import IntegrationMappingRulesSection from '../components/integration/Integratio
 import IntegrationObjectTemplateSection from '../components/integration/IntegrationObjectTemplateSection.vue'
 import IntegrationPayloadPreviewSection from '../components/integration/IntegrationPayloadPreviewSection.vue'
 import IntegrationConnectionSection from '../components/integration/IntegrationConnectionSection.vue'
+import IntegrationBridgeAgentSection from '../components/integration/IntegrationBridgeAgentSection.vue'
+import IntegrationPipelineRunSection from '../components/integration/IntegrationPipelineRunSection.vue'
+import IntegrationStockPrepPanel from '../components/integration/IntegrationStockPrepPanel.vue'
+import IntegrationExternalWritePanel from '../components/integration/IntegrationExternalWritePanel.vue'
+import IntegrationTableActionsPanel from '../components/integration/IntegrationTableActionsPanel.vue'
+import IntegrationFieldOptionSyncPanel from '../components/integration/IntegrationFieldOptionSyncPanel.vue'
 
 type WorkbenchSide = 'source' | 'target'
 type TransformFn = '' | 'trim' | 'upper' | 'lower' | 'toNumber' | 'dictMap'
@@ -996,6 +658,10 @@ const railGroups = computed<IntegrationWorkbenchRailGroup[]>(() => [
   { id: 'cleaning-mapping', label: bi('清洗映射', 'Cleansing & Mapping'), targetId: 'int-sec-object-template' },
   { id: 'run-push', label: bi('运行与推送', 'Run & Push'), targetId: 'int-sec-run-push' },
   { id: 'monitoring', label: bi('监控与死信', 'Monitoring & Dead Letters'), targetId: 'int-sec-monitoring' },
+  // BA-UI-1 (docs/development/bridge-agent-admin-page-design-lock-20260707.md): 7th rail group —
+  // ADD-ONLY extension of the IU-2a six (the design-lock says the observability page rides the
+  // IU-2 skeleton as a new section, not a separate shell).
+  { id: 'bridge-agent', label: bi('Bridge Agent 观测', 'Bridge Agent'), targetId: 'int-sec-bridge-agent' },
 ])
 
 const sectionGroupIds: Record<string, string> = {
@@ -1009,6 +675,7 @@ const sectionGroupIds: Record<string, string> = {
   'int-sec-run-push': 'run-push',
   'int-sec-monitoring': 'monitoring',
   'int-sec-preview': 'cleaning-mapping',
+  'int-sec-bridge-agent': 'bridge-agent',
 }
 
 const activeRailGroupId = ref('connection')
@@ -1517,6 +1184,19 @@ const selectedBomMultitableFeature = computed<PlmIntegrationCapabilityFeature | 
   if (!result?.available) return null
   const feature = result.manifest.features[PLM_BOM_MULTITABLE_FEATURE_KEY]
   return feature && typeof feature === 'object' ? feature : null
+})
+// ECO Phase 3: advisory pre-gate for the locked-BOM ECO-revision CTA. True iff the provider's
+// capabilities manifest advertises bom_eco_revision as supported + entitled AND its actions
+// include eco_revision_intent (Phase-0 Lock 3: availability discovery is the advisory, never
+// the error payload). Advisory only — the relay + provider re-gate authoritatively.
+const selectedPlmBomEcoIntentEnabled = computed<boolean>(() => {
+  const result = selectedSourcePlmCapabilities.value
+  if (!result?.available) return false
+  const feature = result.manifest.features.bom_eco_revision
+  if (!feature || typeof feature !== 'object') return false
+  if (feature.supported !== true || feature.entitled !== true) return false
+  const actions = Array.isArray(feature.actions) ? feature.actions : []
+  return actions.includes('eco_revision_intent')
 })
 const selectedPlmBomMultitableCapabilityEntry = computed<PlmBomCapabilityEntry | null>(() => {
   if (!selectedSourcePlmDataSourceId.value) return null

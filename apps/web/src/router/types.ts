@@ -98,6 +98,7 @@ export const AppRouteNames = {
   ADMIN_LOGS: 'admin-logs',
   INTEGRATION_WORKBENCH: 'integration-workbench',
   INTEGRATION_K3_WISE: 'integration-k3-wise',
+  INTEGRATION_STOCK_PREPARATION: 'integration-stock-preparation',
 
   // Error routes
   NOT_FOUND: 'not-found',
@@ -172,6 +173,7 @@ export interface AppRouteParams {
   'admin-logs': Record<string, never>
   'integration-workbench': Record<string, never>
   'integration-k3-wise': Record<string, never>
+  'integration-stock-preparation': Record<string, never>
   'not-found': Record<string, never>
   'forbidden': Record<string, never>
   'server-error': Record<string, never>

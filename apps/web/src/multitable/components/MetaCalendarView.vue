@@ -11,10 +11,10 @@
 
     <template v-else>
       <div class="meta-calendar__header">
-        <button class="meta-calendar__nav-btn" @click="goPrevious">&lsaquo;</button>
+        <MtIconButton class="meta-calendar__nav-btn" @click="goPrevious">&lsaquo;</MtIconButton>
         <span class="meta-calendar__title">{{ periodLabel }}</span>
-        <button class="meta-calendar__nav-btn" @click="goNext">&rsaquo;</button>
-        <button class="meta-calendar__today-btn" @click="goToday">{{ viewRenderLabel('calendar.today', isZh) }}</button>
+        <MtIconButton class="meta-calendar__nav-btn" @click="goNext">&rsaquo;</MtIconButton>
+        <MtButton variant="ghost" class="meta-calendar__today-btn" @click="goToday">{{ viewRenderLabel('calendar.today', isZh) }}</MtButton>
         <button v-if="canCreate" class="meta-calendar__create-btn" @click="onQuickCreate">{{ viewRenderLabel('common.addRecord', isZh) }}</button>
         <label class="meta-calendar__mode-label">
           {{ viewRenderLabel('calendar.view', isZh) }}
@@ -26,7 +26,7 @@
         </label>
         <span class="meta-calendar__field-label">
           {{ isZh ? '字段：' : 'Field:' }} <strong>{{ dateField.name }}</strong>
-          <button v-if="dateField" class="meta-calendar__change-btn" @click="onResetDateField">{{ viewRenderLabel('calendar.change', isZh) }}</button>
+          <MtButton v-if="dateField" variant="ghost" class="meta-calendar__change-btn" @click="onResetDateField">{{ viewRenderLabel('calendar.change', isZh) }}</MtButton>
         </span>
       </div>
       <div v-if="calendarHolidayNotice" class="meta-calendar__notice" role="status">
@@ -370,6 +370,7 @@ import {
 import MetaAttachmentList from './MetaAttachmentList.vue'
 import MetaCommentActionChip from './MetaCommentActionChip.vue'
 import MetaCommentAffordance from './MetaCommentAffordance.vue'
+import { MtButton, MtIconButton } from '../ui'
 import { useLocale } from '../../composables/useLocale'
 import {
   handleCommentAffordanceKeydown,
@@ -878,19 +879,21 @@ function onCellKeydown(e: KeyboardEvent, cellIdx: number, cells: CalendarCell[])
 .meta-calendar__picker-icon { font-size: 36px; opacity: 0.5; }
 .meta-calendar__field-select { padding: 6px 12px; border: 1px solid #ddd; border-radius: 4px; font-size: 13px; }
 .meta-calendar__header { display: flex; align-items: center; gap: 8px; padding: 10px 16px; border-bottom: 1px solid #eee; flex-wrap: wrap; }
-.meta-calendar__nav-btn { width: 28px; height: 28px; border: 1px solid #ddd; border-radius: 4px; background: #fff; cursor: pointer; font-size: 16px; display: flex; align-items: center; justify-content: center; }
-.meta-calendar__nav-btn:hover { background: #f5f5f5; }
+/* .meta-calendar__nav-btn: prev/next now render as <MtIconButton> (ghost, token-styled; the &lsaquo;/
+   &rsaquo; glyphs pass through its default-slot icon fallback unchanged). Bespoke hardcoded CSS removed
+   (UI-P2-1c batch6). Class kept on the element only for selector stability. */
 .meta-calendar__title { font-size: 15px; font-weight: 600; color: #333; min-width: 160px; text-align: center; }
-.meta-calendar__today-btn,
+/* .meta-calendar__today-btn: now <MtButton variant="ghost"> (token-styled); bespoke CSS removed
+   (UI-P2-1c batch6). create-btn/day-create stay bespoke — same visual family, but "create" affordances
+   are held pending an owner variant call (see the T2 soft-tinted-create tail lock); not migrated here. */
 .meta-calendar__create-btn,
 .meta-calendar__day-create { padding: 3px 10px; border: 1px solid #ddd; border-radius: 4px; background: #fff; cursor: pointer; font-size: 12px; color: #409eff; }
-.meta-calendar__today-btn:hover,
 .meta-calendar__create-btn:hover,
 .meta-calendar__day-create:hover { background: #ecf5ff; }
 .meta-calendar__mode-label { display: flex; align-items: center; gap: 6px; font-size: 12px; color: #64748b; }
 .meta-calendar__mode-select { padding: 4px 8px; border: 1px solid #ddd; border-radius: 4px; font-size: 12px; }
 .meta-calendar__field-label { margin-left: auto; font-size: 12px; color: #999; }
-.meta-calendar__change-btn { padding: 1px 6px; border: 1px solid #ddd; border-radius: 3px; background: #fff; cursor: pointer; font-size: 11px; color: #409eff; margin-left: 4px; }
+/* .meta-calendar__change-btn: now <MtButton variant="ghost">; bespoke CSS removed (UI-P2-1c batch6). */
 .meta-calendar__notice { margin: 8px 16px 0; padding: 6px 10px; border: 1px solid #fde68a; border-radius: 6px; background: #fffbeb; color: #92400e; font-size: 12px; line-height: 1.45; }
 .meta-calendar__weekdays { display: grid; grid-template-columns: repeat(7, 1fr); border-bottom: 1px solid #eee; }
 .meta-calendar__weekday { padding: 6px 0; text-align: center; font-size: 12px; font-weight: 600; color: #999; }

@@ -20,22 +20,21 @@
     <div class="meta-template-card__actions">
       <!-- S2: opt-in detail entry (template center only); other consumers
            (home view, workbench modal) keep the install-only card. -->
-      <button
+      <MtButton
         v-if="showDetail"
-        type="button"
         class="meta-template-card__detail"
         @click="emit('detail', template)"
       >
         {{ workbenchLabel('card.viewDetail', isZh) }}
-      </button>
-      <button
-        type="button"
+      </MtButton>
+      <MtButton
+        variant="primary"
         class="meta-template-card__install"
         :disabled="installing"
         @click="emit('install', template)"
       >
         {{ installing ? workbenchLabel('card.installing', isZh) : workbenchLabel('card.install', isZh) }}
-      </button>
+      </MtButton>
     </div>
   </article>
 </template>
@@ -51,6 +50,7 @@ import {
   cardViews,
   workbenchLabel,
 } from '../utils/workbench-labels'
+import { MtButton } from '../ui'
 
 const props = defineProps<{
   template: MetaTemplate
@@ -145,40 +145,12 @@ const viewCount = computed(() => {
   gap: 0.5rem;
 }
 
-.meta-template-card__detail {
-  border: 1px solid #cbd5e1;
-  background: #ffffff;
-  color: #0f172a;
-  border-radius: 8px;
-  padding: 0.5rem 1rem;
-  font-size: 0.875rem;
-  font-weight: 600;
-  cursor: pointer;
-}
-
-.meta-template-card__detail:hover {
-  border-color: #94a3b8;
-}
-
+/* .meta-template-card__detail / __install: the two action controls are now <MtButton> (detail = ghost,
+   install = variant="primary"; the bespoke #2563eb == --ms-color-primary). Their bespoke hardcoded-hex
+   button CSS was removed to avoid double-styling the MtButton root. Only the install control's LAYOUT
+   property (flex: it stretches to fill the actions row) is kept — MtButton doesn't provide it. Classes
+   kept for selector stability. */
 .meta-template-card__install {
   flex: 1 1 auto;
-  border: 1px solid #2563eb;
-  background: #2563eb;
-  color: #ffffff;
-  border-radius: 8px;
-  padding: 0.5rem 1rem;
-  font-size: 0.875rem;
-  font-weight: 600;
-  cursor: pointer;
-}
-
-.meta-template-card__install:disabled {
-  opacity: 0.6;
-  cursor: progress;
-}
-
-.meta-template-card__install:hover:not(:disabled) {
-  background: #1d4ed8;
-  border-color: #1d4ed8;
 }
 </style>

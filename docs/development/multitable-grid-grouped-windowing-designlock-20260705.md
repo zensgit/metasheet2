@@ -1,8 +1,8 @@
-# Multitable grid — GROUPED-path row windowing — DESIGN LOCK (PROPOSED)
+# Multitable grid — GROUPED-path row windowing — DESIGN LOCK (RATIFIED · runtime shipped #3648)
 
-- **Status**: PROPOSED — awaiting owner ratification. Docs-only PR; no runtime code ships here.
+- **Status**: RATIFIED (owner, 2026-07-09) · **runtime SHIPPED via #3648**. Reconciliation note: this lock's own PR (#3591) was genuinely docs-only ("no runtime code ships *here*" was accurate for that PR), but the grouped-windowing runtime this lock specifies has since landed on `main` (**#3648**, `4c376b8e4`, merged 2026-07-05) and is live. This header + §8 previously still read "PROPOSED / awaiting ratification / runtime locked" — pure doc-staleness, corrected here to match the ratified-and-shipped reality (owner directed, 2026-07-09; no runtime rollback).
 - **Provenance**: this is the design-lock the measure-first baseline (`docs/development/multitable-grid-perf-baseline-20260705.md`, PR #3582, squash `b891780bd`, merged 2026-07-05) called for. The flat-path half of audit gap Tier-B #4 shipped long ago (PR #3008, `085ce92be`, 2026-06-22); this lock covers the remaining half the baseline isolated: **the grouped rendering path has no windowing at all**.
-- **Change surface when implemented** (single runtime PR after ratification): `apps/web/src/multitable/components/MetaGridTable.vue` only (grouped `<tbody>` branch + new windowing computeds + two spacer rows), plus tests. **No backend change, no API change, no data-shape change, no new env flag.**
+- **Change surface (SHIPPED in #3648)**: `apps/web/src/multitable/components/MetaGridTable.vue` only (grouped `<tbody>` branch renders `windowedGroupRenderItems`, `groupedWindowEnabled` activates at the `VIRTUALIZE_MIN_ROWS` count-threshold, + two spacer rows), plus tests. **No backend change, no API change, no data-shape change, no new env flag** (as designed).
 
 ## §1 Problem — verified against code, with one honest reframing of the baseline
 
@@ -73,7 +73,7 @@ Grouped-mode infinite-scroll accumulation (pager → load-more parity with flat 
 
 ## §8 Arc ledger
 
-- ⬜ **GW-lock** (this doc) — awaiting ratification
-- 🔒 **GW-runtime** — implement §2–§5 in `MetaGridTable.vue` + flip the baseline grouped test + Playwright before/after (single PR, after ratification)
+- ✅ **GW-lock** (this doc) — **RATIFIED** (owner, 2026-07-09)
+- ✅ **GW-runtime** — **SHIPPED via #3648** (`4c376b8e4`, merged 2026-07-05): grouped `<tbody>` renders `windowedGroupRenderItems`, `groupedWindowEnabled` gated at the `VIRTUALIZE_MIN_ROWS` count-threshold with no env flag; §2–§5 implemented, baseline grouped test flipped
 - 🔒 **Grouped infinite-scroll accumulation** (separate design first; unblocked by GW-runtime)
 - 🔒 **Server-side grouping / cross-page group coalescing** (data-model slice, independent)

@@ -117,9 +117,9 @@
       </div>
     </div>
     <div v-if="totalPages > 1" class="meta-gallery__pagination">
-      <button class="meta-gallery__page-btn" :disabled="currentPage <= 1" @click="emit('go-to-page', currentPage - 1)">&lsaquo; {{ viewRenderLabel('gallery.prev', isZh) }}</button>
+      <MtButton variant="ghost" class="meta-gallery__page-btn" :disabled="currentPage <= 1" @click="emit('go-to-page', currentPage - 1)">&lsaquo; {{ viewRenderLabel('gallery.prev', isZh) }}</MtButton>
       <span class="meta-gallery__page-info">{{ currentPage }} / {{ totalPages }}</span>
-      <button class="meta-gallery__page-btn" :disabled="currentPage >= totalPages" @click="emit('go-to-page', currentPage + 1)">{{ viewRenderLabel('gallery.next', isZh) }} &rsaquo;</button>
+      <MtButton variant="ghost" class="meta-gallery__page-btn" :disabled="currentPage >= totalPages" @click="emit('go-to-page', currentPage + 1)">{{ viewRenderLabel('gallery.next', isZh) }} &rsaquo;</MtButton>
     </div>
     <div v-if="loading" class="meta-gallery__loading">{{ viewRenderLabel('common.loading', isZh) }}</div>
   </div>
@@ -134,6 +134,7 @@ import { useLocale } from '../../composables/useLocale'
 import MetaAttachmentList from './MetaAttachmentList.vue'
 import MetaCommentActionChip from './MetaCommentActionChip.vue'
 import MetaCommentAffordance from './MetaCommentAffordance.vue'
+import { MtButton } from '../ui'
 import {
   handleCommentAffordanceKeydown,
   resolveCommentAffordanceStateClass,
@@ -439,9 +440,8 @@ function getColumnsCount(): number {
 .meta-gallery__empty-action { margin-top: 12px; padding: 8px 14px; border: 1px solid #c7ddff; border-radius: 6px; background: #ecf5ff; color: #2563eb; font-size: 12px; cursor: pointer; }
 .meta-gallery__empty-action:hover { background: #dbeafe; }
 .meta-gallery__pagination { display: flex; align-items: center; justify-content: center; gap: 12px; padding: 8px; border-top: 1px solid #e5e7eb; }
-.meta-gallery__page-btn { padding: 4px 12px; border: 1px solid #ddd; border-radius: 3px; background: #fff; cursor: pointer; font-size: 12px; }
-.meta-gallery__page-btn:hover:not(:disabled) { background: #f5f5f5; }
-.meta-gallery__page-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+/* .meta-gallery__page-btn: prev/next now render as <MtButton variant="ghost"> (token-styled); bespoke
+   hardcoded CSS removed (UI-P2-1c batch6). Class kept on the element only for selector stability. */
 .meta-gallery__page-info { font-size: 12px; color: #666; }
 .meta-gallery__loading { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; background: rgba(255,255,255,.7); font-size: 14px; color: #666; z-index: 10; }
 </style>

@@ -17,7 +17,7 @@ import { resolveStatusDisplay, type StatusDomain, type StatusTone } from '../../
 // UF-3 — the ONE status-color renderer (design-lock §3.4 "状态 = 语义"). Framework-free by
 // design (no Element Plus import) so it drops into both EP table cells (ApprovalCenterView,
 // MyDelegationView, DelegationSettingsView) and hand-rolled markup (ApprovalMobileList,
-// AutomationExecutionsView, ApprovalInboxView) alike. Colors come ONLY from CSS custom
+// AutomationExecutionsView) alike. Colors come ONLY from CSS custom
 // properties (tokens.css / the EP variable mapping UF-1 wrote) — never a hardcoded hex — so a
 // future palette change repaints every status tag site-wide from one place.
 const props = withDefaults(
@@ -25,6 +25,14 @@ const props = withDefaults(
     domain: StatusDomain
     status: string
     size?: 'sm' | 'md'
+    // UF-7b: escape hatch for the handful of admin views whose OTHER chrome is
+    // hardcoded-Chinese (never localized) — a StatusTag that follows the global useLocale()
+    // toggle would show an English badge inside an otherwise-monolingual-Chinese page under
+    // locale=en. Setting this pins the resolved label/tone to the given locale regardless of
+    // useLocale(); leaving it unset (the default) keeps following useLocale() exactly as
+    // before — bilingual views (ApprovalCenterView/AutomationExecutionsView/
+    // ApprovalMobileList/WorkflowHubView) must NOT set this.
+    forceLocale?: 'zh' | 'en'
   }>(),
   {
     size: 'md',
@@ -33,7 +41,9 @@ const props = withDefaults(
 
 const { isZh } = useLocale()
 
-const display = computed(() => resolveStatusDisplay(props.domain, props.status, isZh.value))
+const effectiveIsZh = computed(() => (props.forceLocale ? props.forceLocale === 'zh' : isZh.value))
+
+const display = computed(() => resolveStatusDisplay(props.domain, props.status, effectiveIsZh.value))
 
 function toneColors(tone: StatusTone): { background: string; color: string } {
   if (tone === 'neutral') {

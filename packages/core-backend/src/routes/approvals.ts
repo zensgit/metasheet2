@@ -491,6 +491,65 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
     }
   })
 
+  // RP-3 (B3-06 authoring 试运行): template author's read-only dry-run of the LATEST/draft version.
+  // Guarded by approvalTemplateAdminGuard (canManageTemplates) — this is the ONLY surface that
+  // accepts sampleRequesterId, the org-structure probe vector owner order ③ isolates here (the
+  // B3-05 requester surface never accepts a requester override). Zero writes (RP-1 substrate).
+  r.post('/api/approval-templates/:id/route-preview', authenticate, approvalTemplateAdminGuard, async (req: Request, res: Response) => {
+    try {
+      const actorId = resolveApprovalActorId(req)
+      if (!actorId) {
+        return res.status(401).json(
+          approvalErrorResponse('APPROVAL_USER_REQUIRED', 'User ID not found in token'),
+        )
+      }
+
+      const templateId = typeof req.params.id === 'string' ? req.params.id.trim() : ''
+      const sampleFormData =
+        req.body?.sampleFormData && typeof req.body.sampleFormData === 'object' && !Array.isArray(req.body.sampleFormData)
+          ? req.body.sampleFormData as Record<string, unknown>
+          : null
+      const sampleRequesterId = typeof req.body?.sampleRequesterId === 'string' ? req.body.sampleRequesterId.trim() : ''
+
+      if (!templateId || !sampleFormData) {
+        return res.status(400).json({
+          error: {
+            code: 'VALIDATION_ERROR',
+            message: 'templateId (path) and sampleFormData are required',
+          },
+        })
+      }
+
+      const preview = await productService.previewTemplateRoute(
+        { templateId, formData: sampleFormData },
+        {
+          userId: actorId,
+          userName: resolveApprovalActorName(req, actorId),
+          email: typeof req.user?.email === 'string' ? req.user.email : undefined,
+          tenantId: resolveApprovalTenantId(req),
+          department: typeof req.user?.department === 'string' ? req.user.department : undefined,
+          departmentIds: resolveApprovalActorDepartmentIds(req),
+          roles: resolveApprovalActorRoles(req),
+          permissions: resolveApprovalActorPermissions(req),
+        },
+        // The sample requester is identified by id only; org relations / directory roles / dept /
+        // title are resolved fresh from the DB by that id inside the substrate (never client-supplied).
+        sampleRequesterId ? { sampleRequester: { userId: sampleRequesterId } } : {},
+      )
+
+      // Conform to the ratified §3 output contract ({ route, truncated? }); the substrate's
+      // internal totalSteps is not part of the endpoint contract.
+      res.json({ route: preview.route, truncated: preview.truncated })
+    } catch (error) {
+      handleApprovalsError(
+        res,
+        error,
+        'APPROVAL_TEMPLATE_PREVIEW_FAILED',
+        'Failed to preview the approval template route',
+      )
+    }
+  })
+
   r.post('/api/approval-templates', authenticate, approvalTemplateAdminGuard, async (req: Request, res: Response) => {
     try {
       const template = await productService.createTemplate({
@@ -588,6 +647,8 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
     try {
       const version = await productService.publishTemplate(req.params.id, {
         policy: req.body?.policy,
+        // B3-09 — optional publish note; the service normalizes (trim, empty->null, length cap).
+        note: req.body?.note,
       })
       res.json(version)
     } catch (error) {
@@ -596,6 +657,72 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
         error,
         'APPROVAL_TEMPLATE_PUBLISH_FAILED',
         'Failed to publish approval template',
+      )
+    }
+  })
+
+  // B3-08 (模板治理 — 用量/blast-radius): fetched by the FE archive confirm dialog BEFORE the
+  // archive call so the admin sees the instance count first (mirrors the ruleStats /
+  // automationDeleteRuleConfirmMessage precedent). Read-only; safe to call for a template of any
+  // status.
+  r.get('/api/approval-templates/:id/usage', authenticate, approvalTemplateAdminGuard, async (req: Request, res: Response) => {
+    try {
+      const usage = await productService.getTemplateUsage(req.params.id)
+      res.json(usage)
+    } catch (error) {
+      handleApprovalsError(
+        res,
+        error,
+        'APPROVAL_TEMPLATE_USAGE_FETCH_FAILED',
+        'Failed to fetch approval template usage',
+      )
+    }
+  })
+
+  // B3-08 (模板治理 — 停用/启用): PUBLISHED <-> ARCHIVED. Archived templates cannot be the target of
+  // a new createApproval/route-preview (assembleCreationContext's published-status gate already
+  // fails closed for any non-'published' status); already-running instances are untouched.
+  r.post('/api/approval-templates/:id/archive', authenticate, approvalTemplateAdminGuard, async (req: Request, res: Response) => {
+    try {
+      const template = await productService.archiveTemplate(req.params.id)
+      res.json(template)
+    } catch (error) {
+      handleApprovalsError(
+        res,
+        error,
+        'APPROVAL_TEMPLATE_ARCHIVE_FAILED',
+        'Failed to archive approval template',
+      )
+    }
+  })
+
+  r.post('/api/approval-templates/:id/unarchive', authenticate, approvalTemplateAdminGuard, async (req: Request, res: Response) => {
+    try {
+      const template = await productService.unarchiveTemplate(req.params.id)
+      res.json(template)
+    } catch (error) {
+      handleApprovalsError(
+        res,
+        error,
+        'APPROVAL_TEMPLATE_UNARCHIVE_FAILED',
+        'Failed to unarchive approval template',
+      )
+    }
+  })
+
+  // B3-09 (模板治理 — 版本历史): newest-first summary rows (no formSchema/approvalGraph payloads —
+  // the per-version detail endpoint below serves those on demand). Same admin guard as the rest
+  // of the template-authoring surface.
+  r.get('/api/approval-templates/:id/versions', authenticate, approvalTemplateAdminGuard, async (req: Request, res: Response) => {
+    try {
+      const versions = await productService.listTemplateVersions(req.params.id)
+      res.json({ versions })
+    } catch (error) {
+      handleApprovalsError(
+        res,
+        error,
+        'APPROVAL_TEMPLATE_VERSIONS_FETCH_FAILED',
+        'Failed to fetch approval template versions',
       )
     }
   })
@@ -663,8 +790,27 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
       const workflowKey = typeof req.query.workflowKey === 'string' ? req.query.workflowKey : undefined
       const businessKey = typeof req.query.businessKey === 'string' ? req.query.businessKey : undefined
       const assignee = typeof req.query.assignee === 'string' ? req.query.assignee : undefined
-      const tab = typeof req.query.tab === 'string' ? req.query.tab as 'pending' | 'mine' | 'cc' | 'completed' : undefined
+      const tab = typeof req.query.tab === 'string' ? req.query.tab as 'pending' | 'mine' | 'cc' | 'completed' | 'processed' : undefined
       const search = typeof req.query.search === 'string' ? req.query.search : undefined
+      // B3-03 (模板/时间筛选): optional template + created-at window. Empty strings are treated as
+      // absent so a cleared filter chip degrades to the unfiltered feed rather than a 400.
+      const templateId = typeof req.query.templateId === 'string' && req.query.templateId.trim()
+        ? req.query.templateId.trim()
+        : undefined
+      const rawCreatedFrom = typeof req.query.createdFrom === 'string' ? req.query.createdFrom.trim() : ''
+      const rawCreatedTo = typeof req.query.createdTo === 'string' ? req.query.createdTo.trim() : ''
+      for (const [label, value] of [['createdFrom', rawCreatedFrom], ['createdTo', rawCreatedTo]] as const) {
+        if (value && Number.isNaN(Date.parse(value))) {
+          return res.status(400).json(
+            approvalErrorResponse(
+              'APPROVAL_DATE_FILTER_INVALID',
+              `${label} must be a valid ISO-8601 date`,
+            ),
+          )
+        }
+      }
+      const createdFrom = rawCreatedFrom || undefined
+      const createdTo = rawCreatedTo || undefined
       const page = parsePaging(req.query.page, 1, Number.MAX_SAFE_INTEGER)
       const pageSize = parsePaging(req.query.pageSize, 20)
       const { limit, offset } = req.query.page || req.query.pageSize
@@ -715,6 +861,9 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
         businessKey,
         assignee,
         search,
+        templateId,
+        createdFrom,
+        createdTo,
         tab,
         includeExternalTabSources: rawSourceSystem === 'all',
         actorId: actorId || undefined,
@@ -769,6 +918,64 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
         error,
         'PLM_APPROVAL_SYNC_FAILED',
         'Failed to sync PLM approvals',
+      )
+    }
+  })
+
+  // RP-2 (route-preview lock, RATIFIED; B3-05): read-only route preview — the SAME guard chain
+  // and actor assembly as POST /api/approvals (below), but the body reaches ONLY
+  // previewApprovalRoute (zero-write substrate, formData whitelisted to the template's fields —
+  // the owner hard gate lives in the service). The session actor IS the requester: no requester
+  // override is accepted on this surface (org-structure probing stays impossible; the admin
+  // sample-requester variant is the separate RP-3 endpoint behind canManageTemplates).
+  r.post('/api/approvals/preview', authenticate, rbacGuard('approvals', 'write'), async (req: Request, res: Response) => {
+    try {
+      const userId = resolveApprovalActorId(req)
+      if (!userId) {
+        return res.status(401).json(
+          approvalErrorResponse('APPROVAL_USER_REQUIRED', 'User ID not found in token'),
+        )
+      }
+
+      const templateId = typeof req.body?.templateId === 'string' ? req.body.templateId.trim() : ''
+      const formData =
+        req.body?.formData && typeof req.body.formData === 'object' && !Array.isArray(req.body.formData)
+          ? req.body.formData as Record<string, unknown>
+          : null
+
+      if (!templateId || !formData) {
+        return res.status(400).json({
+          error: {
+            code: 'VALIDATION_ERROR',
+            message: 'templateId and formData are required',
+          },
+        })
+      }
+
+      const preview = await productService.previewApprovalRoute(
+        { templateId, formData },
+        {
+          userId,
+          userName: resolveApprovalActorName(req, userId),
+          email: typeof req.user?.email === 'string' ? req.user.email : undefined,
+          tenantId: resolveApprovalTenantId(req),
+          department: typeof req.user?.department === 'string' ? req.user.department : undefined,
+          departmentIds: resolveApprovalActorDepartmentIds(req),
+          roles: resolveApprovalActorRoles(req),
+          permissions: resolveApprovalActorPermissions(req),
+        },
+      )
+
+      // Conform to the ratified §3 B3-05 output contract exactly ({ route, truncated? }). The
+      // substrate returns totalSteps for its own internal use, but it is not part of the endpoint
+      // contract, so it is not forwarded on the wire.
+      res.json({ route: preview.route, truncated: preview.truncated })
+    } catch (error) {
+      handleApprovalsError(
+        res,
+        error,
+        'APPROVAL_PREVIEW_FAILED',
+        'Failed to preview the approval route',
       )
     }
   })

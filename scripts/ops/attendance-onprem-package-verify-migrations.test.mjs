@@ -29,6 +29,7 @@ function writeMinimumPackage(pkgRoot, options = {}) {
   const {
     omitDistMigration,
     extraSourceMigration,
+    omitSupersededAuditMarker,
   } = options
 
   const placeholderFiles = [
@@ -59,15 +60,18 @@ function writeMinimumPackage(pkgRoot, options = {}) {
   writeFile(pkgRoot, 'apps/web/dist/index.html', '<html>attendance</html>\n')
   writeFile(pkgRoot, 'packages/core-backend/dist/src/index.js', 'module.exports = {}\n')
   writeFile(pkgRoot, 'packages/core-backend/dist/src/db/migrate.js', 'module.exports = {}\n')
+  const providerLines = [
+    'const marker = "MIGRATION_INCLUDE_SUPERSEDED_LEGACY_SQL";',
+    'const legacy = "032_create_approval_records";',
+  ]
+  if (!omitSupersededAuditMarker) {
+    providerLines.push('const audit = "20250926_create_audit_tables";')
+  }
+  providerLines.push('module.exports = { marker, legacy };', '')
   writeFile(
     pkgRoot,
     'packages/core-backend/dist/src/db/migration-provider.js',
-    [
-      'const marker = "MIGRATION_INCLUDE_SUPERSEDED_LEGACY_SQL";',
-      'const legacy = "032_create_approval_records";',
-      'module.exports = { marker, legacy };',
-      '',
-    ].join('\n')
+    providerLines.join('\n')
   )
 
   writeFile(
@@ -196,6 +200,18 @@ test('accepts a package with compiled migration coverage for upgraded databases'
 
     assert.equal(result.status, 0, result.stderr || result.stdout)
     assert.match(result.stderr, /Package verify OK/)
+  })
+})
+
+test('rejects a package whose compiled provider lacks the superseded audit marker', () => {
+  withArchive({ omitSupersededAuditMarker: true }, (archivePath) => {
+    const result = runVerify(archivePath)
+
+    assert.notEqual(result.status, 0)
+    assert.match(
+      result.stderr,
+      /migration-provider\.js must no-op the superseded audit SQL on upgraded on-prem databases/
+    )
   })
 })
 

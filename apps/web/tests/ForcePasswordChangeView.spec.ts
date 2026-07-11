@@ -182,6 +182,23 @@ describe('ForcePasswordChangeView', () => {
     expect(mocks.routerReplace).toHaveBeenCalledWith('/attendance')
   })
 
+  it('shows the full password requirements before submission', async () => {
+    container = document.createElement('div')
+    document.body.appendChild(container)
+
+    app = createApp(ForcePasswordChangeViewComponent)
+    app.mount(container)
+    await flushUi(6)
+
+    const requirements = container.querySelector('[data-testid="password-requirements"]')
+    expect(requirements?.textContent).toContain('密码要求')
+    expect(requirements?.textContent).toContain('8-128 位字符')
+    expect(requirements?.textContent).toContain('至少包含 1 个小写字母')
+    expect(requirements?.textContent).toContain('至少包含 1 个大写字母')
+    expect(requirements?.textContent).toContain('至少包含 1 个数字')
+    expect(requirements?.textContent).toContain('常见弱口令片段')
+  })
+
   it('allows signing out from the forced password change page', async () => {
     container = document.createElement('div')
     document.body.appendChild(container)

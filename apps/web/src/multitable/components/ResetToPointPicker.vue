@@ -11,14 +11,21 @@
   "Target" line is derived FROM `asOf` (not the raw input), so what the user sees can never diverge from what the
   destructive op uses. Gated on `pitResetEnabled` ALONE (it already encodes flag ∧ canManageSheetAccess); the
   dialog is mounted only once T is valid & past, so the dialog's own "Reset to {asOf}…" button never fires empty.
+
+  i18n (R5b strict-zero closeout): strings routed through `l()` → meta-record-labels.ts `record.resetPicker*`.
+  The stray `{{ ' ' }}` mustaches around some labels are NOT decorative — a whitespace-only static text node that
+  is the first/last child of its element is unconditionally stripped by Vue's template whitespace-condense pass
+  (unlike a mixed text+space node, which only gets collapsed), so a literal-string-space would silently vanish
+  where the original hardcoded copy had a leading/trailing space. Wrapping the space in its own interpolation
+  keeps it immune to that pass — do not "clean this up" without re-diffing rendered output byte-for-byte.
 -->
 <template>
   <div v-if="pitResetEnabled" class="reset-picker" data-test="reset-picker">
     <div class="reset-picker__history" data-test="reset-picker-history">
-      <div class="reset-picker__heading">Reset this sheet to a Global History point</div>
+      <div class="reset-picker__heading">{{ l('record.resetPickerHeading') }}</div>
       <div class="reset-picker__history-row">
         <label class="reset-picker__label">
-          <span>History point</span>
+          <span>{{ l('record.resetPickerHistoryLabel') }}</span>
           <select
             class="reset-picker__input reset-picker__select"
             data-test="reset-picker-history-select"
@@ -26,32 +33,29 @@
             :disabled="historyLoading || historyOptions.length === 0"
             @change="mode = 'history'"
           >
-            <option value="">Select a recent history batch</option>
+            <option value="">{{ l('record.resetPickerHistoryPlaceholder') }}</option>
             <option v-for="batch in historyOptions" :key="batch.batchId" :value="batch.batchId">
               {{ historyBatchLabel(batch) }}
             </option>
           </select>
         </label>
-        <button
-          type="button"
+        <MtButton
           class="reset-picker__refresh"
           data-test="reset-picker-history-refresh"
           :disabled="historyLoading || !canLoadHistory"
           @click="loadHistoryBatches"
-        >
-          Refresh
-        </button>
+        >{{ ' ' }}{{ l('record.resetPickerRefresh') }}{{ ' ' }}</MtButton>
       </div>
-      <p v-if="historyLoading" class="reset-picker__hint" data-test="reset-picker-history-loading">Loading history points...</p>
+      <p v-if="historyLoading" class="reset-picker__hint" data-test="reset-picker-history-loading">{{ l('record.resetPickerHistoryLoading') }}</p>
       <p v-else-if="historyError" class="reset-picker__hint reset-picker__hint--warn" data-test="reset-picker-history-error">{{ historyError }}</p>
-      <p v-else-if="canLoadHistory && historyOptions.length === 0" class="reset-picker__hint" data-test="reset-picker-history-empty">No recent history batches found.</p>
-      <p v-else-if="!canLoadHistory" class="reset-picker__hint" data-test="reset-picker-history-unavailable">History points unavailable.</p>
+      <p v-else-if="canLoadHistory && historyOptions.length === 0" class="reset-picker__hint" data-test="reset-picker-history-empty">{{ l('record.resetPickerHistoryEmpty') }}</p>
+      <p v-else-if="!canLoadHistory" class="reset-picker__hint" data-test="reset-picker-history-unavailable">{{ l('record.resetPickerHistoryUnavailable') }}</p>
     </div>
 
     <details class="reset-picker__manual" data-test="reset-picker-manual">
-      <summary>Advanced manual time</summary>
+      <summary>{{ l('record.resetPickerManualSummary') }}</summary>
       <label class="reset-picker__label">
-        <span>Manual point in time</span>
+        <span>{{ l('record.resetPickerManualLabel') }}</span>
         <input
           type="datetime-local"
           class="reset-picker__input"
@@ -65,14 +69,11 @@
 
     <!-- datetime-local coerces invalid text to '' so a non-empty-unparseable value can't occur; if `asOf` is somehow
          null it simply renders nothing below (fail-safe: no dialog), so no separate invalid branch is needed. -->
-    <p v-if="asOf && isFuture" class="reset-picker__hint reset-picker__hint--warn" data-test="reset-picker-future">
-      Pick a time in the past — you can only reset to an earlier state.
-    </p>
+    <p v-if="asOf && isFuture" class="reset-picker__hint reset-picker__hint--warn" data-test="reset-picker-future">{{ ' ' }}{{ l('record.resetPickerFutureWarn') }}{{ ' ' }}</p>
 
     <template v-else-if="asOf">
-      <p class="reset-picker__target" data-test="reset-picker-target">
-        Target: <strong>{{ targetDisplay }}</strong> (your local time)
-        <span v-if="selectedHistoryBatch && mode === 'history'"> from history batch {{ shortSelectedBatchId }}</span>
+      <p class="reset-picker__target" data-test="reset-picker-target">{{ ' ' }}{{ l('record.resetPickerTargetPrefix') }} <strong>{{ targetDisplay }}</strong> {{ l('record.resetPickerTargetSuffix') }}
+        <span v-if="selectedHistoryBatch && mode === 'history'">{{ ' ' }}{{ l('record.resetPickerFromBatch') }} {{ shortSelectedBatchId }}</span>
       </p>
       <ResetConfirmDialog
         :pit-reset-enabled="true"
@@ -89,8 +90,11 @@
 import { computed, ref, watch } from 'vue'
 
 import ResetConfirmDialog from './ResetConfirmDialog.vue'
+import { MtButton } from '../ui'
 import type { ResetPreview, ResetResult } from '../api/client'
 import type { HistoryBatchSummary } from '../types'
+import { useLocale } from '../../composables/useLocale'
+import { recordLabel, resetPickerRecordCount, type MetaRecordLabelKey } from '../utils/meta-record-labels'
 
 type ListHistoryEvents = (
   baseId: string,
@@ -111,6 +115,9 @@ const props = defineProps<{
 }>()
 
 const RECENT_HISTORY_LIMIT = 20
+
+const { isZh } = useLocale()
+const l = (key: MetaRecordLabelKey): string => recordLabel(key, isZh.value)
 
 const localValue = ref('')
 const selectedBatchId = ref('')
@@ -133,9 +140,9 @@ function hasUsableCreatedAt(batch: HistoryBatchSummary): boolean {
 
 function historyBatchLabel(batch: HistoryBatchSummary): string {
   const when = new Date(batch.createdAt).toLocaleString()
-  const actor = batch.actorName || batch.actorId || 'System'
-  const action = batch.action || 'update'
-  const records = batch.visibleAffectedRecordCount === 1 ? '1 record' : `${batch.visibleAffectedRecordCount} records`
+  const actor = batch.actorName || batch.actorId || l('record.resetPickerSystemActor')
+  const action = batch.action || l('record.resetPickerDefaultAction')
+  const records = resetPickerRecordCount(batch.visibleAffectedRecordCount, isZh.value)
   return `${when} - ${action} - ${actor} - ${records}`
 }
 
@@ -190,7 +197,7 @@ async function loadHistoryBatches(): Promise<void> {
     if (loadSeq !== historyLoadSeq) return
     historyBatches.value = []
     selectedBatchId.value = ''
-    historyError.value = err instanceof Error ? err.message : 'Failed to load history points'
+    historyError.value = err instanceof Error ? err.message : l('record.resetPickerErrorLoad')
   } finally {
     if (loadSeq === historyLoadSeq) historyLoading.value = false
   }
@@ -216,8 +223,9 @@ const boundExecute = (a: string, identity: string): Promise<ResetResult> => prop
 .reset-picker__label { display: flex; flex-direction: column; gap: 4px; font-size: 13px; color: #912018; }
 .reset-picker__input { padding: 6px 8px; border: 1px solid #d0d5dd; border-radius: 6px; max-width: 240px; }
 .reset-picker__select { min-width: min(520px, 100%); max-width: min(640px, 100%); }
-.reset-picker__refresh { padding: 6px 10px; border: 1px solid #d0d5dd; border-radius: 6px; background: #fff; color: #912018; cursor: pointer; }
-.reset-picker__refresh:disabled { cursor: default; opacity: 0.6; }
+/* .reset-picker__refresh: the Refresh control is now <MtButton> (ghost, token-styled); its bespoke
+   hardcoded-hex CSS was removed to avoid double-styling the MtButton root. Class + data-test kept for
+   selector stability. */
 .reset-picker__manual { color: #912018; font-size: 12px; }
 .reset-picker__manual > summary { cursor: pointer; }
 .reset-picker__manual .reset-picker__label { margin-top: 6px; }

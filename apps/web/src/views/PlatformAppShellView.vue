@@ -287,7 +287,9 @@ async function loadRuntimeCurrent(targetApp: NonNullable<typeof app.value>): Pro
   }
 
   try {
-    const response = await apiGet<unknown>(targetApp.runtimeBindings.currentPath)
+    const response = await apiGet<unknown>(targetApp.runtimeBindings.currentPath, {
+      suppressUnauthorizedRedirect: true,
+    })
     runtimeCurrent.value = normalizeRuntimeCurrentSnapshot(response)
     runtimeCurrentError.value = null
     setPlatformAppRuntimeInstallState(

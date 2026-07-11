@@ -78,15 +78,14 @@
            records. S2 deliberately renders NO sample data. -->
 
       <section class="multitable-template-detail__dryrun">
-        <button
-          type="button"
+        <MtButton
           class="multitable-template-detail__check"
           data-testid="template-detail-dryrun"
           :disabled="checking"
           @click="runDryRun"
         >
           {{ checking ? workbenchLabel('detail.checking', isZh) : workbenchLabel('detail.checkInstallable', isZh) }}
-        </button>
+        </MtButton>
         <p v-if="dryRunError" class="multitable-template-detail__error" role="alert">
           {{ dryRunError }}
         </p>
@@ -135,15 +134,15 @@
         <p v-if="installError" class="multitable-template-detail__warning" role="status">
           {{ installError }}
         </p>
-        <button
-          type="button"
+        <MtButton
           class="multitable-template-detail__install"
+          variant="primary"
           data-testid="template-detail-install"
           :disabled="installDisabled"
           @click="onInstall"
         >
           {{ installing ? workbenchLabel('card.installing', isZh) : workbenchLabel('card.install', isZh) }}
-        </button>
+        </MtButton>
       </footer>
     </template>
   </section>
@@ -172,6 +171,7 @@ import type {
   TemplateDryRunResult,
 } from '../multitable/types'
 import { AppRouteNames } from '../router/types'
+import { MtButton } from '../multitable/ui'
 
 const TemplatesRouteName = AppRouteNames.MULTITABLE_TEMPLATES
 
@@ -410,21 +410,13 @@ onMounted(() => {
   gap: 0.75rem;
 }
 
+/* .multitable-template-detail__check: now <MtButton> (default ghost — sanctioned border drop, was a plain
+   #cbd5e1-bordered neutral action). Bespoke resting/disabled visual CSS removed to avoid double-styling the
+   MtButton root; only the LAYOUT property (align-self: flex-start — the parent is a flex column and would
+   otherwise stretch the button full-width) is kept, same pattern as MetaTemplateCard's `flex: 1 1 auto` /
+   MetaGanttView's `align-self: end`. Class kept for selector stability. */
 .multitable-template-detail__check {
   align-self: flex-start;
-  border: 1px solid #cbd5e1;
-  background: #ffffff;
-  color: #0f172a;
-  padding: 0.5rem 1rem;
-  border-radius: 8px;
-  font-size: 0.875rem;
-  font-weight: 600;
-  cursor: pointer;
-}
-
-.multitable-template-detail__check:disabled {
-  opacity: 0.6;
-  cursor: progress;
 }
 
 .multitable-template-detail__dryrun-result {
@@ -505,25 +497,11 @@ onMounted(() => {
   font-size: 0.875rem;
 }
 
+/* .multitable-template-detail__install: now <MtButton variant="primary"> (the bespoke #2563eb fill ==
+   --ms-color-primary exactly, incl. the #1d4ed8 hover — same token as --el-color-primary-dark-2). Bespoke
+   visual/disabled/hover CSS removed to avoid double-styling the MtButton root; only the LAYOUT property
+   (align-self: flex-start — the parent footer is a flex column) is kept. Class kept for selector stability. */
 .multitable-template-detail__install {
   align-self: flex-start;
-  border: 1px solid #2563eb;
-  background: #2563eb;
-  color: #ffffff;
-  border-radius: 8px;
-  padding: 0.5rem 1.25rem;
-  font-size: 0.875rem;
-  font-weight: 600;
-  cursor: pointer;
-}
-
-.multitable-template-detail__install:disabled {
-  opacity: 0.6;
-  cursor: not-allowed;
-}
-
-.multitable-template-detail__install:hover:not(:disabled) {
-  background: #1d4ed8;
-  border-color: #1d4ed8;
 }
 </style>

@@ -164,6 +164,12 @@ type CommentActivityPayload = {
   authorId?: string
 }
 
+export type CommentTargetReadChecker = (input: {
+  spreadsheetId: string
+  rowId: string
+  userId: string
+}) => Promise<boolean>
+
 export class CommentService {
   static inject = [ICollabService, ILogger]
 
@@ -171,6 +177,12 @@ export class CommentService {
     private collabService: CollabService,
     private logger: ILogger,
   ) {}
+
+  private commentTargetReadChecker: CommentTargetReadChecker = async () => true
+
+  setCommentTargetReadChecker(checker: CommentTargetReadChecker): void {
+    this.commentTargetReadChecker = checker
+  }
 
   /**
    * Update a comment's content and optionally its mentions.
@@ -208,10 +220,11 @@ export class CommentService {
       throw new Error('Updated comment could not be reloaded')
     }
 
-    this.publishCommentUpdated(comment, normalizedUserId)
+    await this.publishCommentUpdated(comment, normalizedUserId)
 
     for (const mentionUserId of mentions) {
       if (!mentionUserId || mentionUserId === normalizedUserId || previousMentions.includes(mentionUserId)) continue
+      if (!(await this.canNotifyUserAboutCommentTarget(comment.spreadsheetId, comment.rowId, mentionUserId))) continue
       this.collabService.sendTo(mentionUserId, 'comment:mention', {
         containerId: comment.containerId,
         targetId: comment.targetId,
@@ -248,7 +261,7 @@ export class CommentService {
       await trx.deleteFrom('meta_comments').where('id', '=', commentId).execute()
     })
 
-    this.publishCommentDeleted(existing, normalizedUserId)
+    await this.publishCommentDeleted(existing, normalizedUserId)
   }
 
   /**
@@ -356,23 +369,20 @@ export class CommentService {
       'comment:created',
       createdPayload,
     )
-    this.collabService.broadcastTo(
-      buildCommentInboxRoom(),
-      'comment:activity',
-      {
-        kind: 'created',
-        containerId: data.spreadsheetId,
-        targetId: data.rowId,
-        targetFieldId: effectiveFieldId ?? null,
-        spreadsheetId: data.spreadsheetId,
-        rowId: data.rowId,
-        fieldId: effectiveFieldId,
-        commentId: comment.id,
-        authorId: data.authorId,
-      } satisfies CommentActivityPayload,
-    )
+    await this.publishCommentActivity({
+      kind: 'created',
+      containerId: data.spreadsheetId,
+      targetId: data.rowId,
+      targetFieldId: effectiveFieldId ?? null,
+      spreadsheetId: data.spreadsheetId,
+      rowId: data.rowId,
+      fieldId: effectiveFieldId,
+      commentId: comment.id,
+      authorId: data.authorId,
+    })
     for (const mentionUserId of mentions) {
       if (mentionUserId && mentionUserId !== data.authorId) {
+        if (!(await this.canNotifyUserAboutCommentTarget(data.spreadsheetId, data.rowId, mentionUserId))) continue
         this.collabService.sendTo(mentionUserId, 'comment:mention', createdPayload)
       }
     }
@@ -407,6 +417,10 @@ export class CommentService {
 
     if (typeof options?.resolved === 'boolean') {
       query = query.where('resolved', '=', options.resolved)
+    }
+    const excludedRowIds = this.normalizeRowIdList(options?.excludeRowIds)
+    if (excludedRowIds.length > 0) {
+      query = query.where('row_id', 'not in', excludedRowIds)
     }
 
     const limit = Math.min(200, Math.max(1, Number(options?.limit ?? 50)))
@@ -702,9 +716,11 @@ export class CommentService {
     spreadsheetId: string,
     rowIds?: string[],
     mentionUserId?: string,
+    excludeRowIds?: string[],
   ): Promise<{ items: CommentPresenceSummary[]; total: number }> {
     const normalizedRowIds = [...new Set((rowIds ?? []).map((rowId) => rowId.trim()).filter((rowId) => rowId.length > 0))]
     const normalizedMentionUserId = typeof mentionUserId === 'string' && mentionUserId.trim().length > 0 ? mentionUserId.trim() : null
+    const excludedRowIds = this.normalizeRowIdList(excludeRowIds)
 
     // Single combined query with conditional aggregation instead of two separate queries
     const mentionJsonb = normalizedMentionUserId
@@ -726,6 +742,9 @@ export class CommentService {
 
     if (normalizedRowIds.length > 0) {
       query = query.where('row_id', 'in', normalizedRowIds)
+    }
+    if (excludedRowIds.length > 0) {
+      query = query.where('row_id', 'not in', excludedRowIds)
     }
 
     const rows = (await query.groupBy(['row_id', 'field_id']).execute()) as Array<
@@ -784,6 +803,7 @@ export class CommentService {
   async getMentionSummary(
     spreadsheetId: string,
     mentionUserId: string,
+    excludeRowIds?: string[],
   ): Promise<{
     /** Canonical container alias for `spreadsheetId`. */
     containerId: string
@@ -804,6 +824,7 @@ export class CommentService {
     }>
   }> {
     const normalizedUserId = mentionUserId.trim()
+    const excludedRowIds = this.normalizeRowIdList(excludeRowIds)
     if (!normalizedUserId) {
       return {
         containerId: spreadsheetId,
@@ -816,7 +837,7 @@ export class CommentService {
       }
     }
 
-    const rows = (await db
+    let query = db
       .selectFrom('meta_comments as c')
       .leftJoin('meta_comment_reads as r', (join) => join.onRef('r.comment_id', '=', 'c.id').on('r.user_id', '=', normalizedUserId))
       .select([
@@ -829,8 +850,10 @@ export class CommentService {
       .where('c.resolved', '=', false)
       .where('c.author_id', '!=', normalizedUserId)
       .where(sql<boolean>`c.mentions @> ${JSON.stringify([normalizedUserId])}::jsonb`)
-      .groupBy(['c.row_id', 'c.field_id'])
-      .execute()) as MentionGroupedCountRow[]
+    if (excludedRowIds.length > 0) {
+      query = query.where('c.row_id', 'not in', excludedRowIds)
+    }
+    const rows = (await query.groupBy(['c.row_id', 'c.field_id']).execute()) as MentionGroupedCountRow[]
 
     const byRow = new Map<string, { count: number; unread: number; fieldIds: Set<string> }>()
     for (const row of rows) {
@@ -869,13 +892,14 @@ export class CommentService {
    *
    * @returns The number of read records that were inserted or updated.
    */
-  async markAllCommentsRead(spreadsheetId: string, userId: string): Promise<number> {
+  async markAllCommentsRead(spreadsheetId: string, userId: string, excludeRowIds?: string[]): Promise<number> {
     const normalizedUserId = userId.trim()
     const normalizedSheetId = spreadsheetId.trim()
     if (!normalizedUserId || !normalizedSheetId) return 0
+    const excludedRowIds = this.normalizeRowIdList(excludeRowIds)
 
     // Collect IDs of all unread comments (not authored by this user)
-    const unreadRows = await db
+    let query = db
       .selectFrom('meta_comments as c')
       .leftJoin('meta_comment_reads as r', (join) =>
         join.onRef('r.comment_id', '=', 'c.id').on('r.user_id', '=', normalizedUserId),
@@ -884,7 +908,10 @@ export class CommentService {
       .where('c.spreadsheet_id', '=', normalizedSheetId)
       .where('c.author_id', '!=', normalizedUserId)
       .where(sql<boolean>`r.comment_id is null`)
-      .execute()
+    if (excludedRowIds.length > 0) {
+      query = query.where('c.row_id', 'not in', excludedRowIds)
+    }
+    const unreadRows = await query.execute()
 
     if (unreadRows.length === 0) return 0
 
@@ -917,8 +944,9 @@ export class CommentService {
     rowIds?: string[],
     mentionUserId?: string,
     includeViewers?: boolean,
+    excludeRowIds?: string[],
   ): Promise<{ items: CommentPresenceSummary[]; total: number; viewers?: CommentPresenceViewer[] }> {
-    const base = await this.getCommentPresenceSummary(spreadsheetId, rowIds, mentionUserId)
+    const base = await this.getCommentPresenceSummary(spreadsheetId, rowIds, mentionUserId, excludeRowIds)
 
     if (!includeViewers) {
       return base
@@ -932,9 +960,13 @@ export class CommentService {
     return { ...base, viewers }
   }
 
-  async markMentionsRead(spreadsheetId: string, userId: string): Promise<void> {
+  async markMentionsRead(spreadsheetId: string, userId: string, excludeRowIds?: string[]): Promise<void> {
     const normalizedUserId = userId.trim()
     if (!normalizedUserId || !spreadsheetId) return
+    const excludedRowIds = this.normalizeRowIdList(excludeRowIds)
+    const rowDenyPredicate = excludedRowIds.length > 0
+      ? sql`and c.row_id <> all(${excludedRowIds}::text[])`
+      : sql``
 
     await sql`
       insert into meta_comment_reads (comment_id, user_id, read_at, created_at)
@@ -944,6 +976,7 @@ export class CommentService {
         and c.resolved = false
         and c.author_id <> ${normalizedUserId}
         and c.mentions @> ${JSON.stringify([normalizedUserId])}::jsonb
+        ${rowDenyPredicate}
       on conflict (comment_id, user_id)
       do update set read_at = excluded.read_at
     `.execute(db)
@@ -977,20 +1010,16 @@ export class CommentService {
         'comment:resolved',
         resolvedPayload,
       )
-      this.collabService.broadcastTo(
-        buildCommentInboxRoom(),
-        'comment:activity',
-        {
-          kind: 'resolved',
-          containerId: result.container_id,
-          targetId: result.target_id,
-          targetFieldId: result.target_field_id ?? null,
-          spreadsheetId: result.spreadsheet_id,
-          rowId: result.row_id,
-          fieldId: result.field_id ?? undefined,
-          commentId,
-        } satisfies CommentActivityPayload,
-      )
+      await this.publishCommentActivity({
+        kind: 'resolved',
+        containerId: result.container_id,
+        targetId: result.target_id,
+        targetFieldId: result.target_field_id ?? null,
+        spreadsheetId: result.spreadsheet_id,
+        rowId: result.row_id,
+        fieldId: result.field_id ?? undefined,
+        commentId,
+      })
     }
   }
 
@@ -1022,7 +1051,35 @@ export class CommentService {
     }
   }
 
-  private publishCommentUpdated(comment: Comment, authorId: string): void {
+  private normalizeRowIdList(rowIds?: string[]): string[] {
+    return [...new Set((rowIds ?? []).map((rowId) => rowId.trim()).filter((rowId) => rowId.length > 0))]
+  }
+
+  private async canNotifyUserAboutCommentTarget(spreadsheetId: string, rowId: string, userId: string): Promise<boolean> {
+    try {
+      return await this.commentTargetReadChecker({ spreadsheetId, rowId, userId })
+    } catch (error) {
+      this.logger.warn('Comment mention read-target check failed', error instanceof Error ? error : undefined)
+      return false
+    }
+  }
+
+  private async publishCommentActivity(payload: CommentActivityPayload): Promise<void> {
+    const getSubscriberIds = (this.collabService as { getCommentInboxSubscriberIds?: () => string[] })
+      .getCommentInboxSubscriberIds
+    if (!getSubscriberIds) return
+    const subscriberIds = getSubscriberIds.call(this.collabService)
+    for (const userId of subscriberIds) {
+      if (!(await this.canNotifyUserAboutCommentTarget(payload.spreadsheetId, payload.rowId, userId))) continue
+      this.collabService.broadcastTo(
+        buildCommentInboxRoom({ userId }),
+        'comment:activity',
+        payload,
+      )
+    }
+  }
+
+  private async publishCommentUpdated(comment: Comment, authorId: string): Promise<void> {
     const payload = {
       containerId: comment.containerId,
       targetId: comment.targetId,
@@ -1042,24 +1099,20 @@ export class CommentService {
       'comment:updated',
       payload,
     )
-    this.collabService.broadcastTo(
-      buildCommentInboxRoom(),
-      'comment:activity',
-      {
-        kind: 'updated',
-        containerId: comment.containerId,
-        targetId: comment.targetId,
-        targetFieldId: comment.targetFieldId,
-        spreadsheetId: comment.spreadsheetId,
-        rowId: comment.rowId,
-        fieldId: comment.fieldId,
-        commentId: comment.id,
-        authorId,
-      } satisfies CommentActivityPayload,
-    )
+    await this.publishCommentActivity({
+      kind: 'updated',
+      containerId: comment.containerId,
+      targetId: comment.targetId,
+      targetFieldId: comment.targetFieldId,
+      spreadsheetId: comment.spreadsheetId,
+      rowId: comment.rowId,
+      fieldId: comment.fieldId,
+      commentId: comment.id,
+      authorId,
+    })
   }
 
-  private publishCommentDeleted(row: CommentRow, authorId: string): void {
+  private async publishCommentDeleted(row: CommentRow, authorId: string): Promise<void> {
     const payload = {
       containerId: row.container_id,
       targetId: row.target_id,
@@ -1079,21 +1132,17 @@ export class CommentService {
       'comment:deleted',
       payload,
     )
-    this.collabService.broadcastTo(
-      buildCommentInboxRoom(),
-      'comment:activity',
-      {
-        kind: 'deleted',
-        containerId: row.container_id,
-        targetId: row.target_id,
-        targetFieldId: row.target_field_id ?? null,
-        spreadsheetId: row.spreadsheet_id,
-        rowId: row.row_id,
-        fieldId: row.field_id ?? undefined,
-        commentId: row.id,
-        authorId,
-      } satisfies CommentActivityPayload,
-    )
+    await this.publishCommentActivity({
+      kind: 'deleted',
+      containerId: row.container_id,
+      targetId: row.target_id,
+      targetFieldId: row.target_field_id ?? null,
+      spreadsheetId: row.spreadsheet_id,
+      rowId: row.row_id,
+      fieldId: row.field_id ?? undefined,
+      commentId: row.id,
+      authorId,
+    })
   }
 
   private async getComment(id: string): Promise<Comment | undefined> {

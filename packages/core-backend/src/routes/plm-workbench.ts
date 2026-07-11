@@ -32,7 +32,12 @@ import type {
   BomMultitableContextResult,
   BomMultitableLinePatch,
   BomMultitableLineUpdateResult,
+  BomEcoRevisionIntentResult,
 } from '../data-adapters/PLMAdapter'
+// #4020: value import (not type-only) -- isFeatureAvailable is the shared affordance-
+// visibility judgment (entry.available when the provider sends it, else the pre-#4020
+// supported+entitled derivation), so these routes never re-derive it locally.
+import { isFeatureAvailable } from '../data-adapters/PLMAdapter'
 
 // Typed wrapper for temporary tables not yet in main Database interface
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -788,8 +793,9 @@ router.get(
 // PLM-COLLAB Phase 3 C (P3-C): relay the governed READ-ONLY BOM multi-table review context,
 // GATED by the advisory manifest. Pinned order: resolve adapter (404) -> duck-typed guard ->
 // capabilities pre-check. If bom_multitable is not supported -> hide (old PLM / unlit). If it
-// is supported but the tenant is NOT entitled (per the advisory manifest), return the
-// unentitled affordance WITHOUT calling the data endpoint ("未授权不查资源"). Only an entitled
+// IS supported but not `available` (#4020: `isFeatureAvailable` -- the provider-computed
+// `entry.available` when present, else the pre-#4020 supported+entitled derivation), return the
+// unentitled affordance WITHOUT calling the data endpoint ("未授权不查资源"). Only an available
 // tenant reaches getBomMultitableContext, and the PROVIDER stays the authoritative gate (we
 // reflect its entitled + null its context otherwise). Read-only; never 500s -> degrades.
 interface PlmBomReviewAdapter {
@@ -820,6 +826,52 @@ function isPlmBomWritebackAdapter(adapter: unknown): adapter is PlmBomWritebackA
     isPlmBomReviewAdapter(adapter)
     && typeof candidate?.updateBomMultitableLine === 'function'
   )
+}
+
+// ECO Phase 3: the locked-BOM revision-intent seam (attach-or-create a PENDING bom-ECO).
+interface PlmBomEcoIntentAdapter extends PlmBomReviewAdapter {
+  requestBomEcoRevisionIntent(
+    partId: string,
+  ): Promise<{ data?: BomEcoRevisionIntentResult[]; error?: Error }>
+}
+
+function isPlmBomEcoIntentAdapter(adapter: unknown): adapter is PlmBomEcoIntentAdapter {
+  const candidate = adapter as PlmBomEcoIntentAdapter | null
+  return (
+    isPlmBomReviewAdapter(adapter)
+    && typeof candidate?.requestBomEcoRevisionIntent === 'function'
+  )
+}
+
+// The intent endpoint's own discriminated-409 namespace (distinct from the write PATCH's
+// lifecycle_locked/idempotency_conflict): `not_locked` = the part is editable, use the direct
+// edit path; `eco_intent_rejected` = the provider declined (concurrent open ECO race /
+// non-versionable part). Unknown/absent code degrades to 'provider-rejected' (fail-closed,
+// same idiom as providerConflictReasonCode).
+const PROVIDER_ECO_INTENT_409_CODES = new Set(['not_locked', 'eco_intent_rejected'])
+
+function providerEcoIntentConflictCode(error: unknown): string | null {
+  const candidate = error as { response?: { data?: unknown } } | null
+  const data = candidate?.response?.data
+  if (!data || typeof data !== 'object') return null
+  const detail = (data as { detail?: unknown }).detail
+  if (!detail || typeof detail !== 'object') return null
+  const code = (detail as { code?: unknown }).code
+  return typeof code === 'string' && PROVIDER_ECO_INTENT_409_CODES.has(code) ? code : null
+}
+
+function relayProviderEcoIntentError(error: unknown): { status: number; reason: string } {
+  const status = providerErrorStatus(error)
+  // 409 = discriminated by the intent endpoint's own namespace: `not_locked` (editable part —
+  // use the direct edit path) vs `eco_intent_rejected` (provider declined). Unknown/absent code
+  // degrades to the legacy flattened reason (same fail-closed rule as the write PATCH).
+  if (status === 409) {
+    return { status: 409, reason: providerEcoIntentConflictCode(error) ?? 'provider-rejected' }
+  }
+  if (status && [400, 403, 404, 422].includes(status)) {
+    return { status, reason: 'provider-rejected' }
+  }
+  return { status: 502, reason: 'provider-unavailable' }
 }
 
 function normalizeBomLineWritebackPatch(value: unknown): BomMultitableLinePatch | null {
@@ -933,8 +985,9 @@ router.get(
       // old PLM / feature unlit -> hide the surface entirely
       return res.json({ data_source_id: dataSourceId, available: false, reason: 'unsupported' })
     }
-    if (feature.entitled !== true) {
-      // supported but not entitled -> DO NOT query the resource; advisory upgrade affordance
+    if (!isFeatureAvailable(feature)) {
+      // #4020: supported but not available (unentitled, non-base) -> DO NOT query the
+      // resource; advisory upgrade affordance instead
       return res.json({ data_source_id: dataSourceId, available: true, entitled: false, context: null })
     }
     // 2) entitled -> fetch the governed read-only context (never 500 -> degrade)
@@ -1005,7 +1058,8 @@ router.patch(
         reason: 'unsupported',
       })
     }
-    if (feature.entitled !== true) {
+    if (!isFeatureAvailable(feature)) {
+      // #4020: supported but not available (unentitled, non-base) -> block the write
       return res.status(403).json({
         error: 'BOM write-back is not entitled',
         data_source_id: dataSourceId,
@@ -1049,6 +1103,99 @@ router.patch(
     if (!payload || payload.ok !== true || typeof payload.bom_line_id !== 'string') {
       return res.status(502).json({
         error: 'BOM write-back returned a malformed response',
+        data_source_id: dataSourceId,
+        reason: 'malformed-response',
+      })
+    }
+    return res.json(payload)
+  },
+)
+
+// ECO Phase 3 consumer CTA relay: opt-in that opens/attaches a PENDING ECO revision for a
+// lifecycle-LOCKED part. Pre-gates on the capabilities advisory descriptor `bom_eco_revision`
+// (supported + available (#4020: `isFeatureAvailable`) + actions includes
+// `eco_revision_intent` — Phase-0 Lock 3: availability discovery is the advisory, never the
+// error payload). Provider owns idempotency
+// (attach-before-create), so no Idempotency-Key here. Never a raw 500.
+router.post(
+  '/api/plm-workbench/data-sources/:id/bom-multitable/:partId/eco-intent',
+  authenticate,
+  param('id').isString(),
+  param('partId').isString(),
+  validate,
+  async (req: Request, res: Response) => {
+    const dataSourceId = req.params.id
+    const partId = req.params.partId
+    let adapter: unknown
+    try {
+      adapter = getDataSourceManager().getDataSource(dataSourceId)
+    } catch {
+      return res
+        .status(404)
+        .json({ error: 'Data source not found', data_source_id: dataSourceId })
+    }
+    if (!isPlmBomEcoIntentAdapter(adapter)) {
+      return res.status(404).json({
+        error: 'BOM ECO revision intent is not supported for this data source',
+        data_source_id: dataSourceId,
+      })
+    }
+
+    let capabilities: IntegrationCapabilitiesResult
+    try {
+      capabilities = await adapter.getIntegrationCapabilities()
+    } catch {
+      return res.status(503).json({
+        error: 'PLM capabilities unavailable',
+        data_source_id: dataSourceId,
+        reason: 'unavailable',
+      })
+    }
+    const feature = capabilities.available ? capabilities.manifest.features.bom_eco_revision : undefined
+    if (!feature || feature.supported !== true) {
+      return res.status(404).json({
+        error: 'BOM ECO revision is not supported',
+        data_source_id: dataSourceId,
+        reason: 'unsupported',
+      })
+    }
+    if (!isFeatureAvailable(feature)) {
+      // #4020: supported but not available (unentitled, non-base) -> block the intent
+      return res.status(403).json({
+        error: 'BOM ECO revision is not entitled',
+        data_source_id: dataSourceId,
+        reason: 'not-entitled',
+      })
+    }
+    // Advisory action pre-gate: the descriptor must actually advertise the intent action
+    // (a provider that lights the SKU but withdraws the action must hide the CTA path).
+    const actions = Array.isArray(feature.actions) ? feature.actions : []
+    if (!actions.includes('eco_revision_intent')) {
+      return res.status(404).json({
+        error: 'ECO revision intent action is not advertised',
+        data_source_id: dataSourceId,
+        reason: 'unsupported',
+      })
+    }
+
+    const result = await adapter.requestBomEcoRevisionIntent(partId)
+    if (result.error) {
+      const relayed = relayProviderEcoIntentError(result.error)
+      return res.status(relayed.status).json({
+        error: result.error.message || 'ECO revision intent failed',
+        data_source_id: dataSourceId,
+        reason: relayed.reason,
+      })
+    }
+    const payload = result.data?.[0]
+    if (
+      !payload
+      || typeof payload.eco_id !== 'string'
+      || typeof payload.state !== 'string'
+      || typeof payload.attached !== 'boolean'
+    ) {
+      return res.status(502).json({
+        error: 'ECO revision intent returned a malformed response',
         data_source_id: dataSourceId,
         reason: 'malformed-response',
       })

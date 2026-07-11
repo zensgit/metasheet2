@@ -33,7 +33,7 @@
           <option value="hidden">{{ viewRenderLabel('hierarchy.hide', isZh) }}</option>
         </select>
       </label>
-      <button v-if="canCreate" class="meta-hierarchy__create" @click="emit('create-record', {})">{{ viewRenderLabel('hierarchy.addRoot', isZh) }}</button>
+      <MtButton v-if="canCreate" variant="primary" class="meta-hierarchy__create" @click="emit('create-record', {})">{{ viewRenderLabel('hierarchy.addRoot', isZh) }}</MtButton>
     </div>
 
     <div v-if="!parentField" class="meta-hierarchy__placeholder">
@@ -99,6 +99,7 @@ import {
 } from '../utils/comment-affordance'
 import { commentLabel } from '../utils/meta-comment-labels'
 import { managerLabel } from '../utils/meta-manager-labels'
+import { MtButton } from '../ui'
 import {
   openRecordCommentsAria,
   viewRenderLabel,
@@ -536,7 +537,9 @@ const HierarchyNode: ReturnType<typeof defineComponent> = defineComponent({
 .meta-hierarchy__toolbar { display: flex; flex-wrap: wrap; gap: 10px; align-items: end; padding: 12px 16px; border-bottom: 1px solid #e2e8f0; background: #fff; }
 .meta-hierarchy__control { display: flex; flex-direction: column; gap: 4px; min-width: 130px; font-size: 11px; color: #64748b; }
 .meta-hierarchy__control select, .meta-hierarchy__control input { padding: 6px 8px; border: 1px solid #cbd5e1; border-radius: 6px; background: #fff; color: #334155; }
-.meta-hierarchy__create { padding: 7px 12px; border: 1px solid #2563eb; border-radius: 6px; background: #2563eb; color: #fff; cursor: pointer; }
+/* .meta-hierarchy__create: the Add-root control is now <MtButton variant="primary"> (bespoke #2563eb ==
+   --ms-color-primary); its bespoke hex CSS was removed to avoid double-styling the MtButton root. Class kept
+   for selector stability. The h()-rendered per-node controls (toggle/child-add/comment) stay bespoke. */
 .meta-hierarchy__placeholder, .meta-hierarchy__empty { margin: 24px; padding: 28px; border: 1px dashed #cbd5e1; border-radius: 10px; background: #fff; color: #64748b; text-align: center; display: flex; flex-direction: column; gap: 6px; }
 .meta-hierarchy__body { flex: 1; min-height: 0; overflow: auto; padding: 14px 16px 24px; }
 .meta-hierarchy__notice { margin-bottom: 10px; padding: 8px 10px; border: 1px solid #fde68a; border-radius: 8px; background: #fffbeb; color: #92400e; font-size: 12px; }
