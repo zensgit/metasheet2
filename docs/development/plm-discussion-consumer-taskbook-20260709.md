@@ -111,15 +111,16 @@ interface PlmDiscussionProvider {
 > read-side `metasheet_review` gate in §6. Consumer implementation: Lane C
 > (`PLMAdapter.exchangeDiscussionSession` + the 6 write methods).
 
-> **Write-relay (server-side): Option A (PROPOSED — owner-recommended, pending ratification), Option B deferred.**
+> **Write-relay (server-side): Option A (RATIFIED by owner 2026-07-11), Option B deferred.**
 > `routes/plm-embed-discussion.ts` wires Lane C's adapter methods into the
 > actual `/api/plm-embed/discussion/...` HTTP surface an embedded BOM-review
 > writes through. Two designs were considered for how the discussion-session
 > credential (minted by `exchangeDiscussionSession`) is held between the
 > exchange and the write call:
 >
-> - **Option A — stateless, single-use per write (PROPOSED — owner-recommended
->   at Gate-2 2026-07-11, pending final ratification; NOT yet shipped).** Every
+> - **Option A — stateless, single-use per write (RATIFIED by the owner at
+>   Gate-2 2026-07-11; Option B deferred). Merge pending the provider-first
+>   sequence.** Every
 >   write request carries its own freshly-minted `bom_multitable` embed token;
 >   the relay runs the read relay's guards (feature_key / embed_origin / tenant
 >   cross-check), consumes that token's jti via the SAME shared single-use store

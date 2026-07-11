@@ -8,8 +8,8 @@
  * whitelisted from the global session-JWT gate (jwt-middleware.ts's AUTH_WHITELIST prefix match)
  * and gated solely by `embedTokenAuth`.
  *
- * **Design: Option A (stateless, single-use per write) -- PROPOSED, owner-recommended at Gate-2
- * 2026-07-11, pending final ratification (NOT yet the owner's ratified choice).**
+ * **Design: Option A (stateless, single-use per write) -- RATIFIED by the owner at Gate-2
+ * 2026-07-11 (Option B, a server-side credential cache, remains deferred).**
  * Every write request carries its OWN freshly-minted BOM-review embed token
  * (`X-PLM-Embed-Token`, feature_key="bom_multitable"). The route:
  *   1. runs the SAME guards as the read relay (feature_key / embed_origin / data-source resolve
