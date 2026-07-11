@@ -76,6 +76,10 @@ const ROUTES = [
   // #3751 MVP: COMMIT a previewed sync-run plan — persist its rows into the 9 internal MVP tables
   // (internal-only via target-scoped records API, idempotent, immutable, admin-gated, values-free).
   ['POST', '/api/integration/stock-preparation/mvp/sync/persist', 'stockPreparationMvpSyncPersist'],
+  // #3889: approved readonly config -> normalized stock-preparation intake. The request selects a
+  // stored config by reference; raw rows, paths, SQL, credentials, and write controls are absent.
+  ['POST', '/api/integration/stock-preparation/mvp/source-runs/plm-bom', 'stockPreparationPlmBomSourceRun'],
+  ['POST', '/api/integration/stock-preparation/mvp/source-runs/erp-materials', 'stockPreparationErpMaterialSourceRun'],
   // #3751 MVP view 2: readonly snapshot-batch LIST + DIFF reads (queryRecords-only, admin-gated,
   // values-free). List is exact-path; diff carries the batch id in the path.
   ['GET', '/api/integration/stock-preparation/snapshot-batches', 'stockPreparationSnapshotBatchList'],
@@ -282,6 +286,13 @@ const { planBomSnapshotSyncRun } = require('./stock-preparation-sync-run-plan.cj
 // its batch + line + run rows into the internal MVP tables via a target-scoped records API — the FIRST
 // business-row write. Internal-only (structural), idempotent, immutable, admin-gated, values-free.
 const { persistStockPreparationSyncRun } = require('./stock-preparation-sync-run-persist.cjs')
+// #3889: approved PLM / ERP-K3 readonly config -> existing pure intake contract. Routes return only
+// the values-free projection; normalized rows remain an internal backend data plane.
+const {
+  publicReadonlySourceRunResult,
+  runErpMaterialReadonlySource,
+  runPlmBomReadonlySource,
+} = require('./stock-preparation-readonly-source-run.cjs')
 // #3751 MVP view 2: READONLY snapshot-batch LIST + DIFF read endpoints. queryRecords-only; admin-gated;
 // values-free; TWO-project split (staging locator via resolveIntegrationStagingProjectId vs business
 // project row filter). Persists nothing, no external / PLM / K3 write path.
@@ -645,6 +656,28 @@ const VALID_STOCK_PREPARATION_MVP_SYNC_PLAN_REQUEST_KEYS = new Set([
   'previousLines',
   'readPlan',
   'defaultDesignUnit',
+])
+// #3889 source-run bodies select an approved read config by reference and may supply only its named
+// key input. No raw source row, endpoint/path, SQL, page control, credential, or external-write flag.
+const VALID_STOCK_PREPARATION_PLM_SOURCE_RUN_REQUEST_KEYS = new Set([
+  'tenantId',
+  'workspaceId',
+  'projectId',
+  'sourceProjectNo',
+  'projectName',
+  'readSourceConfigId',
+  'inputs',
+  'syncRunId',
+  'snapshotBatchId',
+  'snapshotVersion',
+])
+const VALID_STOCK_PREPARATION_ERP_SOURCE_RUN_REQUEST_KEYS = new Set([
+  'tenantId',
+  'workspaceId',
+  'projectId',
+  'readSourceConfigId',
+  'inputs',
+  'syncRunId',
 ])
 // #3751 MVP view 2: closed query allowlist for the readonly snapshot-batch LIST + DIFF reads. Only the
 // tenant/workspace scope + the (business) projectId; the batch id rides the DIFF route PATH, never the
@@ -1138,6 +1171,40 @@ function stockPreparationMvpSyncPersistInput(rawInput = {}) {
     previousLines: rawInput.previousLines,
     readPlan: rawInput.readPlan,
     defaultDesignUnit: rawInput.defaultDesignUnit,
+  }
+}
+
+function normalizeStockPreparationSourceRunInputs(value, code) {
+  if (value === undefined || value === null) return undefined
+  if (!isPlainObject(value)) {
+    throw new HttpRouteError(400, code, 'source-run inputs must be an object', { field: 'inputs' })
+  }
+  if (Object.keys(value).some((key) => key !== 'key')) {
+    throw new HttpRouteError(400, code, 'source-run inputs contain an unsupported field', { field: 'inputs.<unexpected>' })
+  }
+  return Object.prototype.hasOwnProperty.call(value, 'key') ? { key: value.key } : {}
+}
+
+function normalizeStockPreparationSourceRunBody(rawInput, allowedKeys, code) {
+  if (!isPlainObject(rawInput)) {
+    throw new HttpRouteError(400, code, 'source-run request must be an object')
+  }
+  for (const key of Object.keys(rawInput)) {
+    if (!allowedKeys.has(key)) {
+      throw new HttpRouteError(400, code, 'source-run request contains an unsupported field', { field: '<unexpected>' })
+    }
+  }
+  return {
+    tenantId: firstString(rawInput.tenantId),
+    workspaceId: firstString(rawInput.workspaceId),
+    projectId: firstString(rawInput.projectId),
+    sourceProjectNo: firstString(rawInput.sourceProjectNo),
+    projectName: firstString(rawInput.projectName),
+    readSourceConfigId: firstString(rawInput.readSourceConfigId),
+    inputs: normalizeStockPreparationSourceRunInputs(rawInput.inputs, code),
+    syncRunId: firstString(rawInput.syncRunId),
+    snapshotBatchId: firstString(rawInput.snapshotBatchId),
+    snapshotVersion: rawInput.snapshotVersion,
   }
 }
 
@@ -2136,6 +2203,60 @@ function createHandlers(services, options = {}) {
       })
     }
     return provisioning
+  }
+
+  async function loadStockPreparationReadonlySource(req, input, errorCode) {
+    if (!input.readSourceConfigId) {
+      throw new HttpRouteError(400, errorCode, 'readSourceConfigId is required', { field: 'readSourceConfigId' })
+    }
+    const configScope = {
+      tenantId: input.tenantId,
+      workspaceId: input.workspaceId,
+      id: input.readSourceConfigId,
+    }
+    let row
+    try {
+      row = await readSourceConfigs.getForRuntime(scopedInput(req, configScope))
+    } catch (error) {
+      throw mapReadSourceConfigError(error)
+    }
+    if (!firstString(row && row.systemId)) {
+      throw new HttpRouteError(409, 'STOCK_PREPARATION_SOURCE_SYSTEM_UNAVAILABLE', 'approved source-run system is unavailable')
+    }
+
+    let preparedRead
+    try {
+      preparedRead = prepareConfiguredRead({ config: row.config, inputs: input.inputs })
+    } catch (error) {
+      throw new HttpRouteError(400, errorCode, 'approved source-run config is not executable', {
+        reason: error && typeof error.reason === 'string' ? error.reason : 'invalid',
+      })
+    }
+
+    const loadSystem = typeof externalSystems.getExternalSystemForAdapter === 'function'
+      ? externalSystems.getExternalSystemForAdapter.bind(externalSystems)
+      : externalSystems.getExternalSystem.bind(externalSystems)
+    let system
+    try {
+      system = await loadSystem(scopedInput(req, {
+        tenantId: input.tenantId,
+        workspaceId: input.workspaceId,
+        id: row.systemId,
+      }))
+    } catch (error) {
+      const status = /NotFound/.test(error && error.name ? String(error.name) : '') ? 409 : 503
+      throw new HttpRouteError(status, 'STOCK_PREPARATION_SOURCE_SYSTEM_UNAVAILABLE', 'approved source-run system is unavailable')
+    }
+    if (!system || system.kind !== preparedRead.plan.requiredKind) {
+      throw new HttpRouteError(409, 'STOCK_PREPARATION_SOURCE_KIND_MISMATCH', 'approved source-run system kind does not match its config')
+    }
+    return {
+      preparedRead,
+      system,
+      createAdapter: (adapterSystem) => adapterRegistry.createAdapter(adapterSystem, {
+        principal: requestPrincipal(req),
+      }),
+    }
   }
 
   // FOS-2: scoped multitable provisioning API for the generic field-option-sync route. Same dep the
@@ -3528,6 +3649,61 @@ function createHandlers(services, options = {}) {
         defaultDesignUnit: input.defaultDesignUnit,
       })
       return sendOk(res, result, result.persisted ? 201 : 200)
+    },
+
+    // #3889: execute an approved PLM readonly config and feed its mapped rows through the existing
+    // pure intake contract. Dry-run/read only: no business-row write and no raw/value-bearing result.
+    async stockPreparationPlmBomSourceRun(req, res) {
+      const user = requireAccess(req, 'admin')
+      const input = normalizeStockPreparationSourceRunBody(
+        requestBody(req),
+        VALID_STOCK_PREPARATION_PLM_SOURCE_RUN_REQUEST_KEYS,
+        'STOCK_PREPARATION_PLM_SOURCE_RUN_REQUEST_INVALID',
+      )
+      const tenantId = resolveTenantId(req, input)
+      const sourceRuntime = await loadStockPreparationReadonlySource(
+        req,
+        { ...input, tenantId },
+        'STOCK_PREPARATION_PLM_SOURCE_RUN_REQUEST_INVALID',
+      )
+      const actor = user.id || user.email
+      const result = await runPlmBomReadonlySource({
+        permission: 'admin',
+        projectId: input.projectId,
+        sourceProjectNo: input.sourceProjectNo,
+        projectName: input.projectName,
+        syncRunId: input.syncRunId,
+        snapshotBatchId: input.snapshotBatchId,
+        snapshotVersion: input.snapshotVersion,
+        actor,
+        ...sourceRuntime,
+      })
+      return sendOk(res, publicReadonlySourceRunResult(result))
+    },
+
+    // #3889: approved ERP/K3 readonly config -> pure material-cache intake shape summary. There is no
+    // internal or external write and no K3 Save/Submit/Audit path.
+    async stockPreparationErpMaterialSourceRun(req, res) {
+      const user = requireAccess(req, 'admin')
+      const input = normalizeStockPreparationSourceRunBody(
+        requestBody(req),
+        VALID_STOCK_PREPARATION_ERP_SOURCE_RUN_REQUEST_KEYS,
+        'STOCK_PREPARATION_ERP_SOURCE_RUN_REQUEST_INVALID',
+      )
+      const tenantId = resolveTenantId(req, input)
+      const sourceRuntime = await loadStockPreparationReadonlySource(
+        req,
+        { ...input, tenantId },
+        'STOCK_PREPARATION_ERP_SOURCE_RUN_REQUEST_INVALID',
+      )
+      const actor = user.id || user.email
+      const result = await runErpMaterialReadonlySource({
+        permission: 'admin',
+        syncRunId: input.syncRunId,
+        actor,
+        ...sourceRuntime,
+      })
+      return sendOk(res, publicReadonlySourceRunResult(result))
     },
 
     // #3751 MVP view 2: readonly LIST of the immutable BOM snapshot batches for a business project.

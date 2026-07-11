@@ -295,6 +295,83 @@ async function testListPageBoundedPageIndexInput() {
   assert.deepEqual({ ...keyed.inputs }, { key: 'M-001', pageIndex: 2 })
 }
 
+async function testTrustedInternalPagingDoesNotWidenPublicDefaults() {
+  const prepared = prepareConfiguredRead({ config: normalizedConfig('list_page') })
+  const { deps, state } = mockDeps({
+    read: (request) => ({
+      records: Array.from({ length: request.limit }, () => ({})),
+      raw: {
+        Data: {
+          Data: Array.from({ length: request.limit }, (_, i) => ({
+            FSigmaField: `SIGMA-VALUE-${i}`,
+          })),
+          ROWCOUNT: 73,
+          PAGEINDEX: request.options.listPageIndex,
+        },
+      },
+      metadata: {
+        returnedRecordCount: request.limit,
+        dataRowCount: 73,
+        dataPageIndex: request.options.listPageIndex,
+      },
+    }),
+  })
+  const outcome = await executeConfiguredRead(prepared, deps, { rowCap: 20, pageIndex: 4 })
+
+  assert.equal(state.readArgs[0].limit, 20)
+  assert.equal(state.readArgs[0].options.listPageIndex, 4)
+  assert.equal(outcome.data.recordCount, 20)
+  assert.deepEqual(outcome.page, {
+    nextCursor: null,
+    done: false,
+    returnedRecordCount: 20,
+    sourceTotalCount: 73,
+    pageIndex: 4,
+  })
+  assert.equal(JSON.stringify(outcome).includes('sourceTotalCount'), false, 'internal page metadata is non-enumerable')
+  assertEvidenceValuesFree(outcome.evidence)
+  assert.equal(JSON.stringify(outcome.evidence).includes('73'), false, 'source totals stay internal')
+  assert.throws(
+    () => __internals.normalizeTrustedExecution(prepared.plan, { rowCap: 1001 }),
+    (error) => error instanceof ReadSourceProbeContractError && error.reason === 'execution_row_cap_invalid',
+  )
+  assert.throws(
+    () => __internals.normalizeTrustedExecution(prepared.plan, { pageIndex: 11 }),
+    (error) => error instanceof ReadSourceProbeContractError && error.reason === 'execution_page_index_invalid',
+  )
+  assert.deepEqual(
+    __internals.normalizeTrustedExecution(prepared.plan, { cursor: 'offset:20' }).cursor,
+    'offset:20',
+    'trusted list execution may use cursor-based adapters',
+  )
+  assert.throws(
+    () => __internals.normalizeTrustedExecution(prepared.plan, { cursor: 'offset:20', pageIndex: 2 }),
+    (error) => error instanceof ReadSourceProbeContractError && error.reason === 'execution_pagination_conflict',
+  )
+
+  const keyed = prepareConfiguredRead({
+    config: normalizedConfig('single_record'),
+    inputs: { key: 'M-001' },
+  })
+  const cursorDeps = mockDeps({
+    read: (request) => ({
+      records: [{}],
+      nextCursor: 'offset:20',
+      done: false,
+      raw: { Data: { FSigmaField: 'SIGMA-VALUE' } },
+      metadata: { count: 1 },
+    }),
+  })
+  const cursorOutcome = await executeConfiguredRead(keyed, cursorDeps.deps, {
+    rowCap: 20,
+    cursor: 'offset:10',
+  })
+  assert.equal(cursorDeps.state.readArgs[0].cursor, 'offset:10')
+  assert.equal(cursorOutcome.page.nextCursor, 'offset:20')
+  assert.equal(cursorOutcome.page.sourceTotalCount, null, 'per-page metadata.count is not a source total')
+  assert.equal(JSON.stringify(cursorOutcome.evidence).includes('offset:'), false)
+}
+
 async function testDetailWithLinesBothContainersMapped() {
   const prepared = prepareConfiguredRead({ config: normalizedConfig('detail_with_lines'), inputs: { key: 'PBOM-001' } })
   const { deps } = mockDeps({
@@ -409,6 +486,7 @@ async function main() {
   await testSingleRecordDataPlane()
   await testListPageCapAndProjection()
   await testListPageBoundedPageIndexInput()
+  await testTrustedInternalPagingDoesNotWidenPublicDefaults()
   await testDetailWithLinesBothContainersMapped()
   await testContainerMissingAndShapeMismatch()
   await testAdapterErrorsAreCoarseWithNullData()

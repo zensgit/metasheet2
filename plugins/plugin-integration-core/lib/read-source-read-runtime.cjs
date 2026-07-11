@@ -41,6 +41,8 @@ const {
 const { applyReadSmokePresetOverlay } = require('./read-smoke.cjs')
 
 const CONFIGURED_READ_BODY_KEYS = Object.freeze(['config', 'inputs'])
+const TRUSTED_EXECUTION_MAX_ROW_CAP = 1000
+const TRUSTED_EXECUTION_MAX_PAGE_INDEX = 10
 
 // R2 (#1709, owner-authorized 2026-07-03): resolver_lookup is now a supported runtime mode — its multiplicity
 // selection semantics were designed (resolver design-lock) and implemented as the R1 pure evaluator, which
@@ -135,12 +137,103 @@ function failureOutcome(plan, errorCode, errorType, extra) {
   }
 }
 
+function normalizeTrustedExecution(plan, input) {
+  if (input === undefined || input === null) {
+    return { plan, cursor: null, pageIndex: null }
+  }
+  if (!isPlainObject(input)) {
+    throw new ReadSourceProbeContractError('execution_options_invalid')
+  }
+  if (!Object.keys(input).every((key) => ['rowCap', 'cursor', 'pageIndex'].includes(key))) {
+    throw new ReadSourceProbeContractError('execution_options_unexpected_field')
+  }
+  const rowCap = input.rowCap === undefined ? plan.rowCap : Number(input.rowCap)
+  if (!Number.isInteger(rowCap) || rowCap < 1 || rowCap > TRUSTED_EXECUTION_MAX_ROW_CAP) {
+    throw new ReadSourceProbeContractError('execution_row_cap_invalid')
+  }
+  const cursor = input.cursor === undefined || input.cursor === null
+    ? null
+    : (typeof input.cursor === 'string' && input.cursor.length <= 512 ? input.cursor : undefined)
+  if (cursor === undefined) {
+    throw new ReadSourceProbeContractError('execution_cursor_invalid')
+  }
+  const pageIndex = input.pageIndex === undefined || input.pageIndex === null
+    ? null
+    : Number(input.pageIndex)
+  if (
+    pageIndex !== null
+    && (!Number.isInteger(pageIndex) || pageIndex < 1 || pageIndex > TRUSTED_EXECUTION_MAX_PAGE_INDEX)
+  ) {
+    throw new ReadSourceProbeContractError('execution_page_index_invalid')
+  }
+  if (cursor !== null && pageIndex !== null) {
+    throw new ReadSourceProbeContractError('execution_pagination_conflict')
+  }
+  if (plan.mode !== 'list_page' && pageIndex !== null) {
+    throw new ReadSourceProbeContractError('execution_page_index_not_allowed')
+  }
+  return {
+    plan: rowCap === plan.rowCap ? plan : Object.freeze({ ...plan, rowCap }),
+    cursor,
+    pageIndex,
+  }
+}
+
+function buildExecutionRequest(plan, inputs, execution) {
+  const request = buildReadSourceProbeRequest(plan, inputs)
+  if (execution.cursor !== null) {
+    request.cursor = execution.cursor
+    if (isPlainObject(request.options) && Object.prototype.hasOwnProperty.call(request.options, 'listPageIndex')) {
+      const options = { ...request.options }
+      delete options.listPageIndex
+      request.options = options
+    }
+  }
+  if (execution.pageIndex !== null) {
+    request.options = { ...(request.options || {}), listPageIndex: execution.pageIndex }
+  }
+  return request
+}
+
+function safeCount(...values) {
+  for (const value of values) {
+    const parsed = typeof value === 'string' && value.trim() ? Number(value) : value
+    if (typeof parsed === 'number' && Number.isInteger(parsed) && parsed >= 0) return parsed
+  }
+  return null
+}
+
+function buildInternalPage(raced, request, mappedRecordCount) {
+  const metadata = isPlainObject(raced && raced.metadata) ? raced.metadata : {}
+  return {
+    nextCursor: typeof raced?.nextCursor === 'string' && raced.nextCursor.length <= 512
+      ? raced.nextCursor
+      : null,
+    done: raced?.done === true,
+    returnedRecordCount: safeCount(
+      metadata.returnedRecordCount,
+      Array.isArray(raced && raced.records) ? raced.records.length : null,
+      mappedRecordCount,
+    ),
+    // Generic `metadata.count` is commonly the current page size (PLM/Bridge), not a source total.
+    // Only explicitly total-shaped fields may terminate multi-page intake early.
+    sourceTotalCount: safeCount(metadata.dataRowCount, metadata.totalCount),
+    pageIndex: safeCount(metadata.dataPageIndex, metadata.requestedPageIndex, request?.options?.listPageIndex),
+  }
+}
+
 // Execute a configured read against an already-loaded, already-approved registered system. Contract-level
 // problems throw (route maps to 4xx); read-level outcomes ALWAYS return { evidence, data } — evidence
 // values-free in the probe vocabulary, data null on any failure. `timeoutMs` is dependency injection for
 // tests only; the platform constants are never request-reachable.
-async function executeConfiguredRead(prepared, { system, createAdapter, timeoutMs = READ_SOURCE_PROBE_TIMEOUT_MS }) {
-  const { plan, fieldMap, config, inputs } = prepared
+async function executeConfiguredRead(
+  prepared,
+  { system, createAdapter, timeoutMs = READ_SOURCE_PROBE_TIMEOUT_MS },
+  trustedExecution,
+) {
+  const { plan: preparedPlan, fieldMap, config, inputs } = prepared
+  const execution = normalizeTrustedExecution(preparedPlan, trustedExecution)
+  const plan = execution.plan
   // Execution-time defense-in-depth — same re-guard as the S2-b probe: no adapter, no outbound path for
   // a readPath that lost the config-time guarantee.
   if (!isSafeRelativeReadPath(plan.readPath)) {
@@ -152,7 +245,7 @@ async function executeConfiguredRead(prepared, { system, createAdapter, timeoutM
 
   const adapterSystem = applyReadSmokePresetOverlay(system, buildReadSourceProbeOverlayPreset(plan))
   const adapter = createAdapter(adapterSystem)
-  const request = buildReadSourceProbeRequest(plan, inputs)
+  const request = buildExecutionRequest(plan, inputs, execution)
 
   const TIMEOUT = Symbol('read-source-configured-read-timeout')
   let timer
@@ -264,10 +357,18 @@ async function executeConfiguredRead(prepared, { system, createAdapter, timeoutM
     recordCount,
     capReached,
   })
-  return {
+  const result = {
     evidence,
     data: { containers: dataContainers, recordCount },
   }
+  // Internal-only continuation metadata. Non-enumerable by construction so even an accidental whole-
+  // outcome JSON response cannot expose totals/cursors; trusted backend feeders can still read it.
+  Object.defineProperty(result, 'page', {
+    value: Object.freeze(buildInternalPage(raced, request, recordCount)),
+    enumerable: false,
+    writable: false,
+  })
+  return result
 }
 
 module.exports = {
@@ -276,6 +377,9 @@ module.exports = {
   __internals: {
     locateContainerValue,
     mapRecord,
+    normalizeTrustedExecution,
     walkOwnPath,
+    TRUSTED_EXECUTION_MAX_PAGE_INDEX,
+    TRUSTED_EXECUTION_MAX_ROW_CAP,
   },
 }
