@@ -1,25 +1,37 @@
 /**
  * 4c-3 §7 — PIT-resurrect (`POST /sheets/:id/revert-execute`, T8-1 undelete) inbound-edge replay (real
- * DB). R8 absorption-audit hardening (P3-1, post-hoc — no product behaviour changed). PR #3975 wired
- * resurrect to reuse the SAME `replayInboundLinks` helper restore uses (design-lock §7: "never a
- * parallel inbound semantic"), but shipped with no dedicated golden for its anchor derivation, which
- * — unlike restore's `meta_records_trash.delete_revision_id` column — is a HEURISTIC: resurrect has no
- * trash row, so it anchors to the record's MOST RECENT 'delete' revision (`ORDER BY created_at DESC`).
+ * DB). R11 A′ (ratified 2026-07-11) — the anchor is now DERIVED from the revert's `asOf` T, replacing
+ * the R8 `created_at DESC` latest-delete heuristic. Resurrect has no trash row (unlike restore's
+ * `meta_records_trash.delete_revision_id`), but the revert carries T on the wire and the semantics are
+ * "restore the record as it existed at T"; a record is in the resurrect set precisely because its
+ * latest revision with `created_at <= T` is NOT a delete (reconstructRecordsAtT), so the removing
+ * deletion is the FIRST 'delete' revision strictly AFTER T — a vintage-EXACT anchor:
+ * `SELECT ... WHERE action='delete' AND created_at > T ORDER BY created_at ASC, version ASC, id ASC LIMIT 1`.
  *
- * This file pins the two honest consequences of that heuristic (see the reworded comment at
- * `univer-meta.ts` ~10165, which used to overclaim "deterministic"):
- *   (A) multi-vintage: resurrecting an OLDER vintage's snapshot still anchors to the LATEST delete
- *       revision — replaying only that vintage's captured edges, never stringing multiple anchors'
- *       tombstones together (no cross-vintage double-replay).
- *   (B) the most recent deletion happened while capture was off (zero tombstones for that anchor) →
+ * Goldens:
+ *   (A) multi-vintage: resurrecting an OLDER vintage's snapshot anchors to THAT vintage's deletion
+ *       (first delete after T), replaying exactly that vintage's captured edges — never the LATEST
+ *       deletion's, never a cross-vintage union. This assertion is the INVERSE of the R8 heuristic
+ *       golden (which replayed the latest vintage's edges); reverting the query to `created_at DESC`
+ *       flips it red.
+ *   (B) the removing deletion happened while capture was off (zero tombstones for that anchor) →
  *       silent zero replay, honest, never an error and never fabricated.
- * Over-replay stays impossible in both cases regardless of which delete revision the heuristic picks,
- * because precondition 6 (neighbour consent — replay only what N's OWN live data still declares) gates
- * every edge independently of the anchor.
+ *   (C) flag OFF: byte-identical to pre-4c-3 (no undeleteInbound field).
+ *   (D) same-millisecond tiebreak: two delete revisions share `created_at`; `version ASC, id ASC`
+ *       selects a unique, stable anchor (mutation: `version DESC` flips which neighbour replays).
+ *   (E) boundary — absent-at-T: a delete at exactly `created_at == T` is the record's latest revision ⇒
+ *       absent at T ⇒ NOT resurrected. Pins reconstruct's `<= T` EXCLUSION (the record never reaches the
+ *       anchor query), NOT the anchor's `> T` strictness.
+ *   (F) boundary — strict `> T` is load-bearing: a re-create at exactly T makes the record PRESENT at T, so
+ *       its removing delete is a LATER one; `>= T` would mis-anchor to the prior vintage's same-instant
+ *       delete. This is the ONLY golden that reds under `> T` → `>= T`.
+ * Over-replay stays impossible regardless of which delete revision anchors, because precondition 6
+ * (neighbour consent — replay only what N's OWN live data still declares) gates every edge
+ * independently of the anchor.
  *
  * Design-lock: `docs/development/multitable-global-history-4c3-record-undelete-2b-inbound-edge-replay-
- * design-lock-20260708.md` §7. Audit: `/tmp/pr3975-4c3-absorption-audit-claude-20260709.md` (P3-1).
- * Runs only with DATABASE_URL.
+ * design-lock-20260708.md` §7; A′ decision: `multitable-global-history-resurrect-anchor-exactness-
+ * decision-20260710.md`. Runs only with DATABASE_URL.
  */
 import express, { type Express } from 'express'
 import request from 'supertest'
@@ -43,6 +55,7 @@ const T0_5 = '2026-01-01T12:00:00.000Z'
 const T1 = '2026-01-02T00:00:00.000Z'
 const T1_5 = '2026-01-02T12:00:00.000Z'
 const T2 = '2026-01-03T00:00:00.000Z'
+const T3 = '2026-01-04T00:00:00.000Z'
 
 const q = (sql: string, params?: unknown[]) => poolManager.get().query(sql, params)
 let app: Express
@@ -114,7 +127,7 @@ describeIfDatabase('4c-3 §7 — PIT-resurrect inbound-edge replay heuristic anc
 
   test('sentinel: DATABASE_URL set', () => { expect(process.env.DATABASE_URL).toBeTruthy() })
 
-  test('(A) multi-vintage: resurrecting an OLDER vintage anchors to the LATEST delete revision — replays ONLY that vintage, never strings anchors together', async () => {
+  test('(A) multi-vintage: resurrecting an OLDER vintage anchors to THAT vintage\'s deletion (first delete after T) — replays vintage-1, NOT the latest vintage', async () => {
     process.env[INBOUND_FLAG] = 'true'
     const F = mkFieldId('a')
     await insertField(SHEET_B, F)
@@ -144,13 +157,14 @@ describeIfDatabase('4c-3 §7 — PIT-resurrect inbound-edge replay heuristic anc
     const live = await liveRow(R)
     expect(live?.data?.[NAME]).toBe('vintage-1') // the OLD vintage's snapshot was indeed resurrected
 
-    // Anchor = latest delete revision (del2, vintage-2) — so vintage-2's neighbour replays...
-    expect(await edgeCount(F, N2, R)).toBe(1)
+    // A′: anchor = FIRST delete after T0_5 = del1 (vintage-1's own deletion). So vintage-1's neighbour
+    // replays — the vintage-EXACT edge, matching the resurrected snapshot...
+    expect(await edgeCount(F, N1, R)).toBe(1)
     expect(ex.body?.data?.undeleteInbound).toMatchObject({ replayed: 1 })
-    // ...but vintage-1's neighbour does NOT — its tombstone lives under a DIFFERENT anchor (del1) that
-    // this resurrect never queries. This is the honest, pinned consequence of the heuristic: exactly
-    // one vintage's edges replay, never a cross-vintage union.
-    expect(await edgeCount(F, N1, R)).toBe(0)
+    // ...and vintage-2's neighbour does NOT — its tombstone lives under a LATER anchor (del2) that a
+    // T0_5 revert never reaches. Reverting the anchor query to `created_at DESC` (the R8 heuristic)
+    // inverts both assertions: N2 replays, N1 does not.
+    expect(await edgeCount(F, N2, R)).toBe(0)
   })
 
   test('(B) most recent deletion was uncaptured (zero tombstones for its anchor): silent zero replay, no error, resurrect still succeeds', async () => {
@@ -197,5 +211,102 @@ describeIfDatabase('4c-3 §7 — PIT-resurrect inbound-edge replay heuristic anc
     expect(ex.status).toBe(200)
     expect(ex.body?.data?.undeleteInbound).toBeUndefined()
     expect(await edgeCount(F, N, R)).toBe(0) // today's (pre-4c-3) behavior: inbound stays lost on resurrect
+  })
+
+  test('(D) same-millisecond tiebreak: two delete revisions share created_at — version ASC, id ASC picks a unique, stable anchor', async () => {
+    process.env[INBOUND_FLAG] = 'true'
+    const F = mkFieldId('d')
+    await insertField(SHEET_B, F)
+    const R = mkRecordId('d_r')
+    const Na = mkRecordId('d_na') // edge captured under the LOWER-version delete (v2)
+    const Nb = mkRecordId('d_nb') // edge captured under the HIGHER-version delete (v4)
+    await insertRecord(SHEET_B, Na, { [F]: [R] })
+    await insertRecord(SHEET_B, Nb, { [F]: [R] })
+
+    const SNAP_V1 = { [NAME]: 'v1' }
+    const SNAP_V2 = { [NAME]: 'v2' }
+    await rev(SHEET_A, R, 1, 'create', SNAP_V1, T0)
+    // delete v2, restore v3, delete v4 — ALL sharing the same created_at (T1). Rapid same-ms churn.
+    const delLo = await rev(SHEET_A, R, 2, 'delete', SNAP_V1, T1)
+    await insertTombstone(SHEET_A, F, Na, R, delLo)
+    await rev(SHEET_A, R, 3, 'create', SNAP_V2, T1)
+    const delHi = await rev(SHEET_A, R, 4, 'delete', SNAP_V2, T1)
+    await insertTombstone(SHEET_A, F, Nb, R, delHi)
+
+    // Resurrect at T0_5 (< T1) → the v1 snapshot. Anchor = first delete after T0_5, and with delLo/delHi
+    // tied on created_at, `version ASC` picks delLo (v2). Na replays; Nb does not. Mutation: flipping the
+    // anchor query to `version DESC` (or dropping the version tiebreak so id decides differently) selects
+    // delHi and replays Nb instead ⇒ this golden goes red.
+    const pv = await preview(T0_5)
+    expect(pv.status).toBe(200)
+    expect(pv.body?.data?.undeleteRecordIds).toEqual([R])
+    const ex = await execute(T0_5, pv.body?.data?.previewIdentity)
+    expect(ex.status).toBe(200)
+    expect(ex.body?.data?.resurrectedCount).toBe(1)
+    expect(ex.body?.data?.undeleteInbound).toMatchObject({ replayed: 1 })
+    expect(await edgeCount(F, Na, R)).toBe(1)
+    expect(await edgeCount(F, Nb, R)).toBe(0)
+  })
+
+  test('(E) boundary: a delete at exactly created_at == T ⇒ record absent at T ⇒ NOT in the resurrect set (strict > T complements reconstruct\'s <= T)', async () => {
+    process.env[INBOUND_FLAG] = 'true'
+    const F = mkFieldId('e')
+    await insertField(SHEET_B, F)
+    const R = mkRecordId('e_r')
+    const N = mkRecordId('e_n')
+    await insertRecord(SHEET_B, N, { [F]: [R] })
+
+    const SNAP = { [NAME]: 'boundary' }
+    await rev(SHEET_A, R, 1, 'create', SNAP, T0)
+    const delAtT = await rev(SHEET_A, R, 2, 'delete', SNAP, T2) // deleted at exactly T2
+    await insertTombstone(SHEET_A, F, N, R, delAtT)
+
+    // Revert to exactly T2: reconstructRecordsAtT applies `created_at <= T2`, so the delete@T2 is the
+    // latest revision ⇒ the record is ABSENT at T2 ⇒ it is never in the "existed at T but deleted now"
+    // resurrect set. The strict `created_at > T` anchor query would also skip that delete, but the record
+    // never reaches the anchor step because it is excluded upstream.
+    const pv = await preview(T2)
+    expect(pv.status).toBe(200)
+    expect(pv.body?.data?.undeleteRecordIds ?? []).not.toContain(R)
+    expect(await edgeCount(F, N, R)).toBe(0) // never resurrected, so no inbound edge replayed
+  })
+
+  test('(F) strict > T is load-bearing: a re-create at exactly T means the removing delete is a LATER one — >= T would mis-anchor to the prior vintage\'s delete', async () => {
+    // The one shape golden (E) does NOT cover: at exactly T the record EXISTS (a re-create landed at T with
+    // a higher version than the same-instant delete of the previous vintage), so it IS in the resurrect set.
+    // reconstruct (`created_at <= T`, DISTINCT ON ... version DESC) picks the v3 CREATE as the state at T.
+    // The deletion that removed THAT vintage is v4 (T3), strictly after T. Shipped `created_at > T` anchors to
+    // v4 (correct). Mutating the query to `created_at >= T` would anchor to v2 (the T2 delete of the OLD
+    // vintage) and replay the wrong neighbour — this golden is the ONLY one that reds under `>=`.
+    process.env[INBOUND_FLAG] = 'true'
+    const F = mkFieldId('f')
+    await insertField(SHEET_B, F)
+    const R = mkRecordId('f_r')
+    const Nv2 = mkRecordId('f_nv2') // edge captured under v2 (the T2 delete of the OLD, un-resurrected vintage)
+    const Nv4 = mkRecordId('f_nv4') // edge captured under v4 (the T3 delete of the RESURRECTED vintage)
+    await insertRecord(SHEET_B, Nv2, { [F]: [R] })
+    await insertRecord(SHEET_B, Nv4, { [F]: [R] })
+
+    const SNAP_V1 = { [NAME]: 'v1' }
+    const SNAP_V3 = { [NAME]: 'v3' }
+    await rev(SHEET_A, R, 1, 'create', SNAP_V1, T0)
+    const dv2 = await rev(SHEET_A, R, 2, 'delete', SNAP_V1, T2) // delete of vintage-1, exactly at T2
+    await insertTombstone(SHEET_A, F, Nv2, R, dv2)
+    await rev(SHEET_A, R, 3, 'create', SNAP_V3, T2) // re-create at exactly T2 (higher version ⇒ latest <= T2)
+    const dv4 = await rev(SHEET_A, R, 4, 'delete', SNAP_V3, T3) // delete of vintage-3, later
+    await insertTombstone(SHEET_A, F, Nv4, R, dv4)
+
+    const pv = await preview(T2)
+    expect(pv.status).toBe(200)
+    expect(pv.body?.data?.undeleteRecordIds).toEqual([R])
+    const ex = await execute(T2, pv.body?.data?.previewIdentity)
+    expect(ex.status).toBe(200)
+    expect(ex.body?.data?.resurrectedCount).toBe(1)
+    const live = await liveRow(R)
+    expect(live?.data?.[NAME]).toBe('v3') // the AT-T (re-created) vintage was resurrected, not vintage-1
+    // strict `> T2` anchors to v4 (vintage-3's own delete) → Nv4 replays, Nv2 does not.
+    expect(await edgeCount(F, Nv4, R)).toBe(1)
+    expect(await edgeCount(F, Nv2, R)).toBe(0)
+    expect(ex.body?.data?.undeleteInbound).toMatchObject({ replayed: 1 })
   })
 })
