@@ -517,6 +517,15 @@ export interface HistoryBatchDetail {
   visibleAffectedRecordCount: number
   visibleAffectedFieldCount: number
   changes: HistoryChange[]
+  /**
+   * all-tables-B (R11): masked field-id → display-name map, per sheet, for the fields that actually appear
+   * in this batch's (post-mask) changes. Reuses the SAME per-sheet allow-set (`allowedFieldsBySheet`) the
+   * value masking uses — layer-2 property-hidden ∩ layer-3 field_permissions ∩ taint-mask — so a field name
+   * here is, by construction, a field whose VALUE the projection already emits: no new information. Lets the
+   * History Center label cross-table (all-tables mode) diff rows by name instead of raw id without the FE
+   * re-deriving the two-layer mask client-side (the #4007 footgun). Hidden/denied field names NEVER appear.
+   */
+  fieldNames: Record<string, Record<string, string>>
 }
 
 /**
@@ -629,6 +638,9 @@ export async function loadHistoryBatchDetail(
   const changes: HistoryChange[] = []
   const visibleRecords = new Set<string>()
   const visibleFields = new Set<string>()
+  // all-tables-B: per-sheet set of the (already post-mask) field ids that appear in this batch's changes —
+  // exactly the ids we need display names for. Only these get named (minimal surface, "payload 实际涉及").
+  const involvedFieldsBySheet = new Map<string, Set<string>>()
   let head: Record<string, unknown> | null = null
   for (const { row: r, sheetId, recordId, action, version } of visible) {
     if (!head) head = r
@@ -638,6 +650,11 @@ export async function loadHistoryBatchDetail(
     const allowed = allowedFieldsFor(allowedFieldsBySheet, sheetId)
     const fields = (Array.isArray(r.changed_field_ids) ? r.changed_field_ids.map(String) : []).filter((f) => allowed.has(f))
     for (const f of fields) visibleFields.add(f)
+    if (fields.length > 0) {
+      let inv = involvedFieldsBySheet.get(sheetId)
+      if (!inv) { inv = new Set(); involvedFieldsBySheet.set(sheetId, inv) }
+      for (const f of fields) inv.add(f)
+    }
     // T1b before-image, sourced per action semantics (see loadPreviousSnapshots doc):
     //   create → null (no prior state); update → the immediately-previous revision's snapshot (looked up
     //   above); delete → this revision's OWN snapshot column (the pre-delete state it captured).
@@ -659,6 +676,30 @@ export async function loadHistoryBatchDetail(
     })
   }
   if (!head || visibleRecords.size === 0) return null // fully denied → same as missing (LOCK-3, no oracle)
+
+  // all-tables-B: resolve display names for the involved (already post-mask) fields, one query for the whole
+  // batch (unnest-join, never N+1 — same shape as loadPreviousSnapshots). Every (sheet, field) pair is a
+  // subset of the two-layer allow-set, so the query cannot return a hidden/denied field; the re-check below
+  // is defense-in-depth (LOCK-3: a field name is as sensitive as its value, evaluated PER the field's sheet).
+  const fieldNames: Record<string, Record<string, string>> = {}
+  const nameSheetIds: string[] = []
+  const nameFieldIds: string[] = []
+  for (const [sheetId, ids] of involvedFieldsBySheet) for (const fieldId of ids) { nameSheetIds.push(sheetId); nameFieldIds.push(fieldId) }
+  if (nameFieldIds.length > 0) {
+    const nameRes = await query(
+      `SELECT f.id, f.sheet_id, f.name FROM meta_fields f
+       JOIN unnest($1::text[], $2::text[]) AS t(sheet_id, field_id) ON f.sheet_id = t.sheet_id AND f.id = t.field_id`,
+      [nameSheetIds, nameFieldIds],
+    )
+    for (const row of nameRes.rows as Array<Record<string, unknown>>) {
+      const sheetId = String(row.sheet_id)
+      const fieldId = String(row.id)
+      if (!allowedFieldsFor(allowedFieldsBySheet, sheetId).has(fieldId)) continue // defense-in-depth LOCK-3
+      const name = typeof row.name === 'string' ? row.name : ''
+      ;(fieldNames[sheetId] ??= {})[fieldId] = name
+    }
+  }
+
   return {
     batchId,
     actorId: typeof head.actor_id === 'string' ? head.actor_id : null,
@@ -667,5 +708,6 @@ export async function loadHistoryBatchDetail(
     visibleAffectedRecordCount: visibleRecords.size,
     visibleAffectedFieldCount: visibleFields.size,
     changes,
+    fieldNames,
   }
 }
