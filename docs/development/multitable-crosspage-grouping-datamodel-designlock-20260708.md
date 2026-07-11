@@ -1,6 +1,7 @@
 # Multitable — 跨页 / 服务端分组数据模型 — DESIGN LOCK
 
-- **状态：PROPOSED — 待 owner ratify。** 本文件为纯文档；未经 ratify 不得开工任何运行时切片。
+- **状态：RATIFIED（owner directive 2026-07-11）。** 本文件为纯文档；未经 ratify 不得开工任何运行时切片。
+> **RATIFIED — owner directive 2026-07-11**（批 12 把 merge-tree-clean 锁）。header 状态由 owner 决定翻转、Claude 机械执行(非自我批准)。锁内 per-tier owner 子决定(如变体/env-cap/storage opt-in)仍各自留待 owner。
 - **✅ 已经独立对抗门禁（MERGE_CLEAN，2026-07-08）**——载重声明全部代码坐实（服务端发真计数/客户端 `MetaGridTable.vue:1213` 丢弃 `node.count`/两个「直接读」阻塞真实/小计值对骨架错/GW 台账矛盾只 surface 不改），权限引用真实、无 P1/P2。门禁 P3 + NIT 已并入：§3.0 分支优先级、count 消费者措辞收紧、§5.0 `[MUTEX:BE]`。报告 `/tmp/crosspage-grouping-lock-gate-20260708.md`。
 - **基线**：`origin/main` @ `c29b5e2c2`。以下每条"现状"断言均给出 file:line，均在该 commit 上复核过。
 - **本锁的位置**：`docs/development/multitable-grid-grouped-windowing-designlock-20260705.md` §6 / §8 把
