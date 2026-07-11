@@ -14,6 +14,14 @@ const buildScript = fs.readFileSync(buildScriptPath, 'utf8')
 const verifyScript = fs.readFileSync(verifyScriptPath, 'utf8')
 const packageWorkflow = fs.readFileSync(packageWorkflowPath, 'utf8')
 
+test('on-prem verifier requires the superseded audit migration marker', () => {
+  assert.match(
+    verifyScript,
+    /search_fixed_string '20250926_create_audit_tables' "\$provider"/,
+    'the package verifier must reject builds that could replay the non-idempotent legacy audit SQL',
+  )
+})
+
 function runVerifierFunction(functionName, listEntries) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ms2-package-list-'))
   const listPath = path.join(dir, 'archive-list.txt')

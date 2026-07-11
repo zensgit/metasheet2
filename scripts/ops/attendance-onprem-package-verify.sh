@@ -118,6 +118,8 @@ function verify_core_backend_migration_set() {
     || die "migration-provider.js must expose the superseded legacy SQL opt-in"
   search_fixed_string '032_create_approval_records' "$provider" \
     || die "migration-provider.js must carry the superseded legacy SQL skip list"
+  search_fixed_string '20250926_create_audit_tables' "$provider" \
+    || die "migration-provider.js must no-op the superseded audit SQL on upgraded on-prem databases"
 
   [[ -f "${source_dir}/20250925_create_view_tables.sql" ]] \
     || die "Source SQL migration missing from package: 20250925_create_view_tables.sql"
