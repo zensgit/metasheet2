@@ -21,6 +21,11 @@
         >{{ recordDisplay(c) }}</button>
         <span v-else class="meta-hist__change-rec" :title="c.recordId" data-test="hist-rec-label">{{ recordDisplay(c) }}</span>
         <span class="meta-hist__change-fields">{{ fieldsLabel(c.changedFieldIds.length) }}</span>
+        <span
+          v-if="c.restoredFromVersion != null"
+          class="meta-hist__change-restored"
+          data-test="hist-restored-from"
+        >{{ restoredFromLabel(c.restoredFromVersion) }}</span>
       </div>
       <ul v-if="c.changedFieldIds.length" class="meta-hist__diff" data-test="hist-diff">
         <li v-for="d in changeFieldDiffs(c)" :key="d.fieldId" class="meta-hist__diff-row" data-test="hist-diff-row">
@@ -52,7 +57,7 @@
 
 <script setup lang="ts">
 import { useLocale } from '../../composables/useLocale'
-import { recordLabel } from '../utils/meta-record-labels'
+import { recordLabel, restoredFromVersionBadge } from '../utils/meta-record-labels'
 import { formatFieldDisplay, pickRecordTitle } from '../utils/field-display'
 import type { HistoryChange, LinkedRecordSummary, MetaField, PersonSummary } from '../types'
 
@@ -88,6 +93,10 @@ const { isZh } = useLocale()
 
 function fieldsLabel(n: number): string {
   return isZh.value ? `${n} 个字段` : `${n} field(s)`
+}
+// R11 back-reference: badge shown only for a restore change carrying a source version (non-null).
+function restoredFromLabel(version: number): string {
+  return restoredFromVersionBadge(version, isZh.value)
 }
 function shortRecordId(id: string): string {
   const trimmed = id.startsWith('rec_') ? id.slice(4) : id

@@ -389,6 +389,9 @@ export interface HistoryChange {
   changedFieldIds: string[]
   before: Record<string, unknown> | null
   after: Record<string, unknown> | null
+  /** R11 back-reference: the source record-version this `source='restore'` change restored from, else
+   *  null/absent. Optional so a pre-R11 backend payload still typechecks. The badge renders only when non-null. */
+  restoredFromVersion?: number | null
 }
 
 export interface HistoryBatchDetail {

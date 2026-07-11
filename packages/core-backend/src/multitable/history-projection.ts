@@ -507,6 +507,13 @@ export interface HistoryChange {
   changedFieldIds: string[]
   before: Record<string, unknown> | null
   after: Record<string, unknown> | null
+  /**
+   * R11 restore back-reference (OD-0=(a)): the SOURCE record-version a `source='restore'` record-version
+   * restore wrote from, else null. LOCK-3: a version number is metadata (same tier as changedFieldIds/version),
+   * carries no field value, needs no mask increment. Non-null only for the three record-version restore routes;
+   * every other write (incl. non-version-restore source='restore' emitters) is null. The FE badge keys on non-null.
+   */
+  restoredFromVersion?: number | null
 }
 
 export interface HistoryBatchDetail {
@@ -588,6 +595,14 @@ async function loadPreviousSnapshots(
   return result
 }
 
+// R11 back-reference: local 42703 guard for the restored_from_version deploy window (read side).
+function isUndefinedColumnError42703Projection(err: unknown, columnName: string): boolean {
+  const code = (err as { code?: string } | null)?.code
+  const message = err instanceof Error ? err.message : String(err)
+  if (code === '42703') return message.includes(columnName)
+  return message.includes(`column "${columnName}" does not exist`)
+}
+
 /**
  * Batch detail, permission-filtered. Returns null when the batch is unknown OR fully denied — the SAME
  * shape for missing and denied (LOCK-3: no existence oracle). The caller maps null → 404 not-found.
@@ -600,13 +615,24 @@ export async function loadHistoryBatchDetail(
   allowedFieldsBySheet: Map<string, Set<string>>,
 ): Promise<HistoryBatchDetail | null> {
   if (sheetIds.length === 0) return null
-  const res = await query(
-    `SELECT id, sheet_id, record_id, version, action, source, actor_id, changed_field_ids, batch_id, snapshot, patch, created_at
-     FROM meta_record_revisions
-     WHERE sheet_id = ANY($1::text[]) AND COALESCE(batch_id, id::text) = $2
-     ORDER BY created_at DESC, version DESC, id DESC`,
-    [sheetIds, batchId],
-  )
+  // R11 back-reference: select restored_from_version too, with a deploy-window fallback — a rolling deploy
+  // where this read ships before the restored_from_version migration degrades to the base column set (restoredFromVersion → null)
+  // instead of 500ing the whole batch-detail endpoint (mirrors record-service's delete_revision_id read).
+  const detailSelect = (withRestored: boolean) =>
+    query(
+      `SELECT id, sheet_id, record_id, version, action, source, actor_id, changed_field_ids, batch_id, snapshot, patch, created_at${withRestored ? ', restored_from_version' : ''}
+       FROM meta_record_revisions
+       WHERE sheet_id = ANY($1::text[]) AND COALESCE(batch_id, id::text) = $2
+       ORDER BY created_at DESC, version DESC, id DESC`,
+      [sheetIds, batchId],
+    )
+  let res
+  try {
+    res = await detailSelect(true)
+  } catch (err) {
+    if (!isUndefinedColumnError42703Projection(err, 'restored_from_version')) throw err
+    res = await detailSelect(false)
+  }
   const rows = res.rows as Array<Record<string, unknown>>
   if (rows.length === 0) return null
   const deniedBySheet = await loadDeniedBySheet(query, [...new Set(rows.map((r) => String(r.sheet_id)))], access)
@@ -673,6 +699,8 @@ export async function loadHistoryBatchDetail(
       changedFieldIds: fields,
       before: filterDataByAllowedFields(beforeSource, allowed),
       after: filterDataByAllowedFields(r.snapshot, allowed),
+      // R11 back-reference: pre-migration/absent → null; NULL → null; non-null int → the source version.
+      restoredFromVersion: typeof r.restored_from_version === 'number' ? r.restored_from_version : null,
     })
   }
   if (!head || visibleRecords.size === 0) return null // fully denied → same as missing (LOCK-3, no oracle)

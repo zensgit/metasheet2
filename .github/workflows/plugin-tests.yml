@@ -241,6 +241,7 @@ jobs:
             tests/integration/multitable-permmatrix-b4-g8-comments-visibility-realdb.test.ts \
             tests/integration/multitable-record-history-field-mask.test.ts \
             tests/integration/multitable-record-restore.test.ts \
+            tests/integration/multitable-restore-backreference-realdb.test.ts \
             tests/integration/multitable-record-recycle-bin.test.ts \
             tests/integration/multitable-history-events-realdb.test.ts \
             tests/integration/multitable-history-alltables-fieldnames-realdb.test.ts \

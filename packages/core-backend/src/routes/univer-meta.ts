@@ -9559,6 +9559,7 @@ export function univerMetaRouter(): Router {
           sheetScope,
           access,
           source: 'restore',
+          restoredFromVersion: targetVersion, // R11 back-reference (OD-0=(a)): legacy /restore is the 3rd version-restore path
         })
         const newVersion = result.updated.find((u) => u.recordId === recordId)?.version ?? currentVersion + 1
         return res.json({ ok: true, data: { recordId, newVersion, noop: false, restoredFieldIds, skippedFieldIds: [] } })
@@ -9700,6 +9701,7 @@ export function univerMetaRouter(): Router {
           sheetScope,
           access,
           source: 'restore',
+          restoredFromVersion: targetVersion, // R11 back-reference (OD-0=(a)): record-restore-execute
         })
         const newVersion = result.updated.find((u) => u.recordId === recordId)?.version ?? currentVersion + 1
         return res.json({ ok: true, data: { recordId, newVersion, noop: false, restoredFieldIds: selectedDiff.map((c) => c.fieldId) } })
@@ -9851,7 +9853,7 @@ export function univerMetaRouter(): Router {
           const result = await recordWriteService.patchRecords({
             sheetId, changesByRecord: new Map(contributing.map((c) => [c.recordId, c.diff])), actorId: getRequestActorId(req),
             fields, visiblePropertyFields: readableEchoFields, visiblePropertyFieldIds: readableEchoFieldIds,
-            attachmentFields, fieldById, capabilities, sheetScope, access, source: 'restore',
+            attachmentFields, fieldById, capabilities, sheetScope, access, source: 'restore', restoredFromVersion: targetVersion, // R11 back-reference: restore-batch-execute (all-or-nothing)
           })
           const versionByRecord = new Map(result.updated.map((u) => [u.recordId, u.version]))
           const records: Outcome[] = contributing.map((c) => ({ recordId: c.recordId, status: 'restored', newVersion: versionByRecord.get(c.recordId), restoredFieldIds: c.diff.map((d) => d.fieldId) }))
@@ -9879,7 +9881,7 @@ export function univerMetaRouter(): Router {
           const result = await recordWriteService.patchRecords({
             sheetId, changesByRecord: new Map([[c.recordId, c.diff]]), actorId: getRequestActorId(req),
             fields, visiblePropertyFields: readableEchoFields, visiblePropertyFieldIds: readableEchoFieldIds,
-            attachmentFields, fieldById, capabilities, sheetScope, access, source: 'restore',
+            attachmentFields, fieldById, capabilities, sheetScope, access, source: 'restore', restoredFromVersion: targetVersion, // R11 back-reference: restore-batch-execute (per-record)
           })
           outcomes.push({ recordId: c.recordId, status: 'restored', newVersion: result.updated.find((u) => u.recordId === c.recordId)?.version, restoredFieldIds: c.diff.map((d) => d.fieldId) })
         } catch (err) {
