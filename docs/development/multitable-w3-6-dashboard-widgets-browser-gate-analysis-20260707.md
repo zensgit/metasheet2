@@ -1,6 +1,7 @@
-# W3-6 · 仪表盘非图表 widgets · browser-gated 语义解锁分析（PROPOSED）
+# W3-6 · 仪表盘非图表 widgets · browser-gated 语义解锁分析（RATIFIED）
 
-> 状态：**PROPOSED — 分析 + 解锁判定**。docs-only。
+> 状态：**RATIFIED（owner directive 2026-07-11；分析+解锁判定已采纳）**。docs-only。
+> **RATIFIED — owner directive 2026-07-11**（批 12 把 merge-tree-clean 锁）。header 状态由 owner 决定翻转、Claude 机械执行(非自我批准)。锁内 per-tier owner 子决定(如变体/env-cap/storage opt-in)仍各自留待 owner。
 > 背景：goal-pool 把 W3-6「仪表盘 B4 非图表 widgets 批」标 🔒，门禁理由=**"先核 browser-gated 语义再解锁"**。本文做这个核实并给出解锁判定。
 > 模型分档：分析/设计 = Fable；后续 widget 实现 = Sonnet。
 
