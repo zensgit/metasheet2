@@ -124,6 +124,30 @@
                 </li>
               </ul>
             </div>
+
+            <div
+              class="bridge-agent__task-status"
+              :data-testid="`bridge-agent-task-status-${system.id}`"
+            >
+              <h4>{{ bi('计划任务运行态提示', 'Scheduled task status (guidance)') }}</h4>
+              <p class="bridge-agent__task-note" :data-testid="`bridge-agent-task-managed-${system.id}`">
+                <el-icon><Clock /></el-icon>
+                <span>{{ bi(
+                  '按部署惯例：本 Agent 通常由本机 Windows 计划任务（Scheduled Task）常驻管理，而非本页直接控制。',
+                  'By deployment convention: this Agent is normally kept running by a local Windows Scheduled Task, not controlled from this page.',
+                ) }}</span>
+              </p>
+              <p
+                :data-testid="`bridge-agent-task-last-check-${system.id}`"
+                :data-result="taskLastCheckResult(system.id)"
+              >{{ bi('最近探测结果（非任务运行态）：', 'Last probe result (not task run-state): ') }}{{ taskLastCheckLabel(system.id) }}</p>
+              <p class="bridge-agent__task-guidance" :data-testid="`bridge-agent-task-guidance-${system.id}`">
+                {{ bi(
+                  '启动方式提示：安装/查看/启停计划任务由本机运维按 Bridge Agent 运维 runbook 操作；本页不提供启停或本机配置入口。',
+                  'Start/stop guidance: installing, checking, or starting/stopping the scheduled task is done by local operations per the Bridge Agent ops runbook; this page provides no start/stop or local-config entry point.',
+                ) }}
+              </p>
+            </div>
           </div>
         </div>
 
@@ -411,6 +435,143 @@
               class="bridge-agent__error"
             >{{ bi('复制失败，请手动选择文本复制。', 'Copy failed; select the text manually to copy.') }}</span>
           </div>
+
+          <!-- BA-APPLY-1 (docs/development/bridge-agent-controlled-apply-design-lock-20260708.md §2
+               形态 A, #3876): export the SAME drafts as a machine-readable, values-free implementation
+               checklist. Independently gated (own guided-empty state), sibling to the prose suggestion
+               above rather than nested inside it. EXPORT/render only — no apply endpoint, no write, no
+               Agent write. -->
+          <div class="bridge-agent__checklist-export">
+            <button
+              type="button"
+              class="integration-workbench__button"
+              data-testid="bridge-agent-checklist-export"
+              @click="toggleChecklist"
+            >
+              <el-icon><DocumentCopy /></el-icon>
+              {{ checklistVisible ? bi('收起实施清单', 'Hide implementation checklist') : bi('导出实施清单', 'Export implementation checklist') }}
+            </button>
+
+            <template v-if="checklistVisible">
+              <p class="integration-workbench__hint">{{ bi(
+                '机读格式：仅含对象名、字段键名与固定操作枚举（add_readonly_object / add_readonly_field），不含取值/host/凭据/自由文本；本导出不会调用任何写入接口，也不会做任何直接修改——供人工确认后交由受控后端或运维脚本按既有 runbook 应用。',
+                'Machine-readable: object names, field-key names, and a fixed operation enum only (add_readonly_object / add_readonly_field) — never a value/host/credential/free-form text; this export calls no write endpoint and makes no direct change — a human hands it to the controlled backend or an ops script to apply per the existing runbook.',
+              ) }}</p>
+
+              <div
+                v-if="implementationChecklist.checklist.operations.length === 0"
+                class="integration-workbench__empty"
+                data-testid="bridge-agent-checklist-empty"
+              >
+                <strong data-testid="bridge-agent-checklist-empty-what">{{ bi(
+                  '这里会把上面填写的对象/字段名整理成一份机读的实施清单（JSON）。',
+                  'This turns the object/field names you enter above into a machine-readable implementation checklist (JSON).',
+                ) }}</strong>
+                <p data-testid="bridge-agent-checklist-empty-first-step">{{ bi(
+                  '第一步：在上方填写至少一个对象名（可选填字段名），清单会自动生成。',
+                  'First step: enter at least one object name above (field names are optional); the checklist is generated automatically.',
+                ) }}</p>
+              </div>
+              <div v-else class="bridge-agent__suggestion-output" data-testid="bridge-agent-checklist-output">
+                <h4>{{ bi('机读实施清单（JSON，可复制/下载）', 'Machine-readable implementation checklist (JSON; copyable/downloadable)') }}</h4>
+                <textarea
+                  class="bridge-agent__suggestion-text"
+                  data-testid="bridge-agent-checklist-text"
+                  readonly
+                  :value="checklistText"
+                />
+                <button
+                  type="button"
+                  class="integration-workbench__button"
+                  data-testid="bridge-agent-checklist-copy"
+                  @click="copyChecklistText"
+                >
+                  <el-icon><DocumentCopy /></el-icon>
+                  {{ bi('复制清单 JSON', 'Copy checklist JSON') }}
+                </button>
+                <button
+                  type="button"
+                  class="integration-workbench__button"
+                  data-testid="bridge-agent-checklist-download"
+                  @click="downloadChecklistJson"
+                >
+                  <el-icon><DocumentCopy /></el-icon>
+                  {{ bi('下载清单 JSON', 'Download checklist JSON') }}
+                </button>
+                <span
+                  v-if="checklistCopyState === 'copied'"
+                  data-testid="bridge-agent-checklist-copy-state"
+                  class="integration-workbench__hint"
+                >{{ bi('已复制', 'Copied') }}</span>
+                <span
+                  v-else-if="checklistCopyState === 'failed'"
+                  data-testid="bridge-agent-checklist-copy-state"
+                  class="bridge-agent__error"
+                >{{ bi('复制失败，请手动选择文本复制。', 'Copy failed; select the text manually to copy.') }}</span>
+              </div>
+            </template>
+          </div>
+
+          <div class="bridge-agent__reprobe-confirm">
+            <button
+              type="button"
+              class="integration-workbench__button"
+              data-testid="bridge-agent-reprobe-toggle"
+              @click="toggleConfirm"
+            >
+              <el-icon><Refresh /></el-icon>
+              {{ confirmVisible ? bi('收起生效确认', 'Hide apply confirmation') : bi('复探测确认是否生效', 'Re-probe to confirm applied') }}
+            </button>
+
+            <template v-if="confirmVisible">
+              <p class="integration-workbench__hint">{{ bi(
+                '运维按上方清单在受控后端/脚本手工应用后，点此用只读探测复查预期的只读对象/字段是否已出现；本操作只重新读取（复用上方“刷新对象”探测），不写入任何配置、不启停 Agent、不改凭据——Agent 始终只读。请先在上方“刷新对象”并展开相关对象 schema，再看下方逐项结果。',
+                'After operations manually apply the checklist above via the controlled backend/script, click here to re-check whether the expected readonly objects/fields now appear, using a read-only probe only; this merely re-reads (reusing the “Refresh objects” probe above) — it writes no config, does not start/stop the Agent, and never touches credentials; the Agent stays read-only. Refresh objects above (and expand the relevant object schema) first, then read the per-item results below.',
+              ) }}</p>
+
+              <div
+                v-if="reProbeConfirmation.total === 0"
+                class="integration-workbench__empty"
+                data-testid="bridge-agent-reprobe-empty"
+              >
+                <strong>{{ bi(
+                  '暂无待确认项：先在上方填写至少一个对象名，生成实施清单后再复探测确认。',
+                  'Nothing to confirm yet: enter at least one object name above to build a checklist, then re-probe.',
+                ) }}</strong>
+              </div>
+              <div v-else class="bridge-agent__suggestion-output" data-testid="bridge-agent-reprobe-output">
+                <p
+                  class="bridge-agent__reprobe-overall"
+                  data-testid="bridge-agent-reprobe-status"
+                  :data-status="reProbeConfirmation.status"
+                >{{ reProbeStatusLabel(reProbeConfirmation.status) }}
+                  <span class="integration-workbench__hint">({{ reProbeConfirmation.present }}/{{ reProbeConfirmation.total }})</span>
+                </p>
+                <ul class="bridge-agent__reprobe-list">
+                  <li
+                    v-for="row in reProbeConfirmation.rows"
+                    :key="row.objectName"
+                    data-testid="bridge-agent-reprobe-object"
+                    :data-object-present="row.objectPresent ? 'yes' : 'no'"
+                  >
+                    <span class="bridge-agent__reprobe-name">{{ row.objectName }}</span>
+                    <span class="bridge-agent__reprobe-flag">{{ reProbePresenceLabel(row.objectPresent) }}</span>
+                    <ul v-if="row.fields.length > 0" class="bridge-agent__reprobe-fields">
+                      <li
+                        v-for="field in row.fields"
+                        :key="field.key"
+                        data-testid="bridge-agent-reprobe-field"
+                        :data-field-present="field.present ? 'yes' : 'no'"
+                      >
+                        <span class="bridge-agent__reprobe-name">{{ field.key }}</span>
+                        <span class="bridge-agent__reprobe-flag">{{ reProbePresenceLabel(field.present) }}</span>
+                      </li>
+                    </ul>
+                  </li>
+                </ul>
+              </div>
+            </template>
+          </div>
         </div>
       </template>
     </el-card>
@@ -450,11 +611,12 @@
 //     (counted, never echoed) rather than rendered (lock §3: applied only by a controlled backend or
 //     ops script, never this page).
 import { computed, reactive, ref, watch } from 'vue'
-import { CircleCheck, CircleClose, Connection, DocumentCopy, List, Lock, Refresh, Warning } from '@element-plus/icons-vue'
+import { CircleCheck, CircleClose, Clock, Connection, DocumentCopy, List, Lock, Refresh, Warning } from '@element-plus/icons-vue'
 import { useLocale } from '../../composables/useLocale'
 import {
   bridgeAgentConfigCheckLabel,
   buildBridgeAgentChangeSuggestion,
+  buildImplementationChecklist,
   computeBridgeAgentConfigCheck,
   type BridgeAgentConfigCheckItem,
   type BridgeAgentConfigCheckStatus,
@@ -851,6 +1013,39 @@ async function runProbe(system: WorkbenchExternalSystem): Promise<void> {
   }
 }
 
+// --- BA-UI-4 (docs/development/bridge-agent-admin-page-design-lock-20260707.md §3 BA-UI-4): a
+// read-only "scheduled task status" guidance card. FIRST version, per lock: "只读显示，不
+// start/stop" — no control of any kind lives in this file for the scheduled task (no button, no
+// service call, no local-config write).
+//
+// Why this renders STATIC guidance rather than a live task-state field: the BA-UI-1 backend scout
+// established that none of the three generic routes this section consumes expose Windows Scheduled
+// Task state. `testConnection()`'s `/health`-derived `status`/`ok`/`connected` fields describe HTTP
+// reachability of the Agent process, not whether the OS scheduled task that launched it is
+// Running/Stopped/Ready — that distinction only exists on the host, surfaced by
+// `scripts/ops/bridge-agent-readonly-scheduled-task.ps1 -Action Status` (which itself deliberately
+// avoids calling `/health` — see the runbook). No new backend route is added to bridge that gap
+// (out of this slice's authorization; the lock's zero-new-route posture from BA-UI-1/2 continues
+// unchanged). So rather than inventing a "running/stopped" badge from data that was never asked for,
+// this card renders (a) a fixed, values-free statement of the deployment convention, (b) the
+// existing BA-UI-2 probe's last COARSE outcome relabeled as what it actually is (a reachability
+// probe result, not task run-state), and (c) a fixed pointer to the runbook process for anyone who
+// needs to actually install/inspect/start/stop the task.
+function taskLastCheckResult(systemId: string): 'pass' | 'fail' | 'unknown' {
+  const result = probeResultFor(systemId)
+  if (!result) return 'unknown'
+  return result.overallPass ? 'pass' : 'fail'
+}
+
+// Deliberately coarse (lock §3 BA-UI-4: "PASS/FAIL/未探测 coarse only") — unlike `overallLabel()`
+// above (which names the failed step for the probe-evidence panel), this card never names a step;
+// it only ever renders one of the three words below.
+function taskLastCheckLabel(systemId: string): string {
+  const result = taskLastCheckResult(systemId)
+  if (result === 'unknown') return bi('未探测', 'Not probed yet')
+  return result === 'pass' ? 'PASS' : 'FAIL'
+}
+
 watch(
   bridgeSystems,
   (list) => {
@@ -964,6 +1159,139 @@ async function copySuggestionText(): Promise<void> {
 
 watch(suggestionDrafts, () => {
   copyState.value = 'idle'
+}, { deep: true })
+
+// --- BA-APPLY-1 (docs/development/bridge-agent-controlled-apply-design-lock-20260708.md §2 形态 A,
+// #3876): "导出实施清单" — renders the SAME operator-typed drafts above as a machine-readable, values-
+// free implementation checklist (`buildImplementationChecklist`), instead of the prose suggestion text.
+// This is an EXPORT/render only: no apply endpoint, no local-config write, no .ps1 invocation, no Agent
+// write — the JSON below is handed to a controlled backend or ops script by a human (a LATER, unopened
+// rung). `implementationChecklist` recomputes from `suggestionDrafts` directly (not from
+// `suggestionResult.entries`) so this surface independently re-applies the safe-identifier gate rather
+// than trusting the sibling suggestion builder's output.
+const implementationChecklist = computed(() => {
+  const drafts: BridgeAgentSuggestionObjectDraft[] = suggestionDrafts.value.map((row) => ({
+    objectName: row.objectName,
+    fieldKeys: row.fieldKeysText.split(',').map((key) => key.trim()).filter(Boolean),
+  }))
+  return buildImplementationChecklist(drafts)
+})
+
+// The exact serialized artifact — `{ schemaVersion, operations }` only, no counts/labels/free text —
+// is what gets previewed, copied, and downloaded.
+const checklistText = computed(() => JSON.stringify(implementationChecklist.value.checklist, null, 2))
+
+const checklistVisible = ref(false)
+
+function toggleChecklist(): void {
+  checklistVisible.value = !checklistVisible.value
+}
+
+const checklistCopyState = ref<'idle' | 'copied' | 'failed'>('idle')
+
+async function copyChecklistText(): Promise<void> {
+  checklistCopyState.value = 'idle'
+  try {
+    if (typeof navigator !== 'undefined' && navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+      await navigator.clipboard.writeText(checklistText.value)
+      checklistCopyState.value = 'copied'
+      return
+    }
+  } catch {
+    // fall through to the failed state below
+  }
+  checklistCopyState.value = 'failed'
+}
+
+// Values-free by construction: the downloaded file's own content is `checklistText` (object names/
+// field-key names/op enum only — see the module header) and its filename carries nothing but a
+// client-side timestamp, never a system name or config value.
+function downloadChecklistJson(): void {
+  if (typeof document === 'undefined' || typeof URL.createObjectURL !== 'function') return
+  const blob = new Blob([checklistText.value], { type: 'application/json;charset=utf-8' })
+  const url = URL.createObjectURL(blob)
+  const anchor = document.createElement('a')
+  anchor.href = url
+  anchor.download = `bridge-agent-implementation-checklist-${Date.now()}.json`
+  anchor.rel = 'noopener'
+  anchor.style.display = 'none'
+  document.body.appendChild(anchor)
+  anchor.click()
+  anchor.remove()
+  if (typeof URL.revokeObjectURL === 'function') {
+    window.setTimeout(() => URL.revokeObjectURL(url), 0)
+  }
+}
+
+// --- BA-APPLY-3 (docs/development/bridge-agent-controlled-apply-design-lock-20260708.md §7 terminal
+// state, refs #3746): "复探测确认" — the FINAL rung. After an OPERATOR has MANUALLY applied the
+// exported checklist (form-A handoff, outside this platform — a human runbook step, NOT this page),
+// this card lets the admin confirm it took effect by RE-READING the connector via the SAME read-only
+// object/schema probe the page already uses (loadObjects / toggleSchema). It performs NO apply, NO
+// config write, NO start/stop, NO credential handling, NO raw-config edit, and adds NO new fetch or
+// backend route — the Agent stays readonly:true. It reads `implementationChecklist.checklist.operations`
+// (the SAME safe-identifier-filtered operations the export emits — single source, no re-filtering) and
+// intersects each EXPECTED name with the CURRENTLY-LOADED read-only `objects` / `schemaByObject`.
+// Confirmation is DERIVED from that probed state (expected-name ∈ probed names), never hardcoded.
+// Values-free by construction: object/field-key NAMES + present/absent booleans + a coarse status only.
+interface ReProbeFieldConfirmation {
+  key: string
+  present: boolean
+}
+interface ReProbeObjectConfirmation {
+  objectName: string
+  objectPresent: boolean
+  fields: ReProbeFieldConfirmation[]
+}
+type ReProbeStatus = 'applied' | 'partial' | 'absent' | 'empty'
+const reProbeConfirmation = computed(() => {
+  const operations = implementationChecklist.value.checklist.operations
+  const probedObjectNames = new Set(objects.value.map((object) => object.name))
+  const rows: ReProbeObjectConfirmation[] = operations.map((operation) => {
+    const objectPresent = probedObjectNames.has(operation.objectName)
+    const probedFieldNames = new Set((schemaByObject.value[operation.objectName] ?? []).map((field) => field.name))
+    const fields: ReProbeFieldConfirmation[] = operation.fieldKeys.map((key) => ({
+      key,
+      // a field is confirmed only if its parent object is present AND that object's schema (re-)probe
+      // has actually surfaced the key — both facts come from the read-only probe, never assumed
+      present: objectPresent && probedFieldNames.has(key),
+    }))
+    return { objectName: operation.objectName, objectPresent, fields }
+  })
+  const checks: boolean[] = []
+  for (const row of rows) {
+    checks.push(row.objectPresent)
+    for (const field of row.fields) checks.push(field.present)
+  }
+  const total = checks.length
+  const present = checks.filter(Boolean).length
+  const status: ReProbeStatus =
+    total === 0 ? 'empty' : present === total ? 'applied' : present === 0 ? 'absent' : 'partial'
+  return { rows, total, present, status }
+})
+
+const confirmVisible = ref(false)
+function toggleConfirm(): void {
+  confirmVisible.value = !confirmVisible.value
+}
+function reProbeStatusLabel(status: ReProbeStatus): string {
+  switch (status) {
+    case 'applied':
+      return bi('已生效', 'Applied')
+    case 'partial':
+      return bi('部分生效', 'Partially applied')
+    case 'absent':
+      return bi('未生效', 'Not applied')
+    default:
+      return bi('无待确认项', 'Nothing to confirm')
+  }
+}
+function reProbePresenceLabel(present: boolean): string {
+  return present ? bi('已出现', 'Present') : bi('未出现', 'Absent')
+}
+
+watch(suggestionDrafts, () => {
+  checklistCopyState.value = 'idle'
 }, { deep: true })
 </script>
 
@@ -1184,6 +1512,43 @@ watch(suggestionDrafts, () => {
 
 .bridge-agent__probe-guidance {
   margin: 2px 0 0;
+  color: var(--ms-text-3);
+}
+
+/* BA-UI-4 own classes below — a neutral, non-badge-colored box (see the script-block comment above
+   for why: this is guidance/convention + a relabeled probe result, never a live "task running"
+   signal, so it deliberately does NOT borrow the online/offline badge coloring). */
+
+.bridge-agent__task-status {
+  margin-top: 4px;
+  padding: 8px 10px;
+  border: 1px dashed var(--ms-border);
+  border-radius: 6px;
+  font-size: 12px;
+  color: var(--ms-text-2);
+}
+
+.bridge-agent__task-status h4 {
+  margin: 0 0 6px;
+  font-size: 12px;
+  color: var(--ms-text-1);
+}
+
+.bridge-agent__task-status p {
+  margin: 0 0 6px;
+}
+
+.bridge-agent__task-status p:last-child {
+  margin-bottom: 0;
+}
+
+.bridge-agent__task-note {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.bridge-agent__task-guidance {
   color: var(--ms-text-3);
 }
 

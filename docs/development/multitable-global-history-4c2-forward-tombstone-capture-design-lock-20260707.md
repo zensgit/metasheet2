@@ -21,6 +21,17 @@
 | 记录硬删:行值+出边 | `record-service.ts:804` snapshot + `:835-840` trash | ✅ `meta_records_trash` + delete revision |
 | 记录硬删:**入边** | `record-service.ts:808` `DELETE FROM meta_links WHERE record_id=$1 OR foreign_record_id=$1` | **无**(4c-3 record-undelete 2b 的阻塞缺口) |
 
+> **⚠️ impl 期审计修订(2026-07-08):上表只列了「治理路径」,现补齐全部四条 `DELETE FROM meta_records` 路径的实情。** C2「flag on ⇒ 凡销毁必已捕获」**仅对第 1 条成立**:
+
+| # | 记录硬删路径 | delete revision | trash | tombstone(flag-on) | PIT as-of-T |
+|---|---|---|---|---|---|
+| 1 | `record-service.ts` `deleteRecord`(本锁覆盖) | ✓ | ✓ | ✓ inbound | ✅ |
+| 2 | `univer-meta.ts:10066` PIT-reset 内联删除 | ✓ | ✓ | **✗**(无 anchor;拟由 4c-3 补) | ✅ |
+| 3 | `records.ts:565` plugin-SDK | **✗** | **✗** | ✗ | ❌ 谎报存活 |
+| 4 | `automation-executor.ts:2269` automation `delete_record` | **✗** | **✗** | **✗** | ❌ 谎报存活 |
+
+第 3、4 条不写 delete revision,而 `reconstructRecordsAtT` 纯从 `meta_record_revisions` 派生存在性 ⇒ **被它们删除的记录在任意 T 都被 PIT 判为「仍存在」**。这是本线核心承诺的缺陷,详见 `…destruction-path-coverage-gap-audit-20260708.md`(含 owner 决策菜单 D-1..D-5)。**本锁不修第 2/3/4 条**;4c-3 的可达边界因此如实收窄为「路径 1(+ 若 D-3 采纳则含路径 2)」。
+
 可照抄蓝本 = `meta_records_trash`(migration `zzzz20260617120000_create_meta_records_trash.ts:19-46`):独立表(零热读路径改动)、same-txn INSERT-before-DELETE、`isUndefinedTableError` 兼容守卫、surrogate PK、original timestamps、retention 默认关。
 
 ## 2. 捕获模型(锁定)
@@ -81,5 +92,13 @@
 ## 8. 出界(记录在案)
 
 sheet 删除级联(`univer-meta.ts:11927`)、跨 base、任何 FE 面(独立 gated 项)、`meta_records_trash` 的 retention 接入、4d(不可能项,永不承诺)。
+
+**其余记录硬删路径(impl 期审计,显式出界):** C2「flag on ⇒ 凡销毁必已捕获」的口径**仅覆盖** `record-service.deleteRecord` 与 `dropFieldCascade`。另外三条路径均**不在**本锁范围(且均非 4c-2 引入的回归):
+
+- `records.ts:565` plugin-SDK `deleteRecord`(经 `plugin-scope.ts`):无 trash / 无 revision / 无 tombstone(已在 `records.ts` 就地注释)。
+- `automation-executor.ts:2269` automation `delete_record`:**已上线、无 flag、有授权 UI**,无 trash / 无 revision / 无 tombstone。
+- `univer-meta.ts:10066` PIT-reset 内联删除:有 trash + delete revision,**无 tombstone**(其 `recordRecordRevision` 未预生成 id,故无 anchor 可挂)。
+
+前两条不写 delete revision ⇒ 经它们删除的记录被 `reconstructRecordsAtT` 永久判为「仍存在」(PIT 污染)。三条的定性、后果与 owner 决策菜单见 `…destruction-path-coverage-gap-audit-20260708.md`。给它们 trash/capture/revision 对等属**独立 rung**,非 4c-2。
 
 **解锁词示例:「ratify 4c-2」(可附修改意见)。**

@@ -90,6 +90,22 @@ export type MetaRecordLabelKey =
   | 'notification.eventNotificationSent'
   // --- MetaFormView multi-page nav chrome (A4) ---
   | 'form.previousPage' | 'form.nextPage'
+  // --- T8-2 Reset UI T-source picker (R5b strict-zero closeout) ---
+  | 'record.resetPickerHeading' | 'record.resetPickerHistoryLabel' | 'record.resetPickerHistoryPlaceholder'
+  | 'record.resetPickerRefresh' | 'record.resetPickerHistoryLoading'
+  | 'record.resetPickerHistoryEmpty' | 'record.resetPickerHistoryUnavailable'
+  | 'record.resetPickerManualSummary' | 'record.resetPickerManualLabel' | 'record.resetPickerFutureWarn'
+  | 'record.resetPickerTargetPrefix' | 'record.resetPickerTargetSuffix' | 'record.resetPickerFromBatch'
+  | 'record.resetPickerErrorLoad' | 'record.resetPickerSystemActor' | 'record.resetPickerDefaultAction'
+  // --- T8-2 Reset UI confirm dialog (R5c strict-zero closeout, final microslice of this line) ---
+  | 'record.resetConfirmDialogAria' | 'record.resetConfirmCancelAria' | 'record.resetConfirmLoading'
+  | 'record.resetConfirmViewInTrash'
+  | 'record.resetConfirmErrorDisabled' | 'record.resetConfirmErrorForbidden' | 'record.resetConfirmErrorBlocked'
+  | 'record.resetConfirmErrorStale' | 'record.resetConfirmErrorTooLarge' | 'record.resetConfirmErrorTypeMismatch'
+  | 'record.resetConfirmErrorGeneric'
+  | 'record.resetConfirmWarnResetWord' | 'record.resetConfirmWarnNotWord' | 'record.resetConfirmRevertWord'
+  | 'record.resetConfirmWarnBeforeNot' | 'record.resetConfirmWarnInstead'
+  | 'record.resetConfirmTypePrefix' | 'record.resetConfirmTypeSuffix' | 'record.resetConfirmTypeAria'
 
 const META_RECORD_LABELS: Record<MetaRecordLabelKey, { en: string; zh: string }> = {
   'notification.bell': { en: 'Notifications', zh: '通知' },
@@ -229,6 +245,55 @@ const META_RECORD_LABELS: Record<MetaRecordLabelKey, { en: string; zh: string }>
   'form.reset': { en: 'Reset', zh: '重置' },
   'form.previousPage': { en: 'Previous', zh: '上一页' },
   'form.nextPage': { en: 'Next', zh: '下一页' },
+
+  // T8-2 Reset UI T-source picker (ResetToPointPicker.vue, R5b strict-zero closeout — the component was born
+  // after the i18n line closed and shipped all-English; flag (pitResetEnabled) is dormant by default so this
+  // is a shape-only migration, no behavior change).
+  'record.resetPickerHeading': { en: 'Reset this sheet to a Global History point', zh: '将此表重置到某个全局历史点' },
+  'record.resetPickerHistoryLabel': { en: 'History point', zh: '历史点' },
+  'record.resetPickerHistoryPlaceholder': { en: 'Select a recent history batch', zh: '选择一个最近的历史批次' },
+  'record.resetPickerRefresh': { en: 'Refresh', zh: '刷新' },
+  'record.resetPickerHistoryLoading': { en: 'Loading history points...', zh: '正在加载历史点...' },
+  'record.resetPickerHistoryEmpty': { en: 'No recent history batches found.', zh: '未找到最近的历史批次。' },
+  'record.resetPickerHistoryUnavailable': { en: 'History points unavailable.', zh: '历史点不可用。' },
+  'record.resetPickerManualSummary': { en: 'Advanced manual time', zh: '高级：手动指定时间' },
+  'record.resetPickerManualLabel': { en: 'Manual point in time', zh: '手动指定时间点' },
+  'record.resetPickerFutureWarn': { en: 'Pick a time in the past — you can only reset to an earlier state.', zh: '请选择过去的时间——只能重置到更早的状态。' },
+  'record.resetPickerTargetPrefix': { en: 'Target:', zh: '目标：' },
+  'record.resetPickerTargetSuffix': { en: '(your local time)', zh: '（你的本地时间）' },
+  'record.resetPickerFromBatch': { en: 'from history batch', zh: '来自历史批次' },
+  'record.resetPickerErrorLoad': { en: 'Failed to load history points', zh: '加载历史点失败' },
+  'record.resetPickerSystemActor': { en: 'System', zh: '系统' },
+  'record.resetPickerDefaultAction': { en: 'update', zh: '更新' },
+
+  // T8-2 Reset UI confirm dialog (ResetConfirmDialog.vue, R5c strict-zero closeout — the final microslice of
+  // this line; ResetToPointPicker/R5b was the other post-closure component, now landed). Static labels only;
+  // the asOf/count-interpolated strings live in the helper functions below.
+  'record.resetConfirmDialogAria': { en: 'Reset sheet to a point in time', zh: '将表重置到某个时间点' },
+  'record.resetConfirmCancelAria': { en: 'Cancel', zh: '取消' },
+  'record.resetConfirmLoading': { en: 'Loading preview…', zh: '正在加载预览…' },
+  'record.resetConfirmViewInTrash': { en: 'View in Trash', zh: '在回收站中查看' },
+  'record.resetConfirmErrorDisabled': { en: 'Reset is not enabled here.', zh: '此处未启用重置。' },
+  'record.resetConfirmErrorForbidden': { en: 'You do not have permission to reset this sheet.', zh: '你没有权限重置此表。' },
+  'record.resetConfirmErrorBlocked': { en: 'A target record is locked or denied — nothing was changed.', zh: '某条目标记录被锁定或拒绝 — 未做任何更改。' },
+  'record.resetConfirmErrorStale': { en: 'The sheet changed since the preview — please re-preview and try again.', zh: '表在预览之后已发生变化 — 请重新预览后再试。' },
+  'record.resetConfirmErrorTooLarge': { en: 'This sheet has too many records for a one-shot reset.', zh: '此表记录过多，无法一次性重置。' },
+  // The 400 (type-mismatch) response fires when the operator's typed confirm text didn't match the server's
+  // expected literal. `reset` is the same server-authoritative token as the type-to-confirm input below — kept
+  // untranslated in both locales.
+  'record.resetConfirmErrorTypeMismatch': { en: 'Type "reset" to confirm.', zh: '请输入 "reset" 以确认。' },
+  'record.resetConfirmErrorGeneric': { en: 'Reset could not be completed. Please re-preview and try again.', zh: '重置未能完成。请重新预览后再试。' },
+  // The three inline-bold words in the destructive warning paragraph. Word-for-word bold placement doesn't
+  // map 1:1 to Chinese, so the zh values are chosen so the concatenated sentence (built from these plus the
+  // resetConfirmWarn* helpers below, in the same fixed template slots) still reads naturally.
+  'record.resetConfirmWarnResetWord': { en: 'Reset', zh: '重置' },
+  'record.resetConfirmWarnNotWord': { en: 'not', zh: '并不是' },
+  'record.resetConfirmRevertWord': { en: 'Revert', zh: '回退' },
+  'record.resetConfirmWarnBeforeNot': { en: '— recoverable from Trash, but this is', zh: '——可从回收站中恢复，但这' },
+  'record.resetConfirmWarnInstead': { en: 'instead — it changes nothing destructively.', zh: '代替 — 它不会进行任何破坏性更改。' },
+  'record.resetConfirmTypePrefix': { en: 'Type', zh: '输入' },
+  'record.resetConfirmTypeSuffix': { en: 'to confirm:', zh: '以确认：' },
+  'record.resetConfirmTypeAria': { en: 'type reset to confirm', zh: '输入 reset 以确认' },
 }
 
 export function recordLabel(key: MetaRecordLabelKey, isZh: boolean): string {
@@ -293,4 +358,85 @@ export function formPageIndicator(current: number, total: number, isZh: boolean)
 // never translated; only the surrounding copy is.
 export function configRestoreTypedConfirm(confirmToken: string, isZh: boolean): string {
   return isZh ? `输入 ${confirmToken} 以确认：` : `Type ${confirmToken} to confirm:`
+}
+
+// resetPickerRecordCount: the affected-record count fragment of a Global History batch label
+// (ResetToPointPicker's historyBatchLabel, R5b). EN keeps the original singular/plural literal
+// ('1 record' / 'N records'); zh uses the measure-word form. The number itself is never translated.
+export function resetPickerRecordCount(count: number, isZh: boolean): string {
+  if (isZh) return `${count} 条记录`
+  return count === 1 ? '1 record' : `${count} records`
+}
+
+// R11 back-reference: History Center badge for a `source='restore'` change that carries a source version.
+export function restoredFromVersionBadge(version: number, isZh: boolean): string {
+  return isZh ? `从版本 ${version} 恢复` : `Restored from v${version}`
+}
+
+// --- ResetConfirmDialog.vue interpolation helpers (R5c) ---
+// `asOf` is the wire point-in-time value (display + API `asOf`) and record counts are wire summary
+// numbers — both always interpolated raw, never translated. Each helper below reconstructs one
+// EN sentence byte-for-byte (verified against a before/after DOM snapshot diff) plus its zh counterpart.
+
+// resetConfirmEntryLabel: the destructive entry button ("Reset to <T>…").
+export function resetConfirmEntryLabel(asOf: string, isZh: boolean): string {
+  return isZh ? `重置到 ${asOf}…` : `Reset to ${asOf}…`
+}
+
+// resetConfirmTitle: the dialog header ("Reset sheet to <T>").
+export function resetConfirmTitle(asOf: string, isZh: boolean): string {
+  return isZh ? `将表重置到 ${asOf}` : `Reset sheet to ${asOf}`
+}
+
+// resetConfirmResultSummary: the post-execute result line (deleted + reverted counts + asOf).
+export function resetConfirmResultSummary(deletedCount: number, revertedCount: number, asOf: string, isZh: boolean): string {
+  return isZh
+    ? `${deletedCount} 条记录已移至回收站 · ${revertedCount} 条记录已回退到 ${asOf}。`
+    : `${deletedCount} record(s) moved to the recycle bin · ${revertedCount} reverted to ${asOf}.`
+}
+
+// resetConfirmRevertEquivIntro: the non-destructive (deleteCount===0) explanatory sentence, up to
+// (not including) the bolded "Revert" word that follows it in the template.
+export function resetConfirmRevertEquivIntro(asOf: string, revertCount: number, isZh: boolean): string {
+  return isZh
+    ? `${asOf} 之后没有新建任何记录。这会将 ${revertCount} 条记录回退到它们在 ${asOf} 时的状态 — 非破坏性操作，等同于`
+    : `Nothing was created after ${asOf}. This reverts ${revertCount} record(s) to their state at ${asOf} — non-destructive, the same as`
+}
+
+// resetConfirmRevertButtonLabel: the non-destructive confirm button ("Revert to <T>").
+export function resetConfirmRevertButtonLabel(asOf: string, isZh: boolean): string {
+  return isZh ? `回退到 ${asOf}` : `Revert to ${asOf}`
+}
+
+// resetConfirmDestructiveButtonLabel: the destructive confirm button ("Reset — move N to recycle bin").
+export function resetConfirmDestructiveButtonLabel(deleteCount: number, isZh: boolean): string {
+  return isZh ? `重置 — 将 ${deleteCount} 条记录移至回收站` : `Reset — move ${deleteCount} to recycle bin`
+}
+
+// resetConfirmAckLabel: the destructive-path acknowledgement checkbox copy.
+export function resetConfirmAckLabel(deleteCount: number, isZh: boolean): string {
+  return isZh
+    ? `我知道 ${deleteCount} 条记录将被移至回收站。`
+    : `I understand ${deleteCount} record(s) will be moved to the recycle bin.`
+}
+
+// resetConfirmWarnRevertsAt: destructive-warning clause 1, between the bolded "Reset" and the bolded
+// delete-clause below.
+export function resetConfirmWarnRevertsAt(asOf: string, isZh: boolean): string {
+  return isZh ? `会将每条记录回退到其在 ${asOf} 时的状态` : `reverts every record to its state at ${asOf}`
+}
+
+// resetConfirmWarnDeleteClause: the bolded delete clause inside the destructive warning paragraph.
+export function resetConfirmWarnDeleteClause(deleteCount: number, asOf: string, isZh: boolean): string {
+  return isZh
+    ? `并将 ${asOf} 之后新建的 ${deleteCount} 条记录移至回收站`
+    : `and moves the ${deleteCount} record(s) created after ${asOf} to the recycle bin`
+}
+
+// resetConfirmWarnAfterNot: destructive-warning clause between the bolded "not" and the bolded "Revert"
+// that follows (covers the asOf-embedded "Need to keep records created after <T>?" sub-clause).
+export function resetConfirmWarnAfterNot(asOf: string, isZh: boolean): string {
+  return isZh
+    ? `一次普通恢复。如果需要保留 ${asOf} 之后新建的记录，请使用`
+    : `a normal restore. Need to keep records created after ${asOf}? Use`
 }

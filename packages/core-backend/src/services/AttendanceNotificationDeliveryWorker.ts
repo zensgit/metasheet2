@@ -5,6 +5,7 @@ import {
   DingTalkBusinessError,
   DingTalkRequestError,
   fetchDingTalkAppAccessToken,
+  isDingTalkOutcomeUnknown,
   sendDingTalkWorkNotification,
   sendDingTalkWorkNotificationActionCard,
   type DingTalkMessageConfig,
@@ -14,6 +15,25 @@ import {
 import {
   readDingTalkMessageConfigFromRuntime,
 } from '../integrations/dingtalk/work-notification-settings'
+import {
+  WeComBusinessError,
+  WeComRequestError,
+  clampWeComByteLengthUtf8,
+  clampWeComCharLength,
+  fetchWeComAppAccessToken,
+  invalidateWeComAppAccessTokenCache,
+  readWeComMessageConfigFromEnv,
+  resolveWeComMessageConfigReadiness,
+  sendWeComTextCardMessage,
+  sendWeComTextMessage,
+  WECOM_TEXTCARD_DESCRIPTION_MAX_CHARS,
+  WECOM_TEXTCARD_TITLE_MAX_CHARS,
+  WECOM_TEXT_CONTENT_MAX_BYTES,
+  type WeComMessageConfig,
+  type WeComSendMessageResult,
+  type WeComTextCardMessageInput,
+  type WeComTextMessageInput,
+} from '../integrations/wecom/client'
 import nodemailer from 'nodemailer'
 import {
   resolveEmailSmtpTransportConfig,
@@ -47,9 +67,27 @@ export interface AttendanceDeliveryMessage {
   payload: Record<string, unknown>
 }
 
+/**
+ * `skip` only has meaning alongside `retryable: false` — it tells the worker this recipient is
+ * structurally undeliverable through this channel (no identity to send to, retrying will never help)
+ * as opposed to a genuine send failure worth operator attention. The worker terminates a `skip: true`
+ * result as delivery status `skipped` instead of `failed`, so a partially-onboarded org's ordinary
+ * "this user has no channel identity yet" case does not pollute the dead-letter/failed counter that
+ * exists to surface real delivery faults (API errors, timeouts, quota). Channels MUST NOT set `skip`
+ * on a retryable result; the worker only consults it once `retryable` is already false.
+ *
+ * `outcomeUnknown` (PR #4046 Phase B) likewise only has meaning alongside `retryable: false`: the
+ * send was ATTEMPTED and the outcome is unknowable (network error/timeout/5xx/malformed 2xx — the
+ * recipient may well have received the message). The worker terminates it as the DISTINCT
+ * `outcome_unknown` status: it must NOT burn retries and must NOT be resent (owner doctrine — a
+ * resend on ambiguity is a duplicate-notification hazard; DingTalk's async-send result query only
+ * reconciles when a task_id exists, and a lost response has none). Only the DingTalk channel's
+ * classifier produces it today; WeCom/email transports do not emit the marker and are untouched.
+ * `skip` and `outcomeUnknown` are mutually exclusive; the worker checks `outcomeUnknown` first.
+ */
 export type AttendanceDeliveryChannelResult =
   | { ok: true }
-  | { ok: false; retryable: boolean; error: string }
+  | { ok: false; retryable: boolean; error: string; skip?: boolean; outcomeUnknown?: boolean }
 
 export interface AttendanceDeliveryChannel {
   readonly name: string
@@ -65,6 +103,13 @@ export interface AttendanceNotificationDeliveryWorkerOptions {
   workerId?: string
   now?: () => Date
   logger?: Logger
+  /**
+   * R8 quiet hours gate. `undefined` (the default when the worker is constructed by
+   * resolveAttendanceNotificationDeliveryJob) resolves from ATTENDANCE_NOTIFICATION_QUIET_HOURS /
+   * ATTENDANCE_NOTIFICATION_QUIET_HOURS_TZ at construction time; pass `null` explicitly to force the
+   * gate off (e.g. tests), or a concrete config to bypass env parsing entirely (also tests).
+   */
+  quietHours?: AttendanceNotificationQuietHoursConfig | null
 }
 
 export interface DingTalkAttendanceDeliveryChannelOptions {
@@ -111,7 +156,10 @@ export interface AttendanceNotificationDeliveryResult {
   sent: number
   retrying: number
   failed: number
+  skipped: number
   lostLease?: number
+  /** PR #4046 Phase B: rows terminated `outcome_unknown` this batch (present only when > 0, like lostLease). */
+  outcomeUnknown?: number
 }
 
 interface DeliveryRow {
@@ -136,6 +184,7 @@ const MIN_LEASE_MS = 5_000
 const MAX_LEASE_MS = 10 * 60_000
 export const DINGTALK_WORK_NOTIFICATION_CHANNEL_NAME = 'dingtalk_work_notification'
 export const EMAIL_SMTP_CHANNEL_NAME = 'email_smtp'
+export const WECOM_WORK_NOTIFICATION_CHANNEL_NAME = 'wecom_work_notification'
 
 /**
  * Channel names a producer may assign to a NEW outbox row — these MUST be names the worker's channel
@@ -146,6 +195,7 @@ export const EMAIL_SMTP_CHANNEL_NAME = 'email_smtp'
 const ROUTABLE_DEFAULT_DELIVERY_CHANNELS: ReadonlySet<string> = new Set([
   DINGTALK_WORK_NOTIFICATION_CHANNEL_NAME,
   EMAIL_SMTP_CHANNEL_NAME,
+  WECOM_WORK_NOTIFICATION_CHANNEL_NAME,
 ])
 
 /**
@@ -183,6 +233,119 @@ export function computeDeliveryBackoffMs(attemptCount: number): number {
   return 6 * 60 * 60_000
 }
 
+export interface AttendanceNotificationQuietHoursConfig {
+  /** 24h "HH:MM", local to `timeZone`. */
+  start: string
+  /** 24h "HH:MM", local to `timeZone`; may be < start (cross-midnight window, e.g. 22:00-08:00). */
+  end: string
+  /** IANA zone name, e.g. "Asia/Shanghai". */
+  timeZone: string
+}
+
+const QUIET_HOURS_ENV_PATTERN = /^([01]\d|2[0-3]):([0-5]\d)-([01]\d|2[0-3]):([0-5]\d)$/
+const DEFAULT_QUIET_HOURS_TZ = 'Asia/Shanghai'
+
+/**
+ * R8 quiet-hours window (design decision: deployment-wide v1, consistent with every existing
+ * ATTENDANCE_NOTIFICATION_* knob — per-org config is a named follow-up, not v1).
+ *
+ * ATTENDANCE_NOTIFICATION_QUIET_HOURS="HH:MM-HH:MM" — unset/empty = off (unchanged behavior).
+ * ATTENDANCE_NOTIFICATION_QUIET_HOURS_TZ — IANA zone; defaults to Asia/Shanghai.
+ *
+ * Malformed input (bad "HH:MM-HH:MM" shape, or a TZ Intl does not recognize) never throws: it logs a
+ * single warn and disables the gate (off), exactly like unset — a typo in ops config must not crash the
+ * scheduler tick or start silently dropping notifications outside a window nobody intended.
+ *
+ * Channel-agnostic by construction: this config is consumed only by AttendanceNotificationDeliveryWorker
+ * .runBatch()'s pre-claim gate (see the R8 comment there), which runs BEFORE claimDueDeliveries() and
+ * therefore BEFORE any per-row channel dispatch. It applies to every channel this worker dispatches —
+ * DingTalk, WeCom, and email alike — with no per-channel opt-out; there is no separate claim/send path
+ * for any registered channel that could bypass it (verified for WeCom's S4 adapter, which routes through
+ * the same channelsByName / deliver() call site as DingTalk and email).
+ */
+export function resolveAttendanceNotificationQuietHours(
+  env: NodeJS.ProcessEnv = process.env,
+  logger: Pick<Logger, 'warn'> = new Logger('AttendanceNotificationDeliveryWorker'),
+): AttendanceNotificationQuietHoursConfig | null {
+  const raw = (env.ATTENDANCE_NOTIFICATION_QUIET_HOURS ?? '').trim()
+  if (!raw) return null
+  const match = QUIET_HOURS_ENV_PATTERN.exec(raw)
+  if (!match) {
+    logger.warn(
+      `Ignoring malformed ATTENDANCE_NOTIFICATION_QUIET_HOURS="${raw}" (expected "HH:MM-HH:MM", 24h clock); quiet hours disabled`,
+    )
+    return null
+  }
+  const start = `${match[1]}:${match[2]}`
+  const end = `${match[3]}:${match[4]}`
+  if (start === end) {
+    // start === end (e.g. "22:00-22:00") is treated as INVALID config, same tier as a malformed shape —
+    // NOT as a valid zero-length or full-day window. A zero-length window is almost certainly a config
+    // typo, not an intentional one-minute quiet period; and "fixing" it to mean full-day-quiet instead
+    // would let a typo silently stop ALL attendance notifications for 24h with no visible signal beyond
+    // this warn. Least-surprise is to refuse the config outright, exactly like a malformed shape.
+    logger.warn(
+      `Ignoring ATTENDANCE_NOTIFICATION_QUIET_HOURS="${raw}" (start equals end — a zero-length window is not a valid config; use two distinct HH:MM values); quiet hours disabled`,
+    )
+    return null
+  }
+  const timeZone = (env.ATTENDANCE_NOTIFICATION_QUIET_HOURS_TZ ?? '').trim() || DEFAULT_QUIET_HOURS_TZ
+  try {
+    // Throws RangeError for a zone Intl does not recognize; this is the validation, the format result
+    // itself is discarded.
+    new Intl.DateTimeFormat('en-US', { timeZone }).format(new Date())
+  } catch {
+    logger.warn(`Ignoring invalid ATTENDANCE_NOTIFICATION_QUIET_HOURS_TZ="${timeZone}"; quiet hours disabled`)
+    return null
+  }
+  return { start, end, timeZone }
+}
+
+/**
+ * Same cross-midnight wrap shape as NotificationService.isInQuietHours (start<=end → contiguous
+ * window; start>end → wraps past midnight, "inside" means >= start OR <= end), but the local HH:MM is
+ * computed via Intl.DateTimeFormat in the CONFIGURED timezone — NotificationService uses
+ * `toTimeString()` (server-local time) and silently ignores its own `timezone` field; that bug is not
+ * repeated here.
+ *
+ * Both endpoints are INCLUSIVE: `current <= end` means the window covers the entire end minute (e.g.
+ * "22:00-08:00" still defers at 08:00:59), not up-to-but-excluding it. Intentional, documented here and
+ * in .env.example — not changed by this pass.
+ *
+ * Fail-OPEN on a broken Intl result: if formatToParts unexpectedly omits the hour/minute parts (should
+ * not happen given the options passed above, but a broken runtime ICU data set is not impossible), this
+ * returns `false` (outside the window) rather than defaulting to "00:00". Defaulting to midnight would
+ * silently land inside any cross-midnight window and could make notifications stop flowing permanently
+ * and invisibly on every tick. A late/deferred notification is recoverable (the next in-window tick
+ * sends it); a silent permanent quiet window is not — so an unparseable local time must not block
+ * delivery.
+ */
+export function isAttendanceNotificationQuietHours(
+  now: Date,
+  config: AttendanceNotificationQuietHoursConfig,
+  logger: Pick<Logger, 'warn'> = new Logger('AttendanceNotificationDeliveryWorker'),
+): boolean {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: config.timeZone,
+    hour: '2-digit',
+    minute: '2-digit',
+    hourCycle: 'h23',
+  }).formatToParts(now)
+  const hour = parts.find((p) => p.type === 'hour')?.value
+  const minute = parts.find((p) => p.type === 'minute')?.value
+  if (hour === undefined || minute === undefined) {
+    logger.warn(
+      `Could not determine local time for quiet-hours check (timeZone="${config.timeZone}"); treating as OUTSIDE the quiet window so notifications are not blocked`,
+    )
+    return false
+  }
+  const current = `${hour}:${minute}`
+  if (config.start <= config.end) {
+    return current >= config.start && current <= config.end
+  }
+  return current >= config.start || current <= config.end
+}
+
 export class DeterministicFakeAttendanceDeliveryChannel implements AttendanceDeliveryChannel {
   readonly name = DINGTALK_WORK_NOTIFICATION_CHANNEL_NAME
 
@@ -193,6 +356,12 @@ export class DeterministicFakeAttendanceDeliveryChannel implements AttendanceDel
     }
     if (mode === 'fail' || mode === 'non_retryable_failure') {
       return { ok: false, retryable: false, error: 'fake_non_retryable_failure' }
+    }
+    if (mode === 'skip' || mode === 'structural_skip') {
+      // Deterministic stand-in for a channel-flagged structurally-undeliverable recipient (e.g. the real
+      // DingTalk channel's dingtalk_recipient_not_bound) — exercises the worker's skip: true → `skipped`
+      // dispatch path without needing the real DingTalk channel/directory tables.
+      return { ok: false, retryable: false, skip: true, error: 'fake_structural_skip' }
     }
     return { ok: true }
   }
@@ -218,6 +387,15 @@ export function createAttendanceDeliveryChannelsFromEnv(env: NodeJS.ProcessEnv =
     resolveEmailTransportReadiness(env).ok
   ) {
     channels.push(new EmailAttendanceDeliveryChannel({ env }))
+  }
+  // WeCom (企业微信): a THIRD, independent in-app channel — register ONLY when explicitly enabled AND
+  // its app credentials (corpid+corpsecret+agentid) are all present (env-only readiness check, see
+  // resolveWeComMessageConfigReadiness); else register-nothing (S4 design-lock G2).
+  if (
+    env.ATTENDANCE_NOTIFICATION_WECOM_ENABLED === 'true' &&
+    resolveWeComMessageConfigReadiness(env).ok
+  ) {
+    channels.push(new WeComAttendanceDeliveryChannel())
   }
   return channels
 }
@@ -323,12 +501,50 @@ export class DingTalkAttendanceDeliveryChannel implements AttendanceDeliveryChan
       [message.recipientUserId, message.orgId],
     )
     if (rows.length === 0) {
+      // 0 rows conflates two different situations (H1 hardening — review #3920 P3-1): the ordinary
+      // "this user is not onboarded to DingTalk yet" gap for a partially-adopted org (SKIP — correct,
+      // unchanged), and "the org itself has no active DingTalk integration at all" because it was
+      // suspended/reconfigured/removed (directory_integrations has no status='active' row for this
+      // org). The latter is an org-level, typically RECOVERABLE outage: every delivery for that org
+      // would otherwise be silently and PERMANENTLY dropped via the `skipped` terminal state, and
+      // integration recovery would not self-heal anything already skipped. Disambiguate with one
+      // extra existence check — only reached on this cold 0-row path, never on the hot bound-recipient
+      // path.
+      const { rows: orgIntegrationRows } = await this.query<{ org_has_active_integration: boolean }>(
+        `SELECT EXISTS (
+           SELECT 1
+             FROM directory_integrations
+            WHERE org_id = $1
+              AND provider = 'dingtalk'
+              AND status = 'active'
+         ) AS org_has_active_integration`,
+        [message.orgId],
+      )
+      const orgHasActiveIntegration = Boolean(orgIntegrationRows[0]?.org_has_active_integration)
+      if (!orgHasActiveIntegration) {
+        // No active DingTalk integration exists for this org at all — not this one user's onboarding
+        // gap. Return a retryable failure (NOT skip) so the worker's normal backoff keeps retrying;
+        // if/when the integration is re-activated, the delivery self-heals instead of staying dropped.
+        return {
+          ok: false,
+          result: { ok: false, retryable: true, error: 'dingtalk_org_integration_inactive' },
+        }
+      }
+      // The org DOES have an active DingTalk integration — this really is just "this user is not
+      // onboarded yet". Nothing about retrying (or alerting on this specific delivery) would help; the
+      // fix is a directory sync/linking action outside this worker's scope. Structural, not a fault:
+      // terminate as `skipped`, not `failed`.
       return {
         ok: false,
-        result: { ok: false, retryable: false, error: 'dingtalk_recipient_not_bound' },
+        result: { ok: false, retryable: false, skip: true, error: 'dingtalk_recipient_not_bound' },
       }
     }
     if (rows.length > 1) {
+      // Two+ active linked bindings for the same local user is a directory DATA INTEGRITY anomaly, not
+      // an expected "not onboarded" gap — it means account-linking let a duplicate/ambiguous state form.
+      // That is worth an operator's attention (dedupe the links), so this intentionally stays `failed`
+      // (visible in the dead-letter counter) rather than `skipped`. Retrying still will not help, hence
+      // retryable: false, but we do not set `skip`.
       return {
         ok: false,
         result: { ok: false, retryable: false, error: 'dingtalk_recipient_ambiguous' },
@@ -336,15 +552,237 @@ export class DingTalkAttendanceDeliveryChannel implements AttendanceDeliveryChan
     }
     const dingTalkUserId = String(rows[0].external_user_id ?? '').trim()
     if (!dingTalkUserId) {
+      // A linked, unambiguous binding row exists but its external_user_id is blank. From this delivery's
+      // perspective there is still no usable DingTalk identity to send to — same structural class as
+      // "not bound" (no action a retry could take), so this also terminates as `skipped`.
       return {
         ok: false,
-        result: { ok: false, retryable: false, error: 'dingtalk_recipient_external_user_id_missing' },
+        result: { ok: false, retryable: false, skip: true, error: 'dingtalk_recipient_external_user_id_missing' },
       }
     }
     return {
       ok: true,
       integrationId: rows[0].integration_id,
       dingTalkUserId,
+    }
+  }
+}
+
+// ── WeCom (企业微信) delivery channel ───────────────────────────────────────────
+// S4 design-lock (attendance-wecom-delivery-channel-s4-design-lock-20260710). A THIRD, independent
+// AttendanceDeliveryChannel beside DingTalk and Email — coexists via name-routing. Config is env-only
+// (no directory-stored tier in this slice; see design-lock G7). Recipient resolution is the SAME
+// three-table JOIN as DingTalk, scoped to provider='wecom' (zero new tables/columns).
+
+interface WeComRecipientRow {
+  integration_id: string
+  external_user_id: string
+}
+
+export interface WeComAttendanceDeliveryChannelOptions {
+  query?: AttendanceNotificationDeliveryQuery
+  readConfig?: (integrationId?: string) => Promise<WeComMessageConfig>
+  fetchAccessToken?: (config: WeComMessageConfig) => Promise<string>
+  sendTextMessage?: (
+    accessToken: string,
+    input: WeComTextMessageInput,
+    config: WeComMessageConfig,
+  ) => Promise<WeComSendMessageResult>
+  sendTextCardMessage?: (
+    accessToken: string,
+    input: WeComTextCardMessageInput,
+    config: WeComMessageConfig,
+  ) => Promise<WeComSendMessageResult>
+}
+
+const WECOM_TOKEN_EXPIRED_ERRCODES: ReadonlySet<number> = new Set([42001, 40014])
+
+export class WeComAttendanceDeliveryChannel implements AttendanceDeliveryChannel {
+  readonly name = WECOM_WORK_NOTIFICATION_CHANNEL_NAME
+  private readonly query: AttendanceNotificationDeliveryQuery
+  private readonly readConfig: (integrationId?: string) => Promise<WeComMessageConfig>
+  private readonly fetchAccessToken: (config: WeComMessageConfig) => Promise<string>
+  private readonly sendTextMessage: (
+    accessToken: string,
+    input: WeComTextMessageInput,
+    config: WeComMessageConfig,
+  ) => Promise<WeComSendMessageResult>
+
+  private readonly sendTextCardMessage: (
+    accessToken: string,
+    input: WeComTextCardMessageInput,
+    config: WeComMessageConfig,
+  ) => Promise<WeComSendMessageResult>
+
+  constructor(options: WeComAttendanceDeliveryChannelOptions = {}) {
+    this.query = options.query ?? (defaultQuery as AttendanceNotificationDeliveryQuery)
+    this.readConfig = options.readConfig ?? (async () => readWeComMessageConfigFromEnv())
+    this.fetchAccessToken = options.fetchAccessToken ?? fetchWeComAppAccessToken
+    this.sendTextMessage = options.sendTextMessage ?? sendWeComTextMessage
+    this.sendTextCardMessage = options.sendTextCardMessage ?? sendWeComTextCardMessage
+  }
+
+  async send(message: AttendanceDeliveryMessage): Promise<AttendanceDeliveryChannelResult> {
+    const recipient = await this.resolveRecipient(message)
+    if (recipient.ok === false) return recipient.result
+
+    let config: WeComMessageConfig
+    try {
+      config = await this.readConfig(recipient.integrationId)
+    } catch (error) {
+      return classifyWeComConfigError(error)
+    }
+
+    const deepLink = attendanceDeepLinkEnabled()
+      ? buildAttendanceNotificationDeepLink(message.sourceType, resolveAttendanceDeepLinkBaseUrl())
+      : null
+    const title = buildDeliveryTitle(message)
+    const content = buildDeliveryContent(message)
+
+    // Field-length guards (design-lock G4) are applied HERE, before the (possibly-injected) sender —
+    // a clamp inside the client's send function would be invisible to DI-mode tests that stub it out.
+    const doSend = (accessToken: string): Promise<WeComSendMessageResult> => {
+      if (deepLink) {
+        // E3 parity: textcard whose button deep-links into the E2 container landing. Same
+        // title/content source as the text path — no per-msgtype drift.
+        return this.sendTextCardMessage(
+          accessToken,
+          {
+            userIds: [recipient.weComUserId],
+            title: clampWeComCharLength(title, WECOM_TEXTCARD_TITLE_MAX_CHARS),
+            description: clampWeComCharLength(content, WECOM_TEXTCARD_DESCRIPTION_MAX_CHARS),
+            url: deepLink,
+            btnTxt: '打开考勤',
+          },
+          config,
+        )
+      }
+      return this.sendTextMessage(
+        accessToken,
+        {
+          userIds: [recipient.weComUserId],
+          content: clampWeComByteLengthUtf8(content, WECOM_TEXT_CONTENT_MAX_BYTES),
+        },
+        config,
+      )
+    }
+
+    let accessToken: string
+    try {
+      accessToken = await this.fetchAccessToken(config)
+    } catch (error) {
+      return classifyWeComSendError(error)
+    }
+
+    let result: WeComSendMessageResult
+    try {
+      result = await doSend(accessToken)
+    } catch (error) {
+      // G3: a token-expired/invalid business error gets exactly ONE invalidate+refetch+retry; whatever
+      // happens on that retry (success or any failure) is final — no further retry loop here (the
+      // worker's own backoff handles subsequent attempts across outbox rows).
+      if (error instanceof WeComBusinessError && WECOM_TOKEN_EXPIRED_ERRCODES.has(error.errcode)) {
+        invalidateWeComAppAccessTokenCache(config)
+        try {
+          const freshToken = await this.fetchAccessToken(config)
+          result = await doSend(freshToken)
+        } catch (retryError) {
+          return classifyWeComSendError(retryError)
+        }
+      } else {
+        return classifyWeComSendError(error)
+      }
+    }
+
+    // G6: errcode===0 (overall success) can still carry `invaliduser` listing THIS recipient — a
+    // structural per-recipient failure inside an otherwise-successful call. Never thrown (errcode is
+    // 0), so it is only observable here, not via classifyWeComSendError.
+    if (result.invalidUserIds.includes(recipient.weComUserId)) {
+      return { ok: false, retryable: false, skip: true, error: 'wecom_recipient_invalid_user' }
+    }
+    return { ok: true }
+  }
+
+  private async resolveRecipient(message: AttendanceDeliveryMessage): Promise<
+    | { ok: true; integrationId: string; weComUserId: string }
+    | { ok: false; result: AttendanceDeliveryChannelResult }
+  > {
+    const { rows } = await this.query<WeComRecipientRow>(
+      `SELECT i.id::text AS integration_id,
+              a.external_user_id
+         FROM directory_account_links l
+         JOIN directory_accounts a
+           ON a.id = l.directory_account_id
+          AND a.provider = 'wecom'
+          AND a.is_active = true
+         JOIN directory_integrations i
+           ON i.id = a.integration_id
+          AND i.provider = 'wecom'
+          AND i.status = 'active'
+          AND i.org_id = $2
+        WHERE l.local_user_id = $1
+          AND l.link_status = 'linked'
+        ORDER BY i.updated_at DESC, a.updated_at DESC, a.id ASC
+        LIMIT 2`,
+      [message.recipientUserId, message.orgId],
+    )
+    if (rows.length === 0) {
+      // 0 rows conflates two different situations (H1 hardening — review #3920 P3-1, applied here for
+      // parity with the DingTalk channel — same shape, same fix): the ordinary "this user is not
+      // onboarded to WeCom yet" gap for a partially-adopted org (SKIP — correct, unchanged; WeCom
+      // directory population is a named prerequisite outside this channel's scope — S4 design-lock
+      // G7), and "the org itself has no active WeCom integration at all" because it was
+      // suspended/reconfigured/removed. The latter is an org-level, typically RECOVERABLE outage:
+      // every delivery for that org would otherwise be silently and PERMANENTLY dropped via the
+      // `skipped` terminal state. Disambiguate with one extra existence check — only reached on this
+      // cold 0-row path, never on the hot bound-recipient path.
+      const { rows: orgIntegrationRows } = await this.query<{ org_has_active_integration: boolean }>(
+        `SELECT EXISTS (
+           SELECT 1
+             FROM directory_integrations
+            WHERE org_id = $1
+              AND provider = 'wecom'
+              AND status = 'active'
+         ) AS org_has_active_integration`,
+        [message.orgId],
+      )
+      const orgHasActiveIntegration = Boolean(orgIntegrationRows[0]?.org_has_active_integration)
+      if (!orgHasActiveIntegration) {
+        // No active WeCom integration exists for this org at all — not this one user's onboarding
+        // gap. Return a retryable failure (NOT skip) so the worker's normal backoff keeps retrying;
+        // if/when the integration is re-activated, the delivery self-heals instead of staying dropped.
+        return {
+          ok: false,
+          result: { ok: false, retryable: true, error: 'wecom_org_integration_inactive' },
+        }
+      }
+      // The org DOES have an active WeCom integration — this really is just "this user is not
+      // onboarded yet". Structural, not a fault: terminate as `skipped`.
+      return {
+        ok: false,
+        result: { ok: false, retryable: false, skip: true, error: 'wecom_recipient_not_bound' },
+      }
+    }
+    if (rows.length > 1) {
+      // Same directory data-integrity reasoning as the DingTalk channel: worth an operator's
+      // attention (dedupe the links), so this stays `failed` (visible in the dead-letter counter)
+      // rather than `skipped`. Retrying will not help, hence retryable: false, but no `skip`.
+      return {
+        ok: false,
+        result: { ok: false, retryable: false, error: 'wecom_recipient_ambiguous' },
+      }
+    }
+    const weComUserId = String(rows[0].external_user_id ?? '').trim()
+    if (!weComUserId) {
+      return {
+        ok: false,
+        result: { ok: false, retryable: false, skip: true, error: 'wecom_recipient_external_user_id_missing' },
+      }
+    }
+    return {
+      ok: true,
+      integrationId: rows[0].integration_id,
+      weComUserId,
     }
   }
 }
@@ -358,6 +796,8 @@ export class AttendanceNotificationDeliveryWorker {
   private readonly workerId: string
   private readonly now: () => Date
   private readonly logger: Logger
+  private readonly quietHours: AttendanceNotificationQuietHoursConfig | null
+  private quietHoursLogged = false
   private running = false
 
   constructor(options: AttendanceNotificationDeliveryWorkerOptions = {}) {
@@ -371,6 +811,9 @@ export class AttendanceNotificationDeliveryWorker {
     this.workerId = options.workerId ?? `attendance-delivery:${process.pid}:${randomBytes(4).toString('hex')}`
     this.now = options.now ?? (() => new Date())
     this.logger = options.logger ?? new Logger('AttendanceNotificationDeliveryWorker')
+    this.quietHours = options.quietHours !== undefined
+      ? options.quietHours
+      : resolveAttendanceNotificationQuietHours(process.env, this.logger)
   }
 
   async claimDueDeliveries(): Promise<DeliveryRow[]> {
@@ -422,25 +865,54 @@ export class AttendanceNotificationDeliveryWorker {
   }
 
   async runBatch(): Promise<AttendanceNotificationDeliveryResult> {
-    if (this.running) return { claimed: 0, sent: 0, retrying: 0, failed: 0 }
+    if (this.running) return { claimed: 0, sent: 0, retrying: 0, failed: 0, skipped: 0 }
     this.running = true
-    const result: AttendanceNotificationDeliveryResult = { claimed: 0, sent: 0, retrying: 0, failed: 0 }
+    const result: AttendanceNotificationDeliveryResult = { claimed: 0, sent: 0, retrying: 0, failed: 0, skipped: 0 }
     try {
+      // R8: quiet-hours gate sits BEFORE claimDueDeliveries — a zero-result return here touches no SQL
+      // at all, so due rows stay untouched (pending/retrying, next_attempt_at unchanged, attempt_count
+      // unchanged, no lease taken). They are not lost and not penalized; the very next in-window
+      // runBatch() call drains them oldest-first via claimDueDeliveries' ORDER BY. This must NOT be
+      // expressed as a channel-level retryable failure — that would burn attempt_count toward
+      // maxAttempts and could dead-letter a row via computeDeliveryBackoffMs's up-to-6h backoff.
+      //
+      // This gate fences the WHOLE batch, not any one channel: claimDueDeliveries() is the ONLY place
+      // outbox rows get claimed, and deliver() (the only caller of channel.send()) only runs over rows
+      // that claimDueDeliveries() returned. Every registered AttendanceDeliveryChannel — DingTalk, WeCom
+      // (S4), and email — is dispatched exclusively through that one claim -> deliver loop below, so
+      // quiet hours applies to every channel this worker dispatches with no per-channel opt-out. Ratified
+      // product decision (owner, 2026-07-10): "don't disturb at night" is channel-independent.
+      if (this.quietHours && isAttendanceNotificationQuietHours(this.now(), this.quietHours, this.logger)) {
+        if (!this.quietHoursLogged) {
+          this.logger.info(
+            `Attendance notification dispatch deferred: quiet hours ${this.quietHours.start}-${this.quietHours.end} (${this.quietHours.timeZone})`,
+          )
+          this.quietHoursLogged = true
+        }
+        return result
+      }
+      this.quietHoursLogged = false
       const rows = await this.claimDueDeliveries()
       result.claimed = rows.length
       let lostLease = 0
+      let outcomeUnknown = 0
       for (const row of rows) {
         const outcome = await this.deliver(row)
         if (outcome === 'sent') result.sent += 1
         else if (outcome === 'retrying') result.retrying += 1
         else if (outcome === 'failed') result.failed += 1
+        else if (outcome === 'skipped') result.skipped += 1
+        else if (outcome === 'outcome_unknown') outcomeUnknown += 1
         else lostLease += 1
       }
       if (lostLease > 0) {
         result.lostLease = lostLease
       }
+      if (outcomeUnknown > 0) {
+        result.outcomeUnknown = outcomeUnknown
+      }
       if (result.claimed > 0) {
-        this.logger.info(`Attendance deliveries claimed=${result.claimed} sent=${result.sent} retrying=${result.retrying} failed=${result.failed} lostLease=${lostLease}`)
+        this.logger.info(`Attendance deliveries claimed=${result.claimed} sent=${result.sent} retrying=${result.retrying} failed=${result.failed} skipped=${result.skipped} outcomeUnknown=${outcomeUnknown} lostLease=${lostLease}`)
       }
       return result
     } finally {
@@ -448,7 +920,7 @@ export class AttendanceNotificationDeliveryWorker {
     }
   }
 
-  private async deliver(row: DeliveryRow): Promise<'sent' | 'retrying' | 'failed' | 'lost-lease'> {
+  private async deliver(row: DeliveryRow): Promise<'sent' | 'retrying' | 'failed' | 'skipped' | 'outcome_unknown' | 'lost-lease'> {
     const channel = this.channelsByName.get(row.channel)
     const attemptCount = Number(row.attempt_count)
     if (!channel) {
@@ -482,6 +954,20 @@ export class AttendanceNotificationDeliveryWorker {
 
     const failure = channelResult as Extract<AttendanceDeliveryChannelResult, { ok: false }>
     if (!failure.retryable || attemptCount >= this.maxAttempts) {
+      // PR #4046 Phase B: an outcome-unknown send (attempted, response lost — maybe delivered)
+      // terminates as the DISTINCT `outcome_unknown` state on the FIRST such classification: it
+      // never burns further attempts and is never resent (a resend on ambiguity is a duplicate
+      // hazard). Sits strictly in this per-row post-send classification — the quiet-hours gate
+      // and the claim/lease CAS semantics above are untouched.
+      if (!failure.retryable && failure.outcomeUnknown) {
+        return await this.markOutcomeUnknown(row.id, failure.error, attemptCount) ? 'outcome_unknown' : 'lost-lease'
+      }
+      // Only a genuinely non-retryable, channel-flagged-structural result skips the dead-letter bucket.
+      // A retryable failure that merely ran out of attempts (attemptCount >= maxAttempts) always still
+      // lands in `failed` — it was a real, repeated send failure, not something we should have skipped.
+      if (!failure.retryable && failure.skip) {
+        return await this.markSkipped(row.id, failure.error, attemptCount) ? 'skipped' : 'lost-lease'
+      }
       return await this.markFailed(row.id, failure.error, attemptCount) ? 'failed' : 'lost-lease'
     }
 
@@ -529,9 +1015,62 @@ export class AttendanceNotificationDeliveryWorker {
 
   private async markFailed(id: string, error: string, attemptCount: number): Promise<boolean> {
     const now = this.now().toISOString()
+    // redelivery_safe = (this row's own channel is dingtalk_work_notification). markFailed is only
+    // ever reached by a DEFINITE non-delivery: the deliver() invariant routes an ambiguous DingTalk
+    // result (retryable:false + outcomeUnknown) to markOutcomeUnknown BEFORE this fallthrough, and
+    // the classifier contract guarantees outcomeUnknown ⟹ !retryable. So a row that lands here is a
+    // definite failure, and it is redelivery-safe IFF it is a DingTalk failure — WeCom/Email have no
+    // outcome_unknown vocabulary yet, so their `failed` rows may still be ambiguous sends and must
+    // stay redelivery_safe=false. Ambiguous DingTalk rows never reach here; they go to
+    // markOutcomeUnknown (which leaves redelivery_safe at its default false). No new parameter: the
+    // row's persisted `channel` column drives the flag. See the redelivery-service doctrine header.
     const result = await this.query(
       `UPDATE attendance_notification_deliveries
           SET status = 'failed',
+              last_error = $2,
+              redelivery_safe = (channel = $6),
+              claim_expires_at = NULL,
+              claim_worker_id = NULL,
+              updated_at = $3::timestamptz
+        WHERE id = $1::uuid
+          AND status = 'sending'
+          AND claim_worker_id = $4
+          AND attempt_count = $5::int`,
+      [id, error.slice(0, 1000), now, this.workerId, attemptCount, DINGTALK_WORK_NOTIFICATION_CHANNEL_NAME],
+    )
+    return Number(result.rowCount ?? 0) === 1
+  }
+
+  // Same terminal-state CAS guard as markFailed (only the lease holder, matching attempt_count, may
+  // write) — the only difference is the target status. See the AttendanceDeliveryChannelResult
+  // `outcomeUnknown` doc comment: the send may well have been delivered, so this row must never be
+  // re-claimed or resent; reconciliation is manual/ops via the distinct status + last_error.
+  private async markOutcomeUnknown(id: string, error: string, attemptCount: number): Promise<boolean> {
+    const now = this.now().toISOString()
+    const result = await this.query(
+      `UPDATE attendance_notification_deliveries
+          SET status = 'outcome_unknown',
+              last_error = $2,
+              claim_expires_at = NULL,
+              claim_worker_id = NULL,
+              updated_at = $3::timestamptz
+        WHERE id = $1::uuid
+          AND status = 'sending'
+          AND claim_worker_id = $4
+          AND attempt_count = $5::int`,
+      [id, error.slice(0, 1000), now, this.workerId, attemptCount],
+    )
+    return Number(result.rowCount ?? 0) === 1
+  }
+
+  // Same terminal-state CAS guard as markFailed (only the lease holder, matching attempt_count, may
+  // write) — the only difference is the target status. See the AttendanceDeliveryChannelResult.skip
+  // doc comment for why this is a distinct terminal bucket from `failed`.
+  private async markSkipped(id: string, error: string, attemptCount: number): Promise<boolean> {
+    const now = this.now().toISOString()
+    const result = await this.query(
+      `UPDATE attendance_notification_deliveries
+          SET status = 'skipped',
               last_error = $2,
               claim_expires_at = NULL,
               claim_worker_id = NULL,
@@ -618,6 +1157,23 @@ function isRetryableDingTalkErrorCode(code: number): boolean {
 }
 
 function classifyDingTalkSendError(error: unknown): AttendanceDeliveryChannelResult {
+  // PR #4046 Phase B — checked FIRST, before any shape-based bucket: the transport marks
+  // send-tier failures whose outcome is unknowable (network error/timeout/5xx/malformed 2xx)
+  // with isDingTalkOutcomeUnknown. Pre-fix these fell into the retryable buckets below and the
+  // outbox RESENT them — the duplicate-notification hazard the owner's doctrine forbids. They
+  // are terminal (`outcome_unknown`), never retried: a resend cannot be reconciled (a lost
+  // response carries no task_id for DingTalk's async-send result query). Definite rejections
+  // (429 pre-processing, flow-control errcodes, business errors) are NOT marked by the
+  // transport and keep their classification below. WeCom/email classifiers are untouched —
+  // their transports do not emit the marker.
+  if (isDingTalkOutcomeUnknown(error)) {
+    return {
+      ok: false,
+      retryable: false,
+      outcomeUnknown: true,
+      error: `dingtalk_send_outcome_unknown: ${normalizeErrorText(error, 'DingTalk send outcome unknown')}`,
+    }
+  }
   if (error instanceof DingTalkRequestError) {
     return {
       ok: false,
@@ -636,6 +1192,86 @@ function classifyDingTalkSendError(error: unknown): AttendanceDeliveryChannelRes
     ok: false,
     retryable: true,
     error: `dingtalk_send_failed: ${normalizeErrorText(error, 'DingTalk send failed')}`,
+  }
+}
+
+// ── WeCom error classification + redaction (design-lock G6) ────────────────────────────────────
+// Distinct bucketing from DingTalk's (different error-code space, different retry semantics):
+//  - retryable: HTTP transport error / timeout / 5xx, {42001,40014} (token-expired, but ONLY after
+//    the channel's own single invalidate+retry already ran — see WeComAttendanceDeliveryChannel.send),
+//    {45009,45033} (rate/concurrency limited).
+//  - structural skip (undeliverable to THIS recipient, not an operator fault): {81013,82001,40003}.
+//  - permanent config fault (worth operator attention, NOT skipped — dead-letter): {41001,40056,60020}
+//    plus "not configured" config-read failures.
+//  - any other/unrecognized WeCom business error: permanent, non-retryable (mirrors DingTalk's
+//    conservative default — do not spin forever against an unclassified business rule violation).
+const WECOM_RATE_LIMIT_ERRCODES: ReadonlySet<number> = new Set([45009, 45033])
+const WECOM_STRUCTURAL_SKIP_ERRCODES: ReadonlySet<number> = new Set([81013, 82001, 40003])
+const WECOM_PERMANENT_CONFIG_ERRCODES: ReadonlySet<number> = new Set([41001, 40056, 60020])
+
+function isRetryableWeComRequestStatus(statusCode: number): boolean {
+  return statusCode === 408 || statusCode === 429 || (statusCode >= 500 && statusCode < 600)
+}
+
+function redactWeComErrorText(text: string): string {
+  const redactedSecrets = text
+    .replace(/([?&](?:corpsecret|access_token|accessToken)=)[^&\s'")]+/gi, '$1[redacted]')
+    .replace(/((?:corpsecret|access_token|accessToken)\s*[:=]\s*)[^&\s'")]+/gi, '$1[redacted]')
+  return redactedSecrets.replace(/(?:https?:\/\/)?(?:[a-z0-9-]+\.)+[a-z]{2,}(?::\d+)?(?:\/[^\s'")]*)?/gi, '[redacted-url]')
+}
+
+function normalizeWeComErrorText(error: unknown, fallback: string): string {
+  const raw = error instanceof Error ? error.message : String(error ?? '')
+  const text = redactWeComErrorText(raw.trim() || fallback)
+  return text.length > 240 ? `${text.slice(0, 237)}...` : text
+}
+
+function classifyWeComConfigError(error: unknown): AttendanceDeliveryChannelResult {
+  const message = normalizeWeComErrorText(error, 'WeCom work-notification config unavailable')
+  const retryable = !/not configured/i.test(message)
+  return { ok: false, retryable, error: `wecom_work_notification_config_unavailable: ${message}` }
+}
+
+function classifyWeComSendError(error: unknown): AttendanceDeliveryChannelResult {
+  if (error instanceof WeComRequestError) {
+    return {
+      ok: false,
+      retryable: isRetryableWeComRequestStatus(error.statusCode),
+      error: `wecom_request_${error.statusCode}: ${normalizeWeComErrorText(error, 'WeCom request failed')}`,
+    }
+  }
+  if (error instanceof WeComBusinessError) {
+    const code = error.errcode
+    if (WECOM_STRUCTURAL_SKIP_ERRCODES.has(code)) {
+      return {
+        ok: false,
+        retryable: false,
+        skip: true,
+        error: `wecom_business_error_${code}: ${normalizeWeComErrorText(error, 'WeCom business error')}`,
+      }
+    }
+    if (WECOM_RATE_LIMIT_ERRCODES.has(code) || WECOM_TOKEN_EXPIRED_ERRCODES.has(code)) {
+      return {
+        ok: false,
+        retryable: true,
+        error: `wecom_business_error_${code}: ${normalizeWeComErrorText(error, 'WeCom business error')}`,
+      }
+    }
+    // WECOM_PERMANENT_CONFIG_ERRCODES (41001/40056/60020) and any OTHER unrecognized WeCom business
+    // error both land here: permanent, non-retryable, NOT skipped (worth an operator's attention —
+    // dead-lettered, never silently dropped). The explicit set membership check keeps the design-lock's
+    // G6 bucket boundaries visible in the persisted error text rather than relying on elimination.
+    const label = WECOM_PERMANENT_CONFIG_ERRCODES.has(code) ? 'WeCom permanent config error' : 'WeCom business error'
+    return {
+      ok: false,
+      retryable: false,
+      error: `wecom_business_error_${code}: ${normalizeWeComErrorText(error, label)}`,
+    }
+  }
+  return {
+    ok: false,
+    retryable: true,
+    error: `wecom_send_failed: ${normalizeWeComErrorText(error, 'WeCom send failed')}`,
   }
 }
 

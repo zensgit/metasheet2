@@ -32,6 +32,10 @@ i18n:集成词汇零 label 模块(仅机器码集);帮助面:零(无 tooltip/无
          attendance AdminCenter+Rail(大管理区 = rail + 分区,反单页怪物)
 ```
 
+> **✅ ALL SHIPPED 2026-07-07**:IU-1 #3743 · IU-2a #3770 / 2b #3794 / 2c #3800 / 2d #3822 ·
+> IU-3 #3821 · IU-4 #3855 · IU-5a #3838 / 5b #3851 · IU-6 #3750 · F(K3 token+errorSummary)#3837。
+> Workbench 6195→5140 行,hex→0。完成报告 = integration-line-ux-ba-completion-report-20260707.md。
+
 ## 2. 切片阶梯(每片单独 opt-in;✅=完成 ⬜=ratify 后可执行 🔒=前置未达)
 
 ```text

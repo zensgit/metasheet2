@@ -11,6 +11,11 @@ import {
   validateDingTalkRobotResponse,
 } from '../integrations/dingtalk/robot'
 import { maskDingTalkWebhookUrl } from '../integrations/dingtalk/runtime-policy'
+import {
+  decryptDingTalkDestinationSecret,
+  decryptDingTalkDestinationWebhookUrl,
+  encryptDingTalkDestinationValue,
+} from './dingtalk-group-destinations'
 import type {
   DingTalkGroupDelivery,
   DingTalkGroupDestination,
@@ -44,11 +49,36 @@ function generateId(): string {
 
 function rowToDestination(row: DingTalkGroupDestinationRow): DingTalkGroupDestination {
   const scope = row.org_id ? 'org' : row.sheet_id ? 'sheet' : 'private'
+  // DT-HARDEN-03 P3: decrypt failures (wrong-key backfill, key rotation, corruption)
+  // must not throw here — this runs inside Array.map for list/get, and the routes that
+  // call it (GET /dingtalk-groups, GET /dingtalk-groups/:id/deliveries) have no
+  // try/catch, so an uncaught throw on ANY row hangs the whole response with none of
+  // the OTHER (readable) rows ever reaching the client. Flag the row instead; never
+  // fall back to the raw stored value (it would leak the `enc:` ciphertext blob as a
+  // "webhook URL" through the masking layer, which passes non-URLs through verbatim).
+  let webhookUrl: string
+  let secret: string | undefined
+  let credentialUnreadable = false
+  try {
+    webhookUrl = decryptDingTalkDestinationWebhookUrl(row.webhook_url)
+    secret = decryptDingTalkDestinationSecret(row.secret)
+  } catch (error) {
+    credentialUnreadable = true
+    webhookUrl = ''
+    secret = undefined
+    logger.error(
+      `DingTalk group destination ${row.id} has unreadable credentials (decrypt failed): ` +
+      `${error instanceof Error ? error.message : String(error)}`,
+    )
+  }
   return {
     id: row.id,
     name: row.name,
-    webhookUrl: row.webhook_url,
-    secret: row.secret ?? undefined,
+    // DT-HARDEN-03: stored encrypted; the domain object always carries plaintext so
+    // masking, signing and validation downstream keep working unchanged.
+    webhookUrl,
+    secret,
+    ...(credentialUnreadable ? { credentialUnreadable: true as const } : {}),
     enabled: row.enabled,
     scope,
     sheetId: row.sheet_id ?? undefined,
@@ -135,8 +165,9 @@ export class DingTalkGroupDestinationService {
     await this.db.insertInto('dingtalk_group_destinations').values({
       id,
       name,
-      webhook_url: webhookUrl,
-      secret: secret ?? null,
+      // DT-HARDEN-03: validated as plaintext above, persisted encrypted.
+      webhook_url: encryptDingTalkDestinationValue(webhookUrl),
+      secret: secret ? encryptDingTalkDestinationValue(secret) : null,
       enabled,
       sheet_id: sheetId,
       org_id: orgId,
@@ -272,9 +303,13 @@ export class DingTalkGroupDestinationService {
       updates.name = name
     }
     if (input.webhookUrl !== undefined) {
-      updates.webhook_url = normalizeDingTalkRobotWebhookUrl(input.webhookUrl)
+      // DT-HARDEN-03: validate the plaintext, persist encrypted.
+      updates.webhook_url = encryptDingTalkDestinationValue(normalizeDingTalkRobotWebhookUrl(input.webhookUrl))
     }
-    if (input.secret !== undefined) updates.secret = normalizeDingTalkRobotSecret(input.secret) ?? null
+    if (input.secret !== undefined) {
+      const nextSecret = normalizeDingTalkRobotSecret(input.secret)
+      updates.secret = nextSecret ? encryptDingTalkDestinationValue(nextSecret) : null
+    }
     if (input.enabled !== undefined) updates.enabled = input.enabled
 
     await this.db.updateTable('dingtalk_group_destinations')
@@ -313,9 +348,10 @@ export class DingTalkGroupDestinationService {
     let responseBody: string | null = null
 
     try {
+      // DT-HARDEN-03: decrypt at rest → plaintext before validation/signing.
       const signedUrl = buildSignedDingTalkWebhookUrl(
-        normalizeDingTalkRobotWebhookUrl(row.webhook_url),
-        normalizeDingTalkRobotSecret(row.secret ?? undefined),
+        normalizeDingTalkRobotWebhookUrl(decryptDingTalkDestinationWebhookUrl(row.webhook_url)),
+        normalizeDingTalkRobotSecret(decryptDingTalkDestinationSecret(row.secret)),
       )
       const controller = new AbortController()
       const timeout = setTimeout(() => controller.abort(), DINGTALK_REQUEST_TIMEOUT_MS)
@@ -391,7 +427,9 @@ export class DingTalkGroupDestinationService {
         .where('id', '=', id)
         .execute()
 
-      logger.info(`DingTalk group destination test sent to ${maskDingTalkWebhookUrl(row.webhook_url)}`)
+      logger.info(
+        `DingTalk group destination test sent to ${maskDingTalkWebhookUrl(decryptDingTalkDestinationWebhookUrl(row.webhook_url))}`,
+      )
       return { ok: true }
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unknown error'

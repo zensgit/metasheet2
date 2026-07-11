@@ -1384,6 +1384,9 @@
             <button class="attendance__btn" :disabled="exporting || loading || reportsExportBlocked" @click="exportCsv">
               {{ exporting ? tr('Exporting...', '导出中...') : tr('Export CSV', '导出 CSV') }}
             </button>
+            <button class="attendance__btn" data-testid="attendance-export-xlsx" :disabled="exportingXlsx || loading || reportsExportBlocked" @click="exportXlsx">
+              {{ exportingXlsx ? tr('Exporting...', '导出中...') : tr('Export Excel', '导出 Excel') }}
+            </button>
           </div>
         </div>
         <small class="attendance__field-hint">{{ recordsTimezoneContextHint }}</small>
@@ -3022,6 +3025,9 @@
                     data-overtime-bank="cap"
                     :placeholder="tr('0 = no cap', '0＝不限')"
                   />
+                  <small class="attendance__field-hint" data-overtime-bank-hint="cap">
+                    {{ tr('Caps the comp-time banked from overtime per calendar month. An approval that would push the month past this cap is blocked. 0 = no cap.', '限制每自然月由加班转入调休池的额度上限。若某次审批会使当月超过该上限，则阻断该审批。0＝不限。') }}
+                  </small>
                 </label>
                 <label class="attendance__field" for="attendance-overtime-bank-validity">
                   <span>{{ tr('Lot validity (days, empty = no expiry)', '额度有效期（天，留空＝不过期）') }}</span>
@@ -3034,6 +3040,9 @@
                     data-overtime-bank="validity"
                     :placeholder="tr('Empty = no expiry', '留空＝不过期')"
                   />
+                  <small class="attendance__field-hint" data-overtime-bank-hint="validity">
+                    {{ tr('Applies to banked (source-tagged) lots; overrides the comp-time conversion validity. Empty = fall back to it.', '作用于加班银行的分源额度，覆盖调休转换的有效期；留空则回落到该有效期。') }}
+                  </small>
                 </label>
                 <button
                   class="attendance__btn attendance__btn--primary"
@@ -3183,6 +3192,18 @@
                     data-outdoor="require-note"
                   />
                 </label>
+                <label class="attendance__field attendance__field--checkbox" for="attendance-outdoor-require-photo">
+                  <span>{{ tr('Require a photo on the outdoor punch', '外勤打卡需上传照片证据') }}</span>
+                  <input
+                    id="attendance-outdoor-require-photo"
+                    v-model="outdoorForm.requirePhoto"
+                    type="checkbox"
+                    data-outdoor="require-photo"
+                  />
+                </label>
+                <p class="attendance__field-hint">
+                  {{ tr('Requires a photo-evidence upload attached to the outdoor punch; only takes effect for punch clients that submit a location or outdoor marker.', '要求外勤打卡附照片证据；对携带定位/外勤标记的打卡端生效。') }}
+                </p>
                 <label class="attendance__field" for="attendance-outdoor-flow">
                   <span>{{ tr('Approval flow', '审批流程') }}</span>
                   <select
@@ -7228,6 +7249,20 @@
                   <input type="checkbox" v-model="annualPolicyForm.carryoverEnabled" />
                 </label>
               </div>
+              <div class="attendance__admin-subsection" data-admin-card="annual-leave-scheduled-trigger">
+                <p class="attendance__field-hint">
+                  {{ tr('When on, the accrual engine runs automatically once a month per org (in addition to the manual run below) — no admin click required. Off (default) = accrual only ever runs when an admin manually triggers it.', '开启后，计提引擎每月为每个组织自动运行一次（在下方手工运行之外）——无需管理员点击。关闭（默认）＝计提仅在管理员手工触发时运行。') }}
+                </p>
+                <label class="attendance__field attendance__field--checkbox" for="attendance-annual-policy-scheduled-trigger">
+                  <span>{{ tr('Auto-run accrual monthly (scheduler)', '每月自动运行计提（调度器）') }}</span>
+                  <input
+                    id="attendance-annual-policy-scheduled-trigger"
+                    v-model="annualPolicyForm.scheduledTriggerEnabled"
+                    type="checkbox"
+                    data-annual-policy="scheduled-trigger"
+                  />
+                </label>
+              </div>
               <h5>{{ tr('Tier ladder (cumulative years → days)', '工龄阶梯 (累计工龄 → 天数)') }}</h5>
               <div class="attendance__table-wrapper">
                 <table class="attendance__table">
@@ -7289,6 +7324,127 @@
                   <span v-else-if="annualAdjustResult.alreadyApplied">↻ {{ tr('Already applied (no change)', '已应用(无变化)') }}</span>
                   <span>{{ tr('Delta', '变动') }}: {{ annualAdjustResult.delta }} {{ tr('min', '分钟') }}</span>
                   <span>{{ tr('Adjustment id', '调整 id') }}: {{ annualAdjustResult.id }}</span>
+                </div>
+              </div>
+
+              <div class="attendance__admin-subsection" data-annual-ops-card="bulk-adjust">
+                <h5>{{ tr('Bulk manual adjustment', '批量手工调整') }}</h5>
+                <p class="attendance__field-hint">
+                  {{ tr(
+                    'Pick one or more users; they share the same delta and reason, but each is written as an independent, individually-audited adjustment.',
+                    '选择一个或多个用户；它们共享相同的变动量和原因，但每个用户都作为独立的、可单独审计的调整写入。',
+                  ) }}
+                </p>
+                <div class="attendance__admin-grid">
+                  <AttendanceUserPickerField
+                    v-model="annualBulkAdjustUserPickerValue"
+                    :tr="tr"
+                    :label="tr('Add user', '添加用户')"
+                    name="annualBulkAdjustUserPicker"
+                    :help-text="tr('Search and pick a user, then click Add.', '搜索并选择用户，然后点击添加。')"
+                    :search-placeholder="tr('Search users for bulk adjustment', '搜索批量调整用户')"
+                    :full-width="false"
+                    input-id="attendance-annual-bulk-adjust-user-picker"
+                  />
+                  <div class="attendance__field">
+                    <span>&nbsp;</span>
+                    <button
+                      class="attendance__btn"
+                      type="button"
+                      data-attendance-annual-bulk-adjust-add-user
+                      @click="addAnnualBulkAdjustUser"
+                    >
+                      {{ tr('Add to targets', '添加到目标') }}
+                    </button>
+                  </div>
+                  <label class="attendance__field"><span>{{ tr('Delta (minutes, ±, shared)', '变动(分钟,±,共享)') }}</span><input v-model.number="annualBulkAdjustForm.deltaMinutes" type="number" data-attendance-annual-bulk-adjust-delta /></label>
+                  <label class="attendance__field"><span>{{ tr('Reason (shared)', '原因(共享)') }}</span><input v-model="annualBulkAdjustForm.reason" type="text" maxlength="500" data-attendance-annual-bulk-adjust-reason /></label>
+                </div>
+                <div
+                  v-if="annualBulkAdjustUserIds.length > 0"
+                  class="attendance__bulk-apply-user-chips"
+                  data-attendance-annual-bulk-adjust-user-chips
+                >
+                  <span
+                    v-for="userId in annualBulkAdjustUserIds"
+                    :key="userId"
+                    class="attendance__scheduler-scope-chip"
+                    data-attendance-annual-bulk-adjust-user-chip
+                  >
+                    {{ userId }}
+                    <button
+                      class="attendance__btn attendance__btn--inline"
+                      type="button"
+                      :aria-label="tr(`Remove ${userId}`, `移除 ${userId}`)"
+                      @click="removeAnnualBulkAdjustUser(userId)"
+                    >
+                      &times;
+                    </button>
+                  </span>
+                </div>
+                <span class="attendance__field-hint" data-attendance-annual-bulk-adjust-selected-count>
+                  {{ tr(`Selected users: ${annualBulkAdjustUserIds.length} / ${BULK_BALANCE_ADJUST_MAX_USERS}`, `已选用户：${annualBulkAdjustUserIds.length} / ${BULK_BALANCE_ADJUST_MAX_USERS}`) }}
+                </span>
+                <div class="attendance__admin-actions">
+                  <button
+                    class="attendance__btn attendance__btn--primary"
+                    :disabled="Boolean(annualBulkAdjustSubmitDisabledReason)"
+                    :title="annualBulkAdjustSubmitDisabledReason || undefined"
+                    data-attendance-annual-bulk-adjust-request
+                    type="button"
+                    @click="requestAnnualBulkAdjust"
+                  >
+                    {{ tr('Bulk adjust balance', '批量调整余额') }}
+                  </button>
+                  <small
+                    v-if="annualBulkAdjustSubmitDisabledReason"
+                    class="attendance__field-hint"
+                    data-attendance-annual-bulk-adjust-disabled-reason
+                  >
+                    {{ annualBulkAdjustSubmitDisabledReason }}
+                  </small>
+                </div>
+                <p v-if="annualBulkAdjustError" class="attendance__error" data-attendance-annual-bulk-adjust-error>{{ annualBulkAdjustError }}</p>
+                <div v-if="annualBulkAdjustHasResults" class="attendance__annual-ops-result" data-attendance-annual-bulk-adjust-results>
+                  <span data-attendance-annual-bulk-adjust-summary>
+                    {{ tr(`${annualBulkAdjustAppliedCount} applied, ${annualBulkAdjustFailedCount} failed`, `${annualBulkAdjustAppliedCount} 成功，${annualBulkAdjustFailedCount} 失败`) }}
+                  </span>
+                  <table class="attendance__table">
+                    <thead><tr><th>{{ tr('User', '用户') }}</th><th>{{ tr('Result', '结果') }}</th></tr></thead>
+                    <tbody>
+                      <tr v-for="userId in annualBulkAdjustUserIds" :key="userId">
+                        <td>{{ userId }}</td>
+                        <td>
+                          <span
+                            v-if="annualBulkAdjust.results[userId]"
+                            class="attendance__status-chip"
+                            :data-attendance-annual-bulk-adjust-row-state="annualBulkAdjust.results[userId]?.state"
+                            :data-attendance-annual-bulk-adjust-row-error-kind="annualBulkAdjust.results[userId]?.errorKind"
+                          >
+                            {{ annualBulkAdjustRowResultText(userId) }}
+                          </span>
+                        </td>
+                      </tr>
+                    </tbody>
+                  </table>
+                  <p
+                    v-if="annualBulkAdjustOutcome === 'completed_with_errors'"
+                    class="attendance__error"
+                    data-attendance-annual-bulk-adjust-outcome-error
+                  >
+                    {{ tr('Some users failed. Retry the failed users, or start a new batch.', '部分用户失败。请重试失败用户，或开始新一批。') }}
+                  </p>
+                  <div class="attendance__admin-actions">
+                    <button
+                      class="attendance__btn"
+                      type="button"
+                      :disabled="annualBulkAdjust.submitting || annualBulkAdjustOutcome !== 'completed_with_errors'"
+                      data-attendance-annual-bulk-adjust-retry
+                      @click="retryAnnualBulkAdjust"
+                    >
+                      {{ annualBulkAdjust.submitting ? tr('Submitting...', '提交中...') : tr('Retry failed users', '重试失败用户') }}
+                    </button>
+                  </div>
                 </div>
               </div>
 
@@ -7497,12 +7653,7 @@
                 <label class="attendance__field" for="attendance-approval-type">
                   <span>{{ tr('Request type', '申请类型') }}</span>
                   <select id="attendance-approval-type" name="approvalType" v-model="approvalFlowForm.requestType">
-                    <option value="missed_check_in">{{ tr('Missed check-in', '漏打上班卡') }}</option>
-                    <option value="missed_check_out">{{ tr('Missed check-out', '漏打下班卡') }}</option>
-                    <option value="time_correction">{{ tr('Time correction', '时间更正') }}</option>
-                    <option value="leave">{{ tr('Leave', '请假') }}</option>
-                    <option value="overtime">{{ tr('Overtime', '加班') }}</option>
-                    <option value="shift_swap">{{ tr('Shift swap', '换班') }}</option>
+                    <option v-for="type in approvalFlowRequestTypeOptions" :key="type" :value="type">{{ formatRequestType(type) }}</option>
                   </select>
                 </label>
                 <label class="attendance__field attendance__field--checkbox" for="attendance-approval-active">
@@ -7514,16 +7665,18 @@
                     type="checkbox"
                   />
                 </label>
-                <label class="attendance__field attendance__field--full" for="attendance-approval-steps">
-                  <span>{{ tr('Steps (JSON)', '步骤（JSON）') }}</span>
-                  <textarea
-                    id="attendance-approval-steps"
-                    name="approvalSteps"
-                    v-model="approvalFlowForm.steps"
-                    rows="3"
-                    placeholder='[{"name":"Manager","approverRoleIds":["manager"]}]'
-                  />
-                </label>
+                <div class="attendance__field attendance__field--full">
+                  <span>{{ tr('Approval steps', '审批步骤') }}</span>
+                  <AttendanceApprovalFlowStepsEditor v-model="approvalFlowSteps" :tr="tr" />
+                  <p v-for="(warn, i) in approvalFlowStepWarnings" :key="i" class="attendance__hint attendance__hint--warning" data-testid="attendance-approval-flow-warning">
+                    <template v-if="warn.code === 'no_steps'">{{ tr('No steps configured — requests of this type may auto-pass.', '未配置任何步骤——该类型申请可能自动通过。') }}</template>
+                    <template v-else>{{ tr(`Step ${(warn.stepIndex ?? 0) + 1} has no approver.`, `第 ${(warn.stepIndex ?? 0) + 1} 级未配置审批人。`) }}</template>
+                  </p>
+                  <details class="attendance__approval-preview" data-testid="attendance-approval-steps-preview">
+                    <summary>{{ tr('Preview steps JSON (what will be saved)', '预览步骤 JSON（即将保存的内容）') }}</summary>
+                    <pre><code>{{ approvalFlowStepsPreview }}</code></pre>
+                  </details>
+                </div>
               </div>
               <div class="attendance__admin-actions">
                 <button
@@ -9766,6 +9919,15 @@ import AttendanceImportBatchesSection from './attendance/AttendanceImportBatches
 import AttendanceTeamAvailabilitySection from './attendance/AttendanceTeamAvailabilitySection.vue'
 import AttendanceHolidayDataSection from './attendance/AttendanceHolidayDataSection.vue'
 import AttendanceUserPickerField from './attendance/AttendanceUserPickerField.vue'
+import AttendanceApprovalFlowStepsEditor from './attendance/AttendanceApprovalFlowStepsEditor.vue'
+import {
+  ATTENDANCE_APPROVAL_REQUEST_TYPES,
+  collectAuthoringWarnings,
+  normalizeSteps as normalizeApprovalSteps,
+  stepsPreviewJson,
+  toPayloadSteps as toApprovalPayloadSteps,
+  type AttendanceApprovalStep as AttendanceApprovalStepModel,
+} from './attendance/attendanceApprovalSteps'
 import AttendanceReportFieldsSection from './attendance/AttendanceReportFieldsSection.vue'
 import {
   buildCalendarPolicyOverrideDiagnostics,
@@ -9808,6 +9970,7 @@ import {
   type AttendanceImportMappingColumnLike,
 } from './attendance/importTemplateColumns'
 import { withCsvBom } from './attendance/csvExport'
+import { REPORT_XLSX_MIME, csvTextToXlsxArrayBuffer, xlsxFilenameFromCsv } from './attendance/reportXlsxExport'
 import {
   parseCsvHeaderFromText,
   readBlobHeadText,
@@ -9849,6 +10012,17 @@ import {
   type BatchAnomalyRowResult,
   type BatchAnomalyRowSnapshot,
 } from './attendance/batchAnomalyResolution'
+import {
+  BULK_BALANCE_ADJUST_MAX_USERS,
+  bulkBalanceAdjustErrorText,
+  buildBulkBalanceAdjustRows,
+  canRunBulkBalanceAdjust,
+  runBulkBalanceAdjust,
+  summarizeBulkBalanceAdjustOutcome,
+  type BulkBalanceAdjustRowResult,
+  type BulkBalanceAdjustRowSnapshot,
+  type BulkBalanceAdjustSubmitOutcome,
+} from './attendance/bulkBalanceAdjust'
 import {
   buildRuleSetPreviewRecommendations,
   summarizeRuleSetPreviewResult,
@@ -10522,7 +10696,9 @@ interface AttendanceSettings {
     }
   }
   // ② S3 punch-policy outdoor approval (backend #2308). Frontend type only — the admin card reads/writes
-  // these via PUT { punchPolicy: { outdoor: ... } }. requirePhoto stays latent (no UI in S3-2).
+  // these via PUT { punchPolicy: { outdoor: ... } }. requirePhoto is wired (S2 outdoor-punch-photo
+  // design-lock, 2026-07-10): it takes effect only on punch clients that submit a location or an
+  // outdoor marker (the web hero-punch flow does neither — see punchOutcome.ts / UI-P0 #3806 §4).
   punchPolicy?: {
     outdoor?: {
       requireApproval?: boolean
@@ -10546,6 +10722,9 @@ interface AttendanceSettings {
     tiers?: Array<{ minYears?: number; maxYears?: number | null; days?: number }>
     carryover?: { enabled?: boolean }
     timezone?: string | null
+    // S3 scheduler trigger (design-lock attendance-annual-leave-accrual-scheduler-s3-design-lock-20260710).
+    // The admin card reads/writes this via the SAME PUT { annualLeavePolicy: ... } payload.
+    scheduledTrigger?: { enabled?: boolean }
   }
 }
 
@@ -11527,6 +11706,7 @@ const statusMeta = ref<AttendanceStatusMeta | null>(null)
 const calendarMonth = ref(new Date())
 const pluginsLoaded = ref(false)
 const exporting = ref(false)
+const exportingXlsx = ref(false)
 const exportCsvHeaderMode = ref<'label' | 'code'>('label')
 const settingsLoading = ref(false)
 const attendanceSettings = ref<AttendanceSettings | null>(null)
@@ -15126,10 +15306,14 @@ const multiShiftDayForm = reactive({
 
 // ② S3-2 外勤打卡审批 (outdoor approval) config card. Mirrors shiftComplianceForm: saved via
 // saveOutdoorApproval, which PUTs ONLY { punchPolicy: { outdoor: ... } } so the backend per-key merge
-// leaves unscheduled / merge / the latent requirePhoto untouched. requireApproval=false ⇒ no regression.
+// leaves unscheduled / merge siblings untouched. requireApproval=false ⇒ no regression. requirePhoto
+// (S2 outdoor-punch-photo design-lock, 2026-07-10) is wired but only enforced for outdoor candidates
+// (outsideGeofence || outdoorMarker) — the web hero-punch flow never produces one, so this card alone
+// cannot cause a punch to actually require a photo (see punchOutcome.ts / UI-P0 #3806 §4).
 const outdoorForm = reactive({
   requireApproval: false,
   requireNote: false,
+  requirePhoto: false,
   approvalFlowId: '',
 })
 // ② S2-2 内外勤卡合并 (in/out merge) config card. Mirrors outdoorForm: saved via saveInOutMerge, which
@@ -15356,9 +15540,15 @@ const overtimeRuleForm = reactive({
 const approvalFlowForm = reactive({
   name: '',
   requestType: 'leave',
-  steps: '',
   isActive: true,
 })
+// A1 structured step editor (approval-flow-editor design-lock): the working
+// step model behind the editor. The old approvalFlowForm.steps JSON string is
+// gone; the persisted payload shape is unchanged (built by toApprovalPayloadSteps).
+const approvalFlowSteps = ref<AttendanceApprovalStepModel[]>([])
+const approvalFlowStepsPreview = computed(() => stepsPreviewJson(approvalFlowSteps.value))
+const approvalFlowRequestTypeOptions = ATTENDANCE_APPROVAL_REQUEST_TYPES
+const approvalFlowStepWarnings = computed(() => collectAuthoringWarnings(approvalFlowSteps.value))
 
 const rotationRuleForm = reactive({
   name: '',
@@ -15836,7 +16026,9 @@ function formatRequestType(value: string): string {
         time_correction: '时间更正',
         leave: '请假申请',
         overtime: '加班申请',
+        outdoor_punch: '外勤打卡',
         shift_swap: '换班申请',
+        schedule_dispatch: '调度申请',
       }
     : {
         missed_check_in: 'Missed check-in',
@@ -15844,7 +16036,9 @@ function formatRequestType(value: string): string {
         time_correction: 'Time correction',
         leave: 'Leave request',
         overtime: 'Overtime request',
+        outdoor_punch: 'Outdoor punch',
         shift_swap: 'Shift-swap request',
+        schedule_dispatch: 'Schedule dispatch',
       }
   return map[value] ?? value
 }
@@ -16595,17 +16789,6 @@ function parseShiftSequenceInput(value: string): string[] {
   return parseAttendanceRotationSequenceInput(value)
 }
 
-function parseApprovalStepsInput(value: string): AttendanceApprovalStep[] | null {
-  if (!value.trim()) return []
-  try {
-    const parsed = JSON.parse(value)
-    if (!Array.isArray(parsed)) return null
-    return parsed.filter(item => item && typeof item === 'object') as AttendanceApprovalStep[]
-  } catch {
-    return null
-  }
-}
-
 function parseUserIdList(value: string): string[] {
   if (!value) return []
   return Array.from(new Set(
@@ -16632,10 +16815,6 @@ function comprehensiveHoursStatusClass(status: AttendanceComprehensiveHoursStatu
   if (status === 'violation') return 'attendance__status-chip--late_early'
   if (status === 'warning') return 'attendance__status-chip--late'
   return 'attendance__status-chip--normal'
-}
-
-function formatApprovalSteps(steps: AttendanceApprovalStep[]): string {
-  return JSON.stringify(steps ?? [], null, 2)
 }
 
 function formatMetaMinutes(meta: Record<string, any> | undefined, key: 'leave' | 'overtime'): string {
@@ -21808,6 +21987,65 @@ async function exportCsv() {
   }
 }
 
+// S5: same server report CSV (identical fields/filters/fingerprint) rendered to
+// a real .xlsx client-side — Excel opens it without the ANSI/GBK 乱码 guess.
+async function exportXlsx() {
+  if (reportsExportBlocked.value) {
+    setStatus(
+      appendStatusContext(
+        reportsUnavailable.value
+          ? tr('Reload the report before exporting.', '请先重载报表再导出。')
+          : tr('Filters changed. Reload the report before exporting.', '筛选条件已变化，请先重载报表再导出。'),
+        recordsTimezoneContextHint.value,
+      ),
+      'error',
+    )
+    return
+  }
+  exportingXlsx.value = true
+  try {
+    const query = buildQuery({
+      from: fromDate.value,
+      to: toDate.value,
+      orgId: normalizedOrgId(),
+      userId: normalizedUserId(),
+      header: exportCsvHeaderMode.value,
+    })
+    const response = await apiFetch(`/api/attendance/export?${query.toString()}`)
+    const text = await response.text()
+    if (!response.ok) {
+      let message = tr('Export failed', '导出失败')
+      try {
+        message = readErrorMessage(JSON.parse(text), message)
+      } catch {
+        message = text || message
+      }
+      throw new Error(message)
+    }
+    const disposition = response.headers.get('content-disposition')
+    const match = disposition?.match(/filename="?([^";]+)"?/)
+    const filename = xlsxFilenameFromCsv(match?.[1] || 'attendance-export.csv')
+    const bytes = await csvTextToXlsxArrayBuffer(text)
+    const blob = new Blob([bytes], { type: REPORT_XLSX_MIME })
+    const url = URL.createObjectURL(blob)
+    const link = document.createElement('a')
+    link.href = url
+    link.download = filename
+    document.body.appendChild(link)
+    link.click()
+    link.remove()
+    URL.revokeObjectURL(url)
+    setStatus(appendStatusContext(tr('Excel export ready.', 'Excel 导出完成。'), recordsTimezoneContextHint.value))
+  } catch (error: any) {
+    setStatus(
+      appendStatusContext(readErrorMessage(error, tr('Export failed', '导出失败')), recordsTimezoneContextHint.value),
+      'error',
+    )
+  } finally {
+    exportingXlsx.value = false
+  }
+}
+
 function listToText(list?: Array<string | number>): string {
   return Array.isArray(list) ? list.join(',') : ''
 }
@@ -22414,6 +22652,7 @@ function applyOutdoorToForm(settings: AttendanceSettings) {
   const outdoor = settings.punchPolicy?.outdoor || {}
   outdoorForm.requireApproval = outdoor.requireApproval === true
   outdoorForm.requireNote = outdoor.requireNote === true
+  outdoorForm.requirePhoto = outdoor.requirePhoto === true
   outdoorForm.approvalFlowId = typeof outdoor.approvalFlowId === 'string' ? outdoor.approvalFlowId : ''
 }
 
@@ -22842,13 +23081,15 @@ async function saveMultiShiftDay() {
 async function saveOutdoorApproval() {
   settingsLoading.value = true
   try {
-    // PUT ONLY punchPolicy.outdoor — the backend 2-level merge preserves unscheduled / merge siblings and
-    // the latent requirePhoto (not sent here). requireApproval=false ⇒ no change to existing punching.
+    // PUT ONLY punchPolicy.outdoor — the backend 2-level merge preserves unscheduled / merge siblings.
+    // requireApproval=false ⇒ no change to existing punching. requirePhoto only takes effect on outdoor
+    // candidates (see punchOutcome.ts / UI-P0 #3806 §4 — the web hero-punch flow never produces one).
     const payload = {
       punchPolicy: {
         outdoor: {
           requireApproval: outdoorForm.requireApproval === true,
           requireNote: outdoorForm.requireNote === true,
+          requirePhoto: outdoorForm.requirePhoto === true,
           approvalFlowId: String(outdoorForm.approvalFlowId || '').trim(),
         },
       },
@@ -23781,6 +24022,8 @@ const annualPolicyForm = reactive<{
   tiers: AnnualLeaveTierRow[]
   carryoverEnabled: boolean
   timezone: string
+  // S3 scheduler trigger single opt-in switch (design-lock attendance-annual-leave-accrual-scheduler-s3-design-lock-20260710).
+  scheduledTriggerEnabled: boolean
 }>({
   enabled: false,
   tenureMode: 'cumulative_service',
@@ -23792,6 +24035,7 @@ const annualPolicyForm = reactive<{
   ],
   carryoverEnabled: false,
   timezone: '',
+  scheduledTriggerEnabled: false,
 })
 
 // Hydrate the policy form from a settings object — the idiomatic apply…ToForm pattern, called from loadSettings()
@@ -23813,6 +24057,7 @@ function applyAnnualPolicyToForm(settings: AttendanceSettings): void {
     }
     annualPolicyForm.carryoverEnabled = !!p.carryover?.enabled
     annualPolicyForm.timezone = p.timezone || ''
+    annualPolicyForm.scheduledTriggerEnabled = !!p.scheduledTrigger?.enabled
   }
   annualPolicyLoaded.value = true
 }
@@ -23894,6 +24139,7 @@ async function saveAnnualPolicy() {
         tiers: annualPolicyForm.tiers.map(t => ({ minYears: t.minYears, maxYears: t.maxYears, days: t.days })),
         carryover: { enabled: annualPolicyForm.carryoverEnabled },
         timezone: annualPolicyForm.timezone.trim() || null,
+        scheduledTrigger: { enabled: annualPolicyForm.scheduledTriggerEnabled },
       },
     }
     const response = await apiFetch('/api/attendance/settings', { method: 'PUT', body: JSON.stringify(payload) })
@@ -24097,6 +24343,184 @@ async function submitAnnualAdjust(snapshot: { userId: string; deltaMinutes: numb
   } finally {
     annualAdjustSubmitting.value = false
   }
+}
+
+// -- Card 1b (S6 #3925 design-lock 2026-07-10): bulk manual adjustment — a client-side
+// sequential loop over the SAME single-user route as Card 1 above, sharing one
+// {deltaMinutes, reason} across a user-picker selection (annual only — G1). Kept as its own
+// state block (never entangled with the single-row annualAdjustForm) so a partial-failure
+// retry here can never touch Card 1's own in-flight request. G4: reuses annualOpsConfirm's
+// shape for the confirm step; the actual network loop only runs from onConfirm, mirroring
+// the bulk-apply-schedule / batch-anomaly two-step precedent.
+const annualBulkAdjustUserPickerValue = ref('')
+const annualBulkAdjustUserIds = ref<string[]>([])
+const annualBulkAdjustForm = reactive<{ deltaMinutes: number; reason: string }>({ deltaMinutes: 0, reason: '' })
+const annualBulkAdjustError = ref<string | null>(null)
+const annualBulkAdjust = reactive<{
+  submitting: boolean
+  rows: BulkBalanceAdjustRowSnapshot[]
+  results: Record<string, BulkBalanceAdjustRowResult>
+}>({ submitting: false, rows: [], results: {} })
+
+function addAnnualBulkAdjustUser(): void {
+  const userId = annualBulkAdjustUserPickerValue.value.trim()
+  if (!userId) return
+  if (!annualBulkAdjustUserIds.value.includes(userId)) {
+    annualBulkAdjustUserIds.value = [...annualBulkAdjustUserIds.value, userId]
+  }
+  annualBulkAdjustUserPickerValue.value = ''
+}
+
+function removeAnnualBulkAdjustUser(userId: string): void {
+  annualBulkAdjustUserIds.value = annualBulkAdjustUserIds.value.filter(id => id !== userId)
+}
+
+const annualBulkAdjustSubmitDisabledReason = computed(() => {
+  if (!annualOpsPolicyEnabled.value) {
+    return tr('The annual leave engine is disabled.', '年假引擎未启用。')
+  }
+  if (annualBulkAdjust.submitting) return tr('Bulk adjustment in progress...', '批量调整处理中...')
+  if (annualBulkAdjustUserIds.value.length === 0) return tr('Add at least one user.', '请至少添加一个用户。')
+  if (!canRunBulkBalanceAdjust(annualBulkAdjustUserIds.value.length)) {
+    return tr(
+      `Select at most ${BULK_BALANCE_ADJUST_MAX_USERS} users; narrow the selection.`,
+      `最多选择 ${BULK_BALANCE_ADJUST_MAX_USERS} 个用户；请缩小选择范围。`,
+    )
+  }
+  const delta = Number(annualBulkAdjustForm.deltaMinutes)
+  if (!Number.isInteger(delta) || delta === 0) {
+    return tr('Enter a non-zero whole number of minutes.', '请输入非零整数分钟。')
+  }
+  if (!annualBulkAdjustForm.reason.trim()) return tr('A reason is required.', '必须填写原因。')
+  return ''
+})
+
+const annualBulkAdjustOutcome = computed(() => summarizeBulkBalanceAdjustOutcome(Object.values(annualBulkAdjust.results)))
+const annualBulkAdjustHasResults = computed(() => Object.keys(annualBulkAdjust.results).length > 0)
+const annualBulkAdjustAppliedCount = computed(() => Object.values(annualBulkAdjust.results).filter(r => r.state === 'ok').length)
+const annualBulkAdjustFailedCount = computed(() => Object.values(annualBulkAdjust.results).filter(r => r.state === 'error').length)
+
+function annualBulkAdjustRowResultText(userId: string): string {
+  const result = annualBulkAdjust.results[userId]
+  if (!result) return ''
+  if (result.state === 'ok') return tr('Applied', '已应用')
+  if (result.state === 'error') return bulkBalanceAdjustErrorText(result.errorKind ?? 'generic', tr)
+  return tr('Submitting...', '提交中...')
+}
+
+// Phase 1 (selection -> confirm): builds the row snapshot and opens the SHARED annualOpsConfirm
+// panel only — this function must never call runBulkBalanceAdjust/apiFetch directly
+// (design §G4 confirm gate).
+function requestAnnualBulkAdjust(): void {
+  annualBulkAdjustError.value = null
+  const userIds = [...annualBulkAdjustUserIds.value]
+  const delta = Number(annualBulkAdjustForm.deltaMinutes)
+  const reason = annualBulkAdjustForm.reason.trim()
+  if (userIds.length === 0) {
+    annualBulkAdjustError.value = tr('Add at least one user', '请至少添加一个用户')
+    return
+  }
+  if (!canRunBulkBalanceAdjust(userIds.length)) {
+    annualBulkAdjustError.value = tr(
+      `Select at most ${BULK_BALANCE_ADJUST_MAX_USERS} users; narrow the selection.`,
+      `最多选择 ${BULK_BALANCE_ADJUST_MAX_USERS} 个用户；请缩小选择范围。`,
+    )
+    return
+  }
+  if (!Number.isInteger(delta) || delta === 0) {
+    annualBulkAdjustError.value = tr('The adjustment must be a non-zero whole number of minutes', '调整必须是非零整数分钟')
+    return
+  }
+  if (!reason) {
+    annualBulkAdjustError.value = tr('A reason is required', '必须填写原因')
+    return
+  }
+  // A brand-new confirmed request always starts a clean batch — a retry (below) reuses
+  // submitAnnualBulkAdjust directly against the already-built rows, never through here.
+  const rows = buildBulkBalanceAdjustRows(userIds, { deltaMinutes: delta, reason }, annualOpsIdempotencyKey)
+  annualBulkAdjust.results = {}
+  openAnnualOpsConfirm({
+    title: tr('Confirm bulk balance adjustment', '确认批量余额调整'),
+    lines: [
+      { label: tr('Users', '用户数'), value: String(rows.length) },
+      { label: tr('Delta (min, shared)', '变动(分钟,共享)'), value: (delta > 0 ? '+' : '') + delta },
+      { label: tr('Reason', '原因'), value: reason },
+      // G3 (override-import-guard design-lock, 2026-07-05): negative adjustments (deductions)
+      // get the same extra irreversibility note as the single-row Card 1 — pure copy, no
+      // behavior change.
+      ...(delta < 0 ? [buildManualAdjustDeductionLedgerLine(tr)] : []),
+    ],
+    onConfirm: () => { void submitAnnualBulkAdjust(rows) },
+  })
+}
+
+// Phase 2 (confirm -> submit): the ONLY function that calls runBulkBalanceAdjust / hits the
+// network. Also the REAL annualOpsPolicyEnabled gate (design §G4 — "批量入口受同一 FE
+// annualOpsPolicyEnabled 门"); the template's :disabled bindings are the proactive UX layer,
+// this is the handler-level guard a direct call cannot bypass (mirrors annualOpsPost's gate).
+async function submitAnnualBulkAdjust(rows: BulkBalanceAdjustRowSnapshot[]): Promise<void> {
+  if (!annualOpsPolicyEnabled.value) {
+    annualBulkAdjustError.value = annualOpsErrorLine('ANNUAL_LEAVE_NOT_ENABLED')
+    return
+  }
+  if (annualBulkAdjust.submitting) return
+  annualBulkAdjust.submitting = true
+  annualBulkAdjust.rows = rows
+  annualBulkAdjustError.value = null
+  const current = new Map<string, BulkBalanceAdjustRowResult>(Object.entries(annualBulkAdjust.results))
+  try {
+    const finalResults = await runBulkBalanceAdjust(
+      rows,
+      current,
+      async (row): Promise<BulkBalanceAdjustSubmitOutcome> => {
+        try {
+          const response = await apiFetch('/api/attendance/annual-leave-manual-adjustment', {
+            method: 'POST',
+            body: JSON.stringify({
+              orgId: normalizedOrgId(),
+              userId: row.userId,
+              deltaMinutes: row.deltaMinutes,
+              reason: row.reason,
+              idempotencyKey: row.idempotencyKey,
+            }),
+          })
+          const data = await response.json().catch(() => null)
+          if (!response.ok || !data?.ok) {
+            throw createApiError(response, data, tr('Bulk balance adjust failed', '批量余额调整失败'))
+          }
+          return {
+            ok: true as const,
+            result: { adjustmentId: data.data?.id, applied: data.data?.applied, alreadyApplied: data.data?.alreadyApplied },
+          }
+        } catch (error) {
+          // Per-row 404/422/409 are per-target results, not a global admin-forbidden state
+          // (design §G3 — "per-row 结果非全局中止"); this loop never sets adminForbidden.
+          return { ok: false as const, errorCode: (error as AttendanceApiError)?.code }
+        }
+      },
+      (userId, result) => {
+        annualBulkAdjust.results = { ...annualBulkAdjust.results, [userId]: result }
+      },
+    )
+    annualBulkAdjust.results = Object.fromEntries(finalResults)
+    const values = [...finalResults.values()]
+    const okCount = values.filter(r => r.state === 'ok').length
+    const errCount = values.filter(r => r.state === 'error').length
+    setStatus(
+      tr(`Bulk balance adjust: ${okCount} applied, ${errCount} failed.`, `批量余额调整：${okCount} 成功，${errCount} 失败。`),
+      errCount > 0 ? 'error' : undefined,
+    )
+  } finally {
+    annualBulkAdjust.submitting = false
+  }
+}
+
+// Retry: only re-submits rows not yet `ok` (design §G5) — reuses the same snapshot `rows`
+// built at confirm time (no re-prompt), so it stays independent of whatever the live form
+// currently shows.
+function retryAnnualBulkAdjust(): void {
+  if (annualBulkAdjust.rows.length === 0 || annualBulkAdjust.submitting) return
+  void submitAnnualBulkAdjust(annualBulkAdjust.rows)
 }
 
 // -- Card 2: expiry backfill (server dry-run; returns {scanned,updated,skipped,reasons{code→count}}) --
@@ -24411,7 +24835,7 @@ function resetApprovalFlowForm() {
   approvalFlowEditingId.value = null
   approvalFlowForm.name = ''
   approvalFlowForm.requestType = 'leave'
-  approvalFlowForm.steps = ''
+  approvalFlowSteps.value = []
   approvalFlowForm.isActive = true
 }
 
@@ -24419,7 +24843,7 @@ function editApprovalFlow(flow: AttendanceApprovalFlow) {
   approvalFlowEditingId.value = flow.id
   approvalFlowForm.name = flow.name
   approvalFlowForm.requestType = flow.requestType
-  approvalFlowForm.steps = formatApprovalSteps(flow.steps)
+  approvalFlowSteps.value = normalizeApprovalSteps(flow.steps)
   approvalFlowForm.isActive = flow.isActive
 }
 
@@ -24452,10 +24876,10 @@ async function saveApprovalFlow() {
     if (!approvalFlowForm.name.trim()) {
       throw new Error(tr('Name is required', '名称为必填项'))
     }
-    const steps = parseApprovalStepsInput(approvalFlowForm.steps)
-    if (steps === null) {
-      throw new Error(tr('Invalid steps JSON', '步骤 JSON 格式无效'))
-    }
+    // A1: steps now come from the structured editor's working model (payload
+    // shape unchanged — same {name,approverUserIds,approverRoleIds}, unknown
+    // keys on existing flows preserved via toApprovalPayloadSteps).
+    const steps = toApprovalPayloadSteps(approvalFlowSteps.value)
     const payload = {
       name: approvalFlowForm.name.trim(),
       requestType: approvalFlowForm.requestType,

@@ -40,6 +40,18 @@ async function flushUi(cycles = 6): Promise<void> {
   }
 }
 
+// jsdom's Blob does not always implement `.text()` — same fallback pattern as
+// IntegrationWorkbenchView.spec.ts's readBlobText helper (BA-APPLY-1 checklist download test, below).
+async function readBlobText(blob: Blob): Promise<string> {
+  if (typeof blob.text === 'function') return blob.text()
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = () => resolve(String(reader.result ?? ''))
+    reader.onerror = () => reject(reader.error)
+    reader.readAsText(blob)
+  })
+}
+
 // ElCard stub — same pattern as IntegrationMonitoringSection.spec.ts (real Element Plus is not
 // globally installed in this createApp() instance).
 const ElCard = defineComponent({
@@ -826,6 +838,240 @@ describe('IntegrationBridgeAgentSection', () => {
     expect(q(root, 'bridge-agent-suggestion-copy-state').textContent).toMatch(/copy failed/i)
   })
 
+  // --- BA-APPLY-1 (docs/development/bridge-agent-controlled-apply-design-lock-20260708.md §2 形态 A,
+  // #3876): "导出实施清单" — an ADD-ONLY export button on the suggestion card. Component spec covers:
+  // toggle visibility, guided empty state, live JSON generation, add/remove-row reflection, the
+  // SENTINEL discipline (independent of the sibling suggestion text), copy + a missing-clipboard
+  // fallback, and download (createObjectURL/anchor/revoke). Zero apply endpoint, zero write — the
+  // component test setup below never registers a route beyond the existing test/objects/schema mocks.
+
+  it('checklist export: hidden until the export button is clicked; toggling flips the button label', async () => {
+    mockRoutes()
+    const root = mountSection([bridgeSystem()])
+    await flushUi()
+
+    expect(root.querySelector('[data-testid="bridge-agent-checklist-output"]')).toBeNull()
+    expect(root.querySelector('[data-testid="bridge-agent-checklist-empty"]')).toBeNull()
+    const exportButton = q<HTMLButtonElement>(root, 'bridge-agent-checklist-export')
+    expect(exportButton.textContent).toMatch(/export implementation checklist/i)
+
+    exportButton.click()
+    await flushUi()
+    expect(exportButton.textContent).toMatch(/hide implementation checklist/i)
+    // no object name typed yet -> the guided empty state, not the JSON preview
+    q(root, 'bridge-agent-checklist-empty')
+    expect(root.querySelector('[data-testid="bridge-agent-checklist-output"]')).toBeNull()
+
+    exportButton.click()
+    await flushUi()
+    expect(exportButton.textContent).toMatch(/export implementation checklist/i)
+    expect(root.querySelector('[data-testid="bridge-agent-checklist-empty"]')).toBeNull()
+  })
+
+  it('checklist export: typing an object + field names renders the exact { schemaVersion, operations } JSON', async () => {
+    mockRoutes()
+    const root = mountSection([bridgeSystem()])
+    await flushUi()
+
+    const objectInput = q<HTMLInputElement>(root, 'bridge-agent-suggestion-object-0')
+    const fieldsInput = q<HTMLInputElement>(root, 'bridge-agent-suggestion-fields-0')
+    objectInput.value = 'material_extra'
+    objectInput.dispatchEvent(new Event('input'))
+    fieldsInput.value = 'field_a, field_b'
+    fieldsInput.dispatchEvent(new Event('input'))
+    await flushUi()
+
+    q<HTMLButtonElement>(root, 'bridge-agent-checklist-export').click()
+    await flushUi()
+
+    const text = q<HTMLTextAreaElement>(root, 'bridge-agent-checklist-text')
+    const parsed = JSON.parse(text.value)
+    expect(parsed).toEqual({
+      schemaVersion: 1,
+      operations: [{ op: 'add_readonly_field', objectName: 'material_extra', fieldKeys: ['field_a', 'field_b'] }],
+    })
+    // no targetLabel/system-name, no free text, no counts — exactly the two keys
+    expect(Object.keys(parsed).sort()).toEqual(['operations', 'schemaVersion'])
+    expect(text.value).not.toContain(bridgeSystem().name)
+  })
+
+  it('checklist export: an object-only row (no field names) yields op=add_readonly_object', async () => {
+    mockRoutes()
+    const root = mountSection([bridgeSystem()])
+    await flushUi()
+
+    const objectInput = q<HTMLInputElement>(root, 'bridge-agent-suggestion-object-0')
+    objectInput.value = 'material_extra'
+    objectInput.dispatchEvent(new Event('input'))
+    await flushUi()
+
+    q<HTMLButtonElement>(root, 'bridge-agent-checklist-export').click()
+    await flushUi()
+
+    const text = q<HTMLTextAreaElement>(root, 'bridge-agent-checklist-text')
+    expect(JSON.parse(text.value)).toEqual({
+      schemaVersion: 1,
+      operations: [{ op: 'add_readonly_object', objectName: 'material_extra', fieldKeys: [] }],
+    })
+  })
+
+  it('checklist export: add row / remove row are reflected in the live JSON, in order', async () => {
+    mockRoutes()
+    const root = mountSection([bridgeSystem()])
+    await flushUi()
+
+    q<HTMLButtonElement>(root, 'bridge-agent-suggestion-add-row').click()
+    await flushUi()
+
+    const object0 = q<HTMLInputElement>(root, 'bridge-agent-suggestion-object-0')
+    object0.value = 'material_extra'
+    object0.dispatchEvent(new Event('input'))
+    const object1 = q<HTMLInputElement>(root, 'bridge-agent-suggestion-object-1')
+    object1.value = 'bom_child_extra'
+    object1.dispatchEvent(new Event('input'))
+    await flushUi()
+
+    q<HTMLButtonElement>(root, 'bridge-agent-checklist-export').click()
+    await flushUi()
+
+    let parsed = JSON.parse(q<HTMLTextAreaElement>(root, 'bridge-agent-checklist-text').value)
+    expect(parsed.operations.map((op: { objectName: string }) => op.objectName)).toEqual(['material_extra', 'bom_child_extra'])
+
+    q<HTMLButtonElement>(root, 'bridge-agent-suggestion-remove-0').click()
+    await flushUi()
+    parsed = JSON.parse(q<HTMLTextAreaElement>(root, 'bridge-agent-checklist-text').value)
+    expect(parsed.operations.map((op: { objectName: string }) => op.objectName)).toEqual(['bom_child_extra'])
+  })
+
+  it('SENTINEL (BA-APPLY-1 checklist export): a secret/host-shaped object or field name is dropped, never echoed into the JSON', async () => {
+    mockRoutes()
+    const root = mountSection([bridgeSystem()])
+    await flushUi()
+
+    const objectInput = q<HTMLInputElement>(root, 'bridge-agent-suggestion-object-0')
+    objectInput.value = `password=${SENTINEL.configSecret}`
+    objectInput.dispatchEvent(new Event('input'))
+    await flushUi()
+
+    q<HTMLButtonElement>(root, 'bridge-agent-checklist-export').click()
+    await flushUi()
+    // the hostile-named row is dropped entirely -> back to the guided empty state, not a JSON preview
+    q(root, 'bridge-agent-checklist-empty')
+    expect(root.querySelector('[data-testid="bridge-agent-checklist-text"]')).toBeNull()
+    expect(root.textContent).not.toContain(SENTINEL.configSecret)
+
+    q<HTMLButtonElement>(root, 'bridge-agent-suggestion-add-row').click()
+    await flushUi()
+    const object1 = q<HTMLInputElement>(root, 'bridge-agent-suggestion-object-1')
+    object1.value = 'material_extra'
+    object1.dispatchEvent(new Event('input'))
+    const fields1 = q<HTMLInputElement>(root, 'bridge-agent-suggestion-fields-1')
+    fields1.value = `token=${SENTINEL.configSecret}, field_a`
+    fields1.dispatchEvent(new Event('input'))
+    await flushUi()
+
+    const text = q<HTMLTextAreaElement>(root, 'bridge-agent-checklist-text')
+    expect(text.value).not.toContain(SENTINEL.configSecret)
+    expect(text.value).not.toContain('password=')
+    expect(text.value).not.toContain('token=')
+    expect(JSON.parse(text.value)).toEqual({
+      schemaVersion: 1,
+      operations: [{ op: 'add_readonly_field', objectName: 'material_extra', fieldKeys: ['field_a'] }],
+    })
+  })
+
+  it('checklist export: copy button writes the exact JSON to the clipboard and shows a copied state', async () => {
+    mockRoutes()
+    const root = mountSection([bridgeSystem()])
+    await flushUi()
+
+    const writeText = vi.fn().mockResolvedValue(undefined)
+    Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true })
+    try {
+      const objectInput = q<HTMLInputElement>(root, 'bridge-agent-suggestion-object-0')
+      objectInput.value = 'material_extra'
+      objectInput.dispatchEvent(new Event('input'))
+      await flushUi()
+
+      q<HTMLButtonElement>(root, 'bridge-agent-checklist-export').click()
+      await flushUi()
+      q<HTMLButtonElement>(root, 'bridge-agent-checklist-copy').click()
+      await flushUi()
+
+      expect(writeText).toHaveBeenCalledTimes(1)
+      const copiedText = String(writeText.mock.calls[0][0])
+      expect(JSON.parse(copiedText)).toEqual({
+        schemaVersion: 1,
+        operations: [{ op: 'add_readonly_object', objectName: 'material_extra', fieldKeys: [] }],
+      })
+      expect(q(root, 'bridge-agent-checklist-copy-state').textContent).toMatch(/copied/i)
+    } finally {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      delete (navigator as any).clipboard
+    }
+  })
+
+  it('checklist export: a missing/non-functional clipboard API renders a failed-copy fallback message, never throwing', async () => {
+    mockRoutes()
+    const root = mountSection([bridgeSystem()])
+    await flushUi()
+
+    const objectInput = q<HTMLInputElement>(root, 'bridge-agent-suggestion-object-0')
+    objectInput.value = 'material_extra'
+    objectInput.dispatchEvent(new Event('input'))
+    await flushUi()
+
+    q<HTMLButtonElement>(root, 'bridge-agent-checklist-export').click()
+    await flushUi()
+    q<HTMLButtonElement>(root, 'bridge-agent-checklist-copy').click()
+    await flushUi()
+
+    expect(q(root, 'bridge-agent-checklist-copy-state').textContent).toMatch(/copy failed/i)
+  })
+
+  it('checklist export: download button creates an object URL for a values-free JSON blob, clicks a hidden anchor, and revokes the URL', async () => {
+    const originalCreateObjectURL = URL.createObjectURL
+    const originalRevokeObjectURL = URL.revokeObjectURL
+    const originalAnchorClick = HTMLAnchorElement.prototype.click
+    const createObjectURLMock = vi.fn(() => 'blob:bridge-agent-checklist')
+    const revokeObjectURLMock = vi.fn()
+    const anchorClickMock = vi.fn()
+    Object.defineProperty(URL, 'createObjectURL', { configurable: true, value: createObjectURLMock })
+    Object.defineProperty(URL, 'revokeObjectURL', { configurable: true, value: revokeObjectURLMock })
+    Object.defineProperty(HTMLAnchorElement.prototype, 'click', { configurable: true, value: anchorClickMock })
+    try {
+      mockRoutes()
+      const root = mountSection([bridgeSystem()])
+      await flushUi()
+
+      const objectInput = q<HTMLInputElement>(root, 'bridge-agent-suggestion-object-0')
+      objectInput.value = 'material_extra'
+      objectInput.dispatchEvent(new Event('input'))
+      await flushUi()
+
+      q<HTMLButtonElement>(root, 'bridge-agent-checklist-export').click()
+      await flushUi()
+      q<HTMLButtonElement>(root, 'bridge-agent-checklist-download').click()
+      await flushUi()
+
+      expect(createObjectURLMock).toHaveBeenCalledTimes(1)
+      expect(anchorClickMock).toHaveBeenCalledTimes(1)
+      const downloadedBlob = createObjectURLMock.mock.calls[0]?.[0] as Blob
+      expect(downloadedBlob.type).toContain('application/json')
+      const downloadedText = await readBlobText(downloadedBlob)
+      expect(JSON.parse(downloadedText)).toEqual({
+        schemaVersion: 1,
+        operations: [{ op: 'add_readonly_object', objectName: 'material_extra', fieldKeys: [] }],
+      })
+      await new Promise((resolve) => window.setTimeout(resolve, 0))
+      expect(revokeObjectURLMock).toHaveBeenCalledWith('blob:bridge-agent-checklist')
+    } finally {
+      Object.defineProperty(URL, 'createObjectURL', { configurable: true, value: originalCreateObjectURL })
+      Object.defineProperty(URL, 'revokeObjectURL', { configurable: true, value: originalRevokeObjectURL })
+      Object.defineProperty(HTMLAnchorElement.prototype, 'click', { configurable: true, value: originalAnchorClick })
+    }
+  })
+
   it('zh copy: config-check card + suggestion builder render Chinese labels under zh-CN', async () => {
     const { setLocale } = useLocale()
     setLocale('zh-CN')
@@ -845,6 +1091,256 @@ describe('IntegrationBridgeAgentSection', () => {
       await flushUi()
       const text = q<HTMLTextAreaElement>(root, 'bridge-agent-suggestion-text')
       expect(text.value).toContain('1. 对象：material_extra')
+
+      // BA-APPLY-1: zh label for the export button + the JSON preview content is locale-agnostic
+      // (values are identifier strings, not translated copy) but the surrounding hint text is zh.
+      const exportButton = q<HTMLButtonElement>(root, 'bridge-agent-checklist-export')
+      expect(exportButton.textContent).toContain('导出实施清单')
+      exportButton.click()
+      await flushUi()
+      expect(root.textContent).toContain('机读实施清单')
+      const checklistText = q<HTMLTextAreaElement>(root, 'bridge-agent-checklist-text')
+      expect(JSON.parse(checklistText.value)).toEqual({
+        schemaVersion: 1,
+        operations: [{ op: 'add_readonly_object', objectName: 'material_extra', fieldKeys: [] }],
+      })
+    } finally {
+      setLocale('en')
+    }
+  })
+
+  it('task status: last-check reads 未探测/"Not probed yet" before any probe has run', async () => {
+    mockRoutes()
+    const system = bridgeSystem()
+    const root = mountSection([system])
+    await flushUi()
+
+    const lastCheck = q(root, `bridge-agent-task-last-check-${system.id}`)
+    expect(lastCheck.getAttribute('data-result')).toBe('unknown')
+    expect(lastCheck.textContent).toMatch(/not probed yet/i)
+  })
+
+  it('task status: last-check reflects FAIL after a failed probe, COARSE ONLY (never names the failed step)', async () => {
+    mockRoutes({ objects: () => errorResponse(500, 'BRIDGE_AGENT_REQUEST_FAILED', SENTINEL.errorBody) })
+    const system = bridgeSystem()
+    const root = mountSection([system])
+    await flushUi()
+
+    q<HTMLButtonElement>(root, `bridge-agent-probe-${system.id}`).click()
+    await flushUi()
+
+    // The probe-evidence panel elsewhere on the page is allowed to name the step ("FAIL: Objects") —
+    // but THIS card's own last-check line is scoped to the coarse PASS/FAIL/未探测 vocabulary only.
+    const lastCheck = q(root, `bridge-agent-task-last-check-${system.id}`)
+    expect(lastCheck.getAttribute('data-result')).toBe('fail')
+    expect(lastCheck.textContent).toContain('FAIL')
+    expect(lastCheck.textContent).not.toMatch(/objects/i)
+  })
+
+  it('task status: last-check reflects PASS after a successful BA-UI-2 probe run', async () => {
+    mockRoutes()
+    const system = bridgeSystem()
+    const root = mountSection([system])
+    await flushUi()
+
+    q<HTMLButtonElement>(root, `bridge-agent-probe-${system.id}`).click()
+    await flushUi()
+
+    const lastCheck = q(root, `bridge-agent-task-last-check-${system.id}`)
+    expect(lastCheck.getAttribute('data-result')).toBe('pass')
+    expect(lastCheck.textContent).toContain('PASS')
+  })
+
+  it('task status: renders the managed-by-scheduled-task guidance and the start/stop pointer, with ZERO control elements', async () => {
+    mockRoutes()
+    const system = bridgeSystem()
+    const root = mountSection([system])
+    await flushUi()
+
+    const card = q<HTMLDivElement>(root, `bridge-agent-task-status-${system.id}`)
+    const managed = q(root, `bridge-agent-task-managed-${system.id}`)
+    const guidance = q(root, `bridge-agent-task-guidance-${system.id}`)
+
+    expect(managed.textContent).toMatch(/Windows Scheduled Task/i)
+    expect(guidance.textContent).toMatch(/runbook/i)
+    expect(guidance.textContent).toMatch(/no start\/stop/i)
+
+    // Hard bound: no control of any kind lives inside THIS card (scoped query — the sibling "Check
+    // connection" / "One-click probe" buttons live earlier in the same per-system card and must not
+    // be mistaken for a control belonging to the task-status surface).
+    expect(card.querySelectorAll('button, input[type="button"], input[type="submit"]').length).toBe(0)
+    // Belt-and-braces: no start/stop-shaped testid anywhere in the whole rendered tree.
+    expect(root.querySelector(`[data-testid="bridge-agent-task-start-${system.id}"]`)).toBeNull()
+    expect(root.querySelector(`[data-testid="bridge-agent-task-stop-${system.id}"]`)).toBeNull()
+    expect(root.querySelector('[data-testid*="task-start"]')).toBeNull()
+    expect(root.querySelector('[data-testid*="task-stop"]')).toBeNull()
+  })
+
+  it('task status: SENTINEL — no host/path/secret from mocked system/probe state ever reaches this card, success or failure', async () => {
+    mockRoutes({
+      test: () => jsonResponse({
+        ok: false,
+        connected: false,
+        code: SENTINEL.hostileCode,
+        message: SENTINEL.testMessage,
+      }),
+    })
+    const system = bridgeSystem()
+    const root = mountSection([system])
+    await flushUi()
+
+    q<HTMLButtonElement>(root, `bridge-agent-card-check-${system.id}`).click()
+    await flushUi()
+    q<HTMLButtonElement>(root, `bridge-agent-probe-${system.id}`).click()
+    await flushUi()
+
+    const card = q<HTMLDivElement>(root, `bridge-agent-task-status-${system.id}`)
+    const html = card.innerHTML
+    const text = card.textContent || ''
+    for (const [key, sentinel] of Object.entries(SENTINEL)) {
+      expect(html.includes(sentinel), `task-status sentinel leak html: ${key}`).toBe(false)
+      expect(text.includes(sentinel), `task-status sentinel leak text: ${key}`).toBe(false)
+    }
+    for (const fragment of ['SENTINEL-', 'Password=', 'token=', 'authorityCode=', '192.168.77.66', 'sharedsecret']) {
+      expect(html.includes(fragment), `task-status sentinel fragment leaked: ${fragment}`).toBe(false)
+    }
+    // Coarse result only — this card degrades a hostile/unregistered health code the same as any
+    // other failure, it never renders the code or message text.
+    expect(q(root, `bridge-agent-task-last-check-${system.id}`).getAttribute('data-result')).toBe('fail')
+  })
+
+  it('zh copy: task status card renders bilingual guidance + coarse result labels under zh-CN', async () => {
+    const { setLocale } = useLocale()
+    setLocale('zh-CN')
+    try {
+      mockRoutes()
+      const system = bridgeSystem()
+      const root = mountSection([system])
+      await flushUi()
+
+      expect(q(root, `bridge-agent-task-managed-${system.id}`).textContent).toContain('计划任务')
+      expect(q(root, `bridge-agent-task-guidance-${system.id}`).textContent).toContain('runbook')
+      expect(q(root, `bridge-agent-task-last-check-${system.id}`).textContent).toContain('未探测')
+
+      q<HTMLButtonElement>(root, `bridge-agent-probe-${system.id}`).click()
+      await flushUi()
+      expect(q(root, `bridge-agent-task-last-check-${system.id}`).textContent).toContain('PASS')
+    } finally {
+      setLocale('en')
+    }
+  })
+
+  // --- BA-APPLY-3: post-apply auto re-probe confirmation (design-lock §7 terminal state, refs #3746).
+  // The FINAL rung. After an operator manually applies the exported checklist (form-A handoff), this
+  // card re-reads the connector via the SAME read-only object/schema probe and confirms the expected
+  // readonly objects/fields now appear. Read-only: no apply, no write, no start/stop, no credentials,
+  // no new fetch. Confirmation is DERIVED from the probe (expected-name ∈ probed names), never assumed.
+  it('BA-APPLY-3 re-probe confirm: an object present in the probe shows 已出现; a field absent from the probed schema shows 未出现; overall partial', async () => {
+    mockRoutes()
+    const root = mountSection([bridgeSystem()])
+    await flushUi()
+    // objects auto-load (material, bom); expand material so its schema (FItemID/FNumber/FName) is probed
+    q<HTMLButtonElement>(root, 'bridge-agent-object-schema-toggle-material').click()
+    await flushUi()
+    const objectInput = q<HTMLInputElement>(root, 'bridge-agent-suggestion-object-0')
+    objectInput.value = 'material'
+    objectInput.dispatchEvent(new Event('input'))
+    const fieldsInput = q<HTMLInputElement>(root, 'bridge-agent-suggestion-fields-0')
+    fieldsInput.value = 'FItemID, ghost_field'
+    fieldsInput.dispatchEvent(new Event('input'))
+    await flushUi()
+
+    q<HTMLButtonElement>(root, 'bridge-agent-reprobe-toggle').click()
+    await flushUi()
+
+    expect(q(root, 'bridge-agent-reprobe-status').getAttribute('data-status')).toBe('partial')
+    expect(q(root, 'bridge-agent-reprobe-object').getAttribute('data-object-present')).toBe('yes')
+    const fields = root.querySelectorAll('[data-testid="bridge-agent-reprobe-field"]')
+    expect(fields.length).toBe(2)
+    const present = Array.from(fields).find((f) => f.textContent?.includes('FItemID'))!
+    const absent = Array.from(fields).find((f) => f.textContent?.includes('ghost_field'))!
+    expect(present.getAttribute('data-field-present')).toBe('yes')
+    expect(absent.getAttribute('data-field-present')).toBe('no')
+  })
+
+  it('BA-APPLY-3 re-probe confirm: an expected object NOT in the probe reports 未生效 (absent) — derived from the probe, never assumed applied', async () => {
+    mockRoutes()
+    const root = mountSection([bridgeSystem()])
+    await flushUi()
+    const objectInput = q<HTMLInputElement>(root, 'bridge-agent-suggestion-object-0')
+    objectInput.value = 'ghost_object' // absent from OBJECTS_PAYLOAD (material, bom)
+    objectInput.dispatchEvent(new Event('input'))
+    await flushUi()
+
+    q<HTMLButtonElement>(root, 'bridge-agent-reprobe-toggle').click()
+    await flushUi()
+
+    expect(q(root, 'bridge-agent-reprobe-status').getAttribute('data-status')).toBe('absent')
+    expect(q(root, 'bridge-agent-reprobe-object').getAttribute('data-object-present')).toBe('no')
+  })
+
+  it('BA-APPLY-3 re-probe confirm: renders object/field names + present/absent only — no probe-payload SENTINEL value leaks', async () => {
+    mockRoutes()
+    const root = mountSection([bridgeSystem()])
+    await flushUi()
+    q<HTMLButtonElement>(root, 'bridge-agent-object-schema-toggle-material').click()
+    await flushUi()
+    const objectInput = q<HTMLInputElement>(root, 'bridge-agent-suggestion-object-0')
+    objectInput.value = 'material'
+    objectInput.dispatchEvent(new Event('input'))
+    const fieldsInput = q<HTMLInputElement>(root, 'bridge-agent-suggestion-fields-0')
+    fieldsInput.value = 'FItemID'
+    fieldsInput.dispatchEvent(new Event('input'))
+    await flushUi()
+
+    q<HTMLButtonElement>(root, 'bridge-agent-reprobe-toggle').click()
+    await flushUi()
+
+    const output = q(root, 'bridge-agent-reprobe-output')
+    expect(output.textContent).toContain('material')
+    expect(output.textContent).toContain('FItemID')
+    expect(output.innerHTML).not.toContain(SENTINEL.objectExtra)
+    expect(output.innerHTML).not.toContain(SENTINEL.schemaExtra)
+  })
+
+  it('BA-APPLY-3 re-probe confirm: pure client-side read of already-probed state — issues no apply/list/write/start-stop route and the confirm card exposes no action button', async () => {
+    mockRoutes()
+    const root = mountSection([bridgeSystem()])
+    await flushUi()
+    const objectInput = q<HTMLInputElement>(root, 'bridge-agent-suggestion-object-0')
+    objectInput.value = 'material'
+    objectInput.dispatchEvent(new Event('input'))
+    await flushUi()
+
+    apiFetchMock.mockClear()
+    q<HTMLButtonElement>(root, 'bridge-agent-reprobe-toggle').click()
+    await flushUi()
+
+    const urls = apiFetchMock.mock.calls.map((call) => String(call[0]))
+    expect(urls.some((u) => /apply|checklist|write|start|stop|config/i.test(u))).toBe(false)
+    const output = q(root, 'bridge-agent-reprobe-output')
+    expect(output.querySelectorAll('button, input[type="button"], input[type="submit"]').length).toBe(0)
+  })
+
+  it('BA-APPLY-3 re-probe confirm: zh-CN renders Chinese apply-confirmation labels', async () => {
+    const { setLocale } = useLocale()
+    setLocale('zh-CN')
+    try {
+      mockRoutes()
+      const root = mountSection([bridgeSystem()])
+      await flushUi()
+      const objectInput = q<HTMLInputElement>(root, 'bridge-agent-suggestion-object-0')
+      objectInput.value = 'ghost_object'
+      objectInput.dispatchEvent(new Event('input'))
+      await flushUi()
+
+      const toggle = q<HTMLButtonElement>(root, 'bridge-agent-reprobe-toggle')
+      expect(toggle.textContent).toContain('复探测确认')
+      toggle.click()
+      await flushUi()
+
+      expect(q(root, 'bridge-agent-reprobe-status').textContent).toContain('未生效')
+      expect(q(root, 'bridge-agent-reprobe-object').textContent).toContain('未出现')
     } finally {
       setLocale('en')
     }

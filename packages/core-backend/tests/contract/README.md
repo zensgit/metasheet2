@@ -61,6 +61,33 @@ The `plm-adapter-yuantus.pact.test.ts` vitest test guards six things:
    response `embed_token`, `token_type`, `expires_in`, `jti`, `aud`, and
    `embed_origin`. Token and `jti` are matched by shape, never exact value.
 
+## PLM-COLLAB Discussion Phase 3 slice-1 (READ-ONLY) (2026-07-09)
+
+Adds 3 interactions (38 -> 41) for `PLMAdapter.getDiscussions()` /
+`PLMAdapter.getDiscussionThread()` against the provider's EXISTING
+`/api/v1/discussions` routes (Discussion Core R1 + Phase-2 + Phase-6,
+already shipped on Yuantus main -- this slice adds **no new provider
+route**, only the consumer read callsites):
+
+- `GET /api/v1/discussions` -- thread-list success for a readable target.
+- `GET /api/v1/discussions/{thread_id}` -- thread-detail success (comments +
+  the Phase-6 `include_history` merge).
+- `GET /api/v1/discussions` -- the no-leak 404 for a missing/unreadable
+  target (`{"detail": "discussion target not found"}`).
+
+Bearer-JWT + target-inherited permission only -- **not entitlement-gated**;
+this slice does no capability/SKU check (the `discussion_core` manifest key
+is a separate, not-yet-ratified owner fork per the design-lock taskbook
+`plm-collab-discussion-phase3-metasheet-consumer-taskbook-20260709.md` on
+the Yuantus side). Write routes (create thread / add comment / edit /
+delete / resolve / reopen) are a later, write-capable-consumer slice and are
+deliberately not added here.
+
+The three interactions sit at the END of the adapter-owned interaction
+list, immediately before the V1.2 parent-host-mediated embed-token mint, so
+the concatenated `PACT_PATHS` order in `plm-adapter-yuantus.pact.test.ts`
+still matches the pact JSON placement.
+
 ## aml/metadata is now live on main
 
 `GET /api/v1/aml/metadata/{item_type_name}` was previously parked outside the
@@ -74,6 +101,40 @@ that gap in the contract-first way:
 5. The provider verifier can seed stable `Property` rows for the `Part`
    `ItemType`, so the metadata response is meaningful instead of an empty
    placeholder.
+
+## #4020: unified `available` affordance-visibility formula (2026-07-10)
+
+The Yuantus provider (#1156) now computes a unified per-feature `available` field on
+every `GET /api/v1/integrations/capabilities` entry: `available = supported &&
+(packaging === 'base' || entitled)`. The capabilities interaction's response body is
+enriched (no new interaction, no count change -- still 41) to pin the formula for three
+feature keys:
+
+- `bom_multitable` -- paid, licensed under this fixture's `tenant-1 holds an active
+  plm.bom_multitable license` provider state: `entitled: true`, `available: true`.
+- `discussion_core` -- base-packaged (`packaging: "base"`), **no** license row on this
+  fixture: `entitled: false`, `available: true`. This is the exact case #4020 exists for
+  -- a naive entitled-only derivation would wrongly hide a base affordance.
+- `metasheet_review` -- paid-packaged (`packaging: "paid"`), also **no** license row on
+  this fixture: `entitled: false`, `available: false`. (`metasheet_review` was NOT part
+  of the licensed provider state, so this reflects the actual unlicensed reading, not an
+  invented flip -- see the dev doc for the grounding against the live Yuantus provider
+  fixture seeding.)
+
+`entitled` and `available` on all three keys are left **without** a matchingRule, so
+they are matched by exact equality (the formula's own discriminators) rather than the
+usual `type` matcher -- mirroring the ECO Phase 0 discriminated-409 precedent
+(`detail.code` / `eco_required` exact, message/state type-matched).
+
+Consumer-side, `packages/core-backend/src/data-adapters/PLMAdapter.ts` adds `available?:
+boolean` to `IntegrationFeatureCapability` (additive) plus an exported
+`isFeatureAvailable(entry)` helper: consumes `entry.available` directly when present,
+falls back to `supported && entitled` when absent (older provider). The three
+`plm-workbench.ts` gates that used to check `feature.entitled !== true` (BOM multitable
+read context, BOM multitable write-back, BOM ECO-revision intent) are re-keyed through
+this helper. No discussion UI affordance is wired -- this is a capability-helper +
+pact change only. See
+`docs/development/plm-capability-available-helper-dev-and-verification-20260710.md`.
 
 ## Running the test
 

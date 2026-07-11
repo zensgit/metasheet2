@@ -133,6 +133,9 @@ vi.mock('../../src/integrations/dingtalk/client', () => ({
 }))
 
 import { authRouter } from '../../src/routes/auth'
+import express from 'express'
+import request from 'supertest'
+import { jwtAuthMiddleware, isWhitelisted } from '../../src/auth/jwt-middleware'
 
 function createMockResponse() {
   return {
@@ -1433,7 +1436,7 @@ describe('auth login routes', () => {
 
   describe('E1 POST /dingtalk/container (容器免登)', () => {
     it('404s with container_login_disabled when the flag is off', async () => {
-      const response = await invokeRoute('post', '/dingtalk/container', {
+      const response = await invokeRoute('post', '/login/dingtalk/container', {
         body: { authCode: 'code-1' },
       })
       expect(response.statusCode).toBe(404)
@@ -1443,7 +1446,7 @@ describe('auth login routes', () => {
 
     it('400s when authCode is missing', async () => {
       vi.stubEnv('DINGTALK_CONTAINER_LOGIN_ENABLED', 'true')
-      const response = await invokeRoute('post', '/dingtalk/container', { body: {} })
+      const response = await invokeRoute('post', '/login/dingtalk/container', { body: {} })
       expect(response.statusCode).toBe(400)
       expect(dingtalkOauthMocks.exchangeEnterpriseAuthCodeForUser).not.toHaveBeenCalled()
     })
@@ -1464,7 +1467,7 @@ describe('auth login routes', () => {
       sessionRegistryMocks.createUserSession.mockResolvedValue(undefined)
       pgMocks.query.mockResolvedValue({ rows: [] })
 
-      const response = await invokeRoute('post', '/dingtalk/container', {
+      const response = await invokeRoute('post', '/login/dingtalk/container', {
         headers: { 'user-agent': 'DingTalk WebView' },
         body: { authCode: 'auth-code-9' },
       })
@@ -1489,7 +1492,7 @@ describe('auth login routes', () => {
         }),
       )
 
-      const response = await invokeRoute('post', '/dingtalk/container', {
+      const response = await invokeRoute('post', '/login/dingtalk/container', {
         body: { authCode: 'auth-code-10' },
       })
 
@@ -1504,11 +1507,11 @@ describe('auth login routes', () => {
       dingtalkOauthMocks.exchangeEnterpriseAuthCodeForUser.mockRejectedValue(
         new dingtalkOauthMocks.DingTalkLoginPolicyError('x', { statusCode: 403, code: 'grant_required' }),
       )
-      const response = await invokeRoute('post', '/dingtalk/container', { body: { authCode: 'c' } })
+      const response = await invokeRoute('post', '/login/dingtalk/container', { body: { authCode: 'c' } })
       expect(response.statusCode).toBe(403)
 
       vi.stubEnv('DINGTALK_CONTAINER_LOGIN_ENABLED', 'on')
-      const closed = await invokeRoute('post', '/dingtalk/container', { body: { authCode: 'c' } })
+      const closed = await invokeRoute('post', '/login/dingtalk/container', { body: { authCode: 'c' } })
       expect(closed.statusCode).toBe(404)
     })
 
@@ -1520,7 +1523,7 @@ describe('auth login routes', () => {
       )
       let last: { statusCode: number; body: unknown } | undefined
       for (let i = 0; i < 6; i += 1) {
-        last = await invokeRoute('post', '/dingtalk/container', {
+        last = await invokeRoute('post', '/login/dingtalk/container', {
           headers: { 'x-forwarded-for': '10.9.9.9' },
           body: { authCode: `code-${i}` },
         })
@@ -1534,12 +1537,65 @@ describe('auth login routes', () => {
       dingtalkOauthMocks.exchangeEnterpriseAuthCodeForUser.mockRejectedValue(
         new dingtalkClientMocks.DingTalkBusinessError('invalid code', 40078),
       )
-      const response = await invokeRoute('post', '/dingtalk/container', {
+      const response = await invokeRoute('post', '/login/dingtalk/container', {
         headers: { 'x-forwarded-for': '10.9.9.10' },
         body: { authCode: 'bad' },
       })
       expect(response.statusCode).toBe(401)
       expect((response.body as Record<string, any>).code).toBe('invalid_auth_code')
     })
+  })
+})
+
+// DT-HARDEN-01: full-HTTP wire test through the REAL global JWT gate + authRouter
+// mount, reproducing index.ts's guard verbatim (isWhitelisted(req.path) → next,
+// else /api/ → jwtAuthMiddleware → 401). The pre-fix regression was invisible
+// because every other E1 test invokes the router handler directly, bypassing the
+// app-level whitelist. This exercises the seam end to end.
+describe('E1 container login — full HTTP wire (whitelist + route mount)', () => {
+  function buildWireApp() {
+    const app = express()
+    app.use(express.json())
+    // Verbatim slice of the index.ts global `/api/**` guard.
+    app.use((req, res, next) => {
+      if (isWhitelisted(req.path)) return next()
+      if (req.path.startsWith('/api/')) return jwtAuthMiddleware(req, res, next)
+      return next()
+    })
+    app.use('/api/auth', authRouter)
+    return app
+  }
+
+  it('whitelist statically covers the new path and NOT the pre-fix path', () => {
+    expect(isWhitelisted('/api/auth/login/dingtalk/container')).toBe(true)
+    expect(isWhitelisted('/api/auth/dingtalk/container')).toBe(false)
+  })
+
+  it('admits POST /api/auth/login/dingtalk/container without a JWT and reaches the handler (default-off → 404)', async () => {
+    vi.stubEnv('DINGTALK_CONTAINER_LOGIN_ENABLED', '')
+    const res = await request(buildWireApp())
+      .post('/api/auth/login/dingtalk/container')
+      .send({ authCode: 'x' })
+    // 404 from OUR handler (body.code), not a JWT 401 and not an express not-found:
+    // proves the whitelist admitted it AND the route is mounted at the new path.
+    expect(res.status).toBe(404)
+    expect(res.body?.code).toBe('container_login_disabled')
+  })
+
+  it('with the flag on, missing authCode → 400 without requiring a JWT', async () => {
+    vi.stubEnv('DINGTALK_CONTAINER_LOGIN_ENABLED', 'true')
+    const res = await request(buildWireApp())
+      .post('/api/auth/login/dingtalk/container')
+      .send({})
+    expect(res.status).toBe(400)
+  })
+
+  it('the pre-fix path /api/auth/dingtalk/container is JWT-gated (401 before the handler)', async () => {
+    vi.stubEnv('DINGTALK_CONTAINER_LOGIN_ENABLED', 'true')
+    const res = await request(buildWireApp())
+      .post('/api/auth/dingtalk/container')
+      .send({ authCode: 'x' })
+    // Not whitelisted → global gate returns 401 before any container handler runs.
+    expect(res.status).toBe(401)
   })
 })

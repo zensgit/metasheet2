@@ -1315,8 +1315,16 @@ authRouter.post('/dingtalk/callback', async (req: Request, res: Response) => {
  * the web-OAuth chain's resolveLocalUser (all policy gates identical) and
  * issueAuthSessionToken (same claims/session). No state/nonce — that is a
  * web-redirect CSRF concept; the authCode is single-use, verified server-side.
+ *
+ * Path MUST stay under `/login/…`: authRouter mounts at `/api/auth`, so this
+ * resolves to `/api/auth/login/dingtalk/container` — the path the in-container
+ * frontend (LoginView) posts to AND the only form covered by the
+ * `/api/auth/login` AUTH_WHITELIST prefix (jwt-middleware `isWhitelisted`,
+ * startsWith). Container 免登 is pre-authentication and must bypass the global
+ * JWT gate; registering it outside `/login` 404s the frontend and 401s the
+ * real path — the E1 wire regression this fix closes.
  */
-authRouter.post('/dingtalk/container', async (req: Request, res: Response) => {
+authRouter.post('/login/dingtalk/container', async (req: Request, res: Response) => {
   try {
     const flag = String(process.env.DINGTALK_CONTAINER_LOGIN_ENABLED ?? '').trim().toLowerCase()
     if (!['true', '1', 'yes'].includes(flag)) {

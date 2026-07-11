@@ -2,6 +2,12 @@
 
 const crypto = require('node:crypto')
 
+const {
+  firstValue,
+  isPlainObject,
+  optionalString,
+} = require('./stock-preparation-common.cjs')
+
 const INTAKE_STATUSES = Object.freeze({
   READY: 'ready',
   PARTIAL: 'partial',
@@ -22,22 +28,6 @@ class StockPreparationReadonlyIntakeError extends Error {
     this.name = 'StockPreparationReadonlyIntakeError'
     this.details = details
   }
-}
-
-function isPlainObject(value) {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return false
-  const prototype = Object.getPrototypeOf(value)
-  return prototype === Object.prototype || prototype === null
-}
-
-function optionalString(value) {
-  if (value === undefined || value === null) return null
-  if (typeof value === 'string') {
-    const trimmed = value.trim()
-    return trimmed ? trimmed : null
-  }
-  if (typeof value === 'number' || typeof value === 'boolean') return String(value)
-  return null
 }
 
 function requiredString(value, field) {
@@ -80,14 +70,6 @@ function stableJson(value) {
 
 function stableFingerprint(value) {
   return `sha16:${stableHash(value)}`
-}
-
-function firstValue(row, keys) {
-  for (const key of keys) {
-    const value = optionalString(row && row[key])
-    if (value !== null) return value
-  }
-  return null
 }
 
 function firstNumber(row, keys) {

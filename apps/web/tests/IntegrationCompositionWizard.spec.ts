@@ -485,4 +485,77 @@ describe('IntegrationCompositionWizard (via IntegrationReadSourceCompositionAuth
       setLocale('en')
     }
   })
+
+  // --- TC-1 connector/experience template catalog (design-lock
+  // docs/development/integration-connector-template-catalog-design-lock-20260708.md, #3879) ---------
+  // ADD-ONLY: every test above this point is unchanged. The template catalog picker is a NEW,
+  // collapsed-by-default entry point rendered by the parent panel
+  // (IntegrationReadSourceCompositionAuthoringPanel.vue) above the wizard.
+
+  it('TC-1: template catalog picker is collapsed by default — the blank-form wizard path is unaffected', async () => {
+    apiFetchMock.mockImplementation(routeApiFetch())
+    const root = mountPanel()
+    await waitUntil(() => root.querySelector('[data-testid="iu4-wizard-hop1-rsc_material_lookup"]') !== null, 'hop cards load')
+
+    expect(maybe(root, 'rscauth-template-catalog-toggle')).not.toBeNull()
+    const body = maybe(root, 'rscauth-template-catalog-body')
+    expect(body).not.toBeNull()
+    expect((body as HTMLElement).style.display).toBe('none')
+
+    await toStep2(root)
+    expect(q(root, 'iu4-wizard-wiring-output').textContent).toContain('internal_id')
+  })
+
+  it('TC-1: selecting the two-hop composition template seeds sourceTarget back to the EXACT default a fresh panel starts with, even after a manual edit', async () => {
+    apiFetchMock.mockImplementation(routeApiFetch())
+    const root = mountPanel()
+    await waitUntil(() => root.querySelector('[data-testid="iu4-wizard-hop1-rsc_material_lookup"]') !== null, 'hop cards load')
+    await toStep2(root)
+
+    // Diverge from the seed first, so selecting the template afterwards is a REAL, observable change —
+    // not a no-op that happens to match an already-untouched default.
+    setInput(root, 'iu4-wizard-source-target', 'diverged_value')
+    await flushUi()
+    expect(q(root, 'iu4-wizard-wiring-output').textContent).toContain('diverged_value')
+
+    q<HTMLButtonElement>(root, 'rscauth-template-catalog-toggle').click()
+    await flushUi()
+    expect(maybe(root, 'rscauth-template-catalog-card-two-hop-composition')).not.toBeNull()
+    q<HTMLButtonElement>(root, 'rscauth-template-catalog-card-two-hop-composition').click()
+    await flushUi()
+
+    expect(q(root, 'iu4-wizard-wiring-output').textContent).toContain('internal_id')
+    expect(q(root, 'iu4-wizard-wiring-output').textContent).not.toContain('diverged_value')
+  })
+
+  it('TC-1: selecting a template forces the panel back to wizard view even from expert mode', async () => {
+    apiFetchMock.mockImplementation(routeApiFetch())
+    const root = mountPanel('expert')
+    await waitUntil(() => root.querySelector('[data-testid="rscauth-step1"]') !== null, 'expert form loads')
+    expect(maybe(root, 'composition-wizard')).toBeNull()
+
+    q<HTMLButtonElement>(root, 'rscauth-template-catalog-toggle').click()
+    await flushUi()
+    q<HTMLButtonElement>(root, 'rscauth-template-catalog-card-two-hop-composition').click()
+    await flushUi()
+
+    expect(maybe(root, 'composition-wizard')).not.toBeNull()
+    expect(maybe(root, 'rscauth-step1')).toBeNull()
+  })
+
+  it('TC-1: template catalog card copy renders bilingually via useLocale', async () => {
+    const { setLocale } = useLocale()
+    setLocale('zh-CN')
+    try {
+      apiFetchMock.mockImplementation(routeApiFetch())
+      const root = mountPanel()
+      await waitUntil(() => root.querySelector('[data-testid="iu4-wizard-hop1-rsc_material_lookup"]') !== null, 'hop cards load')
+      expect(q(root, 'rscauth-template-catalog-toggle').textContent).toContain('从模板开始')
+      q<HTMLButtonElement>(root, 'rscauth-template-catalog-toggle').click()
+      await flushUi()
+      expect(q(root, 'rscauth-template-catalog-card-two-hop-composition').textContent).toContain('两跳组合')
+    } finally {
+      setLocale('en')
+    }
+  })
 })
