@@ -46,6 +46,12 @@ export type DingTalkStreamDownStreamFrame = {
   headers?: {
     messageId?: string
     topic?: string
+    /**
+     * P3-1: the gateway-populated, SDK-typed corp id of the clicking corp. Authoritative provenance
+     * (the untyped business `data.corpId` is a secondary echo). The adapter forwards it into the
+     * business payload as `eventCorpId` so the callback's cross-corp gate can anchor on it.
+     */
+    eventCorpId?: string
   }
   /** JSON-encoded card-callback payload (a string on the wire). */
   data?: unknown
@@ -122,6 +128,14 @@ async function handleCardCallbackFrame(
     // Values-free reject: never log (or forward) unparseable wire bytes.
     logger.warn('DingTalk interactive-card Stream frame rejected (malformed_frame:data_not_json)')
     return
+  }
+
+  // P3-1: stamp the gateway-guaranteed header corp id onto the forwarded payload as `eventCorpId`
+  // so the callback's cross-corp gate anchors on the SDK-typed provenance rather than the untyped
+  // business-blob `data.corpId` (the header wins; a mismatch is cross-checked downstream).
+  const headerCorpId = typeof frame.headers?.eventCorpId === 'string' ? frame.headers.eventCorpId.trim() : ''
+  if (headerCorpId && payload && typeof payload === 'object' && !Array.isArray(payload)) {
+    (payload as Record<string, unknown>).eventCorpId = headerCorpId
   }
 
   try {

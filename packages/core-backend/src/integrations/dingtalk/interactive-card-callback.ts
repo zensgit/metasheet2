@@ -107,15 +107,21 @@ function asRecord(value: unknown): Record<string, unknown> | null {
 }
 
 /**
- * The official corp id of the operator who clicked, read from the DingTalk card-callback payload's
- * top-level `corpId` (the documented `/v1.0/card/instances/callback` business field — the same slot
- * the Stream frame's decoded `data` carries it in). Returns '' when absent/blank so the caller
- * fail-closes: an absent corpId is treated exactly like a mismatch (never skipped).
+ * The official corp id of the operator who clicked. Two sources (P3-1):
+ *  - `eventCorpId` — the gateway-guaranteed, SDK-typed header corp id the Stream adapter stamps onto
+ *    the payload. AUTHORITATIVE provenance.
+ *  - `corpId` — the untyped top-level business field of the decoded `/v1.0/card/instances/callback`
+ *    `data`. SECONDARY (an echo).
+ * The header wins; when BOTH are present they must AGREE (a mismatch is treated as absent → the
+ * caller fail-closes). Returns '' when neither is present so an absent corpId is never skipped.
  */
 function readCallbackCorpId(payload: unknown): string {
   const record = asRecord(payload)
   if (!record) return ''
-  return readTrimmedString(record.corpId)
+  const headerCorp = readTrimmedString(record.eventCorpId)
+  const bodyCorp = readTrimmedString(record.corpId)
+  if (headerCorp && bodyCorp && headerCorp !== bodyCorp) return ''
+  return headerCorp || bodyCorp
 }
 
 /**

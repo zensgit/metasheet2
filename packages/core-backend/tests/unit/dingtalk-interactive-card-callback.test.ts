@@ -418,6 +418,28 @@ describe('executeDingTalkApprovalCardCallback (B-3 §B-3 execution)', () => {
     expect(blankResult).toMatchObject({ outcome: 'operator_unresolved', reason: 'corp_mismatch' })
   })
 
+  it('P3-1 provenance: the SDK-typed header corp (eventCorpId) is authoritative — used even when the untyped body corpId is absent', async () => {
+    // The Stream adapter stamps the gateway-guaranteed header corp onto the payload as eventCorpId.
+    // A frame with only eventCorpId (no business corpId) must still pass on a matching corp.
+    const h = makeHarness()
+    const result = await executeDingTalkApprovalCardCallback(
+      h.deps as never,
+      wirePayload({ corpId: undefined, eventCorpId: DEFAULT_CORP_ID }),
+    )
+    expect(result).not.toMatchObject({ reason: 'corp_mismatch' })
+    expect(h.dispatchAction).toHaveBeenCalled()
+  })
+
+  it('P3-1 provenance: header eventCorpId and body corpId DISAGREEING → fail-closed corp_mismatch (a forged body echo cannot override the header)', async () => {
+    const h = makeHarness()
+    const result = await executeDingTalkApprovalCardCallback(
+      h.deps as never,
+      wirePayload({ eventCorpId: DEFAULT_CORP_ID, corpId: 'corp_forged' }),
+    )
+    expect(result).toEqual({ outcome: 'operator_unresolved', deliveryId: DELIVERY_ID, reason: 'corp_mismatch' })
+    expect(h.dispatchAction).not.toHaveBeenCalled()
+  })
+
   it('P1-2 CORP GATE fail-closed when the delivery integration corp cannot be resolved (missing integration row)', async () => {
     const h = makeHarness({ integrationCorpId: null })
     const result = await executeDingTalkApprovalCardCallback(h.deps as never, wirePayload())
