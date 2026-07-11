@@ -1,9 +1,13 @@
-# 备料 MVP(#3751)— 实体机(Windows on-prem)验收 corrective 弧 — 设计与验证记录 — 2026-07-10
+# 备料 MVP(历史 #3751)— 实体机(Windows on-prem)验收 corrective 弧 — 设计与验证记录 — 2026-07-10
 
 > 承接 `stock-preparation-mvp-w3-w6-dev-verification-20260710.md`(W3-W6 代码侧完成)。本文记录
-> **代码侧完成之后、实体机验收 PASS 之前**的 corrective 弧:每一轮实体机 dispatch 暴露的 on-prem
-> 打包/部署缺陷、其根因、修复 PR、以及重发的验收包。这些缺陷**不在产品运行时路径上**——全部是
-> Windows on-prem 交付管道(pnpm 固定、深路径清理、迁移基线)的加固。**本文是记录,不是授权。**
+> **代码侧完成之后、实体机验收 PASS 之前**的 corrective 弧:每一轮实体机 dispatch 暴露的缺陷、
+> 其根因、修复 PR、以及重发的验收包。**范围界定(审阅 P2)**:这些缺陷**由 Windows on-prem 验收
+> 暴露,未改变产品 API / 业务运行面**——但修复的落点不全是 on-prem 专用工具链:#4084 改的是**共享的
+> 迁移 provider**(`core-backend/src/db/migration-provider.ts`),#4068 改的是**共享的依赖清单**
+> (`package.json` + lockfile);corrective-1/2/4 才是 on-prem 打包/部署脚本本身。**本文是记录,不是授权。**
+>
+> 执行/结论落点:历史 #3751 现已 404,**实体机验收统一在 #4101 追踪**(见 §5)。
 
 ## 0. 口径
 
@@ -63,9 +67,15 @@ diff 实测三处差异(均已缓解,记录于此以免后续误判):
 5. PM2 重启 + 健康检查。
 6. 打包内 values-free smoke:`METASHEET_AUTH_TOKEN=<admin> node scripts/ops/stock-preparation-mvp-postdeploy-smoke.mjs --base-url http://localhost:<port>`。
 
-**即时解锁杠杆(可选,不等发包)**:实体机设 `MIGRATION_EXCLUDE=20250926_create_audit_tables` 即可
-跳过该迁移当场继续。**适用限定(审阅 P3-2)**:仅对**台账不含该名**的机器安全(实体机正属此类);
-台账**含**该名的机器设此值会 fatal(`corrupted migrations: … is missing`)——勿在跑过 `.sql` 的机器用。
+**应急续跑杠杆(≠ 验收路径,审阅 P1)**:实体机设 `MIGRATION_EXCLUDE=20250926_create_audit_tables`
+可**临时**越过该迁移继续下游步骤,但**它不是正式 PASS 的等价路径**。机制上 `MIGRATION_EXCLUDE`
+把该迁移**整个从 provider 返回集剔除**(`migration-provider.ts` 的 `!excludedNames.has(name)` 过滤)
+→ kysely **从不写 ledger 戳**;而 corrective-5(#4084)的 no-op 超越是**保名跑 no-op → 写 ledger 戳**,
+这才是**永久**解除。后果:设了变量续跑的机器,日后**移除该变量并仍运行旧 provider(#4084 之前)**,
+20250926 会**再次**成为 pending → **42P07 复发**。
+**正式验收要求(不可省)**:装 **corrective-5 包**,并在**不设 `MIGRATION_EXCLUDE`** 的情况下完成
+迁移(20250926 走 no-op 盖戳)+ smoke。`MIGRATION_EXCLUDE` 仅用于现场应急,且仅对**台账不含该名**的
+机器安全(实体机正属此类);台账**含**该名的机器设此值会 fatal(`corrupted migrations: … is missing`)。
 
 ## 5. 状态与范围边界(审阅纠正)
 
@@ -76,8 +86,12 @@ diff 实测三处差异(均已缓解,记录于此以免后续误判):
   前序 W3-W6 MD 补 addendum,**W3-W6 on-prem 包 runtime 验收弧**闭环。
 - **包保障(本文范围外,仍 open)**:#4086 是 #4084 之后的**包验证器增量**——两个 on-prem 包验证器
   都须强制 superseded audit marker 在场。它是独立的代码审阅/合并项,不被实体机 smoke 覆盖。
-- **#3751 更广 follow-up(本文范围外,仍 open)**:#4093(#3889 下的 PLM/ERP/K3 只读 feeder)与
-  原 #3751 只读同步验收重叠,仍在开发。**本文不关闭整个 #3751 epic。**
+- **更广 follow-up(本文范围外,仍 open)**:#4093(#3889 下的 PLM/ERP/K3 只读 feeder)与
+  原始只读同步验收重叠,仍在开发。**本文不关闭整个功能 epic。**
+
+**执行与结论落点(审阅 P2 — 历史 #3751 现已 404,引用不可执行)**:功能 issue #3751 当前返回
+404(历史 #3751,不可回填)。**实体机验收的执行、values-free 回贴、PASS 结论一律落到 #4101
+(实体机验收追踪单)+ 本 W3-W6 corrective 弧 MD**,不再指向 #3751。
 
 因此:**「本线转全线闭环」是过宽表述,已收回。** 正确口径 = 实体机 smoke PASS 只结**已合并的
 W3-W6 on-prem 包 runtime 验收弧**;#4086 包保障与 #4093 只读 feeder 各自独立推进。runtime 产品面
