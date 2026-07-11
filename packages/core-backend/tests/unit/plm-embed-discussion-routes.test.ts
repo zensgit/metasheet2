@@ -351,6 +351,76 @@ describe('PLM embed discussion WRITE relay (Discussion Phase-3 write-relay, Opti
     expect(res.status).toBe(422)
   })
 
+  // --- P2-a (Gate-2 2026-07-11): a PRESENT-but-wrong-typed optional field must 422, never be
+  // silently coerced to `undefined` and dropped -- otherwise a malformed mention/anchor/title/
+  // parent_comment_id would let the write SUCCEED DEGRADED (no mention / top-level / no anchor)
+  // when the caller should have gotten a 422. The write adapter must NEVER be called. ---
+
+  it('create with a non-string title -> 422, write never called (not silently dropped)', async () => {
+    const createDiscussionThread = vi.fn()
+    dsMocks.getDataSource.mockReturnValue(fullAdapter({ createDiscussionThread }))
+    const res = await request(buildApp()).post(THREADS_URL).set('X-PLM-Embed-Token', mint()).send({ ...CREATE_BODY, title: 123 })
+    expect(res.status).toBe(422)
+    expect(res.body.error.code).toBe('EMBED_DISCUSSION_INVALID_BODY')
+    expect(createDiscussionThread).not.toHaveBeenCalled()
+  })
+
+  it('create with a non-array mentioned_user_ids -> 422, write never called', async () => {
+    const createDiscussionThread = vi.fn()
+    dsMocks.getDataSource.mockReturnValue(fullAdapter({ createDiscussionThread }))
+    const res = await request(buildApp()).post(THREADS_URL).set('X-PLM-Embed-Token', mint()).send({ ...CREATE_BODY, mentioned_user_ids: 'not-an-array' })
+    expect(res.status).toBe(422)
+    expect(createDiscussionThread).not.toHaveBeenCalled()
+  })
+
+  it('create with mentioned_user_ids containing a non-number -> 422, write never called', async () => {
+    const createDiscussionThread = vi.fn()
+    dsMocks.getDataSource.mockReturnValue(fullAdapter({ createDiscussionThread }))
+    const res = await request(buildApp()).post(THREADS_URL).set('X-PLM-Embed-Token', mint()).send({ ...CREATE_BODY, mentioned_user_ids: [1, 'two', 3] })
+    expect(res.status).toBe(422)
+    expect(createDiscussionThread).not.toHaveBeenCalled()
+  })
+
+  it('create with a non-object anchor -> 422, write never called', async () => {
+    const createDiscussionThread = vi.fn()
+    dsMocks.getDataSource.mockReturnValue(fullAdapter({ createDiscussionThread }))
+    const res = await request(buildApp()).post(THREADS_URL).set('X-PLM-Embed-Token', mint()).send({ ...CREATE_BODY, anchor: 'not-an-object' })
+    expect(res.status).toBe(422)
+    expect(createDiscussionThread).not.toHaveBeenCalled()
+  })
+
+  it('create with anchor: null is VALID (explicit no-anchor) -> 200, NOT over-rejected', async () => {
+    const createDiscussionThread = vi.fn().mockResolvedValue({ data: [THREAD_DETAIL], metadata: { totalCount: 1 } })
+    dsMocks.getDataSource.mockReturnValue(fullAdapter({ createDiscussionThread }))
+    const res = await request(buildApp()).post(THREADS_URL).set('X-PLM-Embed-Token', mint()).send({ ...CREATE_BODY, anchor: null })
+    expect(res.status).toBe(200)
+    expect(createDiscussionThread).toHaveBeenCalled()
+  })
+
+  it('add-comment with a non-string parent_comment_id -> 422, write never called', async () => {
+    const addDiscussionComment = vi.fn()
+    dsMocks.getDataSource.mockReturnValue(fullAdapter({ addDiscussionComment }))
+    const res = await request(buildApp()).post(COMMENTS_URL()).set('X-PLM-Embed-Token', mint()).send({ body: 'hi', parent_comment_id: 42 })
+    expect(res.status).toBe(422)
+    expect(addDiscussionComment).not.toHaveBeenCalled()
+  })
+
+  it('add-comment with a bad mentioned_user_ids -> 422, write never called', async () => {
+    const addDiscussionComment = vi.fn()
+    dsMocks.getDataSource.mockReturnValue(fullAdapter({ addDiscussionComment }))
+    const res = await request(buildApp()).post(COMMENTS_URL()).set('X-PLM-Embed-Token', mint()).send({ body: 'hi', mentioned_user_ids: [{}] })
+    expect(res.status).toBe(422)
+    expect(addDiscussionComment).not.toHaveBeenCalled()
+  })
+
+  it('add-comment with a non-object anchor -> 422, write never called', async () => {
+    const addDiscussionComment = vi.fn()
+    dsMocks.getDataSource.mockReturnValue(fullAdapter({ addDiscussionComment }))
+    const res = await request(buildApp()).post(COMMENTS_URL()).set('X-PLM-Embed-Token', mint()).send({ body: 'hi', anchor: ['array-not-object'] })
+    expect(res.status).toBe(422)
+    expect(addDiscussionComment).not.toHaveBeenCalled()
+  })
+
   // --- per-route dispatch smoke tests (each route calls the RIGHT adapter method with the RIGHT args) ---
 
   it('delete comment: DELETE dispatches to deleteDiscussionComment with (token, threadId, commentId)', async () => {

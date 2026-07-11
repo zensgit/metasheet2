@@ -258,9 +258,22 @@ export default function plmEmbedDiscussionWriteRouter(): Router {
     }
     if (!isNonEmptyString(body.target_id)) return badBody(res, 'target_id is required')
     if (!isNonEmptyString(body.body)) return badBody(res, 'body is required')
+    // Distinguish an ABSENT optional field (omit it) from a PRESENT-but-wrong-typed one
+    // (reject 422). Silently coercing a bad value to `undefined` and omitting it would let a
+    // malformed mention/anchor/title write succeed DEGRADED (no mention / no anchor / no title)
+    // when the caller should have gotten a 422 -- mirrors parseTransitionRequest's guard below.
+    if (body.title !== undefined && typeof body.title !== 'string') {
+      return badBody(res, 'title must be a string when present')
+    }
     const title = typeof body.title === 'string' ? body.title : undefined
     const mentioned_user_ids = optionalMentionedUserIds(body)
+    if (body.mentioned_user_ids !== undefined && mentioned_user_ids === undefined) {
+      return badBody(res, 'mentioned_user_ids must be number[] when present')
+    }
     const anchor = optionalAnchor(body)
+    if (body.anchor !== undefined && anchor === undefined) {
+      return badBody(res, 'anchor must be an object or null when present')
+    }
     const createReq: CreateThreadRequest = {
       target_type: targetType as DiscussionTargetType,
       target_id: body.target_id as string,
@@ -285,9 +298,20 @@ export default function plmEmbedDiscussionWriteRouter(): Router {
     const threadId = req.params.threadId
     const body = (req.body ?? {}) as Record<string, unknown>
     if (!isNonEmptyString(body.body)) return badBody(res, 'body is required')
+    // Present-but-wrong-typed optional fields reject 422 (never silently omit) -- see the
+    // create-thread route above for the rationale.
+    if (body.parent_comment_id !== undefined && typeof body.parent_comment_id !== 'string') {
+      return badBody(res, 'parent_comment_id must be a string when present')
+    }
     const parent_comment_id = typeof body.parent_comment_id === 'string' ? body.parent_comment_id : undefined
     const mentioned_user_ids = optionalMentionedUserIds(body)
+    if (body.mentioned_user_ids !== undefined && mentioned_user_ids === undefined) {
+      return badBody(res, 'mentioned_user_ids must be number[] when present')
+    }
     const anchor = optionalAnchor(body)
+    if (body.anchor !== undefined && anchor === undefined) {
+      return badBody(res, 'anchor must be an object or null when present')
+    }
     const commentReq: AddCommentRequest = {
       body: body.body as string,
       ...(parent_comment_id !== undefined ? { parent_comment_id } : {}),
