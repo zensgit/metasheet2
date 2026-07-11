@@ -171,6 +171,7 @@ import workflowRouter from './routes/workflow'
 import workflowDesignerRouter from './routes/workflow-designer'
 import plmWorkbenchRouter from './routes/plm-workbench'
 import plmEmbedRouter from './routes/plm-embed'
+import plmEmbedDiscussionWriteRouter from './routes/plm-embed-discussion'
 import { createHostPluginStorage } from './plugins/plugin-durable-storage'
 import { univerMockRouter } from './routes/univer-mock'
 import { univerMetaRouter } from './routes/univer-meta'
@@ -1141,6 +1142,7 @@ export class MetaSheetServer {
     if (plmEnabled) {
       this.app.use(plmWorkbenchRouter)
       this.app.use(plmEmbedRouter())
+      this.app.use(plmEmbedDiscussionWriteRouter())
     } else {
       this.app.use('/api/plm-workbench', disabledFeatureHandler('PLM workbench is disabled in this deployment'))
       this.app.use('/api/plm-embed', disabledFeatureHandler('PLM embed is disabled in this deployment'))
