@@ -1,6 +1,7 @@
-# 多维表 UI-P2-1c · 尾巴解决 · 设计锁（PROPOSED）
+# 多维表 UI-P2-1c · 尾巴解决 · 设计锁（RATIFIED）
 
-> 状态：**PROPOSED — 待 owner ratify**。docs-only。
+> 状态：**RATIFIED（owner directive 2026-07-11）**。docs-only。
+> **RATIFIED — owner directive 2026-07-11**（批 12 把 merge-tree-clean 锁）。header 状态由 owner 决定翻转、Claude 机械执行(非自我批准)。锁内 per-tier owner 子决定(如变体/env-cap/storage opt-in)仍各自留待 owner。
 > 前置：P2-1c 干净 MtButton sweep **已完成 16 个**（见 `multitable-ui-p2-1c-completion-verification-20260707.md` / PR #3864）。
 > 本锁定形本轮**被 defer 的尾巴**如何收——每一档给出**推荐 + 需 owner 拍板的裁决**，ratify 后即可按既有"主循环迁→adversarial-reviewer gate(mutation红)→串行落"机制执行（impl=Sonnet；结构性=Opus 审）。
 > 模型分档：设计=Fable/Opus；实现=Sonnet。**不自 ratify、不碰行为/权限**（同 red line）。
