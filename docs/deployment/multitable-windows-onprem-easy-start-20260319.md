@@ -306,36 +306,38 @@ the current launcher code immediately, so the first hop also defaults to
 `C:\ms-tmp` and `.NET ZipFile`.
 
 The package intentionally does **not** bundle `node_modules`. `deploy.bat`
-defaults to `InstallDeps=1` and refreshes dependencies with
-`pnpm install --frozen-lockfile` on every package apply. This is intentional for
-upgrade installs: the deploy root may already have `node_modules`, but the new
-package can add runtime dependencies such as plugin drivers. If you copy package
-files manually instead of using `deploy.bat`, run this from the package root
-before migrations, PM2 restart, or `bootstrap-admin.bat`:
-
-```bat
-pnpm install --frozen-lockfile
-```
+defaults to `InstallDeps=1`, activates the exact pnpm version recorded in the
+package, and completes a frozen install in staging before it changes the live
+root. It then overlays the package and performs an offline dependency
+activation inside a rollback transaction. If activation fails, the previous
+package files and workspace `node_modules` are restored before migrations or
+restart. Do not hand-copy corrective packages and do not use
+`--no-frozen-lockfile`.
 
 The Windows apply helper runs that dependency refresh with diagnostics rather
 than as an unbounded silent command:
 
-- install entrypoint: a generated `dependency-refresh-*.cmd` wrapper launched
-  through `cmd.exe /d /s /c`, with `pnpm.cmd` preferred over `pnpm.ps1`;
-- local store: deploy-root `.pnpm-store`, passed to pnpm with `--store-dir`;
+- install entrypoint: generated `.cmd` wrappers launched through
+  `cmd.exe /d /s /c`, using the package-pinned pnpm version;
+- staging phase: full frozen install before any live overlay;
+- local cache: deploy-root `.pnpm-store`, populated by staging preflight;
+- live phase: offline activation using that preflight-populated store;
+- rollback: overwritten files and workspace `node_modules` are restored if the
+  live dependency phase fails;
 - pnpm reporter: `--reporter=append-only`, so scheduled-task logs can grow
   incrementally instead of waiting for an interactive renderer;
 - default timeout: 1800 seconds;
 - default heartbeat: 60 seconds;
-- stdout/stderr logs: `output\logs\dependency-refresh-*.stdout.log` and
-  `output\logs\dependency-refresh-*.stderr.log`;
+- stdout/stderr logs: `output\logs\dependency-preflight-*` and
+  `output\logs\dependency-activate-*`;
 - tunables for exceptional hosts:
   `-DependencyRefreshTimeoutSec <seconds>` and
   `-DependencyRefreshHeartbeatSec <seconds>`.
 
 If a scheduled deployment appears stuck at dependency refresh, inspect
-`output\logs\deploy-remote.log` plus the two `dependency-refresh-*` logs before
-rerunning. A timeout is a deploy failure, not a valid SQL/K3 runtime test.
+`output\logs\deploy-remote.log` plus the matching preflight/activation logs
+before rerunning. A timeout is a deploy failure, not a valid SQL/K3 runtime
+test.
 
 The packaged Windows admin bootstrap helper also avoids `node -e` and writes a short-lived `.cjs` file into the package-local `.tmp/node-bootstrap` directory before invoking Node. This sidesteps the Node v24 + Windows PowerShell type-stripping issue and keeps bundled dependencies such as `bcryptjs` resolvable from the packaged app root.
 

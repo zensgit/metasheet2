@@ -20,6 +20,12 @@
     "lib": ["ES2022"],
     "types": ["node", "vitest/globals"]
   },
-  "include": ["src/**/*", "core/**/*", "types/**/*"],
+  "include": [
+    "src/**/*",
+    "core/**/*",
+    "types/**/*",
+    "scripts/encrypt-dingtalk-destination-secrets.ts",
+    "scripts/encrypt-dingtalk-integration-secrets.ts"
+  ],
   "exclude": ["node_modules", "dist", "**/*.test.ts", "**/__tests__/**"]
 }

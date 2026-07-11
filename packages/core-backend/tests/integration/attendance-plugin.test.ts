@@ -6060,6 +6060,243 @@ attendanceIntegrationDescribe(
       // replay: re-approving is rejected and never adds extra lots.
       expect((await approve(bankId)).status).toBe(400)
       expect((await pool.query(`SELECT count(*)::int AS n FROM attendance_leave_balances WHERE source_id=$1 AND leave_type_code='comp_time'`, [bankId])).rows[0].n).toBe(2)
+
+      // (5) S1 加班银行·额度有效期裁决 (overtime-bank-validity design-lock):
+      // BEFORE S1 `overtimeBankPolicy.validityDays` was shipped in the admin UI but read by nothing —
+      // only compTimeFromOvertime.expiresInDays governed expiry. Now: bank-enabled + validityDays set →
+      // it governs BANKED (source-tagged) lots and overrides expiresInDays; unset → falls back; the
+      // DORMANT path always uses expiresInDays.
+      const expiryDaysOf = async (rid: string) => (await pool.query(
+        `SELECT overtime_source,
+                CASE WHEN expires_at IS NULL THEN NULL
+                     ELSE round(EXTRACT(EPOCH FROM (expires_at - now())) / 86400.0)::int END AS days
+           FROM attendance_leave_balances
+          WHERE org_id='default' AND source_id=$1 AND leave_type_code='comp_time'
+          ORDER BY overtime_source NULLS FIRST`,
+        [rid],
+      )).rows as { overtime_source: string | null; days: number | null }[]
+
+      const segmentRequest = async (rid: string) => {
+        await pool.query(
+          `UPDATE attendance_requests SET metadata = jsonb_set(metadata, '{overtimeSegmentation}', $2::jsonb) WHERE id = $1`,
+          [rid, JSON.stringify({ version: 1, engine: 'attendance_overtime_segmentation_v1', workDate: '2026-09-11', dayType: 'workday', segments: { workdayMinutes: 60, restdayMinutes: 0, holidayMinutes: 0 }, totalMinutes: 60, compTimeGrantMinutes: 60 })],
+        )
+      }
+
+      // 5a — bank ON, validityDays=90, expiresInDays=null → banked lot expires in 90 days (was: never).
+      expect((await putSettings({ compTimeFromOvertime: { enabled: true, expiresInDays: null }, overtimeBankPolicy: { enabled: true, pooledSources: ['workday'], validityDays: 90 } })).status).toBe(200)
+      const vId = await createOvertime('2026-09-11', 60)
+      await segmentRequest(vId)
+      expect((await approve(vId)).status).toBe(200)
+      expect(await expiryDaysOf(vId)).toEqual([{ overtime_source: 'workday', days: 90 }])
+
+      // 5b — bank ON, validityDays=90, expiresInDays=30 → validityDays WINS (precedence proven).
+      expect((await putSettings({ compTimeFromOvertime: { enabled: true, expiresInDays: 30 }, overtimeBankPolicy: { enabled: true, pooledSources: ['workday'], validityDays: 90 } })).status).toBe(200)
+      const vWinId = await createOvertime('2026-09-12', 60)
+      await pool.query(
+        `UPDATE attendance_requests SET metadata = jsonb_set(metadata, '{overtimeSegmentation}', $2::jsonb) WHERE id = $1`,
+        [vWinId, JSON.stringify({ version: 1, engine: 'attendance_overtime_segmentation_v1', workDate: '2026-09-12', dayType: 'workday', segments: { workdayMinutes: 60, restdayMinutes: 0, holidayMinutes: 0 }, totalMinutes: 60, compTimeGrantMinutes: 60 })],
+      )
+      expect((await approve(vWinId)).status).toBe(200)
+      expect(await expiryDaysOf(vWinId)).toEqual([{ overtime_source: 'workday', days: 90 }])
+
+      // 5c — bank ON, validityDays unset, expiresInDays=30 → falls back (pre-S1 behaviour, unchanged).
+      expect((await putSettings({ compTimeFromOvertime: { enabled: true, expiresInDays: 30 }, overtimeBankPolicy: { enabled: true, pooledSources: ['workday'], validityDays: null } })).status).toBe(200)
+      const vFallId = await createOvertime('2026-09-13', 60)
+      await pool.query(
+        `UPDATE attendance_requests SET metadata = jsonb_set(metadata, '{overtimeSegmentation}', $2::jsonb) WHERE id = $1`,
+        [vFallId, JSON.stringify({ version: 1, engine: 'attendance_overtime_segmentation_v1', workDate: '2026-09-13', dayType: 'workday', segments: { workdayMinutes: 60, restdayMinutes: 0, holidayMinutes: 0 }, totalMinutes: 60, compTimeGrantMinutes: 60 })],
+      )
+      expect((await approve(vFallId)).status).toBe(200)
+      expect(await expiryDaysOf(vFallId)).toEqual([{ overtime_source: 'workday', days: 30 }])
+
+      // 5d — bank OFF + validityDays=90 + expiresInDays=30 → DORMANT single NULL-source lot keeps
+      // expiresInDays; the bank knob must NOT leak into the legacy path (byte-identical).
+      expect((await putSettings({ compTimeFromOvertime: { enabled: true, expiresInDays: 30 }, overtimeBankPolicy: { enabled: false, pooledSources: [], validityDays: 90 } })).status).toBe(200)
+      const dormId = await createOvertime('2026-09-14', 60)
+      expect((await approve(dormId)).status).toBe(200)
+      expect(await expiryDaysOf(dormId)).toEqual([{ overtime_source: null, days: 30 }])
+
+      // 5g — expiresInDays parity: the sibling knob is now bounded too, so an over-large value is rejected at
+      // save (400) — before this it had no zod .max and would 500 the comp-time grant just like validityDays did.
+      expect((await putSettings({ compTimeFromOvertime: { enabled: true, expiresInDays: 999999999 } })).status).toBe(400)
+
+      // 5h — legacy-row defense (review P2-1): a settings row saved BEFORE the zod .max (or seeded by another
+      // writer) can hold expiresInDays > MAX; the normalize-on-read path does NOT cap it, so the read-point
+      // clampLotValidityDays is the ONLY thing that stops it 500-ing the grant INSERT. Over-bind the persisted
+      // value directly (bypassing PUT/zod) and prove both the dormant and banked grant paths clamp to 36500
+      // instead of overflowing the PG interval.
+      const overbindPersistedExpiry = async () => {
+        await pool.query(
+          `UPDATE system_configs
+              SET value = jsonb_set(value::jsonb, '{compTimeFromOvertime,expiresInDays}', '999999999')::text
+            WHERE key = 'attendance.settings'`,
+        )
+        // the plugin caches settings for 60s — force a re-read of the over-bound row. (The reset helper is
+        // nested under __attendanceReportFieldCatalogForTests; the top-level `?.()` accessor is a silent no-op.)
+        const plugin = getAttendancePluginForTest() as unknown as { __attendanceReportFieldCatalogForTests?: { resetAttendanceSettingsCacheForTests?: () => void } }
+        plugin.__attendanceReportFieldCatalogForTests?.resetAttendanceSettingsCacheForTests?.()
+      }
+
+      // 5h-dormant: bank OFF, over-bound expiresInDays → single NULL-source lot clamps to 36500 days, 200 (was 500).
+      expect((await putSettings({ compTimeFromOvertime: { enabled: true, expiresInDays: 30 }, overtimeBankPolicy: { enabled: false, pooledSources: [], validityDays: null } })).status).toBe(200)
+      await overbindPersistedExpiry()
+      const legacyDormantId = await createOvertime('2026-09-16', 60)
+      expect((await approve(legacyDormantId)).status).toBe(200)
+      expect(await expiryDaysOf(legacyDormantId)).toEqual([{ overtime_source: null, days: 36500 }])
+
+      // 5h-banked: bank ON (validityDays null → falls back to expiresInDays), over-bound expiresInDays →
+      // source-tagged lot clamps to 36500 days via the resolveBankedLotExpiresInDays fallback, 200 (was 500).
+      expect((await putSettings({ compTimeFromOvertime: { enabled: true, expiresInDays: 30 }, overtimeBankPolicy: { enabled: true, pooledSources: ['workday'], validityDays: null } })).status).toBe(200)
+      await overbindPersistedExpiry()
+      const legacyBankedId = await createOvertime('2026-09-17', 60)
+      await pool.query(
+        `UPDATE attendance_requests SET metadata = jsonb_set(metadata, '{overtimeSegmentation}', $2::jsonb) WHERE id = $1`,
+        [legacyBankedId, JSON.stringify({ version: 1, engine: 'attendance_overtime_segmentation_v1', workDate: '2026-09-17', dayType: 'workday', segments: { workdayMinutes: 60, restdayMinutes: 0, holidayMinutes: 0 }, totalMinutes: 60, compTimeGrantMinutes: 60 })],
+      )
+      expect((await approve(legacyBankedId)).status).toBe(200)
+      expect(await expiryDaysOf(legacyBankedId)).toEqual([{ overtime_source: 'workday', days: 36500 }])
+
+      // 5e — P2-1: an over-large validityDays is rejected at settings-save (400), so it can never reach the
+      // banked INSERT and overflow the PG interval (was: 200 at PUT, then 500 on the next approval).
+      expect((await putSettings({ overtimeBankPolicy: { enabled: true, pooledSources: ['workday'], validityDays: 999999999 } })).status).toBe(400)
+      // the boundary value is accepted and governs.
+      expect((await putSettings({ compTimeFromOvertime: { enabled: true, expiresInDays: null }, overtimeBankPolicy: { enabled: true, pooledSources: ['workday'], validityDays: 36500 } })).status).toBe(200)
+      const capId = await createOvertime('2026-09-15', 60)
+      await pool.query(
+        `UPDATE attendance_requests SET metadata = jsonb_set(metadata, '{overtimeSegmentation}', $2::jsonb) WHERE id = $1`,
+        [capId, JSON.stringify({ version: 1, engine: 'attendance_overtime_segmentation_v1', workDate: '2026-09-15', dayType: 'workday', segments: { workdayMinutes: 60, restdayMinutes: 0, holidayMinutes: 0 }, totalMinutes: 60, compTimeGrantMinutes: 60 })],
+      )
+      expect((await approve(capId)).status).toBe(200)
+      expect(await expiryDaysOf(capId)).toEqual([{ overtime_source: 'workday', days: 36500 }])
+
+      // 5f — P3-2: existing lots are never rewritten. Re-issuing the exact banked INSERT with a DIFFERENT
+      // validity leaves the already-granted lot's expires_at unchanged (INSERT … ON CONFLICT DO NOTHING,
+      // no UPDATE reaches comp_time).
+      const beforeExpiry = (await pool.query(
+        `SELECT expires_at FROM attendance_leave_balances WHERE org_id='default' AND source_id=$1 AND leave_type_code='comp_time'`, [capId],
+      )).rows[0].expires_at
+      await pool.query(
+        `INSERT INTO attendance_leave_balances
+           (org_id, user_id, leave_type_code, amount_minutes, remaining_minutes, source_type, source_id, source_key, status, expires_at, overtime_source)
+         VALUES ('default', $1, 'comp_time', 60, 60, 'overtime_conversion', $2, $3, 'active', now() + (7 * interval '24 hours'), 'workday')
+         ON CONFLICT (org_id, source_key) DO NOTHING`,
+        [userId, capId, `overtime_conversion:${capId}:workday`],
+      )
+      const afterExpiry = (await pool.query(
+        `SELECT expires_at FROM attendance_leave_balances WHERE org_id='default' AND source_id=$1 AND leave_type_code='comp_time'`, [capId],
+      )).rows[0].expires_at
+      expect(new Date(afterExpiry).getTime()).toBe(new Date(beforeExpiry).getTime())
+
+      // ==========================================================================================
+      // (6) S1b 加班银行·每周期(自然月)上限强制 (overtime-bank-cap design-lock §3):
+      // `overtimeBankPolicy.maxMinutesPerPeriod` caps the BANKED (pooled, source-tagged) comp-time a user
+      // accrues per calendar month. An approval that would push the month's pooled total STRICTLY past the
+      // cap throws 422 OVERTIME_BANK_CAP_EXCEEDED and rolls the whole approval back (request stays pending,
+      // 0 lot). Headroom counts only pooled lots (§6: statutory never pools) whose SOURCE OT request's
+      // work_date falls in the month — so the cap is per-month, cross-month-isolated, and dormant-immune.
+      // BEFORE S1b this knob shipped in the admin UI but was read by nothing.
+      // ==========================================================================================
+      const segmentWorkday = async (rid: string, workDate: string, minutes: number) => {
+        await pool.query(
+          `UPDATE attendance_requests SET metadata = jsonb_set(metadata, '{overtimeSegmentation}', $2::jsonb) WHERE id = $1`,
+          [rid, JSON.stringify({ version: 1, engine: 'attendance_overtime_segmentation_v1', workDate, dayType: 'workday', segments: { workdayMinutes: minutes, restdayMinutes: 0, holidayMinutes: 0 }, totalMinutes: minutes, compTimeGrantMinutes: minutes })],
+        )
+      }
+      // pooled banked minutes for a month (same口径 as the runtime headroom: source-tagged lots, joined to
+      // the source OT request's work_date). Robust to per-source lot keys (…:workday) unlike lotsFor.
+      const bankedMinutesForMonth = async (monthPrefix: string) => (await pool.query(
+        `SELECT COALESCE(SUM(b.amount_minutes),0)::int AS banked
+           FROM attendance_leave_balances b JOIN attendance_requests r ON r.id::text = b.source_id
+          WHERE b.org_id='default' AND b.user_id=$1 AND b.leave_type_code='comp_time'
+            AND b.source_type='overtime_conversion' AND b.overtime_source IS NOT NULL
+            AND to_char(r.work_date, 'YYYY-MM') = $2`,
+        [userId, monthPrefix],
+      )).rows[0].banked as number
+      // count ANY comp_time lot for a request (matches per-source keys too) — for the "0 side-effect" assertion.
+      const compLotCount = async (rid: string) => (await pool.query(
+        `SELECT count(*)::int AS n FROM attendance_leave_balances WHERE org_id='default' AND source_id=$1 AND leave_type_code='comp_time'`,
+        [rid],
+      )).rows[0].n as number
+      const statusOf = async (rid: string) => (await pool.query(`SELECT status FROM attendance_requests WHERE id=$1`, [rid])).rows[0].status as string
+
+      // 6a — cap ON (maxMinutesPerPeriod=120): two Oct grants of 60 each land EXACTLY on the cap → both allowed.
+      expect((await putSettings({ compTimeFromOvertime: { enabled: true, expiresInDays: null }, overtimeBankPolicy: { enabled: true, pooledSources: ['workday'], maxMinutesPerPeriod: 120, validityDays: null } })).status).toBe(200)
+      const capA1 = await createOvertime('2026-10-05', 60)
+      await segmentWorkday(capA1, '2026-10-05', 60)
+      expect((await approve(capA1)).status).toBe(200)
+      const capA2 = await createOvertime('2026-10-20', 60)
+      await segmentWorkday(capA2, '2026-10-20', 60)
+      expect((await approve(capA2)).status).toBe(200)
+      expect(await bankedMinutesForMonth('2026-10')).toBe(120) // exactly on the cap → allowed
+
+      // 6b — cap EXCEEDED: a third Oct grant of 60 would reach 180 > 120 → 422, approval rolls back.
+      const capB = await createOvertime('2026-10-25', 60)
+      await segmentWorkday(capB, '2026-10-25', 60)
+      const blockedRes = await approve(capB)
+      expect(blockedRes.status).toBe(422)
+      expect((blockedRes.body as { error?: { code?: string } } | undefined)?.error?.code).toBe('OVERTIME_BANK_CAP_EXCEEDED')
+      expect(await statusOf(capB)).toBe('pending')             // approval rolled back — request unchanged
+      expect(await compLotCount(capB)).toBe(0)                 // 0 lot side-effect
+      expect(await bankedMinutesForMonth('2026-10')).toBe(120) // month total unchanged
+
+      // 6c — cap = 0 (no cap): a large single grant is never blocked.
+      expect((await putSettings({ compTimeFromOvertime: { enabled: true, expiresInDays: null }, overtimeBankPolicy: { enabled: true, pooledSources: ['workday'], maxMinutesPerPeriod: 0, validityDays: null } })).status).toBe(200)
+      const noCap = await createOvertime('2026-11-05', 600)
+      await segmentWorkday(noCap, '2026-11-05', 600)
+      expect((await approve(noCap)).status).toBe(200)
+      expect(await bankedMinutesForMonth('2026-11')).toBe(600)
+
+      // 6d — cross-month isolation: cap=120 again; Oct is full (120) but a Dec grant of 120 uses ONLY Dec's
+      // headroom (0) → lands on the cap → allowed. A leaked cross-month cap would have 422'd here.
+      expect((await putSettings({ compTimeFromOvertime: { enabled: true, expiresInDays: null }, overtimeBankPolicy: { enabled: true, pooledSources: ['workday'], maxMinutesPerPeriod: 120, validityDays: null } })).status).toBe(200)
+      const crossMonth = await createOvertime('2026-12-10', 120)
+      await segmentWorkday(crossMonth, '2026-12-10', 120)
+      expect((await approve(crossMonth)).status).toBe(200)
+      expect(await bankedMinutesForMonth('2026-12')).toBe(120)
+
+      // 6e — dormant immunity: bank OFF + a large grant → the cap never runs (dormant branch), a single
+      // NULL-source lot is granted. Proves the cap gates ONLY the banked branch (invariant 2).
+      expect((await putSettings({ compTimeFromOvertime: { enabled: true, expiresInDays: null }, overtimeBankPolicy: { enabled: false, pooledSources: [], maxMinutesPerPeriod: 120, validityDays: null } })).status).toBe(200)
+      const dormantBig = await createOvertime('2027-01-06', 600)
+      expect((await approve(dormantBig)).status).toBe(200)
+      const dormantLots = await lotsFor(dormantBig)
+      expect(dormantLots).toHaveLength(1)
+      expect(dormantLots[0].amount_minutes).toBe(600)
+
+      // 6f — month-boundary attribution: the FIRST day and the LAST day of a month must both attribute to
+      // THAT month (guards against a TZ/UTC off-by-one shifting a boundary work_date into an adjacent month).
+      // cap=120: Feb-01 (60) + Feb-28 (60) fill Feb exactly; a mid-Feb 60 then reaches 180>120 → 422. If the
+      // first-day leaked to Jan or the last-day to Mar, Feb headroom would be < 120 and the mid-Feb grant
+      // would NOT block — so the 422 proves both boundary lots attribute to Feb.
+      expect((await putSettings({ compTimeFromOvertime: { enabled: true, expiresInDays: null }, overtimeBankPolicy: { enabled: true, pooledSources: ['workday'], maxMinutesPerPeriod: 120, validityDays: null } })).status).toBe(200)
+      const febFirst = await createOvertime('2027-02-01', 60)
+      await segmentWorkday(febFirst, '2027-02-01', 60)
+      expect((await approve(febFirst)).status).toBe(200)
+      const febLast = await createOvertime('2027-02-28', 60)
+      await segmentWorkday(febLast, '2027-02-28', 60)
+      expect((await approve(febLast)).status).toBe(200)
+      expect(await bankedMinutesForMonth('2027-02')).toBe(120) // both boundary days counted in Feb
+      const febMid = await createOvertime('2027-02-15', 60)
+      await segmentWorkday(febMid, '2027-02-15', 60)
+      const febBlocked = await approve(febMid)
+      expect(febBlocked.status).toBe(422)
+      expect((febBlocked.body as { error?: { code?: string } } | undefined)?.error?.code).toBe('OVERTIME_BANK_CAP_EXCEEDED')
+
+      // 6g — dormant cross-contamination (proves the §6 `overtime_source IS NOT NULL` headroom filter is
+      // load-bearing, not neuter): an org that ran the bank DORMANT earlier in a month accrued a single
+      // NULL-source (un-pooled, full-amount, statutory-inclusive) lot. When the bank is later ENABLED with a
+      // cap mid-month, that dormant lot must NOT count toward the pooled headroom — else it would falsely
+      // block. Here: a dormant 600-min lot in Mar, then bank ON cap=120 + a workday 60 in Mar → 200 (dormant
+      // ignored; pooled headroom = 60, not 660). Drop the filter and this grant false-blocks with 422.
+      expect((await putSettings({ compTimeFromOvertime: { enabled: true, expiresInDays: null }, overtimeBankPolicy: { enabled: false, pooledSources: [], maxMinutesPerPeriod: 0, validityDays: null } })).status).toBe(200)
+      const marDormant = await createOvertime('2027-03-05', 600)
+      expect((await approve(marDormant)).status).toBe(200) // dormant → single NULL-source (un-pooled) lot
+      expect((await putSettings({ compTimeFromOvertime: { enabled: true, expiresInDays: null }, overtimeBankPolicy: { enabled: true, pooledSources: ['workday'], maxMinutesPerPeriod: 120, validityDays: null } })).status).toBe(200)
+      const marBanked = await createOvertime('2027-03-20', 60)
+      await segmentWorkday(marBanked, '2027-03-20', 60)
+      expect((await approve(marBanked)).status).toBe(200) // dormant 600 excluded from pooled headroom → 60<=120
+      expect(await bankedMinutesForMonth('2027-03')).toBe(60) // only the pooled workday lot, NOT 660
     } finally {
       if (token && Object.keys(originalSettings).length > 0) {
         await requestJson(`${baseUrl}/api/attendance/settings`, { method: 'PUT', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, body: JSON.stringify(originalSettings) }).catch(() => undefined)
@@ -6073,7 +6310,7 @@ attendanceIntegrationDescribe(
       else process.env.RBAC_BYPASS = previousRbacBypass
       await pool.end().catch(() => undefined)
     }
-  })
+  }, 120000)
 
   it('加班三段 O2 — opt-in request metadata snapshot is written and refreshed on final approval', async () => {
     if (!baseUrl) return
@@ -9288,6 +9525,9 @@ attendanceIntegrationDescribe(
         tiers: [{ minYears: 0, maxYears: 5, days: 3 }, { minYears: 5, maxYears: null, days: 8 }],
         carryover: { enabled: true },
         timezone: 'Asia/Shanghai',
+        // S3 scheduler trigger sub-object (design-lock attendance-annual-leave-accrual-scheduler-s3-design-lock-20260710) —
+        // default off; this PUT never touched it.
+        scheduledTrigger: { enabled: false },
       })
       expect(reloaded?.overtimeSegmentation).toEqual({ enabled: true })
       expect(reloaded?.autoShiftMatching).toEqual({
@@ -17143,6 +17383,342 @@ attendanceIntegrationDescribe(
           method: 'PUT',
           headers,
           body: JSON.stringify({ reportSync: originalReportSync ?? { scheduledTrigger: { enabled: false } } }),
+        }).catch(() => undefined)
+      }
+    })
+  })
+
+  describe('attendance annual-leave accrual scheduled trigger (S3, design-lock attendance-annual-leave-accrual-scheduler-s3-design-lock-20260710)', () => {
+    // The auto-trigger for the L2b accrual engine, which previously had ONLY a manual admin route. This
+    // block covers ONLY the scheduling layer (double-gate no-op / due-gate / triggered_by='scheduler'
+    // provenance / no-double-grant when combined with a manual run) — the per-user eligibility/tier/
+    // proration math is already covered by the L2b describe block above. Job-isolation coverage (a throwing
+    // 'attendance-annual-leave-accrual' job never blocks siblings) lives in tests/unit/attendance-scheduler.test.ts;
+    // pure normalizer/period/due-gate coverage lives in tests/unit/attendance-annual-leave-accrual-scheduled-trigger.test.ts.
+    const annualSchedSeam = () => (getAttendancePluginForTest() as any).__attendanceReportFieldCatalogForTests
+
+    async function annualSchedAdminToken(uid: string): Promise<string | undefined> {
+      const res = await requestJson(
+        `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(uid)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`,
+      )
+      return (res.body as { token?: string } | undefined)?.token
+    }
+
+    async function putAnnualSchedPolicy(token: string, policy: Record<string, unknown>): Promise<HttpResponse> {
+      return requestJson(`${baseUrl}/api/attendance/settings`, {
+        method: 'PUT',
+        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ annualLeavePolicy: policy }),
+      })
+    }
+
+    function annualSchedPolicy(opts: {
+      enabled?: boolean
+      scheduledTriggerEnabled?: boolean
+      timezone?: string | null
+    } = {}): Record<string, unknown> {
+      return {
+        enabled: opts.enabled ?? true,
+        tenureMode: 'cumulative_service',
+        standardDayMinutes: 480,
+        tiers: [
+          { minYears: 1, maxYears: 10, days: 5 },
+          { minYears: 10, maxYears: 20, days: 10 },
+          { minYears: 20, maxYears: null, days: 15 },
+        ],
+        carryover: { enabled: false },
+        timezone: opts.timezone === undefined ? 'UTC' : opts.timezone,
+        scheduledTrigger: { enabled: opts.scheduledTriggerEnabled ?? true },
+      }
+    }
+
+    function withAnnualSchedTriggerEnv<T>(value: string | undefined, fn: () => Promise<T>): Promise<T> {
+      const prev = process.env.ATTENDANCE_ANNUAL_LEAVE_ACCRUAL_SCHEDULED_ENABLED
+      if (value === undefined) delete process.env.ATTENDANCE_ANNUAL_LEAVE_ACCRUAL_SCHEDULED_ENABLED
+      else process.env.ATTENDANCE_ANNUAL_LEAVE_ACCRUAL_SCHEDULED_ENABLED = value
+      return fn().finally(() => {
+        if (prev === undefined) delete process.env.ATTENDANCE_ANNUAL_LEAVE_ACCRUAL_SCHEDULED_ENABLED
+        else process.env.ATTENDANCE_ANNUAL_LEAVE_ACCRUAL_SCHEDULED_ENABLED = prev
+      })
+    }
+
+    async function seedAnnualSchedOrgRule(pool: Pool, orgId: string, timezone = 'UTC'): Promise<void> {
+      await pool.query(
+        `INSERT INTO attendance_rules
+           (id, org_id, name, timezone, work_start_time, work_end_time, late_grace_minutes, early_grace_minutes,
+            severe_late_threshold_minutes, absence_late_threshold_minutes, rounding_minutes, working_days, is_default)
+         VALUES ($1, $2, $3, $4, '09:00', '18:00', 5, 5, 30, 60, 1, '[1,2,3,4,5]'::jsonb, true)`,
+        [randomUUID(), orgId, `S3 annual accrual sched rule ${orgId}`, timezone],
+      )
+    }
+
+    async function seedAnnualSchedUser(pool: Pool, id: string, org: string, hireDate: string, cumulative: string): Promise<void> {
+      await pool.query(
+        `INSERT INTO users (id, email, password_hash, is_active, hire_date, cumulative_service_start_date)
+         VALUES ($1, $2, 'no-login', true, $3, $4)
+         ON CONFLICT (id) DO UPDATE SET is_active = true, hire_date = EXCLUDED.hire_date, cumulative_service_start_date = EXCLUDED.cumulative_service_start_date`,
+        [id, `${id}@example.com`, hireDate, cumulative],
+      )
+      await pool.query(
+        `INSERT INTO user_orgs (user_id, org_id, is_active) VALUES ($1, $2, true)
+         ON CONFLICT (user_id, org_id) DO UPDATE SET is_active = true`,
+        [id, org],
+      )
+    }
+
+    async function annualSchedRunsForOrgPeriod(
+      pool: Pool, orgId: string, periodKey: string,
+    ): Promise<Array<{ id: string; triggered_by: string; dry_run: boolean }>> {
+      return (await pool.query(
+        `SELECT id, triggered_by, dry_run FROM attendance_leave_accrual_runs
+          WHERE org_id = $1 AND period_key = $2 ORDER BY created_at ASC`,
+        [orgId, periodKey],
+      )).rows
+    }
+
+    async function annualSchedItemFor(pool: Pool, runId: string, userId: string): Promise<{ status: string } | undefined> {
+      return (await pool.query(
+        `SELECT status FROM attendance_leave_accrual_run_items WHERE run_id = $1 AND user_id = $2`,
+        [runId, userId],
+      )).rows[0]
+    }
+
+    async function annualSchedLotsForUser(pool: Pool, userId: string): Promise<Array<{ id: string; source_key: string }>> {
+      return (await pool.query(
+        `SELECT id, source_key FROM attendance_leave_balances WHERE user_id = $1 AND leave_type_code = 'annual'`,
+        [userId],
+      )).rows
+    }
+
+    async function cleanupAnnualSchedOrg(pool: Pool, org: string, userIds: string[]): Promise<void> {
+      await pool.query('DELETE FROM attendance_leave_balance_events WHERE org_id = $1', [org]).catch(() => undefined)
+      await pool.query('DELETE FROM attendance_leave_balances WHERE org_id = $1', [org]).catch(() => undefined)
+      await pool.query('DELETE FROM attendance_leave_accrual_run_items WHERE org_id = $1', [org]).catch(() => undefined)
+      await pool.query('DELETE FROM attendance_leave_accrual_runs WHERE org_id = $1', [org]).catch(() => undefined)
+      await pool.query('DELETE FROM attendance_rules WHERE org_id = $1', [org]).catch(() => undefined)
+      if (userIds.length) {
+        await pool.query('DELETE FROM user_orgs WHERE user_id = ANY($1::text[])', [userIds]).catch(() => undefined)
+        await pool.query('DELETE FROM users WHERE id = ANY($1::text[])', [userIds]).catch(() => undefined)
+      }
+    }
+
+    it('double-gate: env unset, then settings.scheduledTrigger.enabled left at its off default — zero run rows, zero writes either way', async () => {
+      if (!baseUrl) return
+      const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
+      if (!dbUrl) return
+      const runSuffix = Date.now().toString(36)
+      const org = `alsched-gate-${runSuffix}`
+      const uid = `alsched-gate-u-${runSuffix}`
+      const pool = new Pool({ connectionString: dbUrl })
+      const now = new Date('2026-07-10T12:00:00.000Z')
+      try {
+        await seedAnnualSchedOrgRule(pool, org)
+        await seedAnnualSchedUser(pool, uid, org, '2015-01-01', '2015-01-01')
+
+        const seam = annualSchedSeam()
+        const pluginDb = createPluginDbForTest(pool)
+        const logger = { warn() {}, error() {}, info() {} }
+
+        // (a) env flag unset (settings default enabled=false too, never PUT in this test) → byte-exact no-op.
+        const resEnvOff = await withAnnualSchedTriggerEnv(undefined, () =>
+          seam.runAnnualLeaveAccrualScheduledTriggerOnce(pluginDb, logger, { now }))
+        expect(resEnvOff).toEqual({ ran: false, reason: 'disabled', orgs: [] })
+        expect(await annualSchedRunsForOrgPeriod(pool, org, 'annual:2026')).toHaveLength(0)
+
+        // (b) env on, but settings.annualLeavePolicy.scheduledTrigger.enabled is still at its off default
+        // (never PUT true anywhere in THIS test) → still ran=false, still zero rows.
+        const resSettingsOff = await withAnnualSchedTriggerEnv('true', () =>
+          seam.runAnnualLeaveAccrualScheduledTriggerOnce(pluginDb, logger, { now }))
+        expect(resSettingsOff).toEqual({ ran: false, reason: 'disabled', orgs: [] })
+        expect(await annualSchedRunsForOrgPeriod(pool, org, 'annual:2026')).toHaveLength(0)
+      } finally {
+        await cleanupAnnualSchedOrg(pool, org, [uid])
+        await pool.end().catch(() => undefined)
+      }
+    })
+
+    it('double-gate: settings.enabled=true but env flag unset — still zero run rows, zero writes (the env-half of the gate, tested independently of the settings-half above)', async () => {
+      if (!baseUrl) return
+      const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
+      if (!dbUrl) return
+      const runSuffix = Date.now().toString(36)
+      const org = `alsched-gate-env-${runSuffix}`
+      const uid = `alsched-gate-env-u-${runSuffix}`
+      const adminToken = await annualSchedAdminToken(`alsched-gate-env-admin-${runSuffix}`)
+      expect(adminToken).toBeTruthy()
+      if (!adminToken) return
+      const pool = new Pool({ connectionString: dbUrl })
+      const now = new Date('2026-07-10T12:00:00.000Z')
+      let originalPolicy: unknown
+      try {
+        await seedAnnualSchedOrgRule(pool, org)
+        await seedAnnualSchedUser(pool, uid, org, '2015-01-01', '2015-01-01')
+
+        const origRes = await requestJson(`${baseUrl}/api/attendance/settings`, { headers: { Authorization: `Bearer ${adminToken}` } })
+        originalPolicy = (origRes.body as { data?: { annualLeavePolicy?: unknown } } | undefined)?.data?.annualLeavePolicy
+        const putStatus = (await putAnnualSchedPolicy(adminToken, annualSchedPolicy())).status
+        expect(putStatus).toBe(200)
+
+        const seam = annualSchedSeam()
+        const pluginDb = createPluginDbForTest(pool)
+        const logger = { warn() {}, error() {}, info() {} }
+
+        // settings.enabled=true + scheduledTrigger.enabled=true (just PUT above) but the env flag is unset
+        // → still a byte-exact no-op. Isolates the ENV half of the double-gate: the settings-off scenarios
+        // above would still no-op even if the env check were deleted entirely, so this scenario is the one
+        // that actually proves the env flag independently gates the runner.
+        const res = await withAnnualSchedTriggerEnv(undefined, () =>
+          seam.runAnnualLeaveAccrualScheduledTriggerOnce(pluginDb, logger, { now }))
+        expect(res).toEqual({ ran: false, reason: 'disabled', orgs: [] })
+        expect(await annualSchedRunsForOrgPeriod(pool, org, 'annual:2026')).toHaveLength(0)
+      } finally {
+        await putAnnualSchedPolicy(adminToken!, (originalPolicy as Record<string, unknown>) ?? { enabled: false }).catch(() => undefined)
+        await cleanupAnnualSchedOrg(pool, org, [uid])
+        await pool.end().catch(() => undefined)
+      }
+    })
+
+    it('gate open: scheduler run persists triggered_by=scheduler; a same-month repeat tick is a due-gate no-op; a same-period MANUAL run afterward does not double-grant the lot', async () => {
+      if (!baseUrl) return
+      const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
+      if (!dbUrl) return
+      const runSuffix = Date.now().toString(36)
+      const org = `alsched-open-${runSuffix}`
+      const uid = `alsched-open-u-${runSuffix}`
+      const adminToken = await annualSchedAdminToken(`alsched-open-admin-${runSuffix}`)
+      expect(adminToken).toBeTruthy()
+      if (!adminToken) return
+      const pool = new Pool({ connectionString: dbUrl })
+      // hire_date/cumulative_service_start_date 2015-01-01 → 11 completed years as-of 2026-07-10 → tier
+      // [10,20) → 10 days × 480min = 4800min entitlement (mirrors the L2b 'full' fixture above).
+      const now = new Date('2026-07-10T12:00:00.000Z')
+      let originalPolicy: unknown
+      try {
+        await seedAnnualSchedOrgRule(pool, org)
+        await seedAnnualSchedUser(pool, uid, org, '2015-01-01', '2015-01-01')
+
+        const origRes = await requestJson(`${baseUrl}/api/attendance/settings`, { headers: { Authorization: `Bearer ${adminToken}` } })
+        originalPolicy = (origRes.body as { data?: { annualLeavePolicy?: unknown } } | undefined)?.data?.annualLeavePolicy
+        expect((await putAnnualSchedPolicy(adminToken, annualSchedPolicy())).status).toBe(200)
+
+        const seam = annualSchedSeam()
+        const pluginDb = createPluginDbForTest(pool)
+        const logger = { warn() {}, error() {}, info() {} }
+        const emitted: Array<{ type: string; data: unknown }> = []
+        const emitEvent = (type: string, data: unknown) => emitted.push({ type, data })
+
+        // (1) first scheduler tick: due (no prior real run) → grants exactly one lot, stamps triggered_by='scheduler'.
+        const first = await withAnnualSchedTriggerEnv('true', () =>
+          seam.runAnnualLeaveAccrualScheduledTriggerOnce(pluginDb, logger, { now, emitEvent }))
+        expect(first.ran).toBe(true)
+        const mine = first.orgs.find((o: { orgId: string }) => o.orgId === org)
+        expect(mine).toMatchObject({
+          orgId: org, ran: true, period: 2026, periodKey: 'annual:2026',
+          granted: 1, skipped: 0, grantedMinutes: 4800, lotsCreated: 1, alreadyGranted: 0,
+        })
+        const runsAfterFirst = await annualSchedRunsForOrgPeriod(pool, org, 'annual:2026')
+        expect(runsAfterFirst).toHaveLength(1)
+        expect(runsAfterFirst[0]).toMatchObject({ triggered_by: 'scheduler', dry_run: false })
+        expect(await annualSchedItemFor(pool, runsAfterFirst[0].id, uid)).toEqual({ status: 'granted' })
+        const lotsAfterFirst = await annualSchedLotsForUser(pool, uid)
+        expect(lotsAfterFirst).toHaveLength(1)
+        expect(lotsAfterFirst[0].source_key).toBe(`annual_accrual:${uid}:annual:2026`)
+        expect(emitted).toHaveLength(1)
+        expect(emitted[0]).toMatchObject({
+          type: 'attendance.annual_leave_accrual.run',
+          data: { orgId: org, periodKey: 'annual:2026', dryRun: false, granted: 1, skipped: 0, triggeredBy: 'scheduler' },
+        })
+
+        // (2) second scheduler tick, SAME now (same org-local month) → due-gate no-op: zero new run rows,
+        // zero new lots, zero new events.
+        const second = await withAnnualSchedTriggerEnv('true', () =>
+          seam.runAnnualLeaveAccrualScheduledTriggerOnce(pluginDb, logger, { now, emitEvent }))
+        const mineAgain = second.orgs.find((o: { orgId: string }) => o.orgId === org)
+        expect(mineAgain).toEqual({ orgId: org, ran: false, reason: 'not_due', period: 2026, periodKey: 'annual:2026' })
+        expect(await annualSchedRunsForOrgPeriod(pool, org, 'annual:2026')).toHaveLength(1)
+        expect(await annualSchedLotsForUser(pool, uid)).toHaveLength(1)
+        expect(emitted).toHaveLength(1) // no second emit
+
+        // (3) a MANUAL run for the SAME period afterward (bypassing the scheduler's own due-gate entirely,
+        // since the manual route has none) proves the DEEPER lot-level idempotency (source_key) still holds:
+        // a NEW run row is written (manual has no due-gate) but the grant itself is a no-op.
+        const manualRes = await requestJson(`${baseUrl}/api/attendance/annual-leave-accrual/run`, {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${adminToken}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ period: 2026, asOf: '2026-07-10', dryRun: false, orgId: org }),
+        })
+        expect(manualRes.status, JSON.stringify(manualRes.body)).toBe(200)
+        const manualBody = manualRes.body as { data?: { runId?: string; granted?: number; lotsCreated?: number; alreadyGranted?: number } }
+        expect(manualBody.data).toMatchObject({ granted: 1, lotsCreated: 0, alreadyGranted: 1 })
+        const runsAfterManual = await annualSchedRunsForOrgPeriod(pool, org, 'annual:2026')
+        expect(runsAfterManual).toHaveLength(2)
+        expect(runsAfterManual[1]).toMatchObject({ triggered_by: 'manual', dry_run: false })
+        // still exactly one lot — the "不双发" proof: scheduler + manual for the SAME period never double-grant.
+        expect(await annualSchedLotsForUser(pool, uid)).toHaveLength(1)
+      } finally {
+        await putAnnualSchedPolicy(adminToken!, (originalPolicy as Record<string, unknown>) ?? { enabled: false }).catch(() => undefined)
+        await cleanupAnnualSchedOrg(pool, org, [uid])
+        await pool.end().catch(() => undefined)
+      }
+    })
+
+    it('PUT /api/attendance/settings round-trips annualLeavePolicy.scheduledTrigger without stripping siblings (#1829) and rejects a non-boolean enabled', async () => {
+      if (!baseUrl) return
+      const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
+      if (!dbUrl) return
+      const runSuffix = Date.now().toString(36)
+      const adminToken = await annualSchedAdminToken(`alsched-roundtrip-admin-${runSuffix}`)
+      expect(adminToken).toBeTruthy()
+      if (!adminToken) return
+      const headers = { Authorization: `Bearer ${adminToken}`, 'Content-Type': 'application/json' }
+      let originalPolicy: unknown
+      try {
+        const origRes = await requestJson(`${baseUrl}/api/attendance/settings`, { headers: { Authorization: `Bearer ${adminToken}` } })
+        originalPolicy = (origRes.body as { data?: { annualLeavePolicy?: unknown } } | undefined)?.data?.annualLeavePolicy
+
+        // a full policy PUT with scheduledTrigger.enabled=true round-trips it AND every sibling field.
+        const putRes = await requestJson(`${baseUrl}/api/attendance/settings`, {
+          method: 'PUT', headers,
+          body: JSON.stringify({ annualLeavePolicy: annualSchedPolicy({ timezone: 'Asia/Shanghai' }) }),
+        })
+        expect(putRes.status).toBe(200)
+        expect((putRes.body as { data?: { annualLeavePolicy?: unknown } } | undefined)?.data?.annualLeavePolicy).toEqual({
+          enabled: true, tenureMode: 'cumulative_service', standardDayMinutes: 480,
+          tiers: [{ minYears: 1, maxYears: 10, days: 5 }, { minYears: 10, maxYears: 20, days: 10 }, { minYears: 20, maxYears: null, days: 15 }],
+          carryover: { enabled: false }, timezone: 'Asia/Shanghai', scheduledTrigger: { enabled: true },
+        })
+
+        // re-GET (a fresh read, not just the PUT echo) proves it actually persisted.
+        const rt = await requestJson(`${baseUrl}/api/attendance/settings`, { headers: { Authorization: `Bearer ${adminToken}` } })
+        expect((rt.body as { data?: { annualLeavePolicy?: { scheduledTrigger?: unknown } } } | undefined)?.data?.annualLeavePolicy?.scheduledTrigger).toEqual({ enabled: true })
+
+        // a sibling-only partial update (untouched key) preserves annualLeavePolicy.scheduledTrigger.
+        const siblingPut = await requestJson(`${baseUrl}/api/attendance/settings`, {
+          method: 'PUT', headers, body: JSON.stringify({ minPunchIntervalMinutes: 2 }),
+        })
+        expect(siblingPut.status).toBe(200)
+        expect((siblingPut.body as { data?: { annualLeavePolicy?: { scheduledTrigger?: unknown } } } | undefined)?.data?.annualLeavePolicy?.scheduledTrigger).toEqual({ enabled: true })
+
+        // a partial annualLeavePolicy update touching only scheduledTrigger.enabled preserves the OTHER
+        // annualLeavePolicy fields (tenureMode/standardDayMinutes/tiers/timezone/carryover untouched).
+        const partialPut = await requestJson(`${baseUrl}/api/attendance/settings`, {
+          method: 'PUT', headers, body: JSON.stringify({ annualLeavePolicy: { scheduledTrigger: { enabled: false } } }),
+        })
+        expect(partialPut.status).toBe(200)
+        expect((partialPut.body as { data?: { annualLeavePolicy?: unknown } } | undefined)?.data?.annualLeavePolicy).toEqual({
+          enabled: true, tenureMode: 'cumulative_service', standardDayMinutes: 480,
+          tiers: [{ minYears: 1, maxYears: 10, days: 5 }, { minYears: 10, maxYears: 20, days: 10 }, { minYears: 20, maxYears: null, days: 15 }],
+          carryover: { enabled: false }, timezone: 'Asia/Shanghai', scheduledTrigger: { enabled: false },
+        })
+
+        // an invalid (non-boolean) scheduledTrigger.enabled is REJECTED (400), not silently coerced/dropped.
+        const badType = await requestJson(`${baseUrl}/api/attendance/settings`, {
+          method: 'PUT', headers, body: JSON.stringify({ annualLeavePolicy: { scheduledTrigger: { enabled: 'yes' } } }),
+        })
+        expect(badType.status).toBe(400)
+      } finally {
+        await requestJson(`${baseUrl}/api/attendance/settings`, {
+          method: 'PUT', headers, body: JSON.stringify({ annualLeavePolicy: originalPolicy ?? { enabled: false } }),
         }).catch(() => undefined)
       }
     })

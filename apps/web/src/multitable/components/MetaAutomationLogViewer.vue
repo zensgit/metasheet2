@@ -35,7 +35,7 @@
             <option value="failed">{{ automationStatusLabel('failed', isZh) }}</option>
             <option value="skipped">{{ automationStatusLabel('skipped', isZh) }}</option>
           </select>
-          <button class="meta-log-viewer__btn" type="button" data-action="refresh" @click="loadData">{{ automationLabel('log.refresh', isZh) }}</button>
+          <MtButton class="meta-log-viewer__btn" data-action="refresh" @click="loadData">{{ automationLabel('log.refresh', isZh) }}</MtButton>
         </div>
 
         <!-- Load error (replaces previous silent catch) -->
@@ -47,12 +47,11 @@
         >
           <span class="meta-log-viewer__error-label">{{ automationLabel('log.errorPrefix', isZh) }}</span>
           <span class="meta-log-viewer__error-message" data-field="error-message">{{ loadError }}</span>
-          <button
-            type="button"
+          <MtButton
             class="meta-log-viewer__btn meta-log-viewer__btn--retry"
             data-action="retry"
             @click="loadData"
-          >{{ automationLabel('log.retry', isZh) }}</button>
+          >{{ automationLabel('log.retry', isZh) }}</MtButton>
         </div>
 
         <!-- Log list -->
@@ -77,18 +76,16 @@
           </div>
           <div v-if="expandedId === log.id && log.steps" class="meta-log-viewer__log-detail" data-detail="true">
             <div class="meta-log-viewer__support-actions">
-              <button
+              <MtButton
                 class="meta-log-viewer__btn meta-log-viewer__btn--support"
-                type="button"
                 data-action="copy-support-packet"
                 @click.stop="copySupportPacket(log)"
-              >{{ automationLabel('support.copyPacket', isZh) }}</button>
-              <button
+              >{{ automationLabel('support.copyPacket', isZh) }}</MtButton>
+              <MtButton
                 class="meta-log-viewer__btn meta-log-viewer__btn--support"
-                type="button"
                 data-action="download-support-packet"
                 @click.stop="downloadSupportPacket(log)"
-              >{{ automationLabel('support.downloadJson', isZh) }}</button>
+              >{{ automationLabel('support.downloadJson', isZh) }}</MtButton>
               <span
                 v-if="supportPacketStatus[log.id]"
                 class="meta-log-viewer__support-status"
@@ -147,6 +144,7 @@ import {
   renderAutomationLogSupportPacketJson,
   renderAutomationLogSupportPacketMarkdown,
 } from '../utils/automation-log-support-packet'
+import { MtButton } from '../ui'
 
 const props = defineProps<{
   sheetId: string
@@ -330,15 +328,15 @@ watch(
   background: #fff;
 }
 
-.meta-log-viewer__btn {
-  border: 1px solid #cbd5e1;
-  border-radius: 8px;
-  padding: 6px 14px;
-  background: #fff;
-  color: #0f172a;
-  font-size: 13px;
-  cursor: pointer;
-}
+/* .meta-log-viewer__btn (+ --retry / --support modifiers, below): Refresh, Retry, and both support-packet
+   controls are now <MtButton> (ghost, token-styled — all were neutral bordered-white secondary actions, same
+   family as the MERGED GDV/PDV Refresh migrations #3869/#3870). Their bespoke CSS was removed to avoid
+   double-styling the MtButton root: `--retry`'s pink/red accent (border-color #fecaca, color #b91c1c — a
+   tint layered on the same unfilled shape, not a solid-fill destructive action) and `--support`'s smaller
+   padding/font-size (4px 10px / 12px vs the base 6px 14px / 13px) are both dropped in favor of MtButton's
+   uniform ghost/md styling (sanctioned normalization, same treatment already applied to MetaChartLoadError's
+   retry control #3823). Classes + data-action kept for selector stability. The header close-× glyph stays
+   bespoke. */
 
 .meta-log-viewer__empty {
   padding: 10px 12px;
@@ -362,11 +360,6 @@ watch(
 
 .meta-log-viewer__error-label { font-weight: 600; }
 .meta-log-viewer__error-message { flex: 1; word-break: break-word; }
-.meta-log-viewer__btn--retry {
-  border-color: #fecaca;
-  color: #b91c1c;
-  background: #fff;
-}
 
 .meta-log-viewer__log-item {
   border: 1px solid #e2e8f0;
@@ -411,11 +404,6 @@ watch(
   gap: 8px;
   flex-wrap: wrap;
   padding: 4px 0 2px;
-}
-
-.meta-log-viewer__btn--support {
-  padding: 4px 10px;
-  font-size: 12px;
 }
 
 .meta-log-viewer__support-status {

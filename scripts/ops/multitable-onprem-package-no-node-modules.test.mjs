@@ -9,8 +9,18 @@ import { fileURLToPath } from 'node:url'
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..')
 const buildScriptPath = path.join(repoRoot, 'scripts/ops/multitable-onprem-package-build.sh')
 const verifyScriptPath = path.join(repoRoot, 'scripts/ops/multitable-onprem-package-verify.sh')
+const packageWorkflowPath = path.join(repoRoot, '.github/workflows/multitable-onprem-package-build.yml')
 const buildScript = fs.readFileSync(buildScriptPath, 'utf8')
 const verifyScript = fs.readFileSync(verifyScriptPath, 'utf8')
+const packageWorkflow = fs.readFileSync(packageWorkflowPath, 'utf8')
+
+test('on-prem verifier requires the superseded audit migration marker', () => {
+  assert.match(
+    verifyScript,
+    /search_fixed_string '20250926_create_audit_tables' "\$provider"/,
+    'the package verifier must reject builds that could replay the non-idempotent legacy audit SQL',
+  )
+})
 
 function runVerifierFunction(functionName, listEntries) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ms2-package-list-'))
@@ -42,6 +52,45 @@ function runVerifierMacMetadataCheck(listEntries) {
   return runVerifierFunction('verify_no_macos_metadata_entries', listEntries)
 }
 
+function runStockPreparationVerifier(root) {
+  return spawnSync(
+    'bash',
+    ['-lc', 'source "$VERIFY"; verify_stock_preparation_mvp_contract "$PACKAGE_ROOT"'],
+    {
+      cwd: repoRoot,
+      env: {
+        ...process.env,
+        VERIFY: verifyScriptPath,
+        PACKAGE_ROOT: root,
+      },
+      encoding: 'utf8',
+    },
+  )
+}
+
+function runNativeBcryptVerifier(packageJson, lockfile) {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ms2-package-native-bcrypt-'))
+  const backendRoot = path.join(root, 'packages/core-backend')
+  fs.mkdirSync(backendRoot, { recursive: true })
+  fs.writeFileSync(path.join(backendRoot, 'package.json'), JSON.stringify(packageJson, null, 2))
+  fs.writeFileSync(path.join(root, 'pnpm-lock.yaml'), lockfile)
+  const result = spawnSync(
+    'bash',
+    ['-lc', 'source "$VERIFY"; verify_no_native_bcrypt_dependency "$PACKAGE_ROOT"'],
+    {
+      cwd: repoRoot,
+      env: {
+        ...process.env,
+        VERIFY: verifyScriptPath,
+        PACKAGE_ROOT: root,
+      },
+      encoding: 'utf8',
+    },
+  )
+  fs.rmSync(root, { recursive: true, force: true })
+  return result
+}
+
 test('on-prem package build prunes copied workspace node_modules before archiving', () => {
   assert.match(
     buildScript,
@@ -63,6 +112,57 @@ test('on-prem package build prunes copied workspace node_modules before archivin
     /prune_node_modules "\$PACKAGE_ROOT"/,
     'the final package root should be swept before archive creation',
   )
+})
+
+test('on-prem verifier rejects native bcrypt build dependencies', () => {
+  const clean = runNativeBcryptVerifier(
+    {
+      dependencies: { bcryptjs: '^3.0.3' },
+      devDependencies: {},
+    },
+    "lockfileVersion: '9.0'\n",
+  )
+  assert.equal(clean.status, 0, clean.stderr)
+
+  const nativeManifest = runNativeBcryptVerifier(
+    {
+      dependencies: { bcrypt: '^5.1.1', bcryptjs: '^3.0.3' },
+      devDependencies: { '@types/bcrypt': '^5.0.2' },
+    },
+    "lockfileVersion: '9.0'\n",
+  )
+  assert.notEqual(nativeManifest.status, 0, 'native bcrypt manifest entries must fail verification')
+  assert.match(nativeManifest.stderr, /must not depend on native bcrypt/)
+
+  const nativeTypeManifest = runNativeBcryptVerifier(
+    {
+      dependencies: { bcryptjs: '^3.0.3' },
+      devDependencies: { '@types/bcrypt': '^5.0.2' },
+    },
+    "lockfileVersion: '9.0'\n",
+  )
+  assert.notEqual(nativeTypeManifest.status, 0, 'unused native bcrypt type entries must fail verification')
+  assert.match(nativeTypeManifest.stderr, /must not depend on native bcrypt/)
+
+  const staleLock = runNativeBcryptVerifier(
+    {
+      dependencies: { bcryptjs: '^3.0.3' },
+      devDependencies: {},
+    },
+    "lockfileVersion: '9.0'\n\npackages:\n\n  bcrypt@5.1.1:\n    resolution: {}\n",
+  )
+  assert.notEqual(staleLock.status, 0, 'native bcrypt lockfile entries must fail verification')
+  assert.match(staleLock.stderr, /lockfile must not contain native bcrypt/)
+
+  const staleTypeLock = runNativeBcryptVerifier(
+    {
+      dependencies: { bcryptjs: '^3.0.3' },
+      devDependencies: {},
+    },
+    "lockfileVersion: '9.0'\n\npackages:\n\n  '@types/bcrypt@5.0.2':\n    resolution: {}\n",
+  )
+  assert.notEqual(staleTypeLock.status, 0, 'native bcrypt type lockfile entries must fail verification')
+  assert.match(staleTypeLock.stderr, /lockfile must not contain native bcrypt/)
 })
 
 test('on-prem verifier rejects archive lists that contain node_modules entries', () => {
@@ -231,4 +331,68 @@ test('on-prem package build emits first-hop Windows bootstrap sidecar assets', (
     /first-hop bootstrap release sidecar/,
     'package verifier should require the package metadata to describe the bootstrap sidecar',
   )
+})
+
+test('on-prem release and workflow artifacts publish both first-hop bootstrap sidecars', () => {
+  assert.match(
+    packageWorkflow,
+    /pkg_bootstrap_ps1="\$\{pkg_tgz%\.tgz\}-deploy-bootstrap\.ps1"/,
+    'the workflow should derive the PowerShell sidecar from the selected package name',
+  )
+  assert.match(
+    packageWorkflow,
+    /pkg_bootstrap_bat="\$\{pkg_tgz%\.tgz\}-deploy-bootstrap\.bat"/,
+    'the workflow should derive the batch sidecar from the selected package name',
+  )
+  const releaseAssetsMatch = packageWorkflow.match(/assets=\(\n([\s\S]*?)\n\s+\)/)
+  assert.ok(releaseAssetsMatch, 'the workflow should declare a GitHub Release asset list')
+  const releaseAssets = releaseAssetsMatch[1]
+  for (const asset of [
+    '"$PACKAGE_BOOTSTRAP_PS1"',
+    '"$PACKAGE_BOOTSTRAP_BAT"',
+    '"${PACKAGE_BOOTSTRAP_PS1}.sha256"',
+    '"${PACKAGE_BOOTSTRAP_BAT}.sha256"',
+  ]) {
+    assert.ok(
+      releaseAssets.includes(asset),
+      `the GitHub Release asset list should include ${asset}`,
+    )
+  }
+  assert.match(
+    packageWorkflow,
+    /output\/releases\/multitable-onprem\/\*-deploy-bootstrap\.ps1/,
+    'the workflow artifact should retain the PowerShell bootstrap sidecar',
+  )
+  assert.match(
+    packageWorkflow,
+    /output\/releases\/multitable-onprem\/\*-deploy-bootstrap\.bat/,
+    'the workflow artifact should retain the batch bootstrap sidecar',
+  )
+})
+
+test('on-prem verifier rejects packages missing the stock-preparation smoke contract', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ms2-stock-prep-package-'))
+  const migrationPath = path.join(root, 'packages/core-backend/migrations/066_create_integration_stock_prep_audit.sql')
+  const smokePath = path.join(root, 'scripts/ops/stock-preparation-mvp-postdeploy-smoke.mjs')
+  fs.mkdirSync(path.dirname(migrationPath), { recursive: true })
+  fs.mkdirSync(path.dirname(smokePath), { recursive: true })
+  fs.writeFileSync(migrationPath, 'CREATE TABLE integration_stock_prep_audit ();\n')
+  fs.writeFileSync(smokePath, 'S.auditActionsCovered = "8/8"\nS.selfScanClean = true\nS.pass = true\n')
+
+  try {
+    const clean = runStockPreparationVerifier(root)
+    assert.equal(clean.status, 0, clean.stderr)
+
+    fs.rmSync(smokePath)
+    const missing = runStockPreparationVerifier(root)
+    assert.notEqual(missing.status, 0)
+    assert.match(missing.stderr, /stock-preparation MVP postdeploy smoke/)
+
+    fs.writeFileSync(smokePath, 'S.auditActionsCovered = "8/8"\nS.pass = true\n')
+    const incomplete = runStockPreparationVerifier(root)
+    assert.notEqual(incomplete.status, 0)
+    assert.match(incomplete.stderr, /values-free self scan/)
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
 })

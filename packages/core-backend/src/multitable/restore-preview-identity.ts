@@ -239,6 +239,34 @@ export interface ConfigRestorePreviewIdentityClaims {
   baselineHash: string
   /** the actor the preview was minted for — a preview minted for A is unusable by B. */
   actorId: string
+  /**
+   * 4c-1 (design-lock §2.3): the LOSS-MAGNITUDE binding. Present ONLY on a lossy retype-revert preview
+   * (`hashLossSummary`); `undefined` on every pre-existing Tier-1/Tier-2 preview, whose token bytes are therefore
+   * unchanged. Execute RE-COMPUTES the loss summary inside the txn (after `FOR UPDATE`) and re-hashes: a divergence
+   * means the cell values moved since preview, so the loss the actor confirmed is not the loss about to happen →
+   * 409 PLAN_DRIFT. Absence is itself bound (an `undefined` claim must match an `undefined` expectation), so a lossy
+   * token can never drive a non-lossy execute and vice versa.
+   */
+  lossHash?: string
+}
+
+/**
+ * 4c-1 §2.3: opaque, SERVER-KEYED digest of the loss magnitude. HMAC (not the plain sha256 `configBaselineHash`
+ * uses) for the same reason `hashUncreatePlan` is keyed: the inputs are three small integers in a client-decodable
+ * JWT, so a plain hash would be trivially brute-forceable into an exact "how many cells will be dropped" oracle for
+ * a token holder. The keyed PRF makes the claim opaque. `fieldId` is folded in so a token minted for one field's
+ * loss can never satisfy another field's execute even at identical counts. The raw summary IS returned in the
+ * preview response body — but only to an actor the full-read gate has already proven can read the whole table.
+ */
+export function hashLossSummary(fieldId: string, summary: { unchanged: number; coerced: number; dropped: number }): string {
+  const n = (v: number): number => (Number.isFinite(v) ? Math.trunc(v) : 0)
+  const canon = {
+    fieldId: String(fieldId),
+    unchanged: n(summary.unchanged),
+    coerced: n(summary.coerced),
+    dropped: n(summary.dropped),
+  }
+  return createHmac('sha256', getSecret()).update(JSON.stringify(canon)).digest('hex')
 }
 
 export function mintConfigRestorePreviewIdentity(claims: ConfigRestorePreviewIdentityClaims, expiresIn: SignOptions['expiresIn'] = DEFAULT_TTL): string {
@@ -247,7 +275,10 @@ export function mintConfigRestorePreviewIdentity(claims: ConfigRestorePreviewIde
 
 export interface ConfigRestoreVerifyResult {
   valid: boolean
-  reason?: 'invalid' | 'expired' | 'wrong_type' | 'mismatch_sheetId' | 'mismatch_revisionId' | 'mismatch_entityType' | 'mismatch_entityId' | 'mismatch_baselineHash' | 'mismatch_actorId'
+  // `loss_drift` (4c-1) = the opaque lossHash diverged (cell values moved since preview, so the loss magnitude the
+  // actor confirmed is stale) OR the token's lossy-ness does not match the execute path's. The route maps it to ONE
+  // generic 409 PLAN_DRIFT — the keyed hash cannot reveal WHICH bucket moved, which would itself be an oracle.
+  reason?: 'invalid' | 'expired' | 'wrong_type' | 'mismatch_sheetId' | 'mismatch_revisionId' | 'mismatch_entityType' | 'mismatch_entityId' | 'mismatch_baselineHash' | 'loss_drift' | 'mismatch_actorId'
 }
 
 export function verifyConfigRestorePreviewIdentity(token: string, expected: ConfigRestorePreviewIdentityClaims): ConfigRestoreVerifyResult {
@@ -263,6 +294,10 @@ export function verifyConfigRestorePreviewIdentity(token: string, expected: Conf
   if (payload.entityType !== expected.entityType) return { valid: false, reason: 'mismatch_entityType' }
   if (payload.entityId !== expected.entityId) return { valid: false, reason: 'mismatch_entityId' }
   if (payload.baselineHash !== expected.baselineHash) return { valid: false, reason: 'mismatch_baselineHash' }
+  // 4c-1: bind the loss magnitude, INCLUDING its absence (`undefined` ↔ `undefined`). `jwt.sign` drops undefined
+  // claims, so a pre-4c-1 token carries no `lossHash` and matches a non-lossy expectation; a lossy token presented
+  // to the non-lossy branch (or vice versa) diverges here rather than silently executing the wrong contract.
+  if ((payload.lossHash ?? null) !== (expected.lossHash ?? null)) return { valid: false, reason: 'loss_drift' }
   if (payload.actorId !== expected.actorId) return { valid: false, reason: 'mismatch_actorId' }
   return { valid: true }
 }

@@ -20,6 +20,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+$SupportedPackagePnpmVersion = '9.15.9'
 
 function Resolve-NormalizedPath {
   param(
@@ -233,6 +234,109 @@ function Resolve-PnpmInstallCommand {
   return $command.Source
 }
 
+function Resolve-CorepackCommand {
+  foreach ($dir in Get-WindowsToolPathCandidates) {
+    foreach ($leaf in @('corepack.exe', 'corepack.cmd', 'corepack.ps1')) {
+      $candidate = Join-Path $dir $leaf
+      if (Test-Path -LiteralPath $candidate) {
+        return $candidate
+      }
+    }
+  }
+
+  foreach ($name in @('corepack.cmd', 'corepack')) {
+    $command = Get-Command $name -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($command -and -not [string]::IsNullOrWhiteSpace($command.Source)) {
+      return $command.Source
+    }
+  }
+
+  return $null
+}
+
+function New-CorepackPnpmCommandWrapper {
+  param(
+    [string]$WrapperPath,
+    [string]$CorepackPath,
+    [string]$RequiredVersion
+  )
+
+  $resolvedCorepackPath = Resolve-NormalizedPath -Candidate $CorepackPath -Label 'Corepack command'
+  $quotedCorepackPath = ConvertTo-CmdQuoted -Value $resolvedCorepackPath
+  $corepackPrefix = if ($resolvedCorepackPath.ToLowerInvariant().EndsWith('.ps1')) {
+    "powershell.exe -NoProfile -ExecutionPolicy Bypass -File $quotedCorepackPath"
+  } elseif ($resolvedCorepackPath.ToLowerInvariant().EndsWith('.cmd') -or $resolvedCorepackPath.ToLowerInvariant().EndsWith('.bat')) {
+    "call $quotedCorepackPath"
+  } else {
+    $quotedCorepackPath
+  }
+
+  $lines = @(
+    '@echo off',
+    'setlocal EnableExtensions DisableDelayedExpansion',
+    "$corepackPrefix `"pnpm@$RequiredVersion`" %*",
+    'set "COREPACK_PNPM_EXIT=%ERRORLEVEL%"',
+    'exit /b %COREPACK_PNPM_EXIT%'
+  )
+  Set-Content -LiteralPath $WrapperPath -Value $lines -Encoding ASCII
+  return (Resolve-Path -LiteralPath $WrapperPath).Path
+}
+
+function Resolve-PackagePnpmVersion {
+  param([string]$PackageRoot)
+
+  $metadataPath = Join-Path $PackageRoot 'PACKAGE-METADATA.json'
+  if (-not (Test-Path -LiteralPath $metadataPath)) {
+    throw "Package metadata is missing: $metadataPath"
+  }
+
+  $metadata = Get-Content -LiteralPath $metadataPath -Raw | ConvertFrom-Json
+  $version = [string]$metadata.pnpmVersion
+  if ($version -ne $SupportedPackagePnpmVersion) {
+    throw "Unsupported package pnpm version '$version'; this apply helper accepts only $SupportedPackagePnpmVersion"
+  }
+
+  return $version
+}
+
+function Initialize-PinnedPnpm {
+  param(
+    [string]$RequiredVersion,
+    [string]$WrapperRoot
+  )
+
+  $corepackPath = Resolve-CorepackCommand
+  $pnpmPath = $null
+  if (-not [string]::IsNullOrWhiteSpace($corepackPath)) {
+    Write-Info "Activate pinned pnpm via corepack prepare pnpm@$RequiredVersion --activate"
+    $prepareOutput = & $corepackPath prepare "pnpm@$RequiredVersion" --activate 2>&1
+    $prepareExit = $LASTEXITCODE
+    @($prepareOutput) | ForEach-Object { Write-Host "[corepack] $_" }
+    if ($prepareExit -ne 0) {
+      throw "corepack failed to activate pnpm $RequiredVersion (exit=$prepareExit)"
+    }
+    # Dispatch through this exact Corepack binary with an explicit pnpm
+    # version. A generic PATH/profile search here can select an unrelated
+    # pnpm.cmd and defeat the activation that just succeeded.
+    $corepackWrapperPath = Join-Path $WrapperRoot "pnpm-corepack-$RequiredVersion.cmd"
+    $pnpmPath = New-CorepackPnpmCommandWrapper `
+      -WrapperPath $corepackWrapperPath `
+      -CorepackPath $corepackPath `
+      -RequiredVersion $RequiredVersion
+  } else {
+    Write-Info 'corepack is unavailable; an already-installed exact pnpm version is required'
+    $pnpmPath = Resolve-PnpmInstallCommand
+  }
+
+  $actualVersion = Invoke-PnpmSingleLine -PnpmPath $pnpmPath -Arguments @('--version')
+  if ([string]::IsNullOrWhiteSpace($actualVersion) -or $actualVersion.Trim() -ne $RequiredVersion) {
+    throw "PNPM_VERSION_MISMATCH: package requires $RequiredVersion but resolved '$actualVersion' at $pnpmPath"
+  }
+
+  Write-Info "Pinned pnpm ready: version=$RequiredVersion path=$pnpmPath"
+  return $pnpmPath
+}
+
 function Convert-PositiveInt {
   param(
     [string]$Value,
@@ -275,7 +379,8 @@ function New-DependencyRefreshCommandWrapper {
     [string]$WrapperPath,
     [string]$PnpmPath,
     [string]$RootDir,
-    [string]$StoreDir
+    [string]$StoreDir,
+    [switch]$Offline
   )
 
   $quotedPnpmPath = ConvertTo-CmdQuoted -Value $PnpmPath
@@ -286,6 +391,7 @@ function New-DependencyRefreshCommandWrapper {
   } else {
     "call $quotedPnpmPath"
   }
+  $offlineFlag = if ($Offline) { ' --offline' } else { '' }
 
   $lines = @(
     '@echo off',
@@ -317,7 +423,7 @@ function New-DependencyRefreshCommandWrapper {
     "echo [dependency-refresh-wrapper] local store-dir=$quotedStoreDir",
     "if not exist $quotedStoreDir mkdir $quotedStoreDir",
     'echo [dependency-refresh-wrapper] pnpm install starting',
-    "$pnpmPrefix install --frozen-lockfile --reporter=append-only --store-dir $quotedStoreDir",
+    "$pnpmPrefix install --frozen-lockfile --reporter=append-only --store-dir $quotedStoreDir$offlineFlag",
     'set "DEPENDENCY_REFRESH_EXIT=%ERRORLEVEL%"',
     'echo [dependency-refresh-wrapper] pnpm install exit=%DEPENDENCY_REFRESH_EXIT%',
     'exit /b %DEPENDENCY_REFRESH_EXIT%'
@@ -495,6 +601,38 @@ function Invoke-LoggedProcess {
   }
 }
 
+function Invoke-DependencyInstall {
+  param(
+    [string]$Description,
+    [string]$PnpmPath,
+    [string]$RootDir,
+    [string]$StoreDir,
+    [string]$LogPrefix,
+    [int]$TimeoutSec,
+    [int]$HeartbeatSec,
+    [switch]$Offline
+  )
+
+  $wrapperPath = $LogPrefix + '.cmd'
+  New-Item -ItemType Directory -Path $StoreDir -Force | Out-Null
+  New-DependencyRefreshCommandWrapper `
+    -WrapperPath $wrapperPath `
+    -PnpmPath $PnpmPath `
+    -RootDir $RootDir `
+    -StoreDir $StoreDir `
+    -Offline:$Offline
+
+  $cmdPath = Resolve-CommandPath -Name 'cmd.exe'
+  Invoke-LoggedProcess `
+    -Description $Description `
+    -FilePath $cmdPath `
+    -Arguments @('/d', '/s', '/c', ('"' + $wrapperPath + '"')) `
+    -WorkingDirectory $RootDir `
+    -LogPrefix $LogPrefix `
+    -TimeoutSec $TimeoutSec `
+    -HeartbeatSec $HeartbeatSec
+}
+
 function Expand-PackageArchive {
   param(
     [string]$ArchivePath,
@@ -558,6 +696,250 @@ function Resolve-ExtractedPackageRoot {
     return @($preferred)[0].FullName
   }
   throw "Ambiguous extracted package roots under ${ExtractRoot}: $(@($candidates | ForEach-Object { $_.FullName }) -join '; ')"
+}
+
+function Get-RelativePathUnderRoot {
+  param(
+    [string]$Root,
+    [string]$Path
+  )
+
+  $normalizedRoot = [System.IO.Path]::GetFullPath($Root).TrimEnd([char[]]'\/')
+  $normalizedPath = [System.IO.Path]::GetFullPath($Path)
+  $prefix = $normalizedRoot + [System.IO.Path]::DirectorySeparatorChar
+  if (-not $normalizedPath.StartsWith($prefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+    throw "Path is outside expected root: path=$normalizedPath root=$normalizedRoot"
+  }
+
+  return $normalizedPath.Substring($prefix.Length)
+}
+
+function Get-WorkspaceProjectRelativeRoots {
+  param([string]$Root)
+
+  $roots = @('')
+  foreach ($group in @('apps', 'packages', 'plugins', 'tools')) {
+    $groupPath = Join-Path $Root $group
+    if (-not (Test-Path -LiteralPath $groupPath -PathType Container)) {
+      continue
+    }
+
+    foreach ($child in Get-ChildItem -LiteralPath $groupPath -Directory -Force) {
+      if (Test-Path -LiteralPath (Join-Path $child.FullName 'package.json') -PathType Leaf) {
+        $roots += (Join-Path $group $child.Name)
+      }
+    }
+  }
+
+  $openapiSdk = Join-Path $Root 'packages\openapi\dist-sdk'
+  if (Test-Path -LiteralPath (Join-Path $openapiSdk 'package.json') -PathType Leaf) {
+    $roots += 'packages\openapi\dist-sdk'
+  }
+
+  return @($roots | Select-Object -Unique)
+}
+
+function Remove-DirectoryTree {
+  param(
+    [string]$Path,
+    [string]$Label = 'Directory tree'
+  )
+
+  if (-not (Test-Path -LiteralPath $Path)) {
+    return
+  }
+
+  # PowerShell's FileSystem provider can fail while traversing deep pnpm trees
+  # on Windows. Node is already a required runtime and removes those trees
+  # without asking the provider to enumerate every nested path.
+  $removeScript = @'
+const fs = require('node:fs')
+const target = process.argv[1]
+if (!target) throw new Error('cleanup target is required')
+fs.rmSync(target, { recursive: true, force: true, maxRetries: 5, retryDelay: 250 })
+'@
+  $output = & node -e $removeScript $Path 2>&1
+  $exitCode = $LASTEXITCODE
+  foreach ($line in @($output)) {
+    if (-not [string]::IsNullOrWhiteSpace([string]$line)) {
+      Write-Host "[node-rm] $line"
+    }
+  }
+  if ($exitCode -ne 0) {
+    throw "$Label cleanup failed for $Path (node exit=$exitCode)"
+  }
+  if (Test-Path -LiteralPath $Path) {
+    throw "$Label cleanup did not remove $Path"
+  }
+}
+
+function Remove-WorkspaceNodeModules {
+  param([string]$Root)
+
+  $projectRoots = @(Get-WorkspaceProjectRelativeRoots -Root $Root) |
+    Sort-Object { $_.Length } -Descending
+  foreach ($relativeRoot in $projectRoots) {
+    $projectRoot = if ([string]::IsNullOrWhiteSpace($relativeRoot)) { $Root } else { Join-Path $Root $relativeRoot }
+    $modulesPath = Join-Path $projectRoot 'node_modules'
+    if (Test-Path -LiteralPath $modulesPath) {
+      Remove-DirectoryTree -Path $modulesPath -Label 'Staging dependency tree'
+    }
+  }
+}
+
+function New-PackageOverlayTransaction {
+  param(
+    [string]$PackageRoot,
+    [string]$LiveRoot,
+    [string]$BackupRoot
+  )
+
+  $filesBackupRoot = Join-Path $BackupRoot 'files'
+  New-Item -ItemType Directory -Path $filesBackupRoot -Force | Out-Null
+
+  $fileEntries = @()
+  foreach ($sourceFile in Get-ChildItem -LiteralPath $PackageRoot -File -Recurse -Force) {
+    $relativePath = Get-RelativePathUnderRoot -Root $PackageRoot -Path $sourceFile.FullName
+    if ($relativePath -match '(^|[\\/])node_modules([\\/]|$)') {
+      throw "Package overlay unexpectedly contains node_modules: $relativePath"
+    }
+
+    $destinationPath = Join-Path $LiveRoot $relativePath
+    if ((Test-Path -LiteralPath $destinationPath) -and -not (Test-Path -LiteralPath $destinationPath -PathType Leaf)) {
+      throw "Package file conflicts with a non-file destination: $relativePath"
+    }
+
+    $existed = Test-Path -LiteralPath $destinationPath -PathType Leaf
+    $backupPath = $null
+    if ($existed) {
+      $backupPath = Join-Path $filesBackupRoot $relativePath
+      New-Item -ItemType Directory -Path (Split-Path -Parent $backupPath) -Force | Out-Null
+      Copy-Item -LiteralPath $destinationPath -Destination $backupPath -Force
+    }
+
+    $fileEntries += [pscustomobject]@{
+      RelativePath = $relativePath
+      SourcePath = $sourceFile.FullName
+      DestinationPath = $destinationPath
+      Existed = $existed
+      BackupPath = $backupPath
+    }
+  }
+
+  $createdDirectories = @()
+  foreach ($sourceDirectory in Get-ChildItem -LiteralPath $PackageRoot -Directory -Recurse -Force) {
+    $relativePath = Get-RelativePathUnderRoot -Root $PackageRoot -Path $sourceDirectory.FullName
+    if ($relativePath -match '(^|[\\/])node_modules([\\/]|$)') {
+      continue
+    }
+    $destinationPath = Join-Path $LiveRoot $relativePath
+    if (-not (Test-Path -LiteralPath $destinationPath)) {
+      $createdDirectories += $destinationPath
+    }
+  }
+
+  return [pscustomobject]@{
+    Files = $fileEntries
+    CreatedDirectories = $createdDirectories
+  }
+}
+
+function Copy-PackageOverlay {
+  param([pscustomobject]$Transaction)
+
+  foreach ($entry in @($Transaction.Files)) {
+    New-Item -ItemType Directory -Path (Split-Path -Parent $entry.DestinationPath) -Force | Out-Null
+    Copy-Item -LiteralPath $entry.SourcePath -Destination $entry.DestinationPath -Force
+  }
+}
+
+function Restore-PackageOverlay {
+  param([pscustomobject]$Transaction)
+
+  foreach ($entry in @($Transaction.Files)) {
+    if ($entry.Existed) {
+      New-Item -ItemType Directory -Path (Split-Path -Parent $entry.DestinationPath) -Force | Out-Null
+      Copy-Item -LiteralPath $entry.BackupPath -Destination $entry.DestinationPath -Force
+    } elseif (Test-Path -LiteralPath $entry.DestinationPath) {
+      Remove-Item -LiteralPath $entry.DestinationPath -Force
+    }
+  }
+
+  foreach ($directory in @($Transaction.CreatedDirectories) | Sort-Object { $_.Length } -Descending) {
+    if ((Test-Path -LiteralPath $directory -PathType Container) -and
+        @((Get-ChildItem -LiteralPath $directory -Force)).Count -eq 0) {
+      Remove-Item -LiteralPath $directory -Force
+    }
+  }
+}
+
+function Move-WorkspaceNodeModulesForRollback {
+  param(
+    [string]$LiveRoot,
+    [string]$PackageRoot,
+    [string]$TransactionId
+  )
+
+  $relativeRoots = @(
+    @(Get-WorkspaceProjectRelativeRoots -Root $LiveRoot) +
+    @(Get-WorkspaceProjectRelativeRoots -Root $PackageRoot)
+  ) | Select-Object -Unique
+  $entries = @()
+
+  try {
+    foreach ($relativeRoot in $relativeRoots) {
+      $projectRoot = if ([string]::IsNullOrWhiteSpace($relativeRoot)) { $LiveRoot } else { Join-Path $LiveRoot $relativeRoot }
+      $modulesPath = Join-Path $projectRoot 'node_modules'
+      $backupPath = "$modulesPath.mspa-backup-$TransactionId"
+      if (Test-Path -LiteralPath $backupPath) {
+        throw "Dependency rollback path already exists: $backupPath"
+      }
+
+      $hadExisting = Test-Path -LiteralPath $modulesPath
+      if ($hadExisting) {
+        Move-Item -LiteralPath $modulesPath -Destination $backupPath
+      }
+
+      $entries += [pscustomobject]@{
+        ModulesPath = $modulesPath
+        BackupPath = $backupPath
+        HadExisting = $hadExisting
+      }
+    }
+  }
+  catch {
+    foreach ($entry in @($entries) | Sort-Object { $_.ModulesPath.Length } -Descending) {
+      if ($entry.HadExisting -and (Test-Path -LiteralPath $entry.BackupPath)) {
+        Move-Item -LiteralPath $entry.BackupPath -Destination $entry.ModulesPath
+      }
+    }
+    throw
+  }
+
+  return [pscustomobject]@{ Entries = $entries }
+}
+
+function Restore-WorkspaceNodeModules {
+  param([pscustomobject]$Transaction)
+
+  foreach ($entry in @($Transaction.Entries) | Sort-Object { $_.ModulesPath.Length } -Descending) {
+    if (Test-Path -LiteralPath $entry.ModulesPath) {
+      Remove-DirectoryTree -Path $entry.ModulesPath -Label 'Rollback dependency tree'
+    }
+    if ($entry.HadExisting -and (Test-Path -LiteralPath $entry.BackupPath)) {
+      Move-Item -LiteralPath $entry.BackupPath -Destination $entry.ModulesPath
+    }
+  }
+}
+
+function Complete-WorkspaceNodeModulesTransaction {
+  param([pscustomobject]$Transaction)
+
+  foreach ($entry in @($Transaction.Entries)) {
+    if ($entry.HadExisting -and (Test-Path -LiteralPath $entry.BackupPath)) {
+      Remove-DirectoryTree -Path $entry.BackupPath -Label 'Retired dependency backup'
+    }
+  }
 }
 
 function Invoke-HealthcheckOnce {
@@ -634,6 +1016,7 @@ New-Item -ItemType Directory -Force -Path $outputLogs | Out-Null
 $stagingBase = Resolve-StagingBase -Candidate $StagingRoot
 Write-Info "Staging base: $stagingBase"
 $extractRoot = New-ShortTempDirectory -Prefix 'mspa' -BaseRoot $stagingBase
+$rollbackRoot = $null
 
 try {
   Write-Info "Package archive: $resolvedArchive"
@@ -645,27 +1028,25 @@ try {
   $packageRoot = Resolve-ExtractedPackageRoot -ExtractRoot $extractRoot
   Write-Info "Extracted package root: $packageRoot"
 
-  foreach ($item in Get-ChildItem -LiteralPath $packageRoot -Force) {
-    Copy-Item -LiteralPath $item.FullName -Destination $resolvedRoot -Recurse -Force
-  }
-
-  Set-Location $resolvedRoot
-
   Require-Command -Name 'node'
-  $pnpmInstallPath = Resolve-PnpmInstallCommand
-  $pnpmPath = $pnpmInstallPath
 
   if ($InstallDeps -ne '0') {
+    $requiredPnpmVersion = Resolve-PackagePnpmVersion -PackageRoot $packageRoot
+    $pnpmInstallPath = Initialize-PinnedPnpm `
+      -RequiredVersion $requiredPnpmVersion `
+      -WrapperRoot $extractRoot
     $dependencyTimeoutSec = Convert-PositiveInt -Value $DependencyRefreshTimeoutSec -Label 'DependencyRefreshTimeoutSec'
     $dependencyHeartbeatSec = Convert-PositiveInt -Value $DependencyRefreshHeartbeatSec -Label 'DependencyRefreshHeartbeatSec'
-    $dependencyLogPrefix = Join-Path $outputLogs ('dependency-refresh-' + (Get-Date -Format 'yyyyMMdd-HHmmss'))
-    $dependencyWrapperPath = $dependencyLogPrefix + '.cmd'
+    # The deploy-local content-addressable store is cache-only state. Reusing it
+    # avoids a full redownload while keeping package files/runtime dependencies
+    # untouched until the staging preflight succeeds.
     $dependencyStoreDir = Join-Path $resolvedRoot '.pnpm-store'
-    New-Item -ItemType Directory -Force -Path $dependencyStoreDir | Out-Null
-    Write-Info "pnpm path: $pnpmPath"
+    $timestamp = Get-Date -Format 'yyyyMMdd-HHmmss'
+    $preflightLogPrefix = Join-Path $outputLogs ('dependency-preflight-' + $timestamp)
+    $dependencyLogPrefix = Join-Path $outputLogs ('dependency-activate-' + $timestamp)
+    Write-Info "pnpm path: $pnpmInstallPath"
     Write-Info "pnpm install path: $pnpmInstallPath"
-    Write-Info "dependency refresh wrapper: $dependencyWrapperPath"
-    Write-Info "dependency refresh local store: $dependencyStoreDir"
+    Write-Info "dependency transaction store: $dependencyStoreDir"
     try {
       $pnpmVersion = Invoke-PnpmSingleLine -PnpmPath $pnpmInstallPath -Arguments @('--version')
       if (-not [string]::IsNullOrWhiteSpace($pnpmVersion)) {
@@ -693,22 +1074,89 @@ try {
     catch {
       Write-Info "Unable to read pnpm store-dir before dependency refresh: $($_.Exception.Message)"
     }
-    New-DependencyRefreshCommandWrapper `
-      -WrapperPath $dependencyWrapperPath `
-      -PnpmPath $pnpmInstallPath `
-      -RootDir $resolvedRoot `
-      -StoreDir $dependencyStoreDir
 
-    $cmdPath = Resolve-CommandPath -Name 'cmd.exe'
-    Invoke-LoggedProcess `
-      -Description 'Refresh dependencies (cmd.exe /c pnpm install --frozen-lockfile)' `
-      -FilePath $cmdPath `
-      -Arguments @('/d', '/s', '/c', ('"' + $dependencyWrapperPath + '"')) `
-      -WorkingDirectory $resolvedRoot `
-      -LogPrefix $dependencyLogPrefix `
+    # This is the dependency failure boundary: the complete frozen install must
+    # succeed in disposable staging before any live-root file or node_modules is
+    # touched. It also fills the private store used by the offline activation.
+    Invoke-DependencyInstall `
+      -Description 'Preflight dependencies in staging (pinned pnpm, frozen lockfile)' `
+      -PnpmPath $pnpmInstallPath `
+      -RootDir $packageRoot `
+      -StoreDir $dependencyStoreDir `
+      -LogPrefix $preflightLogPrefix `
       -TimeoutSec $dependencyTimeoutSec `
       -HeartbeatSec $dependencyHeartbeatSec
+
+    # node_modules is intentionally not part of the package overlay. The same
+    # preflight-populated store is consumed offline in the live transaction.
+    Remove-WorkspaceNodeModules -Root $packageRoot
+
+    $transactionId = [System.Guid]::NewGuid().ToString('N').Substring(0, 12)
+    $rollbackRoot = New-ShortTempDirectory -Prefix 'mspb' -BaseRoot $stagingBase
+    $overlayTransaction = New-PackageOverlayTransaction `
+      -PackageRoot $packageRoot `
+      -LiveRoot $resolvedRoot `
+      -BackupRoot $rollbackRoot
+    $modulesTransaction = $null
+
+    try {
+      $modulesTransaction = Move-WorkspaceNodeModulesForRollback `
+        -LiveRoot $resolvedRoot `
+        -PackageRoot $packageRoot `
+        -TransactionId $transactionId
+      Copy-PackageOverlay -Transaction $overlayTransaction
+      Set-Location $resolvedRoot
+
+      Invoke-DependencyInstall `
+        -Description 'Activate preflighted dependencies in live root (offline, rollback protected)' `
+        -PnpmPath $pnpmInstallPath `
+        -RootDir $resolvedRoot `
+        -StoreDir $dependencyStoreDir `
+        -LogPrefix $dependencyLogPrefix `
+        -TimeoutSec $dependencyTimeoutSec `
+        -HeartbeatSec $dependencyHeartbeatSec `
+        -Offline
+    }
+    catch {
+      $activationError = $_
+      $rollbackErrors = @()
+      Write-Info 'Dependency activation failed; restoring previous package files and workspace node_modules before aborting'
+
+      if ($null -ne $modulesTransaction) {
+        try {
+          Restore-WorkspaceNodeModules -Transaction $modulesTransaction
+        }
+        catch {
+          $rollbackErrors += "node_modules rollback failed: $($_.Exception.Message)"
+        }
+      }
+      try {
+        Restore-PackageOverlay -Transaction $overlayTransaction
+      }
+      catch {
+        $rollbackErrors += "package overlay rollback failed: $($_.Exception.Message)"
+      }
+
+      if ($rollbackErrors.Count -gt 0) {
+        throw "PACKAGE_DEPENDENCY_ROLLBACK_FAILED after '$($activationError.Exception.Message)': $($rollbackErrors -join '; ')"
+      }
+      throw $activationError
+    }
+
+    try {
+      Complete-WorkspaceNodeModulesTransaction -Transaction $modulesTransaction
+    }
+    catch {
+      Write-Info "Dependency activation succeeded but old node_modules cleanup needs manual follow-up: $($_.Exception.Message)"
+    }
+  } else {
+    Write-Info 'InstallDeps=0: dependency preflight and rollback transaction explicitly bypassed by operator'
+    foreach ($item in Get-ChildItem -LiteralPath $packageRoot -Force) {
+      Copy-Item -LiteralPath $item.FullName -Destination $resolvedRoot -Recurse -Force
+    }
   }
+
+  Set-Location $resolvedRoot
 
   if ($RunMigrations -ne '0') {
     $migratePath = Join-Path $resolvedRoot 'packages\core-backend\dist\src\db\migrate.js'
@@ -748,6 +1196,9 @@ try {
   Write-Info "Root: $resolvedRoot"
 }
 finally {
+  if ($null -ne $rollbackRoot -and (Test-Path -LiteralPath $rollbackRoot)) {
+    Remove-Item -LiteralPath $rollbackRoot -Recurse -Force -ErrorAction SilentlyContinue
+  }
   if (Test-Path -LiteralPath $extractRoot) {
     Remove-Item -LiteralPath $extractRoot -Recurse -Force -ErrorAction SilentlyContinue
   }

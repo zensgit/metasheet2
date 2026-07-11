@@ -530,6 +530,14 @@ function createHarness() {
         async listAudit() { return [] },
         async getForRuntime() { return {} },
       },
+      // BA-APPLY-2a: satisfy requireService('bridgeAgentChecklistStore', ...) — this harness never
+      // exercises the checklist routes.
+      bridgeAgentChecklistStore: {
+        async saveVersion() { return {} },
+        async approve() { return {} },
+        async retire() { return {} },
+        async getForApply() { return {} },
+      },
     },
     logger: {
       warn() {},

@@ -23,6 +23,23 @@ on:
       - 'apps/web/src/multitable/utils/personal-config-write.ts'
       - 'apps/web/tests/multitable-reorder-view-fields.spec.ts'
       - 'apps/web/tests/multitable-grid-personal-additive-write.spec.ts'
+      # G-B2-22: the save-block reason aggregator is the SINGLE SOURCE for `canSave` in the
+      # automation rule editor — a dropped conjunct there lets an invalid rule be saved. Its
+      # exhaustive guard harness must fire whenever either file changes.
+      - 'apps/web/src/multitable/utils/meta-automation-labels.ts'
+      - 'apps/web/src/multitable/automationRecipes.ts'
+      - 'apps/web/src/multitable/components/MetaAutomationManager.vue'
+      - 'apps/web/src/multitable/automationSaveBlockReasons.ts'
+      - 'apps/web/src/multitable/components/MetaAutomationRuleEditor.vue'
+      - 'apps/web/tests/automation-save-block-reasons.spec.ts'
+      # G-B2-25: the per-action collapse-card one-line summary (its matrix spec is the only thing
+      # pinning "honest placeholder, never fabricated" behavior across every action type).
+      - 'apps/web/src/multitable/automationActionSummary.ts'
+      - 'apps/web/tests/automation-action-summary.spec.ts'
+      # G-B2-27: create_record's target-sheet dropdown (listSheets() → options, pure mapping) plus
+      # its mount-level wiring/fallback tests.
+      - 'apps/web/src/multitable/utils/automation-target-sheet-options.ts'
+      - 'apps/web/tests/automation-target-sheet-options.spec.ts'
       - 'apps/web/src/multitable/utils/field-config.ts'
       - 'apps/web/src/multitable/utils/meta-manager-labels.ts'
       - 'apps/web/src/multitable/components/MetaFieldManager.vue'
@@ -34,6 +51,20 @@ on:
       - 'apps/web/src/multitable/components/HistoryCenterModal.vue'
       - 'apps/web/src/multitable/composables/useHistoryCenter.ts'
       - 'apps/web/tests/multitable-history-fe.spec.ts'
+      # L1c CI-residual fix: HistoryBatchChangesList.vue is a child of HistoryCenterModal.vue
+      # (mounted for both the pinned-detail and normal-detail change lists) but had NO path
+      # trigger of its own, and its only real behavioral coverage — the 3 specs below, which mount
+      # the real component tree via HistoryCenterModal — ran in NO CI gate at all (not this guard,
+      # not the required web-tests gate). A PR touching only HistoryBatchChangesList.vue previously
+      # triggered no web-guard and ran no specs.
+      - 'apps/web/src/multitable/components/HistoryBatchChangesList.vue'
+      - 'apps/web/tests/multitable-history-center-inline-diff.spec.ts'
+      - 'apps/web/tests/multitable-history-center-ai-shortcut-label.spec.ts'
+      - 'apps/web/tests/multitable-history-center-pinned-batch-deeplink.spec.ts'
+      # Owner P1 (R9): the layer-2∩layer-3 field-scope wiring spec is the real-workbench golden
+      # for #4007/#4018 — it must trigger this guard and run in its vitest filter (and in the
+      # always-on run-required-web-tests.sh), otherwise those security goldens run in NO gate.
+      - 'apps/web/tests/multitable-workbench-history-field-scope-wiring.spec.ts'
       - 'apps/web/src/multitable/components/MetaKanbanView.vue'
       - 'apps/web/src/multitable/components/MetaViewManager.vue'
       - 'apps/web/src/multitable/utils/view-config.ts'
@@ -98,6 +129,17 @@ on:
       - 'apps/web/tests/statusTag.spec.ts'
       - 'apps/web/tests/AutomationExecutionsView.spec.ts'
       - 'apps/web/tests/parallelBranchRunsView.spec.ts'
+      # UI-P2-1c MtButton/MtPopover migration proof-specs (all *-migration.spec.ts) — fire the guard when
+      # any of them changes so they actually carry CI weight (they were landing un-gated; #3769 failure mode).
+      - 'apps/web/tests/*-migration.spec.ts'
+      # Formula catalog parity (12 scalar functions): web-side intent specs (12-present /
+      # COUNTIF-absent, 1a scalar-set, i18n labels, editor diagnostics incl. arity table)
+      - 'apps/web/src/multitable/utils/formula-docs.ts'
+      - 'apps/web/src/multitable/utils/meta-formula-labels.ts'
+      - 'apps/web/tests/multitable-formula-catalog-parity-12.spec.ts'
+      - 'apps/web/tests/multitable-formula-catalog-1a.spec.ts'
+      - 'apps/web/tests/meta-formula-labels.spec.ts'
+      - 'apps/web/tests/multitable-formula-editor.spec.ts'
       - '.github/workflows/multitable-web-guard.yml'
   push:
     branches: [main]
@@ -109,6 +151,14 @@ on:
       - 'apps/web/src/multitable/utils/personal-config-write.ts'
       - 'apps/web/tests/multitable-reorder-view-fields.spec.ts'
       - 'apps/web/tests/multitable-grid-personal-additive-write.spec.ts'
+      # G-B2-25: the per-action collapse-card one-line summary (its matrix spec is the only thing
+      # pinning "honest placeholder, never fabricated" behavior across every action type).
+      - 'apps/web/src/multitable/automationActionSummary.ts'
+      - 'apps/web/tests/automation-action-summary.spec.ts'
+      # G-B2-27: create_record's target-sheet dropdown (listSheets() → options, pure mapping) plus
+      # its mount-level wiring/fallback tests.
+      - 'apps/web/src/multitable/utils/automation-target-sheet-options.ts'
+      - 'apps/web/tests/automation-target-sheet-options.spec.ts'
       - 'apps/web/src/multitable/utils/field-config.ts'
       - 'apps/web/src/multitable/utils/meta-manager-labels.ts'
       - 'apps/web/src/multitable/components/MetaFieldManager.vue'
@@ -120,6 +170,20 @@ on:
       - 'apps/web/src/multitable/components/HistoryCenterModal.vue'
       - 'apps/web/src/multitable/composables/useHistoryCenter.ts'
       - 'apps/web/tests/multitable-history-fe.spec.ts'
+      # L1c CI-residual fix: HistoryBatchChangesList.vue is a child of HistoryCenterModal.vue
+      # (mounted for both the pinned-detail and normal-detail change lists) but had NO path
+      # trigger of its own, and its only real behavioral coverage — the 3 specs below, which mount
+      # the real component tree via HistoryCenterModal — ran in NO CI gate at all (not this guard,
+      # not the required web-tests gate). A PR touching only HistoryBatchChangesList.vue previously
+      # triggered no web-guard and ran no specs.
+      - 'apps/web/src/multitable/components/HistoryBatchChangesList.vue'
+      - 'apps/web/tests/multitable-history-center-inline-diff.spec.ts'
+      - 'apps/web/tests/multitable-history-center-ai-shortcut-label.spec.ts'
+      - 'apps/web/tests/multitable-history-center-pinned-batch-deeplink.spec.ts'
+      # Owner P1 (R9): the layer-2∩layer-3 field-scope wiring spec is the real-workbench golden
+      # for #4007/#4018 — it must trigger this guard and run in its vitest filter (and in the
+      # always-on run-required-web-tests.sh), otherwise those security goldens run in NO gate.
+      - 'apps/web/tests/multitable-workbench-history-field-scope-wiring.spec.ts'
       - 'apps/web/src/multitable/components/MetaKanbanView.vue'
       - 'apps/web/src/multitable/components/MetaViewManager.vue'
       - 'apps/web/src/multitable/utils/view-config.ts'
@@ -184,6 +248,17 @@ on:
       - 'apps/web/tests/statusTag.spec.ts'
       - 'apps/web/tests/AutomationExecutionsView.spec.ts'
       - 'apps/web/tests/parallelBranchRunsView.spec.ts'
+      # UI-P2-1c MtButton/MtPopover migration proof-specs (all *-migration.spec.ts) — fire the guard when
+      # any of them changes so they actually carry CI weight (they were landing un-gated; #3769 failure mode).
+      - 'apps/web/tests/*-migration.spec.ts'
+      # Formula catalog parity (12 scalar functions): web-side intent specs (12-present /
+      # COUNTIF-absent, 1a scalar-set, i18n labels, editor diagnostics incl. arity table)
+      - 'apps/web/src/multitable/utils/formula-docs.ts'
+      - 'apps/web/src/multitable/utils/meta-formula-labels.ts'
+      - 'apps/web/tests/multitable-formula-catalog-parity-12.spec.ts'
+      - 'apps/web/tests/multitable-formula-catalog-1a.spec.ts'
+      - 'apps/web/tests/meta-formula-labels.spec.ts'
+      - 'apps/web/tests/multitable-formula-editor.spec.ts'
       - '.github/workflows/multitable-web-guard.yml'
 
 jobs:
@@ -243,4 +318,7 @@ jobs:
         # UF-3: status-color convergence — statusTag (StatusTag.vue + statusDomains.ts unit/mount
         # coverage), AutomationExecutionsView + parallelBranchRunsView (automationRun domain status
         # badges, run + step level, including the parallel-branch readability regression).
-        run: pnpm --filter @metasheet/web exec vitest run multitable-rollup-aggregation-fe multitable-trash-fe multitable-history-fe multitable-kanban-view multitable-field-manager multitable-sheet-cursor-state multitable-record-permission-manager multitable-sheet-permission-manager multitable-yjs-scalar-cell multitable-yjs-cell-editor multitable-conditional-rule multitable-person-picker multitable-cell-renderer-person-inactive meta-toolbar-filter-builder meta-filter-group meta-grid-table multitable-grid multitable-reorder-view-fields multitable-restore-preview-dialog multitable-restore-batch-dialog multitable-config-history-modal multitable-workbench-restore-wiring multitable-config-revert-refresh multitable-reset-confirm-dialog multitable-reset-tsource-picker multitable-field-visibility multitable-required-if multitable-conditional-formatting statusTag AutomationExecutionsView parallelBranchRunsView --reporter=dot
+        # L1c: HistoryBatchChangesList.vue's only behavioral coverage — 3 specs that mount the real
+        # component tree via HistoryCenterModal (inline-diff, ai-shortcut-label, pinned-batch-deeplink)
+        # — were exercised in NO CI gate; added alongside their new path triggers above.
+        run: pnpm --filter @metasheet/web exec vitest run automation-action-summary automation-recipes automation-save-block-reasons automation-target-sheet-options AutomationExecutionsView meta-automation-labels meta-filter-group meta-formula-labels meta-grid-table meta-toolbar-filter-builder migration multitable-automation-manager multitable-automation-rule-editor multitable-cell-renderer-person-inactive multitable-conditional-formatting multitable-conditional-rule multitable-config-history-modal multitable-config-revert-refresh multitable-field-manager multitable-field-visibility multitable-formula-catalog-1a multitable-formula-catalog-parity multitable-formula-editor multitable-grid multitable-history-center-ai-shortcut-label multitable-history-center-inline-diff multitable-history-center-pinned-batch-deeplink multitable-history-fe multitable-kanban-view multitable-person-picker multitable-record-permission-manager multitable-reorder-view-fields multitable-required-if multitable-reset-confirm-dialog multitable-reset-tsource-picker multitable-restore-batch-dialog multitable-restore-preview-dialog multitable-rollup-aggregation-fe multitable-sheet-cursor-state multitable-sheet-permission-manager multitable-trash-fe multitable-workbench-history-field-scope-wiring multitable-workbench-restore-wiring multitable-yjs-cell-editor multitable-yjs-scalar-cell parallelBranchRunsView statusTag --reporter=dot

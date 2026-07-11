@@ -2,6 +2,8 @@ name: Plugin System Tests
 
 on:
   workflow_dispatch:
+  merge_group:
+    types: [checks_requested]
   push:
     branches: [main, develop]
     paths:
@@ -68,6 +70,12 @@ jobs:
       - name: Run K3 WISE offline PoC readiness smoke
         run: |
           pnpm run verify:integration-k3wise:poc
+
+      - name: Run on-prem package apply and archive contract tests
+        run: |
+          node --test \
+            scripts/ops/onprem-windows-system-hardening.test.mjs \
+            scripts/ops/multitable-onprem-package-no-node-modules.test.mjs
 
   test:
     runs-on: ubuntu-latest
@@ -144,6 +152,18 @@ jobs:
         run: |
           pnpm --filter @metasheet/core-backend exec vitest run tests/unit/richtext-longtext-sanitizer.test.ts --reporter=dot
 
+      - name: Run F3 storage-integrity canaries
+        # Security-critical (F3 path-traversal + storage integrity): the LocalStorageProvider
+        # server-key/containment/index-free read, the controlled url-fallback accept/reject, and the
+        # three-state ACL are the authoritative defenses. Run them explicitly (fail-fast) so they stay
+        # gated even if the default vitest discovery globs ever change.
+        run: |
+          pnpm --filter @metasheet/core-backend exec vitest run \
+            tests/unit/storageServiceLocalProvider.test.ts \
+            tests/unit/filesStorageKey.test.ts \
+            tests/unit/filesAcl.test.ts \
+            --reporter=dot
+
       - name: Start Postgres
         uses: ankane/setup-postgres@v1
         with:
@@ -168,7 +188,7 @@ jobs:
           : "${DATABASE_URL:?DATABASE_URL is required for after-sales integration}"
           pnpm --filter @metasheet/core-backend exec vitest --config vitest.integration.config.ts run tests/integration/after-sales-plugin.install.test.ts --reporter=dot
 
-      - name: Run multitable real-DB integration (permission golden + view-aggregate + formula dry-run + read-path field mask + foreign-field taint mask + dashboard authz + realtime invalidation + automation retry provenance + cross-base governed automation writes + webhook outbound chain + AI shortcut run + AI ledger retention sweep + record-level version restore + rollup countall non-gating characterization + rollup filter condition fail-closed + rollup string/boolean reducers + dashboard non-numeric rollup rejection + dashboard-level filtering (narrow/AND/row-deny/no-side-channel) + record recycle-bin delete/restore + field type-retype revert schema-only scalar-gated + cross-base relation-agg authorized-reader read gate + dangling-link repair-on-read + sheet-delete cascade + oapi-4a per-base/sheet scope guard + oapi-4a REST token-create scope + mirror-read-only enumeration hardening + cross-base editable-mirror write-through op + cross-base mirror write-through Decision-F concurrency + personal-views slice-1 actor-scoped isolation + W1-2 permission-matrix B1 side-door goldens (Yjs bridge flush actor-tier/lock/row-deny/rule-deny, OAPI token write re-gate parity, base-write/sheet-write non-intersection) + W1-2 permission-matrix B2 oracle/no-leak goldens (G-5 row-level-read-deny zero-presence on export + history, G-4 OAPI token-vs-interactive read-mask parity across the 5 records:read routes) + W1-2 permission-matrix B3 management-surface 403 matrix (field/view CRUD, sheet-permission grant, sheet_config flag + conditional-rules, across A3/A4/A5/A6 actor tiers) + W1-2 permission-matrix B4 G-7 export⊆read differential (field-mask/row-deny/taint modifier combinations, same actor) + W1-1 formula freshness goldens (Yjs-bridge formula recompute GF1-GF4/GF9 + expression-change bulk recompute GF5-GF8/GF12) + W1-3 per-subject field-write gate goldens (Yjs bridge flush GW1-GW3 headline/positive-control/atomic-mixed, single-record PATCH GW4-GW6 mst_-token/session-JWT dual-caller + regression spot-check) + W3-5 batchId===null default (record-service.ts single-record self-referential batch_id vs record-write-service.ts bulk fresh-id control) + W1-2 permission-matrix B4 G-8 comments sheet-visibility gate (comments:read/write actor 403'd on a no-read sheet across list/summary/presence read + create write + no identifier/content leak) + LOCK-12 partial-success bulk PATCH shared-batch grouping + 4c-2 forward tombstone-capture flag-off/on/cap goldens (field-delete value+link+auto-number capture, record-delete inbound-only capture, R1 undelete rehydration + masking parity, retention keep-days sweep))
+      - name: Run multitable real-DB integration (permission golden + view-aggregate + formula dry-run + read-path field mask + foreign-field taint mask + dashboard authz + realtime invalidation + automation retry provenance + cross-base governed automation writes + webhook outbound chain + AI shortcut run + AI ledger retention sweep + record-level version restore + rollup countall non-gating characterization + rollup filter condition fail-closed + rollup string/boolean reducers + dashboard non-numeric rollup rejection + dashboard-level filtering (narrow/AND/row-deny/no-side-channel) + record recycle-bin delete/restore + field type-retype revert schema-only scalar-gated + cross-base relation-agg authorized-reader read gate + dangling-link repair-on-read + sheet-delete cascade + oapi-4a per-base/sheet scope guard + oapi-4a REST token-create scope + mirror-read-only enumeration hardening + cross-base editable-mirror write-through op + cross-base mirror write-through Decision-F concurrency + personal-views slice-1 actor-scoped isolation + W1-2 permission-matrix B1 side-door goldens (Yjs bridge flush actor-tier/lock/row-deny/rule-deny, OAPI token write re-gate parity, base-write/sheet-write non-intersection) + W1-2 permission-matrix B2 oracle/no-leak goldens (G-5 row-level-read-deny zero-presence on export + history, G-4 OAPI token-vs-interactive read-mask parity across the 5 records:read routes) + W1-2 permission-matrix B3 management-surface 403 matrix (field/view CRUD, sheet-permission grant, sheet_config flag + conditional-rules, across A3/A4/A5/A6 actor tiers) + W1-2 permission-matrix B4 G-7 export⊆read differential (field-mask/row-deny/taint modifier combinations, same actor) + W1-1 formula freshness goldens (Yjs-bridge formula recompute GF1-GF4/GF9 + expression-change bulk recompute GF5-GF8/GF12) + W1-3 per-subject field-write gate goldens (Yjs bridge flush GW1-GW3 headline/positive-control/atomic-mixed, single-record PATCH GW4-GW6 mst_-token/session-JWT dual-caller + regression spot-check) + W3-5 batchId===null default (record-service.ts single-record self-referential batch_id vs record-write-service.ts bulk fresh-id control) + W1-2 permission-matrix B4 G-8 comments sheet-visibility gate (comments:read/write actor 403'd on a no-read sheet across list/summary/presence read + create write + no identifier/content leak) + LOCK-12 partial-success bulk PATCH shared-batch grouping + 4c-2 forward tombstone-capture flag-off/on/cap goldens (field-delete value+link+auto-number capture, record-delete inbound-only capture, R1 undelete rehydration + masking parity, retention keep-days sweep) + D-6 config-restore-execute metaFieldCache invalidation golden + F2 attachment-download read-gate row-deny/field-mask security regression guard)
         if: matrix.node-version == '20.x'
         env:
           DATABASE_URL: postgresql://postgres@localhost:5432/metasheet_test
@@ -221,14 +241,21 @@ jobs:
             tests/integration/multitable-permmatrix-b4-g8-comments-visibility-realdb.test.ts \
             tests/integration/multitable-record-history-field-mask.test.ts \
             tests/integration/multitable-record-restore.test.ts \
+            tests/integration/multitable-restore-backreference-realdb.test.ts \
             tests/integration/multitable-record-recycle-bin.test.ts \
             tests/integration/multitable-history-events-realdb.test.ts \
+            tests/integration/multitable-history-alltables-fieldnames-realdb.test.ts \
             tests/integration/multitable-history-events-hasmore-realdb.test.ts \
             tests/integration/multitable-history-audit-grant-realdb.test.ts \
             tests/integration/multitable-history-audit-reveal-realdb.test.ts \
             tests/integration/multitable-history-audit-log-realdb.test.ts \
             tests/integration/multitable-history-audit-reveal-taint-realdb.test.ts \
             tests/integration/multitable-record-reconstructor-realdb.test.ts \
+            tests/integration/multitable-d1-delete-revision-parity-realdb.test.ts \
+            tests/integration/multitable-d1-delete-revisions-realdb.test.ts \
+            tests/integration/multitable-undelete-inbound-replay-realdb.test.ts \
+            tests/integration/multitable-undelete-pit-inbound-replay-realdb.test.ts \
+            tests/integration/multitable-undelete-inbound-resurrect-realdb.test.ts \
             tests/integration/multitable-pit-view-realdb.test.ts \
             tests/integration/multitable-restore-preview-realdb.test.ts \
             tests/integration/multitable-restore-execute-realdb.test.ts \
@@ -240,6 +267,8 @@ jobs:
             tests/integration/multitable-config-restore-realdb.test.ts \
             tests/integration/multitable-sheet-config-revert-realdb.test.ts \
             tests/integration/multitable-field-retype-revert-realdb.test.ts \
+            tests/integration/multitable-lossy-retype-revert-realdb.test.ts \
+            tests/integration/multitable-config-restore-field-cache-invalidate-realdb.test.ts \
             tests/integration/multitable-uncreate-config-realdb.test.ts \
             tests/integration/multitable-undelete-config-realdb.test.ts \
             tests/integration/multitable-permission-revert-realdb.test.ts \
@@ -247,6 +276,7 @@ jobs:
             tests/integration/multitable-revert-pit-realdb.test.ts \
             tests/integration/multitable-undelete-pit-realdb.test.ts \
             tests/integration/multitable-reset-pit-realdb.test.ts \
+            tests/integration/multitable-reset-pit-inbound-capture-realdb.test.ts \
             tests/integration/multitable-config-revision-retention-realdb.test.ts \
             tests/integration/multitable-config-history-api-realdb.test.ts \
             tests/integration/multitable-config-history-view-redaction-realdb.test.ts \
@@ -319,7 +349,9 @@ jobs:
             tests/integration/automation-approval-completed-trigger.test.ts \
             tests/integration/automation-approval-task-created-trigger.test.ts \
             tests/integration/automation-dingtalk-approval-card-action.test.ts \
+            tests/integration/dingtalk-person-message-integration-scoping.db.test.ts \
             tests/integration/approval-card-delivery-wrapper.db.test.ts \
+            tests/integration/dingtalk-approval-card-callback.db.test.ts \
             tests/integration/approval-projection-visibility.db.test.ts \
             tests/integration/approval-projection-participant-read.db.test.ts \
             tests/integration/approval-route-preview-substrate.db.test.ts \
@@ -334,6 +366,7 @@ jobs:
             tests/integration/multitable-ai-bulk-job.test.ts \
             tests/integration/multitable-ai-ledger-retention.test.ts \
             tests/integration/multitable-ai-ledger-concurrency.test.ts \
+            tests/integration/dingtalk-group-delivery-retention.db.test.ts \
             tests/integration/multitable-ai-suggest-formula.test.ts \
             tests/integration/data-source-c3-keyset-realdb.test.ts \
             tests/integration/data-source-test-ephemeral-realdb.test.ts \
@@ -345,9 +378,10 @@ jobs:
             tests/integration/multitable-tombstone-field-rehydrate-realdb.test.ts \
             tests/integration/multitable-tombstone-record-capture-realdb.test.ts \
             tests/integration/multitable-tombstone-retention-realdb.test.ts \
+            tests/integration/multitable-attachment-readgate.security.test.ts \
             --reporter=dot
 
-      - name: Run approval real-DB integration (directory endpoints + P1-C field redaction + P1-B add_sign/reduce_sign + direct_manager create/start + A/E/B/D/G cross-lane acceptance + dept_head sync-plumbing carry-forward + continuous_managers chain walk + common template presets)
+      - name: Run approval real-DB integration (directory endpoints + P1-C field redaction + P1-B add_sign/reduce_sign + direct_manager create/start + A/E/B/D/G cross-lane acceptance + dept_head sync-plumbing carry-forward + continuous_managers chain walk + common template presets + DT-OPS-01 deprovision selection goldens)
         # Lane A (directory endpoints) + Lane B (P1-C hidden field redaction) + Lane D (add_sign/reduce_sign). Wired as WHOLE FILE runs so the
         # gate is robust (a name filter that matches zero tests would exit green and hide
         # regressions). The file is describeIfDatabase-guarded + excluded from the no-DB
@@ -366,6 +400,7 @@ jobs:
             tests/integration/approval-postgate-acceptance.api.test.ts \
             tests/integration/dept-head-sync-plumbing.test.ts \
             tests/integration/approval-manager-chain.db.test.ts \
+            tests/integration/directory-sync-admission-orphan-guard.db.test.ts \
             tests/integration/approval-requester-department.db.test.ts \
             tests/integration/approval-requester-title.db.test.ts \
             tests/integration/approval-requester-role.db.test.ts \
@@ -384,7 +419,17 @@ jobs:
             tests/integration/approval-node-signature-policy.api.test.ts \
             tests/integration/dingtalk-approval-card-deliveries.db.test.ts \
             tests/integration/dingtalk-container-login.db.test.ts \
+            tests/integration/directory-admission-case-insensitive-uniqueness.db.test.ts \
+            tests/integration/directory-primary-department-write.db.test.ts \
+            tests/integration/directory-primary-department-backfill.db.test.ts \
+            tests/integration/directory-sync-preview-apply-parity.db.test.ts \
+            tests/integration/directory-sync-alert-coverage.db.test.ts \
+            tests/integration/directory-deprovision-selection.db.test.ts \
+            tests/integration/directory-sync-run-lease.db.test.ts \
+            tests/integration/directory-sync-orchestration.db.test.ts \
             tests/integration/attendance-csv-export-bom.test.ts \
+            tests/integration/attendance-notification-redelivery.db.test.ts \
+            tests/integration/attendance-notification-redelivery-route.db.test.ts \
             --reporter=dot
 
       - name: Run comment-reaction keystone (real wire, real PG)
@@ -461,6 +506,11 @@ jobs:
             tests/integration/attendance-expiry-service.test.ts \
             tests/integration/attendance-unscheduled-reminder.test.ts \
             tests/integration/attendance-outdoor-punch.test.ts \
+            tests/integration/attendance-files-acl.test.ts \
+            tests/integration/files-storage-key-migration.db.test.ts \
+            tests/integration/files-orphan-blob-retention.db.test.ts \
+            tests/integration/multitable-attachment-blob-purge.db.test.ts \
+            tests/integration/multitable-attachment-root-escape.db.test.ts \
             tests/integration/attendance-import-template-prefs.test.ts \
             tests/integration/attendance-notification-deliveries.test.ts \
             tests/integration/attendance-comp-time-expiry-reminder.test.ts \

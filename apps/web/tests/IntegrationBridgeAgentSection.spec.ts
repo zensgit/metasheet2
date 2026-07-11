@@ -1229,4 +1229,120 @@ describe('IntegrationBridgeAgentSection', () => {
       setLocale('en')
     }
   })
+
+  // --- BA-APPLY-3: post-apply auto re-probe confirmation (design-lock §7 terminal state, refs #3746).
+  // The FINAL rung. After an operator manually applies the exported checklist (form-A handoff), this
+  // card re-reads the connector via the SAME read-only object/schema probe and confirms the expected
+  // readonly objects/fields now appear. Read-only: no apply, no write, no start/stop, no credentials,
+  // no new fetch. Confirmation is DERIVED from the probe (expected-name ∈ probed names), never assumed.
+  it('BA-APPLY-3 re-probe confirm: an object present in the probe shows 已出现; a field absent from the probed schema shows 未出现; overall partial', async () => {
+    mockRoutes()
+    const root = mountSection([bridgeSystem()])
+    await flushUi()
+    // objects auto-load (material, bom); expand material so its schema (FItemID/FNumber/FName) is probed
+    q<HTMLButtonElement>(root, 'bridge-agent-object-schema-toggle-material').click()
+    await flushUi()
+    const objectInput = q<HTMLInputElement>(root, 'bridge-agent-suggestion-object-0')
+    objectInput.value = 'material'
+    objectInput.dispatchEvent(new Event('input'))
+    const fieldsInput = q<HTMLInputElement>(root, 'bridge-agent-suggestion-fields-0')
+    fieldsInput.value = 'FItemID, ghost_field'
+    fieldsInput.dispatchEvent(new Event('input'))
+    await flushUi()
+
+    q<HTMLButtonElement>(root, 'bridge-agent-reprobe-toggle').click()
+    await flushUi()
+
+    expect(q(root, 'bridge-agent-reprobe-status').getAttribute('data-status')).toBe('partial')
+    expect(q(root, 'bridge-agent-reprobe-object').getAttribute('data-object-present')).toBe('yes')
+    const fields = root.querySelectorAll('[data-testid="bridge-agent-reprobe-field"]')
+    expect(fields.length).toBe(2)
+    const present = Array.from(fields).find((f) => f.textContent?.includes('FItemID'))!
+    const absent = Array.from(fields).find((f) => f.textContent?.includes('ghost_field'))!
+    expect(present.getAttribute('data-field-present')).toBe('yes')
+    expect(absent.getAttribute('data-field-present')).toBe('no')
+  })
+
+  it('BA-APPLY-3 re-probe confirm: an expected object NOT in the probe reports 未生效 (absent) — derived from the probe, never assumed applied', async () => {
+    mockRoutes()
+    const root = mountSection([bridgeSystem()])
+    await flushUi()
+    const objectInput = q<HTMLInputElement>(root, 'bridge-agent-suggestion-object-0')
+    objectInput.value = 'ghost_object' // absent from OBJECTS_PAYLOAD (material, bom)
+    objectInput.dispatchEvent(new Event('input'))
+    await flushUi()
+
+    q<HTMLButtonElement>(root, 'bridge-agent-reprobe-toggle').click()
+    await flushUi()
+
+    expect(q(root, 'bridge-agent-reprobe-status').getAttribute('data-status')).toBe('absent')
+    expect(q(root, 'bridge-agent-reprobe-object').getAttribute('data-object-present')).toBe('no')
+  })
+
+  it('BA-APPLY-3 re-probe confirm: renders object/field names + present/absent only — no probe-payload SENTINEL value leaks', async () => {
+    mockRoutes()
+    const root = mountSection([bridgeSystem()])
+    await flushUi()
+    q<HTMLButtonElement>(root, 'bridge-agent-object-schema-toggle-material').click()
+    await flushUi()
+    const objectInput = q<HTMLInputElement>(root, 'bridge-agent-suggestion-object-0')
+    objectInput.value = 'material'
+    objectInput.dispatchEvent(new Event('input'))
+    const fieldsInput = q<HTMLInputElement>(root, 'bridge-agent-suggestion-fields-0')
+    fieldsInput.value = 'FItemID'
+    fieldsInput.dispatchEvent(new Event('input'))
+    await flushUi()
+
+    q<HTMLButtonElement>(root, 'bridge-agent-reprobe-toggle').click()
+    await flushUi()
+
+    const output = q(root, 'bridge-agent-reprobe-output')
+    expect(output.textContent).toContain('material')
+    expect(output.textContent).toContain('FItemID')
+    expect(output.innerHTML).not.toContain(SENTINEL.objectExtra)
+    expect(output.innerHTML).not.toContain(SENTINEL.schemaExtra)
+  })
+
+  it('BA-APPLY-3 re-probe confirm: pure client-side read of already-probed state — issues no apply/list/write/start-stop route and the confirm card exposes no action button', async () => {
+    mockRoutes()
+    const root = mountSection([bridgeSystem()])
+    await flushUi()
+    const objectInput = q<HTMLInputElement>(root, 'bridge-agent-suggestion-object-0')
+    objectInput.value = 'material'
+    objectInput.dispatchEvent(new Event('input'))
+    await flushUi()
+
+    apiFetchMock.mockClear()
+    q<HTMLButtonElement>(root, 'bridge-agent-reprobe-toggle').click()
+    await flushUi()
+
+    const urls = apiFetchMock.mock.calls.map((call) => String(call[0]))
+    expect(urls.some((u) => /apply|checklist|write|start|stop|config/i.test(u))).toBe(false)
+    const output = q(root, 'bridge-agent-reprobe-output')
+    expect(output.querySelectorAll('button, input[type="button"], input[type="submit"]').length).toBe(0)
+  })
+
+  it('BA-APPLY-3 re-probe confirm: zh-CN renders Chinese apply-confirmation labels', async () => {
+    const { setLocale } = useLocale()
+    setLocale('zh-CN')
+    try {
+      mockRoutes()
+      const root = mountSection([bridgeSystem()])
+      await flushUi()
+      const objectInput = q<HTMLInputElement>(root, 'bridge-agent-suggestion-object-0')
+      objectInput.value = 'ghost_object'
+      objectInput.dispatchEvent(new Event('input'))
+      await flushUi()
+
+      const toggle = q<HTMLButtonElement>(root, 'bridge-agent-reprobe-toggle')
+      expect(toggle.textContent).toContain('复探测确认')
+      toggle.click()
+      await flushUi()
+
+      expect(q(root, 'bridge-agent-reprobe-status').textContent).toContain('未生效')
+      expect(q(root, 'bridge-agent-reprobe-object').textContent).toContain('未出现')
+    } finally {
+      setLocale('en')
+    }
+  })
 })

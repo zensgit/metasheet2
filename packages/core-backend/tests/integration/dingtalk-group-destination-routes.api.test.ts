@@ -212,6 +212,47 @@ describe('DingTalk group destination routes', () => {
     expect(response.body.data.destinations.map((item: { id: string }) => item.id)).toEqual(['dt_private', 'dt_org_1'])
   })
 
+  it(
+    'DT-HARDEN-03 P3: responds 200 with a corrupt row flagged instead of hanging when one ' +
+    'destination has undecryptable credentials',
+    async () => {
+      // Mirrors what DingTalkGroupDestinationService.listDestinations now returns for a row
+      // whose ciphertext fails to decrypt (wrong-key backfill / key rotation / corruption):
+      // rowToDestination flags it rather than throwing, so this shape reaching the route is
+      // the real contract, not a hypothetical. Before the P3 fix the route had no try/catch
+      // and a throwing decrypt inside Array.map hung the response entirely — this proves the
+      // route still answers, the corrupt row is flagged, and the good row is untouched.
+      const { app, service } = await createApp({
+        serviceOverrides: {
+          listDestinations: vi.fn(async () => [
+            makeDestination({ id: 'dt_good' }),
+            makeDestination({
+              id: 'dt_corrupt',
+              webhookUrl: '',
+              secret: undefined,
+              credentialUnreadable: true,
+            }),
+          ]),
+        },
+      })
+
+      const response = await request(app)
+        .get('/api/multitable/dingtalk-groups')
+        .query({ sheetId: SHEET_ID })
+        .expect(200)
+
+      expect(service.listDestinations).toHaveBeenCalled()
+      const byId = Object.fromEntries(
+        (response.body.data.destinations as Array<Record<string, unknown>>).map((d) => [d.id, d]),
+      )
+      expect(byId.dt_good.credentialUnreadable).toBeUndefined()
+      expect(byId.dt_good.webhookUrl).toContain('access_token=***')
+      expect(byId.dt_corrupt.credentialUnreadable).toBe(true)
+      expect(byId.dt_corrupt.hasSecret).toBe(false)
+      expect(String(byId.dt_corrupt.webhookUrl)).not.toContain('enc:')
+    },
+  )
+
   it.each([
     ['PATCH', `/api/multitable/dingtalk-groups/${DESTINATION_ID}`, 'updateDestination'],
     ['DELETE', `/api/multitable/dingtalk-groups/${DESTINATION_ID}`, 'deleteDestination'],

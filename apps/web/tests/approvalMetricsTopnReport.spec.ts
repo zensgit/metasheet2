@@ -297,6 +297,41 @@ describe('ApprovalMetricsView TopN report', () => {
     expect(container!.textContent).not.toContain('别的模板')
   })
 
+  // B3-03 (看板钻取): the 按模板汇总 rows drill into the approvals list carrying that row's OWN
+  // templateId (+ the shared date range, empty here since this harness's date-picker stub is
+  // inert). This spec hosts the test because its ElTable stub renders scoped-slot cell content —
+  // approvalMetricsView.spec.ts's count-only table stub cannot reach the per-row drill link.
+  it('B3-03: a 按模板汇总 row drill link routes to the approvals list scoped to that row\'s templateId', async () => {
+    fetchSummarySpy.mockResolvedValueOnce({
+      total: 4, approved: 2, rejected: 1, revoked: 0, returned: 0, running: 1,
+      avgDurationSeconds: 1800, p50DurationSeconds: 900, p95DurationSeconds: 7200,
+      slaBreachCount: 2, slaCandidateCount: 4, slaBreachRate: 0.5,
+      byTemplate: [{
+        templateId: 'tmpl-risk-1',
+        total: 4, approved: 2, rejected: 1, revoked: 0,
+        avgDurationSeconds: 1800, slaBreachRate: 0.5,
+      }],
+    })
+    const { default: ApprovalMetricsView } = await import('../src/views/approval/ApprovalMetricsView.vue')
+    app = createApp(ApprovalMetricsView)
+    app.component('ElAlert', ElAlert)
+    app.component('ElButton', ElButton)
+    app.component('ElCard', ElCard)
+    app.component('ElDatePicker', ElDatePicker)
+    app.component('ElLink', ElLink)
+    app.component('ElTable', ElTable)
+    app.component('ElTableColumn', ElTableColumn)
+    app.directive('loading', {})
+    app.mount(container!)
+    await flushPromises()
+
+    const drill = container!.querySelector<HTMLButtonElement>('[data-testid="metric-template-drill-tmpl-risk-1"]')
+    expect(drill, 'the per-template drill link renders in the 操作 column').toBeTruthy()
+    drill!.click()
+
+    expect(pushSpy).toHaveBeenCalledWith({ name: 'approval-list', query: { templateId: 'tmpl-risk-1' } })
+  })
+
   it('B2-04: a rejected listTemplates does not break the dashboard (non-fatal, falls back to raw ids)', async () => {
     listTemplatesSpy.mockRejectedValue(new Error('network error'))
     const { default: ApprovalMetricsView } = await import('../src/views/approval/ApprovalMetricsView.vue')
