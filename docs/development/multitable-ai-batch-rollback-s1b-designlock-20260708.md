@@ -1,6 +1,7 @@
 # Multitable AI-fields S1b — true history-batch rollback (restore-surface extension) — DESIGN LOCK
 
-状态：PROPOSED — 待 owner ratify
+状态：RATIFIED（owner directive 2026-07-11）
+> **RATIFIED — owner directive 2026-07-11**（批 12 把 merge-tree-clean 锁）。header 状态由 owner 决定翻转、Claude 机械执行(非自我批准)。锁内 per-tier owner 子决定(如变体/env-cap/storage opt-in)仍各自留待 owner。
 
 - **Slice**: S1b of the AI-fields governance arc (S1 provenance/grouping foundation ✅ → **🔒 S1b true history-batch rollback ← this lock** → S2 prompt-config-history UI → S3 staleness lineage → S4 cost visibility → S5 cleaning kinds).
 - **Baseline SHA**: every `file:line` below is verified at `origin/main` `0964908662eb2ea4d87d2d3153fd3c3f7ffaa057` (the merge commit of #3921). Re-verify before any implementation opt-in; `univer-meta.ts` line numbers in particular drift under the `[MUTEX:BE]` traffic (§7).
@@ -72,7 +73,7 @@ The revert must apply `pick(snapshot_{V−1}, member.changed_field_ids)` — res
 |---|---|---|---|
 | **#3922** 4c-1 lossy retype revert | OPEN | **Config/schema** revert of a field's type/property, lossy-value oracle. Edits `restore-preview-identity.ts`, `restore-caps.ts`, `lossy-retype-oracle.ts`, `univer-meta.ts` | S1b is a **record-data** revert (record values), not schema. Different revert axis. **File collision only on `restore-preview-identity.ts`** — both add claim types (§7) |
 | **#3921** 4c-2 destruction-path gap audit | **MERGED** (= this baseline HEAD) | The finding that automation/plugin **hard-delete** paths (`automation-executor.ts:2269`, `records.ts:565`) write no delete revision → PIT reconstruction (`record-reconstructor.ts:51`) lies a deleted record is alive | S1b inherits this as a **predecessor-destruction fork** (§4). Its owner menu item **D-1** (emit delete revisions) is a cross-lane fix S1b MUST NOT make |
-| **#3928** cross-page grouping data-model lock | OPEN (PROPOSED) | `view-groups` server-side grouping route + grid `[MUTEX]` on `MetaGridTable.vue` / `useMultitableGrid.ts` | Disjoint feature. Shares the backend hot file `univer-meta.ts` under `[MUTEX:BE]` (§7) |
+| **#3928** cross-page grouping data-model lock | OPEN (RATIFIED) | `view-groups` server-side grouping route + grid `[MUTEX]` on `MetaGridTable.vue` / `useMultitableGrid.ts` | Disjoint feature. Shares the backend hot file `univer-meta.ts` under `[MUTEX:BE]` (§7) |
 | **#3931** non-grid view materialization lock | OPEN (PROPOSED) | Defines the **`[MUTEX:BE]`** class over `univer-meta.ts` + `aggregation-helpers.ts` + `api/client.ts` (its §5.0-C) and `[MUTEX:WB]` over `MultitableWorkbench.vue` (its §5.0-B) | S1b's backend + wire rungs fall inside `[MUTEX:BE]`; its FE rung inside `[MUTEX:WB]`. S1b **honors** both, baseline-first (§7) |
 
 **Note on #3921's title.** The alleged defect ("only 1 of 4 delete paths covered; PIT pollution") is about **existence** reconstruction on the DELETE axis — it does **not** show predecessor reconstruction is broken. The predecessor unsoundness (§2) is a **different**, independently-found defect on the UPDATE axis. #3921's gap therefore does not trigger this task's STOP condition; it feeds one fork into §4.
