@@ -255,7 +255,9 @@ onMounted(() => {
    MultitableHomeView's `.multitable-home__favorite[aria-pressed='true']` — since MtButton has no
    selected/active variant and the active category still needs a persistent visual cue beyond the (behavioral,
    unchanged) label text. */
-.multitable-templates__category-btn--active {
+/* Specificity (0,3,0) so the active tint robustly beats MtButton's own `.mt-button--ghost` (0,2,0)
+   base rule rather than relying on stylesheet source order (gate P3-1). */
+.mt-button.multitable-templates__category-btn--active {
   border-color: #2563eb;
   background: #eff6ff;
   color: #1d4ed8;
