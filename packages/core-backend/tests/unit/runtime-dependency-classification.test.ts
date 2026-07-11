@@ -12,16 +12,18 @@ import { describe, expect, it } from 'vitest'
 // crashes on boot (uuid was declared only in core-backend devDependencies while WorkflowDesigner /
 // BPMNWorkflowEngine / DelayService import it at module load).
 //
-// This guard BFS-walks the startup graph from `src/index.ts` using the TypeScript AST (not regex):
-// each file is parsed and its top-level `ImportDeclaration` / `ExportDeclaration` (re-export) nodes
-// are read, skipping the type-only forms (`import type` / `export type`, erased at compile time).
-// Every external eager import must resolve to a prod dependency of core-backend or the workspace
-// root (hoisting reality). Lazy `require()` / `await import()` inside functions (the optional
-// adapters: mongodb, aws-sdk, @opentelemetry, …) are call expressions, NOT declarations, so the AST
-// never treats them as eager — the check is precise, not a blanket sweep. The AST handles
-// single-line, multi-line, default/named/namespace, side-effect, and barrel re-export forms
-// uniformly, so there is no line-based blind spot. A file-count floor + an explicit
-// multi-line-edge regression test guard against a traversal regression.
+// This guard BFS-walks the startup graph from `src/index.ts` using the TypeScript AST (not regex).
+// For each file it collects the HARD-eager module specifiers — the ones whose absence crashes
+// module evaluation under a `--prod` install:
+//   - `import … from`  /  side-effect `import '…'`  /  `export … from`  (declarations)
+//   - a TOP-LEVEL `require('…')` / `import('…')` NOT inside a `try` block
+// and skips the non-crashing forms structurally: type-only declarations; require()/import() inside a
+// function/class body (lazy); and a top-level require()/import() INSIDE a try block (the captured
+// optional-dependency pattern — @opentelemetry/api, js-yaml, express-validator each `try { require }
+// catch {}`). Every hard external must resolve to a prod dependency of core-backend or the workspace
+// root (hoisting reality). Multi-line, default/named/namespace, and barrel re-export forms are
+// handled uniformly by the AST (no line-based blind spot). A file-count floor, a multi-line-edge
+// regression test, and a synthetic eager-vs-lazy classification test guard against regressions.
 
 const CORE_BACKEND = path.resolve(__dirname, '..', '..')
 const REPO_ROOT = path.resolve(CORE_BACKEND, '..', '..')
@@ -64,12 +66,38 @@ function rootModule(spec: string): string {
   return spec.startsWith('@') ? spec.split('/').slice(0, 2).join('/') : spec.split('/')[0]
 }
 
-// Every static module specifier that makes a file part of the EAGER graph, read from the AST:
+// The HARD-eager module specifiers of a file — the ones whose absence crashes module evaluation:
 //   - `import … from '…'`   ImportDeclaration (default / named / namespace / side-effect)
 //   - `export … from '…'`   ExportDeclaration with a moduleSpecifier (barrel re-export)
-// skipping the type-only forms. `import(…)` / `require(…)` are CallExpressions, never Import/Export
-// Declarations, so they are structurally excluded — no eager/lazy heuristic needed.
-function staticSpecifiersOf(file: string): string[] {
+//   - a TOP-LEVEL `require('…')` / `import('…')` call NOT inside a try block — executed at module
+//     load, unguarded, so a missing module throws and the backend fails to boot.
+// Skipped (not hard): type-only forms; require()/import() inside a function/class body (lazy); a
+// top-level require()/import() INSIDE a try block (the "captured optional dependency" pattern — the
+// catch tolerates absence, e.g. @opentelemetry/api, js-yaml, express-validator). These distinctions
+// are read structurally from the AST (function boundaries, try blocks), not by heuristic.
+function isFunctionLikeBoundary(node: ts.Node): boolean {
+  return (
+    ts.isFunctionDeclaration(node) ||
+    ts.isFunctionExpression(node) ||
+    ts.isArrowFunction(node) ||
+    ts.isMethodDeclaration(node) ||
+    ts.isConstructorDeclaration(node) ||
+    ts.isGetAccessorDeclaration(node) ||
+    ts.isSetAccessorDeclaration(node)
+  )
+}
+
+function dynamicRequireSpecifier(node: ts.Node): string | null {
+  if (!ts.isCallExpression(node) || node.arguments.length === 0) return null
+  const callee = node.expression
+  const isRequire = ts.isIdentifier(callee) && callee.text === 'require'
+  const isDynamicImport = callee.kind === ts.SyntaxKind.ImportKeyword
+  if (!isRequire && !isDynamicImport) return null
+  const arg = node.arguments[0]
+  return ts.isStringLiteral(arg) ? arg.text : null
+}
+
+function hardSpecifiersOf(file: string): string[] {
   const source = ts.createSourceFile(
     file,
     readFileSync(file, 'utf8'),
@@ -78,16 +106,36 @@ function staticSpecifiersOf(file: string): string[] {
     file.endsWith('.tsx') ? ts.ScriptKind.TSX : ts.ScriptKind.TS,
   )
   const specs: string[] = []
+
+  // Top-level executable walk: descend through control flow, STOP at function/class boundaries
+  // (lazy), and treat requires inside a `try` block as captured-optional (skipped).
+  const walkTopLevel = (node: ts.Node, inTry: boolean): void => {
+    if (isFunctionLikeBoundary(node)) return
+    if (ts.isTryStatement(node)) {
+      // The try/catch/finally bodies are all the optional context — a require anywhere in them is
+      // gracefully guarded. (Anything in the enclosing scope stays hard.)
+      node.forEachChild((child) => walkTopLevel(child, true))
+      return
+    }
+    const spec = dynamicRequireSpecifier(node)
+    if (spec !== null && !inTry) specs.push(spec)
+    node.forEachChild((child) => walkTopLevel(child, inTry))
+  }
+
   for (const stmt of source.statements) {
     if (ts.isImportDeclaration(stmt)) {
       if (stmt.importClause?.isTypeOnly) continue // `import type …`
       if (ts.isStringLiteral(stmt.moduleSpecifier)) specs.push(stmt.moduleSpecifier.text)
-    } else if (ts.isExportDeclaration(stmt)) {
+      continue
+    }
+    if (ts.isExportDeclaration(stmt)) {
       if (stmt.isTypeOnly) continue // `export type … from …`
       if (stmt.moduleSpecifier && ts.isStringLiteral(stmt.moduleSpecifier)) {
         specs.push(stmt.moduleSpecifier.text)
       }
+      continue
     }
+    walkTopLevel(stmt, false)
   }
   return specs
 }
@@ -105,7 +153,7 @@ function walkStartupGraph(): {
     const file = queue.shift()!
     if (visited.has(file) || !existsSync(file)) continue
     visited.add(file)
-    for (const spec of staticSpecifiersOf(file)) {
+    for (const spec of hardSpecifiersOf(file)) {
       if (spec.startsWith('.')) {
         const resolved = resolveRelative(file, spec)
         if (resolved) queue.push(resolved)
@@ -148,6 +196,35 @@ describe('runtime dependency classification (production-install startup contract
       visited.has(target as string),
       'a module reachable only via a multi-line import edge must be traversed',
     ).toBe(true)
+  })
+
+  it('classifies eager vs lazy specifiers structurally (#4126 review: top-level require/import gap)', () => {
+    const os = require('os') as typeof import('os')
+    const fs = require('fs') as typeof import('fs')
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'metasheet2-hardspec-'))
+    const file = path.join(dir, 'sample.ts')
+    fs.writeFileSync(
+      file,
+      [
+        `import staticDefault from 'eager-static'`,
+        `import type { T } from 'type-only-erased'`,
+        `export { x } from 'eager-reexport'`,
+        `const a = require('eager-toplevel-require')`,
+        `void import('eager-toplevel-import')`,
+        `let opt; try { opt = require('optional-in-try') } catch { opt = null }`,
+        `function later() { const b = require('lazy-in-function'); return b }`,
+        `class C { m() { return require('lazy-in-method') } }`,
+      ].join('\n'),
+    )
+    const specs = hardSpecifiersOf(file)
+    expect(specs.sort()).toEqual(
+      ['eager-static', 'eager-reexport', 'eager-toplevel-require', 'eager-toplevel-import'].sort(),
+    )
+    // Explicitly: the type-only, try-captured, and in-function forms are NOT hard.
+    for (const notHard of ['type-only-erased', 'optional-in-try', 'lazy-in-function', 'lazy-in-method']) {
+      expect(specs).not.toContain(notHard)
+    }
+    fs.rmSync(dir, { recursive: true, force: true })
   })
 
   it('uuid specifically is a production dependency (corrective-6 regression lock)', () => {
