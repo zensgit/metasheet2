@@ -24,11 +24,22 @@
  *    would erase delivery-channel provenance the group-delivery precedent doesn't have to protect).
  *    Instead, rows still `card_state='sent'` past the window are moved to the already-existing
  *    `expired` terminal state (allowed by the original CHECK constraint — no migration needed).
- *    This can only ever move a row AWAY from `sent`: the WHERE clause requires `card_state='sent'`,
- *    so a swept row can never become actionable again (buildSummary()'s `actionable` requires
- *    card_state==='sent'; claimDingTalkApprovalCardDeliveryActed()'s claim UPDATE requires
- *    card_state='sent' too — both close on an `expired` row exactly like they do on `acted`/
- *    `superseded`/`revoked`). `task_id` and the idx_dacd_task_id trace index are never touched.
+ *    This can only ever move a row AWAY from `sent`: the WHERE clause requires `card_state='sent'`.
+ *    `task_id` and the idx_dacd_task_id trace index are never touched.
+ *
+ *    WHY A SWEPT ROW CANNOT APPROVE — cite the LIVE guard, not a dead one. An earlier revision of this
+ *    comment proved the invariant by pointing at `claimDingTalkApprovalCardDeliveryActed`'s
+ *    `WHERE card_state='sent'`. That helper is no longer on the production path at all, and — worse —
+ *    the wrapper's `card_state` pre-read that this comment leaned on ran OUTSIDE the engine's
+ *    transaction, so this sweep could and DID race it: the owner reproduced an `expired` card
+ *    completing an approval (P1, 2026-07-12). Reasoning from a comment is what let that ship.
+ *
+ *    The invariant is now enforced where it is actually decided: `ApprovalProductService.dispatchAction`
+ *    takes a ROW LOCK on the delivery inside its own transaction, gates on
+ *    (binding AND card_state='sent' AND send_status delivered), and claims the card `acted` ATOMICALLY
+ *    in that same transaction. So the two orderings are both safe — this sweep either wins the row lock
+ *    (dispatch then reads `expired` and refuses) or loses it (the card is already `acted`, and our
+ *    `WHERE card_state='sent'` no longer matches). Pinned by a real-DB interleaving golden, not by prose.
  *
  * GATING DEVIATION FROM THE GROUP-DELIVERY PRECEDENT (read this before changing the default):
  * the group sweep is enabled BY DEFAULT (opt OUT via DINGTALK_GROUP_DELIVERY_RETENTION_DISABLED=1),

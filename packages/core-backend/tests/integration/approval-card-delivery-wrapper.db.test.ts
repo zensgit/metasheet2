@@ -795,6 +795,83 @@ describeIfDatabase('A-4 card-delivery wrapper (real DB)', () => {
     expect((card.rows[0] as { card_state: string }).card_state).toBe('expired')
   })
 
+  // The in-txn guard's `send_status` conjunct had NO coverage: the adversarial review dropped it and all
+  // 53 card tests stayed green. The old goldens for it (dingtalk-approval-card-deliveries.db.test.ts) now
+  // exercise `claimDingTalkApprovalCardDeliveryActed` — a helper PRODUCTION NO LONGER CALLS, since the
+  // engine claims in-txn. And no wrapper test can reach the conjunct either, because the wrapper's
+  // `actionable` pre-read short-circuits pending/failed first.
+  //
+  // I am NOT deferring these on "the producer can't reach it, the pre-read covers it" — that is precisely
+  // the reasoning that walked the original TOCTOU past two reviewers and me. Drive dispatchAction DIRECTLY,
+  // bypassing the pre-read, and pin the LIVE guard.
+
+  test('owner-P1 (send_status): a `pending` card cannot approve via the in-txn guard — STALE, zero approvals (the pre-read is bypassed)', async () => {
+    const instanceId = await newInstance()
+    const e1 = await activeEpoch(instanceId, 'approval_1')
+    // Inserted but never marked sent → send_status='pending': no live button was ever produced.
+    const row = await insertDingTalkApprovalCardDelivery(q, {
+      instanceId, nodeKey: 'approval_1', recipientUserId: APPROVER, recipientDingTalkUserId: 'dd_p1_pending',
+      deliveryKind: 'interactive_card', entryEpoch: e1,
+    })
+
+    // RED-before (drop the send_status conjunct from the in-txn guard): this APPROVES an undelivered card.
+    await expect(
+      approvals.dispatchAction(
+        instanceId,
+        { action: 'approve', comment: '同意', channelOrigin: { channel: 'dingtalk_card', cardDeliveryId: row.id } },
+        { userId: APPROVER, userName: APPROVER, roles: [] },
+      ),
+    ).rejects.toMatchObject({ code: 'APPROVAL_CARD_DELIVERY_STALE', statusCode: 409 })
+
+    const approves = await q(`SELECT COUNT(*)::int AS c FROM approval_records WHERE instance_id = $1 AND action = 'approve'`, [instanceId])
+    expect((approves.rows[0] as { c: number }).c).toBe(0)
+  })
+
+  test('owner-P1 (send_status): a `failed` card cannot approve via the in-txn guard — STALE, zero approvals', async () => {
+    const instanceId = await newInstance()
+    const e1 = await activeEpoch(instanceId, 'approval_1')
+    const row = await insertDingTalkApprovalCardDelivery(q, {
+      instanceId, nodeKey: 'approval_1', recipientUserId: APPROVER, recipientDingTalkUserId: 'dd_p1_failed',
+      deliveryKind: 'interactive_card', entryEpoch: e1,
+    })
+    await markDingTalkApprovalCardDeliverySendFailed(q, row.id, 'redacted send failure')
+
+    await expect(
+      approvals.dispatchAction(
+        instanceId,
+        { action: 'approve', comment: '同意', channelOrigin: { channel: 'dingtalk_card', cardDeliveryId: row.id } },
+        { userId: APPROVER, userName: APPROVER, roles: [] },
+      ),
+    ).rejects.toMatchObject({ code: 'APPROVAL_CARD_DELIVERY_STALE', statusCode: 409 })
+
+    const approves = await q(`SELECT COUNT(*)::int AS c FROM approval_records WHERE instance_id = $1 AND action = 'approve'`, [instanceId])
+    expect((approves.rows[0] as { c: number }).c).toBe(0)
+  })
+
+  test('owner-P1 (send_status) POSITIVE CONTROL: an `outcome_unknown` card STILL approves and claims — the guard rejects the undelivered, not everyone (PR #4046 doctrine)', async () => {
+    // Load-bearing. Without it, the two rejections above would also pass if the conjunct were broken SHUT
+    // (rejecting every card), and #4046's deliberate posture — an outcome_unknown send MAY have been
+    // delivered, and a valid HMAC callback is itself proof of delivery — would regress silently.
+    const instanceId = await newInstance()
+    const e1 = await activeEpoch(instanceId, 'approval_1')
+    const row = await insertDingTalkApprovalCardDelivery(q, {
+      instanceId, nodeKey: 'approval_1', recipientUserId: APPROVER, recipientDingTalkUserId: 'dd_p1_unknown',
+      deliveryKind: 'interactive_card', entryEpoch: e1,
+    })
+    await markDingTalkApprovalCardDeliverySendOutcomeUnknown(q, row.id, 'transport outcome unknown')
+
+    await approvals.dispatchAction(
+      instanceId,
+      { action: 'approve', comment: '同意', channelOrigin: { channel: 'dingtalk_card', cardDeliveryId: row.id } },
+      { userId: APPROVER, userName: APPROVER, roles: [] },
+    )
+
+    const approves = await q(`SELECT COUNT(*)::int AS c FROM approval_records WHERE instance_id = $1 AND action = 'approve'`, [instanceId])
+    expect((approves.rows[0] as { c: number }).c).toBe(1)
+    const card = await q('SELECT card_state FROM dingtalk_approval_card_deliveries WHERE id = $1', [row.id])
+    expect((card.rows[0] as { card_state: string }).card_state).toBe('acted')
+  })
+
   test('owner-P1 (REVERSE ORDER): once the approval wins the row lock it claims the card `acted` in the SAME txn — a later sweep can no longer expire a card that already decided', async () => {
     // The other half of atomicity. If the claim were still a post-commit write, a sweep landing between
     // the engine commit and the claim would leave a decided approval on an `expired` card.

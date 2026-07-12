@@ -28,14 +28,12 @@ interface CronExpression {
 }
 
 /**
- * Roadmap §7.8: resolve a `SimpleCronExpression` timezone argument to the zoned-matching
- * path, or `null` for the FAST PATH that must stay byte-identical to every pre-§7.8 caller.
+ * Resolve a `SimpleCronExpression` timezone argument to the zoned-matching path, or `null` meaning
+ * REAL UTC. `null` covers: undefined, empty string, `'UTC'`, `'Etc/UTC'`, and an invalid IANA zone
+ * (never throws mid-match — this class is the RUNTIME; the fail-closed reject-on-save gate lives at
+ * the write boundary, `directory-sync-timezone.ts` / `admin-directory.ts`).
  *
- * `null` covers: undefined (the constructor's own `= 'UTC'` default never reaches here as
- * `undefined` — see below), empty string, `'UTC'`, and `'Etc/UTC'`. An invalid IANA zone also
- * resolves to `null` (never throws mid-match) — this class is the RUNTIME; the fail-closed
- * reject-on-save gate lives at the write boundary (`directory-sync-timezone.ts` /
- * `admin-directory.ts`), not here. Mirrors `automation-scheduler.ts`'s `resolveCronTimeZone`.
+ * `null` used to mean "fall through to the host's LOCAL clock". It no longer does — see `matchesUtc`.
  */
 function resolveZonedTimeZone(timezone: string | undefined): string | null {
   const tz = typeof timezone === 'string' ? timezone.trim() : ''
@@ -74,6 +72,9 @@ function matchesUtc(
  * 简单的 Cron 表达式解析器
  * 支持标准的 5 字段格式：分 时 日 月 周
  */
+/** One minute in absolute (epoch) milliseconds — the scan's step unit. */
+const MINUTE_MS = 60_000
+
 class SimpleCronExpression implements CronExpression {
   private minute: number[] = []
   private hour: number[] = []
@@ -82,10 +83,7 @@ class SimpleCronExpression implements CronExpression {
   private dayOfWeek: number[] = []
   private timezone: string
   private currentDate: Date
-  // Roadmap §7.8: resolved once at construction. `null` = the untouched local-getter fast
-  // path (`matches()` below is byte-identical to pre-§7.8 for every caller that omits
-  // `timezone` or passes 'UTC'/'Etc/UTC' — which is every caller today except a directory
-  // integration that has explicitly configured a non-UTC zone).
+  // Resolved once at construction. `null` = REAL UTC matching (NOT the host clock — that path is gone).
   private zonedTimeZone: string | null
 
   constructor(expression: string, timezone: string = 'UTC') {
@@ -140,32 +138,49 @@ class SimpleCronExpression implements CronExpression {
     return [value]
   }
 
+  /**
+   * The scan walks ABSOLUTE time (epoch ms), one minute at a time — NOT local wall-clock minutes.
+   *
+   * Owner review P2 (2026-07-12), second round: this used to step with `setMinutes(getMinutes() ± 1)`,
+   * which advances the LOCAL wall clock. On the HOST's own DST day that clock is not monotonic — it
+   * folds back an hour (fall-back) or jumps forward an hour (spring-forward) — so the scan either
+   * revisits the same absolute instants or SKIPS a whole hour of them. Real candidates were then never
+   * examined at all: with the host on `America/New_York`, a genuine 2026-11-01T06:30Z match was stepped
+   * straight over and `next()` returned the FOLLOWING DAY (and `prev()` the previous one).
+   *
+   * That bug is independent of the cron's own timezone — it is the ITERATION that was zone-sensitive,
+   * not the matching. Fixing `matches()` to real UTC (above) did not fix it, and the first round of
+   * tests could not see it because they ran under `Asia/Taipei`, which observes no DST. Epoch-ms
+   * stepping is monotonic by construction and immune to whatever the host clock does.
+   */
   next(): Date | null {
-    const nextDate = new Date(this.currentDate)
-    nextDate.setSeconds(0, 0) // 重置秒和毫秒
-    nextDate.setMinutes(nextDate.getMinutes() + 1) // 从下一分钟开始
+    const base = new Date(this.currentDate)
+    base.setSeconds(0, 0) // seconds/ms are offset-invariant — safe to zero on any host
+    let ms = base.getTime() + MINUTE_MS
 
     for (let attempts = 0; attempts < 366 * 24 * 60; attempts++) {
-      if (this.matches(nextDate)) {
-        this.currentDate = new Date(nextDate)
-        return new Date(nextDate)
+      const candidate = new Date(ms)
+      if (this.matches(candidate)) {
+        this.currentDate = new Date(ms)
+        return new Date(ms)
       }
-      nextDate.setMinutes(nextDate.getMinutes() + 1)
+      ms += MINUTE_MS
     }
 
     return null // 找不到匹配的时间
   }
 
   prev(): Date | null {
-    const prevDate = new Date(this.currentDate)
-    prevDate.setSeconds(0, 0)
-    prevDate.setMinutes(prevDate.getMinutes() - 1)
+    const base = new Date(this.currentDate)
+    base.setSeconds(0, 0)
+    let ms = base.getTime() - MINUTE_MS
 
     for (let attempts = 0; attempts < 366 * 24 * 60; attempts++) {
-      if (this.matches(prevDate)) {
-        return new Date(prevDate)
+      const candidate = new Date(ms)
+      if (this.matches(candidate)) {
+        return new Date(ms)
       }
-      prevDate.setMinutes(prevDate.getMinutes() - 1)
+      ms -= MINUTE_MS
     }
 
     return null

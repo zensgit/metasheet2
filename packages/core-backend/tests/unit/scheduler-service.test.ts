@@ -338,3 +338,58 @@ describe('SchedulerService P2: firing must not depend on the HOST timezone; DST 
     expect(e.next()?.toISOString()).toBe('2026-11-02T06:30:00.000Z') // straight to the next day
   })
 })
+
+// ─── owner review P2, SECOND round (2026-07-12) ──────────────────────────────────────────────────
+//
+// The first round's tests ran under Asia/Taipei — which observes NO DST — so they could not see this:
+// next()/prev() stepped the LOCAL wall clock (`setMinutes(getMinutes() ± 1)`). On the HOST's own DST
+// day that clock is not monotonic (it folds back / jumps forward an hour), so the scan revisited or
+// SKIPPED whole hours of absolute time and stepped straight over genuine matches. Fixing matches() to
+// real UTC did NOT fix this — the ITERATION was the zone-sensitive part. These run on a DST-OBSERVING
+// host on purpose.
+describe('SchedulerService P2 (round 2): the scan must walk ABSOLUTE time, on a DST-observing HOST', () => {
+  const originalTz = process.env.TZ
+
+  beforeEach(() => {
+    process.env.TZ = 'America/New_York' // fall-back 2026-11-01, spring-forward 2026-03-08
+    vi.useFakeTimers()
+  })
+
+  afterEach(() => {
+    vi.useRealTimers()
+    if (originalTz === undefined) delete process.env.TZ
+    else process.env.TZ = originalTz
+  })
+
+  it('next() does not SKIP a real UTC match across the host fall-back (it used to jump to the next day)', () => {
+    // 2026-11-01T06:30Z is a genuine match for "30 6 * * *" in UTC. With local-minute stepping on a
+    // New_York host, the fall-back fold stepped straight over it. RED-before: 2026-11-02T06:30:00.000Z.
+    vi.setSystemTime(new Date('2026-11-01T05:00:00.000Z'))
+    const e = new SimpleCronExpression('30 6 * * *', 'UTC')
+    expect(e.next()?.toISOString()).toBe('2026-11-01T06:30:00.000Z')
+  })
+
+  it('prev() does not SKIP a real UTC match across the host fall-back (it used to jump to the previous day)', () => {
+    // RED-before: 2026-10-31T06:30:00.000Z.
+    vi.setSystemTime(new Date('2026-11-01T08:00:00.000Z'))
+    const e = new SimpleCronExpression('30 6 * * *', 'UTC')
+    expect(e.prev()?.toISOString()).toBe('2026-11-01T06:30:00.000Z')
+  })
+
+  it('next() does not skip across the host SPRING-FORWARD either (the gap, not just the fold)', () => {
+    // 2026-03-08 is New_York's spring-forward day: local 02:00-03:00 does not exist. A UTC cron at
+    // 07:30Z lands inside that missing local hour — with local stepping it could be skipped entirely.
+    vi.setSystemTime(new Date('2026-03-08T06:00:00.000Z'))
+    const e = new SimpleCronExpression('30 7 * * *', 'UTC')
+    expect(e.next()?.toISOString()).toBe('2026-03-08T07:30:00.000Z')
+  })
+
+  it('a ZONED cron on a DST host still fires ONCE on the fall-back (single-fire survives the new stepping)', () => {
+    // Regression guard: absolute-time stepping now VISITS both 05:30Z and 06:30Z (it no longer skips
+    // them), so the fall-back dedup is what keeps this single-fire. Both mechanisms must hold together.
+    vi.setSystemTime(new Date('2026-11-01T04:00:00.000Z'))
+    const e = new SimpleCronExpression('30 1 * * *', 'America/New_York')
+    expect(e.next()?.toISOString()).toBe('2026-11-01T05:30:00.000Z') // FIRST occurrence
+    expect(e.next()?.toISOString()).toBe('2026-11-02T06:30:00.000Z') // the 06:30Z repeat is suppressed
+  })
+})
