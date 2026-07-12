@@ -20,13 +20,15 @@ P1-2 跨企业门（#4116）用「点击方企业」与「台账 `integration_id
 - 门会静默退化为只认 body `corpId`（不是「网关保证的权威锚点」，与设计意图不符）；
 - **若真实 callback body 顶层也没有 `corpId`，则每一次点击都会 fail-closed → 卡片「点了没反应」（dead-on-arrival）。**
 
-**✅ 工具已就绪（#4160）**：回调层现在对**每一次**到达跨企业门的 callback（**拒绝与成功都记**）落一条 values-free 记录：
+**✅ 工具已就绪（#4171）**：回调层现在对**每一次**到达跨企业门的 callback（**拒绝与成功都记**）落一条 values-free 记录：
 
 ```
 DingTalk interactive-card callback corp anchor
   deliveryId, headerEventCorpIdPresent: bool, bodyCorpIdPresent: bool
 ```
 **只有布尔值**——corpId 值/用户/表单/原始 payload 一律不入日志（有测试钉死）。
+
+**记录范围**：只有**到达跨企业门**的 callback 才有这条记录。更早就被拒的（`delivery_not_found` 台账查无此卡、`integration_unpinned` 台账未绑定企业）**不会**出现这一行——它们在门之前就 fail-closed 了。所以看不到记录时，先确认 `outcome` 是不是这两种，再怀疑 LOG_LEVEL。
 
 拒绝原因也拆开了，四者互不混淆：
 
@@ -38,6 +40,21 @@ DingTalk interactive-card callback corp anchor
 | `corp_mismatch` | **真跨企业点击**（门正常工作） | 这是门在挡攻击，符合预期 |
 
 > ⚠️ 从前这四种全折叠成 `corp_mismatch` 且**毫无日志**，所以「真实帧没有 corp 字段」和「真跨企业点击」长得一模一样——而这两者要求**相反**的处置。
+
+> ### 🚨 先做这一步：**证明探针是活的**（否则「什么都没看到」是二义的）
+>
+> 探针走 `logger.info`，而 `Logger` 在**构造时**读取 `LOG_LEVEL`（`core/logger.ts`：`level: process.env.LOG_LEVEL || 'info'`）。
+> **`LOG_LEVEL=warn` 或 `error` ⇒ 探针完全静默。**（`scripts/dev-optimized-start.sh` 就默认 `LOG_LEVEL=warn`。）
+>
+> 那样一来「日志里什么都没有」会同时对应两种**截然相反**的结论：
+> - 真实帧没有企业锚点（⇒ **关 flag**），或
+> - **只是日志级别把它吞了**（⇒ 什么都不该做，改配置重跑）。
+>
+> 这正是本 PR 要消灭的那种二义。所以：
+>
+> - [ ] 确认 UAT 机器 **`LOG_LEVEL=info`**（或 `debug`）。
+> - [ ] **先做一次「已知会到达跨企业门」的点击**（例如一次正常的受理人同意），确认日志里**看得到** `DingTalk interactive-card callback corp anchor` 这一行。
+> - [ ] **看不到 ⇒ 说明探针没生效（LOG_LEVEL/部署问题），不是「真实帧没有 corp 字段」。先修配置，再回来抓帧。**
 
 - [ ] **抓一帧真实的互动卡 callback frame**，从上面的日志读出：
       - [ ] `headerEventCorpIdPresent` = ?（header 里有没有 `eventCorpId`）

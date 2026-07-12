@@ -480,6 +480,14 @@ async function resolveDingTalkApprovalCardCallbackOutcome(
   // VALUES-FREE, hard rule: booleans and the delivery id ONLY. No corpId, no user id, no form values,
   // no raw payload — not here, not in any branch below. The delivery id is already the callback's public
   // outTrackId and is present in every existing outcome, so it introduces nothing new.
+  //
+  // LEVEL DEPENDENCY (review P3-1) — this is `info`, and `Logger` fixes its level AT CONSTRUCTION from
+  // LOG_LEVEL. On a `LOG_LEVEL=warn` box (which scripts/dev-optimized-start.sh sets) winston DROPS this
+  // record, and then "the log shows nothing" means BOTH "the frame carries no corp anchor → close the
+  // flag" AND "your log level ate it → do nothing" — the very ambiguity §0-a exists to destroy. The UAT
+  // runbook therefore requires LOG_LEVEL=info AND a self-check click that proves the probe is live
+  // before any silence is interpreted. Pinned by dingtalk-corp-anchor-log-emission.test.ts, which
+  // asserts the record reaches the TRANSPORT (a Logger.prototype spy cannot see a suppressed line).
   logger.info('DingTalk interactive-card callback corp anchor', {
     deliveryId: delivery.id,
     headerEventCorpIdPresent: anchor.headerPresent,
