@@ -5932,6 +5932,40 @@ class HttpError extends Error {
   }
 }
 
+// Attendance import upload path containment (post-closeout P3 defense-in-depth, 2026-07-11).
+// Output-side containment mirroring core StorageService.resolveWithinBase, layered behind the existing
+// isUuidLike(fileId) + sanitizeImportUploadOrgId(orgId) input gates: even if a future caller builds a path
+// without the uuid gate, an interpolated key that resolves outside the base throws instead of escaping the
+// upload root. Hardens both the upload endpoints and the cleanupExpiredImportUploads sweep (both delegate
+// to getImportUploadPaths). Module-scope + hoisted so the deletion/read call sites and the test seam share
+// one implementation.
+function resolveImportUploadWithinBase(baseDir, relativeKey) {
+  const base = path.resolve(baseDir)
+  const resolved = path.resolve(base, relativeKey)
+  if (resolved !== base && resolved.startsWith(base + path.sep)) return resolved
+  throw new HttpError(400, 'VALIDATION_ERROR', 'Import upload path resolves outside the base directory')
+}
+
+function getImportUploadBaseDir() {
+  return String(process.env.ATTENDANCE_IMPORT_UPLOAD_DIR || path.join(process.cwd(), 'uploads', 'attendance-import'))
+}
+
+function sanitizeImportUploadOrgId(orgId) {
+  const raw = typeof orgId === 'string' && orgId.trim() ? orgId.trim() : DEFAULT_ORG_ID
+  const safe = raw.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 64)
+  return safe || DEFAULT_ORG_ID
+}
+
+function getImportUploadPaths({ orgId, fileId }) {
+  const safeOrgId = sanitizeImportUploadOrgId(orgId)
+  const dir = resolveImportUploadWithinBase(getImportUploadBaseDir(), safeOrgId)
+  return {
+    dir,
+    csvPath: resolveImportUploadWithinBase(dir, `${fileId}.csv`),
+    metaPath: resolveImportUploadWithinBase(dir, `${fileId}.json`),
+  }
+}
+
 function formatZodValidationDetails(error) {
   const issues = Array.isArray(error?.issues) ? error.issues : []
   return issues.map((issue) => ({
@@ -20754,6 +20788,11 @@ module.exports = {
     collectRowUserIdentityValues,
     resolveRowUserId,
   },
+  __attendanceImportPathForTests: {
+    getImportUploadPaths,
+    resolveImportUploadWithinBase,
+    sanitizeImportUploadOrgId,
+  },
   __attendanceImportCsvHeaderForTests: {
     detectCsvHeaderIndex,
     detectCsvHeaderRowIndexFromFile,
@@ -22651,21 +22690,9 @@ module.exports = {
 		      return Math.max(1, Math.floor(raw))
 		    })()
 
-		    const sanitizeImportUploadOrgId = (orgId) => {
-		      const raw = typeof orgId === 'string' && orgId.trim() ? orgId.trim() : DEFAULT_ORG_ID
-		      const safe = raw.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 64)
-		      return safe || DEFAULT_ORG_ID
-		    }
-
-		    const getImportUploadPaths = ({ orgId, fileId }) => {
-		      const safeOrgId = sanitizeImportUploadOrgId(orgId)
-		      const dir = path.join(ATTENDANCE_IMPORT_UPLOAD_DIR, safeOrgId)
-		      return {
-		        dir,
-		        csvPath: path.join(dir, `${fileId}.csv`),
-		        metaPath: path.join(dir, `${fileId}.json`),
-		      }
-		    }
+		    // sanitizeImportUploadOrgId + getImportUploadPaths moved to module scope (import-path containment,
+		    // 2026-07-11): the module-scope getImportUploadPaths now routes every path through
+		    // resolveImportUploadWithinBase, so these call sites (and the test seam) share one contained impl.
 
 		    const isUuidLike = (value) => {
 		      if (typeof value !== 'string') return false
