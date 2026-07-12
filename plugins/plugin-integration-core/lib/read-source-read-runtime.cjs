@@ -147,11 +147,28 @@ function classifyContainerShape(value) {
 // never by source path (which names the external system's schema).
 function mapRecord(row, fieldMap, resolvedCounts) {
   const record = {}
+  const resolvedTargets = new Set()
   for (const entry of fieldMap) {
     const { resolved, value } = walkOwnPath(row, entry.source)
-    record[entry.target] = resolved ? value : null
-    if (resolvedCounts && resolved) {
-      resolvedCounts[entry.target] = (resolvedCounts[entry.target] || 0) + 1
+    if (resolved) {
+      record[entry.target] = value
+      resolvedTargets.add(entry.target)
+      continue
+    }
+    // An entry that resolves NOWHERE must not erase a value another entry already read. Assignment used to
+    // be unconditional, so a second entry on the same target overwrote a real value with null — the column
+    // then read as empty on every row while the source had a value all along. (The config validator now
+    // rejects duplicate targets outright; this keeps the projection itself from being a lossy write even if
+    // one ever reaches it.)
+    if (!Object.prototype.hasOwnProperty.call(record, entry.target)) {
+      record[entry.target] = null
+    }
+  }
+  // The tally is derived from the row we ACTUALLY EMIT, not from "some entry resolved somewhere". Keyed on
+  // the emitted target, it cannot drift from the value written — whatever the entry order or multiplicity.
+  if (resolvedCounts) {
+    for (const target of resolvedTargets) {
+      resolvedCounts[target] = (resolvedCounts[target] || 0) + 1
     }
   }
   return record

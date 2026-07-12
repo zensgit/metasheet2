@@ -557,7 +557,9 @@ function assertEveryConfiguredFieldResolved(fieldMap, fieldResolution, receivedR
   if (receivedRows < 1) return
   const unresolvedTargets = []
   for (const entry of fieldMap) {
-    if (!Number.isInteger(fieldResolution[entry.target]) || fieldResolution[entry.target] < 1) {
+    // The tally only ever counts UP from absent, so "resolved on no row" is simply a falsy count — there is
+    // no separate zero case to test for (an explicit `< 1` arm here would be unreachable).
+    if (!fieldResolution[entry.target]) {
       unresolvedTargets.push(entry.target)
     }
   }
