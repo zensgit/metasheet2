@@ -653,6 +653,10 @@ async function deleteRecordWithRecoverability(
     deleteRevisionId,
   })
 
+  // The SAME guardRecordNotLockedForPlugin(actor=null) call in `deleteRecord` rejects a locked record
+  // before EITHER branch is dispatched, so this DELETE carries the identical lock disposition as the
+  // flag-off one below.
+  // lock-guarded: plugin-SDK deleteRecord, D-2 flag-on path (M1) — guarded in `deleteRecord` above.
   const deleted = await query(
     `DELETE FROM meta_records
      WHERE id = $1 AND sheet_id = $2
