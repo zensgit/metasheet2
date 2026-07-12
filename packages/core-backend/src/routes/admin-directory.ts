@@ -44,6 +44,8 @@ import { isAdmin as isRbacAdmin } from '../rbac/service'
 // `SimpleCronExpression` (the SAME class `directory-sync-scheduler.ts` uses to actually run the job) rather
 // than the multitable automation scheduler's own cron parser.
 import { SimpleCronExpression } from '../services/SchedulerService'
+// Roadmap §7.8 "Add timezone support" — SAME validity gate the scheduler and CRUD layer resolve with.
+import { isValidDirectoryScheduleTimezone } from '../directory/directory-sync-timezone'
 import { jsonError, jsonOk, parsePagination } from '../util/response'
 
 const logger = new Logger('AdminDirectoryRoutes')
@@ -115,10 +117,14 @@ function normalizeScheduleCronInput(value: unknown): string {
  * → `SimpleCronExpression`) — guarantees byte-for-byte parity with what will actually be scheduled, at the
  * cost of a bounded scan (up to ~366 days of minutes; ~40ms worst case, measured) instead of an O(1) check.
  *
- * TIMEZONE: the directory sync scheduler always runs `schedule_cron` in UTC — `directory-sync-scheduler.ts`
- * hardcodes `timezone: 'UTC'` at `applySchedule`, and this validates with the same fixed `'UTC'`. There is
- * no per-integration timezone yet (roadmap §7.8 "Add timezone support" is a separate, not-yet-built
- * follow-up); a `schedule_cron` saved here is UTC wall-clock time, not the admin's local timezone.
+ * TIMEZONE (roadmap §7.8 "Add timezone support", LANDED): cron reachability itself is timezone-invariant —
+ * which calendar dates/hours a 5-field expression can ever match does not depend on which zone the clock
+ * fields are read in (a February 30th is unreachable in every zone alike) — so validating with a fixed
+ * `'UTC'` construction here remains correct regardless of the integration's configured `scheduleTimezone`.
+ * The zone itself is validated separately (see `isValidDirectoryScheduleTimezone` below) and, once saved,
+ * is what the scheduler actually runs the cron in (`directory-sync-scheduler.ts` resolves
+ * `schedule_timezone` via `resolveDirectoryScheduleTimezone`, defaulting to `'UTC'` — byte-identical to
+ * every integration that has never configured one).
  */
 function isDirectoryScheduleCronValid(cron: string): boolean {
   try {
@@ -132,9 +138,25 @@ const DIRECTORY_SCHEDULE_CRON_ERROR_MESSAGE =
   'scheduleCron is not a valid schedule. Expected a standard 5-field cron expression ' +
   '(minute hour dayOfMonth month dayOfWeek — e.g. "0 2 * * *") that resolves to at least one execution ' +
   'within the next year (day-of-month and day-of-week restrictions combine with AND, so e.g. a day-of-month ' +
-  'that never falls on the requested weekday is rejected). DingTalk directory sync always runs on UTC ' +
-  'wall-clock time — per-integration timezones are not supported yet. Leave scheduleCron empty to disable ' +
+  'that never falls on the requested weekday is rejected). DingTalk directory sync runs in the ' +
+  'integration\'s configured scheduleTimezone (UTC by default). Leave scheduleCron empty to disable ' +
   'the scheduled sync.'
+
+// Mirrors `normalizeScheduleCronInput` above: absent/null/undefined/non-string all normalize to '' = "no
+// configured timezone" (the scheduler default), which is always allowed.
+function normalizeScheduleTimezoneInput(value: unknown): string {
+  return typeof value === 'string' ? value.trim() : String(value ?? '').trim()
+}
+
+/**
+ * Roadmap §7.8 "Add timezone support" save-time gate: fail-closed on an invalid IANA zone. Reuses the SAME
+ * `isValidDirectoryScheduleTimezone` the scheduler's runtime resolver falls back through — an invalid zone
+ * must be REJECTED here rather than silently degrading to UTC at runtime (that would let an admin believe a
+ * zone was saved that was quietly dropped). '' / 'UTC' / 'Etc/UTC' are always valid (= use the default).
+ */
+const DIRECTORY_SCHEDULE_TIMEZONE_ERROR_MESSAGE =
+  'scheduleTimezone is not a valid IANA timezone (e.g. "Asia/Shanghai"). Leave it empty, or set it to ' +
+  '"UTC", to run scheduleCron on UTC wall-clock time.'
 
 function getRequestUserId(req: Request): string {
   const raw = req.user as Record<string, unknown> | undefined
@@ -260,6 +282,12 @@ export function adminDirectoryRouter(): Router {
       return
     }
 
+    const scheduleTimezoneInput = normalizeScheduleTimezoneInput((req.body as Record<string, unknown> | undefined)?.scheduleTimezone)
+    if (scheduleTimezoneInput && !isValidDirectoryScheduleTimezone(scheduleTimezoneInput)) {
+      jsonError(res, 400, 'DIRECTORY_SCHEDULE_TIMEZONE_INVALID', DIRECTORY_SCHEDULE_TIMEZONE_ERROR_MESSAGE)
+      return
+    }
+
     try {
       const integration = await createDirectoryIntegration(req.body as Record<string, unknown> as never)
       await refreshDirectoryIntegrationSchedule(integration.id)
@@ -276,6 +304,12 @@ export function adminDirectoryRouter(): Router {
     const scheduleCronInput = normalizeScheduleCronInput((req.body as Record<string, unknown> | undefined)?.scheduleCron)
     if (scheduleCronInput && !isDirectoryScheduleCronValid(scheduleCronInput)) {
       jsonError(res, 400, 'DIRECTORY_SCHEDULE_CRON_INVALID', DIRECTORY_SCHEDULE_CRON_ERROR_MESSAGE)
+      return
+    }
+
+    const scheduleTimezoneInput = normalizeScheduleTimezoneInput((req.body as Record<string, unknown> | undefined)?.scheduleTimezone)
+    if (scheduleTimezoneInput && !isValidDirectoryScheduleTimezone(scheduleTimezoneInput)) {
+      jsonError(res, 400, 'DIRECTORY_SCHEDULE_TIMEZONE_INVALID', DIRECTORY_SCHEDULE_TIMEZONE_ERROR_MESSAGE)
       return
     }
 
