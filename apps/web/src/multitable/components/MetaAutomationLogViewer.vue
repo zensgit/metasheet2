@@ -3,7 +3,7 @@
     <div class="meta-log-viewer">
       <div class="meta-log-viewer__header">
         <h4 class="meta-log-viewer__title">{{ automationLabel('log.title', isZh) }}</h4>
-        <button class="meta-log-viewer__close" type="button" @click="$emit('close')">&times;</button>
+        <MtIconButton class="meta-log-viewer__close" @click="$emit('close')">&times;</MtIconButton>
       </div>
 
       <div class="meta-log-viewer__body">
@@ -144,7 +144,7 @@ import {
   renderAutomationLogSupportPacketJson,
   renderAutomationLogSupportPacketMarkdown,
 } from '../utils/automation-log-support-packet'
-import { MtButton } from '../ui'
+import { MtButton, MtIconButton } from '../ui'
 
 const props = defineProps<{
   sheetId: string
@@ -293,7 +293,9 @@ watch(
 }
 
 .meta-log-viewer__title { margin: 0; font-size: 16px; font-weight: 700; color: #0f172a; }
-.meta-log-viewer__close { border: none; background: none; font-size: 22px; cursor: pointer; color: #64748b; line-height: 1; padding: 0 4px; }
+/* .meta-log-viewer__close: now <MtIconButton> (ghost, token-styled; the &times; glyph char passes
+   through its default-slot icon fallback (size token-normalized to the icon control)). Bespoke hardcoded CSS
+   removed (UI-P2-1c T1 batch-4). Class kept on the element only for selector stability. */
 
 .meta-log-viewer__body {
   padding: 16px 20px 20px;
