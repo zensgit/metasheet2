@@ -5819,11 +5819,18 @@ export class ApprovalProductService {
 
       await client.query('COMMIT')
       await this.emitApprovalTaskCreatedEventsPostCommit(id, createdTaskEvents) // A-2a
-      // P1-1 defense-in-depth (NOT the safety mechanism — the wrapper's read-time active-assignment
-      // binding stands alone): the node just advanced past `currentNodeKey`, so sweep every still-`sent`
-      // card of this instance to `superseded`. The card that TRIGGERED this approve (card-originated
-      // path) is excluded — the wrapper claims it `acted` after dispatchAction returns. Best-effort:
-      // a card-ledger hiccup must never fail a committed approval.
+      // P1-1 defense-in-depth: the node just advanced past `currentNodeKey`, so sweep every still-`sent`
+      // card of this instance to `superseded`. Best-effort — a card-ledger hiccup must never fail a
+      // committed approval.
+      //
+      // Two claims that used to sit here were WRONG and are corrected (owner P3, 2026-07-12):
+      //   * "the wrapper's read-time binding stands alone" — it does NOT. That pre-read runs OUTSIDE this
+      //     transaction; relying on it is exactly what let an `expired` card complete an approval. The
+      //     authority is the in-txn card→round guard + row lock + atomic claim, above.
+      //   * "the wrapper claims it `acted` after dispatchAction returns" — it no longer does. The card is
+      //     claimed `acted` INSIDE this transaction (see the dingtalk_card block), which is why the
+      //     triggering card is excluded from the sweep below: it is already `acted`, not still `sent`.
+      // Do NOT reintroduce a post-commit claim: a claim made after the decision is durable cannot gate it.
       await this.supersedeCardDeliveriesPostCommit(id, request.channelOrigin?.cardDeliveryId)
 
       // Wave 2 WP5 slice 1 — emit metrics after commit so rollback failures

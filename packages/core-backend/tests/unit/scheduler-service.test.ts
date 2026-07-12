@@ -393,3 +393,72 @@ describe('SchedulerService P2 (round 2): the scan must walk ABSOLUTE time, on a 
     expect(e.next()?.toISOString()).toBe('2026-11-02T06:30:00.000Z') // the 06:30Z repeat is suppressed
   })
 })
+
+// ─── owner review P1 (2026-07-12, round 3): the fall-back HOT LOOP ───────────────────────────────
+//
+// The scan stepped in absolute time, but its STARTING POINT was floored with `setSeconds(0, 0)` — and a
+// comment claimed that was "offset-invariant". It is not: it writes through LOCAL wall-clock fields and
+// the instant is re-derived from them, so during a fall-back (where one local wall time maps to TWO
+// instants) it collapses onto the FIRST. At the SECOND 01:30 local, the base jumped an HOUR BACKWARD and
+// next() returned a time EARLIER THAN NOW. JobScheduler clamps a negative delay to 0 → fire → reschedule
+// → a per-minute job hot-loops for the whole fall-back hour.
+//
+// These pin the exact input the old tests missed: the SECOND fold occurrence, with NON-ZERO seconds.
+describe('SchedulerService P1: no immediate-reschedule loop across a host DST fall-back', () => {
+  const originalTz = process.env.TZ
+
+  beforeEach(() => {
+    process.env.TZ = 'America/New_York'
+    vi.useFakeTimers()
+  })
+
+  afterEach(() => {
+    vi.useRealTimers()
+    if (originalTz === undefined) delete process.env.TZ
+    else process.env.TZ = originalTz
+  })
+
+  // 2026-11-01T06:30:30Z is the SECOND 01:30 local (EST) — after the clock went back — and carries
+  // non-zero seconds, which is what a live scheduler actually calls next() with.
+  const SECOND_FOLD_WITH_SECONDS = new Date('2026-11-01T06:30:30.000Z')
+
+  it('next() is strictly AFTER now at the second fold occurrence (RED-before: 05:31Z, an hour in the PAST)', () => {
+    vi.setSystemTime(SECOND_FOLD_WITH_SECONDS)
+    const e = new SimpleCronExpression('* * * * *', 'UTC')
+    const n = e.next()
+
+    expect(n?.toISOString()).toBe('2026-11-01T06:31:00.000Z')
+    // THE invariant that makes the hot loop impossible: a negative delay is what JobScheduler clamps to 0.
+    expect(n!.getTime()).toBeGreaterThan(SECOND_FOLD_WITH_SECONDS.getTime())
+  })
+
+  it('prev() is the TRUE previous minute at the second fold occurrence (RED-before: 05:29Z)', () => {
+    vi.setSystemTime(SECOND_FOLD_WITH_SECONDS)
+    const e = new SimpleCronExpression('* * * * *', 'UTC')
+    expect(e.prev()?.toISOString()).toBe('2026-11-01T06:29:00.000Z')
+  })
+
+  it('repeated next() marches strictly FORWARD through the entire fall-back hour — never backwards, never equal', () => {
+    // The hot loop was per-minute re-firing inside the fold. Walk the whole ambiguous hour and assert
+    // strict monotonicity: this is the property, not just a single lucky value.
+    vi.setSystemTime(new Date('2026-11-01T04:59:30.000Z')) // before the fold begins
+    const e = new SimpleCronExpression('* * * * *', 'UTC')
+    let prevMs = 0
+    for (let i = 0; i < 150; i++) { // 150 minutes: spans the full 05:00Z-07:00Z ambiguous window
+      const n = e.next()
+      expect(n).not.toBeNull()
+      expect(n!.getTime()).toBeGreaterThan(prevMs)
+      prevMs = n!.getTime()
+    }
+  })
+
+  it('a zoned cron ALSO advances strictly forward across the fold (single-fire must not become no-fire or a loop)', () => {
+    vi.setSystemTime(new Date('2026-11-01T04:00:00.000Z'))
+    const e = new SimpleCronExpression('30 1 * * *', 'America/New_York')
+    const first = e.next()
+    const second = e.next()
+    expect(first?.toISOString()).toBe('2026-11-01T05:30:00.000Z')
+    expect(second!.getTime()).toBeGreaterThan(first!.getTime())
+    expect(second?.toISOString()).toBe('2026-11-02T06:30:00.000Z') // the 06:30Z repeat stays suppressed
+  })
+})

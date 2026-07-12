@@ -154,9 +154,16 @@ class SimpleCronExpression implements CronExpression {
    * stepping is monotonic by construction and immune to whatever the host clock does.
    */
   next(): Date | null {
-    const base = new Date(this.currentDate)
-    base.setSeconds(0, 0) // seconds/ms are offset-invariant — safe to zero on any host
-    let ms = base.getTime() + MINUTE_MS
+    // Floor to the minute in ABSOLUTE time. `setSeconds(0, 0)` — which the previous revision used, with
+    // a comment claiming it was "offset-invariant" — is NOT: it writes through LOCAL wall-clock fields,
+    // and the resulting instant is re-derived from them. During a fall-back the same local wall time maps
+    // to TWO instants, and that re-derivation collapses onto the FIRST one. So at the SECOND 01:30 local
+    // (06:30:30Z, New_York) the base jumped an HOUR BACKWARD to 05:30Z, and next() returned 05:31Z —
+    // EARLIER THAN NOW. JobScheduler clamps a negative delay to 0, fires, and reschedules: a per-minute
+    // job HOT-LOOPS for the entire fall-back hour (owner P1, 2026-07-12).
+    // Integer division on the epoch never touches a wall clock, so it cannot be folded.
+    const baseMs = Math.floor(this.currentDate.getTime() / MINUTE_MS) * MINUTE_MS
+    let ms = baseMs + MINUTE_MS
 
     for (let attempts = 0; attempts < 366 * 24 * 60; attempts++) {
       const candidate = new Date(ms)
@@ -171,9 +178,10 @@ class SimpleCronExpression implements CronExpression {
   }
 
   prev(): Date | null {
-    const base = new Date(this.currentDate)
-    base.setSeconds(0, 0)
-    let ms = base.getTime() - MINUTE_MS
+    // Same absolute-time flooring — see next(). A local-wall-clock floor here returned 05:29Z instead of
+    // 06:29Z at the second fold occurrence.
+    const baseMs = Math.floor(this.currentDate.getTime() / MINUTE_MS) * MINUTE_MS
+    let ms = baseMs - MINUTE_MS
 
     for (let attempts = 0; attempts < 366 * 24 * 60; attempts++) {
       const candidate = new Date(ms)
