@@ -614,8 +614,6 @@ module.exports = {
     assertKnownSourceNotExceeded,
     assertIntakeReady,
     buildSourceRunOutcome,
-    effectivePageSize,
-    rawContainerRowCount,
     readAllMappedRows,
     sourceCapability,
     sourceChannel,

@@ -10,7 +10,11 @@ const { validateReadSourceConfig } = require(path.join(__dirname, '..', 'lib', '
 const { prepareConfiguredRead } = require(path.join(__dirname, '..', 'lib', 'read-source-read-runtime.cjs'))
 const {
   publicReadonlySourceRunResult,
+  BRIDGE_SOURCE_PAGE_SIZE,
+  ERP_SOURCE_KINDS,
   K3_WEBAPI_SOURCE_PAGE_SIZE,
+  PLM_SOURCE_KINDS,
+  SOURCE_KIND_CAPABILITIES,
   SOURCE_MAX_PAGES,
   SOURCE_PAGE_SIZE,
   StockPreparationReadonlySourceRunError,
@@ -1027,7 +1031,28 @@ async function testEmptySourceFailsClosed() {
   assert.equal(runtime.writes.length, 0)
 }
 
+// Every kind the feeder ACCEPTS must have a declared paging capability. Adding a kind to the allowlists
+// without telling the feeder how (or whether) that kind can be continued is how a source that silently
+// truncates gets waved through — so the two sets and the capability table are pinned to each other.
+function testEverySupportedKindDeclaresItsPagingCapability() {
+  for (const kind of new Set([...PLM_SOURCE_KINDS, ...ERP_SOURCE_KINDS])) {
+    const capability = SOURCE_KIND_CAPABILITIES[kind]
+    assert.ok(capability, `source kind ${kind} is accepted but declares no paging capability`)
+    assert.ok(
+      ['cursor', 'page_index', 'none'].includes(capability.pagination),
+      `source kind ${kind} declares an unknown pagination mechanism`,
+    )
+    assert.ok(Number.isInteger(capability.pageSize) && capability.pageSize > 0)
+  }
+  // The kinds that CANNOT continue a page are exactly the two adapters that clamp and always claim done.
+  assert.equal(SOURCE_KIND_CAPABILITIES['bridge:legacy-sql-readonly'].pagination, 'none')
+  assert.equal(SOURCE_KIND_CAPABILITIES['bridge:legacy-sql-readonly'].pageSize, BRIDGE_SOURCE_PAGE_SIZE)
+  assert.equal(SOURCE_KIND_CAPABILITIES['erp:k3-wise-sqlserver'].pagination, 'none')
+  assert.equal(SOURCE_KIND_CAPABILITIES['erp:k3-wise-webapi'].pageSize, K3_WEBAPI_SOURCE_PAGE_SIZE)
+}
+
 async function main() {
+  testEverySupportedKindDeclaresItsPagingCapability()
   await testPlmFeedsPureIntakeAcrossCursorPages()
   await testBridgeClampedSourceCannotReportReady()
   await testBridgeSourceUnderTheClampStillSucceeds()
