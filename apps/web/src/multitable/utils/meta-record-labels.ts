@@ -373,6 +373,16 @@ export function restoredFromVersionBadge(version: number, isZh: boolean): string
   return isZh ? `从版本 ${version} 恢复` : `Restored from v${version}`
 }
 
+/**
+ * Person before-side name resolution (OD-P2): mark a DEACTIVATED person in a History diff.
+ * Scoped to the History Center diff on purpose — the shared `formatFieldDisplay` renders person summaries
+ * as bare `display` strings and is also used by the grid/record-drawer, so the marker is applied where the
+ * diff builds its own summaries rather than by changing the shared formatter for every surface.
+ */
+export function inactivePersonDisplay(display: string, isZh: boolean): string {
+  return isZh ? `${display}（已停用）` : `${display} (deactivated)`
+}
+
 // --- ResetConfirmDialog.vue interpolation helpers (R5c) ---
 // `asOf` is the wire point-in-time value (display + API `asOf`) and record counts are wire summary
 // numbers — both always interpolated raw, never translated. Each helper below reconstructs one
