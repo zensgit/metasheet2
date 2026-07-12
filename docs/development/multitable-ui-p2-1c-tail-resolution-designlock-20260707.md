@@ -26,10 +26,12 @@
 - ratify(A) 后：MtButton 加 `variant="plain"`（Opus 审，因是原语扩展）→ 再迁 Gallery/Kanban/Timeline create（+ empty-action/placeholder-action）。
 
 ### T3 — link-styled 按钮 → **新原语 MtLink**（或归入 T2 plain）
-现状：MetaNotificationBell `__mark-all`（无边框蓝字）、MetaExportDialog/FilterGroup 的 select-all/clear/add 内联链接、MetaViewManager `__btn-inline`(filter/sort add) 是**文字链接样**。MtButton 任何变体都会加 padding/边框 → link→button 突变。
+现状：MetaNotificationBell `__mark-all`（无边框蓝字）、MetaExportDialog/FilterGroup 的 select-all/clear/add 内联链接、MetaViewManager `__btn-inline`(filter/sort add) 是**文字链接样**〔**⚠ MetaViewManager 这一处事实有误——见下方勘误**〕。MtButton 任何变体都会加 padding/边框 → link→button 突变。
 - **需 owner 定**：加 `MtLink` 原语（原生 `<button>` 但零 padding/边框、主色字、hover 下划线，token 化），还是接受映射到 T2 的 `plain`？
 - **推荐**：**加 MtLink**（link 与 button 是不同强度语义，混用会乱）。additive 新原语，走 P2-1a 同法（结构锁 + Opus 审）。
 - 范围：mark-all-read · select-all/clear-all · addFilter/addSort inline · MetaFilterGroup add-condition/add-group。
+
+> **勘误（2026-07-12，owner 裁定）**：本档原把 MetaViewManager 的 `__btn-inline`（+Add filter/+Add sort）列为「文字链接样」——**事实有误**。核实其原 CSS 为 `padding:4px 10px; border:1px dashed #cbd5e1; background:#fff; color:#475569`（灰色虚线框 action），非文字链接。#4131 据此把这两个按钮迁成 MtLink 后，同一个 `__btn-inline` class 的另 2 个 sharer（reloadLatestConfig / dismissLiveRefreshNotice）仍是虚线框原样 → 同 class 两种外观，语义不干净。**owner 裁定改用 `MtButton variant="plain"`**（T2 的 plain 变体，#4156 已落 main），见 fix-forward PR。T3 本档其余三处——MetaExportDialog select-all/clear · MetaFilterGroup add-condition/add-group · MetaNotificationBell mark-all——**核实确为文字链接样，MtLink 迁移判断正确、维持不变**。本勘误只订正 MetaViewManager 这一处的事实前提，不改本锁的 RATIFIED 状态，也不重开 MtLink 原语本身的裁决。
 
 ### T4 — behind-flow managers → **共享 mock-client 测试 harness**
 现状：TrashModal · MetaConfigHistoryModal · MetaRecordPermissionManager · MetaFormShareManager · MetaCommentsDrawer · MetaSheetPermissionManager · MetaImportModal · MetaAiBulkFillDialog 的通用 action 按钮藏在 API 驱动/多步流程后，mount 测需 mock 管线——故 defer。
