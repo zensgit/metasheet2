@@ -3,8 +3,18 @@
 // danger accent; `.meta-hist__apply` / `.meta-hist__more` were unstyled, `.meta-hist__pinned-dismiss` was
 // already a neutral --ms-* bordered secondary action). Behavior-preservation proof: each control stays a
 // native <button>, keeps its :disabled binding (Load-more) and data-test attribute, and clicking it still
-// runs the SAME composable method with the SAME arguments. The header close-× glyph and the per-row
-// __summary batch toggle (a domain row control) stay bespoke — out of scope for this migration.
+// runs the SAME composable method with the SAME arguments. The per-row __summary batch toggle (a domain
+// row control) stays bespoke — out of scope for this migration.
+//
+// UI-P2-1c T1 batch-4 (multitable-ui-p2-1c-tail-resolution-designlock-20260707.md §2-T1, RATIFIED,
+// "各 manager header" remainder): the header close-× (`.meta-hist__close`) was additionally migrated
+// from a bespoke <button>×</button> to the shared MtIconButton primitive — the × glyph char passes
+// through MtIconButton's default-slot icon fallback (glyph char preserved, size token-normalized to the
+// icon control). Behavior-preservation proof: it stays a native, keyboard-operable <button>, keeps the
+// SAME aria-label (`t('关闭', 'Close')`), and clicking it still fires the SAME `emit('close')`. This is
+// the only sharer of `.meta-hist__close` — its bespoke CSS was removed outright, no double-styling risk.
+// The bespoke `type="button"` attribute was dropped (redundant — MtButton's own template already
+// hardcodes `type="button"` on its root native <button>).
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createApp, nextTick, type App } from 'vue'
 import HistoryCenterModal from '../src/multitable/components/HistoryCenterModal.vue'
@@ -126,5 +136,29 @@ describe('HistoryCenterModal — MtButton migration (UI-P2-1c batch4)', () => {
     expect(container.querySelectorAll('[data-test="hist-batch"]').length).toBe(2) // b1 + appended b2
     // v-if="nextCursor && !loading" — the control disappears once the cursor is exhausted.
     expect(container.querySelector('[data-test="hist-load-more"]')).toBeNull()
+  })
+})
+
+describe('HistoryCenterModal — close-× MtIconButton migration (UI-P2-1c T1 batch-4)', () => {
+  it('renders the header close-× as a native <button> (MtIconButton) keeping the class + aria-label + glyph', async () => {
+    mockListHistoryEvents.mockResolvedValue({ batches: [], total: 0, nextCursor: null, searchTruncated: false })
+    const container = mount({ open: true, baseId: 'base_1' })
+    await flush()
+    const btn = container.querySelector('.meta-hist__close') as HTMLButtonElement
+    expect(btn.tagName).toBe('BUTTON')
+    expect(btn.classList.contains('meta-hist__close')).toBe(true)
+    expect(btn.getAttribute('aria-label')).toBe('Close')
+    expect(btn.textContent?.trim()).toBe('×') // × glyph char preserved (size token-normalized)
+  })
+
+  it('clicking the header close-× emits `close` (unchanged — same emit(\'close\'))', async () => {
+    mockListHistoryEvents.mockResolvedValue({ batches: [], total: 0, nextCursor: null, searchTruncated: false })
+    const onClose = vi.fn()
+    const container = mount({ open: true, baseId: 'base_1', onClose })
+    await flush()
+    const btn = container.querySelector('.meta-hist__close') as HTMLButtonElement
+    btn.click()
+    expect(onClose).toHaveBeenCalledTimes(1)
+    expect(onClose).toHaveBeenCalledWith()
   })
 })
