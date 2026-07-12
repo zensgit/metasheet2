@@ -72,8 +72,13 @@ export async function resolvePersonDirectoryEntries(
       const display = name || email || id // raw-id fallback, matching the grid's person summaries
       out.set(id, u.is_active === false ? { display, inactive: true } : { display })
     }
-  } catch {
-    // users table absent (minimal harness) — return empty; callers fall back to the raw id.
+  } catch (err) {
+    // ONLY "users table absent" (42P01, minimal harness) degrades to an empty map → callers fall back to the
+    // raw id. Anything else RETHROWS, matching the sibling this claims parity with (`buildPersonSummaries`,
+    // univer-meta.ts:5435-5438). A bare `catch {}` here would swallow a transient connection error or a
+    // genuinely broken query and silently render EVERY person as a raw userId, with no signal at all —
+    // fail-safe in direction, but indistinguishable from "no directory exists" (review P3-1).
+    if (!(typeof (err as { code?: unknown })?.code === 'string' && (err as { code?: string }).code === '42P01')) throw err
   }
   return out
 }

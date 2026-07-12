@@ -16,20 +16,38 @@
  *   G2 a deactivated user carries `inactive: true` (OD-P2; same `users.is_active === false` rule as the grid).
  *   G3 LOCK-3: a person in a field_permissions-DENIED person field appears NOWHERE — not in personNames,
  *      not anywhere in the response body (whole-body assertion).
+ *   G4 TRIPWIRE (current reality, not an endorsement): a layer-2 `property.hidden` PERSON field is NOT
+ *      excluded — because layer-2 hiding is a PLATFORM NO-OP on person fields (pre-existing; the sanitizer
+ *      drops `hidden`). Such a field is one the actor CAN read, so it is outside this feature's precondition.
+ *      Pinned so the gap is visible; flip it when the platform bug is fixed. See the test's own docstring.
  *
- * MUTATION MATRIX (measured, not asserted — stating exactly what each golden is load-bearing FOR):
- *   The leak is guarded THREE independent times: (i) `involvedFieldsBySheet` accumulates from the POST-MASK
- *   `fields`, so a denied person field never even becomes a person-field candidate; (ii) the name loop
- *   re-checks `allowed.has`; (iii) the id harvest reads the POST-MASK `changes`, never a raw snapshot.
- *     - break (ii) alone              → 4/4 still GREEN (no leak — (i)+(iii) hold)
- *     - break (iii) alone             → G1+G2 RED (the removed/inactive people live only on the HYDRATED
- *                                       `before` side, absent from this batch's raw rows), but NO leak
- *     - break (ii)+(iii)              → G1+G2 RED, still NO leak (guard (i) alone suffices)
- *     - break ALL THREE               → G3 RED: the denied person's display NAME surfaces in the body
- *   So: **G1/G2 are load-bearing for correctness** (they red on a real refactor). **G3 is non-vacuous but
- *   triply-redundant** — it is the last line, not the only line. Do not read a green G3 as "the mask works";
- *   read it as "all three guards would have to fail together." (Mutation-red proves load-bearing for a layer;
- *   it does not by itself prove a reachable vulnerability.)
+ * MUTATION MATRIX (12 combinations, measured — independently re-run by the #4161 adversarial review).
+ * The leak is guarded three times: (i) the `changed_field_ids` filter (`allowed.has`) → a denied person field
+ * never becomes a person-field candidate; (ii) the name loop's `allowed.has` re-check; (iii) the id harvest
+ * reads the POST-MASK `changes`, never a raw snapshot.
+ *   NOTE (review NIT-2): (i) and (ii) are the SAME predicate applied twice — defense-in-depth, not two
+ *   independent properties. The genuinely independent guard is (iii).
+ *
+ * Two flavors of breaking (iii) matter, and they say OPPOSITE things about G3:
+ *   - (iii-a) harvest this batch's RAW rows → also loses the hydrated before-image
+ *   - (iii-b) harvest raw snapshots AND the raw, UNMASKED hydrated prev-snapshot → before-image still works
+ *             (this is the MORE REALISTIC refactor: "just read the snapshots directly")
+ *
+ *   | breaks            | G1    | G2    | G3    | leak? |
+ *   |-------------------|-------|-------|-------|-------|
+ *   | none (as-is)      | GREEN | GREEN | GREEN |  –    |
+ *   | any ONE           | see below, but NEVER a leak                   |
+ *   | any TWO           | never a leak                                  |
+ *   | i + ii + iii-a    | RED   | RED   | RED   | LEAK  |
+ *   | i + ii + iii-b    | GREEN | GREEN | **RED** | LEAK |
+ *
+ * So, precisely:
+ *   - The leak needs ALL THREE broken — no single or double break reds G3 (upheld).
+ *   - G1/G2 are load-bearing for CORRECTNESS (they red under iii-a).
+ *   - **G3 is NOT merely a redundant last line.** Under (iii-b) — the refactor someone would actually write —
+ *     **G1 and G2 stay GREEN and G3 is the SOLE detector of the leak.** An earlier version of this header
+ *     called G3 "triply-redundant"; that undersold it and is corrected here.
+ *   (Mutation-red proves a guard is load-bearing for its layer; it is not by itself a reachability claim.)
  *
  * Runs only with DATABASE_URL. (plugin-tests.yml whitelist — two-point wiring.)
  */
@@ -46,6 +64,7 @@ const BASE_ID = `base_pn_${TS}`
 const SHEET_ID = `sheet_pn_${TS}`
 const PERSON_OK = `fld_pn_ok_${TS}` // readable person field
 const PERSON_DENIED = `fld_pn_den_${TS}` // layer-3 field_permissions-denied person field
+const PERSON_HIDDEN = `fld_pn_hid_${TS}` // layer-2 property.hidden person field (a NO-OP on person — see G4)
 const REC = `rec_pn_${TS}`
 const BATCH_PRIOR = `batch_pn_prior_${TS}`
 const BATCH = `batch_pn_${TS}`
@@ -55,11 +74,13 @@ const P_KEPT = `user_pn_kept_${TS}` // still in the cell after the change
 const P_REMOVED = `user_pn_removed_${TS}` // REMOVED by this change — the whole point
 const P_INACTIVE = `user_pn_inactive_${TS}` // deactivated (is_active = false)
 const P_SECRET = `user_pn_secret_${TS}` // ONLY in the DENIED field — must never surface
+const P_HIDDEN = `user_pn_hidden_${TS}` // ONLY in the layer-2 property-hidden field (G4 tripwire)
 
 const KEPT_NAME = 'Kept Person'
 const REMOVED_NAME = 'Removed Person'
 const INACTIVE_NAME = 'Inactive Person'
 const SECRET_NAME = 'SecretPersonMustNeverAppear'
+const HIDDEN_NAME = 'Layer2HiddenPerson'
 
 const q = (sql: string, params: unknown[]) => poolManager.get().query(sql, params)
 let app: Express
@@ -91,11 +112,14 @@ describeIfDatabase('person before-side name resolution — batch-detail personNa
     await addUser(P_REMOVED, REMOVED_NAME)
     await addUser(P_INACTIVE, INACTIVE_NAME, false) // 2c-S4: is_active = false ⇒ inactive
     await addUser(P_SECRET, SECRET_NAME)
+    await addUser(P_HIDDEN, HIDDEN_NAME)
 
     await q('INSERT INTO meta_bases (id, name) VALUES ($1,$2)', [BASE_ID, 'PersonNames Base'])
     await q('INSERT INTO meta_sheets (id, base_id, name) VALUES ($1,$2,$3)', [SHEET_ID, BASE_ID, 'PN Sheet'])
     await q('INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6)', [PERSON_OK, SHEET_ID, 'Assignees', 'person', '{}', 1])
     await q('INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6)', [PERSON_DENIED, SHEET_ID, 'SecretAssignees', 'person', '{}', 2])
+    // layer-2 property-hidden person field — which the platform does NOT actually hide (G4 tripwire).
+    await q('INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6)', [PERSON_HIDDEN, SHEET_ID, 'HiddenAssignees', 'person', '{"hidden":true}', 3])
     // layer-3: VIEWER cannot read PERSON_DENIED ⇒ its VALUES (and thus its userIds) are dropped post-mask.
     await q(
       `INSERT INTO field_permissions (sheet_id, field_id, subject_type, subject_id, visible, read_only) VALUES ($1,$2,'user',$3,false,false)`,
@@ -103,10 +127,10 @@ describeIfDatabase('person before-side name resolution — batch-detail personNa
     )
 
     // v1 (prior batch): the person cell holds THREE people; the denied field holds the secret person.
-    await insertRevision(1, BATCH_PRIOR, { [PERSON_OK]: [P_KEPT, P_REMOVED, P_INACTIVE], [PERSON_DENIED]: [P_SECRET] }, [PERSON_OK, PERSON_DENIED])
+    await insertRevision(1, BATCH_PRIOR, { [PERSON_OK]: [P_KEPT, P_REMOVED, P_INACTIVE], [PERSON_DENIED]: [P_SECRET], [PERSON_HIDDEN]: [P_HIDDEN] }, [PERSON_OK, PERSON_DENIED, PERSON_HIDDEN])
     // v2 (BATCH under test): P_REMOVED and P_INACTIVE are removed — only P_KEPT survives in the current cell.
     // The denied field is listed as changed too, so its ids are in the RAW snapshot the projection reads.
-    await insertRevision(2, BATCH, { [PERSON_OK]: [P_KEPT], [PERSON_DENIED]: [P_SECRET] }, [PERSON_OK, PERSON_DENIED])
+    await insertRevision(2, BATCH, { [PERSON_OK]: [P_KEPT], [PERSON_DENIED]: [P_SECRET], [PERSON_HIDDEN]: [P_HIDDEN] }, [PERSON_OK, PERSON_DENIED, PERSON_HIDDEN])
   })
 
   afterAll(async () => {
@@ -115,7 +139,7 @@ describeIfDatabase('person before-side name resolution — batch-detail personNa
     await q('DELETE FROM meta_fields WHERE sheet_id = $1', [SHEET_ID]).catch(() => {})
     await q('DELETE FROM meta_sheets WHERE id = $1', [SHEET_ID]).catch(() => {})
     await q('DELETE FROM meta_bases WHERE id = $1', [BASE_ID]).catch(() => {})
-    for (const u of [VIEWER, P_KEPT, P_REMOVED, P_INACTIVE, P_SECRET]) await q('DELETE FROM users WHERE id = $1', [u]).catch(() => {})
+    for (const u of [VIEWER, P_KEPT, P_REMOVED, P_INACTIVE, P_SECRET, P_HIDDEN]) await q('DELETE FROM users WHERE id = $1', [u]).catch(() => {})
   })
 
   test('sentinel: DATABASE_URL set', () => { expect(process.env.DATABASE_URL).toBeTruthy() })
@@ -145,6 +169,36 @@ describeIfDatabase('person before-side name resolution — batch-detail personNa
     expect(personNames[P_INACTIVE]?.inactive).toBe(true)
     // an ACTIVE user must NOT be marked (otherwise the marker is meaningless)
     expect(personNames[P_KEPT]?.inactive).toBeUndefined()
+  })
+
+  /**
+   * G4 — CURRENT-REALITY TRIPWIRE, not an endorsement. Documents a PRE-EXISTING PLATFORM GAP that this
+   * feature neither causes nor relies on (found by the #4161 adversarial review):
+   *
+   *   layer-2 `property.hidden` is a NO-OP on native PERSON fields, platform-wide.
+   *   `sanitizeFieldPropertyByType`'s `person` branch (field-codecs.ts) is a CLOSED ALLOWLIST that silently
+   *   drops `hidden`/`visible` — unlike `select`, which passes them through. So `isFieldPermissionHidden`
+   *   never sees the flag, and a "hidden" person field is readable at EVERY surface: `GET /records` already
+   *   returns its userIds today, with or without this PR.
+   *
+   * ⇒ Such a field is one the actor CAN read, so it is outside this feature's masking precondition (which is
+   *   scoped to layer-3 `field_permissions`-DENIED — see G3). Marginal disclosure of this PR is ZERO: the raw
+   *   ids are already on the same payload pre-PR; `personNames` only turns an ALREADY-VISIBLE id into a name.
+   *
+   * This test pins that reality so the gap is VISIBLE rather than silently absent. **When the platform bug is
+   * fixed** (person's sanitizer stops dropping `hidden`), this test WILL go red — that is the point: flip it
+   * to `toBeUndefined()` then. Deliberately NOT written as a failing test, which would make an out-of-scope
+   * permission-layer fix a merge gate for this feature.
+   */
+  test('G4 tripwire: a layer-2 property-hidden PERSON field is NOT excluded — because layer-2 hiding is a platform no-op on person fields (pre-existing; flip this when fixed)', async () => {
+    const res = await detail(BATCH)
+    expect(res.status).toBe(200)
+    const personNames = res.body?.data?.personNames
+    // Current reality: the "hidden" person field is readable, so its member resolves like any visible person.
+    expect(personNames[P_HIDDEN]?.display).toBe(HIDDEN_NAME)
+    // …and, decisively, its raw id is ALREADY on the payload pre-PR — so personNames adds no disclosure here.
+    const change = (res.body?.data?.changes ?? []).find((c: any) => c.recordId === REC)
+    expect(change?.before?.[PERSON_HIDDEN]).toEqual([P_HIDDEN])
   })
 
   test('G3 LOCK-3: a person inside a field_permissions-DENIED person field appears NOWHERE', async () => {
