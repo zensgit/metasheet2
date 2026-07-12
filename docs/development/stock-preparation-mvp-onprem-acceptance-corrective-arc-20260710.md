@@ -26,6 +26,7 @@
 | corrective-3 | Node 24 尝试为**未使用的原生 `bcrypt@5.1.1`** 构建,无兼容 prebuilt 二进制/工具链 → 安装失败 | 该原生依赖从未被运行时用到(运行时用可移植的 `bcryptjs`)→ **移除 `bcrypt` + `@types/bcrypt`**,并在包验证器加回归守卫(`verify_no_native_bcrypt_dependency`:必须保 bcryptjs、禁 native bcrypt) | **#4068**(`4290b08c5`) | `…-corrective3-20260711-4290b08c5` |
 | corrective-4 | 交付管道深路径清理残留 | staging `node_modules` 清理 SYSTEM-safe(长路径/深嵌套) | **#4073** | `…-corrective4-…` |
 | corrective-5 | `failedMigrationName=20250926_create_audit_tables` · `42P07`(duplicate_table)· `table` | 实体机先跑幂等孪生 `zz20251231_create_audit_tables.ts`(allowUnorderedMigrations 历史);同名更早的 raw `.sql` 后合入被当 pending 重放 → 裸 `CREATE TABLE audit_logs` 撞已存在对象 | **#4084**(`.sql` 名加入 `SUPERSEDED_LEGACY_SQL_MIGRATIONS` no-op 名单) | `…-corrective5-20260710-698acd918` |
+| **corrective-6** | 迁移全过(`migration066=applied`,42P07 消失),但**后端启动即崩**、`/api/health` **502** · `failureClass=RUNTIME_DEPENDENCY_DECLARED_AS_DEV_ONLY` · `missingRuntimeModule=uuid` | `uuid` 只声明在 core-backend **devDependencies**,而 `WorkflowDesigner` / `BPMNWorkflowEngine` / `DelayService` 在**模块加载期**就 import 它 —— **`--prod` 安装跳过 devDependencies** | **#4126**(`6b5a6d90a`)= `uuid` → `dependencies` + **production-install 启动契约 guard** + guard 顺带挖出的 **express-validator fail-open 安全缺陷**(见 §6) | `…-corrective6-20260712-6b5a6d90a` |
 
 > 说明:#4062 与 #4061 是并行的同修法,#4062 在审阅确认机制等价后作为 superseded 关闭。
 
@@ -81,18 +82,128 @@ diff 实测三处差异(均已缓解,记录于此以免后续误判):
 
 **本文的关闭范围 = W3-W6 on-prem 包的 *runtime 验收* 弧,不是整个 #3751 epic。** 明确划界:
 
-- **runtime 验收余项(本文范围内)**:实体机装 corrective-5 包跑 smoke 回贴 `mvpSmoke.pass=true` +
+- **runtime 验收余项(本文范围内)**:实体机装 **corrective-6** 包跑 smoke 回贴 `mvpSmoke.pass=true` +
   `auditActionsCovered=8/8` + `selfScanClean=true`。此为**唯一的 runtime 验收余项**;PASS 后
   前序 W3-W6 MD 补 addendum,**W3-W6 on-prem 包 runtime 验收弧**闭环。
 - **包保障(本文范围外,已 MERGED `458373d54`)**:#4086 是 #4084 之后的**包验证器增量**——两个 on-prem 包验证器
   都须强制 superseded audit marker 在场。它是独立的代码审阅/合并项,不被实体机 smoke 覆盖。
-- **更广 follow-up(本文范围外,仍 open)**:#4093(#3889 下的 PLM/ERP/K3 只读 feeder)与
-  原始只读同步验收重叠,仍在开发。**本文不关闭整个功能 epic。**
+- **更广 follow-up(本文范围外,**已 MERGED** `c70595e72`)**:#4093(#3889 下的 PLM/ERP/K3 只读 feeder)
+  已落地,验证记录见 `stock-preparation-readonly-source-feeder-dev-verification-20260712.md`。
+  **本文不关闭整个功能 epic。**
 
 **执行与结论落点(审阅 P2 — 历史 #3751 现已 404,引用不可执行)**:功能 issue #3751 当前返回
 404(历史 #3751,不可回填)。**实体机验收的执行、values-free 回贴、PASS 结论一律落到 #4101
 (实体机验收追踪单)+ 本 W3-W6 corrective 弧 MD**,不再指向 #3751。
 
 因此:**「本线转全线闭环」是过宽表述,已收回。** 正确口径 = 实体机 smoke PASS 只结**已合并的
-W3-W6 on-prem 包 runtime 验收弧**;#4086 包保障已 MERGED、#4093 只读 feeder 仍独立推进。runtime 产品面
-未因本弧改动。
+W3-W6 on-prem 包 runtime 验收弧**;#4086 包保障已 MERGED、#4093 只读 feeder 已 MERGED。
+
+> **⚠️ 范围修订(corrective-6)**:本弧前五轮**未改产品运行面**(仅交付管道/迁移基线)。
+> **corrective-6 打破了这条**:它把 `express-validator` 的声明式校验从"**实际上没在跑**"变成"**真在跑**"
+> —— 这是一次**真实的生产行为变更**(见 §6.3)。本文不再声称"runtime 产品面未因本弧改动"。
+
+## 6. corrective-6 — 启动依赖 + 一条 fail-open 安全缺陷(#4126,`6b5a6d90a`)
+
+### 6.1 崩溃与根因
+
+corrective-5 之后,实体机迁移**全部通过**(`migration066=applied`,42P07 消失),但**后端启动即崩**、
+`/api/health` **502**。values-free 证据:`failureClass=RUNTIME_DEPENDENCY_DECLARED_AS_DEV_ONLY`、
+`missingRuntimeModule=uuid`。
+
+**根因**:`uuid` 只声明在 core-backend 的 **devDependencies**,而 `WorkflowDesigner` /
+`BPMNWorkflowEngine` / `DelayService` 在**模块加载期**就 import 它。**`--prod` 安装跳过 devDependencies**
+→ 模块求值抛错 → 进程起不来。**开发机与 CI 都装 devDependencies,所以这个缺陷在仓内结构性不可见。**
+
+### 6.2 修复不是"把 uuid 挪一下" —— 是一道**启动契约 guard**
+
+只挪 `uuid` 只解决这一个 symptom;**下一个把 devDependency 写进启动路径的人会重演同一次 502**。
+所以 #4126 立了 `tests/unit/runtime-dependency-classification.test.ts`:从 `src/index.ts` 出发,
+用 **TypeScript AST**(不是正则)BFS 走遍启动图(**实测 343 个文件**),收集"**缺了就会让模块求值崩溃**"
+的**硬 eager** 说明符 —— 每一个都必须是 core-backend 或 workspace root 的**生产依赖**,
+否则必须是 `OPTIONAL_SOFT_DEPENDENCIES` 上的**显式例外**。
+
+**例外由三把锁绑定**(缺一不可):
+
+| 锁 | 作用 |
+|---|---|
+| **site** | 该模块只能在**那个精确文件**里 eager |
+| **occurrence 计数** | 恰好一次 —— 同文件内**再加一个**裸 import 即失败 |
+| **loader 形状** | 那唯一一次调用**必须落在一个会吞错的 `catch` 的 `try` 块里**;rethrow 的 catch / 无 catch 的 try-finally / 写在 catch·finally 里的调用 / finally 里有 throw —— **一律算未加守卫** |
+
+**guard 的演进本身就是证据**(每一轮都是**实证**出来的真逃逸,不是推演):
+逐行 regex → 整文件 regex → TypeScript AST → try-aware 遍历 → 「所有顶层 require 皆硬 + 显式 allowlist」
+→ site-exact + 计数锁 → **取消 occurrence 折叠 + 形状锁**。
+
+> 最后一轮的逃逸值得记:occurrence 在分类**之前**就被 `module@@file` **折叠**了,而例外键**也是**
+> `module@@file` —— 于是在**已豁免文件内部**再加一个裸的顶层 `import 'js-yaml'`,会被折叠掉、
+> **直接继承豁免**。旧 head 上实测 guard **全绿**。教训:**去重发生在判定之前,就等于把判定的输入删掉了。**
+
+### 6.3 guard 顺带挖出的东西:声明式校验在生产里 fail-OPEN
+
+guard 一上,`express-validator` 立刻被点名 —— 它**在任何地方都没声明**(连 devDependencies 都没有)、
+也解析不到。追下去:
+
+- `loadValidators()` 在 `catch` 里返回 **no-op 校验链**;
+- `validate` 中间件在 `validationResult` 缺失时**无条件 `next()`**;
+- ⇒ **workflow / workflow-designer / PLM 路由上的声明式校验,在包括生产在内的所有环境里,整体 fail-OPEN。**
+
+**它不是"可接受的软依赖",不能用 allowlist 固化。** 修复:
+
+1. `express-validator` → **生产依赖**(`^7.2.1`),移出例外名单;
+2. **两个 loader 一律 fail-closed**:模块**缺失** → throw;**畸形/部分导出** → **也 throw**
+   (否则交回 undefined 校验器,Express 会当成"**没有中间件**" —— **另一条路的 fail-open**);
+3. **`createNoOpValidator()` 删除并钉死** —— 它返回的中间件**无条件 `next()`**,**就是那个 fail-open 原语本身**;
+   修复后它已无调用者。**一个安全反模式的死导出,是留给下一个作者的邀请函。**
+
+#### 一个必须记下的测试教训
+
+第一版的"证明"是 `expect(source).toMatch(/throw new Error\(/)` —— **匹配源码文本**。
+而两个 loader 里**各有两处 `throw`**,所以**把"模块缺失时抛错"那一处删掉、把 fail-open 放行恢复回去,
+guard 照样全绿**(两个 loader 上都用 md5 验证的真实变异证实)。
+
+> **一个名字叫「loaders are fail-closed」的测试,在 loader 已经 fail-OPEN 的情况下通过。**
+
+而且别处也接不住:那几个路由测试把两个 loader 都 `vi.mock` 掉了;又因为依赖装上了,那个 `catch`
+在测试期**根本不可达** —— **变异在行为上是惰性的,这正是它隐形的原因,不是偶然。**
+
+**修法**:给两个 loader 开一条**可注入的模块解析缝**,让"模块缺失"这条分支**第一次真正可被驱动**;
+断言改为**行为**(缺失 → throw · 畸形 → throw · **真模块仍能加载**,即 fail-**closed** 而非 fail-always)。
+
+### 6.4 验证
+
+- 独立 **exact-head 对抗审阅**:**APPROVE,0 P1**。它构造的所有逃逸(顶层 IIFE require / 调用一个会
+  require 的 helper / 模板串说明符 / catch 里间接 rethrow)在**真实启动图上 occurrence 均为 0**;
+  **独立** AST 扫描 353 个文件,**未发现第二个在启动期被 eager import 的 devDependency**;
+  "343 文件"经插桩核实**恰为 343**。
+- guard **9/9** · `tsc --noEmit` clean · 全量单测 **372 文件 / 5099 测试通过**(校验现在是**真在跑**的)。
+- **guard 有 CI 牙**:required 的 `test (20.x)` 会跑到它(默认 include 覆盖 `tests/unit/**`,且不在 exclude 名单里)。
+
+### 6.5 打包前置验证(**在包上实跑,不是读代码推断**)
+
+fail-closed 有一个**必须正视的副作用**:**将来若打包漏了 `express-validator`,会变成一次启动崩溃**
+—— 正是 corrective-6 要消灭的那类 502。因此 corrective-6 包在发给实体机**之前**,已在包上跑通:
+
+| 检查 | 结果 |
+|---|---|
+| tarball SHA256 vs `SHA256SUMS` | **MATCH** |
+| `pnpm install --prod --frozen-lockfile`(**模拟实体机生产安装**) | 成功,devDependencies skipped |
+| 从 `packages/core-backend` 真 `require('uuid')` | **RESOLVED**,`uuid.v4()` 可用 |
+| 从 `packages/core-backend` 真 `require('express-validator')` | **RESOLVED**,`body`/`param`/`query`/`validationResult` 齐全 |
+| native `bcrypt` 是否复活 | **absent**(corrective-3 回归守卫仍成立) |
+
+### 6.6 行为变更(如实告知,勿误认为回归)
+
+声明式校验从"**其实没在跑**"变成"**真在跑**"。独立审阅逐个查过现有调用方(ID 都是真 `uuidv4()`、
+无调用方发 `limit`、前端字面量联合与服务端 `isIn()` 白名单**逐字对应**)→ **现有调用方不会断**。
+
+**残余**:以前能蒙混过关的**松散/遗留外部客户端**,现在会收到 **400**。**这是预期内的**——校验本就该在跑。
+
+> 审阅同时诚实声明:**"5099 全绿"不能证明这一点**,因为路由测试把校验 mock 掉了。此处不做过度断言。
+
+### 6.7 验收包
+
+**Release**:`stock-prep-onprem-corrective6-20260712`
+**包名**:`metasheet-multitable-onprem-v2.5.0-corrective6-20260712-6b5a6d90a`
+
+**PASS 判据**(实体机回贴,**不贴业务值**):`mvpSmoke.pass=true` + `auditActionsCovered=8/8` + `selfScanClean=true`。
+执行指引与证据落点:**#4101**。
