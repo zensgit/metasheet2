@@ -1,0 +1,89 @@
+# PLM-embed web guard (targeted gate).
+#
+# Why this exists: the required PR gate (plugin-tests.yml, `test (20.x)`) runs core-backend tests
+# but only `pnpm --filter @metasheet/web build` for the web app — it NEVER runs apps/web vitest
+# specs. The required `web-tests` job runs a hand-curated list (apps/web/scripts/run-required-web-tests.sh)
+# which has ZERO plm entries. Net effect before this workflow: `plm-embed-bom-review.spec.ts` and
+# `plm-embed-service.spec.ts` (27 tests) ran in **no CI workflow at all** — a grep for `plm-embed`
+# across .github/workflows/ returned nothing. The LIVE PLM BOM-review embed surface (the iframe the
+# Yuantus PLM workspace mounts) was therefore protected by exactly nothing on the FE side.
+#
+# What these 27 tests actually pin (why a build-only gate can't catch a regression here):
+#   - PlmEmbedBomReviewView.vue is deliberately **LISTEN-only**: it accepts exactly ONE inbound
+#     `plm-embed:token` message, and ONLY when `event.source === window.parent` AND the origin is in
+#     the server-supplied allowlist (never `*`). It never posts outward. Those are security
+#     invariants of a cross-origin embed — a regression is silent under a build-only gate.
+#   - plmEmbed.ts pins the wire shape of GET /api/plm-embed/config and
+#     GET /api/plm-embed/bom-review/context (including the `{context:null, reason}` degrade path
+#     that must NOT be rendered as an error).
+#
+# Scope: deliberately TARGETED (same convention as multitable/approval/attendance web-guards) — the
+# full @metasheet/web vitest suite has historical flakes, so wiring it whole would be red on arrival.
+# Verified green at time of wiring: 27/27.
+#
+# NOT a required check (mirrors the other *-web-guard workflows): it cannot hang a PR, but it turns
+# a silent FE regression on the embed surface into a visible red.
+#
+# The backend route is a path trigger on purpose: `plm-embed.ts` owns the response shapes that
+# plmEmbed.ts's specs pin. A wire-shape change on the server must re-run the client-side shape-lock
+# (house rule: a wire-shape change gets swept on BOTH sides).
+name: PLM Embed Web Guard
+
+on:
+  pull_request:
+    paths:
+      # The embedded BOM-review view (LISTEN-only postMessage gate + render of the degrade path).
+      - 'apps/web/src/views/PlmEmbedBomReviewView.vue'
+      # The client for the two embed endpoints (wire-shape lock).
+      - 'apps/web/src/services/integration/plmEmbed.ts'
+      # The specs themselves.
+      - 'apps/web/tests/plm-embed-bom-review.spec.ts'
+      - 'apps/web/tests/plm-embed-service.spec.ts'
+      # Server side of the same wire: response shapes these specs pin (config allowlist + context degrade).
+      - 'packages/core-backend/src/routes/plm-embed.ts'
+      # This guard itself.
+      - '.github/workflows/plm-embed-web-guard.yml'
+
+jobs:
+  plm-embed-web-guard:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 20.x
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20.x
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.16.1
+          run_install: false
+
+      - name: Use empty npmrc for pnpm
+        run: |
+          echo "" > /tmp/empty-npmrc
+          echo "NPM_CONFIG_USERCONFIG=/tmp/empty-npmrc" >> "$GITHUB_ENV"
+
+      - name: Get pnpm store directory
+        id: pnpm-cache
+        shell: bash
+        run: echo "STORE_PATH=$(pnpm store path)" >> "$GITHUB_OUTPUT"
+
+      - name: Setup pnpm cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ steps.pnpm-cache.outputs.STORE_PATH }}
+          key: ${{ runner.os }}-pnpm-store-${{ hashFiles('**/pnpm-lock.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-pnpm-store-
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Run PLM-embed web guard specs (targeted)
+        # Two files, 27 tests. The filter is a substring match — it resolves to exactly
+        # tests/plm-embed-bom-review.spec.ts and tests/plm-embed-service.spec.ts.
+        run: pnpm --filter @metasheet/web exec vitest run plm-embed-bom-review plm-embed-service --reporter=dot

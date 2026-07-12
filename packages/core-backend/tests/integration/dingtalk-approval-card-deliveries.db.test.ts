@@ -12,6 +12,7 @@ import { randomUUID } from 'crypto'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { pool } from '../../src/db/pg'
 import {
+  supersedeLegacyDingTalkApprovalCardDeliveries,
   claimDingTalkApprovalCardDeliveryActed,
   findDingTalkApprovalCardDeliveriesByTaskId,
   findDingTalkApprovalCardDeliveryById,
@@ -128,6 +129,93 @@ describeIfDb('A-1 — dingtalk approval card delivery ledger (real DB)', () => {
     // full sweep (no exclude) takes the remaining sent row
     const sweptAll = await supersedeDingTalkApprovalCardDeliveriesForInstance(q, INSTANCE_CASCADE)
     expect(sweptAll).toEqual([keep.id])
+  })
+
+  it('P2-1: supersede NEVER sweeps a card whose (node,recipient) seat is still ACTIVE (parallel-fork sibling)', async () => {
+    // Model a joinMode:'all' parallel fork: two live seats on distinct branch nodes. Approving
+    // branch A advances past its own node but branch B's seat stays active — sweeping the instance
+    // must NOT false-stale branch B's live card.
+    const liveSeatCard = await insertDingTalkApprovalCardDelivery(q, {
+      instanceId: INSTANCE_CASCADE,
+      nodeKey: 'branch_b',
+      recipientUserId: 'user_live',
+      recipientDingTalkUserId: 'dd_user_live',
+      deliveryKind: 'work_notice_action_card',
+    })
+    await markDingTalkApprovalCardDeliverySent(q, liveSeatCard.id, 'task_live_seat')
+    const deadSeatCard = await insertDingTalkApprovalCardDelivery(q, {
+      instanceId: INSTANCE_CASCADE,
+      nodeKey: 'branch_a',
+      recipientUserId: 'user_dead',
+      recipientDingTalkUserId: 'dd_user_dead',
+      deliveryKind: 'work_notice_action_card',
+    })
+    await markDingTalkApprovalCardDeliverySent(q, deadSeatCard.id, 'task_dead_seat')
+    // branch B's seat is ACTIVE; branch A's seat was consumed (is_active = FALSE).
+    await q(
+      `INSERT INTO approval_assignments (instance_id, assignment_type, assignee_id, source_step, node_key, is_active)
+       VALUES ($1, 'user', 'user_live', 0, 'branch_b', TRUE), ($1, 'user', 'user_dead', 0, 'branch_a', FALSE)`,
+      [INSTANCE_CASCADE],
+    )
+
+    const swept = await supersedeDingTalkApprovalCardDeliveriesForInstance(q, INSTANCE_CASCADE)
+
+    // Only the dead-seat card is superseded; the live parallel-sibling card is spared.
+    expect(swept).toContain(deadSeatCard.id)
+    expect(swept).not.toContain(liveSeatCard.id)
+    expect((await findDingTalkApprovalCardDeliveryById(q, liveSeatCard.id))?.card_state).toBe('sent')
+    expect((await findDingTalkApprovalCardDeliveryById(q, deadSeatCard.id))?.card_state).toBe('superseded')
+
+    await q(`DELETE FROM approval_assignments WHERE instance_id = $1`, [INSTANCE_CASCADE]).catch(() => {})
+  })
+
+  it('P1-1 legacy reconcile (owner re-review repro): a null-epoch sent card is SUPERSEDED outright — NEVER re-authorized into a fresh same-node/same-recipient round via seat inference; idempotent', async () => {
+    // Dedicated instance so the scoped reconcile cannot touch sibling fixtures in this shared-DB file.
+    const INST = `apv_dacd_reentry_${Date.now()}`
+    await q(`INSERT INTO approval_instances (id, status, current_node_key) VALUES ($1, 'pending', 'approval_1') ON CONFLICT (id) DO NOTHING`, [INST])
+    try {
+      // (1) Legacy pre-column card — sent for round R0 of (INST, approval_1, user_reentry), entry_epoch NULL.
+      const legacy = await insertDingTalkApprovalCardDelivery(q, { instanceId: INST, nodeKey: 'approval_1', recipientUserId: 'user_reentry', recipientDingTalkUserId: 'dd_user_reentry', deliveryKind: 'work_notice_action_card' })
+      await markDingTalkApprovalCardDeliverySent(q, legacy.id, 'task_reentry')
+
+      // (2) A FRESH round re-enters the SAME node for the SAME recipient — a NEW active seat at epoch 9.
+      //     This is the ONLY live non-null-epoch seat for (INST, approval_1, user_reentry). The DELETED
+      //     "infer epoch from the unique live seat" backfill would have adopted 9 and left the legacy card
+      //     sent + entry_epoch=9 → actionable in round-9 (owner re-review P1: same-node re-entry reopened).
+      await q(`INSERT INTO approval_assignments (instance_id, assignment_type, assignee_id, source_step, node_key, is_active, entry_epoch) VALUES ($1,'user','user_reentry',0,'approval_1',TRUE,9)`, [INST])
+
+      // (3) An orphan legacy card with NO live seat at all — must also supersede.
+      const orphan = await insertDingTalkApprovalCardDelivery(q, { instanceId: INST, nodeKey: 'approval_9', recipientUserId: 'user_orphan', recipientDingTalkUserId: 'dd_user_orphan', deliveryKind: 'work_notice_action_card' })
+      await markDingTalkApprovalCardDeliverySent(q, orphan.id, 'task_orphan')
+
+      // Both start sent + null-epoch.
+      for (const id of [legacy.id, orphan.id]) {
+        const row = await findDingTalkApprovalCardDeliveryById(q, id)
+        expect(row?.card_state).toBe('sent')
+        expect(row?.entry_epoch ?? null).toBeNull()
+      }
+
+      const result = await supersedeLegacyDingTalkApprovalCardDeliveries(q, { instanceIds: [INST] })
+
+      // Both legacy cards are SUPERSEDED (fail-closed). RED-before (restore the seat-inference backfill):
+      // `legacy` becomes entry_epoch=9 + card_state='sent' → re-authorized into the wrong round.
+      expect(result.supersededIds.sort()).toEqual([legacy.id, orphan.id].sort())
+      const legacyRow = await findDingTalkApprovalCardDeliveryById(q, legacy.id)
+      expect(legacyRow?.card_state).toBe('superseded')
+      expect(legacyRow?.entry_epoch ?? null).toBeNull() // NOT adopted from the epoch-9 seat — provenance never inferred
+      expect((await findDingTalkApprovalCardDeliveryById(q, orphan.id))?.card_state).toBe('superseded')
+
+      // A superseded card is UNCLAIMABLE — the acted-claim requires card_state='sent'. Not actionable, full stop.
+      expect(await claimDingTalkApprovalCardDeliveryActed(q, legacy.id, { action: 'approve', actedBy: 'user_reentry' })).toBeNull()
+
+      // Idempotent: a second run touches nothing (no sent + null-epoch rows remain).
+      const rerun = await supersedeLegacyDingTalkApprovalCardDeliveries(q, { instanceIds: [INST] })
+      expect(rerun.supersededIds).toEqual([])
+    } finally {
+      await q(`DELETE FROM dingtalk_approval_card_deliveries WHERE instance_id = $1`, [INST]).catch(() => {})
+      await q(`DELETE FROM approval_assignments WHERE instance_id = $1`, [INST]).catch(() => {})
+      await q(`DELETE FROM approval_instances WHERE id = $1`, [INST]).catch(() => {})
+    }
   })
 
   it('P2: pending/failed sends are NEVER claimable — only a delivered card is actionable', async () => {
