@@ -56,6 +56,7 @@ batch-1 门禁抓出:MtIconButton 把 × **归一到 icon token 尺寸(14px)+ co
 
 - **🔒 T2 soft-tinted create**(Gallery/Kanban/Timeline 的 `#ecf5ff` 底 + `#2563eb` 字)——**等 owner 选 A(给 MtButton 加 plain/tinted 变体,锁推荐)/ B / C**。MtButton 现无对应变体;不许实现自行发明。
 - **T1 剩余批次**:仍有 close-× 分布在其它 dialog/manager(部分需 T4 harness 挂载)。
+- **T3 剩余批次**:MetaFieldManager / MetaImportModal 的 `__btn-inline`(代码注释里被标为 T3-GATED,但**不在锁 §2-T3 的枚举范围内**,需单独 ratify 后才能动)。
 - **T5 剩余批次**:MetaRecordDrawer 等其它 shared-class manager。
 - 以上均可在 owner 给 T2 决定后与 T2 一并排期;**不主张 tail「完成」**——完成的是 T1/T3/T4/T5 的首批 + T3/T4 的一次性基础设施(MtLink 原语 / behind-flow harness)。
 
