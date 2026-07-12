@@ -176,6 +176,35 @@ describe('DingTalk interactive-card Stream SDK adapter', () => {
     expect(dw.socketCallBackResponse).toHaveBeenCalledWith('msg-1', {})
   })
 
+  it('P3-1 provenance: a BODY-forged eventCorpId is STRIPPED (never laundered into header-grade provenance); a real header IS stamped', async () => {
+    // `eventCorpId` on the forwarded payload is the cross-corp gate's SDK-typed provenance anchor and
+    // must mean "came from the frame HEADER". Stamping it only-when-the-header-exists left a
+    // body-supplied value in place, so the untrusted business blob could forge the anchor the gate
+    // trusts above body `corpId`. RED-before (restore the conditional stamp): the forged value survives.
+    const events: DingTalkInteractiveCardStreamEvent[] = []
+    const onEvent = vi.fn(async (event: DingTalkInteractiveCardStreamEvent) => { events.push(event) })
+    const { dw } = await adapter({ onEvent })
+
+    // (a) NO header eventCorpId, but the body forges one → it must be stripped, leaving the field ABSENT
+    //     (absent reads honestly as absent → the gate fail-closes, rather than trusting the forgery).
+    dw.listeners.get(TOPIC_CARD)!({
+      type: 'CALLBACK',
+      headers: { messageId: 'msg-forge', topic: TOPIC_CARD },
+      data: JSON.stringify({ outTrackId: 'd-forge', userId: 'dd_op', eventCorpId: 'corp_ATTACKER' }),
+    })
+    await vi.waitFor(() => expect(onEvent).toHaveBeenCalledTimes(1))
+    expect((events[0].payload as Record<string, unknown>)).not.toHaveProperty('eventCorpId')
+
+    // (b) A REAL header value IS stamped, and overrides whatever the body claimed.
+    dw.listeners.get(TOPIC_CARD)!({
+      type: 'CALLBACK',
+      headers: { messageId: 'msg-hdr', topic: TOPIC_CARD, eventCorpId: 'corp_REAL' },
+      data: JSON.stringify({ outTrackId: 'd-hdr', userId: 'dd_op', eventCorpId: 'corp_ATTACKER' }),
+    })
+    await vi.waitFor(() => expect(onEvent).toHaveBeenCalledTimes(2))
+    expect((events[1].payload as Record<string, unknown>).eventCorpId).toBe('corp_REAL')
+  })
+
   it('rejects a frame whose data is not a string: values-free warn, no onEvent, still acked', async () => {
     const onEvent = vi.fn(async () => {})
     const { log, dw } = await adapter({ onEvent })
