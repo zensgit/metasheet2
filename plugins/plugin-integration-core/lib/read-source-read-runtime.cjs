@@ -312,7 +312,7 @@ function buildInternalPage(raced, request, mappedRecordCount, rawContainerRowCou
     rawRowCounts: Object.freeze({ ...rawContainerRowCounts }),
     // Per-TARGET tally of how many rows each configured field actually RESOLVED on. A source path that
     // resolves nowhere maps to null on every row, silently — this is how a caller notices.
-    fieldResolution: Object.freeze({ ...((rowPlane && rowPlane.fieldResolution) || {}) }),
+    fieldResolution: Object.freeze(Object.assign(Object.create(null), rowPlane && rowPlane.fieldResolution)),
     // Identity of the rows AS THE ADAPTER RETURNED THEM, never the lossy fieldMap projection of them.
     rowFingerprints: Object.freeze({ ...((rowPlane && rowPlane.rowFingerprints) || {}) }),
   }
@@ -346,7 +346,7 @@ function executeFromAdapterRecords(plan, fieldMap, raced, request) {
       containerLocated: true,
     })
   }
-  const fieldResolution = {}
+  const fieldResolution = Object.create(null)
   const mapped = rows.map((row) => mapRecord(row, fieldMap, fieldResolution))
   const shapes = { primary: { type: 'array', arrayLength: records.length } }
   const evidence = readSourceProbeEvidence(plan, {
@@ -463,7 +463,10 @@ async function executeConfiguredRead(
   const shapes = {}
   const dataContainers = {}
   const rawRowCounts = {}
-  const fieldResolution = {}
+  // Prototype-free: fieldMap targets are operator-chosen, and `constructor` / `toString` / `valueOf` are
+  // all identifiers the config validator accepts. On a plain {} the inherited member would answer the
+  // lookup and the tally would report a field as resolved that resolved on no row at all.
+  const fieldResolution = Object.create(null)
   const rowFingerprints = {}
   let containerLocated = true
   let shapeOk = true

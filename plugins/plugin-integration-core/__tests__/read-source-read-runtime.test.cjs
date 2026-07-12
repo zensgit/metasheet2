@@ -321,7 +321,13 @@ async function testTrustedInternalPagingDoesNotWidenPublicDefaults() {
   assert.equal(state.readArgs[0].limit, 20)
   assert.equal(state.readArgs[0].options.listPageIndex, 4)
   assert.equal(outcome.data.recordCount, 20)
-  const { rowFingerprints, ...pageCounts } = outcome.page
+  const { rowFingerprints, fieldResolution, ...pageCounts } = outcome.page
+  // The tally is PROTOTYPE-FREE: a fieldMap target is operator-chosen and the validator accepts
+  // `constructor` / `toString` / `valueOf`, so a plain {} would answer the lookup from Object.prototype and
+  // report a field as resolved that resolved on no row at all.
+  assert.equal(Object.getPrototypeOf(fieldResolution), null, 'the resolution tally must not inherit Object.prototype')
+  assert.deepEqual({ ...fieldResolution }, { colGamma: 20 })
+  assert.equal(fieldResolution.constructor, undefined, 'a prototype member name answers nothing')
   assert.deepEqual(pageCounts, {
     nextCursor: null,
     done: false,
@@ -336,9 +342,6 @@ async function testTrustedInternalPagingDoesNotWidenPublicDefaults() {
     echoedPageIndex: 4,
     adapterRecordCount: 20,
     reportedRecordCount: 20,
-    // #3889 fix: how many rows each CONFIGURED target actually resolved on. A source path that resolves
-    // nowhere writes null on every row without a word — this tally is what makes that visible.
-    fieldResolution: { colGamma: 20 },
   })
   // Page identity is computed from the rows the ADAPTER returned, never from the lossy fieldMap projection
   // of them (two pages differing only in an unmapped column are still two different pages).
@@ -417,6 +420,18 @@ async function testInternalPageReportsPreSliceRawRowCountsAndAppliedLimit() {
   })
   const outcome = await executeConfiguredRead(prepared, deps, { rowCap: 20 })
   assert.equal(outcome.data.recordCount, 20, 'mapped records are still rowCap-bounded')
+
+  // The RECORD plane's internal page must be non-enumerable too — the raw plane's twin is asserted below,
+  // and this is the plane the stock-preparation feeder actually eats. Its `page` carries source totals,
+  // cursors, per-field resolution counts and row fingerprints: an accidental whole-outcome JSON response
+  // must not be able to serialize any of it.
+  const recordPlane = await executeConfiguredRead(prepared, deps, { rowCap: 20, rowSource: 'adapter_records' })
+  assert.deepEqual(Object.keys(recordPlane), ['evidence', 'data'], 'the record-plane page is not an own enumerable key')
+  const recordPlaneJson = JSON.stringify(recordPlane)
+  for (const internal of ['rowFingerprints', 'fieldResolution', 'sourceTotalCount', 'nextCursor', 'adapterRecordCount']) {
+    assert.ok(!recordPlaneJson.includes(internal), `record-plane page metadata must stay internal: ${internal}`)
+  }
+  assert.equal(recordPlane.page.rawRowCounts.primary, 37, 'the trusted caller can still read it')
   assert.equal(outcome.page.rawRowCounts.primary, 37, 'raw container length survives the rowCap slice')
   assert.equal(outcome.page.effectiveLimit, 20, 'the adapter-applied page bound is surfaced')
   assert.equal(outcome.evidence.capReached, true)

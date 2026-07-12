@@ -299,7 +299,8 @@ async function readAllMappedRows({ preparedRead, system, createAdapter }) {
   const rowsAlias = 'primary'
   const rows = []
   const headerRows = []
-  const fieldResolution = {}
+  // Prototype-free (see mapRecord): a fieldMap target may legitimately be named `constructor`.
+  const fieldResolution = Object.create(null)
   const seenCursors = new Set()
   const seenPages = new Set()
   let cursor = null
@@ -555,14 +556,20 @@ async function readAllMappedRows({ preparedRead, system, createAdapter }) {
 // source path, which names the external system's schema.
 function assertEveryConfiguredFieldResolved(fieldMap, fieldResolution, receivedRows) {
   if (receivedRows < 1) return
-  const unresolvedTargets = []
+  const unresolved = new Set()
   for (const entry of fieldMap) {
-    // The tally only ever counts UP from absent, so "resolved on no row" is simply a falsy count — there is
-    // no separate zero case to test for (an explicit `< 1` arm here would be unreachable).
-    if (!fieldResolution[entry.target]) {
-      unresolvedTargets.push(entry.target)
+    // OWN property only. A bare `fieldResolution[target]` lookup answers `constructor` / `toString` /
+    // `valueOf` from Object.prototype — all of them identifiers the config validator accepts — so a field
+    // that resolved on NOT ONE row would report as resolved and walk straight past this guard.
+    const resolvedRows = Object.prototype.hasOwnProperty.call(fieldResolution, entry.target)
+      ? fieldResolution[entry.target]
+      : 0
+    // Anything that is not a positive count fails closed, whatever its type.
+    if (!(resolvedRows >= 1)) {
+      unresolved.add(entry.target)
     }
   }
+  const unresolvedTargets = [...unresolved]
   if (unresolvedTargets.length > 0) {
     throw new StockPreparationReadonlySourceRunError(
       422,

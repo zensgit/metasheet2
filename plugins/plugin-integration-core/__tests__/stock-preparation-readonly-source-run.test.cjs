@@ -1497,6 +1497,38 @@ async function testFieldsThatResolveOnNoRowFailClosedOnTheDeclaredTotalExitToo()
   assert.equal(runtime.writes.length, 0)
 }
 
+// A fieldMap target is operator-chosen, and the config validator accepts any bounded identifier — including
+// `constructor`, `toString`, `valueOf`, `hasOwnProperty`. The resolution tally must not answer those from
+// Object.prototype: a bare lookup made a field that resolved on NOT ONE row report as resolved, and the run
+// came back `ready`. A guard whose criterion can be satisfied by the prototype chain is not a guard.
+async function testPrototypeNamedTargetsCannotSatisfyTheFieldGuard() {
+  for (const target of ['constructor', 'toString', 'valueOf', 'hasOwnProperty', 'isPrototypeOf']) {
+    const runtime = sourceRuntime('data-source:sql-readonly', () => readResult(
+      [{ id: 'material_internal_1', code: 'MAT-1' }],
+      { done: true },
+    ))
+    await assert.rejects(
+      () => runErpMaterialReadonlySource({
+        permission: 'admin',
+        syncRunId: `data_source_proto_${target}`,
+        preparedRead: preparedRead('data-source:sql-readonly', [
+          { source: 'id', target: 'erpMaterialInternalId' },
+          { source: 'code', target: 'erpMaterialCode' },
+          { source: 'nope_does_not_exist', target },
+        ]),
+        ...runtime,
+      }),
+      (error) => {
+        assert.ok(error instanceof StockPreparationReadonlySourceRunError)
+        assert.equal(error.code, 'SOURCE_RUN_FIELD_MAP_UNRESOLVED', `a '${target}' target must not pass the guard`)
+        assert.deepEqual(error.details.unresolvedTargets, [target])
+        return true
+      },
+    )
+    assert.equal(runtime.writes.length, 0)
+  }
+}
+
 // ... and a field that resolves on SOME rows is a sparse column, not a broken config.
 async function testSparseOptionalFieldIsNotABrokenConfig() {
   const runtime = sourceRuntime('data-source:sql-readonly', () => readResult(
@@ -1554,6 +1586,7 @@ async function main() {
   await testKindsAreFencedPerRunType()
   await testPagesDifferingOnlyInAnUnmappedColumnAreNotAReplay()
   await testFieldsThatResolveOnNoRowFailClosed()
+  await testPrototypeNamedTargetsCannotSatisfyTheFieldGuard()
   await testFieldsThatResolveOnNoRowFailClosedOnTheDeclaredTotalExitToo()
   await testSparseOptionalFieldIsNotABrokenConfig()
   await testRealBomTreeIsIngestedWholeNeverSilentlyTruncated()
