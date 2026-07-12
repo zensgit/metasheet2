@@ -7030,19 +7030,23 @@ async function testStockPreparationReadonlySourceRunRoutes() {
     adapterRegistry: {
       createAdapter(system) {
         return {
+          // Shaped like a REAL adapter read result: `records` IS the row plane (that is where every
+          // shipped adapter puts its normalized, paged rows) and `raw` echoes the upstream payload.
           async read(request) {
             sourceReadCalls.push({ kind: system.kind, request })
             if (system.kind === 'plm:yuantus-wrapper') {
+              const rows = [{ path: '/root/part-1', childCode: RAW_PLM_VALUE, quantity: 2 }]
               return {
-                records: [{}],
-                raw: { Rows: [{ path: '/root/part-1', childCode: RAW_PLM_VALUE, quantity: 2 }] },
-                metadata: { totalCount: 1 },
+                records: rows,
+                raw: { Rows: rows },
+                metadata: { totalCount: 1, returnedRecordCount: rows.length },
               }
             }
+            const rows = [{ FItemID: 'erp_internal_1', FNumber: RAW_ERP_VALUE, FName: 'Material Secret' }]
             return {
-              records: [{}],
-              raw: { Rows: [{ FItemID: 'erp_internal_1', FNumber: RAW_ERP_VALUE, FName: 'Material Secret' }] },
-              metadata: { dataRowCount: 1, dataPageIndex: 1 },
+              records: rows,
+              raw: { Rows: rows },
+              metadata: { dataRowCount: 1, dataPageIndex: 1, returnedRecordCount: rows.length },
             }
           },
           async upsert(input) { externalWriteCalls.push(['upsert', input]) },

@@ -50,6 +50,20 @@ function preparedRead(requiredKind, fieldMap) {
   return prepareConfiguredRead({ config: validation.normalized })
 }
 
+// A read result shaped the way the SHIPPED adapters actually shape one: `records` IS the row plane — that
+// is where every adapter puts its normalized, flattened, paged rows — and `raw` echoes the upstream payload
+// a config's containerPaths were authored against. Fixtures that carried rows ONLY in `raw` (and an empty
+// `records`) are precisely the wire-vs-fixture drift that let a 2,500-line BOM tree read as three rows.
+function readResult(rows, extra = {}) {
+  const { metadata, ...rest } = extra
+  return {
+    records: rows,
+    raw: { Rows: rows },
+    metadata: { returnedRecordCount: rows.length, ...(metadata || {}) },
+    ...rest,
+  }
+}
+
 function sourceRuntime(kind, read) {
   const reads = []
   const writes = []
@@ -94,16 +108,12 @@ function assertValuesFree(value) {
 async function testPlmFeedsPureIntakeAcrossCursorPages() {
   const runtime = sourceRuntime('plm:yuantus-wrapper', (request) => {
     const secondPage = request.cursor === 'offset:1'
-    return {
-      records: [{}],
-      nextCursor: secondPage ? null : 'offset:1',
-      done: secondPage,
-      raw: {
-        Rows: [secondPage
-          ? { path: '/root/part-2', childCode: 'PART-2', quantity: 3, unit: 'pcs' }
-          : { path: '/root/part-1', childCode: 'PLM-DRAWING-SECRET', quantity: 2, unit: SECRET }],
-      },
-    }
+    return readResult(
+      [secondPage
+        ? { path: '/root/part-2', childCode: 'PART-2', quantity: 3, unit: 'pcs' }
+        : { path: '/root/part-1', childCode: 'PLM-DRAWING-SECRET', quantity: 2, unit: SECRET }],
+      { nextCursor: secondPage ? null : 'offset:1', done: secondPage },
+    )
   })
   const result = await runPlmBomReadonlySource({
     permission: 'admin',
@@ -172,12 +182,7 @@ async function testErpK3FeedsMaterialCacheShape() {
       FNumber: start + index === 0 ? 'ERP-MATERIAL-SECRET' : `MAT-${start + index + 1}`,
       FName: start + index === 0 ? `Material ${SECRET}` : `Material ${start + index + 1}`,
     }))
-    return {
-      records: rows.map(() => ({})),
-      raw: { Rows: rows },
-      done: true,
-      metadata: { dataRowCount: 12, dataPageIndex: pageIndex },
-    }
+    return readResult(rows, { done: true, metadata: { dataRowCount: 12, dataPageIndex: pageIndex } })
   })
   const result = await runErpMaterialReadonlySource({
     permission: 'admin',
@@ -208,10 +213,10 @@ async function testErpK3FeedsMaterialCacheShape() {
 }
 
 async function testMissingRequiredMappingFailsClosed() {
-  const runtime = sourceRuntime('erp:k3-wise-webapi', () => ({
-    records: [{}],
-    raw: { Rows: [{ FNumber: 'ERP-MATERIAL-SECRET', FName: `Material ${SECRET}` }] },
-  }))
+  const runtime = sourceRuntime('erp:k3-wise-webapi', (request) => readResult(
+    [{ FNumber: 'ERP-MATERIAL-SECRET', FName: `Material ${SECRET}` }],
+    { done: true, metadata: { dataPageIndex: request.options.listPageIndex } },
+  ))
 
   await assert.rejects(
     () => runErpMaterialReadonlySource({
@@ -236,11 +241,10 @@ async function testMissingRequiredMappingFailsClosed() {
 }
 
 async function testBridgeAndConfiguredDataSourceKindsFeedTheSameContract() {
-  const bridge = sourceRuntime('bridge:legacy-sql-readonly', () => ({
-    records: [{}],
-    raw: { Rows: [{ path: '/root/bridge-part', childCode: 'BRIDGE-PART', quantity: 1 }] },
-    done: true,
-  }))
+  const bridge = sourceRuntime('bridge:legacy-sql-readonly', () => readResult(
+    [{ path: '/root/bridge-part', childCode: 'BRIDGE-PART', quantity: 1 }],
+    { done: true, metadata: { limit: 20 } },
+  ))
   const plm = await runPlmBomReadonlySource({
     permission: 'admin',
     projectId: 'business_project_bridge',
@@ -259,11 +263,10 @@ async function testBridgeAndConfiguredDataSourceKindsFeedTheSameContract() {
   assert.equal(plm.evidence.intake.result.bomSnapshotLines, 1)
   assert.equal(bridge.writes.length, 0)
 
-  const dataSource = sourceRuntime('data-source:sql-readonly', () => ({
-    records: [{}],
-    raw: { Rows: [{ id: 'material_internal_1', code: 'MAT-DS-1' }] },
-    done: true,
-  }))
+  const dataSource = sourceRuntime('data-source:sql-readonly', () => readResult(
+    [{ id: 'material_internal_1', code: 'MAT-DS-1' }],
+    { done: true },
+  ))
   const erp = await runErpMaterialReadonlySource({
     permission: 'admin',
     syncRunId: 'data_source_run_1',
@@ -304,12 +307,10 @@ async function testSourceRuntimeErrorsAreCoarse() {
 }
 
 async function testDeclaredTotalCannotEndEarly() {
-  const runtime = sourceRuntime('plm:yuantus-wrapper', () => ({
-    records: [{}],
-    raw: { Rows: [{ path: '/root/part-1', childCode: 'PART-1', quantity: 1 }] },
-    done: true,
-    metadata: { totalCount: 2 },
-  }))
+  const runtime = sourceRuntime('plm:yuantus-wrapper', () => readResult(
+    [{ path: '/root/part-1', childCode: 'PART-1', quantity: 1 }],
+    { done: true, metadata: { totalCount: 2 } },
+  ))
   await assert.rejects(
     () => runPlmBomReadonlySource({
       permission: 'admin',
@@ -337,13 +338,10 @@ async function testDeclaredTotalMustRemainStableAcrossPages() {
   let page = 0
   const runtime = sourceRuntime('plm:yuantus-wrapper', () => {
     page += 1
-    return {
-      records: [{}],
-      raw: { Rows: [{ path: `/root/part-${page}`, childCode: `PART-${page}`, quantity: 1 }] },
-      nextCursor: page === 1 ? 'offset:1' : null,
-      done: page > 1,
-      metadata: { totalCount: page === 1 ? 2 : 3 },
-    }
+    return readResult(
+      [{ path: `/root/part-${page}`, childCode: `PART-${page}`, quantity: 1 }],
+      { nextCursor: page === 1 ? 'offset:1' : null, done: page > 1, metadata: { totalCount: page === 1 ? 2 : 3 } },
+    )
   })
   await assert.rejects(
     () => runPlmBomReadonlySource({
@@ -372,13 +370,10 @@ async function testDeclaredTotalRemainsBindingWhenLaterPageOmitsIt() {
   let page = 0
   const runtime = sourceRuntime('plm:yuantus-wrapper', () => {
     page += 1
-    return {
-      records: [{}],
-      raw: { Rows: [{ path: `/root/part-${page}`, childCode: `PART-${page}`, quantity: 1 }] },
-      nextCursor: page === 1 ? 'offset:1' : null,
-      done: page > 1,
-      metadata: page === 1 ? { totalCount: 3 } : {},
-    }
+    return readResult(
+      [{ path: `/root/part-${page}`, childCode: `PART-${page}`, quantity: 1 }],
+      { nextCursor: page === 1 ? 'offset:1' : null, done: page > 1, metadata: page === 1 ? { totalCount: 3 } : {} },
+    )
   })
   await assert.rejects(
     () => runPlmBomReadonlySource({
@@ -408,11 +403,7 @@ async function testUnknownTotalCannotEndOnAnAmbiguousFullPage() {
     id: `material_internal_${index}`,
     code: `MAT-${index}`,
   }))
-  const runtime = sourceRuntime('data-source:sql-readonly', () => ({
-    records: rows.map(() => ({})),
-    raw: { Rows: rows },
-    done: true,
-  }))
+  const runtime = sourceRuntime('data-source:sql-readonly', () => readResult(rows, { done: true }))
   await assert.rejects(
     () => runErpMaterialReadonlySource({
       permission: 'admin',
@@ -505,8 +496,17 @@ function realPreparedRead({ requiredKind, object, mode, containerPaths, fieldMap
   return prepareConfiguredRead({ config: validation.normalized })
 }
 
+// The Bridge Agent hands its SQL rows through untouched, so a bridge config addresses them as they are.
 const BOM_FIELD_MAP = [
   { source: 'path', target: 'pathKey' },
+  { source: 'childCode', target: 'childDrawingNo' },
+  { source: 'quantity', target: 'designQty' },
+]
+// The PLM wrapper NORMALIZES each BOM line (childCode/quantity/parentCode/...) and keeps the untouched
+// upstream row under `rawPayload`, so a PLM config addresses the record plane — which is the only plane
+// where a flattened BOM *tree* exists at all.
+const PLM_BOM_FIELD_MAP = [
+  { source: 'rawPayload.path', target: 'pathKey' },
   { source: 'childCode', target: 'childDrawingNo' },
   { source: 'quantity', target: 'designQty' },
 ]
@@ -724,7 +724,7 @@ function plmPreparedRead() {
     object: 'bom',
     mode: 'list_page',
     containerPaths: ['data'],
-    fieldMap: BOM_FIELD_MAP,
+    fieldMap: PLM_BOM_FIELD_MAP,
   })
 }
 
@@ -790,12 +790,16 @@ async function testPlmSourceOverflowingOnePageFailsClosedAsTooLarge() {
 // PR body promise: cursor loops are detected. A source that keeps handing back the same cursor must not
 // spin, and must not be believed.
 async function testRepeatedCursorFailsClosed() {
-  const runtime = sourceRuntime('data-source:sql-readonly', () => ({
-    records: [{}],
-    raw: { Rows: [{ id: 'material_internal_1', code: 'MAT-1' }] },
-    nextCursor: 'offset:stuck',
-    done: false,
-  }))
+  let cursorLoopPage = 0
+  const runtime = sourceRuntime('data-source:sql-readonly', () => {
+    cursorLoopPage += 1
+    // Fresh rows every page, but the SAME cursor: this exercises the cursor-loop guard specifically,
+    // rather than the "the source replayed a page it already served" guard.
+    return readResult(
+      [{ id: `material_internal_${cursorLoopPage}`, code: `MAT-${cursorLoopPage}` }],
+      { nextCursor: 'offset:stuck', done: false },
+    )
+  })
   await assert.rejects(
     () => runErpMaterialReadonlySource({
       permission: 'admin',
@@ -820,12 +824,10 @@ async function testBoundedPageBudgetFailsClosed() {
   let page = 0
   const runtime = sourceRuntime('data-source:sql-readonly', () => {
     page += 1
-    return {
-      records: [{}],
-      raw: { Rows: [{ id: `material_internal_${page}`, code: `MAT-${page}` }] },
-      nextCursor: `offset:${page}`,
-      done: false,
-    }
+    return readResult(
+      [{ id: `material_internal_${page}`, code: `MAT-${page}` }],
+      { nextCursor: `offset:${page}`, done: false },
+    )
   })
   await assert.rejects(
     () => runErpMaterialReadonlySource({
@@ -860,12 +862,10 @@ async function testK3MaterialCeilingBehaviourIsHonest() {
     { source: 'FName', target: 'erpMaterialName' },
   ]
 
-  const withTotal = sourceRuntime('erp:k3-wise-webapi', (request) => ({
-    records: [],
-    raw: { Rows: k3Rows(request.options.listPageIndex) },
-    done: true,
-    metadata: { dataRowCount: ceiling, dataPageIndex: request.options.listPageIndex },
-  }))
+  const withTotal = sourceRuntime('erp:k3-wise-webapi', (request) => readResult(
+    k3Rows(request.options.listPageIndex),
+    { done: true, metadata: { dataRowCount: ceiling, dataPageIndex: request.options.listPageIndex } },
+  ))
   const result = await runErpMaterialReadonlySource({
     permission: 'admin',
     syncRunId: 'erp_source_run_ceiling',
@@ -878,11 +878,10 @@ async function testK3MaterialCeilingBehaviourIsHonest() {
   assert.equal(result.evidence.completenessProof, 'declared_total')
   assert.equal(result.evidence.sourceTotalKnown, true)
 
-  const withoutTotal = sourceRuntime('erp:k3-wise-webapi', (request) => ({
-    records: [],
-    raw: { Rows: k3Rows(request.options.listPageIndex) },
-    done: true,
-  }))
+  const withoutTotal = sourceRuntime('erp:k3-wise-webapi', (request) => readResult(
+    k3Rows(request.options.listPageIndex),
+    { done: true, metadata: { dataPageIndex: request.options.listPageIndex } },
+  ))
   await assert.rejects(
     () => runErpMaterialReadonlySource({
       permission: 'admin',
@@ -899,12 +898,10 @@ async function testK3MaterialCeilingBehaviourIsHonest() {
 
 // A source claiming MORE rows than it declared is inconsistent, not merely surprising.
 async function testDeclaredTotalCannotBeExceeded() {
-  const runtime = sourceRuntime('data-source:sql-readonly', () => ({
-    records: [],
-    raw: { Rows: [{ id: 'material_internal_1', code: 'MAT-1' }, { id: 'material_internal_2', code: 'MAT-2' }] },
-    done: true,
-    metadata: { totalCount: 1 },
-  }))
+  const runtime = sourceRuntime('data-source:sql-readonly', () => readResult(
+    [{ id: 'material_internal_1', code: 'MAT-1' }, { id: 'material_internal_2', code: 'MAT-2' }],
+    { done: true, metadata: { totalCount: 1 } },
+  ))
   await assert.rejects(
     () => runErpMaterialReadonlySource({
       permission: 'admin',
@@ -925,12 +922,10 @@ async function testDeclaredTotalCannotBeExceeded() {
 
 // "This is the last page" and "here is the next page" cannot both be true.
 async function testTerminalPageWithCursorFailsClosed() {
-  const runtime = sourceRuntime('data-source:sql-readonly', () => ({
-    records: [],
-    raw: { Rows: [{ id: 'material_internal_1', code: 'MAT-1' }] },
-    nextCursor: 'offset:1',
-    done: true,
-  }))
+  const runtime = sourceRuntime('data-source:sql-readonly', () => readResult(
+    [{ id: 'material_internal_1', code: 'MAT-1' }],
+    { nextCursor: 'offset:1', done: true },
+  ))
   await assert.rejects(
     () => runErpMaterialReadonlySource({
       permission: 'admin',
@@ -1009,11 +1004,7 @@ async function testResolverLookupModeIsRejectedBeforeAnyRead() {
 
 // An empty source is an empty source — never a "ready" snapshot with nothing in it.
 async function testEmptySourceFailsClosed() {
-  const runtime = sourceRuntime('data-source:sql-readonly', () => ({
-    records: [],
-    raw: { Rows: [] },
-    done: true,
-  }))
+  const runtime = sourceRuntime('data-source:sql-readonly', () => readResult([], { done: true }))
   await assert.rejects(
     () => runErpMaterialReadonlySource({
       permission: 'admin',

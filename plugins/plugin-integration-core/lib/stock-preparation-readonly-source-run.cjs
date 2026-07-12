@@ -1,5 +1,6 @@
 'use strict'
 
+const { createHash } = require('node:crypto')
 const { executeConfiguredRead } = require('./read-source-read-runtime.cjs')
 const {
   normalizeStockPreparationReadonlyIntake,
@@ -7,6 +8,11 @@ const {
 const { isPlainObject, optionalString } = require('./stock-preparation-common.cjs')
 
 const REQUIRED_PERMISSION = 'admin'
+// The feeder ingests business rows, so it reads the ADAPTER'S row plane — the rows the adapter normalized,
+// flattened and paged — never the unprocessed upstream payload. Walking the raw payload silently bypasses
+// that entire layer: a PLM BOM *tree* presents as a single root node there (its 2,500 flattened lines exist
+// only in the record plane), and data-source:sql-readonly has no raw payload at all.
+const ROW_SOURCE = 'adapter_records'
 // TRUSTED_EXECUTION_MAX_ROW_CAP (read-source-read-runtime.cjs) is the hard ceiling for any page we may
 // request; the cursor-paging kinds honour a limit that large, so this is the page they get.
 const SOURCE_PAGE_SIZE = 1000
@@ -35,12 +41,38 @@ const SOURCE_MAX_PAGES = 10
 //
 // `pagination: 'none'` is not a nicety — it means a full page from that kind can NEVER be continued, so
 // completeness can never be proven and the run must fail closed rather than ingest a truncated snapshot.
+//
+// `limitContract` says HOW we learn the page bound the adapter actually applied. There is no default and no
+// fallback: "we asked for 1000, so it must have been 1000" is the assumption that let a clamped 20-row page
+// pass as a complete 5,000-row source in the first place.
+//   'adapter_reported' — the adapter CLAMPS, and reports what it applied (bridge: metadata.limit). If a page
+//                        arrives without that report we cannot know what bound was applied -> fail closed.
+//   'honours_request'  — the adapter executes the limit we send, verbatim, and never silently lowers it.
+//                        Each one below is asserted against its adapter source. If such an adapter ever DOES
+//                        report a smaller applied limit we believe the smaller number (fail-closed direction).
+const ADAPTER_REPORTED_LIMIT = 'adapter_reported'
+const HONOURS_REQUESTED_LIMIT = 'honours_request'
 const SOURCE_KIND_CAPABILITIES = Object.freeze({
-  'plm:yuantus-wrapper': Object.freeze({ pageSize: SOURCE_PAGE_SIZE, pagination: 'cursor' }),
-  'data-source:sql-readonly': Object.freeze({ pageSize: SOURCE_PAGE_SIZE, pagination: 'cursor' }),
-  'erp:k3-wise-sqlserver': Object.freeze({ pageSize: SOURCE_PAGE_SIZE, pagination: 'none' }),
-  'bridge:legacy-sql-readonly': Object.freeze({ pageSize: BRIDGE_SOURCE_PAGE_SIZE, pagination: 'none' }),
-  'erp:k3-wise-webapi': Object.freeze({ pageSize: K3_WEBAPI_SOURCE_PAGE_SIZE, pagination: 'page_index' }),
+  // read(): passes request.limit straight to the PLM client and slices the flattened BOM by it.
+  'plm:yuantus-wrapper': Object.freeze({
+    pageSize: SOURCE_PAGE_SIZE, pagination: 'cursor', limitContract: HONOURS_REQUESTED_LIMIT,
+  }),
+  // read(): selectOptions.limit = request.limit; the facade REJECTS an over-max limit, never clamps it.
+  'data-source:sql-readonly': Object.freeze({
+    pageSize: SOURCE_PAGE_SIZE, pagination: 'cursor', limitContract: HONOURS_REQUESTED_LIMIT,
+  }),
+  // executor limitPolicy: maxLimit 10000, overMax 'clamp' — our 1000 is far below the clamp point.
+  'erp:k3-wise-sqlserver': Object.freeze({
+    pageSize: SOURCE_PAGE_SIZE, pagination: 'none', limitContract: HONOURS_REQUESTED_LIMIT,
+  }),
+  // normalizeBridgeLimit(): Math.min(requested, config.maxLimit) — CLAMPS, and echoes it in metadata.limit.
+  'bridge:legacy-sql-readonly': Object.freeze({
+    pageSize: BRIDGE_SOURCE_PAGE_SIZE, pagination: 'none', limitContract: ADAPTER_REPORTED_LIMIT,
+  }),
+  // LIST read THROWS when request.limit exceeds maxListLimit — it can never quietly serve a smaller page.
+  'erp:k3-wise-webapi': Object.freeze({
+    pageSize: K3_WEBAPI_SOURCE_PAGE_SIZE, pagination: 'page_index', limitContract: HONOURS_REQUESTED_LIMIT,
+  }),
 })
 
 const PLM_SOURCE_KINDS = new Set([
@@ -203,27 +235,47 @@ function sourceCapability(plan) {
   const pagination = capability.pagination === 'page_index' && plan.mode !== 'list_page'
     ? 'none'
     : capability.pagination
-  return { pageSize: capability.pageSize, pagination }
+  if (capability.limitContract !== ADAPTER_REPORTED_LIMIT && capability.limitContract !== HONOURS_REQUESTED_LIMIT) {
+    throw new StockPreparationReadonlySourceRunError(
+      409,
+      'SOURCE_RUN_KIND_NOT_ALLOWED',
+      'configured source kind declares no effective-page-size contract',
+      { sourceChannel: sourceChannel(plan.requiredKind) },
+    )
+  }
+  return { pageSize: capability.pageSize, pagination, limitContract: capability.limitContract }
 }
 
 // The page bound the ADAPTER APPLIED, which is the only one a full-page test may be judged against. The
 // Bridge Agent clamps our 500 to its config.maxLimit (default 20) and says so in metadata.limit; measuring
 // "full page" against the 500 WE asked for makes the guard structurally unable to fire (20 >= 500 is false)
-// and a 5,000-row source silently becomes a 20-row `ready` snapshot. An adapter claiming a LARGER page than
-// we requested is not believed: the smaller bound is the fail-closed direction (it calls a page full sooner,
-// which then demands a proven continuation).
-function effectivePageSize(outcome, requestedPageSize) {
+// and a 5,000-row source silently becomes a 20-row `ready` snapshot.
+//
+// There is NO fallback to "well, we asked for N". A kind whose adapter clamps must report what it applied
+// (limitContract 'adapter_reported'); if that report is missing, the applied bound is unknown and the page
+// is unprovable — never assumed. A kind contracted to honour the request uses the request, and if it ever
+// reports a SMALLER applied bound we believe the smaller number (the fail-closed direction: it calls a page
+// full sooner, which then demands a proven continuation). A larger claim is never believed.
+function effectivePageSize(outcome, requestedPageSize, limitContract) {
   const applied = outcome.page && outcome.page.effectiveLimit
-  if (!Number.isInteger(applied) || applied < 1) return requestedPageSize
-  return Math.min(applied, requestedPageSize)
+  if (Number.isInteger(applied) && applied >= 1) return Math.min(applied, requestedPageSize)
+  return limitContract === ADAPTER_REPORTED_LIMIT ? null : requestedPageSize
 }
 
 // Rows in the RAW container as the adapter returned them, BEFORE executeConfiguredRead sliced it to
-// rowCap. null for a single-object container (single_record header), which cannot be truncated.
+// rowCap. null when the raw payload has no such array (the row plane is the adapter's `records`).
 function rawContainerRowCount(outcome, alias) {
   const counts = outcome.page && outcome.page.rawRowCounts
   const count = isPlainObject(counts) ? counts[alias] : null
   return Number.isInteger(count) ? count : null
+}
+
+// A page's identity, derived from the rows it carried. Two pages of a paging read must not be the same page:
+// a source that ignores the page index (or the offset cursor) and serves page 1 forever otherwise looks like
+// a perfectly paged read — and its duplicate rows can even ADD UP to the total it declared.
+// Internal only: this is derived from business values and never leaves the module.
+function pageFingerprint(rows) {
+  return createHash('sha256').update(JSON.stringify(rows)).digest('hex')
 }
 
 // Read every mapped row of an approved readonly source, and PROVE the result is the whole source.
@@ -235,12 +287,17 @@ function rawContainerRowCount(outcome, alias) {
 // the Bridge Agent and the K3 SQL-Server executor return done:true unconditionally, including on a page
 // they just clamped. A snapshot we cannot prove complete is never handed to the intake contract.
 async function readAllMappedRows({ preparedRead, system, createAdapter }) {
-  if (preparedRead.plan.mode === 'resolver_lookup') {
+  // resolver_lookup resolves ONE key to ONE value: it has no row plane to feed an intake with.
+  // detail_with_lines splits a payload into header + lines, which only exists in the RAW upstream shape —
+  // and the raw shape is exactly the layer a feeder must not read (see ROW_SOURCE below). It is also
+  // unreachable in practice: the probe request builder only ever sends the K3 `options.bomKey` dialect for
+  // that mode, so the PLM wrapper rejects it outright. Refuse it rather than pretend to support it.
+  if (preparedRead.plan.mode !== 'list_page' && preparedRead.plan.mode !== 'single_record') {
     throw new StockPreparationReadonlySourceRunError(
       422,
       'SOURCE_RUN_MODE_NOT_SUPPORTED',
-      'resolver lookup cannot feed a stock-preparation source run',
-      { mode: 'resolver_lookup' },
+      'this read mode cannot feed a stock-preparation source run',
+      { mode: optionalString(preparedRead.plan.mode) || 'unknown' },
     )
   }
 
@@ -248,18 +305,19 @@ async function readAllMappedRows({ preparedRead, system, createAdapter }) {
   const pageSize = capability.pageSize
   const usesPageIndex = capability.pagination === 'page_index'
   const supportsCursor = capability.pagination === 'cursor'
-  const rowsAlias = preparedRead.plan.mode === 'detail_with_lines' ? 'lines' : 'primary'
+  const rowsAlias = 'primary'
   const rows = []
-  let headerRows = []
+  const headerRows = []
   const seenCursors = new Set()
+  const seenPages = new Set()
   let cursor = null
   let declaredSourceTotal = null
   let appliedPageSize = pageSize
 
   for (let page = 1; page <= SOURCE_MAX_PAGES; page += 1) {
     const execution = usesPageIndex
-      ? { rowCap: pageSize, pageIndex: page }
-      : { rowCap: pageSize, cursor }
+      ? { rowCap: pageSize, pageIndex: page, rowSource: ROW_SOURCE }
+      : { rowCap: pageSize, cursor, rowSource: ROW_SOURCE }
     let outcome
     try {
       outcome = await executeConfiguredRead(
@@ -287,26 +345,104 @@ async function readAllMappedRows({ preparedRead, system, createAdapter }) {
       )
     }
 
-    // A source that ignored our page bound and handed back MORE rows than we asked for was silently
-    // truncated by the executor's rowCap slice. Refuse it by name — "too large" is a different fact from
-    // "we cannot prove this is complete", and an operator must not have to guess which one happened.
+    // The adapter's own count of the rows in this page, and what its metadata separately CLAIMS it
+    // returned. Both are needed before a single row is trusted.
+    const adapterRowCount = outcome.page && outcome.page.adapterRecordCount
+    const reportedRowCount = outcome.page && outcome.page.reportedRecordCount
+    if (!Number.isInteger(adapterRowCount)) {
+      throw new StockPreparationReadonlySourceRunError(
+        502,
+        'SOURCE_RUN_SOURCE_SHAPE_UNVERIFIABLE',
+        'configured readonly source returned no row plane to verify',
+        { pageSize },
+      )
+    }
+
+    // A source that ignored our page bound and handed back MORE rows than it accepts was silently truncated
+    // by the executor's rowCap slice. Refuse it by name — "too large" is a different fact from "we cannot
+    // prove this is complete", and an operator must not have to guess which one happened. Both planes are
+    // checked: the adapter's rows, and the raw upstream container when the payload carries one.
     const rawRowCount = rawContainerRowCount(outcome, rowsAlias)
-    if (rawRowCount !== null && rawRowCount > pageSize) {
+    const overflowRows = adapterRowCount > pageSize
+      ? adapterRowCount
+      : (rawRowCount !== null && rawRowCount > pageSize ? rawRowCount : null)
+    if (overflowRows !== null) {
       throw new StockPreparationReadonlySourceRunError(
         422,
         'SOURCE_RUN_RESULT_TOO_LARGE',
         'configured readonly source returned more rows in one page than the feeder accepts',
-        { receivedRows: rawRowCount, pageSize },
+        { receivedRows: overflowRows, pageSize },
       )
     }
 
     const pageRows = containerRows(outcome.data, rowsAlias)
-    if (page === 1 && preparedRead.plan.mode === 'detail_with_lines') {
-      headerRows = containerRows(outcome.data, 'header')
+    // Structural cross-check: the adapter's row plane, the count its metadata reports, and the rows we
+    // actually mapped must be the SAME NUMBER. When they disagree, the config is not reading the source's
+    // rows — which is precisely what a BOM tree used to look like (1,000 flattened lines next to one mapped
+    // root node) — and no count computed from them can be trusted.
+    if (pageRows.length !== adapterRowCount
+      || (Number.isInteger(reportedRowCount) && reportedRowCount !== adapterRowCount)) {
+      throw new StockPreparationReadonlySourceRunError(
+        502,
+        'SOURCE_RUN_SOURCE_SHAPE_UNVERIFIABLE',
+        'configured readonly source disagrees with itself about how many rows this page holds',
+        {
+          mappedRows: pageRows.length,
+          adapterRows: adapterRowCount,
+          ...(Number.isInteger(reportedRowCount) ? { reportedRows: reportedRowCount } : {}),
+        },
+      )
     }
+
+    // Paging must be PROVEN to advance, not assumed. A K3 endpoint that ignores PageIndex (a custom view or
+    // stored proc that honours Top but not PageIndex, and still returns ROWCOUNT) serves page 1 to all ten
+    // requests; the duplicate rows then ADD UP to the total it declared and satisfy the strongest proof we
+    // have. So: the source must echo back the page it applied, and it must be the page we asked for.
+    if (usesPageIndex) {
+      const echoedPageIndex = outcome.page && outcome.page.echoedPageIndex
+      if (!Number.isInteger(echoedPageIndex) || echoedPageIndex !== page) {
+        throw new StockPreparationReadonlySourceRunError(
+          502,
+          'SOURCE_RUN_PAGINATION_UNVERIFIED',
+          'configured readonly source did not confirm which page it served',
+          {
+            requestedPageIndex: page,
+            ...(Number.isInteger(echoedPageIndex) ? { echoedPageIndex } : { echoedPageIndex: null }),
+          },
+        )
+      }
+    }
+
+    // ... and the page must actually be a different page. This catches every "pagination did not move"
+    // shape at once, whatever the mechanism: a page index the source ignores, an offset cursor a client
+    // drops on the floor, a bridge agent replaying its only page.
+    if (pageRows.length > 0) {
+      const fingerprint = pageFingerprint(pageRows)
+      if (seenPages.has(fingerprint)) {
+        throw new StockPreparationReadonlySourceRunError(
+          502,
+          'SOURCE_RUN_PAGE_NOT_ADVANCING',
+          'configured readonly source repeated a page it had already served',
+          { page, receivedRows: rows.length },
+        )
+      }
+      seenPages.add(fingerprint)
+    }
+
     rows.push(...pageRows)
 
-    appliedPageSize = effectivePageSize(outcome, pageSize)
+    const applied = effectivePageSize(outcome, pageSize, capability.limitContract)
+    if (applied === null) {
+      // The kind is contracted to report the bound it applied (it clamps), and did not. We cannot tell a
+      // full page from a short one, so nothing about this read is provable.
+      throw new StockPreparationReadonlySourceRunError(
+        502,
+        'SOURCE_RUN_COMPLETENESS_UNPROVABLE',
+        'configured readonly source did not report the page bound it applied',
+        { pageSize, receivedRows: rows.length, reason: 'effective_page_size_unknown' },
+      )
+    }
+    appliedPageSize = applied
     const pageIsFull = pageRows.length >= appliedPageSize
 
     const reportedSourceTotal = outcome.page && outcome.page.sourceTotalCount
@@ -462,6 +598,23 @@ function assertIntakeReady(intake, expectedField) {
   }
 }
 
+// Fail closed when the source's own rows say they belong to a different project than the run was scoped to.
+// A row that carries no source project at all says nothing and is left to the intake contract; a row that
+// NAMES a project must name this one.
+function assertRowsStayInProjectScope(rows, sourceProjectNo, mappedProject) {
+  const candidates = [mappedProject, ...rows]
+  for (const row of candidates) {
+    const rowProjectNo = optionalString(row && row.sourceProjectNo)
+    if (rowProjectNo && rowProjectNo !== sourceProjectNo) {
+      throw new StockPreparationReadonlySourceRunError(
+        409,
+        'SOURCE_RUN_PROJECT_SCOPE_MISMATCH',
+        'configured source project does not match the requested project scope',
+      )
+    }
+  }
+}
+
 function buildSourceRunOutcome(sourceRun, channel, source, intake) {
   return {
     sourceRun,
@@ -536,14 +689,12 @@ async function runPlmBomReadonlySource(input = {}) {
     createAdapter: input.createAdapter,
   })
   const mappedProject = source.headerRows[0] || {}
-  const mappedSourceProjectNo = optionalString(mappedProject.sourceProjectNo)
-  if (mappedSourceProjectNo && mappedSourceProjectNo !== sourceProjectNo) {
-    throw new StockPreparationReadonlySourceRunError(
-      409,
-      'SOURCE_RUN_PROJECT_SCOPE_MISMATCH',
-      'configured source project does not match the requested project scope',
-    )
-  }
+  // Project scope is enforced against every row the source actually returned, not just a header row. The
+  // header only exists in detail_with_lines — a mode no usable PLM config can reach — so a guard that read
+  // only the header could never fire on the live path: an approved config pointed at ANOTHER project's BOM
+  // would have been ingested under this project's id without a word. Any row that names its source project
+  // must name the one we asked for.
+  assertRowsStayInProjectScope(source.rows, sourceProjectNo, mappedProject)
 
   const intake = normalizeIntake({
     sourceSystem: sourceChannel(kind),
