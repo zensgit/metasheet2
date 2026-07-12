@@ -309,6 +309,38 @@ async function main() {
     assert.equal(recordsApi.createCalls.length, 0, 'nothing was written with a dropped field')
   })
 
+  // ---- the target-sheet fence: a call that names ANOTHER sheet is refused, not silently redirected ----
+  // This is the last lock on "stock-prep writes only ever touch its own 9 internal tables". It was the one
+  // guard with zero coverage (#4163 review F1). `withTargetSheet` also overwrites sheetId, so deleting the
+  // throw would make an out-of-scope attempt SILENT rather than successful — but silence is exactly how a
+  // caller drifting to the wrong sheet stops being noticed. The fence must speak.
+  await run('#4163 a records call naming a DIFFERENT sheet is refused (403), on every verb', async () => {
+    const { createTargetScopedRecordsApi, StockPreparationTableActionError } =
+      require(path.join(__dirname, '..', 'lib', 'stock-preparation-table-actions.cjs'))
+    const recordsApi = makeRecordsApi()
+    const scoped = await createTargetScopedRecordsApi(
+      recordsApi,
+      { sheetId: BATCH_SHEET_ID, objectId: BATCH_OBJECT_ID },
+      { provisioning: makeProvisioning(), projectId: STAGING_PROJECT_ID },
+    )
+    const foreignSheetId = `${BATCH_SHEET_ID}_someone_elses_sheet`
+    for (const call of [
+      () => scoped.createRecord({ sheetId: foreignSheetId, data: { snapshotBatchId: 'b1' } }),
+      () => scoped.patchRecord({ sheetId: foreignSheetId, recordId: 'rec_1', changes: { snapshotStatus: 'draft' } }),
+      () => scoped.queryRecords({ sheetId: foreignSheetId, filters: { snapshotBatchId: 'b1' } }),
+    ]) {
+      await assert.rejects(call, (error) =>
+        error instanceof StockPreparationTableActionError &&
+        error.status === 403 &&
+        error.code === 'TABLE_ACTION_TARGET_SCOPE_VIOLATION')
+    }
+    assert.equal(recordsApi.createCalls.length, 0, 'no write escaped to the foreign sheet')
+    // The bound sheet still works — the fence is scoped, not a blanket refusal.
+    await scoped.createRecord({ data: { snapshotBatchId: 'b1' } })
+    assert.equal(recordsApi.createCalls.length, 1)
+    assert.equal(recordsApi.createCalls[0].sheetId, BATCH_SHEET_ID)
+  })
+
   // ---- (b) idempotency + (c) immutability: a repeat persist of the same batch id is skipped ----
   await run('a second persist of the same snapshotBatchId is skipped (no new batch create, no patch)', async () => {
     const recordsApi = makeRecordsApi()
