@@ -82,6 +82,9 @@ export async function resolveDingTalkCardPersonDeliveryRetentionSchedulerLeaderO
     : undefined
   return {
     leaderLock: new RedisLeaderLock({ client: redis as unknown as RedisLeaderLockClient }),
+    // Owner review P2: UNIQUE per sweep. Previously this shared the generic default key with the group
+    // sweep, so whichever booted first won and THIS sweep never ran at all.
+    lockKey: 'ledger-retention:dingtalk-card-person-deliveries:leader',
     ownerId: `dingtalk-card-person-delivery-retention:${process.pid}:${randomBytes(4).toString('hex')}`,
     ttlMs,
     retryIntervalMs,
