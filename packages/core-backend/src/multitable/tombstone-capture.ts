@@ -205,17 +205,19 @@ export async function insertInboundLinkTombstones(
 }
 
 /**
- * RESERVED SEAM (design-lock §2 capture point 3) — NOT wired to any retype path in this PR. When the 4c-1
- * lossy-retype-revert lands, its coerce-write step should call this BEFORE overwriting/dropping the
- * pre-coerce cell values, passing the rows it is about to lose (already computed in JS during the coerce
- * pass, since retype coercion is a per-row JS transform, unlike the field-delete/record-delete points
- * above which can select the pre-image straight out of SQL). Anchors to the retype's OWN config revision
- * id (§2 point 3 / §4 R2 — "the revision that triggered the loss", not any later revert of it).
+ * Capture point 3 (design-lock §2) — **WIRED AND LIVE** since 4c-1 landed. `applyLossyRetypeCellRewrite`
+ * (`routes/univer-meta.ts:6407`) calls this BEFORE overwriting/dropping the pre-coerce cell values, passing
+ * the rows it is about to lose (computed in JS during the coerce pass, since retype coercion is a per-row JS
+ * transform, unlike the field-delete/record-delete points above which can select the pre-image straight out
+ * of SQL). Anchors to the retype's OWN config revision id (§2 point 3 / §4 R2 — "the revision that triggered
+ * the loss", not any later revert of it).
  * Batches via `jsonb_to_recordset` (the one existing bulk-insert-from-JS-array idiom in this module,
  * mirroring `record-subscription-service.ts`'s `insertRecordSubscriptionNotifications`) rather than a
  * per-row INSERT, consistent with the "single batched insert, no row-by-row round trip" discipline used
- * by the two wired capture points. The caller is responsible for its own cap-check (this seam performs
- * none) — 4c-1 must add one when it wires this in.
+ * by the two other capture points. The caller is responsible for its own cap-check (this seam performs
+ * none); the live caller satisfies that with `assertWithinCaptureCap(preImages.length)` immediately before
+ * this call, inside the same `isTombstoneCaptureEnabled()` gate — so an over-cap capture THROWS and the
+ * whole revert rolls back (fail-closed: "capture on ⇒ every destruction is already captured").
  */
 export async function captureLossyRetypePreImageRows(
   query: TombstoneQueryFn,
