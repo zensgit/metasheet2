@@ -16,42 +16,8 @@
 // ERP material codes, design/issue quantities, unit symbols, or factors ever cross — the
 // value-bearing detail surface stays OWNER-GATED (OD-W3-1) and is deliberately NOT in the MVP.
 import { apiFetch } from '../../../utils/api'
-import { buildQueryString, parseIntegrationResponse, type IntegrationScope } from '../workbench'
+import { buildQueryString, type IntegrationScope } from '../workbench'
 import { parseStockPreparationConfirmResponse } from './confirmApi'
-
-export type StockPreparationPrepStatus = 'draft' | 'ready' | 'held' | 'confirmed' | 'cancelled'
-
-export type StockPreparationUnitStatus = 'converted' | 'pending_confirm' | 'missing_rule' | 'conflict'
-
-export interface StockPreparationLineSummary {
-  totalLineCount: number
-  prepStatusCounts: Record<StockPreparationPrepStatus | string, number>
-  unitStatusCounts: Record<StockPreparationUnitStatus | string, number>
-  mappingStatusCounts: Record<string, number>
-  exceptionLinkedLineCount: number
-}
-
-/**
- * Values-free summary of the stock-preparation-line table for a project/snapshot batch.
- * GET /api/integration/stock-preparation/prep-lines/summary
- *
- * NOTE: sp-fe-shell stub predating the W5a real read below — the design-vocabulary types above stay
- * with it. The endpoint is not served yet; view 5 reads listStockPreparationPrepLines instead.
- */
-export async function getStockPreparationLineSummary(
-  scope: IntegrationScope & { projectId?: string | null; snapshotBatchId?: string | null } = {},
-): Promise<StockPreparationLineSummary> {
-  const query = buildQueryString({
-    tenantId: scope.tenantId,
-    workspaceId: scope.workspaceId,
-    projectId: scope.projectId,
-    snapshotBatchId: scope.snapshotBatchId,
-  })
-  const response = await apiFetch(
-    `/api/integration/stock-preparation/prep-lines/summary${query ? `?${query}` : ''}`,
-  )
-  return parseIntegrationResponse<StockPreparationLineSummary>(response)
-}
 
 // ── W5a prep-line list (view 5 real read) ─────────────────────────────────────────────────────────
 
