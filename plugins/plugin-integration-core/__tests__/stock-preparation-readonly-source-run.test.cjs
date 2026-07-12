@@ -1069,8 +1069,9 @@ async function testRealBomTreeIsIngestedWholeNeverSilentlyTruncated() {
   assertValuesFree(publicReadonlySourceRunResult(result))
 }
 
-// The same tree through a config that still addresses the RAW payload: the rows no longer silently vanish —
-// all 2,500 reach the intake contract and are judged there. Fail-closed, never a three-row `ready`.
+// The same tree through a config that still addresses the RAW payload: the rows no longer silently vanish,
+// and the config is now rejected BY NAME — `path` does not exist on the plane we actually read, so it would
+// have been null on all 2,500 rows. Fail-closed, never a three-row `ready` and never a null column.
 async function testTreeReadWithARawPlaneConfigFailsClosedInsteadOfTruncating() {
   const client = { async getProductBOM() { return { data: [bomTree(2500)] } } }
   await assert.rejects(
@@ -1095,8 +1096,11 @@ async function testTreeReadWithARawPlaneConfigFailsClosedInsteadOfTruncating() {
       }),
     }),
     (error) => {
-      assert.equal(error.code, 'SOURCE_RUN_REQUIRED_SHAPE_MISSING')
-      assert.equal(error.details.rowErrors, 2500, 'all 2500 lines reached the intake and were judged there')
+      assert.equal(error.code, 'SOURCE_RUN_FIELD_MAP_UNRESOLVED')
+      assert.equal(error.status, 422)
+      assert.deepEqual(error.details.unresolvedTargets, ['pathKey'], 'the field that resolves nowhere is named')
+      assert.equal(error.details.receivedRows, 2500)
+      assertValuesFree(error)
       return true
     },
   )
@@ -1336,6 +1340,147 @@ async function testDetailWithLinesModeIsRefused() {
   assert.equal(runtime.reads.length, 0, 'an unsupported mode fails before any external read')
 }
 
+// The kind allowlists are PER RUN TYPE: an ERP/K3 config must not be executed by the PLM BOM run, and a PLM
+// config must not be executed by the ERP material run. The only kind test we had used `'http'`, which is not
+// in the capability table at all — so it was stopped by a DIFFERENT guard downstream and this one was never
+// exercised. Use kinds that ARE in the table but belong to the other run type.
+async function testKindsAreFencedPerRunType() {
+  const k3Runtime = sourceRuntime('erp:k3-wise-webapi', () => {
+    throw new Error('adapter must not run')
+  })
+  await assert.rejects(
+    () => runPlmBomReadonlySource({
+      permission: 'admin',
+      projectId: 'business_project_wrong_kind',
+      sourceProjectNo: 'wrong_kind_project',
+      syncRunId: 'plm_source_run_wrong_kind',
+      snapshotBatchId: 'snapshot_wrong_kind',
+      snapshotVersion: 1,
+      preparedRead: preparedRead('erp:k3-wise-webapi', [
+        { source: 'FItemID', target: 'erpMaterialInternalId' },
+        { source: 'FNumber', target: 'erpMaterialCode' },
+      ]),
+      ...k3Runtime,
+    }),
+    (error) => error instanceof StockPreparationReadonlySourceRunError
+      && error.code === 'SOURCE_RUN_KIND_NOT_ALLOWED'
+      && error.status === 409
+      && error.details.runType === 'plm_bom',
+  )
+  assert.equal(k3Runtime.reads.length, 0, 'an ERP config never reaches the source through the PLM run')
+
+  const plmRuntime = sourceRuntime('plm:yuantus-wrapper', () => {
+    throw new Error('adapter must not run')
+  })
+  await assert.rejects(
+    () => runErpMaterialReadonlySource({
+      permission: 'admin',
+      syncRunId: 'erp_source_run_wrong_kind',
+      preparedRead: preparedRead('plm:yuantus-wrapper', [
+        { source: 'path', target: 'pathKey' },
+        { source: 'childCode', target: 'childDrawingNo' },
+        { source: 'quantity', target: 'designQty' },
+      ]),
+      ...plmRuntime,
+    }),
+    (error) => error instanceof StockPreparationReadonlySourceRunError
+      && error.code === 'SOURCE_RUN_KIND_NOT_ALLOWED'
+      && error.details.runType === 'erp_material',
+  )
+  assert.equal(plmRuntime.reads.length, 0, 'a PLM config never reaches the source through the ERP run')
+}
+
+// A page's identity must come from the rows the ADAPTER returned, not from the fieldMap projection of them.
+// The projection is lossy: two genuinely different pages that differ only in a column the config does not
+// map would collide, and the run would be killed as a "replayed page".
+async function testPagesDifferingOnlyInAnUnmappedColumnAreNotAReplay() {
+  let page = 0
+  const runtime = sourceRuntime('data-source:sql-readonly', () => {
+    page += 1
+    // Same mapped columns on both pages; only `serialNo` — which the fieldMap does NOT map — differs.
+    const rows = [{ id: 'material_internal_1', code: 'MAT-1', serialNo: `SN-${page}` }]
+    return readResult(rows, { nextCursor: page === 1 ? 'offset:1' : null, done: page > 1 })
+  })
+  const result = await runErpMaterialReadonlySource({
+    permission: 'admin',
+    syncRunId: 'data_source_unmapped_column',
+    preparedRead: preparedRead('data-source:sql-readonly', [
+      { source: 'id', target: 'erpMaterialInternalId' },
+      { source: 'code', target: 'erpMaterialCode' },
+    ]),
+    ...runtime,
+  })
+  assert.equal(result.status, 'ready', 'a genuinely different page is not a replay just because we ignore a column')
+  assert.equal(result.evidence.pages, 2)
+  assert.equal(result.evidence.sourceRows, 2)
+}
+
+// A field the operator CONFIGURED must exist on the rows we actually read. `mapRecord` is per-field
+// fail-soft, and the intake contract only requires a couple of columns — so a fieldMap naming fields that
+// resolve NOWHERE produced a full snapshot of rows whose business columns were all null, reported `ready`
+// with rowErrors: 0. (The decisive case: a config that maps cleanly on the probe's raw plane, where the PLM
+// aliases `qty`/`unit` still exist, but not on the feeder's record plane, where the wrapper has normalized
+// them away.)
+async function testFieldsThatResolveOnNoRowFailClosed() {
+  const runtime = sourceRuntime('data-source:sql-readonly', () => readResult(
+    [
+      { id: 'material_internal_1', code: 'MAT-1', name: 'Material 1' },
+      { id: 'material_internal_2', code: 'MAT-2', name: 'Material 2' },
+    ],
+    { done: true },
+  ))
+  await assert.rejects(
+    () => runErpMaterialReadonlySource({
+      permission: 'admin',
+      syncRunId: 'data_source_unresolved_fields',
+      preparedRead: preparedRead('data-source:sql-readonly', [
+        { source: 'id', target: 'erpMaterialInternalId' },
+        { source: 'code', target: 'erpMaterialCode' },
+        // Typo'd / wrong-plane source names: they resolve on NO row.
+        { source: 'materialName', target: 'erpMaterialName' },
+        { source: 'spec', target: 'erpSpec' },
+      ]),
+      ...runtime,
+    }),
+    (error) => {
+      assert.ok(error instanceof StockPreparationReadonlySourceRunError)
+      assert.equal(error.code, 'SOURCE_RUN_FIELD_MAP_UNRESOLVED')
+      assert.equal(error.status, 422)
+      assert.deepEqual(error.details.unresolvedTargets, ['erpMaterialName', 'erpSpec'])
+      assert.equal(error.details.receivedRows, 2)
+      // Values-free: the TARGET names are our own intake vocabulary; the source paths (which name the
+      // external system's schema) never appear.
+      const serialized = JSON.stringify(error.details)
+      assert.ok(!serialized.includes('materialName') && !serialized.includes('spec'))
+      return true
+    },
+  )
+  assert.equal(runtime.writes.length, 0)
+}
+
+// ... and a field that resolves on SOME rows is a sparse column, not a broken config.
+async function testSparseOptionalFieldIsNotABrokenConfig() {
+  const runtime = sourceRuntime('data-source:sql-readonly', () => readResult(
+    [
+      { id: 'material_internal_1', code: 'MAT-1', name: 'Material 1' },
+      { id: 'material_internal_2', code: 'MAT-2' },
+    ],
+    { done: true },
+  ))
+  const result = await runErpMaterialReadonlySource({
+    permission: 'admin',
+    syncRunId: 'data_source_sparse_field',
+    preparedRead: preparedRead('data-source:sql-readonly', [
+      { source: 'id', target: 'erpMaterialInternalId' },
+      { source: 'code', target: 'erpMaterialCode' },
+      { source: 'name', target: 'erpMaterialName' },
+    ]),
+    ...runtime,
+  })
+  assert.equal(result.status, 'ready')
+  assert.equal(result.evidence.sourceRows, 2)
+}
+
 // Every kind the feeder ACCEPTS must have a declared paging capability. Adding a kind to the allowlists
 // without telling the feeder how (or whether) that kind can be continued is how a source that silently
 // truncates gets waved through — so the two sets and the capability table are pinned to each other.
@@ -1367,6 +1512,10 @@ function testEverySupportedKindDeclaresItsPagingCapability() {
 
 async function main() {
   testEverySupportedKindDeclaresItsPagingCapability()
+  await testKindsAreFencedPerRunType()
+  await testPagesDifferingOnlyInAnUnmappedColumnAreNotAReplay()
+  await testFieldsThatResolveOnNoRowFailClosed()
+  await testSparseOptionalFieldIsNotABrokenConfig()
   await testRealBomTreeIsIngestedWholeNeverSilentlyTruncated()
   await testTreeReadWithARawPlaneConfigFailsClosedInsteadOfTruncating()
   await testK3ThatIgnoresPageIndexCannotProvePaging()

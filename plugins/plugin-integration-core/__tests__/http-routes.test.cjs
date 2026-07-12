@@ -6402,7 +6402,9 @@ async function testReadSourceConfiguredReadRoute() {
           async read(req) {
             readArgs.push(req)
             return {
-              records: [],
+              // #3889: a real adapter's RECORD plane is its normalized rows — not the same shape as the raw
+              // upstream payload (here the normalizer renames FName -> col_name's source `name`).
+              records: [{ name: 'SECRET-NAME', model: 'MX-9' }],
               raw: { Data: { FName: 'SECRET-NAME', FModel: 'MX-9', FNumber: req.filters.FNumber, FUnclassified: 'DROP-ME' } },
             }
           },
@@ -6433,6 +6435,40 @@ async function testReadSourceConfiguredReadRoute() {
   }
   const dataStr = JSON.stringify(ok.body.data.data)
   assert.ok(!dataStr.includes('DROP-ME') && !dataStr.includes('FUnclassified'), 'unmapped raw fields never reach the data plane')
+
+  // #3889: this route is the only surface that returns MAPPED VALUES for an approved config, so it is the
+  // only way to see what a config actually produces. The stock-preparation feeder maps the adapter's RECORD
+  // plane, so this route must be able to run that same plane — otherwise the config an operator verifies
+  // here and the config the feeder executes are two different things, and a fieldMap that resolves
+  // perfectly here can resolve NOWHERE there and be written as null on every ingested row.
+  const recordPlane = await invoke(routes, 'POST', '/api/integration/read-source-configs/:id/read', {
+    user: READ_USER, params: { id: 'rsc_ok' }, query: { workspaceId: 'workspace_1' },
+    body: { inputs: { key: 'M-001' }, rowSource: 'adapter_records' },
+  })
+  assertOkResponse(recordPlane, 200)
+  assert.equal(recordPlane.body.data.evidence.ok, true)
+  // The SAME config over the adapter's record plane: `FName`/`FModel` do not exist there, so the operator
+  // SEES the nulls instead of discovering them in an ingested snapshot.
+  assert.deepEqual(
+    recordPlane.body.data.data.containers.primary.records,
+    [{ col_name: null, col_model: null }],
+    'the record plane is shown exactly as the feeder would map it',
+  )
+  const recordEvidenceStr = JSON.stringify(recordPlane.body.data.evidence)
+  for (const leak of ['M-001', 'SECRET-NAME', 'MX-9', 'col_name', 'FName', 'secret-token']) {
+    assert.ok(!recordEvidenceStr.includes(leak), `record-plane evidence must not leak ${leak}`)
+  }
+  // Closed enum, same as the runtime's.
+  const badPlane = await invoke(routes, 'POST', '/api/integration/read-source-configs/:id/read', {
+    user: READ_USER, params: { id: 'rsc_ok' }, body: { inputs: { key: 'M-001' }, rowSource: 'raw' },
+  })
+  assert.equal(badPlane.statusCode, 400)
+  assert.equal(badPlane.body.error.details.reason, 'execution_row_source_invalid')
+  const unexpectedField = await invoke(routes, 'POST', '/api/integration/read-source-configs/:id/read', {
+    user: READ_USER, params: { id: 'rsc_ok' }, body: { inputs: { key: 'M-001' }, rowCap: 5000 },
+  })
+  assert.equal(unexpectedField.statusCode, 400)
+  assert.equal(unexpectedField.body.error.details.reason, 'unexpected_field')
 
   // approved-only: draft/retired → 409 coarse
   const draft = await invoke(routes, 'POST', '/api/integration/read-source-configs/:id/read', {
@@ -7092,7 +7128,6 @@ async function testStockPreparationReadonlySourceRunRoutes() {
     user: ADMIN_USER,
     body: {
       workspaceId: 'workspace_1',
-      projectId: 'business_project_1',
       readSourceConfigId: ERP_CONFIG_ID,
       syncRunId: 'erp_source_run_1',
     },
@@ -7147,7 +7182,6 @@ async function testStockPreparationReadonlySourceRunRoutes() {
     const rejected = await invoke(routes, 'POST', '/api/integration/stock-preparation/mvp/source-runs/erp-materials', {
       user: ADMIN_USER,
       body: {
-        projectId: 'business_project_1',
         readSourceConfigId: ERP_CONFIG_ID,
         syncRunId: 'erp_source_run_rejected',
         ...forbiddenInput,
@@ -7180,7 +7214,6 @@ async function testStockPreparationReadonlySourceRunRoutes() {
     const deniedErp = await invoke(routes, 'POST', '/api/integration/stock-preparation/mvp/source-runs/erp-materials', {
       user,
       body: {
-        projectId: 'business_project_1',
         readSourceConfigId: ERP_CONFIG_ID,
         syncRunId: 'erp_source_run_denied',
       },
@@ -7203,7 +7236,7 @@ async function testStockPreparationReadonlySourceRunRoutes() {
   // authorize against, so the run must not start.
   const missingConfigId = await invoke(routes, 'POST', '/api/integration/stock-preparation/mvp/source-runs/erp-materials', {
     user: ADMIN_USER,
-    body: { projectId: 'business_project_1', syncRunId: 'erp_source_run_no_config' },
+    body: { syncRunId: 'erp_source_run_no_config' },
   })
   assert.equal(missingConfigId.statusCode, 400)
   assert.equal(missingConfigId.body.error.details.field, 'readSourceConfigId')
@@ -7340,7 +7373,6 @@ async function testStockPreparationSourceRunRejectsUnapprovedConfig() {
       snapshotVersion: 1,
     }],
     ['/api/integration/stock-preparation/mvp/source-runs/erp-materials', {
-      projectId: 'business_project_1',
       readSourceConfigId: 'private_draft_config_3889',
       syncRunId: 'erp_source_run_draft',
     }],

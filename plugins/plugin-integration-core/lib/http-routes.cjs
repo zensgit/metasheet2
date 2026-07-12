@@ -162,6 +162,9 @@ const {
   prepareReadSourceProbe,
   executeReadSourceProbe,
 } = require('./read-source-probe-runtime.cjs')
+// #3889: the executor rejects an execution option it cannot honour (e.g. the record plane for a mode that
+// has no single row plane) with the same contract error the request normalizers use.
+const { ReadSourceProbeContractError } = require('./read-source-probe-contract.cjs')
 // S2-c (#1709 self-service): content-keyed config persistence + values-free audit. Stores the S1
 // normalized structure and a systemId reference only — never a resolved URL, credential, or probe response.
 const {
@@ -671,10 +674,11 @@ const VALID_STOCK_PREPARATION_PLM_SOURCE_RUN_REQUEST_KEYS = new Set([
   'snapshotBatchId',
   'snapshotVersion',
 ])
+// The ERP material run is not project-scoped (it caches the ERP material master), so it does NOT take a
+// projectId — a field accepted and then ignored is an invitation to believe it scopes something.
 const VALID_STOCK_PREPARATION_ERP_SOURCE_RUN_REQUEST_KEYS = new Set([
   'tenantId',
   'workspaceId',
-  'projectId',
   'readSourceConfigId',
   'inputs',
   'syncRunId',
@@ -2580,10 +2584,23 @@ function createHandlers(services, options = {}) {
         if (typeof body !== 'object' || Array.isArray(body)) {
           throw new HttpRouteError(400, 'READ_SOURCE_READ_CONTRACT_INVALID', 'configured read request is invalid', { reason: 'not_object' })
         }
-        const unexpected = Object.keys(body).filter((key) => key !== 'inputs')
+        const unexpected = Object.keys(body).filter((key) => key !== 'inputs' && key !== 'rowSource')
         if (unexpected.length > 0) {
           throw new HttpRouteError(400, 'READ_SOURCE_READ_CONTRACT_INVALID', 'configured read request is invalid', { reason: 'unexpected_field' })
         }
+      }
+      // #3889: WHICH PLANE the approved config is mapped over. The stock-preparation feeder ingests the
+      // adapter's own record plane (normalized, flattened, paged rows); this route — the only surface that
+      // returns MAPPED VALUES for an approved config, and therefore the only way to see what a config
+      // actually produces — used to be able to run the raw plane only. That made the config an operator
+      // verifies and the config the feeder executes two different things: a fieldMap that resolves
+      // perfectly here could resolve NOWHERE there (a BOM tree's flattened lines, a PLM alias the wrapper
+      // normalizes away) and be written as null on every row. It also left data-source:sql-readonly with no
+      // usable surface at all — that adapter emits no raw payload, so the raw plane can only ever answer
+      // RESPONSE_UNRECOGNIZED. Same closed enum the runtime validates; the default is unchanged.
+      const rowSource = body && body.rowSource !== undefined ? body.rowSource : undefined
+      if (rowSource !== undefined && rowSource !== 'raw_containers' && rowSource !== 'adapter_records') {
+        throw new HttpRouteError(400, 'READ_SOURCE_READ_CONTRACT_INVALID', 'configured read request is invalid', { reason: 'execution_row_source_invalid' })
       }
       let row
       try {
@@ -2607,16 +2624,27 @@ function createHandlers(services, options = {}) {
         throw new HttpRouteError(409, 'READ_SOURCE_READ_KIND_MISMATCH', 'external system kind does not match the approved config')
       }
       try {
-        const { evidence, data } = await executeConfiguredRead(prepared, {
-          system,
-          createAdapter: (adapterSystem) => adapterRegistry.createAdapter(adapterSystem, { principal: requestPrincipal(req) }),
-        })
+        const { evidence, data } = await executeConfiguredRead(
+          prepared,
+          {
+            system,
+            createAdapter: (adapterSystem) => adapterRegistry.createAdapter(adapterSystem, { principal: requestPrincipal(req) }),
+          },
+          rowSource === undefined ? undefined : { rowSource },
+        )
         return sendOk(res, { evidence, data })
       } catch (error) {
         // Defense-in-depth only: the route pre-checks kind above, so the executor's own kind re-check
         // (same guard, second layer) is unreachable here unless the runtime module changes.
         if (error instanceof ReadSourceProbeRuntimeError) {
           throw new HttpRouteError(409, 'READ_SOURCE_READ_KIND_MISMATCH', 'external system kind does not match the approved config')
+        }
+        // The record plane is one flat page of rows: it cannot express the header/lines split of
+        // detail_with_lines, and resolver_lookup owns its own evaluator.
+        if (error instanceof ReadSourceProbeContractError) {
+          throw new HttpRouteError(400, 'READ_SOURCE_READ_CONTRACT_INVALID', 'configured read request is invalid', {
+            reason: typeof error.reason === 'string' ? error.reason : 'invalid',
+          })
         }
         throw error
       }

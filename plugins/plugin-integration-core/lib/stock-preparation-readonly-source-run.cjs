@@ -1,6 +1,5 @@
 'use strict'
 
-const { createHash } = require('node:crypto')
 const { executeConfiguredRead } = require('./read-source-read-runtime.cjs')
 const {
   normalizeStockPreparationReadonlyIntake,
@@ -270,14 +269,6 @@ function rawContainerRowCount(outcome, alias) {
   return Number.isInteger(count) ? count : null
 }
 
-// A page's identity, derived from the rows it carried. Two pages of a paging read must not be the same page:
-// a source that ignores the page index (or the offset cursor) and serves page 1 forever otherwise looks like
-// a perfectly paged read — and its duplicate rows can even ADD UP to the total it declared.
-// Internal only: this is derived from business values and never leaves the module.
-function pageFingerprint(rows) {
-  return createHash('sha256').update(JSON.stringify(rows)).digest('hex')
-}
-
 // Read every mapped row of an approved readonly source, and PROVE the result is the whole source.
 //
 // Completeness is only ever proven two ways:
@@ -308,6 +299,7 @@ async function readAllMappedRows({ preparedRead, system, createAdapter }) {
   const rowsAlias = 'primary'
   const rows = []
   const headerRows = []
+  const fieldResolution = {}
   const seenCursors = new Set()
   const seenPages = new Set()
   let cursor = null
@@ -376,22 +368,21 @@ async function readAllMappedRows({ preparedRead, system, createAdapter }) {
     }
 
     const pageRows = containerRows(outcome.data, rowsAlias)
-    // Structural cross-check: the adapter's row plane, the count its metadata reports, and the rows we
-    // actually mapped must be the SAME NUMBER. When they disagree, the config is not reading the source's
-    // rows — which is precisely what a BOM tree used to look like (1,000 flattened lines next to one mapped
-    // root node) — and no count computed from them can be trusted.
-    if (pageRows.length !== adapterRowCount
-      || (Number.isInteger(reportedRowCount) && reportedRowCount !== adapterRowCount)) {
+    // The adapter's records array and the count its metadata CLAIMS must agree. (There is no third check
+    // against the mapped row count: on the record plane the mapped rows ARE the adapter's rows, capped at
+    // the same bound the overflow check above already enforced, so comparing them could never fail. The
+    // BOM-tree divergence is prevented by reading the record plane at all — not by this comparison.)
+    if (Number.isInteger(reportedRowCount) && reportedRowCount !== adapterRowCount) {
       throw new StockPreparationReadonlySourceRunError(
         502,
         'SOURCE_RUN_SOURCE_SHAPE_UNVERIFIABLE',
         'configured readonly source disagrees with itself about how many rows this page holds',
-        {
-          mappedRows: pageRows.length,
-          adapterRows: adapterRowCount,
-          ...(Number.isInteger(reportedRowCount) ? { reportedRows: reportedRowCount } : {}),
-        },
+        { adapterRows: adapterRowCount, reportedRows: reportedRowCount },
       )
+    }
+    const pageFieldResolution = (outcome.page && outcome.page.fieldResolution) || {}
+    for (const target of Object.keys(pageFieldResolution)) {
+      fieldResolution[target] = (fieldResolution[target] || 0) + pageFieldResolution[target]
     }
 
     // Paging must be PROVEN to advance, not assumed. A K3 endpoint that ignores PageIndex (a custom view or
@@ -416,8 +407,18 @@ async function readAllMappedRows({ preparedRead, system, createAdapter }) {
     // ... and the page must actually be a different page. This catches every "pagination did not move"
     // shape at once, whatever the mechanism: a page index the source ignores, an offset cursor a client
     // drops on the floor, a bridge agent replaying its only page.
+    const fingerprint = optionalString(
+      outcome.page && outcome.page.rowFingerprints && outcome.page.rowFingerprints[rowsAlias],
+    )
+    if (!fingerprint) {
+      throw new StockPreparationReadonlySourceRunError(
+        502,
+        'SOURCE_RUN_SOURCE_SHAPE_UNVERIFIABLE',
+        'configured readonly source returned a page with no verifiable identity',
+        { page },
+      )
+    }
     if (pageRows.length > 0) {
-      const fingerprint = pageFingerprint(pageRows)
       if (seenPages.has(fingerprint)) {
         throw new StockPreparationReadonlySourceRunError(
           502,
@@ -480,6 +481,7 @@ async function readAllMappedRows({ preparedRead, system, createAdapter }) {
           'configured readonly source returned a continuation cursor after its declared row count',
         )
       }
+      assertEveryConfiguredFieldResolved(preparedRead.fieldMap, fieldResolution, rows.length)
       return completeRead(rows, headerRows, page, 'declared_total', true, pageSize, appliedPageSize)
     }
 
@@ -506,6 +508,7 @@ async function readAllMappedRows({ preparedRead, system, createAdapter }) {
     // closed inside assertKnownSourceComplete.)
     if (!pageIsFull) {
       assertKnownSourceComplete(sourceTotal, rows.length)
+      assertEveryConfiguredFieldResolved(preparedRead.fieldMap, fieldResolution, rows.length)
       return completeRead(
         rows,
         headerRows,
@@ -541,6 +544,31 @@ async function readAllMappedRows({ preparedRead, system, createAdapter }) {
     'configured readonly source exceeded the bounded page limit',
     { maxPages: SOURCE_MAX_PAGES, pageSize, effectivePageSize: appliedPageSize, receivedRows: rows.length },
   )
+}
+
+// A field the operator CONFIGURED must actually exist on the rows we read. `mapRecord` is per-field
+// fail-soft: a source path that resolves nowhere quietly becomes null on every row, and the intake contract
+// only requires a couple of columns — so a fieldMap written against the wrong plane, or with one typo'd
+// field name, produced a 2,500-line BOM snapshot whose designQty and designUnit were null on EVERY row,
+// reported as `ready` with rowErrors: 0. A configured field that resolved on NOT ONE row is a broken config,
+// not an empty column. Values-free: target names (our own intake vocabulary) and counts only — never the
+// source path, which names the external system's schema.
+function assertEveryConfiguredFieldResolved(fieldMap, fieldResolution, receivedRows) {
+  if (receivedRows < 1) return
+  const unresolvedTargets = []
+  for (const entry of fieldMap) {
+    if (!Number.isInteger(fieldResolution[entry.target]) || fieldResolution[entry.target] < 1) {
+      unresolvedTargets.push(entry.target)
+    }
+  }
+  if (unresolvedTargets.length > 0) {
+    throw new StockPreparationReadonlySourceRunError(
+      422,
+      'SOURCE_RUN_FIELD_MAP_UNRESOLVED',
+      'configured fields do not exist on the rows this source actually returns',
+      { unresolvedTargets: unresolvedTargets.sort(), receivedRows },
+    )
+  }
 }
 
 function completeRead(rows, headerRows, pages, completenessProof, sourceTotalKnown, pageSize, appliedPageSize) {
