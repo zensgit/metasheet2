@@ -143,5 +143,27 @@ owner 复审给出 5 项 finding + A–E 收尾计划。**完成判据（owner �
 
 现存三份「余下开发」文档：#4147（merged，§5 4d 口径已被本 §8 更正）· 本 #4186（AS-BUILT 主文）· **#4185（平行 session，armed，我不可控——将落一份 stale 竞品**，见下）。**本 MD（#4186）为 R12 AS-BUILT 唯一权威**；#4147 保留为历史。⚠️ **#4185 未受本轮 partition 约束**，若先合入会与本文并存造成漂移——**建议 owner 择一为准并把另一份降为指针**。
 
-<!-- R12-B/C FOLD-IN PLACEHOLDER: 两条 Sonnet lane 的 Draft PR 号 + Opus gate 结论完成后折入 §9 表 -->
-_R12-B / R12-C 两条 lane 的 Draft PR + Opus 对抗审 gate 结论完成后折入。_
+### 9.3 R12-B / R12-C lane 交付 + 独立 Opus 对抗审 gate（均完成）
+
+| lane | Draft PR | 独立 Opus gate 结论 | 关键实证 |
+|---|---|---|---|
+| **R12-B** 工程加固 | **#4197**（draft） | **APPROVE-with-fixes → fixes 已折并推** | G17 barrier 正控**独立复跑**：neuter `ensureRecordNotLocked` → 50ms 内 **assertion 红**（非 timeout/hang）；barrier 经 iteration-counter 证非空、`pg_blocking_pids`↔自身 pid 相关不会误配、5000ms 有界超时、raw client 恒 `finally` 释放；full file 38/38。OD-7 三层措辞 + 每层 goldens（G3 / G18+G15 / G16）一致且通过；production-status 边界勘误准确。gate 抓出 **P3-1**：R12-B「found exactly one」漏了**第二条**present-tense stale 注释（`multitable-history-person-names-realdb.test.ts:120`「does NOT actually hide」= #4165 后**假**）+ NIT-1（line 76 `(G4 tripwire)`）——**我已修两处并推**（sweep 确认无第三条） |
+| **R12-C** O-2 operator-contract | **#4199**（draft） | **APPROVE 0 P1 / 0 P2** | 4 条 combo 规则**均源码独立复核**：lossy 双门（`lossy-retype-oracle.ts:105`）· side-door 需 capture（`side-door-delete-trash.ts:130`）· PIT-reset 撞 retention（`univer-meta.ts:10275`，真实行，brief 的 10264 已漂移、manifest 记的是真实行）· retention 激活 `'1'` 非 `'true'`（`meta-revision-retention.ts:60`）；18 flag 全含、2 个无关 flag 正确排除；32/32 + mutation（删 lossy `dependsOn` → 4 红）；`--strict` 三类非法组合**双模式**拒 + 具体违规名；`retention='true'` footgun 正确判 OFF（advisory，非假 STOP）。**bonus**：修了旧 helper 测试的一个**假阳**（旧 heuristic 把 `RETENTION='true'` 误判为触发 PIT_RESET stop，而源码需精确 `'1'`）——这是 manifest 修真实 footgun 的最硬证据 |
+
+### 9.4 待 owner 定夺 / 收尾项（如实，不自行拍板）
+
+- **R12-C P3（owner call）**：manifest 把 `side-door 未配 capture` 定为**硬 STOP**。gate 溯源发现该组合**代码上合法但降级**——trash 行无条件写、记录仍可恢复，**仅** inbound 边捕获需双 flag。你 R12-C 指令**明列**「side-door 未配 capture」为要拒的组合 ⇒ 当前 STOP **符合你的意图**；gate 建议降为 `--strict`-only WARN。**二选一请你定**（prose 已准确标「降级非损坏」）。
+- **R12-C 两个 P3（低风险收尾）**：① `flagEnabled`/`TRUE_VALUES` 现为运行时死代码（易误导后来读者）建议删/注；② helper 两个测试仅 `node --test` 本地、无 CI workflow 亦无 `verify:*:test` npm script（与兄弟 ops helper 不对等）——ops 只读工具，可接受但建议补 npm script。**均可留作 fix-forward，不阻断。**
+- **两 PR 均 Draft**：等你 GO 再转 Ready + 合。R12-B 修复后 head 已前移；合前顺手 rebase。
+- **R12-D staging 实跑 + R12-E 浏览器/API 证据 = owner/ops 门**（部署 host env + 全栈，本会话不可达）。runbook（§9.1）已备；实跑与证据归档由你/operator 执行。
+
+### 9.5 R12 完成判据对账（owner 明定）
+
+| 判据 | 状态 |
+|---|---|
+| 代码与台账一致 | ✅ 4d 口径按源码更正（§8）；#4147 §5 以 §8 为准（历史指针）；person/D-2 状态已同步（§4/§9） |
+| operator 工具不误报 | ✅ R12-C helper 展示全部 18 flag + `--strict` 拒非法组合 + 修了旧假阳；gate APPROVE |
+| staging 全链路有证据 | 🧭 runbook 已备（§9.1）；**实跑证据 = owner/ops 执行**（本会话不可达 staging） |
+| 生产开关仍逐项审批 | ✅ 零 flag 翻转；两 PR Draft 待 owner GO；D-2 L3.5 明标产品语义变更需单独确认 |
+
+**收官口径**：R12 代码/文档面 A/B/C/E(文档)/D(runbook) **本会话已交付并各过独立对抗审**（B=APPROVE-with-fixes 已修，C=APPROVE 0P1/0P2）；**staging 实跑 + 浏览器/API 证据 + 生产启用 = owner/ops 门**，非本会话可完成。**不是「全做好上生产」**——是「可自动化的开发与验证已完成且过审，生产启用逐项待你」。
