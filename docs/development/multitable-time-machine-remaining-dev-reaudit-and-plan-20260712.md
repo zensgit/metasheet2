@@ -77,7 +77,7 @@ R11（2026-07-11）+ 今日 D-2 落地后，运行时面在 main 上已闭合：
 |---|---|---|---|---|
 | 1 | **#4161 person 名称解析** | 锁 RATIFIED；独立对抗审 APPROVE 0P1/0P2；**已 MERGED `b674dba8c`**（纯 rebase of 所审头，byte-identical）| — | **① Opus 对抗审 = APPROVE（完成）→ ② 平行 session auto-merge 合入（绕过显式 owner GO，实质经审内容满足）→ 剩：可选 NIT（error 对称性硬化，Sonnet 小切片，owner 定夺）**。**唯一代码路径已落地** |
 | 2 | **O-2 运维启用**（`TOMBSTONE_CAPTURE`→`RECORD_UNDELETE_INBOUND`→`PIT_UNDELETE`；retention；**D-2 的 L3.5 侧门可恢复=产品语义变更，owner 单独确认**） | 部署 host env，**非 CI 可设**；代码默认 OFF（「线上是否 OFF」是外部环境状态，代码审阅不核验） | **owner/operator** | 阶梯 L1→L2→L3→L3.5（见 o2-ladder 决策就绪材料 + R11 收官 MD）。**非编码任务**；若需 staging smoke 工具=Sonnet 小切片。⚠ 激活值 footgun：capture/replay 用 `'true'`，retention 用 `'1'` |
-| 3 | **4d：已删字段列的值级恢复** | **红线，永不承诺**（无 tombstone 可依） | — | 无开发 |
+| 3 | **4d：已删字段列的值级恢复**（**口径已按源码更正，见 §8**） | 部分**已实现**（capture ON 时未来字段删除可恢复值/链接/自动编号）；**仅** pre-capture / 已过期数据不可恢复 | 已实现部分随 4c-2 capture flag；不可恢复部分=物理边界 | 无新开发（更正的是台账口径，非代码） |
 
 **并行性**：#4161 是单一小切片（读路径、无 flag），**内部无并行拆分空间**；其 gate（Opus 审）与本 MD 起草**已并行**。O-2 是 ops 决策，不占编码并行槽。故本轮真正可并行的只有「审 + 文档」两股，已在跑。**没有可继续 fan-out 的编码工作**——如实报告，不制造并行以显得繁忙。
 
@@ -97,5 +97,51 @@ R11（2026-07-11）+ 今日 D-2 落地后，运行时面在 main 上已闭合：
 ## 7. 收官口径（如实）
 
 - **功能运行时面已闭合、CI 覆盖已满**——**唯一的代码开发项 #4161（person 名称解析）独立对抗审 APPROVE 0P1/0P2，已 MERGED（`b674dba8c`，纯 rebase of 所审头、byte-identical，gate 实质成立）**。⚠️但它由平行 session auto-merge 合入、**绕过了 owner 显式 GO**（治理注见 §4）。**至此本线的代码开发项全部落地**；但**仍不能说「这条线全做好了」**：production 启用（O-2，含 D-2 L3.5 产品语义变更）与 4d 红线均在 owner-ops 门后，且「线上是否 OFF」是本文未核验的外部环境状态。准确表述：**代码面无剩余未 gated 开发（#4161 已落地并过独立审）；余下全部需 owner 动作。**
-- 本轮相对首轮的两处更正已如实记录：(a) web-spec 覆盖的假缺口是我的 basename 检索误报，实测 7 spec 早在跑；(b) person 锁已 RATIFIED，池非空。
-- **不 arm auto-merge、不开任何 env flag、不自合。** #4161 的合入以 owner GO 为唯一前置。
+- 本轮相对首轮的两处更正已如实记录：(a) web-spec 覆盖的假缺口是我的 basename 检索误报，实测 7 spec 早在跑；(b) person 锁已 RATIFIED，池非空。**（owner 补充第三处更正见 §8：4d「值级恢复不可能」的旧口径不精确。）**
+- **不 arm auto-merge、不开任何 env flag、不自合。**
+
+## 8. 4d 口径更正（owner P2，2026-07-12，按源码逐条核对）
+
+首轮/本轮早前把 **4d = 已删字段列的值级恢复** 一律写成「不可能 / 永不承诺」——**不精确**。源码事实（`packages/core-backend/src/routes/univer-meta.ts` `recreateFieldFromConfig`，4c-2 R1）：
+
+- **capture flag（`MULTITABLE_TOMBSTONE_CAPTURE_ENABLED`）开启后发生的字段删除，其 undelete 会 rehydrate**：① 列值（**仅**写入尚无该 key 的记录——**绝不覆盖** recreate 之后写入的新值）② 链接边（**仅**在两条当前均存活的记录之间）③ 自动编号序列的 `next_value`。锚定由字段删除 revision 自身的 id（`deleteRevisionId`）界定，不误取同 id 的更早/更晚 capture。
+- **真正不可恢复的只有两类**：(a) **capture flag 曾经开启之前**被销毁的数据（无 tombstone，`recreateFieldFromConfig` 退化为 pre-4c-2 的 **definition-only** 重建，C1 forward-only）；(b) tombstone 已按 retention **过期**老化的数据。
+- 因此**精确口径**：4d **不是**「值级恢复不可能」，而是「**pre-capture 或已过期**的字段列值级恢复不可能；**capture 开启后**的未来字段删除**可**值级恢复（值/链接/自动编号）」。这是物理边界（无捕获即无源），不是未开发的功能。
+- **同源纠正**：#4147 台账（`multitable-time-machine-remaining-dev-and-verification-20260712.md` §5）与本 MD 早前版本的「4d 永不承诺」措辞，**均以本 §8 为准**；#4147 作为历史记录保留、其 4d 行以此指针更正。
+
+## 9. R12 Closeout 轮（owner /goal「完成上条信息的开发」，2026-07-12）
+
+owner 复审给出 5 项 finding + A–E 收尾计划。**完成判据（owner 明定）= 代码与台账一致 · operator 工具不误报 · staging 全链路有证据 · 生产开关仍逐项审批**——**不是**「所有 flag 上生产」。本轮我方交付 A/B/C/E(文档面) + D(runbook)，**staging 实跑与浏览器证据=owner/ops 门**（部署 host env + 全栈，本会话不可达）。
+
+| 子项 | 内容 | 本轮处置 | 模型 |
+|---|---|---|---|
+| **R12-A** 落地 #4161 | person 名称解析上 main | **已完成**：MERGED `b674dba8c`；OD-P1/P2/P3 均在 origin/main 实证（`HistoryBatchChangesList.vue:196` inactive marker 渲染；history-projection personNames/fieldTypes）；对抗审 APPROVE。残留旧注释→R12-B | Opus gate |
+| **R12-B** 工程加固 | G17 定时 sleep→确定性 barrier（正控证伪）· #4004 OD-7 两/三层措辞 · production-status 外部可验证边界 · #4161 旧「person hidden no-op」注释 | **Draft PR（Sonnet lane，进行中）** — 折入见下 | Sonnet impl + Opus gate |
+| **R12-C** O-2 operator-contract | 单一 flag manifest（激活值/依赖/危险级，逐条 `// source:` 溯源）· status helper 展示全部 flag + `--strict` 拒绝非法组合（lossy 无 base / side-door 无 capture / PIT-reset 撞 retention）· 依赖矩阵测试 · 修 o2-ladder 文档 | **Draft PR（Sonnet lane，进行中）** — 折入见下 | Sonnet impl + Opus gate |
+| **R12-D** staging 顺序验收 runbook | 见下方顺序 | **runbook 已写（本 §9.1）**；**实跑=owner/ops** | — |
+| **R12-E** 收官证据 + AS-BUILT | 本 MD 即 AS-BUILT 主文；浏览器/API 证据 | 文档面本 MD；**浏览器/API 实证=owner/ops（需全栈+staging）** | — |
+
+**combo 规则均来自源码（非文档，避免继承漂移）**：lossy 双门 `lossy-retype-oracle.ts:isLossyRetypeRevertEnabled` · side-door 需 capture `side-door-delete-trash.ts:131 isSideDoorTombstoneCaptureEnabled = sideDoor && capture` · PIT-reset 撞 retention `univer-meta.ts:10264 PIT_RESET_RETENTION_BLOCKED = RETENTION_ENABLED==='1'` · retention 激活值 `'1'` 非 `'true'` `meta-revision-retention.ts:60`。
+
+### 9.1 R12-D staging 顺序验收 runbook（**串行**，execution = owner/operator）
+
+> 每级：先跑 `node scripts/ops/multitable-global-history-flag-status.mjs --strict`（R12-C 交付后可拒非法组合）→ 开该级 flag → 跑验证 → 记证据。**Retention 最后单独决定，不与恢复能力顺手一起开。**
+
+| 级 | 开启 | 验证 |
+|---|---|---|
+| 0 | 全关基线 | 所有 flag OFF；helper 全绿；恢复类响应形状 = 现状 byte-identical |
+| 1 | lossless sheet config revert / retype（`SHEET_CONFIG_REVERT`；`FIELD_RETYPE_REVERT` 仅无损） | 无损 revert 生效；无值销毁 |
+| 2 | tombstone capture（`TOMBSTONE_CAPTURE_ENABLED='true'`） | 删被引用记录→`meta_link_tombstones` 出 `reason='record_delete'` 组；trash 行带 `delete_revision_id` |
+| 3 | config undelete 补水 + inbound replay（`CONFIG_UNDELETE`、`RECORD_UNDELETE_INBOUND='true'`） | 恢复记录→`inbound.replayed≥1`；邻居单元格重现；字段 undelete 补水值/链接/自动编号（§8） |
+| 4 | PIT undelete / reset（`PIT_UNDELETE='true'`；`PIT_RESET`——**须确认 retention 仍 OFF**，否则 STOP-SHIP） | revert-execute confirm='undelete'→`undeleteInbound`；reset 受 `PIT_RESET_RETENTION_BLOCKED` 保护 |
+| 5 | config uncreate / permission revert（`CONFIG_UNCREATE`、`PERMISSION_REVERT`） | 对应恢复面生效 |
+| 6 | lossy retype（`FIELD_RETYPE_REVERT_LOSSY='true'` **且** base 已开——**双门**） | 有损 revert 走 loss-oracle + 413 cap；base 未开时 helper `--strict` 拒绝 |
+| 7 | side-door delete（`SIDE_DOOR_DELETE_TRASH_ENABLED='true'`，**前置 capture 已开**；**D-2 产品语义变更，owner 单独确认**） | automation/plugin 删被引用记录→进回收站、`inboundEdgesRecoverable:true`；restore 后邻居重现；机器删除自此可被任何 `canDeleteRecord` 者恢复、restore 重放事件——**须确认可接受** |
+| — | **retention（`META_REVISION_RETENTION_ENABLED='1'`，注意值是 `'1'` 非 `'true'`）** | **最后单独决定**；与 `PIT_RESET` **互斥**（撞则 reset STOP-SHIP）；地板-A 增长风险回 owner 桌面 |
+
+### 9.2 台账去重（doc-drift 处置，owner R12-E「旧台账只保留历史指针」）
+
+现存三份「余下开发」文档：#4147（merged，§5 4d 口径已被本 §8 更正）· 本 #4186（AS-BUILT 主文）· **#4185（平行 session，armed，我不可控——将落一份 stale 竞品**，见下）。**本 MD（#4186）为 R12 AS-BUILT 唯一权威**；#4147 保留为历史。⚠️ **#4185 未受本轮 partition 约束**，若先合入会与本文并存造成漂移——**建议 owner 择一为准并把另一份降为指针**。
+
+<!-- R12-B/C FOLD-IN PLACEHOLDER: 两条 Sonnet lane 的 Draft PR 号 + Opus gate 结论完成后折入 §9 表 -->
+_R12-B / R12-C 两条 lane 的 Draft PR + Opus 对抗审 gate 结论完成后折入。_
