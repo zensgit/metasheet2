@@ -4899,14 +4899,35 @@ export class ApprovalProductService {
             'APPROVAL_CARD_DELIVERY_STALE',
           )
         }
+        // P1 (owner review 2026-07-12) — CARD-STATE TOCTOU. The previous revision validated only the
+        // node/round BINDING here and read the row WITHOUT a lock, while `card_state` was checked only
+        // by the wrapper's pre-read (OUTSIDE this txn) and the acted-claim ran in a SEPARATE txn AFTER
+        // this one committed. So anything that moved the card off `sent` between the pre-read and this
+        // commit — the retention sweep, `supersede…ForInstance`, a revoke — lost the race INVISIBLY:
+        // the approval committed anyway and only the post-hoc claim failed. Owner's real-DB
+        // interleaving: pre-read `sent` → sweep → `expired` → outcome=ok, approveRecords=1,
+        // instance=approved, cardState=expired. An expired card completed an approval.
+        //
+        // A lock-free `card_state === 'sent'` check would NOT have closed it — that is the same
+        // check-then-act shape one line further down. So: take a ROW LOCK on the delivery inside THIS
+        // transaction, gate on (binding AND still-`sent` AND actually-delivered), and CLAIM it `acted`
+        // in the SAME transaction. Approval and claim now commit or roll back together, and the two
+        // orderings are both safe:
+        //   * sweep wins the row lock → card is `expired` when we read it → we refuse (STALE), nothing
+        //     is written;
+        //   * we win → the card is `acted` before we commit → the sweep's `WHERE card_state='sent'`
+        //     no longer matches it, so it cannot expire a card that has already decided.
         const deliveryResult = await client.query<{
           instance_id: string
           node_key: string
           recipient_user_id: string
           entry_epoch: number | string | null
+          card_state: string
+          send_status: string
         }>(
-          `SELECT instance_id, node_key, recipient_user_id, entry_epoch
-             FROM dingtalk_approval_card_deliveries WHERE id = $1`,
+          `SELECT instance_id, node_key, recipient_user_id, entry_epoch, card_state, send_status
+             FROM dingtalk_approval_card_deliveries WHERE id = $1
+             FOR UPDATE`,
           [cardDeliveryId],
         )
         const deliveryRow = deliveryResult.rows[0]
@@ -4921,13 +4942,42 @@ export class ApprovalProductService {
             const seatEpoch = assignment.entry_epoch
             return seatEpoch !== null && seatEpoch !== undefined && Number(seatEpoch) === deliveryEpoch
           })
+        // `outcome_unknown` stays claimable on purpose (PR #4046): DingTalk may well have delivered the
+        // card even though the client saw no usable response, and a valid HMAC callback is itself proof
+        // of delivery. `pending`/`failed` never produced a live button, so they are not actionable.
+        const cardDelivered =
+          !!deliveryRow
+          && (deliveryRow.send_status === 'sent' || deliveryRow.send_status === 'outcome_unknown')
         const cardBindingValid =
           !!deliveryRow
           && deliveryRow.instance_id === id
           && deliveryRow.node_key === currentNodeKey
           && deliveryRow.recipient_user_id === actor.userId
           && epochMatchesLiveSeat
+          && deliveryRow.card_state === 'sent'
+          && cardDelivered
         if (!cardBindingValid) {
+          throw new ServiceError(
+            'Approval card is no longer valid for the current node',
+            409,
+            'APPROVAL_CARD_DELIVERY_STALE',
+          )
+        }
+
+        // Atomic claim, same txn, same lock. The predicate is re-asserted in the UPDATE itself so the
+        // claim is conditional-by-construction rather than trusting the read above. Zero rows can only
+        // happen if the row changed under us, which the FOR UPDATE forbids — so treat it as STALE and
+        // roll the whole approval back rather than proceeding on an unclaimed card.
+        const claimed = await client.query(
+          `UPDATE dingtalk_approval_card_deliveries
+              SET card_state = 'acted', acted_action = $2, acted_by = $3, acted_at = NOW(), updated_at = NOW()
+            WHERE id = $1
+              AND card_state = 'sent'
+              AND send_status IN ('sent', 'outcome_unknown')
+            RETURNING id`,
+          [cardDeliveryId, request.action, actor.userId],
+        )
+        if ((claimed.rowCount ?? 0) === 0) {
           throw new ServiceError(
             'Approval card is no longer valid for the current node',
             409,
