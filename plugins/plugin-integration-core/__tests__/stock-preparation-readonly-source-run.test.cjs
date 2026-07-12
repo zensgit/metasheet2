@@ -131,9 +131,17 @@ async function testPlmFeedsPureIntakeAcrossCursorPages() {
   assert.equal(result.intake.bomSnapshotLines.length, 2)
   assert.equal(result.intake.bomSnapshotLines[0].childDrawingNo, 'PLM-DRAWING-SECRET')
   assert.equal(runtime.reads.length, 2)
-  assert.equal(runtime.reads[0].limit, 500)
+  assert.equal(runtime.reads[0].limit, SOURCE_PAGE_SIZE)
   assert.equal(runtime.reads[1].cursor, 'offset:1')
   assert.equal(runtime.writes.length, 0)
+  // Completeness is PROVEN, and the evidence says how: the last page came back short of the bound the
+  // adapter applied. `sourceTotalKnown` reflects reality (this source declared no total) instead of
+  // being computed and thrown away.
+  assert.equal(result.evidence.completenessProof, 'short_page')
+  assert.equal(result.evidence.sourceTotalKnown, false)
+  assert.equal(result.evidence.sourcePageSizeRequested, SOURCE_PAGE_SIZE)
+  assert.equal(result.evidence.sourcePageSizeEffective, SOURCE_PAGE_SIZE)
+  assert.equal(result.evidence.sourceRowsTruncated, false)
   const publicResult = publicReadonlySourceRunResult(result)
   assert.equal(Object.prototype.hasOwnProperty.call(publicResult, 'intake'), false)
   assertValuesFree(publicResult)
@@ -400,9 +408,12 @@ async function testUnknownTotalCannotEndOnAnAmbiguousFullPage() {
       ]),
       ...runtime,
     }),
+    // `done: true` on a page that exactly fills the applied bound proves nothing — and is precisely what a
+    // clamping source reports. No total, no cursor, no proof: fail closed.
     (error) => error instanceof StockPreparationReadonlySourceRunError
-      && error.code === 'SOURCE_RUN_PAGINATION_AMBIGUOUS'
-      && error.details.receivedRows === SOURCE_PAGE_SIZE,
+      && error.code === 'SOURCE_RUN_COMPLETENESS_UNPROVABLE'
+      && error.details.receivedRows === SOURCE_PAGE_SIZE
+      && error.details.cursorReturned === false,
   )
   assert.equal(runtime.writes.length, 0)
 }

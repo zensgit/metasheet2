@@ -7,9 +7,41 @@ const {
 const { isPlainObject, optionalString } = require('./stock-preparation-common.cjs')
 
 const REQUIRED_PERMISSION = 'admin'
-const SOURCE_PAGE_SIZE = 500
+// TRUSTED_EXECUTION_MAX_ROW_CAP (read-source-read-runtime.cjs) is the hard ceiling for any page we may
+// request; the cursor-paging kinds honour a limit that large, so this is the page they get.
+const SOURCE_PAGE_SIZE = 1000
+// bridge-agent-readonly-adapter.cjs MAX_ADAPTER_LIMIT — the largest config.maxLimit the agent accepts.
+// The agent CLAMPS us to its own config.maxLimit (default 20) whatever we ask for, and reports what it
+// applied in metadata.limit, so the requested size is only an upper bound here.
+const BRIDGE_SOURCE_PAGE_SIZE = 500
+// k3-wise-webapi-adapter.cjs DEFAULT_MATERIAL_LIST_MAX_LIMIT — the LIST read THROWS above it.
 const K3_WEBAPI_SOURCE_PAGE_SIZE = 10
 const SOURCE_MAX_PAGES = 10
+
+// The paging capability of each supported kind, DERIVED FROM THE ADAPTERS THEMSELVES — not from what we
+// would like them to do. Re-read the adapter before changing any row:
+//
+//   plm:yuantus-wrapper         plm-yuantus-wrapper.cjs read(): honours request.limit and pages a BOM
+//                               tree by offset cursor (nextCursor = offset+limit while lines remain).
+//   data-source:sql-readonly    data-source-sql-readonly-source-adapter.cjs read(): honours request.limit
+//                               and returns an offset cursor on every full page.
+//   bridge:legacy-sql-readonly  bridge-agent-readonly-adapter.cjs read(): CLAMPS the limit to
+//                               config.maxLimit (default 20) and NEVER sends a cursor — the /query/:object
+//                               body is {limit, filters} only. It cannot page. At all.
+//   erp:k3-wise-sqlserver       k3-wise-sqlserver-executor.cjs: clamps over-max limits and always returns
+//                               { nextCursor: null, done: true }. No continuation of any kind.
+//   erp:k3-wise-webapi          k3-wise-webapi-adapter.cjs: LIST reads reject cursors and page by
+//                               options.listPageIndex (bounded 1..10), capped at 10 rows per page.
+//
+// `pagination: 'none'` is not a nicety — it means a full page from that kind can NEVER be continued, so
+// completeness can never be proven and the run must fail closed rather than ingest a truncated snapshot.
+const SOURCE_KIND_CAPABILITIES = Object.freeze({
+  'plm:yuantus-wrapper': Object.freeze({ pageSize: SOURCE_PAGE_SIZE, pagination: 'cursor' }),
+  'data-source:sql-readonly': Object.freeze({ pageSize: SOURCE_PAGE_SIZE, pagination: 'cursor' }),
+  'erp:k3-wise-sqlserver': Object.freeze({ pageSize: SOURCE_PAGE_SIZE, pagination: 'none' }),
+  'bridge:legacy-sql-readonly': Object.freeze({ pageSize: BRIDGE_SOURCE_PAGE_SIZE, pagination: 'none' }),
+  'erp:k3-wise-webapi': Object.freeze({ pageSize: K3_WEBAPI_SOURCE_PAGE_SIZE, pagination: 'page_index' }),
+})
 
 const PLM_SOURCE_KINDS = new Set([
   'plm:yuantus-wrapper',
@@ -156,6 +188,52 @@ function assertKnownSourceComplete(sourceTotal, receivedRows) {
   }
 }
 
+// The paging capability of the CONFIGURED kind. page-index paging only exists on the K3 LIST dialect, so
+// any other mode on that kind falls back to "cannot continue" rather than to a fictitious page index.
+function sourceCapability(plan) {
+  const capability = SOURCE_KIND_CAPABILITIES[plan.requiredKind]
+  if (!capability) {
+    throw new StockPreparationReadonlySourceRunError(
+      409,
+      'SOURCE_RUN_KIND_NOT_ALLOWED',
+      'configured source kind is not allowed for this stock-preparation run',
+      { sourceChannel: sourceChannel(plan.requiredKind) },
+    )
+  }
+  const pagination = capability.pagination === 'page_index' && plan.mode !== 'list_page'
+    ? 'none'
+    : capability.pagination
+  return { pageSize: capability.pageSize, pagination }
+}
+
+// The page bound the ADAPTER APPLIED, which is the only one a full-page test may be judged against. The
+// Bridge Agent clamps our 500 to its config.maxLimit (default 20) and says so in metadata.limit; measuring
+// "full page" against the 500 WE asked for makes the guard structurally unable to fire (20 >= 500 is false)
+// and a 5,000-row source silently becomes a 20-row `ready` snapshot. An adapter claiming a LARGER page than
+// we requested is not believed: the smaller bound is the fail-closed direction (it calls a page full sooner,
+// which then demands a proven continuation).
+function effectivePageSize(outcome, requestedPageSize) {
+  const applied = outcome.page && outcome.page.effectiveLimit
+  if (!Number.isInteger(applied) || applied < 1) return requestedPageSize
+  return Math.min(applied, requestedPageSize)
+}
+
+// Rows in the RAW container as the adapter returned them, BEFORE executeConfiguredRead sliced it to
+// rowCap. null for a single-object container (single_record header), which cannot be truncated.
+function rawContainerRowCount(outcome, alias) {
+  const counts = outcome.page && outcome.page.rawRowCounts
+  const count = isPlainObject(counts) ? counts[alias] : null
+  return Number.isInteger(count) ? count : null
+}
+
+// Read every mapped row of an approved readonly source, and PROVE the result is the whole source.
+//
+// Completeness is only ever proven two ways:
+//   short_page     the adapter returned FEWER rows than the page bound it applied — it had no more to give;
+//   declared_total the rows we collected match the row count the SOURCE ITSELF declared.
+// Everything else fails closed. In particular an adapter's `done: true` is NEVER evidence of completeness:
+// the Bridge Agent and the K3 SQL-Server executor return done:true unconditionally, including on a page
+// they just clamped. A snapshot we cannot prove complete is never handed to the intake contract.
 async function readAllMappedRows({ preparedRead, system, createAdapter }) {
   if (preparedRead.plan.mode === 'resolver_lookup') {
     throw new StockPreparationReadonlySourceRunError(
@@ -166,16 +244,17 @@ async function readAllMappedRows({ preparedRead, system, createAdapter }) {
     )
   }
 
+  const capability = sourceCapability(preparedRead.plan)
+  const pageSize = capability.pageSize
+  const usesPageIndex = capability.pagination === 'page_index'
+  const supportsCursor = capability.pagination === 'cursor'
+  const rowsAlias = preparedRead.plan.mode === 'detail_with_lines' ? 'lines' : 'primary'
   const rows = []
   let headerRows = []
   const seenCursors = new Set()
-  const pageSize = preparedRead.plan.requiredKind === 'erp:k3-wise-webapi'
-    ? K3_WEBAPI_SOURCE_PAGE_SIZE
-    : SOURCE_PAGE_SIZE
-  const usesPageIndex = preparedRead.plan.mode === 'list_page'
-    && preparedRead.plan.requiredKind === 'erp:k3-wise-webapi'
   let cursor = null
   let declaredSourceTotal = null
+  let appliedPageSize = pageSize
 
   for (let page = 1; page <= SOURCE_MAX_PAGES; page += 1) {
     const execution = usesPageIndex
@@ -208,13 +287,27 @@ async function readAllMappedRows({ preparedRead, system, createAdapter }) {
       )
     }
 
-    const pageRows = preparedRead.plan.mode === 'detail_with_lines'
-      ? containerRows(outcome.data, 'lines')
-      : containerRows(outcome.data, 'primary')
+    // A source that ignored our page bound and handed back MORE rows than we asked for was silently
+    // truncated by the executor's rowCap slice. Refuse it by name — "too large" is a different fact from
+    // "we cannot prove this is complete", and an operator must not have to guess which one happened.
+    const rawRowCount = rawContainerRowCount(outcome, rowsAlias)
+    if (rawRowCount !== null && rawRowCount > pageSize) {
+      throw new StockPreparationReadonlySourceRunError(
+        422,
+        'SOURCE_RUN_RESULT_TOO_LARGE',
+        'configured readonly source returned more rows in one page than the feeder accepts',
+        { receivedRows: rawRowCount, pageSize },
+      )
+    }
+
+    const pageRows = containerRows(outcome.data, rowsAlias)
     if (page === 1 && preparedRead.plan.mode === 'detail_with_lines') {
       headerRows = containerRows(outcome.data, 'header')
     }
     rows.push(...pageRows)
+
+    appliedPageSize = effectivePageSize(outcome, pageSize)
+    const pageIsFull = pageRows.length >= appliedPageSize
 
     const reportedSourceTotal = outcome.page && outcome.page.sourceTotalCount
     if (Number.isInteger(reportedSourceTotal)) {
@@ -241,6 +334,8 @@ async function readAllMappedRows({ preparedRead, system, createAdapter }) {
         'configured readonly source returned a terminal page with a continuation cursor',
       )
     }
+
+    // PROOF 1 — the source declared its own row count and we hold exactly that many rows.
     if (Number.isInteger(sourceTotal) && rows.length === sourceTotal) {
       if (!usesPageIndex && nextCursor) {
         throw new StockPreparationReadonlySourceRunError(
@@ -249,57 +344,79 @@ async function readAllMappedRows({ preparedRead, system, createAdapter }) {
           'configured readonly source returned a continuation cursor after its declared row count',
         )
       }
-      return { rows, headerRows, pages: page, sourceTotalKnown: true }
+      return completeRead(rows, headerRows, page, 'declared_total', true, pageSize, appliedPageSize)
     }
-    if (usesPageIndex) {
-      if (pageRows.length < pageSize) {
-        assertKnownSourceComplete(sourceTotal, rows.length)
-        return { rows, headerRows, pages: page, sourceTotalKnown: Number.isInteger(sourceTotal) }
+
+    // A continuation the adapter actually OFFERED is always followed — even on a short page, where the
+    // cursor is the source saying "there is more" (PLM's wrapper emits one from a declared total). Note
+    // this is not the mirror image of distrusting `done: true`: following an offered cursor can only ever
+    // find rows we would otherwise have dropped, and the loop is bounded by seenCursors + SOURCE_MAX_PAGES.
+    // A kind that cannot SEND a cursor (bridge, k3 sqlserver) can never follow one, whatever it echoes.
+    if (!usesPageIndex && supportsCursor && nextCursor) {
+      if (seenCursors.has(nextCursor)) {
+        throw new StockPreparationReadonlySourceRunError(
+          502,
+          'SOURCE_RUN_CURSOR_LOOP',
+          'configured readonly source repeated a pagination cursor',
+        )
       }
+      seenCursors.add(nextCursor)
+      cursor = nextCursor
       continue
     }
-    if (outcome.page && outcome.page.done === true) {
-      if (!Number.isInteger(sourceTotal) && pageRows.length >= pageSize) {
-        throw new StockPreparationReadonlySourceRunError(
-          502,
-          'SOURCE_RUN_PAGINATION_AMBIGUOUS',
-          'configured readonly source ended on a full page without a row count or continuation cursor',
-          { receivedRows: rows.length, pageSize },
-        )
-      }
-      assertKnownSourceComplete(sourceTotal, rows.length)
-      return { rows, headerRows, pages: page, sourceTotalKnown: Number.isInteger(sourceTotal) }
-    }
 
-    if (!nextCursor) {
-      if (!Number.isInteger(sourceTotal) && pageRows.length >= pageSize) {
-        throw new StockPreparationReadonlySourceRunError(
-          502,
-          'SOURCE_RUN_PAGINATION_AMBIGUOUS',
-          'configured readonly source ended on a full page without a row count or continuation cursor',
-          { receivedRows: rows.length, pageSize },
-        )
-      }
+    // PROOF 2 — a short page with no continuation on offer: the adapter returned fewer rows than the bound
+    // it itself applied, so it had nothing more to give. (Falling short of a DECLARED total still fails
+    // closed inside assertKnownSourceComplete.)
+    if (!pageIsFull) {
       assertKnownSourceComplete(sourceTotal, rows.length)
-      return { rows, headerRows, pages: page, sourceTotalKnown: Number.isInteger(sourceTotal) }
-    }
-    if (seenCursors.has(nextCursor)) {
-      throw new StockPreparationReadonlySourceRunError(
-        502,
-        'SOURCE_RUN_CURSOR_LOOP',
-        'configured readonly source repeated a pagination cursor',
+      return completeRead(
+        rows,
+        headerRows,
+        page,
+        'short_page',
+        Number.isInteger(sourceTotal),
+        pageSize,
+        appliedPageSize,
       )
     }
-    seenCursors.add(nextCursor)
-    cursor = nextCursor
+
+    // Full page and nothing left to prove it with. The page-index dialect still has pages in its budget;
+    // every other kind is out of moves and must NOT report a snapshot it cannot vouch for.
+    if (usesPageIndex) continue
+    throw new StockPreparationReadonlySourceRunError(
+      502,
+      'SOURCE_RUN_COMPLETENESS_UNPROVABLE',
+      'configured readonly source filled its page and offers no way to prove there is nothing more',
+      {
+        receivedRows: rows.length,
+        pageSize,
+        effectivePageSize: appliedPageSize,
+        pagination: capability.pagination,
+        cursorReturned: Boolean(nextCursor),
+      },
+    )
   }
 
+  // Every page in the budget came back full: the source has at least this many rows and may have more.
   throw new StockPreparationReadonlySourceRunError(
     422,
     'SOURCE_RUN_RESULT_TOO_LARGE',
     'configured readonly source exceeded the bounded page limit',
-    { maxPages: SOURCE_MAX_PAGES, pageSize },
+    { maxPages: SOURCE_MAX_PAGES, pageSize, effectivePageSize: appliedPageSize, receivedRows: rows.length },
   )
+}
+
+function completeRead(rows, headerRows, pages, completenessProof, sourceTotalKnown, pageSize, appliedPageSize) {
+  return {
+    rows,
+    headerRows,
+    pages,
+    completenessProof,
+    sourceTotalKnown,
+    pageSizeRequested: pageSize,
+    pageSizeEffective: appliedPageSize,
+  }
 }
 
 function normalizeIntake(input) {
@@ -359,6 +476,18 @@ function buildSourceRunOutcome(sourceRun, channel, source, intake) {
       externalReadExecuted: true,
       pages: source.pages,
       sourceRows: source.rows.length,
+      // How completeness was PROVEN for this snapshot — never an assumption, and never the adapter's own
+      // `done` flag. 'short_page': the source returned fewer rows than the page bound it applied.
+      // 'declared_total': the collected rows matched the row count the source declared. A run that can
+      // prove neither never reaches this projector (SOURCE_RUN_COMPLETENESS_UNPROVABLE / _TOO_LARGE).
+      completenessProof: source.completenessProof,
+      sourceTotalKnown: source.sourceTotalKnown,
+      // The page we asked for vs the page the ADAPTER applied. They differ whenever a source clamps us
+      // (Bridge Agent -> config.maxLimit), which is exactly when a truncated read looks complete.
+      sourcePageSizeRequested: source.pageSizeRequested,
+      sourcePageSizeEffective: source.pageSizeEffective,
+      // Proven, not asserted: a page whose raw container exceeded the accepted size fails closed above.
+      sourceRowsTruncated: false,
       intake: intake.evidence,
       rawPayloadReturned: false,
       internalWriteExecuted: false,
@@ -469,9 +598,11 @@ async function runErpMaterialReadonlySource(input = {}) {
 }
 
 module.exports = {
+  BRIDGE_SOURCE_PAGE_SIZE,
   ERP_SOURCE_KINDS,
   K3_WEBAPI_SOURCE_PAGE_SIZE,
   PLM_SOURCE_KINDS,
+  SOURCE_KIND_CAPABILITIES,
   SOURCE_MAX_PAGES,
   SOURCE_PAGE_SIZE,
   StockPreparationReadonlySourceRunError,
@@ -483,7 +614,10 @@ module.exports = {
     assertKnownSourceNotExceeded,
     assertIntakeReady,
     buildSourceRunOutcome,
+    effectivePageSize,
+    rawContainerRowCount,
     readAllMappedRows,
+    sourceCapability,
     sourceChannel,
   },
 }

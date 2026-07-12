@@ -7098,7 +7098,7 @@ async function testStockPreparationReadonlySourceRunRoutes() {
   assert.equal(erp.body.data.evidence.intake.result.erpMaterialRows, 1)
   assert.equal(erp.body.data.evidence.internalWriteExecuted, false)
   assert.equal(sourceReadCalls.length, 2)
-  assert.equal(sourceReadCalls[0].request.limit, 500)
+  assert.equal(sourceReadCalls[0].request.limit, 1000, 'PLM/SQL page = the trusted-execution row cap')
   assert.equal(sourceReadCalls[1].request.limit, 10, 'K3 route preserves the adapter page bound')
   assert.equal(externalWriteCalls.length, 0, 'source-run routes never call an external write operation')
   assert.equal(internalRecordCalls, 0, 'dry-run feeder never reads or writes MVP records')
