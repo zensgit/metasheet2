@@ -8,9 +8,22 @@ import {
 import { validateLongTextValue } from './field-codecs'
 import { fieldTypeRegistry } from './field-type-registry'
 import { loadFieldsForSheet, loadSheetRow } from './loaders'
-import { MultitableRecordLockedError, MultitableRecordNotFoundError, MultitableRecordValidationError } from './record-errors'
+import {
+  MultitableRecordDeleteCapExceededError,
+  MultitableRecordLockedError,
+  MultitableRecordNotFoundError,
+  MultitableRecordValidationError,
+} from './record-errors'
 import { ensureRecordNotLocked, mapRecordLockState } from './record-lock'
 import { isFieldAlwaysReadOnly } from './permission-derivation'
+import {
+  assertTransactionalQuery,
+  captureSideDoorInboundTombstones,
+  insertSideDoorTrashRow,
+  isSideDoorDeleteTrashEnabled,
+  resolveSheetBaseIdForTrash,
+} from './side-door-delete-trash'
+import { TombstoneCaptureCapExceededError } from './tombstone-capture'
 import {
   listRecords as listRecordsViaQueryService,
   queryRecords as queryRecordsViaQueryService,
@@ -23,7 +36,12 @@ import {
   type QueryMultitableRecordsInput,
 } from './query-service'
 
-export { MultitableRecordNotFoundError, MultitableRecordValidationError } from './record-errors'
+export {
+  MultitableRecordDeleteCapExceededError,
+  MultitableRecordNotFoundError,
+  MultitableRecordValidationError,
+} from './record-errors'
+export { MultitableSideDoorDeleteNonTransactionalError } from './side-door-delete-trash'
 export {
   buildRecordsCacheKey,
   decodeRecordCursor,
@@ -544,6 +562,160 @@ export async function createRecord(
   }
 }
 
+/**
+ * D-2 flag-ON plugin delete (design-lock #4004 §2, owner-ratified). Full recoverability parity with the
+ * UI path: pre-generated anchor → cap-checked inbound capture → links DELETE → delete revision → trash
+ * INSERT → record DELETE, all inside the caller's transaction (OD-7 contract, asserted by golden G3).
+ *
+ * Kept as a SEPARATE function from the flag-off path on purpose (§1.9): the flag-off branch below is the
+ * D-1 code verbatim, so byte-identity is guaranteed BY CONSTRUCTION rather than by argument. The two
+ * orderings genuinely differ — flag-off keeps D-1's deliberate delete-then-emit fail-safe (safe without a
+ * txn), flag-on must emit BEFORE the delete so trash/tombstones have an anchor to hang off (safe only
+ * inside a txn, which this module's contract now requires).
+ */
+async function deleteRecordWithRecoverability(
+  input: DeleteMultitableRecordInput,
+): Promise<DeletedMultitableRecord> {
+  const query = input.query
+
+  // OD-7 LAYER 3 (review P2-1): refuse to run the reordered path outside a transaction, BEFORE any write.
+  // Prose + G3 were not enough — G3 supplies its OWN transaction, so it proves atomicity GIVEN a txn, not
+  // that the entry wiring provides one (unwrapping index.ts's transaction left every golden green). This
+  // check is independent of the entry wiring: it also protects callers that do not exist yet. It is not
+  // un-deletable — it is pinned by a no-transaction golden (G16).
+  await assertTransactionalQuery(query, 'plugin')
+
+  // FOR UPDATE + the extra columns the trash row needs (created_by / created_at / updated_at) AND the
+  // lock columns (see the re-check below). The flag-off path reads only data+version and needs no row
+  // lock (it destroys first, asks later).
+  const snapshotRes = await query(
+    `SELECT data, version, created_by, created_at, updated_at, locked, locked_by
+       FROM meta_records
+      WHERE id = $1 AND sheet_id = $2
+      FOR UPDATE`,
+    [input.recordId, input.sheetId],
+  )
+  const snapshotRow = (snapshotRes.rows as any[])[0] as
+    | {
+        data?: Record<string, unknown>
+        version?: unknown
+        created_by?: unknown
+        created_at?: Date | string | null
+        updated_at?: Date | string | null
+        locked?: unknown
+        locked_by?: unknown
+      }
+    | undefined
+  // Missing record ⇒ same NotFound contract the flag-off path gets from its 0-row DELETE RETURNING.
+  if (!snapshotRow) {
+    throw new MultitableRecordNotFoundError(`Record not found: ${input.recordId}`)
+  }
+
+  // LOCK TOCTOU CLOSE (owner review, P1). `guardRecordNotLockedForPlugin` above is a PRE-CHECK on an
+  // UNLOCKED snapshot — a plain `SELECT locked, locked_by, created_by` with NO `FOR UPDATE`, so it holds
+  // no row lock. Between it and this statement a concurrent transaction can COMMIT a lock on the record;
+  // the pre-check would still say "unlocked" and this path would destroy a locked row, violating rank-8
+  // record-lock semantics. The `FOR UPDATE` above is the first point at which the row is actually pinned,
+  // so THAT is where lock authority lives: re-verify here, under the row lock, before any capture /
+  // links DELETE / revision / trash / record DELETE. The pre-check stays as a cheap fast path but is NOT
+  // the authority. (The automation lane already had this shape: its FOR UPDATE selects the lock columns
+  // and re-checks under the row lock.)
+  ensureRecordNotLocked(null, snapshotRow, () => new MultitableRecordLockedError('Record is locked'))
+
+  const version = Number(snapshotRow.version ?? 1)
+  const serverVersion = Number.isFinite(version) ? version : 1
+  const baseId = await resolveSheetBaseIdForTrash(query, input.sheetId)
+
+  // §1.2 anchor: ONE uuid = delete-revision id = trash.delete_revision_id = tombstones.source_revision_id.
+  const deleteRevisionId = randomUUID()
+
+  // §1.3 capture BEFORE the links DELETE below destroys both edge directions. No-op unless BOTH flags are
+  // on (§1.5 nesting). Over-cap ⇒ throws ⇒ the delete is refused (fail-closed, §1.4) — surfaced to SDK
+  // callers as the typed MultitableRecordDeleteCapExceededError (OD-6).
+  try {
+    await captureSideDoorInboundTombstones(query, {
+      sheetId: input.sheetId,
+      recordId: input.recordId,
+      sourceRevisionId: deleteRevisionId,
+    })
+  } catch (err) {
+    if (err instanceof TombstoneCaptureCapExceededError) {
+      throw new MultitableRecordDeleteCapExceededError(err.message, err.totalRows, err.cap)
+    }
+    throw err
+  }
+
+  await query('DELETE FROM meta_links WHERE record_id = $1 OR foreign_record_id = $1', [input.recordId])
+
+  await recordRecordRevision(query, {
+    sheetId: input.sheetId,
+    recordId: input.recordId,
+    version: serverVersion,
+    action: 'delete',
+    source: 'plugin',
+    actorId: null,
+    changedFieldIds: [],
+    patch: {},
+    id: deleteRevisionId,
+    snapshot: snapshotRow.data ?? null,
+  })
+
+  // Fail-closed on a missing trash schema (§1.8): NO 42P01/42703 swallow here, unlike the UI path's
+  // never-fail degradation. An operator who opted into recoverability must not get a silent
+  // unrecoverable delete — the whole txn rolls back instead (golden G11).
+  await insertSideDoorTrashRow(query, {
+    recordId: input.recordId,
+    sheetId: input.sheetId,
+    baseId,
+    snapshot: snapshotRow.data ?? null,
+    originalVersion: serverVersion,
+    createdBy: typeof snapshotRow.created_by === 'string' ? snapshotRow.created_by : null,
+    deletedBy: null, // OD-5: the plugin lane is actor-less.
+    originalCreatedAt: snapshotRow.created_at ?? null,
+    originalUpdatedAt: snapshotRow.updated_at ?? null,
+    deleteRevisionId,
+  })
+
+  // The SAME guardRecordNotLockedForPlugin(actor=null) call in `deleteRecord` rejects a locked record
+  // before EITHER branch is dispatched, so this DELETE carries the identical lock disposition as the
+  // flag-off one below.
+  // lock-guarded: plugin-SDK deleteRecord, D-2 flag-on path (M1) — guarded in `deleteRecord` above.
+  const deleted = await query(
+    `DELETE FROM meta_records
+     WHERE id = $1 AND sheet_id = $2
+     RETURNING version`,
+    [input.recordId, input.sheetId],
+  )
+  const row = (deleted.rows as any[])[0]
+  if (!row) {
+    throw new MultitableRecordNotFoundError(`Record not found: ${input.recordId}`)
+  }
+
+  return {
+    id: input.recordId,
+    sheetId: input.sheetId,
+    version: Number(row.version ?? serverVersion),
+  }
+}
+
+/**
+ * TRANSACTION CONTRACT (D-2 design-lock OD-7 — normative): `input.query` MUST be transactional. The sole
+ * production wiring already satisfies it (every plugin-SDK call is wrapped in
+ * `poolManager.get().transaction`, index.ts:651). The D-2 flag-on path REORDERS this delete so the
+ * revision + trash row are written BEFORE the record DELETE; without a real transaction a mid-sequence
+ * failure would leave the "revision says dead, row still alive" half-state D-1's delete-then-emit
+ * ordering was designed to avoid.
+ *
+ * Three layers enforce it, and you need all three — G3 ALONE DOES NOT GUARD THE WIRING, because it
+ * supplies its own transaction and therefore proves atomicity only *given* one:
+ *   1. G3a/G3b (real-DB goldens) — the sequence is atomic given a transaction.
+ *   2. The real entry points must SUPPLY one, proven behaviourally: G18 drives the actual
+ *      `createCoreAPI()` plugin-SDK factory (reds if this call site's `transaction` is unwrapped), and
+ *      G15 drives the actual `AutomationService.exec` (reds if `deps.transaction` stops being supplied).
+ *   3. `assertTransactionalQuery` — refuses at runtime if a caller does not (pinned by G16 on both lanes).
+ * Unwrapping the transaction at the call site leaves G3 GREEN and turns layers 2+3 red. Do not "fix" a
+ * red layer-2/3 by relaxing the guard; re-wire the caller.
+ */
 export async function deleteRecord(
   input: DeleteMultitableRecordInput,
 ): Promise<DeletedMultitableRecord> {
@@ -553,6 +725,12 @@ export async function deleteRecord(
   // Record-lock guard (rank-8 review M1; decision d). Actor-less plugin path → a locked record cannot
   // be deleted via the SDK (it must be unlocked first through the explicit unlock action).
   await guardRecordNotLockedForPlugin(query, input.sheetId, input.recordId)
+
+  // D-2 (side-door delete recoverability, #4004): opt-in recoverability parity with the UI path. Default
+  // OFF ⇒ fall through to the D-1 code below, byte-identically (§1.9).
+  if (isSideDoorDeleteTrashEnabled()) {
+    return await deleteRecordWithRecoverability(input)
+  }
 
   // D-1 (destruction-path gap audit, owner-ratified): read the row BEFORE destroying anything so the
   // delete revision below can carry the record's final snapshot. PIT/as-of-T existence is derived
@@ -564,11 +742,12 @@ export async function deleteRecord(
   )
   const snapshotRow = (snapshotRes.rows as any[])[0] as { data?: Record<string, unknown>; version?: unknown } | undefined
 
-  // 4c-2 scope boundary (design-lock §8) + D-1 update: this plugin-SDK delete path now EMITS the
-  // delete revision (source:'plugin' — PIT correctness, D-1) but remains intentionally NOT wired to
-  // tombstone-capture or meta_records_trash: the row is still irrecoverable, independent of
-  // MULTITABLE_TOMBSTONE_CAPTURE_ENABLED. Trash+capture parity (recoverability) is the separate
-  // owner-gated D-2 rung, not D-1.
+  // 4c-2 scope boundary (design-lock §8) + D-1 update: with the D-2 flag OFF this plugin-SDK delete path
+  // EMITS the delete revision (source:'plugin' — PIT correctness, D-1) but writes NO meta_records_trash
+  // row and captures NO tombstones — the row stays irrecoverable, independent of
+  // MULTITABLE_TOMBSTONE_CAPTURE_ENABLED (D-2 §1.5: capture on this path is NESTED under the D-2 flag, so
+  // capture-on alone must not change this branch by so much as one row). Recoverability lives in
+  // `deleteRecordWithRecoverability` above, behind MULTITABLE_SIDE_DOOR_DELETE_TRASH_ENABLED.
   await query('DELETE FROM meta_links WHERE record_id = $1 OR foreign_record_id = $1', [input.recordId])
 
   // lock-guarded: plugin-SDK deleteRecord (M1) — guardRecordNotLockedForPlugin(actor=null) rejected above.
@@ -583,9 +762,12 @@ export async function deleteRecord(
     throw new MultitableRecordNotFoundError(`Record not found: ${input.recordId}`)
   }
 
-  // D-1: emit AFTER the hard delete (this path has no enclosing transaction guarantee): if this INSERT
-  // fails we degrade to today's missing-revision behavior for one record — never the reverse lie of a
-  // delete revision for a row that still exists. Gated on the DELETE having actually removed a row.
+  // D-1: emit AFTER the hard delete. This ordering is D-1's deliberate fail-safe — if this INSERT fails
+  // we degrade to today's missing-revision behavior for one record, never the reverse lie of a delete
+  // revision for a row that still exists. Gated on the DELETE having actually removed a row. (D-2/OD-7
+  // note: the module now pins a transactional-`query` contract — see `deleteRecord`'s doc-comment — but
+  // this flag-off branch is preserved VERBATIM for §1.9 byte-identity, so it keeps the ordering that is
+  // safe even without one. Only the flag-on branch relies on the txn.)
   await recordRecordRevision(query, {
     sheetId: input.sheetId,
     recordId: input.recordId,

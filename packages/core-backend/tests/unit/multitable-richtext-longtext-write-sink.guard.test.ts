@@ -100,6 +100,11 @@ const ALLOWLIST: Record<string, { disposition: 'CHOKEPOINT' | 'SAFE'; reason: st
     disposition: 'SAFE',
     reason: 'W7-1 approval-result backwrite writes ONLY system outcome values (status enum / approver id / ISO timestamp) — never user-supplied longText',
   },
+  'multitable/side-door-delete-trash.ts': {
+    disposition: 'SAFE',
+    reason:
+      'D-2 side-door delete recoverability. Writes NO meta_records row at all — it is caught by `writesRecordData` only because its sole INSERT targets meta_records_TRASH, whose name shares the `meta_records` prefix the regex matches. The `data` it copies is the deleted row\'s own snapshot, read verbatim out of meta_records microseconds earlier inside the same txn, so it is content that ALREADY passed the ingress chokepoint on its original write — this module adds no new user-content ingress and cannot introduce an unvalidated rich-longText value (identical in kind to the trash INSERT record-service.ts has always done on the UI delete path).',
+  },
 }
 
 /** A file is a `meta_records.data` writer iff it contains an INSERT/UPDATE touching `meta_records`

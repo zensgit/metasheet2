@@ -187,6 +187,11 @@ export default defineConfig({
       // skip-green here, re-opening the "real-DB spec silently skips in the no-DB lane" hole) —
       // whole-file wired into `Run multitable real-DB integration` in plugin-tests.yml.
       'tests/integration/multitable-d1-delete-revision-parity-realdb.test.ts',
+      // D-2 side-door delete recoverability (#4004): real Postgres only (it installs scoped failure-
+      // injection triggers and drives both side doors end-to-end) — excluded HERE so it cannot skip-green
+      // in the no-DB lane, and whole-file wired into `Run multitable real-DB integration` in
+      // plugin-tests.yml. Two-point wiring: BOTH points or the file silently never runs.
+      'tests/integration/multitable-d2-sidedoor-delete-recoverability-realdb.test.ts',
       // 4c-3 RB matrix: real Postgres only — whole-file wired into `Run multitable real-DB
       // integration` in plugin-tests.yml (describeIfDatabase alone would skip-green here).
       'tests/integration/multitable-undelete-inbound-replay-realdb.test.ts',
