@@ -93,6 +93,7 @@ held PR 只做 watch-only。
 |---|---|
 | 27 个 FE 测试此前跑在零 workflow | `grep -rl plm-embed .github/workflows/` = 空；`run-required-web-tests.sh` plm 条目 = 0；`test (20.x)` 对 apps/web 只 build |
 | 新守卫不会一上来就红 | 本地 27/27 绿，且文件与 origin/main 逐字节相同 |
+| **守卫真的会触发并通过（不是「纸面正确」）** | **#4136 自身即实证**：guard 把自己的 workflow 文件也列进 path-filter，故在 #4136 上**真的触发了**——`plm-embed-web-guard` **pass 28s**（run `29178569233`，三次 run 全 success）。这是**活的 CI 证据**，非「本地绿+YAML 合法」的推断 |
 | 守卫不是「死 filter」 | 5 条 path-filter 目标在 main 上**逐条存在**（实测） |
 | filter 精确 | vitest filter 解析为**恰好** 2 个 spec / 27 测 |
 | 一 token 一调用 | `plm-embed.ts:103-110` jti 查询前原子消费；`PlmEmbedBomReviewView.vue:119` 首个 token 生效；outbound postMessage = **0** |
