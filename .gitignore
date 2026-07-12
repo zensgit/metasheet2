@@ -98,3 +98,7 @@ apps/web/verification-output/
 
 # vue-tsc -b (the `type-check` script) emits .js/.vue.js next to TS/Vue source; never commit them
 apps/web/src/**/*.js
+
+# core-backend runtime file storage (StorageService: STORAGE_PATH || cwd()/uploads, layout <uuid>/<name>).
+# Local server/test runs write real blobs here; they are runtime artifacts, never source.
+packages/core-backend/uploads/
