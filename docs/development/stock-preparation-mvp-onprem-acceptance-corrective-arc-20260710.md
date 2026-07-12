@@ -27,6 +27,7 @@
 | corrective-4 | 交付管道深路径清理残留 | staging `node_modules` 清理 SYSTEM-safe(长路径/深嵌套) | **#4073** | `…-corrective4-…` |
 | corrective-5 | `failedMigrationName=20250926_create_audit_tables` · `42P07`(duplicate_table)· `table` | 实体机先跑幂等孪生 `zz20251231_create_audit_tables.ts`(allowUnorderedMigrations 历史);同名更早的 raw `.sql` 后合入被当 pending 重放 → 裸 `CREATE TABLE audit_logs` 撞已存在对象 | **#4084**(`.sql` 名加入 `SUPERSEDED_LEGACY_SQL_MIGRATIONS` no-op 名单) | `…-corrective5-20260710-698acd918` |
 | **corrective-6** | 迁移全过(`migration066=applied`,42P07 消失),但**后端启动即崩**、`/api/health` **502** · `failureClass=RUNTIME_DEPENDENCY_DECLARED_AS_DEV_ONLY` · `missingRuntimeModule=uuid` | `uuid` 只声明在 core-backend **devDependencies**,而 `WorkflowDesigner` / `BPMNWorkflowEngine` / `DelayService` 在**模块加载期**就 import 它 —— **`--prod` 安装跳过 devDependencies** | **#4126**(`6b5a6d90a`)= `uuid` → `dependencies` + **production-install 启动契约 guard** + guard 顺带挖出的 **express-validator fail-open 安全缺陷**(见 §6) | `…-corrective6-20260712-6b5a6d90a` |
+| **corrective-7** | *(本地全量预演捕获,**未烧实体机一轮**)* — corrective-6 修好启动后,smoke 在 persist 停下:`500 VALIDATION_ERROR: Unknown fieldId: snapshotBatchId` | 模板用**逻辑键**、provisioning 派生**物理 fieldId**、records 服务**只认物理 id**,而备料**全部读写路径**把逻辑键当 fieldId 传、**从不调 `resolveFieldIds`**(33 次 createRecord/patchRecord,0 次 resolveFieldIds;两个读模块**完全绕过 scoped API**)→ **写入面从未在真实 multitable 上运行过** | **#4163**(`94f124ba4`)= 翻译收口进 `createTargetScopedRecordsApi` + **把测试 fake 改成像真服务一样拒绝未知 fieldId** | `…-corrective7-20260712-94f124ba4` |
 
 > 说明:#4062 与 #4061 是并行的同修法,#4062 在审阅确认机制等价后作为 superseded 关闭。
 
@@ -82,7 +83,7 @@ diff 实测三处差异(均已缓解,记录于此以免后续误判):
 
 **本文的关闭范围 = W3-W6 on-prem 包的 *runtime 验收* 弧,不是整个 #3751 epic。** 明确划界:
 
-- **runtime 验收余项(本文范围内)**:实体机装 **corrective-6** 包跑 smoke 回贴 `mvpSmoke.pass=true` +
+- **runtime 验收余项(本文范围内)**:实体机装 **corrective-7** 包跑 smoke 回贴 `mvpSmoke.pass=true` +
   `auditActionsCovered=8/8` + `selfScanClean=true`。此为**唯一的 runtime 验收余项**;PASS 后
   前序 W3-W6 MD 补 addendum,**W3-W6 on-prem 包 runtime 验收弧**闭环。
 - **包保障(本文范围外,已 MERGED `458373d54`)**:#4086 是 #4084 之后的**包验证器增量**——两个 on-prem 包验证器
@@ -207,3 +208,96 @@ fail-closed 有一个**必须正视的副作用**:**将来若打包漏了 `expre
 
 **PASS 判据**(实体机回贴,**不贴业务值**):`mvpSmoke.pass=true` + `auditActionsCovered=8/8` + `selfScanClean=true`。
 执行指引与证据落点:**#4101**。
+## 7. corrective-7 — 备料的写入面从未在真实 multitable 上运行过(#4160 / PR #4163)
+
+### 7.0 它是怎么被发现的:**本地把实体机那一轮整个演了一遍**
+
+前六轮 corrective 的代价是**串行的**:每一轮都要等操作员在物理机上装完、跑到下一个坑,才知道下一个坑在哪。
+
+corrective-6 发包**之前**,本轮改用**本地全量预演**替代"发包 → 等回贴":
+真 Postgres → **全新空库** → `pnpm install --prod --frozen-lockfile`(**跳过 devDependencies**,即实体机 502 的那条路径)
+→ `node dist/src/db/migrate.js` → 启后端 → **跑实体机将要跑的那个 smoke 脚本本身**。
+
+结果分成两半:
+
+**corrective-6 达成了它的目标** ✅
+
+| 步骤 | 结果 |
+|---|---|
+| `--prod` 安装 | 成功(devDependencies skipped) |
+| 全新库迁移 | **261 个,零错误**;**42P07 消失**;`066` 在;`audit_logs` 在 |
+| **后端启动** | ✅ **`/api/health` → 200**(**502 崩溃循环消除**) |
+| smoke:ensure / options-sync / plan | ok(9 张冻结表 · 19 个选项字段 · draft + 2 行) |
+
+**但它一修好,就露出了后面那个从来没人看见过的洞** ❌
+
+```
+[smoke] sync persist -> 201: FAIL (http=500)
+   → VALIDATION_ERROR: Unknown fieldId: snapshotBatchId
+```
+
+### 7.1 根因:逻辑键 vs 物理 fieldId
+
+| 层 | 用的是什么 |
+|---|---|
+| **模板**(`stock-preparation-templates.cjs:627`) | **逻辑键** + 显示名:`field('snapshotBatchId', 'Snapshot Batch ID', …)` |
+| **provisioning** | 按显示名建字段,派生**物理 id**:`'fld_' + sha1(projectId:objectId:fieldId)[0:24]`(确定性) |
+| **multitable records 服务** | **只认物理 id**,两个方向都拒:写(`buildNormalizedPatch`)、读的 filter(`normalizeQueryFilters`);返回的行也是物理键 |
+| **备料写入路径** | **把逻辑键直接当 fieldId 传**,且**从不调 `resolveFieldIds`** |
+
+**影响面是整条链,不是单点**(真库实测):
+
+| 模块 | createRecord/patchRecord | resolveFieldIds |
+|---|---|---|
+| `stock-preparation-sync-run-persist.cjs` | 6 | **0** |
+| `stock-preparation-confirm-writes.cjs` | 11 | **0** |
+| `stock-preparation-generation-runtime.cjs` | 10 | **0** |
+| `stock-preparation-table-actions.cjs` | 6 | **0** |
+| **`stock-preparation-confirm-reads.cjs` / `snapshot-reads.cjs`** | **完全绕过 scoped API** | **0** |
+
+**读路径更阴**:逻辑键的 filter 会被**拒绝**;而按逻辑键去读物理键的行,**每个格子都是 `undefined`** —— **不报错,直接读到空**。
+
+**同插件的其他模块全都用对了**(`option-sync` / `mvp-provisioning` / `erp-feedback` / `target-provisioning` 均调 `resolveFieldIds`)→ **这是遗漏,不是设计。**
+
+### 7.2 为什么几十个绿测一个都没抓到
+
+> **所有写入路径的测试都注入了 fake `recordsApi`,而 fake 接受逻辑键。真服务不接受。**
+
+这是教科书级的 **「mock 不是契约」**:测试证明的是"我们的代码调用了我们自己的假 API",**不是"它能写进真表"**。
+
+`sync-run-persist.cjs:120` 的注释甚至写着「the records service rejects an unknown fieldId」——
+作者**知道**这条规则,**但假定了逻辑键就是 fieldId**。**注释里写着的正确知识,和代码里做的错误假设,在同一个文件里并存了几个月。**
+
+### 7.3 修法:把翻译收口到唯一入口 + 让 fake 像真服务一样严格
+
+1. **翻译绑在 `createTargetScopedRecordsApi` 内**(所有备料读写的**唯一收口**)——写(`data` / `changes`)· 读(`filters` **以及返回行的键反向翻回逻辑键**;`id`/`version` 不动以保 `patchRecord({recordId})` 可用)· **未知逻辑键 fail-closed**(绝不静默丢弃 —— 静默丢弃 = 又一个"绿着的谎")。
+   **让"漏调 `resolveFieldIds`"结构上不可能再发生**,而不是逐个函数补一遍。
+2. **把测试的 fake 改成"像真服务一样拒绝未知 fieldId"** —— **改完之后,不修代码的旧实现立刻 6/12 变红**。
+   **这一步才是本次修复真正的价值**:否则同一类缺陷会再次全绿通过。
+
+### 7.4 验证
+
+**真服务端 end-to-end(不是 mock)**:全新库 → `pass=true` · `auditActionsCovered=8/8` · `selfScanClean=true`;
+行**真的落进 Postgres**:2 batches / 4 lines / 6 mappings / 4 exceptions / 4 runs / 2 unit rules。
+
+**独立对抗审阅:APPROVE(0 P1 · 0 P2)**,并**补上了作者诚实标记为「未覆盖」的那条路径**——
+smoke 的 fixture 让 generation 停在 `blocked`,**零 prep-line 行**,所以 prep-line 的写入面 live smoke 没覆盖。审阅用真库把它造了出来:
+
+- **值落进了*正确的列***,不只是"某些列":**`designQty 7.03125 × factor 2 = issueQty 14.0625`** —— **列错位则乘法等式不成立**。
+- **重跑 v1→v2、零重复行** —— 反证反向映射正确:`existingPrepLinesById` 按**逻辑键**索引,**没有反向映射,每次重跑都会复制整张表**。
+- 字段 id **从 `meta_fields` 表读取**,而非用代码同一套 sha1 派生 —— **fake 给不了的「代码 ↔ 数据库」交叉核对**。
+
+**攻击面证伪**:`pre_mapped` 旁路**不是洞**(HTTP 面注入 → `400 unsupported request field`;夹带裸物理 fieldId → `400`,库里 `PWNED` 计数 **0**);读的反向映射对未声明字段是**透传**(既不静默丢、也不泄漏物理 id)。
+
+**mutation**:写翻译 / 读反向映射 / 三处 fail-closed(`data`·`changes`·`filters`)逐个删 → 分别变红;
+**并补上了 `withTargetSheet` 的 403 围栏测试**(此前**零覆盖**)——它是"备料只写自己那 9 张表"的最后一道锁。
+删掉那道 throw 只会让越界尝试变**静默**而非**成功**,但 **静默正是一个调用方漂到错误 sheet 上却没人发现的方式。围栏必须出声。**
+
+### 7.5 这一轮真正的教训
+
+**如果没有这次本地预演,corrective-6 的包会被装上实体机 —— 启动会好,然后在 persist 停下,白烧第七轮。**
+
+> **能在本地重放的验收步骤,就不要用别人的物理机去发现。**
+> 六轮 corrective 里,有几轮的缺陷本可以在发包前的一次全量预演中被同时抓出来。
+
+**并且:一个 fake 如果比真依赖宽容,它保护的不是代码,是缺陷。**
