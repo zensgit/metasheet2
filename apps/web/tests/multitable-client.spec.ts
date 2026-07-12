@@ -792,6 +792,9 @@ describe('MultitableApiClient', () => {
         action: 'update',
         source: 'rest',
         actorId: 'user_1',
+        // #2928 added server-side actor-name enrichment to the history normalizer; the fixture
+        // response above doesn't include actorName, so it normalizes to null (id-fallback path).
+        actorName: null,
         changedFieldIds: ['fld_title'],
         patch: { fld_title: 'Updated' },
         snapshot: { fld_title: 'Updated' },
