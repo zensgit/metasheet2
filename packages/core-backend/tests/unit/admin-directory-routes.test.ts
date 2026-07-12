@@ -599,6 +599,60 @@ describe('adminDirectoryRouter', () => {
       expect(schedulerMocks.refreshDirectoryIntegrationSchedule).not.toHaveBeenCalled()
     })
 
+    // Review P3-3: cron reachability is NOT timezone-invariant, so the save gate must validate the cron
+    // in the zone it will actually RUN in. `30 2 8 3 *` = 02:30 on Mar 8. In America/New_York, 2026-03-08
+    // is the DST spring-forward Sunday — 02:00–03:00 local does not exist that day — so the expression can
+    // never fire; in Asia/Shanghai (no DST) the same expression is perfectly reachable. Same cron, opposite
+    // verdicts: reachability depends on the zone.
+    //
+    // The clock MUST be pinned: `hasNext()` scans forward from "now" for ~a year, and this cron has exactly
+    // ONE candidate in that window. Which March 8 that is decides the answer (DST moves each year — it is
+    // the 2nd Sunday of March), so an unpinned clock makes this pass or fail depending on the wall date.
+    // That is not a hypothetical: the first draft of this test failed for exactly that reason.
+    const DST_GAP_CLOCK = new Date('2026-01-15T00:00:00.000Z') // next Mar 8 = 2026-03-08 = the DST gap day
+
+    it('P3-3: a cron UNREACHABLE in the configured zone is REJECTED at save time (not silently accepted and never run)', async () => {
+      // RED-before (validate the cron with a hardcoded 'UTC' as the gate used to): this saves with 200 and
+      // the scheduler then silently drops it forever — the exact failure this gate exists to prevent,
+      // arriving via the timezone instead of via a mismatched parser.
+      vi.useFakeTimers()
+      vi.setSystemTime(DST_GAP_CLOCK)
+      try {
+        const response = await invokeRoute('post', '/integrations', {
+          body: { name: 'DingTalk US', scheduleCron: '30 2 8 3 *', scheduleTimezone: 'America/New_York' },
+          user: { id: 'admin-1', role: 'admin' },
+        })
+
+        expect(response.statusCode).toBe(400)
+        expect(response.body).toMatchObject({
+          ok: false,
+          error: { code: 'DIRECTORY_SCHEDULE_CRON_INVALID' },
+        })
+        expect(directoryMocks.createDirectoryIntegration).not.toHaveBeenCalled()
+      } finally {
+        vi.useRealTimers()
+      }
+    })
+
+    it('P3-3 CONTROL: the SAME cron is ACCEPTED for a zone where it IS reachable — the gate rejects the unreachable expression, not every expression', async () => {
+      // Load-bearing positive control. Without it, the rejection above could equally mean "the gate rejects
+      // everything", and the suite would stay green even if the save gate were broken shut.
+      vi.useFakeTimers()
+      vi.setSystemTime(DST_GAP_CLOCK)
+      try {
+        directoryMocks.createDirectoryIntegration.mockResolvedValue({ id: 'dir-tz-ok', name: 'DingTalk CN' })
+        const response = await invokeRoute('post', '/integrations', {
+          body: { name: 'DingTalk CN', scheduleCron: '30 2 8 3 *', scheduleTimezone: 'Asia/Shanghai' },
+          user: { id: 'admin-1', role: 'admin' },
+        })
+
+        expect(response.statusCode).toBe(200)
+        expect(directoryMocks.createDirectoryIntegration).toHaveBeenCalled()
+      } finally {
+        vi.useRealTimers()
+      }
+    })
+
     it('accepts a valid schedule_cron on create and passes it through unmodified', async () => {
       directoryMocks.createDirectoryIntegration.mockResolvedValue({ id: 'dir-1', name: 'DingTalk CN' })
 

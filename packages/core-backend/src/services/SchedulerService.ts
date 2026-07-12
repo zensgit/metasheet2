@@ -286,6 +286,25 @@ class JobScheduler extends EventEmitter {
   private scheduleCronJob(job: ScheduledJob): void {
     if (!job.cronExpression || job.isPaused) return
 
+    const registrationName = job.name || job.id || ''
+    // Review P2-1 — STALE-JOB GUARD. `armCronTimeout`'s post-run callback re-schedules the job object
+    // it CAPTURED when the timer was armed. If that job was unregistered or REPLACED while the run was
+    // in flight, re-arming it resurrects a job the caller already dismissed:
+    //   * unschedule() mid-run → a ZOMBIE: `jobs` no longer holds it and getJob() returns null, but the
+    //     timer keeps firing — an admin who disables directory sync gets a sync that keeps calling
+    //     DingTalk until the process restarts.
+    //   * a timezone edit mid-run (unschedule + schedule with a NEW job) → the finishing run re-arms the
+    //     OLD object, silently REVERTING to the stale zone; it does not self-heal, because `jobs` holds
+    //     the new job so the next applySchedule sees an unchanged timezone and reschedules in place.
+    // Only ever (re)schedule the job that is CURRENTLY registered under this name. Identity, not name:
+    // a replacement job carries the same name but is a different object.
+    // (The other two call sites schedule a job that IS the registered one — schedule() sets `jobs`
+    // immediately before, and resume() reads it out of `jobs` — so this guard is inert for them.)
+    if (this.jobs.get(registrationName) !== job) {
+      this.logger.debug(`Skipping re-schedule of a stale/unregistered cron job: ${registrationName}`)
+      return
+    }
+
     try {
       const expression = new SimpleCronExpression(job.cronExpression, job.options?.timezone)
       const nextRun = expression.next()
@@ -296,7 +315,7 @@ class JobScheduler extends EventEmitter {
       }
 
       job.nextRun = nextRun
-      const jobName = job.name || job.id || ''
+      const jobName = registrationName
 
       // 清理旧的定时器
       const oldCronJob = this.cronJobs.get(jobName)

@@ -73,6 +73,82 @@ describe('SchedulerService cron delay arming (far-future crons)', () => {
     service.destroy()
   })
 
+  it('ZOMBIE (review P2-1): a cron unscheduled DURING an in-flight run must NOT re-arm itself when that run finishes', async () => {
+    // armCronTimeout's post-run callback re-schedules the job object it CAPTURED when the timer was
+    // armed. Unscheduling mid-run used to be undone by the finishing run: `jobs` no longer held the
+    // job and getJob() returned null, yet the timer kept firing — an admin who DISABLES directory
+    // sync would get a sync that keeps calling DingTalk until the process restarts.
+    // The existing "unscheduled mid-chain" test above cancels BEFORE the handler ever runs, so it
+    // cannot see this; the resurrection happens on the completion path.
+    // RED-before (drop the stale-job guard in scheduleCronJob): handler keeps firing after unschedule.
+    const service = new SchedulerServiceImpl()
+    let releaseRun: (() => void) | null = null
+    const handler = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          releaseRun = resolve // park the run IN FLIGHT until we release it
+        }),
+    )
+
+    await service.schedule('zombie-job', '* * * * *', handler, { timezone: 'UTC' })
+
+    // Fire once — the run is now parked in flight.
+    await vi.advanceTimersByTimeAsync(61_000)
+    expect(handler).toHaveBeenCalledTimes(1)
+
+    // The admin disables the sync WHILE that run is still in flight.
+    await service.unschedule('zombie-job')
+    expect(await service.getJob('zombie-job')).toBeNull()
+
+    // The in-flight run now completes → the post-run callback tries to re-schedule the captured job.
+    releaseRun!()
+    await vi.advanceTimersByTimeAsync(0)
+
+    // It must stay dead. Without the guard the job re-arms and fires every minute forever.
+    await vi.advanceTimersByTimeAsync(10 * 60_000)
+    expect(handler).toHaveBeenCalledTimes(1)
+    expect(await service.getJob('zombie-job')).toBeNull()
+
+    service.destroy()
+  })
+
+  it('STALE ZONE (review P2-1): a timezone change during an in-flight run must not be reverted by that run finishing', async () => {
+    // The timezone-edit path is unschedule + schedule (reschedule() cannot update options.timezone in
+    // place). If the edit lands mid-run, the finishing run re-arms the OLD job object — silently
+    // reverting to the stale zone. It does not self-heal: `jobs` holds the NEW job, so the next
+    // applySchedule sees an unchanged timezone and reschedules in place, never rebuilding the
+    // expression. Here the replacement must survive, and the stale object must not fire.
+    const service = new SchedulerServiceImpl()
+    let releaseRun: (() => void) | null = null
+    const oldHandler = vi.fn(
+      () => new Promise<void>((resolve) => { releaseRun = resolve }),
+    )
+    const newHandler = vi.fn().mockResolvedValue(undefined)
+
+    await service.schedule('tz-job', '* * * * *', oldHandler, { timezone: 'UTC' })
+    await vi.advanceTimersByTimeAsync(61_000)
+    expect(oldHandler).toHaveBeenCalledTimes(1) // parked in flight
+
+    // Admin edits the timezone mid-run: unschedule + schedule a NEW job object under the same name.
+    await service.unschedule('tz-job')
+    await service.schedule('tz-job', '* * * * *', newHandler, { timezone: 'Asia/Shanghai' })
+
+    // The old run finishes and tries to re-arm ITSELF (the stale UTC job object).
+    releaseRun!()
+    await vi.advanceTimersByTimeAsync(0)
+
+    // The registered job must still be the NEW one, on the NEW zone.
+    const registered = await service.getJob('tz-job')
+    expect(registered?.options?.timezone).toBe('Asia/Shanghai')
+
+    // And the stale object must never fire again — only the replacement runs.
+    await vi.advanceTimersByTimeAsync(5 * 60_000)
+    expect(oldHandler).toHaveBeenCalledTimes(1)
+    expect(newHandler.mock.calls.length).toBeGreaterThan(0)
+
+    service.destroy()
+  })
+
   it('never arms a raw setTimeout delay beyond Node\'s clamp ceiling for a far-future cron', async () => {
     const setTimeoutSpy = vi.spyOn(globalThis, 'setTimeout')
     const service = new SchedulerServiceImpl()
