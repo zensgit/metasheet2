@@ -17,10 +17,11 @@ import {
 import { ensureRecordNotLocked, mapRecordLockState } from './record-lock'
 import { isFieldAlwaysReadOnly } from './permission-derivation'
 import {
+  assertTransactionalQuery,
   captureSideDoorInboundTombstones,
   insertSideDoorTrashRow,
   isSideDoorDeleteTrashEnabled,
-  resolveSheetBaseId,
+  resolveSheetBaseIdForTrash,
 } from './side-door-delete-trash'
 import { TombstoneCaptureCapExceededError } from './tombstone-capture'
 import {
@@ -40,6 +41,7 @@ export {
   MultitableRecordNotFoundError,
   MultitableRecordValidationError,
 } from './record-errors'
+export { MultitableSideDoorDeleteNonTransactionalError } from './side-door-delete-trash'
 export {
   buildRecordsCacheKey,
   decodeRecordCursor,
@@ -576,10 +578,17 @@ async function deleteRecordWithRecoverability(
 ): Promise<DeletedMultitableRecord> {
   const query = input.query
 
-  // FOR UPDATE + the extra columns the trash row needs (created_by / created_at / updated_at). The
-  // flag-off path reads only data+version and needs no row lock (it destroys first, asks later).
+  // OD-7 ENFORCED (review P2-1): refuse to run the reordered path outside a transaction, BEFORE any
+  // write. Prose + a golden were not enough — the goldens supplied their own transaction, so a
+  // production wiring regression (dropping the `poolManager.get().transaction` wrapper in index.ts) left
+  // them all green. A runtime precondition cannot be refactored away silently.
+  await assertTransactionalQuery(query, 'plugin')
+
+  // FOR UPDATE + the extra columns the trash row needs (created_by / created_at / updated_at) AND the
+  // lock columns (see the re-check below). The flag-off path reads only data+version and needs no row
+  // lock (it destroys first, asks later).
   const snapshotRes = await query(
-    `SELECT data, version, created_by, created_at, updated_at
+    `SELECT data, version, created_by, created_at, updated_at, locked, locked_by
        FROM meta_records
       WHERE id = $1 AND sheet_id = $2
       FOR UPDATE`,
@@ -592,6 +601,8 @@ async function deleteRecordWithRecoverability(
         created_by?: unknown
         created_at?: Date | string | null
         updated_at?: Date | string | null
+        locked?: unknown
+        locked_by?: unknown
       }
     | undefined
   // Missing record ⇒ same NotFound contract the flag-off path gets from its 0-row DELETE RETURNING.
@@ -599,9 +610,20 @@ async function deleteRecordWithRecoverability(
     throw new MultitableRecordNotFoundError(`Record not found: ${input.recordId}`)
   }
 
+  // LOCK TOCTOU CLOSE (owner review, P1). `guardRecordNotLockedForPlugin` above is a PRE-CHECK on an
+  // UNLOCKED snapshot — a plain `SELECT locked, locked_by, created_by` with NO `FOR UPDATE`, so it holds
+  // no row lock. Between it and this statement a concurrent transaction can COMMIT a lock on the record;
+  // the pre-check would still say "unlocked" and this path would destroy a locked row, violating rank-8
+  // record-lock semantics. The `FOR UPDATE` above is the first point at which the row is actually pinned,
+  // so THAT is where lock authority lives: re-verify here, under the row lock, before any capture /
+  // links DELETE / revision / trash / record DELETE. The pre-check stays as a cheap fast path but is NOT
+  // the authority. (The automation lane already had this shape: its FOR UPDATE selects the lock columns
+  // and re-checks under the row lock.)
+  ensureRecordNotLocked(null, snapshotRow, () => new MultitableRecordLockedError('Record is locked'))
+
   const version = Number(snapshotRow.version ?? 1)
   const serverVersion = Number.isFinite(version) ? version : 1
-  const baseId = await resolveSheetBaseId(query, input.sheetId)
+  const baseId = await resolveSheetBaseIdForTrash(query, input.sheetId)
 
   // §1.2 anchor: ONE uuid = delete-revision id = trash.delete_revision_id = tombstones.source_revision_id.
   const deleteRevisionId = randomUUID()

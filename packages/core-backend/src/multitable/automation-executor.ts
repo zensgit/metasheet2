@@ -13,10 +13,11 @@ import type { ConditionBranchResumeCursor } from './automation-resume-cursor'
 import { isRichLongTextProperty, normalizeJson, sanitizeRichLongText } from './field-codecs'
 import { ensureRecordNotLocked } from './record-lock'
 import {
+  assertTransactionalQuery,
   captureSideDoorInboundTombstones,
   insertSideDoorTrashRow,
   isSideDoorDeleteTrashEnabled,
-  resolveSheetBaseId,
+  resolveSheetBaseIdForTrash,
 } from './side-door-delete-trash'
 import { resolveCrossBaseWriteAuthority } from './cross-base-write-authority'
 import { publishMultitableSheetRealtime } from './realtime-publish'
@@ -2328,6 +2329,13 @@ export class AutomationExecutor {
         const sideDoorTrash = isSideDoorDeleteTrashEnabled()
         const deleteRevisionId = randomUUID()
 
+        // OD-7 ENFORCED (review P2-1), BEFORE any write. `withTransaction` SILENTLY falls back to a
+        // non-transactional `queryFn` when `deps.transaction` is absent (:2429-2436), so an executor
+        // constructed without it would otherwise run this destructive reordered path with no transaction,
+        // no error, and — as the review proved — no failing test. Now it fails closed: the step reports
+        // `failed` and nothing is destroyed.
+        if (sideDoorTrash) await assertTransactionalQuery(query, 'automation')
+
         // §1.3: capture the INBOUND edges BEFORE the links DELETE below destroys both directions. No-op
         // unless BOTH the D-2 flag and the capture flag are on (§1.5 nesting). Over-cap ⇒
         // TombstoneCaptureCapExceededError propagates out of withTransaction to this method's catch ⇒ step
@@ -2374,7 +2382,7 @@ export class AutomationExecutor {
             // delete surfaces in the TARGET base's recycle bin and restore re-fires target-base events.
             // Fail-closed on a missing trash schema (§1.8): no 42P01/42703 swallow — the error propagates
             // to the catch below, the step fails, and the txn rolls the delete back (golden G11).
-            const baseId = await resolveSheetBaseId(query, effectiveSheetId)
+            const baseId = await resolveSheetBaseIdForTrash(query, effectiveSheetId)
             await insertSideDoorTrashRow(query, {
               recordId: effectiveRecordId,
               sheetId: effectiveSheetId,

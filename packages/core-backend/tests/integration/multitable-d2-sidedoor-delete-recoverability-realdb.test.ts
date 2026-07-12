@@ -557,6 +557,56 @@ describeIfDatabase('D-2 — side-door delete recoverability (plugin + automation
     })
   }
 
+  // ── G14 — record-lock TOCTOU under real concurrency (owner review P1) ─────────────────────────────
+  /**
+   * The plugin lane's lock pre-check (`guardRecordNotLockedForPlugin`, records.ts) is a plain
+   * `SELECT locked, locked_by, created_by` with NO `FOR UPDATE` — it holds no row lock. So between the
+   * pre-check and the flag-on path's `FOR UPDATE`, a CONCURRENT COMMITTED transaction can lock the
+   * record. If the `FOR UPDATE` read does not re-fetch the lock columns and re-verify under the row
+   * lock, a LOCKED record gets destroyed (rank-8 violation).
+   *
+   * This golden reproduces exactly that interleaving: a second connection commits
+   * `locked = true` in the window AFTER the pre-check SELECT returns and BEFORE the FOR UPDATE runs.
+   * Under READ COMMITTED, the `FOR UPDATE` re-reads the newest committed row version, so the re-check
+   * sees the lock — and must refuse. Mutation: delete the `ensureRecordNotLocked` re-check in
+   * `deleteRecordWithRecoverability` ⇒ this test goes red (the locked record is deleted).
+   */
+  test('G14 [plugin] lock TOCTOU: a lock COMMITTED between the pre-check and the FOR UPDATE still refuses the delete', async () => {
+    process.env[SIDE_DOOR_FLAG] = 'true'
+    process.env[CAPTURE_FLAG] = 'true'
+    const { F, R, N } = await fixture('g14')
+    const locker = `u_locker_${TS}`
+
+    let injected = false
+    const raced = poolManager.get().transaction(async ({ query }) => {
+      const racingQuery = (async (sql: string, params?: unknown[]) => {
+        const res = await query(sql, params)
+        // The pre-check just ran on an UNLOCKED snapshot. Now a DIFFERENT session (a separate pooled
+        // connection ⇒ its own transaction, auto-committed) takes the lock — the classic TOCTOU window.
+        if (!injected && /SELECT\s+locked,\s*locked_by,\s*created_by\s+FROM\s+meta_records/i.test(sql)) {
+          injected = true
+          await poolManager
+            .get()
+            .query('UPDATE meta_records SET locked = true, locked_by = $2 WHERE id = $1', [R, locker])
+        }
+        return res
+      }) as never
+      return pluginDeleteRecord({ query: racingQuery, sheetId: SHEET_A, recordId: R } as never)
+    })
+
+    await expect(raced).rejects.toThrow(/locked/i)
+    expect(injected).toBe(true) // the race really was interleaved (not a vacuous pass)
+
+    // Nothing destroyed: the whole flag-on unit refused before its first write.
+    expect(await recordExists(R)).toBe(true)
+    expect(await trashRow(R)).toBeUndefined()
+    expect(await deleteRevisions(R)).toHaveLength(0)
+    expect(await tombstones(R)).toHaveLength(0)
+    expect(await edgeAlive(F, N, R)).toBe(true)
+
+    await q('UPDATE meta_records SET locked = false, locked_by = NULL WHERE id = $1', [R])
+  })
+
   // ── G5 — PIT-resurrect equivalence (the SECOND resurrection surface) ──────────────────────────────
   /**
    * G4 covers `restoreRecord` (the recycle-bin surface, anchored on `meta_records_trash.delete_revision_id`).

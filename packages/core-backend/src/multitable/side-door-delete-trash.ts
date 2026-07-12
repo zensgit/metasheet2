@@ -53,6 +53,58 @@ import {
   type TombstoneQueryFn,
 } from './tombstone-capture'
 
+/**
+ * Thrown when the flag-on reordered delete is handed a NON-transactional `query`. See
+ * `assertTransactionalQuery` — this is the runtime half of the OD-7 contract, and it is fail-closed:
+ * the delete is refused rather than allowed to run in a shape where a mid-sequence failure would leave
+ * the record alive, both link directions destroyed, and a delete revision claiming it is dead.
+ */
+export class MultitableSideDoorDeleteNonTransactionalError extends Error {
+  code = 'NON_TRANSACTIONAL_DELETE'
+
+  constructor(lane: 'plugin' | 'automation') {
+    super(
+      `D-2 (MULTITABLE_SIDE_DOOR_DELETE_TRASH_ENABLED) refused a ${lane} delete: the reordered ` +
+        `recoverability path requires a TRANSACTIONAL query (OD-7). It was called outside a transaction, ` +
+        `where a failure after the links DELETE would destroy both edge directions and emit a delete ` +
+        `revision for a row that still exists — irrecoverably. Wrap the call in a transaction ` +
+        `(plugin: poolManager.get().transaction; automation: supply AutomationDeps.transaction).`,
+    )
+    this.name = 'MultitableSideDoorDeleteNonTransactionalError'
+  }
+}
+
+/**
+ * OD-7, ENFORCED AT RUNTIME (not merely documented). The flag-on path REORDERS the delete so the
+ * revision + trash row are written BEFORE the record DELETE; that ordering is only safe inside a real
+ * transaction. The type signature of `query` cannot express "must be transactional", and the original
+ * D-2 goldens could not catch a wiring regression either — they wrapped the call in their OWN
+ * transaction, so they pinned the FIXTURE's transactionality, not production's (independent review of
+ * #4168, P2-1: unwrapping the production transaction on either lane left all 39 goldens green). A
+ * *runtime* precondition cannot be refactored away silently, which is exactly what that finding asked for.
+ *
+ * Detection: `txid_current()` twice. Inside one transaction both calls return the SAME transaction id;
+ * outside, each statement is its own implicit transaction (and may even land on a different pooled
+ * connection), so the ids differ. This is a fact about the connection's state, not a timing heuristic —
+ * there is no clock-resolution or statement-ordering assumption to get wrong.
+ *
+ * Cost: two trivial round-trips, ONLY on the flag-on destructive path (the flag is default-OFF, and the
+ * flag-off branch never calls this). A destructive, opt-in, non-hot path is exactly where a fail-closed
+ * precondition is worth two round-trips.
+ */
+export async function assertTransactionalQuery(
+  query: TombstoneQueryFn,
+  lane: 'plugin' | 'automation',
+): Promise<void> {
+  const first = await query('SELECT txid_current()::text AS xid')
+  const second = await query('SELECT txid_current()::text AS xid')
+  const a = (first.rows[0] as { xid?: unknown } | undefined)?.xid
+  const b = (second.rows[0] as { xid?: unknown } | undefined)?.xid
+  if (typeof a !== 'string' || typeof b !== 'string' || a !== b) {
+    throw new MultitableSideDoorDeleteNonTransactionalError(lane)
+  }
+}
+
 /** OD-2 flag — default OFF. Off ⇒ paths 3+4 behave byte-identically to their D-1 status quo (§1.9). */
 export function isSideDoorDeleteTrashEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
   return env.MULTITABLE_SIDE_DOOR_DELETE_TRASH_ENABLED === 'true'
@@ -110,6 +162,16 @@ export type SideDoorTrashRow = {
  * schema predates `meta_records_trash` / `delete_revision_id`, this INSERT throws, the transaction rolls
  * back, and the delete is REFUSED (automation step `failed` / plugin error propagated) — the operator who
  * opted into recoverability gets a loud failure instead of a silently-unrecoverable delete. Golden G11.
+ *
+ * PRECISION (review NIT-2) — know exactly how much work the missing catch is doing, so nobody later
+ * "simplifies" the goldens believing it is the only barrier. Because this runs inside a transaction (and
+ * the D-2 path now REFUSES to run outside one — see `assertTransactionalQuery`), Postgres has already
+ * ABORTED the transaction by the time a swallowed error would return: the subsequent
+ * `DELETE FROM meta_records` would fail with 25P02 (current transaction is aborted) regardless. So adding
+ * a catch here could NOT actually complete a delete — it would only DEGRADE the failure into a confusing
+ * 25P02 and destroy the honest 42P01/42703 signal. The no-catch design is therefore correct AND
+ * belt-and-suspenders; the goldens' `/does not exist/` message assertions are what discriminate the two,
+ * and that is why they assert on the message and not merely on "the delete failed".
  */
 export async function insertSideDoorTrashRow(query: TombstoneQueryFn, row: SideDoorTrashRow): Promise<void> {
   await query(
@@ -131,9 +193,17 @@ export async function insertSideDoorTrashRow(query: TombstoneQueryFn, row: SideD
   )
 }
 
-/** Resolve the sheet's base for the trash row. OD-8: callers pass the TARGET sheet (cross-base deletes
- * trash into the base where the record actually lives, not the trigger's base). */
-export async function resolveSheetBaseId(query: TombstoneQueryFn, sheetId: string): Promise<string | null> {
+/**
+ * Resolve the sheet's base for the trash row. OD-8: callers pass the TARGET sheet (a cross-base delete
+ * trashes into the base where the record actually LIVES, not the trigger's base).
+ *
+ * NAMED `…ForTrash` DELIBERATELY (review P3-3): `AutomationExecutor` already has a PRIVATE METHOD called
+ * `resolveSheetBaseId` with DIFFERENT semantics (it additionally filters soft-deleted sheets via
+ * `deleted_at`). A bare `resolveSheetBaseId(...)` call inside that class silently resolves to whichever
+ * is in scope — an identical name with different behavior, one screen apart, inside a DESTRUCTIVE
+ * method. The distinct name makes the intended one unmistakable and un-shadowable.
+ */
+export async function resolveSheetBaseIdForTrash(query: TombstoneQueryFn, sheetId: string): Promise<string | null> {
   const res = await query('SELECT base_id FROM meta_sheets WHERE id = $1', [sheetId])
   const row = res.rows[0] as { base_id?: unknown } | undefined
   return row && typeof row.base_id === 'string' ? row.base_id : null
