@@ -1460,8 +1460,11 @@ onBeforeUnmount(() => {
    (existing specs query them).
    UI-P2-1c T3 (multitable-ui-p2-1c-tail-resolution-designlock-20260707.md §2-T3, RATIFIED): only TWO of
    this class's four sharers are in the T3-ratified range — addFilterRule ("+ Add filter") and addSortRule
-   ("+ Add sort") — and are now <MtLink> (bespoke #409eff→#475569-ish dashed-box styling normalized to the
-   MtLink primary-text-link look). reloadLatestConfig ("Reload latest") and dismissLiveRefreshNotice
+   ("+ Add sort") — and are now <MtLink> (bespoke padding:4px 10px; border:1px dashed #cbd5e1; background:
+   #fff; color:#475569 gray dashed-box styling — the SAME styling still defined by the rule below, since
+   reloadLatestConfig/dismissLiveRefreshNotice keep it — normalized to the MtLink primary-text-link look;
+   #409eff never applied to this class, that hex belongs to .meta-view-mgr__btn-add's fill described
+   above). reloadLatestConfig ("Reload latest") and dismissLiveRefreshNotice
    ("Dismiss") are NOT in scope and stay on this bespoke class — so the rule below is kept (partial-sharer
    migration: CSS removal is gated on ALL sharers migrating, per design-lock §4). */
 .meta-view-mgr__btn-inline { align-self: flex-start; padding: 4px 10px; border: 1px dashed #cbd5e1; border-radius: 4px; background: #fff; color: #475569; cursor: pointer; font-size: 12px; }
