@@ -647,6 +647,111 @@ describe('adminDirectoryRouter', () => {
     })
   })
 
+  // Roadmap §7.8 "Add timezone support". Mirrors the schedule_cron save-time gate above: an invalid IANA
+  // zone must be REJECTED at the write boundary rather than silently degrading to UTC at runtime.
+  describe('schedule_timezone save-time validation (roadmap §7.8)', () => {
+    const basePayload = {
+      name: 'DingTalk CN',
+      corpId: 'dingcorp',
+      appKey: 'ding-app-key',
+      appSecret: 'secret',
+      syncEnabled: true,
+      memberGroupDefaultRoleIds: ['crm_user'],
+      memberGroupDefaultNamespaces: ['crm'],
+    }
+
+    it('rejects an invalid scheduleTimezone on create with 400 and never calls createDirectoryIntegration', async () => {
+      const response = await invokeRoute('post', '/integrations', {
+        body: { ...basePayload, scheduleTimezone: 'Not/AZone' },
+        user: { id: 'admin-1', role: 'admin' },
+      })
+
+      expect(response.statusCode).toBe(400)
+      expect(response.body).toMatchObject({
+        ok: false,
+        error: { code: 'DIRECTORY_SCHEDULE_TIMEZONE_INVALID' },
+      })
+      expect(directoryMocks.createDirectoryIntegration).not.toHaveBeenCalled()
+      expect(schedulerMocks.refreshDirectoryIntegrationSchedule).not.toHaveBeenCalled()
+    })
+
+    it('rejects a made-up but plausible-looking zone (not a real IANA identifier) on create', async () => {
+      const response = await invokeRoute('post', '/integrations', {
+        body: { ...basePayload, scheduleTimezone: 'Mars/OlympusMons' },
+        user: { id: 'admin-1', role: 'admin' },
+      })
+
+      expect(response.statusCode).toBe(400)
+      expect(response.body).toMatchObject({ error: { code: 'DIRECTORY_SCHEDULE_TIMEZONE_INVALID' } })
+      expect(directoryMocks.createDirectoryIntegration).not.toHaveBeenCalled()
+    })
+
+    it('rejects an invalid scheduleTimezone on update with 400 and never calls updateDirectoryIntegration', async () => {
+      const response = await invokeRoute('put', '/integrations/:integrationId', {
+        params: { integrationId: 'dir-1' },
+        body: { name: 'DingTalk CN', scheduleTimezone: 'Mars/OlympusMons' },
+        user: { id: 'admin-1', role: 'admin' },
+      })
+
+      expect(response.statusCode).toBe(400)
+      expect(response.body).toMatchObject({
+        ok: false,
+        error: { code: 'DIRECTORY_SCHEDULE_TIMEZONE_INVALID' },
+      })
+      expect(directoryMocks.updateDirectoryIntegration).not.toHaveBeenCalled()
+      expect(schedulerMocks.refreshDirectoryIntegrationSchedule).not.toHaveBeenCalled()
+    })
+
+    it('accepts a valid IANA zone on create and passes it through unmodified', async () => {
+      directoryMocks.createDirectoryIntegration.mockResolvedValue({ id: 'dir-1', name: 'DingTalk CN' })
+
+      const payload = { ...basePayload, scheduleCron: '0 2 * * *', scheduleTimezone: 'Asia/Shanghai' }
+      const response = await invokeRoute('post', '/integrations', {
+        body: payload,
+        user: { id: 'admin-1', role: 'admin' },
+      })
+
+      expect(response.statusCode).toBe(200)
+      expect(directoryMocks.createDirectoryIntegration).toHaveBeenCalledWith(payload)
+    })
+
+    it.each([
+      ['undefined (key omitted)', undefined],
+      ['null', null],
+      ['empty string', ''],
+      ['whitespace only', '   '],
+      ["'UTC'", 'UTC'],
+      ["'Etc/UTC'", 'Etc/UTC'],
+    ])('allows %s scheduleTimezone on create (= default UTC) without invoking the validator rejection', async (_label, scheduleTimezone) => {
+      directoryMocks.createDirectoryIntegration.mockResolvedValue({ id: 'dir-1', name: 'DingTalk CN' })
+
+      const payload: Record<string, unknown> = { ...basePayload }
+      if (scheduleTimezone !== undefined) payload.scheduleTimezone = scheduleTimezone
+
+      const response = await invokeRoute('post', '/integrations', {
+        body: payload,
+        user: { id: 'admin-1', role: 'admin' },
+      })
+
+      expect(response.statusCode).toBe(200)
+      expect(directoryMocks.createDirectoryIntegration).toHaveBeenCalledWith(payload)
+    })
+
+    it('allows an empty scheduleTimezone on update (= clears to the default)', async () => {
+      directoryMocks.updateDirectoryIntegration.mockResolvedValue({ id: 'dir-1', name: 'DingTalk CN' })
+
+      const payload = { name: 'DingTalk CN', scheduleTimezone: '' }
+      const response = await invokeRoute('put', '/integrations/:integrationId', {
+        params: { integrationId: 'dir-1' },
+        body: payload,
+        user: { id: 'admin-1', role: 'admin' },
+      })
+
+      expect(response.statusCode).toBe(200)
+      expect(directoryMocks.updateDirectoryIntegration).toHaveBeenCalledWith('dir-1', payload)
+    })
+  })
+
   it('delegates sync to the directory service and returns its payload', async () => {
     directoryMocks.syncDirectoryIntegration.mockResolvedValue({
       integration: { id: 'dir-1', name: 'DingTalk CN' },
