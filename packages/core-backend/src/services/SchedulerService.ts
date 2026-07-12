@@ -12,6 +12,10 @@ import type {
   ScheduleEventType
 } from '../types/plugin'
 import { Logger } from '../core/logger'
+// Roadmap §7.8 "Add timezone support": zoned wall-clock matching reuses the SAME primitives
+// the multitable automation cron trigger already ships (T2-5) rather than a second hand-rolled
+// implementation — see that module's docstring, which explicitly invites this reuse.
+import { getZonedParts, isValidIanaTimeZone } from '../multitable/automation-timezone'
 
 /**
  * Cron 解析器接口
@@ -21,6 +25,23 @@ interface CronExpression {
   prev(): Date | null
   hasNext(): boolean
   reset(date?: Date): void
+}
+
+/**
+ * Roadmap §7.8: resolve a `SimpleCronExpression` timezone argument to the zoned-matching
+ * path, or `null` for the FAST PATH that must stay byte-identical to every pre-§7.8 caller.
+ *
+ * `null` covers: undefined (the constructor's own `= 'UTC'` default never reaches here as
+ * `undefined` — see below), empty string, `'UTC'`, and `'Etc/UTC'`. An invalid IANA zone also
+ * resolves to `null` (never throws mid-match) — this class is the RUNTIME; the fail-closed
+ * reject-on-save gate lives at the write boundary (`directory-sync-timezone.ts` /
+ * `admin-directory.ts`), not here. Mirrors `automation-scheduler.ts`'s `resolveCronTimeZone`.
+ */
+function resolveZonedTimeZone(timezone: string | undefined): string | null {
+  const tz = typeof timezone === 'string' ? timezone.trim() : ''
+  if (!tz || tz === 'UTC' || tz === 'Etc/UTC') return null
+  if (!isValidIanaTimeZone(tz)) return null
+  return tz
 }
 
 /**
@@ -35,9 +56,15 @@ class SimpleCronExpression implements CronExpression {
   private dayOfWeek: number[] = []
   private timezone: string
   private currentDate: Date
+  // Roadmap §7.8: resolved once at construction. `null` = the untouched local-getter fast
+  // path (`matches()` below is byte-identical to pre-§7.8 for every caller that omits
+  // `timezone` or passes 'UTC'/'Etc/UTC' — which is every caller today except a directory
+  // integration that has explicitly configured a non-UTC zone).
+  private zonedTimeZone: string | null
 
   constructor(expression: string, timezone: string = 'UTC') {
     this.timezone = timezone
+    this.zonedTimeZone = resolveZonedTimeZone(timezone)
     this.currentDate = new Date()
     this.parseExpression(expression)
   }
@@ -130,6 +157,26 @@ class SimpleCronExpression implements CronExpression {
   }
 
   private matches(date: Date): boolean {
+    // Roadmap §7.8: only a resolved non-default IANA zone takes this branch. Everything else
+    // (undefined/''/'UTC'/'Etc/UTC'/invalid) falls through to the UNCHANGED local-getter path
+    // below — this is what keeps every existing caller byte-identical.
+    if (this.zonedTimeZone) {
+      let parts: ReturnType<typeof getZonedParts>
+      try {
+        parts = getZonedParts(date.getTime(), this.zonedTimeZone)
+      } catch {
+        // Defensive: a formatter failure mid-scan must never throw out of next()/prev().
+        return false
+      }
+      // Day-of-week is derived from the civil date (locale-independent), matching
+      // `automation-scheduler.ts`'s `cronMatchesZoned` technique exactly.
+      const dow = new Date(Date.UTC(parts.year, parts.month - 1, parts.day)).getUTCDay()
+      return this.minute.includes(parts.minute) &&
+             this.hour.includes(parts.hour) &&
+             this.dayOfMonth.includes(parts.day) &&
+             this.month.includes(parts.month) &&
+             this.dayOfWeek.includes(dow)
+    }
     return this.minute.includes(date.getMinutes()) &&
            this.hour.includes(date.getHours()) &&
            this.dayOfMonth.includes(date.getDate()) &&
