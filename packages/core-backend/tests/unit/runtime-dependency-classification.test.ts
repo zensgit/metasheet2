@@ -16,7 +16,7 @@ import { describe, expect, it } from 'vitest'
 // For each file it collects the HARD-eager module specifiers — the ones whose absence crashes
 // module evaluation under a `--prod` install:
 //   - `import … from`  /  side-effect `import '…'`  /  `export … from`  (declarations)
-//   - a TOP-LEVEL `require('…')` / `import('…')` NOT inside a `try` block
+//   - every TOP-LEVEL `require('…')` / `import('…')`, including calls inside `try`
 // and skips only the genuinely non-eager forms: type-only declarations, and require()/import()
 // inside a function/class body (lazy). A top-level require()/import() in ANY position — including
 // inside try / catch / finally — is treated as hard, because only a `try { require } catch` that
@@ -24,11 +24,12 @@ import { describe, expect, it } from 'vitest'
 // structurally (try-finally with no catch propagates; a require in catch/finally is unguarded; a
 // rethrowing catch does not swallow). The intentionally-optional soft dependencies are therefore
 // exempted by the explicit, auditable OPTIONAL_SOFT_DEPENDENCIES allowlist at the check site, whose
-// entries are asserted to stay live-and-non-prod. Every other hard external must resolve to a prod
-// dependency of core-backend or the workspace root (hoisting reality). Multi-line, default/named/
-// namespace, and barrel re-export forms are handled uniformly by the AST (no line-based blind spot).
-// A file-count floor, a multi-line-edge regression test, a synthetic classification test covering
-// every try/catch/finally shape, and an allowlist-hygiene test guard against regressions.
+// entries are asserted to stay live-and-non-prod, occur exactly once, and remain protected by a
+// swallowing top-level try/catch. Every other hard external must resolve to a prod dependency of
+// core-backend or the workspace root (hoisting reality). Multi-line, default/named/namespace, and
+// barrel re-export forms are handled uniformly by the AST (no line-based blind spot). A file-count
+// floor, multi-line-edge regression, synthetic eager/lazy classification, guarded-loader shape
+// matrix, and allowlist-hygiene test guard against regressions.
 
 const CORE_BACKEND = path.resolve(__dirname, '..', '..')
 const REPO_ROOT = path.resolve(CORE_BACKEND, '..', '..')
@@ -107,12 +108,10 @@ function rootModule(spec: string): string {
 // The HARD-eager module specifiers of a file — the ones whose absence crashes module evaluation:
 //   - `import … from '…'`   ImportDeclaration (default / named / namespace / side-effect)
 //   - `export … from '…'`   ExportDeclaration with a moduleSpecifier (barrel re-export)
-//   - a TOP-LEVEL `require('…')` / `import('…')` call NOT inside a try block — executed at module
-//     load, unguarded, so a missing module throws and the backend fails to boot.
-// Skipped (not hard): type-only forms; require()/import() inside a function/class body (lazy); a
-// top-level require()/import() INSIDE a try block (the "captured optional dependency" pattern — the
-// catch tolerates absence, e.g. @opentelemetry/api, js-yaml, express-validator). These distinctions
-// are read structurally from the AST (function boundaries, try blocks), not by heuristic.
+//   - every TOP-LEVEL `require('…')` / `import('…')` call — including calls inside try/catch/finally.
+// Skipped (not hard): type-only forms and require()/import() inside a function/class body (lazy).
+// Intentionally optional top-level loaders are still collected here, then exempted only when their
+// exact allowlisted occurrence retains a structurally verified swallowing try/catch.
 function isFunctionLikeBoundary(node: ts.Node): boolean {
   return (
     ts.isFunctionDeclaration(node) ||
@@ -180,9 +179,75 @@ function hardSpecifiersOf(file: string): string[] {
   return specs
 }
 
-// One eager external import site. EVERY occurrence is recorded (#4126 review: keeping only the
-// first site per module let a module-name allowlist mask a new hard import of the same module in
-// another file).
+function isDescendantOf(node: ts.Node, ancestor: ts.Node): boolean {
+  let current: ts.Node | undefined = node
+  while (current) {
+    if (current === ancestor) return true
+    current = current.parent
+  }
+  return false
+}
+
+function containsEagerThrow(node: ts.Node): boolean {
+  let found = false
+  const walk = (current: ts.Node): void => {
+    if (found) return
+    if (current !== node && isFunctionLikeBoundary(current)) return
+    if (ts.isThrowStatement(current)) {
+      found = true
+      return
+    }
+    current.forEachChild(walk)
+  }
+  walk(node)
+  return found
+}
+
+function isProtectedBySwallowingTry(call: ts.CallExpression): boolean {
+  let current: ts.Node | undefined = call.parent
+  while (current) {
+    if (isFunctionLikeBoundary(current)) return false
+    if (
+      ts.isTryStatement(current) &&
+      isDescendantOf(call, current.tryBlock) &&
+      current.catchClause &&
+      !containsEagerThrow(current.catchClause.block) &&
+      (!current.finallyBlock || !containsEagerThrow(current.finallyBlock))
+    ) {
+      return true
+    }
+    current = current.parent
+  }
+  return false
+}
+
+function inspectOptionalLoader(file: string, module: string): {
+  topLevelCalls: number
+  guardedCalls: number
+} {
+  const source = ts.createSourceFile(
+    file,
+    readFileSync(file, 'utf8'),
+    ts.ScriptTarget.Latest,
+    /*setParentNodes*/ true,
+    file.endsWith('.tsx') ? ts.ScriptKind.TSX : ts.ScriptKind.TS,
+  )
+  const calls: ts.CallExpression[] = []
+  const walkTopLevel = (node: ts.Node): void => {
+    if (isFunctionLikeBoundary(node)) return
+    const spec = dynamicRequireSpecifier(node)
+    if (spec !== null && rootModule(spec) === module && ts.isCallExpression(node)) calls.push(node)
+    node.forEachChild(walkTopLevel)
+  }
+  for (const stmt of source.statements) walkTopLevel(stmt)
+  return {
+    topLevelCalls: calls.length,
+    guardedCalls: calls.filter(isProtectedBySwallowingTry).length,
+  }
+}
+
+// One eager external import occurrence. EVERY occurrence is recorded (#4126 review: deduplicating
+// by module+file let an exemption mask a second, unguarded import in the same file).
 interface EagerOccurrence {
   module: string
   file: string // repo-relative to packages/core-backend
@@ -195,7 +260,6 @@ function walkStartupGraph(): {
 } {
   const visited = new Set<string>()
   const occurrences: EagerOccurrence[] = []
-  const seenSites = new Set<string>()
   const queue: string[] = [ENTRY]
   while (queue.length > 0) {
     const file = queue.shift()!
@@ -211,9 +275,6 @@ function walkStartupGraph(): {
       if (spec.startsWith('node:')) continue
       const mod = rootModule(spec)
       if (NODE_BUILTINS.has(mod)) continue
-      const site = `${mod}@@${relFile}`
-      if (seenSites.has(site)) continue // one occurrence per (module, file) — repeats in a file are the same site
-      seenSites.add(site)
       occurrences.push({ module: mod, file: relFile })
     }
   }
@@ -303,7 +364,45 @@ describe('runtime dependency classification (production-install startup contract
     fs.rmSync(dir, { recursive: true, force: true })
   })
 
-  it('the soft-dependency exemptions are site-exact, live, non-prod, and occurrence-count-locked', () => {
+  it('only exempts one top-level loader protected by a swallowing try/catch', () => {
+    const os = require('os') as typeof import('os')
+    const fs = require('fs') as typeof import('fs')
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'metasheet2-soft-loader-'))
+    const file = path.join(dir, 'sample.ts')
+    const inspect = (source: string) => {
+      fs.writeFileSync(file, source)
+      return inspectOptionalLoader(file, 'optional-soft')
+    }
+
+    expect(inspect(`try { require('optional-soft') } catch { /* degrade */ }`)).toEqual({
+      topLevelCalls: 1,
+      guardedCalls: 1,
+    })
+    expect(inspect(`require('optional-soft')`)).toEqual({ topLevelCalls: 1, guardedCalls: 0 })
+    expect(inspect(`try { require('optional-soft') } finally { /* propagates */ }`)).toEqual({
+      topLevelCalls: 1,
+      guardedCalls: 0,
+    })
+    expect(inspect(`try {} catch { require('optional-soft') }`)).toEqual({
+      topLevelCalls: 1,
+      guardedCalls: 0,
+    })
+    expect(inspect(`try { require('optional-soft') } catch (error) { throw error }`)).toEqual({
+      topLevelCalls: 1,
+      guardedCalls: 0,
+    })
+    expect(
+      inspect(`try { require('optional-soft') } catch {}\nrequire('optional-soft')`),
+    ).toEqual({ topLevelCalls: 2, guardedCalls: 1 })
+    expect(inspect(`function later() { require('optional-soft') }`)).toEqual({
+      topLevelCalls: 0,
+      guardedCalls: 0,
+    })
+
+    fs.rmSync(dir, { recursive: true, force: true })
+  })
+
+  it('the soft-dependency exemptions are exact, guarded, live, non-prod, and occurrence-count-locked', () => {
     const prod = prodDependencyNames()
     const { occurrences } = walkStartupGraph()
     for (const entry of OPTIONAL_SOFT_DEPENDENCIES) {
@@ -318,9 +417,16 @@ describe('runtime dependency classification (production-install startup contract
       // file adds an occurrence and fails here (and in the main check, which is site-keyed).
       expect(
         sites.map((o) => o.file).sort(),
-        `${entry.module} is eagerly imported at unexempted site(s) — a module-name exemption must not ` +
-          `cover a new hard import elsewhere. Sites: ${sites.map((o) => o.file).join(', ')}`,
+        `${entry.module} has extra eager occurrences — an exemption must not cover a new hard import ` +
+          `in the same file or elsewhere. Sites: ${sites.map((o) => o.file).join(', ')}`,
       ).toEqual([entry.file])
+      // Shape lock: the sole occurrence must remain inside the try block of a swallowing catch.
+      // Moving it outside the try, into catch/finally, or adding a second call fails closed.
+      expect(
+        inspectOptionalLoader(path.join(CORE_BACKEND, entry.file), entry.module),
+        `${entry.module} at ${entry.file} is exempt only while exactly one top-level loader is ` +
+          `protected by a swallowing try/catch`,
+      ).toEqual({ topLevelCalls: 1, guardedCalls: 1 })
       // Not a prod dep — otherwise the exemption hides a real classification.
       expect(
         prod.has(entry.module),
