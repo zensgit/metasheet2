@@ -62,6 +62,13 @@ export default defineConfig({
       // job cannot skip-green it, and wired as a WHOLE FILE into the multitable real-DB step in
       // plugin-tests.yml. Two-point wiring — both points, deliberately.
       'tests/integration/multitable-layer2-hidden-person-button-realdb.test.ts',
+      // Person before-side name resolution (real DB): its reason to exist is the LOCK-3 property — a
+      // field_permissions-DENIED person field's members must never reach the directory resolver, so their
+      // display NAMES can never surface. DATABASE_URL-gated; excluded here so the no-DB job cannot
+      // skip-green it (a `describeIfDatabase` alone still gets COLLECTED and reported as skipped =
+      // silently never run), and wired as a WHOLE FILE into the multitable real-DB step in plugin-tests.yml.
+      // Two-point wiring — both points, deliberately.
+      'tests/integration/multitable-history-person-names-realdb.test.ts',
       'tests/integration/approval-manager-chain.db.test.ts',
       'tests/integration/approval-requester-department.db.test.ts',
       'tests/integration/approval-requester-title.db.test.ts',

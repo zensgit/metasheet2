@@ -23,6 +23,8 @@
  */
 import type { QueryFn } from './permission-service'
 import { loadDeniedRecordIds, loadRowLevelReadDenyEnabled } from './permission-service'
+import type { PersonDirectoryEntry } from './user-display'
+import { resolvePersonDirectoryEntries } from './user-display'
 
 export interface HistoryAccess {
   userId: string
@@ -533,6 +535,22 @@ export interface HistoryBatchDetail {
    * re-deriving the two-layer mask client-side (the #4007 footgun). Hidden/denied field names NEVER appear.
    */
   fieldNames: Record<string, Record<string, string>>
+  /**
+   * Person before-side name resolution (OD-P1 = Option A, OD-P2 = carry `inactive`): a flat
+   * `userId → { display, inactive? }` directory map for every userId that appears in this batch's
+   * (post-mask) PERSON field values — before AND after sides.
+   *
+   * WHY IT EXISTS: the grid's person cache only knows the record's CURRENT cell, so a person REMOVED by
+   * this very change (present in `before`, absent from `after`) has no cached summary and used to render
+   * as a raw userId — "who was removed" was unreadable. This map is resolved server-side from the SAME
+   * directory as `actorName` (`resolvePersonDirectoryEntries`, one query for the whole batch, never N+1).
+   *
+   * LOCK-3: the ids are harvested ONLY from `changes` — which is already value-masked — and only for
+   * fields in the per-sheet allow-set. A person field the actor cannot read has had its values dropped
+   * before this runs, so its userIds never appear here. Resolving an ALREADY-VISIBLE userId to its display
+   * name is directory-level info (the same name renders wherever that user appears), not a new disclosure.
+   */
+  personNames: Record<string, PersonDirectoryEntry>
 }
 
 /**
@@ -710,12 +728,15 @@ export async function loadHistoryBatchDetail(
   // subset of the two-layer allow-set, so the query cannot return a hidden/denied field; the re-check below
   // is defense-in-depth (LOCK-3: a field name is as sensitive as its value, evaluated PER the field's sheet).
   const fieldNames: Record<string, Record<string, string>> = {}
+  // Person before-side resolution: the SAME meta_fields join also tells us which of those already-visible
+  // fields are `type='person'` (no extra query), so we can harvest their userIds below.
+  const personFieldsBySheet = new Map<string, Set<string>>()
   const nameSheetIds: string[] = []
   const nameFieldIds: string[] = []
   for (const [sheetId, ids] of involvedFieldsBySheet) for (const fieldId of ids) { nameSheetIds.push(sheetId); nameFieldIds.push(fieldId) }
   if (nameFieldIds.length > 0) {
     const nameRes = await query(
-      `SELECT f.id, f.sheet_id, f.name FROM meta_fields f
+      `SELECT f.id, f.sheet_id, f.name, f.type FROM meta_fields f
        JOIN unnest($1::text[], $2::text[]) AS t(sheet_id, field_id) ON f.sheet_id = t.sheet_id AND f.id = t.field_id`,
       [nameSheetIds, nameFieldIds],
     )
@@ -725,7 +746,32 @@ export async function loadHistoryBatchDetail(
       if (!allowedFieldsFor(allowedFieldsBySheet, sheetId).has(fieldId)) continue // defense-in-depth LOCK-3
       const name = typeof row.name === 'string' ? row.name : ''
       ;(fieldNames[sheetId] ??= {})[fieldId] = name
+      if (String(row.type ?? '').trim().toLowerCase() === 'person') {
+        ;(personFieldsBySheet.get(sheetId) ?? personFieldsBySheet.set(sheetId, new Set()).get(sheetId)!).add(fieldId)
+      }
     }
+  }
+
+  // Harvest the userIds to resolve. ONLY from `changes` (already value-masked) and ONLY for person fields
+  // in the per-sheet allow-set ⇒ a denied person field's values were dropped upstream and can never land
+  // here (LOCK-3 — see the `personNames` doc on HistoryBatchDetail). Both sides: the whole point is the
+  // BEFORE side, where a just-removed person has no grid-cache summary.
+  const personIds: string[] = []
+  const collect = (v: unknown): void => {
+    if (Array.isArray(v)) { for (const id of v) if (typeof id === 'string' && id.trim()) personIds.push(id) }
+    else if (typeof v === 'string' && v.trim()) personIds.push(v)
+  }
+  for (const c of changes) {
+    const personFields = personFieldsBySheet.get(c.sheetId)
+    if (!personFields?.size) continue
+    for (const fieldId of personFields) {
+      if (c.before && Object.prototype.hasOwnProperty.call(c.before, fieldId)) collect(c.before[fieldId])
+      if (c.after && Object.prototype.hasOwnProperty.call(c.after, fieldId)) collect(c.after[fieldId])
+    }
+  }
+  const personNames: Record<string, PersonDirectoryEntry> = {}
+  if (personIds.length > 0) {
+    for (const [id, entry] of await resolvePersonDirectoryEntries(query, personIds)) personNames[id] = entry
   }
 
   return {
@@ -737,5 +783,6 @@ export async function loadHistoryBatchDetail(
     visibleAffectedFieldCount: visibleFields.size,
     changes,
     fieldNames,
+    personNames,
   }
 }

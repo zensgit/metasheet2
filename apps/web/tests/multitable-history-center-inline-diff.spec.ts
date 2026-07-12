@@ -545,3 +545,75 @@ describe('HistoryCenterModal — restore back-reference badge', () => {
     } finally { app.unmount(); container.remove() }
   })
 })
+
+// Person before-side name resolution. The grid's `personSummaries` cache describes the record's CURRENT
+// cell, so a person REMOVED by the very change you're looking at is NOT in it and used to render as a raw
+// userId — "who was removed" was unreadable. The server's `personNames` map covers BOTH sides.
+// Priority per id: personNames → grid cell cache → raw id.
+describe('HistoryCenterModal — person before-side name resolution', () => {
+  const removedChange = [{
+    sheetId: 'sheet_1', recordId: 'rec_1', action: 'update', version: 2,
+    changedFieldIds: ['fld_person'],
+    before: { fld_person: ['user_kept', 'user_removed'] },
+    after: { fld_person: ['user_kept'] },
+  }] as unknown as HistoryBatchDetail['changes']
+
+  async function openWith(personNames: Record<string, { display: string; inactive?: boolean }> | undefined, personSummaries: unknown) {
+    mockListHistoryEvents.mockResolvedValue({ batches: [batch()], total: 1, nextCursor: null, searchTruncated: false })
+    mockGetHistoryBatch.mockResolvedValue({ ...detailWith(removedChange), ...(personNames ? { personNames } : {}) })
+    const { app, container } = mountModalWithProps({ fields: TYPED_FIELDS, personSummaries })
+    await flushPromises()
+    container.querySelector<HTMLButtonElement>('[data-test="hist-batch"]')!.click()
+    await flushPromises()
+    return { app, container }
+  }
+
+  it('BEFORE side resolves the REMOVED person from personNames — the grid cache cannot know them', async () => {
+    // the cache holds ONLY the current cell (user_kept); user_removed is gone from it by definition
+    const { app, container } = await openWith(
+      { user_kept: { display: 'Kept Person' }, user_removed: { display: 'Removed Person' } },
+      { rec_1: { fld_person: [{ id: 'user_kept', display: 'Kept Person' }] } },
+    )
+    try {
+      const before = container.querySelector('.meta-hist__diff-before')?.textContent ?? ''
+      expect(before).toContain('Removed Person') // ← the whole point of the feature
+      expect(before).not.toContain('user_removed') // not the raw id
+      expect(before).toContain('Kept Person')
+    } finally { app.unmount(); container.remove() }
+  })
+
+  it('marks a DEACTIVATED person and still renders them (OD-P2)', async () => {
+    const { app, container } = await openWith(
+      { user_kept: { display: 'Kept Person' }, user_removed: { display: 'Removed Person', inactive: true } },
+      { rec_1: { fld_person: [{ id: 'user_kept', display: 'Kept Person' }] } },
+    )
+    try {
+      const before = container.querySelector('.meta-hist__diff-before')?.textContent ?? ''
+      expect(before).toContain('Removed Person') // still visible…
+      expect(before).toContain('deactivated') // …and marked
+    } finally { app.unmount(); container.remove() }
+  })
+
+  it('falls back to the grid cache, then to the raw id, when personNames lacks the id', async () => {
+    // personNames covers neither id → cache supplies user_kept; user_removed has no source → raw id
+    const { app, container } = await openWith(
+      {},
+      { rec_1: { fld_person: [{ id: 'user_kept', display: 'Kept Person' }] } },
+    )
+    try {
+      const before = container.querySelector('.meta-hist__diff-before')?.textContent ?? ''
+      expect(before).toContain('Kept Person') // cache fallback
+      expect(before).toContain('user_removed') // raw-id fallback, not JSON
+      expect(before).not.toContain('[')
+    } finally { app.unmount(); container.remove() }
+  })
+
+  it('no personNames at all (older payload) → legacy behavior exactly (cache, then raw id)', async () => {
+    const { app, container } = await openWith(undefined, { rec_1: { fld_person: [{ id: 'user_kept', display: 'Kept Person' }] } })
+    try {
+      const before = container.querySelector('.meta-hist__diff-before')?.textContent ?? ''
+      expect(before).toContain('Kept Person')
+      expect(before).toContain('user_removed')
+    } finally { app.unmount(); container.remove() }
+  })
+})
