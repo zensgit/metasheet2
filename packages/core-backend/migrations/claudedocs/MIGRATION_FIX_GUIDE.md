@@ -1,8 +1,20 @@
 # SQL 迁移修复详细指南
 
-**项目**: MetaSheet v2
-**目标**: 修复 7 个排除的迁移文件
-**优先级**: P0 - 阻塞 Phase 3 发布
+> **⚠️ 2026-07-12 陈旧标注（T8 文档化，未删除，仅存历史记录）**
+> 本指南生成于 2025-10-29，目标路线="逐个修复 7 个排除的 SQL 迁移文件使其幂等，然后把
+> `MIGRATION_EXCLUDE` 清空"。**该路线已于 2026-05-12 被彻底废弃**，改用
+> `packages/core-backend/src/db/migration-provider.ts` 里的 `SUPERSEDED_LEGACY_SQL_MIGRATIONS`
+> "no-op 双胞胎迁移"机制：不再逐条修复历史 SQL 文件的幂等性，而是把 032-055 号整批老 SQL
+> 迁移标记为永久 no-op 历史占位符（名字保留、body 不跑），由现代 timestamp/`zzzz` 迁移作为
+> 真正的替代实现。参见 `docs/development/migration-legacy-sql-skip-design-20260512.md`（设计决策）
+> 与 `docs/development/superseded-legacy-migrations-gap-audit-20260710.md`（2026-07-10 缺口审计）。
+> 本文档下方"修复进度追踪"里的 1/7 (14%) 进度**已冻结、不会再推进**——不要在没有先读上述
+> 设计文档的情况下续跑本指南的 Phase 1/2/3 计划。当前权威、活跃的排除名单说明见同目录上级的
+> `packages/core-backend/MIGRATION_EXCLUDE_TRACKING.md`。
+>
+> **项目**: MetaSheet v2
+> **目标**: 修复 7 个排除的迁移文件
+> **优先级**: P0 - 阻塞 Phase 3 发布
 
 ---
 
