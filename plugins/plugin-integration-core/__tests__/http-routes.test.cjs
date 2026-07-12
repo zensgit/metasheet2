@@ -7153,6 +7153,108 @@ async function testStockPreparationReadonlySourceRunRoutes() {
     assert.equal(rejected.body.error.code, 'STOCK_PREPARATION_ERP_SOURCE_RUN_REQUEST_INVALID')
   }
   assert.equal(sourceReadCalls.length, readsBeforeRejectedBody, 'raw/SQL/apply controls are rejected before external read')
+
+  // Both source-run endpoints are admin-only, and the gate closes BEFORE any external read. Nothing here
+  // used to cover it: the `requireAccess(req, 'admin')` line could be deleted from both handlers and this
+  // whole suite still passed.
+  const readsBeforeDeniedUsers = sourceReadCalls.length
+  for (const user of [WRITE_USER, READ_USER]) {
+    const deniedPlm = await invoke(routes, 'POST', '/api/integration/stock-preparation/mvp/source-runs/plm-bom', {
+      user,
+      body: {
+        projectId: 'business_project_1',
+        sourceProjectNo: 'SOURCE-PROJECT-SECRET',
+        readSourceConfigId: PLM_CONFIG_ID,
+        syncRunId: 'plm_source_run_denied',
+        snapshotBatchId: 'plm_snapshot_denied',
+        snapshotVersion: 1,
+      },
+    })
+    assert.equal(deniedPlm.statusCode, 403, 'PLM source-run is admin-only')
+    assert.equal(deniedPlm.body.error.code, 'FORBIDDEN')
+
+    const deniedErp = await invoke(routes, 'POST', '/api/integration/stock-preparation/mvp/source-runs/erp-materials', {
+      user,
+      body: {
+        projectId: 'business_project_1',
+        readSourceConfigId: ERP_CONFIG_ID,
+        syncRunId: 'erp_source_run_denied',
+      },
+    })
+    assert.equal(deniedErp.statusCode, 403, 'ERP source-run is admin-only')
+    assert.equal(deniedErp.body.error.code, 'FORBIDDEN')
+  }
+  // Unauthenticated is 401, and likewise never reaches the source.
+  const anonymous = await invoke(routes, 'POST', '/api/integration/stock-preparation/mvp/source-runs/erp-materials', {
+    body: { readSourceConfigId: ERP_CONFIG_ID, syncRunId: 'erp_source_run_anonymous' },
+  })
+  assert.equal(anonymous.statusCode, 401)
+  assert.equal(
+    sourceReadCalls.length,
+    readsBeforeDeniedUsers,
+    'a denied caller never reaches the external source (403/401 before any IO)',
+  )
+
+  // `readSourceConfigId` is what binds a run to an APPROVED config. Without it there is nothing to
+  // authorize against, so the run must not start.
+  const missingConfigId = await invoke(routes, 'POST', '/api/integration/stock-preparation/mvp/source-runs/erp-materials', {
+    user: ADMIN_USER,
+    body: { projectId: 'business_project_1', syncRunId: 'erp_source_run_no_config' },
+  })
+  assert.equal(missingConfigId.statusCode, 400)
+  assert.equal(missingConfigId.body.error.details.field, 'readSourceConfigId')
+  assert.equal(sourceReadCalls.length, readsBeforeDeniedUsers, 'no config reference, no external read')
+}
+
+// #3889: the approved-only gate lives in the config store, and the route must surrender to it. The happy
+// path above mounts a store that only ever answers "approved", so a draft/retired config was never once
+// exercised through these routes.
+async function testStockPreparationSourceRunRejectsUnapprovedConfig() {
+  let getForRuntimeCalls = 0
+  let adapterCalls = 0
+  const { services } = createMockServices({
+    readSourceConfigStore: {
+      async getForRuntime() {
+        getForRuntimeCalls += 1
+        throw new ReadSourceConfigNotApprovedError('read source config is not approved')
+      },
+    },
+    externalSystemRegistry: {
+      async getExternalSystemForAdapter() {
+        throw new Error('system must not be loaded for an unapproved config')
+      },
+    },
+    adapterRegistry: {
+      createAdapter() {
+        adapterCalls += 1
+        throw new Error('adapter must not run for an unapproved config')
+      },
+    },
+  })
+  const { routes } = mountRoutes(services)
+
+  for (const [route, body] of [
+    ['/api/integration/stock-preparation/mvp/source-runs/plm-bom', {
+      projectId: 'business_project_1',
+      sourceProjectNo: 'SOURCE-PROJECT-1',
+      readSourceConfigId: 'private_draft_config_3889',
+      syncRunId: 'plm_source_run_draft',
+      snapshotBatchId: 'plm_snapshot_draft',
+      snapshotVersion: 1,
+    }],
+    ['/api/integration/stock-preparation/mvp/source-runs/erp-materials', {
+      projectId: 'business_project_1',
+      readSourceConfigId: 'private_draft_config_3889',
+      syncRunId: 'erp_source_run_draft',
+    }],
+  ]) {
+    const res = await invoke(routes, 'POST', route, { user: ADMIN_USER, body })
+    assert.equal(res.statusCode, 409, 'an unapproved config cannot feed a source run')
+    assert.equal(res.body.error.code, 'READ_SOURCE_CONFIG_NOT_APPROVED')
+  }
+  assert.equal(getForRuntimeCalls, 2, 'the route always goes through the approved-only store accessor')
+  assert.equal(adapterCalls, 0, 'an unapproved config never reaches an adapter')
+  console.log('  testStockPreparationSourceRunRejectsUnapprovedConfig OK')
 }
 
 async function main() {
@@ -7183,6 +7285,7 @@ async function main() {
   await testReadSourceCompositionRoutes()
   await testBridgeAgentChecklistRoutes()
   await testStockPreparationReadonlySourceRunRoutes()
+  await testStockPreparationSourceRunRejectsUnapprovedConfig()
   await testExternalSystemUpsertPreservesObjectSchema()
   await testExternalSystemTestPersistsFailureAndPreservesInactive()
   await testExternalSystemTestClearsErrorToActiveOnSuccess()

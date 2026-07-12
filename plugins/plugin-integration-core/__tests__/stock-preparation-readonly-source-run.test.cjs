@@ -625,6 +625,72 @@ async function testBridgeSourceUnderTheClampStillSucceeds() {
   assertValuesFree(publicReadonlySourceRunResult(result))
 }
 
+// The probe request builder only puts `limit` on the LIST dialects, so a keyed (single_record /
+// detail_with_lines) feeder used to reach the adapter with no page bound at all and the adapter fell back
+// to its own default — for the Bridge Agent that is sampleLimit, i.e. THREE rows. A page bound the source
+// never sees is fiction, and every completeness rule downstream is computed against fiction.
+async function testKeyedModeSendsItsPageBoundToTheSource() {
+  const agentRows = bomRows(25)
+  const bodies = []
+  const fetchImpl = async (url, options) => {
+    const body = JSON.parse(options.body)
+    bodies.push(body)
+    return {
+      ok: true,
+      status: 200,
+      async text() {
+        return JSON.stringify({ records: agentRows.slice(0, body.limit), done: true })
+      },
+    }
+  }
+  const validation = validateReadSourceConfig({
+    version: 1,
+    systemId: 'private_system_reference_3889',
+    requiredKind: 'bridge:legacy-sql-readonly',
+    object: 'bom_lines',
+    mode: 'single_record',
+    readPath: '/readonly/stock-preparation',
+    readMethod: 'POST',
+    operations: ['read'],
+    containerPaths: ['records'],
+    keyField: 'childCode',
+    fieldMap: BOM_FIELD_MAP,
+  })
+  assert.equal(validation.valid, true, JSON.stringify(validation.errors))
+
+  await assert.rejects(
+    () => runPlmBomReadonlySource({
+      permission: 'admin',
+      projectId: 'business_project_keyed',
+      sourceProjectNo: 'keyed_project',
+      syncRunId: 'bridge_source_run_keyed',
+      snapshotBatchId: 'bridge_snapshot_keyed',
+      snapshotVersion: 1,
+      preparedRead: prepareConfiguredRead({
+        config: validation.normalized,
+        inputs: { key: 'PART-1' },
+      }),
+      system: {
+        id: 'private_runtime_system_3889',
+        kind: 'bridge:legacy-sql-readonly',
+        role: 'source',
+        config: { baseUrl: 'http://127.0.0.1:19091/', sampleLimit: 3, maxLimit: 20 },
+        credentials: { sharedSecret: `bridge_${SECRET}` },
+      },
+      createAdapter: (adapterSystem) => createBridgeAgentReadonlyAdapter({ system: adapterSystem, fetchImpl }),
+    }),
+    (error) => {
+      assert.equal(error.code, 'SOURCE_RUN_COMPLETENESS_UNPROVABLE')
+      // 20 = the bound the agent applied to OUR bound. 3 would mean the request carried no limit at all
+      // and the agent fell back to its sample size.
+      assert.equal(error.details.receivedRows, 20, 'the keyed request carried the feeder page bound')
+      assert.equal(error.details.effectivePageSize, 20)
+      return true
+    },
+  )
+  assert.equal(bodies[0].limit, 20, 'a keyed read reaches the source with a real page bound, not its default')
+}
+
 // A PLM client that honours the wrapper's limit/offset contract (the wrapper passes both down).
 function plmClient(lines, { honourBound = true } = {}) {
   const calls = []
@@ -965,6 +1031,7 @@ async function main() {
   await testPlmFeedsPureIntakeAcrossCursorPages()
   await testBridgeClampedSourceCannotReportReady()
   await testBridgeSourceUnderTheClampStillSucceeds()
+  await testKeyedModeSendsItsPageBoundToTheSource()
   await testPlmBomAtExactlyThePageSizeIsIngestedCompletely()
   await testPlmSourceOverflowingOnePageFailsClosedAsTooLarge()
   await testRepeatedCursorFailsClosed()
