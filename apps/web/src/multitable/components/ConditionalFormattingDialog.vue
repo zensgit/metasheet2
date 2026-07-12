@@ -4,7 +4,7 @@
       <div class="cf-dlg__header">
         <h4 class="cf-dlg__title">{{ ml('formatting.title') }}</h4>
         <span class="cf-dlg__count">{{ draftRules.length }} / {{ ruleLimit }}</span>
-        <button class="cf-dlg__close" :aria-label="ml('formatting.close')" @click="close">&times;</button>
+        <MtIconButton class="cf-dlg__close" :aria-label="ml('formatting.close')" @click="close">&times;</MtIconButton>
       </div>
       <div class="cf-dlg__body">
         <p v-if="!draftRules.length" class="cf-dlg__empty">
@@ -153,7 +153,7 @@ import {
   formattingPickColor,
   managerLabel,
 } from '../utils/meta-manager-labels'
-import { MtButton } from '../ui'
+import { MtButton, MtIconButton } from '../ui'
 
 const props = defineProps<{
   visible: boolean
@@ -398,7 +398,9 @@ function save() {
 .cf-dlg__header { display: flex; align-items: center; gap: 12px; padding: 12px 16px; border-bottom: 1px solid #eee; }
 .cf-dlg__title { flex: 1; font-size: 15px; font-weight: 600; margin: 0; }
 .cf-dlg__count { font-size: 12px; color: #666; }
-.cf-dlg__close { border: none; background: none; font-size: 20px; cursor: pointer; color: #999; padding: 0 4px; }
+/* .cf-dlg__close: now <MtIconButton> (ghost, token-styled; the &times; glyph char passes through
+   its default-slot icon fallback (size token-normalized to the icon control)). Bespoke hardcoded CSS removed
+   (UI-P2-1c T1 batch-2). Class kept on the element only for selector stability. */
 .cf-dlg__body { flex: 1; overflow-y: auto; padding: 12px 16px; display: flex; flex-direction: column; gap: 12px; }
 .cf-dlg__empty { font-size: 13px; color: #777; margin: 0; }
 .cf-dlg__rule-list { display: flex; flex-direction: column; gap: 10px; }

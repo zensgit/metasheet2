@@ -4,7 +4,7 @@
       <div class="meta-export-modal" role="dialog" :aria-label="l('export.title')">
         <div class="meta-export__header">
           <strong>{{ l('export.title') }}</strong>
-          <button class="meta-export__close" :aria-label="l('export.close')" @click="onCancel">&times;</button>
+          <MtIconButton class="meta-export__close" :aria-label="l('export.close')" @click="onCancel">&times;</MtIconButton>
         </div>
 
         <div class="meta-export__body">
@@ -86,7 +86,7 @@
 import { computed, ref, watch } from 'vue'
 import { useLocale } from '../../composables/useLocale'
 import { metaCoreLabel, selectedCount, type MetaCoreLabelKey } from '../utils/meta-core-labels'
-import { MtButton, MtLink } from '../ui'
+import { MtButton, MtIconButton, MtLink } from '../ui'
 
 export interface ExportColumn {
   id: string
@@ -168,8 +168,9 @@ function onCancel() {
 .meta-export-overlay { position: fixed; inset: 0; z-index: 110; background: rgba(0,0,0,.3); display: flex; align-items: center; justify-content: center; }
 .meta-export-modal { background: #fff; border-radius: 6px; min-width: 420px; max-width: 540px; box-shadow: 0 10px 40px rgba(0,0,0,.18); display: flex; flex-direction: column; max-height: 80vh; }
 .meta-export__header { display: flex; align-items: center; justify-content: space-between; padding: 12px 16px; border-bottom: 1px solid #ebedf0; }
-.meta-export__close { background: transparent; border: none; font-size: 22px; line-height: 1; cursor: pointer; color: #909399; }
-.meta-export__close:hover { color: #303133; }
+/* .meta-export__close: now <MtIconButton> (ghost, token-styled; the &times; glyph char passes through
+   its default-slot icon fallback (size token-normalized to the icon control)). Bespoke hardcoded CSS removed
+   (UI-P2-1c T1 batch-2). Class kept on the element only for selector stability. */
 .meta-export__body { padding: 16px; display: flex; flex-direction: column; gap: 16px; overflow-y: auto; }
 .meta-export__row { display: flex; flex-direction: column; gap: 6px; }
 .meta-export__row-head { display: flex; align-items: center; justify-content: space-between; }
