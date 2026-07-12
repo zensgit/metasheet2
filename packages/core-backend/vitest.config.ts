@@ -7,6 +7,17 @@ export default defineConfig({
     environment: 'node',
     // Fix vite SSR transformation issues - use forks pool to avoid __vite_ssr_exportName__ errors
     pool: 'forks',
+    // #4154: supertest specs call `request(app)`, which spins up a fresh `app.listen(0)` ephemeral
+    // listener PER REQUEST (~495 call sites across 42 files). Under full-suite event-loop load the OS
+    // recycles ephemeral ports fast enough that a request occasionally lands on a DIFFERENT test's app
+    // that just rebound the same port — proven by a `GET /api/approvals` returning 405 (a server that
+    // knows the path but not the method = someone else's app), and by the FAILING SPEC being random
+    // across runs (dashboard / ai-suggest / approval-rbac) rather than fixed. The collision is purely
+    // transient: a retry gets a fresh port and hits the right server. A DETERMINISTIC product failure
+    // still fails all attempts, so this absorbs the infra flake without hiding real bugs. (Tradeoff,
+    // stated plainly: a genuinely NON-deterministic PRODUCT race would also be absorbed — acceptable
+    // here because these are mock-dep unit tests, but flagged for review.)
+    retry: 2,
     deps: {
       interopDefault: true
     },
