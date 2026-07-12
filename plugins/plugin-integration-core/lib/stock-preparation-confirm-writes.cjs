@@ -123,13 +123,15 @@ function assertAdminPermission(permission) {
   }
 }
 
+// #4160: resolveFieldIds is REQUIRED — the scoped records API resolves the frozen template's
+// logical->physical fieldId map through it (the records service accepts physical ids only).
 function ensureProvisioning(provisioning) {
-  if (!provisioning || typeof provisioning.findObjectSheet !== 'function') {
+  if (!provisioning || typeof provisioning.findObjectSheet !== 'function' || typeof provisioning.resolveFieldIds !== 'function') {
     throw new StockPreparationConfirmWriteError(
       503,
       'CONFIRM_PROVISIONING_API_UNAVAILABLE',
-      'stock-preparation confirm writes require multitable.provisioning.findObjectSheet',
-      { requiredMethods: ['findObjectSheet'] },
+      'stock-preparation confirm writes require multitable.provisioning findObjectSheet/resolveFieldIds',
+      { requiredMethods: ['findObjectSheet', 'resolveFieldIds'] },
     )
   }
   return provisioning
@@ -171,6 +173,8 @@ function manualConversionRuleIdFor(rule) {
 }
 
 // Resolve ONE MVP objectId to a scoped, sheet-bound records API (mirror of the persist committer).
+// The scoped API also binds the logical->physical fieldId map for this objectId under the SAME staging
+// projectId (#4160), so this module keeps speaking the frozen templates' logical keys throughout.
 async function resolveScopedTarget(recordsApi, provisioning, targetProjectId, objectId) {
   if (!MVP_OBJECT_ID_SET.has(objectId)) {
     throw new StockPreparationConfirmWriteError(
@@ -190,7 +194,8 @@ async function resolveScopedTarget(recordsApi, provisioning, targetProjectId, ob
       { objectId },
     )
   }
-  return { objectId, sheetId, scoped: createTargetScopedRecordsApi(recordsApi, { sheetId, objectId }) }
+  const scoped = await createTargetScopedRecordsApi(recordsApi, { sheetId, objectId }, { provisioning, projectId: targetProjectId })
+  return { objectId, sheetId, scoped }
 }
 
 function recordData(record) {

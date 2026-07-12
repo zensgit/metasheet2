@@ -26,6 +26,7 @@ const {
 } = require('./stock-preparation-conflict-policies.cjs')
 const {
   STOCK_PREPARATION_MAIN_TABLE_TEMPLATE,
+  STOCK_PREPARATION_MVP_TABLE_TEMPLATES,
   normalizeStockPreparationTemplate,
 } = require('./stock-preparation-templates.cjs')
 const {
@@ -358,25 +359,145 @@ async function readExistingStockPreparationRows(recordsApi, target, projectNo, o
   })
 }
 
-function createTargetScopedRecordsApi(recordsApi, target) {
-  const api = ensureWriteRecordsApi(recordsApi)
+// ── #4160: logical-key <-> physical fieldId translation, bound to the ONE records entry point ──────
+//
+// The frozen templates declare LOGICAL field keys ('snapshotBatchId'); provisioning materializes each
+// one as a DERIVED physical fieldId ('fld_<sha1(projectId:objectId:fieldId)>' — see the platform's
+// getObjectFieldId). The multitable records service only ever speaks physical ids: an unknown key is
+// rejected outright by buildNormalizedPatch (writes) and normalizeQueryFilters (filters), and the rows
+// it returns are keyed by physical id. So EVERY stock-preparation read and write must translate.
+//
+// The translation is bound HERE — inside the single target-scoped records API that every stock-prep
+// records call already goes through — precisely so that "forgot to call resolveFieldIds" stops being a
+// convention a module can silently omit (which is exactly how #4160 shipped) and becomes structurally
+// impossible. There are exactly TWO modes and a target that declares NEITHER is REJECTED (fail-closed):
+//
+//   'logical'    (default) — the caller passes `provisioning` + the staging `projectId`; the map is
+//                  resolved HERE from the target's frozen template via provisioning.resolveFieldIds.
+//                  Writes (data / changes) and reads (filters) are translated key-by-key, an UNKNOWN
+//                  logical key THROWS (never a silent drop), and returned rows are translated BACK so
+//                  callers keep reading/writing logical keys.
+//   'pre_mapped'          — the C4 apply path only: its writer already maps every payload key through
+//                  the operator-configured `target.fieldIdMap`, so this API must not map a second time.
+//                  Both of its call sites pass the mode EXPLICITLY — an opt-out you cannot fall into.
+const FIELD_ID_TRANSLATION_MODES = Object.freeze(['logical', 'pre_mapped'])
+const MVP_TEMPLATE_BY_OBJECT_ID = new Map(
+  STOCK_PREPARATION_MVP_TABLE_TEMPLATES.map((template) => [template.objectId, template]),
+)
+
+// Resolve the target objectId's frozen logical field ids to physical ids. Fail-closed on every step:
+// an unknown objectId, a provisioning API without resolveFieldIds, or ANY declared logical field the
+// platform did not resolve — a partial map would silently drop columns on write.
+async function resolveTargetFieldIds(provisioning, projectId, objectId) {
+  const template = MVP_TEMPLATE_BY_OBJECT_ID.get(objectId)
+  if (!template) {
+    throw new StockPreparationTableActionError(500, 'TABLE_ACTION_FIELD_IDS_UNRESOLVED', 'target objectId has no frozen stock-preparation template to resolve field ids from', { objectId })
+  }
+  if (!provisioning || typeof provisioning.resolveFieldIds !== 'function' || !optionalString(projectId)) {
+    throw new StockPreparationTableActionError(503, 'TABLE_ACTION_FIELD_IDS_UNRESOLVED', 'target-scoped records API requires multitable.provisioning.resolveFieldIds and the resolution projectId', { objectId })
+  }
+  const fieldIds = template.fields.map((field) => field.id)
+  const resolved = await provisioning.resolveFieldIds({ projectId, objectId, fieldIds })
+  const map = {}
+  const missingFields = []
+  for (const fieldId of fieldIds) {
+    const physical = optionalString(isPlainObject(resolved) ? resolved[fieldId] : null)
+    if (physical) map[fieldId] = physical
+    else missingFields.push(fieldId)
+  }
+  if (missingFields.length > 0) {
+    throw new StockPreparationTableActionError(500, 'TABLE_ACTION_FIELD_IDS_UNRESOLVED', 'target-scoped records API could not resolve every declared field id', { objectId, missingFields })
+  }
+  return map
+}
+
+function invertFieldIdMap(fieldIds) {
+  const inverse = {}
+  for (const [logical, physical] of Object.entries(fieldIds)) inverse[physical] = logical
+  return inverse
+}
+
+// Fail-closed key translation: an unknown logical key THROWS. Silently dropping it would write a row
+// that is missing a column the caller believed it had written — a green lie.
+function toPhysicalFieldId(logicalKey, fieldIds, objectId, part) {
+  const physical = fieldIds[logicalKey]
+  if (!physical) {
+    throw new StockPreparationTableActionError(500, 'TABLE_ACTION_UNKNOWN_LOGICAL_FIELD', 'records API call used a field the target template does not declare', {
+      field: logicalKey,
+      part,
+      targetObjectId: objectId,
+    })
+  }
+  return physical
+}
+
+function toPhysicalKeys(source, fieldIds, objectId, part) {
+  const out = {}
+  for (const [key, value] of Object.entries(isPlainObject(source) ? source : {})) {
+    out[toPhysicalFieldId(key, fieldIds, objectId, part)] = value
+  }
+  return out
+}
+
+// Reverse direction: the records service returns { id, sheetId, version, data: { <physical>: value } }.
+// Only `data` keys are translated — id / sheetId / version (and the recordId the callers patch by) are
+// platform identities and pass through untouched. A physical key with no logical twin (a field outside
+// the frozen template) is passed through as-is rather than dropped.
+function toLogicalRecord(record, inverse) {
+  if (!isPlainObject(record) || !isPlainObject(record.data)) return record
+  const data = {}
+  for (const [key, value] of Object.entries(record.data)) {
+    data[Object.prototype.hasOwnProperty.call(inverse, key) ? inverse[key] : key] = value
+  }
+  return { ...record, data }
+}
+
+async function createTargetScopedRecordsApi(recordsApi, target, options = {}) {
+  const readOnly = options.readOnly === true
+  const api = readOnly ? ensureRecordsApi(recordsApi) : ensureWriteRecordsApi(recordsApi)
+  const mode = optionalString(options.fieldIdTranslation) || 'logical'
+  if (!FIELD_ID_TRANSLATION_MODES.includes(mode)) {
+    throw new StockPreparationTableActionError(500, 'TABLE_ACTION_FIELD_ID_TRANSLATION_INVALID', 'unsupported fieldIdTranslation mode', { fieldIdTranslation: mode })
+  }
+  const objectId = optionalString(target && target.objectId)
+  const fieldIds = mode === 'logical'
+    ? await resolveTargetFieldIds(options.provisioning, options.projectId, objectId)
+    : null
+  const inverse = fieldIds ? invertFieldIdMap(fieldIds) : null
+
   function withTargetSheet(input = {}) {
     if (input.sheetId && input.sheetId !== target.sheetId) {
       throw new StockPreparationTableActionError(403, 'TABLE_ACTION_TARGET_SCOPE_VIOLATION', 'records API call attempted to leave configured target sheet')
     }
     return { ...input, sheetId: target.sheetId }
   }
-  return {
-    queryRecords(input = {}) {
-      return api.queryRecords(withTargetSheet(input))
-    },
-    createRecord(input = {}) {
-      return api.createRecord(withTargetSheet(input))
-    },
-    patchRecord(input = {}) {
-      return api.patchRecord(withTargetSheet(input))
-    },
+
+  async function queryRecords(input = {}) {
+    const scoped = withTargetSheet(input)
+    if (mode === 'pre_mapped') return api.queryRecords(scoped)
+    if (scoped.filters !== undefined) scoped.filters = toPhysicalKeys(scoped.filters, fieldIds, objectId, 'filters')
+    const rows = await api.queryRecords(scoped)
+    // A non-array passes straight through so each caller's own "queryRecords must return an array"
+    // guard still fires (rather than being masked by a mapping TypeError).
+    return Array.isArray(rows) ? rows.map((row) => toLogicalRecord(row, inverse)) : rows
   }
+
+  const scopedApi = { queryRecords }
+  if (readOnly) return scopedApi
+
+  scopedApi.createRecord = async function createRecord(input = {}) {
+    const scoped = withTargetSheet(input)
+    if (mode === 'pre_mapped') return api.createRecord(scoped)
+    scoped.data = toPhysicalKeys(scoped.data, fieldIds, objectId, 'data')
+    return toLogicalRecord(await api.createRecord(scoped), inverse)
+  }
+  scopedApi.patchRecord = async function patchRecord(input = {}) {
+    const scoped = withTargetSheet(input)
+    if (mode === 'pre_mapped') return api.patchRecord(scoped)
+    scoped.changes = toPhysicalKeys(scoped.changes, fieldIds, objectId, 'changes')
+    return toLogicalRecord(await api.patchRecord(scoped), inverse)
+  }
+  return scopedApi
 }
 
 function emptyPlan() {
@@ -801,7 +922,9 @@ async function applyStockPreparationAction(input = {}) {
     plan: dryRun.plan,
     target: action.target,
     template: action.template,
-    recordsApi: createTargetScopedRecordsApi(input.recordsApi, action.target),
+    // C4 apply: the writer already maps every payload key through the operator-configured
+    // target.fieldIdMap, so the scoped API must NOT translate a second time (#4160).
+    recordsApi: await createTargetScopedRecordsApi(input.recordsApi, action.target, { fieldIdTranslation: 'pre_mapped' }),
   })
   return {
     action: publicActionMetadata(action),
