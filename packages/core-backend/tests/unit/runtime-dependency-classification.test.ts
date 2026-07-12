@@ -42,17 +42,38 @@ const NODE_BUILTINS = new Set([
   'stream/promises', 'timers/promises', 'crypto/promises',
 ])
 
-// Explicit allowlist of intentionally-OPTIONAL soft dependencies: modules a startup file requires at
-// module load INSIDE a try/catch that swallows the missing-module error and degrades gracefully, so
-// their absence under a --prod install does NOT crash the backend. Each entry below was verified to
-// be a `try { require(x) } catch { …fallback… }` (never rethrown) with a functioning degraded path.
-// Adding a new optional soft dependency is a deliberate, auditable edit here — anything NOT declared
-// prod and NOT on this list is treated as a hard eager dependency and fails the guard.
-const OPTIONAL_SOFT_DEPENDENCIES = new Set([
-  '@opentelemetry/api', // src/core/logger.ts — try{require}catch{otelApi=null}; trace-id enrichment off
-  'js-yaml', // src/services/ConfigService.ts — try{require}catch{}; JSON-only config fallback
-  'express-validator', // src/middleware/validation.ts — try{require}catch{}; validation skipped
-])
+// Explicit, OCCURRENCE-PRECISE allowlist of intentionally-OPTIONAL soft dependencies (#4126 review):
+// a module-name-only allowlist would mask a NEW hard import of the same module elsewhere (an
+// unguarded `import 'js-yaml'` in another startup file would sail through). So each exemption pins
+// the module to its exact source file AND requires the total occurrence count across the startup
+// graph to match — any additional site, or a change of site, fails the guard.
+//
+// Each entry is a verified `try { require(x) } catch { …working degraded path… }` (never rethrown)
+// whose absence does NOT crash the backend and does NOT disable a security control.
+// (express-validator was previously listed here and is NOT eligible: request validation is a
+// security control that fail-OPENed when the module was absent — it is now a declared production
+// dependency loaded fail-closed.)
+interface SoftDependencyExemption {
+  module: string
+  file: string // repo-relative to packages/core-backend
+  reason: string
+}
+const OPTIONAL_SOFT_DEPENDENCIES: SoftDependencyExemption[] = [
+  {
+    module: '@opentelemetry/api',
+    file: 'src/core/logger.ts',
+    reason: 'try{require}catch{otelApi=null} — trace-id enrichment degrades off; no security control',
+  },
+  {
+    module: 'js-yaml',
+    file: 'src/services/ConfigService.ts',
+    reason: 'try{require}catch{} — JSON-only config fallback; no security control',
+  },
+]
+const SOFT_EXEMPTION_KEY = (module: string, file: string): string => `${module}@@${file}`
+const SOFT_EXEMPTION_KEYS = new Set(
+  OPTIONAL_SOFT_DEPENDENCIES.map((entry) => SOFT_EXEMPTION_KEY(entry.module, entry.file)),
+)
 
 function readJson(file: string): Record<string, unknown> {
   return JSON.parse(readFileSync(file, 'utf8'))
@@ -159,19 +180,28 @@ function hardSpecifiersOf(file: string): string[] {
   return specs
 }
 
-// BFS the eager startup import graph; return external top-level modules mapped to an example file,
-// plus the full set of visited (resolved) files.
+// One eager external import site. EVERY occurrence is recorded (#4126 review: keeping only the
+// first site per module let a module-name allowlist mask a new hard import of the same module in
+// another file).
+interface EagerOccurrence {
+  module: string
+  file: string // repo-relative to packages/core-backend
+}
+
+// BFS the eager startup import graph; return every eager external occurrence plus the visited files.
 function walkStartupGraph(): {
-  externals: Map<string, string>
+  occurrences: EagerOccurrence[]
   visited: Set<string>
 } {
   const visited = new Set<string>()
-  const externals = new Map<string, string>()
+  const occurrences: EagerOccurrence[] = []
+  const seenSites = new Set<string>()
   const queue: string[] = [ENTRY]
   while (queue.length > 0) {
     const file = queue.shift()!
     if (visited.has(file) || !existsSync(file)) continue
     visited.add(file)
+    const relFile = path.relative(CORE_BACKEND, file)
     for (const spec of hardSpecifiersOf(file)) {
       if (spec.startsWith('.')) {
         const resolved = resolveRelative(file, spec)
@@ -181,26 +211,35 @@ function walkStartupGraph(): {
       if (spec.startsWith('node:')) continue
       const mod = rootModule(spec)
       if (NODE_BUILTINS.has(mod)) continue
-      if (!externals.has(mod)) externals.set(mod, path.relative(CORE_BACKEND, file))
+      const site = `${mod}@@${relFile}`
+      if (seenSites.has(site)) continue // one occurrence per (module, file) — repeats in a file are the same site
+      seenSites.add(site)
+      occurrences.push({ module: mod, file: relFile })
     }
   }
-  return { externals, visited }
+  return { occurrences, visited }
 }
 
 describe('runtime dependency classification (production-install startup contract)', () => {
-  it('every eagerly-imported external module in the startup graph is a production dependency', () => {
+  it('every eager external import site in the startup graph is a production dependency', () => {
     const prod = prodDependencyNames()
-    const { externals, visited } = walkStartupGraph()
+    const { occurrences, visited } = walkStartupGraph()
     // Guard against silent coverage collapse: the eager startup graph is a few hundred files; if a
     // parser/traversal regression makes the walk visit almost nothing the "0 missing" is meaningless.
     expect(visited.size).toBeGreaterThan(150)
-    const missing = [...externals.entries()]
-      .filter(([mod]) => !prod.has(mod) && !OPTIONAL_SOFT_DEPENDENCIES.has(mod))
-      .map(([mod, file]) => `${mod} (eager import e.g. ${file})`)
+    // Checked PER OCCURRENCE (module + source file), not per module name: a soft-dependency
+    // exemption is bound to its exact site, so an unguarded import of the SAME module in another
+    // startup file is still a hard dependency and still fails.
+    const missing = occurrences
+      .filter(
+        ({ module, file }) =>
+          !prod.has(module) && !SOFT_EXEMPTION_KEYS.has(SOFT_EXEMPTION_KEY(module, file)),
+      )
+      .map(({ module, file }) => `${module} (eager import at ${file})`)
     expect(
       missing,
-      `these modules are imported at startup but are neither a production dependency nor an ` +
-        `allowlisted optional soft dependency — a --prod install would omit them and crash the ` +
+      `these import sites are eager at startup but are neither a production dependency nor an ` +
+        `allowlisted optional soft-dependency SITE — a --prod install would omit them and crash the ` +
         `backend on boot:\n  ${missing.join('\n  ')}`,
     ).toEqual([])
   })
@@ -264,18 +303,51 @@ describe('runtime dependency classification (production-install startup contract
     fs.rmSync(dir, { recursive: true, force: true })
   })
 
-  it('the optional-soft-dependency allowlist is not stale — every entry is still a startup require and not a prod dep', () => {
+  it('the soft-dependency exemptions are site-exact, live, non-prod, and occurrence-count-locked', () => {
     const prod = prodDependencyNames()
-    const { externals } = walkStartupGraph()
-    for (const soft of OPTIONAL_SOFT_DEPENDENCIES) {
+    const { occurrences } = walkStartupGraph()
+    for (const entry of OPTIONAL_SOFT_DEPENDENCIES) {
+      const sites = occurrences.filter((o) => o.module === entry.module)
+      // Live: the exempted site still exists.
       expect(
-        externals.has(soft),
-        `${soft} is allowlisted as optional but is no longer eagerly required in the startup graph — remove the stale entry`,
+        sites.some((o) => o.file === entry.file),
+        `${entry.module} is exempted at ${entry.file} but is no longer eagerly required there — fix or remove the stale exemption`,
       ).toBe(true)
+      // Occurrence-count lock (#4126 review): the module must be eagerly imported at EXACTLY the
+      // exempted site and nowhere else. A new unguarded import of the same module in another startup
+      // file adds an occurrence and fails here (and in the main check, which is site-keyed).
       expect(
-        prod.has(soft),
-        `${soft} is now a production dependency — drop it from the optional allowlist so a real regression can be seen`,
+        sites.map((o) => o.file).sort(),
+        `${entry.module} is eagerly imported at unexempted site(s) — a module-name exemption must not ` +
+          `cover a new hard import elsewhere. Sites: ${sites.map((o) => o.file).join(', ')}`,
+      ).toEqual([entry.file])
+      // Not a prod dep — otherwise the exemption hides a real classification.
+      expect(
+        prod.has(entry.module),
+        `${entry.module} is now a production dependency — drop the exemption so a real regression can be seen`,
       ).toBe(false)
+    }
+  })
+
+  it('express-validator is a production dependency and its loaders are fail-closed (#4126 review security fix)', () => {
+    const cb = readJson(path.join(CORE_BACKEND, 'package.json'))
+    const deps = (cb.dependencies as Record<string, string>) ?? {}
+    expect(
+      deps['express-validator'],
+      'express-validator backs declarative request validation (a security control) and must be a production dependency, never an optional soft dependency',
+    ).toBeTruthy()
+    expect(
+      OPTIONAL_SOFT_DEPENDENCIES.some((entry) => entry.module === 'express-validator'),
+      'express-validator must not be allowlisted as an optional soft dependency — its absence fail-OPENed validation',
+    ).toBe(false)
+    // The loaders must throw (fail-closed), never fall back to no-op validators / next().
+    const loaderSources = [
+      readFileSync(path.join(CORE_BACKEND, 'src/types/validator.ts'), 'utf8'),
+      readFileSync(path.join(CORE_BACKEND, 'src/middleware/validation.ts'), 'utf8'),
+    ]
+    for (const source of loaderSources) {
+      expect(source).toMatch(/throw new Error\(/)
+      expect(source).not.toMatch(/validation will be skipped|skip validation|use no-op validators/)
     }
   })
 
