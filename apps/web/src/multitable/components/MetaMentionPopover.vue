@@ -3,7 +3,7 @@
     <div class="meta-mention-popover__panel" role="dialog" :aria-label="l('comment.mentions')">
       <div class="meta-mention-popover__header">
         <strong>{{ l('comment.mentions') }}</strong>
-        <button class="meta-mention-popover__close" :aria-label="l('comment.closeMentions')" @click="emit('close')">&times;</button>
+        <MtIconButton class="meta-mention-popover__close" :aria-label="l('comment.closeMentions')" @click="emit('close')">&times;</MtIconButton>
       </div>
       <div class="meta-mention-popover__list">
         <button
@@ -33,6 +33,7 @@
 import type { CommentMentionSummaryItem, MetaField, MetaRecord } from '../types'
 import { useLocale } from '../../composables/useLocale'
 import { commentLabel, mentionFieldScope, type MetaCommentLabelKey } from '../utils/meta-comment-labels'
+import { MtIconButton } from '../ui'
 
 const props = defineProps<{
   visible: boolean
@@ -82,8 +83,9 @@ function fieldScopeLabel(mentionedFieldIds: string[]): string {
 .meta-mention-popover__panel { position: absolute; top: 48px; left: 120px; width: 320px; max-height: 360px; background: #fff; border: 1px solid #ddd; border-radius: 8px; box-shadow: 0 4px 16px rgba(0,0,0,0.12); display: flex; flex-direction: column; overflow: hidden; }
 .meta-mention-popover__header { display: flex; align-items: center; justify-content: space-between; padding: 10px 14px; border-bottom: 1px solid #f0f0f0; }
 .meta-mention-popover__header strong { font-size: 14px; color: #333; }
-.meta-mention-popover__close { border: none; background: none; font-size: 18px; cursor: pointer; color: #999; padding: 0 2px; line-height: 1; }
-.meta-mention-popover__close:hover { color: #333; }
+/* .meta-mention-popover__close: now <MtIconButton> (ghost, token-styled; the &times; glyph char passes
+   through its default-slot icon fallback (size token-normalized to the icon control)). Bespoke hardcoded CSS removed (UI-P2-1c T1
+   batch-1). Class kept on the element only for selector stability. */
 .meta-mention-popover__list { overflow-y: auto; flex: 1; }
 .meta-mention-popover__item { display: flex; align-items: center; gap: 8px; width: 100%; padding: 8px 14px; border: none; background: none; cursor: pointer; text-align: left; font-size: 13px; color: #333; }
 .meta-mention-popover__item:hover { background: #f5f7fa; }
