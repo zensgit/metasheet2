@@ -1,4 +1,5 @@
 import { readFileSync, existsSync } from 'fs'
+import { spawnSync } from 'child_process'
 import path from 'path'
 import ts from 'typescript'
 import { describe, expect, it } from 'vitest'
@@ -25,11 +26,13 @@ import { describe, expect, it } from 'vitest'
 // rethrowing catch does not swallow). The intentionally-optional soft dependencies are therefore
 // exempted by the explicit, auditable OPTIONAL_SOFT_DEPENDENCIES allowlist at the check site, whose
 // entries are asserted to stay live-and-non-prod, occur exactly once, and remain protected by a
-// swallowing top-level try/catch. Every other hard external must resolve to a prod dependency of
-// core-backend or the workspace root (hoisting reality). Multi-line, default/named/namespace, and
-// barrel re-export forms are handled uniformly by the AST (no line-based blind spot). A file-count
-// floor, multi-line-edge regression, synthetic eager/lazy classification, guarded-loader shape
-// matrix, and allowlist-hygiene test guard against regressions.
+// swallowing top-level try/catch. The loader must assign to one module-local fallback binding; a
+// catch may only restore that same binding, and later top-level control flow may not read it. Every
+// other hard external must resolve to a prod dependency of core-backend or the workspace root
+// (hoisting reality). Multi-line, default/named/namespace, and barrel re-export forms are handled
+// uniformly by the AST (no line-based blind spot). A file-count floor, multi-line-edge regression,
+// synthetic eager/lazy classification, guarded-loader shape matrix, and allowlist-hygiene test
+// guard against regressions.
 
 const CORE_BACKEND = path.resolve(__dirname, '..', '..')
 const REPO_ROOT = path.resolve(CORE_BACKEND, '..', '..')
@@ -75,6 +78,23 @@ const SOFT_EXEMPTION_KEY = (module: string, file: string): string => `${module}@
 const SOFT_EXEMPTION_KEYS = new Set(
   OPTIONAL_SOFT_DEPENDENCIES.map((entry) => SOFT_EXEMPTION_KEY(entry.module, entry.file)),
 )
+
+const OPTIONAL_MODULE_ABSENCE_PROBE = `
+import Module from 'node:module'
+import { pathToFileURL } from 'node:url'
+
+const originalLoad = Module._load
+Module._load = function (request, parent, isMain) {
+  if (request === process.env.BLOCKED_MODULE) {
+    const error = new Error('blocked optional module')
+    error.code = 'MODULE_NOT_FOUND'
+    throw error
+  }
+  return originalLoad.call(this, request, parent, isMain)
+}
+
+await import(pathToFileURL(process.env.TARGET_FILE).href)
+`
 
 function readJson(file: string): Record<string, unknown> {
   return JSON.parse(readFileSync(file, 'utf8'))
@@ -179,42 +199,125 @@ function hardSpecifiersOf(file: string): string[] {
   return specs
 }
 
-function isDescendantOf(node: ts.Node, ancestor: ts.Node): boolean {
-  let current: ts.Node | undefined = node
-  while (current) {
-    if (current === ancestor) return true
-    current = current.parent
-  }
-  return false
+function isLiteralFallback(node: ts.Expression): boolean {
+  return (
+    node.kind === ts.SyntaxKind.NullKeyword ||
+    node.kind === ts.SyntaxKind.TrueKeyword ||
+    node.kind === ts.SyntaxKind.FalseKeyword ||
+    ts.isStringLiteral(node) ||
+    ts.isNumericLiteral(node) ||
+    (ts.isIdentifier(node) && node.text === 'undefined')
+  )
 }
 
-function containsEagerThrow(node: ts.Node): boolean {
-  let found = false
-  const walk = (current: ts.Node): void => {
-    if (found) return
-    if (current !== node && isFunctionLikeBoundary(current)) return
-    if (ts.isThrowStatement(current)) {
-      found = true
+interface OptionalLoaderBinding {
+  name: string
+  declaration: ts.VariableDeclaration
+  assignment: ts.BinaryExpression
+  assignmentTarget: ts.Identifier
+}
+
+function optionalLoaderBinding(call: ts.CallExpression): OptionalLoaderBinding | null {
+  const assignment = call.parent
+  const isSynchronousRequire = ts.isIdentifier(call.expression) && call.expression.text === 'require'
+  if (
+    !isSynchronousRequire ||
+    !ts.isBinaryExpression(assignment) ||
+    assignment.right !== call ||
+    assignment.operatorToken.kind !== ts.SyntaxKind.EqualsToken ||
+    !ts.isIdentifier(assignment.left)
+  ) {
+    return null
+  }
+
+  const source = call.getSourceFile()
+  const declarations = source.statements.flatMap((statement) =>
+    ts.isVariableStatement(statement)
+      ? statement.declarationList.declarations.filter(
+          (declaration) =>
+            ts.isIdentifier(declaration.name) && declaration.name.text === assignment.left.text,
+        )
+      : [],
+  )
+  if (declarations.length !== 1) return null
+  const declaration = declarations[0]
+  if (declaration.initializer && !isLiteralFallback(declaration.initializer)) return null
+
+  return {
+    name: assignment.left.text,
+    declaration,
+    assignment,
+    assignmentTarget: assignment.left,
+  }
+}
+
+function isSafeFallbackCatch(block: ts.Block, bindingName: string): boolean {
+  return block.statements.every((statement) => {
+    if (ts.isEmptyStatement(statement)) return true
+    if (!ts.isExpressionStatement(statement) || !ts.isBinaryExpression(statement.expression)) {
+      return false
+    }
+    const assignment = statement.expression
+    return (
+      assignment.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
+      ts.isIdentifier(assignment.left) &&
+      assignment.left.text === bindingName &&
+      isLiteralFallback(assignment.right)
+    )
+  })
+}
+
+function hasUnsafeTopLevelBindingUse(
+  source: ts.SourceFile,
+  binding: OptionalLoaderBinding,
+  catchBlock: ts.Block,
+): boolean {
+  const allowedIdentifiers = new Set<ts.Identifier>([
+    binding.declaration.name as ts.Identifier,
+    binding.assignmentTarget,
+  ])
+  for (const statement of catchBlock.statements) {
+    if (ts.isExpressionStatement(statement) && ts.isBinaryExpression(statement.expression)) {
+      const target = statement.expression.left
+      if (ts.isIdentifier(target)) allowedIdentifiers.add(target)
+    }
+  }
+
+  let unsafe = false
+  const walk = (node: ts.Node): void => {
+    if (unsafe) return
+    if (node !== source && isFunctionLikeBoundary(node)) return
+    if (ts.isIdentifier(node) && node.text === binding.name && !allowedIdentifiers.has(node)) {
+      unsafe = true
       return
     }
-    current.forEachChild(walk)
+    node.forEachChild(walk)
   }
-  walk(node)
-  return found
+  source.forEachChild(walk)
+  return unsafe
 }
 
 function isProtectedBySwallowingTry(call: ts.CallExpression): boolean {
+  const binding = optionalLoaderBinding(call)
+  if (!binding) return false
+
+  const assignmentStatement = binding.assignment.parent
+  if (!ts.isExpressionStatement(assignmentStatement)) return false
+
   let current: ts.Node | undefined = call.parent
   while (current) {
-    if (isFunctionLikeBoundary(current)) return false
-    if (
-      ts.isTryStatement(current) &&
-      isDescendantOf(call, current.tryBlock) &&
-      current.catchClause &&
-      !containsEagerThrow(current.catchClause.block) &&
-      (!current.finallyBlock || !containsEagerThrow(current.finallyBlock))
-    ) {
-      return true
+    if (isFunctionLikeBoundary(current) || ts.isSourceFile(current)) return false
+    if (ts.isTryStatement(current)) {
+      if (
+        current.parent !== call.getSourceFile() ||
+        assignmentStatement.parent !== current.tryBlock ||
+        !current.catchClause ||
+        !isSafeFallbackCatch(current.catchClause.block, binding.name) ||
+        (current.finallyBlock && current.finallyBlock.statements.length > 0)
+      ) {
+        return false
+      }
+      return !hasUnsafeTopLevelBindingUse(call.getSourceFile(), binding, current.catchClause.block)
     }
     current = current.parent
   }
@@ -374,11 +477,43 @@ describe('runtime dependency classification (production-install startup contract
       return inspectOptionalLoader(file, 'optional-soft')
     }
 
-    expect(inspect(`try { require('optional-soft') } catch { /* degrade */ }`)).toEqual({
+    expect(
+      inspect(`let soft\ntry { soft = require('optional-soft') } catch { /* degrade */ }`),
+    ).toEqual({
       topLevelCalls: 1,
       guardedCalls: 1,
     })
-    expect(inspect(`require('optional-soft')`)).toEqual({ topLevelCalls: 1, guardedCalls: 0 })
+    expect(
+      inspect(
+        `let fallback\ntry { fallback = require('optional-soft') } catch { fallback = null }`,
+      ),
+    ).toEqual({
+      topLevelCalls: 1,
+      guardedCalls: 1,
+    })
+    expect(
+      inspect(
+        `let soft = null\ntry { soft = require('optional-soft') } catch {}\n` +
+          `if (soft === null) process.exit(1)`,
+      ),
+    ).toEqual({ topLevelCalls: 1, guardedCalls: 0 })
+    expect(
+      inspect(
+        `let soft\nlet fatal = false\n` +
+          `try { soft = require('optional-soft') } catch { fatal = true }`,
+      ),
+    ).toEqual({ topLevelCalls: 1, guardedCalls: 0 })
+    expect(inspect(`try { require('optional-soft') } catch {}`)).toEqual({
+      topLevelCalls: 1,
+      guardedCalls: 0,
+    })
+    expect(
+      inspect(`let soft\ntry { soft = import('optional-soft') } catch {}`),
+    ).toEqual({ topLevelCalls: 1, guardedCalls: 0 })
+    expect(inspect(`require('optional-soft')`)).toEqual({
+      topLevelCalls: 1,
+      guardedCalls: 0,
+    })
     expect(inspect(`try { require('optional-soft') } finally { /* propagates */ }`)).toEqual({
       topLevelCalls: 1,
       guardedCalls: 0,
@@ -391,8 +526,18 @@ describe('runtime dependency classification (production-install startup contract
       topLevelCalls: 1,
       guardedCalls: 0,
     })
+    expect(inspect(`try { require('optional-soft') } catch { process.exit(1) }`)).toEqual({
+      topLevelCalls: 1,
+      guardedCalls: 0,
+    })
+    expect(inspect(`try { require('optional-soft') } catch {} finally { cleanup() }`)).toEqual({
+      topLevelCalls: 1,
+      guardedCalls: 0,
+    })
     expect(
-      inspect(`try { require('optional-soft') } catch {}\nrequire('optional-soft')`),
+      inspect(
+        `let soft\ntry { soft = require('optional-soft') } catch {}\nrequire('optional-soft')`,
+      ),
     ).toEqual({ topLevelCalls: 2, guardedCalls: 1 })
     expect(inspect(`function later() { require('optional-soft') }`)).toEqual({
       topLevelCalls: 0,
@@ -432,6 +577,33 @@ describe('runtime dependency classification (production-install startup contract
         prod.has(entry.module),
         `${entry.module} is now a production dependency — drop the exemption so a real regression can be seen`,
       ).toBe(false)
+    }
+  })
+
+  it('each soft-dependency exemption still evaluates when its module is absent', () => {
+    for (const entry of OPTIONAL_SOFT_DEPENDENCIES) {
+      const result = spawnSync(
+        process.execPath,
+        ['--import', 'tsx', '--input-type=module', '--eval', OPTIONAL_MODULE_ABSENCE_PROBE],
+        {
+          cwd: CORE_BACKEND,
+          env: {
+            HOME: process.env.HOME,
+            NODE_ENV: 'test',
+            PATH: process.env.PATH,
+            BLOCKED_MODULE: entry.module,
+            TARGET_FILE: path.join(CORE_BACKEND, entry.file),
+          },
+          encoding: 'utf8',
+          timeout: 10_000,
+        },
+      )
+      expect(result.error, `${entry.module} absence probe failed to execute`).toBeUndefined()
+      expect(
+        result.status,
+        `${entry.module} is allowlisted as optional but its module exits non-zero when the ` +
+          `dependency is absent (status=${result.status}, signal=${result.signal ?? 'none'})`,
+      ).toBe(0)
     }
   })
 
