@@ -777,6 +777,24 @@ describe('MultitableApiClient', () => {
             snapshot: { fld_title: 'Updated' },
             createdAt: '2026-04-30T09:00:00.000Z',
           },
+          {
+            // #2928 enrichment POSITIVE control: this row DOES carry actorName; it must pass through
+            // verbatim. Without this row, hardcoding `actorName: null` in the normalizer would leave
+            // the spec green (the other row is null either way) — and this spec now sits in the
+            // REQUIRED gate as #2928's contract, so an enrichment regression must be visible here.
+            id: 'rev_2',
+            sheetId: 'sheet history',
+            recordId: 'rec history',
+            version: 4,
+            action: 'update',
+            source: 'rest',
+            actorId: 'user_2',
+            actorName: 'Ada Lovelace',
+            changedFieldIds: ['fld_title'],
+            patch: { fld_title: 'Edited again' },
+            snapshot: { fld_title: 'Edited again' },
+            createdAt: '2026-04-30T10:00:00.000Z',
+          },
           { id: 'bad' },
         ],
       },
@@ -792,13 +810,28 @@ describe('MultitableApiClient', () => {
         action: 'update',
         source: 'rest',
         actorId: 'user_1',
-        // #2928 added server-side actor-name enrichment to the history normalizer; the fixture
-        // response above doesn't include actorName, so it normalizes to null (id-fallback path).
+        // #2928 added server-side actor-name enrichment to the history normalizer; this fixture row
+        // has no actorName, so it normalizes to null (id-fallback path). The rev_2 row below pins the
+        // opposite direction — a populated actorName passing through — so the pass-through is guarded.
         actorName: null,
         changedFieldIds: ['fld_title'],
         patch: { fld_title: 'Updated' },
         snapshot: { fld_title: 'Updated' },
         createdAt: '2026-04-30T09:00:00.000Z',
+      },
+      {
+        id: 'rev_2',
+        sheetId: 'sheet history',
+        recordId: 'rec history',
+        version: 4,
+        action: 'update',
+        source: 'rest',
+        actorId: 'user_2',
+        actorName: 'Ada Lovelace',
+        changedFieldIds: ['fld_title'],
+        patch: { fld_title: 'Edited again' },
+        snapshot: { fld_title: 'Edited again' },
+        createdAt: '2026-04-30T10:00:00.000Z',
       },
     ])
     expect(fetchFn).toHaveBeenCalledWith('/api/multitable/sheets/sheet%20history/records/rec%20history/history?limit=25')
