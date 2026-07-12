@@ -14,10 +14,19 @@ import { useLocale } from '../src/composables/useLocale'
 // UI-P2-1c batch-3: the FOOTER slice — both `meta-view-mgr__btn-cancel` sharers (config-panel Cancel +
 // delete-confirm Cancel) and the delete-confirm's `meta-view-mgr__btn-delete` (its only sharer) — are now
 // <MtButton> (default ghost / variant="danger"). Both classes' full sharer sets were migrated at once, so
-// their bespoke CSS was removed (no double-styling). __btn-inline (T3-GATED) and the __action glyph row stay
-// untouched. Behavior-preservation proof: all three stay native <button>s; clicking config-Cancel still closes
-// the config panel (closeConfig); clicking confirm-Cancel still clears deleteTargetId; clicking confirm-Delete
-// still emits `delete-view` with the same viewId.
+// their bespoke CSS was removed (no double-styling). The __action glyph row stays untouched. Behavior-
+// preservation proof: all three stay native <button>s; clicking config-Cancel still closes the config panel
+// (closeConfig); clicking confirm-Cancel still clears deleteTargetId; clicking confirm-Delete still emits
+// `delete-view` with the same viewId.
+//
+// UI-P2-1c T3 (multitable-ui-p2-1c-tail-resolution-designlock-20260707.md §2-T3, RATIFIED): of
+// `.meta-view-mgr__btn-inline`'s FOUR sharers, only the two named in the T3-ratified range —
+// addFilterRule ("+ Add filter") and addSortRule ("+ Add sort") — are now <MtLink>. reloadLatestConfig
+// ("Reload latest") and dismissLiveRefreshNotice ("Dismiss") are OUT of scope and stay on the bespoke
+// class (its CSS therefore stays too — partial-sharer migration, CSS removal gated on ALL sharers
+// migrating). Behavior-preservation proof: both migrated controls stay native <button>s (now class
+// `mt-link`); clicking "+ Add filter" still appends a filter rule row, clicking "+ Add sort" still
+// appends a sort rule row — same as pre-migration.
 
 const fields = [{ id: 'fld_name', name: 'Name', type: 'string' as const }]
 const views = [{ id: 'view_1', sheetId: 'sheet_1', name: 'Grid', type: 'grid' }]
@@ -103,5 +112,48 @@ describe('MetaViewManager — MtButton migration (UI-P2-1c batch-3, footer slice
     confirmDeleteBtn()!.click() // confirmDelete() → emit('delete-view', deleteTarget.value.id)
     expect(onDeleteView).toHaveBeenCalledTimes(1)
     expect(onDeleteView).toHaveBeenCalledWith('view_1')
+  })
+})
+
+const addFilterBtn = () => container!.querySelector('[data-filter-add="true"]') as HTMLButtonElement | null
+const addSortBtn = () => container!.querySelector('[data-sort-add="true"]') as HTMLButtonElement | null
+
+describe('MetaViewManager — MtLink migration (UI-P2-1c T3)', () => {
+  it('renders + Add filter and + Add sort as native <button class="mt-link">s (only 2 of the 4 __btn-inline sharers migrate)', async () => {
+    mount()
+    configBtn()!.click() // openConfig(view) → configTarget set → config panel renders
+    await nextTick()
+    expect(addFilterBtn()!.tagName).toBe('BUTTON')
+    expect(addFilterBtn()!.classList.contains('mt-link')).toBe(true)
+    expect(addSortBtn()!.tagName).toBe('BUTTON')
+    expect(addSortBtn()!.classList.contains('mt-link')).toBe(true)
+    // the bespoke class stays declared for the OTHER two (out-of-scope) sharers, but is gone from
+    // these two migrated elements specifically:
+    expect(addFilterBtn()!.classList.contains('meta-view-mgr__btn-inline')).toBe(false)
+    expect(addSortBtn()!.classList.contains('meta-view-mgr__btn-inline')).toBe(false)
+  })
+
+  it('clicking + Add filter still appends a filter rule row (same as pre-migration)', async () => {
+    mount()
+    configBtn()!.click()
+    await nextTick()
+    expect(container!.querySelectorAll('.meta-view-mgr__rule-row--filter').length).toBe(0)
+    addFilterBtn()!.click()
+    await nextTick()
+    expect(container!.querySelectorAll('.meta-view-mgr__rule-row--filter').length).toBe(1)
+  })
+
+  it('clicking + Add sort still appends a sort rule row (same as pre-migration)', async () => {
+    mount()
+    configBtn()!.click()
+    await nextTick()
+    const sortRowsBefore = Array.from(container!.querySelectorAll('.meta-view-mgr__rule-row'))
+      .filter((row) => !row.classList.contains('meta-view-mgr__rule-row--filter'))
+    expect(sortRowsBefore.length).toBe(0)
+    addSortBtn()!.click()
+    await nextTick()
+    const sortRowsAfter = Array.from(container!.querySelectorAll('.meta-view-mgr__rule-row'))
+      .filter((row) => !row.classList.contains('meta-view-mgr__rule-row--filter'))
+    expect(sortRowsAfter.length).toBe(1)
   })
 })

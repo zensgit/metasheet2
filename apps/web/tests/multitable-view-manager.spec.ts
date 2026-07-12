@@ -1073,7 +1073,7 @@ describe('MetaViewManager', () => {
     ;(container.querySelector('.meta-view-mgr__action[title="Configure"]') as HTMLButtonElement | null)?.click()
     await nextTick()
 
-    ;(Array.from(container.querySelectorAll('.meta-view-mgr__btn-inline')) as HTMLButtonElement[])
+    ;(Array.from(container.querySelectorAll('.mt-link')) as HTMLButtonElement[])
       .find((button) => button.textContent?.includes('+ Add filter'))
       ?.click()
     await nextTick()
@@ -1089,7 +1089,7 @@ describe('MetaViewManager', () => {
     filterInput.value = 'Open'
     filterInput.dispatchEvent(new Event('change', { bubbles: true }))
 
-    ;(Array.from(container.querySelectorAll('.meta-view-mgr__btn-inline')) as HTMLButtonElement[])
+    ;(Array.from(container.querySelectorAll('.mt-link')) as HTMLButtonElement[])
       .find((button) => button.textContent?.includes('+ Add sort'))
       ?.click()
     await nextTick()

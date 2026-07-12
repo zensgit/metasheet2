@@ -14,13 +14,11 @@
     <div v-if="open" class="meta-notif-bell__panel" data-test="notification-panel">
       <div class="meta-notif-bell__head">
         <span class="meta-notif-bell__title">{{ l('notification.title') }}</span>
-        <button
+        <MtLink
           v-if="hasUnread"
-          type="button"
-          class="meta-notif-bell__mark-all"
           data-test="notification-mark-all"
           @click="markAllRead"
-        >{{ l('notification.markAllRead') }}</button>
+        >{{ l('notification.markAllRead') }}</MtLink>
       </div>
       <div v-if="loading" class="meta-notif-bell__state">…</div>
       <div v-else-if="error" class="meta-notif-bell__state meta-notif-bell__state--error">{{ error }}</div>
@@ -60,6 +58,7 @@ import { recordLabel, type MetaRecordLabelKey } from '../utils/meta-record-label
 import { useNotificationInbox } from '../composables/useNotificationInbox'
 import type { MetaRecordSubscriptionNotification } from '../types'
 import type { MultitableApiClient } from '../api/client'
+import { MtLink } from '../ui'
 
 const props = defineProps<{ apiClient?: MultitableApiClient }>()
 const emit = defineEmits<{ (e: 'navigate', payload: { sheetId: string; recordId: string }): void }>()
@@ -100,7 +99,8 @@ void refreshUnreadCount()
 .meta-notif-bell__panel { position: absolute; right: 0; top: calc(100% + 6px); z-index: 20; width: 320px; max-height: 420px; overflow-y: auto; background: #fff; border: 1px solid #e5e7eb; border-radius: 10px; box-shadow: 0 8px 24px rgba(15, 23, 42, 0.12); }
 .meta-notif-bell__head { display: flex; align-items: center; justify-content: space-between; padding: 10px 12px; border-bottom: 1px solid #f1f5f9; }
 .meta-notif-bell__title { font-weight: 600; color: #0f172a; }
-.meta-notif-bell__mark-all { font-size: 12px; color: #2563eb; background: none; border: none; cursor: pointer; }
+/* .meta-notif-bell__mark-all: its only sharer is now <MtLink> (UI-P2-1c T3); the bespoke #2563eb text
+   is normalized to --ms-color-primary. Bespoke CSS removed (no double-styling). */
 .meta-notif-bell__state { padding: 16px 12px; color: #64748b; font-size: 13px; }
 .meta-notif-bell__state--error { color: #b91c1c; }
 .meta-notif-bell__list { list-style: none; margin: 0; padding: 4px 0; }

@@ -1,6 +1,7 @@
-# multitable/ui — shared UI primitives (P2-1a + P2-1b)
+# multitable/ui — shared UI primitives (P2-1a + P2-1b + P2-1c T3)
 
 Design-lock: `docs/development/multitable-ui-p2-structure-designlock-20260706.md` §2 P2-1.
+`MtLink` additionally follows `docs/development/multitable-ui-p2-1c-tail-resolution-designlock-20260707.md` §2-T3 (RATIFIED).
 
 These are stateless, presentation-only primitives meant to replace the per-SFC bespoke-CSS
 buttons/badges/menus/panels scattered across `apps/web/src/multitable/components/` and `views/`.
@@ -82,6 +83,33 @@ Props: same as `MtButton` (`variant`, `size`, `disabled`, `loading`) plus:
 Slots: `icon` (falls back to the default slot) — use when you need custom icon markup instead of the
 `icon` prop.
 Emits: `click(evt: MouseEvent)`.
+
+## MtLink
+
+A text-link-styled action — for bare inline links (mark-all-read, select-all/clear-all, add-filter/
+add-sort, add-condition/add-group) where any `MtButton` variant's padding + border would be a visible
+strength bump. Native `<button type="button">`, zero padding/border, `--ms-color-primary` text,
+underline on hover only.
+
+```vue
+<script setup lang="ts">
+import { MtLink } from '@/multitable/ui'
+</script>
+
+<template>
+  <MtLink @click="onSelectAll">Select all</MtLink>
+  <MtLink :disabled="!hasUnread" @click="onMarkAllRead">Mark all read</MtLink>
+</template>
+```
+
+Props:
+
+| Prop | Type | Default | Notes |
+|---|---|---|---|
+| `disabled` | `boolean` | `false` | native `disabled` attribute — tab-skipped, activation suppressed |
+
+Slots: default (label).
+Emits: `click(evt: MouseEvent)` — not emitted while `disabled`.
 
 ## MtBadge
 
