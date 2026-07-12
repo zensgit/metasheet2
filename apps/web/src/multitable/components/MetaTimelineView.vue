@@ -38,12 +38,12 @@
             {{ viewRenderLabel('timeline.axisZoomHint', isZh) }}
           </span>
         </label>
-        <button v-if="canCreate" class="meta-timeline__create-btn" @click="onQuickCreate">{{ viewRenderLabel('common.addRecord', isZh) }}</button>
+        <MtButton v-if="canCreate" variant="plain" class="meta-timeline__create-btn" @click="onQuickCreate">{{ viewRenderLabel('common.addRecord', isZh) }}</MtButton>
       </div>
 
       <div v-if="!startFieldId || !endFieldId" class="meta-timeline__placeholder">
         {{ viewRenderLabel('timeline.selectStartEnd', isZh) }}
-        <button v-if="canCreate" class="meta-timeline__placeholder-action" @click="onQuickCreate">{{ viewRenderLabel('common.createRecord', isZh) }}</button>
+        <MtButton v-if="canCreate" variant="plain" class="meta-timeline__placeholder-action" @click="onQuickCreate">{{ viewRenderLabel('common.createRecord', isZh) }}</MtButton>
       </div>
 
       <template v-else>
@@ -170,7 +170,7 @@
 
         <div v-if="!scheduledRows.length && !unscheduledRows.length" class="meta-timeline__empty">
           {{ viewRenderLabel('common.noRecordsFound', isZh) }}
-          <button v-if="canCreate" class="meta-timeline__placeholder-action" @click="onQuickCreate">{{ viewRenderLabel('common.createFirstRecord', isZh) }}</button>
+          <MtButton v-if="canCreate" variant="plain" class="meta-timeline__placeholder-action" @click="onQuickCreate">{{ viewRenderLabel('common.createFirstRecord', isZh) }}</MtButton>
         </div>
       </template>
     </template>
@@ -186,6 +186,7 @@ import { useLocale } from '../../composables/useLocale'
 import MetaAttachmentList from './MetaAttachmentList.vue'
 import MetaCommentActionChip from './MetaCommentActionChip.vue'
 import MetaCommentAffordance from './MetaCommentAffordance.vue'
+import { MtButton } from '../ui'
 import {
   handleCommentAffordanceKeydown,
   resolveCommentAffordanceStateClass,
@@ -560,10 +561,13 @@ function onDragEnd() {
 .meta-timeline__config-label { display: flex; flex-direction: column; gap: 2px; font-size: 12px; color: #666; }
 .meta-timeline__config-select { padding: 4px 8px; border: 1px solid #ddd; border-radius: 4px; font-size: 12px; }
 .meta-timeline__config-hint { font-size: 11px; color: #999; line-height: 1.3; max-width: 200px; }
-.meta-timeline__create-btn { align-self: flex-end; padding: 6px 12px; border: 1px solid #c7ddff; border-radius: 6px; background: #ecf5ff; color: #2563eb; font-size: 12px; cursor: pointer; }
-.meta-timeline__create-btn:hover { background: #dbeafe; }
+/* .meta-timeline__create-btn: now <MtButton variant="plain"> (token-styled); bespoke soft-tinted
+   hardcoded CSS removed (UI-P2-1c T2). Class kept on the element only for selector stability. */
+.meta-timeline__create-btn { align-self: flex-end; }
 .meta-timeline__placeholder { text-align: center; padding: 32px; color: #999; font-size: 13px; display: flex; flex-direction: column; align-items: center; gap: 12px; }
-.meta-timeline__placeholder-action { padding: 6px 12px; border: 1px solid #c7ddff; border-radius: 6px; background: #ecf5ff; color: #2563eb; font-size: 12px; cursor: pointer; }
+/* .meta-timeline__placeholder-action: now <MtButton variant="plain"> (token-styled); bespoke
+   soft-tinted hardcoded CSS removed (UI-P2-1c T2). Class kept on both elements only for selector
+   stability. */
 .meta-timeline__header { display: flex; align-items: flex-end; border-bottom: 1px solid #e5e7eb; padding-bottom: 4px; height: 40px; }
 .meta-timeline__label-col { width: 180px; min-width: 180px; font-size: 12px; font-weight: 600; color: #666; padding: 0 8px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .meta-timeline__label-col--attachment { white-space: normal; overflow: visible; text-overflow: initial; }
