@@ -26,7 +26,7 @@
 - ratify(A) 后：MtButton 加 `variant="plain"`（Opus 审，因是原语扩展）→ 再迁 Gallery/Kanban/Timeline create（+ empty-action/placeholder-action）。
 
 ### T3 — link-styled 按钮 → **新原语 MtLink**（或归入 T2 plain）
-现状：MetaNotificationBell `__mark-all`（无边框蓝字）、MetaExportDialog/FilterGroup 的 select-all/clear/add 内联链接、MetaViewManager `__btn-inline`(filter/sort add) 是**文字链接样**。MtButton 任何变体都会加 padding/边框 → link→button 突变。
+现状：MetaNotificationBell `__mark-all`（无边框蓝字）、MetaExportDialog/FilterGroup 的 select-all/clear/add 内联链接、MetaViewManager `__btn-inline`(filter/sort add) 是**文字链接样**〔**⚠ MetaViewManager 这一处事实有误——见下方勘误**〕。MtButton 任何变体都会加 padding/边框 → link→button 突变。
 - **需 owner 定**：加 `MtLink` 原语（原生 `<button>` 但零 padding/边框、主色字、hover 下划线，token 化），还是接受映射到 T2 的 `plain`？
 - **推荐**：**加 MtLink**（link 与 button 是不同强度语义，混用会乱）。additive 新原语，走 P2-1a 同法（结构锁 + Opus 审）。
 - 范围：mark-all-read · select-all/clear-all · addFilter/addSort inline · MetaFilterGroup add-condition/add-group。
