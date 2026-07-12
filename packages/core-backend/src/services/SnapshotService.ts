@@ -14,6 +14,16 @@ import crypto from 'crypto'
 import type { Database } from '../db/types'
 import { protectionRuleService } from './ProtectionRuleService'
 
+/**
+ * SECURITY (GHSA-h8mf): the only item types a snapshot restore can act on. restoreItem() handles
+ * exactly these three (view / view_state / table_row); any other type is a no-op warning. A
+ * partial/selective restore MUST draw every itemType from this allowlist, and a full restore MUST
+ * NOT narrow to a subset. This is the single source of truth for both the route validation
+ * (defense-in-depth) and the authoritative service-layer invariant in restoreSnapshot().
+ */
+export const RESTORABLE_ITEM_TYPES = ['view', 'view_state', 'table_row'] as const
+export type RestorableItemType = (typeof RESTORABLE_ITEM_TYPES)[number]
+
 export interface SnapshotCreateOptions {
   viewId: string
   name: string
@@ -304,6 +314,38 @@ export class SnapshotService {
 
     if (!db) {
       throw new Error('Database not available')
+    }
+
+    // SECURITY (GHSA-h8mf): authoritative restore-scope invariant, enforced HERE (not only at the
+    // HTTP route) so that no caller — internal service, a future route, or a test harness — can
+    // trigger a full restore while labeling it partial, or a partial restore over an item type
+    // outside the allowlist. `restore_type` alone is only a log label; the real determinant of
+    // scope is `itemTypes` (missing/empty itemTypes = restore EVERYTHING). We therefore bind the
+    // two together and reject any contradiction, before touching the database:
+    //   - restoreType MUST be explicitly one of 'full' | 'partial' | 'selective' (no silent default).
+    //   - 'full' MUST NOT carry itemTypes (a full restore covers every item type).
+    //   - 'partial' | 'selective' MUST carry a non-empty itemTypes, every value in RESTORABLE_ITEM_TYPES.
+    const restoreType = options.restoreType
+    if (restoreType !== 'full' && restoreType !== 'partial' && restoreType !== 'selective') {
+      throw new Error(
+        `Invalid restoreType: must be explicitly 'full', 'partial', or 'selective' (received: ${String(restoreType)})`
+      )
+    }
+    if (restoreType === 'full') {
+      if (options.itemTypes && options.itemTypes.length > 0) {
+        throw new Error("restoreType 'full' must not specify itemTypes; a full restore covers all item types")
+      }
+    } else {
+      const itemTypes = options.itemTypes
+      if (!Array.isArray(itemTypes) || itemTypes.length === 0) {
+        throw new Error(`restoreType '${restoreType}' requires a non-empty itemTypes allowlist`)
+      }
+      const invalid = itemTypes.filter((t) => !RESTORABLE_ITEM_TYPES.includes(t as RestorableItemType))
+      if (invalid.length > 0) {
+        throw new Error(
+          `itemTypes contains values outside the allowlist [${RESTORABLE_ITEM_TYPES.join(', ')}]: ${invalid.join(', ')}`
+        )
+      }
     }
 
     this.logger.info(`Restoring snapshot: ${options.snapshotId}`)

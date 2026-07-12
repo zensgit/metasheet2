@@ -945,6 +945,10 @@ router.post(
  */
 router.delete(
   '/snapshots/:id',
+  // SECURITY (GHSA-h8mf): match the restore/cleanup siblings — a snapshot delete must be platform-admin,
+  // not merely safety-confirmed. protectAdminOperation = [requireAdminRole (fail-closed 403/503), audit].
+  // Without this a non-admin could reach delete with only a safety token (delete is a bypass-inventory path).
+  ...protectAdminOperation(OperationType.DELETE_SNAPSHOT),
   requireSafetyCheck({
     operation: OperationType.DELETE_SNAPSHOT,
     getDetails: (req) => ({ snapshotId: req.params.id })
