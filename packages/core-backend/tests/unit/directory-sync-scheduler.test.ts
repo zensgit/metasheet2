@@ -337,4 +337,157 @@ describe('directory-sync-scheduler', () => {
       integrationName: 'DingTalk CN Renamed',
     })
   })
+
+  // Roadmap §7.8 "Add timezone support".
+  describe('per-integration timezone', () => {
+    it('passes a configured IANA zone from schedule_timezone into the cron registration', async () => {
+      const scheduler = createSchedulerMock()
+      scheduler.getJob.mockResolvedValue(null)
+
+      pgMocks.query.mockResolvedValueOnce({
+        rows: [
+          {
+            id: 'dir-1',
+            name: 'DingTalk CN',
+            status: 'active',
+            sync_enabled: true,
+            schedule_cron: '0 2 * * *',
+            schedule_timezone: 'Asia/Shanghai',
+          },
+        ],
+      })
+
+      await startDirectorySyncScheduler({ scheduler: scheduler as never })
+
+      expect(scheduler.schedule).toHaveBeenCalledWith(
+        'directory-sync:dir-1',
+        '0 2 * * *',
+        expect.any(Function),
+        { timezone: 'Asia/Shanghai' },
+      )
+    })
+
+    // Q6-style runtime defense (mirrors automation-scheduler.ts's resolveCronTimeZone): a
+    // persisted-junk timezone (e.g. a direct-DB write that bypassed the save-time validator
+    // in admin-directory.ts) must fall back to UTC at the scheduler, never be handed through
+    // verbatim or crash the boot sweep.
+    it('falls back to UTC when the persisted schedule_timezone is not a real IANA zone', async () => {
+      const scheduler = createSchedulerMock()
+      scheduler.getJob.mockResolvedValue(null)
+
+      pgMocks.query.mockResolvedValueOnce({
+        rows: [
+          {
+            id: 'dir-1',
+            name: 'DingTalk CN',
+            status: 'active',
+            sync_enabled: true,
+            schedule_cron: '*/5 * * * *',
+            schedule_timezone: 'Not/AZone',
+          },
+        ],
+      })
+
+      await startDirectorySyncScheduler({ scheduler: scheduler as never })
+
+      expect(scheduler.schedule).toHaveBeenCalledWith(
+        'directory-sync:dir-1',
+        '*/5 * * * *',
+        expect.any(Function),
+        { timezone: 'UTC' },
+      )
+    })
+
+    // `SchedulerServiceImpl.reschedule()` only swaps the cron expression; it has no way to
+    // update a job's `options.timezone` in place (see SchedulerService.ts). Without special
+    // handling, an admin editing ONLY the timezone (or the timezone alongside the cron) on an
+    // already-scheduled integration would silently keep firing under the STALE zone until the
+    // process restarts — this pins the fix: detect the change and unschedule+schedule fresh.
+    it('unschedules and re-schedules (not reschedule-in-place) when the timezone changes on an existing job', async () => {
+      const scheduler = createSchedulerMock()
+      scheduler.getJob.mockResolvedValue(null)
+
+      pgMocks.query.mockResolvedValueOnce({
+        rows: [
+          {
+            id: 'dir-1',
+            name: 'DingTalk CN',
+            status: 'active',
+            sync_enabled: true,
+            schedule_cron: '0 2 * * *',
+            schedule_timezone: null, // UTC
+          },
+        ],
+      })
+      await startDirectorySyncScheduler({ scheduler: scheduler as never })
+      expect(scheduler.schedule).toHaveBeenCalledTimes(1)
+
+      // Admin now sets a non-UTC timezone (cron unchanged). getJob reflects the job's
+      // ORIGINAL options (UTC) — the scheduler mock does not itself track state.
+      scheduler.getJob.mockResolvedValue({ name: 'directory-sync:dir-1', options: { timezone: 'UTC' } })
+      pgMocks.query.mockResolvedValueOnce({
+        rows: [
+          {
+            id: 'dir-1',
+            name: 'DingTalk CN',
+            status: 'active',
+            sync_enabled: true,
+            schedule_cron: '0 2 * * *',
+            schedule_timezone: 'Asia/Shanghai',
+          },
+        ],
+      })
+      await refreshDirectoryIntegrationSchedule('dir-1')
+
+      expect(scheduler.unschedule).toHaveBeenCalledWith('directory-sync:dir-1')
+      expect(scheduler.schedule).toHaveBeenCalledTimes(2)
+      expect(scheduler.schedule).toHaveBeenLastCalledWith(
+        'directory-sync:dir-1',
+        '0 2 * * *',
+        expect.any(Function),
+        { timezone: 'Asia/Shanghai' },
+      )
+      // The stale-zone job was dropped, not patched in place.
+      expect(scheduler.reschedule).not.toHaveBeenCalled()
+    })
+
+    it('keeps the reschedule-in-place path when the resolved timezone is unchanged (cron-only edit)', async () => {
+      const scheduler = createSchedulerMock()
+      scheduler.getJob.mockResolvedValue(null)
+
+      pgMocks.query.mockResolvedValueOnce({
+        rows: [
+          {
+            id: 'dir-1',
+            name: 'DingTalk CN',
+            status: 'active',
+            sync_enabled: true,
+            schedule_cron: '0 2 * * *',
+            schedule_timezone: 'Asia/Shanghai',
+          },
+        ],
+      })
+      await startDirectorySyncScheduler({ scheduler: scheduler as never })
+
+      // Admin edits ONLY the cron; the resolved timezone ('Asia/Shanghai') is unchanged.
+      scheduler.getJob.mockResolvedValue({ name: 'directory-sync:dir-1', options: { timezone: 'Asia/Shanghai' } })
+      pgMocks.query.mockResolvedValueOnce({
+        rows: [
+          {
+            id: 'dir-1',
+            name: 'DingTalk CN',
+            status: 'active',
+            sync_enabled: true,
+            schedule_cron: '0 3 * * *',
+            schedule_timezone: 'Asia/Shanghai',
+          },
+        ],
+      })
+      await refreshDirectoryIntegrationSchedule('dir-1')
+
+      expect(scheduler.reschedule).toHaveBeenCalledWith('directory-sync:dir-1', '0 3 * * *')
+      expect(scheduler.schedule).toHaveBeenCalledTimes(1) // no second schedule() call
+      expect(scheduler.unschedule).not.toHaveBeenCalled()
+    })
+  })
 })

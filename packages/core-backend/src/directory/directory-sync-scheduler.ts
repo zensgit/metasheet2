@@ -3,6 +3,7 @@ import { query } from '../db/pg'
 import { SchedulerServiceImpl } from '../services/SchedulerService'
 import { DirectorySyncInProgressError, reclaimStaleDirectorySyncRuns, syncDirectoryIntegration } from './directory-sync'
 import { deliverDirectoryInactiveLinkedAlert } from './directory-sync-alert-delivery'
+import { resolveDirectoryScheduleTimezone } from './directory-sync-timezone'
 
 type DirectoryScheduleRow = {
   id: string
@@ -10,6 +11,9 @@ type DirectoryScheduleRow = {
   status: string
   sync_enabled: boolean
   schedule_cron: string | null
+  // Roadmap §7.8: NULL for every integration created before this landed (and for any
+  // integration that has never set one) — resolves to 'UTC' via `resolveDirectoryScheduleTimezone`.
+  schedule_timezone: string | null
 }
 
 type DirectorySyncSchedulerLike = Pick<SchedulerServiceImpl, 'schedule' | 'reschedule' | 'unschedule' | 'getJob' | 'destroy'>
@@ -36,7 +40,7 @@ function shouldSchedule(row: DirectoryScheduleRow | null): row is DirectorySched
 
 async function listScheduleRows(): Promise<DirectoryScheduleRow[]> {
   const result = await query<DirectoryScheduleRow>(
-    `SELECT id, name, status, sync_enabled, schedule_cron
+    `SELECT id, name, status, sync_enabled, schedule_cron, schedule_timezone
      FROM directory_integrations
      WHERE provider = 'dingtalk'`,
   )
@@ -45,7 +49,7 @@ async function listScheduleRows(): Promise<DirectoryScheduleRow[]> {
 
 async function getScheduleRow(integrationId: string): Promise<DirectoryScheduleRow | null> {
   const result = await query<DirectoryScheduleRow>(
-    `SELECT id, name, status, sync_enabled, schedule_cron
+    `SELECT id, name, status, sync_enabled, schedule_cron, schedule_timezone
      FROM directory_integrations
      WHERE id = $1 AND provider = 'dingtalk'`,
     [integrationId],
@@ -118,17 +122,37 @@ async function applySchedule(row: DirectoryScheduleRow | null, options: ApplySch
   }
 
   const cronExpression = normalizeText(row.schedule_cron)
+  // Roadmap §7.8: 'UTC' when `schedule_timezone` is unset — byte-identical to the
+  // pre-§7.8 hardcoded literal every existing integration schedules under today.
+  const timezone = resolveDirectoryScheduleTimezone(row.schedule_timezone)
+  const scheduleHandler = async () => {
+    await runScheduledSync(row.id, await resolveScheduledIntegrationName(row.id))
+  }
   try {
-    if (existingJob) {
+    // `SchedulerServiceImpl.reschedule()` only swaps the cron expression — it keeps the
+    // job's ORIGINAL `options.timezone` (see SchedulerService.ts) and has no parameter to
+    // change it. A timezone edit (with or without a cron edit) on an already-scheduled
+    // integration would therefore silently keep firing under the stale zone until the
+    // process restarts. Detect that and fall through to unschedule+schedule (a fresh job,
+    // fresh options) instead of reschedule-in-place; an unchanged timezone keeps the
+    // existing reschedule-in-place path (job stats/runCount survive, matching every other
+    // cron-only edit — see the P3-2 comment on `resolveScheduledIntegrationName`).
+    const existingTimezone = resolveDirectoryScheduleTimezone(existingJob?.options?.timezone)
+    if (existingJob && existingTimezone === timezone) {
       await scheduler.reschedule(jobName, cronExpression)
       logger.info(`Rescheduled directory sync job: ${jobName} (${cronExpression})`)
     } else {
-      await scheduler.schedule(jobName, cronExpression, async () => {
-        await runScheduledSync(row.id, await resolveScheduledIntegrationName(row.id))
-      }, {
-        timezone: 'UTC',
+      if (existingJob) {
+        await scheduler.unschedule(jobName)
+      }
+      await scheduler.schedule(jobName, cronExpression, scheduleHandler, {
+        timezone,
       })
-      logger.info(`Scheduled directory sync job: ${jobName} (${cronExpression})`)
+      logger.info(
+        existingJob
+          ? `Rescheduled directory sync job (timezone changed): ${jobName} (${cronExpression}, ${timezone})`
+          : `Scheduled directory sync job: ${jobName} (${cronExpression}, ${timezone})`,
+      )
     }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
