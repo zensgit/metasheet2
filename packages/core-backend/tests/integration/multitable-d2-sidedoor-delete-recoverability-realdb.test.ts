@@ -54,6 +54,23 @@ import {
   MultitableSideDoorDeleteNonTransactionalError,
 } from '../../src/multitable/records'
 import { AutomationService } from '../../src/multitable/automation-service'
+// OD-6 (G19): imported the way a PLUGIN AUTHOR would — from the package root, not from the module that
+// happens to define them. This import IS the contract under test; if index.ts stops exporting them these
+// bindings become undefined and G19 reds.
+import {
+  MetaSheetServer,
+  MultitableRecordDeleteCapExceededError as RootCapExceededError,
+  MultitableSideDoorDeleteNonTransactionalError as RootNonTransactionalError,
+} from '../../src/index'
+
+/** The slice of the real core API this golden drives (index.ts builds it; we do not re-declare it). */
+type CoreApiShape = {
+  multitable: {
+    records: {
+      deleteRecord: (input: { sheetId: string; recordId: string }) => Promise<unknown>
+    }
+  }
+}
 import { RecordService } from '../../src/multitable/record-service'
 import { recordRecordRevision } from '../../src/multitable/record-history-service'
 import { reconstructRecordsAtT } from '../../src/multitable/record-reconstructor'
@@ -561,6 +578,97 @@ describeIfDatabase('D-2 — side-door delete recoverability (plugin + automation
       expect(await edgeAlive(F, N, R)).toBe(true)
     })
   }
+
+  // ── G19 — OD-6: the PUBLIC typed-error contract, imported from the PACKAGE ROOT ───────────────────
+  /**
+   * OD-6 ratifies a *typed SDK error* — a contract a plugin author can `instanceof`, not a string they
+   * must match on `err.code`. That contract lives or dies on the **package-root export**, and it had ZERO
+   * coverage: deleting both exports from `src/index.ts` left `tsc` clean and all 47 tests green
+   * (re-review P2-2), because every test imported the classes from their defining module instead.
+   *
+   * So this golden imports them the way a plugin does — from the package root — and throws them for real
+   * (a real cap breach; a real non-transactional call). Mutation: remove either export from `index.ts` ⇒
+   * the imported binding is `undefined` ⇒ `toBeInstanceOf(undefined)` throws ⇒ RED.
+   */
+  test('G19 OD-6 public contract: both typed errors are catchable by `instanceof` from the PACKAGE ROOT', async () => {
+    process.env[SIDE_DOOR_FLAG] = 'true'
+    process.env[CAPTURE_FLAG] = 'true'
+
+    // The two classes must BE classes on the public surface (not undefined, not a re-declared shape).
+    expect(typeof RootCapExceededError).toBe('function')
+    expect(typeof RootNonTransactionalError).toBe('function')
+
+    // (1) A REAL cap breach: 2 inbound edges against a cap of 1, both flags on.
+    process.env[CAP_ROWS] = '1'
+    const capFx = await fixture('g19cap')
+    const N2 = mkRecord('g19capn2')
+    await insertRecord(SHEET_B, N2, { [capFx.F]: [capFx.R] })
+    await q('INSERT INTO meta_links (field_id, record_id, foreign_record_id) VALUES ($1,$2,$3)', [capFx.F, N2, capFx.R])
+
+    await expect(pluginDelete(capFx.R)).rejects.toBeInstanceOf(RootCapExceededError)
+    expect(await recordExists(capFx.R)).toBe(true) // fail-closed: refused, not half-captured
+    delete process.env[CAP_ROWS]
+
+    // (2) A REAL non-transactional call (the bare pool — no transaction wrapper).
+    const txFx = await fixture('g19tx')
+    await expect(
+      pluginDeleteRecord({ query: q as never, sheetId: SHEET_A, recordId: txFx.R } as never),
+    ).rejects.toBeInstanceOf(RootNonTransactionalError)
+    expect(await recordExists(txFx.R)).toBe(true)
+  })
+
+  // ── G18 — PLUGIN PRODUCTION WIRING, driven for real (OD-7 layer 2 / PROBE-1) ──────────────────────
+  /**
+   * Drives the ACTUAL plugin-SDK factory in `src/index.ts` — `MetaSheetServer.createCoreAPI()` — not a
+   * test re-implementation of it. This is what OD-7 layer 2 demands, and it replaces the structural
+   * source-regex guard that used to stand in for it.
+   *
+   * Why the regex guard had to go (re-review P2-1): it sliced a fixed 1200-char window after the
+   * `deleteRecord` key and asserted `poolManager.get().transaction(` appeared somewhere inside. That
+   * passed only by POSITIONAL ACCIDENT — `deleteRecord` is currently the last key in the `records`
+   * object, so the window spilled into `auth:`, which happens to contain no `transaction(`. Add any
+   * transactional sibling after it (e.g. `restoreRecord` — exactly what THIS recoverability line would
+   * add next) and the guard goes green with the destructive SDK path in NO transaction at all
+   * (reviewer's DEFEAT-1). A behavioral golden cannot be fooled that way: it either commits
+   * transactionally or it does not.
+   *
+   * `pluginDirs: []` is load-bearing — without it the server scans the real plugin dirs and hangs. (My
+   * earlier claim that "constructing the server hangs in-process" was simply wrong: three existing unit
+   * tests construct it exactly like this and pass in CI.)
+   *
+   * Acceptance: REDs under PROBE-1 (unwrap the SDK's transaction) AND under DEFEAT-1 (unwrap + add a
+   * transactional sibling key after `deleteRecord`).
+   */
+  test('G18 [plugin] REAL production wiring: index.ts createCoreAPI() SDK deleteRecord is transactional and recoverable', async () => {
+    process.env[SIDE_DOOR_FLAG] = 'true'
+    process.env[CAPTURE_FLAG] = 'true'
+    const { F, R, N } = await fixture('g18')
+
+    // The REAL server → the REAL core API → the REAL SDK surface a plugin is handed.
+    const server = new MetaSheetServer({ port: 0, host: '127.0.0.1', pluginDirs: [] })
+    const coreApi = (server as unknown as { createCoreAPI: () => CoreApiShape }).createCoreAPI()
+    const sdk = coreApi.multitable.records
+    expect(typeof sdk.deleteRecord).toBe('function')
+
+    const deleted = await sdk.deleteRecord({ sheetId: SHEET_A, recordId: R })
+    expect(deleted).toBeTruthy()
+
+    // If index.ts's `poolManager.get().transaction(...)` wrapper were gone, the SDK would hand
+    // `deleteRecordWithRecoverability` a bare pool query — the OD-7 layer-3 guard would refuse, and this
+    // delete would throw instead of completing.
+    expect(await recordExists(R)).toBe(false)
+
+    const trash = await trashRow(R)
+    expect(trash).toBeDefined()
+    const revs = await deleteRevisions(R)
+    expect(revs).toHaveLength(1)
+    expect(revs[0]!.source).toBe('plugin')
+    expect(trash!.delete_revision_id).toBe(revs[0]!.id) // §1.2 anchor, end-to-end through production
+    const tombs = await tombstones(R)
+    expect(tombs).toHaveLength(1)
+    expect(tombs[0]!.source_revision_id).toBe(revs[0]!.id)
+    expect(await edgeAlive(F, N, R)).toBe(false)
+  })
 
   // ── G16 — OD-7 LAYER 3: the reordered path REFUSES to run outside a transaction ───────────────────
   /**

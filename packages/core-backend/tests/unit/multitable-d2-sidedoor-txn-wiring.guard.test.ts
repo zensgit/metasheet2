@@ -55,32 +55,29 @@ function fakeQuery(xids: Array<string | undefined>) {
 
 describe('D-2 — OD-7 production-wiring guard (durable structural guard)', () => {
   describe('LAYER 2 — the real entry points must SUPPLY a transaction', () => {
-    test('plugin SDK deleteRecord is wrapped in poolManager.get().transaction (PROBE-1)', () => {
-      const src = read('index.ts')
-      // Isolate the SDK's deleteRecord body: from its property key to the next sibling key at the same
-      // depth (or the end of the records object). Asserting on the WHOLE file would pass on any unrelated
-      // `transaction(` elsewhere — the point is that THIS method is the one that must be transactional.
-      const start = src.indexOf('deleteRecord: async ({ sheetId, recordId })')
-      expect(start, 'index.ts no longer defines the multitable SDK deleteRecord — re-point this guard').toBeGreaterThan(0)
-      const body = src.slice(start, start + 1200)
-      expect(
-        /poolManager\.get\(\)\.transaction\(/.test(body),
-        'PROBE-1: the plugin-SDK deleteRecord in index.ts is NOT wrapped in poolManager.get().transaction. ' +
-          'With MULTITABLE_SIDE_DOOR_DELETE_TRASH_ENABLED on, the reordered D-2 path would run outside a ' +
-          'transaction: a failure at the trash INSERT leaves the record alive, BOTH link directions ' +
-          'permanently destroyed, and a delete revision saying it is dead. (The runtime guard ' +
-          'assertTransactionalQuery would now refuse the delete — this test exists so the wiring regression ' +
-          'is caught at CI time, not as a production outage.)',
-      ).toBe(true)
-    })
+    /**
+     * PROBE-1 IS NOT GUARDED HERE — DELIBERATELY. A structural test used to live at this spot asserting
+     * that `index.ts`'s SDK `deleteRecord` contains a `poolManager.get().transaction(` within a fixed
+     * 1200-char window. It was DEFEATED in re-review: the window's "next sibling key" claim was false, and
+     * it passed only because `deleteRecord` happens to be the LAST key in the `records` object today. Add
+     * any transactional sibling after it (e.g. `restoreRecord` — the very next thing this recoverability
+     * line would add) and the guard went green with the destructive SDK path in NO transaction at all.
+     *
+     * PROBE-1 is now guarded BEHAVIORALLY, where it cannot be fooled by source layout:
+     * `multitable-d2-sidedoor-delete-recoverability-realdb.test.ts` → **G18**, which drives the ACTUAL
+     * `MetaSheetServer.createCoreAPI()` SDK factory end-to-end. It reds under PROBE-1 *and* under DEFEAT-1.
+     */
 
-    test('AutomationService supplies deps.transaction to its AutomationExecutor (PROBE-2)', () => {
+    /**
+     * CHEAP EXTRA, not the evidence. The real guard for PROBE-2 is behavioral: G15 drives
+     * `new AutomationService(...).exec` (production's own deps) end-to-end and reds when the dep is
+     * dropped. This assertion is a fast, precise tripwire on the exact production string — no positional
+     * window, so it cannot be defeated the way the old PROBE-1 guard was.
+     */
+    test('AutomationService supplies deps.transaction to its AutomationExecutor (PROBE-2, cheap tripwire)', () => {
       const src = read('multitable/automation-service.ts')
-      const start = src.indexOf('const deps: AutomationDeps = {')
-      expect(start, 'automation-service.ts no longer builds an AutomationDeps literal — re-point this guard').toBeGreaterThan(0)
-      const body = src.slice(start, start + 1500)
       expect(
-        /transaction:\s*async/.test(body),
+        /transaction:\s*async\s*\(handler\)\s*=>\s*poolManager\.get\(\)\.transaction\(/.test(src),
         'PROBE-2: AutomationService no longer supplies deps.transaction. AutomationExecutor.withTransaction ' +
           'SILENTLY falls back to a bare, non-transactional queryFn — so the D-2 delete_record path would run ' +
           'without a transaction and destroy links irrecoverably on a mid-sequence failure.',
