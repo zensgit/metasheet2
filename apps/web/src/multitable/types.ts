@@ -415,6 +415,12 @@ export interface HistoryBatchDetail {
    * fields' values (and thus their userIds) never reach it.
    */
   personNames?: Record<string, { display: string; inactive?: boolean }>
+  /**
+   * all-tables: masked field-id → TYPE map, per sheet. Companion to `fieldNames`: that one gives a
+   * non-active sheet's field its NAME, this one gives its VALUE a type-aware renderer (person/link/date/…)
+   * instead of raw JSON. Same masked source; hidden/denied field types never appear.
+   */
+  fieldTypes?: Record<string, Record<string, string>>
 }
 
 export interface MetaRecordSubscription {

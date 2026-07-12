@@ -16,10 +16,9 @@
  *   G2 a deactivated user carries `inactive: true` (OD-P2; same `users.is_active === false` rule as the grid).
  *   G3 LOCK-3: a person in a field_permissions-DENIED person field appears NOWHERE — not in personNames,
  *      not anywhere in the response body (whole-body assertion).
- *   G4 TRIPWIRE (current reality, not an endorsement): a layer-2 `property.hidden` PERSON field is NOT
- *      excluded — because layer-2 hiding is a PLATFORM NO-OP on person fields (pre-existing; the sanitizer
- *      drops `hidden`). Such a field is one the actor CAN read, so it is outside this feature's precondition.
- *      Pinned so the gap is visible; flip it when the platform bug is fixed. See the test's own docstring.
+ *   G4 LOCK-3 (layer-2): a person inside a property-HIDDEN person field appears NOWHERE. Authored as a
+ *      tripwire when layer-2 hiding was a platform no-op on person fields; FLIPPED to this deny assertion
+ *      once #4165 fixed it. Layer-2 is now a SECOND independent exclusion, alongside G3's layer-3.
  *
  * MUTATION MATRIX (12 combinations, measured — independently re-run by the #4161 adversarial review).
  * The leak is guarded three times: (i) the `changed_field_ids` filter (`allowed.has`) → a denied person field
@@ -172,33 +171,43 @@ describeIfDatabase('person before-side name resolution — batch-detail personNa
   })
 
   /**
-   * G4 — CURRENT-REALITY TRIPWIRE, not an endorsement. Documents a PRE-EXISTING PLATFORM GAP that this
-   * feature neither causes nor relies on (found by the #4161 adversarial review):
+   * G4 — DENY ASSERTION (flipped 2026-07-12, once the platform fix landed).
    *
-   *   layer-2 `property.hidden` is a NO-OP on native PERSON fields, platform-wide.
-   *   `sanitizeFieldPropertyByType`'s `person` branch (field-codecs.ts) is a CLOSED ALLOWLIST that silently
-   *   drops `hidden`/`visible` — unlike `select`, which passes them through. So `isFieldPermissionHidden`
-   *   never sees the flag, and a "hidden" person field is readable at EVERY surface: `GET /records` already
-   *   returns its userIds today, with or without this PR.
+   * This test was authored as a CURRENT-REALITY TRIPWIRE: layer-2 `property.hidden` used to be a NO-OP on
+   * native person fields (the `person` branch of `sanitizeFieldPropertyByType` was a closed allowlist that
+   * silently dropped `hidden`/`visible`), so a "hidden" person field was readable at every surface. The
+   * tripwire pinned that reality and said, in as many words, "flip this when the platform bug is fixed".
    *
-   * ⇒ Such a field is one the actor CAN read, so it is outside this feature's masking precondition (which is
-   *   scoped to layer-3 `field_permissions`-DENIED — see G3). Marginal disclosure of this PR is ZERO: the raw
-   *   ids are already on the same payload pre-PR; `personNames` only turns an ALREADY-VISIBLE id into a name.
+   * It is fixed (#4165 `30d2acb17`): `withLayer2VisibilityKeys` now carries the layer-2 keys across EVERY
+   * type's sanitizer, in BOTH sanitizers. The tripwire duly went red — `expected undefined to be
+   * 'Layer2HiddenPerson'` — which is the tripwire working, not a regression. It is now flipped to the
+   * assertion it always wanted to be:
    *
-   * This test pins that reality so the gap is VISIBLE rather than silently absent. **When the platform bug is
-   * fixed** (person's sanitizer stops dropping `hidden`), this test WILL go red — that is the point: flip it
-   * to `toBeUndefined()` then. Deliberately NOT written as a failing test, which would make an out-of-scope
-   * permission-layer fix a merge gate for this feature.
+   *   a layer-2 property-hidden PERSON field is masked, so its member NEVER reaches the directory resolver
+   *   and their display NAME can never surface.
+   *
+   * This makes layer-2 a SECOND independent exclusion for `personNames`, alongside the layer-3
+   * field_permissions exclusion G3 pins. Both layers now hold.
    */
-  test('G4 tripwire: a layer-2 property-hidden PERSON field is NOT excluded — because layer-2 hiding is a platform no-op on person fields (pre-existing; flip this when fixed)', async () => {
+  test('G4 LOCK-3 (layer-2): a person inside a property-HIDDEN person field appears NOWHERE', async () => {
     const res = await detail(BATCH)
     expect(res.status).toBe(200)
     const personNames = res.body?.data?.personNames
-    // Current reality: the "hidden" person field is readable, so its member resolves like any visible person.
-    expect(personNames[P_HIDDEN]?.display).toBe(HIDDEN_NAME)
-    // …and, decisively, its raw id is ALREADY on the payload pre-PR — so personNames adds no disclosure here.
+
+    // the hidden field's member is NOT resolved — not even to a raw id
+    expect(personNames[P_HIDDEN]).toBeUndefined()
+
+    // precondition (proves the layer-2 mask is actually on, so this is not vacuous):
+    // the hidden field's VALUES are dropped upstream, exactly like the layer-3 denied field in G3
     const change = (res.body?.data?.changes ?? []).find((c: any) => c.recordId === REC)
-    expect(change?.before?.[PERSON_HIDDEN]).toEqual([P_HIDDEN])
+    expect(change?.before?.[PERSON_HIDDEN]).toBeUndefined()
+    expect(change?.after?.[PERSON_HIDDEN]).toBeUndefined()
+    expect(change?.changedFieldIds).not.toContain(PERSON_HIDDEN)
+
+    // WHOLE-BODY: neither the hidden member's id nor their display name may appear anywhere.
+    const body = JSON.stringify(res.body)
+    expect(body).not.toContain(HIDDEN_NAME)
+    expect(body).not.toContain(P_HIDDEN)
   })
 
   test('G3 LOCK-3: a person inside a field_permissions-DENIED person field appears NOWHERE', async () => {

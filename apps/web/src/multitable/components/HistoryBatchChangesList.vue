@@ -84,6 +84,11 @@ const props = defineProps<{
    * in it and used to render as a raw userId. This server-resolved directory map covers BOTH sides.
    */
   personNames?: Record<string, { display: string; inactive?: boolean }>
+  /**
+   * all-tables: server-masked field TYPES for sheets other than the active one (`props.fields` only carries
+   * the active sheet). Without this a cross-table person diff rendered as raw `["u_123"]` JSON.
+   */
+  fieldTypes?: Record<string, Record<string, string>>
   /** Reuses the caller's own action-label map (kept as a single source of truth in HistoryCenterModal.vue —
    *  this is prop-drilling, not a shared-module extraction, per the AI-fields S1 design-lock's constraint
    *  on `sourceLabel` NOT applying here since this is a distinct map (per-change action, not source)). */
@@ -175,7 +180,11 @@ function personSummariesForSide(c: HistoryChange, fieldId: string, v: unknown): 
   const cached = props.personSummaries?.[c.recordId]?.[fieldId] ?? null
   const dir = props.personNames
   if (!dir) return cached // no server map (older payload) → legacy behavior exactly
-  const ids = Array.isArray(v) ? v.map(String).filter((id) => id.trim()) : v ? [String(v)] : []
+  // Dirty-value filtering: a person value is `userId[]`. A stored value can be dirty (a legacy object, a
+  // number, null). `v.map(String)` would render an object as the literal "[object Object]" — so accept ONLY
+  // non-empty strings and drop the rest, rather than stringifying garbage into the UI.
+  const ids = (Array.isArray(v) ? v : v === null || v === undefined ? [] : [v])
+    .filter((id): id is string => typeof id === 'string' && id.trim().length > 0)
   if (ids.length === 0) return cached
   const byIdCached = new Map((cached ?? []).map((s) => [s.id, s]))
   return ids.map((id) => {
@@ -190,8 +199,18 @@ function personSummariesForSide(c: HistoryChange, fieldId: string, v: unknown): 
     return byIdCached.get(id) ?? { id, display: id }
   })
 }
+// Resolve the field for rendering. `props.fields` is the ACTIVE sheet only, so in all-tables mode a row on
+// another sheet found nothing and fell back to raw JSON. Fall back to the server's masked fieldTypes/
+// fieldNames maps, which describe exactly the fields whose values the projection already emitted.
+function fieldForDiff(c: HistoryChange, fieldId: string): { id: string; name: string; type: string } | null {
+  const active = props.fields?.find((x) => x.id === fieldId)
+  if (active && typeof active.type === 'string') return active as { id: string; name: string; type: string }
+  const type = props.fieldTypes?.[c.sheetId]?.[fieldId]
+  if (!type) return null // no masked type ⇒ cannot render type-aware; caller falls back to plain text
+  return { id: fieldId, name: props.fieldNames?.[c.sheetId]?.[fieldId] ?? fieldId, type }
+}
 function formatDiffValueFor(c: HistoryChange, fieldId: string, v: unknown): string {
-  const f = props.fields?.find((x) => x.id === fieldId)
+  const f = fieldForDiff(c, fieldId)
   if (!f || typeof f.type !== 'string') return formatDiffValue(v)
   return formatFieldDisplay({
     field: f as MetaField,

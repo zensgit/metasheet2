@@ -551,6 +551,17 @@ export interface HistoryBatchDetail {
    * name is directory-level info (the same name renders wherever that user appears), not a new disclosure.
    */
   personNames: Record<string, PersonDirectoryEntry>
+  /**
+   * all-tables: masked field-id → TYPE map, per sheet — the companion to `fieldNames`.
+   *
+   * WHY: in all-tables mode the FE's `fields` prop carries only the ACTIVE sheet's fields, so a change row on
+   * a NON-active sheet had no type and fell back to raw JSON text — a person diff on another table rendered
+   * as `["u_123"]` instead of names, and a link/date/select diff rendered raw. `fieldNames` fixed the LABEL;
+   * this fixes the VALUE. Same masked source (`allowedFieldsBySheet`), same query (the join already selects
+   * `f.type`), so it costs nothing extra and can only describe a field whose value the projection already
+   * emits. Hidden/denied field types NEVER appear, exactly as their names never do.
+   */
+  fieldTypes: Record<string, Record<string, string>>
 }
 
 /**
@@ -728,6 +739,7 @@ export async function loadHistoryBatchDetail(
   // subset of the two-layer allow-set, so the query cannot return a hidden/denied field; the re-check below
   // is defense-in-depth (LOCK-3: a field name is as sensitive as its value, evaluated PER the field's sheet).
   const fieldNames: Record<string, Record<string, string>> = {}
+  const fieldTypes: Record<string, Record<string, string>> = {}
   // Person before-side resolution: the SAME meta_fields join also tells us which of those already-visible
   // fields are `type='person'` (no extra query), so we can harvest their userIds below.
   const personFieldsBySheet = new Map<string, Set<string>>()
@@ -746,7 +758,9 @@ export async function loadHistoryBatchDetail(
       if (!allowedFieldsFor(allowedFieldsBySheet, sheetId).has(fieldId)) continue // defense-in-depth LOCK-3
       const name = typeof row.name === 'string' ? row.name : ''
       ;(fieldNames[sheetId] ??= {})[fieldId] = name
-      if (String(row.type ?? '').trim().toLowerCase() === 'person') {
+      const fieldType = String(row.type ?? '').trim()
+      if (fieldType) (fieldTypes[sheetId] ??= {})[fieldId] = fieldType
+      if (fieldType.toLowerCase() === 'person') {
         ;(personFieldsBySheet.get(sheetId) ?? personFieldsBySheet.set(sheetId, new Set()).get(sheetId)!).add(fieldId)
       }
     }
@@ -783,6 +797,7 @@ export async function loadHistoryBatchDetail(
     visibleAffectedFieldCount: visibleFields.size,
     changes,
     fieldNames,
+    fieldTypes,
     personNames,
   }
 }
