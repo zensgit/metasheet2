@@ -137,4 +137,28 @@ describeIfDatabase('all-tables-B — batch-detail fieldNames masked cross-table 
     expect(body).toContain(OK_A_NAME)
     expect(body).toContain(OK_B_NAME)
   })
+
+  test('fieldTypes mirrors fieldNames — same masked set; a hidden/denied field TYPE never leaks either', async () => {
+    const res = await detail(BATCH)
+    expect(res.status).toBe(200)
+    const fieldNames = res.body?.data?.fieldNames
+    const fieldTypes = res.body?.data?.fieldTypes
+    expect(fieldTypes && typeof fieldTypes === 'object').toBe(true)
+
+    // fieldTypes covers EXACTLY the same (sheet, field) pairs fieldNames does — same masked allow-set.
+    // If it could describe a field fieldNames cannot name, it would be a second, weaker mask.
+    expect(Object.keys(fieldTypes).sort()).toEqual(Object.keys(fieldNames).sort())
+    for (const sheetId of Object.keys(fieldNames)) {
+      expect(Object.keys(fieldTypes[sheetId]).sort()).toEqual(Object.keys(fieldNames[sheetId]).sort())
+    }
+
+    // the readable fields DO carry a type (non-vacuous)
+    expect(fieldTypes[SHEET_A]?.[OK_A]).toBeTruthy()
+    expect(fieldTypes[SHEET_B]?.[OK_B]).toBeTruthy()
+
+    // LOCK-3: the layer-2 property-hidden and layer-3 denied fields have NO type entry — the same
+    // exclusion their NAMES get. A type is metadata about a field the actor cannot read.
+    expect(fieldTypes[SHEET_A]?.[HIDDEN_A]).toBeUndefined()
+    expect(fieldTypes[SHEET_B]?.[DENIED_B]).toBeUndefined()
+  })
 })
