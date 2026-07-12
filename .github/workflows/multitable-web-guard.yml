@@ -139,8 +139,8 @@ on:
       # not in the `vitest run` filter below — a PR that only edited e.g. MtLink.vue ran no guard at
       # all. Concretely: deleting the `type="button"` attribute from MtLink.vue leaves the 4 gated
       # migration specs green (none of them re-mount MtLink inside a real `<form>`), and only breaks
-      # when a caller places `<MtLink>` inside an actual form (MetaFormView.vue is exactly that) —
-      # the button's implicit type then becomes "submit" and a click triggers an implicit form
+      # if a caller ever places `<MtLink>` inside a real form — the button's implicit type then
+      # becomes "submit" and a click triggers an implicit form
       # submission. Required-side coverage (the `multitable-ui` token in
       # run-required-web-tests.sh) is wired separately in #4156; this is the advisory-guard half of
       # the same fix.

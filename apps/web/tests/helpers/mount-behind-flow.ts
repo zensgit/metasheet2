@@ -189,7 +189,12 @@ export function createRoutedApiClient(
       // in the `{ data }` success envelope — matching the real server's error response shape (see
       // `respond`'s doc comment).
       const { status, body } = routed
-      const raw = status === 204 ? '' : JSON.stringify(body)
+      // 204/205/304 are null-body statuses: the Response constructor THROWS on ANY non-null body
+    // (including ''), so pass null. The real client has a dedicated 204 branch
+    // (client.ts `if (res.status === 204 || !raw.trim()) return undefined`) — precisely the
+    // status this harness must be able to drive.
+    const isNullBodyStatus = status === 204 || status === 205 || status === 304
+    const raw = isNullBodyStatus ? null : JSON.stringify(body)
       return new Response(raw, { status, headers: { 'Content-Type': 'application/json' } })
     }
     // `undefined` means "no route matched this request" → fall back to `defaultResponse` (still a

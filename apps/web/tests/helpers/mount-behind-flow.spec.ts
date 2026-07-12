@@ -118,6 +118,19 @@ describe('createRoutedApiClient', () => {
     })
   })
 
+  it('respond(204) drives the real client 204/no-content branch (null-body status must not throw)', async () => {
+    // 204/205/304 are null-body statuses: the Response constructor throws on ANY non-null body
+    // (including ''). The real client has a dedicated 204 branch (client.ts: `if (res.status === 204
+    // || !raw.trim()) return undefined`) — the harness must be able to drive exactly that status.
+    const { client } = createRoutedApiClient((method, url) => {
+      if (method === 'DELETE' && url.includes('/api/multitable/views/')) return respond(204, null)
+      return undefined
+    })
+    // Real client (client.ts): `if (res.status === 204 || !raw.trim()) return undefined`.
+    // Before this fix respond(204) threw (Response ctor rejects a non-null body on a 204).
+    await expect(client.deleteView('view_1')).resolves.toBeUndefined()
+  })
+
   it('respond() body is sent as the raw error payload, never wrapped in the { data } success envelope', async () => {
     // If the harness wrapped a respond() body in `{ data: ... }` (the success-envelope shape),
     // normalizeApiErrorPayload would find no top-level `error`/`message` field and the thrown
