@@ -1,6 +1,9 @@
-# Multitable Global History — D-2 side-door delete RECOVERABILITY — DESIGN LOCK (PROPOSED)
+# Multitable Global History — D-2 side-door delete RECOVERABILITY — DESIGN LOCK (RATIFIED)
 
-- **Status**: PROPOSED — awaiting owner ratification. Docs-only PR; **no runtime code ships here and none is authorized until the owner ratifies this lock** (same design-lock-first discipline as 4c-1/4c-2/4c-3/D-1). This is the owner-gated *recoverability* half of the destruction-path gap audit (`multitable-global-history-destruction-path-coverage-gap-audit-20260708.md`); the *PIT-correctness* half shipped as D-1 (#3969 `a1522034d` + #3992 `5dcea0b6f`).
+- **Status**: **RATIFIED 2026-07-12 (owner)**. All eight open decisions (§4) are resolved and the §1.11 truth table is accepted — see the per-OD rulings below and the ticked checklist in §8. HOT-CORE implementation is AUTHORIZED (strong-model lane + independent adversarial review + txn-boundary proof, per §8). **No environment flag may be enabled by the implementation** — `MULTITABLE_SIDE_DOOR_DELETE_TRASH_ENABLED` ships default-OFF and its enablement is a separate O-2 operator rung. This is the *recoverability* half of the destruction-path gap audit (`multitable-global-history-destruction-path-coverage-gap-audit-20260708.md`); the *PIT-correctness* half shipped as D-1 (#3969 `a1522034d` + #3992 `5dcea0b6f`).
+- **ERRATA (2026-07-12)** — two defects in this lock, found while implementing it, corrected below:
+  1. **§2/§3's "`:10183` latest-delete heuristic" is STALE.** It was replaced by the **R11 A′ vintage-exact anchor** (#4117, 2026-07-11 — *after* this lock was drafted). G5 is restated against the anchor as it actually is.
+  2. **OD-7's CI-guard claim was FALSE as written** ("a non-txn regression turns G3 red"). G3 supplies its own transaction, so it proves atomicity *given* a transaction — it does NOT prove the real entry points provide one. OD-7 is now split into TWO layers of evidence.
 - **Provenance**: scoped 2026-07-09 by a primary-source audit lane against `origin/main` (R9 round, owner /goal「接续多维表历史记录与版本恢复线」). Every file:line below was read, not inferred.
 - **One-sentence problem**: records deleted through the plugin-SDK or an automation `delete_record` step get a delete revision (D-1) but **no `meta_records_trash` row and no inbound-edge tombstones** — they are invisible to trash-restore and outside 4c-3's inbound-replay reach, while UI-deleted records are fully recoverable.
 
@@ -51,7 +54,7 @@ In-txn data today: `locked, locked_by, created_by, version, data` via FOR UPDATE
 
 ### Same-PR obligations
 - `multitable-d1-delete-revision-parity-realdb.test.ts:202-210` asserts the exact OPPOSITE of D-2 (no-trash/no-tombstone) — it MUST be flipped/retired **in the same PR** (flag-off keeps a byte-identity variant; flag-on gets the parity assertions). Review NIT-1: the golden's NAME says "neither path" but its BODY exercises the plugin path only — the flip must add explicit per-path coverage for BOTH lanes, not just rename. Landing D-2 without flipping it leaves CI red or a silently weakened assertion.
-- PIT-resurrect equivalence golden extending `multitable-undelete-inbound-resurrect-realdb.test.ts` (the :10183-10196 latest-delete-revision heuristic auto-benefits once D-2 anchors exist — prove it, don't assume it).
+- PIT-resurrect equivalence golden extending `multitable-undelete-inbound-resurrect-realdb.test.ts`. **ERRATA:** the anchor is NOT the old "latest delete revision" heuristic — that was replaced by the **R11 A′ vintage-exact anchor** (#4117): the FIRST delete revision with **`created_at > T`**, ordered **`created_at ASC, version ASC, id ASC`**, LIMIT 1. It applies **NO `source` filter** — which is precisely why a side-door (`plugin`/`automation`) delete revision is eligible to be the anchor. Prove it, don't assume it.
 - Doc honesty sweep (§6).
 
 ## §3 Goldens (all real-DB, mutation-verified; realdb three-point wiring)
@@ -60,7 +63,7 @@ In-txn data today: `locked, locked_by, created_by, version, data` via FOR UPDATE
 - **G2 anchor linkage** (capture flag on): tombstone rows with `source_revision_id` == trash.`delete_revision_id` == revision id, `reason='record_delete'`; capture flag off ⇒ trash row + anchor present, zero tombstones.
 - **G3 atomicity per lane** (D1-5b technique): BEFORE-DELETE trigger forces the record DELETE to fail ⇒ NO trash row, NO delete revision, NO tombstones, seeded inbound link intact; plus injected failure at the trash INSERT ⇒ record still alive, no revision, no tombstones.
 - **G4 restore round-trip per path** (both flags on): cross-sheet inbound edge → side-door delete → `listDeletedRecords` shows the row with `inboundEdgesRecoverable:true` → `restoreRecord` succeeds with `inbound.replayed>=1` and the neighbour's cell re-renders (RB2 shape extended to sources `'automation'`/`'plugin'`).
-- **G5 PIT-resurrect equivalence**: automation-deleted record with capture on, then PIT undelete (`confirm:'undelete'`, `MULTITABLE_ENABLE_PIT_UNDELETE` + inbound flag) ⇒ the :10183 heuristic anchors to the D-2 revision id and replays the captured vintage.
+- **G5 PIT-resurrect equivalence (RESTATED — R11 A′)**: automation-deleted record with capture on, then PIT undelete (`confirm:'undelete'`, `MULTITABLE_ENABLE_PIT_UNDELETE` + inbound flag) ⇒ the **R11 A′ anchor** (`univer-meta.ts` ~:10196 — first delete revision with `created_at > T`, `ORDER BY created_at ASC, version ASC, id ASC LIMIT 1`, **no `source` filter**) resolves to the D-2 revision id and replays the captured vintage. Two properties are load-bearing and must BOTH be pinned: (i) the anchor query does not filter on `source`, so a side-door revision qualifies; (ii) D-2 **pre-generates** the revision id, so trash + tombstones have something to anchor to.
 - **G6 flag matrix (per §1.11 truth table)**: (a) SIDE_DOOR off ⇒ byte-identical D-1 behavior **including CAPTURE-on ⇒ zero side-door tombstones** (the nesting golden — review P3-1); (b) SIDE_DOOR on + CAPTURE off: trash+anchor present, zero tombstones; restoring such a record ⇒ `recoverable=false`, zero replay, zero fabrication.
 - **G7 cap breach fail-closed per lane**: >cap inbound edges + both flags on ⇒ automation step `status:'failed'` and the record still exists; plugin call rejects and the record still exists.
 - **G8 retention-floor extension**: a D-2 trash row's anchor group survives a tombstone sweep that prunes an unreferenced same-age group (RB10 shape, side-door anchors).
@@ -69,16 +72,30 @@ In-txn data today: `locked, locked_by, created_by, version, data` via FOR UPDATE
 - **G11 schema-missing fail-closed per lane (§1.8/§1.11 — review P3-3)**: with SIDE_DOOR on, inject 42P01 (missing trash table) and separately 42703 (missing `delete_revision_id`) ⇒ the delete is REFUSED (automation step `failed` / plugin error), record + links + revision count all unchanged; with SIDE_DOOR off, the same schema holes are never touched (delete succeeds, revision-only).
 - **G12 PIT read-path invariance (§1.7 — review P3-3)**: an identical delete sequence executed with the D-2 flag off vs on yields byte-identical `reconstructRecordsAtT` output at every probed T (D-2 adds recoverability, never changes history reads).
 
-## §4 Open decisions — owner must pick at ratification
+## §4 Owner decisions — ✅ ALL RESOLVED at ratification (2026-07-12)
 
-- **OD-1 (API semantics — the core product question)**: should plugin-SDK deletes be trash'd at all? Today's SDK contract is intentionally permanent-delete (records.ts:567-571). Options: **(a) full parity both paths** · (b) automation-only, plugin stays revision-only · (c) parity + per-call SDK opt-out (`permanent:true`). **Recommended: (a)**, made safe by OD-2's default-off flag (the semantic change only manifests when an operator opts in) — parity keeps the line's core promise coherent ("recoverability doesn't depend on which door deleted you") and avoids a permanent 2-of-3-doors asterisk. Owner may override to (b)/(c) if SDK contract stability outweighs.
-- **OD-2 (flag posture)**: **recommended: new default-off flag** `MULTITABLE_SIDE_DOOR_DELETE_TRASH_ENABLED` gating the trash write + reordering (adds one O-2 ladder rung; deploy-reversible; flag-off = byte-identical D-1 status quo). Alternative (unflagged parity, like the never-flagged UI trash) is simpler but irreversibly changes automation/plugin delete semantics at deploy and surfaces machine deletes in the recycle-bin UI with no off switch. Capture stays under `MULTITABLE_TOMBSTONE_CAPTURE_ENABLED` and replay under `MULTITABLE_ENABLE_RECORD_UNDELETE_INBOUND` regardless.
-- **OD-3 (retention/volume)**: D-2 gives `meta_records_trash` its **first machine-rate writer** while trash still has NO sweep (sole DELETE = restore success, record-service.ts:1136), and live trash rows floor-pin their tombstone groups forever. Options: accept (status-quo-consistent) · commission a separate trash-retention rung (OUT of D-2 — red line §5) · minimal telemetry only. **Recommended: accept + acknowledge**, with trash-retention listed on the owner menu as its own future rung. D-2 must not smuggle in a trash sweep.
-- **OD-4 (scope confirmation)**: ratify that D-2 covers paths 3+4 only — path 2 (PIT-reset) is already at full parity via 4c-3 D-3 as-built, so the audit-table row is a doc update, not code (§0 table).
-- **OD-5 (deleted_by attribution for automation)**: **recommended: `context.actorId ?? null`** (mirrors the D-1 revision's actorId); a rule-id attribution column would be a schema change beyond parity — out of scope.
-- **OD-6 (plugin cap-breach error surface)**: **recommended: export a typed SDK error** (visible contract, only reachable flag-on) rather than pre-mapping to an existing shape; either way the delete is refused.
-- **OD-7 (records.ts transaction contract)**: **recommended: pin "input.query MUST be transactional" as the module contract** in prose + doc-comment (production already satisfies it, index.ts:634-653) and keep flag-off ordering byte-identical (plugin delete-then-emit fail-safe; automation emit-then-delete-in-txn — §1.9). The flag-on reordered path's atomicity is then CI-guarded by G3 (a non-txn regression turns G3 red). The stale records.ts:586-588 no-txn comment must be reconciled either way.
-- **OD-8 (cross-base machine deletes — review P3-4)**: the automation path is cross-base-capable (`effectiveSheetId = targetSheetId`, automation-executor.ts:2255-2290); D-2's trash INSERT + `base_id` lookup resolve against the **target** base, so the record surfaces in the target base's recycle bin and restore re-fires **target-base** events (possibly re-triggering that base's automations). **Recommended: accept target-base semantics** (it is where the record lives); owner may instead demand a cross-base marker or exclusion, which would be extra scope.
+Each bullet below records the owner's ruling first, then the original analysis that produced the recommendation.
+
+- **OD-1 (API semantics — the core product question)** — ✅ **RESOLVED = (a) full parity** (owner 2026-07-12).
+  Original analysis: should plugin-SDK deletes be trash'd at all? Today's SDK contract is intentionally permanent-delete (records.ts:567-571). Options: **(a) full parity both paths** · (b) automation-only, plugin stays revision-only · (c) parity + per-call SDK opt-out (`permanent:true`). **Recommended: (a)**, made safe by OD-2's default-off flag (the semantic change only manifests when an operator opts in) — parity keeps the line's core promise coherent ("recoverability doesn't depend on which door deleted you") and avoids a permanent 2-of-3-doors asterisk. Owner may override to (b)/(c) if SDK contract stability outweighs.
+- **OD-2 (flag posture)** — ✅ **RESOLVED = new flag, DEFAULT OFF** (owner 2026-07-12). Enablement is a separate O-2 operator rung; the implementation must enable NO environment flag.
+  Original analysis: **recommended: new default-off flag** `MULTITABLE_SIDE_DOOR_DELETE_TRASH_ENABLED` gating the trash write + reordering (adds one O-2 ladder rung; deploy-reversible; flag-off = byte-identical D-1 status quo). Alternative (unflagged parity, like the never-flagged UI trash) is simpler but irreversibly changes automation/plugin delete semantics at deploy and surfaces machine deletes in the recycle-bin UI with no off switch. Capture stays under `MULTITABLE_TOMBSTONE_CAPTURE_ENABLED` and replay under `MULTITABLE_ENABLE_RECORD_UNDELETE_INBOUND` regardless.
+- **OD-3 (retention/volume)** — ✅ **RESOLVED = trash retention as a SINGLE COLUMN** (owner 2026-07-12).
+  Original analysis: D-2 gives `meta_records_trash` its **first machine-rate writer** while trash still has NO sweep (sole DELETE = restore success, record-service.ts:1136), and live trash rows floor-pin their tombstone groups forever. Options: accept (status-quo-consistent) · commission a separate trash-retention rung (OUT of D-2 — red line §5) · minimal telemetry only. **Recommended: accept + acknowledge**, with trash-retention listed on the owner menu as its own future rung. D-2 must not smuggle in a trash sweep.
+- **OD-4 (scope confirmation)** — ✅ **RESOLVED = paths 3+4 ONLY** (owner 2026-07-12). Paths 1 (UI record-service) and 2 (PIT-reset) are NO CHANGE; any behavior delta there is out of ratified scope.
+  Original analysis: ratify that D-2 covers paths 3+4 only — path 2 (PIT-reset) is already at full parity via 4c-3 D-3 as-built, so the audit-table row is a doc update, not code (§0 table).
+- **OD-5 (deleted_by attribution for automation)** — ✅ **RESOLVED = `actorId ?? null`** (owner 2026-07-12); plugin lane = `null` (actor-less).
+  Original analysis: **recommended: `context.actorId ?? null`** (mirrors the D-1 revision's actorId); a rule-id attribution column would be a schema change beyond parity — out of scope.
+- **OD-6 (plugin cap-breach error surface)** — ✅ **RESOLVED = typed SDK error, EXPORTED FROM THE PACKAGE ROOT** (owner 2026-07-12) so consumers can catch it by type.
+  Original analysis: **recommended: export a typed SDK error** (visible contract, only reachable flag-on) rather than pre-mapping to an existing shape; either way the delete is refused.
+- **OD-7 (records.ts transaction contract) — ✅ RESOLVED, and CORRECTED.** Pin "`input.query` MUST be transactional" as the module contract (prose + doc-comment), and keep flag-off ordering byte-identical (§1.9).
+  **ERRATA — the original CI-guard claim was FALSE.** It said "the flag-on reordered path's atomicity is then CI-guarded by G3 (a non-txn regression turns G3 red)". It is not: **G3 supplies its own transaction**, so unwrapping the REAL wiring (`index.ts` SDK factory; `automation-service.ts` `deps.transaction`) leaves G3 green. Atomicity therefore needs **TWO INDEPENDENT LAYERS OF EVIDENCE**, and the implementation must provide BOTH:
+  - **Layer 1 — "atomic GIVEN a transaction"**: G3a/G3b. Assert link intact + zero revisions + zero tombstones + zero trash on failure (not merely "the record still exists").
+  - **Layer 2 — "the real entry points actually SUPPLY a transaction"**: a **production-wiring guard** that drives the ACTUAL `index.ts` SDK factory and the ACTUAL `automation-service.ts` deps (not a test re-implementation). Acceptance: unwrapping the txn at the real call sites must turn THIS guard RED.
+  - **Belt-and-braces**: the reordered path additionally **refuses to run outside a transaction at runtime** (typed throw). A runtime precondition cannot be silently refactored away; a test can be.
+  The stale `records.ts:586-588` no-txn comment must be reconciled.
+- **OD-8 (cross-base machine deletes — review P3-4)** — ✅ **RESOLVED = accept target-base semantics** (owner 2026-07-12).
+  Original analysis: the automation path is cross-base-capable (`effectiveSheetId = targetSheetId`, automation-executor.ts:2255-2290); D-2's trash INSERT + `base_id` lookup resolve against the **target** base, so the record surfaces in the target base's recycle bin and restore re-fires **target-base** events (possibly re-triggering that base's automations). **Recommended: accept target-base semantics** (it is where the record lives); owner may instead demand a cross-base marker or exclusion, which would be extra scope.
 
 ## §5 Honest consequences + risks (recorded, not hidden)
 
@@ -103,13 +120,17 @@ In-txn data today: `locked, locked_by, created_by, version, data` via FOR UPDATE
 
 ## §8 Ratification checklist
 
-- [ ] OD-1 choice (recommended: (a) full parity)
-- [ ] OD-2 flag posture (recommended: new default-off flag, +1 O-2 rung)
-- [ ] OD-3 trash-growth posture (recommended: accept + menu the retention rung)
-- [ ] OD-4 scope = paths 3+4 (+ stale-doc flip timing)
-- [ ] OD-5 attribution (recommended: actorId ?? null)
-- [ ] OD-6 SDK error contract (recommended: typed export)
-- [ ] OD-7 txn contract pinning (recommended: prose contract + G3 CI guard)
-- [ ] OD-8 cross-base machine-delete disposition (recommended: accept target-base semantics)
-- [ ] §1.11 dual-flag × schema truth table incl. the fail-closed schema-missing row (owner P2 ruling)
-- [ ] Impl lane assignment (hot-core: strong model + adversarial review mandatory)
+**RATIFIED 2026-07-12 (owner). All items resolved.**
+
+- [x] **OD-1** = **(a) full parity**
+- [x] **OD-2** = **new flag, DEFAULT OFF** — enablement is a separate O-2 rung; the impl enables NO env flag
+- [x] **OD-3** = **trash retention as a single column**
+- [x] **OD-4** = **scope: paths 3+4 ONLY** (paths 1/2 NO CHANGE)
+- [x] **OD-5** = **`actorId ?? null`** (automation); plugin = `null`
+- [x] **OD-6** = **typed SDK error, exported from the package root**
+- [x] **OD-7** = **txn contract pinned — with TWO layers of evidence** (see the OD-7 errata: G3 proves "atomic GIVEN a txn"; a separate PRODUCTION-WIRING guard proves the real entry points supply one; plus a runtime refusal-outside-txn)
+- [x] **OD-8** = **accept target-base semantics**
+- [x] **§1.11** dual-flag × schema truth table accepted, **including the fail-closed schema-missing row**
+- [x] **Impl lane** = HOT CORE: strong model + independent adversarial review + txn-boundary proof (mandatory)
+
+**Landing order (owner):** this lock (#4004) lands FIRST; the implementation (#4168) lands after.
