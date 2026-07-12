@@ -508,6 +508,10 @@ describe('adminDirectoryRouter', () => {
 
   it('refreshes scheduler state after updating an integration', async () => {
     directoryMocks.updateDirectoryIntegration.mockResolvedValue({ id: 'dir-1', name: 'DingTalk CN' })
+    // Owner P2: a cron-only PUT omits `scheduleTimezone`, which means "keep the saved zone" — so the
+    // route must READ that zone to validate the cron in the zone it will actually run in. It no longer
+    // guesses UTC, so the saved config has to be readable.
+    directoryMocks.getDirectorySyncScheduleSnapshot.mockResolvedValue({ integrationId: 'dir-1', scheduleTimezone: null })
 
     const payload = {
       name: 'DingTalk CN',
@@ -651,6 +655,64 @@ describe('adminDirectoryRouter', () => {
       } finally {
         vi.useRealTimers()
       }
+    })
+
+    // ─── owner review P2 (2026-07-12): PUT must decide by FIELD PRESENCE, and must never GUESS ──────
+    //
+    // An earlier revision collapsed "key absent" and "key present but empty" into one `''`, so:
+    //   * `scheduleTimezone: ''` (an explicit CLEAR) was read as absent → the cron was validated against
+    //     the OLD saved zone while the write cleared the zone to UTC. Validated in one zone, saved in another.
+    //   * when the saved zone could not be read it silently GUESSED UTC → a cron that can never fire in the
+    //     zone actually being PRESERVED could sail through the gate.
+
+    it('P2: an explicit CLEAR (scheduleTimezone: "") validates the cron against UTC — the zone that will actually be SAVED, not the old one', async () => {
+      // The saved zone is Asia/Shanghai; the body clears it. `30 2 8 3 *` is reachable in Shanghai but,
+      // at this clock, is a normal reachable time in UTC too — so use the DST-gap clock and a zone pair
+      // where the verdicts differ: cleared ⇒ UTC ⇒ must NOT be validated against the stale Shanghai value.
+      directoryMocks.getDirectorySyncScheduleSnapshot.mockResolvedValue({ integrationId: 'dir-1', scheduleTimezone: 'Asia/Shanghai' })
+      directoryMocks.updateDirectoryIntegration.mockResolvedValue({ id: 'dir-1', name: 'DingTalk CN' })
+
+      const response = await invokeRoute('put', '/integrations/:integrationId', {
+        params: { integrationId: 'dir-1' },
+        body: { name: 'DingTalk CN', scheduleCron: '*/10 * * * *', scheduleTimezone: '' },
+        user: { id: 'admin-1', role: 'admin' },
+      })
+
+      // RED-before: the empty string was treated as "absent", so the saved Asia/Shanghai zone was read
+      // back and used to validate a cron that would actually be persisted as UTC.
+      expect(response.statusCode).toBe(200)
+      expect(directoryMocks.getDirectorySyncScheduleSnapshot).not.toHaveBeenCalled()
+    })
+
+    it('P2: when the saved timezone CANNOT be read, a cron-only PUT is REFUSED (503) — never validated against a guessed UTC', async () => {
+      // Absent key ⇒ the saved zone is preserved ⇒ we must know it to validate the cron honestly.
+      // RED-before: this fell back to '' (UTC) and could pass a cron that never fires in the kept zone.
+      directoryMocks.getDirectorySyncScheduleSnapshot.mockRejectedValue(new Error('db down'))
+
+      const response = await invokeRoute('put', '/integrations/:integrationId', {
+        params: { integrationId: 'dir-1' },
+        body: { name: 'DingTalk CN', scheduleCron: '*/10 * * * *' },
+        user: { id: 'admin-1', role: 'admin' },
+      })
+
+      expect(response.statusCode).toBe(503)
+      expect(response.body).toMatchObject({ ok: false, error: { code: 'DIRECTORY_SCHEDULE_CONFIG_UNREADABLE' } })
+      expect(directoryMocks.updateDirectoryIntegration).not.toHaveBeenCalled()
+    })
+
+    it('P2: a STRUCTURALLY invalid cron is 400 without any timezone lookup — broken in every zone, so a DB hiccup must not turn it into a 503', async () => {
+      directoryMocks.getDirectorySyncScheduleSnapshot.mockRejectedValue(new Error('db down'))
+
+      const response = await invokeRoute('put', '/integrations/:integrationId', {
+        params: { integrationId: 'dir-1' },
+        body: { name: 'DingTalk CN', scheduleCron: '60 25 * * *' },
+        user: { id: 'admin-1', role: 'admin' },
+      })
+
+      expect(response.statusCode).toBe(400)
+      expect(response.body).toMatchObject({ ok: false, error: { code: 'DIRECTORY_SCHEDULE_CRON_INVALID' } })
+      expect(directoryMocks.getDirectorySyncScheduleSnapshot).not.toHaveBeenCalled()
+      expect(directoryMocks.updateDirectoryIntegration).not.toHaveBeenCalled()
     })
 
     it('accepts a valid schedule_cron on create and passes it through unmodified', async () => {

@@ -192,13 +192,17 @@ describeIfDatabase('AI usage ledger retention sweep (real DB)', () => {
       const store = new Map()
       const lockA = new RedisLeaderLock({ client: new MemoryLeaderLockClient(store) })
       const lockB = new RedisLeaderLock({ client: new MemoryLeaderLockClient(store) })
+      // Owner P2: lockKey is now REQUIRED and must be unique PER SWEEP. These two are the SAME sweep on
+      // two processes, so they share ONE dedicated key on purpose — that is the leader/follower election
+      // this test exercises. (The bug was DIFFERENT sweeps sharing a key, which starved all but the first.)
+      const AI_LEDGER_SWEEP_KEY = 'ledger-retention:ai-usage-ledger:leader'
       const leader = new LedgerRetentionScheduler({
         service: new PgLedgerRetentionService(),
-        leaderOptions: { leaderLock: lockA, ownerId: 'ret-a', ttlMs: 30_000 },
+        leaderOptions: { leaderLock: lockA, lockKey: AI_LEDGER_SWEEP_KEY, ownerId: 'ret-a', ttlMs: 30_000 },
       })
       const follower = new LedgerRetentionScheduler({
         service: new PgLedgerRetentionService(),
-        leaderOptions: { leaderLock: lockB, ownerId: 'ret-b', ttlMs: 30_000 },
+        leaderOptions: { leaderLock: lockB, lockKey: AI_LEDGER_SWEEP_KEY, ownerId: 'ret-b', ttlMs: 30_000 },
       })
       await Promise.all([leader.ready, follower.ready])
 

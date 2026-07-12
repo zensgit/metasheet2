@@ -67,7 +67,21 @@ export class PgLedgerRetentionService implements LedgerRetentionService {
 
 export interface LedgerRetentionSchedulerLeaderOptions {
   leaderLock: RedisLeaderLock
-  lockKey?: string
+  /**
+   * REQUIRED, and must be UNIQUE per sweep (owner review P2, 2026-07-12).
+   *
+   * This used to be optional with a single shared default (`ledger-retention-scheduler:leader`), and
+   * every consumer took the default. `LedgerRetentionScheduler` is generic — the AI-usage ledger, the
+   * DingTalk group-delivery ledger and the DingTalk card/person-delivery ledger all use it — so they
+   * all contended for ONE Redis key: whichever booted first became leader and every OTHER sweep became
+   * a PERMANENT FOLLOWER that never ran. Owner reproduced it: start group + card together, group wins,
+   * and the card sweep never sweeps. A retention sweep that silently never runs is indistinguishable
+   * from one that has nothing to do.
+   *
+   * Required (not defaulted) ON PURPOSE: a shared key is a silent, correct-looking failure, so the
+   * type — not a convention — is what forbids it. A new sweep that forgets a key will not compile.
+   */
+  lockKey: string
   ownerId: string
   ttlMs?: number
   renewIntervalMs?: number
@@ -122,7 +136,19 @@ export class LedgerRetentionScheduler {
     this.service = options.service ?? new PgLedgerRetentionService()
     this.intervalMs = Math.max(MIN_INTERVAL_MS, options.intervalMs ?? DEFAULT_INTERVAL_MS)
     this.leaderOptions = options.leaderOptions ?? null
-    this.lockKey = this.leaderOptions?.lockKey ?? 'ledger-retention-scheduler:leader'
+    // Owner review P2: fail CLOSED on a missing key rather than falling back to a shared default.
+    // The type already requires `lockKey`, but this scheduler is also constructed from untyped call
+    // sites (tests, plugins), and the old behaviour — silently defaulting to ONE shared key — turned
+    // every non-first sweep into a permanent follower that never ran. A sweep that silently never runs
+    // is indistinguishable from a sweep with nothing to do, so this must be loud, not lenient.
+    const resolvedLockKey = this.leaderOptions?.lockKey?.trim() ?? ''
+    if (this.leaderOptions && !resolvedLockKey) {
+      throw new Error(
+        'LedgerRetentionScheduler: leaderOptions.lockKey is required and must be UNIQUE per sweep — '
+        + 'a shared leader-lock key makes every other sweep a permanent follower that never runs',
+      )
+    }
+    this.lockKey = resolvedLockKey
     this.ttlMs = this.leaderOptions?.ttlMs ?? DEFAULT_LOCK_TTL_MS
     this.renewIntervalMs = this.leaderOptions?.renewIntervalMs ?? Math.max(1_000, Math.floor(this.ttlMs / 3))
     this.retryIntervalMs = this.leaderOptions?.retryIntervalMs ?? Math.max(1_000, Math.floor(this.ttlMs / 3))
@@ -337,6 +363,8 @@ export async function resolveLedgerRetentionSchedulerLeaderOptions(): Promise<Le
     : undefined
   return {
     leaderLock: new RedisLeaderLock({ client: redis as unknown as RedisLeaderLockClient }),
+    // Owner review P2: UNIQUE per sweep. A shared key made every non-first sweep a permanent follower.
+    lockKey: 'ledger-retention:ai-usage-ledger:leader',
     ownerId: `ledger-retention:${process.pid}:${randomBytes(4).toString('hex')}`,
     ttlMs,
     retryIntervalMs,

@@ -15,7 +15,7 @@ import { Logger } from '../core/logger'
 // Roadmap §7.8 "Add timezone support": zoned wall-clock matching reuses the SAME primitives
 // the multitable automation cron trigger already ships (T2-5) rather than a second hand-rolled
 // implementation — see that module's docstring, which explicitly invites this reuse.
-import { getZonedParts, isValidIanaTimeZone } from '../multitable/automation-timezone'
+import { getZonedParts, isValidIanaTimeZone, isZonedFallbackRepeat } from '../multitable/automation-timezone'
 
 /**
  * Cron 解析器接口
@@ -28,14 +28,12 @@ interface CronExpression {
 }
 
 /**
- * Roadmap §7.8: resolve a `SimpleCronExpression` timezone argument to the zoned-matching
- * path, or `null` for the FAST PATH that must stay byte-identical to every pre-§7.8 caller.
+ * Resolve a `SimpleCronExpression` timezone argument to the zoned-matching path, or `null` meaning
+ * REAL UTC. `null` covers: undefined, empty string, `'UTC'`, `'Etc/UTC'`, and an invalid IANA zone
+ * (never throws mid-match — this class is the RUNTIME; the fail-closed reject-on-save gate lives at
+ * the write boundary, `directory-sync-timezone.ts` / `admin-directory.ts`).
  *
- * `null` covers: undefined (the constructor's own `= 'UTC'` default never reaches here as
- * `undefined` — see below), empty string, `'UTC'`, and `'Etc/UTC'`. An invalid IANA zone also
- * resolves to `null` (never throws mid-match) — this class is the RUNTIME; the fail-closed
- * reject-on-save gate lives at the write boundary (`directory-sync-timezone.ts` /
- * `admin-directory.ts`), not here. Mirrors `automation-scheduler.ts`'s `resolveCronTimeZone`.
+ * `null` used to mean "fall through to the host's LOCAL clock". It no longer does — see `matchesUtc`.
  */
 function resolveZonedTimeZone(timezone: string | undefined): string | null {
   const tz = typeof timezone === 'string' ? timezone.trim() : ''
@@ -45,9 +43,38 @@ function resolveZonedTimeZone(timezone: string | undefined): string | null {
 }
 
 /**
+ * Owner review P2 (2026-07-12) — "UTC" used to mean "whatever the host clock says".
+ *
+ * `resolveZonedTimeZone` returns null for absent/''/UTC/Etc/UTC/invalid, and `matches()` then fell
+ * through to LOCAL `Date` getters (`getHours()`, `getDate()`, …). So a cron explicitly configured as
+ * UTC — which is what `directory-sync-scheduler.ts` passes — actually fired on the host's local clock.
+ * On a UTC-clocked container the two coincide, which is exactly why it hid; under `TZ=Asia/Taipei` the
+ * owner measured a UTC cron landing 8 hours off. The suite could not catch it either, because
+ * `scheduler-service.test.ts` pins `process.env.TZ='UTC'`.
+ *
+ * There is no legitimate caller that wants "host-local, whatever that happens to be" — a scheduler's
+ * firing time must not depend on the machine's TZ env. So the local-getter path is GONE: an unspecified
+ * or UTC zone now means REAL UTC (`getUTC*`), and an invalid zone degrades to real UTC rather than to
+ * the host clock (the fail-closed reject lives at the save boundary; the runtime must stay deterministic).
+ */
+function matchesUtc(
+  date: Date,
+  minute: number[], hour: number[], dayOfMonth: number[], month: number[], dayOfWeek: number[],
+): boolean {
+  return minute.includes(date.getUTCMinutes()) &&
+         hour.includes(date.getUTCHours()) &&
+         dayOfMonth.includes(date.getUTCDate()) &&
+         month.includes(date.getUTCMonth() + 1) &&
+         dayOfWeek.includes(date.getUTCDay())
+}
+
+/**
  * 简单的 Cron 表达式解析器
  * 支持标准的 5 字段格式：分 时 日 月 周
  */
+/** One minute in absolute (epoch) milliseconds — the scan's step unit. */
+const MINUTE_MS = 60_000
+
 class SimpleCronExpression implements CronExpression {
   private minute: number[] = []
   private hour: number[] = []
@@ -56,10 +83,7 @@ class SimpleCronExpression implements CronExpression {
   private dayOfWeek: number[] = []
   private timezone: string
   private currentDate: Date
-  // Roadmap §7.8: resolved once at construction. `null` = the untouched local-getter fast
-  // path (`matches()` below is byte-identical to pre-§7.8 for every caller that omits
-  // `timezone` or passes 'UTC'/'Etc/UTC' — which is every caller today except a directory
-  // integration that has explicitly configured a non-UTC zone).
+  // Resolved once at construction. `null` = REAL UTC matching (NOT the host clock — that path is gone).
   private zonedTimeZone: string | null
 
   constructor(expression: string, timezone: string = 'UTC') {
@@ -114,32 +138,57 @@ class SimpleCronExpression implements CronExpression {
     return [value]
   }
 
+  /**
+   * The scan walks ABSOLUTE time (epoch ms), one minute at a time — NOT local wall-clock minutes.
+   *
+   * Owner review P2 (2026-07-12), second round: this used to step with `setMinutes(getMinutes() ± 1)`,
+   * which advances the LOCAL wall clock. On the HOST's own DST day that clock is not monotonic — it
+   * folds back an hour (fall-back) or jumps forward an hour (spring-forward) — so the scan either
+   * revisits the same absolute instants or SKIPS a whole hour of them. Real candidates were then never
+   * examined at all: with the host on `America/New_York`, a genuine 2026-11-01T06:30Z match was stepped
+   * straight over and `next()` returned the FOLLOWING DAY (and `prev()` the previous one).
+   *
+   * That bug is independent of the cron's own timezone — it is the ITERATION that was zone-sensitive,
+   * not the matching. Fixing `matches()` to real UTC (above) did not fix it, and the first round of
+   * tests could not see it because they ran under `Asia/Taipei`, which observes no DST. Epoch-ms
+   * stepping is monotonic by construction and immune to whatever the host clock does.
+   */
   next(): Date | null {
-    const nextDate = new Date(this.currentDate)
-    nextDate.setSeconds(0, 0) // 重置秒和毫秒
-    nextDate.setMinutes(nextDate.getMinutes() + 1) // 从下一分钟开始
+    // Floor to the minute in ABSOLUTE time. `setSeconds(0, 0)` — which the previous revision used, with
+    // a comment claiming it was "offset-invariant" — is NOT: it writes through LOCAL wall-clock fields,
+    // and the resulting instant is re-derived from them. During a fall-back the same local wall time maps
+    // to TWO instants, and that re-derivation collapses onto the FIRST one. So at the SECOND 01:30 local
+    // (06:30:30Z, New_York) the base jumped an HOUR BACKWARD to 05:30Z, and next() returned 05:31Z —
+    // EARLIER THAN NOW. JobScheduler clamps a negative delay to 0, fires, and reschedules: a per-minute
+    // job HOT-LOOPS for the entire fall-back hour (owner P1, 2026-07-12).
+    // Integer division on the epoch never touches a wall clock, so it cannot be folded.
+    const baseMs = Math.floor(this.currentDate.getTime() / MINUTE_MS) * MINUTE_MS
+    let ms = baseMs + MINUTE_MS
 
     for (let attempts = 0; attempts < 366 * 24 * 60; attempts++) {
-      if (this.matches(nextDate)) {
-        this.currentDate = new Date(nextDate)
-        return new Date(nextDate)
+      const candidate = new Date(ms)
+      if (this.matches(candidate)) {
+        this.currentDate = new Date(ms)
+        return new Date(ms)
       }
-      nextDate.setMinutes(nextDate.getMinutes() + 1)
+      ms += MINUTE_MS
     }
 
     return null // 找不到匹配的时间
   }
 
   prev(): Date | null {
-    const prevDate = new Date(this.currentDate)
-    prevDate.setSeconds(0, 0)
-    prevDate.setMinutes(prevDate.getMinutes() - 1)
+    // Same absolute-time flooring — see next(). A local-wall-clock floor here returned 05:29Z instead of
+    // 06:29Z at the second fold occurrence.
+    const baseMs = Math.floor(this.currentDate.getTime() / MINUTE_MS) * MINUTE_MS
+    let ms = baseMs - MINUTE_MS
 
     for (let attempts = 0; attempts < 366 * 24 * 60; attempts++) {
-      if (this.matches(prevDate)) {
-        return new Date(prevDate)
+      const candidate = new Date(ms)
+      if (this.matches(candidate)) {
+        return new Date(ms)
       }
-      prevDate.setMinutes(prevDate.getMinutes() - 1)
+      ms -= MINUTE_MS
     }
 
     return null
@@ -157,9 +206,8 @@ class SimpleCronExpression implements CronExpression {
   }
 
   private matches(date: Date): boolean {
-    // Roadmap §7.8: only a resolved non-default IANA zone takes this branch. Everything else
-    // (undefined/''/'UTC'/'Etc/UTC'/invalid) falls through to the UNCHANGED local-getter path
-    // below — this is what keeps every existing caller byte-identical.
+    // A resolved IANA zone takes the zoned branch; everything else (absent/''/UTC/Etc/UTC/invalid) is
+    // REAL UTC — never the host clock. See `matchesUtc` for why the local-getter path was removed.
     if (this.zonedTimeZone) {
       let parts: ReturnType<typeof getZonedParts>
       try {
@@ -171,17 +219,21 @@ class SimpleCronExpression implements CronExpression {
       // Day-of-week is derived from the civil date (locale-independent), matching
       // `automation-scheduler.ts`'s `cronMatchesZoned` technique exactly.
       const dow = new Date(Date.UTC(parts.year, parts.month - 1, parts.day)).getUTCDay()
-      return this.minute.includes(parts.minute) &&
-             this.hour.includes(parts.hour) &&
-             this.dayOfMonth.includes(parts.day) &&
-             this.month.includes(parts.month) &&
-             this.dayOfWeek.includes(dow)
+      const civilMatches =
+        this.minute.includes(parts.minute) &&
+        this.hour.includes(parts.hour) &&
+        this.dayOfMonth.includes(parts.day) &&
+        this.month.includes(parts.month) &&
+        this.dayOfWeek.includes(dow)
+      if (!civilMatches) return false
+      // DST fall-back SINGLE-FIRE (owner review P2): on a clock-back night the same wall-clock minute
+      // occurs at TWO absolute instants an hour apart, and BOTH matched — so a zoned cron fired twice.
+      // The previously-documented mitigation ("the sync lease absorbs it") is false: the lease only
+      // blocks a CONCURRENT run, and these two are an hour apart. Emit the FIRST instant, suppress the
+      // second — the same proven rule the multitable automation scheduler uses (now shared, not cloned).
+      return !isZonedFallbackRepeat(date.getTime(), this.zonedTimeZone)
     }
-    return this.minute.includes(date.getMinutes()) &&
-           this.hour.includes(date.getHours()) &&
-           this.dayOfMonth.includes(date.getDate()) &&
-           this.month.includes(date.getMonth() + 1) &&
-           this.dayOfWeek.includes(date.getDay())
+    return matchesUtc(date, this.minute, this.hour, this.dayOfMonth, this.month, this.dayOfWeek)
   }
 }
 

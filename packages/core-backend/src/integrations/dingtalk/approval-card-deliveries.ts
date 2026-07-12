@@ -4,8 +4,15 @@
  *
  * Import-side-effect-free (no pool/eventBus/scheduler): callers inject the query function, same
  * discipline as the multitable permission path. Consumers per lock §8: A-2 (send path) uses
- * `insert…`; A-4 (card-delivery action endpoint + wrapper) uses `find…` + `claim…Acted` +
- * `supersede…ForInstance`; Slice B's Stream callback reuses the same primitives.
+ * `insert…`; A-4 (card-delivery action endpoint + wrapper) uses `find…` + `supersede…ForInstance`;
+ * Slice B's Stream callback reuses the same primitives.
+ *
+ * NOTE (P1 fix, 2026-07-12): the acted-claim is NO LONGER made from here. `ApprovalProductService.
+ * dispatchAction` claims the card `acted` ATOMICALLY inside the same transaction that writes the
+ * approval, under a row lock on the delivery. A claim issued from out here — after the engine had
+ * already committed — could not gate the decision, which is exactly how an `expired` card completed an
+ * approval. `claim…Acted` below is retained as the ledger's low-level primitive (and is still covered
+ * by the ledger tests), but it has NO production caller: do not re-wire a post-commit claim.
  *
  * The state machine's write side is deliberately narrow:
  *   - `claim…Acted` is an ATOMIC claim (`WHERE card_state='sent'`) — the idempotency anchor for
