@@ -242,6 +242,20 @@ export default defineConfig({
       // here hid a #2052/#2068 redaction-wiring regression (4/7 RED) that no CI job caught.
       'tests/integration/plugin-failures.test.ts',
       'tests/integration/rooms.basic.test.ts',
+      // Real-APP-ASSEMBLY guard: boots a real MetaSheetServer, so it is excluded from this no-DB default job
+      // (which would skip-green it) and wired as a WHOLE FILE into the `Run real-app assembly guard` step in
+      // plugin-tests.yml, where it runs on every PR. It guards an invariant that unit tests structurally
+      // cannot see: no router mounted under /api may intercept traffic it does not own (a path-less
+      // router.use in a router mounted at a shared prefix runs for EVERY request entering that router,
+      // including other routers' traffic).
+      'tests/integration/router-isolation.smoke.test.ts',
+      // snapshot-protection boots a real server too, and its silent-return skips are gone (setup now
+      // hard-fails and every test must assert), so it can no longer report green without doing its work.
+      // It is still NOT wired into CI: the CI test database is migrated with MIGRATION_EXCLUDE, which omits
+      // the view-table migrations (20250924120000_create_views_view_states, 20250925_create_view_tables,
+      // 042a_core_model_views) — so `views` does not exist there and createSnapshot's captureViewState
+      // cannot run. Wiring it requires untangling that excluded migration cluster, which is its own change;
+      // until then this is DECLARED debt, not invisible debt. Run it locally against a fully-migrated DB.
       'tests/integration/snapshot-protection.test.ts',
       'tests/integration/spreadsheet-integration.test.ts',
       // Playwright E2E suites run through their own harness, not Vitest.
