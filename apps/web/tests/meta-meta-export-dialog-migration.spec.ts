@@ -8,7 +8,16 @@ import { useLocale } from '../src/composables/useLocale'
 // preservation proof: they stay native, keyboard-operable <button>s; the `:disabled="!canExport"`
 // binding survives on confirm; and clicking them still emits the SAME `cancel` / `confirm` events
 // with the SAME payload. The dialog teleports to <body>, so queries hit `document`, not the mount
-// container. The close-× glyph and the select-all / clear-all link buttons stay bespoke (untouched).
+// container. The select-all / clear-all link buttons stay bespoke (untouched — a separate PR's territory).
+//
+// UI-P2-1c T1 batch-2: the header close-× (`.meta-export__close`) was additionally migrated from a
+// bespoke <button>&times;</button> to the shared MtIconButton primitive — the &times; glyph passes
+// through MtIconButton's default-slot icon fallback (glyph char preserved, size token-normalized to
+// the icon control, consistent with the existing glyph-MtIconButton controls already on main).
+// Behavior-preservation proof: it stays a native, keyboard-operable <button>, keeps the SAME
+// aria-label (`l('export.close')`), and clicking it still calls the SAME onCancel() → emits `cancel`
+// (identical to the footer cancel button's handler). This is the only sharer of `.meta-export__close`
+// (single button, single file) — its bespoke CSS was removed outright, no double-styling risk.
 
 const mounts: Array<{ app: App<Element>; container: HTMLDivElement }> = []
 afterEach(() => {
@@ -73,5 +82,23 @@ describe('MetaExportDialog — MtButton migration (UI-P2-1c)', () => {
     confirmBtn().click()
     expect(onConfirm).toHaveBeenCalledTimes(1)
     expect(onConfirm).toHaveBeenCalledWith({ fieldIds: ['f1', 'f2'], rowScope: 'all', format: 'csv' })
+  })
+
+  it('renders the header close-× as a native <button> (MtIconButton) keeping the class + aria-label', () => {
+    mount(baseProps())
+    const btn = document.querySelector('.meta-export__close') as HTMLButtonElement
+    expect(btn.tagName).toBe('BUTTON')
+    expect(btn.classList.contains('meta-export__close')).toBe(true)
+    expect(btn.getAttribute('aria-label')).toBe('Close')
+    expect(btn.textContent?.trim()).toBe('×') // × glyph char preserved (size token-normalized)
+  })
+
+  it('clicking the header close-× emits `cancel` (unchanged — same onCancel as the footer cancel button)', () => {
+    const onCancel = vi.fn()
+    mount(baseProps(), { onCancel })
+    const btn = document.querySelector('.meta-export__close') as HTMLButtonElement
+    btn.click()
+    expect(onCancel).toHaveBeenCalledTimes(1)
+    expect(onCancel).toHaveBeenCalledWith()
   })
 })

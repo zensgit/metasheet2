@@ -9,6 +9,16 @@ import { useLocale } from '../src/composables/useLocale'
 // AND would-be-left buttons, ALL sharers were migrated at once and the bespoke hex CSS removed — so the
 // token primitive is not double-styled. Behavior-preservation proof: they stay native, keyboard-operable
 // <button>s; :disabled bindings survive; clicking still runs the same handlers / emits the same events.
+//
+// UI-P2-1c T1 batch-2: the header close-× (`.cf-dlg__close`) was additionally migrated from a bespoke
+// <button>&times;</button> to the shared MtIconButton primitive — the &times; glyph passes through
+// MtIconButton's default-slot icon fallback (glyph char preserved, size token-normalized to the icon
+// control, consistent with the existing glyph-MtIconButton controls already on main). Behavior-
+// preservation proof: it stays a native, keyboard-operable <button>, keeps the SAME aria-label
+// (`ml('formatting.close')`), and clicking it still calls the SAME close() — including the
+// window.confirm dirty-guard (unchanged; see conditional-formatting-dialog-i18n.spec.ts for that
+// path). This is the only sharer of `.cf-dlg__close` (single button, single file) — its bespoke CSS
+// was removed outright, no double-styling risk.
 
 const mounts: Array<{ app: App<Element>; container: HTMLDivElement }> = []
 afterEach(() => {
@@ -46,6 +56,24 @@ describe('ConditionalFormattingDialog — MtButton migration (UI-P2-1c)', () => 
     const root = mount(baseProps(), { onClose })
     footerCancel(root).click()
     expect(onClose).toHaveBeenCalledTimes(1)
+  })
+
+  it('renders the header close-× as a native <button> (MtIconButton) keeping the class + aria-label', () => {
+    const root = mount(baseProps())
+    const btn = root.querySelector('.cf-dlg__close') as HTMLButtonElement
+    expect(btn.tagName).toBe('BUTTON')
+    expect(btn.classList.contains('cf-dlg__close')).toBe(true)
+    expect(btn.getAttribute('aria-label')).toBe('Close')
+    expect(btn.textContent?.trim()).toBe('×') // × glyph char preserved (size token-normalized)
+  })
+
+  it('clicking the header close-× on a clean (non-dirty) dialog emits `close` (unchanged — same close() as footer cancel)', () => {
+    const onClose = vi.fn()
+    const root = mount(baseProps(), { onClose })
+    const btn = root.querySelector('.cf-dlg__close') as HTMLButtonElement
+    btn.click()
+    expect(onClose).toHaveBeenCalledTimes(1)
+    expect(onClose).toHaveBeenCalledWith()
   })
 
   it('addRule → per-rule up/down/remove render as native buttons; save emits `save`; remove drops the rule', async () => {
