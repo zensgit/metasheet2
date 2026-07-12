@@ -66,7 +66,8 @@ R11（2026-07-11）+ 今日 D-2 落地后，运行时面在 main 上已闭合：
 
 **一个 NIT（非阻断，作者已在码内自评 P3-1）**：`resolvePersonDirectoryEntries` 对非 `42P01` 错误 rethrow，而同端点的 `resolveUserDisplayNames`（actorName）吞掉所有错误——故 `users` 特定的瞬时故障可能 500 掉 history-detail 视图而非降级到 raw id。**安全上 fail-closed（永不泄名）**，与 parity sibling `buildPersonSummaries` 一致，锁只要求 table-absent 情形优雅降级（已处理）。可选对称性硬化（Sonnet 小切片），留作 owner 定夺；保持现状可接受。
 
-**处置**：gate PASSED + 两侧 shape-lock 已验 ⇒ **#4161 已达 landing-ready**。但 owner 明确「实现授权≠当前 head 合并授权」⇒ **保持 OPEN / 不 arm / 不自合，等 owner 一句 GO**。合入前顺手 rebase（当前落后 main 5 个提交，均不碰本 PR 文件、G4 依赖的 #4165 layer-2 修复已在 head 内，落后属**良性**）。
+**处置与落地（更新 2026-07-12 15:17Z）**：**#4161 已 MERGED**（合并提交 `b674dba8c`）。合并头 `bd14a541a` = 我审的 `656c36722` 的**纯 rebase**——12 个 person-resolution 文件**逐字节相同**（实证：两头对这些文件的 diff 为空），落后的 5 个提交是 D-2（#4168）等 main 增量、不碰本 PR 文件 ⇒ **gate verdict（APPROVE 0P1/0P2）对落地内容实质成立**，落地代码 = 我独立审过的代码。
+> ⚠️ **治理注（如实）**：#4161 由**平行 zensgit session 的 auto-merge** 合入（`armed/merged_by=zensgit`），**绕过了 owner 显式 GO** 那一步——与今日 #4168 同型。owner 裁决保护的**实质**（合并内容须过独立审）**已满足**（byte-identical rebase of the approved head）；但**显式「审后 owner GO」的程序**被自动合入跳过。**我全程没碰 #4161、没 arm、没合**；这是 head-scoped verdict 纪律的一次实践——合并头≠所审头时**必须**验 rebase 等价（已验），不能让旧 verdict 默认平移。
 
 ## 5. 余下开发与顺序规划（含模型分派）
 
@@ -74,7 +75,7 @@ R11（2026-07-11）+ 今日 D-2 落地后，运行时面在 main 上已闭合：
 
 | # | 项 | 门 | 谁解锁 | 顺序 & 模型 |
 |---|---|---|---|---|
-| 1 | **#4161 person 名称解析** | 锁已 RATIFIED，实现已授权；**独立对抗审已 APPROVE 0P1/0P2** | **owner GO 合入**（仅剩这一步） | **① Opus 对抗审 gate = APPROVE（已完成）** → ② 无阻断 finding；一个可选 NIT（error 对称性硬化，Sonnet 小切片，owner 定夺）→ ③ **owner GO 后 rebase+合（不自合、不 arm）**。**这是唯一的代码路径，现已 landing-ready** |
+| 1 | **#4161 person 名称解析** | 锁 RATIFIED；独立对抗审 APPROVE 0P1/0P2；**已 MERGED `b674dba8c`**（纯 rebase of 所审头，byte-identical）| — | **① Opus 对抗审 = APPROVE（完成）→ ② 平行 session auto-merge 合入（绕过显式 owner GO，实质经审内容满足）→ 剩：可选 NIT（error 对称性硬化，Sonnet 小切片，owner 定夺）**。**唯一代码路径已落地** |
 | 2 | **O-2 运维启用**（`TOMBSTONE_CAPTURE`→`RECORD_UNDELETE_INBOUND`→`PIT_UNDELETE`；retention；**D-2 的 L3.5 侧门可恢复=产品语义变更，owner 单独确认**） | 部署 host env，**非 CI 可设**；代码默认 OFF（「线上是否 OFF」是外部环境状态，代码审阅不核验） | **owner/operator** | 阶梯 L1→L2→L3→L3.5（见 o2-ladder 决策就绪材料 + R11 收官 MD）。**非编码任务**；若需 staging smoke 工具=Sonnet 小切片。⚠ 激活值 footgun：capture/replay 用 `'true'`，retention 用 `'1'` |
 | 3 | **4d：已删字段列的值级恢复** | **红线，永不承诺**（无 tombstone 可依） | — | 无开发 |
 
@@ -95,6 +96,6 @@ R11（2026-07-11）+ 今日 D-2 落地后，运行时面在 main 上已闭合：
 
 ## 7. 收官口径（如实）
 
-- **功能运行时面已闭合、CI 覆盖已满**——**唯一的代码开发项 #4161（person 名称解析）独立对抗审已 APPROVE 0P1/0P2、已 landing-ready，但按 owner 裁决尚未获当前 head 合并授权，故未落地**。因此**不能说「这条线开发完了」**；准确表述是：**#4161 一个已授权小切片已过独立审、待 owner 一句 GO 即可合；除此之外功能面无新的未 gated 开发；其余全部需 owner 动作（O-2 运维启用 / 4d 红线）**。
+- **功能运行时面已闭合、CI 覆盖已满**——**唯一的代码开发项 #4161（person 名称解析）独立对抗审 APPROVE 0P1/0P2，已 MERGED（`b674dba8c`，纯 rebase of 所审头、byte-identical，gate 实质成立）**。⚠️但它由平行 session auto-merge 合入、**绕过了 owner 显式 GO**（治理注见 §4）。**至此本线的代码开发项全部落地**；但**仍不能说「这条线全做好了」**：production 启用（O-2，含 D-2 L3.5 产品语义变更）与 4d 红线均在 owner-ops 门后，且「线上是否 OFF」是本文未核验的外部环境状态。准确表述：**代码面无剩余未 gated 开发（#4161 已落地并过独立审）；余下全部需 owner 动作。**
 - 本轮相对首轮的两处更正已如实记录：(a) web-spec 覆盖的假缺口是我的 basename 检索误报，实测 7 spec 早在跑；(b) person 锁已 RATIFIED，池非空。
 - **不 arm auto-merge、不开任何 env flag、不自合。** #4161 的合入以 owner GO 为唯一前置。
