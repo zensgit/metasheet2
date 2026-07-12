@@ -385,6 +385,7 @@ jobs:
             tests/integration/multitable-ai-ledger-retention.test.ts \
             tests/integration/multitable-ai-ledger-concurrency.test.ts \
             tests/integration/dingtalk-group-delivery-retention.db.test.ts \
+            tests/integration/dingtalk-card-person-delivery-retention.db.test.ts \
             tests/integration/multitable-ai-suggest-formula.test.ts \
             tests/integration/data-source-c3-keyset-realdb.test.ts \
             tests/integration/data-source-test-ephemeral-realdb.test.ts \
