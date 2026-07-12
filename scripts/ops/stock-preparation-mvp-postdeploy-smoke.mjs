@@ -149,6 +149,11 @@ export const ALLOWED_ERROR_CODES = Object.freeze(new Set([
   'OPTION_SYNC_PERMISSION_DENIED', 'OPTION_SYNC_TARGET_NOT_READY', 'OPTION_SYNC_UNKNOWN_SOURCE',
   'PERSIST_CONFIG_INVALID', 'PERSIST_PERMISSION_DENIED', 'PERSIST_PROVISIONING_API_UNAVAILABLE',
   'PERSIST_RECORDS_API_INVALID', 'PERSIST_TARGET_NOT_PROVISIONED', 'PERSIST_TARGET_OBJECT_ID_INVALID',
+  // #4163 T1: GET /projects (values-free project list) error vocabulary.
+  'PROJECT_READS_CONFIG_INVALID', 'PROJECT_READS_OBJECT_ID_NOT_MVP', 'PROJECT_READS_PERMISSION_DENIED',
+  'PROJECT_READS_PROVISIONING_API_UNAVAILABLE', 'PROJECT_READS_RECORDS_API_INVALID',
+  'PROJECT_READS_RECORDS_API_UNAVAILABLE', 'PROJECT_READS_ROWS_TOO_LARGE', 'PROJECT_READS_TEMPLATE_MISSING',
+  'STOCK_PREPARATION_PROJECT_LIST_REQUEST_INVALID',
   'SNAPSHOT_DIFF_BASE_INVALID', 'SNAPSHOT_DIFF_BASE_NOT_FOUND', 'SNAPSHOT_DIFF_BASE_PROJECT_MISMATCH',
   'SNAPSHOT_READS_CONFIG_INVALID', 'SNAPSHOT_READS_OBJECT_ID_NOT_MVP',
   'SNAPSHOT_READS_PROVISIONING_API_UNAVAILABLE', 'SNAPSHOT_READS_RECORDS_API_INVALID',
@@ -199,6 +204,8 @@ export const ALLOWED_FIELD_NAMES = Object.freeze(new Set([
   'minimumIssueQty', 'effectiveFrom', 'effectiveTo',
   'syncRunId', 'snapshotVersion', 'sourceSystem', 'expansionResult', 'previousSnapshotBatchId',
   'previousLines', 'readPlan', 'defaultDesignUnit', 'targetProjectId',
+  // #4163 T1: the project-row populator's own request field NAMES (never their business VALUES).
+  'sourceProjectNo', 'projectName',
 ]))
 
 export function registeredValue(value, registry) {
@@ -273,6 +280,10 @@ export function buildSmokeFixture(salt, projectPrefix = 'stockprep-smoke') {
   const unitErp = `smke${salt}`
   const erpCodeA = `SMKERP-A-${salt}`
   const erpItemA = `SMKITM-A-${salt}`
+  // #4163 T1: the project-row populator's own required/optional inputs. Both are business VALUES (a
+  // human-readable PLM project number / name) that GET /projects must NEVER echo back — sentinels below.
+  const sourceProjectNo = `SMKPRJNO-${salt}`
+  const projectName = `Smoke Project ${salt}`
   // Quantities are leak-scan sentinels: 5-decimal values can never collide with an ISO timestamp's
   // 3-digit millisecond field (e.g. "…:53.512Z") or any count/confidence the reads legitimately emit.
   const qtyA = 7.03125
@@ -294,10 +305,15 @@ export function buildSmokeFixture(salt, projectPrefix = 'stockprep-smoke') {
     unitErp,
     erpCodeA,
     erpItemA,
+    sourceProjectNo,
+    projectName,
     expansionResult,
     defaultDesignUnit: unitPlm,
     // Fixture sentinels: business VALUES that must never appear in any (non-exempt) response.
-    sentinels: [drawingA, drawingB, pathA, pathB, unitPlm, unitErp, erpCodeA, erpItemA, String(qtyA), String(qtyB)],
+    sentinels: [
+      drawingA, drawingB, pathA, pathB, unitPlm, unitErp, erpCodeA, erpItemA, String(qtyA), String(qtyB),
+      sourceProjectNo, projectName,
+    ],
   }
 }
 
@@ -465,6 +481,10 @@ async function main() {
     snapshotBatchId: fixture.snapshotBatchId,
     snapshotVersion: 1,
     sourceSystem: 'plm_smoke',
+    // #4163 T1: the project-row populator's own inputs. /plan ignores both (no project-row concept);
+    // /persist (replaying the SAME body) upserts the project row from them.
+    sourceProjectNo: fixture.sourceProjectNo,
+    projectName: fixture.projectName,
     expansionResult: fixture.expansionResult,
     defaultDesignUnit: fixture.defaultDesignUnit,
   }
@@ -502,6 +522,26 @@ async function main() {
     replay.ok && replayData.persisted === false && replayData.mode === 'skipped_existing' &&
     replayData.created?.batch === 0 && replayData.evidence?.existingBatchMatched === true,
     `http=${replay.status} mode=${S.persistReplayMode}`)
+
+  // ── 2b. #4163 T1: GET /projects — the populator's project row landed, values-free ────────────────
+  // Proves the FULL gap end-to-end against a real Postgres: the FE project-selector's endpoint (which
+  // had NO server route before this) now returns the project the persist call above just populated,
+  // and — the values-free hard boundary — never echoes fixture.sourceProjectNo / fixture.projectName
+  // (both are registered sentinels; the global leak scan in step 10 re-proves this over EVERY response).
+  const projectList = await req(`${API}/projects${scope()}`, { label: 'project-list' })
+  const projectListData = projectList.body?.data || {}
+  const ourProject = (projectListData.projects || []).find((entry) => entry.projectId === fixture.projectId) || null
+  S.projectListHttp = projectList.status
+  S.projectListCount = safeCount(projectListData.projectCount)
+  S.projectStatus = safeStatus(ourProject ? ourProject.projectStatus : null)
+  S.projectSnapshotBatchCount = ourProject ? safeCount(ourProject.snapshotBatchCount) : -1
+  must('project list http 200 + the just-persisted project is present',
+    projectList.ok && Boolean(ourProject), `http=${projectList.status} count=${S.projectListCount}`)
+  must('project entry is values-free: active status + >=1 synced batch + a run handle, no business value keys',
+    ourProject !== null && ourProject.projectStatus === 'active' && ourProject.snapshotBatchCount >= 1 &&
+    typeof ourProject.lastSyncRunId === 'string' &&
+    !('projectName' in ourProject) && !('sourceProjectNo' in ourProject),
+    `status=${S.projectStatus} batches=${S.projectSnapshotBatchCount}`)
 
   // ── 3. snapshot-batches list -> diff (counts) -> diff/rows (11-key projection) ───────────────────
   const batchList = await req(`${API}/snapshot-batches${scope({ projectId: fixture.projectId })}`, { label: 'batch-list' })
