@@ -78,6 +78,75 @@ describe('MtButton', () => {
     expect(btn.classList.contains('mt-button--ghost')).toBe(true)
     expect(btn.classList.contains('mt-button--md')).toBe(true)
   })
+
+  // multitable-ui-p2-1c-tail-lock #3866 §2-T2 (RATIFIED) — `plain` variant: token-normalized
+  // soft-tinted "create" style. These assertions mirror the primary/ghost/danger coverage above
+  // (same primitive-level contract: class generation, disabled/loading gating, @click semantics)
+  // so `plain` is proven to behave IDENTICALLY to the existing variants, not just look different.
+  describe('plain variant', () => {
+    it('applies the mt-button--plain class', () => {
+      const c = mount(MtButton, { variant: 'plain' }, { default: () => 'Add record' })
+      const btn = c.querySelector('button.mt-button') as HTMLButtonElement
+      expect(btn.classList.contains('mt-button--plain')).toBe(true)
+    })
+
+    it('emits click when enabled (same @click semantics as every other variant)', async () => {
+      let clicks = 0
+      const c = mount(MtButton, { variant: 'plain', onClick: () => { clicks += 1 } }, { default: () => 'Add record' })
+      const btn = c.querySelector('button.mt-button') as HTMLButtonElement
+      btn.click()
+      await nextTick()
+      expect(clicks).toBe(1)
+    })
+
+    it('does NOT emit click when disabled (same gating as primary/ghost/danger)', async () => {
+      let clicks = 0
+      const c = mount(
+        MtButton,
+        { variant: 'plain', disabled: true, onClick: () => { clicks += 1 } },
+        { default: () => 'Add record' },
+      )
+      const btn = c.querySelector('button.mt-button') as HTMLButtonElement
+      expect(btn.disabled).toBe(true)
+      btn.click()
+      await nextTick()
+      expect(clicks).toBe(0)
+    })
+
+    it('does NOT emit click when loading (loading implies disabled, same as every other variant)', async () => {
+      let clicks = 0
+      const c = mount(
+        MtButton,
+        { variant: 'plain', loading: true, onClick: () => { clicks += 1 } },
+        { default: () => 'Add record' },
+      )
+      const btn = c.querySelector('button.mt-button') as HTMLButtonElement
+      expect(btn.disabled).toBe(true)
+      expect(c.querySelector('.mt-button__icon--spinner')).not.toBeNull()
+      btn.click()
+      await nextTick()
+      expect(clicks).toBe(0)
+    })
+
+    it('renders its label slot (same slot contract as every other variant)', () => {
+      const c = mount(MtButton, { variant: 'plain' }, { default: () => 'Create record' })
+      expect(c.querySelector('.mt-button__label')?.textContent).toBe('Create record')
+    })
+
+    it('is a distinct variant class from primary/ghost/danger (no cross-contamination)', () => {
+      const c = mount(MtButton, { variant: 'plain' }, { default: () => 'Add' })
+      const btn = c.querySelector('button.mt-button') as HTMLButtonElement
+      expect(btn.classList.contains('mt-button--primary')).toBe(false)
+      expect(btn.classList.contains('mt-button--ghost')).toBe(false)
+      expect(btn.classList.contains('mt-button--danger')).toBe(false)
+    })
+
+    it('carries no inline style/hex — token-only via the .mt-button--plain class', () => {
+      const c = mount(MtButton, { variant: 'plain' }, { default: () => 'Add' })
+      const btn = c.querySelector('button.mt-button') as HTMLButtonElement
+      expect(btn.getAttribute('style')).toBeNull()
+    })
+  })
 })
 
 describe('MtIconButton', () => {

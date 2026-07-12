@@ -6,10 +6,14 @@ import { useLocale } from '../src/composables/useLocale'
 
 // UI-P2-1c batch6: MetaGalleryView's pagination prev/next controls migrated from bespoke <button> to
 // the shared MtButton primitive (ghost, token-styled); the class `meta-gallery__page-btn` is unique, so
-// its bespoke hex CSS was removed. The create-btn (toolbar) and empty-action controls are explicitly
-// NOT touched here — both are the soft-tinted (#ecf5ff bg / #2563eb text) "create" pattern named in the
-// T2 tail lock, gated on an owner variant decision. Behavior-preservation proof: prev/next stay native,
+// its bespoke hex CSS was removed. Behavior-preservation proof: prev/next stay native,
 // keyboard-operable <button>s; the :disabled bindings survive; clicking still emits the SAME payload.
+//
+// UI-P2-1c T2 (multitable-ui-p2-1c-tail-lock #3866 §2-T2, RATIFIED): create-btn (toolbar) and
+// empty-action, both formerly the soft-tinted (#ecf5ff bg / #2563eb text / #c7ddff border) "create"
+// pattern, now migrate onto the new MtButton `plain` variant. Byte-equivalence proof: same v-if="canCreate"
+// gate, same @click="emit('create-record', {})" handler/payload, same class name kept on the element
+// (selector stability) — only the rendering primitive + CSS ownership changed.
 
 const fields: MetaField[] = [
   { id: 'fld_title', name: 'Title', type: 'string' },
@@ -66,14 +70,53 @@ describe('MetaGalleryView — MtButton migration (UI-P2-1c batch6)', () => {
     expect(onGoToPage).toHaveBeenNthCalledWith(2, 3) // currentPage + 1
   })
 
-  it('leaves create-btn/empty-action bespoke (not migrated — T2 soft-tinted create, owner-gated)', () => {
+  it('renders create-btn/empty-action as native <button>s via MtButton plain (T2 migration)', () => {
     const root = mount({ canCreate: true, rows: [] })
-    const createBtn = root.querySelector('.meta-gallery__create-btn')
-    const emptyAction = root.querySelector('.meta-gallery__empty-action')
+    const createBtn = root.querySelector('.meta-gallery__create-btn') as HTMLButtonElement
+    const emptyAction = root.querySelector('.meta-gallery__empty-action') as HTMLButtonElement
     expect(createBtn).not.toBeNull()
     expect(emptyAction).not.toBeNull()
-    // Bespoke controls keep their own hardcoded-hex CSS class (no MtButton wrapper attributes).
-    expect(createBtn!.className.trim()).toBe('meta-gallery__create-btn')
-    expect(emptyAction!.className.trim()).toBe('meta-gallery__empty-action')
+    expect(createBtn.tagName).toBe('BUTTON')
+    expect(emptyAction.tagName).toBe('BUTTON')
+    // MtButton's own variant class rides alongside the original selector-stability class.
+    expect(createBtn.classList.contains('mt-button--plain')).toBe(true)
+    expect(emptyAction.classList.contains('mt-button--plain')).toBe(true)
+    expect(createBtn.classList.contains('meta-gallery__create-btn')).toBe(true)
+    expect(emptyAction.classList.contains('meta-gallery__empty-action')).toBe(true)
+  })
+
+  it('create-btn only renders when canCreate is true (v-if preserved)', () => {
+    expect(mount({ canCreate: false, rows: [] }).querySelector('.meta-gallery__create-btn')).toBeNull()
+    expect(mount({ canCreate: true, rows: [] }).querySelector('.meta-gallery__create-btn')).not.toBeNull()
+  })
+
+  it('empty-action only renders when canCreate is true AND rows is empty (v-if preserved)', () => {
+    expect(mount({ canCreate: true, rows }).querySelector('.meta-gallery__empty-action')).toBeNull()
+    expect(mount({ canCreate: false, rows: [] }).querySelector('.meta-gallery__empty-action')).toBeNull()
+    expect(mount({ canCreate: true, rows: [] }).querySelector('.meta-gallery__empty-action')).not.toBeNull()
+  })
+
+  it('clicking create-btn emits `create-record` with the SAME payload (unchanged handler)', () => {
+    const onCreateRecord = vi.fn()
+    const root = mount({ canCreate: true, rows: [], onCreateRecord })
+    ;(root.querySelector('.meta-gallery__create-btn') as HTMLButtonElement).click()
+    expect(onCreateRecord).toHaveBeenCalledTimes(1)
+    expect(onCreateRecord).toHaveBeenCalledWith({})
+  })
+
+  it('clicking empty-action emits `create-record` with the SAME payload (unchanged handler)', () => {
+    const onCreateRecord = vi.fn()
+    const root = mount({ canCreate: true, rows: [], onCreateRecord })
+    ;(root.querySelector('.meta-gallery__empty-action') as HTMLButtonElement).click()
+    expect(onCreateRecord).toHaveBeenCalledTimes(1)
+    expect(onCreateRecord).toHaveBeenCalledWith({})
+  })
+
+  it('create-btn/empty-action carry no bespoke hardcoded-hex inline style (token-only via MtButton)', () => {
+    const root = mount({ canCreate: true, rows: [] })
+    const createBtn = root.querySelector('.meta-gallery__create-btn') as HTMLButtonElement
+    const emptyAction = root.querySelector('.meta-gallery__empty-action') as HTMLButtonElement
+    expect(createBtn.getAttribute('style')).toBeNull()
+    expect(emptyAction.getAttribute('style')).toBeNull()
   })
 })

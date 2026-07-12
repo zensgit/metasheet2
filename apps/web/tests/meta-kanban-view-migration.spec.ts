@@ -6,11 +6,18 @@ import { useLocale } from '../src/composables/useLocale'
 
 // UI-P2-1c batch6: MetaKanbanView's header "clear grouping" control migrated from bespoke <button> to
 // the shared MtButton primitive (ghost, token-styled); the class `meta-kanban__change-btn` is unique, so
-// its bespoke hex CSS was removed. header-add (x2) and the per-column add-btn are explicitly NOT touched
-// here — all three are the soft-tinted (#ecf5ff bg / #2563eb text, or equivalent create-adjacent) pattern
-// named in the T2 tail lock, gated on an owner variant decision. Behavior-preservation proof: "clear"
-// stays a native, keyboard-operable <button>; clicking it still emits `update-view-config` with the SAME
+// its bespoke hex CSS was removed. Behavior-preservation proof: "clear" stays a native,
+// keyboard-operable <button>; clicking it still emits `update-view-config` with the SAME
 // groupFieldId: null payload (unchanged onClearGroupField handler).
+//
+// UI-P2-1c T2 (multitable-ui-p2-1c-tail-lock #3866 §2-T2, RATIFIED): both header-add instances (the
+// no-group-field empty state AND the grouped header — same class, same soft-tinted #ecf5ff/#2563eb/
+// #c7ddff pattern) migrate onto the new MtButton `plain` variant. The per-column add-btn is
+// deliberately EXCLUDED — its bespoke CSS (`border: 1px dashed #ccc; background: transparent; color:
+// #999`) is NOT the soft-tinted create pattern named in the T2 lock, so it is left untouched
+// (conservative exclusion, per owner instruction). Byte-equivalence proof: same v-if="canCreate" gate,
+// same @click="emit('create-record', {})" handler/payload on both header-add instances, same class
+// name kept on the elements (selector stability).
 
 const fields: MetaField[] = [
   { id: 'fld_title', name: 'Title', type: 'string' },
@@ -66,14 +73,54 @@ describe('MetaKanbanView — MtButton migration (UI-P2-1c batch6)', () => {
     )
   })
 
-  it('leaves header-add/add-btn bespoke (not migrated — T2 soft-tinted-adjacent create, owner-gated)', () => {
+  it('renders header-add (grouped-header instance) as a native <button> via MtButton plain (T2 migration)', () => {
     const root = mount({ canCreate: true })
     const headerAdd = root.querySelectorAll('.meta-kanban__header-add')
+    expect(headerAdd.length).toBe(1)
+    const btn = headerAdd[0] as HTMLButtonElement
+    expect(btn.tagName).toBe('BUTTON')
+    expect(btn.classList.contains('mt-button--plain')).toBe(true)
+  })
+
+  it('renders header-add (empty-state instance, no groupField) as a native <button> via MtButton plain', () => {
+    const root = mount({ canCreate: true, viewConfig: { groupFieldId: null, cardFieldIds: [] } })
+    const headerAdd = root.querySelectorAll('.meta-kanban__header-add')
+    expect(headerAdd.length).toBe(1)
+    const btn = headerAdd[0] as HTMLButtonElement
+    expect(btn.tagName).toBe('BUTTON')
+    expect(btn.classList.contains('mt-button--plain')).toBe(true)
+  })
+
+  it('header-add only renders when canCreate is true (v-if preserved, both instances)', () => {
+    expect(mount({ canCreate: false }).querySelectorAll('.meta-kanban__header-add').length).toBe(0)
+    expect(
+      mount({ canCreate: false, viewConfig: { groupFieldId: null, cardFieldIds: [] } }).querySelectorAll('.meta-kanban__header-add').length,
+    ).toBe(0)
+  })
+
+  it('clicking header-add emits `create-record` with the SAME payload (unchanged handler, both instances)', () => {
+    const onCreateRecordGrouped = vi.fn()
+    const grouped = mount({ canCreate: true, onCreateRecord: onCreateRecordGrouped })
+    ;(grouped.querySelector('.meta-kanban__header-add') as HTMLButtonElement).click()
+    expect(onCreateRecordGrouped).toHaveBeenCalledTimes(1)
+    expect(onCreateRecordGrouped).toHaveBeenCalledWith({})
+
+    const onCreateRecordEmpty = vi.fn()
+    const empty = mount({
+      canCreate: true,
+      viewConfig: { groupFieldId: null, cardFieldIds: [] },
+      onCreateRecord: onCreateRecordEmpty,
+    })
+    ;(empty.querySelector('.meta-kanban__header-add') as HTMLButtonElement).click()
+    expect(onCreateRecordEmpty).toHaveBeenCalledTimes(1)
+    expect(onCreateRecordEmpty).toHaveBeenCalledWith({})
+  })
+
+  it('leaves add-btn bespoke (NOT migrated — its CSS is a dashed transparent grey control, not the T2 soft-tinted pattern)', () => {
+    const root = mount({ canCreate: true })
     const addBtn = root.querySelectorAll('.meta-kanban__add-btn')
-    expect(headerAdd.length).toBeGreaterThan(0)
     expect(addBtn.length).toBeGreaterThan(0)
-    // Bespoke controls keep their own hardcoded-hex CSS class (no MtButton wrapper attributes).
-    for (const el of Array.from(headerAdd)) expect(el.className.trim()).toBe('meta-kanban__header-add')
+    // Bespoke control keeps its own hardcoded CSS class (no MtButton wrapper attributes).
     for (const el of Array.from(addBtn)) expect(el.className.trim()).toBe('meta-kanban__add-btn')
   })
 })
