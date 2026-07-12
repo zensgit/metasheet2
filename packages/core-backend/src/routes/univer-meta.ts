@@ -2246,11 +2246,14 @@ function sanitizeFieldProperty(type: UniverMetaField['type'], property: unknown)
   // rule via `...obj` passthrough. Mirrors field-codecs.ts's sanitizeFieldProperty
   // (shared helpers).
   //
-  // The layer-2 visibility keys (`hidden` / `visible`) belong to that SAME cross-cutting set. This
-  // sanitizer has the same closed-allowlist branches as its field-codecs sibling — `person` and `button`
-  // rebuild `property` from scratch and so dropped them (the other branches spread `...obj` and kept them
-  // incidentally). It applies the SAME SHARED function — imported, never re-implemented: two independent
-  // copies of this rule is precisely how the inconsistency survived in the first place.
+  // The layer-2 visibility keys (`hidden` / `visible`) belong to that SAME cross-cutting set.
+  //
+  // In THIS sanitizer the closed-allowlist branch is `person` ONLY — there is no `button` branch here at
+  // all (button falls through to the passthrough default), so button was never dropped on this path. Its
+  // field-codecs sibling has BOTH person and button. The two sanitizers do not even agree on which types
+  // they special-case — which is exactly why the rule must live OUTSIDE the per-type switch and be SHARED.
+  // It applies the same imported function, never a second copy: two independent copies of this rule is
+  // precisely how the inconsistency survived in the first place.
   return withLayer2VisibilityKeys(
     withFieldRequiredWhenRule(
       withFieldVisibilityRule(sanitizeFieldPropertyByType(type, property), property),

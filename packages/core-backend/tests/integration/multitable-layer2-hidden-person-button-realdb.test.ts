@@ -121,6 +121,30 @@ describeIfDatabase('layer-2 property.hidden masks person + button values (real D
     expect(change.changedFieldIds).toContain(PERSON_VISIBLE)
   })
 
+  /**
+   * The OTHER sanitizer. The tests above seed `property` via raw SQL, so they exercise only the READ-path
+   * codec (field-codecs.ts). The HTTP field-WRITE path has its own sanitizer (`univer-meta.ts`'s
+   * `sanitizeFieldProperty`, reached via `normalizeFieldWriteInput` from `PATCH /fields/:fieldId`), and it
+   * had the SAME closed-allowlist person branch. Neutering ONLY that call site left every other test in this
+   * PR green — an untested guard (review P2-2). This drives the real route so the write half is covered.
+   */
+  test('WRITE PATH (the univer-meta sanitizer): PATCH /fields persists property.hidden on a person field', async () => {
+    const fid = `fld_l2_wp_${TS}`
+    await q('INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6)', [fid, SHEET_ID, 'WritePathPerson', 'person', '{}', 5])
+
+    const res = await request(app).patch(`/api/multitable/fields/${fid}`).send({ property: { hidden: true, limitSingleRecord: false } })
+    expect(res.status).toBe(200)
+
+    // It PERSISTED — this is exactly what the univer-meta half of the fix is responsible for. Without it,
+    // the closed-allowlist person branch rebuilds `property` and the hide is dropped on the way in.
+    const row = (await q('SELECT property FROM meta_fields WHERE id = $1', [fid])).rows[0] as { property: Record<string, unknown> }
+    expect(row.property.hidden).toBe(true)
+    // …and the type-specific sanitization still ran (the cross-cutting rule did not replace it)
+    expect(row.property.limitSingleRecord).toBe(false)
+
+    await q('DELETE FROM meta_fields WHERE id = $1', [fid]).catch(() => {})
+  })
+
   test('CONTROL: a hidden STRING field was always masked — proves the harness detects masking at all', async () => {
     const res = await detail(BATCH)
     const change = (res.body?.data?.changes ?? []).find((c: any) => c.recordId === REC)
