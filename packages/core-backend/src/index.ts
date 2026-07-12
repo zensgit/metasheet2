@@ -130,6 +130,12 @@ import {
   startDingTalkGroupDeliveryRetentionScheduler,
   stopDingTalkGroupDeliveryRetentionScheduler,
 } from './services/dingtalk-group-delivery-retention-scheduler'
+import {
+  resolveDingTalkCardPersonDeliveryRetentionSchedulerIntervalMs,
+  resolveDingTalkCardPersonDeliveryRetentionSchedulerLeaderOptions,
+  startDingTalkCardPersonDeliveryRetentionScheduler,
+  stopDingTalkCardPersonDeliveryRetentionScheduler,
+} from './services/dingtalk-card-person-delivery-retention-scheduler'
 import { initWebhookEventBridge } from './multitable/webhook-event-bridge'
 import { ApprovalBreachNotifier } from './services/ApprovalBreachNotifier'
 import {
@@ -2007,6 +2013,14 @@ export class MetaSheetServer {
       }
     })())
 
+    shutdownTasks.push((async () => {
+      try {
+        stopDingTalkCardPersonDeliveryRetentionScheduler()
+      } catch (err) {
+        this.logger.warn(`DingTalk approval-card/person delivery retention scheduler shutdown failed: ${err instanceof Error ? err.message : String(err)}`)
+      }
+    })())
+
     // 4. Destroy API Gateway resources (only if one was constructed during start()).
     shutdownTasks.push((async () => {
       try {
@@ -2312,6 +2326,30 @@ export class MetaSheetServer {
       )
     } catch (e) {
       this.logger.error('DingTalk group-delivery retention scheduler initialization failed; continuing in degraded mode', e as Error)
+    }
+
+    // DingTalk approval-card + person delivery retention sweep (DT-HARDEN-08 follow-up): a
+    // periodic sweep of dingtalk_person_deliveries (bounded batch DELETE, message content +
+    // response bodies) and dingtalk_approval_card_deliveries (stale sent → expired only, never
+    // deleted — see dingtalk-card-person-delivery-retention.ts for why). Reuses the generic
+    // LedgerRetentionScheduler, same as the group-delivery sweep above. UNLIKE the group sweep,
+    // this one is DISABLED BY DEFAULT: it stays a no-op until an operator sets a positive
+    // DINGTALK_DELIVERY_RETENTION_DAYS (opt out any time with DINGTALK_DELIVERY_RETENTION_DISABLED=1).
+    // The scheduler still starts unconditionally (a harmless no-op timer) so this boot path never
+    // depends on whether that env var is set.
+    try {
+      const dingtalkCardPersonDeliveryRetentionLeaderOptions = await resolveDingTalkCardPersonDeliveryRetentionSchedulerLeaderOptions()
+      const dingtalkCardPersonDeliveryRetentionScheduler = startDingTalkCardPersonDeliveryRetentionScheduler({
+        leaderOptions: dingtalkCardPersonDeliveryRetentionLeaderOptions,
+        intervalMs: resolveDingTalkCardPersonDeliveryRetentionSchedulerIntervalMs(),
+      })
+      this.logger.info(
+        dingtalkCardPersonDeliveryRetentionScheduler
+          ? 'DingTalk approval-card/person delivery retention scheduler initialized (no-op until DINGTALK_DELIVERY_RETENTION_DAYS is set)'
+          : 'DingTalk approval-card/person delivery retention scheduler disabled (DINGTALK_DELIVERY_RETENTION_DISABLED=1)',
+      )
+    } catch (e) {
+      this.logger.error('DingTalk approval-card/person delivery retention scheduler initialization failed; continuing in degraded mode', e as Error)
     }
 
     // B-4 BJ-5 follow-up: reconcile ORPHANED AI bulk-fill jobs at boot. A hard
