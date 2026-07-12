@@ -194,7 +194,7 @@ describeIfDatabase('DingTalk approval-card + person delivery retention sweep (re
     expect(await findDingTalkApprovalCardDeliveryById(q, OLD_SENT_CARD)).not.toBeNull()
   })
 
-  test('(e) SECURITY KEYSTONE: a swept (expired) card row can never be claimed — the atomic claim requires card_state=\'sent\' and a swept row fails it, staying expired forever', async () => {
+  test('(e) LEDGER-LEVEL: a swept (expired) card row can never be CLAIMED (low-level helper only — the real security surface is covered by dingtalk-card-delivery-retention-actionability.db.test.ts) — the atomic claim requires card_state=\'sent\' and a swept row fails it, staying expired forever', async () => {
     await sweepDingTalkApprovalCardDeliveryRetention((sql, params) => q(sql, params), { retentionDays: 30, disabled: false })
     expect(await cardState(OLD_SENT_CARD)).toBe('expired')
 
