@@ -30,23 +30,12 @@ export interface ValidatorChain {
 export type ValidatorFunction = (field: string) => ValidatorChain
 
 /**
- * Create a no-op validator chain for use when express-validator is not installed
+ * Resolves a module by id. The seam exists so the missing-module branch can be driven by a test:
+ * express-validator is installed in every environment that runs the suite, which makes the `catch`
+ * unreachable in-process. Without this seam the fail-closed behaviour can only be asserted against
+ * source text — and a regex on the source cannot tell a `throw` from a `next()` (#4126 review P2).
  */
-export function createNoOpValidator(): ValidatorChain {
-  const middleware = (_req: Request, _res: Response, next: NextFunction) => next()
-  const chain = middleware as ValidatorChain
-  chain.isString = () => chain
-  chain.isBoolean = () => chain
-  chain.isUUID = () => chain
-  chain.isInt = () => chain
-  chain.isIn = () => chain
-  chain.isArray = () => chain
-  chain.isObject = () => chain
-  chain.isISO8601 = () => chain
-  chain.optional = () => chain
-  chain.notEmpty = () => chain
-  return chain
-}
+export type ModuleResolver = (id: string) => unknown
 
 /**
  * Load express-validator. FAIL-CLOSED (#4126 review): express-validator is a declared PRODUCTION
@@ -56,7 +45,10 @@ export function createNoOpValidator(): ValidatorChain {
  * fail-OPEN in every environment. A missing module is now a loud boot failure, never a silent
  * downgrade to "no validation".
  */
-export function loadValidators(): {
+export function loadValidators(
+  // eslint-disable-next-line @typescript-eslint/no-require-imports, @typescript-eslint/no-var-requires
+  resolve: ModuleResolver = require
+): {
   body: ValidatorFunction
   param: ValidatorFunction
   query: ValidatorFunction
@@ -67,8 +59,7 @@ export function loadValidators(): {
     query: ValidatorFunction
   }
   try {
-    // eslint-disable-next-line @typescript-eslint/no-require-imports, @typescript-eslint/no-var-requires
-    validator = require('express-validator')
+    validator = resolve('express-validator') as typeof validator
   } catch (error) {
     throw new Error(
       'express-validator is a required production dependency (declarative request validation is a ' +

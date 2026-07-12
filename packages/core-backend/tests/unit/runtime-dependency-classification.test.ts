@@ -2,6 +2,9 @@ import { readFileSync, existsSync } from 'fs'
 import path from 'path'
 import ts from 'typescript'
 import { describe, expect, it } from 'vitest'
+import * as validatorModule from '../../src/types/validator'
+import { loadValidators, type ModuleResolver } from '../../src/types/validator'
+import { loadValidationResult } from '../../src/middleware/validation'
 
 // Production-install startup contract (#3751 corrective-6, entity-machine failureClass=
 // RUNTIME_DEPENDENCY_DECLARED_AS_DEV_ONLY / missingRuntimeModule=uuid).
@@ -446,15 +449,40 @@ describe('runtime dependency classification (production-install startup contract
       OPTIONAL_SOFT_DEPENDENCIES.some((entry) => entry.module === 'express-validator'),
       'express-validator must not be allowlisted as an optional soft dependency — its absence fail-OPENed validation',
     ).toBe(false)
-    // The loaders must throw (fail-closed), never fall back to no-op validators / next().
-    const loaderSources = [
-      readFileSync(path.join(CORE_BACKEND, 'src/types/validator.ts'), 'utf8'),
-      readFileSync(path.join(CORE_BACKEND, 'src/middleware/validation.ts'), 'utf8'),
-    ]
-    for (const source of loaderSources) {
-      expect(source).toMatch(/throw new Error\(/)
-      expect(source).not.toMatch(/validation will be skipped|skip validation|use no-op validators/)
+  })
+
+  // BEHAVIOURAL, not textual (#4126 review P2). The previous form asserted `/throw new Error\(/`
+  // against the loader source — but each loader holds two throws, so deleting the missing-module
+  // throw and restoring the no-op / next() fallback still matched: a test literally named "loaders
+  // are fail-closed" passed while the loader was fail-OPEN. express-validator is installed wherever
+  // this suite runs, which makes the catch unreachable in-process; the injectable resolver seam is
+  // what lets the absent-module branch be driven for real.
+  it('both validator loaders FAIL CLOSED when express-validator cannot be resolved', () => {
+    const absent: ModuleResolver = () => {
+      throw new Error("Cannot find module 'express-validator'")
     }
+    // Missing module must throw — never hand back chains, which is how validation fail-OPENed.
+    expect(() => loadValidators(absent)).toThrow(/required production dependency/i)
+    expect(() => loadValidationResult(absent)).toThrow(/required production dependency/i)
+
+    // Resolvable-but-malformed must also throw: a partial export otherwise yields undefined
+    // validators, which Express treats as absent middleware — fail-open by another road.
+    const malformed: ModuleResolver = () => ({ body: () => undefined })
+    expect(() => loadValidators(malformed)).toThrow(/body\/param\/query|refusing to start/i)
+    expect(() => loadValidationResult(malformed)).toThrow(/validationResult|refusing to start/i)
+
+    // …and the real module still loads: the contract is fail-CLOSED, not fail-always.
+    expect(typeof loadValidators().body).toBe('function')
+    expect(typeof loadValidationResult()).toBe('function')
+  })
+
+  it('the no-op validator primitive is gone — there is nothing left to fall back TO', () => {
+    // createNoOpValidator() returned a chain whose middleware called next() unconditionally: the
+    // exact fail-open primitive. After the fail-closed fix it had no callers. A dead export of a
+    // security anti-primitive is an invitation to the next author; it must stay deleted.
+    const source = readFileSync(path.join(CORE_BACKEND, 'src/types/validator.ts'), 'utf8')
+    expect(source).not.toMatch(/createNoOpValidator/)
+    expect(Object.keys(validatorModule)).not.toContain('createNoOpValidator')
   })
 
   it('uuid specifically is a production dependency (corrective-6 regression lock)', () => {
