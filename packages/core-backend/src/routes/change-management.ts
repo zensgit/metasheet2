@@ -3,15 +3,35 @@ import type { Request, Response } from 'express'
 import { changeManagementService } from '../services/ChangeManagementService'
 import { schemaSnapshotService } from '../services/SchemaSnapshotService'
 import { Logger } from '../core/logger'
+import { requireAdminRole } from '../guards/audit-integration'
 
 const logger = new Logger('ChangeManagementRoutes')
 const router = Router()
 
-// Middleware to extract user (mock for now if not present)
+// SECURITY (GHSA-q7hj): the entire change-management surface — change create/approve/deploy/rollback
+// AND schema snapshot/diff — performs privileged, side-effecting operations (a deploy can drive a full
+// snapshot restore). Gate it on platform-admin. requireAdminRole() reads the authenticated principal
+// (req.user, set by jwtAuthMiddleware), calls isAdmin(user.id), returns 403 for a non-admin, and FAILS
+// CLOSED (503, never next()) if the permission check itself throws.
+//
+// The guard is bound to this router's OWN namespaces (/changes, /schemas) rather than added path-less.
+// This router is mounted at `app.use('/api', changeManagementRouter)` (index.ts), so a path-less
+// `router.use(guard)` would execute for EVERY /api/* request that reaches this router in the chain —
+// 403'ing unrelated endpoints mounted after it (e.g. /api/admin/*) for any non-admin. Every route below
+// lives under /changes or /schemas, so these two mounts cover the whole surface (and any future route in
+// those namespaces) without leaking the gate to sibling routers.
+router.use('/changes', requireAdminRole())
+router.use('/schemas', requireAdminRole())
+
+// Identity comes ONLY from the authenticated principal. requireAdminRole() above guarantees req.user
+// is present; we never trust an `x-user-id` header and never fall back to a spoofable `anonymous`
+// identity (GHSA-q7hj). If req.user.id is somehow absent, fail rather than impersonate.
 const getUser = (req: Request): string => {
-  const headerUserId = req.headers['x-user-id']
-  const userId = Array.isArray(headerUserId) ? headerUserId[0] : headerUserId
-  return req.user?.id?.toString() || userId || 'anonymous'
+  const id = req.user?.id
+  if (id === undefined || id === null || String(id).length === 0) {
+    throw new Error('unauthenticated: change-management requires an authenticated req.user.id')
+  }
+  return String(id)
 }
 
 /**
@@ -58,10 +78,17 @@ router.post('/changes/:id/approve', async (req: Request, res: Response) => {
 router.post('/changes/:id/deploy', async (req: Request, res: Response) => {
   try {
     const userId = getUser(req)
+    // SECURITY (GHSA-q7hj): a caller-supplied `force` would drive a real full snapshot restore with no
+    // break-glass controls. Reject ANY truthy force outright — forced restore is not permitted via this
+    // endpoint (a genuine forced restore is a separate named, reason-logged, strongly-audited scheme).
+    // Never forward a caller-supplied force to the service.
+    if (req.body.force) {
+      return res.status(400).json({ success: false, error: 'force restore is not permitted via this endpoint' })
+    }
     const result = await changeManagementService.deployChange(
       req.params.id,
       userId,
-      { dryRun: req.body.dry_run, force: req.body.force }
+      { dryRun: req.body.dry_run, force: false }
     )
     res.json({ success: true, data: result })
   } catch (error) {
