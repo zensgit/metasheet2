@@ -66,6 +66,21 @@ jobs:
       - name: Run migrations twice (replay)
         env:
           DATABASE_URL: postgresql://127.0.0.1/metasheet
+          # T8 (migration-exclusion docs+guard hardening) note: this is a DIFFERENT list from
+          # the CI per-PR gate's MIGRATION_EXCLUDE in plugin-tests.yml / observability-*.yml /
+          # safety-guard-e2e.yml, and a different mechanism from SUPERSEDED_LEGACY_SQL_MIGRATIONS
+          # in packages/core-backend/src/db/migration-provider.ts (that one no-ops a migration's
+          # body but keeps its name; this one drops the name+body entirely). This job's purpose
+          # (run db:migrate TWICE against a fresh db, assert idempotency) is narrower than the
+          # per-PR gate's, so its list has independently evolved: it already dropped
+          # 20250925_create_view_tables.sql once #3627 fixed the underlying owner_id FK bug
+          # (see #3632) — the four CI per-PR gate occurrences still exclude that file and have
+          # NOT been re-verified against the same fix, which may mean they are stale rather than
+          # intentionally divergent. See docs/development/superseded-legacy-migrations-gap-audit-20260710.md
+          # and packages/core-backend/MIGRATION_EXCLUDE_TRACKING.md for the full cross-list
+          # picture, and #4162 for the gated follow-up that would re-enable the view-table
+          # cluster in CI. Do not resolve that gap by editing this file — the two lists solve
+          # different problems and are not required to converge.
           # Exclude 008_plugin_infrastructure.sql - has idempotency issue with scope column
           # TODO: Fix migration to be fully idempotent or split into separate migrations
           # Exclude 048-049 - Phase 2 Event Bus/BPMN migrations with complex SQL syntax issues
