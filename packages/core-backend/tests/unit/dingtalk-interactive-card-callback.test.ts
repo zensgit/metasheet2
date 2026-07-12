@@ -232,6 +232,9 @@ function makeHarness(state: {
           status: 'pending',
           current_node_key: 'approval_1',
           policy_snapshot: {},
+          // P1-1: the card is for the STILL-active node/assignee, so the wrapper's live-assignment
+          // binding matches (buildSummary computes this EXISTS as has_active_assignment).
+          has_active_assignment: true,
         }],
       }
     }

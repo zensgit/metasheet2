@@ -82,6 +82,7 @@ import {
   type ApprovalTaskCreatedTaskSnapshot,
 } from './ApprovalTaskCreatedEvent'
 import { getApprovalRecordProjectionService } from '../multitable/approval-record-projection-service'
+import { supersedeDingTalkApprovalCardDeliveriesForInstance } from '../integrations/dingtalk/approval-card-deliveries'
 import { Logger } from '../core/logger'
 import { eventBus } from '../integration/events/event-bus'
 
@@ -4870,6 +4871,71 @@ export class ApprovalProductService {
         throw new ServiceError('Approval assignment not found for actor', 403, 'APPROVAL_ASSIGNMENT_REQUIRED')
       }
 
+      // P1-1 TOCTOU close (authoritative in-txn card→round binding): the wrapper's pre-read binding
+      // (ApprovalCardDeliveryAction.buildSummary) runs OUTSIDE this FOR UPDATE txn, so a concurrent
+      // advance can slip a card issued for a PRIOR node/round past it and into the engine — where
+      // `actorCanAct` only proves "actor is an assignee of the CURRENT node", never "this CARD was
+      // issued for the current node/round". Re-validate the binding HERE, under the same instance lock
+      // that serializes advances, BEFORE any record insert / node advance / side effect. A concurrent
+      // advance is now ordered by the lock: it either committed before we locked (delivery.node_key ≠
+      // currentNodeKey → stale) or waits behind us (we act on the round the card was issued for).
+      //   `currentNodeKey` is the actor's EFFECTIVE node — `actorBranchNodeKey` in a parallel region,
+      //   else `storedCurrentNodeKey` (both already resolved into `currentNodeKey` above).
+      //   STRICT epoch (no null-pass arm): the card must carry a NON-NULL entry_epoch equal to a
+      //   NON-NULL epoch on a live seat the actor holds at that node. A NULL delivery epoch (a
+      //   pre-column legacy card, which the migration supersedes outright) is NOT actionable — fail-closed.
+      if (request.channelOrigin?.channel === 'dingtalk_card') {
+        // Review NIT (defense-in-depth): a card-channel action MUST carry the delivery id — the
+        // whole point of the binding is that a card action is bound to its delivery. A dingtalk_card
+        // origin with no cardDeliveryId can never be validated, so treat it as STALE rather than
+        // silently skipping the guard. (Not reachable today — the wrapper is the sole producer and
+        // always sets it, and the HTTP route never forwards channelOrigin — but the guard must not
+        // depend on that invariant holding forever.)
+        const cardDeliveryId = request.channelOrigin.cardDeliveryId
+        if (!cardDeliveryId) {
+          throw new ServiceError(
+            'Approval card is no longer valid for the current node',
+            409,
+            'APPROVAL_CARD_DELIVERY_STALE',
+          )
+        }
+        const deliveryResult = await client.query<{
+          instance_id: string
+          node_key: string
+          recipient_user_id: string
+          entry_epoch: number | string | null
+        }>(
+          `SELECT instance_id, node_key, recipient_user_id, entry_epoch
+             FROM dingtalk_approval_card_deliveries WHERE id = $1`,
+          [cardDeliveryId],
+        )
+        const deliveryRow = deliveryResult.rows[0]
+        const deliveryEpoch =
+          deliveryRow && deliveryRow.entry_epoch !== null && deliveryRow.entry_epoch !== undefined
+            ? Number(deliveryRow.entry_epoch)
+            : null
+        const epochMatchesLiveSeat =
+          deliveryEpoch !== null
+          && Number.isInteger(deliveryEpoch)
+          && actorAssignments.some((assignment) => {
+            const seatEpoch = assignment.entry_epoch
+            return seatEpoch !== null && seatEpoch !== undefined && Number(seatEpoch) === deliveryEpoch
+          })
+        const cardBindingValid =
+          !!deliveryRow
+          && deliveryRow.instance_id === id
+          && deliveryRow.node_key === currentNodeKey
+          && deliveryRow.recipient_user_id === actor.userId
+          && epochMatchesLiveSeat
+        if (!cardBindingValid) {
+          throw new ServiceError(
+            'Approval card is no longer valid for the current node',
+            409,
+            'APPROVAL_CARD_DELIVERY_STALE',
+          )
+        }
+      }
+
       if (request.action === 'comment') {
         await this.insertApprovalRecord(client, id, {
           action: 'comment',
@@ -5703,6 +5769,12 @@ export class ApprovalProductService {
 
       await client.query('COMMIT')
       await this.emitApprovalTaskCreatedEventsPostCommit(id, createdTaskEvents) // A-2a
+      // P1-1 defense-in-depth (NOT the safety mechanism — the wrapper's read-time active-assignment
+      // binding stands alone): the node just advanced past `currentNodeKey`, so sweep every still-`sent`
+      // card of this instance to `superseded`. The card that TRIGGERED this approve (card-originated
+      // path) is excluded — the wrapper claims it `acted` after dispatchAction returns. Best-effort:
+      // a card-ledger hiccup must never fail a committed approval.
+      await this.supersedeCardDeliveriesPostCommit(id, request.channelOrigin?.cardDeliveryId)
 
       // Wave 2 WP5 slice 1 — emit metrics after commit so rollback failures
       // never leave dangling breakdown entries. All hooks are guarded.
@@ -6049,6 +6121,27 @@ export class ApprovalProductService {
     } catch (error) {
       approvalProductLogger.warn(
         `approval.task_created post-commit emission failed for ${instanceId}: ${error instanceof Error ? error.message : String(error)}`,
+      )
+    }
+  }
+
+  /**
+   * P1-1 defense-in-depth: after a node advance commits, mark every still-`sent` DingTalk approval
+   * card of the instance `superseded` (its node is no longer active). `excludeId` spares the card
+   * that triggered the advance (card-originated path) so the wrapper can claim it `acted`. Best-effort
+   * by contract — the wrapper's read-time active-assignment binding is the authoritative stale-card
+   * guard, so a sweep failure here NEVER fails the approval.
+   */
+  private async supersedeCardDeliveriesPostCommit(instanceId: string, excludeId?: string): Promise<void> {
+    try {
+      await supersedeDingTalkApprovalCardDeliveriesForInstance(
+        (sql, params) => pool.query(sql, params),
+        instanceId,
+        excludeId ? { excludeId } : {},
+      )
+    } catch (error) {
+      approvalProductLogger.warn(
+        `approval card supersede sweep failed for ${instanceId}: ${error instanceof Error ? error.message : String(error)}`,
       )
     }
   }
