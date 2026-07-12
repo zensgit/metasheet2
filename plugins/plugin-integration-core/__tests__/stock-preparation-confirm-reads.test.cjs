@@ -34,6 +34,11 @@ const {
 const {
   STOCK_PREPARATION_MVP_TABLE_TEMPLATES,
 } = require(path.join(__dirname, '..', 'lib', 'stock-preparation-templates.cjs'))
+const {
+  assertKnownFieldIds,
+  physicalRow,
+  resolveFieldIdsFor,
+} = require(path.join(__dirname, 'fixtures', 'stock-preparation-multitable-fakes.cjs'))
 
 function objectIdByRole(role) {
   return STOCK_PREPARATION_MVP_TABLE_TEMPLATES.find((template) => template.role === role).objectId
@@ -93,8 +98,16 @@ async function expectError(promise, { status, code }) {
   return caught
 }
 
-// READONLY fake: queryRecords honors filters + limit/offset; the write methods THROW if ever called
-// (structural read-only proof). `seed` plants rows.
+// The fake sheets follow the sheet_<objectId> convention, so a sheetId names its object.
+function objectIdForSheet(sheetId) {
+  return typeof sheetId === 'string' && sheetId.startsWith('sheet_') ? sheetId.slice('sheet_'.length) : null
+}
+
+// READONLY + STRICT fake (#4160): `seed` takes LOGICAL rows (readable) but STORES them under the
+// PHYSICAL fieldIds provisioning derives — and queryRecords rejects any filter key that is not one,
+// exactly like the real query-service (`Unknown fieldId: X`). So a read module that still filters (or
+// reads cells) by logical key fails loudly here instead of silently returning empty/undefined.
+// The write methods THROW if ever called (structural read-only proof).
 function makeReadOnlyRecordsApi() {
   const store = new Map()
   const queryCalls = []
@@ -104,12 +117,13 @@ function makeReadOnlyRecordsApi() {
     seed(sheetId, data) {
       const rows = store.get(sheetId) || []
       seq += 1
-      rows.push({ id: `rec_${seq}`, data: { ...data } })
+      rows.push({ ...physicalRow(STAGING_PROJECT_ID, objectIdForSheet(sheetId), data), id: `rec_${seq}` })
       store.set(sheetId, rows)
     },
     async queryRecords(input = {}) {
       const { sheetId, filters = {}, limit = 500, offset = 0 } = input
       queryCalls.push({ sheetId, filters })
+      assertKnownFieldIds(STAGING_PROJECT_ID, objectIdForSheet(sheetId), Object.keys(filters))
       const rows = (store.get(sheetId) || []).filter((record) =>
         Object.entries(filters).every(([key, value]) => record.data[key] === value))
       return rows.slice(offset, offset + limit).map((record) => ({ id: record.id, data: { ...record.data } }))
@@ -137,6 +151,9 @@ function makeProvisioning({ missing = new Set(), stagingProjectId = STAGING_PROJ
       if (projectId !== stagingProjectId) return null
       if (missing.has(objectId)) return null
       return { id: `sheet_${objectId}` }
+    },
+    async resolveFieldIds({ projectId, objectId, fieldIds } = {}) {
+      return resolveFieldIdsFor(projectId, objectId, fieldIds)
     },
   }
 }

@@ -99,13 +99,15 @@ function assertAdminPermission(permission) {
   }
 }
 
+// #4160: resolveFieldIds is REQUIRED — the scoped records API resolves the frozen template's
+// logical->physical fieldId map through it (the records service accepts physical ids only).
 function ensureProvisioning(provisioning) {
-  if (!provisioning || typeof provisioning.findObjectSheet !== 'function') {
+  if (!provisioning || typeof provisioning.findObjectSheet !== 'function' || typeof provisioning.resolveFieldIds !== 'function') {
     throw new StockPreparationGenerationRuntimeError(
       503,
       'GENERATION_PROVISIONING_API_UNAVAILABLE',
-      'stock-preparation generation runtime requires multitable.provisioning.findObjectSheet',
-      { requiredMethods: ['findObjectSheet'] },
+      'stock-preparation generation runtime requires multitable.provisioning findObjectSheet/resolveFieldIds',
+      { requiredMethods: ['findObjectSheet', 'resolveFieldIds'] },
     )
   }
   return provisioning
@@ -132,6 +134,8 @@ function requiredString(value, field) {
   return normalized
 }
 
+// The scoped API also binds this objectId's logical->physical fieldId map under the SAME staging
+// projectId (#4160), so the generation runtime keeps speaking the frozen templates' logical keys.
 async function resolveScopedTarget(recordsApi, provisioning, targetProjectId, objectId) {
   if (!MVP_OBJECT_ID_SET.has(objectId)) {
     throw new StockPreparationGenerationRuntimeError(
@@ -151,7 +155,8 @@ async function resolveScopedTarget(recordsApi, provisioning, targetProjectId, ob
       { objectId },
     )
   }
-  return { objectId, sheetId, scoped: createTargetScopedRecordsApi(recordsApi, { sheetId, objectId }) }
+  const scoped = await createTargetScopedRecordsApi(recordsApi, { sheetId, objectId }, { provisioning, projectId: targetProjectId })
+  return { objectId, sheetId, scoped }
 }
 
 function recordData(record) {
