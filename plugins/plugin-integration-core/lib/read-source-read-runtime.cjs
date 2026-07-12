@@ -139,7 +139,7 @@ function failureOutcome(plan, errorCode, errorType, extra) {
 
 function normalizeTrustedExecution(plan, input) {
   if (input === undefined || input === null) {
-    return { plan, cursor: null, pageIndex: null }
+    return { plan, cursor: null, pageIndex: null, rowCapExplicit: false }
   }
   if (!isPlainObject(input)) {
     throw new ReadSourceProbeContractError('execution_options_invalid')
@@ -176,11 +176,21 @@ function normalizeTrustedExecution(plan, input) {
     plan: rowCap === plan.rowCap ? plan : Object.freeze({ ...plan, rowCap }),
     cursor,
     pageIndex,
+    // A trusted feeder that NAMES its own page bound is entitled to have that bound reach the adapter.
+    rowCapExplicit: input.rowCap !== undefined,
   }
 }
 
 function buildExecutionRequest(plan, inputs, execution) {
   const request = buildReadSourceProbeRequest(plan, inputs)
+  // The probe builder only sets `limit` for the list dialects (list_page / bom_list_by_material), so a
+  // single_record / detail_with_lines execution would otherwise carry NO limit and the adapter would fall
+  // back to its own default (PLM/SQL 1000, Bridge sampleLimit=3). A page bound the source never sees is
+  // fiction — a caller that supplied an explicit rowCap gets it sent. Callers that supply no trusted
+  // execution (probe route, composition hops) keep their exact previous request shape.
+  if (execution.rowCapExplicit && request.limit === undefined) {
+    request.limit = plan.rowCap
+  }
   if (execution.cursor !== null) {
     request.cursor = execution.cursor
     if (isPlainObject(request.options) && Object.prototype.hasOwnProperty.call(request.options, 'listPageIndex')) {
@@ -203,7 +213,7 @@ function safeCount(...values) {
   return null
 }
 
-function buildInternalPage(raced, request, mappedRecordCount) {
+function buildInternalPage(raced, request, mappedRecordCount, rawContainerRowCounts) {
   const metadata = isPlainObject(raced && raced.metadata) ? raced.metadata : {}
   return {
     nextCursor: typeof raced?.nextCursor === 'string' && raced.nextCursor.length <= 512
@@ -219,6 +229,15 @@ function buildInternalPage(raced, request, mappedRecordCount) {
     // Only explicitly total-shaped fields may terminate multi-page intake early.
     sourceTotalCount: safeCount(metadata.dataRowCount, metadata.totalCount),
     pageIndex: safeCount(metadata.dataPageIndex, metadata.requestedPageIndex, request?.options?.listPageIndex),
+    // The page bound the ADAPTER ACTUALLY APPLIED, which is not always the one we requested: the Bridge
+    // Agent adapter silently clamps the request to config.maxLimit (default 20) and reports the applied
+    // value here (bridge-agent-readonly-adapter.cjs metadata.limit). A paging feeder that judges "was this
+    // page full?" against the REQUESTED size instead of this one can never detect a clamped source.
+    effectiveLimit: safeCount(metadata.limit, metadata.effectiveLimit),
+    // Row counts of the RAW containers as the adapter returned them — i.e. BEFORE the plan.rowCap slice
+    // below. Without this a caller cannot tell "the source has exactly rowCap rows" from "the source had
+    // more and we silently truncated it": both leave exactly rowCap mapped records.
+    rawRowCounts: Object.freeze({ ...rawContainerRowCounts }),
   }
 }
 
@@ -301,6 +320,7 @@ async function executeConfiguredRead(
 
   const shapes = {}
   const dataContainers = {}
+  const rawRowCounts = {}
   let containerLocated = true
   let shapeOk = true
   let recordCount = 0
@@ -309,10 +329,12 @@ async function executeConfiguredRead(
     const { located, value } = locateContainerValue(raw, container.paths)
     if (!located) {
       shapes[container.alias] = { type: 'missing', arrayLength: null }
+      rawRowCounts[container.alias] = null
       containerLocated = false
       continue
     }
     shapes[container.alias] = classifyContainerShape(value)
+    rawRowCounts[container.alias] = Array.isArray(value) ? value.length : null
     let rows
     if (Array.isArray(value)) {
       rows = value.slice(0, plan.rowCap)
@@ -364,7 +386,7 @@ async function executeConfiguredRead(
   // Internal-only continuation metadata. Non-enumerable by construction so even an accidental whole-
   // outcome JSON response cannot expose totals/cursors; trusted backend feeders can still read it.
   Object.defineProperty(result, 'page', {
-    value: Object.freeze(buildInternalPage(raced, request, recordCount)),
+    value: Object.freeze(buildInternalPage(raced, request, recordCount, rawRowCounts)),
     enumerable: false,
     writable: false,
   })

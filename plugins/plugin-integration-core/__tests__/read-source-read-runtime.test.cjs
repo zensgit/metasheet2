@@ -327,6 +327,9 @@ async function testTrustedInternalPagingDoesNotWidenPublicDefaults() {
     returnedRecordCount: 20,
     sourceTotalCount: 73,
     pageIndex: 4,
+    // #3889 fix: the adapter-applied page bound (absent here) and the PRE-SLICE raw container length.
+    effectiveLimit: null,
+    rawRowCounts: { primary: 20 },
   })
   assert.equal(JSON.stringify(outcome).includes('sourceTotalCount'), false, 'internal page metadata is non-enumerable')
   assertEvidenceValuesFree(outcome.evidence)
@@ -367,9 +370,35 @@ async function testTrustedInternalPagingDoesNotWidenPublicDefaults() {
     cursor: 'offset:10',
   })
   assert.equal(cursorDeps.state.readArgs[0].cursor, 'offset:10')
+  // #3889 fix: a keyed (single_record) execution that NAMES a rowCap must send it. The probe builder only
+  // sets `limit` on the list dialects, so this request used to reach the adapter with no limit at all and
+  // the adapter fell back to its own default (Bridge: sampleLimit=3) — a page bound the source never saw.
+  assert.equal(cursorDeps.state.readArgs[0].limit, 20, 'trusted rowCap reaches a non-list adapter request')
   assert.equal(cursorOutcome.page.nextCursor, 'offset:20')
   assert.equal(cursorOutcome.page.sourceTotalCount, null, 'per-page metadata.count is not a source total')
   assert.equal(JSON.stringify(cursorOutcome.evidence).includes('offset:'), false)
+}
+
+// #3889 fix: the executor slices each raw container to plan.rowCap. `page.rawRowCounts` is the ONLY
+// signal that distinguishes "the source had exactly rowCap rows" from "the source had more and we
+// truncated it" — both leave exactly rowCap mapped records behind. A feeder that cannot tell those apart
+// reports a truncated snapshot as complete.
+async function testInternalPageReportsPreSliceRawRowCountsAndAppliedLimit() {
+  const prepared = prepareConfiguredRead({ config: normalizedConfig('list_page') })
+  const { deps } = mockDeps({
+    read: () => ({
+      records: [],
+      raw: { Data: { Data: Array.from({ length: 37 }, (_, i) => ({ FSigmaField: `SIGMA-${i}` })) } },
+      // A clamping adapter (Bridge) reports the limit it ACTUALLY applied, not the one we asked for.
+      metadata: { limit: 20 },
+    }),
+  })
+  const outcome = await executeConfiguredRead(prepared, deps, { rowCap: 20 })
+  assert.equal(outcome.data.recordCount, 20, 'mapped records are still rowCap-bounded')
+  assert.equal(outcome.page.rawRowCounts.primary, 37, 'raw container length survives the rowCap slice')
+  assert.equal(outcome.page.effectiveLimit, 20, 'the adapter-applied page bound is surfaced')
+  assert.equal(outcome.evidence.capReached, true)
+  assertEvidenceValuesFree(outcome.evidence)
 }
 
 async function testDetailWithLinesBothContainersMapped() {
@@ -487,6 +516,7 @@ async function main() {
   await testListPageCapAndProjection()
   await testListPageBoundedPageIndexInput()
   await testTrustedInternalPagingDoesNotWidenPublicDefaults()
+  await testInternalPageReportsPreSliceRawRowCountsAndAppliedLimit()
   await testDetailWithLinesBothContainersMapped()
   await testContainerMissingAndShapeMismatch()
   await testAdapterErrorsAreCoarseWithNullData()
