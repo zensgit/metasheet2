@@ -18,14 +18,25 @@
  *   recipient lateral and `ApprovalDirectoryOrg.resolveLinkedLocalUserIdByExternal`), pinned to
  *   the DELIVERY row's integration when present (DT-R2 per-corp discipline). Unmapped, inactive,
  *   or ambiguous operators get a typed refusal outcome and NO engine call.
- * - CORP CROSS-CHECK (P1-2 owner gate): the DingTalk Stream card-callback payload carries the
- *   OFFICIAL `corpId` of the operator who clicked. It MUST equal the corp the delivery's own
- *   `integration_id` belongs to (`directory_integrations.corp_id`). A mismatch — or an ABSENT
- *   payload corpId — is refused (`operator_unresolved:corp_mismatch`) BEFORE any operator lookup
- *   or engine call. Without this, a corp-A userId that collides with a corp-B assignee's userId
- *   would resolve through the corp-B-pinned delivery and approve a corp-B task (cross-corp
- *   approval). Composes with `integration_unpinned`: an unpinned delivery already refuses, so this
- *   gate only ever runs on a corp-pinned delivery.
+ * - CORP CROSS-CHECK (P1-2 owner gate): the callback's corp anchor MUST equal the corp the delivery's
+ *   own `integration_id` belongs to (`directory_integrations.corp_id`). Any failure is refused BEFORE
+ *   any operator lookup or engine call. Without this, a corp-A userId that collides with a corp-B
+ *   assignee's userId would resolve through the corp-B-pinned delivery and approve a corp-B task
+ *   (cross-corp approval). Composes with `integration_unpinned`: an unpinned delivery already refuses,
+ *   so this gate only ever runs on a corp-pinned delivery.
+ *
+ *   The anchor is read from the SDK-typed frame header (`eventCorpId`) when present, else the untyped
+ *   body `corpId`. Whether a real card-callback frame carries the header AT ALL is UNVERIFIED — see
+ *   `readCallbackCorpAnchor`. UAT §0-a settles it.
+ *
+ *   §0-a OBSERVABILITY (owner-scoped, 2026-07-12): the gate emits a VALUES-FREE presence record on
+ *   EVERY callback that reaches it — refused and successful alike — carrying only
+ *   `headerEventCorpIdPresent` / `bodyCorpIdPresent` booleans plus the delivery id. And the refusal is
+ *   split into `corp_anchor_absent` / `corp_anchor_conflict` / `delivery_corp_unresolved` /
+ *   `corp_mismatch`, because a single collapsed reason could not tell "a real frame carries no anchor"
+ *   (⇒ the card is dead-on-arrival) from "the corps genuinely differ" (⇒ the attack) — opposite
+ *   responses. Rejection BEHAVIOUR is unchanged; the card face stays neutral for every
+ *   `operator_unresolved`, so none of this becomes an existence oracle.
  * - UNIFIED ACTION PATH: execution funnels through `executeApprovalActionFromCardDelivery`
  *   (A-4 wrapper) — assignee check, reject-comment gate, idempotent acted-claim, and server-side
  *   `channel='dingtalk_card'` attribution all apply untouched. No raw approvals route is called
@@ -44,6 +55,8 @@
  */
 import { createHmac } from 'crypto'
 
+import { Logger } from '../../core/logger'
+
 import { findDingTalkApprovalCardDeliveryById } from './approval-card-deliveries'
 import { resolveApprovalCardLinkSecretForIntegration } from './approval-card-config'
 import {
@@ -55,6 +68,8 @@ import {
   type ApprovalCardDeliverySummary,
 } from '../../services/ApprovalCardDeliveryAction'
 import type { ApprovalProductService } from '../../services/ApprovalProductService'
+
+const logger = new Logger('DingTalkInteractiveCardCallback')
 
 type QueryFn = (sql: string, params?: unknown[]) => Promise<{ rows: unknown[] }>
 
@@ -87,7 +102,38 @@ export type DingTalkApprovalCardCallbackResult =
   | { outcome: 'rejected'; reason: DingTalkApprovalCardCallbackRejectReason }
   | { outcome: 'ignored_unsupported_action'; outTrackId: string }
   | { outcome: 'delivery_not_found'; outTrackId: string }
-  | { outcome: 'operator_unresolved'; deliveryId: string; reason: 'unlinked' | 'inactive' | 'ambiguous' | 'integration_unpinned' | 'corp_mismatch' }
+  | {
+      outcome: 'operator_unresolved'
+      deliveryId: string
+      /**
+       * UAT §0-a observability (owner-scoped, 2026-07-12). The corp gate used to collapse THREE
+       * distinct failures into one `corp_mismatch`, which made the §0-a hard gate un-runnable: a
+       * refused click could not tell "the real frame carries NO corp anchor at all" (⇒ the card is
+       * dead-on-arrival, close the flag) from "the corps genuinely differ" (⇒ a config error) from
+       * "the integration row could not be resolved". They demand opposite responses.
+       *
+       *   corp_anchor_absent      — neither header `eventCorpId` nor body `corpId` was present.
+       *   corp_anchor_conflict    — BOTH present and they DISAGREE. Must be its own reason: the old
+       *                             reader returned '' on a disagreement, so a conflict was reported
+       *                             as *absent* — the exact opposite diagnosis.
+       *   delivery_corp_unresolved— the delivery's integration corp could not be resolved.
+       *   corp_mismatch           — a real cross-corp click (the attack this gate exists to stop).
+       *
+       * The REJECTION behaviour is unchanged — all four still refuse, fail-closed, before any
+       * operator lookup. Only the label is finer. The card face renders every `operator_unresolved`
+       * with the SAME neutral text (buildDingTalkApprovalCardTerminalUpdate), so this never becomes
+       * an existence oracle on the wire.
+       */
+      reason:
+        | 'unlinked'
+        | 'inactive'
+        | 'ambiguous'
+        | 'integration_unpinned'
+        | 'corp_anchor_absent'
+        | 'corp_anchor_conflict'
+        | 'delivery_corp_unresolved'
+        | 'corp_mismatch'
+    }
   | { outcome: 'link_secret_unavailable'; deliveryId: string }
   | { outcome: 'executed'; deliveryId: string; summary: ApprovalCardDeliverySummary }
   | { outcome: 'stale'; deliveryId: string; summary: ApprovalCardDeliverySummary }
@@ -107,28 +153,65 @@ function asRecord(value: unknown): Record<string, unknown> | null {
 }
 
 /**
- * The official corp id of the operator who clicked. Two sources (P3-1):
- *  - `eventCorpId` — the gateway-guaranteed, SDK-typed header corp id the Stream adapter stamps onto
- *    the payload. AUTHORITATIVE provenance.
- *  - `corpId` — the untyped top-level business field of the decoded `/v1.0/card/instances/callback`
- *    `data`. SECONDARY (an echo).
- * The header wins; when BOTH are present they must AGREE (a mismatch is treated as absent → the
- * caller fail-closes). Returns '' when neither is present so an absent corpId is never skipped.
+ * The corp anchor of the operator who clicked, with its PROVENANCE — not just its value.
+ *
+ * Two sources:
+ *  - `eventCorpId` — the **SDK-typed header** corp id, when present. The Stream adapter stamps it onto
+ *    the forwarded payload from the frame header (and strips any body-supplied one first, so the body
+ *    cannot forge it). Preferred.
+ *
+ *    NOT called "gateway-guaranteed" any more (owner, 2026-07-12): `dingtalk-stream@2.1.5` declares
+ *    `eventCorpId` only among the EVENT-topic headers, so a card **callback** frame may not carry it at
+ *    all. Whether it is actually present on a real callback is UNVERIFIED — that is precisely what UAT
+ *    §0-a exists to settle, and this struct is the instrument. Do not restore a guarantee claim here
+ *    until a real frame has proved it.
+ *  - `corpId` — the untyped top-level business field of the decoded callback `data`. Secondary.
+ *
+ * Returns PRESENCE FLAGS as well as the value, because the caller must distinguish "no anchor at all"
+ * from "two anchors that disagree". The previous reader returned '' for BOTH, so a disagreement was
+ * indistinguishable from an absence — opposite diagnoses, same symptom.
  */
-function readCallbackCorpId(payload: unknown): string {
+interface CallbackCorpAnchor {
+  /** The frame HEADER carried an `eventCorpId`. (Boolean only — the value is never logged.) */
+  headerPresent: boolean
+  /** The business body carried a top-level `corpId`. (Boolean only.) */
+  bodyPresent: boolean
+  /** Both present AND disagreeing. Fail-closed, and distinct from absent. */
+  conflict: boolean
+  /** The resolved anchor: header wins. '' when absent or conflicting. */
+  value: string
+}
+
+function readCallbackCorpAnchor(payload: unknown): CallbackCorpAnchor {
   const record = asRecord(payload)
-  if (!record) return ''
+  if (!record) return { headerPresent: false, bodyPresent: false, conflict: false, value: '' }
   const headerCorp = readTrimmedString(record.eventCorpId)
   const bodyCorp = readTrimmedString(record.corpId)
-  if (headerCorp && bodyCorp && headerCorp !== bodyCorp) return ''
-  return headerCorp || bodyCorp
+  const headerPresent = headerCorp.length > 0
+  const bodyPresent = bodyCorp.length > 0
+  const conflict = headerPresent && bodyPresent && headerCorp !== bodyCorp
+  return {
+    headerPresent,
+    bodyPresent,
+    conflict,
+    value: conflict ? '' : (headerCorp || bodyCorp),
+  }
 }
 
 /**
- * The DingTalk corp id that a delivery's `integration_id` belongs to
- * (`directory_integrations.corp_id`, NOT NULL for a live integration). Returns '' when the
- * integration row is missing (e.g. deleted) so the corp cross-check fail-closes rather than
- * matching an absent value.
+ * The DingTalk corp id that a delivery's `integration_id` belongs to (`directory_integrations.corp_id`).
+ * Returns '' when it cannot be read, so the corp cross-check fail-closes rather than matching nothing.
+ *
+ * An earlier docstring said this covers "the integration row is missing (e.g. deleted)". The schema makes
+ * that cause unreachable, and saying so was misleading: the FK
+ * `dingtalk_approval_card_deliveries_integration_id_fkey` is ON DELETE SET NULL, so deleting an
+ * integration UNPINS the delivery — which refuses earlier as `integration_unpinned`. A delivery can never
+ * point at a missing integration (the FK forbids it).
+ *
+ * What IS reachable: the row exists but its corp cannot be read — `corp_id` is NOT NULL yet '' is still
+ * accepted, and this lookup also requires `provider='dingtalk'`. Both are misconfigurations on OUR side,
+ * and they surface as `delivery_corp_unresolved` — deliberately NOT as `corp_anchor_absent`, because the
+ * two demand opposite responses (fix our config vs. close the flag because DingTalk sends no corp field).
  */
 async function resolveIntegrationCorpId(query: QueryFn, integrationId: string): Promise<string> {
   const result = await query(
@@ -386,11 +469,40 @@ async function resolveDingTalkApprovalCardCallbackOutcome(
   // userId, a corp-A click carries corpId=corp-A and is refused against a corp-B-pinned delivery.
   // Fail-closed on an ABSENT payload corpId (readCallbackCorpId → '') — never skipped on a missing
   // field — and on a delivery whose integration corp cannot be resolved.
-  const payloadCorpId = readCallbackCorpId(payload)
+  const anchor = readCallbackCorpAnchor(payload)
   const deliveryCorpId = await resolveIntegrationCorpId(deps.query, delivery.integration_id)
-  if (!payloadCorpId || !deliveryCorpId || payloadCorpId !== deliveryCorpId) {
+
+  // UAT §0-a INSTRUMENT — emitted on EVERY callback that reaches the corp gate, refused AND successful.
+  // Success must report it too: otherwise a successful click still could not prove WHICH source carried
+  // the anchor (header-only ⇒ the header exists on real callback frames; body-only ⇒ it does not, and
+  // the gate is really running on the untyped body).
+  //
+  // VALUES-FREE, hard rule: booleans and the delivery id ONLY. No corpId, no user id, no form values,
+  // no raw payload — not here, not in any branch below. The delivery id is already the callback's public
+  // outTrackId and is present in every existing outcome, so it introduces nothing new.
+  logger.info('DingTalk interactive-card callback corp anchor', {
+    deliveryId: delivery.id,
+    headerEventCorpIdPresent: anchor.headerPresent,
+    bodyCorpIdPresent: anchor.bodyPresent,
+  })
+
+  // Fail-closed on every branch — the REJECTION behaviour is unchanged. Only the reason is finer, so
+  // §0-a can tell "no anchor exists on a real frame" (⇒ dead-on-arrival, close the flag) apart from a
+  // genuine cross-corp click (⇒ the attack) and from a misconfigured integration.
+  //
+  // ORDER MATTERS: `conflict` is checked BEFORE `absent`. A conflicting pair resolves to value '', so
+  // testing emptiness first would report a DISAGREEMENT as an ABSENCE — the opposite diagnosis, and the
+  // one that would wrongly tell an operator to close the flag.
+  const corpRefusal: 'corp_anchor_conflict' | 'corp_anchor_absent' | 'delivery_corp_unresolved' | 'corp_mismatch' | null =
+    anchor.conflict ? 'corp_anchor_conflict'
+      : !anchor.value ? 'corp_anchor_absent'
+        : !deliveryCorpId ? 'delivery_corp_unresolved'
+          : anchor.value !== deliveryCorpId ? 'corp_mismatch'
+            : null
+
+  if (corpRefusal) {
     return {
-      result: { outcome: 'operator_unresolved', deliveryId: delivery.id, reason: 'corp_mismatch' },
+      result: { outcome: 'operator_unresolved', deliveryId: delivery.id, reason: corpRefusal },
       operatorDisplayName: null,
     }
   }

@@ -20,11 +20,30 @@ P1-2 跨企业门（#4116）用「点击方企业」与「台账 `integration_id
 - 门会静默退化为只认 body `corpId`（不是「网关保证的权威锚点」，与设计意图不符）；
 - **若真实 callback body 顶层也没有 `corpId`，则每一次点击都会 fail-closed → 卡片「点了没反应」（dead-on-arrival）。**
 
-- [ ] **抓一帧真实的互动卡 callback frame**（worker 侧 values-free 落一条「字段是否存在」的日志即可，**切勿打印 corpId 值本身**），确认：
-      - [ ] header 里是否有 `eventCorpId`？
-      - [ ] body 顶层是否有 `corpId`？
+**✅ 工具已就绪（#4160）**：回调层现在对**每一次**到达跨企业门的 callback（**拒绝与成功都记**）落一条 values-free 记录：
+
+```
+DingTalk interactive-card callback corp anchor
+  deliveryId, headerEventCorpIdPresent: bool, bodyCorpIdPresent: bool
+```
+**只有布尔值**——corpId 值/用户/表单/原始 payload 一律不入日志（有测试钉死）。
+
+拒绝原因也拆开了，四者互不混淆：
+
+| reason | 含义 | 你该做什么 |
+|---|---|---|
+| `corp_anchor_absent` | **两个字段都不存在** | **🚨 立刻关 flag**——真实帧无企业锚点，卡片必然 dead-on-arrival |
+| `corp_anchor_conflict` | header 与 body **都在但不一致** | 不是「缺失」！查 adapter/网关，勿关 flag |
+| `delivery_corp_unresolved` | 台账 integration 的 corp 读不出（**我方**配置错） | 修 `directory_integrations.corp_id` |
+| `corp_mismatch` | **真跨企业点击**（门正常工作） | 这是门在挡攻击，符合预期 |
+
+> ⚠️ 从前这四种全折叠成 `corp_mismatch` 且**毫无日志**，所以「真实帧没有 corp 字段」和「真跨企业点击」长得一模一样——而这两者要求**相反**的处置。
+
+- [ ] **抓一帧真实的互动卡 callback frame**，从上面的日志读出：
+      - [ ] `headerEventCorpIdPresent` = ?（header 里有没有 `eventCorpId`）
+      - [ ] `bodyCorpIdPresent` = ?（body 顶层有没有 `corpId`）
 - [ ] 依结果决定：两者皆无 ⇒ **不得开 flag**，先补一个真实可用的企业锚点（例如从 Stream 连接自身所绑定的 corp 推导），否则互动卡必然全数拒绝。
-- [ ] 结论回填本文件，并同步到 `interactive-card-callback.ts` 的 `readCallbackCorpId` 注释（把「推测」改成「实测」）。
+- [ ] 结论回填本文件，并同步到 `interactive-card-callback.ts` 的 `readCallbackCorpAnchor` 注释（把「未经验证」改成「实测」）。**在真实帧证明之前，任何地方都不得再写 `eventCorpId` 是「网关保证」的。**
 - [ ] 互动卡模板的「同意」按钮 action id **必须字面 `approve`**（B-3 review 指定的 UAT 必验项）；「驳回」按钮 = 签名 `/m/approval-decision` 深链（B-2 as-built：驳回必填意见走 Slice-A 页）。
 - [ ] 确认 worker 状态从 `sdk_unwired` → 连接态（W2b adapter 接线后）；断网重连一次验证 backoff 日志 values-free。
 
