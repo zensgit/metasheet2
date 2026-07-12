@@ -251,11 +251,8 @@ export default defineConfig({
       'tests/integration/router-isolation.smoke.test.ts',
       // snapshot-protection boots a real server too, and its silent-return skips are gone (setup now
       // hard-fails and every test must assert), so it can no longer report green without doing its work.
-      // It is still NOT wired into CI: the CI test database is migrated with MIGRATION_EXCLUDE, which omits
-      // the view-table migrations (20250924120000_create_views_view_states, 20250925_create_view_tables,
-      // 042a_core_model_views) — so `views` does not exist there and createSnapshot's captureViewState
-      // cannot run. Wiring it requires untangling that excluded migration cluster, which is its own change;
-      // until then this is DECLARED debt, not invisible debt. Run it locally against a fully-migrated DB.
+      // The required Node 20 real-DB job runs this whole file against a dedicated fully-migrated database;
+      // keeping it excluded here prevents the no-DB default job from running it against an incomplete schema.
       'tests/integration/snapshot-protection.test.ts',
       'tests/integration/spreadsheet-integration.test.ts',
       // Playwright E2E suites run through their own harness, not Vitest.
