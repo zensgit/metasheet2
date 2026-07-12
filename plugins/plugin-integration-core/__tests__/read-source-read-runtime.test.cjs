@@ -321,7 +321,8 @@ async function testTrustedInternalPagingDoesNotWidenPublicDefaults() {
   assert.equal(state.readArgs[0].limit, 20)
   assert.equal(state.readArgs[0].options.listPageIndex, 4)
   assert.equal(outcome.data.recordCount, 20)
-  assert.deepEqual(outcome.page, {
+  const { rowFingerprints, ...pageCounts } = outcome.page
+  assert.deepEqual(pageCounts, {
     nextCursor: null,
     done: false,
     returnedRecordCount: 20,
@@ -335,7 +336,13 @@ async function testTrustedInternalPagingDoesNotWidenPublicDefaults() {
     echoedPageIndex: 4,
     adapterRecordCount: 20,
     reportedRecordCount: 20,
+    // #3889 fix: how many rows each CONFIGURED target actually resolved on. A source path that resolves
+    // nowhere writes null on every row without a word — this tally is what makes that visible.
+    fieldResolution: { colGamma: 20 },
   })
+  // Page identity is computed from the rows the ADAPTER returned, never from the lossy fieldMap projection
+  // of them (two pages differing only in an unmapped column are still two different pages).
+  assert.match(rowFingerprints.primary, /^[0-9a-f]{64}$/)
   assert.equal(JSON.stringify(outcome).includes('sourceTotalCount'), false, 'internal page metadata is non-enumerable')
   assertEvidenceValuesFree(outcome.evidence)
   assert.equal(JSON.stringify(outcome.evidence).includes('73'), false, 'source totals stay internal')

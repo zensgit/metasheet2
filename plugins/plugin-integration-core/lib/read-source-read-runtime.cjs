@@ -14,6 +14,7 @@
 // no new credential path. Outbound mechanics are the PROMOTED S2-b builders — the probe and the configured
 // read build the same overlay and the same request, and classify errors identically, by construction.
 
+const { createHash } = require('node:crypto')
 const { isSafeRelativeReadPath } = require('./read-source-config.cjs')
 const {
   READ_SOURCE_PROBE_TIMEOUT_MS,
@@ -138,13 +139,29 @@ function classifyContainerShape(value) {
 // Data-plane projection: ONLY fieldMap targets appear on an output record — never the whole raw row,
 // never an unmapped field. A source that does not resolve in the row maps to null (fail-soft per field;
 // the container-level shape rules above stay fail-closed).
-function mapRecord(row, fieldMap) {
+//
+// `resolvedCounts` (optional) tallies, per TARGET, how many rows the mapping actually RESOLVED. Silently
+// writing null for a source path that resolves nowhere is how a fieldMap written against one plane, or with
+// one typo'd field name, produces a full page of rows whose business columns are all null — with no error
+// anywhere. The tally lets a trusted caller notice. Counts only, keyed by target (our own intake vocabulary),
+// never by source path (which names the external system's schema).
+function mapRecord(row, fieldMap, resolvedCounts) {
   const record = {}
   for (const entry of fieldMap) {
     const { resolved, value } = walkOwnPath(row, entry.source)
     record[entry.target] = resolved ? value : null
+    if (resolvedCounts && resolved) {
+      resolvedCounts[entry.target] = (resolvedCounts[entry.target] || 0) + 1
+    }
   }
   return record
+}
+
+// Identity of a page, computed from the rows the ADAPTER returned — not from the fieldMap projection of
+// them. The projection is lossy: two genuinely different pages that differ only in a column the config does
+// not map would collide, and a paging feeder would wrongly call that a replayed page.
+function fingerprintRows(rows) {
+  return createHash('sha256').update(JSON.stringify(rows)).digest('hex')
 }
 
 function failureOutcome(plan, errorCode, errorType, extra) {
@@ -240,7 +257,7 @@ function safeCount(...values) {
   return null
 }
 
-function buildInternalPage(raced, request, mappedRecordCount, rawContainerRowCounts) {
+function buildInternalPage(raced, request, mappedRecordCount, rawContainerRowCounts, rowPlane) {
   const metadata = isPlainObject(raced && raced.metadata) ? raced.metadata : {}
   return {
     nextCursor: typeof raced?.nextCursor === 'string' && raced.nextCursor.length <= 512
@@ -276,6 +293,11 @@ function buildInternalPage(raced, request, mappedRecordCount, rawContainerRowCou
     // below. Without this a caller cannot tell "the source has exactly rowCap rows" from "the source had
     // more and we silently truncated it": both leave exactly rowCap mapped records.
     rawRowCounts: Object.freeze({ ...rawContainerRowCounts }),
+    // Per-TARGET tally of how many rows each configured field actually RESOLVED on. A source path that
+    // resolves nowhere maps to null on every row, silently — this is how a caller notices.
+    fieldResolution: Object.freeze({ ...((rowPlane && rowPlane.fieldResolution) || {}) }),
+    // Identity of the rows AS THE ADAPTER RETURNED THEM, never the lossy fieldMap projection of them.
+    rowFingerprints: Object.freeze({ ...((rowPlane && rowPlane.rowFingerprints) || {}) }),
   }
 }
 
@@ -307,7 +329,8 @@ function executeFromAdapterRecords(plan, fieldMap, raced, request) {
       containerLocated: true,
     })
   }
-  const mapped = rows.map((row) => mapRecord(row, fieldMap))
+  const fieldResolution = {}
+  const mapped = rows.map((row) => mapRecord(row, fieldMap, fieldResolution))
   const shapes = { primary: { type: 'array', arrayLength: records.length } }
   const evidence = readSourceProbeEvidence(plan, {
     ok: true,
@@ -328,6 +351,7 @@ function executeFromAdapterRecords(plan, fieldMap, raced, request) {
       request,
       mapped.length,
       rawContainerRowCounts(plan, raced && raced.raw),
+      { fieldResolution, rowFingerprints: { primary: fingerprintRows(rows) } },
     )),
     enumerable: false,
     writable: false,
@@ -422,6 +446,8 @@ async function executeConfiguredRead(
   const shapes = {}
   const dataContainers = {}
   const rawRowCounts = {}
+  const fieldResolution = {}
+  const rowFingerprints = {}
   let containerLocated = true
   let shapeOk = true
   let recordCount = 0
@@ -452,7 +478,8 @@ async function executeConfiguredRead(
       shapeOk = false
       continue
     }
-    const records = rows.map((row) => mapRecord(row, fieldMap))
+    const records = rows.map((row) => mapRecord(row, fieldMap, fieldResolution))
+    rowFingerprints[container.alias] = fingerprintRows(rows)
     recordCount += records.length
     dataContainers[container.alias] = { records }
   }
@@ -487,7 +514,10 @@ async function executeConfiguredRead(
   // Internal-only continuation metadata. Non-enumerable by construction so even an accidental whole-
   // outcome JSON response cannot expose totals/cursors; trusted backend feeders can still read it.
   Object.defineProperty(result, 'page', {
-    value: Object.freeze(buildInternalPage(raced, request, recordCount, rawRowCounts)),
+    value: Object.freeze(buildInternalPage(raced, request, recordCount, rawRowCounts, {
+      fieldResolution,
+      rowFingerprints,
+    })),
     enumerable: false,
     writable: false,
   })
