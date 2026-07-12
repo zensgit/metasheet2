@@ -204,6 +204,12 @@ export default defineConfig({
       // as a WHOLE FILE into the `Run multitable real-DB integration` step in plugin-tests.yml where
       // it runs against real Postgres every PR.
       'tests/integration/dingtalk-group-delivery-retention.db.test.ts',
+      // DT-HARDEN-08 follow-up (sibling of the above): dingtalk_approval_card_deliveries +
+      // dingtalk_person_deliveries retention sweep. DATABASE_URL-gated (describeIfDatabase).
+      // Excluded from the no-DB default job so it cannot skip-green, and wired as a WHOLE FILE
+      // into the `Run multitable real-DB integration` step in plugin-tests.yml.
+      'tests/integration/dingtalk-card-person-delivery-retention.db.test.ts',
+      'tests/integration/dingtalk-card-delivery-retention-actionability.db.test.ts',
       // comments.api.test.ts needs setup.integration.ts + a live DB. It stays
       // CI-excluded (NOT wired) because 8 of its tests have a pre-existing real-wire
       // failure (CommentService.mapRowToComment drops containerId/targetId/
