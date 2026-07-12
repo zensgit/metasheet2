@@ -4,7 +4,7 @@
       <div class="scf-dlg__header">
         <h4 class="scf-dlg__title">{{ ml('formatting.scaleTitle') }}</h4>
         <span class="scf-dlg__count">{{ draftRules.length }} / {{ ruleLimit }}</span>
-        <button class="scf-dlg__close" :aria-label="ml('formatting.close')" @click="close">&times;</button>
+        <MtIconButton class="scf-dlg__close" :aria-label="ml('formatting.close')" @click="close">&times;</MtIconButton>
       </div>
       <div class="scf-dlg__body">
         <p v-if="!draftRules.length" class="scf-dlg__empty">{{ ml('formatting.scaleEmpty') }}</p>
@@ -282,7 +282,7 @@ import { CONDITIONAL_FORMATTING_SCALE_RULE_LIMIT } from '../types'
 import { HEX_COLOR_RE, extractScaleRulesFromConfig, lerpHexColor } from '../utils/conditional-formatting'
 import { SCALE_ICON_GLYPHS, type ScaleIconGlyph } from '../utils/scale-icons'
 import { formattingPickColor, managerLabel } from '../utils/meta-manager-labels'
-import { MtButton } from '../ui'
+import { MtButton, MtIconButton } from '../ui'
 
 const props = defineProps<{
   visible: boolean
@@ -549,7 +549,9 @@ function save() {
 .scf-dlg__header { display: flex; align-items: center; gap: 12px; padding: 12px 16px; border-bottom: 1px solid #eee; }
 .scf-dlg__title { flex: 1; font-size: 15px; font-weight: 600; margin: 0; }
 .scf-dlg__count { font-size: 12px; color: #666; }
-.scf-dlg__close { border: none; background: none; font-size: 20px; cursor: pointer; color: #999; padding: 0 4px; }
+/* .scf-dlg__close: now <MtIconButton> (ghost, token-styled; the &times; glyph char passes through
+   its default-slot icon fallback (size token-normalized to the icon control)). Bespoke hardcoded CSS removed
+   (UI-P2-1c T1 batch-5). Class kept on the element only for selector stability. */
 .scf-dlg__body { flex: 1; overflow-y: auto; padding: 12px 16px; display: flex; flex-direction: column; gap: 12px; }
 .scf-dlg__empty { font-size: 13px; color: #777; margin: 0; }
 .scf-dlg__rule-list { display: flex; flex-direction: column; gap: 10px; }
