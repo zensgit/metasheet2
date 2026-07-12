@@ -4,7 +4,7 @@
       <div class="restore-preview-modal" role="dialog" :aria-label="l('record.restorePreviewTitle')">
         <div class="restore-preview__header">
           <strong>{{ l('record.restorePreviewTitle') }}</strong>
-          <button class="restore-preview__close" :aria-label="l('record.restorePreviewCancel')" @click="onCancel">&times;</button>
+          <MtIconButton class="restore-preview__close" :aria-label="l('record.restorePreviewCancel')" @click="onCancel">&times;</MtIconButton>
         </div>
 
         <div class="restore-preview__body">
@@ -52,7 +52,7 @@
 import { computed } from 'vue'
 
 import type { RestorePreviewChange } from '../api/client'
-import { MtButton } from '../ui'
+import { MtButton, MtIconButton } from '../ui'
 import { recordLabel, type MetaRecordLabelKey } from '../utils/meta-record-labels'
 
 const props = defineProps<{
@@ -113,14 +113,9 @@ function onCancel(): void {
   padding: 14px 16px;
   border-bottom: 1px solid var(--border, #e2e8f0);
 }
-.restore-preview__close {
-  border: none;
-  background: none;
-  font-size: 20px;
-  line-height: 1;
-  cursor: pointer;
-  color: var(--text-secondary, #64748b);
-}
+/* .restore-preview__close: now <MtIconButton> (ghost, token-styled; the &times; glyph char passes through
+   its default-slot icon fallback (size token-normalized to the icon control)). Bespoke hardcoded CSS removed
+   (UI-P2-1c T1 batch-4). Class kept on the element only for selector stability. */
 .restore-preview__body {
   padding: 16px;
   overflow-y: auto;

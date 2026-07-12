@@ -6,7 +6,18 @@
 // stays on the element as an additional identity class, not a styling hook. Behavior-preservation proof:
 // both stay a native <button>, keep their respective :disabled gate (!hasIdentity / !canConfirm), and
 // clicking either still runs the SAME onConfirm() → props.resetExecute(asOf, previewIdentity). The entry
-// button, header close-×, and reset-entry stay bespoke — out of scope for this migration.
+// button and reset-entry stay bespoke — out of scope for this migration.
+//
+// UI-P2-1c T1 batch-4 (multitable-ui-p2-1c-tail-resolution-designlock-20260707.md §2-T1, RATIFIED): the
+// header close-× (`.reset-confirm__close`) was additionally migrated from a bespoke <button>&times;</button>
+// to the shared MtIconButton primitive — the &times; glyph passes through MtIconButton's default-slot icon
+// fallback (glyph char preserved, size token-normalized to the icon control, consistent with the existing
+// glyph-MtIconButton controls already on main). Behavior-preservation proof: it stays a native,
+// keyboard-operable <button>, keeps the SAME aria-label (`l('record.resetConfirmCancelAria')`), and clicking
+// it still calls the SAME onCancel() → sets open=false (identical to the pre-migration @click). This is the
+// only sharer of `.reset-confirm__close` (single button, single file) — its bespoke CSS was removed outright,
+// no double-styling risk. The confirm/destructive action buttons above (`.reset-confirm__btn` and its
+// `--destructive` sharer) were NOT touched by this migration — see the pre-existing tests above.
 //
 // NB: the dialog body renders inside <teleport to="body">, so selectors below query `document.body`
 // (not a local mount container) — same pattern as the existing multitable-reset-confirm-dialog.spec.ts.
@@ -120,5 +131,27 @@ describe('ResetConfirmDialog — MtButton migration (UI-P2-1c batch4)', () => {
     await flush()
     expect(resetExecute).toHaveBeenCalledTimes(1)
     expect(resetExecute).toHaveBeenCalledWith('2026-06-20T00:00:00Z', 'tok1')
+  })
+
+  it('renders the header close-× as a native <button> (MtIconButton) keeping the class + aria-label + glyph', async () => {
+    mount({})
+    await nextTick()
+    ;(q('[data-test="reset-entry"]') as HTMLButtonElement).click()
+    await waitUntil(() => !!q('.reset-confirm__close'))
+    const btn = q('.reset-confirm__close') as HTMLButtonElement
+    expect(btn.tagName).toBe('BUTTON')
+    expect(btn.classList.contains('reset-confirm__close')).toBe(true)
+    expect(btn.getAttribute('aria-label')).toBe('Cancel')
+    expect(btn.textContent?.trim()).toBe('×') // × glyph char preserved (size token-normalized)
+  })
+
+  it('clicking the header close-× closes the dialog (unchanged — same onCancel as before migration)', async () => {
+    mount({})
+    await nextTick()
+    ;(q('[data-test="reset-entry"]') as HTMLButtonElement).click()
+    await waitUntil(() => !!q('.reset-confirm__close'))
+    ;(q('.reset-confirm__close') as HTMLButtonElement).click()
+    await flush()
+    expect(q('[data-test="reset-confirm"]')).toBeNull() // overlay gone → open.value was set false by onCancel
   })
 })
