@@ -92,6 +92,30 @@ for (const bad of [
 ]) {
   assert.ok(codes(validateReadSourceConfig({ ...baseValid('list_page'), fieldMap: bad })).includes('READ_SOURCE_FIELD_MAP_INVALID'), `fieldMap must REJECT ${JSON.stringify(bad)}`)
 }
+// A duplicate TARGET is rejected: the mapping is a sequence of writes, so two entries on the same column
+// are not "try both spellings, whichever resolves" — the last entry wins, and an entry that resolves nowhere
+// writes null OVER a real value the earlier one already read. That column then reads as empty on every row
+// while the source had a value all along. Reject it where it is written.
+{
+  const duplicated = validateReadSourceConfig({
+    ...baseValid('list_page'),
+    fieldMap: [
+      { source: 'quantity', target: 'designQty' },
+      { source: 'FQty', target: 'designQty' },
+    ],
+  })
+  assert.equal(duplicated.valid, false, 'a fieldMap writing the same target twice must be rejected')
+  assert.ok(duplicated.errors.some((e) => e.code === 'READ_SOURCE_FIELD_MAP_INVALID' && e.reason === 'duplicate_target'))
+  // Same SOURCE feeding two different targets is fine — that is a fan-out, not a lossy write.
+  assert.equal(validateReadSourceConfig({
+    ...baseValid('list_page'),
+    fieldMap: [
+      { source: 'childCode', target: 'pathKey' },
+      { source: 'childCode', target: 'childDrawingNo' },
+    ],
+  }).valid, true, 'one source may feed several targets')
+}
+
 // fieldMap leak-bait: a value-shaped source is rejected AND never echoed in the (values-free) errors
 {
   const res = validateReadSourceConfig({ ...baseValid('list_page'), fieldMap: [{ source: 'FIELDMAP-VALUE-LEAK-001', target: 'x' }] })
