@@ -19,6 +19,7 @@ import {
   flushBehindFlow,
   mountBehindFlow,
   patchMultitableClient,
+  respond,
 } from './mount-behind-flow'
 import { multitableClient } from '../../src/multitable/api/client'
 
@@ -98,6 +99,53 @@ describe('createRoutedApiClient', () => {
       throw new Error('boom: simulated network failure')
     })
     await expect(client.listBases()).rejects.toThrow('boom: simulated network failure')
+  })
+
+  // Non-2xx support (2026-07-12 post-hoc gate fix): the ONLY way to drive the real client's
+  // `parseJson` error path is `respond(status, body)` — a thrown Error (above) rejects the stub
+  // fetchFn's promise directly and never reaches `parseJson`, so it can't produce the
+  // `.status`/`.code`/`.fieldErrors` shape a manager's error-handling code actually branches on.
+  it('respond(status, body) drives the real parseJson error path with .status/.code/.message', async () => {
+    const { client } = createRoutedApiClient((method, url) => {
+      if (method === 'GET' && url.includes('/bases')) return respond(403, { error: 'FORBIDDEN', message: 'no access' })
+      return undefined
+    })
+    await expect(client.listBases()).rejects.toMatchObject({
+      name: 'MultitableApiError',
+      status: 403,
+      code: 'FORBIDDEN',
+      message: 'no access',
+    })
+  })
+
+  it('respond() body is sent as the raw error payload, never wrapped in the { data } success envelope', async () => {
+    // If the harness wrapped a respond() body in `{ data: ... }` (the success-envelope shape),
+    // normalizeApiErrorPayload would find no top-level `error`/`message` field and the thrown
+    // error would fall back to the generic default message instead of the field-error message
+    // below — this pins that the error body is dispatched as-is.
+    const { client } = createRoutedApiClient(() => respond(422, { error: 'VALIDATION', fieldErrors: { name: 'required' } }))
+    await expect(client.listBases()).rejects.toMatchObject({ status: 422, code: 'VALIDATION', message: 'required' })
+  })
+
+  it('an explicit null route result is sent through as a real 200 body, not silently replaced by defaultResponse', async () => {
+    // Distinguishes "no route matched" (undefined → falls back to defaultResponse) from "the route
+    // matched and legitimately returned null" — the NIT this fix corrects: the old
+    // `router(...) ?? defaultResponse` coalescing could not tell these apart (both are nullish to
+    // `??`), so a legitimate null body was silently replaced by defaultResponse. The wire body sent
+    // is `{"data":null}`; on the client side `unwrapDataBody({ data: null })` reads `.data` (null),
+    // and `parseJson`'s own `unwrapDataBody(body) ?? body` falls back to the OUTER envelope object
+    // for a null unwrap (this is `MultitableApiClient`'s real, pre-existing unwrap behavior, not
+    // something this harness invents) — so the resolved value is `{ data: null }`, never
+    // `defaultResponse`'s bases array. That's the property under test here.
+    const { client } = createRoutedApiClient(() => null, { defaultResponse: { bases: [{ id: 'should-not-appear', name: 'x' }] } })
+    const result = await client.listBases()
+    expect(result).toEqual({ data: null })
+  })
+
+  it('defaultResponse still applies when the router returns undefined (a genuine miss)', async () => {
+    const { client } = createRoutedApiClient(() => undefined, { defaultResponse: { bases: [{ id: 'b1', name: 'Base 1' }] } })
+    const result = await client.listBases()
+    expect(result.bases).toEqual([{ id: 'b1', name: 'Base 1' }])
   })
 })
 

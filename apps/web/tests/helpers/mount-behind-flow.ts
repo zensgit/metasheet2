@@ -108,13 +108,53 @@ export async function flushBehindFlow(ticks = 5): Promise<void> {
 /**
  * A request router for {@link createRoutedApiClient}: given the HTTP method + URL (+ raw
  * `RequestInit`) of a request the client under test issued, return the response BODY (the
- * client's real `{ data: ... }` envelope is added automatically by the harness — callers return
- * just the unwrapped payload, same shape `MultitableApiClient`'s own methods resolve to). Return
- * `undefined` to fall through to `opts.defaultResponse`. Throw an `Error` to simulate a network-
- * level failure (the real client's `parseJson` error path handles that identically to a non-2xx
- * response, so a manager's existing `catch (err) { error.value = err.message }` code runs as-is).
+ * client's real `{ data: ... }` envelope is added automatically by the harness for 2xx responses —
+ * callers return just the unwrapped payload, same shape `MultitableApiClient`'s own methods resolve
+ * to). Return `undefined` to fall through to `opts.defaultResponse` (an explicit `null` is a
+ * legitimate empty body and is sent through as-is, NOT treated as a miss). Wrap a return value with
+ * {@link respond} to simulate a non-2xx status — that is the ONLY way to drive the real client's
+ * `parseJson` error path (the `error.status`/`error.code`/`error.fieldErrors` shape a manager's
+ * `catch` block actually branches on).
+ *
+ * CORRECTION (2026-07-12, post-hoc gate on the T3/T4/T5 PRs): throwing an `Error` from a router
+ * does NOT reach `parseJson` — it rejects the stub `fetchFn`'s promise directly, so
+ * `await this.fetch(...)` inside `MultitableApiClient` itself throws before `parseJson` is ever
+ * called. That still exercises a manager's `catch (err) { error.value = err.message }` code (both
+ * paths end up rejecting the same client-method promise), but it is a NETWORK-level failure, not a
+ * non-2xx HTTP response, and the thrown error has none of `parseJson`'s error shape
+ * (`.status`/`.code`/`.fieldErrors`). Use a thrown `Error` for "the request never reached the
+ * server"; use `respond(status, body)` for "the server responded with an error".
  */
 export type ApiRouter = (method: string, url: string, init?: RequestInit) => unknown
+
+const RESPOND_MARKER = Symbol('mount-behind-flow.respond')
+
+/**
+ * A router return value wrapped by {@link respond} to control the simulated HTTP status code and
+ * raw (non-enveloped) response body — e.g. `respond(403, { error: 'FORBIDDEN' })`. See the
+ * {@link ApiRouter} doc comment for why this exists (a thrown Error is a network failure, not a
+ * non-2xx response).
+ */
+export interface RoutedResponse {
+  readonly [RESPOND_MARKER]: true
+  status: number
+  body: unknown
+}
+
+/**
+ * Wrap a router's return value to simulate a specific non-2xx (or any explicit) HTTP status. The
+ * `body` is sent AS-IS (not wrapped in the `{ data: ... }` success envelope) — matching the real
+ * server, whose error responses are the raw error payload (`{ error, message, fieldErrors, ... }`)
+ * that `MultitableApiClient`'s `parseJson` reads directly on `!res.ok`, never through the
+ * success-only `{ data }` unwrap.
+ */
+export function respond(status: number, body: unknown): RoutedResponse {
+  return { [RESPOND_MARKER]: true, status, body }
+}
+
+function isRoutedResponse(value: unknown): value is RoutedResponse {
+  return typeof value === 'object' && value !== null && (value as Record<PropertyKey, unknown>)[RESPOND_MARKER] === true
+}
 
 /**
  * Builds a REAL `MultitableApiClient` (not a hand-rolled partial-object mock) wired to a stub
@@ -131,6 +171,10 @@ export type ApiRouter = (method: string, url: string, init?: RequestInit) => unk
  *
  * Returns `fetchFn` as well (a `vi.fn`) so a spec can assert on which requests actually fired —
  * the same `fetchFn.mock.calls.filter(...)` convention already used in that spec file.
+ *
+ * Non-2xx: wrap a route's return value with {@link respond} (e.g. `respond(403, { error:
+ * 'FORBIDDEN' })`) to drive the client's real `parseJson` error path — see the {@link ApiRouter}
+ * doc comment.
  */
 export function createRoutedApiClient(
   router: ApiRouter,
@@ -139,7 +183,20 @@ export function createRoutedApiClient(
   const defaultResponse = opts.defaultResponse ?? {}
   const fetchFn = vi.fn(async (url: string, init?: RequestInit) => {
     const method = init?.method ?? 'GET'
-    const body = router(method, url, init) ?? defaultResponse
+    const routed = router(method, url, init)
+    if (isRoutedResponse(routed)) {
+      // Non-2xx (or any explicitly-controlled-status) path: the body is sent AS-IS, never wrapped
+      // in the `{ data }` success envelope — matching the real server's error response shape (see
+      // `respond`'s doc comment).
+      const { status, body } = routed
+      const raw = status === 204 ? '' : JSON.stringify(body)
+      return new Response(raw, { status, headers: { 'Content-Type': 'application/json' } })
+    }
+    // `undefined` means "no route matched this request" → fall back to `defaultResponse` (still a
+    // 200, still enveloped). An explicit `null` (or any other falsy-but-defined value) is a
+    // legitimate response body — e.g. a real 200 with a null payload — and must NOT be silently
+    // replaced by `defaultResponse`; only a genuine miss (`undefined`) falls through.
+    const body = routed === undefined ? defaultResponse : routed
     return new Response(JSON.stringify({ data: body }), {
       status: 200,
       headers: { 'Content-Type': 'application/json' },
