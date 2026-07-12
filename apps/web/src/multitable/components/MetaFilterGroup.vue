@@ -52,14 +52,12 @@
       </template>
     </div>
     <div class="meta-filter-group__actions">
-      <button type="button" class="meta-filter-group__add" data-filter-group-add-condition="true" @click="onAddCondition">{{ l('toolbar.addCondition') }}</button>
-      <button
+      <MtLink data-filter-group-add-condition="true" @click="onAddCondition">{{ l('toolbar.addCondition') }}</MtLink>
+      <MtLink
         v-if="canAddGroup"
-        type="button"
-        class="meta-filter-group__add"
         data-filter-group-add-group="true"
         @click="onAddGroup"
-      >{{ l('toolbar.addGroup') }}</button>
+      >{{ l('toolbar.addGroup') }}</MtLink>
     </div>
   </div>
 </template>
@@ -73,6 +71,7 @@ import { useLocale } from '../../composables/useLocale'
 import { metaCoreLabel, type MetaCoreLabelKey } from '../utils/meta-core-labels'
 import { seedFilterCondition } from '../utils/filter-condition-seed'
 import MetaFilterConditionRow from './MetaFilterConditionRow.vue'
+import { MtLink } from '../ui'
 
 defineOptions({ name: 'MetaFilterGroup' })
 
@@ -122,6 +121,7 @@ function onAddGroup() {
 .meta-filter-group__remove:hover { color: #f56c6c; }
 .meta-filter-group__children { padding-left: 8px; border-left: 2px solid #eee; }
 .meta-filter-group__actions { display: flex; gap: 12px; margin-top: 4px; }
-.meta-filter-group__add { border: none; background: none; color: #409eff; cursor: pointer; font-size: 12px; padding: 2px 0; }
-.meta-filter-group__add:hover { text-decoration: underline; }
+/* .meta-filter-group__add: both sharers (add-condition / add-group) are now <MtLink> (UI-P2-1c T3);
+   the bespoke #409eff text is normalized to --ms-color-primary. Bespoke CSS removed (no
+   double-styling) — both usages of the class were migrated together. */
 </style>

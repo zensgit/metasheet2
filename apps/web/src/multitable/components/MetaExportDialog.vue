@@ -13,8 +13,8 @@
             <div class="meta-export__row-head">
               <span class="meta-export__label">{{ l('export.columns') }}</span>
               <span class="meta-export__bulk">
-                <button type="button" class="meta-export__link" @click="selectAll">{{ l('export.selectAll') }}</button>
-                <button type="button" class="meta-export__link" @click="clearAll">{{ l('export.clearAll') }}</button>
+                <MtLink @click="selectAll">{{ l('export.selectAll') }}</MtLink>
+                <MtLink @click="clearAll">{{ l('export.clearAll') }}</MtLink>
               </span>
             </div>
             <ul class="meta-export__cols" role="group" :aria-label="l('export.columns')">
@@ -86,7 +86,7 @@
 import { computed, ref, watch } from 'vue'
 import { useLocale } from '../../composables/useLocale'
 import { metaCoreLabel, selectedCount, type MetaCoreLabelKey } from '../utils/meta-core-labels'
-import { MtButton, MtIconButton } from '../ui'
+import { MtButton, MtIconButton, MtLink } from '../ui'
 
 export interface ExportColumn {
   id: string
@@ -176,8 +176,10 @@ function onCancel() {
 .meta-export__row-head { display: flex; align-items: center; justify-content: space-between; }
 .meta-export__label { font-size: 12px; color: #909399; }
 .meta-export__bulk { display: flex; gap: 12px; }
-.meta-export__link { background: none; border: none; padding: 0; color: #409eff; font-size: 12px; cursor: pointer; }
-.meta-export__link:hover { text-decoration: underline; }
+/* .meta-export__link: both sharers (select-all / clear-all) are now <MtLink> (UI-P2-1c T3); the
+   bespoke #409eff text is normalized to --ms-color-primary (UF-1 token convergence). Bespoke CSS
+   removed (no double-styling) — both usages of the class were migrated together, so nothing is left
+   depending on it. */
 .meta-export__cols { list-style: none; margin: 0; padding: 4px; border: 1px solid #dcdfe6; border-radius: 4px; max-height: 220px; overflow-y: auto; display: flex; flex-direction: column; gap: 2px; }
 .meta-export__col-label { display: flex; align-items: center; gap: 8px; padding: 4px 6px; cursor: pointer; font-size: 14px; border-radius: 3px; }
 .meta-export__col-label:hover { background: #f5f7fa; }

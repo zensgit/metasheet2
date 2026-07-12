@@ -7,6 +7,11 @@ export { default as MtIconButton } from './MtIconButton.vue'
 export { default as MtBadge } from './MtBadge.vue'
 export type { MtBadgeTone } from './MtBadge.vue'
 
+// P2-1c T3 — MtLink (multitable-ui-p2-1c-tail-resolution-designlock-20260707.md §2-T3, RATIFIED):
+// text-link-styled action, distinct in strength from MtButton (zero padding/border vs. MtButton's
+// always-padded/bordered variants).
+export { default as MtLink } from './MtLink.vue'
+
 // P2-1b — overlay primitives (Teleport-safe: MtPopover / MtMenu render into `body`).
 export { default as MtPopover } from './MtPopover.vue'
 export type { MtPopoverPlacement } from './MtPopover.vue'
