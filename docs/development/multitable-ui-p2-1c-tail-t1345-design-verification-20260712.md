@@ -30,6 +30,8 @@ batch-1 门禁抓出:MtIconButton 把 × **归一到 icon token 尺寸(14px)+ co
 亲审初见 MtLink 的 `font-size: 12px` / `line-height: 1` / `white-space: nowrap` / disabled `opacity: .5`,疑为**实现发明锁未定义的样式语义**(owner 红线)。**核对基线后推翻**:已在 main 的 **MtButton 原语本身**就是 `font-size:13px` / `line-height:1` / `white-space:nowrap` / disabled `opacity:.5` / 同款 token focus-ring——MtLink 是**照抄既有原语惯例**;且 `12px` 恰好**精确保住**三处原链接(`.meta-export__link` / `.meta-filter-group__add` / `.meta-notif-bell__mark-all` 原本都是 12px)。锁的「token 化」在本仓既有实践中指**颜色**走 `--ms-*`(MtButton 的 px 亦硬编码)。
 **教训:先验既有原语基线,再喊「发明」。**
 
+**T3 勘误(2026-07-12 fix-forward)— MetaViewManager 2 处误迁回收**:上表「ViewManager `__btn-inline` 的 2/4」这两处(addFilterRule/`+ Add filter`、addSortRule/`+ Add sort`)的迁移**前提本身有误**——设计锁 §2-T3 原把这个 class 描述为「文字链接样」,但核实其原 CSS 是 `padding:4px 10px; border:1px dashed #cbd5e1; background:#fff; color:#475569`,即**灰色虚线框 action 按钮,不是文字链接**。#4131 据此迁成 MtLink 后,同 class 的另 2 个 sharer(reloadLatestConfig/dismissLiveRefreshNotice,未迁、仍是虚线框原样)与这 2 个形成「同 class 两种外观」的不干净态。**owner 裁定改用 `MtButton variant="plain"`**(T2 的 plain 变体,#4156 已落 main),已由本次 fix-forward 回收——这两处从 `<MtLink>` 改为 `<MtButton variant="plain">`,`.meta-view-mgr__btn-inline` class 依旧不加回(该 class 只服务未迁的另 2 个 sharer)。**这是有意的视觉变更**(灰虚线框 → plain 软主色底),不是零视觉变。T3 本档其余三处(MetaExportDialog select-all/clear、MetaFilterGroup add-condition/add-group、MetaNotificationBell mark-all)核实确为文字链接样,MtLink 迁移判断与落地维持不变。
+
 ### T4 — 红线(删除面 / 访问控制面)逐行核验
 - component diff **只有 tag swap + class/type + import + 注释,script 块零逻辑改动**。
 - **TrashModal**:唯一命中 confirm 的是 **cancel** 按钮(`@click="confirmingId = null"` 逐字节保留);真正的 `.meta-trash__restore`(撤销删除)**根本不在 diff 里**。
@@ -57,6 +59,7 @@ batch-1 门禁抓出:MtIconButton 把 × **归一到 icon token 尺寸(14px)+ co
 - **🔒 T2 soft-tinted create**(Gallery/Kanban/Timeline 的 `#ecf5ff` 底 + `#2563eb` 字)——**等 owner 选 A(给 MtButton 加 plain/tinted 变体,锁推荐)/ B / C**。MtButton 现无对应变体;不许实现自行发明。
 - **T1 剩余批次**:仍有 close-× 分布在其它 dialog/manager(部分需 T4 harness 挂载)。
 - **T3 剩余批次**:MetaFieldManager / MetaImportModal 的 `__btn-inline`(代码注释里被标为 T3-GATED,但**不在锁 §2-T3 的枚举范围内**,需单独 ratify 后才能动)。
+- **T3 勘误已回收**:#4131 迁的 MetaViewManager `__btn-inline` 2/4(addFilter/addSort)**已由 fix-forward 从 MtLink 改迁到 `MtButton variant="plain"`**(§2-T3 前提事实勘误——该 class 原是灰虚线框 action,非文字链接;详见 §3 T3 段)。未迁的另 2 个 sharer(reloadLatestConfig/dismissLiveRefreshNotice)保持原生虚线框按钮不变。T3 本档其余三处(ExportDialog/FilterGroup/NotificationBell)MtLink 落地不受此勘误影响。
 - **T5 剩余批次**:MetaRecordDrawer 等其它 shared-class manager。
 - 以上均可在 owner 给 T2 决定后与 T2 一并排期;**不主张 tail「完成」**——完成的是 T1/T3/T4/T5 的首批 + T3/T4 的一次性基础设施(MtLink 原语 / behind-flow harness)。
 

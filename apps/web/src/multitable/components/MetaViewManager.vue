@@ -352,7 +352,7 @@
                 <button class="meta-view-mgr__action meta-view-mgr__action--danger" @click="removeFilterRule(idx)">&times;</button>
               </div>
             </div>
-            <MtLink v-if="configTargetFields.length" data-filter-add="true" @click="addFilterRule">{{ ml('view.addFilter') }}</MtLink>
+            <MtButton variant="plain" v-if="configTargetFields.length" data-filter-add="true" @click="addFilterRule">{{ ml('view.addFilter') }}</MtButton>
             <p v-if="filterDraft.groups.length" class="meta-view-mgr__nested-note" data-nested-groups-note="true">
               &#x1F512; {{ filterDraft.groups.length }} {{ ml('view.nestedGroupsReadOnly') }}
             </p>
@@ -386,7 +386,7 @@
                 <button class="meta-view-mgr__action meta-view-mgr__action--danger" @click="removeSortRule(idx)">&times;</button>
               </div>
             </div>
-            <MtLink v-if="configTargetFields.length" data-sort-add="true" @click="addSortRule">{{ ml('view.addSort') }}</MtLink>
+            <MtButton variant="plain" v-if="configTargetFields.length" data-sort-add="true" @click="addSortRule">{{ ml('view.addSort') }}</MtButton>
           </div>
 
           <label v-if="configTarget.type !== 'kanban' && configTarget.type !== 'gantt' && configTarget.type !== 'hierarchy'" class="meta-view-mgr__field">
@@ -499,7 +499,7 @@ import {
 } from '../utils/meta-manager-labels'
 import ConditionalFormattingDialog from './ConditionalFormattingDialog.vue'
 import ScaleFormattingDialog from './ScaleFormattingDialog.vue'
-import { MtButton, MtLink } from '../ui'
+import { MtButton } from '../ui'
 
 const VIEW_TYPES = ['grid', 'form', 'kanban', 'gallery', 'calendar', 'timeline', 'gantt', 'hierarchy'] as const
 const VIEW_ICONS: Record<string, string> = {
@@ -1458,15 +1458,20 @@ onBeforeUnmount(() => {
    <MtButton> (default ghost / variant="danger"); both classes' FULL sharer sets were migrated at once, so
    their bespoke CSS below is removed (no double-styling); classes kept as additive for selector stability
    (existing specs query them).
-   UI-P2-1c T3 (multitable-ui-p2-1c-tail-resolution-designlock-20260707.md §2-T3, RATIFIED): only TWO of
-   this class's four sharers are in the T3-ratified range — addFilterRule ("+ Add filter") and addSortRule
-   ("+ Add sort") — and are now <MtLink> (bespoke padding:4px 10px; border:1px dashed #cbd5e1; background:
-   #fff; color:#475569 gray dashed-box styling — the SAME styling still defined by the rule below, since
-   reloadLatestConfig/dismissLiveRefreshNotice keep it — normalized to the MtLink primary-text-link look;
-   #409eff never applied to this class, that hex belongs to .meta-view-mgr__btn-add's fill described
-   above). reloadLatestConfig ("Reload latest") and dismissLiveRefreshNotice
-   ("Dismiss") are NOT in scope and stay on this bespoke class — so the rule below is kept (partial-sharer
-   migration: CSS removal is gated on ALL sharers migrating, per design-lock §4). */
+   UI-P2-1c T3 (multitable-ui-p2-1c-tail-resolution-designlock-20260707.md §2-T3, RATIFIED) + errata
+   fix-forward (2026-07-12): only TWO of this class's four sharers are in the T3-ratified range —
+   addFilterRule ("+ Add filter") and addSortRule ("+ Add sort"). #4131 first migrated them to <MtLink>
+   on the premise that this class was "link-styled" — that premise was factually wrong: this class was
+   always the padding:4px 10px; border:1px dashed #cbd5e1; background:#fff; color:#475569 gray
+   dashed-box "action button" look below, not a text link. Once #4131 exposed the same class with two
+   looks (MtLink for these two, still-dashed-box for the other two), owner corrected course: this
+   fix-forward re-migrates these two from <MtLink> to <MtButton variant="plain"> (T2's soft-tinted
+   primitive, #4156) instead — a deliberate visual change (gray dashed box → plain soft-primary fill),
+   not a zero-visual-change normalization. Neither MtLink nor MtButton apply this bespoke class (both
+   variants own their full look), so no double-styling either way. reloadLatestConfig ("Reload latest")
+   and dismissLiveRefreshNotice ("Dismiss") were NEVER in T3's scope and stay on this bespoke class
+   unchanged — so the rule below is kept (partial-sharer migration: CSS removal is gated on ALL sharers
+   migrating, per design-lock §4). */
 .meta-view-mgr__btn-inline { align-self: flex-start; padding: 4px 10px; border: 1px dashed #cbd5e1; border-radius: 4px; background: #fff; color: #475569; cursor: pointer; font-size: 12px; }
 .meta-view-mgr__confirm { padding: 12px 16px; border-top: 1px solid #eee; background: #fef0f0; }
 .meta-view-mgr__confirm p { margin: 0 0 8px; font-size: 13px; color: #333; }
