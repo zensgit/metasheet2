@@ -28,19 +28,28 @@ R11（2026-07-11）落地后：#4117 vintage-exact PIT-resurrect 锚 · #4119 ma
 
 ## 3. 本轮实质发现（全部已修，#4147）
 
-### 3.1 四个前端 spec 跑在**零个** workflow 里 —— 其中一个是**唯一的**字段掩码渲染守卫
+### 3.1 四个前端 spec 跑在**零个** workflow 里 —— 其中一个是**纵深防御的前端那一层**
 
-- **实证**：全文 grep `.github/workflows/` 无命中；`multitable-web-guard.yml` 的 `vitest run` 过滤器无这些 token；
+> **⚠️ 严重性更正（owner 复审 P2，2026-07-12）**：本节初版称「这个泄漏会**全绿上线**」——**那是过度声称，已撤回**。
+> 见下方「真实严重性」。测试本身的价值不变，接线仍然正确；被更正的是我对其**安全影响**的表述。
+
+- **实证（不变）**：全文 grep `.github/workflows/` 无命中；`multitable-web-guard.yml` 的 `vitest run` 过滤器无这些 token；
   **required** 的 `run-required-web-tests.sh`（backing required `web-tests` 检查）也没有。且 required `test (20.x)`
   对 apps/web **只 build 不跑 vitest**。⇒ 这 4 个 spec（30 测，全绿、无 DB 依赖）**在任何 CI 里都没跑过**。
-- **最要紧的那个 = `meta-record-drawer-history-diff.spec.ts` 的 LEAK-LOCK**：它是 `MetaRecordDrawer` History 页
-  **掩码渲染属性的唯一前端守卫**。后端对照测（`multitable-record-history-field-mask.test.ts`，在 CI 里）只证明
-  **服务端响应**被掩码——**从不触碰渲染器**。而 `historyFieldDiffs()`（`MetaRecordDrawer.vue:791`）**必须**遍历
-  `item.changedFieldIds`，**绝不能**遍历原始 snapshot。
-- **突变实证（本轮最硬的一条证据）**：把 `item.changedFieldIds.map(...)` 换成 `Object.keys(item.snapshot ?? {}).map(...)`
-  ⇒ LEAK-LOCK **变红**，且**渲染出的 DOM 里真的出现了 `TOP_SECRET`**——一个在 snapshot 里、但不在 `changedFieldIds` 里的字段，
-  正是 actor 绝不该看到的被掩码字段。**在本 PR 之前，这个泄漏会「全绿上线」**，因为唯一能抓到它的测试跑在零个 workflow 里。
-  基线恢复后 6/6 绿。
+- **它守的是什么**：`historyFieldDiffs()`（`MetaRecordDrawer.vue:791`）**必须**遍历 `item.changedFieldIds`，
+  **不能**遍历原始 snapshot。LEAK-LOCK 钉住这条**渲染侧**属性。
+- **突变实证（结论仍成立，但只在其正确的作用域内）**：把遍历源换成 `Object.keys(item.snapshot ?? {})`
+  ⇒ LEAK-LOCK **变红**，DOM 渲染出 `TOP_SECRET`。⇒ **这个守卫是承重的、不是装饰性的**（它确实会因该回归而红）。基线恢复后 6/6 绿。
+- **真实严重性 = 纵深防御的前端那一层，不是「单靠 FE 突变就能造成线上泄漏」**：
+  - 该 spec 的 fixture **刻意构造了一个服务端契约不会产生的 payload**（snapshot 里有秘密字段、而 `changedFieldIds` 不含它）。
+    spec 自己的 docstring（`meta-record-drawer-history-diff.spec.ts:4-8`）就写明：`patch` / `snapshot` / `changedFieldIds`
+    **三者服务端都已掩码**，本测只钉「该属性的 **FE 那一半**」。
+  - 后端金测（`multitable-record-history-field-mask.test.ts`，**在 required CI 里**）R1 明确钉住
+    「被拒的 layer-3 字段值**不出现在 patch 与 snapshot 里**」。**故服务端根本不会下发那种形状。**
+  - ⇒ 正确表述：LEAK-LOCK 证明的是「**万一后端掩码发生部分回归**，FE 仍不会渲染出未在 `changedFieldIds` 里的字段」。
+    **单独一个 FE 突变不足以造成真实线上泄漏**——后端那层仍然拦着。
+  - ⇒ 接线的正当性依然充分：**一个两层安全属性的前端那层此前没有任何 CI**（纵深防御的一层是哑的）。但严重性应记为
+    **「补回纵深防御的一层」**，而**不是**「一个 live 泄漏差一次编辑就上线」。
 - **修**：4 个 spec 全部接入 **required** `web-tests` 门（`run-required-web-tests.sh`）。
 
 ### 3.2 一个真库测试**自诞生起从未执行过它的断言**
@@ -67,7 +76,8 @@ R11（2026-07-11）落地后：#4117 vintage-exact PIT-resurrect 锚 · #4119 ma
 | 断言 | 证据 |
 |---|---|
 | 4 个 FE spec 此前跑在零 workflow | grep `.github/workflows/` 无命中；`run-required-web-tests.sh` 无 token；`test (20.x)` 对 apps/web 只 build |
-| **LEAK-LOCK 真的会抓到泄漏（非装饰性守卫）** | **突变实证**：改遍历源为 `Object.keys(snapshot)` ⇒ spec 红，且 DOM 渲染出 `TOP_SECRET`；还原后 6/6 绿 |
+| **LEAK-LOCK 是承重守卫（非装饰性）** | **突变实证**：改遍历源为 `Object.keys(snapshot)` ⇒ spec 红，且 DOM 渲染出 `TOP_SECRET`；还原后 6/6 绿 |
+| **但它证明的是纵深防御的 FE 那一层，不是「FE 突变即造成线上泄漏」**（owner 复审 P2 更正） | fixture 刻意构造服务端契约**不会下发**的形状（snapshot 有秘密、`changedFieldIds` 无）；spec docstring `:4-8` 自陈三者服务端均已掩码；后端金测 `multitable-record-history-field-mask.test.ts` **R1** 钉住「被拒字段不出现在 patch 与 snapshot」⇒ **后端那层仍然拦着**。见 §3.1「真实严重性」 |
 | 真库测试从未执行过断言 | 不在 plugin-tests 白名单；`describeIfDatabase` 在 DATABASE_URL 未设处 skip-green；哨兵嵌套在同一 describe 内故一并跳过 |
 | 该真库测试并未损坏 | **真跑**：全新 pg + 全量迁移 ⇒ **9/9 通过** |
 | capture-point-3 的 cap-check 义务已履行 | `assertWithinCaptureCap` 在 `univer-meta.ts:6407` 调用前、同一 `isTombstoneCaptureEnabled()` 门内 ⇒ **无 bug** |
@@ -79,7 +89,7 @@ R11（2026-07-11）落地后：#4117 vintage-exact PIT-resurrect 锚 · #4119 ma
 | 项 | 门 | 谁解锁 |
 |---|---|---|
 | **#4004 D-2**（side-door delete recoverability 设计锁，PROPOSED） | owner-gated，watch-only（R11 directive 明列不随轮次开） | **owner ratify** |
-| **O-2 运维启用**（`MULTITABLE_TOMBSTONE_CAPTURE_ENABLED` → `..._RECORD_UNDELETE_INBOUND` → `..._PIT_UNDELETE`；retention） | 部署 host 的 env，**非 CI 可设**；production 保持 OFF | **owner/operator**（runbook 见 o2-ladder + R11 收官 MD） |
+| **O-2 运维启用**（`MULTITABLE_TOMBSTONE_CAPTURE_ENABLED` → `..._RECORD_UNDELETE_INBOUND` → `..._PIT_UNDELETE`；retention） | 部署 host 的 env，**非 CI 可设**。**代码默认 OFF**（flag 缺省即关）；**但「production 当前是否为 OFF」是外部环境状态，本次代码审阅/本文均未独立核验**（owner 复审指出，2026-07-12）——不要把「代码默认 OFF」当作「线上已 OFF」的证据 | **owner/operator**（runbook 见 o2-ladder + R11 收官 MD） |
 | **person diff before 侧名称解析** | 设计锁 PROPOSED（随 #4127 上 main），OD-P1/P2/P3 待裁 | **owner ratify** → 之后可建（S/M） |
 | **4d**：已删字段列的**值级**恢复 | **红线，永不承诺** | — |
 

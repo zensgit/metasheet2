@@ -183,10 +183,13 @@ export async function countInboundLinkCaptureRows(query: TombstoneQueryFn, recor
  * `DELETE FROM meta_links WHERE record_id = $1 OR foreign_record_id = $1` in `deleteRecord`. Outbound
  * edges (`record_id = $1`) are intentionally NOT captured here (see module doc-comment); a self-link
  * (`record_id = foreign_record_id`) is double-covered by both the outbound trash-replay and this inbound
- * capture, which is harmless. The reason no duplicate row can result is that inbound captures are never
- * auto-replayed (4c-3 out of scope) — NOT the outbound `ON CONFLICT DO NOTHING`, which only guards the
- * random PK `id` (meta_links has no unique on the edge triple). When 4c-3 wires inbound replay, it must
- * carry its own NOT-EXISTS guard (as the field-undelete link rehydration already does).
+ * capture, which is harmless. **4c-3 has since landed and DOES auto-replay inbound captures** (this
+ * comment previously said they were "never auto-replayed / 4c-3 out of scope" — stale). What keeps the
+ * self-link double from producing a duplicate edge is the replay's OWN `NOT EXISTS` guard
+ * (`inbound-link-replay.ts:154`, "NOT EXISTS an identical meta_links row" — it explicitly kills the
+ * self-link overlap), exactly as this comment once predicted 4c-3 would have to add. It is NOT the
+ * outbound `ON CONFLICT DO NOTHING`, which only guards the random PK `id` (meta_links has no unique
+ * constraint on the edge triple).
  */
 export async function insertInboundLinkTombstones(
   query: TombstoneQueryFn,
