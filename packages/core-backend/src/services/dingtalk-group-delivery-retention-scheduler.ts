@@ -76,6 +76,8 @@ export async function resolveDingTalkGroupDeliveryRetentionSchedulerLeaderOption
     : undefined
   return {
     leaderLock: new RedisLeaderLock({ client: redis as unknown as RedisLeaderLockClient }),
+    // Owner review P2: UNIQUE per sweep — this must NOT share a key with the AI-usage or card/person sweeps.
+    lockKey: 'ledger-retention:dingtalk-group-deliveries:leader',
     ownerId: `dingtalk-group-delivery-retention:${process.pid}:${randomBytes(4).toString('hex')}`,
     ttlMs,
     retryIntervalMs,

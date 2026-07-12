@@ -1,0 +1,104 @@
+name: Multitable Permission Lists Postdeploy Smoke
+
+# Issue #3408 narrow closeout lane. Pull requests run only the local contract
+# tests. The deployed-environment probe is workflow_dispatch only and writes
+# values-free evidence: status, booleans, bounded error codes, and counts.
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/multitable-permission-lists-postdeploy-smoke.yml'
+      - 'scripts/ops/multitable-permission-lists-postdeploy-smoke.mjs'
+      - 'scripts/ops/multitable-permission-lists-postdeploy-smoke.test.mjs'
+  workflow_dispatch:
+    inputs:
+      timeout_ms:
+        description: Per-request timeout in milliseconds
+        required: false
+        default: '15000'
+
+permissions:
+  contents: read
+
+jobs:
+  contract:
+    name: permission-list smoke contract
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Run values-free smoke contract tests
+        run: node --test scripts/ops/multitable-permission-lists-postdeploy-smoke.test.mjs
+
+  smoke:
+    name: deployed permission-list smoke
+    if: github.event_name == 'workflow_dispatch'
+    needs: contract
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    concurrency:
+      group: multitable-permission-lists-postdeploy-smoke
+      cancel-in-progress: false
+    env:
+      # Resource identifiers stay in repo variables instead of workflow inputs,
+      # so dispatch metadata remains values-free. Without an explicit perf base,
+      # the script only considers safely named reusable bases and fails closed.
+      API_BASE: ${{ vars.MULTITABLE_PERF_API_BASE || vars.ATTENDANCE_API_BASE || vars.METASHEET_BASE_URL || vars.PUBLIC_APP_URL || '' }}
+      BASE_ID: ${{ vars.MULTITABLE_PERF_BASE_ID || '' }}
+      TIMEOUT_MS: ${{ inputs.timeout_ms || '15000' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Validate required inputs
+        env:
+          AUTH_TOKEN: ${{ secrets.MULTITABLE_PERF_AUTH_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${API_BASE:-}" ]]; then
+            echo "::error::API base is not configured"
+            exit 1
+          fi
+          if [[ -z "${AUTH_TOKEN:-}" ]]; then
+            echo "::error::MULTITABLE_PERF_AUTH_TOKEN is not configured"
+            exit 1
+          fi
+
+      - name: Run three-endpoint postdeploy smoke
+        env:
+          METASHEET_AUTH_TOKEN: ${{ secrets.MULTITABLE_PERF_AUTH_TOKEN }}
+        run: |
+          set -euo pipefail
+          out_dir="output/multitable-permission-lists-postdeploy-smoke/manual"
+          rm -rf "$out_dir"
+          mkdir -p "$out_dir"
+          args=(
+            --base-url "$API_BASE"
+            --timeout-ms "$TIMEOUT_MS"
+            --out-dir "$out_dir"
+          )
+          if [[ -n "${BASE_ID:-}" ]]; then args+=(--base-id "$BASE_ID"); fi
+          node scripts/ops/multitable-permission-lists-postdeploy-smoke.mjs \
+            "${args[@]}"
+
+      - name: Write values-free summary
+        if: always()
+        run: |
+          echo "## Multitable Permission Lists Postdeploy Smoke" >> "$GITHUB_STEP_SUMMARY"
+          echo '```text' >> "$GITHUB_STEP_SUMMARY"
+          cat output/multitable-permission-lists-postdeploy-smoke/manual/summary.txt 2>/dev/null \
+            >> "$GITHUB_STEP_SUMMARY" || echo "no summary produced" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload values-free evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: multitable-permission-lists-postdeploy-smoke-${{ github.run_id }}-${{ github.run_attempt }}
+          path: output/multitable-permission-lists-postdeploy-smoke/manual
+          if-no-files-found: ignore

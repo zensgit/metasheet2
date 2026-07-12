@@ -1093,3 +1093,78 @@ describe('MetaFieldManager — foreign-field picker (3c)', () => {
     app.unmount(); container.remove()
   })
 })
+
+// Layer-2 visibility keys are CARRIED OPAQUELY through a field-config Save.
+//
+// `update-field` REPLACES `property` wholesale, and `currentDraftProperty` rebuilds it as a closed literal
+// for several types (the person branch is literally `{ limitSingleRecord }`). So without an explicit carry,
+// any unrelated Save — flip person single/multi, rename a button, edit a validation rule — silently DROPPED
+// a stored `hidden: true` and UN-HID the field for everyone. This is the same hazard the component already
+// guards for `actionConfig` ("the form doesn't edit it, so re-emit it intact").
+//
+// The form has no hide/un-hide control anywhere (the FE has no writer of these keys at all — only the
+// reader in utils/field-permissions.ts), so re-emitting them cannot block an un-hide.
+describe('MetaFieldManager — layer-2 visibility keys survive a config Save', () => {
+  function saveConfigFor(field: Record<string, unknown>) {
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const updateSpy = vi.fn()
+    const app = createApp({
+      render() {
+        return h(MetaFieldManager, {
+          visible: true, sheetId: 'sheet_1', sheets: [], fields: [field], onUpdateField: updateSpy,
+        })
+      },
+    })
+    app.mount(container)
+    return { container, updateSpy, app }
+  }
+
+  async function openAndSave(container: HTMLElement) {
+    await nextTick()
+    ;(container.querySelector('.meta-field-mgr__action[title="Configure"]') as HTMLButtonElement | null)?.click()
+    await nextTick()
+    ;(Array.from(container.querySelectorAll('.meta-field-mgr__btn-add')) as HTMLButtonElement[])
+      .find((b) => b.textContent?.includes('Save field settings'))
+      ?.click()
+    await nextTick()
+  }
+
+  it('a HIDDEN person field stays hidden after an unrelated config Save', async () => {
+    const { container, updateSpy, app } = saveConfigFor({
+      id: 'fld_p', name: 'People', type: 'person', property: { hidden: true, limitSingleRecord: true },
+    })
+    try {
+      await openAndSave(container)
+      expect(updateSpy).toHaveBeenCalled()
+      const [, payload] = updateSpy.mock.calls[updateSpy.mock.calls.length - 1]
+      // the hide SURVIVES the wholesale property replacement…
+      expect(payload.property.hidden).toBe(true)
+      // …alongside the type-specific key the form actually edits
+      expect(payload.property.limitSingleRecord).toBe(true)
+    } finally { app.unmount(); container.remove() }
+  })
+
+  it('`visible: false` (the other half of the predicate) survives too', async () => {
+    const { container, updateSpy, app } = saveConfigFor({
+      id: 'fld_p2', name: 'People', type: 'person', property: { visible: false },
+    })
+    try {
+      await openAndSave(container)
+      const [, payload] = updateSpy.mock.calls[updateSpy.mock.calls.length - 1]
+      expect(payload.property.visible).toBe(false)
+    } finally { app.unmount(); container.remove() }
+  })
+
+  it('NON-VACUOUS: a field with no visibility keys does not gain them', async () => {
+    const { container, updateSpy, app } = saveConfigFor({
+      id: 'fld_p3', name: 'People', type: 'person', property: { limitSingleRecord: false },
+    })
+    try {
+      await openAndSave(container)
+      const [, payload] = updateSpy.mock.calls[updateSpy.mock.calls.length - 1]
+      expect(payload.property.hidden).toBeUndefined()
+      expect(payload.property.visible).toBeUndefined()
+    } finally { app.unmount(); container.remove() }
+  })
+})

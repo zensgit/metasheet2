@@ -177,7 +177,7 @@ import { MultitableFormulaEngine } from '../multitable/formula-engine'
 import { FormulaEngine } from '../formula/engine'
 import { validateRecord, getDefaultValidationRules } from '../multitable/field-validation-engine'
 import type { FieldValidationConfig } from '../multitable/field-validation'
-import { assertRichLongTextToggleAllowed, BATCH1_FIELD_TYPES, coerceBatch1Value, isPersonSingleRecord, isRichLongTextProperty, normalizeMultiSelectValue, richLongTextToPlainText, validateLongTextValue, validatePersonValue } from '../multitable/field-codecs'
+import { assertRichLongTextToggleAllowed, BATCH1_FIELD_TYPES, coerceBatch1Value, withLayer2VisibilityKeys, isPersonSingleRecord, isRichLongTextProperty, normalizeMultiSelectValue, richLongTextToPlainText, validateLongTextValue, validatePersonValue } from '../multitable/field-codecs'
 import { apiTokenWriteRateLimit, conditionalPublicRateLimiter, publicFormContextLimiter, publicFormSubmitLimiter } from '../middleware/rate-limiter'
 import { buildOapiAuditContext, oapiWriteAuditBoundary } from '../multitable/oapi-write-audit'
 import { apiTokenAuth, requireScope } from '../middleware/api-token-auth'
@@ -2245,8 +2245,20 @@ function sanitizeFieldProperty(type: UniverMetaField['type'], property: unknown)
   // sanitize + merge them uniformly so the write path can never leak a malformed
   // rule via `...obj` passthrough. Mirrors field-codecs.ts's sanitizeFieldProperty
   // (shared helpers).
-  return withFieldRequiredWhenRule(
-    withFieldVisibilityRule(sanitizeFieldPropertyByType(type, property), property),
+  //
+  // The layer-2 visibility keys (`hidden` / `visible`) belong to that SAME cross-cutting set.
+  //
+  // In THIS sanitizer the closed-allowlist branch is `person` ONLY — there is no `button` branch here at
+  // all (button falls through to the passthrough default), so button was never dropped on this path. Its
+  // field-codecs sibling has BOTH person and button. The two sanitizers do not even agree on which types
+  // they special-case — which is exactly why the rule must live OUTSIDE the per-type switch and be SHARED.
+  // It applies the same imported function, never a second copy: two independent copies of this rule is
+  // precisely how the inconsistency survived in the first place.
+  return withLayer2VisibilityKeys(
+    withFieldRequiredWhenRule(
+      withFieldVisibilityRule(sanitizeFieldPropertyByType(type, property), property),
+      property,
+    ),
     property,
   )
 }

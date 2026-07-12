@@ -85,6 +85,7 @@ REQUIRED_PATHS=(
   "scripts/ops/integration-k3wise-postdeploy-summary.mjs"
   "scripts/ops/integration-k3wise-gate-contract-check.mjs"
   "scripts/ops/stock-preparation-mvp-postdeploy-smoke.mjs"
+  "scripts/ops/multitable-permission-lists-postdeploy-smoke.mjs"
   "scripts/ops/fixtures/integration-k3wise"
   # Legacy SQL readonly Bridge Agent tooling. BA-M0.5 proves the approved
   # Windows SQL driver can connect with SELECT @@VERSION only. BA-M1 then
@@ -630,6 +631,14 @@ First-hop bootstrap sidecar:
     powershell -NoProfile -ExecutionPolicy Bypass -File .\${PACKAGE_NAME}-deploy-bootstrap.ps1 -RootDir . -PackageArchive .\${PACKAGE_NAME}.zip
   The sidecar uses the current launcher logic immediately, defaults staging to
   C:\ms-tmp on Windows, and invokes the staged package's fresh apply helper.
+
+Multitable permission-list closeout smoke (#3408):
+  Set METASHEET_AUTH_TOKEN to a dedicated admin token, then run:
+    node scripts/ops/multitable-permission-lists-postdeploy-smoke.mjs --base-url http://localhost:<port> --out-dir <safe-output-dir>
+  Add --base-id <dedicated-smoke-base-id> when one is available. Without it,
+  the script considers only token-visible bases with an explicit perf/smoke/test
+  name and fails closed before mutation if no safe reusable base exists. It
+  deletes its temporary sheet and emits values-free evidence only.
 
 K3 WISE PoC operator tools (Node only; no Docker needed to run these):
   Runtime plugin:

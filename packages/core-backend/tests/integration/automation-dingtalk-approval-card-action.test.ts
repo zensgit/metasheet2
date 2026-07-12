@@ -385,7 +385,7 @@ describeIfDatabase('A-2b send_dingtalk_approval_card action (real DB)', () => {
     interactiveBodies.length = 0
     const dto = await approvals.createApproval({ templateId, formData: { summary: 'SECRET-FORM-VALUE' } }, { userId: REQUESTER, userName: REQUESTER })
     const instanceId = (dto as { id: string }).id
-    const rows = await waitFor(() => cardRows(instanceId))
+    const rows = await waitFor(async () => (await cardRows(instanceId)).filter((r) => r.send_status !== 'pending'))
     expect(rows).toHaveLength(1)
     const row = rows[0]
     expect(row.delivery_kind).toBe('work_notice_action_card')
@@ -777,7 +777,7 @@ describeIfDatabase('A-2b send_dingtalk_approval_card action (real DB)', () => {
     try {
       const dto = await approvals.createApproval({ templateId, formData: { summary: 'r2 anchor run' } }, { userId: REQUESTER, userName: REQUESTER })
       const instanceId = (dto as { id: string }).id
-      const rows = await waitFor(() => cardRows(instanceId))
+      const rows = await waitFor(async () => (await cardRows(instanceId)).filter((r) => r.send_status !== 'pending'))
       expect(rows).toHaveLength(1)
       // The callback credential anchor: the row is pinned to the corp the card went through.
       expect(rows[0].integration_id).toBe(DD_INTEGRATION)
@@ -816,7 +816,7 @@ describeIfDatabase('A-2b send_dingtalk_approval_card action (real DB)', () => {
       sentBodies.length = 0
       const dto = await approvals.createApproval({ templateId, formData: { summary: 'r2 corp secret run' } }, { userId: REQUESTER, userName: REQUESTER })
       const instanceId = (dto as { id: string }).id
-      const rows = await waitFor(() => cardRows(instanceId))
+      const rows = await waitFor(async () => (await cardRows(instanceId)).filter((r) => r.send_status !== 'pending'))
       expect(rows).toHaveLength(1)
       const row = rows[0]
       expect(row.integration_id).toBe(DD_INTEGRATION)

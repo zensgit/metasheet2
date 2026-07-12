@@ -57,6 +57,11 @@ export default defineConfig({
       // no-DB job cannot skip-green it, and wired as a WHOLE FILE into the directory real-DB
       // step in plugin-tests.yml.
       'tests/integration/directory-sync-schedule-timezone.db.test.ts',
+      // Layer-2 hidden person/button masking (real DB): proves the cross-cutting visibility-key fix actually
+      // masks the VALUE end-to-end, with non-vacuous controls. DATABASE_URL-gated; excluded here so the no-DB
+      // job cannot skip-green it, and wired as a WHOLE FILE into the multitable real-DB step in
+      // plugin-tests.yml. Two-point wiring — both points, deliberately.
+      'tests/integration/multitable-layer2-hidden-person-button-realdb.test.ts',
       'tests/integration/approval-manager-chain.db.test.ts',
       'tests/integration/approval-requester-department.db.test.ts',
       'tests/integration/approval-requester-title.db.test.ts',

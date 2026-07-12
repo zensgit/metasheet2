@@ -40,7 +40,6 @@ import {
   resolveApprovalCardLinkSecretForIntegration,
 } from '../integrations/dingtalk/approval-card-config'
 import {
-  claimDingTalkApprovalCardDeliveryActed,
   findDingTalkApprovalCardDeliveryById,
   type DingTalkApprovalCardDeliveryRow,
 } from '../integrations/dingtalk/approval-card-deliveries'
@@ -270,12 +269,17 @@ export async function executeApprovalActionFromCardDelivery(
     }
   }
 
-  // Engine success — claim the card's terminal state. A lost race (concurrent duplicate) is fine:
-  // the ledger already reflects the real terminal state; re-read and return it.
-  await claimDingTalkApprovalCardDeliveryActed(deps.query, delivery.id, {
-    action: input.decision,
-    actedBy: input.actor.userId,
-  })
+  // P1 (owner review 2026-07-12): the card is claimed `acted` by the ENGINE, inside dispatchAction's
+  // transaction, under a row lock on the delivery, gated on (binding AND still-`sent` AND delivered) —
+  // so the approval and the claim commit or roll back TOGETHER.
+  //
+  // There used to be a separate `claim…Acted` call HERE, after dispatch had already committed, with the
+  // comment "a lost race is fine — the ledger already reflects the real terminal state". That is true
+  // when the race is a duplicate CLICK, and false when the race is a state change: if the retention
+  // sweep (or a supersede/revoke) moved the card off `sent` between the pre-read above and dispatch's
+  // commit, then losing this claim meant the approval had ALREADY been written on a card that was no
+  // longer valid — and nothing surfaced it. Do not reintroduce a post-commit claim: a claim that runs
+  // after the decision is durable cannot gate the decision.
   const fresh = await findDingTalkApprovalCardDeliveryById(deps.query, input.deliveryId)
   const summary = fresh ? await buildSummary(deps.query, fresh, input.actor.userId) : null
   return { status: 'ok', summary: summary ?? preSummary }

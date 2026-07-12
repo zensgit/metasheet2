@@ -233,10 +233,51 @@ export function sanitizeFieldProperty(
   // per-type normalization rather than relying on each branch's incidental
   // `...obj` passthrough (which would also let a *malformed* rule leak through).
   // See field-visibility-rule.ts.
-  return withFieldRequiredWhenRule(
-    withFieldVisibilityRule(sanitizeFieldPropertyByType(type, property), property),
+  //
+  // The layer-2 visibility keys (`hidden` / `visible`) belong to that SAME cross-cutting set and were
+  // simply never added to it — see withLayer2VisibilityKeys. That omission is the bug it fixes.
+  return withLayer2VisibilityKeys(
+    withFieldRequiredWhenRule(
+      withFieldVisibilityRule(sanitizeFieldPropertyByType(type, property), property),
+      property,
+    ),
     property,
   )
+}
+
+/**
+ * Layer-2 field visibility (`property.hidden === true` / `property.visible === false`) is CROSS-CUTTING:
+ * `isFieldPermissionHidden` (permission-derivation.ts) reads these two keys for EVERY field type.
+ *
+ * Most per-type branches spread the source (`...obj`, or link's `...cleanObj`) and so carried the keys
+ * through incidentally. Exactly TWO branches rebuild `property` from scratch as a closed allowlist and
+ * therefore DROPPED them — **`person` and `button`** (measured, not assumed: reverting this rule reds only
+ * the person and button rows of the type-by-type test). A custom `fieldTypeRegistry` codec can do the same.
+ * So whether a field could be hidden at all depended on which branch its type happened to fall into.
+ *
+ * This applies the rule ONCE, in the cross-cutting composition chain — exactly where `visibilityRule` and
+ * `requiredWhen` already live, and for exactly the same stated reason ("rather than relying on each
+ * branch's incidental `...obj` passthrough"). Fixing only the two guilty branches would leave the next
+ * closed-allowlist branch (or new field type) free to reintroduce it; a branch only has to forget once.
+ *
+ * SCOPE, precisely (review P3): this helper only ever SYNTHESIZES the DENY values — it adds `hidden: true`
+ * / `visible: false` when the source carries them, and adds nothing otherwise. It does NOT strip anything:
+ * a passthrough branch that already spreads `...obj` still carries an existing `hidden: false` /
+ * `visible: true` through, exactly as before. Those permissive values are inert for the predicate, and
+ * deliberately NOT removed here — stripping them would churn existing wire shapes for no security benefit.
+ * So: deny values are guaranteed present; permissive values keep whatever shape the type already had.
+ *
+ * SINGLE DEFINITION — `univer-meta.ts`'s sibling sanitizer imports and applies this same function, so the
+ * two cannot silently drift apart again.
+ */
+export function withLayer2VisibilityKeys(
+  sanitized: Record<string, unknown>,
+  property: unknown,
+): Record<string, unknown> {
+  const source = normalizeJson(property)
+  if (source.hidden === true) sanitized.hidden = true
+  if (source.visible === false) sanitized.visible = false
+  return sanitized
 }
 
 function sanitizeFieldPropertyByType(

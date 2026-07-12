@@ -29,6 +29,7 @@ const {
 } = require('./stock-preparation-templates.cjs')
 const { planBomSnapshotDiff, CHANGE_TYPES, DIFF_TYPES, REVIEW_STATUSES } = require('./stock-preparation-snapshot-diff.cjs')
 const { optionalString, isPlainObject } = require('./stock-preparation-common.cjs')
+const { createTargetScopedRecordsApi } = require('./stock-preparation-table-actions.cjs')
 const {
   StockPreparationTargetProvisioningError,
   __internals: { assertAdminPermission },
@@ -106,13 +107,16 @@ function ensureReadOnlyRecordsApi(recordsApi) {
   return recordsApi
 }
 
+// #4160: resolveFieldIds is REQUIRED — a read is as fieldId-bound as a write. The records service
+// rejects a logical filter key ('Unknown fieldId') and returns rows keyed by PHYSICAL fieldId, so a
+// read that skips the translation silently reports every cell as undefined.
 function ensureProvisioningApi(provisioning) {
-  if (!provisioning || typeof provisioning.findObjectSheet !== 'function') {
+  if (!provisioning || typeof provisioning.findObjectSheet !== 'function' || typeof provisioning.resolveFieldIds !== 'function') {
     throw new StockPreparationTargetProvisioningError(
       501,
       'SNAPSHOT_READS_PROVISIONING_API_UNAVAILABLE',
-      'stock-preparation snapshot reads require multitable.provisioning.findObjectSheet',
-      { requiredMethods: ['findObjectSheet'] },
+      'stock-preparation snapshot reads require multitable.provisioning findObjectSheet/resolveFieldIds',
+      { requiredMethods: ['findObjectSheet', 'resolveFieldIds'] },
     )
   }
   return provisioning
@@ -139,20 +143,29 @@ function toNumber(value) {
 }
 
 // Locate a frozen MVP sheet by objectId (asserting the objectId is in the MVP set first), using the
-// STAGING targetProjectId. Returns the sheet ({ id }) or null when the internal table has not been
-// provisioned yet (tables may be empty — callers degrade gracefully).
-async function findMvpSheet(provisioning, targetProjectId, objectId) {
+// STAGING targetProjectId. Returns a READ-ONLY target-scoped records API bound to that sheet AND to
+// its logical->physical fieldId map (#4160 — every read goes through the one translating entry point,
+// so this module keeps filtering and reading by the frozen templates' logical keys), or null when the
+// internal table has not been provisioned yet (tables may be empty — callers degrade gracefully).
+async function findMvpSheet(recordsApi, provisioning, targetProjectId, objectId) {
   assertMvpObjectId(objectId)
   const sheet = await provisioning.findObjectSheet({ projectId: targetProjectId, objectId })
-  return sheet && sheet.id ? sheet : null
+  const sheetId = sheet && sheet.id ? sheet.id : null
+  if (!sheetId) return null
+  const scoped = await createTargetScopedRecordsApi(recordsApi, { sheetId, objectId }, {
+    provisioning,
+    projectId: targetProjectId,
+    readOnly: true,
+  })
+  return { id: sheetId, scoped }
 }
 
 // Bounded readonly scan: page queryRecords until a short page (last page) or the page bound is hit.
-async function queryAllRecords(recordsApi, sheetId, filters) {
+// `target` is a findMvpSheet result — the scoped, field-mapped API; filters/rows stay logical.
+async function queryAllRecords(target, filters) {
   const rows = []
   for (let page = 0; page < READ_MAX_PAGES; page += 1) {
-    const pageRows = await recordsApi.queryRecords({
-      sheetId,
+    const pageRows = await target.scoped.queryRecords({
       filters,
       limit: READ_PAGE_LIMIT,
       offset: page * READ_PAGE_LIMIT,
@@ -162,7 +175,7 @@ async function queryAllRecords(recordsApi, sheetId, filters) {
         500,
         'SNAPSHOT_READS_RECORDS_API_INVALID',
         'queryRecords must return an array',
-        { sheetId },
+        { sheetId: target.id },
       )
     }
     rows.push(...pageRows)
@@ -213,26 +226,26 @@ async function listSnapshotBatches({ recordsApi, provisioning, targetProjectId, 
   const stagingProjectId = requiredString(targetProjectId, 'targetProjectId')
   const projectId = requiredString(businessProjectId, 'businessProjectId')
 
-  const batchSheet = await findMvpSheet(prov, stagingProjectId, BATCH_OBJECT_ID)
+  const batchSheet = await findMvpSheet(api, prov, stagingProjectId, BATCH_OBJECT_ID)
   if (!batchSheet) {
     return { projectId, batchCount: 0, batches: [] }
   }
-  const lineSheet = await findMvpSheet(prov, stagingProjectId, LINE_OBJECT_ID)
-  const runSheet = await findMvpSheet(prov, stagingProjectId, RUN_OBJECT_ID)
+  const lineSheet = await findMvpSheet(api, prov, stagingProjectId, LINE_OBJECT_ID)
+  const runSheet = await findMvpSheet(api, prov, stagingProjectId, RUN_OBJECT_ID)
 
-  const batchRows = await queryAllRecords(api, batchSheet.id, { projectId })
+  const batchRows = await queryAllRecords(batchSheet, { projectId })
   const summaries = []
   for (const batchRow of batchRows) {
     const snapshotBatchId = optionalString(readCell(batchRow, 'snapshotBatchId'))
     const syncRunId = optionalString(readCell(batchRow, 'syncRunId'))
     let lineCount = 0
     if (lineSheet && snapshotBatchId) {
-      const lineRows = await queryAllRecords(api, lineSheet.id, { snapshotBatchId })
+      const lineRows = await queryAllRecords(lineSheet, { snapshotBatchId })
       lineCount = lineRows.length
     }
     let runPresent = false
     if (runSheet && syncRunId) {
-      const runRows = await queryAllRecords(api, runSheet.id, { runId: syncRunId })
+      const runRows = await queryAllRecords(runSheet, { runId: syncRunId })
       runPresent = runRows.length > 0
     }
     summaries.push(batchSummary(batchRow, lineCount, runPresent))
@@ -288,7 +301,7 @@ async function resolveDiffBase(api, batchSheet, { currentSnapshotBatchId, projec
     if (requestedBase === currentSnapshotBatchId) {
       throw new StockPreparationTargetProvisioningError(400, 'SNAPSHOT_DIFF_BASE_INVALID', 'baseSnapshotBatchId must differ from the diffed batch', { field: 'baseSnapshotBatchId' })
     }
-    const baseRows = batchSheet ? await queryAllRecords(api, batchSheet.id, { snapshotBatchId: requestedBase }) : []
+    const baseRows = batchSheet ? await queryAllRecords(batchSheet, { snapshotBatchId: requestedBase }) : []
     const baseRow = baseRows[0] || null
     if (!baseRow) {
       throw new StockPreparationTargetProvisioningError(404, 'SNAPSHOT_DIFF_BASE_NOT_FOUND', 'base snapshot batch was not found', { field: 'baseSnapshotBatchId' })
@@ -300,7 +313,7 @@ async function resolveDiffBase(api, batchSheet, { currentSnapshotBatchId, projec
     return requestedBase
   }
   if (batchSheet && projectId) {
-    const projectBatchRows = await queryAllRecords(api, batchSheet.id, { projectId })
+    const projectBatchRows = await queryAllRecords(batchSheet, { projectId })
     return pickPredecessor(projectBatchRows, currentSnapshotBatchId, currentVersion)
   }
   return null
@@ -322,9 +335,9 @@ async function getSnapshotDiff({ recordsApi, provisioning, targetProjectId, busi
   const stagingProjectId = requiredString(targetProjectId, 'targetProjectId')
   const requestedBase = optionalString(baseOverride)
 
-  const batchSheet = await findMvpSheet(prov, stagingProjectId, BATCH_OBJECT_ID)
-  const lineSheet = await findMvpSheet(prov, stagingProjectId, LINE_OBJECT_ID)
-  const exceptionSheet = await findMvpSheet(prov, stagingProjectId, EXCEPTION_OBJECT_ID)
+  const batchSheet = await findMvpSheet(api, prov, stagingProjectId, BATCH_OBJECT_ID)
+  const lineSheet = await findMvpSheet(api, prov, stagingProjectId, LINE_OBJECT_ID)
+  const exceptionSheet = await findMvpSheet(api, prov, stagingProjectId, EXCEPTION_OBJECT_ID)
 
   if (!batchSheet && !lineSheet && !exceptionSheet) {
     // An explicit base cannot be verified against an unprovisioned substrate — fail closed instead of
@@ -345,7 +358,7 @@ async function getSnapshotDiff({ recordsApi, provisioning, targetProjectId, busi
   let projectId = optionalString(businessProjectId)
   let currentVersion = null
   if (batchSheet) {
-    const currentRows = await queryAllRecords(api, batchSheet.id, { snapshotBatchId: currentSnapshotBatchId })
+    const currentRows = await queryAllRecords(batchSheet, { snapshotBatchId: currentSnapshotBatchId })
     currentBatchRow = currentRows[0] || null
     if (currentBatchRow) {
       projectId = optionalString(readCell(currentBatchRow, 'projectId')) || projectId
@@ -363,10 +376,10 @@ async function getSnapshotDiff({ recordsApi, provisioning, targetProjectId, busi
 
   // Lines for the current + predecessor batches (never mutated; passed straight to the diff engine).
   const currentLines = lineSheet
-    ? (await queryAllRecords(api, lineSheet.id, { snapshotBatchId: currentSnapshotBatchId })).map(recordData)
+    ? (await queryAllRecords(lineSheet, { snapshotBatchId: currentSnapshotBatchId })).map(recordData)
     : []
   const previousLines = lineSheet && baseSnapshotBatchId
-    ? (await queryAllRecords(api, lineSheet.id, { snapshotBatchId: baseSnapshotBatchId })).map(recordData)
+    ? (await queryAllRecords(lineSheet, { snapshotBatchId: baseSnapshotBatchId })).map(recordData)
     : []
 
   const diff = planBomSnapshotDiff({
@@ -381,7 +394,7 @@ async function getSnapshotDiff({ recordsApi, provisioning, targetProjectId, busi
   // Open-Decision noted in the PR): a resolved-but-blocking-severity row is still counted here.
   let blockingExceptionCount = 0
   if (exceptionSheet) {
-    const exceptionRows = await queryAllRecords(api, exceptionSheet.id, { snapshotBatchId: currentSnapshotBatchId })
+    const exceptionRows = await queryAllRecords(exceptionSheet, { snapshotBatchId: currentSnapshotBatchId })
     for (const row of exceptionRows) {
       if (optionalString(readCell(row, 'severity')) === BLOCKING_EXCEPTION_SEVERITY) blockingExceptionCount += 1
     }
@@ -447,8 +460,8 @@ async function listSnapshotDiffRows({ recordsApi, provisioning, targetProjectId,
     throw new StockPreparationTargetProvisioningError(422, 'SNAPSHOT_READS_CONFIG_INVALID', 'diffType must be one of the diff-type vocabulary', { field: 'diffType' })
   }
 
-  const batchSheet = await findMvpSheet(prov, stagingProjectId, BATCH_OBJECT_ID)
-  const lineSheet = await findMvpSheet(prov, stagingProjectId, LINE_OBJECT_ID)
+  const batchSheet = await findMvpSheet(api, prov, stagingProjectId, BATCH_OBJECT_ID)
+  const lineSheet = await findMvpSheet(api, prov, stagingProjectId, LINE_OBJECT_ID)
 
   if (!batchSheet && !lineSheet) {
     if (requestedBase) {
@@ -461,7 +474,7 @@ async function listSnapshotDiffRows({ recordsApi, provisioning, targetProjectId,
   let currentVersion = null
   let currentBatchRowPresent = false
   if (batchSheet) {
-    const currentRows = await queryAllRecords(api, batchSheet.id, { snapshotBatchId: currentSnapshotBatchId })
+    const currentRows = await queryAllRecords(batchSheet, { snapshotBatchId: currentSnapshotBatchId })
     const currentBatchRow = currentRows[0] || null
     if (currentBatchRow) {
       currentBatchRowPresent = true
@@ -479,10 +492,10 @@ async function listSnapshotDiffRows({ recordsApi, provisioning, targetProjectId,
   })
 
   const currentLines = lineSheet
-    ? (await queryAllRecords(api, lineSheet.id, { snapshotBatchId: currentSnapshotBatchId })).map(recordData)
+    ? (await queryAllRecords(lineSheet, { snapshotBatchId: currentSnapshotBatchId })).map(recordData)
     : []
   const previousLines = lineSheet && baseSnapshotBatchId
-    ? (await queryAllRecords(api, lineSheet.id, { snapshotBatchId: baseSnapshotBatchId })).map(recordData)
+    ? (await queryAllRecords(lineSheet, { snapshotBatchId: baseSnapshotBatchId })).map(recordData)
     : []
 
   const plan = planBomSnapshotDiff({
