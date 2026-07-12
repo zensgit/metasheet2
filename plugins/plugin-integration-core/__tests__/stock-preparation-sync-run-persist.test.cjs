@@ -30,6 +30,12 @@ const {
 const {
   __internals: { LINE_FIELD_IDS },
 } = require(path.join(__dirname, '..', 'lib', 'stock-preparation-sync-run-plan.cjs'))
+const {
+  makeFakeProvisioning,
+  makeStrictRecordsApi,
+  physicalFieldId,
+  logicalData,
+} = require(path.join(__dirname, 'fixtures', 'stock-preparation-multitable-fakes.cjs'))
 
 const BATCH_SHEET_ID = `sheet_${BATCH_OBJECT_ID}`
 const LINE_SHEET_ID = `sheet_${LINE_OBJECT_ID}`
@@ -63,69 +69,51 @@ function run(name, fn) {
     })
 }
 
-// Stateful in-memory fake records API: stores every created row by sheetId, records every call's
-// sheetId (+ data), and filters queryRecords by exact field equality — so idempotency genuinely hits
-// the skip path. patchRecord is present ONLY so createTargetScopedRecordsApi's write-API guard passes;
-// it counts invocations, which every test asserts stays 0.
+// The 9 frozen MVP objects, each on its own sheet (sheet_<objectId>) — and the reverse map the STRICT
+// fake needs to know which object's field ids a given sheet accepts.
+const SHEET_ID_BY_OBJECT_ID = Object.fromEntries([...MVP_OBJECT_ID_SET].map((objectId) => [objectId, `sheet_${objectId}`]))
+const OBJECT_ID_BY_SHEET_ID = Object.fromEntries(Object.entries(SHEET_ID_BY_OBJECT_ID).map(([objectId, sheetId]) => [sheetId, objectId]))
+
+// #4160 — the records API is now STRICT: it accepts ONLY the physical fieldIds provisioning derived for
+// the sheet's object, exactly like the real service (`Unknown fieldId: X` otherwise). The old fake here
+// accepted the templates' LOGICAL keys, which is why the whole suite was green while every write 500'd
+// in production. Point this fake at the pre-fix module and it throws `Unknown fieldId: snapshotBatchId`.
 function makeRecordsApi() {
-  const store = new Map() // sheetId -> [{ id, data }]
-  const createCalls = []
-  const queryCalls = []
-  let patchCalls = 0
-  let seq = 0
-  return {
-    createCalls,
-    queryCalls,
-    get patchCalls() {
-      return patchCalls
-    },
-    async createRecord(input = {}) {
-      const { sheetId, data } = input
-      createCalls.push({ sheetId, data })
-      const rows = store.get(sheetId) || []
-      seq += 1
-      const record = { id: `rec_${seq}`, data: { ...data } }
-      rows.push(record)
-      store.set(sheetId, rows)
-      return record
-    },
-    async queryRecords(input = {}) {
-      const { sheetId, filters = {} } = input
-      queryCalls.push({ sheetId, filters })
-      const rows = store.get(sheetId) || []
-      return rows.filter((record) => Object.entries(filters).every(([key, value]) => record.data[key] === value))
-    },
-    async patchRecord(input = {}) {
-      patchCalls += 1
-      return { id: input.recordId }
-    },
-  }
+  return makeStrictRecordsApi({ objectIdBySheetId: OBJECT_ID_BY_SHEET_ID, stagingProjectId: STAGING_PROJECT_ID })
 }
 
 // Fake provisioning: a DISTINCT sheetId per MVP objectId (sheet_<objectId>), but ONLY under the STAGING
 // project — a lookup with any other projectId (e.g. the business projectId) misses (returns null). This
 // mirrors the real provisioning scope: ensure/readiness provisioned the tables under the staging project,
-// so persist MUST resolve them there. `missing` names objectIds unprovisioned even under staging. Records
-// every projectId seen (so a test can assert sheet resolution used the staging target, not the business
-// project) and counts invocations (so the admin-gate-first test can assert zero).
+// so persist MUST resolve them there. `missing` names objectIds unprovisioned even under staging.
+// resolveFieldIds mirrors the platform derivation, so the module can learn the physical ids.
 function makeProvisioning({ missing = new Set(), stagingProjectId = STAGING_PROJECT_ID } = {}) {
-  let findObjectSheetCalls = 0
-  const projectIdsSeen = []
+  const fake = makeFakeProvisioning({ sheetIdByObjectId: SHEET_ID_BY_OBJECT_ID, stagingProjectId, missing })
   return {
+    ...fake,
     get findObjectSheetCalls() {
-      return findObjectSheetCalls
+      return fake.calls.findObjectSheet.length
     },
+    // Only the SHEET lookups' project ids — the field-id resolution rides the same staging project by
+    // construction (the scoped API resolves under the projectId the sheet was resolved with).
     get projectIdsSeen() {
-      return projectIdsSeen.slice()
+      return fake.calls.findObjectSheet.map((call) => call.projectId)
     },
-    async findObjectSheet({ projectId, objectId } = {}) {
-      findObjectSheetCalls += 1
-      projectIdsSeen.push(projectId)
-      if (projectId !== stagingProjectId) return null
-      if (missing.has(objectId)) return null
-      return { id: `sheet_${objectId}` }
-    },
+    findObjectSheet: fake.findObjectSheet,
+    resolveFieldIds: fake.resolveFieldIds,
   }
+}
+
+// The recorded write payloads are keyed by PHYSICAL fieldId (that is the whole point). Read them back
+// as logical keys for the value assertions; `rawKeysArePhysical` pins the translation itself.
+function logicalOf(call) {
+  return logicalData(STAGING_PROJECT_ID, objectIdForSheet(call.sheetId), call.data)
+}
+
+function rawKeysArePhysical(call) {
+  const objectId = objectIdForSheet(call.sheetId)
+  return Object.keys(call.data).every((key) => key.startsWith('fld_')) &&
+    Object.keys(logicalOf(call)).every((logical) => call.data[physicalFieldId(STAGING_PROJECT_ID, objectId, logical)] !== undefined)
 }
 
 // A clean two-row expansion result: distinct paths, positive quantities.
@@ -186,13 +174,13 @@ async function main() {
     }
 
     // Batch row carries the batch key + status; run row carries the run id + type.
-    assert.equal(recordsApi.createCalls[0].data.snapshotBatchId, 'batch_1')
-    assert.equal(recordsApi.createCalls[0].data.snapshotStatus, 'draft')
-    assert.equal(recordsApi.createCalls[3].data.runId, 'run_1')
-    assert.equal(recordsApi.createCalls[3].data.runType, 'plm_sync')
+    assert.equal(logicalOf(recordsApi.createCalls[0]).snapshotBatchId, 'batch_1')
+    assert.equal(logicalOf(recordsApi.createCalls[0]).snapshotStatus, 'draft')
+    assert.equal(logicalOf(recordsApi.createCalls[3]).runId, 'run_1')
+    assert.equal(logicalOf(recordsApi.createCalls[3]).runType, 'plm_sync')
 
     // Immutability: no patch ever.
-    assert.equal(recordsApi.patchCalls, 0)
+    assert.equal(recordsApi.patchCalls.length, 0)
     // Evidence is values-free & carries the public objectId constants.
     assert.equal(result.evidence.valuesFree, true)
     assert.equal(result.evidence.targets.snapshotBatch.objectId, BATCH_OBJECT_ID)
@@ -203,7 +191,7 @@ async function main() {
     // THE SPLIT: sheet resolution used the STAGING targetProjectId for all three lookups, NOT the business
     // projectId — while the persisted batch row still carries the BUSINESS projectId as business data.
     assert.deepEqual(provisioning.projectIdsSeen, [STAGING_PROJECT_ID, STAGING_PROJECT_ID, STAGING_PROJECT_ID])
-    assert.equal(recordsApi.createCalls[0].data.projectId, 'proj_1')
+    assert.equal(logicalOf(recordsApi.createCalls[0]).projectId, 'proj_1')
   })
 
   // ---- project-scope split: targetProjectId (staging) resolves sheets; business projectId must NOT ----
@@ -258,14 +246,99 @@ async function main() {
     const lineWrites = recordsApi.createCalls.filter((call) => call.sheetId === LINE_SHEET_ID)
     assert.equal(lineWrites.length, 3)
     for (const call of lineWrites) {
-      assert.equal('missingChildBom' in call.data, false, 'plan-internal marker not persisted')
-      for (const key of Object.keys(call.data)) {
+      const logical = logicalOf(call)
+      assert.equal('missingChildBom' in logical, false, 'plan-internal marker not persisted')
+      // The keys actually sent to the records service are PHYSICAL fieldIds; each maps back to a
+      // template-declared logical key of the line template (nothing else may be written).
+      assert.ok(rawKeysArePhysical(call), 'line write used physical fieldIds')
+      for (const key of Object.keys(logical)) {
         assert.ok(LINE_FIELD_ID_SET.has(key), `persisted line key ${key} is template-declared`)
       }
     }
     // At least one stamped incomplete line reached the sheet.
-    assert.ok(lineWrites.some((call) => call.data.lineStatus === 'incomplete'), 'incomplete line persisted')
-    assert.equal(recordsApi.patchCalls, 0)
+    assert.ok(lineWrites.some((call) => logicalOf(call).lineStatus === 'incomplete'), 'incomplete line persisted')
+    assert.equal(recordsApi.patchCalls.length, 0)
+  })
+
+  // ---- #4160: the write path speaks PHYSICAL fieldIds — a logical key would be rejected outright ----
+  await run('#4160 every create/query key is a resolved physical fieldId, never a logical template key', async () => {
+    const recordsApi = makeRecordsApi()
+    const provisioning = makeProvisioning()
+    await persistStockPreparationSyncRun({ permission: 'admin', recordsApi, provisioning, ...basePlanInputs() })
+
+    // Writes: every key is the physical id provisioning derived for that sheet's object.
+    for (const call of recordsApi.createCalls) {
+      assert.ok(rawKeysArePhysical(call), `create on ${call.sheetId} used physical fieldIds`)
+      assert.equal(Object.keys(call.data).some((key) => key === 'snapshotBatchId' || key === 'runId'), false,
+        'no raw logical key ever reaches the records service')
+    }
+    // Reads: the idempotency probe filters by the PHYSICAL snapshotBatchId — the exact key the real
+    // service accepts (a logical filter key is rejected with `Unknown fieldId`).
+    const batchProbe = recordsApi.queryCalls.find((call) => call.sheetId === BATCH_SHEET_ID)
+    assert.ok(batchProbe, 'the batch idempotency probe ran')
+    assert.deepEqual(Object.keys(batchProbe.filters), [physicalFieldId(STAGING_PROJECT_ID, BATCH_OBJECT_ID, 'snapshotBatchId')])
+    assert.equal(Object.values(batchProbe.filters)[0], 'batch_1')
+
+    // And the field ids were learned through the sanctioned API, under the STAGING project.
+    assert.ok(provisioning.calls.resolveFieldIds.length > 0, 'field ids resolved via provisioning.resolveFieldIds')
+    for (const call of provisioning.calls.resolveFieldIds) {
+      assert.equal(call.projectId, STAGING_PROJECT_ID, 'field ids resolved under the staging project, not the business project')
+    }
+  })
+
+  // ---- #4160 fail-closed: a field the target template does not declare THROWS (never silently dropped) ----
+  await run('#4160 an undeclared logical key is rejected by the scoped API, not silently dropped', async () => {
+    const { createTargetScopedRecordsApi, StockPreparationTableActionError } =
+      require(path.join(__dirname, '..', 'lib', 'stock-preparation-table-actions.cjs'))
+    const recordsApi = makeRecordsApi()
+    const scoped = await createTargetScopedRecordsApi(
+      recordsApi,
+      { sheetId: BATCH_SHEET_ID, objectId: BATCH_OBJECT_ID },
+      { provisioning: makeProvisioning(), projectId: STAGING_PROJECT_ID },
+    )
+    for (const call of [
+      () => scoped.createRecord({ data: { snapshotBatchId: 'b1', notATemplateField: 'x' } }),
+      () => scoped.patchRecord({ recordId: 'rec_1', changes: { notATemplateField: 'x' } }),
+      () => scoped.queryRecords({ filters: { notATemplateField: 'x' } }),
+    ]) {
+      await assert.rejects(call, (error) =>
+        error instanceof StockPreparationTableActionError &&
+        error.code === 'TABLE_ACTION_UNKNOWN_LOGICAL_FIELD' &&
+        error.details.field === 'notATemplateField')
+    }
+    assert.equal(recordsApi.createCalls.length, 0, 'nothing was written with a dropped field')
+  })
+
+  // ---- the target-sheet fence: a call that names ANOTHER sheet is refused, not silently redirected ----
+  // This is the last lock on "stock-prep writes only ever touch its own 9 internal tables". It was the one
+  // guard with zero coverage (#4163 review F1). `withTargetSheet` also overwrites sheetId, so deleting the
+  // throw would make an out-of-scope attempt SILENT rather than successful — but silence is exactly how a
+  // caller drifting to the wrong sheet stops being noticed. The fence must speak.
+  await run('#4163 a records call naming a DIFFERENT sheet is refused (403), on every verb', async () => {
+    const { createTargetScopedRecordsApi, StockPreparationTableActionError } =
+      require(path.join(__dirname, '..', 'lib', 'stock-preparation-table-actions.cjs'))
+    const recordsApi = makeRecordsApi()
+    const scoped = await createTargetScopedRecordsApi(
+      recordsApi,
+      { sheetId: BATCH_SHEET_ID, objectId: BATCH_OBJECT_ID },
+      { provisioning: makeProvisioning(), projectId: STAGING_PROJECT_ID },
+    )
+    const foreignSheetId = `${BATCH_SHEET_ID}_someone_elses_sheet`
+    for (const call of [
+      () => scoped.createRecord({ sheetId: foreignSheetId, data: { snapshotBatchId: 'b1' } }),
+      () => scoped.patchRecord({ sheetId: foreignSheetId, recordId: 'rec_1', changes: { snapshotStatus: 'draft' } }),
+      () => scoped.queryRecords({ sheetId: foreignSheetId, filters: { snapshotBatchId: 'b1' } }),
+    ]) {
+      await assert.rejects(call, (error) =>
+        error instanceof StockPreparationTableActionError &&
+        error.status === 403 &&
+        error.code === 'TABLE_ACTION_TARGET_SCOPE_VIOLATION')
+    }
+    assert.equal(recordsApi.createCalls.length, 0, 'no write escaped to the foreign sheet')
+    // The bound sheet still works — the fence is scoped, not a blanket refusal.
+    await scoped.createRecord({ data: { snapshotBatchId: 'b1' } })
+    assert.equal(recordsApi.createCalls.length, 1)
+    assert.equal(recordsApi.createCalls[0].sheetId, BATCH_SHEET_ID)
   })
 
   // ---- (b) idempotency + (c) immutability: a repeat persist of the same batch id is skipped ----
@@ -285,7 +358,7 @@ async function main() {
 
     // No new writes on the skip path — the batch (and its lines/run) are immutable.
     assert.equal(recordsApi.createCalls.length, createsAfterFirst, 'no new createRecord on skip')
-    assert.equal(recordsApi.patchCalls, 0, 'patchRecord never called across both persists')
+    assert.equal(recordsApi.patchCalls.length, 0, 'patchRecord never called across both persists')
   })
 
   // ---- (e) target not provisioned -> fail closed, NO writes ----
@@ -303,7 +376,7 @@ async function main() {
         `missing ${missingObjectId} fails closed`,
       )
       assert.equal(recordsApi.createCalls.length, 0, 'no rows written when a target is unprovisioned')
-      assert.equal(recordsApi.patchCalls, 0)
+      assert.equal(recordsApi.patchCalls.length, 0)
     }
   })
 
@@ -362,9 +435,9 @@ async function main() {
     // The persisted rows legitimately carry the business values (that IS the row data)...
     const lineWrite = recordsApi.createCalls.find((call) => call.sheetId === LINE_SHEET_ID)
     assert.ok(lineWrite, 'a line row was written')
-    assert.equal(lineWrite.data.childDrawingNo, LEAKY_DRAWING_NO)
+    assert.equal(logicalOf(lineWrite).childDrawingNo, LEAKY_DRAWING_NO)
     const batchWrite = recordsApi.createCalls.find((call) => call.sheetId === BATCH_SHEET_ID)
-    assert.equal(batchWrite.data.projectId, LEAKY_PROJECT_ID)
+    assert.equal(logicalOf(batchWrite).projectId, LEAKY_PROJECT_ID)
 
     // ...but the EVIDENCE is values-free: the secret token appears nowhere in it.
     const evidenceJson = JSON.stringify(result.evidence)

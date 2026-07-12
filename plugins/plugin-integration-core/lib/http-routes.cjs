@@ -3428,7 +3428,9 @@ function createHandlers(services, options = {}) {
       const planDecisions = (pendingJob && pendingJob.plan && Array.isArray(pendingJob.plan.decisions)) ? pendingJob.plan.decisions : []
       const largeBomCleanRowCount = planDecisions.filter((d) => d && (d.decision === 'add' || d.decision === 'update')).length
       assertProductionCleanRowsWithinBound(applyGate, largeBomCleanRowCount)
-      const scopedRecordsApi = createTargetScopedRecordsApi(getMultitableRecordsApi(), pendingJob.target)
+      // C4 large-BOM apply: same pre-mapped contract as the small route — the apply writer maps payload
+      // keys through the operator-configured target.fieldIdMap, so the scoped API must not remap (#4160).
+      const scopedRecordsApi = await createTargetScopedRecordsApi(getMultitableRecordsApi(), pendingJob.target, { fieldIdTranslation: 'pre_mapped' })
       const job = await runLargeBomCheckpointApplyJobChunk({
         storage: context.storage,
         ...routeScope,
