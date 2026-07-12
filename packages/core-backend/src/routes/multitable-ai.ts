@@ -729,7 +729,10 @@ export function createMultitableAiRoutes(deps: MultitableAiRouteDeps = {}): Rout
       }
 
       const recordIdFilter = recordIds && recordIds.length > 0 ? new Set(recordIds) : null
-      const recordRes = await query('SELECT id, version, data FROM meta_records WHERE sheet_id = $1', [sheetId])
+      const recordRes = await query(
+        'SELECT id, version, data FROM meta_records WHERE sheet_id = $1 ORDER BY created_at ASC, id ASC',
+        [sheetId],
+      )
       let candidateIds = (recordRes.rows as Array<{ id: unknown; data: unknown }>)
         .map((row) => ({ id: String(row.id), data: normalizeJson(row.data) }))
         .filter((row) => (recordIdFilter ? recordIdFilter.has(row.id) : true))

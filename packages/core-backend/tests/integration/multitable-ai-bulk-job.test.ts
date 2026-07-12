@@ -156,6 +156,13 @@ async function seedRecord(recordId: string, data: Record<string, unknown>, creat
   ])
 }
 
+async function seedRecordAt(recordId: string, data: Record<string, unknown>, createdBy: string, createdAt: string) {
+  await q(
+    'INSERT INTO meta_records (id, sheet_id, data, version, created_by, created_at) VALUES ($1,$2,$3::jsonb,1,$4,$5)',
+    [recordId, SHEET_ID, JSON.stringify(data), createdBy, createdAt],
+  )
+}
+
 /** Drive the queued job's generate phase to its suspend (deterministic; no queue registered). */
 async function runJob(jobId: string) {
   await jobService.runJob(jobId)
@@ -742,9 +749,12 @@ describeIfDatabase('B-4 AI bulk-fill async job (real DB)', () => {
     const W2 = `rec_b4_d_w2_${TS}`
     const W3 = `rec_b4_d_w3_${TS}`
     const NOWRITE = `rec_b4_d_nowrite_${TS}`
-    await seedRecord(W1, { [FLD_SRC]: 'w1', [FLD_TARGET]: 'EXISTING-1' }, ACTOR)
-    await seedRecord(W2, { [FLD_SRC]: 'w2' }, ACTOR) // empty target → currentValue null
-    await seedRecord(W3, { [FLD_SRC]: 'w3' }, ACTOR)
+    // Insert in reverse physical order while created_at defines W1 -> W2 -> W3.
+    // Without the route's explicit ordering, PostgreSQL feeds W3/W2 to the quota
+    // first and leaves W1 pending, making the runtime regression deterministic.
+    await seedRecordAt(W3, { [FLD_SRC]: 'w3' }, ACTOR, '2024-01-03T00:00:00.000Z')
+    await seedRecordAt(W2, { [FLD_SRC]: 'w2' }, ACTOR, '2024-01-02T00:00:00.000Z') // empty target → currentValue null
+    await seedRecordAt(W1, { [FLD_SRC]: 'w1', [FLD_TARGET]: 'EXISTING-1' }, ACTOR, '2024-01-01T00:00:00.000Z')
     await seedRecord(NOWRITE, { [FLD_SRC]: 'theirs' }, OTHER) // not writable → skipped
 
     // Cap 600 admits 2 reservations → W1/W2 generate, W3 pauses (pending_not_generated).
