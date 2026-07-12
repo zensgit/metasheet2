@@ -330,6 +330,11 @@ async function testTrustedInternalPagingDoesNotWidenPublicDefaults() {
     // #3889 fix: the adapter-applied page bound (absent here) and the PRE-SLICE raw container length.
     effectiveLimit: null,
     rawRowCounts: { primary: 20 },
+    // #3889 fix: the SOURCE's own page-index echo (never our requested value), plus two independent
+    // witnesses of the page's row count — the adapter's records array and what its metadata claims.
+    echoedPageIndex: 4,
+    adapterRecordCount: 20,
+    reportedRecordCount: 20,
   })
   assert.equal(JSON.stringify(outcome).includes('sourceTotalCount'), false, 'internal page metadata is non-enumerable')
   assertEvidenceValuesFree(outcome.evidence)

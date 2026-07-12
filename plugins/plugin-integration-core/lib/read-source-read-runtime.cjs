@@ -44,6 +44,23 @@ const CONFIGURED_READ_BODY_KEYS = Object.freeze(['config', 'inputs'])
 const TRUSTED_EXECUTION_MAX_ROW_CAP = 1000
 const TRUSTED_EXECUTION_MAX_PAGE_INDEX = 10
 
+// Where a configured read takes its ROWS from.
+//
+// `raw_containers` (default, unchanged): walk the config's containerPaths over the adapter's UNPROCESSED
+// upstream payload. This is what the probe shows an operator when they author a config, so it stays the
+// default for the probe route, composition hops and the resolver.
+//
+// `adapter_records`: take the rows from `readResult.records` — the adapter's OWN row plane, after it has
+// normalized, flattened and PAGINATED them. The two planes are NOT the same shape, and for some adapters
+// they are not even the same data:
+//   - plm-yuantus-wrapper flattens a BOM *tree* (flattenBomNode) and applies offset paging on `records`;
+//     `raw` stays the tree root, so a containerPaths walk over `raw` sees ONE node for a 2,500-line BOM.
+//   - data-source:sql-readonly never sets `raw` at all — its rows exist only in `records`.
+// A trusted feeder that INGESTS business rows must therefore read the record plane; walking `raw` silently
+// bypasses the adapter's whole normalization + pagination layer.
+const RAW_CONTAINERS = 'raw_containers'
+const ADAPTER_RECORDS = 'adapter_records'
+
 // R2 (#1709, owner-authorized 2026-07-03): resolver_lookup is now a supported runtime mode — its multiplicity
 // selection semantics were designed (resolver design-lock) and implemented as the R1 pure evaluator, which
 // this executor invokes. STANDALONE: called directly, the resolver resolves one key to one value and
@@ -139,13 +156,22 @@ function failureOutcome(plan, errorCode, errorType, extra) {
 
 function normalizeTrustedExecution(plan, input) {
   if (input === undefined || input === null) {
-    return { plan, cursor: null, pageIndex: null, rowCapExplicit: false }
+    return { plan, cursor: null, pageIndex: null, rowCapExplicit: false, rowSource: RAW_CONTAINERS }
   }
   if (!isPlainObject(input)) {
     throw new ReadSourceProbeContractError('execution_options_invalid')
   }
-  if (!Object.keys(input).every((key) => ['rowCap', 'cursor', 'pageIndex'].includes(key))) {
+  if (!Object.keys(input).every((key) => ['rowCap', 'cursor', 'pageIndex', 'rowSource'].includes(key))) {
     throw new ReadSourceProbeContractError('execution_options_unexpected_field')
+  }
+  const rowSource = input.rowSource === undefined ? RAW_CONTAINERS : input.rowSource
+  if (rowSource !== RAW_CONTAINERS && rowSource !== ADAPTER_RECORDS) {
+    throw new ReadSourceProbeContractError('execution_row_source_invalid')
+  }
+  // The adapter's record plane is ONE flat page of rows. It cannot express the header/lines split that
+  // detail_with_lines is, and resolver_lookup owns its own evaluator — neither may ask for it.
+  if (rowSource === ADAPTER_RECORDS && plan.mode !== 'list_page' && plan.mode !== 'single_record') {
+    throw new ReadSourceProbeContractError('execution_row_source_mode_not_supported')
   }
   const rowCap = input.rowCap === undefined ? plan.rowCap : Number(input.rowCap)
   if (!Number.isInteger(rowCap) || rowCap < 1 || rowCap > TRUSTED_EXECUTION_MAX_ROW_CAP) {
@@ -178,6 +204,7 @@ function normalizeTrustedExecution(plan, input) {
     pageIndex,
     // A trusted feeder that NAMES its own page bound is entitled to have that bound reach the adapter.
     rowCapExplicit: input.rowCap !== undefined,
+    rowSource,
   }
 }
 
@@ -229,6 +256,17 @@ function buildInternalPage(raced, request, mappedRecordCount, rawContainerRowCou
     // Only explicitly total-shaped fields may terminate multi-page intake early.
     sourceTotalCount: safeCount(metadata.dataRowCount, metadata.totalCount),
     pageIndex: safeCount(metadata.dataPageIndex, metadata.requestedPageIndex, request?.options?.listPageIndex),
+    // The page index the SOURCE echoed back — never our own requested value. `pageIndex` above falls back
+    // to what we asked for, so it can never witness a source that ignores paging and serves page 1 forever;
+    // a paging feeder must be able to tell "K3 says it applied page 7" from "we asked for page 7".
+    echoedPageIndex: safeCount(metadata.dataPageIndex),
+    // Rows in the adapter's OWN record plane for this page (post-normalization/flatten/paging), before any
+    // rowCap slice. This is the adapter's answer to "how many rows does this page have"; a feeder that maps
+    // a different number of rows out of the payload is not reading the source's rows.
+    adapterRecordCount: Array.isArray(raced && raced.records) ? raced.records.length : null,
+    // What the adapter's metadata CLAIMS it returned (no fallback): a third, independent witness of the
+    // same count, so metadata that disagrees with the records array cannot pass unnoticed.
+    reportedRecordCount: safeCount(metadata.returnedRecordCount),
     // The page bound the ADAPTER ACTUALLY APPLIED, which is not always the one we requested: the Bridge
     // Agent adapter silently clamps the request to config.maxLimit (default 20) and reports the applied
     // value here (bridge-agent-readonly-adapter.cjs metadata.limit). A paging feeder that judges "was this
@@ -239,6 +277,62 @@ function buildInternalPage(raced, request, mappedRecordCount, rawContainerRowCou
     // more and we silently truncated it": both leave exactly rowCap mapped records.
     rawRowCounts: Object.freeze({ ...rawContainerRowCounts }),
   }
+}
+
+// Row counts of the config's containers as they sit in the RAW upstream payload — i.e. before any rowCap
+// slice, and independent of where the rows themselves came from. Used for overflow diagnostics only.
+function rawContainerRowCounts(plan, raw) {
+  const counts = {}
+  if (!isPlainObject(raw)) return counts
+  for (const container of plan.containers) {
+    const { located, value } = locateContainerValue(raw, container.paths)
+    counts[container.alias] = located && Array.isArray(value) ? value.length : null
+  }
+  return counts
+}
+
+// #3889 data plane over the adapter's OWN records: the rows the adapter normalized, flattened and paged.
+// The fieldMap is applied to those records (for PLM's BOM lines the untouched upstream row remains reachable
+// under `rawPayload.*`, which is how a config keeps addressing source fields the wrapper does not normalize).
+function executeFromAdapterRecords(plan, fieldMap, raced, request) {
+  const records = Array.isArray(raced && raced.records) ? raced.records : null
+  if (!records) {
+    return failureOutcome(plan, 'READ_SOURCE_PROBE_RESPONSE_UNRECOGNIZED', 'ReadSourceProbeRuntimeError')
+  }
+  const rows = records.slice(0, plan.rowCap)
+  // Same fail-closed rule as the raw plane: a scalar inside the row plane is a shape mismatch, not a row.
+  if (!rows.every(isPlainObject)) {
+    return failureOutcome(plan, 'READ_SOURCE_PROBE_SHAPE_MISMATCH', 'ReadSourceProbeRuntimeError', {
+      containers: { primary: classifyContainerShape(records) },
+      containerLocated: true,
+    })
+  }
+  const mapped = rows.map((row) => mapRecord(row, fieldMap))
+  const shapes = { primary: { type: 'array', arrayLength: records.length } }
+  const evidence = readSourceProbeEvidence(plan, {
+    ok: true,
+    containers: shapes,
+    containerLocated: true,
+    boundedSmokeExecuted: true,
+    timeoutReached: false,
+    recordCount: mapped.length,
+    capReached: records.length >= plan.rowCap,
+  })
+  const result = {
+    evidence,
+    data: { containers: { primary: { records: mapped } }, recordCount: mapped.length },
+  }
+  Object.defineProperty(result, 'page', {
+    value: Object.freeze(buildInternalPage(
+      raced,
+      request,
+      mapped.length,
+      rawContainerRowCounts(plan, raced && raced.raw),
+    )),
+    enumerable: false,
+    writable: false,
+  })
+  return result
 }
 
 // Execute a configured read against an already-loaded, already-approved registered system. Contract-level
@@ -288,6 +382,13 @@ async function executeConfiguredRead(
   }
 
   const raw = raced && raced.raw
+
+  // #3889: the adapter's record plane. `raw` is OPTIONAL here (data-source:sql-readonly never sets it),
+  // and is used only for the caller's overflow diagnostics, never for the rows themselves.
+  if (execution.rowSource === ADAPTER_RECORDS) {
+    return executeFromAdapterRecords(plan, fieldMap, raced, request)
+  }
+
   if (!isPlainObject(raw)) {
     return failureOutcome(plan, 'READ_SOURCE_PROBE_RESPONSE_UNRECOGNIZED', 'ReadSourceProbeRuntimeError')
   }
