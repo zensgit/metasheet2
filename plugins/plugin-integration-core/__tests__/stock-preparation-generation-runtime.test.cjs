@@ -31,6 +31,13 @@ const {
 const {
   STOCK_PREPARATION_MVP_TABLE_TEMPLATES,
 } = require(path.join(__dirname, '..', 'lib', 'stock-preparation-templates.cjs'))
+const {
+  assertKnownFieldIds,
+  logicalData,
+  physicalFieldId,
+  physicalRow,
+  resolveFieldIdsFor,
+} = require(path.join(__dirname, 'fixtures', 'stock-preparation-multitable-fakes.cjs'))
 
 function objectIdByRole(role) {
   return STOCK_PREPARATION_MVP_TABLE_TEMPLATES.find((template) => template.role === role).objectId
@@ -85,51 +92,83 @@ async function expectError(promise, { status, code }) {
   return caught
 }
 
+// The fake sheets follow the sheet_<objectId> convention, so a sheetId names its object.
+function objectIdForSheet(sheetId) {
+  return typeof sheetId === 'string' && sheetId.startsWith('sheet_') ? sheetId.slice('sheet_'.length) : null
+}
+
+// #4160 — STRICT + PHYSICAL fake, like the real records service: rows are stored under the physical
+// fieldIds provisioning derives, and every create / patch / query key is validated against them
+// (`Unknown fieldId: X` otherwise). Seeds and the recorded calls/rows keep the LOGICAL view so the
+// assertions read as business fields; rawCreateCalls/rawPatchCalls hold the wire payload.
 function makeRecordsApi() {
   const store = new Map()
   const createCalls = []
   const patchCalls = []
   const queryCalls = []
+  const rawCreateCalls = []
+  const rawPatchCalls = []
   let seq = 0
+  const toLogical = (sheetId, data) => logicalData(STAGING_PROJECT_ID, objectIdForSheet(sheetId), data)
+  const assertKnown = (sheetId, keys) => assertKnownFieldIds(STAGING_PROJECT_ID, objectIdForSheet(sheetId), keys)
   return {
     createCalls,
     patchCalls,
     queryCalls,
+    rawCreateCalls,
+    rawPatchCalls,
+    // Test-side fixture manipulation: takes LOGICAL changes and applies them to the PHYSICAL row
+    // (the module-facing patchRecord above stays strict — it is the contract under test).
+    seedPatch(sheetId, recordId, changes) {
+      const objectId = objectIdForSheet(sheetId)
+      const physical = {}
+      for (const [key, value] of Object.entries(changes || {})) physical[physicalFieldId(STAGING_PROJECT_ID, objectId, key)] = value
+      const record = (store.get(sheetId) || []).find((entry) => entry.id === recordId)
+      if (record) Object.assign(record.data, physical)
+      return record
+    },
     seed(sheetId, data) {
       const rows = store.get(sheetId) || []
       seq += 1
-      const record = { id: `rec_${seq}`, data: { ...data } }
+      const record = { ...physicalRow(STAGING_PROJECT_ID, objectIdForSheet(sheetId), data), id: `rec_${seq}` }
       rows.push(record)
       store.set(sheetId, rows)
       return record
     },
     rowsOf(sheetId) {
-      return (store.get(sheetId) || []).map((record) => ({ id: record.id, data: { ...record.data } }))
+      return (store.get(sheetId) || []).map((record) => ({ id: record.id, data: toLogical(sheetId, record.data) }))
     },
     async createRecord(input = {}) {
-      const { sheetId, data } = input
-      createCalls.push({ sheetId, data: { ...data } })
+      const { sheetId, data = {} } = input
+      assertKnown(sheetId, Object.keys(data))
+      rawCreateCalls.push({ sheetId, data: { ...data } })
+      createCalls.push({ sheetId, data: toLogical(sheetId, data) })
       const rows = store.get(sheetId) || []
       seq += 1
       const record = { id: `rec_${seq}`, data: { ...data } }
       rows.push(record)
       store.set(sheetId, rows)
-      return record
+      return { ...record, data: { ...record.data } }
     },
     async queryRecords(input = {}) {
       const { sheetId, filters = {}, limit = 500, offset = 0 } = input
-      queryCalls.push({ sheetId, filters })
+      assertKnown(sheetId, Object.keys(filters))
+      queryCalls.push({ sheetId, filters: toLogical(sheetId, filters) })
       const rows = (store.get(sheetId) || []).filter((record) =>
         Object.entries(filters).every(([key, value]) => record.data[key] === value))
       return rows.slice(offset, offset + limit).map((record) => ({ id: record.id, data: { ...record.data } }))
     },
     async patchRecord(input = {}) {
-      const { sheetId, recordId, changes } = input
-      patchCalls.push({ sheetId, recordId, changes: { ...changes } })
+      const { sheetId, recordId, changes = {} } = input
+      assertKnown(sheetId, Object.keys(changes))
+      rawPatchCalls.push({ sheetId, recordId, changes: { ...changes } })
+      patchCalls.push({ sheetId, recordId, changes: toLogical(sheetId, changes) })
       const rows = store.get(sheetId) || []
       const record = rows.find((entry) => entry.id === recordId)
+      // Merge semantics, exactly like records.ts patchRecord (`nextData = { ...existing, ...patch }`):
+      // an explicit null SETS null — it does not remove the key.
       if (record) Object.assign(record.data, changes)
-      return { id: recordId }
+      return { id: recordId, data: record ? { ...record.data } : {} }
     },
   }
 }
@@ -144,6 +183,9 @@ function makeProvisioning({ stagingProjectId = STAGING_PROJECT_ID } = {}) {
       findObjectSheetCalls += 1
       if (projectId !== stagingProjectId) return null
       return { id: `sheet_${objectId}` }
+    },
+    async resolveFieldIds({ projectId, objectId, fieldIds } = {}) {
+      return resolveFieldIdsFor(projectId, objectId, fieldIds)
     },
   }
 }
@@ -232,7 +274,7 @@ async function main() {
     // its snapshot line to 'pcs' so the confirmed generic pcs->pcs rule covers it too.
     const lineRows = api.rowsOf(SHEET.line)
     const lineB = lineRows.find((row) => row.data.snapshotLineId === 'g_l2')
-    await api.patchRecord({ sheetId: SHEET.line, recordId: lineB.id, changes: { designUnit: 'pcs' } })
+    api.seedPatch(SHEET.line, lineB.id, { designUnit: 'pcs' })
     api.patchCalls.length = 0
     api.seed(SHEET.material, { erpMaterialId: 'erp_b', erpMaterialCode: 'B-200', erpMaterialInternalId: 'ITM_B', issueUnit: 'pcs', isActive: true })
     // A PRE-EXISTING unresolved blocking exception on this batch (from an earlier run).
@@ -301,10 +343,10 @@ async function main() {
     // stale. Plant a stale ERP internal id on the stored prep line, re-run, and require it cleared
     // alongside the fresh code (no hybrid identity row).
     const prepLineRecord = api.rowsOf(SHEET.prepLine)[0]
-    await api.patchRecord({ sheetId: SHEET.prepLine, recordId: prepLineRecord.id, changes: { erpMaterialInternalId: 'STALE_ITM' } })
+    api.seedPatch(SHEET.prepLine, prepLineRecord.id, { erpMaterialInternalId: 'STALE_ITM' })
     // Remove internalId from the mapping so the fresh generated line lacks that field.
     const mappingRecord = api.rowsOf(SHEET.mapping).find((row) => row.data.mappingId === 'map_a')
-    await api.patchRecord({ sheetId: SHEET.mapping, recordId: mappingRecord.id, changes: { erpMaterialInternalId: null } })
+    api.seedPatch(SHEET.mapping, mappingRecord.id, { erpMaterialInternalId: null })
     api.patchCalls.length = 0
     await runStockPreparationGeneration(baseRunInput(api, provisioning))
     const refreshed = api.rowsOf(SHEET.prepLine)[0]
@@ -407,7 +449,7 @@ async function main() {
     // deleting the project-ownership guard now has a failing negative (parity with the W3c read side).
     seedGenerationFixture(api, { snapshotBatchId: 'other_owner' })
     const otherBatch = api.rowsOf(SHEET.batch).find((row) => row.data.snapshotBatchId === 'other_owner')
-    await api.patchRecord({ sheetId: SHEET.batch, recordId: otherBatch.id, changes: { projectId: 'proj_other' } })
+    api.seedPatch(SHEET.batch, otherBatch.id, { projectId: 'proj_other' })
     await expectError(
       runStockPreparationGeneration(baseRunInput(api, provisioning, { snapshotBatchId: 'other_owner' })),
       { status: 404, code: 'GENERATION_BATCH_NOT_FOUND' },

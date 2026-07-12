@@ -50,6 +50,13 @@ const {
 const {
   STOCK_PREPARATION_MVP_TABLE_TEMPLATES,
 } = require(path.join(__dirname, '..', 'lib', 'stock-preparation-templates.cjs'))
+const {
+  assertKnownFieldIds,
+  logicalData,
+  physicalFieldId,
+  physicalRow,
+  resolveFieldIdsFor,
+} = require(path.join(__dirname, 'fixtures', 'stock-preparation-multitable-fakes.cjs'))
 
 // Derive the substrate objectIds from the frozen templates (never hardcode — the run-record id is
 // plm_stock_preparation_run, not _run_record).
@@ -106,59 +113,87 @@ async function expectError(promise, { status, code }) {
   return caught
 }
 
+// The fake sheets follow the sheet_<objectId> convention, so a sheetId names its object.
+function objectIdForSheet(sheetId) {
+  return typeof sheetId === 'string' && sheetId.startsWith('sheet_') ? sheetId.slice('sheet_'.length) : null
+}
+
 // Stateful in-memory fake records API. Unlike the persist fake, patchRecord here APPLIES its changes
 // (confirm tests assert the patched row) and queryRecords honors limit/offset (the module paginates).
+//
+// #4160 — it is now STRICT and PHYSICAL, like the real service: rows are stored under the physical
+// fieldIds provisioning derives, and every createRecord / patchRecord / queryRecords key is validated
+// against them (`Unknown fieldId: X` otherwise — the exact rejection production issues). The recorded
+// calls (createCalls/patchCalls/queryCalls) and `rowsOf` expose the LOGICAL view so the assertions
+// below still read as the business fields they are; `rawCreateCalls`/`rawPatchCalls` keep the wire
+// payload for the translation assertions.
 function makeRecordsApi() {
-  const store = new Map() // sheetId -> [{ id, data }]
+  const store = new Map() // sheetId -> [{ id, data: { <physical>: value } }]
   const createCalls = []
   const patchCalls = []
   const queryCalls = []
+  const rawCreateCalls = []
+  const rawPatchCalls = []
+  const rawQueryCalls = []
   let seq = 0
+  const toLogical = (sheetId, data) => logicalData(STAGING_PROJECT_ID, objectIdForSheet(sheetId), data)
+  const assertKnown = (sheetId, keys) => assertKnownFieldIds(STAGING_PROJECT_ID, objectIdForSheet(sheetId), keys)
   return {
     store,
     createCalls,
     patchCalls,
     queryCalls,
+    rawCreateCalls,
+    rawPatchCalls,
+    rawQueryCalls,
+    // `seed` takes LOGICAL rows (readable) and stores the PHYSICAL row the substrate really holds.
     seed(sheetId, data) {
       const rows = store.get(sheetId) || []
       seq += 1
-      const record = { id: `rec_${seq}`, data: { ...data } }
+      const record = { ...physicalRow(STAGING_PROJECT_ID, objectIdForSheet(sheetId), data), id: `rec_${seq}` }
       rows.push(record)
       store.set(sheetId, rows)
       return record
     },
     rowsOf(sheetId) {
-      return (store.get(sheetId) || []).map((record) => ({ id: record.id, data: { ...record.data } }))
+      return (store.get(sheetId) || []).map((record) => ({ id: record.id, data: toLogical(sheetId, record.data) }))
     },
     async createRecord(input = {}) {
-      const { sheetId, data } = input
-      createCalls.push({ sheetId, data: { ...data } })
+      const { sheetId, data = {} } = input
+      assertKnown(sheetId, Object.keys(data))
+      rawCreateCalls.push({ sheetId, data: { ...data } })
+      createCalls.push({ sheetId, data: toLogical(sheetId, data) })
       const rows = store.get(sheetId) || []
       seq += 1
       const record = { id: `rec_${seq}`, data: { ...data } }
       rows.push(record)
       store.set(sheetId, rows)
-      return record
+      return { ...record, data: { ...record.data } }
     },
     async queryRecords(input = {}) {
       const { sheetId, filters = {}, limit = 500, offset = 0 } = input
-      queryCalls.push({ sheetId, filters })
+      assertKnown(sheetId, Object.keys(filters))
+      rawQueryCalls.push({ sheetId, filters: { ...filters } })
+      queryCalls.push({ sheetId, filters: toLogical(sheetId, filters) })
       const rows = (store.get(sheetId) || []).filter((record) =>
         Object.entries(filters).every(([key, value]) => record.data[key] === value))
-      return rows.slice(offset, offset + limit)
+      return rows.slice(offset, offset + limit).map((record) => ({ ...record, data: { ...record.data } }))
     },
     async patchRecord(input = {}) {
-      const { sheetId, recordId, changes } = input
-      patchCalls.push({ sheetId, recordId, changes: { ...changes } })
+      const { sheetId, recordId, changes = {} } = input
+      assertKnown(sheetId, Object.keys(changes))
+      rawPatchCalls.push({ sheetId, recordId, changes: { ...changes } })
+      patchCalls.push({ sheetId, recordId, changes: toLogical(sheetId, changes) })
       const rows = store.get(sheetId) || []
       const record = rows.find((entry) => entry.id === recordId)
       if (record) Object.assign(record.data, changes)
-      return { id: recordId }
+      return { id: recordId, data: record ? { ...record.data } : {} }
     },
   }
 }
 
 // Fake provisioning: distinct sheetId per MVP objectId, resolvable ONLY under the staging project.
+// resolveFieldIds (#4160) mirrors the platform's physical-id derivation.
 function makeProvisioning({ missing = new Set(), stagingProjectId = STAGING_PROJECT_ID } = {}) {
   let findObjectSheetCalls = 0
   return {
@@ -170,6 +205,9 @@ function makeProvisioning({ missing = new Set(), stagingProjectId = STAGING_PROJ
       if (projectId !== stagingProjectId) return null
       if (missing.has(objectId)) return null
       return { id: `sheet_${objectId}` }
+    },
+    async resolveFieldIds({ projectId, objectId, fieldIds } = {}) {
+      return resolveFieldIdsFor(projectId, objectId, fieldIds)
     },
   }
 }
@@ -718,6 +756,36 @@ async function main() {
     })
     const write = api.createCalls.find((call) => call.sheetId === SHEET.mapping)
     assert.equal(write.data.notes, 'top-level note')
+  })
+
+  // ---- #4160: confirm/retire speak PHYSICAL fieldIds on the wire (create, patch AND filter) ----
+  await run('#4160 confirm-write create/patch/filter keys are resolved physical fieldIds', async () => {
+    const api = makeRecordsApi()
+    const provisioning = makeProvisioning()
+    const base = { permission: 'admin', recordsApi: api, provisioning, targetProjectId: STAGING_PROJECT_ID, confirmedBy: OPERATOR }
+    await confirmMaterialMapping({
+      ...base,
+      mapping: { plmDrawingNo: 'DN-4160', erpMaterialCode: 'C1', erpMaterialInternalId: 'ITM_1', versionPolicy: 'drawing_only' },
+    })
+    const created = api.rawCreateCalls.find((call) => call.sheetId === SHEET.mapping)
+    assert.ok(created, 'the confirmed mapping row was created')
+    assert.ok(Object.keys(created.data).every((key) => key.startsWith('fld_')), 'create payload keys are physical fieldIds')
+    assert.equal(created.data[physicalFieldId(STAGING_PROJECT_ID, MAPPING_OBJECT_ID, 'plmDrawingNo')], 'DN-4160')
+    assert.equal('plmDrawingNo' in created.data, false, 'no logical key ever reaches the records service')
+
+    // The existence probe filters by the PHYSICAL mappingId — a logical filter key is rejected by the
+    // real query-service, so this is the only shape that can work.
+    const probe = api.rawQueryCalls.find((call) => call.sheetId === SHEET.mapping && Object.keys(call.filters).length === 1)
+    assert.ok(probe, 'the mapping existence probe ran')
+    assert.deepEqual(Object.keys(probe.filters), [physicalFieldId(STAGING_PROJECT_ID, MAPPING_OBJECT_ID, 'mappingId')])
+
+    // retire patches by physical id too.
+    const mappingId = api.createCalls.find((call) => call.sheetId === SHEET.mapping).data.mappingId
+    await retireMaterialMapping({ ...base, mappingId })
+    const patched = api.rawPatchCalls.find((call) => call.sheetId === SHEET.mapping)
+    assert.ok(patched, 'the retire patch landed')
+    assert.deepEqual(Object.keys(patched.changes), [physicalFieldId(STAGING_PROJECT_ID, MAPPING_OBJECT_ID, 'isActive')])
+    assert.equal(patched.changes[physicalFieldId(STAGING_PROJECT_ID, MAPPING_OBJECT_ID, 'isActive')], false)
   })
 
   const total = passed + failed

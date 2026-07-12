@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { SchedulerServiceImpl } from '../../src/services/SchedulerService'
+import { SchedulerServiceImpl, SimpleCronExpression } from '../../src/services/SchedulerService'
 
 // Node clamps setTimeout delays above 2^31-1 ms (~24.86 days) to 1ms. A validated
 // far-future cron (e.g. a yearly schedule saved mid-year) must not be handed a raw delay
@@ -73,6 +73,82 @@ describe('SchedulerService cron delay arming (far-future crons)', () => {
     service.destroy()
   })
 
+  it('ZOMBIE (review P2-1): a cron unscheduled DURING an in-flight run must NOT re-arm itself when that run finishes', async () => {
+    // armCronTimeout's post-run callback re-schedules the job object it CAPTURED when the timer was
+    // armed. Unscheduling mid-run used to be undone by the finishing run: `jobs` no longer held the
+    // job and getJob() returned null, yet the timer kept firing — an admin who DISABLES directory
+    // sync would get a sync that keeps calling DingTalk until the process restarts.
+    // The existing "unscheduled mid-chain" test above cancels BEFORE the handler ever runs, so it
+    // cannot see this; the resurrection happens on the completion path.
+    // RED-before (drop the stale-job guard in scheduleCronJob): handler keeps firing after unschedule.
+    const service = new SchedulerServiceImpl()
+    let releaseRun: (() => void) | null = null
+    const handler = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          releaseRun = resolve // park the run IN FLIGHT until we release it
+        }),
+    )
+
+    await service.schedule('zombie-job', '* * * * *', handler, { timezone: 'UTC' })
+
+    // Fire once — the run is now parked in flight.
+    await vi.advanceTimersByTimeAsync(61_000)
+    expect(handler).toHaveBeenCalledTimes(1)
+
+    // The admin disables the sync WHILE that run is still in flight.
+    await service.unschedule('zombie-job')
+    expect(await service.getJob('zombie-job')).toBeNull()
+
+    // The in-flight run now completes → the post-run callback tries to re-schedule the captured job.
+    releaseRun!()
+    await vi.advanceTimersByTimeAsync(0)
+
+    // It must stay dead. Without the guard the job re-arms and fires every minute forever.
+    await vi.advanceTimersByTimeAsync(10 * 60_000)
+    expect(handler).toHaveBeenCalledTimes(1)
+    expect(await service.getJob('zombie-job')).toBeNull()
+
+    service.destroy()
+  })
+
+  it('STALE ZONE (review P2-1): a timezone change during an in-flight run must not be reverted by that run finishing', async () => {
+    // The timezone-edit path is unschedule + schedule (reschedule() cannot update options.timezone in
+    // place). If the edit lands mid-run, the finishing run re-arms the OLD job object — silently
+    // reverting to the stale zone. It does not self-heal: `jobs` holds the NEW job, so the next
+    // applySchedule sees an unchanged timezone and reschedules in place, never rebuilding the
+    // expression. Here the replacement must survive, and the stale object must not fire.
+    const service = new SchedulerServiceImpl()
+    let releaseRun: (() => void) | null = null
+    const oldHandler = vi.fn(
+      () => new Promise<void>((resolve) => { releaseRun = resolve }),
+    )
+    const newHandler = vi.fn().mockResolvedValue(undefined)
+
+    await service.schedule('tz-job', '* * * * *', oldHandler, { timezone: 'UTC' })
+    await vi.advanceTimersByTimeAsync(61_000)
+    expect(oldHandler).toHaveBeenCalledTimes(1) // parked in flight
+
+    // Admin edits the timezone mid-run: unschedule + schedule a NEW job object under the same name.
+    await service.unschedule('tz-job')
+    await service.schedule('tz-job', '* * * * *', newHandler, { timezone: 'Asia/Shanghai' })
+
+    // The old run finishes and tries to re-arm ITSELF (the stale UTC job object).
+    releaseRun!()
+    await vi.advanceTimersByTimeAsync(0)
+
+    // The registered job must still be the NEW one, on the NEW zone.
+    const registered = await service.getJob('tz-job')
+    expect(registered?.options?.timezone).toBe('Asia/Shanghai')
+
+    // And the stale object must never fire again — only the replacement runs.
+    await vi.advanceTimersByTimeAsync(5 * 60_000)
+    expect(oldHandler).toHaveBeenCalledTimes(1)
+    expect(newHandler.mock.calls.length).toBeGreaterThan(0)
+
+    service.destroy()
+  })
+
   it('never arms a raw setTimeout delay beyond Node\'s clamp ceiling for a far-future cron', async () => {
     const setTimeoutSpy = vi.spyOn(globalThis, 'setTimeout')
     const service = new SchedulerServiceImpl()
@@ -127,5 +203,82 @@ describe('SchedulerService cron delay arming (far-future crons)', () => {
 
     service.destroy()
     setTimeoutSpy.mockRestore()
+  })
+})
+
+// Roadmap §7.8 "Add timezone support": SimpleCronExpression.matches() used to ignore its
+// `timezone` constructor argument entirely and match against LOCAL Date getters (host-TZ
+// wall clock) regardless of what was passed. These pin the FIX directly against the class
+// the directory sync scheduler and its save-time validator both depend on.
+describe('SimpleCronExpression timezone (roadmap §7.8)', () => {
+  const originalTz = process.env.TZ
+
+  beforeEach(() => {
+    // The UNCHANGED default/'UTC' path still reads LOCAL Date getters (byte-identical to
+    // pre-§7.8) — pin the host TZ so that path is deterministic regardless of the
+    // machine/CI runner's own zone. The zoned (non-UTC) path below is Intl-based and does
+    // NOT depend on this at all — it is asserted BECAUSE it stays correct even with the
+    // host pinned to UTC.
+    process.env.TZ = 'UTC'
+  })
+
+  afterEach(() => {
+    if (originalTz === undefined) {
+      delete process.env.TZ
+    } else {
+      process.env.TZ = originalTz
+    }
+  })
+
+  // Anchor before both target instants below (2026-07-10T12:00:00Z = 2026-07-10 20:00 in
+  // Asia/Shanghai, UTC+8, no DST).
+  const ANCHOR = new Date('2026-07-10T12:00:00.000Z')
+  const DAILY_2AM_CRON = '0 2 * * *'
+
+  it('the SAME cron fires at DIFFERENT absolute instants for UTC vs a configured IANA zone', () => {
+    const utcExpr = new SimpleCronExpression(DAILY_2AM_CRON, 'UTC')
+    utcExpr.reset(new Date(ANCHOR))
+    const utcNext = utcExpr.next()
+
+    const shanghaiExpr = new SimpleCronExpression(DAILY_2AM_CRON, 'Asia/Shanghai')
+    shanghaiExpr.reset(new Date(ANCHOR))
+    const shanghaiNext = shanghaiExpr.next()
+
+    // UTC: next 02:00 UTC after the anchor is the following day.
+    expect(utcNext?.toISOString()).toBe('2026-07-11T02:00:00.000Z')
+    // Asia/Shanghai (UTC+8): next 02:00 LOCAL Shanghai time is 18:00 UTC the day before —
+    // exactly 8 hours EARLIER than the UTC case, proving the timezone argument now changes
+    // which absolute instant fires (not merely that a string was threaded through).
+    expect(shanghaiNext?.toISOString()).toBe('2026-07-10T18:00:00.000Z')
+
+    const deltaMs = utcNext!.getTime() - shanghaiNext!.getTime()
+    expect(deltaMs).toBe(8 * 60 * 60 * 1000)
+  })
+
+  it('absent timezone still matches LOCAL Date getters — byte-identical to pre-§7.8 (host pinned to UTC)', () => {
+    const defaultExpr = new SimpleCronExpression(DAILY_2AM_CRON) // no timezone arg at all
+    defaultExpr.reset(new Date(ANCHOR))
+    const utcExpr = new SimpleCronExpression(DAILY_2AM_CRON, 'UTC')
+    utcExpr.reset(new Date(ANCHOR))
+
+    expect(defaultExpr.next()?.toISOString()).toBe(utcExpr.next()?.toISOString())
+  })
+
+  it('an unresolvable/invalid IANA zone falls back to the UTC fast path rather than throwing', () => {
+    const junkExpr = new SimpleCronExpression(DAILY_2AM_CRON, 'Not/AZone')
+    junkExpr.reset(new Date(ANCHOR))
+    const utcExpr = new SimpleCronExpression(DAILY_2AM_CRON, 'UTC')
+    utcExpr.reset(new Date(ANCHOR))
+
+    expect(junkExpr.next()?.toISOString()).toBe(utcExpr.next()?.toISOString())
+  })
+
+  it("'Etc/UTC' takes the same fast path as 'UTC' (both are the default state)", () => {
+    const etcUtcExpr = new SimpleCronExpression(DAILY_2AM_CRON, 'Etc/UTC')
+    etcUtcExpr.reset(new Date(ANCHOR))
+    const utcExpr = new SimpleCronExpression(DAILY_2AM_CRON, 'UTC')
+    utcExpr.reset(new Date(ANCHOR))
+
+    expect(etcUtcExpr.next()?.toISOString()).toBe(utcExpr.next()?.toISOString())
   })
 })

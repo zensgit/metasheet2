@@ -2725,11 +2725,32 @@ export class AutomationExecutor {
       }
     }
     const interactiveCardConfig = resolveDingTalkInteractiveCardStreamConfig()
-    const useInteractiveCard = interactiveCardConfig.enabled === true
+    // P1-2 cross-corp SEND gate: the interactive card is dispatched via the GLOBAL Stream app's
+    // OWN credentials (robotCode = its clientId), so it may only go to a recipient in the Stream
+    // app's OWN corp. Gate on flag-enabled AND the Stream app being bound to a directory
+    // integration AND that binding matching the recipient's integration. Any mismatch — a
+    // recipient in a different corp, an unbound Stream app, or a recipient with no integration —
+    // falls through to the per-corp OA `work_notice_action_card` (the doc's "other corps
+    // auto-fallback to OA"), never a card sent through the wrong corp's app.
+    const streamIntegrationId = interactiveCardConfig.enabled === true ? interactiveCardConfig.integrationId : ''
+    const useInteractiveCard =
+      interactiveCardConfig.enabled === true
+      && streamIntegrationId.length > 0
+      && assigneeIntegrationId.length > 0
+      && assigneeIntegrationId === streamIntegrationId
 
     // Ledger FIRST — the row is the only legitimate delivery → instance anchor.
     const entryEpochRaw = event.task?.entryEpoch
     const sourceStepRaw = event.task?.sourceStep
+    if (typeof entryEpochRaw !== 'number') {
+      // Review P3-1: a card with no node-entry epoch is dead-on-arrival under the strict binding
+      // (never actionable). Surface it (values-free: ids + node only) instead of shipping silently.
+      logger.warn('DingTalk approval card sent with no node-entry epoch — will not be actionable (fail-closed)', {
+        instanceId,
+        nodeKey,
+        ruleId: context.ruleId,
+      })
+    }
     const delivery = await insertDingTalkApprovalCardDelivery(this.deps.queryFn, {
       instanceId,
       nodeKey,
@@ -2737,6 +2758,12 @@ export class AutomationExecutor {
       recipientDingTalkUserId: dingtalkUserId,
       deliveryKind: useInteractiveCard ? 'interactive_card' : 'work_notice_action_card',
       integrationId: assigneeIntegrationId || null,
+      // P1-1: persist the node-entry epoch this card is sent for so the action wrapper + the engine's
+      // in-txn binding can bind the card to the SAME round's active assignment (closes same-node
+      // re-entry). Review P3-1: under the STRICT binding a NULL epoch is NOT actionable (fail-closed
+      // dead-on-arrival), so a null here means this card will never be clickable — warn (values-free)
+      // rather than silently ship a dead card. Expected only for pre-epoch/legacy task events.
+      entryEpoch: typeof entryEpochRaw === 'number' ? entryEpochRaw : null,
     })
 
     const token = createHmac('sha256', linkSecret).update(delivery.id).digest('hex').slice(0, 32)

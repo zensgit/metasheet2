@@ -3,7 +3,7 @@
     <div class="meta-form-share">
       <div class="meta-form-share__header">
         <h4 class="meta-form-share__title">{{ f('title') }}</h4>
-        <button class="meta-form-share__close" type="button" @click="$emit('close')">&times;</button>
+        <MtIconButton class="meta-form-share__close" @click="$emit('close')">&times;</MtIconButton>
       </div>
 
       <div class="meta-form-share__body">
@@ -203,14 +203,13 @@
                   readonly
                   data-form-share-link="true"
                 />
-                <button
-                  class="meta-form-share__btn meta-form-share__btn--primary"
-                  type="button"
+                <MtButton
+                  variant="primary"
                   data-form-share-copy="true"
                   @click="onCopyLink"
                 >
                   {{ copied ? f('link.copied') : f('link.copy') }}
-                </button>
+                </MtButton>
               </div>
             </div>
 
@@ -224,14 +223,12 @@
               >
                 {{ f('link.regenerate') }}
               </button>
-              <button
-                class="meta-form-share__btn"
-                type="button"
+              <MtButton
                 data-form-share-preview="true"
                 @click="onPreview"
               >
                 {{ f('link.preview') }}
-              </button>
+              </MtButton>
             </div>
 
             <div class="meta-form-share__expiry-section">
@@ -266,6 +263,7 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
 import { useLocale } from '../../composables/useLocale'
+import { MtButton, MtIconButton } from '../ui'
 import type { FormShareConfig, MetaSheetPermissionCandidate } from '../types'
 import type { MultitableApiClient } from '../api/client'
 import { managerLabel, type MetaManagerLabelKey } from '../utils/meta-manager-labels'
@@ -615,15 +613,10 @@ watch(candidateQuery, () => {
   color: #0f172a;
 }
 
-.meta-form-share__close {
-  border: none;
-  background: none;
-  font-size: 22px;
-  cursor: pointer;
-  color: #64748b;
-  line-height: 1;
-  padding: 0 4px;
-}
+/* .meta-form-share__close: now <MtIconButton> (ghost, token-styled; the &times; glyph char passes
+   through its default-slot icon fallback, size token-normalized to the icon control). Bespoke
+   hardcoded CSS removed (UI-P2-1c T4). Class kept on the element only for selector stability — sole
+   sharer. */
 
 .meta-form-share__body {
   padding: 16px 20px 20px;
@@ -850,6 +843,14 @@ watch(candidateQuery, () => {
   gap: 8px;
 }
 
+/* .meta-form-share__btn: still bespoke — this is a shared class across the Regenerate
+   (data-form-share-regenerate) and Clear-expiry (data-form-share-clear-expiry) buttons, which are
+   NOT migrated (both mutate access-control state: rotating the public token / removing the expiry
+   window — permission-adjacent, out of the T4 red line) and the now-migrated Copy/Preview buttons
+   (UI-P2-1c T4), which no longer carry this class (they were the sole reason to keep a
+   variant-styled MtButton-shaped hook here; removing just the class from them — rather than
+   deleting this rule — avoids double-styling the migrated <MtButton> root while leaving the
+   still-bespoke siblings' appearance completely unchanged). */
 .meta-form-share__btn {
   border: 1px solid #cbd5e1;
   border-radius: 8px;
@@ -867,11 +868,10 @@ watch(candidateQuery, () => {
   cursor: not-allowed;
 }
 
-.meta-form-share__btn--primary {
-  border-color: #2563eb;
-  background: #2563eb;
-  color: #fff;
-}
+/* .meta-form-share__btn--primary: was the Copy-link button's variant class; Copy is now <MtButton
+   variant="primary"> (UI-P2-1c T4) and no longer carries this class — no other element used it, so
+   the bespoke rule is removed outright (no double-styling risk, matches the sole-sharer convention
+   from prior P2-1c batches). */
 
 .meta-form-share__audience-card {
   display: flex;

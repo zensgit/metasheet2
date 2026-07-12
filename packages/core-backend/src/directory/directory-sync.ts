@@ -21,6 +21,11 @@ import {
   mergeDeptManagerIntoRaw,
   resolveManagerListForDept,
 } from './department-manager-enrichment'
+import {
+  createDirectorySyncApiCallCounters,
+  summarizeDirectorySyncApiCalls,
+  type DirectorySyncApiCallCounters,
+} from './directory-sync-api-telemetry'
 import { assertDingTalkCorpAllowed } from '../integrations/dingtalk/runtime-policy'
 import {
   deriveDelegatedAdminNamespace,
@@ -32,6 +37,7 @@ import { decryptStoredSecretValue, normalizeStoredSecretValue } from '../securit
 import { getBcryptSaltRounds } from '../security/auth-runtime-config'
 import { SimpleCronExpression } from '../services/SchedulerService'
 import { deliverDirectorySyncFailureAlert, getDirectoryManagerBindingCoverage } from './directory-sync-alert-delivery'
+import { resolveDirectoryScheduleTimezone } from './directory-sync-timezone'
 
 const logger = new Logger('DirectorySync')
 const DEFAULT_ORG_ID = 'default'
@@ -73,6 +79,9 @@ type DirectoryIntegrationRow = {
   config: JsonRecord | string | null
   sync_enabled: boolean
   schedule_cron: string | null
+  // Roadmap §7.8: NULL for every row created before this landed. NULL/'UTC'/'Etc/UTC' are
+  // all "no configured timezone" — resolved via `resolveDirectoryScheduleTimezone`.
+  schedule_timezone: string | null
   default_deprovision_policy: string
   last_sync_at: string | null
   last_success_at: string | null
@@ -268,6 +277,7 @@ export type DirectoryIntegrationSummary = {
   corpId: string
   syncEnabled: boolean
   scheduleCron: string | null
+  scheduleTimezone: string | null
   defaultDeprovisionPolicy: string
   lastSyncAt: string | null
   lastSuccessAt: string | null
@@ -334,6 +344,10 @@ export type DirectoryIntegrationInput = {
   memberGroupDefaultNamespaces?: string[] | string
   syncEnabled?: boolean
   scheduleCron?: string | null
+  // Roadmap §7.8: an IANA zone (e.g. 'Asia/Shanghai'), '' / null / 'UTC' / 'Etc/UTC' for the
+  // default, or `undefined` (key absent) to leave whatever is currently saved untouched —
+  // see `updateDirectoryIntegration`'s absent-vs-present handling.
+  scheduleTimezone?: string | null
   defaultDeprovisionPolicy?: string
   status?: string
 }
@@ -448,6 +462,7 @@ export type DirectorySyncScheduleSnapshot = {
   integrationId: string
   syncEnabled: boolean
   scheduleCron: string | null
+  scheduleTimezone: string | null
   cronValid: boolean
   nextExpectedRunAt: string | null
   lastRun: DirectorySyncRunSummary | null
@@ -1529,6 +1544,7 @@ function summarizeIntegration(row: DirectoryIntegrationRow): DirectoryIntegratio
     corpId: row.corp_id,
     syncEnabled: Boolean(row.sync_enabled),
     scheduleCron: row.schedule_cron,
+    scheduleTimezone: row.schedule_timezone,
     defaultDeprovisionPolicy: row.default_deprovision_policy,
     lastSyncAt: row.last_sync_at,
     lastSuccessAt: row.last_success_at,
@@ -2016,6 +2032,15 @@ function normalizeIntegrationInput(
     memberGroupDefaultNamespaces,
     syncEnabled: input.syncEnabled ?? false,
     scheduleCron: normalizeOptionalText(input.scheduleCron),
+    // Roadmap §7.8: this naive normalize (no absent-vs-present distinction) is what
+    // `createDirectoryIntegration` uses as-is — there is no prior row to preserve on
+    // create. `updateDirectoryIntegration` OVERRIDES this field after calling this
+    // function (see the absent-vs-present comment there) because there is no FE field for
+    // it yet: unlike `scheduleCron`, which the FE form always resends verbatim on every
+    // save, an FE-driven PUT would omit `scheduleTimezone` entirely and — with only this
+    // naive normalize — would silently reset any directly-API-configured zone back to
+    // UTC on the next unrelated edit.
+    scheduleTimezone: normalizeOptionalText(input.scheduleTimezone),
     defaultDeprovisionPolicy,
     status,
   }
@@ -2023,7 +2048,7 @@ function normalizeIntegrationInput(
 
 async function getIntegrationRow(integrationId: string): Promise<DirectoryIntegrationRow | null> {
   const result = await query<DirectoryIntegrationRow>(
-    `SELECT id, org_id, provider, name, status, corp_id, config, sync_enabled, schedule_cron,
+    `SELECT id, org_id, provider, name, status, corp_id, config, sync_enabled, schedule_cron, schedule_timezone,
             default_deprovision_policy, last_sync_at, last_success_at, last_error, created_at, updated_at
      FROM directory_integrations
      WHERE id = $1 AND provider = $2`,
@@ -2034,7 +2059,7 @@ async function getIntegrationRow(integrationId: string): Promise<DirectoryIntegr
 
 export async function listDirectoryIntegrations(orgId = DEFAULT_ORG_ID): Promise<DirectoryIntegrationSummary[]> {
   const result = await query<DirectoryIntegrationRow>(
-    `SELECT i.id, i.org_id, i.provider, i.name, i.status, i.corp_id, i.config, i.sync_enabled, i.schedule_cron,
+    `SELECT i.id, i.org_id, i.provider, i.name, i.status, i.corp_id, i.config, i.sync_enabled, i.schedule_cron, i.schedule_timezone,
             i.default_deprovision_policy, i.last_sync_at, i.last_success_at, i.last_error, i.created_at, i.updated_at,
             COALESCE((SELECT COUNT(*)::int FROM directory_departments d WHERE d.integration_id = i.id AND d.is_active = true), 0) AS department_count,
             COALESCE((SELECT COUNT(*)::int FROM directory_accounts a WHERE a.integration_id = i.id AND a.is_active = true), 0) AS account_count,
@@ -2074,11 +2099,11 @@ export async function createDirectoryIntegration(input: DirectoryIntegrationInpu
   })
   const result = await query<DirectoryIntegrationRow>(
     `INSERT INTO directory_integrations (
-       org_id, provider, name, status, corp_id, config, sync_enabled, schedule_cron,
+       org_id, provider, name, status, corp_id, config, sync_enabled, schedule_cron, schedule_timezone,
        default_deprovision_policy, created_at, updated_at
      )
-     VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8, $9, NOW(), NOW())
-     RETURNING id, org_id, provider, name, status, corp_id, config, sync_enabled, schedule_cron,
+     VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8, $9, $10, NOW(), NOW())
+     RETURNING id, org_id, provider, name, status, corp_id, config, sync_enabled, schedule_cron, schedule_timezone,
                default_deprovision_policy, last_sync_at, last_success_at, last_error, created_at, updated_at`,
     [
       DEFAULT_ORG_ID,
@@ -2105,6 +2130,7 @@ export async function createDirectoryIntegration(input: DirectoryIntegrationInpu
       }),
       Boolean(normalized.syncEnabled),
       normalized.scheduleCron,
+      normalized.scheduleTimezone,
       normalized.defaultDeprovisionPolicy,
     ],
   )
@@ -2132,6 +2158,14 @@ export async function updateDirectoryIntegration(
   const rawCurrentConfig = parseJsonRecord(current.config)
   const carriedApprovalCardLinkSecret = normalizeText(rawCurrentConfig.approvalCardLinkSecret) || null
   const carriedApprovalCardPublicAppUrl = normalizeText(rawCurrentConfig.approvalCardPublicAppUrl) || null
+  // Roadmap §7.8: unlike `scheduleCron` (the existing FE form always resends it verbatim, so
+  // a plain "always overwrite from input" is safe), there is no FE field for `scheduleTimezone`
+  // yet. An absent key (the FE's payload shape today) must PRESERVE whatever is already saved,
+  // not reset it to UTC on the next unrelated edit; an explicitly present key (including `''`)
+  // still overwrites, so a direct API caller can still clear it back to the default.
+  const scheduleTimezone = input.scheduleTimezone !== undefined
+    ? normalizeOptionalText(input.scheduleTimezone)
+    : current.schedule_timezone
   const result = await query<DirectoryIntegrationRow>(
     `UPDATE directory_integrations
      SET name = $2,
@@ -2140,10 +2174,11 @@ export async function updateDirectoryIntegration(
          config = $5::jsonb,
          sync_enabled = $6,
          schedule_cron = $7,
-         default_deprovision_policy = $8,
+         schedule_timezone = $8,
+         default_deprovision_policy = $9,
          updated_at = NOW()
      WHERE id = $1
-     RETURNING id, org_id, provider, name, status, corp_id, config, sync_enabled, schedule_cron,
+     RETURNING id, org_id, provider, name, status, corp_id, config, sync_enabled, schedule_cron, schedule_timezone,
                default_deprovision_policy, last_sync_at, last_success_at, last_error, created_at, updated_at`,
     [
       integrationId,
@@ -2171,6 +2206,7 @@ export async function updateDirectoryIntegration(
       }),
       Boolean(normalized.syncEnabled),
       normalized.scheduleCron,
+      scheduleTimezone,
       normalized.defaultDeprovisionPolicy,
     ],
   )
@@ -2405,7 +2441,13 @@ export async function testDirectoryIntegration(input: DirectoryIntegrationTestIn
   }
 }
 
-async function fetchAllDepartments(config: DirectoryIntegrationConfig, integrationName: string): Promise<Map<string, DingTalkDepartment>> {
+export async function fetchAllDepartments(
+  config: DirectoryIntegrationConfig,
+  integrationName: string,
+  // §7.7 telemetry: increment per external directory-pull call so the N+1 is ops-visible on
+  // the run record. Optional — the preview path (no run row) omits it.
+  apiCalls?: DirectorySyncApiCallCounters,
+): Promise<Map<string, DingTalkDepartment>> {
   const accessToken = await fetchDingTalkAppAccessToken({
     appKey: config.appKey,
     appSecret: config.appSecret,
@@ -2424,6 +2466,7 @@ async function fetchAllDepartments(config: DirectoryIntegrationConfig, integrati
   while (queue.length > 0) {
     const current = queue.shift()
     if (!current) continue
+    if (apiCalls) apiCalls.departmentListCalls += 1
     const children = await listDingTalkDepartments(accessToken, current, { baseUrl: config.baseUrl })
     for (const child of children) {
       const existing = departments.get(child.id)
@@ -2439,7 +2482,10 @@ async function fetchAllDepartments(config: DirectoryIntegrationConfig, integrati
   // the prior dept_manager_userid_list forward instead of wiping it.
   await enrichDepartmentsWithManagers(
     departments.values(),
-    (deptId) => getDingTalkDepartmentDetail(accessToken, deptId, { baseUrl: config.baseUrl }),
+    (deptId) => {
+      if (apiCalls) apiCalls.departmentDetailCalls += 1
+      return getDingTalkDepartmentDetail(accessToken, deptId, { baseUrl: config.baseUrl })
+    },
     (deptId, error) =>
       logger.warn(
         `dept-head: department/get failed for dept ${deptId} (integration ${integrationName}); carrying prior forward: ${readErrorMessage(error, 'unknown error')}`,
@@ -2453,9 +2499,12 @@ function mergeDepartmentIds(primary: string[], secondary: string[]): string[] {
   return Array.from(new Set([...primary, ...secondary].filter(Boolean)))
 }
 
-async function fetchAllUsers(
+export async function fetchAllUsers(
   config: DirectoryIntegrationConfig,
   departmentMap: Map<string, DingTalkDepartment>,
+  // §7.7 telemetry: `userDetailCalls` is THE N+1 metric — one `user/get` per unique user.
+  // Optional — the preview path (no run row) omits it.
+  apiCalls?: DirectorySyncApiCallCounters,
 ): Promise<Map<string, DingTalkDirectoryUser>> {
   const accessToken = await fetchDingTalkAppAccessToken({
     appKey: config.appKey,
@@ -2469,6 +2518,7 @@ async function fetchAllUsers(
     let cursor = 0
     let hasMore = true
     while (hasMore) {
+      if (apiCalls) apiCalls.userListPageCalls += 1
       const response = await listDingTalkDepartmentUsers(
         accessToken,
         departmentId,
@@ -2479,6 +2529,9 @@ async function fetchAllUsers(
       for (const summary of response.users) {
         const existing = users.get(summary.userId)
         if (!existing) {
+          // The N+1: a per-user detail fetch, issued once per UNIQUE user (this branch only
+          // runs on first sight — a user in two departments is fetched once).
+          if (apiCalls) apiCalls.userDetailCalls += 1
           const detail = await getDingTalkUserDetail(accessToken, summary.userId, { baseUrl: config.baseUrl })
           users.set(summary.userId, {
             ...detail,
@@ -2883,14 +2936,18 @@ export async function syncDirectoryIntegration(
   }, DIRECTORY_SYNC_HEARTBEAT_INTERVAL_MS)
   heartbeat.unref?.()
 
+  // §7.7 telemetry: one counter set per run, incremented at each external directory-pull call
+  // site (departments + users) so the N+1 detail fan-out is measurable on the run record.
+  const apiCallCounters = createDirectorySyncApiCallCounters()
+
   try {
-    const departments = await fetchAllDepartments(config, integration.name)
+    const departments = await fetchAllDepartments(config, integration.name, apiCallCounters)
     const departmentPathMap = buildDepartmentPathMap(departments)
     // dept-head plumbing: capture last-known-good dept_manager_userid_list BEFORE the
     // whole-column upsert (raw = EXCLUDED.raw) overwrites raw, so a failed department/get
     // (managerUserIds left undefined) carries the prior value forward instead of wiping it.
     const priorDeptManagers = await capturePriorDeptManagers(integrationId, query)
-    const users = await fetchAllUsers(config, departments)
+    const users = await fetchAllUsers(config, departments, apiCallCounters)
 
     let directoryDiagnosticStats: JsonRecord = {}
     if (triggerSource === 'manual') {
@@ -3357,6 +3414,11 @@ export async function syncDirectoryIntegration(
       const stats = {
         departmentsSynced: departments.size,
         accountsSynced: users.size,
+        // §7.7 sync-performance telemetry — external directory-pull call counts for THIS run.
+        // `externalUserDetailCalls` is the N+1: compare it against `accountsSynced` (≈ equal
+        // means one `user/get` per account). Makes the eventual `user/list` staging fix
+        // provable via before/after on this number. Additive; all pre-existing keys kept.
+        ...summarizeDirectorySyncApiCalls(apiCallCounters),
         // R5 per-run change summary — all additive; every pre-existing key above/below is kept.
         departmentsCreatedCount,
         departmentsUpdatedCount,
@@ -3898,7 +3960,11 @@ function readScheduleObservation(
   }
 
   try {
-    const parser = new SimpleCronExpression(cronExpression, 'UTC')
+    // Roadmap §7.8: report the next-run estimate in the integration's OWN configured
+    // timezone (defaults to 'UTC' — byte-identical to the pre-§7.8 hardcoded literal for
+    // every integration that has never set one), so this observation never disagrees with
+    // what the scheduler actually runs (`directory-sync-scheduler.ts` resolves the same way).
+    const parser = new SimpleCronExpression(cronExpression, resolveDirectoryScheduleTimezone(integration.schedule_timezone))
     const nextRun = parser.next()
     if (lastAutomaticRun) {
       return {
@@ -3979,6 +4045,7 @@ export async function getDirectorySyncScheduleSnapshot(
     integrationId: normalizedIntegrationId,
     syncEnabled: Boolean(integration.sync_enabled),
     scheduleCron: integration.schedule_cron,
+    scheduleTimezone: integration.schedule_timezone,
     cronValid: observation.cronValid,
     nextExpectedRunAt: observation.nextExpectedRunAt,
     lastRun: lastRun ? summarizeRun(lastRun) : null,

@@ -1,8 +1,9 @@
 /**
  * 4c-2 forward tombstone-capture — shared helper unit tests (no DB). Covers the pure
- * flag/cap-resolution logic and exercises the RESERVED lossy-retype capture seam
- * (`captureLossyRetypePreImageRows`) so it is a tested, not a dead, helper even though no
- * route wires it in this PR (4c-1 will).
+ * flag/cap-resolution logic and exercises the lossy-retype capture point
+ * (`captureLossyRetypePreImageRows`), which is WIRED AND LIVE since 4c-1 landed — it is called by
+ * `applyLossyRetypeCellRewrite` (`routes/univer-meta.ts:6407`) under the
+ * `MULTITABLE_TOMBSTONE_CAPTURE_ENABLED` gate, with the caller's `assertWithinCaptureCap` in front of it.
  */
 import { describe, expect, test, vi } from 'vitest'
 

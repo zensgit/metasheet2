@@ -344,6 +344,7 @@ function verify_migration_bridge_contract() {
 
   search_fixed_string 'MIGRATION_INCLUDE_SUPERSEDED_LEGACY_SQL' "$provider" || die "migration-provider.js must expose the superseded legacy SQL opt-in"
   search_fixed_string '032_create_approval_records' "$provider" || die "migration-provider.js must carry the superseded legacy SQL skip list"
+  search_fixed_string '20250926_create_audit_tables' "$provider" || die "migration-provider.js must no-op the superseded audit SQL on upgraded on-prem databases"
   search_fixed_string '037_add_gallery_form_support' "$provider" || die "migration-provider.js must no-op superseded gallery/form SQL on upgraded on-prem DBs"
   search_fixed_string '038_config_and_secrets' "$provider" || die "migration-provider.js must no-op superseded config/secrets SQL on upgraded on-prem DBs"
   search_fixed_string "to_regclass('public.users') IS NOT NULL" "$legacy_must_change" || die "056_add_users_must_change_password.sql must no-op when users table is absent"

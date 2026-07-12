@@ -45,7 +45,7 @@
           </label>
         </div>
       </details>
-      <button v-if="canCreate" class="meta-gallery__create-btn" @click="emit('create-record', {})">{{ viewRenderLabel('common.addRecord', isZh) }}</button>
+      <MtButton v-if="canCreate" variant="plain" class="meta-gallery__create-btn" @click="emit('create-record', {})">{{ viewRenderLabel('common.addRecord', isZh) }}</MtButton>
     </div>
     <div class="meta-gallery__grid" :style="gridStyle">
       <div
@@ -113,13 +113,13 @@
         <div class="meta-gallery__empty-icon">&#x1F5BC;</div>
         <div class="meta-gallery__empty-title">{{ viewRenderLabel('gallery.noRecordsTitle', isZh) }}</div>
         <div class="meta-gallery__empty-hint">{{ viewRenderLabel('gallery.noRecordsHint', isZh) }}</div>
-        <button v-if="canCreate" class="meta-gallery__empty-action" @click="emit('create-record', {})">{{ viewRenderLabel('common.createFirstRecord', isZh) }}</button>
+        <MtButton v-if="canCreate" variant="plain" class="meta-gallery__empty-action" @click="emit('create-record', {})">{{ viewRenderLabel('common.createFirstRecord', isZh) }}</MtButton>
       </div>
     </div>
     <div v-if="totalPages > 1" class="meta-gallery__pagination">
-      <button class="meta-gallery__page-btn" :disabled="currentPage <= 1" @click="emit('go-to-page', currentPage - 1)">&lsaquo; {{ viewRenderLabel('gallery.prev', isZh) }}</button>
+      <MtButton variant="ghost" class="meta-gallery__page-btn" :disabled="currentPage <= 1" @click="emit('go-to-page', currentPage - 1)">&lsaquo; {{ viewRenderLabel('gallery.prev', isZh) }}</MtButton>
       <span class="meta-gallery__page-info">{{ currentPage }} / {{ totalPages }}</span>
-      <button class="meta-gallery__page-btn" :disabled="currentPage >= totalPages" @click="emit('go-to-page', currentPage + 1)">{{ viewRenderLabel('gallery.next', isZh) }} &rsaquo;</button>
+      <MtButton variant="ghost" class="meta-gallery__page-btn" :disabled="currentPage >= totalPages" @click="emit('go-to-page', currentPage + 1)">{{ viewRenderLabel('gallery.next', isZh) }} &rsaquo;</MtButton>
     </div>
     <div v-if="loading" class="meta-gallery__loading">{{ viewRenderLabel('common.loading', isZh) }}</div>
   </div>
@@ -134,6 +134,7 @@ import { useLocale } from '../../composables/useLocale'
 import MetaAttachmentList from './MetaAttachmentList.vue'
 import MetaCommentActionChip from './MetaCommentActionChip.vue'
 import MetaCommentAffordance from './MetaCommentAffordance.vue'
+import { MtButton } from '../ui'
 import {
   handleCommentAffordanceKeydown,
   resolveCommentAffordanceStateClass,
@@ -399,8 +400,9 @@ function getColumnsCount(): number {
 .meta-gallery__toolbar-field { display: flex; flex-direction: column; gap: 3px; font-size: 11px; color: #64748b; }
 .meta-gallery__toolbar-select { min-width: 104px; padding: 5px 8px; border: 1px solid #d8e1ee; border-radius: 6px; background: #fff; font-size: 12px; color: #334155; }
 .meta-gallery__field-picker { margin-left: auto; align-self: end; }
-.meta-gallery__create-btn { align-self: end; padding: 6px 12px; border: 1px solid #c7ddff; border-radius: 6px; background: #ecf5ff; color: #2563eb; font-size: 12px; cursor: pointer; }
-.meta-gallery__create-btn:hover { background: #dbeafe; }
+/* .meta-gallery__create-btn: now <MtButton variant="plain"> (token-styled); bespoke soft-tinted
+   hardcoded CSS removed (UI-P2-1c T2). Class kept on the element only for selector stability. */
+.meta-gallery__create-btn { align-self: end; }
 .meta-gallery__field-picker summary { list-style: none; cursor: pointer; font-size: 12px; color: #409eff; user-select: none; }
 .meta-gallery__field-picker summary::-webkit-details-marker { display: none; }
 .meta-gallery__field-picker-list { display: flex; flex-wrap: wrap; gap: 8px 12px; margin-top: 8px; padding: 10px 12px; border: 1px solid #d8e1ee; border-radius: 8px; background: #fff; box-shadow: 0 8px 20px rgba(15,23,42,.08); max-width: 360px; }
@@ -436,12 +438,12 @@ function getColumnsCount(): number {
 .meta-gallery__empty-icon { font-size: 36px; opacity: 0.5; margin-bottom: 8px; }
 .meta-gallery__empty-title { font-size: 15px; font-weight: 600; color: #666; margin-bottom: 4px; }
 .meta-gallery__empty-hint { font-size: 13px; color: #aaa; }
-.meta-gallery__empty-action { margin-top: 12px; padding: 8px 14px; border: 1px solid #c7ddff; border-radius: 6px; background: #ecf5ff; color: #2563eb; font-size: 12px; cursor: pointer; }
-.meta-gallery__empty-action:hover { background: #dbeafe; }
+/* .meta-gallery__empty-action: now <MtButton variant="plain"> (token-styled); bespoke soft-tinted
+   hardcoded CSS removed (UI-P2-1c T2). Class kept on the element only for selector stability. */
+.meta-gallery__empty-action { margin-top: 12px; }
 .meta-gallery__pagination { display: flex; align-items: center; justify-content: center; gap: 12px; padding: 8px; border-top: 1px solid #e5e7eb; }
-.meta-gallery__page-btn { padding: 4px 12px; border: 1px solid #ddd; border-radius: 3px; background: #fff; cursor: pointer; font-size: 12px; }
-.meta-gallery__page-btn:hover:not(:disabled) { background: #f5f5f5; }
-.meta-gallery__page-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+/* .meta-gallery__page-btn: prev/next now render as <MtButton variant="ghost"> (token-styled); bespoke
+   hardcoded CSS removed (UI-P2-1c batch6). Class kept on the element only for selector stability. */
 .meta-gallery__page-info { font-size: 12px; color: #666; }
 .meta-gallery__loading { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; background: rgba(255,255,255,.7); font-size: 14px; color: #666; z-index: 10; }
 </style>

@@ -8,7 +8,21 @@ import { useLocale } from '../src/composables/useLocale'
 // preservation proof: they stay native, keyboard-operable <button>s; the `:disabled="!canExport"`
 // binding survives on confirm; and clicking them still emits the SAME `cancel` / `confirm` events
 // with the SAME payload. The dialog teleports to <body>, so queries hit `document`, not the mount
-// container. The close-× glyph and the select-all / clear-all link buttons stay bespoke (untouched).
+// container. BOTH tail-lock tiers have now landed on this dialog:
+//
+// UI-P2-1c T1 batch-2 — the header close-× (`.meta-export__close`) migrated from a bespoke
+// <button>&times;</button> to the shared MtIconButton primitive — the &times; glyph char passes
+// through MtIconButton's default-slot icon fallback (size token-normalized to the icon control,
+// consistent with the existing glyph-MtIconButton controls already on main). It stays a native,
+// keyboard-operable <button>, keeps the SAME aria-label (`l('export.close')`), and clicking it still
+// calls the SAME onCancel() → emits `cancel`. Sole sharer of `.meta-export__close` → bespoke CSS
+// removed outright, no double-styling risk.
+//
+// UI-P2-1c T3 (design-lock §2-T3, RATIFIED) — the select-all / clear-all inline links, both sharers
+// of the old `.meta-export__link` class, are now <MtLink>. Both migrated together so the bespoke
+// #409eff CSS was removed (no double-styling). Both stay native, keyboard-operable <button>s (now
+// class `mt-link`); select-all still checks every column, clear-all still unchecks every column
+// (verified via confirm's `:disabled="!canExport"` and the emitted fieldIds).
 
 const mounts: Array<{ app: App<Element>; container: HTMLDivElement }> = []
 afterEach(() => {
@@ -51,8 +65,8 @@ describe('MetaExportDialog — MtButton migration (UI-P2-1c)', () => {
 
   it('confirm becomes disabled when no columns are checked (:disabled="!canExport" survives)', async () => {
     mount(baseProps())
-    // Uncheck both columns via the bespoke "clear all" link → canExport false.
-    const clearAll = Array.from(document.querySelectorAll('.meta-export__link'))
+    // Uncheck both columns via the now-MtLink "clear all" link → canExport false.
+    const clearAll = Array.from(document.querySelectorAll('.mt-link'))
       .find((b) => (b.textContent || '').toLowerCase().includes('clear')) as HTMLButtonElement
     clearAll.click()
     await nextTick()
@@ -73,5 +87,64 @@ describe('MetaExportDialog — MtButton migration (UI-P2-1c)', () => {
     confirmBtn().click()
     expect(onConfirm).toHaveBeenCalledTimes(1)
     expect(onConfirm).toHaveBeenCalledWith({ fieldIds: ['f1', 'f2'], rowScope: 'all', format: 'csv' })
+  })
+
+  it('renders the header close-× as a native <button> (MtIconButton) keeping the class + aria-label', () => {
+    mount(baseProps())
+    const btn = document.querySelector('.meta-export__close') as HTMLButtonElement
+    expect(btn.tagName).toBe('BUTTON')
+    expect(btn.classList.contains('meta-export__close')).toBe(true)
+    expect(btn.getAttribute('aria-label')).toBe('Close')
+    expect(btn.textContent?.trim()).toBe('×') // × glyph char preserved (size token-normalized)
+  })
+
+  it('clicking the header close-× emits `cancel` (unchanged — same onCancel as the footer cancel button)', () => {
+    const onCancel = vi.fn()
+    mount(baseProps(), { onCancel })
+    const btn = document.querySelector('.meta-export__close') as HTMLButtonElement
+    btn.click()
+    expect(onCancel).toHaveBeenCalledTimes(1)
+    expect(onCancel).toHaveBeenCalledWith()
+  })
+})
+
+const linkBtns = () => Array.from(document.querySelectorAll('.meta-export__bulk .mt-link')) as HTMLButtonElement[]
+const selectAllLink = () => linkBtns().find((b) => (b.textContent || '').toLowerCase().includes('select')) as HTMLButtonElement
+const clearAllLink = () => linkBtns().find((b) => (b.textContent || '').toLowerCase().includes('clear')) as HTMLButtonElement
+
+describe('MetaExportDialog — MtLink migration (UI-P2-1c T3)', () => {
+  it('renders select-all and clear-all as native <button class="mt-link">s (keyboard-operable, no bespoke class left)', () => {
+    mount(baseProps())
+    const btns = linkBtns()
+    expect(btns.length).toBe(2)
+    expect(btns.every((b) => b.tagName === 'BUTTON')).toBe(true)
+    expect(document.querySelector('.meta-export__link')).toBeNull() // bespoke class fully removed, not just unused
+  })
+
+  it('clear-all unchecks every column, then select-all re-checks every column (real state round-trip, not just an emit count)', async () => {
+    mount(baseProps())
+    const cols = () => Array.from(document.querySelectorAll('.meta-export__cols input[type="checkbox"]')) as HTMLInputElement[]
+    expect(cols().every((cb) => cb.checked)).toBe(true) // starts fully checked
+
+    clearAllLink().click()
+    await nextTick()
+    expect(cols().every((cb) => !cb.checked)).toBe(true)
+    expect(confirmBtn().disabled).toBe(true) // canExport flips off
+
+    selectAllLink().click()
+    await nextTick()
+    expect(cols().every((cb) => cb.checked)).toBe(true)
+    expect(confirmBtn().disabled).toBe(false) // canExport flips back on
+  })
+
+  it('select-all/clear-all never emit `confirm`/`cancel` themselves (distinct from the footer MtButtons)', async () => {
+    const onConfirm = vi.fn()
+    const onCancel = vi.fn()
+    mount(baseProps(), { onConfirm, onCancel })
+    clearAllLink().click()
+    selectAllLink().click()
+    await nextTick()
+    expect(onConfirm).not.toHaveBeenCalled()
+    expect(onCancel).not.toHaveBeenCalled()
   })
 })

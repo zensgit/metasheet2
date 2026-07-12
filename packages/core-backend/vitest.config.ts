@@ -42,6 +42,21 @@ export default defineConfig({
       // reclaims a live long run. DATABASE_URL-gated; excluded here so the no-DB job cannot
       // skip-green it, and wired as a WHOLE FILE into the approval real-DB step.
       'tests/integration/directory-sync-run-lease.db.test.ts',
+      // R1-L4 syncDirectoryIntegration orchestration harness (real DB): drives the REAL sync
+      // end-to-end (mocked DingTalk pull, real Postgres apply) to cover the CALL SITES the
+      // per-helper goldens cannot — heartbeat lifecycle/interval-cleared proof, H02 admission
+      // wiring + per-account SAVEPOINT, OPS-01 deprovision executor wiring (both arms), and
+      // the stale-lease reclaim composition (trigger path + scheduler boot sweep).
+      // DATABASE_URL-gated; excluded here so the no-DB job cannot skip-green it, and wired as
+      // a WHOLE FILE into the approval real-DB step in plugin-tests.yml.
+      'tests/integration/directory-sync-orchestration.db.test.ts',
+      // Roadmap §7.8 "Add timezone support" (real DB): proves schedule_timezone round-trips
+      // through create/update/read against the REAL migrated column, and specifically the
+      // absent-vs-present update semantics (omitted key preserves; explicit '' clears) that a
+      // mocked-pg unit test cannot prove end-to-end. DATABASE_URL-gated; excluded here so the
+      // no-DB job cannot skip-green it, and wired as a WHOLE FILE into the directory real-DB
+      // step in plugin-tests.yml.
+      'tests/integration/directory-sync-schedule-timezone.db.test.ts',
       'tests/integration/approval-manager-chain.db.test.ts',
       'tests/integration/approval-requester-department.db.test.ts',
       'tests/integration/approval-requester-title.db.test.ts',
@@ -78,6 +93,16 @@ export default defineConfig({
       // a WHOLE FILE into the `Run approval real-DB integration` step in plugin-tests.yml where it
       // runs against real Postgres every PR.
       'tests/integration/dingtalk-approval-card-deliveries.db.test.ts',
+      // §7.6 Delivery Closure — operator-initiated redelivery of a FAILED attendance-notification
+      // outbox row: DATABASE_URL-gated (describeIfDb). Excluded from the no-DB default job so it
+      // cannot skip-green, and wired as a WHOLE FILE into the `Run approval real-DB integration`
+      // step in plugin-tests.yml where it runs against real Postgres every PR.
+      'tests/integration/attendance-notification-redelivery.db.test.ts',
+      // §7.6 Delivery Closure — HTTP route-level tests for the platform-admin-gated redelivery
+      // endpoint (403/400/409/200 + values-free PII-free audit row). DATABASE_URL-gated
+      // (describeIfDb). Excluded from the no-DB default job so it cannot skip-green, and wired as a
+      // WHOLE FILE into the `Run approval real-DB integration` step in plugin-tests.yml.
+      'tests/integration/attendance-notification-redelivery-route.db.test.ts',
       // DT-OPS-02 P2 follow-up: preview/apply auto-admission-candidate-count parity.
       // DATABASE_URL-gated (describeIfDatabase). Excluded from the no-DB default job so it
       // doesn't skip-green, and wired as a WHOLE FILE into the `Run approval real-DB
@@ -186,6 +211,12 @@ export default defineConfig({
       // as a WHOLE FILE into the `Run multitable real-DB integration` step in plugin-tests.yml where
       // it runs against real Postgres every PR.
       'tests/integration/dingtalk-group-delivery-retention.db.test.ts',
+      // DT-HARDEN-08 follow-up (sibling of the above): dingtalk_approval_card_deliveries +
+      // dingtalk_person_deliveries retention sweep. DATABASE_URL-gated (describeIfDatabase).
+      // Excluded from the no-DB default job so it cannot skip-green, and wired as a WHOLE FILE
+      // into the `Run multitable real-DB integration` step in plugin-tests.yml.
+      'tests/integration/dingtalk-card-person-delivery-retention.db.test.ts',
+      'tests/integration/dingtalk-card-delivery-retention-actionability.db.test.ts',
       // comments.api.test.ts needs setup.integration.ts + a live DB. It stays
       // CI-excluded (NOT wired) because 8 of its tests have a pre-existing real-wire
       // failure (CommentService.mapRowToComment drops containerId/targetId/
@@ -224,6 +255,20 @@ export default defineConfig({
       // here hid a #2052/#2068 redaction-wiring regression (4/7 RED) that no CI job caught.
       'tests/integration/plugin-failures.test.ts',
       'tests/integration/rooms.basic.test.ts',
+      // Real-APP-ASSEMBLY guard: boots a real MetaSheetServer, so it is excluded from this no-DB default job
+      // (which would skip-green it) and wired as a WHOLE FILE into the `Run real-app assembly guard` step in
+      // plugin-tests.yml, where it runs on every PR. It guards an invariant that unit tests structurally
+      // cannot see: no router mounted under /api may intercept traffic it does not own (a path-less
+      // router.use in a router mounted at a shared prefix runs for EVERY request entering that router,
+      // including other routers' traffic).
+      'tests/integration/router-isolation.smoke.test.ts',
+      // snapshot-protection boots a real server too, and its silent-return skips are gone (setup now
+      // hard-fails and every test must assert), so it can no longer report green without doing its work.
+      // It is still NOT wired into CI: the CI test database is migrated with MIGRATION_EXCLUDE, which omits
+      // the view-table migrations (20250924120000_create_views_view_states, 20250925_create_view_tables,
+      // 042a_core_model_views) — so `views` does not exist there and createSnapshot's captureViewState
+      // cannot run. Wiring it requires untangling that excluded migration cluster, which is its own change;
+      // until then this is DECLARED debt, not invisible debt. Run it locally against a fully-migrated DB.
       'tests/integration/snapshot-protection.test.ts',
       'tests/integration/spreadsheet-integration.test.ts',
       // Playwright E2E suites run through their own harness, not Vitest.

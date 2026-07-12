@@ -9,7 +9,7 @@
     <div class="meta-trash__modal" role="dialog" aria-modal="true" :aria-label="t('回收站', 'Recycle bin')">
       <header class="meta-trash__header">
         <h3 class="meta-trash__title">{{ t('回收站', 'Recycle bin') }}</h3>
-        <button class="meta-trash__close" type="button" :aria-label="t('关闭', 'Close')" @click="emit('close')">×</button>
+        <MtIconButton class="meta-trash__close" :aria-label="t('关闭', 'Close')" @click="emit('close')">×</MtIconButton>
       </header>
 
       <p v-if="error" class="meta-trash__error" role="alert">{{ error }}</p>
@@ -30,7 +30,7 @@
               :disabled="restoringIds.includes(row.rec.recordId)"
               @click="confirmRestore(row.rec.recordId)"
             >{{ restoringIds.includes(row.rec.recordId) ? t('恢复中…', 'Restoring…') : t('确定恢复', 'Confirm') }}</button>
-            <button class="meta-trash__cancel" type="button" @click="confirmingId = null">{{ t('取消', 'Cancel') }}</button>
+            <MtButton class="meta-trash__cancel" @click="confirmingId = null">{{ t('取消', 'Cancel') }}</MtButton>
           </template>
           <button
             v-else
@@ -52,6 +52,7 @@ import { useLocale } from '../../composables/useLocale'
 import { useTrash } from '../composables/useTrash'
 import { pickRecordTitle } from '../utils/field-display'
 import { historyActor } from '../utils/meta-record-labels'
+import { MtButton, MtIconButton } from '../ui'
 import type { MetaDeletedRecord, MetaField } from '../types'
 
 // `fields` is the current sheet's field list (passed by the workbench). It lets a trashed row show a
@@ -114,7 +115,9 @@ async function confirmRestore(recordId: string): Promise<void> {
 .meta-trash__modal { background: var(--meta-surface, #fff); color: var(--meta-text, #1f2329); border-radius: 8px; min-width: 360px; max-width: 560px; max-height: 70vh; overflow: auto; padding: 16px; box-shadow: 0 8px 32px rgba(0, 0, 0, 0.18); }
 .meta-trash__header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
 .meta-trash__title { margin: 0; font-size: 15px; }
-.meta-trash__close { background: none; border: none; font-size: 20px; line-height: 1; cursor: pointer; color: inherit; }
+/* .meta-trash__close: now <MtIconButton> (ghost, token-styled; the × glyph char passes through its
+   default-slot icon fallback, size token-normalized to the icon control). Bespoke hardcoded CSS
+   removed (UI-P2-1c T4). Class kept on the element only for selector stability — sole sharer. */
 .meta-trash__list { list-style: none; margin: 0; padding: 0; }
 .meta-trash__row { display: flex; align-items: center; gap: 12px; padding: 8px 0; border-bottom: 1px solid var(--meta-border, #eee); }
 .meta-trash__identity { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
@@ -122,7 +125,9 @@ async function confirmRestore(recordId: string): Promise<void> {
 .meta-trash__meta { color: var(--meta-text-secondary, #888); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .meta-trash__confirm-text { font-size: 12px; color: var(--meta-text-secondary, #888); white-space: nowrap; }
 .meta-trash__restore { cursor: pointer; }
-.meta-trash__cancel { cursor: pointer; background: none; border: none; color: var(--meta-text-secondary, #888); }
+/* .meta-trash__cancel: now <MtButton> (ghost, token-styled); its bespoke hardcoded CSS was removed
+   (UI-P2-1c T4). Class kept on the element only for selector stability — sole sharer. Red line:
+   .meta-trash__restore (Restore / Confirm-restore) is delete-adjacent semantic and is NOT migrated. */
 .meta-trash__restore:disabled { cursor: default; opacity: 0.6; }
 .meta-trash__error { color: var(--meta-danger, #c0392b); margin: 0 0 8px; }
 .meta-trash__hint { color: var(--meta-text-secondary, #888); padding: 12px 0; }

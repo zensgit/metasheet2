@@ -192,6 +192,22 @@ function validateReadSourceConfig(config) {
   // Field map — declares the data-plane fields only: { source, target } names, never values.
   if (config.fieldMap !== undefined && (!Array.isArray(config.fieldMap) || config.fieldMap.length === 0 || !config.fieldMap.every(isValidFieldMapEntry))) {
     push('READ_SOURCE_FIELD_MAP_INVALID', 'fieldMap', 'invalid_field_map')
+  } else if (Array.isArray(config.fieldMap)) {
+    // One target, one source. Two entries writing the SAME target is not "try both spellings": the mapping
+    // is a sequence of writes, so the last entry wins — and an entry that does not resolve writes null OVER
+    // a real value an earlier entry had already read. The column then reads as empty everywhere while the
+    // source had a value all along. Reject it where it is written, not where it silently loses data.
+    const targets = new Set()
+    const duplicated = config.fieldMap.some((entry) => {
+      const target = entry && typeof entry.target === 'string' ? entry.target.trim() : null
+      if (!target) return false
+      if (targets.has(target)) return true
+      targets.add(target)
+      return false
+    })
+    if (duplicated) {
+      push('READ_SOURCE_FIELD_MAP_INVALID', 'fieldMap', 'duplicate_target')
+    }
   }
 
   // R0 resolver_lookup contract (rule-gated multiplicity; #1709 / resolver design-lock). The resolver keys

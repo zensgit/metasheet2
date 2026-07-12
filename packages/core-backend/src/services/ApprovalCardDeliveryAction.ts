@@ -15,6 +15,22 @@
  *   exactly outcome_unknown — a send whose outcome the client could not observe MAY have been
  *   delivered, and a valid HMAC deep-link token is itself proof of delivery, so the ledger's
  *   send-time uncertainty must not make a delivered card inoperable. pending/failed stay stale.)
+ * - P1-1 stale-card binding: actionability ADDITIONALLY requires a LIVE active `approval_assignments`
+ *   row still matching the delivery's node_key + recipient + entry_epoch. A card issued for node-1
+ *   must NOT approve node-2 after the instance advances (node-1's assignment is deactivated → no
+ *   match), nor re-approve the SAME node after a loop-back (a fresh epoch on the new active
+ *   assignment fails the old card's epoch match).
+ *
+ *   STRICT, fail-closed (P1-1 re-review): the delivery MUST carry a NON-NULL entry_epoch equal to a
+ *   NON-NULL live-seat epoch. There is NO null-pass arm — a NULL delivery epoch is never actionable,
+ *   and pre-column legacy cards are SUPERSEDED outright at migrate time (their original round cannot
+ *   be proven, so it is never inferred).
+ *
+ *   The binding below is a read-time PRE-READ (fast-fail + honest UI state); it is NOT the authority.
+ *   The authoritative guard is re-validated inside `ApprovalProductService.dispatchAction`'s instance
+ *   `FOR UPDATE` transaction, because this pre-read runs OUTSIDE that lock and a concurrent advance
+ *   can slip a stale card past it (the TOCTOU the re-review closed). Never weaken the in-txn guard on
+ *   the strength of this one.
  */
 import { createHmac, timingSafeEqual } from 'crypto'
 
@@ -40,7 +56,11 @@ export interface ApprovalCardDeliverySummary {
   nodeKey: string
   recipientUserId: string
   viewerIsRecipient: boolean
-  /** card live + send possibly delivered ('sent'/'outcome_unknown') + instance still pending — the page may offer 同意/拒绝. */
+  /**
+   * card live + send possibly delivered ('sent'/'outcome_unknown') + instance still pending + the
+   * delivery's node/recipient(/epoch) still matches a LIVE active assignment (P1-1 stale-card
+   * binding) — the page may offer 同意/拒绝.
+   */
   actionable: boolean
   approval: {
     instanceId: string
@@ -97,6 +117,17 @@ interface InstanceSummaryRow {
   status: string
   current_node_key: string | null
   policy_snapshot: unknown
+  /**
+   * P1-1: TRUE iff an ACTIVE `approval_assignments` row still matches the delivery's node +
+   * recipient + epoch (STRICT: a NON-NULL delivery epoch equal to a NON-NULL live-seat epoch; a
+   * NULL-epoch delivery never matches). Computed in the same round-trip as the instance read so
+   * `actionable` reflects live assignment state, never just the instance status.
+   *
+   * This is the read-time PRE-READ, NOT the authoritative guard — it runs outside the engine's
+   * instance lock, so a concurrent advance can race it. The authority is the in-txn card→round
+   * binding inside `ApprovalProductService.dispatchAction`'s `FOR UPDATE` txn. See `buildSummary`.
+   */
+  has_active_assignment: boolean
 }
 
 function rejectCommentRequiredFromPolicy(policySnapshot: unknown): boolean {
@@ -113,10 +144,32 @@ async function buildSummary(
   delivery: DingTalkApprovalCardDeliveryRow,
   viewerUserId: string,
 ): Promise<ApprovalCardDeliverySummary | null> {
+  // P1-1: bind actionability to a LIVE active assignment matching the delivery's node + recipient +
+  // STRICT epoch — computed in the SAME round-trip as the instance read.
+  //   - The node/assignee match closes FORWARD advance using live state: once node-1 is approved and
+  //     the instance advances to node-2 (where the recipient is ALSO an assignee), node-1's assignment
+  //     row is is_active=FALSE, so a stale node-1 card no longer matches → NOT actionable.
+  //   - The STRICT epoch clause closes SAME-NODE re-entry: a loop-back to the same node_key mints a
+  //     FRESH entry_epoch on a new active assignment, so the old-epoch card fails the equality. There
+  //     is NO null-pass arm (the P1-1 re-review dropped the `$4 IS NULL` / `aa.entry_epoch IS NULL`
+  //     dual-read that let a legacy card re-enter the same node): the delivery MUST carry a NON-NULL
+  //     epoch equal to a NON-NULL live-seat epoch. A NULL delivery epoch (a pre-column legacy card)
+  //     → NOT actionable (fail-closed). Legacy in-flight cards are retired at migrate time — SUPERSEDED
+  //     outright (no epoch inference: a pre-column card has no provable original-round anchor), never
+  //     re-authorized by a permissive read.
   const result = await query(
-    `SELECT id, title, request_no, status, current_node_key, policy_snapshot
-       FROM approval_instances WHERE id = $1`,
-    [delivery.instance_id],
+    `SELECT i.id, i.title, i.request_no, i.status, i.current_node_key, i.policy_snapshot,
+            EXISTS (
+              SELECT 1 FROM approval_assignments aa
+               WHERE aa.instance_id = $1
+                 AND aa.node_key = $2
+                 AND aa.assignee_id = $3
+                 AND aa.is_active = TRUE
+                 AND aa.entry_epoch IS NOT NULL
+                 AND aa.entry_epoch = $4::int
+            ) AS has_active_assignment
+       FROM approval_instances i WHERE i.id = $1`,
+    [delivery.instance_id, delivery.node_key, delivery.recipient_user_id, delivery.entry_epoch],
   )
   const instance = (result.rows[0] ?? null) as InstanceSummaryRow | null
   if (!instance) return null
@@ -130,7 +183,8 @@ async function buildSummary(
     actionable:
       delivery.card_state === 'sent'
       && (delivery.send_status === 'sent' || delivery.send_status === 'outcome_unknown')
-      && instance.status === 'pending',
+      && instance.status === 'pending'
+      && instance.has_active_assignment === true,
     approval: {
       instanceId: instance.id,
       title: instance.title,
@@ -200,6 +254,13 @@ export async function executeApprovalActionFromCardDelivery(
       const fresh = await findDingTalkApprovalCardDeliveryById(deps.query, input.deliveryId)
       return fresh ? buildSummary(deps.query, fresh, input.actor.userId) : null
     })()) ?? preSummary
+    // P1-1 TOCTOU close: the engine's authoritative in-txn card→round binding threw because a
+    // concurrent advance (or same-node re-entry) raced the wrapper's pre-read — the card is stale,
+    // not "rejected". Report it as `stale` (matching the pre-read early-stale outcome) so a raced
+    // card renders the real terminal state, never a dead engine-error form.
+    if (err.code === 'APPROVAL_CARD_DELIVERY_STALE') {
+      return { status: 'stale', summary }
+    }
     return {
       status: 'engine_rejected',
       code: typeof err.code === 'string' ? err.code : 'APPROVAL_ACTION_FAILED',

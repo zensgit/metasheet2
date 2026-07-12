@@ -1015,10 +1015,20 @@ export class AttendanceNotificationDeliveryWorker {
 
   private async markFailed(id: string, error: string, attemptCount: number): Promise<boolean> {
     const now = this.now().toISOString()
+    // redelivery_safe = (this row's own channel is dingtalk_work_notification). markFailed is only
+    // ever reached by a DEFINITE non-delivery: the deliver() invariant routes an ambiguous DingTalk
+    // result (retryable:false + outcomeUnknown) to markOutcomeUnknown BEFORE this fallthrough, and
+    // the classifier contract guarantees outcomeUnknown ⟹ !retryable. So a row that lands here is a
+    // definite failure, and it is redelivery-safe IFF it is a DingTalk failure — WeCom/Email have no
+    // outcome_unknown vocabulary yet, so their `failed` rows may still be ambiguous sends and must
+    // stay redelivery_safe=false. Ambiguous DingTalk rows never reach here; they go to
+    // markOutcomeUnknown (which leaves redelivery_safe at its default false). No new parameter: the
+    // row's persisted `channel` column drives the flag. See the redelivery-service doctrine header.
     const result = await this.query(
       `UPDATE attendance_notification_deliveries
           SET status = 'failed',
               last_error = $2,
+              redelivery_safe = (channel = $6),
               claim_expires_at = NULL,
               claim_worker_id = NULL,
               updated_at = $3::timestamptz
@@ -1026,7 +1036,7 @@ export class AttendanceNotificationDeliveryWorker {
           AND status = 'sending'
           AND claim_worker_id = $4
           AND attempt_count = $5::int`,
-      [id, error.slice(0, 1000), now, this.workerId, attemptCount],
+      [id, error.slice(0, 1000), now, this.workerId, attemptCount, DINGTALK_WORK_NOTIFICATION_CHANNEL_NAME],
     )
     return Number(result.rowCount ?? 0) === 1
   }

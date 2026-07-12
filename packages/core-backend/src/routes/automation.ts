@@ -24,6 +24,8 @@ import type { AutomationExecution, AutomationStepResult } from '../multitable/au
 import { legacyAutomationStatusToJobStatus } from '../multitable/workflow-job-contract'
 import { requireAdminRole } from '../guards/audit-integration'
 import { createRateLimiter } from '../middleware/rate-limiter'
+import { resolveSheetCapabilities } from '../multitable/permission-service'
+import { poolManager } from '../integration/db/connection-pool'
 import {
   INBOUND_WEBHOOK_BODY_LIMIT,
   INBOUND_WEBHOOK_RATE_LIMIT_PER_MINUTE,
@@ -245,6 +247,35 @@ export function createAutomationRoutes(
     const ruleId = typeof req.params.ruleId === 'string' ? req.params.ruleId : ''
     if (!sheetId || !ruleId) {
       return res.status(400).json({ error: 'sheetId and ruleId are required' })
+    }
+
+    // G8 (retry/test-run governance lock §6): the test route REALLY executes the rule (fires
+    // writes/notifications/webhooks). Until now it had no backend capability gate at all — only the
+    // FE hides the button behind `canManageAutomation`. Enforce that same per-sheet capability on
+    // the backend so a caller who cannot manage automation on this sheet cannot trigger a real run.
+    // Mirrors the automation rule-CRUD gate at routes/univer-meta.ts (resolveSheetCapabilities →
+    // canManageAutomation). Standalone security fix; no flag, no behaviour change for a privileged
+    // caller (the FE test button already only renders for canManageAutomation holders).
+    try {
+      const pool = poolManager.get()
+      const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      if (!capabilities.canManageAutomation) {
+        return res.status(403).json({ ok: false, error: { code: 'FORBIDDEN', message: 'Insufficient permissions' } })
+      }
+    } catch (err) {
+      // A capability-resolution failure (e.g. DB not ready) must fail CLOSED — never fall through
+      // to an ungated testRun. Review P3: never echo the raw error message (it can carry DB
+      // host/port/user) — surface a generic, values-free message. A connection / not-ready error
+      // is a transient 503; anything else is a 500. Either way the real run never fired.
+      const raw = err instanceof Error ? err.message : ''
+      const transient = /ECONNREFUSED|ETIMEDOUT|not ready|unavailable|Connection terminated|too many clients|does not exist/i.test(raw)
+      return res.status(transient ? 503 : 500).json({
+        ok: false,
+        error: {
+          code: transient ? 'DB_NOT_READY' : 'PERMISSION_CHECK_FAILED',
+          message: transient ? 'Service temporarily unavailable' : 'Failed to resolve permissions',
+        },
+      })
     }
 
     const svc = getService(res)

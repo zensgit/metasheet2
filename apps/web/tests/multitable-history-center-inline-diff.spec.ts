@@ -486,3 +486,62 @@ describe('HistoryCenterModal — record click-through emit (PR-C)', () => {
     } finally { app.unmount(); container.remove() }
   })
 })
+
+// all-tables-B (R11): a batch can span multiple sheets, but the `fields` prop only carries the ACTIVE
+// sheet's fields. diffFieldName resolves the active sheet via `fields` (byte-identical to pre-R11), a
+// non-active sheet via the server-masked `fieldNames` map, and neither → the raw id.
+describe('HistoryCenterModal — all-tables-B cross-table field-name resolution', () => {
+  it('active sheet uses `fields` prop; non-active sheet uses the masked fieldNames map; neither → raw id', async () => {
+    mockListHistoryEvents.mockResolvedValue({ batches: [batch()], total: 1, nextCursor: null, searchTruncated: false })
+    const detail: HistoryBatchDetail = {
+      batchId: 'batch_1', actorId: 'user_1', source: 'rest', createdAt: new Date().toISOString(),
+      visibleAffectedRecordCount: 2, visibleAffectedFieldCount: 3,
+      changes: [
+        { sheetId: 'sheet_active', recordId: 'rec_a', action: 'update', version: 2,
+          changedFieldIds: ['fld_active'], before: { fld_active: 'x' }, after: { fld_active: 'y' } },
+        { sheetId: 'sheet_other', recordId: 'rec_o', action: 'update', version: 2,
+          changedFieldIds: ['fld_other', 'fld_orphan'],
+          before: { fld_other: 'p', fld_orphan: 'm' }, after: { fld_other: 'q', fld_orphan: 'n' } },
+      ],
+      // active field's map name is DIFFERENT from its prop name, to prove props win for the active sheet.
+      fieldNames: { sheet_active: { fld_active: 'ActiveMap' }, sheet_other: { fld_other: 'OtherName' } },
+    }
+    mockGetHistoryBatch.mockResolvedValue(detail)
+    const { app, container } = mountModal([{ id: 'fld_active', name: 'ActiveProp' }])
+    try {
+      await flushPromises()
+      container.querySelector<HTMLButtonElement>('[data-test="hist-batch"]')!.click()
+      await flushPromises()
+      const labels = Array.from(container.querySelectorAll<HTMLElement>('.meta-hist__diff-label')).map((n) => n.textContent?.trim())
+      expect(labels).toEqual(['ActiveProp', 'OtherName', 'fld_orphan'])
+    } finally { app.unmount(); container.remove() }
+  })
+})
+
+// R11 restore back-reference: a change carrying restoredFromVersion renders a "Restored from vN" badge;
+// a change with null/absent restoredFromVersion renders no badge (the badge keys on NON-NULL).
+describe('HistoryCenterModal — restore back-reference badge', () => {
+  it('renders "Restored from vN" only for a change with a non-null restoredFromVersion', async () => {
+    mockListHistoryEvents.mockResolvedValue({ batches: [batch()], total: 1, nextCursor: null, searchTruncated: false })
+    const detail: HistoryBatchDetail = {
+      batchId: 'batch_1', actorId: 'user_1', source: 'restore', createdAt: new Date().toISOString(),
+      visibleAffectedRecordCount: 2, visibleAffectedFieldCount: 2,
+      changes: [
+        { sheetId: 'sheet_1', recordId: 'rec_restored', action: 'update', version: 4,
+          changedFieldIds: ['fld_name'], before: { fld_name: 'old' }, after: { fld_name: 'new' }, restoredFromVersion: 5 },
+        { sheetId: 'sheet_1', recordId: 'rec_plain', action: 'update', version: 2,
+          changedFieldIds: ['fld_name'], before: { fld_name: 'a' }, after: { fld_name: 'b' }, restoredFromVersion: null },
+      ],
+    }
+    mockGetHistoryBatch.mockResolvedValue(detail)
+    const { app, container } = mountModal([{ id: 'fld_name', name: 'Name' }])
+    try {
+      await flushPromises()
+      container.querySelector<HTMLButtonElement>('[data-test="hist-batch"]')!.click()
+      await flushPromises()
+      const badges = Array.from(container.querySelectorAll<HTMLElement>('[data-test="hist-restored-from"]'))
+      expect(badges.length).toBe(1) // exactly one change carries a source version
+      expect(badges[0].textContent).toContain('v5')
+    } finally { app.unmount(); container.remove() }
+  })
+})
