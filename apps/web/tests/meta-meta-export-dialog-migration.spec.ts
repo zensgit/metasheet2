@@ -8,14 +8,21 @@ import { useLocale } from '../src/composables/useLocale'
 // preservation proof: they stay native, keyboard-operable <button>s; the `:disabled="!canExport"`
 // binding survives on confirm; and clicking them still emits the SAME `cancel` / `confirm` events
 // with the SAME payload. The dialog teleports to <body>, so queries hit `document`, not the mount
-// container. The close-× glyph stays bespoke (untouched; T1-gated).
+// container. BOTH tail-lock tiers have now landed on this dialog:
 //
-// UI-P2-1c T3 (multitable-ui-p2-1c-tail-resolution-designlock-20260707.md §2-T3, RATIFIED): the
-// select-all / clear-all inline links — both sharers of the old `.meta-export__link` class — are now
-// <MtLink>. Both were migrated together so the bespoke #409eff CSS was removed (no double-styling).
-// Behavior-preservation proof: both stay native, keyboard-operable <button>s (now class `mt-link`);
-// clicking select-all still checks every column, clicking clear-all still unchecks every column
-// (verified indirectly via confirm's `:disabled="!canExport"` and the emitted fieldIds).
+// UI-P2-1c T1 batch-2 — the header close-× (`.meta-export__close`) migrated from a bespoke
+// <button>&times;</button> to the shared MtIconButton primitive — the &times; glyph char passes
+// through MtIconButton's default-slot icon fallback (size token-normalized to the icon control,
+// consistent with the existing glyph-MtIconButton controls already on main). It stays a native,
+// keyboard-operable <button>, keeps the SAME aria-label (`l('export.close')`), and clicking it still
+// calls the SAME onCancel() → emits `cancel`. Sole sharer of `.meta-export__close` → bespoke CSS
+// removed outright, no double-styling risk.
+//
+// UI-P2-1c T3 (design-lock §2-T3, RATIFIED) — the select-all / clear-all inline links, both sharers
+// of the old `.meta-export__link` class, are now <MtLink>. Both migrated together so the bespoke
+// #409eff CSS was removed (no double-styling). Both stay native, keyboard-operable <button>s (now
+// class `mt-link`); select-all still checks every column, clear-all still unchecks every column
+// (verified via confirm's `:disabled="!canExport"` and the emitted fieldIds).
 
 const mounts: Array<{ app: App<Element>; container: HTMLDivElement }> = []
 afterEach(() => {
@@ -80,6 +87,24 @@ describe('MetaExportDialog — MtButton migration (UI-P2-1c)', () => {
     confirmBtn().click()
     expect(onConfirm).toHaveBeenCalledTimes(1)
     expect(onConfirm).toHaveBeenCalledWith({ fieldIds: ['f1', 'f2'], rowScope: 'all', format: 'csv' })
+  })
+
+  it('renders the header close-× as a native <button> (MtIconButton) keeping the class + aria-label', () => {
+    mount(baseProps())
+    const btn = document.querySelector('.meta-export__close') as HTMLButtonElement
+    expect(btn.tagName).toBe('BUTTON')
+    expect(btn.classList.contains('meta-export__close')).toBe(true)
+    expect(btn.getAttribute('aria-label')).toBe('Close')
+    expect(btn.textContent?.trim()).toBe('×') // × glyph char preserved (size token-normalized)
+  })
+
+  it('clicking the header close-× emits `cancel` (unchanged — same onCancel as the footer cancel button)', () => {
+    const onCancel = vi.fn()
+    mount(baseProps(), { onCancel })
+    const btn = document.querySelector('.meta-export__close') as HTMLButtonElement
+    btn.click()
+    expect(onCancel).toHaveBeenCalledTimes(1)
+    expect(onCancel).toHaveBeenCalledWith()
   })
 })
 

@@ -4,10 +4,15 @@
 # specs. Web specs otherwise run only in the NON-required, path-filtered approval-web-guard /
 # multitable-web-guard — so a green PR did not mean any apps/web test passed.
 #
-# This job runs the curated, verified-stable union of those two guards' filters (104 files / 1537
-# tests, all green on main 2026-07-08) UNCONDITIONALLY — no path filter — so it can be added to
-# branch-protection required contexts WITHOUT the path-filtered-required footgun (a required check
-# that never triggers leaves PRs hanging forever). Job name is stable: `web-tests`.
+# This job runs the curated, verified-stable union of those two guards' filters UNCONDITIONALLY — no
+# path filter — so it can be added to branch-protection required contexts WITHOUT the
+# path-filtered-required footgun (a required check that never triggers leaves PRs hanging forever).
+# Job name is stable: `web-tests`.
+#
+# The file/test COUNT is deliberately NOT recorded here. It was once pinned as "104 files / 1537 tests"
+# and silently drifted as the list grew (#4147 took it to 166 files / 1958 tests) — a hardcoded count in
+# a comment becomes a false ledger on every expansion. The run log is the source of truth; grow the
+# filter list in run-required-web-tests.sh and let CI report the number.
 #
 # Adding it to required contexts is done via APPEND, never PUT — a PUT to
 # .../required_status_checks/contexts REPLACES the whole array, so `PUT ... ["web-tests"]` would

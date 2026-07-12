@@ -407,6 +407,20 @@ export interface HistoryBatchDetail {
    *  appear in this batch's (post-mask) changes across ALL involved sheets. Optional so a pre-R11 backend
    *  payload still typechecks; the FE degrades to raw ids / active-table names when absent. */
   fieldNames?: Record<string, Record<string, string>>
+  /**
+   * Person before-side name resolution: flat `userId → { display, inactive? }` for every userId in this
+   * batch's (post-mask) person values, BOTH sides. The grid's person cache only knows the CURRENT cell, so
+   * a person REMOVED by this change has no cached summary and would render as a raw id — this map is what
+   * makes "who was removed" readable. Server-resolved from the same directory as `actorName`; denied person
+   * fields' values (and thus their userIds) never reach it.
+   */
+  personNames?: Record<string, { display: string; inactive?: boolean }>
+  /**
+   * all-tables: masked field-id → TYPE map, per sheet. Companion to `fieldNames`: that one gives a
+   * non-active sheet's field its NAME, this one gives its VALUE a type-aware renderer (person/link/date/…)
+   * instead of raw JSON. Same masked source; hidden/denied field types never appear.
+   */
+  fieldTypes?: Record<string, Record<string, string>>
 }
 
 export interface MetaRecordSubscription {

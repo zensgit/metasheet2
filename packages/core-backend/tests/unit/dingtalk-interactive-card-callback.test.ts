@@ -28,6 +28,10 @@ import type { DingTalkApprovalCardTerminalUpdate } from '../../src/integrations/
 
 const DELIVERY_ID = '11111111-2222-4333-8444-555555555555'
 const OPERATOR = 'dd_operator_1'
+// P1-2: the delivery fixture's integration belongs to this corp; the wire payload's official
+// corpId matches it by default so the corp cross-check passes on the happy path. Mismatch/absent
+// cases override `corpId` explicitly.
+const DEFAULT_CORP_ID = 'corp_default'
 
 function wirePayload(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
@@ -35,6 +39,7 @@ function wirePayload(overrides: Record<string, unknown> = {}): Record<string, un
     userId: OPERATOR,
     userIdType: 1,
     content: JSON.stringify({ cardPrivateData: { actionIds: ['approve'], params: {} } }),
+    corpId: DEFAULT_CORP_ID,
     ...overrides,
   }
 }
@@ -181,6 +186,83 @@ describe('parseDingTalkApprovalCardCallback (B-3 §B-3 shape gates)', () => {
   })
 })
 
+// ── P2-2: the OFFICIAL params.action wire channel (primary) + actionIds (secondary) ────────────
+
+describe('parseDingTalkApprovalCardCallback (P2-2 params.action official channel)', () => {
+  type Parsed = ReturnType<typeof parseDingTalkApprovalCardCallback>
+  const expectApprove = (parsed: Parsed) =>
+    expect(parsed).toEqual({
+      ok: true,
+      callback: { outTrackId: DELIVERY_ID, action: 'approve', operatorDingTalkUserId: OPERATOR },
+    })
+  const expectNoOp = (parsed: Parsed) =>
+    expect(parsed).toEqual({ ok: false, outcome: 'ignored_unsupported_action', outTrackId: DELIVERY_ID })
+
+  it('(a) PRIMARY channel: params.action=approve with NO actionIds → approve (string or object content)', () => {
+    expectApprove(parseDingTalkApprovalCardCallback(wirePayload({
+      content: JSON.stringify({ cardPrivateData: { params: { action: 'approve' } } }),
+    })))
+    expectApprove(parseDingTalkApprovalCardCallback(wirePayload({
+      content: { cardPrivateData: { params: { action: 'approve' } } },
+    })))
+  })
+
+  it('(b) params.action and actionIds AGREE → approve', () => {
+    expectApprove(parseDingTalkApprovalCardCallback(wirePayload({
+      content: JSON.stringify({ cardPrivateData: { params: { action: 'approve' }, actionIds: ['approve'] } }),
+    })))
+  })
+
+  it('(c) params.action vs actionIds DISAGREE → fail-closed no-op (symmetric)', () => {
+    expectNoOp(parseDingTalkApprovalCardCallback(wirePayload({
+      content: JSON.stringify({ cardPrivateData: { params: { action: 'approve' }, actionIds: ['reject'] } }),
+    })))
+    expectNoOp(parseDingTalkApprovalCardCallback(wirePayload({
+      content: JSON.stringify({ cardPrivateData: { params: { action: 'reject' }, actionIds: ['approve'] } }),
+    })))
+  })
+
+  it('(d) params.action=reject → approve-only no-op', () => {
+    expectNoOp(parseDingTalkApprovalCardCallback(wirePayload({
+      content: JSON.stringify({ cardPrivateData: { params: { action: 'reject' } } }),
+    })))
+  })
+
+  it('(e) backward-compat: a single actionIds entry with NO params.action → approve', () => {
+    expectApprove(parseDingTalkApprovalCardCallback(wirePayload({
+      content: JSON.stringify({ cardPrivateData: { actionIds: ['approve'] } }),
+    })))
+    expectApprove(parseDingTalkApprovalCardCallback(wirePayload({
+      content: JSON.stringify({ cardPrivateData: { actionIds: ['approve'], params: {} } }),
+    })))
+  })
+
+  it('(f) P3-1 preserved: genuinely unreadable content (no readable params) → no-op, even with explicit approve', () => {
+    expectNoOp(parseDingTalkApprovalCardCallback(wirePayload({ content: 'not-json{{' })))
+    expectNoOp(parseDingTalkApprovalCardCallback(wirePayload({ action: 'approve', content: 'not-json{{' })))
+    expectNoOp(parseDingTalkApprovalCardCallback(wirePayload({ action: 'approve', content: 42 })))
+  })
+
+  it('a READABLE frame carrying only params.action is NOT swallowed by the P3-1 unreadable gate', () => {
+    // Regression guard: the P3-1 "content present but unreadable → fail-close" must not reject a
+    // valid template callback that legitimately fills params.action and omits actionIds.
+    expect(parseDingTalkApprovalCardCallback(wirePayload({
+      content: JSON.stringify({ cardPrivateData: { params: { action: 'approve' } } }),
+    })).ok).toBe(true)
+  })
+
+  it('pre-normalized business action + params.action: agreement → approve, disagreement → no-op', () => {
+    expectApprove(parseDingTalkApprovalCardCallback(wirePayload({
+      action: 'approve',
+      content: JSON.stringify({ cardPrivateData: { params: { action: 'approve' } } }),
+    })))
+    expectNoOp(parseDingTalkApprovalCardCallback(wirePayload({
+      action: 'approve',
+      content: JSON.stringify({ cardPrivateData: { params: { action: 'reject' } } }),
+    })))
+  })
+})
+
 // ── executor: ledger-only resolution + fail-closed operator + wrapper funneling ────────────────
 
 type QueryCall = { sql: string; params: unknown[] }
@@ -213,15 +295,24 @@ function makeHarness(state: {
   deliveryRows?: Record<string, unknown>[]
   linkRows?: Record<string, unknown>[]
   dispatchError?: unknown
+  /** P1-2: the corp_id the delivery's integration resolves to. `null` = integration row missing. */
+  integrationCorpId?: string | null
 } = {}) {
   const calls: QueryCall[] = []
   const deliveryRows = state.deliveryRows ?? [deliveryRow()]
+  const integrationCorpId = state.integrationCorpId === undefined ? DEFAULT_CORP_ID : state.integrationCorpId
   const linkRows = state.linkRows ?? [
     { local_user_id: 'u_appr', local_user_name: 'Approver A', local_user_active: true },
   ]
   const query = async (sql: string, params?: unknown[]) => {
     calls.push({ sql, params: params ?? [] })
     if (sql.includes('FROM dingtalk_approval_card_deliveries')) return { rows: deliveryRows }
+    // P1-2 corp cross-check resolver (SELECT corp_id FROM directory_integrations …). The
+    // link-secret resolver also reads directory_integrations but selects id/name/status/config
+    // (no corp_id), so it stays on the empty-else branch below — preserving link_secret_unavailable.
+    if (sql.includes('FROM directory_integrations') && sql.includes('corp_id')) {
+      return { rows: integrationCorpId === null ? [] : [{ corp_id: integrationCorpId }] }
+    }
     if (sql.includes('FROM directory_accounts')) return { rows: linkRows }
     if (sql.includes('FROM approval_instances')) {
       return {
@@ -275,6 +366,16 @@ describe('executeDingTalkApprovalCardCallback (B-3 §B-3 execution)', () => {
     expect(result).toEqual({ outcome: 'ignored_unsupported_action', outTrackId: DELIVERY_ID })
     expect(h.calls).toHaveLength(0)
     expect(h.dispatchAction).not.toHaveBeenCalled()
+  })
+
+  it('P2-2: a params.action=approve template callback (no actionIds) executes through the wrapper', async () => {
+    const h = makeHarness()
+    const result = await executeDingTalkApprovalCardCallback(
+      h.deps as never,
+      wirePayload({ content: JSON.stringify({ cardPrivateData: { params: { action: 'approve' } } }) }),
+    )
+    expect(result.outcome).toBe('executed')
+    expect(h.dispatchAction).toHaveBeenCalledTimes(1)
   })
 
   it('unknown delivery id → delivery_not_found (values-free, no engine call)', async () => {
@@ -378,6 +479,66 @@ describe('executeDingTalkApprovalCardCallback (B-3 §B-3 execution)', () => {
     // fail-closed BEFORE the lookup: the directory is never queried, the engine never dispatched.
     expect(h.calls.some((c) => c.sql.includes('FROM directory_accounts'))).toBe(false)
     expect(h.dispatchAction).not.toHaveBeenCalled()
+  })
+
+  it('P1-2 CORP GATE: a payload corpId that differs from the delivery integration corp → corp_mismatch, NO operator lookup, NO engine call', async () => {
+    // Cross-corp collision face: the delivery is pinned to corp `corp_default`, the operator id
+    // is a legitimately-linked corp user, but the click carries corpId=corp_other (a corp-A
+    // clicker whose userId collides with the corp-B assignee). Refused before any operator lookup.
+    const h = makeHarness()
+    const result = await executeDingTalkApprovalCardCallback(h.deps as never, wirePayload({ corpId: 'corp_other' }))
+    expect(result).toEqual({ outcome: 'operator_unresolved', deliveryId: DELIVERY_ID, reason: 'corp_mismatch' })
+    expect(h.calls.some((c) => c.sql.includes('FROM directory_accounts'))).toBe(false)
+    expect(h.dispatchAction).not.toHaveBeenCalled()
+  })
+
+  it('P1-2 CORP GATE fail-closed on ABSENT corpId: a payload with no corpId is refused, not skipped', async () => {
+    const h = makeHarness()
+    const result = await executeDingTalkApprovalCardCallback(h.deps as never, wirePayload({ corpId: undefined }))
+    expect(result).toEqual({ outcome: 'operator_unresolved', deliveryId: DELIVERY_ID, reason: 'corp_mismatch' })
+    expect(h.calls.some((c) => c.sql.includes('FROM directory_accounts'))).toBe(false)
+    expect(h.dispatchAction).not.toHaveBeenCalled()
+
+    // Blank/whitespace corpId is equally absent (readCallbackCorpId trims to '').
+    const blank = makeHarness()
+    const blankResult = await executeDingTalkApprovalCardCallback(blank.deps as never, wirePayload({ corpId: '   ' }))
+    expect(blankResult).toMatchObject({ outcome: 'operator_unresolved', reason: 'corp_mismatch' })
+  })
+
+  it('P3-1 provenance: the SDK-typed header corp (eventCorpId) is authoritative — used even when the untyped body corpId is absent', async () => {
+    // The Stream adapter stamps the gateway-guaranteed header corp onto the payload as eventCorpId.
+    // A frame with only eventCorpId (no business corpId) must still pass on a matching corp.
+    const h = makeHarness()
+    const result = await executeDingTalkApprovalCardCallback(
+      h.deps as never,
+      wirePayload({ corpId: undefined, eventCorpId: DEFAULT_CORP_ID }),
+    )
+    expect(result).not.toMatchObject({ reason: 'corp_mismatch' })
+    expect(h.dispatchAction).toHaveBeenCalled()
+  })
+
+  it('P3-1 provenance: header eventCorpId and body corpId DISAGREEING → fail-closed corp_mismatch (a forged body echo cannot override the header)', async () => {
+    const h = makeHarness()
+    const result = await executeDingTalkApprovalCardCallback(
+      h.deps as never,
+      wirePayload({ eventCorpId: DEFAULT_CORP_ID, corpId: 'corp_forged' }),
+    )
+    expect(result).toEqual({ outcome: 'operator_unresolved', deliveryId: DELIVERY_ID, reason: 'corp_mismatch' })
+    expect(h.dispatchAction).not.toHaveBeenCalled()
+  })
+
+  it('P1-2 CORP GATE fail-closed when the delivery integration corp cannot be resolved (missing integration row)', async () => {
+    const h = makeHarness({ integrationCorpId: null })
+    const result = await executeDingTalkApprovalCardCallback(h.deps as never, wirePayload())
+    expect(result).toEqual({ outcome: 'operator_unresolved', deliveryId: DELIVERY_ID, reason: 'corp_mismatch' })
+    expect(h.dispatchAction).not.toHaveBeenCalled()
+  })
+
+  it('P1-2 CORP GATE: a matching corpId passes the gate and executes (contrast pin for the mismatch test)', async () => {
+    const h = makeHarness()
+    const result = await executeDingTalkApprovalCardCallback(h.deps as never, wirePayload({ corpId: DEFAULT_CORP_ID }))
+    expect(result.outcome).toBe('executed')
+    expect(h.dispatchAction).toHaveBeenCalledTimes(1)
   })
 
   it('missing link secret fail-closes BEFORE the engine (link_secret_unavailable)', async () => {

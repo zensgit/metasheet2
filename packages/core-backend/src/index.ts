@@ -130,6 +130,12 @@ import {
   startDingTalkGroupDeliveryRetentionScheduler,
   stopDingTalkGroupDeliveryRetentionScheduler,
 } from './services/dingtalk-group-delivery-retention-scheduler'
+import {
+  resolveDingTalkCardPersonDeliveryRetentionSchedulerIntervalMs,
+  resolveDingTalkCardPersonDeliveryRetentionSchedulerLeaderOptions,
+  startDingTalkCardPersonDeliveryRetentionScheduler,
+  stopDingTalkCardPersonDeliveryRetentionScheduler,
+} from './services/dingtalk-card-person-delivery-retention-scheduler'
 import { initWebhookEventBridge } from './multitable/webhook-event-bridge'
 import { ApprovalBreachNotifier } from './services/ApprovalBreachNotifier'
 import {
@@ -2007,6 +2013,14 @@ export class MetaSheetServer {
       }
     })())
 
+    shutdownTasks.push((async () => {
+      try {
+        stopDingTalkCardPersonDeliveryRetentionScheduler()
+      } catch (err) {
+        this.logger.warn(`DingTalk approval-card/person delivery retention scheduler shutdown failed: ${err instanceof Error ? err.message : String(err)}`)
+      }
+    })())
+
     // 4. Destroy API Gateway resources (only if one was constructed during start()).
     shutdownTasks.push((async () => {
       try {
@@ -2312,6 +2326,30 @@ export class MetaSheetServer {
       )
     } catch (e) {
       this.logger.error('DingTalk group-delivery retention scheduler initialization failed; continuing in degraded mode', e as Error)
+    }
+
+    // DingTalk approval-card + person delivery retention sweep (DT-HARDEN-08 follow-up): a
+    // periodic sweep of dingtalk_person_deliveries (bounded batch DELETE, message content +
+    // response bodies) and dingtalk_approval_card_deliveries (stale sent → expired only, never
+    // deleted — see dingtalk-card-person-delivery-retention.ts for why). Reuses the generic
+    // LedgerRetentionScheduler, same as the group-delivery sweep above. UNLIKE the group sweep,
+    // this one is DISABLED BY DEFAULT: it stays a no-op until an operator sets a positive
+    // DINGTALK_DELIVERY_RETENTION_DAYS (opt out any time with DINGTALK_DELIVERY_RETENTION_DISABLED=1).
+    // The scheduler still starts unconditionally (a harmless no-op timer) so this boot path never
+    // depends on whether that env var is set.
+    try {
+      const dingtalkCardPersonDeliveryRetentionLeaderOptions = await resolveDingTalkCardPersonDeliveryRetentionSchedulerLeaderOptions()
+      const dingtalkCardPersonDeliveryRetentionScheduler = startDingTalkCardPersonDeliveryRetentionScheduler({
+        leaderOptions: dingtalkCardPersonDeliveryRetentionLeaderOptions,
+        intervalMs: resolveDingTalkCardPersonDeliveryRetentionSchedulerIntervalMs(),
+      })
+      this.logger.info(
+        dingtalkCardPersonDeliveryRetentionScheduler
+          ? 'DingTalk approval-card/person delivery retention scheduler initialized (no-op until DINGTALK_DELIVERY_RETENTION_DAYS is set)'
+          : 'DingTalk approval-card/person delivery retention scheduler disabled (DINGTALK_DELIVERY_RETENTION_DISABLED=1)',
+      )
+    } catch (e) {
+      this.logger.error('DingTalk approval-card/person delivery retention scheduler initialization failed; continuing in degraded mode', e as Error)
     }
 
     // B-4 BJ-5 follow-up: reconcile ORPHANED AI bulk-fill jobs at boot. A hard
@@ -2885,3 +2923,14 @@ export type {
   AggregatedHealth,
   HealthAggregatorConfig
 } from './services/HealthAggregatorService'
+
+/**
+ * D-2 side-door delete recoverability — TYPED SDK ERRORS on the package's public surface (OD-6; review
+ * P3-2). A plugin author catching a refused delete must be able to `instanceof` it, not string-match on
+ * `err.code`. Both are only reachable with `MULTITABLE_SIDE_DOOR_DELETE_TRASH_ENABLED='true'`:
+ *   - CapExceeded      — the record's inbound-edge count is over MULTITABLE_TOMBSTONE_CAPTURE_MAX_ROWS
+ *                        (fail-closed: refused rather than run half-captured).
+ *   - NonTransactional — the SDK's `deleteRecord` was wired outside a transaction (OD-7, fail-closed).
+ */
+export { MultitableRecordDeleteCapExceededError } from './multitable/record-errors'
+export { MultitableSideDoorDeleteNonTransactionalError } from './multitable/side-door-delete-trash'

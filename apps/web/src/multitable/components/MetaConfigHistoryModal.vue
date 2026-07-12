@@ -4,7 +4,7 @@
       <div class="cfg-history-modal" role="dialog" :aria-label="l('record.configHistoryTitle')">
         <div class="cfg-history__header">
           <strong>{{ l('record.configHistoryTitle') }}</strong>
-          <button class="cfg-history__close" :aria-label="l('record.configHistoryClose')" @click="$emit('close')">&times;</button>
+          <MtIconButton class="cfg-history__close" :aria-label="l('record.configHistoryClose')" @click="$emit('close')">&times;</MtIconButton>
         </div>
 
         <!-- Entity-type filter (server still gates; this only narrows within what the server returned). -->
@@ -122,6 +122,7 @@ import { computed, ref } from 'vue'
 import type { MetaConfigRevision, ConfigRestoreExecuteConfirm, ConfigRestorePreview, ConfigRestoreUpdatePreview } from '../api/client'
 import { redactString } from '../utils/automation-log-redact'
 import { recordLabel, configRestoreTypedConfirm, type MetaRecordLabelKey } from '../utils/meta-record-labels'
+import { MtIconButton } from '../ui'
 
 const props = defineProps<{
   visible: boolean
@@ -407,7 +408,9 @@ function entitySummary(entityType: string, entityId: string, entityName?: string
 .cfg-history-overlay { position: fixed; inset: 0; background: rgba(15, 23, 42, 0.45); display: flex; align-items: center; justify-content: center; z-index: 1000; }
 .cfg-history-modal { position: relative; background: var(--surface, #fff); border-radius: 10px; width: min(560px, calc(100vw - 32px)); max-height: calc(100vh - 64px); display: flex; flex-direction: column; box-shadow: 0 12px 40px rgba(15, 23, 42, 0.2); }
 .cfg-history__header { display: flex; align-items: center; justify-content: space-between; padding: 14px 16px; border-bottom: 1px solid var(--border, #e2e8f0); }
-.cfg-history__close { border: none; background: none; font-size: 20px; line-height: 1; cursor: pointer; color: var(--text-secondary, #64748b); }
+/* .cfg-history__close: now <MtIconButton> (ghost, token-styled; the &times; glyph char passes through
+   its default-slot icon fallback (size token-normalized to the icon control)). Bespoke hardcoded CSS removed
+   (UI-P2-1c T1 batch-2). Class kept on the element only for selector stability. */
 .cfg-history__filters { display: flex; gap: 6px; flex-wrap: wrap; padding: 10px 16px 0; }
 .cfg-history__chip { padding: 3px 10px; border-radius: 999px; border: 1px solid var(--border, #cbd5e1); background: var(--surface, #fff); cursor: pointer; font-size: 12px; }
 .cfg-history__chip--active { background: var(--primary, #2563eb); color: #fff; border-color: var(--primary, #2563eb); }

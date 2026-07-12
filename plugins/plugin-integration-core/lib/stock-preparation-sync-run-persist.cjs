@@ -76,13 +76,16 @@ function assertAdminPermission(permission) {
   }
 }
 
+// #4160: resolveFieldIds is REQUIRED, not optional — the scoped records API translates the frozen
+// templates' logical keys to the physical fieldIds the records service actually accepts, and it
+// resolves that map through this API. A provisioning facade without it fails closed here.
 function ensureProvisioning(provisioning) {
-  if (!provisioning || typeof provisioning.findObjectSheet !== 'function') {
+  if (!provisioning || typeof provisioning.findObjectSheet !== 'function' || typeof provisioning.resolveFieldIds !== 'function') {
     throw new StockPreparationSyncRunPersistError(
       503,
       'PERSIST_PROVISIONING_API_UNAVAILABLE',
-      'stock-preparation sync-run persist requires multitable.provisioning findObjectSheet',
-      { requiredMethods: ['findObjectSheet'] },
+      'stock-preparation sync-run persist requires multitable.provisioning findObjectSheet/resolveFieldIds',
+      { requiredMethods: ['findObjectSheet', 'resolveFieldIds'] },
     )
   }
   return provisioning
@@ -90,7 +93,10 @@ function ensureProvisioning(provisioning) {
 
 // Resolve ONE MVP objectId to a scoped, sheet-bound records API. objectId MUST be a frozen MVP member
 // (fail closed otherwise); the sheet MUST already exist (fail closed — NEVER create a sheet here). The
-// returned scoped API forces every call onto sheet.id, so a write can never leave the resolved sheet.
+// returned scoped API forces every call onto sheet.id, so a write can never leave the resolved sheet,
+// and it binds the logical->physical fieldId map (resolved from the frozen template under the SAME
+// staging projectId the sheet was resolved with), so every write/read speaks the ids the records
+// service accepts (#4160) while this module keeps writing plain logical keys.
 async function resolveScopedTarget(recordsApi, provisioning, projectId, objectId) {
   if (!MVP_OBJECT_ID_SET.has(objectId)) {
     // Defense-in-depth: the batch / line / run objectIds come from frozen templates, so this only
@@ -112,7 +118,8 @@ async function resolveScopedTarget(recordsApi, provisioning, projectId, objectId
       { objectId },
     )
   }
-  return { objectId, sheetId, scoped: createTargetScopedRecordsApi(recordsApi, { sheetId, objectId }) }
+  const scoped = await createTargetScopedRecordsApi(recordsApi, { sheetId, objectId }, { provisioning, projectId })
+  return { objectId, sheetId, scoped }
 }
 
 // Ground a mapped snapshot line to ONLY the frozen line-template field ids (dropping null / undefined

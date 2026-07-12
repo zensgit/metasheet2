@@ -73,6 +73,28 @@ async function waitUntilBlockedOnInstanceLock(blockerPid: number, timeoutMs = 50
   throw new Error('concurrent dispatchAction never blocked on the instance row lock HELD BY THIS TEST — interleaving did not occur')
 }
 
+/**
+ * Same deterministic lock-wait proof, for the DELIVERY row (owner P1 2026-07-12). Correlated to OUR
+ * holder via pg_blocking_pids so a foreign waiter can never satisfy it.
+ */
+async function waitUntilBlockedOnCardLock(blockerPid: number, timeoutMs = 5000): Promise<void> {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    const r = await q(
+      `SELECT COUNT(*)::int AS c FROM pg_stat_activity
+        WHERE datname = current_database()
+          AND wait_event_type = 'Lock'
+          AND $1 = ANY(pg_blocking_pids(pid))
+          AND query ILIKE '%dingtalk_approval_card_deliveries%'
+          AND query ILIKE '%for update%'`,
+      [blockerPid],
+    )
+    if ((r.rows[0] as { c: number }).c >= 1) return
+    await sleep(25)
+  }
+  throw new Error('dispatchAction never blocked on the DELIVERY row lock HELD BY THIS TEST — it is not locking the card row, so the sweep can still race it')
+}
+
 let approvals: ApprovalProductService
 let templateId = ''
 // P1-1: a linear TWO-approval-node template (node1 → node2, SAME assignee) — the shape the
@@ -683,6 +705,195 @@ describeIfDatabase('A-4 card-delivery wrapper (real DB)', () => {
   // CURRENT node", never "this CARD was issued for the current round". These goldens drive
   // dispatchAction DIRECTLY (bypassing the pre-read) to prove the in-txn guard is the authoritative
   // close — a mock/sequential review of the wrapper alone could not see this class.
+
+  // ─── owner P1 (2026-07-12): CARD-STATE TOCTOU — an `expired` card completed an approval ──────────
+  //
+  // The engine's in-txn guard validated the node/round BINDING but read the delivery WITHOUT a lock and
+  // never re-checked `card_state`; the wrapper checked `card_state='sent'` only in its pre-read (outside
+  // the txn) and claimed `acted` in a SEPARATE txn AFTER the approval had already committed. So anything
+  // that moved the card off `sent` in between — the retention sweep, supersede, revoke — lost the race
+  // invisibly. Owner's real-DB result: pre-read sent → sweep → expired → outcome=ok, approveRecords=1,
+  // instance=approved, cardState=expired.
+  //
+  // The owner also named the trap: a lock-FREE `card_state==='sent'` check does NOT close this — it is
+  // the same check-then-act one line lower. The fix must LOCK the delivery row in dispatchAction's txn
+  // and claim `acted` atomically there. These two goldens pin exactly that.
+
+  test('owner-P1 (SEQUENTIAL): a card the retention sweep already EXPIRED cannot approve — dispatchAction refuses, ZERO approval records', async () => {
+    const instanceId = await newInstance()
+    const e1 = await activeEpoch(instanceId, 'approval_1')
+    const deliveryId = await newSentDelivery(instanceId, { nodeKey: 'approval_1', entryEpoch: e1 })
+
+    // The sweep's effect: the card leaves `sent` while its seat is STILL LIVE and the instance is STILL
+    // PENDING — the one state in the system where card_state alone carries the guard.
+    await q(`UPDATE dingtalk_approval_card_deliveries SET card_state = 'expired' WHERE id = $1`, [deliveryId])
+
+    // RED-before (drop the card_state/send_status conjuncts from the in-txn guard): this APPROVES.
+    await expect(
+      approvals.dispatchAction(
+        instanceId,
+        { action: 'approve', comment: '同意', channelOrigin: { channel: 'dingtalk_card', cardDeliveryId: deliveryId } },
+        { userId: APPROVER, userName: APPROVER, roles: [] },
+      ),
+    ).rejects.toMatchObject({ code: 'APPROVAL_CARD_DELIVERY_STALE', statusCode: 409 })
+
+    const approves = await q(`SELECT COUNT(*)::int AS c FROM approval_records WHERE instance_id = $1 AND action = 'approve'`, [instanceId])
+    expect((approves.rows[0] as { c: number }).c).toBe(0)
+    const inst = await q('SELECT status FROM approval_instances WHERE id = $1', [instanceId])
+    expect((inst.rows[0] as { status: string }).status).toBe('pending')
+  })
+
+  test('owner-P1 (REAL INTERLEAVING, HEADLINE): the sweep expires the card WHILE the approval is parked on the delivery row lock → STALE, ZERO approval records, and the approval is NOT committed', async () => {
+    // This is the one that matters. A lock-free state check would pass the sequential test above and
+    // STILL lose this race. Here the sweep commits its expire while dispatchAction is provably BLOCKED
+    // on the delivery row lock (pg_blocking_pids-correlated, not a timer) — so dispatch can only observe
+    // the card AFTER the sweep, and it must refuse.
+    const instanceId = await newInstance()
+    const e1 = await activeEpoch(instanceId, 'approval_1')
+    const deliveryId = await newSentDelivery(instanceId, { nodeKey: 'approval_1', entryEpoch: e1 })
+
+    const sweeper = await poolManager.get().getInternalPool().connect()
+    try {
+      // A: take the delivery row lock and HOLD it (this is the sweep, mid-flight).
+      await sweeper.query('BEGIN')
+      await sweeper.query('SELECT id FROM dingtalk_approval_card_deliveries WHERE id = $1 FOR UPDATE', [deliveryId])
+      const sweeperPid = Number((await sweeper.query('SELECT pg_backend_pid() AS pid')).rows[0].pid)
+
+      // B: the approval, in flight. It must PARK on the delivery row lock — if it does not, it is not
+      // locking the card at all and the sweep can still slip underneath it (the probe throws).
+      let bSettled = false
+      const bPromise = approvals
+        .dispatchAction(
+          instanceId,
+          { action: 'approve', comment: '同意', channelOrigin: { channel: 'dingtalk_card', cardDeliveryId: deliveryId } },
+          { userId: APPROVER, userName: APPROVER, roles: [] },
+        )
+        .then((v) => { bSettled = true; return v }, (e) => { bSettled = true; throw e })
+
+      await waitUntilBlockedOnCardLock(sweeperPid)
+      expect(bSettled).toBe(false) // it cannot have decided while the sweep holds the card
+
+      // A: expire the card and COMMIT — strictly before B can re-read it.
+      await sweeper.query(`UPDATE dingtalk_approval_card_deliveries SET card_state = 'expired', updated_at = NOW() WHERE id = $1 AND card_state = 'sent'`, [deliveryId])
+      await sweeper.query('COMMIT')
+
+      // B resumes, re-reads under its own lock, sees `expired` → refuses; its whole txn rolls back.
+      await expect(bPromise).rejects.toMatchObject({ code: 'APPROVAL_CARD_DELIVERY_STALE', statusCode: 409 })
+    } catch (err) {
+      await sweeper.query('ROLLBACK').catch(() => {})
+      throw err
+    } finally {
+      sweeper.release()
+    }
+
+    // The approval was NEVER written, and the instance never advanced. (Owner's bug: c=1, approved.)
+    const approves = await q(`SELECT COUNT(*)::int AS c FROM approval_records WHERE instance_id = $1 AND action = 'approve'`, [instanceId])
+    expect((approves.rows[0] as { c: number }).c).toBe(0)
+    const inst = await q('SELECT status FROM approval_instances WHERE id = $1', [instanceId])
+    expect((inst.rows[0] as { status: string }).status).toBe('pending')
+    const card = await q('SELECT card_state FROM dingtalk_approval_card_deliveries WHERE id = $1', [deliveryId])
+    expect((card.rows[0] as { card_state: string }).card_state).toBe('expired')
+  })
+
+  // The in-txn guard's `send_status` conjunct had NO coverage: the adversarial review dropped it and all
+  // 53 card tests stayed green. The old goldens for it (dingtalk-approval-card-deliveries.db.test.ts) now
+  // exercise `claimDingTalkApprovalCardDeliveryActed` — a helper PRODUCTION NO LONGER CALLS, since the
+  // engine claims in-txn. And no wrapper test can reach the conjunct either, because the wrapper's
+  // `actionable` pre-read short-circuits pending/failed first.
+  //
+  // I am NOT deferring these on "the producer can't reach it, the pre-read covers it" — that is precisely
+  // the reasoning that walked the original TOCTOU past two reviewers and me. Drive dispatchAction DIRECTLY,
+  // bypassing the pre-read, and pin the LIVE guard.
+
+  test('owner-P1 (send_status): a `pending` card cannot approve via the in-txn guard — STALE, zero approvals (the pre-read is bypassed)', async () => {
+    const instanceId = await newInstance()
+    const e1 = await activeEpoch(instanceId, 'approval_1')
+    // Inserted but never marked sent → send_status='pending': no live button was ever produced.
+    const row = await insertDingTalkApprovalCardDelivery(q, {
+      instanceId, nodeKey: 'approval_1', recipientUserId: APPROVER, recipientDingTalkUserId: 'dd_p1_pending',
+      deliveryKind: 'interactive_card', entryEpoch: e1,
+    })
+
+    // RED-before (drop the send_status conjunct from the in-txn guard): this APPROVES an undelivered card.
+    await expect(
+      approvals.dispatchAction(
+        instanceId,
+        { action: 'approve', comment: '同意', channelOrigin: { channel: 'dingtalk_card', cardDeliveryId: row.id } },
+        { userId: APPROVER, userName: APPROVER, roles: [] },
+      ),
+    ).rejects.toMatchObject({ code: 'APPROVAL_CARD_DELIVERY_STALE', statusCode: 409 })
+
+    const approves = await q(`SELECT COUNT(*)::int AS c FROM approval_records WHERE instance_id = $1 AND action = 'approve'`, [instanceId])
+    expect((approves.rows[0] as { c: number }).c).toBe(0)
+  })
+
+  test('owner-P1 (send_status): a `failed` card cannot approve via the in-txn guard — STALE, zero approvals', async () => {
+    const instanceId = await newInstance()
+    const e1 = await activeEpoch(instanceId, 'approval_1')
+    const row = await insertDingTalkApprovalCardDelivery(q, {
+      instanceId, nodeKey: 'approval_1', recipientUserId: APPROVER, recipientDingTalkUserId: 'dd_p1_failed',
+      deliveryKind: 'interactive_card', entryEpoch: e1,
+    })
+    await markDingTalkApprovalCardDeliverySendFailed(q, row.id, 'redacted send failure')
+
+    await expect(
+      approvals.dispatchAction(
+        instanceId,
+        { action: 'approve', comment: '同意', channelOrigin: { channel: 'dingtalk_card', cardDeliveryId: row.id } },
+        { userId: APPROVER, userName: APPROVER, roles: [] },
+      ),
+    ).rejects.toMatchObject({ code: 'APPROVAL_CARD_DELIVERY_STALE', statusCode: 409 })
+
+    const approves = await q(`SELECT COUNT(*)::int AS c FROM approval_records WHERE instance_id = $1 AND action = 'approve'`, [instanceId])
+    expect((approves.rows[0] as { c: number }).c).toBe(0)
+  })
+
+  test('owner-P1 (send_status) POSITIVE CONTROL: an `outcome_unknown` card STILL approves and claims — the guard rejects the undelivered, not everyone (PR #4046 doctrine)', async () => {
+    // Load-bearing. Without it, the two rejections above would also pass if the conjunct were broken SHUT
+    // (rejecting every card), and #4046's deliberate posture — an outcome_unknown send MAY have been
+    // delivered, and a valid HMAC callback is itself proof of delivery — would regress silently.
+    const instanceId = await newInstance()
+    const e1 = await activeEpoch(instanceId, 'approval_1')
+    const row = await insertDingTalkApprovalCardDelivery(q, {
+      instanceId, nodeKey: 'approval_1', recipientUserId: APPROVER, recipientDingTalkUserId: 'dd_p1_unknown',
+      deliveryKind: 'interactive_card', entryEpoch: e1,
+    })
+    await markDingTalkApprovalCardDeliverySendOutcomeUnknown(q, row.id, 'transport outcome unknown')
+
+    await approvals.dispatchAction(
+      instanceId,
+      { action: 'approve', comment: '同意', channelOrigin: { channel: 'dingtalk_card', cardDeliveryId: row.id } },
+      { userId: APPROVER, userName: APPROVER, roles: [] },
+    )
+
+    const approves = await q(`SELECT COUNT(*)::int AS c FROM approval_records WHERE instance_id = $1 AND action = 'approve'`, [instanceId])
+    expect((approves.rows[0] as { c: number }).c).toBe(1)
+    const card = await q('SELECT card_state FROM dingtalk_approval_card_deliveries WHERE id = $1', [row.id])
+    expect((card.rows[0] as { card_state: string }).card_state).toBe('acted')
+  })
+
+  test('owner-P1 (REVERSE ORDER): once the approval wins the row lock it claims the card `acted` in the SAME txn — a later sweep can no longer expire a card that already decided', async () => {
+    // The other half of atomicity. If the claim were still a post-commit write, a sweep landing between
+    // the engine commit and the claim would leave a decided approval on an `expired` card.
+    const instanceId = await newInstance()
+    const e1 = await activeEpoch(instanceId, 'approval_1')
+    const deliveryId = await newSentDelivery(instanceId, { nodeKey: 'approval_1', entryEpoch: e1 })
+
+    const outcome = await executeApprovalActionFromCardDelivery(
+      { query: q, approvals },
+      { deliveryId, token: tokenFor(deliveryId), decision: 'approve', comment: '同意', actor: approverActor },
+    )
+    expect(outcome.status).toBe('ok')
+
+    // The engine claimed it inside its own transaction — not by a separate post-commit write.
+    const acted = await q('SELECT card_state, acted_action, acted_by FROM dingtalk_approval_card_deliveries WHERE id = $1', [deliveryId])
+    expect(acted.rows[0]).toMatchObject({ card_state: 'acted', acted_action: 'approve', acted_by: APPROVER })
+
+    // A sweep now runs: it must NOT touch a card that already decided (its WHERE requires 'sent').
+    await q(`UPDATE dingtalk_approval_card_deliveries SET card_state = 'expired' WHERE id = $1 AND card_state = 'sent'`, [deliveryId])
+    const after = await q('SELECT card_state FROM dingtalk_approval_card_deliveries WHERE id = $1', [deliveryId])
+    expect((after.rows[0] as { card_state: string }).card_state).toBe('acted')
+  })
 
   test('P1-1 TOCTOU (in-txn guard, HEADLINE): a node1 card driven DIRECTLY into dispatchAction after the instance advanced to node2 → APPROVAL_CARD_DELIVERY_STALE, node2 NEVER approved', async () => {
     const instanceId = await newInstance(twoNodeTemplateId)

@@ -33,7 +33,7 @@
 ## 3. 语义与 flag
 
 - **无 flag(纯正确性修复,同 D-6 先例)。** 现行「不写 revision」本身就是缺陷,不存在一个「默认关」是想要的。发射 delete revision 后,**曾被 automation/plugin 删除的记录会在其删除 T 之后正确地从 PIT 消失**——这是**期望的行为更正**,但确是一处 as-of-T 结果变化,须在 PR 中如实声明(现存的被污染 as-of-T 状态会被纠正)。
-- **不加 trash / 不改可恢复性**:D-1 后这些记录在 Global History 里如实记为「已删」,但**仍不可恢复**(无 trash 行、无 tombstone)——与 plugin-SDK 今日"不可恢复"一致,只是不再污染 PIT。可恢复性 = D-2。
+- **不加 trash / 不改可恢复性**:D-1 后这些记录在 Global History 里如实记为「已删」,但**仍不可恢复**(无 trash 行、无 tombstone)——与 plugin-SDK 今日"不可恢复"一致,只是不再污染 PIT。可恢复性 = D-2。**【2026-07-12:D-2 已 ratify 并实现(#4004 锁 / PR #4168),但**默认 OFF**;flag-off 时本句依然逐字节成立,见文末更新。】**
 - **不碰 4c-2 tombstone 捕获**:D-1 不为这两条路径加 inbound tombstone(那属 D-2 的可恢复性范畴);故 4c-3 的 inbound 重放**仍不覆盖**经这两条路径删除的记录(4c-3 可达边界不变)。
 
 ## 4. Golden(realdb,fail-first,mutation-proven)
@@ -74,4 +74,10 @@ D-2 可恢复性、public-form 创建-revision(§6,待确认)、任何 flag、�
 
 **偏差 2(batchId 批量语义,不适用):** automation `delete_record` 每次 action 执行恰删一条记录,不存在批量删除形状;省略 batchId(= revision 自身 id 作 batch,LOCK-12 单记录语义)。若未来出现 bulk delete action,须按原文补共享 batchId。
 
-后续:4c-3(#3975)已落,其可达边界如 §3 所述**不因 D-1 扩大**(这两条路径仍无 tombstone,不可恢复=D-2 owner-gated)。
+后续:4c-3(#3975)已落,其可达边界如 §3 所述**不因 D-1 扩大**(这两条路径仍无 tombstone,不可恢复=D-2 owner-gated)。**【2026-07-12 更正:D-2 已实现——下方更新块给出准确口径。】**
+
+> **2026-07-12 更新(D-2 已落地,上句的"仍不可恢复"须按 flag 态理解):** D-2 已 owner ratify 并实现
+> (design-lock #4004;impl PR #4168)。两条侧门现在**可以**写 trash + 捕获 inbound 边,但整条能力
+> **嵌套在 `MULTITABLE_SIDE_DOOR_DELETE_TRASH_ENABLED`(默认 OFF)之下**;flag-off 时行为与本锁描述的
+> D-1 现状**逐字节一致**(revision-only、无 trash、无 tombstone)。所以本锁正文在 flag-off 下依然准确,
+> 但"不可恢复"已不再是**能力边界**,而是**默认关闭的开关**。

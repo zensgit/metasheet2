@@ -132,6 +132,26 @@ on:
       # UI-P2-1c MtButton/MtPopover migration proof-specs (all *-migration.spec.ts) — fire the guard when
       # any of them changes so they actually carry CI weight (they were landing un-gated; #3769 failure mode).
       - 'apps/web/tests/*-migration.spec.ts'
+      # T3/T4/T5 post-hoc gate (2026-07-12, independent Opus review of the already-MERGED #4131/
+      # #4140/#4143): the UI primitives directory itself (MtLink, MtButton, MtIconButton, MtPopover,
+      # MtMenu, ...) had NO path trigger on this guard, and their own specs
+      # (multitable-ui-p2-1-primitives / multitable-ui-mtlink / multitable-ui-p2-1b-overlays) were
+      # not in the `vitest run` filter below — a PR that only edited e.g. MtLink.vue ran no guard at
+      # all. Concretely: deleting the `type="button"` attribute from MtLink.vue leaves the 4 gated
+      # migration specs green (none of them re-mount MtLink inside a real `<form>`), and only breaks
+      # if a caller ever places `<MtLink>` inside a real form — the button's implicit type then
+      # becomes "submit" and a click triggers an implicit form
+      # submission. Required-side coverage (the `multitable-ui` token in
+      # run-required-web-tests.sh) is wired separately in #4156; this is the advisory-guard half of
+      # the same fix.
+      - 'apps/web/src/multitable/ui/**'
+      # UI-P2-1c T1 batch-3: MetaPersonPicker/MetaLinkPicker/ScaleFormattingDialog's header close-×
+      # migrated to MtIconButton. Their `*-migration.spec.ts` files are covered by the wildcard
+      # above, but (per the R5c/T3-T4-T5 CI-residual precedent) the .vue sources themselves had NO
+      # path trigger — a PR touching only e.g. ScaleFormattingDialog.vue would run no web-guard.
+      - 'apps/web/src/multitable/components/MetaPersonPicker.vue'
+      - 'apps/web/src/multitable/components/MetaLinkPicker.vue'
+      - 'apps/web/src/multitable/components/ScaleFormattingDialog.vue'
       # Formula catalog parity (12 scalar functions): web-side intent specs (12-present /
       # COUNTIF-absent, 1a scalar-set, i18n labels, editor diagnostics incl. arity table)
       - 'apps/web/src/multitable/utils/formula-docs.ts'
@@ -251,6 +271,26 @@ on:
       # UI-P2-1c MtButton/MtPopover migration proof-specs (all *-migration.spec.ts) — fire the guard when
       # any of them changes so they actually carry CI weight (they were landing un-gated; #3769 failure mode).
       - 'apps/web/tests/*-migration.spec.ts'
+      # T3/T4/T5 post-hoc gate (2026-07-12, independent Opus review of the already-MERGED #4131/
+      # #4140/#4143): the UI primitives directory itself (MtLink, MtButton, MtIconButton, MtPopover,
+      # MtMenu, ...) had NO path trigger on this guard, and their own specs
+      # (multitable-ui-p2-1-primitives / multitable-ui-mtlink / multitable-ui-p2-1b-overlays) were
+      # not in the `vitest run` filter below — a PR that only edited e.g. MtLink.vue ran no guard at
+      # all. Concretely: deleting the `type="button"` attribute from MtLink.vue leaves the 4 gated
+      # migration specs green (none of them re-mount MtLink inside a real `<form>`), and only breaks
+      # when a caller places `<MtLink>` inside an actual form (MetaFormView.vue is exactly that) —
+      # the button's implicit type then becomes "submit" and a click triggers an implicit form
+      # submission. Required-side coverage (the `multitable-ui` token in
+      # run-required-web-tests.sh) is wired separately in #4156; this is the advisory-guard half of
+      # the same fix.
+      - 'apps/web/src/multitable/ui/**'
+      # UI-P2-1c T1 batch-3: MetaPersonPicker/MetaLinkPicker/ScaleFormattingDialog's header close-×
+      # migrated to MtIconButton. Their `*-migration.spec.ts` files are covered by the wildcard
+      # above, but (per the R5c/T3-T4-T5 CI-residual precedent) the .vue sources themselves had NO
+      # path trigger — a PR touching only e.g. ScaleFormattingDialog.vue would run no web-guard.
+      - 'apps/web/src/multitable/components/MetaPersonPicker.vue'
+      - 'apps/web/src/multitable/components/MetaLinkPicker.vue'
+      - 'apps/web/src/multitable/components/ScaleFormattingDialog.vue'
       # Formula catalog parity (12 scalar functions): web-side intent specs (12-present /
       # COUNTIF-absent, 1a scalar-set, i18n labels, editor diagnostics incl. arity table)
       - 'apps/web/src/multitable/utils/formula-docs.ts'
@@ -321,4 +361,7 @@ jobs:
         # L1c: HistoryBatchChangesList.vue's only behavioral coverage — 3 specs that mount the real
         # component tree via HistoryCenterModal (inline-diff, ai-shortcut-label, pinned-batch-deeplink)
         # — were exercised in NO CI gate; added alongside their new path triggers above.
-        run: pnpm --filter @metasheet/web exec vitest run automation-action-summary automation-recipes automation-save-block-reasons automation-target-sheet-options AutomationExecutionsView meta-automation-labels meta-filter-group meta-formula-labels meta-grid-table meta-toolbar-filter-builder migration multitable-automation-manager multitable-automation-rule-editor multitable-cell-renderer-person-inactive multitable-conditional-formatting multitable-conditional-rule multitable-config-history-modal multitable-config-revert-refresh multitable-field-manager multitable-field-visibility multitable-formula-catalog-1a multitable-formula-catalog-parity multitable-formula-editor multitable-grid multitable-history-center-ai-shortcut-label multitable-history-center-inline-diff multitable-history-center-pinned-batch-deeplink multitable-history-fe multitable-kanban-view multitable-person-picker multitable-record-permission-manager multitable-reorder-view-fields multitable-required-if multitable-reset-confirm-dialog multitable-reset-tsource-picker multitable-restore-batch-dialog multitable-restore-preview-dialog multitable-rollup-aggregation-fe multitable-sheet-cursor-state multitable-sheet-permission-manager multitable-trash-fe multitable-workbench-history-field-scope-wiring multitable-workbench-restore-wiring multitable-yjs-cell-editor multitable-yjs-scalar-cell parallelBranchRunsView statusTag --reporter=dot
+        # T3/T4/T5 post-hoc gate (2026-07-12): `multitable-ui` matches multitable-ui-p2-1-primitives /
+        # multitable-ui-mtlink / multitable-ui-p2-1b-overlays — the primitives' own specs, previously
+        # in no run-list here — added alongside their new path trigger above.
+        run: pnpm --filter @metasheet/web exec vitest run automation-action-summary automation-recipes automation-save-block-reasons automation-target-sheet-options AutomationExecutionsView meta-automation-labels meta-filter-group meta-formula-labels meta-grid-table meta-toolbar-filter-builder migration multitable-automation-manager multitable-automation-rule-editor multitable-cell-renderer-person-inactive multitable-conditional-formatting multitable-conditional-rule multitable-config-history-modal multitable-config-revert-refresh multitable-field-manager multitable-field-visibility multitable-formula-catalog-1a multitable-formula-catalog-parity multitable-formula-editor multitable-grid multitable-history-center-ai-shortcut-label multitable-history-center-inline-diff multitable-history-center-pinned-batch-deeplink multitable-history-fe multitable-kanban-view multitable-person-picker multitable-record-permission-manager multitable-reorder-view-fields multitable-required-if multitable-reset-confirm-dialog multitable-reset-tsource-picker multitable-restore-batch-dialog multitable-restore-preview-dialog multitable-rollup-aggregation-fe multitable-sheet-cursor-state multitable-sheet-permission-manager multitable-trash-fe multitable-ui multitable-view-manager multitable-workbench-history-field-scope-wiring multitable-workbench-restore-wiring multitable-yjs-cell-editor multitable-yjs-scalar-cell parallelBranchRunsView statusTag --reporter=dot

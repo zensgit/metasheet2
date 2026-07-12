@@ -12,6 +12,13 @@ import { computeActionFingerprint } from './automation-suspension-service'
 import type { ConditionBranchResumeCursor } from './automation-resume-cursor'
 import { isRichLongTextProperty, normalizeJson, sanitizeRichLongText } from './field-codecs'
 import { ensureRecordNotLocked } from './record-lock'
+import {
+  assertTransactionalQuery,
+  captureSideDoorInboundTombstones,
+  insertSideDoorTrashRow,
+  isSideDoorDeleteTrashEnabled,
+  resolveSheetBaseIdForTrash,
+} from './side-door-delete-trash'
 import { resolveCrossBaseWriteAuthority } from './cross-base-write-authority'
 import { publishMultitableSheetRealtime } from './realtime-publish'
 import { MemoryRateLimitStore, type RateLimitStore } from '../middleware/rate-limiter'
@@ -2280,15 +2287,25 @@ export class AutomationExecutor {
         // D-1: lock the row and capture version+data inside the SAME transaction as the hard delete and
         // delete revision. Without the delete revision, point-in-time reconstruction kept treating
         // automation-deleted records as alive forever.
+        // D-2: created_at/updated_at ride along on the SELECT that is already happening (zero extra
+        // queries) — the trash row preserves the record's original timestamps through a restore.
         const lockRes = await query(
-          `SELECT locked, locked_by, created_by, version, data
+          `SELECT locked, locked_by, created_by, version, data, created_at, updated_at
              FROM meta_records
             WHERE id = $1 AND sheet_id = $2
             FOR UPDATE`,
           [effectiveRecordId, effectiveSheetId],
         )
         const lockRow = lockRes.rows[0] as
-          | { locked?: unknown; locked_by?: unknown; created_by?: unknown; version?: unknown; data?: unknown }
+          | {
+              locked?: unknown
+              locked_by?: unknown
+              created_by?: unknown
+              version?: unknown
+              data?: unknown
+              created_at?: Date | string | null
+              updated_at?: Date | string | null
+            }
           | undefined
         // ②b claim==truth for the record: a cross-base delete must address a record that ACTUALLY lives in
         // `targetSheetId`. No row → the targetRecordId does not exist there → fail-closed (never a silent
@@ -2305,6 +2322,34 @@ export class AutomationExecutor {
           ensureRecordNotLocked(context.actorId ?? null, lockRow, () => new Error('Record is locked'))
         }
 
+        // D-2 (side-door delete recoverability, #4004; default OFF ⇒ every `sideDoorTrash` branch below is
+        // dead and this method behaves byte-identically to D-1, §1.9). §1.2 anchor: ONE pre-generated uuid
+        // becomes the delete revision's id, the trash row's delete_revision_id and the tombstones'
+        // source_revision_id — so restore can NAME this deletion's captured inbound edges.
+        const sideDoorTrash = isSideDoorDeleteTrashEnabled()
+        const deleteRevisionId = randomUUID()
+
+        // OD-7 LAYER 3 (review P2-1), BEFORE any write. `withTransaction` SILENTLY falls back to a
+        // non-transactional `queryFn` when `deps.transaction` is absent (:2429-2436), so an executor
+        // constructed without it would otherwise run this destructive reordered path with no transaction,
+        // no error, and — as the review proved — no failing test. Now it fails closed: the step reports
+        // `failed` and nothing is destroyed. Independent of the entry wiring; pinned by golden G16.
+        if (sideDoorTrash) await assertTransactionalQuery(query, 'automation')
+
+        // §1.3: capture the INBOUND edges BEFORE the links DELETE below destroys both directions. No-op
+        // unless BOTH the D-2 flag and the capture flag are on (§1.5 nesting). Over-cap ⇒
+        // TombstoneCaptureCapExceededError propagates out of withTransaction to this method's catch ⇒ step
+        // `failed`, whole txn rolled back, record NOT deleted (fail-closed, §1.4 / golden G7). Skipped when
+        // there is no row: a same-base delete of a missing record must not anchor tombstones to a delete
+        // revision that will never be written.
+        if (lockRow) {
+          await captureSideDoorInboundTombstones(query, {
+            sheetId: effectiveSheetId,
+            recordId: effectiveRecordId,
+            sourceRevisionId: deleteRevisionId,
+          })
+        }
+
         // Clean up links FIRST (mirrors the same-base delete sinks `records.deleteRecord` /
         // `RecordService.deleteRecord`): the FK cascade only covers the `record_id` side, so the
         // `foreign_record_id` side must be deleted explicitly or it dangles. (This statement touches
@@ -2316,17 +2361,41 @@ export class AutomationExecutor {
 
         if (lockRow) {
           const version = Number(lockRow.version ?? 1)
+          const serverVersion = Number.isFinite(version) ? version : 1
           await recordRecordRevision(query, {
             sheetId: effectiveSheetId,
             recordId: effectiveRecordId,
-            version: Number.isFinite(version) ? version : 1,
+            version: serverVersion,
             action: 'delete',
             source: 'automation',
             actorId: context.actorId ?? null,
             changedFieldIds: [],
             patch: {},
+            // §1.9: flag-off passes NO id, so recordRecordRevision self-generates exactly as it does today.
+            ...(sideDoorTrash ? { id: deleteRevisionId } : {}),
             snapshot: normalizeJson(lockRow.data),
           })
+
+          if (sideDoorTrash) {
+            // OD-8 target-base semantics: the trash row (and its base_id) resolve against the sheet the
+            // record ACTUALLY lives in (`effectiveSheetId`), NOT the trigger's base — so a cross-base
+            // delete surfaces in the TARGET base's recycle bin and restore re-fires target-base events.
+            // Fail-closed on a missing trash schema (§1.8): no 42P01/42703 swallow — the error propagates
+            // to the catch below, the step fails, and the txn rolls the delete back (golden G11).
+            const baseId = await resolveSheetBaseIdForTrash(query, effectiveSheetId)
+            await insertSideDoorTrashRow(query, {
+              recordId: effectiveRecordId,
+              sheetId: effectiveSheetId,
+              baseId,
+              snapshot: normalizeJson(lockRow.data),
+              originalVersion: serverVersion,
+              createdBy: typeof lockRow.created_by === 'string' ? lockRow.created_by : null,
+              deletedBy: context.actorId ?? null, // OD-5
+              originalCreatedAt: lockRow.created_at ?? null,
+              originalUpdatedAt: lockRow.updated_at ?? null,
+              deleteRevisionId,
+            })
+          }
         }
 
         // HARD delete — the system has NO soft-delete for records: `meta_records` has no `deleted_at`
@@ -2725,7 +2794,19 @@ export class AutomationExecutor {
       }
     }
     const interactiveCardConfig = resolveDingTalkInteractiveCardStreamConfig()
-    const useInteractiveCard = interactiveCardConfig.enabled === true
+    // P1-2 cross-corp SEND gate: the interactive card is dispatched via the GLOBAL Stream app's
+    // OWN credentials (robotCode = its clientId), so it may only go to a recipient in the Stream
+    // app's OWN corp. Gate on flag-enabled AND the Stream app being bound to a directory
+    // integration AND that binding matching the recipient's integration. Any mismatch — a
+    // recipient in a different corp, an unbound Stream app, or a recipient with no integration —
+    // falls through to the per-corp OA `work_notice_action_card` (the doc's "other corps
+    // auto-fallback to OA"), never a card sent through the wrong corp's app.
+    const streamIntegrationId = interactiveCardConfig.enabled === true ? interactiveCardConfig.integrationId : ''
+    const useInteractiveCard =
+      interactiveCardConfig.enabled === true
+      && streamIntegrationId.length > 0
+      && assigneeIntegrationId.length > 0
+      && assigneeIntegrationId === streamIntegrationId
 
     // Ledger FIRST — the row is the only legitimate delivery → instance anchor.
     const entryEpochRaw = event.task?.entryEpoch

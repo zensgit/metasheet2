@@ -44,6 +44,8 @@ import { isAdmin as isRbacAdmin } from '../rbac/service'
 // `SimpleCronExpression` (the SAME class `directory-sync-scheduler.ts` uses to actually run the job) rather
 // than the multitable automation scheduler's own cron parser.
 import { SimpleCronExpression } from '../services/SchedulerService'
+// Roadmap §7.8 "Add timezone support" — SAME validity gate the scheduler and CRUD layer resolve with.
+import { isValidDirectoryScheduleTimezone, resolveDirectoryScheduleTimezone } from '../directory/directory-sync-timezone'
 import { jsonError, jsonOk, parsePagination } from '../util/response'
 
 const logger = new Logger('AdminDirectoryRoutes')
@@ -115,14 +117,44 @@ function normalizeScheduleCronInput(value: unknown): string {
  * → `SimpleCronExpression`) — guarantees byte-for-byte parity with what will actually be scheduled, at the
  * cost of a bounded scan (up to ~366 days of minutes; ~40ms worst case, measured) instead of an O(1) check.
  *
- * TIMEZONE: the directory sync scheduler always runs `schedule_cron` in UTC — `directory-sync-scheduler.ts`
- * hardcodes `timezone: 'UTC'` at `applySchedule`, and this validates with the same fixed `'UTC'`. There is
- * no per-integration timezone yet (roadmap §7.8 "Add timezone support" is a separate, not-yet-built
- * follow-up); a `schedule_cron` saved here is UTC wall-clock time, not the admin's local timezone.
+ * TIMEZONE (roadmap §7.8 "Add timezone support", LANDED): reachability is NOT timezone-invariant, and an
+ * earlier revision of this comment asserted that it was. Review P3-3, verified by construction: `30 2 8 3 *`
+ * (02:30 on Mar 8) is reachable in `Asia/Shanghai` but NOT in `America/New_York` when the next Mar 8 is
+ * that zone's DST spring-forward Sunday (e.g. 2026-03-08) — 02:00–03:00 local does not exist that day, so
+ * the zoned scan finds no match within its ~1-year window and `hasNext()` is false. Same expression,
+ * opposite verdicts, decided purely by the zone.
+ *
+ * (Whether a given annual expression is unreachable also depends on WHICH year the next candidate lands in,
+ * since DST moves — that is a property of the example, not of the principle. The principle is what matters
+ * here: we cannot validate in one zone and run in another.)
+ *
+ * Validating with a fixed `'UTC'` would therefore let an expression that can NEVER fire in the integration's
+ * configured zone save as "valid", after which the scheduler silently drops it forever — the EXACT failure
+ * this gate exists to prevent, arriving via the timezone rather than via a mismatched parser. So we validate
+ * against the zone the cron will actually run in: same expression class, same zone as
+ * `directory-sync-scheduler.ts` will construct. The zone string itself is validated separately
+ * (`isValidDirectoryScheduleTimezone`) BEFORE this runs, so a garbage zone is rejected on its own terms
+ * rather than being laundered into a confusing cron error.
  */
-function isDirectoryScheduleCronValid(cron: string): boolean {
+function isDirectoryScheduleCronValid(cron: string, timezone: string): boolean {
   try {
-    return new SimpleCronExpression(cron, 'UTC').hasNext()
+    return new SimpleCronExpression(cron, resolveDirectoryScheduleTimezone(timezone)).hasNext()
+  } catch {
+    return false
+  }
+}
+
+/**
+ * STRUCTURE only — zone-independent, and cheap. A malformed expression (`60 25 * * *`, wrong field
+ * count, out-of-range value) is malformed in EVERY zone, so it must be rejected without first going to
+ * the database for the integration's saved timezone: the zone lookup exists to answer "can this cron
+ * ever fire THERE", which is a question a broken expression never gets to ask. Keeping the two checks
+ * separate also means a DB hiccup can never turn a plainly-invalid cron into a 503.
+ */
+function isDirectoryScheduleCronParseable(cron: string): boolean {
+  try {
+    new SimpleCronExpression(cron, 'UTC')
+    return true
   } catch {
     return false
   }
@@ -132,9 +164,25 @@ const DIRECTORY_SCHEDULE_CRON_ERROR_MESSAGE =
   'scheduleCron is not a valid schedule. Expected a standard 5-field cron expression ' +
   '(minute hour dayOfMonth month dayOfWeek — e.g. "0 2 * * *") that resolves to at least one execution ' +
   'within the next year (day-of-month and day-of-week restrictions combine with AND, so e.g. a day-of-month ' +
-  'that never falls on the requested weekday is rejected). DingTalk directory sync always runs on UTC ' +
-  'wall-clock time — per-integration timezones are not supported yet. Leave scheduleCron empty to disable ' +
+  'that never falls on the requested weekday is rejected). DingTalk directory sync runs in the ' +
+  'integration\'s configured scheduleTimezone (UTC by default). Leave scheduleCron empty to disable ' +
   'the scheduled sync.'
+
+// Mirrors `normalizeScheduleCronInput` above: absent/null/undefined/non-string all normalize to '' = "no
+// configured timezone" (the scheduler default), which is always allowed.
+function normalizeScheduleTimezoneInput(value: unknown): string {
+  return typeof value === 'string' ? value.trim() : String(value ?? '').trim()
+}
+
+/**
+ * Roadmap §7.8 "Add timezone support" save-time gate: fail-closed on an invalid IANA zone. Reuses the SAME
+ * `isValidDirectoryScheduleTimezone` the scheduler's runtime resolver falls back through — an invalid zone
+ * must be REJECTED here rather than silently degrading to UTC at runtime (that would let an admin believe a
+ * zone was saved that was quietly dropped). '' / 'UTC' / 'Etc/UTC' are always valid (= use the default).
+ */
+const DIRECTORY_SCHEDULE_TIMEZONE_ERROR_MESSAGE =
+  'scheduleTimezone is not a valid IANA timezone (e.g. "Asia/Shanghai"). Leave it empty, or set it to ' +
+  '"UTC", to run scheduleCron on UTC wall-clock time.'
 
 function getRequestUserId(req: Request): string {
   const raw = req.user as Record<string, unknown> | undefined
@@ -254,8 +302,22 @@ export function adminDirectoryRouter(): Router {
     const adminUserId = await ensurePlatformAdmin(req, res)
     if (!adminUserId) return
 
+    // Review P3-3: the ZONE is validated FIRST, then the cron is validated IN THAT ZONE. Reachability is
+    // not timezone-invariant (see isDirectoryScheduleCronValid), so a fixed-UTC cron check would let an
+    // expression that can never fire in the configured zone save as "valid" and then silently never run.
+    const scheduleTimezoneInput = normalizeScheduleTimezoneInput((req.body as Record<string, unknown> | undefined)?.scheduleTimezone)
+    if (scheduleTimezoneInput && !isValidDirectoryScheduleTimezone(scheduleTimezoneInput)) {
+      jsonError(res, 400, 'DIRECTORY_SCHEDULE_TIMEZONE_INVALID', DIRECTORY_SCHEDULE_TIMEZONE_ERROR_MESSAGE)
+      return
+    }
+
     const scheduleCronInput = normalizeScheduleCronInput((req.body as Record<string, unknown> | undefined)?.scheduleCron)
-    if (scheduleCronInput && !isDirectoryScheduleCronValid(scheduleCronInput)) {
+    // Structure first (zone-independent), then reachability in the zone it will run in.
+    if (scheduleCronInput && !isDirectoryScheduleCronParseable(scheduleCronInput)) {
+      jsonError(res, 400, 'DIRECTORY_SCHEDULE_CRON_INVALID', DIRECTORY_SCHEDULE_CRON_ERROR_MESSAGE)
+      return
+    }
+    if (scheduleCronInput && !isDirectoryScheduleCronValid(scheduleCronInput, scheduleTimezoneInput)) {
       jsonError(res, 400, 'DIRECTORY_SCHEDULE_CRON_INVALID', DIRECTORY_SCHEDULE_CRON_ERROR_MESSAGE)
       return
     }
@@ -273,10 +335,65 @@ export function adminDirectoryRouter(): Router {
     const adminUserId = await ensurePlatformAdmin(req, res)
     if (!adminUserId) return
 
-    const scheduleCronInput = normalizeScheduleCronInput((req.body as Record<string, unknown> | undefined)?.scheduleCron)
-    if (scheduleCronInput && !isDirectoryScheduleCronValid(scheduleCronInput)) {
+    // Zone first, then the cron IN the zone it will actually run in.
+    //
+    // Owner review P2 (2026-07-12) — this must be decided by FIELD PRESENCE, not by truthiness. An
+    // earlier revision collapsed "key absent" and "key present but empty" into the same `''`, which was
+    // wrong in BOTH directions:
+    //   * `scheduleTimezone: ''` (an explicit CLEAR) was treated as absent, so the cron was validated
+    //     against the OLD saved zone — while the write cleared the zone to UTC. Validated in one zone,
+    //     saved in another.
+    //   * when the saved zone could not be read, it silently GUESSED UTC — so a cron that can never
+    //     fire in the zone actually being PRESERVED could sail through the gate.
+    // Presence is the truth: absent = keep the saved zone; present (including '') = this is the zone.
+    // And if we cannot read the config we must PRESERVE, we refuse the update — we do not guess.
+    const putBody = req.body as Record<string, unknown> | undefined
+    const timezoneKeyPresent = !!putBody && Object.prototype.hasOwnProperty.call(putBody, 'scheduleTimezone')
+    const scheduleTimezoneInput = normalizeScheduleTimezoneInput(putBody?.scheduleTimezone)
+    if (timezoneKeyPresent && scheduleTimezoneInput && !isValidDirectoryScheduleTimezone(scheduleTimezoneInput)) {
+      jsonError(res, 400, 'DIRECTORY_SCHEDULE_TIMEZONE_INVALID', DIRECTORY_SCHEDULE_TIMEZONE_ERROR_MESSAGE)
+      return
+    }
+
+    const scheduleCronInput = normalizeScheduleCronInput(putBody?.scheduleCron)
+    // Malformed in every zone ⇒ reject WITHOUT reading the saved timezone. A broken expression must not
+    // depend on a DB round-trip, and a DB hiccup must never turn a plainly-invalid cron into a 503.
+    if (scheduleCronInput && !isDirectoryScheduleCronParseable(scheduleCronInput)) {
       jsonError(res, 400, 'DIRECTORY_SCHEDULE_CRON_INVALID', DIRECTORY_SCHEDULE_CRON_ERROR_MESSAGE)
       return
+    }
+    if (scheduleCronInput) {
+      let effectiveTimezone: string
+      if (timezoneKeyPresent) {
+        // Explicitly supplied — including '' meaning "clear to UTC". This IS what will be persisted,
+        // so it is exactly the zone to validate the cron against.
+        effectiveTimezone = scheduleTimezoneInput
+      } else {
+        // Absent ⇒ the saved zone is preserved, so THAT is the zone this cron will run in.
+        let snapshot: Awaited<ReturnType<typeof getDirectorySyncScheduleSnapshot>>
+        try {
+          snapshot = await getDirectorySyncScheduleSnapshot(req.params.integrationId)
+        } catch (error) {
+          // Cannot read the zone we are about to preserve ⇒ we cannot honestly validate the cron in it.
+          // Refuse; do NOT fall back to UTC and let a never-firing schedule through.
+          jsonError(
+            res,
+            503,
+            'DIRECTORY_SCHEDULE_CONFIG_UNREADABLE',
+            readErrorMessage(error, 'Could not read the integration\'s saved schedule timezone, so scheduleCron cannot be validated against the zone it will run in. No change was made; retry.'),
+          )
+          return
+        }
+        if (!snapshot) {
+          jsonError(res, 404, 'DIRECTORY_INTEGRATION_NOT_FOUND', 'Directory integration not found')
+          return
+        }
+        effectiveTimezone = snapshot.scheduleTimezone ?? ''
+      }
+      if (!isDirectoryScheduleCronValid(scheduleCronInput, effectiveTimezone)) {
+        jsonError(res, 400, 'DIRECTORY_SCHEDULE_CRON_INVALID', DIRECTORY_SCHEDULE_CRON_ERROR_MESSAGE)
+        return
+      }
     }
 
     try {

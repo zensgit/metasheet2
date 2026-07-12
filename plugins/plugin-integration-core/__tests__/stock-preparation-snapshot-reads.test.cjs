@@ -29,6 +29,11 @@ const {
 const {
   StockPreparationTargetProvisioningError,
 } = require(path.join(__dirname, '..', 'lib', 'stock-preparation-target-provisioning.cjs'))
+const {
+  assertKnownFieldIds,
+  physicalRow,
+  resolveFieldIdsFor,
+} = require(path.join(__dirname, 'fixtures', 'stock-preparation-multitable-fakes.cjs'))
 
 const STAGING_PROJECT = 'tenant_1:integration-core'
 const BUSINESS_PROJECT = 'PROJ-42'
@@ -70,19 +75,30 @@ function rowData(row) {
   return row || {}
 }
 
+const OBJECT_ID_BY_SHEET_ID = Object.fromEntries(Object.entries(SHEET_IDS).map(([objectId, sheetId]) => [sheetId, objectId]))
+
+// #4160 — STRICT records API. The fixtures below are written in LOGICAL keys because that is what a
+// human can read, but the substrate STORES (and returns) PHYSICAL fieldIds, and it rejects any filter
+// key that is not one — exactly as the real query-service does (`Unknown fieldId: X`). A read module
+// that filters by a logical key therefore FAILS here instead of quietly returning nothing, and one
+// that reads a physical-keyed row by logical key sees undefined instead of the value.
 function makeRecordsApi(rowsBySheet = {}) {
   const calls = []
+  const stored = {}
+  for (const [sheetId, rows] of Object.entries(rowsBySheet)) {
+    const objectId = OBJECT_ID_BY_SHEET_ID[sheetId]
+    stored[sheetId] = rows.map((row, index) => physicalRow(STAGING_PROJECT, objectId, rowData(row), `rec_${sheetId}_${index}`))
+  }
   return {
     calls,
     async queryRecords({ sheetId, filters = {}, limit, offset = 0 } = {}) {
       calls.push(['queryRecords', { sheetId, filters: { ...filters }, limit, offset }])
-      const matched = (rowsBySheet[sheetId] || []).filter((row) => {
-        const data = rowData(row)
-        return Object.entries(filters).every(([key, value]) => data[key] === value)
-      })
+      assertKnownFieldIds(STAGING_PROJECT, OBJECT_ID_BY_SHEET_ID[sheetId], Object.keys(filters))
+      const matched = (stored[sheetId] || []).filter((row) =>
+        Object.entries(filters).every(([key, value]) => row.data[key] === value))
       const start = offset || 0
       const end = typeof limit === 'number' ? start + limit : matched.length
-      return matched.slice(start, end)
+      return matched.slice(start, end).map((row) => ({ ...row, data: { ...row.data } }))
     },
     // Write methods exist only to PROVE they are never called (readonly): any call throws + is recorded.
     createRecord() { calls.push(['createRecord']); throw new Error('createRecord must never be called (readonly)') },
@@ -94,6 +110,7 @@ function makeRecordsApi(rowsBySheet = {}) {
 // KILLER for the project-scope split: sheets resolve ONLY under the STAGING project; the business
 // project (or any non-staging id) returns null. A mutation that located sheets by the business project
 // would get null here and the list/diff would go empty, failing the assertions below.
+// resolveFieldIds (#4160) mirrors the platform derivation — and is scoped the same way.
 function makeProvisioning({ staging = STAGING_PROJECT, present = ALL_OBJECT_IDS } = {}) {
   const calls = []
   return {
@@ -103,6 +120,10 @@ function makeProvisioning({ staging = STAGING_PROJECT, present = ALL_OBJECT_IDS 
       if (projectId !== staging) return null
       if (!present.includes(objectId)) return null
       return { id: SHEET_IDS[objectId] }
+    },
+    async resolveFieldIds({ projectId, objectId, fieldIds } = {}) {
+      calls.push(['resolveFieldIds', { projectId, objectId }])
+      return resolveFieldIdsFor(projectId, objectId, fieldIds)
     },
   }
 }

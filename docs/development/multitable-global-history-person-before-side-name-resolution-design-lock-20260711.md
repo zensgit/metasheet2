@@ -1,8 +1,23 @@
-# Global History — person diff before-side 名称解析 — MINI DESIGN LOCK (PROPOSED)
+# Global History — person diff before-side 名称解析 — MINI DESIGN LOCK (RATIFIED)
 
-- **Status**: PROPOSED — docs-only；owner ratify 前零实现授权。R11 closeout 项（owner R11 directive 明列为收尾小设计项）。R9/R10 携带残差（「person diff before 侧缓存 miss 回退 raw id」）的正式设计。
-- **解锁词**：owner 对本文的明确点头（如「ratify person 名称解析」+ 选项）。
+- **Status**: **RATIFIED 2026-07-12（owner）**。三个决策点（§5 OD-P1/OD-P2/OD-P3）全部裁定，见下方「owner 裁决」。实现授权：**已授予**（小切片，读路径，无 flag）——仍需独立对抗审 + wire shape-lock 两侧同步。R11 closeout 项。R9/R10 携带残差（「person diff before 侧缓存 miss 回退 raw id」）的正式设计。
 - **难度/分派建议**：小（一处投影 map + FE 优先序 + wire shape-lock）→ Sonnet 5 建 + 对抗审。
+
+## §0 owner 裁决（2026-07-12）
+
+| 决策点 | 裁决 | 备注 |
+|---|---|---|
+| **OD-P1** | **= A** | 服务端 `personNames` 随批次详情下发（§3 表 A 行），与 all-tables-B 的 `fieldNames`（#4119）同构：单一真源、零新端点、复用 `resolveUserDisplayNames`。 |
+| **OD-P2** | **= carry inactive AND render marker** | `personNames` 的 map 值为 `{ display, inactive? }`（**非**裸 string）。停用用户在 diff 里**必须仍然可见且被标注**——「携带」不足，**渲染出标记**才算满足本裁决。 |
+| **OD-P3** | **= no flag** | 只读目录元数据，与 all-tables-B `fieldNames`、`actorName` 同级，不引入 env flag。 |
+
+### §0.1 Scope 说明 — `fieldTypes` companion payload（owner 2026-07-12，随本次 ratify 一并承认）
+
+实现同时下发 `fieldTypes: Record<sheetId, Record<fieldId, type>>`。这是 **all-tables cross-sheet person diff 能 type-aware 渲染的 companion payload**，明确纳入本锁范围：
+
+- **它不是一项独立新能力**，而是 A 方案在 all-tables（跨表）场景下成立的必要条件：跨表批次里，FE 手里的 `fields` 只有**当前**表的，别的表的字段拿不到 `type` ⇒ 认不出「这是 person 字段」⇒ 即使 `personNames` 已下发也走不进 person 分支，退回 raw JSON。`fieldNames` 给的是字段**名**，`fieldTypes` 给的是字段**类型**——前者修标签，后者修**值**的渲染。
+- **掩码同源**：`fieldTypes` 与 `fieldNames` **出自同一个 masked set（`allowedFieldsBySheet`）、同一次查询**。不可读字段既不出现在 `fieldNames` 也不出现在 `fieldTypes`。**它不扩大任何披露面**——字段类型是 schema 元数据，且只对 actor 已可读的字段下发。
+- 因此 wire shape 增量共两项：`personNames`（OD-P2 形状）与 `fieldTypes`。两侧 shape-lock 同步。
 
 ## §1 问题（对 origin/main 核验）
 
@@ -21,7 +36,7 @@ History Center 批次 diff 里，person（人员）字段的值 = `userId[]`。F
 
 | 选项 | 内容 | 代价/问题 |
 |---|---|---|
-| **A（推荐）** 服务端 `personNames` 随批次详情下发 | `loadHistoryBatchDetail` 顺路输出 `personNames: { [userId]: string }`，覆盖批次里**已可见 person 值**（before/after，post-mask）出现的所有 userId，用**批次详情端点已在用的** `resolveUserDisplayNames` 解析（与 `actorName` 同源）。FE person 渲染的 before 侧优先该 map、缺则单元格缓存、再缺 raw id | response-shape 增量=两侧 shape-lock；与 all-tables-B 的 `fieldNames` 完全同构（单一真源，零新端点）；需先枚举 payload 里的 person 字段（type='person' 且 refKind='user'）再收集其 before/after 的 userId |
+| **A ✅ 已裁定（OD-P1）** 服务端 `personNames` 随批次详情下发 | `loadHistoryBatchDetail` 顺路输出 `personNames: { [userId]: { display, inactive? } }`（**OD-P2 裁定形状；本表原写作裸 `string`，已被 OD-P2 覆盖**），覆盖批次里**已可见 person 值**（before/after，post-mask）出现的所有 userId，用**批次详情端点已在用的** `resolveUserDisplayNames` 解析（与 `actorName` 同源）。FE person 渲染的 before 侧优先该 map、缺则单元格缓存、再缺 raw id | response-shape 增量=两侧 shape-lock；与 all-tables-B 的 `fieldNames` 完全同构（单一真源，零新端点）；需先枚举 payload 里的 person 字段（type='person' 且 refKind='user'）再收集其 before/after 的 userId |
 | B FE 目录端点补抓 | FE 对缺失 userId 调目录端点补显示名 | N+1/额外往返；两处真源漂移；person 目录可见性口径要在 FE 复刻 |
 | C 维持 raw-id 回退 | 现状 | before 侧「谁被移除」永远只显示 id |
 
@@ -29,17 +44,22 @@ History Center 批次 diff 里，person（人员）字段的值 = `userId[]`。F
 
 **A**。与 all-tables-B 的 `fieldNames`（#4119）同构：批次详情投影再顺路输出一个 masked/directory-resolved 的 `personNames` map，FE 优先序 = personNames map（before 侧解已移除的人）→ 当前单元格缓存 → raw id。单一真源，零新端点，无 flag（只读目录元数据）。
 
-实现要点（ratify 后才排）：
-- 投影层：枚举批次 changes 里 **type='person'（refKind='user'）** 的**可见**字段，收集 before/after 值里的 userId 集合，`resolveUserDisplayNames` 一次解析（非 N+1），输出 `personNames: { [userId]: displayName }`（含 inactive 标记？见 OD-P2）。
+实现要点（**ratify 已给，可排**）：
+- 投影层：枚举批次 changes 里 **type='person'（refKind='user'）** 的**可见**字段，收集 before/after 值里的 userId 集合，`resolveUserDisplayNames` 一次解析（非 N+1），输出 `personNames: { [userId]: { display, inactive? } }`（**OD-P2 = 携带 `inactive` 且必须渲染出标记**）。
+- 同批下发 `fieldTypes`（见 §0.1）：跨表 person diff 的 type-aware 渲染前提，与 `fieldNames` 同一 masked set / 同一次查询。
 - 只覆盖已可见 person 单元格出现的 userId——denied person 字段的值已被掩码丢弃，其 userId 本就不在 payload。
 - FE：`formatDiffValueFor` 的 person 分支，before 侧解析优先 `personNames`；after 侧行为不变（当前单元格缓存已够）；两侧最终回退 raw id 不变。
 - Goldens：realdb——一条 person 字段 before 有「已移除」userId、after 没有，断言 `personNames` 含该 userId 的显示名且渲染出名字（非 raw id）；denied person 字段的 userId 绝不出现在 `personNames`（LOCK-3 邻测）。FE spec——before 侧优先 personNames、缺则缓存、再缺 raw id。wire shape 两侧同步。
+- **OD-P2 的 render 半边必须单独有金测**：一个 `inactive: true` 的 userId **渲染出停用标记**（不是只在 payload 里带着 `inactive`）。「携带但不渲染」会让只断言 payload 的测试全绿——而 owner 的裁决是 carry **and** render，两半都要钉。
+- **`fieldTypes` 掩码金测**：不可读字段既不出现在 `fieldNames` 也不出现在 `fieldTypes`（与 LOCK-3 同型的邻测——否则 `fieldTypes` 会变成绕过掩码的 schema 侧信道）。
 
-## §5 Owner 决策点
+## §5 Owner 决策点 — 全部 RESOLVED（owner 2026-07-12）
 
-- **OD-P1**：选项 A/B/C。
-- **OD-P2**：`personNames` 是否携带 `inactive` 标记（推荐：携带，与 PersonSummary 一致，diff 里停用用户仍标注）——若携带则 map 值改为 `{ display, inactive? }` 而非裸 string。
-- **OD-P3**：是否需要 flag（推荐：否——只读目录元数据，与 all-tables-B `fieldNames`、`actorName` 同级，无 flag）。
+- **OD-P1**：选项 A/B/C。 → ✅ **RESOLVED = A**（服务端 `personNames` 随批次详情下发）。
+- **OD-P2**：`personNames` 是否携带 `inactive` 标记——若携带则 map 值改为 `{ display, inactive? }` 而非裸 string。 → ✅ **RESOLVED = 携带 `inactive`，且必须渲染出标记**（carry **and** render）。map 值 = `{ display, inactive? }`。
+- **OD-P3**：是否需要 flag。 → ✅ **RESOLVED = 否，无 flag**（只读目录元数据，与 all-tables-B `fieldNames`、`actorName` 同级）。
+
+（裁决全文 + `fieldTypes` companion payload 的 scope 说明见 §0/§0.1。）
 
 ## §6 出界（如实）
 

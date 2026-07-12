@@ -50,6 +50,25 @@ export default defineConfig({
       // DATABASE_URL-gated; excluded here so the no-DB job cannot skip-green it, and wired as
       // a WHOLE FILE into the approval real-DB step in plugin-tests.yml.
       'tests/integration/directory-sync-orchestration.db.test.ts',
+      // Roadmap §7.8 "Add timezone support" (real DB): proves schedule_timezone round-trips
+      // through create/update/read against the REAL migrated column, and specifically the
+      // absent-vs-present update semantics (omitted key preserves; explicit '' clears) that a
+      // mocked-pg unit test cannot prove end-to-end. DATABASE_URL-gated; excluded here so the
+      // no-DB job cannot skip-green it, and wired as a WHOLE FILE into the directory real-DB
+      // step in plugin-tests.yml.
+      'tests/integration/directory-sync-schedule-timezone.db.test.ts',
+      // Layer-2 hidden person/button masking (real DB): proves the cross-cutting visibility-key fix actually
+      // masks the VALUE end-to-end, with non-vacuous controls. DATABASE_URL-gated; excluded here so the no-DB
+      // job cannot skip-green it, and wired as a WHOLE FILE into the multitable real-DB step in
+      // plugin-tests.yml. Two-point wiring — both points, deliberately.
+      'tests/integration/multitable-layer2-hidden-person-button-realdb.test.ts',
+      // Person before-side name resolution (real DB): its reason to exist is the LOCK-3 property — a
+      // field_permissions-DENIED person field's members must never reach the directory resolver, so their
+      // display NAMES can never surface. DATABASE_URL-gated; excluded here so the no-DB job cannot
+      // skip-green it (a `describeIfDatabase` alone still gets COLLECTED and reported as skipped =
+      // silently never run), and wired as a WHOLE FILE into the multitable real-DB step in plugin-tests.yml.
+      // Two-point wiring — both points, deliberately.
+      'tests/integration/multitable-history-person-names-realdb.test.ts',
       'tests/integration/approval-manager-chain.db.test.ts',
       'tests/integration/approval-requester-department.db.test.ts',
       'tests/integration/approval-requester-title.db.test.ts',
@@ -175,6 +194,11 @@ export default defineConfig({
       // skip-green here, re-opening the "real-DB spec silently skips in the no-DB lane" hole) —
       // whole-file wired into `Run multitable real-DB integration` in plugin-tests.yml.
       'tests/integration/multitable-d1-delete-revision-parity-realdb.test.ts',
+      // D-2 side-door delete recoverability (#4004): real Postgres only (it installs scoped failure-
+      // injection triggers and drives both side doors end-to-end) — excluded HERE so it cannot skip-green
+      // in the no-DB lane, and whole-file wired into `Run multitable real-DB integration` in
+      // plugin-tests.yml. Two-point wiring: BOTH points or the file silently never runs.
+      'tests/integration/multitable-d2-sidedoor-delete-recoverability-realdb.test.ts',
       // 4c-3 RB matrix: real Postgres only — whole-file wired into `Run multitable real-DB
       // integration` in plugin-tests.yml (describeIfDatabase alone would skip-green here).
       'tests/integration/multitable-undelete-inbound-replay-realdb.test.ts',
@@ -204,6 +228,12 @@ export default defineConfig({
       // as a WHOLE FILE into the `Run multitable real-DB integration` step in plugin-tests.yml where
       // it runs against real Postgres every PR.
       'tests/integration/dingtalk-group-delivery-retention.db.test.ts',
+      // DT-HARDEN-08 follow-up (sibling of the above): dingtalk_approval_card_deliveries +
+      // dingtalk_person_deliveries retention sweep. DATABASE_URL-gated (describeIfDatabase).
+      // Excluded from the no-DB default job so it cannot skip-green, and wired as a WHOLE FILE
+      // into the `Run multitable real-DB integration` step in plugin-tests.yml.
+      'tests/integration/dingtalk-card-person-delivery-retention.db.test.ts',
+      'tests/integration/dingtalk-card-delivery-retention-actionability.db.test.ts',
       // comments.api.test.ts needs setup.integration.ts + a live DB. It stays
       // CI-excluded (NOT wired) because 8 of its tests have a pre-existing real-wire
       // failure (CommentService.mapRowToComment drops containerId/targetId/
@@ -242,6 +272,20 @@ export default defineConfig({
       // here hid a #2052/#2068 redaction-wiring regression (4/7 RED) that no CI job caught.
       'tests/integration/plugin-failures.test.ts',
       'tests/integration/rooms.basic.test.ts',
+      // Real-APP-ASSEMBLY guard: boots a real MetaSheetServer, so it is excluded from this no-DB default job
+      // (which would skip-green it) and wired as a WHOLE FILE into the `Run real-app assembly guard` step in
+      // plugin-tests.yml, where it runs on every PR. It guards an invariant that unit tests structurally
+      // cannot see: no router mounted under /api may intercept traffic it does not own (a path-less
+      // router.use in a router mounted at a shared prefix runs for EVERY request entering that router,
+      // including other routers' traffic).
+      'tests/integration/router-isolation.smoke.test.ts',
+      // snapshot-protection boots a real server too, and its silent-return skips are gone (setup now
+      // hard-fails and every test must assert), so it can no longer report green without doing its work.
+      // It is still NOT wired into CI: the CI test database is migrated with MIGRATION_EXCLUDE, which omits
+      // the view-table migrations (20250924120000_create_views_view_states, 20250925_create_view_tables,
+      // 042a_core_model_views) — so `views` does not exist there and createSnapshot's captureViewState
+      // cannot run. Wiring it requires untangling that excluded migration cluster, which is its own change;
+      // until then this is DECLARED debt, not invisible debt. Run it locally against a fully-migrated DB.
       'tests/integration/snapshot-protection.test.ts',
       'tests/integration/spreadsheet-integration.test.ts',
       // Playwright E2E suites run through their own harness, not Vitest.

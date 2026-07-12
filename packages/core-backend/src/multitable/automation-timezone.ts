@@ -144,3 +144,38 @@ export function zonedMinuteKey(utcMs: number, timeZone: string): string {
   const p = getZonedParts(utcMs, timeZone)
   return `${p.year}-${p.month}-${p.day}-${p.hour}-${p.minute}`
 }
+
+/** Max look-back when detecting a DST fall-back repeat (a fall-back overlap is at most a couple of hours). */
+export const MAX_DST_FALLBACK_LOOKBACK_MS = 3 * 60 * 60 * 1000
+
+/**
+ * DST fall-back: a wall-clock minute that occurs TWICE (clock-back day) must fire ONCE. We always emit the
+ * FIRST instant and suppress the SECOND. A candidate is the suppressed repeat iff some EARLIER UTC minute
+ * within {@link MAX_DST_FALLBACK_LOOKBACK_MS} maps to the SAME local Y-M-D-H-m. An identical
+ * local-date-hour-minute can only arise during a fall-back overlap, so this is false-positive-free for
+ * ordinary days/crons. Defensive: any zoned-formatter throw is treated as "not a repeat" (never throws
+ * inside a scan).
+ *
+ * Lifted here from `automation-scheduler.ts` (which pioneered it as `isZonedFallbackRepeat`) so the
+ * SchedulerService cron path can reuse the SAME proven single-fire rule rather than growing a second,
+ * subtly-different one. Owner review P2 (2026-07-12): the previous SchedulerService revision documented
+ * the double-fire as an accepted limitation and claimed the sync lease absorbed it — it does not (the two
+ * fires are an HOUR apart; a lease only blocks a concurrent run).
+ */
+export function isZonedFallbackRepeat(candidateMs: number, timeZone: string): boolean {
+  let key: string
+  try {
+    key = zonedMinuteKey(candidateMs, timeZone)
+  } catch {
+    return false
+  }
+  const minuteMs = 60 * 1000
+  for (let back = candidateMs - minuteMs; back >= candidateMs - MAX_DST_FALLBACK_LOOKBACK_MS; back -= minuteMs) {
+    try {
+      if (zonedMinuteKey(back, timeZone) === key) return true
+    } catch {
+      return false
+    }
+  }
+  return false
+}

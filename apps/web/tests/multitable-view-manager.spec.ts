@@ -1073,9 +1073,10 @@ describe('MetaViewManager', () => {
     ;(container.querySelector('.meta-view-mgr__action[title="Configure"]') as HTMLButtonElement | null)?.click()
     await nextTick()
 
-    ;(Array.from(container.querySelectorAll('.mt-link')) as HTMLButtonElement[])
-      .find((button) => button.textContent?.includes('+ Add filter'))
-      ?.click()
+    // UI-P2-1c T3 errata fix-forward (2026-07-12): "+ Add filter"/"+ Add sort" moved from MtLink to
+    // MtButton variant="plain" (see meta-view-manager-migration.spec.ts) — select by the stable
+    // data-filter-add/data-sort-add attrs (unaffected by which primitive renders them) rather than class.
+    ;(container.querySelector('[data-filter-add="true"]') as HTMLButtonElement | null)?.click()
     await nextTick()
 
     const filterRow = container.querySelector('.meta-view-mgr__rule-row--filter') as HTMLElement
@@ -1089,9 +1090,7 @@ describe('MetaViewManager', () => {
     filterInput.value = 'Open'
     filterInput.dispatchEvent(new Event('change', { bubbles: true }))
 
-    ;(Array.from(container.querySelectorAll('.mt-link')) as HTMLButtonElement[])
-      .find((button) => button.textContent?.includes('+ Add sort'))
-      ?.click()
+    ;(container.querySelector('[data-sort-add="true"]') as HTMLButtonElement | null)?.click()
     await nextTick()
 
     const sortRow = Array.from(container.querySelectorAll('.meta-view-mgr__rule-row'))

@@ -295,6 +295,149 @@ async function testListPageBoundedPageIndexInput() {
   assert.deepEqual({ ...keyed.inputs }, { key: 'M-001', pageIndex: 2 })
 }
 
+async function testTrustedInternalPagingDoesNotWidenPublicDefaults() {
+  const prepared = prepareConfiguredRead({ config: normalizedConfig('list_page') })
+  const { deps, state } = mockDeps({
+    read: (request) => ({
+      records: Array.from({ length: request.limit }, () => ({})),
+      raw: {
+        Data: {
+          Data: Array.from({ length: request.limit }, (_, i) => ({
+            FSigmaField: `SIGMA-VALUE-${i}`,
+          })),
+          ROWCOUNT: 73,
+          PAGEINDEX: request.options.listPageIndex,
+        },
+      },
+      metadata: {
+        returnedRecordCount: request.limit,
+        dataRowCount: 73,
+        dataPageIndex: request.options.listPageIndex,
+      },
+    }),
+  })
+  const outcome = await executeConfiguredRead(prepared, deps, { rowCap: 20, pageIndex: 4 })
+
+  assert.equal(state.readArgs[0].limit, 20)
+  assert.equal(state.readArgs[0].options.listPageIndex, 4)
+  assert.equal(outcome.data.recordCount, 20)
+  const { rowFingerprints, fieldResolution, ...pageCounts } = outcome.page
+  // The tally is PROTOTYPE-FREE: a fieldMap target is operator-chosen and the validator accepts
+  // `constructor` / `toString` / `valueOf`, so a plain {} would answer the lookup from Object.prototype and
+  // report a field as resolved that resolved on no row at all.
+  assert.equal(Object.getPrototypeOf(fieldResolution), null, 'the resolution tally must not inherit Object.prototype')
+  assert.deepEqual({ ...fieldResolution }, { colGamma: 20 })
+  assert.equal(fieldResolution.constructor, undefined, 'a prototype member name answers nothing')
+  assert.deepEqual(pageCounts, {
+    nextCursor: null,
+    done: false,
+    returnedRecordCount: 20,
+    sourceTotalCount: 73,
+    pageIndex: 4,
+    // #3889 fix: the adapter-applied page bound (absent here) and the PRE-SLICE raw container length.
+    effectiveLimit: null,
+    rawRowCounts: { primary: 20 },
+    // #3889 fix: the SOURCE's own page-index echo (never our requested value), plus two independent
+    // witnesses of the page's row count — the adapter's records array and what its metadata claims.
+    echoedPageIndex: 4,
+    adapterRecordCount: 20,
+    reportedRecordCount: 20,
+  })
+  // Page identity is computed from the rows the ADAPTER returned, never from the lossy fieldMap projection
+  // of them (two pages differing only in an unmapped column are still two different pages).
+  assert.match(rowFingerprints.primary, /^[0-9a-f]{64}$/)
+  assert.equal(JSON.stringify(outcome).includes('sourceTotalCount'), false, 'internal page metadata is non-enumerable')
+  assertEvidenceValuesFree(outcome.evidence)
+  assert.equal(JSON.stringify(outcome.evidence).includes('73'), false, 'source totals stay internal')
+  assert.throws(
+    () => __internals.normalizeTrustedExecution(prepared.plan, { rowCap: 1001 }),
+    (error) => error instanceof ReadSourceProbeContractError && error.reason === 'execution_row_cap_invalid',
+  )
+  assert.throws(
+    () => __internals.normalizeTrustedExecution(prepared.plan, { pageIndex: 11 }),
+    (error) => error instanceof ReadSourceProbeContractError && error.reason === 'execution_page_index_invalid',
+  )
+  assert.deepEqual(
+    __internals.normalizeTrustedExecution(prepared.plan, { cursor: 'offset:20' }).cursor,
+    'offset:20',
+    'trusted list execution may use cursor-based adapters',
+  )
+  assert.throws(
+    () => __internals.normalizeTrustedExecution(prepared.plan, { cursor: 'offset:20', pageIndex: 2 }),
+    (error) => error instanceof ReadSourceProbeContractError && error.reason === 'execution_pagination_conflict',
+  )
+  // The trusted-execution surface is a CLOSED allowlist: an unknown key is a rejected request, never a
+  // silently ignored one (a typo'd `rowcap` must not quietly become the plan's default page).
+  assert.throws(
+    () => __internals.normalizeTrustedExecution(prepared.plan, { rowCap: 20, rowcap: 5000 }),
+    (error) => error instanceof ReadSourceProbeContractError && error.reason === 'execution_options_unexpected_field',
+  )
+  assert.throws(
+    () => __internals.normalizeTrustedExecution(prepared.plan, { rowSource: 'raw' }),
+    (error) => error instanceof ReadSourceProbeContractError && error.reason === 'execution_row_source_invalid',
+  )
+
+  const keyed = prepareConfiguredRead({
+    config: normalizedConfig('single_record'),
+    inputs: { key: 'M-001' },
+  })
+  const cursorDeps = mockDeps({
+    read: (request) => ({
+      records: [{}],
+      nextCursor: 'offset:20',
+      done: false,
+      raw: { Data: { FSigmaField: 'SIGMA-VALUE' } },
+      metadata: { count: 1 },
+    }),
+  })
+  const cursorOutcome = await executeConfiguredRead(keyed, cursorDeps.deps, {
+    rowCap: 20,
+    cursor: 'offset:10',
+  })
+  assert.equal(cursorDeps.state.readArgs[0].cursor, 'offset:10')
+  // #3889 fix: a keyed (single_record) execution that NAMES a rowCap must send it. The probe builder only
+  // sets `limit` on the list dialects, so this request used to reach the adapter with no limit at all and
+  // the adapter fell back to its own default (Bridge: sampleLimit=3) — a page bound the source never saw.
+  assert.equal(cursorDeps.state.readArgs[0].limit, 20, 'trusted rowCap reaches a non-list adapter request')
+  assert.equal(cursorOutcome.page.nextCursor, 'offset:20')
+  assert.equal(cursorOutcome.page.sourceTotalCount, null, 'per-page metadata.count is not a source total')
+  assert.equal(JSON.stringify(cursorOutcome.evidence).includes('offset:'), false)
+}
+
+// #3889 fix: the executor slices each raw container to plan.rowCap. `page.rawRowCounts` is the ONLY
+// signal that distinguishes "the source had exactly rowCap rows" from "the source had more and we
+// truncated it" — both leave exactly rowCap mapped records behind. A feeder that cannot tell those apart
+// reports a truncated snapshot as complete.
+async function testInternalPageReportsPreSliceRawRowCountsAndAppliedLimit() {
+  const prepared = prepareConfiguredRead({ config: normalizedConfig('list_page') })
+  const { deps } = mockDeps({
+    read: () => ({
+      records: [],
+      raw: { Data: { Data: Array.from({ length: 37 }, (_, i) => ({ FSigmaField: `SIGMA-${i}` })) } },
+      // A clamping adapter (Bridge) reports the limit it ACTUALLY applied, not the one we asked for.
+      metadata: { limit: 20 },
+    }),
+  })
+  const outcome = await executeConfiguredRead(prepared, deps, { rowCap: 20 })
+  assert.equal(outcome.data.recordCount, 20, 'mapped records are still rowCap-bounded')
+
+  // The RECORD plane's internal page must be non-enumerable too — the raw plane's twin is asserted below,
+  // and this is the plane the stock-preparation feeder actually eats. Its `page` carries source totals,
+  // cursors, per-field resolution counts and row fingerprints: an accidental whole-outcome JSON response
+  // must not be able to serialize any of it.
+  const recordPlane = await executeConfiguredRead(prepared, deps, { rowCap: 20, rowSource: 'adapter_records' })
+  assert.deepEqual(Object.keys(recordPlane), ['evidence', 'data'], 'the record-plane page is not an own enumerable key')
+  const recordPlaneJson = JSON.stringify(recordPlane)
+  for (const internal of ['rowFingerprints', 'fieldResolution', 'sourceTotalCount', 'nextCursor', 'adapterRecordCount']) {
+    assert.ok(!recordPlaneJson.includes(internal), `record-plane page metadata must stay internal: ${internal}`)
+  }
+  assert.equal(recordPlane.page.rawRowCounts.primary, 37, 'the trusted caller can still read it')
+  assert.equal(outcome.page.rawRowCounts.primary, 37, 'raw container length survives the rowCap slice')
+  assert.equal(outcome.page.effectiveLimit, 20, 'the adapter-applied page bound is surfaced')
+  assert.equal(outcome.evidence.capReached, true)
+  assertEvidenceValuesFree(outcome.evidence)
+}
+
 async function testDetailWithLinesBothContainersMapped() {
   const prepared = prepareConfiguredRead({ config: normalizedConfig('detail_with_lines'), inputs: { key: 'PBOM-001' } })
   const { deps } = mockDeps({
@@ -403,12 +546,54 @@ async function testTimeoutInjectableAndPathReGuard() {
   )
 }
 
+// The projection is a sequence of writes. An entry that resolves NOWHERE must not erase a value another
+// entry already read — that is data loss, not a sparse column — and the resolution tally must be derived
+// from the row we actually EMIT, so it can never certify a column the row does not carry. (Duplicate targets
+// are rejected by the config validator now; this keeps the projection itself honest regardless.)
+function testMappingNeverErasesAResolvedValueAndTalliesWhatItEmits() {
+  const duplicateTarget = [
+    { source: 'quantity', target: 'designQty' }, // resolves
+    { source: 'qty', target: 'designQty' },      // does not resolve
+  ]
+  const counts = {}
+  assert.deepEqual(
+    __internals.mapRecord({ quantity: 1 }, duplicateTarget, counts),
+    { designQty: 1 },
+    'an unresolved entry must not overwrite a value another entry read',
+  )
+  assert.deepEqual(counts, { designQty: 1 }, 'the tally matches the value actually emitted')
+
+  const swappedCounts = {}
+  assert.deepEqual(
+    __internals.mapRecord({ quantity: 1 }, [duplicateTarget[1], duplicateTarget[0]], swappedCounts),
+    { designQty: 1 },
+    'and the result does not depend on the order the entries happen to be written in',
+  )
+  assert.deepEqual(swappedCounts, { designQty: 1 })
+
+  // Resolved on NO entry -> null, and NOT tallied: the guard downstream must see a zero here.
+  const missingCounts = {}
+  assert.deepEqual(__internals.mapRecord({}, duplicateTarget, missingCounts), { designQty: null })
+  assert.deepEqual(missingCounts, {}, 'a column no entry resolved is never certified as present')
+
+  // An EXPLICIT null in the source is resolved: a present-but-empty column is a faithful representation.
+  const nullCounts = {}
+  assert.deepEqual(
+    __internals.mapRecord({ quantity: null }, [duplicateTarget[0]], nullCounts),
+    { designQty: null },
+  )
+  assert.deepEqual(nullCounts, { designQty: 1 })
+}
+
 async function main() {
+  testMappingNeverErasesAResolvedValueAndTalliesWhatItEmits()
   await testPrepareFailClosed()
   await testResolverLookupRuntime()
   await testSingleRecordDataPlane()
   await testListPageCapAndProjection()
   await testListPageBoundedPageIndexInput()
+  await testTrustedInternalPagingDoesNotWidenPublicDefaults()
+  await testInternalPageReportsPreSliceRawRowCountsAndAppliedLimit()
   await testDetailWithLinesBothContainersMapped()
   await testContainerMissingAndShapeMismatch()
   await testAdapterErrorsAreCoarseWithNullData()

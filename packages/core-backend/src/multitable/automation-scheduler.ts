@@ -16,6 +16,7 @@ import {
   isValidIanaTimeZone,
   zonedMinuteKey,
   type ZonedParts,
+  isZonedFallbackRepeat,
 } from './automation-timezone'
 import type { AutomationRule } from './automation-executor'
 import type { RedisLeaderLock } from './redis-leader-lock'
@@ -186,7 +187,6 @@ function cronMatchesZoned(parsed: ParsedCronExpression, parts: ZonedParts): bool
  * ≤ 1h for every modern IANA zone; 3h gives comfortable margin. The cost (≤180 cheap zoned-minute lookups) is
  * paid ONLY when a candidate already matched the cron — i.e. once per fired occurrence, not per scanned minute.
  */
-const MAX_DST_FALLBACK_LOOKBACK_MS = 3 * 60 * 60 * 1000
 
 /**
  * Resolve a cron schedule's timezone. Absent / 'UTC' / 'Etc/UTC' → `null` = the UTC fast path (behaviour
@@ -204,30 +204,6 @@ function resolveCronTimeZone(raw: string | undefined): string | null {
   return tz
 }
 
-/**
- * Q1 (DST fall-back): a wall-clock minute that occurs TWICE (clock-back day) must fire ONCE. We always emit
- * the FIRST instant and suppress the SECOND. A candidate is the suppressed repeat iff some EARLIER UTC minute
- * within {@link MAX_DST_FALLBACK_LOOKBACK_MS} maps to the SAME local Y-M-D-H-m. Identical local-date-hour-
- * minute can only arise during a fall-back overlap, so this is false-positive-free for ordinary days/crons.
- * Defensive: any zoned-formatter throw is treated as "not a repeat" (never throws in the scan).
- */
-function isZonedFallbackRepeat(candidateMs: number, timeZone: string): boolean {
-  let key: string
-  try {
-    key = zonedMinuteKey(candidateMs, timeZone)
-  } catch {
-    return false
-  }
-  const minuteMs = 60 * 1000
-  for (let back = candidateMs - minuteMs; back >= candidateMs - MAX_DST_FALLBACK_LOOKBACK_MS; back -= minuteMs) {
-    try {
-      if (zonedMinuteKey(back, timeZone) === key) return true
-    } catch {
-      return false
-    }
-  }
-  return false
-}
 
 /** Leap-safe maximum day each month (1..12) can host (February = 29). */
 const MONTH_MAX_DAYS: Readonly<Record<number, number>> = {
