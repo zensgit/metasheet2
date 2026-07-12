@@ -145,6 +145,13 @@ on:
       # run-required-web-tests.sh) is wired separately in #4156; this is the advisory-guard half of
       # the same fix.
       - 'apps/web/src/multitable/ui/**'
+      # UI-P2-1c T1 batch-3: MetaPersonPicker/MetaLinkPicker/ScaleFormattingDialog's header close-×
+      # migrated to MtIconButton. Their `*-migration.spec.ts` files are covered by the wildcard
+      # above, but (per the R5c/T3-T4-T5 CI-residual precedent) the .vue sources themselves had NO
+      # path trigger — a PR touching only e.g. ScaleFormattingDialog.vue would run no web-guard.
+      - 'apps/web/src/multitable/components/MetaPersonPicker.vue'
+      - 'apps/web/src/multitable/components/MetaLinkPicker.vue'
+      - 'apps/web/src/multitable/components/ScaleFormattingDialog.vue'
       # Formula catalog parity (12 scalar functions): web-side intent specs (12-present /
       # COUNTIF-absent, 1a scalar-set, i18n labels, editor diagnostics incl. arity table)
       - 'apps/web/src/multitable/utils/formula-docs.ts'
@@ -290,6 +297,13 @@ on:
       # run-required-web-tests.sh) is wired separately in #4156; this is the advisory-guard half of
       # the same fix.
       - 'apps/web/src/multitable/ui/**'
+      # UI-P2-1c T1 batch-3: MetaPersonPicker/MetaLinkPicker/ScaleFormattingDialog's header close-×
+      # migrated to MtIconButton. Their `*-migration.spec.ts` files are covered by the wildcard
+      # above, but (per the R5c/T3-T4-T5 CI-residual precedent) the .vue sources themselves had NO
+      # path trigger — a PR touching only e.g. ScaleFormattingDialog.vue would run no web-guard.
+      - 'apps/web/src/multitable/components/MetaPersonPicker.vue'
+      - 'apps/web/src/multitable/components/MetaLinkPicker.vue'
+      - 'apps/web/src/multitable/components/ScaleFormattingDialog.vue'
       # Formula catalog parity (12 scalar functions): web-side intent specs (12-present /
       # COUNTIF-absent, 1a scalar-set, i18n labels, editor diagnostics incl. arity table)
       - 'apps/web/src/multitable/utils/formula-docs.ts'
