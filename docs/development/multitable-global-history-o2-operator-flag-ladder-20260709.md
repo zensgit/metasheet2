@@ -91,5 +91,10 @@ tombstone 数据是惰性的——关 flag 不删数据，重开后继续可用�
   capture/revert flag（`TOMBSTONE_CAPTURE_ENABLED` / `ENABLE_RECORD_UNDELETE_INBOUND` /
   `ENABLE_FIELD_RETYPE_REVERT`）已在生产开启，地板-A 决策自动回到 owner 桌面——此时 field-value 值恢复窗口
   = keep-days，过期即 4d 化。operator 在 L4/L5 勾选前必须显式确认这一联动（或保持 retention 关闭）。
-- automation / plugin-SDK 删除仍**无捕获**（不可恢复=D-2，owner-gated）；4c-3 可达边界不含它们。
+- ~~automation / plugin-SDK 删除仍**无捕获**（不可恢复=D-2，owner-gated）；4c-3 可达边界不含它们。~~
+  **【2026-07-12 更正 — 本句已与代码相反，按 as-built 重写】** D-2 已 owner ratify 并实现（design-lock #4004；impl PR #4168）：
+  两条侧门（automation / plugin-SDK）**已具备** trash + inbound 捕获能力，**但嵌套在新 flag
+  `MULTITABLE_SIDE_DOOR_DELETE_TRASH_ENABLED`（默认 OFF）之下**，且捕获还需 `TOMBSTONE_CAPTURE_ENABLED` 同时为真（§2.5 嵌套规则）。
+  因此**当前生产行为不变**（两 flag 皆未开 ⇒ 侧门仍 revision-only、不可恢复、4c-3 可达边界仍不含它们）——
+  但这是 **flag 态**，不再是**能力缺失**。开启路径见 §3 的 **L3.5** 级（产品语义变更，需 owner 单独确认）。
 - 4d 红线不变：已删字段列值的值级恢复永不承诺。

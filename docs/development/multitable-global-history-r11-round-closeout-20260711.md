@@ -113,4 +113,9 @@
 
 ---
 
+> **2026-07-12 前向指针（不改写本轮历史结论）**：本文下述「#4004 D-2（owner-gated，watch-only）」是
+> **2026-07-11 收官时点的如实记录**。此后 owner 于 2026-07-11 晚 ratify 了 D-2，实现落在 PR #4168
+> （flag `MULTITABLE_SIDE_DOOR_DELETE_TRASH_ENABLED`，**默认 OFF**，生产行为未变）。查当前状态请以
+> `multitable-time-machine-remaining-dev-and-verification-20260712.md` 与 O-2 flag ladder 为准。
+
 **收官口径**：本轮 ratify/decision-clean 池已清空至 gate-front（floor-A/A′/all-tables-B/restore 回链落地；person 名称解析 PROPOSED 待 owner ratify）。剩余 = O-2 staging enablement（operator/CI runbook，production OFF）+ #4004 D-2（owner-gated，watch-only）+ person 实现（owner ratify 后）。**非「全部开发好了」**。
