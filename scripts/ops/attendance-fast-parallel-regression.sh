@@ -133,11 +133,14 @@ for index in "${!CHECK_NAMES[@]}"; do
   fi
 done
 
-for pid in "${ACTIVE_PIDS[@]}"; do
-  if [[ -n "$pid" ]]; then
-    wait "$pid" || true
-  fi
-done
+# Bash 3.2 treats an empty array expansion as unbound under `set -u`.
+if (( ${#ACTIVE_PIDS[@]} > 0 )); then
+  for pid in "${ACTIVE_PIDS[@]}"; do
+    if [[ -n "$pid" ]]; then
+      wait "$pid" || true
+    fi
+  done
+fi
 
 for index in "${!CHECK_RESULT_FILES[@]}"; do
   result_file="${CHECK_RESULT_FILES[$index]}"
