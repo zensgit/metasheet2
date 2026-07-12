@@ -154,7 +154,8 @@ owner 复审给出 5 项 finding + A–E 收尾计划。**完成判据（owner �
 
 - **R12-C P3（owner call）**：manifest 把 `side-door 未配 capture` 定为**硬 STOP**。gate 溯源发现该组合**代码上合法但降级**——trash 行无条件写、记录仍可恢复，**仅** inbound 边捕获需双 flag。你 R12-C 指令**明列**「side-door 未配 capture」为要拒的组合 ⇒ 当前 STOP **符合你的意图**；gate 建议降为 `--strict`-only WARN。**二选一请你定**（prose 已准确标「降级非损坏」）。
 - **R12-C 两个 P3（低风险收尾）**：① `flagEnabled`/`TRUE_VALUES` 现为运行时死代码（易误导后来读者）建议删/注；② helper 两个测试仅 `node --test` 本地、无 CI workflow 亦无 `verify:*:test` npm script（与兄弟 ops helper 不对等）——ops 只读工具，可接受但建议补 npm script。**均可留作 fix-forward，不阻断。**
-- **两 PR 均 Draft**：等你 GO 再转 Ready + 合。R12-B 修复后 head 已前移；合前顺手 rebase。
+- **两 PR 均 Draft**：等你 GO 再转 Ready + 合。合前顺手 rebase。
+- **R12-B head-scoped 说明（对自己套用同一纪律）**：gate 的 APPROVE-with-fixes 判在 head `50c4b93a`；我随后推的 P3-1/NIT-1 修复使 head 前移=**技术上 gate 之后**。但该 commit **恰是 gate 要求的两处 comment-only 修复本身**⇒ verdict 是被**满足**（apply the fixes），非被推翻；comment-only、零 runtime 字节，**无需重跑 gate**。（对比 #4161：那是**平行 session** 移了 head 需验 rebase 等价；这里是**我按 gate 自身指令**应用修复。）
 - **R12-D staging 实跑 + R12-E 浏览器/API 证据 = owner/ops 门**（部署 host env + 全栈，本会话不可达）。runbook（§9.1）已备；实跑与证据归档由你/operator 执行。
 
 ### 9.5 R12 完成判据对账（owner 明定）
