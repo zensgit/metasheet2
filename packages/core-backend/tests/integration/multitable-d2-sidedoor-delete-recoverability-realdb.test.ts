@@ -48,7 +48,11 @@ import {
   type AutomationDeps,
   type AutomationRule,
 } from '../../src/multitable/automation-executor'
-import { deleteRecord as pluginDeleteRecord, MultitableRecordDeleteCapExceededError } from '../../src/multitable/records'
+import {
+  deleteRecord as pluginDeleteRecord,
+  MultitableRecordDeleteCapExceededError,
+  MultitableSideDoorDeleteNonTransactionalError,
+} from '../../src/multitable/records'
 import { AutomationService } from '../../src/multitable/automation-service'
 import { RecordService } from '../../src/multitable/record-service'
 import { recordRecordRevision } from '../../src/multitable/record-history-service'
@@ -557,6 +561,116 @@ describeIfDatabase('D-2 — side-door delete recoverability (plugin + automation
       expect(await edgeAlive(F, N, R)).toBe(true)
     })
   }
+
+  // ── G16 — OD-7 LAYER 3: the reordered path REFUSES to run outside a transaction ───────────────────
+  /**
+   * Layer 3 of the OD-7 contract (owner ruling): G3 proves the sequence is atomic GIVEN a transaction;
+   * the production-wiring guard proves the real entry points supply one; THIS pins the runtime refusal
+   * that covers everything else — a caller that does not exist yet, or one whose transaction a refactor
+   * dropped far away from this file.
+   *
+   * Non-transactional here is REAL, not simulated: the query fn is the bare pool (`poolManager.query`),
+   * so every statement is its own implicit transaction — exactly what a caller gets if the
+   * `poolManager.get().transaction` wrapper in `index.ts` (or `deps.transaction` in automation-service)
+   * is dropped. Mutation: delete the `assertTransactionalQuery` call in either lane ⇒ the matching case
+   * below reds, and reds LOUDLY — the record is destroyed and its links are gone, non-transactionally.
+   */
+  test('G16 [plugin] OD-7 layer 3: a NON-transactional query is REFUSED (typed) and nothing is written', async () => {
+    process.env[SIDE_DOOR_FLAG] = 'true'
+    process.env[CAPTURE_FLAG] = 'true'
+    const { F, R, N } = await fixture('g16p')
+
+    // The bare pool: each statement its own implicit transaction. NO poolManager.transaction wrapper.
+    await expect(
+      pluginDeleteRecord({ query: q as never, sheetId: SHEET_A, recordId: R } as never),
+    ).rejects.toBeInstanceOf(MultitableSideDoorDeleteNonTransactionalError)
+
+    // Refused BEFORE any write — this is the whole point: without the guard, the links DELETE and the
+    // delete revision would COMMIT (no txn to roll them back) and the trash INSERT could then fail,
+    // leaving the record alive with both edge directions permanently destroyed.
+    expect(await recordExists(R)).toBe(true)
+    expect(await trashRow(R)).toBeUndefined()
+    expect(await deleteRevisions(R)).toHaveLength(0)
+    expect(await tombstones(R)).toHaveLength(0)
+    expect(await edgeAlive(F, N, R)).toBe(true)
+  })
+
+  test('G16 [automation] OD-7 layer 3: an executor with NO transaction dep is REFUSED — step failed, nothing written', async () => {
+    process.env[SIDE_DOOR_FLAG] = 'true'
+    process.env[CAPTURE_FLAG] = 'true'
+    const { F, R, N } = await fixture('g16a')
+
+    // `withTransaction` SILENTLY falls back to the bare queryFn when `deps.transaction` is absent — the
+    // exact shape PROBE-2 produces in production. The guard must catch it.
+    const noTxnExecutor = new AutomationExecutor({
+      eventBus: new EventBus(),
+      queryFn: (sql: string, params?: unknown[]) => q(sql, params),
+      crossBaseWriteQuota: { limit: 1000, windowMs: 60_000, store: new MemoryRateLimitStore() },
+    } as unknown as AutomationDeps)
+
+    const exec = await noTxnExecutor.execute(deleteRule({}, SHEET_A), {
+      recordId: R,
+      sheetId: SHEET_A,
+      actorId: OWNER,
+      data: {},
+    } as never)
+
+    expect(exec.steps[0]?.status).toBe('failed')
+    expect(exec.steps[0]?.error).toMatch(/TRANSACTIONAL|transaction/i)
+    expect(await recordExists(R)).toBe(true)
+    expect(await trashRow(R)).toBeUndefined()
+    expect(await deleteRevisions(R)).toHaveLength(0)
+    expect(await tombstones(R)).toHaveLength(0)
+    expect(await edgeAlive(F, N, R)).toBe(true)
+  })
+
+  // ── G17 — automation lock under REAL concurrency (source unchanged; pin the property) ─────────────
+  /**
+   * The automation lane's lock handling is ALREADY correct — its `FOR UPDATE` selects `locked`/`locked_by`
+   * and re-verifies via `ensureRecordNotLocked` on that same result, so it has no TOCTOU window (this is
+   * exactly the shape the plugin lane was missing, per the owner's P1). No source change was made here.
+   * But "correct today" is not "pinned", so this golden pins it under REAL concurrency:
+   *
+   * a second connection holds the row lock (`SELECT … FOR UPDATE`), sets `locked = true`, and commits only
+   * AFTER the executor has already blocked on the same row. The executor therefore acquires the row lock
+   * and must re-read the FRESHLY COMMITTED lock state and refuse. Non-vacuity: delete the automation
+   * lane's own `ensureRecordNotLocked` call ⇒ this goes red (the locked record is destroyed).
+   */
+  test('G17 [automation] lock under real concurrency: a lock committed WHILE the executor blocks on the row still refuses the delete', async () => {
+    process.env[SIDE_DOOR_FLAG] = 'true'
+    process.env[CAPTURE_FLAG] = 'true'
+    const { F, R, N } = await fixture('g17')
+    const locker = `u_locker_a_${TS}`
+
+    let release: () => void = () => {}
+    const held = new Promise<void>((resolve) => { release = resolve })
+
+    // Connection A: grab the row lock, mark it locked, and HOLD the transaction open.
+    const holder = poolManager.get().transaction(async ({ query }) => {
+      await query('SELECT id FROM meta_records WHERE id = $1 FOR UPDATE', [R])
+      await query('UPDATE meta_records SET locked = true, locked_by = $2 WHERE id = $1', [R, locker])
+      await held // keep the row locked + the change uncommitted
+    })
+    await new Promise((r) => setTimeout(r, 150)) // let A actually take the row lock
+
+    // Connection B (the executor): its own `FOR UPDATE` now BLOCKS on A's row lock.
+    const running = automationDelete(R)
+    await new Promise((r) => setTimeout(r, 150))
+
+    release() // A commits ⇒ B unblocks and re-reads the row: locked = true
+    await holder
+    const step = await running
+
+    expect(step.status).toBe('failed')
+    expect(step.error).toMatch(/locked/i)
+    expect(await recordExists(R)).toBe(true)
+    expect(await trashRow(R)).toBeUndefined()
+    expect(await deleteRevisions(R)).toHaveLength(0)
+    expect(await tombstones(R)).toHaveLength(0)
+    expect(await edgeAlive(F, N, R)).toBe(true)
+
+    await q('UPDATE meta_records SET locked = false, locked_by = NULL WHERE id = $1', [R])
+  })
 
   // ── G15 — PRODUCTION WIRING, driven for real (owner review item 2 / PROBE-2) ──────────────────────
   /**

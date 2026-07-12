@@ -578,10 +578,11 @@ async function deleteRecordWithRecoverability(
 ): Promise<DeletedMultitableRecord> {
   const query = input.query
 
-  // OD-7 ENFORCED (review P2-1): refuse to run the reordered path outside a transaction, BEFORE any
-  // write. Prose + a golden were not enough — the goldens supplied their own transaction, so a
-  // production wiring regression (dropping the `poolManager.get().transaction` wrapper in index.ts) left
-  // them all green. A runtime precondition cannot be refactored away silently.
+  // OD-7 LAYER 3 (review P2-1): refuse to run the reordered path outside a transaction, BEFORE any write.
+  // Prose + G3 were not enough — G3 supplies its OWN transaction, so it proves atomicity GIVEN a txn, not
+  // that the entry wiring provides one (unwrapping index.ts's transaction left every golden green). This
+  // check is independent of the entry wiring: it also protects callers that do not exist yet. It is not
+  // un-deletable — it is pinned by a no-transaction golden (G16).
   await assertTransactionalQuery(query, 'plugin')
 
   // FOR UPDATE + the extra columns the trash row needs (created_by / created_at / updated_at) AND the

@@ -75,13 +75,20 @@ export class MultitableSideDoorDeleteNonTransactionalError extends Error {
 }
 
 /**
- * OD-7, ENFORCED AT RUNTIME (not merely documented). The flag-on path REORDERS the delete so the
+ * OD-7 LAYER 3 — refuse to run outside a transaction. The flag-on path REORDERS the delete so the
  * revision + trash row are written BEFORE the record DELETE; that ordering is only safe inside a real
  * transaction. The type signature of `query` cannot express "must be transactional", and the original
  * D-2 goldens could not catch a wiring regression either — they wrapped the call in their OWN
  * transaction, so they pinned the FIXTURE's transactionality, not production's (independent review of
- * #4168, P2-1: unwrapping the production transaction on either lane left all 39 goldens green). A
- * *runtime* precondition cannot be refactored away silently, which is exactly what that finding asked for.
+ * #4168, P2-1: unwrapping the production transaction on either lane left all 39 goldens green).
+ *
+ * What this layer is worth, stated precisely: it is NOT "un-removable" — any guard can be deleted. Its
+ * value is that it is **independent of the entry wiring**: it holds for callers that do not exist yet, and
+ * for a caller whose transaction was dropped by a refactor far away from this file. That is why OD-7 needs
+ * all three layers, not this one alone: (1) G3 proves the sequence is atomic GIVEN a transaction;
+ * (2) the production-wiring guard proves the real entry points actually supply one (PROBE-1/PROBE-2);
+ * (3) this refusal covers everything else. This function is itself pinned by a no-transaction golden
+ * (delete the call and that golden reds — the record gets destroyed non-transactionally).
  *
  * Detection: `txid_current()` twice. Inside one transaction both calls return the SAME transaction id;
  * outside, each statement is its own implicit transaction (and may even land on a different pooled

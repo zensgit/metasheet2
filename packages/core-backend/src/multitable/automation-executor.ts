@@ -2329,11 +2329,11 @@ export class AutomationExecutor {
         const sideDoorTrash = isSideDoorDeleteTrashEnabled()
         const deleteRevisionId = randomUUID()
 
-        // OD-7 ENFORCED (review P2-1), BEFORE any write. `withTransaction` SILENTLY falls back to a
+        // OD-7 LAYER 3 (review P2-1), BEFORE any write. `withTransaction` SILENTLY falls back to a
         // non-transactional `queryFn` when `deps.transaction` is absent (:2429-2436), so an executor
         // constructed without it would otherwise run this destructive reordered path with no transaction,
         // no error, and — as the review proved — no failing test. Now it fails closed: the step reports
-        // `failed` and nothing is destroyed.
+        // `failed` and nothing is destroyed. Independent of the entry wiring; pinned by golden G16.
         if (sideDoorTrash) await assertTransactionalQuery(query, 'automation')
 
         // §1.3: capture the INBOUND edges BEFORE the links DELETE below destroys both directions. No-op
