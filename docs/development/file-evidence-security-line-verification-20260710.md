@@ -145,6 +145,32 @@ root **外**文件被真实删除。
 （每 tick throw、不 stamp、victim 存），理论上老逃逸行可 head-of-line 补偿 sweep（≤1 slot/tick、sweep 默认 OFF、须先有 malformed
 行=另一 bug）；symlink 逃逸 = F3 既有词法 containment 边界，非 F10 范围。安全优先级 = 绝不删 root 外，按 owner spec 走「不 stamp」。
 
+## §收官后 security-class sweep + 1 P3 硬化（2026-07-11）
+
+池 CLOSED 后，owner 问「下一步建议」，我提议**把本线暴露的漏洞类横向扫一遍**（而非急着开 F4）。只读审计 @ `origin/main 45f9e888a`，
+猎的是**类**、三特征：**A** 容器逃逸（用户可影响路径 + 裸 `path.join`，无 `resolveWithinBase`）· **B** 假绿盲区（生产默认实现 ≠
+测试注入实现，= 让 opus 两轮漏掉 F10 P1 的根因）· **C** 后台 sweep 在未审计路径物理删除。机械枚举全清单 → 逐条判定。
+
+**结论 = 干净体检单**：
+- **A**：全部 fs 写/删/改名点逐条判定，要么走 `resolveWithinBase`（StorageService + F10 后的 retention 删除器），要么前置
+  `isUuidLike`+org sanitizer（考勤 import），要么纯 server-derived 路径（`randomBytes(16).hex` / timestamp / `__dirname` / `os.tmpdir()`）。**无第三处。**
+- **B**：`?? { fs默认实现 }` 这个 F9/F10 盲区形状，全仓**只有** `attachment-orphan-retention.ts` 那两处（已 F10 修）。`deleteLocal*` 是唯一 fs 默认删除器家族。**盲区是单文件双点、已闭、无扩散。**
+- **C**：~30 个 setInterval 里做**物理文件删除**的只有两个 attachment sweep（F9/F10 已修）+ 考勤 import cleanup sweep（经 gated
+  `getImportUploadPaths`）；`meta-revision` / `operation-audit` retention 是纯 `DELETE FROM`（DB 行）。**无别的 sweep 在未审计路径删文件。**
+- 审计体检单存 scratchpad（**PUBLIC repo：枚举攻击面，不主动公开 commit**）。
+
+**唯一 finding = 1 条 P3 defense-in-depth（owner 同意修）→ 已修**：考勤 import 的 `getImportUploadPaths` 原用**纯输入侧** containment
+（`isUuidLike`+org sanitizer），无输出侧兜底。加 `resolveImportUploadWithinBase`（逐字 mirror 核心 `StorageService.resolveWithinBase`）+
+把 path builder/sanitizer 上提 module scope（**生产函数与测试 seam 共用同一 contained 实现，无 test/prod 分叉 = F10 教训**）；
+同时硬化 upload endpoints 与 cleanup sweep 两路径。
+
+**= PR #4134 → main `7649136bf`**（Sonnet impl，refs #3925）：opus **APPROVE 0 P1/P2/P3**（真跑新测 6/6 + 邻居 93/93、测真实
+production `getImportUploadPaths` 非 reimpl、mutation 还原 `path.join` 真红）；**owner 独立复核 APPROVE 0 P1/0 P2**（核了 upload/读/提交/
+失败清理/过期 sweep 全汇入真实 getImportUploadPaths，dir/csvPath/metaPath 均过输出侧 containment）。**非 live vuln、纯防呆**（当前所有
+生产路径都有 uuid gate，新 throw 不可达）。审 MD `/tmp/pr4134-import-path-review-claude-20260711.md`。
+
+**至此 security-class sweep 归档**：文件证据/存储完整性线的漏洞类横向扫净（A/B/C 全仓），仅一条防呆 P3 已硬化。
+
 ## 落地清单
 | 刀 | PR | main sha | 模型 | opus 审 |
 |---|---|---|---|---|
