@@ -7208,6 +7208,99 @@ async function testStockPreparationReadonlySourceRunRoutes() {
   assert.equal(missingConfigId.statusCode, 400)
   assert.equal(missingConfigId.body.error.details.field, 'readSourceConfigId')
   assert.equal(sourceReadCalls.length, readsBeforeDeniedUsers, 'no config reference, no external read')
+
+  // The only thing a caller may supply for an approved config is its PRESET-DECLARED named key. `inputs` is
+  // a closed sub-allowlist: anything else is an attempt to steer the outbound read (a filter, a path, a page
+  // control) through a config that was approved without it.
+  for (const inputs of [
+    { key: 'M-001', filters: { FNumber: 'X' } },
+    { key: 'M-001', readPath: '/K3API/Anything' },
+    { limit: 5000 },
+  ]) {
+    const steered = await invoke(routes, 'POST', '/api/integration/stock-preparation/mvp/source-runs/erp-materials', {
+      user: ADMIN_USER,
+      body: {
+        readSourceConfigId: ERP_CONFIG_ID,
+        syncRunId: 'erp_source_run_steered',
+        inputs,
+      },
+    })
+    assert.equal(steered.statusCode, 400, 'inputs is a closed allowlist: only the named key')
+    assert.equal(steered.body.error.code, 'STOCK_PREPARATION_ERP_SOURCE_RUN_REQUEST_INVALID')
+    assert.equal(steered.body.error.details.field, 'inputs.<unexpected>')
+  }
+  assert.equal(sourceReadCalls.length, readsBeforeDeniedUsers, 'a steered input never reaches the source')
+}
+
+// #3889: a config approved for one system KIND must not be executed against a system of another kind. The
+// config carries the requiredKind its containerPaths/fieldMap/readPath were approved against; a system that
+// is not that kind speaks a different dialect entirely.
+async function testStockPreparationSourceRunRejectsSystemKindMismatch() {
+  let adapterCalls = 0
+  const validation = validateReadSourceConfig({
+    version: 1,
+    systemId: 'private_kind_system_3889',
+    requiredKind: 'plm:yuantus-wrapper',
+    object: 'stock-preparation-source',
+    mode: 'list_page',
+    readPath: '/readonly/stock-preparation',
+    readMethod: 'POST',
+    operations: ['read'],
+    containerPaths: ['Rows'],
+    fieldMap: [
+      { source: 'path', target: 'pathKey' },
+      { source: 'childCode', target: 'childDrawingNo' },
+      { source: 'quantity', target: 'designQty' },
+    ],
+  })
+  assert.equal(validation.valid, true, JSON.stringify(validation.errors))
+  const { services } = createMockServices({
+    readSourceConfigStore: {
+      async getForRuntime() {
+        return {
+          id: 'private_kind_config_3889',
+          status: 'approved',
+          systemId: 'private_kind_system_3889',
+          config: validation.normalized,
+        }
+      },
+    },
+    externalSystemRegistry: {
+      // The registered system is a BRIDGE, but the approved config was written for the PLM wrapper.
+      async getExternalSystemForAdapter(input) {
+        return {
+          id: input.id,
+          tenantId: input.tenantId,
+          kind: 'bridge:legacy-sql-readonly',
+          credentials: {},
+          config: {},
+        }
+      },
+    },
+    adapterRegistry: {
+      createAdapter() {
+        adapterCalls += 1
+        throw new Error('adapter must not run on a kind mismatch')
+      },
+    },
+  })
+  const { routes } = mountRoutes(services)
+
+  const res = await invoke(routes, 'POST', '/api/integration/stock-preparation/mvp/source-runs/plm-bom', {
+    user: ADMIN_USER,
+    body: {
+      projectId: 'business_project_1',
+      sourceProjectNo: 'SOURCE-PROJECT-1',
+      readSourceConfigId: 'private_kind_config_3889',
+      syncRunId: 'plm_source_run_kind_mismatch',
+      snapshotBatchId: 'plm_snapshot_kind_mismatch',
+      snapshotVersion: 1,
+    },
+  })
+  assert.equal(res.statusCode, 409)
+  assert.equal(res.body.error.code, 'STOCK_PREPARATION_SOURCE_KIND_MISMATCH')
+  assert.equal(adapterCalls, 0, 'a kind mismatch fails before any adapter is built')
+  console.log('  testStockPreparationSourceRunRejectsSystemKindMismatch OK')
 }
 
 // #3889: the approved-only gate lives in the config store, and the route must surrender to it. The happy
@@ -7290,6 +7383,7 @@ async function main() {
   await testBridgeAgentChecklistRoutes()
   await testStockPreparationReadonlySourceRunRoutes()
   await testStockPreparationSourceRunRejectsUnapprovedConfig()
+  await testStockPreparationSourceRunRejectsSystemKindMismatch()
   await testExternalSystemUpsertPreservesObjectSchema()
   await testExternalSystemTestPersistsFailureAndPreservesInactive()
   await testExternalSystemTestClearsErrorToActiveOnSuccess()

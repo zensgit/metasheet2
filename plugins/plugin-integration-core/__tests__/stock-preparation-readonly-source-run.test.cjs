@@ -30,6 +30,9 @@ const {
 const {
   createYuantusPlmWrapperAdapter,
 } = require(path.join(__dirname, '..', 'lib', 'adapters', 'plm-yuantus-wrapper.cjs'))
+const {
+  createK3WiseWebApiAdapter,
+} = require(path.join(__dirname, '..', 'lib', 'adapters', 'k3-wise-webapi-adapter.cjs'))
 
 const SECRET = 'RAW_SOURCE_SECRET_3889'
 
@@ -1022,6 +1025,317 @@ async function testEmptySourceFailsClosed() {
   assert.equal(runtime.writes.length, 0)
 }
 
+// ---------------------------------------------------------------------------------------------------
+// The row plane, and proving that paging actually moved.
+// ---------------------------------------------------------------------------------------------------
+
+// A BOM *tree* is the shape the PLM wrapper's flattenBomNode exists for, and the shape the capability table
+// claims to page. It is also where the adapter's row plane and its raw upstream payload diverge completely:
+// `raw` is ONE root node, while the 2,500 flattened lines live only in `records`. Reading the raw payload
+// mapped the root node once per page — three rows — and called that ready / short_page / rowErrors:0.
+function bomTree(childCount) {
+  return {
+    id: 'ROOT',
+    code: 'ASSY-ROOT',
+    childCode: 'ASSY-ROOT',
+    path: '/root',
+    quantity: 1,
+    children: Array.from({ length: childCount }, (_, index) => ({
+      id: `L${index}`,
+      code: `PART-${index}`,
+      childCode: `PART-${index}`,
+      path: `/root/part-${index}`,
+      quantity: 1,
+    })),
+  }
+}
+
+async function testRealBomTreeIsIngestedWholeNeverSilentlyTruncated() {
+  const lines = 2500
+  let plmCalls = 0
+  const client = {
+    async getProductBOM() {
+      plmCalls += 1
+      return { data: [bomTree(lines)] }
+    },
+  }
+  const result = await runPlmBomWithRealWrapper(client, 'plm_source_run_tree')
+  assert.equal(result.status, 'ready')
+  assert.equal(result.evidence.sourceRows, lines, 'every flattened BOM line is ingested')
+  assert.equal(result.evidence.intake.result.bomSnapshotLines, lines)
+  assert.equal(result.evidence.intake.result.rowErrors, 0)
+  assert.equal(result.evidence.pages, 3, 'the tree is paged through the adapter, not read once and truncated')
+  assert.equal(plmCalls, 3)
+  assertValuesFree(publicReadonlySourceRunResult(result))
+}
+
+// The same tree through a config that still addresses the RAW payload: the rows no longer silently vanish —
+// all 2,500 reach the intake contract and are judged there. Fail-closed, never a three-row `ready`.
+async function testTreeReadWithARawPlaneConfigFailsClosedInsteadOfTruncating() {
+  const client = { async getProductBOM() { return { data: [bomTree(2500)] } } }
+  await assert.rejects(
+    () => runPlmBomReadonlySource({
+      permission: 'admin',
+      projectId: 'business_project_tree_raw',
+      sourceProjectNo: 'plm_project',
+      syncRunId: 'plm_source_run_tree_raw',
+      snapshotBatchId: 'snapshot_tree_raw',
+      snapshotVersion: 1,
+      preparedRead: realPreparedRead({
+        requiredKind: 'plm:yuantus-wrapper',
+        object: 'bom',
+        mode: 'list_page',
+        containerPaths: ['data'],
+        fieldMap: BOM_FIELD_MAP, // raw-plane names; the wrapper does not normalize a bare `path`
+      }),
+      system: plmSystem(),
+      createAdapter: (adapterSystem) => createYuantusPlmWrapperAdapter({
+        system: adapterSystem,
+        plmClient: client,
+      }),
+    }),
+    (error) => {
+      assert.equal(error.code, 'SOURCE_RUN_REQUIRED_SHAPE_MISSING')
+      assert.equal(error.details.rowErrors, 2500, 'all 2500 lines reached the intake and were judged there')
+      return true
+    },
+  )
+}
+
+// P1-B: a K3 endpoint that declares ROWCOUNT 100 but ignores PageIndex (a custom view / stored proc that
+// honours Top only — an ordinary shape in the field) served page 1 ten times. The duplicate rows added up
+// to the declared total and satisfied `declared_total`, the STRONGEST proof we have: 100 "provably
+// complete" rows holding 10 real materials.
+async function testK3ThatIgnoresPageIndexCannotProvePaging() {
+  const pagesRequested = []
+  const rows = Array.from({ length: K3_WEBAPI_SOURCE_PAGE_SIZE }, (_, index) => ({
+    FItemID: String(1001 + index),
+    FNumber: `MAT-${index}`,
+    FName: `Material ${index}`,
+  }))
+  const json = (body) => ({ ok: true, status: 200, async text() { return JSON.stringify(body) } })
+  const fetchImpl = async (url, options) => {
+    const parsed = new URL(url)
+    const body = options && options.body ? JSON.parse(options.body) : {}
+    if (parsed.pathname === '/K3API/Login') return json({ success: true, sessionId: 'k3-session-1' })
+    pagesRequested.push((body.Data || {}).PageIndex)
+    // Page 1 forever. ROWCOUNT still claims 100. No PAGEINDEX echo.
+    return json({ StatusCode: 200, IsSuccess: true, Data: { Data: rows, ROWCOUNT: 100 } })
+  }
+
+  await assert.rejects(
+    () => runErpMaterialReadonlySource({
+      permission: 'admin',
+      syncRunId: 'erp_source_run_no_page_echo',
+      preparedRead: realPreparedRead({
+        requiredKind: 'erp:k3-wise-webapi',
+        object: 'material',
+        mode: 'list_page',
+        containerPaths: ['Data.Data'],
+        fieldMap: [
+          { source: 'FItemID', target: 'erpMaterialInternalId' },
+          { source: 'FNumber', target: 'erpMaterialCode' },
+          { source: 'FName', target: 'erpMaterialName' },
+        ],
+      }),
+      system: {
+        id: 'private_runtime_system_3889',
+        kind: 'erp:k3-wise-webapi',
+        role: 'source',
+        config: {
+          baseUrl: 'https://k3.example.test',
+          loginPath: '/K3API/Login',
+          objects: {
+            material: {
+              operations: ['read'],
+              readPath: '/K3API/Material/GetList',
+              readMethod: 'POST',
+              readMode: 'list',
+              readListBodyTemplate: { Data: { Top: 10, PageIndex: 1 } },
+              topField: 'Top',
+              pageIndexField: 'PageIndex',
+              pageSizeField: 'PageSize',
+              maxListLimit: K3_WEBAPI_SOURCE_PAGE_SIZE,
+            },
+          },
+        },
+        credentials: { username: 'demo', password: 'secret', acctId: '001' },
+      },
+      createAdapter: (adapterSystem) => createK3WiseWebApiAdapter({ system: adapterSystem, fetchImpl }),
+    }),
+    (error) => {
+      assert.ok(error instanceof StockPreparationReadonlySourceRunError)
+      assert.equal(error.code, 'SOURCE_RUN_PAGINATION_UNVERIFIED')
+      assert.equal(error.status, 502)
+      assert.equal(error.details.requestedPageIndex, 1)
+      assert.equal(error.details.echoedPageIndex, null)
+      assertValuesFree(error)
+      return true
+    },
+  )
+  assert.equal(pagesRequested.length, 1, 'a source that will not say which page it served is dropped on page 1')
+}
+
+// The adapter-agnostic net beneath the page-echo check: whatever the mechanism (an ignored page index, an
+// offset cursor a client drops on the floor), a page that repeats one already served is not a new page.
+// It also ends the ten redundant external reads such a source used to provoke.
+async function testAPageAlreadyServedIsNotANewPage() {
+  const rows = [{ id: 'material_internal_1', code: 'MAT-1' }, { id: 'material_internal_2', code: 'MAT-2' }]
+  let page = 0
+  const runtime = sourceRuntime('data-source:sql-readonly', () => {
+    page += 1
+    // A fresh cursor every time (so the cursor-loop guard cannot fire) but the very same rows.
+    return readResult(rows, { nextCursor: `offset:${page * 2}`, done: false })
+  })
+  await assert.rejects(
+    () => runErpMaterialReadonlySource({
+      permission: 'admin',
+      syncRunId: 'data_source_replayed_page',
+      preparedRead: preparedRead('data-source:sql-readonly', [
+        { source: 'id', target: 'erpMaterialInternalId' },
+        { source: 'code', target: 'erpMaterialCode' },
+      ]),
+      ...runtime,
+    }),
+    (error) => error instanceof StockPreparationReadonlySourceRunError
+      && error.code === 'SOURCE_RUN_PAGE_NOT_ADVANCING'
+      && error.details.page === 2,
+  )
+  assert.equal(runtime.reads.length, 2, 'the replay is caught on the page that repeats — not after ten reads')
+  assert.equal(runtime.writes.length, 0)
+}
+
+// P2-A: a kind whose adapter CLAMPS (bridge) must report the bound it applied. Without that report the
+// applied bound is unknown — and "well, we asked for 500" is the exact assumption that let a clamped 20-row
+// page pass as a complete 5,000-row source. Unknown is unprovable, never assumed.
+async function testClampingKindThatReportsNoAppliedBoundIsUnprovable() {
+  const rows = Array.from({ length: 300 }, (_, index) => ({
+    path: `/root/part-${index}`,
+    childCode: `PART-${index}`,
+    quantity: 1,
+  }))
+  const runtime = sourceRuntime('bridge:legacy-sql-readonly', () => readResult(rows, { done: true }))
+  await assert.rejects(
+    () => runPlmBomReadonlySource({
+      permission: 'admin',
+      projectId: 'business_project_silent_clamp',
+      sourceProjectNo: 'silent_clamp_project',
+      syncRunId: 'bridge_source_run_silent_clamp',
+      snapshotBatchId: 'snapshot_silent_clamp',
+      snapshotVersion: 1,
+      preparedRead: preparedRead('bridge:legacy-sql-readonly', BOM_FIELD_MAP),
+      ...runtime,
+    }),
+    (error) => {
+      assert.ok(error instanceof StockPreparationReadonlySourceRunError)
+      assert.equal(error.code, 'SOURCE_RUN_COMPLETENESS_UNPROVABLE')
+      assert.equal(error.details.reason, 'effective_page_size_unknown')
+      return true
+    },
+  )
+  assert.equal(runtime.writes.length, 0)
+}
+
+// The three witnesses of a page's row count — the adapter's records, the count its metadata claims, and the
+// rows we actually mapped — must agree. When they do not, we are not reading the source's rows, and no
+// count derived from them means anything.
+async function testDisagreeingRowCountsFailClosed() {
+  const rows = [{ id: 'material_internal_1', code: 'MAT-1' }]
+  const runtime = sourceRuntime('data-source:sql-readonly', () => ({
+    ...readResult(rows, { done: true }),
+    metadata: { returnedRecordCount: 7 }, // metadata contradicts the adapter's own records array
+  }))
+  await assert.rejects(
+    () => runErpMaterialReadonlySource({
+      permission: 'admin',
+      syncRunId: 'data_source_shape_disagreement',
+      preparedRead: preparedRead('data-source:sql-readonly', [
+        { source: 'id', target: 'erpMaterialInternalId' },
+        { source: 'code', target: 'erpMaterialCode' },
+      ]),
+      ...runtime,
+    }),
+    (error) => error instanceof StockPreparationReadonlySourceRunError
+      && error.code === 'SOURCE_RUN_SOURCE_SHAPE_UNVERIFIABLE'
+      && error.details.adapterRows === 1
+      && error.details.reportedRows === 7,
+  )
+  assert.equal(runtime.writes.length, 0)
+}
+
+// M12: an approved config pointed at ANOTHER project's BOM must not be ingested under this project's id.
+// The old guard read only a header row — a shape no usable PLM config can produce — so it never fired.
+async function testRowsFromAnotherProjectFailClosed() {
+  const runtime = sourceRuntime('plm:yuantus-wrapper', () => readResult(
+    [
+      { path: '/root/part-1', childCode: 'PART-1', quantity: 1, projectNo: 'SOURCE-PROJECT-SECRET' },
+      { path: '/root/part-2', childCode: 'PART-2', quantity: 1, projectNo: 'SOME-OTHER-PROJECT' },
+    ],
+    { done: true },
+  ))
+  await assert.rejects(
+    () => runPlmBomReadonlySource({
+      permission: 'admin',
+      projectId: 'business_project_scope',
+      sourceProjectNo: 'SOURCE-PROJECT-SECRET',
+      syncRunId: 'plm_source_run_scope',
+      snapshotBatchId: 'snapshot_scope',
+      snapshotVersion: 1,
+      preparedRead: preparedRead('plm:yuantus-wrapper', [
+        { source: 'path', target: 'pathKey' },
+        { source: 'childCode', target: 'childDrawingNo' },
+        { source: 'quantity', target: 'designQty' },
+        { source: 'projectNo', target: 'sourceProjectNo' },
+      ]),
+      ...runtime,
+    }),
+    (error) => error instanceof StockPreparationReadonlySourceRunError
+      && error.code === 'SOURCE_RUN_PROJECT_SCOPE_MISMATCH'
+      && error.status === 409,
+  )
+  assert.equal(runtime.writes.length, 0)
+}
+
+// detail_with_lines splits a payload into header + lines, which exists only in the raw upstream shape — the
+// layer a feeder must not read. It is unreachable in practice anyway (the probe builder only ever sends the
+// K3 bomKey dialect for it, which the PLM wrapper rejects). Refuse it rather than pretend to support it.
+async function testDetailWithLinesModeIsRefused() {
+  const runtime = sourceRuntime('erp:k3-wise-webapi', () => {
+    throw new Error('adapter must not run')
+  })
+  const validation = validateReadSourceConfig({
+    version: 1,
+    systemId: 'private_system_reference_3889',
+    requiredKind: 'erp:k3-wise-webapi',
+    object: 'bom',
+    mode: 'detail_with_lines',
+    readPath: '/readonly/stock-preparation',
+    readMethod: 'POST',
+    operations: ['read'],
+    containerPaths: ['Data'],
+    headerContainerPaths: ['Header'],
+    lineContainerPaths: ['Lines'],
+    keyField: 'bomKey',
+    fieldMap: [{ source: 'FNumber', target: 'erpMaterialCode' }],
+  })
+  assert.equal(validation.valid, true, JSON.stringify(validation.errors))
+  await assert.rejects(
+    () => runErpMaterialReadonlySource({
+      permission: 'admin',
+      syncRunId: 'erp_source_run_detail',
+      preparedRead: prepareConfiguredRead({
+        config: validation.normalized,
+        inputs: { key: 'BOM-1' },
+      }),
+      ...runtime,
+    }),
+    (error) => error instanceof StockPreparationReadonlySourceRunError
+      && error.code === 'SOURCE_RUN_MODE_NOT_SUPPORTED'
+      && error.details.mode === 'detail_with_lines',
+  )
+  assert.equal(runtime.reads.length, 0, 'an unsupported mode fails before any external read')
+}
+
 // Every kind the feeder ACCEPTS must have a declared paging capability. Adding a kind to the allowlists
 // without telling the feeder how (or whether) that kind can be continued is how a source that silently
 // truncates gets waved through — so the two sets and the capability table are pinned to each other.
@@ -1034,16 +1348,33 @@ function testEverySupportedKindDeclaresItsPagingCapability() {
       `source kind ${kind} declares an unknown pagination mechanism`,
     )
     assert.ok(Number.isInteger(capability.pageSize) && capability.pageSize > 0)
+    // ... and HOW the bound it actually applied is learned. There is no default: a kind that clamps must
+    // report what it applied, and a kind that is trusted to honour the request must say so out loud.
+    assert.ok(
+      ['adapter_reported', 'honours_request'].includes(capability.limitContract),
+      `source kind ${kind} declares no effective-page-size contract`,
+    )
   }
   // The kinds that CANNOT continue a page are exactly the two adapters that clamp and always claim done.
   assert.equal(SOURCE_KIND_CAPABILITIES['bridge:legacy-sql-readonly'].pagination, 'none')
   assert.equal(SOURCE_KIND_CAPABILITIES['bridge:legacy-sql-readonly'].pageSize, BRIDGE_SOURCE_PAGE_SIZE)
   assert.equal(SOURCE_KIND_CAPABILITIES['erp:k3-wise-sqlserver'].pagination, 'none')
   assert.equal(SOURCE_KIND_CAPABILITIES['erp:k3-wise-webapi'].pageSize, K3_WEBAPI_SOURCE_PAGE_SIZE)
+  // The bridge is the one kind that silently clamps, so it is the one kind whose applied bound we refuse
+  // to assume.
+  assert.equal(SOURCE_KIND_CAPABILITIES['bridge:legacy-sql-readonly'].limitContract, 'adapter_reported')
 }
 
 async function main() {
   testEverySupportedKindDeclaresItsPagingCapability()
+  await testRealBomTreeIsIngestedWholeNeverSilentlyTruncated()
+  await testTreeReadWithARawPlaneConfigFailsClosedInsteadOfTruncating()
+  await testK3ThatIgnoresPageIndexCannotProvePaging()
+  await testAPageAlreadyServedIsNotANewPage()
+  await testClampingKindThatReportsNoAppliedBoundIsUnprovable()
+  await testDisagreeingRowCountsFailClosed()
+  await testRowsFromAnotherProjectFailClosed()
+  await testDetailWithLinesModeIsRefused()
   await testPlmFeedsPureIntakeAcrossCursorPages()
   await testBridgeClampedSourceCannotReportReady()
   await testBridgeSourceUnderTheClampStillSucceeds()

@@ -356,6 +356,16 @@ async function testTrustedInternalPagingDoesNotWidenPublicDefaults() {
     () => __internals.normalizeTrustedExecution(prepared.plan, { cursor: 'offset:20', pageIndex: 2 }),
     (error) => error instanceof ReadSourceProbeContractError && error.reason === 'execution_pagination_conflict',
   )
+  // The trusted-execution surface is a CLOSED allowlist: an unknown key is a rejected request, never a
+  // silently ignored one (a typo'd `rowcap` must not quietly become the plan's default page).
+  assert.throws(
+    () => __internals.normalizeTrustedExecution(prepared.plan, { rowCap: 20, rowcap: 5000 }),
+    (error) => error instanceof ReadSourceProbeContractError && error.reason === 'execution_options_unexpected_field',
+  )
+  assert.throws(
+    () => __internals.normalizeTrustedExecution(prepared.plan, { rowSource: 'raw' }),
+    (error) => error instanceof ReadSourceProbeContractError && error.reason === 'execution_row_source_invalid',
+  )
 
   const keyed = prepareConfiguredRead({
     config: normalizedConfig('single_record'),
