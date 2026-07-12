@@ -17,6 +17,7 @@ import {
   DINGTALK_INTERACTIVE_CARD_CLIENT_ID_ENV,
   DINGTALK_INTERACTIVE_CARD_CLIENT_SECRET_ENV,
   DINGTALK_INTERACTIVE_CARD_STREAM_ENABLED_ENV,
+  DINGTALK_INTERACTIVE_CARD_STREAM_INTEGRATION_ID_ENV,
   DINGTALK_INTERACTIVE_CARD_TEMPLATE_ID_ENV,
   resolveDingTalkInteractiveCardStreamConfig,
 } from '../../src/integrations/dingtalk/interactive-card-stream'
@@ -36,6 +37,13 @@ import { normalizeStoredSecretValue } from '../../src/security/encrypted-secrets
 const DD_INTEGRATION = randomUUID()
 const DD_ACCOUNT = randomUUID()
 const DD_USER_ID = `dd_ext_${TS}`
+// P1-2 cross-corp fixtures: a SECOND corp (B). Its approver routes through DD_INTEGRATION_B, which
+// is NOT the corp the Stream app is bound to — so the interactive-card send must fall through to OA.
+const APPROVER_B = `u_card_appr_b_${TS}`
+const DD_INTEGRATION_B = randomUUID()
+const DD_ACCOUNT_B = randomUUID()
+const DD_USER_ID_B = `dd_ext_b_${TS}`
+let templateIdB = ''
 
 const q = (sqlText: string, params?: unknown[]) => poolManager.get().query(sqlText, params)
 
@@ -131,6 +139,56 @@ function cardTemplateRequest() {
   }
 }
 
+function cardTemplateRequestB() {
+  return {
+    key: `card-b-${TS}`,
+    name: 'Approval Card Action Template (corp B)',
+    formSchema: { fields: [{ id: 'summary', type: 'text', label: 'Summary', required: true }] },
+    approvalGraph: {
+      nodes: [
+        { key: 'start', type: 'start', name: 'Start', config: {} },
+        { key: 'approval_1', type: 'approval', name: 'First', config: { mode: 'any', assigneeSources: [{ kind: 'static_user', userIds: [APPROVER_B] }] } },
+        { key: 'end', type: 'end', name: 'End', config: {} },
+      ],
+      edges: [
+        { key: 'edge-start-approval_1', source: 'start', target: 'approval_1' },
+        { key: 'edge-approval_1-end', source: 'approval_1', target: 'end' },
+      ],
+    },
+  }
+}
+
+// Corp-B directory binding: APPROVER_B ↔ DD_USER_ID_B under DD_INTEGRATION_B (a distinct corp).
+async function ensureDingTalkBindingB(): Promise<void> {
+  await q(
+    `INSERT INTO directory_integrations (id, name, corp_id)
+     VALUES ($1, 'card-test-corp-b', 'corp_card_test_b')
+     ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name, corp_id = EXCLUDED.corp_id`,
+    [DD_INTEGRATION_B],
+  )
+  await q(
+    `INSERT INTO directory_accounts
+       (id, integration_id, provider, external_user_id, external_key, name, is_active)
+     VALUES ($1, $2, 'dingtalk', $3, $3, 'Card Approver B', TRUE)
+     ON CONFLICT (id) DO UPDATE
+       SET integration_id = EXCLUDED.integration_id,
+           external_user_id = EXCLUDED.external_user_id,
+           external_key = EXCLUDED.external_key,
+           name = EXCLUDED.name,
+           is_active = TRUE`,
+    [DD_ACCOUNT_B, DD_INTEGRATION_B, DD_USER_ID_B],
+  )
+  await q(
+    'DELETE FROM directory_account_links WHERE directory_account_id = $1 OR local_user_id = $2',
+    [DD_ACCOUNT_B, APPROVER_B],
+  )
+  await q(
+    `INSERT INTO directory_account_links (directory_account_id, local_user_id, link_status)
+     VALUES ($1, $2, 'linked')`,
+    [DD_ACCOUNT_B, APPROVER_B],
+  )
+}
+
 async function cardRows(instanceId: string) {
   const r = await q('SELECT * FROM dingtalk_approval_card_deliveries WHERE instance_id = $1 ORDER BY created_at', [instanceId])
   return r.rows as Array<Record<string, unknown>>
@@ -193,6 +251,7 @@ describeIfDatabase('A-2b send_dingtalk_approval_card action (real DB)', () => {
       DINGTALK_INTERACTIVE_CARD_CLIENT_ID_ENV,
       DINGTALK_INTERACTIVE_CARD_CLIENT_SECRET_ENV,
       DINGTALK_INTERACTIVE_CARD_TEMPLATE_ID_ENV,
+      DINGTALK_INTERACTIVE_CARD_STREAM_INTEGRATION_ID_ENV,
     ]) {
       savedEnv[key] = process.env[key]
       delete process.env[key]
@@ -201,18 +260,22 @@ describeIfDatabase('A-2b send_dingtalk_approval_card action (real DB)', () => {
     await q('INSERT INTO meta_bases (id, name) VALUES ($1,$2)', [BASE_ID, 'Card Base'])
     await q('INSERT INTO meta_sheets (id, base_id, name) VALUES ($1,$2,$3)', [SHEET_ID, BASE_ID, 'Card Sheet'])
     await q(`INSERT INTO permissions (code, name, description) VALUES ('approvals:read','r','t'),('approvals:write','w','t'),('approvals:act','a','t') ON CONFLICT (code) DO NOTHING`)
-    for (const uid of [CREATOR, REQUESTER, APPROVER]) {
+    for (const uid of [CREATOR, REQUESTER, APPROVER, APPROVER_B]) {
       await q(`INSERT INTO users (id, email, name, password_hash, role, permissions, is_active, is_admin)
                VALUES ($1,$2,$1,'x','user','[]'::jsonb,TRUE,FALSE) ON CONFLICT (id) DO UPDATE SET is_active = TRUE`, [uid, `${uid}@card.test`])
     }
     await q(`INSERT INTO user_permissions (user_id, permission_code) VALUES ($1,'approvals:read') ON CONFLICT DO NOTHING`, [CREATOR])
     await q(`INSERT INTO user_permissions (user_id, permission_code) VALUES ($1,'approvals:write') ON CONFLICT DO NOTHING`, [REQUESTER])
     await q(`INSERT INTO user_permissions (user_id, permission_code) VALUES ($1,'approvals:act') ON CONFLICT DO NOTHING`, [APPROVER])
+    await q(`INSERT INTO user_permissions (user_id, permission_code) VALUES ($1,'approvals:act') ON CONFLICT DO NOTHING`, [APPROVER_B])
 
     approvals = new ApprovalProductService()
     const template = await approvals.createTemplate(cardTemplateRequest() as never)
     templateId = (template as { id: string }).id
     await approvals.publishTemplate(templateId, { policy: { allowRevoke: true } } as never)
+    const templateB = await approvals.createTemplate(cardTemplateRequestB() as never)
+    templateIdB = (templateB as { id: string }).id
+    await approvals.publishTemplate(templateIdB, { policy: { allowRevoke: true } } as never)
 
     svc = new AutomationService(integrationEventBus, db as never, queryFn, fakeFetch as never)
     svc.init()
@@ -223,12 +286,22 @@ describeIfDatabase('A-2b send_dingtalk_approval_card action (real DB)', () => {
     delete process.env[DINGTALK_INTERACTIVE_CARD_CLIENT_ID_ENV]
     delete process.env[DINGTALK_INTERACTIVE_CARD_CLIENT_SECRET_ENV]
     delete process.env[DINGTALK_INTERACTIVE_CARD_TEMPLATE_ID_ENV]
+    delete process.env[DINGTALK_INTERACTIVE_CARD_STREAM_INTEGRATION_ID_ENV]
     interactiveBodies.length = 0
   })
 
+  /** Enable the interactive-card Stream flag bound to a specific corp integration (P1-2). */
+  function enableInteractiveStream(streamIntegrationId: string): void {
+    process.env[DINGTALK_INTERACTIVE_CARD_STREAM_ENABLED_ENV] = '1'
+    process.env[DINGTALK_INTERACTIVE_CARD_CLIENT_ID_ENV] = 'stream-app-key'
+    process.env[DINGTALK_INTERACTIVE_CARD_CLIENT_SECRET_ENV] = 'stream-app-secret'
+    process.env[DINGTALK_INTERACTIVE_CARD_TEMPLATE_ID_ENV] = 'stream-card-template'
+    process.env[DINGTALK_INTERACTIVE_CARD_STREAM_INTEGRATION_ID_ENV] = streamIntegrationId
+  }
+
   afterAll(async () => {
     try { svc?.shutdown() } catch { /* noop */ }
-    const instances = await q('SELECT id FROM approval_instances WHERE template_id = $1', [templateId]).catch(() => ({ rows: [] as unknown[] }))
+    const instances = await q('SELECT id FROM approval_instances WHERE template_id = ANY($1::text[])', [[templateId, templateIdB]]).catch(() => ({ rows: [] as unknown[] }))
     for (const row of instances.rows as Array<{ id: string }>) {
       await q('DELETE FROM dingtalk_approval_card_deliveries WHERE instance_id = $1', [row.id]).catch(() => {})
       await q('DELETE FROM approval_assignments WHERE instance_id = $1', [row.id]).catch(() => {})
@@ -240,15 +313,15 @@ describeIfDatabase('A-2b send_dingtalk_approval_card action (real DB)', () => {
       await q('DELETE FROM multitable_automation_executions WHERE rule_id = ANY($1::text[])', [ruleIds]).catch(() => {})
       await q('DELETE FROM automation_rules WHERE id = ANY($1::text[])', [ruleIds]).catch(() => {})
     }
-    await q('DELETE FROM approval_templates WHERE id = $1', [templateId]).catch(() => {})
-    await q('DELETE FROM dingtalk_person_deliveries WHERE local_user_id = ANY($1::text[])', [[APPROVER]]).catch(() => {})
-    await q('DELETE FROM directory_account_links WHERE local_user_id = $1', [APPROVER]).catch(() => {})
-    await q('DELETE FROM directory_accounts WHERE id = $1', [DD_ACCOUNT]).catch(() => {})
-    await q('DELETE FROM directory_integrations WHERE id = $1', [DD_INTEGRATION]).catch(() => {})
+    await q('DELETE FROM approval_templates WHERE id = ANY($1::text[])', [[templateId, templateIdB]]).catch(() => {})
+    await q('DELETE FROM dingtalk_person_deliveries WHERE local_user_id = ANY($1::text[])', [[APPROVER, APPROVER_B]]).catch(() => {})
+    await q('DELETE FROM directory_account_links WHERE local_user_id = ANY($1::text[])', [[APPROVER, APPROVER_B]]).catch(() => {})
+    await q('DELETE FROM directory_accounts WHERE id = ANY($1::uuid[])', [[DD_ACCOUNT, DD_ACCOUNT_B]]).catch(() => {})
+    await q('DELETE FROM directory_integrations WHERE id = ANY($1::uuid[])', [[DD_INTEGRATION, DD_INTEGRATION_B]]).catch(() => {})
     await q('DELETE FROM meta_sheets WHERE id = $1', [SHEET_ID]).catch(() => {})
     await q('DELETE FROM meta_bases WHERE id = $1', [BASE_ID]).catch(() => {})
-    await q('DELETE FROM user_permissions WHERE user_id = ANY($1::text[])', [[CREATOR, REQUESTER, APPROVER]]).catch(() => {})
-    await q('DELETE FROM users WHERE id = ANY($1::text[])', [[CREATOR, REQUESTER, APPROVER]]).catch(() => {})
+    await q('DELETE FROM user_permissions WHERE user_id = ANY($1::text[])', [[CREATOR, REQUESTER, APPROVER, APPROVER_B]]).catch(() => {})
+    await q('DELETE FROM users WHERE id = ANY($1::text[])', [[CREATOR, REQUESTER, APPROVER, APPROVER_B]]).catch(() => {})
     for (const [k, v] of Object.entries(savedEnv)) {
       if (v === undefined) delete process.env[k]
       else process.env[k] = v
@@ -339,10 +412,9 @@ describeIfDatabase('A-2b send_dingtalk_approval_card action (real DB)', () => {
 
   test('B-2 opt-in: interactive card uses the ledger id as outTrackId and stays values-free', async () => {
     await ensureDingTalkBinding()
-    process.env[DINGTALK_INTERACTIVE_CARD_STREAM_ENABLED_ENV] = '1'
-    process.env[DINGTALK_INTERACTIVE_CARD_CLIENT_ID_ENV] = 'stream-app-key'
-    process.env[DINGTALK_INTERACTIVE_CARD_CLIENT_SECRET_ENV] = 'stream-app-secret'
-    process.env[DINGTALK_INTERACTIVE_CARD_TEMPLATE_ID_ENV] = 'stream-card-template'
+    // P1-2: the recipient (APPROVER) is in DD_INTEGRATION's corp, and the Stream app is bound to
+    // that SAME integration — so an interactive card is legitimately sent through its own corp.
+    enableInteractiveStream(DD_INTEGRATION)
 
     const rule = await svc.createRule(SHEET_ID, {
       name: 'interactive card bound', triggerType: 'approval.task_created', triggerConfig: { templateId },
@@ -397,6 +469,90 @@ describeIfDatabase('A-2b send_dingtalk_approval_card action (real DB)', () => {
     expect(serialized).not.toContain(instanceId)
     expect(serialized).not.toContain('SECRET-INTERACTIVE-FORM-VALUE')
 
+    await svc.deleteRule(rule.id, SHEET_ID)
+  })
+
+  test('P1-2 cross-corp SEND gate: Stream bound to corp A → a corp-B recipient falls back to OA (work_notice_action_card); a corp-A recipient gets interactive', async () => {
+    await ensureDingTalkBinding()   // corp A: APPROVER ↔ DD_INTEGRATION
+    await ensureDingTalkBindingB()  // corp B: APPROVER_B ↔ DD_INTEGRATION_B
+    enableInteractiveStream(DD_INTEGRATION) // the global Stream app belongs to corp A only
+
+    // Corp-B recipient: routes through DD_INTEGRATION_B ≠ the Stream app's corp. The card must NOT
+    // be sent via corp A's Stream app; it falls through to the per-corp OA action-card. RED-before:
+    // on main `useInteractiveCard = enabled === true` alone, so this corp-B recipient gets an
+    // interactive_card dispatched with corp A's robotCode/token — the cross-corp send bug.
+    const ruleB = await svc.createRule(SHEET_ID, {
+      name: 'card cross-corp B', triggerType: 'approval.task_created', triggerConfig: { templateId: templateIdB },
+      actionType: 'send_dingtalk_approval_card', actionConfig: {}, createdBy: CREATOR,
+    } as never)
+    ruleIds.push(ruleB.id)
+    sentBodies.length = 0
+    interactiveBodies.length = 0
+    const dtoB = await approvals.createApproval(
+      { templateId: templateIdB, formData: { summary: 'cross-corp B run' } },
+      { userId: REQUESTER, userName: REQUESTER },
+    )
+    const instanceB = (dtoB as { id: string }).id
+    const rowsB = await waitFor(async () => (await cardRows(instanceB)).filter((r) => r.send_status !== 'pending'))
+    expect(rowsB).toHaveLength(1)
+    expect(rowsB[0].delivery_kind).toBe('work_notice_action_card')
+    expect(rowsB[0].integration_id).toBe(DD_INTEGRATION_B)
+    expect(rowsB[0].send_status).toBe('sent')
+    // The interactive endpoint was NEVER called for the corp-B recipient; the OA send fired once.
+    expect(interactiveBodies).toHaveLength(0)
+    expect(sentBodies).toHaveLength(1)
+    await svc.deleteRule(ruleB.id, SHEET_ID)
+
+    // Corp-A recipient (same corp as the Stream app): the legitimate interactive-card case.
+    const ruleA = await svc.createRule(SHEET_ID, {
+      name: 'card cross-corp A', triggerType: 'approval.task_created', triggerConfig: { templateId },
+      actionType: 'send_dingtalk_approval_card', actionConfig: {}, createdBy: CREATOR,
+    } as never)
+    ruleIds.push(ruleA.id)
+    sentBodies.length = 0
+    interactiveBodies.length = 0
+    const dtoA = await approvals.createApproval(
+      { templateId, formData: { summary: 'cross-corp A run' } },
+      { userId: REQUESTER, userName: REQUESTER },
+    )
+    const instanceA = (dtoA as { id: string }).id
+    const rowsA = await waitFor(async () => (await cardRows(instanceA)).filter((r) => r.send_status !== 'pending'))
+    expect(rowsA).toHaveLength(1)
+    expect(rowsA[0].delivery_kind).toBe('interactive_card')
+    expect(rowsA[0].integration_id).toBe(DD_INTEGRATION)
+    expect(interactiveBodies).toHaveLength(1)
+    expect(sentBodies).toHaveLength(0)
+    await svc.deleteRule(ruleA.id, SHEET_ID)
+  })
+
+  test('P1-2 fail-closed: flag ON but the Stream app UNBOUND (no integration id) → OA fallback even for the local corp, never interactive via an unbound global app', async () => {
+    await ensureDingTalkBinding()
+    // Flag + credentials + template present, but DINGTALK_INTERACTIVE_CARD_STREAM_INTEGRATION_ID
+    // deliberately unset: the config is enabled:true but carries integrationId ''. The send path
+    // must NOT interactive-dispatch to anyone (there is no corp to legitimize the app's identity).
+    process.env[DINGTALK_INTERACTIVE_CARD_STREAM_ENABLED_ENV] = '1'
+    process.env[DINGTALK_INTERACTIVE_CARD_CLIENT_ID_ENV] = 'stream-app-key'
+    process.env[DINGTALK_INTERACTIVE_CARD_CLIENT_SECRET_ENV] = 'stream-app-secret'
+    process.env[DINGTALK_INTERACTIVE_CARD_TEMPLATE_ID_ENV] = 'stream-card-template'
+    expect(resolveDingTalkInteractiveCardStreamConfig()).toMatchObject({ enabled: true, integrationId: '' })
+
+    const rule = await svc.createRule(SHEET_ID, {
+      name: 'card unbound stream', triggerType: 'approval.task_created', triggerConfig: { templateId },
+      actionType: 'send_dingtalk_approval_card', actionConfig: {}, createdBy: CREATOR,
+    } as never)
+    ruleIds.push(rule.id)
+    sentBodies.length = 0
+    interactiveBodies.length = 0
+    const dto = await approvals.createApproval(
+      { templateId, formData: { summary: 'unbound stream run' } },
+      { userId: REQUESTER, userName: REQUESTER },
+    )
+    const instanceId = (dto as { id: string }).id
+    const rows = await waitFor(async () => (await cardRows(instanceId)).filter((r) => r.send_status !== 'pending'))
+    expect(rows).toHaveLength(1)
+    expect(rows[0].delivery_kind).toBe('work_notice_action_card')
+    expect(interactiveBodies).toHaveLength(0)
+    expect(sentBodies).toHaveLength(1)
     await svc.deleteRule(rule.id, SHEET_ID)
   })
 

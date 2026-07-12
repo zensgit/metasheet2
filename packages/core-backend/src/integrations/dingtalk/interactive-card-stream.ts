@@ -18,6 +18,16 @@ export const DINGTALK_INTERACTIVE_CARD_STREAM_ENABLED_ENV = 'DINGTALK_INTERACTIV
 export const DINGTALK_INTERACTIVE_CARD_CLIENT_ID_ENV = 'DINGTALK_INTERACTIVE_CARD_CLIENT_ID'
 export const DINGTALK_INTERACTIVE_CARD_CLIENT_SECRET_ENV = 'DINGTALK_INTERACTIVE_CARD_CLIENT_SECRET'
 export const DINGTALK_INTERACTIVE_CARD_TEMPLATE_ID_ENV = 'DINGTALK_INTERACTIVE_CARD_TEMPLATE_ID'
+/**
+ * P1-2 cross-corp gate: the directory `integration_id` (uuid) of the DingTalk corp the GLOBAL
+ * Stream app is bound to. The Stream app can only legitimately push an interactive card to
+ * recipients in its OWN corp, and its callbacks are only trustworthy for that corp. The send path
+ * uses this to refuse interactive-sending to any other corp (OA fallback instead) so a card is
+ * never dispatched via the wrong corp's credentials. Absent → the send fail-closes to OA for
+ * everyone (never interactive-send via an unbound global app); it does NOT stop the worker from
+ * connecting to receive callbacks.
+ */
+export const DINGTALK_INTERACTIVE_CARD_STREAM_INTEGRATION_ID_ENV = 'DINGTALK_INTERACTIVE_CARD_STREAM_INTEGRATION_ID'
 
 export type DingTalkInteractiveCardStreamDisabledReason =
   | 'env_disabled'
@@ -40,6 +50,13 @@ export type DingTalkInteractiveCardStreamConfig =
     clientId: string
     clientSecret: string
     templateId: string
+    /**
+     * The directory integration id the Stream app is bound to, or '' when unset. NOT a requirement
+     * for enabling the worker (a Stream app can connect to receive callbacks without it); the SEND
+     * path additionally gates interactive-sends on this being present AND equal to the recipient's
+     * integration (cross-corp P1-2). '' therefore means "flag on but unbound" → OA fallback only.
+     */
+    integrationId: string
     requirements: {
       clientId: true
       clientSecret: true
@@ -106,6 +123,7 @@ export function resolveDingTalkInteractiveCardStreamConfig(
   const clientId = readEnv(env, DINGTALK_INTERACTIVE_CARD_CLIENT_ID_ENV)
   const clientSecret = readEnv(env, DINGTALK_INTERACTIVE_CARD_CLIENT_SECRET_ENV)
   const templateId = readEnv(env, DINGTALK_INTERACTIVE_CARD_TEMPLATE_ID_ENV)
+  const integrationId = readEnv(env, DINGTALK_INTERACTIVE_CARD_STREAM_INTEGRATION_ID_ENV)
   const requirements = {
     clientId: Boolean(clientId),
     clientSecret: Boolean(clientSecret),
@@ -122,6 +140,7 @@ export function resolveDingTalkInteractiveCardStreamConfig(
     clientId,
     clientSecret,
     templateId,
+    integrationId,
     requirements: {
       clientId: true,
       clientSecret: true,

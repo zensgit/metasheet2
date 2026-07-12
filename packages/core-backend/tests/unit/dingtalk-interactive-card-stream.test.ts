@@ -4,6 +4,7 @@ import {
   DINGTALK_INTERACTIVE_CARD_CLIENT_ID_ENV,
   DINGTALK_INTERACTIVE_CARD_CLIENT_SECRET_ENV,
   DINGTALK_INTERACTIVE_CARD_STREAM_ENABLED_ENV,
+  DINGTALK_INTERACTIVE_CARD_STREAM_INTEGRATION_ID_ENV,
   DINGTALK_INTERACTIVE_CARD_TEMPLATE_ID_ENV,
   DingTalkInteractiveCardStreamWorker,
   resolveDingTalkInteractiveCardStreamConfig,
@@ -76,12 +77,36 @@ describe('DingTalk interactive-card Stream worker (B-1)', () => {
         clientId: 'client-1',
         clientSecret: 'secret-1',
         templateId: 'template-1',
+        // P1-2: absent DINGTALK_INTERACTIVE_CARD_STREAM_INTEGRATION_ID → '' (flag on but unbound);
+        // the worker still enables, but the SEND path treats '' as "OA fallback for everyone".
+        integrationId: '',
         requirements: {
           clientId: true,
           clientSecret: true,
           templateId: true,
         },
       })
+    })
+
+    it('P1-2: carries the bound Stream integration id (trimmed) when configured; enabling is independent of it', () => {
+      const bound = resolveDingTalkInteractiveCardStreamConfig(env({
+        [DINGTALK_INTERACTIVE_CARD_STREAM_ENABLED_ENV]: '1',
+        [DINGTALK_INTERACTIVE_CARD_CLIENT_ID_ENV]: 'client-1',
+        [DINGTALK_INTERACTIVE_CARD_CLIENT_SECRET_ENV]: 'secret-1',
+        [DINGTALK_INTERACTIVE_CARD_TEMPLATE_ID_ENV]: 'template-1',
+        [DINGTALK_INTERACTIVE_CARD_STREAM_INTEGRATION_ID_ENV]: '  integration-corp-a  ',
+      }))
+      expect(bound).toMatchObject({ enabled: true, integrationId: 'integration-corp-a' })
+
+      // A missing integration id does NOT disable the worker (it can still receive callbacks);
+      // the cross-corp restriction is enforced only on the SEND path via integrationId === ''.
+      const unbound = resolveDingTalkInteractiveCardStreamConfig(env({
+        [DINGTALK_INTERACTIVE_CARD_STREAM_ENABLED_ENV]: '1',
+        [DINGTALK_INTERACTIVE_CARD_CLIENT_ID_ENV]: 'client-1',
+        [DINGTALK_INTERACTIVE_CARD_CLIENT_SECRET_ENV]: 'secret-1',
+        [DINGTALK_INTERACTIVE_CARD_TEMPLATE_ID_ENV]: 'template-1',
+      }))
+      expect(unbound).toMatchObject({ enabled: true, integrationId: '' })
     })
   })
 
