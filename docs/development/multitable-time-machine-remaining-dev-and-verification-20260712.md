@@ -88,7 +88,7 @@ R11（2026-07-11）落地后：#4117 vintage-exact PIT-resurrect 锚 · #4119 ma
 
 | 项 | 门 | 谁解锁 |
 |---|---|---|
-| **#4004 D-2**（side-door delete recoverability 设计锁，PROPOSED） | owner-gated，watch-only（R11 directive 明列不随轮次开） | **owner ratify** |
+| **#4004 D-2**（side-door delete recoverability 设计锁） | **owner 已 ratify（2026-07-11）；实现 = PR #4168**（flag `MULTITABLE_SIDE_DOOR_DELETE_TRASH_ENABLED` **默认 OFF**，capture 嵌套于双 flag；运行时 fail-closed：非事务调用/schema 缺失/超 cap 一律拒绝删除）。**生产行为未变**（flag 未开） | #4004 errata 先落 → #4168 落地 → 之后才谈 staging L3.5 启用（产品语义变更，owner 单独确认） |
 | **O-2 运维启用**（`MULTITABLE_TOMBSTONE_CAPTURE_ENABLED` → `..._RECORD_UNDELETE_INBOUND` → `..._PIT_UNDELETE`；retention） | 部署 host 的 env，**非 CI 可设**。**代码默认 OFF**（flag 缺省即关）；**但「production 当前是否为 OFF」是外部环境状态，本次代码审阅/本文均未独立核验**（owner 复审指出，2026-07-12）——不要把「代码默认 OFF」当作「线上已 OFF」的证据 | **owner/operator**（runbook 见 o2-ladder + R11 收官 MD） |
 | **person diff before 侧名称解析** | 设计锁 PROPOSED（随 #4127 上 main），OD-P1/P2/P3 待裁 | **owner ratify** → 之后可建（S/M） |
 | **4d**：已删字段列的**值级**恢复 | **红线，永不承诺** | — |

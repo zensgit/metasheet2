@@ -301,3 +301,42 @@ smoke 的 fixture 让 generation 停在 `blocked`,**零 prep-line 行**,所以 p
 > 六轮 corrective 里,有几轮的缺陷本可以在发包前的一次全量预演中被同时抓出来。
 
 **并且:一个 fake 如果比真依赖宽容,它保护的不是代码,是缺陷。**
+
+## 8. ✅ 实体机验收 PASS(corrective-7,2026-07-12,真实 Windows 硬件)
+
+操作员在实体机上装 corrective-7 包、跑 smoke,回贴 values-free 证据(#4101):
+
+```
+pm2RestartCommand=PASS
+pm2StableOnline=PASS            ← 后端在真实硬件上稳定上线(corrective-6 的 502 崩溃循环消除)
+postRestartHealthcheck=PASS
+mvpSmoke.pass=true
+mvpSmoke.auditActionsCovered=8/8
+mvpSmoke.selfScanClean=true
+failedCheckCount=0
+repeatability=1/1
+externalPlmK3ErpWrite=false    ← C4 硬闸守住:零未授权外部写
+postSmokeStabilityCheck=PASS
+```
+
+**判据全数满足**:`mvpSmoke.pass=true` + `auditActionsCovered=8/8` + `selfScanClean=true`。
+
+### 范围界定(owner 口径,不过度声称)
+
+这**只闭合 corrective-7 的实体机 *runtime 验收* 弧** —— 即「备料 MVP 的 on-prem 包在真实 Windows 硬件上装得上、起得来、写读审计全链跑通、C4 外部写硬闸守住」。它**不**声称整个功能 epic 完成,也**不**覆盖真实 PLM/K3/ERP 外部系统的现场对接(`externalPlmK3ErpWrite=false` 正表明本轮不触外部写)。#4141 是独立的 corrective-6 guard governance lane,与本弧分开。
+
+### 这条 corrective 弧的最终账(corrective-1 → 7)
+
+| 轮 | 症结 | 落点 |
+|---|---|---|
+| 1-2 | frozen-lockfile 安全 · corepack pnpm 定版 | #4050 · #4061 |
+| 3-4 | 移除未用的原生 bcrypt · 深路径清理 | #4068 · #4073 |
+| 5 | 42P07 迁移 supersession(no-op 保名盖戳) | #4084(+ 包保障 #4086) |
+| 6 | uuid 运行时依赖 + production-install 启动契约 guard + express-validator fail-open 安全修 | #4126 |
+| **7** | **备料写入面从未在真实 multitable 上运行(逻辑键 vs 物理 fieldId)** | **#4163** |
+
+**贯穿七轮的方法论沉淀(见 §7.5 与本文结尾两条)**:
+- **corrective-6 与 7 是「本地全量预演」抓出来的,没烧实体机额外轮次** —— 能在本地重放的验收步骤,就不要用别人的物理机去发现。
+- **一个比真依赖更宽容的 fake,保护的不是代码,是缺陷** —— 修 fake 让未修代码当场变红,比修代码本身更防回归。
+
+**至此,备料 MVP 的 on-prem 包在真实硬件上的 runtime 验收弧闭合。** 余项均属独立线:#4169(测试 flake 修复的 retry-vs-根因取舍,owner 待决)· 真实外部系统现场对接(需现场数据/授权)· #4141 corrective-6 guard governance lane。

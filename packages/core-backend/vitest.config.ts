@@ -62,6 +62,13 @@ export default defineConfig({
       // job cannot skip-green it, and wired as a WHOLE FILE into the multitable real-DB step in
       // plugin-tests.yml. Two-point wiring — both points, deliberately.
       'tests/integration/multitable-layer2-hidden-person-button-realdb.test.ts',
+      // Person before-side name resolution (real DB): its reason to exist is the LOCK-3 property — a
+      // field_permissions-DENIED person field's members must never reach the directory resolver, so their
+      // display NAMES can never surface. DATABASE_URL-gated; excluded here so the no-DB job cannot
+      // skip-green it (a `describeIfDatabase` alone still gets COLLECTED and reported as skipped =
+      // silently never run), and wired as a WHOLE FILE into the multitable real-DB step in plugin-tests.yml.
+      // Two-point wiring — both points, deliberately.
+      'tests/integration/multitable-history-person-names-realdb.test.ts',
       'tests/integration/approval-manager-chain.db.test.ts',
       'tests/integration/approval-requester-department.db.test.ts',
       'tests/integration/approval-requester-title.db.test.ts',
@@ -187,6 +194,11 @@ export default defineConfig({
       // skip-green here, re-opening the "real-DB spec silently skips in the no-DB lane" hole) —
       // whole-file wired into `Run multitable real-DB integration` in plugin-tests.yml.
       'tests/integration/multitable-d1-delete-revision-parity-realdb.test.ts',
+      // D-2 side-door delete recoverability (#4004): real Postgres only (it installs scoped failure-
+      // injection triggers and drives both side doors end-to-end) — excluded HERE so it cannot skip-green
+      // in the no-DB lane, and whole-file wired into `Run multitable real-DB integration` in
+      // plugin-tests.yml. Two-point wiring: BOTH points or the file silently never runs.
+      'tests/integration/multitable-d2-sidedoor-delete-recoverability-realdb.test.ts',
       // 4c-3 RB matrix: real Postgres only — whole-file wired into `Run multitable real-DB
       // integration` in plugin-tests.yml (describeIfDatabase alone would skip-green here).
       'tests/integration/multitable-undelete-inbound-replay-realdb.test.ts',

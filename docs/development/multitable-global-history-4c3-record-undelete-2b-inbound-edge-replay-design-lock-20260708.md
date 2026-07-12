@@ -7,7 +7,9 @@
 
 让 record undelete 在恢复行值与 outbound 边之外,**重建被同一次删除销毁的 inbound 边**(即"别的记录指向我"的那些链接)。
 
-**可达边界(硬性,不得虚构):** 只能为**经 `record-service.deleteRecord` 且捕获 flag 开启期间**删除的记录重建 inbound 边。其余三条记录硬删路径(automation / plugin-SDK / PIT-reset 内联)当前**不产生 tombstone**,详见 `…destruction-path-coverage-gap-audit-20260708.md`。本锁**在 §7 提议把 PIT-reset 路径补进捕获**(D-3);automation / plugin-SDK 属 owner 决策(D-1/D-2),**不在本锁**。
+**可达边界(硬性,不得虚构):** 只能为**捕获 flag 开启期间被删除、且删除路径确实捕获了 tombstone**的记录重建 inbound 边。
+
+> **2026-07-12 更新(可达边界已随后续 rung 扩大 —— 本锁写作时的「仅路径 1」已陈旧):** 本锁落地时,可达边界是「仅 `record-service.deleteRecord`」。此后 **本锁 §7/D-3**(#3975)把 **PIT-reset 内联删除**补进捕获;**D-2**(#4004 锁,owner ratify)把 **automation / plugin-SDK** 两条侧门补进捕获。现状:**四条记录硬删路径全部可产生 tombstone**,故 4c-3 的重放对四条都可达 —— **但侧门(automation/plugin-SDK)的捕获嵌套在 `MULTITABLE_SIDE_DOOR_DELETE_TRASH_ENABLED`(默认 OFF)之下**,只开 `MULTITABLE_TOMBSTONE_CAPTURE_ENABLED` 时侧门仍**零 tombstone**、可达边界仍为路径 1+2。本锁的重放层代码**零改动**(D-2 §1.6 restore-side zero delta):侧门 trash 行与路径 1 的 trash 行同构,直接流经既有机器。详见 `…destruction-path-coverage-gap-audit-20260708.md` §1 表。
 **4d 红线不动摇:** 不恢复任何 flag 开启前销毁的边。
 
 ## 1. 现状(primary-source 已核,以 `origin/main` 为准)

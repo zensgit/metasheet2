@@ -3,7 +3,7 @@
     <div class="meta-link-picker" @keydown.esc.stop.prevent="emit('close')" @keydown.enter.stop.prevent="onConfirm">
       <div class="meta-link-picker__header">
         <h4 class="meta-link-picker__title">{{ titleText }}</h4>
-        <button class="meta-link-picker__close" :aria-label="lp('linkPicker.close')" @click="emit('close')">&times;</button>
+        <MtIconButton class="meta-link-picker__close" :aria-label="lp('linkPicker.close')" @click="emit('close')">&times;</MtIconButton>
       </div>
       <div class="meta-link-picker__search">
         <input v-model="search" class="meta-link-picker__input" :placeholder="searchPlaceholder" @input="onSearch" />
@@ -46,7 +46,7 @@
 <script setup lang="ts">
 import { computed, reactive, ref, watch } from 'vue'
 import { useLocale } from '../../composables/useLocale'
-import { MtButton } from '../ui'
+import { MtButton, MtIconButton } from '../ui'
 import type { LinkedRecordSummary, MetaField } from '../types'
 import { multitableClient } from '../api/client'
 import { linkPickerSearchPlaceholder, linkPickerTitle } from '../utils/link-fields'
@@ -172,7 +172,10 @@ function onConfirm() {
 .meta-link-picker { width: 480px; max-height: 70vh; background: #fff; border-radius: 8px; box-shadow: 0 8px 24px rgba(0,0,0,.15); display: flex; flex-direction: column; }
 .meta-link-picker__header { display: flex; justify-content: space-between; align-items: center; padding: 12px 16px; border-bottom: 1px solid #eee; }
 .meta-link-picker__title { font-size: 14px; font-weight: 600; margin: 0; }
-.meta-link-picker__close { border: none; background: none; font-size: 20px; cursor: pointer; color: #999; }
+/* .meta-link-picker__close: now <MtIconButton> (ghost, token-styled; the &times; glyph char
+   passes through its default-slot icon fallback, size token-normalized to the icon control).
+   Bespoke hardcoded CSS removed (UI-P2-1c T1 batch-3). Class kept on the element only for
+   selector stability. */
 .meta-link-picker__search { padding: 8px 16px; }
 .meta-link-picker__input { width: 100%; padding: 6px 10px; border: 1px solid #ddd; border-radius: 4px; font-size: 13px; }
 .meta-link-picker__selected { padding: 0 16px 8px; border-bottom: 1px solid #f0f0f0; }
