@@ -531,7 +531,47 @@ async function testTimeoutInjectableAndPathReGuard() {
   )
 }
 
+// The projection is a sequence of writes. An entry that resolves NOWHERE must not erase a value another
+// entry already read — that is data loss, not a sparse column — and the resolution tally must be derived
+// from the row we actually EMIT, so it can never certify a column the row does not carry. (Duplicate targets
+// are rejected by the config validator now; this keeps the projection itself honest regardless.)
+function testMappingNeverErasesAResolvedValueAndTalliesWhatItEmits() {
+  const duplicateTarget = [
+    { source: 'quantity', target: 'designQty' }, // resolves
+    { source: 'qty', target: 'designQty' },      // does not resolve
+  ]
+  const counts = {}
+  assert.deepEqual(
+    __internals.mapRecord({ quantity: 1 }, duplicateTarget, counts),
+    { designQty: 1 },
+    'an unresolved entry must not overwrite a value another entry read',
+  )
+  assert.deepEqual(counts, { designQty: 1 }, 'the tally matches the value actually emitted')
+
+  const swappedCounts = {}
+  assert.deepEqual(
+    __internals.mapRecord({ quantity: 1 }, [duplicateTarget[1], duplicateTarget[0]], swappedCounts),
+    { designQty: 1 },
+    'and the result does not depend on the order the entries happen to be written in',
+  )
+  assert.deepEqual(swappedCounts, { designQty: 1 })
+
+  // Resolved on NO entry -> null, and NOT tallied: the guard downstream must see a zero here.
+  const missingCounts = {}
+  assert.deepEqual(__internals.mapRecord({}, duplicateTarget, missingCounts), { designQty: null })
+  assert.deepEqual(missingCounts, {}, 'a column no entry resolved is never certified as present')
+
+  // An EXPLICIT null in the source is resolved: a present-but-empty column is a faithful representation.
+  const nullCounts = {}
+  assert.deepEqual(
+    __internals.mapRecord({ quantity: null }, [duplicateTarget[0]], nullCounts),
+    { designQty: null },
+  )
+  assert.deepEqual(nullCounts, { designQty: 1 })
+}
+
 async function main() {
+  testMappingNeverErasesAResolvedValueAndTalliesWhatItEmits()
   await testPrepareFailClosed()
   await testResolverLookupRuntime()
   await testSingleRecordDataPlane()

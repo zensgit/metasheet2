@@ -1458,6 +1458,45 @@ async function testFieldsThatResolveOnNoRowFailClosed() {
   assert.equal(runtime.writes.length, 0)
 }
 
+// The field guard has TWO exits, one per completeness proof — and `erp:k3-wise-webapi` can only ever prove
+// completeness through `declared_total` (its page-index dialect has no short page to end on when K3 declares
+// a ROWCOUNT). So the ERP material feeder leaves through the declared_total exit, and that exit needs its own
+// negative: the guard must fire there too, not only on the short_page path the other tests take.
+async function testFieldsThatResolveOnNoRowFailClosedOnTheDeclaredTotalExitToo() {
+  const total = K3_WEBAPI_SOURCE_PAGE_SIZE * 2
+  const k3Rows = (pageIndex) => Array.from({ length: K3_WEBAPI_SOURCE_PAGE_SIZE }, (_, index) => {
+    const row = (pageIndex - 1) * K3_WEBAPI_SOURCE_PAGE_SIZE + index
+    return { FItemID: String(1001 + row), FNumber: `MAT-${row}`, FName: `Material ${row}` }
+  })
+  const runtime = sourceRuntime('erp:k3-wise-webapi', (request) => readResult(
+    k3Rows(request.options.listPageIndex),
+    { done: true, metadata: { dataRowCount: total, dataPageIndex: request.options.listPageIndex } },
+  ))
+  await assert.rejects(
+    () => runErpMaterialReadonlySource({
+      permission: 'admin',
+      syncRunId: 'erp_source_run_unresolved_declared_total',
+      preparedRead: preparedRead('erp:k3-wise-webapi', [
+        { source: 'FItemID', target: 'erpMaterialInternalId' },
+        { source: 'FNumber', target: 'erpMaterialCode' },
+        { source: 'FSpec', target: 'erpSpec' }, // K3 never returns this column
+      ]),
+      ...runtime,
+    }),
+    (error) => {
+      assert.ok(error instanceof StockPreparationReadonlySourceRunError)
+      assert.equal(error.code, 'SOURCE_RUN_FIELD_MAP_UNRESOLVED')
+      assert.deepEqual(error.details.unresolvedTargets, ['erpSpec'])
+      assert.equal(error.details.receivedRows, total)
+      return true
+    },
+  )
+  // The completeness proof itself was reached (both pages read, total matched) — the field guard is what
+  // rejected the run, on the exit the ERP feeder actually leaves through.
+  assert.equal(runtime.reads.length, 2)
+  assert.equal(runtime.writes.length, 0)
+}
+
 // ... and a field that resolves on SOME rows is a sparse column, not a broken config.
 async function testSparseOptionalFieldIsNotABrokenConfig() {
   const runtime = sourceRuntime('data-source:sql-readonly', () => readResult(
@@ -1515,6 +1554,7 @@ async function main() {
   await testKindsAreFencedPerRunType()
   await testPagesDifferingOnlyInAnUnmappedColumnAreNotAReplay()
   await testFieldsThatResolveOnNoRowFailClosed()
+  await testFieldsThatResolveOnNoRowFailClosedOnTheDeclaredTotalExitToo()
   await testSparseOptionalFieldIsNotABrokenConfig()
   await testRealBomTreeIsIngestedWholeNeverSilentlyTruncated()
   await testTreeReadWithARawPlaneConfigFailsClosedInsteadOfTruncating()
