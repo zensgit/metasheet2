@@ -244,10 +244,16 @@ export async function markDingTalkApprovalCardDeliverySendOutcomeUnknown(
  * delivery that triggered the transition (it is claimed `acted` separately). Returns the swept ids.
  *
  * Review P2-1: a card whose (node_key, recipient) STILL has an active `approval_assignments` seat
- * MUST NOT be superseded — otherwise approving branch A of a `joinMode:'all'` parallel fork would
- * false-stale branch B's legitimately-live card. The `NOT EXISTS` clause keeps this sweep in exact
- * agreement with the wrapper's read-time active-assignment binding: a card is superseded iff no
- * live seat matches it.
+ * MUST NOT be superseded. The `NOT EXISTS` clause keeps this sweep in exact agreement with the
+ * STRICT card→round binding (the wrapper pre-read AND the engine's authoritative in-txn guard): a
+ * card is superseded iff no live seat matches it — the sweep never retires a card the binding would
+ * still honour, and never revives one it would not.
+ *
+ * (The original motivation was a `joinMode:'all'` parallel fork false-stale'ing a sibling branch's
+ * live card. That exact topology is in fact foreclosed twice over — template validation rejects the
+ * same user on two branches, and the per-instance active-seat unique index forbids a second live
+ * seat for one assignee — so a recipient is live on at most one branch. The clause stays regardless:
+ * it is the invariant, not the workaround.)
  */
 export async function supersedeDingTalkApprovalCardDeliveriesForInstance(
   query: QueryFn,

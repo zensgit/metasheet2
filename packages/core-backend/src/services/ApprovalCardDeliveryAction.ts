@@ -16,12 +16,21 @@
  *   delivered, and a valid HMAC deep-link token is itself proof of delivery, so the ledger's
  *   send-time uncertainty must not make a delivered card inoperable. pending/failed stay stale.)
  * - P1-1 stale-card binding: actionability ADDITIONALLY requires a LIVE active `approval_assignments`
- *   row still matching the delivery's node_key + recipient (+ entry_epoch when the delivery carries
- *   one). A card issued for node-1 must NOT approve node-2 after the instance advances (node-1's
- *   assignment is deactivated → no match), nor re-approve the SAME node after a loop-back (a fresh
- *   epoch on the new active assignment fails the old card's epoch match). The read-time binding is the
- *   authoritative guard and stands alone even if the supersede sweep never runs; a NULL delivery
- *   epoch (legacy) skips only the epoch clause and stays closed on the node/assignee match.
+ *   row still matching the delivery's node_key + recipient + entry_epoch. A card issued for node-1
+ *   must NOT approve node-2 after the instance advances (node-1's assignment is deactivated → no
+ *   match), nor re-approve the SAME node after a loop-back (a fresh epoch on the new active
+ *   assignment fails the old card's epoch match).
+ *
+ *   STRICT, fail-closed (P1-1 re-review): the delivery MUST carry a NON-NULL entry_epoch equal to a
+ *   NON-NULL live-seat epoch. There is NO null-pass arm — a NULL delivery epoch is never actionable,
+ *   and pre-column legacy cards are SUPERSEDED outright at migrate time (their original round cannot
+ *   be proven, so it is never inferred).
+ *
+ *   The binding below is a read-time PRE-READ (fast-fail + honest UI state); it is NOT the authority.
+ *   The authoritative guard is re-validated inside `ApprovalProductService.dispatchAction`'s instance
+ *   `FOR UPDATE` transaction, because this pre-read runs OUTSIDE that lock and a concurrent advance
+ *   can slip a stale card past it (the TOCTOU the re-review closed). Never weaken the in-txn guard on
+ *   the strength of this one.
  */
 import { createHmac, timingSafeEqual } from 'crypto'
 
@@ -110,9 +119,13 @@ interface InstanceSummaryRow {
   policy_snapshot: unknown
   /**
    * P1-1: TRUE iff an ACTIVE `approval_assignments` row still matches the delivery's node +
-   * recipient (+ epoch when the delivery carries one). This is the authoritative stale-card guard —
-   * see `buildSummary`. Computed in the same round-trip as the instance read so `actionable`
-   * reflects live assignment state, never just the instance status.
+   * recipient + epoch (STRICT: a NON-NULL delivery epoch equal to a NON-NULL live-seat epoch; a
+   * NULL-epoch delivery never matches). Computed in the same round-trip as the instance read so
+   * `actionable` reflects live assignment state, never just the instance status.
+   *
+   * This is the read-time PRE-READ, NOT the authoritative guard — it runs outside the engine's
+   * instance lock, so a concurrent advance can race it. The authority is the in-txn card→round
+   * binding inside `ApprovalProductService.dispatchAction`'s `FOR UPDATE` txn. See `buildSummary`.
    */
   has_active_assignment: boolean
 }

@@ -45,25 +45,32 @@ const q = (sqlText: string, params?: unknown[]) => poolManager.get().query(sqlTe
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms))
 
 /**
- * Block until a backend is genuinely WAITING on the instance row lock (wait_event_type='Lock' on the
- * `approval_instances … FOR UPDATE`) — the deterministic proof that the concurrent dispatchAction is
- * parked behind the held lock, NOT a timer. Throws if it never blocks so the interleaving golden can
- * never silently degrade into the sequential case (a vacuous green).
+ * Block until a backend is genuinely WAITING on the instance row lock held by THIS test — the
+ * deterministic proof that the concurrent dispatchAction is parked behind our lock, NOT a timer.
+ * Throws if it never blocks, so the interleaving golden can never silently degrade into the
+ * sequential case (a vacuous green).
+ *
+ * Review P3: correlate the waiter to OUR holder via `pg_blocking_pids(pid)` rather than merely
+ * matching "some backend is blocked on some approval_instances FOR UPDATE". The integration suite
+ * shares one database, so an unrelated test's lock waiter could otherwise satisfy a text-match-only
+ * probe and let this golden pass without our interleaving ever happening.
  */
-async function waitUntilBlockedOnInstanceLock(timeoutMs = 5000): Promise<void> {
+async function waitUntilBlockedOnInstanceLock(blockerPid: number, timeoutMs = 5000): Promise<void> {
   const deadline = Date.now() + timeoutMs
   while (Date.now() < deadline) {
     const r = await q(
       `SELECT COUNT(*)::int AS c FROM pg_stat_activity
         WHERE datname = current_database()
           AND wait_event_type = 'Lock'
+          AND $1 = ANY(pg_blocking_pids(pid))
           AND query ILIKE '%approval_instances%'
           AND query ILIKE '%for update%'`,
+      [blockerPid],
     )
     if ((r.rows[0] as { c: number }).c >= 1) return
     await sleep(25)
   }
-  throw new Error('concurrent dispatchAction never blocked on the instance row lock — interleaving did not occur')
+  throw new Error('concurrent dispatchAction never blocked on the instance row lock HELD BY THIS TEST — interleaving did not occur')
 }
 
 let approvals: ApprovalProductService
@@ -727,6 +734,9 @@ describeIfDatabase('A-4 card-delivery wrapper (real DB)', () => {
       // A: take and HOLD the instance row lock (same row dispatchAction locks FOR UPDATE).
       await hold.query('BEGIN')
       await hold.query(`SELECT id FROM approval_instances WHERE id = $1 AND COALESCE(source_system, 'platform') = 'platform' FOR UPDATE`, [instanceId])
+      // Our holder's backend pid — the waiter probe correlates against THIS pid (review P3), so a
+      // foreign lock waiter in the shared test DB can never satisfy the interleaving proof for us.
+      const holdPid = Number((await hold.query('SELECT pg_backend_pid() AS pid')).rows[0].pid)
 
       // B: the stale node1 card driven directly into dispatchAction — it must block on B's own FOR UPDATE.
       let bSettled = false
@@ -739,8 +749,9 @@ describeIfDatabase('A-4 card-delivery wrapper (real DB)', () => {
         .then((v) => { bSettled = true; return v }, (e) => { bSettled = true; throw e })
       bStarted = true
 
-      // Deterministic proof B is parked behind the lock (not a timer): wait for wait_event_type='Lock'.
-      await waitUntilBlockedOnInstanceLock()
+      // Deterministic proof B is parked behind OUR lock (not a timer, not a foreign waiter):
+      // wait_event_type='Lock' AND our holder's pid is among B's pg_blocking_pids.
+      await waitUntilBlockedOnInstanceLock(holdPid)
       expect(bSettled).toBe(false) // B cannot have resolved while A holds the lock
 
       // A advances N1→N2 IN-TXN (deactivate node1 seat, mint the node2 seat at a fresh epoch, move the
