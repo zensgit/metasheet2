@@ -166,7 +166,7 @@ describe('dingtalk work notification client', () => {
           rejectUrl: 'https://ms.example.test/m/approval-decision?d=delivery-1&t=token',
         },
       },
-      openSpaceId: 'dtv1.card//im_robot.dt-user-1',
+      openSpaceId: 'dtv1.card//IM_ROBOT.dt-user-1',
       imRobotOpenSpaceModel: { supportForward: false },
       imRobotOpenDeliverModel: { robotCode: 'ding-app-key', spaceType: 'IM_ROBOT' },
     })

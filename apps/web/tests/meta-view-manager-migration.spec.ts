@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { createApp, h, nextTick, type App } from 'vue'
+import { createApp, h, nextTick, ref, type App } from 'vue'
 import MetaViewManager from '../src/multitable/components/MetaViewManager.vue'
 import { useLocale } from '../src/composables/useLocale'
 
@@ -21,12 +21,23 @@ import { useLocale } from '../src/composables/useLocale'
 //
 // UI-P2-1c T3 (multitable-ui-p2-1c-tail-resolution-designlock-20260707.md §2-T3, RATIFIED): of
 // `.meta-view-mgr__btn-inline`'s FOUR sharers, only the two named in the T3-ratified range —
-// addFilterRule ("+ Add filter") and addSortRule ("+ Add sort") — are now <MtLink>. reloadLatestConfig
+// addFilterRule ("+ Add filter") and addSortRule ("+ Add sort") — were in scope. reloadLatestConfig
 // ("Reload latest") and dismissLiveRefreshNotice ("Dismiss") are OUT of scope and stay on the bespoke
 // class (its CSS therefore stays too — partial-sharer migration, CSS removal gated on ALL sharers
-// migrating). Behavior-preservation proof: both migrated controls stay native <button>s (now class
-// `mt-link`); clicking "+ Add filter" still appends a filter rule row, clicking "+ Add sort" still
-// appends a sort rule row — same as pre-migration.
+// migrating).
+//
+// T3 errata fix-forward (2026-07-12): #4131 first migrated addFilterRule/addSortRule to <MtLink> on
+// the premise that `.meta-view-mgr__btn-inline` was "link-styled" — that premise was factually wrong
+// (the class is `padding:4px 10px; border:1px dashed #cbd5e1; background:#fff; color:#475569`, a gray
+// dashed-box action button, not a text link — see the CSS comment above `.meta-view-mgr__btn-inline`
+// in the component). owner corrected course: these two are now <MtButton variant="plain"> instead (T2's
+// soft-tinted primitive). This is a DELIBERATE visual change (gray dashed box → plain soft-primary
+// fill), not a zero-visual-change normalization. Behavior-preservation proof: both migrated controls
+// stay native <button>s (now class `mt-button mt-button--plain`, still NOT carrying
+// `.meta-view-mgr__btn-inline`); clicking "+ Add filter" still appends a filter rule row, clicking
+// "+ Add sort" still appends a sort rule row — same as pre-migration. A second describe block below
+// pins that the two OUT-of-scope sharers (reloadLatestConfig/dismissLiveRefreshNotice) were untouched
+// by this fix-forward — still native bespoke `.meta-view-mgr__btn-inline` buttons, not MtLink/MtButton.
 
 const fields = [{ id: 'fld_name', name: 'Name', type: 'string' as const }]
 const views = [{ id: 'view_1', sheetId: 'sheet_1', name: 'Grid', type: 'grid' }]
@@ -118,22 +129,27 @@ describe('MetaViewManager — MtButton migration (UI-P2-1c batch-3, footer slice
 const addFilterBtn = () => container!.querySelector('[data-filter-add="true"]') as HTMLButtonElement | null
 const addSortBtn = () => container!.querySelector('[data-sort-add="true"]') as HTMLButtonElement | null
 
-describe('MetaViewManager — MtLink migration (UI-P2-1c T3)', () => {
-  it('renders + Add filter and + Add sort as native <button class="mt-link">s (only 2 of the 4 __btn-inline sharers migrate)', async () => {
+describe('MetaViewManager — MtButton plain reclaim (UI-P2-1c T3 errata fix-forward, 2026-07-12)', () => {
+  it('renders + Add filter and + Add sort as native <button class="mt-button mt-button--plain">s, NOT mt-link (only 2 of the 4 __btn-inline sharers migrate)', async () => {
     mount()
     configBtn()!.click() // openConfig(view) → configTarget set → config panel renders
     await nextTick()
     expect(addFilterBtn()!.tagName).toBe('BUTTON')
-    expect(addFilterBtn()!.classList.contains('mt-link')).toBe(true)
+    expect(addFilterBtn()!.classList.contains('mt-button')).toBe(true)
+    expect(addFilterBtn()!.classList.contains('mt-button--plain')).toBe(true)
+    expect(addFilterBtn()!.classList.contains('mt-link')).toBe(false)
     expect(addSortBtn()!.tagName).toBe('BUTTON')
-    expect(addSortBtn()!.classList.contains('mt-link')).toBe(true)
-    // the bespoke class stays declared for the OTHER two (out-of-scope) sharers, but is gone from
-    // these two migrated elements specifically:
+    expect(addSortBtn()!.classList.contains('mt-button')).toBe(true)
+    expect(addSortBtn()!.classList.contains('mt-button--plain')).toBe(true)
+    expect(addSortBtn()!.classList.contains('mt-link')).toBe(false)
+    // the bespoke class stays declared for the OTHER two (out-of-scope) sharers (see next describe
+    // block), but is gone from these two migrated elements specifically — MtButton's plain variant
+    // owns its full look, so the class is never re-added:
     expect(addFilterBtn()!.classList.contains('meta-view-mgr__btn-inline')).toBe(false)
     expect(addSortBtn()!.classList.contains('meta-view-mgr__btn-inline')).toBe(false)
   })
 
-  it('clicking + Add filter still appends a filter rule row (same as pre-migration)', async () => {
+  it('clicking + Add filter still appends a filter rule row (same as pre-migration; mutation-red proof the @click wiring survived the MtLink→MtButton swap)', async () => {
     mount()
     configBtn()!.click()
     await nextTick()
@@ -143,7 +159,7 @@ describe('MetaViewManager — MtLink migration (UI-P2-1c T3)', () => {
     expect(container!.querySelectorAll('.meta-view-mgr__rule-row--filter').length).toBe(1)
   })
 
-  it('clicking + Add sort still appends a sort rule row (same as pre-migration)', async () => {
+  it('clicking + Add sort still appends a sort rule row (same as pre-migration; mutation-red proof the @click wiring survived the MtLink→MtButton swap)', async () => {
     mount()
     configBtn()!.click()
     await nextTick()
@@ -155,5 +171,73 @@ describe('MetaViewManager — MtLink migration (UI-P2-1c T3)', () => {
     const sortRowsAfter = Array.from(container!.querySelectorAll('.meta-view-mgr__rule-row'))
       .filter((row) => !row.classList.contains('meta-view-mgr__rule-row--filter'))
     expect(sortRowsAfter.length).toBe(1)
+  })
+
+  it('renders v-if="configTargetFields.length" unchanged: hides both when no fields are configurable', async () => {
+    container = document.createElement('div'); document.body.appendChild(container)
+    app = createApp({ render: () => h(MetaViewManager, { visible: true, sheetId: 'sheet_1', activeViewId: 'view_1', fields: [], views, } as never) })
+    app.mount(container)
+    configBtn()!.click()
+    await nextTick()
+    expect(addFilterBtn()).toBeNull()
+    expect(addSortBtn()).toBeNull()
+  })
+})
+
+// Reactive-props mount helper — needed to drive `reloadLatestConfig`/`dismissLiveRefreshNotice` into
+// view, since both are gated behind internal refs (viewConfigOutdated / viewConfigLiveRefreshText) that
+// only change via the component's own `watch(() => props.views, ...)` (MetaViewManager.vue ~L1353),
+// comparing a live source-signature against the one captured when the config panel opened. Reassigning
+// the ref's `.value` gives MetaViewManager a new `views` array so that watcher actually fires.
+function mountReactive(initialViews: typeof views = views) {
+  container = document.createElement('div'); document.body.appendChild(container)
+  const viewsRef = ref(initialViews)
+  app = createApp({ render: () => h(MetaViewManager, { visible: true, sheetId: 'sheet_1', activeViewId: 'view_1', fields, views: viewsRef.value } as never) })
+  app.mount(container)
+  return viewsRef
+}
+
+describe('MetaViewManager — reloadLatestConfig / dismissLiveRefreshNotice stay bespoke (T3 errata pin: not misrouted into the T3/plain reclaim)', () => {
+  it('dismissLiveRefreshNotice ("Dismiss") stays a native <button class="meta-view-mgr__btn-inline">, never mt-link/mt-button, and still dismisses on click', async () => {
+    const viewsRef = mountReactive()
+    configBtn()!.click() // openConfig(view_1) → captures the source signature, draft stays clean
+    await nextTick()
+    // No local edit is made, so viewConfigDirty stays false. Changing the SOURCE view (name) while the
+    // draft is clean routes into the live-refresh branch (hydrateExistingViewConfig sets
+    // viewConfigLiveRefreshText), which renders the Dismiss control — not the Reload-latest one.
+    viewsRef.value = [{ ...views[0], name: 'Grid Renamed' }]
+    await nextTick()
+    await nextTick()
+    const dismissBtn = container!.querySelector('.meta-view-mgr__refresh .meta-view-mgr__btn-inline') as HTMLButtonElement | null
+    expect(dismissBtn).not.toBeNull()
+    expect(dismissBtn!.tagName).toBe('BUTTON')
+    expect(dismissBtn!.classList.contains('meta-view-mgr__btn-inline')).toBe(true)
+    expect(dismissBtn!.classList.contains('mt-link')).toBe(false)
+    expect(dismissBtn!.classList.contains('mt-button')).toBe(false)
+    dismissBtn!.click() // dismissLiveRefreshNotice() → viewConfigLiveRefreshText = ''
+    await nextTick()
+    expect(container!.querySelector('.meta-view-mgr__refresh')).toBeNull()
+  })
+
+  it('reloadLatestConfig ("Reload latest") stays a native <button class="meta-view-mgr__btn-inline">, never mt-link/mt-button, and still reloads on click', async () => {
+    const viewsRef = mountReactive()
+    configBtn()!.click() // openConfig(view_1)
+    await nextTick()
+    addSortBtn()!.click() // dirty the draft (sortDraft.rules gains a row) so the next source change
+    await nextTick()      // routes into the outdated/Reload branch instead of the live-refresh one
+    expect(container!.querySelectorAll('.meta-view-mgr__rule-row').length).toBeGreaterThan(0)
+    viewsRef.value = [{ ...views[0], name: 'Grid Renamed' }]
+    await nextTick()
+    await nextTick()
+    const reloadBtn = container!.querySelector('.meta-view-mgr__warning .meta-view-mgr__btn-inline') as HTMLButtonElement | null
+    expect(reloadBtn).not.toBeNull()
+    expect(reloadBtn!.tagName).toBe('BUTTON')
+    expect(reloadBtn!.classList.contains('meta-view-mgr__btn-inline')).toBe(true)
+    expect(reloadBtn!.classList.contains('mt-link')).toBe(false)
+    expect(reloadBtn!.classList.contains('mt-button')).toBe(false)
+    reloadBtn!.click() // reloadLatestConfig() → hydrateExistingViewConfig(view) resets the dirty sort edit
+    await nextTick()
+    expect(container!.querySelector('.meta-view-mgr__warning')).toBeNull()
+    expect(container!.querySelectorAll('.meta-view-mgr__rule-row').length).toBe(0)
   })
 })

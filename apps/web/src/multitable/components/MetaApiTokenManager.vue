@@ -3,7 +3,7 @@
     <div class="meta-api-mgr">
       <div class="meta-api-mgr__header">
         <h4 class="meta-api-mgr__title">{{ managerTitle }}</h4>
-        <button class="meta-api-mgr__close" type="button" @click="$emit('close')">&times;</button>
+        <MtIconButton class="meta-api-mgr__close" @click="$emit('close')">&times;</MtIconButton>
       </div>
 
       <div class="meta-api-mgr__tabs" role="tablist">
@@ -55,12 +55,12 @@
             <strong>{{ a('token.newShownOnce') }}</strong>
             <div class="meta-api-mgr__token-display">
               <code data-new-token-value="true">{{ newTokenPlaintext }}</code>
-              <button class="meta-api-mgr__btn meta-api-mgr__btn--primary" type="button" data-copy-new-token="true" @click="onCopyNewToken">
+              <MtButton variant="primary" class="meta-api-mgr__btn meta-api-mgr__btn--primary" data-copy-new-token="true" @click="onCopyNewToken">
                 {{ copiedNewToken ? a('token.action.copied') : a('token.action.copy') }}
-              </button>
+              </MtButton>
             </div>
             <p class="meta-api-mgr__warning">{{ a('token.saveWarning') }}</p>
-            <button class="meta-api-mgr__btn" type="button" @click="newTokenPlaintext = null">{{ m('action.dismiss') }}</button>
+            <MtButton class="meta-api-mgr__btn" @click="newTokenPlaintext = null">{{ m('action.dismiss') }}</MtButton>
           </div>
 
           <!-- Create form -->
@@ -78,12 +78,12 @@
             <label class="meta-api-mgr__label">{{ a('token.expiryOptional') }}</label>
             <input v-model="tokenDraft.expiresAt" class="meta-api-mgr__input" type="date" data-token-expiry="true" />
             <div class="meta-api-mgr__form-actions">
-              <button class="meta-api-mgr__btn meta-api-mgr__btn--primary" type="button" :disabled="!tokenDraft.name.trim() || busy" data-token-create="true" @click="onCreateToken">{{ a('token.action.create') }}</button>
-              <button class="meta-api-mgr__btn" type="button" @click="showTokenForm = false">{{ m('action.cancel') }}</button>
+              <MtButton variant="primary" class="meta-api-mgr__btn meta-api-mgr__btn--primary" :disabled="!tokenDraft.name.trim() || busy" data-token-create="true" @click="onCreateToken">{{ a('token.action.create') }}</MtButton>
+              <MtButton class="meta-api-mgr__btn" @click="showTokenForm = false">{{ m('action.cancel') }}</MtButton>
             </div>
           </section>
 
-          <button v-if="!showTokenForm" class="meta-api-mgr__btn meta-api-mgr__btn--primary meta-api-mgr__btn-add" type="button" data-token-new="true" @click="openTokenForm">{{ a('token.newButton') }}</button>
+          <MtButton v-if="!showTokenForm" variant="primary" class="meta-api-mgr__btn meta-api-mgr__btn--primary meta-api-mgr__btn-add" data-token-new="true" @click="openTokenForm">{{ a('token.newButton') }}</MtButton>
 
           <!-- Token list -->
           <div v-if="tokensLoading" class="meta-api-mgr__empty">{{ a('token.loading') }}</div>
@@ -100,8 +100,8 @@
               <span v-if="token.expiresAt">{{ a('token.meta.expires') }}: {{ formatDate(token.expiresAt) }}</span>
             </div>
             <div class="meta-api-mgr__card-actions">
-              <button class="meta-api-mgr__btn" type="button" :disabled="busy" data-token-rotate="true" @click="onRotateToken(token.id)">{{ a('token.action.rotate') }}</button>
-              <button class="meta-api-mgr__btn meta-api-mgr__btn--danger" type="button" :disabled="busy" data-token-revoke="true" @click="onRevokeToken(token.id)">{{ a('token.action.revoke') }}</button>
+              <MtButton class="meta-api-mgr__btn" :disabled="busy" data-token-rotate="true" @click="onRotateToken(token.id)">{{ a('token.action.rotate') }}</MtButton>
+              <MtButton variant="danger" class="meta-api-mgr__btn meta-api-mgr__btn--danger" :disabled="busy" data-token-revoke="true" @click="onRevokeToken(token.id)">{{ a('token.action.revoke') }}</MtButton>
             </div>
           </div>
         </template>
@@ -176,14 +176,14 @@
             >{{ a('webhook.retry.rangeError') }}</p>
 
             <div class="meta-api-mgr__form-actions">
-              <button class="meta-api-mgr__btn meta-api-mgr__btn--primary" type="button" :disabled="!canSaveWebhook || busy" data-webhook-save="true" @click="onSaveWebhook">
+              <MtButton variant="primary" class="meta-api-mgr__btn meta-api-mgr__btn--primary" :disabled="!canSaveWebhook || busy" data-webhook-save="true" @click="onSaveWebhook">
                 {{ editingWebhookId ? a('webhook.action.update') : a('webhook.action.create') }}
-              </button>
-              <button class="meta-api-mgr__btn" type="button" @click="cancelWebhookForm">{{ m('action.cancel') }}</button>
+              </MtButton>
+              <MtButton class="meta-api-mgr__btn" @click="cancelWebhookForm">{{ m('action.cancel') }}</MtButton>
             </div>
           </section>
 
-          <button v-if="!showWebhookForm" class="meta-api-mgr__btn meta-api-mgr__btn--primary meta-api-mgr__btn-add" type="button" data-webhook-new="true" @click="openWebhookForm">{{ a('webhook.newButton') }}</button>
+          <MtButton v-if="!showWebhookForm" variant="primary" class="meta-api-mgr__btn meta-api-mgr__btn--primary meta-api-mgr__btn-add" data-webhook-new="true" @click="openWebhookForm">{{ a('webhook.newButton') }}</MtButton>
 
           <!-- Webhook list -->
           <div v-if="webhooksLoading" class="meta-api-mgr__empty">{{ a('webhook.loading') }}</div>
@@ -201,12 +201,12 @@
               <span v-if="wh.failureCount > 0" class="meta-api-mgr__card-failures">{{ a('webhook.meta.failures') }}: {{ wh.failureCount }}</span>
             </div>
             <div class="meta-api-mgr__card-actions">
-              <button class="meta-api-mgr__btn" type="button" data-webhook-edit="true" @click="openEditWebhook(wh)">{{ a('webhook.action.edit') }}</button>
-              <button class="meta-api-mgr__btn" type="button" data-webhook-toggle="true" :disabled="busy" @click="onToggleWebhook(wh)">
+              <MtButton class="meta-api-mgr__btn" data-webhook-edit="true" @click="openEditWebhook(wh)">{{ a('webhook.action.edit') }}</MtButton>
+              <MtButton class="meta-api-mgr__btn" data-webhook-toggle="true" :disabled="busy" @click="onToggleWebhook(wh)">
                 {{ apiToggleLabel(wh.active, isZh) }}
-              </button>
-              <button class="meta-api-mgr__btn" type="button" data-webhook-deliveries="true" @click="onViewDeliveries(wh.id)">{{ a('webhook.action.deliveries') }}</button>
-              <button class="meta-api-mgr__btn meta-api-mgr__btn--danger" type="button" :disabled="busy" data-webhook-delete="true" @click="onDeleteWebhook(wh.id)">{{ m('action.delete') }}</button>
+              </MtButton>
+              <MtButton class="meta-api-mgr__btn" data-webhook-deliveries="true" @click="onViewDeliveries(wh.id)">{{ a('webhook.action.deliveries') }}</MtButton>
+              <MtButton variant="danger" class="meta-api-mgr__btn meta-api-mgr__btn--danger" :disabled="busy" data-webhook-delete="true" @click="onDeleteWebhook(wh.id)">{{ m('action.delete') }}</MtButton>
             </div>
 
             <!-- Delivery history (inline) -->
@@ -305,28 +305,28 @@
               {{ a('dingtalk.enabled') }}
             </label>
             <div class="meta-api-mgr__form-actions">
-              <button
+              <MtButton
+                variant="primary"
                 class="meta-api-mgr__btn meta-api-mgr__btn--primary"
-                type="button"
                 :disabled="!canSaveDingTalkGroup || busy"
                 data-dingtalk-group-save="true"
                 @click="onSaveDingTalkGroup"
               >
                 {{ editingDingTalkGroupId ? a('dingtalk.action.update') : a('dingtalk.action.create') }}
-              </button>
-              <button class="meta-api-mgr__btn" type="button" @click="cancelDingTalkGroupForm">{{ m('action.cancel') }}</button>
+              </MtButton>
+              <MtButton class="meta-api-mgr__btn" @click="cancelDingTalkGroupForm">{{ m('action.cancel') }}</MtButton>
             </div>
           </section>
 
-          <button
+          <MtButton
             v-if="!showDingTalkGroupForm"
+            variant="primary"
             class="meta-api-mgr__btn meta-api-mgr__btn--primary meta-api-mgr__btn-add"
-            type="button"
             data-dingtalk-group-new="true"
             @click="openDingTalkGroupForm"
           >
             {{ a('dingtalk.newButton') }}
-          </button>
+          </MtButton>
 
           <div v-if="dingTalkGroupsLoading" class="meta-api-mgr__empty">{{ a('dingtalk.loading') }}</div>
           <div
@@ -362,21 +362,21 @@
               <span>{{ a('dingtalk.meta.lastError') }}: {{ group.lastTestError }}</span>
             </div>
             <div class="meta-api-mgr__card-actions">
-              <button v-if="canMutateDingTalkGroup(group)" class="meta-api-mgr__btn" type="button" data-dingtalk-group-edit="true" @click="openEditDingTalkGroup(group)">
+              <MtButton v-if="canMutateDingTalkGroup(group)" class="meta-api-mgr__btn" data-dingtalk-group-edit="true" @click="openEditDingTalkGroup(group)">
                 {{ a('dingtalk.action.edit') }}
-              </button>
-              <button v-if="canMutateDingTalkGroup(group)" class="meta-api-mgr__btn" type="button" :disabled="busy" data-dingtalk-group-toggle="true" @click="onToggleDingTalkGroup(group)">
+              </MtButton>
+              <MtButton v-if="canMutateDingTalkGroup(group)" class="meta-api-mgr__btn" :disabled="busy" data-dingtalk-group-toggle="true" @click="onToggleDingTalkGroup(group)">
                 {{ apiDingTalkToggleLabel(group.enabled, isZh) }}
-              </button>
-              <button class="meta-api-mgr__btn" type="button" data-dingtalk-group-deliveries="true" @click="onViewDingTalkDeliveries(group)">
+              </MtButton>
+              <MtButton class="meta-api-mgr__btn" data-dingtalk-group-deliveries="true" @click="onViewDingTalkDeliveries(group)">
                 {{ a('dingtalk.action.deliveries') }}
-              </button>
-              <button v-if="canMutateDingTalkGroup(group)" class="meta-api-mgr__btn" type="button" :disabled="busy" data-dingtalk-group-test-send="true" @click="onTestDingTalkGroup(group)">
+              </MtButton>
+              <MtButton v-if="canMutateDingTalkGroup(group)" class="meta-api-mgr__btn" :disabled="busy" data-dingtalk-group-test-send="true" @click="onTestDingTalkGroup(group)">
                 {{ a('dingtalk.action.testSend') }}
-              </button>
-              <button v-if="canMutateDingTalkGroup(group)" class="meta-api-mgr__btn meta-api-mgr__btn--danger" type="button" :disabled="busy" data-dingtalk-group-delete="true" @click="onDeleteDingTalkGroup(group)">
+              </MtButton>
+              <MtButton v-if="canMutateDingTalkGroup(group)" variant="danger" class="meta-api-mgr__btn meta-api-mgr__btn--danger" :disabled="busy" data-dingtalk-group-delete="true" @click="onDeleteDingTalkGroup(group)">
                 {{ m('action.delete') }}
-              </button>
+              </MtButton>
               <span v-else class="meta-api-mgr__card-readonly" data-dingtalk-group-readonly="true">
                 {{ a('dingtalk.readonly') }}
               </span>
@@ -433,6 +433,7 @@ import type {
   WebhookDelivery,
 } from '../types'
 import type { MultitableApiClient } from '../api/client'
+import { MtButton, MtIconButton } from '../ui'
 import { managerLabel, type MetaManagerLabelKey } from '../utils/meta-manager-labels'
 import {
   apiDeliveryResultLabel,
@@ -1148,15 +1149,9 @@ watch(canManageDingTalkGroups, (canManage) => {
   color: #0f172a;
 }
 
-.meta-api-mgr__close {
-  border: none;
-  background: none;
-  font-size: 22px;
-  cursor: pointer;
-  color: #64748b;
-  line-height: 1;
-  padding: 0 4px;
-}
+/* .meta-api-mgr__close: now <MtIconButton> (ghost, token-styled; the &times; glyph passes through its
+   default-slot icon fallback). Bespoke hardcoded CSS removed (UI-P2-1c T5 batch-1). Class kept on the
+   element only for selector stability. */
 
 .meta-api-mgr__tabs {
   display: flex;
@@ -1412,31 +1407,10 @@ watch(canManageDingTalkGroups, (canManage) => {
 }
 
 /* Buttons */
-.meta-api-mgr__btn {
-  border: 1px solid #cbd5e1;
-  border-radius: 8px;
-  padding: 6px 14px;
-  background: #fff;
-  color: #0f172a;
-  font-size: 13px;
-  cursor: pointer;
-}
-
-.meta-api-mgr__btn:disabled {
-  opacity: 0.55;
-  cursor: not-allowed;
-}
-
-.meta-api-mgr__btn--primary {
-  border-color: #2563eb;
-  background: #2563eb;
-  color: #fff;
-}
-
-.meta-api-mgr__btn--danger {
-  border-color: #ef4444;
-  color: #b91c1c;
-}
+/* .meta-api-mgr__btn / --primary / --danger: all 22 sharers of the old bespoke button class are now
+   <MtButton> (token-styled; primary/danger map to MtButton's own `variant`). Bespoke hardcoded-hex
+   CSS removed outright (UI-P2-1c T5 batch-1, all sharers migrated in this same PR — no double-styling
+   risk). Classes kept on the elements only for selector stability. */
 
 .meta-api-mgr__btn-add {
   align-self: flex-start;

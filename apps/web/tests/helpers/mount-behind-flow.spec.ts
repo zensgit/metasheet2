@@ -1,0 +1,272 @@
+// Self-test for the UI-P2-1c T4 harness (mount-behind-flow.ts) — proves each of its four pieces
+// actually does what its doc comment claims:
+//   1. mountBehindFlow / cleanupBehindFlowMounts — real DOM mount + tracked teardown.
+//   2. createRoutedApiClient — a real MultitableApiClient wired to a router fn, with a working
+//      default-fallback and a working thrown-error path (both are load-bearing: a manager's
+//      migration spec relies on driving BOTH the success phase and the error phase).
+//   3. patchMultitableClient — monkey-patches + restores a method on the shared singleton, proving
+//      a SINGLETON composable (like TrashModal's useTrash()) can be driven to its loaded phase with
+//      no client prop at all.
+//   4. End-to-end: a tiny stand-in "behind-flow" component (async client call gated by a `visible`
+//      watch, matching the real managers' shape) is mounted in a loading state, then flushed to its
+//      post-load, button-bearing phase, and its button is clicked for a real emit assertion — the
+//      exact sequence a `*-migration.spec.ts` for TrashModal / MetaFormShareManager performs.
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import { defineComponent, h, ref, watch } from 'vue'
+import {
+  cleanupBehindFlowMounts,
+  createRoutedApiClient,
+  flushBehindFlow,
+  mountBehindFlow,
+  patchMultitableClient,
+  respond,
+} from './mount-behind-flow'
+import { multitableClient } from '../../src/multitable/api/client'
+
+afterEach(() => {
+  cleanupBehindFlowMounts()
+})
+
+describe('mountBehindFlow / cleanupBehindFlowMounts', () => {
+  const Trivial = defineComponent({
+    props: { label: { type: String, default: 'hi' } },
+    emits: ['ping'],
+    setup(props, { emit }) {
+      return () => h('button', { class: 'trivial-btn', onClick: () => emit('ping') }, props.label)
+    },
+  })
+
+  it('mounts a component into a real document.body div and it is queryable', () => {
+    const { container } = mountBehindFlow(Trivial, { label: 'hello' })
+    expect(document.body.contains(container)).toBe(true)
+    expect(container.querySelector('.trivial-btn')?.textContent).toBe('hello')
+  })
+
+  it('real DOM click fires a real emit', () => {
+    const onPing = vi.fn()
+    const { container } = mountBehindFlow(Trivial, { onPing })
+    ;(container.querySelector('.trivial-btn') as HTMLButtonElement).click()
+    expect(onPing).toHaveBeenCalledTimes(1)
+  })
+
+  it('cleanupBehindFlowMounts removes every tracked mount from the DOM', () => {
+    const a = mountBehindFlow(Trivial, {})
+    const b = mountBehindFlow(Trivial, {})
+    expect(document.body.contains(a.container)).toBe(true)
+    expect(document.body.contains(b.container)).toBe(true)
+    cleanupBehindFlowMounts()
+    expect(document.body.contains(a.container)).toBe(false)
+    expect(document.body.contains(b.container)).toBe(false)
+  })
+
+  it('an individually-unmounted mount is a no-op on the later cleanup sweep (idempotent)', () => {
+    const a = mountBehindFlow(Trivial, {})
+    a.unmount()
+    expect(document.body.contains(a.container)).toBe(false)
+    // Must not throw when the sweep encounters an already-unmounted entry.
+    expect(() => cleanupBehindFlowMounts()).not.toThrow()
+  })
+})
+
+describe('createRoutedApiClient', () => {
+  it('dispatches through the router and unwraps the { data } envelope like the real client', async () => {
+    const { client, fetchFn } = createRoutedApiClient((method, url) => {
+      if (method === 'GET' && url.includes('/bases')) return { bases: [{ id: 'b1', name: 'Base 1' }] }
+      return undefined
+    })
+    const result = await client.listBases()
+    expect(result.bases).toEqual([{ id: 'b1', name: 'Base 1' }])
+    expect(fetchFn).toHaveBeenCalledTimes(1)
+  })
+
+  it('falls back to defaultResponse when the router returns undefined', async () => {
+    const { client } = createRoutedApiClient(() => undefined, { defaultResponse: { bases: [] } })
+    const result = await client.listBases()
+    expect(result.bases).toEqual([])
+  })
+
+  it('falls back to {} when neither the router nor defaultResponse match (matches real-client shape)', async () => {
+    const { client } = createRoutedApiClient(() => undefined)
+    const result = await client.listBases()
+    // MultitableApiClient#listBases does `{ bases: Array.isArray(...) ? ... : [] }`-style guarding
+    // in most list endpoints, but listBases just returns the parsed body directly — an empty body
+    // still round-trips through the client without throwing, proving the envelope wiring works.
+    expect(result).toEqual({})
+  })
+
+  it('a thrown router error surfaces as a rejected client call (simulates a network failure)', async () => {
+    const { client } = createRoutedApiClient(() => {
+      throw new Error('boom: simulated network failure')
+    })
+    await expect(client.listBases()).rejects.toThrow('boom: simulated network failure')
+  })
+
+  // Non-2xx support (2026-07-12 post-hoc gate fix): the ONLY way to drive the real client's
+  // `parseJson` error path is `respond(status, body)` — a thrown Error (above) rejects the stub
+  // fetchFn's promise directly and never reaches `parseJson`, so it can't produce the
+  // `.status`/`.code`/`.fieldErrors` shape a manager's error-handling code actually branches on.
+  it('respond(status, body) drives the real parseJson error path with .status/.code/.message', async () => {
+    const { client } = createRoutedApiClient((method, url) => {
+      if (method === 'GET' && url.includes('/bases')) return respond(403, { error: 'FORBIDDEN', message: 'no access' })
+      return undefined
+    })
+    await expect(client.listBases()).rejects.toMatchObject({
+      name: 'MultitableApiError',
+      status: 403,
+      code: 'FORBIDDEN',
+      message: 'no access',
+    })
+  })
+
+  it('respond(204) drives the real client 204/no-content branch (null-body status must not throw)', async () => {
+    // 204/205/304 are null-body statuses: the Response constructor throws on ANY non-null body
+    // (including ''). The real client has a dedicated 204 branch (client.ts: `if (res.status === 204
+    // || !raw.trim()) return undefined`) — the harness must be able to drive exactly that status.
+    const { client } = createRoutedApiClient((method, url) => {
+      if (method === 'DELETE' && url.includes('/api/multitable/views/')) return respond(204, null)
+      return undefined
+    })
+    // Real client (client.ts): `if (res.status === 204 || !raw.trim()) return undefined`.
+    // Before this fix respond(204) threw (Response ctor rejects a non-null body on a 204).
+    await expect(client.deleteView('view_1')).resolves.toBeUndefined()
+  })
+
+  it('respond() body is sent as the raw error payload, never wrapped in the { data } success envelope', async () => {
+    // If the harness wrapped a respond() body in `{ data: ... }` (the success-envelope shape),
+    // normalizeApiErrorPayload would find no top-level `error`/`message` field and the thrown
+    // error would fall back to the generic default message instead of the field-error message
+    // below — this pins that the error body is dispatched as-is.
+    const { client } = createRoutedApiClient(() => respond(422, { error: 'VALIDATION', fieldErrors: { name: 'required' } }))
+    await expect(client.listBases()).rejects.toMatchObject({ status: 422, code: 'VALIDATION', message: 'required' })
+  })
+
+  it('an explicit null route result is sent through as a real 200 body, not silently replaced by defaultResponse', async () => {
+    // Distinguishes "no route matched" (undefined → falls back to defaultResponse) from "the route
+    // matched and legitimately returned null" — the NIT this fix corrects: the old
+    // `router(...) ?? defaultResponse` coalescing could not tell these apart (both are nullish to
+    // `??`), so a legitimate null body was silently replaced by defaultResponse. The wire body sent
+    // is `{"data":null}`; on the client side `unwrapDataBody({ data: null })` reads `.data` (null),
+    // and `parseJson`'s own `unwrapDataBody(body) ?? body` falls back to the OUTER envelope object
+    // for a null unwrap (this is `MultitableApiClient`'s real, pre-existing unwrap behavior, not
+    // something this harness invents) — so the resolved value is `{ data: null }`, never
+    // `defaultResponse`'s bases array. That's the property under test here.
+    const { client } = createRoutedApiClient(() => null, { defaultResponse: { bases: [{ id: 'should-not-appear', name: 'x' }] } })
+    const result = await client.listBases()
+    expect(result).toEqual({ data: null })
+  })
+
+  it('defaultResponse still applies when the router returns undefined (a genuine miss)', async () => {
+    const { client } = createRoutedApiClient(() => undefined, { defaultResponse: { bases: [{ id: 'b1', name: 'Base 1' }] } })
+    const result = await client.listBases()
+    expect(result.bases).toEqual([{ id: 'b1', name: 'Base 1' }])
+  })
+})
+
+describe('patchMultitableClient', () => {
+  it('monkey-patches a method on the shared singleton and restore() puts the original back', async () => {
+    const original = multitableClient.listBases
+    const { restore } = patchMultitableClient({
+      listBases: async () => ({ bases: [{ id: 'patched', name: 'Patched Base' }] }),
+    })
+    expect(multitableClient.listBases).not.toBe(original)
+    const result = await multitableClient.listBases()
+    expect(result.bases[0].id).toBe('patched')
+
+    restore()
+    expect(multitableClient.listBases).toBe(original)
+  })
+})
+
+// End-to-end: a stand-in component shaped exactly like the real "behind-flow" managers — it starts
+// in a loading state and only renders its action button once an API call (gated by a `visible`
+// watch, same as MetaFormShareManager's own `watch(() => props.visible, loadConfig)`) resolves.
+describe('end-to-end: driving a behind-flow-shaped component to its button-bearing phase', () => {
+  const BehindFlowStandIn = defineComponent({
+    props: {
+      visible: { type: Boolean, default: false },
+      client: { type: Object, required: true },
+    },
+    emits: ['loaded-name'],
+    setup(props, { emit }) {
+      const loading = ref(false)
+      const name = ref<string | null>(null)
+      watch(
+        () => props.visible,
+        async (visible) => {
+          if (!visible) return
+          loading.value = true
+          const res = await props.client.listBases()
+          name.value = res.bases?.[0]?.name ?? null
+          loading.value = false
+        },
+        { immediate: true },
+      )
+      return () => {
+        if (loading.value || name.value === null) return h('div', { class: 'sfi-loading' }, 'loading…')
+        return h(
+          'button',
+          { class: 'sfi-action', onClick: () => emit('loaded-name', name.value) },
+          `Action for ${name.value}`,
+        )
+      }
+    },
+  })
+
+  it('renders only the loading state before the client call resolves', () => {
+    const { client } = createRoutedApiClient(() => ({ bases: [{ id: 'b1', name: 'Base 1' }] }))
+    const { container } = mountBehindFlow(BehindFlowStandIn, { visible: true, client })
+    expect(container.querySelector('.sfi-loading')).toBeTruthy()
+    expect(container.querySelector('.sfi-action')).toBeNull()
+  })
+
+  it('flushBehindFlow drives it past the load into the button-bearing phase, and the button click emits real data', async () => {
+    const { client } = createRoutedApiClient((method, url) => {
+      if (method === 'GET' && url.includes('/bases')) return { bases: [{ id: 'b1', name: 'Base 1' }] }
+      return undefined
+    })
+    const onLoadedName = vi.fn()
+    const { container } = mountBehindFlow(BehindFlowStandIn, { visible: true, client, onLoadedName })
+    await flushBehindFlow()
+
+    const btn = container.querySelector('.sfi-action') as HTMLButtonElement
+    expect(btn).toBeTruthy()
+    expect(btn.textContent).toBe('Action for Base 1')
+
+    btn.click()
+    expect(onLoadedName).toHaveBeenCalledWith('Base 1')
+  })
+
+  it('SINGLETON-shape: patchMultitableClient can drive the same stand-in without any client prop wiring', async () => {
+    const { restore } = patchMultitableClient({
+      listBases: async () => ({ bases: [{ id: 'b2', name: 'Singleton Base' }] }),
+    })
+    try {
+      // No `client` prop passed at all — the component reaches for the shared singleton directly,
+      // exactly like TrashModal's useTrash() falling back to `multitableClient`.
+      const SingletonStandIn = defineComponent({
+        props: { visible: { type: Boolean, default: false } },
+        setup(props) {
+          const loading = ref(false)
+          const name = ref<string | null>(null)
+          watch(
+            () => props.visible,
+            async (visible) => {
+              if (!visible) return
+              loading.value = true
+              const res = await multitableClient.listBases()
+              name.value = res.bases?.[0]?.name ?? null
+              loading.value = false
+            },
+            { immediate: true },
+          )
+          return () => (name.value === null ? h('div', { class: 'sfi-loading' }, 'loading…') : h('button', { class: 'sfi-action' }, `Action for ${name.value}`))
+        },
+      })
+      const { container } = mountBehindFlow(SingletonStandIn, { visible: true })
+      await flushBehindFlow()
+      expect(container.querySelector('.sfi-action')?.textContent).toBe('Action for Singleton Base')
+    } finally {
+      restore()
+    }
+  })
+})

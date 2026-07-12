@@ -31,6 +31,7 @@ const {
 } = require('./stock-preparation-unit-rule-match.cjs')
 const { MATCH_STATUSES, MATCH_METHODS, VERSION_POLICIES: MATCH_VERSION_POLICIES } = require('./stock-preparation-material-match.cjs')
 const { VERSION_POLICIES, EXCEPTION_TYPES, PREP_STATUSES, UNIT_STATUSES } = require('./stock-preparation-mvp-generation.cjs')
+const { createTargetScopedRecordsApi } = require('./stock-preparation-table-actions.cjs')
 const { optionalString, isPlainObject } = require('./stock-preparation-common.cjs')
 
 const REQUIRED_PERMISSION = 'admin'
@@ -122,13 +123,16 @@ function ensureReadOnlyRecordsApi(recordsApi) {
   return recordsApi
 }
 
+// #4160: resolveFieldIds is REQUIRED — a read is as fieldId-bound as a write. The records service
+// rejects a logical filter key ('Unknown fieldId') and returns rows keyed by PHYSICAL fieldId, so a
+// read that skips the translation silently reports every cell as undefined.
 function ensureProvisioningApi(provisioning) {
-  if (!provisioning || typeof provisioning.findObjectSheet !== 'function') {
+  if (!provisioning || typeof provisioning.findObjectSheet !== 'function' || typeof provisioning.resolveFieldIds !== 'function') {
     throw new StockPreparationConfirmReadError(
       501,
       'CONFIRM_READS_PROVISIONING_API_UNAVAILABLE',
-      'stock-preparation confirm reads require multitable.provisioning.findObjectSheet',
-      { requiredMethods: ['findObjectSheet'] },
+      'stock-preparation confirm reads require multitable.provisioning findObjectSheet/resolveFieldIds',
+      { requiredMethods: ['findObjectSheet', 'resolveFieldIds'] },
     )
   }
   return provisioning
@@ -160,7 +164,10 @@ function toNumber(value) {
   return null
 }
 
-async function findMvpSheet(provisioning, targetProjectId, objectId) {
+// Returns a READ-ONLY target-scoped records API bound to the resolved sheet AND to its
+// logical->physical fieldId map (#4160 — the one translating entry point), or null when the internal
+// table is not provisioned yet (callers degrade gracefully).
+async function findMvpSheet(recordsApi, provisioning, targetProjectId, objectId) {
   if (!MVP_OBJECT_ID_SET.has(objectId)) {
     throw new StockPreparationConfirmReadError(
       500,
@@ -170,15 +177,23 @@ async function findMvpSheet(provisioning, targetProjectId, objectId) {
     )
   }
   const sheet = await provisioning.findObjectSheet({ projectId: targetProjectId, objectId })
-  return sheet && sheet.id ? sheet : null
+  const sheetId = sheet && sheet.id ? sheet.id : null
+  if (!sheetId) return null
+  const scoped = await createTargetScopedRecordsApi(recordsApi, { sheetId, objectId }, {
+    provisioning,
+    projectId: targetProjectId,
+    readOnly: true,
+  })
+  return { id: sheetId, scoped }
 }
 
-async function queryAllRecords(recordsApi, sheetId, filters) {
+// `target` is a findMvpSheet result — the scoped, field-mapped API; filters/rows stay logical.
+async function queryAllRecords(target, filters) {
   const rows = []
   for (let page = 0; page < READ_MAX_PAGES; page += 1) {
-    const pageRows = await recordsApi.queryRecords({ sheetId, filters, limit: READ_PAGE_LIMIT, offset: page * READ_PAGE_LIMIT })
+    const pageRows = await target.scoped.queryRecords({ filters, limit: READ_PAGE_LIMIT, offset: page * READ_PAGE_LIMIT })
     if (!Array.isArray(pageRows)) {
-      throw new StockPreparationConfirmReadError(500, 'CONFIRM_READS_RECORDS_API_INVALID', 'queryRecords must return an array', { sheetId })
+      throw new StockPreparationConfirmReadError(500, 'CONFIRM_READS_RECORDS_API_INVALID', 'queryRecords must return an array', { sheetId: target.id })
     }
     rows.push(...pageRows)
     if (pageRows.length < READ_PAGE_LIMIT) return rows
@@ -214,37 +229,37 @@ function enumCounts(rows, field, enumValues) {
 // completeness predicate as the #4002 list / confirm-writes sync (an orphaned mid-commit batch must
 // never feed a pending computation). Returns null when none qualifies.
 async function resolveLatestCompleteBatchLines(api, prov, targetProjectId, projectId, snapshotBatchId) {
-  const batchSheet = await findMvpSheet(prov, targetProjectId, BATCH_OBJECT_ID)
-  const lineSheet = await findMvpSheet(prov, targetProjectId, LINE_OBJECT_ID)
-  const runSheet = await findMvpSheet(prov, targetProjectId, RUN_OBJECT_ID)
+  const batchSheet = await findMvpSheet(api, prov, targetProjectId, BATCH_OBJECT_ID)
+  const lineSheet = await findMvpSheet(api, prov, targetProjectId, LINE_OBJECT_ID)
+  const runSheet = await findMvpSheet(api, prov, targetProjectId, RUN_OBJECT_ID)
   if (!batchSheet || !lineSheet) return null
 
   async function runPresent(batchRow) {
     if (!runSheet) return false
     const syncRunId = optionalString(readCell(batchRow, 'syncRunId'))
     if (!syncRunId) return false
-    const runRows = await queryAllRecords(api, runSheet.id, { runId: syncRunId })
+    const runRows = await queryAllRecords(runSheet, { runId: syncRunId })
     return runRows.length > 0
   }
 
   if (snapshotBatchId) {
-    const rows = await queryAllRecords(api, batchSheet.id, { snapshotBatchId })
+    const rows = await queryAllRecords(batchSheet, { snapshotBatchId })
     const batchRow = rows[0]
     if (!batchRow || optionalString(readCell(batchRow, 'projectId')) !== projectId) return null
     if (!(await runPresent(batchRow))) return null
-    const lines = await queryAllRecords(api, lineSheet.id, { snapshotBatchId })
+    const lines = await queryAllRecords(lineSheet, { snapshotBatchId })
     if (lines.length === 0) return null
     return { snapshotBatchId, lines: lines.map(recordData) }
   }
 
-  const projectBatches = await queryAllRecords(api, batchSheet.id, { projectId })
+  const projectBatches = await queryAllRecords(batchSheet, { projectId })
   const ordered = projectBatches
     .map((row) => ({ row, id: optionalString(readCell(row, 'snapshotBatchId')), version: toNumber(readCell(row, 'snapshotVersion')) || 0 }))
     .filter((entry) => entry.id)
     .sort((left, right) => (right.version - left.version) || String(left.id).localeCompare(String(right.id)))
   for (const entry of ordered) {
     if (!(await runPresent(entry.row))) continue
-    const lines = await queryAllRecords(api, lineSheet.id, { snapshotBatchId: entry.id })
+    const lines = await queryAllRecords(lineSheet, { snapshotBatchId: entry.id })
     if (lines.length === 0) continue
     return { snapshotBatchId: entry.id, lines: lines.map(recordData) }
   }
@@ -255,14 +270,14 @@ async function resolveLatestCompleteBatchLines(api, prov, targetProjectId, proje
 async function computeUnitCandidates(api, prov, targetProjectId, projectId, snapshotBatchId) {
   const batchContext = await resolveLatestCompleteBatchLines(api, prov, targetProjectId, projectId, snapshotBatchId)
   if (!batchContext) return null
-  const mappingSheet = await findMvpSheet(prov, targetProjectId, MAPPING_OBJECT_ID)
-  const materialSheet = await findMvpSheet(prov, targetProjectId, MATERIAL_OBJECT_ID)
-  const ruleSheet = await findMvpSheet(prov, targetProjectId, RULE_OBJECT_ID)
+  const mappingSheet = await findMvpSheet(api, prov, targetProjectId, MAPPING_OBJECT_ID)
+  const materialSheet = await findMvpSheet(api, prov, targetProjectId, MATERIAL_OBJECT_ID)
+  const ruleSheet = await findMvpSheet(api, prov, targetProjectId, RULE_OBJECT_ID)
   const generated = generateUnitConversionRuleCandidates({
     bomSnapshotLines: batchContext.lines,
-    materialMappings: mappingSheet ? (await queryAllRecords(api, mappingSheet.id, {})).map(recordData) : [],
-    erpMaterials: materialSheet ? (await queryAllRecords(api, materialSheet.id, {})).map(recordData) : [],
-    unitConversionRules: ruleSheet ? (await queryAllRecords(api, ruleSheet.id, {})).map(recordData) : [],
+    materialMappings: mappingSheet ? (await queryAllRecords(mappingSheet, {})).map(recordData) : [],
+    erpMaterials: materialSheet ? (await queryAllRecords(materialSheet, {})).map(recordData) : [],
+    unitConversionRules: ruleSheet ? (await queryAllRecords(ruleSheet, {})).map(recordData) : [],
   })
   return { snapshotBatchId: batchContext.snapshotBatchId, generated }
 }
@@ -282,8 +297,8 @@ async function getMaterialMappingSummary({ recordsApi, provisioning, targetProje
   const prov = ensureProvisioningApi(provisioning)
   const stagingProjectId = requiredString(targetProjectId, 'targetProjectId')
 
-  const mappingSheet = await findMvpSheet(prov, stagingProjectId, MAPPING_OBJECT_ID)
-  const rows = mappingSheet ? (await queryAllRecords(api, mappingSheet.id, {})).map(recordData) : []
+  const mappingSheet = await findMvpSheet(api, prov, stagingProjectId, MAPPING_OBJECT_ID)
+  const rows = mappingSheet ? (await queryAllRecords(mappingSheet, {})).map(recordData) : []
   const activeRows = rows.filter(isActiveRow)
   return {
     totalMappingCount: rows.length,
@@ -307,8 +322,8 @@ async function listMaterialMappingCandidates({ recordsApi, provisioning, targetP
     throw new StockPreparationConfirmReadError(422, 'CONFIRM_READS_CONFIG_INVALID', 'matchStatus must be one of the match-status vocabulary', { field: 'matchStatus' })
   }
 
-  const mappingSheet = await findMvpSheet(prov, stagingProjectId, MAPPING_OBJECT_ID)
-  let rows = mappingSheet ? (await queryAllRecords(api, mappingSheet.id, {})).map(recordData) : []
+  const mappingSheet = await findMvpSheet(api, prov, stagingProjectId, MAPPING_OBJECT_ID)
+  let rows = mappingSheet ? (await queryAllRecords(mappingSheet, {})).map(recordData) : []
   rows = rows.filter(isActiveRow)
   if (matchStatusFilter) rows = rows.filter((data) => optionalString(data.matchStatus) === matchStatusFilter)
   if (rows.length > MAX_LIST_ROWS) {
@@ -343,8 +358,8 @@ async function getUnitConversionSummary({ recordsApi, provisioning, targetProjec
   const stagingProjectId = requiredString(targetProjectId, 'targetProjectId')
   const businessProjectId = requiredString(projectId, 'projectId')
 
-  const ruleSheet = await findMvpSheet(prov, stagingProjectId, RULE_OBJECT_ID)
-  const rows = ruleSheet ? (await queryAllRecords(api, ruleSheet.id, {})).map(recordData) : []
+  const ruleSheet = await findMvpSheet(api, prov, stagingProjectId, RULE_OBJECT_ID)
+  const rows = ruleSheet ? (await queryAllRecords(ruleSheet, {})).map(recordData) : []
   const activeRows = rows.filter(isActiveRow)
 
   let pendingUnitLineCount = 0
@@ -435,9 +450,9 @@ async function listStockPreparationExceptions({ recordsApi, provisioning, target
   const severityFilter = optionalEnumFilter(severity, EXCEPTION_SEVERITY_VALUES, 'severity')
   const batchFilter = optionalString(snapshotBatchId)
 
-  const exceptionSheet = await findMvpSheet(prov, stagingProjectId, EXCEPTION_OBJECT_ID)
+  const exceptionSheet = await findMvpSheet(api, prov, stagingProjectId, EXCEPTION_OBJECT_ID)
   let rows = exceptionSheet
-    ? (await queryAllRecords(api, exceptionSheet.id, batchFilter
+    ? (await queryAllRecords(exceptionSheet, batchFilter
         ? { projectId: businessProjectId, snapshotBatchId: batchFilter }
         : { projectId: businessProjectId })).map(recordData)
     : []
@@ -484,9 +499,9 @@ async function listStockPreparationPrepLines({ recordsApi, provisioning, targetP
   const prepStatusFilter = optionalEnumFilter(prepStatus, PREP_STATUS_VALUES, 'prepStatus')
   const batchFilter = optionalString(snapshotBatchId)
 
-  const prepLineSheet = await findMvpSheet(prov, stagingProjectId, PREP_LINE_OBJECT_ID)
+  const prepLineSheet = await findMvpSheet(api, prov, stagingProjectId, PREP_LINE_OBJECT_ID)
   let rows = prepLineSheet
-    ? (await queryAllRecords(api, prepLineSheet.id, batchFilter
+    ? (await queryAllRecords(prepLineSheet, batchFilter
         ? { projectId: businessProjectId, snapshotBatchId: batchFilter }
         : { projectId: businessProjectId })).map(recordData)
     : []
