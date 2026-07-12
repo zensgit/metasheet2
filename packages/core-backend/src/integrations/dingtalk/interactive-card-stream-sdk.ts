@@ -133,9 +133,19 @@ async function handleCardCallbackFrame(
   // P3-1: stamp the gateway-guaranteed header corp id onto the forwarded payload as `eventCorpId`
   // so the callback's cross-corp gate anchors on the SDK-typed provenance rather than the untyped
   // business-blob `data.corpId` (the header wins; a mismatch is cross-checked downstream).
-  const headerCorpId = typeof frame.headers?.eventCorpId === 'string' ? frame.headers.eventCorpId.trim() : ''
-  if (headerCorpId && payload && typeof payload === 'object' && !Array.isArray(payload)) {
-    (payload as Record<string, unknown>).eventCorpId = headerCorpId
+  //
+  // Provenance laundering (review P3-1): `eventCorpId` on the forwarded payload MUST mean "came from
+  // the frame HEADER". Stamping it only when the header is present let a BODY-supplied `eventCorpId`
+  // survive untouched and be trusted downstream as header-grade provenance. So strip it
+  // UNCONDITIONALLY first, then re-add it only from the header — the body can no longer forge the
+  // anchor, and an absent header now honestly reads as absent (fail-closed) rather than as whatever
+  // the body claimed.
+  if (payload && typeof payload === 'object' && !Array.isArray(payload)) {
+    delete (payload as Record<string, unknown>).eventCorpId
+    const headerCorpId = typeof frame.headers?.eventCorpId === 'string' ? frame.headers.eventCorpId.trim() : ''
+    if (headerCorpId) {
+      (payload as Record<string, unknown>).eventCorpId = headerCorpId
+    }
   }
 
   try {

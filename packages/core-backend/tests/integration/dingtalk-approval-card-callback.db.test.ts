@@ -394,8 +394,14 @@ describeIfDatabase('B-3 DingTalk card callback adapter (real DB)', () => {
   test('P1-2 corp cross-check: a corp-A click (userId collision) on a corp-B delivery is refused (corp_mismatch); missing corpId is refused; the matching corp executes', async () => {
     const instanceId = await newInstance()
     // Delivery pinned to corp B; the assignee APPROVER is linked under corp B as DD_OP_B.
+    // The delivery MUST carry the live seat's entry_epoch (P1-1 strict binding): without it the card
+    // is un-actionable for the epoch reason, and the final `executed` leg below would degrade to
+    // `stale` — leaving an all-fail-closed suite that stays green even if the corp gate refused
+    // EVERYTHING. The positive control is what proves the gate refuses the attacker specifically,
+    // rather than refusing everyone.
     const row = await insertDingTalkApprovalCardDelivery(q, {
       instanceId, nodeKey: 'approval_1', recipientUserId: APPROVER, recipientDingTalkUserId: DD_OP_B, deliveryKind: 'interactive_card', integrationId: INTEGRATION_B,
+      entryEpoch: await liveSeatEpoch(instanceId, 'approval_1', APPROVER),
     })
     await markDingTalkApprovalCardDeliverySent(q, row.id, 'carrier_corp_xcheck')
 
