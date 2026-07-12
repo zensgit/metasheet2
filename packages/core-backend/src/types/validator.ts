@@ -49,31 +49,45 @@ export function createNoOpValidator(): ValidatorChain {
 }
 
 /**
- * Load express-validator or return no-op validators
+ * Load express-validator. FAIL-CLOSED (#4126 review): express-validator is a declared PRODUCTION
+ * dependency, and the declarative validation chains on the workflow / workflow-designer / PLM
+ * routes are a security control. The previous no-op fallback silently disabled every one of those
+ * chains when the module was absent — and the module was never declared anywhere, so validation was
+ * fail-OPEN in every environment. A missing module is now a loud boot failure, never a silent
+ * downgrade to "no validation".
  */
 export function loadValidators(): {
   body: ValidatorFunction
   param: ValidatorFunction
   query: ValidatorFunction
 } {
+  let validator: {
+    body: ValidatorFunction
+    param: ValidatorFunction
+    query: ValidatorFunction
+  }
   try {
     // eslint-disable-next-line @typescript-eslint/no-require-imports, @typescript-eslint/no-var-requires
-    const validator = require('express-validator') as {
-      body: ValidatorFunction
-      param: ValidatorFunction
-      query: ValidatorFunction
-    }
-    return {
-      body: validator.body,
-      param: validator.param,
-      query: validator.query
-    }
-  } catch {
-    // express-validator not installed, use no-op validators
-    return {
-      body: () => createNoOpValidator(),
-      param: () => createNoOpValidator(),
-      query: () => createNoOpValidator()
-    }
+    validator = require('express-validator')
+  } catch (error) {
+    throw new Error(
+      'express-validator is a required production dependency (declarative request validation is a ' +
+        'security control and must never silently degrade to no-op). Install dependencies and retry. ' +
+        `Underlying: ${(error as Error)?.message ?? 'unknown'}`
+    )
+  }
+  if (
+    typeof validator?.body !== 'function' ||
+    typeof validator?.param !== 'function' ||
+    typeof validator?.query !== 'function'
+  ) {
+    throw new Error(
+      'express-validator did not expose body/param/query — refusing to start with unvalidated routes'
+    )
+  }
+  return {
+    body: validator.body,
+    param: validator.param,
+    query: validator.query
   }
 }
