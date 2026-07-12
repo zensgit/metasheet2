@@ -2725,7 +2725,19 @@ export class AutomationExecutor {
       }
     }
     const interactiveCardConfig = resolveDingTalkInteractiveCardStreamConfig()
-    const useInteractiveCard = interactiveCardConfig.enabled === true
+    // P1-2 cross-corp SEND gate: the interactive card is dispatched via the GLOBAL Stream app's
+    // OWN credentials (robotCode = its clientId), so it may only go to a recipient in the Stream
+    // app's OWN corp. Gate on flag-enabled AND the Stream app being bound to a directory
+    // integration AND that binding matching the recipient's integration. Any mismatch — a
+    // recipient in a different corp, an unbound Stream app, or a recipient with no integration —
+    // falls through to the per-corp OA `work_notice_action_card` (the doc's "other corps
+    // auto-fallback to OA"), never a card sent through the wrong corp's app.
+    const streamIntegrationId = interactiveCardConfig.enabled === true ? interactiveCardConfig.integrationId : ''
+    const useInteractiveCard =
+      interactiveCardConfig.enabled === true
+      && streamIntegrationId.length > 0
+      && assigneeIntegrationId.length > 0
+      && assigneeIntegrationId === streamIntegrationId
 
     // Ledger FIRST — the row is the only legitimate delivery → instance anchor.
     const entryEpochRaw = event.task?.entryEpoch

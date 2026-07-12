@@ -13,7 +13,10 @@
  * `/v1.0/card/instances/callback`). The SDK's default wildcard EVENT subscription is dropped
  * before connecting so the gateway registration carries exactly that one CALLBACK subscription.
  * Frames are threaded into the worker's existing `handlers.onEvent` seam unchanged — semantic
- * parsing of the payload stays owned by the B-3 callback adapter.
+ * parsing of the payload stays owned by the B-3 callback adapter. The decoded `data` object is
+ * forwarded WHOLE (never field-filtered): the DingTalk card-callback business payload carries the
+ * platform-verified `corpId` at its top level, and the B-3 executor consumes it for the P1-2
+ * cross-corp gate — dropping fields here would blind that check.
  *
  * Reconnect: the SDK's built-in reconnect (`autoReconnect`, default on) owns retry after
  * transport drops and CONNECT failures; `close()` disables it BEFORE disconnecting so an
@@ -43,6 +46,12 @@ export type DingTalkStreamDownStreamFrame = {
   headers?: {
     messageId?: string
     topic?: string
+    /**
+     * P3-1: the gateway-populated, SDK-typed corp id of the clicking corp. Authoritative provenance
+     * (the untyped business `data.corpId` is a secondary echo). The adapter forwards it into the
+     * business payload as `eventCorpId` so the callback's cross-corp gate can anchor on it.
+     */
+    eventCorpId?: string
   }
   /** JSON-encoded card-callback payload (a string on the wire). */
   data?: unknown
@@ -119,6 +128,24 @@ async function handleCardCallbackFrame(
     // Values-free reject: never log (or forward) unparseable wire bytes.
     logger.warn('DingTalk interactive-card Stream frame rejected (malformed_frame:data_not_json)')
     return
+  }
+
+  // P3-1: stamp the gateway-guaranteed header corp id onto the forwarded payload as `eventCorpId`
+  // so the callback's cross-corp gate anchors on the SDK-typed provenance rather than the untyped
+  // business-blob `data.corpId` (the header wins; a mismatch is cross-checked downstream).
+  //
+  // Provenance laundering (review P3-1): `eventCorpId` on the forwarded payload MUST mean "came from
+  // the frame HEADER". Stamping it only when the header is present let a BODY-supplied `eventCorpId`
+  // survive untouched and be trusted downstream as header-grade provenance. So strip it
+  // UNCONDITIONALLY first, then re-add it only from the header — the body can no longer forge the
+  // anchor, and an absent header now honestly reads as absent (fail-closed) rather than as whatever
+  // the body claimed.
+  if (payload && typeof payload === 'object' && !Array.isArray(payload)) {
+    delete (payload as Record<string, unknown>).eventCorpId
+    const headerCorpId = typeof frame.headers?.eventCorpId === 'string' ? frame.headers.eventCorpId.trim() : ''
+    if (headerCorpId) {
+      (payload as Record<string, unknown>).eventCorpId = headerCorpId
+    }
   }
 
   try {
