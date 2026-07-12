@@ -9,7 +9,7 @@
       <div class="reset-confirm-modal reset-confirm-modal--destructive" role="dialog" :aria-label="l('record.resetConfirmDialogAria')">
         <div class="reset-confirm__header">
           <h3 class="reset-confirm__title">{{ resetConfirmTitle(asOf, isZh) }}</h3>
-          <MtIconButton class="reset-confirm__close" :aria-label="l('record.resetConfirmCancelAria')" @click="onCancel">&times;</MtIconButton>
+          <button class="reset-confirm__close" :aria-label="l('record.resetConfirmCancelAria')" @click="onCancel">&times;</button>
         </div>
         <div class="reset-confirm__body">
           <p v-if="loading" class="reset-confirm__hint" data-test="reset-confirm-loading">{{ l('record.resetConfirmLoading') }}</p>
@@ -53,7 +53,7 @@ import { computed, ref } from 'vue'
 
 import type { ResetPreview, ResetResult } from '../api/client'
 import { useLocale } from '../../composables/useLocale'
-import { MtButton, MtIconButton } from '../ui'
+import { MtButton } from '../ui'
 import {
   recordLabel, resetConfirmEntryLabel, resetConfirmTitle, resetConfirmResultSummary,
   resetConfirmRevertEquivIntro, resetConfirmRevertButtonLabel, resetConfirmDestructiveButtonLabel,
@@ -131,9 +131,7 @@ function onCancel(): void { open.value = false }
 .reset-confirm-modal--destructive { border-top: 4px solid #d92d20; }
 .reset-confirm__header { display: flex; justify-content: space-between; align-items: center; padding: 16px 20px; border-bottom: 1px solid #eee; }
 .reset-confirm__title { margin: 0; font-size: 16px; }
-/* .reset-confirm__close: now <MtIconButton> (ghost, token-styled; the &times; glyph char passes through
-   its default-slot icon fallback (size token-normalized to the icon control)). Bespoke hardcoded CSS removed
-   (UI-P2-1c T1 batch-4). Class kept on the element only for selector stability. */
+.reset-confirm__close { background: none; border: none; font-size: 22px; cursor: pointer; }
 .reset-confirm__body { padding: 20px; }
 .reset-confirm__warn { background: #fef3f2; border: 1px solid #fda29b; color: #912018; border-radius: 6px; padding: 12px; }
 .reset-confirm__ack { display: block; margin: 12px 0; }
