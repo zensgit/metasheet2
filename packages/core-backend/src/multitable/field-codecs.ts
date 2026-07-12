@@ -260,8 +260,12 @@ export function sanitizeFieldProperty(
  * branch's incidental `...obj` passthrough"). Fixing only the two guilty branches would leave the next
  * closed-allowlist branch (or new field type) free to reintroduce it; a branch only has to forget once.
  *
- * Only the HIDING signals are carried (`hidden: true` / `visible: false`); the permissive values are not
- * load-bearing for the predicate and preserving them would churn existing property shapes for no benefit.
+ * SCOPE, precisely (review P3): this helper only ever SYNTHESIZES the DENY values — it adds `hidden: true`
+ * / `visible: false` when the source carries them, and adds nothing otherwise. It does NOT strip anything:
+ * a passthrough branch that already spreads `...obj` still carries an existing `hidden: false` /
+ * `visible: true` through, exactly as before. Those permissive values are inert for the predicate, and
+ * deliberately NOT removed here — stripping them would churn existing wire shapes for no security benefit.
+ * So: deny values are guaranteed present; permissive values keep whatever shape the type already had.
  *
  * SINGLE DEFINITION — `univer-meta.ts`'s sibling sanitizer imports and applies this same function, so the
  * two cannot silently drift apart again.

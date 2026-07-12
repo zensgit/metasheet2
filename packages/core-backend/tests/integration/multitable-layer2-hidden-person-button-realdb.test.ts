@@ -19,6 +19,27 @@
  *   - STRING_HIDDEN  (string, property.hidden=true)   → value MUST be masked (control: always worked, so a
  *                                                       green here proves the harness detects masking)
  *
+ * MUTATION MATRIX (measured — and the reason the ROUTE goldens exist rather than inference):
+ * the two record routes go through DIFFERENT sanitizers, which is only visible by mutating each half:
+ *   - `GET /records` (list)        → univer-meta's `loadSheetFields` → **univer-meta's** sanitizer
+ *   - `GET /records/:id` (single)  → `loaders.ts`                    → **field-codecs'** sanitizer
+ *
+ *   | mutation                      | list | single |
+ *   |-------------------------------|------|--------|
+ *   | remove univer-meta half only  | RED  | green  |
+ *   | remove field-codecs half only | green| RED    |
+ *   | remove BOTH                   | RED  | RED    |
+ *
+ * So each route golden pins a DIFFERENT half of the fix, and a single-module mutation would have missed
+ * one. This is exactly why a permission-layer fix cannot be argued "platform-wide" from the fact that the
+ * surfaces share a sanitizer — they don't all share the SAME one.
+ *
+ * KNOWN, ACCEPTED CONSEQUENCE (owner-decided, not changed here): making person/button genuinely hideable
+ * also makes them able to trigger the pre-existing Yjs gate — `canReadEveryYjsFieldForUser` refuses the
+ * whole Y.Doc if ANY field on the sheet is unreadable, so the client falls back to REST. That fail-closed is
+ * the correct security boundary (a record-level Y.Doc cannot be field-masked); this change only widens the
+ * set of field types that can trip it. A field-scoped Yjs design is a separate piece of work.
+ *
  * Runs only with DATABASE_URL. (plugin-tests.yml whitelist — two-point wiring.)
  */
 import express, { type Express } from 'express'
@@ -47,6 +68,10 @@ const STRING_CANARY = 'string-hidden-canary'
 const q = (sql: string, params: unknown[]) => poolManager.get().query(sql, params)
 let app: Express
 const detail = (batchId: string) => request(app).get(`/api/multitable/bases/${BASE_ID}/history/events/${batchId}`)
+// The RECORD read routes — the surface on which the leak was originally confirmed. A permission fix must be
+// pinned HERE, not inferred from a shared sanitizer across modules.
+const recordsList = () => request(app).get('/api/multitable/records').query({ sheetId: SHEET_ID })
+const singleRecord = () => request(app).get(`/api/multitable/records/${REC}`).query({ sheetId: SHEET_ID })
 
 describeIfDatabase('layer-2 property.hidden masks person + button values (real DB)', () => {
   beforeAll(async () => {
@@ -67,6 +92,18 @@ describeIfDatabase('layer-2 property.hidden masks person + button values (real D
     await addField(PERSON_VISIBLE, 'OpenPeople', 'person', '{}', 3)
     await addField(STRING_HIDDEN, 'HiddenString', 'string', '{"hidden":true}', 4)
 
+    // a LIVE record row — GET /records and GET /records/:id read meta_records (the revisions below drive the
+    // History surface). Same four fields, so one fixture proves both surfaces.
+    await q('INSERT INTO meta_records (id, sheet_id, data, version) VALUES ($1,$2,$3::jsonb,1)', [
+      REC, SHEET_ID,
+      JSON.stringify({
+        [PERSON_HIDDEN]: [P_SECRET],
+        [BUTTON_HIDDEN]: BUTTON_CANARY,
+        [PERSON_VISIBLE]: [P_OPEN],
+        [STRING_HIDDEN]: STRING_CANARY,
+      }),
+    ])
+
     await q(
       `INSERT INTO meta_record_revisions (id, sheet_id, record_id, version, action, source, actor_id, changed_field_ids, patch, snapshot, batch_id)
        VALUES (gen_random_uuid(), $1, $2, 1, 'update', 'rest', $3, $4::text[], '{}'::jsonb, $5::jsonb, $6)`,
@@ -85,6 +122,7 @@ describeIfDatabase('layer-2 property.hidden masks person + button values (real D
   })
 
   afterAll(async () => {
+    await q('DELETE FROM meta_records WHERE sheet_id = $1', [SHEET_ID]).catch(() => {})
     await q('DELETE FROM meta_record_revisions WHERE sheet_id = $1', [SHEET_ID]).catch(() => {})
     await q('DELETE FROM meta_fields WHERE sheet_id = $1', [SHEET_ID]).catch(() => {})
     await q('DELETE FROM meta_sheets WHERE id = $1', [SHEET_ID]).catch(() => {})
@@ -119,6 +157,53 @@ describeIfDatabase('layer-2 property.hidden masks person + button values (real D
     const change = (res.body?.data?.changes ?? []).find((c: any) => c.recordId === REC)
     expect(change.after?.[PERSON_VISIBLE]).toEqual([P_OPEN])
     expect(change.changedFieldIds).toContain(PERSON_VISIBLE)
+  })
+
+  /**
+   * THE ROUTES THE LEAK WAS ORIGINALLY CONFIRMED ON.
+   *
+   * The History batch-detail tests above prove the two-layer mask chain. They are NOT a substitute for these:
+   * the originally-observed fact was that **`GET /records` returned the hidden person field's userId**. A
+   * permission-layer fix must be pinned on the actual read routes, not inferred "platform-wide" from the fact
+   * that both surfaces happen to share a sanitizer. Cross-module deduction is an argument, not a test.
+   *
+   * Asserted on BOTH the list and the single-record route: the hidden person's and hidden button's FIELD ID,
+   * VALUE, and (for person) MEMBER ID are all absent; the visible person is still returned.
+   */
+  test('GET /records (list): a hidden person/button field is absent — field id, value, and member id', async () => {
+    const res = await recordsList()
+    expect(res.status).toBe(200)
+    const rows = (res.body?.data?.records ?? res.body?.data ?? res.body?.records ?? []) as Array<Record<string, any>>
+    const rec = rows.find((r) => r.id === REC)
+    expect(rec).toBeTruthy()
+    const data = (rec!.data ?? rec!.fields ?? rec) as Record<string, unknown>
+
+    expect(data[PERSON_HIDDEN]).toBeUndefined()          // hidden PERSON: value gone
+    expect(Object.keys(data)).not.toContain(PERSON_HIDDEN) // …and its field id gone
+    expect(data[BUTTON_HIDDEN]).toBeUndefined()          // hidden BUTTON: same
+    expect(data[PERSON_VISIBLE]).toEqual([P_OPEN])       // NON-VACUOUS: visible person still returned
+
+    const body = JSON.stringify(res.body)
+    expect(body).not.toContain(P_SECRET)      // the hidden member's user id, nowhere in the body
+    expect(body).not.toContain(BUTTON_CANARY)
+    expect(body).not.toContain(STRING_CANARY)
+    expect(body).toContain(P_OPEN)            // control: the VISIBLE member does appear
+  })
+
+  test('GET /records/:recordId (single): same — hidden person/button absent, visible person returned', async () => {
+    const res = await singleRecord()
+    expect(res.status).toBe(200)
+    const rec = (res.body?.data?.record ?? res.body?.data ?? res.body?.record ?? {}) as Record<string, any>
+    const data = (rec.data ?? rec.fields ?? rec) as Record<string, unknown>
+
+    expect(data[PERSON_HIDDEN]).toBeUndefined()
+    expect(data[BUTTON_HIDDEN]).toBeUndefined()
+    expect(data[PERSON_VISIBLE]).toEqual([P_OPEN])
+
+    const body = JSON.stringify(res.body)
+    expect(body).not.toContain(P_SECRET)
+    expect(body).not.toContain(BUTTON_CANARY)
+    expect(body).toContain(P_OPEN)
   })
 
   /**
