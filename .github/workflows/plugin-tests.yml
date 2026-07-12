@@ -263,6 +263,7 @@ jobs:
             tests/integration/multitable-history-events-realdb.test.ts \
             tests/integration/multitable-history-before-hydration-realdb.test.ts \
             tests/integration/multitable-history-alltables-fieldnames-realdb.test.ts \
+            tests/integration/multitable-layer2-hidden-person-button-realdb.test.ts \
             tests/integration/multitable-history-events-hasmore-realdb.test.ts \
             tests/integration/multitable-history-audit-grant-realdb.test.ts \
             tests/integration/multitable-history-audit-reveal-realdb.test.ts \

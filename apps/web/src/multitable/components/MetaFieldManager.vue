@@ -2559,6 +2559,19 @@ function saveConfig() {
   const property = currentDraftProperty(fieldType)
   if (!property && fieldConfigError.value) return
   if (!property) return
+  // Layer-2 visibility keys (`hidden` / `visible`) are CARRIED OPAQUELY — exactly like `actionConfig`
+  // above, and for exactly the same reason: this form does not edit them, but `update-field` REPLACES
+  // `property` wholesale, and several `currentDraftProperty` branches (person, button, …) rebuild it as a
+  // closed literal. Without this, an unrelated Save (rename a button, flip person single/multi, edit a
+  // validation rule) would silently drop a stored `hidden: true` and UN-HIDE the field for everyone.
+  //
+  // Safe by construction: the FE has no writer of these keys anywhere (grep — the only FE reference is the
+  // reader in utils/field-permissions.ts), so re-emitting them can never block an un-hide; whatever
+  // authored the hide is also what clears it. Mirrors the server-side cross-cutting carrier.
+  const carried = { ...property }
+  const storedProperty = (configTarget.value.property ?? {}) as Record<string, unknown>
+  if (storedProperty.hidden === true) carried.hidden = true
+  if (storedProperty.visible === false) carried.visible = false
   // Skip no-op saves for types that only expose validation + aiShortcut: if
   // the user touched neither surface there is nothing to persist, and
   // emitting an empty `property: {}` would otherwise clobber existing values
@@ -2569,7 +2582,7 @@ function saveConfig() {
     closeConfig()
     return
   }
-  emit('update-field', configTarget.value.id, { property })
+  emit('update-field', configTarget.value.id, { property: carried })
   closeConfig()
 }
 
