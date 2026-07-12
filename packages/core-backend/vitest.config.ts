@@ -17,7 +17,11 @@ export default defineConfig({
     // still fails all attempts, so this absorbs the infra flake without hiding real bugs. (Tradeoff,
     // stated plainly: a genuinely NON-deterministic PRODUCT race would also be absorbed — acceptable
     // here because these are mock-dep unit tests, but flagged for review.)
-    retry: 2,
+    // CI-only (review of #4169): the required `test (20.x)` check runs in CI, so retry absorbs the
+    // flake exactly where it reds a gate; locally retry is 0 so a developer sees a genuine failure
+    // immediately instead of waiting through re-runs — and the masking tradeoff never touches local
+    // debugging. GitHub Actions sets CI=true for every run.
+    retry: process.env.CI ? 2 : 0,
     deps: {
       interopDefault: true
     },
