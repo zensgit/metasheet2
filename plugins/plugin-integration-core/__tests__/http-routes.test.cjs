@@ -8,6 +8,7 @@ const httpRoutes = require(HTTP_ROUTES_PATH)
 const { MAX_LIST_LIMIT } = httpRoutes
 const { PLM_STOCK_PREPARATION_ACTION_ID } = require(path.join(__dirname, '..', 'lib', 'stock-preparation-table-actions.cjs'))
 const { STOCK_PREPARATION_MAIN_TABLE_TEMPLATE } = require(path.join(__dirname, '..', 'lib', 'stock-preparation-templates.cjs'))
+const { validateReadSourceConfig } = require(path.join(__dirname, '..', 'lib', 'read-source-config.cjs'))
 const { READ_SMOKE_LIST_REQUEST_MARKER } = require(path.join(__dirname, '..', 'lib', 'read-smoke-marker.cjs'))
 const { createReadSourceConfigStore, ReadSourceConfigNotApprovedError } = require(path.join(__dirname, '..', 'lib', 'read-source-config-store.cjs'))
 const { ReadSourceCompositionConfigNotApprovedError } = require(path.join(__dirname, '..', 'lib', 'read-source-composition-config-store.cjs'))
@@ -6370,9 +6371,11 @@ async function testReadSourceConfiguredReadRoute() {
     ],
   }
   const storeCalls = []
+  const systemLoads = []
   const services = createMockServices({
     externalSystemRegistry: {
       async getExternalSystemForAdapter(input) {
+        systemLoads.push(input.id)
         return { id: input.id, kind: 'erp:k3-wise-webapi', credentials: { bearerToken: 'secret-token' }, config: { objects: {} } }
       },
     },
@@ -6401,7 +6404,9 @@ async function testReadSourceConfiguredReadRoute() {
           async read(req) {
             readArgs.push(req)
             return {
-              records: [],
+              // #3889: a real adapter's RECORD plane is its normalized rows — not the same shape as the raw
+              // upstream payload (here the normalizer renames FName -> col_name's source `name`).
+              records: [{ name: 'SECRET-NAME', model: 'MX-9' }],
               raw: { Data: { FName: 'SECRET-NAME', FModel: 'MX-9', FNumber: req.filters.FNumber, FUnclassified: 'DROP-ME' } },
             }
           },
@@ -6432,6 +6437,43 @@ async function testReadSourceConfiguredReadRoute() {
   }
   const dataStr = JSON.stringify(ok.body.data.data)
   assert.ok(!dataStr.includes('DROP-ME') && !dataStr.includes('FUnclassified'), 'unmapped raw fields never reach the data plane')
+
+  // #3889: this route is the only surface that returns MAPPED VALUES for an approved config, so it is the
+  // only way to see what a config actually produces. The stock-preparation feeder maps the adapter's RECORD
+  // plane, so this route must be able to run that same plane — otherwise the config an operator verifies
+  // here and the config the feeder executes are two different things, and a fieldMap that resolves
+  // perfectly here can resolve NOWHERE there and be written as null on every ingested row.
+  const recordPlane = await invoke(routes, 'POST', '/api/integration/read-source-configs/:id/read', {
+    user: READ_USER, params: { id: 'rsc_ok' }, query: { workspaceId: 'workspace_1' },
+    body: { inputs: { key: 'M-001' }, rowSource: 'adapter_records' },
+  })
+  assertOkResponse(recordPlane, 200)
+  assert.equal(recordPlane.body.data.evidence.ok, true)
+  // The SAME config over the adapter's record plane: `FName`/`FModel` do not exist there, so the operator
+  // SEES the nulls instead of discovering them in an ingested snapshot.
+  assert.deepEqual(
+    recordPlane.body.data.data.containers.primary.records,
+    [{ col_name: null, col_model: null }],
+    'the record plane is shown exactly as the feeder would map it',
+  )
+  const recordEvidenceStr = JSON.stringify(recordPlane.body.data.evidence)
+  for (const leak of ['M-001', 'SECRET-NAME', 'MX-9', 'col_name', 'FName', 'secret-token']) {
+    assert.ok(!recordEvidenceStr.includes(leak), `record-plane evidence must not leak ${leak}`)
+  }
+  // Closed enum, same as the runtime's — and rejected BEFORE the system (and therefore its credentials) is
+  // resolved: a request we already know is invalid must not cause a credential lookup.
+  const loadsBeforeBadPlane = systemLoads.length
+  const badPlane = await invoke(routes, 'POST', '/api/integration/read-source-configs/:id/read', {
+    user: READ_USER, params: { id: 'rsc_ok' }, body: { inputs: { key: 'M-001' }, rowSource: 'raw' },
+  })
+  assert.equal(badPlane.statusCode, 400)
+  assert.equal(badPlane.body.error.details.reason, 'execution_row_source_invalid')
+  assert.equal(systemLoads.length, loadsBeforeBadPlane, 'an invalid row source never resolves a system credential')
+  const unexpectedField = await invoke(routes, 'POST', '/api/integration/read-source-configs/:id/read', {
+    user: READ_USER, params: { id: 'rsc_ok' }, body: { inputs: { key: 'M-001' }, rowCap: 5000 },
+  })
+  assert.equal(unexpectedField.statusCode, 400)
+  assert.equal(unexpectedField.body.error.details.reason, 'unexpected_field')
 
   // approved-only: draft/retired → 409 coarse
   const draft = await invoke(routes, 'POST', '/api/integration/read-source-configs/:id/read', {
@@ -6962,6 +7004,406 @@ async function testBridgeAgentChecklistRoutes() {
   console.log('  testBridgeAgentChecklistRoutes OK')
 }
 
+// #3889: route-level proof that only an approved config reference reaches the feeder, the response
+// stays values-free, no internal/external write surface runs, and raw payload controls are rejected.
+async function testStockPreparationReadonlySourceRunRoutes() {
+  function normalizedSourceConfig(systemId, requiredKind, fieldMap) {
+    const validation = validateReadSourceConfig({
+      version: 1,
+      systemId,
+      requiredKind,
+      object: 'stock-preparation-source',
+      mode: 'list_page',
+      readPath: '/readonly/stock-preparation',
+      readMethod: 'POST',
+      operations: ['read'],
+      containerPaths: ['Rows'],
+      fieldMap,
+    })
+    assert.equal(validation.valid, true, JSON.stringify(validation.errors))
+    return validation.normalized
+  }
+
+  const PLM_CONFIG_ID = 'private_plm_config_3889'
+  const ERP_CONFIG_ID = 'private_erp_config_3889'
+  const PLM_SYSTEM_ID = 'private_plm_system_3889'
+  const ERP_SYSTEM_ID = 'private_erp_system_3889'
+  const RAW_PLM_VALUE = 'RAW-PLM-VALUE-3889'
+  const RAW_ERP_VALUE = 'RAW-ERP-VALUE-3889'
+  const plmConfig = normalizedSourceConfig(PLM_SYSTEM_ID, 'plm:yuantus-wrapper', [
+    { source: 'path', target: 'pathKey' },
+    { source: 'childCode', target: 'childDrawingNo' },
+    { source: 'quantity', target: 'designQty' },
+  ])
+  const erpConfig = normalizedSourceConfig(ERP_SYSTEM_ID, 'erp:k3-wise-webapi', [
+    { source: 'FItemID', target: 'erpMaterialInternalId' },
+    { source: 'FNumber', target: 'erpMaterialCode' },
+    { source: 'FName', target: 'erpMaterialName' },
+  ])
+  const sourceReadCalls = []
+  const externalWriteCalls = []
+  let internalRecordCalls = 0
+  let provisioningCalls = 0
+  const { services } = createMockServices({
+    readSourceConfigStore: {
+      async getForRuntime(input) {
+        if (input.id === PLM_CONFIG_ID) {
+          return { id: PLM_CONFIG_ID, status: 'approved', systemId: PLM_SYSTEM_ID, config: plmConfig }
+        }
+        if (input.id === ERP_CONFIG_ID) {
+          return { id: ERP_CONFIG_ID, status: 'approved', systemId: ERP_SYSTEM_ID, config: erpConfig }
+        }
+        throw new Error('unexpected config reference')
+      },
+    },
+    externalSystemRegistry: {
+      async getExternalSystemForAdapter(input) {
+        const kind = input.id === PLM_SYSTEM_ID ? 'plm:yuantus-wrapper' : 'erp:k3-wise-webapi'
+        return {
+          id: input.id,
+          tenantId: input.tenantId,
+          kind,
+          credentials: { password: 'PRIVATE-CREDENTIAL-3889' },
+          config: {},
+        }
+      },
+    },
+    adapterRegistry: {
+      createAdapter(system) {
+        return {
+          // Shaped like a REAL adapter read result: `records` IS the row plane (that is where every
+          // shipped adapter puts its normalized, paged rows) and `raw` echoes the upstream payload.
+          async read(request) {
+            sourceReadCalls.push({ kind: system.kind, request })
+            if (system.kind === 'plm:yuantus-wrapper') {
+              const rows = [{ path: '/root/part-1', childCode: RAW_PLM_VALUE, quantity: 2 }]
+              return {
+                records: rows,
+                raw: { Rows: rows },
+                metadata: { totalCount: 1, returnedRecordCount: rows.length },
+              }
+            }
+            const rows = [{ FItemID: 'erp_internal_1', FNumber: RAW_ERP_VALUE, FName: 'Material Secret' }]
+            return {
+              records: rows,
+              raw: { Rows: rows },
+              metadata: { dataRowCount: 1, dataPageIndex: 1, returnedRecordCount: rows.length },
+            }
+          },
+          async upsert(input) { externalWriteCalls.push(['upsert', input]) },
+          async save(input) { externalWriteCalls.push(['save', input]) },
+          async submit(input) { externalWriteCalls.push(['submit', input]) },
+          async audit(input) { externalWriteCalls.push(['audit', input]) },
+        }
+      },
+    },
+  })
+  // No stockPreparationAuditStore is mounted. The source-run routes are read/dry-run surfaces and
+  // must not consult multitable provisioning or records APIs either.
+  const recordsApi = {
+    async queryRecords() { internalRecordCalls += 1; throw new Error('records API must not run') },
+    async createRecord() { internalRecordCalls += 1; throw new Error('records API must not run') },
+    async patchRecord() { internalRecordCalls += 1; throw new Error('records API must not run') },
+  }
+  const provisioningApi = {
+    async findObjectSheet() { provisioningCalls += 1; throw new Error('provisioning API must not run') },
+  }
+  const { routes } = mountRoutes(services, { recordsApi, provisioningApi })
+
+  const plm = await invoke(routes, 'POST', '/api/integration/stock-preparation/mvp/source-runs/plm-bom', {
+    user: ADMIN_USER,
+    body: {
+      workspaceId: 'workspace_1',
+      projectId: 'business_project_1',
+      sourceProjectNo: 'SOURCE-PROJECT-SECRET',
+      projectName: 'Secret project name',
+      readSourceConfigId: PLM_CONFIG_ID,
+      syncRunId: 'plm_source_run_1',
+      snapshotBatchId: 'plm_snapshot_1',
+      snapshotVersion: 1,
+    },
+  })
+  assertOkResponse(plm, 200)
+  assert.equal(plm.body.data.mode, 'dry_run')
+  assert.equal(plm.body.data.evidence.intake.result.projectRows, 1)
+  assert.equal(plm.body.data.evidence.intake.result.bomSnapshotLines, 1)
+  assert.equal(plm.body.data.evidence.internalWriteExecuted, false)
+
+  const erp = await invoke(routes, 'POST', '/api/integration/stock-preparation/mvp/source-runs/erp-materials', {
+    user: ADMIN_USER,
+    body: {
+      workspaceId: 'workspace_1',
+      readSourceConfigId: ERP_CONFIG_ID,
+      syncRunId: 'erp_source_run_1',
+    },
+  })
+  assertOkResponse(erp, 200)
+  assert.equal(erp.body.data.mode, 'dry_run')
+  assert.equal(erp.body.data.evidence.intake.result.erpMaterialRows, 1)
+  assert.equal(erp.body.data.evidence.internalWriteExecuted, false)
+  assert.equal(sourceReadCalls.length, 2)
+  assert.equal(sourceReadCalls[0].request.limit, 1000, 'PLM/SQL page = the trusted-execution row cap')
+  assert.equal(sourceReadCalls[1].request.limit, 10, 'K3 route preserves the adapter page bound')
+  assert.equal(externalWriteCalls.length, 0, 'source-run routes never call an external write operation')
+  assert.equal(internalRecordCalls, 0, 'dry-run feeder never reads or writes MVP records')
+  assert.equal(provisioningCalls, 0, 'dry-run feeder never resolves an MVP target')
+
+  const publicText = JSON.stringify({ plm: plm.body, erp: erp.body })
+  for (const forbidden of [
+    PLM_CONFIG_ID, ERP_CONFIG_ID, PLM_SYSTEM_ID, ERP_SYSTEM_ID, RAW_PLM_VALUE, RAW_ERP_VALUE,
+    'SOURCE-PROJECT-SECRET', 'PRIVATE-CREDENTIAL-3889',
+  ]) {
+    assert.ok(!publicText.includes(forbidden), `public source-run evidence must not expose ${forbidden}`)
+  }
+  assert.equal(Object.prototype.hasOwnProperty.call(plm.body.data, 'bomSnapshotLines'), false)
+  assert.equal(Object.prototype.hasOwnProperty.call(erp.body.data, 'erpMaterials'), false)
+  assert.equal(Object.prototype.hasOwnProperty.call(plm.body.data, 'intake'), false)
+  assert.equal(Object.prototype.hasOwnProperty.call(erp.body.data, 'intake'), false)
+
+  const readsBeforeInvalidVersion = sourceReadCalls.length
+  const invalidVersion = await invoke(routes, 'POST', '/api/integration/stock-preparation/mvp/source-runs/plm-bom', {
+    user: ADMIN_USER,
+    body: {
+      workspaceId: 'workspace_1',
+      projectId: 'business_project_1',
+      sourceProjectNo: 'SOURCE-PROJECT-SECRET',
+      readSourceConfigId: PLM_CONFIG_ID,
+      syncRunId: 'plm_source_run_invalid_version',
+      snapshotBatchId: 'plm_snapshot_invalid_version',
+      snapshotVersion: true,
+    },
+  })
+  assert.equal(invalidVersion.statusCode, 422)
+  assert.equal(invalidVersion.body.error.code, 'SOURCE_RUN_CONFIG_INVALID')
+  assert.equal(invalidVersion.body.error.details.field, 'snapshotVersion')
+  assert.equal(sourceReadCalls.length, readsBeforeInvalidVersion, 'invalid snapshot version fails before external read')
+
+  const readsBeforeRejectedBody = sourceReadCalls.length
+  for (const forbiddenInput of [
+    { rawRows: [{ FNumber: RAW_ERP_VALUE }] },
+    { rawSql: 'SELECT * FROM private_materials' },
+    { autoApply: true },
+  ]) {
+    const rejected = await invoke(routes, 'POST', '/api/integration/stock-preparation/mvp/source-runs/erp-materials', {
+      user: ADMIN_USER,
+      body: {
+        readSourceConfigId: ERP_CONFIG_ID,
+        syncRunId: 'erp_source_run_rejected',
+        ...forbiddenInput,
+      },
+    })
+    assert.equal(rejected.statusCode, 400)
+    assert.equal(rejected.body.error.code, 'STOCK_PREPARATION_ERP_SOURCE_RUN_REQUEST_INVALID')
+  }
+  assert.equal(sourceReadCalls.length, readsBeforeRejectedBody, 'raw/SQL/apply controls are rejected before external read')
+
+  // Both source-run endpoints are admin-only, and the gate closes BEFORE any external read. Nothing here
+  // used to cover it: the `requireAccess(req, 'admin')` line could be deleted from both handlers and this
+  // whole suite still passed.
+  const readsBeforeDeniedUsers = sourceReadCalls.length
+  for (const user of [WRITE_USER, READ_USER]) {
+    const deniedPlm = await invoke(routes, 'POST', '/api/integration/stock-preparation/mvp/source-runs/plm-bom', {
+      user,
+      body: {
+        projectId: 'business_project_1',
+        sourceProjectNo: 'SOURCE-PROJECT-SECRET',
+        readSourceConfigId: PLM_CONFIG_ID,
+        syncRunId: 'plm_source_run_denied',
+        snapshotBatchId: 'plm_snapshot_denied',
+        snapshotVersion: 1,
+      },
+    })
+    assert.equal(deniedPlm.statusCode, 403, 'PLM source-run is admin-only')
+    assert.equal(deniedPlm.body.error.code, 'FORBIDDEN')
+
+    const deniedErp = await invoke(routes, 'POST', '/api/integration/stock-preparation/mvp/source-runs/erp-materials', {
+      user,
+      body: {
+        readSourceConfigId: ERP_CONFIG_ID,
+        syncRunId: 'erp_source_run_denied',
+      },
+    })
+    assert.equal(deniedErp.statusCode, 403, 'ERP source-run is admin-only')
+    assert.equal(deniedErp.body.error.code, 'FORBIDDEN')
+  }
+  // Unauthenticated is 401, and likewise never reaches the source.
+  const anonymous = await invoke(routes, 'POST', '/api/integration/stock-preparation/mvp/source-runs/erp-materials', {
+    body: { readSourceConfigId: ERP_CONFIG_ID, syncRunId: 'erp_source_run_anonymous' },
+  })
+  assert.equal(anonymous.statusCode, 401)
+  assert.equal(
+    sourceReadCalls.length,
+    readsBeforeDeniedUsers,
+    'a denied caller never reaches the external source (403/401 before any IO)',
+  )
+
+  // `readSourceConfigId` is what binds a run to an APPROVED config. Without it there is nothing to
+  // authorize against, so the run must not start.
+  const missingConfigId = await invoke(routes, 'POST', '/api/integration/stock-preparation/mvp/source-runs/erp-materials', {
+    user: ADMIN_USER,
+    body: { syncRunId: 'erp_source_run_no_config' },
+  })
+  assert.equal(missingConfigId.statusCode, 400)
+  assert.equal(missingConfigId.body.error.details.field, 'readSourceConfigId')
+  assert.equal(sourceReadCalls.length, readsBeforeDeniedUsers, 'no config reference, no external read')
+
+  // The only thing a caller may supply for an approved config is its PRESET-DECLARED named key. `inputs` is
+  // a closed sub-allowlist: anything else is an attempt to steer the outbound read (a filter, a path, a page
+  // control) through a config that was approved without it.
+  for (const inputs of [
+    { key: 'M-001', filters: { FNumber: 'X' } },
+    { key: 'M-001', readPath: '/K3API/Anything' },
+    { limit: 5000 },
+  ]) {
+    const steered = await invoke(routes, 'POST', '/api/integration/stock-preparation/mvp/source-runs/erp-materials', {
+      user: ADMIN_USER,
+      body: {
+        readSourceConfigId: ERP_CONFIG_ID,
+        syncRunId: 'erp_source_run_steered',
+        inputs,
+      },
+    })
+    assert.equal(steered.statusCode, 400, 'inputs is a closed allowlist: only the named key')
+    assert.equal(steered.body.error.code, 'STOCK_PREPARATION_ERP_SOURCE_RUN_REQUEST_INVALID')
+    assert.equal(steered.body.error.details.field, 'inputs.<unexpected>')
+  }
+  assert.equal(sourceReadCalls.length, readsBeforeDeniedUsers, 'a steered input never reaches the source')
+
+  // The ERP material run caches the ERP material master; it is not project-scoped. A field accepted and
+  // then ignored invites the belief that it scopes something, so the body does not take one.
+  const projectScoped = await invoke(routes, 'POST', '/api/integration/stock-preparation/mvp/source-runs/erp-materials', {
+    user: ADMIN_USER,
+    body: {
+      projectId: 'business_project_1',
+      readSourceConfigId: ERP_CONFIG_ID,
+      syncRunId: 'erp_source_run_project_scoped',
+    },
+  })
+  assert.equal(projectScoped.statusCode, 400, 'the ERP run does not take a projectId')
+  assert.equal(projectScoped.body.error.code, 'STOCK_PREPARATION_ERP_SOURCE_RUN_REQUEST_INVALID')
+}
+
+// #3889: a config approved for one system KIND must not be executed against a system of another kind. The
+// config carries the requiredKind its containerPaths/fieldMap/readPath were approved against; a system that
+// is not that kind speaks a different dialect entirely.
+async function testStockPreparationSourceRunRejectsSystemKindMismatch() {
+  let adapterCalls = 0
+  const validation = validateReadSourceConfig({
+    version: 1,
+    systemId: 'private_kind_system_3889',
+    requiredKind: 'plm:yuantus-wrapper',
+    object: 'stock-preparation-source',
+    mode: 'list_page',
+    readPath: '/readonly/stock-preparation',
+    readMethod: 'POST',
+    operations: ['read'],
+    containerPaths: ['Rows'],
+    fieldMap: [
+      { source: 'path', target: 'pathKey' },
+      { source: 'childCode', target: 'childDrawingNo' },
+      { source: 'quantity', target: 'designQty' },
+    ],
+  })
+  assert.equal(validation.valid, true, JSON.stringify(validation.errors))
+  const { services } = createMockServices({
+    readSourceConfigStore: {
+      async getForRuntime() {
+        return {
+          id: 'private_kind_config_3889',
+          status: 'approved',
+          systemId: 'private_kind_system_3889',
+          config: validation.normalized,
+        }
+      },
+    },
+    externalSystemRegistry: {
+      // The registered system is a BRIDGE, but the approved config was written for the PLM wrapper.
+      async getExternalSystemForAdapter(input) {
+        return {
+          id: input.id,
+          tenantId: input.tenantId,
+          kind: 'bridge:legacy-sql-readonly',
+          credentials: {},
+          config: {},
+        }
+      },
+    },
+    adapterRegistry: {
+      createAdapter() {
+        adapterCalls += 1
+        throw new Error('adapter must not run on a kind mismatch')
+      },
+    },
+  })
+  const { routes } = mountRoutes(services)
+
+  const res = await invoke(routes, 'POST', '/api/integration/stock-preparation/mvp/source-runs/plm-bom', {
+    user: ADMIN_USER,
+    body: {
+      projectId: 'business_project_1',
+      sourceProjectNo: 'SOURCE-PROJECT-1',
+      readSourceConfigId: 'private_kind_config_3889',
+      syncRunId: 'plm_source_run_kind_mismatch',
+      snapshotBatchId: 'plm_snapshot_kind_mismatch',
+      snapshotVersion: 1,
+    },
+  })
+  assert.equal(res.statusCode, 409)
+  assert.equal(res.body.error.code, 'STOCK_PREPARATION_SOURCE_KIND_MISMATCH')
+  assert.equal(adapterCalls, 0, 'a kind mismatch fails before any adapter is built')
+  console.log('  testStockPreparationSourceRunRejectsSystemKindMismatch OK')
+}
+
+// #3889: the approved-only gate lives in the config store, and the route must surrender to it. The happy
+// path above mounts a store that only ever answers "approved", so a draft/retired config was never once
+// exercised through these routes.
+async function testStockPreparationSourceRunRejectsUnapprovedConfig() {
+  let getForRuntimeCalls = 0
+  let adapterCalls = 0
+  const { services } = createMockServices({
+    readSourceConfigStore: {
+      async getForRuntime() {
+        getForRuntimeCalls += 1
+        throw new ReadSourceConfigNotApprovedError('read source config is not approved')
+      },
+    },
+    externalSystemRegistry: {
+      async getExternalSystemForAdapter() {
+        throw new Error('system must not be loaded for an unapproved config')
+      },
+    },
+    adapterRegistry: {
+      createAdapter() {
+        adapterCalls += 1
+        throw new Error('adapter must not run for an unapproved config')
+      },
+    },
+  })
+  const { routes } = mountRoutes(services)
+
+  for (const [route, body] of [
+    ['/api/integration/stock-preparation/mvp/source-runs/plm-bom', {
+      projectId: 'business_project_1',
+      sourceProjectNo: 'SOURCE-PROJECT-1',
+      readSourceConfigId: 'private_draft_config_3889',
+      syncRunId: 'plm_source_run_draft',
+      snapshotBatchId: 'plm_snapshot_draft',
+      snapshotVersion: 1,
+    }],
+    ['/api/integration/stock-preparation/mvp/source-runs/erp-materials', {
+      readSourceConfigId: 'private_draft_config_3889',
+      syncRunId: 'erp_source_run_draft',
+    }],
+  ]) {
+    const res = await invoke(routes, 'POST', route, { user: ADMIN_USER, body })
+    assert.equal(res.statusCode, 409, 'an unapproved config cannot feed a source run')
+    assert.equal(res.body.error.code, 'READ_SOURCE_CONFIG_NOT_APPROVED')
+  }
+  assert.equal(getForRuntimeCalls, 2, 'the route always goes through the approved-only store accessor')
+  assert.equal(adapterCalls, 0, 'an unapproved config never reaches an adapter')
+  console.log('  testStockPreparationSourceRunRejectsUnapprovedConfig OK')
+}
+
 async function main() {
   await testTemplatesCrudRoutes()
   await testUnauthenticatedWriteRequestIsRejected()
@@ -6989,6 +7431,9 @@ async function main() {
   await testReadSourceResolverReadRoute()
   await testReadSourceCompositionRoutes()
   await testBridgeAgentChecklistRoutes()
+  await testStockPreparationReadonlySourceRunRoutes()
+  await testStockPreparationSourceRunRejectsUnapprovedConfig()
+  await testStockPreparationSourceRunRejectsSystemKindMismatch()
   await testExternalSystemUpsertPreservesObjectSchema()
   await testExternalSystemTestPersistsFailureAndPreservesInactive()
   await testExternalSystemTestClearsErrorToActiveOnSuccess()
