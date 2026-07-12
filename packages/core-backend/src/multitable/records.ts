@@ -701,12 +701,20 @@ async function deleteRecordWithRecoverability(
 /**
  * TRANSACTION CONTRACT (D-2 design-lock OD-7 — normative): `input.query` MUST be transactional. The sole
  * production wiring already satisfies it (every plugin-SDK call is wrapped in
- * `poolManager.get().transaction`, index.ts:634-653). The D-2 flag-on path REORDERS this delete so the
+ * `poolManager.get().transaction`, index.ts:651). The D-2 flag-on path REORDERS this delete so the
  * revision + trash row are written BEFORE the record DELETE; without a real transaction a mid-sequence
  * failure would leave the "revision says dead, row still alive" half-state D-1's delete-then-emit
- * ordering was designed to avoid. Golden G3 is the CI guard — a non-transactional caller turns it red.
- * (This supersedes the old "this path has no enclosing transaction guarantee" comment, which was stale:
- * it described the type signature, not the only caller.)
+ * ordering was designed to avoid.
+ *
+ * Three layers enforce it, and you need all three — G3 ALONE DOES NOT GUARD THE WIRING, because it
+ * supplies its own transaction and therefore proves atomicity only *given* one:
+ *   1. G3a/G3b (real-DB goldens) — the sequence is atomic given a transaction.
+ *   2. The real entry points must SUPPLY one, proven behaviourally: G18 drives the actual
+ *      `createCoreAPI()` plugin-SDK factory (reds if this call site's `transaction` is unwrapped), and
+ *      G15 drives the actual `AutomationService.exec` (reds if `deps.transaction` stops being supplied).
+ *   3. `assertTransactionalQuery` — refuses at runtime if a caller does not (pinned by G16 on both lanes).
+ * Unwrapping the transaction at the call site leaves G3 GREEN and turns layers 2+3 red. Do not "fix" a
+ * red layer-2/3 by relaxing the guard; re-wire the caller.
  */
 export async function deleteRecord(
   input: DeleteMultitableRecordInput,

@@ -41,9 +41,15 @@
  *
  * Every caller MUST run inside a real transaction: capture → `DELETE FROM meta_links` → revision →
  * trash INSERT → `DELETE FROM meta_records` all commit or all roll back. Production satisfies this on
- * both lanes (plugin: `poolManager.get().transaction`, index.ts:634-653; automation: `withTransaction`
- * with the `transaction` dep supplied at automation-service.ts:840). Golden G3 is the CI guard: it
- * injects a failure at the record DELETE and at the trash INSERT and proves the whole unit rolls back.
+ * both lanes (plugin: `poolManager.get().transaction`, index.ts:651; automation: `withTransaction`
+ * with the `transaction` dep supplied at automation-service.ts:840).
+ *
+ * Golden G3 injects a failure at the record DELETE and at the trash INSERT and proves the whole unit
+ * rolls back — but it supplies its own transaction, so it proves atomicity only *given* one and CANNOT
+ * catch a caller that provides none. That wiring is guarded separately: G18 (real `createCoreAPI()` SDK
+ * factory) and G15 (real `AutomationService.exec`) prove the two production entry points each supply a
+ * transaction, and `assertTransactionalQuery` refuses at runtime if one ever stops.
+ * See the TRANSACTION CONTRACT block on `deleteRecord` (records.ts) for the full three-layer statement.
  */
 import {
   assertWithinCaptureCap,
