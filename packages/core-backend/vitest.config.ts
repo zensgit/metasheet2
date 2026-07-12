@@ -266,6 +266,21 @@ export default defineConfig({
       // tracked coverage gap pending that conversion.
       'tests/integration/multitable-sheet-permissions.api.test.ts',
       'tests/integration/multitable-sheet-realtime.api.test.ts',
+      // Six DB-gated specs (describeIfDatabase) that were previously NOT excluded here — meaning the
+      // no-DB `test` job collected and skip-greened them (0 assertions ever executed) inside the
+      // REQUIRED test (20.x) check, and no other workflow ran them for real either. Verified against a
+      // real Postgres (CI's exact MIGRATION_EXCLUDE, no views/view_states dependency): 67/67 pass.
+      // Excluded HERE so the no-DB job cannot skip-green them, and wired as WHOLE FILES into the
+      // `Run multitable real-DB integration` step in plugin-tests.yml. Two-point wiring.
+      'tests/integration/multitable-ai-write-provenance-batch-grouping-realdb.test.ts',
+      'tests/integration/multitable-automation-branch-local-wait.test.ts',
+      'tests/integration/multitable-cross-base-automation-delete-lock.test.ts',
+      'tests/integration/multitable-crossbase-realtime-fanout.test.ts',
+      'tests/integration/multitable-record-duplicate.test.ts',
+      // T3-6 approval-record-as-multitable-record projection: writes directly onto meta_records (the
+      // multitable substrate) via ApprovalRecordProjectionService.reconcile — multitable-relevant despite
+      // the `approval-` filename prefix. Same DB-gated/never-run state and same two-point wiring as above.
+      'tests/integration/approval-record-projection.test.ts',
       // multitable-view-config.api.test.ts uses an in-file MOCK pool (no live DB) and
       // self-contains its RBAC mocking — it runs under the default config + setup.ts, so
       // it stays IN the standard `test` job (runs on every PR, Node 18 + 20). Excluding it
