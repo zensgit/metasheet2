@@ -49,6 +49,7 @@ import {
   type AutomationRule,
 } from '../../src/multitable/automation-executor'
 import { deleteRecord as pluginDeleteRecord, MultitableRecordDeleteCapExceededError } from '../../src/multitable/records'
+import { AutomationService } from '../../src/multitable/automation-service'
 import { RecordService } from '../../src/multitable/record-service'
 import { recordRecordRevision } from '../../src/multitable/record-history-service'
 import { reconstructRecordsAtT } from '../../src/multitable/record-reconstructor'
@@ -556,6 +557,55 @@ describeIfDatabase('D-2 — side-door delete recoverability (plugin + automation
       expect(await edgeAlive(F, N, R)).toBe(true)
     })
   }
+
+  // ── G15 — PRODUCTION WIRING, driven for real (owner review item 2 / PROBE-2) ──────────────────────
+  /**
+   * Every other golden in this file constructs its OWN executor and supplies its OWN `transaction` dep —
+   * so they pin the FIXTURE's transactionality, not production's. That is exactly why the reviewer's
+   * PROBE-2 (delete `deps.transaction` from `automation-service.ts:840`) left all 39 goldens green.
+   *
+   * This golden drives the REAL production seam: `new AutomationService(...)` builds its own
+   * `AutomationDeps` (automation-service.ts:840 supplies `transaction`) and `.exec` is that executor.
+   * Nothing here re-implements the wiring. Combined with the runtime `assertTransactionalQuery`
+   * precondition, dropping `deps.transaction` in production source now makes the executor run
+   * non-transactionally ⇒ the guard throws ⇒ step `failed` ⇒ THIS TEST REDS.
+   *
+   * (The plugin lane's production seam — `index.ts`'s SDK factory — cannot be driven the same way: it
+   * lives inside `MetaSheetServer.createCoreAPI()`, and constructing the server boots the whole
+   * container/plugin stack — it hangs in-process. That lane is covered instead by the structural guard
+   * `tests/unit/multitable-d2-sidedoor-txn-wiring.guard.test.ts`, which asserts the transaction wrapper
+   * is present in `index.ts` itself, and reds under PROBE-1.)
+   */
+  test('G15 [automation] REAL production wiring: AutomationService supplies the txn dep — a side-door delete through it is transactional and recoverable', async () => {
+    process.env[SIDE_DOOR_FLAG] = 'true'
+    process.env[CAPTURE_FLAG] = 'true'
+    const { F, R, N } = await fixture('g15')
+
+    // The REAL service — its AutomationDeps (incl. `transaction`) are built by automation-service.ts,
+    // not by this test.
+    const svc = new AutomationService(new EventBus() as never, {} as never, q as never)
+    const exec = await svc.exec.execute(deleteRule({}, SHEET_A), {
+      recordId: R,
+      sheetId: SHEET_A,
+      actorId: OWNER,
+      data: {},
+    } as never)
+
+    // If the production `transaction` dep were missing, `withTransaction` would silently fall back to a
+    // bare queryFn, `assertTransactionalQuery` would refuse, and this step would be `failed`.
+    expect(exec.steps[0]?.status).toBe('success')
+    expect(await recordExists(R)).toBe(false)
+
+    const trash = await trashRow(R)
+    expect(trash).toBeDefined()
+    const revs = await deleteRevisions(R)
+    expect(revs).toHaveLength(1)
+    expect(trash!.delete_revision_id).toBe(revs[0]!.id)
+    const tombs = await tombstones(R)
+    expect(tombs).toHaveLength(1)
+    expect(tombs[0]!.source_revision_id).toBe(revs[0]!.id)
+    expect(await edgeAlive(F, N, R)).toBe(false)
+  })
 
   // ── G14 — record-lock TOCTOU under real concurrency (owner review P1) ─────────────────────────────
   /**
