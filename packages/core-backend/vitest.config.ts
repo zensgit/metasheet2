@@ -50,6 +50,13 @@ export default defineConfig({
       // DATABASE_URL-gated; excluded here so the no-DB job cannot skip-green it, and wired as
       // a WHOLE FILE into the approval real-DB step in plugin-tests.yml.
       'tests/integration/directory-sync-orchestration.db.test.ts',
+      // Roadmap §7.8 "Add timezone support" (real DB): proves schedule_timezone round-trips
+      // through create/update/read against the REAL migrated column, and specifically the
+      // absent-vs-present update semantics (omitted key preserves; explicit '' clears) that a
+      // mocked-pg unit test cannot prove end-to-end. DATABASE_URL-gated; excluded here so the
+      // no-DB job cannot skip-green it, and wired as a WHOLE FILE into the directory real-DB
+      // step in plugin-tests.yml.
+      'tests/integration/directory-sync-schedule-timezone.db.test.ts',
       'tests/integration/approval-manager-chain.db.test.ts',
       'tests/integration/approval-requester-department.db.test.ts',
       'tests/integration/approval-requester-title.db.test.ts',
