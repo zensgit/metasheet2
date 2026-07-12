@@ -85,6 +85,11 @@ router.get('/safety/status', createSafetyStatusEndpoint());
  */
 router.post(
   '/safety/confirm',
+  // SECURITY (GHSA): confirming a dangerous operation is itself a privileged step — platform-admin only,
+  // fail-closed. Without this the endpoint was reachable by any authenticated caller (rate-limit +
+  // idempotency are throughput controls, not authorization), letting a non-admin confirm a pending
+  // token. requireAdminRole also guarantees req.user.id for the initiator binding in the confirm handler.
+  requireAdminRole(),
   ...protectConfirmationEndpoint(),
   async (req: AuthenticatedRequest, res: Response) => {
     const confirmHandler = createSafetyConfirmEndpoint();
