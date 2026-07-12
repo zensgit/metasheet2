@@ -20,30 +20,38 @@ describe('Snapshot Protection System E2E', () => {
   let testSnapshotId: string
   let testRuleId: string
 
+  // Setup HARD-FAILS. Previously every failure path here `return`ed silently, leaving baseUrl empty —
+  // and every test then began with `if (!baseUrl) return`, so a server that never started still
+  // reported 21 passed with ZERO assertions executed. A suite that cannot green without doing its
+  // work is the whole point of wiring it into CI.
   beforeAll(async () => {
-    // Check if port is available
     const canListen: boolean = await new Promise((resolve) => {
       const s = net.createServer()
       s.once('error', () => resolve(false))
       s.listen(0, '127.0.0.1', () => s.close(() => resolve(true)))
     })
-    if (!canListen) return
+    if (!canListen) throw new Error('snapshot-protection: cannot bind an ephemeral port')
 
-    // Start test server
     server = new MetaSheetServer({
       port: 0,
       host: '127.0.0.1'
     })
     await server.start()
     const address = server.getAddress()
-    if (!address || !address.port) return
+    if (!address || !address.port) {
+      throw new Error('snapshot-protection: server did not report a listening address')
+    }
     baseUrl = `http://127.0.0.1:${address.port}`
 
     const tokenRes = await authFetch(`${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(testUserId)}`)
-    if (tokenRes.status === 200) {
-      const tokenJson = await tokenRes.json()
-      authToken = tokenJson.token as string
+    if (tokenRes.status !== 200) {
+      throw new Error(`snapshot-protection: dev-token request failed (${tokenRes.status})`)
     }
+    const tokenJson = (await tokenRes.json()) as { token?: string }
+    if (!tokenJson.token) {
+      throw new Error('snapshot-protection: dev-token response carried no token')
+    }
+    authToken = tokenJson.token
   })
 
   afterAll(async () => {
@@ -69,6 +77,10 @@ describe('Snapshot Protection System E2E', () => {
   })
 
   beforeEach(async () => {
+    // Every test must actually assert something. Combined with the hard-failing setup above, this makes
+    // a silently-skipped (assertion-free) test impossible to report as green.
+    expect.hasAssertions()
+
     // Create a test snapshot for each test
     if (!testSnapshotId) {
       const snapshot = await snapshotService.createSnapshot({
@@ -82,6 +94,9 @@ describe('Snapshot Protection System E2E', () => {
       })
       testSnapshotId = snapshot.id
     }
+    if (!testSnapshotId) {
+      throw new Error('snapshot-protection: fixture snapshot was not created')
+    }
   })
 
   const authFetch = (url: string, init: RequestInit = {}) => {
@@ -94,7 +109,6 @@ describe('Snapshot Protection System E2E', () => {
 
   describe('Snapshot Labeling API', () => {
     it('should add tags to snapshot', async () => {
-      if (!baseUrl || !testSnapshotId) return
 
       const response = await authFetch(`${baseUrl}/api/snapshots/${testSnapshotId}/tags`, {
         method: 'PUT',
@@ -116,7 +130,6 @@ describe('Snapshot Protection System E2E', () => {
     })
 
     it('should remove tags from snapshot', async () => {
-      if (!baseUrl || !testSnapshotId) return
 
       // First add some tags
       await authFetch(`${baseUrl}/api/snapshots/${testSnapshotId}/tags`, {
@@ -151,7 +164,6 @@ describe('Snapshot Protection System E2E', () => {
     })
 
     it('should set protection level to protected', async () => {
-      if (!baseUrl || !testSnapshotId) return
 
       const response = await authFetch(`${baseUrl}/api/snapshots/${testSnapshotId}/protection`, {
         method: 'PATCH',
@@ -171,7 +183,6 @@ describe('Snapshot Protection System E2E', () => {
     })
 
     it('should set protection level to critical', async () => {
-      if (!baseUrl || !testSnapshotId) return
 
       const response = await authFetch(`${baseUrl}/api/snapshots/${testSnapshotId}/protection`, {
         method: 'PATCH',
@@ -191,7 +202,6 @@ describe('Snapshot Protection System E2E', () => {
     })
 
     it('should reject invalid protection level', async () => {
-      if (!baseUrl || !testSnapshotId) return
 
       const response = await authFetch(`${baseUrl}/api/snapshots/${testSnapshotId}/protection`, {
         method: 'PATCH',
@@ -210,7 +220,6 @@ describe('Snapshot Protection System E2E', () => {
     })
 
     it('should set release channel', async () => {
-      if (!baseUrl || !testSnapshotId) return
 
       const response = await authFetch(`${baseUrl}/api/snapshots/${testSnapshotId}/release-channel`, {
         method: 'PATCH',
@@ -230,7 +239,6 @@ describe('Snapshot Protection System E2E', () => {
     })
 
     it('should query snapshots by tags', async () => {
-      if (!baseUrl || !testSnapshotId) return
 
       // Add specific tags
       await authFetch(`${baseUrl}/api/snapshots/${testSnapshotId}/tags`, {
@@ -258,7 +266,6 @@ describe('Snapshot Protection System E2E', () => {
     })
 
     it('should query snapshots by protection level', async () => {
-      if (!baseUrl || !testSnapshotId) return
 
       // Set protection level
       await authFetch(`${baseUrl}/api/snapshots/${testSnapshotId}/protection`, {
@@ -283,7 +290,6 @@ describe('Snapshot Protection System E2E', () => {
 
   describe('Protection Rules API', () => {
     it('should create a protection rule', async () => {
-      if (!baseUrl) return
 
       const response = await authFetch(`${baseUrl}/api/admin/safety/rules`, {
         method: 'POST',
@@ -323,7 +329,6 @@ describe('Snapshot Protection System E2E', () => {
     })
 
     it('should list protection rules', async () => {
-      if (!baseUrl) return
 
       const response = await authFetch(`${baseUrl}/api/admin/safety/rules`, {
         headers: { 'x-user-id': testUserId }
@@ -336,7 +341,6 @@ describe('Snapshot Protection System E2E', () => {
     })
 
     it('should filter rules by target_type', async () => {
-      if (!baseUrl) return
 
       const response = await authFetch(`${baseUrl}/api/admin/safety/rules?target_type=snapshot`, {
         headers: { 'x-user-id': testUserId }
@@ -349,7 +353,6 @@ describe('Snapshot Protection System E2E', () => {
     })
 
     it('should get a single protection rule', async () => {
-      if (!baseUrl || !testRuleId) return
 
       const response = await authFetch(`${baseUrl}/api/admin/safety/rules/${testRuleId}`, {
         headers: { 'x-user-id': testUserId }
@@ -362,7 +365,6 @@ describe('Snapshot Protection System E2E', () => {
     })
 
     it('should update a protection rule', async () => {
-      if (!baseUrl || !testRuleId) return
 
       const response = await authFetch(`${baseUrl}/api/admin/safety/rules/${testRuleId}`, {
         method: 'PATCH',
@@ -384,7 +386,6 @@ describe('Snapshot Protection System E2E', () => {
     })
 
     it('should deactivate a protection rule', async () => {
-      if (!baseUrl || !testRuleId) return
 
       const response = await authFetch(`${baseUrl}/api/admin/safety/rules/${testRuleId}`, {
         method: 'PATCH',
@@ -404,7 +405,6 @@ describe('Snapshot Protection System E2E', () => {
     })
 
     it('should evaluate rules (dry-run)', async () => {
-      if (!baseUrl || !testRuleId) return
 
       // First reactivate the rule
       await authFetch(`${baseUrl}/api/admin/safety/rules/${testRuleId}`, {
@@ -442,7 +442,6 @@ describe('Snapshot Protection System E2E', () => {
     })
 
     it('should not match when conditions are not met', async () => {
-      if (!baseUrl || !testRuleId) return
 
       const response = await authFetch(`${baseUrl}/api/admin/safety/rules/evaluate`, {
         method: 'POST',
@@ -471,7 +470,6 @@ describe('Snapshot Protection System E2E', () => {
 
   describe('Protected Snapshot Cleanup', () => {
     it('should skip protected snapshots during cleanup', async () => {
-      if (!testSnapshotId) return
 
       // Set snapshot to protected
       await snapshotService.setProtectionLevel(testSnapshotId, 'protected', testUserId)
@@ -496,7 +494,6 @@ describe('Snapshot Protection System E2E', () => {
     })
 
     it('should skip critical snapshots during cleanup', async () => {
-      if (!testSnapshotId) return
 
       // Set snapshot to critical
       await snapshotService.setProtectionLevel(testSnapshotId, 'critical', testUserId)
@@ -523,7 +520,6 @@ describe('Snapshot Protection System E2E', () => {
 
   describe('SafetyGuard Integration', () => {
     it('should block operations based on protection rules', async () => {
-      if (!testSnapshotId || !testRuleId) return
 
       // Add production tag to snapshot
       await snapshotService.addTags(testSnapshotId, ['production'], testUserId)
@@ -547,7 +543,6 @@ describe('Snapshot Protection System E2E', () => {
     })
 
     it('should create risk elevation rule', async () => {
-      if (!baseUrl) return
 
       const response = await authFetch(`${baseUrl}/api/admin/safety/rules`, {
         method: 'POST',
@@ -592,7 +587,6 @@ describe('Snapshot Protection System E2E', () => {
     })
 
     it('should create approval requirement rule', async () => {
-      if (!baseUrl) return
 
       const response = await authFetch(`${baseUrl}/api/admin/safety/rules`, {
         method: 'POST',
