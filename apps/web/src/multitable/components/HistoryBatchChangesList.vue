@@ -202,11 +202,21 @@ function personSummariesForSide(c: HistoryChange, fieldId: string, v: unknown): 
 // Resolve the field for rendering. `props.fields` is the ACTIVE sheet only, so in all-tables mode a row on
 // another sheet found nothing and fell back to raw JSON. Fall back to the server's masked fieldTypes/
 // fieldNames maps, which describe exactly the fields whose values the projection already emitted.
+//
+// The synthesized field carries NO `property` — we only have the masked id→name/type maps, not the
+// per-field config. `formatFieldDisplay`'s property-dependent branches then silently take their DEFAULTS,
+// which FABRICATES values on an audit surface: a USD `currency` (property.code='USD') renders as
+// "¥1,000.00", and a `rating` with property.max=10 renders 8 as "★★★★★" (capped at the default max of 5).
+// So the cross-sheet fallback is restricted to `person`, the ONE type the D-2-era lock authorizes
+// `fieldTypes` for (…person-before-side-name-resolution… §0.1: fieldNames fixes the LABEL, fieldTypes
+// fixes the VALUE — for person). Every other cross-sheet type falls through to `formatDiffValue`, i.e.
+// the honest raw value. Rendering a value we cannot faithfully format is worse than not formatting it.
 function fieldForDiff(c: HistoryChange, fieldId: string): { id: string; name: string; type: string } | null {
   const active = props.fields?.find((x) => x.id === fieldId)
   if (active && typeof active.type === 'string') return active as { id: string; name: string; type: string }
   const type = props.fieldTypes?.[c.sheetId]?.[fieldId]
   if (!type) return null // no masked type ⇒ cannot render type-aware; caller falls back to plain text
+  if (type !== 'person') return null // property-less ⇒ would fabricate; see the note above
   return { id: fieldId, name: props.fieldNames?.[c.sheetId]?.[fieldId] ?? fieldId, type }
 }
 function formatDiffValueFor(c: HistoryChange, fieldId: string, v: unknown): string {

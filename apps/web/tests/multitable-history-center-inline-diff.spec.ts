@@ -666,6 +666,55 @@ describe('HistoryCenterModal — all-tables cross-sheet type-aware diffs + dirty
     } finally { app.unmount(); container.remove() }
   })
 
+  // NO-FABRICATION (review P2-1). `fieldTypes` gives us a cross-sheet field's id→name/type, but NOT its
+  // `property`. Formatting a property-dependent type from a property-LESS field makes formatFieldDisplay
+  // fall back to its defaults and INVENT a value: a USD currency renders with a ¥ symbol, and a rating with
+  // max=10 renders 8 as five full stars. History is an AUDIT surface — a wrong value is worse than an
+  // unformatted one. So the cross-sheet fallback is person-only; every other type shows the raw value.
+  const otherSheetCurrency = [{
+    sheetId: 'sheet_other', recordId: 'rec_9', action: 'update', version: 2,
+    changedFieldIds: ['fld_other_money'],
+    before: { fld_other_money: 1000 },
+    after: { fld_other_money: 2000 },
+  }] as unknown as HistoryBatchDetail['changes']
+
+  it('NO-FABRICATION: a cross-sheet CURRENCY diff shows the raw value, never a guessed currency symbol', async () => {
+    const { app, container } = await openWith({
+      ...detailWith(otherSheetCurrency),
+      fieldNames: { sheet_other: { fld_other_money: 'Amount' } },
+      fieldTypes: { sheet_other: { fld_other_money: 'currency' } }, // type known, property NOT
+    }, {})
+    try {
+      const before = container.querySelector('.meta-hist__diff-before')?.textContent ?? ''
+      const after = container.querySelector('.meta-hist__diff-after')?.textContent ?? ''
+      expect(before).toContain('1000')
+      expect(after).toContain('2000')
+      // the field is USD on its own sheet; we have no property here, so we must NOT stamp a symbol on it
+      expect(before).not.toContain('¥')
+      expect(before).not.toContain('$')
+      expect(after).not.toContain('¥')
+    } finally { app.unmount(); container.remove() }
+  })
+
+  it('NO-FABRICATION: a cross-sheet RATING diff shows the raw number, never stars against a guessed max', async () => {
+    const ratingChange = [{
+      sheetId: 'sheet_other', recordId: 'rec_9', action: 'update', version: 2,
+      changedFieldIds: ['fld_other_rating'],
+      before: { fld_other_rating: 8 }, // max=10 on its own sheet → 8/10, NOT full marks
+      after: { fld_other_rating: 9 },
+    }] as unknown as HistoryBatchDetail['changes']
+    const { app, container } = await openWith({
+      ...detailWith(ratingChange),
+      fieldNames: { sheet_other: { fld_other_rating: 'Score' } },
+      fieldTypes: { sheet_other: { fld_other_rating: 'rating' } }, // type known, property (max) NOT
+    }, {})
+    try {
+      const before = container.querySelector('.meta-hist__diff-before')?.textContent ?? ''
+      expect(before).toContain('8')
+      expect(before).not.toContain('★') // default max=5 would cap 8 to five stars ⇒ reads as full marks
+    } finally { app.unmount(); container.remove() }
+  })
+
   it('DIRTY VALUES: a person value holding an object/number/null never renders as "[object Object]"', async () => {
     const dirty = [{
       sheetId: 'sheet_1', recordId: 'rec_1', action: 'update', version: 2,
