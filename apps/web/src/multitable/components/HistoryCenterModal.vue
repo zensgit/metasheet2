@@ -10,7 +10,7 @@
     <div class="meta-hist__modal" role="dialog" aria-modal="true" :aria-label="t('历史记录', 'History')">
       <header class="meta-hist__header">
         <h3 class="meta-hist__title">{{ t('历史记录', 'History') }}</h3>
-        <button class="meta-hist__close" type="button" :aria-label="t('关闭', 'Close')" @click="emit('close')">×</button>
+        <MtIconButton class="meta-hist__close" :aria-label="t('关闭', 'Close')" @click="emit('close')">×</MtIconButton>
       </header>
 
       <div v-if="initialBatchId && !pinnedDismissed" class="meta-hist__pinned" data-test="hist-pinned-batch">
@@ -90,7 +90,7 @@ import { useLocale } from '../../composables/useLocale'
 import { useHistoryCenter } from '../composables/useHistoryCenter'
 import { historyActor } from '../utils/meta-record-labels'
 import HistoryBatchChangesList from './HistoryBatchChangesList.vue'
-import { MtButton } from '../ui'
+import { MtButton, MtIconButton } from '../ui'
 import type { LinkedRecordSummary, PersonSummary } from '../types'
 
 const props = defineProps<{
@@ -224,7 +224,9 @@ function formatTime(iso: string): string {
 .meta-hist__modal { background: var(--meta-surface, #fff); color: var(--meta-text, #1f2329); border-radius: 8px; min-width: 420px; max-width: 640px; max-height: 76vh; overflow: auto; padding: 16px; box-shadow: 0 8px 32px rgba(0, 0, 0, 0.18); }
 .meta-hist__header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
 .meta-hist__title { margin: 0; font-size: 15px; }
-.meta-hist__close { background: none; border: none; font-size: 20px; line-height: 1; cursor: pointer; color: inherit; }
+/* .meta-hist__close: now <MtIconButton> (ghost, token-styled; the × glyph char passes through its
+   default-slot icon fallback (size token-normalized to the icon control)). Bespoke hardcoded CSS removed
+   (UI-P2-1c T1 batch-4). Class kept on the element only for selector stability. */
 .meta-hist__filters { display: flex; gap: 8px; margin-bottom: 12px; flex-wrap: wrap; }
 .meta-hist__filter { font-size: 12px; padding: 4px 6px; border: 1px solid var(--meta-border, #ddd); border-radius: 4px; }
 /* .meta-hist__apply / .meta-hist__more (below): the Filter and Load-more controls are now <MtButton>

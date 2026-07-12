@@ -10,7 +10,7 @@
           {{ l('comment.inbox') }}
           <span v-if="unreadCount > 0" class="meta-comments-drawer__inbox-badge">{{ unreadCount }}</span>
         </RouterLink>
-        <button class="meta-comments-drawer__close" @click="emit('close')">&times;</button>
+        <MtIconButton class="meta-comments-drawer__close" @click="emit('close')">&times;</MtIconButton>
       </div>
     </div>
     <div class="meta-comments-drawer__body">
@@ -147,6 +147,7 @@ import { RouterLink } from 'vue-router'
 import { useLocale } from '../../composables/useLocale'
 import type { MetaCommentMentionSuggestion, MultitableComment } from '../types'
 import { normalizeMultitableComment } from '../api/client'
+import { MtIconButton } from '../ui'
 import {
   commentLabel,
   editingBanner,
@@ -416,7 +417,9 @@ function formatCommentPreview(content: string): string {
 .meta-comments-drawer__inbox-link { color: #409eff; font-size: 12px; text-decoration: none; }
 .meta-comments-drawer__inbox-link:hover { text-decoration: underline; }
 .meta-comments-drawer__inbox-badge { margin-left: 6px; padding: 2px 6px; border-radius: 999px; background: #eff6ff; color: #2563eb; font-size: 11px; }
-.meta-comments-drawer__close { border: none; background: none; font-size: 18px; cursor: pointer; color: #999; }
+/* .meta-comments-drawer__close: now <MtIconButton> (ghost, token-styled; the &times; glyph char passes
+   through its default-slot icon fallback (size token-normalized to the icon control)). Bespoke hardcoded CSS
+   removed (UI-P2-1c T1 batch-4). Class kept on the element only for selector stability. */
 .meta-comments-drawer__body { flex: 1; overflow-y: auto; padding: 10px 14px; }
 .meta-comments-drawer__loading, .meta-comments-drawer__empty { text-align: center; padding: 20px; color: #999; font-size: 13px; }
 .meta-comments-drawer__thread { margin-bottom: 12px; }
