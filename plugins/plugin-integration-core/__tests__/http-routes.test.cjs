@@ -6371,9 +6371,11 @@ async function testReadSourceConfiguredReadRoute() {
     ],
   }
   const storeCalls = []
+  const systemLoads = []
   const services = createMockServices({
     externalSystemRegistry: {
       async getExternalSystemForAdapter(input) {
+        systemLoads.push(input.id)
         return { id: input.id, kind: 'erp:k3-wise-webapi', credentials: { bearerToken: 'secret-token' }, config: { objects: {} } }
       },
     },
@@ -6458,12 +6460,15 @@ async function testReadSourceConfiguredReadRoute() {
   for (const leak of ['M-001', 'SECRET-NAME', 'MX-9', 'col_name', 'FName', 'secret-token']) {
     assert.ok(!recordEvidenceStr.includes(leak), `record-plane evidence must not leak ${leak}`)
   }
-  // Closed enum, same as the runtime's.
+  // Closed enum, same as the runtime's — and rejected BEFORE the system (and therefore its credentials) is
+  // resolved: a request we already know is invalid must not cause a credential lookup.
+  const loadsBeforeBadPlane = systemLoads.length
   const badPlane = await invoke(routes, 'POST', '/api/integration/read-source-configs/:id/read', {
     user: READ_USER, params: { id: 'rsc_ok' }, body: { inputs: { key: 'M-001' }, rowSource: 'raw' },
   })
   assert.equal(badPlane.statusCode, 400)
   assert.equal(badPlane.body.error.details.reason, 'execution_row_source_invalid')
+  assert.equal(systemLoads.length, loadsBeforeBadPlane, 'an invalid row source never resolves a system credential')
   const unexpectedField = await invoke(routes, 'POST', '/api/integration/read-source-configs/:id/read', {
     user: READ_USER, params: { id: 'rsc_ok' }, body: { inputs: { key: 'M-001' }, rowCap: 5000 },
   })
@@ -7263,6 +7268,19 @@ async function testStockPreparationReadonlySourceRunRoutes() {
     assert.equal(steered.body.error.details.field, 'inputs.<unexpected>')
   }
   assert.equal(sourceReadCalls.length, readsBeforeDeniedUsers, 'a steered input never reaches the source')
+
+  // The ERP material run caches the ERP material master; it is not project-scoped. A field accepted and
+  // then ignored invites the belief that it scopes something, so the body does not take one.
+  const projectScoped = await invoke(routes, 'POST', '/api/integration/stock-preparation/mvp/source-runs/erp-materials', {
+    user: ADMIN_USER,
+    body: {
+      projectId: 'business_project_1',
+      readSourceConfigId: ERP_CONFIG_ID,
+      syncRunId: 'erp_source_run_project_scoped',
+    },
+  })
+  assert.equal(projectScoped.statusCode, 400, 'the ERP run does not take a projectId')
+  assert.equal(projectScoped.body.error.code, 'STOCK_PREPARATION_ERP_SOURCE_RUN_REQUEST_INVALID')
 }
 
 // #3889: a config approved for one system KIND must not be executed against a system of another kind. The
