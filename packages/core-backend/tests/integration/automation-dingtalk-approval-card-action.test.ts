@@ -456,7 +456,7 @@ describeIfDatabase('A-2b send_dingtalk_approval_card action (real DB)', () => {
     expect(body.callbackType).toBe('STREAM')
     expect(body.callbackRouteKey).toBe('approval_card')
     expect(body.userId).toBe(DD_USER_ID)
-    expect(body.openSpaceId).toBe(`dtv1.card//im_robot.${DD_USER_ID}`)
+    expect(body.openSpaceId).toBe(`dtv1.card//IM_ROBOT.${DD_USER_ID}`)
     expect(body.imRobotOpenSpaceModel).toEqual({ supportForward: false })
     expect(body.imRobotOpenDeliverModel).toEqual({ robotCode: 'stream-app-key', spaceType: 'IM_ROBOT' })
     expect(body).not.toHaveProperty('openSpaceModel')

@@ -861,7 +861,11 @@ export async function sendDingTalkInteractiveApprovalCard(
   if (!rejectUrl) throw new Error('DingTalk interactive-card reject url is required')
   if (!callbackRouteKey) throw new Error('DingTalk interactive-card callback route key is required')
 
-  const openSpaceId = `dtv1.card//im_robot.${userId}`
+  // openSpaceId spaceType segment casing per DingTalk's official card-callback contract: the
+  // documented value is UPPERCASE `IM_ROBOT` (the sample library + `imRobotOpenDeliverModel.spaceType`
+  // below both use `IM_ROBOT`; a lowercase segment here was internally inconsistent). UAT-confirmable
+  // against the real createAndDeliver API.
+  const openSpaceId = `dtv1.card//IM_ROBOT.${userId}`
   const payload = await requestDingTalkJson(
     `${normalizeDingTalkOpenApiBaseUrl(config.openApiBaseUrl)}/v1.0/card/instances/createAndDeliver`,
     {

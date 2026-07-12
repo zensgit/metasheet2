@@ -186,6 +186,83 @@ describe('parseDingTalkApprovalCardCallback (B-3 §B-3 shape gates)', () => {
   })
 })
 
+// ── P2-2: the OFFICIAL params.action wire channel (primary) + actionIds (secondary) ────────────
+
+describe('parseDingTalkApprovalCardCallback (P2-2 params.action official channel)', () => {
+  type Parsed = ReturnType<typeof parseDingTalkApprovalCardCallback>
+  const expectApprove = (parsed: Parsed) =>
+    expect(parsed).toEqual({
+      ok: true,
+      callback: { outTrackId: DELIVERY_ID, action: 'approve', operatorDingTalkUserId: OPERATOR },
+    })
+  const expectNoOp = (parsed: Parsed) =>
+    expect(parsed).toEqual({ ok: false, outcome: 'ignored_unsupported_action', outTrackId: DELIVERY_ID })
+
+  it('(a) PRIMARY channel: params.action=approve with NO actionIds → approve (string or object content)', () => {
+    expectApprove(parseDingTalkApprovalCardCallback(wirePayload({
+      content: JSON.stringify({ cardPrivateData: { params: { action: 'approve' } } }),
+    })))
+    expectApprove(parseDingTalkApprovalCardCallback(wirePayload({
+      content: { cardPrivateData: { params: { action: 'approve' } } },
+    })))
+  })
+
+  it('(b) params.action and actionIds AGREE → approve', () => {
+    expectApprove(parseDingTalkApprovalCardCallback(wirePayload({
+      content: JSON.stringify({ cardPrivateData: { params: { action: 'approve' }, actionIds: ['approve'] } }),
+    })))
+  })
+
+  it('(c) params.action vs actionIds DISAGREE → fail-closed no-op (symmetric)', () => {
+    expectNoOp(parseDingTalkApprovalCardCallback(wirePayload({
+      content: JSON.stringify({ cardPrivateData: { params: { action: 'approve' }, actionIds: ['reject'] } }),
+    })))
+    expectNoOp(parseDingTalkApprovalCardCallback(wirePayload({
+      content: JSON.stringify({ cardPrivateData: { params: { action: 'reject' }, actionIds: ['approve'] } }),
+    })))
+  })
+
+  it('(d) params.action=reject → approve-only no-op', () => {
+    expectNoOp(parseDingTalkApprovalCardCallback(wirePayload({
+      content: JSON.stringify({ cardPrivateData: { params: { action: 'reject' } } }),
+    })))
+  })
+
+  it('(e) backward-compat: a single actionIds entry with NO params.action → approve', () => {
+    expectApprove(parseDingTalkApprovalCardCallback(wirePayload({
+      content: JSON.stringify({ cardPrivateData: { actionIds: ['approve'] } }),
+    })))
+    expectApprove(parseDingTalkApprovalCardCallback(wirePayload({
+      content: JSON.stringify({ cardPrivateData: { actionIds: ['approve'], params: {} } }),
+    })))
+  })
+
+  it('(f) P3-1 preserved: genuinely unreadable content (no readable params) → no-op, even with explicit approve', () => {
+    expectNoOp(parseDingTalkApprovalCardCallback(wirePayload({ content: 'not-json{{' })))
+    expectNoOp(parseDingTalkApprovalCardCallback(wirePayload({ action: 'approve', content: 'not-json{{' })))
+    expectNoOp(parseDingTalkApprovalCardCallback(wirePayload({ action: 'approve', content: 42 })))
+  })
+
+  it('a READABLE frame carrying only params.action is NOT swallowed by the P3-1 unreadable gate', () => {
+    // Regression guard: the P3-1 "content present but unreadable → fail-close" must not reject a
+    // valid template callback that legitimately fills params.action and omits actionIds.
+    expect(parseDingTalkApprovalCardCallback(wirePayload({
+      content: JSON.stringify({ cardPrivateData: { params: { action: 'approve' } } }),
+    })).ok).toBe(true)
+  })
+
+  it('pre-normalized business action + params.action: agreement → approve, disagreement → no-op', () => {
+    expectApprove(parseDingTalkApprovalCardCallback(wirePayload({
+      action: 'approve',
+      content: JSON.stringify({ cardPrivateData: { params: { action: 'approve' } } }),
+    })))
+    expectNoOp(parseDingTalkApprovalCardCallback(wirePayload({
+      action: 'approve',
+      content: JSON.stringify({ cardPrivateData: { params: { action: 'reject' } } }),
+    })))
+  })
+})
+
 // ── executor: ledger-only resolution + fail-closed operator + wrapper funneling ────────────────
 
 type QueryCall = { sql: string; params: unknown[] }
@@ -289,6 +366,16 @@ describe('executeDingTalkApprovalCardCallback (B-3 §B-3 execution)', () => {
     expect(result).toEqual({ outcome: 'ignored_unsupported_action', outTrackId: DELIVERY_ID })
     expect(h.calls).toHaveLength(0)
     expect(h.dispatchAction).not.toHaveBeenCalled()
+  })
+
+  it('P2-2: a params.action=approve template callback (no actionIds) executes through the wrapper', async () => {
+    const h = makeHarness()
+    const result = await executeDingTalkApprovalCardCallback(
+      h.deps as never,
+      wirePayload({ content: JSON.stringify({ cardPrivateData: { params: { action: 'approve' } } }) }),
+    )
+    expect(result.outcome).toBe('executed')
+    expect(h.dispatchAction).toHaveBeenCalledTimes(1)
   })
 
   it('unknown delivery id → delivery_not_found (values-free, no engine call)', async () => {
