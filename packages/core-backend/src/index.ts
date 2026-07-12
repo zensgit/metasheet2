@@ -2923,3 +2923,14 @@ export type {
   AggregatedHealth,
   HealthAggregatorConfig
 } from './services/HealthAggregatorService'
+
+/**
+ * D-2 side-door delete recoverability — TYPED SDK ERRORS on the package's public surface (OD-6; review
+ * P3-2). A plugin author catching a refused delete must be able to `instanceof` it, not string-match on
+ * `err.code`. Both are only reachable with `MULTITABLE_SIDE_DOOR_DELETE_TRASH_ENABLED='true'`:
+ *   - CapExceeded      — the record's inbound-edge count is over MULTITABLE_TOMBSTONE_CAPTURE_MAX_ROWS
+ *                        (fail-closed: refused rather than run half-captured).
+ *   - NonTransactional — the SDK's `deleteRecord` was wired outside a transaction (OD-7, fail-closed).
+ */
+export { MultitableRecordDeleteCapExceededError } from './multitable/record-errors'
+export { MultitableSideDoorDeleteNonTransactionalError } from './multitable/side-door-delete-trash'

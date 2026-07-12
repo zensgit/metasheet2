@@ -199,16 +199,71 @@ describeIfDatabase('D-1 — delete-revision parity for plugin-SDK + automation h
     expect(await deleteRevisionsOf(ghost)).toHaveLength(0)
   })
 
-  test('D-1 MINIMAL scope: neither path writes trash or tombstones (recoverability stays D-2)', async () => {
-    const recId = `rec_d1_scope_${TS}`
-    await insertRecord(recId, { title: 'scope check' })
-    await pluginDeleteRecord({ query: q as never, sheetId: SHEET, recordId: recId } as never)
-    const trash = await q('SELECT 1 FROM meta_records_trash WHERE record_id = $1', [recId]).catch(() => ({ rows: [] }))
-    expect(trash.rows).toHaveLength(0)
-    const tomb = await q(
-      "SELECT 1 FROM meta_link_tombstones WHERE record_id = $1 OR foreign_record_id = $1",
-      [recId],
-    ).catch(() => ({ rows: [] }))
-    expect(tomb.rows).toHaveLength(0)
+  /**
+   * D-2 FLIP (design-lock #4004 §2 "same-PR obligations"). This golden used to assert, unconditionally,
+   * that "neither path writes trash or tombstones" — the exact OPPOSITE of what D-2 does when its flag is
+   * on. Two things were wrong with it and both are fixed here:
+   *
+   *   1. Its NAME said "neither path" but its BODY only ever exercised the PLUGIN lane. The automation
+   *      lane was never covered. Both lanes are now asserted explicitly (the loop below).
+   *   2. Its claim is only true with `MULTITABLE_SIDE_DOOR_DELETE_TRASH_ENABLED` OFF. That is now stated
+   *      rather than assumed — and it is precisely D-2's §1.9 byte-identity promise, so it stays as a
+   *      GUARD (delete the D-2 flag check in records.ts / automation-executor.ts and these go red).
+   *
+   * The flag-ON parity assertions live in `multitable-d2-sidedoor-delete-recoverability-realdb.test.ts`
+   * (the §1.11 truth table, both lanes). Together the two files pin the whole matrix.
+   */
+  describe('D-2 flag OFF ⇒ byte-identical D-1: revision only, no trash, no tombstones (per lane)', () => {
+    // Pin the precondition explicitly: this suite asserts the flag-OFF half of the §1.11 truth table.
+    beforeAll(() => {
+      delete process.env.MULTITABLE_SIDE_DOOR_DELETE_TRASH_ENABLED
+    })
+
+    async function assertRevisionOnly(recId: string): Promise<void> {
+      const trash = await q('SELECT 1 FROM meta_records_trash WHERE record_id = $1', [recId]).catch(() => ({ rows: [] }))
+      expect(trash.rows).toHaveLength(0)
+      const tomb = await q(
+        'SELECT 1 FROM meta_link_tombstones WHERE record_id = $1 OR foreign_record_id = $1',
+        [recId],
+      ).catch(() => ({ rows: [] }))
+      expect(tomb.rows).toHaveLength(0)
+      // …but the D-1 revision IS still written. "No trash" must never quietly become "no revision".
+      expect(await deleteRevisionsOf(recId)).toHaveLength(1)
+    }
+
+    test('PLUGIN path: flag-off delete writes NO trash row and NO tombstones (recoverability stays opt-in)', async () => {
+      const recId = `rec_d1_scope_plugin_${TS}`
+      await insertRecord(recId, { title: 'scope check plugin' })
+      await pluginDeleteRecord({ query: q as never, sheetId: SHEET, recordId: recId } as never)
+      await assertRevisionOnly(recId)
+    })
+
+    test('AUTOMATION path: flag-off delete_record writes NO trash row and NO tombstones (the lane the old golden never covered)', async () => {
+      const recId = `rec_d1_scope_auto_${TS}`
+      await insertRecord(recId, { title: 'scope check automation' })
+      const exec = await makeExecutor().execute(deleteRuleFor(recId), {
+        recordId: recId,
+        sheetId: SHEET,
+        actorId: OWNER,
+        data: {},
+      })
+      expect(exec.steps[0]?.status).toBe('success')
+      await assertRevisionOnly(recId)
+    })
+
+    test('NESTING (§1.5): capture flag ON alone — with the D-2 flag off — still yields ZERO side-door tombstones', async () => {
+      // The trap this pins: the UI path gates capture on MULTITABLE_TOMBSTONE_CAPTURE_ENABLED alone.
+      // Copying that gating onto the side doors would silently start writing tombstones for every
+      // operator already running with capture on, the moment D-2 deploys — breaking byte-identity.
+      process.env.MULTITABLE_TOMBSTONE_CAPTURE_ENABLED = 'true'
+      try {
+        const recId = `rec_d1_scope_nest_${TS}`
+        await insertRecord(recId, { title: 'nesting check' })
+        await pluginDeleteRecord({ query: q as never, sheetId: SHEET, recordId: recId } as never)
+        await assertRevisionOnly(recId)
+      } finally {
+        delete process.env.MULTITABLE_TOMBSTONE_CAPTURE_ENABLED
+      }
+    })
   })
 })

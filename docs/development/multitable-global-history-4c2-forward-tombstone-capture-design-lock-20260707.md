@@ -26,11 +26,17 @@
 | # | 记录硬删路径 | delete revision | trash | tombstone(flag-on) | PIT as-of-T |
 |---|---|---|---|---|---|
 | 1 | `record-service.ts` `deleteRecord`(本锁覆盖) | ✓ | ✓ | ✓ inbound | ✅ |
-| 2 | `univer-meta.ts:10066` PIT-reset 内联删除 | ✓ | ✓ | **✗**(无 anchor;拟由 4c-3 补) | ✅ |
-| 3 | `records.ts:565` plugin-SDK | **✗** | **✗** | ✗ | ❌ 谎报存活 |
-| 4 | `automation-executor.ts:2269` automation `delete_record` | **✗** | **✗** | **✗** | ❌ 谎报存活 |
+| 2 | `univer-meta.ts` PIT-reset 内联删除 | ✓ | ✓ | ✓ inbound(**4c-3 §7/D-3 已补 anchor + 捕获**) | ✅ |
+| 3 | `records.ts` plugin-SDK | ✓(**D-1**,`source:'plugin'`) | ✓(**D-2**,flag-on) | ✓ inbound(**D-2**,双 flag-on) | ✅(D-1 修复) |
+| 4 | `automation-executor.ts` automation `delete_record` | ✓(**D-1**,`source:'automation'`) | ✓(**D-2**,flag-on) | ✓ inbound(**D-2**,双 flag-on) | ✅(D-1 修复) |
 
-第 3、4 条不写 delete revision,而 `reconstructRecordsAtT` 纯从 `meta_record_revisions` 派生存在性 ⇒ **被它们删除的记录在任意 T 都被 PIT 判为「仍存在」**。这是本线核心承诺的缺陷,详见 `…destruction-path-coverage-gap-audit-20260708.md`(含 owner 决策菜单 D-1..D-5)。**本锁不修第 2/3/4 条**;4c-3 的可达边界因此如实收窄为「路径 1(+ 若 D-3 采纳则含路径 2)」。
+> **2026-07-12 更新(D-2 落地后重写本表):** 上表原记录的是 4c-2 impl 期(2026-07-08)的实情,此后三个 rung 依次把它填满 —— 第 2 条由 **4c-3 §7/D-3**(#3975)补齐 anchor 与捕获;第 3、4 条的 **delete revision** 由 **D-1**(#3969/#3992)补齐(PIT 不再谎报存活),**trash + inbound 捕获**由 **D-2**(#4004 锁,owner ratify)补齐。
+>
+> **C2 覆盖率因此从 2/4 升到 4/4 —— 但口径必须精确:** D-2 的两条侧门路径(3、4)的捕获**嵌套在 D-2 flag 之下**(`MULTITABLE_SIDE_DOOR_DELETE_TRASH_ENABLED` **且** `MULTITABLE_TOMBSTONE_CAPTURE_ENABLED` 同时为 `'true'` 才捕获)。所以:
+> - **仅开 CAPTURE(不开 D-2)⇒ 覆盖仍是 2/4**(路径 1、2),侧门**零 tombstone**、零行为变化(byte-identity,D-2 锁 §1.9;golden G6a)。
+> - **双 flag 全开 ⇒ 覆盖 4/4**,「flag on ⇒ 凡销毁必已捕获」对全部四条成立。
+>
+> 路径 1、2 保持各自原有的 CAPTURE-only 门(不受 D-2 flag 影响)。
 
 可照抄蓝本 = `meta_records_trash`(migration `zzzz20260617120000_create_meta_records_trash.ts:19-46`):独立表(零热读路径改动)、same-txn INSERT-before-DELETE、`isUndefinedTableError` 兼容守卫、surrogate PK、original timestamps、retention 默认关。
 
@@ -93,12 +99,12 @@
 
 sheet 删除级联(`univer-meta.ts:11927`)、跨 base、任何 FE 面(独立 gated 项)、`meta_records_trash` 的 retention 接入、4d(不可能项,永不承诺)。
 
-**其余记录硬删路径(impl 期审计,显式出界):** C2「flag on ⇒ 凡销毁必已捕获」的口径**仅覆盖** `record-service.deleteRecord` 与 `dropFieldCascade`。另外三条路径均**不在**本锁范围(且均非 4c-2 引入的回归):
+**其余记录硬删路径(impl 期审计,显式出界 —— 均已由后续 rung 各自闭合,见下):** 本锁自身的 C2 口径**仅覆盖** `record-service.deleteRecord` 与 `dropFieldCascade`;另外三条路径当时均不在本锁范围(且均非 4c-2 引入的回归)。**2026-07-12 更新:三条已分别由独立 rung 闭合**,如 §1 表所载:
 
-- `records.ts:565` plugin-SDK `deleteRecord`(经 `plugin-scope.ts`):无 trash / 无 revision / 无 tombstone(已在 `records.ts` 就地注释)。
-- `automation-executor.ts:2269` automation `delete_record`:**已上线、无 flag、有授权 UI**,无 trash / 无 revision / 无 tombstone。
-- `univer-meta.ts:10066` PIT-reset 内联删除:有 trash + delete revision,**无 tombstone**(其 `recordRecordRevision` 未预生成 id,故无 anchor 可挂)。
+- `records.ts` plugin-SDK `deleteRecord`(经 `plugin-scope.ts`):**D-1** 补 delete revision;**D-2** 补 trash + inbound 捕获(嵌套于 `MULTITABLE_SIDE_DOOR_DELETE_TRASH_ENABLED`,默认 OFF)。
+- `automation-executor.ts` automation `delete_record`(**已上线、无 flag、有授权 UI**):同上(D-1 + D-2)。
+- `univer-meta.ts` PIT-reset 内联删除:**4c-3 §7/D-3** 补 anchor + 捕获(此前有 trash + delete revision,但 `recordRecordRevision` 未预生成 id,故无 anchor 可挂)。
 
-前两条不写 delete revision ⇒ 经它们删除的记录被 `reconstructRecordsAtT` 永久判为「仍存在」(PIT 污染)。三条的定性、后果与 owner 决策菜单见 `…destruction-path-coverage-gap-audit-20260708.md`。给它们 trash/capture/revision 对等属**独立 rung**,非 4c-2。
+前两条此前不写 delete revision ⇒ 经它们删除的记录被 `reconstructRecordsAtT` 永久判为「仍存在」(PIT 污染)——**D-1 已修**。三条的定性、后果与 owner 决策菜单见 `…destruction-path-coverage-gap-audit-20260708.md`。给它们 trash/capture 对等的正是 **D-2**(独立 rung,非 4c-2)。
 
 **解锁词示例:「ratify 4c-2」(可附修改意见)。**
