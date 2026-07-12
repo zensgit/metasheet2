@@ -420,6 +420,27 @@ async function selectAdminSection(page, sectionId, headingName = null) {
   return section
 }
 
+async function ensureImportAdvancedOptionsVisible(importSection, waitMs = adminReadyTimeoutMs) {
+  // #3708 moved payload JSON behind a collapsed advanced panel. Older deployments have no toggle.
+  const payloadInput = importSection.locator('#attendance-import-payload').first()
+  if (await payloadInput.isVisible().catch(() => false)) return payloadInput
+
+  const toggle = importSection.locator('[data-testid="attendance-import-advanced-toggle"]').first()
+  if (await toggle.count()) {
+    const expanded = await toggle.getAttribute('aria-expanded')
+    if (expanded !== 'true') {
+      await toggle.click()
+    }
+    const advanced = importSection.locator('[data-testid="attendance-import-advanced"]').first()
+    if (await advanced.count()) {
+      await advanced.waitFor({ state: 'visible', timeout: waitMs })
+    }
+  }
+
+  await payloadInput.waitFor({ state: 'visible', timeout: waitMs })
+  return payloadInput
+}
+
 function squashWhitespace(value) {
   return String(value || '').replace(/\s+/g, ' ').trim()
 }
@@ -448,13 +469,12 @@ async function collectAdminImportDebugState(page) {
 }
 
 async function assertAdminRetryState(page, importSection) {
-  const payloadInput = importSection.locator('#attendance-import-payload').first()
+  const payloadInput = await ensureImportAdvancedOptionsVisible(importSection)
   const previewButton = importSection.getByRole('button', { name: labels.preview }).first()
   const adminStatusBlock = page.locator('div.attendance__status-block--admin').first()
   const invalidJsonMessage = adminStatusBlock.getByText(labels.invalidImportJson).first()
   const retryPreviewButton = adminStatusBlock.getByRole('button', { name: labels.retryPreview }).first()
 
-  await payloadInput.waitFor({ timeout: adminReadyTimeoutMs })
   await previewButton.waitFor({ timeout: adminReadyTimeoutMs })
 
   if (await invalidJsonMessage.isVisible().catch(() => false) || await retryPreviewButton.isVisible().catch(() => false)) {
@@ -754,9 +774,8 @@ async function resolveRecoveryUserId(apiBase) {
 
 async function assertImportJobRecoveryFlow(page, importSection, apiBase) {
   logInfo('Admin import recovery assertion started')
-  const payloadInput = importSection.locator('#attendance-import-payload').first()
+  const payloadInput = await ensureImportAdvancedOptionsVisible(importSection)
   const importButton = importSection.getByRole('button', { name: labels.import }).first()
-  await payloadInput.waitFor({ timeout: adminReadyTimeoutMs })
   await importButton.waitFor({ timeout: adminReadyTimeoutMs })
 
   const profileSelect = importSection.locator('#attendance-import-profile').first()
