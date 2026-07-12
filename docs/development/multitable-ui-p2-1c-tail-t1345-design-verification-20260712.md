@@ -1,6 +1,8 @@
 # 多维表 UI-P2-1c tail(#3866)· T1/T3/T4/T5 实现与验证记录(2026-07-12)
 
-**类型**:实现与验证记录(docs-only,零 runtime,可自验)。承接 owner 的两步走指令(第一步批 12 把 design-lock,第二步只开一条 runtime 车道 = #3866 Lane-A tail),记录 tail 五档中 **T1/T3/T4/T5 四档的落地**;**T2 按 owner 护栏 HOLD**。
+**类型**:实现与验证记录(docs-only,零 runtime,可自验)。承接 owner 的两步走指令(第一步批 12 把 design-lock,第二步只开一条 runtime 车道 = #3866 Lane-A tail),记录 tail 五档中 **T1/T3/T4/T5 四档的落地**;**T2 在本轮当时按 owner 护栏 HOLD**。
+
+> **⚠ 时点说明(勘误 2026-07-12)**:本文是**那一轮的当期记录**。**T2 此后已由 owner 裁定(选 A)并落地**(#4156 `8118f0f65`)——凡本文写「T2 未动 / HOLD / MtButton 无 plain 变体」处,**均为当时事实,不是当前状态**。当前状态见 **§6**。
 
 **前置**:tail 设计锁 `multitable-ui-p2-1c-tail-resolution-designlock-20260707.md` 于 **2026-07-11 RATIFIED**(owner batch-ratify 指令,12 把锁机械执行 + origin/main 逐把对账)。
 
@@ -54,17 +56,21 @@ batch-1 门禁抓出:MtIconButton 把 × **归一到 icon token 尺寸(14px)+ co
 
 热 main + strict + enforce_admins:多 PR 同 arm 会互抢绿窗饥饿。**本轮抓到一个自伤 bug**:heartbeat 里「看到全绿就 sync」——但 `update-branch` 会重跑 8 分钟 CI,下一轮又看到绿又 sync,**等于自己不停重置 CI、饿死自己的 PR**。修正为:**REST poke-then-query 判真 `behind` 才 sync**(`clean` 让 auto-merge 收、`blocked` 让 CI 跑完),并对末尾几个 PR **串行聚焦**(一次只顶一个)。修正后立刻连落。
 
-## 6. 剩余(全部 owner-gated)
+## 6. 剩余
 
-- **🔒 T2 soft-tinted create**(Gallery/Kanban/Timeline 的 `#ecf5ff` 底 + `#2563eb` 字)——**等 owner 选 A(给 MtButton 加 plain/tinted 变体,锁推荐)/ B / C**。MtButton 现无对应变体;不许实现自行发明。
+> **⚠ 勘误(2026-07-12)——本节原写作「剩余(全部 owner-gated)」且把 T2 列为 🔒 HOLD,这在本文落地时已经过期。**
+> T2 **早已由 owner 裁定(选 A)并落地**;本文其余部分(§3 T3 段)甚至已经引用了「#4156 已落 main」,却漏改了本节和 §1/§7 的旧表述——**头部改了、正文残留 = 文档自相矛盾**,正是本线记过的 fix-forward 教训(改新账必须**全文**搜旧表述,不能只改一处)。下方已订正。
+
+- **✅ T2 soft-tinted create — 已完成,非 gated。** owner 裁决 = **选 A**:给 `MtButton` 新增 **`plain`** 变体(token-only,零新 hex),`MtButtonVariant = 'primary' | 'ghost' | 'danger' | 'plain'`。落地 **#4156 `8118f0f65`**;`MtButton.vue:36` 携该 union、`:139` 是 `.mt-button--plain` 规则;Gallery/Kanban/Timeline 三处 soft-tinted create 全迁(`variant="plain"` 各 4/3/5 处)。后续 **#4166 `9bc8d6853`** 把 MetaViewManager 的 add-filter/add-sort 从误迁的 MtLink 回收到同一个 `plain` 变体。
+  尺寸 owner 另有裁定:**不加 `size="sm"`**,保持 MtButton 默认 `md`(12→13px 字号、28→32px 高度属 UI-P2 的尺寸归一;若日后觉得挤,单开尺寸审计票)。
 - **T1 剩余批次**:仍有 close-× 分布在其它 dialog/manager(部分需 T4 harness 挂载)。
 - **T3 剩余批次**:MetaFieldManager / MetaImportModal 的 `__btn-inline`(代码注释里被标为 T3-GATED,但**不在锁 §2-T3 的枚举范围内**,需单独 ratify 后才能动)。
 - **T3 勘误已回收**:#4131 迁的 MetaViewManager `__btn-inline` 2/4(addFilter/addSort)**已由 fix-forward 从 MtLink 改迁到 `MtButton variant="plain"`**(§2-T3 前提事实勘误——该 class 原是灰虚线框 action,非文字链接;详见 §3 T3 段)。未迁的另 2 个 sharer(reloadLatestConfig/dismissLiveRefreshNotice)保持原生虚线框按钮不变。T3 本档其余三处(ExportDialog/FilterGroup/NotificationBell)MtLink 落地不受此勘误影响。
 - **T5 剩余批次**:MetaRecordDrawer 等其它 shared-class manager。
-- 以上均可在 owner 给 T2 决定后与 T2 一并排期;**不主张 tail「完成」**——完成的是 T1/T3/T4/T5 的首批 + T3/T4 的一次性基础设施(MtLink 原语 / behind-flow harness)。
+- T2 已闭;**T1/T5 的剩余批次不再等任何 T2 决定,可直接排**(2026-07-12 起已在排)。**仍不主张 tail「完成」**——已完成的是 T1/T3/T5 的若干批 + **T2 全档** + T3/T4 的一次性基础设施(MtLink 原语 / behind-flow harness);T1/T5 均有剩余批次,且 **T5 的 MetaRecordDrawer 另有 owner 决策点**(toggle/emoji 处理,见 `multitable-ui-p2-1c-t5-recorddrawer-decision-brief-20260712.md`)。
 
 ## 7. 本文不主张什么
 
-- 不主张 tail 五档已全部完成(T2 未动、T1/T5 有剩余批次)。
+- 不主张 tail 五档已全部完成。**T2 已完成**(勘误,见 §6);但 **T1/T5 仍有剩余批次**,且 T5 的 MetaRecordDrawer 卡在 owner 决策点。
 - 不主张 #4131/#4133/#4140/#4143 经过了**独立 subagent** 对抗门禁(它们是主循环 Opus 亲审,已在各 PR 标注)。
 - 不主张任何权限/删除/AI 逻辑被触碰——恰恰相反,红线逐行核验为零触碰。

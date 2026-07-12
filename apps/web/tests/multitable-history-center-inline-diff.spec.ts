@@ -545,3 +545,192 @@ describe('HistoryCenterModal — restore back-reference badge', () => {
     } finally { app.unmount(); container.remove() }
   })
 })
+
+// Person before-side name resolution. The grid's `personSummaries` cache describes the record's CURRENT
+// cell, so a person REMOVED by the very change you're looking at is NOT in it and used to render as a raw
+// userId — "who was removed" was unreadable. The server's `personNames` map covers BOTH sides.
+// Priority per id: personNames → grid cell cache → raw id.
+describe('HistoryCenterModal — person before-side name resolution', () => {
+  const removedChange = [{
+    sheetId: 'sheet_1', recordId: 'rec_1', action: 'update', version: 2,
+    changedFieldIds: ['fld_person'],
+    before: { fld_person: ['user_kept', 'user_removed'] },
+    after: { fld_person: ['user_kept'] },
+  }] as unknown as HistoryBatchDetail['changes']
+
+  async function openWith(personNames: Record<string, { display: string; inactive?: boolean }> | undefined, personSummaries: unknown) {
+    mockListHistoryEvents.mockResolvedValue({ batches: [batch()], total: 1, nextCursor: null, searchTruncated: false })
+    mockGetHistoryBatch.mockResolvedValue({ ...detailWith(removedChange), ...(personNames ? { personNames } : {}) })
+    const { app, container } = mountModalWithProps({ fields: TYPED_FIELDS, personSummaries })
+    await flushPromises()
+    container.querySelector<HTMLButtonElement>('[data-test="hist-batch"]')!.click()
+    await flushPromises()
+    return { app, container }
+  }
+
+  it('BEFORE side resolves the REMOVED person from personNames — the grid cache cannot know them', async () => {
+    // the cache holds ONLY the current cell (user_kept); user_removed is gone from it by definition
+    const { app, container } = await openWith(
+      { user_kept: { display: 'Kept Person' }, user_removed: { display: 'Removed Person' } },
+      { rec_1: { fld_person: [{ id: 'user_kept', display: 'Kept Person' }] } },
+    )
+    try {
+      const before = container.querySelector('.meta-hist__diff-before')?.textContent ?? ''
+      expect(before).toContain('Removed Person') // ← the whole point of the feature
+      expect(before).not.toContain('user_removed') // not the raw id
+      expect(before).toContain('Kept Person')
+    } finally { app.unmount(); container.remove() }
+  })
+
+  it('marks a DEACTIVATED person and still renders them (OD-P2)', async () => {
+    const { app, container } = await openWith(
+      { user_kept: { display: 'Kept Person' }, user_removed: { display: 'Removed Person', inactive: true } },
+      { rec_1: { fld_person: [{ id: 'user_kept', display: 'Kept Person' }] } },
+    )
+    try {
+      const before = container.querySelector('.meta-hist__diff-before')?.textContent ?? ''
+      expect(before).toContain('Removed Person') // still visible…
+      expect(before).toContain('deactivated') // …and marked
+    } finally { app.unmount(); container.remove() }
+  })
+
+  it('falls back to the grid cache, then to the raw id, when personNames lacks the id', async () => {
+    // personNames covers neither id → cache supplies user_kept; user_removed has no source → raw id
+    const { app, container } = await openWith(
+      {},
+      { rec_1: { fld_person: [{ id: 'user_kept', display: 'Kept Person' }] } },
+    )
+    try {
+      const before = container.querySelector('.meta-hist__diff-before')?.textContent ?? ''
+      expect(before).toContain('Kept Person') // cache fallback
+      expect(before).toContain('user_removed') // raw-id fallback, not JSON
+      expect(before).not.toContain('[')
+    } finally { app.unmount(); container.remove() }
+  })
+
+  it('no personNames at all (older payload) → legacy behavior exactly (cache, then raw id)', async () => {
+    const { app, container } = await openWith(undefined, { rec_1: { fld_person: [{ id: 'user_kept', display: 'Kept Person' }] } })
+    try {
+      const before = container.querySelector('.meta-hist__diff-before')?.textContent ?? ''
+      expect(before).toContain('Kept Person')
+      expect(before).toContain('user_removed')
+    } finally { app.unmount(); container.remove() }
+  })
+})
+
+// all-tables: a change row on a NON-ACTIVE sheet. `props.fields` carries only the active sheet, so before
+// `fieldTypes` such a row had no type and fell back to raw JSON — a cross-table person diff rendered as
+// `["user_x"]`. The server's masked fieldTypes/fieldNames maps close that, and dirty values must never be
+// stringified into the UI as "[object Object]".
+describe('HistoryCenterModal — all-tables cross-sheet type-aware diffs + dirty-value filtering', () => {
+  async function openWith(detail: Record<string, unknown>, props: Record<string, unknown>) {
+    mockListHistoryEvents.mockResolvedValue({ batches: [batch()], total: 1, nextCursor: null, searchTruncated: false })
+    mockGetHistoryBatch.mockResolvedValue(detail)
+    const { app, container } = mountModalWithProps({ fields: TYPED_FIELDS, ...props })
+    await flushPromises()
+    container.querySelector<HTMLButtonElement>('[data-test="hist-batch"]')!.click()
+    await flushPromises()
+    return { app, container }
+  }
+
+  const otherSheetChange = [{
+    sheetId: 'sheet_other', recordId: 'rec_9', action: 'update', version: 2,
+    changedFieldIds: ['fld_other_person'],
+    before: { fld_other_person: ['user_kept', 'user_removed'] },
+    after: { fld_other_person: ['user_kept'] },
+  }] as unknown as HistoryBatchDetail['changes']
+
+  it('a PERSON diff on a NON-ACTIVE sheet renders names (not raw JSON) via the masked fieldTypes map', async () => {
+    const { app, container } = await openWith({
+      ...detailWith(otherSheetChange),
+      fieldNames: { sheet_other: { fld_other_person: 'Owners' } },
+      fieldTypes: { sheet_other: { fld_other_person: 'person' } },
+      personNames: { user_kept: { display: 'Kept Person' }, user_removed: { display: 'Removed Person' } },
+    }, {})
+    try {
+      const before = container.querySelector('.meta-hist__diff-before')?.textContent ?? ''
+      expect(before).toContain('Removed Person') // resolved, cross-sheet
+      expect(before).toContain('Kept Person')
+      expect(before).not.toContain('[') // NOT raw JSON
+    } finally { app.unmount(); container.remove() }
+  })
+
+  it('without a masked type for that sheet, it degrades to plain text (never crashes)', async () => {
+    const { app, container } = await openWith({
+      ...detailWith(otherSheetChange),
+      fieldNames: { sheet_other: { fld_other_person: 'Owners' } },
+      // no fieldTypes → cannot render type-aware
+    }, {})
+    try {
+      expect(container.querySelector('.meta-hist__diff-before')).toBeTruthy()
+    } finally { app.unmount(); container.remove() }
+  })
+
+  // NO-FABRICATION (review P2-1). `fieldTypes` gives us a cross-sheet field's id→name/type, but NOT its
+  // `property`. Formatting a property-dependent type from a property-LESS field makes formatFieldDisplay
+  // fall back to its defaults and INVENT a value: a USD currency renders with a ¥ symbol, and a rating with
+  // max=10 renders 8 as five full stars. History is an AUDIT surface — a wrong value is worse than an
+  // unformatted one. So the cross-sheet fallback is person-only; every other type shows the raw value.
+  const otherSheetCurrency = [{
+    sheetId: 'sheet_other', recordId: 'rec_9', action: 'update', version: 2,
+    changedFieldIds: ['fld_other_money'],
+    before: { fld_other_money: 1000 },
+    after: { fld_other_money: 2000 },
+  }] as unknown as HistoryBatchDetail['changes']
+
+  it('NO-FABRICATION: a cross-sheet CURRENCY diff shows the raw value, never a guessed currency symbol', async () => {
+    const { app, container } = await openWith({
+      ...detailWith(otherSheetCurrency),
+      fieldNames: { sheet_other: { fld_other_money: 'Amount' } },
+      fieldTypes: { sheet_other: { fld_other_money: 'currency' } }, // type known, property NOT
+    }, {})
+    try {
+      const before = container.querySelector('.meta-hist__diff-before')?.textContent ?? ''
+      const after = container.querySelector('.meta-hist__diff-after')?.textContent ?? ''
+      expect(before).toContain('1000')
+      expect(after).toContain('2000')
+      // the field is USD on its own sheet; we have no property here, so we must NOT stamp a symbol on it
+      expect(before).not.toContain('¥')
+      expect(before).not.toContain('$')
+      expect(after).not.toContain('¥')
+    } finally { app.unmount(); container.remove() }
+  })
+
+  it('NO-FABRICATION: a cross-sheet RATING diff shows the raw number, never stars against a guessed max', async () => {
+    const ratingChange = [{
+      sheetId: 'sheet_other', recordId: 'rec_9', action: 'update', version: 2,
+      changedFieldIds: ['fld_other_rating'],
+      before: { fld_other_rating: 8 }, // max=10 on its own sheet → 8/10, NOT full marks
+      after: { fld_other_rating: 9 },
+    }] as unknown as HistoryBatchDetail['changes']
+    const { app, container } = await openWith({
+      ...detailWith(ratingChange),
+      fieldNames: { sheet_other: { fld_other_rating: 'Score' } },
+      fieldTypes: { sheet_other: { fld_other_rating: 'rating' } }, // type known, property (max) NOT
+    }, {})
+    try {
+      const before = container.querySelector('.meta-hist__diff-before')?.textContent ?? ''
+      expect(before).toContain('8')
+      expect(before).not.toContain('★') // default max=5 would cap 8 to five stars ⇒ reads as full marks
+    } finally { app.unmount(); container.remove() }
+  })
+
+  it('DIRTY VALUES: a person value holding an object/number/null never renders as "[object Object]"', async () => {
+    const dirty = [{
+      sheetId: 'sheet_1', recordId: 'rec_1', action: 'update', version: 2,
+      changedFieldIds: ['fld_person'],
+      before: { fld_person: [{ id: 'user_kept' }, 42, null, 'user_kept'] },
+      after: { fld_person: ['user_kept'] },
+    }] as unknown as HistoryBatchDetail['changes']
+    const { app, container } = await openWith({
+      ...detailWith(dirty),
+      personNames: { user_kept: { display: 'Kept Person' } },
+    }, {})
+    try {
+      const before = container.querySelector('.meta-hist__diff-before')?.textContent ?? ''
+      expect(before).not.toContain('[object Object]') // ← the whole point
+      expect(before).not.toContain('42')
+      expect(before).toContain('Kept Person') // the one clean id still resolves
+    } finally { app.unmount(); container.remove() }
+  })
+})
