@@ -14457,10 +14457,49 @@ export function univerMetaRouter(): Router {
               `UPDATE meta_records
                SET data = data || $1::jsonb, updated_at = now(), version = version + 1, modified_by = $4
                WHERE id = $2 AND sheet_id = $3
-               RETURNING version`,
+               RETURNING version, data`,
               [JSON.stringify(patch), recordId, view.sheetId, getRequestActorId(req)],
             )
+            // D-1c slice ① required fix (zero-row RETURNING fail-closed): the SELECT ... FOR UPDATE
+            // above already locked+confirmed this row exists within THIS transaction, so a concurrent
+            // DELETE/UPDATE from another transaction is blocked until we commit — this branch is not
+            // expected to be reachable in normal operation. Fail closed anyway, not open: if a future
+            // refactor ever drops that lock (or any other same-txn path removes the row), a zero-row
+            // UPDATE must NOT fall through and write a spurious `update` revision for a record that's
+            // no longer there. meta_record_revisions.record_id carries no FK — an unguarded write here
+            // would silently persist and could resurrect a deleted record via reconstructRecordsAtT.
+            if ((updateRes as any).rows.length === 0) {
+              throw new NotFoundError(`Record not found: ${recordId}`)
+            }
             nextVersion = Number((updateRes as any).rows[0]?.version ?? serverVersion)
+            // D-1c slice ① (form-submit EDIT = A1, ratified design-lock 2026-07-13, OD-1..OD-3): this
+            // UPDATE previously mutated meta_records with NO revision — reconstructRecordsAtT (the PIT
+            // view / revert / reset primitive) derives existence+data PURELY from meta_record_revisions,
+            // so it kept returning the pre-edit row forever, and a sheet revert/reset to a T after this
+            // edit would silently overwrite the member's edit with the stale pre-edit value (irrecoverably
+            // — no trash row, no prior revision, nothing). Link-field edits fold into this SAME UPDATE
+            // (`patch[fieldId] = ids` above, before the field-validation loop returns) and are therefore
+            // already inside `snapshot` below — the ids land in the ordinary `data` snapshot like any
+            // other cell (OD-4: in scope). Edge-level `meta_links` history is a SEPARATE, still-unsolved
+            // design-lock (OD-4) — this does not claim edge-level completeness.
+            // snapshot = the full post-merge row (RETURNING …, data), NOT the patch, mirroring the
+            // canonical bulk-PATCH shape (record-write-service.ts:998) — a naive `snapshot: patch` would
+            // silently truncate every multi-field record to just the edited fields.
+            // source='public-form' per OD-2 (the surface, not the actor's auth level — this branch
+            // happens to be authenticated-only, but the sibling CREATE branch below on the same form
+            // surface can be anonymous, so 'source' names the FORM SURFACE consistently for both).
+            // actorId carries getRequestActorId(req) verbatim (OD-3) — never fabricated.
+            await recordRecordRevision(query, {
+              sheetId: view.sheetId,
+              recordId,
+              version: nextVersion,
+              action: 'update',
+              source: 'public-form',
+              actorId: getRequestActorId(req),
+              changedFieldIds: Object.keys(patch),
+              patch,
+              snapshot: normalizeJson((updateRes as any).rows[0]?.data),
+            })
           } else {
             nextVersion = serverVersion
           }
@@ -14500,6 +14539,7 @@ export function univerMetaRouter(): Router {
         const latestFields = await loadFieldsForSheet(query, view.sheetId)
         Object.assign(patch, await allocateAutoNumberValues(query, view.sheetId, latestFields))
 
+        const createActorId = effectivePublicAccessAllowed && !access.userId ? null : getRequestActorId(req)
         const insertRes = await query(
           `INSERT INTO meta_records (id, sheet_id, data, version, created_by, modified_by)
            VALUES ($1, $2, $3::jsonb, 1, $4, $4)
@@ -14508,7 +14548,7 @@ export function univerMetaRouter(): Router {
             resultRecordId,
             view.sheetId,
             JSON.stringify(patch),
-            effectivePublicAccessAllowed && !access.userId ? null : getRequestActorId(req),
+            createActorId,
           ],
         )
         resultRecordId = String((insertRes as any).rows[0]?.id ?? resultRecordId)
@@ -14524,6 +14564,30 @@ export function univerMetaRouter(): Router {
             )
           }
         }
+
+        // D-1c slice ① (form-submit CREATE = A6, ratified design-lock 2026-07-13, OD-1/OD-3; audit
+        // site A6): this INSERT previously created a brand-new meta_records row with NO revision —
+        // reconstructRecordsAtT derives record EXISTENCE purely from meta_record_revisions, so this
+        // record was invisible to it at every T, including "now". Worse than incomplete history: a
+        // Reset-to-T run at any T after this create could not tell "created after T" from "created
+        // before T but never captured", so `computeSheetReset` pushed it into the unconditional
+        // delete-set and Reset would DESTROY a record that legitimately existed at T (§0.5's corrected
+        // CREATE risk). snapshot=patch is the full row — a create's `data` IS the submitted+allocated
+        // patch (link ids already folded in via `patch[fieldId]=ids` above, same as the auto-number
+        // values just assigned). source='public-form' per OD-2 — unlike the EDIT branch, THIS branch is
+        // genuinely reachable by an anonymous public submitter, so the surface name is exactly accurate
+        // here. actorId=createActorId verbatim (OD-3): null on the anonymous path, never fabricated.
+        await recordRecordRevision(query, {
+          sheetId: view.sheetId,
+          recordId: resultRecordId,
+          version: nextVersion,
+          action: 'create',
+          source: 'public-form',
+          actorId: createActorId,
+          changedFieldIds: Object.keys(patch),
+          patch,
+          snapshot: patch,
+        })
       })
 
       const recordRes = await pool.query(

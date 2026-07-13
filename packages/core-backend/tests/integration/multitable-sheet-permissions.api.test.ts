@@ -1012,6 +1012,11 @@ describe('Multitable sheet-scoped permissions API', () => {
           records.delete('rec_owned')
           return { rows: [] }
         }
+        // D-1c slice ① (ratified 2026-07-13): form-submit CREATE/EDIT now emit a same-txn revision (the
+        // fix — this route previously mutated meta_records with no revision at all).
+        if (sql.includes('INSERT INTO meta_record_revisions')) {
+          return { rows: [] }
+        }
         { const cr = configRevisionNoop(sql); if (cr) return cr }
         // A: approval-projection read-guard lookup — no projection sheet in this test
         if (/FROM meta_sheets WHERE id = ANY[\s\S]*base_id/i.test(sql)) return { rows: [] }
