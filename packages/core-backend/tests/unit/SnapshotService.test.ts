@@ -116,7 +116,9 @@ describe('SnapshotService - Protection Integration', () => {
       execution_time_ms: 10
     })
 
-    await expect(service.restoreSnapshot({ snapshotId: 'snap-1', restoredBy: 'user-1' }))
+    // restoreType is now required (GHSA-h8mf explicit-scope invariant); 'full' keeps this test's
+    // intent (a full restore that the protection rule then blocks).
+    await expect(service.restoreSnapshot({ snapshotId: 'snap-1', restoredBy: 'user-1', restoreType: 'full' }))
       .rejects.toThrow('Snapshot restore blocked by rule: Block Restore')
   })
 })

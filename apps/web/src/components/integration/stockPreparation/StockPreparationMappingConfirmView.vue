@@ -71,6 +71,16 @@
         </div>
       </header>
 
+      <!-- CAVEAT (P3 FE cleanup, #3751): the mapping table has no projectId field (server
+           stock-preparation-confirm-reads.cjs R3) — it is a tenant-level, cross-project reuse asset
+           by design, so the five counts above are NOT filtered to the project selected in this view. -->
+      <p class="sp-map__scope-note" data-testid="stock-prep-mapping-scope-note" role="note">
+        {{ bi(
+          '物料映射为租户级、跨项目复用资产:以上计数统计当前租户内的全部映射,不按此处已选项目过滤。',
+          'Material mappings are a tenant-level, cross-project reuse asset: the counts above cover all mappings in this tenant, not filtered to the project selected here.',
+        ) }}
+      </p>
+
       <!-- Candidate sync: feeds the review queue. defaultVersionPolicy is REQUIRED with NO default
            (OD2) — the sync entry stays disabled until the operator picks one. -->
       <div class="sp-map__sync" data-testid="stock-prep-mapping-sync-block">
@@ -636,6 +646,13 @@ watch(statusFilter, reloadQueue)
 .sp-map__note {
   color: var(--ms-text-2);
   font-size: 13px;
+}
+
+.sp-map__scope-note {
+  margin: 0;
+  color: var(--ms-text-3);
+  font-size: 12px;
+  font-style: italic;
 }
 
 .sp-map__table-wrap {

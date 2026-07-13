@@ -75,6 +75,18 @@
         </div>
       </header>
 
+      <!-- CAVEAT (P3 FE cleanup, #3751): the unit-conversion rule table has no projectId field
+           (server stock-preparation-confirm-reads.cjs R8) — it is a tenant-level, cross-project
+           reuse asset by design, so "Total/Active/Rules pending confirmation/By scope/By rounding"
+           above are NOT filtered to the project selected in this view. "Pending unit lines" is the
+           one exception: it IS computed over this project's latest complete snapshot batch. -->
+      <p class="sp-unit__scope-note" data-testid="stock-prep-unit-scope-note" role="note">
+        {{ bi(
+          '换算规则为租户级、跨项目复用资产:除「待处理单位行」外,以上计数统计当前租户内的全部规则,不按此处已选项目过滤。',
+          'Conversion rules are a tenant-level, cross-project reuse asset: except "Pending unit lines", the counts above cover all rules in this tenant, not filtered to the project selected here.',
+        ) }}
+      </p>
+
       <!-- Stale-candidate notice (409 CONFIRM_UNIT_CANDIDATE_NOT_FOUND): the computed view drifted
            (snapshot changed / a rule landed meanwhile) — the operator must re-read before confirming. -->
       <p v-if="staleCandidates" class="sp-unit__state sp-unit__state--warn" data-testid="stock-prep-unit-stale" role="alert">
@@ -607,6 +619,13 @@ watch(() => props.projectId, loadAll)
 .sp-unit__metric-label {
   color: var(--ms-text-3);
   font-size: 12px;
+}
+
+.sp-unit__scope-note {
+  margin: 0;
+  color: var(--ms-text-3);
+  font-size: 12px;
+  font-style: italic;
 }
 
 .sp-unit__metric-value {

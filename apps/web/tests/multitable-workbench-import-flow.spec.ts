@@ -65,12 +65,15 @@ vi.mock('../src/multitable/composables/useMultitableComments', () => ({
     resolvingIds: ref<string[]>([]),
     updatingIds: ref<string[]>([]),
     deletingIds: ref<string[]>([]),
+    reactingKeys: ref<string[]>([]),
     error: ref<string | null>(null),
     loadComments: vi.fn(),
     addComment: vi.fn(),
     updateComment: vi.fn(),
     deleteComment: vi.fn(),
     resolveComment: vi.fn(),
+    addReaction: vi.fn(),
+    removeReaction: vi.fn(),
   }),
 }))
 
@@ -220,6 +223,8 @@ function createGridMock(fields: Array<Record<string, unknown>>) {
     sortRules: ref([]),
     filterRules: ref([]),
     filterConjunction: ref('and'),
+    filterGroups: ref([]),
+    canLoadMore: ref(false),
     canUndo: ref(false),
     canRedo: ref(false),
     groupFieldId: ref<string | null>(null), groupFieldIds: ref([]),
@@ -337,7 +342,7 @@ describe('MultitableWorkbench import flow', () => {
       data: { fld_name: 'Beta' },
     }, expect.objectContaining({ signal: expect.any(AbortSignal) }))
     expect(gridMock.loadViewData).toHaveBeenCalled()
-    expect(showSuccessSpy).toHaveBeenCalledWith('2 records imported')
+    expect(showSuccessSpy).toHaveBeenCalledWith('2 records imported', undefined)
     expect(document.body.querySelector('.meta-import-modal')).toBeNull()
   })
 
@@ -419,7 +424,7 @@ describe('MultitableWorkbench import flow', () => {
       data: { fld_vendor: ['rec_vendor_1'] },
     }, expect.objectContaining({ signal: expect.any(AbortSignal) }))
     expect(gridMock.loadViewData).toHaveBeenCalled()
-    expect(showSuccessSpy).toHaveBeenCalledWith('1 record imported')
+    expect(showSuccessSpy).toHaveBeenCalledWith('1 record imported', undefined)
     expect(document.body.querySelector('.meta-import-modal')).toBeNull()
   })
 
@@ -527,7 +532,7 @@ describe('MultitableWorkbench import flow', () => {
       data: { fld_vendor: ['rec_vendor_fixed'] },
     }, expect.objectContaining({ signal: expect.any(AbortSignal) }))
     expect(gridMock.loadViewData).toHaveBeenCalledTimes(2)
-    expect(showSuccessSpy).toHaveBeenLastCalledWith('1 record imported')
+    expect(showSuccessSpy).toHaveBeenLastCalledWith('1 record imported', undefined)
     expect(document.body.querySelector('.meta-import-modal')).toBeNull()
   })
 
@@ -576,7 +581,7 @@ describe('MultitableWorkbench import flow', () => {
       viewId: 'view_grid',
       data: { fld_name: 'Alpha' },
     }, expect.objectContaining({ signal: expect.any(AbortSignal) }))
-    expect(showSuccessSpy).toHaveBeenLastCalledWith('1 record imported')
+    expect(showSuccessSpy).toHaveBeenLastCalledWith('1 record imported', undefined)
     expect(document.body.querySelector('.meta-import-modal')).toBeNull()
   })
 
@@ -711,7 +716,7 @@ describe('MultitableWorkbench import flow', () => {
       data: { fld_title: 'Alpha', fld_owner: 'Owner Person' },
     }, expect.objectContaining({ signal: expect.any(AbortSignal) }))
     expect(gridMock.loadViewData).toHaveBeenCalled()
-    expect(showSuccessSpy).toHaveBeenLastCalledWith('1 record imported')
+    expect(showSuccessSpy).toHaveBeenLastCalledWith('1 record imported', undefined)
     expect(document.body.querySelector('.meta-import-modal')).toBeNull()
   })
 

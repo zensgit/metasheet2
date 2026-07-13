@@ -8,17 +8,17 @@
         <button class="meta-record-drawer__nav-btn" :disabled="currentRecordIndex >= recordIds.length - 1" :aria-label="l('record.next')" @click="navigateNext">&rsaquo;</button>
       </div>
       <div class="meta-record-drawer__actions">
-        <button
+        <MtButton
           v-if="record && canLoadSubscription"
           class="meta-record-drawer__btn meta-record-drawer__btn--watch"
           :class="{ 'meta-record-drawer__btn--watching': recordSubscribed }"
-          type="button"
           :disabled="subscriptionLoading"
           :title="l(recordSubscribed ? 'record.unwatchTitle' : 'record.watchTitle')"
+          :aria-pressed="recordSubscribed"
           @click="toggleRecordSubscription"
         >
           {{ l(recordSubscribed ? 'record.watching' : 'record.watch') }}
-        </button>
+        </MtButton>
         <button
           v-if="resolvedCanComment"
           class="meta-record-drawer__btn meta-record-drawer__btn--comment"
@@ -29,10 +29,14 @@
         >
           <MetaCommentActionChip :label="l('record.comments')" :state="drawerCommentAffordance" />
         </button>
-        <button v-if="canManageAutomation" class="meta-record-drawer__btn" :title="l('record.workflowTitle')" @click="emit('open-automation')">&#x2699; {{ l('record.workflow') }}</button>
-        <button v-if="canManageRecordPermissions" class="meta-record-drawer__btn" :title="l('record.permissionsTitle')" @click="showRecordPermissions = true">&#x1F512; {{ l('record.permissions') }}</button>
-        <button v-if="record && canCreate" class="meta-record-drawer__btn meta-record-drawer__btn--duplicate" :title="l('record.duplicateTitle')" type="button" @click="emit('duplicate')">{{ l('record.duplicate') }}</button>
-        <button v-if="resolvedCanDelete" class="meta-record-drawer__btn meta-record-drawer__btn--danger" @click="emit('delete')">{{ l('record.delete') }}</button>
+        <MtButton v-if="canManageAutomation" class="meta-record-drawer__btn" :title="l('record.workflowTitle')" @click="emit('open-automation')">&#x2699; {{ l('record.workflow') }}</MtButton>
+        <MtButton v-if="canManageRecordPermissions" class="meta-record-drawer__btn" :title="l('record.permissionsTitle')" @click="showRecordPermissions = true">&#x1F512; {{ l('record.permissions') }}</MtButton>
+        <MtButton v-if="record && canCreate" class="meta-record-drawer__btn meta-record-drawer__btn--duplicate" :title="l('record.duplicateTitle')" @click="emit('duplicate')">{{ l('record.duplicate') }}</MtButton>
+        <!-- gate P2: the retained `meta-record-drawer__btn` base rule (background:#fff, later-injected,
+             specificity tie) beat `.mt-button--danger`'s red background while danger's white text stayed
+             → white-on-white "Delete". The danger variant must own the cascade, so the base class is
+             dropped HERE ONLY; `--danger` stays as a stable spec/test anchor (its bespoke rule is gone). -->
+        <MtButton v-if="resolvedCanDelete" variant="danger" class="meta-record-drawer__btn--danger" @click="emit('delete')">{{ l('record.delete') }}</MtButton>
         <button class="meta-record-drawer__close" :aria-label="l('record.close')" @click="emit('close')">&times;</button>
       </div>
     </div>
@@ -61,13 +65,12 @@
         <span class="meta-record-drawer__lock-status">{{ l('record.locked') }}</span>
         <span v-if="record.lockedBy" class="meta-record-drawer__lock-meta">{{ l('record.lockedBy') }}: {{ record.lockedBy }}</span>
         <span v-if="record.lockedAt" class="meta-record-drawer__lock-meta">{{ l('record.lockedAt') }}: {{ record.lockedAt }}</span>
-        <button
+        <MtButton
           v-if="record.canUnlock"
-          type="button"
           class="meta-record-drawer__btn meta-record-drawer__lock-unlock"
           data-test="record-unlock-action"
           @click="emit('toggle-lock', { recordId: record.id, locked: false })"
-        >{{ l('record.unlock') }}</button>
+        >{{ l('record.unlock') }}</MtButton>
       </div>
       <div v-if="activeTab === 'details'" class="meta-record-drawer__fields">
       <div v-for="field in visibleFields" :key="field.id" class="meta-record-drawer__field">
@@ -395,6 +398,7 @@ import type {
   MetaRowActions,
 } from '../types'
 import type { MultitableApiClient } from '../api/client'
+import { MtButton } from '../ui'
 import MetaAttachmentList from './MetaAttachmentList.vue'
 import MetaCommentActionChip from './MetaCommentActionChip.vue'
 import MetaCommentAffordance from './MetaCommentAffordance.vue'
@@ -1076,8 +1080,15 @@ function attachmentAllowsMultiple(field: MetaField): boolean {
 .meta-record-drawer__btn--comment { border-radius: 999px; padding: 3px 8px; }
 .meta-record-drawer__btn--comment.meta-record-drawer__btn--comment--active { border-color: #f59e0b; background: #fff7ed; color: #b45309; }
 .meta-record-drawer__btn--comment.meta-record-drawer__btn--comment--idle { border-color: #d8e1ee; background: #fff; color: #64748b; }
-.meta-record-drawer__btn--danger { color: #f56c6c; border-color: #f56c6c; }
-.meta-record-drawer__btn--watch { border-color: #bfdbfe; color: #1d4ed8; background: #eff6ff; }
+/* UI-P2-1c T5-safe (owner-ratified 2026-07-13): watch/workflow/permissions/duplicate/delete/unlock
+   are now <MtButton> — token-styled, no longer needs bespoke hardcoded-hex. --danger's sole sharer
+   (delete) now uses MtButton's own `variant="danger"`; --watch's sole sharer (watch, non-active
+   state) now uses MtButton's default ghost styling — both bespoke rules removed (orphaned, no other
+   sharer). --watching stays: it is the watch toggle's ACTIVE-state visual (OD-T5a option A) — MtButton
+   has no built-in pressed/active variant (adding one is a primitive-contract change, out of scope),
+   so the toggle's active affordance still comes from this class, now paired with `aria-pressed`. The
+   base .meta-record-drawer__btn rule above and the three --comment* rules stay untouched: the comment
+   button (OD-T5b) is deliberately NOT migrated this round — it remains bespoke, styled by these rules. */
 .meta-record-drawer__btn--watching { border-color: #0f766e; color: #0f766e; background: #ecfdf5; }
 .meta-record-drawer__btn:disabled { opacity: 0.55; cursor: not-allowed; }
 .meta-record-drawer__close { border: none; background: none; font-size: 20px; cursor: pointer; color: #999; }

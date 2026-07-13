@@ -2138,6 +2138,19 @@ export async function createDirectoryIntegration(input: DirectoryIntegrationInpu
   return summarizeIntegration(result.rows[0])
 }
 
+/**
+ * Thrown by `updateDirectoryIntegration` when a generic integration-form save tries to change
+ * `corp_id` once it is already set — see the guard's comment there (org-transfer Phase 1 §12.1)
+ * for why this is blocked. The rule is absolute (no synced-records probe): once set, corp_id is
+ * immutable in an ordinary PUT.
+ */
+export class DirectoryTenantChangeBlockedError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'DirectoryTenantChangeBlockedError'
+  }
+}
+
 export async function updateDirectoryIntegration(
   integrationId: string,
   input: DirectoryIntegrationInput,
@@ -2147,6 +2160,34 @@ export async function updateDirectoryIntegration(
 
   const currentConfig = parseIntegrationConfig(current)
   const normalized = normalizeIntegrationInput(input, currentConfig)
+
+  // org-transfer Phase 1 §12.1 — corp_id is IMMUTABLE once set (no probe, no bypass).
+  //
+  // `corp_id` identifies WHICH DingTalk tenant this integration syncs against. Changing it via this
+  // generic integration-form save is a tenant swap disguised as an edit: the next sync's absence sweep
+  // only "sees" accounts/departments returned by the NEW corp's DingTalk API and marks every row still
+  // tagged with the OLD corp inactive — silently mass-deactivating the previous organization.
+  //
+  // A "block only if it already has synced records" rule is NOT sufficient: `syncDirectoryIntegration`
+  // reads the corp config, then claims the run lease, then pulls and writes rows. During the FIRST sync
+  // (corp_id already set, no account/department rows written yet) an interleaved PUT could change corp_id
+  // from under the in-flight sync — which then writes the OLD corp's data into the now-retagged
+  // integration, re-arming the exact mass-deactivation on the following sync. There is no safe TOCTOU
+  // window, so the rule is absolute and race-free: once `corp_id` is set, an ordinary PUT can NEVER
+  // change it. A mis-entered corp_id (before first sync) is corrected by deleting and recreating the
+  // integration; a genuine organization change must go through the org-transfer workflow. There is
+  // deliberately NO production escape hatch.
+  //
+  // Initial set (current empty → a value) and same-corp resend pass through. `normalized.corpId` cannot
+  // be empty here — normalizeIntegrationInput throws 'corpId is required' earlier — so a "clear" is
+  // already unreachable.
+  const currentCorpId = normalizeText(current.corp_id)
+  if (currentCorpId !== '' && normalized.corpId !== currentCorpId) {
+    throw new DirectoryTenantChangeBlockedError(
+      `corp_id is immutable once set on directory integration ${integrationId} (currently "${currentCorpId}", attempted "${normalized.corpId}"): changing it via a generic integration edit would make the next sync mass-deactivate the previous organization's accounts and departments. To correct a mis-entered corp_id before the first sync, delete and recreate the integration; to move to a different organization, use the org-transfer workflow.`,
+    )
+  }
+
   await assertDirectoryProjectedGovernanceConfigValid({
     memberGroupDefaultRoleIds: normalized.memberGroupDefaultRoleIds,
     memberGroupDefaultNamespaces: normalized.memberGroupDefaultNamespaces,

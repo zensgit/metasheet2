@@ -5,7 +5,11 @@ import { join } from 'node:path'
 
 // Stock Preparation MVP (#3751 — docs/development/stock-preparation-mvp-design-20260707.md).
 // Covers ONLY the new sp-fe-shell surface: the routed tabbed workspace shell, its route
-// registration, the permission-gated App nav entry, and the six readonly per-view service stubs.
+// registration, the permission-gated App nav entry, and four readonly per-view service reads
+// (project overview, snapshot-batch list/diff, material-mapping summary, unit-conversion summary —
+// each wired into its own view). The prep-line and exception-queue summary stubs that used to live
+// here were dead code (zero callers outside this spec; view 5/6 read the real W5a list endpoints
+// instead) and were removed under the T6 FE cleanup (#3751 remaining-dev).
 // (Unrelated apps/web specs are red on main from api mocks — this spec asserts only its own surface.)
 
 // Shared mutable holder — vi.hoisted so the mock factories below can read it, and the test body can
@@ -84,8 +88,6 @@ import {
 } from '../src/services/integration/stockPreparation/bomSnapshotDiff'
 import { getStockPreparationMaterialMappingSummary } from '../src/services/integration/stockPreparation/materialMapping'
 import { getStockPreparationUnitConversionSummary } from '../src/services/integration/stockPreparation/unitConversion'
-import { getStockPreparationLineSummary } from '../src/services/integration/stockPreparation/prepLine'
-import { getStockPreparationExceptionQueueSummary } from '../src/services/integration/stockPreparation/exceptionQueue'
 
 // Values-free forbidden-substring guard: rendered shell copy must never surface any of these.
 const FORBIDDEN_SUBSTRINGS = [
@@ -717,26 +719,12 @@ describe('Stock Preparation per-view service stubs (readonly GET, values-free)',
     expect(lastCall()[1]).toBeUndefined()
   })
 
-  it('prepLine GETs the prep-line summary (readonly)', async () => {
-    await getStockPreparationLineSummary()
-    expect(lastCall()[0]).toContain('/api/integration/stock-preparation/prep-lines/summary')
-    expect(lastCall()[1]).toBeUndefined()
-  })
-
-  it('exceptionQueue GETs the exception summary (readonly)', async () => {
-    await getStockPreparationExceptionQueueSummary()
-    expect(lastCall()[0]).toContain('/api/integration/stock-preparation/exceptions/summary')
-    expect(lastCall()[1]).toBeUndefined()
-  })
-
   it('NONE of the readonly stubs ever issues a write method (no POST/PUT/PATCH/DELETE)', async () => {
     await Promise.all([
       getStockPreparationWorkspaceOverview(),
       listStockPreparationSnapshotBatches(),
       getStockPreparationMaterialMappingSummary(),
       getStockPreparationUnitConversionSummary(),
-      getStockPreparationLineSummary(),
-      getStockPreparationExceptionQueueSummary(),
     ])
     for (const call of h.apiFetch.mock.calls) {
       const options = call[1] as { method?: string } | undefined

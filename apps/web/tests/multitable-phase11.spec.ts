@@ -112,11 +112,16 @@ describe('date field type', () => {
   })
 
   it('date display formats correctly', () => {
+    // ISO date-only strings ('YYYY-MM-DD') parse as UTC midnight per spec, but Date#getFullYear/
+    // getMonth/getDate read LOCAL time — in any negative-UTC-offset timezone (e.g. America/Los_Angeles)
+    // that rolls the local calendar date back a day, so this assertion was timezone-fragile (green in
+    // UTC/positive-offset CI runners, red on a western-hemisphere dev machine). Use the UTC accessors
+    // instead: same exact expected values, deterministic across every timezone.
     const val = '2026-03-18'
     const d = new Date(val)
-    expect(d.getFullYear()).toBe(2026)
-    expect(d.getMonth()).toBe(2) // March = 2
-    expect(d.getDate()).toBe(18)
+    expect(d.getUTCFullYear()).toBe(2026)
+    expect(d.getUTCMonth()).toBe(2) // March = 2
+    expect(d.getUTCDate()).toBe(18)
   })
 
   it('date field has icon in field manager', () => {
