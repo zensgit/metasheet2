@@ -35,10 +35,14 @@ test('buildSmokeFixture: salted, self-contained, and every value-bearing token i
   assert.deepEqual(fixture.expansionResult.rowErrors, [])
   // Row B references row A as parent so the mapper resolves parentDrawingNo in-batch.
   assert.equal(fixture.expansionResult.rows[1].parentSourceId, fixture.expansionResult.rows[0].componentSourceId)
-  // Both drawing numbers, both paths, both units, both ERP ids, and both quantities are sentinels.
+  // #4163 T1: the project-row populator's own inputs are present and salted.
+  assert.equal(fixture.sourceProjectNo, 'SMKPRJNO-t123')
+  assert.equal(fixture.projectName, 'Smoke Project t123')
+  // Both drawing numbers, both paths, both units, both ERP ids, both quantities, and the project-row
+  // populator's own inputs (sourceProjectNo/projectName) are all sentinels.
   for (const value of [
     fixture.drawingA, fixture.drawingB, fixture.unitPlm, fixture.unitErp,
-    fixture.erpCodeA, fixture.erpItemA,
+    fixture.erpCodeA, fixture.erpItemA, fixture.sourceProjectNo, fixture.projectName,
     String(fixture.expansionResult.rows[0].rawQuantity), String(fixture.expansionResult.rows[1].rawQuantity),
   ]) {
     assert.ok(fixture.sentinels.includes(value), `sentinel list must include ${typeof value}`)
@@ -47,6 +51,7 @@ test('buildSmokeFixture: salted, self-contained, and every value-bearing token i
   const other = buildSmokeFixture('t124', 'stockprep-smoke')
   assert.notEqual(other.snapshotBatchId, fixture.snapshotBatchId)
   assert.notEqual(other.drawingA, fixture.drawingA)
+  assert.notEqual(other.sourceProjectNo, fixture.sourceProjectNo)
 })
 
 test('fixture quantity sentinels cannot collide with ISO-timestamp millisecond substrings', () => {
