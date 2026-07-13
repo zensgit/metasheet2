@@ -19,7 +19,7 @@
 // severity / status, sha16 handles, and presence booleans only. The exception `message` cell
 // (human-readable business text) NEVER crosses; resolver identity surfaces as a presence boolean.
 import { apiFetch } from '../../../utils/api'
-import { buildQueryString, parseIntegrationResponse, type IntegrationScope } from '../workbench'
+import { buildQueryString, type IntegrationScope } from '../workbench'
 import { parseStockPreparationConfirmResponse } from './confirmApi'
 
 // Fixed FE whitelists mirroring the server's frozen vocabularies (EXCEPTION_TYPES in
@@ -70,35 +70,6 @@ export const STOCK_PREPARATION_RESOLUTION_ACTIONS: readonly StockPreparationReso
   'accepted_change',
   'manual_hold',
 ]
-
-export interface StockPreparationExceptionQueueSummary {
-  totalExceptionCount: number
-  openBlockingCount: number
-  typeCounts: Record<StockPreparationExceptionType | string, number>
-  severityCounts: Record<StockPreparationExceptionSeverity | string, number>
-  statusCounts: Record<StockPreparationExceptionStatus | string, number>
-}
-
-/**
- * Values-free summary of the exception-confirmation queue for a project.
- * GET /api/integration/stock-preparation/exceptions/summary
- *
- * NOTE: sp-fe-shell stub predating the W5a real read below — the endpoint is not served yet;
- * view 6 reads listStockPreparationExceptions instead.
- */
-export async function getStockPreparationExceptionQueueSummary(
-  scope: IntegrationScope & { projectId?: string | null } = {},
-): Promise<StockPreparationExceptionQueueSummary> {
-  const query = buildQueryString({
-    tenantId: scope.tenantId,
-    workspaceId: scope.workspaceId,
-    projectId: scope.projectId,
-  })
-  const response = await apiFetch(
-    `/api/integration/stock-preparation/exceptions/summary${query ? `?${query}` : ''}`,
-  )
-  return parseIntegrationResponse<StockPreparationExceptionQueueSummary>(response)
-}
 
 // ── W5a exception queue list (view 6 real read) ───────────────────────────────────────────────────
 

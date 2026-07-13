@@ -139,10 +139,16 @@ export class SafetyGuard {
       };
     }
 
-    // If has confirmation token, verify it
+    // If has confirmation token, verify it. BINDING (GHSA): the retried operation must match the token's
+    // original operation, initiator, and resource, and the token must already be confirmed. The retry
+    // deliberately does NOT forward a typed phrase / acknowledgment — a token is accepted here only via
+    // the RETRY-phase branch in verifyConfirmation (pending.confirmed), never by re-confirming inline.
     if (context.confirmationToken) {
       const verification = this.verifyConfirmation({
-        token: context.confirmationToken
+        token: context.confirmationToken,
+        operation: context.operation,
+        initiator: context.initiator,
+        resourceKey: this.resourceKey(context.details)
       });
 
       if (verification.valid) {
@@ -254,7 +260,37 @@ export class SafetyGuard {
       return { valid: false, reason: 'Confirmation token has expired' };
     }
 
-    // Check double-confirm requirement
+    // BINDING (GHSA): a confirmation token is bound to the operation, initiator, and resource of the
+    // request that minted it. Reject any presentation that does not match — this prevents a confirmed
+    // token from being replayed against a different operation, by a different admin, or on a different
+    // resource. The route/retry path (checkOperation) supplies all three; /safety/confirm supplies the
+    // authenticated initiator. A field left undefined by the caller is not checked, but the security
+    // paths always supply the fields their threat requires (retry: all three; confirm: initiator).
+    if (request.operation !== undefined && request.operation !== pending.context.operation) {
+      return { valid: false, reason: 'Confirmation token does not match this operation' };
+    }
+    if (request.initiator !== undefined && request.initiator !== pending.context.initiator) {
+      return { valid: false, reason: 'Confirmation token was issued to a different user' };
+    }
+    if (
+      request.resourceKey !== undefined &&
+      request.resourceKey !== this.resourceKey(pending.context.details)
+    ) {
+      return { valid: false, reason: 'Confirmation token does not match this resource' };
+    }
+
+    // RETRY phase (GHSA): once a token is confirmed (via /safety/confirm), the retried operation
+    // request — which carries ONLY the token, never the typed phrase or acknowledgment — is accepted on
+    // the strength of pending.confirmed alone. This is the fix for the double-confirm deadlock: the
+    // typed-phrase re-check below must NOT fire on the retry. Binding was already enforced above.
+    if (pending.confirmed) {
+      return { valid: true };
+    }
+
+    // CONFIRM phase (GHSA): the token is not yet confirmed — this is the /safety/confirm step. A
+    // double-confirm operation requires the typed phrase; a HIGH/CRITICAL operation requires an explicit
+    // acknowledgment. A route retry that reaches here (token present but never confirmed) fails these
+    // checks — confirmation cannot be skipped by going straight to the retry.
     if (pending.assessment.requiresDoubleConfirm) {
       if (!request.typedConfirmation) {
         return {
@@ -275,11 +311,9 @@ export class SafetyGuard {
       }
     }
 
-    // Check acknowledgment for high-risk operations (only if not already confirmed)
     if (
-      !pending.confirmed &&
-      (pending.assessment.riskLevel === RiskLevel.HIGH ||
-        pending.assessment.riskLevel === RiskLevel.CRITICAL)
+      pending.assessment.riskLevel === RiskLevel.HIGH ||
+      pending.assessment.riskLevel === RiskLevel.CRITICAL
     ) {
       if (!request.acknowledged) {
         return {
@@ -289,17 +323,58 @@ export class SafetyGuard {
       }
     }
 
-    // Mark as confirmed after successful verification
-    if (!pending.confirmed) {
-      pending.confirmed = true;
-      logger.info('Operation confirmed by user', {
-        context: 'SafetyGuard',
-        operation: pending.context.operation,
-        token: request.token.substring(0, 20) + '...'
-      });
-    }
+    // All confirm-phase checks passed: mark the token confirmed. The subsequent route retry (token only)
+    // will be accepted by the RETRY-phase branch above.
+    pending.confirmed = true;
+    logger.info('Operation confirmed by user', {
+      context: 'SafetyGuard',
+      operation: pending.context.operation,
+      token: request.token.substring(0, 20) + '...'
+    });
 
     return { valid: true };
+  }
+
+  /**
+   * Canonical fingerprint of the resource-identifying details of an operation, used to bind a
+   * confirmation token to its resource (GHSA). assessRisk() adds its own bookkeeping keys to
+   * context.details (ruleApplied / ruleInfo / ruleBlocked / ruleBlockReason) on both the issuing and
+   * the retried request; those top-level keys are excluded so the fingerprint reflects only the
+   * caller-supplied resource identity.
+   *
+   * Callers may pass NESTED resource details — e.g. the admin bulk-data routes pass
+   * { table, filters: { ... } } and { table, updates: { ... } } — so the fingerprint RECURSIVELY sorts
+   * object keys at every depth. Array order is PRESERVED (a reordered array is a different resource).
+   * The effect: two requests that differ only in object key ordering bind to the SAME token (a
+   * legitimate confirmation is not rejected), while any value change or array reordering binds to a
+   * DIFFERENT token.
+   */
+  private resourceKey(details: Record<string, unknown> | undefined): string {
+    if (!details) return '';
+    const OMIT = new Set(['ruleApplied', 'ruleInfo', 'ruleBlocked', 'ruleBlockReason']);
+    const stable: Record<string, unknown> = {};
+    for (const key of Object.keys(details)) {
+      if (!OMIT.has(key)) stable[key] = details[key];
+    }
+    return JSON.stringify(this.canonicalize(stable));
+  }
+
+  /**
+   * Recursively normalize a value for stable fingerprinting: object keys sorted at any depth, array
+   * order preserved, primitives returned as-is.
+   */
+  private canonicalize(value: unknown): unknown {
+    if (Array.isArray(value)) {
+      return value.map((v) => this.canonicalize(v));
+    }
+    if (value !== null && typeof value === 'object') {
+      const sorted: Record<string, unknown> = {};
+      for (const key of Object.keys(value as Record<string, unknown>).sort()) {
+        sorted[key] = this.canonicalize((value as Record<string, unknown>)[key]);
+      }
+      return sorted;
+    }
+    return value;
   }
 
   /**

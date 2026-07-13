@@ -53,9 +53,10 @@ vi.mock('../src/multitable/composables/useMultitableCapabilities', () => ({
 vi.mock('../src/multitable/composables/useMultitableComments', () => ({
   useMultitableComments: () => ({
     comments: ref([]), loading: ref(false), submitting: ref(false),
-    resolvingIds: ref([]), updatingIds: ref([]), deletingIds: ref([]),
+    resolvingIds: ref([]), updatingIds: ref([]), deletingIds: ref([]), reactingKeys: ref([]),
     error: ref(null), loadComments: vi.fn(), addComment: vi.fn(),
     resolveComment: vi.fn(), deleteComment: vi.fn(), updateComment: vi.fn(), clearComments: vi.fn(),
+    addReaction: vi.fn(), removeReaction: vi.fn(),
   }),
 }))
 vi.mock('../src/multitable/composables/useMultitableCommentRealtime', () => ({
@@ -65,6 +66,9 @@ vi.mock('../src/composables/useAuth', () => ({
   useAuth: () => ({
     getCurrentUserId: vi.fn().mockResolvedValue('user_1'),
     getAccessSnapshot: () => ({ userId: 'user_1', isAdmin: false, permissions: [] }),
+    // useMultitableSheetPresence calls auth.getToken() unconditionally before opening the
+    // presence socket — stub it so the sheet-activation watcher doesn't throw.
+    getToken: vi.fn().mockReturnValue('token_1672_1673'),
   }),
 }))
 vi.mock('../src/composables/useToast', () => ({
@@ -137,7 +141,7 @@ function createGridMock() {
     currentPage: ref(1), totalPages: ref(1),
     page: ref({ offset: 0, limit: 50, total: 0, hasMore: false }),
     visibleFields: ref(fields), sortRules: ref([]), filterRules: ref([]),
-    filterConjunction: ref('and'), canUndo: ref(false), canRedo: ref(false),
+    filterConjunction: ref('and'), filterGroups: ref([]), canLoadMore: ref(false), canUndo: ref(false), canRedo: ref(false),
     groupFieldId: ref(null), groupFieldIds: ref([]), groupField: ref(null), groupFields: ref([]),
     hiddenFieldIds: ref([]), columnWidths: ref({}),
     linkSummaries: ref({}), personSummaries: ref({}), attachmentSummaries: ref({}),

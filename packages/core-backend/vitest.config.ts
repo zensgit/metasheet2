@@ -7,6 +7,21 @@ export default defineConfig({
     environment: 'node',
     // Fix vite SSR transformation issues - use forks pool to avoid __vite_ssr_exportName__ errors
     pool: 'forks',
+    // #4154: supertest specs call `request(app)`, which spins up a fresh `app.listen(0)` ephemeral
+    // listener PER REQUEST (~495 call sites across 42 files). Under full-suite event-loop load the OS
+    // recycles ephemeral ports fast enough that a request occasionally lands on a DIFFERENT test's app
+    // that just rebound the same port — proven by a `GET /api/approvals` returning 405 (a server that
+    // knows the path but not the method = someone else's app), and by the FAILING SPEC being random
+    // across runs (dashboard / ai-suggest / approval-rbac) rather than fixed. The collision is purely
+    // transient: a retry gets a fresh port and hits the right server. A DETERMINISTIC product failure
+    // still fails all attempts, so this absorbs the infra flake without hiding real bugs. (Tradeoff,
+    // stated plainly: a genuinely NON-deterministic PRODUCT race would also be absorbed — acceptable
+    // here because these are mock-dep unit tests, but flagged for review.)
+    // CI-only (review of #4169): the required `test (20.x)` check runs in CI, so retry absorbs the
+    // flake exactly where it reds a gate; locally retry is 0 so a developer sees a genuine failure
+    // immediately instead of waiting through re-runs — and the masking tradeoff never touches local
+    // debugging. GitHub Actions sets CI=true for every run.
+    retry: process.env.CI ? 2 : 0,
     deps: {
       interopDefault: true
     },
@@ -42,6 +57,10 @@ export default defineConfig({
       // reclaims a live long run. DATABASE_URL-gated; excluded here so the no-DB job cannot
       // skip-green it, and wired as a WHOLE FILE into the approval real-DB step.
       'tests/integration/directory-sync-run-lease.db.test.ts',
+      // org-transfer Phase 1 §12.1: real-DB proof that corp_id is immutable once set (incl. the first-sync
+      // window). DATABASE_URL-gated; excluded from the no-DB default job so it cannot skip-green, and wired
+      // as a WHOLE FILE into the `Run approval real-DB integration` step in plugin-tests.yml.
+      'tests/integration/directory-tenant-change-immutable.db.test.ts',
       // R1-L4 syncDirectoryIntegration orchestration harness (real DB): drives the REAL sync
       // end-to-end (mocked DingTalk pull, real Postgres apply) to cover the CALL SITES the
       // per-helper goldens cannot — heartbeat lifecycle/interval-cleared proof, H02 admission

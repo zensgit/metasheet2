@@ -57,6 +57,11 @@ PLM project and BOM readonly sync
 - Hiding or overwriting PLM source data to match ERP convenience fields.
 - Treating AI or fuzzy matching as final approval without a human confirmation step.
 
+> **词表回填(2026-07-12)**:本文早稿的 `match_method` / `exception_type` 词表与后续已落地的
+> server 实现(`stock-preparation-material-match.cjs` / `stock-preparation-mvp-generation.cjs` /
+> `stock-preparation-confirm-writes.cjs`)一度漂移。上表已对齐到**代码实发的闭合词表**。
+> **以代码为准**:任何后续变更应改代码词表并回填本表,勿反向按旧 MD 改代码。
+
 ## Core Entities
 
 ### 1. Project Table
@@ -158,7 +163,7 @@ Suggested fields:
 | `erp_spec` | ERP specification |
 | `version_policy` | drawing_and_version, drawing_only, category_rule, manual |
 | `match_status` | matched, pending_confirm, multi_candidate, not_found, version_conflict |
-| `match_method` | exact, normalized, historical_reuse, rule, manual |
+| `match_method` | historical_confirmed, exact_code_candidate, normalized_code_candidate, name_spec_candidate, none, manual_confirm |
 | `confidence` | Numeric confidence for ranking only |
 | `is_active` | Whether this mapping is active |
 | `confirmed_by` | Confirmation user |
@@ -259,7 +264,7 @@ Suggested fields:
 | `snapshot_batch_id` | Snapshot batch |
 | `snapshot_line_id` | Optional BOM line |
 | `stock_prep_line_id` | Optional stock preparation line |
-| `exception_type` | missing_mapping, multi_candidate, unit_missing, unit_conflict, bom_changed, missing_child_bom, invalid_qty |
+| `exception_type` | missing_mapping, multi_candidate, version_conflict, erp_item_missing, unit_missing, unit_conflict, invalid_qty, missing_child_bom |
 | `severity` | info, warning, blocking |
 | `status` | open, resolved, ignored, deferred |
 | `message` | Human-readable explanation |

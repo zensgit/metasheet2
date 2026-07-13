@@ -6,8 +6,36 @@
 
 import type { Request, Response, NextFunction } from 'express';
 import { getSafetyGuard } from './SafetyGuard';
-import type { OperationType} from './types';
-import { type OperationContext } from './types';
+import type { OperationType, RiskAssessment } from './types';
+import { type OperationContext, RiskLevel } from './types';
+
+/**
+ * Build accurate client instructions for completing a blocked operation.
+ *
+ * The confirmation flow is TWO steps for anything needing a typed phrase or an acknowledgment: first
+ * POST /api/admin/safety/confirm with the token (plus the typed phrase for double-confirm ops and/or
+ * `acknowledged: true` for HIGH/CRITICAL ops), THEN retry the ORIGINAL operation with the same token in
+ * the X-Safety-Token header — the retry never carries the typed phrase/acknowledgment. A MEDIUM op needs
+ * neither, so a single retry with the token suffices.
+ */
+function buildConfirmInstructions(operation: OperationType, assessment: RiskAssessment): string {
+  const needsConfirmStep =
+    assessment.requiresDoubleConfirm ||
+    assessment.riskLevel === RiskLevel.HIGH ||
+    assessment.riskLevel === RiskLevel.CRITICAL;
+
+  if (!needsConfirmStep) {
+    return 'Retry this operation with the same token in the X-Safety-Token header.';
+  }
+
+  const confirmBody = assessment.requiresDoubleConfirm
+    ? `{ token, typedConfirmation: "${operation}", acknowledged: true }`
+    : '{ token, acknowledged: true }';
+  return (
+    `First POST /api/admin/safety/confirm with ${confirmBody}, then retry this operation with the same ` +
+    'token in the X-Safety-Token header.'
+  );
+}
 
 // Extend Express Request type
 interface SafetyRequest extends Request {
@@ -86,9 +114,7 @@ export function requireSafetyCheck(options: SafetyMiddlewareOptions) {
           ? {
               token: result.confirmationToken,
               expiresAt: result.tokenExpiry,
-              instructions: result.assessment.requiresDoubleConfirm
-                ? `To confirm, send another request with the token and type "${options.operation}" as confirmation`
-                : 'To confirm, send another request with the token and acknowledged: true'
+              instructions: buildConfirmInstructions(options.operation, result.assessment)
             }
           : undefined
       });
@@ -97,9 +123,11 @@ export function requireSafetyCheck(options: SafetyMiddlewareOptions) {
 }
 
 /**
- * API endpoint for confirming dangerous operations
+ * API endpoint for confirming dangerous operations. This is step ONE of the two-step flow: it validates
+ * the typed phrase / acknowledgment and marks the token confirmed, but does NOT execute the operation —
+ * the caller then retries the original operation with the same token in the X-Safety-Token header.
  *
- * POST /api/safety/confirm
+ * POST /api/admin/safety/confirm
  * Body: { token: string, typedConfirmation?: string, acknowledged?: boolean }
  */
 export function createSafetyConfirmEndpoint() {
@@ -116,10 +144,18 @@ export function createSafetyConfirmEndpoint() {
       return;
     }
 
+    // BINDING (GHSA): confirm on behalf of the AUTHENTICATED principal only. verifyConfirmation rejects
+    // the token if this initiator does not match the one that minted it, so an admin cannot confirm
+    // another admin's pending operation. The route mounting this handler is platform-admin gated, so
+    // req.user.id is present.
+    const initiator =
+      (req as SafetyRequest).user?.id || (req as SafetyRequest).user?.email;
+
     const verification = safetyGuard.verifyConfirmation({
       token,
       typedConfirmation,
-      acknowledged
+      acknowledged,
+      initiator
     });
 
     if (verification.valid) {
