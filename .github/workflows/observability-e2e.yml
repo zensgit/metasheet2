@@ -72,9 +72,11 @@ jobs:
           # (no-ops a migration's body but keeps its name; this drops name+body entirely). See
           # packages/core-backend/MIGRATION_EXCLUDE_TRACKING.md and
           # docs/development/superseded-legacy-migrations-gap-audit-20260710.md for the full
-          # cross-list picture. Known asymmetry: production/on-prem db:migrate runs with no
-          # exclude at all, so the view-table cluster excluded below has never had a per-PR
-          # green CI run of its up() bodies — untangling that is gated planning work, #4162.
+          # cross-list picture. #4162 follow-up (2026-07-13): the views/view_states migration
+          # and the three snapshot-cluster migrations are re-enabled below (in all five
+          # workflow lists at once), so their up() bodies now DO get per-PR green CI runs.
+          # Remaining asymmetry: production/on-prem db:migrate runs with no exclude at all,
+          # so the STILL-excluded items (008/048/049, 042a, gantt, 20250925) keep that gap.
           # Exclude problematic migrations (see migration-replay.yml for the per-item detail
           # this workflow shares):
           # 008_plugin_infrastructure.sql - has idempotency issue with scope column

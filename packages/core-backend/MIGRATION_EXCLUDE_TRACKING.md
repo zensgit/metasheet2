@@ -48,7 +48,7 @@ workflows/jobs that depend on each one's specific shape. Full detail:
    marker) so CI's schema-build order can succeed despite that migration's known conflicts.
 2. **`migration-replay.yml`'s own `MIGRATION_EXCLUDE` subset** — a narrower, independently
    evolving list for a different job (run `db:migrate` twice against a fresh db, assert
-   idempotency). It is not the same 11 items as #1 today.
+   idempotency). Its list is not identical to #1's (7-item union as of 2026-07-13) today.
 3. **`SUPERSEDED_LEGACY_SQL_MIGRATIONS`** in `packages/core-backend/src/db/migration-provider.ts`
    — a disjoint-purpose list of ~29 legacy numeric SQL migrations turned into no-op history
    markers (name stays, body doesn't run) rather than dropped. Overlaps #1 on exactly three
@@ -77,8 +77,8 @@ undocumented drift (warn-only; see that script's header for what it covers and d
 
 ## Pre-2026-07-12 content below is a historical snapshot
 
-The "Current CI Exclusions" section right below is still an accurate reflection of the workflow
-files as of 2026-05-12. Everything under **Pre-Existing Issues / Phase 2 Additions / Fix Strategy
+The "Current CI Exclusions" section right below reflected the workflow files as of 2026-05-12;
+the four items marked RE-ENABLED were removed from all lists on 2026-07-13 (#4162, see above). Everything under **Pre-Existing Issues / Phase 2 Additions / Fix Strategy
 / History** further down, however, refers to migration **filenames that no longer exist** in this
 repo (`008_add_indexes_to_workflows.sql`, `031_add_approval_templates.sql`,
 `036_add_workflow_execution_logs.sql`, `037_add_notification_preferences.sql`,
@@ -103,7 +103,7 @@ without re-reading that design doc first.
 **Issue**: References non-existent `last_accessed` column during replay paths.
 
 #### `20250924120000_create_views_view_states.ts`
-**Status**: ❌ Excluded
+**Status**: ✅ RE-ENABLED 2026-07-13 (#4162 follow-up — see section above)
 **Issue**: Creates view-state foreign keys against pre-fix `text` view ids, which fails once replay paths rebuild the newer UUID-based schema.
 
 #### `20250924140000_create_gantt_tables.ts`
@@ -115,15 +115,15 @@ without re-reading that design doc first.
 **Issue**: Applies `tables_owner_id_fkey` against a legacy `owner_id` shape that no longer exists in replay-built schemas, causing `owner_id` foreign-key failures.
 
 #### `20251117000001_add_snapshot_labels.ts`
-**Status**: ❌ Excluded
+**Status**: ✅ RE-ENABLED 2026-07-13 (#4162 follow-up — see section above)
 **Issue**: Re-applies the `chk_protection_level` constraint after replay paths have already created the newer snapshot schema, causing duplicate-constraint failures on `snapshots`.
 
 #### `20251117000002_create_protection_rules.ts`
-**Status**: ❌ Excluded
+**Status**: ✅ RE-ENABLED 2026-07-13 (#4162 follow-up — see section above)
 **Issue**: Re-creates the `protection_rules` table after replay paths have already applied the legacy protection-rule schema, causing duplicate-table failures.
 
 #### `20251201000001_create_change_management_tables.ts`
-**Status**: ❌ Excluded
+**Status**: ✅ RE-ENABLED 2026-07-13 (#4162 follow-up — see section above)
 **Issue**: Applies `snapshot_id` foreign keys against the newer `uuid snapshots.id` while replay paths still rebuild legacy `text` snapshot references, causing incompatible-FK failures.
 
 #### `zzzz20260114110000_create_user_orgs_table.ts`

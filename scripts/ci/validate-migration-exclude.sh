@@ -23,7 +23,7 @@
 # (a single env var, as inherited by this process) contained 3 hardcoded filenames. It now
 # reads the actual workflow files and migration-provider.ts directly and checks:
 #   A. every item in every CI-gate/replay MIGRATION_EXCLUDE occurrence against the full known
-#      baseline (11 items, not 3) — anything extra is reported as a possibly-undocumented new
+#      baseline (7 items since the 2026-07-13 #4162 re-enable; was 11, originally 3) — anything extra is reported as a possibly-undocumented new
 #      exclusion;
 #   B. every occurrence-to-occurrence divergence within those six occurrences against a table
 #      of KNOWN, already-reviewed divergences (see MIGRATION_EXCLUDE_TRACKING.md) — anything
