@@ -523,6 +523,15 @@ describeIfDatabase('D-1c slice ② — plugin-SDK createRecord/patchRecord write
         await holder.query('COMMIT')
         await patchPromise
       } finally {
+        // If the barrier above ever throws (timeout), COMMIT is never reached — releasing the raw
+        // connection here WITHOUT first ending its open transaction would return it to the pool
+        // `idle in transaction`, still holding the DELETE's row lock, and leave the fire-and-forget
+        // `patchPromise` blocked forever (its UPDATE never unblocks). That would poison every OTHER
+        // `describeIfDatabase` file sharing this one Postgres in the same `plugin-tests.yml` run — a
+        // barrier timeout in THIS test must never cascade into unrelated suites as flake. ROLLBACK is a
+        // safe no-op after a successful COMMIT (nothing left to roll back) and a real safety net
+        // otherwise — always run it before the connection goes back to the pool.
+        await holder.query('ROLLBACK').catch(() => {})
         holder.release()
       }
 
