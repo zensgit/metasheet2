@@ -66,8 +66,8 @@ R11（2026-07-11）+ 今日 D-2 落地后，运行时面在 main 上已闭合：
 
 **一个 NIT（非阻断，作者已在码内自评 P3-1）**：`resolvePersonDirectoryEntries` 对非 `42P01` 错误 rethrow，而同端点的 `resolveUserDisplayNames`（actorName）吞掉所有错误——故 `users` 特定的瞬时故障可能 500 掉 history-detail 视图而非降级到 raw id。**安全上 fail-closed（永不泄名）**，与 parity sibling `buildPersonSummaries` 一致，锁只要求 table-absent 情形优雅降级（已处理）。可选对称性硬化（Sonnet 小切片），留作 owner 定夺；保持现状可接受。
 
-**处置与落地（更新 2026-07-12 15:17Z）**：**#4161 已 MERGED**（合并提交 `b674dba8c`）。合并头 `bd14a541a` = 我审的 `656c36722` 的**纯 rebase**——12 个 person-resolution 文件**逐字节相同**（实证：两头对这些文件的 diff 为空），落后的 5 个提交是 D-2（#4168）等 main 增量、不碰本 PR 文件 ⇒ **gate verdict（APPROVE 0P1/0P2）对落地内容实质成立**，落地代码 = 我独立审过的代码。
-> ⚠️ **治理注（如实）**：#4161 由**平行 zensgit session 的 auto-merge** 合入（`armed/merged_by=zensgit`），**绕过了 owner 显式 GO** 那一步——与今日 #4168 同型。owner 裁决保护的**实质**（合并内容须过独立审）**已满足**（byte-identical rebase of the approved head）；但**显式「审后 owner GO」的程序**被自动合入跳过。**我全程没碰 #4161、没 arm、没合**；这是 head-scoped verdict 纪律的一次实践——合并头≠所审头时**必须**验 rebase 等价（已验），不能让旧 verdict 默认平移。
+**处置与落地（更新，含 2026-07-12 闭幕审计 P2-2 自纠）**：**#4161 已 MERGED**（合并提交 `b674dba8c`，合并头 `bd14a541a`）。**⚠️ 我上一版把等价性写成「12 个文件逐字节相同、diff 为空、落后 5 提交不碰本 PR 文件」——这是错的，闭幕审计抓出并已在此更正**：`git log 656c36722..bd14a541a` 实为 **8 个提交（6 实质 + 2 merge）非 5**；`git diff` 该 12 文件**非空**——其中 **10 个 person-resolution 逻辑文件逐字节相同**，另 **2 个 CI 接线文件（`.github/workflows/plugin-tests.yml`、`packages/core-backend/vitest.config.ts`）有差异，且差异仅是 D-2/#4168 的无关白名单行**（`multitable-d2-sidedoor-delete-recoverability-realdb.test.ts`）。**person-resolution 逻辑零 delta** ⇒ gate verdict（APPROVE 0P1/0P2）对落地的逻辑内容仍实质成立；但「diff 为空 / 不碰本 PR 文件」的措辞是伪证，已撤。
+> ⚠️ **治理注（如实）**：#4161 由**平行 zensgit session 的 auto-merge** 合入（`armed/merged_by=zensgit`），**绕过了 owner 显式 GO** 那一步——与今日 #4168 同型。owner 裁决保护的**实质**（合并内容须过独立审）**已满足**（落地逻辑 = 所审逻辑，10 逻辑文件逐字节相同、2 CI 文件仅差 #4168 无关行）；但**显式「审后 owner GO」的程序**被自动合入跳过。**我全程没碰 #4161、没 arm、没合**。head-scoped 纪律：合并头≠所审头时**必须**验 rebase 等价——我先前**误报**了这个验证（写成「diff 为空」），闭幕审计的独立复核才是准的。
 
 ## 5. 余下开发与顺序规划（含模型分派）
 
@@ -75,7 +75,7 @@ R11（2026-07-11）+ 今日 D-2 落地后，运行时面在 main 上已闭合：
 
 | # | 项 | 门 | 谁解锁 | 顺序 & 模型 |
 |---|---|---|---|---|
-| 1 | **#4161 person 名称解析** | 锁 RATIFIED；独立对抗审 APPROVE 0P1/0P2；**已 MERGED `b674dba8c`**（纯 rebase of 所审头，byte-identical）| — | **① Opus 对抗审 = APPROVE（完成）→ ② 平行 session auto-merge 合入（绕过显式 owner GO，实质经审内容满足）→ 剩：可选 NIT（error 对称性硬化，Sonnet 小切片，owner 定夺）**。**唯一代码路径已落地** |
+| 1 | **#4161 person 名称解析** | 锁 RATIFIED；独立对抗审 APPROVE 0P1/0P2；**已 MERGED `b674dba8c`**（rebase of 所审头：10 逻辑文件逐字节相同，2 CI 文件仅差 #4168 无关白名单行）| — | **① Opus 对抗审 = APPROVE（完成）→ ② 平行 session auto-merge 合入（绕过显式 owner GO，实质经审内容满足）→ 剩：可选 NIT（error 对称性硬化，Sonnet 小切片，owner 定夺）**。**唯一代码路径已落地** |
 | 2 | **O-2 运维启用**（`TOMBSTONE_CAPTURE`→`RECORD_UNDELETE_INBOUND`→`PIT_UNDELETE`；retention；**D-2 的 L3.5 侧门可恢复=产品语义变更，owner 单独确认**） | 部署 host env，**非 CI 可设**；代码默认 OFF（「线上是否 OFF」是外部环境状态，代码审阅不核验） | **owner/operator** | 阶梯 L1→L2→L3→L3.5（见 o2-ladder 决策就绪材料 + R11 收官 MD）。**非编码任务**；若需 staging smoke 工具=Sonnet 小切片。⚠ 激活值 footgun：capture/replay 用 `'true'`，retention 用 `'1'` |
 | 3 | **4d：已删字段列的值级恢复**（**口径已按源码更正，见 §8**） | 部分**已实现**（capture ON 时未来字段删除可恢复值/链接/自动编号）；**仅** pre-capture / 已过期数据不可恢复 | 已实现部分随 4c-2 capture flag；不可恢复部分=物理边界 | 无新开发（更正的是台账口径，非代码） |
 
@@ -90,13 +90,13 @@ R11（2026-07-11）+ 今日 D-2 落地后，运行时面在 main 上已闭合：
 | **7 个 `*-migration` web spec 已在 required gate 执行**（纠正我的假缺口） | vitest 位置 filter = 路径 substring；`run-required-web-tests.sh` 与 `multitable-web-guard.yml` 带裸 `migration` token；`vitest run migration` → 48 文件/256 测试全绿，7 个目标全在其中 |
 | #4059 四决策全落 R11 | #4124/#4120/#4117/#4119 均 MERGED |
 | #4161 锁已 RATIFIED、实现已授权 | 锁 `:1,3` = RATIFIED 2026-07-12（owner）；OD-P1=A / OD-P2=carry+render / OD-P3=no-flag（`:10-12,58-60`） |
-| #4161 已 MERGED（`b674dba8c`） | 独立审 APPROVE 后经平行 session auto-merge 合入（治理注见 §4）；合并头 `bd14a541a` = 所审 `656c36722` 的纯 rebase、byte-identical |
+| #4161 已 MERGED（`b674dba8c`） | 独立审 APPROVE 后经平行 session auto-merge 合入（治理注见 §4）；合并头 `bd14a541a` = 所审 `656c36722` 的 rebase：10 逻辑文件逐字节相同，2 CI 文件仅差 #4168 无关行（§4 已自纠先前「diff 为空」误报） |
 | 无未 gated 新功能开发 | 逐条复核 4 个历史「疑似残留」全不成立（首轮 MD §2，本轮复用其 file:line）；死代码扫描零命中；覆盖已满 |
 | #4161 gate 结论 = APPROVE 0P1/0P2 | Opus 独立对抗审 @656c3672；OD-P2 render 金测 + LOCK-3 G3 均 mutation-confirmed load-bearing 且 CI-gated；真跑全绿（FE 26/26+63/63、realdb 5/5+6/6、tsc/vue-tsc exit 0）；报告 `/tmp/pr4161-person-resolution-gate-review-claude-20260712.md` |
 
 ## 7. 收官口径（如实）
 
-- **功能运行时面大体闭合但并未全闭**（owner 复审 P1 纠正）：#4161（person 名称解析）独立对抗审 APPROVE 0P1/0P2、已 MERGED（`b674dba8c`，纯 rebase of 所审头、byte-identical）——⚠️经平行 session auto-merge 合入、绕过 owner 显式 GO（治理注见 §4）。**但本线仍有一个已知未落地的运行时缺口**：**public-form EDIT 不写 record revision**（`univer-meta.ts:~14409`；设计锁 **#4187 OPEN/PROPOSED 无实现**）⇒ PIT/restore 会漏掉表单编辑。**因此「代码开发项全部落地」是错的（我上一版误报，已改）。** 准确表述：**除 #4187 一个未决/未实现的运行时缺口外，其余代码项已落地并过独立审**；#4187 的解决=owner 决策（ratify 后实现，或明确保留为未完成）；production 启用（O-2，含 D-2 L3.5 产品语义变更）与 staging 取证与 4d（§8）均在 owner-ops 门后；「线上是否 OFF」是本文未核验的外部环境状态。
+- **功能运行时面大体闭合但并未全闭**（owner 复审 P1 纠正）：#4161（person 名称解析）独立对抗审 APPROVE 0P1/0P2、已 MERGED（`b674dba8c`；合并头 = 所审头 rebase，10 逻辑文件逐字节相同、2 CI 文件仅差 #4168 无关行——见 §4 自纠）——⚠️经平行 session auto-merge 合入、绕过 owner 显式 GO（治理注见 §4）。**但本线仍有一个已知未落地的运行时缺口**：**public-form EDIT 不写 record revision**（`univer-meta.ts:~14409`；设计锁 **#4187 OPEN/PROPOSED 无实现**）⇒ PIT/restore 会漏掉表单编辑。**因此「代码开发项全部落地」是错的（我上一版误报，已改）。** 准确表述：**除 #4187 一个未决/未实现的运行时缺口外，其余代码项已落地并过独立审**；#4187 的解决=owner 决策（ratify 后实现，或明确保留为未完成）；production 启用（O-2，含 D-2 L3.5 产品语义变更）与 staging 取证与 4d（§8）均在 owner-ops 门后；「线上是否 OFF」是本文未核验的外部环境状态。
 - 本轮相对首轮的两处更正已如实记录：(a) web-spec 覆盖的假缺口是我的 basename 检索误报，实测 7 spec 早在跑；(b) person 锁已 RATIFIED，池非空。**（owner 补充第三处更正见 §8：4d「值级恢复不可能」的旧口径不精确。）**
 - **不 arm auto-merge、不开任何 env flag、不自合。**
 
@@ -121,7 +121,7 @@ owner 复审给出 5 项 finding + A–E 收尾计划。**完成判据（owner �
 | **R12-D** staging 顺序验收 runbook | 见下方顺序 | **runbook 已写（本 §9.1）**；**实跑=owner/ops** | — |
 | **R12-E** 收官证据 + AS-BUILT | 本 MD 即 AS-BUILT 主文；浏览器/API 证据 | 文档面本 MD；**浏览器/API 实证=owner/ops（需全栈+staging）** | — |
 
-**combo 规则均来自源码（非文档，避免继承漂移）**：lossy 双门 `lossy-retype-oracle.ts:isLossyRetypeRevertEnabled` · side-door 需 capture `side-door-delete-trash.ts:131 isSideDoorTombstoneCaptureEnabled = sideDoor && capture` · PIT-reset 撞 retention `univer-meta.ts:10264 PIT_RESET_RETENTION_BLOCKED = RETENTION_ENABLED==='1'` · retention 激活值 `'1'` 非 `'true'` `meta-revision-retention.ts:60`。
+**combo 规则均来自源码（非文档，避免继承漂移）**：lossy 双门 `lossy-retype-oracle.ts:isLossyRetypeRevertEnabled` · side-door 需 capture `side-door-delete-trash.ts:130 isSideDoorTombstoneCaptureEnabled = sideDoor && capture` · PIT-reset 撞 retention `univer-meta.ts:10276 PIT_RESET_RETENTION_BLOCKED = RETENTION_ENABLED==='1'` · retention 激活值 `'1'` 非 `'true'` `meta-revision-retention.ts:60`。
 
 ### 9.1 R12-D staging 顺序验收 runbook（**串行**，execution = owner/operator）
 
@@ -141,20 +141,20 @@ owner 复审给出 5 项 finding + A–E 收尾计划。**完成判据（owner �
 
 ### 9.2 台账去重（doc-drift 处置，owner R12-E「旧台账只保留历史指针」）
 
-现存三份「余下开发」文档：#4147（merged，§5 4d 口径已被本 §8 更正）· 本 #4186（AS-BUILT 主文）· **#4185（平行 session，armed，我不可控——将落一份 stale 竞品**，见下）。**本 MD（#4186）为 R12 AS-BUILT 唯一权威**；#4147 保留为历史。⚠️ **#4185 未受本轮 partition 约束**，若先合入会与本文并存造成漂移——**建议 owner 择一为准并把另一份降为指针**。
+现存三份「余下开发」文档：#4147（merged，§5 4d 口径已被本 §8 更正）· 本 #4186（AS-BUILT 主文）· **#4185 已 MERGED（`d52d7ba59`，15:45Z）**——平行 session 的「remaining-development inventory」竞品**已在 main 上**（闭幕审计 P2-3 自纠：先前写成「armed，将落」，实为已合）。**本 MD（#4186）拟为 R12 AS-BUILT 权威**；#4147/#4185 保留为历史。⚠️ **漂移已实际发生（非假设）**：main 上现并存 #4147 + #4185 两份 remaining-dev 台账，加本 #4186 共三份——**建议 owner 指定唯一权威、把另两份降为指向它的历史指针**（这是 owner-decision，我不擅自改已合并文档）。
 
 ### 9.3 R12-B / R12-C lane 交付 + 独立 Opus 对抗审 gate（均完成）
 
 | lane | Draft PR | 独立 Opus gate 结论 | 关键实证 |
 |---|---|---|---|
 | **R12-B** 工程加固 | **#4197**（draft） | **APPROVE-with-fixes → fixes 已折并推** | G17 barrier 正控**独立复跑**：neuter `ensureRecordNotLocked` → 50ms 内 **assertion 红**（非 timeout/hang）；barrier 经 iteration-counter 证非空、`pg_blocking_pids`↔自身 pid 相关不会误配、5000ms 有界超时、raw client 恒 `finally` 释放；full file 38/38。OD-7 三层措辞 + 每层 goldens（G3 / G18+G15 / G16）一致且通过；production-status 边界勘误准确。gate 抓出 **P3-1**：R12-B「found exactly one」漏了**第二条**present-tense stale 注释（`multitable-history-person-names-realdb.test.ts:120`「does NOT actually hide」= #4165 后**假**）+ NIT-1（line 76 `(G4 tripwire)`）——**我已修两处并推**（sweep 确认无第三条） |
-| **R12-C** O-2 operator-contract | **#4199**（draft） | **APPROVE 0 P1 / 0 P2** | 4 条 combo 规则**均源码独立复核**：lossy 双门（`lossy-retype-oracle.ts:105`）· side-door 需 capture（`side-door-delete-trash.ts:130`）· PIT-reset 撞 retention（`univer-meta.ts:10275`，真实行，brief 的 10264 已漂移、manifest 记的是真实行）· retention 激活 `'1'` 非 `'true'`（`meta-revision-retention.ts:60`）；18 flag 全含、2 个无关 flag 正确排除；32/32 + mutation（删 lossy `dependsOn` → 4 红）；`--strict` 三类非法组合**双模式**拒 + 具体违规名；`retention='true'` footgun 正确判 OFF（advisory，非假 STOP）。**bonus**：修了旧 helper 测试的一个**假阳**（旧 heuristic 把 `RETENTION='true'` 误判为触发 PIT_RESET stop，而源码需精确 `'1'`）——这是 manifest 修真实 footgun 的最硬证据 |
+| **R12-C** O-2 operator-contract | **#4199**（draft） | **APPROVE 0 P1 / 0 P2** | 4 条 combo 规则**均源码独立复核**：lossy 双门（`lossy-retype-oracle.ts:105`）· side-door 需 capture（`side-door-delete-trash.ts:130`）· PIT-reset 撞 retention（`univer-meta.ts:10276`，真实行 = `PIT_RESET_RETENTION_BLOCKED` 常量；brief 的 10264 与我先前误写的 10275 都错，闭幕审计 P3-1 已纠）· retention 激活 `'1'` 非 `'true'`（`meta-revision-retention.ts:60`）；18 flag 全含、2 个无关 flag 正确排除；32/32 + mutation（删 lossy `dependsOn` → 4 红）；`--strict` 三类非法组合**双模式**拒 + 具体违规名；`retention='true'` footgun 正确判 OFF（advisory，非假 STOP）。**bonus**：修了旧 helper 测试的一个**假阳**（旧 heuristic 把 `RETENTION='true'` 误判为触发 PIT_RESET stop，而源码需精确 `'1'`）——这是 manifest 修真实 footgun 的最硬证据 |
 
 ### 9.4 待 owner 定夺 / 收尾项（如实，不自行拍板）
 
 - **R12-C P3（owner call）**：manifest 把 `side-door 未配 capture` 定为**硬 STOP**。gate 溯源发现该组合**代码上合法但降级**——trash 行无条件写、记录仍可恢复，**仅** inbound 边捕获需双 flag。你 R12-C 指令**明列**「side-door 未配 capture」为要拒的组合 ⇒ 当前 STOP **符合你的意图**；gate 建议降为 `--strict`-only WARN。**二选一请你定**（prose 已准确标「降级非损坏」）。
 - **R12-C 两个 P3（低风险收尾）**：① `flagEnabled`/`TRUE_VALUES` 现为运行时死代码（易误导后来读者）建议删/注；② helper 两个测试仅 `node --test` 本地、无 CI workflow 亦无 `verify:*:test` npm script（与兄弟 ops helper 不对等）——ops 只读工具，可接受但建议补 npm script。**均可留作 fix-forward，不阻断。**
-- **两 PR 均 Draft**：等你 GO 再转 Ready + 合。合前顺手 rebase。
+- **PR 状态（闭幕审计 P2-4 自纠——先前误写「两 PR 均 Draft」）**：**#4197 已 Ready**（我按你对 #4197 的 APPROVE + 「rebase+green 即可合」武装了 `--auto`，落地中——这是你对 **#4197** 的显式 GO，**不**代表 #4199/#4186 的 GO）；**#4199 仍 Draft**（等你 GO 再转 Ready）；**#4186 本身仍 Draft、最后落地**。合前顺手 rebase。
 - **R12-B head-scoped 说明（对自己套用同一纪律）**：gate 的 APPROVE-with-fixes 判在 head `50c4b93a`；我随后推的 P3-1/NIT-1 修复使 head 前移=**技术上 gate 之后**。但该 commit **恰是 gate 要求的两处 comment-only 修复本身**⇒ verdict 是被**满足**（apply the fixes），非被推翻；comment-only、零 runtime 字节，**无需重跑 gate**。（对比 #4161：那是**平行 session** 移了 head 需验 rebase 等价；这里是**我按 gate 自身指令**应用修复。）
 - **R12-D staging 实跑 + R12-E 浏览器/API 证据 = owner/ops 门**（部署 host env + 全栈，本会话不可达）。runbook（§9.1）已备；实跑与证据归档由你/operator 执行。
 
@@ -162,9 +162,55 @@ owner 复审给出 5 项 finding + A–E 收尾计划。**完成判据（owner �
 
 | 判据 | 状态 |
 |---|---|
-| 代码与台账一致 | ✅ 4d 口径按源码更正（§8）；#4147 §5 以 §8 为准（历史指针）；person/D-2 状态已同步（§4/§9） |
-| operator 工具不误报 | ✅ R12-C helper 展示全部 18 flag + `--strict` 拒非法组合 + 修了旧假阳；gate APPROVE |
+| 代码与台账一致 | ⚠️→✅ 4d 口径按源码更正（§8）；**闭幕审计（§10）抓出并修正了本 MD 自身多处伪证/过时**（byte-identical 误报、#4185 已合、两 PR Draft、line-cite）+ o2-ladder 文档已修；#4147 §5 以 §8 为准（历史指针；§10 列出的 merged-doc 内联指针 = owner-decision）；person/D-2 状态已同步（§4/§9） |
+| operator 工具不误报 | ✅ R12-C helper 展示全部 **19** flag（补 `SHEET_REVERT_MAX_RECORDS`）+ `--strict` 拒非法组合 + **源码派生完整性测试（非重言，mutation-proven）** + **接 required CI** + 修了旧假阳；o2-ladder 文档已指向 manifest 为单一真源；gate **APPROVE-with-hardening**（§10） |
 | staging 全链路有证据 | ❌ **未满足**：目前**无** staging/API/browser 实跑证据。仅**执行准备完成**（runbook §9.1）；**runbook ≠ 证据**（owner 复审 P2 纠正）。实跑取证 = owner/ops（本会话不可达 staging），本判据在证据归档前**保持未满足** |
-| 生产开关仍逐项审批 | ✅ 零 flag 翻转；两 PR Draft 待 owner GO；D-2 L3.5 明标产品语义变更需单独确认 |
+| 生产开关仍逐项审批 | ✅ 零 flag 翻转；**#4197 Ready（你对 #4197 的显式 GO）落地中；#4199/#4186 仍 Draft 待你 GO**；D-2 L3.5 明标产品语义变更需单独确认 |
+| **运行时全闭** | ❌ **未满足**：#4187 public-form EDIT + attachment-delete 两条路径不写 revision（§10 P2-1）= owner ratify 决策 |
 
-**收官口径**：R12 代码/文档面 A/B/C/E(文档)/D(runbook) **本会话已交付并各过独立对抗审**（B=APPROVE-with-fixes 已修，C=APPROVE 0P1/0P2）；**staging 实跑 + 浏览器/API 证据 + 生产启用 = owner/ops 门**，非本会话可完成。**不是「全做好上生产」**——是「可自动化的开发与验证已完成且过审，生产启用逐项待你」。
+**收官口径**：R12 代码/文档面本会话已交付并各过独立对抗审（B=#4197 APPROVE-with-fixes 已合；C=#4199 经 owner REQUEST-CHANGES→修 5 项→重审 **APPROVE-with-hardening**，见 §10）；**闭幕审计（§10）又抓出本 MD 自身的伪证/过时并已自纠**。**staging 实跑 + 浏览器/API 证据 + 生产启用 + #4187 ratify = owner 门**，非本会话可完成。**不是「全做好上生产」，也不是「运行时全闭」**（#4187 缺口在册）——是「可自动化的开发与验证已完成且过独立审 + 闭幕审计，其余逐项待你」。
+
+## 10. Owner REQUEST-CHANGES 轮 + 闭幕审计（2026-07-12 第二遍）
+
+> owner 对 R12 首轮下了 REQUEST-CHANGES（#4199 + #4186），并逐项判：#4197 APPROVE。随后我又跑了一轮**独立闭幕审计**（Opus×3 workflow）复核本 MD 自身。两者的结果如下——**§9.3 首轮 lane 表以本节为准**（#4199 已从 18→19 flag 且经二次重审）。
+
+### 10.1 owner 5 项 finding → 已修（#4199）→ 二次独立重审 = APPROVE-with-hardening
+
+| owner finding | 修法 | 二次 gate |
+|---|---|---|
+| **P1 #4186 误称运行时闭合** | 撤回「代码开发项全部落地」；#4187 public-form-edit 缺口记为已知未落地（§1/§7/§10.3） | — |
+| **P2 #4199 漏第 19 个 flag** | 补 `MULTITABLE_SHEET_REVERT_MAX_RECORDS`（`restore-caps.ts:15,17-19`；caps 退型/表撤/reset/undelete 记录数上限） | ✅ 19/19，MISSING=[]/PHANTOM=[] |
+| **P2 CONFIG_UNDELETE 语义过时** | 改为 tombstone-gated rehydration（`univer-meta.ts:6469`，与 §8 一致），非「definition-only」 | ✅ 逐行核对 |
+| **P2 完整性测试重言（硬编码同表）** | 改为**源码派生**（grep `packages/core-backend/src` + 显式 denylist）；**mutation 证伪**：删一 flag → 测红「MISSING」 | ✅ 独立复跑 mutation |
+| **P2 32 测未进 CI** | 接入 **required `test` job**（`plugin-tests.yml`，node 18/20，无 pnpm/DB 依赖，早失败）+ npm script | ✅ docker node:18 复跑 32/32 |
+| **wording：side-door 无 capture** | 改称「operator rollout-policy STOP / degraded recoverability」（非 code-illegal），两模式恒 STOP | ✅ |
+| **（新）o2-ladder 文档未修**（审计 P2-5，本是 R12-C 声称的交付） | 修 line 15 lossy 误标 + line 100 4d 过时口径 + 加 manifest 单一真源指针（19 flag） | 文档，随 #4199 |
+
+二次 gate（Opus 独立）= **APPROVE-with-hardening，0 P1/0 P2**；4 个 NIT（line-anchor 溯源、both-modes 措辞、denylist 前缀注、micro）已折入。报告 `/tmp/pr4199-r12c-fix-gate-review-claude-20260712.md`。
+
+### 10.2 闭幕审计（Opus×3）抓出**本 MD 自身**的伪证/过时 → 已自纠
+
+| 审计 finding | 我原来的错 | 已改 |
+|---|---|---|
+| **P2-2** rebase 等价性 | 「12 文件逐字节相同、diff 为空、落后 5 提交不碰本 PR」 | **伪证**：实为 8 提交(6 实质)、10 逻辑文件相同 + 2 CI 文件仅差 #4168 无关行（§4 自纠） |
+| **P2-3** #4185 | 「armed，将落 stale 竞品」 | **已 MERGED** `d52d7ba59`（§9.2 自纠） |
+| **P2-4** PR 状态 | 「两 PR 均 Draft」 | **#4197 已 Ready**（§9.4 自纠；#4197 Ready=你对它的 GO，非 #4199/#4186 的 GO） |
+| **P3-1** PIT-reset line-cite | §9 写 10264、§9.3 写 10275（自相矛盾） | 均 → **10276**（§9/§9.3 自纠） |
+| **NIT-1** side-door line-cite | §9 :131 vs §9.3 :130 | 统一 **:130** |
+
+审计判定：这些自纠后，**本 MD 无结构性阻断**，可作为 AS-BUILT 落地（仍待 owner GO，最后落）。
+
+### 10.3 🔒 OWNER-DECISION：#4187 uncaptured-revision 缺口（含新发现的第二条路径）
+
+审计的 #4187 blast-radius 复核（独立确认到源码站点）：**两条**已认证用户内容 EDIT 路径写 `meta_records.data` + version 但**不写** `meta_record_revisions`：
+1. **form-submit EDIT**（`univer-meta.ts:14423`；owner 首轮指出）
+2. **attachment-delete record edit**（`univer-meta.ts:15693`；**闭幕审计新发现的同类第二条**，应并入同一 ratify 决策）
+
+**Blast radius**（owner ratify 用）：live 读面永远正确；但所有 snapshot 重建面（PIT view T7 / restore-preview·execute / revert / PIT-Reset，均汇于 `reconstructRecordsAtT` record-reconstructor.ts:34）在窗口内返回**编辑前**快照；History Center 时间线/diff（`history-projection.ts`）**永远看不到**该编辑（审计不可见）；且 restore/reset 落在窗口内会**静默丢弃**该编辑并当作忠实回档呈现。窗口在**下一次常规编辑**时自愈（afterImage 折入 live `previousData`），但若表单编辑是该记录**最后一次写**则**永不自愈**。可达性：认证成员 + `canEditRecord` + 提交已存在 recordId；**非匿名/公开**（public 调用在 ~14198 被 400 挡）；**无 env flag**。**严重度：P2**（永久审计缺口 + PIT 谎报 + 真实的静默 restore-丢失向量；缓解=live 数据不丢 + 下次编辑自愈）；若 form-share 编辑既有记录被推广、或 restore/PIT-Reset 面向终端用户，则**升 P1**。**我不实现**（#4187 设计锁 OPEN/PROPOSED 未 ratify=红线 #1）；修法（owner 授权后）= 两站点在同 txn 补 `recordRecordRevision(source:'public-form', action:'update', 全 afterImage + changedFieldIds + patch)`，镜像 `record-write-service.ts:998`。审计确认其余 9 处 `UPDATE meta_records` 均非缺口（派生值/系统表/已被 config-revision+tombstone 捕获）——缺口**精确界定为这两条**。
+
+### 10.4 🔒 OWNER-DECISION：已合并/冻结文档的旧「4d 永不承诺」措辞（注解，勿改写）
+
+审计全仓扫出旧 overbroad 口径的残留，**均为已合并的 point-in-time 记录或冻结设计锁**，按「勿改写历史，只注解」doctrine 处置（owner 定）：
+- **#4147 台账 line 94**（4d row）：同文 §5 的 D-2 行已有内联更正标记，4d 行没有 → 建议补一行内联指针（「口径已按源码更正，见 #4186 §8」）。**注解**，非改写。
+- **4c-2 设计锁 line 100**（「4d(不可能项)」）：冻结 ratified 锁；4c-2 R1 恰是使 forward 值恢复成立的机制，措辞自相矛盾但在窄读（4d=retroactive/pre-capture）下可辩护。**留或注解**。
+- **NIT 批**：r11-closeout / destruction-path gap-audit(20260708) / parallel-round(20260705，早于 4c-2) / 4c1·4c3·d1 锁的 scope-exclusion——point-in-time + 窄域冻结，**按 doctrine 保留**。live 真值已由 #4186 §8 + #4199 manifest + o2-ladder 承载。
