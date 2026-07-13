@@ -2,6 +2,8 @@
 
 > **Status: 可交付范围 CLOSED.** 备料 MVP 的 on-prem runtime 验收弧闭合;剩余项全部迁入独立 gated pool。
 > 本文是该线的收账 + 验证汇总,**不**声称真实 PLM/K3/ERP 现场对接、C4 外部写、OD-W3-1 值面读完成。
+>
+> **权威边界(owner 口径 2026-07-12)**:本 closeout MD **不**承载外部对接 design-lock。真实外部系统现场对接的**唯一权威设计锁 = #4194**(`real-external-integration-line-design-lock-20260712.md`,PROPOSED / owner-ratification-required)。本文只做 MVP 收账并链接 #4194,避免两份 design-lock 同时权威。
 
 ## 1. 审阅结论(数据库代码 / 备料代码 / 目标文档)
 
@@ -50,7 +52,7 @@ externalPlmK3ErpWrite=false(C4 硬闸守住:零未授权外部写) · postSmokeS
 
 | 项 | 定性 | 门 |
 |---|---|---|
-| **真实 PLM/K3/ERP 现场对接** | 下一条产品线(非本线漏项) | 需现场系统 + 凭据 + 样本 + 授权;design-lock 见 `real-external-plm-k3-erp-onsite-integration-designlock-20260712.md` |
+| **真实 PLM/K3/ERP 现场对接** | 下一条产品线(非本线漏项) | 需现场系统 + 凭据 + 样本 + 授权;**唯一权威 design-lock = `real-external-integration-line-design-lock-20260712.md`(PR #4194 PROPOSED)** |
 | **C4 外部写 / K3 Save/Submit/Audit** | 最高风险 gate | 客户禁 + owner 单独授权 + sandbox-first(#2253) |
 | **OD-W3-1 值面读** | values-free → 值面 | 单独 gated audited read(图号/数量/单位等操作员可见需专门开,不顺手放开) |
 | **#4141** | corrective-6 guard governance lane | 质量债,不阻塞 runtime PASS;可选队列 |
