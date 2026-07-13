@@ -8,6 +8,17 @@ import RestorePreviewDialog from '../src/multitable/components/RestorePreviewDia
 // on Execute survives; and clicking them still emits the SAME `cancel` / `confirm` events with no
 // change to payload. The dialog teleports to <body>, so queries hit `document`, not the mount
 // container. Locale comes from the `isZh` prop (not the useLocale composable), so no locale reset.
+//
+// UI-P2-1c T1 batch-4 (multitable-ui-p2-1c-tail-resolution-designlock-20260707.md §2-T1, RATIFIED): the
+// header close-× (`.restore-preview__close`) was additionally migrated from a bespoke <button>&times;</button>
+// to the shared MtIconButton primitive — the &times; glyph passes through MtIconButton's default-slot icon
+// fallback (glyph char preserved, size token-normalized to the icon control, consistent with the existing
+// glyph-MtIconButton controls already on main). Behavior-preservation proof: it stays a native,
+// keyboard-operable <button>, keeps the SAME aria-label (`l('record.restorePreviewCancel')`), and clicking
+// it still calls the SAME onCancel() → emits the SAME `cancel` event (identical to the footer cancel
+// button's handler). This is the only sharer of `.restore-preview__close` (single button, single file) —
+// its bespoke CSS was removed outright, no double-styling risk. The footer Execute-confirm button was NOT
+// touched by this migration — see the pre-existing tests below (kept as the positive control).
 
 const mounts: Array<{ app: App<Element>; container: HTMLDivElement }> = []
 afterEach(() => {
@@ -66,5 +77,22 @@ describe('RestorePreviewDialog — MtButton migration (UI-P2-1c)', () => {
     expect(confirmBtn().disabled).toBe(false) // precondition driven enabled
     confirmBtn().click()
     expect(onConfirm).toHaveBeenCalledTimes(1)
+  })
+
+  it('renders the header close-× as a native <button> (MtIconButton) keeping the class + aria-label + glyph', () => {
+    mount(baseProps())
+    const btn = document.querySelector('.restore-preview__close') as HTMLButtonElement
+    expect(btn.tagName).toBe('BUTTON')
+    expect(btn.classList.contains('restore-preview__close')).toBe(true)
+    expect(btn.getAttribute('aria-label')).toBe('Cancel')
+    expect(btn.textContent?.trim()).toBe('×') // × glyph char preserved (size token-normalized)
+  })
+
+  it('clicking the header close-× emits `cancel` (unchanged — same onCancel as the footer cancel button)', () => {
+    const onCancel = vi.fn()
+    mount(baseProps(), { onCancel })
+    const btn = document.querySelector('.restore-preview__close') as HTMLButtonElement
+    btn.click()
+    expect(onCancel).toHaveBeenCalledTimes(1)
   })
 })

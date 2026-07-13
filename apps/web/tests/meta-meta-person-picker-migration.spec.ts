@@ -11,7 +11,16 @@ import { useLocale } from '../src/composables/useLocale'
 // pre-migration onConfirm. The `watch(() => props.visible, …)` is non-immediate, so mounting with
 // visible:true does NOT trigger loadMembers() — no directory API to stub, selection stays empty.
 // The dialog is an inline v-if overlay (not teleported), but we query `document` for robustness.
-// Left untouched per the classifier: the close-× glyph, chip-remove × glyphs, and the Clear button.
+//
+// UI-P2-1c T1 batch-3: the header close-× (`.meta-person-picker__close`) was ALSO migrated, from a
+// bespoke <button>&times;</button> to the shared MtIconButton primitive (T1 design-lock recommendation:
+// keep the &times; glyph, only collapse padding/hover/focus-ring onto tokens — token-normalized, not
+// zero-visual-change; see #4130/#4133 wording precedent). It stays a native, keyboard-operable
+// <button>, keeps the SAME aria-label (`pp('personPicker.close')`) and the SAME @click="emit('close')"
+// (no payload). `.meta-person-picker__close` is the sole sharer of that class in this file — its
+// bespoke CSS was removed outright (no double-styling risk).
+// Left untouched per the classifier: the chip-remove × glyphs (`@click="removeSelected(id)"` — a
+// "remove this chip" action, not a dismiss/close — and the Clear button) stay bespoke <button>s.
 
 const mounts: Array<{ app: App<Element>; container: HTMLDivElement }> = []
 afterEach(() => {
@@ -30,6 +39,7 @@ function mount(props: Record<string, unknown>, handlers: Record<string, unknown>
 const baseProps = () => ({ visible: true, sheetId: 's1' })
 const cancelBtn = () => document.querySelector('.meta-person-picker__cancel') as HTMLButtonElement
 const confirmBtn = () => document.querySelector('.meta-person-picker__confirm') as HTMLButtonElement
+const closeBtn = () => document.querySelector('.meta-person-picker__close') as HTMLButtonElement
 
 describe('MetaPersonPicker — MtButton migration (UI-P2-1c)', () => {
   it('renders cancel + confirm as native, enabled <button>s (keyboard-operable, not bare divs)', () => {
@@ -57,5 +67,29 @@ describe('MetaPersonPicker — MtButton migration (UI-P2-1c)', () => {
     expect(onConfirm).toHaveBeenCalledTimes(1)
     // selection empty (loadMembers never ran) → onConfirm emits empty arrays, exactly as before
     expect(onConfirm).toHaveBeenCalledWith({ userIds: [], summaries: [] })
+  })
+
+  it('T1 batch-3: renders the header close-× as a native <button> (MtIconButton) keeping class + aria-label + glyph', () => {
+    useLocale().setLocale('en')
+    mount(baseProps())
+    const btn = closeBtn()
+    expect(btn.tagName).toBe('BUTTON')
+    expect(btn.classList.contains('meta-person-picker__close')).toBe(true)
+    expect(btn.getAttribute('aria-label')).toBe('Close people picker')
+    expect(btn.textContent?.trim()).toBe('×')
+  })
+
+  it('T1 batch-3: renders the localized (zh) aria-label unchanged on the close-×', () => {
+    useLocale().setLocale('zh')
+    mount(baseProps())
+    expect(closeBtn().getAttribute('aria-label')).toBe('关闭人员选择器')
+  })
+
+  it('T1 batch-3: clicking the header close-× emits `close` with no payload (unchanged from pre-migration @click="emit(\'close\')")', () => {
+    const onClose = vi.fn()
+    mount(baseProps(), { onClose })
+    closeBtn().click()
+    expect(onClose).toHaveBeenCalledTimes(1)
+    expect(onClose).toHaveBeenCalledWith()
   })
 })

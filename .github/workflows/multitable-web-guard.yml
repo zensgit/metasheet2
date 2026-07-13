@@ -145,6 +145,13 @@ on:
       # run-required-web-tests.sh) is wired separately in #4156; this is the advisory-guard half of
       # the same fix.
       - 'apps/web/src/multitable/ui/**'
+      # UI-P2-1c T1 batch-3: MetaPersonPicker/MetaLinkPicker/ScaleFormattingDialog's header close-×
+      # migrated to MtIconButton. Their `*-migration.spec.ts` files are covered by the wildcard
+      # above, but (per the R5c/T3-T4-T5 CI-residual precedent) the .vue sources themselves had NO
+      # path trigger — a PR touching only e.g. ScaleFormattingDialog.vue would run no web-guard.
+      - 'apps/web/src/multitable/components/MetaPersonPicker.vue'
+      - 'apps/web/src/multitable/components/MetaLinkPicker.vue'
+      - 'apps/web/src/multitable/components/ScaleFormattingDialog.vue'
       # Formula catalog parity (12 scalar functions): web-side intent specs (12-present /
       # COUNTIF-absent, 1a scalar-set, i18n labels, editor diagnostics incl. arity table)
       - 'apps/web/src/multitable/utils/formula-docs.ts'
@@ -153,6 +160,19 @@ on:
       - 'apps/web/tests/multitable-formula-catalog-1a.spec.ts'
       - 'apps/web/tests/meta-formula-labels.spec.ts'
       - 'apps/web/tests/multitable-formula-editor.spec.ts'
+      # 3 red-on-main specs that ran in NO workflow (repair + first-time CI wiring): the
+      # MultitableApiClient contract spec, the comment-affordance idle-icon spec (#3734 emoji→SVG
+      # icon swap left it unupdated), and the comment-inbox realtime composable spec (its useAuth/
+      # utils-api mocks bit-rotted against #3964's getToken()-gated join + the client.ts singleton's
+      # apiFetch dependency — collection-level failure, zero tests ran).
+      - 'apps/web/tests/multitable-client.spec.ts'
+      - 'apps/web/tests/multitable-comment-affordance.spec.ts'
+      - 'apps/web/tests/multitable-comment-inbox-realtime.spec.ts'
+      - 'apps/web/src/multitable/components/MetaCommentAffordance.vue'
+      - 'apps/web/src/multitable/components/MetaCommentActionChip.vue'
+      - 'apps/web/src/multitable/utils/comment-affordance.ts'
+      - 'apps/web/src/multitable/composables/useMultitableCommentInboxRealtime.ts'
+      - 'apps/web/src/multitable/realtime/comments-realtime.ts'
       - '.github/workflows/multitable-web-guard.yml'
   push:
     branches: [main]
@@ -277,6 +297,13 @@ on:
       # run-required-web-tests.sh) is wired separately in #4156; this is the advisory-guard half of
       # the same fix.
       - 'apps/web/src/multitable/ui/**'
+      # UI-P2-1c T1 batch-3: MetaPersonPicker/MetaLinkPicker/ScaleFormattingDialog's header close-×
+      # migrated to MtIconButton. Their `*-migration.spec.ts` files are covered by the wildcard
+      # above, but (per the R5c/T3-T4-T5 CI-residual precedent) the .vue sources themselves had NO
+      # path trigger — a PR touching only e.g. ScaleFormattingDialog.vue would run no web-guard.
+      - 'apps/web/src/multitable/components/MetaPersonPicker.vue'
+      - 'apps/web/src/multitable/components/MetaLinkPicker.vue'
+      - 'apps/web/src/multitable/components/ScaleFormattingDialog.vue'
       # Formula catalog parity (12 scalar functions): web-side intent specs (12-present /
       # COUNTIF-absent, 1a scalar-set, i18n labels, editor diagnostics incl. arity table)
       - 'apps/web/src/multitable/utils/formula-docs.ts'
@@ -285,6 +312,19 @@ on:
       - 'apps/web/tests/multitable-formula-catalog-1a.spec.ts'
       - 'apps/web/tests/meta-formula-labels.spec.ts'
       - 'apps/web/tests/multitable-formula-editor.spec.ts'
+      # 3 red-on-main specs that ran in NO workflow (repair + first-time CI wiring): the
+      # MultitableApiClient contract spec, the comment-affordance idle-icon spec (#3734 emoji→SVG
+      # icon swap left it unupdated), and the comment-inbox realtime composable spec (its useAuth/
+      # utils-api mocks bit-rotted against #3964's getToken()-gated join + the client.ts singleton's
+      # apiFetch dependency — collection-level failure, zero tests ran).
+      - 'apps/web/tests/multitable-client.spec.ts'
+      - 'apps/web/tests/multitable-comment-affordance.spec.ts'
+      - 'apps/web/tests/multitable-comment-inbox-realtime.spec.ts'
+      - 'apps/web/src/multitable/components/MetaCommentAffordance.vue'
+      - 'apps/web/src/multitable/components/MetaCommentActionChip.vue'
+      - 'apps/web/src/multitable/utils/comment-affordance.ts'
+      - 'apps/web/src/multitable/composables/useMultitableCommentInboxRealtime.ts'
+      - 'apps/web/src/multitable/realtime/comments-realtime.ts'
       - '.github/workflows/multitable-web-guard.yml'
 
 jobs:
@@ -350,4 +390,7 @@ jobs:
         # T3/T4/T5 post-hoc gate (2026-07-12): `multitable-ui` matches multitable-ui-p2-1-primitives /
         # multitable-ui-mtlink / multitable-ui-p2-1b-overlays — the primitives' own specs, previously
         # in no run-list here — added alongside their new path trigger above.
-        run: pnpm --filter @metasheet/web exec vitest run automation-action-summary automation-recipes automation-save-block-reasons automation-target-sheet-options AutomationExecutionsView meta-automation-labels meta-filter-group meta-formula-labels meta-grid-table meta-toolbar-filter-builder migration multitable-automation-manager multitable-automation-rule-editor multitable-cell-renderer-person-inactive multitable-conditional-formatting multitable-conditional-rule multitable-config-history-modal multitable-config-revert-refresh multitable-field-manager multitable-field-visibility multitable-formula-catalog-1a multitable-formula-catalog-parity multitable-formula-editor multitable-grid multitable-history-center-ai-shortcut-label multitable-history-center-inline-diff multitable-history-center-pinned-batch-deeplink multitable-history-fe multitable-kanban-view multitable-person-picker multitable-record-permission-manager multitable-reorder-view-fields multitable-required-if multitable-reset-confirm-dialog multitable-reset-tsource-picker multitable-restore-batch-dialog multitable-restore-preview-dialog multitable-rollup-aggregation-fe multitable-sheet-cursor-state multitable-sheet-permission-manager multitable-trash-fe multitable-ui multitable-view-manager multitable-workbench-history-field-scope-wiring multitable-workbench-restore-wiring multitable-yjs-cell-editor multitable-yjs-scalar-cell parallelBranchRunsView statusTag --reporter=dot
+        # Red-on-main repair (2026-07-12): multitable-client / multitable-comment-affordance /
+        # multitable-comment-inbox-realtime ran in NO workflow at all before this — added alongside
+        # their new path triggers above (see run-required-web-tests.sh for the REQUIRED-gate half).
+        run: pnpm --filter @metasheet/web exec vitest run automation-action-summary automation-recipes automation-save-block-reasons automation-target-sheet-options AutomationExecutionsView meta-automation-labels meta-filter-group meta-formula-labels meta-grid-table meta-toolbar-filter-builder migration multitable-automation-manager multitable-automation-rule-editor multitable-cell-renderer-person-inactive multitable-client multitable-comment-affordance multitable-comment-inbox-realtime multitable-conditional-formatting multitable-conditional-rule multitable-config-history-modal multitable-config-revert-refresh multitable-field-manager multitable-field-visibility multitable-formula-catalog-1a multitable-formula-catalog-parity multitable-formula-editor multitable-grid multitable-history-center-ai-shortcut-label multitable-history-center-inline-diff multitable-history-center-pinned-batch-deeplink multitable-history-fe multitable-kanban-view multitable-person-picker multitable-record-permission-manager multitable-reorder-view-fields multitable-required-if multitable-reset-confirm-dialog multitable-reset-tsource-picker multitable-restore-batch-dialog multitable-restore-preview-dialog multitable-rollup-aggregation-fe multitable-sheet-cursor-state multitable-sheet-permission-manager multitable-trash-fe multitable-ui multitable-view-manager multitable-workbench-history-field-scope-wiring multitable-workbench-restore-wiring multitable-yjs-cell-editor multitable-yjs-scalar-cell parallelBranchRunsView statusTag --reporter=dot

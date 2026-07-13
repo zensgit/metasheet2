@@ -277,6 +277,27 @@ async function selectAdminSection(page, sectionId, headingName, waitMs = timeout
   return section
 }
 
+async function ensureImportAdvancedOptionsVisible(importSection, waitMs = timeoutMs) {
+  // #3708 moved payload JSON behind a collapsed advanced panel. Older deployments have no toggle.
+  const payloadInput = importSection.locator('#attendance-import-payload').first()
+  if (await payloadInput.isVisible().catch(() => false)) return payloadInput
+
+  const toggle = importSection.locator('[data-testid="attendance-import-advanced-toggle"]').first()
+  if (await toggle.count()) {
+    const expanded = await toggle.getAttribute('aria-expanded')
+    if (expanded !== 'true') {
+      await toggle.click()
+    }
+    const advanced = importSection.locator('[data-testid="attendance-import-advanced"]').first()
+    if (await advanced.count()) {
+      await advanced.waitFor({ state: 'visible', timeout: waitMs })
+    }
+  }
+
+  await payloadInput.waitFor({ state: 'visible', timeout: waitMs })
+  return payloadInput
+}
+
 async function waitForJsonResponse(page, predicate, { label }) {
   const response = await page.waitForResponse(predicate, { timeout: timeoutMs })
   const raw = await response.text()
@@ -527,7 +548,7 @@ async function run() {
 
   logInfo('Loading import template')
   await importSection.getByRole('button', { name: exactNamePattern(uiText.loadTemplate) }).click()
-  await page.locator('#attendance-import-payload').waitFor({ timeout: timeoutMs })
+  await ensureImportAdvancedOptionsVisible(importSection)
 
   // Prepare a tiny CSV with explicit UserId so we don't need user-map.
   const groupName = `E2E Group ${Date.now().toString(36)}`
