@@ -2,7 +2,7 @@
  * A-3 decision page (one-tap lock #3594 §5) — view behavior + the no-raw-/actions tripwire.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { createApp, defineComponent, h, nextTick, type App as VueApp } from 'vue'
+import { createApp, defineComponent, h, type App as VueApp } from 'vue'
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 
@@ -35,6 +35,12 @@ import ApprovalCardDecisionView from '../src/views/approval/ApprovalCardDecision
 
 function jsonResponse(data: unknown, status = 200): Response {
   return new Response(JSON.stringify(data), { status, headers: { 'Content-Type': 'application/json' } })
+}
+
+// Cross a real macrotask boundary so fixed microtask/nextTick flushes cannot pass these waits by luck.
+async function delayedJsonResponse(data: unknown, status = 200): Promise<Response> {
+  await new Promise((resolve) => setTimeout(resolve, 25))
+  return jsonResponse(data, status)
 }
 
 function summaryFixture(overrides: Record<string, unknown> = {}) {
@@ -81,29 +87,46 @@ const stub = (name: string, tag = 'div') => defineComponent({
   },
 })
 
-// The load path awaits getCurrentUserId → apiFetch → response.json(). Under Node 20's undici,
-// draining a Response body is several MACROTASK hops (not just microtasks), so a microtask-only
-// flush (await Promise.resolve()) settles on Node 25 but under-flushes on Node 20 / CI, leaving
-// summary.value null. Each cycle therefore drains a microtask, a macrotask (setTimeout(0)), and a
-// Vue tick; the higher cycle count is slack, not a race — assertions run only after the DOM is stable.
-// The load path awaits getCurrentUserId → apiFetch → response.json(). Draining an undici Response
-// body is microtask-bound but takes MORE hops under Node 20 (CI) than under the Node 25 dev
-// toolchain — a 6-cycle microtask-only flush settled locally yet left summary.value null on CI.
-// Each cycle now crosses a macrotask boundary (setTimeout(0)) as well, which forces the microtask
-// queue to drain to completion before the next tick, so the flush no longer depends on the exact
-// body-read hop count (a fixed microtask-only budget is what silently under-flushed on Node 20).
-// The cycle count is generous slack, not a race — assertions run only after the DOM is stable.
-async function flushUi(cycles = 12) {
-  for (let i = 0; i < cycles; i += 1) {
-    await Promise.resolve()
-    await new Promise((resolve) => setTimeout(resolve))
-    await nextTick()
-  }
-}
+const UI_WAIT_OPTIONS = { timeout: 5_000, interval: 10 }
 
 describe('ApprovalCardDecisionView (A-3)', () => {
   let app: VueApp<Element> | null = null
   let container: HTMLDivElement | null = null
+  let savedLocation: Location | null = null
+
+  function unmountView() {
+    app?.unmount()
+    container?.remove()
+    app = null
+    container = null
+  }
+
+  async function waitForElement<T extends Element>(selector: string): Promise<T> {
+    let element: T | null = null
+    await vi.waitFor(() => {
+      element = container?.querySelector<T>(selector) ?? null
+      expect(element).not.toBeNull()
+    }, UI_WAIT_OPTIONS)
+    return element!
+  }
+
+  async function waitForUi(assertion: () => void): Promise<void> {
+    await vi.waitFor(assertion, UI_WAIT_OPTIONS)
+  }
+
+  function stubWindowLocation(href: string) {
+    savedLocation = window.location
+    Object.defineProperty(window, 'location', {
+      configurable: true,
+      value: { ...savedLocation, href },
+    })
+  }
+
+  function restoreWindowLocation() {
+    if (!savedLocation) return
+    Object.defineProperty(window, 'location', { configurable: true, value: savedLocation })
+    savedLocation = null
+  }
 
   async function mountView() {
     container = document.createElement('div')
@@ -112,7 +135,6 @@ describe('ApprovalCardDecisionView (A-3)', () => {
     for (const name of ['ElAlert', 'ElInput', 'ElButton']) app.component(name, stub(name))
     app.directive('loading', { mounted() {}, updated() {} })
     app.mount(container)
-    await flushUi()
   }
 
   beforeEach(() => {
@@ -123,26 +145,26 @@ describe('ApprovalCardDecisionView (A-3)', () => {
   })
 
   afterEach(() => {
-    app?.unmount()
-    container?.remove()
-    app = null
-    container = null
+    unmountView()
+    restoreWindowLocation()
   })
 
   it('renders the summary and blocks 驳回 until a comment is typed (rejectCommentRequired)', async () => {
-    apiFetchMock.mockResolvedValueOnce(jsonResponse({ ok: true, data: summaryFixture() }))
+    apiFetchMock.mockImplementationOnce(() => delayedJsonResponse({ ok: true, data: summaryFixture() }))
     await mountView()
 
-    expect(container!.querySelector('[data-testid="card-decision-title"]')?.textContent).toBe('出差报销')
-    const reject = container!.querySelector('[data-testid="card-decision-reject"]') as HTMLButtonElement
+    const title = await waitForElement('[data-testid="card-decision-title"]')
+    expect(title.textContent).toBe('出差报销')
+    const reject = await waitForElement<HTMLButtonElement>('[data-testid="card-decision-reject"]')
     expect(reject.disabled).toBe(true)
     expect(container!.querySelector('[data-testid="card-decision-reject-hint"]')).toBeTruthy()
 
     const commentBox = container!.querySelector('[data-testid="card-decision-comment"] textarea, textarea') as HTMLTextAreaElement
     commentBox.value = '材料不全'
     commentBox.dispatchEvent(new Event('input', { bubbles: true }))
-    await flushUi()
-    expect((container!.querySelector('[data-testid="card-decision-reject"]') as HTMLButtonElement).disabled).toBe(false)
+    await waitForUi(() => {
+      expect((container!.querySelector('[data-testid="card-decision-reject"]') as HTMLButtonElement).disabled).toBe(false)
+    })
   })
 
   it('PR #4046 Phase B: an actionable outcome_unknown card renders live buttons; a non-actionable one gets 已流转 — never 未成功投递', async () => {
@@ -150,16 +172,16 @@ describe('ApprovalCardDecisionView (A-3)', () => {
     // outcome_unknown delivery whose instance is pending stays actionable server-side.
     apiFetchMock.mockResolvedValueOnce(jsonResponse({ ok: true, data: summaryFixture({ sendStatus: 'outcome_unknown' }) }))
     await mountView()
-    expect(container!.querySelector('[data-testid="card-decision-approve"]')).toBeTruthy()
+    await waitForElement('[data-testid="card-decision-approve"]')
     expect(container!.querySelector('[data-testid="card-decision-stale"]')).toBeNull()
-    app!.unmount(); container!.remove()
+    unmountView()
 
     // Non-actionable for ANOTHER reason (superseded): the accurate message is 已流转 —
     // "未成功投递" is reserved for pending/failed sends, where non-delivery is KNOWN.
     apiFetchMock.mockReset()
     apiFetchMock.mockResolvedValueOnce(jsonResponse({ ok: true, data: summaryFixture({ sendStatus: 'outcome_unknown', cardState: 'superseded', actionable: false }) }))
     await mountView()
-    const stale = container!.querySelector('[data-testid="card-decision-stale"]')
+    const stale = await waitForElement('[data-testid="card-decision-stale"]')
     expect(stale?.getAttribute('data-title')).toContain('已流转')
     expect(stale?.getAttribute('data-title')).not.toContain('未成功投递')
   })
@@ -172,14 +194,16 @@ describe('ApprovalCardDecisionView (A-3)', () => {
       data: summaryFixture({ cardState: 'acted', actionable: false, actedAction: 'approve', approval: { ...summaryFixture().approval, status: 'approved' } }),
     }))
 
-    ;(container!.querySelector('[data-testid="card-decision-approve"]') as HTMLButtonElement).click()
-    await flushUi()
+    const approve = await waitForElement<HTMLButtonElement>('[data-testid="card-decision-approve"]')
+    approve.click()
+    await waitForUi(() => expect(apiFetchMock).toHaveBeenCalledTimes(2))
 
     const calls = apiFetchMock.mock.calls.map((c) => String(c[0]))
     expect(calls[1]).toBe('/api/approval-card-deliveries/del_1/actions')
     const init = apiFetchMock.mock.calls[1][1] as RequestInit
     expect(JSON.parse(String(init.body))).toEqual({ t: 'a'.repeat(32), decision: 'approve' })
-    expect(container!.querySelector('[data-testid="card-decision-stale"]')?.getAttribute('data-title')).toContain('已处理')
+    const stale = await waitForElement('[data-testid="card-decision-stale"]')
+    expect(stale.getAttribute('data-title')).toContain('已处理')
   })
 
   it('a 409 stale response swaps in the REAL terminal summary instead of a dead form', async () => {
@@ -190,28 +214,26 @@ describe('ApprovalCardDecisionView (A-3)', () => {
       data: summaryFixture({ cardState: 'superseded', actionable: false }),
     }, 409))
 
-    ;(container!.querySelector('[data-testid="card-decision-approve"]') as HTMLButtonElement).click()
-    await flushUi()
-    expect(container!.querySelector('[data-testid="card-decision-stale"]')).toBeTruthy()
+    const approve = await waitForElement<HTMLButtonElement>('[data-testid="card-decision-approve"]')
+    approve.click()
+    await waitForElement('[data-testid="card-decision-stale"]')
   })
 
   it('missing d/t query renders an invalid-link error without calling the api', async () => {
     routeQuery = {}
     await mountView()
-    expect(container!.querySelector('[data-testid="card-decision-load-error"]')?.getAttribute('data-title')).toContain('链接无效')
+    const error = await waitForElement('[data-testid="card-decision-load-error"]')
+    expect(error.getAttribute('data-title')).toContain('链接无效')
     expect(apiFetchMock).not.toHaveBeenCalled()
   })
 
   it('P2: an unauthenticated deep link auto-launches DingTalk OAuth — never the generic /login', async () => {
     mockUserId = null
-    const originalLocation = window.location
-    Object.defineProperty(window, 'location', {
-      configurable: true,
-      value: { ...originalLocation, href: 'http://localhost/m/approval-decision?d=del_1' },
-    })
-    apiFetchMock.mockResolvedValueOnce(jsonResponse({ success: true, data: { url: 'https://oapi.dingtalk.com/launch/abc' } }))
+    stubWindowLocation('http://localhost/m/approval-decision?d=del_1')
+    apiFetchMock.mockImplementationOnce(() => delayedJsonResponse({ success: true, data: { url: 'https://oapi.dingtalk.com/launch/abc' } }))
 
     await mountView()
+    await waitForUi(() => expect(window.location.href).toBe('https://oapi.dingtalk.com/launch/abc'))
 
     const calls = apiFetchMock.mock.calls.map((c) => String(c[0]))
     expect(calls).toHaveLength(1)
@@ -220,20 +242,20 @@ describe('ApprovalCardDecisionView (A-3)', () => {
     expect(window.location.href).toBe('https://oapi.dingtalk.com/launch/abc')
     // no summary fetch, no /login navigation of any kind
     expect(calls.some((u) => u.includes('/api/approval-card-deliveries/'))).toBe(false)
-    Object.defineProperty(window, 'location', { configurable: true, value: originalLocation })
   })
 
   it('P2: bounced back still unauthenticated → manual 钉钉登录 button instead of a redirect loop', async () => {
     mockUserId = null
     sessionStorage.setItem('approval-card-launch-attempted:del_1', '1')
     await mountView()
+    await waitForElement('[data-testid="card-decision-launch"]')
     expect(apiFetchMock).not.toHaveBeenCalled()
-    expect(container!.querySelector('[data-testid="card-decision-launch"]')).toBeTruthy()
   })
 
   it('P2: an authenticated visit never triggers the launch flow', async () => {
     apiFetchMock.mockResolvedValueOnce(jsonResponse({ ok: true, data: summaryFixture() }))
     await mountView()
+    await waitForElement('[data-testid="card-decision-title"]')
     const calls = apiFetchMock.mock.calls.map((c) => String(c[0]))
     expect(calls.some((u) => u.includes('/api/auth/dingtalk/launch'))).toBe(false)
     expect(calls[0]).toContain('/api/approval-card-deliveries/del_1')
@@ -243,8 +265,9 @@ describe('ApprovalCardDecisionView (A-3)', () => {
     mockUserId = null
     routeQuery = {}
     await mountView()
+    const error = await waitForElement('[data-testid="card-decision-load-error"]')
     expect(apiFetchMock).not.toHaveBeenCalled()
-    expect(container!.querySelector('[data-testid="card-decision-load-error"]')?.getAttribute('data-title')).toContain('链接无效')
+    expect(error.getAttribute('data-title')).toContain('链接无效')
   })
 
   it('TRIPWIRE: the decision page and its api module never touch raw /api/approvals/ paths', () => {

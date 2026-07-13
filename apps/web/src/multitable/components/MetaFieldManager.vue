@@ -3,7 +3,7 @@
     <div class="meta-field-mgr">
       <div class="meta-field-mgr__header">
         <h4 class="meta-field-mgr__title">{{ ml('field.title') }}</h4>
-        <button class="meta-field-mgr__close" @click="requestClose">&times;</button>
+        <MtIconButton class="meta-field-mgr__close" @click="requestClose">&times;</MtIconButton>
       </div>
 
       <div class="meta-field-mgr__body">
@@ -856,7 +856,7 @@ import {
 } from '../composables/useAiShortcut'
 import type { AiShortcutConfigInput, AiShortcutKind, AiShortcutPreviewData, AiUsageSummary } from '../api/client'
 import MetaFieldValidationPanel from './MetaFieldValidationPanel.vue'
-import { MtButton } from '../ui'
+import { MtButton, MtIconButton } from '../ui'
 
 /** Field types where the validation panel is configurable. */
 const VALIDATION_PANEL_TYPES: ReadonlySet<string> = new Set(['string', 'longText', 'number', 'select', 'multiSelect'])
@@ -2729,7 +2729,10 @@ onBeforeUnmount(() => {
 .meta-field-mgr { width: 720px; max-height: 84vh; background: #fff; border-radius: 8px; box-shadow: 0 8px 24px rgba(0,0,0,.15); display: flex; flex-direction: column; }
 .meta-field-mgr__header { display: flex; justify-content: space-between; align-items: center; padding: 12px 16px; border-bottom: 1px solid #eee; }
 .meta-field-mgr__title { font-size: 15px; font-weight: 600; margin: 0; }
-.meta-field-mgr__close { border: none; background: none; font-size: 20px; cursor: pointer; color: #999; }
+/* .meta-field-mgr__close: now <MtIconButton> (ghost, token-styled; the &times; glyph char passes through
+   its default-slot icon fallback (size token-normalized to the icon control)). Bespoke hardcoded CSS removed
+   (UI-P2-1c T1 batch-7). Class kept on the element only for selector stability (multitable-field-manager.spec.ts,
+   scripts/verify-multitable-live-smoke.mjs, packages/core-backend/tests/e2e/multitable-ai-bulk-fill-over-cap.e2e.spec.ts). */
 .meta-field-mgr__body { flex: 1; overflow-y: auto; padding: 8px 16px; }
 .meta-field-mgr__row { display: flex; align-items: center; gap: 8px; padding: 6px 0; border-bottom: 1px solid #f5f5f5; }
 .meta-field-mgr__icon { width: 24px; text-align: center; color: #999; font-size: 13px; }

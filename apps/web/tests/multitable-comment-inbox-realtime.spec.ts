@@ -21,11 +21,19 @@ vi.mock('socket.io-client', () => ({
 vi.mock('../src/composables/useAuth', () => ({
   useAuth: () => ({
     getCurrentUserId: vi.fn().mockResolvedValue('user_inbox'),
+    // #3964 made the inbox join present a caller token server-side; the composable now calls
+    // auth.getToken() unconditionally before opening the socket.
+    getToken: vi.fn().mockReturnValue('token_inbox'),
   }),
 }))
 
 vi.mock('../src/utils/api', () => ({
   getApiBase: () => '',
+  // ../src/multitable/realtime/comments-realtime.ts imports normalize* helpers from
+  // ../api/client, whose module-level `multitableClient` singleton resolves its default
+  // fetch function from this module's `apiFetch` export at import time — without it the
+  // whole spec file fails at collection before any test runs.
+  apiFetch: vi.fn(),
 }))
 
 async function flushUi(cycles = 4): Promise<void> {

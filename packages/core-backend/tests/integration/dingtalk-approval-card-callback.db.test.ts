@@ -17,10 +17,11 @@
  *     a corp-pinned delivery verifies through THAT corp's stored secret with env unset
  *     (same-source token threading).
  */
-import { afterAll, beforeAll, describe, expect, test } from 'vitest'
+import { afterAll, beforeAll, beforeEach, describe, expect, test, vi } from 'vitest'
 import { createHmac, randomUUID } from 'crypto'
 
 import { poolManager } from '../../src/integration/db/connection-pool'
+import { Logger } from '../../src/core/logger'
 import { ApprovalProductService } from '../../src/services/ApprovalProductService'
 import { executeDingTalkApprovalCardCallback } from '../../src/integrations/dingtalk/interactive-card-callback'
 import {
@@ -391,6 +392,159 @@ describeIfDatabase('B-3 DingTalk card callback adapter (real DB)', () => {
     expect(await approveRecordCount(instanceId)).toBe(1)
   })
 
+  // ══ UAT §0-a INSTRUMENT (owner-scoped, 2026-07-12) ═══════════════════════════════════════════════
+  //
+  // §0-a asks ONE question of a real DingTalk frame: does it carry `eventCorpId` (SDK-typed header),
+  // `corpId` (untyped body), or NEITHER? If neither, every click fail-closes and the card is
+  // DEAD-ON-ARRIVAL — close the flag. The old gate could not answer it: absent / conflicting /
+  // unresolvable / genuinely-mismatched all collapsed into one `corp_mismatch`, with no logging at all.
+  //
+  // These pin the full matrix, plus the two hard constraints: presence is reported on SUCCESS too
+  // (otherwise a working click still cannot prove WHICH source carried the anchor), and the log is
+  // VALUES-FREE (a corp id must never reach a log line).
+  describe('UAT §0-a corp-anchor observability', () => {
+    // Spy on the module's Logger; the callback logs through Logger.prototype.info.
+    const infoSpy = vi.spyOn(Logger.prototype, 'info')
+
+    beforeEach(() => { infoSpy.mockClear() })
+    afterAll(() => { infoSpy.mockRestore() })
+
+    /** The values-free presence record the corp gate emits for a given delivery. */
+    const anchorLogFor = (deliveryId: string): Record<string, unknown> | null => {
+      for (const call of infoSpy.mock.calls) {
+        const [msg, meta] = call as [string, Record<string, unknown> | undefined]
+        if (msg === 'DingTalk interactive-card callback corp anchor' && meta?.deliveryId === deliveryId) return meta
+      }
+      return null
+    }
+
+    /** Every string that ever reached ANY logger call this test — used to prove no corp value leaked. */
+    const allLoggedText = (): string =>
+      infoSpy.mock.calls.map((c) => JSON.stringify(c)).join(' | ')
+
+    async function pinnedCorpBCard(instanceId: string): Promise<string> {
+      const row = await insertDingTalkApprovalCardDelivery(q, {
+        instanceId, nodeKey: 'approval_1', recipientUserId: APPROVER, recipientDingTalkUserId: DD_OP_B,
+        deliveryKind: 'interactive_card', integrationId: INTEGRATION_B,
+        entryEpoch: await liveSeatEpoch(instanceId, 'approval_1', APPROVER),
+      })
+      await markDingTalkApprovalCardDeliverySent(q, row.id, `carrier_0a_${row.id.slice(0, 8)}`)
+      return row.id
+    }
+
+    test('HEADER-ONLY (eventCorpId, no body corpId) → executes; presence logged as header=true body=false', async () => {
+      const instanceId = await newInstance()
+      const deliveryId = await pinnedCorpBCard(instanceId)
+      // The Stream adapter stamps the header value as `eventCorpId`; no top-level `corpId` at all.
+      const res = await executeDingTalkApprovalCardCallback(
+        deps, payloadFor(deliveryId, DD_OP_B, { eventCorpId: CORP_B }, 'approve', null),
+      )
+      expect(res.outcome).toBe('executed')
+      expect(anchorLogFor(deliveryId)).toMatchObject({ headerEventCorpIdPresent: true, bodyCorpIdPresent: false })
+    })
+
+    test('BODY-ONLY (no header) → executes; presence logged as header=false body=true — THIS is the §0-a answer that says the header does not exist on real frames', async () => {
+      const instanceId = await newInstance()
+      const deliveryId = await pinnedCorpBCard(instanceId)
+      const res = await executeDingTalkApprovalCardCallback(deps, payloadFor(deliveryId, DD_OP_B, {}, 'approve', CORP_B))
+      expect(res.outcome).toBe('executed')
+      expect(anchorLogFor(deliveryId)).toMatchObject({ headerEventCorpIdPresent: false, bodyCorpIdPresent: true })
+    })
+
+    test('BOTH ABSENT → corp_anchor_absent (the DEAD-ON-ARRIVAL signal), zero approvals, presence both false', async () => {
+      const instanceId = await newInstance()
+      const deliveryId = await pinnedCorpBCard(instanceId)
+      const res = await executeDingTalkApprovalCardCallback(deps, payloadFor(deliveryId, DD_OP_B, {}, 'approve', null))
+      expect(res).toEqual({ outcome: 'operator_unresolved', deliveryId, reason: 'corp_anchor_absent' })
+      expect(await approveRecordCount(instanceId)).toBe(0)
+      expect(anchorLogFor(deliveryId)).toMatchObject({ headerEventCorpIdPresent: false, bodyCorpIdPresent: false })
+    })
+
+    test('CONFLICT (header ≠ body) → corp_anchor_conflict, NOT absent — a disagreement must never be misreported as "no anchor exists"', async () => {
+      // THE trap. The old reader returned '' on a disagreement, so this looked exactly like BOTH-ABSENT
+      // — which would tell an operator "DingTalk sends no corp field, close the flag" when in fact two
+      // anchors arrived and disagreed. Opposite diagnosis, opposite action.
+      const instanceId = await newInstance()
+      const deliveryId = await pinnedCorpBCard(instanceId)
+      const res = await executeDingTalkApprovalCardCallback(
+        deps, payloadFor(deliveryId, DD_OP_B, { eventCorpId: CORP_A }, 'approve', CORP_B),
+      )
+      expect(res).toEqual({ outcome: 'operator_unresolved', deliveryId, reason: 'corp_anchor_conflict' })
+      expect(await approveRecordCount(instanceId)).toBe(0)
+      // Both WERE present — that is the whole point, and it is what distinguishes this from absent.
+      expect(anchorLogFor(deliveryId)).toMatchObject({ headerEventCorpIdPresent: true, bodyCorpIdPresent: true })
+    })
+
+    test('DELIVERY CORP UNRESOLVABLE (pinned integration exists but its corp cannot be resolved) → delivery_corp_unresolved, zero approvals', async () => {
+      // Two earlier drafts of this test were WRONG, and how they were wrong is worth keeping:
+      //   1. DELETE the integration row → it CASCADED and destroyed the shared corp-B accounts/links,
+      //      silently breaking the two tests that ran after it. Construct state; never demolish a fixture.
+      //   2. Pin the delivery at a ghost uuid → rejected by the FK
+      //      (dingtalk_approval_card_deliveries_integration_id_fkey). A delivery CANNOT point at a
+      //      missing integration.
+      // And the FK is ON DELETE SET NULL, so deleting an integration UNPINS the delivery — which returns
+      // `integration_unpinned` at an EARLIER gate, not this one. So the docstring on
+      // resolveIntegrationCorpId ("returns '' when the integration row is missing, e.g. deleted") names a
+      // cause the schema makes unreachable.
+      //
+      // The genuinely reachable cause is an integration that EXISTS but whose corp cannot be read:
+      // corp_id is NOT NULL yet '' is still accepted (and resolveIntegrationCorpId also filters
+      // provider='dingtalk'). That is a real misconfiguration, and it must read as OUR failure — never as
+      // "the frame carried no corp anchor", which would wrongly tell an operator to close the flag.
+      const instanceId = await newInstance()
+      const brokenIntegrationId = randomUUID()
+      await q(
+        `INSERT INTO directory_integrations (id, name, provider, status, corp_id, config, updated_at)
+         VALUES ($1, $2, 'dingtalk', 'active', '', '{}'::jsonb, now())`,
+        [brokenIntegrationId, `b3cb-corp-broken-${TS}`],
+      )
+      try {
+        const row = await insertDingTalkApprovalCardDelivery(q, {
+          instanceId, nodeKey: 'approval_1', recipientUserId: APPROVER, recipientDingTalkUserId: DD_OP_B,
+          deliveryKind: 'interactive_card', integrationId: brokenIntegrationId,
+          entryEpoch: await liveSeatEpoch(instanceId, 'approval_1', APPROVER),
+        })
+        await markDingTalkApprovalCardDeliverySent(q, row.id, 'carrier_0a_brokencorp')
+
+        const res = await executeDingTalkApprovalCardCallback(deps, payloadFor(row.id, DD_OP_B, {}, 'approve', CORP_B))
+        expect(res).toEqual({ outcome: 'operator_unresolved', deliveryId: row.id, reason: 'delivery_corp_unresolved' })
+        expect(await approveRecordCount(instanceId)).toBe(0)
+        // The frame's anchor WAS present. The failure is on OUR side, and the log must say so.
+        expect(anchorLogFor(row.id)).toMatchObject({ headerEventCorpIdPresent: false, bodyCorpIdPresent: true })
+      } finally {
+        await q('DELETE FROM dingtalk_approval_card_deliveries WHERE integration_id = $1::uuid', [brokenIntegrationId]).catch(() => {})
+        await q('DELETE FROM directory_integrations WHERE id = $1::uuid', [brokenIntegrationId]).catch(() => {})
+      }
+    })
+
+    test('REAL MISMATCH (corp-A click on a corp-B delivery) → corp_mismatch — still refused, still distinct from the absent/conflict cases', async () => {
+      const instanceId = await newInstance()
+      const deliveryId = await pinnedCorpBCard(instanceId)
+      const res = await executeDingTalkApprovalCardCallback(deps, payloadFor(deliveryId, DD_OP_B, {}, 'approve', CORP_A))
+      expect(res).toEqual({ outcome: 'operator_unresolved', deliveryId, reason: 'corp_mismatch' })
+      expect(await approveRecordCount(instanceId)).toBe(0)
+    })
+
+    test('VALUES-FREE: no corp id, user id, form value or raw payload EVER reaches a log line', async () => {
+      // The §0-a instrument exists to answer a presence question — it must not become an exfiltration
+      // channel for the very identifiers the doctrine forbids logging. Drive the successful path (the
+      // one that carries a real corp value end-to-end) and prove the corp value never appears anywhere.
+      const instanceId = await newInstance()
+      const deliveryId = await pinnedCorpBCard(instanceId)
+      const res = await executeDingTalkApprovalCardCallback(deps, payloadFor(deliveryId, DD_OP_B, { eventCorpId: CORP_B }, 'approve', CORP_B))
+      expect(res.outcome).toBe('executed')
+
+      const logged = allLoggedText()
+      expect(logged).not.toContain(CORP_A)
+      expect(logged).not.toContain(CORP_B)          // the corp VALUE must never be logged
+      expect(logged).not.toContain(DD_OP_B)         // nor the DingTalk user id
+      expect(logged).not.toContain('cardPrivateData') // nor any raw payload fragment
+
+      // ...while the presence booleans ARE there. Absent this, the test would pass by logging nothing.
+      expect(anchorLogFor(deliveryId)).toMatchObject({ headerEventCorpIdPresent: true, bodyCorpIdPresent: true })
+    })
+  })
+
   test('P1-2 corp cross-check: a corp-A click (userId collision) on a corp-B delivery is refused (corp_mismatch); missing corpId is refused; the matching corp executes', async () => {
     const instanceId = await newInstance()
     // Delivery pinned to corp B; the assignee APPROVER is linked under corp B as DD_OP_B.
@@ -415,8 +569,10 @@ describeIfDatabase('B-3 DingTalk card callback adapter (real DB)', () => {
     expect(await cardState(row.id)).toBe('sent')
 
     // Fail-closed on an ABSENT payload corpId (the field is omitted entirely), never skipped.
+    // UAT §0-a: this is now its OWN reason. Collapsed into `corp_mismatch` it was indistinguishable
+    // from a real cross-corp click — and those demand opposite responses (close the flag vs. a config fix).
     const absent = await executeDingTalkApprovalCardCallback(deps, payloadFor(row.id, DD_OP_B, {}, 'approve', null))
-    expect(absent).toEqual({ outcome: 'operator_unresolved', deliveryId: row.id, reason: 'corp_mismatch' })
+    expect(absent).toEqual({ outcome: 'operator_unresolved', deliveryId: row.id, reason: 'corp_anchor_absent' })
     expect(await approveRecordCount(instanceId)).toBe(0)
     expect(await cardState(row.id)).toBe('sent')
 

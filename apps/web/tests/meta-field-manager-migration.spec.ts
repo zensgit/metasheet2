@@ -28,6 +28,16 @@ import type { DryRunResult } from '../src/multitable/api/client'
 // multitable-formula-dryrun-panel.spec.ts, multitable-formula-suggest-field-manager.spec.ts,
 // multitable-ai-shortcut-field-manager.spec.ts — all query these buttons by the SAME class names / data-test
 // attributes, which are kept as additive classes/attrs on the MtButton root.
+//
+// UI-P2-1c T1 batch-7 (multitable-ui-p2-1c-tail-resolution-designlock-20260707.md §2-T1, RATIFIED): the
+// header close-× (`.meta-field-mgr__close`, @click="requestClose") is now <MtIconButton> (ghost, token-
+// styled) — the &times; glyph passes through MtIconButton's default-slot icon fallback (glyph char
+// preserved, size token-normalized to the icon control: 20px -> 14px glyph, 32x32 control box). This file
+// ALSO has three other × glyph buttons that are remove-item actions, NOT close buttons, and none of them
+// were touched: removeSelectOption (`.meta-field-mgr__option-row .meta-field-mgr__action--danger`),
+// removeRollupFilter (`.meta-field-mgr__icon-btn`), removeAiOption (`.meta-field-mgr__action--danger` in
+// the AI-classify options list). See the POSITIVE CONTROL test below proving removeSelectOption still
+// fires unchanged (also proves this file's mount can observe these buttons at all).
 
 let app: App | null = null
 let container: HTMLDivElement | null = null
@@ -64,6 +74,9 @@ const deleteGlyphBtn = () => container!.querySelector('.meta-field-mgr__action--
 const confirmCancelBtn = () => container!.querySelector('.meta-field-mgr__confirm .meta-field-mgr__btn-cancel') as HTMLButtonElement | null
 const confirmDeleteBtn = () => container!.querySelector('.meta-field-mgr__btn-delete') as HTMLButtonElement | null
 const rollupAddBtn = () => container!.querySelector('.meta-field-mgr__add-btn') as HTMLButtonElement | null
+const closeBtn = () => container!.querySelector('.meta-field-mgr__close') as HTMLButtonElement | null
+const optionRemoveBtns = () =>
+  Array.from(container!.querySelectorAll('.meta-field-mgr__option-row .meta-field-mgr__action--danger')) as HTMLButtonElement[]
 
 describe('MetaFieldManager — MtButton migration (UI-P2-1c batch-3, config-panel footer)', () => {
   it('Cancel and Save render as native <button>s; Cancel closes the config panel', async () => {
@@ -275,5 +288,54 @@ describe('MetaFieldManager — MtButton migration (UI-P2-1c batch-3, AI preview 
     btn.click() // onBulkFill() → emit('bulk-fill', { fieldId: configTarget.value.id })
     expect(onBulkFill).toHaveBeenCalledTimes(1)
     expect(onBulkFill).toHaveBeenCalledWith({ fieldId: 'fld_target' })
+  })
+})
+
+describe('MetaFieldManager — MtIconButton migration (UI-P2-1c T1 batch-7, header close-×)', () => {
+  it('renders the header close-× as a native <button> (MtIconButton) keeping the class + glyph', async () => {
+    mount({ fields: [] })
+    await nextTick()
+
+    const btn = closeBtn()!
+    expect(btn.tagName).toBe('BUTTON')
+    expect(btn.getAttribute('type')).toBe('button')
+    expect(btn.classList.contains('meta-field-mgr__close')).toBe(true)
+    expect(btn.textContent?.trim()).toBe('×') // × glyph char preserved (size token-normalized)
+  })
+
+  it('clicking the header close-× still calls requestClose -> emits SAME `close` event (no unsaved drafts, no confirm gate)', async () => {
+    const onClose = vi.fn()
+    mount({ fields: [], onClose })
+    await nextTick()
+
+    closeBtn()!.click()
+    await nextTick()
+
+    expect(onClose).toHaveBeenCalledTimes(1)
+  })
+
+  it('POSITIVE CONTROL: the unmigrated remove-option × (removeSelectOption, same glyph, different button) still fires — proves this migration left it alone AND that this file can observe these buttons', async () => {
+    mount({ fields: [] })
+    await nextTick()
+
+    const typeSelect = container!.querySelector('.meta-field-mgr__add-row .meta-field-mgr__select') as HTMLSelectElement
+    typeSelect.value = 'select'
+    typeSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    await nextTick()
+
+    expect(container!.querySelectorAll('.meta-field-mgr__option-row').length).toBe(1)
+
+    // addSelectOption — itself out of scope (T3-GATED __btn-inline), used only to reach a 2-row state
+    ;(container!.querySelector('.meta-field-mgr__btn-inline') as HTMLButtonElement).click()
+    await nextTick()
+    expect(container!.querySelectorAll('.meta-field-mgr__option-row').length).toBe(2)
+
+    const removeButtons = optionRemoveBtns()
+    expect(removeButtons.length).toBe(2)
+    removeButtons[0].click()
+    await nextTick()
+
+    // removeSelectOption(0) spliced the row out — unchanged behavior, untouched by this migration
+    expect(container!.querySelectorAll('.meta-field-mgr__option-row').length).toBe(1)
   })
 })

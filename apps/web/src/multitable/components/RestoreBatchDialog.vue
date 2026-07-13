@@ -4,7 +4,7 @@
       <div class="restore-batch-modal" role="dialog" :aria-label="l('record.batchRestoreTitle')">
         <div class="restore-batch__header">
           <strong>{{ l('record.batchRestoreTitle') }}</strong>
-          <button class="restore-batch__close" :aria-label="l('record.batchRestoreCancel')" @click="onCancel">&times;</button>
+          <MtIconButton class="restore-batch__close" :aria-label="l('record.batchRestoreCancel')" @click="onCancel">&times;</MtIconButton>
         </div>
 
         <!-- Target control: default = revert to original (v1); Advanced reveals a version-N picker (the MIX entry). -->
@@ -97,7 +97,7 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
 
-import { MtButton } from '../ui'
+import { MtButton, MtIconButton } from '../ui'
 import type { RestoreBatchPreviewRecord, RestoreBatchExecuteRecord } from '../api/client'
 import { recordLabel, batchSkipReasonLabel, type MetaRecordLabelKey } from '../utils/meta-record-labels'
 
@@ -169,14 +169,9 @@ function onDone(): void {
   padding: 14px 16px;
   border-bottom: 1px solid var(--border, #e2e8f0);
 }
-.restore-batch__close {
-  border: none;
-  background: none;
-  font-size: 20px;
-  line-height: 1;
-  cursor: pointer;
-  color: var(--text-secondary, #64748b);
-}
+/* .restore-batch__close: now <MtIconButton> (ghost, token-styled; the &times; glyph char passes through
+   its default-slot icon fallback (size token-normalized to the icon control)). Bespoke hardcoded CSS removed
+   (UI-P2-1c T1 batch-4). Class kept on the element only for selector stability. */
 .restore-batch__target {
   padding: 12px 16px 0;
   display: flex;
