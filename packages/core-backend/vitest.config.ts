@@ -243,6 +243,13 @@ export default defineConfig({
       // real Postgres only — excluded HERE so it cannot skip-green in the no-DB lane, whole-file wired
       // into `Run multitable real-DB integration` in plugin-tests.yml.
       'tests/integration/multitable-d1c-approval-revision-realdb.test.ts',
+      // D-1c W0 slice ⑤ (FINAL) (attachment-delete cell-strip revision goldens, driving the real
+      // DELETE /attachments/:attachmentId route end-to-end + the zero-row RETURNING fail-closed
+      // concurrent-delete golden, simulated via a scoped BEFORE UPDATE suppression trigger — a genuine
+      // two-connection race is impossible here, the branch already holds a same-txn row lock): real
+      // Postgres only — excluded HERE so it cannot skip-green in the no-DB lane, whole-file wired into
+      // `Run multitable real-DB integration` in plugin-tests.yml.
+      'tests/integration/multitable-d1c-attachment-revision-realdb.test.ts',
       // D-2 side-door delete recoverability (#4004): real Postgres only (it installs scoped failure-
       // injection triggers and drives both side doors end-to-end) — excluded HERE so it cannot skip-green
       // in the no-DB lane, and whole-file wired into `Run multitable real-DB integration` in
