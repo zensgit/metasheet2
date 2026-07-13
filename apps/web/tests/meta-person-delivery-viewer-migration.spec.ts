@@ -6,7 +6,18 @@ import { useLocale } from '../src/composables/useLocale'
 // UI-P2-1c: MetaAutomationPersonDeliveryViewer's toolbar Refresh control was migrated from a bespoke <button>
 // to the shared MtButton primitive (ghost — neutral bordered-white secondary). Unique class → bespoke hex CSS
 // removed. Behavior-preservation proof: native <button>; :disabled survives; clicking still runs loadData →
-// props.client.getAutomationDingTalkPersonDeliveries. The header close-× glyph stays bespoke.
+// props.client.getAutomationDingTalkPersonDeliveries.
+//
+// UI-P2-1c T1 batch-4 (multitable-ui-p2-1c-tail-resolution-designlock-20260707.md §2-T1, RATIFIED,
+// "各 manager header" remainder): the header close-× (`.meta-person-delivery__close`) was additionally
+// migrated from a bespoke <button>&times;</button> to the shared MtIconButton primitive — the &times;
+// glyph passes through MtIconButton's default-slot icon fallback (glyph char preserved, size
+// token-normalized to the icon control). Behavior-preservation proof: it stays a native, keyboard-
+// operable <button>, and clicking it still fires the SAME `$emit('close')` (no aria-label existed
+// pre-migration — none was invented). This is the only sharer of `.meta-person-delivery__close` — its
+// bespoke CSS was removed outright, no double-styling risk. The bespoke `type="button"` attribute was
+// dropped (redundant — MtButton's own template already hardcodes `type="button"` on its root native
+// <button>).
 
 const flush = () => new Promise((r) => setTimeout(r, 0))
 let app: App | null = null; let container: HTMLDivElement | null = null
@@ -16,9 +27,9 @@ afterEach(() => {
   useLocale().setLocale('en')
 })
 
-function mount(client: Record<string, unknown>) {
+function mount(client: Record<string, unknown>, extraProps: Record<string, unknown> = {}) {
   container = document.createElement('div'); document.body.appendChild(container)
-  app = createApp({ render: () => h(MetaAutomationPersonDeliveryViewer, { visible: true, sheetId: 's1', ruleId: 'r1', client }) })
+  app = createApp({ render: () => h(MetaAutomationPersonDeliveryViewer, { visible: true, sheetId: 's1', ruleId: 'r1', client, ...extraProps }) })
   app.mount(container)
 }
 const refreshBtn = () => container!.querySelector('[data-action="refresh"]') as HTMLButtonElement
@@ -65,5 +76,26 @@ describe('MetaAutomationPersonDeliveryViewer — MtButton migration (UI-P2-1c)',
     // admin-side list filter: the new state is selectable, not silently excluded by the IN-list
     const options = Array.from(container!.querySelectorAll('[data-field="statusFilter"] option')).map((o) => (o as HTMLOptionElement).value)
     expect(options).toContain('outcome_unknown')
+  })
+})
+
+describe('MetaAutomationPersonDeliveryViewer — close-× MtIconButton migration (UI-P2-1c T1 batch-4)', () => {
+  it('renders the header close-× as a native <button> (MtIconButton) keeping the class + glyph', async () => {
+    mount({ getAutomationDingTalkPersonDeliveries: vi.fn().mockResolvedValue([]) })
+    await flush()
+    const btn = container!.querySelector('.meta-person-delivery__close') as HTMLButtonElement
+    expect(btn.tagName).toBe('BUTTON')
+    expect(btn.classList.contains('meta-person-delivery__close')).toBe(true)
+    expect(btn.textContent?.trim()).toBe('×') // × glyph char preserved (size token-normalized)
+  })
+
+  it('clicking the header close-× emits `close` (unchanged — same $emit(\'close\'))', async () => {
+    const onClose = vi.fn()
+    mount({ getAutomationDingTalkPersonDeliveries: vi.fn().mockResolvedValue([]) }, { onClose })
+    await flush()
+    const btn = container!.querySelector('.meta-person-delivery__close') as HTMLButtonElement
+    btn.click()
+    expect(onClose).toHaveBeenCalledTimes(1)
+    expect(onClose).toHaveBeenCalledWith()
   })
 })

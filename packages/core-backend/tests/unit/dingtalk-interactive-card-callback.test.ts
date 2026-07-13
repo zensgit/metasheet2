@@ -492,21 +492,24 @@ describe('executeDingTalkApprovalCardCallback (B-3 §B-3 execution)', () => {
     expect(h.dispatchAction).not.toHaveBeenCalled()
   })
 
-  it('P1-2 CORP GATE fail-closed on ABSENT corpId: a payload with no corpId is refused, not skipped', async () => {
+  it('P1-2 CORP GATE fail-closed on ABSENT corp anchor → `corp_anchor_absent` (UAT §0-a: the DEAD-ON-ARRIVAL signal, distinct from a real mismatch)', async () => {
+    // §0-a: this used to be `corp_mismatch`, indistinguishable from a genuine cross-corp click. They
+    // demand OPPOSITE responses — "close the flag, DingTalk sends no corp field" vs "the gate is
+    // correctly blocking an attacker" — so absence now has its own reason.
     const h = makeHarness()
     const result = await executeDingTalkApprovalCardCallback(h.deps as never, wirePayload({ corpId: undefined }))
-    expect(result).toEqual({ outcome: 'operator_unresolved', deliveryId: DELIVERY_ID, reason: 'corp_mismatch' })
+    expect(result).toEqual({ outcome: 'operator_unresolved', deliveryId: DELIVERY_ID, reason: 'corp_anchor_absent' })
     expect(h.calls.some((c) => c.sql.includes('FROM directory_accounts'))).toBe(false)
     expect(h.dispatchAction).not.toHaveBeenCalled()
 
-    // Blank/whitespace corpId is equally absent (readCallbackCorpId trims to '').
+    // Blank/whitespace is equally absent (the reader trims to '').
     const blank = makeHarness()
     const blankResult = await executeDingTalkApprovalCardCallback(blank.deps as never, wirePayload({ corpId: '   ' }))
-    expect(blankResult).toMatchObject({ outcome: 'operator_unresolved', reason: 'corp_mismatch' })
+    expect(blankResult).toMatchObject({ outcome: 'operator_unresolved', reason: 'corp_anchor_absent' })
   })
 
   it('P3-1 provenance: the SDK-typed header corp (eventCorpId) is authoritative — used even when the untyped body corpId is absent', async () => {
-    // The Stream adapter stamps the gateway-guaranteed header corp onto the payload as eventCorpId.
+    // The Stream adapter stamps the SDK-typed header corp (when present) onto the payload as eventCorpId.
     // A frame with only eventCorpId (no business corpId) must still pass on a matching corp.
     const h = makeHarness()
     const result = await executeDingTalkApprovalCardCallback(
@@ -517,20 +520,30 @@ describe('executeDingTalkApprovalCardCallback (B-3 §B-3 execution)', () => {
     expect(h.dispatchAction).toHaveBeenCalled()
   })
 
-  it('P3-1 provenance: header eventCorpId and body corpId DISAGREEING → fail-closed corp_mismatch (a forged body echo cannot override the header)', async () => {
+  it('P3-1 provenance: header and body DISAGREEING → `corp_anchor_conflict`, NOT `corp_anchor_absent` (UAT §0-a: a disagreement must never read as "no anchor exists")', async () => {
+    // THE trap the split exists for. The old reader returned '' on a disagreement, so a conflict looked
+    // exactly like BOTH-ABSENT — which would tell an operator "DingTalk sends no corp field, close the
+    // flag" when in fact TWO anchors arrived and disagreed. Opposite diagnosis, opposite action.
+    // Still fail-closed either way; only the label (and therefore the operator's next move) differs.
     const h = makeHarness()
     const result = await executeDingTalkApprovalCardCallback(
       h.deps as never,
       wirePayload({ eventCorpId: DEFAULT_CORP_ID, corpId: 'corp_forged' }),
     )
-    expect(result).toEqual({ outcome: 'operator_unresolved', deliveryId: DELIVERY_ID, reason: 'corp_mismatch' })
+    expect(result).toEqual({ outcome: 'operator_unresolved', deliveryId: DELIVERY_ID, reason: 'corp_anchor_conflict' })
     expect(h.dispatchAction).not.toHaveBeenCalled()
   })
 
-  it('P1-2 CORP GATE fail-closed when the delivery integration corp cannot be resolved (missing integration row)', async () => {
+  it('P1-2 CORP GATE fail-closed when the DELIVERY-side corp cannot be resolved → `delivery_corp_unresolved` (OUR misconfiguration, not the frame\'s fault)', async () => {
+    // §0-a: this is a failure on OUR side (the pinned integration's corp is unreadable), and it must NOT
+    // read as `corp_anchor_absent` — that would wrongly tell an operator to close the flag when the real
+    // fix is `directory_integrations.corp_id`.
+    // (Real-DB note: the FK is ON DELETE SET NULL, so a DELETED integration UNPINS the delivery and
+    // refuses earlier as `integration_unpinned`. The reachable cause is an integration that EXISTS with
+    // an unreadable corp — '' passes NOT NULL — which is what this harness models.)
     const h = makeHarness({ integrationCorpId: null })
     const result = await executeDingTalkApprovalCardCallback(h.deps as never, wirePayload())
-    expect(result).toEqual({ outcome: 'operator_unresolved', deliveryId: DELIVERY_ID, reason: 'corp_mismatch' })
+    expect(result).toEqual({ outcome: 'operator_unresolved', deliveryId: DELIVERY_ID, reason: 'delivery_corp_unresolved' })
     expect(h.dispatchAction).not.toHaveBeenCalled()
   })
 

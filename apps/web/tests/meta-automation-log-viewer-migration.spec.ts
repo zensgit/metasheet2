@@ -6,7 +6,18 @@
 // MetaChartLoadError's retry control #3823). Behavior-preservation proof: each stays a native <button>,
 // keeps its data-action attribute, and clicking it still runs the SAME handler (loadData /
 // copySupportPacket / downloadSupportPacket) — including the copy/download buttons' `.stop` modifier, which
-// still works because MtButton re-emits the real native MouseEvent. The header close-× glyph stays bespoke.
+// still works because MtButton re-emits the real native MouseEvent.
+//
+// UI-P2-1c T1 batch-4 (multitable-ui-p2-1c-tail-resolution-designlock-20260707.md §2-T1, RATIFIED,
+// "各 manager header" remainder): the header close-× (`.meta-log-viewer__close`) was additionally
+// migrated from a bespoke <button>&times;</button> to the shared MtIconButton primitive — the &times;
+// glyph passes through MtIconButton's default-slot icon fallback (glyph char preserved, size
+// token-normalized to the icon control). Behavior-preservation proof: it stays a native, keyboard-
+// operable <button>, and clicking it still fires the SAME `$emit('close')` (no aria-label existed
+// pre-migration — none was invented). This is the only sharer of `.meta-log-viewer__close` — its
+// bespoke CSS was removed outright, no double-styling risk. The bespoke `type="button"` attribute
+// was dropped (redundant — MtButton's own template already hardcodes `type="button"` on its root
+// native <button>, so the DOM type stays "button" either way).
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createApp, h, nextTick } from 'vue'
 
@@ -148,5 +159,28 @@ describe('MetaAutomationLogViewer — MtButton migration (UI-P2-1c batch4)', () 
     expect(item.querySelector('[data-detail="true"]')).not.toBeNull()
 
     clickSpy.mockRestore()
+  })
+})
+
+describe('MetaAutomationLogViewer — close-× MtIconButton migration (UI-P2-1c T1 batch-4)', () => {
+  it('renders the header close-× as a native <button> (MtIconButton) keeping the class + glyph', async () => {
+    const client = makeMockClient()
+    mounted = mount({ visible: true, sheetId: 's', ruleId: 'rule-1', client })
+    await flushPromises()
+    const btn = mounted.container.querySelector('.meta-log-viewer__close') as HTMLButtonElement
+    expect(btn.tagName).toBe('BUTTON')
+    expect(btn.classList.contains('meta-log-viewer__close')).toBe(true)
+    expect(btn.textContent?.trim()).toBe('×') // × glyph char preserved (size token-normalized)
+  })
+
+  it('clicking the header close-× emits `close` (unchanged — same $emit(\'close\'))', async () => {
+    const client = makeMockClient()
+    const onClose = vi.fn()
+    mounted = mount({ visible: true, sheetId: 's', ruleId: 'rule-1', client, onClose })
+    await flushPromises()
+    const btn = mounted.container.querySelector('.meta-log-viewer__close') as HTMLButtonElement
+    btn.click()
+    expect(onClose).toHaveBeenCalledTimes(1)
+    expect(onClose).toHaveBeenCalledWith()
   })
 })
