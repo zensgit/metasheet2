@@ -48,7 +48,7 @@ externalPlmK3ErpWrite=false(C4 硬闸守住:零未授权外部写) · postSmokeS
 
 **范围界定(owner 口径)**:只闭合 corrective-7 的实体机 *runtime 验收*弧(on-prem 包在真实硬件装得上/起得来/写读审计全链跑通/C4 硬闸守住)。**不**声称整个功能 epic 完成,**不**覆盖真实外部系统现场对接。
 
-## 5. 明确未交付 / 迁入独立 gated pool(勿冒称交付)
+## 5. 明确未交付 / 迁入独立 gated pool(**冻结 gate** —— 勿冒称交付)
 
 | 项 | 定性 | 门 |
 |---|---|---|
@@ -57,6 +57,19 @@ externalPlmK3ErpWrite=false(C4 硬闸守住:零未授权外部写) · postSmokeS
 | **OD-W3-1 值面读** | values-free → 值面 | 单独 gated audited read(图号/数量/单位等操作员可见需专门开,不顺手放开) |
 | **#4141** | corrective-6 guard governance lane | 质量债,不阻塞 runtime PASS;可选队列 |
 | **#4169** | CI flake(retry:2 vs 根因) | 稳定性,非功能闭合项;可选队列,owner 待决 |
+
+## 5b. Active productization(**在建,非冻结**——路线图 B/C 层,建在已验收 MVP *之上*,不重开 MVP)
+
+> owner 口径(2026-07-12):§5 的 gated pool 是**冻结 gate**;下面这些是**正在开发**的产品化线,
+> 用已验收的内部底座往上建,**不重新打开已 PASS 的 MVP runtime 验收弧**,也**不放松**任何 gate。
+
+| 线 | 内容 | 边界 |
+|---|---|---|
+| **T2** ERP 物料缓存落库 | `erp_material_sync` → 内部 `erp_material_master` 表;auto-match 吃同步缓存而非请求体候选 | 只写内部表;externalWrite=false;不碰 K3 Save/Submit/Audit |
+| **T3 / T4** | T3 真实只读 feeder → 快照/内部表;T4 非空 prep-line smoke(验缓存/匹配/单位/异常/审计链) | 同上;真库证据 + 对抗审阅门 |
+| **H0-H4** UI 产品化线 | H0 平面边界设计锁(#4202)· H1/H2 证据面任务化入口+六阶段进度 · H3(值面读,gated on H3-0 契约 + OD-W3-1)· H4 响应式/可用性验收 | 证据面 values-free;业务值面走 RBAC+server 白名单+审计三重门;各路由现有权限零放宽 |
+
+**收尾发布(Wave 3)**:T4 + H4 就绪后**一次性**切 corrective-8 RC 包在实体机跑扩展 smoke(project endpoint PASS · ERP 缓存 rows>0 · auto-match 用上缓存 · prepLineRows>0 · audit 8/8 或新增清楚 · **externalPlmK3ErpWrite=false**),避免 T2/UI/迁移各自让实体机重复部署。
 
 ## 6. 方法论沉淀(七轮)
 - corrective-6/7 都是**本地全量预演**抓出来的,没烧实体机额外轮次 —— 能本地重放的验收步骤别用别人物理机去发现。
