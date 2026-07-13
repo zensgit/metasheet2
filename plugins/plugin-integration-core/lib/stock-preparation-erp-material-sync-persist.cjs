@@ -99,6 +99,13 @@ const MATERIAL_KEY_FIELD = MATERIAL_TEMPLATE.keyFields[0] // 'erpMaterialId' —
 const RUN_KEY_FIELD = RUN_TEMPLATE.keyFields[0] // 'runId'
 const MATERIAL_FIELD_IDS = Object.freeze(MATERIAL_TEMPLATE.fields.map((field) => field.id))
 const RUN_FIELD_IDS = Object.freeze(RUN_TEMPLATE.fields.map((field) => field.id))
+// Template-declared type per field, so a row is normalized to its DECLARED type BEFORE it is indexed,
+// validated, and saved (#4206 review P2): the records service stores a 'string' field's numeric value
+// as its string form, so an un-normalized numeric key (erpMaterialId=123) would index the in-memory
+// Map by the number while the re-read row keys by "123" — the lookup misses and the "upsert" double-
+// creates. Coercing here makes the write value, the Map key, and the read-back value the SAME shape.
+const MATERIAL_FIELD_TYPE = new Map(MATERIAL_TEMPLATE.fields.map((field) => [field.id, field.type]))
+const RUN_FIELD_TYPE = new Map(RUN_TEMPLATE.fields.map((field) => [field.id, field.type]))
 // Every field the template requires (INCLUDES the key field) — read from the template's OWN
 // requiredFields, never hand-duplicated, so erpMaterialInternalId (required-but-not-key; confirm-writes
 // matches candidates on it) can never be silently dropped from the required-completeness check below.
@@ -202,13 +209,27 @@ async function queryAllRecords(scoped, filters) {
   throw new StockPreparationErpMaterialSyncError(422, 'ERP_MATERIAL_SYNC_READS_RESULT_TOO_LARGE', 'stock-preparation ERP material read exceeded the page bound', { maxPages: READ_MAX_PAGES })
 }
 
+// Coerce a value to its template-declared type so the write value, the in-memory index key, and the
+// value the records service reads back are all the SAME shape (#4206 review P2). string/select →
+// String; number → a finite Number (else left as-is so isUpsertable can reject it); date/other left
+// untouched.
+function coerceByType(type, value) {
+  if (value === undefined || value === null) return value
+  if (type === 'string' || type === 'select') return String(value)
+  if (type === 'number') { const n = Number(value); return Number.isFinite(n) ? n : value }
+  return value
+}
+
 // Ground a row to ONLY the frozen template field ids, dropping null/undefined (the records service
-// rejects an unknown fieldId — see createTargetScopedRecordsApi's #4160 translation layer).
-function groundRow(fieldIds, row) {
+// rejects an unknown fieldId — see createTargetScopedRecordsApi's #4160 translation layer) and
+// NORMALIZING each kept value to its template-declared type (typeByField) before it is indexed/saved.
+function groundRow(fieldIds, row, typeByField) {
   const out = {}
   for (const key of fieldIds) {
     const value = row ? row[key] : undefined
-    if (value !== undefined && value !== null) out[key] = value
+    if (value !== undefined && value !== null) {
+      out[key] = typeByField ? coerceByType(typeByField.get(key), value) : value
+    }
   }
   return out
 }
@@ -241,12 +262,14 @@ async function upsertErpMaterials(scoped, erpMaterials) {
   let patched = 0
   let skippedInvalid = 0
   for (const row of erpMaterials) {
-    const grounded = groundRow(MATERIAL_FIELD_IDS, isPlainObject(row) ? row : {})
+    const grounded = groundRow(MATERIAL_FIELD_IDS, isPlainObject(row) ? row : {}, MATERIAL_FIELD_TYPE)
     if (!isUpsertable(grounded)) {
       skippedInvalid += 1
       continue
     }
-    const key = grounded[MATERIAL_KEY_FIELD]
+    // Index/lookup by the SAME normalization existingByKey was built with (optionalString), so the
+    // fresh row's key and the re-read row's key occupy one key space regardless of source shape.
+    const key = optionalString(grounded[MATERIAL_KEY_FIELD])
     const existing = existingByKey.get(key)
     if (existing) {
       const changes = { ...grounded }
@@ -277,10 +300,10 @@ async function upsertRunRecord(scoped, runId, runStatus) {
     throw new StockPreparationErpMaterialSyncError(500, 'ERP_MATERIAL_SYNC_RECORDS_API_INVALID', 'queryRecords must return an array')
   }
   if (existing.length > 1) {
-    throw new StockPreparationErpMaterialSyncError(500, 'ERP_MATERIAL_SYNC_KEY_AMBIGUOUS', 'run record key matched more than one row', { [RUN_KEY_FIELD]: runId })
+    throw new StockPreparationErpMaterialSyncError(500, 'ERP_MATERIAL_SYNC_KEY_AMBIGUOUS', 'run record key matched more than one row', { keyField: RUN_KEY_FIELD })
   }
   if (existing.length === 0) {
-    await scoped.createRecord({ data: groundRow(RUN_FIELD_IDS, { runId, runType: ERP_MATERIAL_SYNC_RUN_TYPE, status: runStatus }) })
+    await scoped.createRecord({ data: groundRow(RUN_FIELD_IDS, { runId, runType: ERP_MATERIAL_SYNC_RUN_TYPE, status: runStatus }, RUN_FIELD_TYPE) })
     return { mode: 'created' }
   }
   const record = existing[0]
@@ -368,13 +391,15 @@ async function persistStockPreparationErpMaterialSync(input = {}) {
   const runSync = await upsertRunRecord(runTarget.scoped, runId, runStatus)
 
   const evidence = buildEvidence({ created, patched, skippedInvalid, plannedMaterialCount: erpMaterials.length, runId, runStatus, runSync })
+  // PUBLIC-RESULT ALLOWLIST (#4206 review P2): the caller's raw syncRunId must NOT be echoed back — a
+  // values-free response is counts / modes / statuses / a values-free evidence block only. runIdPresent
+  // (a boolean, inside evidence) is the only trace of it; the raw value never crosses.
   return {
     persisted: evidence.persisted,
     mode: evidence.mode,
     created: evidence.created,
     patched: evidence.patched,
     skipped: evidence.skipped,
-    runId,
     runStatus,
     evidence,
   }

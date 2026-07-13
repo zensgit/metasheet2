@@ -276,6 +276,74 @@ async function main() {
     assert.equal(runRowsNow.length, 2, 'two distinct syncRunIds -> two run rows')
   })
 
+  // ---- P2-1 (owner independent review 2026-07-12): a NUMERIC erpMaterialId must stay idempotent ----
+  // The ERP feed can hand erpMaterialId over as a JSON number (123) instead of "123". The existing-row
+  // index and the per-row upsert lookup key are both normalized with optionalString(...), AND each cell is
+  // grounded to its template field's declared type before persistence — so the string-typed key field
+  // stores "123", and a second sync of the SAME numeric id HITS the index (patch) instead of missing it
+  // and DOUBLE-CREATING. Regression for that double-create (revert the coercion + the optionalString on the
+  // lookup key and this goes red: the second sync creates a 2nd row).
+  await run('a NUMERIC erpMaterialId upserts idempotently (no duplicate) and is grounded to the string-typed key', async () => {
+    const recordsApi = makeRecordsApi()
+    const provisioning = makeProvisioning()
+    const first = await persistStockPreparationErpMaterialSync({
+      permission: 'admin', recordsApi, provisioning,
+      ...baseSyncInputs({ syncRunId: 'erp_run_num_1', erpMaterials: [baseMaterialRow({ erpMaterialId: 123 })] }),
+    })
+    assert.deepEqual(first.created, { materials: 1, run: 1 })
+
+    const second = await persistStockPreparationErpMaterialSync({
+      permission: 'admin', recordsApi, provisioning,
+      ...baseSyncInputs({ syncRunId: 'erp_run_num_2', erpMaterials: [baseMaterialRow({ erpMaterialId: 123 })] }),
+    })
+    assert.deepEqual(second.created, { materials: 0, run: 1 }, 'a re-sync of the SAME numeric id PATCHES, never re-creates')
+    assert.deepEqual(second.patched, { materials: 1, run: 0 })
+
+    const materialRowsNow = recordsApi.rows(MATERIAL_SHEET_ID)
+    assert.equal(materialRowsNow.length, 1, 'exactly ONE material row for the numeric erpMaterialId — no duplicate')
+    const persisted = logicalData(STAGING_PROJECT_ID, MATERIAL_OBJECT_ID, materialRowsNow[0].data)
+    assert.strictEqual(persisted.erpMaterialId, '123', 'the numeric id is grounded to the string-typed key field ("123", not 123)')
+  })
+
+  // ---- P2-2 (owner independent review 2026-07-12): response + errors stay values-free (no echo-back) ----
+  // "values-free" also means the caller's OWN inputs never bounce back: the raw syncRunId is a caller
+  // handle, so the public result carries only counts/modes/statuses + a values-free evidence block, and the
+  // ambiguous-key error names the FIELD, never the offending value.
+  await run("the public result never echoes the caller's raw syncRunId (values-free response)", async () => {
+    const recordsApi = makeRecordsApi()
+    const provisioning = makeProvisioning()
+    const RUN_TOKEN = 'erp_run_LEAKBAIT_9c2'
+    const result = await persistStockPreparationErpMaterialSync({
+      permission: 'admin', recordsApi, provisioning, ...baseSyncInputs({ syncRunId: RUN_TOKEN }),
+    })
+    assert.equal('runId' in result, false, 'raw runId is not a public-result field')
+    assert.equal('syncRunId' in result, false)
+    assert.equal(JSON.stringify(result).includes(RUN_TOKEN), false, 'the caller-supplied syncRunId token never crosses into the response')
+    assert.equal(result.evidence.runIdPresent, true, 'only a boolean trace of the run remains in evidence')
+  })
+
+  await run('the ambiguous-run error names the key FIELD, never the offending runId value', async () => {
+    const DUP = 'erp_run_DUP_LEAKBAIT_4f1'
+    const cell = (logical) => physicalFieldId(STAGING_PROJECT_ID, RUN_OBJECT_ID, logical)
+    const dupRow = (id) => ({ id, data: { [cell(RUN_KEY_FIELD)]: DUP, [cell('runType')]: ERP_MATERIAL_SYNC_RUN_TYPE, [cell('status')]: 'running' } })
+    const recordsApi = makeStrictRecordsApi({
+      objectIdBySheetId: OBJECT_ID_BY_SHEET_ID,
+      stagingProjectId: STAGING_PROJECT_ID,
+      rowsBySheet: { [RUN_SHEET_ID]: [dupRow('rec_dup_1'), dupRow('rec_dup_2')] },
+    })
+    const provisioning = makeProvisioning()
+    await assert.rejects(
+      () => persistStockPreparationErpMaterialSync({ permission: 'admin', recordsApi, provisioning, ...baseSyncInputs({ syncRunId: DUP }) }),
+      (error) => {
+        assert.ok(error instanceof StockPreparationErpMaterialSyncError)
+        assert.equal(error.code, 'ERP_MATERIAL_SYNC_KEY_AMBIGUOUS')
+        assert.deepEqual(error.details, { keyField: RUN_KEY_FIELD }, 'error details name the field only')
+        assert.equal(JSON.stringify(error.details).includes(DUP), false, 'the offending runId value never appears in the error')
+        return true
+      },
+    )
+  })
+
   // ---- run-record idempotency: replaying the SAME syncRunId with an unchanged status is a no-op ----
   await run('replaying the SAME syncRunId with an unchanged run status patches nothing on the run sheet', async () => {
     const recordsApi = makeRecordsApi()

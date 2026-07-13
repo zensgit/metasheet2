@@ -4166,6 +4166,53 @@ async function testStockPreparationOptionSyncRoute() {
   assert.equal(res.body.error.code, 'OPTION_SYNC_EXECUTABLE_REJECTED')
 }
 
+// #4206 (owner independent review 2026-07-12): the NEW T2 write route must be gated + un-smuggleable.
+// requireAccess(admin) fires first, then the closed request allowlist (targetProjectId is server-derived
+// from the auth tenant, NEVER request-sourced) — so no auth-boundary or scope-steering path reaches a write.
+async function testStockPreparationErpMaterialSyncRoute() {
+  const provisioning = createStockPreparationTargetProvisioningApi({ sheetExists: true })
+  const records = createTableActionRecordsApi()
+  const { routes, registered } = mountRoutes(createMockServices().services, {
+    provisioningApi: provisioning.api,
+    recordsApi: records.recordsApi,
+  })
+
+  const ROUTE = '/api/integration/stock-preparation/mvp/erp-materials/sync'
+  assert.ok(registered.includes(`POST ${ROUTE}`), 'stock-preparation ERP material sync route registered')
+  const wrote = () => findCalls(records.calls, 'createRecord').length + findCalls(records.calls, 'patchRecord').length
+
+  // (1) unauthenticated -> 401/403, and NO write reached the records substrate.
+  let res = await invoke(routes, 'POST', ROUTE, { body: { syncRunId: 'r1', erpMaterials: [] } })
+  assertErrorResponse(res, [401, 403])
+  assert.equal(wrote(), 0, 'no write on an unauthenticated sync')
+
+  // (2) a non-admin integration:write user -> 403 (this route is admin-only), still no write.
+  res = await invoke(routes, 'POST', ROUTE, { user: WRITE_USER, body: { syncRunId: 'r1', erpMaterials: [] } })
+  assert.equal(res.statusCode, 403, 'write user cannot run the admin-only ERP material sync')
+  assert.equal(wrote(), 0)
+
+  // (3) SMUGGLING: an admin body carrying targetProjectId (which the route derives server-side from the
+  //     auth tenant, never from the request) is rejected by the closed allowlist BEFORE any records
+  //     access — the caller cannot steer which staging project the write lands in.
+  res = await invoke(routes, 'POST', ROUTE, {
+    user: ADMIN_USER,
+    body: { syncRunId: 'r1', erpMaterials: [], targetProjectId: 'tenant_evil:integration-core' },
+  })
+  assert.equal(res.statusCode, 400, 'a smuggled targetProjectId is rejected')
+  assert.equal(res.body.error.code, 'STOCK_PREPARATION_ERP_MATERIAL_SYNC_REQUEST_INVALID')
+  assert.equal(res.body.error.details.field, 'targetProjectId', 'the offending field is named')
+  assert.equal(wrote(), 0, 'no write on a smuggled body')
+
+  // (4) the allowlist is closed generally, not a targetProjectId special-case: any unknown field 400s too.
+  res = await invoke(routes, 'POST', ROUTE, {
+    user: ADMIN_USER,
+    body: { syncRunId: 'r1', erpMaterials: [], permission: 'admin' },
+  })
+  assert.equal(res.statusCode, 400, 'an unknown request field is rejected')
+  assert.equal(res.body.error.details.field, 'permission')
+  assert.equal(wrote(), 0)
+}
+
 async function testFieldOptionsSyncDisableMissing() {
   // FOS-4 (prove-the-path / P2 wire-test): the 2nd catalog preset (disable_missing) drives the generic
   // route through the REAL getObjectField-backed closure (closing the wire-vs-fixture gap), and proves
@@ -7409,6 +7456,7 @@ async function main() {
   await testUnauthenticatedWriteRequestIsRejected()
   await testStockPreparationTargetProvisioningRoutes()
   await testStockPreparationOptionSyncRoute()
+  await testStockPreparationErpMaterialSyncRoute()
   await testFieldOptionsSyncRoute()
   await testFieldOptionsSyncDisableMissing()
   await testTableActionRoutes()
