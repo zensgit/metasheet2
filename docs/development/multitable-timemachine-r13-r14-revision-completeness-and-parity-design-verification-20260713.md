@@ -100,3 +100,33 @@ O-2 上线              ──── flag-off 基线 → 分级 flag-on → 证�
 
 ## 9. 收官口径（如实，不掩盖未完成代码）
 R12 基础工程收口**已落**（#4197/#4199 MERGED）。**revision 链尚未补齐**（R13-A 3 lane 进行中 + OD-6 guard 未建）——在此之前，PIT/History/Reset 在 8 条用户数据路径上**仍基于错误历史**，且 Reset 有静默数据销毁向量。**因此现在既不能宣称「Time Machine 完成」，也不能宣称「媲美飞书」**。诚实终点见 §主线定位。**#4186 最后重写并合，作唯一收口索引；本 MD 为当前进度索引，代码 + canonical 文档为语义权威。**
+
+## 10. Owner 审阅 + 计划（2026-07-13 v2）—— W0 可信性纠错 + 收尾顺序
+
+owner 提交了完整审阅 + 收尾计划 + 估算。**逐条复核：计划成立，W0-first 顺序门正确，估算合理。** 对我方 #4235 的 **P1 已实证复核成立**。
+
+### 10.1 W0 可信性——`HISTORY_INCOMPLETE` 现草案不安全（owner P1，我已实证）
+- **healed-gap（实证：#4235 comparator = `ORDER BY created_at DESC LIMIT 1` = live-vs-LATEST）**：v1✓→v2 漏→v3✓；live==v3 ⇒ 预检**通过**，但 Reset/Revert 到 T∈[v2,v3) 用 latest≤T=v1 快照=**错**。tail 健康、**中段有洞**，live-vs-latest 结构性看不见。⇒ 需**连续版本证明 / 持久化 trusted-since**，非只比 live-vs-latest。
+- **check→write 竞态**：execute 预检是破坏性事务**前**多条 READ COMMITTED 查询 ⇒ check→write 间可落无 revision 写入。⇒ execute 复检+恢复写入须**同一锁定事务**（`FOR UPDATE` scope 行）。
+- **缺 golden**：healed-gap + 并发竞态。
+- **本轮处置**：Opus lane 进行中——先**构造 healed-gap/race 反例金测**（对当前 #4235 应**红**），再设计+实现 trusted-since/连续性 + 同锁事务复检 + 新金测；**不得误拒** healthy lock/unlock（G-HI-2）与 formula 物化（G-HI-3）。**#4235 修好前不落地**（owner「不能安全落地」，我同意）。
+
+### 10.2 收尾顺序（owner 计划，我采纳 + 模型分派）
+| 阶段 | 内容 | 顺序门 | 模型 |
+|---|---|---|---|
+| **W0 可信性** | 修 `HISTORY_INCOMPLETE`（§10.1）→ 依次 form/plugin/automation/approval/attachment **5 刀** → 最后 revision-disposition guard（#4227 已建） | **硬顺序门** | Opus 预检 · Sonnet 逐刀 · Opus gate |
+| **T-state 体验** | **采用 #4205**（deleted-since-T 完整版本视图 + preview/restore + operationId + 单记录 resurrect）；**#4225 已关**（重复） | W0 后 | Sonnet API + Fable FE + Opus gate |
+| **整库恢复** | base 级跨表/配置 preview + 确定性计划 + 原子恢复（= R14 方案 A 若选） | T-state 后；**R14 owner 决策** | Opus |
+| **规模与关系** | >5000 benchmark/job + retention 共存（#4224）+ 边级 link history（独立锁 OD-4） | 受恢复事务风险约束 | Opus 设计 + Sonnet |
+| **上线** | staging 浏览器验收 + 逐 flag ladder + 监控/回滚 | 最后；owner/ops | — |
+
+### 10.3 诚实工作量（owner 估算，采纳）
+可安全用：**8–12 人周**；严格飞书公开核心：**12–20 人周**；再超越：**16–28 人周**。三人并行守 W0 门 ≈ 4–6 / 7–10 / 10–14 周。**现有 Draft 不能按「已完成」计**：#4219/#4220 DIRTY、其余 BEHIND；**revision 链一刀未落 main**。
+
+### 10.4 台账/去重 + 待清理
+- **#4205 = T-state 权威**；**#4225 已关**（本轮，owner 令）。
+- **#4187 §4/§8 残留 proposed/not-authorized（顶部已 RATIFIED）= 合并前必须全文清理**（owner P3）——#4187 由平行 session 主写，我不擅动免冲突，**标给落地方**。
+- **平行 session 重复**：#4187 vs #4204 · #4227 vs #4204——建议 owner 择 #4187+#4227 权威并停平行重做。
+- **已超飞书的部分**（owner 认定）：细粒度单字段/记录/sheet 恢复 + 签名 preview + CAS + typed confirm + 事务原子性——飞书不支持只恢复单表/视图、归档表不能恢复到指定时刻。**W0 可信闭环后中小场景可宣称媲美；补整库原子恢复后宜宣称接近飞书完整能力。**
+
+**采纳 owner 建议**：**暂不启用更多恢复 flag**，先把 W0 做成可信闭环 → 再 #4205 → 最后整库恢复。
