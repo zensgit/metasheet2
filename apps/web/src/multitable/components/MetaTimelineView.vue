@@ -575,11 +575,11 @@ function onDragEnd() {
 .meta-timeline__label-actions { display: inline-flex; align-items: center; gap: 4px; flex-shrink: 0; }
 .meta-timeline__comment-btn { display: inline-flex; align-items: center; justify-content: center; min-height: 28px; padding: 2px 8px; border: 1px solid #d8e1ee; border-radius: 999px; background: #fff; cursor: pointer; color: #64748b; }
 .meta-timeline__comment-btn:hover { border-color: #93c5fd; background: #eff6ff; color: #2563eb; }
-.meta-timeline__comment-btn--active { border-color: #f59e0b; background: #fff7ed; color: #b45309; }
+.meta-timeline__comment-btn--active { border-color: var(--ms-color-comment-active-border); background: var(--ms-color-comment-active-bg); color: var(--ms-color-comment-active-text); }
 .meta-timeline__comment-btn--idle { border-color: #d8e1ee; background: #fff; color: #64748b; }
 .meta-timeline__field-comment-btn { display: inline-flex; align-items: center; justify-content: center; min-width: 24px; height: 22px; padding: 0 5px; border: 1px solid #d8e1ee; border-radius: 999px; background: #fff; cursor: pointer; color: #64748b; }
 .meta-timeline__field-comment-btn:hover { border-color: #93c5fd; background: #eff6ff; color: #2563eb; }
-.meta-timeline__field-comment-btn--active { border-color: #f59e0b; background: #fff7ed; color: #b45309; }
+.meta-timeline__field-comment-btn--active { border-color: var(--ms-color-comment-active-border); background: var(--ms-color-comment-active-bg); color: var(--ms-color-comment-active-text); }
 .meta-timeline__field-comment-btn--idle { border-color: #d8e1ee; background: #fff; color: #64748b; }
 .meta-timeline__label-col--attachment :deep(.meta-attachment-list__items) { gap: 4px; }
 .meta-timeline__label-col--attachment :deep(.meta-attachment-list__card) { border-color: #bfdbfe; background: #fff; }

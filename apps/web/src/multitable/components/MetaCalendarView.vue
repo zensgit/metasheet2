@@ -942,11 +942,11 @@ function onCellKeydown(e: KeyboardEvent, cellIdx: number, cells: CalendarCell[])
 .meta-calendar__event-actions { display: inline-flex; align-items: center; gap: 4px; flex-shrink: 0; }
 .meta-calendar__comment-btn { display: inline-flex; align-items: center; justify-content: center; min-height: 24px; padding: 2px 6px; border: 1px solid #bfdbfe; border-radius: 999px; background: #fff; cursor: pointer; color: #2563eb; }
 .meta-calendar__comment-btn:hover { border-color: #60a5fa; background: #dbeafe; }
-.meta-calendar__comment-btn--active { border-color: #f59e0b; background: #fff7ed; color: #b45309; }
+.meta-calendar__comment-btn--active { border-color: var(--ms-color-comment-active-border); background: var(--ms-color-comment-active-bg); color: var(--ms-color-comment-active-text); }
 .meta-calendar__comment-btn--idle { border-color: #bfdbfe; background: #fff; color: #2563eb; }
 .meta-calendar__field-comment-btn { display: inline-flex; align-items: center; justify-content: center; min-width: 24px; height: 22px; padding: 0 5px; border: 1px solid #bfdbfe; border-radius: 999px; background: #fff; cursor: pointer; color: #2563eb; }
 .meta-calendar__field-comment-btn:hover { border-color: #60a5fa; background: #dbeafe; }
-.meta-calendar__field-comment-btn--active { border-color: #f59e0b; background: #fff7ed; color: #b45309; }
+.meta-calendar__field-comment-btn--active { border-color: var(--ms-color-comment-active-border); background: var(--ms-color-comment-active-bg); color: var(--ms-color-comment-active-text); }
 .meta-calendar__field-comment-btn--idle { border-color: #bfdbfe; background: #fff; color: #2563eb; }
 .meta-calendar__event-attachments { pointer-events: none; }
 .meta-calendar__event-attachments :deep(.meta-attachment-list__items) { gap: 4px; }

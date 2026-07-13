@@ -1435,7 +1435,10 @@ thead .meta-grid__check-col {
 }
 .meta-grid__comment-action--active,
 .meta-grid__field-comment-action--active {
-  color: #1d4ed8;
+  /* OD-CA-2 = A (RATIFIED): this was blue #1d4ed8 — the one comment-affordance consumer that
+   * drifted from the amber majority convention. Converged to the shared comment-active token;
+   * this is an owner-approved VISIBLE change (grid active turns amber like every other view). */
+  color: var(--ms-color-comment-active-text);
 }
 .meta-grid__comment-action--idle,
 .meta-grid__field-comment-action--idle {
