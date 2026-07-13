@@ -22,7 +22,7 @@
         @toggle-favorite="onToggleFavoriteBase"
       />
     </div>
-    <MetaViewTabBar :sheets="workbench.sheets.value" :views="visibleWorkbenchViews" :active-sheet-id="workbench.activeSheetId.value" :active-view-id="workbench.activeViewId.value" :can-create-sheet="canCreateBasesAndSheets" :personal-views-enabled="personalViewsEnabled" :is-personal-mode="personalView.isPersonalMode" @select-sheet="onSelectSheet" @select-view="onSelectView" @create-sheet="onCreateSheet" @toggle-personal="onTogglePersonalView" />
+    <MetaSheetViewRail :sheets="workbench.sheets.value" :views="visibleWorkbenchViews" :active-sheet-id="workbench.activeSheetId.value" :active-view-id="workbench.activeViewId.value" :can-create-sheet="canCreateBasesAndSheets" :personal-views-enabled="personalViewsEnabled" :is-personal-mode="personalView.isPersonalMode" @select-sheet="onSelectSheet" @select-view="onSelectView" @create-sheet="onCreateSheet" @toggle-personal="onTogglePersonalView" />
     <div class="mt-workbench__actions">
       <div
         v-if="sheetPresenceState.activeCollaboratorCount.value > 0"
@@ -634,7 +634,7 @@ import { useMultitableCommentRealtime } from '../composables/useMultitableCommen
 import { useMultitableSheetPresence } from '../composables/useMultitableSheetPresence'
 import { useMultitableSheetRealtime } from '../composables/useMultitableSheetRealtime'
 import { subscribeToMultitableCommentSheetRealtime } from '../realtime/comments-realtime'
-import MetaViewTabBar from '../components/MetaViewTabBar.vue'
+import MetaSheetViewRail from '../components/MetaSheetViewRail.vue'
 import MetaToolbar from '../components/MetaToolbar.vue'
 import MetaGridTable from '../components/MetaGridTable.vue'
 import MetaExportDialog, { type ExportConfirmPayload } from '../components/MetaExportDialog.vue'

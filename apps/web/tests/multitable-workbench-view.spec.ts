@@ -193,9 +193,9 @@ vi.mock('../src/multitable/import/bulk-import', () => ({
   bulkImportRecords: bulkImportRecordsMock,
 }))
 
-vi.mock('../src/multitable/components/MetaViewTabBar.vue', () => ({
+vi.mock('../src/multitable/components/MetaSheetViewRail.vue', () => ({
   default: defineComponent({
-    name: 'MetaViewTabBar',
+    name: 'MetaSheetViewRail',
     props: {
       canCreateSheet: { type: Boolean, default: false },
     },
