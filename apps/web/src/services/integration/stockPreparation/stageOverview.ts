@@ -117,7 +117,15 @@ export function classifyProvisionStatus(input: { projectCount: number; hasSelect
   return 'clear'
 }
 
-export type StockPreparationRecommendedStepKind = 'select_project' | 'admin_required' | 'go_to_stage' | 'all_clear'
+export type StockPreparationRecommendedStepKind =
+  | 'select_project'
+  | 'admin_required'
+  | 'go_to_stage'
+  | 'all_clear'
+  // The admin detail reads were attempted but at least one came back 'unknown' (a non-permission read
+  // failure) and nothing that DID load is blocked — so we can neither claim "all clear" nor blame
+  // permissions. An explicit "we couldn't read everything" state.
+  | 'detail_unavailable'
 
 // Values-free reason enum. Each entry is a CLASSIFICATION key, never a rendered sentence — the
 // component owns the bi(zh, en) copy and interpolates `count` where the reason calls for a number.
@@ -135,6 +143,8 @@ export type StockPreparationRecommendedStepReason =
   | 'project_held_lines'
   | 'project_no_snapshot_yet'
   | 'all_clear'
+  // Paired with kind 'detail_unavailable': an admin detail read failed and nothing loaded is blocked.
+  | 'detail_read_incomplete'
 
 export interface StockPreparationRecommendedStep {
   kind: StockPreparationRecommendedStepKind
@@ -211,8 +221,7 @@ export function deriveRecommendedNextStep(input: {
     }
     // No loaded stage is blocked. The "nothing pending" TERMINAL (generate-not-run, else all_clear) is
     // only trustworthy when EVERY detail stage loaded — asserting it off a failed read is the false
-    // "no blocking items". If any stage is unknown, fall through to the tier-1 per-project signals (or
-    // admin_required) instead of claiming all_clear here.
+    // "no blocking items".
     if (!detailUnknown) {
       const generateStage = byKey.get('generate')
       if (generateStage && generateStage.count === 0) {
@@ -220,6 +229,12 @@ export function deriveRecommendedNextStep(input: {
       }
       return { kind: 'all_clear', reason: 'all_clear' }
     }
+    // A detail stage's read failed (unknown) and nothing that DID load is blocked. We cannot honestly say
+    // "all clear" (that is the false "no blocking items" off a failed read), and it is NOT a permission
+    // problem (adminDetailAvailable is true), so we must NOT fall through to the tier-1 all_clear or to
+    // admin_required. Return an explicit "detail read incomplete" so the operator knows the picture is
+    // partial rather than reassuringly empty (owner review P2, stricter terminal semantics 2026-07-13).
+    return { kind: 'detail_unavailable', reason: 'detail_read_incomplete' }
   }
 
   const signals = input.projectSignals

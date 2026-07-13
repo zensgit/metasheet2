@@ -267,6 +267,27 @@ describe('StockPreparationDashboardView', () => {
     expect(recommend.textContent).toContain('2')
   })
 
+  // #4207 stricter terminal semantics (owner review 2026-07-13): admin reads that fail for a
+  // NON-permission reason (not 403) leave adminDetailAvailable true but the stages 'unknown'. The banner
+  // must say the detail is incomplete — never a reassuring all_clear, never "admin required".
+  it('shows an explicit "detail incomplete" recommendation when the admin reads fail for a non-permission reason', async () => {
+    h.getOverview.mockResolvedValue(buildOverview(0)) // CLEAN tier-1 signals — a wrong fallback would say all_clear
+    h.listSnapshotBatches.mockRejectedValue(new Error('backend not ready'))
+    h.getMappingSummary.mockRejectedValue(new Error('backend not ready'))
+    h.getUnitSummary.mockRejectedValue(new Error('backend not ready'))
+    h.listPrepLines.mockRejectedValue(new StockPreparationConfirmApiError(500, 'BACKEND_NOT_READY', null))
+    h.listExceptions.mockRejectedValue(new StockPreparationConfirmApiError(500, 'BACKEND_NOT_READY', null))
+
+    const root = mountView({ projectId: 'proj-alpha' })
+    await flushUi()
+
+    const recommend = root.querySelector('[data-testid="stock-prep-dashboard-recommend"]') as HTMLElement
+    expect(recommend.getAttribute('data-kind')).toBe('detail_unavailable')
+    expect(recommend.textContent).toContain('部分阶段详情') // the honest "read incomplete" copy
+    expect(recommend.textContent).not.toContain('没有需要处理') // never the false all_clear
+    expect(recommend.textContent).not.toContain('需要管理员权限') // and not mislabelled as a permission problem
+  })
+
   it('is values-free: planted business-looking strings on the project row never render', async () => {
     h.getOverview.mockResolvedValue(buildOverview())
     mockClearStageReads()
@@ -367,5 +388,63 @@ describe('StockPreparationDashboardView', () => {
     const text = container!.textContent || ''
     expect(text).toContain('42')
     expect(text).not.toContain('99')
+  })
+
+  // #4207 review P2 (owner): A in flight → DESELECT (projectId → '') → reselect A. If the sequence is
+  // claimed AFTER the empty-project early return, deselecting does NOT bump it, so the in-flight A keeps a
+  // sequence that still matches and commits its stale result on resolve — then reselecting A renders that
+  // stale detail ("有 1 个不完整的快照批次") until the fresh A settles. Claiming the sequence at the
+  // function head makes the deselect cancel the in-flight load.
+  it('cancels an in-flight load when the project is DESELECTED, so a reselect never shows the stale recommendation', async () => {
+    // proj-A has no snapshot batch per the read-gated overview (tier-1 truth), so once the stale detail is
+    // correctly cancelled the reselect derives a DIFFERENT recommendation ("no snapshot yet"), never the
+    // stale "1 incomplete batch". The recommendation banner is NOT gated on the stepper's loading flag, so
+    // a wrongly-committed stale detail surfaces there even while the fresh reselect load is in flight.
+    h.getOverview.mockResolvedValue({
+      projectCount: 1,
+      statusCounts: { active: 1 },
+      projects: [
+        { projectId: 'proj-A', projectStatus: 'active', lastSyncRunId: 'r-a', snapshotBatchCount: 0, openExceptionCount: 0, readyLineCount: 0, heldLineCount: 0 },
+      ],
+    } as unknown as StockPreparationWorkspaceOverview)
+
+    let releaseFirstA!: () => void
+    let releaseSecondA!: () => void
+    // Stale A carries a BLOCKING incomplete batch → derives the "1 incomplete snapshot batch" recommendation
+    // (the exact symptom owner saw). Fresh A is clean.
+    const firstA = new Promise((resolve) => { releaseFirstA = () => resolve({ batchCount: 1, batches: [{ incomplete: true }] }) })
+    const secondA = new Promise((resolve) => { releaseSecondA = () => resolve({ batchCount: 3, batches: [] }) })
+    let aCalls = 0
+    h.listSnapshotBatches.mockImplementation((scope: { projectId?: string }) => {
+      if (scope.projectId === 'proj-A') { aCalls += 1; return aCalls === 1 ? firstA : secondA }
+      return Promise.resolve({ batchCount: 0, batches: [] })
+    })
+    h.getMappingSummary.mockResolvedValue({ activeMappingCount: 0, pendingConfirmCount: 0 })
+    h.getUnitSummary.mockResolvedValue({ pendingUnitLineCount: 0 })
+    h.listPrepLines.mockResolvedValue({ rowCount: 0, byPrepStatus: {} })
+    h.listExceptions.mockResolvedValue({ rowCount: 0, unresolvedBlockingCount: 0 })
+
+    const projectId = ref<string>('proj-A')
+    app = createApp({ render: () => renderH(StockPreparationDashboardView as Component, { projectId: projectId.value, scope: () => ({}) }) })
+    app.mount(container!)
+    await flushUi()            // load#1 (A) in flight — its snapshot-batches read is held
+
+    projectId.value = ''       // DESELECT — must bump the sequence and cancel load#1
+    await flushUi()
+
+    releaseFirstA()            // load#1's stale A resolves AFTER the deselect — must be dropped, not committed
+    await flushUi()
+
+    projectId.value = 'proj-A'  // reselect A — the fresh load#3 is in flight (held); the stale banner is
+    await flushUi()             // what would show right now if load#1 had wrongly committed its detail
+
+    const recommend = container!.querySelector('[data-testid="stock-prep-dashboard-recommend-text"]')?.textContent || ''
+    expect(recommend).not.toContain('不完整')        // never the stale blocking recommendation
+    expect(recommend).not.toContain('incomplete')
+    expect(recommend).toContain('尚无快照')          // the honest tier-1 recommendation for a no-snapshot project
+
+    releaseSecondA()
+    await flushUi()
+    expect(container!.textContent || '').toContain('3') // the fresh reselect load settles cleanly
   })
 })

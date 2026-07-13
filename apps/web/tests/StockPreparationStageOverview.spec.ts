@@ -157,10 +157,13 @@ describe('deriveRecommendedNextStep', () => {
       expect(step).toEqual({ kind: 'all_clear', reason: 'all_clear' })
     })
 
-    // #4207 review P2: a FAILED detail read classifies its stage 'unknown'; the array still exists, so
-    // an "array present ⇒ detail available" gate would fall through to all_clear ("nothing to handle")
-    // when the truth is "we don't know". An unknown detail stage must NOT yield all_clear.
-    it('does NOT claim all_clear when a detail stage is unknown (read failed) — falls to tier-1', () => {
+    // #4207 stricter terminal semantics (owner review 2026-07-13): a FAILED detail read classifies its
+    // stage 'unknown'. When a detail read is unknown and nothing loaded is blocked, the derivation must
+    // return an EXPLICIT detail_unavailable — NOT a bare tier-1 all_clear ("no blocking items" off a failed
+    // read), NOT admin_required (adminDetailAvailable is true — it is not a permission problem), and clean
+    // OR actionable tier-1 signals must NOT override it (the operator is told the picture is partial, not
+    // reassuringly empty).
+    it('returns an explicit detail_unavailable (never all_clear / admin_required / tier-1) when a detail read is unknown', () => {
       const stages = buildStages({
         sync: { status: 'unknown', count: null, blockingCount: null },
         map: { status: 'unknown', count: null, blockingCount: null },
@@ -168,15 +171,31 @@ describe('deriveRecommendedNextStep', () => {
         generate: { status: 'unknown', count: null, blockingCount: null },
         exception: { status: 'unknown', count: null, blockingCount: null },
       })
-      // No signals → cannot claim all_clear; surfaces admin_required rather than a false "all clear".
-      const noSignals = deriveRecommendedNextStep({ hasProject: true, adminDetailAvailable: true, stages })
-      expect(noSignals).toEqual({ kind: 'admin_required', reason: 'admin_permission_required' })
-      // With read-gated project signals → tier-1 fallback recommendation, still never a false all_clear.
-      const withSignals = deriveRecommendedNextStep({
+      const incomplete = { kind: 'detail_unavailable', reason: 'detail_read_incomplete' }
+      // No project signals: an unknown detail read is NOT a permission problem → detail_read_incomplete.
+      expect(deriveRecommendedNextStep({ hasProject: true, adminDetailAvailable: true, stages })).toEqual(incomplete)
+      // CLEAN tier-1 signals must NOT manufacture a reassuring all_clear off a failed detail read.
+      expect(deriveRecommendedNextStep({
+        hasProject: true, adminDetailAvailable: true, stages,
+        projectSignals: { snapshotBatchCount: 2, openExceptionCount: 0, readyLineCount: 0, heldLineCount: 0 },
+      })).toEqual(incomplete)
+      // Even ACTIONABLE tier-1 signals (open exceptions) do not override the honest "detail incomplete"
+      // state — the detail read is what failed, and its truth is unknown, not "handle these exceptions".
+      expect(deriveRecommendedNextStep({
         hasProject: true, adminDetailAvailable: true, stages,
         projectSignals: { snapshotBatchCount: 2, openExceptionCount: 4, readyLineCount: 0, heldLineCount: 0 },
+      })).toEqual(incomplete)
+    })
+
+    // A PARTIAL unknown (one stage failed, the rest loaded clean, none blocked) is still detail_unavailable —
+    // we cannot claim all_clear while any stage's truth is unknown.
+    it('returns detail_unavailable when ONE detail stage is unknown and no loaded stage is blocked', () => {
+      const stages = buildStages({ exception: { status: 'unknown', count: null, blockingCount: null } })
+      const step = deriveRecommendedNextStep({
+        hasProject: true, adminDetailAvailable: true, stages,
+        projectSignals: { snapshotBatchCount: 2, openExceptionCount: 0, readyLineCount: 4, heldLineCount: 0 },
       })
-      expect(withSignals).toEqual({ kind: 'go_to_stage', stage: 'exception', reason: 'project_open_exceptions', count: 4 })
+      expect(step).toEqual({ kind: 'detail_unavailable', reason: 'detail_read_incomplete' })
     })
 
     // #4207 re-review 2026-07-12: a PARTIAL detail failure must still surface a blocker that DID load.

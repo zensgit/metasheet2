@@ -251,16 +251,24 @@ function stageFromResult<T>(
 }
 
 async function loadStageDetail(): Promise<void> {
+  // Claim this load's sequence FIRST — BEFORE the empty-project early return. The watcher re-fires
+  // loadStageDetail on every projectId change, so several loads can be in flight at once; only the run
+  // that is still the most recent may commit. Claiming the sequence here means clearing the selection
+  // (projectId → '') ALSO bumps the sequence and cancels any in-flight load — otherwise an A-load still
+  // in flight when the user deselects keeps a sequence that still matches, and would commit its stale
+  // result on resolve (owner review P2: A in flight → deselect → reselect A briefly showed the stale A).
+  const seq = ++stageDetailSeq
   if (!props.projectId) {
     stageDetailLoading.value = false
     detailForbidden.value = false
     detailStages.value = null
     return
   }
-  // Claim this load's sequence number. The watcher re-fires loadStageDetail on every projectId change,
-  // so several loads can be in flight at once; only the run that is still the most recent may commit.
-  const seq = ++stageDetailSeq
   stageDetailLoading.value = true
+  // Clear stale detail at the start of each new load so a superseded response can never render while the
+  // fresh load is in flight (owner review P2: "每次新加载开始时清空旧 detail 状态").
+  detailStages.value = null
+  detailForbidden.value = false
   const scope = { ...props.scope, projectId: props.projectId }
   const [syncResult, mapResult, unitResult, generateResult, exceptionResult] = await Promise.allSettled([
     listStockPreparationSnapshotBatches(scope),
@@ -375,6 +383,11 @@ const recommendCopy = computed<string>(() => {
       return bi('该项目尚无快照批次 → 去同步快照。', 'This project has no snapshot batch yet → go sync.')
     case 'all_clear':
       return bi('当前没有需要处理的阻断项。', 'Nothing currently needs attention.')
+    case 'detail_read_incomplete':
+      return bi(
+        '部分阶段详情暂时读取失败,当前无法完整判断是否有阻断项 → 请稍后重试。',
+        'Some stage details failed to load, so the picture is incomplete — retry shortly.',
+      )
     default:
       return ''
   }
