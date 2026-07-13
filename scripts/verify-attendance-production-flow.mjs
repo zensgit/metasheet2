@@ -325,12 +325,32 @@ function isImportCommitUrl(url) {
   }
 }
 
+// When the import mode requires confirmation, requestRunImport() opens the "confirm override import"
+// modal (确认覆盖导入, AttendanceView §2/§4 design-lock) instead of committing directly; the commit POST
+// only fires after the acknowledgement checkbox is checked and Confirm is clicked. Handle it so the commit
+// actually dispatches. No-op (returns fast) when no modal appears (non-override direct-commit path).
+async function confirmImportOverrideModalIfPresent(page) {
+  const modal = page.locator('[data-import-override-confirm]').first()
+  try {
+    await modal.waitFor({ state: 'visible', timeout: 5000 })
+  } catch {
+    return // no override-confirm modal — direct-commit path
+  }
+  const checkbox = modal.locator('[data-import-override-extra-confirm] input[type="checkbox"]').first()
+  if (await checkbox.count()) {
+    await checkbox.check().catch(() => {})
+  }
+  await modal.locator('[data-import-override-confirm-submit]').first().click()
+}
+
 async function clickImportAndWaitForCommitResponse(page, importSection) {
   const responsePromise = page.waitForResponse((resp) => {
     if (resp.request().method() !== 'POST') return false
     return isImportCommitUrl(resp.url())
   }, { timeout: timeoutMs })
   await importSection.getByRole('button', { name: exactNamePattern(uiText.import) }).click()
+  // A confirm-override modal may intercept before the commit POST fires (design-lock §2/§4); confirm it.
+  await confirmImportOverrideModalIfPresent(page)
   const response = await responsePromise
   const raw = await response.text()
   let body = null
