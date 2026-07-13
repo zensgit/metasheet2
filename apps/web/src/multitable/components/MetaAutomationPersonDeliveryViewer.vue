@@ -3,7 +3,7 @@
     <div class="meta-person-delivery">
       <div class="meta-person-delivery__header">
         <h4 class="meta-person-delivery__title">{{ automationLabel('delivery.personTitle', isZh) }}</h4>
-        <button class="meta-person-delivery__close" type="button" @click="$emit('close')">&times;</button>
+        <MtIconButton class="meta-person-delivery__close" @click="$emit('close')">&times;</MtIconButton>
       </div>
 
       <div class="meta-person-delivery__body">
@@ -66,7 +66,7 @@ import { useLocale } from '../../composables/useLocale'
 import type { DingTalkPersonDelivery } from '../types'
 import type { MultitableApiClient } from '../api/client'
 import { automationLabel, automationStatusLabel } from '../utils/meta-automation-labels'
-import { MtButton } from '../ui'
+import { MtButton, MtIconButton } from '../ui'
 
 const props = defineProps<{
   visible: boolean
@@ -195,15 +195,9 @@ watch(
   color: #0f172a;
 }
 
-.meta-person-delivery__close {
-  border: none;
-  background: none;
-  font-size: 22px;
-  cursor: pointer;
-  color: #64748b;
-  line-height: 1;
-  padding: 0 4px;
-}
+/* .meta-person-delivery__close: now <MtIconButton> (ghost, token-styled; the &times; glyph char passes
+   through its default-slot icon fallback (size token-normalized to the icon control)). Bespoke hardcoded
+   CSS removed (UI-P2-1c T1 batch-4). Class kept on the element only for selector stability. */
 
 .meta-person-delivery__body {
   padding: 16px 20px 20px;

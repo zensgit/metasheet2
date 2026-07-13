@@ -117,7 +117,14 @@ export function formatFieldDisplay(params: {
   // Native person (人员): value = userId[]; resolve display from personSummaries (userId →
   // display), falling back to the raw userId. (Legacy link-backed person is type='link' below.)
   if (field.type === 'person') {
-    const ids = Array.isArray(value) ? value.map(String).filter((id) => id.trim().length > 0) : value ? [String(value)] : []
+    // DIRTY-VALUE FILTERING. A person value is `userId[]`, but a stored value can be dirty — a legacy
+    // object, a number, a null — from an old import, a retype, or a hand-seeded row. The previous
+    // `value.map(String)` stringified those, so an object rendered as the literal "[object Object]" and a
+    // number as "42", straight into the UI (and, in a History diff, into an audit surface). Accept ONLY
+    // non-empty strings and DROP the rest: an id we cannot trust is not an id. A cell of nothing but dirt
+    // renders as '—', which is honest, rather than as fabricated garbage.
+    const ids = (Array.isArray(value) ? value : value === null || value === undefined ? [] : [value])
+      .filter((id): id is string => typeof id === 'string' && id.trim().length > 0)
     if (ids.length === 0) return '—'
     const byId = new Map((personSummaries ?? []).map((s) => [s.id, s.display]))
     return ids.map((id) => byId.get(id) || id).join(', ')

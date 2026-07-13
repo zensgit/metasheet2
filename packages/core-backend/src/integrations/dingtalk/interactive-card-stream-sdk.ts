@@ -130,7 +130,10 @@ async function handleCardCallbackFrame(
     return
   }
 
-  // P3-1: stamp the gateway-guaranteed header corp id onto the forwarded payload as `eventCorpId`
+  // P3-1: stamp the SDK-typed header corp id — WHEN PRESENT — onto the forwarded payload as `eventCorpId`
+  // (owner 2026-07-12: NOT 'gateway-guaranteed'. dingtalk-stream@2.1.5 declares eventCorpId only among the
+  // EVENT-topic headers, so a card CALLBACK frame may not carry it at all. Unverified until UAT §0-a
+  // captures a real frame; do not restore a guarantee claim before then.)
   // so the callback's cross-corp gate anchors on the SDK-typed provenance rather than the untyped
   // business-blob `data.corpId` (the header wins; a mismatch is cross-checked downstream).
   //

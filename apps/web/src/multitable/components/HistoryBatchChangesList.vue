@@ -57,7 +57,7 @@
 
 <script setup lang="ts">
 import { useLocale } from '../../composables/useLocale'
-import { recordLabel, restoredFromVersionBadge } from '../utils/meta-record-labels'
+import { inactivePersonDisplay, recordLabel, restoredFromVersionBadge } from '../utils/meta-record-labels'
 import { formatFieldDisplay, pickRecordTitle } from '../utils/field-display'
 import type { HistoryChange, LinkedRecordSummary, MetaField, PersonSummary } from '../types'
 
@@ -78,6 +78,17 @@ const props = defineProps<{
    *  layer-3 field_permissions), so it carries only names the actor may see — the FE never re-derives the
    *  mask (the #4007 footgun). Active-table rows still resolve via `fields`; both sources are masked. */
   fieldNames?: Record<string, Record<string, string>>
+  /**
+   * Person before-side name resolution (batch-detail payload `HistoryBatchDetail.personNames`). The grid's
+   * `personSummaries` cache describes the record's CURRENT cell, so a person REMOVED by this change is not
+   * in it and used to render as a raw userId. This server-resolved directory map covers BOTH sides.
+   */
+  personNames?: Record<string, { display: string; inactive?: boolean }>
+  /**
+   * all-tables: server-masked field TYPES for sheets other than the active one (`props.fields` only carries
+   * the active sheet). Without this a cross-table person diff rendered as raw `["u_123"]` JSON.
+   */
+  fieldTypes?: Record<string, Record<string, string>>
   /** Reuses the caller's own action-label map (kept as a single source of truth in HistoryCenterModal.vue —
    *  this is prop-drilling, not a shared-module extraction, per the AI-fields S1 design-lock's constraint
    *  on `sourceLabel` NOT applying here since this is a distinct map (per-change action, not source)). */
@@ -157,14 +168,65 @@ function linkSummariesForSide(c: HistoryChange, fieldId: string, v: unknown): Li
   const matched = v.map((id) => byId.get(String(id)))
   return matched.every((s): s is LinkedRecordSummary => s !== undefined) ? matched : null
 }
+// Person sides. UNLIKE link (above), formatFieldDisplay maps person summaries PER ID (`byId.get(id) || id`)
+// rather than rendering them verbatim — so person has no "both sides show the same name list" bug and needs
+// no value-order filtering. The real gap is different: the grid's `personSummaries` cache describes the
+// record's CURRENT cell, so a person REMOVED by this change (in `before`, gone from `after`) is NOT cached
+// and rendered as a raw userId — "who was removed" was unreadable.
+//
+// Priority per id: server `personNames` (covers BOTH sides, incl. removed people) → grid cell cache →
+// raw id (formatFieldDisplay's own final fallback). Built from THIS side's ids, so each side resolves its own.
+function personSummariesForSide(c: HistoryChange, fieldId: string, v: unknown): PersonSummary[] | null {
+  const cached = props.personSummaries?.[c.recordId]?.[fieldId] ?? null
+  const dir = props.personNames
+  if (!dir) return cached // no server map (older payload) → legacy behavior exactly
+  // Dirty-value filtering: a person value is `userId[]`. A stored value can be dirty (a legacy object, a
+  // number, null). `v.map(String)` would render an object as the literal "[object Object]" — so accept ONLY
+  // non-empty strings and drop the rest, rather than stringifying garbage into the UI.
+  const ids = (Array.isArray(v) ? v : v === null || v === undefined ? [] : [v])
+    .filter((id): id is string => typeof id === 'string' && id.trim().length > 0)
+  if (ids.length === 0) return cached
+  const byIdCached = new Map((cached ?? []).map((s) => [s.id, s]))
+  return ids.map((id) => {
+    const entry = dir[id]
+    if (entry) {
+      // OD-P2: a deactivated person stays visible and MARKED. formatFieldDisplay renders person summaries
+      // as bare `display` strings (it ignores `inactive`), so the marker is applied here — in the diff's own
+      // summaries — rather than by changing that shared formatter for the grid/drawer too.
+      const display = entry.inactive ? inactivePersonDisplay(entry.display, isZh.value) : entry.display
+      return { id, display, ...(entry.inactive ? { inactive: true } : {}) }
+    }
+    return byIdCached.get(id) ?? { id, display: id }
+  })
+}
+// Resolve the field for rendering. `props.fields` is the ACTIVE sheet only, so in all-tables mode a row on
+// another sheet found nothing and fell back to raw JSON. Fall back to the server's masked fieldTypes/
+// fieldNames maps, which describe exactly the fields whose values the projection already emitted.
+//
+// The synthesized field carries NO `property` — we only have the masked id→name/type maps, not the
+// per-field config. `formatFieldDisplay`'s property-dependent branches then silently take their DEFAULTS,
+// which FABRICATES values on an audit surface: a USD `currency` (property.code='USD') renders as
+// "¥1,000.00", and a `rating` with property.max=10 renders 8 as "★★★★★" (capped at the default max of 5).
+// So the cross-sheet fallback is restricted to `person`, the ONE type the D-2-era lock authorizes
+// `fieldTypes` for (…person-before-side-name-resolution… §0.1: fieldNames fixes the LABEL, fieldTypes
+// fixes the VALUE — for person). Every other cross-sheet type falls through to `formatDiffValue`, i.e.
+// the honest raw value. Rendering a value we cannot faithfully format is worse than not formatting it.
+function fieldForDiff(c: HistoryChange, fieldId: string): { id: string; name: string; type: string } | null {
+  const active = props.fields?.find((x) => x.id === fieldId)
+  if (active && typeof active.type === 'string') return active as { id: string; name: string; type: string }
+  const type = props.fieldTypes?.[c.sheetId]?.[fieldId]
+  if (!type) return null // no masked type ⇒ cannot render type-aware; caller falls back to plain text
+  if (type !== 'person') return null // property-less ⇒ would fabricate; see the note above
+  return { id: fieldId, name: props.fieldNames?.[c.sheetId]?.[fieldId] ?? fieldId, type }
+}
 function formatDiffValueFor(c: HistoryChange, fieldId: string, v: unknown): string {
-  const f = props.fields?.find((x) => x.id === fieldId)
+  const f = fieldForDiff(c, fieldId)
   if (!f || typeof f.type !== 'string') return formatDiffValue(v)
   return formatFieldDisplay({
     field: f as MetaField,
     value: v,
     linkSummaries: f.type === 'link' ? linkSummariesForSide(c, fieldId, v) : null,
-    personSummaries: props.personSummaries?.[c.recordId]?.[fieldId] ?? null,
+    personSummaries: f.type === 'person' ? personSummariesForSide(c, fieldId, v) : (props.personSummaries?.[c.recordId]?.[fieldId] ?? null),
     isZh: isZh.value,
   })
 }
