@@ -77,9 +77,10 @@ export const GLOBAL_HISTORY_FLAG_MANIFEST = Object.freeze([
     conflictsWith: [],
     danger: 'medium',
     purpose:
-      'T9-W Tier 4 (U-4): undelete recreates a deleted field/view definition from its `before` revision. Definition-only — values/links/auto-number state are NOT restored.',
-    // source: packages/core-backend/src/routes/univer-meta.ts:8611 (preview), :8861 (execute) — `!== 'true'` guard
-    source: 'packages/core-backend/src/routes/univer-meta.ts:8611,8861',
+      'T9-W Tier 4 (U-4): undelete recreates a deleted field/view definition from its `before` revision, AND — when a matching tombstone set exists (MULTITABLE_TOMBSTONE_CAPTURE_ENABLED was on at delete time) — rehydrates column values (only into records that do NOT already have the key, never clobbering a value written after the recreate), inbound link edges (only between two currently-alive records), and the auto-number sequence next_value. Degrades to DEFINITION-ONLY (values/links/auto-number NOT restored) ONLY for pre-capture deletes or expired tombstones (recreateFieldFromConfig, C1 forward-only). The earlier "definition-only, values not restored" framing was stale.',
+    // source: packages/core-backend/src/routes/univer-meta.ts:8611 (preview), :8861 (execute) — `!== 'true'` guard;
+    //         :6469 recreateFieldFromConfig (tombstone-gated values/links/auto-number rehydration, else definition-only)
+    source: 'packages/core-backend/src/routes/univer-meta.ts:8611,8861,6469',
   },
   {
     key: 'MULTITABLE_ENABLE_PERMISSION_REVERT',
@@ -204,6 +205,19 @@ export const GLOBAL_HISTORY_FLAG_MANIFEST = Object.freeze([
     source: 'packages/core-backend/src/multitable/tombstone-capture.ts:42,48-51',
   },
   {
+    key: 'MULTITABLE_SHEET_REVERT_MAX_RECORDS',
+    type: 'numeric',
+    activationValue: 'numeric (default 5000; any positive integer overrides, else the default)',
+    dependsOn: [],
+    conflictsWith: [],
+    danger: 'medium',
+    purpose:
+      'Fail-closed record-count ceiling for whole-sheet revert/reset. Bounds how many records a single revert/reset/undelete may touch — the field-retype revert (incl. lossy), sheet-wide revert, and PIT reset paths REFUSE (not partially apply) when the computed record count exceeds it (D3/PIT-6 fail-closed before the full scan; undelete cannot bypass it). Numeric, default 5000 when unset/non-positive. A too-low value silently blocks legitimate large reverts; an operator running a large-sheet recovery must raise it deliberately.',
+    // source: packages/core-backend/src/multitable/restore-caps.ts:6 (SHEET_REVERT_DEFAULT_MAX_RECORDS=5000), :8-10 (resolveSheetRevertMaxRecords);
+    //         consumed at packages/core-backend/src/routes/univer-meta.ts:8680,8969,9918,9933,9980 (retype-revert + sheet-revert/reset ceilings)
+    source: 'packages/core-backend/src/multitable/restore-caps.ts:6,8-10',
+  },
+  {
     key: 'MULTITABLE_SIDE_DOOR_DELETE_TRASH_ENABLED',
     type: 'boolean',
     activationValue: 'true',
@@ -222,7 +236,7 @@ export const GLOBAL_HISTORY_FLAG_MANIFEST = Object.freeze([
         kind: 'requires',
         id: 'side-door-without-capture',
         description:
-          "MULTITABLE_SIDE_DOOR_DELETE_TRASH_ENABLED is active but MULTITABLE_TOMBSTONE_CAPTURE_ENABLED is not — isSideDoorTombstoneCaptureEnabled() will be false, so side-door deletes write trash rows with ZERO inbound-edge capture. Restored records from this state report inboundEdgesRecoverable:false. Not a code-level error, but a silent recoverability gap an operator opting into D-2 almost certainly did not intend.",
+          "OPERATOR ROLLOUT-POLICY STOP / degraded recoverability (NOT a code-illegal combination): MULTITABLE_SIDE_DOOR_DELETE_TRASH_ENABLED is active while MULTITABLE_TOMBSTONE_CAPTURE_ENABLED is not. The code ALLOWS this — the trash row still writes and the record stays restorable — but isSideDoorTombstoneCaptureEnabled() is false, so inbound-edge capture is DEGRADED (zero inbound tombstones; restored records report inboundEdgesRecoverable:false). --strict STOPs here by rollout policy so an operator does not half-enable D-2, not because the code forbids the combination.",
       },
     ],
   },

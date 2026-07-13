@@ -9,7 +9,10 @@
  */
 
 import assert from 'node:assert/strict'
+import { execSync } from 'node:child_process'
+import path from 'node:path'
 import test from 'node:test'
+import { fileURLToPath } from 'node:url'
 
 import {
   GLOBAL_HISTORY_FLAG_BY_KEY,
@@ -24,32 +27,74 @@ function violationIds(flags) {
   return evaluateFlagRules(flags).map((v) => v.id)
 }
 
-test('manifest lists all 18 Global History line flags named in the R12-C brief', () => {
-  const expected = [
-    'MULTITABLE_ENABLE_SHEET_CONFIG_REVERT',
-    'MULTITABLE_ENABLE_CONFIG_UNCREATE',
-    'MULTITABLE_ENABLE_CONFIG_UNDELETE',
-    'MULTITABLE_ENABLE_PERMISSION_REVERT',
-    'MULTITABLE_ENABLE_FIELD_RETYPE_REVERT',
-    'MULTITABLE_ENABLE_FIELD_RETYPE_REVERT_LOSSY',
-    'MULTITABLE_ENABLE_PIT_RESET',
-    'MULTITABLE_ENABLE_PIT_UNDELETE',
-    'MULTITABLE_ENABLE_RECORD_UNDELETE_INBOUND',
-    'MULTITABLE_TOMBSTONE_CAPTURE_ENABLED',
-    'MULTITABLE_TOMBSTONE_CAPTURE_MAX_ROWS',
-    'MULTITABLE_SIDE_DOOR_DELETE_TRASH_ENABLED',
-    'MULTITABLE_META_REVISION_RETENTION_ENABLED',
-    'MULTITABLE_META_REVISION_RETENTION_POLICY',
-    'MULTITABLE_META_REVISION_RETENTION_KEEP_N',
-    'MULTITABLE_META_REVISION_RETENTION_DAYS',
-    'MULTITABLE_META_REVISION_RETENTION_BATCH',
-    'MULTITABLE_META_REVISION_RETENTION_INTERVAL_MS',
-  ]
-  for (const key of expected) {
-    assert.ok(GLOBAL_HISTORY_FLAG_BY_KEY[key], `manifest is missing ${key}`)
+// NON-TAUTOLOGICAL completeness: derive the flag set from SOURCE (grep packages/core-backend/src), NOT from
+// a hand-copied list. A flag READ in source but MISSING from the manifest fails here — this is exactly how
+// the 19th flag (MULTITABLE_SHEET_REVERT_MAX_RECORDS) slipped through the earlier hardcoded-list test, which
+// asserted the manifest against a copy of itself and stayed green while missing it (owner REQUEST-CHANGES).
+// The denylist below is the ONLY reviewed part: it names the NON-Global-History flag families. A NEW flag
+// added to source that matches neither the manifest nor the denylist FAILS this test and forces a human to
+// categorize it (→ manifest if it's a recovery/history flag, → denylist with a reason if it's out of scope).
+const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..')
+
+const NON_GH_PREFIXES = [
+  'MULTITABLE_AI_', // AI fields / bulk-fill / ledger / tenant caps
+  'MULTITABLE_ATTACHMENT_', // attachment storage / cleanup / blob retention
+  'MULTITABLE_EMAIL_', // email transport / SMTP / smoke
+]
+const NON_GH_EXACT = new Set([
+  'MULTITABLE_AGGREGATE_MAX_ROWS', // read-aggregation row cap
+  'MULTITABLE_CAPABILITY_KEYS', // capability registry
+  'MULTITABLE_ENABLE_CROSSBASE_MIRROR_WRITE', // cross-base mirror write (separate line)
+  'MULTITABLE_ENABLE_PERSONAL_VIEWS', // personal views (separate line)
+  'MULTITABLE_FIELD_INPUT_TYPES', // field-input-type registry
+  'MULTITABLE_FIELD_TYPES', // field-type registry
+  'MULTITABLE_FORMULA_BULK_RECOMPUTE_MAX_ROWS', // formula recompute cap
+  'MULTITABLE_OBJECT_SCOPE_FORBIDDEN', // scope guards
+  'MULTITABLE_PROJECT_NAMESPACE_FORBIDDEN',
+  'MULTITABLE_SHARE_PERMISSIONS', // share permission registry
+  'MULTITABLE_SHEET_SCOPE_FORBIDDEN',
+])
+
+function globalHistoryFlagsInSource() {
+  const srcDir = path.join(REPO_ROOT, 'packages/core-backend/src')
+  let out = ''
+  try {
+    out = execSync(`grep -rhoE 'MULTITABLE_[A-Z_0-9]+' ${srcDir} --include='*.ts'`, {
+      encoding: 'utf8',
+      maxBuffer: 64 * 1024 * 1024,
+    })
+  } catch (err) {
+    throw new Error(`could not grep MULTITABLE_ flags under ${srcDir}: ${err.message}`)
   }
-  assert.equal(GLOBAL_HISTORY_FLAG_KEYS.length, expected.length)
-  // every spec has a non-empty source citation — a rule with no citation is not verified
+  const tokens = [...new Set(out.split('\n').map((s) => s.trim()).filter(Boolean))]
+  return tokens
+    .filter((t) => !t.endsWith('_')) // drop concatenation-prefix artifacts (MULTITABLE_ENABLE_, ..._SMTP_)
+    .filter((t) => !NON_GH_PREFIXES.some((p) => t.startsWith(p)))
+    .filter((t) => !NON_GH_EXACT.has(t))
+    .sort()
+}
+
+test('completeness (source-derived, non-tautological): manifest covers every Global-History flag read in packages/core-backend/src', () => {
+  const sourceGH = globalHistoryFlagsInSource()
+  assert.ok(
+    sourceGH.length >= 19,
+    `expected >=19 Global-History flags derived from source, got ${sourceGH.length} — the denylist is too broad or grep broke`,
+  )
+  const manifestKeys = new Set(GLOBAL_HISTORY_FLAG_KEYS)
+  const missing = sourceGH.filter((f) => !manifestKeys.has(f))
+  assert.deepEqual(
+    missing,
+    [],
+    `source reads Global-History flags MISSING from the manifest — add each to global-history-flag-manifest.mjs (or, if genuinely out of scope, to NON_GH_PREFIXES/NON_GH_EXACT with a reason): ${missing.join(', ')}`,
+  )
+  const sourceSet = new Set(sourceGH)
+  const phantom = GLOBAL_HISTORY_FLAG_KEYS.filter((k) => !sourceSet.has(k))
+  assert.deepEqual(
+    phantom,
+    [],
+    `manifest lists flags NOT read anywhere in packages/core-backend/src (stale or typo'd key): ${phantom.join(', ')}`,
+  )
+  // every spec carries a non-empty source citation — a rule with no citation is not verified
   for (const spec of GLOBAL_HISTORY_FLAG_MANIFEST) {
     assert.ok(spec.source && spec.source.length > 0, `${spec.key} has no source citation`)
   }
