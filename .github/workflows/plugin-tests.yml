@@ -77,6 +77,10 @@ jobs:
             scripts/ops/onprem-windows-system-hardening.test.mjs \
             scripts/ops/multitable-onprem-package-no-node-modules.test.mjs
 
+      - name: Run DingTalk OAuth-stability metrics-auth contract test (DT-CLOSE-01)
+        run: |
+          node --test scripts/ops/dingtalk-oauth-stability-metrics-auth-contract.test.mjs
+
   test:
     runs-on: ubuntu-latest
 
