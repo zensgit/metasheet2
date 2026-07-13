@@ -163,10 +163,6 @@ const PENDING_REVISION_SITES: ReadonlyArray<{ file: string; line: number; lane: 
   { file: 'routes/univer-meta.ts', line: 6527, lane: 'follow-up (field-undelete rehydration, owner-ruled MUST-WRITE, no PR yet)' },
 ]
 
-function findPendingEntry(file: string, line: number): { file: string; line: number; lane: string } | undefined {
-  return PENDING_REVISION_SITES.find((p) => p.file === file && p.line === line)
-}
-
 /**
  * The acceptance predicate every site is judged by. Exported as a plain function (not a class/closure
  * over module state) so the self-tests below can call it directly against synthetic sites and a
