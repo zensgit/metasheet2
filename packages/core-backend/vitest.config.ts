@@ -57,6 +57,10 @@ export default defineConfig({
       // reclaims a live long run. DATABASE_URL-gated; excluded here so the no-DB job cannot
       // skip-green it, and wired as a WHOLE FILE into the approval real-DB step.
       'tests/integration/directory-sync-run-lease.db.test.ts',
+      // org-transfer Phase 1 §12.1: real-DB proof that corp_id is immutable once set (incl. the first-sync
+      // window). DATABASE_URL-gated; excluded from the no-DB default job so it cannot skip-green, and wired
+      // as a WHOLE FILE into the `Run approval real-DB integration` step in plugin-tests.yml.
+      'tests/integration/directory-tenant-change-immutable.db.test.ts',
       // R1-L4 syncDirectoryIntegration orchestration harness (real DB): drives the REAL sync
       // end-to-end (mocked DingTalk pull, real Postgres apply) to cover the CALL SITES the
       // per-helper goldens cannot — heartbeat lifecycle/interval-cleared proof, H02 admission
