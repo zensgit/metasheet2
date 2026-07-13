@@ -422,7 +422,7 @@ function getColumnsCount(): number {
 .meta-gallery__card-title { font-size: 14px; font-weight: 600; color: #333; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .meta-gallery__comment-btn { display: inline-flex; align-items: center; justify-content: center; min-height: 28px; padding: 2px 8px; border: 1px solid #d8e1ee; border-radius: 999px; background: #fff; cursor: pointer; color: #64748b; flex-shrink: 0; }
 .meta-gallery__comment-btn:hover { border-color: #93c5fd; background: #eff6ff; color: #2563eb; }
-.meta-gallery__comment-btn--active { border-color: #f59e0b; background: #fff7ed; color: #b45309; }
+.meta-gallery__comment-btn--active { border-color: var(--ms-color-comment-active-border); background: var(--ms-color-comment-active-bg); color: var(--ms-color-comment-active-text); }
 .meta-gallery__comment-btn--idle { border-color: #d8e1ee; background: #fff; color: #64748b; }
 .meta-gallery__card-body { display: flex; flex-direction: column; gap: 4px; }
 .meta-gallery__field { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; font-size: 12px; }
@@ -432,7 +432,7 @@ function getColumnsCount(): number {
 .meta-gallery__field-value--attachment { flex: 1; min-width: 0; white-space: normal; }
 .meta-gallery__field-comment-btn { display: inline-flex; align-items: center; justify-content: center; min-width: 28px; height: 24px; padding: 0 6px; border: 1px solid #d8e1ee; border-radius: 999px; background: #fff; cursor: pointer; color: #64748b; flex-shrink: 0; }
 .meta-gallery__field-comment-btn:hover { border-color: #93c5fd; background: #eff6ff; color: #2563eb; }
-.meta-gallery__field-comment-btn--active { border-color: #f59e0b; background: #fff7ed; color: #b45309; }
+.meta-gallery__field-comment-btn--active { border-color: var(--ms-color-comment-active-border); background: var(--ms-color-comment-active-bg); color: var(--ms-color-comment-active-text); }
 .meta-gallery__field-comment-btn--idle { border-color: #d8e1ee; background: #fff; color: #64748b; }
 .meta-gallery__empty { grid-column: 1 / -1; display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 48px; color: #999; }
 .meta-gallery__empty-icon { font-size: 36px; opacity: 0.5; margin-bottom: 8px; }

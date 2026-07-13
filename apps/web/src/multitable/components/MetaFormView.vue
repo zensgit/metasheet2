@@ -936,7 +936,7 @@ function isSameFormValue(left: unknown, right: unknown): boolean {
 .meta-form-view__label { display: block; font-size: 13px; font-weight: 500; color: #333; }
 .meta-form-view__comment-anchor { display: inline-flex; align-items: center; justify-content: center; min-width: 28px; height: 24px; padding: 0 6px; border: 1px solid #d8e1ee; border-radius: 999px; background: #fff; cursor: pointer; color: #64748b; }
 .meta-form-view__comment-anchor:hover { border-color: #93c5fd; background: #eff6ff; color: #2563eb; }
-.meta-form-view__comment-anchor--active { border-color: #f59e0b; background: #fff7ed; color: #b45309; }
+.meta-form-view__comment-anchor--active { border-color: var(--ms-color-comment-active-border); background: var(--ms-color-comment-active-bg); color: var(--ms-color-comment-active-text); }
 .meta-form-view__comment-anchor--idle { border-color: #d8e1ee; background: #fff; color: #64748b; }
 .meta-form-view__input { width: 100%; padding: 6px 10px; border: 1px solid #ddd; border-radius: 4px; font-size: 13px; }
 .meta-form-view__input--multi { min-height: 110px; }
