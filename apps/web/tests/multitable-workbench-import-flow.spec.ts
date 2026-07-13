@@ -92,8 +92,8 @@ vi.mock('../src/multitable/composables/useMultitableSheetRealtime', () => ({
   useMultitableSheetRealtime: vi.fn(),
 }))
 
-vi.mock('../src/multitable/components/MetaViewTabBar.vue', () => ({
-  default: stubComponent('MetaViewTabBar'),
+vi.mock('../src/multitable/components/MetaSheetViewRail.vue', () => ({
+  default: stubComponent('MetaSheetViewRail'),
 }))
 
 vi.mock('../src/multitable/components/MetaToolbar.vue', () => ({
