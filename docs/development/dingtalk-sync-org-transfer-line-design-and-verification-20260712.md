@@ -18,6 +18,32 @@ lives in (all now **on `main`**):
 - `docs/research/dingtalk-corp-switch-assessment-20260708.md` **(Rev 5)** — the assessment
   (#3941 + post-#4181 errata #4221).
 
+> **Erratum (2026-07-13 — DT-CLOSE-05).** This MD went stale within the same day it landed.
+> Corrections, no history rewrite (pattern per #4221):
+> - **#159** (deploy-host disk) — **CLOSED**. Storage-health recovery confirmed
+>   (`df_used_pct=39`, run `29206256980`). The Wave-1 UAT deploy-host blocker is cleared;
+>   the deploy + U1–U13 evidence-pack execution itself is **still not done** — only its
+>   infra precondition is.
+> - **#4218** (snapshot-protection CI wiring) — **MERGED** `f0ce863ea`. No longer "disarmed,
+>   awaiting an owner decision."
+> - **#4228** (re-enable `views`/`view_states` + snapshot-cluster migrations in all 5 CI
+>   exclude lists — the owner's `MIGRATION_EXCLUDE` ruling, executed as its own PR first,
+>   per this doc's own §3 recommendation) — **MERGED** `4157205ce`.
+> - **#4176** (planning-only investigation of the exclusion cluster) — superseded by
+>   #4228's execution; **recommend close**, no residual action on this line.
+> - Reaffirmed: this line is **two separate milestones** (§1), never described together as
+>   "钉钉线收官" (whole-line done). **DingTalk Sync Hardening v1** (Waves 0–2) has landed
+>   code for every hardening ticket and is now at the **运行态收官** (operational-closeout)
+>   stage — tracked by the **DT-CLOSE-0x** ticket set (this errata is DT-CLOSE-05; see also
+>   DT-CLOSE-03 `dingtalk-hardening-real-uat-evidence-pack-20260713.md` and DT-CLOSE-04
+>   `dingtalk-hardening-switch-ruling-ledger-20260713.md`) — it is **NOT done**.
+>   **Canonical Org & Provider Transfer v1** (Waves 3–4) remains a **separate** milestone:
+>   its design is committed (#4215, #3944 Rev 3) but **core implementation has not
+>   started**. Do not conflate the two.
+>
+> The inline text in §1, §3, and §8 below is also corrected in place, so a partial read does
+> not land on a stale claim either.
+
 ## 0. Honest headline
 
 The DingTalk hardening tickets (17/17 H/OPS/PERF) and their follow-ups are already on
@@ -29,6 +55,13 @@ from real-env UAT onward is owner/ops-gated or depends on a staging proof this e
 cannot produce — it is sequenced here, not force-built. **The product line itself (Waves
 1–5) is NOT done; what is done is Wave 0.**
 
+This still holds after the 2026-07-13 errata above: **DingTalk Sync Hardening v1** (Waves
+0–2) and **Canonical Org & Provider Transfer v1** (Waves 3–4) are tracked and reported as
+**two separate milestones**, and neither is complete. Hardening v1 is code-complete but at
+the **运行态收官** (operational-closeout) stage — Wave 1 real-env UAT and Wave 2 switch
+closeout, tracked as the **DT-CLOSE-0x** ticket set — not "done." Transfer v1 remains
+design-only; core implementation has not started. Never collapse this into "钉钉线收官."
+
 ## 1. Two milestones, six waves
 
 Per owner review (2026-07-12), the line splits into two formal milestones:
@@ -39,7 +72,7 @@ Per owner review (2026-07-12), the line splits into two formal milestones:
 | Wave | Work | Done-gate | State |
 | --- | --- | --- | --- |
 | **0 — stop the bleeding** | fix/disarm **#4181** (corp_id immutable); rebase+merge **#4171** (corp-anchor UAT probe); refresh **#3941** to as-built; revise **#3944 → Rev 3**; commit the local-org plan | no OPEN P1/P2; docs have no dead refs / stale status | ✅ **CLOSED** — all landed with owner APPROVE at each step; real merge SHAs in §3 |
-| 1 — real-env UAT | resolve deploy-host disk (#159); deploy the exact main SHA; run default-off smoke + interactive-card **U1–U13** | a real deploy of current main + evidence pack (time, SHA, result, rollback point) | **owner/ops** — sandbox cannot reach the deploy host |
+| 1 — real-env UAT | ~~resolve deploy-host disk~~ (**#159, CLOSED** — done); deploy the exact main SHA; run default-off smoke + interactive-card **U1–U13** | a real deploy of current main + evidence pack (time, SHA, result, rollback point) | **owner/ops** — sandbox cannot reach the deploy host |
 | 2 — switch closeout | per-switch ruling for deprovision / primary-department / OAuth shared-state / retention / alert-webhook | each switch "verified-enabled" or "explicitly-deferred", never an unowned default-off | **owner** — see §6 |
 | 3 — local org substrate | `provider='local'` integration; editable departments/memberships; external-department binding; explicit routing policy (by org+purpose, not array[0]); normalized manager relation | local department IDs are the stable anchor; DingTalk disappearing does not delete the local org | **design committed** this session; impl gated |
 | 4 — org transfer | transfer/decision tables; source freeze; dry-run; two-corp proof; atomic user rebind; group rebind/drop; admin UI; never a direct corp_id edit | resumable, idempotent, auditable, reversible | **design Rev 3**; impl gated on design merge + staging proof |
@@ -84,11 +117,15 @@ verdict (APPROVE / best-of-both ruling / CHANGES_REQUESTED→fix→land):
 
 **Process note (for the record):** two Claude sessions worked this line in parallel and
 collided on #3941/#3944. Neither clobbered the other; the owner ruled best-of-both, which is
-what merged. The one Wave-0-adjacent item still open is the **snapshot-protection CI wiring
-(#4218)** — disarmed, blocked on an owner decision about the CI test-DB's
-`MIGRATION_EXCLUDE` (the suite needs `snapshots.tags` / `protection_rules` /
-`change_management` tables whose migrations that DB skips); it belongs to the security line,
-not this one.
+what merged. The one Wave-0-adjacent item that was still open, **snapshot-protection CI
+wiring (#4218)**, is now resolved (2026-07-13 errata, DT-CLOSE-05): the owner's
+`MIGRATION_EXCLUDE` decision landed as its own verified PR first — **#4228** (`4157205ce`)
+re-enabled the `views` / `view_states` + snapshot-cluster migrations in all 5 CI exclude
+lists — and then **#4218** (`f0ce863ea`) merged, wiring the snapshot-protection E2E into the
+Node 20 real-DB lane and closing the false-green (21/21 positive control). **#4176** (the
+planning-only investigation issue for the exclusion cluster) is superseded by #4228's
+execution and is recommended for closure. This item belonged to the security line, not this
+one, and is recorded here only because it was Wave-0-adjacent.
 
 ## 4. Design — the three-layer model
 
@@ -146,7 +183,7 @@ set and same-corp resend pass; a genuine org change must go through the Wave 4 t
 
 | Item | Why not verified now |
 | --- | --- |
-| Real-env UAT U1–U13 (Wave 1) | needs a real deploy of the exact main SHA on the deploy host; sandbox cannot reach it |
+| Real-env UAT U1–U13 (Wave 1) | needs a real deploy of the exact main SHA on the deploy host; sandbox cannot reach it — execution scaffold: `dingtalk-hardening-real-uat-evidence-pack-20260713.md` (DT-CLOSE-03, blank until owner/ops fills it in) |
 | Two-corp coexistence proof (Wave 4 gate) | needs a staging env + two real DingTalk corps; the DB-level collision *mechanism* can be shown, the production proof cannot |
 | Local-org substrate tests (Wave 3) | substrate not built; test matrix specified in the local-org plan §13 |
 | Transfer engine tests (Wave 4) | engine not built; test outlines in the transfer plan §9.4/§10.4 |
@@ -157,6 +194,10 @@ increment must produce (real-DB parity, archive-not-delete, stale-binding-not-in
 atomic single-transaction rebind, etc.). Those are acceptance criteria, not results.
 
 ## 6. Switch decisions (owner guidance — all still owner-gated)
+
+> Full ledger with current default, evidence-required-to-flip, rollback action and an
+> owner/负责人 placeholder per switch: `dingtalk-hardening-switch-ruling-ledger-20260713.md`
+> (DT-CLOSE-04). The summary below is unchanged; the ledger is the executable version.
 
 - `DIRECTORY_DEPROVISION_ENABLED` — stays **off** until audited reactivation/rollback +
   real-data preview + a small canary.
@@ -184,16 +225,20 @@ atomic single-transaction rebind, etc.). Those are acceptance criteria, not resu
 
 ## 8. What remains + who owns it (Wave 0 closed; everything below is Waves 1–5)
 
-- **Wave 1** — ops: deploy-host disk (#159) + a real deploy of the exact main SHA + the
-  U1–U13 evidence pack.
+- **Wave 1** — ops: deploy-host disk (**#159, CLOSED 2026-07-12** — storage-health recovery
+  confirmed, the infra blocker is cleared) + a real deploy of the exact main SHA + the
+  U1–U13 evidence pack (scaffold ready: DT-CLOSE-03). **The deploy + UAT execution itself is
+  still not done** — only its precondition is.
 - **Wave 2** — owner: resolve each switch in §6 to "verified-enabled" or
-  "explicitly-deferred".
+  "explicitly-deferred" (ledger ready: DT-CLOSE-04).
 - **Wave 3** — a per-phase go to start the local-org substrate impl; the design (#4215) is
   landed and its three schema questions are resolved.
 - **Wave 4** — gated on the Wave 3 substrate + the staging two-corp coexistence proof; the
   design (#3944 Rev 3) is landed.
 - **Wave 5** — only on a named second-provider customer case.
-- **#4218 (snapshot-protection CI wiring; security line)** — disarmed, awaiting the owner's
-  ruling on the CI test-DB `MIGRATION_EXCLUDE` (un-exclude the 3 snapshot/protection/
-  change-management migrations inside #4218, or land the un-exclusion as its own verified
-  PR first).
+- **#4218 (snapshot-protection CI wiring; security line) — MERGED** `f0ce863ea`. **#4228**
+  (the owner's `MIGRATION_EXCLUDE` ruling — re-enable `views`/`view_states` +
+  snapshot-cluster migrations in all 5 CI exclude lists) — **MERGED** `4157205ce`, landed as
+  its own verified PR first, exactly as this doc originally recommended. False-green closed,
+  21/21 positive control. **#4176** (the planning-only version of the same investigation) is
+  superseded and **recommended for closure** — no residual action on this line.
