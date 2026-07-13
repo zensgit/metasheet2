@@ -97,6 +97,7 @@ export async function backfillAutoNumberField(
   // SELECT ... FOR UPDATE is required.
   const overwrite = opts?.overwrite === true
   // lock-exempt: system auto-number backfill — system-derived sequence value, no user actor.
+  // revision-exempt: auto-number backfill; jsonb_set of ROW_NUMBER() seq under advisory lock; no version bump.
   const updated = await query(
     `UPDATE meta_records mr
      SET data = jsonb_set(

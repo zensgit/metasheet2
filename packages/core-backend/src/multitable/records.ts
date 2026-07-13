@@ -503,6 +503,7 @@ export async function patchRecord(
   }
 
   // lock-guarded: plugin-SDK patchRecord (M1) — guardRecordNotLockedForPlugin(actor=null) rejected above.
+  // revision-pending: audit A2/OD-6 lane B — writes no revision (PIT-poisoning, reproduced); fix in #4216.
   const updated = await query(
     `UPDATE meta_records
      SET data = $1::jsonb, version = version + 1, updated_at = now()
@@ -542,6 +543,7 @@ export async function createRecord(
   }))))
 
   const recordId = `rec_${randomUUID()}`
+  // revision-pending: audit A5/OD-6 lane B — plugin-SDK createRecord writes no revision; fix in #4216.
   const inserted = await query(
     `INSERT INTO meta_records (id, sheet_id, data, version)
      VALUES ($1, $2, $3::jsonb, 1)
@@ -680,6 +682,7 @@ async function deleteRecordWithRecoverability(
   // before EITHER branch is dispatched, so this DELETE carries the identical lock disposition as the
   // flag-off one below.
   // lock-guarded: plugin-SDK deleteRecord, D-2 flag-on path (M1) — guarded in `deleteRecord` above.
+  // revision-emitted: delete (D-2 flag-on) — recordRecordRevision written above in the same txn (rev@650).
   const deleted = await query(
     `DELETE FROM meta_records
      WHERE id = $1 AND sheet_id = $2
@@ -751,6 +754,7 @@ export async function deleteRecord(
   await query('DELETE FROM meta_links WHERE record_id = $1 OR foreign_record_id = $1', [input.recordId])
 
   // lock-guarded: plugin-SDK deleteRecord (M1) — guardRecordNotLockedForPlugin(actor=null) rejected above.
+  // revision-emitted: delete (D-1 flag-off) — recordRecordRevision written below, after the DELETE (rev@771).
   const deleted = await query(
     `DELETE FROM meta_records
      WHERE id = $1 AND sheet_id = $2

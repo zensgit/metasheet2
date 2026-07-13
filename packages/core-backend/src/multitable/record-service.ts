@@ -675,6 +675,7 @@ export class RecordService {
         type: field.type,
         property: field.property,
       }))))
+      // revision-emitted: create — recordRecordRevision below in the same txn (rev@706).
       const inserted = await query(
         `INSERT INTO meta_records (id, sheet_id, data, version, created_by, modified_by)
          VALUES ($1, $2, $3::jsonb, 1, $4, $4)
@@ -889,6 +890,7 @@ export class RecordService {
       }
 
       // lock-guarded: single DELETE — ensureRecordNotLocked enforced above (rejects before this txn).
+      // revision-emitted: delete — recordRecordRevision written above in the same txn (rev@845).
       await query('DELETE FROM meta_records WHERE id = $1', [recordId])
 
       // OAPI-2b §6: committed token-delete audit INSIDE the (soft-)delete txn (fail-closed). No-op for session.
@@ -1083,6 +1085,7 @@ export class RecordService {
       }
       let inserted: { rows: Array<{ version?: number }> }
       try {
+        // revision-emitted: create (trash restore) — recordRecordRevision below in the same txn (rev@1125).
         inserted = await query(
           `INSERT INTO meta_records (id, sheet_id, data, version, created_by, modified_by, created_at, updated_at)
            VALUES ($1, $2, $3::jsonb, 1, $4, $5, COALESCE($6, now()), COALESCE($7, now()))
@@ -1381,6 +1384,7 @@ export class RecordService {
 
       if (Object.keys(patch).length > 0) {
         // lock-guarded: single PATCH — ensureRecordNotLocked enforced above in this txn.
+        // revision-emitted: update — recordRecordRevision below in the same txn (rev@1392).
         const updateRes = await query(
           `UPDATE meta_records
            SET data = data || $1::jsonb, updated_at = now(), version = version + 1, modified_by = $4

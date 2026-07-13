@@ -2956,6 +2956,7 @@ async function recalculateFormulaFields(
         }
         if (Object.keys(updates).length > 0) {
           // lock-exempt: system relation-aggregation materialization — derived value, no user actor (same posture as recalculateRecordFromData; a record lock is read-only to users, not system recompute).
+          // revision-exempt: relation-aggregation same-record materialization; no version bump; taint-skip.
           await query(
             'UPDATE meta_records SET data = data || $1::jsonb, updated_at = now() WHERE id = $2 AND sheet_id = $3',
             [JSON.stringify(updates), recordId, sheetId],
@@ -3852,6 +3853,7 @@ async function computeDependentLookupRollupRecords(
         }
         if (Object.keys(updates).length > 0) {
           // lock-exempt: system relation-aggregation fan-out materialization — derived value, no user actor (same posture as the same-record recompute write).
+          // revision-exempt: relation-aggregation fan-out materialization; no version bump; taint-skip.
           await query('UPDATE meta_records SET data = data || $1::jsonb, updated_at = now() WHERE id = $2 AND sheet_id = $3', [JSON.stringify(updates), recordId, sheetId])
           formulaDataByRecord.set(recordId, { ...(formulaDataByRecord.get(recordId) ?? {}), ...updates })
         }
@@ -5169,6 +5171,7 @@ async function ensurePeopleSheetPreset(query: QueryFn, baseId: string): Promise<
       }
       const existing = recordByUserId.get(user.id)
       if (!existing) {
+        // revision-exempt: system People-directory sync; mirror of `users`; regenerable, not user content.
         await query(
           `INSERT INTO meta_records (id, sheet_id, data, version)
            VALUES ($1, $2, $3::jsonb, 1)`,
@@ -5185,6 +5188,7 @@ async function ensurePeopleSheetPreset(query: QueryFn, baseId: string): Promise<
 
       if (changed) {
         // lock-exempt: internal people-directory sync — system sheet, not a user-facing record edit path.
+        // revision-exempt: system People-sheet sync; not a user-content edit (audit §2).
         await query(
           `UPDATE meta_records
            SET data = $1::jsonb, version = version + 1, updated_at = now()
@@ -5803,6 +5807,7 @@ async function createSeededSheet(args: { sheetId: string; name: string; descript
     }
 
     for (const record of records) {
+      // revision-exempt: seed/demo bootstrap; ON CONFLICT DO NOTHING; hard-coded, not user-authored.
       await query(
         `INSERT INTO meta_records (id, sheet_id, data, version)
          VALUES ($1, $2, $3::jsonb, $4)
@@ -6148,6 +6153,7 @@ async function dropFieldCascade(query: TxnQuery, opts: {
     if (!isUndefinedTableError(err, 'meta_links')) throw err
   }
   // lock-exempt: field-delete schema op — drops the deleted field's key sheet-wide; not a per-record user edit.
+  // revision-exempt: field-delete column strip; captured on the config channel (recordConfigRevision) + value/link tombstones; no per-record bump.
   await query('UPDATE meta_records SET data = data - $1 WHERE sheet_id = $2', [fieldId, sheetId])
   const shiftedDel = ((await query('UPDATE meta_fields SET "order" = "order" - 1 WHERE sheet_id = $1 AND "order" > $2 RETURNING id, "order"', [sheetId, order])) as any).rows as Array<{ id: string; order: number }>
   await recordFieldOrderShifts(query, sheetId, shiftedDel.map((r) => ({ id: String(r.id), newOrder: Number(r.order) })), -1, configBatchId, actorId)
@@ -6423,8 +6429,8 @@ async function applyLossyRetypeCellRewrite(query: TxnQuery, opts: {
   // and `jsonb_set(data, path, NULL)` returns NULL for the WHOLE `data` column — a dropped cell would wipe the record.
   // A single batched statement (never a per-row round trip), matching the tombstone-capture module's discipline.
   const payload = changed.map((c) => ({ record_id: c.recordId, value: c.after ?? null }))
-  // lock-exempt: 4c-1 lossy retype revert — schema op rewriting the reverted field's key sheet-wide under the
-  // config-restore canManageFields gate (mirrors the field-delete column strip / field-undelete rehydration);
+  // lock-exempt: 4c-1 lossy retype revert — schema op rewriting the reverted field's key sheet-wide under the config-restore canManageFields gate (mirrors the field-delete column strip / field-undelete rehydration);
+  // revision-emitted: one recordRecordRevision per changed cell, below in the same txn (rev@6454) — C5 history completeness.
   const rewritten = (await query(
     `UPDATE meta_records AS m
      SET data = jsonb_set(m.data, ARRAY[$2::text], COALESCE(item.value, 'null'::jsonb), true),
@@ -6515,8 +6521,8 @@ async function recreateFieldFromConfig(query: TxnQuery, opts: {
     // Values: only into records that do NOT already carry this key (never overwrite a value written after
     // this recreate — the recreate above just happened in THIS same transaction, so the only way a record
     // could already have the key is a value legitimately written since — this WHERE clause is the guard).
-    // lock-exempt: field-undelete schema op — rehydrates the recreated field's key sheet-wide (mirror of
-    // the field-delete drop at ~6116); not a per-record user edit, and NOT(data?key) never clobbers.
+    // lock-exempt: field-undelete schema op — rehydrates the recreated field's key sheet-wide (mirror of the field-delete drop at ~6116); not a per-record user edit, and NOT(data?key) never clobbers.
+    // revision-pending: owner-ruled MUST-WRITE (design-lock §0.5, not exempt); no lane PR yet — follow-up.
     await query(
       `UPDATE meta_records m
        SET data = data || jsonb_build_object($3::text, t.value)
@@ -10165,6 +10171,7 @@ export function univerMetaRouter(): Router {
               const occupied = await query('SELECT 1 FROM meta_records WHERE id = $1 FOR UPDATE', [r.recordId])
               if ((occupied.rows as unknown[]).length > 0) throw new RecordServiceRestoreConflictError(`Record id is occupied, cannot undelete: ${r.recordId}`)
               try {
+                // revision-emitted: create (PIT resurrect) — recordRecordRevision below in the same txn (rev@10178).
                 await query('INSERT INTO meta_records (id, sheet_id, data, version, created_by, modified_by, created_at, updated_at) VALUES ($1, $2, $3::jsonb, 1, $4, $4, now(), now())', [r.recordId, sheetId, JSON.stringify(r.snapshot), undeleteActorId])
               } catch (e) {
                 if ((e as { code?: string })?.code === '23505') throw new RecordServiceRestoreConflictError(`Record id is occupied, cannot undelete: ${r.recordId}`)
@@ -10391,6 +10398,7 @@ export function univerMetaRouter(): Router {
             }
             const updateRes = unsetIds.length > 0
               // lock-guarded: PIT Reset reverts in one transaction after ensureRecordNotLocked above.
+              // revision-emitted: update (unset+set) — recordRecordRevision below in the same txn (rev@10416).
               ? await query(
                   `UPDATE meta_records
                      SET data = (data - $5::text[]) || $1::jsonb, updated_at = now(), version = version + 1, modified_by = $4
@@ -10399,6 +10407,7 @@ export function univerMetaRouter(): Router {
                   [JSON.stringify(patch), sheetId, candidate.recordId, actorId, unsetIds],
                 )
               // lock-guarded: PIT Reset reverts in one transaction after ensureRecordNotLocked above.
+              // revision-emitted: update (set-only) — recordRecordRevision below in the same txn (rev@10416).
               : await query(
                   `UPDATE meta_records
                      SET data = data || $1::jsonb, updated_at = now(), version = version + 1, modified_by = $4
@@ -10525,6 +10534,7 @@ export function univerMetaRouter(): Router {
               )
             }
             // lock-guarded: PIT Reset deletes in the same transaction after ensureRecordNotLocked above.
+            // revision-emitted: delete — recordRecordRevision written above in the same txn (rev@10498).
             await query('DELETE FROM meta_records WHERE sheet_id = $1 AND id = $2', [sheetId, candidate.recordId])
             deletedRecordIds.push(candidate.recordId)
           }
@@ -12516,6 +12526,11 @@ export function univerMetaRouter(): Router {
       // OTHER sheets pointing to these records would DANGLE. Clean those inbound edges FIRST, in the SAME
       // transaction, before the records vanish (else the subquery can't find them) — atomic delete-edges+sheet.
       const del = await pool.transaction(async ({ query }) => {
+        // revision-exempt: records die via meta_sheets→meta_records ON DELETE CASCADE, tracked as
+        // config-channel #9 (OD-6 audit §1 row 9 / §4) — this record-revision guard does not reach it
+        // (there is no literal `DELETE FROM meta_records` here, the row loss is a DB-level FK cascade);
+        // it is a known structural residual routed to a future config-revision guard, not this one. See
+        // "known structural residual (out of scanner reach)" in multitable-revision-disposition-guard.guard.test.ts.
         await query('DELETE FROM meta_links WHERE foreign_record_id IN (SELECT id FROM meta_records WHERE sheet_id = $1)', [sheetId])
         return query('DELETE FROM meta_sheets WHERE id = $1', [sheetId])
       })
@@ -14419,6 +14434,7 @@ export function univerMetaRouter(): Router {
 
           if (Object.keys(patch).length > 0) {
             // lock-guarded: form-submit EDIT (B2) — ensureRecordNotLocked enforced just above.
+            // revision-pending: audit A1/OD-6 lane A (this is D-1c's own defect) — writes no revision; fix in #4219.
             const updateRes = await query(
               `UPDATE meta_records
                SET data = data || $1::jsonb, updated_at = now(), version = version + 1, modified_by = $4
@@ -14466,6 +14482,7 @@ export function univerMetaRouter(): Router {
         const latestFields = await loadFieldsForSheet(query, view.sheetId)
         Object.assign(patch, await allocateAutoNumberValues(query, view.sheetId, latestFields))
 
+        // revision-pending: audit A6/OD-6 lane A — form-submit CREATE writes no revision; fix in #4219.
         const insertRes = await query(
           `INSERT INTO meta_records (id, sheet_id, data, version, created_by, modified_by)
            VALUES ($1, $2, $3::jsonb, 1, $4, $4)
@@ -15689,6 +15706,7 @@ export function univerMetaRouter(): Router {
             const nextIds = currentIds.filter((id) => id !== attachmentId)
             if (nextIds.length !== currentIds.length) {
               // lock-guarded: attachment-delete record edit (B3) — ensureRecordNotLocked enforced before this txn.
+              // revision-pending: audit A8/OD-6 lane A — attachment-delete record edit writes no revision; fix in #4219.
               const updateRes = await query(
                 `UPDATE meta_records
                  SET data = data || $1::jsonb, updated_at = now(), version = version + 1, modified_by = $4
@@ -16257,6 +16275,7 @@ export function univerMetaRouter(): Router {
         }
         const lockedBy = actorId ?? access.userId
         // lock-mgmt: LOCK action — sets the lock columns (own canEditRecord authority above).
+        // revision-exempt: record lock — metadata-only (locked/locked_by/locked_at); no data column touched.
         await pool.query(
           `UPDATE meta_records SET locked = true, locked_by = $2, locked_at = NOW(), version = version + 1, updated_at = NOW()
            WHERE id = $1 AND sheet_id = $3`,
@@ -16271,6 +16290,7 @@ export function univerMetaRouter(): Router {
           return sendForbidden(res, 'Not allowed to unlock this record')
         }
         // lock-mgmt: UNLOCK action — clears the lock columns (own canUnlock authority above).
+        // revision-exempt: record unlock — metadata-only (locked/locked_by/locked_at); no data column touched.
         await pool.query(
           `UPDATE meta_records SET locked = false, locked_by = NULL, locked_at = NULL, version = version + 1, updated_at = NOW()
            WHERE id = $1 AND sheet_id = $2`,

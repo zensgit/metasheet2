@@ -2213,6 +2213,7 @@ export class AutomationExecutor {
       // xbase-write-gated: routes through evaluateCrossBaseWrite (gate computed above) — a cross-base
       // update is rejected before this UPDATE unless claim==truth + trigger-actor base-write.
       // lock-guarded: automation update_record (B1) — ensureRecordNotLocked enforced just above.
+      // revision-pending: audit A3/OD-6 lane C — automation update_record writes no revision; fix in #4220.
       await this.deps.queryFn(
         `UPDATE meta_records
          SET data = COALESCE(data, '{}'::jsonb) || $1::jsonb,
@@ -2406,6 +2407,7 @@ export class AutomationExecutor {
         // xbase-write-gated: routes through evaluateCrossBaseWrite (gate computed above) — a cross-base
         // delete is rejected before this DELETE unless claim==truth + trigger-actor base-write.
         // lock-guarded: automation delete_record (C2a) — ensureRecordNotLocked enforced just above.
+        // revision-emitted: delete — recordRecordRevision written above in the same txn (rev@2365).
         await query(
           'DELETE FROM meta_records WHERE id = $1 AND sheet_id = $2',
           [effectiveRecordId, effectiveSheetId],
@@ -2471,6 +2473,7 @@ export class AutomationExecutor {
       // xbase-write-gated: routes through evaluateCrossBaseWrite (gate computed above) — a cross-base
       // create is rejected before this INSERT unless claim==truth + trigger-actor base-write. This is
       // the §1.3 create-to-another-base vector the gate closes.
+      // revision-pending: audit A4/OD-6 lane C — automation create_record writes no revision; fix in #4220.
       await this.deps.queryFn(
         `INSERT INTO meta_records (id, sheet_id, data, version) VALUES ($1, $2, $3::jsonb, 1)`,
         [recordId, targetSheetId, JSON.stringify(data)],
@@ -3408,6 +3411,7 @@ export class AutomationExecutor {
         // xbase-write-gated: routes through evaluateCrossBaseWrite (gate above) — same-base uses the gate's
         // fast-path (byte-identical to pre-C2); a cross-base lock is rejected unless claim==truth + base-write.
         // lock-mgmt: LOCK action — sets the lock columns themselves (not a data edit of a locked row).
+        // revision-exempt: metadata-only lock columns; `data` untouched — not a user-content edit.
         await this.deps.queryFn(
           `UPDATE meta_records
            SET locked = true, locked_by = $1, locked_at = NOW(), version = version + 1, updated_at = NOW()
@@ -3418,6 +3422,7 @@ export class AutomationExecutor {
         // xbase-write-gated: routes through evaluateCrossBaseWrite (gate above) — same-base fast-path keeps
         // this byte-identical to pre-C2; a cross-base unlock is rejected unless claim==truth + base-write.
         // lock-mgmt: UNLOCK action — clears the lock columns (decision f: automation may unlock).
+        // revision-exempt: metadata-only unlock columns; `data` untouched — not a user-content edit.
         await this.deps.queryFn(
           `UPDATE meta_records
            SET locked = false, locked_by = NULL, locked_at = NULL, version = version + 1, updated_at = NOW()

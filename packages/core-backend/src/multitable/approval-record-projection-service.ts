@@ -219,6 +219,8 @@ export class ApprovalRecordProjectionService {
       await this.ensureSystemBase(client)
       await this.ensureFamilySheet(client, sheetId, instance.templateId, instance.templateName)
 
+      // revision-exempt: derived projection into the system approval base; regenerable by sweep/reconcile;
+      // authoritative history lives in the approval domain (approval_instances), not here (audit §2/§4).
       await client.query(
         `INSERT INTO meta_records (id, sheet_id, data, version, created_by, modified_by)
          VALUES ($1, $2, $3::jsonb, 1, $4, $4)
