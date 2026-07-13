@@ -2139,9 +2139,10 @@ export async function createDirectoryIntegration(input: DirectoryIntegrationInpu
 }
 
 /**
- * Thrown by `updateDirectoryIntegration` when a generic integration-form save tries to swap
- * `corp_id` on an integration that already has synced accounts — see the guard's comment there
- * (org-transfer Phase 1 §12.1) for why this is blocked.
+ * Thrown by `updateDirectoryIntegration` when a generic integration-form save tries to change
+ * `corp_id` once it is already set — see the guard's comment there (org-transfer Phase 1 §12.1)
+ * for why this is blocked. The rule is absolute (no synced-records probe): once set, corp_id is
+ * immutable in an ordinary PUT.
  */
 export class DirectoryTenantChangeBlockedError extends Error {
   constructor(message: string) {
