@@ -6,7 +6,7 @@
           <h4 class="meta-sheet-perm__title">{{ p('sheet.title') }}</h4>
           <p class="meta-sheet-perm__subtitle">{{ p('sheet.subtitle') }}</p>
         </div>
-        <button class="meta-sheet-perm__close" type="button" @click="requestClose">&times;</button>
+        <MtIconButton class="meta-sheet-perm__close" @click="requestClose">&times;</MtIconButton>
       </div>
 
       <div class="meta-sheet-perm__tabs" role="tablist">
@@ -697,6 +697,7 @@
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { useLocale } from '../../composables/useLocale'
 import MetaConditionalRuleBuilder from './MetaConditionalRuleBuilder.vue'
+import { MtIconButton } from '../ui'
 import type { MultitableApiClient } from '../api/client'
 import type {
   MetaField,
@@ -1549,14 +1550,9 @@ onBeforeUnmount(() => {
   color: #64748b;
 }
 
-.meta-sheet-perm__close {
-  border: 0;
-  background: transparent;
-  font-size: 24px;
-  line-height: 1;
-  color: #64748b;
-  cursor: pointer;
-}
+/* .meta-sheet-perm__close: now <MtIconButton> (ghost, token-styled; the &times; glyph char passes
+   through its default-slot icon fallback (size token-normalized to the icon control)). Bespoke hardcoded
+   CSS removed (UI-P2-1c T1 batch-6). Class kept on the element only for selector stability. */
 
 .meta-sheet-perm__tabs {
   display: flex;

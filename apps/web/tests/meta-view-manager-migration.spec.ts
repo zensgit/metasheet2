@@ -26,6 +26,15 @@ import { useLocale } from '../src/composables/useLocale'
 // class (its CSS therefore stays too — partial-sharer migration, CSS removal gated on ALL sharers
 // migrating).
 //
+// UI-P2-1c T1 batch-7 (multitable-ui-p2-1c-tail-resolution-designlock-20260707.md §2-T1, RATIFIED): the
+// header close-× (`.meta-view-mgr__close`, @click="requestClose") is now <MtIconButton> (ghost, token-
+// styled) — the &times; glyph passes through MtIconButton's default-slot icon fallback (glyph char
+// preserved, size token-normalized to the icon control: 20px -> 14px glyph, 32x32 control box). This file
+// ALSO has two other × glyph buttons that are remove-item actions, NOT close buttons, and neither was
+// touched: removeFilterRule / removeSortRule (both `.meta-view-mgr__action--danger`). See the POSITIVE
+// CONTROL test below proving removeFilterRule still fires unchanged (also proves this file's mount can
+// observe these buttons at all).
+//
 // T3 errata fix-forward (2026-07-12): #4131 first migrated addFilterRule/addSortRule to <MtLink> on
 // the premise that `.meta-view-mgr__btn-inline` was "link-styled" — that premise was factually wrong
 // (the class is `padding:4px 10px; border:1px dashed #cbd5e1; background:#fff; color:#475569`, a gray
@@ -60,6 +69,7 @@ const configCancelBtn = () => container!.querySelector('.meta-view-mgr__config .
 const deleteGlyphBtn = () => container!.querySelector('.meta-view-mgr__action--danger') as HTMLButtonElement | null
 const confirmCancelBtn = () => container!.querySelector('.meta-view-mgr__confirm .meta-view-mgr__btn-cancel') as HTMLButtonElement | null
 const confirmDeleteBtn = () => container!.querySelector('.meta-view-mgr__btn-delete') as HTMLButtonElement | null
+const closeBtn = () => container!.querySelector('.meta-view-mgr__close') as HTMLButtonElement | null
 
 describe('MetaViewManager — MtButton migration (UI-P2-1c)', () => {
   it('renders the add-section Add view as a native <button>; disabled until a name is typed', () => {
@@ -239,5 +249,44 @@ describe('MetaViewManager — reloadLatestConfig / dismissLiveRefreshNotice stay
     await nextTick()
     expect(container!.querySelector('.meta-view-mgr__warning')).toBeNull()
     expect(container!.querySelectorAll('.meta-view-mgr__rule-row').length).toBe(0)
+  })
+})
+
+describe('MetaViewManager — MtIconButton migration (UI-P2-1c T1 batch-7, header close-×)', () => {
+  it('renders the header close-× as a native <button> (MtIconButton) keeping the class + glyph', () => {
+    mount()
+    const btn = closeBtn()!
+    expect(btn.tagName).toBe('BUTTON')
+    expect(btn.getAttribute('type')).toBe('button')
+    expect(btn.classList.contains('meta-view-mgr__close')).toBe(true)
+    expect(btn.textContent?.trim()).toBe('×') // × glyph char preserved (size token-normalized)
+  })
+
+  it('clicking the header close-× still calls requestClose -> emits SAME `close` event (no unsaved drafts, no confirm gate)', async () => {
+    const onClose = vi.fn()
+    mount({ onClose })
+    closeBtn()!.click()
+    await nextTick()
+    expect(onClose).toHaveBeenCalledTimes(1)
+  })
+
+  it('POSITIVE CONTROL: the unmigrated remove-filter-rule × (removeFilterRule, same glyph, different button) still fires — proves this migration left it alone AND that this file can observe these buttons', async () => {
+    mount()
+    configBtn()!.click() // openConfig(view) → configTarget set → config panel renders
+    await nextTick()
+    addFilterBtn()!.click() // addFilterRule() — out of scope, itself already-migrated MtButton plain (T3 errata)
+    await nextTick()
+
+    expect(container!.querySelectorAll('.meta-view-mgr__rule-row--filter').length).toBe(1)
+
+    const removeBtn = container!.querySelector(
+      '.meta-view-mgr__rule-row--filter .meta-view-mgr__action--danger',
+    ) as HTMLButtonElement
+    expect(removeBtn).toBeTruthy()
+    removeBtn.click() // removeFilterRule(0)
+    await nextTick()
+
+    // unchanged behavior, untouched by this migration
+    expect(container!.querySelectorAll('.meta-view-mgr__rule-row--filter').length).toBe(0)
   })
 })

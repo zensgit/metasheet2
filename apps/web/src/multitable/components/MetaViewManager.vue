@@ -3,7 +3,7 @@
     <div class="meta-view-mgr">
       <div class="meta-view-mgr__header">
         <h4 class="meta-view-mgr__title">{{ ml('view.title') }}</h4>
-        <button class="meta-view-mgr__close" @click="requestClose">&times;</button>
+        <MtIconButton class="meta-view-mgr__close" @click="requestClose">&times;</MtIconButton>
       </div>
 
       <div class="meta-view-mgr__body">
@@ -499,7 +499,7 @@ import {
 } from '../utils/meta-manager-labels'
 import ConditionalFormattingDialog from './ConditionalFormattingDialog.vue'
 import ScaleFormattingDialog from './ScaleFormattingDialog.vue'
-import { MtButton } from '../ui'
+import { MtButton, MtIconButton } from '../ui'
 
 const VIEW_TYPES = ['grid', 'form', 'kanban', 'gallery', 'calendar', 'timeline', 'gantt', 'hierarchy'] as const
 const VIEW_ICONS: Record<string, string> = {
@@ -1415,7 +1415,10 @@ onBeforeUnmount(() => {
 .meta-view-mgr { width: 620px; max-height: 80vh; background: #fff; border-radius: 8px; box-shadow: 0 8px 24px rgba(0,0,0,.15); display: flex; flex-direction: column; }
 .meta-view-mgr__header { display: flex; justify-content: space-between; align-items: center; padding: 12px 16px; border-bottom: 1px solid #eee; }
 .meta-view-mgr__title { font-size: 15px; font-weight: 600; margin: 0; }
-.meta-view-mgr__close { border: none; background: none; font-size: 20px; cursor: pointer; color: #999; }
+/* .meta-view-mgr__close: now <MtIconButton> (ghost, token-styled; the &times; glyph char passes through
+   its default-slot icon fallback (size token-normalized to the icon control)). Bespoke hardcoded CSS removed
+   (UI-P2-1c T1 batch-7). Class kept on the element only for selector stability (multitable-view-manager.spec.ts,
+   scripts/verify-multitable-live-smoke.mjs). */
 .meta-view-mgr__body { flex: 1; overflow-y: auto; padding: 8px 16px; }
 .meta-view-mgr__row { display: flex; align-items: center; gap: 8px; padding: 6px 0; border-bottom: 1px solid #f5f5f5; }
 .meta-view-mgr__row--active { background: #f0f7ff; border-radius: 4px; margin: 0 -4px; padding: 6px 4px; }
