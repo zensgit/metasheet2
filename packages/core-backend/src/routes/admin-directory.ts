@@ -4,6 +4,7 @@ import { auditLog } from '../audit/audit'
 import { Logger } from '../core/logger'
 import {
   DirectorySyncInProgressError,
+  DirectoryTenantChangeBlockedError,
   acknowledgeDirectorySyncAlert,
   admitDirectoryAccountUser,
   batchAdmitDirectoryAccountUsers,
@@ -405,6 +406,10 @@ export function adminDirectoryRouter(): Router {
       await refreshDirectoryIntegrationSchedule(integration.id)
       jsonOk(res, { integration })
     } catch (error) {
+      if (error instanceof DirectoryTenantChangeBlockedError) {
+        jsonError(res, 409, 'DIRECTORY_TENANT_CHANGE_BLOCKED', readErrorMessage(error, 'Tenant change blocked'))
+        return
+      }
       jsonError(res, 400, 'DIRECTORY_UPDATE_FAILED', readErrorMessage(error, 'Failed to update directory integration'))
     }
   })
