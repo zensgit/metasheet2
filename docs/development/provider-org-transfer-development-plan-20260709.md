@@ -3,7 +3,15 @@
 Date: 2026-07-09
 Status: development plan, Rev 3
 Rev 3 (2026-07-12): owner's permanent-immutable `corp_id` rule absorbed (§12.1, no probe, no escape hatch); local-canonical-org substrate formalized (§4.1, `org_id` as anchor).
-Baseline: `origin/main @ 8c15b8bf80ac0c6107615d6db73ce9e37dd66d6c`
+Rev 3 status refresh (2026-07-13): **#4181 is MERGED** (`0e088d3b1`) — the §12.1 guard is live on
+`main`, not a pending branch; the Wave-3 substrate this plan depends on is the **standalone**
+local canonical-org plan (PR #4215), whose department-binding integrity is a **buildable FK
+chain** (binding carries `local_integration_id` + `external_integration_id`;
+`(department_id, integration_id)` → `directory_departments(id, integration_id)` and
+`(integration_id, org_id)` → `directory_integrations(id, org_id)`, both sides — NOT a direct
+`(department_id, org_id)` FK, since `directory_departments` has no `org_id` column). Baseline
+re-pinned.
+Baseline: `origin/main @ 8bc7bbfe4` (post-#4181, post-#3941-errata)
 Primary provider: DingTalk
 Future providers: WeCom, Feishu
 
@@ -44,8 +52,8 @@ integration:
   - `updateDirectoryIntegration`
   - SQL update includes `corp_id = $4`
 
-(Rev 3: the guardrail branch closes this path — `corp_id` is permanently
-immutable once set, see §12.1.)
+(Rev 3, status refresh: this path is now closed **on `main`** — #4181 merged (`0e088d3b1`);
+`corp_id` is permanently immutable once set, see §12.1.)
 
 That is dangerous for any integration — whether or not it has synced records —
 because several downstream behaviors assume the integration represents one
@@ -69,10 +77,12 @@ as ordinary integration configuration editing.
 This section captures the facts the implementation must preserve.
 
 Anchor-freshness note (Rev 3): the code citations in this plan were captured at
-the Rev 1/Rev 2 baseline; main has since moved roughly 266 commits, and the
-`corp_id` guardrail branch landed in parallel. File/function facts below remain
-directionally correct, but re-verify specific anchors against current main
-before implementing against them.
+the Rev 1/Rev 2 baseline; main has since moved substantially, and the `corp_id`
+guard (#4181) has since **merged into `directory-sync.ts`**, shifting that file's
+line numbers by ~+44. File/function facts below remain directionally correct, but
+re-verify specific anchors against current main before implementing against them
+(the companion assessment doc, `dingtalk-corp-switch-assessment-20260708.md` Rev 5,
+carries the re-verified post-#4181 anchors).
 
 ### 3.1 Provider-Tagged User Identity Already Exists
 
@@ -221,10 +231,16 @@ Default behavior should be conservative:
 
 > **This section is a summary. The full Wave-3 substrate design is a standalone plan**,
 > `docs/development/local-directory-provider-canonical-org-anchor-development-plan-20260709.md`
-> (its own doc PR), which adds the editable `provider='local'` integration, the
-> `local:<org_id>` immutable corp_id, the one-active-local-integration DB constraint, the
-> normalized manager relation, and the department-binding single-org-integrity FKs. This
-> transfer plan (Wave 4) depends on that substrate; it is not compressed into this subsection.
+> (**landed on `main` via PR #4215, merge `66c7459a8`**), which adds the editable
+> `provider='local'` integration, the immutable
+> `local:<org_id>` corp_id, the **at-most-one-active-local-integration** partial unique index
+> (at-least-one is the bootstrap service's job), the normalized manager relation, and the
+> department-binding single-org integrity via a **buildable FK chain** — the binding carries
+> both integration ids, `(department_id, integration_id)` FKs to
+> `directory_departments(id, integration_id)` and `(integration_id, org_id)` FKs to
+> `directory_integrations(id, org_id)` on both sides (NOT a direct `(department_id, org_id)`
+> FK; `directory_departments` has no `org_id` column). This transfer plan (Wave 4) depends on
+> that substrate; it is not compressed into this subsection.
 
 The true stable anchor above any provider/corp binding is the local canonical
 org: `org_id`. The schema already enforces this direction —
@@ -903,8 +919,8 @@ Tests:
 - Editing `corp_id` once set is blocked unconditionally, including the
   pre-first-sync window (`corp_id` set, zero synced account/department rows).
 - Dedicated real-DB regression proving zero-row-mutation on rejection —
-  `directory-tenant-change-immutable.db.test.ts` already exists on the
-  guardrail branch; cite/extend it rather than re-prove.
+  `directory-tenant-change-immutable.db.test.ts` is **on `main`** (landed with
+  #4181, two-point CI-wired); cite/extend it rather than re-prove.
 - Active transfer prevents destructive source sync.
 
 ### Phase 2: Transfer Schema and API Skeleton
