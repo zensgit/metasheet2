@@ -6,7 +6,8 @@
 import type { Request, Response } from 'express';
 import { Router } from 'express'
 import { rbacGuard } from '../rbac/rbac'
-import { snapshotService } from '../services/SnapshotService'
+import { requireAdminRole, protectAdminOperation, requireSafetyCheck, OperationType } from '../guards'
+import { snapshotService, RESTORABLE_ITEM_TYPES, type RestorableItemType } from '../services/SnapshotService'
 import { Logger } from '../core/logger'
 
 const logger = new Logger('SnapshotsRouter')
@@ -14,11 +15,33 @@ const logger = new Logger('SnapshotsRouter')
 type ProtectionLevel = 'normal' | 'protected' | 'critical'
 type ReleaseChannel = 'stable' | 'canary' | 'beta' | 'experimental'
 
-const getUserId = (req: Request) =>
-  req.user?.id?.toString() || (req.headers['x-user-id'] as string) || 'system'
+// SECURITY (GHSA-h8mf): identity comes ONLY from the authenticated principal. Every snapshot
+// MUTATION below is gated by requireAdminRole(), which guarantees req.user is present; we never
+// trust an `x-user-id` header and never fall back to a spoofable `system` identity. If req.user.id
+// is somehow absent we fail rather than impersonate. (Defensive hardening: on the normal JWT chain
+// req.user.id is always set on a successful auth, so the old fallback was largely unreachable — but
+// removing it removes the ambiguity entirely.)
+const getUserId = (req: Request): string => {
+  const id = req.user?.id
+  if (id === undefined || id === null || String(id).length === 0) {
+    throw new Error('unauthenticated: snapshot mutation requires an authenticated req.user.id')
+  }
+  return String(id)
+}
 
 export function snapshotsRouter(): Router {
   const r = Router()
+
+  // SECURITY (GHSA-h8mf): every snapshot MUTATION (create/restore/delete/lock-unlock/protection/
+  // release-channel/tags/cleanup) is a privileged, side-effecting operation — a restore drives a
+  // real write-back, and lock/protection changes gate whether a restore/delete is even possible.
+  // The prior `rbacGuard('permissions','write')` granted any non-admin holding the `permissions:write`
+  // code, so a low-privilege user could unlock-then-restore or trigger a destructive full restore.
+  // We therefore raise ALL mutations to platform-admin via requireAdminRole() (the existing admin
+  // safety guard: 403 for non-admin / 403 for no principal / 503 fail-closed if the RBAC check
+  // itself throws — it never falls through). READ routes keep `permissions:read` (scope not widened).
+  // org/view-scoped snapshot permissions are deferred to the later RBAC line; this is the
+  // conservative platform-admin boundary.
 
   // List snapshots for a view or filtered query
   r.get('/api/snapshots', rbacGuard('permissions', 'read'), async (req: Request, res: Response) => {
@@ -81,7 +104,7 @@ export function snapshotsRouter(): Router {
   })
 
   // Add/remove snapshot tags
-  r.put('/api/snapshots/:id/tags', rbacGuard('permissions', 'write'), async (req: Request, res: Response) => {
+  r.put('/api/snapshots/:id/tags', requireAdminRole(), async (req: Request, res: Response) => {
     try {
       const { id } = req.params
       const { add, remove } = req.body
@@ -113,7 +136,7 @@ export function snapshotsRouter(): Router {
   })
 
   // Set protection level
-  r.patch('/api/snapshots/:id/protection', rbacGuard('permissions', 'write'), async (req: Request, res: Response) => {
+  r.patch('/api/snapshots/:id/protection', requireAdminRole(), async (req: Request, res: Response) => {
     try {
       const { id } = req.params
       const { level } = req.body
@@ -147,7 +170,7 @@ export function snapshotsRouter(): Router {
   })
 
   // Set release channel
-  r.patch('/api/snapshots/:id/release-channel', rbacGuard('permissions', 'write'), async (req: Request, res: Response) => {
+  r.patch('/api/snapshots/:id/release-channel', requireAdminRole(), async (req: Request, res: Response) => {
     try {
       const { id } = req.params
       const { channel } = req.body
@@ -203,7 +226,7 @@ export function snapshotsRouter(): Router {
   })
 
   // Create a new snapshot
-  r.post('/api/snapshots', rbacGuard('permissions', 'write'), async (req: Request, res: Response) => {
+  r.post('/api/snapshots', requireAdminRole(), async (req: Request, res: Response) => {
     const userId = getUserId(req)
     const { view_id, name, description, snapshot_type, metadata, expires_at } = req.body
 
@@ -235,18 +258,78 @@ export function snapshotsRouter(): Router {
     }
   })
 
+  // SECURITY (GHSA-h8mf) SCOPE: the three legacy DESTRUCTIVE snapshot endpoints in this router —
+  // restore (POST /api/snapshots/:id/restore, CRITICAL), delete (DELETE /api/snapshots/:id, MEDIUM),
+  // and cleanup (POST /api/snapshots/cleanup, HIGH) — are ALL raised to the canonical admin safety stack
+  // (protectAdminOperation + requireSafetyCheck). cleanup is included deliberately: it is a batch delete
+  // whose canonical twin already uses the same stack, so leaving it on the old guard would keep a weaker
+  // door open. Each of the three is annotated at its route below.
+
   // Restore a snapshot
-  r.post('/api/snapshots/:id/restore', rbacGuard('permissions', 'write'), async (req: Request, res: Response) => {
+  // SECURITY (GHSA-h8mf): this legacy endpoint reaches the SAME destructive primitive as the canonical
+  // admin route (admin-routes.ts POST /api/admin/snapshots/:id/restore), so it must carry the SAME
+  // security stack — platform-admin + audit (protectAdminOperation) AND the SafetyGuard confirmation
+  // (requireSafetyCheck). RESTORE_SNAPSHOT is RiskLevel.CRITICAL. `confirm_full` below is an ordinary
+  // request field for restore-SCOPE validation; it is NOT a safety token and cannot substitute for one.
+  r.post(
+    '/api/snapshots/:id/restore',
+    ...protectAdminOperation(OperationType.RESTORE_SNAPSHOT),
+    requireSafetyCheck({
+      operation: OperationType.RESTORE_SNAPSHOT,
+      getDetails: (req: Request) => ({ snapshotId: req.params.id })
+    }),
+    async (req: Request, res: Response) => {
     const snapshotId = req.params.id
     const userId = getUserId(req)
-    const { restore_type, item_types } = req.body
+    const { restore_type, item_types, confirm_full } = req.body
+
+    // SECURITY (GHSA-h8mf): validate the restore scope at the edge (defense-in-depth; SnapshotService
+    // re-validates the same invariant authoritatively so other callers cannot bypass this). restore_type
+    // is not a mere label — with no item_types the restore covers EVERYTHING — so bind the two:
+    //   - restore_type must be explicitly 'full' | 'partial' | 'selective';
+    //   - a 'full' restore must be explicitly confirmed (confirm_full === true) and must NOT narrow via item_types;
+    //   - 'partial'/'selective' must carry a non-empty item_types drawn from RESTORABLE_ITEM_TYPES.
+    if (restore_type !== 'full' && restore_type !== 'partial' && restore_type !== 'selective') {
+      return res.status(400).json({
+        ok: false,
+        error: { code: 'BAD_REQUEST', message: "restore_type must be 'full', 'partial', or 'selective'" }
+      })
+    }
+    if (restore_type === 'full') {
+      if (confirm_full !== true) {
+        return res.status(400).json({
+          ok: false,
+          error: { code: 'BAD_REQUEST', message: 'a full restore must be explicitly confirmed with confirm_full:true' }
+        })
+      }
+      if (item_types !== undefined && !(Array.isArray(item_types) && item_types.length === 0)) {
+        return res.status(400).json({
+          ok: false,
+          error: { code: 'BAD_REQUEST', message: "restore_type 'full' must not specify item_types" }
+        })
+      }
+    } else {
+      if (!Array.isArray(item_types) || item_types.length === 0) {
+        return res.status(400).json({
+          ok: false,
+          error: { code: 'BAD_REQUEST', message: `restore_type '${restore_type}' requires a non-empty item_types array` }
+        })
+      }
+      const invalid = item_types.filter((t: unknown) => !RESTORABLE_ITEM_TYPES.includes(t as RestorableItemType))
+      if (invalid.length > 0) {
+        return res.status(400).json({
+          ok: false,
+          error: { code: 'BAD_REQUEST', message: `item_types outside allowlist [${RESTORABLE_ITEM_TYPES.join(', ')}]: ${invalid.join(', ')}` }
+        })
+      }
+    }
 
     try {
       const result = await snapshotService.restoreSnapshot({
         snapshotId,
         restoredBy: userId,
         restoreType: restore_type,
-        itemTypes: item_types
+        itemTypes: restore_type === 'full' ? undefined : item_types
       })
 
       return res.json({ ok: true, data: result })
@@ -260,7 +343,17 @@ export function snapshotsRouter(): Router {
   })
 
   // Delete a snapshot
-  r.delete('/api/snapshots/:id', rbacGuard('permissions', 'write'), async (req: Request, res: Response) => {
+  // SECURITY (GHSA-h8mf): same reasoning as restore above — this legacy endpoint must carry the same
+  // stack as its canonical twin (admin-routes.ts DELETE /api/admin/snapshots/:id): platform-admin +
+  // audit AND the SafetyGuard confirmation. DELETE_SNAPSHOT is RiskLevel.MEDIUM.
+  r.delete(
+    '/api/snapshots/:id',
+    ...protectAdminOperation(OperationType.DELETE_SNAPSHOT),
+    requireSafetyCheck({
+      operation: OperationType.DELETE_SNAPSHOT,
+      getDetails: (req: Request) => ({ snapshotId: req.params.id })
+    }),
+    async (req: Request, res: Response) => {
     const snapshotId = req.params.id
     const userId = getUserId(req)
 
@@ -289,7 +382,7 @@ export function snapshotsRouter(): Router {
   })
 
   // Lock/unlock a snapshot
-  r.patch('/api/snapshots/:id/lock', rbacGuard('permissions', 'write'), async (req: Request, res: Response) => {
+  r.patch('/api/snapshots/:id/lock', requireAdminRole(), async (req: Request, res: Response) => {
     const snapshotId = req.params.id
     const userId = getUserId(req)
     const { locked } = req.body
@@ -349,7 +442,14 @@ export function snapshotsRouter(): Router {
   })
 
   // Cleanup expired snapshots
-  r.post('/api/snapshots/cleanup', rbacGuard('permissions', 'write'), async (_req: Request, res: Response) => {
+  // SECURITY (GHSA-h8mf): cleanup deletes snapshots (RiskLevel.HIGH) and its canonical twin
+  // (admin-routes.ts POST /api/admin/snapshots/cleanup) carries protectAdminOperation +
+  // requireSafetyCheck — this legacy endpoint reuses the same stack rather than being the weak door.
+  r.post(
+    '/api/snapshots/cleanup',
+    ...protectAdminOperation(OperationType.CLEANUP_SNAPSHOTS),
+    requireSafetyCheck({ operation: OperationType.CLEANUP_SNAPSHOTS }),
+    async (_req: Request, res: Response) => {
     try {
       const result = await snapshotService.cleanupExpired()
       return res.json({

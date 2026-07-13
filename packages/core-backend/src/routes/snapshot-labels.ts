@@ -5,8 +5,10 @@
  * Provides REST API for snapshot labeling operations
  */
 
+import type { Request } from 'express';
 import { Router } from 'express';
 import { snapshotService } from '../services/SnapshotService';
+import { requireAdminRole } from '../guards/audit-integration';
 import { Logger } from '../core/logger';
 
 const router = Router();
@@ -18,15 +20,28 @@ type ProtectionLevel = 'normal' | 'protected' | 'critical';
 // Type for release channels
 type ReleaseChannel = 'stable' | 'canary' | 'beta' | 'experimental';
 
+// SECURITY (GHSA-h8mf): this router is a SECOND surface for snapshot label mutations, mounted under
+// /api/admin/snapshots (admin-routes.ts). Like the /api/snapshots router, its mutations are raised to
+// platform-admin (requireAdminRole) and identity is taken ONLY from req.user.id — never the spoofable
+// `x-user-id` header, never a `system` fallback. requireAdminRole() guarantees req.user is present, so
+// getUserId only throws if reached without a principal (it never should be).
+const getUserId = (req: Request): string => {
+  const id = req.user?.id;
+  if (id === undefined || id === null || String(id).length === 0) {
+    throw new Error('unauthenticated: snapshot label mutation requires an authenticated req.user.id');
+  }
+  return String(id);
+};
+
 /**
  * PUT /api/snapshots/:id/tags
  * Add or remove tags from a snapshot
  */
-router.put('/:id/tags', async (req, res) => {
+router.put('/:id/tags', requireAdminRole(), async (req, res) => {
   try {
     const { id } = req.params;
     const { add, remove } = req.body;
-    const userId = req.headers['x-user-id'] as string || 'system';
+    const userId = getUserId(req);
 
     if (add && Array.isArray(add) && add.length > 0) {
       await snapshotService.addTags(id, add, userId);
@@ -56,11 +71,11 @@ router.put('/:id/tags', async (req, res) => {
  * PATCH /api/snapshots/:id/protection
  * Set protection level for a snapshot
  */
-router.patch('/:id/protection', async (req, res) => {
+router.patch('/:id/protection', requireAdminRole(), async (req, res) => {
   try {
     const { id } = req.params;
     const { level } = req.body;
-    const userId = req.headers['x-user-id'] as string || 'system';
+    const userId = getUserId(req);
 
     if (!level || !['normal', 'protected', 'critical'].includes(level)) {
       return res.status(400).json({
@@ -91,11 +106,11 @@ router.patch('/:id/protection', async (req, res) => {
  * PATCH /api/snapshots/:id/release-channel
  * Set release channel for a snapshot
  */
-router.patch('/:id/release-channel', async (req, res) => {
+router.patch('/:id/release-channel', requireAdminRole(), async (req, res) => {
   try {
     const { id } = req.params;
     const { channel } = req.body;
-    const userId = req.headers['x-user-id'] as string || 'system';
+    const userId = getUserId(req);
 
     if (channel && !['stable', 'canary', 'beta', 'experimental'].includes(channel)) {
       return res.status(400).json({
