@@ -518,6 +518,20 @@ function resolveTenantId(req, input = {}) {
   return tenantId
 }
 
+// A tenant-scoped WRITE must derive its tenant from the AUTHENTICATED principal ONLY — never from the
+// request. resolveTenantId above honors a request-supplied tenantId for admins (platform-admin
+// cross-tenant READS depend on that), which on a write route is a steering vector: a tenant_1 admin
+// could pass tenantId: tenant_evil and redirect the write to another tenant's staging project. This
+// fail-closed helper is the write-safe derivation — the request cannot influence it at all.
+function resolveAuthUserTenantId(req) {
+  const user = getUser(req)
+  const tenantId = typeof (user && user.tenantId) === 'string' ? user.tenantId.trim() : ''
+  if (!tenantId) {
+    throw new HttpRouteError(400, 'TENANT_REQUIRED', 'authenticated tenant context is required')
+  }
+  return tenantId
+}
+
 function resolveWorkspaceId(req, input = {}) {
   return firstString(input.workspaceId, req.query && req.query.workspaceId, req.params && req.params.workspaceId)
 }
@@ -713,9 +727,11 @@ const VALID_STOCK_PREPARATION_ERP_SOURCE_RUN_REQUEST_KEYS = new Set([
 // the caller's ALREADY-NORMALIZED row array (e.g. the output of runErpMaterialReadonlySource /
 // normalizeStockPreparationReadonlyIntake, or a sample/fixture in the same shape) — this route does not
 // itself read K3/ERP or re-derive business keys.
+// NO tenantId / workspaceId here: this is a tenant-scoped WRITE, so the tenant is derived server-side
+// from the authenticated principal (resolveAuthUserTenantId), never from the request. Accepting a
+// request tenantId would be a steering vector (an admin could redirect the write to another tenant's
+// staging project) — the closed allowlist rejects it outright, on top of the auth-only derivation.
 const VALID_STOCK_PREPARATION_ERP_MATERIAL_SYNC_REQUEST_KEYS = new Set([
-  'tenantId',
-  'workspaceId',
   'syncRunId',
   'erpMaterials',
 ])
@@ -3815,7 +3831,9 @@ function createHandlers(services, options = {}) {
         VALID_STOCK_PREPARATION_ERP_MATERIAL_SYNC_REQUEST_KEYS,
         'STOCK_PREPARATION_ERP_MATERIAL_SYNC_REQUEST_INVALID',
       )
-      const tenantId = resolveTenantId(req, input)
+      // Tenant is derived from the AUTHENTICATED user only (not resolveTenantId, which would honor a
+      // request tenantId for admins) — the write cannot be steered to another tenant's staging project.
+      const tenantId = resolveAuthUserTenantId(req)
       const targetProjectId = resolveIntegrationStagingProjectId(tenantId, undefined)
       const result = await persistStockPreparationErpMaterialSync({
         context,

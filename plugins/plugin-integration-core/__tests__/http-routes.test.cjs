@@ -4211,6 +4211,68 @@ async function testStockPreparationErpMaterialSyncRoute() {
   assert.equal(res.statusCode, 400, 'an unknown request field is rejected')
   assert.equal(res.body.error.details.field, 'permission')
   assert.equal(wrote(), 0)
+
+  // (5) TENANT STEERING (owner review P1): resolveTenantId honors a request tenantId for admins, so an
+  //     admin could redirect the write to another tenant's staging project. This route derives the tenant
+  //     from the authenticated user only AND drops tenantId from the request allowlist — so a tenant_1
+  //     admin passing tenantId: tenant_evil is rejected by the allowlist before any write. Zero write.
+  res = await invoke(routes, 'POST', ROUTE, {
+    user: ADMIN_USER, // tenantId: 'tenant_1'
+    body: { syncRunId: 'r1', erpMaterials: [], tenantId: 'tenant_evil' },
+  })
+  assert.equal(res.statusCode, 400, 'a request tenantId (steering another tenant) is rejected')
+  assert.equal(res.body.error.details.field, 'tenantId', 'the steering field is named')
+  assert.equal(wrote(), 0, 'no write when a caller tries to steer the tenant')
+
+  // (6) a request workspaceId is likewise not part of this write's contract → rejected, zero write.
+  res = await invoke(routes, 'POST', ROUTE, {
+    user: ADMIN_USER,
+    body: { syncRunId: 'r1', erpMaterials: [], workspaceId: 'ws_evil' },
+  })
+  assert.equal(res.statusCode, 400, 'a request workspaceId is rejected')
+  assert.equal(res.body.error.details.field, 'workspaceId')
+  assert.equal(wrote(), 0)
+
+  // (7) MISSING TENANT: an admin whose authenticated principal carries no tenant fails closed (the tenant
+  //     is derived from the user, never the request) — 400 TENANT_REQUIRED, no write.
+  res = await invoke(routes, 'POST', ROUTE, {
+    user: { id: 'user_admin_notenant', roles: ['admin'], permissions: ['integration:admin'] },
+    body: { syncRunId: 'r1', erpMaterials: [] },
+  })
+  assert.equal(res.statusCode, 400, 'an admin with no authenticated tenant fails closed')
+  assert.equal(res.body.error.code, 'TENANT_REQUIRED')
+  assert.equal(wrote(), 0, 'no write when the authenticated tenant is absent')
+
+  // (8) QUERY-STRING steering — the belt the body allowlist does NOT cover. resolveTenantId also reads
+  //     req.query.tenantId, so trimming the body allowlist alone would leave `?tenantId=tenant_evil`
+  //     open. resolveAuthUserTenantId ignores the request entirely, so a tenant_1 admin's query cannot
+  //     redirect the write: it lands on the AUTHENTICATED tenant's staging project. This is the case that
+  //     isolates the derivation fix (revert it to resolveTenantId → the write targets tenant_evil).
+  {
+    const steer = createStockPreparationTargetProvisioningApi({ sheetExists: true })
+    const steerRecords = createTableActionRecordsApi()
+    const mounted = mountRoutes(createMockServices().services, {
+      provisioningApi: steer.api,
+      recordsApi: steerRecords.recordsApi,
+    })
+    const steerRes = await invoke(mounted.routes, 'POST', ROUTE, {
+      user: ADMIN_USER, // authenticated tenant_1
+      query: { tenantId: 'tenant_evil' },
+      body: { syncRunId: 'r1', erpMaterials: [] },
+    })
+    // The write proceeds (valid admin request) — the point is WHERE it lands, not that it is rejected.
+    const targetedProjects = findCalls(steer.calls, 'findObjectSheet').map(([, inp]) => inp.projectId)
+    assert.ok(targetedProjects.length > 0, 'the write reached target resolution')
+    assert.ok(
+      targetedProjects.every((pid) => pid === 'tenant_1:integration-core'),
+      'the write targets the AUTHENTICATED tenant staging project, never the query-supplied tenant',
+    )
+    assert.ok(
+      !targetedProjects.some((pid) => String(pid).includes('tenant_evil')),
+      'the query-string tenant never reaches the write target',
+    )
+    void steerRes
+  }
 }
 
 async function testFieldOptionsSyncDisableMissing() {
