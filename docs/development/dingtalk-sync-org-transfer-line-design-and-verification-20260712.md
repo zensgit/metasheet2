@@ -225,7 +225,7 @@ atomic single-transaction rebind, etc.). Those are acceptance criteria, not resu
 
 ## 8. What remains + who owns it (Wave 0 closed; everything below is Waves 1–5)
 
-- **Wave 1** — ops: deploy-host disk (**#159, CLOSED 2026-07-13** — storage-health recovery
+- **Wave 1** — ops: deploy-host disk (**#159, CLOSED 2026-07-12** — storage-health recovery
   confirmed, the infra blocker is cleared) + a real deploy of the exact main SHA + the
   U1–U13 evidence pack (scaffold ready: DT-CLOSE-03). **The deploy + UAT execution itself is
   still not done** — only its precondition is.

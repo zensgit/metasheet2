@@ -35,7 +35,7 @@ blocker.
 
 | # | Precondition | Status |
 | --- | --- | --- |
-| P1 | Deploy-host disk resolved (#159 — **CLOSED** 2026-07-13, storage-health recovery confirmed) | done (infra only — does not itself satisfy P2/P3) |
+| P1 | Deploy-host disk resolved (#159 — **CLOSED** 2026-07-12, storage-health recovery confirmed) | done (infra only — does not itself satisfy P2/P3) |
 | P2 | The exact target SHA is deployed and its identity is confirmable (`git rev-parse HEAD` on the deploy host, or the image tag) | ⬜ record SHA: `______` |
 | P3 | Access to a real DingTalk corp (staging tenant or an authorized customer sandbox) with: an admin account, Stream app credentials, an interactive-card template, and **at least two** local accounts bound to DingTalk (one designated approval assignee "A", one non-assignee "B") | ⬜ |
 | P4 | `LOG_LEVEL=info` (or `debug`) on the deployed instance — **not** `warn`/`error`. `scripts/dev-optimized-start.sh` defaults to `warn`, which silently swallows the corp-anchor probe log line and makes "no log line" ambiguous between "prod-safe default silence" and "the probe never fired." Confirm before Section C. | ⬜ |
