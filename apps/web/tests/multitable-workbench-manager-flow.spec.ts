@@ -30,9 +30,19 @@ vi.mock('../src/multitable/composables/useMultitableWorkbench', () => ({
   useMultitableWorkbench: () => workbenchMock,
 }))
 
-vi.mock('../src/multitable/composables/useMultitableGrid', () => ({
-  useMultitableGrid: () => gridMock,
-}))
+// MetaViewManager imports the pure `parseFilterTree` named export directly from this module
+// (not via the useMultitableGrid() hook return value) to hydrate a view's stored filter into its
+// config-drawer draft. A hook-only mock leaves that export undefined and throws the moment a real
+// (unstubbed) MetaViewManager opens a non-grid view's config — keep it real via importActual.
+vi.mock('../src/multitable/composables/useMultitableGrid', async () => {
+  const actual = await vi.importActual<typeof import('../src/multitable/composables/useMultitableGrid')>(
+    '../src/multitable/composables/useMultitableGrid',
+  )
+  return {
+    ...actual,
+    useMultitableGrid: () => gridMock,
+  }
+})
 
 vi.mock('../src/multitable/composables/useMultitableCapabilities', () => ({
   useMultitableCapabilities: () => ({
@@ -56,12 +66,15 @@ vi.mock('../src/multitable/composables/useMultitableComments', () => ({
     resolvingIds: ref<string[]>([]),
     updatingIds: ref<string[]>([]),
     deletingIds: ref<string[]>([]),
+    reactingKeys: ref<string[]>([]),
     error: ref<string | null>(null),
     loadComments: vi.fn(),
     addComment: vi.fn(),
     updateComment: vi.fn(),
     deleteComment: vi.fn(),
     resolveComment: vi.fn(),
+    addReaction: vi.fn(),
+    removeReaction: vi.fn(),
   }),
 }))
 
@@ -199,6 +212,8 @@ function createGridMock() {
     sortRules: ref([]),
     filterRules: ref([]),
     filterConjunction: ref('and'),
+    filterGroups: ref([]),
+    canLoadMore: ref(false),
     canUndo: ref(false),
     canRedo: ref(false),
     groupFieldId: ref<string | null>(null), groupFieldIds: ref([]),

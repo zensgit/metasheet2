@@ -1031,6 +1031,8 @@ function createGridMock() {
     sortRules: ref([]),
     filterRules: ref([]),
     filterConjunction: ref('and'),
+    filterGroups: ref([]),
+    canLoadMore: ref(false),
     canUndo: ref(false),
     canRedo: ref(false),
     groupFieldId: ref<string | null>(null), groupFieldIds: ref([]),
