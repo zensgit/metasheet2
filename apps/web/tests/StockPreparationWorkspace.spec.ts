@@ -119,6 +119,7 @@ async function waitForSelector(container: HTMLElement, selector: string, cycles 
 }
 
 const VIEW_KEYS = [
+  'dashboard',
   'project-workspace',
   'bom-snapshot-diff',
   'material-mapping',
@@ -181,7 +182,7 @@ describe('StockPreparationWorkspace shell', () => {
     return container!
   }
 
-  it('renders the tablist with all six MVP view tabs', async () => {
+  it('renders the tablist with the dashboard tab (H1/H2) plus all six MVP view tabs', async () => {
     const root = await mountShell()
     const tablist = root.querySelector('[data-testid="stock-prep-tabs"]')
     expect(tablist).not.toBeNull()
@@ -189,7 +190,7 @@ describe('StockPreparationWorkspace shell', () => {
     for (const key of VIEW_KEYS) {
       expect(root.querySelector(`[data-testid="stock-prep-tab-${key}"]`)).not.toBeNull()
     }
-    expect(root.querySelectorAll('[data-testid^="stock-prep-tab-"]').length).toBe(6)
+    expect(root.querySelectorAll('[data-testid^="stock-prep-tab-"]').length).toBe(7)
   })
 
   it('renders Chinese labels + the readonly-boundary copy when locale is zh-CN', async () => {
@@ -216,8 +217,21 @@ describe('StockPreparationWorkspace shell', () => {
     expect(boundary.textContent).toMatch(/readonly/i)
   })
 
-  it('shows the active view panel as a readonly GET placeholder and switches on tab click', async () => {
+  it('defaults to the dashboard tab (H1: "operator enters the system and sees this first"), with no single-endpoint badge', async () => {
     const root = await mountShell()
+    const panel = root.querySelector('[data-testid="stock-prep-panel"]') as HTMLElement
+    expect(panel.getAttribute('data-active')).toBe('dashboard')
+    // The dashboard aggregates MULTIPLE existing endpoints client-side — it has no single endpoint
+    // to badge, so that line is skipped for it only (see StockPreparationViewTab.noEndpointBadge).
+    expect(root.querySelector('[data-testid="stock-prep-panel-endpoint"]')).toBeNull()
+    expect(root.querySelector('[data-testid="stock-prep-dashboard"]')).not.toBeNull()
+  })
+
+  it('shows a concrete view panel as a readonly GET placeholder and switches on tab click', async () => {
+    const root = await mountShell()
+    const projectTab = root.querySelector('[data-testid="stock-prep-tab-project-workspace"]') as HTMLButtonElement
+    projectTab.click()
+    await flushUi()
     const panel = root.querySelector('[data-testid="stock-prep-panel"]') as HTMLElement
     expect(panel.getAttribute('data-active')).toBe('project-workspace')
     const endpoint = root.querySelector('[data-testid="stock-prep-panel-endpoint"]') as HTMLElement
@@ -429,6 +443,10 @@ describe('StockPreparationWorkspace shell', () => {
     mockStockPrepReads()
     const root = await mountShell()
 
+    // The dashboard (H1) is now the default tab — switch to view 1 explicitly before its row mounts.
+    ;(root.querySelector('[data-testid="stock-prep-tab-project-workspace"]') as HTMLButtonElement).click()
+    await flushUi()
+
     // Pick a project in view 1 (its row renders after the REAL projects Response settles — poll).
     const selectButton = (await waitForSelector(
       root,
@@ -471,6 +489,10 @@ describe('StockPreparationWorkspace shell', () => {
     mockStockPrepReads()
     const root = await mountShell()
 
+    // The dashboard (H1) is now the default tab — switch to view 1 explicitly before its row mounts.
+    ;(root.querySelector('[data-testid="stock-prep-tab-project-workspace"]') as HTMLButtonElement).click()
+    await flushUi()
+
     // Pick a project in view 1 (REAL wire), then enter the two confirmation tabs.
     const selectButton = (await waitForSelector(
       root,
@@ -506,6 +528,10 @@ describe('StockPreparationWorkspace shell', () => {
   it('shares the projectId with views 5 and 6 — prep-line and exception views open already scoped', async () => {
     mockStockPrepReads()
     const root = await mountShell()
+
+    // The dashboard (H1) is now the default tab — switch to view 1 explicitly before its row mounts.
+    ;(root.querySelector('[data-testid="stock-prep-tab-project-workspace"]') as HTMLButtonElement).click()
+    await flushUi()
 
     // Pick a project in view 1 (REAL wire), then enter the two W5 tabs.
     const selectButton = (await waitForSelector(
@@ -559,8 +585,14 @@ describe('StockPreparationWorkspace shell', () => {
     const batchListCalls = h.apiFetch.mock.calls
       .map((call) => String(call[0]))
       .filter((url) => url.includes('/snapshot-batches'))
-    expect(batchListCalls.length).toBe(1)
-    expect(batchListCalls[0]).toContain('projectId=proj-alpha')
+    // TWO calls, not one: the dashboard (H1/H2, now the default landing tab) ALSO eagerly aggregates
+    // the sync stage for an already-seeded projectId on its own mount (before the test ever switches
+    // to view 2) — this is the dashboard's own reused GET, not a duplicate/bug. Both carry the SAME
+    // deep-linked handle either way.
+    expect(batchListCalls.length).toBe(2)
+    for (const call of batchListCalls) {
+      expect(call).toContain('projectId=proj-alpha')
+    }
   })
 
   it('shell copy is values-free (no secrets, no long numeric runs) in both locales', async () => {

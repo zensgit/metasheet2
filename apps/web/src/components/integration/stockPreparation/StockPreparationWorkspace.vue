@@ -44,17 +44,31 @@
       <p class="stock-prep__panel-desc" :data-testid="`stock-prep-desc-${activeKey}`">
         {{ bi(activeView.zhDesc, activeView.enDesc) }}
       </p>
-      <p class="stock-prep__panel-endpoint" data-testid="stock-prep-panel-endpoint">
+      <!-- The dashboard tab aggregates MULTIPLE existing readonly endpoints client-side (H1/H2) — it
+           has no single endpoint to badge, so this line is skipped for it only. -->
+      <p v-if="!activeView.noEndpointBadge" class="stock-prep__panel-endpoint" data-testid="stock-prep-panel-endpoint">
         <span class="stock-prep__badge">{{
           activeView.confirmWrites ? bi('只读 + 人工确认', 'readonly + human confirm') : `${bi('只读', 'readonly')} · GET`
         }}</span>
         <code>{{ activeView.endpoint }}</code>
       </p>
+      <!-- H1/H2 (UI humanization, H0 plane-boundary design-lock PR #4202): the dashboard tab is the
+           new default landing view — "operator enters the system and immediately sees current
+           project / current stage / blocking count / recommended next step". Its own picker updates
+           selectedProjectId WITHOUT switching tabs (handleDashboardProjectSelect), and its stepper /
+           recommend-action navigates by reusing this SAME activeKey (handleNavigateStage) — a
+           satellite of the one tab-nav surface, never a second one. -->
+      <StockPreparationDashboardView
+        v-if="activeKey === 'dashboard'"
+        :project-id="selectedProjectId"
+        @select-project="handleDashboardProjectSelect"
+        @navigate-stage="handleNavigateStage"
+      />
       <!-- Views 1-6 are all real views now (the placeholder branch remains only as a guard for any
            future tab). Views 2-6 share the shell-owned projectId context selected in view 1
            (#4017 pattern). -->
       <StockPreparationProjectWorkspaceView
-        v-if="activeKey === 'project-workspace'"
+        v-else-if="activeKey === 'project-workspace'"
         @select-project="handleProjectSelect"
       />
       <StockPreparationSnapshotDiffView
@@ -99,6 +113,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { useLocale } from '../../../composables/useLocale'
 import PageShell from '../../layout/PageShell.vue'
 import PageHeader from '../../layout/PageHeader.vue'
+import StockPreparationDashboardView from './StockPreparationDashboardView.vue'
 import StockPreparationProjectWorkspaceView from './StockPreparationProjectWorkspaceView.vue'
 import StockPreparationSnapshotDiffView from './StockPreparationSnapshotDiffView.vue'
 import StockPreparationMappingConfirmView from './StockPreparationMappingConfirmView.vue'
@@ -115,6 +130,7 @@ function bi(zh: string, en: string): string {
 }
 
 type StockPreparationViewKey =
+  | 'dashboard'
   | 'project-workspace'
   | 'bom-snapshot-diff'
   | 'material-mapping'
@@ -136,11 +152,27 @@ interface StockPreparationViewTab {
    * resolutions). Still no external ERP/K3 write — the badge copy reflects the human-confirm nature.
    */
   confirmWrites?: boolean
+  /** True only for the dashboard tab — it aggregates multiple existing GETs client-side (H1/H2), so
+   *  it has no single endpoint to badge (see the panel-endpoint paragraph's v-if). */
+  noEndpointBadge?: boolean
 }
 
 // Tab order follows the MVP business loop (design §"MVP Goal"). Descriptions are values-free — they
 // name fields/statuses, never customer drawing numbers, material codes, or quantities.
 const views: StockPreparationViewTab[] = [
+  // H1/H2 (UI humanization, H0 plane-boundary design-lock PR #4202 — PLANE A, values-free): the
+  // task-oriented entry. It is listed FIRST so `views[0].key` (the shell's existing "default tab is
+  // the first tab" pattern) makes it the landing view — "operator enters the system and immediately
+  // sees current project / current stage / blocking count / recommended next step".
+  {
+    key: 'dashboard',
+    zh: '仪表盘',
+    en: 'Dashboard',
+    zhDesc: '当前项目、当前阶段、阻断数与推荐下一步;六阶段进度均复用下方各视图的既有只读端点聚合,不新增后端。',
+    enDesc: 'Current project, current stage, blocking count, and a recommended next step; the six-stage progress aggregates the existing readonly endpoints below client-side — no new backend.',
+    endpoint: '',
+    noEndpointBadge: true,
+  },
   {
     key: 'project-workspace',
     zh: '项目工作台',
@@ -220,6 +252,22 @@ function handleProjectSelect(projectId: string): void {
   activeKey.value = 'bom-snapshot-diff'
   // Mirror the handle into the query (replace: selecting is not a history step).
   void router.replace({ query: { ...route.query, projectId } })
+}
+
+// H1: the dashboard's OWN picker updates the shared handle WITHOUT switching tabs — the operator
+// stays on the dashboard to read the stage overview for the project they just picked (unlike view 1's
+// row action above, which jumps straight to view 2).
+function handleDashboardProjectSelect(projectId: string): void {
+  selectedProjectId.value = projectId
+  void router.replace({ query: { ...route.query, projectId } })
+}
+
+// H2: the stepper / recommend-action navigates by reusing this SAME activeKey ref — a satellite of
+// the one tab-nav surface, never a second one. viewKey is a plain string at the stageOverview.ts
+// boundary (STOCK_PREPARATION_STAGE_VIEW_KEY) to avoid a circular type import; every value it can
+// hold is one of this file's own StockPreparationViewKey literals.
+function handleNavigateStage(viewKey: string): void {
+  activeKey.value = viewKey as StockPreparationViewKey
 }
 </script>
 
