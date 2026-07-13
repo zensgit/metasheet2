@@ -298,7 +298,12 @@ describe('MultitableWorkbench manager-driven config flow', () => {
     await flushUi()
 
     const selects = Array.from(container!.querySelectorAll('.meta-view-mgr__config select')) as HTMLSelectElement[]
-    expect(selects).toHaveLength(4)
+    // 5, not 4: MetaViewManager's config drawer grew a shared "Filter, sort, group" section
+    // (.meta-view-mgr__common) rendered after every type-specific block, whose "Group field"
+    // select is always present (5th) regardless of view type. The 4 timeline-specific selects
+    // (start/end/label/zoom) this test drives are still indices 0-3 — the new select is appended
+    // after them, not inserted before, so the positional assertions below are unaffected.
+    expect(selects).toHaveLength(5)
     selects[2].value = 'fld_owner'
     selects[2].dispatchEvent(new Event('change', { bubbles: true }))
     selects[3].value = 'month'
@@ -320,7 +325,11 @@ describe('MultitableWorkbench manager-driven config flow', () => {
     })
     expect(workbenchMock.loadSheetMeta).toHaveBeenCalledWith('sheet_orders')
     expect(gridMock.loadViewData).toHaveBeenCalledWith(0)
-    expect(showSuccessSpy).toHaveBeenCalledWith('View settings saved')
+    // #3720 (W3-5b) added an optional `action?: ToastAction` 2nd param to the workbench's local
+    // showSuccess(msg, action) wrapper (for History Center deep-link toast actions); it always
+    // forwards both positional args to the MetaToast stub, so a call site that only supplies
+    // `msg` still records `action === undefined` explicitly as the 2nd arg.
+    expect(showSuccessSpy).toHaveBeenCalledWith('View settings saved', undefined)
     expect(showErrorSpy).not.toHaveBeenCalled()
   })
 })
