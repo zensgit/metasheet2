@@ -842,6 +842,46 @@ async function main() {
     ghostCurrent.ok && S.probeGhostCurrentCode === 'SNAPSHOT_DIFF_BASE_NOT_FOUND',
     `http=${ghostCurrent.status} code=${S.probeGhostCurrentCode}`)
 
+  // ── 7z. T2: ERP material-master cache sync (POST /mvp/erp-materials/sync) ────────────────────────
+  // Deployed-lane coverage of the T2 route: persist an ALREADY-NORMALIZED ERP material into the internal
+  // erp_material_master cache, then re-sync to prove the idempotent upsert (patch, not a duplicate).
+  // NON-PERTURBING by construction: erpCodeA (SMKERP-A-…) is a DIFFERENT value from the BOM drawings
+  // (SMKDWG-A/B-…), so it matches no snapshot line and cannot change the mapping/generation steps above;
+  // it runs AFTER them regardless. The response is values-free (counts/modes/objectId constants only),
+  // so the step-10 global leak scan re-proves erpCodeA / erpItemA never cross. (The deep downstream proof
+  // — confirm-writes reading the cache + the meta_fields physical-fieldId cross-check — lives in the
+  // real-Postgres harness scripts/ops/stock-preparation-erp-material-sync-realdb-smoke.mjs.)
+  const erpMaterialId = `smk_erpid_${salt}`
+  const erpSyncBody = {
+    syncRunId: `smk_erprun_${salt}`,
+    erpMaterials: [{
+      erpMaterialId,
+      erpMaterialCode: fixture.erpCodeA,
+      erpMaterialInternalId: fixture.erpItemA,
+      materialStatus: 'active',
+    }],
+  }
+  const erpSync = await req(`${API}/mvp/erp-materials/sync${scope()}`, { method: 'POST', body: erpSyncBody, accept: [201], label: 'erp-materials-sync' })
+  const erpSyncData = erpSync.body?.data || {}
+  S.erpSyncHttp = erpSync.status
+  S.erpSyncMode = safeMode(erpSyncData.mode)
+  S.erpSyncRunStatus = safeStatus(erpSyncData.runStatus)
+  S.erpSyncCreated = projectCounts(erpSyncData.created, ['materials', 'run'])
+  must('erp-materials sync -> 201 created {materials:1} runType succeeded',
+    erpSync.ok && erpSyncData.persisted === true && erpSyncData.mode === 'created' &&
+    erpSyncData.created?.materials === 1 && erpSyncData.runStatus === 'succeeded',
+    `http=${erpSync.status} mode=${S.erpSyncMode} created=${S.erpSyncCreated}`)
+
+  const erpResync = await req(`${API}/mvp/erp-materials/sync${scope()}`, { method: 'POST', body: erpSyncBody, accept: [201], label: 'erp-materials-resync' })
+  const erpResyncData = erpResync.body?.data || {}
+  S.erpResyncHttp = erpResync.status
+  S.erpResyncMode = safeMode(erpResyncData.mode)
+  S.erpResyncPatched = projectCounts(erpResyncData.patched, ['materials', 'run'])
+  must('erp-materials re-sync -> refreshed (patched materials:1, no duplicate create)',
+    erpResync.ok && erpResyncData.mode === 'refreshed' &&
+    erpResyncData.patched?.materials === 1 && erpResyncData.created?.materials === 0,
+    `http=${erpResync.status} mode=${S.erpResyncMode} patched=${S.erpResyncPatched}`)
+
   // ── 8. cleanup retires (also the mapping_retire / unit_retire audit actions) ─────────────────────
   let retiredMappings = 0
   for (const mappingId of [confirmedMappingId, ...createdCandidateIds]) {
