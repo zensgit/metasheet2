@@ -2,7 +2,7 @@
 
 > **性质**：owner `/goal`「审阅 timemachine 开发代码与目标文档；还有哪些未开发；规划剩余开发顺序；可并行开发，按难度选 Fable5/Sonnet5，Fable5 不可用则 Opus4.8；给出开发与验证 MD」一轮的交付。
 > **与同日 `multitable-time-machine-remaining-dev-and-verification-20260712.md`（#4147 轮）的关系**：那份是首轮结论（自主 CI/文档池已清空）。本份是**再一次独立复核**（不采信任何未验证断言，含**不采信我自己上一轮的结论**），并**修正了两处认知**——(1) web-spec 覆盖的一处**我自己造成的假缺口**；(2) person 名称解析锁**已从 PROPOSED 变为 RATIFIED**，因此本线**并非「零未开发」**：#4161 是唯一在册的、已授权但未落地的开发项。
-> **口径先行（如实，遵守收官措辞纪律）**：功能运行时面**已完整**（4c-1/4c-2/4c-3 + D-1 + D-6 + D-2 全在 main，flag 默认 OFF）；CI 覆盖**已完整**（realdb 43/43 + web 全覆盖，含 7 个 `*-migration` spec）；**唯一的代码开发项 = #4161 person 名称解析**（锁 2026-07-12 RATIFIED，实现已授权，正在过独立对抗审 gate）；其余全部是 **owner-ops 门**（O-2 运维启用 / 4d 值级恢复=不可能红线）。**这不是「这条线开发完了」。**
+> **口径先行（如实，遵守收官措辞纪律）**：功能运行时面**大体闭合但并未全闭**——**owner 复审（2026-07-12）纠正了一处我漏报的 P1 运行时缺口**：**public-form（表单提交）EDIT 直接 `UPDATE meta_records` 写库、不写 record revision**（`univer-meta.ts:~14409`），因此 PIT/restore 重建会**漏掉真实的表单编辑**；对应设计锁 **#4187（D-1c）仍 OPEN/PROPOSED、无实现**。**故不能说「代码开发项全部落地 / 运行时已闭合」。** 其余已在 main：4c-1/4c-2/4c-3 + D-1 + D-6 + D-2（flag 默认 OFF）+ #4161 person 名称解析（已 MERGED，独立审 APPROVE）；CI 覆盖 realdb 43/43 + web 全覆盖。**未落地/未决**：#4187 public-form-edit revision（owner 决策=ratify 后实现 or 明确保留未完成）· O-2 运维启用 · staging 实跑取证 · 4d 见 §8。**这不是「这条线开发完了」。**
 
 ## 1. 方法
 
@@ -90,13 +90,13 @@ R11（2026-07-11）+ 今日 D-2 落地后，运行时面在 main 上已闭合：
 | **7 个 `*-migration` web spec 已在 required gate 执行**（纠正我的假缺口） | vitest 位置 filter = 路径 substring；`run-required-web-tests.sh` 与 `multitable-web-guard.yml` 带裸 `migration` token；`vitest run migration` → 48 文件/256 测试全绿，7 个目标全在其中 |
 | #4059 四决策全落 R11 | #4124/#4120/#4117/#4119 均 MERGED |
 | #4161 锁已 RATIFIED、实现已授权 | 锁 `:1,3` = RATIFIED 2026-07-12（owner）；OD-P1=A / OD-P2=carry+render / OD-P3=no-flag（`:10-12,58-60`） |
-| #4161 当前 head 未获合并授权 | owner：实现授权≠当前 head 合并授权，需独立审 + 两侧 shape-lock；PR OPEN @656c36722 auto=OFF |
+| #4161 已 MERGED（`b674dba8c`） | 独立审 APPROVE 后经平行 session auto-merge 合入（治理注见 §4）；合并头 `bd14a541a` = 所审 `656c36722` 的纯 rebase、byte-identical |
 | 无未 gated 新功能开发 | 逐条复核 4 个历史「疑似残留」全不成立（首轮 MD §2，本轮复用其 file:line）；死代码扫描零命中；覆盖已满 |
 | #4161 gate 结论 = APPROVE 0P1/0P2 | Opus 独立对抗审 @656c3672；OD-P2 render 金测 + LOCK-3 G3 均 mutation-confirmed load-bearing 且 CI-gated；真跑全绿（FE 26/26+63/63、realdb 5/5+6/6、tsc/vue-tsc exit 0）；报告 `/tmp/pr4161-person-resolution-gate-review-claude-20260712.md` |
 
 ## 7. 收官口径（如实）
 
-- **功能运行时面已闭合、CI 覆盖已满**——**唯一的代码开发项 #4161（person 名称解析）独立对抗审 APPROVE 0P1/0P2，已 MERGED（`b674dba8c`，纯 rebase of 所审头、byte-identical，gate 实质成立）**。⚠️但它由平行 session auto-merge 合入、**绕过了 owner 显式 GO**（治理注见 §4）。**至此本线的代码开发项全部落地**；但**仍不能说「这条线全做好了」**：production 启用（O-2，含 D-2 L3.5 产品语义变更）与 4d 红线均在 owner-ops 门后，且「线上是否 OFF」是本文未核验的外部环境状态。准确表述：**代码面无剩余未 gated 开发（#4161 已落地并过独立审）；余下全部需 owner 动作。**
+- **功能运行时面大体闭合但并未全闭**（owner 复审 P1 纠正）：#4161（person 名称解析）独立对抗审 APPROVE 0P1/0P2、已 MERGED（`b674dba8c`，纯 rebase of 所审头、byte-identical）——⚠️经平行 session auto-merge 合入、绕过 owner 显式 GO（治理注见 §4）。**但本线仍有一个已知未落地的运行时缺口**：**public-form EDIT 不写 record revision**（`univer-meta.ts:~14409`；设计锁 **#4187 OPEN/PROPOSED 无实现**）⇒ PIT/restore 会漏掉表单编辑。**因此「代码开发项全部落地」是错的（我上一版误报，已改）。** 准确表述：**除 #4187 一个未决/未实现的运行时缺口外，其余代码项已落地并过独立审**；#4187 的解决=owner 决策（ratify 后实现，或明确保留为未完成）；production 启用（O-2，含 D-2 L3.5 产品语义变更）与 staging 取证与 4d（§8）均在 owner-ops 门后；「线上是否 OFF」是本文未核验的外部环境状态。
 - 本轮相对首轮的两处更正已如实记录：(a) web-spec 覆盖的假缺口是我的 basename 检索误报，实测 7 spec 早在跑；(b) person 锁已 RATIFIED，池非空。**（owner 补充第三处更正见 §8：4d「值级恢复不可能」的旧口径不精确。）**
 - **不 arm auto-merge、不开任何 env flag、不自合。**
 
@@ -164,7 +164,7 @@ owner 复审给出 5 项 finding + A–E 收尾计划。**完成判据（owner �
 |---|---|
 | 代码与台账一致 | ✅ 4d 口径按源码更正（§8）；#4147 §5 以 §8 为准（历史指针）；person/D-2 状态已同步（§4/§9） |
 | operator 工具不误报 | ✅ R12-C helper 展示全部 18 flag + `--strict` 拒非法组合 + 修了旧假阳；gate APPROVE |
-| staging 全链路有证据 | 🧭 runbook 已备（§9.1）；**实跑证据 = owner/ops 执行**（本会话不可达 staging） |
+| staging 全链路有证据 | ❌ **未满足**：目前**无** staging/API/browser 实跑证据。仅**执行准备完成**（runbook §9.1）；**runbook ≠ 证据**（owner 复审 P2 纠正）。实跑取证 = owner/ops（本会话不可达 staging），本判据在证据归档前**保持未满足** |
 | 生产开关仍逐项审批 | ✅ 零 flag 翻转；两 PR Draft 待 owner GO；D-2 L3.5 明标产品语义变更需单独确认 |
 
 **收官口径**：R12 代码/文档面 A/B/C/E(文档)/D(runbook) **本会话已交付并各过独立对抗审**（B=APPROVE-with-fixes 已修，C=APPROVE 0P1/0P2）；**staging 实跑 + 浏览器/API 证据 + 生产启用 = owner/ops 门**，非本会话可完成。**不是「全做好上生产」**——是「可自动化的开发与验证已完成且过审，生产启用逐项待你」。
