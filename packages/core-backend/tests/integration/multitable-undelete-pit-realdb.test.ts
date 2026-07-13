@@ -45,6 +45,12 @@ async function seed(): Promise<void> {
   // L: a LIVE record that links to U. U's delete dropped BOTH directions, so L's inbound edge to U is gone, but L's
   // DATA still references U → inbound (A) re-appears only when L is re-saved, NOT by the undelete.
   await q('INSERT INTO meta_records (id, sheet_id, data, version) VALUES ($1,$2,$3::jsonb,1)', [L, SHEET, JSON.stringify({ [NAME]: 'L', [LINK]: [U] })])
+  // D-1c §0.6 fixture repair: L must be CAPTURE-COMPLETE (a create revision matching its live row) —
+  // otherwise the sheet-wide precheck sees a live record with zero revisions (the uncaptured-CREATE
+  // fingerprint) and correctly refuses every preview/execute in this suite before the resurrect logic
+  // under test ever runs. This is a fixture fix, not a §0.6 weakening: L was always meant to be a normal
+  // captured neighbour, not the uncaptured-write class §0.6 exists to catch.
+  await rev(L, 1, 'create', { [NAME]: 'L', [LINK]: [U] }, T0)
 }
 
 describeIfDatabase('multitable T8-1 PIT undelete-execute (real DB)', () => {
@@ -152,8 +158,16 @@ describeIfDatabase('multitable T8-1 PIT undelete-execute (real DB)', () => {
     // check. (The FOR UPDATE / unique-violation→409 guard is the deeper TOCTOU backstop, not reached here.) Either way:
     // 409 and the squatter is never overwritten.
     await q('INSERT INTO meta_records (id, sheet_id, data, version) VALUES ($1,$2,$3::jsonb,7)', [U, SHEET, JSON.stringify({ [NAME]: 'squatter' })])
+    // D-1c §0.6 fixture repair (P3-4): the squatter must ALSO be capture-complete (a matching revision) —
+    // otherwise the sheet-wide precheck refuses on the zero-revision-live-row rule first (still a 409, but
+    // for the WRONG reason, silently defeating this test's own re-enumeration/resurrectScopeHash-mismatch
+    // mechanism). created_at=T2 keeps it OUT of the T1 reconstruction window (U's target-at-T1 stays the
+    // original create snapshot), so the diff against the squatter's live data still exists and U still
+    // reclassifies from resurrect to revert at execute — exactly the drift this test exercises.
+    await rev(U, 7, 'create', { [NAME]: 'squatter' }, T2)
     const x = await execute(T1, pv.body?.data?.previewIdentity, 'undelete')
     expect([409, 410]).toContain(x.status)
+    expect(x.body?.error?.code).toBe('PREVIEW_IDENTITY_INVALID') // pins the INTENDED path, not a §0.6 refusal
     const live = await liveRow(U)
     expect(live?.data?.[NAME]).toBe('squatter') // never overwritten
     expect(live?.version).toBe(7)

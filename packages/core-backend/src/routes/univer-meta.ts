@@ -74,6 +74,7 @@ import { createPersonMemberResolver, personRestrictGroupIds, resolvePersonAssign
 import { resolveUserDisplayNames } from '../multitable/user-display'
 import { loadHistoryBatchSummaries, loadHistoryBatchDetail, estimateHistoryHasMore } from '../multitable/history-projection'
 import { reconstructRecordsAtT } from '../multitable/record-reconstructor'
+import { precheckSheetHistoryIntegrity } from '../multitable/history-integrity-precheck'
 import { hashPreviewChanges, hashScope, hashResurrectSet, hashDeleteSet, mintRestorePreviewIdentity, mintScopedRestorePreviewIdentity, verifyRestorePreviewIdentity, verifyScopedRestorePreviewIdentity, mintPitRevertPreviewIdentity, verifyPitRevertPreviewIdentity, mintPitResetPreviewIdentity, verifyPitResetPreviewIdentity, mintConfigRestorePreviewIdentity, verifyConfigRestorePreviewIdentity, hashLossSummary, type UncreatePlan, hashUncreatePlan, mintConfigUncreatePreviewIdentity, verifyConfigUncreatePreviewIdentity, type UndeletePlan, hashUndeletePlan, mintConfigUndeletePreviewIdentity, verifyConfigUndeletePreviewIdentity, hashPermissionGrant, mintConfigPermissionRevertPreviewIdentity, verifyConfigPermissionRevertPreviewIdentity } from '../multitable/restore-preview-identity'
 import {
   recordConfigRevision,
@@ -9936,13 +9937,19 @@ export function univerMetaRouter(): Router {
   const computeSheetRevert = async (
     pool: ReturnType<typeof poolManager.get>, req: Request, sheetId: string, asOfIso: string,
     access: RevertSheetCaps['access'], capabilities: RevertSheetCaps['capabilities'],
-  ): Promise<null | SheetRevertTooLarge | { reverts: Array<{ recordId: string; diff: RecordChange[]; changesHash: string; version: number }>; resurrects: Array<{ recordId: string; snapshot: Record<string, unknown>; snapshotHash: string }>; undeleteCount: number; keptCreatedAfterT: number; createdAfterTIds: string[]; driftCount: number; patchContext: Awaited<ReturnType<typeof buildRecordPatchContext>> }> => {
+  ): Promise<null | SheetRevertTooLarge | { historyIncomplete: true } | { reverts: Array<{ recordId: string; diff: RecordChange[]; changesHash: string; version: number }>; resurrects: Array<{ recordId: string; snapshot: Record<string, unknown>; snapshotHash: string }>; undeleteCount: number; keptCreatedAfterT: number; createdAfterTIds: string[]; driftCount: number; patchContext: Awaited<ReturnType<typeof buildRecordPatchContext>> }> => {
     const asRec = (v: unknown): Record<string, unknown> => (v && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, unknown>) : {})
     const patchContext = await buildRecordPatchContext(req, pool.query.bind(pool), sheetId, access, capabilities)
     if (!patchContext) return null
     const { fieldById } = patchContext
     const recordCount = Number(((await pool.query('SELECT count(*)::int AS c FROM meta_records WHERE sheet_id = $1', [sheetId])).rows[0] as { c: number }).c)
     if (recordCount > SHEET_REVERT_MAX_RECORDS) return { tooLarge: true, recordCount, scope: 'live_sheet' } // D3/PIT-6 fail-closed before the full scan
+    // D-1c §0.6 HISTORY_INCOMPLETE (owner hard-lock, RATIFIED 2026-07-13): fail-closed integrity precheck,
+    // SHARED by preview and execute (both call this compute — the execute re-check is by construction, and it
+    // runs BEFORE the previewIdentity verification, which is revision-derived and blind to uncaptured writes).
+    // Refusal ⇒ no token minted, zero rows written.
+    const integrity = await precheckSheetHistoryIntegrity(pool.query.bind(pool), sheetId)
+    if (!integrity.ok) return { historyIncomplete: true }
     const rawTypeById = new Map<string, string>(((await pool.query('SELECT id, type FROM meta_fields WHERE sheet_id = $1', [sheetId])).rows as Array<{ id: string; type: unknown }>).map((r) => [String(r.id), String(r.type ?? '').trim().toLowerCase()]))
     const baseAllowed = await loadAllowedFieldIds(pool.query.bind(pool), sheetId, access.userId, capabilities)
     const allowed = await maskStoredRecordFieldIds(req, pool.query.bind(pool), sheetId, undefined, baseAllowed) // PIT-3 mask; NO reveal (PIT-7)
@@ -9999,6 +10006,7 @@ export function univerMetaRouter(): Router {
   type PitResetComputation =
     | null
     | { tooLarge: true; recordCount: number }
+    | { historyIncomplete: true }
     | { blocked: true; reason: 'denied' | 'forbidden' | 'schema_drift' | 'undelete_unsupported' }
     | {
         reverts: PitResetRevert[]
@@ -10016,6 +10024,12 @@ export function univerMetaRouter(): Router {
     const { fieldById, fieldPermissions } = patchContext
     const recordCount = Number(((await pool.query('SELECT count(*)::int AS c FROM meta_records WHERE sheet_id = $1', [sheetId])).rows[0] as { c: number }).c)
     if (recordCount > SHEET_REVERT_MAX_RECORDS) return { tooLarge: true, recordCount }
+    // D-1c §0.6 HISTORY_INCOMPLETE (owner hard-lock, RATIFIED 2026-07-13): shared fail-closed precheck — same
+    // doctrine as computeSheetRevert above. Rule 3 is load-bearing HERE: the delete-set loop below pushes live
+    // rows absent from the reconstruction into `deletes`, so an uncaptured-CREATE row would be silently
+    // destroyed if the precheck did not enumerate the LIVE row set first.
+    const integrity = await precheckSheetHistoryIntegrity(pool.query.bind(pool), sheetId)
+    if (!integrity.ok) return { historyIncomplete: true }
     const rawTypeById = new Map<string, string>(((await pool.query('SELECT id, type FROM meta_fields WHERE sheet_id = $1', [sheetId])).rows as Array<{ id: string; type: unknown }>).map((r) => [String(r.id), String(r.type ?? '').trim().toLowerCase()]))
     const baseAllowed = await loadAllowedFieldIds(pool.query.bind(pool), sheetId, access.userId, capabilities)
     const allowed = await maskStoredRecordFieldIds(req, pool.query.bind(pool), sheetId, undefined, baseAllowed)
@@ -10056,6 +10070,17 @@ export function univerMetaRouter(): Router {
     return { reverts, deletes, patchContext }
   }
 
+  // D-1c §0.6 unified refusal (rule 1): one values-free 409 for all four routes (revert/reset × preview/execute).
+  // Deliberately carries NO record ids and NO counts — the refusal must not become a denied-record existence
+  // oracle — and, being an error response, carries no previewIdentity: refusal ⇒ no execute token exists.
+  const sendHistoryIncomplete = (res: Response) => res.status(409).json({
+    ok: false,
+    error: {
+      code: 'HISTORY_INCOMPLETE',
+      message: 'Record history for this sheet is incomplete or inconsistent with its live data; destructive recovery is refused and nothing was written. History must be trustworthy before revert/reset can run.',
+    },
+  })
+
   const sendPitResetBlocked = (res: Response, reason: 'denied' | 'forbidden' | 'schema_drift' | 'undelete_unsupported') => {
     if (reason === 'schema_drift' || reason === 'undelete_unsupported') {
       return res.status(422).json({ ok: false, error: { code: 'RESET_UNSUPPORTED', message: 'Reset-to-T cannot be executed for this sheet without a separate schema-drift/undelete slice; nothing written.' } })
@@ -10084,6 +10109,7 @@ export function univerMetaRouter(): Router {
       const computed = await computeSheetRevert(pool, req, sheetId, asOfIso, access, capabilities)
       if (!computed) return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
       if ('tooLarge' in computed) return res.status(413).json({ ok: false, error: { code: 'SHEET_TOO_LARGE', message: sheetRevertTooLargeMessage(computed) } })
+      if ('historyIncomplete' in computed) return sendHistoryIncomplete(res) // D-1c §0.6 — refused BEFORE any token is minted
       const { reverts, resurrects, undeleteCount, keptCreatedAfterT, driftCount } = computed
       const previewIdentity = (reverts.length > 0 || resurrects.length > 0)
         ? mintPitRevertPreviewIdentity({
@@ -10123,6 +10149,10 @@ export function univerMetaRouter(): Router {
       const computed = await computeSheetRevert(pool, req, sheetId, asOfIso, access, capabilities)
       if (!computed) return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
       if ('tooLarge' in computed) return res.status(413).json({ ok: false, error: { code: 'SHEET_TOO_LARGE', message: sheetRevertTooLargeMessage(computed) } })
+      // D-1c §0.6 rule 4 (TOCTOU): the execute re-check refuses HERE — before previewIdentity verification and
+      // before any transaction — so a preview that passed never licenses an execute over history that has since
+      // gone untrustworthy. Zero writes on this path.
+      if ('historyIncomplete' in computed) return sendHistoryIncomplete(res)
       const { reverts, resurrects, patchContext } = computed
       // T8-1 undelete gate: a revert that would resurrect deleted records needs the default-off flag, the
       // canDeleteRecord floor (NEVER canEditRecord — record resurrection, not edit), and a typed confirm:'undelete'.
@@ -10298,6 +10328,7 @@ export function univerMetaRouter(): Router {
       const computed = await computeSheetReset(pool, req, sheetId, asOfIso, access, capabilities)
       if (!computed) return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
       if ('tooLarge' in computed) return res.status(413).json({ ok: false, error: { code: 'SHEET_TOO_LARGE', message: `This sheet has ${computed.recordCount} records, above the ${SHEET_REVERT_MAX_RECORDS}-record reset ceiling; a sheet-wide reset of this size is refused.` } })
+      if ('historyIncomplete' in computed) return sendHistoryIncomplete(res) // D-1c §0.6 — refused BEFORE any token is minted
       if ('blocked' in computed) return sendPitResetBlocked(res, computed.reason)
       const { reverts, deletes } = computed
       const previewIdentity = (reverts.length > 0 || deletes.length > 0)
@@ -10340,6 +10371,9 @@ export function univerMetaRouter(): Router {
       const computed = await computeSheetReset(pool, req, sheetId, asOfIso, access, capabilities) // RE-ENUMERATE reverts + delete-set
       if (!computed) return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
       if ('tooLarge' in computed) return res.status(413).json({ ok: false, error: { code: 'SHEET_TOO_LARGE', message: `This sheet has ${computed.recordCount} records, above the ${SHEET_REVERT_MAX_RECORDS}-record reset ceiling; a sheet-wide reset of this size is refused.` } })
+      // D-1c §0.6 rule 4 (TOCTOU): execute re-check — refused before previewIdentity verification and before
+      // the destructive transaction. Zero writes on this path.
+      if ('historyIncomplete' in computed) return sendHistoryIncomplete(res)
       if ('blocked' in computed) return sendPitResetBlocked(res, computed.reason)
       const { reverts, deletes, patchContext } = computed
       // Verify the signed reset identity against the RE-ENUMERATED reverts AND delete-set. A record created between
