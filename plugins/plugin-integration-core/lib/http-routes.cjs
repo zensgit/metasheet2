@@ -80,6 +80,9 @@ const ROUTES = [
   // stored config by reference; raw rows, paths, SQL, credentials, and write controls are absent.
   ['POST', '/api/integration/stock-preparation/mvp/source-runs/plm-bom', 'stockPreparationPlmBomSourceRun'],
   ['POST', '/api/integration/stock-preparation/mvp/source-runs/erp-materials', 'stockPreparationErpMaterialSourceRun'],
+  // #4163 T1: readonly, values-free PROJECT list (FE view 1, the project workspace / selector — the
+  // deep-link entry point into views 2-6). read-gated (broader than the rest of this module).
+  ['GET', '/api/integration/stock-preparation/projects', 'stockPreparationProjectList'],
   // #3751 MVP view 2: readonly snapshot-batch LIST + DIFF reads (queryRecords-only, admin-gated,
   // values-free). List is exact-path; diff carries the batch id in the path.
   ['GET', '/api/integration/stock-preparation/snapshot-batches', 'stockPreparationSnapshotBatchList'],
@@ -304,6 +307,10 @@ const {
   getSnapshotDiff,
   listSnapshotDiffRows,
 } = require('./stock-preparation-snapshot-reads.cjs')
+// #4163 T1: READONLY project LIST (FE view 1, the project workspace / selector). queryRecords-only;
+// READ-gated (broader than the rest of this module — see the route); values-free (projectName /
+// sourceProjectNo never cross, OWNER-GATED OD-W3-1, not opened here).
+const { listStockPreparationProjects } = require('./stock-preparation-project-reads.cjs')
 // #3751 MVP W3 (diff rows): route-level enum gates for the diff-row filters come from the SAME frozen
 // vocabularies the engine exports (never re-typed literals).
 const { DIFF_TYPES: STOCK_PREPARATION_DIFF_TYPES, REVIEW_STATUSES: STOCK_PREPARATION_REVIEW_STATUSES } = require('./stock-preparation-snapshot-diff.cjs')
@@ -644,16 +651,22 @@ const VALID_STOCK_PREPARATION_MVP_OPTION_SYNC_REQUEST_KEYS = new Set([
   'optionSources',
   'configInfo',
 ])
-// #3751 MVP: closed allowlist for the readonly sync-RUN PLAN route. Carries the readonly plan inputs
-// only — an already-produced expansion result + optional prior batch/lines + plan ids/version/source.
-// NEVER a credential, sheetId, or SQL. `projectId` here is the PLM business project id (preserved
-// verbatim into the plan row), not a workspace sheet id.
+// #3751 MVP: closed allowlist for the readonly sync-RUN PLAN route — ALSO reused verbatim by the
+// COMMIT (persist) route below it (same body the admin previewed with /plan is replayed to /persist).
+// Carries the readonly plan inputs only — an already-produced expansion result + optional prior
+// batch/lines + plan ids/version/source — PLUS (#4163 T1) the project row's own populator inputs
+// (`sourceProjectNo` / `projectName`): the plan orchestrator ignores both (it has no project-row
+// concept), but /persist consumes them to upsert the project row. NEVER a credential, sheetId, or SQL.
+// `projectId` here is the PLM business project id (preserved verbatim into the plan row), not a
+// workspace sheet id.
 const VALID_STOCK_PREPARATION_MVP_SYNC_PLAN_REQUEST_KEYS = new Set([
   'projectId',
   'syncRunId',
   'snapshotBatchId',
   'snapshotVersion',
   'sourceSystem',
+  'sourceProjectNo',
+  'projectName',
   'expansionResult',
   'previousSnapshotBatchId',
   'previousLines',
@@ -682,6 +695,14 @@ const VALID_STOCK_PREPARATION_ERP_SOURCE_RUN_REQUEST_KEYS = new Set([
   'readSourceConfigId',
   'inputs',
   'syncRunId',
+])
+// #4163 T1: closed query allowlist for the readonly PROJECT list. Unlike every other read in this
+// module family, this route is NOT scoped to one business projectId — the project table IS the
+// top-level list an operator picks a projectId FROM — so only the tenant/workspace scope rides the
+// query (used to derive the STAGING targetProjectId; never a sheetId / credential / SQL).
+const VALID_STOCK_PREPARATION_PROJECT_LIST_QUERY_KEYS = new Set([
+  'tenantId',
+  'workspaceId',
 ])
 // #3751 MVP view 2: closed query allowlist for the readonly snapshot-batch LIST + DIFF reads. Only the
 // tenant/workspace scope + the (business) projectId; the batch id rides the DIFF route PATH, never the
@@ -1155,6 +1176,8 @@ function stockPreparationMvpSyncPlanInput(rawInput = {}) {
 
 // #3751 MVP: the COMMIT request allowlist is IDENTICAL to the sync-plan allowlist (same body the admin
 // previewed with /plan is replayed to /persist). Reuse the frozen key set; a persist-specific error code.
+// #4163 T1: `sourceProjectNo` / `projectName` ALSO ride this same body — persist (unlike plan) actually
+// consumes them to upsert the project row.
 function stockPreparationMvpSyncPersistInput(rawInput = {}) {
   if (!isPlainObject(rawInput)) {
     throw new HttpRouteError(400, 'STOCK_PREPARATION_MVP_SYNC_PERSIST_REQUEST_INVALID', 'request must be an object')
@@ -1170,6 +1193,8 @@ function stockPreparationMvpSyncPersistInput(rawInput = {}) {
     snapshotBatchId: rawInput.snapshotBatchId,
     snapshotVersion: rawInput.snapshotVersion,
     sourceSystem: rawInput.sourceSystem,
+    sourceProjectNo: rawInput.sourceProjectNo,
+    projectName: rawInput.projectName,
     expansionResult: rawInput.expansionResult,
     previousSnapshotBatchId: rawInput.previousSnapshotBatchId,
     previousLines: rawInput.previousLines,
@@ -1228,6 +1253,20 @@ function normalizeStockPreparationSnapshotReadQuery(input = {}, code, allowedKey
     out[key] = firstString(input[key])
   }
   return out
+}
+
+// #4163 T1: PROJECT LIST query — tenant/workspace scope only (no business projectId: this route lists
+// every synced project, it does not filter rows OF one). `targetProjectId` is the STAGING locator the
+// MVP tables were provisioned under, derived from the auth tenant (never request-sourced), via the
+// SAME resolveIntegrationStagingProjectId the ensure/readiness/persist routes use.
+function stockPreparationProjectListInput(req, rawQuery = {}) {
+  const input = normalizeStockPreparationSnapshotReadQuery(rawQuery, 'STOCK_PREPARATION_PROJECT_LIST_REQUEST_INVALID', VALID_STOCK_PREPARATION_PROJECT_LIST_QUERY_KEYS)
+  const tenantId = resolveTenantId(req, input)
+  return {
+    tenantId,
+    workspaceId: input.workspaceId,
+    targetProjectId: resolveIntegrationStagingProjectId(tenantId, undefined),
+  }
 }
 
 // LIST: `projectId` is the PLM business project (REQUIRED — it filters + is echoed). `targetProjectId`
@@ -3672,6 +3711,8 @@ function createHandlers(services, options = {}) {
         snapshotBatchId: input.snapshotBatchId,
         snapshotVersion: input.snapshotVersion,
         sourceSystem: input.sourceSystem,
+        sourceProjectNo: input.sourceProjectNo,
+        projectName: input.projectName,
         expansionResult: input.expansionResult,
         previousSnapshotBatchId: input.previousSnapshotBatchId,
         previousLines: input.previousLines,
@@ -3734,6 +3775,29 @@ function createHandlers(services, options = {}) {
         ...sourceRuntime,
       })
       return sendOk(res, publicReadonlySourceRunResult(result))
+    },
+
+    // #4163 T1: values-free project LIST — backs FE view 1 (project workspace / selector), the
+    // deep-link entry point into views 2-6. read-gated (broader than the rest of this admin-only
+    // module — the project selector is meant for any integration:read/write/admin caller to light up
+    // the in-UI chain, not just admins). queryRecords-only; projectName / sourceProjectNo NEVER cross
+    // (OWNER-GATED OD-W3-1, not opened by this slice).
+    async stockPreparationProjectList(req, res) {
+      requireAccess(req, 'read')
+      const input = stockPreparationProjectListInput(req, requestQuery(req))
+      const provisioning = context && context.api && context.api.multitable
+        ? context.api.multitable.provisioning
+        : undefined
+      if (!provisioning) {
+        throw new HttpRouteError(501, 'PROJECT_READS_PROVISIONING_API_UNAVAILABLE', 'multitable provisioning API is not available')
+      }
+      const result = await listStockPreparationProjects({
+        recordsApi: getMultitableRecordsApi(),
+        provisioning,
+        targetProjectId: input.targetProjectId,
+        permission: 'read',
+      })
+      return sendOk(res, result)
     },
 
     // #3751 MVP view 2: readonly LIST of the immutable BOM snapshot batches for a business project.

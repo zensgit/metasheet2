@@ -5,15 +5,19 @@
 // invariants, not just the happy path. Covered:
 //   (a) happy path — batch -> lines -> run each written to its OWN resolved MVP sheet; every write's
 //       objectId (mapped back from the recorded sheetId) is in the frozen MVP set; ordering is
-//       batch-first, run-last; patchRecord is never called;
+//       batch-first, run-last; patchRecord is never called ON THE BATCH/LINE/RUN sheets;
 //   (b) idempotency — a second persist of the same snapshotBatchId is SKIPPED (no new batch create);
-//   (c) immutability — patchRecord / update is NEVER called on any path;
+//   (c) immutability — patchRecord / update is NEVER called on the batch/line/run sheets on any path;
 //   (d) grounding — a stamped missing_child_bom line persists WITHOUT the plan-internal missingChildBom
 //       marker (records service rejects unknown fieldIds), and every persisted line key is template-declared;
-//   (e) target not provisioned — fail closed with NO writes;
+//   (e) target not provisioned — fail closed with NO writes (now including the PROJECT sheet);
 //   (f) admin-permission-denied — 403 BEFORE any provisioning / records access;
 //   (g) values-free evidence — a planted leaky projectId + drawing number is absent from evidence
-//       (while the persisted row payload legitimately carries it).
+//       (while the persisted row payload legitimately carries it);
+//   (h) #4163 T1 — project-row UPSERT: create on first sync, PATCH (not a duplicate create) on a
+//       SECOND, genuinely-new batch for the same project; the patch never carries owner / sourceProjectNo
+//       / projectName (human_preserved + first-synced identity survive untouched); a duplicate/retried
+//       persist of the SAME snapshotBatchId leaves the project row untouched entirely (idempotent skip).
 
 const assert = require('node:assert/strict')
 const path = require('node:path')
@@ -25,6 +29,8 @@ const {
   BATCH_OBJECT_ID,
   LINE_OBJECT_ID,
   RUN_OBJECT_ID,
+  PROJECT_OBJECT_ID,
+  PROJECT_KEY_FIELD,
   __internals: { MVP_OBJECT_ID_SET },
 } = require(path.join(__dirname, '..', 'lib', 'stock-preparation-sync-run-persist.cjs'))
 const {
@@ -40,6 +46,7 @@ const {
 const BATCH_SHEET_ID = `sheet_${BATCH_OBJECT_ID}`
 const LINE_SHEET_ID = `sheet_${LINE_OBJECT_ID}`
 const RUN_SHEET_ID = `sheet_${RUN_OBJECT_ID}`
+const PROJECT_SHEET_ID = `sheet_${PROJECT_OBJECT_ID}`
 const LINE_FIELD_ID_SET = new Set(LINE_FIELD_IDS)
 
 // A leaky project id + drawing number carrying a unique token that MUST NEVER reach evidence.
@@ -126,13 +133,15 @@ function cleanExpansionResult() {
 
 // `projectId` is the BUSINESS project (rides the plan rows); `targetProjectId` is the internal STAGING
 // project used only for sheet resolution — the module destructures it out before recomputing the plan, so
-// it never reaches the plan/business rows. They are deliberately DIFFERENT values here.
+// it never reaches the plan/business rows. They are deliberately DIFFERENT values here. `sourceProjectNo`
+// is the project row's own required populator input (#4163 T1) — unrelated to the plan orchestrator.
 function basePlanInputs(overrides = {}) {
   return {
     projectId: 'proj_1',
     targetProjectId: STAGING_PROJECT_ID,
     syncRunId: 'run_1',
     snapshotBatchId: 'batch_1',
+    sourceProjectNo: 'PN-1',
     defaultDesignUnit: 'pcs',
     expansionResult: cleanExpansionResult(),
     ...overrides,
@@ -160,12 +169,13 @@ async function main() {
     assert.equal(result.mode, 'created')
     assert.deepEqual(result.created, { batch: 1, lines: 2, run: 1 })
 
-    // 4 creates: 1 batch, 2 lines, 1 run — in that order.
-    assert.equal(recordsApi.createCalls.length, 4)
+    // 5 creates: 1 batch, 2 lines, 1 run, THEN the project row (upserted last) — in that order.
+    assert.equal(recordsApi.createCalls.length, 5)
     assert.equal(recordsApi.createCalls[0].sheetId, BATCH_SHEET_ID, 'batch written first')
     assert.equal(recordsApi.createCalls[1].sheetId, LINE_SHEET_ID)
     assert.equal(recordsApi.createCalls[2].sheetId, LINE_SHEET_ID)
-    assert.equal(recordsApi.createCalls[3].sheetId, RUN_SHEET_ID, 'run written last')
+    assert.equal(recordsApi.createCalls[3].sheetId, RUN_SHEET_ID, 'run written last of batch/line/run')
+    assert.equal(recordsApi.createCalls[4].sheetId, PROJECT_SHEET_ID, 'project row upserted last overall')
 
     // Every write landed on a sheet whose objectId is in the frozen MVP set (mapped back from sheetId).
     for (const call of recordsApi.createCalls) {
@@ -179,18 +189,31 @@ async function main() {
     assert.equal(logicalOf(recordsApi.createCalls[3]).runId, 'run_1')
     assert.equal(logicalOf(recordsApi.createCalls[3]).runType, 'plm_sync')
 
-    // Immutability: no patch ever.
+    // #4163 T1: the project row was CREATED (first sync for this project) — key + required field +
+    // status + last-sync pointer, and projectName is ABSENT (the plan input never supplied one).
+    const projectRow = logicalOf(recordsApi.createCalls[4])
+    assert.equal(projectRow[PROJECT_KEY_FIELD], 'proj_1')
+    assert.equal(projectRow.sourceProjectNo, 'PN-1')
+    assert.equal(projectRow.projectStatus, 'active')
+    assert.equal(projectRow.lastSyncRunId, 'run_1')
+    assert.equal(typeof projectRow.lastSyncedAt, 'string')
+    assert.equal('projectName' in projectRow, false, 'projectName not invented when absent from input')
+    assert.deepEqual(result.project, { mode: 'created' })
+
+    // Immutability: no patch ever (batch/line/run/project ALL created on a first sync).
     assert.equal(recordsApi.patchCalls.length, 0)
     // Evidence is values-free & carries the public objectId constants.
     assert.equal(result.evidence.valuesFree, true)
     assert.equal(result.evidence.targets.snapshotBatch.objectId, BATCH_OBJECT_ID)
     assert.equal(result.evidence.targets.snapshotLine.objectId, LINE_OBJECT_ID)
     assert.equal(result.evidence.targets.syncRun.objectId, RUN_OBJECT_ID)
+    assert.equal(result.evidence.targets.project.objectId, PROJECT_OBJECT_ID)
+    assert.equal(result.evidence.projectSync.mode, 'created')
     assert.equal(result.evidence.plannedLineCount, 2)
 
-    // THE SPLIT: sheet resolution used the STAGING targetProjectId for all three lookups, NOT the business
+    // THE SPLIT: sheet resolution used the STAGING targetProjectId for all FOUR lookups, NOT the business
     // projectId — while the persisted batch row still carries the BUSINESS projectId as business data.
-    assert.deepEqual(provisioning.projectIdsSeen, [STAGING_PROJECT_ID, STAGING_PROJECT_ID, STAGING_PROJECT_ID])
+    assert.deepEqual(provisioning.projectIdsSeen, [STAGING_PROJECT_ID, STAGING_PROJECT_ID, STAGING_PROJECT_ID, STAGING_PROJECT_ID])
     assert.equal(logicalOf(recordsApi.createCalls[0]).projectId, 'proj_1')
   })
 
@@ -348,22 +371,99 @@ async function main() {
     const first = await persistStockPreparationSyncRun({ permission: 'admin', recordsApi, provisioning, ...basePlanInputs() })
     assert.equal(first.persisted, true)
     const createsAfterFirst = recordsApi.createCalls.length
-    assert.equal(createsAfterFirst, 4)
+    assert.equal(createsAfterFirst, 5, 'batch + 2 lines + run + the first-sync project create')
+    assert.deepEqual(first.project, { mode: 'created' })
 
     const second = await persistStockPreparationSyncRun({ permission: 'admin', recordsApi, provisioning, ...basePlanInputs() })
     assert.equal(second.persisted, false)
     assert.equal(second.mode, 'skipped_existing')
     assert.deepEqual(second.created, { batch: 0, lines: 0, run: 0 })
     assert.equal(second.evidence.existingBatchMatched, true)
+    // #4163 T1: a duplicate/retried persist of the SAME snapshotBatchId leaves the project row
+    // COMPLETELY untouched too (no query, no create, no patch) — the whole commit is a no-op skip.
+    assert.deepEqual(second.project, { mode: 'skipped' })
 
-    // No new writes on the skip path — the batch (and its lines/run) are immutable.
+    // No new writes on the skip path — the batch/lines/run/project are all left alone.
     assert.equal(recordsApi.createCalls.length, createsAfterFirst, 'no new createRecord on skip')
-    assert.equal(recordsApi.patchCalls.length, 0, 'patchRecord never called across both persists')
+    assert.equal(recordsApi.patchCalls.length, 0, 'patchRecord never called across both persists (same batch retried)')
+  })
+
+  // ---- #4163 T1: a SECOND, genuinely-new batch for the SAME project PATCHES the project row ----
+  await run('a second (new) sync for the same project PATCHES the project row, never duplicates it, and never touches owner/sourceProjectNo/projectName', async () => {
+    const recordsApi = makeRecordsApi()
+    const provisioning = makeProvisioning()
+    const first = await persistStockPreparationSyncRun({
+      permission: 'admin',
+      recordsApi,
+      provisioning,
+      ...basePlanInputs({ sourceProjectNo: 'PN-ORIGINAL', projectName: 'Original Name' }),
+    })
+    assert.deepEqual(first.project, { mode: 'created' })
+    const projectCreateCall = recordsApi.createCalls.find((call) => call.sheetId === PROJECT_SHEET_ID)
+    assert.ok(projectCreateCall)
+    assert.equal(logicalOf(projectCreateCall).sourceProjectNo, 'PN-ORIGINAL')
+    assert.equal(logicalOf(projectCreateCall).projectName, 'Original Name')
+
+    // A human sets `owner` directly on the stored row between syncs (simulating the human_preserved
+    // annotation) — the fake records API supports this via a direct patch outside the module under test.
+    const projectRecordId = projectCreateCall && (await recordsApi.queryRecords({
+      sheetId: PROJECT_SHEET_ID,
+      filters: { [physicalFieldId(STAGING_PROJECT_ID, PROJECT_OBJECT_ID, PROJECT_KEY_FIELD)]: 'proj_1' },
+    }))[0].id
+    await recordsApi.patchRecord({
+      sheetId: PROJECT_SHEET_ID,
+      recordId: projectRecordId,
+      changes: { [physicalFieldId(STAGING_PROJECT_ID, PROJECT_OBJECT_ID, 'owner')]: 'human-owner-alice' },
+    })
+
+    // A SECOND, genuinely different batch/syncRun for the SAME project — NOT a duplicate/retry.
+    const second = await persistStockPreparationSyncRun({
+      permission: 'admin',
+      recordsApi,
+      provisioning,
+      ...basePlanInputs({
+        syncRunId: 'run_2',
+        snapshotBatchId: 'batch_2',
+        // sourceProjectNo/projectName supplied again (a real caller always sends the populator inputs);
+        // they must NOT overwrite the ORIGINAL stored values on this patch path.
+        sourceProjectNo: 'PN-CHANGED-LATER',
+        projectName: 'Changed Name Later',
+      }),
+    })
+    assert.equal(second.persisted, true)
+    assert.deepEqual(second.project, { mode: 'patched' })
+
+    // Still exactly ONE project row (no duplicate) — patched, not re-created.
+    const projectRowsNow = recordsApi.rows(PROJECT_SHEET_ID)
+    assert.equal(projectRowsNow.length, 1, 'no duplicate project row for the same projectId')
+    const patchCallsOnProject = recordsApi.patchCalls.filter((call) => call.sheetId === PROJECT_SHEET_ID)
+    assert.equal(patchCallsOnProject.length, 2, 'the human owner-patch plus the populator patch')
+    const populatorPatch = patchCallsOnProject[1]
+    const populatorPatchLogical = logicalData(STAGING_PROJECT_ID, PROJECT_OBJECT_ID, populatorPatch.changes)
+    assert.deepEqual(
+      Object.keys(populatorPatchLogical).sort(),
+      ['lastSyncRunId', 'lastSyncedAt', 'projectStatus'],
+      'the populator patch touches ONLY lastSyncRunId/lastSyncedAt/projectStatus',
+    )
+    assert.equal(populatorPatchLogical.lastSyncRunId, 'run_2')
+    assert.equal(populatorPatchLogical.projectStatus, 'active')
+
+    // The ORIGINAL sourceProjectNo/projectName survive untouched (never overwritten by the second sync);
+    // the human-set owner survives untouched too (human_preserved, never in the patch payload).
+    const finalRow = logicalData(STAGING_PROJECT_ID, PROJECT_OBJECT_ID, projectRowsNow[0].data)
+    assert.equal(finalRow.sourceProjectNo, 'PN-ORIGINAL')
+    assert.equal(finalRow.projectName, 'Original Name')
+    assert.equal(finalRow.owner, 'human-owner-alice')
+    assert.equal(finalRow.projectStatus, 'active')
+    assert.equal(finalRow.lastSyncRunId, 'run_2')
+
+    // Batch/line/run rows for the FIRST batch are untouched — patchRecord never touches those sheets.
+    assert.equal(recordsApi.patchCalls.filter((call) => call.sheetId !== PROJECT_SHEET_ID).length, 0)
   })
 
   // ---- (e) target not provisioned -> fail closed, NO writes ----
   await run('any unprovisioned MVP target fails closed with no writes', async () => {
-    for (const missingObjectId of [BATCH_OBJECT_ID, LINE_OBJECT_ID, RUN_OBJECT_ID]) {
+    for (const missingObjectId of [BATCH_OBJECT_ID, LINE_OBJECT_ID, RUN_OBJECT_ID, PROJECT_OBJECT_ID]) {
       const recordsApi = makeRecordsApi()
       const provisioning = makeProvisioning({ missing: new Set([missingObjectId]) })
       await assert.rejects(
@@ -438,6 +538,11 @@ async function main() {
     assert.equal(logicalOf(lineWrite).childDrawingNo, LEAKY_DRAWING_NO)
     const batchWrite = recordsApi.createCalls.find((call) => call.sheetId === BATCH_SHEET_ID)
     assert.equal(logicalOf(batchWrite).projectId, LEAKY_PROJECT_ID)
+    // The project row's OWN key field is the SAME leaky projectId (#4163 T1) — legitimate row data.
+    const projectWrite = recordsApi.createCalls.find((call) => call.sheetId === PROJECT_SHEET_ID)
+    assert.ok(projectWrite, 'a project row was written')
+    assert.equal(logicalOf(projectWrite)[PROJECT_KEY_FIELD], LEAKY_PROJECT_ID)
+    assert.equal(logicalOf(projectWrite).sourceProjectNo, 'PN-1')
 
     // ...but the EVIDENCE is values-free: the secret token appears nowhere in it.
     const evidenceJson = JSON.stringify(result.evidence)
@@ -447,7 +552,31 @@ async function main() {
     assert.equal(result.evidence.valuesFree, true)
     // Evidence still carries the values-free field-key NAMES + public objectId constants.
     assert.ok(result.evidence.targets.snapshotBatch.fieldKeys.includes('snapshotBatchId'))
+    assert.ok(result.evidence.targets.project.fieldKeys.includes('sourceProjectNo'))
+    assert.equal(result.evidence.targets.project.objectId, PROJECT_OBJECT_ID)
+    assert.equal(result.evidence.projectSync.mode, 'created')
     assert.equal(result.evidence.runType, 'plm_sync')
+  })
+
+  // ---- #4163 T1: sourceProjectNo is required — omitting it fails closed with NO writes ----
+  await run('sourceProjectNo is required for the project-row populator — omitting it fails closed with NO writes', async () => {
+    const recordsApi = makeRecordsApi()
+    const provisioning = makeProvisioning()
+    await assert.rejects(
+      () => persistStockPreparationSyncRun({
+        permission: 'admin',
+        recordsApi,
+        provisioning,
+        ...basePlanInputs({ sourceProjectNo: undefined }),
+      }),
+      (error) =>
+        error instanceof StockPreparationSyncRunPersistError &&
+        error.status === 422 &&
+        error.code === 'PERSIST_CONFIG_INVALID' &&
+        error.details.field === 'sourceProjectNo',
+    )
+    assert.equal(provisioning.findObjectSheetCalls, 0, 'fails before any sheet resolution')
+    assert.equal(recordsApi.createCalls.length, 0)
   })
 
   console.log(`\nstock-preparation-sync-run-persist.test.cjs: ${passed} passed, ${failed} failed`)
