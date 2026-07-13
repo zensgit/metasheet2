@@ -363,6 +363,11 @@ describe('Multitable record and form context API', () => {
           expect(params?.[3]).toBeNull()
           return { rows: [{ id: 'rec_public_1', version: 1 }] }
         }
+        // D-1c slice ① (ratified 2026-07-13): form-submit CREATE now emits a same-txn revision (the fix —
+        // this route previously mutated meta_records with no revision at all).
+        if (sql.includes('INSERT INTO meta_record_revisions')) {
+          return { rows: [] }
+        }
         if (sql.includes('SELECT id, version, data FROM meta_records WHERE id = $1 AND sheet_id = $2')) {
           expect(params).toEqual(['rec_public_1', 'sheet_public'])
           return {
@@ -1074,6 +1079,11 @@ describe('Multitable record and form context API', () => {
         if (sql.includes('UPDATE meta_records') && sql.includes('RETURNING version')) {
           expect(params).toEqual([JSON.stringify({ fld_title: 'Updated title', fld_vendor_link: ['vendor_1'] }), 'rec_existing', 'sheet_ops'])
           return { rows: [{ version: 6 }] }
+        }
+        // D-1c slice ① (ratified 2026-07-13): form-submit EDIT now emits a same-txn revision (the fix —
+        // this route previously mutated meta_records with no revision at all).
+        if (sql.includes('INSERT INTO meta_record_revisions')) {
+          return { rows: [] }
         }
         if (sql.includes('SELECT foreign_record_id FROM meta_links WHERE field_id = $1 AND record_id = $2')) {
           expect(params).toEqual(['fld_vendor_link', 'rec_existing'])

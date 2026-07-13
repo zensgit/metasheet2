@@ -218,6 +218,11 @@ export default defineConfig({
       // `Run multitable real-DB integration` in plugin-tests.yml. Two-point wiring: BOTH points
       // or the file silently never runs.
       'tests/integration/multitable-history-incomplete-precheck-realdb.test.ts',
+      // D-1c W0 slice ① (form-submit CREATE/EDIT public-form revision goldens): real Postgres only
+      // (installs scoped failure/suppression triggers per site and drives the real submit route
+      // end-to-end) — excluded HERE so it cannot skip-green in the no-DB lane, whole-file wired into
+      // `Run multitable real-DB integration` in plugin-tests.yml.
+      'tests/integration/multitable-d1c-form-submit-revision-realdb.test.ts',
       // D-2 side-door delete recoverability (#4004): real Postgres only (it installs scoped failure-
       // injection triggers and drives both side doors end-to-end) — excluded HERE so it cannot skip-green
       // in the no-DB lane, and whole-file wired into `Run multitable real-DB integration` in
