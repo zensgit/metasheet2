@@ -94,6 +94,13 @@ jobs:
         with:
           node-version: ${{ matrix.node-version }}
 
+      # R12-C: the Global History flag manifest is an operator contract — the status helper reads it to
+      # decide safe flag combinations. This node:test (no deps, no DB) is source-derived: it fails if a
+      # MULTITABLE_ flag read in packages/core-backend/src is missing from the manifest. Runs early so a
+      # manifest/source drift fails the required `test` check fast, before the pnpm install/build.
+      - name: Global History flag manifest contract (R12-C)
+        run: node --test scripts/ops/global-history-flag-manifest.test.mjs scripts/ops/multitable-global-history-flag-status.test.mjs
+
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
         with:
