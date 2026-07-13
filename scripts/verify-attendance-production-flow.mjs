@@ -319,6 +319,10 @@ async function waitForJsonResponse(page, predicate, { label }) {
 function isImportCommitUrl(url) {
   try {
     const pathname = new URL(url).pathname
+    // Sync commit + legacy alias. NOT '/import/commit-async': the prod-gate fixture is 1 row
+    // (< commitAsyncThreshold=1000), so the commit is always sync. If that fixture ever grows
+    // to >=1000 rows the commit goes async and this matcher misses it — producing the SAME 60s
+    // waitForResponse timeout from a DIFFERENT cause (routing, not the override-confirm modal).
     return pathname === '/api/attendance/import/commit' || pathname === '/api/attendance/import'
   } catch {
     return false
