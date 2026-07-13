@@ -21,6 +21,12 @@
  *           claims the record is dead, so reset would push it into the delete-set even though the content
  *           projection matches the pre-delete snapshot → refused. No captured path produces this state
  *           (trash-restore and PIT-resurrect both write a fresh 'create' revision in-txn).
+ *   P3-1    hardening (post-ratification, same doctrine): the projection excludes the four SYSTEM field
+ *           types (createdTime/modifiedTime/createdBy/modifiedBy — `field-codecs`'s canonical
+ *           `SYSTEM_FIELD_TYPES`) exactly like the four derived-value types. Not a live false-positive today
+ *           (no writer puts a value under a system field id in `data` — it is derived at READ time from
+ *           `created_at`/`updated_at`/`created_by`/`modified_by`), but a stray/legacy value under a system
+ *           field id must never be able to pollute-refuse a healthy record.
  *
  * The refusal body is asserted EXACTLY (deepEqual) — it is values-free by contract: no record ids, no counts
  * (no denied-record existence oracle), and no data/previewIdentity.
@@ -40,14 +46,17 @@ const TS = Date.now()
 const BASE = `base_hi_${TS}`
 const SHEET = `sheet_hi_plain_${TS}`      // plain sheet: string + number fields
 const SHEET_F = `sheet_hi_formula_${TS}`  // formula sheet: string + formula + autoNumber fields
+const SHEET_S = `sheet_hi_system_${TS}`   // P3-1: string + a system-computed (modifiedTime) field
 const NAME = `fld_hi_name_${TS}`, SALARY = `fld_hi_salary_${TS}`
 const FNAME = `fld_hi_fname_${TS}`, FORMULA = `fld_hi_formula_${TS}`, AUTON = `fld_hi_auton_${TS}`
+const SNAME = `fld_hi_sname_${TS}`, SMOD = `fld_hi_smod_${TS}` // P3-1 system-field sheet
 const H = `rec_hi_h_${TS}`   // healthy revert candidate (old@T0 → new@T2) — gives every op real work at T1
 const P = `rec_hi_p_${TS}`   // polluted: live data ≠ latest snapshot (G-HI-1)
 const X = `rec_hi_x_${TS}`   // version-only drift via real lock/unlock (G-HI-2)
 const Z = `rec_hi_z_${TS}`   // zero-revision live row (G-HI-4)
 const ZD = `rec_hi_zd_${TS}` // live row whose latest revision is a delete (HI-5)
 const F1 = `rec_hi_f1_${TS}`, F2 = `rec_hi_f2_${TS}` // formula-sheet records (G-HI-3)
+const SYS1 = `rec_hi_sys1_${TS}` // system-field-sheet record (P3-1)
 const ACTOR = `user_hi_${TS}`
 const T0 = '2026-01-01T00:00:00.000Z', T1 = '2026-01-02T00:00:00.000Z', T2 = '2026-01-03T00:00:00.000Z'
 
@@ -116,17 +125,19 @@ describeIfDatabase('multitable D-1c §0.6 HISTORY_INCOMPLETE precheck (real DB)'
     app.use((req, _res, next) => { ;(req as any).user = { id: ACTOR, roles: ['member'], perms: ['multitable:read', 'multitable:write', 'multitable:share'] }; next() })
     app.use('/api/multitable', univerMetaRouter())
     await q('INSERT INTO meta_bases (id, name) VALUES ($1,$2)', [BASE, 'HI Base'])
-    await q('INSERT INTO meta_sheets (id, base_id, name) VALUES ($1,$2,$3),($4,$2,$5)', [SHEET, BASE, 'HI Plain', SHEET_F, 'HI Formula'])
+    await q('INSERT INTO meta_sheets (id, base_id, name) VALUES ($1,$2,$3),($4,$2,$5),($6,$2,$7)', [SHEET, BASE, 'HI Plain', SHEET_F, 'HI Formula', SHEET_S, 'HI System'])
     await q('INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6)', [NAME, SHEET, 'Name', 'string', '{}', 1])
     await q('INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6)', [SALARY, SHEET, 'Salary', 'number', '{}', 2])
     await q('INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6)', [FNAME, SHEET_F, 'FName', 'string', '{}', 1])
     await q('INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6)', [FORMULA, SHEET_F, 'Computed', 'formula', JSON.stringify({ expression: `{${FNAME}}` }), 2])
     await q('INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6)', [AUTON, SHEET_F, 'Seq', 'autoNumber', '{}', 3])
+    await q('INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6)', [SNAME, SHEET_S, 'SName', 'string', '{}', 1])
+    await q('INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6)', [SMOD, SHEET_S, 'Modified', 'modifiedTime', '{}', 2])
     await q("INSERT INTO users (id, password_hash) VALUES ($1,'x') ON CONFLICT (id) DO NOTHING", [ACTOR])
   })
   afterAll(async () => {
     delete process.env.MULTITABLE_ENABLE_PIT_RESET
-    for (const sheet of [SHEET, SHEET_F]) {
+    for (const sheet of [SHEET, SHEET_F, SHEET_S]) {
       for (const t of ['meta_records_trash', 'meta_record_revisions', 'meta_records', 'meta_fields']) await q(`DELETE FROM ${t} WHERE sheet_id = $1`, [sheet]).catch(() => {})
       await q('DELETE FROM meta_sheets WHERE id = $1', [sheet]).catch(() => {})
     }
@@ -135,7 +146,7 @@ describeIfDatabase('multitable D-1c §0.6 HISTORY_INCOMPLETE precheck (real DB)'
   })
   beforeEach(async () => {
     process.env.MULTITABLE_ENABLE_PIT_RESET = 'true'
-    for (const sheet of [SHEET, SHEET_F]) {
+    for (const sheet of [SHEET, SHEET_F, SHEET_S]) {
       await q('DELETE FROM meta_records_trash WHERE sheet_id = $1', [sheet]).catch(() => {})
       await q('DELETE FROM meta_record_revisions WHERE sheet_id = $1', [sheet])
       await q('DELETE FROM meta_records WHERE sheet_id = $1', [sheet])
@@ -261,5 +272,22 @@ describeIfDatabase('multitable D-1c §0.6 HISTORY_INCOMPLETE precheck (real DB)'
     await rev(SHEET, ZD, 1, 'create', { [NAME]: 'zombie', [SALARY]: 1 }, T0)
     await rev(SHEET, ZD, 2, 'delete', { [NAME]: 'zombie', [SALARY]: 1 }, T2) // delete stores the PRE-delete snapshot
     await expectAllFourRefuseWithZeroWrites(SHEET)
+  })
+
+  test('P3-1: a system-computed field (modifiedTime) is excluded from the projection like a derived type', async () => {
+    // The real write path never stores a value under a system field id in `data` at all — it is derived
+    // fresh at READ time (`query-service.ts`'s `injectSystemFieldValues`) from `created_at`/`updated_at`/
+    // `created_by`/`modified_by`. To prove the exclusion is a real type-based guard (not merely an accident
+    // of "these keys are usually absent"), this seeds an ADVERSARIAL state: a STALE value sits under the
+    // modifiedTime field id on BOTH sides, DIFFERING between live and the latest snapshot. Before the P3-1
+    // fix (DERIVED_FIELD_TYPES alone, no SYSTEM_FIELD_TYPES) this field id was compared like any other user
+    // field and this exact scenario would have content-mismatch-refused a healthy record.
+    await insertLive(SHEET_S, SYS1, { [SNAME]: 'n1', [SMOD]: '2026-06-01T00:00:00.000Z' }, 1)
+    await rev(SHEET_S, SYS1, 1, 'create', { [SNAME]: 'n1', [SMOD]: '2025-01-01T00:00:00.000Z' }, T0)
+    const pv = await revertPreview(SHEET_S)
+    expect(pv.status).toBe(200) // NOT refused — modifiedTime is excluded from the user-authored projection
+    // SNAME matches (live == snapshot); SMOD differs but is excluded from BOTH the precheck projection and
+    // the restore-diff's own NON_RESTORABLE_TYPES — nothing to revert.
+    expect(pv.body?.data?.summary?.visibleRevertCount).toBe(0)
   })
 })

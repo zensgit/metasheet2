@@ -68,6 +68,15 @@ async function seed(): Promise<void> {
   await q('INSERT INTO meta_records (id, sheet_id, data, version) VALUES ($1,$2,$3::jsonb,1)', [
     L, SHEET, JSON.stringify({ [NAME]: 'L', [LINK]: [U] }),
   ])
+  // D-1c §0.6 fixture repair: L must be CAPTURE-COMPLETE (a create revision matching its live row) —
+  // otherwise the sheet-wide precheck sees a live record with zero revisions (the uncaptured-CREATE
+  // fingerprint) and correctly refuses every preview/execute in this suite before the resurrect-inbound
+  // logic under test ever runs. Fixture fix, not a §0.6 weakening.
+  await q(
+    `INSERT INTO meta_record_revisions (id, sheet_id, record_id, version, action, source, changed_field_ids, patch, snapshot, created_at)
+     VALUES (gen_random_uuid(),$1,$2,1,'create','rest',ARRAY[$3,$4]::text[],'{}'::jsonb,$5::jsonb,$6)`,
+    [SHEET, L, NAME, LINK, JSON.stringify({ [NAME]: 'L', [LINK]: [U] }), T0],
+  )
   // The inbound tombstone exactly as record-service.deleteRecord's capture writes it.
   await q(
     `INSERT INTO meta_link_tombstones (id, sheet_id, field_id, record_id, foreign_record_id, reason, source_revision_id, created_at)
@@ -131,7 +140,16 @@ describeIfDatabase('4c-3 §7 — PIT-resurrect inbound replay (real DB, P3-2 gol
 
   test('P3-2c flag ON + neighbour declined: Option A consent holds on the resurrect surface too', async () => {
     process.env[INBOUND_FLAG] = 'true'
-    await q(`UPDATE meta_records SET data = jsonb_set(data, $2, '[]'::jsonb) WHERE id = $1`, [L, `{${LINK}}`])
+    // D-1c §0.6 fixture repair: the decline must be CAPTURED (version bump + a matching update revision,
+    // timestamped BEFORE the revert's asOf so it is L's T1-target too) — otherwise the sheet-wide precheck
+    // would refuse the whole revert/undelete for the WRONG reason (content-mismatch) before this test's own
+    // mechanism (Option A consent — the neighbour's live data no longer references U) is ever exercised.
+    await q(`UPDATE meta_records SET data = jsonb_set(data, $2, '[]'::jsonb), version = version + 1 WHERE id = $1`, [L, `{${LINK}}`])
+    await q(
+      `INSERT INTO meta_record_revisions (id, sheet_id, record_id, version, action, source, changed_field_ids, patch, snapshot, created_at)
+       VALUES (gen_random_uuid(),$1,$2,2,'update','rest',ARRAY[$3]::text[],'{}'::jsonb,$4::jsonb,$5)`,
+      [SHEET, L, LINK, JSON.stringify({ [NAME]: 'L', [LINK]: [] }), '2026-01-01T12:00:00.000Z'],
+    )
     const { status, body } = await runUndelete()
     expect(status).toBe(200)
     expect(body?.data?.undeleteInbound).toMatchObject({ replayed: 0, total: 1 })

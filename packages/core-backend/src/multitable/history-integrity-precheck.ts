@@ -1,4 +1,4 @@
-import { mapFieldType } from './field-codecs'
+import { mapFieldType, isSystemFieldType } from './field-codecs'
 import type { QueryFn } from './permission-service'
 
 /**
@@ -43,10 +43,31 @@ export const HISTORY_INCOMPLETE = 'HISTORY_INCOMPLETE' as const
  */
 export const DERIVED_FIELD_TYPES: ReadonlySet<string> = new Set(['formula', 'rollup', 'lookup', 'autoNumber'])
 
-/** Raw DB `meta_fields.type` → derived? Routed through the canonical `mapFieldType` so raw spellings
- * (`auto_number`, `AUTO-NUMBER`, …) classify identically to their canonical forms. */
+/**
+ * P3-1 hardening (post-ratification, same doctrine — not a live false-positive today, but the security path
+ * must be closed on its own terms, not on the accident that no writer currently exercises the gap). Rule 2's
+ * text is "the sheet's user-authored/writable field ids" — the four value-derivation engines above are one
+ * instance of "not user-authored", not the whole class. The four SYSTEM field types (`createdTime` /
+ * `modifiedTime` / `createdBy` / `modifiedBy`, `field-codecs`'s canonical `SYSTEM_FIELD_TYPES`) are equally
+ * server-maintained: `isFieldAlwaysReadOnly` (`permission-derivation.ts`) already places them in the SAME
+ * always-read-only bucket as formula/lookup/rollup. In today's write paths a system field's value is derived
+ * purely at READ time (`query-service.ts`'s `injectSystemFieldValues`, from `created_at`/`updated_at`/
+ * `created_by`/`modified_by`) and is never written into the `data` column at all — so this exclusion has no
+ * observable effect on any current writer. It hardens the precheck against a FUTURE or LEGACY/imported record
+ * that happens to carry a stray value under a system field id in `data`: such a value must never be able to
+ * pollute-refuse a healthy record, any more than a materialized formula value can. `autoNumber` is a member of
+ * both sets; the union simply dedupes it.
+ */
+export function isNonUserAuthoredFieldType(canonicalType: string): boolean {
+  return DERIVED_FIELD_TYPES.has(canonicalType) || isSystemFieldType(canonicalType)
+}
+
+/** Raw DB `meta_fields.type` → excluded from the user-authored-field projection? Routed through the canonical
+ * `mapFieldType` so raw spellings (`auto_number`, `AUTO-NUMBER`, `modified_time`, …) classify identically to
+ * their canonical forms. Covers both the derived-value engines (rule 2) and the system-computed types
+ * (P3-1 hardening, above). */
 export function isDerivedFieldType(rawType: string): boolean {
-  return DERIVED_FIELD_TYPES.has(String(mapFieldType(String(rawType ?? ''))))
+  return isNonUserAuthoredFieldType(String(mapFieldType(String(rawType ?? ''))))
 }
 
 export type HistoryIntegrityVerdict =
