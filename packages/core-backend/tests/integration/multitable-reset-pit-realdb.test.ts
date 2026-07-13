@@ -168,6 +168,10 @@ describeIfDatabase('multitable T8-2 Reset-to-T (DESTRUCTIVE, real DB)', () => {
     const pv = await resetPreview() // delete-set bound = {D}
     const E = `rec_rs_e_${TS}`
     await q('INSERT INTO meta_records (id, sheet_id, data, version) VALUES ($1,$2,$3::jsonb,1)', [E, SHEET, JSON.stringify({ [NAME]: 'sneaked-in' })]) // now post-T-created too
+    // E needs a matching create revision — a HEALTHY new record, isolating the scope-drift property this
+    // golden targets. (D-1c §0.6's HISTORY_INCOMPLETE precheck would otherwise refuse first, on E's
+    // zero-revision live row, before the deleteScopeHash comparison this golden is pinning ever runs.)
+    await rev(E, 1, 'create', { [NAME]: 'sneaked-in' }, T2)
     const ex = await resetExecute({ asOf: T1, previewIdentity: pv.body?.data?.previewIdentity, confirm: 'reset' })
     expect(ex.status).toBe(409); expect(ex.body?.error?.code).toBe('PREVIEW_IDENTITY_INVALID') // deleteScopeHash diverged
     expect(await recordRow(D)).toBeTruthy() // D NOT deleted
@@ -177,6 +181,9 @@ describeIfDatabase('multitable T8-2 Reset-to-T (DESTRUCTIVE, real DB)', () => {
   test('(g2) delete-set version drift: a post-T-created record edited after preview → execute 409, NOTHING deleted', async () => {
     const pv = await resetPreview() // D bound at version 1
     await q('UPDATE meta_records SET data = $2::jsonb, version = version + 1 WHERE id = $1', [D, JSON.stringify({ [NAME]: 'edited-after-preview', [SALARY]: 501 })])
+    // D needs a matching revision for its new version — a HEALTHY edit, isolating the version-drift property
+    // this golden targets (an uncaptured edit here would instead trip D-1c §0.6's HISTORY_INCOMPLETE first).
+    await rev(D, 2, 'update', { [NAME]: 'edited-after-preview', [SALARY]: 501 }, T2)
     const ex = await resetExecute({ asOf: T1, previewIdentity: pv.body?.data?.previewIdentity, confirm: 'reset' })
     expect(ex.status).toBe(409); expect(ex.body?.error?.code).toBe('PREVIEW_IDENTITY_INVALID')
     expect((await recordRow(D))?.data?.[NAME]).toBe('edited-after-preview')

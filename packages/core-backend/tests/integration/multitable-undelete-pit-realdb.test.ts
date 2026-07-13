@@ -45,6 +45,10 @@ async function seed(): Promise<void> {
   // L: a LIVE record that links to U. U's delete dropped BOTH directions, so L's inbound edge to U is gone, but L's
   // DATA still references U → inbound (A) re-appears only when L is re-saved, NOT by the undelete.
   await q('INSERT INTO meta_records (id, sheet_id, data, version) VALUES ($1,$2,$3::jsonb,1)', [L, SHEET, JSON.stringify({ [NAME]: 'L', [LINK]: [U] })])
+  // L needs a matching create revision — D-1c §0.6's HISTORY_INCOMPLETE precheck (shared by revert-preview/
+  // execute) refuses the WHOLE sheet if any live record has zero revisions; L is scaffolding here, not the
+  // record under test, so it must be a HEALTHY record like any real live row.
+  await rev(L, 1, 'create', { [NAME]: 'L', [LINK]: [U] }, T0)
 }
 
 describeIfDatabase('multitable T8-1 PIT undelete-execute (real DB)', () => {

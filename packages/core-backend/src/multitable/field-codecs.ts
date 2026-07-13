@@ -1163,3 +1163,22 @@ export const SYSTEM_FIELD_TYPES: ReadonlySet<string> = new Set([
 export function isSystemFieldType(type: string): boolean {
   return SYSTEM_FIELD_TYPES.has(type)
 }
+
+// D-1c §0.6 HISTORY_INCOMPLETE precheck (design-lock 20260712): the field types whose engines materialize
+// computed keys into `meta_records.data` POST-COMMIT, with no version bump and no `recordRecordRevision` call
+// (`formula-engine.ts:345`, cross-record fan-out `univer-meta.ts:3855`, `auto-number-service.ts:101`). A
+// content diff between live `data` and a record's latest revision snapshot MUST exclude exactly these types —
+// otherwise every healthy record on every formula/rollup/lookup/auto-number sheet reads as "polluted" (the
+// live row legitimately carries a derived key the last captured revision predates), bricking PIT-revert/reset.
+// This is the ONLY exclusion the precheck's projection makes — every other field type (including `link`,
+// whose ids are ordinary user-authored `data`, D-1c OD-4) stays IN the comparison.
+export const DERIVED_FIELD_TYPES: ReadonlySet<string> = new Set([
+  'formula',
+  'rollup',
+  'lookup',
+  'autoNumber',
+])
+
+export function isDerivedFieldType(type: string): boolean {
+  return DERIVED_FIELD_TYPES.has(type)
+}

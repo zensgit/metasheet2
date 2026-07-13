@@ -227,6 +227,9 @@ export default defineConfig({
       // whole-file wired into `Run multitable real-DB integration` in plugin-tests.yml.
       'tests/integration/multitable-undelete-inbound-resurrect-realdb.test.ts',
       'tests/integration/multitable-reset-pit-inbound-capture-realdb.test.ts',
+      // D-1c §0.6 HISTORY_INCOMPLETE fail-closed precheck (shared by PIT-Revert/Reset preview+execute):
+      // real Postgres only — whole-file wired into `Run multitable real-DB integration` in plugin-tests.yml.
+      'tests/integration/multitable-history-incomplete-precheck-realdb.test.ts',
       // W6 full-HTTP-path approve->resume seam: mounts authRouter + approvalsRouter on an
       // ephemeral port against real Postgres, so it is excluded from the default run and wired
       // into the dedicated `Run multitable real-DB integration` job in plugin-tests.yml.

@@ -31,7 +31,7 @@ const L = `rec_uir_l_${TS}` // LIVE neighbour whose data still declares U (inbou
 const ACTOR = `user_uir_${TS}`
 const UNDELETE_FLAG = 'MULTITABLE_ENABLE_PIT_UNDELETE'
 const INBOUND_FLAG = 'MULTITABLE_ENABLE_RECORD_UNDELETE_INBOUND'
-const T0 = '2026-01-01T00:00:00.000Z', T1 = '2026-01-02T00:00:00.000Z', T2 = '2026-01-03T00:00:00.000Z'
+const T0 = '2026-01-01T00:00:00.000Z', T1 = '2026-01-02T00:00:00.000Z', T2 = '2026-01-03T00:00:00.000Z', T3 = '2026-01-04T00:00:00.000Z'
 const SNAP = { [NAME]: 'u-at-T1' } // no outbound links — this suite is about INBOUND only
 
 const q = (sql: string, params: unknown[]) => poolManager.get().query(sql, params)
@@ -68,6 +68,18 @@ async function seed(): Promise<void> {
   await q('INSERT INTO meta_records (id, sheet_id, data, version) VALUES ($1,$2,$3::jsonb,1)', [
     L, SHEET, JSON.stringify({ [NAME]: 'L', [LINK]: [U] }),
   ])
+  // L needs a matching create revision — D-1c §0.6's HISTORY_INCOMPLETE precheck (shared by revert-preview/
+  // execute) refuses the WHOLE sheet if any live record has zero revisions; L is scaffolding here, not the
+  // record under test, so it must be a HEALTHY record like any real live row. Timestamped AFTER T1 (not T0)
+  // so L stays OUTSIDE the T1 revert/undelete scope (created-after-T, per the ORIGINAL fixture's intent —
+  // L is a bystander neighbour, not itself a revert target); a T0 timestamp would make L's T1-target =
+  // {LINK:[U]} and a real field-revert would rewrite L's link back to [U] on execute, confounding P3-2c's
+  // decline scenario below with an unrelated field-revert.
+  await q(
+    `INSERT INTO meta_record_revisions (id, sheet_id, record_id, version, action, source, changed_field_ids, patch, snapshot, created_at)
+     VALUES (gen_random_uuid(),$1,$2,1,'create','rest',ARRAY[$3,$4]::text[],'{}'::jsonb,$5::jsonb,$6)`,
+    [SHEET, L, NAME, LINK, JSON.stringify({ [NAME]: 'L', [LINK]: [U] }), T2],
+  )
   // The inbound tombstone exactly as record-service.deleteRecord's capture writes it.
   await q(
     `INSERT INTO meta_link_tombstones (id, sheet_id, field_id, record_id, foreign_record_id, reason, source_revision_id, created_at)
@@ -131,7 +143,15 @@ describeIfDatabase('4c-3 §7 — PIT-resurrect inbound replay (real DB, P3-2 gol
 
   test('P3-2c flag ON + neighbour declined: Option A consent holds on the resurrect surface too', async () => {
     process.env[INBOUND_FLAG] = 'true'
-    await q(`UPDATE meta_records SET data = jsonb_set(data, $2, '[]'::jsonb) WHERE id = $1`, [L, `{${LINK}}`])
+    // A HEALTHY captured edit (version bump + matching revision, timestamped after L's T2 create so it stays
+    // OUTSIDE the T1 revert scope just like the create) — an uncaptured one here would instead trip D-1c
+    // §0.6's HISTORY_INCOMPLETE precheck before this golden's actual Option A consent property ever runs.
+    await q(`UPDATE meta_records SET data = jsonb_set(data, $2, '[]'::jsonb), version = version + 1 WHERE id = $1`, [L, `{${LINK}}`])
+    await q(
+      `INSERT INTO meta_record_revisions (id, sheet_id, record_id, version, action, source, changed_field_ids, patch, snapshot, created_at)
+       VALUES (gen_random_uuid(),$1,$2,2,'update','rest',ARRAY[$3]::text[],'{}'::jsonb,$4::jsonb,$5)`,
+      [SHEET, L, LINK, JSON.stringify({ [NAME]: 'L', [LINK]: [] }), T3],
+    )
     const { status, body } = await runUndelete()
     expect(status).toBe(200)
     expect(body?.data?.undeleteInbound).toMatchObject({ replayed: 0, total: 1 })
