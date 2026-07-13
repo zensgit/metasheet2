@@ -57,6 +57,18 @@
   --ms-page-narrow: 800px;
   --ms-page-default: 1200px;
 
+  /* ---- Comment-affordance active state (multitable comment-affordance token
+   * design-lock, docs/development/multitable-comment-affordance-token-design-lock-20260713.md,
+   * RATIFIED — OD-CA-1 = A). Values = the pre-existing amber trio that was already the de facto
+   * majority convention across the 10 comment-affordance consumers, so adopting the token is a
+   * zero-visual-change refactor everywhere except MetaGridTable (OD-CA-2 = A: its blue #1d4ed8 was
+   * drift, converged here — an owner-approved VISIBLE change on the grid).
+   * DELIBERATELY NOT an alias of --ms-color-warning (#d97706) — the two hex values are different
+   * and the owner explicitly ruled out substituting the warning token for this semantic. */
+  --ms-color-comment-active-border: #f59e0b;
+  --ms-color-comment-active-bg:     #fff7ed;
+  --ms-color-comment-active-text:   #b45309;
+
   /* ================================================================
    * Element Plus semantic-color mapping.
    * Shades derived from the --ms-* base values above (formulas in the

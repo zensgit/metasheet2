@@ -486,7 +486,7 @@ function onCardKeydown(e: KeyboardEvent, cardId: string) {
 .meta-kanban__card-title { font-size: 13px; font-weight: 500; color: #333; min-width: 0; }
 .meta-kanban__comment-btn { display: inline-flex; align-items: center; justify-content: center; min-height: 28px; padding: 2px 8px; border: 1px solid #d8e1ee; border-radius: 999px; background: #fff; cursor: pointer; color: #64748b; flex-shrink: 0; }
 .meta-kanban__comment-btn:hover { border-color: #93c5fd; background: #eff6ff; color: #2563eb; }
-.meta-kanban__comment-btn--active { border-color: #f59e0b; background: #fff7ed; color: #b45309; }
+.meta-kanban__comment-btn--active { border-color: var(--ms-color-comment-active-border); background: var(--ms-color-comment-active-bg); color: var(--ms-color-comment-active-text); }
 .meta-kanban__comment-btn--idle { border-color: #d8e1ee; background: #fff; color: #64748b; }
 .meta-kanban__card-fields { display: flex; flex-direction: column; gap: 2px; }
 .meta-kanban__card-field { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; font-size: 11px; color: #888; }
@@ -494,7 +494,7 @@ function onCardKeydown(e: KeyboardEvent, cardId: string) {
 .meta-kanban__card-field-label { color: #aaa; }
 .meta-kanban__field-comment-btn { display: inline-flex; align-items: center; justify-content: center; min-width: 24px; height: 22px; padding: 0 5px; border: 1px solid #d8e1ee; border-radius: 999px; background: #fff; cursor: pointer; color: #64748b; flex-shrink: 0; }
 .meta-kanban__field-comment-btn:hover { border-color: #93c5fd; background: #eff6ff; color: #2563eb; }
-.meta-kanban__field-comment-btn--active { border-color: #f59e0b; background: #fff7ed; color: #b45309; }
+.meta-kanban__field-comment-btn--active { border-color: var(--ms-color-comment-active-border); background: var(--ms-color-comment-active-bg); color: var(--ms-color-comment-active-text); }
 .meta-kanban__field-comment-btn--idle { border-color: #d8e1ee; background: #fff; color: #64748b; }
 .meta-kanban__drop-hint { padding: 12px 10px; font-size: 11px; color: #94a3b8; text-align: center; border: 1px dashed #cbd5e1; border-radius: 6px; background: rgba(255,255,255,.7); }
 .meta-kanban__add-btn { margin: 4px 8px 8px; padding: 4px; border: 1px dashed #ccc; border-radius: 4px; background: transparent; cursor: pointer; font-size: 12px; color: #999; }

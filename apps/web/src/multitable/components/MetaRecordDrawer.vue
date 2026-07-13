@@ -1078,7 +1078,7 @@ function attachmentAllowsMultiple(field: MetaField): boolean {
 .meta-record-drawer__actions { display: flex; gap: 8px; align-items: center; }
 .meta-record-drawer__btn { padding: 4px 10px; border: 1px solid #ddd; border-radius: 3px; background: #fff; cursor: pointer; font-size: 12px; }
 .meta-record-drawer__btn--comment { border-radius: 999px; padding: 3px 8px; }
-.meta-record-drawer__btn--comment.meta-record-drawer__btn--comment--active { border-color: #f59e0b; background: #fff7ed; color: #b45309; }
+.meta-record-drawer__btn--comment.meta-record-drawer__btn--comment--active { border-color: var(--ms-color-comment-active-border); background: var(--ms-color-comment-active-bg); color: var(--ms-color-comment-active-text); }
 .meta-record-drawer__btn--comment.meta-record-drawer__btn--comment--idle { border-color: #d8e1ee; background: #fff; color: #64748b; }
 /* UI-P2-1c T5-safe (owner-ratified 2026-07-13): watch/workflow/permissions/duplicate/delete/unlock
    are now <MtButton> — token-styled, no longer needs bespoke hardcoded-hex. --danger's sole sharer
@@ -1114,7 +1114,7 @@ function attachmentAllowsMultiple(field: MetaField): boolean {
 .meta-record-drawer__ai-output { margin-top: 4px; padding: 6px 8px; border: 1px dashed #c7d2fe; border-radius: 6px; background: #f8faff; font-size: 12px; color: #334155; white-space: pre-wrap; word-break: break-word; }
 .meta-record-drawer__comment-anchor { display: inline-flex; align-items: center; justify-content: center; min-width: 28px; height: 24px; padding: 0 6px; border: 1px solid #d8e1ee; border-radius: 999px; background: #fff; cursor: pointer; color: #64748b; }
 .meta-record-drawer__comment-anchor:hover { border-color: #93c5fd; background: #eff6ff; color: #2563eb; }
-.meta-record-drawer__comment-anchor--active { border-color: #f59e0b; background: #fff7ed; color: #b45309; }
+.meta-record-drawer__comment-anchor--active { border-color: var(--ms-color-comment-active-border); background: var(--ms-color-comment-active-bg); color: var(--ms-color-comment-active-text); }
 .meta-record-drawer__comment-anchor--idle { border-color: #d8e1ee; background: #fff; color: #64748b; }
 .meta-record-drawer__input { width: 100%; padding: 4px 8px; border: 1px solid #ddd; border-radius: 3px; font-size: 13px; }
 .meta-record-drawer__input--multi { min-height: 96px; }
