@@ -61,7 +61,7 @@ vi.mock('../src/multitable/composables/useMultitableCommentRealtime', () => ({ u
 vi.mock('../src/multitable/composables/useMultitableSheetRealtime', () => ({ useMultitableSheetRealtime: vi.fn() }))
 vi.mock('../src/multitable/import/bulk-import', () => ({ bulkImportRecords: vi.fn() }))
 
-vi.mock('../src/multitable/components/MetaViewTabBar.vue', () => ({ default: stubComponent('MetaViewTabBar') }))
+vi.mock('../src/multitable/components/MetaSheetViewRail.vue', () => ({ default: stubComponent('MetaSheetViewRail') }))
 vi.mock('../src/multitable/components/MetaToolbar.vue', () => ({ default: stubComponent('MetaToolbar') }))
 // Capturing stub for the grid — records the @bulk-restore listener (onBulkRestoreRequest), the BS-4 entry point.
 vi.mock('../src/multitable/components/MetaGridTable.vue', () => ({
