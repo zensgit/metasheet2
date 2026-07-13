@@ -104,7 +104,9 @@ describe('StockPreparationStageStepper', () => {
     expect(root.querySelector('[data-testid="stock-prep-stage-count-provision"]')?.textContent).toContain('1')
   })
 
-  it('shows the forbidden copy instead of counts for a forbidden stage', async () => {
+  it('shows the forbidden copy instead of counts (and suppresses the now-moot caveat) for a forbidden stage', async () => {
+    // exception in FULL_STAGES already carries caveat:'display_only' — forbidden must suppress it too,
+    // since a caveat qualifies a rendered number and there is no number left to qualify.
     const stages = FULL_STAGES.map((stage) =>
       stage.key === 'exception' ? { ...stage, status: 'forbidden' as const, count: null, blockingCount: null } : stage,
     )
@@ -112,6 +114,7 @@ describe('StockPreparationStageStepper', () => {
     await flushUi()
     expect(root.querySelector('[data-testid="stock-prep-stage-forbidden-exception"]')).not.toBeNull()
     expect(root.querySelector('[data-testid="stock-prep-stage-count-exception"]')).toBeNull()
+    expect(root.querySelector('[data-testid="stock-prep-stage-caveat-exception"]')).toBeNull()
     expect(root.querySelector('[data-testid="stock-prep-stage-blocking-exception"]')).toBeNull()
   })
 

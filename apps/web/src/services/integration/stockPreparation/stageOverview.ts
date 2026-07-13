@@ -1,5 +1,8 @@
-// Stock Preparation UI humanization H1/H2 (H0 plane-boundary design-lock #4202 — docs/development/
-// stock-preparation-ui-humanization-h0-plane-boundary-design-lock-20260709.md — PLANE A ONLY).
+// Stock Preparation UI humanization H1/H2 (H0 plane-boundary design-lock PR #4202 —
+// docs/development/stock-preparation-ui-humanization-h0-plane-boundary-design-lock-20260712.md,
+// branch claude/stock-prep-ui-h0-designlock, PROPOSED/not yet merged — PLANE A ONLY. Per that lock's
+// own §5.3, "H1-H2 在证据面实现无需等本锁" (H1/H2 in the evidence plane may proceed without waiting
+// for ratification); H3's authorized data-plane read is gated separately and is NOT touched here).
 //
 // Pure, network-free derivation for:
 //  - H2 the six-stage progress stepper (provision -> sync -> map -> unit -> generate -> exception):

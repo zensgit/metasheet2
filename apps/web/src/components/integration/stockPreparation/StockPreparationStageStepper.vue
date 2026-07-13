@@ -55,16 +55,19 @@
             >
               {{ bi('阻断', 'Blocking') }}: {{ stage.blockingCount }}
             </span>
-          </template>
 
-          <span
-            v-if="stage.caveat"
-            class="sp-stage__caveat"
-            :data-testid="`stock-prep-stage-caveat-${stage.key}`"
-            :title="bi(CAVEAT_LABELS[stage.caveat].zhTitle, CAVEAT_LABELS[stage.caveat].enTitle)"
-          >
-            {{ bi(CAVEAT_LABELS[stage.caveat].zh, CAVEAT_LABELS[stage.caveat].en) }}
-          </span>
+            <!-- The caveat qualifies a rendered number (scope / read-time-vs-gate honesty) — it has
+                 nothing to qualify once forbidden/unknown already hid the numbers, so it lives INSIDE
+                 this branch rather than always-on. -->
+            <span
+              v-if="stage.caveat"
+              class="sp-stage__caveat"
+              :data-testid="`stock-prep-stage-caveat-${stage.key}`"
+              :title="bi(CAVEAT_LABELS[stage.caveat].zhTitle, CAVEAT_LABELS[stage.caveat].enTitle)"
+            >
+              {{ bi(CAVEAT_LABELS[stage.caveat].zh, CAVEAT_LABELS[stage.caveat].en) }}
+            </span>
+          </template>
         </button>
       </li>
     </ol>
