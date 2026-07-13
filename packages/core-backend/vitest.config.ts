@@ -213,6 +213,11 @@ export default defineConfig({
       // skip-green here, re-opening the "real-DB spec silently skips in the no-DB lane" hole) —
       // whole-file wired into `Run multitable real-DB integration` in plugin-tests.yml.
       'tests/integration/multitable-d1-delete-revision-parity-realdb.test.ts',
+      // R13 Lane A (D-1c, ratified 2026-07-13): form-submit CREATE/EDIT + attachment-delete revision
+      // goldens — real Postgres only (installs scoped failure-injection triggers per site and drives
+      // the real routes end-to-end). Excluded HERE so it cannot skip-green in the no-DB lane, whole-file
+      // wired into `Run multitable real-DB integration` in plugin-tests.yml.
+      'tests/integration/multitable-r13-lane-a-form-revision-realdb.test.ts',
       // D-2 side-door delete recoverability (#4004): real Postgres only (it installs scoped failure-
       // injection triggers and drives both side doors end-to-end) — excluded HERE so it cannot skip-green
       // in the no-DB lane, and whole-file wired into `Run multitable real-DB integration` in
