@@ -23,9 +23,10 @@
 # (a single env var, as inherited by this process) contained 3 hardcoded filenames. It now
 # reads the actual workflow files and migration-provider.ts directly and checks:
 #   A. every item in every CI-gate/replay MIGRATION_EXCLUDE occurrence against the full known
-#      baseline (11 items, not 3) — anything extra is reported as a possibly-undocumented new
+#      baseline (7 items since the 2026-07-13 #4162 re-enable; was 11, originally 3) — anything extra is reported as a possibly-undocumented new
 #      exclusion;
-#   B. every occurrence-to-occurrence divergence within those six occurrences against a table
+#   B. every occurrence-to-occurrence divergence within those seven occurrences (5 files:
+#      plugin-tests x2, migration-replay x2, observability-e2e/strict, safety-guard-e2e) against a table
 #      of KNOWN, already-reviewed divergences (see MIGRATION_EXCLUDE_TRACKING.md) — anything
 #      not in that table is reported as new/undocumented drift;
 #   C. the overlap between MIGRATION_EXCLUDE and SUPERSEDED_LEGACY_SQL_MIGRATIONS against the
@@ -48,17 +49,18 @@ WORKFLOWS_DIR="${WORKFLOWS_DIR:-$REPO_ROOT/.github/workflows}"
 PROVIDER_FILE="${PROVIDER_FILE:-$REPO_ROOT/packages/core-backend/src/db/migration-provider.ts}"
 
 # Known baseline: the union of every item that has appeared, with review, in any CI
-# per-PR-gate / migration-replay MIGRATION_EXCLUDE occurrence as of 2026-07-12.
+# per-PR-gate / migration-replay MIGRATION_EXCLUDE occurrence as of 2026-07-13.
+# (#4162 follow-up, 2026-07-13: 20250924120000_create_views_view_states.ts and the three
+# snapshot-cluster migrations — 20251117000001_add_snapshot_labels.ts,
+# 20251117000002_create_protection_rules.ts, 20251201000001_create_change_management_tables.ts —
+# were RE-ENABLED across all five workflow lists at once and removed from this baseline; if one
+# of them reappears in a list, this guard now reports it as a possibly-undocumented NEW exclusion.)
 KNOWN_BASELINE_ITEMS='008_plugin_infrastructure.sql
 048_create_event_bus_tables.sql
 049_create_bpmn_workflow_tables.sql
 042a_core_model_views.sql
-20250924120000_create_views_view_states.ts
 20250924140000_create_gantt_tables.ts
 20250925_create_view_tables.sql
-20251117000001_add_snapshot_labels.ts
-20251117000002_create_protection_rules.ts
-20251201000001_create_change_management_tables.ts
 zzzz20260114110000_create_user_orgs_table.ts'
 
 # Known, reviewed occurrence-to-occurrence divergences: "<item>|<workflow-file-basename that
@@ -168,8 +170,16 @@ run_checks() {
   local occurrences
   occurrences="$(collect_occurrences)"
 
-  if [[ -z "$occurrences" ]]; then
-    warn "No MIGRATION_EXCLUDE occurrences found under $WORKFLOWS_DIR — expected at least 6."
+  # Exact shape pin (2026-07-13, #4228 review): 7 occurrences across 5 files in the real repo
+  # (plugin-tests x2, migration-replay x2, observability-e2e, observability-strict,
+  # safety-guard-e2e). Env-overridable so the fixture tests can pin their own shape.
+  local expected_occ expected_files occ_count file_count
+  expected_occ="${EXPECTED_OCCURRENCE_COUNT:-7}"
+  expected_files="${EXPECTED_FILE_COUNT:-5}"
+  occ_count="$(printf '%s\n' "$occurrences" | sed '/^$/d' | wc -l | tr -d ' ')"
+  file_count="$(printf '%s\n' "$occurrences" | sed '/^$/d' | cut -d: -f1 | sort -u | wc -l | tr -d ' ')"
+  if [[ "$occ_count" -ne "$expected_occ" || "$file_count" -ne "$expected_files" ]]; then
+    warn "Expected exactly $expected_occ MIGRATION_EXCLUDE occurrences across $expected_files workflow files; found $occ_count across $file_count — a new/removed occurrence must be reviewed and this pin updated."
   fi
 
   # --- A: every item in every occurrence must be a known baseline item ------------------
@@ -282,10 +292,11 @@ $stripped"
 
   # --- Always-on informational note: the asymmetry this guard does not, and cannot, close --
   info "Known asymmetry (not a bug this guard can catch): production/on-prem 'db:migrate' runs"
-  info "with NO MIGRATION_EXCLUDE at all. Only CI's per-PR gate trims the list above, so the"
-  info "view-table/gantt/snapshot/protection-rule/change-management cluster excluded there has"
-  info "never had a per-PR green CI run of its up() bodies. Re-enabling that cluster in CI is"
-  info "gated planning work — see #4162. Do not close that gap by editing this script."
+  info "with NO MIGRATION_EXCLUDE at all. Only CI's per-PR gate trims the list above. #4162"
+  info "follow-up (2026-07-13): views/view_states + the snapshot/protection-rule/change-management"
+  info "migrations are re-enabled in CI and now DO get per-PR green runs; the still-excluded"
+  info "remainder (008/048/049, 042a, gantt, 20250925) keeps this gap. Do not close it by"
+  info "editing this script."
 }
 
 # main() is the only thing in this file that calls exit. It is intentionally NOT wired into any
