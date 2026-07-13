@@ -189,7 +189,16 @@ export function deriveRecommendedNextStep(input: {
     return { kind: 'select_project', reason: 'no_project_selected' }
   }
 
-  if (input.adminDetailAvailable && input.stages) {
+  // The tier-2 walk is only trustworthy if the detail reads actually SUCCEEDED. A rejected read
+  // classifies its stage 'unknown' (classifyDetailStageStatus, errored:true) — the array still exists
+  // but its numbers are absent, so treating "array present" as "detail available" would let a total
+  // read failure fall through to all_clear ("nothing to handle") when the truth is "we don't know".
+  // If ANY detail stage is unknown, drop to the tier-1 fallback (read-gated per-project signals) or an
+  // explicit admin_required, never all_clear.
+  const detailUnknown = Boolean(
+    input.stages && input.stages.some((stage) => stage.key !== 'provision' && stage.status === 'unknown'),
+  )
+  if (input.adminDetailAvailable && input.stages && !detailUnknown) {
     const byKey = new Map(input.stages.map((stage) => [stage.key, stage]))
     for (const { key, reason } of TIER_TWO_BLOCKING_ORDER) {
       const stage = byKey.get(key)

@@ -325,4 +325,47 @@ describe('StockPreparationDashboardView', () => {
     expect(text).toContain('7')
     expect(text).not.toContain('99')
   })
+
+  // #4207 review P2: A → B → A. The newest load and a stale earliest-A load share projectId 'proj-A',
+  // so an id-only guard would let the late earliest-A response overwrite the newest A's numbers. Only
+  // a monotonic sequence guard is safe.
+  it('drops the stale earliest-A response even after A → B → A (sequence guard, not id)', async () => {
+    h.getOverview.mockResolvedValue({
+      projectCount: 2,
+      statusCounts: { active: 2 },
+      projects: [
+        { projectId: 'proj-A', projectStatus: 'active', lastSyncRunId: 'r-a', snapshotBatchCount: 0, openExceptionCount: 0, readyLineCount: 0, heldLineCount: 0 },
+        { projectId: 'proj-B', projectStatus: 'active', lastSyncRunId: 'r-b', snapshotBatchCount: 0, openExceptionCount: 0, readyLineCount: 0, heldLineCount: 0 },
+      ],
+    } as unknown as StockPreparationWorkspaceOverview)
+
+    let releaseFirstA!: () => void
+    const firstA = new Promise((resolve) => { releaseFirstA = () => resolve({ batchCount: 99, batches: [] }) })
+    let aCalls = 0
+    h.listSnapshotBatches.mockImplementation((scope: { projectId?: string }) => {
+      if (scope.projectId === 'proj-A') { aCalls += 1; return aCalls === 1 ? firstA : Promise.resolve({ batchCount: 42, batches: [] }) }
+      return Promise.resolve({ batchCount: 7, batches: [] }) // B
+    })
+    h.getMappingSummary.mockResolvedValue({ activeMappingCount: 0, pendingConfirmCount: 0 })
+    h.getUnitSummary.mockResolvedValue({ pendingUnitLineCount: 0 })
+    h.listPrepLines.mockResolvedValue({ rowCount: 0, byPrepStatus: {} })
+    h.listExceptions.mockResolvedValue({ rowCount: 0, unresolvedBlockingCount: 0 })
+
+    const projectId = ref<string>('proj-A')
+    app = createApp({ render: () => renderH(StockPreparationDashboardView as Component, { projectId: projectId.value, scope: () => ({}) }) })
+    app.mount(container!)
+    await flushUi()            // load#1 (A) in flight — its snapshot-batches read (99) is held
+
+    projectId.value = 'proj-B'
+    await flushUi()            // load#2 (B) resolves (7)
+    projectId.value = 'proj-A'
+    await flushUi()            // load#3 (A, second A call) resolves (42) — this is the current truth
+
+    releaseFirstA()           // load#1's stale A (99) finally resolves — lower seq, must be dropped
+    await flushUi()
+
+    const text = container!.textContent || ''
+    expect(text).toContain('42')
+    expect(text).not.toContain('99')
+  })
 })

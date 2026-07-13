@@ -220,6 +220,12 @@ function onPick(event: Event): void {
 
 // ── H2 stage detail (five admin-gated reads, reused verbatim from views 2/3/4/5/6) ─────────────────
 
+// Monotonic load counter: every loadStageDetail run claims the next number, and only the run whose
+// number is still the latest may write the result. A plain projectId comparison is NOT enough — with
+// A → B → A the newest run and a stale earliest-A run share the same projectId, so an id-only guard
+// lets the late earliest-A response overwrite the newest A's numbers. The sequence is per-load, so
+// only the single most-recent load ever wins.
+let stageDetailSeq = 0
 const stageDetailLoading = ref(false)
 const detailForbidden = ref(false)
 const detailStages = ref<StockPreparationStageMetric[] | null>(null)
@@ -251,10 +257,9 @@ async function loadStageDetail(): Promise<void> {
     detailStages.value = null
     return
   }
-  // Capture the project this load is FOR. The watcher re-fires loadStageDetail on every projectId
-  // change, so several loads can be in flight at once; without this guard an earlier project's late
-  // response would overwrite a newer project's stage counts (stale-count pollution on project switch).
-  const requestedProjectId = props.projectId
+  // Claim this load's sequence number. The watcher re-fires loadStageDetail on every projectId change,
+  // so several loads can be in flight at once; only the run that is still the most recent may commit.
+  const seq = ++stageDetailSeq
   stageDetailLoading.value = true
   const scope = { ...props.scope, projectId: props.projectId }
   const [syncResult, mapResult, unitResult, generateResult, exceptionResult] = await Promise.allSettled([
@@ -265,10 +270,10 @@ async function loadStageDetail(): Promise<void> {
     listStockPreparationExceptions({ ...scope, projectId: props.projectId }),
   ])
 
-  // Drop a superseded response: if the selection changed while these five reads were in flight, a
-  // newer loadStageDetail owns the state — writing our stale results now would show the wrong
-  // project's numbers. (The newer load sets loading/detail itself.)
-  if (props.projectId !== requestedProjectId) return
+  // Drop a superseded response: if another loadStageDetail started after us (project switched, even
+  // A → B → A), it owns the state. Comparing the monotonic sequence — not the projectId — is what
+  // makes A → B → A safe: the stale earliest-A run has a lower seq than the newest A run.
+  if (seq !== stageDetailSeq) return
 
   // Authoritative forbidden signal: only these two calls throw StockPreparationConfirmApiError with
   // a REAL HTTP status (the three summary-shaped calls above lose status/code through

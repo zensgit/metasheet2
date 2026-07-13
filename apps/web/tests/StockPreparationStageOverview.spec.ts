@@ -150,10 +150,33 @@ describe('deriveRecommendedNextStep', () => {
       expect(step).toEqual({ kind: 'all_clear', reason: 'all_clear' })
     })
 
-    it('treats a null blockingCount (unavailable/no concept) as not blocking', () => {
-      const stages = buildStages({ sync: { blockingCount: null, status: 'unknown', count: null } })
+    it('treats a null blockingCount on a KNOWN stage (no such concept) as not blocking', () => {
+      // status stays 'clear' — a known stage that simply has no blocking concept, NOT a failed read.
+      const stages = buildStages({ sync: { blockingCount: null, status: 'clear', count: 2 } })
       const step = deriveRecommendedNextStep({ hasProject: true, adminDetailAvailable: true, stages })
       expect(step).toEqual({ kind: 'all_clear', reason: 'all_clear' })
+    })
+
+    // #4207 review P2: a FAILED detail read classifies its stage 'unknown'; the array still exists, so
+    // an "array present ⇒ detail available" gate would fall through to all_clear ("nothing to handle")
+    // when the truth is "we don't know". An unknown detail stage must NOT yield all_clear.
+    it('does NOT claim all_clear when a detail stage is unknown (read failed) — falls to tier-1', () => {
+      const stages = buildStages({
+        sync: { status: 'unknown', count: null, blockingCount: null },
+        map: { status: 'unknown', count: null, blockingCount: null },
+        unit: { status: 'unknown', count: null, blockingCount: null },
+        generate: { status: 'unknown', count: null, blockingCount: null },
+        exception: { status: 'unknown', count: null, blockingCount: null },
+      })
+      // No signals → cannot claim all_clear; surfaces admin_required rather than a false "all clear".
+      const noSignals = deriveRecommendedNextStep({ hasProject: true, adminDetailAvailable: true, stages })
+      expect(noSignals).toEqual({ kind: 'admin_required', reason: 'admin_permission_required' })
+      // With read-gated project signals → tier-1 fallback recommendation, still never a false all_clear.
+      const withSignals = deriveRecommendedNextStep({
+        hasProject: true, adminDetailAvailable: true, stages,
+        projectSignals: { snapshotBatchCount: 2, openExceptionCount: 4, readyLineCount: 0, heldLineCount: 0 },
+      })
+      expect(withSignals).toEqual({ kind: 'go_to_stage', stage: 'exception', reason: 'project_open_exceptions', count: 4 })
     })
   })
 
