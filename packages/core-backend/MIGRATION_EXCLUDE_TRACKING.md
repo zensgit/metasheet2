@@ -8,7 +8,67 @@ This document tracks database migrations that are currently excluded from automa
 
 **Default Exclude in CI**: `008_plugin_infrastructure.sql, 048_create_event_bus_tables.sql, 049_create_bpmn_workflow_tables.sql, 042a_core_model_views.sql, 20250924120000_create_views_view_states.ts, 20250924140000_create_gantt_tables.ts, 20250925_create_view_tables.sql, 20251117000001_add_snapshot_labels.ts, 20251117000002_create_protection_rules.ts, 20251201000001_create_change_management_tables.ts, zzzz20260114110000_create_user_orgs_table.ts`
 
-**Last Updated**: 2026-05-12
+**Last Updated**: 2026-05-12 (T8 docs-only pass 2026-07-12 added the cross-list context below without
+changing any exclude value)
+
+---
+
+## T8 update (2026-07-12): this is ONE of THREE independent exclusion/skip mechanisms
+
+This repo has three separate lists that all sound like "migration exclusions" but do different
+things and are **not required to converge** — forcing them into one shared list would break the
+workflows/jobs that depend on each one's specific shape. Full detail:
+`docs/development/migration-legacy-sql-skip-design-20260512.md` (design decision) and
+`docs/development/superseded-legacy-migrations-gap-audit-20260710.md` (2026-07-10 gap/zombie audit).
+
+1. **The CI per-PR gate's `MIGRATION_EXCLUDE`** (this doc's subject) — lives in
+   `.github/workflows/plugin-tests.yml` (2 occurrences), `observability-strict.yml`,
+   `observability-e2e.yml`, `safety-guard-e2e.yml`. Drops a migration entirely (no history
+   marker) so CI's schema-build order can succeed despite that migration's known conflicts.
+2. **`migration-replay.yml`'s own `MIGRATION_EXCLUDE` subset** — a narrower, independently
+   evolving list for a different job (run `db:migrate` twice against a fresh db, assert
+   idempotency). It is not the same 11 items as #1 today.
+3. **`SUPERSEDED_LEGACY_SQL_MIGRATIONS`** in `packages/core-backend/src/db/migration-provider.ts`
+   — a disjoint-purpose list of ~29 legacy numeric SQL migrations turned into no-op history
+   markers (name stays, body doesn't run) rather than dropped. Overlaps #1 on exactly three
+   items (`042a_core_model_views`, `048_create_event_bus_tables`,
+   `049_create_bpmn_workflow_tables`) — confirmed intentional/harmless double-listing by the
+   2026-07-10 audit.
+
+**Known, verified divergences between the 6 occurrences of #1/#2** (git-blame-checked, not
+guessed):
+
+| Item | Present in | Absent from | Why |
+|---|---|---|---|
+| `20250925_create_view_tables.sql` | plugin-tests.yml (both jobs), observability-strict/e2e.yml, safety-guard-e2e.yml | migration-replay.yml | The owner_id FK bug this item guards against was fixed by #3627; migration-replay.yml dropped the exclusion in #3632 (verified passing). The other 4 occurrences were never re-verified/updated to match — **possibly stale**, not resolved here. Re-enabling for the full view-table cluster (so `snapshot-protection.test.ts` can run in CI) is gated planning work: **#4162**. |
+| `zzzz20260114110000_create_user_orgs_table.ts` | observability-strict/e2e.yml, safety-guard-e2e.yml, migration-replay.yml | plugin-tests.yml (both jobs) | Removed from plugin-tests.yml's `test` job in commit `b1fc1e19d1` ("ci(attendance): run integration gate against postgres") because attendance auto-absence needs the `user_orgs` table applied in that job. The **same commit** also removed it from the `after-sales-integration` job in the same file, which does not obviously touch attendance/user_orgs — that second removal may be an unverified side-effect of a file-wide edit rather than a deliberate per-job decision. Flagged, not resolved here. |
+
+**Known asymmetry this doc does not close**: production and on-prem `db:migrate` runs use **no**
+`MIGRATION_EXCLUDE` at all — every migration listed above runs in a real deploy. Only CI's per-PR
+gate trims the list, which means the view-table/gantt/snapshot/protection-rule/change-management
+cluster has never had a per-PR green CI run of its `up()` bodies. See #4162.
+
+**Guard**: `scripts/ci/validate-migration-exclude.sh` cross-checks all of the above for
+undocumented drift (warn-only; see that script's header for what it covers and does not cover).
+
+---
+
+## Pre-2026-07-12 content below is a historical snapshot
+
+The "Current CI Exclusions" section right below is still an accurate reflection of the workflow
+files as of 2026-05-12. Everything under **Pre-Existing Issues / Phase 2 Additions / Fix Strategy
+/ History** further down, however, refers to migration **filenames that no longer exist** in this
+repo (`008_add_indexes_to_workflows.sql`, `031_add_approval_templates.sql`,
+`036_add_workflow_execution_logs.sql`, `037_add_notification_preferences.sql`,
+`042_add_audit_logs.sql`, `048_create_bpmn_process_definitions.sql`,
+`049_create_bpmn_process_instances.sql`) — that 2025-10-29 "fix each SQL file, then shrink
+MIGRATION_EXCLUDE to empty" plan was superseded by the 2026-05-12
+`SUPERSEDED_LEGACY_SQL_MIGRATIONS` no-op/twin-migration design (see
+`docs/development/migration-legacy-sql-skip-design-20260512.md`): rather than hand-fixing 29
+legacy SQL files for idempotency one at a time, they are treated as permanently-superseded
+no-op history markers, with modern timestamp/`zzzz` migrations as their replacements. **Kept
+below for historical record, not as a live plan** — do not resume the Phase 1/2/3 fix strategy
+without re-reading that design doc first.
 
 ---
 
