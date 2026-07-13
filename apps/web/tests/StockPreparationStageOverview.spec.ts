@@ -190,6 +190,13 @@ describe('deriveRecommendedNextStep', () => {
         hasProject: true, adminDetailAvailable: true, stages,
         projectSignals: { snapshotBatchCount: 2, openExceptionCount: 0, readyLineCount: 0, heldLineCount: 3 },
       })).toEqual({ kind: 'go_to_stage', stage: 'generate', reason: 'project_held_lines', count: 3 })
+      // The THIRD tier-1 branch (no snapshot yet) is likewise a known positive signal that wins over
+      // detail_unavailable — an unknown detail read does not hide "this project has no snapshot, go sync"
+      // (owner P3 lock 2026-07-13).
+      expect(deriveRecommendedNextStep({
+        hasProject: true, adminDetailAvailable: true, stages,
+        projectSignals: { snapshotBatchCount: 0, openExceptionCount: 0, readyLineCount: 0, heldLineCount: 0 },
+      })).toEqual({ kind: 'go_to_stage', stage: 'sync', reason: 'project_no_snapshot_yet', count: 0 })
     })
 
     // A PARTIAL unknown (one stage failed, the rest loaded clean, none blocked) is still detail_unavailable —
