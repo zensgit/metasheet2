@@ -51,6 +51,20 @@ export const STOCK_PREPARATION_STAGE_KEYS: readonly StockPreparationStageKey[] =
   'exception',
 ]
 
+// The stepper and the recommended-next-step banner both need to turn "go look at this stage" into
+// "switch the shell to this tab" — a single shared map keeps that 1:1 correspondence in ONE place
+// instead of duplicating it across the stepper and the dashboard. Values are the existing
+// StockPreparationWorkspace.vue tab keys (plain strings here to avoid a circular type import; the
+// shell casts back to its own StockPreparationViewKey union, which these six literals satisfy).
+export const STOCK_PREPARATION_STAGE_VIEW_KEY: Readonly<Record<StockPreparationStageKey, string>> = {
+  provision: 'project-workspace',
+  sync: 'bom-snapshot-diff',
+  map: 'material-mapping',
+  unit: 'unit-conversion',
+  generate: 'prep-line',
+  exception: 'exception-queue',
+}
+
 /**
  * FE-DERIVED classification only (never a server enum): a closed, values-free vocabulary describing
  * a stage's state for the stepper.
