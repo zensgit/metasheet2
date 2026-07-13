@@ -63,7 +63,7 @@ const BASE_ID = `base_pn_${TS}`
 const SHEET_ID = `sheet_pn_${TS}`
 const PERSON_OK = `fld_pn_ok_${TS}` // readable person field
 const PERSON_DENIED = `fld_pn_den_${TS}` // layer-3 field_permissions-denied person field
-const PERSON_HIDDEN = `fld_pn_hid_${TS}` // layer-2 property.hidden person field (a NO-OP on person — see G4)
+const PERSON_HIDDEN = `fld_pn_hid_${TS}` // layer-2 property.hidden person field (ENFORCED since #4165 — see G4)
 const REC = `rec_pn_${TS}`
 const BATCH_PRIOR = `batch_pn_prior_${TS}`
 const BATCH = `batch_pn_${TS}`
@@ -73,7 +73,7 @@ const P_KEPT = `user_pn_kept_${TS}` // still in the cell after the change
 const P_REMOVED = `user_pn_removed_${TS}` // REMOVED by this change — the whole point
 const P_INACTIVE = `user_pn_inactive_${TS}` // deactivated (is_active = false)
 const P_SECRET = `user_pn_secret_${TS}` // ONLY in the DENIED field — must never surface
-const P_HIDDEN = `user_pn_hidden_${TS}` // ONLY in the layer-2 property-hidden field (G4 tripwire)
+const P_HIDDEN = `user_pn_hidden_${TS}` // ONLY in the layer-2 property-hidden field (G4 asserts it stays hidden, #4165)
 
 const KEPT_NAME = 'Kept Person'
 const REMOVED_NAME = 'Removed Person'
@@ -117,7 +117,7 @@ describeIfDatabase('person before-side name resolution — batch-detail personNa
     await q('INSERT INTO meta_sheets (id, base_id, name) VALUES ($1,$2,$3)', [SHEET_ID, BASE_ID, 'PN Sheet'])
     await q('INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6)', [PERSON_OK, SHEET_ID, 'Assignees', 'person', '{}', 1])
     await q('INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6)', [PERSON_DENIED, SHEET_ID, 'SecretAssignees', 'person', '{}', 2])
-    // layer-2 property-hidden person field — which the platform does NOT actually hide (G4 tripwire).
+    // layer-2 property-hidden person field — ENFORCED since #4165 (G4 asserts its name + id surface nowhere).
     await q('INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6)', [PERSON_HIDDEN, SHEET_ID, 'HiddenAssignees', 'person', '{"hidden":true}', 3])
     // layer-3: VIEWER cannot read PERSON_DENIED ⇒ its VALUES (and thus its userIds) are dropped post-mask.
     await q(

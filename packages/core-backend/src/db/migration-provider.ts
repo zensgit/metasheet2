@@ -18,16 +18,79 @@ interface CreateCoreBackendMigrationProviderOptions {
   includeSupersededLegacySqlMigrations?: boolean
 }
 
+// SUPERSEDED_LEGACY_SQL_MIGRATIONS — this is ONE of THREE independent migration
+// exclusion/skip mechanisms in this repo; they intentionally differ from each other and
+// unifying them by force would break the CI/replay lanes that depend on their specific
+// shapes. Full account, including a per-item gap/zombie audit, lives in
+// docs/development/migration-legacy-sql-skip-design-20260512.md (the design decision) and
+// docs/development/superseded-legacy-migrations-gap-audit-20260710.md (the 2026-07-10 audit
+// that verified every item below has no live reader with a missing modern replacement,
+// except the two exceptions called out inline). The three mechanisms:
+//   1. THIS list — raw numeric SQL migrations (032-055, plus 20250926) that the modern
+//      timestamp/zzzz migration stream has fully replaced. They become NO-OP HISTORY
+//      MARKERS (see createNoopMigration below) rather than being deleted: upgraded
+//      databases already carry these names in kysely_migration, and Kysely treats a
+//      missing provider entry as migration-history corruption, so the name must stay
+//      visible even though the body no longer runs. Escape hatch for compatibility audits
+//      only: MIGRATION_INCLUDE_SUPERSEDED_LEGACY_SQL=true (never a normal deploy switch).
+//   2. The CI per-PR gate's MIGRATION_EXCLUDE env var (plugin-tests.yml,
+//      observability-strict.yml, observability-e2e.yml, safety-guard-e2e.yml) — DROPS a
+//      migration entirely (no history marker at all), used where CI's own schema-build
+//      order cannot yet satisfy a migration's FK/constraint assumptions.
+//   3. migration-replay.yml's OWN MIGRATION_EXCLUDE subset — a different, narrower list for
+//      a different job (run db:migrate twice against a fresh db, assert idempotency), which
+//      has independently dropped some entries (e.g. 20250925_create_view_tables.sql, fixed by
+//      #3627/#3632) that the CI per-PR gate lists above have not yet re-verified and dropped.
+//      See the comments on that env var in each workflow file for the per-item and
+//      per-occurrence detail.
+//
+// Known, deliberate overlap between this list and mechanism #2: 042a_core_model_views,
+// 048_create_event_bus_tables, and 049_create_bpmn_workflow_tables appear in BOTH — no-op
+// AND CI-excluded is redundant but harmless (belt-and-suspenders), confirmed as the full
+// overlap (no others) by the 2026-07-10 audit above.
+//
+// Known asymmetry that this list does NOT close (tracked, not a bug in this file): production
+// and on-prem `db:migrate` runs use NEITHER this list NOR MIGRATION_EXCLUDE — they run every
+// migration including the modern view_states/gantt/snapshot/protection-rule/change-management
+// migrations that CI's MIGRATION_EXCLUDE (mechanism #2) skips. That means those modern
+// migrations' up() bodies have never had a per-PR green CI run; untangling that gap so the
+// full snapshot-protection integration suite can run in CI is gated planning work — see #4162.
+// Do not "fix" that gap by deleting entries from this list; the two mechanisms serve different
+// failure modes and this file is not the one that needs to change for it.
+//
+// Per-item disposition below (grouped; full object-level mapping is in the 2026-07-10 audit
+// doc's §1/§2 tables). Everything is a verified zombie (no live reader depends on the legacy
+// object) unless a comment says otherwise. Reviving any of these — e.g. by flipping
+// MIGRATION_INCLUDE_SUPERSEDED_LEGACY_SQL=true in a real deployment — requires re-auditing for
+// a live reader/writer first: the modern schema has no equivalent object for most of them, and
+// a silent gap on fresh installs is exactly the failure class this list exists to prevent (see
+// the 035_create_files incident below, and PR #4016 which closed it).
 const SUPERSEDED_LEGACY_SQL_MIGRATIONS = [
+  // 032-036: legacy approval/RBAC/spreadsheet/file/permission core tables, superseded by the
+  // modern core-model timestamp migration stream. 035_create_files was a genuine silent gap
+  // (zombie with an active fresh-install risk: no modern migration created `files`) until PR
+  // #4016 added the bridge migration zzzz20260710120000_create_files.ts; kept no-op here
+  // (safe) rather than reactivated now that the gap is closed from the other side.
   '032_create_approval_records',
   '033_create_rbac_core',
   '034_create_spreadsheets',
   '035_create_files',
   '036_create_spreadsheet_permissions',
+  // 037: view_configs + indexes — zombie, no modern reader/writer found.
   '037_add_gallery_form_support',
+  // 038: secrets / secret_access_logs / config_history — zombie. DO NOT reactivate without a
+  // security review first; these are sensitive-data tables.
   '038_config_and_secrets',
+  // 040: data_source_schemas/query_templates/query_history/data_sync_jobs/
+  // data_sync_history/connection_metrics — zombie.
   '040_data_sources',
+  // 041: script_sandbox (8-table package) — zombie.
   '041_script_sandbox',
+  // 042/042a-042d, 043-047: core-model/views/external-data/audit/plugin/cache duplicates and
+  // predecessors of the modern equivalents. Two of these back genuinely dead application code,
+  // not just unused tables — WorkflowRepository.ts (042 workflow_tokens/workflow_incidents) and
+  // DataMaterializationService.ts (042b/044 external_tables) have zero importers repo-wide, so
+  // reviving the migration alone would not make the feature live.
   '042_core_model_completion',
   '042a_core_model_views',
   '042b_external_data_model',
@@ -37,8 +100,13 @@ const SUPERSEDED_LEGACY_SQL_MIGRATIONS = [
   '043_core_model_views',
   '044_external_data_model',
   '045_audit_placeholder',
+  // 046: plugin_manifests — zombie; the modern plugin system uses plugin_registry instead.
   '046_plugins_and_templates',
   '047_audit_and_cache',
+  // 047/048: event-bus predecessors. event_handlers/event_queue have no modern replacement —
+  // the modern 8-table event-bus migration does not recreate them (a real, low-risk gap).
+  // event_dead_letters has a soft modern successor, dead_letter_events; EventBusService.ts:875
+  // has an explicit fallback that already tolerates the legacy table's absence.
   '047_create_event_bus_tables',
   '048_create_event_bus_tables',
   '049_create_bpmn_workflow_tables',
@@ -46,6 +114,10 @@ const SUPERSEDED_LEGACY_SQL_MIGRATIONS = [
   '051_create_minimal_views',
   '052_recreate_minimal_views',
   '053_create_protection_rules',
+  // 054: legacy users table. users.permissions drifted TEXT[] -> jsonb with no transitional
+  // migration (AuthService.ts:357 tolerates both shapes at read time, but the SQL-level shape
+  // has diverged); users.name NOT NULL -> nullable; avatar_url/is_active/is_admin are absent
+  // from this legacy shape. See the 2026-07-10 audit §2 for the full column-drift table.
   '054_create_users_table',
   '055_create_attendance_import_tokens',
   // #3751 entity-machine baseline conflict (42P07 duplicate_table on audit_logs): this legacy raw

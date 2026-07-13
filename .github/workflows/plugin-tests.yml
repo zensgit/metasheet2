@@ -176,6 +176,39 @@ jobs:
       - name: Run DB migrations
         env:
           DATABASE_URL: postgresql://postgres@localhost:5432/metasheet_test
+          # T8 (migration-exclusion docs+guard hardening) note: this MIGRATION_EXCLUDE is the
+          # CI per-PR gate's list, a DIFFERENT mechanism from migration-replay.yml's own subset
+          # (narrower job: run db:migrate twice, assert idempotency) and from
+          # SUPERSEDED_LEGACY_SQL_MIGRATIONS in packages/core-backend/src/db/migration-provider.ts
+          # (no-ops a migration's body but keeps its name; this drops name+body entirely). See
+          # packages/core-backend/MIGRATION_EXCLUDE_TRACKING.md and
+          # docs/development/superseded-legacy-migrations-gap-audit-20260710.md for the full
+          # cross-list picture. Known asymmetry: production/on-prem db:migrate runs with no
+          # exclude at all, so the view-table cluster excluded below has never had a per-PR
+          # green CI run of its up() bodies — untangling that is gated planning work, #4162.
+          # Exclude problematic migrations (see migration-replay.yml for the per-item detail
+          # this workflow shares):
+          # 008_plugin_infrastructure.sql - has idempotency issue with scope column
+          # 048/049 (event bus / BPMN) - Phase 2 migrations with complex SQL syntax issues
+          # 042a_core_model_views.sql - References non-existent last_accessed column
+          # 20250924120000_create_views_view_states.ts - View states migration with schema issues
+          # 20250924140000_create_gantt_tables.ts - FK points at pre-fix text view ids
+          # 20250925_create_view_tables.sql - legacy owner_id FK assumes pre-text user ids during replay.
+          #   NOTE: this exact bug was fixed by #3627, and migration-replay.yml already dropped
+          #   this exclusion in #3632 (verified passing there); this workflow was never
+          #   re-verified/updated to match, so this exclusion may now be stale rather than still
+          #   required — needs re-verification before removal, not a piecemeal drop (see #4162).
+          # 20251117000001_add_snapshot_labels.ts - re-applies chk_protection_level after earlier snapshot schema creation during replay
+          # 20251117000002_create_protection_rules.ts - re-creates protection_rules after replay paths already created the table
+          # 20251201000001_create_change_management_tables.ts - legacy snapshot_id text FKs no longer match replay-built uuid snapshot ids
+          # NOTE: zzzz20260114110000_create_user_orgs_table.ts is intentionally NOT in this
+          #   list (unlike observability-*.yml/safety-guard-e2e.yml/migration-replay.yml, which
+          #   all exclude it because it hits a legacy user_orgs is_active replay incompatibility
+          #   there): this job's attendance integration step needs the user_orgs table applied,
+          #   so it was deliberately removed from here in b1fc1e19d1
+          #   ("ci(attendance): run integration gate against postgres") — "Include the user_orgs
+          #   migration in plugin-test database setup because attendance auto-absence now
+          #   depends on that table."
           MIGRATION_EXCLUDE: 008_plugin_infrastructure.sql,048_create_event_bus_tables.sql,049_create_bpmn_workflow_tables.sql,042a_core_model_views.sql,20250924120000_create_views_view_states.ts,20250924140000_create_gantt_tables.ts,20250925_create_view_tables.sql,20251117000001_add_snapshot_labels.ts,20251117000002_create_protection_rules.ts,20251201000001_create_change_management_tables.ts
         run: |
           pnpm --filter @metasheet/core-backend db:migrate
@@ -541,6 +574,7 @@ jobs:
             tests/integration/files-orphan-blob-retention.db.test.ts \
             tests/integration/multitable-attachment-blob-purge.db.test.ts \
             tests/integration/multitable-attachment-root-escape.db.test.ts \
+            tests/integration/stock-prep-audit-immutable-trigger.db.test.ts \
             tests/integration/attendance-import-template-prefs.test.ts \
             tests/integration/attendance-notification-deliveries.test.ts \
             tests/integration/attendance-comp-time-expiry-reminder.test.ts \
@@ -622,6 +656,39 @@ jobs:
       - name: Run DB migrations
         env:
           DATABASE_URL: postgresql://postgres@localhost:5432/metasheet_test
+          # T8 (migration-exclusion docs+guard hardening) note: this MIGRATION_EXCLUDE is the
+          # CI per-PR gate's list, a DIFFERENT mechanism from migration-replay.yml's own subset
+          # (narrower job: run db:migrate twice, assert idempotency) and from
+          # SUPERSEDED_LEGACY_SQL_MIGRATIONS in packages/core-backend/src/db/migration-provider.ts
+          # (no-ops a migration's body but keeps its name; this drops name+body entirely). See
+          # packages/core-backend/MIGRATION_EXCLUDE_TRACKING.md and
+          # docs/development/superseded-legacy-migrations-gap-audit-20260710.md for the full
+          # cross-list picture. Known asymmetry: production/on-prem db:migrate runs with no
+          # exclude at all, so the view-table cluster excluded below has never had a per-PR
+          # green CI run of its up() bodies — untangling that is gated planning work, #4162.
+          # Exclude problematic migrations (see migration-replay.yml for the per-item detail
+          # this workflow shares):
+          # 008_plugin_infrastructure.sql - has idempotency issue with scope column
+          # 048/049 (event bus / BPMN) - Phase 2 migrations with complex SQL syntax issues
+          # 042a_core_model_views.sql - References non-existent last_accessed column
+          # 20250924120000_create_views_view_states.ts - View states migration with schema issues
+          # 20250924140000_create_gantt_tables.ts - FK points at pre-fix text view ids
+          # 20250925_create_view_tables.sql - legacy owner_id FK assumes pre-text user ids during replay.
+          #   NOTE: this exact bug was fixed by #3627, and migration-replay.yml already dropped
+          #   this exclusion in #3632 (verified passing there); this workflow was never
+          #   re-verified/updated to match, so this exclusion may now be stale rather than still
+          #   required — needs re-verification before removal, not a piecemeal drop (see #4162).
+          # 20251117000001_add_snapshot_labels.ts - re-applies chk_protection_level after earlier snapshot schema creation during replay
+          # 20251117000002_create_protection_rules.ts - re-creates protection_rules after replay paths already created the table
+          # 20251201000001_create_change_management_tables.ts - legacy snapshot_id text FKs no longer match replay-built uuid snapshot ids
+          # NOTE: zzzz20260114110000_create_user_orgs_table.ts is also absent from this job's
+          #   list (unlike observability-*.yml/safety-guard-e2e.yml/migration-replay.yml). It was
+          #   removed here in the SAME commit as the `test` job above (b1fc1e19d1), whose message
+          #   explains the removal in terms of the attendance integration step in that OTHER job
+          #   — this job only runs tests/integration/after-sales-plugin.install.test.ts and does
+          #   not obviously touch user_orgs/attendance. Left as-is (not this T8 slice's job to
+          #   resolve), but flagged: this specific occurrence's omission may be an unverified
+          #   side-effect of a file-wide edit rather than a decision made for this job.
           MIGRATION_EXCLUDE: 008_plugin_infrastructure.sql,048_create_event_bus_tables.sql,049_create_bpmn_workflow_tables.sql,042a_core_model_views.sql,20250924120000_create_views_view_states.ts,20250924140000_create_gantt_tables.ts,20250925_create_view_tables.sql,20251117000001_add_snapshot_labels.ts,20251117000002_create_protection_rules.ts,20251201000001_create_change_management_tables.ts
         run: |
           pnpm --filter @metasheet/core-backend db:migrate
