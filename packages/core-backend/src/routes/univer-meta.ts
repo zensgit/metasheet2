@@ -15791,16 +15791,55 @@ export function univerMetaRouter(): Router {
                 `UPDATE meta_records
                  SET data = data || $1::jsonb, updated_at = now(), version = version + 1, modified_by = $4
                  WHERE id = $2 AND sheet_id = $3
-                 RETURNING version`,
+                 RETURNING version, data`,
                 [JSON.stringify({ [fieldId]: nextIds }), recordId, sheetId, getRequestActorId(req)],
               )
+              // D-1c slice ⑤ required fix (zero-row RETURNING fail-closed — same family as slice ①'s
+              // form-submit EDIT branch: this route ALSO holds a `SELECT ... FOR UPDATE` lock on this
+              // exact row, in this same transaction, immediately above, so a concurrent DELETE/UPDATE
+              // from another transaction is blocked until we commit and this branch is not expected to
+              // be reachable in normal operation. Fail closed anyway: a zero-row UPDATE must NOT fall
+              // through and write a spurious `update` revision for a record that's no longer there — no
+              // FK on meta_record_revisions.record_id, so an unguarded write would silently persist and
+              // could resurrect a deleted record via reconstructRecordsAtT.
+              if ((updateRes as any).rows.length === 0) {
+                throw new NotFoundError(`Record not found: ${recordId}`)
+              }
+              const nextVersion = Number((updateRes.rows[0] as any)?.version ?? Number(recordRow?.version ?? 0) + 1)
               updatedRecordRealtimeScope = {
                 sheetId,
                 recordId,
                 fieldId,
-                version: Number((updateRes.rows[0] as any)?.version ?? Number(recordRow?.version ?? 0) + 1),
+                version: nextVersion,
                 patch: { [fieldId]: nextIds },
               }
+              // D-1c slice ⑤ (attachment-delete = A8, RATIFIED design-lock 2026-07-13, §0.5 OD-1..OD-3,
+              // §0/§7a site A8 — FINAL of the five write-site slices): this UPDATE strips the deleted
+              // attachment id out of the record's attachment-field cell — a real user-data edit — and
+              // previously wrote NO revision. reconstructRecordsAtT derives existence+data PURELY from
+              // meta_record_revisions, so it kept returning the PRE-strip value (including the deleted
+              // attachment id) forever, and a sheet revert/reset to a T after this strip would silently
+              // re-add the deleted attachment id back into the cell (irrecoverably — resurrecting a
+              // reference to now-purged binary/metadata). source='attachment' per OD-2 (owner ruled:
+              // attachment gets its OWN source, distinct from 'rest'/'public-form' — the write entry
+              // point is this endpoint itself). actorId=getRequestActorId(req) (OD-3 — already
+              // `string | null`, never fabricated; this route is not restricted to authenticated-only,
+              // so null is a real, legitimate case here, same as form-submit CREATE). snapshot = the
+              // FULL post-strip row (RETURNING …, data), NOT the patch — mirrors every other slice's
+              // merge-trap fix: the field being stripped may carry OTHER attachment ids, and every OTHER
+              // field's data must also be present, or a naive `snapshot: patch` would truncate the
+              // record to just this one field.
+              await recordRecordRevision(query, {
+                sheetId,
+                recordId,
+                version: nextVersion,
+                action: 'update',
+                source: 'attachment',
+                actorId: getRequestActorId(req),
+                changedFieldIds: [fieldId],
+                patch: { [fieldId]: nextIds },
+                snapshot: normalizeJson((updateRes.rows[0] as any)?.data),
+              })
             }
           }
         }
@@ -15840,6 +15879,11 @@ export function univerMetaRouter(): Router {
 
       return res.json({ ok: true, data: { deleted: attachmentId } })
     } catch (err) {
+      // D-1c slice ⑤: maps the transaction's zero-row RETURNING fail-closed NotFoundError to 404,
+      // mirroring the /views/:viewId/submit route's identical NotFoundError -> 404 handling (:14748-14750).
+      if (err instanceof NotFoundError) {
+        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: err.message } })
+      }
       const hint = getDbNotReadyMessage(err)
       if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
       console.error('[univer-meta] attachment delete failed:', err)
