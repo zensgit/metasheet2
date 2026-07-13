@@ -92,6 +92,9 @@ if [[ "$CASE_ID" == "strict" ]]; then
   info "running strict import advanced-panel contract"
   node --test ./scripts/ops/attendance-strict-import-advanced-contract.test.mjs
 
+  info "running strict import override-confirm modal contract"
+  node --test ./scripts/ops/attendance-import-override-confirm-contract.test.mjs
+
   cp "$valid_summary" "${strict_dir}/gate-summary.json"
   ./scripts/ops/attendance-validate-gate-summary.sh "$strict_dir" 1
   node ./scripts/ops/attendance-validate-gate-summary-schema.mjs \

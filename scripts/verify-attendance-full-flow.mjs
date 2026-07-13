@@ -772,6 +772,23 @@ async function resolveRecoveryUserId(apiBase) {
   return ''
 }
 
+// When the import mode requires confirmation (override), requestRunImport() opens the "confirm override
+// import" modal (确认覆盖导入, AttendanceView §2/§4) before the commit fires; the commit only dispatches after
+// the acknowledgement checkbox is checked and Confirm is clicked. No-op when no modal appears.
+async function confirmImportOverrideModalIfPresent(page) {
+  const modal = page.locator('[data-import-override-confirm]').first()
+  try {
+    await modal.waitFor({ state: 'visible', timeout: 5000 })
+  } catch {
+    return
+  }
+  const checkbox = modal.locator('[data-import-override-extra-confirm] input[type="checkbox"]').first()
+  if (await checkbox.count()) {
+    await checkbox.check().catch(() => {})
+  }
+  await modal.locator('[data-import-override-confirm-submit]').first().click()
+}
+
 async function assertImportJobRecoveryFlow(page, importSection, apiBase) {
   logInfo('Admin import recovery assertion started')
   const payloadInput = await ensureImportAdvancedOptionsVisible(importSection)
@@ -845,6 +862,7 @@ async function assertImportJobRecoveryFlow(page, importSection, apiBase) {
     }
 
     await importButton.click()
+    await confirmImportOverrideModalIfPresent(page)
     const asyncCard = importSection.locator('div.attendance__status').filter({ hasText: labels.asyncJobCard }).first()
     const timeoutMessage = page.getByText(labels.asyncStillRunning).first()
     await Promise.any([
