@@ -251,6 +251,10 @@ async function loadStageDetail(): Promise<void> {
     detailStages.value = null
     return
   }
+  // Capture the project this load is FOR. The watcher re-fires loadStageDetail on every projectId
+  // change, so several loads can be in flight at once; without this guard an earlier project's late
+  // response would overwrite a newer project's stage counts (stale-count pollution on project switch).
+  const requestedProjectId = props.projectId
   stageDetailLoading.value = true
   const scope = { ...props.scope, projectId: props.projectId }
   const [syncResult, mapResult, unitResult, generateResult, exceptionResult] = await Promise.allSettled([
@@ -260,6 +264,11 @@ async function loadStageDetail(): Promise<void> {
     listStockPreparationPrepLines({ ...scope, projectId: props.projectId }),
     listStockPreparationExceptions({ ...scope, projectId: props.projectId }),
   ])
+
+  // Drop a superseded response: if the selection changed while these five reads were in flight, a
+  // newer loadStageDetail owns the state — writing our stale results now would show the wrong
+  // project's numbers. (The newer load sets loading/detail itself.)
+  if (props.projectId !== requestedProjectId) return
 
   // Authoritative forbidden signal: only these two calls throw StockPreparationConfirmApiError with
   // a REAL HTTP status (the three summary-shaped calls above lose status/code through

@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { createApp, nextTick, ref, type App as VueApp, type Component } from 'vue'
+import { createApp, h as renderH, nextTick, ref, type App as VueApp, type Component } from 'vue'
 
 // Stock Preparation UI humanization H1/H2 (H0 plane-boundary design-lock PR #4202 — PLANE A ONLY).
 // StockPreparationDashboardView is the "task-oriented entry": a project picker (H1) + a current-project
@@ -284,5 +284,45 @@ describe('StockPreparationDashboardView', () => {
     const root = mountView()
     await flushUi()
     expect(root.querySelector('[data-testid="stock-prep-dashboard-no-project"]')?.textContent).toMatch(/select a project/i)
+  })
+
+  // #4207 review (owner focus: concurrent-request stale results / project-switch stale-count pollution).
+  // The watcher re-fires loadStageDetail on every projectId change, so an earlier project's late
+  // response must NOT overwrite a newer project's stage counts. The "sync" stage count comes from
+  // listSnapshotBatches().batchCount, so we give project A a distinct 99 (held until after the switch)
+  // and project B a 7 — the DOM must settle on B's 7, never A's stale 99.
+  it('drops a superseded stage-detail response when the project changes mid-load', async () => {
+    h.getOverview.mockResolvedValue({
+      projectCount: 2,
+      statusCounts: { active: 2 },
+      projects: [
+        { projectId: 'proj-A', projectStatus: 'active', lastSyncRunId: 'r-a', snapshotBatchCount: 0, openExceptionCount: 0, readyLineCount: 0, heldLineCount: 0 },
+        { projectId: 'proj-B', projectStatus: 'active', lastSyncRunId: 'r-b', snapshotBatchCount: 0, openExceptionCount: 0, readyLineCount: 0, heldLineCount: 0 },
+      ],
+    } as unknown as StockPreparationWorkspaceOverview)
+
+    let releaseA!: () => void
+    const aBatches = new Promise((resolve) => { releaseA = () => resolve({ batchCount: 99, batches: [] }) })
+    h.listSnapshotBatches.mockImplementation((scope: { projectId?: string }) =>
+      scope.projectId === 'proj-A' ? aBatches : Promise.resolve({ batchCount: 7, batches: [] }))
+    h.getMappingSummary.mockResolvedValue({ activeMappingCount: 0, pendingConfirmCount: 0 })
+    h.getUnitSummary.mockResolvedValue({ pendingUnitLineCount: 0 })
+    h.listPrepLines.mockResolvedValue({ rowCount: 0, byPrepStatus: {} })
+    h.listExceptions.mockResolvedValue({ rowCount: 0, unresolvedBlockingCount: 0 })
+
+    const projectId = ref<string>('proj-A')
+    app = createApp({ render: () => renderH(StockPreparationDashboardView as Component, { projectId: projectId.value, scope: () => ({}) }) })
+    app.mount(container!)
+    await flushUi() // project A's stage-detail load is in flight (its snapshot-batches read is held)
+
+    projectId.value = 'proj-B' // switch — the watcher starts a fresh loadStageDetail for B
+    await flushUi() // B fully resolves and renders (sync stage count = 7)
+
+    releaseA() // A's stale snapshot-batches finally resolve (count 99) — must be dropped by the guard
+    await flushUi()
+
+    const text = container!.textContent || ''
+    expect(text).toContain('7')
+    expect(text).not.toContain('99')
   })
 })
