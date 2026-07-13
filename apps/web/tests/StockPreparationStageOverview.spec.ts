@@ -178,6 +178,25 @@ describe('deriveRecommendedNextStep', () => {
       })
       expect(withSignals).toEqual({ kind: 'go_to_stage', stage: 'exception', reason: 'project_open_exceptions', count: 4 })
     })
+
+    // #4207 re-review 2026-07-12: a PARTIAL detail failure must still surface a blocker that DID load.
+    // sync loaded with a real blocker, exception's read failed (unknown). adminDetailAvailable is true
+    // (it is `detailStages !== null && !detailForbidden`, not "all five succeeded"), and the tier-1
+    // per-project signals are CLEAN — so gating the whole tier-2 walk on !detailUnknown would drop the
+    // loaded sync blocker and fall to a tier-1 all_clear. The blocker walk must run regardless of a
+    // sibling stage being unknown; only the "nothing pending" terminal is deferred.
+    it('surfaces a LOADED blocker even when a sibling detail stage is unknown (clean tier-1 would hide it)', () => {
+      const stages = buildStages({
+        sync: { status: 'blocked', count: 3, blockingCount: 3 },
+        exception: { status: 'unknown', count: null, blockingCount: null },
+      })
+      const step = deriveRecommendedNextStep({
+        hasProject: true, adminDetailAvailable: true, stages,
+        // CLEAN signals: batches exist, nothing open/held — tier-1 alone would say all_clear.
+        projectSignals: { snapshotBatchCount: 2, openExceptionCount: 0, readyLineCount: 4, heldLineCount: 0 },
+      })
+      expect(step).toEqual({ kind: 'go_to_stage', stage: 'sync', reason: 'sync_incomplete_batches', count: 3 })
+    })
   })
 
   describe('tier 1 fallback (admin detail unavailable — non-admin operator or errored reads)', () => {

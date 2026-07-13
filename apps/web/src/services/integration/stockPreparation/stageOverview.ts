@@ -189,28 +189,37 @@ export function deriveRecommendedNextStep(input: {
     return { kind: 'select_project', reason: 'no_project_selected' }
   }
 
-  // The tier-2 walk is only trustworthy if the detail reads actually SUCCEEDED. A rejected read
-  // classifies its stage 'unknown' (classifyDetailStageStatus, errored:true) — the array still exists
-  // but its numbers are absent, so treating "array present" as "detail available" would let a total
-  // read failure fall through to all_clear ("nothing to handle") when the truth is "we don't know".
-  // If ANY detail stage is unknown, drop to the tier-1 fallback (read-gated per-project signals) or an
-  // explicit admin_required, never all_clear.
+  // A rejected detail read classifies its stage 'unknown' (classifyDetailStageStatus, errored:true) — the
+  // stages array still exists (a full five entries) with that stage's numbers absent, and
+  // adminDetailAvailable stays true because it is `detailStages !== null && !detailForbidden`, NOT "all
+  // five succeeded". So a partial failure (one endpoint 500s, the rest return) reaches here with
+  // adminDetailAvailable=true AND one unknown stage.
   const detailUnknown = Boolean(
     input.stages && input.stages.some((stage) => stage.key !== 'provision' && stage.status === 'unknown'),
   )
-  if (input.adminDetailAvailable && input.stages && !detailUnknown) {
+  if (input.adminDetailAvailable && input.stages) {
     const byKey = new Map(input.stages.map((stage) => [stage.key, stage]))
+    // A positive blockingCount is GROUND TRUTH from a stage that actually loaded — surface it even if a
+    // DIFFERENT stage's read failed. (Gating the whole walk on !detailUnknown would drop a real, loaded
+    // blocker whenever any sibling read errored — #4207 re-review 2026-07-12: that regressed the very
+    // "false all_clear" the P2 fix was closing, just via the tier-1 path instead.)
     for (const { key, reason } of TIER_TWO_BLOCKING_ORDER) {
       const stage = byKey.get(key)
       if (stage && stage.blockingCount !== null && stage.blockingCount > 0) {
         return { kind: 'go_to_stage', stage: key, reason, count: stage.blockingCount }
       }
     }
-    const generateStage = byKey.get('generate')
-    if (generateStage && generateStage.count === 0) {
-      return { kind: 'go_to_stage', stage: 'generate', reason: 'generate_not_run', count: 0 }
+    // No loaded stage is blocked. The "nothing pending" TERMINAL (generate-not-run, else all_clear) is
+    // only trustworthy when EVERY detail stage loaded — asserting it off a failed read is the false
+    // "no blocking items". If any stage is unknown, fall through to the tier-1 per-project signals (or
+    // admin_required) instead of claiming all_clear here.
+    if (!detailUnknown) {
+      const generateStage = byKey.get('generate')
+      if (generateStage && generateStage.count === 0) {
+        return { kind: 'go_to_stage', stage: 'generate', reason: 'generate_not_run', count: 0 }
+      }
+      return { kind: 'all_clear', reason: 'all_clear' }
     }
-    return { kind: 'all_clear', reason: 'all_clear' }
   }
 
   const signals = input.projectSignals
