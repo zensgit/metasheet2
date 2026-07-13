@@ -36,6 +36,10 @@ function violationIds(flags) {
 // categorize it (→ manifest if it's a recovery/history flag, → denylist with a reason if it's out of scope).
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..')
 
+// MAINTAINER NOTE: these are PREFIX families — a future flag that shares one of these prefixes is
+// auto-denied (treated as out of scope) WITHOUT failing this test. That is correct today (no recovery/
+// history flag lives under AI_/ATTACHMENT_/EMAIL_), but if a Global-History flag is ever named with one
+// of these prefixes it would be silently excluded here. If that happens, switch that family to NON_GH_EXACT.
 const NON_GH_PREFIXES = [
   'MULTITABLE_AI_', // AI fields / bulk-fill / ledger / tenant caps
   'MULTITABLE_ATTACHMENT_', // attachment storage / cleanup / blob retention
