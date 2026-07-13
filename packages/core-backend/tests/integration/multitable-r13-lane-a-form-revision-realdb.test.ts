@@ -310,6 +310,25 @@ describeIfDatabase('R13 Lane A — form-submit CREATE/EDIT + attachment-delete n
       expect(state.get(created.id)?.version).toBe(2)
     })
 
+    test('EDIT full-merge snapshot (G4 merge trap): editing ONE field of a two-field record keeps the untouched field', async () => {
+      // The snapshot MUST be the full post-merge row, not the bare patch. On a single-field record
+      // patch ≡ nextData, so `snapshot: patch` passes vacuously (mutation-proven). A record with a NAME
+      // AND a LINK field, edited on only the name, distinguishes `snapshot: data` (correct) from
+      // `snapshot: patch` (drops the link field). Mutating univer-meta.ts:14454 to the bare patch reds THIS.
+      const created = await createMemberRecord('mt-name-v1', [LINK_TARGET_1])
+      asUser(MEMBER, ['multitable:read', 'multitable:write'])
+      const res = await request(app)
+        .post(`/api/multitable/views/${VIEW_ID}/submit`)
+        .send({ recordId: created.id, expectedVersion: created.version, data: { [FLD_NAME]: 'mt-name-v2' } })
+      expect(res.status).toBe(200)
+      const revs = await revisionsOf(created.id)
+      const last = revs[revs.length - 1]!
+      expect(last.action).toBe('update')
+      expect((last.snapshot as Record<string, unknown>)?.[FLD_NAME]).toBe('mt-name-v2')
+      // the untouched link field — `snapshot: patch` would DROP this, reddening the test:
+      expect((last.snapshot as Record<string, unknown>)?.[FLD_LINK]).toEqual([LINK_TARGET_1])
+    })
+
     test('the destructive leg: revert-preview at asOf AFTER the edit proposes ZERO reverts for this record (PIT/revert no longer lies)', async () => {
       const created = await createMemberRecord('destr-v1')
       asUser(MEMBER, ['multitable:read', 'multitable:write'])
