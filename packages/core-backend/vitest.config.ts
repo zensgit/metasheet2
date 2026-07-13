@@ -218,6 +218,12 @@ export default defineConfig({
       // in the no-DB lane, and whole-file wired into `Run multitable real-DB integration` in
       // plugin-tests.yml. Two-point wiring: BOTH points or the file silently never runs.
       'tests/integration/multitable-d2-sidedoor-delete-recoverability-realdb.test.ts',
+      // R13 Lane B (design-lock d1c §0.5 OD-1 lane B): plugin-SDK createRecord/patchRecord revision
+      // parity — real Postgres only (installs scoped failure-injection triggers on
+      // meta_record_revisions and drives the REAL createCoreAPI() plugin-SDK factory end-to-end).
+      // Excluded HERE so it cannot skip-green in the no-DB lane; whole-file wired into `Run multitable
+      // real-DB integration` in plugin-tests.yml. Two-point wiring: BOTH points or it silently never runs.
+      'tests/integration/multitable-r13-laneb-plugin-revision-realdb.test.ts',
       // 4c-3 RB matrix: real Postgres only — whole-file wired into `Run multitable real-DB
       // integration` in plugin-tests.yml (describeIfDatabase alone would skip-green here).
       'tests/integration/multitable-undelete-inbound-replay-realdb.test.ts',

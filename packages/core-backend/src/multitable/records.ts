@@ -511,15 +511,41 @@ export async function patchRecord(
     [JSON.stringify(nextData), input.recordId, input.sheetId],
   )
 
+  const version = Number((updated.rows as any[])[0]?.version ?? existing.version + 1)
+  const nextVersion = Number.isFinite(version) ? version : existing.version + 1
+
+  // R13 Lane B (design-lock d1c §0.5 OD-1 lane B / audit A2 `/tmp/r13-revision-disposition-audit-20260713.md`
+  // §1 row 6): this UPDATE mutated `data` and bumped `version` but wrote NO meta_record_revisions row —
+  // `reconstructRecordsAtT` (record-reconstructor.ts:34) derives existence+data PURELY from revisions and
+  // never saw this write, so it kept returning the PRE-patch value at every T after the patch, forever
+  // (the "A2 PIT lie", reproduced end-to-end in the design-lock §3). Emit the revision in the SAME
+  // transaction as the UPDATE above — index.ts wraps every plugin-SDK `patchRecord` call in
+  // `poolManager.get().transaction` (verified at index.ts:631, not assumed), so a failed revision
+  // INSERT rolls the UPDATE back too (no half-write). source:'plugin' (OD-2) + actorId:null (OD-3: the
+  // plugin lane is actor-less by design — mirrors this module's own delete path's `deletedBy:null` /
+  // `actorId:null`, records.ts:656/777). snapshot is `nextData`, the FULL merged row (not the raw patch) —
+  // a link-field write already lives inside it (`patch[fieldId] = ids`, buildNormalizedPatch above), so the
+  // snapshot carries the OD-4 link-edge state consistent with the `meta_links` rows written below.
+  await recordRecordRevision(query, {
+    sheetId: input.sheetId,
+    recordId: input.recordId,
+    version: nextVersion,
+    action: 'update',
+    source: 'plugin',
+    actorId: null,
+    changedFieldIds: Object.keys(patch),
+    patch,
+    snapshot: nextData,
+  })
+
   if (linkUpdates.size > 0) {
     await replaceRecordLinks(query, input.recordId, linkUpdates)
   }
 
-  const version = Number((updated.rows as any[])[0]?.version ?? existing.version + 1)
   return {
     id: existing.id,
     sheetId: existing.sheetId,
-    version: Number.isFinite(version) ? version : existing.version + 1,
+    version: nextVersion,
     data: nextData,
     locked: existing.locked,
     lockedBy: existing.lockedBy,
@@ -549,15 +575,39 @@ export async function createRecord(
     [recordId, input.sheetId, JSON.stringify(patch)],
   )
 
+  const version = Number((inserted.rows as any[])[0]?.version ?? 1)
+  const nextVersion = Number.isFinite(version) ? version : 1
+
+  // R13 Lane B (design-lock d1c §0.5 OD-1 lane B / audit A5 `/tmp/r13-revision-disposition-audit-20260713.md`
+  // §1 row 2): this INSERT created a brand-new record but wrote NO meta_record_revisions row —
+  // `reconstructRecordsAtT` derives existence PURELY from revisions (record-reconstructor.ts:34), so the
+  // record is not merely stale, it is ABSENT from every PIT/revert view, AND a Reset-to-T that should
+  // PRESERVE it instead DESTROYS it (computeSheetReset pushes any record with no revision <= T into the
+  // delete-set unconditionally — it cannot distinguish "created after T" from "created before T but never
+  // captured"; audit §1(c)). Emit atomically in the SAME transaction as the INSERT above — index.ts wraps
+  // every plugin-SDK `createRecord` call in `poolManager.get().transaction` (verified at index.ts:593,
+  // not assumed). Mirrors record-service.ts:706's create-revision shape. source:'plugin' (OD-2) +
+  // actorId:null (OD-3: actor-less by design — mirrors this module's own delete path's `actorId:null`).
+  await recordRecordRevision(query, {
+    sheetId: input.sheetId,
+    recordId,
+    version: nextVersion,
+    action: 'create',
+    source: 'plugin',
+    actorId: null,
+    changedFieldIds: Object.keys(patch),
+    patch,
+    snapshot: patch,
+  })
+
   if (linkUpdates.size > 0) {
     await replaceRecordLinks(query, recordId, linkUpdates)
   }
 
-  const version = Number((inserted.rows as any[])[0]?.version ?? 1)
   return {
     id: recordId,
     sheetId: input.sheetId,
-    version: Number.isFinite(version) ? version : 1,
+    version: nextVersion,
     data: patch,
   }
 }
