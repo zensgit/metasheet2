@@ -223,6 +223,12 @@ export default defineConfig({
       // end-to-end) — excluded HERE so it cannot skip-green in the no-DB lane, whole-file wired into
       // `Run multitable real-DB integration` in plugin-tests.yml.
       'tests/integration/multitable-d1c-form-submit-revision-realdb.test.ts',
+      // D-1c W0 slice ② (plugin-SDK createRecord/patchRecord revision goldens + the concurrent-delete
+      // P1 fix golden, which uses a genuine two-connection Postgres lock race via
+      // `poolManager.get().getInternalPool().connect()`): real Postgres only — excluded HERE so it cannot
+      // skip-green in the no-DB lane, whole-file wired into `Run multitable real-DB integration` in
+      // plugin-tests.yml.
+      'tests/integration/multitable-d1c-plugin-revision-realdb.test.ts',
       // D-2 side-door delete recoverability (#4004): real Postgres only (it installs scoped failure-
       // injection triggers and drives both side doors end-to-end) — excluded HERE so it cannot skip-green
       // in the no-DB lane, and whole-file wired into `Run multitable real-DB integration` in
