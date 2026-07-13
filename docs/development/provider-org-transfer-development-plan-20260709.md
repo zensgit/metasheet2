@@ -219,6 +219,13 @@ Default behavior should be conservative:
 
 ### 4.1 Local-Canonical-Org Substrate: `org_id` Is the Anchor (Rev 3)
 
+> **This section is a summary. The full Wave-3 substrate design is a standalone plan**,
+> `docs/development/local-directory-provider-canonical-org-anchor-development-plan-20260709.md`
+> (its own doc PR), which adds the editable `provider='local'` integration, the
+> `local:<org_id>` immutable corp_id, the one-active-local-integration DB constraint, the
+> normalized manager relation, and the department-binding single-org-integrity FKs. This
+> transfer plan (Wave 4) depends on that substrate; it is not compressed into this subsection.
+
 The true stable anchor above any provider/corp binding is the local canonical
 org: `org_id`. The schema already enforces this direction —
 `directory_integrations` carries a unique index on `(org_id, provider, name)`
@@ -730,13 +737,18 @@ path, for the life of the row.
 Allowed transitions:
 
 - Initial set: empty → value.
-- Clear: value → empty, before any sync has run (a setup-time correction).
 - Same value: value → identical value (no-op).
 
 Rejected:
 
 - value → different non-empty value, always, with `409`. No synced-records
   probe, no active/inactive distinction, no escape hatch.
+- value → empty ("clear") is **not** an allowed transition and is in fact
+  **unreachable**: `normalizeIntegrationInput` rejects an empty `corpId`
+  (`'corpId is required'`) before the guard runs, so a PUT can never null a set
+  `corp_id`. (An earlier Rev-3 draft listed "clear before first sync" as allowed;
+  removed — a mis-entered `corp_id` before first sync is corrected by
+  delete-and-recreate, not by clearing.)
 
 Why the Rev 2 design ("block only if the integration has synced accounts",
 with an env escape hatch) is provably unsafe — TOCTOU:
