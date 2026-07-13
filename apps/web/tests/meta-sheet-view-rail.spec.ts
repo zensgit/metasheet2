@@ -241,6 +241,16 @@ describe('MetaSheetViewRail vs MetaViewTabBar — DOM-snapshot equivalence (byte
     ['last sheet + last view active, isPersonalMode true', baseProps({
       activeSheetId: 's2', activeViewId: 'v3', isPersonalMode: () => true,
     })],
+    // P3-1 (adversarial-review hardening on #4237): every case above that renders the toggle at
+    // all renders it ON (isPersonalMode true, via baseProps()'s default `id === 'v1'` matching the
+    // default activeViewId, or the explicit `() => true` case above). Toggle-visible-but-OFF
+    // (`aria-pressed="false"`, no `--on` class) was therefore never byte-compared by THIS spec —
+    // it's covered transitively today by tests/meta-view-tab-bar-personal-toggle.spec.ts mounting
+    // MetaViewTabBar alone, but this spec's own baseline forward-pin (the one P2-2b will build on)
+    // had a gap. Close it directly.
+    ['personal-views-enabled on, toggle visible but OFF (isPersonalMode false)', baseProps({
+      personalViewsEnabled: true, isPersonalMode: () => false,
+    })],
     ['empty views[]', baseProps({ views: [] })],
     ['single sheet, no create', baseProps({ sheets: [SHEETS[0]], canCreateSheet: false, activeSheetId: 's1' })],
   ]
