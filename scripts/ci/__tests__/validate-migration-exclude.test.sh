@@ -23,7 +23,10 @@ run_against() {
   (
     WORKFLOWS_DIR="$FIX/$subdir/workflows"
     PROVIDER_FILE="$FIX/$subdir/provider.ts"
-    export WORKFLOWS_DIR PROVIDER_FILE
+    # Fixture shape: 3 occurrence lines across 3 files (the guard's real-repo pin is 7/5).
+    EXPECTED_OCCURRENCE_COUNT=3
+    EXPECTED_FILE_COUNT=3
+    export WORKFLOWS_DIR PROVIDER_FILE EXPECTED_OCCURRENCE_COUNT EXPECTED_FILE_COUNT
     # shellcheck source=../validate-migration-exclude.sh
     source "$GUARD"
     run_checks

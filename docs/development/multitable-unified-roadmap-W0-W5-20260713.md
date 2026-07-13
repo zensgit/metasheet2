@@ -81,24 +81,20 @@ W0 之所以排第一,是因为**上面每一层都建立在「历史可信、�
 - **W2**:T5 决策(brief 已备 = #4175);PIT Revert 能力**已上线、无 flag、零 UI**(F1);history-audit-grant 能力已上线、**目前只能裸 HTTP 签发**(F4)。
 - **W3**:W3-6b/6c dashboard widgets(锁已在);automation 整次重试无 UI(其兄弟 resume 有 UI)。
 - **W4**:S3 血缘 / S4 成本 / S5 normalize / L0.5 租户 gate(各自锁已在;S3 存储门已满足)。
-- **W5**:7 个默认关闭 flag 的逐档 smoke——**PIT_RESET 有 STOP-SHIP**:保持 retention 关,或 trash-retention ≥ 审批窗口。
+- **W5**:7 个默认关闭 flag 的逐档 smoke——**PIT_RESET 的 STOP-SHIP 门 = 保持 `MULTITABLE_META_REVISION_RETENTION_ENABLED` 关闭**(owner 勘误 2026-07-13:该门是这个**真实存在的 revision-retention flag**,不是一个尚不存在的 trash sweep;回收站 v1 = 无限期保留、无自动清理,见 G-8)。
 
 ---
 
-## §6 仍需 owner 拍板(逐项,一句话即可)
+## §6 owner 决策台账 — ✅ G-1..G-10 全部已裁(2026-07-13)
 
-| # | 决策 | 我读到的路线倾向 | 仍缺 |
-|---|---|---|---|
-| **G-1** | **#4187 OD-1 范围** | 路线写「分批补齐 8 类」+「不存在无 revision 的权威数据写」⇒ **倾向 = 全 8 入口** | 请**确认全 8 入口**(而非 EDIT-only) |
-| **G-2** | #4187 OD-2 `source` 命名 | —— | EDIT 分支只认证用户 ⇒ `source` 命名的是**面**(`public-form`)还是**行为者**?且与 OD-1 耦合(若也修 CREATE,该面可匿名) |
-| **G-3** | #4187 OD-3 `actorId` 归属 | —— | 各入口 actor 取值口径 |
-| **G-4** | #4187 OD-4 `meta_links` 副作用 | —— | 补 revision 时是否一并处理边;还是分离成独立 rung |
-| **G-5** | #4187 OD-5 已污染的历史 | —— | 前向修复(只保证今后)还是回填(须造历史时间戳)?荐**前向** |
-| **G-6** | #4187 OD-6 revision-disposition 守卫 | 路线把它列入 W0 ⇒ **倾向 = 建** | 请**确认建**,顺序按 §4.3(收尾) |
-| **G-7** | `HISTORY_INCOMPLETE` 预检 | 路线明列 ⇒ **倾向 = 建,fail-closed** | 请确认 execute = **零写入**(而非降级写) |
-| **G-8** | 回收站保留策略 | 路线列入 W0 | 保留**期**是多少?(trash 目前永不清;PIT_RESET STOP-SHIP:trash-retention ≥ 审批窗口) |
-| **G-9** | T5 决策(W2 前置) | brief = #4175 | OD-T5a watch toggle / OD-T5b comment / OD-T5c glyph / OD-T5d 三纯文本按钮 |
-| **G-10** | UI 术语映射词典(W1 前置) | §3 约束已定 | 「工作区/数据表/视图/记录」↔ base/sheet/view/record 的**确切中文对照**由 owner 定稿 |
+> 原「仍需 owner 拍板」表保留问题框架;裁决如下,**逐字为准**。
+
+| # | 裁决(owner 2026-07-13) |
+|---|---|
+| **G-1..G-7** | **随 #4187 一并裁定并 RATIFIED**(post re-review):OD-1=全量 A1–A8 分 **5 独立 slice**(form→plugin→automation→approval→attachment);OD-2 source=写入入口(form=`public-form`/plugin/automation/approval/**attachment**);OD-3 已知 actor 必写、匿名 CREATE=null、禁伪 system;OD-4 link-edge history=独立锁(标 UNSOLVED);OD-5 前向、禁 backfill;OD-6 守卫独立 slice、**最后落**、须可靠扫描+稳定 site ID;§0.6 `HISTORY_INCOMPLETE`=**先行独立实现**,execute=零写入,goldens 门=**对应 runtime 合并前**(非 ratify 前)。既有 R13 lane PR(#4216/#4219/#4220/#4227)保持 **Draft 不合不 rebase**,按 owner 逐 PR 修正后按五刀回收(**(b) 三车道交付不接受**;#4216 须 concurrent-delete fail-closed+golden)。 |
+| **G-8** | **v1 = 无限期保留、无自动清理**。未来有限期清理**另立设计锁**。同时勘误文档:PIT_RESET 的真实门 = 保持 `MULTITABLE_META_REVISION_RETENTION_ENABLED` 关闭,**不是**一个不存在的 trash sweep(本文 §5-W5 行已同步勘误)。 |
+| **G-9** | **T5 已裁**(见 `…t5-recorddrawer-decision-brief…` §3.5):OD-T5a/b/c=A、OD-T5d 放行;T5-safe 已实现落地(#4223);comment-affordance 锁已 RATIFIED(OD-CA-1=A 琥珀三元组 / OD-CA-2=A Grid 蓝属漂移收敛 / OD-CA-3=B 先 token+一致性、Drawer 迁移另开小刀)。 |
+| **G-10** | **术语词典定稿**:产品名=**多维表**;Base=**工作区**、Sheet=**数据表**、View=**视图**、Record=**记录**。**底层 API/代码仍保留 Base/Sheet/recordId**(§3 不变量 1 不动)——映射只在展示层。W1 术语映射据此可开工。 |
 
 **红线不变**:#4187 等一切设计锁**由 owner ratify**,我只机械记录你的裁决,绝不自裁;flag 生产启用是 W5 的独立运维阶梯,永不「一键全开」;AI L1 / C 簇路 2/3 在各自 owner 门前不动。
 
@@ -114,7 +110,7 @@ W0 之所以排第一,是因为**上面每一层都建立在「历史可信、�
 
 ## §8 本文不主张什么
 
-- 不主张任何波次已完成,也不主张 W0 已开始「补 8 入口」——那要 §6 的 G-1 先拍。
-- 不主张 §6 里任何「倾向」已被采纳——它们是我对路线的**读法**,待 owner 确认;读错请纠。
+- 不主张任何波次已完成。~~「W0 未开工等 G-1」~~ → **2026-07-13 起 G-1..G-10 全部已裁**(§6):W0-CI 半已收(#4213/#4217),§0.6 实现已开工;5 slices 等 §0.6 落地后按序开。
+- ~~「倾向待确认」~~ → §6 现在记录的是 owner 裁决本身,不再是我的读法。
 - 不主张改动了 Base/Sheet/recordId 契约——恰相反,§3 把不重命名钉为不变量。
 - 不主张 flag 会被打开——W5 逐档、独立回滚,永不一键全开。

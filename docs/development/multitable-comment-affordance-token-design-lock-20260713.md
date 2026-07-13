@@ -1,6 +1,10 @@
-# Multitable · comment-affordance 专用 token + 9 组件一致性 — 短设计锁（PROPOSED）
+# Multitable · comment-affordance 专用 token + 9 组件一致性 — 短设计锁（RATIFIED）
 
-- **Status**: **PROPOSED — owner ratify 前零实现授权。** 本锁由 owner 2026-07-13 对 T5 的 OD-T5b=A 裁决**委托创建**（「Comment-affordance：独立短设计锁，定义专用 comment-active token 和 9 组件一致性测试」），但 token **值**与 OD-CA-1..3 仍待 owner 拍板。
+- **Status**: **RATIFIED 2026-07-13（owner）— OD-CA-1..3 全部已裁,实现授权已给(按 OD-CA-3=B 的拆分)。**
+  - **OD-CA-1 = A**:token 值 = 现有琥珀三元组(`#f59e0b / #fff7ed / #b45309`),采纳时主流面零视觉变。
+  - **OD-CA-2 = A**:**MetaGridTable 的蓝 `#1d4ed8` 属漂移**,统一到 comment-active token(网格 active 变琥珀 = owner 知情并批准的可见变化)。
+  - **OD-CA-3 = B**:**先完成 token + 九组件一致性**;Drawer comment 按钮的 MtButton 迁移**另开小刀**,不混入本 slice。
+- **本锁由 owner 2026-07-13 对 T5 的 OD-T5b=A 裁决委托创建**（「Comment-affordance：独立短设计锁，定义专用 comment-active token 和 9 组件一致性测试」）。
 - **上游裁决（已定，不在本锁重议）**：comment 按钮从 T5 剥离；**不得拿 `--ms-color-warning` 代替 comment-active 色彩**（owner 明令）。
 - **范围**：仅 comment-affordance 的**颜色语义与一致性**。不碰 affordance 的行为逻辑（`comment-affordance.ts` 的 active/idle 判定不变）、不碰权限、不碰计数逻辑。
 
@@ -26,11 +30,11 @@
    --ms-color-comment-active-bg:     #fff7ed;
    --ms-color-comment-active-text:   #b45309;
    ```
-   **值 = 现行主流琥珀**（采纳时零视觉变）——值本身是 OD-CA-1,owner 可改。
+   **值 = 现行主流琥珀**（采纳时主流面零视觉变）——**OD-CA-1 = A 已裁定此值**（见 Status）。
 2. **9 组件全部改引 token**,删除各自硬编码琥珀。
 3. **一致性守卫测试**:一个 spec 遍历 9 个消费组件的 `--active` 规则,断言:(a) 颜色只来自上述 token(源码扫描:组件内不得再出现裸琥珀 hex);(b) `resolveCommentAffordanceStateClass` 仍是唯一的态派生入口(防止有组件另起炉灶)。**必须带正控**:故意在一个组件里塞回裸 hex → 守卫必红(否则守卫空转)。
 
-## §4 OWNER 决策点
+## §4 OWNER 决策点 — ✅ 全部已裁（2026-07-13,裁决见 Status;下表保留为提案历史,选项非决定）
 
 | # | 决策 | 选项 |
 |---|---|---|
@@ -40,6 +44,6 @@
 
 ## §5 本文不主张什么
 
-- 不主张任何 token 已存在或任何组件已改——**零 runtime,PROPOSED**。
+- 不主张任何 token 已存在或任何组件已改——本锁**零 runtime**;实施(token + 九组件一致性)按 RATIFIED 授权另开 slice,Drawer 按钮迁移再单独一刀(OD-CA-3=B)。
 - 不主张 §2 表覆盖了全部 10 文件的每一条规则——主流琥珀 + Grid 蓝 + Chip 无自样式是**核验过的**;逐组件全量清单在实施 slice 里做。
-- 不主张 OD-CA-2 的「(a 荐)」已被采纳——网格变色是**可见变化**,必须 owner 知情后拍。
+- ~~不主张 OD-CA-2 已被采纳~~ → **OD-CA-2 = A 已裁**(owner 2026-07-13 知情批准网格 active 由蓝转琥珀的可见变化)。
