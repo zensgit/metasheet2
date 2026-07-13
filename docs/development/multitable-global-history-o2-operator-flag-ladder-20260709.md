@@ -6,13 +6,16 @@
 
 ## 1. Flag 清单（本线相关，全部默认 OFF）
 
+> **单一真源（R12-C，2026-07-12）**：本表是人读摘要、**并不完整**（本线共 **19** 个 flag）。**权威、完整、机器校验的清单 = `scripts/ops/global-history-flag-manifest.mjs`**；开关前请跑 `node scripts/ops/multitable-global-history-flag-status.mjs --strict`（展示全部 flag + 拒绝非法组合：lossy 无 base / side-door 无 capture / PIT-reset 撞 retention）。**本表若与 manifest 冲突，以 manifest 为准。**
+
 | Flag | 激活值 | 作用 | 出处 |
 |---|---|---|---|
 | `MULTITABLE_TOMBSTONE_CAPTURE_ENABLED` | `'true'` | 捕获层：record/field 销毁时写 tombstone（4c-2 + 4c-3 D-3 的 PIT-reset 点） | 4c-2 锁 |
 | `MULTITABLE_TOMBSTONE_CAPTURE_MAX_ROWS` | 数字（默认 50000） | 单次销毁的捕获上限；超限 **fail-closed 拒绝该次销毁**（delete 422 / reset 422 / **侧门 D-2:automation step failed + plugin 抛 typed error**） | 4c-2 锁 |
 | `MULTITABLE_SIDE_DOOR_DELETE_TRASH_ENABLED` | `'true'` | **D-2 侧门可恢复性**：plugin-SDK / automation `delete_record` 两条侧门写 `meta_records_trash` + 锚 + inbound 捕获 ⇒ 机器删除进回收站、可恢复。**默认 OFF ⇒ 与 D-1 现状 byte-identical** | D-2 锁 (#4004) |
 | `MULTITABLE_ENABLE_RECORD_UNDELETE_INBOUND` | `'true'` | 4c-3 重放层：restore / PIT-resurrect 重建 inbound 边（Option A 邻居同意） | 4c-3 锁 |
-| `MULTITABLE_ENABLE_FIELD_RETYPE_REVERT` | `'true'` | 4c-1 lossy retype revert | 4c-1 锁 |
+| `MULTITABLE_ENABLE_FIELD_RETYPE_REVERT` | `'true'` | 4c-1 field retype revert **BASE** flag（**仅**无损/结构性 revert；base OFF ⇒ 整面 403。**旧表把它写成「lossy」= 错**，有损另需下一行的 `_LOSSY`） | 4c-1 锁 |
+| `MULTITABLE_ENABLE_FIELD_RETYPE_REVERT_LOSSY` | `'true'`（**且** base 也须 `'true'`） | 4c-1 **有损** retype revert（双门：`isLossyRetypeRevertEnabled = _LOSSY==='true' && base==='true'`，`lossy-retype-oracle.ts`；base 未开时 helper `--strict` 拒绝） | 4c-1 锁 |
 | `MULTITABLE_ENABLE_PIT_UNDELETE` | `'true'` | T8-1 PIT undelete-execute（resurrect 面；4c-3 的第二重放面挂在它之下） | T8-1 锁 |
 | `MULTITABLE_META_REVISION_RETENTION_ENABLED` | **`'1'`**（⚠ 非 `'true'`） | retention janitor：revisions/config-revisions/tombstones 老化 | T9/4c-2 |
 | `MULTITABLE_META_REVISION_RETENTION_POLICY / _KEEP_N / _DAYS / _BATCH / _INTERVAL_MS` | 见代码默认 | retention 细节旋钮 | 同上 |
@@ -97,4 +100,4 @@ tombstone 数据是惰性的——关 flag 不删数据，重开后继续可用�
   `MULTITABLE_SIDE_DOOR_DELETE_TRASH_ENABLED`（默认 OFF）之下**，且捕获还需 `TOMBSTONE_CAPTURE_ENABLED` 同时为真（§2.5 嵌套规则）。
   因此**当前生产行为不变**（两 flag 皆未开 ⇒ 侧门仍 revision-only、不可恢复、4c-3 可达边界仍不含它们）——
   但这是 **flag 态**，不再是**能力缺失**。开启路径见 §3 的 **L3.5** 级（产品语义变更，需 owner 单独确认）。
-- 4d 红线不变：已删字段列值的值级恢复永不承诺。
+- 4d 边界（**精确口径，见 #4186 §8；旧「值级恢复永不承诺」已被源码推翻**）：**pre-capture 或 tombstone 已过期**的已删字段列值级恢复不可承诺（物理边界，无捕获即无源）；但 **capture flag 开启后**发生的字段删除，其 undelete **可**恢复列值/链接边/自动编号（`recreateFieldFromConfig` 4c-2 R1，tombstone-gated，与本行同表的 `CONFIG_UNDELETE`/manifest 口径一致）。
