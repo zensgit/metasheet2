@@ -22,7 +22,7 @@
  *
  * ## Transaction-boundary proof (re-verified per-lane, not assumed — D-1「偏差1」/ D-2 §0)
  *
- * `index.ts` wraps BOTH `createRecord` (index.ts:592-611) and `patchRecord` (index.ts:630-650) in
+ * `index.ts` wraps BOTH `createRecord` (index.ts:593) and `patchRecord` (index.ts:631) in
  * `poolManager.get().transaction(...)` — this is the SOLE production wiring. Rather than grep the
  * source (a source-text assertion is not a behaviour assertion), every golden below drives the REAL
  * `MetaSheetServer.createCoreAPI()` factory — precisely the technique the D-2 suite's G18 uses to close
@@ -178,6 +178,7 @@ describeIfDatabase('R13 Lane B — plugin-SDK createRecord/patchRecord revision 
     await makeSheet(SHEET_FAIL_PATCH, 'R13B Fail Patch')
 
     await makeField(`fld_r13b_title_${TS}`, SHEET_MAIN, 'Title', 'string')
+    await makeField(`fld_r13b_notes_${TS}`, SHEET_MAIN, 'Notes', 'string') // 2nd field on SHEET_MAIN — for the G4 merge-trap golden
     await makeField(`fld_r13b_ftitle_${TS}`, SHEET_FAIL_CREATE, 'Title', 'string')
     await makeField(`fld_r13b_ptitle_${TS}`, SHEET_FAIL_PATCH, 'Title', 'string')
     await makeField(`fld_r13b_tgtname_${TS}`, SHEET_LINK_TARGET, 'Name', 'string')
@@ -263,12 +264,35 @@ describeIfDatabase('R13 Lane B — plugin-SDK createRecord/patchRecord revision 
     expect(updateRev.actor_id).toBeNull()
     expect(updateRev.version).toBe(2)
     expect(updateRev.changed_field_ids).toEqual([titleField])
-    // The snapshot is the FULL merged row, not the raw single-field patch — pins the merge trap the
-    // design-lock's G4 warns about (a naive `snapshot: patch` would still pass on a single-field record;
-    // it is asserted structurally here, not just by field count, so a future multi-field regression
-    // cannot slip through).
+    // NOTE: this is a SINGLE-field record, so patch ≡ nextData and `snapshot: patch` would pass here too.
+    // The merge trap (design-lock G4) is pinned by the TWO-field golden below, not by this test.
     expect(updateRev.snapshot).toMatchObject({ [titleField]: 'v2-edited-via-plugin' })
     expect(Object.keys(updateRev.snapshot ?? {})).toEqual([titleField])
+  })
+
+  // ── G4 (gate P2) THE MERGE TRAP: patch ONE field of a TWO-field record; the untouched field MUST
+  //    survive in the snapshot. On a single-field record patch ≡ nextData, so `snapshot: patch` passes
+  //    vacuously (proven: the gate mutated `snapshot: nextData → patch` and the whole suite stayed green).
+  //    Only a ≥2-field record distinguishes `snapshot: nextData` (full merged row, correct) from
+  //    `snapshot: patch` (drops the untouched field). Mutating records.ts `snapshot: nextData → patch`
+  //    MUST red THIS test.
+  test('patchRecord (A2/G4): full-merge snapshot — patching one field of a two-field record keeps the other', async () => {
+    const titleField = `fld_r13b_title_${TS}`
+    const notesField = `fld_r13b_notes_${TS}`
+    const created = await sdk.createRecord({
+      sheetId: SHEET_MAIN,
+      data: { [titleField]: 'g4-title-v1', [notesField]: 'g4-notes-untouched' },
+    })
+    await sdk.patchRecord({
+      sheetId: SHEET_MAIN,
+      recordId: created.id,
+      changes: { [titleField]: 'g4-title-v2' }, // patch ONLY title — notes must survive via the data||patch merge
+    })
+    const updateRev = (await revisionsOf(created.id)).find((r) => r.action === 'update')!
+    expect(updateRev.snapshot?.[titleField]).toBe('g4-title-v2')
+    // the untouched field — `snapshot: patch` (bare single-field patch) would DROP this, reddening the test:
+    expect(updateRev.snapshot?.[notesField]).toBe('g4-notes-untouched')
+    expect(updateRev.changed_field_ids).toEqual([titleField])
   })
 
   // ── G2/G5 the A2 PIT LIE is gone: PIT-after-edit now returns the NEW value, not the stale one ──────

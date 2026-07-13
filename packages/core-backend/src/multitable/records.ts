@@ -520,7 +520,7 @@ export async function patchRecord(
   // never saw this write, so it kept returning the PRE-patch value at every T after the patch, forever
   // (the "A2 PIT lie", reproduced end-to-end in the design-lock §3). Emit the revision in the SAME
   // transaction as the UPDATE above — index.ts wraps every plugin-SDK `patchRecord` call in
-  // `poolManager.get().transaction` (verified at index.ts:630-650, not assumed), so a failed revision
+  // `poolManager.get().transaction` (verified at index.ts:631, not assumed), so a failed revision
   // INSERT rolls the UPDATE back too (no half-write). source:'plugin' (OD-2) + actorId:null (OD-3: the
   // plugin lane is actor-less by design — mirrors this module's own delete path's `deletedBy:null` /
   // `actorId:null`, records.ts:656/777). snapshot is `nextData`, the FULL merged row (not the raw patch) —
@@ -585,7 +585,7 @@ export async function createRecord(
   // PRESERVE it instead DESTROYS it (computeSheetReset pushes any record with no revision <= T into the
   // delete-set unconditionally — it cannot distinguish "created after T" from "created before T but never
   // captured"; audit §1(c)). Emit atomically in the SAME transaction as the INSERT above — index.ts wraps
-  // every plugin-SDK `createRecord` call in `poolManager.get().transaction` (verified at index.ts:592-611,
+  // every plugin-SDK `createRecord` call in `poolManager.get().transaction` (verified at index.ts:593,
   // not assumed). Mirrors record-service.ts:706's create-revision shape. source:'plugin' (OD-2) +
   // actorId:null (OD-3: actor-less by design — mirrors this module's own delete path's `actorId:null`).
   await recordRecordRevision(query, {
