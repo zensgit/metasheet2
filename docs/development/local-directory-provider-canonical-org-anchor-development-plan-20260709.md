@@ -11,7 +11,7 @@ the local canonical-org substrate — of the two-milestone org-transfer roadmap:
 *DingTalk Sync Hardening v1* (Waves 0–2) then *Canonical Org & Provider Transfer v1*
 (Waves 3–4). Wave 0 already delivered the stop-the-bleeding guard that protects the
 anchors this plan builds on: `corp_id` is now **immutable once set** on a directory
-integration, delivered in **PR #4181 (open, pending owner re-review — not yet on main)**.
+integration, delivered in **PR #4181 (merged to main `0e088d3b1`)**.
 The **Wave 4** org-transfer engine that consumes this substrate is specified in
 `docs/development/provider-org-transfer-development-plan-20260709.md` (Rev 3). Brought
 into committed docs per the Wave 0 task "bring the local-org plan into committed docs".
@@ -99,7 +99,7 @@ The provider-agnostic org-transfer plan already treats local users, forms,
 automation rules, approval products, sheets, and orgs as stable anchors. This
 plan adds the missing organization anchor: local departments and memberships.
 
-The Wave 0 corp_id-immutable guard (PR #4181, open) is the near-term protection for
+The Wave 0 corp_id-immutable guard (PR #4181, merged `0e088d3b1`) is the near-term protection for
 the *external* side of that anchor: it forbids re-tagging a synced integration's
 `corp_id` in place, so an org change cannot silently mass-deactivate the previous
 organization before this substrate and the Wave 4 transfer engine exist. Once the
@@ -157,10 +157,14 @@ not admin-entered.
 
 Rules:
 
-- **exactly one active local integration per org — enforced in the DB, not by service convention:**
+- **at most one active local integration per org — enforced in the DB:**
   a partial unique index
   `CREATE UNIQUE INDEX one_active_local_integration_per_org ON directory_integrations(org_id) WHERE provider='local' AND status='active';`
-  (so two concurrent bootstraps cannot both create one);
+  guarantees the DB can never hold two active local integrations for one org (two concurrent
+  bootstraps cannot both succeed). It does **not** guarantee *at least one* — that "an org has a local
+  anchor when it needs one" is the **bootstrap service's** responsibility (create-on-first-use /
+  get-or-create), not something a partial unique index can assert. Together: DB caps the upper bound,
+  the service establishes the lower bound;
 - no external API credentials;
 - no scheduler sync;
 - local edit APIs own mutations.
@@ -253,12 +257,17 @@ Add a small binding table for external provider departments.
 Suggested table:
 
 ```sql
+-- Prerequisite unique indexes for the composite FK targets (see single-org-integrity below):
+--   ALTER TABLE directory_departments  ADD UNIQUE (id, integration_id);
+--   ALTER TABLE directory_integrations ADD UNIQUE (id, org_id);
+
 CREATE TABLE directory_department_bindings (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   org_id text NOT NULL,
-  local_department_id uuid NOT NULL REFERENCES directory_departments(id),
-  external_integration_id uuid NOT NULL REFERENCES directory_integrations(id),
-  external_department_id uuid NOT NULL REFERENCES directory_departments(id),
+  local_integration_id uuid NOT NULL,      -- carried so org membership is FK-checkable both sides
+  local_department_id uuid NOT NULL,
+  external_integration_id uuid NOT NULL,
+  external_department_id uuid NOT NULL,
   provider text NOT NULL,
   binding_status text NOT NULL DEFAULT 'pending',
   match_strategy text NOT NULL DEFAULT 'manual',
@@ -267,9 +276,21 @@ CREATE TABLE directory_department_bindings (
   decided_at timestamptz,
   created_at timestamptz NOT NULL DEFAULT now(),
   updated_at timestamptz NOT NULL DEFAULT now(),
+  -- department ⇒ its integration (both sides)
+  FOREIGN KEY (local_department_id, local_integration_id)
+    REFERENCES directory_departments(id, integration_id),
+  FOREIGN KEY (external_department_id, external_integration_id)
+    REFERENCES directory_departments(id, integration_id),
+  -- each integration ⇒ its org, pinned to this binding's org_id (both sides)
+  FOREIGN KEY (local_integration_id, org_id)
+    REFERENCES directory_integrations(id, org_id),
+  FOREIGN KEY (external_integration_id, org_id)
+    REFERENCES directory_integrations(id, org_id),
   UNIQUE (external_department_id),
   UNIQUE (local_department_id, external_integration_id, external_department_id)
 );
+-- Provider-role correctness (local side provider='local', external side not) is enforced separately
+-- (redundant provider composite FK or CONSTRAINT TRIGGER) — the FKs above pin only the org boundary.
 ```
 
 `binding_status` values:
@@ -280,23 +301,38 @@ CREATE TABLE directory_department_bindings (
 - `conflict`
 - `stale`
 
-**Single-org integrity — enforced in the DB, not by service convention (owner design fix).**
-A binding is only meaningful within one org: the `local_department`, the `external_department`, and
-**both** their integrations must all share the binding's `org_id`. That cannot be left to the service
-layer. Enforce it structurally:
+**Single-org integrity — enforced in the DB, not by service convention (owner design fix, revised).**
+A binding is only meaningful within one org: the local department, the external department, and
+**both** their integrations must all resolve to the binding's `org_id`. That cannot be left to the
+service layer.
 
-- `directory_departments` and `directory_integrations` both carry `org_id`; add composite foreign
-  keys so the binding references `(local_department_id, org_id)` and
-  `(external_department_id, org_id)` against `directory_departments(id, org_id)`, and
-  `(external_integration_id, org_id)` against `directory_integrations(id, org_id)` — this makes a
-  cross-org binding **impossible to insert**, not merely discouraged. (Requires the referenced
-  tables to expose `UNIQUE (id, org_id)`, which is trivially true since `id` is already unique.)
-- Equivalently, a `BEFORE INSERT/UPDATE` trigger asserting all four `org_id`s match — but composite
-  FKs are preferred (declarative, no trigger drift).
+**Schema reality (corrected):** `directory_departments` has **no `org_id` column** — it carries only
+`integration_id` (FK → `directory_integrations.id`). Only `directory_integrations` carries `org_id`.
+So a direct `(department_id, org_id) → directory_departments(id, org_id)` FK is **impossible to
+build**. Enforce the invariant instead through a **buildable FK chain** that routes org membership
+via each department's integration:
 
-This pairs with the **one-active-local-integration-per-org** partial unique index from §5.1: together
-they guarantee an org has exactly one local anchor and that every external→local department binding
-stays inside that org's boundary.
+- The binding carries **both** integration ids: add `local_integration_id` alongside the existing
+  `external_integration_id`.
+- **Department ⇒ its integration** (both sides):
+  - `FOREIGN KEY (local_department_id, local_integration_id) REFERENCES directory_departments(id, integration_id)`
+  - `FOREIGN KEY (external_department_id, external_integration_id) REFERENCES directory_departments(id, integration_id)`
+- **Each integration ⇒ its org** (both sides), pinned to the binding's `org_id`:
+  - `FOREIGN KEY (local_integration_id, org_id) REFERENCES directory_integrations(id, org_id)`
+  - `FOREIGN KEY (external_integration_id, org_id) REFERENCES directory_integrations(id, org_id)`
+- **Required unique indexes to make those composite FKs referenceable:**
+  - `UNIQUE (id, integration_id)` on `directory_departments`
+  - `UNIQUE (id, org_id)` on `directory_integrations`
+  (both trivially unique since `id` is the PK, but must be declared for a composite FK target).
+
+Together this makes a cross-org binding **impossible to insert**: a department can only be paired with
+its own integration, and both integrations must belong to the binding's `org_id`. **Provider-type**
+correctness (local side is `provider='local'`, external side is not) is *not* covered by these FKs;
+enforce it with a redundant provider composite FK (add `provider` to the referenced key and pin it) or
+a `CONSTRAINT TRIGGER` — the FK chain guarantees the org boundary, the provider check guarantees the
+role of each side.
+
+This pairs with the **at-most-one-active-local-integration-per-org** partial unique index from §5.1.
 
 Why a binding table is needed:
 
