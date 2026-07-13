@@ -173,6 +173,28 @@ on:
       - 'apps/web/src/multitable/utils/comment-affordance.ts'
       - 'apps/web/src/multitable/composables/useMultitableCommentInboxRealtime.ts'
       - 'apps/web/src/multitable/realtime/comments-realtime.ts'
+      # W0 (2026-07-13): the 4th red the #4191 audit found-but-left-out-of-scope
+      # (multitable-comment-inbox-view.spec.ts, same getToken() mock gap) + the documented
+      # 7-file workbench-cluster quarantine (crash-on-mount bit-rot: their useMultitableGrid
+      # mocks predated `filterGroups`/`canLoadMore`, their useMultitableComments mocks predated
+      # `reactingKeys`/addReaction/removeReaction, plus 3 further stale-expectation drifts —
+      # native person-field pass-through #2735, the shared "Filter, sort, group" section's
+      # Group-field select, and the A2 mask-preserving export route) — all ran in NO workflow at
+      # all before this. multitable-phase11.spec.ts (a 5th red the original audit didn't catalog:
+      # a timezone-fragile literal assertion, no product coupling) is included for symmetry even
+      # though it has no source-file trigger of its own.
+      - 'apps/web/tests/multitable-crossbase-workbench-wiring.spec.ts'
+      - 'apps/web/tests/multitable-workbench-1672-1673.spec.ts'
+      - 'apps/web/tests/multitable-workbench-drawer-button-wiring.spec.ts'
+      - 'apps/web/tests/multitable-workbench-import-flow.spec.ts'
+      - 'apps/web/tests/multitable-workbench-manager-flow.spec.ts'
+      - 'apps/web/tests/multitable-workbench-permission-wiring.spec.ts'
+      - 'apps/web/tests/multitable-workbench-view.spec.ts'
+      - 'apps/web/tests/multitable-phase11.spec.ts'
+      - 'apps/web/src/views/MultitableCommentInboxView.vue'
+      - 'apps/web/src/multitable/composables/useMultitableComments.ts'
+      - 'apps/web/src/multitable/components/MetaExportDialog.vue'
+      - 'apps/web/src/stores/featureFlags.ts'
       - '.github/workflows/multitable-web-guard.yml'
   push:
     branches: [main]
@@ -325,6 +347,28 @@ on:
       - 'apps/web/src/multitable/utils/comment-affordance.ts'
       - 'apps/web/src/multitable/composables/useMultitableCommentInboxRealtime.ts'
       - 'apps/web/src/multitable/realtime/comments-realtime.ts'
+      # W0 (2026-07-13): the 4th red the #4191 audit found-but-left-out-of-scope
+      # (multitable-comment-inbox-view.spec.ts, same getToken() mock gap) + the documented
+      # 7-file workbench-cluster quarantine (crash-on-mount bit-rot: their useMultitableGrid
+      # mocks predated `filterGroups`/`canLoadMore`, their useMultitableComments mocks predated
+      # `reactingKeys`/addReaction/removeReaction, plus 3 further stale-expectation drifts —
+      # native person-field pass-through #2735, the shared "Filter, sort, group" section's
+      # Group-field select, and the A2 mask-preserving export route) — all ran in NO workflow at
+      # all before this. multitable-phase11.spec.ts (a 5th red the original audit didn't catalog:
+      # a timezone-fragile literal assertion, no product coupling) is included for symmetry even
+      # though it has no source-file trigger of its own.
+      - 'apps/web/tests/multitable-crossbase-workbench-wiring.spec.ts'
+      - 'apps/web/tests/multitable-workbench-1672-1673.spec.ts'
+      - 'apps/web/tests/multitable-workbench-drawer-button-wiring.spec.ts'
+      - 'apps/web/tests/multitable-workbench-import-flow.spec.ts'
+      - 'apps/web/tests/multitable-workbench-manager-flow.spec.ts'
+      - 'apps/web/tests/multitable-workbench-permission-wiring.spec.ts'
+      - 'apps/web/tests/multitable-workbench-view.spec.ts'
+      - 'apps/web/tests/multitable-phase11.spec.ts'
+      - 'apps/web/src/views/MultitableCommentInboxView.vue'
+      - 'apps/web/src/multitable/composables/useMultitableComments.ts'
+      - 'apps/web/src/multitable/components/MetaExportDialog.vue'
+      - 'apps/web/src/stores/featureFlags.ts'
       - '.github/workflows/multitable-web-guard.yml'
 
 jobs:
@@ -393,4 +437,4 @@ jobs:
         # Red-on-main repair (2026-07-12): multitable-client / multitable-comment-affordance /
         # multitable-comment-inbox-realtime ran in NO workflow at all before this — added alongside
         # their new path triggers above (see run-required-web-tests.sh for the REQUIRED-gate half).
-        run: pnpm --filter @metasheet/web exec vitest run automation-action-summary automation-recipes automation-save-block-reasons automation-target-sheet-options AutomationExecutionsView meta-automation-labels meta-filter-group meta-formula-labels meta-grid-table meta-toolbar-filter-builder migration multitable-automation-manager multitable-automation-rule-editor multitable-cell-renderer-person-inactive multitable-client multitable-comment-affordance multitable-comment-inbox-realtime multitable-conditional-formatting multitable-conditional-rule multitable-config-history-modal multitable-config-revert-refresh multitable-field-manager multitable-field-visibility multitable-formula-catalog-1a multitable-formula-catalog-parity multitable-formula-editor multitable-grid multitable-history-center-ai-shortcut-label multitable-history-center-inline-diff multitable-history-center-pinned-batch-deeplink multitable-history-fe multitable-kanban-view multitable-person-picker multitable-record-permission-manager multitable-reorder-view-fields multitable-required-if multitable-reset-confirm-dialog multitable-reset-tsource-picker multitable-restore-batch-dialog multitable-restore-preview-dialog multitable-rollup-aggregation-fe multitable-sheet-cursor-state multitable-sheet-permission-manager multitable-trash-fe multitable-ui multitable-view-manager multitable-workbench-history-field-scope-wiring multitable-workbench-restore-wiring multitable-yjs-cell-editor multitable-yjs-scalar-cell parallelBranchRunsView statusTag --reporter=dot
+        run: pnpm --filter @metasheet/web exec vitest run automation-action-summary automation-recipes automation-save-block-reasons automation-target-sheet-options AutomationExecutionsView meta-automation-labels meta-filter-group meta-formula-labels meta-grid-table meta-toolbar-filter-builder migration multitable-automation-manager multitable-automation-rule-editor multitable-cell-renderer-person-inactive multitable-client multitable-comment-affordance multitable-comment-inbox-realtime multitable-conditional-formatting multitable-conditional-rule multitable-config-history-modal multitable-config-revert-refresh multitable-crossbase-workbench-wiring multitable-field-manager multitable-field-visibility multitable-formula-catalog-1a multitable-formula-catalog-parity multitable-formula-editor multitable-grid multitable-history-center-ai-shortcut-label multitable-history-center-inline-diff multitable-history-center-pinned-batch-deeplink multitable-history-fe multitable-kanban-view multitable-person-picker multitable-phase11 multitable-record-permission-manager multitable-reorder-view-fields multitable-required-if multitable-reset-confirm-dialog multitable-reset-tsource-picker multitable-restore-batch-dialog multitable-restore-preview-dialog multitable-rollup-aggregation-fe multitable-sheet-cursor-state multitable-sheet-permission-manager multitable-trash-fe multitable-ui multitable-view-manager multitable-workbench-1672-1673 multitable-workbench-drawer-button-wiring multitable-workbench-history-field-scope-wiring multitable-workbench-import-flow multitable-workbench-manager-flow multitable-workbench-permission-wiring multitable-workbench-restore-wiring multitable-workbench-view multitable-yjs-cell-editor multitable-yjs-scalar-cell parallelBranchRunsView statusTag --reporter=dot

@@ -30,6 +30,10 @@ vi.mock('../src/composables/useLocale', () => ({
 vi.mock('../src/composables/useAuth', () => ({
   useAuth: () => ({
     getCurrentUserId: vi.fn().mockResolvedValue('user_1'),
+    // #3964 made the comment-inbox realtime join present a caller token server-side; the
+    // composable now calls auth.getToken() unconditionally before opening the socket (same gap
+    // #4191 fixed in multitable-comment-inbox-realtime.spec.ts's useAuth mock).
+    getToken: vi.fn().mockReturnValue('token_inbox_view'),
   }),
 }))
 
