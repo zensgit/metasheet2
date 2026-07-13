@@ -30,9 +30,19 @@ vi.mock('../src/multitable/composables/useMultitableWorkbench', () => ({
   useMultitableWorkbench: () => workbenchMock,
 }))
 
-vi.mock('../src/multitable/composables/useMultitableGrid', () => ({
-  useMultitableGrid: () => gridMock,
-}))
+// MetaViewManager imports the pure `parseFilterTree` named export directly from this module
+// (not via the useMultitableGrid() hook return value) to hydrate a view's stored filter into its
+// config-drawer draft. A hook-only mock leaves that export undefined and throws the moment a real
+// (unstubbed) MetaViewManager opens a non-grid view's config — keep it real via importActual.
+vi.mock('../src/multitable/composables/useMultitableGrid', async () => {
+  const actual = await vi.importActual<typeof import('../src/multitable/composables/useMultitableGrid')>(
+    '../src/multitable/composables/useMultitableGrid',
+  )
+  return {
+    ...actual,
+    useMultitableGrid: () => gridMock,
+  }
+})
 
 vi.mock('../src/multitable/composables/useMultitableCapabilities', () => ({
   useMultitableCapabilities: () => ({
@@ -56,12 +66,15 @@ vi.mock('../src/multitable/composables/useMultitableComments', () => ({
     resolvingIds: ref<string[]>([]),
     updatingIds: ref<string[]>([]),
     deletingIds: ref<string[]>([]),
+    reactingKeys: ref<string[]>([]),
     error: ref<string | null>(null),
     loadComments: vi.fn(),
     addComment: vi.fn(),
     updateComment: vi.fn(),
     deleteComment: vi.fn(),
     resolveComment: vi.fn(),
+    addReaction: vi.fn(),
+    removeReaction: vi.fn(),
   }),
 }))
 
@@ -199,6 +212,8 @@ function createGridMock() {
     sortRules: ref([]),
     filterRules: ref([]),
     filterConjunction: ref('and'),
+    filterGroups: ref([]),
+    canLoadMore: ref(false),
     canUndo: ref(false),
     canRedo: ref(false),
     groupFieldId: ref<string | null>(null), groupFieldIds: ref([]),
@@ -283,7 +298,12 @@ describe('MultitableWorkbench manager-driven config flow', () => {
     await flushUi()
 
     const selects = Array.from(container!.querySelectorAll('.meta-view-mgr__config select')) as HTMLSelectElement[]
-    expect(selects).toHaveLength(4)
+    // 5, not 4: MetaViewManager's config drawer grew a shared "Filter, sort, group" section
+    // (.meta-view-mgr__common) rendered after every type-specific block, whose "Group field"
+    // select is always present (5th) regardless of view type. The 4 timeline-specific selects
+    // (start/end/label/zoom) this test drives are still indices 0-3 — the new select is appended
+    // after them, not inserted before, so the positional assertions below are unaffected.
+    expect(selects).toHaveLength(5)
     selects[2].value = 'fld_owner'
     selects[2].dispatchEvent(new Event('change', { bubbles: true }))
     selects[3].value = 'month'
@@ -305,7 +325,11 @@ describe('MultitableWorkbench manager-driven config flow', () => {
     })
     expect(workbenchMock.loadSheetMeta).toHaveBeenCalledWith('sheet_orders')
     expect(gridMock.loadViewData).toHaveBeenCalledWith(0)
-    expect(showSuccessSpy).toHaveBeenCalledWith('View settings saved')
+    // #3720 (W3-5b) added an optional `action?: ToastAction` 2nd param to the workbench's local
+    // showSuccess(msg, action) wrapper (for History Center deep-link toast actions); it always
+    // forwards both positional args to the MetaToast stub, so a call site that only supplies
+    // `msg` still records `action === undefined` explicitly as the 2nd arg.
+    expect(showSuccessSpy).toHaveBeenCalledWith('View settings saved', undefined)
     expect(showErrorSpy).not.toHaveBeenCalled()
   })
 })

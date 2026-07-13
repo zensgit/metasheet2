@@ -2,19 +2,25 @@
 /**
  * Read-only Global History staging flag status helper.
  *
- * The script intentionally prints only the flags in FLAG_KEYS. It never dumps
- * the full container environment, tokens, or connection strings.
+ * The script intentionally prints only the flags in FLAG_KEYS (now: every flag in the R12-C manifest,
+ * `global-history-flag-manifest.mjs` — the SINGLE SOURCE OF TRUTH for which flags exist, their exact
+ * per-flag activation string, and the illegal-combination rules). It never dumps the full container
+ * environment, tokens, or connection strings.
+ *
+ * `--strict` additionally runs the manifest's dependency/conflict rules (`evaluateFlagRules`) against
+ * the observed flags and turns any violation into a hard STOP (non-zero exit), in addition to its
+ * existing job of promoting the image-tag-mismatch WARN into a STOP. The three illegal-combination
+ * checks (lossy-without-base, side-door-without-capture, pit-reset-intent-with-retention-on) are ALSO
+ * evaluated and reported as STOPs in the default (non-strict) mode — this preserves the pre-existing
+ * unconditional PIT_RESET-vs-retention stop (do not regress that to strict-only) and is the safer
+ * default for an operator-facing safety helper: a plain run cannot miss a genuinely illegal config.
  */
 
 import { execFileSync } from 'node:child_process'
 
-const FLAG_KEYS = Object.freeze([
-  'MULTITABLE_ENABLE_SHEET_CONFIG_REVERT',
-  'MULTITABLE_ENABLE_FIELD_RETYPE_REVERT',
-  'MULTITABLE_ENABLE_PIT_RESET',
-  'MULTITABLE_ENABLE_PIT_UNDELETE',
-  'MULTITABLE_META_REVISION_RETENTION_ENABLED',
-])
+import { GLOBAL_HISTORY_FLAG_KEYS, GLOBAL_HISTORY_FLAG_BY_KEY, evaluateFlagRules, isActivated, isMisconfiguredTruthy } from './global-history-flag-manifest.mjs'
+
+const FLAG_KEYS = GLOBAL_HISTORY_FLAG_KEYS
 
 const TRUE_VALUES = new Set(['1', 'true', 'TRUE', 'yes', 'YES', 'on', 'ON'])
 
@@ -58,12 +64,23 @@ Environment / options:
   METASHEET_STATUS_WEB_CONTAINER      web container name (default: metasheet-staging-web)
   METASHEET_STATUS_HEALTH_URL         optional local/tunneled health URL to fetch
 
+Flags shown come from scripts/ops/global-history-flag-manifest.mjs (single source of truth for the
+Global History line's flags, their exact activation string, and illegal-combination rules).
+
+--strict additionally promotes advisory warnings (image-tag mismatch, a flag value that looks truthy
+but does not match its exact activation string) into hard stops. Illegal flag combinations
+(lossy-without-base, side-door-without-capture, pit-reset-intent-with-retention-on) are ALWAYS hard
+stops, in both modes.
+
 Examples:
   METASHEET_STATUS_SSH_HOST=mainuser@staging-host \\
     node scripts/ops/multitable-global-history-flag-status.mjs
 
   METASHEET_STATUS_HEALTH_URL=http://127.0.0.1:18900/health \\
     node scripts/ops/multitable-global-history-flag-status.mjs --json
+
+  METASHEET_STATUS_SSH_HOST=mainuser@staging-host \\
+    node scripts/ops/multitable-global-history-flag-status.mjs --strict
 `
 }
 
@@ -161,17 +178,37 @@ function buildAssessment(input, { strict = false } = {}) {
   if (input.health && !input.health.ok) {
     stops.push(`health check returned ${input.health.status}`)
   }
-  if (
-    flagEnabled(input.flags, 'MULTITABLE_ENABLE_PIT_RESET') &&
-    flagEnabled(input.flags, 'MULTITABLE_META_REVISION_RETENTION_ENABLED')
-  ) {
-    stops.push('PIT_RESET is enabled while MULTITABLE_META_REVISION_RETENTION_ENABLED is true')
+
+  // R12-C: manifest-driven illegal-combination rules (lossy-without-base, side-door-without-capture,
+  // pit-reset-intent-with-retention-on). These are UNCONDITIONAL stops in both modes — an illegal
+  // combination is illegal regardless of whether the operator remembered --strict; this also preserves
+  // the pre-existing behavior where PIT_RESET-vs-retention already stopped without --strict.
+  const violations = evaluateFlagRules(input.flags)
+  for (const violation of violations) {
+    stops.push(`[${violation.id}] ${violation.description}`)
+  }
+
+  // Per-flag "truthy but wrong activation string" advisory (the R4 footgun, e.g. retention='true' or
+  // PIT_RESET='1') — always a WARN (the flag is simply off, not a safety violation), promoted to a STOP
+  // under --strict like the other advisory warnings.
+  const misconfigured = []
+  for (const key of FLAG_KEYS) {
+    const spec = GLOBAL_HISTORY_FLAG_BY_KEY[key]
+    if (spec && isMisconfiguredTruthy(spec, input.flags[key])) {
+      const warning = `${key}=${input.flags[key]} looks truthy but does NOT match its activation value ('${spec.activationValue}') — the flag is OFF`
+      warnings.push(warning)
+      misconfigured.push(warning)
+    }
+  }
+  if (strict && misconfigured.length > 0) {
+    stops.push(...misconfigured.map((warning) => `strict: ${warning}`))
   }
 
   return {
     ok: stops.length === 0,
     warnings,
     stops,
+    violations,
     backendTag,
     webTag,
   }
@@ -190,7 +227,18 @@ function renderText(snapshot, assessment) {
   lines.push('')
   lines.push('flags:')
   for (const key of FLAG_KEYS) {
-    lines.push(`  ${key}=${snapshot.flags[key] ?? '(absent)'}`)
+    const spec = GLOBAL_HISTORY_FLAG_BY_KEY[key]
+    const rawValue = snapshot.flags[key] ?? '(absent)'
+    // Only boolean flags have a meaningful ACTIVE/inactive state; numeric/enum knobs (e.g. a configured
+    // MAX_ROWS or KEEP_N) always take effect once their gating boolean flag is on, so labeling them
+    // "inactive" would misread as "not set" / "off" to a hurried operator.
+    const suffix =
+      spec && spec.type === 'boolean'
+        ? ` [activates='${spec.activationValue}' danger=${spec.danger} ${isActivated(spec, snapshot.flags[key]) ? 'ACTIVE' : 'inactive'}]`
+        : spec
+          ? ` [${spec.type}: ${spec.activationValue} danger=${spec.danger}]`
+          : ''
+    lines.push(`  ${key}=${rawValue}${suffix}`)
   }
   lines.push('')
   lines.push('checks:')
@@ -252,4 +300,8 @@ export {
   parseArgs,
   parseContainerInspect,
   renderText,
+  GLOBAL_HISTORY_FLAG_BY_KEY,
+  evaluateFlagRules,
+  isActivated,
+  isMisconfiguredTruthy,
 }

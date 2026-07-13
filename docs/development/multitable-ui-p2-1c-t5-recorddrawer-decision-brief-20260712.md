@@ -57,7 +57,22 @@ border-color: #f59e0b;  background: #fff7ed;  color: #b45309;
 
 ---
 
-## §3 OWNER 决策点
+## §3 OWNER 决策点 — ✅ 全部已裁（owner 2026-07-13，见 §3.5）
+
+## §3.5 OWNER 裁决记录（2026-07-13，逐字采纳）
+
+| 决策点 | 裁决 | 实施边界（owner 原话要点） |
+|---|---|---|
+| **OD-T5a** | **= A** | watch 迁 `MtButton`，**保留 `--watching` 状态类**，**新增 `aria-pressed`**；原有 loading / disabled / click 行为**不变**。 |
+| **OD-T5b** | **= A** | comment **从 T5 剥离**，**单独治理整个 comment-affordance 系统**（独立短设计锁：专用 comment-active token + 9 组件一致性测试）。**不得拿 warning token 代替 comment-active 色彩**（§2.1 的 C 选项被明确否决）。 |
+| **OD-T5c** | **= A** | workflow / permissions 迁 `MtButton`，**现有 glyph 保留在 slot**，**暂不引入新图标契约**。 |
+| **OD-T5d** | **= 放行** | duplicate / delete / unlock 可迁；**`@click`、`v-if`、`:disabled`、`data-*` 必须逐字节保留**；delete 用 **`variant="danger"`**。 |
+
+**实施拆分（owner 指定，可并行）**：
+- **T5-safe** = watch + workflow + permissions + duplicate/delete/unlock（一个 runtime slice，实施中）。
+- **Comment-affordance** = 独立短设计锁（`multitable-comment-affordance-token-design-lock-20260713.md`，PROPOSED——token 值是新样式语义，仍需 owner ratify），定义专用 comment-active token + 9 组件一致性测试。
+
+> 下方 §3 原选项表与 §4 推荐保留为**提案历史**;裁决以本节为准。
 
 ### 🔴 OD-T5a — watch toggle 的 active 态怎么表达？
 
@@ -102,6 +117,7 @@ border-color: #f59e0b;  background: #fff7ed;  color: #b45309;
 
 ## §5 本文不主张什么
 
-- 不主张 T5 已完成，也不主张 MetaRecordDrawer 已迁。
-- 不主张上面任何一个「（荐）」已被采纳——**全部待 owner 拍板**。
+- 不主张 T5 已完成——T5-safe slice 实施中（未合），comment-affordance 锁是 PROPOSED。
+- ~~不主张上面任何一个「（荐）」已被采纳~~ → **2026-07-13 起 §3.5 记录 owner 裁决**：OD-T5a/b/c 均裁 A、OD-T5d 放行（凑巧与推荐一致，但**以裁决为准,不以推荐为据**）。
 - 不主张碰过任何权限 / 删除 / 锁定逻辑：**本文零 runtime**。
+- 不主张 comment-affordance 的 token **值**已定——那在独立锁里,仍待 owner ratify。

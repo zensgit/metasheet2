@@ -7,7 +7,7 @@
           <p class="meta-record-perm__subtitle">{{ p('record.subtitle') }}</p>
           <p class="meta-record-perm__hint">{{ p('rowDeny.noneHint') }}</p>
         </div>
-        <button class="meta-record-perm__close" type="button" @click="requestClose">&times;</button>
+        <MtIconButton class="meta-record-perm__close" @click="requestClose">&times;</MtIconButton>
       </div>
 
       <div class="meta-record-perm__body">
@@ -237,6 +237,7 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
 import { useLocale } from '../../composables/useLocale'
+import { MtIconButton } from '../ui'
 import type { MultitableApiClient } from '../api/client'
 import type { MetaSheetPermissionCandidate, MetaSheetPermissionEntry, RecordPermissionAccessLevel, RecordPermissionEntry } from '../types'
 import { managerLabel, type MetaManagerLabelKey } from '../utils/meta-manager-labels'
@@ -541,14 +542,9 @@ watch(
   color: #64748b;
 }
 
-.meta-record-perm__close {
-  border: 0;
-  background: transparent;
-  font-size: 24px;
-  line-height: 1;
-  color: #64748b;
-  cursor: pointer;
-}
+/* .meta-record-perm__close: now <MtIconButton> (ghost, token-styled; the &times; glyph char passes
+   through its default-slot icon fallback (size token-normalized to the icon control)). Bespoke hardcoded
+   CSS removed (UI-P2-1c T1 batch-6). Class kept on the element only for selector stability. */
 
 .meta-record-perm__body {
   padding: 18px 20px 20px;

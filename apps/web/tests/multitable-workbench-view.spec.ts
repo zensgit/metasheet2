@@ -5,6 +5,19 @@ const showErrorSpy = vi.fn()
 const showSuccessSpy = vi.fn()
 const pushSpy = vi.fn().mockResolvedValue(undefined)
 const useMultitableSheetRealtimeMock = vi.fn()
+// The workflow-designer manager button is gated on caps.canManageAutomation AND
+// featureFlags.hasFeature('workflow') (introduced after this spec was last authored — see
+// multitable-workbench-1672-1673.spec.ts's #1673 gate tests, which added this same partial mock).
+// No test in this file exercises the negative "flag off" branch, so a constant `true` is safe:
+// the workflow button also stays hidden in every other test here because canManageAutomation
+// defaults false (see the "Workflow/Automations are excluded" comment below).
+vi.mock('../src/stores/featureFlags', async () => {
+  const actual = await vi.importActual<any>('../src/stores/featureFlags')
+  return {
+    ...actual,
+    useFeatureFlags: () => ({ ...actual.useFeatureFlags(), hasFeature: (feature: string) => feature === 'workflow' }),
+  }
+})
 let sheetPresenceStateMock: any
 let commentInboxStateMock: any
 const { authAccessSnapshot, bulkImportRecordsMock } = vi.hoisted(() => ({
@@ -153,6 +166,9 @@ vi.mock('../src/multitable/composables/useMultitableSheetPresence', () => ({
     activeUsers: ref([] as Array<{ id: string }>),
     activeCollaborators: ref([] as Array<{ id: string }>),
     activeCollaboratorCount: computed(() => sheetPresenceStateMock?.activeCollaborators.value.length ?? 0),
+    remoteCursors: ref([] as unknown[]),
+    remoteCursorsByCell: ref({} as Record<string, unknown>),
+    setLocalCursor: vi.fn(),
     reconnect: vi.fn(),
     disconnect: vi.fn(),
   }),
@@ -963,6 +979,7 @@ function createWorkbenchMock() {
       createBase: vi.fn(),
       createField: vi.fn(),
       preparePersonField: vi.fn(),
+      exportSheet: vi.fn(),
       updateField: vi.fn(),
       deleteField: vi.fn(),
       createView: vi.fn(),
@@ -1031,6 +1048,8 @@ function createGridMock() {
     sortRules: ref([]),
     filterRules: ref([]),
     filterConjunction: ref('and'),
+    filterGroups: ref([]),
+    canLoadMore: ref(false),
     canUndo: ref(false),
     canRedo: ref(false),
     groupFieldId: ref<string | null>(null), groupFieldIds: ref([]),
@@ -1432,7 +1451,7 @@ describe('MultitableWorkbench view wiring', () => {
         { fld_title: 'alpha', fld_status: 'Closed' },
       ],
     }))
-    expect(showSuccessSpy).toHaveBeenCalledWith('2 records imported')
+    expect(showSuccessSpy).toHaveBeenCalledWith('2 records imported', undefined)
   })
 
   it('localizes workbench import success toast in zh-CN', async () => {
@@ -1459,9 +1478,18 @@ describe('MultitableWorkbench view wiring', () => {
     container!.querySelector<HTMLButtonElement>('[data-import-submit="true"]')!.click()
     await flushUi()
 
-    expect(showSuccessSpy).toHaveBeenCalledWith('2 条记录已导入')
+    expect(showSuccessSpy).toHaveBeenCalledWith('2 条记录已导入', undefined)
   })
 
+  // A2 (see the "Export (A2: column/row selection via MetaExportDialog)" block in
+  // MultitableWorkbench.vue, ~L3553): the dialog's default row scope is 'all', which now routes
+  // through the MASK-PRESERVING BACKEND ROUTE (workbench.client.exportSheet), not the client-side
+  // doExportCsv/doExportXlsx this test used to validate directly. exportSheet re-applies the same
+  // field_permissions mask server-side, so client-side scoping is no longer "the whole story" for
+  // this path — but scopedGridFields (fed into the dialog's `fields` prop and, on confirm, into
+  // exportSheet's `fieldIds`) still does the SAME masking (grid.fieldPermissions[id].visible !== false,
+  // ~L1347) before the request is ever sent. This test now asserts that surviving client-side
+  // contract: the request sent to the backend route only carries the visible field id.
   it('exports only scoped visible grid fields', async () => {
     gridMock.fields.value = [
       { id: 'fld_title', name: 'Title', type: 'string' },
@@ -1476,11 +1504,14 @@ describe('MultitableWorkbench view wiring', () => {
       fld_view_hidden: { visible: false, readOnly: false },
     }
 
-    let exportedBlob: Blob | null = null
+    const exportedBlob = new Blob(['Title\nAlpha'], { type: 'text/csv' })
+    workbenchMock.client.exportSheet.mockResolvedValue({ blob: exportedBlob, filename: 'sheet_orders.csv' })
+
+    let capturedBlob: Blob | null = null
     const originalCreateObjectURL = URL.createObjectURL
     const originalRevokeObjectURL = URL.revokeObjectURL
     const createObjectURLMock = vi.fn((blob: Blob | MediaSource) => {
-      exportedBlob = blob as Blob
+      capturedBlob = blob as Blob
       return 'blob:multitable-export'
     })
     const revokeObjectURLMock = vi.fn()
@@ -1501,18 +1532,14 @@ describe('MultitableWorkbench view wiring', () => {
       confirmBtn!.click()
       await flushUi()
 
+      expect(workbenchMock.client.exportSheet).toHaveBeenCalledWith({
+        sheetId: 'sheet_orders',
+        viewId: 'view_grid',
+        fieldIds: ['fld_title'],
+        format: 'csv',
+      })
       expect(createObjectURLMock).toHaveBeenCalledTimes(1)
-      const csv = exportedBlob
-        ? await new Promise<string>((resolve, reject) => {
-          const reader = new FileReader()
-          reader.onload = () => resolve(String(reader.result ?? ''))
-          reader.onerror = () => reject(reader.error)
-          reader.readAsText(exportedBlob as Blob)
-        })
-        : ''
-      expect(csv).toContain('Title')
-      expect(csv).not.toContain('View Hidden')
-      expect(csv).not.toContain('Hidden value')
+      expect(capturedBlob).toBe(exportedBlob)
       expect(revokeObjectURLMock).toHaveBeenCalledWith('blob:multitable-export')
     } finally {
       clickSpy.mockRestore()
@@ -1730,12 +1757,12 @@ describe('MultitableWorkbench view wiring', () => {
     ;(container?.querySelector('.mt-workbench__conflict-btn') as HTMLButtonElement | null)?.click()
     await flushUi()
     expect(gridMock.reloadCurrentPage).toHaveBeenCalledTimes(1)
-    expect(showSuccessSpy).toHaveBeenCalledWith('Loaded the latest row state')
+    expect(showSuccessSpy).toHaveBeenCalledWith('Loaded the latest row state', undefined)
 
     ;(container?.querySelector('.mt-workbench__conflict-btn--primary') as HTMLButtonElement | null)?.click()
     await flushUi()
     expect(gridMock.retryConflict).toHaveBeenCalledTimes(1)
-    expect(showSuccessSpy).toHaveBeenLastCalledWith('Change reapplied')
+    expect(showSuccessSpy).toHaveBeenLastCalledWith('Change reapplied', undefined)
 
     const dismissButton = Array.from(container?.querySelectorAll('.mt-workbench__conflict-btn') ?? []).find((button) =>
       (button as HTMLButtonElement).textContent?.includes('Dismiss'),
@@ -1888,60 +1915,41 @@ describe('MultitableWorkbench view wiring', () => {
     expect(container!.querySelector('[data-create-sheet="true"]')).toBeNull()
   })
 
-  it('maps person field creation through the prepared link preset', async () => {
+  // #2735 (2026-06-16, "native person/member field") made newly-created person fields
+  // first-class native `type:'person'` — sent straight through createField, NOT rewritten to a
+  // `link`+refKind:user preset against a system People sheet (see the "Native person (人员, design
+  // 2026-06-16)" comment on onCreateField in MultitableWorkbench.vue). preparePersonField / the
+  // link-preset path stay intact for existing legacy link-backed person fields, but the create-new
+  // path this test drives no longer calls them — coexistence-only, not a revert.
+  it('passes native person field creation straight through to createField', async () => {
     mountWorkbench()
     await flushUi()
-
-    workbenchMock.client.preparePersonField.mockResolvedValue({
-      targetSheet: { id: 'sheet_people', baseId: 'base_ops', name: 'People' },
-      fieldProperty: {
-        foreignSheetId: 'sheet_people',
-        limitSingleRecord: true,
-        refKind: 'user',
-      },
-    })
 
     container!.querySelector<HTMLButtonElement>('[data-create-person-field="true"]')!.click()
     await flushUi()
 
-    expect(workbenchMock.client.preparePersonField).toHaveBeenCalledWith('sheet_orders')
+    expect(workbenchMock.client.preparePersonField).not.toHaveBeenCalled()
     expect(workbenchMock.client.createField).toHaveBeenCalledWith({
       sheetId: 'sheet_orders',
       name: 'Owner',
-      type: 'link',
-      property: {
-        foreignSheetId: 'sheet_people',
-        limitSingleRecord: true,
-        refKind: 'user',
-      },
+      type: 'person',
+      property: undefined,
     })
   })
 
-  it('merges person field manager property overrides into the prepared link preset', async () => {
+  it('passes native person field manager property overrides straight through to createField', async () => {
     mountWorkbench()
     await flushUi()
-
-    workbenchMock.client.preparePersonField.mockResolvedValue({
-      targetSheet: { id: 'sheet_people', baseId: 'base_ops', name: 'People' },
-      fieldProperty: {
-        foreignSheetId: 'sheet_people',
-        limitSingleRecord: true,
-        refKind: 'user',
-      },
-    })
 
     container!.querySelector<HTMLButtonElement>('[data-create-person-field-multi="true"]')!.click()
     await flushUi()
 
+    expect(workbenchMock.client.preparePersonField).not.toHaveBeenCalled()
     expect(workbenchMock.client.createField).toHaveBeenCalledWith({
       sheetId: 'sheet_orders',
       name: 'Approvers',
-      type: 'link',
-      property: {
-        foreignSheetId: 'sheet_people',
-        limitSingleRecord: false,
-        refKind: 'user',
-      },
+      type: 'person',
+      property: { limitSingleRecord: false },
     })
   })
 
@@ -2028,7 +2036,7 @@ describe('MultitableWorkbench view wiring', () => {
       ],
     })
     expect(gridMock.loadViewData).toHaveBeenCalled()
-    expect(showSuccessSpy).toHaveBeenCalledWith('Dates updated')
+    expect(showSuccessSpy).toHaveBeenCalledWith('Dates updated', undefined)
   })
 
   it('patches gantt resize date updates through patchRecords and refreshes the active page', async () => {
@@ -2052,7 +2060,7 @@ describe('MultitableWorkbench view wiring', () => {
       ],
     })
     expect(gridMock.loadViewData).toHaveBeenCalled()
-    expect(showSuccessSpy).toHaveBeenCalledWith('Dates updated')
+    expect(showSuccessSpy).toHaveBeenCalledWith('Dates updated', undefined)
   })
 
   it('patches hierarchy reparent updates through patchRecords and refreshes the active page', async () => {
@@ -2075,7 +2083,7 @@ describe('MultitableWorkbench view wiring', () => {
       ],
     })
     expect(gridMock.loadViewData).toHaveBeenCalled()
-    expect(showSuccessSpy).toHaveBeenCalledWith('Hierarchy updated')
+    expect(showSuccessSpy).toHaveBeenCalledWith('Hierarchy updated', undefined)
   })
 
   it('blocks timeline patch updates when scoped rowActions disallow edits', async () => {

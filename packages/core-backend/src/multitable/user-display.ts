@@ -32,3 +32,53 @@ export async function resolveUserDisplayNames(
   }
   return out
 }
+
+/** A person-field directory entry: the same shape the grid's PersonSummary carries (minus `id`). */
+export type PersonDirectoryEntry = { display: string; inactive?: boolean }
+
+/**
+ * Person before-side name resolution (OD-P1 = Option A, OD-P2 = carry `inactive`).
+ *
+ * Resolve `userId → { display, inactive }` for user ids that appear in person-field VALUES. Same
+ * directory + same rules as `resolveUserDisplayNames` / `buildPersonSummaries`, so there is ONE source
+ * of truth for both:
+ *   - display preference `name → email`, falling back to the RAW userId when the user row exists but
+ *     carries neither (parity with the grid's person summaries, univer-meta.ts:5449);
+ *   - `inactive: true` iff `users.is_active === false` (2c-S4, univer-meta.ts:5433) — a deactivated
+ *     assignee still renders, marked, and stays non-re-assignable.
+ * Graceful empty map if the `users` table is absent (minimal harness) → caller falls back to the raw id.
+ *
+ * WHY THIS IS NOT A DISCLOSURE (LOCK-3): the caller resolves ONLY the userIds that are already present
+ * in the POST-MASK payload. A person field the actor cannot read has had its values dropped by
+ * `filterDataByAllowedFields` before this runs, so its userIds never reach here. Turning an ALREADY-VISIBLE
+ * userId into its display name is directory-level information (the same name already renders wherever
+ * that user appears, and `actorName` resolves it from this very table) — it is not a new disclosure of the
+ * field's value. Never call this with ids harvested from an unmasked snapshot.
+ */
+export async function resolvePersonDirectoryEntries(
+  query: QueryFn,
+  userIds: Array<string | null | undefined>,
+): Promise<Map<string, PersonDirectoryEntry>> {
+  const ids = [...new Set(userIds.filter((id): id is string => typeof id === 'string' && id.length > 0))]
+  const out = new Map<string, PersonDirectoryEntry>()
+  if (ids.length === 0) return out
+  try {
+    const res = await query('SELECT id, email, name, is_active FROM users WHERE id = ANY($1::text[])', [ids])
+    for (const u of res.rows as Array<{ id?: unknown; email?: unknown; name?: unknown; is_active?: unknown }>) {
+      const id = typeof u.id === 'string' ? u.id : String(u.id ?? '')
+      if (!id) continue
+      const name = typeof u.name === 'string' ? u.name.trim() : ''
+      const email = typeof u.email === 'string' ? u.email.trim() : ''
+      const display = name || email || id // raw-id fallback, matching the grid's person summaries
+      out.set(id, u.is_active === false ? { display, inactive: true } : { display })
+    }
+  } catch (err) {
+    // ONLY "users table absent" (42P01, minimal harness) degrades to an empty map → callers fall back to the
+    // raw id. Anything else RETHROWS, matching the sibling this claims parity with (`buildPersonSummaries`,
+    // univer-meta.ts:5435-5438). A bare `catch {}` here would swallow a transient connection error or a
+    // genuinely broken query and silently render EVERY person as a raw userId, with no signal at all —
+    // fail-safe in direction, but indistinguishable from "no directory exists" (review P3-1).
+    if (!(typeof (err as { code?: unknown })?.code === 'string' && (err as { code?: string }).code === '42P01')) throw err
+  }
+  return out
+}

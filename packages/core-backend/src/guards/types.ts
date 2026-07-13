@@ -106,6 +106,16 @@ export interface ConfirmationRequest {
 
   /** Additional acknowledgment */
   acknowledged?: boolean;
+
+  /**
+   * Binding fields (GHSA): a confirmation token is bound to the operation, initiator, and resource of
+   * the request that minted it. verifyConfirmation rejects a token presented for a different operation,
+   * by a different initiator, or against a different resource. The route/retry path (checkOperation)
+   * always supplies all three; the /safety/confirm endpoint supplies the authenticated initiator.
+   */
+  operation?: OperationType;
+  initiator?: string;
+  resourceKey?: string;
 }
 
 export interface SafetyGuardConfig {

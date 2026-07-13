@@ -33,8 +33,26 @@
     <div v-else-if="list" class="sp-exq__overview" data-testid="stock-prep-exception-overview">
       <!-- Header cards: the blocking gate count + total + values-free type/status counts. -->
       <header class="sp-exq__summary" data-testid="stock-prep-exception-summary">
-        <div class="sp-exq__metric" data-testid="stock-prep-exception-metric" data-kind="blocking">
-          <span class="sp-exq__metric-label">{{ bi('未解决阻断异常', 'Unresolved blocking') }}</span>
+        <!-- CAVEAT (P3 FE cleanup, #3751): this count follows the ACTIVE status/type filters below
+             (server stock-preparation-confirm-reads.cjs computes it over the post-filter subset) — it
+             is a display figure for the current view, NOT the generation gate's determination. The
+             generation route recomputes the real unresolved-blocking count over the full unfiltered
+             set at run time; this header never gates or substitutes for that server recompute. -->
+        <div
+          class="sp-exq__metric"
+          data-testid="stock-prep-exception-metric"
+          data-kind="blocking"
+          :title="bi(
+            '当前视图筛选下的未解决阻断异常计数——展示口径,并非生成闸实际执行的判定值;生成时服务端会基于全量重新计算真实值。',
+            'Unresolved blocking count under the current view filter — a display figure, not the value the generation gate enforces; the server recomputes it from the full set when generation runs.',
+          )"
+        >
+          <span class="sp-exq__metric-label">
+            {{ bi('未解决阻断异常', 'Unresolved blocking') }}
+            <span class="sp-exq__metric-caveat" data-testid="stock-prep-exception-blocking-caveat">
+              {{ bi('(当前筛选,展示口径)', '(current filter, display only)') }}
+            </span>
+          </span>
           <span class="sp-exq__metric-value" data-testid="stock-prep-exception-blocking-count">{{ list.unresolvedBlockingCount }}</span>
         </div>
         <div class="sp-exq__metric" data-testid="stock-prep-exception-metric" data-kind="total">
@@ -475,6 +493,14 @@ watch([statusFilter, typeFilter], reloadList)
 .sp-exq__metric-label {
   color: var(--ms-text-3);
   font-size: 12px;
+}
+
+.sp-exq__metric-caveat {
+  display: block;
+  font-size: 11px;
+  font-style: italic;
+  color: var(--ms-text-3);
+  opacity: 0.85;
 }
 
 .sp-exq__metric-value {

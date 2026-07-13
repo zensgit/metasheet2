@@ -94,6 +94,13 @@ jobs:
         with:
           node-version: ${{ matrix.node-version }}
 
+      # R12-C: the Global History flag manifest is an operator contract — the status helper reads it to
+      # decide safe flag combinations. This node:test (no deps, no DB) is source-derived: it fails if a
+      # MULTITABLE_ flag read in packages/core-backend/src is missing from the manifest. Runs early so a
+      # manifest/source drift fails the required `test` check fast, before the pnpm install/build.
+      - name: Global History flag manifest contract (R12-C)
+        run: node --test scripts/ops/global-history-flag-manifest.test.mjs scripts/ops/multitable-global-history-flag-status.test.mjs
+
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
         with:
@@ -176,6 +183,39 @@ jobs:
       - name: Run DB migrations
         env:
           DATABASE_URL: postgresql://postgres@localhost:5432/metasheet_test
+          # T8 (migration-exclusion docs+guard hardening) note: this MIGRATION_EXCLUDE is the
+          # CI per-PR gate's list, a DIFFERENT mechanism from migration-replay.yml's own subset
+          # (narrower job: run db:migrate twice, assert idempotency) and from
+          # SUPERSEDED_LEGACY_SQL_MIGRATIONS in packages/core-backend/src/db/migration-provider.ts
+          # (no-ops a migration's body but keeps its name; this drops name+body entirely). See
+          # packages/core-backend/MIGRATION_EXCLUDE_TRACKING.md and
+          # docs/development/superseded-legacy-migrations-gap-audit-20260710.md for the full
+          # cross-list picture. Known asymmetry: production/on-prem db:migrate runs with no
+          # exclude at all, so the view-table cluster excluded below has never had a per-PR
+          # green CI run of its up() bodies — untangling that is gated planning work, #4162.
+          # Exclude problematic migrations (see migration-replay.yml for the per-item detail
+          # this workflow shares):
+          # 008_plugin_infrastructure.sql - has idempotency issue with scope column
+          # 048/049 (event bus / BPMN) - Phase 2 migrations with complex SQL syntax issues
+          # 042a_core_model_views.sql - References non-existent last_accessed column
+          # 20250924120000_create_views_view_states.ts - View states migration with schema issues
+          # 20250924140000_create_gantt_tables.ts - FK points at pre-fix text view ids
+          # 20250925_create_view_tables.sql - legacy owner_id FK assumes pre-text user ids during replay.
+          #   NOTE: this exact bug was fixed by #3627, and migration-replay.yml already dropped
+          #   this exclusion in #3632 (verified passing there); this workflow was never
+          #   re-verified/updated to match, so this exclusion may now be stale rather than still
+          #   required — needs re-verification before removal, not a piecemeal drop (see #4162).
+          # 20251117000001_add_snapshot_labels.ts - re-applies chk_protection_level after earlier snapshot schema creation during replay
+          # 20251117000002_create_protection_rules.ts - re-creates protection_rules after replay paths already created the table
+          # 20251201000001_create_change_management_tables.ts - legacy snapshot_id text FKs no longer match replay-built uuid snapshot ids
+          # NOTE: zzzz20260114110000_create_user_orgs_table.ts is intentionally NOT in this
+          #   list (unlike observability-*.yml/safety-guard-e2e.yml/migration-replay.yml, which
+          #   all exclude it because it hits a legacy user_orgs is_active replay incompatibility
+          #   there): this job's attendance integration step needs the user_orgs table applied,
+          #   so it was deliberately removed from here in b1fc1e19d1
+          #   ("ci(attendance): run integration gate against postgres") — "Include the user_orgs
+          #   migration in plugin-test database setup because attendance auto-absence now
+          #   depends on that table."
           MIGRATION_EXCLUDE: 008_plugin_infrastructure.sql,048_create_event_bus_tables.sql,049_create_bpmn_workflow_tables.sql,042a_core_model_views.sql,20250924120000_create_views_view_states.ts,20250924140000_create_gantt_tables.ts,20250925_create_view_tables.sql,20251117000001_add_snapshot_labels.ts,20251117000002_create_protection_rules.ts,20251201000001_create_change_management_tables.ts
         run: |
           pnpm --filter @metasheet/core-backend db:migrate
@@ -205,7 +245,7 @@ jobs:
             tests/integration/router-isolation.smoke.test.ts \
             --reporter=verbose
 
-      - name: Run multitable real-DB integration (permission golden + view-aggregate + formula dry-run + read-path field mask + foreign-field taint mask + dashboard authz + realtime invalidation + automation retry provenance + cross-base governed automation writes + webhook outbound chain + AI shortcut run + AI ledger retention sweep + record-level version restore + rollup countall non-gating characterization + rollup filter condition fail-closed + rollup string/boolean reducers + dashboard non-numeric rollup rejection + dashboard-level filtering (narrow/AND/row-deny/no-side-channel) + record recycle-bin delete/restore + field type-retype revert schema-only scalar-gated + cross-base relation-agg authorized-reader read gate + dangling-link repair-on-read + sheet-delete cascade + oapi-4a per-base/sheet scope guard + oapi-4a REST token-create scope + mirror-read-only enumeration hardening + cross-base editable-mirror write-through op + cross-base mirror write-through Decision-F concurrency + personal-views slice-1 actor-scoped isolation + W1-2 permission-matrix B1 side-door goldens (Yjs bridge flush actor-tier/lock/row-deny/rule-deny, OAPI token write re-gate parity, base-write/sheet-write non-intersection) + W1-2 permission-matrix B2 oracle/no-leak goldens (G-5 row-level-read-deny zero-presence on export + history, G-4 OAPI token-vs-interactive read-mask parity across the 5 records:read routes) + W1-2 permission-matrix B3 management-surface 403 matrix (field/view CRUD, sheet-permission grant, sheet_config flag + conditional-rules, across A3/A4/A5/A6 actor tiers) + W1-2 permission-matrix B4 G-7 export⊆read differential (field-mask/row-deny/taint modifier combinations, same actor) + W1-1 formula freshness goldens (Yjs-bridge formula recompute GF1-GF4/GF9 + expression-change bulk recompute GF5-GF8/GF12) + W1-3 per-subject field-write gate goldens (Yjs bridge flush GW1-GW3 headline/positive-control/atomic-mixed, single-record PATCH GW4-GW6 mst_-token/session-JWT dual-caller + regression spot-check) + W3-5 batchId===null default (record-service.ts single-record self-referential batch_id vs record-write-service.ts bulk fresh-id control) + W1-2 permission-matrix B4 G-8 comments sheet-visibility gate (comments:read/write actor 403'd on a no-read sheet across list/summary/presence read + create write + no identifier/content leak) + LOCK-12 partial-success bulk PATCH shared-batch grouping + 4c-2 forward tombstone-capture flag-off/on/cap goldens (field-delete value+link+auto-number capture, record-delete inbound-only capture, R1 undelete rehydration + masking parity, retention keep-days sweep) + D-6 config-restore-execute metaFieldCache invalidation golden + F2 attachment-download read-gate row-deny/field-mask security regression guard)
+      - name: Run multitable real-DB integration (permission golden + view-aggregate + formula dry-run + read-path field mask + foreign-field taint mask + dashboard authz + realtime invalidation + automation retry provenance + cross-base governed automation writes + webhook outbound chain + AI shortcut run + AI ledger retention sweep + record-level version restore + rollup countall non-gating characterization + rollup filter condition fail-closed + rollup string/boolean reducers + dashboard non-numeric rollup rejection + dashboard-level filtering (narrow/AND/row-deny/no-side-channel) + record recycle-bin delete/restore + field type-retype revert schema-only scalar-gated + cross-base relation-agg authorized-reader read gate + dangling-link repair-on-read + sheet-delete cascade + oapi-4a per-base/sheet scope guard + oapi-4a REST token-create scope + mirror-read-only enumeration hardening + cross-base editable-mirror write-through op + cross-base mirror write-through Decision-F concurrency + personal-views slice-1 actor-scoped isolation + W1-2 permission-matrix B1 side-door goldens (Yjs bridge flush actor-tier/lock/row-deny/rule-deny, OAPI token write re-gate parity, base-write/sheet-write non-intersection) + W1-2 permission-matrix B2 oracle/no-leak goldens (G-5 row-level-read-deny zero-presence on export + history, G-4 OAPI token-vs-interactive read-mask parity across the 5 records:read routes) + W1-2 permission-matrix B3 management-surface 403 matrix (field/view CRUD, sheet-permission grant, sheet_config flag + conditional-rules, across A3/A4/A5/A6 actor tiers) + W1-2 permission-matrix B4 G-7 export⊆read differential (field-mask/row-deny/taint modifier combinations, same actor) + W1-1 formula freshness goldens (Yjs-bridge formula recompute GF1-GF4/GF9 + expression-change bulk recompute GF5-GF8/GF12) + W1-3 per-subject field-write gate goldens (Yjs bridge flush GW1-GW3 headline/positive-control/atomic-mixed, single-record PATCH GW4-GW6 mst_-token/session-JWT dual-caller + regression spot-check) + W3-5 batchId===null default (record-service.ts single-record self-referential batch_id vs record-write-service.ts bulk fresh-id control) + W1-2 permission-matrix B4 G-8 comments sheet-visibility gate (comments:read/write actor 403'd on a no-read sheet across list/summary/presence read + create write + no identifier/content leak) + LOCK-12 partial-success bulk PATCH shared-batch grouping + 4c-2 forward tombstone-capture flag-off/on/cap goldens (field-delete value+link+auto-number capture, record-delete inbound-only capture, R1 undelete rehydration + masking parity, retention keep-days sweep) + D-6 config-restore-execute metaFieldCache invalidation golden + F2 attachment-download read-gate row-deny/field-mask security regression guard + AI-fields S1 write-provenance/batch-grouping goldens + A6-3-3a automation branch-local-wait suspend/resume goldens + Phase C2 cross-base automation governed DELETE/LOCK goldens + C1 automation real-time fan-out goldens + duplicate/clone record route security goldens + T3-6 approval-record multitable projection goldens — six previously skip-green DB-gated specs now actually executing)
         if: matrix.node-version == '20.x'
         env:
           DATABASE_URL: postgresql://postgres@localhost:5432/metasheet_test
@@ -264,6 +304,7 @@ jobs:
             tests/integration/multitable-history-before-hydration-realdb.test.ts \
             tests/integration/multitable-history-alltables-fieldnames-realdb.test.ts \
             tests/integration/multitable-layer2-hidden-person-button-realdb.test.ts \
+            tests/integration/multitable-history-person-names-realdb.test.ts \
             tests/integration/multitable-history-events-hasmore-realdb.test.ts \
             tests/integration/multitable-history-audit-grant-realdb.test.ts \
             tests/integration/multitable-history-audit-reveal-realdb.test.ts \
@@ -401,6 +442,12 @@ jobs:
             tests/integration/multitable-tombstone-record-capture-realdb.test.ts \
             tests/integration/multitable-tombstone-retention-realdb.test.ts \
             tests/integration/multitable-attachment-readgate.security.test.ts \
+            tests/integration/multitable-ai-write-provenance-batch-grouping-realdb.test.ts \
+            tests/integration/multitable-automation-branch-local-wait.test.ts \
+            tests/integration/multitable-cross-base-automation-delete-lock.test.ts \
+            tests/integration/multitable-crossbase-realtime-fanout.test.ts \
+            tests/integration/multitable-record-duplicate.test.ts \
+            tests/integration/approval-record-projection.test.ts \
             --reporter=dot
 
       - name: Run approval real-DB integration (directory endpoints + P1-C field redaction + P1-B add_sign/reduce_sign + direct_manager create/start + A/E/B/D/G cross-lane acceptance + dept_head sync-plumbing carry-forward + continuous_managers chain walk + common template presets + DT-OPS-01 deprovision selection goldens)
@@ -448,6 +495,7 @@ jobs:
             tests/integration/directory-sync-alert-coverage.db.test.ts \
             tests/integration/directory-deprovision-selection.db.test.ts \
             tests/integration/directory-sync-run-lease.db.test.ts \
+            tests/integration/directory-tenant-change-immutable.db.test.ts \
             tests/integration/directory-sync-orchestration.db.test.ts \
             tests/integration/directory-sync-schedule-timezone.db.test.ts \
             tests/integration/attendance-csv-export-bom.test.ts \
@@ -534,6 +582,7 @@ jobs:
             tests/integration/files-orphan-blob-retention.db.test.ts \
             tests/integration/multitable-attachment-blob-purge.db.test.ts \
             tests/integration/multitable-attachment-root-escape.db.test.ts \
+            tests/integration/stock-prep-audit-immutable-trigger.db.test.ts \
             tests/integration/attendance-import-template-prefs.test.ts \
             tests/integration/attendance-notification-deliveries.test.ts \
             tests/integration/attendance-comp-time-expiry-reminder.test.ts \
@@ -615,6 +664,39 @@ jobs:
       - name: Run DB migrations
         env:
           DATABASE_URL: postgresql://postgres@localhost:5432/metasheet_test
+          # T8 (migration-exclusion docs+guard hardening) note: this MIGRATION_EXCLUDE is the
+          # CI per-PR gate's list, a DIFFERENT mechanism from migration-replay.yml's own subset
+          # (narrower job: run db:migrate twice, assert idempotency) and from
+          # SUPERSEDED_LEGACY_SQL_MIGRATIONS in packages/core-backend/src/db/migration-provider.ts
+          # (no-ops a migration's body but keeps its name; this drops name+body entirely). See
+          # packages/core-backend/MIGRATION_EXCLUDE_TRACKING.md and
+          # docs/development/superseded-legacy-migrations-gap-audit-20260710.md for the full
+          # cross-list picture. Known asymmetry: production/on-prem db:migrate runs with no
+          # exclude at all, so the view-table cluster excluded below has never had a per-PR
+          # green CI run of its up() bodies — untangling that is gated planning work, #4162.
+          # Exclude problematic migrations (see migration-replay.yml for the per-item detail
+          # this workflow shares):
+          # 008_plugin_infrastructure.sql - has idempotency issue with scope column
+          # 048/049 (event bus / BPMN) - Phase 2 migrations with complex SQL syntax issues
+          # 042a_core_model_views.sql - References non-existent last_accessed column
+          # 20250924120000_create_views_view_states.ts - View states migration with schema issues
+          # 20250924140000_create_gantt_tables.ts - FK points at pre-fix text view ids
+          # 20250925_create_view_tables.sql - legacy owner_id FK assumes pre-text user ids during replay.
+          #   NOTE: this exact bug was fixed by #3627, and migration-replay.yml already dropped
+          #   this exclusion in #3632 (verified passing there); this workflow was never
+          #   re-verified/updated to match, so this exclusion may now be stale rather than still
+          #   required — needs re-verification before removal, not a piecemeal drop (see #4162).
+          # 20251117000001_add_snapshot_labels.ts - re-applies chk_protection_level after earlier snapshot schema creation during replay
+          # 20251117000002_create_protection_rules.ts - re-creates protection_rules after replay paths already created the table
+          # 20251201000001_create_change_management_tables.ts - legacy snapshot_id text FKs no longer match replay-built uuid snapshot ids
+          # NOTE: zzzz20260114110000_create_user_orgs_table.ts is also absent from this job's
+          #   list (unlike observability-*.yml/safety-guard-e2e.yml/migration-replay.yml). It was
+          #   removed here in the SAME commit as the `test` job above (b1fc1e19d1), whose message
+          #   explains the removal in terms of the attendance integration step in that OTHER job
+          #   — this job only runs tests/integration/after-sales-plugin.install.test.ts and does
+          #   not obviously touch user_orgs/attendance. Left as-is (not this T8 slice's job to
+          #   resolve), but flagged: this specific occurrence's omission may be an unverified
+          #   side-effect of a file-wide edit rather than a decision made for this job.
           MIGRATION_EXCLUDE: 008_plugin_infrastructure.sql,048_create_event_bus_tables.sql,049_create_bpmn_workflow_tables.sql,042a_core_model_views.sql,20250924120000_create_views_view_states.ts,20250924140000_create_gantt_tables.ts,20250925_create_view_tables.sql,20251117000001_add_snapshot_labels.ts,20251117000002_create_protection_rules.ts,20251201000001_create_change_management_tables.ts
         run: |
           pnpm --filter @metasheet/core-backend db:migrate
