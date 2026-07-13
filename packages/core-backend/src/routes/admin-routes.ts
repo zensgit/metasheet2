@@ -85,6 +85,11 @@ router.get('/safety/status', createSafetyStatusEndpoint());
  */
 router.post(
   '/safety/confirm',
+  // SECURITY (GHSA): confirming a dangerous operation is itself a privileged step — platform-admin only,
+  // fail-closed. Without this the endpoint was reachable by any authenticated caller (rate-limit +
+  // idempotency are throughput controls, not authorization), letting a non-admin confirm a pending
+  // token. requireAdminRole also guarantees req.user.id for the initiator binding in the confirm handler.
+  requireAdminRole(),
   ...protectConfirmationEndpoint(),
   async (req: AuthenticatedRequest, res: Response) => {
     const confirmHandler = createSafetyConfirmEndpoint();
@@ -945,6 +950,10 @@ router.post(
  */
 router.delete(
   '/snapshots/:id',
+  // SECURITY (GHSA-h8mf): match the restore/cleanup siblings — a snapshot delete must be platform-admin,
+  // not merely safety-confirmed. protectAdminOperation = [requireAdminRole (fail-closed 403/503), audit].
+  // Without this a non-admin could reach delete with only a safety token (delete is a bypass-inventory path).
+  ...protectAdminOperation(OperationType.DELETE_SNAPSHOT),
   requireSafetyCheck({
     operation: OperationType.DELETE_SNAPSHOT,
     getDetails: (req) => ({ snapshotId: req.params.id })

@@ -7,6 +7,7 @@ import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest'
 import { MetaSheetServer } from '../../src/index'
 import { snapshotService } from '../../src/services/SnapshotService'
 import { protectionRuleService } from '../../src/services/ProtectionRuleService'
+import { pool } from '../../src/db/pg'
 import net from 'net'
 import crypto from 'crypto'
 import type { ProtectionRule } from '../../src/services/ProtectionRuleService'
@@ -43,6 +44,17 @@ describe('Snapshot Protection System E2E', () => {
     }
     baseUrl = `http://127.0.0.1:${address.port}`
 
+    // SECURITY (GHSA-h8mf): snapshot MUTATIONS (tags / protection level / release channel) are now
+    // platform-admin only — protection_level gates deletion and restore, so it is not a
+    // `permissions:write` operation. This E2E drives those operator routes, so its actor must be a
+    // platform admin. isAdmin() (rbac/service.ts) = a user_roles row with role_id 'admin'.
+    if (pool) {
+      await pool.query(
+        `INSERT INTO user_roles (user_id, role_id) VALUES ($1, 'admin') ON CONFLICT DO NOTHING`,
+        [testUserId]
+      )
+    }
+
     const tokenRes = await authFetch(`${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(testUserId)}`)
     if (tokenRes.status !== 200) {
       throw new Error(`snapshot-protection: dev-token request failed (${tokenRes.status})`)
@@ -66,6 +78,15 @@ describe('Snapshot Protection System E2E', () => {
     if (testRuleId) {
       try {
         await protectionRuleService.deleteRule(testRuleId)
+      } catch (e) {
+        // Ignore cleanup errors
+      }
+    }
+
+    // Drop the platform-admin grant seeded in beforeAll (GHSA-h8mf) so it cannot leak to other suites.
+    if (pool) {
+      try {
+        await pool.query(`DELETE FROM user_roles WHERE user_id = $1 AND role_id = 'admin'`, [testUserId])
       } catch (e) {
         // Ignore cleanup errors
       }
