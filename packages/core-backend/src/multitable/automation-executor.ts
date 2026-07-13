@@ -2176,51 +2176,81 @@ export class AutomationExecutor {
         effectiveRecordId = targetRecordId
       }
 
-      // Record-lock guard (rank-8 review B1; decisions d/e/f). An automation acting on behalf of its
-      // actor is NOT implicitly the locker/owner — overwriting a locked record is blocked. To write
-      // through a lock the rule must first run a `lock_record{locked:false}` action (decision f). The
-      // step fails honestly so it surfaces in the execution log. ②b LOCK-REDIRECT: the SELECT below
-      // and the UPDATE further down BOTH read `effectiveSheetId`/`effectiveRecordId` so a cross-base
-      // update checks the TARGET record's lock (not the trigger record's) — lock priority over base-write.
-      const lockRes = await this.deps.queryFn(
-        'SELECT locked, locked_by, created_by FROM meta_records WHERE id = $1 AND sheet_id = $2',
-        [effectiveRecordId, effectiveSheetId],
-      )
-      const lockRow = lockRes.rows[0] as
-        | { locked?: unknown; locked_by?: unknown; created_by?: unknown }
-        | undefined
-      // ②b claim==truth for the record: a cross-base update must address a record that ACTUALLY lives in
-      // `targetSheetId`. If the lock SELECT found no row, the targetRecordId does not exist in
-      // targetSheetId → fail-closed (decision 4: never a silent no-op success). Same-base keeps its
-      // pre-②b leniency (a missing trigger record yields a 0-row UPDATE reported as success) to avoid
-      // any behavior regression.
-      if (gate.crossBase && !lockRow) {
-        return {
-          actionType: 'update_record',
-          status: 'failed',
-          error: `Cross-base update_record target record not found in target sheet: ${effectiveRecordId} ∉ ${effectiveSheetId}`,
-        }
-      }
-      if (lockRow) {
-        ensureRecordNotLocked(context.actorId ?? null, lockRow, () => new Error('Record is locked'))
-      }
-
       // rich-longText write-path defense: this bare UPDATE bypasses the 5 record-write
       // validators, so sanitize any rich-longText value in the patch against the TARGET
       // sheet's field config before it reaches the DB (inert-by-construction at every writer).
+      // Read-only field-config lookup — never touches `meta_records`, so it runs before the
+      // transaction (same as the delete action's cross-base gate evaluation above).
       await this.sanitizeRichLongTextInWritePayload(effectiveSheetId, patch)
 
-      // xbase-write-gated: routes through evaluateCrossBaseWrite (gate computed above) — a cross-base
-      // update is rejected before this UPDATE unless claim==truth + trigger-actor base-write.
-      // lock-guarded: automation update_record (B1) — ensureRecordNotLocked enforced just above.
-      await this.deps.queryFn(
-        `UPDATE meta_records
-         SET data = COALESCE(data, '{}'::jsonb) || $1::jsonb,
-             version = version + 1,
-             updated_at = NOW()
-         WHERE id = $2 AND sheet_id = $3`,
-        [JSON.stringify(patch), effectiveRecordId, effectiveSheetId],
-      )
+      // R13 Lane C: lock-check, the UPDATE, and the revision INSERT all run inside ONE transaction —
+      // mirrors D-1's executeDeleteRecord (`withTransaction` below). A failed revision insert rolls
+      // back the UPDATE; no half-write (an updated `meta_records` row with no matching
+      // `meta_record_revisions` row) is possible.
+      const txResult = await this.withTransaction(async (query) => {
+        // Record-lock guard (rank-8 review B1; decisions d/e/f). An automation acting on behalf of its
+        // actor is NOT implicitly the locker/owner — overwriting a locked record is blocked. To write
+        // through a lock the rule must first run a `lock_record{locked:false}` action (decision f). The
+        // step fails honestly so it surfaces in the execution log. ②b LOCK-REDIRECT: the SELECT below
+        // and the UPDATE further down BOTH read `effectiveSheetId`/`effectiveRecordId` so a cross-base
+        // update checks the TARGET record's lock (not the trigger record's) — lock priority over base-write.
+        const lockRes = await query(
+          'SELECT locked, locked_by, created_by FROM meta_records WHERE id = $1 AND sheet_id = $2',
+          [effectiveRecordId, effectiveSheetId],
+        )
+        const lockRow = lockRes.rows[0] as
+          | { locked?: unknown; locked_by?: unknown; created_by?: unknown }
+          | undefined
+        // ②b claim==truth for the record: a cross-base update must address a record that ACTUALLY lives in
+        // `targetSheetId`. If the lock SELECT found no row, the targetRecordId does not exist in
+        // targetSheetId → fail-closed (decision 4: never a silent no-op success). Same-base keeps its
+        // pre-②b leniency (a missing trigger record yields a 0-row UPDATE reported as success) to avoid
+        // any behavior regression.
+        if (gate.crossBase && !lockRow) {
+          return {
+            actionType: 'update_record',
+            status: 'failed',
+            error: `Cross-base update_record target record not found in target sheet: ${effectiveRecordId} ∉ ${effectiveSheetId}`,
+          } satisfies AutomationStepResult
+        }
+        if (lockRow) {
+          ensureRecordNotLocked(context.actorId ?? null, lockRow, () => new Error('Record is locked'))
+        }
+
+        // RETURNING version, data: the post-merge full row becomes the revision snapshot (NOT the
+        // patch — D-1c §4.2's merge trap: `snapshot: patch` truncates every multi-field record).
+        // xbase-write-gated: routes through evaluateCrossBaseWrite (gate computed above) — a cross-base
+        // update is rejected before this UPDATE unless claim==truth + trigger-actor base-write.
+        // lock-guarded: automation update_record (B1) — ensureRecordNotLocked enforced just above.
+        const updateRes = await query(
+          `UPDATE meta_records
+           SET data = COALESCE(data, '{}'::jsonb) || $1::jsonb,
+               version = version + 1,
+               updated_at = NOW()
+           WHERE id = $2 AND sheet_id = $3
+           RETURNING version, data`,
+          [JSON.stringify(patch), effectiveRecordId, effectiveSheetId],
+        )
+        const updatedRow = updateRes.rows[0] as { version?: unknown; data?: unknown } | undefined
+        // Same-base pre-②b leniency (unchanged): a missing trigger record yields a 0-row UPDATE
+        // reported as success. No row ⇒ fabricate NO revision for a record that was never touched.
+        if (updatedRow) {
+          const nextVersion = Number(updatedRow.version)
+          await recordRecordRevision(query, {
+            sheetId: effectiveSheetId,
+            recordId: effectiveRecordId,
+            version: Number.isFinite(nextVersion) ? nextVersion : 0,
+            action: 'update',
+            source: 'automation',
+            actorId: context.actorId ?? null,
+            changedFieldIds: Object.keys(patch),
+            patch,
+            snapshot: normalizeJson(updatedRow.data),
+          })
+        }
+        return null
+      })
+      if (txResult) return txResult
 
       // Emit event for chaining
       this.deps.eventBus.emit('multitable.record.updated', withAutomationEventId({
@@ -2468,13 +2498,30 @@ export class AutomationExecutor {
       // field config before it reaches the DB (inert-by-construction at every writer).
       await this.sanitizeRichLongTextInWritePayload(targetSheetId, data)
 
+      // R13 Lane C: the INSERT and its birth revision run inside ONE transaction — mirrors D-1's
+      // executeDeleteRecord / the update-record fix above. A failed revision insert rolls back the
+      // record INSERT: the record and its create revision either both exist or neither does (no
+      // record that is created but invisible-forever to reconstructRecordsAtT, D-1c §0/§7a A4).
       // xbase-write-gated: routes through evaluateCrossBaseWrite (gate computed above) — a cross-base
       // create is rejected before this INSERT unless claim==truth + trigger-actor base-write. This is
       // the §1.3 create-to-another-base vector the gate closes.
-      await this.deps.queryFn(
-        `INSERT INTO meta_records (id, sheet_id, data, version) VALUES ($1, $2, $3::jsonb, 1)`,
-        [recordId, targetSheetId, JSON.stringify(data)],
-      )
+      await this.withTransaction(async (query) => {
+        await query(
+          `INSERT INTO meta_records (id, sheet_id, data, version) VALUES ($1, $2, $3::jsonb, 1)`,
+          [recordId, targetSheetId, JSON.stringify(data)],
+        )
+        await recordRecordRevision(query, {
+          sheetId: targetSheetId,
+          recordId,
+          version: 1,
+          action: 'create',
+          source: 'automation',
+          actorId: context.actorId ?? null,
+          changedFieldIds: Object.keys(data),
+          patch: data,
+          snapshot: normalizeJson(data),
+        })
+      })
 
       this.deps.eventBus.emit('multitable.record.created', withAutomationEventId({
         sheetId: targetSheetId,

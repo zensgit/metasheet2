@@ -34,7 +34,8 @@ import {
 import { isValidIanaTimeZone } from './automation-timezone'
 import { ensureRecordNotLocked } from './record-lock'
 import { publishMultitableSheetRealtime } from './realtime-publish'
-import { extractSelectOptions } from './field-codecs'
+import { extractSelectOptions, normalizeJson } from './field-codecs'
+import { recordRecordRevision } from './record-history-service'
 import {
   ConditionGroupValidationError,
   normalizeConditionGroupInput,
@@ -2802,24 +2803,53 @@ export class AutomationService {
       missingMessage?: string
     },
   ): Promise<boolean> {
-    const lockRes = await this.queryFn(
-      'SELECT locked, locked_by, created_by FROM meta_records WHERE id = $1 AND sheet_id = $2',
-      [recordId, sheetId],
-    )
-    const lockRow = lockRes.rows[0] as { locked?: unknown; locked_by?: unknown; created_by?: unknown } | undefined
-    if (!lockRow) {
-      if (opts.onMissing === 'throw') throw new Error(opts.missingMessage ?? `resultWriteback target record not found: ${recordId} ∉ ${sheetId}`)
-      return false // record gone — the caller's missing-record path already handled it
-    }
-    ensureRecordNotLocked(opts.lockActorId, lockRow, () => new Error(opts.lockedMessage))
-    // lock-guarded: resultWriteback patch — ensureRecordNotLocked (opts.lockActorId = the trigger actor for a
-    // cross-base target) is enforced immediately above, so a locked target record throws → backwriteSkipped.
-    await this.queryFn(
-      `UPDATE meta_records
-       SET data = COALESCE(data, '{}'::jsonb) || $1::jsonb, version = version + 1, updated_at = NOW()
-       WHERE id = $2 AND sheet_id = $3`,
-      [JSON.stringify(patch), recordId, sheetId],
-    )
+    // R13 Lane C: lock-check, the patch UPDATE, and the revision INSERT all run inside ONE transaction
+    // (mirrors the executor's D-1 delete-record fix and the create/update-record fixes above). A failed
+    // revision insert rolls back the UPDATE — no half-write (a patched record with no matching
+    // meta_record_revisions row) is possible, for either the same-base or the cross-base target. There is
+    // a single Postgres database for every base in this architecture (a "base" is a row, not a separate
+    // connection), so opening this transaction against the process-global pool already runs it on
+    // whichever base `sheetId`/`recordId` resolve to — same-base or cross-base alike.
+    const wrote = await this.withTransaction(async (query) => {
+      const lockRes = await query(
+        'SELECT locked, locked_by, created_by FROM meta_records WHERE id = $1 AND sheet_id = $2',
+        [recordId, sheetId],
+      )
+      const lockRow = lockRes.rows[0] as { locked?: unknown; locked_by?: unknown; created_by?: unknown } | undefined
+      if (!lockRow) {
+        if (opts.onMissing === 'throw') throw new Error(opts.missingMessage ?? `resultWriteback target record not found: ${recordId} ∉ ${sheetId}`)
+        return false // record gone — the caller's missing-record path already handled it
+      }
+      ensureRecordNotLocked(opts.lockActorId, lockRow, () => new Error(opts.lockedMessage))
+      // RETURNING version, data: the post-merge full row becomes the revision snapshot (NOT the patch —
+      // mirrors the executor update-record fix's D-1c §4.2 merge-trap avoidance).
+      // lock-guarded: resultWriteback patch — ensureRecordNotLocked (opts.lockActorId = the trigger actor for a
+      // cross-base target) is enforced immediately above, so a locked target record throws → backwriteSkipped.
+      const updateRes = await query(
+        `UPDATE meta_records
+         SET data = COALESCE(data, '{}'::jsonb) || $1::jsonb, version = version + 1, updated_at = NOW()
+         WHERE id = $2 AND sheet_id = $3
+         RETURNING version, data`,
+        [JSON.stringify(patch), recordId, sheetId],
+      )
+      const updatedRow = updateRes.rows[0] as { version?: unknown; data?: unknown } | undefined
+      if (updatedRow) {
+        const nextVersion = Number(updatedRow.version)
+        await recordRecordRevision(query, {
+          sheetId,
+          recordId,
+          version: Number.isFinite(nextVersion) ? nextVersion : 0,
+          action: 'update',
+          source: 'automation',
+          actorId: opts.chainActorId,
+          changedFieldIds: Object.keys(patch),
+          patch,
+          snapshot: normalizeJson(updatedRow.data),
+        })
+      }
+      return true
+    })
+    if (!wrote) return false
     this.eventBus.emit('multitable.record.updated', withAutomationEventId({
       sheetId,
       recordId,
@@ -2839,6 +2869,30 @@ export class AutomationService {
       // publishMultitableSheetRealtime swallows its own errors; belt-and-suspenders.
     }
     return true
+  }
+
+  // R13 Lane C: dedicated transaction wrapper for `applyResultWritebackPatch` — mirrors the identical
+  // `poolManager.get().transaction(...)` adapter this file already builds inline for the executor's
+  // `AutomationDeps.transaction` (constructor, above). Verified NOT re-entrant: `applyResultWritebackPatch`
+  // is only reached via `handleApprovalCompletionEvent` → `writeApprovalResultBack(CrossBase)`, a plain
+  // event-bus handler with no ambient transaction — so opening a fresh one here cannot nest/deadlock.
+  private async withTransaction<T>(
+    handler: (query: AutomationQueryFn) => Promise<T>,
+  ): Promise<T> {
+    return poolManager.get().transaction(async ({ query }) => {
+      const txQuery: AutomationQueryFn = async (sqlText, params) => {
+        const result = await query(sqlText, params)
+        return {
+          rows: Array.isArray((result as { rows?: unknown[] }).rows)
+            ? (result as { rows: unknown[] }).rows
+            : [],
+          rowCount: typeof (result as { rowCount?: number }).rowCount === 'number'
+            ? (result as { rowCount: number }).rowCount
+            : undefined,
+        }
+      }
+      return handler(txQuery)
+    })
   }
 
   private async assertResultWritebackFields(

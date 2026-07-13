@@ -209,6 +209,17 @@ export default defineConfig({
       // skip-green here, re-opening the "real-DB spec silently skips in the no-DB lane" hole) —
       // whole-file wired into `Run multitable real-DB integration` in plugin-tests.yml.
       'tests/integration/multitable-d1-delete-revision-parity-realdb.test.ts',
+      // R13 Lane C (D-1c-class fix, design-lock 20260712 §0.5): automation create_record/update_record
+      // now emit same-txn revisions; installs scoped failure-injection triggers on
+      // meta_record_revisions and drives the REAL AutomationExecutor with `deps.transaction` wired to
+      // poolManager. Real Postgres only — excluded HERE so it cannot skip-green in the no-DB lane, and
+      // whole-file wired into `Run multitable real-DB integration` in plugin-tests.yml.
+      'tests/integration/multitable-r13-lanec-automation-create-update-revision-realdb.test.ts',
+      // R13 Lane C: automation resultWriteback (W7-1 same-base + T3-5 cross-base) now emits same-txn
+      // revisions. Drives the REAL AutomationService → ApprovalProductService.dispatchAction →
+      // approval.completed chain (approval schema bootstrap + real Postgres only) — excluded HERE,
+      // whole-file wired into `Run multitable real-DB integration` in plugin-tests.yml.
+      'tests/integration/multitable-r13-lanec-resultwriteback-revision-realdb.test.ts',
       // D-2 side-door delete recoverability (#4004): real Postgres only (it installs scoped failure-
       // injection triggers and drives both side doors end-to-end) — excluded HERE so it cannot skip-green
       // in the no-DB lane, and whole-file wired into `Run multitable real-DB integration` in
