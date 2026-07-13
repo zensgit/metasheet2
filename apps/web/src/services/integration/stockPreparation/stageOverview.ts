@@ -219,9 +219,10 @@ export function deriveRecommendedNextStep(input: {
         return { kind: 'go_to_stage', stage: key, reason, count: stage.blockingCount }
       }
     }
-    // No loaded stage is blocked. The "nothing pending" TERMINAL (generate-not-run, else all_clear) is
-    // only trustworthy when EVERY detail stage loaded — asserting it off a failed read is the false
-    // "no blocking items".
+    // No loaded stage is blocked AND every detail stage loaded → the "nothing pending" TERMINAL
+    // (generate-not-run, else all_clear) is trustworthy. If a detail read is unknown, DO NOT return here:
+    // fall through to the tier-1 signals below so a KNOWN tier-1 positive blocker still wins, and only a
+    // genuinely clean tier-1 yields detail_unavailable (never a false all_clear off the failed read).
     if (!detailUnknown) {
       const generateStage = byKey.get('generate')
       if (generateStage && generateStage.count === 0) {
@@ -229,17 +230,21 @@ export function deriveRecommendedNextStep(input: {
       }
       return { kind: 'all_clear', reason: 'all_clear' }
     }
-    // A detail stage's read failed (unknown) and nothing that DID load is blocked. We cannot honestly say
-    // "all clear" (that is the false "no blocking items" off a failed read), and it is NOT a permission
-    // problem (adminDetailAvailable is true), so we must NOT fall through to the tier-1 all_clear or to
-    // admin_required. Return an explicit "detail read incomplete" so the operator knows the picture is
-    // partial rather than reassuringly empty (owner review P2, stricter terminal semantics 2026-07-13).
-    return { kind: 'detail_unavailable', reason: 'detail_read_incomplete' }
   }
 
+  // Tier-1 per-project signals — the source for a non-admin operator AND the fall-through for an admin
+  // whose detail read was INCOMPLETE (some stage unknown, nothing loaded blocked). Priority ladder (owner
+  // review 2026-07-13): (1) a loaded detail blocker already returned above; (2) a KNOWN tier-1 positive
+  // blocker wins next — an open-exception / held-line / no-snapshot signal is actionable even when the
+  // detail read failed; (3) only when tier-1 is ALSO clean do we resolve the terminal — all_clear when the
+  // detail was complete (or this is a non-admin operator), but detail_unavailable when a detail read was
+  // unknown (we cannot claim "all clear" off a failed read, and it is NOT a permission problem).
+  const detailIncomplete = Boolean(input.adminDetailAvailable && input.stages && detailUnknown)
   const signals = input.projectSignals
   if (!signals) {
-    return { kind: 'admin_required', reason: 'admin_permission_required' }
+    return detailIncomplete
+      ? { kind: 'detail_unavailable', reason: 'detail_read_incomplete' }
+      : { kind: 'admin_required', reason: 'admin_permission_required' }
   }
   if (signals.openExceptionCount > 0) {
     return { kind: 'go_to_stage', stage: 'exception', reason: 'project_open_exceptions', count: signals.openExceptionCount }
@@ -250,5 +255,7 @@ export function deriveRecommendedNextStep(input: {
   if (signals.snapshotBatchCount === 0) {
     return { kind: 'go_to_stage', stage: 'sync', reason: 'project_no_snapshot_yet', count: 0 }
   }
-  return { kind: 'all_clear', reason: 'all_clear' }
+  return detailIncomplete
+    ? { kind: 'detail_unavailable', reason: 'detail_read_incomplete' }
+    : { kind: 'all_clear', reason: 'all_clear' }
 }

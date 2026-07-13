@@ -157,13 +157,13 @@ describe('deriveRecommendedNextStep', () => {
       expect(step).toEqual({ kind: 'all_clear', reason: 'all_clear' })
     })
 
-    // #4207 stricter terminal semantics (owner review 2026-07-13): a FAILED detail read classifies its
-    // stage 'unknown'. When a detail read is unknown and nothing loaded is blocked, the derivation must
-    // return an EXPLICIT detail_unavailable — NOT a bare tier-1 all_clear ("no blocking items" off a failed
-    // read), NOT admin_required (adminDetailAvailable is true — it is not a permission problem), and clean
-    // OR actionable tier-1 signals must NOT override it (the operator is told the picture is partial, not
-    // reassuringly empty).
-    it('returns an explicit detail_unavailable (never all_clear / admin_required / tier-1) when a detail read is unknown', () => {
+    // #4207 stricter terminal semantics (owner review 2026-07-13). Priority ladder when a detail read is
+    // 'unknown': (1) a loaded detail blocker wins (separate test below); (2) a KNOWN tier-1 POSITIVE blocker
+    // (open exceptions / held lines / no snapshot) wins next — it is actionable even though a detail read
+    // failed; (3) ONLY when tier-1 is also clean do we return the EXPLICIT detail_unavailable — never a bare
+    // all_clear ("no blocking items" off a failed read) and never admin_required (it is not a permission
+    // problem). all_clear is reserved for a COMPLETE detail read.
+    it('returns detail_unavailable ONLY when tier-1 is also clean (never all_clear / admin_required) on an unknown detail read', () => {
       const stages = buildStages({
         sync: { status: 'unknown', count: null, blockingCount: null },
         map: { status: 'unknown', count: null, blockingCount: null },
@@ -179,12 +179,17 @@ describe('deriveRecommendedNextStep', () => {
         hasProject: true, adminDetailAvailable: true, stages,
         projectSignals: { snapshotBatchCount: 2, openExceptionCount: 0, readyLineCount: 0, heldLineCount: 0 },
       })).toEqual(incomplete)
-      // Even ACTIONABLE tier-1 signals (open exceptions) do not override the honest "detail incomplete"
-      // state — the detail read is what failed, and its truth is unknown, not "handle these exceptions".
+      // But a KNOWN tier-1 POSITIVE blocker (open exceptions) IS actionable and wins over detail_unavailable —
+      // a real, read-gated blocking count must not be suppressed just because a detail read failed.
       expect(deriveRecommendedNextStep({
         hasProject: true, adminDetailAvailable: true, stages,
         projectSignals: { snapshotBatchCount: 2, openExceptionCount: 4, readyLineCount: 0, heldLineCount: 0 },
-      })).toEqual(incomplete)
+      })).toEqual({ kind: 'go_to_stage', stage: 'exception', reason: 'project_open_exceptions', count: 4 })
+      // Held lines are likewise a known tier-1 positive blocker → go generate, not detail_unavailable.
+      expect(deriveRecommendedNextStep({
+        hasProject: true, adminDetailAvailable: true, stages,
+        projectSignals: { snapshotBatchCount: 2, openExceptionCount: 0, readyLineCount: 0, heldLineCount: 3 },
+      })).toEqual({ kind: 'go_to_stage', stage: 'generate', reason: 'project_held_lines', count: 3 })
     })
 
     // A PARTIAL unknown (one stage failed, the rest loaded clean, none blocked) is still detail_unavailable —
