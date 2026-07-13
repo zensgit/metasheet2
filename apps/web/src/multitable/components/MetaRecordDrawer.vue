@@ -32,7 +32,11 @@
         <MtButton v-if="canManageAutomation" class="meta-record-drawer__btn" :title="l('record.workflowTitle')" @click="emit('open-automation')">&#x2699; {{ l('record.workflow') }}</MtButton>
         <MtButton v-if="canManageRecordPermissions" class="meta-record-drawer__btn" :title="l('record.permissionsTitle')" @click="showRecordPermissions = true">&#x1F512; {{ l('record.permissions') }}</MtButton>
         <MtButton v-if="record && canCreate" class="meta-record-drawer__btn meta-record-drawer__btn--duplicate" :title="l('record.duplicateTitle')" @click="emit('duplicate')">{{ l('record.duplicate') }}</MtButton>
-        <MtButton v-if="resolvedCanDelete" variant="danger" class="meta-record-drawer__btn meta-record-drawer__btn--danger" @click="emit('delete')">{{ l('record.delete') }}</MtButton>
+        <!-- gate P2: the retained `meta-record-drawer__btn` base rule (background:#fff, later-injected,
+             specificity tie) beat `.mt-button--danger`'s red background while danger's white text stayed
+             → white-on-white "Delete". The danger variant must own the cascade, so the base class is
+             dropped HERE ONLY; `--danger` stays as a stable spec/test anchor (its bespoke rule is gone). -->
+        <MtButton v-if="resolvedCanDelete" variant="danger" class="meta-record-drawer__btn--danger" @click="emit('delete')">{{ l('record.delete') }}</MtButton>
         <button class="meta-record-drawer__close" :aria-label="l('record.close')" @click="emit('close')">&times;</button>
       </div>
     </div>
