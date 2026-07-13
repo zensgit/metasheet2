@@ -660,6 +660,11 @@ describe('Multitable attachment API', () => {
             expect(params).toEqual([uploadedAttachmentId])
             return { rows: [] }
           }
+          // R13 lane A (D-1c, ratified 2026-07-13): attachment-delete now emits a same-txn revision
+          // (the fix — this route previously mutated meta_records with no revision at all).
+          if (sql.includes('INSERT INTO meta_record_revisions')) {
+            return { rows: [] }
+          }
           // A: approval-projection read-guard lookup — no projection sheet in this test
           if (/FROM meta_sheets WHERE id = ANY[\s\S]*base_id/i.test(sql)) return { rows: [] }
           throw new Error(`Unhandled SQL in test: ${sql}`)
@@ -759,6 +764,11 @@ describe('Multitable attachment API', () => {
           }
           if (sql.includes('UPDATE multitable_attachments SET deleted_at = now(), updated_at = now()')) {
             expect(params).toEqual(['att_sheet_write'])
+            return { rows: [] }
+          }
+          // R13 lane A (D-1c, ratified 2026-07-13): attachment-delete now emits a same-txn revision
+          // (the fix — this route previously mutated meta_records with no revision at all).
+          if (sql.includes('INSERT INTO meta_record_revisions')) {
             return { rows: [] }
           }
           // A: approval-projection read-guard lookup — no projection sheet in this test
