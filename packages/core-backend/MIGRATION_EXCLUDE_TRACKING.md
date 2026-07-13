@@ -28,7 +28,10 @@ queries `views` / `view_states` — so a CI test-DB without these migrations can
 all (it failed with `column "tags" of relation "snapshots" does not exist` when first wired in
 PR #4218). The old per-item exclusion reasons were re-tested and found stale — the same class of
 staleness as the `20250925` row below. Proof carried by the re-enable PR: fresh-DB full migrate,
-second-pass replay (idempotency), upgrade path (old-list DB → new-list migrate), the 5 target
+second-pass **tracked-skip replay** (a second `migrateToLatest()` skips already-applied items via
+the migration history — it does NOT re-run the four `up()` bodies), a **separate upgrade proof**
+(old-list DB → new-list migrate, which is what actually re-executes the newly-enabled `up()`
+bodies on an existing schema), the 5 target
 tables/columns present, `snapshot-protection.test.ts` 21/21, and Node 18.x/20.x real-DB CI jobs
 green with the new lists.
 
@@ -47,8 +50,9 @@ workflows/jobs that depend on each one's specific shape. Full detail:
    `observability-e2e.yml`, `safety-guard-e2e.yml`. Drops a migration entirely (no history
    marker) so CI's schema-build order can succeed despite that migration's known conflicts.
 2. **`migration-replay.yml`'s own `MIGRATION_EXCLUDE` subset** — a narrower, independently
-   evolving list for a different job (run `db:migrate` twice against a fresh db, assert
-   idempotency). Its list is not identical to #1's (7-item union as of 2026-07-13) today.
+   evolving list for a different job (run `db:migrate` twice against a fresh db, assert the
+   second pass is a clean tracked-skip replay). Its list is not identical to #1's (7-item
+   union as of 2026-07-13) today.
 3. **`SUPERSEDED_LEGACY_SQL_MIGRATIONS`** in `packages/core-backend/src/db/migration-provider.ts`
    — a disjoint-purpose list of ~29 legacy numeric SQL migrations turned into no-op history
    markers (name stays, body doesn't run) rather than dropped. Overlaps #1 on exactly three
@@ -56,7 +60,7 @@ workflows/jobs that depend on each one's specific shape. Full detail:
    `049_create_bpmn_workflow_tables`) — confirmed intentional/harmless double-listing by the
    2026-07-10 audit.
 
-**Known, verified divergences between the 6 occurrences of #1/#2** (git-blame-checked, not
+**Known, verified divergences between the 7 occurrences of #1/#2** (git-blame-checked, not
 guessed):
 
 | Item | Present in | Absent from | Why |

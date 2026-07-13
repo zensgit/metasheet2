@@ -25,7 +25,8 @@
 #   A. every item in every CI-gate/replay MIGRATION_EXCLUDE occurrence against the full known
 #      baseline (7 items since the 2026-07-13 #4162 re-enable; was 11, originally 3) — anything extra is reported as a possibly-undocumented new
 #      exclusion;
-#   B. every occurrence-to-occurrence divergence within those six occurrences against a table
+#   B. every occurrence-to-occurrence divergence within those seven occurrences (5 files:
+#      plugin-tests x2, migration-replay x2, observability-e2e/strict, safety-guard-e2e) against a table
 #      of KNOWN, already-reviewed divergences (see MIGRATION_EXCLUDE_TRACKING.md) — anything
 #      not in that table is reported as new/undocumented drift;
 #   C. the overlap between MIGRATION_EXCLUDE and SUPERSEDED_LEGACY_SQL_MIGRATIONS against the
@@ -169,8 +170,16 @@ run_checks() {
   local occurrences
   occurrences="$(collect_occurrences)"
 
-  if [[ -z "$occurrences" ]]; then
-    warn "No MIGRATION_EXCLUDE occurrences found under $WORKFLOWS_DIR — expected at least 6."
+  # Exact shape pin (2026-07-13, #4228 review): 7 occurrences across 5 files in the real repo
+  # (plugin-tests x2, migration-replay x2, observability-e2e, observability-strict,
+  # safety-guard-e2e). Env-overridable so the fixture tests can pin their own shape.
+  local expected_occ expected_files occ_count file_count
+  expected_occ="${EXPECTED_OCCURRENCE_COUNT:-7}"
+  expected_files="${EXPECTED_FILE_COUNT:-5}"
+  occ_count="$(printf '%s\n' "$occurrences" | sed '/^$/d' | wc -l | tr -d ' ')"
+  file_count="$(printf '%s\n' "$occurrences" | sed '/^$/d' | cut -d: -f1 | sort -u | wc -l | tr -d ' ')"
+  if [[ "$occ_count" -ne "$expected_occ" || "$file_count" -ne "$expected_files" ]]; then
+    warn "Expected exactly $expected_occ MIGRATION_EXCLUDE occurrences across $expected_files workflow files; found $occ_count across $file_count — a new/removed occurrence must be reviewed and this pin updated."
   fi
 
   # --- A: every item in every occurrence must be a known baseline item ------------------
