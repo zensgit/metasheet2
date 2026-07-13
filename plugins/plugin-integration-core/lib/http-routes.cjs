@@ -80,6 +80,10 @@ const ROUTES = [
   // stored config by reference; raw rows, paths, SQL, credentials, and write controls are absent.
   ['POST', '/api/integration/stock-preparation/mvp/source-runs/plm-bom', 'stockPreparationPlmBomSourceRun'],
   ['POST', '/api/integration/stock-preparation/mvp/source-runs/erp-materials', 'stockPreparationErpMaterialSourceRun'],
+  // T2: COMMIT already-normalized ERP/K3 material-master intake rows into erp_material_master (the
+  // internal cache confirm-writes.cjs / generation-runtime.cjs already read from). Upsert, not
+  // immutable; own 'erp_material_sync' run record; NOT project-scoped (tenant-level cache).
+  ['POST', '/api/integration/stock-preparation/mvp/erp-materials/sync', 'stockPreparationErpMaterialSync'],
   // #4163 T1: readonly, values-free PROJECT list (FE view 1, the project workspace / selector — the
   // deep-link entry point into views 2-6). read-gated (broader than the rest of this module).
   ['GET', '/api/integration/stock-preparation/projects', 'stockPreparationProjectList'],
@@ -299,6 +303,14 @@ const {
   runErpMaterialReadonlySource,
   runPlmBomReadonlySource,
 } = require('./stock-preparation-readonly-source-run.cjs')
+// T2 (#3751): COMMIT step for ALREADY-NORMALIZED ERP/K3 material-master intake rows (the shape
+// stock-preparation-readonly-source-run.cjs's runErpMaterialReadonlySource / normalizeStockPreparation-
+// ReadonlyIntake produce) into the internal erp_material_master CACHE table. Own module / own
+// 'erp_material_sync' run type — NOT bolted onto persistStockPreparationSyncRun (a BOM-snapshot commit
+// with an unrelated project/batch scope); mirrors how generation-runtime.cjs earns 'prep_generate' in
+// its own committer. Internal-only (structural), upsert (cache refresh, not immutable), admin-gated,
+// values-free. NOT project-scoped (same reasoning as the ERP source-run request allowlist below).
+const { persistStockPreparationErpMaterialSync } = require('./stock-preparation-erp-material-sync-persist.cjs')
 // #3751 MVP view 2: READONLY snapshot-batch LIST + DIFF read endpoints. queryRecords-only; admin-gated;
 // values-free; TWO-project split (staging locator via resolveIntegrationStagingProjectId vs business
 // project row filter). Persists nothing, no external / PLM / K3 write path.
@@ -506,6 +518,20 @@ function resolveTenantId(req, input = {}) {
   return tenantId
 }
 
+// A tenant-scoped WRITE must derive its tenant from the AUTHENTICATED principal ONLY — never from the
+// request. resolveTenantId above honors a request-supplied tenantId for admins (platform-admin
+// cross-tenant READS depend on that), which on a write route is a steering vector: a tenant_1 admin
+// could pass tenantId: tenant_evil and redirect the write to another tenant's staging project. This
+// fail-closed helper is the write-safe derivation — the request cannot influence it at all.
+function resolveAuthUserTenantId(req) {
+  const user = getUser(req)
+  const tenantId = typeof (user && user.tenantId) === 'string' ? user.tenantId.trim() : ''
+  if (!tenantId) {
+    throw new HttpRouteError(400, 'TENANT_REQUIRED', 'authenticated tenant context is required')
+  }
+  return tenantId
+}
+
 function resolveWorkspaceId(req, input = {}) {
   return firstString(input.workspaceId, req.query && req.query.workspaceId, req.params && req.params.workspaceId)
 }
@@ -695,6 +721,19 @@ const VALID_STOCK_PREPARATION_ERP_SOURCE_RUN_REQUEST_KEYS = new Set([
   'readSourceConfigId',
   'inputs',
   'syncRunId',
+])
+// T2: the ERP material SYNC (commit) request — same "not project-scoped" reasoning as the source-run
+// allowlist above (this is a tenant-level cache commit, not a per-PLM-project write). `erpMaterials` is
+// the caller's ALREADY-NORMALIZED row array (e.g. the output of runErpMaterialReadonlySource /
+// normalizeStockPreparationReadonlyIntake, or a sample/fixture in the same shape) — this route does not
+// itself read K3/ERP or re-derive business keys.
+// NO tenantId / workspaceId here: this is a tenant-scoped WRITE, so the tenant is derived server-side
+// from the authenticated principal (resolveAuthUserTenantId), never from the request. Accepting a
+// request tenantId would be a steering vector (an admin could redirect the write to another tenant's
+// staging project) — the closed allowlist rejects it outright, on top of the auth-only derivation.
+const VALID_STOCK_PREPARATION_ERP_MATERIAL_SYNC_REQUEST_KEYS = new Set([
+  'syncRunId',
+  'erpMaterials',
 ])
 // #4163 T1: closed query allowlist for the readonly PROJECT list. Unlike every other read in this
 // module family, this route is NOT scoped to one business projectId — the project table IS the
@@ -3775,6 +3814,37 @@ function createHandlers(services, options = {}) {
         ...sourceRuntime,
       })
       return sendOk(res, publicReadonlySourceRunResult(result))
+    },
+
+    // T2: COMMIT already-normalized ERP/K3 material-master rows into the internal erp_material_master
+    // CACHE (upsert by the frozen template's own key field; every field is plm_system, so a re-sync
+    // fully refreshes a row). NOT project-scoped — targetProjectId is the tenant-level STAGING project,
+    // derived server-side exactly like every sibling MVP route (never request-sourced). Own
+    // 'erp_material_sync' run record (create-if-absent / patch-status-if-changed). Internal-only,
+    // admin-gated, values-free; no audit-trail requirement (this is a system cache-refresh commit, the
+    // same category as /mvp/sync/persist — parity with that route, which likewise does not audit;
+    // audit coverage is reserved for the human confirm/generation/resolve write family, #3890).
+    async stockPreparationErpMaterialSync(req, res) {
+      requireAccess(req, 'admin')
+      const input = normalizeStockPreparationConfirmBody(
+        requestBody(req),
+        VALID_STOCK_PREPARATION_ERP_MATERIAL_SYNC_REQUEST_KEYS,
+        'STOCK_PREPARATION_ERP_MATERIAL_SYNC_REQUEST_INVALID',
+      )
+      // Tenant is derived from the AUTHENTICATED user only (not resolveTenantId, which would honor a
+      // request tenantId for admins) — the write cannot be steered to another tenant's staging project.
+      const tenantId = resolveAuthUserTenantId(req)
+      const targetProjectId = resolveIntegrationStagingProjectId(tenantId, undefined)
+      const result = await persistStockPreparationErpMaterialSync({
+        context,
+        permission: 'admin',
+        recordsApi: getMultitableRecordsApi(),
+        provisioning: getMultitableProvisioning(),
+        targetProjectId,
+        syncRunId: input.syncRunId,
+        erpMaterials: input.erpMaterials,
+      })
+      return sendOk(res, result, result.persisted ? 201 : 200)
     },
 
     // #4163 T1: values-free project LIST — backs FE view 1 (project workspace / selector), the
