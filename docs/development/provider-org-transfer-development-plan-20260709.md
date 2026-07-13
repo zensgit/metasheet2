@@ -1,7 +1,8 @@
 # Provider-Agnostic Organization Transfer Development Plan
 
 Date: 2026-07-09
-Status: development plan, Rev 2
+Status: development plan, Rev 3
+Rev 3 (2026-07-12): owner's permanent-immutable `corp_id` rule absorbed (§12.1, no probe, no escape hatch); local-canonical-org substrate formalized (§4.1, `org_id` as anchor).
 Baseline: `origin/main @ 8c15b8bf80ac0c6107615d6db73ce9e37dd66d6c`
 Primary provider: DingTalk
 Future providers: WeCom, Feishu
@@ -9,7 +10,10 @@ Future providers: WeCom, Feishu
 ## 1. Executive Decision
 
 Organization transfer is feasible, but it must not be implemented as an in-place
-`corp_id` edit on an active integration.
+`corp_id` edit on an integration. Once `corp_id` is non-empty on a
+`directory_integrations` row it is permanently immutable (§12.1) —
+unconditionally, from the instant it is first set, with no escape hatch — so a
+transfer can only ever be a workflow across rows, never an edit of one row.
 
 The correct model is a first-class transfer workflow:
 
@@ -33,14 +37,19 @@ describe provider-native handles.
 
 ## 2. Why Not Edit `corp_id` Directly
 
-The current code allows `corp_id` to be updated on a directory integration:
+At the Rev 2 baseline the code allowed `corp_id` to be updated on a directory
+integration:
 
 - `packages/core-backend/src/directory/directory-sync.ts`
   - `updateDirectoryIntegration`
   - SQL update includes `corp_id = $4`
 
-That is dangerous for an active integration because several downstream behaviors
-assume the integration represents one stable external tenant.
+(Rev 3: the guardrail branch closes this path — `corp_id` is permanently
+immutable once set, see §12.1.)
+
+That is dangerous for any integration — whether or not it has synced records —
+because several downstream behaviors assume the integration represents one
+stable external tenant.
 
 Known hazards:
 
@@ -58,6 +67,12 @@ as ordinary integration configuration editing.
 ## 3. Current Code Facts
 
 This section captures the facts the implementation must preserve.
+
+Anchor-freshness note (Rev 3): the code citations in this plan were captured at
+the Rev 1/Rev 2 baseline; main has since moved roughly 266 commits, and the
+`corp_id` guardrail branch landed in parallel. File/function facts below remain
+directionally correct, but re-verify specific anchors against current main
+before implementing against them.
 
 ### 3.1 Provider-Tagged User Identity Already Exists
 
@@ -201,6 +216,33 @@ Default behavior should be conservative:
 - Unknown bindings default to `pending`, not `rebind`.
 - Destructive-looking operations are implemented as disable/unlink, not delete.
 - Bulk apply requires a dry-run summary.
+
+### 4.1 Local-Canonical-Org Substrate: `org_id` Is the Anchor (Rev 3)
+
+The true stable anchor above any provider/corp binding is the local canonical
+org: `org_id`. The schema already enforces this direction —
+`directory_integrations` carries a unique index on `(org_id, provider, name)`
+(`idx_directory_integrations_org_provider_name`), so every integration row is
+born scoped to exactly one permanent local org.
+
+With `corp_id` permanently immutable per row (§12.1), each
+`directory_integrations` row becomes a single-tenant-for-life, corp-pinned
+satellite of one permanent `org_id`. The row's identity — "this org's window
+into that specific corp" — is fixed at creation for the row's whole life.
+
+Consequences:
+
+- A transfer can NEVER be "edit the row". The only shape a transfer can take
+  is: stand up a new satellite row (bound to the new corp), reconcile bindings
+  from the old satellite to the new one, retire the old satellite.
+- "Transfer" is therefore reconciliation-over-satellites, not
+  mutation-of-anchor. The anchor — `org_id` and the local entities hanging off
+  it — never moves; only which satellite rows orbit it changes.
+- This should inform §7: `provider_org_transfers` keys on `org_id` (the
+  `org_id` column in the proposed schema is not incidental — it is the primary
+  scoping key). A transfer is scoped to one canonical local org, which is
+  meaningful even before any provider integration exists for that org, and is
+  not merely derived from the source/target integration ids.
 
 ## 5. Functional Scope
 
@@ -679,14 +721,42 @@ unchanged.
 
 ## 12. Safety Guardrails
 
-### 12.1 Block Active In-Place Corp Switch
+### 12.1 Permanent-Immutable `corp_id` (Rev 3 — supersedes "Block Active In-Place Corp Switch")
 
-Add a guard around `updateDirectoryIntegration`:
+Owner rule: once `corp_id` is non-empty on a `directory_integrations` row, it
+can never be changed to a different non-empty value through any ordinary edit
+path, for the life of the row.
 
-- If `corp_id` changes on an integration that has synced accounts, require a
-  transfer workflow instead.
-- Allow ordinary edits that do not change tenant identity.
-- Allow test/dev override only behind an explicit admin-only escape hatch.
+Allowed transitions:
+
+- Initial set: empty → value.
+- Clear: value → empty, before any sync has run (a setup-time correction).
+- Same value: value → identical value (no-op).
+
+Rejected:
+
+- value → different non-empty value, always, with `409`. No synced-records
+  probe, no active/inactive distinction, no escape hatch.
+
+Why the Rev 2 design ("block only if the integration has synced accounts",
+with an env escape hatch) is provably unsafe — TOCTOU:
+
+During the FIRST sync there is a window where `corp_id` is set but zero
+`directory_accounts`/`directory_departments` rows have been written yet. An
+interleaved PUT in that window swaps `corp_id` before any row exists to trip a
+synced-records probe — the conditional guard passes, the tenant silently
+changes, and the next sync re-arms the mass-deactivation hazard (every record
+from the old corp is "not seen" in the new corp's sync window and swept
+inactive). Any guard conditioned on integration state has this
+time-of-check/time-of-use race. Only unconditional immutability from the
+moment `corp_id` is first set is race-free.
+
+There is deliberately NO production escape hatch of any kind — not env-gated,
+not admin-gated. The only way to point an org at a new tenant is the transfer
+workflow in this plan: stand up a new integration row and reconcile (§4.1).
+
+Ordinary edits that do not touch tenant identity remain allowed, and the
+rejection error should tell the admin to start a transfer instead.
 
 ### 12.2 Freeze or Guard Source Sync
 
@@ -810,16 +880,19 @@ Exit criteria:
 
 Deliverables:
 
-- Backend guard that blocks active tenant identity edits on directory
-  integrations.
+- Backend guard making `corp_id` permanently immutable once set on directory
+  integrations (§12.1) — no synced-records probe, no escape hatch.
 - Transfer-aware source-sync freeze.
 - Admin-visible error explaining how to start a transfer.
 
 Tests:
 
 - Editing non-tenant fields still works.
-- Editing `corp_id` on an active integration is blocked.
-- Test/dev escape hatch is explicit.
+- Editing `corp_id` once set is blocked unconditionally, including the
+  pre-first-sync window (`corp_id` set, zero synced account/department rows).
+- Dedicated real-DB regression proving zero-row-mutation on rejection —
+  `directory-tenant-change-immutable.db.test.ts` already exists on the
+  guardrail branch; cite/extend it rather than re-prove.
 - Active transfer prevents destructive source sync.
 
 ### Phase 2: Transfer Schema and API Skeleton
@@ -931,7 +1004,7 @@ Exit criteria:
 Recommended PR order:
 
 1. Docs correction and development plan.
-2. Guard active `corp_id` edit.
+2. Guard `corp_id` edit (permanent immutability once set, §12.1).
 3. Transfer schema and repository.
 4. Transfer service and admin API skeleton.
 5. Two-corp coexistence proof or directory-account key-strategy migration.
@@ -946,7 +1019,7 @@ and UI into one large PR.
 
 | Area | Evidence required |
 | --- | --- |
-| Tenant edit guard | Unit + route integration tests |
+| Tenant edit guard | Unit + route integration tests + real-DB zero-row-mutation regression (`directory-tenant-change-immutable.db.test.ts`) |
 | Source sync freeze | Sync integration test with active transfer |
 | Transfer lifecycle | Repository/service unit tests |
 | Decision idempotency | Repeated scan/apply tests |
@@ -973,8 +1046,9 @@ and UI into one large PR.
 
 The first production-ready release is acceptable when:
 
-1. Active `corp_id` edits can no longer silently mutate an integration into a
-   new tenant.
+1. `corp_id` edits can no longer mutate an integration into a new tenant —
+   immutability is unconditional from the instant `corp_id` is non-empty (no
+   synced-records condition, no active/inactive distinction, no escape hatch).
 2. Admins can create a DingTalk transfer from source integration to target
    integration.
 3. The system scans users and group destinations into explicit decisions.
