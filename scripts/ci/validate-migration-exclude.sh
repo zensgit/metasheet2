@@ -48,17 +48,18 @@ WORKFLOWS_DIR="${WORKFLOWS_DIR:-$REPO_ROOT/.github/workflows}"
 PROVIDER_FILE="${PROVIDER_FILE:-$REPO_ROOT/packages/core-backend/src/db/migration-provider.ts}"
 
 # Known baseline: the union of every item that has appeared, with review, in any CI
-# per-PR-gate / migration-replay MIGRATION_EXCLUDE occurrence as of 2026-07-12.
+# per-PR-gate / migration-replay MIGRATION_EXCLUDE occurrence as of 2026-07-13.
+# (#4162 follow-up, 2026-07-13: 20250924120000_create_views_view_states.ts and the three
+# snapshot-cluster migrations — 20251117000001_add_snapshot_labels.ts,
+# 20251117000002_create_protection_rules.ts, 20251201000001_create_change_management_tables.ts —
+# were RE-ENABLED across all five workflow lists at once and removed from this baseline; if one
+# of them reappears in a list, this guard now reports it as a possibly-undocumented NEW exclusion.)
 KNOWN_BASELINE_ITEMS='008_plugin_infrastructure.sql
 048_create_event_bus_tables.sql
 049_create_bpmn_workflow_tables.sql
 042a_core_model_views.sql
-20250924120000_create_views_view_states.ts
 20250924140000_create_gantt_tables.ts
 20250925_create_view_tables.sql
-20251117000001_add_snapshot_labels.ts
-20251117000002_create_protection_rules.ts
-20251201000001_create_change_management_tables.ts
 zzzz20260114110000_create_user_orgs_table.ts'
 
 # Known, reviewed occurrence-to-occurrence divergences: "<item>|<workflow-file-basename that
@@ -282,10 +283,11 @@ $stripped"
 
   # --- Always-on informational note: the asymmetry this guard does not, and cannot, close --
   info "Known asymmetry (not a bug this guard can catch): production/on-prem 'db:migrate' runs"
-  info "with NO MIGRATION_EXCLUDE at all. Only CI's per-PR gate trims the list above, so the"
-  info "view-table/gantt/snapshot/protection-rule/change-management cluster excluded there has"
-  info "never had a per-PR green CI run of its up() bodies. Re-enabling that cluster in CI is"
-  info "gated planning work — see #4162. Do not close that gap by editing this script."
+  info "with NO MIGRATION_EXCLUDE at all. Only CI's per-PR gate trims the list above. #4162"
+  info "follow-up (2026-07-13): views/view_states + the snapshot/protection-rule/change-management"
+  info "migrations are re-enabled in CI and now DO get per-PR green runs; the still-excluded"
+  info "remainder (008/048/049, 042a, gantt, 20250925) keeps this gap. Do not close it by"
+  info "editing this script."
 }
 
 # main() is the only thing in this file that calls exit. It is intentionally NOT wired into any

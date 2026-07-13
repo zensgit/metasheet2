@@ -79,20 +79,21 @@ jobs:
           # 008_plugin_infrastructure.sql - has idempotency issue with scope column
           # 048/049 (event bus / BPMN) - Phase 2 migrations with complex SQL syntax issues
           # 042a_core_model_views.sql - References non-existent last_accessed column
-          # 20250924120000_create_views_view_states.ts - View states migration with schema issues
+          # Re-enabled per #4162 (2026-07-13): 20250924120000_create_views_view_states.ts and the three
+          # snapshot-cluster migrations (20251117000001_add_snapshot_labels, 20251117000002_create_protection_rules,
+          # 20251201000001_create_change_management_tables) now RUN here. Their old per-item exclusion reasons were
+          # re-tested and are stale (same class as the 20250925 one #3627 fixed): fresh-DB migrate, second-pass
+          # replay, and the snapshot-protection E2E (21/21) all pass with them applied.
           # 20250924140000_create_gantt_tables.ts - FK points at pre-fix text view ids
           # 20250925_create_view_tables.sql - legacy owner_id FK assumes pre-text user ids during replay.
           #   NOTE: this exact bug was fixed by #3627, and migration-replay.yml already dropped
           #   this exclusion in #3632 (verified passing there); this workflow was never
           #   re-verified/updated to match, so this exclusion may now be stale rather than still
           #   required — needs re-verification before removal, not a piecemeal drop (see #4162).
-          # 20251117000001_add_snapshot_labels.ts - re-applies chk_protection_level after earlier snapshot schema creation during replay
-          # 20251117000002_create_protection_rules.ts - re-creates protection_rules after replay paths already created the table
-          # 20251201000001_create_change_management_tables.ts - legacy snapshot_id text FKs no longer match replay-built uuid snapshot ids
           # zzzz20260114110000_create_user_orgs_table.ts - replay paths hit legacy user_orgs is_active reference incompatibility.
           #   NOTE: plugin-tests.yml intentionally does NOT exclude this one — attendance
           #   auto-absence depends on the user_orgs table in that job (see b1fc1e19d1).
-          MIGRATION_EXCLUDE: 008_plugin_infrastructure.sql,048_create_event_bus_tables.sql,049_create_bpmn_workflow_tables.sql,042a_core_model_views.sql,20250924120000_create_views_view_states.ts,20250924140000_create_gantt_tables.ts,20250925_create_view_tables.sql,20251117000001_add_snapshot_labels.ts,20251117000002_create_protection_rules.ts,20251201000001_create_change_management_tables.ts,zzzz20260114110000_create_user_orgs_table.ts
+          MIGRATION_EXCLUDE: 008_plugin_infrastructure.sql,048_create_event_bus_tables.sql,049_create_bpmn_workflow_tables.sql,042a_core_model_views.sql,20250924140000_create_gantt_tables.ts,20250925_create_view_tables.sql,zzzz20260114110000_create_user_orgs_table.ts
         run: |
           pnpm -F @metasheet/core-backend db:list || true
           pnpm -F @metasheet/core-backend db:migrate

@@ -4,12 +4,33 @@
 
 This document tracks database migrations that are currently excluded from automated replay testing. These migrations require manual review and fixing before they can be re-enabled.
 
-**Current Exclude Count**: 11 files
+**Current Exclude Count**: 7 files (union across occurrences)
 
-**Default Exclude in CI**: `008_plugin_infrastructure.sql, 048_create_event_bus_tables.sql, 049_create_bpmn_workflow_tables.sql, 042a_core_model_views.sql, 20250924120000_create_views_view_states.ts, 20250924140000_create_gantt_tables.ts, 20250925_create_view_tables.sql, 20251117000001_add_snapshot_labels.ts, 20251117000002_create_protection_rules.ts, 20251201000001_create_change_management_tables.ts, zzzz20260114110000_create_user_orgs_table.ts`
+**Default Exclude in CI**: `008_plugin_infrastructure.sql, 048_create_event_bus_tables.sql, 049_create_bpmn_workflow_tables.sql, 042a_core_model_views.sql, 20250924140000_create_gantt_tables.ts, 20250925_create_view_tables.sql, zzzz20260114110000_create_user_orgs_table.ts`
 
-**Last Updated**: 2026-05-12 (T8 docs-only pass 2026-07-12 added the cross-list context below without
-changing any exclude value)
+**Last Updated**: 2026-07-13 (#4162 follow-up — see the re-enable section below; T8 docs-only pass
+2026-07-12 added the cross-list context without changing any exclude value)
+
+---
+
+## #4162 follow-up (2026-07-13): 4 items RE-ENABLED across all five workflow lists
+
+`20250924120000_create_views_view_states.ts`, `20251117000001_add_snapshot_labels.ts`,
+`20251117000002_create_protection_rules.ts`, and `20251201000001_create_change_management_tables.ts`
+were removed from **every** `MIGRATION_EXCLUDE` occurrence at once (plugin-tests.yml ×2,
+observability-e2e.yml, observability-strict.yml, safety-guard-e2e.yml, migration-replay.yml ×2) —
+deliberately all-lists-at-once, to avoid recreating the #3627→#3632 single-file-sync drift this doc
+records for `20250925_create_view_tables.sql`.
+
+Why: `snapshot-protection.test.ts` (the GHSA-h8mf "Snapshot Protection System E2E") needs
+`snapshots.tags`, `protection_rules`, and the change-management tables — and `SnapshotService` also
+queries `views` / `view_states` — so a CI test-DB without these migrations cannot run that suite at
+all (it failed with `column "tags" of relation "snapshots" does not exist` when first wired in
+PR #4218). The old per-item exclusion reasons were re-tested and found stale — the same class of
+staleness as the `20250925` row below. Proof carried by the re-enable PR: fresh-DB full migrate,
+second-pass replay (idempotency), upgrade path (old-list DB → new-list migrate), the 5 target
+tables/columns present, `snapshot-protection.test.ts` 21/21, and Node 18.x/20.x real-DB CI jobs
+green with the new lists.
 
 ---
 
@@ -40,13 +61,14 @@ guessed):
 
 | Item | Present in | Absent from | Why |
 |---|---|---|---|
-| `20250925_create_view_tables.sql` | plugin-tests.yml (both jobs), observability-strict/e2e.yml, safety-guard-e2e.yml | migration-replay.yml | The owner_id FK bug this item guards against was fixed by #3627; migration-replay.yml dropped the exclusion in #3632 (verified passing). The other 4 occurrences were never re-verified/updated to match — **possibly stale**, not resolved here. Re-enabling for the full view-table cluster (so `snapshot-protection.test.ts` can run in CI) is gated planning work: **#4162**. |
+| `20250925_create_view_tables.sql` | plugin-tests.yml (both jobs), observability-strict/e2e.yml, safety-guard-e2e.yml | migration-replay.yml | The owner_id FK bug this item guards against was fixed by #3627; migration-replay.yml dropped the exclusion in #3632 (verified passing). The other 4 occurrences were never re-verified/updated to match — **possibly stale**, not resolved here (still open for `20250925` specifically). The snapshot-protection-blocking part of #4162 was executed 2026-07-13 (see the re-enable section above); `20250925` itself remains excluded outside migration-replay.yml. |
 | `zzzz20260114110000_create_user_orgs_table.ts` | observability-strict/e2e.yml, safety-guard-e2e.yml, migration-replay.yml | plugin-tests.yml (both jobs) | Removed from plugin-tests.yml's `test` job in commit `b1fc1e19d1` ("ci(attendance): run integration gate against postgres") because attendance auto-absence needs the `user_orgs` table applied in that job. The **same commit** also removed it from the `after-sales-integration` job in the same file, which does not obviously touch attendance/user_orgs — that second removal may be an unverified side-effect of a file-wide edit rather than a deliberate per-job decision. Flagged, not resolved here. |
 
 **Known asymmetry this doc does not close**: production and on-prem `db:migrate` runs use **no**
 `MIGRATION_EXCLUDE` at all — every migration listed above runs in a real deploy. Only CI's per-PR
-gate trims the list, which means the view-table/gantt/snapshot/protection-rule/change-management
-cluster has never had a per-PR green CI run of its `up()` bodies. See #4162.
+gate trims the list. **Since the 2026-07-13 #4162 follow-up, the views/view_states + snapshot/
+protection-rule/change-management migrations DO get per-PR green CI runs**; the asymmetry now
+covers only the still-excluded remainder (008/048/049, 042a, gantt, 20250925).
 
 **Guard**: `scripts/ci/validate-migration-exclude.sh` cross-checks all of the above for
 undocumented drift (warn-only; see that script's header for what it covers and does not cover).
