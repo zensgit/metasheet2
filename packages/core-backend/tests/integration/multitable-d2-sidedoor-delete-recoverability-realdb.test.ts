@@ -732,17 +732,55 @@ describeIfDatabase('D-2 — side-door delete recoverability (plugin + automation
     expect(await edgeAlive(F, N, R)).toBe(true)
   })
 
+  /**
+   * Block until a backend is genuinely WAITING on the `meta_records` row lock held by THIS test's
+   * holder connection — the deterministic proof that the automation executor's own `FOR UPDATE`
+   * (automation-executor.ts:2292-2296) is parked behind ours, NOT a timer. Correlated to the holder's
+   * OWN backend pid via `pg_blocking_pids(pid)` — the same technique as
+   * `approval-card-delivery-wrapper.db.test.ts`'s `waitUntilBlockedOnInstanceLock` — so an unrelated
+   * lock-waiter elsewhere in this shared integration database (many `describeIfDatabase` files share ONE
+   * Postgres) can never satisfy the probe. Throws (never silently returns) if it never blocks, so the
+   * interleaving golden can never degrade into the sequential case (a vacuous green).
+   */
+  async function waitUntilBlockedOnRecordLock(blockerPid: number, timeoutMs = 5000): Promise<void> {
+    const deadline = Date.now() + timeoutMs
+    while (Date.now() < deadline) {
+      const r = await q(
+        `SELECT COUNT(*)::int AS c FROM pg_stat_activity
+          WHERE datname = current_database()
+            AND wait_event_type = 'Lock'
+            AND $1 = ANY(pg_blocking_pids(pid))
+            AND query ILIKE '%meta_records%'
+            AND query ILIKE '%for update%'`,
+        [blockerPid],
+      )
+      if ((r.rows[0] as { c: number }).c >= 1) return
+      await new Promise((resolve) => setTimeout(resolve, 25))
+    }
+    throw new Error('automation delete_record never blocked on the meta_records row lock HELD BY THIS TEST — interleaving did not occur')
+  }
+
   // ── G17 — automation lock under REAL concurrency (source unchanged; pin the property) ─────────────
   /**
    * The automation lane's lock handling is ALREADY correct — its `FOR UPDATE` selects `locked`/`locked_by`
    * and re-verifies via `ensureRecordNotLocked` on that same result, so it has no TOCTOU window (this is
    * exactly the shape the plugin lane was missing, per the owner's P1). No source change was made here.
-   * But "correct today" is not "pinned", so this golden pins it under REAL concurrency:
+   * But "correct today" is not "pinned", so this golden pins it under REAL concurrency — with EXPLICIT
+   * barriers instead of fixed sleeps, so the race is deterministic (no false-green on slow CI, no flake):
    *
-   * a second connection holds the row lock (`SELECT … FOR UPDATE`), sets `locked = true`, and commits only
-   * AFTER the executor has already blocked on the same row. The executor therefore acquires the row lock
-   * and must re-read the FRESHLY COMMITTED lock state and refuse. Non-vacuity: delete the automation
-   * lane's own `ensureRecordNotLocked` call ⇒ this goes red (the locked record is destroyed).
+   * barrier (a) "the lock is actually held": Connection A is a DEDICATED client (not the opaque
+   * `poolManager.get().transaction()` wrapper), so every step below is a real awaited round-trip on THIS
+   * one connection — by the time the UPDATE resolves, the row lock is PROVABLY held (still uncommitted).
+   * No timer needed for this half; sequential await on one connection already IS the barrier.
+   *
+   * barrier (b) "the deleter has entered its FOR UPDATE": `waitUntilBlockedOnRecordLock` polls
+   * `pg_stat_activity`, correlated to A's own backend pid via `pg_blocking_pids`, until Connection B (the
+   * executor) is genuinely parked behind A's lock.
+   *
+   * Only once BOTH barriers are proven does A commit — B then unblocks and must re-read the FRESHLY
+   * COMMITTED lock state and refuse. Non-vacuity / positive control: deleting the automation lane's own
+   * `ensureRecordNotLocked` re-check (automation-executor.ts:2321-2323) makes this go RED (the locked
+   * record is destroyed) — see the task report for both runs.
    */
   test('G17 [automation] lock under real concurrency: a lock committed WHILE the executor blocks on the row still refuses the delete', async () => {
     process.env[SIDE_DOOR_FLAG] = 'true'
@@ -750,24 +788,30 @@ describeIfDatabase('D-2 — side-door delete recoverability (plugin + automation
     const { F, R, N } = await fixture('g17')
     const locker = `u_locker_a_${TS}`
 
-    let release: () => void = () => {}
-    const held = new Promise<void>((resolve) => { release = resolve })
+    const hold = await poolManager.get().getInternalPool().connect()
+    let step: { status?: string; error?: string } = {}
+    try {
+      // Connection A: grab the row lock, mark it locked, and HOLD the transaction open.
+      await hold.query('BEGIN')
+      await hold.query('SELECT id FROM meta_records WHERE id = $1 FOR UPDATE', [R])
+      await hold.query('UPDATE meta_records SET locked = true, locked_by = $2 WHERE id = $1', [R, locker])
+      // Barrier (a) satisfied here — see comment above.
+      const holdPid = Number((await hold.query('SELECT pg_backend_pid() AS pid')).rows[0]!.pid)
 
-    // Connection A: grab the row lock, mark it locked, and HOLD the transaction open.
-    const holder = poolManager.get().transaction(async ({ query }) => {
-      await query('SELECT id FROM meta_records WHERE id = $1 FOR UPDATE', [R])
-      await query('UPDATE meta_records SET locked = true, locked_by = $2 WHERE id = $1', [R, locker])
-      await held // keep the row locked + the change uncommitted
-    })
-    await new Promise((r) => setTimeout(r, 150)) // let A actually take the row lock
+      // Connection B (the executor): its own `FOR UPDATE` now BLOCKS on A's row lock.
+      const running = automationDelete(R)
 
-    // Connection B (the executor): its own `FOR UPDATE` now BLOCKS on A's row lock.
-    const running = automationDelete(R)
-    await new Promise((r) => setTimeout(r, 150))
+      // Barrier (b): block until B is deterministically confirmed parked behind A's lock.
+      await waitUntilBlockedOnRecordLock(holdPid)
 
-    release() // A commits ⇒ B unblocks and re-reads the row: locked = true
-    await holder
-    const step = await running
+      await hold.query('COMMIT') // A commits ⇒ B unblocks and re-reads the row: locked = true
+      step = await running
+    } catch (err) {
+      await hold.query('ROLLBACK').catch(() => {})
+      throw err
+    } finally {
+      hold.release()
+    }
 
     expect(step.status).toBe('failed')
     expect(step.error).toMatch(/locked/i)
