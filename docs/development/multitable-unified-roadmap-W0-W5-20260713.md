@@ -114,3 +114,28 @@ W0 之所以排第一,是因为**上面每一层都建立在「历史可信、�
 - ~~「倾向待确认」~~ → §6 现在记录的是 owner 裁决本身,不再是我的读法。
 - 不主张改动了 Base/Sheet/recordId 契约——恰相反,§3 把不重命名钉为不变量。
 - 不主张 flag 会被打开——W5 逐档、独立回滚,永不一键全开。
+
+---
+
+## §9 owner 计划 v2(2026-07-13 晚,逐字存档)— 各波 PR 量级与内容细化
+
+> owner 在 G-1..G-10 全裁后给出的细化计划。**波次标签以本节为准**(v2 将原 W2「记录工作区」称为「业务应用化」、原 W3 称为「业务应用化扩展」——内容映射一致,命名以 owner 最新表述为准;§1 总表的旧标签保留为历史)。
+
+> **W0 可信数据底座**:最高优先,约 **7–10 PR**。HISTORY_INCOMPLETE 预检先行,execute 零写入;随后按 5 个独立 slice 补齐 8 类无 revision 写入口;最后才上 revision-disposition 守卫。还要把 CI lane 清单补完整,避免「被触发但不跑 / skip-green」。这是现在唯一不能拖的底座工程。
+>
+> **W1 飞书级工作台**:约 **5–8 PR**。已有 UI foundation、MtButton/MtPopover/MtMenu/MtLink、大量按钮迁移、CA token 锁。下一步**不是继续零散换按钮**,而是 P2-2a/b/c:把水平 sheet/view tab 升级为左侧「工作区 → 数据表 → 视图」树;同时落展示层术语词典。后端/API 仍叫 Base/Sheet/recordId,普通 UI 显示「工作区 / 数据表 / 视图 / 记录」。这一层决定用户第一眼是否觉得「这是一个正经多维表工作台」。
+>
+> **W2 业务应用化**:约 **6–10 PR**。重点是**统一右侧记录检查器**:详情、评论、动态、审批、历史、权限、恢复入口合一。还缺 PIT Revert UI、history-audit-grant 管理 UI,以及危险动作的预览/确认体验。飞书感不是按钮漂亮,而是用户围绕「一条记录」能闭环工作,不必在表格、历史、审批、评论之间跳来跳去。
+>
+> **W3 业务应用化扩展**:约 **6–10 PR**。包括搭建模式 / 使用模式、角色化首页、仪表盘非图表 widgets、自动化整次重试 UI、移动端记录详情、以及 **cross-base relational completion 的后续 runtime**。对标飞书,这里是「从数据表变成应用」的核心;对标钉钉,这里更接近审批、表单、通知、组织协同的业务壳。
+>
+> **W4 受治理 AI**:约 **6–8 PR + 启用输入**。AI 能力不是空白,已有 readiness、ledger、S1/S2、bulk-fill、输出不可信隔离。缺的是 S3 陈旧度血缘、S4 成本可见性、S5 normalize、**L0.5 租户级 live gate/tenant quota**、以及右侧 AI 工作区。**没有 L0.5 前,AI 只能按部署/用户放量,不能承诺单租户隔离。**
+>
+> **W5 分档启用**:约 **5–7 PR + 运维验收**。T9-W、PIT Reset/Undelete、permission-revert 等很多能力是 default-off,不是没开发。这里的开发量主要是 flag-on smoke、TOCTOU 并发门、监控、runbook、回滚演练。**不要「一键全开」,这条原则继续保持。**
+
+### §9.1 审阅注记(coordinator,2026-07-13)——采纳,四点钉子
+
+1. **量级核验**:W0 = §0.6(1)+ 五刀(5)+ 守卫(1)+ CI 残项(comment-inbox-view 隔离 / export-sheet-client Node24,1–2)≈ 8–9,落在 7–10 内 ✅。其余各波按既有锁/audit 的 buildable 清单折算均在区间内。合计约 35–53 PR。
+2. **W3 的 cross-base 后续 runtime 此前是明确门禁项**(owner 早前:「C 簇路 2/3 不建议在没明确 env/cap 或 RFC 口径前自动开」)。本节将其读作**「排期到 W3;届时仍须按其三把锁各自的解锁梯逐格核验」——排期≠解锁**。若 owner 意图是提前解锁,须另一句明示。
+3. **TOCTOU 并发门**(W5)沿用既有铁律:顺序论证对竞态无效,必须**构造**并发(见 feedback:TOCTOU 必须构造并发)。
+4. **计划外两项防丢**:OD-4 推迟的 **link-edge history 独立锁**(建议 W2 检查器触及 link 历史面时评估);平行 session 的 **R13-B(#4225 T-state 完备)/ R13-C(#4224 retention↔Reset 共存)两把 PROPOSED 锁**(分别贴 W0 尾 / W5,等 owner 各自 ratify)。
