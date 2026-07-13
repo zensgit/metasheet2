@@ -101,6 +101,43 @@ for (const { label, path } of TEMPLATES) {
   })
 }
 
+// The three switches that are DANGEROUS if a template ships them turned ON: the deploy would
+// enable mass-deprovision / re-infer every primary department / start the Stream client on the
+// next redeploy. Presence alone is not enough for these — a live `KEY=true` in a template is a
+// footgun. If the key is present as a LIVE (non-commented) assignment, it MUST be an off value.
+// (Numeric defaults like MAX_BATCH=25 are intentionally NOT pinned to the code value here: the
+// code defaults are computed IIFE/Math expressions, not extractable literals, so a source-vs-
+// template numeric equality check would be brittle. Numeric-value drift is covered by the
+// DT-CLOSE-04 switch-ruling ledger + review, not this contract — this test locks the one class
+// that is both cheap to check and genuinely dangerous: a dangerous switch shipped ON.)
+const MUST_BE_OFF_IF_LIVE = [
+  'DIRECTORY_DEPROVISION_ENABLED',
+  'DIRECTORY_PRIMARY_DEPT_FROM_ORDER',
+  'DINGTALK_INTERACTIVE_CARD_STREAM_ENABLED',
+]
+const OFF_VALUES = new Set(['false', '0', 'no', 'off', ''])
+
+for (const { label, path } of TEMPLATES) {
+  test(`${label} template never ships a dangerous closeout switch turned ON`, () => {
+    const lines = readFileSync(path, 'utf8').split('\n')
+    for (const key of MUST_BE_OFF_IF_LIVE) {
+      // A LIVE assignment = the line is NOT commented out.
+      const liveRe = new RegExp(`^\\s*${key}=(.*)$`)
+      for (const line of lines) {
+        const m = line.match(liveRe)
+        if (!m) continue
+        const value = m[1].trim().toLowerCase()
+        assert.ok(
+          OFF_VALUES.has(value),
+          `${key} is shipped LIVE as '${m[1].trim()}' in ${path} — this switch must stay OFF ` +
+            'by default (a deploy applying this template would enable a dangerous behavior). ' +
+            'Ship it commented-out or =false.',
+        )
+      }
+    }
+  })
+}
+
 test('production and staging templates both carry the closeout switches header', () => {
   for (const { path } of TEMPLATES) {
     const text = readFileSync(path, 'utf8')
