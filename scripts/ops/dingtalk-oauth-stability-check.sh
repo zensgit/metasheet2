@@ -8,14 +8,45 @@ SSH_KEY="${SSH_KEY:-${HOME}/.ssh/metasheet2_deploy}"
 JSON_OUTPUT="${JSON_OUTPUT:-false}"
 LOG_WINDOW="${LOG_WINDOW:-24h}"
 MAX_ROOT_USE_PERCENT="${MAX_ROOT_USE_PERCENT:-95}"
+# DT-CLOSE-01: /metrics/prom now requires METRICS_SCRAPE_TOKEN (metrics.ts createMetricsAuthMiddleware),
+# so an unauthenticated scrape 401s and the whole OAuth-stability recording goes blind. Resolve the
+# token on the deploy host itself (same source of truth as scripts/ops/resolve-metrics-scrape-token.sh:
+# the backend container's runtime env) and attach it as the x-metrics-token header IN THE SAME remote
+# shell — the secret never transits the CI runner, this script's env, or a runner-side process arg list.
+# Falls back to an unauthenticated scrape only when the backend has no token configured (auth disabled).
+DEPLOY_PATH="${DEPLOY_PATH:-metasheet2}"
+DEPLOY_COMPOSE_FILE="${DEPLOY_COMPOSE_FILE:-docker-compose.app.yml}"
 
 ssh_cmd() {
   ssh -i "${SSH_KEY}" -o BatchMode=yes -o StrictHostKeyChecking=no "${SSH_USER_HOST}" "$@"
 }
 
+# Scrape a token-gated endpoint on the deploy host. The token is read from the backend container's
+# runtime env on the remote and used within the same remote shell (never printed, never returned to
+# the runner). Args: <url>. Any remaining args after the url are appended to curl verbatim.
+remote_authed_curl() {
+  local url="$1"; shift || true
+  ssh_cmd "DEPLOY_PATH=$(printf '%q' "${DEPLOY_PATH}") DEPLOY_COMPOSE_FILE=$(printf '%q' "${DEPLOY_COMPOSE_FILE}") URL=$(printf '%q' "${url}") bash -s" <<'REMOTE'
+set -euo pipefail
+if [ "${DEPLOY_PATH}" != "${DEPLOY_PATH#/}" ]; then repo="${DEPLOY_PATH}"; else repo="${HOME}/${DEPLOY_PATH}"; fi
+compose=(docker compose)
+docker compose version >/dev/null 2>&1 || compose=(docker-compose)
+token=""
+if [ -d "${repo}" ]; then
+  token="$(cd "${repo}" && "${compose[@]}" -f "${DEPLOY_COMPOSE_FILE}" exec -T backend sh -lc 'printf "%s" "${METRICS_SCRAPE_TOKEN:-}"' </dev/null 2>/dev/null || true)"
+fi
+if [ -n "${token}" ]; then
+  curl -fsS -H "x-metrics-token: ${token}" "${URL}"
+else
+  # No token configured on the backend => metrics auth is disabled; an unauthenticated scrape is correct.
+  curl -fsS "${URL}"
+fi
+REMOTE
+}
+
 WEBHOOK_STATUS="$(bash "${ROOT_DIR}/scripts/ops/set-dingtalk-onprem-alertmanager-webhook-config.sh" --print-status)"
 HEALTH_JSON="$(ssh_cmd "curl -fsS http://127.0.0.1:8900/health")"
-METRICS_TEXT="$(ssh_cmd "curl -fsS http://127.0.0.1:8900/metrics/prom")"
+METRICS_TEXT="$(remote_authed_curl "http://127.0.0.1:8900/metrics/prom")"
 ALERTMANAGER_STATUS_JSON="$(ssh_cmd "curl -fsS http://127.0.0.1:9093/api/v2/status")"
 ALERTS_JSON="$(ssh_cmd "curl -fsS http://127.0.0.1:9093/api/v2/alerts")"
 ALERTMANAGER_ERROR_COUNT="$(ssh_cmd "docker logs --since ${LOG_WINDOW} metasheet-alertmanager 2>&1 | grep -E 'Notify for alerts failed|no_text' | wc -l | tr -d ' '")"
