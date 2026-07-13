@@ -92,9 +92,11 @@ O-2 上线              ──── flag-off 基线 → 分级 flag-on → 证�
 | R12-C #4199 | Opus gate APPROVE-with-hardening 0P1/0P2；19-flag 源码派生完整性测试 mutation-proven；接 required CI；MERGED 09:09Z |
 | R13-A 缺口 8 路径 | 独立审计 37 站点、8 UNCAPTURED 确认；link-branch + CREATE-reset 两纠错 primary-source 证实 |
 | R13-A 锁 | #4187 RATIFIED §0.5（OD-1..6）；audit synthesis `/tmp/r13-revision-disposition-audit-20260713.md` |
-| R13-A lanes A/B/C | 🔄 进行中 — 每 lane 待 Opus gate 验：真实入口/同事务/完整 snapshot/PIT 正确/失败回滚/突变红 |
-| R13-A OD-6 guard | ⬜ 待建（矩阵 22/15） |
-| R13-B/C · R14 · O-2 | ⬜/🔒 见上 |
+| R13-A lanes A/B/C | ✅ 实现完 + **首手验**（Draft，待 owner GO）：**A #4219**(14/14; CREATE-rollback 原子 + OD-4 真 revert link 一致 + G4 merge-trap[我补,mutation-proven])· **B #4216**(10/10; A2 PIT-lie 闭 + G4 merge-trap[我补,mutation-proven])· **C #4220**(12/12; 3 站点原子[`withTransaction` fallback 穿 `queryFn`,button/AutomationService 两构造皆原子], G4 genuine)。三者：source-by-surface + actor-or-null + 完整 snapshot + mutation-kill 承重 + 两点 CI。⚠️ **Opus gates 两条 stall on infra**(600s watchdog/长真库跑)：**B gate 完成=CHANGES-REQUESTED**,抓出 G4 未钉(单字段 record 令 `snapshot:patch` 假绿)→已修;A/C gate stall→G4+原子性**我首手复核**(snapshot→patch mutation 恰红新 golden;fallback 源读)。**非完整对抗审——owner 可要求 scoped 重 gate。** OD-3 flag: C same-base writeback actor=approval actor `chainActorId` 待 owner 确认 |
+| R13-A OD-6 guard | ⬜ 待建（矩阵 22/15），**stacks on 3 lanes 落地后** |
+| **R13-B** T-state 读完整性 | ✅ **设计锁 #4225**(PROPOSED)：缺口=PIT view 丢弃 T 后被删记录(`:8314` 只喂 liveIds);读面 decision-independent,写面批量恢复耦合 R14。OD-B1..B3 |
+| **R13-C** retention+reset/async | ✅ **设计锁 #4224**(PROPOSED)：一刀切 409→逐 T reconstructability gate;>5000 异步 job;基准方法学(真跑=ratify 前置)。OD-C1..C4 |
+| R14 · O-2 | 🔒 owner 决策 / owner-ops（见 §5/§6） |
 
 ## 9. 收官口径（如实，不掩盖未完成代码）
 R12 基础工程收口**已落**（#4197/#4199 MERGED）。**revision 链尚未补齐**（R13-A 3 lane 进行中 + OD-6 guard 未建）——在此之前，PIT/History/Reset 在 8 条用户数据路径上**仍基于错误历史**，且 Reset 有静默数据销毁向量。**因此现在既不能宣称「Time Machine 完成」，也不能宣称「媲美飞书」**。诚实终点见 §主线定位。**#4186 最后重写并合，作唯一收口索引；本 MD 为当前进度索引，代码 + canonical 文档为语义权威。**
