@@ -6527,27 +6527,59 @@ async function recreateFieldFromConfig(query: TxnQuery, opts: {
     // Values: only into records that do NOT already carry this key (never overwrite a value written after
     // this recreate — the recreate above just happened in THIS same transaction, so the only way a record
     // could already have the key is a value legitimately written since — this WHERE clause is the guard).
-    // OD-6 owner ruling (design-lock §0.5 row OD-6, 2026-07-13): this site MUST WRITE REVISION — the audit
-    // had flagged it debatable-EXEMPT (Bucket D), owner overrode to MUST-WRITE. NOT YET IMPLEMENTED: this
-    // UPDATE rehydrates real user cell values from tombstones (`data = data || jsonb_build_object(...)`)
-    // but bumps no `version` and calls no `recordRecordRevision` — the exact fingerprint of the bug class
-    // this guard exists to catch. Out of scope for D-1c's five slices (A1-A8 — this is a field-op, not one
-    // of the eight); tracked as an explicit, named, non-silent gap, NOT a silent exemption — see
-    // KNOWN_REVISION_GAPS in multitable-revision-disposition-guard.guard.test.ts, pending its own rung.
-    // lock-exempt: field-undelete schema op — rehydrates the recreated field's key sheet-wide (mirror of the field-delete drop at ~6116); not a per-record user edit, and NOT(data?key) never clobbers (lock disposition only — see revision-pending below for the SEPARATE, still-open revision disposition).
-    // revision-pending: OD-6 owner-ruled MUST-WRITE, not yet implemented — tracked in KNOWN_REVISION_GAPS.
-    await query(
+    // OD-6 owner ruling (design-lock §0.5 row OD-6, 2026-07-13): this site is MUST-WRITE — the audit had
+    // flagged it debatable-EXEMPT (Bucket D), owner overrode to MUST-WRITE, because it rehydrates real user
+    // cell values from tombstones, the exact fingerprint of the bug class this guard exists to catch. The
+    // UPDATE below bumps `version` and RETURNs the post-write row so a `recordRecordRevision` can be
+    // emitted AT THE NEW version, in this SAME transaction, for every rehydrated row — the W0-1
+    // generation-aware contiguity precheck (every version in [genStart..liveVersion] has EXACTLY ONE
+    // occupant) requires this: bumping the version WITHOUT emitting a revision would leave a hole, and
+    // emitting a revision AT THE OLD (pre-bump) version would create a duplicate occupant. Zero rows
+    // affected (record hard-deleted concurrently, between the tombstone capture and this undelete) emits
+    // NOTHING — a revision with no matching data write is an FK-less ghost (the D-1c slice ②/③ attack this
+    // codebase already hardened against). `source: 'restore'` (not `restoredFromVersion`) mirrors the
+    // OTHER non-record-version-restore `source='restore'` emitters (PIT-resurrect, PIT-reset, the lossy-
+    // retype revert's `applyLossyRetypeCellRewrite` above) — `restoredFromVersion` stays reserved for the
+    // three record-version restore routes per `RecordRevisionInput`'s own doc comment.
+    // lock-exempt: field-undelete schema op — rehydrates the recreated field's key sheet-wide (mirror of the field-delete drop at ~6116); not a per-record user edit, and NOT(data?key) never clobbers.
+    // revision-emitted: field-undelete rehydration — recordRecordRevision (one per rehydrated record) below, same txn.
+    const rehydrated = (await query(
       `UPDATE meta_records m
-       SET data = data || jsonb_build_object($3::text, t.value)
+       SET data = data || jsonb_build_object($3::text, t.value),
+           version = m.version + 1,
+           updated_at = now()
        FROM meta_field_value_tombstones t
        WHERE m.id = t.record_id
          AND m.sheet_id = $2
          AND t.config_revision_id = $1
          AND t.field_id = $3
          AND t.reason = 'field_delete'
-         AND NOT (m.data ? $3)`,
+         AND NOT (m.data ? $3)
+       RETURNING m.id, m.version, m.data, t.value AS rehydrated_value`,
       [deleteRevisionId, sheetId, fieldId],
-    )
+    )) as any
+    const rehydratedRows = rehydrated.rows as Array<{ id: unknown; version: unknown; data: unknown; rehydrated_value: unknown }>
+    if (rehydratedRows.length > 0) {
+      // One shared batchId across every record THIS field-undelete rehydrates (LOCK-12 — one user action =
+      // one batch). Deliberately its OWN randomUUID, distinct from `configBatchId` above: that one groups
+      // the field-order-shift + field-create CONFIG revisions (a different history channel) — reusing it
+      // here would cross-wire the two channels' batch grouping.
+      const recordBatchId = randomUUID()
+      for (const row of rehydratedRows) {
+        await recordRecordRevision(query, {
+          sheetId,
+          recordId: String(row.id),
+          version: Number(row.version) || 0,
+          action: 'update',
+          source: 'restore',
+          actorId,
+          changedFieldIds: [fieldId],
+          patch: { [fieldId]: row.rehydrated_value as unknown },
+          snapshot: normalizeJson(row.data),
+          batchId: recordBatchId,
+        })
+      }
+    }
     // Link edges: only between two records that are BOTH currently alive (design-lock §4 R1).
     // Idempotence: meta_links has no unique on (field_id, record_id, foreign_record_id) (PK is the
     // random `id` only), so a repeat rehydration would silently duplicate edges. Guard with NOT
