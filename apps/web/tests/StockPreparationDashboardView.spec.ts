@@ -343,7 +343,7 @@ describe('StockPreparationDashboardView', () => {
     expect(root.querySelector('[data-testid="stock-prep-dashboard-detail-retry"]')).toBeNull()
   })
 
-  it('H4-1: both retry buttons are bilingual + carry an accessible name (aria-label)', async () => {
+  it('H4-1: the detail retry button is bilingual + carries an accessible name (aria-label)', async () => {
     h.locale = 'en'
     mockDetailUnavailable()
     const root = mountView({ projectId: 'proj-alpha' })
@@ -351,11 +351,14 @@ describe('StockPreparationDashboardView', () => {
     const detailRetry = root.querySelector('[data-testid="stock-prep-dashboard-detail-retry"]') as HTMLButtonElement
     expect(detailRetry.textContent?.trim()).toBe('Retry')
     expect(detailRetry.getAttribute('aria-label')).toBe('Retry loading stage detail')
-    // overview retry (separate mount, error state)
+  })
+
+  it('H4-1: the overview retry button is bilingual + carries an accessible name (aria-label)', async () => {
+    h.locale = 'en'
     h.getOverview.mockRejectedValue(new Error('503'))
-    const root2 = mountView()
+    const root = mountView()
     await flushUi()
-    const overviewRetry = root2.querySelector('[data-testid="stock-prep-dashboard-retry"]') as HTMLButtonElement
+    const overviewRetry = root.querySelector('[data-testid="stock-prep-dashboard-retry"]') as HTMLButtonElement
     expect(overviewRetry.textContent?.trim()).toBe('Retry')
     expect(overviewRetry.getAttribute('aria-label')).toBe('Retry loading workbench overview')
   })
@@ -386,7 +389,7 @@ describe('StockPreparationDashboardView', () => {
     h.listExceptions.mockImplementation(failFirstA({ rowCount: 0, unresolvedBlockingCount: 0 }))
 
     const projectId = ref<string>('proj-A')
-    app = createApp({ render: () => renderH(StockPreparationDashboardView as Component, { projectId: projectId.value, scope: () => ({}) }) })
+    app = createApp({ render: () => renderH(StockPreparationDashboardView as Component, { projectId: projectId.value, scope: {} }) })
     app.mount(container!)
     await flushUi() // A mount → detail_unavailable
     const retry = container!.querySelector('[data-testid="stock-prep-dashboard-detail-retry"]') as HTMLButtonElement
@@ -446,7 +449,7 @@ describe('StockPreparationDashboardView', () => {
     h.listExceptions.mockResolvedValue({ rowCount: 0, unresolvedBlockingCount: 0 })
 
     const projectId = ref<string>('proj-A')
-    app = createApp({ render: () => renderH(StockPreparationDashboardView as Component, { projectId: projectId.value, scope: () => ({}) }) })
+    app = createApp({ render: () => renderH(StockPreparationDashboardView as Component, { projectId: projectId.value, scope: {} }) })
     app.mount(container!)
     await flushUi() // project A's stage-detail load is in flight (its snapshot-batches read is held)
 
@@ -487,7 +490,7 @@ describe('StockPreparationDashboardView', () => {
     h.listExceptions.mockResolvedValue({ rowCount: 0, unresolvedBlockingCount: 0 })
 
     const projectId = ref<string>('proj-A')
-    app = createApp({ render: () => renderH(StockPreparationDashboardView as Component, { projectId: projectId.value, scope: () => ({}) }) })
+    app = createApp({ render: () => renderH(StockPreparationDashboardView as Component, { projectId: projectId.value, scope: {} }) })
     app.mount(container!)
     await flushUi()            // load#1 (A) in flight — its snapshot-batches read (99) is held
 
@@ -539,7 +542,7 @@ describe('StockPreparationDashboardView', () => {
     h.listExceptions.mockResolvedValue({ rowCount: 0, unresolvedBlockingCount: 0 })
 
     const projectId = ref<string>('proj-A')
-    app = createApp({ render: () => renderH(StockPreparationDashboardView as Component, { projectId: projectId.value, scope: () => ({}) }) })
+    app = createApp({ render: () => renderH(StockPreparationDashboardView as Component, { projectId: projectId.value, scope: {} }) })
     app.mount(container!)
     await flushUi()            // load#1 (A) in flight — its snapshot-batches read is held
 
