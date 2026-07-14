@@ -100,6 +100,12 @@ test('the alert-topology probes are soft (a failure marks deferred via a PARENT-
     'ALERTMANAGER_STATUS_JSON',
     'ALERTS_JSON',
     'WEBHOOK_STATUS',
+    // The three docker-logs match-count probes are held to the same parent-shell if/else shape —
+    // they were the second instance of the subshell-assignment bug (plus wc -l masking the docker
+    // failure entirely; see dingtalk-oauth-stability-log-probe-cmds.sh for that half of the fix).
+    'ALERTMANAGER_ERROR_COUNT',
+    'BRIDGE_NOTIFY_COUNT',
+    'BRIDGE_RESOLVED_COUNT',
   ]) {
     const re = new RegExp(
       `if ${probe}="\\$\\([^\\n]*"; then\\n\\s*:\\n\\s*else\\n\\s*ALERT_TOPOLOGY_DEFERRED="true"\\n\\s*${probe}=`,

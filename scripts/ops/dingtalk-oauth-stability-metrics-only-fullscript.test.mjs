@@ -123,7 +123,12 @@ const WEBHOOK_CONFIG_STUB = `#!/usr/bin/env bash
 # Stub for set-dingtalk-onprem-alertmanager-webhook-config.sh --print-status, controlled per-scenario
 # by STUB_WEBHOOK_CONFIGURED. Mirrors the real script's contract: it exits 0 in BOTH the configured and
 # the reachable-but-unconfigured cases (only a missing/unreadable config *file* is "not configured" —
-# that is still a clean, successful probe, not a probe failure).
+# that is still a clean, successful probe, not a probe failure). STUB_WEBHOOK_FAIL=true simulates the
+# probe itself failing (script error, non-zero exit) — that MUST take the deferred path.
+if [ "\${STUB_WEBHOOK_FAIL:-false}" = "true" ]; then
+  echo "stub: simulated webhook-config probe failure" >&2
+  exit 1
+fi
 if [ "\${1:-}" = "--print-status" ]; then
   if [ "\${STUB_WEBHOOK_CONFIGURED:-false}" = "true" ]; then
     printf '%s\\n' 'configured=true'
@@ -278,6 +283,31 @@ test('state 4: :9093 reachable + webhook configured, but the metasheet-alert-web
     assert.equal(report.bridge.resolvedEventsLastWindow, 0)
     assert.equal(report.oauthMetricsPresent, true)
     assert.equal(report.healthy, true, 'the metrics-only verdict must stay healthy when only the bridge log probe is down')
+  } finally {
+    cleanupSandbox(sandbox)
+  }
+})
+
+test('state 5: the webhook-config probe ITSELF fails (non-zero exit, not configured=false) => deferred, healthy stays true', () => {
+  // Distinct from state 2: there the probe SUCCEEDS and reports configured=false; here the probe
+  // script errors out. The check.sh else-branch must mark deferred (and fall back to
+  // configured=false), never abort under set -e or read as observed.
+  const sandbox = makeSandbox()
+  try {
+    const result = runScript(sandbox, {
+      MOCK_9093_UP: 'true',
+      STUB_WEBHOOK_CONFIGURED: 'true',
+      STUB_WEBHOOK_FAIL: 'true',
+    })
+    const report = parseReport(result)
+    assert.equal(report.webhookConfig.configured, false, 'a failed webhook-config probe must fall back to configured=false')
+    assert.equal(
+      report.alertDeliveryObservability,
+      'deferred',
+      'a crashed webhook-config probe must defer, not read as observed',
+    )
+    assert.equal(report.oauthMetricsPresent, true)
+    assert.equal(report.healthy, true, 'the metrics-only verdict must stay healthy when only the webhook-config probe crashed')
   } finally {
     cleanupSandbox(sandbox)
   }

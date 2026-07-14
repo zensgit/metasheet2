@@ -97,19 +97,25 @@ fi
 # a genuine zero-match read still exits 0 — see that file for the full contract. Combined with the
 # parent-shell if/else here, a probe failure now correctly sets ALERT_TOPOLOGY_DEFERRED instead of
 # being read as "0 events, alert delivery topology fine".
-if ALERTMANAGER_ERROR_COUNT="$(ssh_cmd "$(alertmanager_error_count_cmd)" 2>/dev/null)"; then
+# `set -o pipefail` is bash-only, so the pipeline is run under an EXPLICIT `bash -c` on the remote
+# (parity with remote_authed_curl's `bash -s` above) instead of trusting the remote login shell to be
+# bash. A non-bash login shell would have aborted on `set -o pipefail` (fail-safe → deferred), but
+# forcing bash makes the probe work — not just fail safely — regardless of the login-shell config.
+# `printf '%q'` re-quotes the pipeline as backslash-escaped words (no control chars in these strings,
+# so no $'…' forms), which any POSIX login shell can hand to bash unmangled.
+if ALERTMANAGER_ERROR_COUNT="$(ssh_cmd "bash -c $(printf '%q' "$(alertmanager_error_count_cmd)")" 2>/dev/null)"; then
   :
 else
   ALERT_TOPOLOGY_DEFERRED="true"
   ALERTMANAGER_ERROR_COUNT="0"
 fi
-if BRIDGE_NOTIFY_COUNT="$(ssh_cmd "$(bridge_notify_count_cmd)" 2>/dev/null)"; then
+if BRIDGE_NOTIFY_COUNT="$(ssh_cmd "bash -c $(printf '%q' "$(bridge_notify_count_cmd)")" 2>/dev/null)"; then
   :
 else
   ALERT_TOPOLOGY_DEFERRED="true"
   BRIDGE_NOTIFY_COUNT="0"
 fi
-if BRIDGE_RESOLVED_COUNT="$(ssh_cmd "$(bridge_resolved_count_cmd)" 2>/dev/null)"; then
+if BRIDGE_RESOLVED_COUNT="$(ssh_cmd "bash -c $(printf '%q' "$(bridge_resolved_count_cmd)")" 2>/dev/null)"; then
   :
 else
   ALERT_TOPOLOGY_DEFERRED="true"
