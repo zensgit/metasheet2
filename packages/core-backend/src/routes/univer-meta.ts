@@ -10143,7 +10143,10 @@ export function univerMetaRouter(): Router {
         summary: { visibleRevertCount: reverts.length, visibleUndeleteCount: undeleteCount, keptCreatedAfterTCount: keptCreatedAfterT, conflictCount: driftCount },
         records: reverts.map((r) => ({ recordId: r.recordId, fieldIds: r.diff.map((dd) => dd.fieldId) })),
         undeleteRecordIds: resurrects.map((r) => r.recordId),
-        undeleteSupported: PIT_UNDELETE_ENABLED(), previewIdentity,
+        // W0 step-1: undelete-revert rides INSIDE revert-execute, so it is only actually supported when BOTH the
+        // revert master gate AND the undelete gate are on — reporting PIT_UNDELETE alone would promise an undelete
+        // that revert-execute then refuses with REVERT_DISABLED.
+        undeleteSupported: PIT_UNDELETE_ENABLED() && PIT_REVERT_ENABLED(), previewIdentity,
       } })
     } catch (err) {
       if (isUndefinedTableError(err, 'meta_record_revisions')) return res.status(404).json({ ok: false, error: { code: 'VERSION_NOT_FOUND', message: 'No revision history available' } })

@@ -156,17 +156,38 @@ export const GLOBAL_HISTORY_FLAG_MANIFEST = Object.freeze([
     ],
   },
   {
-    key: 'MULTITABLE_ENABLE_PIT_UNDELETE',
+    key: 'MULTITABLE_ENABLE_PIT_REVERT',
     type: 'boolean',
     activationValue: 'true',
     caseInsensitive: true,
     dependsOn: [],
     conflictsWith: [],
+    danger: 'high',
+    purpose:
+      'W0 step-1 — emergency master gate on the DESTRUCTIVE point-in-time revert-execute (whole-sheet rollback to T; OVERWRITES live data). Gated by PIT_REVERT_ENABLED() (`.trim().toLowerCase() === \'true\'`) as the FIRST statement of revert-execute — before parse/auth/DB — returning 403 REVERT_DISABLED. Read-only revert-preview is intentionally NOT gated. Default OFF until the full W0 integrity work lands: the trustworthiness precheck enumerates LIVE rows only and the reconstructor orders by created_at (= transaction-start via now()), so a mid-history healed gap / a deleted record\'s broken chain / a concurrent version-vs-time inversion can still overwrite with a WRONG T-state.',
+    // source: packages/core-backend/src/routes/univer-meta.ts (PIT_REVERT_ENABLED helper + the gate as revert-execute's first statement)
+    source: 'packages/core-backend/src/routes/univer-meta.ts:10100,10151',
+  },
+  {
+    key: 'MULTITABLE_ENABLE_PIT_UNDELETE',
+    type: 'boolean',
+    activationValue: 'true',
+    caseInsensitive: true,
+    dependsOn: ['MULTITABLE_ENABLE_PIT_REVERT'],
+    conflictsWith: [],
     danger: 'medium',
     purpose:
-      'T8-1 PIT undelete-execute (resurrect face). Gated by `.trim().toLowerCase() === \'true\'` — same case-insensitive family as PIT_RESET. Requires canDeleteRecord (never canEditRecord) at execute plus a typed confirm:\'undelete\'. Inbound links are NOT rebuilt by this flag alone (design-lock L4 A) — see MULTITABLE_ENABLE_RECORD_UNDELETE_INBOUND for that layer.',
-    // source: packages/core-backend/src/routes/univer-meta.ts:10071
+      'T8-1 PIT undelete-execute (resurrect face). Gated by `.trim().toLowerCase() === \'true\'` — same case-insensitive family as PIT_RESET. Requires canDeleteRecord (never canEditRecord) at execute plus a typed confirm:\'undelete\'. Inbound links are NOT rebuilt by this flag alone (design-lock L4 A) — see MULTITABLE_ENABLE_RECORD_UNDELETE_INBOUND for that layer. The undelete face rides INSIDE revert-execute, whose W0 master gate (MULTITABLE_ENABLE_PIT_REVERT) is checked FIRST — so undelete requires BOTH gates.',
+    // source: packages/core-backend/src/routes/univer-meta.ts:10071 (PIT_UNDELETE gate; the PIT_REVERT master gate precedes it at the top of revert-execute)
     source: 'packages/core-backend/src/routes/univer-meta.ts:10071',
+    rules: [
+      {
+        kind: 'requires',
+        id: 'undelete-without-revert-gate',
+        description:
+          "MULTITABLE_ENABLE_PIT_UNDELETE is active but MULTITABLE_ENABLE_PIT_REVERT is not — the undelete face rides inside revert-execute, whose W0 master gate (checked FIRST) returns 403 REVERT_DISABLED before the undelete gate is reached. So undelete has no effect without PIT_REVERT: dead configuration, not a working feature. Enable BOTH to make undelete-revert live.",
+      },
+    ],
   },
   {
     key: 'MULTITABLE_ENABLE_RECORD_UNDELETE_INBOUND',

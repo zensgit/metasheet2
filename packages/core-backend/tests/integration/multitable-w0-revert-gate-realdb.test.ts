@@ -1,12 +1,15 @@
 /**
  * W0 step-1 (emergency stop-loss): the DESTRUCTIVE point-in-time revert-execute is DEFAULT-OFF behind
  * MULTITABLE_ENABLE_PIT_REVERT. This is the NEGATIVE CONTROL — with the flag OFF the route must refuse
- * with 403 REVERT_DISABLED BEFORE any parse / auth / DB read / write, and leave ZERO records / revisions
- * / links written. Positive control: with the flag ON the same call gets PAST the gate (a different,
- * non-REVERT_DISABLED response), proving the gate is load-bearing rather than always-403.
+ * with 403 REVERT_DISABLED BEFORE any parse / auth / DB read / write, leaving the record + revision rows
+ * unchanged. (The gate is the handler's FIRST statement, so nothing downstream runs at all — including
+ * link writes; this test directly checks records + revisions, from which no-op is proven.) Positive
+ * control: with the flag ON the same call gets PAST the gate (a different, non-REVERT_DISABLED response),
+ * proving the gate is load-bearing rather than always-403.
  *
- * This file NEVER leaves the flag enabled — it deletes it in beforeEach so it is immune to a sibling
- * file that set it, and restores nothing global. Runs only with DATABASE_URL.
+ * Env discipline: this file SAVES the incoming MULTITABLE_ENABLE_PIT_REVERT / _PIT_UNDELETE in beforeAll
+ * and RESTORES them in afterAll (never a blind delete), and forces them OFF in beforeEach so the negative
+ * control is immune to a sibling file that set them. Runs only with DATABASE_URL.
  */
 import express, { type Express } from 'express'
 import request from 'supertest'
@@ -24,6 +27,9 @@ const T0 = '2026-01-01T00:00:00.000Z', T2 = '2026-01-03T00:00:00.000Z'
 
 const q = (sql: string, params: unknown[]) => poolManager.get().query(sql, params)
 let app: Express
+let priorRevert: string | undefined
+let priorUndelete: string | undefined
+const restoreEnv = (key: string, prior: string | undefined) => { if (prior === undefined) delete process.env[key]; else process.env[key] = prior }
 const revertExecute = (body: unknown) => request(app).post(`/api/multitable/sheets/${SHEET}/revert-execute`).send(body)
 const countWhere = async (table: string) => Number((await q(`SELECT count(*)::int AS n FROM ${table} WHERE sheet_id = $1`, [SHEET])).rows[0].n)
 
@@ -39,6 +45,8 @@ async function seed(): Promise<void> {
 
 describeIfDatabase('multitable W0 step-1 revert-execute default-off gate (real DB)', () => {
   beforeAll(async () => {
+    priorRevert = process.env.MULTITABLE_ENABLE_PIT_REVERT
+    priorUndelete = process.env.MULTITABLE_ENABLE_PIT_UNDELETE
     app = express()
     app.use(express.json())
     app.use((req, _res, next) => { ;(req as any).user = { id: ACTOR, roles: ['member'], perms: ['multitable:read', 'multitable:write', 'multitable:share'] }; next() })
@@ -55,8 +63,8 @@ describeIfDatabase('multitable W0 step-1 revert-execute default-off gate (real D
     await q('DELETE FROM meta_sheets WHERE id = $1', [SHEET]).catch(() => {})
     await q('DELETE FROM meta_bases WHERE id = $1', [BASE]).catch(() => {})
     await q('DELETE FROM users WHERE id = $1', [ACTOR]).catch(() => {})
-    delete process.env.MULTITABLE_ENABLE_PIT_REVERT
-    delete process.env.MULTITABLE_ENABLE_PIT_UNDELETE
+    restoreEnv('MULTITABLE_ENABLE_PIT_REVERT', priorRevert)
+    restoreEnv('MULTITABLE_ENABLE_PIT_UNDELETE', priorUndelete)
   })
   beforeEach(() => {
     // Immune to a sibling file that set the flag: this negative control ALWAYS runs with the gate OFF.

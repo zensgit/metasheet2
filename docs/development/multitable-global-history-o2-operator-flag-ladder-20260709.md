@@ -66,7 +66,7 @@
 |---|---|---|
 | L1 | staging 开 `TOMBSTONE_CAPTURE_ENABLED='true'` | 删一条被引用记录 → `meta_link_tombstones` 出现 `reason='record_delete'` 组；trash 行带 `delete_revision_id` |
 | L2 | staging 开 `RECORD_UNDELETE_INBOUND='true'` | 回收站恢复该记录 → 响应带 `inbound.replayed≥1`；邻居单元格重新显示该记录；trash 列表出现 `inboundEdgesRecoverable:true` |
-| L3 | staging 开 `ENABLE_PIT_UNDELETE='true'`（若走 PIT 面） | revert-execute confirm:'undelete' → 响应带 `undeleteInbound`；真库金测同形状（P3-2a/b/c） |
+| L3 | staging 开 **两把闸**：`ENABLE_PIT_REVERT='true'` **且** `ENABLE_PIT_UNDELETE='true'`（若走 PIT 面）。**W0 step-1**：undelete-revert 在 revert-execute 内,总闸 `PIT_REVERT` 先判,单开 UNDELETE 无效(preview `undeleteSupported=false`,execute 403 `REVERT_DISABLED`)。 | revert-execute confirm:'undelete' → 响应带 `undeleteInbound`；真库金测同形状（P3-2a/b/c） |
 | **L3.5** | **（D-2，产品语义变更——需 owner 单独确认再上 prod）staging 开 `SIDE_DOOR_DELETE_TRASH_ENABLED='true'`**（前置：L1 已开，否则只有 trash 无捕获） | 用 automation `delete_record` 删一条被引用记录 → 该记录**出现在回收站**、`inboundEdgesRecoverable:true`；restore 后邻居单元格重新显示；plugin-SDK 删除同形状（`deleted_by` 为 NULL）。**并确认可接受**：机器删除自此可被任何有 `canDeleteRecord` 的人恢复，restore 会重放事件（可能再次触发自动化）；超 cap 的机器删除会开始失败（§2.4） |
 | L4 | （可选）staging 开 retention（值=**'1'**）并设 `_DAYS` | 观察 janitor 日志；确认地板：有存活 trash 引用的组不被清（RB10 / D-2 G8 同形状——侧门锚同样受地板保护） |
 | L5 | prod 逐级重复 L1→L3（retention 与 **L3.5/D-2** 是否上 prod 各自独立决定） | 同上 + 观察 cap 拒绝率（若出现 422 / step-failed 频发→调 cap 或审视扇入）+ trash 行数增长（§2.7） |

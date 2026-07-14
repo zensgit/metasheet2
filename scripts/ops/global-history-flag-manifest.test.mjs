@@ -81,8 +81,8 @@ function globalHistoryFlagsInSource() {
 test('completeness (source-derived, non-tautological): manifest covers every Global-History flag read in packages/core-backend/src', () => {
   const sourceGH = globalHistoryFlagsInSource()
   assert.ok(
-    sourceGH.length >= 19,
-    `expected >=19 Global-History flags derived from source, got ${sourceGH.length} — the denylist is too broad or grep broke`,
+    sourceGH.length >= 20,
+    `expected >=20 Global-History flags derived from source, got ${sourceGH.length} — the denylist is too broad or grep broke`,
   )
   const manifestKeys = new Set(GLOBAL_HISTORY_FLAG_KEYS)
   const missing = sourceGH.filter((f) => !manifestKeys.has(f))
@@ -132,6 +132,30 @@ test('R1 positive control: LOSSY off never fires regardless of base', () => {
     violationIds({ MULTITABLE_ENABLE_FIELD_RETYPE_REVERT_LOSSY: 'false', MULTITABLE_ENABLE_FIELD_RETYPE_REVERT: 'false' }).includes(
       'lossy-without-base',
     ),
+    false,
+  )
+})
+
+// ── W0 step-1: PIT undelete rides on the revert master gate ──────────────────────────────────────────
+
+test('W0 undelete-without-revert-gate: PIT_UNDELETE on + PIT_REVERT off fires the named violation (STOP)', () => {
+  const ids = violationIds({ MULTITABLE_ENABLE_PIT_UNDELETE: 'true', MULTITABLE_ENABLE_PIT_REVERT: 'false' })
+  assert.ok(ids.includes('undelete-without-revert-gate'), `expected undelete-without-revert-gate, got ${ids.join(',')}`)
+})
+
+test('W0 undelete-without-revert-gate: PIT_UNDELETE on + PIT_REVERT UNSET also fires (unset is not activated)', () => {
+  const ids = violationIds({ MULTITABLE_ENABLE_PIT_UNDELETE: 'true' })
+  assert.ok(ids.includes('undelete-without-revert-gate'))
+})
+
+test('W0 positive control: PIT_UNDELETE on + PIT_REVERT on does NOT fire (both gates → PASS)', () => {
+  const ids = violationIds({ MULTITABLE_ENABLE_PIT_UNDELETE: 'true', MULTITABLE_ENABLE_PIT_REVERT: 'true' })
+  assert.ok(!ids.includes('undelete-without-revert-gate'), `unexpected violation: ${ids.join(',')}`)
+})
+
+test('W0 positive control: PIT_UNDELETE off never fires regardless of PIT_REVERT', () => {
+  assert.equal(
+    violationIds({ MULTITABLE_ENABLE_PIT_UNDELETE: 'false', MULTITABLE_ENABLE_PIT_REVERT: 'false' }).includes('undelete-without-revert-gate'),
     false,
   )
 })
@@ -239,6 +263,7 @@ test('positive control: a full valid L1->L3.5 ladder rung (exact activation valu
   const flags = {
     MULTITABLE_TOMBSTONE_CAPTURE_ENABLED: 'true', // L1
     MULTITABLE_ENABLE_RECORD_UNDELETE_INBOUND: 'true', // L2
+    MULTITABLE_ENABLE_PIT_REVERT: 'true', // W0 master gate — undelete rides on revert-execute, so both go together
     MULTITABLE_ENABLE_PIT_UNDELETE: 'true', // L3
     MULTITABLE_SIDE_DOOR_DELETE_TRASH_ENABLED: 'true', // L3.5 (D-2), capture already on above
     MULTITABLE_ENABLE_FIELD_RETYPE_REVERT: 'true',
@@ -258,7 +283,7 @@ test('positive control: retention-only rung (L4, no PIT_RESET) has zero violatio
   assert.deepEqual(violations, [])
 })
 
-test('a rung that stacks ALL THREE illegal combinations fires all three named violations at once', () => {
+test('a rung that stacks ALL FOUR illegal combinations fires all four named violations at once', () => {
   const ids = violationIds({
     MULTITABLE_ENABLE_FIELD_RETYPE_REVERT_LOSSY: 'true',
     MULTITABLE_ENABLE_FIELD_RETYPE_REVERT: 'false',
@@ -266,10 +291,11 @@ test('a rung that stacks ALL THREE illegal combinations fires all three named vi
     MULTITABLE_TOMBSTONE_CAPTURE_ENABLED: 'false',
     MULTITABLE_ENABLE_PIT_RESET: 'true',
     MULTITABLE_META_REVISION_RETENTION_ENABLED: '1',
+    MULTITABLE_ENABLE_PIT_UNDELETE: 'true', // PIT_REVERT unset → undelete-without-revert-gate fires
   })
   assert.deepEqual(
     [...ids].sort(),
-    ['lossy-without-base', 'pit-reset-intent-with-retention-on', 'side-door-without-capture'].sort(),
+    ['lossy-without-base', 'pit-reset-intent-with-retention-on', 'side-door-without-capture', 'undelete-without-revert-gate'].sort(),
   )
 })
 
@@ -282,7 +308,7 @@ test('mutation guard: every FlagSpec.rules[] entry is reachable by evaluateFlagR
   const allRuleIds = GLOBAL_HISTORY_FLAG_MANIFEST.flatMap((spec) => (spec.rules || []).map((r) => r.id))
   assert.deepEqual(
     [...allRuleIds].sort(),
-    ['lossy-without-base', 'pit-reset-intent-with-retention-on', 'side-door-without-capture'].sort(),
+    ['lossy-without-base', 'pit-reset-intent-with-retention-on', 'side-door-without-capture', 'undelete-without-revert-gate'].sort(),
     'manifest rule set changed — update this test deliberately if a rule was intentionally added/removed',
   )
 })
