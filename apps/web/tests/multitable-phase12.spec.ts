@@ -105,8 +105,10 @@ describe('print CSS coverage', () => {
     expect(rule).toContain('display: none')
   })
 
-  it('view tab bar hides in print', () => {
-    const rule = '@media print { .meta-tab-bar { display: none !important; } }'
+  it('sheet/view rail hides in print', () => {
+    // Rail print CSS lives in MetaSheetViewRail.vue (post-P2-2a/2b; retired MetaViewTabBar.vue's
+    // .meta-tab-bar rule no longer exists anywhere in the tree).
+    const rule = '@media print { .meta-view-rail { display: none !important; } }'
     expect(rule).toContain('display: none')
   })
 
@@ -123,8 +125,8 @@ describe('print CSS coverage', () => {
     expect(hiddenGridSelectors).toHaveLength(5)
   })
 
-  it('complete print chain: tab-bar + toolbar + workbench chrome + grid interactives', () => {
-    const printComponents = ['MetaViewTabBar', 'MetaToolbar', 'MultitableWorkbench', 'MetaGridTable']
+  it('complete print chain: sheet/view rail + toolbar + workbench chrome + grid interactives', () => {
+    const printComponents = ['MetaSheetViewRail', 'MetaToolbar', 'MultitableWorkbench', 'MetaGridTable']
     expect(printComponents).toHaveLength(4)
   })
 })
