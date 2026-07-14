@@ -111,19 +111,50 @@ const canonicalize = (v: unknown): string => {
 // ==============================================================================================================
 
 export type ChainEventAction = 'create' | 'update' | 'delete'
-/** A revision chain event. `orderKey` is a monotone tiebreaker (created_at epoch, then version, then id) used
- *  ONLY to decide which event is "latest" for the live-row-after-delete check. */
+/** A revision chain event. `orderKey` is the RAW `created_at` epoch-ms (exact in float64 — never packed with
+ *  the version; see `chainOrderAfter`). Rank + version tiebreaks are compared structurally off the event. */
 export interface ChainEvent {
   version: number
   action: ChainEventAction
   orderKey?: number
 }
 /** A legitimate non-data version bump (lock/unlock) recorded out-of-chain in `meta_record_version_markers`.
- *  `orderKey` (created_at epoch, then version) places the marker in its generation, exactly like a ChainEvent. */
+ *  `orderKey` = raw `created_at` epoch-ms; a marker ranks with updates (it happens on a LIVE row). */
 export interface VersionMarker {
   version: number
   kind: 'lock' | 'unlock'
   orderKey?: number
+}
+
+/**
+ * Total chain order = (created_at epoch-ms, version, non-delete-before-delete), compared STRUCTURALLY.
+ *
+ * Why not a packed numeric key: the previous encoding (`epoch*1e6 + version`) silently LOST the version
+ * tiebreak to float64 precision — at 2026 epochs the scaled value is ~1.7e18 where the ULP is ~256, so
+ * same-millisecond events collapsed to one float and the generation boundary was mis-drawn (CI catch:
+ * undelete-pit scenario (g), a same-ms delete + occupying create). Comments asserting "version is a sub-ms
+ * tiebreaker" were an unverified invariant; this comparator is pinned by same-epoch unit goldens instead.
+ *
+ * Within one millisecond, VERSION is the primary tiebreak: same-epoch multi-vintage churn writes ascending
+ * versions (…delete@2, create@3, delete@4… — 4c-3 §7 realdb goldens construct exactly this at one T), so
+ * ordering by version keeps each create with ITS vintage. A static action rank (e.g. "create after delete")
+ * cannot linearize that shape — it would hoist create@3 past delete@4 into the live generation and refuse
+ * out_of_range. The final leg breaks the delete-REUSE tie only: a delete that reuses version k happens
+ * after the content event at k, so at equal (epoch, version) the delete sorts LAST.
+ *
+ * Known fail-closed residue (C2 docket, NOT solved here): a restore/resurrect create@v1 landing in the SAME
+ * millisecond as the delete it follows is version-below the delete and thus sorts before it — the row
+ * refuses (live_row_after_delete_revision), it is never mis-reconstructed. The packed-float ordering refused
+ * that shape too (collapsed keys), so this is no regression; disambiguating same-ms cross-generation order
+ * needs the C2 time anchor.
+ */
+type ChainOrdered = { version: number; action?: ChainEventAction; orderKey?: number }
+const chainOrderAfter = (a: ChainOrdered, b: ChainOrdered): boolean => {
+  const ta = a.orderKey ?? 0
+  const tb = b.orderKey ?? 0
+  if (ta !== tb) return ta > tb
+  if (a.version !== b.version) return a.version > b.version
+  return a.action === 'delete' && b.action !== 'delete'
 }
 
 export type ContiguityResult = { ok: true } | { ok: false; reason: HistoryIntegrityReason }
@@ -163,16 +194,17 @@ export function checkRecordChainContiguity(
   const anyCreateOrUpdate = events.some((e) => e.action !== 'delete')
   if (!anyCreateOrUpdate && markers.length === 0) return { ok: false, reason: 'zero_revision_live_row' }
 
-  // Generation boundary: the LAST delete (by orderKey) terminates the prior generation; the current
-  // generation is everything strictly after it.
-  let lastDeleteOrderKey = Number.NEGATIVE_INFINITY
+  // Generation boundary: the LAST delete (by chain order) terminates the prior generation; the current
+  // generation is everything strictly after it (structural comparator — see chainOrderAfter).
+  let lastDelete: ChainEvent | null = null
   for (const e of events) {
-    if (e.action === 'delete') lastDeleteOrderKey = Math.max(lastDeleteOrderKey, e.orderKey ?? 0)
+    if (e.action === 'delete' && (lastDelete === null || chainOrderAfter(e, lastDelete))) lastDelete = e
   }
-  const inCurrentGen = (orderKey?: number): boolean => (orderKey ?? 0) > lastDeleteOrderKey
+  const boundary = lastDelete
+  const inCurrentGen = (x: ChainOrdered): boolean => boundary === null || chainOrderAfter(x, boundary)
 
-  const currentGenEvents = events.filter((e) => e.action !== 'delete' && inCurrentGen(e.orderKey))
-  const currentGenMarkers = markers.filter((m) => inCurrentGen(m.orderKey))
+  const currentGenEvents = events.filter((e) => e.action !== 'delete' && inCurrentGen(e))
+  const currentGenMarkers = markers.filter((m) => inCurrentGen(m))
 
   // Current generation empty while the row is LIVE ⇒ the latest chain event is a delete (uncaptured
   // resurrection: history claims dead but the row exists).
@@ -206,10 +238,10 @@ export function checkRecordChainContiguity(
 // ==============================================================================================================
 
 const toNumber = (v: unknown): number => (typeof v === 'number' && Number.isFinite(v) ? v : Number(v) || 0)
-const orderKeyOf = (createdAt: unknown, version: number): number => {
+/** Raw created_at epoch-ms — exact in float64. NEVER pack version into this (see chainOrderAfter). */
+const epochOf = (createdAt: unknown): number => {
   const t = createdAt instanceof Date ? createdAt.getTime() : Date.parse(String(createdAt ?? ''))
-  // epoch-ms dominates; version is a sub-ms tiebreaker (max ~1e6 versions before it would collide a ms).
-  return (Number.isFinite(t) ? t : 0) * 1e6 + version
+  return Number.isFinite(t) ? t : 0
 }
 
 /**
@@ -247,17 +279,18 @@ export async function precheckSheetHistoryIntegrity(
     )
     type RevRow = { record_id: unknown; version: unknown; action: unknown; snapshot: unknown; created_at: unknown; id: unknown }
     const eventsByRecord = new Map<string, ChainEvent[]>()
-    const latestSnapByRecord = new Map<string, { action: string; snapshot: unknown; orderKey: number }>()
+    const latestSnapByRecord = new Map<string, { action: ChainEventAction; snapshot: unknown; version: number; orderKey: number }>()
     for (const r of revRes.rows as RevRow[]) {
       const rid = String(r.record_id)
       const version = toNumber(r.version)
-      const action = (r.action === 'create' || r.action === 'delete') ? r.action : 'update'
-      const orderKey = orderKeyOf(r.created_at, version)
+      const action: ChainEventAction = (r.action === 'create' || r.action === 'delete') ? r.action : 'update'
+      const orderKey = epochOf(r.created_at)
       const list = eventsByRecord.get(rid) ?? []
       list.push({ version, action, orderKey })
       eventsByRecord.set(rid, list)
       const prev = latestSnapByRecord.get(rid)
-      if (!prev || orderKey > prev.orderKey) latestSnapByRecord.set(rid, { action, snapshot: r.snapshot, orderKey })
+      const cand = { action, snapshot: r.snapshot, version, orderKey }
+      if (!prev || chainOrderAfter(cand, prev)) latestSnapByRecord.set(rid, cand)
     }
 
     // Lock/unlock markers (deploy-window safe: a missing table pre-migration ⇒ no markers ⇒ locked records
@@ -275,7 +308,7 @@ export async function precheckSheetHistoryIntegrity(
         const rid = String(m.record_id)
         const version = toNumber(m.version)
         const list = markersByRecord.get(rid) ?? []
-        list.push({ version, kind: m.kind === 'unlock' ? 'unlock' : 'lock', orderKey: orderKeyOf(m.created_at, version) })
+        list.push({ version, kind: m.kind === 'unlock' ? 'unlock' : 'lock', orderKey: epochOf(m.created_at) })
         markersByRecord.set(rid, list)
       }
     }
