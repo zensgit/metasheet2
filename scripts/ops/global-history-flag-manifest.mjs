@@ -140,11 +140,9 @@ export const GLOBAL_HISTORY_FLAG_MANIFEST = Object.freeze([
     danger: 'high',
     purpose:
       'R3 — PIT-reset vs retention STOP-SHIP. T8-2 Reset-to-T (destructive whole-sheet PIT restore). Gated by PIT_RESET_ENABLED() (`.trim().toLowerCase() === \'true\'`, so \'TRUE\'/\' true \' also activate it — unlike most other flags in this manifest). BOTH reset-preview and reset-execute additionally call PIT_RESET_RETENTION_BLOCKED() and refuse with 409 RESET_RETENTION_CONFLICT whenever meta-revision retention is active. An operator who intends to use PIT reset MUST NOT also have retention active.',
-    // source: packages/core-backend/src/routes/univer-meta.ts:10275 (PIT_RESET_ENABLED),
-    //         :10276 (PIT_RESET_RETENTION_BLOCKED — compares MULTITABLE_META_REVISION_RETENTION_ENABLED === '1'),
-    //         :10287,:10328 (both preview and execute call the blocked-check)
-    // NOTE: the task brief cited univer-meta.ts:10264 for this; the verified line in this checkout is 10276
-    // (small file drift since the brief was written) — same function, same rule, confirmed by symbol name.
+    // Anchored by SYMBOL NAME (drift-proof): PIT_RESET_ENABLED gates reset-preview + reset-execute;
+    // PIT_RESET_RETENTION_BLOCKED compares MULTITABLE_META_REVISION_RETENTION_ENABLED === '1' and both
+    // routes call it (409 RESET_RETENTION_CONFLICT). No line numbers — they drift across rebases.
     source: 'packages/core-backend/src/routes/univer-meta.ts (symbol refs, drift-proof: PIT_RESET_ENABLED + PIT_RESET_RETENTION_BLOCKED helpers; reset-preview + reset-execute both gate on them)',
     rules: [
       {
@@ -165,8 +163,8 @@ export const GLOBAL_HISTORY_FLAG_MANIFEST = Object.freeze([
     danger: 'high',
     purpose:
       'W0 step-1 — emergency master gate on the DESTRUCTIVE point-in-time revert-execute (whole-sheet rollback to T; OVERWRITES live data). Gated by PIT_REVERT_ENABLED() (`.trim().toLowerCase() === \'true\'`) as the FIRST statement of revert-execute — before parse/auth/DB — returning 403 REVERT_DISABLED. Read-only revert-preview is intentionally NOT gated. Default OFF until the full W0 integrity work lands: the trustworthiness precheck enumerates LIVE rows only and the reconstructor orders by created_at (= transaction-start via now()), so a mid-history healed gap / a deleted record\'s broken chain / a concurrent version-vs-time inversion can still overwrite with a WRONG T-state.',
-    // source: packages/core-backend/src/routes/univer-meta.ts (PIT_REVERT_ENABLED helper :10115; the gate as
-    //   revert-execute's first statement :10169; the two-gate undeleteSupported conjunction in revert-preview :10149)
+    // Anchored by SYMBOL NAME (drift-proof, no line numbers): PIT_REVERT_ENABLED helper; the gate is
+    // revert-execute's first statement; the two-gate undeleteSupported conjunction lives in revert-preview.
     source: 'packages/core-backend/src/routes/univer-meta.ts (symbol refs, drift-proof: PIT_REVERT_ENABLED helper; revert-execute gate = its first statement; revert-preview undeleteSupported two-gate conjunction)',
   },
   {
@@ -179,7 +177,8 @@ export const GLOBAL_HISTORY_FLAG_MANIFEST = Object.freeze([
     danger: 'medium',
     purpose:
       'T8-1 PIT undelete-execute (resurrect face). Gated by `.trim().toLowerCase() === \'true\'` — same case-insensitive family as PIT_RESET. Requires canDeleteRecord (never canEditRecord) at execute plus a typed confirm:\'undelete\'. Inbound links are NOT rebuilt by this flag alone (design-lock L4 A) — see MULTITABLE_ENABLE_RECORD_UNDELETE_INBOUND for that layer. The undelete face rides INSIDE revert-execute, whose W0 master gate (MULTITABLE_ENABLE_PIT_REVERT) is checked FIRST — so undelete requires BOTH gates.',
-    // source: packages/core-backend/src/routes/univer-meta.ts:10071 (PIT_UNDELETE gate; the PIT_REVERT master gate precedes it at the top of revert-execute)
+    // Anchored by SYMBOL NAME (drift-proof, no line numbers): PIT_UNDELETE_ENABLED helper + the undelete
+    // sub-gate inside revert-execute; the PIT_REVERT master gate precedes it at the top of revert-execute.
     source: 'packages/core-backend/src/routes/univer-meta.ts (symbol refs, drift-proof: PIT_UNDELETE_ENABLED helper + the undelete sub-gate inside revert-execute; the PIT_REVERT master gate precedes it at the top of revert-execute)',
     rules: [
       {
