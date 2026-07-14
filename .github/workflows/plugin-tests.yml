@@ -280,27 +280,18 @@ jobs:
           # (no-ops a migration's body but keeps its name; this drops name+body entirely). See
           # packages/core-backend/MIGRATION_EXCLUDE_TRACKING.md and
           # docs/development/superseded-legacy-migrations-gap-audit-20260710.md for the full
-          # cross-list picture. #4162 follow-up (2026-07-13): the views/view_states migration
-          # and the three snapshot-cluster migrations are re-enabled below (in all five
-          # workflow lists at once), so their up() bodies now DO get per-PR green CI runs.
-          # Remaining asymmetry: production/on-prem db:migrate runs with no exclude at all,
-          # so the STILL-excluded items (008/048/049, 042a, gantt, 20250925) keep that gap.
+          # cross-list picture. #4162 is now fully executed: the 2026-07-13 tranche re-enabled
+          # views/view_states plus the snapshot cluster, and the 2026-07-14 tail removed 042a,
+          # gantt, and 20250925 from every occurrence. 042a now reaches the provider's audited
+          # superseded no-op marker; gantt and 20250925 execute their real bodies in this lane.
+          # Remaining asymmetry is limited to 008/048/049 (and user_orgs outside plugin-tests).
           # Exclude problematic migrations (see migration-replay.yml for the per-item detail
           # this workflow shares):
           # 008_plugin_infrastructure.sql - has idempotency issue with scope column
           # 048/049 (event bus / BPMN) - Phase 2 migrations with complex SQL syntax issues
-          # 042a_core_model_views.sql - References non-existent last_accessed column
-          # Re-enabled per #4162 (2026-07-13): 20250924120000_create_views_view_states.ts and the three
-          # snapshot-cluster migrations (20251117000001_add_snapshot_labels, 20251117000002_create_protection_rules,
-          # 20251201000001_create_change_management_tables) now RUN here. Their old per-item exclusion reasons were
-          # re-tested and are stale (same class as the 20250925 one #3627 fixed): fresh-DB migrate, second-pass
-          # replay, and the snapshot-protection E2E (21/21) all pass with them applied.
-          # 20250924140000_create_gantt_tables.ts - FK points at pre-fix text view ids
-          # 20250925_create_view_tables.sql - legacy owner_id FK assumes pre-text user ids during replay.
-          #   NOTE: this exact bug was fixed by #3627, and migration-replay.yml already dropped
-          #   this exclusion in #3632 (verified passing there); this workflow was never
-          #   re-verified/updated to match, so this exclusion may now be stale rather than still
-          #   required — needs re-verification before removal, not a piecemeal drop (see #4162).
+          # Re-enabled per #4162: views/view_states + snapshot cluster (2026-07-13), then
+          # 042a/gantt/20250925 (2026-07-14). Fresh and old-list upgrade migrations, tracked-skip
+          # replay, schema assertions, and the snapshot-protection E2E all pass with this shape.
           # NOTE: zzzz20260114110000_create_user_orgs_table.ts is intentionally NOT in this
           #   list (unlike observability-*.yml/safety-guard-e2e.yml/migration-replay.yml, which
           #   all exclude it because it hits a legacy user_orgs is_active replay incompatibility
@@ -309,7 +300,7 @@ jobs:
           #   ("ci(attendance): run integration gate against postgres") — "Include the user_orgs
           #   migration in plugin-test database setup because attendance auto-absence now
           #   depends on that table."
-          MIGRATION_EXCLUDE: 008_plugin_infrastructure.sql,048_create_event_bus_tables.sql,049_create_bpmn_workflow_tables.sql,042a_core_model_views.sql,20250924140000_create_gantt_tables.ts,20250925_create_view_tables.sql
+          MIGRATION_EXCLUDE: 008_plugin_infrastructure.sql,048_create_event_bus_tables.sql,049_create_bpmn_workflow_tables.sql
         run: |
           pnpm --filter @metasheet/core-backend db:migrate
 
@@ -817,27 +808,18 @@ jobs:
           # (no-ops a migration's body but keeps its name; this drops name+body entirely). See
           # packages/core-backend/MIGRATION_EXCLUDE_TRACKING.md and
           # docs/development/superseded-legacy-migrations-gap-audit-20260710.md for the full
-          # cross-list picture. #4162 follow-up (2026-07-13): the views/view_states migration
-          # and the three snapshot-cluster migrations are re-enabled below (in all five
-          # workflow lists at once), so their up() bodies now DO get per-PR green CI runs.
-          # Remaining asymmetry: production/on-prem db:migrate runs with no exclude at all,
-          # so the STILL-excluded items (008/048/049, 042a, gantt, 20250925) keep that gap.
+          # cross-list picture. #4162 is now fully executed: the 2026-07-13 tranche re-enabled
+          # views/view_states plus the snapshot cluster, and the 2026-07-14 tail removed 042a,
+          # gantt, and 20250925 from every occurrence. 042a now reaches the provider's audited
+          # superseded no-op marker; gantt and 20250925 execute their real bodies in this lane.
+          # Remaining asymmetry is limited to 008/048/049 (and user_orgs outside plugin-tests).
           # Exclude problematic migrations (see migration-replay.yml for the per-item detail
           # this workflow shares):
           # 008_plugin_infrastructure.sql - has idempotency issue with scope column
           # 048/049 (event bus / BPMN) - Phase 2 migrations with complex SQL syntax issues
-          # 042a_core_model_views.sql - References non-existent last_accessed column
-          # Re-enabled per #4162 (2026-07-13): 20250924120000_create_views_view_states.ts and the three
-          # snapshot-cluster migrations (20251117000001_add_snapshot_labels, 20251117000002_create_protection_rules,
-          # 20251201000001_create_change_management_tables) now RUN here. Their old per-item exclusion reasons were
-          # re-tested and are stale (same class as the 20250925 one #3627 fixed): fresh-DB migrate, second-pass
-          # replay, and the snapshot-protection E2E (21/21) all pass with them applied.
-          # 20250924140000_create_gantt_tables.ts - FK points at pre-fix text view ids
-          # 20250925_create_view_tables.sql - legacy owner_id FK assumes pre-text user ids during replay.
-          #   NOTE: this exact bug was fixed by #3627, and migration-replay.yml already dropped
-          #   this exclusion in #3632 (verified passing there); this workflow was never
-          #   re-verified/updated to match, so this exclusion may now be stale rather than still
-          #   required — needs re-verification before removal, not a piecemeal drop (see #4162).
+          # Re-enabled per #4162: views/view_states + snapshot cluster (2026-07-13), then
+          # 042a/gantt/20250925 (2026-07-14). Fresh and old-list upgrade migrations, tracked-skip
+          # replay, schema assertions, and the snapshot-protection E2E all pass with this shape.
           # NOTE: zzzz20260114110000_create_user_orgs_table.ts is also absent from this job's
           #   list (unlike observability-*.yml/safety-guard-e2e.yml/migration-replay.yml). It was
           #   removed here in the SAME commit as the `test` job above (b1fc1e19d1), whose message
@@ -846,7 +828,7 @@ jobs:
           #   not obviously touch user_orgs/attendance. Left as-is (not this T8 slice's job to
           #   resolve), but flagged: this specific occurrence's omission may be an unverified
           #   side-effect of a file-wide edit rather than a decision made for this job.
-          MIGRATION_EXCLUDE: 008_plugin_infrastructure.sql,048_create_event_bus_tables.sql,049_create_bpmn_workflow_tables.sql,042a_core_model_views.sql,20250924140000_create_gantt_tables.ts,20250925_create_view_tables.sql
+          MIGRATION_EXCLUDE: 008_plugin_infrastructure.sql,048_create_event_bus_tables.sql,049_create_bpmn_workflow_tables.sql
         run: |
           pnpm --filter @metasheet/core-backend db:migrate
 

@@ -76,39 +76,32 @@ jobs:
           # in packages/core-backend/src/db/migration-provider.ts (that one no-ops a migration's
           # body but keeps its name; this one drops the name+body entirely). This job's purpose
           # (run db:migrate TWICE against a fresh db, assert idempotency) is narrower than the
-          # per-PR gate's, so its list has independently evolved: it already dropped
-          # 20250925_create_view_tables.sql once #3627 fixed the underlying owner_id FK bug
-          # (see #3632) — the four CI per-PR gate occurrences still exclude that file and have
-          # NOT been re-verified against the same fix, which may mean they are stale rather than
-          # intentionally divergent. See docs/development/superseded-legacy-migrations-gap-audit-20260710.md
+          # per-PR gate's, so its list has independently evolved. It first dropped
+          # 20250925_create_view_tables.sql after #3627 fixed the owner_id FK bug (#3632), and
+          # #4162 has now removed that stale exclusion from the other lanes too. See
+          # docs/development/superseded-legacy-migrations-gap-audit-20260710.md
           # and packages/core-backend/MIGRATION_EXCLUDE_TRACKING.md for the full cross-list
-          # picture. #4162's follow-up is now PARTIALLY executed (2026-07-13): the
-          # views/view_states migration and the three snapshot-cluster migrations are
-          # re-enabled in ALL five workflow lists simultaneously (this file, plugin-tests,
-          # observability-e2e/strict, safety-guard-e2e) — see the Re-enabled note below.
-          # Still excluded everywhere: 008/048/049, 042a, gantt (and 20250925 outside this
-          # file). The two lists solve different problems and are not required to converge.
+          # picture. #4162 is now fully executed: views/view_states + the snapshot cluster
+          # were re-enabled on 2026-07-13, and 042a/gantt/20250925 were removed from every
+          # occurrence on 2026-07-14. 042a reaches the provider's superseded no-op marker;
+          # gantt and 20250925 execute their real bodies. Remaining exclusions are 008/048/049
+          # plus user_orgs in the non-plugin lanes.
           # Exclude 008_plugin_infrastructure.sql - has idempotency issue with scope column
           # TODO: Fix migration to be fully idempotent or split into separate migrations
           # Exclude 048-049 - Phase 2 Event Bus/BPMN migrations with complex SQL syntax issues
           # TODO: Rewrite these migrations with correct PostgreSQL syntax
-          # Re-enabled per #4162 (2026-07-13): 20250924120000_create_views_view_states.ts and the three
-          # snapshot-cluster migrations (20251117000001_add_snapshot_labels, 20251117000002_create_protection_rules,
-          # 20251201000001_create_change_management_tables) now RUN here. Their old per-item exclusion reasons were
-          # re-tested and are stale (same class as the 20250925 one #3627 fixed): fresh-DB migrate, second-pass
-          # replay, and the snapshot-protection E2E (21/21) all pass with them applied.
-          # Exclude 20250924140000_create_gantt_tables.ts - FK points at pre-fix text view ids
+          # Re-enabled per #4162: views/view_states + snapshot cluster (2026-07-13), then
+          # 042a/gantt/20250925 (2026-07-14). Fresh and old-list upgrade migrations, tracked-skip
+          # replay, schema assertions, and the snapshot-protection E2E all pass with this shape.
           # Exclude zzzz20260114110000_create_user_orgs_table.ts - replay paths hit legacy user_orgs is_active reference incompatibility
-          # Exclude 042a_core_model_views.sql - References non-existent last_accessed column
-          # TODO: Fix last_accessed column reference in 042a_core_model_views.sql
-          MIGRATION_EXCLUDE: 008_plugin_infrastructure.sql,048_create_event_bus_tables.sql,049_create_bpmn_workflow_tables.sql,042a_core_model_views.sql,20250924140000_create_gantt_tables.ts,zzzz20260114110000_create_user_orgs_table.ts
+          MIGRATION_EXCLUDE: 008_plugin_infrastructure.sql,048_create_event_bus_tables.sql,049_create_bpmn_workflow_tables.sql,zzzz20260114110000_create_user_orgs_table.ts
         run: |
           pnpm -F @metasheet/core-backend db:migrate
           pnpm -F @metasheet/core-backend db:migrate
       - name: List migrations
         env:
           DATABASE_URL: postgresql://127.0.0.1/metasheet
-          MIGRATION_EXCLUDE: 008_plugin_infrastructure.sql,048_create_event_bus_tables.sql,049_create_bpmn_workflow_tables.sql,042a_core_model_views.sql,20250924140000_create_gantt_tables.ts,zzzz20260114110000_create_user_orgs_table.ts
+          MIGRATION_EXCLUDE: 008_plugin_infrastructure.sql,048_create_event_bus_tables.sql,049_create_bpmn_workflow_tables.sql,zzzz20260114110000_create_user_orgs_table.ts
         run: pnpm -F @metasheet/core-backend db:list
 
       - name: Upload install logs on failure
