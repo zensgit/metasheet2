@@ -105,6 +105,20 @@ async function revisionsFor(recordId: string): Promise<RevisionRow[]> {
   const r = await q('SELECT version, action, source, actor_id, changed_field_ids, patch, snapshot, batch_id FROM meta_record_revisions WHERE record_id = $1 ORDER BY version', [recordId])
   return r.rows as RevisionRow[]
 }
+/** meta_fields uses HARD delete (no `deleted_at` column) — "still deleted" for a field means "still absent". */
+async function fieldExists(fieldId: string): Promise<boolean> {
+  const r = await q('SELECT 1 FROM meta_fields WHERE id = $1', [fieldId])
+  return r.rows.length > 0
+}
+async function fieldOrder(fieldId: string): Promise<number | undefined> {
+  const r = await q('SELECT "order" FROM meta_fields WHERE id = $1', [fieldId])
+  const row = r.rows[0] as { order: number } | undefined
+  return row ? Number(row.order) : undefined
+}
+async function fieldCreateRevisionCount(sheetId: string, fieldId: string): Promise<number> {
+  const r = await q(`SELECT COUNT(*)::int AS n FROM meta_config_revisions WHERE sheet_id = $1 AND entity_type = 'field' AND entity_id = $2 AND action = 'create'`, [sheetId, fieldId])
+  return Number((r.rows[0] as { n: number }).n)
+}
 
 describeIfDatabase('W0 tail — field-undelete rehydration emits revisions (real DB)', () => {
   beforeAll(async () => {
@@ -249,5 +263,76 @@ describeIfDatabase('W0 tail — field-undelete rehydration emits revisions (real
     const diesRevs = await revisionsFor(R_DIES)
     expect(diesRevs).toHaveLength(1)
     expect(diesRevs[0]?.action).toBe('create')
+  })
+
+  // Owner post-merge review of #4279 (Medium finding #2): the two tests above prove the success path and
+  // the zero-row leg, but neither forces a `meta_record_revisions` INSERT failure AFTER the row data/version
+  // updates — so neither actually pins that the WHOLE field-undelete (field re-creation + its order-shift +
+  // its create-revision + the per-record rehydration UPDATE + the per-record revision emit) is ONE atomic
+  // transaction. This golden does, following the same scoped-trigger shape as the D-1c slice ⑤ atomicity
+  // golden (`multitable-d1c-attachment-revision-realdb.test.ts`).
+  test('atomicity golden: if the meta_record_revisions INSERT throws mid-rehydration, the WHOLE field-undelete transaction rolls back — field re-creation, its order-shift, AND the record data/version all undo, no half-write', async () => {
+    const s = await freshSheet('atomic')
+    const F = mkFieldId('atomic')
+    const TRAIL = mkFieldId('atomicTrail') // a trailing field — proves the recreate's own order-shift undoes too
+    await insertField(s, F, 'AtomicVal', 'string', 1)
+    await insertField(s, TRAIL, 'Trailing', 'string', 2)
+
+    const R = mkRecordId('atomic')
+    const T0 = new Date(Date.now() - 60_000).toISOString()
+    await insertRecord(s, R, { [F]: 'atomic-orig', other: 'x1' })
+    await seedCreateRevision(s, R, { other: 'x1' }, T0)
+
+    expect((await deleteField(F)).status).toBe(200)
+    // The forward delete already shifted TRAIL's order 2 -> 1 (the -1 shift dropFieldCascade applies).
+    expect(await fieldOrder(TRAIL)).toBe(1)
+    const revF = await lastFieldDeleteRevisionId(s, F)
+
+    const p = await preview(s, revF)
+    expect(p.status).toBe(200)
+    expect(p.body?.data?.undelete?.tombstoneAvailable).toBe(true)
+    const previewToken = p.body.data.previewToken
+
+    // Scoped, self-cleaning failure injection: fires ONLY for R's own rehydration-revision INSERT — the
+    // AND clause (record_id match AND source='restore') is the exact discriminator recreateFieldFromConfig
+    // uses for this write (see univer-meta.ts ~6569), so this cannot fire for any other concurrently-seeded
+    // record or test file sharing this database. Dropped in `finally`, always, win or lose.
+    await q(`CREATE OR REPLACE FUNCTION _tfrr_atomic_fail_revision() RETURNS trigger AS $f$
+      BEGIN IF NEW.record_id = '${R}' AND NEW.source = 'restore' THEN RAISE EXCEPTION 'tfrr atomic injected revision failure'; END IF; RETURN NEW; END;
+    $f$ LANGUAGE plpgsql`, [])
+    await q('CREATE TRIGGER _tfrr_atomic_fail_revision_trg BEFORE INSERT ON meta_record_revisions FOR EACH ROW EXECUTE FUNCTION _tfrr_atomic_fail_revision()', [])
+    try {
+      const failed = await execute(s, { revisionId: revF, previewToken, confirm: 'undelete' })
+      expect(failed.status).toBe(500) // not a RecordServiceRestoreConflictError -> falls through to the outer catch's generic 500
+    } finally {
+      await q('DROP TRIGGER IF EXISTS _tfrr_atomic_fail_revision_trg ON meta_record_revisions', [])
+      await q('DROP FUNCTION IF EXISTS _tfrr_atomic_fail_revision()', [])
+    }
+
+    // ---- everything in the SAME transaction rolled back: field re-creation, its order-shift, config
+    // revision, record data + version, and the (never-committed) revision emit itself. ----
+    expect(await fieldExists(F)).toBe(false) // field: still absent (hard-delete; "still deleted" == still no row)
+    expect(await fieldOrder(TRAIL)).toBe(1) // the recreate's own +1 shift did NOT stick (would be 2 if it had)
+    expect(await fieldCreateRevisionCount(s, F)).toBe(0) // the field-create config revision never committed
+
+    const row = await recordRow(R)
+    expect(row?.data).toEqual({ other: 'x1' }) // rehydrated value NOT present
+    expect(row?.version).toBe(1) // unchanged — the version bump did not survive the rollback
+    expect(await revisionsFor(R)).toHaveLength(1) // only the seeded create@1 — no ghost rehydration revision
+
+    // ---- positive control: identical fixture, trigger gone -> the SAME undelete now succeeds fully. Proves
+    // the failure above was caused BY the trigger (not a broken previewToken / stale-revision fixture) — the
+    // revision id and preview flow are still valid; the DB state is byte-for-byte back where the delete left it. ----
+    const p2 = await preview(s, revF)
+    expect(p2.status).toBe(200)
+    const ok = await execute(s, { revisionId: revF, previewToken: p2.body.data.previewToken, confirm: 'undelete' })
+    expect(ok.status).toBe(200)
+
+    expect(await fieldExists(F)).toBe(true)
+    expect(await fieldOrder(TRAIL)).toBe(2) // this time the shift DOES stick
+    const row2 = await recordRow(R)
+    expect(row2?.data).toEqual({ [F]: 'atomic-orig', other: 'x1' })
+    expect(row2?.version).toBe(2)
+    expect(await revisionsFor(R)).toHaveLength(2)
   })
 })
