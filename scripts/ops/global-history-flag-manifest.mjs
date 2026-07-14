@@ -17,7 +17,7 @@
  * `activationValue` is the EXACT string the flag must equal (after `.trim()`, and after `.toLowerCase()`
  * only when `caseInsensitive: true`) for the gated code path to treat it as ON. Two families exist:
  *   - capture/replay/revert flags compare with `=== 'true'` (case-SENSITIVE, no trim in most call sites,
- *     except PIT_RESET/PIT_UNDELETE which use `.trim().toLowerCase() === 'true'`)
+ *     except PIT_RESET/PIT_UNDELETE/SHEET_REVERT which use `.trim().toLowerCase() === 'true'`)
  *   - the retention flag compares with `=== '1'` (NOT `'true'`) — `meta-revision-retention.ts:60`
  * Setting the wrong string for a given flag is silent: the gated code path stays OFF and nothing errors.
  */
@@ -129,6 +129,21 @@ export const GLOBAL_HISTORY_FLAG_MANIFEST = Object.freeze([
           "MULTITABLE_ENABLE_FIELD_RETYPE_REVERT_LOSSY is active ('true') but MULTITABLE_ENABLE_FIELD_RETYPE_REVERT is not active — the lossy gate has no effect (isLossyRetypeRevertEnabled requires both), so this flag combination is dead configuration, not a working feature.",
       },
     ],
+  },
+  {
+    key: 'MULTITABLE_ENABLE_SHEET_REVERT',
+    type: 'boolean',
+    activationValue: 'true',
+    caseInsensitive: true,
+    dependsOn: [],
+    conflictsWith: [],
+    danger: 'high',
+    purpose:
+      'Interim revert-execute master gate (current-risk mitigation, owner-directed): the merged §0.6 history-integrity precheck (#4234) is live-vs-latest and still blind to the healed-gap + check→write race, so revert-execute (bulk-overwrites live record field values back to T across up to MULTITABLE_SHEET_REVERT_MAX_RECORDS records, and resurrects records deleted after T — that resurrect sub-path additionally requires MULTITABLE_ENABLE_PIT_UNDELETE) is closed by DEFAULT until the full W0-1 correctness fix lands. Mirrors MULTITABLE_ENABLE_PIT_RESET\'s gate exactly: SAME `String(env).trim().toLowerCase() === \'true\'` resolution (hence caseInsensitive here too, unlike the config-revert family above which compares case-sensitively), same canManageSheetAccess (D2) floor. danger=high for the same reason as PIT_RESET, not the medium config-revert flags above: a whole-sheet-scale destructive bulk write over live record data with no undo, gated off specifically because a known correctness gap (TOCTOU-shaped) is unmitigated. revert-preview stays UNGATED (read-only; the FE preview UI still needs to render even while the button that would call execute is hidden — capabilities.sheetRevertEnabled controls that visibility, same flag-derived-capability pattern as pitResetEnabled).',
+    // source: packages/core-backend/src/routes/univer-meta.ts:10121 (SHEET_REVERT_ENABLED, `.trim().toLowerCase() === 'true'` guard),
+    //         :10164 (revert-execute gate call site — 403 REVERT_DISABLED when off),
+    //         :7153 (capabilities.sheetRevertEnabled — SAME flag-derived-capability pattern as pitResetEnabled, ANDed with canManageSheetAccess)
+    source: 'packages/core-backend/src/routes/univer-meta.ts:10121,10164,7153',
   },
   {
     key: 'MULTITABLE_ENABLE_PIT_RESET',
