@@ -5,6 +5,7 @@
 
 import { randomUUID } from 'crypto'
 import { recordRecordRevision } from './record-history-service'
+import { acquireAutoNumberSheetWriteLock } from './auto-number-service'
 import { Logger } from '../core/logger'
 import { withAutomationEventId } from './automation-event-dedup'
 import { redactString } from './automation-log-redact'
@@ -2532,8 +2533,15 @@ export class AutomationExecutor {
       // neither of which added one).
       // xbase-write-gated: routes through evaluateCrossBaseWrite (gate computed above) — a cross-base
       // create is rejected before this INSERT unless claim==truth + trigger-actor base-write. This is
-      // the §1.3 create-to-another-base vector the gate closes. revision-emitted: D-1c slice ③ (A4) — recordRecordRevision(action:'create') below, same txn.
+      // the §1.3 create-to-another-base vector the gate closes.
+      // W0-1 (corrected) §10.2 (recommended fork): acquire the SAME sheet-level auto-number advisory lock
+      // `createRecord`/trash-restore take, as the FIRST statement in this txn — outermost, before the
+      // INSERT. automation create_record is a phantom-INSERT-into-`meta_records` site exactly like those
+      // two; fencing it the same way closes the residual gap for a clean C4 claim (a PIT Reset's in-txn
+      // re-enumeration can no longer race a concurrent automation create materializing an unpreviewed row).
       await this.withTransaction(async (query) => {
+        await acquireAutoNumberSheetWriteLock(query, targetSheetId)
+        // revision-emitted: D-1c slice ③ (A4) — recordRecordRevision(action:'create') below, same txn.
         await query(
           `INSERT INTO meta_records (id, sheet_id, data, version) VALUES ($1, $2, $3::jsonb, 1)`,
           [recordId, targetSheetId, JSON.stringify(data)],
@@ -3482,29 +3490,70 @@ export class AutomationExecutor {
         }
       }
 
+      // W0-1 (corrected) §3 marker plan: the UPDATE and its `lock`/`unlock` marker revision now run in ONE
+      // transaction (mirrors executeUpdateRecord/executeDeleteRecord/executeCreateRecord's same-txn
+      // pattern above) — `recordRecordRevision` in the SAME txn as the `version + 1` bump keeps the
+      // version chain +1-dense (a `lock`/`unlock` marker is version-consuming, content-neutral: snapshot
+      // NULL, patch {}, changed_field_ids []). Zero-row fail-closed (same class as the siblings above): a
+      // concurrently-deleted record's 0-row UPDATE keeps its pre-existing same-base leniency (still
+      // reports success) but fabricates NO marker revision for a record this UPDATE never touched.
       if (locked) {
         const lockedBy = typeof context.actorId === 'string' && context.actorId.trim() ? context.actorId : 'system'
-        // xbase-write-gated: routes through evaluateCrossBaseWrite (gate above) — same-base uses the gate's
-        // fast-path (byte-identical to pre-C2); a cross-base lock is rejected unless claim==truth + base-write.
-        // lock-mgmt: LOCK action — sets the lock columns themselves (not a data edit of a locked row).
-        // revision-exempt: lock/unlock metadata-only — no `data` column touched, not a user-content edit.
-        await this.deps.queryFn(
-          `UPDATE meta_records
-           SET locked = true, locked_by = $1, locked_at = NOW(), version = version + 1, updated_at = NOW()
-           WHERE id = $2 AND sheet_id = $3`,
-          [lockedBy, effectiveRecordId, effectiveSheetId],
-        )
+        await this.withTransaction(async (query) => {
+          // xbase-write-gated: routes through evaluateCrossBaseWrite (gate above) — same-base uses the
+          // gate's fast-path (byte-identical to pre-C2); a cross-base lock is rejected unless claim==truth.
+          // lock-mgmt: LOCK action — sets the lock columns themselves (not a data edit of a locked row).
+          // revision-emitted: W0-1 (corrected) §3 marker — recordRecordRevision(action:'lock') below, same txn.
+          const updateRes = await query(
+            `UPDATE meta_records
+             SET locked = true, locked_by = $1, locked_at = NOW(), version = version + 1, updated_at = NOW()
+             WHERE id = $2 AND sheet_id = $3
+             RETURNING version`,
+            [lockedBy, effectiveRecordId, effectiveSheetId],
+          )
+          const updatedRow = updateRes.rows[0] as { version?: unknown } | undefined
+          if (updatedRow) {
+            await recordRecordRevision(query, {
+              sheetId: effectiveSheetId,
+              recordId: effectiveRecordId,
+              version: Number(updatedRow.version),
+              action: 'lock',
+              source: 'automation',
+              actorId: context.actorId ?? null,
+              changedFieldIds: [],
+              patch: {},
+              snapshot: null,
+            })
+          }
+        })
       } else {
-        // xbase-write-gated: routes through evaluateCrossBaseWrite (gate above) — same-base fast-path keeps
-        // this byte-identical to pre-C2; a cross-base unlock is rejected unless claim==truth + base-write.
-        // lock-mgmt: UNLOCK action — clears the lock columns (decision f: automation may unlock).
-        // revision-exempt: lock/unlock metadata-only — no `data` column touched, not a user-content edit.
-        await this.deps.queryFn(
-          `UPDATE meta_records
-           SET locked = false, locked_by = NULL, locked_at = NULL, version = version + 1, updated_at = NOW()
-           WHERE id = $1 AND sheet_id = $2`,
-          [effectiveRecordId, effectiveSheetId],
-        )
+        await this.withTransaction(async (query) => {
+          // xbase-write-gated: routes through evaluateCrossBaseWrite (gate above) — same-base fast-path
+          // keeps this byte-identical to pre-C2; a cross-base unlock is rejected unless claim==truth.
+          // lock-mgmt: UNLOCK action — clears the lock columns (decision f: automation may unlock).
+          // revision-emitted: W0-1 (corrected) §3 marker — recordRecordRevision(action:'unlock') below, same txn.
+          const updateRes = await query(
+            `UPDATE meta_records
+             SET locked = false, locked_by = NULL, locked_at = NULL, version = version + 1, updated_at = NOW()
+             WHERE id = $1 AND sheet_id = $2
+             RETURNING version`,
+            [effectiveRecordId, effectiveSheetId],
+          )
+          const updatedRow = updateRes.rows[0] as { version?: unknown } | undefined
+          if (updatedRow) {
+            await recordRecordRevision(query, {
+              sheetId: effectiveSheetId,
+              recordId: effectiveRecordId,
+              version: Number(updatedRow.version),
+              action: 'unlock',
+              source: 'automation',
+              actorId: context.actorId ?? null,
+              changedFieldIds: [],
+              patch: {},
+              snapshot: null,
+            })
+          }
+        })
       }
 
       return {

@@ -1,5 +1,6 @@
 import { mapFieldType, isSystemFieldType } from './field-codecs'
 import type { QueryFn } from './permission-service'
+import { isSystemSheet } from './system-sheet'
 
 /**
  * Global History — D-1c §0.6: `HISTORY_INCOMPLETE`, the fail-closed integrity PRECHECK for the destructive
@@ -74,7 +75,17 @@ export type HistoryIntegrityVerdict =
   | { ok: true }
   /** Reasons are internal/log-only enums — the HTTP surface is a flat, values-free `HISTORY_INCOMPLETE`
    *  (no record ids, no counts: the refusal must not become a denied-record existence oracle). */
-  | { ok: false; reason: 'zero_revision_live_row' | 'live_row_after_delete_revision' | 'content_mismatch' | 'comparator_error' }
+  | {
+      ok: false
+      reason:
+        | 'zero_revision_live_row'
+        | 'live_row_after_delete_revision'
+        | 'content_mismatch'
+        | 'comparator_error'
+        // W0-1 (corrected) §2/§6 — strict-mode-only reasons (MULTITABLE_HISTORY_CONTIGUITY_STRICT).
+        | 'generation_gap'
+        | 'nonmonotonic_history'
+    }
 
 const isPlainRecord = (v: unknown): v is Record<string, unknown> =>
   !!v && typeof v === 'object' && !Array.isArray(v)
@@ -97,6 +108,19 @@ const canonicalize = (v: unknown): string => {
 }
 
 /**
+ * W0-1 (corrected) §7 — `MULTITABLE_HISTORY_CONTIGUITY_STRICT`, default OFF. Flag-off = byte-for-byte the
+ * pre-existing #4234 content-diff precheck (zero behavior change). Flag-on = ALSO run the generation-aware
+ * §2 contiguity walk + §6 monotonicity guard, additively (a sheet must pass BOTH to proceed) — the content
+ * diff catches an uncaptured EDIT whose live state still disagrees with the latest snapshot; contiguity
+ * catches a "healed" gap the content diff structurally cannot see (an uncaptured middle write whose LATER
+ * capture already re-aligned live data with the latest snapshot) and a resurrected-but-still-gapped
+ * now-deleted vintage.
+ */
+export function isHistoryContiguityStrictEnabled(): boolean {
+  return String(process.env.MULTITABLE_HISTORY_CONTIGUITY_STRICT ?? '').trim().toLowerCase() === 'true'
+}
+
+/**
  * The shared §0.6 precheck. Scope = the sheet (revert/reset are whole-sheet operations, T8 D5).
  *
  * Both compute paths (`computeSheetRevert`, `computeSheetReset`) call this AFTER their cheap record-count
@@ -107,6 +131,27 @@ export async function precheckSheetHistoryIntegrity(
   query: QueryFn,
   sheetId: string,
 ): Promise<HistoryIntegrityVerdict> {
+  const contentVerdict = await checkContentDiff(query, sheetId)
+  if (!contentVerdict.ok) return contentVerdict
+  // W0-1 (corrected) §2/§6 — additive strict-mode check, gated so flag-off stays byte-for-byte #4234.
+  if (isHistoryContiguityStrictEnabled()) {
+    return checkGenerationContiguity(query, sheetId)
+  }
+  return contentVerdict
+}
+
+/**
+ * D-1c §0.6 rules 1-4 — the pre-existing (#4234) live-vs-latest-snapshot content-diff precheck, UNCHANGED
+ * in doctrine. The ONE code change from #4234: the "latest revision per record" query now excludes the
+ * W0-1 lock/unlock MARKER actions (`AND action NOT IN ('lock','unlock')`). Markers ship unconditionally
+ * with the migration (not flag-gated — a trusted window must exist at flag-flip), so without this
+ * exclusion a record's "latest revision" could become a marker (snapshot=NULL) the FIRST time it is
+ * locked/unlocked, and the content comparator would then diff live data against an EMPTY snapshot →
+ * false `content_mismatch` on every locked/unlocked record. This is the precise regression this guard
+ * pre-existing invariant ("lock/unlock never trips it") must not suffer from marker emission — the
+ * exclusion restores it exactly, independent of the strict flag (`G-HI-2` pins this).
+ */
+async function checkContentDiff(query: QueryFn, sheetId: string): Promise<HistoryIntegrityVerdict> {
   const fieldsRes = await query('SELECT id, type FROM meta_fields WHERE sheet_id = $1', [sheetId])
   const userFieldIds: string[] = []
   for (const row of fieldsRes.rows as Array<{ id: unknown; type: unknown }>) {
@@ -115,13 +160,14 @@ export async function precheckSheetHistoryIntegrity(
   const liveRes = await query('SELECT id, data FROM meta_records WHERE sheet_id = $1', [sheetId])
   const liveRows = liveRes.rows as Array<{ id: unknown; data: unknown }>
   if (liveRows.length === 0) return { ok: true }
-  // Latest revision per record — LOCK-11 deterministic order (`created_at DESC, version DESC, id DESC`),
-  // parity with `reconstructRecordsAtT` but WITHOUT the `<= T` cut: rule 2 compares live data against
-  // history's most recent claim, which is T-independent.
+  // Latest CONTENT-BEARING revision per record — LOCK-11 deterministic order (`created_at DESC, version
+  // DESC, id DESC`), parity with `reconstructRecordsAtT` but WITHOUT the `<= T` cut: rule 2 compares live
+  // data against history's most recent claim, which is T-independent. `action NOT IN ('lock','unlock')`
+  // — see the function docstring above for why this exclusion is load-bearing, not cosmetic.
   const revRes = await query(
     `SELECT DISTINCT ON (record_id) record_id, action, snapshot
      FROM meta_record_revisions
-     WHERE sheet_id = $1
+     WHERE sheet_id = $1 AND action NOT IN ('lock', 'unlock')
      ORDER BY record_id, created_at DESC, version DESC, id DESC`,
     [sheetId],
   )
@@ -152,4 +198,148 @@ export async function precheckSheetHistoryIntegrity(
     // Rule 4 fail-closed: a comparator error is a refusal, never a proceed.
     return { ok: false, reason: 'comparator_error' }
   }
+}
+
+interface RevisionRow {
+  record_id: string
+  action: string
+  version: number
+  created_at: string | Date
+  id: string
+  generation: number
+}
+
+function toEpochMs(v: string | Date): number {
+  return v instanceof Date ? v.getTime() : new Date(v).getTime()
+}
+
+/**
+ * W0-1 (corrected) §2 (contiguity) + §6 (C2 monotonicity) — the generation-aware strict check. Additive to
+ * (never a replacement for) `checkContentDiff` above; only reached when that already passed and the flag
+ * is on. PURE READ.
+ *
+ * Scope: EVERY record_id this sheet has ANY revision for — live AND now-deleted alike (a deliberate
+ * superset of "records live now or existing at the specific reconstruction T": T-independence keeps the
+ * precheck a single, cheap, sheet-scoped read with no dependency on the caller's `asOf`, and is at least as
+ * strict as a T-scoped check would be — see the PR body for this as a named, owner-facing fork). Sound only
+ * from marker-emission ship-forward (§7): a retained pre-marker generation with a genuine legacy gap
+ * refuses fail-closed by design, not a bug.
+ *
+ * §1's generation derivation (verbatim): `generation = COUNT(*) FILTER (WHERE action='create') OVER
+ * (PARTITION BY record_id ORDER BY created_at, version, id ROWS UNBOUNDED PRECEDING)` — 1-based, contiguous,
+ * vintage-exact. Within each (record_id, generation) group, re-sorted by (version, id) ascending (the
+ * axis actually being asserted dense — see below), two independent assertions:
+ *   §2 density: version must be exactly `+1` from the group's create (v1) onward, EXCEPT a `delete` may
+ *     repeat the immediately preceding version (the terminal update+delete duplicate, §1). A `lock`/
+ *     `unlock` marker is just another `+1` step — content-neutral, still version-consuming. Anything else
+ *     (a jump, a non-delete duplicate, a decrease) is a missing/uncaptured write → `generation_gap`.
+ *   §6 monotonicity: in that SAME version-ascending walk, `created_at` must be non-decreasing. `reconstruct
+ *     RecordsAtT` picks "latest `created_at <= T`" — if two concurrent writers' commit order disagreed with
+ *     their version-assignment order, the picked-by-time revision would not be the picked-by-version one →
+ *     `nonmonotonic_history`.
+ * Trailing check (this check's own addition, beyond §2's literal text, load-bearing for "remove the marker
+ *   write ⇒ reds" — see PR body): for every LIVE record, its `meta_records.version` must equal the MAX
+ *   version this scan found in `meta_record_revisions` for that record. A record whose captured chain ends
+ *   at v1 while its live version is 3 (e.g. lock 1→2, unlock 2→3 with NO marker emitted) has an uncaptured
+ *   trailing gap that the internal density walk alone cannot see (there is no "hole" among captured rows —
+ *   the tip itself is simply missing).
+ */
+export async function checkGenerationContiguity(query: QueryFn, sheetId: string): Promise<HistoryIntegrityVerdict> {
+  const sheetRes = await query('SELECT base_id, description FROM meta_sheets WHERE id = $1', [sheetId])
+  const sheetRow = sheetRes.rows[0] as { base_id?: unknown; description?: unknown } | undefined
+  // §3 Class B — system sheets are structurally excluded from strict contiguity BEFORE any assertion
+  // (their existing revision-exempt writers bump `version` with no revision, by design).
+  if (sheetRow && isSystemSheet({ baseId: typeof sheetRow.base_id === 'string' ? sheetRow.base_id : null, description: sheetRow.description })) {
+    return { ok: true }
+  }
+
+  const revRes = await query(
+    `SELECT record_id, action, version, created_at, id,
+       COUNT(*) FILTER (WHERE action = 'create') OVER (
+         PARTITION BY record_id ORDER BY created_at, version, id
+         ROWS UNBOUNDED PRECEDING
+       ) AS generation
+     FROM meta_record_revisions
+     WHERE sheet_id = $1
+     ORDER BY record_id, created_at, version, id`,
+    [sheetId],
+  )
+  const rows = revRes.rows as Array<{ record_id: unknown; action: unknown; version: unknown; created_at: unknown; id: unknown; generation: unknown }>
+  if (rows.length === 0) return { ok: true }
+
+  // Group into (record_id, generation) chunks, preserving the SQL's (record_id, created_at, version, id) order.
+  const groups: RevisionRow[][] = []
+  let cur: RevisionRow[] = []
+  for (const raw of rows) {
+    const row: RevisionRow = {
+      record_id: String(raw.record_id),
+      action: String(raw.action ?? ''),
+      version: Number(raw.version),
+      created_at: raw.created_at as string | Date,
+      id: String(raw.id),
+      generation: Number(raw.generation),
+    }
+    if (cur.length > 0 && (cur[0]!.record_id !== row.record_id || cur[0]!.generation !== row.generation)) {
+      groups.push(cur)
+      cur = []
+    }
+    cur.push(row)
+  }
+  if (cur.length > 0) groups.push(cur)
+
+  // Per-record max version WITHIN ITS CURRENT (OPEN) GENERATION ONLY — never the global max across a
+  // record's whole lifetime. `groups` is ordered by (record_id, generation) ascending (generation is
+  // non-decreasing per record_id in the SQL's own order), so an OVERWRITE (not an accumulating max) as we
+  // walk the groups in order naturally leaves each record_id keyed to its LAST (highest-generation)
+  // group's max version. This is load-bearing: version RESETS to 1 on every new generation (trash-restore/
+  // resurrect), so a live record's version can legitimately be LOWER than an earlier, now-closed
+  // generation's terminal version — comparing against the global max would false-refuse EVERY
+  // delete→restore chain (proven flaky without this fix; see the golden's own comment).
+  const maxVersionByRecord = new Map<string, number>()
+  for (const group of groups) {
+    let groupMax = 0
+    for (const row of group) if (row.version > groupMax) groupMax = row.version
+    maxVersionByRecord.set(group[0]!.record_id, groupMax)
+  }
+
+  for (const group of groups) {
+    // Re-sort by (version, ACTION-RANK, id) ascending — the axis §2/§6 actually walk (distinct from the
+    // SQL's (created_at, version, id) grouping order, which only exists to derive `generation` per §1).
+    // ACTION-RANK is load-bearing, not cosmetic: the terminal update+delete pair shares the SAME version
+    // integer (§1) AND — because a delete never bumps `updated_at`/reuses the row's exact commit moment
+    // in practice — can even share the SAME `created_at` down to the microsecond, leaving `id` (a random
+    // uuid, uncorrelated with semantic order) as the only tiebreak. A delete must always be ordered AFTER
+    // its same-version sibling (it is the terminal, closing act of the pair) — sorting those two by random
+    // `id` would flip the pair's order roughly half the time and false-refuse a healthy delete→restore→
+    // delete chain as a `generation_gap` (proven flaky without this rank; see the golden's own comment).
+    const actionRank = (action: string): number => (action === 'delete' ? 1 : 0)
+    const byVersion = [...group].sort((a, b) => {
+      if (a.version !== b.version) return a.version - b.version
+      const ra = actionRank(a.action), rb = actionRank(b.action)
+      if (ra !== rb) return ra - rb
+      return a.id < b.id ? -1 : a.id > b.id ? 1 : 0
+    })
+    const first = byVersion[0]!
+    if (first.action !== 'create' || first.version !== 1) return { ok: false, reason: 'generation_gap' }
+    for (let i = 1; i < byVersion.length; i += 1) {
+      const prev = byVersion[i - 1]!
+      const item = byVersion[i]!
+      const isDenseStep = item.version === prev.version + 1
+      const isTerminalDeleteDup = item.action === 'delete' && item.version === prev.version
+      if (!isDenseStep && !isTerminalDeleteDup) return { ok: false, reason: 'generation_gap' }
+      if (toEpochMs(item.created_at) < toEpochMs(prev.created_at)) return { ok: false, reason: 'nonmonotonic_history' }
+    }
+  }
+
+  // Trailing check: every LIVE record's version must equal the max captured version — otherwise the tip of
+  // its chain is uncaptured (e.g. a lock/unlock whose marker never landed).
+  const liveRes = await query('SELECT id, version FROM meta_records WHERE sheet_id = $1', [sheetId])
+  for (const row of liveRes.rows as Array<{ id: unknown; version: unknown }>) {
+    const id = String(row.id)
+    const maxCaptured = maxVersionByRecord.get(id)
+    if (maxCaptured === undefined) continue // zero-revision live rows are rule 3's job (checkContentDiff), not this check's
+    if (Number(row.version) !== maxCaptured) return { ok: false, reason: 'generation_gap' }
+  }
+
+  return { ok: true }
 }

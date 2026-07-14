@@ -1070,6 +1070,15 @@ export class RecordService {
     let inboundOut: (InboundReplayResult & { recoverable: boolean }) | undefined
     const inboundEnabled = isRecordUndeleteInboundEnabled()
     await this.pool.transaction(async ({ query }) => {
+      // W0-1 (corrected) §10.2 (recommended fork): acquire the SAME sheet-level auto-number advisory lock
+      // `createRecord` takes (auto-number-service.ts, `acquireAutoNumberSheetWriteLock`) as the FIRST
+      // statement in this txn — outermost, before any FOR UPDATE, matching `createRecord`'s own ordering
+      // to avoid a lock-order inversion. Trash-restore is a phantom-INSERT-into-`meta_records` site (a
+      // fresh row materializes under a caller-known id) exactly like `createRecord` — without this fence a
+      // concurrent PIT Reset's re-enumeration could race a restore that inserts a "new" live record the
+      // reset never previewed. Serializing restore behind the same lock a reset now also takes (see
+      // `univer-meta.ts` reset-execute) closes that residual phantom-insert gap for a clean C4 claim.
+      await acquireAutoNumberSheetWriteLock(query, sheetId)
       // 4c-3 C4: the trash row is re-read FOR UPDATE inside the txn — two concurrent restores of the
       // same record serialize here; the loser sees the row gone (winner deleted it on success) and
       // gets a clean 409 instead of racing to a duplicate insert / double replay.

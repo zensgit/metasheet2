@@ -5,7 +5,12 @@ export type QueryFn = (
   params?: unknown[],
 ) => Promise<{ rows: unknown[]; rowCount?: number | null }>
 
-export type RecordRevisionAction = 'create' | 'update' | 'delete'
+// W0-1 (corrected) §3 — 'lock'/'unlock' are the marker actions emitted in the SAME txn as a record
+// lock/unlock's `version + 1` bump (HTTP `univer-meta.ts` lock route + automation `lock_record`), so the
+// version chain stays +1-dense across a lock/unlock exactly like any other version-consuming step
+// (`snapshot=NULL`, `patch={}`, `changed_field_ids=[]` — content-neutral, per the design-lock). Forward-
+// only: no backfill of historical lock/unlock (unreconstructable, OD-5 forbids fabricating history).
+export type RecordRevisionAction = 'create' | 'update' | 'delete' | 'lock' | 'unlock'
 
 // D-1c OD-2 (W0 slice ④): 'approval' names the approval `resultWriteback` write entry point
 // (automation-service.ts's applyResultWritebackPatch, both same-base and cross-base) — the write
@@ -155,7 +160,12 @@ export async function listRecordRevisions(
        batch_id,
        created_at
      FROM meta_record_revisions
-     WHERE sheet_id = $1 AND record_id = $2
+     -- W0-1 (corrected) §10.4 (recommended, owner-flagged for confirmation in the PR): the History
+     -- Center timeline is the sole production caller of this function — filter out the lock/unlock
+     -- MARKER rows so the visible timeline stays byte-identical to before markers shipped (a lock/
+     -- unlock is metadata, not a user-content edit; markers exist purely to keep the internal version
+     -- chain dense for contiguity reasoning, not to be surfaced as history events).
+     WHERE sheet_id = $1 AND record_id = $2 AND action NOT IN ('lock', 'unlock')
      ORDER BY version DESC, created_at DESC
      LIMIT $3 OFFSET $4`,
     [input.sheetId, input.recordId, limit, offset],
@@ -181,7 +191,8 @@ function serializeRecordRevision(row: Record<string, unknown>): RecordRevisionEn
 }
 
 function normalizeAction(value: unknown): RecordRevisionAction {
-  return value === 'create' || value === 'delete' ? value : 'update'
+  if (value === 'create' || value === 'delete' || value === 'lock' || value === 'unlock') return value
+  return 'update'
 }
 
 function normalizeJsonObject(value: unknown): Record<string, unknown> {

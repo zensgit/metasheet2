@@ -75,6 +75,7 @@ import { resolveUserDisplayNames } from '../multitable/user-display'
 import { loadHistoryBatchSummaries, loadHistoryBatchDetail, estimateHistoryHasMore } from '../multitable/history-projection'
 import { reconstructRecordsAtT } from '../multitable/record-reconstructor'
 import { precheckSheetHistoryIntegrity } from '../multitable/history-integrity-precheck'
+import { isSystemPeopleSheetDescription, SYSTEM_PEOPLE_SHEET_DESCRIPTION } from '../multitable/system-sheet'
 import { hashPreviewChanges, hashScope, hashResurrectSet, hashDeleteSet, mintRestorePreviewIdentity, mintScopedRestorePreviewIdentity, verifyRestorePreviewIdentity, verifyScopedRestorePreviewIdentity, mintPitRevertPreviewIdentity, verifyPitRevertPreviewIdentity, mintPitResetPreviewIdentity, verifyPitResetPreviewIdentity, mintConfigRestorePreviewIdentity, verifyConfigRestorePreviewIdentity, hashLossSummary, type UncreatePlan, hashUncreatePlan, mintConfigUncreatePreviewIdentity, verifyConfigUncreatePreviewIdentity, type UndeletePlan, hashUndeletePlan, mintConfigUndeletePreviewIdentity, verifyConfigUndeletePreviewIdentity, hashPermissionGrant, mintConfigPermissionRevertPreviewIdentity, verifyConfigPermissionRevertPreviewIdentity } from '../multitable/restore-preview-identity'
 import {
   recordConfigRevision,
@@ -463,7 +464,6 @@ type QueryFn = (sql: string, params?: unknown[]) => Promise<{ rows: unknown[]; r
 const DEFAULT_BASE_ID = 'base_legacy'
 const DEFAULT_BASE_NAME = 'Migrated Base'
 const SYSTEM_PEOPLE_SHEET_NAME = 'People'
-const SYSTEM_PEOPLE_SHEET_DESCRIPTION = '__metasheet_system:people__'
 const ATTACHMENT_PATH = process.env.ATTACHMENT_PATH || path.join(process.cwd(), 'data', 'attachments')
 const ATTACHMENT_UPLOAD_MAX_SIZE = Number.parseInt(process.env.ATTACHMENT_MAX_SIZE ?? '', 10) || 100 * 1024 * 1024
 const multitableMulter = loadMulter()
@@ -981,10 +981,6 @@ function normalizeJsonArray(value: unknown): string[] {
     }
   }
   return []
-}
-
-function isSystemPeopleSheetDescription(value: unknown): boolean {
-  return typeof value === 'string' && value.trim() === SYSTEM_PEOPLE_SHEET_DESCRIPTION
 }
 
 function filterVisibleSheetRows<T extends { description?: unknown }>(rows: T[]): T[] {
@@ -5881,6 +5877,40 @@ class RecordLockedError extends Error {
 }
 
 /**
+ * W0-1 (corrected) §5 C8/C4 — thrown INSIDE the PIT Reset destructive transaction (`reset-execute`, after
+ * the advisory-lock fence) when the AUTHORITATIVE in-txn re-check disagrees with what the cheap pre-txn
+ * gate saw: either the shared `precheckSheetHistoryIntegrity` now refuses (`history_incomplete` — a
+ * concurrent uncaptured write landed in the TOCTOU window), the previewIdentity recomputed from the
+ * in-txn re-enumerated revert/delete sets no longer matches the caller's token (`identity_invalid` — e.g.
+ * a phantom insert changed the delete-set's hash), or the re-enumeration itself came back
+ * gone/too-large/blocked (`precondition_changed`). Every branch rolls the WHOLE txn back — zero writes —
+ * and the route always tells the caller to re-preview.
+ */
+class ResetInTxnRecheckError extends Error {
+  constructor(
+    public kind: 'history_incomplete' | 'identity_invalid' | 'precondition_changed',
+    public identityReason?: string,
+  ) {
+    super(`Reset in-txn re-check failed: ${kind}${identityReason ? ` (${identityReason})` : ''}`)
+    this.name = 'ResetInTxnRecheckError'
+  }
+}
+
+/**
+ * W0-1 (corrected) §5 — thrown INSIDE the PIT Revert resurrect transaction (`revert-execute`, after the
+ * advisory-lock fence) when the in-txn re-check of `precheckSheetHistoryIntegrity` refuses — a concurrent
+ * uncaptured write landed in the window between the pre-txn gate and this fenced re-check. Rolls the
+ * WHOLE resurrect txn back (zero writes); the route maps it to the same unified `HISTORY_INCOMPLETE` 409
+ * every other refusal surface uses.
+ */
+class RevertResurrectHistoryIncompleteError extends Error {
+  constructor() {
+    super('Revert resurrect in-txn re-check failed: history_incomplete')
+    this.name = 'RevertResurrectHistoryIncompleteError'
+  }
+}
+
+/**
  * W1-1 (design-lock 2026-07-05 §3 LOCK-B, B2): thrown INSIDE the field-update transaction when an
  * expression-change PATCH's sheet has more live records than the bulk-recompute cap — aborts the
  * WHOLE transaction (fail-closed, BS-6 posture: no silent partial/truncated recompute, config NOT
@@ -10029,32 +10059,39 @@ export function univerMetaRouter(): Router {
         patchContext: Awaited<ReturnType<typeof buildRecordPatchContext>>
       }
 
+  // W0-1 (corrected) §5 point 3: `computeSheetReset` accepts an EXPLICIT `query` (defaulting callers pass
+  // `pool.query.bind(pool)`) so the C8/C4 in-txn re-check (reset-execute, below) can call this SAME
+  // function again with the TRANSACTION's query — every internal read (record-count ceiling, precheck,
+  // meta_fields, live meta_records, denied-ids, reconstructRecordsAtT) routes through this ONE parameter,
+  // so re-invoking it under the txn's advisory-lock fence re-enumerates reverts/deletes from data that is
+  // provably inside the fence, not a stale/racy read against an autocommit snapshot outside it.
   const computeSheetReset = async (
     pool: ReturnType<typeof poolManager.get>, req: Request, sheetId: string, asOfIso: string,
     access: RevertSheetCaps['access'], capabilities: RevertSheetCaps['capabilities'],
+    query: QueryFn = pool.query.bind(pool),
   ): Promise<PitResetComputation> => {
     const asRec = (v: unknown): Record<string, unknown> => (v && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, unknown>) : {})
-    const patchContext = await buildRecordPatchContext(req, pool.query.bind(pool), sheetId, access, capabilities)
+    const patchContext = await buildRecordPatchContext(req, query, sheetId, access, capabilities)
     if (!patchContext) return null
     const { fieldById, fieldPermissions } = patchContext
-    const recordCount = Number(((await pool.query('SELECT count(*)::int AS c FROM meta_records WHERE sheet_id = $1', [sheetId])).rows[0] as { c: number }).c)
+    const recordCount = Number(((await query('SELECT count(*)::int AS c FROM meta_records WHERE sheet_id = $1', [sheetId])).rows[0] as { c: number }).c)
     if (recordCount > SHEET_REVERT_MAX_RECORDS) return { tooLarge: true, recordCount }
     // D-1c §0.6 HISTORY_INCOMPLETE (owner hard-lock, RATIFIED 2026-07-13): shared fail-closed precheck — same
     // doctrine as computeSheetRevert above. Rule 3 is load-bearing HERE: the delete-set loop below pushes live
     // rows absent from the reconstruction into `deletes`, so an uncaptured-CREATE row would be silently
     // destroyed if the precheck did not enumerate the LIVE row set first.
-    const integrity = await precheckSheetHistoryIntegrity(pool.query.bind(pool), sheetId)
+    const integrity = await precheckSheetHistoryIntegrity(query, sheetId)
     if (!integrity.ok) return { historyIncomplete: true }
-    const rawTypeById = new Map<string, string>(((await pool.query('SELECT id, type FROM meta_fields WHERE sheet_id = $1', [sheetId])).rows as Array<{ id: string; type: unknown }>).map((r) => [String(r.id), String(r.type ?? '').trim().toLowerCase()]))
-    const baseAllowed = await loadAllowedFieldIds(pool.query.bind(pool), sheetId, access.userId, capabilities)
-    const allowed = await maskStoredRecordFieldIds(req, pool.query.bind(pool), sheetId, undefined, baseAllowed)
-    const deniedIds = (!access.isAdminRole && (await loadRowLevelReadDenyEnabled(pool.query.bind(pool), sheetId)))
-      ? await loadDeniedRecordIds(pool.query.bind(pool), sheetId, access.userId) : new Set<string>()
+    const rawTypeById = new Map<string, string>(((await query('SELECT id, type FROM meta_fields WHERE sheet_id = $1', [sheetId])).rows as Array<{ id: string; type: unknown }>).map((r) => [String(r.id), String(r.type ?? '').trim().toLowerCase()]))
+    const baseAllowed = await loadAllowedFieldIds(query, sheetId, access.userId, capabilities)
+    const allowed = await maskStoredRecordFieldIds(req, query, sheetId, undefined, baseAllowed)
+    const deniedIds = (!access.isAdminRole && (await loadRowLevelReadDenyEnabled(query, sheetId)))
+      ? await loadDeniedRecordIds(query, sheetId, access.userId) : new Set<string>()
     const liveById = new Map<string, { data: Record<string, unknown>; version: number }>()
-    for (const r of (await pool.query('SELECT id, data, version FROM meta_records WHERE sheet_id = $1', [sheetId])).rows as Array<{ id: string; data: unknown; version: unknown }>) {
+    for (const r of (await query('SELECT id, data, version FROM meta_records WHERE sheet_id = $1', [sheetId])).rows as Array<{ id: string; data: unknown; version: unknown }>) {
       liveById.set(String(r.id), { data: asRec(r.data), version: typeof r.version === 'number' && Number.isFinite(r.version) ? r.version : Number(r.version) || 0 })
     }
-    const stateMap = await reconstructRecordsAtT(pool.query.bind(pool), sheetId, asOfIso)
+    const stateMap = await reconstructRecordsAtT(query, sheetId, asOfIso)
     const reverts: PitResetRevert[] = []
     const deletes: PitResetDelete[] = []
     for (const [recordId, live] of liveById) {
@@ -10204,6 +10241,18 @@ export function univerMetaRouter(): Router {
         const undeleteActorId = getRequestActorId(req)
         try {
           await pool.transaction(async ({ query }) => {
+            // W0-1 (corrected) §5 — "same in-txn re-check + fence for the resurrect block" (REVERT's
+            // C8/C4, lighter than RESET's: no delete-set exists to phantom-sweep into, so no
+            // re-enumeration/previewIdentity-recompute is needed here — only the fence + precheck).
+            // FIRST statement: the advisory lock fence (outermost, before any FOR UPDATE below) — blocks
+            // any OTHER meta_records inserter (createRecord/trash-restore/automation create_record, all
+            // fenced the same way) from materializing a phantom insert mid-resurrect.
+            await acquireAutoNumberSheetWriteLock(query, sheetId)
+            // Authoritative in-txn re-check: a concurrent uncaptured write that landed after the pre-txn
+            // gate above (`computeSheetRevert`'s precheck call) is now visible under this fence — refuse
+            // before any resurrect INSERT runs, closing the same check→write TOCTOU class as RESET.
+            const inTxnIntegrity = await precheckSheetHistoryIntegrity(query, sheetId)
+            if (!inTxnIntegrity.ok) throw new RevertResurrectHistoryIncompleteError()
             const sheetAlive = await query('SELECT 1 FROM meta_sheets WHERE id = $1 AND deleted_at IS NULL', [sheetId])
             if ((sheetAlive.rows as unknown[]).length === 0) throw new RecordServiceRestoreConflictError(`Cannot undelete: sheet no longer exists: ${sheetId}`)
             for (const r of resurrects) {
@@ -10268,6 +10317,7 @@ export function univerMetaRouter(): Router {
             }
           })
         } catch (err) {
+          if (err instanceof RevertResurrectHistoryIncompleteError) return sendHistoryIncomplete(res)
           if (err instanceof RecordServiceRestoreConflictError) return res.status(409).json({ ok: false, error: { code: 'UNDELETE_CONFLICT', message: `${err.message}; the sheet changed since preview — re-preview` } })
           throw err
         }
@@ -10384,35 +10434,61 @@ export function univerMetaRouter(): Router {
       const { access, capabilities, sheetScope } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
       if (!access.userId) return res.status(401).json({ ok: false, error: { code: 'UNAUTHENTICATED', message: 'Authentication required' } })
       if (!capabilities.canManageSheetAccess) return sendForbidden(res) // D2
-      const computed = await computeSheetReset(pool, req, sheetId, asOfIso, access, capabilities) // RE-ENUMERATE reverts + delete-set
+      // Cheap pre-txn fail-fast gate (UNCHANGED from before W0-1) — a too-large/gone/blocked sheet never
+      // even opens a transaction. This computation is NOT the authoritative one anymore: see the in-txn
+      // re-enumeration below (W0-1 §5 C8/C4).
+      const computed = await computeSheetReset(pool, req, sheetId, asOfIso, access, capabilities)
       if (!computed) return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
       if ('tooLarge' in computed) return res.status(413).json({ ok: false, error: { code: 'SHEET_TOO_LARGE', message: `This sheet has ${computed.recordCount} records, above the ${SHEET_REVERT_MAX_RECORDS}-record reset ceiling; a sheet-wide reset of this size is refused.` } })
-      // D-1c §0.6 rule 4 (TOCTOU): execute re-check — refused before previewIdentity verification and before
-      // the destructive transaction. Zero writes on this path.
+      // D-1c §0.6 rule 4 (TOCTOU): pre-txn fail-fast — refused before opening any transaction. The
+      // AUTHORITATIVE re-check (closing the remaining check→write gap) runs again inside the txn below.
       if ('historyIncomplete' in computed) return sendHistoryIncomplete(res)
       if ('blocked' in computed) return sendPitResetBlocked(res, computed.reason)
-      const { reverts, deletes, patchContext } = computed
-      // Verify the signed reset identity against the RE-ENUMERATED reverts AND delete-set. A record created between
-      // preview and execute re-enumerates into deletes; a delete target edited since preview changes its bound version.
-      const verdict = verifyPitResetPreviewIdentity(parsed.data.previewIdentity, {
-        sheetId, asOf: asOfIso, strategy: 'reset',
-        revertScopeHash: hashScope(reverts.map((r) => ({ recordId: r.recordId, changesHash: r.changesHash, version: r.version }))),
-        deleteScopeHash: hashDeleteSet(deletes.map((d) => ({ recordId: d.recordId, version: d.version }))), actorId: access.userId,
-      })
-      if (!verdict.valid) {
-        const status = verdict.reason === 'expired' ? 410 : 409
-        return res.status(status).json({ ok: false, error: { code: 'PREVIEW_IDENTITY_INVALID', message: `Reset preview identity rejected (${verdict.reason}); the sheet changed since preview — re-preview` } })
-      }
-      const { fieldById } = patchContext
 
       const actorId = getRequestActorId(req)
-      const affectedIds = [...new Set([...reverts.map((r) => r.recordId), ...deletes.map((d) => d.recordId)])]
       const batchId = randomUUID()
       const updatedRows: Array<{ recordId: string; version: number; fieldIds: string[]; patch: Record<string, unknown> }> = []
       const deletedRecordIds: string[] = []
 
       try {
         await pool.transaction(async ({ query }) => {
+          // W0-1 (corrected) §5 point 1 — the C4 fence: FIRST statement in the txn, outermost, before any
+          // FOR UPDATE (matches `createRecord`'s own lock ordering to avoid a lock-order inversion). Every
+          // OTHER writer that inserts into `meta_records` (createRecord, trash-restore, automation
+          // create_record — all now take this SAME advisory lock) blocks until this txn commits or rolls
+          // back, so a phantom insert from any of those paths cannot materialize mid-reset.
+          await acquireAutoNumberSheetWriteLock(query, sheetId)
+
+          // W0-1 (corrected) §5 points 2-3 — the C8 same-txn re-check: re-run the FULL compute (precheck +
+          // reverts/deletes re-enumeration) with the TXN's OWN query, now that the fence is held. This is
+          // the AUTHORITATIVE, atomic check — a concurrent uncaptured write or phantom insert that landed
+          // AFTER the pre-txn gate above is visible now (READ COMMITTED sees anything already committed)
+          // and is re-included/re-detected here, never silently missed.
+          const reenumerated = await computeSheetReset(pool, req, sheetId, asOfIso, access, capabilities, query)
+          if (!reenumerated || 'tooLarge' in reenumerated || 'blocked' in reenumerated) {
+            // Sheet vanished / grew past the ceiling / a target newly denied-forbidden-drifted since the
+            // pre-txn gate above — same "state changed since preview" family, mapped to one safe re-preview
+            // response (never a 500, never a partial write: nothing has been touched yet).
+            throw new ResetInTxnRecheckError('precondition_changed')
+          }
+          if ('historyIncomplete' in reenumerated) throw new ResetInTxnRecheckError('history_incomplete')
+          const { reverts, deletes, patchContext } = reenumerated
+
+          // previewIdentity verification MOVED inside the txn (§5 point 3): recompute the scope hashes
+          // from THIS in-txn, fence-protected set — never the stale pre-txn one. A phantom insert that
+          // re-enumerates into `deletes`, or any delete-set member whose version changed since preview,
+          // now produces a DIFFERENT hash and fails verification HERE — the whole txn rolls back and the
+          // phantom (or anything else) is NEVER silently swept into a reset the actor did not preview.
+          const verdict = verifyPitResetPreviewIdentity(parsed.data.previewIdentity, {
+            sheetId, asOf: asOfIso, strategy: 'reset',
+            revertScopeHash: hashScope(reverts.map((r) => ({ recordId: r.recordId, changesHash: r.changesHash, version: r.version }))),
+            deleteScopeHash: hashDeleteSet(deletes.map((d) => ({ recordId: d.recordId, version: d.version }))), actorId: access.userId,
+          })
+          if (!verdict.valid) throw new ResetInTxnRecheckError('identity_invalid', verdict.reason)
+
+          const { fieldById } = patchContext
+          const affectedIds = [...new Set([...reverts.map((r) => r.recordId), ...deletes.map((d) => d.recordId)])]
+
           const baseRow = (await query('SELECT base_id FROM meta_sheets WHERE id = $1', [sheetId])).rows[0] as Record<string, unknown> | undefined
           const baseId = typeof baseRow?.base_id === 'string' ? baseRow.base_id : null
           const lockedRows = affectedIds.length > 0
@@ -10583,6 +10659,18 @@ export function univerMetaRouter(): Router {
           }
         })
       } catch (err) {
+        // W0-1 (corrected) §5 C8/C4 — the in-txn re-check's own refusal family, thrown ABOVE inside the
+        // txn (so it always rolls back the whole txn, zero writes) and mapped here to the same response
+        // shapes the pre-txn gates already use, so a caller sees ONE consistent contract regardless of
+        // which check (pre-txn or in-txn) actually caught the change.
+        if (err instanceof ResetInTxnRecheckError) {
+          if (err.kind === 'history_incomplete') return sendHistoryIncomplete(res)
+          if (err.kind === 'identity_invalid') {
+            const status = err.identityReason === 'expired' ? 410 : 409
+            return res.status(status).json({ ok: false, error: { code: 'PREVIEW_IDENTITY_INVALID', message: `Reset preview identity rejected (${err.identityReason}); the sheet changed since preview — re-preview` } })
+          }
+          return res.status(409).json({ ok: false, error: { code: 'RESET_BLOCKED', message: 'Reset preconditions changed since preview; nothing written — re-preview.' } })
+        }
         if (err instanceof ServiceVersionConflictError || err instanceof RecordServiceVersionConflictError) {
           return res.status(409).json({ ok: false, error: { code: 'PREVIEW_IDENTITY_INVALID', message: 'Reset target changed since preview; nothing written — re-preview.' } })
         }
@@ -16414,19 +16502,33 @@ export function univerMetaRouter(): Router {
       }
       const actorId = getRequestActorId(req)
 
+      // W0-1 (corrected) §3 marker plan: the UPDATE and its `lock`/`unlock` marker revision now run in ONE
+      // transaction — recordRecordRevision in the SAME txn as the `version + 1` bump keeps the version
+      // chain +1-dense (content-neutral: snapshot NULL, patch {}, changed_field_ids []). Forward-only, no
+      // backfill (OD-5).
       if (parsed.data.locked) {
         // LOCK: must be allowed to edit this row.
         if (!capabilities.canEditRecord || !ensureRecordWriteAllowed(capabilities, sheetScope, access, createdBy, 'edit')) {
           return sendForbidden(res, 'Record editing is not allowed for this row')
         }
         const lockedBy = actorId ?? access.userId
-        // lock-mgmt: LOCK action — sets the lock columns (own canEditRecord authority above).
-        // revision-exempt: lock/unlock metadata-only — no `data` column touched, not a user-content edit.
-        await pool.query(
-          `UPDATE meta_records SET locked = true, locked_by = $2, locked_at = NOW(), version = version + 1, updated_at = NOW()
-           WHERE id = $1 AND sheet_id = $3`,
-          [recordId, lockedBy, sheetId],
-        )
+        await pool.transaction(async ({ query }) => {
+          // lock-mgmt: LOCK action — sets the lock columns (own canEditRecord authority above).
+          // revision-emitted: W0-1 (corrected) §3 marker — recordRecordRevision(action:'lock') below, same txn.
+          const updateRes = await query(
+            `UPDATE meta_records SET locked = true, locked_by = $2, locked_at = NOW(), version = version + 1, updated_at = NOW()
+             WHERE id = $1 AND sheet_id = $3
+             RETURNING version`,
+            [recordId, lockedBy, sheetId],
+          )
+          const updatedRow = (updateRes.rows as Array<{ version?: unknown }>)[0]
+          if (updatedRow) {
+            await recordRecordRevision(query, {
+              sheetId: sheetId as string, recordId, version: Number(updatedRow.version), action: 'lock',
+              source: 'rest', actorId, changedFieldIds: [], patch: {}, snapshot: null,
+            })
+          }
+        })
       } else {
         // UNLOCK: must pass canUnlock (locker ∨ owner ∨ sheet-admin).
         if (!canUnlock(actorId ?? access.userId ?? null, {
@@ -16435,13 +16537,23 @@ export function univerMetaRouter(): Router {
         }, capabilities)) {
           return sendForbidden(res, 'Not allowed to unlock this record')
         }
-        // lock-mgmt: UNLOCK action — clears the lock columns (own canUnlock authority above).
-        // revision-exempt: lock/unlock metadata-only — no `data` column touched, not a user-content edit.
-        await pool.query(
-          `UPDATE meta_records SET locked = false, locked_by = NULL, locked_at = NULL, version = version + 1, updated_at = NOW()
-           WHERE id = $1 AND sheet_id = $2`,
-          [recordId, sheetId],
-        )
+        await pool.transaction(async ({ query }) => {
+          // lock-mgmt: UNLOCK action — clears the lock columns (own canUnlock authority above).
+          // revision-emitted: W0-1 (corrected) §3 marker — recordRecordRevision(action:'unlock') below, same txn.
+          const updateRes = await query(
+            `UPDATE meta_records SET locked = false, locked_by = NULL, locked_at = NULL, version = version + 1, updated_at = NOW()
+             WHERE id = $1 AND sheet_id = $2
+             RETURNING version`,
+            [recordId, sheetId],
+          )
+          const updatedRow = (updateRes.rows as Array<{ version?: unknown }>)[0]
+          if (updatedRow) {
+            await recordRecordRevision(query, {
+              sheetId: sheetId as string, recordId, version: Number(updatedRow.version), action: 'unlock',
+              source: 'rest', actorId, changedFieldIds: [], patch: {}, snapshot: null,
+            })
+          }
+        })
       }
 
       const after = await pool.query('SELECT locked, locked_by, locked_at FROM meta_records WHERE id = $1', [recordId])
