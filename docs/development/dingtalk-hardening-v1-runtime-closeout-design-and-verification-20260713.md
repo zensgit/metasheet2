@@ -9,10 +9,16 @@ and the forward plan for the SECOND, separate milestone (Canonical Org & Provide
 Per the owner's judgment, the DingTalk line is **two milestones**, never one "钉钉线收官":
 
 1. **DingTalk Sync Hardening v1** — code basically complete; this document takes it to **运行态收官**
-   (runtime-closeout). **Runtime-closeout is still BLOCKED, not done** (owner review 2026-07-13):
-   OAuth-stability *metrics* observability is restored (DT-CLOSE-01B; the Alertmanager+webhook
-   alert-delivery topology is DEFERRED, not restored), deploy templates are reproducible, switches
-   are *ruled* (owners still `_TBD_` in the ledger), UAT is scaffolded (not executed).
+   (runtime-closeout). **Runtime-closeout is still BLOCKED, not done** (owner review 2026-07-13; status
+   as of 2026-07-13): OAuth-stability *metrics* observability is **NOT yet restored**. DT-CLOSE-01B
+   (**#4253**, OPEN, unarmed) only teaches the check a metrics-only *verdict* — decoupled from the
+   undeployed Alertmanager+webhook alert-delivery topology, which stays **deferred by design**, not
+   restored. Actually restoring the metric additionally needs: (a) an OAuth state-metrics *producer* —
+   `metasheet_dingtalk_oauth_state_operations_total` currently has **no producer anywhere on `main`**
+   — only the check script that reads it (`git grep` on `origin/main` finds zero emitters); a separate
+   producer PR is required and has not landed; (b) both the producer and #4253 deployed together; (c)
+   consecutive green live runs (ops). Deploy templates are reproducible, switches are *ruled* (owners
+   still `_TBD_` in the ledger), UAT is scaffolded (not executed).
 2. **Canonical Org & Provider Transfer v1** — **design done** (#4215 / #3944 landed), core impl **not
    started**; its MVP sequencing is a separate plan (see §4). It starts only after milestone 1 closes.
 
@@ -25,14 +31,17 @@ from templates (the switches the code reads weren't in any `.env` template), and
 
 ## 2. Deliverables (DT-CLOSE-01…05)
 
+*State column reflects GitHub PR status as of 2026-07-13 — re-check `gh pr view <N>` before relying on
+an OPEN/unarmed row, since those can change after this date.*
+
 | Ticket | What | PR | State | Model |
 | --- | --- | --- | --- | --- |
 | **DT-CLOSE-01** | Authenticate the OAuth-stability `/metrics/prom` scrape — token resolved on the deploy host (backend-container runtime, secret-safe), `x-metrics-token` header, unauth fallback; contract test that reddens if auth is removed | **#4236** | ✅ **MERGED** `cd1a36428` | me (Opus care — auth) |
-| **DT-CLOSE-02** | DingTalk env contract — every closeout key in `docker/app.env.example` + staging with code-accurate default + DANGER comment; contract test: missing-key → red, dangerous switch shipped ON → red | **#4240** | armed (squash) | Sonnet + Opus gate |
-| **DT-CLOSE-03** | Real-enterprise UAT evidence-pack scaffold — default-off smoke, U1–U13, real-callback corp-anchor, values-free rules | **#4241** | armed (owner/ops executes) | Sonnet |
-| **DT-CLOSE-04** | Switch-ruling ledger — every switch = explicitly-deferred or must-verify-enabled + rollback + owner; no unowned default-off | **#4241** | armed | Sonnet |
-| **DT-CLOSE-05** | Consolidated-MD status errata — #159 CLOSED, #4218/#4228 MERGED, #4176 superseded; reaffirm two-milestone split | **#4241** | ✅ merged | Sonnet |
-| **DT-CLOSE-01B** | *(owner review)* metrics-only downgrade — the check hard-depended on an undeployed Alertmanager+webhook topology (all 4 scheduled runs failed `curl (7) :9093`); soft-defer the topology + decouple the verdict from it; behavioral contract test (re-coupling reddens) | **#4253** | armed | me (Opus care) |
+| **DT-CLOSE-02** | DingTalk env contract — every closeout key in `docker/app.env.example` + staging with code-accurate default + DANGER comment; contract test: missing-key → red, dangerous switch shipped ON → red | **#4240** | ✅ **MERGED** `31ff515f8` | Sonnet + Opus gate |
+| **DT-CLOSE-03** | Real-enterprise UAT evidence-pack scaffold — default-off smoke, U1–U13, real-callback corp-anchor, values-free rules | **#4241** | ✅ **MERGED** `3385adab7` (owner/ops still executes the UAT itself) | Sonnet |
+| **DT-CLOSE-04** | Switch-ruling ledger — every switch = explicitly-deferred or must-verify-enabled + rollback + owner; no unowned default-off | **#4241** | ✅ **MERGED** `3385adab7` | Sonnet |
+| **DT-CLOSE-05** | Consolidated-MD status errata — #159 CLOSED, #4218/#4228 MERGED, #4176 superseded; reaffirm two-milestone split | **#4241** | ✅ **MERGED** `3385adab7` | Sonnet |
+| **DT-CLOSE-01B** | *(owner review)* metrics-only downgrade — the check hard-depended on an undeployed Alertmanager+webhook topology (all 4 scheduled runs failed `curl (7) :9093`); soft-defer the topology + decouple the verdict from it; behavioral contract test (re-coupling reddens) | **#4253** | **OPEN, unarmed** — under continued owner review (as of 2026-07-13); not merged | me (Opus care) |
 | **DT-CLOSE-02B** | *(owner review)* retention correction — the docs conflated GROUP-webhook retention (`dingtalk_group_deliveries`) with approval-card retention; corrected templates/U11-b/ledger/MDs; a first pass also wrongly filed the already-implemented, disabled-by-default `DINGTALK_DELIVERY_RETENTION_*` card/person family (#4142) as a non-existent gap — corrected here; fixed the ledger's stale pre-#4240 "in template?" column | **#4255** | this PR | me |
 
 **Owner review (2026-07-13) — runtime-closeout is BLOCKED, not done.** Two findings: (1) the OAuth
