@@ -25,7 +25,9 @@ function New-Fixture {
     [string]$BootstrapName = $null,          # override the bootstrap FILE name (mixed-package / wrong name)
     [bool]$BootstrapBadChecksum = $false,    # write the bootstrap but a WRONG SHA256SUMS entry for it
     [string]$MetaBootstrapName = $null,      # external metadata windowsFirstHopBootstrap value
-    [string]$MigrateBehaviour = $null        # 'confirm_fails' | 'confirm_ok' | $null (no migrate.js)
+    [string]$MigrateBehaviour = $null,       # 'confirm_fails' | 'confirm_ok' | $null (no migrate.js)
+    [bool]$NestedOnlyProvenance = $false,    # provenance ONLY in a nested subdir, NOT at the package root (owner P2)
+    [bool]$AmbiguousRoot = $false            # TWO top-level dirs in the archive (no single deterministic root)
   )
   $root = Join-Path ([System.IO.Path]::GetTempPath()) ("t9accept_" + [guid]::NewGuid().ToString('N').Substring(0, 12))
   New-Item -ItemType Directory -Path $root | Out-Null
@@ -46,9 +48,19 @@ function New-Fixture {
     # If that producer renames the field, THIS fixture must change too, or the reader would false-pass here
     # while false-failing on the real RC package.
     $prov = if ($BadProvenance -eq 'absent_key') { @{ schema = 'metasheet-onprem-build-provenance/v1'; builtAt = '2026-07-14' } } else { @{ schema = 'metasheet-onprem-build-provenance/v1'; gitCommit = $commit; builtAt = '2026-07-14' } }
-    ($prov | ConvertTo-Json) | Set-Content -Path (Join-Path $content 'BUILD_PROVENANCE.json')
+    # NestedOnly: write provenance ONLY into a nested subdir, leaving the package ROOT with no provenance —
+    # a recursive first-match reader would wrongly accept this; the root-only reader must reject it.
+    $provTarget = if ($NestedOnlyProvenance) { $sub = Join-Path $content 'nested'; New-Item -ItemType Directory -Path $sub -Force | Out-Null; Join-Path $sub 'BUILD_PROVENANCE.json' } else { Join-Path $content 'BUILD_PROVENANCE.json' }
+    ($prov | ConvertTo-Json) | Set-Content -Path $provTarget
   }
-  & tar -czf $pkg -C $stage 'ms2-onprem' 2>$null
+  if ($AmbiguousRoot) {
+    # A SECOND top-level dir → the archive has no single deterministic package root.
+    $content2 = Join-Path $stage 'ms2-onprem-extra'; New-Item -ItemType Directory -Path $content2 -Force | Out-Null
+    Set-Content -Path (Join-Path $content2 'README.txt') -Value 'second-root' -NoNewline
+    & tar -czf $pkg -C $stage 'ms2-onprem' 'ms2-onprem-extra' 2>$null
+  } else {
+    & tar -czf $pkg -C $stage 'ms2-onprem' 2>$null
+  }
 
   # SHA256SUMS: always the archive; the bootstrap entry when a bootstrap is present.
   $shaLines = @()
@@ -98,6 +110,14 @@ try {
 
   $r = Invoke-Acceptance (New-Fixture -BadProvenance 'short') $GOOD_SHA
   Check "provenance gitCommit not 40-hex -> sha FAIL (provenance_git_commit_absent)" ($r.Exit -eq 1 -and $r.Summary.failDetail.reason -eq 'provenance_git_commit_absent')
+
+  # owner P2: a malformed package with provenance ONLY nested (no root file) must FAIL, not read the nested one.
+  $r = Invoke-Acceptance (New-Fixture -ProvenanceGitCommit $GOOD_SHA -NestedOnlyProvenance $true) $GOOD_SHA
+  Check "provenance nested-only (no root file) -> sha FAIL (provenance_missing), never reads the nested one" ($r.Exit -eq 1 -and $r.Summary.failedStage -eq 'sha' -and $r.Summary.failDetail.reason -eq 'provenance_missing')
+
+  # owner P2: no single deterministic package root (two top-level dirs) -> FAIL (ambiguous root).
+  $r = Invoke-Acceptance (New-Fixture -ProvenanceGitCommit $GOOD_SHA -AmbiguousRoot $true) $GOOD_SHA
+  Check "ambiguous package root (2 top-level dirs) -> sha FAIL (provenance_root_ambiguous)" ($r.Exit -eq 1 -and $r.Summary.failedStage -eq 'sha' -and $r.Summary.failDetail.reason -eq 'provenance_root_ambiguous')
 
   $r = Invoke-Acceptance (New-Fixture -ProvenanceGitCommit $OTHER_SHA) $GOOD_SHA
   Check "in-archive gitCommit != ExpectedGitSha -> sha FAIL (git_sha_mismatch)" ($r.Exit -eq 1 -and $r.Summary.failDetail.reason -eq 'git_sha_mismatch')

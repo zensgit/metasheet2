@@ -8,7 +8,8 @@
 .DESCRIPTION
   Runs, in order, stopping at the first failed stage (never self-healing — no manual dependency
   patching, never MIGRATION_EXCLUDE):
-    1. packageShaMatch  — SHA256 of the package vs SHA256SUMS + optional -ExpectedGitSha vs metadata.
+    1. packageShaMatch  — SHA256 of the package vs SHA256SUMS + optional -ExpectedGitSha vs the archive's
+                          own BUILD_PROVENANCE.json.gitCommit (read from inside the checksummed archive).
     2. (install)        — the package's own *-deploy-bootstrap.ps1 (never re-implemented here).
     3. migrationStatus  — node dist/src/db/migrate.js, then confirm the target migration is applied.
     4. pm2StableOnline  — pm2 restart, then POLL that the process stays 'online' (not just that the
@@ -45,7 +46,8 @@
 .PARAMETER TenantId           Optional tenant id passed to the smoke (--tenant-id) when the admin
                               token carries no tenant claim.
 .PARAMETER TargetMigration    Migration name that MUST be applied after migrate (idempotent confirm).
-.PARAMETER ExpectedGitSha     Optional expected git commit SHA; compared to the package metadata SHA.
+.PARAMETER ExpectedGitSha     Optional expected git commit SHA; compared to BUILD_PROVENANCE.json.gitCommit
+                              read from INSIDE the archive (the checksummed bytes), not an external sidecar.
 .PARAMETER AdminTokenEnvVar   Env var holding the admin token (default METASHEET_ADMIN_TOKEN).
 .PARAMETER SummaryPath        Output path for acceptance-summary.txt (default ./acceptance-summary.txt).
 #>
@@ -148,9 +150,16 @@ function Get-ArchiveProvenanceGitCommit {
       & tar -xzf $ArchivePath -C $tmp 2>$null
       if ($LASTEXITCODE -ne 0) { throw 'provenance_archive_unreadable' }
     }
-    $prov = Get-ChildItem -Path $tmp -Recurse -Filter 'BUILD_PROVENANCE.json' -File -ErrorAction SilentlyContinue | Select-Object -First 1
-    if (-not $prov) { throw 'provenance_missing' }
-    $json = Get-Content $prov.FullName -Raw | ConvertFrom-Json
+    # Read ONLY <package-root>/BUILD_PROVENANCE.json — a well-formed package has exactly ONE top-level
+    # directory (package-build.sh: `tar -C $stage <PACKAGE_ROOT>`). A recursive first-match would accept a
+    # MALFORMED package whose ONLY provenance is buried in a nested path with no root file — a fake-PASS
+    # identity path (owner P2). So: require a single deterministic root, and read the root file exactly.
+    $topLevel = @(Get-ChildItem -Path $tmp -Force)
+    $topDirs = @($topLevel | Where-Object { $_.PSIsContainer })
+    if ($topDirs.Count -ne 1) { throw 'provenance_root_ambiguous' }   # 0 or >1 top-level dirs = not a single package root
+    $prov = Join-Path $topDirs[0].FullName 'BUILD_PROVENANCE.json'
+    if (-not (Test-Path $prov -PathType Leaf)) { throw 'provenance_missing' }  # nested-only / absent root file
+    $json = Get-Content $prov -Raw | ConvertFrom-Json
     $commit = if ($json.PSObject.Properties.Name -contains 'gitCommit') { "$($json.gitCommit)".ToLower() } else { '' }
     if (-not $commit -or $commit -notmatch '^[0-9a-f]{40}$') { throw 'provenance_git_commit_absent' }
     return $commit

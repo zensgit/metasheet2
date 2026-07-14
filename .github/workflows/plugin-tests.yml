@@ -99,6 +99,16 @@ jobs:
             scripts/ops/github-dingtalk-oauth-stability-summary.test.mjs \
             scripts/ops/dingtalk-oauth-stability-workflow-contract.test.mjs
 
+      # #4210 T9: the stock-preparation one-click acceptance script's contract + behavioural tests are
+      # pure pwsh 7 + tar + node (no DB, no live server — the pm2/health/smoke stages are unit-tested via
+      # dot-sourced pure helpers). ubuntu runners ship pwsh, so run them ONCE here (a few seconds) rather
+      # than duplicating across the Node 18/20 matrix. This is the only CI that executes these 31 checks.
+      - name: Run stock-preparation on-prem acceptance tests (T9, pwsh)
+        shell: pwsh
+        run: |
+          ./scripts/ops/__tests__/stock-preparation-onprem-acceptance.tests.ps1
+          ./scripts/ops/__tests__/stock-preparation-onprem-acceptance.behavior.tests.ps1
+
   test:
     runs-on: ubuntu-latest
 
