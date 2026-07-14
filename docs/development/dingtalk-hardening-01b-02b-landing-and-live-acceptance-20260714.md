@@ -36,13 +36,16 @@
 
 - 连续两次 scheduled run **SUCCESS**：run 29319848894（08:56Z @ `73b3796cf`）、
   run 29326896286（10:52Z @ `e8c37ec0c`）——两 SHA 均包含全部三个 merge（ancestry 已验）。
-  此前最后一次旧管线 run（06:58Z @ `e97068b72`，未含 producer）为 failure，符合预期。
+  此前最后一次旧管线 run（06:58Z @ `e97068b72`）为 failure——直接死因是旧脚本对 Alertmanager
+  `:9093` 的硬依赖 curl 中断（rc=7，无 JSON），#4253 的软探针修复了它；producer 缺失是软探针
+  落地后本会暴露的下一层原因（该 run 的 SHA 也未含 producer）。
 - `healthy: true`、`oauthMetricsPresent: true`：deploy host 的 `/metrics/prom` 上
   `operations_total` 4 条样本 + `fallback_total` 2 条样本，值全为 0——零值预初始化在生产精确生效。
 - `alertDeliveryObservability: deferred`：host 上 webhook 配置文件存在（`configured=true`）但告警
   拓扑不完整——三态逻辑正确拒绝 `observed`（full-script 测试 state-4 行为在生产复现）。
-- 部署链：docker-build（build+deploy）在每次 main push 后成功（`983802abf` @ 08:15Z 起
-  主机镜像即含 producer），无需人工部署步骤。
+- 部署链：docker-build（build+deploy job，SSH 到主机）在每次 main push 后成功——producer 自
+  `fab40e848` @ 07:48Z 的部署起即在主机上（08:15Z @ `983802abf` 为三合并齐备的锚点），
+  无需人工部署步骤。
 
 ## 4. 剩余收官项（全部 owner/ops，开发侧无遗留）
 
