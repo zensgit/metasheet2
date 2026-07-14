@@ -5,18 +5,38 @@ name: Multitable Recovery-Flag Containment Check
 # `MULTITABLE_ENABLE_PIT_RESET` must stay off until the W0-1 correction lock (#4262) is built and gated.
 # Code-default-off is NOT evidence about the environment; this workflow produces the ops-side evidence leg.
 #
-# READ-ONLY: ssh + `docker ps` + `docker exec <backend> env` reads. No writes, no restarts, no config edits.
-# Intentionally NOT scheduled; dispatch manually. FAIL-CLOSED: the job fails if either flag is active in any
-# backend container, if an env file under DEPLOY_PATH sets one active, or — positive control — if NO backend
-# container is observable at all (nothing-observed must never read as "contained").
+# READ-ONLY: ssh + `docker ps` + `docker exec <backend> env` + `docker inspect` + `docker compose config`
+# reads. No writes, no restarts, no config edits.
+#
+# `target` is a fixed `choice` input (staging | production | both) — NEVER free text. The chosen value is
+# mapped, before the ssh call, to a hard-coded expected-container list (the real `container_name:` values
+# from docker-compose.app.yml / docker-compose.app.staging.yml on origin/main: `metasheet-backend` for
+# production, `metasheet-staging-backend` for staging). Only that mapped constant — never the raw input —
+# is interpolated onto the remote ssh command line, so there is no shell-metacharacter injection surface.
+#
+# Two verification legs, both fail-closed:
+#   1. Running env: every expected container must be observed running and have its live env checked;
+#      missing ANY expected container ⇒ FAIL (a substring match on some unrelated container never suffices).
+#   2. Next-restart (authoritative): the compose project's OWN config is derived from the running
+#      container's own labels (`com.docker.compose.project.config_files` /
+#      `com.docker.compose.project.working_dir`), then rendered read-only via `docker compose config` —
+#      this covers env_file AND compose YAML/override merges, not just a directory's top-level `.env*`
+#      files — and the two flags are verdicted against that rendered, fully-resolved config.
+#
+# Intentionally NOT scheduled; dispatch manually. FAIL-CLOSED throughout: a flag active (=true/1) anywhere
+# — running env OR rendered compose config — fails the job; a missing expected container, a broken/
+# implausible env or compose-config read, or an unresolvable compose-project label all fail the job too.
+# Nothing-observed must never read as "contained".
 
 on:
   workflow_dispatch:
     inputs:
-      container_match:
-        description: 'Substring to match backend container names (checks every running match)'
-        required: false
-        default: 'backend'
+      target:
+        description: 'Which stack to verify. Fixed choices only — never free text reaches the remote host.'
+        required: true
+        type: choice
+        options: [staging, production, both]
+        default: both
 
 concurrency:
   group: multitable-recovery-flag-containment-check
@@ -35,34 +55,76 @@ jobs:
           DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
           DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
           DEPLOY_SSH_KEY_B64: ${{ secrets.DEPLOY_SSH_KEY_B64 }}
-          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
-          CONTAINER_MATCH: ${{ github.event.inputs.container_match || 'backend' }}
+          TARGET: ${{ github.event.inputs.target }}
         run: |
           set -euo pipefail
           mkdir -p ~/.ssh
           printf '%s' "$DEPLOY_SSH_KEY_B64" | base64 -d > ~/.ssh/deploy_key
           chmod 600 ~/.ssh/deploy_key
           ssh_opts="-o StrictHostKeyChecking=no -o IdentitiesOnly=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=6 -i ~/.ssh/deploy_key"
-          DEPLOY_PATH="${DEPLOY_PATH:-metasheet2}"
 
-          # Remote script (single quoted heredoc — nothing expands locally). Verdict lines are machine-greppable.
-          ssh $ssh_opts "$DEPLOY_USER@$DEPLOY_HOST" CONTAINER_MATCH="$CONTAINER_MATCH" DEPLOY_PATH="$DEPLOY_PATH" 'bash -s' <<'REMOTE' | tee containment-report.txt
+          # Map the validated `choice` input to a hard-coded, known-safe container list. This case
+          # statement is the ONLY place the input is consulted; every branch yields a fixed constant
+          # (the real container_name values below), and the unmapped default fails closed instead of
+          # ever falling through to interpolate the raw input string anywhere.
+          case "$TARGET" in
+            staging)
+              EXPECTED_CONTAINERS="metasheet-staging-backend"
+              ;;
+            production)
+              EXPECTED_CONTAINERS="metasheet-backend"
+              ;;
+            both)
+              EXPECTED_CONTAINERS="metasheet-backend metasheet-staging-backend"
+              ;;
+            *)
+              echo "::error::unexpected target '${TARGET}' (expected staging|production|both) — refusing to proceed"
+              exit 1
+              ;;
+          esac
+
+          echo "target='${TARGET}' -> EXPECTED_CONTAINERS='${EXPECTED_CONTAINERS}'"
+
+          # Remote script (single-quoted heredoc — nothing expands locally). Verdict lines are
+          # machine-greppable. EXPECTED_CONTAINERS (the hard-coded constant from the case statement
+          # above) is the ONLY input-derived token interpolated onto the ssh command line — the raw
+          # $TARGET value itself never reaches the remote shell, only this mapped constant does.
+          ssh $ssh_opts "$DEPLOY_USER@$DEPLOY_HOST" EXPECTED_CONTAINERS="$EXPECTED_CONTAINERS" 'bash -s' <<'REMOTE' | tee containment-report.txt
           set -uo pipefail
           FLAGS="MULTITABLE_ENABLE_SHEET_REVERT MULTITABLE_ENABLE_PIT_RESET"
           fail=0
           checked=0
 
-          echo "== running backend containers matching '${CONTAINER_MATCH}' =="
-          names=$(docker ps --format '{{.Names}}' | grep -i -- "${CONTAINER_MATCH}" || true)
-          if [ -z "$names" ]; then
-            echo "VERDICT: FAIL (positive control) — zero containers matched '${CONTAINER_MATCH}'; nothing observed is not containment evidence"
+          if ! command -v docker >/dev/null 2>&1; then
+            echo "VERDICT: FAIL — docker not available on host (observation broken)"
+            exit 2
+          fi
+          if ! docker compose version >/dev/null 2>&1; then
+            echo "VERDICT: FAIL — 'docker compose' v2 plugin not available (next-restart check unavailable)"
+            exit 2
+          fi
+          # Defense in depth: the remote script must not trust the caller to have supplied a
+          # non-empty EXPECTED_CONTAINERS. An empty/blank value would otherwise make the loop
+          # below a no-op — checked=0, fail=0 — and fall through to a false PASS. Nothing
+          # expected is not containment evidence either.
+          if [ -z "${EXPECTED_CONTAINERS// /}" ]; then
+            echo "VERDICT: FAIL (positive control) — EXPECTED_CONTAINERS is empty; refusing to report PASS on zero expectations"
             exit 2
           fi
 
-          for name in $names; do
+          echo "== expected containers: ${EXPECTED_CONTAINERS} =="
+          running_names=$(docker ps --format '{{.Names}}')
+
+          for name in $EXPECTED_CONTAINERS; do
             checked=$((checked+1))
             echo "-- container: $name"
-            # Positive control per container: the env read itself must work and be non-trivial.
+            if ! printf '%s\n' "$running_names" | grep -qxF "$name"; then
+              echo "VERDICT: FAIL (positive control) — expected container '$name' is NOT running; nothing observed is not containment evidence"
+              fail=1
+              continue
+            fi
+
+            # Leg 1: running env (what the container has RIGHT NOW).
             envdump=$(docker exec "$name" env 2>/dev/null) || { echo "VERDICT: FAIL — cannot exec/env in $name (observation broken)"; fail=1; continue; }
             count=$(printf '%s\n' "$envdump" | wc -l)
             echo "   observed env vars: $count"
@@ -71,31 +133,81 @@ jobs:
               raw=$(printf '%s\n' "$envdump" | grep -E "^${f}=" | head -1 | cut -d= -f2- || true)
               norm=$(printf '%s' "${raw:-}" | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')
               if [ -z "${raw+x}" ] || [ -z "$raw" ]; then
-                echo "   $f: unset — CONTAINED"
+                echo "   [running] $f: unset — CONTAINED"
               elif [ "$norm" = "true" ] || [ "$norm" = "1" ]; then
-                echo "   $f=$raw — ACTIVE ⇒ CONTAINMENT BREACH"
+                echo "   [running] $f=$raw — ACTIVE ⇒ CONTAINMENT BREACH"
                 fail=1
               else
-                echo "   $f=$raw — inactive value — CONTAINED"
+                echo "   [running] $f=$raw — inactive value — CONTAINED"
               fi
             done
-          done
 
-          echo "== env files under ${DEPLOY_PATH} (second leg: what the NEXT container start would get) =="
-          for envfile in $(find "$DEPLOY_PATH" -maxdepth 2 -name '.env*' -o -maxdepth 2 -name '*.env' 2>/dev/null | head -10); do
+            # Leg 2: authoritative next-restart check. Derive the compose project's OWN config from the
+            # running container's own compose labels (covers env_file AND compose YAML/override merges,
+            # not just a directory's top-level .env* files), then render the fully-resolved config
+            # read-only with `docker compose config` and verdict against that rendering.
+            config_files=$(docker inspect "$name" --format '{{ index .Config.Labels "com.docker.compose.project.config_files" }}' 2>/dev/null || true)
+            working_dir=$(docker inspect "$name" --format '{{ index .Config.Labels "com.docker.compose.project.working_dir" }}' 2>/dev/null || true)
+            if [ -z "$config_files" ] || [ -z "$working_dir" ]; then
+              echo "VERDICT: FAIL — cannot resolve compose project labels for $name (next-restart check unavailable)"
+              fail=1
+              continue
+            fi
+
+            compose_args=()
+            old_ifs="$IFS"
+            IFS=','
+            for cf in $config_files; do
+              compose_args+=(-f "$cf")
+            done
+            IFS="$old_ifs"
+
+            cfg_out="$(mktemp)"
+            cfg_err="$(mktemp)"
+            if ! docker compose "${compose_args[@]}" --project-directory "$working_dir" config >"$cfg_out" 2>"$cfg_err"; then
+              echo "VERDICT: FAIL — 'docker compose config' failed for $name (next-restart check broken)"
+              sed 's/^/   compose-config-stderr: /' "$cfg_err" 2>/dev/null || true
+              rm -f "$cfg_out" "$cfg_err"
+              fail=1
+              continue
+            fi
+            rendered_lines=$(wc -l < "$cfg_out")
+            echo "   rendered compose config: ${rendered_lines} lines (project: ${working_dir})"
+            if [ "$rendered_lines" -lt 5 ]; then
+              echo "VERDICT: FAIL — rendered compose config for $name implausibly small (observation broken)"
+              rm -f "$cfg_out" "$cfg_err"
+              fail=1
+              continue
+            fi
+
             for f in $FLAGS; do
-              hit=$(grep -E "^[[:space:]]*${f}[[:space:]]*=" "$envfile" 2>/dev/null | grep -viE "=[[:space:]]*(false|0|)[[:space:]]*$" || true)
-              if [ -n "$hit" ]; then
-                echo "   $envfile sets ACTIVE: $hit ⇒ CONTAINMENT BREACH (next restart would enable)"
-                fail=1
+              hits=$(grep -E "^[[:space:]]*${f}[[:space:]]*:" "$cfg_out" || true)
+              if [ -z "$hits" ]; then
+                echo "   [next-restart] $f: absent from rendered compose config — CONTAINED"
+                continue
+              fi
+              breach=0
+              while IFS= read -r line; do
+                [ -z "$line" ] && continue
+                val=$(printf '%s' "$line" | sed -E 's/^[^:]*:[[:space:]]*//' | sed -E 's/^"(.*)"$/\1/' | sed -E "s/^'(.*)'\$/\1/")
+                norm=$(printf '%s' "$val" | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')
+                if [ "$norm" = "true" ] || [ "$norm" = "1" ]; then
+                  echo "   [next-restart] $f=$val — ACTIVE ⇒ CONTAINMENT BREACH (next restart of $name would enable it)"
+                  fail=1
+                  breach=1
+                fi
+              done <<< "$hits"
+              if [ "$breach" -eq 0 ]; then
+                echo "   [next-restart] $f — inactive in all rendered occurrences — CONTAINED"
               fi
             done
+            rm -f "$cfg_out" "$cfg_err"
           done
 
           echo "== summary =="
-          echo "containers checked: $checked"
+          echo "containers expected: $checked"
           if [ "$fail" -ne 0 ]; then echo "VERDICT: FAIL — containment breached or observation broken (see above)"; exit 1; fi
-          echo "VERDICT: PASS — both recovery flags inactive in every observed backend container and env file"
+          echo "VERDICT: PASS — both recovery flags inactive in every expected container's running env AND in its rendered next-restart compose config"
           REMOTE
 
       - name: Upload report
