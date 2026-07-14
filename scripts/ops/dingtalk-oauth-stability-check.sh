@@ -17,6 +17,11 @@ MAX_ROOT_USE_PERCENT="${MAX_ROOT_USE_PERCENT:-95}"
 DEPLOY_PATH="${DEPLOY_PATH:-metasheet2}"
 DEPLOY_COMPOSE_FILE="${DEPLOY_COMPOSE_FILE:-docker-compose.app.yml}"
 
+# Fail-honest docker-logs match-count pipeline builders (alertmanager_error_count_cmd,
+# bridge_notify_count_cmd, bridge_resolved_count_cmd) — see the file for the contract.
+# shellcheck source=./dingtalk-oauth-stability-log-probe-cmds.sh
+source "${ROOT_DIR}/scripts/ops/dingtalk-oauth-stability-log-probe-cmds.sh"
+
 ssh_cmd() {
   ssh -i "${SSH_KEY}" -o BatchMode=yes -o StrictHostKeyChecking=no "${SSH_USER_HOST}" "$@"
 }
@@ -55,12 +60,14 @@ REMOTE
 # the verdict (report['healthy']) does NOT depend on them. Alert-delivery observability is DEFERRED
 # to a follow-up that actually deploys the topology; this check no longer claims it is "restored".
 ALERT_TOPOLOGY_DEFERRED="false"
-# NOTE: each of these three probes must set ALERT_TOPOLOGY_DEFERRED from the PARENT shell on failure.
-# `WEBHOOK_STATUS="$(cmd || { ALERT_TOPOLOGY_DEFERRED=true; ... })"` is a bug: the `|| { ... }` runs
-# INSIDE the `$( ... )` command substitution, which is a SUBSHELL — the assignment never propagates
-# to the parent shell and ALERT_TOPOLOGY_DEFERRED silently stays "false" even when the probe failed.
-# Repro: `X=false; Y=$(false || { X=true; echo z; }); echo $X` prints `false`. Use a parent-shell
-# if/else instead so the assignment sticks; the `if` consumes the non-zero exit so `set -e` does not abort.
+# NOTE: each of these SIX probes (webhook-status, alertmanager-status, alerts, and the three
+# docker-logs match-count probes below) must set ALERT_TOPOLOGY_DEFERRED from the PARENT shell on
+# failure. `WEBHOOK_STATUS="$(cmd || { ALERT_TOPOLOGY_DEFERRED=true; ... })"` is a bug: the `|| { ... }`
+# runs INSIDE the `$( ... )` command substitution, which is a SUBSHELL — the assignment never
+# propagates to the parent shell and ALERT_TOPOLOGY_DEFERRED silently stays "false" even when the
+# probe failed. Repro: `X=false; Y=$(false || { X=true; echo z; }); echo $X` prints `false`. Use a
+# parent-shell if/else instead so the assignment sticks; the `if` consumes the non-zero exit so
+# `set -e` does not abort.
 if WEBHOOK_STATUS="$(bash "${ROOT_DIR}/scripts/ops/set-dingtalk-onprem-alertmanager-webhook-config.sh" --print-status 2>/dev/null)"; then
   :
 else
@@ -81,9 +88,33 @@ else
   ALERT_TOPOLOGY_DEFERRED="true"
   ALERTS_JSON='[]'
 fi
-ALERTMANAGER_ERROR_COUNT="$(ssh_cmd "docker logs --since ${LOG_WINDOW} metasheet-alertmanager 2>&1 | grep -E 'Notify for alerts failed|no_text' | wc -l | tr -d ' '" 2>/dev/null || printf '0')"
-BRIDGE_NOTIFY_COUNT="$(ssh_cmd "docker logs --since ${LOG_WINDOW} metasheet-alert-webhook 2>&1 | grep '\"path\": \"/notify\"' | wc -l | tr -d ' '" 2>/dev/null || printf '0')"
-BRIDGE_RESOLVED_COUNT="$(ssh_cmd "docker logs --since ${LOG_WINDOW} metasheet-alert-webhook 2>&1 | grep '\"path\": \"/notify\"' | grep '\"status\": \"resolved\"' | wc -l | tr -d ' '" 2>/dev/null || printf '0')"
+# SECOND bug class (distinct from the subshell-assignment one above): these three probes pipe
+# `docker logs | grep | wc -l` over ssh. `wc -l` ALWAYS exits 0 no matter what fed it, so a `docker
+# logs` failure (container missing, daemon down) used to be silently reported as a successful "0"
+# count — the `|| printf 0` local fallback never even ran, because the remote pipeline itself never
+# failed. The pipeline strings below (built by the sourced dingtalk-oauth-stability-log-probe-cmds.sh)
+# enable `pipefail` on the remote shell so a `docker logs` failure propagates as a non-zero exit while
+# a genuine zero-match read still exits 0 — see that file for the full contract. Combined with the
+# parent-shell if/else here, a probe failure now correctly sets ALERT_TOPOLOGY_DEFERRED instead of
+# being read as "0 events, alert delivery topology fine".
+if ALERTMANAGER_ERROR_COUNT="$(ssh_cmd "$(alertmanager_error_count_cmd)" 2>/dev/null)"; then
+  :
+else
+  ALERT_TOPOLOGY_DEFERRED="true"
+  ALERTMANAGER_ERROR_COUNT="0"
+fi
+if BRIDGE_NOTIFY_COUNT="$(ssh_cmd "$(bridge_notify_count_cmd)" 2>/dev/null)"; then
+  :
+else
+  ALERT_TOPOLOGY_DEFERRED="true"
+  BRIDGE_NOTIFY_COUNT="0"
+fi
+if BRIDGE_RESOLVED_COUNT="$(ssh_cmd "$(bridge_resolved_count_cmd)" 2>/dev/null)"; then
+  :
+else
+  ALERT_TOPOLOGY_DEFERRED="true"
+  BRIDGE_RESOLVED_COUNT="0"
+fi
 ROOT_DF_LINE="$(ssh_cmd "df -P / | awk 'NR==2 {print \$2\" \"\$3\" \"\$4\" \"\$5}'")"
 
 WEBHOOK_STATUS_INPUT="${WEBHOOK_STATUS}" \
