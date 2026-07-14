@@ -85,7 +85,7 @@ export interface PlmEmbedWriteTokenClient {
   dispose(): void
 }
 
-function randomNonce(): string {
+function randomNonce(): string | null {
   const cryptoApi = globalThis.crypto as { randomUUID?: () => string; getRandomValues?: <T extends ArrayBufferView>(a: T) => T } | undefined
   if (typeof cryptoApi?.randomUUID === 'function') return cryptoApi.randomUUID()
   if (typeof cryptoApi?.getRandomValues === 'function') {
@@ -93,8 +93,11 @@ function randomNonce(): string {
     cryptoApi.getRandomValues(bytes)
     return Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('')
   }
-  // Defensive-only fallback; every supported runtime (browser + jsdom test env) provides `crypto`.
-  return `wtok-${Date.now()}-${Math.random().toString(36).slice(2)}`
+  // FAIL CLOSED (adversarial-verify P2): with no CSPRNG, return null so requestWriteToken() rejects
+  // and posts NOTHING. A predictable Date.now()+Math.random() nonce would weaken the correlation
+  // lock; a write channel must not silently degrade. Every supported runtime (browser + jsdom test
+  // env) provides Web Crypto, so this is a fail-closed guard, not an expected path.
+  return null
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -176,6 +179,9 @@ export function createPlmEmbedWriteTokenClient(getParentOrigin: () => string | n
     }
 
     const nonce = randomNonce()
+    if (nonce === null) {
+      return Promise.reject(new PlmEmbedWriteTokenError('secure randomness (Web Crypto) is unavailable'))
+    }
     return new Promise<string>((resolve, reject) => {
       const timeoutHandle = setTimeout(() => {
         settleInFlight()
