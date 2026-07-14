@@ -17,7 +17,7 @@
  * `activationValue` is the EXACT string the flag must equal (after `.trim()`, and after `.toLowerCase()`
  * only when `caseInsensitive: true`) for the gated code path to treat it as ON. Two families exist:
  *   - capture/replay/revert flags compare with `=== 'true'` (case-SENSITIVE, no trim in most call sites,
- *     except PIT_RESET/PIT_UNDELETE which use `.trim().toLowerCase() === 'true'`)
+ *     except PIT_RESET/PIT_UNDELETE/PIT_REVERT which use `.trim().toLowerCase() === 'true'`)
  *   - the retention flag compares with `=== '1'` (NOT `'true'`) — `meta-revision-retention.ts:60`
  * Setting the wrong string for a given flag is silent: the gated code path stays OFF and nothing errors.
  */
@@ -34,7 +34,7 @@
  * @property {string} key
  * @property {'boolean'|'numeric'|'enum'} type
  * @property {string} activationValue - exact string that activates a boolean flag (ignored for numeric/enum)
- * @property {boolean} [caseInsensitive] - true only for the two flags whose source call site lowercases+trims
+ * @property {boolean} [caseInsensitive] - true only for the three flags (PIT_RESET/PIT_UNDELETE/PIT_REVERT) whose source call site lowercases+trims
  * @property {string[]} dependsOn - other flag keys that MUST also be active for this flag's gated effect to be safe/whole
  * @property {string[]} conflictsWith - other flag keys that MUST NOT be active at the same time as this one
  * @property {'low'|'medium'|'high'} danger
@@ -165,8 +165,9 @@ export const GLOBAL_HISTORY_FLAG_MANIFEST = Object.freeze([
     danger: 'high',
     purpose:
       'W0 step-1 — emergency master gate on the DESTRUCTIVE point-in-time revert-execute (whole-sheet rollback to T; OVERWRITES live data). Gated by PIT_REVERT_ENABLED() (`.trim().toLowerCase() === \'true\'`) as the FIRST statement of revert-execute — before parse/auth/DB — returning 403 REVERT_DISABLED. Read-only revert-preview is intentionally NOT gated. Default OFF until the full W0 integrity work lands: the trustworthiness precheck enumerates LIVE rows only and the reconstructor orders by created_at (= transaction-start via now()), so a mid-history healed gap / a deleted record\'s broken chain / a concurrent version-vs-time inversion can still overwrite with a WRONG T-state.',
-    // source: packages/core-backend/src/routes/univer-meta.ts (PIT_REVERT_ENABLED helper + the gate as revert-execute's first statement)
-    source: 'packages/core-backend/src/routes/univer-meta.ts:10100,10151',
+    // source: packages/core-backend/src/routes/univer-meta.ts (PIT_REVERT_ENABLED helper :10115; the gate as
+    //   revert-execute's first statement :10169; the two-gate undeleteSupported conjunction in revert-preview :10149)
+    source: 'packages/core-backend/src/routes/univer-meta.ts:10115,10149,10169',
   },
   {
     key: 'MULTITABLE_ENABLE_PIT_UNDELETE',

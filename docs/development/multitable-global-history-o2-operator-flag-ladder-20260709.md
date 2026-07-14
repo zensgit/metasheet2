@@ -6,7 +6,7 @@
 
 ## 1. Flag 清单（本线相关，全部默认 OFF）
 
-> **单一真源（R12-C，2026-07-12）**：本表是人读摘要、**并不完整**（本线共 **19** 个 flag）。**权威、完整、机器校验的清单 = `scripts/ops/global-history-flag-manifest.mjs`**；开关前请跑 `node scripts/ops/multitable-global-history-flag-status.mjs --strict`（展示全部 flag + 拒绝非法组合：lossy 无 base / side-door 无 capture / PIT-reset 撞 retention）。**本表若与 manifest 冲突，以 manifest 为准。**
+> **单一真源（R12-C，2026-07-12；2026-07-14 W0 step-1 +1）**：本表是人读摘要、**并不完整**（本线共 **20** 个 flag，W0 step-1 加入 `MULTITABLE_ENABLE_PIT_REVERT`）。**权威、完整、机器校验的清单 = `scripts/ops/global-history-flag-manifest.mjs`**；开关前请跑 `node scripts/ops/multitable-global-history-flag-status.mjs --strict`（展示全部 flag + 拒绝非法组合：lossy 无 base / side-door 无 capture / PIT-reset 撞 retention / **undelete 无 revert 总闸**）。**本表若与 manifest 冲突，以 manifest 为准。**
 
 | Flag | 激活值 | 作用 | 出处 |
 |---|---|---|---|

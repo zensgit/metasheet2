@@ -31,6 +31,7 @@ let priorRevert: string | undefined
 let priorUndelete: string | undefined
 const restoreEnv = (key: string, prior: string | undefined) => { if (prior === undefined) delete process.env[key]; else process.env[key] = prior }
 const revertExecute = (body: unknown) => request(app).post(`/api/multitable/sheets/${SHEET}/revert-execute`).send(body)
+const revertPreview = (body: unknown) => request(app).post(`/api/multitable/sheets/${SHEET}/revert-preview`).send(body)
 const countWhere = async (table: string) => Number((await q(`SELECT count(*)::int AS n FROM ${table} WHERE sheet_id = $1`, [SHEET])).rows[0].n)
 
 async function seed(): Promise<void> {
@@ -104,5 +105,29 @@ describeIfDatabase('multitable W0 step-1 revert-execute default-off gate (real D
     const res = await revertExecute({ garbage: true }) // no valid body → should now reach parse → 400 VALIDATION_ERROR
     expect(res.body?.error?.code).not.toBe('REVERT_DISABLED') // proves the gate is what refused above, not an always-403
     expect(res.status).toBe(400)
+  })
+
+  // W0 step-1 review P2: revert-preview's `undeleteSupported` must be the TWO-GATE conjunction, and this
+  // must be LOAD-BEARING. The existing undelete real-DB tests set PIT_REVERT on in beforeAll, so deleting
+  // `&& PIT_REVERT_ENABLED()` from the preview leaves them green. This four-state matrix exercises all
+  // combinations against the LIVE preview route (which is NOT gated, so it runs in every state); the
+  // revert-OFF/undelete-ON row is the discriminator — it MUST report false, so the mutation flips it to
+  // true and this test goes red.
+  test('revert-preview undeleteSupported is the two-gate conjunction (four-state matrix, mutation-catching)', async () => {
+    const cases = [
+      { revert: false, undelete: false, expected: false },
+      { revert: true, undelete: false, expected: false },
+      { revert: false, undelete: true, expected: false }, // discriminator: remove `&& PIT_REVERT_ENABLED()` → this flips to true
+      { revert: true, undelete: true, expected: true },
+    ]
+    for (const c of cases) {
+      if (c.revert) process.env.MULTITABLE_ENABLE_PIT_REVERT = 'true'
+      else delete process.env.MULTITABLE_ENABLE_PIT_REVERT
+      if (c.undelete) process.env.MULTITABLE_ENABLE_PIT_UNDELETE = 'true'
+      else delete process.env.MULTITABLE_ENABLE_PIT_UNDELETE
+      const res = await revertPreview({ asOf: T0 })
+      expect(res.status).toBe(200)
+      expect(res.body?.data?.undeleteSupported).toBe(c.expected)
+    }
   })
 })
