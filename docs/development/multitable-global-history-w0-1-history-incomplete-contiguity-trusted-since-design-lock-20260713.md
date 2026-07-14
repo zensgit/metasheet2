@@ -52,3 +52,37 @@ execute 的复检 + 恢复写入须**同一事务 + `FOR UPDATE` scope 行**:进
 - 本锁是 W0 第一刀;5 刀 revision 写入(form/plugin/automation/approval/attachment)+ OD-6 guard(#4227)排其后。**W0 未成可信闭环前不启用更多恢复 flag。**
 
 **收官口径**:design-only;§0.6 升级为连续性证明的设计已锁,healed-gap 已实证;实现待 owner ratify OD-W0-1..4 + 迁移排序验。这是 owner「先把 W0 做成可信闭环」的第一刀设计。
+
+---
+
+## §6 OWNER 裁决(2026-07-14)— 方向校准 + 首刀 scope + 延迟尾
+
+owner 复审本锁 + #4252(C1–C8 验证)后裁决:**「不要做 global version-unique,要做 generation-aware contiguity + site disposition。同意改道。」** 逐字要点:
+
+### §6.1 已裁的设计口径
+- **OD-W0-1 = 显式 marker,覆盖 4 个 lock/unlock 站点**(非只 HTTP pair):HTTP `univer-meta.ts:16426`(lock)/`:16441`(unlock)+ **automation** `automation-executor.ts:3493`(lock)/`:3504`(unlock)。四者都是「版本递增但不写 revision」的**合法例外**,**必须显式 marker**——否则守卫会给未来维护者留下「已捕获」的错觉。
+- **系统 sheet 排除走统一 predicate**,不散写站点豁免:`isSystemSheet(sheet) = isApprovalProjectionBaseId(base_id) || isSystemPeopleSheetDescription(description)`。**people directory sync 与 approval projection reprojection 是系统再生读模型**,不进用户历史完整性模型(它们合法地非连续)。
+- **generation / vintage 模型(必进 spec + golden)**:`generation = count(create revisions at-or-before)`;**但 delete revision 可复用 last live version**,所以**不能用单调 version 唯一性推历史完整性**(C5 的实质)。这点后续实现极易写错,须钉死。
+- **`recreateFieldFromConfig`(`:6522`)不得被吞成合法豁免**:它是**内容完整性**缺口,不是 version-contiguity 缺口。保留为 **flagged tail / OD-6 MUST-WRITE**(见 OD-6 守卫 #4251 的 `revision-pending` 具名追踪)。**本轮守卫绿不得掩盖它。**
+- **trash-restore `source='rest'` vs 注释写 "restore"**:作**注释/测试口径修正**,勿让 spec 引用错事实。
+
+### §6.2 首刀 scope(owner:「让实现只做这四件事」)
+1. **generation-aware contiguity**(替换 #4234 的 live-vs-latest;精确集非 count,C1/C5)。
+2. **4 个 lock/unlock markers**(§6.1,HTTP + automation)。
+3. **统一 `isSystemSheet` 排除**(§6.1)。
+4. **C8 same-txn + C4 fence**(execute 复检移入破坏性事务内、在 fence 后;C4 机制 SERIALIZABLE / sheet-lock / advisory 三选一,实现择安全者并证,若视为真 fork 回报 owner)。
+
+### §6.3 延迟尾(**明标、不得被守卫绿掩盖**,与 recreateFieldFromConfig 同纪律)
+owner「只做这四件」⇒ #4252 的以下条件**本刀不做,但显式 docket 为后续**,须在 OD-6/W0-1 报告里钉死:
+- **C2 时间单调性**(`created_at`=txn-start,版本升序/时间降序可选错 T-snapshot)——本刀不解,报告标「已知残余:PIT 时间锚未证单调」。
+- **C3 已删记录链的 healed-gap**(live-only 枚举漏 tombstoned resurrect)——本刀不解,标后续。
+- **C6 trusted-since 锚 + 滚动上线协议**(checkpoint / 水位持久化 / 跨 regime 边界的旧实例写)——本刀不解,标后续。
+- **C7 marker 词汇迁移**(`action CHECK` 只收 create/update/delete;若 marker 走轻量 revision 须迁 CHECK + 闭类型 + 同步 History UI/retention/reconstructor)——随本刀 marker 方案定,若采独立 marker 表则规避 C7。
+
+### §6.4 验收锚(fail-first)
+#4252 §6.1 的 **healed-gap 反例**(record v3、revisions 仅 {v1,v3}、live==v3 ⇒ revert-preview(T∈(v1,v3)) 必 **409**)= 本刀首个 fail-first golden。live-vs-latest 使其绿=证伪;contiguity 使其红→绿=证成。突变(去 contiguity)必红。
+
+### §6.5 状态与授权
+- **本锁仍非全 RATIFIED**——owner 裁的是**方向 + 首刀 4 项 scope 授权**;C2/C3/C6 延迟、其各自设计/机制未裁。
+- **首刀实现:AUTHORIZED**(HOT-CORE + schema/txn ⇒ Opus 设计/门禁 + zzzz 迁移排序 fresh-DB 验 + mutation-proven goldens)。
+- **#4234(已合的 live-vs-latest §0.6)= 部分守卫**,首刀落地后被 contiguity 取代/升级;在此之前它对 healed-gap **欠检**(如实,不掩盖)。**并行的 #4235(同款 live-vs-latest)按 #4252 建议关闭**(port 其 golden)。
