@@ -190,14 +190,29 @@ here). Same seed shape as the 1k tier: 950 records get a content revert (cohort 
 | new revisions written | 950 | 950 | 1,000 (950 update + 50 delete) | 1,000 |
 | ms / record touched | ~4.56 | ~4.07 | ~0.39 | ~0.41 |
 | transaction shape | **per-record** — each `patchRecords` call is its own transaction (loop at `univer-meta.ts` ~:10295) | same | **single transaction** wrapping every revert-update AND every delete (`pool.transaction` at ~:10426) | same |
+| write shape | full `RecordWriteService.patchRecords` — permission re-checks, formula/rollup recompute, relation-aggregation fan-out, per-record realtime publish + automation event | same | raw `UPDATE meta_records SET data = data \|\| $1::jsonb ...` inside the txn — no recompute, no per-record events (realtime is batched once at the end) | same |
 
-**This ~10–11x gap is the single most decision-relevant number in this benchmark.** It is not noise —
-it reproduced within ~12% across two independent runs, and it has a structural explanation already on
-record: the [#4262 v2 design lock](https://github.com/zensgit/metasheet2/pull/4262) §9 item 1 itself
-flags revert-execute's per-record loop as an "honest deferral" — *"needs an outer-txn refactor... until
-then the #4261 default-off gate is the operative protection."* reset-execute's existing single-transaction
-pattern (already shipped, already exercised by the T8-2 real-DB test suite) is the empirically faster
-**and** the only genuinely atomic one of the two.
+**This ~10–11x gap is the single most decision-relevant number in this benchmark, but it is a
+composite, not an isolated transaction-boundary effect** — it reproduced within ~12% across two
+independent runs, so the *gap itself* is real, but this benchmark did not run a variant that holds the
+write shape constant and varies only the transaction boundary, so it cannot attribute the 10–11x to any
+one of at least three conflated factors: (1) N commits (with their fsync/WAL cost) vs 1 commit; (2)
+`patchRecords`' heavier per-record service overhead (permission re-checks, formula/rollup recompute,
+relation-aggregation fan-out, per-record realtime + automation events) vs a bare `UPDATE`; (3)
+reset-execute's write is genuinely **thinner** — it skips derived-field recompute entirely, which
+`patchRecords` does not. **Do not read this as "wrapping revert-execute's existing loop in one
+transaction yields ~10x"** — that specific claim is not tested here and may be false if the cost lives
+mostly in (2)/(3) rather than (1). What the benchmark **does** support, and what §9 item 1 of the
+[#4262 v2 design lock](https://github.com/zensgit/metasheet2/pull/4262) already flags as an "honest
+deferral" (*"needs an outer-txn refactor... until then the #4261 default-off gate is the operative
+protection"*): reset-execute's existing single-transaction, thin-write pattern (already shipped, already
+exercised by the T8-2 real-DB test suite) is empirically faster **and** the only genuinely atomic one of
+the two measured here — a directional finding, not a decomposed one. The ~0.4ms/record reset-execute
+number is also a **thin-write floor**: it excludes the formula/rollup/relation recompute a real
+Option-A restore may need to keep derived fields consistent, so extrapolations from it (§6a) are
+plausibly optimistic, not pessimistic. Isolating the transaction-boundary cost alone (e.g. a third
+variant: raw per-record `UPDATE`s in N separate transactions) would need a follow-up run; it was judged
+out of scope for this evidence-only pass.
 
 ## 5. Table/index stats
 
@@ -225,16 +240,20 @@ report should be read as "same order of magnitude, this dev box," not as product
 reset-execute's real single-transaction pattern as the empirical anchor (§4: ~0.4ms per record-write,
 atomic, reproduced across two runs) and extrapolating **linearly** (a stated simplification — it
 ignores lock-contention growth, WAL/checkpoint pressure, and larger in-memory sort costs at higher N,
-all of which tend to make large transactions *worse* than linear, not better):
-- 10,000 records ≈ 10 × 0.4ms/record × 1,000 ≈ **~4 seconds** of transaction time for the writes alone.
-- 50,000 records ≈ **~20 seconds**.
+all of which tend to make large transactions *worse* than linear, not better) — **and, per §4, is a
+thin-write floor**: reset-execute's raw `UPDATE` skips formula/rollup recompute and relation-aggregation
+fan-out, which a real base-wide restore may need to run per record to keep derived fields consistent, so
+every number below is plausibly an underestimate, not a worst case:
+- 10,000 records ≈ 10 × 0.4ms/record × 1,000 ≈ **~4 seconds** of transaction time for the thin writes alone.
+- 50,000 records ≈ **~20 seconds** (thin-write floor).
 - A *base-wide* restore spanning multiple sheets (e.g. 10 sheets × 5,000 records) would need to extend
   the transaction boundary across sheets (today's reset-execute is single-sheet), but the per-record
-  write cost measured here is the right order-of-magnitude building block: ~10 sheets × 5,000 records
-  ≈ 50,000 records total ≈ the same **~20 second** ballpark, plus the read-side compute (reconstruct +
+  write cost measured here is the right order-of-magnitude floor: ~10 sheets × 5,000 records
+  ≈ 50,000 records total ≈ the same **~20 second** floor, plus the read-side compute (reconstruct +
   precheck + contiguity) per sheet, which is comparatively cheap even at 50k (150–350ms per sheet,
-  §2) — the write work dominates, not the read/verify work.
-- A ~20-second single transaction holding row locks (and, if the [v2 design lock](https://github.com/zensgit/metasheet2/pull/4262)
+  §2), plus whatever derived-field recompute a production-safe implementation adds on top (not
+  measured here).
+- A ~20-second-or-more single transaction holding row locks (and, if the [v2 design lock](https://github.com/zensgit/metasheet2/pull/4262)
   §5's proposed shared sheet-writer fence is adopted, blocking **all** concurrent writes to the
   affected sheet(s) for that whole window) is a real but bounded cost — plausibly acceptable for an
   explicit, user-initiated, rare "restore this base" action, but not something to run casually inline
@@ -242,8 +261,11 @@ all of which tend to make large transactions *worse* than linear, not better):
   A as "the full W0 trustworthiness build," not a headline slice.
 - **revert-execute's current per-record-transaction pattern is not a viable template for Option A as
   measured** (~3.6 minutes extrapolated at 50k, and non-atomic — a crash mid-loop leaves a partially
-  reverted sheet). If Option A is chosen, the write path should follow reset-execute's already-atomic
-  shape (or the design lock's own proposed txn/fence refactor), not revert-execute's current shape.
+  reverted sheet). Per §4, this benchmark cannot say *how much* of that gap is the transaction boundary
+  versus `patchRecords`' heavier per-record work — so the actionable claim is narrower than "wrap the
+  loop in one transaction": it is that reset-execute's already-atomic, already-shipped shape is the
+  better empirical template to build Option A's write path from, not that revert-execute's existing
+  shape merely needs a transaction wrapped around it.
 
 **(b) Option B — granular operation-level recovery.** The read-path numbers (§2) directly size this:
 reconstructing or precheck-validating a single sheet at realistic scale (1k–50k records) costs single-
