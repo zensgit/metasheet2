@@ -17,6 +17,8 @@ on:
       - 'packages/core-backend/**'
       - 'apps/web/**'
       - 'packages/openapi/**'
+      - 'scripts/contract-smoke.js'
+      - 'scripts/contract-smoke.test.mjs'
       - '.github/workflows/observability-strict.yml'
 
 concurrency:
@@ -50,6 +52,7 @@ jobs:
     env:
       P99_THRESHOLD: 0.1
       RBAC_SOFT_THRESHOLD: 60
+      JWT_SECRET: 'test-secret-for-ci'
 
     steps:
       - name: Checkout code
@@ -92,6 +95,9 @@ jobs:
         with:
           name: observability-install-log
           path: install.log
+
+      - name: Test contract smoke harness
+        run: node --test scripts/contract-smoke.test.mjs
 
       - name: Build OpenAPI spec
         run: |
@@ -143,7 +149,6 @@ jobs:
           KANBAN_AUTH_REQUIRED: 'true'
           APPROVAL_AUTH_REQUIRED: 'false'
           DATABASE_URL: postgresql://postgres:postgres@localhost:5432/metasheet
-          JWT_SECRET: 'test-secret-for-ci'
           NODE_ENV: 'development'
         run: |
           echo "Starting backend server directly with tsx..."
