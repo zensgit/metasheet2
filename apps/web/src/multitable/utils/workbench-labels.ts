@@ -20,6 +20,8 @@ export type WorkbenchLabelKey =
   | 'toolbar.workflow' | 'toolbar.automations' | 'toolbar.templates'
   | 'toolbar.dashboard' | 'toolbar.shareForm' | 'toolbar.apiWebhooks' | 'toolbar.trash'
   | 'toolbar.mentions'
+  // §3.1b UI-P2-2b rail collapse toggle
+  | 'rail.collapse' | 'rail.expand'
   // §3.3 template library modal
   | 'tpl.title' | 'tpl.subtitle' | 'tpl.loading' | 'tpl.more' | 'tpl.errorLoad'
   // §3.4 keyboard shortcuts modal (explanatory text only)
@@ -93,6 +95,8 @@ const WORKBENCH_LABELS: Record<WorkbenchLabelKey, { en: string; zh: string }> = 
   'toolbar.apiWebhooks': { en: 'API & Webhooks', zh: 'API 与 Webhook' },
   'toolbar.trash': { en: 'Trash', zh: '回收站' },
   'toolbar.mentions': { en: 'Mentions', zh: '提及' },
+  'rail.collapse': { en: 'Collapse sidebar', zh: '折叠侧栏' },
+  'rail.expand': { en: 'Expand sidebar', zh: '展开侧栏' },
 
   'tpl.title': { en: 'Template Library', zh: '模板库' },
   'tpl.subtitle': {

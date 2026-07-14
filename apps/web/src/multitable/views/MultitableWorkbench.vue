@@ -12,17 +12,6 @@
         <MtButton class="mt-workbench__conflict-btn" @click="grid.dismissConflict()">{{ wb('conflict.dismiss', isZh) }}</MtButton>
       </div>
     </div>
-    <div v-if="basePickerBases.length" class="mt-workbench__base-bar">
-      <MetaBasePicker
-        :bases="basePickerBases"
-        :active-base-id="activeBaseId"
-        :can-create="canCreateBasesAndSheets"
-        @select="onSelectBase"
-        @create="onCreateBase"
-        @toggle-favorite="onToggleFavoriteBase"
-      />
-    </div>
-    <MetaSheetViewRail :sheets="workbench.sheets.value" :views="visibleWorkbenchViews" :active-sheet-id="workbench.activeSheetId.value" :active-view-id="workbench.activeViewId.value" :can-create-sheet="canCreateBasesAndSheets" :personal-views-enabled="personalViewsEnabled" :is-personal-mode="personalView.isPersonalMode" @select-sheet="onSelectSheet" @select-view="onSelectView" @create-sheet="onCreateSheet" @toggle-personal="onTogglePersonalView" />
     <div class="mt-workbench__actions">
       <div
         v-if="sheetPresenceState.activeCollaboratorCount.value > 0"
@@ -144,6 +133,30 @@
       @reset-to-shared="onResetToShared"
     />
     <div class="mt-workbench__content">
+      <aside class="mt-workbench__rail" :class="{ 'mt-workbench__rail--collapsed': railCollapsed }">
+        <div class="mt-workbench__rail-head">
+          <div v-if="basePickerBases.length" v-show="!railCollapsed" class="mt-workbench__base-bar">
+            <MetaBasePicker
+              :bases="basePickerBases"
+              :active-base-id="activeBaseId"
+              :can-create="canCreateBasesAndSheets"
+              @select="onSelectBase"
+              @create="onCreateBase"
+              @toggle-favorite="onToggleFavoriteBase"
+            />
+          </div>
+          <button
+            type="button"
+            data-testid="rail-collapse-toggle"
+            class="mt-workbench__rail-toggle"
+            :aria-expanded="!railCollapsed"
+            :aria-label="railCollapsed ? wb('rail.expand', isZh) : wb('rail.collapse', isZh)"
+            :title="railCollapsed ? wb('rail.expand', isZh) : wb('rail.collapse', isZh)"
+            @click="railCollapsed = !railCollapsed"
+          >{{ railCollapsed ? '›' : '‹' }}</button>
+        </div>
+        <MetaSheetViewRail v-show="!railCollapsed" :sheets="workbench.sheets.value" :views="visibleWorkbenchViews" :active-sheet-id="workbench.activeSheetId.value" :active-view-id="workbench.activeViewId.value" :can-create-sheet="canCreateBasesAndSheets" :personal-views-enabled="personalViewsEnabled" :is-personal-mode="personalView.isPersonalMode" @select-sheet="onSelectSheet" @select-view="onSelectView" @create-sheet="onCreateSheet" @toggle-personal="onTogglePersonalView" />
+      </aside>
       <div class="mt-workbench__main">
         <MetaDashboardView
           v-if="showDashboardView"
@@ -985,6 +998,10 @@ const personPickerCurrentValue = ref<unknown>(null)
 const showFieldManager = ref(false)
 const showPermissionManager = ref(false)
 const showAutomationManager = ref(false)
+// UI-P2-2b (design docs/development/multitable-ui-p2-2b-vertical-tree-design-20260713.md §3.1,
+// owner decision A pending -> recommended default applied): session-local only, default expanded,
+// NOT persisted (no localStorage/server write) — component remount resets to expanded.
+const railCollapsed = ref(false)
 const showDashboardView = ref(false)
 const showTemplateLibrary = ref(false)
 const TemplateCenterRouteName = AppRouteNames.MULTITABLE_TEMPLATES
@@ -4406,6 +4423,35 @@ defineExpose({
 .mt-workbench__mgr-btn-icon { font-size: 15px; color: currentColor; }
 .mt-workbench__mgr-badge { display: inline-flex; align-items: center; justify-content: center; min-width: 18px; height: 18px; margin-left: 6px; padding: 0 6px; border-radius: 999px; background: #f59e0b; color: #fff; font-size: 11px; font-weight: 600; }
 .mt-workbench__base-bar { padding: 8px 16px 0; border-bottom: 1px solid #f0f0f0; }
+/* UI-P2-2b (design docs/development/multitable-ui-p2-2b-vertical-tree-design-20260713.md §2.1/§3.1):
+   persistent, collapsible left rail housing the base-bar (workspace picker) + the sheet/view tree
+   (MetaSheetViewRail). Width values (240px / 36px) are layout sizing, not color — the token vocabulary
+   has no width family, so these stay raw px per the design's "allowed non-token numbers" carve-out. */
+.mt-workbench__rail {
+  width: 240px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  border-right: 1px solid var(--ms-border-light);
+  overflow: hidden;
+}
+.mt-workbench__rail--collapsed { width: 36px; }
+.mt-workbench__rail-head { display: flex; align-items: center; justify-content: space-between; }
+.mt-workbench__rail-toggle {
+  flex-shrink: 0;
+  width: 24px;
+  height: 24px;
+  margin: 6px;
+  border: none;
+  border-radius: var(--ms-radius-sm);
+  background: transparent;
+  color: var(--ms-text-2);
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+}
+.mt-workbench__rail-toggle:hover { background: var(--ms-bg-card); }
+.mt-workbench__rail-toggle:focus-visible { outline: 2px solid var(--ms-color-primary); outline-offset: -2px; }
 .mt-template-library {
   margin: 8px 16px 0;
   padding: 14px;
@@ -4433,7 +4479,7 @@ defineExpose({
 .mt-workbench__shortcut { display: flex; align-items: center; gap: 12px; font-size: 13px; }
 .mt-workbench__shortcut kbd { background: #f0f0f0; border: 1px solid #ddd; border-radius: 3px; padding: 2px 8px; font-family: monospace; font-size: 12px; min-width: 80px; text-align: center; }
 @media print {
-  .mt-workbench__base-bar, .mt-workbench__actions, .mt-workbench__shortcuts-overlay, .mt-template-library { display: none !important; }
+  .mt-workbench__base-bar, .mt-workbench__actions, .mt-workbench__shortcuts-overlay, .mt-template-library, .mt-workbench__rail { display: none !important; }
   .mt-workbench__content { overflow: visible !important; }
   .mt-workbench__main { overflow: visible !important; }
 }
