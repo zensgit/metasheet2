@@ -10148,11 +10148,14 @@ export function univerMetaRouter(): Router {
   // resurrects run in ONE transaction (all-or-nothing) while field-reverts stay best-effort per-record. Inbound links
   // are NOT rebuilt (design-lock L4 A) — they re-appear when the linking record is next saved.
   const PIT_UNDELETE_ENABLED = () => String(process.env.MULTITABLE_ENABLE_PIT_UNDELETE ?? '').trim().toLowerCase() === 'true'
-  // Interim revert-execute master gate (current-risk mitigation, owner-directed): the merged §0.6 precheck (#4234)
-  // is live-vs-latest and still blind to the healed-gap + check→write race; until the full W0-1 correctness fix
-  // lands, revert-execute is closed by DEFAULT — mirrors reset-execute's PIT_RESET_ENABLED() gate exactly (same
-  // String(env).trim().toLowerCase()==='true' resolution). revert-preview stays UNGATED (read-only, no writes to
-  // protect, and the FE preview UI still needs to render even while the button that would call execute is hidden).
+  // Interim revert-execute master gate (current-risk mitigation, owner-directed). The W0-1 generation-aware
+  // contiguity fix (#4269, `3356a7ed6`) has now LANDED, closing the healed-gap + check→write race the earlier
+  // §0.6 live-vs-latest precheck (#4234) was blind to — so the correctness gap this gate was mitigating is
+  // fixed. This flag stays default-OFF regardless: turning revert-execute ON in prod is a separate, deliberate
+  // enablement step (owner-gated rollout decision), not an automatic consequence of the fix landing. Mirrors
+  // reset-execute's PIT_RESET_ENABLED() gate exactly (same String(env).trim().toLowerCase()==='true'
+  // resolution). revert-preview stays UNGATED (read-only, no writes to protect, and the FE preview UI still
+  // needs to render even while the button that would call execute is hidden).
   const SHEET_REVERT_ENABLED = () => String(process.env.MULTITABLE_ENABLE_SHEET_REVERT ?? '').trim().toLowerCase() === 'true'
 
   router.post('/sheets/:sheetId/revert-preview', async (req: Request, res: Response) => {
