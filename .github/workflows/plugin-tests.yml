@@ -85,6 +85,20 @@ jobs:
         run: |
           node --test scripts/ops/dingtalk-closeout-env-contract.test.mjs
 
+      - name: Run DingTalk OAuth-stability metrics-only contract test (DT-CLOSE-01B)
+        run: |
+          node --test scripts/ops/dingtalk-oauth-stability-metrics-only-contract.test.mjs
+
+      - name: Run DingTalk OAuth-stability metrics-only full-script test (DT-CLOSE-01B)
+        run: |
+          node --test scripts/ops/dingtalk-oauth-stability-metrics-only-fullscript.test.mjs
+
+      - name: Run DingTalk OAuth-stability summary + workflow contract tests (DT-CLOSE-01B)
+        run: |
+          node --test \
+            scripts/ops/github-dingtalk-oauth-stability-summary.test.mjs \
+            scripts/ops/dingtalk-oauth-stability-workflow-contract.test.mjs
+
   test:
     runs-on: ubuntu-latest
 
