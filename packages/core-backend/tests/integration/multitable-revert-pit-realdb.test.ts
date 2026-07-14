@@ -46,6 +46,7 @@ async function seed(): Promise<void> {
 
 describeIfDatabase('multitable T8-1 Revert-to-T (real DB)', () => {
   beforeAll(async () => {
+    process.env.MULTITABLE_ENABLE_PIT_REVERT = 'true' // W0 step-1: this file drives revert-execute; the gate is default-OFF, set per-file here and restored in afterAll — NEVER enabled globally.
     app = express()
     app.use(express.json())
     app.use((req, _res, next) => { ;(req as any).user = { id: ACTOR, roles: curRoles, perms: curPerms }; next() })
@@ -58,6 +59,7 @@ describeIfDatabase('multitable T8-1 Revert-to-T (real DB)', () => {
     await q("INSERT INTO users (id, password_hash) VALUES ($1,'x') ON CONFLICT (id) DO NOTHING", [ACTOR])
   })
   afterAll(async () => {
+    delete process.env.MULTITABLE_ENABLE_PIT_REVERT // W0 step-1: restore — never leak the revert gate into sibling files' negative controls.
     for (const t of ['meta_record_revisions', 'meta_records', 'meta_fields']) await q(`DELETE FROM ${t} WHERE sheet_id = $1`, [SHEET]).catch(() => {})
     await q('DELETE FROM meta_sheets WHERE id = $1', [SHEET]).catch(() => {})
     await q('DELETE FROM meta_bases WHERE id = $1', [BASE]).catch(() => {})

@@ -10109,6 +10109,10 @@ export function univerMetaRouter(): Router {
   // resurrects run in ONE transaction (all-or-nothing) while field-reverts stay best-effort per-record. Inbound links
   // are NOT rebuilt (design-lock L4 A) — they re-appear when the linking record is next saved.
   const PIT_UNDELETE_ENABLED = () => String(process.env.MULTITABLE_ENABLE_PIT_UNDELETE ?? '').trim().toLowerCase() === 'true'
+  // W0 step-1 emergency stop-loss (default OFF; only a normalized literal "true" enables). Gates the
+  // DESTRUCTIVE revert-execute path only — read-only revert-preview is unaffected. See the gate at the
+  // top of revert-execute for the data-safety rationale.
+  const PIT_REVERT_ENABLED = () => String(process.env.MULTITABLE_ENABLE_PIT_REVERT ?? '').trim().toLowerCase() === 'true'
 
   router.post('/sheets/:sheetId/revert-preview', async (req: Request, res: Response) => {
     const sheetId = typeof req.params.sheetId === 'string' ? req.params.sheetId.trim() : ''
@@ -10151,6 +10155,15 @@ export function univerMetaRouter(): Router {
   })
 
   router.post('/sheets/:sheetId/revert-execute', async (req: Request, res: Response) => {
+    // W0 step-1 (emergency stop-loss, data-safety): the destructive point-in-time revert reconstructs record
+    // state at T and OVERWRITES live data, but its trustworthiness precheck only enumerates LIVE rows and
+    // trusts created_at (= transaction-start via now()) for T-ordering — so a mid-history healed gap, a
+    // deleted record's broken chain, or a concurrent version-vs-time inversion can still overwrite with a
+    // WRONG T-state. Until the full W0 integrity work lands, revert-execute is DEFAULT-OFF behind
+    // MULTITABLE_ENABLE_PIT_REVERT and refused HERE — before parse / auth / any DB read or write. The
+    // read-only revert-preview is intentionally NOT gated. (This is the isolated stop-loss only; it does not
+    // touch contiguity / watermark / marker / time semantics / transaction isolation.)
+    if (!PIT_REVERT_ENABLED()) return res.status(403).json({ ok: false, error: { code: 'REVERT_DISABLED', message: 'Point-in-time revert is disabled (MULTITABLE_ENABLE_PIT_REVERT is off).' } })
     const sheetId = typeof req.params.sheetId === 'string' ? req.params.sheetId.trim() : ''
     const parsed = z.object({ asOf: z.string().min(1), previewIdentity: z.string().min(1), confirm: z.string().optional() }).safeParse(req.body)
     if (!sheetId || !parsed.success) return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'sheetId, asOf, previewIdentity required' } })

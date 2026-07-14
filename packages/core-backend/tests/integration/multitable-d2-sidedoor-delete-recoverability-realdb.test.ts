@@ -256,6 +256,7 @@ const RETENTION: MetaRevisionRetentionConfig = {
 
 describeIfDatabase('D-2 — side-door delete recoverability (plugin + automation, real DB)', () => {
   beforeAll(async () => {
+    process.env.MULTITABLE_ENABLE_PIT_REVERT = 'true' // W0 step-1: this file drives revert-execute; the gate is default-OFF, set per-file here and restored in afterAll — NEVER enabled globally.
     app = express()
     app.use(express.json())
     app.use((req, _res, next) => {
@@ -296,6 +297,7 @@ describeIfDatabase('D-2 — side-door delete recoverability (plugin + automation
   })
 
   afterAll(async () => {
+    delete process.env.MULTITABLE_ENABLE_PIT_REVERT // W0 step-1: restore — never leak the revert gate into sibling files' negative controls.
     for (const flag of [SIDE_DOOR_FLAG, CAPTURE_FLAG, CAP_ROWS, INBOUND_FLAG, PIT_UNDELETE_FLAG]) delete process.env[flag]
     delete process.env.MULTITABLE_SHEET_REVERT_MAX_RECORDS
     await q('DELETE FROM users WHERE id = $1', [OWNER]).catch(() => {})

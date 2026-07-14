@@ -49,6 +49,7 @@ const mirrorRows = async (): Promise<number> =>
 
 describeIfDatabase('multitable mirror-read-only hardening — C2/I-1 enumeration (real DB)', () => {
   beforeAll(async () => {
+    process.env.MULTITABLE_ENABLE_PIT_REVERT = 'true' // W0 step-1: this file drives revert-execute; the gate is default-OFF, set per-file here and restored in afterAll — NEVER enabled globally.
     app = express()
     app.use(express.json())
     app.use((req, _res, next) => { ;(req as express.Request & { user?: unknown }).user = currentUser; next() })
@@ -75,6 +76,7 @@ describeIfDatabase('multitable mirror-read-only hardening — C2/I-1 enumeration
   })
 
   afterAll(async () => {
+    delete process.env.MULTITABLE_ENABLE_PIT_REVERT // W0 step-1: restore — never leak the revert gate into sibling files' negative controls.
     await q('DELETE FROM meta_links WHERE field_id = ANY($1::text[])', [[FLD_A_LINK, FLD_B_MIRROR]]).catch(() => {})
     for (const t of ['meta_records_trash', 'meta_record_revisions', 'meta_records']) await q(`DELETE FROM ${t} WHERE sheet_id = ANY($1::text[])`, [[SA, SB]]).catch(() => {})
     await q('DELETE FROM meta_fields WHERE sheet_id = ANY($1::text[])', [[SA, SB]]).catch(() => {})

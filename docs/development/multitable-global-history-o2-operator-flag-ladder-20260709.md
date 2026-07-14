@@ -17,6 +17,7 @@
 | `MULTITABLE_ENABLE_FIELD_RETYPE_REVERT` | `'true'` | 4c-1 field retype revert **BASE** flag（**仅**无损/结构性 revert；base OFF ⇒ 整面 403。**旧表把它写成「lossy」= 错**，有损另需下一行的 `_LOSSY`） | 4c-1 锁 |
 | `MULTITABLE_ENABLE_FIELD_RETYPE_REVERT_LOSSY` | `'true'`（**且** base 也须 `'true'`） | 4c-1 **有损** retype revert（双门：`isLossyRetypeRevertEnabled = _LOSSY==='true' && base==='true'`，`lossy-retype-oracle.ts`；base 未开时 helper `--strict` 拒绝） | 4c-1 锁 |
 | `MULTITABLE_ENABLE_PIT_UNDELETE` | `'true'` | T8-1 PIT undelete-execute（resurrect 面；4c-3 的第二重放面挂在它之下） | T8-1 锁 |
+| `MULTITABLE_ENABLE_PIT_REVERT` | `'true'`（规范化字面 `'true'`） | **W0 step-1 紧急止损总闸**：destructive `revert-execute` 默认 **OFF**（入口第一道判断即 403 `REVERT_DISABLED`，早于 parse/auth/DB/写）。**生产保持 OFF，直到完整 W0 完整性工作落地**（连续链/时间单调/删除记录 healed-gap/phantom insert 未修前，Revert 仍可能据错误 T-state 覆写）。只读 `revert-preview` 不受影响。**undelete 成功路径需同时开本闸 + `MULTITABLE_ENABLE_PIT_UNDELETE`**（总闸在最前，任何 resurrect 路径已先过本闸）。 | W0 step-1 |
 | `MULTITABLE_META_REVISION_RETENTION_ENABLED` | **`'1'`**（⚠ 非 `'true'`） | retention janitor：revisions/config-revisions/tombstones 老化 | T9/4c-2 |
 | `MULTITABLE_META_REVISION_RETENTION_POLICY / _KEEP_N / _DAYS / _BATCH / _INTERVAL_MS` | 见代码默认 | retention 细节旋钮 | 同上 |
 

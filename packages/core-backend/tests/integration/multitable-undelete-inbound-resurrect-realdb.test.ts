@@ -94,6 +94,7 @@ async function insertTombstone(sheetId: string, fieldId: string, neighborId: str
 
 describeIfDatabase('4c-3 §7 — PIT-resurrect inbound-edge replay heuristic anchor (real DB)', () => {
   beforeAll(async () => {
+    process.env.MULTITABLE_ENABLE_PIT_REVERT = 'true' // W0 step-1: this file drives revert-execute; the gate is default-OFF, set per-file here and restored in afterAll — NEVER enabled globally.
     app = express()
     app.use(express.json())
     app.use((req, _res, next) => { ;(req as any).user = { id: ACTOR, roles: ['member'], perms: ['multitable:read', 'multitable:write', 'multitable:share'] }; next() })
@@ -108,6 +109,7 @@ describeIfDatabase('4c-3 §7 — PIT-resurrect inbound-edge replay heuristic anc
   })
 
   afterAll(async () => {
+    delete process.env.MULTITABLE_ENABLE_PIT_REVERT // W0 step-1: restore — never leak the revert gate into sibling files' negative controls.
     delete process.env[UNDELETE_FLAG]
     delete process.env[INBOUND_FLAG]
     delete process.env.MULTITABLE_SHEET_REVERT_MAX_RECORDS

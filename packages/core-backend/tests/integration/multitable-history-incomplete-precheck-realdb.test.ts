@@ -120,6 +120,7 @@ async function expectAllFourRefuseWithZeroWrites(sheet: string): Promise<void> {
 
 describeIfDatabase('multitable D-1c §0.6 HISTORY_INCOMPLETE precheck (real DB)', () => {
   beforeAll(async () => {
+    process.env.MULTITABLE_ENABLE_PIT_REVERT = 'true' // W0 step-1: this file drives revert-execute; the gate is default-OFF, set per-file here and restored in afterAll — NEVER enabled globally.
     app = express()
     app.use(express.json())
     app.use((req, _res, next) => { ;(req as any).user = { id: ACTOR, roles: ['member'], perms: ['multitable:read', 'multitable:write', 'multitable:share'] }; next() })
@@ -136,6 +137,7 @@ describeIfDatabase('multitable D-1c §0.6 HISTORY_INCOMPLETE precheck (real DB)'
     await q("INSERT INTO users (id, password_hash) VALUES ($1,'x') ON CONFLICT (id) DO NOTHING", [ACTOR])
   })
   afterAll(async () => {
+    delete process.env.MULTITABLE_ENABLE_PIT_REVERT // W0 step-1: restore — never leak the revert gate into sibling files' negative controls.
     delete process.env.MULTITABLE_ENABLE_PIT_RESET
     for (const sheet of [SHEET, SHEET_F, SHEET_S]) {
       for (const t of ['meta_records_trash', 'meta_record_revisions', 'meta_records', 'meta_fields']) await q(`DELETE FROM ${t} WHERE sheet_id = $1`, [sheet]).catch(() => {})

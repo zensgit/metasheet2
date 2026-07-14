@@ -82,6 +82,7 @@ const storedRecord = async (recordId: string): Promise<{ data: Record<string, un
 
 describeIfDatabase('W1-3 GW4/GW5/GW6 — layer-3 per-subject field-write gate on single-record PATCH (real DB)', () => {
   beforeAll(async () => {
+    process.env.MULTITABLE_ENABLE_PIT_REVERT = 'true' // W0 step-1: this file drives revert-execute; the gate is default-OFF, set per-file here and restored in afterAll — NEVER enabled globally.
     app = express()
     app.use(express.json())
     // Fake "always-on" session-auth middleware — mirrors production ordering: session auth runs first
@@ -125,6 +126,7 @@ describeIfDatabase('W1-3 GW4/GW5/GW6 — layer-3 per-subject field-write gate on
   })
 
   afterAll(async () => {
+    delete process.env.MULTITABLE_ENABLE_PIT_REVERT // W0 step-1: restore — never leak the revert gate into sibling files' negative controls.
     await db.deleteFrom('multitable_api_tokens').where('created_by', '=', TOKEN_CREATOR_ID).execute().catch(() => {})
     await q('DELETE FROM oapi_write_audit WHERE token_id = $1', [tokWriteId]).catch(() => {})
     await q('DELETE FROM field_permissions WHERE sheet_id = $1', [SHEET_ID]).catch(() => {})
