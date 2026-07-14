@@ -149,7 +149,14 @@ export async function recordRecordRevision(query: QueryFn, input: RecordRevision
  * silent destructive write.
  */
 let versionMarkerTablePresent = false
-async function hasVersionMarkerTable(query: QueryFn): Promise<boolean> {
+/**
+ * Txn-safe existence probe for `meta_record_version_markers`. Uses `information_schema.tables`, which
+ * returns zero rows (never throws `42P01`) when the table is absent — so callers inside a transaction
+ * can gate a direct marker SELECT/INSERT without poisoning the enclosing txn during the pre-migration
+ * rolling-deploy window. Shared by the WRITE path (recordVersionMarker) and the READ path
+ * (history-integrity-precheck) so both avoid the 42P01-abort trap identically.
+ */
+export async function hasVersionMarkerTable(query: QueryFn): Promise<boolean> {
   if (versionMarkerTablePresent) return true
   const res = await query(
     `SELECT 1 FROM information_schema.tables WHERE table_name = 'meta_record_version_markers' AND table_schema = ANY(current_schemas(false)) LIMIT 1`,

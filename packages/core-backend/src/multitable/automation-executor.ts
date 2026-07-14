@@ -3490,28 +3490,35 @@ export class AutomationExecutor {
         // non-data version bump as a marker, not an uncaptured-write hole.
         // lock-mgmt: LOCK action — sets the lock columns themselves (not a data edit of a locked row).
         // revision-exempt: lock/unlock metadata-only — no `data` column touched, not a user-content edit.
-        const upd = await this.deps.queryFn(
-          `UPDATE meta_records
-           SET locked = true, locked_by = $1, locked_at = NOW(), version = version + 1, updated_at = NOW()
-           WHERE id = $2 AND sheet_id = $3 RETURNING version`,
-          [lockedBy, effectiveRecordId, effectiveSheetId],
-        )
-        const newVersion = Number((upd.rows[0] as { version?: unknown } | undefined)?.version)
-        if (Number.isFinite(newVersion)) await recordVersionMarker(this.deps.queryFn, { sheetId: effectiveSheetId, recordId: effectiveRecordId, version: newVersion, kind: 'lock', actorId: typeof context.actorId === 'string' ? context.actorId : null })
+        // W0-1 NIT-2: version bump + marker are atomic (mirrors the HTTP lock path). A transient error between
+        // the two must not leave a durable version hole that fail-closed-refuses revert/reset until C6.
+        await this.withTransaction(async (query) => {
+          const upd = await query(
+            `UPDATE meta_records
+             SET locked = true, locked_by = $1, locked_at = NOW(), version = version + 1, updated_at = NOW()
+             WHERE id = $2 AND sheet_id = $3 RETURNING version`,
+            [lockedBy, effectiveRecordId, effectiveSheetId],
+          )
+          const newVersion = Number((upd.rows[0] as { version?: unknown } | undefined)?.version)
+          if (Number.isFinite(newVersion)) await recordVersionMarker(query, { sheetId: effectiveSheetId, recordId: effectiveRecordId, version: newVersion, kind: 'lock', actorId: typeof context.actorId === 'string' ? context.actorId : null })
+        })
       } else {
         // xbase-write-gated: routes through evaluateCrossBaseWrite (gate above) — same-base fast-path keeps
         // this byte-identical to pre-C2; a cross-base unlock is rejected unless claim==truth + base-write.
         // W0-1: write an unlock marker at the new version — legitimate non-data bump, not a hole.
         // lock-mgmt: UNLOCK action — clears the lock columns (decision f: automation may unlock).
         // revision-exempt: lock/unlock metadata-only — no `data` column touched, not a user-content edit.
-        const upd = await this.deps.queryFn(
-          `UPDATE meta_records
-           SET locked = false, locked_by = NULL, locked_at = NULL, version = version + 1, updated_at = NOW()
-           WHERE id = $1 AND sheet_id = $2 RETURNING version`,
-          [effectiveRecordId, effectiveSheetId],
-        )
-        const newVersion = Number((upd.rows[0] as { version?: unknown } | undefined)?.version)
-        if (Number.isFinite(newVersion)) await recordVersionMarker(this.deps.queryFn, { sheetId: effectiveSheetId, recordId: effectiveRecordId, version: newVersion, kind: 'unlock', actorId: typeof context.actorId === 'string' ? context.actorId : null })
+        // W0-1 NIT-2: version bump + marker are atomic (mirrors the HTTP unlock path) — no durable version hole.
+        await this.withTransaction(async (query) => {
+          const upd = await query(
+            `UPDATE meta_records
+             SET locked = false, locked_by = NULL, locked_at = NULL, version = version + 1, updated_at = NOW()
+             WHERE id = $1 AND sheet_id = $2 RETURNING version`,
+            [effectiveRecordId, effectiveSheetId],
+          )
+          const newVersion = Number((upd.rows[0] as { version?: unknown } | undefined)?.version)
+          if (Number.isFinite(newVersion)) await recordVersionMarker(query, { sheetId: effectiveSheetId, recordId: effectiveRecordId, version: newVersion, kind: 'unlock', actorId: typeof context.actorId === 'string' ? context.actorId : null })
+        })
       }
 
       return {

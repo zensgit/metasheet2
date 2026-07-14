@@ -1,6 +1,7 @@
 import { mapFieldType, isSystemFieldType } from './field-codecs'
 import type { QueryFn } from './permission-service'
 import { isSystemSheet } from './system-sheet-predicate'
+import { hasVersionMarkerTable } from './record-history-service'
 
 /**
  * Global History — W0-1: `HISTORY_INCOMPLETE`, the fail-closed integrity PRECHECK for the destructive
@@ -261,8 +262,11 @@ export async function precheckSheetHistoryIntegrity(
 
     // Lock/unlock markers (deploy-window safe: a missing table pre-migration ⇒ no markers ⇒ locked records
     // fail CLOSED via a hole, never a crash — the C6 trusted-since watermark that grandfathers them is deferred).
+    // The existence probe (information_schema, never 42P01) MUST run before the direct SELECT: this precheck is
+    // re-run INSIDE the reset-execute destructive transaction, and a swallowed 42P01 there still aborts the txn
+    // (25P02 on the next statement → 500 instead of clean 409). Mirrors the WRITE path's txn-safe probe.
     const markersByRecord = new Map<string, VersionMarker[]>()
-    try {
+    if (await hasVersionMarkerTable(query)) {
       const markerRes = await query(
         `SELECT record_id, version, kind, created_at FROM meta_record_version_markers WHERE sheet_id = $1`,
         [sheetId],
@@ -274,8 +278,6 @@ export async function precheckSheetHistoryIntegrity(
         list.push({ version, kind: m.kind === 'unlock' ? 'unlock' : 'lock', orderKey: orderKeyOf(m.created_at, version) })
         markersByRecord.set(rid, list)
       }
-    } catch (err) {
-      if (!isMissingMarkerTable(err)) throw err // real errors → fail-closed via outer catch
     }
 
     for (const row of liveRows) {
@@ -302,11 +304,4 @@ export async function precheckSheetHistoryIntegrity(
   } catch {
     return { ok: false, reason: 'comparator_error' } // rule 4 fail-closed
   }
-}
-
-/** 42P01 = undefined_table — the marker table has not been migrated yet (rolling-deploy window). */
-function isMissingMarkerTable(err: unknown): boolean {
-  const code = (err as { code?: unknown })?.code
-  const message = String((err as { message?: unknown })?.message ?? '')
-  return code === '42P01' || /meta_record_version_markers/.test(message) && /does not exist|undefined table/i.test(message)
 }
