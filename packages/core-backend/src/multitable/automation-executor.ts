@@ -3484,15 +3484,15 @@ export class AutomationExecutor {
 
       if (locked) {
         const lockedBy = typeof context.actorId === 'string' && context.actorId.trim() ? context.actorId : 'system'
-        // xbase-write-gated: routes through evaluateCrossBaseWrite (gate above) — same-base uses the gate's
-        // fast-path (byte-identical to pre-C2); a cross-base lock is rejected unless claim==truth + base-write.
         // W0-1: write a lock marker at the new version so the contiguity precheck reads this legitimate
-        // non-data version bump as a marker, not an uncaptured-write hole.
-        // lock-mgmt: LOCK action — sets the lock columns themselves (not a data edit of a locked row).
-        // revision-exempt: lock/unlock metadata-only — no `data` column touched, not a user-content edit.
-        // W0-1 NIT-2: version bump + marker are atomic (mirrors the HTTP lock path). A transient error between
-        // the two must not leave a durable version hole that fail-closed-refuses revert/reset until C6.
+        // non-data version bump as a marker, not an uncaptured-write hole. Bump + marker are atomic inside
+        // withTransaction (mirrors the HTTP lock path) — a transient error between the two must not leave
+        // a durable version hole that fail-closed-refuses revert/reset until C6. The three disposition
+        // markers live INSIDE the callback: each structural guard scans a fixed window above the SQL line.
         await this.withTransaction(async (query) => {
+          // xbase-write-gated: routes through evaluateCrossBaseWrite (gate above) — cross-base lock rejected unless claim==truth + base-write.
+          // lock-mgmt: LOCK action — sets the lock columns themselves (not a data edit of a locked row).
+          // revision-exempt: lock/unlock metadata-only — no `data` column touched, not a user-content edit.
           const upd = await query(
             `UPDATE meta_records
              SET locked = true, locked_by = $1, locked_at = NOW(), version = version + 1, updated_at = NOW()
@@ -3503,13 +3503,13 @@ export class AutomationExecutor {
           if (Number.isFinite(newVersion)) await recordVersionMarker(query, { sheetId: effectiveSheetId, recordId: effectiveRecordId, version: newVersion, kind: 'lock', actorId: typeof context.actorId === 'string' ? context.actorId : null })
         })
       } else {
-        // xbase-write-gated: routes through evaluateCrossBaseWrite (gate above) — same-base fast-path keeps
-        // this byte-identical to pre-C2; a cross-base unlock is rejected unless claim==truth + base-write.
-        // W0-1: write an unlock marker at the new version — legitimate non-data bump, not a hole.
-        // lock-mgmt: UNLOCK action — clears the lock columns (decision f: automation may unlock).
-        // revision-exempt: lock/unlock metadata-only — no `data` column touched, not a user-content edit.
-        // W0-1 NIT-2: version bump + marker are atomic (mirrors the HTTP unlock path) — no durable version hole.
+        // W0-1: write an unlock marker at the new version — legitimate non-data bump, not a hole. Bump +
+        // marker are atomic inside withTransaction (mirrors the HTTP unlock path) — no durable version hole.
+        // Disposition markers live INSIDE the callback (fixed guard scan windows above the SQL line).
         await this.withTransaction(async (query) => {
+          // xbase-write-gated: routes through evaluateCrossBaseWrite (gate above) — cross-base unlock rejected unless claim==truth + base-write.
+          // lock-mgmt: UNLOCK action — clears the lock columns (decision f: automation may unlock).
+          // revision-exempt: lock/unlock metadata-only — no `data` column touched, not a user-content edit.
           const upd = await query(
             `UPDATE meta_records
              SET locked = false, locked_by = NULL, locked_at = NULL, version = version + 1, updated_at = NOW()
