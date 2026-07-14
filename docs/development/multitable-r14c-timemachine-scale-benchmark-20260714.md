@@ -10,15 +10,47 @@ owner's model-split policy for benchmark/impl lanes. No Opus adversarial gate ha
 treat the numbers as measured evidence, not a ratified design artifact.
 
 **Harness:** [`packages/core-backend/scripts/bench/timemachine-scale-bench.ts`](../../packages/core-backend/scripts/bench/timemachine-scale-bench.ts)
-(tsx, not wired into CI — a load benchmark run by hand). Re-runnable, idempotent per `BENCH_RUN_ID`,
-seeds/measures/cleans up its own throwaway sheets.
+(tsx, not wired into CI — a load benchmark run by hand, gated behind a fail-closed preflight guard —
+see §0's "Safety guards" bullet and the harness's own header comment). Re-runnable, idempotent per
+`BENCH_RUN_ID`, seeds/measures/cleans up its own throwaway sheets inside one outermost try/finally.
 
 ## 0. Environment (read this before trusting any number)
 
+- **Safety guards (added post-review — this is the harness's actual safety contract, not a
+  best-effort description):** the harness refuses to run at all unless THREE independent conditions
+  hold: (1) `BENCH_ALLOW_DESTRUCTIVE=1` is explicitly set — acknowledges this runs real
+  revert-execute/reset-execute writes, mass INSERT/DELETE, and index DDL; (2) `DATABASE_URL`'s host is
+  `localhost`/`127.0.0.1`/`::1`, or `BENCH_ALLOW_REMOTE_DB=1` is set as a second, independent opt-in;
+  (3) `DATABASE_URL`'s database name matches `/bench|test/i`, or `BENCH_ALLOW_NONSTANDARD_DB_NAME=1` is
+  set as a third, independent opt-in. All three are checked before any database connection is opened.
+  Separately, the harness never drops/creates the real, shared `#4262 §4` candidate index (checked
+  read-only, informationally, only) — its own "with index" comparison pass uses a separate
+  `bench_`-prefixed, run-scoped index it owns outright instead (see §3's safety-update note). All
+  seeding/measurement/cleanup runs inside one outermost `try/finally` in the harness's `main()`, so a
+  mid-run exception cannot strand seeded rows or the harness-owned index. **Superseded claims, for the
+  historical record:** earlier drafts of this harness (and this MD) described the harness as leaving
+  "the DB in the same state it was found" and "never touching a real deployment" as if those were
+  guaranteed outcomes of best-effort code; they are now enforced preconditions with the guards above,
+  not aspirations — see §3 for what specifically changed and why.
+- **Exact code measured (pin this before citing any precheck/contiguity number):** the harness's two
+  commits sit directly on `86fa1d85c` — the commit immediately **before** `#4269` (the W0-1
+  generation-aware contiguity correction) merged to `main` (merge commit `3356a7ed6`, 2026-07-14, the
+  same day as this benchmark) — and were never rebased past it. Concretely: `precheckSheetHistoryIntegrity`
+  as measured here is still **`#4234`'s live-vs-latest comparator**, not the generation-aware
+  contiguity proof `#4269` landed (which also shipped four lock/unlock markers and moved the execute
+  re-check inside the same destructive transaction/fence, per its §6.2 scope). The "v2 contiguity
+  prototype" (§3) is a standalone, never-wired probe keyed on the **old** `(created_at, version, id)`
+  tuple — not `#4262` §1's proposed persistent monotonic `seq` column — and it does not join `#4269`'s
+  lock/unlock markers, nor exercise the still-design-only (not implemented anywhere yet) C3
+  deleted-record healed-gap enumeration or C6 trusted-since trust-floor. **This benchmark measures none
+  of `#4269`'s landed precheck path.** Every precheck/contiguity number and conclusion in §6 needs a
+  re-run against current `main` before it can be relied on for a decision that touches the landed code
+  (see §7, Re-run plan).
 - **Local scratch PG**, `postgresql://postgres:pw@localhost:55888/metasheet_test` — a single dev
   instance, not a production-shaped cluster (no replicas, no realistic concurrent load, single
   connection pool, `DB_POOL_MAX` default). **Numbers are relative (cross-tier, cross-op), not
-  absolute** — do not read "50k reconstruct = 122–183ms" as a production SLA.
+  absolute** — do not read "50k reconstruct p50 ≈122–183ms" (p95 reaches up to ~346ms, §2) as a
+  production SLA.
 - The table `meta_record_revisions` is **shared** across many past benchmark/dev sessions on this
   scratch DB — at the time of these runs it held ~1,000–35,000 baseline rows from unrelated prior
   work before this harness added its own throwaway sheets on top. Every measured query is scoped by
@@ -109,6 +141,13 @@ p50 3.7–9.8ms, a ~2.6x spread that is still "a few ms," i.e. noise around a ve
 a regression). The **413 ceiling refusal itself is fast in every case** (1.6–13.4ms, never anywhere
 near a timeout) — see §5(d).
 
+**On the 10k/50k preview cells specifically (honesty note, added post-review):** every `(**413**)`-labeled
+row above measures ONLY the fast ceiling-refusal path (request rejected because `SHEET_REVERT_MAX_RECORDS`
+is exceeded, before any diff/delete-set computation starts) — it is NOT a measurement of full
+revert-preview/reset-preview computation at 10k/50k record counts. This benchmark never exercised that
+computation above 5,000 records; only the 1k/5k `(200)` rows above reflect a real, fully-computed
+preview (diff assembly for revert, delete-set assembly for reset).
+
 ## 3. §4 candidate index — measured, and why it made ~no difference
 
 The scratch DB already had an index that is **exactly** the shape the [#4262 v2 design lock §4](https://github.com/zensgit/metasheet2/pull/4262)
@@ -127,6 +166,19 @@ above was measured **twice**: once with this index **dropped** (main-parity — 
 with it **recreated** (the "§4 index applied" comparison). The index is dropped at harness start and
 unconditionally recreated in a `finally` block so a crash cannot leave the shared DB worse than found;
 both runs confirmed `present at end == present at start (true)`.
+
+**Harness safety update (post-review — read before re-running):** this drop/recreate-the-shared-index
+methodology, while it did correctly restore state in both reported runs, mutated a pre-existing,
+non-harness-owned database object — an assumption that doesn't hold for every target this harness
+might someday be pointed at (a real deployment's index, a colleague's concurrent probe, etc). Following
+the owner's P1 review, the harness has been hardened to never touch this or any other
+non-harness-owned object: it now checks this real candidate index's presence read-only (informational
+logging only, never DROP/CREATE), and for its own with-index comparison pass it creates and drops a
+SEPARATE `bench_`-prefixed, run-scoped index of the identical column shape that it owns outright. Any
+future re-run of this benchmark (§7, Re-run plan) uses that mechanism instead of the
+drop/recreate-the-shared-index approach described above — the numbers already measured and reported in
+this section are unaffected (they describe what those two specific runs actually did), but a re-run
+will not reproduce the "index dropped/recreated" step verbatim.
 
 Result: **no consistent improvement** from having the index. At 10k, for example (run1):
 reconstruct 27.48ms → 26.26ms, precheck 60.14ms → 56.52ms, contiguity 50.89ms → 48.55ms — all within
@@ -243,15 +295,18 @@ ignores lock-contention growth, WAL/checkpoint pressure, and larger in-memory so
 all of which tend to make large transactions *worse* than linear, not better) — **and, per §4, is a
 thin-write floor**: reset-execute's raw `UPDATE` skips formula/rollup recompute and relation-aggregation
 fan-out, which a real base-wide restore may need to run per record to keep derived fields consistent, so
-every number below is plausibly an underestimate, not a worst case:
-- 10,000 records ≈ 10 × 0.4ms/record × 1,000 ≈ **~4 seconds** of transaction time for the thin writes alone.
-- 50,000 records ≈ **~20 seconds** (thin-write floor).
+every number below is plausibly an underestimate, not a worst case. **All of the following are LINEAR
+EXTRAPOLATIONS from the single 1k-tier, once-per-run reset-execute measurement in §4 — execute was
+never itself run at 5k/10k/50k in this pass; these are projections, not measurements:**
+- 10,000 records ≈ 10 × 0.4ms/record × 1,000 ≈ **~4 seconds** (LINEAR EXTRAPOLATION, not measured at 10k).
+- 50,000 records ≈ **~20 seconds** (thin-write floor; LINEAR EXTRAPOLATION, not measured at 50k).
 - A *base-wide* restore spanning multiple sheets (e.g. 10 sheets × 5,000 records) would need to extend
   the transaction boundary across sheets (today's reset-execute is single-sheet), but the per-record
   write cost measured here is the right order-of-magnitude floor: ~10 sheets × 5,000 records
-  ≈ 50,000 records total ≈ the same **~20 second** floor, plus the read-side compute (reconstruct +
-  precheck + contiguity) per sheet, which is comparatively cheap even at 50k (150–350ms per sheet,
-  §2), plus whatever derived-field recompute a production-safe implementation adds on top (not
+  ≈ 50,000 records total ≈ the same **~20 second** LINEAR-EXTRAPOLATION floor, plus the read-side
+  compute (reconstruct + precheck + contiguity) per sheet — cheap, but not uniformly sub-200ms: **p50
+  ranges ~122–220ms per sheet at 50k across the three read ops, while p95 reaches up to ~346ms** (§2,
+  full table) — plus whatever derived-field recompute a production-safe implementation adds on top (not
   measured here).
 - A ~20-second-or-more single transaction holding row locks (and, if the [v2 design lock](https://github.com/zensgit/metasheet2/pull/4262)
   §5's proposed shared sheet-writer fence is adopted, blocking **all** concurrent writes to the
@@ -260,47 +315,66 @@ every number below is plausibly an underestimate, not a worst case:
   with normal traffic. This is consistent with (and reinforces) the design lock's own framing of Option
   A as "the full W0 trustworthiness build," not a headline slice.
 - **revert-execute's current per-record-transaction pattern is not a viable template for Option A as
-  measured** (~3.6 minutes extrapolated at 50k, and non-atomic — a crash mid-loop leaves a partially
-  reverted sheet). Per §4, this benchmark cannot say *how much* of that gap is the transaction boundary
-  versus `patchRecords`' heavier per-record work — so the actionable claim is narrower than "wrap the
-  loop in one transaction": it is that reset-execute's already-atomic, already-shipped shape is the
-  better empirical template to build Option A's write path from, not that revert-execute's existing
-  shape merely needs a transaction wrapped around it.
+  measured** (~3.6 minutes LINEAR EXTRAPOLATION at 50k, not measured at that tier, and non-atomic — a
+  crash mid-loop leaves a partially reverted sheet). Per §4, this benchmark cannot say *how much* of
+  that gap is the transaction boundary versus `patchRecords`' heavier per-record work — so the
+  actionable claim is narrower than "wrap the loop in one transaction": it is that reset-execute's
+  already-atomic, already-shipped shape is the better empirical template to build Option A's write path
+  from, not that revert-execute's existing shape merely needs a transaction wrapped around it.
+
+**Supported conclusion, stated precisely (added post-review, replacing any broader framing above):**
+the linear extrapolations and read-path costs in this sub-section support keeping the 5,000-record
+synchronous ceiling and designing an async path for anything larger; **they do not, on their own, prove
+Option B over Option A** — that choice turns on product/UX tradeoffs (and a real ≥5k-tier execute
+re-run, §7) this benchmark does not settle.
 
 **(b) Option B — granular operation-level recovery.** The read-path numbers (§2) directly size this:
 reconstructing or precheck-validating a single sheet at realistic scale (1k–50k records) costs single-
-to-low-triple-digit milliseconds, cheap enough to run synchronously per-operation (per-record,
-per-field, per-sheet) without an async job, which is exactly Option B's premise. Nothing in this
-benchmark suggests granular recovery has a scale problem in the ranges tested; its cost profile scales
-with the size of the *targeted* scope, not the whole base, by construction.
+to-low-triple-digit milliseconds **at p50** (§2: ~1.7–2.7ms at 1k, up to ~122–220ms at 50k across the
+three read ops) — **but p95 reaches up to ~346ms at 50k**, not just the p50 headline. Even accounting
+for that tail, it is cheap enough to run synchronously per-operation (per-record, per-field, per-sheet)
+without an async job, which is exactly Option B's premise. Nothing in this benchmark suggests granular
+recovery has a scale problem in the ranges tested; its cost profile scales with the size of the
+*targeted* scope, not the whole base, by construction.
 
-**(c) The v2 contiguity window-function cost, and the §4 supporting index.** The per-generation
-contiguity prototype (§3) costs roughly the same as the existing precheck's own latest-revision scan
-at every tier (both are dominated by a full per-sheet sort — see the `EXPLAIN` output in §3, where the
-`Sort` node is 25–47ms of a 35–53ms total at 10k) — i.e. adding generation-aware contiguity checking on
-top of today's live-vs-latest precheck is **not** introducing a new order-of-magnitude cost; it is
-roughly the same shape of work the precheck already pays. The O(n)-window concern in #4262 §1 is real
-in the sense that this is an O(n log n) sort-then-scan per sheet, confirmed to scale from ~7ms (1k) to
-~220ms (50k) across two runs — but it does not blow up superlinearly in the tested range, and it is not
-materially worse than the precheck cost already paid on every revert/reset preview and execute today.
-**On the §4 supporting index specifically: this benchmark could not demonstrate a benefit from either
-an ASC-ordered or a DESC-matching composite index at 10k-per-sheet scale on this dev DB** — the planner
+**(c) The v2 contiguity window-function cost, and the §4 supporting index.** **Caveat first (see §0's
+"Exact code measured" bullet): this entire sub-section measures `#4234`'s live-vs-latest precheck and a
+standalone, old-order-key `(created_at, version, id)` contiguity prototype — NOT `#4269`'s landed
+generation-aware precheck, its lock/unlock markers, or its same-txn/fence execute re-check, and not
+`#4262` §1's proposed persistent `seq` column, C3's deleted-record enumeration, or C6's trusted-since
+trust-floor.** With that pinned, here is what was actually measured: the per-generation contiguity
+prototype (§3) costs roughly the same as the existing (old) precheck's own latest-revision scan at
+every tier (both are dominated by a full per-sheet sort — see the `EXPLAIN` output in §3, where the
+`Sort` node is 25–47ms of a 35–53ms total at 10k) — i.e., on this old code path, adding generation-aware
+contiguity checking on top of the live-vs-latest precheck was not introducing a new order-of-magnitude
+cost; it was roughly the same shape of work the precheck already paid. The O(n)-window concern in
+`#4262` §1 is real in the sense that this is an O(n log n) sort-then-scan per sheet — measured (old
+ordering, this prototype only) at p50 ~7ms (1k) up to **p50 ~214–220ms / p95 ~224–248ms at 50k** (across
+two runs) — but it did not blow up superlinearly in the tested range on this old code path. **On the §4
+supporting index specifically: this benchmark could not demonstrate a benefit from either an
+ASC-ordered or a DESC-matching composite index at 10k-per-sheet scale on this dev DB** — the planner
 consistently chose bitmap-scan-then-sort over both index shapes (§3). This is evidence against treating
-the index as an urgent prerequisite, but it is evidence from one dev box's current table state, not a
-production-scale test; re-verify against a production-shaped copy (many sheets, realistic cache
-pressure) before ruling the index out. Independent of the index question, the design's own move to a
+the index as an urgent prerequisite on this OLD code path, but it is evidence from one dev box's
+current table state on pre-`#4269` code, not a production-scale test of the landed contiguity query;
+re-verify against a production-shaped copy (many sheets, realistic cache pressure) running current
+`main` before ruling the index out. Independent of the index question, the design's own move to a
 single persistent monotonic `seq` (replacing the 3-key `(created_at, version, id)` tuple) is still the
 right simplification for the sort itself — a single-key integer sort is cheaper to perform and a
 cleaner index target than a 3-key mixed-type tuple, regardless of what the planner does with either
 index today.
 
+**Conclusion, weakened per owner review (this is the operative statement for §(c), superseding any
+broader framing above):** the old order-key window query showed no blow-up on this dev box; the
+landed/corrected precheck is NOT yet measured — re-run required after the W0-1 correction lands.
+
 **(d) Is the >5,000 async-job requirement (SC.1) confirmed?** **Yes, on two independent lines of
 evidence.** First, the *existing* fail-closed 413 refusal above `SHEET_REVERT_MAX_RECORDS` (default
 5,000) is itself fast in every measured case (1.6–13.4ms at 10k/50k, §2) — so today's ceiling is not
 masking a slow path; it refuses cheaply, exactly as designed. Second, and more importantly: **if the
-ceiling were simply raised or removed**, the write-side cost extrapolated in (a) — ~20 seconds at 50k
-for the atomic (reset-execute-shaped) pattern, ~3.6 minutes for the current non-atomic (revert-execute-
-shaped) pattern — is well past what a synchronous HTTP request/response should hold open (typical
+ceiling were simply raised or removed**, the write-side cost LINEARLY EXTRAPOLATED in (a) from the
+single 1k-tier measurement — ~20 seconds at 50k for the atomic (reset-execute-shaped) pattern, ~3.6
+minutes for the current non-atomic (revert-execute-shaped) pattern, neither actually measured above 1k
+— is well past what a synchronous HTTP request/response should hold open (typical
 gateway/load-balancer timeouts sit in the 30–60s range, and a multi-minute held transaction risks lock-
 contention pileups on a live table regardless of gateway timeouts). The data confirms that >5,000-record
 recovery needs to move to an async job with progress/cancel semantics (SC.1, and the R13-C design
@@ -308,22 +382,70 @@ lock's own framing) rather than simply raising the synchronous ceiling — this 
 Option B is chosen, since both would eventually need to process more than 5,000 records per operation
 at scale.
 
-## 7. Reproduce
+## 7. Re-run plan (required before any number in §6 can support a decision)
+
+This harness's two commits sit on `86fa1d85c`, the commit immediately before `#4269` (W0-1
+generation-aware contiguity correction, its four lock/unlock markers, and its same-txn/fence execute
+re-check) merged to `main` — and were never rebased past it (see §0, §6(c)). `#4269` is already on
+`main` as of this writing (merge commit `3356a7ed6`, 2026-07-14 — the same day as this benchmark).
+Concretely, before any conclusion in §6 can be treated as current:
+
+1. **Rebase this harness onto current `main`** (or check it out fresh against a `main` checkout) so
+   `precheckSheetHistoryIntegrity` and the contiguity prototype measure the landed generation-aware
+   path, its lock/unlock markers, and its same-txn/fence execute re-check — not `#4234`'s superseded
+   live-vs-latest comparator that this pass actually measured.
+2. **≥3 rounds of 5,000-record execute** (both revert-execute and reset-execute), not the single
+   1k-tier, once-per-run measurement this pass relied on (§4) — enough rounds to report a real p50/p95
+   spread at the actual sync ceiling tier, instead of linearly extrapolating from 1k (§6(a)).
+3. **A controlled transaction-boundary comparison, holding write shape constant.** The §4 finding
+   (reset-execute ~10–11x faster per record than revert-execute) conflates the transaction boundary (N
+   commits vs 1) with write-shape differences (thin raw `UPDATE` vs full `patchRecords` with
+   formula/rollup recompute and relation-aggregation fan-out). A clean re-run needs a variant that holds
+   ONE of these constant while varying the other — e.g., wrap revert-execute's existing per-record loop
+   in a single outer transaction (same write shape, single-commit boundary) and/or run reset-execute's
+   thin write in N separate per-record transactions (same write shape, per-record commit boundary) — so
+   the ~10–11x gap can be attributed to the transaction boundary alone, the write shape alone, or both,
+   instead of being reported as one conflated number as it is today.
+
+Until this re-run lands, treat every precheck-latency, contiguity-latency, and index-benefit number in
+§6 as describing the pre-`#4269` code path only — not a statement about current `main`.
+
+## 8. Reproduce
 
 ```bash
 DATABASE_URL=postgresql://postgres:pw@localhost:55888/metasheet_test \
+BENCH_ALLOW_DESTRUCTIVE=1 \
   npx tsx packages/core-backend/scripts/bench/timemachine-scale-bench.ts
 ```
 
-Env knobs: `BENCH_TIERS` (default `1000,5000,10000,50000`), `BENCH_ITERS` (override loop count for
-every tier), `BENCH_RUN_ID` (namespaces all seeded ids — must be unique per concurrent invocation; see
-the caveat below), `BENCH_KEEP_DATA=1` (skip cleanup for inspection), `BENCH_SKIP_INDEX_CMP=1`
-(baseline-only, skip the drop/recreate-index comparison pass).
+**`BENCH_ALLOW_DESTRUCTIVE=1` is now required** (added post-review, P1) — the harness refuses to run
+without it, and refuses further unless `DATABASE_URL`'s host is local (or `BENCH_ALLOW_REMOTE_DB=1`
+double-opts-in to a remote target) and its database name matches `/bench|test/i` (or
+`BENCH_ALLOW_NONSTANDARD_DB_NAME=1` triple-opts-in to override) — see the harness's own header comment
+for the full preflight contract, and §0's "Safety guards" bullet for a summary.
 
-**Concurrency caveat (learned the hard way during this session):** the harness drops and recreates a
-**global** index (`idx_meta_record_revisions_sheet_record_created_version_id`) as part of its baseline
-methodology. Two harness invocations (or a harness run and any ad hoc `EXPLAIN`/index probe) must
-**never** run concurrently against the same database — one can observe or restore the index mid-measurement
-of the other. Run invocations sequentially. (This is why the two official runs reported here are
-`r14c1` and `r14c2b` — an interim `r14c2` was aborted mid-run after it overlapped with a manual index
-probe, and discarded rather than reported.)
+Env knobs: `BENCH_ALLOW_DESTRUCTIVE=1` (required), `BENCH_ALLOW_REMOTE_DB=1` /
+`BENCH_ALLOW_NONSTANDARD_DB_NAME=1` (conditionally required, see above), `BENCH_TIERS` (default
+`1000,5000,10000,50000`), `BENCH_ITERS` (override loop count for every tier), `BENCH_RUN_ID`
+(namespaces all seeded ids — must be unique per concurrent invocation; see the caveat below),
+`BENCH_KEEP_DATA=1` (skip cleanup for inspection), `BENCH_SKIP_INDEX_CMP=1` (baseline-only, skip the
+with-index comparison pass), `BENCH_INJECT_FAULT=1` (testing hook only — verifies the outermost
+try/finally cleanup path on a simulated mid-run crash; never set this for a real measurement run).
+
+**Concurrency caveat, UPDATED post-review:** the two reported runs (`r14c1`, `r14c2b`) predate the P1
+hardening in this PR and used a since-removed methodology that dropped and recreated the REAL, shared
+`idx_meta_record_revisions_sheet_record_created_version_id` index as part of the baseline methodology —
+which is why an interim `r14c2` run was aborted and discarded after it overlapped with a manual index
+probe on that same shared index (original incident account below, kept for the historical record).
+**The harness no longer touches that shared index at all** — it creates/drops a separate
+`bench_`-prefixed, run-scoped index it owns outright, so this specific hazard is gone for any future
+re-run. Running two harness invocations concurrently against the same database is still not
+recommended (they'd both churn the same underlying `meta_record_revisions` table, mixing into each
+other's §5/§6 table-wide bloat/size stats), but neither run can corrupt the other's index state anymore.
+
+*(Original incident account, historical — describes why the two reported runs above used
+`BENCH_RUN_ID=r14c1`/`r14c2b` instead of a single run; no longer a live hazard per the update above):*
+two harness invocations (or a harness run and any ad hoc `EXPLAIN`/index probe) must never run
+concurrently against the same database — one could observe or restore the index mid-measurement of the
+other. This is why the two official runs reported here are `r14c1` and `r14c2b` — an interim `r14c2`
+was aborted mid-run after it overlapped with a manual index probe, and discarded rather than reported.
