@@ -111,6 +111,49 @@ interface PlmDiscussionProvider {
 > read-side `metasheet_review` gate in §6. Consumer implementation: Lane C
 > (`PLMAdapter.exchangeDiscussionSession` + the 6 write methods).
 
+> **Write-relay (server-side): Option A (RATIFIED by owner 2026-07-11), Option B deferred.**
+> `routes/plm-embed-discussion.ts` wires Lane C's adapter methods into the
+> actual `/api/plm-embed/discussion/...` HTTP surface an embedded BOM-review
+> writes through. Two designs were considered for how the discussion-session
+> credential (minted by `exchangeDiscussionSession`) is held between the
+> exchange and the write call:
+>
+> - **Option A — stateless, single-use per write (RATIFIED by the owner at
+>   Gate-2 2026-07-11; Option B deferred). Merge pending the provider-first
+>   sequence.** Every
+>   write request carries its own freshly-minted `bom_multitable` embed token;
+>   the relay runs the read relay's guards (feature_key / embed_origin / tenant
+>   cross-check), consumes that token's jti via the SAME shared single-use store
+>   the read relay uses, exchanges it for a discussion-session credential, holds
+>   the `access_token` in a request-local variable for the lifetime of the
+>   handler only, and lets it fall out of scope on return. No new stateful
+>   surface on the relay side: nothing is cached, and a compromised process has
+>   nothing at rest to steal. Cost: one exchange round-trip per write, and a
+>   transient write failure after the jti is consumed still burns the token (the
+>   embed frontend must re-mint and retry).
+>   - **HARD PRECONDITION (owner Gate-2 2026-07-11), blocking flag-on:** the
+>     relay's single-use store is **defense-in-depth only** — the Yuantus
+>     pre-auth exchange endpoint (`POST /api/v1/auth/embed/discussion-session`)
+>     is reachable DIRECTLY, bypassing the relay's Redis consumption, so a valid
+>     embed token could otherwise be replayed to mint discussion-session
+>     credentials repeatedly within its TTL. Option A is only sound once the
+>     **provider** atomically consumes the embed token's jti at exchange time
+>     (Yuantus-side single-use table). `DISCUSSION_SESSION_ENABLED=true` must NOT
+>     be set until that provider-side single-use lands. Until the owner ratifies
+>     Option A, this section is a proposal, not a decision.
+> - **Option B — server-side credential cache (deferred).** Cache the
+>   exchanged credential (e.g. keyed by embed session / part_id) across
+>   several writes within its TTL, trading the per-write exchange round-trip
+>   for a new credential-storage security surface (cache invalidation,
+>   cross-tenant/cross-user key scoping, at-rest exposure). Not built; would
+>   need its own Gate-2-style review before landing.
+>
+> The 6 write routes (`POST .../threads`, `POST .../threads/:id/comments`,
+> `PATCH .../threads/:id/comments/:commentId`, `DELETE
+> .../threads/:id/comments/:commentId`, `POST .../threads/:id/resolve`,
+> `POST .../threads/:id/reopen`) return only the write result — the
+> credential itself never appears in a response body or header.
+
 ## 5. Notifications
 
 - Cross-system dedup key = the Yuantus outbox occurrence nonce
