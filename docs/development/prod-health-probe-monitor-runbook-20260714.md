@@ -68,7 +68,14 @@ its own.
 4. **Continued failure**: while the outage continues, a heartbeat comment
    (with a fresh snapshot dispatch) is appended every 12th consecutive
    failing run (~hourly at the 5-minute cadence), not every run — this keeps
-   the issue readable during long outages.
+   the issue readable during long outages. The streak is computed from the
+   probe's own last 96 completed runs, so heartbeats continue for roughly the
+   first **8 hours** of a continuous outage and then stop; the alert issue
+   stays open and the probe keeps running regardless. Additionally, every
+   failing run at/past the 3-failure threshold self-heals a missed alert: if
+   no open alert issue exists (e.g. the exact crossing run hit a transient
+   API error), the next failing run creates/reopens it — comments still only
+   append at crossing/heartbeat.
 5. **Auto-close**: after **2 consecutive** successful probe runs, the monitor
    comments "Recovered" and closes the issue automatically.
 

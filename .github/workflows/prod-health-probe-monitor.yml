@@ -13,7 +13,8 @@ run-name: Prod Health Probe Monitor${{ vars.PROD_HEALTH_PROBE_SILENCE == 'true' 
 #   workflow (attendance-remote-log-snapshot-prod.yml, skip_host_sync=true)
 #   as a second vantage point and links that run in the alert.
 # - Alerting = ONE deduplicated GitHub issue (stable title marker
-#   "[prod-health]"); continued failure appends hourly heartbeat comments;
+#   "[prod-health]"); continued failure appends ~hourly heartbeats for the
+#   first ~8h of an outage (streak window caps at 96 runs);
 #   the issue auto-closes after 2 consecutive recoveries.
 # - This monitor NEVER restarts, deploys, or mutates the prod stack. The probe
 #   itself uses no secrets (public endpoint); GITHUB_TOKEN is used only for
@@ -116,12 +117,12 @@ jobs:
           # other than success/failure (cancelled, skipped, startup_failure)
           # is ignored for streak purposes.
           history="$(gh api \
-            "repos/${GITHUB_REPOSITORY}/actions/workflows/${WORKFLOW_FILE}/runs?status=completed&per_page=50" \
+            "repos/${GITHUB_REPOSITORY}/actions/workflows/${WORKFLOW_FILE}/runs?status=completed&per_page=100" \
             --jq '[.workflow_runs[]
                     | select((.event=="schedule" or .event=="workflow_dispatch") and .head_branch=="main")
                     | .conclusion]
                   | map(select(. == "success" or . == "failure"))
-                  | .[0:30] | join(" ")')"
+                  | .[0:96] | join(" ")')"
           echo "[streak] recent completed conclusions (newest first): ${history:-<none>}"
 
           prev_fail_streak=0
@@ -140,9 +141,17 @@ jobs:
           consecutive_successes=0
           crossing=false
           heartbeat=false
+          ensure_open=false
           should_close=false
           if [[ "$PROBE_RESULT" == "fail" ]]; then
             consecutive_failures=$((prev_fail_streak + 1))
+            if [[ "$consecutive_failures" -ge "$FAIL_THRESHOLD" ]]; then
+              # Self-heal: every failing run at/past the threshold ensures the
+              # alert issue exists (covers a missed crossing when the exact
+              # cf==3 run hit a transient API error) — comments still only
+              # append at crossing/heartbeat.
+              ensure_open=true
+            fi
             if [[ "$consecutive_failures" -eq "$FAIL_THRESHOLD" ]]; then
               crossing=true
             elif [[ "$consecutive_failures" -gt "$FAIL_THRESHOLD" ]] && \
@@ -162,6 +171,7 @@ jobs:
             echo "consecutive_successes=$consecutive_successes"
             echo "crossing=$crossing"
             echo "heartbeat=$heartbeat"
+            echo "ensure_open=$ensure_open"
             echo "should_close=$should_close"
           } >> "$GITHUB_OUTPUT"
 
@@ -206,8 +216,7 @@ jobs:
       - name: Alert issue operations (find-or-create / heartbeat / auto-close)
         if: >-
           vars.PROD_HEALTH_PROBE_SILENCE != 'true' &&
-          (steps.streak.outputs.crossing == 'true' ||
-           steps.streak.outputs.heartbeat == 'true' ||
+          (steps.streak.outputs.ensure_open == 'true' ||
            steps.streak.outputs.should_close == 'true')
         uses: actions/github-script@v7
         env:
@@ -217,14 +226,16 @@ jobs:
           CONSECUTIVE_SUCCESSES: ${{ steps.streak.outputs.consecutive_successes }}
           CROSSING: ${{ steps.streak.outputs.crossing }}
           HEARTBEAT: ${{ steps.streak.outputs.heartbeat }}
+          ENSURE_OPEN: ${{ steps.streak.outputs.ensure_open }}
           SHOULD_CLOSE: ${{ steps.streak.outputs.should_close }}
           SNAPSHOT_RUN_URL: ${{ steps.snapshot.outputs.snapshot_run_url }}
         with:
           script: |
             const crossing = process.env.CROSSING === 'true'
             const heartbeat = process.env.HEARTBEAT === 'true'
+            const ensureOpen = process.env.ENSURE_OPEN === 'true'
             const shouldClose = process.env.SHOULD_CLOSE === 'true'
-            if (!crossing && !heartbeat && !shouldClose) {
+            if (!ensureOpen && !shouldClose) {
               core.info('No issue action needed.')
               return
             }
@@ -283,13 +294,17 @@ jobs:
               `- Probe run: ${runUrl}`,
               `- Second vantage (read-only SSH log snapshot, skip_host_sync=true): ${snapshotUrl}`,
               '',
-              'Lifecycle: deduplicated by exact issue title; continued failure appends roughly hourly heartbeat comments; auto-closes after 2 consecutive successful probe runs.',
+              'Lifecycle: deduplicated by exact issue title; continued failure appends roughly hourly heartbeat comments for the first ~8 hours of a continuous outage (then heartbeats stop; the issue stays open and the probe keeps running); auto-closes after 2 consecutive successful probe runs.',
               'This monitor never restarts or deploys anything. Runbook: docs/development/prod-health-probe-monitor-runbook-20260714.md',
             ].join('\n')
 
             if (openMatch) {
-              await github.rest.issues.createComment({ owner, repo, issue_number: openMatch.number, body })
-              core.info(`Appended ${crossing ? 'alert' : 'heartbeat'} comment on open issue #${openMatch.number}.`)
+              if (crossing || heartbeat) {
+                await github.rest.issues.createComment({ owner, repo, issue_number: openMatch.number, body })
+                core.info(`Appended ${crossing ? 'alert' : 'heartbeat'} comment on open issue #${openMatch.number}.`)
+              } else {
+                core.info(`Alert issue #${openMatch.number} already open; no comment outside crossing/heartbeat.`)
+              }
             } else if (anyMatch) {
               await github.rest.issues.update({ owner, repo, issue_number: anyMatch.number, state: 'open' })
               await github.rest.issues.createComment({ owner, repo, issue_number: anyMatch.number, body })
@@ -309,6 +324,7 @@ jobs:
           CONSECUTIVE_SUCCESSES: ${{ steps.streak.outputs.consecutive_successes }}
           CROSSING: ${{ steps.streak.outputs.crossing }}
           HEARTBEAT: ${{ steps.streak.outputs.heartbeat }}
+          ENSURE_OPEN: ${{ steps.streak.outputs.ensure_open }}
           SHOULD_CLOSE: ${{ steps.streak.outputs.should_close }}
           SILENCED: ${{ vars.PROD_HEALTH_PROBE_SILENCE == 'true' }}
         run: |
