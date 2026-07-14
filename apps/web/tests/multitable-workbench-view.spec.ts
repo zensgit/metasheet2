@@ -2780,4 +2780,59 @@ describe('MultitableWorkbench view wiring', () => {
       expect(container!.querySelector('[data-grid-collapsed-keys]')?.getAttribute('data-grid-collapsed-keys')).toBe('[]')
     })
   })
+
+  // UI-P2-2b (design docs/development/multitable-ui-p2-2b-vertical-tree-design-20260713.md §2.1/§3.1,
+  // §8.2-T7): the rail is now a persistent collapsible <aside> wrapping the base-bar + the
+  // MetaSheetViewRail tree (mocked above). Collapse is a workbench-local `railCollapsed` ref — v-show
+  // hides both the rail-stub and the base-bar (display:none => unfocusable/unclickable/out of the a11y
+  // tree, directly assertable via style.display in jsdom). Count-conservation across the round-trip is
+  // already covered by meta-sheet-view-rail.spec.ts's own T3 (this component is mocked here); T7 only
+  // proves the workbench-level collapse wiring itself.
+  describe('UI-P2-2b — rail collapse (T7)', () => {
+    function railStubRoot(): HTMLElement {
+      const rail = container!.querySelector('.mt-workbench__rail') as HTMLElement
+      expect(rail).toBeTruthy()
+      // rail-head (base-bar + toggle) is always the first child; the MetaSheetViewRail stub is the
+      // second — structurally stable regardless of whether the base-bar itself is v-if-rendered.
+      return rail.children[1] as HTMLElement
+    }
+
+    it('defaults to expanded: rail stub and base-bar are visible, toggle aria-expanded=true', async () => {
+      mountWorkbench()
+      await flushUi()
+      const toggle = container!.querySelector('[data-testid="rail-collapse-toggle"]') as HTMLButtonElement
+      expect(toggle).toBeTruthy()
+      expect(toggle.getAttribute('aria-expanded')).toBe('true')
+      expect(railStubRoot().style.display).not.toBe('none')
+      const baseBar = container!.querySelector('.mt-workbench__base-bar') as HTMLElement | null
+      expect(baseBar).toBeTruthy() // listBases() mock resolves 2 bases -> basePickerBases.length > 0
+      expect(baseBar!.style.display).not.toBe('none')
+    })
+
+    it('clicking the collapse toggle hides the rail stub AND the base-bar (display:none), flips aria-expanded to false', async () => {
+      mountWorkbench()
+      await flushUi()
+      const toggle = container!.querySelector('[data-testid="rail-collapse-toggle"]') as HTMLButtonElement
+      toggle.click()
+      await flushUi()
+      expect(toggle.getAttribute('aria-expanded')).toBe('false')
+      expect(railStubRoot().style.display).toBe('none')
+      const baseBar = container!.querySelector('.mt-workbench__base-bar') as HTMLElement
+      expect(baseBar.style.display).toBe('none')
+    })
+
+    it('clicking again restores the rail stub and base-bar to visible (round-trip)', async () => {
+      mountWorkbench()
+      await flushUi()
+      const toggle = container!.querySelector('[data-testid="rail-collapse-toggle"]') as HTMLButtonElement
+      toggle.click()
+      await flushUi()
+      toggle.click()
+      await flushUi()
+      expect(toggle.getAttribute('aria-expanded')).toBe('true')
+      expect(railStubRoot().style.display).not.toBe('none')
+      const baseBar = container!.querySelector('.mt-workbench__base-bar') as HTMLElement
+      expect(baseBar.style.display).not.toBe('none')
+    })
+  })
 })

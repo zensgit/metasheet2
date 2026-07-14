@@ -26,7 +26,6 @@ export { default as MetaCellEditor } from './components/cells/MetaCellEditor.vue
 // Grid components
 export { default as MetaGridTable } from './components/MetaGridTable.vue'
 export { default as MetaFieldHeader } from './components/MetaFieldHeader.vue'
-export { default as MetaViewTabBar } from './components/MetaViewTabBar.vue'
 export { default as MetaSheetViewRail } from './components/MetaSheetViewRail.vue'
 export { default as MetaToolbar } from './components/MetaToolbar.vue'
 export { default as MetaFormView } from './components/MetaFormView.vue'
