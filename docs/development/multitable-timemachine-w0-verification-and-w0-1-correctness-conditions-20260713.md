@@ -56,7 +56,7 @@ The W0-1 direction (version-contiguity + trusted-since + same-txn re-check) is c
 
 ## 4. Corrected W0 implementation order (dependency-sorted)
 
-1. **(owner call) Interim gate** — default-off master flag on `revert-execute` (§2), or accept the residual risk window. *Fable/Sonnet — mechanical, fail-closed.*
+1. **Interim gate — ✅ DONE (#4261, merged `86fa1d85c`)** — default-off master flag `MULTITABLE_ENABLE_SHEET_REVERT` on `revert-execute`, mirroring Reset's `PIT_RESET_ENABLED`; base sheet-wide Revert-execute is now fail-closed by default until W0-1 lands.
 2. **Chain-event schema** — `UNIQUE (sheet_id, record_id, version)` (C5); marker vocabulary + `action` CHECK migration + closed type (C7); checkpoint column that survives deletion (C6). *Opus — schema/txn design; zzzz-ordered migration, fresh-DB full-migrate proof.*
 3. **Persistent integrity ledger + trusted anchor** covering live + deleted chains (C3, C6). *Opus.*
 4. **Two-phase rollout** so old instances cannot write across the regime boundary (C6). *Opus — design; Sonnet — impl.*
