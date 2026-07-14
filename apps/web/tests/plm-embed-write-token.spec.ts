@@ -255,6 +255,20 @@ describe('plmEmbedWriteToken — child protocol layer (discussion write-UI on-de
     await expect(promise).resolves.toBe('finally')
   })
 
+  it('MUST-2 fail-closed: with no Web Crypto CSPRNG, requestWriteToken() rejects and posts NOTHING', async () => {
+    const realCrypto = globalThis.crypto
+    // A runtime with no usable CSPRNG (no randomUUID, no getRandomValues) must NOT degrade to a
+    // predictable nonce -- it must reject before any outbound token-request.
+    Object.defineProperty(globalThis, 'crypto', { value: {}, configurable: true })
+    try {
+      const postsBefore = postSpy.mock.calls.length
+      await expect(client!.requestWriteToken()).rejects.toBeInstanceOf(PlmEmbedWriteTokenError)
+      expect(postSpy.mock.calls.length).toBe(postsBefore)
+    } finally {
+      Object.defineProperty(globalThis, 'crypto', { value: realCrypto, configurable: true })
+    }
+  })
+
   it('dispose() rejects an in-flight request and REMOVES the message listener (non-vacuous)', async () => {
     const removeSpy = vi.spyOn(window, 'removeEventListener')
     const promise = client!.requestWriteToken()
