@@ -405,6 +405,7 @@ import {
   locationValueFromAddress,
 } from '../utils/field-display'
 import { isSystemField } from '../utils/system-fields'
+import { isFieldAlwaysReadOnly } from '../utils/field-permissions'
 import { isFieldConditionallyRequired, isFieldVisible } from '../utils/field-visibility'
 import { resolveFormPages } from '../utils/form-layout'
 import { MtButton } from '../ui'
@@ -523,9 +524,13 @@ function goToPreviousPage() {
   if (!isFirstPage.value) currentPageIndex.value -= 1
 }
 
+// B4: `isFieldAlwaysReadOnly(field)` is ADDITIVE to `fieldPermissions?.[fieldId]?.readOnly` (the
+// server-supplied flag already carrying mirror/system/formula/lookup/rollup readOnly) — see the matching
+// comment in MetaGridTable.isEditable / apps/web/src/multitable/utils/field-permissions.ts for the
+// defense-in-depth rationale.
 function isFieldReadOnly(fieldId: string): boolean {
   const field = props.fields.find((item) => item.id === fieldId) ?? null
-  return !!props.readOnly || props.fieldPermissions?.[fieldId]?.readOnly === true || props.rowActions?.canEdit === false || isSystemField(field)
+  return !!props.readOnly || props.fieldPermissions?.[fieldId]?.readOnly === true || props.rowActions?.canEdit === false || isSystemField(field) || isFieldAlwaysReadOnly(field)
 }
 
 const hasUnsavedChanges = computed(() => {
