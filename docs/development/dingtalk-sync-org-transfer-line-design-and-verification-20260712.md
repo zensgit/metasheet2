@@ -205,8 +205,17 @@ atomic single-transaction rebind, etc.). Those are acceptance criteria, not resu
   prefer **per-integration** over a global env.
 - `DINGTALK_OAUTH_REQUIRE_SHARED_STATE_STORE` — must be **on** + Redis-verified for
   multi-replica; single-replica may defer.
-- `DINGTALK_DELIVERY_RETENTION_DAYS` — set **before** enabling interactive cards; window
-  must exceed the longest approval SLA.
+- `DINGTALK_DELIVERY_RETENTION_DAYS` — the approval-card/person delivery retention family
+  (`dingtalk-card-person-delivery-retention.ts`, #4142; sweeps `dingtalk_approval_card_deliveries`
+  + `dingtalk_person_deliveries`). **Disabled by default** — set to a positive integer (≥7,
+  floored) **before** enabling interactive cards, or `dingtalk_person_deliveries` rows accumulate
+  unbounded (never deleted). Enabling it does **not** bound `dingtalk_approval_card_deliveries`
+  the same way: that table is never deleted from, at any setting — enabling only transitions
+  rows still `sent` past the window to `expired` (loses its one-tap deep link; the row, and the
+  table's row count, remain). This is a **separate control** from
+  `DINGTALK_GROUP_DELIVERY_RETENTION_DAYS` (DT-CLOSE-02B correction: that family only sweeps the
+  GROUP-webhook ledger `dingtalk_group_deliveries`, sized for diagnostic/audit needs — it never
+  touches approval cards, and setting it does nothing here).
 - `DINGTALK_INTERACTIVE_CARD_STREAM_ENABLED` — stays **OFF** until U1–U13 pass **and** the
   #4171 real-callback anchor proof lands.
 - The user/list primary-source flip is deferred behind a **2,000-user-tenant benchmark** of
