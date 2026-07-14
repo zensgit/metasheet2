@@ -154,8 +154,13 @@ async function create(): Promise<void> {
 async function reply(threadId: string): Promise<void> {
   const body = (replyDraft[threadId] || '').trim()
   if (!body) return
+  // A reply is a ONE-LEVEL reply carrying parent_comment_id (the discussion model's definition) --
+  // NOT a second top-level comment. Attach it to the thread's root (first) comment; the provider
+  // rejects reply-to-reply, so one level is the only valid depth.
+  const thread = threads.value.find((x) => x.id === threadId)
+  const parentId = thread?.comments[0]?.id
   await run(
-    (token) => addDiscussionComment(token, threadId, { body }),
+    (token) => addDiscussionComment(token, threadId, parentId ? { body, parent_comment_id: parentId } : { body }),
     (t) => { upsert(t); replyDraft[threadId] = '' },
   )
 }
