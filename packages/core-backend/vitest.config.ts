@@ -213,6 +213,43 @@ export default defineConfig({
       // skip-green here, re-opening the "real-DB spec silently skips in the no-DB lane" hole) —
       // whole-file wired into `Run multitable real-DB integration` in plugin-tests.yml.
       'tests/integration/multitable-d1-delete-revision-parity-realdb.test.ts',
+      // D-1c §0.6 HISTORY_INCOMPLETE precheck goldens (G-HI-1..4 + HI-5): real Postgres only
+      // (describeIfDatabase would skip-green in the no-DB lane) — whole-file wired into
+      // `Run multitable real-DB integration` in plugin-tests.yml. Two-point wiring: BOTH points
+      // or the file silently never runs.
+      'tests/integration/multitable-history-incomplete-precheck-realdb.test.ts',
+      // D-1c W0 slice ① (form-submit CREATE/EDIT public-form revision goldens): real Postgres only
+      // (installs scoped failure/suppression triggers per site and drives the real submit route
+      // end-to-end) — excluded HERE so it cannot skip-green in the no-DB lane, whole-file wired into
+      // `Run multitable real-DB integration` in plugin-tests.yml.
+      'tests/integration/multitable-d1c-form-submit-revision-realdb.test.ts',
+      // D-1c W0 slice ② (plugin-SDK createRecord/patchRecord revision goldens + the concurrent-delete
+      // P1 fix golden, which uses a genuine two-connection Postgres lock race via
+      // `poolManager.get().getInternalPool().connect()`): real Postgres only — excluded HERE so it cannot
+      // skip-green in the no-DB lane, whole-file wired into `Run multitable real-DB integration` in
+      // plugin-tests.yml.
+      'tests/integration/multitable-d1c-plugin-revision-realdb.test.ts',
+      // D-1c W0 slice ③ (automation create_record/update_record revision goldens, driven through the
+      // real AutomationService.executeRule entry point + the concurrent-delete zero-row fail-closed
+      // golden, which uses a genuine two-connection Postgres lock race via
+      // `poolManager.get().getInternalPool().connect()`): real Postgres only — excluded HERE so it cannot
+      // skip-green in the no-DB lane, whole-file wired into `Run multitable real-DB integration` in
+      // plugin-tests.yml.
+      'tests/integration/multitable-d1c-automation-revision-realdb.test.ts',
+      // D-1c W0 slice ④ (approval resultWriteback revision goldens, driven through the real
+      // dispatchAction -> approval.completed event bus -> AutomationService.handleApprovalCompletionEvent
+      // -> writeApprovalResultBack chain + the concurrent-delete zero-row fail-closed golden, which uses a
+      // genuine two-connection Postgres lock race via `poolManager.get().getInternalPool().connect()`):
+      // real Postgres only — excluded HERE so it cannot skip-green in the no-DB lane, whole-file wired
+      // into `Run multitable real-DB integration` in plugin-tests.yml.
+      'tests/integration/multitable-d1c-approval-revision-realdb.test.ts',
+      // D-1c W0 slice ⑤ (FINAL) (attachment-delete cell-strip revision goldens, driving the real
+      // DELETE /attachments/:attachmentId route end-to-end + the zero-row RETURNING fail-closed
+      // concurrent-delete golden, simulated via a scoped BEFORE UPDATE suppression trigger — a genuine
+      // two-connection race is impossible here, the branch already holds a same-txn row lock): real
+      // Postgres only — excluded HERE so it cannot skip-green in the no-DB lane, whole-file wired into
+      // `Run multitable real-DB integration` in plugin-tests.yml.
+      'tests/integration/multitable-d1c-attachment-revision-realdb.test.ts',
       // D-2 side-door delete recoverability (#4004): real Postgres only (it installs scoped failure-
       // injection triggers and drives both side doors end-to-end) — excluded HERE so it cannot skip-green
       // in the no-DB lane, and whole-file wired into `Run multitable real-DB integration` in

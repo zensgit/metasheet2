@@ -967,6 +967,7 @@ export class RecordWriteService {
         // template below carries its own adjacent lock-guarded marker for the RANK-8 structural scanner.
         const updateRes = unsetIds.length > 0
           // lock-guarded: ensureRecordNotLocked enforced per record above (unset+set path)
+          // revision-emitted: bulk PATCH unset+set — recordRecordRevision(action:'update') @998.
           ? await query(
               `UPDATE meta_records
                SET data = (data - $5::text[]) || $1::jsonb, updated_at = now(), version = version + 1, modified_by = $4
@@ -975,6 +976,7 @@ export class RecordWriteService {
               [JSON.stringify(patch), sheetId, recordId, actorId, unsetIds],
             )
           // lock-guarded: ensureRecordNotLocked enforced per record above (set-only path)
+          // revision-emitted: bulk PATCH set-only — recordRecordRevision(action:'update') @998.
           : await query(
               `UPDATE meta_records
                SET data = data || $1::jsonb, updated_at = now(), version = version + 1, modified_by = $4

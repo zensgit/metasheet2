@@ -7,7 +7,15 @@ export type QueryFn = (
 
 export type RecordRevisionAction = 'create' | 'update' | 'delete'
 
-export type RecordRevisionSource = 'rest' | 'yjs-bridge' | 'automation' | 'public-form' | 'plugin' | string
+// D-1c OD-2 (W0 slice ④): 'approval' names the approval `resultWriteback` write entry point
+// (automation-service.ts's applyResultWritebackPatch, both same-base and cross-base) — the write
+// entry point, not the auth identity. Union stays `| string` (non-blocking) per the design-lock; named
+// explicitly here for type-safety at the slice's call site.
+// D-1c OD-2 (W0 slice ⑤, FINAL): 'attachment' names the attachment-delete cell-strip write entry point
+// (univer-meta.ts's `DELETE /attachments/:attachmentId`) — the owner ruled attachment gets its OWN
+// source, distinct from 'rest'/'public-form', because the write entry point is the attachment endpoint
+// itself, not a generic record write.
+export type RecordRevisionSource = 'rest' | 'yjs-bridge' | 'automation' | 'public-form' | 'plugin' | 'approval' | 'attachment' | string
 
 export interface RecordRevisionInput {
   sheetId: string

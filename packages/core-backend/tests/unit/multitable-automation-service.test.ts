@@ -228,14 +228,30 @@ describe('AutomationService', () => {
       const query = createMockQuery([rule])
       service = new AutomationService(bus, createMockDb([rule]) as never, query)
 
+      // W0 slice ③: update_record now emits its revision inside ONE real transaction (mirrors D-1's
+      // executeDeleteRecord), so the executor's `withTransaction` routes through `AutomationService`'s
+      // hard-wired `poolManager.get().transaction(...)` instead of calling `deps.queryFn` directly.
+      // Route that transaction through the SAME injected `query` mock (rather than a real Postgres
+      // pool) so this stays a no-DB unit test — mirrors `multitable-button-routes.test.ts`'s
+      // `createMockPool()` pattern.
+      const { poolManager } = await import('../../src/integration/db/connection-pool')
+      const poolSpy = vi.spyOn(poolManager, 'get').mockReturnValue({
+        query,
+        transaction: (fn: (client: { query: typeof query }) => Promise<unknown>) => fn({ query }),
+      } as never)
+
       const emitSpy = vi.spyOn(bus, 'emit')
 
-      await service.handleEvent('multitable.record.created', {
-        sheetId: 'sheet1',
-        recordId: 'rec1',
-        data: {},
-        actorId: 'user1',
-      })
+      try {
+        await service.handleEvent('multitable.record.created', {
+          sheetId: 'sheet1',
+          recordId: 'rec1',
+          data: {},
+          actorId: 'user1',
+        })
+      } finally {
+        poolSpy.mockRestore()
+      }
 
       const updateCall = query.mock.calls.find(([sql]) =>
         String(sql).includes('UPDATE meta_records') && String(sql).includes('SET data ='),
@@ -248,6 +264,12 @@ describe('AutomationService', () => {
         'rec1',
         'sheet1',
       ])
+
+      // W0 slice ③: the same-txn revision insert actually ran (source=automation, action=update).
+      const revisionCall = query.mock.calls.find(([sql]) =>
+        String(sql).includes('INSERT INTO meta_record_revisions'),
+      )
+      expect(revisionCall).toBeTruthy()
 
       // Should emit follow-up update event with incremented depth
       expect(emitSpy).toHaveBeenCalledWith('multitable.record.updated', expect.objectContaining({

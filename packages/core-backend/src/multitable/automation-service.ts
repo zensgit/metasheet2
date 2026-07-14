@@ -34,7 +34,8 @@ import {
 import { isValidIanaTimeZone } from './automation-timezone'
 import { ensureRecordNotLocked } from './record-lock'
 import { publishMultitableSheetRealtime } from './realtime-publish'
-import { extractSelectOptions } from './field-codecs'
+import { extractSelectOptions, normalizeJson } from './field-codecs'
+import { recordRecordRevision } from './record-history-service'
 import {
   ConditionGroupValidationError,
   normalizeConditionGroupInput,
@@ -2779,6 +2780,27 @@ export class AutomationService {
   }
 
   /**
+   * D-1c W0 slice ④ helper (same shape as `AutomationExecutor.withTransaction`, and the SAME production
+   * wiring this class already hard-wires for the executor's `deps.transaction` in the constructor above:
+   * a real `poolManager.get().transaction(...)`). Used ONLY by `applyResultWritebackPatch` — every other
+   * `AutomationService` call site keeps its pre-existing `this.queryFn` shape untouched.
+   */
+  private async withTransaction<T>(handler: (query: AutomationQueryFn) => Promise<T>): Promise<T> {
+    return poolManager.get().transaction(async ({ query }) => {
+      const txQuery: AutomationQueryFn = async (sqlText, params) => {
+        const result = await query(sqlText, params)
+        return {
+          rows: Array.isArray((result as { rows?: unknown[] }).rows) ? (result as { rows: unknown[] }).rows : [],
+          rowCount: typeof (result as { rowCount?: number }).rowCount === 'number'
+            ? (result as { rowCount: number }).rowCount
+            : undefined,
+        }
+      }
+      return handler(txQuery)
+    })
+  }
+
+  /**
    * Shared tail for BOTH W7 backwrite paths: lock-check the target record (governed by `lockActorId`,
    * B1), write the patch via the bare `|| $1::jsonb` UPDATE, then emit the chaining event + realtime
    * fan-out. Returns true when the row was written, false when the record is gone AND `onMissing` is
@@ -2787,6 +2809,31 @@ export class AutomationService {
    *
    * rich-longText SAFE: the patch carries ONLY system outcome values (status enum / approver id / ISO
    * timestamp), never user-supplied longText — classified SAFE in the rich-longText write-sink guard.
+   *
+   * D-1c W0 slice ④ (RATIFIED design-lock, §0.5 OD-1..OD-3, §0/§7a site A7): this bare UPDATE mutated
+   * `meta_records` with NO `meta_record_revisions` row, so `reconstructRecordsAtT` (the PIT view / revert
+   * / reset primitive) never saw an approval resultWriteback — the same "PIT lie" class slices ①/②/③
+   * closed for form-submit, plugin-SDK, and automation, just triggered by an approval completion. This
+   * path was NOT previously transactional (D-1 "偏差1" caution) — the lock-check SELECT, the UPDATE (now
+   * `RETURNING version, data`), and the revision INSERT now all run inside ONE transaction
+   * (`withTransaction` above), so a failed revision INSERT rolls back the UPDATE too. `source='approval'`
+   * (OD-2 — names the write entry point, not the auth identity). `actorId=opts.chainActorId ?? null`
+   * (OD-3 — identical to `opts.lockActorId` at BOTH call sites: the approval actor for same-base, the
+   * TRIGGER actor for cross-base; never a fabricated system actor for a null trigger).
+   *
+   * ZERO-ROW FAIL-CLOSED DETERMINATION: the lock-check SELECT above takes no row lock (no `FOR UPDATE`),
+   * so a concurrent DELETE of this exact record between that SELECT and the UPDATE is reachable — nothing
+   * pins a record in place during an in-flight approval (`handleApprovalCompletionEvent`'s own "Record no
+   * longer exists" guard on the SOURCE record proves the authors already expect mid-flight deletes here).
+   * The PRE-EXISTING contract for a 0-row UPDATE (proven by the fact that no RETURNING/rowCount check
+   * existed at all before this slice) was SILENT SUCCESS for both same-base and cross-base callers — the
+   * automation-lane contract (slice ③), not the plugin-lane throw contract (slice ②). Regressing that
+   * into a thrown error would be an unrelated behavior change outside this slice's mandate. So the guard
+   * fails closed on the REVISION ONLY (`if (updatedRow) { ...write revision... }`): a 0-row UPDATE still
+   * reports success and still emits the chaining/realtime events (unchanged), but writes NO spurious
+   * revision for a record this UPDATE never touched — a fabricated one would persist forever
+   * (`meta_record_revisions.record_id` carries no FK) and could resurrect the deleted record via
+   * `reconstructRecordsAtT`.
    */
   private async applyResultWritebackPatch(
     sheetId: string,
@@ -2802,24 +2849,45 @@ export class AutomationService {
       missingMessage?: string
     },
   ): Promise<boolean> {
-    const lockRes = await this.queryFn(
-      'SELECT locked, locked_by, created_by FROM meta_records WHERE id = $1 AND sheet_id = $2',
-      [recordId, sheetId],
-    )
-    const lockRow = lockRes.rows[0] as { locked?: unknown; locked_by?: unknown; created_by?: unknown } | undefined
-    if (!lockRow) {
-      if (opts.onMissing === 'throw') throw new Error(opts.missingMessage ?? `resultWriteback target record not found: ${recordId} ∉ ${sheetId}`)
-      return false // record gone — the caller's missing-record path already handled it
-    }
-    ensureRecordNotLocked(opts.lockActorId, lockRow, () => new Error(opts.lockedMessage))
-    // lock-guarded: resultWriteback patch — ensureRecordNotLocked (opts.lockActorId = the trigger actor for a
-    // cross-base target) is enforced immediately above, so a locked target record throws → backwriteSkipped.
-    await this.queryFn(
-      `UPDATE meta_records
-       SET data = COALESCE(data, '{}'::jsonb) || $1::jsonb, version = version + 1, updated_at = NOW()
-       WHERE id = $2 AND sheet_id = $3`,
-      [JSON.stringify(patch), recordId, sheetId],
-    )
+    const wrote = await this.withTransaction(async (query) => {
+      const lockRes = await query(
+        'SELECT locked, locked_by, created_by FROM meta_records WHERE id = $1 AND sheet_id = $2',
+        [recordId, sheetId],
+      )
+      const lockRow = lockRes.rows[0] as { locked?: unknown; locked_by?: unknown; created_by?: unknown } | undefined
+      if (!lockRow) {
+        if (opts.onMissing === 'throw') throw new Error(opts.missingMessage ?? `resultWriteback target record not found: ${recordId} ∉ ${sheetId}`)
+        return false // record gone — the caller's missing-record path already handled it
+      }
+      ensureRecordNotLocked(opts.lockActorId, lockRow, () => new Error(opts.lockedMessage))
+      // lock-guarded: resultWriteback patch — ensureRecordNotLocked (opts.lockActorId, the trigger actor for a cross-base target) enforced immediately above; a locked target throws and rolls back.
+      // revision-emitted: D-1c slice ④ (A7 approval resultWriteback) — recordRecordRevision below, same txn.
+      const updateRes = await query(
+        `UPDATE meta_records
+         SET data = COALESCE(data, '{}'::jsonb) || $1::jsonb, version = version + 1, updated_at = NOW()
+         WHERE id = $2 AND sheet_id = $3
+         RETURNING version, data`,
+        [JSON.stringify(patch), recordId, sheetId],
+      )
+      const updatedRow = updateRes.rows[0] as { version?: unknown; data?: unknown } | undefined
+      if (updatedRow) {
+        const nextVersion = Number(updatedRow.version)
+        await recordRecordRevision(query, {
+          sheetId,
+          recordId,
+          version: Number.isFinite(nextVersion) ? nextVersion : 0,
+          action: 'update',
+          source: 'approval',
+          actorId: opts.chainActorId ?? null,
+          changedFieldIds: Object.keys(patch),
+          patch,
+          snapshot: normalizeJson(updatedRow.data),
+        })
+      }
+      return true
+    })
+    if (!wrote) return false
+
     this.eventBus.emit('multitable.record.updated', withAutomationEventId({
       sheetId,
       recordId,
