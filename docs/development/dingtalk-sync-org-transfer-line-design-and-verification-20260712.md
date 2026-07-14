@@ -206,7 +206,7 @@ atomic single-transaction rebind, etc.). Those are acceptance criteria, not resu
 - `DINGTALK_OAUTH_REQUIRE_SHARED_STATE_STORE` — must be **on** + Redis-verified for
   multi-replica; single-replica may defer.
 - `DINGTALK_DELIVERY_RETENTION_DAYS` — set **before** enabling interactive cards; window
-  must exceed the longest approval SLA.
+  is sized for GROUP-delivery diagnostic/audit retention — NOT an approval-SLA coupling (DT-CLOSE-02B: the group sweep does not touch approval cards; approval-card retention is unimplemented, a separate gap).
 - `DINGTALK_INTERACTIVE_CARD_STREAM_ENABLED` — stays **OFF** until U1–U13 pass **and** the
   #4171 real-callback anchor proof lands.
 - The user/list primary-source flip is deferred behind a **2,000-user-tenant benchmark** of
