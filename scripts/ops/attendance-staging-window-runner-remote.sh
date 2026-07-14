@@ -625,7 +625,13 @@ action_migrate_rehearse() {
   docker cp "$MIGRATE_BACKUP_PATH" "${POSTGRES_CONTAINER}:${container_dump_path}"
 
   log "rehearsal: restoring into ${REHEARSAL_DB}"
-  docker exec "$POSTGRES_CONTAINER" pg_restore -j 2 -U "$pg_user" -d "$REHEARSAL_DB" "$container_dump_path" \
+  # --disable-triggers: the audit-log partitions inherit a row trigger from their
+  # partitioned parent (set_retention_period), which lives in the PRE-data section and
+  # fires during COPY, querying audit_retention_policies before it is restored (run
+  # 29340321213). We restore as the container superuser, so wrapping the data load in
+  # DISABLE/ENABLE TRIGGER ALL is safe and yields a byte-faithful clone (trigger
+  # recomputation during restore is not desired anyway).
+  docker exec "$POSTGRES_CONTAINER" pg_restore -j 2 --disable-triggers -U "$pg_user" -d "$REHEARSAL_DB" "$container_dump_path" \
     2>&1 | tee "${OUTPUT_DIR}/rehearsal-restore.log"
 
   local backend_dsn rehearsal_dsn

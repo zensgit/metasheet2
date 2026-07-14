@@ -181,3 +181,13 @@ test('staging-only contract: the remote script names only staging containers', (
     'remote script must never reference the prod-track compose file',
   )
 })
+
+test('rehearsal pg_restore keeps --disable-triggers (load-bearing: partition-inherited row triggers fire during COPY without it — run 29340321213)', () => {
+  const remote = readFileSync(REMOTE_SH, 'utf8')
+  const restoreLines = remote.split('\n').filter((l) => l.includes('pg_restore') && l.includes('$REHEARSAL_DB'))
+  assert.ok(restoreLines.length >= 1, 'expected the rehearsal pg_restore invocation to exist')
+  for (const line of restoreLines) {
+    assert.ok(line.includes('--disable-triggers'),
+      `rehearsal pg_restore lost --disable-triggers: ${line.trim()}`)
+  }
+})
