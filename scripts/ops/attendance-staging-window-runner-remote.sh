@@ -170,7 +170,8 @@ capture_settings() {
     -H "Authorization: Bearer ${token}" -H 'x-org-id: default' \
     'http://127.0.0.1:8082/api/attendance/settings?orgId=default' || echo '000')"
   echo "$http_code" > "${out_file}.http_code"
-  log "GET /api/attendance/settings -> ${http_code} (${out_file})"
+  # callers capture stdout as the code — informational line goes to stderr
+  log "GET /api/attendance/settings -> ${http_code} (${out_file})" >&2
   printf '%s' "$http_code"
 }
 
@@ -447,7 +448,8 @@ action_smoke() {
   } > "${OUTPUT_DIR}/summary.txt"
 
   if [[ "$smoke_rc" != "0" ]]; then
-    fail "smoke ${SMOKE_ID} exited rc=${smoke_rc} (full log: smoke-${SMOKE_ID}.log)"
+    echo "[window-runner][error] smoke ${SMOKE_ID} exited rc=${smoke_rc} (full log: smoke-${SMOKE_ID}.log)" >&2
+    exit "$smoke_rc"
   fi
   log "smoke ${SMOKE_ID} OK (stamp ${stamp})"
 }
