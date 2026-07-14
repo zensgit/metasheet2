@@ -1,0 +1,219 @@
+name: Attendance Staging Window Runner
+
+run-name: "Attendance Staging Window Runner: ${{ inputs.action }}${{ inputs.action == 'smoke' && format(' ({0})', inputs.smoke) || '' }}"
+
+# One dispatch = ONE action of the attendance five-window staging acceptance
+# (docs/development/attendance-staging-window-bundle-20260702.md):
+#   deploy — pin staging backend+web to a full-SHA GHCR tag, migrate, verify build+auth
+#   smoke  — run one window smoke (ae4 / rd45 / otbank-v18 / mp6 / hmr5) in-container
+#   status — read-only staging snapshot
+#
+# Modeled on attendance-remote-log-snapshot-prod.yml (SSH via deploy secrets, artifact
+# upload, 15-minute timeout, single concurrency group). Remote logic lives in the
+# committed scripts/ops/attendance-staging-window-runner-remote.sh, synced per-run;
+# every remote command is wrapped in an explicit `bash -o pipefail -c '<script>'`
+# (login-shell defaults are never relied on). Pipeline semantics are proven by
+# scripts/ops/attendance-window-runner-pipeline.test.mjs (gate-contract strict case).
+#
+# STAGING ONLY: the remote script fails closed unless it finds
+# docker-compose.app.staging.yml defining the metasheet-staging-* containers, and it
+# never recreates staging postgres/redis (asserted by container-id comparison).
+
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: 'What to run against the STAGING stack'
+        required: true
+        type: choice
+        options: [deploy, smoke, status]
+        default: status
+      deploy_sha:
+        description: 'FULL 40-char commit SHA (GHCR tags are full-SHA). Required for deploy and smoke.'
+        required: false
+        default: ''
+      smoke:
+        description: 'Which window smoke to run (action=smoke only)'
+        required: false
+        type: choice
+        options: [ae4, rd45, otbank-v18, mp6, hmr5]
+        default: ae4
+      set_window_env:
+        description: 'deploy only: rd-window sets ATTENDANCE_SCHEDULER_ENABLED + ATTENDANCE_NOTIFICATION_DELIVERY_WORKER_ENABLED on the staging backend at deploy time (bundle §3.4). The digest gate always stays unset.'
+        required: false
+        type: choice
+        options: [none, rd-window]
+        default: none
+      skip_host_sync:
+        description: 'skip the deploy-host repo git sync before smoke (true/false)'
+        required: false
+        default: 'false'
+
+concurrency:
+  group: attendance-staging-window-runner
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate inputs and embedded scripts
+        env:
+          ACTION: ${{ inputs.action }}
+          DEPLOY_SHA: ${{ inputs.deploy_sha }}
+          SET_WINDOW_ENV: ${{ inputs.set_window_env }}
+        run: |
+          set -euo pipefail
+          case "$ACTION" in deploy|smoke|status) ;; *) echo "invalid action: $ACTION" >&2; exit 2 ;; esac
+          if [[ "$ACTION" == "deploy" || "$ACTION" == "smoke" ]]; then
+            if [[ ! "$DEPLOY_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+              echo "deploy_sha must be the FULL 40-char lowercase commit SHA for action=$ACTION (GHCR tags are full-SHA; short prefixes fail with manifest unknown), got: '$DEPLOY_SHA'" >&2
+              exit 2
+            fi
+          fi
+          if [[ "$ACTION" != "deploy" && "$SET_WINDOW_ENV" != "none" ]]; then
+            echo "set_window_env=$SET_WINDOW_ENV is only meaningful for action=deploy (env flips happen together with the deploy, never mid-smoke — bundle §3.4)" >&2
+            exit 2
+          fi
+          bash -n scripts/ops/attendance-staging-window-runner-remote.sh
+          bash -n scripts/ops/attendance-window-runner-pipeline.lib.sh
+          node --check scripts/ops/attendance-window-runner-mint-token.mjs
+          echo "inputs and embedded scripts OK"
+
+      - name: Run pipeline self-test (same shape as the remote invocation)
+        run: node --test scripts/ops/attendance-window-runner-pipeline.test.mjs
+
+      - name: Sync runner scripts to deploy host
+        id: sync
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          DEPLOY_SSH_KEY_B64: ${{ secrets.DEPLOY_SSH_KEY_B64 }}
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          printf '%s' "$DEPLOY_SSH_KEY_B64" | base64 -d > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          runner_dir="/tmp/attendance-window-runner-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          echo "runner_dir=$runner_dir" >> "$GITHUB_OUTPUT"
+          tar -czf - \
+            scripts/ops/attendance-staging-window-runner-remote.sh \
+            scripts/ops/attendance-window-runner-pipeline.lib.sh \
+            scripts/ops/attendance-window-runner-mint-token.mjs \
+          | ssh -o StrictHostKeyChecking=no -o IdentitiesOnly=yes -i ~/.ssh/deploy_key \
+              "$DEPLOY_USER@$DEPLOY_HOST" \
+              "bash -o pipefail -c 'set -euo pipefail; rm -rf ${runner_dir}; mkdir -p ${runner_dir}; tar -xzf - -C ${runner_dir} --strip-components=2'"
+
+      - name: Run remote action
+        id: remote
+        continue-on-error: true
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
+          STAGING_DEPLOY_PATH: ${{ vars.STAGING_DEPLOY_PATH || 'metasheet2-dingtalk-staging' }}
+          ACTION: ${{ inputs.action }}
+          DEPLOY_SHA: ${{ inputs.deploy_sha }}
+          SMOKE_ID: ${{ inputs.smoke }}
+          SET_WINDOW_ENV: ${{ inputs.set_window_env }}
+          SKIP_HOST_SYNC: ${{ inputs.skip_host_sync }}
+          RUNNER_DIR: ${{ steps.sync.outputs.runner_dir }}
+        run: |
+          set -euo pipefail
+          ssh_opts="-o StrictHostKeyChecking=no -o IdentitiesOnly=yes -i ~/.ssh/deploy_key"
+          DEPLOY_PATH="${DEPLOY_PATH:-metasheet2}"
+          for pair in "DEPLOY_PATH=$DEPLOY_PATH" "STAGING_DEPLOY_PATH=$STAGING_DEPLOY_PATH" "SKIP_HOST_SYNC=$SKIP_HOST_SYNC"; do
+            value="${pair#*=}"
+            if [[ ! "$value" =~ ^[A-Za-z0-9._/~-]+$ ]]; then
+              echo "refusing unsafe characters in ${pair%%=*}: '$value'" >&2
+              exit 2
+            fi
+          done
+          remote_output_dir="/tmp/attendance-window-runner-out-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          artifact_name="attendance-staging-window-runner-${ACTION}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          echo "artifact_name=$artifact_name" >> "$GITHUB_OUTPUT"
+          mkdir -p output/window-runner
+
+          # Everything after this prelude is the committed remote script; the inputs are
+          # regex-validated above so the generated prelude is quoting-safe.
+          remote_script="set -euo pipefail
+          export ACTION='${ACTION}'
+          export DEPLOY_SHA='${DEPLOY_SHA}'
+          export SMOKE_ID='${SMOKE_ID}'
+          export SET_WINDOW_ENV='${SET_WINDOW_ENV}'
+          export STAGING_DEPLOY_PATH='${STAGING_DEPLOY_PATH}'
+          export DEPLOY_PATH='${DEPLOY_PATH}'
+          export SKIP_HOST_SYNC='${SKIP_HOST_SYNC}'
+          export OUTPUT_DIR='${remote_output_dir}'
+          export RUN_STAMP='gh${GITHUB_RUN_ID}a${GITHUB_RUN_ATTEMPT}'
+          rm -rf '${remote_output_dir}'
+          mkdir -p '${remote_output_dir}'
+          bash '${RUNNER_DIR}/attendance-staging-window-runner-remote.sh'"
+          escaped_script="$(printf '%s' "$remote_script" | sed "s/'/'\\\\''/g")"
+
+          set +e
+          # Owner-ruled invocation shape: the remote command is exactly
+          # `bash -o pipefail -c '<script>'` — never a login-shell default.
+          ssh $ssh_opts "$DEPLOY_USER@$DEPLOY_HOST" "bash -o pipefail -c '${escaped_script}'" 2>&1 \
+            | tee output/window-runner/ssh.log
+          rc=${PIPESTATUS[0]}
+          scp $ssh_opts -r "$DEPLOY_USER@$DEPLOY_HOST:${remote_output_dir}/." output/window-runner/ 2>&1 \
+            | tee -a output/window-runner/ssh.log
+          scp_rc=${PIPESTATUS[0]}
+          ssh $ssh_opts "$DEPLOY_USER@$DEPLOY_HOST" \
+            "bash -o pipefail -c 'rm -rf ${remote_output_dir} ${RUNNER_DIR}'" \
+            >> output/window-runner/ssh.log 2>&1
+          set -e
+
+          if [[ "$rc" == "0" && "$scp_rc" != "0" ]]; then
+            rc="$scp_rc"
+          fi
+          echo "remote_rc=$rc" >> "$GITHUB_OUTPUT"
+          exit 0
+
+      - name: Write step summary
+        if: always()
+        env:
+          REMOTE_RC: ${{ steps.remote.outputs.remote_rc }}
+          ARTIFACT_NAME: ${{ steps.remote.outputs.artifact_name }}
+          ACTION: ${{ inputs.action }}
+          SMOKE_ID: ${{ inputs.smoke }}
+          DEPLOY_SHA: ${{ inputs.deploy_sha }}
+          SET_WINDOW_ENV: ${{ inputs.set_window_env }}
+        run: |
+          set -euo pipefail
+          {
+            echo "## Attendance Staging Window Runner"
+            echo ""
+            echo "- Action: \`${ACTION}\`"
+            if [[ "$ACTION" == "smoke" ]]; then echo "- Smoke: \`${SMOKE_ID}\`"; fi
+            echo "- Deploy SHA: \`${DEPLOY_SHA:-<none>}\`"
+            echo "- Window env: \`${SET_WINDOW_ENV}\`"
+            echo "- Remote rc: \`${REMOTE_RC:-missing}\`"
+            echo "- Artifact: \`${ARTIFACT_NAME:-missing}\`"
+            if [[ -f output/window-runner/summary.txt ]]; then
+              echo ""
+              echo '```text'
+              cat output/window-runner/summary.txt
+              echo '```'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.remote.outputs.artifact_name || format('attendance-staging-window-runner-{0}-{1}-{2}', inputs.action, github.run_id, github.run_attempt) }}
+          retention-days: 30
+          path: output/window-runner
+
+      - name: Fail on remote error
+        if: steps.remote.outputs.remote_rc != '0'
+        run: exit 1
