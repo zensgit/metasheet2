@@ -9,14 +9,27 @@
       {{ bi('正在加载工作台概览…', 'Loading workbench overview…') }}
     </p>
 
-    <p
+    <div
       v-else-if="overviewErrored"
       class="sp-dash__state sp-dash__state--muted"
       data-testid="stock-prep-dashboard-error"
       role="status"
     >
-      {{ bi('同步后端尚未就绪,稍后再试。', 'Backend read not ready yet — try again later.') }}
-    </p>
+      <p class="sp-dash__state-msg">{{ bi('同步后端尚未就绪,稍后再试。', 'Backend read not ready yet — try again later.') }}</p>
+      <!-- H4-1 retry: re-runs the read-gated overview load. Idempotent + safe — loadOverview resets
+           overviewErrored and re-fetches; no stale race (this is the coarse /projects read, and the
+           stage-detail load carries its own monotonic seq guard). -->
+      <button
+        type="button"
+        class="sp-dash__retry"
+        data-testid="stock-prep-dashboard-retry"
+        :disabled="overviewLoading"
+        :aria-label="bi('重试读取工作台概览', 'Retry loading workbench overview')"
+        @click="loadOverview"
+      >
+        {{ bi('重试', 'Retry') }}
+      </button>
+    </div>
 
     <p
       v-else-if="isEmpty"
@@ -90,6 +103,21 @@
             @click="onStageNavigate(recommendedStep.stage)"
           >
             {{ bi('前往处理', 'Go there') }}
+          </button>
+          <!-- H4-1 detail retry — ONLY for detail_unavailable (a transient, non-permission stage-read
+               failure). NOT for admin_required: a 403 is not a transient fault, so retrying is pointless.
+               loadStageDetail re-runs under its own monotonic seq guard, so a project switched during the
+               retry never lets a stale response win. -->
+          <button
+            v-else-if="recommendedStep.kind === 'detail_unavailable'"
+            type="button"
+            class="sp-dash__recommend-action"
+            data-testid="stock-prep-dashboard-detail-retry"
+            :disabled="stageDetailLoading"
+            :aria-label="bi('重试读取阶段详情', 'Retry loading stage detail')"
+            @click="loadStageDetail"
+          >
+            {{ bi('重试', 'Retry') }}
           </button>
         </div>
 
@@ -505,5 +533,36 @@ watch(() => props.projectId, loadStageDetail, { immediate: true })
 
 .sp-dash__recommend-action:hover {
   background: var(--el-fill-color-light);
+}
+
+.sp-dash__state-msg {
+  margin: 0 0 8px;
+}
+
+/* H4-1 retry button — mirrors the recommend-action, plus a visible focus ring (H4-2 keyboard) and a
+   disabled state while a load is already in flight. */
+.sp-dash__retry {
+  border: 1px solid var(--ms-border-light);
+  border-radius: 6px;
+  background: transparent;
+  padding: 4px 12px;
+  color: var(--ms-color-primary);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.sp-dash__retry:hover:not(:disabled) {
+  background: var(--el-fill-color-light);
+}
+
+.sp-dash__retry:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.sp-dash__retry:focus-visible {
+  outline: 2px solid var(--ms-color-primary);
+  outline-offset: 1px;
 }
 </style>
