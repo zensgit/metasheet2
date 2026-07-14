@@ -624,15 +624,28 @@ action_migrate_rehearse() {
   docker exec "$POSTGRES_CONTAINER" mkdir -p "$CONTAINER_RUNNER_DIR"
   docker cp "$MIGRATE_BACKUP_PATH" "${POSTGRES_CONTAINER}:${container_dump_path}"
 
-  log "rehearsal: restoring into ${REHEARSAL_DB}"
-  # --disable-triggers: the audit-log partitions inherit a row trigger from their
-  # partitioned parent (set_retention_period), which lives in the PRE-data section and
-  # fires during COPY, querying audit_retention_policies before it is restored (run
-  # 29340321213). We restore as the container superuser, so wrapping the data load in
-  # DISABLE/ENABLE TRIGGER ALL is safe and yields a byte-faithful clone (trigger
-  # recomputation during restore is not desired anyway).
-  docker exec "$POSTGRES_CONTAINER" pg_restore -j 2 --disable-triggers -U "$pg_user" -d "$REHEARSAL_DB" "$container_dump_path" \
-    2>&1 | tee "${OUTPUT_DIR}/rehearsal-restore.log"
+  local restore_log="${OUTPUT_DIR}/rehearsal-restore.log"
+  : > "$restore_log"
+
+  # pg_restore only emits DISABLE/ENABLE TRIGGER statements for an explicit data-only
+  # restore. Passing --disable-triggers to a full restore is a no-op (run 29347058494),
+  # so a partition trigger can still fire during COPY before its pending dependency is
+  # migrated. Restore the archive in section order and suppress triggers only around the
+  # data phase; post-data objects are installed after every table payload is present.
+  log "rehearsal: restoring pre-data into ${REHEARSAL_DB}"
+  docker exec "$POSTGRES_CONTAINER" pg_restore --exit-on-error --section=pre-data \
+    -U "$pg_user" -d "$REHEARSAL_DB" "$container_dump_path" \
+    2>&1 | tee -a "$restore_log"
+
+  log "rehearsal: restoring data with triggers disabled into ${REHEARSAL_DB}"
+  docker exec "$POSTGRES_CONTAINER" pg_restore --exit-on-error -j 2 --data-only \
+    --disable-triggers --superuser="$pg_user" -U "$pg_user" -d "$REHEARSAL_DB" "$container_dump_path" \
+    2>&1 | tee -a "$restore_log"
+
+  log "rehearsal: restoring post-data into ${REHEARSAL_DB}"
+  docker exec "$POSTGRES_CONTAINER" pg_restore --exit-on-error -j 2 --section=post-data \
+    -U "$pg_user" -d "$REHEARSAL_DB" "$container_dump_path" \
+    2>&1 | tee -a "$restore_log"
 
   local backend_dsn rehearsal_dsn
   backend_dsn="$(resolve_backend_database_url)"

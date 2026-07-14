@@ -182,12 +182,41 @@ test('staging-only contract: the remote script names only staging containers', (
   )
 })
 
-test('rehearsal pg_restore keeps --disable-triggers (load-bearing: partition-inherited row triggers fire during COPY without it — run 29340321213)', () => {
+test('rehearsal pg_restore uses ordered phases so data-only trigger suppression is effective', () => {
   const remote = readFileSync(REMOTE_SH, 'utf8')
-  const restoreLines = remote.split('\n').filter((l) => l.includes('pg_restore') && l.includes('$REHEARSAL_DB'))
-  assert.ok(restoreLines.length >= 1, 'expected the rehearsal pg_restore invocation to exist')
-  for (const line of restoreLines) {
-    assert.ok(line.includes('--disable-triggers'),
-      `rehearsal pg_restore lost --disable-triggers: ${line.trim()}`)
-  }
+  const logical = remote.replace(/\\\n\s*/g, ' ').replace(/\s+/g, ' ')
+  const preData = logical.indexOf(
+    'pg_restore --exit-on-error --section=pre-data',
+  )
+  const data = logical.indexOf(
+    'pg_restore --exit-on-error -j 2 --data-only --disable-triggers',
+  )
+  const postData = logical.indexOf(
+    'pg_restore --exit-on-error -j 2 --section=post-data',
+  )
+  const restoreCommands =
+    logical.match(/docker exec "\$POSTGRES_CONTAINER" pg_restore [^|]+/g) || []
+
+  assert.ok(preData >= 0, 'expected an explicit pre-data rehearsal restore')
+  assert.ok(data > preData, 'expected the data-only restore after pre-data')
+  assert.ok(
+    postData > data,
+    'expected the post-data restore after the trigger-suppressed data phase',
+  )
+  assert.equal(
+    restoreCommands.length,
+    3,
+    'expected exactly pre-data, data-only, and post-data restore commands',
+  )
+  assert.match(
+    logical.slice(data, postData),
+    /--disable-triggers --superuser="\$pg_user"/,
+    'data-only restore must disable triggers through the restore superuser',
+  )
+  assert.equal(
+    restoreCommands.filter((command) => command.includes('--disable-triggers'))
+      .length,
+    1,
+    '--disable-triggers must appear only on the explicit data-only restore',
+  )
 })
