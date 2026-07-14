@@ -107,6 +107,9 @@ describe('PlmEmbedDiscussionPanel — create + reply + resolve + reopen', () => 
     expect(tokens).toEqual(['tok-1', 'tok-2', 'tok-3', 'tok-4'])
     expect(apiFetchMock.mock.calls[0][0]).toBe('/api/plm-embed/discussion/threads')
     expect(apiFetchMock.mock.calls[1][0]).toBe('/api/plm-embed/discussion/threads/t1/comments')
+    // a REPLY is a one-level reply: it carries parent_comment_id = the thread's root comment (c1),
+    // not a bare top-level comment.
+    expect(JSON.parse((apiFetchMock.mock.calls[1][1] as { body: string }).body)).toMatchObject({ body: 'a reply', parent_comment_id: 'c1' })
     expect(apiFetchMock.mock.calls[2][0]).toBe('/api/plm-embed/discussion/threads/t1/resolve')
     expect(apiFetchMock.mock.calls[3][0]).toBe('/api/plm-embed/discussion/threads/t1/reopen')
   })
