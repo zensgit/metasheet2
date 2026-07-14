@@ -17,9 +17,10 @@
  *   PIT_UNDELETE_API_MOUNT=/api/multitable
  *   PIT_UNDELETE_OUTPUT_FILE=/tmp/pit-undelete-acceptance.json
  *
- * Flag handling:
- *   - flag OFF: proves execute is inert (403 UNDELETE_DISABLED), then exits successfully.
- *   - flag ON: proves happy resurrection and an id-collision/drift 409 without overwriting the occupied record id.
+ * Flag handling (#4261 two-gate: undelete-revert needs BOTH MULTITABLE_ENABLE_SHEET_REVERT and _PIT_UNDELETE):
+ *   - either gate OFF: undeleteSupported=false and execute is inert (403 REVERT_DISABLED when the SHEET_REVERT
+ *     master gate is off — checked first; else 403 UNDELETE_DISABLED). Exits successfully.
+ *   - both gates ON: proves happy resurrection and an id-collision/drift 409 without overwriting the occupied record id.
  *
  * Exit:
  *   0 = all run scenarios passed
@@ -232,13 +233,18 @@ async function latestRestoreRevisionSource(ctx, recordId) {
 }
 
 async function runFlagOff(ctx, pv) {
-  log('Flag state: OFF (MULTITABLE_ENABLE_PIT_UNDELETE not true). Running inert scenario only.\n')
+  // #4261 two-gate parity: undelete-revert requires BOTH MULTITABLE_ENABLE_SHEET_REVERT (the master gate,
+  // checked FIRST) and MULTITABLE_ENABLE_PIT_UNDELETE. undeleteSupported=false covers three states — both
+  // off, SHEET_REVERT-on/UNDELETE-off, and SHEET_REVERT-off/UNDELETE-on. So execute is refused with EITHER
+  // REVERT_DISABLED (the master gate, when SHEET_REVERT is off) OR UNDELETE_DISABLED (the sub-gate, when
+  // SHEET_REVERT is on but UNDELETE is off). Either proves the inert state.
+  log('Flag state: undelete not supported (needs BOTH MULTITABLE_ENABLE_SHEET_REVERT and _PIT_UNDELETE). Running inert scenario only.\n')
   recordCheck('flag-off preview still classifies one undelete candidate', data(pv)?.summary?.visibleUndeleteCount === 1, JSON.stringify(data(pv)?.summary || {}))
   recordCheck('flag-off preview reports undeleteSupported=false', data(pv)?.undeleteSupported === false, `got ${String(data(pv)?.undeleteSupported)}`)
   const ex = await execute(ctx, data(pv)?.previewIdentity, 'undelete')
-  recordCheck('flag-off execute → 403 UNDELETE_DISABLED', ex.status === 403 && code(ex) === 'UNDELETE_DISABLED', `got ${ex.status}/${code(ex)}`)
+  recordCheck('flag-off execute → 403 REVERT_DISABLED or UNDELETE_DISABLED', ex.status === 403 && (code(ex) === 'REVERT_DISABLED' || code(ex) === 'UNDELETE_DISABLED'), `got ${ex.status}/${code(ex)}`)
   recordCheck('flag-off execute writes no live U row', !(await liveRow(ctx, ctx.u)), 'U unexpectedly exists')
-  log('\n→ Flag-off inert state is proven. Enable MULTITABLE_ENABLE_PIT_UNDELETE=true and re-run for the flag-on live smoke.')
+  log('\n→ Inert state is proven. Enable BOTH MULTITABLE_ENABLE_SHEET_REVERT=true and MULTITABLE_ENABLE_PIT_UNDELETE=true and re-run for the flag-on live smoke.')
 }
 
 async function runHappy(ctx, pv) {

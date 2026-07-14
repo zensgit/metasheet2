@@ -34,7 +34,7 @@
  * @property {string} key
  * @property {'boolean'|'numeric'|'enum'} type
  * @property {string} activationValue - exact string that activates a boolean flag (ignored for numeric/enum)
- * @property {boolean} [caseInsensitive] - true only for the two flags whose source call site lowercases+trims
+ * @property {boolean} [caseInsensitive] - true only for the three flags (PIT_RESET/PIT_UNDELETE/SHEET_REVERT) whose source call site lowercases+trims
  * @property {string[]} dependsOn - other flag keys that MUST also be active for this flag's gated effect to be safe/whole
  * @property {string[]} conflictsWith - other flag keys that MUST NOT be active at the same time as this one
  * @property {'low'|'medium'|'high'} danger
@@ -175,13 +175,22 @@ export const GLOBAL_HISTORY_FLAG_MANIFEST = Object.freeze([
     type: 'boolean',
     activationValue: 'true',
     caseInsensitive: true,
-    dependsOn: [],
+    dependsOn: ['MULTITABLE_ENABLE_SHEET_REVERT'],
     conflictsWith: [],
     danger: 'medium',
     purpose:
-      'T8-1 PIT undelete-execute (resurrect face). Gated by `.trim().toLowerCase() === \'true\'` — same case-insensitive family as PIT_RESET. Requires canDeleteRecord (never canEditRecord) at execute plus a typed confirm:\'undelete\'. Inbound links are NOT rebuilt by this flag alone (design-lock L4 A) — see MULTITABLE_ENABLE_RECORD_UNDELETE_INBOUND for that layer.',
-    // source: packages/core-backend/src/routes/univer-meta.ts:10071
-    source: 'packages/core-backend/src/routes/univer-meta.ts:10071',
+      'T8-1 PIT undelete-execute (resurrect face). Gated by `.trim().toLowerCase() === \'true\'` — same case-insensitive family as PIT_RESET. Requires canDeleteRecord (never canEditRecord) at execute plus a typed confirm:\'undelete\'. Inbound links are NOT rebuilt by this flag alone (design-lock L4 A) — see MULTITABLE_ENABLE_RECORD_UNDELETE_INBOUND for that layer. The undelete face rides INSIDE revert-execute, whose SHEET_REVERT master gate (#4261) is checked FIRST — so undelete requires BOTH gates.',
+    // Anchored by SYMBOL NAME (drift-proof, no line numbers): PIT_UNDELETE_ENABLED helper + the undelete
+    // sub-gate inside revert-execute; the SHEET_REVERT master gate precedes it at the top of revert-execute.
+    source: 'packages/core-backend/src/routes/univer-meta.ts (symbol refs, drift-proof: PIT_UNDELETE_ENABLED helper + the undelete sub-gate inside revert-execute; the SHEET_REVERT master gate precedes it at the top of revert-execute)',
+    rules: [
+      {
+        kind: 'requires',
+        id: 'undelete-without-revert-gate',
+        description:
+          "MULTITABLE_ENABLE_PIT_UNDELETE is active but MULTITABLE_ENABLE_SHEET_REVERT is not — the undelete face rides inside revert-execute, whose master gate (checked FIRST) returns 403 REVERT_DISABLED before the undelete gate is reached. So undelete has no effect without SHEET_REVERT: dead configuration, not a working feature. Enable BOTH to make undelete-revert live.",
+      },
+    ],
   },
   {
     key: 'MULTITABLE_ENABLE_RECORD_UNDELETE_INBOUND',
