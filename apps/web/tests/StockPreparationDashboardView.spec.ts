@@ -564,4 +564,64 @@ describe('StockPreparationDashboardView', () => {
     await flushUi()
     expect(container!.textContent || '').toContain('3') // the fresh reselect load settles cleanly
   })
+
+  // ── H4-2 keyboard ────────────────────────────────────────────────────────────────────────────────
+  // Scope note: reachability/activation are already satisfied because every control this view owns is a
+  // native <button>/<select> — so there is deliberately NO Enter/Space→navigate test here (jsdom does not
+  // synthesize a native button's default activation from a synthetic keydown, so such a test would assert
+  // jsdom, not our code). The focus RING itself is CSS `:focus-visible`, which jsdom does not compute — it
+  // is verified through the screenshot channel, not here. What IS load-bearing in jsdom is below.
+
+  it('H4-2: every dashboard control is a NATIVE focusable element (a div@click regression goes red here)', async () => {
+    h.getOverview.mockResolvedValue(buildOverview())
+    mockClearStageReads()
+    const root = mountView({ projectId: 'proj-alpha' })
+    await flushUi()
+    const controls = [
+      root.querySelector('[data-testid="stock-prep-dashboard-project-select"]'),
+      ...Array.from(root.querySelectorAll('[data-testid^="stock-prep-stage-nav-"]')),
+    ].filter(Boolean) as HTMLElement[]
+    expect(controls.length).toBeGreaterThanOrEqual(7) // 1 picker + the six stage buttons
+    for (const el of controls) {
+      el.focus()
+      // A <div @click> without tabindex is NOT focusable: activeElement stays on <body> → this fails.
+      expect(document.activeElement).toBe(el)
+    }
+  })
+
+  it('H4-2: a failed retry returns focus to the retry button (our own :disabled dropped it to body)', async () => {
+    h.getOverview.mockRejectedValue(new Error('503'))
+    const root = mountView()
+    await flushUi()
+    const retry = root.querySelector('[data-testid="stock-prep-dashboard-retry"]') as HTMLButtonElement
+    retry.focus()
+    expect(document.activeElement).toBe(retry)
+    retry.click() // still failing → button re-renders; :disabled during the load drops focus to <body>
+    await flushUi()
+    expect(root.querySelector('[data-testid="stock-prep-dashboard-retry"]')).not.toBeNull()
+    expect(document.activeElement).toBe(root.querySelector('[data-testid="stock-prep-dashboard-retry"]'))
+  })
+
+  it('H4-2: a retry does NOT steal focus back if the operator Tabbed elsewhere while it was in flight', async () => {
+    let releaseRetry: (v: unknown) => void = () => {}
+    h.getOverview.mockRejectedValueOnce(new Error('503'))
+    const root = mountView()
+    await flushUi()
+    const retry = root.querySelector('[data-testid="stock-prep-dashboard-retry"]') as HTMLButtonElement
+    retry.focus()
+    // Hold the retry's load in flight, and fail it again so the retry button is still rendered on settle.
+    h.getOverview.mockImplementation(() => new Promise((_res, rej) => { releaseRetry = () => rej(new Error('503')) }))
+    retry.click()
+    await flushUi()
+    // The operator Tabs away to another control WHILE the retry is still loading.
+    const elsewhere = document.createElement('button')
+    document.body.appendChild(elsewhere)
+    elsewhere.focus()
+    expect(document.activeElement).toBe(elsewhere)
+    releaseRetry(null)
+    await flushUi()
+    // Focus stays where the operator put it — restoring it here would be focus theft.
+    expect(document.activeElement).toBe(elsewhere)
+    elsewhere.remove()
+  })
 })
