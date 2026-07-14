@@ -1,14 +1,15 @@
 # R14 — base-wide restore: A/B decision brief + Option-B design lock
 
-**Date:** 2026-07-14 · **Status:** PROPOSED (gate-front — zero runtime; the owner's formal A/B decision is the gate) · **Evidence base:** R14.C real-scale benchmark (#4273, two full runs, 1k–50k tiers) · **Prereq artifacts:** R13-A revision-completeness (landed #4245–#4249/#4234), W0-1 trust lock (#4262 v2, pending ratify), retention-coexistence design (#4224).
+**Date:** 2026-07-14 (rev 2 — owner P2 corrections folded) · **Status:** PROPOSED (gate-front — zero runtime; the owner's formal decision is the gate) · **Evidence base:** R14.C benchmark (#4273 — **measured at merge-base `86fa1d85c`, pre-#4269**; see §1 caveats) · **Prereq artifacts:** R13-A revision-completeness (landed), W0-1 v3 correction lock (#4262, pending ratify; #4269 landed the skeleton), retention-coexistence design (#4224).
 
-> **Decision at stake (owner):** Option **A** — full base-wide *atomic* Time Machine (Feishu-parity one-click whole-base restore, all config surfaces revisioned) — vs Option **B** — "Granular History & Recovery" (operation-level base-wide restore: fence + deterministic plan + chunking + journal + one-shot visibility flip; no unsupportable single-transaction atomicity promise). The owner's prior lean is **B**. This lock turns that lean into a ratifiable design; §2 records what choosing A would actually require so the fork is decided on evidence, not vibes.
+> **Product shape (owner direction, rev 2): HYBRID.** **≤5,000 records: keep the existing single-sheet synchronous atomic restore** (the sync routes + ceiling stay exactly as-is). **>5,000 / base-wide: Option-B async chunked operation** — with frozen preview/hash, idempotency, progress, retry-resume, conflict detection, and **explicit partial-completion semantics**. **No cross-sheet long-transaction atomicity is promised at any scale.** §2 records what full Option A would additionally require, so that door is closed on evidence.
 
-## §1 Evidence (#4273 — measured, not assumed)
-- **Read path is a non-issue:** reconstruct + precheck + previews ≤ ~220ms even at 50k records; the >5,000 ceiling refuses fast (413), fail-closed.
-- **Write path splits by transaction shape:** reset-execute (single txn, thin writes) ≈ 0.4s @ 1k → **~20s floor @ 50k** (excludes derived-field recompute); revert-execute (per-record `patchRecords` txns) ≈ 4s @ 1k → **~3.6min @ 50k**, non-atomic. (Caveat: the gap is partly per-record write weight, not purely txn boundary.)
-- **SC.1 confirmed on data:** synchronous >5,000-record restore is untenable → base-wide restore is an **async job**, full stop.
-- A base is N sheets: base-wide restore multiplies every per-sheet cost by N and adds cross-sheet consistency (links) — a single-transaction whole-base restore at production scale (100k+ rows, multi-sheet, lock-hold minutes) is **not** an engineering option. "Atomic" in Option A could only be delivered as *pseudo*-atomicity (§2), which is precisely what Option B provides honestly.
+## §1 Evidence (#4273) — with the honest caveats (owner P2)
+- **Baseline caveat:** #4273 ran at `86fa1d85c` (pre-#4269) — it measured the OLD live-vs-latest precheck, and its "v2 prototype" ordered by `(created_at,version,id)`. The landed generation-aware precheck, causal seq, marker join, deleted-enumeration, trust floor, and shared fence are **not yet measured**. Supported claim: *the old order-key window query showed no blow-up on a dev box* — not "v2/v3 has no performance blocker." **Re-run required after the v3 correction lands** (≥3 rounds of 5k execute + a same-write-shape control isolating the txn-boundary variable).
+- **Read path (measured):** reconstruct + precheck + previews — 50k **p50 ≈122–220ms, p95 ≈251–346ms**. The 10k/50k "preview" rows measured the **fast 413 ceiling refusal**, not full preview computation.
+- **Write path (measured @1k, once per run; larger figures are LINEAR EXTRAPOLATIONS):** reset-execute (single txn, thin writes) ≈0.4s @1k → ~20s extrapolated @50k; revert-execute (per-record txns) ≈4s @1k → ~3.6min extrapolated @50k. The gap is partly per-record write weight, not purely txn boundary (control experiment pending).
+- **What the evidence DOES support:** keep the 5,000 sync ceiling; any larger restore must be an async path (SC.1). **It does not alone prove B over A** — the case for the hybrid rests on §1 (scale) *plus* §2 (A's config-surface cost) *plus* the owner's product judgment.
+- A base is N sheets: cross-sheet single-transaction whole-base restore at production scale means lock-hold measured in minutes — per the extrapolations above, not an option we will promise; hence "no cross-sheet long-txn atomicity" as a hard product line.
 
 ## §2 What Option A would actually require (recorded so the decision is informed)
 1. **All config surfaces into the config-revision system** — automation, workflow, dashboard configs currently have **no** config-revision coverage; A means designing + landing revisioning for each (the R14 consequence the owner flagged: 「决定 automation/workflow/dashboard config-history 是否进 config revision」), plus their restore semantics (e.g. restoring an automation to T re-arms triggers — side-effect policy needed).
@@ -16,7 +17,7 @@
 3. **Cost:** the 4–7 pw estimate is dominated by (1); every new config surface added later must join the revision system or silently break the "whole base" promise.
 4. **When A is right:** only if "complete base time machine" is an explicit sold capability (owner's own criterion). Feishu-parity note: Feishu restores the whole base and does **not** support single-table restore — MetaSheet already exceeds Feishu on granular restore; A's increment over B is the *all-config-surfaces* promise, not the restore mechanics.
 
-## §3 Option B design (RECOMMENDED — operation-level base-wide restore)
+## §3 The >5k / base-wide async leg (Option-B operation-level restore) — the hybrid's second half
 **Model:** a persistent restore operation with a deterministic plan, executed in chunks under a write fence, finalized with a one-shot visibility flip. No single-txn promise; instead, **operation-level atomicity**: the base is never observable in a half-restored state, and a failed operation is never silently partial.
 
 1. **`meta_restore_operations`** (new table): `id` (operation-id, idempotency key), `base_id`, `as_of` (T), `state` (`planning → fenced → applying → finalizing → done | failed`), `plan` (jsonb: per-sheet deterministic revert/delete/resurrect sets + per-sheet precheck verdicts + scope hashes), `journal` (jsonb: per-chunk completion cursor), `actor_id`, timestamps. One active operation per base (partial unique on `base_id` where state active) — concurrent restores refuse.
@@ -28,10 +29,10 @@
 7. **Ceiling/limits:** per-sheet 5,000 sync ceiling stays for the sync routes; the operation runs as the async job (SC.1), no ceiling but progress-reported. Retention interplay: plan refuses if `as_of` predates the retention floor (#4224 / #4262 v2 §6 trust-floor) — fail-closed, same doctrine.
 
 ## §4 Hard gates before any B implementation
-1. **W0-1 (#4262 v2) ratified + landed + trusted** — per-sheet precheck is the plan phase's foundation; base-wide restore before chain-trust closes is the healed-gap ×N.
+1. **W0-1 v3 correction lock (#4262) ratified + landed + trusted (over the merged #4269 skeleton)** — per-sheet precheck is the plan phase's foundation; base-wide restore before chain-trust closes is the healed-gap ×N.
 2. Owner A/B ratify of THIS lock (+ §6 forks).
 3. Retention floor (#4224 + v2 §6) landed — the plan-refusal predicate needs it.
-4. The two-session W0-1 fork (#4269 vs #4262 v2) reconciled — B reuses whichever fence/precheck wins.
+4. The v3 corrections to the landed #4269 (causal seq, all-writer fence) — the async leg reuses that fence/precheck.
 
 ## §5 Verification plan (goldens, mutation-proven, when built)
 Operation idempotency (re-run after crash at chunk k resumes, no double-apply); fence-refusal (concurrent write during `applying` → 409 `RESTORE_IN_PROGRESS`, constructed race); scope-hash drift refuse (in-fence mutation between plan and apply is impossible — mutation-test by disabling the fence ⇒ drift golden reds); one-active-operation (concurrent second restore refuses); preview↔execute identity (signed plan); cross-sheet link consistency at T (restored links point at restored rows); excluded-surface honesty (preview declares automation/workflow/dashboard configs unrestored); retention-floor refuse; per-chunk revision emission (`source:'restore'`, operation-id threaded).
