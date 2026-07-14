@@ -15,7 +15,9 @@
                           restart COMMAND returned 0 — a command success is not a stable service).
     5. healthcheck      — GET /api/health.
     6. mvpSmoke         — the in-package stock-preparation smoke (postdeploy-smoke.mjs).
-    7. summary          — one values-free acceptance-summary.txt + .json with EXACTLY the 9 fields.
+    7. summary          — one values-free acceptance-summary.txt + .json: the 9 whitelisted status
+                          fields ALWAYS, plus — only on failure — a values-free failDetail block
+                          (failedStage + at most a migration name / SQLSTATE / HTTP code, never a value).
 
   SECURITY:
     * The admin token is read ONLY from an environment variable (-AdminTokenEnvVar, default
@@ -23,7 +25,7 @@
       written to the command line, to a file, to a log, to the summary, or into any Start-Process
       ArgumentList. It is handed to the child smoke ONLY through a scoped process env var that is
       cleared in a finally block.
-    * The summary is values-free by construction: it can only ever contain the 9 whitelisted fields,
+    * The summary is values-free by construction: it can only ever contain the 9 whitelisted status fields
       each a PASS/FAIL/enum/count/coarse-code — never a drawing number, quantity, unit, material name,
       host, credential, or raw log line. On failure it adds only failedStage + coarse code (migration
       name / SQLSTATE / HTTP status), never a full log.
@@ -126,13 +128,16 @@ function Invoke-ShaStage {
   if (-not $matched) { Stop-WithFailure 'sha' @{ reason = 'checksum_mismatch' } }
 
   if ($ExpectedGitSha) {
-    # metadata json rides next to the package as <pkg-basename>.json (see package-build workflow).
+    # An -ExpectedGitSha lock is only meaningful if it is ENFORCED. metadata json rides next to the
+    # package as <pkg-basename>.json (see package-build workflow). A missing metadata file, or metadata
+    # without a gitSha, is a FAILURE — never a silent pass — otherwise the lock the operator asked for
+    # would be a no-op exactly when it matters.
     $metaPath = [System.IO.Path]::ChangeExtension($PackagePath, '.json')
-    if (Test-Path $metaPath) {
-      $meta = Get-Content $metaPath -Raw | ConvertFrom-Json
-      $metaSha = if ($meta.PSObject.Properties.Name -contains 'gitSha') { "$($meta.gitSha)".ToLower() } else { '' }
-      if ($metaSha -and ($metaSha -ne $ExpectedGitSha.ToLower())) { Stop-WithFailure 'sha' @{ reason = 'git_sha_mismatch' } }
-    }
+    if (-not (Test-Path $metaPath)) { Stop-WithFailure 'sha' @{ reason = 'metadata_missing' } }
+    $meta = Get-Content $metaPath -Raw | ConvertFrom-Json
+    $metaSha = if ($meta.PSObject.Properties.Name -contains 'gitSha') { "$($meta.gitSha)".ToLower() } else { '' }
+    if (-not $metaSha) { Stop-WithFailure 'sha' @{ reason = 'metadata_git_sha_absent' } }
+    if ($metaSha -ne $ExpectedGitSha.ToLower()) { Stop-WithFailure 'sha' @{ reason = 'git_sha_mismatch' } }
   }
   $Summary.packageShaMatch = 'PASS'
   Write-Stage 'stage 1: PASS'
@@ -156,12 +161,13 @@ function Invoke-MigrationStage {
   # NOTE: NEVER set MIGRATION_EXCLUDE here — it is not a valid acceptance path.
   & node $migrate 2>&1 | ForEach-Object { Write-Stage "migrate: $_" }
   if ($LASTEXITCODE -ne 0) { Stop-WithFailure 'migrate' @{ migration = $TargetMigration } }
-  # Confirm the target migration is actually in the ledger (command exit 0 is not proof).
-  $confirm = Join-Path $DeployRoot 'scripts/ops/confirm-migration-applied.mjs'
-  if (Test-Path $confirm) {
-    & node $confirm --name $TargetMigration
-    if ($LASTEXITCODE -ne 0) { Stop-WithFailure 'migrate' @{ migration = $TargetMigration; reason = 'target_not_applied' } }
-  }
+  # Confirm the target migration is actually in the ledger — migrate exit 0 is NOT proof (an empty
+  # pending set, an excluded/no-op entry, or a partially-applied history all exit 0). Uses the SAME
+  # migrate entrypoint's read-only --confirm mode (exit 0 = applied / 1 = pending / 2 = unknown). This
+  # is FAIL-CLOSED: if the confirmation cannot be run or does not report 'applied', migrationStatus is
+  # never marked PASS (the old code silently PASSed when the confirm step was absent).
+  & node $migrate --confirm $TargetMigration
+  if ($LASTEXITCODE -ne 0) { Stop-WithFailure 'migrate' @{ migration = $TargetMigration; reason = 'target_not_applied' } }
   $Summary.migrationStatus = 'PASS'
   Write-Stage 'stage 3: PASS'
 }
