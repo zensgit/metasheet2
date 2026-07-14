@@ -1,0 +1,107 @@
+name: Multitable Recovery-Flag Containment Check
+
+# W0 containment verification (owner-directed, 2026-07-14): prove on the RUNNING host that the two
+# destructive recovery flags are NOT active — `MULTITABLE_ENABLE_SHEET_REVERT` and
+# `MULTITABLE_ENABLE_PIT_RESET` must stay off until the W0-1 correction lock (#4262) is built and gated.
+# Code-default-off is NOT evidence about the environment; this workflow produces the ops-side evidence leg.
+#
+# READ-ONLY: ssh + `docker ps` + `docker exec <backend> env` reads. No writes, no restarts, no config edits.
+# Intentionally NOT scheduled; dispatch manually. FAIL-CLOSED: the job fails if either flag is active in any
+# backend container, if an env file under DEPLOY_PATH sets one active, or — positive control — if NO backend
+# container is observable at all (nothing-observed must never read as "contained").
+
+on:
+  workflow_dispatch:
+    inputs:
+      container_match:
+        description: 'Substring to match backend container names (checks every running match)'
+        required: false
+        default: 'backend'
+
+concurrency:
+  group: multitable-recovery-flag-containment-check
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  containment-check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Verify recovery flags are inactive on the deploy host
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          DEPLOY_SSH_KEY_B64: ${{ secrets.DEPLOY_SSH_KEY_B64 }}
+          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
+          CONTAINER_MATCH: ${{ github.event.inputs.container_match || 'backend' }}
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          printf '%s' "$DEPLOY_SSH_KEY_B64" | base64 -d > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh_opts="-o StrictHostKeyChecking=no -o IdentitiesOnly=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=6 -i ~/.ssh/deploy_key"
+          DEPLOY_PATH="${DEPLOY_PATH:-metasheet2}"
+
+          # Remote script (single quoted heredoc — nothing expands locally). Verdict lines are machine-greppable.
+          ssh $ssh_opts "$DEPLOY_USER@$DEPLOY_HOST" CONTAINER_MATCH="$CONTAINER_MATCH" DEPLOY_PATH="$DEPLOY_PATH" 'bash -s' <<'REMOTE' | tee containment-report.txt
+          set -uo pipefail
+          FLAGS="MULTITABLE_ENABLE_SHEET_REVERT MULTITABLE_ENABLE_PIT_RESET"
+          fail=0
+          checked=0
+
+          echo "== running backend containers matching '${CONTAINER_MATCH}' =="
+          names=$(docker ps --format '{{.Names}}' | grep -i -- "${CONTAINER_MATCH}" || true)
+          if [ -z "$names" ]; then
+            echo "VERDICT: FAIL (positive control) — zero containers matched '${CONTAINER_MATCH}'; nothing observed is not containment evidence"
+            exit 2
+          fi
+
+          for name in $names; do
+            checked=$((checked+1))
+            echo "-- container: $name"
+            # Positive control per container: the env read itself must work and be non-trivial.
+            envdump=$(docker exec "$name" env 2>/dev/null) || { echo "VERDICT: FAIL — cannot exec/env in $name (observation broken)"; fail=1; continue; }
+            count=$(printf '%s\n' "$envdump" | wc -l)
+            echo "   observed env vars: $count"
+            if [ "$count" -lt 5 ]; then echo "VERDICT: FAIL — env read in $name implausibly small (observation broken)"; fail=1; continue; fi
+            for f in $FLAGS; do
+              raw=$(printf '%s\n' "$envdump" | grep -E "^${f}=" | head -1 | cut -d= -f2- || true)
+              norm=$(printf '%s' "${raw:-}" | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')
+              if [ -z "${raw+x}" ] || [ -z "$raw" ]; then
+                echo "   $f: unset — CONTAINED"
+              elif [ "$norm" = "true" ] || [ "$norm" = "1" ]; then
+                echo "   $f=$raw — ACTIVE ⇒ CONTAINMENT BREACH"
+                fail=1
+              else
+                echo "   $f=$raw — inactive value — CONTAINED"
+              fi
+            done
+          done
+
+          echo "== env files under ${DEPLOY_PATH} (second leg: what the NEXT container start would get) =="
+          for envfile in $(find "$DEPLOY_PATH" -maxdepth 2 -name '.env*' -o -maxdepth 2 -name '*.env' 2>/dev/null | head -10); do
+            for f in $FLAGS; do
+              hit=$(grep -E "^[[:space:]]*${f}[[:space:]]*=" "$envfile" 2>/dev/null | grep -viE "=[[:space:]]*(false|0|)[[:space:]]*$" || true)
+              if [ -n "$hit" ]; then
+                echo "   $envfile sets ACTIVE: $hit ⇒ CONTAINMENT BREACH (next restart would enable)"
+                fail=1
+              fi
+            done
+          done
+
+          echo "== summary =="
+          echo "containers checked: $checked"
+          if [ "$fail" -ne 0 ]; then echo "VERDICT: FAIL — containment breached or observation broken (see above)"; exit 1; fi
+          echo "VERDICT: PASS — both recovery flags inactive in every observed backend container and env file"
+          REMOTE
+
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: containment-report
+          path: containment-report.txt
+          retention-days: 30
