@@ -1,0 +1,46 @@
+# R14 — base-wide restore: A/B decision brief + Option-B design lock
+
+**Date:** 2026-07-14 · **Status:** PROPOSED (gate-front — zero runtime; the owner's formal A/B decision is the gate) · **Evidence base:** R14.C real-scale benchmark (#4273, two full runs, 1k–50k tiers) · **Prereq artifacts:** R13-A revision-completeness (landed #4245–#4249/#4234), W0-1 trust lock (#4262 v2, pending ratify), retention-coexistence design (#4224).
+
+> **Decision at stake (owner):** Option **A** — full base-wide *atomic* Time Machine (Feishu-parity one-click whole-base restore, all config surfaces revisioned) — vs Option **B** — "Granular History & Recovery" (operation-level base-wide restore: fence + deterministic plan + chunking + journal + one-shot visibility flip; no unsupportable single-transaction atomicity promise). The owner's prior lean is **B**. This lock turns that lean into a ratifiable design; §2 records what choosing A would actually require so the fork is decided on evidence, not vibes.
+
+## §1 Evidence (#4273 — measured, not assumed)
+- **Read path is a non-issue:** reconstruct + precheck + previews ≤ ~220ms even at 50k records; the >5,000 ceiling refuses fast (413), fail-closed.
+- **Write path splits by transaction shape:** reset-execute (single txn, thin writes) ≈ 0.4s @ 1k → **~20s floor @ 50k** (excludes derived-field recompute); revert-execute (per-record `patchRecords` txns) ≈ 4s @ 1k → **~3.6min @ 50k**, non-atomic. (Caveat: the gap is partly per-record write weight, not purely txn boundary.)
+- **SC.1 confirmed on data:** synchronous >5,000-record restore is untenable → base-wide restore is an **async job**, full stop.
+- A base is N sheets: base-wide restore multiplies every per-sheet cost by N and adds cross-sheet consistency (links) — a single-transaction whole-base restore at production scale (100k+ rows, multi-sheet, lock-hold minutes) is **not** an engineering option. "Atomic" in Option A could only be delivered as *pseudo*-atomicity (§2), which is precisely what Option B provides honestly.
+
+## §2 What Option A would actually require (recorded so the decision is informed)
+1. **All config surfaces into the config-revision system** — automation, workflow, dashboard configs currently have **no** config-revision coverage; A means designing + landing revisioning for each (the R14 consequence the owner flagged: 「决定 automation/workflow/dashboard config-history 是否进 config revision」), plus their restore semantics (e.g. restoring an automation to T re-arms triggers — side-effect policy needed).
+2. **Pseudo-atomic apply** — given §1, A's "one-click atomic" is necessarily fence + staged apply + final visibility flip — i.e. Option B's machinery — plus the *promise* of all-surfaces coverage.
+3. **Cost:** the 4–7 pw estimate is dominated by (1); every new config surface added later must join the revision system or silently break the "whole base" promise.
+4. **When A is right:** only if "complete base time machine" is an explicit sold capability (owner's own criterion). Feishu-parity note: Feishu restores the whole base and does **not** support single-table restore — MetaSheet already exceeds Feishu on granular restore; A's increment over B is the *all-config-surfaces* promise, not the restore mechanics.
+
+## §3 Option B design (RECOMMENDED — operation-level base-wide restore)
+**Model:** a persistent restore operation with a deterministic plan, executed in chunks under a write fence, finalized with a one-shot visibility flip. No single-txn promise; instead, **operation-level atomicity**: the base is never observable in a half-restored state, and a failed operation is never silently partial.
+
+1. **`meta_restore_operations`** (new table): `id` (operation-id, idempotency key), `base_id`, `as_of` (T), `state` (`planning → fenced → applying → finalizing → done | failed`), `plan` (jsonb: per-sheet deterministic revert/delete/resurrect sets + per-sheet precheck verdicts + scope hashes), `journal` (jsonb: per-chunk completion cursor), `actor_id`, timestamps. One active operation per base (partial unique on `base_id` where state active) — concurrent restores refuse.
+2. **Plan phase:** per sheet — run the W0-1 precheck (**hard dependency:** #4262 v2 must be landed + trusted; a base-wide restore over an untrusted chain multiplies the healed-gap blast radius by N sheets), compute the deterministic sets via `reconstructRecordsAtT`, record scope hashes. Preview = the aggregated plan (per-sheet counts + samples), signed like existing previews (CAS/typed-confirm house pattern).
+3. **Fence phase:** acquire the **shared per-sheet writer fence** for every sheet in the base — the *same* primitive as #4262 v2 §5 (`acquireAutoNumberSheetWriteLock`), acquired in **deterministic sheet-id order** (no deadlock). Advisory xact locks don't span the whole multi-chunk operation, so the fence is held by a **coordinator session** (`pg_advisory_lock` session-scope, released in `finalizing`/`failed`) or re-acquired per chunk with an in-plan drift re-check — **fork §6.1**. While fenced, all writers refuse with `RESTORE_IN_PROGRESS` (409 + operation id).
+4. **Apply phase:** chunked (e.g. 500 records/chunk), each chunk one txn, journal cursor updated per chunk — crash/failure ⇒ **resume-forward from the journal** (re-run is idempotent: plan is deterministic, applied chunks are recorded; no compensation/rollback machinery — the fence guarantees no interleaved writes to compensate around) — **fork §6.2**. Each chunk's writes emit normal revisions (`source:'restore'`, `restored_from_version`/operation-id threading) — the restore itself is time-machine-visible and reversible by a later restore.
+5. **Finalize:** per-sheet scope-hash re-verify (in-fence, so must match), flip operation to `done`, release fences. Reads during `applying` — **fork §6.3**: simplest correct posture is "reads see the base as it is mid-apply, writes are fenced" (restore is admin-initiated, brief, and progress-visible via the operation row); a full MVCC-style "old visibility until flip" would require shadow tables and is A-grade machinery unjustified by the use case.
+6. **Scope (the honest product boundary):** record data (all sheets) + the **already-revisioned** config tiers (field/view/sheet_config families with existing config revisions). Automation/workflow/dashboard configs are **excluded and documented** — under B they do not enter the config-revision system. The base-restore preview declares exactly what is and isn't covered (no silent "whole base" over-promise — 不用文档掩盖未覆盖面).
+7. **Ceiling/limits:** per-sheet 5,000 sync ceiling stays for the sync routes; the operation runs as the async job (SC.1), no ceiling but progress-reported. Retention interplay: plan refuses if `as_of` predates the retention floor (#4224 / #4262 v2 §6 trust-floor) — fail-closed, same doctrine.
+
+## §4 Hard gates before any B implementation
+1. **W0-1 (#4262 v2) ratified + landed + trusted** — per-sheet precheck is the plan phase's foundation; base-wide restore before chain-trust closes is the healed-gap ×N.
+2. Owner A/B ratify of THIS lock (+ §6 forks).
+3. Retention floor (#4224 + v2 §6) landed — the plan-refusal predicate needs it.
+4. The two-session W0-1 fork (#4269 vs #4262 v2) reconciled — B reuses whichever fence/precheck wins.
+
+## §5 Verification plan (goldens, mutation-proven, when built)
+Operation idempotency (re-run after crash at chunk k resumes, no double-apply); fence-refusal (concurrent write during `applying` → 409 `RESTORE_IN_PROGRESS`, constructed race); scope-hash drift refuse (in-fence mutation between plan and apply is impossible — mutation-test by disabling the fence ⇒ drift golden reds); one-active-operation (concurrent second restore refuses); preview↔execute identity (signed plan); cross-sheet link consistency at T (restored links point at restored rows); excluded-surface honesty (preview declares automation/workflow/dashboard configs unrestored); retention-floor refuse; per-chunk revision emission (`source:'restore'`, operation-id threaded).
+
+## §6 Open forks (owner; recommendations **bold**)
+1. **Fence hold across chunks:** session-scope advisory lock held by the job coordinator (**recommended** — simplest true fence) vs per-chunk xact re-acquire + drift re-check (releases the sheet between chunks; weaker, more complex).
+2. **Failure semantics:** **resume-forward from journal (recommended)** vs compensation/rollback (no interleaved writes exist to compensate around, given the fence — rollback machinery is dead weight).
+3. **Mid-apply read visibility:** **reads-see-progress + fenced writes (recommended)** vs shadow-table flip (A-grade cost, unjustified).
+4. **Config-tier scope:** already-revisioned tiers only (**recommended**, honest boundary) vs pulling automation/workflow/dashboard into config revisions (that IS choosing A's hardest part).
+
+## §7 Estimates + model dispatch
+Option B: **4–7 pw** — operation table + plan/fence/apply/finalize job (Opus: fence/txn/idempotency; Sonnet: job plumbing + goldens; Fable: progress UI), preview UI (Fable/Sonnet), goldens (Sonnet). Option A: B **plus** config-revisioning of three subsystems (est. +6–10 pw, dominated by automation restore side-effect semantics). Both post-W0. Sequence per the unified roadmap: W0 (trust) → T-state (#4205) → **this** → scale/relations → O-2 ladder.
