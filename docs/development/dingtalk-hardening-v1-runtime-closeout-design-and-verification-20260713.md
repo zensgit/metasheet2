@@ -91,7 +91,7 @@ deferred. **Starts only after Hardening v1 closes.**
 
 ## 5. Definition of runtime-closeout DONE (Hardening v1)
 
-- DT-CLOSE-01 + DT-CLOSE-01B merged + the (now metrics-only) live monitor shows consecutive successful runs (ops).
+- DT-CLOSE-01 + DT-CLOSE-01B merged + the OAuth state-metrics **producer** merged and deployed (the check gates on `metasheet_dingtalk_oauth_state_operations_total` being present in `/metrics/prom`; without the producer every run reds) + the (now metrics-only) live monitor shows consecutive successful runs (ops).
 - DT-CLOSE-02 merged; a deploy is reproducible from the templates (contract-guarded).
 - DT-CLOSE-03 evidence pack executed against the deployed SHA with U1–U13 + real-callback anchor (owner/ops).
 - DT-CLOSE-04 ledger: every switch owned (verified-enabled or explicitly-deferred), never an unowned default-off.
