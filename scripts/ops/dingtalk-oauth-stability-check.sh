@@ -44,14 +44,25 @@ fi
 REMOTE
 }
 
-WEBHOOK_STATUS="$(bash "${ROOT_DIR}/scripts/ops/set-dingtalk-onprem-alertmanager-webhook-config.sh" --print-status)"
+# DT-CLOSE-01B: this recording is a METRICS-ONLY OAuth-stability check. Its job is the OAuth
+# state-machine signal (/metrics/prom, authenticated per DT-CLOSE-01), /health, and root-disk
+# headroom. The Alertmanager (:9093) + metasheet-alert-webhook alert-DELIVERY topology is a
+# SEPARATE concern that is NOT deployable from current main (docker/observability/ has only
+# Prometheus+Grafana; the alertmanager service + webhook bridge + OAuth alert rules were never
+# landed). Hard-depending on it made every scheduled run fail with `curl (7) :9093` — the OAuth
+# monitor going blind because of an unrelated, undeployed topology. So the alert-topology probes
+# below are SOFT (best-effort; a failure yields a "deferred" marker, not an abort) and, critically,
+# the verdict (report['healthy']) does NOT depend on them. Alert-delivery observability is DEFERRED
+# to a follow-up that actually deploys the topology; this check no longer claims it is "restored".
+ALERT_TOPOLOGY_DEFERRED="false"
+WEBHOOK_STATUS="$(bash "${ROOT_DIR}/scripts/ops/set-dingtalk-onprem-alertmanager-webhook-config.sh" --print-status 2>/dev/null || { ALERT_TOPOLOGY_DEFERRED="true"; printf 'configured=false\n'; })"
 HEALTH_JSON="$(ssh_cmd "curl -fsS http://127.0.0.1:8900/health")"
 METRICS_TEXT="$(remote_authed_curl "http://127.0.0.1:8900/metrics/prom")"
-ALERTMANAGER_STATUS_JSON="$(ssh_cmd "curl -fsS http://127.0.0.1:9093/api/v2/status")"
-ALERTS_JSON="$(ssh_cmd "curl -fsS http://127.0.0.1:9093/api/v2/alerts")"
-ALERTMANAGER_ERROR_COUNT="$(ssh_cmd "docker logs --since ${LOG_WINDOW} metasheet-alertmanager 2>&1 | grep -E 'Notify for alerts failed|no_text' | wc -l | tr -d ' '")"
-BRIDGE_NOTIFY_COUNT="$(ssh_cmd "docker logs --since ${LOG_WINDOW} metasheet-alert-webhook 2>&1 | grep '\"path\": \"/notify\"' | wc -l | tr -d ' '")"
-BRIDGE_RESOLVED_COUNT="$(ssh_cmd "docker logs --since ${LOG_WINDOW} metasheet-alert-webhook 2>&1 | grep '\"path\": \"/notify\"' | grep '\"status\": \"resolved\"' | wc -l | tr -d ' '")"
+ALERTMANAGER_STATUS_JSON="$(ssh_cmd "curl -fsS http://127.0.0.1:9093/api/v2/status" 2>/dev/null || { ALERT_TOPOLOGY_DEFERRED="true"; printf '{}'; })"
+ALERTS_JSON="$(ssh_cmd "curl -fsS http://127.0.0.1:9093/api/v2/alerts" 2>/dev/null || { ALERT_TOPOLOGY_DEFERRED="true"; printf '[]'; })"
+ALERTMANAGER_ERROR_COUNT="$(ssh_cmd "docker logs --since ${LOG_WINDOW} metasheet-alertmanager 2>&1 | grep -E 'Notify for alerts failed|no_text' | wc -l | tr -d ' '" 2>/dev/null || printf '0')"
+BRIDGE_NOTIFY_COUNT="$(ssh_cmd "docker logs --since ${LOG_WINDOW} metasheet-alert-webhook 2>&1 | grep '\"path\": \"/notify\"' | wc -l | tr -d ' '" 2>/dev/null || printf '0')"
+BRIDGE_RESOLVED_COUNT="$(ssh_cmd "docker logs --since ${LOG_WINDOW} metasheet-alert-webhook 2>&1 | grep '\"path\": \"/notify\"' | grep '\"status\": \"resolved\"' | wc -l | tr -d ' '" 2>/dev/null || printf '0')"
 ROOT_DF_LINE="$(ssh_cmd "df -P / | awk 'NR==2 {print \$2\" \"\$3\" \"\$4\" \"\$5}'")"
 
 WEBHOOK_STATUS_INPUT="${WEBHOOK_STATUS}" \
@@ -67,6 +78,7 @@ SSH_USER_HOST_INPUT="${SSH_USER_HOST}" \
 LOG_WINDOW_INPUT="${LOG_WINDOW}" \
 MAX_ROOT_USE_PERCENT_INPUT="${MAX_ROOT_USE_PERCENT}" \
 JSON_OUTPUT_INPUT="${JSON_OUTPUT}" \
+ALERT_TOPOLOGY_DEFERRED_INPUT="${ALERT_TOPOLOGY_DEFERRED}" \
 python3 - <<'EOF'
 import json
 import os
@@ -147,11 +159,19 @@ health_ok = (
     report['health']['ok'] is True
     or report['health']['status'] == 'ok'
 )
+# DT-CLOSE-01B: metrics-only OAuth-stability verdict. The OAuth signal is present when the state
+# machine is emitting its operation metrics (an authenticated /metrics/prom scrape returned the
+# metasheet_dingtalk_oauth_state_operations_total series). The verdict deliberately does NOT depend
+# on the alert-delivery topology (webhook configured / Slack host / alertmanager notify errors) —
+# that is a separate, currently-DEFERRED concern (docker/observability has no alertmanager service
+# or webhook bridge on main), and coupling it in is what made the OAuth monitor go blind.
+alert_topology_deferred = os.environ.get('ALERT_TOPOLOGY_DEFERRED_INPUT', 'false') == 'true'
+report['alertDeliveryObservability'] = 'deferred' if alert_topology_deferred else 'observed'
+oauth_metrics_present = len(report['metrics']['operationsSamples']) > 0
+report['oauthMetricsPresent'] = oauth_metrics_present
 report['healthy'] = (
     health_ok
-    and report['webhookConfig']['configured'] is True
-    and report['webhookConfig']['host'] == 'hooks.slack.com'
-    and report['alertmanager']['notifyErrorsLastWindow'] == 0
+    and oauth_metrics_present
     and report['storage']['root']['usePercent'] < report['storage']['root']['maxUsePercent']
 )
 
@@ -161,10 +181,9 @@ else:
     print(f"[oauth-stability] checkedAt={report['checkedAt']}")
     print(f"[oauth-stability] host={report['host']}")
     print(f"[oauth-stability] health.status={report['health']['status']} plugins={report['health']['plugins']} ok={report['health']['ok']}")
-    print(f"[oauth-stability] webhook.configured={report['webhookConfig']['configured']} host={report['webhookConfig']['host']}")
-    print(f"[oauth-stability] alertmanager.activeAlerts={report['alertmanager']['activeAlertsCount']} notifyErrors={report['alertmanager']['notifyErrorsLastWindow']}")
     print(f"[oauth-stability] storage.rootUse={report['storage']['root']['usePercent']}% availKBlocks={report['storage']['root']['availableKBlocks']} maxUse={report['storage']['root']['maxUsePercent']}%")
-    print(f"[oauth-stability] bridge.notifyEvents={report['bridge']['notifyEventsLastWindow']} resolvedEvents={report['bridge']['resolvedEventsLastWindow']}")
-    print(f"[oauth-stability] metrics.operations={len(report['metrics']['operationsSamples'])} fallback={len(report['metrics']['fallbackSamples'])} redis={len(report['metrics']['redisSamples'])}")
+    print(f"[oauth-stability] metrics.operations={len(report['metrics']['operationsSamples'])} fallback={len(report['metrics']['fallbackSamples'])} redis={len(report['metrics']['redisSamples'])} oauthMetricsPresent={str(report['oauthMetricsPresent']).lower()}")
+    print(f"[oauth-stability] alertDeliveryObservability={report['alertDeliveryObservability']} (DEFERRED means the Alertmanager+webhook topology is not deployed — NOT part of the OAuth verdict)")
+    print(f"[oauth-stability] webhook.configured={report['webhookConfig']['configured']} alertmanager.notifyErrors={report['alertmanager']['notifyErrorsLastWindow']} bridge.notifyEvents={report['bridge']['notifyEventsLastWindow']} (informational only)")
     print(f"[oauth-stability] healthy={str(report['healthy']).lower()}")
 EOF
