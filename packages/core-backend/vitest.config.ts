@@ -259,6 +259,24 @@ export default defineConfig({
       // Postgres only — excluded HERE so it cannot skip-green in the no-DB lane, whole-file wired into
       // `Run multitable real-DB integration` in plugin-tests.yml.
       'tests/integration/multitable-d1c-attachment-revision-realdb.test.ts',
+      // 4c-2 forward tombstone-capture cluster (design-lock #3809+#3830, owner-ratified 2026-07-08) — four
+      // sibling realdb specs swept into the exclude list as the same remediation class as the two W0 entries
+      // below/above (post-merge review of #4279): all four are describeIfDatabase-gated and were ALREADY
+      // whole-file wired into `Run multitable real-DB integration` in plugin-tests.yml, but missing from
+      // this list — so the no-DB job silently COLLECTED and skip-greened them. Two-point wiring: BOTH
+      // points or the no-DB lane reports them as green-with-zero-assertions.
+      // Field-delete capture point (G1 values/links/auto-number captured + causal anchor, G2 flag-off
+      // byte-identical `before`, G3 over-cap 422 atomic refusal), driving dropFieldCascade end-to-end.
+      'tests/integration/multitable-tombstone-field-capture-realdb.test.ts',
+      // R1 rehydration on field UNDELETE (G4 values/links/auto-number rehydrate + field_permissions masking
+      // unchanged, G5 no-tombstone stays definition-only), driving config-restore-execute end-to-end.
+      'tests/integration/multitable-tombstone-field-rehydrate-realdb.test.ts',
+      // Record-delete capture point (G2 record half flag-off zero rows, G7 inbound-only edge capture,
+      // G10 version-conflict refusal before any capture), driving deleteRecord end-to-end.
+      'tests/integration/multitable-tombstone-record-capture-realdb.test.ts',
+      // C6/G8 tombstone-table retention sweep (bounded batch, keep-days floor at
+      // META_REVISION_RETENTION_MIN_DAYS, disabled-by-default zero rows touched).
+      'tests/integration/multitable-tombstone-retention-realdb.test.ts',
       // W0 tail (#4279, owner MUST-WRITE OD-6, design-lock §0.5 2026-07-13): field-undelete rehydration
       // revision goldens — proves `recreateFieldFromConfig`'s tombstone-value rehydration UPDATE bumps
       // `version` and emits a `recordRecordRevision` AT THE NEW version, same transaction, for every
