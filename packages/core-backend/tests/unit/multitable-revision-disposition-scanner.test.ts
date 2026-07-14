@@ -161,6 +161,18 @@ describe('OD-6 scanner — gate P3-1: schema-qualified / double-quoted meta_reco
     const sites = enumerateSites('fixture.ts', src)
     expect(sites).toHaveLength(0)
   })
+
+  test('sibling table meta_records2 (digit suffix, no underscore separator) is still NOT matched', () => {
+    const src = "async function t(query: any) {\n  await query('UPDATE meta_records2 SET x = 1', [])\n}\n"
+    const sites = enumerateSites('fixture.ts', src)
+    expect(sites).toHaveLength(0)
+  })
+
+  test('sibling table meta_recordsxyz (letter suffix, no underscore separator) is still NOT matched', () => {
+    const src = "async function t(query: any) {\n  await query('UPDATE meta_recordsxyz SET x = 1', [])\n}\n"
+    const sites = enumerateSites('fixture.ts', src)
+    expect(sites).toHaveLength(0)
+  })
 })
 
 describe('OD-6 scanner — marker window discipline (mirrors rank-8 MARKER_WINDOW=3)', () => {

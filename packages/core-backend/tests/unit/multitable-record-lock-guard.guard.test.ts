@@ -207,4 +207,54 @@ describe('rank-8 record-lock mutation-path guard — durable structural guard', 
     // the rule itself is `locked && !canEditWhileLocked` — assert it routes through canEditWhileLocked
     expect(lockSrc).toMatch(/ensureRecordNotLocked[\s\S]{0,400}canEditWhileLocked\(/)
   })
+
+  test('gate P3-1: the two hand-synced TABLE_REF copies (this file + the OD-6 scanner) stay byte-identical', () => {
+    // TABLE_REF is duplicated (not shared via import — the two guards are independently owned) between
+    // this file and `lib/multitable-revision-disposition-scanner.ts`. A future edit to one copy that
+    // forgets the other would silently re-open the gate-P3-1 gap in whichever guard was NOT updated.
+    // This is a cheap textual pin, not a semantic one — it only proves the two source lines are
+    // byte-identical, not that either is correct (the fixture tests above/below do that).
+    const extractTableRef = (src: string): string => {
+      const m = src.match(/const TABLE_REF = String\.raw`([^`]*)`/)
+      if (!m) throw new Error('TABLE_REF definition not found — did its declaration shape change?')
+      return m[1]
+    }
+    const selfSrc = readFileSync(join(__dirname, 'multitable-record-lock-guard.guard.test.ts'), 'utf8')
+    const scannerSrc = readFileSync(join(__dirname, 'lib/multitable-revision-disposition-scanner.ts'), 'utf8')
+    expect(extractTableRef(selfSrc)).toBe(extractTableRef(scannerSrc))
+  })
+})
+
+describe('rank-8 record-lock mutation-path guard — gate P3-1: schema-qualified / double-quoted meta_records', () => {
+  test('DEFEAT PROOF: schema-qualified unmarked UPDATE (public.meta_records) is now detected', () => {
+    const src = "async function u(query: any) {\n  await query('UPDATE public.meta_records SET x = $1 WHERE id = $2', [a, b])\n}\n"
+    const sites = enumerateSites('fixture.ts', src)
+    expect(sites).toHaveLength(1)
+    expect(sites[0].disposition).toBeNull()
+  })
+
+  test('DEFEAT PROOF: double-quoted unmarked UPDATE ("meta_records") is now detected', () => {
+    const src = 'async function u(query: any) {\n  await query(\'UPDATE "meta_records" SET x = $1 WHERE id = $2\', [a, b])\n}\n'
+    const sites = enumerateSites('fixture.ts', src)
+    expect(sites).toHaveLength(1)
+    expect(sites[0].disposition).toBeNull()
+  })
+
+  test('sibling table meta_records_trash, schema-qualified, is NOT matched (no over-widening)', () => {
+    const src = "async function t(query: any) {\n  await query('UPDATE public.meta_records_trash SET x = 1', [])\n}\n"
+    const sites = enumerateSites('fixture.ts', src)
+    expect(sites).toHaveLength(0)
+  })
+
+  test('sibling table meta_records2 (digit suffix, no underscore) is NOT matched', () => {
+    const src = "async function t(query: any) {\n  await query('UPDATE meta_records2 SET x = 1', [])\n}\n"
+    const sites = enumerateSites('fixture.ts', src)
+    expect(sites).toHaveLength(0)
+  })
+
+  test('sibling table meta_recordsxyz (letter suffix, no underscore) is NOT matched', () => {
+    const src = "async function t(query: any) {\n  await query('UPDATE meta_recordsxyz SET x = 1', [])\n}\n"
+    const sites = enumerateSites('fixture.ts', src)
+    expect(sites).toHaveLength(0)
+  })
 })
