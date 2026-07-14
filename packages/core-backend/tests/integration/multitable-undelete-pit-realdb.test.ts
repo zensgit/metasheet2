@@ -59,6 +59,10 @@ describeIfDatabase('multitable T8-1 PIT undelete-execute (real DB)', () => {
     app.use(express.json())
     app.use((req, _res, next) => { ;(req as any).user = { id: ACTOR, roles: ['member'], perms: curPerms }; next() })
     process.env.MULTITABLE_SHEET_REVERT_MAX_RECORDS = '2' // captured at router creation; (k) exceeds it via the resurrect set
+    // Interim revert-execute master gate (current-risk mitigation): default-OFF now — keep it on for the WHOLE
+    // suite (independent of this file's own FLAG=PIT_UNDELETE on/off toggling, which this suite tests directly),
+    // so every existing revert-execute call here is unchanged.
+    process.env.MULTITABLE_ENABLE_SHEET_REVERT = 'true'
     app.use('/api/multitable', univerMetaRouter())
     await q('INSERT INTO meta_bases (id, name) VALUES ($1,$2)', [BASE, 'UN Base'])
     await q('INSERT INTO meta_sheets (id, base_id, name) VALUES ($1,$2,$3)', [SHEET, BASE, 'UN Sheet'])
@@ -67,6 +71,7 @@ describeIfDatabase('multitable T8-1 PIT undelete-execute (real DB)', () => {
     await q("INSERT INTO users (id, password_hash) VALUES ($1,'x') ON CONFLICT (id) DO NOTHING", [ACTOR])
   })
   afterAll(async () => {
+    delete process.env.MULTITABLE_ENABLE_SHEET_REVERT
     await q('DELETE FROM meta_links WHERE field_id IN (SELECT id FROM meta_fields WHERE sheet_id = $1)', [SHEET]).catch(() => {}) // meta_links has no sheet_id col
     for (const t of ['meta_record_revisions', 'meta_records', 'meta_fields']) await q(`DELETE FROM ${t} WHERE sheet_id = $1`, [SHEET]).catch(() => {})
     await q('DELETE FROM meta_sheets WHERE id = $1', [SHEET]).catch(() => {})
