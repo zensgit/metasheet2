@@ -49,7 +49,7 @@ const mirrorRows = async (): Promise<number> =>
 
 describeIfDatabase('multitable mirror-read-only hardening — C2/I-1 enumeration (real DB)', () => {
   beforeAll(async () => {
-    process.env.MULTITABLE_ENABLE_PIT_REVERT = 'true' // W0 step-1: this file drives revert-execute; the gate is default-OFF, set per-file here and restored in afterAll — NEVER enabled globally.
+    process.env.MULTITABLE_ENABLE_PIT_REVERT = 'true' // W0 step-1: this file drives revert-execute; the gate is default-OFF, set per-file here and FORCED BACK to the default OFF (delete) in afterAll — never a saved/original value, and NEVER enabled globally.
     app = express()
     app.use(express.json())
     app.use((req, _res, next) => { ;(req as express.Request & { user?: unknown }).user = currentUser; next() })

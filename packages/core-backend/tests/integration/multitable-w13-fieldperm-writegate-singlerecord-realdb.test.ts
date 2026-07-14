@@ -82,7 +82,7 @@ const storedRecord = async (recordId: string): Promise<{ data: Record<string, un
 
 describeIfDatabase('W1-3 GW4/GW5/GW6 — layer-3 per-subject field-write gate on single-record PATCH (real DB)', () => {
   beforeAll(async () => {
-    process.env.MULTITABLE_ENABLE_PIT_REVERT = 'true' // W0 step-1: this file drives revert-execute; the gate is default-OFF, set per-file here and restored in afterAll — NEVER enabled globally.
+    process.env.MULTITABLE_ENABLE_PIT_REVERT = 'true' // W0 step-1: this file drives revert-execute; the gate is default-OFF, set per-file here and FORCED BACK to the default OFF (delete) in afterAll — never a saved/original value, and NEVER enabled globally.
     app = express()
     app.use(express.json())
     // Fake "always-on" session-auth middleware — mirrors production ordering: session auth runs first
