@@ -74,3 +74,14 @@ dsn_replace_database() {
   fi
   printf '%s/%s%s' "${base%/*}" "$new_db" "$query"
 }
+
+# dsn_database_name <dsn>
+# Extracts the db-name path segment (query string stripped) — the inverse read of
+# dsn_replace_database, used by the rehearsal isolation guard to psql the real DB directly.
+dsn_database_name() {
+  local dsn="$1" base="$1"
+  if [[ "$dsn" == *'?'* ]]; then
+    base="${dsn%%\?*}"
+  fi
+  printf '%s' "${base##*/}"
+}

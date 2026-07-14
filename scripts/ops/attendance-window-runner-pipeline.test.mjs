@@ -108,6 +108,19 @@ test('workflow shape contract: remote commands run under explicit `bash -o pipef
   assert.doesNotMatch(yaml, /bash\s+-s\b/, 'the workflow must not fall back to `ssh ... bash -s` (login-shell pipefail is not guaranteed)')
 })
 
+test('dsn_database_name: extracts the db-name path segment, stripping the query string', () => {
+  const cases = [
+    ['postgresql://u:p@staging-postgres:5432/metasheet', 'metasheet'],
+    ['postgresql://u:p@staging-postgres:5432/metasheet?sslmode=disable', 'metasheet'],
+    ['postgres://u@h/window_runner_rehearsal?a=1&b=2', 'window_runner_rehearsal'],
+  ]
+  for (const [dsn, expected] of cases) {
+    const result = runPipefailBash(`source '${LIB}'\ndsn_database_name '${dsn}'`)
+    assert.equal(result.status, 0, `expected exit 0 for dsn=${dsn}; stderr: ${result.stderr}`)
+    assert.equal(result.stdout.trim(), expected, `dsn=${dsn}`)
+  }
+})
+
 test('dsn_replace_database: swaps the db-name path segment, preserving host/port/query', () => {
   const cases = [
     // [input DSN, new db name, expected output]

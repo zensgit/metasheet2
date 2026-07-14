@@ -598,13 +598,18 @@ action_migrate_rehearse() {
   # real staging DB is never touched by this function. The rehearsal DB (and the
   # container-local copy of the dump used to restore it) are ALWAYS removed on exit —
   # trap-guarded so an abort mid-rehearsal still cleans up.
-  local pg_user="$MIGRATE_BACKUP_PG_USER"
-  local container_dump_path="${CONTAINER_RUNNER_DIR}/rehearsal-${RUN_STAMP}.dump"
+  # Globals (NOT locals): the EXIT trap must see these under every bash invocation mode
+  # (function locals are not reliably visible to traps under `bash -c`). Review P3, round 6.
+  REHEARSAL_PG_USER="$MIGRATE_BACKUP_PG_USER"
+  REHEARSAL_CONTAINER_DUMP_PATH="${CONTAINER_RUNNER_DIR}/rehearsal-${RUN_STAMP}.dump"
+  local pg_user="$REHEARSAL_PG_USER"
+  local container_dump_path="$REHEARSAL_CONTAINER_DUMP_PATH"
 
   cleanup_rehearsal() {
-    docker exec "$POSTGRES_CONTAINER" psql -U "$pg_user" -d postgres -v ON_ERROR_STOP=0 \
+    # Fixed synthetic name only — this can never name the real staging DB.
+    docker exec "$POSTGRES_CONTAINER" psql -U "$REHEARSAL_PG_USER" -d postgres -v ON_ERROR_STOP=0 \
       -c "DROP DATABASE IF EXISTS ${REHEARSAL_DB};" >/dev/null 2>&1 || true
-    docker exec "$POSTGRES_CONTAINER" rm -f "$container_dump_path" >/dev/null 2>&1 || true
+    docker exec "$POSTGRES_CONTAINER" rm -f "$REHEARSAL_CONTAINER_DUMP_PATH" >/dev/null 2>&1 || true
   }
 
   log "rehearsal: dropping any prior ${REHEARSAL_DB} left by an aborted run"
@@ -627,9 +632,41 @@ action_migrate_rehearse() {
   backend_dsn="$(resolve_backend_database_url)"
   rehearsal_dsn="$(dsn_replace_database "$backend_dsn" "$REHEARSAL_DB")"
 
+  # Channel-independent isolation guard (review P2, round 6): the -e DATABASE_URL override
+  # only isolates if migrate.js resolves its DSN from process.env (SECRET_PROVIDER=env).
+  # Under file/vault providers the override is SILENTLY IGNORED and the "rehearsal" would
+  # migrate the REAL staging DB. Defend independently of that channel: count applied
+  # migrations in BOTH DBs via direct psql before and after the rehearsal run, and require
+  # the real DB's count to be UNCHANGED and the rehearsal DB's to have ADVANCED.
+  count_applied() { # count_applied <db-name>
+    docker exec "$POSTGRES_CONTAINER" psql -U "$REHEARSAL_PG_USER" -d "$1" -tA \
+      -c "SELECT COALESCE((SELECT count(*) FROM kysely_migration), 0);" 2>/dev/null | tr -d '[:space:]'
+  }
+  local real_db real_before rehearsal_before real_after rehearsal_after
+  real_db="$(dsn_database_name "$backend_dsn")"
+  [[ -n "$real_db" && "$real_db" != "$REHEARSAL_DB" ]] \
+    || fail "could not resolve the real staging DB name distinct from the rehearsal DB (got '${real_db:-<empty>}')"
+  real_before="$(count_applied "$real_db")"
+  rehearsal_before="$(count_applied "$REHEARSAL_DB")"
+  [[ "$real_before" =~ ^[0-9]+$ && "$rehearsal_before" =~ ^[0-9]+$ ]] \
+    || fail "pre-rehearsal applied-migration counts unreadable (real='${real_before}' rehearsal='${rehearsal_before}')"
+  log "rehearsal isolation baseline: applied(real ${real_db})=${real_before} applied(${REHEARSAL_DB})=${rehearsal_before}"
+
   log "rehearsal: running migrate.js against the REHEARSAL DB only (staging DB untouched so far)"
   staging_exec_env "DATABASE_URL=${rehearsal_dsn}" -- node "$MIGRATE_JS" < /dev/null 2>&1 \
     | tee "${OUTPUT_DIR}/rehearsal-migrate-run.log"
+
+  real_after="$(count_applied "$real_db")"
+  rehearsal_after="$(count_applied "$REHEARSAL_DB")"
+  log "rehearsal isolation check: applied(real ${real_db}) ${real_before}->${real_after}; applied(${REHEARSAL_DB}) ${rehearsal_before}->${rehearsal_after}"
+  {
+    echo "real_db=${real_db} real_before=${real_before} real_after=${real_after}"
+    echo "rehearsal_before=${rehearsal_before} rehearsal_after=${rehearsal_after}"
+  } > "${OUTPUT_DIR}/rehearsal-isolation-check.txt"
+  [[ "$real_after" == "$real_before" ]] \
+    || fail "ISOLATION BREACH: real staging DB applied-migration count changed ${real_before}->${real_after} during the rehearsal run — the DATABASE_URL override was ignored (non-env secret provider?). STOP; restore from ${MIGRATE_BACKUP_PATH} per runbook before ANY further action"
+  [[ "$rehearsal_after" -gt "$rehearsal_before" || "$rehearsal_after" -ge "$real_before" ]] \
+    || fail "rehearsal DB applied count did not advance (${rehearsal_before}->${rehearsal_after}) — the rehearsal migrate did not actually run against ${REHEARSAL_DB}; refusing to treat rehearsal as green"
 
   log "rehearsal: confirming pending=0 against the rehearsal DB"
   staging_exec_env "DATABASE_URL=${rehearsal_dsn}" -- node "$MIGRATE_JS" --list < /dev/null 2>&1 \
