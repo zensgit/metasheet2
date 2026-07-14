@@ -218,6 +218,15 @@ export default defineConfig({
       // `Run multitable real-DB integration` in plugin-tests.yml. Two-point wiring: BOTH points
       // or the file silently never runs.
       'tests/integration/multitable-history-incomplete-precheck-realdb.test.ts',
+      // W0-1 (#4269, design-lock §6 owner ruling 2026-07-14; corrected in-place by the doc-only 8d65a2a35
+      // follow-up): generation-aware history contiguity goldens — replaces the live-vs-latest §0.6
+      // comparator above with a per-generation occupancy proof (every version in [genStart..liveVersion] is
+      // occupied by exactly one canonical chain event: a create/update revision OR a lock/unlock marker;
+      // delete revisions reuse the last live version and are excluded from the count). Real Postgres only
+      // (describeIfDatabase would skip-green in the no-DB lane) — excluded HERE so the no-DB job cannot
+      // skip-green it, and whole-file wired into `Run multitable real-DB integration` in plugin-tests.yml.
+      // Two-point wiring: BOTH points or the file silently never runs.
+      'tests/integration/multitable-history-contiguity-realdb.test.ts',
       // D-1c W0 slice ① (form-submit CREATE/EDIT public-form revision goldens): real Postgres only
       // (installs scoped failure/suppression triggers per site and drives the real submit route
       // end-to-end) — excluded HERE so it cannot skip-green in the no-DB lane, whole-file wired into
@@ -250,6 +259,17 @@ export default defineConfig({
       // Postgres only — excluded HERE so it cannot skip-green in the no-DB lane, whole-file wired into
       // `Run multitable real-DB integration` in plugin-tests.yml.
       'tests/integration/multitable-d1c-attachment-revision-realdb.test.ts',
+      // W0 tail (#4279, owner MUST-WRITE OD-6, design-lock §0.5 2026-07-13): field-undelete rehydration
+      // revision goldens — proves `recreateFieldFromConfig`'s tombstone-value rehydration UPDATE bumps
+      // `version` and emits a `recordRecordRevision` AT THE NEW version, same transaction, for every
+      // rehydrated record (full post-write snapshot, shared batchId); a zero-row concurrent-delete emits no
+      // ghost revision; and the real revert-preview route 200s afterward (the W0-1 contiguity + retained
+      // content-projection positive control — this site was `history-integrity-precheck.ts`'s own DEFERRED
+      // content-integrity gap before this fix). Real Postgres only (describeIfDatabase would skip-green in
+      // the no-DB lane) — excluded HERE so the no-DB job cannot skip-green it, and whole-file wired into
+      // `Run multitable real-DB integration` in plugin-tests.yml. Two-point wiring: BOTH points or the file
+      // silently never runs.
+      'tests/integration/multitable-tombstone-field-rehydrate-revision-realdb.test.ts',
       // D-2 side-door delete recoverability (#4004): real Postgres only (it installs scoped failure-
       // injection triggers and drives both side doors end-to-end) — excluded HERE so it cannot skip-green
       // in the no-DB lane, and whole-file wired into `Run multitable real-DB integration` in
