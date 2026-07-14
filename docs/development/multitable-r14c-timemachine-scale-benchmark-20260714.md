@@ -406,6 +406,15 @@ Concretely, before any conclusion in §6 can be treated as current:
    thin write in N separate per-record transactions (same write shape, per-record commit boundary) — so
    the ~10–11x gap can be attributed to the transaction boundary alone, the write shape alone, or both,
    instead of being reported as one conflated number as it is today.
+4. **Confirm the real §4 candidate index's state before trusting the baseline/with-index comparison.**
+   Since the P1 hardening (§0, §3), the harness no longer drops the real, shared
+   `idx_meta_record_revisions_sheet_record_created_version_id` index — it only checks it read-only. If
+   that real index already exists on the re-run's target DB (as it currently does on this scratch DB —
+   see the harness's own `[info]` log line), the "baseline (bench index absent)" pass is measured WITH
+   the real index still present underneath, not on a truly index-free table; a clean A/B on re-run needs
+   either a target DB where the real index is confirmed absent, or treating the comparison as
+   "harness-owned index added on top of whatever else already exists" rather than a true absent-vs-present
+   pair.
 
 Until this re-run lands, treat every precheck-latency, contiguity-latency, and index-benefit number in
 §6 as describing the pre-`#4269` code path only — not a statement about current `main`.
