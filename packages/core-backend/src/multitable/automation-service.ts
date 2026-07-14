@@ -2860,8 +2860,8 @@ export class AutomationService {
         return false // record gone — the caller's missing-record path already handled it
       }
       ensureRecordNotLocked(opts.lockActorId, lockRow, () => new Error(opts.lockedMessage))
-      // lock-guarded: resultWriteback patch — ensureRecordNotLocked (opts.lockActorId = the trigger actor
-      // for a cross-base target) is enforced immediately above; a locked target throws → rolls back (§ note).
+      // lock-guarded: resultWriteback patch — ensureRecordNotLocked (opts.lockActorId, the trigger actor for a cross-base target) enforced immediately above; a locked target throws and rolls back.
+      // revision-emitted: D-1c slice ④ (A7 approval resultWriteback) — recordRecordRevision below, same txn.
       const updateRes = await query(
         `UPDATE meta_records
          SET data = COALESCE(data, '{}'::jsonb) || $1::jsonb, version = version + 1, updated_at = NOW()
