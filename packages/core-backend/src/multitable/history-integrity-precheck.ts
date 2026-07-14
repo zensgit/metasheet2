@@ -1,91 +1,101 @@
 import { mapFieldType, isSystemFieldType } from './field-codecs'
 import type { QueryFn } from './permission-service'
+import { isSystemSheet } from './system-sheet-predicate'
+import { hasVersionMarkerTable } from './record-history-service'
 
 /**
- * Global History — D-1c §0.6: `HISTORY_INCOMPLETE`, the fail-closed integrity PRECHECK for the destructive
- * recovery surfaces (PIT sheet Revert-to-T + Reset-to-T, preview AND execute). RATIFIED 2026-07-13 (owner);
- * design-lock: docs/development/multitable-global-history-d1c-form-submit-edit-uncaptured-revision-design-lock-20260712.md.
+ * Global History — W0-1: `HISTORY_INCOMPLETE`, the fail-closed integrity PRECHECK for the destructive
+ * recovery surfaces (PIT sheet Revert-to-T + Reset-to-T, preview AND execute). The owner-directed
+ * correction of D-1c §0.6 (design lock:
+ * docs/development/multitable-global-history-w0-1-history-incomplete-contiguity-trusted-since-design-lock-20260713.md,
+ * §6 owner ruling 2026-07-14).
  *
- * Doctrine (owner hard-lock, verbatim rules 1–4):
+ * WHAT CHANGED vs #4234 (the superseded live-vs-latest comparator): the PRIMARY integrity proof is now a
+ * GENERATION-AWARE CONTIGUITY proof, not a live-vs-latest content diff. #4234 compared the live `data`
+ * against the LATEST revision snapshot; a record at version 3 with revisions only {v1, v3} (v2 an
+ * uncaptured mid-chain write) has live == v3, so #4234 PASSED it — but revert/reset to a T inside (v1, v3)
+ * reconstructs the wrong (v1) snapshot. Contiguity proves that EVERY version in [1..liveVersion] is
+ * accounted for by exactly one chain event (a create/update revision OR a legitimate lock/unlock marker);
+ * a version with no chain event = an uncaptured data write = a HOLE = HISTORY_INCOMPLETE.
+ *
+ * The pre-existing live-vs-latest content-projection is RETAINED as the design-lock §1.3 SECOND layer
+ * (contiguity proves the chain is complete; the content projection proves live == the latest captured
+ * content), so no coverage from #4234 is lost. Contiguity is the load-bearing new proof.
+ *
+ * Doctrine (owner hard-lock, verbatim rules 1–4, unchanged):
  *  1. UNIFIED REFUSAL — while any live record's history in the affected scope is untrustworthy, preview and
- *     execute BOTH return `HISTORY_INCOMPLETE`; no execute token is minted and zero rows are written. Preview
- *     and execute consume the SAME function (this one), so execute re-checks by construction (rule 4 / TOCTOU —
- *     the revision-derived `previewIdentity` scopeHash is structurally blind to uncaptured writes and is NOT
- *     relied on for this).
- *  2. CONTENT, NOT VERSION — the comparator diffs the live `meta_records.data` against the latest revision's
- *     `snapshot`, projected onto the sheet's USER-AUTHORED field ids only. Version-only mutations (record
- *     lock/unlock bump `version` without touching `data`) therefore never trip it, and neither does derived-field
- *     materialization: formula / rollup / lookup / auto-number engines write computed keys into `data` with no
- *     revision BY DESIGN (`formula-engine.ts` recompute, `univer-meta.ts` relation-aggregation fan-out,
- *     `auto-number-service.ts` backfill), so a full-`data` diff would refuse every healthy record on every
- *     formula sheet. The exact excluded type list is pinned below (`DERIVED_FIELD_TYPES`).
- *  3. ZERO-REVISION LIVE ROWS REFUSE — a live record with no revision at all (the uncaptured-CREATE
- *     fingerprint) is trivially inconsistent with its non-existent latest snapshot. The precheck enumerates the
- *     LIVE row set of the scope — NOT the reconstruction — because `computeSheetReset` pushes live rows absent
- *     from the reconstructed state into its delete-set, so iterating the reconstruction misses exactly the rows
- *     the reset would silently destroy.
- *  4. FAIL-CLOSED — any comparator failure refuses; there is no proceed-on-error branch. (Database errors
- *     propagate to the routes' existing non-write error mapping instead of being folded into a false
- *     `HISTORY_INCOMPLETE`; every one of those paths is also a zero-write refusal.)
+ *     execute BOTH return `HISTORY_INCOMPLETE`; no execute token is minted and zero rows are written.
+ *  2. GENERATION-AWARE, NOT COUNT — the criterion is an EXACT SET (C5): exactly one canonical chain event
+ *     per expected version. It is NOT `count(distinct version) < live.version` and NOT `count(*) == version`,
+ *     because a DELETE revision legally REUSES the last live version (so both counts are ambiguous). Delete
+ *     revisions are excluded from the per-version occupant count; a delete that is the latest event on a
+ *     LIVE row, or beyond the live version, refuses.
+ *  3. SYSTEM SHEETS EXCLUDED — approval-projection / people-directory sheets are server-regenerated read
+ *     models (`isSystemSheet`); they legitimately carry non-contiguous history and are skipped entirely.
+ *  4. FAIL-CLOSED — any comparator failure refuses; there is no proceed-on-error branch.
  *
- * PURE READ — writes nothing. NOT a backfill (OD-5 forbids fabricating history); it refuses to act on
- * untrustworthy history, it does not repair it.
+ * C8 (same-txn) + C4 (fence): the EXECUTE path re-runs this precheck INSIDE the destructive transaction,
+ * after a per-sheet `pg_advisory_xact_lock` fence (see `routes/univer-meta.ts` reset-execute), so check and
+ * write are atomic against a phantom insert landing between the preview/compute check and the write.
+ *
+ * PURE READ — writes nothing. NOT a backfill; it refuses to act on untrustworthy history.
+ *
+ * DEFERRED (docketed, must not be masked by this guard going green — design lock §6.3):
+ *  - `recreateFieldFromConfig` (univer-meta.ts) content-integrity gap — owner-ruled MUST-WRITE, own rung.
+ *  - C2 time-monotonicity (version-ascending/time-descending under concurrency can pick the wrong T-snapshot).
+ *  - C3 deleted/tombstoned + resurrected (multi-generation) chains — live-only enumeration here; a resurrected
+ *    record refuses fail-closed (duplicate create at v1), full handling is C3.
+ *  - C6 durable trusted-since watermark + rollout protocol (grandfathers pre-marker lock holes).
  */
 
 /** The unified refusal code (rule 1). Routes surface it as HTTP 409 with a values-free body. */
 export const HISTORY_INCOMPLETE = 'HISTORY_INCOMPLETE' as const
 
+/** C8 in-txn sentinel: thrown by the execute-path re-check inside the destructive transaction so the route
+ *  catch can map it to the same values-free 409 and roll the whole transaction back (zero writes). */
+export const HISTORY_INCOMPLETE_INTXN = 'HISTORY_INCOMPLETE_INTXN' as const
+export class HistoryIncompleteInTxnError extends Error {
+  readonly code = HISTORY_INCOMPLETE_INTXN
+  constructor(readonly reason: HistoryIntegrityReason) {
+    super('History is incomplete — destructive recovery refused inside the transaction (zero writes).')
+    this.name = 'HistoryIncompleteInTxnError'
+  }
+}
+
 /**
- * D-1c §0.6 item 2 — the EXACT derived-type exclusion list, pinned from how `field-codecs` classifies value
- * types (`mapFieldType` canonical names). These four are the value engines that materialize computed keys into
- * `meta_records.data` without a revision by design; every other type (including `link` ids, which live in
- * `data` and are snapshot-captured like any cell per OD-4) is user-authored and IS compared.
+ * The EXACT derived-type exclusion list (retained §1.3 content layer) — value engines that materialize
+ * computed keys into `meta_records.data` WITHOUT a revision by design. Derived materialization does NOT
+ * bump `version` either, so it never creates a contiguity hole; this set only governs the content layer.
  */
 export const DERIVED_FIELD_TYPES: ReadonlySet<string> = new Set(['formula', 'rollup', 'lookup', 'autoNumber'])
 
-/**
- * P3-1 hardening (post-ratification, same doctrine — not a live false-positive today, but the security path
- * must be closed on its own terms, not on the accident that no writer currently exercises the gap). Rule 2's
- * text is "the sheet's user-authored/writable field ids" — the four value-derivation engines above are one
- * instance of "not user-authored", not the whole class. The four SYSTEM field types (`createdTime` /
- * `modifiedTime` / `createdBy` / `modifiedBy`, `field-codecs`'s canonical `SYSTEM_FIELD_TYPES`) are equally
- * server-maintained: `isFieldAlwaysReadOnly` (`permission-derivation.ts`) already places them in the SAME
- * always-read-only bucket as formula/lookup/rollup. In today's write paths a system field's value is derived
- * purely at READ time (`query-service.ts`'s `injectSystemFieldValues`, from `created_at`/`updated_at`/
- * `created_by`/`modified_by`) and is never written into the `data` column at all — so this exclusion has no
- * observable effect on any current writer. It hardens the precheck against a FUTURE or LEGACY/imported record
- * that happens to carry a stray value under a system field id in `data`: such a value must never be able to
- * pollute-refuse a healthy record, any more than a materialized formula value can. `autoNumber` is a member of
- * both sets; the union simply dedupes it.
- */
+/** The four SYSTEM field types are server-maintained (derived at read time), excluded like derived types. */
 export function isNonUserAuthoredFieldType(canonicalType: string): boolean {
   return DERIVED_FIELD_TYPES.has(canonicalType) || isSystemFieldType(canonicalType)
 }
 
-/** Raw DB `meta_fields.type` → excluded from the user-authored-field projection? Routed through the canonical
- * `mapFieldType` so raw spellings (`auto_number`, `AUTO-NUMBER`, `modified_time`, …) classify identically to
- * their canonical forms. Covers both the derived-value engines (rule 2) and the system-computed types
- * (P3-1 hardening, above). */
+/** Raw DB `meta_fields.type` → excluded from the user-authored-field projection? */
 export function isDerivedFieldType(rawType: string): boolean {
   return isNonUserAuthoredFieldType(String(mapFieldType(String(rawType ?? ''))))
 }
 
-export type HistoryIntegrityVerdict =
-  | { ok: true }
-  /** Reasons are internal/log-only enums — the HTTP surface is a flat, values-free `HISTORY_INCOMPLETE`
-   *  (no record ids, no counts: the refusal must not become a denied-record existence oracle). */
-  | { ok: false; reason: 'zero_revision_live_row' | 'live_row_after_delete_revision' | 'content_mismatch' | 'comparator_error' }
+export type HistoryIntegrityReason =
+  // contiguity (primary, W0-1)
+  | 'zero_revision_live_row'
+  | 'chain_hole'
+  | 'duplicate_version_event'
+  | 'out_of_range_version'
+  | 'live_row_after_delete_revision'
+  // content projection (retained §1.3 second layer)
+  | 'content_mismatch'
+  | 'comparator_error'
+
+export type HistoryIntegrityVerdict = { ok: true } | { ok: false; reason: HistoryIntegrityReason }
 
 const isPlainRecord = (v: unknown): v is Record<string, unknown> =>
   !!v && typeof v === 'object' && !Array.isArray(v)
 
-/**
- * Canonical value equality for the projection: key-order-insensitive for nested objects, order-SENSITIVE for
- * arrays (healthy captured writers snapshot the very object they write, so ordering matches), and `null` ≡
- * absent — the same `?? null` fold the canonical restore diff (`record-restore-diff.ts` `sameValue`) already
- * uses for restorable-value equality, so the precheck cannot be stricter about emptiness than the restore
- * machinery it guards.
- */
+/** Canonical value equality for the content projection (key-order-insensitive objects, `null` ≡ absent). */
 const canonicalize = (v: unknown): string => {
   if (v === undefined || v === null) return 'null'
   if (Array.isArray(v)) return `[${v.map(canonicalize).join(',')}]`
@@ -96,60 +106,235 @@ const canonicalize = (v: unknown): string => {
   return JSON.stringify(v) ?? 'null'
 }
 
+// ==============================================================================================================
+// Generation-aware contiguity — the PURE, unit-testable core (mutation-proven in isolation of the DB).
+// ==============================================================================================================
+
+export type ChainEventAction = 'create' | 'update' | 'delete'
+/** A revision chain event. `orderKey` is the RAW `created_at` epoch-ms (exact in float64 — never packed with
+ *  the version; see `chainOrderAfter`). Rank + version tiebreaks are compared structurally off the event. */
+export interface ChainEvent {
+  version: number
+  action: ChainEventAction
+  orderKey?: number
+}
+/** A legitimate non-data version bump (lock/unlock) recorded out-of-chain in `meta_record_version_markers`.
+ *  `orderKey` = raw `created_at` epoch-ms; a marker ranks with updates (it happens on a LIVE row). */
+export interface VersionMarker {
+  version: number
+  kind: 'lock' | 'unlock'
+  orderKey?: number
+}
+
 /**
- * The shared §0.6 precheck. Scope = the sheet (revert/reset are whole-sheet operations, T8 D5).
+ * Total chain order = (created_at epoch-ms, version, non-delete-before-delete), compared STRUCTURALLY.
  *
- * Both compute paths (`computeSheetRevert`, `computeSheetReset`) call this AFTER their cheap record-count
- * ceiling (a too-large sheet is refused 413 before any scan, precheck included) and BEFORE any diff/scope
- * work — so preview mints no token and execute writes no row once this refuses.
+ * Why not a packed numeric key: the previous encoding (`epoch*1e6 + version`) silently LOST the version
+ * tiebreak to float64 precision — at 2026 epochs the scaled value is ~1.7e18 where the ULP is ~256, so
+ * same-millisecond events collapsed to one float and the generation boundary was mis-drawn (CI catch:
+ * undelete-pit scenario (g), a same-ms delete + occupying create). Comments asserting "version is a sub-ms
+ * tiebreaker" were an unverified invariant; this comparator is pinned by same-epoch unit goldens instead.
+ *
+ * Within one millisecond, VERSION is the primary tiebreak: same-epoch multi-vintage churn writes ascending
+ * versions (…delete@2, create@3, delete@4… — 4c-3 §7 realdb goldens construct exactly this at one T), so
+ * ordering by version keeps each create with ITS vintage. A static action rank (e.g. "create after delete")
+ * cannot linearize that shape — it would hoist create@3 past delete@4 into the live generation and refuse
+ * out_of_range. The final leg breaks the delete-REUSE tie only: a delete that reuses version k happens
+ * after the content event at k, so at equal (epoch, version) the delete sorts LAST.
+ *
+ * Known fail-closed residue (C2 docket, NOT solved here): a restore/resurrect create@v1 landing in the SAME
+ * millisecond as the delete it follows is version-below the delete and thus sorts before it — the row
+ * refuses (live_row_after_delete_revision), it is never mis-reconstructed. The packed-float ordering refused
+ * that shape too (collapsed keys), so this is no regression; disambiguating same-ms cross-generation order
+ * needs the C2 time anchor.
+ */
+type ChainOrdered = { version: number; action?: ChainEventAction; orderKey?: number }
+const chainOrderAfter = (a: ChainOrdered, b: ChainOrdered): boolean => {
+  const ta = a.orderKey ?? 0
+  const tb = b.orderKey ?? 0
+  if (ta !== tb) return ta > tb
+  if (a.version !== b.version) return a.version > b.version
+  return a.action === 'delete' && b.action !== 'delete'
+}
+
+export type ContiguityResult = { ok: true } | { ok: false; reason: HistoryIntegrityReason }
+
+/**
+ * Generation-aware contiguity for ONE live record (owner §6.1 — "generation = count(create revisions
+ * at-or-before)"; delete revisions REUSE the last live version, so NO count/version-uniqueness criterion works).
+ *
+ * A record's chain is a sequence of GENERATIONS separated by delete revisions (a record can be created,
+ * deleted, then trash-restored / PIT-resurrected — a fresh `create` revision at version 1 starts a NEW
+ * generation). Only the CURRENT generation (the suffix strictly after the LAST delete, by orderKey) governs
+ * a LIVE record's trustworthiness for revert/reset to a T in that generation. Reconstruction across a prior
+ * generation boundary is C3 (deleted-record chains) — explicitly DEFERRED — so this proof scopes to the
+ * current generation, which is why a common trash-restore is NOT false-refused.
+ *
+ * The current generation is contiguous iff every version k ∈ [genStart..liveVersion] (genStart = the version
+ * of the generation's `create`) is occupied by EXACTLY ONE canonical occupant:
+ *   - a create/update revision at version k in the current generation, OR
+ *   - a lock/unlock marker at version k in the current generation.
+ * Fail-closed:
+ *   - a version with no occupant = an uncaptured data write = a HOLE (this is the healed-gap the whole slice
+ *     exists to catch: v3 record with revisions {v1, v3} ⇒ v2 hole);
+ *   - two occupants at one version = duplicate/conflicting event (C5);
+ *   - an occupant version > liveVersion (or < genStart) = out-of-range (C5);
+ *   - the last chain event is a delete but the row is LIVE (current generation empty) = uncaptured
+ *     resurrection;
+ *   - no create/update revision anywhere = the zero-revision uncaptured-CREATE fingerprint.
+ */
+export function checkRecordChainContiguity(
+  liveVersion: number,
+  events: ReadonlyArray<ChainEvent>,
+  markers: ReadonlyArray<VersionMarker>,
+): ContiguityResult {
+  const V = Number.isFinite(liveVersion) ? Math.trunc(liveVersion) : 0
+  if (V < 1) return { ok: false, reason: 'chain_hole' } // a live record must have version >= 1
+
+  const anyCreateOrUpdate = events.some((e) => e.action !== 'delete')
+  if (!anyCreateOrUpdate && markers.length === 0) return { ok: false, reason: 'zero_revision_live_row' }
+
+  // Generation boundary: the LAST delete (by chain order) terminates the prior generation; the current
+  // generation is everything strictly after it (structural comparator — see chainOrderAfter).
+  let lastDelete: ChainEvent | null = null
+  for (const e of events) {
+    if (e.action === 'delete' && (lastDelete === null || chainOrderAfter(e, lastDelete))) lastDelete = e
+  }
+  const boundary = lastDelete
+  const inCurrentGen = (x: ChainOrdered): boolean => boundary === null || chainOrderAfter(x, boundary)
+
+  const currentGenEvents = events.filter((e) => e.action !== 'delete' && inCurrentGen(e))
+  const currentGenMarkers = markers.filter((m) => inCurrentGen(m))
+
+  // Current generation empty while the row is LIVE ⇒ the latest chain event is a delete (uncaptured
+  // resurrection: history claims dead but the row exists).
+  if (currentGenEvents.length === 0 && anyCreateOrUpdate) return { ok: false, reason: 'live_row_after_delete_revision' }
+  if (currentGenEvents.length === 0) return { ok: false, reason: 'zero_revision_live_row' }
+
+  // A generation must START with a create. genStart = the create's version (v1 for original + resurrect).
+  const createVersions = currentGenEvents.filter((e) => e.action === 'create').map((e) => e.version)
+  if (createVersions.length === 0) return { ok: false, reason: 'chain_hole' } // updates with no create = broken generation
+  const genStart = Math.min(...createVersions)
+  if (genStart < 1 || genStart > V) return { ok: false, reason: 'out_of_range_version' }
+
+  const occupant = new Map<number, number>()
+  for (const e of currentGenEvents) {
+    if (!Number.isInteger(e.version) || e.version < genStart || e.version > V) return { ok: false, reason: 'out_of_range_version' }
+    occupant.set(e.version, (occupant.get(e.version) ?? 0) + 1)
+  }
+  for (const m of currentGenMarkers) {
+    if (!Number.isInteger(m.version) || m.version < genStart || m.version > V) return { ok: false, reason: 'out_of_range_version' }
+    occupant.set(m.version, (occupant.get(m.version) ?? 0) + 1)
+  }
+
+  for (let k = genStart; k <= V; k++) {
+    const c = occupant.get(k) ?? 0
+    if (c === 0) return { ok: false, reason: 'chain_hole' }
+    if (c > 1) return { ok: false, reason: 'duplicate_version_event' }
+  }
+  return { ok: true }
+}
+
+// ==============================================================================================================
+
+const toNumber = (v: unknown): number => (typeof v === 'number' && Number.isFinite(v) ? v : Number(v) || 0)
+/** Raw created_at epoch-ms — exact in float64. NEVER pack version into this (see chainOrderAfter). */
+const epochOf = (createdAt: unknown): number => {
+  const t = createdAt instanceof Date ? createdAt.getTime() : Date.parse(String(createdAt ?? ''))
+  return Number.isFinite(t) ? t : 0
+}
+
+/**
+ * The shared precheck. Scope = the sheet (revert/reset are whole-sheet operations). Preview and execute both
+ * call this; the execute path ALSO re-runs it inside the destructive transaction (C8) via
+ * `HistoryIncompleteInTxnError`.
  */
 export async function precheckSheetHistoryIntegrity(
   query: QueryFn,
   sheetId: string,
 ): Promise<HistoryIntegrityVerdict> {
+  // System sheets (approval projection / people directory) are server-regenerated read models — excluded.
+  const sheetRes = await query('SELECT base_id, description FROM meta_sheets WHERE id = $1', [sheetId])
+  const sheetRow = sheetRes.rows[0] as { base_id?: unknown; description?: unknown } | undefined
+  if (sheetRow && isSystemSheet({ baseId: typeof sheetRow.base_id === 'string' ? sheetRow.base_id : null, description: sheetRow.description })) {
+    return { ok: true }
+  }
+
   const fieldsRes = await query('SELECT id, type FROM meta_fields WHERE sheet_id = $1', [sheetId])
   const userFieldIds: string[] = []
   for (const row of fieldsRes.rows as Array<{ id: unknown; type: unknown }>) {
     if (!isDerivedFieldType(String(row.type ?? ''))) userFieldIds.push(String(row.id))
   }
-  const liveRes = await query('SELECT id, data FROM meta_records WHERE sheet_id = $1', [sheetId])
-  const liveRows = liveRes.rows as Array<{ id: unknown; data: unknown }>
+  const liveRes = await query('SELECT id, data, version FROM meta_records WHERE sheet_id = $1', [sheetId])
+  const liveRows = liveRes.rows as Array<{ id: unknown; data: unknown; version: unknown }>
   if (liveRows.length === 0) return { ok: true }
-  // Latest revision per record — LOCK-11 deterministic order (`created_at DESC, version DESC, id DESC`),
-  // parity with `reconstructRecordsAtT` but WITHOUT the `<= T` cut: rule 2 compares live data against
-  // history's most recent claim, which is T-independent.
-  const revRes = await query(
-    `SELECT DISTINCT ON (record_id) record_id, action, snapshot
-     FROM meta_record_revisions
-     WHERE sheet_id = $1
-     ORDER BY record_id, created_at DESC, version DESC, id DESC`,
-    [sheetId],
-  )
-  const latestByRecord = new Map<string, { action: string; snapshot: unknown }>()
-  for (const row of revRes.rows as Array<{ record_id: unknown; action: unknown; snapshot: unknown }>) {
-    latestByRecord.set(String(row.record_id), { action: String(row.action ?? ''), snapshot: row.snapshot })
-  }
+
   try {
-    // Rule 3: iterate the LIVE rows (never the reconstruction — that misses exactly the delete-set-at-risk rows).
+    // FULL chain per record (contiguity needs every event, not just the latest) — all versions/actions.
+    const revRes = await query(
+      `SELECT record_id, version, action, snapshot, created_at, id
+       FROM meta_record_revisions
+       WHERE sheet_id = $1`,
+      [sheetId],
+    )
+    type RevRow = { record_id: unknown; version: unknown; action: unknown; snapshot: unknown; created_at: unknown; id: unknown }
+    const eventsByRecord = new Map<string, ChainEvent[]>()
+    const latestSnapByRecord = new Map<string, { action: ChainEventAction; snapshot: unknown; version: number; orderKey: number }>()
+    for (const r of revRes.rows as RevRow[]) {
+      const rid = String(r.record_id)
+      const version = toNumber(r.version)
+      const action: ChainEventAction = (r.action === 'create' || r.action === 'delete') ? r.action : 'update'
+      const orderKey = epochOf(r.created_at)
+      const list = eventsByRecord.get(rid) ?? []
+      list.push({ version, action, orderKey })
+      eventsByRecord.set(rid, list)
+      const prev = latestSnapByRecord.get(rid)
+      const cand = { action, snapshot: r.snapshot, version, orderKey }
+      if (!prev || chainOrderAfter(cand, prev)) latestSnapByRecord.set(rid, cand)
+    }
+
+    // Lock/unlock markers (deploy-window safe: a missing table pre-migration ⇒ no markers ⇒ locked records
+    // fail CLOSED via a hole, never a crash — the C6 trusted-since watermark that grandfathers them is deferred).
+    // The existence probe (information_schema, never 42P01) MUST run before the direct SELECT: this precheck is
+    // re-run INSIDE the reset-execute destructive transaction, and a swallowed 42P01 there still aborts the txn
+    // (25P02 on the next statement → 500 instead of clean 409). Mirrors the WRITE path's txn-safe probe.
+    const markersByRecord = new Map<string, VersionMarker[]>()
+    if (await hasVersionMarkerTable(query)) {
+      const markerRes = await query(
+        `SELECT record_id, version, kind, created_at FROM meta_record_version_markers WHERE sheet_id = $1`,
+        [sheetId],
+      )
+      for (const m of markerRes.rows as Array<{ record_id: unknown; version: unknown; kind: unknown; created_at: unknown }>) {
+        const rid = String(m.record_id)
+        const version = toNumber(m.version)
+        const list = markersByRecord.get(rid) ?? []
+        list.push({ version, kind: m.kind === 'unlock' ? 'unlock' : 'lock', orderKey: epochOf(m.created_at) })
+        markersByRecord.set(rid, list)
+      }
+    }
+
     for (const row of liveRows) {
-      const latest = latestByRecord.get(String(row.id))
-      // Zero revisions at all → the uncaptured-CREATE fingerprint → refuse.
-      if (!latest) return { ok: false, reason: 'zero_revision_live_row' }
-      // A LIVE row whose latest revision is a DELETE: history claims the record is dead, so
-      // `reconstructRecordsAtT(now)` reports it non-existent and a Reset would push it into the delete-set
-      // even when the content projection matches (a delete revision stores the PRE-delete snapshot). That is
-      // the same silent-destruction class rule 3 exists for → refuse. (No captured path produces this state:
-      // trash-restore and PIT-resurrect both write a fresh 'create' revision in the same transaction.)
-      if (latest.action === 'delete') return { ok: false, reason: 'live_row_after_delete_revision' }
-      const live = isPlainRecord(row.data) ? row.data : {}
-      const snap = isPlainRecord(latest.snapshot) ? latest.snapshot : {}
-      for (const fid of userFieldIds) {
-        if (canonicalize(live[fid]) !== canonicalize(snap[fid])) return { ok: false, reason: 'content_mismatch' }
+      const rid = String(row.id)
+      const liveVersion = toNumber(row.version)
+      const events = eventsByRecord.get(rid) ?? []
+      const markers = markersByRecord.get(rid) ?? []
+
+      // PRIMARY: generation-aware contiguity.
+      const contiguity = checkRecordChainContiguity(liveVersion, events, markers)
+      if (!contiguity.ok) return contiguity
+
+      // SECOND LAYER (retained §1.3): live user-field content must equal the latest captured snapshot.
+      const latest = latestSnapByRecord.get(rid)
+      if (latest && latest.action !== 'delete') {
+        const live = isPlainRecord(row.data) ? row.data : {}
+        const snap = isPlainRecord(latest.snapshot) ? latest.snapshot : {}
+        for (const fid of userFieldIds) {
+          if (canonicalize(live[fid]) !== canonicalize(snap[fid])) return { ok: false, reason: 'content_mismatch' }
+        }
       }
     }
     return { ok: true }
   } catch {
-    // Rule 4 fail-closed: a comparator error is a refusal, never a proceed.
-    return { ok: false, reason: 'comparator_error' }
+    return { ok: false, reason: 'comparator_error' } // rule 4 fail-closed
   }
 }
