@@ -61,7 +61,12 @@ resolve_home_path() {
 STAGING_DIR="$(resolve_home_path "$STAGING_DEPLOY_PATH")"
 PROD_REPO_DIR="$(resolve_home_path "$DEPLOY_PATH")"
 STAGING_COMPOSE_FILE="${STAGING_DIR}/docker-compose.app.staging.yml"
-OVERRIDE_FILE="${STAGING_DIR}/docker-compose.window-runner.override.yml"
+# The override lives in the per-run OUTPUT_DIR, NOT the staging repo dir: the SSH user has
+# no write permission inside ${STAGING_DIR} (proven by run 29313154282: "Permission denied"),
+# compose accepts absolute -f paths, and compose_staging() is only used by the deploy action
+# (smoke/status use docker exec by container name), so the override never needs to persist
+# across runs — each deploy rewrites it, preserving the set_window_env=none removal semantic.
+OVERRIDE_FILE="${OUTPUT_DIR}/docker-compose.window-runner.override.yml"
 
 # --- staging-only guard (fail closed) -------------------------------------------------
 assert_staging_only() {
@@ -253,9 +258,6 @@ action_deploy() {
   redis_id_before="$(docker inspect -f '{{.Id}}' "$REDIS_CONTAINER")" \
     || fail "staging redis container not found: ${REDIS_CONTAINER}"
 
-  if [[ -f "$OVERRIDE_FILE" ]]; then
-    cp "$OVERRIDE_FILE" "${OVERRIDE_FILE}.bak-$(date +%Y%m%d%H%M%S)"
-  fi
   {
     echo "# Written by attendance-staging-window-runner (run ${RUN_STAMP}). Pins the staging"
     echo "# backend/web images to one full-SHA tag; env flips happen ONLY here, together with"
@@ -271,7 +273,6 @@ action_deploy() {
     echo "  web:"
     echo "    image: ${web_image}"
   } > "$OVERRIDE_FILE"
-  cp "$OVERRIDE_FILE" "${OUTPUT_DIR}/window-runner-override.yml"
   log "override written: ${OVERRIDE_FILE} (env mode: ${SET_WINDOW_ENV})"
 
   compose_staging pull backend web 2>&1 | tee "${OUTPUT_DIR}/compose-pull.log"
