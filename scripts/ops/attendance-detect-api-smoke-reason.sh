@@ -31,7 +31,7 @@ if grep -qE 'features\.attendance is not true' "$log_path"; then
   exit 0
 fi
 if grep -qE \
-  'POST /attendance/requests: HTTP 409 .*DUPLICATE_REQUEST|workDate=.*already has a pending or approved time_correction request|No available smoke work date found' \
+  '\[attendance-smoke-api\] Failed: (POST /attendance/requests: HTTP 409 .*DUPLICATE_REQUEST|.*workDate=.*already has a pending or approved time_correction request|No available smoke work date found)' \
   "$log_path"; then
   echo "REQUEST_DATE_COLLISION"
   exit 0

@@ -197,7 +197,7 @@ async function resolveAvailableSmokeWorkDate() {
     hasBlockingRequest: hasBlockingTimeCorrectionRequest,
     onCollision: (candidate) => {
       log(
-        `WARN: workDate=${candidate} already has a pending or approved time_correction request; trying the next date`,
+        `WARN: workDate=${candidate} has an existing pending/approved time_correction request; trying the next date`,
       )
     },
   })

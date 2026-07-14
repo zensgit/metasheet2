@@ -48,6 +48,19 @@ test('classifies exhausted deterministic date candidates as a request collision'
   assert.equal(result.stdout.trim(), 'REQUEST_DATE_COLLISION')
 })
 
+test('ignores a recovered date collision warning when classifying a later failure', () => {
+  const result = detectReason(
+    [
+      '[attendance-smoke-api] WARN: workDate=2026-07-14 already has a pending or approved time_correction request; trying the next date',
+      '[attendance-smoke-api] Failed: POST /attendance/import/commit: HTTP 500 {"ok":false}',
+      '',
+    ].join('\n'),
+  )
+
+  assert.equal(result.status, 0, `${result.stderr}\n${result.stdout}`)
+  assert.equal(result.stdout.trim(), 'IMPORT_COMMIT_FAILED')
+})
+
 test('keeps unmatched API smoke failures explicitly unknown', () => {
   const result = detectReason(
     '[attendance-smoke-api] Failed: unexpected response\n',
