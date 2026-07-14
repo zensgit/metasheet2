@@ -55,11 +55,32 @@ REMOTE
 # the verdict (report['healthy']) does NOT depend on them. Alert-delivery observability is DEFERRED
 # to a follow-up that actually deploys the topology; this check no longer claims it is "restored".
 ALERT_TOPOLOGY_DEFERRED="false"
-WEBHOOK_STATUS="$(bash "${ROOT_DIR}/scripts/ops/set-dingtalk-onprem-alertmanager-webhook-config.sh" --print-status 2>/dev/null || { ALERT_TOPOLOGY_DEFERRED="true"; printf 'configured=false\n'; })"
+# NOTE: each of these three probes must set ALERT_TOPOLOGY_DEFERRED from the PARENT shell on failure.
+# `WEBHOOK_STATUS="$(cmd || { ALERT_TOPOLOGY_DEFERRED=true; ... })"` is a bug: the `|| { ... }` runs
+# INSIDE the `$( ... )` command substitution, which is a SUBSHELL — the assignment never propagates
+# to the parent shell and ALERT_TOPOLOGY_DEFERRED silently stays "false" even when the probe failed.
+# Repro: `X=false; Y=$(false || { X=true; echo z; }); echo $X` prints `false`. Use a parent-shell
+# if/else instead so the assignment sticks; the `if` consumes the non-zero exit so `set -e` does not abort.
+if WEBHOOK_STATUS="$(bash "${ROOT_DIR}/scripts/ops/set-dingtalk-onprem-alertmanager-webhook-config.sh" --print-status 2>/dev/null)"; then
+  :
+else
+  ALERT_TOPOLOGY_DEFERRED="true"
+  WEBHOOK_STATUS="configured=false"
+fi
 HEALTH_JSON="$(ssh_cmd "curl -fsS http://127.0.0.1:8900/health")"
 METRICS_TEXT="$(remote_authed_curl "http://127.0.0.1:8900/metrics/prom")"
-ALERTMANAGER_STATUS_JSON="$(ssh_cmd "curl -fsS http://127.0.0.1:9093/api/v2/status" 2>/dev/null || { ALERT_TOPOLOGY_DEFERRED="true"; printf '{}'; })"
-ALERTS_JSON="$(ssh_cmd "curl -fsS http://127.0.0.1:9093/api/v2/alerts" 2>/dev/null || { ALERT_TOPOLOGY_DEFERRED="true"; printf '[]'; })"
+if ALERTMANAGER_STATUS_JSON="$(ssh_cmd "curl -fsS http://127.0.0.1:9093/api/v2/status" 2>/dev/null)"; then
+  :
+else
+  ALERT_TOPOLOGY_DEFERRED="true"
+  ALERTMANAGER_STATUS_JSON='{}'
+fi
+if ALERTS_JSON="$(ssh_cmd "curl -fsS http://127.0.0.1:9093/api/v2/alerts" 2>/dev/null)"; then
+  :
+else
+  ALERT_TOPOLOGY_DEFERRED="true"
+  ALERTS_JSON='[]'
+fi
 ALERTMANAGER_ERROR_COUNT="$(ssh_cmd "docker logs --since ${LOG_WINDOW} metasheet-alertmanager 2>&1 | grep -E 'Notify for alerts failed|no_text' | wc -l | tr -d ' '" 2>/dev/null || printf '0')"
 BRIDGE_NOTIFY_COUNT="$(ssh_cmd "docker logs --since ${LOG_WINDOW} metasheet-alert-webhook 2>&1 | grep '\"path\": \"/notify\"' | wc -l | tr -d ' '" 2>/dev/null || printf '0')"
 BRIDGE_RESOLVED_COUNT="$(ssh_cmd "docker logs --since ${LOG_WINDOW} metasheet-alert-webhook 2>&1 | grep '\"path\": \"/notify\"' | grep '\"status\": \"resolved\"' | wc -l | tr -d ' '" 2>/dev/null || printf '0')"
@@ -166,7 +187,12 @@ health_ok = (
 # that is a separate, currently-DEFERRED concern (docker/observability has no alertmanager service
 # or webhook bridge on main), and coupling it in is what made the OAuth monitor go blind.
 alert_topology_deferred = os.environ.get('ALERT_TOPOLOGY_DEFERRED_INPUT', 'false') == 'true'
-report['alertDeliveryObservability'] = 'deferred' if alert_topology_deferred else 'observed'
+# THREE-STATE: 'observed' requires BOTH (i) none of the alert-topology probes failed AND (ii) the
+# webhook is actually configured. A reachable-but-UNCONFIGURED webhook (the config script can exit 0
+# and print `configured=false` — Alertmanager up, nothing to notify) must also read as deferred, not
+# observed: printing a success exit code is not the same as having delivery observability.
+alert_topology_observed = (not alert_topology_deferred) and report['webhookConfig']['configured'] is True
+report['alertDeliveryObservability'] = 'observed' if alert_topology_observed else 'deferred'
 oauth_metrics_present = len(report['metrics']['operationsSamples']) > 0
 report['oauthMetricsPresent'] = oauth_metrics_present
 report['healthy'] = (

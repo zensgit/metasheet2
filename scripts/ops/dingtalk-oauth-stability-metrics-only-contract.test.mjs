@@ -85,7 +85,53 @@ test('source guard: the verdict expression references OAuth metrics, not the ale
   assert.doesNotMatch(expr, /webhookConfig|alertmanager|hooks\.slack\.com/, 'verdict must NOT re-couple to the alert-delivery topology')
 })
 
-test('the alert-topology probes are soft (a failure marks deferred, never aborts under set -e)', () => {
-  assert.match(script, /ALERT_TOPOLOGY_DEFERRED="true"; printf '\{\}'/, 'the :9093 status probe must soft-fail to a deferred marker')
-  assert.match(script, /curl -fsS http:\/\/127\.0\.0\.1:9093\/api\/v2\/status" 2>\/dev\/null \|\|/, 'the alertmanager status curl must have a `|| fallback` so set -e does not abort')
+test('the alert-topology probes are soft (a failure marks deferred via a PARENT-SHELL if/else, never aborts under set -e)', () => {
+  // Regression guard for the subshell bug: `WEBHOOK_STATUS="$(cmd || { ALERT_TOPOLOGY_DEFERRED=true; ... })"`
+  // sets the marker INSIDE the `$( ... )` command substitution (a subshell), so the assignment is lost and
+  // the parent-shell ALERT_TOPOLOGY_DEFERRED silently stays "false" even when the probe failed. The fix
+  // must use a parent-shell `if <probe>; then :; else ALERT_TOPOLOGY_DEFERRED="true"; ... fi` for every
+  // probe that marks deferred, so the assignment actually propagates.
+  assert.doesNotMatch(
+    script,
+    /\$\([^)]*ALERT_TOPOLOGY_DEFERRED="true"[^)]*\)/,
+    'ALERT_TOPOLOGY_DEFERRED must never be assigned inside a $( ... ) command substitution (subshell) — the assignment would be lost',
+  )
+  for (const probe of [
+    'ALERTMANAGER_STATUS_JSON',
+    'ALERTS_JSON',
+    'WEBHOOK_STATUS',
+  ]) {
+    const re = new RegExp(
+      `if ${probe}="\\$\\([^\\n]*"; then\\n\\s*:\\n\\s*else\\n\\s*ALERT_TOPOLOGY_DEFERRED="true"\\n\\s*${probe}=`,
+    )
+    assert.match(script, re, `${probe} must set ALERT_TOPOLOGY_DEFERRED from a parent-shell if/else on failure`)
+  }
+})
+
+test('three-state alertDeliveryObservability: observed requires BOTH no probe failure AND webhook configured', () => {
+  // (1) probe failure alone (webhook happens to report configured=true) => deferred.
+  const probeFailed = runVerdict({
+    ALERT_TOPOLOGY_DEFERRED_INPUT: 'true',
+    WEBHOOK_STATUS_INPUT: 'configured=true\nscheme=https\nhost=hooks.slack.com\npath_length=10',
+  })
+  assert.equal(probeFailed.webhookConfig.configured, true)
+  assert.equal(probeFailed.alertDeliveryObservability, 'deferred', 'a failed alert-topology probe must defer even if the webhook is configured')
+
+  // (2) probes all succeeded, but the webhook is reachable-and-UNCONFIGURED (config script exits 0,
+  // prints configured=false) => deferred. This is the owner-required three-state case: a successful
+  // exit code from the config probe is NOT the same as having delivery observability.
+  const unconfigured = runVerdict({
+    ALERT_TOPOLOGY_DEFERRED_INPUT: 'false',
+    WEBHOOK_STATUS_INPUT: 'configured=false',
+  })
+  assert.equal(unconfigured.webhookConfig.configured, false)
+  assert.equal(unconfigured.alertDeliveryObservability, 'deferred', 'a reachable-but-unconfigured webhook must NOT read as observed')
+
+  // (3) full topology: no probe failure AND webhook configured => observed.
+  const full = runVerdict({
+    ALERT_TOPOLOGY_DEFERRED_INPUT: 'false',
+    WEBHOOK_STATUS_INPUT: 'configured=true\nscheme=https\nhost=hooks.slack.com\npath_length=10',
+  })
+  assert.equal(full.webhookConfig.configured, true)
+  assert.equal(full.alertDeliveryObservability, 'observed', 'observed requires BOTH no probe failure and a configured webhook')
 })
