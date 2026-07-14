@@ -29,8 +29,12 @@ def infer_failure_reasons(
     payload: Optional[dict[str, Any]],
     stability_rc: str,
     healthy: str,
-    webhook_secret_available: str,
 ) -> list[str]:
+    # DT-CLOSE-01B: the health verdict is metrics-only — health_ok AND oauthMetricsPresent AND
+    # storage-headroom (see dingtalk-oauth-stability-check.sh). Alert-DELIVERY topology (webhook
+    # configured / host / Alertmanager notify errors) is a separate, currently-DEFERRED concern and
+    # must NEVER appear here: gating narration on it is what let a real OAuth-metrics outage get
+    # misattributed to "webhook not configured" while the actual failing signal went unreported.
     reasons: list[str] = []
     if stability_rc != '0':
         reasons.append(f'stability-check command failed (rc={stability_rc or "missing"})')
@@ -39,25 +43,17 @@ def infer_failure_reasons(
         return reasons
     if healthy != 'true':
         health = payload.get('health', {}) or {}
-        webhook = payload.get('webhookConfig', {}) or {}
-        alertmanager = payload.get('alertmanager', {}) or {}
         storage = ((payload.get('storage') or {}).get('root') or {})
+        oauth_metrics_present = payload.get('oauthMetricsPresent')
 
         if not (health.get('ok') is True or health.get('status') == 'ok'):
             reasons.append(
                 f'backend health is not ok (status={health.get("status")} ok={health.get("ok")})'
             )
-        if webhook.get('configured') is not True:
-            reasons.append('Alertmanager webhook is not configured')
-            if webhook_secret_available != 'true':
-                reasons.append(
-                    'No supported GitHub webhook secret was available for Alertmanager self-heal'
-                )
-        elif webhook.get('host') != 'hooks.slack.com':
-            reasons.append(f'Alertmanager webhook host drifted to {webhook.get("host")}')
-        if int(alertmanager.get('notifyErrorsLastWindow') or 0) > 0:
+        if oauth_metrics_present is not True:
             reasons.append(
-                f'Alertmanager reported notify errors in the current log window ({alertmanager.get("notifyErrorsLastWindow")})'
+                'OAuth state-operation metrics are absent from /metrics/prom (producer not '
+                'running/not deployed, or the scrape is broken)'
             )
         if int(storage.get('usePercent') or 0) >= int(storage.get('maxUsePercent') or 0):
             reasons.append(
@@ -80,26 +76,31 @@ def infer_next_actions(
                 actions.append(
                     f'Plan a remote Docker image/cache cleanup soon because root usage is approaching the gate ({use_percent}% / {max_use_percent}%).'
                 )
-        return actions
+    else:
+        actions = []
+        for reason in failure_reasons:
+            if 'stability-check command failed' in reason:
+                actions.append('Re-run the workflow log tail and remote SSH stability check to isolate the failing command.')
+            elif 'backend health is not ok' in reason:
+                actions.append('Check the on-prem backend container health and `/health` response before retrying the workflow.')
+            elif 'OAuth state-operation metrics are absent' in reason:
+                actions.append(
+                    'Verify the backend container is up, confirm the METRICS_SCRAPE_TOKEN handshake succeeds '
+                    'against /metrics/prom, and confirm the deployed image actually contains the OAuth '
+                    'state-metrics producer.'
+                )
+            elif 'root filesystem is at or above gate' in reason:
+                actions.append('Run the on-prem Docker GC flow or free disk space on the remote host, then retry the stability workflow.')
+            elif 'JSON missing or unreadable' in reason:
+                actions.append('Check the uploaded log artifact first; the workflow did not produce a readable stability JSON payload.')
 
-    actions: list[str] = []
-    for reason in failure_reasons:
-        if 'stability-check command failed' in reason:
-            actions.append('Re-run the workflow log tail and remote SSH stability check to isolate the failing command.')
-        elif 'backend health is not ok' in reason:
-            actions.append('Check the on-prem backend container health and `/health` response before retrying the workflow.')
-        elif 'webhook is not configured' in reason or 'host drifted' in reason:
-            actions.append('Reapply the persisted Alertmanager webhook configuration on the on-prem host.')
-        elif 'No supported GitHub webhook secret' in reason:
-            actions.append(
-                'Configure one supported GitHub Actions secret: ALERTMANAGER_WEBHOOK_URL, ALERT_WEBHOOK_URL, SLACK_WEBHOOK_URL, or ATTENDANCE_ALERT_SLACK_WEBHOOK_URL.'
-            )
-        elif 'notify errors' in reason:
-            actions.append('Inspect Alertmanager and webhook bridge logs, then confirm Slack delivery still resolves firing and resolved notifications.')
-        elif 'root filesystem is at or above gate' in reason:
-            actions.append('Run the on-prem Docker GC flow or free disk space on the remote host, then retry the stability workflow.')
-        elif 'JSON missing or unreadable' in reason:
-            actions.append('Check the uploaded log artifact first; the workflow did not produce a readable stability JSON payload.')
+    # Alert-delivery topology is deferred by design and is never a failure reason, but it is
+    # always worth surfacing as context — independent of whether the run passed or failed.
+    if payload and payload.get('alertDeliveryObservability') == 'deferred':
+        actions.append(
+            'Alert-delivery observability reading as deferred is expected until the '
+            'Alertmanager+bridge topology ships; see the switch ledger.'
+        )
 
     deduped: list[str] = []
     for action in actions:
@@ -119,7 +120,7 @@ def make_summary_payload(
     status = 'PASS' if stability_rc == '0' and healthy == 'true' else 'FAIL'
     run_url = github_run_url()
     webhook_secret_available = os.environ.get('WEBHOOK_SECRET_AVAILABLE', 'false')
-    failure_reasons = infer_failure_reasons(payload, stability_rc, healthy, webhook_secret_available)
+    failure_reasons = infer_failure_reasons(payload, stability_rc, healthy)
     next_actions = infer_next_actions(payload, failure_reasons)
     summary_json_path = summary_path.with_suffix('.json')
 
@@ -152,6 +153,47 @@ def make_summary_payload(
     }
 
 
+def alert_delivery_observability_lines(
+    payload: Optional[dict[str, Any]],
+    webhook_secret_available: bool,
+) -> list[str]:
+    # Always emitted — this is context, never a gate. The verdict (see infer_failure_reasons)
+    # does not depend on any of this; it exists so a human can see why the topology reads the
+    # way it does without mistaking it for a health failure.
+    lines = ['## Alert Delivery Observability', '']
+    if not payload:
+        lines.append('- Stability JSON missing or unreadable; alert-delivery observability unknown.')
+        lines.append('')
+        return lines
+
+    observability = payload.get('alertDeliveryObservability')
+    webhook = payload.get('webhookConfig', {}) or {}
+    alertmanager = payload.get('alertmanager', {}) or {}
+
+    if observability == 'observed':
+        lines.append(
+            '- State: `observed` — the Alertmanager + webhook bridge topology is deployed and the webhook is configured.'
+        )
+        notify_errors = int(alertmanager.get('notifyErrorsLastWindow') or 0)
+        if notify_errors > 0:
+            lines.append(
+                f'- WARNING: Alertmanager reported {notify_errors} delivery error(s) in the current log window. '
+                'This is informational only and is NOT a failure reason for the OAuth-stability health verdict.'
+            )
+    else:
+        lines.append(
+            '- State: `deferred` — the alert-delivery topology (Alertmanager :9093 / webhook bridge) is deferred '
+            'by design and is NOT part of the OAuth-stability health verdict.'
+        )
+        lines.append(f'- Webhook configured (context only): `{webhook.get("configured")}`')
+
+    lines.append(
+        f'- Webhook self-heal secret available: `{str(bool(webhook_secret_available)).lower()}` (informational only).'
+    )
+    lines.append('')
+    return lines
+
+
 def markdown_lines(summary: dict[str, Any]) -> list[str]:
     payload = summary.get('snapshot') or {}
     lines = ['# DingTalk OAuth Stability Recording (Lite)', '']
@@ -163,9 +205,6 @@ def markdown_lines(summary: dict[str, Any]) -> list[str]:
     run_url = workflow.get('runUrl')
     if run_url:
         lines.append(f'- Run URL: `{run_url}`')
-    lines.append(
-        f'- Webhook self-heal secret available: `{str(bool(self_heal.get("webhookSecretAvailable"))).lower()}`'
-    )
     lines.append('')
 
     if payload:
@@ -214,6 +253,10 @@ def markdown_lines(summary: dict[str, Any]) -> list[str]:
     else:
         lines.append('- No blocking failure reasons detected.')
     lines.append('')
+
+    lines.extend(
+        alert_delivery_observability_lines(payload, bool(self_heal.get('webhookSecretAvailable')))
+    )
 
     lines.append('## Next Actions')
     lines.append('')

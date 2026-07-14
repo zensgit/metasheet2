@@ -144,7 +144,23 @@ wait_for_health_commit() {
     sleep "$delay"
   done
   curl -sS --max-time 10 "$STAGING_WEB_HEALTH_URL" > "${OUTPUT_DIR}/health-last.json" 2>&1 || true
-  fail "staging /api/health build.commit never matched ${expected}"
+  # L6 precedent (tracker 2026-06-21 annual-leave staging closeout, re-proven by run
+  # 29314093729): the staging stack's env file can pin a stale METASHEET_BUILD_COMMIT,
+  # so /api/health build metadata is NOT a reliable deploy identity on staging. The
+  # accepted deploy evidence is the CONTAINER IMAGE TAG. Health must still be
+  # RESPONDING (fetch_health_commit returned a body above); identity falls back to
+  # docker inspect. Fail closed if neither channel matches.
+  local live_image
+  live_image="$(docker inspect -f '{{.Config.Image}}' "$BACKEND_CONTAINER" 2>/dev/null || true)"
+  if [[ "$live_image" == *":${expected}" ]]; then
+    if ! curl -sS --max-time 10 "$STAGING_WEB_HEALTH_URL" | grep -q '"ok":true'; then
+      fail "backend image tag matches ${expected} but /api/health is not ok — not accepting image-tag identity for an unhealthy backend"
+    fi
+    log "health build.commit is stale (env-pinned; L6 precedent) but backend container image tag matches deploy sha: ${live_image}"
+    echo "identity_channel=image-tag health_commit_stale=1 live_image=${live_image}" > "${OUTPUT_DIR}/deploy-identity.txt"
+    return 0
+  fi
+  fail "staging deploy identity failed BOTH channels: /api/health build.commit never matched ${expected} AND backend image is '${live_image:-<none>}'"
 }
 
 prepare_container_runner() {

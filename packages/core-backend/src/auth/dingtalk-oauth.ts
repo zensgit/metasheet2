@@ -18,6 +18,7 @@ import {
   readDingTalkAllowedCorpIds,
 } from '../integrations/dingtalk/runtime-policy'
 import { getBcryptSaltRounds } from '../security/auth-runtime-config'
+import { recordDingTalkOAuthStateFallback, recordDingTalkOAuthStateOperation } from '../metrics/metrics'
 
 const logger = new Logger('DingTalkOAuth')
 
@@ -849,9 +850,14 @@ export async function generateState(options: {
     // per process. Deployments that require a shared store fail closed instead of
     // silently degrading to memory.
     if (isDingTalkOAuthSharedStateStoreRequired()) {
+      recordDingTalkOAuthStateOperation('write', 'error')
       throw new DingTalkOAuthStateStoreUnavailableError()
     }
     writeStateToMemory(state, record)
+    recordDingTalkOAuthStateFallback('write')
+    recordDingTalkOAuthStateOperation('write', 'ok')
+  } else {
+    recordDingTalkOAuthStateOperation('write', 'ok')
   }
 
   return state
@@ -861,21 +867,45 @@ export async function validateState(state: string): Promise<StateValidationResul
   if (!state) return { valid: false, error: 'Missing required parameter: state' }
 
   const redisResult = await validateStateFromRedis(state)
+  // `null` means the shared store was unavailable (no client / a failed exec / a thrown
+  // error) — a real Redis answer (valid, invalid/miss, or expired) is always non-null. This
+  // distinction drives both the ok/error split and whether falling through to memory counts
+  // as fallback degradation below.
+  const redisStoreUnavailable = redisResult === null
 
   // DT-OPS-05: when a shared store is required, NEVER consult the per-process Map — a
   // transient Redis outage must fail the login rather than quietly fall through to a
   // store the other replicas cannot see. `null` here means the store was unavailable
   // (a real miss returns an explicit invalid result).
   if (isDingTalkOAuthSharedStateStoreRequired()) {
-    if (redisResult) return redisResult
+    if (redisResult) {
+      recordDingTalkOAuthStateOperation('validate', 'ok')
+      return redisResult
+    }
+    recordDingTalkOAuthStateOperation('validate', 'error')
     logger.error('DingTalk OAuth state store is unavailable and a shared store is required; refusing the login')
     return { valid: false, error: 'DingTalk login is temporarily unavailable. Please try again.' }
   }
 
-  if (redisResult?.valid) return redisResult
-  if (redisResult?.error === 'State parameter has expired') return redisResult
+  if (redisResult?.valid) {
+    recordDingTalkOAuthStateOperation('validate', 'ok')
+    return redisResult
+  }
+  if (redisResult?.error === 'State parameter has expired') {
+    recordDingTalkOAuthStateOperation('validate', 'ok')
+    return redisResult
+  }
 
-  return validateStateFromMemory(state)
+  // Either Redis was unavailable (redisStoreUnavailable) or it gave a clean miss that still
+  // falls through to the defensive memory check (normal single-replica flow). Only the
+  // unavailable case is a fallback signal — a clean miss falling through here is expected
+  // behavior, not degradation.
+  if (redisStoreUnavailable) {
+    recordDingTalkOAuthStateFallback('validate')
+  }
+  const memoryResult = validateStateFromMemory(state)
+  recordDingTalkOAuthStateOperation('validate', 'ok')
+  return memoryResult
 }
 
 export async function __resetDingTalkOAuthStateStoreForTests(): Promise<void> {
