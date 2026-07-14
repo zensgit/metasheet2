@@ -26,7 +26,17 @@
         未找到该 Part 的 BOM 数据。
       </p>
 
-      <PlmBomReviewTable v-else-if="reviewState === 'table' && context" :context="context" />
+      <template v-else-if="reviewState === 'table' && context">
+        <PlmBomReviewTable :context="context" />
+        <!-- Discussion write composer (Cut 3). Runtime stays DARK server-side: DISCUSSION_SESSION_ENABLED
+             defaults OFF, so while dark a submit's exchange returns the uniform 401 and the composer shows
+             a clean failure. Keyed by part_id so switching Part remounts a fresh token client. -->
+        <PlmEmbedDiscussionComposer
+          :key="context.part.part_id"
+          :parent-origin="parentOrigin"
+          :target="{ target_type: 'item', target_id: context.part.part_id }"
+        />
+      </template>
     </div>
   </section>
 </template>
@@ -50,6 +60,7 @@ import {
   type PlmEmbedBomResult,
 } from '../services/integration/plmEmbed'
 import PlmBomReviewTable from '../components/plm/PlmBomReviewTable.vue'
+import PlmEmbedDiscussionComposer from '../components/plm/PlmEmbedDiscussionComposer.vue'
 
 // the inbound postMessage envelope: { type: 'plm-embed:token', token: '<jwt>' }
 const EMBED_TOKEN_MESSAGE_TYPE = 'plm-embed:token'
