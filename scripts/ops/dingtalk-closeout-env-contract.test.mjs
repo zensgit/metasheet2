@@ -30,6 +30,16 @@ import { dirname, join } from 'node:path'
 // template lines would be a template an operator could "set" that the code silently ignores.
 // They are documented as prose in the DINGTALK_GROUP_DELIVERY_RETENTION_DAYS comment block
 // instead (see the second test below), not enforced as settable keys.
+//
+// DT-CLOSE-02B: the six DINGTALK_DELIVERY_RETENTION_* keys below are the approval-card /
+// person delivery retention family (dingtalk-card-person-delivery-retention.ts + its
+// -scheduler.ts sibling, #4142) — a SEPARATE, already-implemented control plane from the
+// DINGTALK_GROUP_DELIVERY_RETENTION_* family above (that one only touches
+// dingtalk_group_deliveries; this one touches dingtalk_approval_card_deliveries +
+// dingtalk_person_deliveries). Same NOT-included-here note applies to its own compiled-in
+// constants: DINGTALK_DELIVERY_RETENTION_DEFAULT_DAYS (=90), _MIN_DAYS (=7), and
+// _DEFAULT_BATCH (=5000) are exported `const` values, never read via `process.env` — they
+// are documented as prose in the template DANGER comment, not enforced as settable keys.
 const CLOSEOUT_ENV_KEYS = [
   'DIRECTORY_DEPROVISION_ENABLED',
   'DIRECTORY_DEPROVISION_MAX_BATCH',
@@ -41,6 +51,12 @@ const CLOSEOUT_ENV_KEYS = [
   'DINGTALK_GROUP_DELIVERY_RETENTION_SCHEDULER_INTERVAL_MS',
   'DINGTALK_GROUP_DELIVERY_RETENTION_LEADER_LOCK_TTL_MS',
   'DINGTALK_GROUP_DELIVERY_RETENTION_LEADER_LOCK_RETRY_MS',
+  'DINGTALK_DELIVERY_RETENTION_DAYS',
+  'DINGTALK_DELIVERY_RETENTION_DISABLED',
+  'DINGTALK_DELIVERY_RETENTION_SCHEDULER_INTERVAL_MS',
+  'ENABLE_DINGTALK_DELIVERY_RETENTION_LEADER_LOCK',
+  'DINGTALK_DELIVERY_RETENTION_LEADER_LOCK_TTL_MS',
+  'DINGTALK_DELIVERY_RETENTION_LEADER_LOCK_RETRY_MS',
   'DIRECTORY_INACTIVE_LINKED_ALERT_DAYS',
   'DIRECTORY_SYNC_ALERT_WEBHOOK',
   'DIRECTORY_SYNC_ALERT_WEBHOOK_SECRET',
@@ -134,6 +150,36 @@ for (const { label, path } of TEMPLATES) {
             'Ship it commented-out or =false.',
         )
       }
+    }
+  })
+}
+
+// DT-CLOSE-02B: DINGTALK_DELIVERY_RETENTION_DAYS is the ENABLE switch for the approval-card /
+// person delivery retention sweep (dingtalk-card-person-delivery-retention.ts
+// resolveDingTalkDeliveryRetentionConfig — a finite positive value is the ONLY thing that
+// flips `disabled` to false; unset/blank/non-numeric/<=0 stays disabled). It mirrors the
+// MUST_BE_OFF_IF_LIVE class above but with a stricter rule than "off": unlike a boolean
+// switch, THIS key's off-state is the EMPTY string specifically — any live non-empty value
+// (including '0' or a negative number) is a template drift from the intended "ship it blank"
+// posture, and any live POSITIVE value silently auto-enables destructive/expiring behavior on
+// the next deploy that applies this template.
+for (const { label, path } of TEMPLATES) {
+  test(`${label} template ships DINGTALK_DELIVERY_RETENTION_DAYS blank when live (never auto-enabling card/person retention)`, () => {
+    const lines = readFileSync(path, 'utf8').split('\n')
+    const liveRe = /^\s*DINGTALK_DELIVERY_RETENTION_DAYS=(.*)$/
+    for (const line of lines) {
+      const m = line.match(liveRe)
+      if (!m) continue
+      const value = m[1].trim()
+      assert.equal(
+        value,
+        '',
+        `DINGTALK_DELIVERY_RETENTION_DAYS is shipped LIVE with value '${value}' in ${path} — ` +
+          'a positive value auto-ENABLES the approval-card/person delivery retention sweep ' +
+          '(dingtalk_approval_card_deliveries + dingtalk_person_deliveries) on the next deploy ' +
+          'applying this template. Ship it commented-out or blank so it stays disabled-by-' +
+          'default until an operator explicitly opts in.',
+      )
     }
   })
 }

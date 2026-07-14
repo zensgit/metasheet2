@@ -33,12 +33,15 @@ from templates (the switches the code reads weren't in any `.env` template), and
 | **DT-CLOSE-04** | Switch-ruling ledger — every switch = explicitly-deferred or must-verify-enabled + rollback + owner; no unowned default-off | **#4241** | armed | Sonnet |
 | **DT-CLOSE-05** | Consolidated-MD status errata — #159 CLOSED, #4218/#4228 MERGED, #4176 superseded; reaffirm two-milestone split | **#4241** | ✅ merged | Sonnet |
 | **DT-CLOSE-01B** | *(owner review)* metrics-only downgrade — the check hard-depended on an undeployed Alertmanager+webhook topology (all 4 scheduled runs failed `curl (7) :9093`); soft-defer the topology + decouple the verdict from it; behavioral contract test (re-coupling reddens) | **#4253** | armed | me (Opus care) |
-| **DT-CLOSE-02B** | *(owner review)* retention correction — the docs conflated GROUP-webhook retention (`dingtalk_group_deliveries`) with approval-card retention; corrected templates/U11-b/ledger/MDs; filed the real gap (**no** `dingtalk_approval_card_deliveries` retention sweep exists); fixed the ledger's stale "in template?" column | **#4255** | this PR | me |
+| **DT-CLOSE-02B** | *(owner review)* retention correction — the docs conflated GROUP-webhook retention (`dingtalk_group_deliveries`) with approval-card retention; corrected templates/U11-b/ledger/MDs; a first pass also wrongly filed the already-implemented, disabled-by-default `DINGTALK_DELIVERY_RETENTION_*` card/person family (#4142) as a non-existent gap — corrected here; fixed the ledger's stale pre-#4240 "in template?" column | **#4255** | this PR | me |
 
 **Owner review (2026-07-13) — runtime-closeout is BLOCKED, not done.** Two findings: (1) the OAuth
 monitor was still failing post-#4236 because it required an undeployed alert topology → **DT-CLOSE-01B**;
-(2) the env contract wired GROUP-delivery retention but described it as approval-card retention, which is
-a distinct, *unimplemented* concern → **DT-CLOSE-02B**. Both are addressed here. The remaining
+(2) the env contract's DANGER comment mislabeled `DINGTALK_GROUP_DELIVERY_RETENTION_*` as
+approval-card retention when it only touches the group-webhook ledger; the actual approval-card/
+person family (`DINGTALK_DELIVERY_RETENTION_*`, #4142) is a **separate, already-implemented,
+disabled-by-default** control that the templates/ledger/docs failed to reference at all →
+**DT-CLOSE-02B**. Both are addressed here. The remaining
 closeout is genuinely owner/ops (assign the ledger owners, deploy the exact SHA, run U1–U13 + the
 real-callback anchor, record each switch's ruling) — only then does Hardening v1 become DONE and
 unlock Milestone-B's local-provider bootstrap.
@@ -65,7 +68,7 @@ unlock Milestone-B's local-provider bootstrap.
 
 **Switch posture (encoded conservatively, per owner):** deprovision + primary-dept inference + Stream
 stay **OFF** (each with its exact flip-precondition in the ledger); OAuth shared-state **must be ON** on
-multi-replica; the GROUP-delivery retention window sized for group-delivery diagnostic/audit needs (NOT an approval-SLA coupling — DT-CLOSE-02B corrected that; approval-card retention is a separate unimplemented gap); interactive-card Stream only after U1–U13 all
+multi-replica; the GROUP-delivery retention window sized for group-delivery diagnostic/audit needs (NOT an approval-SLA coupling — DT-CLOSE-02B corrected that; the separate approval-card/person `DINGTALK_DELIVERY_RETENTION_DAYS` family is already implemented but disabled by default — must be set BEFORE enabling interactive cards, see ledger §1.2); interactive-card Stream only after U1–U13 all
 green + the #4171 real-callback anchor proof.
 
 ## 4. Forward: milestone 2 (design landed, impl gated)

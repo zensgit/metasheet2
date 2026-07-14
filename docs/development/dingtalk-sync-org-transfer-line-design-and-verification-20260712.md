@@ -205,8 +205,13 @@ atomic single-transaction rebind, etc.). Those are acceptance criteria, not resu
   prefer **per-integration** over a global env.
 - `DINGTALK_OAUTH_REQUIRE_SHARED_STATE_STORE` — must be **on** + Redis-verified for
   multi-replica; single-replica may defer.
-- `DINGTALK_DELIVERY_RETENTION_DAYS` — set **before** enabling interactive cards; window
-  is sized for GROUP-delivery diagnostic/audit retention — NOT an approval-SLA coupling (DT-CLOSE-02B: the group sweep does not touch approval cards; approval-card retention is unimplemented, a separate gap).
+- `DINGTALK_DELIVERY_RETENTION_DAYS` — the approval-card/person delivery retention family
+  (`dingtalk-card-person-delivery-retention.ts`, #4142; sweeps `dingtalk_approval_card_deliveries`
+  + `dingtalk_person_deliveries`). **Disabled by default** — set to a positive integer (≥7,
+  floored) **before** enabling interactive cards, or those two ledgers grow unbounded. This is a
+  **separate control** from `DINGTALK_GROUP_DELIVERY_RETENTION_DAYS` (DT-CLOSE-02B correction:
+  that family only sweeps the GROUP-webhook ledger `dingtalk_group_deliveries`, sized for
+  diagnostic/audit needs — it never touches approval cards, and setting it does nothing here).
 - `DINGTALK_INTERACTIVE_CARD_STREAM_ENABLED` — stays **OFF** until U1–U13 pass **and** the
   #4171 real-callback anchor proof lands.
 - The user/list primary-source flip is deferred behind a **2,000-user-tenant benchmark** of
