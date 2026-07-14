@@ -557,7 +557,7 @@ const HierarchyNode: ReturnType<typeof defineComponent> = defineComponent({
 .meta-hierarchy__title:hover { color: #2563eb; }
 .meta-hierarchy__comment-btn { display: inline-flex; align-items: center; justify-content: center; min-height: 28px; padding: 2px 8px; border: 1px solid #d8e1ee; border-radius: 999px; background: #fff; cursor: pointer; color: #64748b; }
 .meta-hierarchy__comment-btn:hover { border-color: #93c5fd; background: #eff6ff; color: #2563eb; }
-.meta-hierarchy__comment-btn--active { border-color: #f59e0b; background: #fff7ed; color: #b45309; }
+.meta-hierarchy__comment-btn--active { border-color: var(--ms-color-comment-active-border); background: var(--ms-color-comment-active-bg); color: var(--ms-color-comment-active-text); }
 .meta-hierarchy__comment-btn--idle { border-color: #d8e1ee; background: #fff; color: #64748b; }
 .meta-hierarchy__child-btn { margin-right: 10px; padding: 4px 8px; border: 1px dashed #cbd5e1; border-radius: 6px; background: #fff; color: #475569; cursor: pointer; font-size: 12px; }
 .meta-hierarchy__child-btn:hover { border-color: #2563eb; color: #2563eb; }

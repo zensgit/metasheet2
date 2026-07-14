@@ -74,6 +74,7 @@ import { createPersonMemberResolver, personRestrictGroupIds, resolvePersonAssign
 import { resolveUserDisplayNames } from '../multitable/user-display'
 import { loadHistoryBatchSummaries, loadHistoryBatchDetail, estimateHistoryHasMore } from '../multitable/history-projection'
 import { reconstructRecordsAtT } from '../multitable/record-reconstructor'
+import { precheckSheetHistoryIntegrity } from '../multitable/history-integrity-precheck'
 import { hashPreviewChanges, hashScope, hashResurrectSet, hashDeleteSet, mintRestorePreviewIdentity, mintScopedRestorePreviewIdentity, verifyRestorePreviewIdentity, verifyScopedRestorePreviewIdentity, mintPitRevertPreviewIdentity, verifyPitRevertPreviewIdentity, mintPitResetPreviewIdentity, verifyPitResetPreviewIdentity, mintConfigRestorePreviewIdentity, verifyConfigRestorePreviewIdentity, hashLossSummary, type UncreatePlan, hashUncreatePlan, mintConfigUncreatePreviewIdentity, verifyConfigUncreatePreviewIdentity, type UndeletePlan, hashUndeletePlan, mintConfigUndeletePreviewIdentity, verifyConfigUndeletePreviewIdentity, hashPermissionGrant, mintConfigPermissionRevertPreviewIdentity, verifyConfigPermissionRevertPreviewIdentity } from '../multitable/restore-preview-identity'
 import {
   recordConfigRevision,
@@ -2956,6 +2957,7 @@ async function recalculateFormulaFields(
         }
         if (Object.keys(updates).length > 0) {
           // lock-exempt: system relation-aggregation materialization — derived value, no user actor (same posture as recalculateRecordFromData; a record lock is read-only to users, not system recompute).
+          // revision-exempt: relation-aggregation same-record materialization, no version bump — derived value.
           await query(
             'UPDATE meta_records SET data = data || $1::jsonb, updated_at = now() WHERE id = $2 AND sheet_id = $3',
             [JSON.stringify(updates), recordId, sheetId],
@@ -3852,6 +3854,7 @@ async function computeDependentLookupRollupRecords(
         }
         if (Object.keys(updates).length > 0) {
           // lock-exempt: system relation-aggregation fan-out materialization — derived value, no user actor (same posture as the same-record recompute write).
+          // revision-exempt: relation-aggregation fan-out materialization, no version bump — derived value.
           await query('UPDATE meta_records SET data = data || $1::jsonb, updated_at = now() WHERE id = $2 AND sheet_id = $3', [JSON.stringify(updates), recordId, sheetId])
           formulaDataByRecord.set(recordId, { ...(formulaDataByRecord.get(recordId) ?? {}), ...updates })
         }
@@ -5169,6 +5172,7 @@ async function ensurePeopleSheetPreset(query: QueryFn, baseId: string): Promise<
       }
       const existing = recordByUserId.get(user.id)
       if (!existing) {
+        // revision-exempt: internal people-directory sync (INSERT) — system sheet, mirror of `users`, regenerable.
         await query(
           `INSERT INTO meta_records (id, sheet_id, data, version)
            VALUES ($1, $2, $3::jsonb, 1)`,
@@ -5185,6 +5189,7 @@ async function ensurePeopleSheetPreset(query: QueryFn, baseId: string): Promise<
 
       if (changed) {
         // lock-exempt: internal people-directory sync — system sheet, not a user-facing record edit path.
+        // revision-exempt: internal people-directory sync (UPDATE) — system sheet, not a user-content edit.
         await query(
           `UPDATE meta_records
            SET data = $1::jsonb, version = version + 1, updated_at = now()
@@ -5803,6 +5808,8 @@ async function createSeededSheet(args: { sheetId: string; name: string; descript
     }
 
     for (const record of records) {
+      // revision-exempt: createSeededSheet template scaffold — hardcoded demo preset at sheet birth, not
+      // caller/user content (OD-6 §7a Bucket C).
       await query(
         `INSERT INTO meta_records (id, sheet_id, data, version)
          VALUES ($1, $2, $3::jsonb, $4)
@@ -6148,6 +6155,8 @@ async function dropFieldCascade(query: TxnQuery, opts: {
     if (!isUndefinedTableError(err, 'meta_links')) throw err
   }
   // lock-exempt: field-delete schema op — drops the deleted field's key sheet-wide; not a per-record user edit.
+  // revision-exempt: field-delete column strip — captured on the config channel (recordConfigRevision
+  // field/delete) + value/link tombstones, no per-record version bump (OD-6 §7a Bucket C).
   await query('UPDATE meta_records SET data = data - $1 WHERE sheet_id = $2', [fieldId, sheetId])
   const shiftedDel = ((await query('UPDATE meta_fields SET "order" = "order" - 1 WHERE sheet_id = $1 AND "order" > $2 RETURNING id, "order"', [sheetId, order])) as any).rows as Array<{ id: string; order: number }>
   await recordFieldOrderShifts(query, sheetId, shiftedDel.map((r) => ({ id: String(r.id), newOrder: Number(r.order) })), -1, configBatchId, actorId)
@@ -6423,8 +6432,8 @@ async function applyLossyRetypeCellRewrite(query: TxnQuery, opts: {
   // and `jsonb_set(data, path, NULL)` returns NULL for the WHOLE `data` column — a dropped cell would wipe the record.
   // A single batched statement (never a per-row round trip), matching the tombstone-capture module's discipline.
   const payload = changed.map((c) => ({ record_id: c.recordId, value: c.after ?? null }))
-  // lock-exempt: 4c-1 lossy retype revert — schema op rewriting the reverted field's key sheet-wide under the
-  // config-restore canManageFields gate (mirrors the field-delete column strip / field-undelete rehydration);
+  // lock-exempt: 4c-1 lossy retype revert — schema op rewriting the reverted field's key sheet-wide under the config-restore canManageFields gate (mirrors the field-delete column strip / field-undelete rehydration).
+  // revision-emitted: C5 history completeness — recordRecordRevision (one per changed cell) below, same txn.
   const rewritten = (await query(
     `UPDATE meta_records AS m
      SET data = jsonb_set(m.data, ARRAY[$2::text], COALESCE(item.value, 'null'::jsonb), true),
@@ -6515,8 +6524,15 @@ async function recreateFieldFromConfig(query: TxnQuery, opts: {
     // Values: only into records that do NOT already carry this key (never overwrite a value written after
     // this recreate — the recreate above just happened in THIS same transaction, so the only way a record
     // could already have the key is a value legitimately written since — this WHERE clause is the guard).
-    // lock-exempt: field-undelete schema op — rehydrates the recreated field's key sheet-wide (mirror of
-    // the field-delete drop at ~6116); not a per-record user edit, and NOT(data?key) never clobbers.
+    // OD-6 owner ruling (design-lock §0.5 row OD-6, 2026-07-13): this site MUST WRITE REVISION — the audit
+    // had flagged it debatable-EXEMPT (Bucket D), owner overrode to MUST-WRITE. NOT YET IMPLEMENTED: this
+    // UPDATE rehydrates real user cell values from tombstones (`data = data || jsonb_build_object(...)`)
+    // but bumps no `version` and calls no `recordRecordRevision` — the exact fingerprint of the bug class
+    // this guard exists to catch. Out of scope for D-1c's five slices (A1-A8 — this is a field-op, not one
+    // of the eight); tracked as an explicit, named, non-silent gap, NOT a silent exemption — see
+    // KNOWN_REVISION_GAPS in multitable-revision-disposition-guard.guard.test.ts, pending its own rung.
+    // lock-exempt: field-undelete schema op — rehydrates the recreated field's key sheet-wide (mirror of the field-delete drop at ~6116); not a per-record user edit, and NOT(data?key) never clobbers (lock disposition only — see revision-pending below for the SEPARATE, still-open revision disposition).
+    // revision-pending: OD-6 owner-ruled MUST-WRITE, not yet implemented — tracked in KNOWN_REVISION_GAPS.
     await query(
       `UPDATE meta_records m
        SET data = data || jsonb_build_object($3::text, t.value)
@@ -9936,13 +9952,19 @@ export function univerMetaRouter(): Router {
   const computeSheetRevert = async (
     pool: ReturnType<typeof poolManager.get>, req: Request, sheetId: string, asOfIso: string,
     access: RevertSheetCaps['access'], capabilities: RevertSheetCaps['capabilities'],
-  ): Promise<null | SheetRevertTooLarge | { reverts: Array<{ recordId: string; diff: RecordChange[]; changesHash: string; version: number }>; resurrects: Array<{ recordId: string; snapshot: Record<string, unknown>; snapshotHash: string }>; undeleteCount: number; keptCreatedAfterT: number; createdAfterTIds: string[]; driftCount: number; patchContext: Awaited<ReturnType<typeof buildRecordPatchContext>> }> => {
+  ): Promise<null | SheetRevertTooLarge | { historyIncomplete: true } | { reverts: Array<{ recordId: string; diff: RecordChange[]; changesHash: string; version: number }>; resurrects: Array<{ recordId: string; snapshot: Record<string, unknown>; snapshotHash: string }>; undeleteCount: number; keptCreatedAfterT: number; createdAfterTIds: string[]; driftCount: number; patchContext: Awaited<ReturnType<typeof buildRecordPatchContext>> }> => {
     const asRec = (v: unknown): Record<string, unknown> => (v && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, unknown>) : {})
     const patchContext = await buildRecordPatchContext(req, pool.query.bind(pool), sheetId, access, capabilities)
     if (!patchContext) return null
     const { fieldById } = patchContext
     const recordCount = Number(((await pool.query('SELECT count(*)::int AS c FROM meta_records WHERE sheet_id = $1', [sheetId])).rows[0] as { c: number }).c)
     if (recordCount > SHEET_REVERT_MAX_RECORDS) return { tooLarge: true, recordCount, scope: 'live_sheet' } // D3/PIT-6 fail-closed before the full scan
+    // D-1c §0.6 HISTORY_INCOMPLETE (owner hard-lock, RATIFIED 2026-07-13): fail-closed integrity precheck,
+    // SHARED by preview and execute (both call this compute — the execute re-check is by construction, and it
+    // runs BEFORE the previewIdentity verification, which is revision-derived and blind to uncaptured writes).
+    // Refusal ⇒ no token minted, zero rows written.
+    const integrity = await precheckSheetHistoryIntegrity(pool.query.bind(pool), sheetId)
+    if (!integrity.ok) return { historyIncomplete: true }
     const rawTypeById = new Map<string, string>(((await pool.query('SELECT id, type FROM meta_fields WHERE sheet_id = $1', [sheetId])).rows as Array<{ id: string; type: unknown }>).map((r) => [String(r.id), String(r.type ?? '').trim().toLowerCase()]))
     const baseAllowed = await loadAllowedFieldIds(pool.query.bind(pool), sheetId, access.userId, capabilities)
     const allowed = await maskStoredRecordFieldIds(req, pool.query.bind(pool), sheetId, undefined, baseAllowed) // PIT-3 mask; NO reveal (PIT-7)
@@ -9999,6 +10021,7 @@ export function univerMetaRouter(): Router {
   type PitResetComputation =
     | null
     | { tooLarge: true; recordCount: number }
+    | { historyIncomplete: true }
     | { blocked: true; reason: 'denied' | 'forbidden' | 'schema_drift' | 'undelete_unsupported' }
     | {
         reverts: PitResetRevert[]
@@ -10016,6 +10039,12 @@ export function univerMetaRouter(): Router {
     const { fieldById, fieldPermissions } = patchContext
     const recordCount = Number(((await pool.query('SELECT count(*)::int AS c FROM meta_records WHERE sheet_id = $1', [sheetId])).rows[0] as { c: number }).c)
     if (recordCount > SHEET_REVERT_MAX_RECORDS) return { tooLarge: true, recordCount }
+    // D-1c §0.6 HISTORY_INCOMPLETE (owner hard-lock, RATIFIED 2026-07-13): shared fail-closed precheck — same
+    // doctrine as computeSheetRevert above. Rule 3 is load-bearing HERE: the delete-set loop below pushes live
+    // rows absent from the reconstruction into `deletes`, so an uncaptured-CREATE row would be silently
+    // destroyed if the precheck did not enumerate the LIVE row set first.
+    const integrity = await precheckSheetHistoryIntegrity(pool.query.bind(pool), sheetId)
+    if (!integrity.ok) return { historyIncomplete: true }
     const rawTypeById = new Map<string, string>(((await pool.query('SELECT id, type FROM meta_fields WHERE sheet_id = $1', [sheetId])).rows as Array<{ id: string; type: unknown }>).map((r) => [String(r.id), String(r.type ?? '').trim().toLowerCase()]))
     const baseAllowed = await loadAllowedFieldIds(pool.query.bind(pool), sheetId, access.userId, capabilities)
     const allowed = await maskStoredRecordFieldIds(req, pool.query.bind(pool), sheetId, undefined, baseAllowed)
@@ -10056,6 +10085,17 @@ export function univerMetaRouter(): Router {
     return { reverts, deletes, patchContext }
   }
 
+  // D-1c §0.6 unified refusal (rule 1): one values-free 409 for all four routes (revert/reset × preview/execute).
+  // Deliberately carries NO record ids and NO counts — the refusal must not become a denied-record existence
+  // oracle — and, being an error response, carries no previewIdentity: refusal ⇒ no execute token exists.
+  const sendHistoryIncomplete = (res: Response) => res.status(409).json({
+    ok: false,
+    error: {
+      code: 'HISTORY_INCOMPLETE',
+      message: 'Record history for this sheet is incomplete or inconsistent with its live data; destructive recovery is refused and nothing was written. History must be trustworthy before revert/reset can run.',
+    },
+  })
+
   const sendPitResetBlocked = (res: Response, reason: 'denied' | 'forbidden' | 'schema_drift' | 'undelete_unsupported') => {
     if (reason === 'schema_drift' || reason === 'undelete_unsupported') {
       return res.status(422).json({ ok: false, error: { code: 'RESET_UNSUPPORTED', message: 'Reset-to-T cannot be executed for this sheet without a separate schema-drift/undelete slice; nothing written.' } })
@@ -10084,6 +10124,7 @@ export function univerMetaRouter(): Router {
       const computed = await computeSheetRevert(pool, req, sheetId, asOfIso, access, capabilities)
       if (!computed) return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
       if ('tooLarge' in computed) return res.status(413).json({ ok: false, error: { code: 'SHEET_TOO_LARGE', message: sheetRevertTooLargeMessage(computed) } })
+      if ('historyIncomplete' in computed) return sendHistoryIncomplete(res) // D-1c §0.6 — refused BEFORE any token is minted
       const { reverts, resurrects, undeleteCount, keptCreatedAfterT, driftCount } = computed
       const previewIdentity = (reverts.length > 0 || resurrects.length > 0)
         ? mintPitRevertPreviewIdentity({
@@ -10123,6 +10164,10 @@ export function univerMetaRouter(): Router {
       const computed = await computeSheetRevert(pool, req, sheetId, asOfIso, access, capabilities)
       if (!computed) return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
       if ('tooLarge' in computed) return res.status(413).json({ ok: false, error: { code: 'SHEET_TOO_LARGE', message: sheetRevertTooLargeMessage(computed) } })
+      // D-1c §0.6 rule 4 (TOCTOU): the execute re-check refuses HERE — before previewIdentity verification and
+      // before any transaction — so a preview that passed never licenses an execute over history that has since
+      // gone untrustworthy. Zero writes on this path.
+      if ('historyIncomplete' in computed) return sendHistoryIncomplete(res)
       const { reverts, resurrects, patchContext } = computed
       // T8-1 undelete gate: a revert that would resurrect deleted records needs the default-off flag, the
       // canDeleteRecord floor (NEVER canEditRecord — record resurrection, not edit), and a typed confirm:'undelete'.
@@ -10165,6 +10210,7 @@ export function univerMetaRouter(): Router {
               const occupied = await query('SELECT 1 FROM meta_records WHERE id = $1 FOR UPDATE', [r.recordId])
               if ((occupied.rows as unknown[]).length > 0) throw new RecordServiceRestoreConflictError(`Record id is occupied, cannot undelete: ${r.recordId}`)
               try {
+                // revision-emitted: PIT resurrect — recordRecordRevision(action:'create') below, same txn.
                 await query('INSERT INTO meta_records (id, sheet_id, data, version, created_by, modified_by, created_at, updated_at) VALUES ($1, $2, $3::jsonb, 1, $4, $4, now(), now())', [r.recordId, sheetId, JSON.stringify(r.snapshot), undeleteActorId])
               } catch (e) {
                 if ((e as { code?: string })?.code === '23505') throw new RecordServiceRestoreConflictError(`Record id is occupied, cannot undelete: ${r.recordId}`)
@@ -10298,6 +10344,7 @@ export function univerMetaRouter(): Router {
       const computed = await computeSheetReset(pool, req, sheetId, asOfIso, access, capabilities)
       if (!computed) return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
       if ('tooLarge' in computed) return res.status(413).json({ ok: false, error: { code: 'SHEET_TOO_LARGE', message: `This sheet has ${computed.recordCount} records, above the ${SHEET_REVERT_MAX_RECORDS}-record reset ceiling; a sheet-wide reset of this size is refused.` } })
+      if ('historyIncomplete' in computed) return sendHistoryIncomplete(res) // D-1c §0.6 — refused BEFORE any token is minted
       if ('blocked' in computed) return sendPitResetBlocked(res, computed.reason)
       const { reverts, deletes } = computed
       const previewIdentity = (reverts.length > 0 || deletes.length > 0)
@@ -10340,6 +10387,9 @@ export function univerMetaRouter(): Router {
       const computed = await computeSheetReset(pool, req, sheetId, asOfIso, access, capabilities) // RE-ENUMERATE reverts + delete-set
       if (!computed) return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
       if ('tooLarge' in computed) return res.status(413).json({ ok: false, error: { code: 'SHEET_TOO_LARGE', message: `This sheet has ${computed.recordCount} records, above the ${SHEET_REVERT_MAX_RECORDS}-record reset ceiling; a sheet-wide reset of this size is refused.` } })
+      // D-1c §0.6 rule 4 (TOCTOU): execute re-check — refused before previewIdentity verification and before
+      // the destructive transaction. Zero writes on this path.
+      if ('historyIncomplete' in computed) return sendHistoryIncomplete(res)
       if ('blocked' in computed) return sendPitResetBlocked(res, computed.reason)
       const { reverts, deletes, patchContext } = computed
       // Verify the signed reset identity against the RE-ENUMERATED reverts AND delete-set. A record created between
@@ -10391,6 +10441,7 @@ export function univerMetaRouter(): Router {
             }
             const updateRes = unsetIds.length > 0
               // lock-guarded: PIT Reset reverts in one transaction after ensureRecordNotLocked above.
+              // revision-emitted: PIT reset revert unset+set — recordRecordRevision below, same txn.
               ? await query(
                   `UPDATE meta_records
                      SET data = (data - $5::text[]) || $1::jsonb, updated_at = now(), version = version + 1, modified_by = $4
@@ -10399,6 +10450,7 @@ export function univerMetaRouter(): Router {
                   [JSON.stringify(patch), sheetId, candidate.recordId, actorId, unsetIds],
                 )
               // lock-guarded: PIT Reset reverts in one transaction after ensureRecordNotLocked above.
+              // revision-emitted: PIT reset revert set-only — recordRecordRevision below, same txn.
               : await query(
                   `UPDATE meta_records
                      SET data = data || $1::jsonb, updated_at = now(), version = version + 1, modified_by = $4
@@ -10525,6 +10577,7 @@ export function univerMetaRouter(): Router {
               )
             }
             // lock-guarded: PIT Reset deletes in the same transaction after ensureRecordNotLocked above.
+            // revision-emitted: PIT reset delete — recordRecordRevision(action:'delete') below, same txn.
             await query('DELETE FROM meta_records WHERE sheet_id = $1 AND id = $2', [sheetId, candidate.recordId])
             deletedRecordIds.push(candidate.recordId)
           }
@@ -14419,14 +14472,54 @@ export function univerMetaRouter(): Router {
 
           if (Object.keys(patch).length > 0) {
             // lock-guarded: form-submit EDIT (B2) — ensureRecordNotLocked enforced just above.
+            // revision-emitted: D-1c slice ① (A1) — recordRecordRevision(action:'update', source:'public-form') below.
             const updateRes = await query(
               `UPDATE meta_records
                SET data = data || $1::jsonb, updated_at = now(), version = version + 1, modified_by = $4
                WHERE id = $2 AND sheet_id = $3
-               RETURNING version`,
+               RETURNING version, data`,
               [JSON.stringify(patch), recordId, view.sheetId, getRequestActorId(req)],
             )
+            // D-1c slice ① required fix (zero-row RETURNING fail-closed): the SELECT ... FOR UPDATE
+            // above already locked+confirmed this row exists within THIS transaction, so a concurrent
+            // DELETE/UPDATE from another transaction is blocked until we commit — this branch is not
+            // expected to be reachable in normal operation. Fail closed anyway, not open: if a future
+            // refactor ever drops that lock (or any other same-txn path removes the row), a zero-row
+            // UPDATE must NOT fall through and write a spurious `update` revision for a record that's
+            // no longer there. meta_record_revisions.record_id carries no FK — an unguarded write here
+            // would silently persist and could resurrect a deleted record via reconstructRecordsAtT.
+            if ((updateRes as any).rows.length === 0) {
+              throw new NotFoundError(`Record not found: ${recordId}`)
+            }
             nextVersion = Number((updateRes as any).rows[0]?.version ?? serverVersion)
+            // D-1c slice ① (form-submit EDIT = A1, ratified design-lock 2026-07-13, OD-1..OD-3): this
+            // UPDATE previously mutated meta_records with NO revision — reconstructRecordsAtT (the PIT
+            // view / revert / reset primitive) derives existence+data PURELY from meta_record_revisions,
+            // so it kept returning the pre-edit row forever, and a sheet revert/reset to a T after this
+            // edit would silently overwrite the member's edit with the stale pre-edit value (irrecoverably
+            // — no trash row, no prior revision, nothing). Link-field edits fold into this SAME UPDATE
+            // (`patch[fieldId] = ids` above, before the field-validation loop returns) and are therefore
+            // already inside `snapshot` below — the ids land in the ordinary `data` snapshot like any
+            // other cell (OD-4: in scope). Edge-level `meta_links` history is a SEPARATE, still-unsolved
+            // design-lock (OD-4) — this does not claim edge-level completeness.
+            // snapshot = the full post-merge row (RETURNING …, data), NOT the patch, mirroring the
+            // canonical bulk-PATCH shape (record-write-service.ts:998) — a naive `snapshot: patch` would
+            // silently truncate every multi-field record to just the edited fields.
+            // source='public-form' per OD-2 (the surface, not the actor's auth level — this branch
+            // happens to be authenticated-only, but the sibling CREATE branch below on the same form
+            // surface can be anonymous, so 'source' names the FORM SURFACE consistently for both).
+            // actorId carries getRequestActorId(req) verbatim (OD-3) — never fabricated.
+            await recordRecordRevision(query, {
+              sheetId: view.sheetId,
+              recordId,
+              version: nextVersion,
+              action: 'update',
+              source: 'public-form',
+              actorId: getRequestActorId(req),
+              changedFieldIds: Object.keys(patch),
+              patch,
+              snapshot: normalizeJson((updateRes as any).rows[0]?.data),
+            })
           } else {
             nextVersion = serverVersion
           }
@@ -14466,6 +14559,8 @@ export function univerMetaRouter(): Router {
         const latestFields = await loadFieldsForSheet(query, view.sheetId)
         Object.assign(patch, await allocateAutoNumberValues(query, view.sheetId, latestFields))
 
+        const createActorId = effectivePublicAccessAllowed && !access.userId ? null : getRequestActorId(req)
+        // revision-emitted: D-1c slice ① (A6) — recordRecordRevision(action:'create', source:'public-form') below.
         const insertRes = await query(
           `INSERT INTO meta_records (id, sheet_id, data, version, created_by, modified_by)
            VALUES ($1, $2, $3::jsonb, 1, $4, $4)
@@ -14474,7 +14569,7 @@ export function univerMetaRouter(): Router {
             resultRecordId,
             view.sheetId,
             JSON.stringify(patch),
-            effectivePublicAccessAllowed && !access.userId ? null : getRequestActorId(req),
+            createActorId,
           ],
         )
         resultRecordId = String((insertRes as any).rows[0]?.id ?? resultRecordId)
@@ -14490,6 +14585,30 @@ export function univerMetaRouter(): Router {
             )
           }
         }
+
+        // D-1c slice ① (form-submit CREATE = A6, ratified design-lock 2026-07-13, OD-1/OD-3; audit
+        // site A6): this INSERT previously created a brand-new meta_records row with NO revision —
+        // reconstructRecordsAtT derives record EXISTENCE purely from meta_record_revisions, so this
+        // record was invisible to it at every T, including "now". Worse than incomplete history: a
+        // Reset-to-T run at any T after this create could not tell "created after T" from "created
+        // before T but never captured", so `computeSheetReset` pushed it into the unconditional
+        // delete-set and Reset would DESTROY a record that legitimately existed at T (§0.5's corrected
+        // CREATE risk). snapshot=patch is the full row — a create's `data` IS the submitted+allocated
+        // patch (link ids already folded in via `patch[fieldId]=ids` above, same as the auto-number
+        // values just assigned). source='public-form' per OD-2 — unlike the EDIT branch, THIS branch is
+        // genuinely reachable by an anonymous public submitter, so the surface name is exactly accurate
+        // here. actorId=createActorId verbatim (OD-3): null on the anonymous path, never fabricated.
+        await recordRecordRevision(query, {
+          sheetId: view.sheetId,
+          recordId: resultRecordId,
+          version: nextVersion,
+          action: 'create',
+          source: 'public-form',
+          actorId: createActorId,
+          changedFieldIds: Object.keys(patch),
+          patch,
+          snapshot: patch,
+        })
       })
 
       const recordRes = await pool.query(
@@ -15689,20 +15808,60 @@ export function univerMetaRouter(): Router {
             const nextIds = currentIds.filter((id) => id !== attachmentId)
             if (nextIds.length !== currentIds.length) {
               // lock-guarded: attachment-delete record edit (B3) — ensureRecordNotLocked enforced before this txn.
+              // revision-emitted: D-1c slice ⑤ (A8) — recordRecordRevision(action:'update', source:'attachment') below.
               const updateRes = await query(
                 `UPDATE meta_records
                  SET data = data || $1::jsonb, updated_at = now(), version = version + 1, modified_by = $4
                  WHERE id = $2 AND sheet_id = $3
-                 RETURNING version`,
+                 RETURNING version, data`,
                 [JSON.stringify({ [fieldId]: nextIds }), recordId, sheetId, getRequestActorId(req)],
               )
+              // D-1c slice ⑤ required fix (zero-row RETURNING fail-closed — same family as slice ①'s
+              // form-submit EDIT branch: this route ALSO holds a `SELECT ... FOR UPDATE` lock on this
+              // exact row, in this same transaction, immediately above, so a concurrent DELETE/UPDATE
+              // from another transaction is blocked until we commit and this branch is not expected to
+              // be reachable in normal operation. Fail closed anyway: a zero-row UPDATE must NOT fall
+              // through and write a spurious `update` revision for a record that's no longer there — no
+              // FK on meta_record_revisions.record_id, so an unguarded write would silently persist and
+              // could resurrect a deleted record via reconstructRecordsAtT.
+              if ((updateRes as any).rows.length === 0) {
+                throw new NotFoundError(`Record not found: ${recordId}`)
+              }
+              const nextVersion = Number((updateRes.rows[0] as any)?.version ?? Number(recordRow?.version ?? 0) + 1)
               updatedRecordRealtimeScope = {
                 sheetId,
                 recordId,
                 fieldId,
-                version: Number((updateRes.rows[0] as any)?.version ?? Number(recordRow?.version ?? 0) + 1),
+                version: nextVersion,
                 patch: { [fieldId]: nextIds },
               }
+              // D-1c slice ⑤ (attachment-delete = A8, RATIFIED design-lock 2026-07-13, §0.5 OD-1..OD-3,
+              // §0/§7a site A8 — FINAL of the five write-site slices): this UPDATE strips the deleted
+              // attachment id out of the record's attachment-field cell — a real user-data edit — and
+              // previously wrote NO revision. reconstructRecordsAtT derives existence+data PURELY from
+              // meta_record_revisions, so it kept returning the PRE-strip value (including the deleted
+              // attachment id) forever, and a sheet revert/reset to a T after this strip would silently
+              // re-add the deleted attachment id back into the cell (irrecoverably — resurrecting a
+              // reference to now-purged binary/metadata). source='attachment' per OD-2 (owner ruled:
+              // attachment gets its OWN source, distinct from 'rest'/'public-form' — the write entry
+              // point is this endpoint itself). actorId=getRequestActorId(req) (OD-3 — already
+              // `string | null`, never fabricated; this route is not restricted to authenticated-only,
+              // so null is a real, legitimate case here, same as form-submit CREATE). snapshot = the
+              // FULL post-strip row (RETURNING …, data), NOT the patch — mirrors every other slice's
+              // merge-trap fix: the field being stripped may carry OTHER attachment ids, and every OTHER
+              // field's data must also be present, or a naive `snapshot: patch` would truncate the
+              // record to just this one field.
+              await recordRecordRevision(query, {
+                sheetId,
+                recordId,
+                version: nextVersion,
+                action: 'update',
+                source: 'attachment',
+                actorId: getRequestActorId(req),
+                changedFieldIds: [fieldId],
+                patch: { [fieldId]: nextIds },
+                snapshot: normalizeJson((updateRes.rows[0] as any)?.data),
+              })
             }
           }
         }
@@ -15742,6 +15901,11 @@ export function univerMetaRouter(): Router {
 
       return res.json({ ok: true, data: { deleted: attachmentId } })
     } catch (err) {
+      // D-1c slice ⑤: maps the transaction's zero-row RETURNING fail-closed NotFoundError to 404,
+      // mirroring the /views/:viewId/submit route's identical NotFoundError -> 404 handling (:14748-14750).
+      if (err instanceof NotFoundError) {
+        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: err.message } })
+      }
       const hint = getDbNotReadyMessage(err)
       if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
       console.error('[univer-meta] attachment delete failed:', err)
@@ -16257,6 +16421,7 @@ export function univerMetaRouter(): Router {
         }
         const lockedBy = actorId ?? access.userId
         // lock-mgmt: LOCK action — sets the lock columns (own canEditRecord authority above).
+        // revision-exempt: lock/unlock metadata-only — no `data` column touched, not a user-content edit.
         await pool.query(
           `UPDATE meta_records SET locked = true, locked_by = $2, locked_at = NOW(), version = version + 1, updated_at = NOW()
            WHERE id = $1 AND sheet_id = $3`,
@@ -16271,6 +16436,7 @@ export function univerMetaRouter(): Router {
           return sendForbidden(res, 'Not allowed to unlock this record')
         }
         // lock-mgmt: UNLOCK action — clears the lock columns (own canUnlock authority above).
+        // revision-exempt: lock/unlock metadata-only — no `data` column touched, not a user-content edit.
         await pool.query(
           `UPDATE meta_records SET locked = false, locked_by = NULL, locked_at = NULL, version = version + 1, updated_at = NOW()
            WHERE id = $1 AND sheet_id = $2`,

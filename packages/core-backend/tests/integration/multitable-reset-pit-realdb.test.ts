@@ -169,7 +169,12 @@ describeIfDatabase('multitable T8-2 Reset-to-T (DESTRUCTIVE, real DB)', () => {
     const E = `rec_rs_e_${TS}`
     await q('INSERT INTO meta_records (id, sheet_id, data, version) VALUES ($1,$2,$3::jsonb,1)', [E, SHEET, JSON.stringify({ [NAME]: 'sneaked-in' })]) // now post-T-created too
     const ex = await resetExecute({ asOf: T1, previewIdentity: pv.body?.data?.previewIdentity, confirm: 'reset' })
-    expect(ex.status).toBe(409); expect(ex.body?.error?.code).toBe('PREVIEW_IDENTITY_INVALID') // deleteScopeHash diverged
+    // §0.6 restore-marker: original PREVIEW_IDENTITY_INVALID assertion restores after the corresponding revision-slice lands
+    // E is a live row with ZERO revisions (an uncaptured create injected between preview and execute) — the
+    // D-1c §0.6 precheck refuses it FIRST. This is a real TOCTOU and §0.6 refusing is CORRECT: still 409,
+    // still zero writes; only the pinned error code changed from the identity-drift shape to the
+    // history-integrity shape.
+    expect(ex.status).toBe(409); expect(ex.body?.error?.code).toBe('HISTORY_INCOMPLETE')
     expect(await recordRow(D)).toBeTruthy() // D NOT deleted
     expect(await recordRow(E)).toBeTruthy() // E (never in the preview) NOT deleted — the load-bearing safety property
   })
@@ -178,7 +183,11 @@ describeIfDatabase('multitable T8-2 Reset-to-T (DESTRUCTIVE, real DB)', () => {
     const pv = await resetPreview() // D bound at version 1
     await q('UPDATE meta_records SET data = $2::jsonb, version = version + 1 WHERE id = $1', [D, JSON.stringify({ [NAME]: 'edited-after-preview', [SALARY]: 501 })])
     const ex = await resetExecute({ asOf: T1, previewIdentity: pv.body?.data?.previewIdentity, confirm: 'reset' })
-    expect(ex.status).toBe(409); expect(ex.body?.error?.code).toBe('PREVIEW_IDENTITY_INVALID')
+    // §0.6 restore-marker: original PREVIEW_IDENTITY_INVALID assertion restores after the corresponding revision-slice lands
+    // The raw UPDATE left D's live data disagreeing with its latest (only) revision snapshot — an uncaptured
+    // edit injected between preview and execute. The D-1c §0.6 precheck refuses it FIRST: real TOCTOU, §0.6
+    // refusing is CORRECT; still 409, still zero writes; only the pinned error code changed.
+    expect(ex.status).toBe(409); expect(ex.body?.error?.code).toBe('HISTORY_INCOMPLETE')
     expect((await recordRow(D))?.data?.[NAME]).toBe('edited-after-preview')
     for (const id of [A, B]) { const r = await recordRow(id); expect(r?.data?.[NAME]).toBe('new'); expect(r?.version).toBe(2) }
   })

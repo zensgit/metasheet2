@@ -503,6 +503,7 @@ export async function patchRecord(
   }
 
   // lock-guarded: plugin-SDK patchRecord (M1) — guardRecordNotLockedForPlugin(actor=null) rejected above.
+  // revision-emitted: D-1c slice ② (A2) — recordRecordRevision(action:'update', source:'plugin') @559.
   const updated = await query(
     `UPDATE meta_records
      SET data = $1::jsonb, version = version + 1, updated_at = now()
@@ -511,15 +512,67 @@ export async function patchRecord(
     [JSON.stringify(nextData), input.recordId, input.sheetId],
   )
 
+  // W0 slice ② required fix (concurrent-delete fail-closed — recycled from Draft #4216's P1 review):
+  // `existing` above was read via `getRecord` (a plain SELECT, no `FOR UPDATE`) and
+  // `guardRecordNotLockedForPlugin` likewise takes no row lock — so this UPDATE is the FIRST point in
+  // this function that actually locks the row, and a concurrent DELETE of this exact record IS reachable
+  // in the window between those reads and this statement (unlike the form-submit EDIT branch fixed in
+  // slice ①, which already holds a `SELECT ... FOR UPDATE` before its own UPDATE — no such lock exists
+  // here). Under READ COMMITTED, if another transaction deletes and commits this row while this UPDATE is
+  // blocked behind it, Postgres resumes the UPDATE against zero rows rather than erroring — the original
+  // code's `?? existing.version + 1` fallback SILENTLY SYNTHESIZED a version for that case and fell
+  // through to write a spurious `update` revision for a record that no longer exists. Because
+  // `meta_record_revisions.record_id` carries no FK (migration zzzz20260430172000), that spurious
+  // revision would persist forever and could RESURRECT the deleted record via `reconstructRecordsAtT`.
+  // Fail closed instead: a zero-row RETURNING throws here, before any revision is written and before
+  // `nextVersion` can be synthesized. Proven under genuine two-connection lock contention (not a sleep
+  // heuristic) by the concurrent-delete golden in the real-DB suite.
+  if ((updated.rows as unknown[]).length === 0) {
+    throw new MultitableRecordNotFoundError(`Record not found: ${input.recordId}`)
+  }
+
+  const version = Number((updated.rows as any[])[0]?.version ?? existing.version + 1)
+  const nextVersion = Number.isFinite(version) ? version : existing.version + 1
+
   if (linkUpdates.size > 0) {
     await replaceRecordLinks(query, input.recordId, linkUpdates)
   }
 
-  const version = Number((updated.rows as any[])[0]?.version ?? existing.version + 1)
+  // W0 slice ② (D-1c design-lock, RATIFIED 2026-07-13, §0.5 OD-1..OD-3, §0/§7a site A2 — audited &
+  // end-to-end reproduced in the lock's §3 "SIBLING plugin" repro at this exact site): this UPDATE
+  // mutated `data` and bumped `version` with NO `meta_record_revisions` row —
+  // `reconstructRecordsAtT` (record-reconstructor.ts:34) derives existence+data PURELY from revisions,
+  // so it kept returning the PRE-patch value at every T after this patch, forever (the "A2 PIT lie").
+  // Emitted in the SAME transaction as the UPDATE above — `index.ts` wraps every plugin-SDK
+  // `patchRecord` call in `poolManager.get().transaction(...)` (the SOLE production wiring, re-verified
+  // for THIS slice via the real `MetaSheetServer.createCoreAPI()` entry point, not assumed from D-1/D-2)
+  // — a failed revision INSERT rolls the UPDATE back too (no half-write).
+  // source='plugin' (OD-2 — names the WRITE ENTRY POINT). actorId=null (OD-3): the plugin lane threads no
+  // actor identity through this SDK boundary at all (`guardRecordNotLockedForPlugin` above already
+  // treats the caller as actor-less, mirroring this module's own delete path's `actorId: null`) — this is
+  // "no actor is available", not "a known actor was discarded"; never fabricate a system actor.
+  // snapshot=nextData: the FULL merged row (NOT the raw `patch`) — `nextData` is computed above as
+  // `{...existing.data, ...patch}` and is exactly what this UPDATE wrote into `data`
+  // (`SET data = $1::jsonb` with that same JSON string), so it is the true post-write value, not a
+  // re-read. A link-field write already lives inside it (`patch[fieldId] = ids`, buildNormalizedPatch
+  // above) — OD-4: the ids land in the ordinary `data` snapshot like any other cell; edge-level
+  // `meta_links` history remains a SEPARATE, still-unsolved design-lock, not claimed here.
+  await recordRecordRevision(query, {
+    sheetId: input.sheetId,
+    recordId: input.recordId,
+    version: nextVersion,
+    action: 'update',
+    source: 'plugin',
+    actorId: null,
+    changedFieldIds: Object.keys(patch),
+    patch,
+    snapshot: nextData,
+  })
+
   return {
     id: existing.id,
     sheetId: existing.sheetId,
-    version: Number.isFinite(version) ? version : existing.version + 1,
+    version: nextVersion,
     data: nextData,
     locked: existing.locked,
     lockedBy: existing.lockedBy,
@@ -542,6 +595,7 @@ export async function createRecord(
   }))))
 
   const recordId = `rec_${randomUUID()}`
+  // revision-emitted: D-1c slice ② (A5) — recordRecordRevision(action:'create', source:'plugin') @628.
   const inserted = await query(
     `INSERT INTO meta_records (id, sheet_id, data, version)
      VALUES ($1, $2, $3::jsonb, 1)
@@ -549,15 +603,46 @@ export async function createRecord(
     [recordId, input.sheetId, JSON.stringify(patch)],
   )
 
+  // Unlike `patchRecord`'s UPDATE (see the fail-closed comment there), a bare `INSERT ... RETURNING`
+  // with no `ON CONFLICT` clause cannot return zero rows without the statement itself throwing — there is
+  // no "concurrently deleted" analogue for a row that does not exist yet. No zero-row guard is added here
+  // (mirrors slice ①'s form-submit CREATE branch, which likewise added none) — a fabricated symmetry
+  // would be dead code, not a fix.
   if (linkUpdates.size > 0) {
     await replaceRecordLinks(query, recordId, linkUpdates)
   }
 
   const version = Number((inserted.rows as any[])[0]?.version ?? 1)
+  const nextVersion = Number.isFinite(version) ? version : 1
+
+  // W0 slice ② (D-1c design-lock, RATIFIED 2026-07-13, §0.5 OD-1/OD-3, §0/§7a site A5): this INSERT
+  // created a brand-new `meta_records` row with NO revision — `reconstructRecordsAtT` derives record
+  // EXISTENCE purely from `meta_record_revisions`, so the record was invisible to it at every T, and a
+  // Reset-to-T at any T after this create could not distinguish "created after T" from "created before T
+  // but never captured" — `computeSheetReset` would push it into the unconditional delete-set and DESTROY
+  // a record that legitimately existed at T (§0.5's corrected CREATE risk). Emitted in the SAME
+  // transaction as the INSERT above (`index.ts` wraps every plugin-SDK `createRecord` call in
+  // `poolManager.get().transaction(...)`, re-verified for THIS slice via the real
+  // `MetaSheetServer.createCoreAPI()` entry point). source='plugin' (OD-2). actorId=null (OD-3 — the
+  // plugin lane threads no actor identity through this SDK boundary; never fabricated). snapshot=patch:
+  // a create's `data` IS the submitted+allocated patch (link ids already folded in via
+  // `patch[fieldId]=ids` above, same as the auto-number values just assigned).
+  await recordRecordRevision(query, {
+    sheetId: input.sheetId,
+    recordId,
+    version: nextVersion,
+    action: 'create',
+    source: 'plugin',
+    actorId: null,
+    changedFieldIds: Object.keys(patch),
+    patch,
+    snapshot: patch,
+  })
+
   return {
     id: recordId,
     sheetId: input.sheetId,
-    version: Number.isFinite(version) ? version : 1,
+    version: nextVersion,
     data: patch,
   }
 }
@@ -680,6 +765,7 @@ async function deleteRecordWithRecoverability(
   // before EITHER branch is dispatched, so this DELETE carries the identical lock disposition as the
   // flag-off one below.
   // lock-guarded: plugin-SDK deleteRecord, D-2 flag-on path (M1) — guarded in `deleteRecord` above.
+  // revision-emitted: plugin delete, D-2 flag-on — recordRecordRevision(action:'delete') @650.
   const deleted = await query(
     `DELETE FROM meta_records
      WHERE id = $1 AND sheet_id = $2
@@ -751,6 +837,7 @@ export async function deleteRecord(
   await query('DELETE FROM meta_links WHERE record_id = $1 OR foreign_record_id = $1', [input.recordId])
 
   // lock-guarded: plugin-SDK deleteRecord (M1) — guardRecordNotLockedForPlugin(actor=null) rejected above.
+  // revision-emitted: plugin delete, D-1 flag-off — recordRecordRevision(action:'delete') @771.
   const deleted = await query(
     `DELETE FROM meta_records
      WHERE id = $1 AND sheet_id = $2
