@@ -52,11 +52,11 @@ on:
       - 'apps/web/src/services/integration/plmEmbedWriteToken.ts'
       - 'apps/web/tests/plm-embed-write-token.spec.ts'
       - 'apps/web/tests/plm-embed-read-token.spec.ts'
-      # Cut 3: the visible discussion write composer + its relay write service, and the composer
-      # integration spec (drives the composer through the real token client + a mocked relay).
-      - 'apps/web/src/components/plm/PlmEmbedDiscussionComposer.vue'
+      # Cut 3: the visible discussion panel (create + reply/resolve/reopen) + its relay write service, and the
+      # panel integration spec (drives the panel through the real token client + a route-aware mocked relay).
+      - 'apps/web/src/components/plm/PlmEmbedDiscussionPanel.vue'
       - 'apps/web/src/services/integration/plmEmbedDiscussionWrite.ts'
-      - 'apps/web/tests/plm-embed-discussion-composer.spec.ts'
+      - 'apps/web/tests/plm-embed-discussion-panel.spec.ts'
       # Server side of the same wire: response shapes these specs pin (config allowlist + context degrade).
       - 'packages/core-backend/src/routes/plm-embed.ts'
       # This guard itself.
@@ -105,9 +105,9 @@ jobs:
         # Five files. The filter is a substring match — it resolves to exactly
         # tests/plm-embed-bom-review.spec.ts, tests/plm-embed-service.spec.ts,
         # tests/plm-embed-write-token.spec.ts, tests/plm-embed-read-token.spec.ts, and
-        # tests/plm-embed-discussion-composer.spec.ts.
+        # tests/plm-embed-discussion-panel.spec.ts.
         # (This is an explicit enumeration, not a glob — a future spec file needs its own substring
         # added here or it silently never runs in CI. NOTE: 'plm-embed-read-token' as a substring
         # would also match a future 'plm-embed-read-token-foo.spec.ts'; that follows the same
         # convention as the other entries here.)
-        run: pnpm --filter @metasheet/web exec vitest run plm-embed-bom-review plm-embed-service plm-embed-write-token plm-embed-read-token plm-embed-discussion-composer --reporter=dot
+        run: pnpm --filter @metasheet/web exec vitest run plm-embed-bom-review plm-embed-service plm-embed-write-token plm-embed-read-token plm-embed-discussion-panel --reporter=dot
