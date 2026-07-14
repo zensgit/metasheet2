@@ -3,7 +3,7 @@
 **Date:** 2026-07-13 · **Status:** VERIFICATION + GAP-ANALYSIS + PLAN (not a completion declaration)
 **Scope:** the Global History / Time Machine "trustworthiness" gate (W0) and the corrected `HISTORY_INCOMPLETE` precheck (W0-1, PR #4250).
 
-> This document records **what is verified-landed on `main` today**, the **residual recovery-correctness risk that is still live**, and the **load-bearing conditions W0-1 must satisfy before it can be ratified**. Every claim below is anchored to code on `origin/main` (`file:line`) or to a runnable golden. It does **not** claim the Time Machine is finished; the remaining line is multi-week and partly owned by a parallel session (see §7).
+> This document records **what is verified-landed on `main` today**, the **residual recovery-correctness conditions that remain open**, and the **load-bearing conditions W0-1 must satisfy before it can be ratified**. Every claim below is anchored to code on `origin/main` (`file:line`) or to a runnable golden. It does **not** claim the Time Machine is finished; the remaining line is multi-week and partly owned by a parallel session (see §7).
 
 ---
 
@@ -29,15 +29,11 @@ The **8-path revision gap is substantially closed** and the first fail-closed pr
 
 ---
 
-## 2. Residual risk that is STILL LIVE on `main` (verified)
+## 2. The merged precheck (#4234) is a partial guard
 
-The merged precheck (#4234) is the **live-vs-latest (content, not version)** version. Verified in `history-integrity-precheck.ts`: it builds `latestByRecord` per record (`ORDER BY record_id, created_at DESC, version DESC, id DESC` `:125`), enumerates **live rows only** (`:135`), and diffs live `data` against that latest snapshot. Consequences, all confirmed:
+The precheck merged in #4234 is a **live-vs-latest (content, not version)** comparator (`history-integrity-precheck.ts`: `latestByRecord` per record `:125`, live-row enumeration `:135`, live `data` vs latest snapshot). It correctly refuses the cases it was specced for — polluted tail, zero-revision live row, live-row-after-delete — but by construction it does **not** yet cover the residual conditions enumerated in §3 (C1–C8): chain-shape holes, ordering under concurrency, deleted-record chains, and the check-vs-write boundary. Until those land it should be treated as a **partial** guard, not a complete one.
 
-1. **Healed-gap blind spot.** A record at `version = 3` with revisions at only v1 and v3 (v2 uncaptured) has live `data == v3 snapshot`, so the comparator **passes** it — but reconstructing to `T ∈ [v2, v3)` selects v1 (latest ≤ T), a state the record was never in. Revert/Reset then executes a **never-existed state**. Proven by construction (§6.1, golden reds returning 200 not 409).
-2. **Check→write race.** The execute-path precheck runs **before** the destructive transaction as separate READ COMMITTED queries (revert `:9951`, reset `:10031`), so a concurrent uncaptured write between check and write is not caught.
-3. **Revert-execute is default-ON.** `reset-execute` is gated by a master flag `PIT_RESET_ENABLED()` (`univer-meta.ts` reset route), but **base record-data `revert-execute` has no master gate** — only `canManageSheetAccess` + the insufficient precheck. So a sheet-admin can trigger (1)/(2) today. (Sub-classes — permission / field-retype / sheet-config revert, PIT-undelete — each have their own default-off flag; the base data revert does not.)
-
-**Interim mitigation option (owner call):** add a default-off master flag to `revert-execute` mirroring Reset's `PIT_RESET_ENABLED`, until W0-1 lands. This flips a currently-default-on route to off and will red existing revert tests unless they set the flag, so it is an owner decision, not a silent change.
+The specific residual windows, their reachability, and whether an interim operator-level gate is warranted ahead of W0-1 were provided to the maintainer **directly** (repo is public); this document keeps to the design-level conditions below.
 
 ---
 
@@ -88,7 +84,7 @@ The W0-1 direction (version-contiguity + trusted-since + same-txn re-check) is c
 
 ### 6.1 Healed-gap counterexample (durable — must become a fail-first test in the W0-1 branch)
 
-Preserved golden (was at `/tmp/r13-w0-healed-gap-golden.txt`; owner flagged `/tmp` is not persistent, so it is embedded here). A record at `version 3` with revisions at **only v1 and v3** (v2 uncaptured): live `data == v3`, so live-vs-latest **passes**, but `revert-preview` to `T1 ∈ (v1, v3)` must be refused `409 HISTORY_INCOMPLETE`. Against the merged #4234 code it returns **200** — the empirical proof the healed gap is live.
+Preserved golden (was at `/tmp/r13-w0-healed-gap-golden.txt`; owner flagged `/tmp` is not persistent, so it is embedded here) — this is the **W0-1 acceptance target**, not a report of a live exploit. A record at `version 3` with revisions at **only v1 and v3** (v2 uncaptured): live `data == v3`, so a live-vs-latest comparator **passes** it, but `revert-preview` to `T1 ∈ (v1, v3)` must be refused `409 HISTORY_INCOMPLETE`. W0-1 (contiguity, C1/C2/C5) must make this **green**; a live-vs-latest comparator alone does not.
 
 ```js
 describe('OWNER P1 healed-gap (design-flaw proof)', () => {
@@ -100,11 +96,11 @@ describe('OWNER P1 healed-gap (design-flaw proof)', () => {
     await rev(HG, 3, 'update', { [NAME]: 'hg-v3-healed', [SALARY]: 300 }, T2) // NO v2 — uncaptured mid-chain write
     await seedCtrl()
   })
-  test('reds today: revert-preview to a T inside the gap window is refused HISTORY_INCOMPLETE', async () => {
+  test('acceptance: revert-preview to a T inside the gap window is refused HISTORY_INCOMPLETE', async () => {
     expect((await recordRow(HG))?.version).toBe(3)
     expect(await revisionCount(HG)).toBe(2)          // version 3 but only 2 revisions ⇒ chain provably incomplete
     const res = await revertPreview(T1)              // T1 ∈ (v1@T0, v3@T2) — the gap window
-    expect(res.status).toBe(409)                     // trustworthy precheck refuses; #4234 returns 200 → REDS
+    expect(res.status).toBe(409)                     // W0-1 (contiguity) refuses; a live-vs-latest comparator alone does not
     expect(res.body?.error?.code).toBe('HISTORY_INCOMPLETE')
   })
 })
