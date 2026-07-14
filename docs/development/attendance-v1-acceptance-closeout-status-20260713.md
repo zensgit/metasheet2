@@ -18,11 +18,36 @@
   stamps, and closing #3317 / #189 + tagging a release. The harnesses and per-smoke runbooks all
   already exist (§3). This document is the runbook to execute them.
 
-## 1. Four-column ledger
+## 0a. Errata (2026-07-14, owner review findings)
 
-| 已交付 (code shipped to main) | 已验收 (independently verified) | 待验收 / vNext (pending owner-run acceptance) | 长期 OUT |
+1. **[P2] #3317 was mis-closed by this document's own PR.** #4243's body contained the literal
+   prose "close #3317 / close #189" inside its runbook sequence — GitHub parsed them as closing
+   keywords and auto-closed #3317 one second after merge (17:31:17Z), while this very document
+   states AE-4 / manual AE-3 / five smokes / residue=0 are NOT executed. #3317 has been
+   **reopened** with a mis-trigger record; both PR bodies' keywords are defused. Lesson: the
+   closing-keyword pattern fires anywhere in a body, prose included.
+2. **[P2] The original 长期-OUT column was stale.** S2 requirePhoto (#4016), S3 annual-accrual
+   scheduler (#4008), S4 WeCom channel (#4028), S6 bulk balance adjust (#4023) were ALL delivered
+   2026-07-10 with verification MDs, and E4 真机 was completed & closed (#3843, 2026-07-09).
+   The table below is corrected against the main tracker
+   (`attendance-dingtalk-benchmark-target-and-tracker-20260601.md`); genuinely-out items are only
+   S7 (owner-gated) and the non-WeCom notification channels.
+3. **[P3] #189 closure timing.** #189 was auto-closed at 15:59:57Z (1s after #4238's merge, same
+   keyword mis-trigger) — ~13 minutes BEFORE the proving strict-gate run 29265492036 started. The
+   evidence subsequently landed green (both run-twice artifacts: all five gates PASS,
+   owner-re-verified), so #189 stays closed on merit with a timing note on the issue.
+4. **Framing correction (owner):** the remaining acceptance items are NOT "physically impossible"
+   — the accurate statement is they require **owner authorization, credentials, and human
+   observation**, and must not be executed autonomously off a background hook. With explicit owner
+   authorization and a preserved login session, the deploy, the five smoke scripts, and the
+   in-browser AE-3 evidence run can all be executed in-session; credentials and release
+   permission remain with the owner.
+
+## 1. Four-column ledger — CORRECTED 2026-07-14 (see §0a errata)
+
+| 已交付 (code shipped to main) | 已验收 (independently verified) | 待验收 / vNext (pending owner-authorized acceptance) | 长期 OUT |
 |---|---|---|---|
-| #189 verify-flow override-modal fix (#4238); #4096 strict verifier gate; #4135 empty-worker guard; all five staging smoke harnesses + companion unit tests; AE-4/MP-6/HMR-5/RD/OT runbooks + design-locks | **#189 prod strict gate: 6/6 gates green on `491a6567c` (run 29265492036), Gate 4 ×2**; every smoke *harness* passes its own unit test in CI | **AE-4** result-edit staging smoke (`AE4_RESULT_EDIT_STAGING_SMOKE_PASS`) + **manual AE-3 modal browser evidence**; **RD-4/5**, **OT-bank v1-8**, **MP-6**, **HMR-5** staging smokes on one unified SHA; residue=0; close #3317; close #189; release tag | S2 requirePhoto; S3 annual-accrual scheduler; S4 SMS/企微 (external creds); S6 bulk quota; S7 approver resolver (A1-live gate); E4 真机 (#3843, DingTalk micro-app reg + env) |
+| #189 verify-flow override-modal fix (#4238); #4096 strict verifier gate; #4135 empty-worker guard; all five staging smoke harnesses + companion unit tests; AE-4/MP-6/HMR-5/RD/OT runbooks + design-locks; **S2 requirePhoto #4016 `0e118283b` · S3 annual-accrual scheduler #4008 `e837c508f` · S4 WeCom channel #4028 `fd242899c` · S6 bulk balance adjust #4023 `dbf23627a`** (each with its own verification MD, tracker §"能力补齐") | **#189 prod strict gate: 6/6 gates green on `491a6567c` (run 29265492036), Gate 4 ×2 — both run-twice artifacts owner-re-verified `playwrightProd: PASS`**; **E4 真机 done & closed (#3843, 2026-07-09; help page #3966)**; every smoke *harness* passes its own unit test in CI | **AE-4** result-edit staging smoke (`AE4_RESULT_EDIT_STAGING_SMOKE_PASS`) + **manual AE-3 modal browser evidence**; **RD-4/5**, **OT-bank v1-8**, **MP-6**, **HMR-5** staging smokes on one unified `DEPLOY_SHA` per the window bundle (`attendance-staging-window-bundle-20260702.md`); residue=0; strict-gate rerun on the release SHA; 关闭 issue-3317; release tag | S7 approver resolver (owner-gated on A1-live 手感); SMS / native push / email notification channels (tracker: 后续 channel,不进 C5 v1) |
 
 ## 2. #189 fix — verification evidence
 
@@ -95,20 +120,27 @@ up (LIKE-free) so residue stays 0.
 **Backfill (single source of truth):** record each PASS stamp in the tracker
 `attendance-dingtalk-benchmark-target-and-tracker-20260601.md` — one place, not scattered notes.
 
-## 4. Close-out gates (owner)
+## 4. Close-out sequence (owner-ruled 2026-07-14)
 
-- After all five smokes green **and** the manual AE-3 modal evidence captured **and** residue=0:
-  **close #3317**.
-- After #3317 + a re-confirm that the strict gate is still green on the release SHA: **close #189**
-  (kept distinct from #3317 — do not close either as a side effect of the other).
-- **Tag the release** on the unified SHA.
-- Convert this MD's "待验收" column to "已验收" only as each item actually passes.
+1. ✅ Reopen #3317, correct this document's ledger, defuse both PR bodies' closing keywords (§0a).
+2. Freeze one `DEPLOY_SHA` and deploy it (staging stack per the window bundle §2 — staging deploys
+   are operator-run over SSH; CI's deploy job targets the prod-track stack only).
+3. Serially run AE-4 → RD-4/5 → OT-bank v1-8 → MP-6 → HMR-5 per
+   `attendance-staging-window-bundle-20260702.md` §4 (one smoke fully done — settings restored &
+   verified — before the next starts; a failed restore blocks the window).
+4. Complete the AE-3 modal manual evidence in the in-session browser (screenshots), backfill every
+   PASS stamp into the tracker, confirm unified residue=0.
+5. Rerun the strict gate on the same release SHA, update the final verification MD, 关闭
+   issue-3317, and tag the release.
 
-## 5. Explicitly NOT done autonomously — and why
+Convert this MD's "待验收" column to "已验收" only as each item actually passes.
+
+## 5. Why these were not executed autonomously (framing per §0a.4)
 
 - **Unified-SHA deploy** — touches live infra, owner-gated per the tracker ("触发前确认"). Not needed to
   prove #189 (that was redeploy-independent); needed only to give the five smokes one common build.
 - **Running the five staging smokes** — need real staging/prod admin credentials + a deployed target.
-- **Manual AE-3 modal browser evidence** — a human browser probe; no automation can substitute.
+- **Manual AE-3 modal browser evidence** — requires a real logged-in browser session and human-
+  reviewable screenshots; executable in-session once the owner provides/preserves the login state.
 - **Closing #189 / #3317 and tagging the release** — owner decisions; the tag rides on the smoke
   sequence. An automated Stop-hook prompt is not owner authorization to cross any of these gates.
