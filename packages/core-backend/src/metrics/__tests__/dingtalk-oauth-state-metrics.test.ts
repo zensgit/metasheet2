@@ -21,6 +21,7 @@ import { beforeEach, describe, expect, it } from 'vitest'
 import { installMetrics } from '../metrics'
 import {
   __resetDingTalkOAuthStateStoreForTests,
+  DingTalkOAuthStateStoreUnavailableError,
   generateState,
   validateState,
 } from '../../auth/dingtalk-oauth'
@@ -109,9 +110,39 @@ describe('DingTalk OAuth state metrics (real registry + real endpoint)', () => {
       line.startsWith(`${FALLBACK_METRIC}{operation="write"}`))
     expect(fallbackWriteLine).toBeDefined()
     expect(Number(fallbackWriteLine?.trim().split(' ').pop())).toBeGreaterThanOrEqual(1)
+    // The validate side consulted memory for the same reason (no shared store) — the
+    // degradation signal must cover both directions, not just the write.
+    const fallbackValidateLine = fallbackLines.find((line) =>
+      line.startsWith(`${FALLBACK_METRIC}{operation="validate"}`))
+    expect(fallbackValidateLine).toBeDefined()
+    expect(Number(fallbackValidateLine?.trim().split(' ').pop())).toBeGreaterThanOrEqual(1)
 
     // Negative control: the scraped metrics body must never contain the raw state UUID —
     // labels are the fixed 'operation'/'result' enums only, never state values or user data.
     expect(res.text).not.toContain(state)
+  })
+
+  it('increments write/error and validate/error when a shared state store is required but unavailable', async () => {
+    // Shared-required mode with no Redis configured: generateState() must fail closed
+    // (throw) and validateState() must refuse — and BOTH must leave an error sample
+    // behind, so a real multi-replica store outage is visible in /metrics/prom instead
+    // of only in logs. These are the branches the stability gate cannot exercise live.
+    await __resetDingTalkOAuthStateStoreForTests()
+    process.env.DINGTALK_OAUTH_REQUIRE_SHARED_STATE_STORE = 'true'
+
+    await expect(generateState()).rejects.toThrow(DingTalkOAuthStateStoreUnavailableError)
+    const refusal = await validateState('not-a-real-state')
+    expect(refusal.valid).toBe(false)
+
+    const res = await request(buildApp()).get('/metrics/prom')
+    expect(res.status).toBe(200)
+
+    const operationLines = sampleLinesStartingWith(res.text, OPERATIONS_METRIC)
+    const writeErrorLine = operationLines.find((line) =>
+      line.startsWith(`${OPERATIONS_METRIC}{operation="write",result="error"}`))
+    const validateErrorLine = operationLines.find((line) =>
+      line.startsWith(`${OPERATIONS_METRIC}{operation="validate",result="error"}`))
+    expect(Number(writeErrorLine?.trim().split(' ').pop())).toBeGreaterThanOrEqual(1)
+    expect(Number(validateErrorLine?.trim().split(' ').pop())).toBeGreaterThanOrEqual(1)
   })
 })
