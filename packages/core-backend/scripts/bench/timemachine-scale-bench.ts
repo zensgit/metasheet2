@@ -13,12 +13,43 @@
  *      (dedicated throwaway sheets), wall time + write counts
  *   6. table/index stats for meta_record_revisions, plus EXPLAIN (ANALYZE, BUFFERS) at the 10k tier
  *
- * Every measured query/route is exercised TWICE per run: once with the "§4 candidate" composite
- * index `idx_meta_record_revisions_sheet_record_created_version_id (sheet_id, record_id, created_at,
- * version, id)` ABSENT (this is main-parity — that index is NOT in any migration on origin/main; see
- * the results MD for its provenance) and once with it CREATED. The index is dropped at the start of
- * the run and unconditionally recreated in a `finally` block so a crash cannot leave the shared
- * scratch DB in a worse state than it was found in.
+ * Every measured query/route is exercised TWICE per run: once with a harness-OWNED composite index
+ * (see "index safety" below) ABSENT and once with it CREATED, to compare against the shape #4262 §4
+ * proposes (`(sheet_id, record_id, created_at, version, id)`).
+ *
+ * ── SAFETY (read before running — this harness performs REAL destructive writes) ──────────────────
+ * This is not a read-only tool: it runs real revert-execute / reset-execute HTTP calls, mass
+ * INSERT/DELETE of synthetic rows, and CREATE/DROP INDEX DDL. A hard, fail-closed preflight guard
+ * (see `preflightGuard()` below) runs BEFORE any database connection is used and refuses to proceed
+ * unless ALL THREE of the following are explicitly satisfied:
+ *   1. `BENCH_ALLOW_DESTRUCTIVE=1` is set (first opt-in — acknowledges this is destructive).
+ *   2. `DATABASE_URL`'s host is `localhost` / `127.0.0.1` / `::1`, OR `BENCH_ALLOW_REMOTE_DB=1` is
+ *      set (second, independent opt-in required to point this at any non-local host).
+ *   3. `DATABASE_URL`'s database name matches `/bench|test/i`, OR `BENCH_ALLOW_NONSTANDARD_DB_NAME=1`
+ *      is set (third, independent opt-in required to point this at a database that doesn't look like
+ *      a disposable bench/test database).
+ * Any of the three failing refuses with `process.exit(2)` and a clear message, before a single query
+ * runs. There is no scenario in which this harness reaches a write with any of the three unmet.
+ *
+ * **Index safety:** the harness never touches any pre-existing, non-harness-owned database object
+ * (specifically: it never DROPs or CREATEs #4262 §4's real candidate index name — see
+ * `REAL_CANDIDATE_INDEX_NAME` below, checked read-only, informationally, for context only — never via
+ * DDL). For its own "with index" comparison pass it creates and drops a SEPARATE index under a
+ * `bench_`-prefixed, `BENCH_RUN_ID`-namespaced name that it owns outright (see `BENCH_INDEX_NAME`) —
+ * safe to create/drop freely because no other process or migration can legitimately own an object
+ * under that name.
+ *
+ * **Cleanup:** all seeding (sheets/records/revisions/links/trash rows) and the harness-owned bench
+ * index happen inside ONE outermost `try { ... } finally { ... }` in `main()`, so a mid-run exception
+ * anywhere in the seed/measure/execute pipeline still runs cleanup — seeded data cannot be stranded by
+ * a crash partway through. Every sheet id destined to be seeded is reserved into the cleanup list
+ * BEFORE its seed call runs (not after it returns), so even a crash mid-seed of one tier still cleans
+ * up whatever that tier's seed call had already written. Cleanup is idempotent (deleting rows/ids that
+ * were never written, or were already deleted by an earlier cleanup pass, is a no-op) and strictly
+ * scoped to this run's own `BENCH_RUN_ID`-namespaced sheet/base/user ids — it never touches any object
+ * this harness did not itself create. (Note: this defends against a thrown/caught exception mid-run,
+ * not an unrecoverable OS-level kill/power-loss — no userspace `finally` can run after that; the
+ * verification for this PR simulates the former via `BENCH_INJECT_FAULT`, below.)
  *
  * Auth: this harness builds the multitable router in-process and injects `req.user` directly (the
  * exact fixture pattern the repo's own `multitable-*-realdb.test.ts` suite uses) rather than driving a
@@ -28,18 +59,26 @@
  *
  * Measurement-only: seeds/measures/cleans up its own throwaway sheets (ids namespaced by `BENCH_RUN_ID`);
  * makes NO change to runtime source; the two default-off recovery flags are set in THIS PROCESS's env
- * only (never touches any real deployment). NOT wired into CI — this is a load benchmark, run by hand.
+ * only. NOT wired into CI — this is a load benchmark, run by hand, gated behind the preflight above.
  *
  * Usage:
  *   DATABASE_URL=postgresql://postgres:pw@localhost:55888/metasheet_test \
+ *   BENCH_ALLOW_DESTRUCTIVE=1 \
  *     npx tsx packages/core-backend/scripts/bench/timemachine-scale-bench.ts
  *
  * Env knobs:
+ *   BENCH_ALLOW_DESTRUCTIVE=1          REQUIRED — first opt-in, see SAFETY above.
+ *   BENCH_ALLOW_REMOTE_DB=1            required only if DATABASE_URL's host isn't local, see SAFETY above.
+ *   BENCH_ALLOW_NONSTANDARD_DB_NAME=1  required only if the db name doesn't match /bench|test/i, see SAFETY above.
  *   BENCH_TIERS         comma-separated record counts (default "1000,5000,10000,50000")
  *   BENCH_ITERS         override the loop-iteration count for EVERY tier (default: scaled per tier)
  *   BENCH_RUN_ID        override the run id used to namespace all seeded ids (default: Date.now())
  *   BENCH_KEEP_DATA=1   skip cleanup at the end (for post-mortem inspection)
  *   BENCH_SKIP_INDEX_CMP=1  skip the drop/recreate index comparison pass (baseline-only run)
+ *   BENCH_INJECT_FAULT=1  TESTING HOOK ONLY: throws a synthetic error after seeding + destructive
+ *     execute + bench-index creation (requires BENCH_SKIP_INDEX_CMP to be unset), to prove the
+ *     outermost try/finally still cleans up both seeded rows AND the harness-owned index on a
+ *     mid-run crash. Never set this in a real measurement run.
  */
 import { performance } from 'node:perf_hooks'
 import express, { type Express } from 'express'
@@ -51,17 +90,65 @@ import { precheckSheetHistoryIntegrity } from '../../src/multitable/history-inte
 import { univerMetaRouter } from '../../src/routes/univer-meta'
 
 // ---------------------------------------------------------------------------------------------
-// Env (benchmark-process-only; never touches a real deployment)
+// Preflight guard — MUST run, and MUST refuse where warranted, before any DB connection is used.
+// See the "SAFETY" section of the header comment above for the exact three checks.
+// ---------------------------------------------------------------------------------------------
+function parseDatabaseUrlOrExit(raw: string): { host: string; dbName: string } {
+  try {
+    const u = new URL(raw)
+    return { host: u.hostname, dbName: u.pathname.replace(/^\//, '') }
+  } catch {
+    console.error(`FATAL: DATABASE_URL is not a parseable URL: ${raw}`)
+    process.exit(2)
+  }
+}
+
+const LOCAL_DB_HOSTS = new Set(['localhost', '127.0.0.1', '::1', '[::1]'])
+
+function preflightGuard(): void {
+  const rawUrl = process.env.DATABASE_URL
+  if (!rawUrl) {
+    console.error('FATAL: DATABASE_URL is required (see script header for the expected local scratch PG URL).')
+    process.exit(2)
+  }
+  if (process.env.BENCH_ALLOW_DESTRUCTIVE !== '1') {
+    console.error(
+      'FATAL: this harness performs REAL destructive operations against DATABASE_URL — revert-execute / ' +
+        'reset-execute (one real run each), CREATE/DROP INDEX (harness-owned index only), and mass ' +
+        'INSERT/DELETE of synthetic rows. Refusing to run without an explicit opt-in.\n' +
+        'Set BENCH_ALLOW_DESTRUCTIVE=1 to proceed.',
+    )
+    process.exit(2)
+  }
+  const { host, dbName } = parseDatabaseUrlOrExit(rawUrl)
+  if (!LOCAL_DB_HOSTS.has(host) && process.env.BENCH_ALLOW_REMOTE_DB !== '1') {
+    console.error(
+      `FATAL: DATABASE_URL host "${host}" is not localhost/127.0.0.1/::1 — refusing to run destructive ` +
+        'operations against a non-local database.\n' +
+        'Set BENCH_ALLOW_REMOTE_DB=1 to explicitly double-opt-in to a remote target.',
+    )
+    process.exit(2)
+  }
+  if (!/bench|test/i.test(dbName) && process.env.BENCH_ALLOW_NONSTANDARD_DB_NAME !== '1') {
+    console.error(
+      `FATAL: database name "${dbName}" does not match /bench|test/i — refusing to run against what looks ` +
+        'like a real deployment database.\n' +
+        'Set BENCH_ALLOW_NONSTANDARD_DB_NAME=1 to explicitly triple-opt-in and override this check.',
+    )
+    process.exit(2)
+  }
+  console.log(`[preflight] OK — host="${host}" db="${dbName}" (all required opt-ins present; refusing otherwise).`)
+}
+
+preflightGuard()
+
+// ---------------------------------------------------------------------------------------------
+// Env (benchmark-process-only)
 // ---------------------------------------------------------------------------------------------
 process.env.MULTITABLE_ENABLE_SHEET_REVERT = process.env.MULTITABLE_ENABLE_SHEET_REVERT || 'true'
 process.env.MULTITABLE_ENABLE_PIT_RESET = process.env.MULTITABLE_ENABLE_PIT_RESET || 'true'
 process.env.RBAC_TOKEN_TRUST = process.env.RBAC_TOKEN_TRUST || 'true'
 delete process.env.MULTITABLE_META_REVISION_RETENTION_ENABLED // must stay OFF or reset-preview 409s (RESET_RETENTION_CONFLICT)
-
-if (!process.env.DATABASE_URL) {
-  console.error('FATAL: DATABASE_URL is required (see script header for the expected local scratch PG URL).')
-  process.exit(2)
-}
 
 const RUN_ID = process.env.BENCH_RUN_ID || `${Date.now()}`
 const TIERS = (process.env.BENCH_TIERS ? process.env.BENCH_TIERS.split(',').map(Number) : [1000, 5000, 10000, 50000]).filter(
@@ -388,18 +475,31 @@ async function explain(sql: string, params: unknown[]): Promise<string> {
 }
 
 // ---------------------------------------------------------------------------------------------
-// index drop/create (the §4 candidate index)
+// index handling
+//
+// SAFETY (P1-2 fix): this harness must NEVER drop/create a pre-existing, non-harness-owned database
+// object — doing so on a shared DB is a mutation, not a benchmark. REAL_CANDIDATE_INDEX_NAME below is
+// #4262 §4's actual proposed index name; it is checked READ-ONLY (a SELECT against pg_indexes, purely
+// informational) and is NEVER passed to DROP/CREATE anywhere in this file. For the "with index vs
+// without" comparison pass, the harness instead owns a SEPARATE index under a `bench_`-prefixed,
+// BENCH_RUN_ID-namespaced name (BENCH_INDEX_NAME) of the identical column shape — safe to create/drop
+// freely because no migration or other process can legitimately hold that name. This measures the same
+// query-planner effect (index column shape, not index name, is what the planner reasons about) without
+// ever mutating anything the harness didn't itself create.
 // ---------------------------------------------------------------------------------------------
-const CANDIDATE_INDEX = 'idx_meta_record_revisions_sheet_record_created_version_id'
-async function candidateIndexExists(): Promise<boolean> {
-  const res = await q('SELECT 1 FROM pg_indexes WHERE indexname = $1', [CANDIDATE_INDEX])
+const REAL_CANDIDATE_INDEX_NAME = 'idx_meta_record_revisions_sheet_record_created_version_id'
+const BENCH_INDEX_NAME = `bench_tmb_${RUN_ID}_candidate_idx`
+
+/** Read-only informational check — never used to justify a DROP/CREATE against this name. */
+async function realCandidateIndexExists(): Promise<boolean> {
+  const res = await q('SELECT 1 FROM pg_indexes WHERE indexname = $1', [REAL_CANDIDATE_INDEX_NAME])
   return res.rows.length > 0
 }
-async function dropCandidateIndex(): Promise<void> {
-  await q(`DROP INDEX IF EXISTS ${CANDIDATE_INDEX}`)
+async function dropBenchIndex(): Promise<void> {
+  await q(`DROP INDEX IF EXISTS ${BENCH_INDEX_NAME}`)
 }
-async function createCandidateIndex(): Promise<void> {
-  await q(`CREATE INDEX IF NOT EXISTS ${CANDIDATE_INDEX} ON meta_record_revisions (sheet_id, record_id, created_at, version, id)`)
+async function createBenchIndex(): Promise<void> {
+  await q(`CREATE INDEX IF NOT EXISTS ${BENCH_INDEX_NAME} ON meta_record_revisions (sheet_id, record_id, created_at, version, id)`)
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -474,7 +574,9 @@ async function measureReadPath(seed: TierSeed, label: string, app: Express) {
   const revertPreview = await timeLoop(
     () => request(app).post(`/api/multitable/sheets/${seed.sheetId}/revert-preview`).send({ asOf: seed.asOfIso }),
     previewIters,
-    (res) => {
+    // supertest ships no type declarations in this project (implicit `any`) — annotate explicitly so
+    // `timeLoop`'s generic can resolve T instead of defaulting to `unknown` here.
+    (res: { status: number; body: unknown }) => {
       if (res.status !== expectStatus) {
         throw new Error(`[${label}] positive-control FAILED: revert-preview status ${res.status} !== ${expectStatus}: ${JSON.stringify(res.body)}`)
       }
@@ -485,7 +587,7 @@ async function measureReadPath(seed: TierSeed, label: string, app: Express) {
   const resetPreview = await timeLoop(
     () => request(app).post(`/api/multitable/sheets/${seed.sheetId}/reset-preview`).send({ asOf: seed.asOfIso }),
     previewIters,
-    (res) => {
+    (res: { status: number; body: unknown }) => {
       if (res.status !== expectStatus) {
         throw new Error(`[${label}] positive-control FAILED: reset-preview status ${res.status} !== ${expectStatus}: ${JSON.stringify(res.body)}`)
       }
@@ -525,7 +627,11 @@ async function runDestructiveOp(app: Express, kind: 'revert' | 'reset', seed: Ti
 }
 
 // ---------------------------------------------------------------------------------------------
-// cleanup
+// cleanup — idempotent, strictly scoped to this run's own BENCH_RUN_ID-namespaced sheet/base/user ids
+// (never a table-wide or prefix-LIKE delete). Safe to call even when some/all of the given ids were
+// never actually written (a crash before that seed call reached its first INSERT) or were already
+// removed by an earlier cleanup pass — DELETE ... WHERE x = ANY($1) / WHERE id = $1 against
+// nonexistent ids simply deletes zero rows.
 // ---------------------------------------------------------------------------------------------
 async function cleanup(sheetIds: string[]): Promise<void> {
   if (sheetIds.length === 0) return
@@ -543,40 +649,50 @@ async function main() {
   console.log(`R14.C Time Machine scale benchmark — run ${RUN_ID}`)
   console.log(`tiers: ${TIERS.join(', ')}`)
 
-  await ensureBase()
-  const personIds = await seedPeopleSheet()
-  const app = buildApp()
+  const realIndexPresentAtStart = await realCandidateIndexExists() // read-only, informational only — never DDL'd
+  console.log(
+    `[info] real §4 candidate index ("${REAL_CANDIDATE_INDEX_NAME}") present at start: ${realIndexPresentAtStart} ` +
+      `— this harness NEVER drops/creates this object. It owns a separate index ("${BENCH_INDEX_NAME}") for the ` +
+      "with-index comparison pass instead; that pass reflects whatever the real index's presence/absence already " +
+      'is on this DB, on top of the harness-owned one.',
+  )
 
-  const indexExistedInitially = await candidateIndexExists()
-  console.log(`§4 candidate index present at start: ${indexExistedInitially}`)
-
-  const allSheetIds: string[] = [PEOPLE_SHEET_ID]
-  const results: Record<string, unknown> = { runId: RUN_ID, tierList: TIERS, indexExistedInitially }
+  // Every sheet id below is pushed into `allSheetIds` BEFORE the corresponding seed call runs (not
+  // after it returns) — see the header comment's "Cleanup" section: this way, if a seed call throws
+  // partway through (e.g. after inserting the sheet/fields rows but before finishing the record/
+  // revision bulk insert), the outermost `finally` below still knows to clean up that sheet id.
+  const allSheetIds: string[] = []
+  const results: Record<string, unknown> = { runId: RUN_ID, tierList: TIERS, realCandidateIndexPresentAtStart: realIndexPresentAtStart }
   const tierResults: Record<number, Record<string, unknown>> = {}
   const seeds: Record<number, TierSeed> = {}
 
-  await dropCandidateIndex()
-  console.log('dropped §4 candidate index — this is the main-parity baseline index set')
-
   try {
+    allSheetIds.push(PEOPLE_SHEET_ID)
+    await ensureBase()
+    const personIds = await seedPeopleSheet()
+    const app = buildApp()
+
+    await dropBenchIndex() // idempotent defensive drop of the harness-owned index only (never the real one)
+
     for (const n of TIERS) {
+      const sheetId = tierSheetId(n)
+      allSheetIds.push(sheetId) // reserved before seeding — see comment above
       console.log(`\n=== seeding tier ${n} ===`)
       const t0 = performance.now()
       const seed = await seedTier(n, personIds)
       const seedMs = performance.now() - t0
       console.log(`seed ${n} took ${seedMs.toFixed(0)}ms (records=${seed.n} cohortB=${seed.cohortBCount} cohortC=${seed.cohortCCount})`)
       seeds[n] = seed
-      allSheetIds.push(seed.sheetId)
       tierResults[n] = { seedMs, stats: await tierTableStats(seed.sheetId), cohortBCount: seed.cohortBCount, cohortCCount: seed.cohortCCount }
     }
 
-    console.log('\n--- measuring BASELINE (§4 index ABSENT = main-parity) ---')
+    console.log('\n--- measuring BASELINE (harness-owned bench index ABSENT) ---')
     for (const n of TIERS) {
       tierResults[n].baseline = await measureReadPath(seeds[n], `${n}-baseline`, app)
     }
 
     if (seeds[10000]) {
-      console.log('\n--- EXPLAIN ANALYZE at 10k, baseline (index absent) ---')
+      console.log('\n--- EXPLAIN ANALYZE at 10k, baseline (bench index absent) ---')
       results.explainBaseline = {
         reconstruct: await explain(RECONSTRUCT_SQL, [seeds[10000].sheetId, seeds[10000].asOfIso]),
         precheckLatest: await explain(PRECHECK_LATEST_SQL, [seeds[10000].sheetId]),
@@ -585,49 +701,79 @@ async function main() {
     }
 
     console.log('\n--- destructive execute at 1k (dedicated throwaway sheets) ---')
+    const revertSheetId = tierSheetId(1000, '_revertexec')
+    allSheetIds.push(revertSheetId)
     const revertSeed = await seedTier(1000, personIds, '_revertexec')
-    allSheetIds.push(revertSeed.sheetId)
     results.revertExecute = await runDestructiveOp(app, 'revert', revertSeed)
     console.log(`  revert-execute: ${JSON.stringify(results.revertExecute)}`)
 
+    const resetSheetId = tierSheetId(1000, '_resetexec')
+    allSheetIds.push(resetSheetId)
     const resetSeed = await seedTier(1000, personIds, '_resetexec')
-    allSheetIds.push(resetSeed.sheetId)
     results.resetExecute = await runDestructiveOp(app, 'reset', resetSeed)
     console.log(`  reset-execute: ${JSON.stringify(results.resetExecute)}`)
-  } finally {
-    await createCandidateIndex() // ALWAYS restore, even if the try block threw — leaves the shared DB no worse than found
-  }
 
-  if (!SKIP_INDEX_CMP) {
-    console.log('\n--- measuring WITH §4 candidate index PRESENT ---')
-    for (const n of TIERS) {
-      tierResults[n].withIndex = await measureReadPath(seeds[n], `${n}-withIndex`, app)
-    }
-    if (seeds[10000]) {
-      console.log('\n--- EXPLAIN ANALYZE at 10k, with index present ---')
-      results.explainWithIndex = {
-        reconstruct: await explain(RECONSTRUCT_SQL, [seeds[10000].sheetId, seeds[10000].asOfIso]),
-        precheckLatest: await explain(PRECHECK_LATEST_SQL, [seeds[10000].sheetId]),
-        contiguity: await explain(CONTIGUITY_SQL, [seeds[10000].sheetId]),
+    if (!SKIP_INDEX_CMP) {
+      try {
+        await createBenchIndex()
+        if (process.env.BENCH_INJECT_FAULT === '1') {
+          // TESTING HOOK: fires after seeding + destructive execute + bench-index creation, so a single
+          // injected crash exercises BOTH the seeded-row cleanup path AND the bench-index drop path in
+          // one run (see header comment). Requires BENCH_SKIP_INDEX_CMP to be unset.
+          throw new Error(
+            '[self-test] BENCH_INJECT_FAULT=1 — injected fault after seed+execute+bench-index-create, ' +
+              'to verify the outermost try/finally still cleans up seeded rows and the harness-owned index on a mid-run crash',
+          )
+        }
+        console.log('\n--- measuring WITH harness-owned bench index PRESENT ---')
+        for (const n of TIERS) {
+          tierResults[n].withIndex = await measureReadPath(seeds[n], `${n}-withIndex`, app)
+        }
+        if (seeds[10000]) {
+          console.log('\n--- EXPLAIN ANALYZE at 10k, with bench index present ---')
+          results.explainWithIndex = {
+            reconstruct: await explain(RECONSTRUCT_SQL, [seeds[10000].sheetId, seeds[10000].asOfIso]),
+            precheckLatest: await explain(PRECHECK_LATEST_SQL, [seeds[10000].sheetId]),
+            contiguity: await explain(CONTIGUITY_SQL, [seeds[10000].sheetId]),
+          }
+        }
+      } finally {
+        await dropBenchIndex() // always relinquish the harness-owned resource; never touches the real index
       }
     }
-  }
 
-  results.tiers = tierResults
-  results.indexSizes = await globalIndexSizes()
-  const finalExists = await candidateIndexExists()
-  console.log(`\n§4 candidate index present at end: ${finalExists} (initially: ${indexExistedInitially})`)
+    results.tiers = tierResults
+    results.indexSizes = await globalIndexSizes()
+    const realIndexPresentAtEnd = await realCandidateIndexExists()
+    console.log(
+      `\n[info] real §4 candidate index present at end: ${realIndexPresentAtEnd} (start: ${realIndexPresentAtStart}) ` +
+        '— unchanged by this harness by construction (never DDL\'d).',
+    )
 
-  console.log('\n=== RESULTS (JSON) ===')
-  console.log(JSON.stringify(results, null, 2))
-
-  if (!KEEP_DATA) {
-    console.log('\ncleaning up seeded data...')
-    await cleanup(allSheetIds)
-    console.log('cleanup done.')
-  } else {
-    console.log('\nBENCH_KEEP_DATA=1 set; leaving seeded rows in place for inspection.')
-    console.log(`seeded sheet ids: ${JSON.stringify(allSheetIds)}`)
+    console.log('\n=== RESULTS (JSON) ===')
+    console.log(JSON.stringify(results, null, 2))
+  } finally {
+    // OUTERMOST cleanup (P1-3): runs whether the try block above completed normally OR threw at ANY
+    // point above (mid-seed, mid-measure, mid-execute, mid-index-comparison) — seeded data can never
+    // be stranded by a mid-run failure. `dropBenchIndex()` here is a defensive, idempotent no-op in the
+    // normal case (the inner finally already dropped it) and a real safety net if the inner finally
+    // itself never ran (e.g. a crash before `createBenchIndex()` even started). Cleanup errors are
+    // caught and logged here rather than left to propagate, so they can never mask the ORIGINAL error
+    // that triggered this finally (if any) — see the top-level `.catch()` below.
+    await dropBenchIndex().catch((e) => console.error('[cleanup] dropBenchIndex failed (best-effort):', e))
+    if (!KEEP_DATA) {
+      console.log('\ncleaning up seeded data...')
+      try {
+        await cleanup(allSheetIds)
+        console.log('cleanup done.')
+      } catch (e) {
+        console.error('[cleanup] cleanup(allSheetIds) FAILED — seeded rows may be stranded, inspect/clean up manually:', e)
+        console.error(`[cleanup] seeded sheet ids were: ${JSON.stringify(allSheetIds)}`)
+      }
+    } else {
+      console.log('\nBENCH_KEEP_DATA=1 set; leaving seeded rows in place for inspection.')
+      console.log(`seeded sheet ids: ${JSON.stringify(allSheetIds)}`)
+    }
   }
 }
 
@@ -639,11 +785,8 @@ main()
   .then(() => process.exit(0))
   .catch(async (e) => {
     console.error('\nFATAL', e)
-    try {
-      await createCandidateIndex() // best-effort: restore the index even on an unexpected top-level failure
-    } catch {
-      /* already logged the primary failure above */
-    }
+    // No index/data restoration needed here: main()'s own outermost try/finally (P1-3) already ran
+    // cleanup (including the defensive bench-index drop) before this rejection reached this handler.
     try {
       await poolManager.close()
     } catch {
