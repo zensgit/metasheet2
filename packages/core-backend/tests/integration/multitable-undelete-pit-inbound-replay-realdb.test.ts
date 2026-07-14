@@ -31,6 +31,7 @@ const L = `rec_uir_l_${TS}` // LIVE neighbour whose data still declares U (inbou
 const ACTOR = `user_uir_${TS}`
 const UNDELETE_FLAG = 'MULTITABLE_ENABLE_PIT_UNDELETE'
 const INBOUND_FLAG = 'MULTITABLE_ENABLE_RECORD_UNDELETE_INBOUND'
+const SHEET_REVERT_FLAG = 'MULTITABLE_ENABLE_SHEET_REVERT'
 const T0 = '2026-01-01T00:00:00.000Z', T1 = '2026-01-02T00:00:00.000Z', T2 = '2026-01-03T00:00:00.000Z'
 const SNAP = { [NAME]: 'u-at-T1' } // no outbound links — this suite is about INBOUND only
 
@@ -107,6 +108,9 @@ describeIfDatabase('4c-3 §7 — PIT-resurrect inbound replay (real DB, P3-2 gol
   })
   beforeEach(async () => {
     process.env[UNDELETE_FLAG] = 'true'
+    // Interim revert-execute master gate (current-risk mitigation): default-OFF now — keep it on for this
+    // suite's revert-execute-driven inbound-replay goldens, unchanged behavior.
+    process.env[SHEET_REVERT_FLAG] = 'true'
     await q('DELETE FROM meta_link_tombstones WHERE sheet_id = $1', [SHEET])
     await q('DELETE FROM meta_links WHERE field_id IN (SELECT id FROM meta_fields WHERE sheet_id = $1)', [SHEET])
     for (const t of ['meta_record_revisions', 'meta_records']) await q(`DELETE FROM ${t} WHERE sheet_id = $1`, [SHEET])
@@ -115,6 +119,7 @@ describeIfDatabase('4c-3 §7 — PIT-resurrect inbound replay (real DB, P3-2 gol
   afterEach(() => {
     delete process.env[UNDELETE_FLAG]
     delete process.env[INBOUND_FLAG]
+    delete process.env[SHEET_REVERT_FLAG]
   })
 
   test('sentinel: DATABASE_URL set', () => { expect(process.env.DATABASE_URL).toBeTruthy() })

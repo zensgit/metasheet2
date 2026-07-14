@@ -137,6 +137,7 @@ describeIfDatabase('multitable D-1c §0.6 HISTORY_INCOMPLETE precheck (real DB)'
   })
   afterAll(async () => {
     delete process.env.MULTITABLE_ENABLE_PIT_RESET
+    delete process.env.MULTITABLE_ENABLE_SHEET_REVERT
     for (const sheet of [SHEET, SHEET_F, SHEET_S]) {
       for (const t of ['meta_records_trash', 'meta_record_revisions', 'meta_records', 'meta_fields']) await q(`DELETE FROM ${t} WHERE sheet_id = $1`, [sheet]).catch(() => {})
       await q('DELETE FROM meta_sheets WHERE id = $1', [sheet]).catch(() => {})
@@ -146,6 +147,10 @@ describeIfDatabase('multitable D-1c §0.6 HISTORY_INCOMPLETE precheck (real DB)'
   })
   beforeEach(async () => {
     process.env.MULTITABLE_ENABLE_PIT_RESET = 'true'
+    // Interim revert-execute master gate (current-risk mitigation): the route is default-OFF now, so keep it
+    // on for this suite's pre-existing goldens — unchanged behavior. See multitable-revert-pit-realdb.test.ts for
+    // the dedicated flag-off/on gate goldens.
+    process.env.MULTITABLE_ENABLE_SHEET_REVERT = 'true'
     for (const sheet of [SHEET, SHEET_F, SHEET_S]) {
       await q('DELETE FROM meta_records_trash WHERE sheet_id = $1', [sheet]).catch(() => {})
       await q('DELETE FROM meta_record_revisions WHERE sheet_id = $1', [sheet])
