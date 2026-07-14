@@ -102,6 +102,17 @@ describe('plmEmbedWriteToken — child protocol layer (discussion write-UI on-de
     }
   })
 
+  it('MUST-1: rejects a response with a NULL/absent event.source, even from the pinned origin', async () => {
+    // Positive conjunct (taskbook lock 1): source must EQUAL window.parent; a source-less event
+    // is NOT accepted via an origin-only fallback (a token-response is write-authorizing).
+    const promise = client!.requestWriteToken()
+    const nonce = lastPostedNonce(postSpy)
+    postFromParent(PLM_ORIGIN, { type: TOKEN_RESPONSE_TYPE, nonce, token: 'should-not-resolve' }, null)
+    await flush()
+    postFromParent(PLM_ORIGIN, { type: TOKEN_RESPONSE_TYPE, nonce, token: 'correct-token' })
+    await expect(promise).resolves.toBe('correct-token')
+  })
+
   it('MUST-2: drops a response whose nonce does not match the single in-flight request', async () => {
     const promise = client!.requestWriteToken()
     const nonce = lastPostedNonce(postSpy)
@@ -244,12 +255,23 @@ describe('plmEmbedWriteToken — child protocol layer (discussion write-UI on-de
     await expect(promise).resolves.toBe('finally')
   })
 
-  it('dispose() rejects an in-flight request and stops listening', async () => {
+  it('dispose() rejects an in-flight request and REMOVES the message listener (non-vacuous)', async () => {
+    const removeSpy = vi.spyOn(window, 'removeEventListener')
     const promise = client!.requestWriteToken()
-    const nonce = lastPostedNonce(postSpy)
     client!.dispose()
     await expect(promise).rejects.toBeInstanceOf(PlmEmbedWriteTokenError)
-    // Post-dispose, an inbound message must not throw or resurrect anything (listener removed).
-    expect(() => postFromParent(PLM_ORIGIN, { type: TOKEN_RESPONSE_TYPE, nonce, token: 'too-late' })).not.toThrow()
+    // Prove the listener is actually detached, not just that a stray message doesn't throw: the
+    // exact 'message' handler passed to addEventListener must be handed to removeEventListener.
+    expect(removeSpy).toHaveBeenCalledWith('message', expect.any(Function))
+    removeSpy.mockRestore()
+  })
+
+  it('use-after-dispose: requestWriteToken() after dispose() rejects immediately and posts NOTHING', async () => {
+    // Regression: a deferred submit firing after unmount must not re-post a token-request (which the
+    // parent could mint + burn a single-use jti for) nor hang 5s on a removed listener.
+    client!.dispose()
+    const postsBefore = postSpy.mock.calls.length
+    await expect(client!.requestWriteToken()).rejects.toBeInstanceOf(PlmEmbedWriteTokenError)
+    expect(postSpy.mock.calls.length).toBe(postsBefore) // no outbound token-request after dispose
   })
 })

@@ -110,6 +110,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
  */
 export function createPlmEmbedWriteTokenClient(getParentOrigin: () => string | null): PlmEmbedWriteTokenClient {
   let inFlight: InFlightRequest | null = null
+  let disposed = false
 
   function settleInFlight(): InFlightRequest | null {
     const current = inFlight
@@ -128,7 +129,10 @@ export function createPlmEmbedWriteTokenClient(getParentOrigin: () => string | n
     // docstring, invariant 1) -- a different allowlisted origin must still fail this check.
     const parentOrigin = getParentOrigin()
     if (!parentOrigin || event.origin !== parentOrigin) return
-    if (event.source && event.source !== window.parent) return
+    // Positive conjunct per the ratified taskbook lock 1: `event.source === window.parent`. A
+    // null/absent source is REJECTED (a token-response is write-authorizing — unlike the read
+    // page's inbound gate, we do not fall back to origin-only for source-less synthetic events).
+    if (event.source !== window.parent) return
 
     const data = event.data
     if (!isRecord(data)) return
@@ -158,6 +162,11 @@ export function createPlmEmbedWriteTokenClient(getParentOrigin: () => string | n
   window.addEventListener('message', onMessage)
 
   function requestWriteToken(): Promise<string> {
+    if (disposed) {
+      // Fail fast after teardown: never post a spurious token-request (which the parent could
+      // mint + burn a single-use jti for) and never hang the caller on a listener that is gone.
+      return Promise.reject(new PlmEmbedWriteTokenError('write-token client is disposed'))
+    }
     if (inFlight) {
       return Promise.reject(new PlmEmbedWriteTokenError('a write-token request is already in flight'))
     }
@@ -180,6 +189,7 @@ export function createPlmEmbedWriteTokenClient(getParentOrigin: () => string | n
   }
 
   function dispose(): void {
+    disposed = true
     const current = settleInFlight()
     current?.reject(new PlmEmbedWriteTokenError('write-token client disposed'))
     window.removeEventListener('message', onMessage)
