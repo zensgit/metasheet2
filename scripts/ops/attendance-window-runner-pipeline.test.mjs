@@ -182,12 +182,14 @@ test('staging-only contract: the remote script names only staging containers', (
   )
 })
 
-test('rehearsal pg_restore keeps --disable-triggers (load-bearing: partition-inherited row triggers fire during COPY without it — run 29340321213)', () => {
+test('rehearsal restore keeps the replica-role trigger suppression (load-bearing: partition-inherited row triggers fire during COPY without it — runs 29340321213/29347058494; --disable-triggers is inert in full restores)', () => {
   const remote = readFileSync(REMOTE_SH, 'utf8')
-  const restoreLines = remote.split('\n').filter((l) => l.includes('pg_restore') && l.includes('$REHEARSAL_DB'))
-  assert.ok(restoreLines.length >= 1, 'expected the rehearsal pg_restore invocation to exist')
-  for (const line of restoreLines) {
-    assert.ok(line.includes('--disable-triggers'),
-      `rehearsal pg_restore lost --disable-triggers: ${line.trim()}`)
-  }
+  const restoreIdx = remote.indexOf('pg_restore -j 2 -U')
+  assert.notEqual(restoreIdx, -1, 'expected the rehearsal pg_restore invocation to exist')
+  const setIdx = remote.indexOf("SET session_replication_role = 'replica'")
+  const resetIdx = remote.indexOf('RESET session_replication_role')
+  assert.notEqual(setIdx, -1, 'rehearsal lost the DB-level replica-role SET before restore')
+  assert.notEqual(resetIdx, -1, 'rehearsal lost the RESET after restore (rehearsal migrate must run under normal trigger semantics)')
+  assert.ok(setIdx < restoreIdx, 'replica-role SET must come BEFORE the pg_restore invocation')
+  assert.ok(restoreIdx < resetIdx, 'RESET must come AFTER the pg_restore invocation')
 })
