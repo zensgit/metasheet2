@@ -129,3 +129,57 @@ describe('OWNER P1 healed-gap (design-flaw proof)', () => {
 ## 7. Coordination note
 
 A **parallel `zensgit` session** owns the active W0 execution (the merged slices #4245–#4249, the merged precheck #4234, and the open W0-1 lock #4250). GitHub cannot distinguish parallel sessions. To avoid destructive-path races this session did **not** fan out duplicate W0-1 implementation; this document is the non-duplicative deliverable (verification + the C1–C8 correctness spec that moves #4250 from REQUEST_CHANGES toward ratifiable). Recommended: **close superseded #4235** (port its goldens), fold C1–C8 into #4250, and keep this session off the W0 backend impl unless the owner reassigns the lane.
+
+---
+
+## 8. Full-line development plan (order · parallel lanes · model dispatch)
+
+Extends §4 (W0-only) to the whole remaining Time Machine line, per the owner's five-phase closeout order. **Legend:** 🔴 gated on an owner decision · 🟡 startable once its dependency lands · 🟢 startable now (non-destructive, unowned). **Model by difficulty:** **Opus** = schema / transaction / concurrency / security / adversarial; **Sonnet** = locked-spec implementation + real-DB goldens; **Fable** = pure FE / mechanical. Phase order is fixed by the owner: *revision chain (W0) → T-state → scale → launch*; nothing downstream is trustworthy until W0 lands, so nothing downstream is legitimately implementable ahead of W0-1.
+
+### Phase W0 — trustworthiness (the gate, ~4–6 pw)
+| Lane | Work | Model | Status |
+|---|---|---|---|
+| W0.1 | chain-event schema: `UNIQUE(sheet_id,record_id,version)` + marker vocab + `action` CHECK migration + checkpoint col (C5, C7) | Opus | 🔴 needs C5/C7 ratify |
+| W0.2 | live+deleted persistent integrity ledger + trusted anchor (C3, C6) | Opus | 🔴 needs C3/C6 ratify |
+| W0.3 | two-phase rollout so old instances can't cross the regime boundary (C6) | Opus design / Sonnet impl | 🔴 needs C6 ratify |
+| W0.4 | exact contiguity + **time-monotonicity** + content checks (C1, C2) | Opus | 🔴 needs **C2 fork**: monotonicity proof *vs* redefine PIT anchor |
+| W0.5 | same-txn re-check inside SERIALIZABLE / scope-fence (C4, C8) | Opus | 🔴 needs **C4 fork**: SERIALIZABLE *vs* sheet-lock *vs* advisory |
+| W0.6 | golden matrix (healed-gap, deleted-gap, time-reversal, dup-version, phantom-insert, watermark, lock+automation-lock) | Sonnet | 🟡 after W0.1–W0.5 shape |
+| W0.7 | OD-6 disposition-guard convergence (#4227) as markers settle | Sonnet | 🟢 startable now |
+
+**Parallelism:** once the schema fork (C5/C7) is decided, W0.1 ∥ W0.2 run concurrently; W0.4/W0.5 depend on W0.1; W0.6 last.
+
+### Phase T-state — view/restore a historical version (~3–5 pw, after W0; adopt #4205)
+| Lane | Work | Model | Status |
+|---|---|---|---|
+| T.1 | PIT view includes deleted-since-T records, respecting field-mask / row-deny / **no-existence-leak** | Opus (perm-correctness) / Sonnet | 🟡 after W0 (reconstruction must be trustworthy) |
+| T.2 | History Center version canvas (read-only) | Fable / Sonnet | 🟡 after T.1 contract |
+| T.3 | preview/execute split + operationId idempotency + single-record resurrect (**restore = destructive**) | Opus design / Sonnet | 🔴 needs #4205 ratify |
+
+**Parallelism:** T.1 (backend read) ∥ T.2 (FE canvas) once the view contract is fixed; T.3 after.
+
+### Phase base-wide restore (~4–7 pw) — 🔴 R14 A/B first
+| Lane | Work | Model | Status |
+|---|---|---|---|
+| R14.C | real-scale benchmark (>5000 rows) — measurement, informs the A/B call | Sonnet | 🟢 startable now (non-destructive) |
+| BW.1 | base-wide preview/execute — Option A (atomic) *vs* Option B (granular operation-level: restore-op + write-fence + chunk + compensation + one-shot visibility flip) | Opus | 🔴 needs R14 A/B |
+
+### Phase scale & relations (~4–8 pw, after base-wide)
+| Lane | Work | Model | Status |
+|---|---|---|---|
+| SC.1 | >5000 async restore job | Opus design / Sonnet | 🟡 |
+| SC.2 | retention coexistence (#4224) | Opus | 🔴 design ratify |
+| SC.3 | edge-level `meta_links` time history (OD-4, separate design lock) | Opus | 🔴 separate lock + ratify |
+
+**Parallelism:** SC.1 ∥ SC.2 ∥ SC.3 are independent once opened.
+
+### Phase launch (~1–2 pw, last)
+O-2 operator flag ladder + staging browser acceptance + monitor/rollback — Sonnet/ops — 🔴 owner/ops.
+
+### What you must decide to unblock each 🔴 lane
+- **W0 core:** the C2 fork (monotonicity proof vs new PIT anchor), the C4 fork (SERIALIZABLE vs sheet-lock vs advisory), C5/C7 (schema shape), C6 (rollout). Decide these → W0 Opus lanes start immediately.
+- **Base-wide:** R14 Option A (atomic) vs Option B (granular operation-level; the owner's recommendation).
+- **Scale:** ratify #4224 retention + open the OD-4 edge-level link-history design lock.
+
+### Startable now without any ratify (🟢)
+W0.7 (OD-6 guard convergence) · R14.C (scale benchmark, measurement only). Say the word and I take either as a Sonnet lane. Everything else is gated by the decisions above.
