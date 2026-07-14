@@ -368,6 +368,7 @@ jobs:
             tests/integration/multitable-undelete-pit-realdb.test.ts \
             tests/integration/multitable-reset-pit-realdb.test.ts \
             tests/integration/multitable-history-incomplete-precheck-realdb.test.ts \
+            tests/integration/multitable-history-contiguity-realdb.test.ts \
             tests/integration/multitable-d1c-form-submit-revision-realdb.test.ts \
             tests/integration/multitable-d1c-plugin-revision-realdb.test.ts \
             tests/integration/multitable-d1c-automation-revision-realdb.test.ts \

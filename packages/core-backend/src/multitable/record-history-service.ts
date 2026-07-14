@@ -134,6 +134,46 @@ export async function recordRecordRevision(query: QueryFn, input: RecordRevision
   return id
 }
 
+/**
+ * W0-1 (OD-W0-1 mechanism (b)) — record a lock/unlock version bump as a chain marker in the independent
+ * `meta_record_version_markers` table, so the generation-aware contiguity precheck does not read the bump
+ * as an uncaptured-data-write HOLE. `kind` is 'lock' | 'unlock'. Idempotent (ON CONFLICT DO NOTHING against
+ * the UNIQUE(sheet_id, record_id, version) constraint), so a retry never duplicates.
+ *
+ * Deploy-window safe (mirrors `hasRestoredFromVersionColumn`): the marker table may not exist yet in a
+ * rolling deploy (the zzzz migration lands mid-process). A missing table is probed via a txn-safe
+ * information_schema SELECT (never poisons the enclosing transaction with a 42P01) — if absent, the marker
+ * write is SKIPPED and the lock/unlock version bump still commits. That leaves a transient pre-migration
+ * hole for that record; per the design lock (§1.4) the durable trusted-since watermark that grandfathers
+ * pre-marker holes is C6, explicitly DEFERRED — until then such a record fails CLOSED (refused), never a
+ * silent destructive write.
+ */
+let versionMarkerTablePresent = false
+async function hasVersionMarkerTable(query: QueryFn): Promise<boolean> {
+  if (versionMarkerTablePresent) return true
+  const res = await query(
+    `SELECT 1 FROM information_schema.tables WHERE table_name = 'meta_record_version_markers' AND table_schema = ANY(current_schemas(false)) LIMIT 1`,
+  )
+  if ((res.rows as unknown[]).length > 0) {
+    versionMarkerTablePresent = true
+    return true
+  }
+  return false
+}
+
+export async function recordVersionMarker(
+  query: QueryFn,
+  input: { sheetId: string; recordId: string; version: number; kind: 'lock' | 'unlock'; actorId?: string | null },
+): Promise<void> {
+  if (!(await hasVersionMarkerTable(query))) return
+  await query(
+    `INSERT INTO meta_record_version_markers (id, sheet_id, record_id, version, kind, actor_id)
+     VALUES (gen_random_uuid(), $1, $2, $3, $4, $5)
+     ON CONFLICT ON CONSTRAINT uq_meta_record_version_markers_sheet_record_version DO NOTHING`,
+    [input.sheetId, input.recordId, input.version, input.kind, input.actorId ?? null],
+  )
+}
+
 export async function listRecordRevisions(
   query: QueryFn,
   input: { sheetId: string; recordId: string; limit?: number; offset?: number },
