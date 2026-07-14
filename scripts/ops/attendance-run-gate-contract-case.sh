@@ -95,6 +95,11 @@ if [[ "$CASE_ID" == "strict" ]]; then
   info "running strict import override-confirm modal contract"
   node --test ./scripts/ops/attendance-import-override-confirm-contract.test.mjs
 
+  info "running strict smoke work-date collision contracts"
+  node --test \
+    ./scripts/ops/attendance-smoke-workdate.test.mjs \
+    ./scripts/ops/attendance-detect-api-smoke-reason.test.mjs
+
   info "running staging window-runner pipeline contract (pipefail both legs)"
   node --test ./scripts/ops/attendance-window-runner-pipeline.test.mjs
 

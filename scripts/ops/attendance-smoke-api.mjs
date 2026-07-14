@@ -1,5 +1,8 @@
 import { assertImportTelemetry } from './attendance-import-telemetry-utils.mjs'
-import { resolveSmokeWorkDate } from './attendance-smoke-workdate.mjs'
+import {
+  isBlockingTimeCorrectionRequest,
+  selectAvailableSmokeWorkDate,
+} from './attendance-smoke-workdate.mjs'
 
 const apiBase = (process.env.API_BASE || '').replace(/\/+$/, '')
 let token = process.env.AUTH_TOKEN || ''
@@ -146,6 +149,58 @@ function assertOk({ res, raw, body }, label) {
   if (body && typeof body === 'object' && body.success === false) {
     throw new Error(`${label}: ${JSON.stringify(body).slice(0, 200)}`)
   }
+}
+
+async function hasBlockingTimeCorrectionRequest(workDate) {
+  const pageSize = 200
+  const maxPages = 20
+
+  for (let page = 1; page <= maxPages; page += 1) {
+    const query = new URLSearchParams({
+      from: workDate,
+      to: workDate,
+      page: String(page),
+      pageSize: String(pageSize),
+    })
+    const existing = await apiFetch(
+      `/attendance/requests?${query.toString()}`,
+      { method: 'GET' },
+    )
+    assertOk(existing, 'GET /attendance/requests (work-date availability)')
+
+    const items = existing.body?.data?.items
+    if (!Array.isArray(items)) {
+      throw new Error(
+        'GET /attendance/requests (work-date availability): response missing items',
+      )
+    }
+    if (items.some(isBlockingTimeCorrectionRequest)) return true
+
+    const total = Number(existing.body?.data?.total)
+    if (
+      items.length < pageSize ||
+      (Number.isFinite(total) && page * pageSize >= total)
+    ) {
+      return false
+    }
+  }
+
+  throw new Error(
+    `GET /attendance/requests (work-date availability): exceeded ${maxPages} pages for ${workDate}`,
+  )
+}
+
+async function resolveAvailableSmokeWorkDate() {
+  const configuredCount = Number(process.env.SMOKE_WORK_DATE_CANDIDATES || 32)
+  return selectAvailableSmokeWorkDate(process.env, {
+    maxCandidates: configuredCount,
+    hasBlockingRequest: hasBlockingTimeCorrectionRequest,
+    onCollision: (candidate) => {
+      log(
+        `WARN: workDate=${candidate} already has a pending or approved time_correction request; trying the next date`,
+      )
+    },
+  })
 }
 
 function makeGroupName() {
@@ -460,7 +515,7 @@ async function run() {
   log('template ok')
 
   // 5) preview
-  const workDate = resolveSmokeWorkDate()
+  const workDate = await resolveAvailableSmokeWorkDate()
   const groupName = makeGroupName()
   const idempotencyKey = makeIdempotencyKey()
   const csvText = makeCsv(workDate, userId, groupName)

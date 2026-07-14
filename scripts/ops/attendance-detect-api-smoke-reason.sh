@@ -30,6 +30,12 @@ if grep -qE 'features\.attendance is not true' "$log_path"; then
   echo "FEATURE_DISABLED"
   exit 0
 fi
+if grep -qE \
+  'POST /attendance/requests: HTTP 409 .*DUPLICATE_REQUEST|workDate=.*already has a pending or approved time_correction request|No available smoke work date found' \
+  "$log_path"; then
+  echo "REQUEST_DATE_COLLISION"
+  exit 0
+fi
 
 # attendance-admin surface: distinguish "missing endpoint" from "schema/runtime failure".
 if grep -qE 'attendance-admin API missing \(404\)' "$log_path"; then
