@@ -129,6 +129,7 @@ Q7 are worded to that boundary.
   (risks a silent skip); **(iii)** two-phase claim→commit + reconciliation (closest to exactly-once, most
   code). **OPEN — owner decides.** Rev-2 leans **(i)** with `confirmSideEffects` as the human gate, but flags
   that for irreversible egress (email/DingTalk) some owners prefer (ii).
+  > Q3 席位: 本节写语义/重投递权衡已由 `approval-automation-retry-action-classification-designlock-20260712.md` (#4196) 的按 action 类型分类方案取代 (PROPOSED)。
 - **Q4 — `action_key` re-fire-on-reorder (re-framed by C4).** With the corrected structural key, a reordered
   action (new step path) counts as not-applied and re-fires. **OPEN — confirm this is desired**, or pin
   identity to a stable per-action id instead of position.
