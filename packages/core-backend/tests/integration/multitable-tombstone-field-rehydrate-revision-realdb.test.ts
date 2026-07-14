@@ -250,4 +250,75 @@ describeIfDatabase('W0 tail — field-undelete rehydration emits revisions (real
     expect(diesRevs).toHaveLength(1)
     expect(diesRevs[0]?.action).toBe('create')
   })
+
+  test('atomicity golden: a meta_record_revisions INSERT failure DURING rehydration rolls back the ENTIRE field-undelete — field def NOT recreated, record data + version + config revisions all reverted (no half-applied undelete), then the SAME undelete succeeds once the failure is removed (positive control)', async () => {
+    const s = await freshSheet('atomic')
+    const F = mkFieldId('atomic')
+    await insertField(s, F, 'AtomicVal', 'string', 1)
+    const R = mkRecordId('atomic1')
+    const T0 = new Date(Date.now() - 60_000).toISOString()
+    await insertRecord(s, R, { [F]: 'orig', other: 'y' })
+    await seedCreateRevision(s, R, { other: 'y' }, T0)
+
+    expect((await deleteField(F)).status).toBe(200) // field dropped, value tombstoned, delete config revision written
+    const revF = await lastFieldDeleteRevisionId(s, F)
+
+    // ---- pre-execute baseline: the failed undelete must leave ALL of this byte-identical ----
+    expect((await q('SELECT 1 FROM meta_fields WHERE sheet_id = $1 AND id = $2', [s, F])).rowCount).toBe(0) // field is dropped
+    const rowBefore = await recordRow(R)
+    expect(rowBefore?.data?.[F]).toBeUndefined() // F stripped from the record by the field-delete
+    const configRevsBefore = Number((await q('SELECT COUNT(*)::int AS c FROM meta_config_revisions WHERE sheet_id = $1', [s])).rows[0].c)
+    const recordRevsBefore = (await revisionsFor(R)).length
+
+    // ---- inject: force the rehydration's `recordRecordRevision` (source='restore') INSERT to fail. Scoped to
+    // source='restore' — the seed baseline is source='create' (untouched) and the field-undelete rehydration
+    // is the only source='restore' emit in this test's execute(); the trigger is installed AFTER the
+    // field-delete's own revisions are already written, and dropped in `finally`. Vitest runs a file's tests
+    // sequentially, and each test uses a `freshSheet`, so the source-only scope cannot bleed across tests. ----
+    await q(`CREATE OR REPLACE FUNCTION _atomic_fail_rehydrate_rev() RETURNS trigger AS $fn$
+             BEGIN
+               IF NEW.source = 'restore' THEN
+                 RAISE EXCEPTION 'injected: meta_record_revisions insert failed during field-undelete rehydration';
+               END IF;
+               RETURN NEW;
+             END;
+             $fn$ LANGUAGE plpgsql`)
+    await q('DROP TRIGGER IF EXISTS _atomic_fail_rehydrate_rev_trg ON meta_record_revisions')
+    await q(`CREATE TRIGGER _atomic_fail_rehydrate_rev_trg BEFORE INSERT ON meta_record_revisions
+             FOR EACH ROW EXECUTE FUNCTION _atomic_fail_rehydrate_rev()`)
+    try {
+      const p = await preview(s, revF)
+      expect(p.status).toBe(200)
+      const ko = await execute(s, { revisionId: revF, previewToken: p.body.data.previewToken, confirm: 'undelete' })
+      // The injected INSERT failure aborts the transaction → surfaced as a server error, never a partial 200.
+      expect(ko.status).toBeGreaterThanOrEqual(500)
+    } finally {
+      await q('DROP TRIGGER IF EXISTS _atomic_fail_rehydrate_rev_trg ON meta_record_revisions').catch(() => {})
+      await q('DROP FUNCTION IF EXISTS _atomic_fail_rehydrate_rev()').catch(() => {})
+    }
+
+    // ---- FULL ROLLBACK — nothing from the field-undelete survived the aborted transaction ----
+    // (a) field definition NOT recreated
+    expect((await q('SELECT 1 FROM meta_fields WHERE sheet_id = $1 AND id = $2', [s, F])).rowCount).toBe(0)
+    // (b) record data + version unchanged (no rehydrated value, no version bump)
+    const rowAfter = await recordRow(R)
+    expect(rowAfter?.version).toBe(rowBefore?.version)
+    expect(rowAfter?.data).toEqual(rowBefore?.data)
+    expect(rowAfter?.data?.[F]).toBeUndefined()
+    // (c) NO new config revision (field-recreate / order-shift) committed
+    expect(Number((await q('SELECT COUNT(*)::int AS c FROM meta_config_revisions WHERE sheet_id = $1', [s])).rows[0].c)).toBe(configRevsBefore)
+    // (d) NO record revision committed (the emit rolled back together with its own INSERT failure)
+    expect((await revisionsFor(R)).length).toBe(recordRevsBefore)
+
+    // ---- POSITIVE CONTROL: trigger gone → the IDENTICAL undelete now SUCCEEDS, proving the rollback above was
+    // caused by the injected revision failure, not by the undelete being inert (a fresh preview token: the
+    // failed execute consumed the first). ----
+    const p2 = await preview(s, revF)
+    expect(p2.status).toBe(200)
+    const ok = await execute(s, { revisionId: revF, previewToken: p2.body.data.previewToken, confirm: 'undelete' })
+    expect(ok.status).toBe(200)
+    expect((await q('SELECT 1 FROM meta_fields WHERE sheet_id = $1 AND id = $2', [s, F])).rowCount).toBe(1)
+    expect((await recordRow(R))?.data?.[F]).toBe('orig')
+    expect((await revisionsFor(R)).some((r) => r.source === 'restore' && r.changed_field_ids.includes(F))).toBe(true)
+  })
 })

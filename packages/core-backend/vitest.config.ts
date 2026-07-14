@@ -250,6 +250,16 @@ export default defineConfig({
       // Postgres only — excluded HERE so it cannot skip-green in the no-DB lane, whole-file wired into
       // `Run multitable real-DB integration` in plugin-tests.yml.
       'tests/integration/multitable-d1c-attachment-revision-realdb.test.ts',
+      // W0 tail — field-undelete rehydration revision goldens (#4279): real Postgres only (drives the real
+      // config-restore-execute route end-to-end, asserting the rehydration UPDATE bumps `version` and emits
+      // a `recordRecordRevision` AT THE NEW version in the SAME txn, contiguity/duplicate-occupant mutation
+      // controls, zero-row-no-ghost, and the same-txn atomicity rollback golden) — excluded HERE so it
+      // cannot skip-green in the no-DB lane, whole-file wired into `Run multitable real-DB integration` in
+      // plugin-tests.yml. Two-point wiring: BOTH points or the file silently never runs.
+      'tests/integration/multitable-tombstone-field-rehydrate-revision-realdb.test.ts',
+      // W0 tail — field-undelete rehydration (data-layer, #4279 predecessor): real Postgres only —
+      // excluded HERE so it cannot skip-green in the no-DB lane; whole-file wired into plugin-tests.yml.
+      'tests/integration/multitable-tombstone-field-rehydrate-realdb.test.ts',
       // D-2 side-door delete recoverability (#4004): real Postgres only (it installs scoped failure-
       // injection triggers and drives both side doors end-to-end) — excluded HERE so it cannot skip-green
       // in the no-DB lane, and whole-file wired into `Run multitable real-DB integration` in
