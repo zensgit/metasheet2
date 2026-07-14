@@ -20,12 +20,13 @@
            overviewErrored and re-fetches; no stale race (this is the coarse /projects read, and the
            stage-detail load carries its own monotonic seq guard). -->
       <button
+        ref="overviewRetryEl"
         type="button"
         class="sp-dash__retry"
         data-testid="stock-prep-dashboard-retry"
         :disabled="overviewLoading"
         :aria-label="bi('重试读取工作台概览', 'Retry loading workbench overview')"
-        @click="loadOverview"
+        @click="onOverviewRetry"
       >
         {{ bi('重试', 'Retry') }}
       </button>
@@ -110,12 +111,13 @@
                retry never lets a stale response win. -->
           <button
             v-else-if="recommendedStep.kind === 'detail_unavailable'"
+            ref="detailRetryEl"
             type="button"
             class="sp-dash__recommend-action"
             data-testid="stock-prep-dashboard-detail-retry"
             :disabled="stageDetailLoading"
             :aria-label="bi('重试读取阶段详情', 'Retry loading stage detail')"
-            @click="loadStageDetail"
+            @click="onDetailRetry"
           >
             {{ bi('重试', 'Retry') }}
           </button>
@@ -157,7 +159,7 @@
 // (projectId as an <option> VALUE only, never rendered text; lastSyncRunId rendered the same way
 // view 1 already does). No drawing number, material code, ERP id, or other business value ever
 // crosses here — that surface is H3 (gated on OD-W3-1) and is not touched by this component.
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, ref, watch, type Ref } from 'vue'
 import { useLocale } from '../../../composables/useLocale'
 import type { IntegrationScope } from '../../../services/integration/workbench'
 import {
@@ -425,6 +427,31 @@ function onStageNavigate(stage: StockPreparationStageKey): void {
   emit('navigate-stage', STOCK_PREPARATION_STAGE_VIEW_KEY[stage])
 }
 
+// H4 keyboard — retry focus restore. Both retry buttons carry `:disabled` while their load is in
+// flight (H4-1, #4272), and a NATIVE disabled button is pulled out of the tab order, so the browser
+// drops focus to <body>: a keyboard operator who pressed Retry is stranded at the top of the page and
+// has to Tab all the way back. After the load settles we put focus back on the button — but ONLY when
+// it is still rendered (i.e. the retry failed again, so there is something to press) AND focus is
+// still on <body> (i.e. it was OUR disable that dropped it and the operator has not Tabbed elsewhere
+// meanwhile). Without that second condition this would STEAL focus from wherever they moved to.
+const overviewRetryEl = ref<HTMLButtonElement | null>(null)
+const detailRetryEl = ref<HTMLButtonElement | null>(null)
+
+async function restoreRetryFocus(el: Ref<HTMLButtonElement | null>): Promise<void> {
+  await nextTick()
+  if (document.activeElement === document.body) el.value?.focus()
+}
+
+async function onOverviewRetry(): Promise<void> {
+  await loadOverview()
+  await restoreRetryFocus(overviewRetryEl)
+}
+
+async function onDetailRetry(): Promise<void> {
+  await loadStageDetail()
+  await restoreRetryFocus(detailRetryEl)
+}
+
 onMounted(loadOverview)
 watch(() => props.projectId, loadStageDetail, { immediate: true })
 </script>
@@ -479,6 +506,13 @@ watch(() => props.projectId, loadStageDetail, { immediate: true })
   font-size: 13px;
 }
 
+/* H4 keyboard: the project picker is the FIRST Tab stop of the dashboard body — same ring as every
+   other control here (one system). */
+.sp-dash__select:focus-visible {
+  outline: 2px solid var(--ms-color-primary);
+  outline-offset: 1px;
+}
+
 .sp-dash__current {
   display: flex;
   flex-wrap: wrap;
@@ -529,6 +563,13 @@ watch(() => props.projectId, loadStageDetail, { immediate: true })
   font: inherit;
   font-size: 13px;
   cursor: pointer;
+}
+
+/* H4 keyboard: same ring as the H4-1 retry — one focus system across every control this view owns.
+   (The detail-retry button reuses this class, so it inherits the ring here too.) */
+.sp-dash__recommend-action:focus-visible {
+  outline: 2px solid var(--ms-color-primary);
+  outline-offset: 1px;
 }
 
 .sp-dash__recommend-action:hover {
