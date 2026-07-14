@@ -32,6 +32,22 @@ see §0's "Safety guards" bullet and the harness's own header comment). Re-runna
   "the DB in the same state it was found" and "never touching a real deployment" as if those were
   guaranteed outcomes of best-effort code; they are now enforced preconditions with the guards above,
   not aspirations — see §3 for what specifically changed and why.
+- **Second hardening round (added post-review, round 5 — SQL-injection + resource-attribution
+  fixes):** `BENCH_RUN_ID` is now validated against `^[a-z0-9]{1,16}$` (or auto-generated in that same
+  charset if unset) BEFORE any database connection is used — it is the only value ever interpolated
+  directly into DDL text (the harness-owned index name), and an invalid value now exits fail-closed
+  rather than reaching that interpolation. Before creating anything, the harness takes a Postgres
+  session-level advisory lock keyed on the run id (refusing a concurrent same-run-id invocation) and
+  separately asserts that no base/user/sheet/index row for this run id already exists (refusing to
+  silently "adopt" — and later delete — an object a prior/other run created); the base/user/sheet
+  inserts are now plain `INSERT`s with no `ON CONFLICT ... DO NOTHING`, so a name collision that slips
+  past the assertion is a fatal error, not a silent no-op, and cleanup at the end only ever deletes ids
+  this run's own inserts confirmed they created. A cleanup-step failure (lock release, index drop, or
+  row deletion) is now fatal — it forces a non-zero exit instead of being logged and swallowed into an
+  apparently-clean `exit 0`. A malformed `DATABASE_URL` error message no longer echoes the raw
+  connection string (which could contain the password) — only a redacted `scheme://host:port` form, or
+  a fully generic message, is logged. See the harness's own header comment ("Run-id exclusivity" and
+  "Cleanup" paragraphs) for the full contract.
 - **Exact code measured (pin this before citing any precheck/contiguity number):** the harness's two
   commits sit directly on `86fa1d85c` — the commit immediately **before** `#4269` (the W0-1
   generation-aware contiguity correction) merged to `main` (merge commit `3356a7ed6`, 2026-07-14, the
@@ -367,20 +383,23 @@ index today.
 broader framing above):** the old order-key window query showed no blow-up on this dev box; the
 landed/corrected precheck is NOT yet measured — re-run required after the W0-1 correction lands.
 
-**(d) Is the >5,000 async-job requirement (SC.1) confirmed?** **Yes, on two independent lines of
-evidence.** First, the *existing* fail-closed 413 refusal above `SHEET_REVERT_MAX_RECORDS` (default
-5,000) is itself fast in every measured case (1.6–13.4ms at 10k/50k, §2) — so today's ceiling is not
-masking a slow path; it refuses cheaply, exactly as designed. Second, and more importantly: **if the
-ceiling were simply raised or removed**, the write-side cost LINEARLY EXTRAPOLATED in (a) from the
-single 1k-tier measurement — ~20 seconds at 50k for the atomic (reset-execute-shaped) pattern, ~3.6
-minutes for the current non-atomic (revert-execute-shaped) pattern, neither actually measured above 1k
-— is well past what a synchronous HTTP request/response should hold open (typical
-gateway/load-balancer timeouts sit in the 30–60s range, and a multi-minute held transaction risks lock-
-contention pileups on a live table regardless of gateway timeouts). The data confirms that >5,000-record
-recovery needs to move to an async job with progress/cancel semantics (SC.1, and the R13-C design
-lock's own framing) rather than simply raising the synchronous ceiling — this holds whether Option A or
+**(d) Does the evidence support the >5,000 async-job requirement (SC.1)? Directional support only —
+this benchmark cannot independently confirm SC.1 as settled.** Two lines of evidence point the same
+way, with real caveats. First, the *existing* fail-closed 413 refusal above `SHEET_REVERT_MAX_RECORDS`
+(default 5,000) is itself fast in every measured case (1.6–13.4ms at 10k/50k, §2) — so today's ceiling
+is not masking a slow path; it refuses cheaply, exactly as designed. Second: **if the ceiling were
+simply raised or removed**, the write-side cost LINEARLY EXTRAPOLATED in (a) from the single 1k-tier
+measurement — ~20 seconds at 50k for the atomic (reset-execute-shaped) pattern, ~3.6 minutes for the
+current non-atomic (revert-execute-shaped) pattern, neither actually measured above 1k — is well past
+what a synchronous HTTP request/response should hold open (typical gateway/load-balancer timeouts sit
+in the 30–60s range, and a multi-minute held transaction risks lock-contention pileups on a live table
+regardless of gateway timeouts). This is directional support, not proof, for the conclusion that
+>5,000-record recovery needs to move to an async job with progress/cancel semantics (SC.1, and the
+R13-C design lock's own framing) rather than simply raising the synchronous ceiling — the write-side
+figures are unmeasured above 1k (linear extrapolations only) and a real ≥5k-tier execute re-run (§7,
+item 2) is required before treating this as settled. This directional reading holds whether Option A or
 Option B is chosen, since both would eventually need to process more than 5,000 records per operation
-at scale.
+at scale — but it remains directional evidence, not independent confirmation.
 
 ## 7. Re-run plan (required before any number in §6 can support a decision)
 
@@ -436,10 +455,16 @@ for the full preflight contract, and §0's "Safety guards" bullet for a summary.
 Env knobs: `BENCH_ALLOW_DESTRUCTIVE=1` (required), `BENCH_ALLOW_REMOTE_DB=1` /
 `BENCH_ALLOW_NONSTANDARD_DB_NAME=1` (conditionally required, see above), `BENCH_TIERS` (default
 `1000,5000,10000,50000`), `BENCH_ITERS` (override loop count for every tier), `BENCH_RUN_ID`
-(namespaces all seeded ids — must be unique per concurrent invocation; see the caveat below),
+(namespaces all seeded ids — **must match `^[a-z0-9]{1,16}$` or the harness exits fail-closed before
+any DB connection (round-5 hardening, see §0); omit to auto-generate a safe one**; a run id already in
+use — concurrently, via the advisory lock, or from a prior run's leftover objects, via the
+non-adoption assertion — is also refused fail-closed rather than silently reused/adopted),
 `BENCH_KEEP_DATA=1` (skip cleanup for inspection), `BENCH_SKIP_INDEX_CMP=1` (baseline-only, skip the
 with-index comparison pass), `BENCH_INJECT_FAULT=1` (testing hook only — verifies the outermost
-try/finally cleanup path on a simulated mid-run crash; never set this for a real measurement run).
+try/finally cleanup path on a simulated mid-run crash; never set this for a real measurement run),
+`BENCH_INJECT_CLEANUP_FAULT=1` (testing hook only, round-5 — verifies a cleanup-only failure still
+forces a non-zero exit; deliberately strands rows on purpose, never set this for a real measurement
+run).
 
 **Concurrency caveat, UPDATED post-review:** the two reported runs (`r14c1`, `r14c2b`) predate the P1
 hardening in this PR and used a since-removed methodology that dropped and recreated the REAL, shared
