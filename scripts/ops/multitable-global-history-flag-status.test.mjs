@@ -155,7 +155,21 @@ test('buildAssessment stops (without --strict) on side-door-without-capture', ()
   assert.match(assessment.stops.join('\n'), /side-door-without-capture/)
 })
 
-test('buildAssessment passes for a legal rung with all three illegal-combo flag pairs satisfied', () => {
+test('buildAssessment stops (without --strict) on undelete-without-revert-gate (#4261 follow-up)', () => {
+  const assessment = buildAssessment({
+    backend: { image: 'backend:abc', status: 'running' },
+    web: { image: 'web:abc', status: 'running' },
+    flags: collectFlagMapFromEnvText([
+      'MULTITABLE_ENABLE_PIT_UNDELETE=true',
+      'MULTITABLE_ENABLE_SHEET_REVERT=false',
+    ].join('\n')),
+    health: null,
+  })
+  assert.equal(assessment.ok, false)
+  assert.match(assessment.stops.join('\n'), /undelete-without-revert-gate/)
+})
+
+test('buildAssessment passes for a legal rung with all four illegal-combo flag pairs satisfied', () => {
   const assessment = buildAssessment({
     backend: { image: 'ghcr.io/zensgit/metasheet2-backend:abc', status: 'running' },
     web: { image: 'ghcr.io/zensgit/metasheet2-web:abc', status: 'running' },
@@ -166,6 +180,8 @@ test('buildAssessment passes for a legal rung with all three illegal-combo flag 
       'MULTITABLE_SIDE_DOOR_DELETE_TRASH_ENABLED=true',
       'MULTITABLE_ENABLE_PIT_RESET=false',
       'MULTITABLE_META_REVISION_RETENTION_ENABLED=0',
+      'MULTITABLE_ENABLE_SHEET_REVERT=true', // #4261: undelete rides on the revert master gate — both on = legal
+      'MULTITABLE_ENABLE_PIT_UNDELETE=true',
     ].join('\n')),
     health: { ok: true, status: 200, body: {} },
   })
