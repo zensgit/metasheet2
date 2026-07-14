@@ -25,10 +25,18 @@
       written to the command line, to a file, to a log, to the summary, or into any Start-Process
       ArgumentList. It is handed to the child smoke ONLY through a scoped process env var that is
       cleared in a finally block.
-    * The summary is values-free by construction: it can only ever contain the 9 whitelisted status fields
-      each a PASS/FAIL/enum/count/coarse-code — never a drawing number, quantity, unit, material name,
-      host, credential, or raw log line. On failure it adds only failedStage + coarse code (migration
-      name / SQLSTATE / HTTP status), never a full log.
+    * The values-free guarantee is scoped to the SUMMARY ARTIFACTS (acceptance-summary.txt / .json): those
+      can only ever contain the 9 whitelisted status fields — each a PASS/FAIL/enum/count/coarse-code —
+      never a drawing number, quantity, unit, material name, host, credential, or raw log line. On failure
+      they add only failedStage + a coarse code (migration name / SQLSTATE / HTTP status / coarse reason),
+      never a full log. The values-free construction is: only whitelisted fields are ever assigned into
+      $Summary/$FailDetail, and raw child output (pm2 / migrate / smoke stdout) is parsed for those fields
+      and then DISCARDED — never written into the artifacts.
+    * The interactive CONSOLE TRANSCRIPT (stdout) is NOT part of this guarantee: it carries operator-facing
+      stage progress and may include tool status lines. It is coarsened (raw pm2 restart output is
+      suppressed; the smoke's raw $out is never echoed), but it is not a values-free artifact — only the
+      .txt/.json summary is. Do not treat captured stdout as a safe-to-share evidence surface; ship the
+      summary artifacts.
 
 .PARAMETER PackagePath        Path to the .zip or .tgz on-prem package.
 .PARAMETER Sha256SumsPath     Path to the SHA256SUMS sidecar (default: alongside the package).
@@ -100,6 +108,91 @@ function Emit-Summary {
 
 function Get-Sha256Hex { param([string]$Path) (Get-FileHash -Path $Path -Algorithm SHA256).Hash.ToLower() }
 
+# ── Verify one file against its SHA256SUMS entry by EXACT basename (not first-match / substring). ────
+# Returns @{ ok; reason }. Used to bind the bootstrap sidecar we are about to EXECUTE to the manifest,
+# so a stray/older bootstrap left in a mixed-package directory cannot be run in its place (owner P1).
+function Test-Sha256SumsEntry {
+  param([string]$FilePath, [string]$Sha256SumsPath, [string]$ExpectedName)
+  if (-not (Test-Path $FilePath)) { return @{ ok = $false; reason = 'file_missing' } }
+  if (-not (Test-Path $Sha256SumsPath)) { return @{ ok = $false; reason = 'sha256sums_missing' } }
+  $actual = Get-Sha256Hex $FilePath
+  foreach ($line in Get-Content $Sha256SumsPath) {
+    $parts = $line -split '\s+', 2
+    if ($parts.Count -ne 2) { continue }
+    $name = Split-Path -Leaf ($parts[1].Trim())
+    if ($name -ne $ExpectedName) { continue }
+    if ($parts[0].ToLower() -eq $actual) { return @{ ok = $true; reason = 'match' } }
+    return @{ ok = $false; reason = 'checksum_mismatch' }   # named, but the bytes differ
+  }
+  return @{ ok = $false; reason = 'checksum_absent' }        # no SHA256SUMS line for this exact name
+}
+
+# ── Package identity: read gitCommit from BUILD_PROVENANCE.json INSIDE the checksummed archive. ──────
+# The -ExpectedGitSha lock must bind to the bytes we are about to install, not to a swappable sidecar.
+# The old code read <pkg-basename>.json, an EXTERNAL file the build workflow writes gitSha into AFTER the
+# archive is built — so an old archive next to a freshly-written .json would pass the lock (owner P1).
+# BUILD_PROVENANCE.json rides INSIDE the archive (package-build.sh writes ${PACKAGE_ROOT}/BUILD_PROVENANCE.json,
+# and package-verify.sh already enforces a full 40-hex gitCommit), so extracting it from $PackagePath — the
+# same bytes Stage 1 just matched against SHA256SUMS — ties the lock to the real package. Returns the
+# lowercase gitCommit, or throws with a coarse reason (never a value/log body).
+function Get-ArchiveProvenanceGitCommit {
+  param([string]$ArchivePath)
+  $tmp = Join-Path ([System.IO.Path]::GetTempPath()) ("t9prov_" + [guid]::NewGuid().ToString('N').Substring(0, 12))
+  New-Item -ItemType Directory -Path $tmp | Out-Null
+  try {
+    $ext = [System.IO.Path]::GetExtension($ArchivePath).ToLower()
+    if ($ext -eq '.zip') {
+      try { Expand-Archive -Path $ArchivePath -DestinationPath $tmp -Force -ErrorAction Stop } catch { throw 'provenance_archive_unreadable' }
+    } else {
+      # .tgz/.tar.gz — bsdtar ships on Windows 10+ and macOS; extract all to the temp dir.
+      & tar -xzf $ArchivePath -C $tmp 2>$null
+      if ($LASTEXITCODE -ne 0) { throw 'provenance_archive_unreadable' }
+    }
+    $prov = Get-ChildItem -Path $tmp -Recurse -Filter 'BUILD_PROVENANCE.json' -File -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $prov) { throw 'provenance_missing' }
+    $json = Get-Content $prov.FullName -Raw | ConvertFrom-Json
+    $commit = if ($json.PSObject.Properties.Name -contains 'gitCommit') { "$($json.gitCommit)".ToLower() } else { '' }
+    if (-not $commit -or $commit -notmatch '^[0-9a-f]{40}$') { throw 'provenance_git_commit_absent' }
+    return $commit
+  } finally {
+    Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue
+  }
+}
+
+# ── PM2 crash-loop detection (pure, unit-testable). A status='online' SAMPLE cannot catch a loop that
+# cycles online→errored→online BETWEEN samples; the restart_time counter and pm_uptime baseline can.
+# Given the baseline captured right after our deliberate restart, any later increase in restart_time,
+# or a pm_uptime that moved backwards (a fresh start resets it), means the process restarted on its own.
+# Returns @{ ok = $bool; reason = <coarse> }.
+function Test-Pm2StableSample {
+  param($Baseline, $Sample)
+  if (-not $Sample) { return @{ ok = $false; reason = 'missing' } }
+  $state = "$($Sample.state)"
+  if ($state -ne 'online') { return @{ ok = $false; reason = "state:$state" } }
+  if ($null -ne $Baseline) {
+    if ([int]$Sample.restartTime -gt [int]$Baseline.restartTime) { return @{ ok = $false; reason = 'restart_loop' } }
+    # pm_uptime is an epoch-ms start time; a self-restart makes it LATER than the baseline start.
+    if ([long]$Sample.uptime -gt [long]$Baseline.uptime) { return @{ ok = $false; reason = 'uptime_reset' } }
+  }
+  return @{ ok = $true; reason = 'stable' }
+}
+
+# ── Smoke outcome (pure, unit-testable). The smoke prints values-free summary fields; a real steady
+# state requires ALL THREE: mvpSmoke.pass=true AND auditActionsCovered=8/8 AND selfScanClean=true.
+# Absent/unparseable audit or selfScan is a FAILURE, never a silent record of 'N/8' that still passes
+# (owner P2 — fail-closed on absence). Returns @{ pass; audit; selfScan; ok; reason }.
+function Test-SmokeOutcome {
+  param([string]$Joined)
+  $pass = ($Joined -match 'mvpSmoke\.pass=true' -or $Joined -match '(?m)^\s*pass=true')
+  $audit = if ($Joined -match 'auditActionsCovered=(\d+/8)') { $Matches[1] } else { 'N/8' }
+  $selfScan = ($Joined -match 'selfScanClean=true')
+  $ok = $true; $reason = 'ok'
+  if (-not $pass) { $ok = $false; $reason = 'smoke_not_pass' }
+  elseif ($audit -ne '8/8') { $ok = $false; $reason = 'audit_incomplete' }
+  elseif (-not $selfScan) { $ok = $false; $reason = 'self_scan_not_clean' }
+  return @{ pass = $pass; audit = $audit; selfScan = $selfScan; ok = $ok; reason = $reason }
+}
+
 # ── Read the admin token WITHOUT ever exposing it (env var, else secure prompt). ─────────────────
 function Read-AdminTokenSecure {
   $fromEnv = [Environment]::GetEnvironmentVariable($AdminTokenEnvVar)
@@ -128,16 +221,15 @@ function Invoke-ShaStage {
   if (-not $matched) { Stop-WithFailure 'sha' @{ reason = 'checksum_mismatch' } }
 
   if ($ExpectedGitSha) {
-    # An -ExpectedGitSha lock is only meaningful if it is ENFORCED. metadata json rides next to the
-    # package as <pkg-basename>.json (see package-build workflow). A missing metadata file, or metadata
-    # without a gitSha, is a FAILURE — never a silent pass — otherwise the lock the operator asked for
-    # would be a no-op exactly when it matters.
-    $metaPath = [System.IO.Path]::ChangeExtension($PackagePath, '.json')
-    if (-not (Test-Path $metaPath)) { Stop-WithFailure 'sha' @{ reason = 'metadata_missing' } }
-    $meta = Get-Content $metaPath -Raw | ConvertFrom-Json
-    $metaSha = if ($meta.PSObject.Properties.Name -contains 'gitSha') { "$($meta.gitSha)".ToLower() } else { '' }
-    if (-not $metaSha) { Stop-WithFailure 'sha' @{ reason = 'metadata_git_sha_absent' } }
-    if ($metaSha -ne $ExpectedGitSha.ToLower()) { Stop-WithFailure 'sha' @{ reason = 'git_sha_mismatch' } }
+    # The -ExpectedGitSha lock must bind to the ARCHIVE we just checksummed, not to a swappable sidecar.
+    # Read gitCommit from BUILD_PROVENANCE.json INSIDE $PackagePath — an old archive carries its OWN old
+    # gitCommit, so it can no longer be laundered past the lock by writing a fresh external .json.
+    try {
+      $archiveCommit = Get-ArchiveProvenanceGitCommit $PackagePath
+    } catch {
+      Stop-WithFailure 'sha' @{ reason = "$($_.Exception.Message)" }
+    }
+    if ($archiveCommit -ne $ExpectedGitSha.ToLower()) { Stop-WithFailure 'sha' @{ reason = 'git_sha_mismatch' } }
   }
   $Summary.packageShaMatch = 'PASS'
   Write-Stage 'stage 1: PASS'
@@ -146,9 +238,29 @@ function Invoke-ShaStage {
 # ── Stage 2: install via the package's OWN bootstrap (never re-implemented here) ─────────────────
 function Invoke-BootstrapStage {
   Write-Stage 'stage 2: install (package bootstrap)'
-  $bootstrap = Get-ChildItem -Path (Split-Path -Parent $PackagePath) -Filter '*-deploy-bootstrap.ps1' -ErrorAction SilentlyContinue | Select-Object -First 1
-  if (-not $bootstrap) { Stop-WithFailure 'install' @{ reason = 'bootstrap_ps1_missing' } }
-  & $bootstrap.FullName -PackagePath $PackagePath -DeployRoot $DeployRoot
+  # Select the bootstrap by its EXACT bound name, never "first *-deploy-bootstrap.ps1" — in a directory
+  # holding more than one package the first-match could run a DIFFERENT package's installer (owner P1).
+  # The name is deterministic: <package-basename>-deploy-bootstrap.ps1 (package-build.sh). When the
+  # sidecar metadata is present we also assert its windowsFirstHopBootstrap agrees (honor the operator's
+  # "select by bound metadata"), and we verify the chosen file against its SHA256SUMS entry by exact name.
+  $pkgDir = Split-Path -Parent $PackagePath
+  $pkgBase = [System.IO.Path]::GetFileNameWithoutExtension($PackagePath)
+  $bootstrapName = "$pkgBase-deploy-bootstrap.ps1"
+
+  $metaPath = [System.IO.Path]::ChangeExtension($PackagePath, '.json')
+  if (Test-Path $metaPath) {
+    $meta = Get-Content $metaPath -Raw | ConvertFrom-Json
+    $metaBoot = if ($meta.PSObject.Properties.Name -contains 'windowsFirstHopBootstrap') { Split-Path -Leaf "$($meta.windowsFirstHopBootstrap)" } else { '' }
+    if ($metaBoot -and $metaBoot -ne $bootstrapName) { Stop-WithFailure 'install' @{ reason = 'bootstrap_name_metadata_mismatch' } }
+  }
+
+  $bootstrapPath = Join-Path $pkgDir $bootstrapName
+  if (-not (Test-Path $bootstrapPath)) { Stop-WithFailure 'install' @{ reason = 'bootstrap_ps1_missing' } }
+  $shaPath = if ($Sha256SumsPath) { $Sha256SumsPath } else { Join-Path $pkgDir 'SHA256SUMS' }
+  $verdict = Test-Sha256SumsEntry $bootstrapPath $shaPath $bootstrapName
+  if (-not $verdict.ok) { Stop-WithFailure 'install' @{ reason = "bootstrap_$($verdict.reason)" } }
+
+  & $bootstrapPath -PackagePath $PackagePath -DeployRoot $DeployRoot
   if ($LASTEXITCODE -ne 0) { Stop-WithFailure 'install' @{ exitCode = $LASTEXITCODE } }
   Write-Stage 'stage 2: PASS'
 }
@@ -173,20 +285,39 @@ function Invoke-MigrationStage {
 }
 
 # ── Stage 4: pm2 restart + POLL stable-online (command success != stable service) ────────────────
+# Normalize one `pm2 jlist` entry to @{ state; restartTime; uptime } (values-free: no raw jlist echoed).
+function Get-Pm2Sample {
+  $entry = (& pm2 jlist 2>$null | ConvertFrom-Json | Where-Object { $_.name -eq 'metasheet-backend' } | Select-Object -First 1)
+  if (-not $entry) { return $null }
+  [pscustomobject]@{
+    state       = "$($entry.pm2_env.status)"
+    restartTime = [int]($entry.pm2_env.restart_time)
+    uptime      = [long]($entry.pm2_env.pm_uptime)
+  }
+}
+
 function Invoke-Pm2StableStage {
   Write-Stage 'stage 4: pm2 restart + stable-online poll'
-  & pm2 restart metasheet-backend 2>&1 | ForEach-Object { Write-Stage "pm2: $_" }
+  # Coarsen the restart output (do not echo raw pm2 lines) — the values-free guarantee covers the summary
+  # artifacts; keep the transcript free of raw tool output too.
+  & pm2 restart metasheet-backend *> $null
   if ($LASTEXITCODE -ne 0) { Stop-WithFailure 'pm2Restart' @{ reason = 'restart_command_failed' } }
-  # Poll: the process must STAY 'online' for the whole window — a crash-loop shows online→errored.
+  # Baseline captured right AFTER our deliberate restart. A crash-loop that flickers online→errored→online
+  # between 2s samples would pass a bare status check — but each self-restart bumps restart_time and moves
+  # pm_uptime forward, so comparing against this baseline catches it (owner P2).
+  Start-Sleep -Seconds 1
+  $baseline = Get-Pm2Sample
+  if (-not $baseline -or $baseline.state -ne 'online') {
+    Stop-WithFailure 'pm2StableOnline' @{ pm2State = $(if ($baseline) { $baseline.state } else { 'missing' }) }
+  }
   $deadline = (Get-Date).AddSeconds($StableOnlineSeconds)
   while ((Get-Date) -lt $deadline) {
-    $status = (& pm2 jlist 2>$null | ConvertFrom-Json | Where-Object { $_.name -eq 'metasheet-backend' } | Select-Object -First 1)
-    $state = if ($status) { "$($status.pm2_env.status)" } else { 'missing' }
-    if ($state -ne 'online') { Stop-WithFailure 'pm2StableOnline' @{ pm2State = $state } }
+    $verdict = Test-Pm2StableSample $baseline (Get-Pm2Sample)
+    if (-not $verdict.ok) { Stop-WithFailure 'pm2StableOnline' @{ pm2State = $verdict.reason } }
     Start-Sleep -Seconds 2
   }
   $Summary.pm2StableOnline = 'PASS'
-  Write-Stage 'stage 4: PASS (stayed online)'
+  Write-Stage 'stage 4: PASS (stayed online, no restart-loop)'
 }
 
 # ── Stage 5: /api/health ─────────────────────────────────────────────────────────────────────────
@@ -223,32 +354,39 @@ function Invoke-SmokeStage {
   }
   # Parse ONLY the values-free summary fields the smoke prints; never echo the raw $out.
   $joined = ($out | Out-String)
-  $pass = ($joined -match 'mvpSmoke\.pass=true' -or $joined -match '(?m)^\s*pass=true')
-  $audit = if ($joined -match 'auditActionsCovered=(\d+/8)') { $Matches[1] } else { 'N/8' }
-  $selfScan = ($joined -match 'selfScanClean=true')
-  $Summary['mvpSmoke.pass'] = if ($pass) { 'true' } else { 'false' }
-  $Summary.auditActionsCovered = $audit
-  $Summary.selfScanClean = if ($selfScan) { 'true' } else { 'false' }
-  if ($exit -ne 0 -or -not $pass) { Stop-WithFailure 'smoke' @{ smokeExit = $exit } }
+  $outcome = Test-SmokeOutcome $joined
+  $Summary['mvpSmoke.pass'] = if ($outcome.pass) { 'true' } else { 'false' }
+  $Summary.auditActionsCovered = $outcome.audit
+  $Summary.selfScanClean = if ($outcome.selfScan) { 'true' } else { 'false' }
+  # Fail-closed: a green exit is NOT a steady state unless the audit surface is fully covered (8/8) and
+  # the self-scan is clean. An absent/unparseable field records 'N/8'/'false' and FAILS here — it never
+  # passes silently (owner P2).
+  if ($exit -ne 0) { Stop-WithFailure 'smoke' @{ smokeExit = $exit } }
+  if (-not $outcome.ok) { Stop-WithFailure 'smoke' @{ reason = $outcome.reason } }
   Write-Stage 'stage 6: PASS'
 }
 
 # ── Orchestrate ──────────────────────────────────────────────────────────────────────────────────
-try {
-  Invoke-ShaStage
-  Invoke-BootstrapStage
-  Invoke-MigrationStage
-  Invoke-Pm2StableStage
-  Invoke-HealthStage
-  $token = Read-AdminTokenSecure
-  Invoke-SmokeStage -Token $token
-  Emit-Summary
-  Write-Stage 'ACCEPTANCE PASS — all stages green'
-  exit 0
-} catch {
-  # An unexpected error at a stage that did not itself Stop-WithFailure: record coarse, never the message body.
-  if ($Summary.failedStage -eq 'none') { $Summary.failedStage = 'unexpected'; $FailDetail['errorType'] = $_.Exception.GetType().Name }
-  Emit-Summary
-  Write-Stage 'ACCEPTANCE FAILED (unexpected)'
-  exit 1
+# Entry-point guard: when the script is DOT-SOURCED (InvocationName '.') only the functions are defined,
+# so the behavioural tests can exercise the pure helpers (Test-SmokeOutcome / Test-Pm2StableSample) with
+# crafted inputs — the pm2/health/smoke stages cannot be driven end-to-end off a Windows host + live pm2.
+if ($MyInvocation.InvocationName -ne '.') {
+  try {
+    Invoke-ShaStage
+    Invoke-BootstrapStage
+    Invoke-MigrationStage
+    Invoke-Pm2StableStage
+    Invoke-HealthStage
+    $token = Read-AdminTokenSecure
+    Invoke-SmokeStage -Token $token
+    Emit-Summary
+    Write-Stage 'ACCEPTANCE PASS — all stages green'
+    exit 0
+  } catch {
+    # An unexpected error at a stage that did not itself Stop-WithFailure: record coarse, never the message body.
+    if ($Summary.failedStage -eq 'none') { $Summary.failedStage = 'unexpected'; $FailDetail['errorType'] = $_.Exception.GetType().Name }
+    Emit-Summary
+    Write-Stage 'ACCEPTANCE FAILED (unexpected)'
+    exit 1
+  }
 }
