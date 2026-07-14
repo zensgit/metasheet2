@@ -46,12 +46,47 @@ export interface Site {
 export const MARKER_WINDOW = 3
 
 /**
- * Every form a `meta_records` row-mutation can take in this codebase: raw SQL (case-insensitive, verb
- * and table name may be split across lines by `\s+`) and the Kysely query-builder forms, added
- * pre-emptively exactly as the rank-8 guard does for its own MUTATION_RE.
+ * Table-reference sub-pattern for `meta_records` (gate P3-1). The original `MUTATION_RE` (as landed in
+ * #4251) matched only the bare, unquoted, unqualified spelling `meta_records` — a SCHEMA-QUALIFIED
+ * (`public.meta_records`, `"public".meta_records`) or DOUBLE-QUOTED SQL-identifier form
+ * (`"meta_records"`, `public."meta_records"`, `"public"."meta_records"`) of the exact same table
+ * silently evaded it. Zero such producers exist in `src` today (grep-verified) — this is fail-closed
+ * hardening against a P3 finding, not a fix for a live bypass.
+ *
+ * `(?!\w)` immediately after the literal `meta_records` (NOT a trailing `\b` on the outer group) is
+ * deliberate: `\b` right after an optional closing `"` can be FALSE — `\b` requires one side of the
+ * boundary to be a word character, and a closing quote followed by e.g. a space has NON-word characters
+ * on both sides — which would silently un-match every quoted form. `(?!\w)` binds directly to the end of
+ * the `meta_records` token itself, so `meta_records_trash` / `meta_record_revisions` / `meta_records_xyz`
+ * (different tables) still correctly do NOT match, quoted or not.
+ *
+ * DOCUMENTED RESIDUAL (accepted, not fixed): a table name that is ENTIRELY a runtime variable/template
+ * interpolation with no literal `meta_records` substring anywhere in the statement text itself — e.g.
+ * `` `UPDATE ${TABLE} SET ...` `` where `TABLE` is assigned `'meta_records'` somewhere else in the file —
+ * cannot be resolved by a lexical regex scanner; that requires real type-aware static analysis, which is
+ * out of scope for an fs-scan guard. Zero such producers exist in `src` today (grep-verified: every
+ * `meta_records` mutation in this codebase spells the table name as a literal within the statement
+ * itself). Deliberately NOT papered over with a heuristic that flags "any INSERT/UPDATE/DELETE whose
+ * table position is a bare `${...}` expression" — that would false-positive on every unrelated
+ * parameterized-table helper in the codebase (none of which touch `meta_records`), trading a currently
+ * unreachable gap for a guaranteed false-positive tax on unrelated tables. If a `meta_records` write ever
+ * loses its literal spelling to a fully-variable table name, it evades this guard AND the rank-8
+ * lock-disposition guard (`multitable-record-lock-guard.guard.test.ts`, same documented residual) —
+ * flagged here as a known, accepted gap.
  */
-export const MUTATION_RE =
-  /\b(?:INSERT\s+INTO\s+meta_records|UPDATE\s+meta_records|DELETE\s+FROM\s+meta_records)\b|(?:updateTable|deleteFrom|insertInto)\(\s*['"`]meta_records['"`]/gi
+const TABLE_REF = String.raw`(?:"?\w+"?\.)?"?meta_records(?!\w)"?`
+
+/**
+ * Every form a `meta_records` row-mutation can take in this codebase: raw SQL (case-insensitive, verb
+ * and table name may be split across lines by `\s+`, optionally schema-qualified and/or double-quoted —
+ * see `TABLE_REF` above) and the Kysely query-builder forms, added pre-emptively exactly as the rank-8
+ * guard does for its own MUTATION_RE.
+ */
+export const MUTATION_RE = new RegExp(
+  String.raw`\b(?:INSERT\s+INTO\s+${TABLE_REF}|UPDATE\s+${TABLE_REF}|DELETE\s+FROM\s+${TABLE_REF})` +
+    String.raw`|(?:updateTable|deleteFrom|insertInto)\(\s*['"\`]${TABLE_REF}['"\`]`,
+  'gi',
+)
 
 /**
  * Replace every `//...` and `/* ... *\/` comment with equal-length whitespace (newlines preserved, so

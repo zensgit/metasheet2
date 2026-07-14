@@ -90,6 +90,91 @@ describe('OD-6 scanner — case-insensitive + multiline mutation detection (bloc
   })
 })
 
+describe('OD-6 scanner — gate P3-1: schema-qualified / double-quoted meta_records no longer evades detection', () => {
+  test('DEFEAT PROOF: schema-qualified unmarked UPDATE (public.meta_records) is now detected', () => {
+    const src = "async function u(query: any) {\n  await query('UPDATE public.meta_records SET data = $1 WHERE id = $2', [a, b])\n}\n"
+    const sites = enumerateSites('fixture.ts', src)
+    expect(sites).toHaveLength(1)
+    expect(sites[0].disposition).toBeNull()
+  })
+
+  test('DEFEAT PROOF: double-quoted unmarked UPDATE ("meta_records") is now detected', () => {
+    const src = 'async function u(query: any) {\n  await query(\'UPDATE "meta_records" SET data = $1 WHERE id = $2\', [a, b])\n}\n'
+    const sites = enumerateSites('fixture.ts', src)
+    expect(sites).toHaveLength(1)
+    expect(sites[0].disposition).toBeNull()
+  })
+
+  test('DEFEAT PROOF: schema-qualified AND double-quoted unmarked DELETE (public."meta_records") is now detected', () => {
+    const src = 'async function d(query: any) {\n  await query(\'DELETE FROM public."meta_records" WHERE id = $1\', [id])\n}\n'
+    const sites = enumerateSites('fixture.ts', src)
+    expect(sites).toHaveLength(1)
+    expect(sites[0].disposition).toBeNull()
+  })
+
+  test('DEFEAT PROOF: quoted schema AND quoted table unmarked INSERT ("public"."meta_records") is now detected', () => {
+    const src = 'async function c(query: any) {\n  await query(\'INSERT INTO "public"."meta_records" (id, data) VALUES ($1, $2)\', [a, b])\n}\n'
+    const sites = enumerateSites('fixture.ts', src)
+    expect(sites).toHaveLength(1)
+    expect(sites[0].disposition).toBeNull()
+  })
+
+  test('DEFEAT PROOF: schema-qualified Kysely builder form (updateTable(\'public.meta_records\')) is now detected', () => {
+    const src = "async function k(db: any) {\n  await db.updateTable('public.meta_records').set({ x: 1 }).execute()\n}\n"
+    const sites = enumerateSites('fixture.ts', src)
+    expect(sites).toHaveLength(1)
+    expect(sites[0].disposition).toBeNull()
+  })
+
+  test('a marked schema-qualified site is still correctly classified (widening did not break marker classification)', () => {
+    const src = [
+      'function doThing(query: any) {',
+      '  // revision-emitted: test fixture, schema-qualified',
+      "  const x = query('UPDATE public.meta_records SET data = $1 WHERE id = $2', [a, b])",
+      '}',
+    ].join('\n')
+    const sites = enumerateSites('fixture.ts', src)
+    expect(sites).toHaveLength(1)
+    expect(sites[0].disposition).toBe('EMITTED')
+  })
+
+  test('sibling table meta_records_trash, SCHEMA-QUALIFIED, is still NOT matched (no over-widening)', () => {
+    const src = "async function t(query: any) {\n  await query('UPDATE public.meta_records_trash SET x = 1', [])\n}\n"
+    const sites = enumerateSites('fixture.ts', src)
+    expect(sites).toHaveLength(0)
+  })
+
+  test('sibling table meta_records_trash, DOUBLE-QUOTED, is still NOT matched (no over-widening)', () => {
+    const src = 'async function t(query: any) {\n  await query(\'UPDATE "meta_records_trash" SET x = 1\', [])\n}\n'
+    const sites = enumerateSites('fixture.ts', src)
+    expect(sites).toHaveLength(0)
+  })
+
+  test('sibling table meta_record_revisions (singular "record") is still NOT matched', () => {
+    const src = "async function t(query: any) {\n  await query('UPDATE public.meta_record_revisions SET x = 1', [])\n}\n"
+    const sites = enumerateSites('fixture.ts', src)
+    expect(sites).toHaveLength(0)
+  })
+
+  test('sibling table meta_records_xyz, DOUBLE-QUOTED, is still NOT matched', () => {
+    const src = 'async function t(query: any) {\n  await query(\'DELETE FROM "meta_records_xyz" WHERE id = $1\', [id])\n}\n'
+    const sites = enumerateSites('fixture.ts', src)
+    expect(sites).toHaveLength(0)
+  })
+
+  test('sibling table meta_records2 (digit suffix, no underscore separator) is still NOT matched', () => {
+    const src = "async function t(query: any) {\n  await query('UPDATE meta_records2 SET x = 1', [])\n}\n"
+    const sites = enumerateSites('fixture.ts', src)
+    expect(sites).toHaveLength(0)
+  })
+
+  test('sibling table meta_recordsxyz (letter suffix, no underscore separator) is still NOT matched', () => {
+    const src = "async function t(query: any) {\n  await query('UPDATE meta_recordsxyz SET x = 1', [])\n}\n"
+    const sites = enumerateSites('fixture.ts', src)
+    expect(sites).toHaveLength(0)
+  })
+})
+
 describe('OD-6 scanner — marker window discipline (mirrors rank-8 MARKER_WINDOW=3)', () => {
   test('a revision-emitted marker within the 3-line window is recognized', () => {
     const src = [

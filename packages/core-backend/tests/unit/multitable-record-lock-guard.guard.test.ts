@@ -83,15 +83,44 @@ interface Site {
 }
 
 /**
+ * Table-reference sub-pattern for `meta_records` (gate P3-1 — mirrors
+ * `multitable-revision-disposition-scanner.ts`'s `TABLE_REF` exactly; see that file's docstring for the
+ * full evasion-then-detect rationale and the documented residual, reproduced briefly here). The original
+ * `MUTATION_RE` matched only the bare, unquoted, unqualified spelling `meta_records` — a SCHEMA-QUALIFIED
+ * (`public.meta_records`) or DOUBLE-QUOTED SQL-identifier form (`"meta_records"`, `public."meta_records"`)
+ * of the exact same table silently evaded it. Zero such producers exist in `src` today (grep-verified).
+ *
+ * `(?!\w)` right after the literal `meta_records` (not a trailing `\b` on the outer group) is deliberate:
+ * `\b` immediately after an optional closing `"` can be FALSE (both the quote and whatever follows it are
+ * non-word characters), which would silently un-match every quoted form. `(?!\w)` binds directly to the
+ * end of the `meta_records` token, so `meta_records_trash` / `meta_record_revisions` / `meta_records_xyz`
+ * (different tables) still correctly do NOT match.
+ *
+ * DOCUMENTED RESIDUAL (accepted, not fixed — same as the OD-6 scanner): a table name that is ENTIRELY a
+ * runtime variable/template interpolation with no literal `meta_records` substring anywhere in the
+ * statement text cannot be resolved by a lexical regex; that needs real static analysis, out of scope
+ * here. Zero such producers exist in `src` today. Deliberately not papered over with a heuristic that
+ * flags any `${...}`-templated table position, which would false-positive on every unrelated
+ * parameterized-table helper in the codebase.
+ */
+const TABLE_REF = String.raw`(?:"?\w+"?\.)?"?meta_records(?!\w)"?`
+
+/**
  * Every form a `meta_records` row-mutation can take in this codebase:
- *   • raw SQL `UPDATE meta_records` / `DELETE FROM meta_records` (the only forms in use today), and
+ *   • raw SQL `UPDATE meta_records` / `DELETE FROM meta_records` (the only forms in use today, optionally
+ *     schema-qualified and/or double-quoted — see `TABLE_REF` above), and
  *   • the Kysely query-builder forms `.updateTable('meta_records')` / `.deleteFrom('meta_records')`
  *     (any quote style), added pre-emptively so a future builder-style mutation is also caught.
  * `SELECT ... FOR UPDATE` row locks do NOT match (the token before `meta_records` is `FROM`, not the
- * mutation verb), so the read-then-lock pattern is correctly not flagged as a mutation.
+ * mutation verb), so the read-then-lock pattern is correctly not flagged as a mutation. Case-sensitive
+ * and single-space (not `\s+`) between verb and table, unchanged from the original — only the
+ * table-detection portion (`TABLE_REF`) was widened; this guard's own verb-matching / per-line scanning
+ * behavior is out of scope for gate P3-1.
  */
-const MUTATION_RE =
-  /\b(?:UPDATE meta_records|DELETE FROM meta_records)\b|(?:updateTable|deleteFrom)\(\s*['"`]meta_records['"`]/
+const MUTATION_RE = new RegExp(
+  String.raw`\b(?:UPDATE ${TABLE_REF}|DELETE FROM ${TABLE_REF})` +
+    String.raw`|(?:updateTable|deleteFrom)\(\s*['"\`]${TABLE_REF}['"\`]`,
+)
 
 function classify(window: string): Disposition | null {
   if (/\/\/\s*lock-guarded:/.test(window)) return 'GUARDED'
@@ -177,5 +206,55 @@ describe('rank-8 record-lock mutation-path guard — durable structural guard', 
     expect([...lockSrc.matchAll(/function ensureRecordNotLocked\(/g)].length).toBe(1)
     // the rule itself is `locked && !canEditWhileLocked` — assert it routes through canEditWhileLocked
     expect(lockSrc).toMatch(/ensureRecordNotLocked[\s\S]{0,400}canEditWhileLocked\(/)
+  })
+
+  test('gate P3-1: the two hand-synced TABLE_REF copies (this file + the OD-6 scanner) stay byte-identical', () => {
+    // TABLE_REF is duplicated (not shared via import — the two guards are independently owned) between
+    // this file and `lib/multitable-revision-disposition-scanner.ts`. A future edit to one copy that
+    // forgets the other would silently re-open the gate-P3-1 gap in whichever guard was NOT updated.
+    // This is a cheap textual pin, not a semantic one — it only proves the two source lines are
+    // byte-identical, not that either is correct (the fixture tests above/below do that).
+    const extractTableRef = (src: string): string => {
+      const m = src.match(/const TABLE_REF = String\.raw`([^`]*)`/)
+      if (!m) throw new Error('TABLE_REF definition not found — did its declaration shape change?')
+      return m[1]
+    }
+    const selfSrc = readFileSync(join(__dirname, 'multitable-record-lock-guard.guard.test.ts'), 'utf8')
+    const scannerSrc = readFileSync(join(__dirname, 'lib/multitable-revision-disposition-scanner.ts'), 'utf8')
+    expect(extractTableRef(selfSrc)).toBe(extractTableRef(scannerSrc))
+  })
+})
+
+describe('rank-8 record-lock mutation-path guard — gate P3-1: schema-qualified / double-quoted meta_records', () => {
+  test('DEFEAT PROOF: schema-qualified unmarked UPDATE (public.meta_records) is now detected', () => {
+    const src = "async function u(query: any) {\n  await query('UPDATE public.meta_records SET x = $1 WHERE id = $2', [a, b])\n}\n"
+    const sites = enumerateSites('fixture.ts', src)
+    expect(sites).toHaveLength(1)
+    expect(sites[0].disposition).toBeNull()
+  })
+
+  test('DEFEAT PROOF: double-quoted unmarked UPDATE ("meta_records") is now detected', () => {
+    const src = 'async function u(query: any) {\n  await query(\'UPDATE "meta_records" SET x = $1 WHERE id = $2\', [a, b])\n}\n'
+    const sites = enumerateSites('fixture.ts', src)
+    expect(sites).toHaveLength(1)
+    expect(sites[0].disposition).toBeNull()
+  })
+
+  test('sibling table meta_records_trash, schema-qualified, is NOT matched (no over-widening)', () => {
+    const src = "async function t(query: any) {\n  await query('UPDATE public.meta_records_trash SET x = 1', [])\n}\n"
+    const sites = enumerateSites('fixture.ts', src)
+    expect(sites).toHaveLength(0)
+  })
+
+  test('sibling table meta_records2 (digit suffix, no underscore) is NOT matched', () => {
+    const src = "async function t(query: any) {\n  await query('UPDATE meta_records2 SET x = 1', [])\n}\n"
+    const sites = enumerateSites('fixture.ts', src)
+    expect(sites).toHaveLength(0)
+  })
+
+  test('sibling table meta_recordsxyz (letter suffix, no underscore) is NOT matched', () => {
+    const src = "async function t(query: any) {\n  await query('UPDATE meta_recordsxyz SET x = 1', [])\n}\n"
+    const sites = enumerateSites('fixture.ts', src)
+    expect(sites).toHaveLength(0)
   })
 })
