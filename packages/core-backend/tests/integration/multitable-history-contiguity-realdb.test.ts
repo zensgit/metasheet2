@@ -122,6 +122,7 @@ describeIfDatabase('W0-1 generation-aware history contiguity (real DB)', () => {
   })
   afterAll(async () => {
     delete process.env.MULTITABLE_ENABLE_PIT_RESET
+    delete process.env.MULTITABLE_ENABLE_SHEET_REVERT
     for (const sheet of [SHEET, SHEET_PROJ, SHEET_PEOPLE]) {
       for (const t of ['meta_record_version_markers', 'meta_records_trash', 'meta_record_revisions', 'meta_records', 'meta_fields']) await q(`DELETE FROM ${t} WHERE sheet_id = $1`, [sheet]).catch(() => {})
       await q('DELETE FROM meta_sheets WHERE id = $1', [sheet]).catch(() => {})
@@ -131,6 +132,9 @@ describeIfDatabase('W0-1 generation-aware history contiguity (real DB)', () => {
   })
   beforeEach(async () => {
     process.env.MULTITABLE_ENABLE_PIT_RESET = 'true'
+    // #4261 (landed mid-flight on main) closes revert-execute by default behind this master gate;
+    // these goldens assert the CONTIGUITY precheck's verdicts, so the interim gate must be open.
+    process.env.MULTITABLE_ENABLE_SHEET_REVERT = 'true'
     for (const sheet of [SHEET, SHEET_PROJ, SHEET_PEOPLE]) {
       await q('DELETE FROM meta_record_version_markers WHERE sheet_id = $1', [sheet]).catch(() => {})
       await q('DELETE FROM meta_records_trash WHERE sheet_id = $1', [sheet]).catch(() => {})
