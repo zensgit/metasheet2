@@ -7,11 +7,11 @@
   implementation input, not an authority and not merge-ready until this lock is ratified and its L3 corrections land.
 - **Grounding:** `origin/main` at `ffad80b97` (contains #4269, #4320, #4325, #4328). Source sites were re-read on that
   tree; line numbers below are orientation anchors and must be refreshed before implementation.
-- **Containment:** run [29422161484](https://github.com/zensgit/metasheet2/actions/runs/29422161484) remains valid
-  evidence for both running environments and their next-restart Compose render. The workflow independently rebuilt
-  Compose from each running container's `config_files` + `working_dir` labels; it did not rely on #4316's candidate
-  validation. #4329 fixes that candidate-validation cwd for future deploys, but does not invalidate this independent
-  PASS. No recovery flag was changed by this review.
+- **Containment:** after #4329 merged, read-only run
+  [29427111850](https://github.com/zensgit/metasheet2/actions/runs/29427111850) returned PASS for both production and
+  staging: `MULTITABLE_ENABLE_SHEET_REVERT` and `MULTITABLE_ENABLE_PIT_RESET` were absent from each backend's running
+  environment and from its rendered next-restart Compose configuration. The workflow rebuilt Compose from each
+  running container's `config_files` + `working_dir` labels. No recovery flag was changed by this verification.
 
 ## 0. Why v3.6 is not ratifiable
 
@@ -276,7 +276,7 @@ All real-DB tests must be explicitly listed in `plugin-tests.yml` and mutation-p
 
 | Order | Slice | Exit condition | Estimate |
 |---|---|---|---|
-| 0 | containment/tooling | #4329 merged; read-only target=both PASS refreshed if desired; no env flip | ops, no dev pw |
+| 0 | containment/tooling | #4329 merged; read-only target=both run 29427111850 PASS; no env flip | complete |
 | 1 | L3 correction | salvage #4309 + exact bigint + target-generation shape + existing P2 fixes | 1-1.5 pw |
 | 2 | L4 fence + C8 | complete writer/exemption matrix; full in-fence execute recompute | 3-4 pw |
 | 3 | L5 checkpoint/system_kind | active baseline, seq trust floor, retention + spoof goldens | 2-3 pw |
