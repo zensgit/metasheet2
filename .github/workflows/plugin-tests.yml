@@ -508,6 +508,8 @@ jobs:
             tests/integration/multitable-tombstone-record-capture-realdb.test.ts \
             tests/integration/multitable-tombstone-retention-realdb.test.ts \
             tests/integration/multitable-automation-outbox-schema-realdb.test.ts \
+            tests/integration/multitable-action-applied-ledger-realdb.test.ts \
+            tests/integration/multitable-fwb-write-action-realdb.test.ts \
             tests/integration/multitable-automation-dispatcher-claim-realdb.test.ts \
             tests/integration/multitable-automation-dispatch-loop-realdb.test.ts \
             tests/integration/multitable-automation-outbox-enqueue-realdb.test.ts \
