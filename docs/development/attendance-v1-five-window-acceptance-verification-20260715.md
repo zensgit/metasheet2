@@ -78,8 +78,10 @@ Every failure was fail-closed (real staging DB untouched until proofs held); the
   `packages/core-backend/src/`, and the attendance web views is EMPTY — the 13 intervening
   commits are attendance harness/ops fixes (#4294/#4296/#4301, scripts/ops only), owner docs
   ratifications (#4196/#4203/#4195/#4239/#4287), and multitable/web work
-  (#4285/#4290/#4295/#4298/#4300). Zero attendance-runtime change. If the owner does not
-  accept equivalence, the alternative is an exact-SHA rerun.
+  (#4285/#4290/#4295/#4298/#4300). Zero attendance-runtime change. **Owner ACCEPTED the
+  equivalence 2026-07-15 (21:15 local)** after independently comparing `d65a77c25..91d924fb1`
+  and confirming the attendance-runtime diff is empty — no exact-SHA rerun required. Recorded
+  here per the owner's instruction.
 - Tracker backfilled in the same PR (helper-PASS framing, real stamp names).
 
 ## 6. Remaining before the final `*_STAGING_SMOKE_PASS` stamps + 关闭 issue-3317 + tag
@@ -94,11 +96,12 @@ Per-window manual-browser / owner-decision items (owner review 2026-07-15):
 5. **HMR-5**: confirm-snapshot browser step + a real notification channel + owner judgment —
    `sendPosture=worker-on:failed_recognized` only proves the worker correctly recognized a
    terminal failure, NOT that a notification was really delivered.
-6. **§7 consolidated residue sweep** green (all counts 0) + env-flag rollback + settings
-   baseline confirmation at window close.
-7. **DingTalk S1-S8 / U1-U13** — esp. U11-a real corp-anchor callback; B1 NOT in v1.
-8. Owner review → final stamps issued → 关闭 issue-3317 → release tag at full SHA
+6. **DingTalk S1-S8 / U1-U13** — esp. U11-a real corp-anchor callback; B1 NOT in v1.
+7. Owner review → final stamps issued → 关闭 issue-3317 → release tag at full SHA
    `d65a77c250d74143e6671cc424deb7319eadeb51`.
+
+(The former item "§7 consolidated residue sweep" is DONE — run 29397485250 green, see §5 —
+and the exact-SHA equivalence is ACCEPTED by the owner, see §5; both removed from remaining.)
 
 After those: the owner's declaration per the 2026-07-14 ruling — attendance v1 development,
 DingTalk E1-E4 integration, and production acceptance closed; B1/S7/飞书/native-hardware → vNext.
