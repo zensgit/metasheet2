@@ -88,24 +88,29 @@ describeIfDatabase('P2 durable-delivery S1 — automation outbox schema + flag (
     ).rejects.toThrow(/event_id|not-null/i)
   })
 
-  test('event_id CHECK rejects empty AND all-whitespace ids (mirrors the dedup helper .trim()); non-blank accepted', async () => {
-    // negative: empty string — a blank id the dedup helper would treat as no-identity.
-    await expect(
-      q(
-        `INSERT INTO meta_automation_outbox (id, event_type, payload, automation_depth, manifest_version, event_id)
-         VALUES ($1,'approval.approved','{}'::jsonb,0,1,'')`,
-        [OB_EID],
-      ),
-    ).rejects.toThrow(/automation_outbox_event_id_nonblank/)
-    // negative: all-whitespace (space + tab + newline) — the point of [^[:space:]] over a spaces-only btrim:
-    // the helper's JS .trim() strips tab/newline too, so the CHECK must reject them to mirror it.
-    await expect(
-      q(
-        `INSERT INTO meta_automation_outbox (id, event_type, payload, automation_depth, manifest_version, event_id)
-         VALUES ($1,'approval.approved','{}'::jsonb,0,1,$2)`,
-        [OB_EID, ' \t\n '],
-      ),
-    ).rejects.toThrow(/automation_outbox_event_id_nonblank/)
+  test('event_id CHECK requires a printable-ASCII non-space char — rejects empty, ASCII- AND Unicode-whitespace; accepts a real id', async () => {
+    // Every value here is one the dedup helper's `_eventId.trim()` collapses to '' (→ no identity). The
+    // Unicode-whitespace cases are the whole point of `[!-~]` over `[^[:space:]]`: PostgreSQL's `[:space:]`
+    // is ASCII-only, so `[^[:space:]]` would ACCEPT these — while JS `.trim()` strips them — leaving the DB
+    // holding an id the helper treats as blank. `[!-~]` (printable ASCII, no space) rejects them all.
+    const blanks: Array<readonly [string, string]> = [
+      ['empty', ''],
+      ['ascii space+tab+newline', ' \t\n '],
+      ['NBSP U+00A0', '\u00A0'],
+      ['EM SPACE U+2003', '\u2003'],
+      ['narrow NBSP U+202F', '\u202F'],
+      ['BOM / ZWNBSP U+FEFF', '\uFEFF'],
+    ]
+    for (const [label, value] of blanks) {
+      await expect(
+        q(
+          `INSERT INTO meta_automation_outbox (id, event_type, payload, automation_depth, manifest_version, event_id)
+           VALUES ($1,'approval.approved','{}'::jsonb,0,1,$2)`,
+          [OB_EID, value],
+        ),
+        `blank event_id [${label}] must be rejected`,
+      ).rejects.toThrow(/automation_outbox_event_id_nonblank/)
+    }
     // positive control: a normal non-blank id inserts (proves the CHECK gates on blankness, not on event_id itself).
     await expect(
       q(
@@ -176,8 +181,9 @@ describeIfDatabase('P2 durable-delivery S1 — automation outbox schema + flag (
         [OB1],
       ),
     ).resolves.toBeTruthy()
-    // (c) NOT-in_progress + lease → rejected (the OTHER half the review flagged: a stale lease on done/pending
-    //     would be spuriously matched by the reclaim scan).
+    // (c) NOT-in_progress + lease → rejected. The reason is NOT that the reclaim scan would pick it up — that
+    //     scan is status-scoped and never looks at done/pending rows — but to keep a lease meaning EXACTLY
+    //     "owned by a live in_progress worker" (terminal/reclaim transitions must clear it atomically).
     await expect(
       q(
         `INSERT INTO meta_automation_outbox_consumer (outbox_id, consumer_key, status, lease_expires_at)

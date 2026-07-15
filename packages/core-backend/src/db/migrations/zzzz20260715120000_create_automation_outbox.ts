@@ -13,9 +13,11 @@
  *                                        `event_id` is NOT NULL AND non-blank — the stable ORIGINAL-event
  *                                        identity the dispatcher forwards downstream as the per-rule dedup
  *                                        key and the outbound-idempotency seed (#4203 §producer/identity). A
- *                                        CHECK rejects empty/all-whitespace ids, mirroring the dedup helper
- *                                        (`automation-event-dedup.ts`: `_eventId.trim()` → no-identity), so a
- *                                        blank id can't sit in the outbox looking like an identity it isn't.
+ *                                        CHECK requires a printable-ASCII non-space char (`[!-~]`), so any id
+ *                                        the dedup helper (`automation-event-dedup.ts`: `_eventId.trim()`)
+ *                                        would collapse to no-identity — empty, ASCII whitespace, OR Unicode
+ *                                        whitespace (NBSP/EM/narrow-NBSP/BOM, which PostgreSQL's ASCII-only
+ *                                        `[:space:]` misses) — is rejected before it can masquerade as one.
  *                                        It is NOT unique: #4203 §cutover tolerates transient double-emit and
  *                                        dedups at the sink, so a second contract-legal enqueue is allowed.
  *   - `meta_automation_outbox_consumer`— per-(outbox_id, consumer_key) delivery state. `status` is the
@@ -65,12 +67,15 @@ export async function up(db: Kysely<unknown>): Promise<void> {
       manifest_version int  NOT NULL
                          CONSTRAINT automation_outbox_manifest_version_positive CHECK (manifest_version >= 1),
       event_id         text NOT NULL
-                         -- reject empty / all-whitespace ids: the dedup helper (automation-event-dedup.ts)
-                         -- does _eventId.trim() and treats a blank result as NO identity, so a blank id in
-                         -- the outbox would be un-dedupable. [^[:space:]] = at least one non-whitespace char
-                         -- (POSIX class covers space/tab/newline/CR/VT/FF, mirroring JS .trim() over ASCII;
-                         -- a regex, not btrim(), so no backslash escapes leak into this template literal).
-                         CONSTRAINT automation_outbox_event_id_nonblank CHECK (event_id ~ '[^[:space:]]'),
+                         -- reject blank ids: the dedup helper (automation-event-dedup.ts) does _eventId.trim()
+                         -- and treats a blank result as NO identity, so a blank id in the outbox is un-dedupable.
+                         -- event_id is an ASCII identity by contract, so require at least one PRINTABLE-ASCII
+                         -- non-space char: [!-~] = 0x21..0x7E. This is stronger than [^[:space:]] on purpose —
+                         -- PostgreSQL's [:space:] is ASCII-only, so [^[:space:]] would ACCEPT an id made solely
+                         -- of Unicode whitespace (NBSP U+00A0, EM SPACE U+2003, narrow-NBSP U+202F, BOM U+FEFF),
+                         -- all of which JS .trim() strips to '' → no identity. [!-~] rejects those too.
+                         -- (A regex, not btrim(); no backslash escapes leak into this template literal.)
+                         CONSTRAINT automation_outbox_event_id_nonblank CHECK (event_id ~ '[!-~]'),
       created_at       timestamptz NOT NULL DEFAULT now()
     )
   `.execute(db)
