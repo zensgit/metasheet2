@@ -123,8 +123,8 @@ jobs:
       - name: Global History flag manifest contract (R12-C)
         run: node --test scripts/ops/global-history-flag-manifest.test.mjs scripts/ops/multitable-global-history-flag-status.test.mjs
 
-      # #4210 T9: the stock-preparation one-click acceptance script's contract + behavioural tests (36
-      # checks = 11 contract + 25 behavioural) are pure pwsh 7 + tar + node (no DB, no live server — the
+      # #4210 T9: the stock-preparation one-click acceptance script's contract + behavioural tests (40
+      # checks = 14 contract + 26 behavioural) are pure pwsh 7 + tar + node (no DB, no live server — the
       # pm2/health/smoke stages are unit-tested via dot-sourced pure helpers). Run inside the REQUIRED
       # `test` gate, but only ONCE (on 20.x — no need across the 18/20 matrix), early (no pnpm install
       # needed: pwsh/tar ship on ubuntu, node is already set up) so a regression fails the required check
@@ -507,6 +507,7 @@ jobs:
             tests/integration/multitable-tombstone-field-rehydrate-revision-realdb.test.ts \
             tests/integration/multitable-tombstone-record-capture-realdb.test.ts \
             tests/integration/multitable-tombstone-retention-realdb.test.ts \
+            tests/integration/multitable-automation-outbox-schema-realdb.test.ts \
             tests/integration/multitable-attachment-readgate.security.test.ts \
             tests/integration/multitable-ai-write-provenance-batch-grouping-realdb.test.ts \
             tests/integration/multitable-automation-branch-local-wait.test.ts \
