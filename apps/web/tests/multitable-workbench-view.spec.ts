@@ -406,9 +406,14 @@ vi.mock('../src/multitable/components/MetaFormView.vue', () => ({
     },
   }),
 }))
-vi.mock('../src/multitable/components/MetaRecordDrawer.vue', () => ({
+// W2 S3: MultitableWorkbench.vue now renders MetaRecordInspector.vue directly (the shell that
+// absorbed the drawer's tablist/header/lock-banner rendering — MetaRecordDrawer.vue itself is now
+// a deprecated thin compat shell no longer mounted by the workbench, OD-W2-7=b). This stub's mock
+// path + name follow that swap 1:1; its behavior (the clickable stand-in buttons below) is otherwise
+// unchanged from the pre-S3 MetaRecordDrawer stub — same props/emits contract, same fixture shape.
+vi.mock('../src/multitable/components/MetaRecordInspector.vue', () => ({
   default: defineComponent({
-    name: 'MetaRecordDrawer',
+    name: 'MetaRecordInspector',
     props: {
       visible: { type: Boolean, default: false },
       record: { type: Object, default: null },
