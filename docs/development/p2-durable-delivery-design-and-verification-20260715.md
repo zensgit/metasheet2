@@ -1,6 +1,6 @@
 # P2 Durable Delivery — 设计与验证 (Design & Verification)
 
-**状态 (2026-07-15 傍晚)**：S1 已落 main;S2-a→S2-b→S3→S4-a 四级 stacked PR 链全绿待复审(#4322←#4334←#4335←#4336);S4-b/S5/S6/S7 为余量。**flag `AUTOMATION_DURABLE_DELIVERY_ENABLED` 恒 OFF**,当前零 runtime 行为。
+**状态 (2026-07-15 终版)**：**开发全量完成**。S1 已落 main;S2-a→S2-b→S3→S4-a→S4-b/S5/S7 五级 stacked PR 链待复审(#4322←#4334←#4335←#4336←#4337);S6 经分析归零(见 §5f)。余量=owner 逐级复审 + 最终站点实参接线核对 + 八场景验收(owner 执行面)。**flag `AUTOMATION_DURABLE_DELIVERY_ENABLED` 恒 OFF**,当前零 runtime 行为。
 **授权口径**:owner 逐切片实审 runtime,**无自合**;FWB / 附件 / flag 开启在完整实现 + 八场景验收前保持 gated。
 
 ---
@@ -41,9 +41,9 @@
 | **S2-b** | dispatch 循环:registry(重复注册=启动错误)+ tick(告警→claim→直接 await adapter→fence-CAS resolve)+ 确定性指数 backoff + flag-off 拒启 | 📋 **PR #4334 全绿待复审**(stacked) |
 | **S3** | 版本化路由 manifest(锁 §283-291 全集,frozen)+ **双向**完整性断言 + `SUPPORTED_MANIFEST_VERSIONS` 滚动部署锚 | 📋 **PR #4335 待复审**(stacked) |
 | **S4-a** | producer 原子入队 helper:`enqueueOutboxEvent(trx, event)` 同事务落 outbox+全 fan-out;未路由/空白身份=硬错 | 📋 **PR #4336 待复审**(stacked) |
-| **S4-b** | 把真实 produce 站点(审批完成/record 写/表单提交/评论)接到 enqueue,flag 双路 | ⬜ 余量(热文件,须 S2-a 链定稿后) |
-| **S5** | 真 adapter 替换匿名总线订阅(结构性关闭不可枚举方向)+ 外发幂等键 + poison-terminal 接线 | ⬜ 余量 |
-| **S6/S7** | 升级迁移 backfill;崩溃注入 V 系列 | ⬜ |
+| **S4-b/S5** | 激活缝 `automation-durable-activation.ts`:`produceAutomationEvent`(flag ON=事务内入队/OFF=null 零写)+ 六 adapter 工厂(注入真实 service handler,结构性替换匿名订阅)+ `bootDurableDelivery`(完整性断言先于任何 claim) | 📋 **PR #4337 待复审**(stacked) |
+| **S7** | 崩溃注入 V 系列:V1 提交前崩=零行零投;V2 提交后崩=行持久、重启即投;V3 claim 后崩=reclaim 重投且 eventId 跨 fence 不变;V4 僵尸+reclaimer 双达 send=幂等 seed(`eventId::consumer_key`,无 fence)完全相同+僵尸终态写 0 行 | 📋 **同 PR #4337**(9 测含 V1-V4) |
+| **S6** | 升级 backfill:**经分析归零**——outbox 表全新,无历史持久态可回填;切换窗双投已由 sink 幂等承接(锁的迁移安全论证)。落 runbook 项,非代码。 | ✅ 归零(§5f) |
 | **后续** | FWB-1 / 附件 / FWB-2 / FWB-3 → **八场景全链验收** | 🔒 gated |
 
 ---
@@ -88,6 +88,16 @@ v1 = 锁 §283-291 全集(approval.{approved,rejected,revoked,cancelled}→bridg
 `enqueueOutboxEvent(trx, event)`:调用方事务内落 outbox 行 + 每 manifest key 一条 pending 行;REJECT/ROLLBACK 路径**构造性**零投递;未路由事件族/空白身份/非法深度=边界硬错;打 `manifest_version` 戳。
 真库 6 测:**原子性证明**(事务内可见,ROLLBACK 后两表零行)、COMMIT 后精确 3-consumer fan-out、端到端 enqueue→tick **逐 consumer 独立**(bridge 暂败,trigger/projection 照常 done)。变异:只入队第一个 key → fan-out 断言红。**四规格同库回归 45/45**。
 
+## 5e. S4-b/S5 激活缝 + S7 崩溃注入 (PR #4337)
+
+激活缝是生产代码唯一触点;三个入口在 flag OFF 时全为 no-op/拒启(**变异证明**:去掉 produce 的 flag 门 → byte-neutral 测试红)。六 adapter 把注入 handler 包成 outcome 映射(`PermanentDeliveryFailure`→poison;其余 throw→retryable,原文不入库);boot 在任何 claim 之前跑双向完整性断言。
+真库 9 测:flag-OFF 零写零启;缺 handler 启动即抛;flag-ON 端到端排空(bridge 永久拒→dead_letter,trigger/projection→done,eventId 稳定);V1-V4 崩溃注入全过。**五规格同库总回归 54/54**。
+**最终接线核对项(复审时)**:handler 实参须为真实 service 方法(`handleApprovalCompletionResume`/`...Trigger`/projection/task/record/webhook-bridge),站点传**自己的事务客户端**给 `produceAutomationEvent`。
+
+## 5f. S6 归零论证
+
+「升级迁移 backfill」的对象是**遗留持久投递状态**——但 outbox 两表是本线新建,启用前不存在任何历史行;旧 `claimEventDelivery` 墓碑(`meta_automation_event_fires`)在切换后**继续原样承担 sink 级去重**,无需迁移。切换窗内旧总线与 durable 双投的净一次由 sink 幂等承接(#4203 §316-325 的迁移安全论证)。⇒ S6 无代码;唯一残留是 **cutover runbook 项**:启用 flag 前确认 producer/worker 全 N-aware(§243 对称性)+ 观察窗内监控 `event_fires` 去重命中率。
+
 ---
 
 ## 6. 验证方法论 (本线standing)
@@ -102,7 +112,7 @@ v1 = 锁 §283-291 全集(approval.{approved,rejected,revoked,cancelled}→bridg
 
 ## 7. 待办 / 风险
 
-- **S4-b/S5 前置 = owner 复审整条 stack**(S2-a API 已在评审中两改;在未定稿基座上把热文件 automation-service.ts 接进来会放大返工)。S4-b 每站点传**自己的事务客户端**,S7 崩溃注入逐站点证原子性。
+- **余量全在 owner 面**:自底向上复审 #4322→#4334→#4335→#4336→#4337(逐级 retarget→CI 重门→合);最终站点实参接线核对(§5e);八场景验收;之后才是 FWB-1/附件/FWB-2/FWB-3 与 flag 开启。
 - **S3 的滚动部署对称性**:#4203 §243 要求**双侧对称**(producer 全 N-aware 才可展开只有 N 认识的路由)——I6 只解决 worker 侧;**producer 侧漏写 = 该事件对 K 永远没有行,告警看不到**(无行可 park),必须靠激活门槛而非运行期防线。
 - **外发净一次**依赖 endpoint 幂等键绑稳定事件/动作 identity、跨 fence 不变;端点不支持 ⇒ `outcome_unknown` 不自动重发(#4203 §340)。属 S5。
 - **八场景验收**是 FWB/附件/flag 开启的硬前置。
