@@ -34,6 +34,7 @@ import {
   loadHierarchyParentFieldIds,
 } from './hierarchy-cycle-guard'
 import { recordRecordRevision } from './record-history-service'
+import { fenceWriterEntry } from './canonical-sheet-fence'
 import {
   notifyRecordSubscribersBestEffort,
   type NotifyRecordSubscribersInput,
@@ -305,6 +306,13 @@ export interface RecordPatchInput {
    * dedup, revision, mirror-invalidation, field validation) still runs. Never set by any general path.
    */
   authorizationPreValidated?: boolean
+  /**
+   * W0-1 L4: set ONLY by the recovery holder's own in-fence writes (revert-execute's per-record patch loop).
+   * The recovery has already committed the durable `applying` block on this sheet under the canonical fence;
+   * its own writes must still TAKE the fence (for seq-ordering) but must NOT refuse against the block they
+   * themselves own. Every ordinary path leaves this false, so a general write still parks under the block.
+   */
+  bypassWriterBlock?: boolean
 }
 
 export interface RecordPatchResult {
@@ -766,6 +774,11 @@ export class RecordWriteService {
       mirrorInvalidationBySheet.set(mirrorSheetId, group)
     }
     const updates = await this.pool.transaction(async ({ query }) => {
+      // W0-1 L4 (canonical fence): fence FIRST — before the preWriteGuard check and every mutation — then
+      // refuse if a recovery holds a durable block. Covers the bulk / AI / OAPI patch family in one place.
+      // No-op & byte-identical when MULTITABLE_ENABLE_WRITER_FENCE is off. `bypassWriterBlock` is set only by
+      // revert-execute's own in-fence patch loop (it owns the block).
+      await fenceWriterEntry(query, sheetId, { bypassBlockCheck: input.bypassWriterBlock === true })
       // C2 mirror write-through: in-transaction authority/no-oracle guard (see RecordPatchInput.preWriteGuard).
       if (input.preWriteGuard) await input.preWriteGuard(query)
       const updated: Array<{ recordId: string; version: number }> = []

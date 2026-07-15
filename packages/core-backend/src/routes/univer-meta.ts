@@ -230,6 +230,13 @@ import {
   allocateAutoNumberValues,
   backfillAutoNumberField,
 } from '../multitable/auto-number-service'
+import {
+  acquireCanonicalSheetFence,
+  assertNoActiveWriterBlock,
+  fenceWriterEntry,
+  isWriterFenceEnabled,
+  setRecoveryWriterState,
+} from '../multitable/canonical-sheet-fence'
 import { normalizeAutoNumberProperty } from '../multitable/auto-number-property'
 import {
   createYjsInvalidationPostCommitHook,
@@ -10471,18 +10478,31 @@ export function univerMetaRouter(): Router {
 
       try {
         await pool.transaction(async ({ query }) => {
-          // W0-1 C4 FENCE (owner §6.2.4): a per-sheet advisory transaction lock, acquired as the FIRST
-          // statement of the destructive transaction. `FOR UPDATE` on scope rows alone does NOT stop a
-          // concurrent NEW-record insert (phantom) landing between the outer/preview check and this write;
-          // the advisory lock serializes recovery operations on the sheet, and combined with the in-txn
-          // re-check below closes the check→write window. Chosen over SERIALIZABLE (lowest blast radius,
-          // does not change global isolation, no serialization-failure retry loop). Namespace int is a fixed
-          // W0-1 constant; `hashtext(sheetId)` is the per-sheet key.
+          // W0-1 L4 (§4.1 canonical fence convergence — the §0.2-i fix): acquire the CANONICAL sheet-write
+          // fence (the same advisory key every ordinary writer now takes) as the FIRST statement, BEFORE the
+          // recovery-only PIT lock. This is the load-bearing correction: pre-L4, reset held ONLY
+          // PIT_RECOVERY_LOCK_NS, which is DISJOINT from the auto-number/writer fence — so a concurrent
+          // fenced writer did NOT block on reset and the causal-seq guarantee evaporated. Lock ORDER is fixed
+          // (canonical → PIT) across all recovery paths, so no deadlock is introduced. No-op when the L4 flag
+          // is off ⇒ this destructive txn keeps its exact pre-L4 lock shape (byte-identical).
+          if (isWriterFenceEnabled()) await acquireCanonicalSheetFence(query, sheetId)
+          // W0-1 C4 FENCE (owner §6.2.4): the recovery-only advisory lock, retained to serialize recovery-vs-
+          // recovery. `FOR UPDATE` on scope rows alone does NOT stop a concurrent NEW-record insert (phantom)
+          // landing between the outer/preview check and this write; the advisory lock plus the in-txn re-check
+          // below closes the check→write window. Chosen over SERIALIZABLE (lowest blast radius, no
+          // serialization-failure retry loop). Namespace int is a fixed W0-1 constant; `hashtext(sheetId)` is
+          // the per-sheet key.
           await query('SELECT pg_advisory_xact_lock($1::int, hashtext($2)::int)', [PIT_RECOVERY_LOCK_NS, sheetId])
           // W0-1 C8 (same-txn re-check): re-run the integrity precheck INSIDE the fenced transaction. A
           // phantom uncaptured write that committed after the outer computeSheetReset precheck (which runs
           // BEFORE this transaction) is caught HERE — the check and the destructive write are now atomic.
           // Refusal throws → the whole reset rolls back (zero writes) → mapped to the 409 below.
+          //
+          // L6-SEAM (v3.7 §9.5 / §5 "in-fence execute recompute"): the FULL fix recomputes target/schema/set
+          // (`computeSheetReset`) UNDER this fence with the token-bound anchorSeq, not just re-running the
+          // integrity precheck — a stale delete-set computed before the fence can still mis-target (v3.7
+          // §0.1 P1-B). L4 delivers the fence-first ORDERING that makes such an in-fence recompute sound; the
+          // exact-anchor resolver + full in-fence recompute land in L6/L7. Marked here as the wiring seam.
           const inTxnIntegrity = await precheckSheetHistoryIntegrity(query, sheetId)
           if (inTxnIntegrity.ok === false) throw new HistoryIncompleteInTxnError(inTxnIntegrity.reason)
           const baseRow = (await query('SELECT base_id FROM meta_sheets WHERE id = $1', [sheetId])).rows[0] as Record<string, unknown> | undefined
