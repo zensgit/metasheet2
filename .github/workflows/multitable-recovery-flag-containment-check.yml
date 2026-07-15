@@ -8,11 +8,25 @@ name: Multitable Recovery-Flag Containment Check
 # READ-ONLY: ssh + `docker ps` + `docker exec <backend> env` + `docker inspect` + `docker compose config`
 # reads. No writes, no restarts, no config edits.
 #
-# `target` is a fixed `choice` input (staging | production | both) — NEVER free text. The chosen value is
-# mapped, before the ssh call, to a hard-coded expected-container list (the real `container_name:` values
-# from docker-compose.app.yml / docker-compose.app.staging.yml on origin/main: `metasheet-backend` for
-# production, `metasheet-staging-backend` for staging). Only that mapped constant — never the raw input —
-# is interpolated onto the remote ssh command line, so there is no shell-metacharacter injection surface.
+# `target` is a fixed `choice` input (staging | production | both) — NEVER free text. `choice` is a
+# UI-only guardrail (the REST API can still send an arbitrary string), so TARGET is re-validated with an
+# exact-match `case` (default branch fails closed) BEFORE the ssh call — that local check is the real
+# injection boundary, since only the validated, no-space TARGET token is ever interpolated onto the ssh
+# command line. The target → hard-coded expected-container list mapping (the real `container_name:`
+# values from docker-compose.app.yml / docker-compose.app.staging.yml on origin/main: `metasheet-backend`
+# for production, `metasheet-staging-backend` for staging) happens a second time, independently, INSIDE
+# the remote heredoc — so no multi-word, space-containing value (e.g. `both`'s two container names) is
+# ever passed as an env-assignment on the ssh command line. ssh concatenates all trailing arguments into
+# one string and re-parses it through the remote login shell, so a space there previously became "run
+# this as a second, bogus command" (the `both` path failed at runtime with exit 127 before this fix).
+#
+# Host identity is pinned: StrictHostKeyChecking=yes against a `DEPLOY_KNOWN_HOSTS`-derived known_hosts
+# file (never `StrictHostKeyChecking=no` — an unauthenticated responder, e.g. a MITM or the wrong host,
+# could otherwise produce a meaningless "containment PASS"). Required secrets: `DEPLOY_HOST`,
+# `DEPLOY_USER`, `DEPLOY_SSH_KEY_B64` (base64-encoded private key), and `DEPLOY_KNOWN_HOSTS`
+# (base64-encoded or raw known_hosts content for DEPLOY_HOST, e.g. the output of
+# `ssh-keyscan -H <host>`, optionally piped through `base64`). Missing `DEPLOY_KNOWN_HOSTS` fails the job
+# closed with an explicit error — it is never silently treated as "skip verification".
 #
 # Two verification legs, both fail-closed:
 #   1. Running env: every expected container must be observed running and have its live env checked;
@@ -55,18 +69,75 @@ jobs:
           DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
           DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
           DEPLOY_SSH_KEY_B64: ${{ secrets.DEPLOY_SSH_KEY_B64 }}
+          DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
           TARGET: ${{ github.event.inputs.target }}
         run: |
           set -euo pipefail
           mkdir -p ~/.ssh
+
+          # --- Host authentication (fail-closed): without a pinned known_hosts entry there is no way
+          # to prove the ssh responder on DEPLOY_HOST is actually the deploy host — StrictHostKeyChecking
+          # =no would let a MITM, or simply the wrong host, answer and the containment "PASS" below would
+          # be meaningless. Never silently fall back to no-verify.
+          if [ -z "${DEPLOY_KNOWN_HOSTS:-}" ]; then
+            echo "::error::DEPLOY_KNOWN_HOSTS required for host-authenticated containment evidence — refusing to fall back to no-verify"
+            exit 1
+          fi
+          # Accept either a base64-encoded or a raw known_hosts blob: try base64-decoding first and only
+          # keep the decoded form if it actually looks like known_hosts content (a recognizable key-type
+          # token); otherwise write the secret through unmodified. Either way, the resulting file is
+          # verified below to actually contain a key-type token — a garbled/misconfigured secret fails
+          # closed instead of silently producing an unusable (and therefore no-verify-equivalent) file.
+          decoded_known_hosts="$(printf '%s' "$DEPLOY_KNOWN_HOSTS" | base64 -d 2>/dev/null || true)"
+          if printf '%s' "$decoded_known_hosts" | grep -Eq 'ssh-ed25519|ssh-rsa|ecdsa-sha2|ssh-dss'; then
+            printf '%s\n' "$decoded_known_hosts" > ~/.ssh/known_hosts
+          else
+            printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          fi
+          chmod 644 ~/.ssh/known_hosts
+          if ! grep -Eq 'ssh-ed25519|ssh-rsa|ecdsa-sha2|ssh-dss' ~/.ssh/known_hosts; then
+            echo "::error::DEPLOY_KNOWN_HOSTS did not resolve to a recognizable known_hosts entry — refusing to fall back to no-verify"
+            exit 1
+          fi
+
           printf '%s' "$DEPLOY_SSH_KEY_B64" | base64 -d > ~/.ssh/deploy_key
           chmod 600 ~/.ssh/deploy_key
-          ssh_opts="-o StrictHostKeyChecking=no -o IdentitiesOnly=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=6 -i ~/.ssh/deploy_key"
+          ssh_opts="-o StrictHostKeyChecking=yes -o UserKnownHostsFile=$HOME/.ssh/known_hosts -o IdentitiesOnly=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=6 -i ~/.ssh/deploy_key"
 
-          # Map the validated `choice` input to a hard-coded, known-safe container list. This case
-          # statement is the ONLY place the input is consulted; every branch yields a fixed constant
-          # (the real container_name values below), and the unmapped default fails closed instead of
-          # ever falling through to interpolate the raw input string anywhere.
+          # Validate `target` is EXACTLY one of the fixed choices before anything reaches the ssh
+          # command line — this is the real injection boundary (see header comment). Every branch here
+          # is a no-op pass-through; the unmapped default fails closed rather than letting a
+          # non-enum / space-containing / metacharacter-containing TARGET anywhere near ssh.
+          case "$TARGET" in
+            staging|production|both)
+              ;;
+            *)
+              echo "::error::unexpected target '${TARGET}' (expected staging|production|both) — refusing to proceed"
+              exit 1
+              ;;
+          esac
+
+          echo "target='${TARGET}'"
+
+          # Remote script (single-quoted heredoc — nothing expands locally). Verdict lines are
+          # machine-greppable. TARGET (already validated above to be exactly staging|production|both,
+          # i.e. a single word with no spaces or shell metacharacters) is the ONLY input-derived token
+          # interpolated onto the ssh command line. The target -> container-name mapping is redone,
+          # independently, inside the remote heredoc below — no space-containing constant (e.g. the old
+          # `both` -> "metasheet-backend metasheet-staging-backend" EXPECTED_CONTAINERS) is ever passed
+          # as an env-assignment on the ssh command line, because ssh concatenates all trailing arguments
+          # into a single string and re-parses it through the remote login shell — a space there
+          # previously caused the second word to be parsed as a bogus extra command (exit 127).
+          ssh $ssh_opts "$DEPLOY_USER@$DEPLOY_HOST" TARGET="$TARGET" 'bash -s' <<'REMOTE' | tee containment-report.txt
+          set -uo pipefail
+          FLAGS="MULTITABLE_ENABLE_SHEET_REVERT MULTITABLE_ENABLE_PIT_RESET"
+          fail=0
+          checked=0
+
+          # Re-map the (already-validated, single-word) TARGET to the hard-coded, known-safe container
+          # list HERE, on the remote side. This case statement is the ONLY place EXPECTED_CONTAINERS is
+          # produced; every branch yields a fixed constant (the real container_name values below), and
+          # the unmapped default fails closed instead of ever falling through to a false PASS.
           case "$TARGET" in
             staging)
               EXPECTED_CONTAINERS="metasheet-staging-backend"
@@ -78,22 +149,12 @@ jobs:
               EXPECTED_CONTAINERS="metasheet-backend metasheet-staging-backend"
               ;;
             *)
-              echo "::error::unexpected target '${TARGET}' (expected staging|production|both) — refusing to proceed"
-              exit 1
+              echo "VERDICT: FAIL — unexpected target '${TARGET:-}' (expected staging|production|both) — refusing to proceed"
+              exit 2
               ;;
           esac
 
-          echo "target='${TARGET}' -> EXPECTED_CONTAINERS='${EXPECTED_CONTAINERS}'"
-
-          # Remote script (single-quoted heredoc — nothing expands locally). Verdict lines are
-          # machine-greppable. EXPECTED_CONTAINERS (the hard-coded constant from the case statement
-          # above) is the ONLY input-derived token interpolated onto the ssh command line — the raw
-          # $TARGET value itself never reaches the remote shell, only this mapped constant does.
-          ssh $ssh_opts "$DEPLOY_USER@$DEPLOY_HOST" EXPECTED_CONTAINERS="$EXPECTED_CONTAINERS" 'bash -s' <<'REMOTE' | tee containment-report.txt
-          set -uo pipefail
-          FLAGS="MULTITABLE_ENABLE_SHEET_REVERT MULTITABLE_ENABLE_PIT_RESET"
-          fail=0
-          checked=0
+          echo "target='${TARGET:-}' -> EXPECTED_CONTAINERS='${EXPECTED_CONTAINERS}'"
 
           if ! command -v docker >/dev/null 2>&1; then
             echo "VERDICT: FAIL — docker not available on host (observation broken)"
