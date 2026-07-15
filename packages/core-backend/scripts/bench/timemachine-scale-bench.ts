@@ -25,9 +25,12 @@
  *   1. `BENCH_ALLOW_DESTRUCTIVE=1` is set (first opt-in — acknowledges this is destructive).
  *   2. `DATABASE_URL`'s host is `localhost` / `127.0.0.1` / `::1`, OR `BENCH_ALLOW_REMOTE_DB=1` is
  *      set (second, independent opt-in required to point this at any non-local host).
- *   3. `DATABASE_URL`'s database name matches `/bench|test/i`, OR `BENCH_ALLOW_NONSTANDARD_DB_NAME=1`
- *      is set (third, independent opt-in required to point this at a database that doesn't look like
- *      a disposable bench/test database).
+ *   3. `DATABASE_URL`'s database name has "bench" or "test" as a WHOLE underscore-delimited token (see
+ *      `SAFE_DB_NAME_PATTERN` below — a strict, delimiter-anchored match, NOT a bare substring test:
+ *      `bench` / `test` / `bench_tm` / `metasheet_test` pass, but `metasheet_latest_prod` / `contest_prod`
+ *      do NOT, since "test" there is embedded mid-word with no token boundary), OR
+ *      `BENCH_ALLOW_NONSTANDARD_DB_NAME=1` is set (third, independent opt-in required to point this at a
+ *      database that doesn't look like a disposable bench/test database).
  *   4. `BENCH_RUN_ID` (if set) matches `^[a-z0-9]{1,16}$` — a bounded, SQL-metacharacter-free charset.
  *      This is checked and enforced by `resolveRunIdOrExit()` (see below), which runs immediately after
  *      `preflightGuard()` and — like it — before any database connection is used. An unset `BENCH_RUN_ID`
@@ -52,7 +55,11 @@
  * slips past the assertion (a TOCTOU race) is a fatal unique-violation, not a silent no-op. Cleanup at
  * the end only ever deletes ids this run's own inserts actually, successfully created (tracked in
  * `createdSheetIds` / `baseAndUserCreated`, populated strictly AFTER the corresponding insert succeeds,
- * never speculatively beforehand) — it can never delete an object a prior/other run created.
+ * never speculatively beforehand) — it can never delete an object a prior/other run created. (P1-b,
+ * round 6: `ensureBase()`'s base INSERT and user INSERT run on one client inside a single
+ * `BEGIN`/`COMMIT` transaction — not as two independently-auto-committed statements — so a failure of
+ * the SECOND insert can no longer leave the FIRST one's base row committed-but-untracked; see
+ * `ensureBase()` itself for the detail.)
  *
  * **Index safety:** the harness never touches any pre-existing, non-harness-owned database object
  * (specifically: it never DROPs or CREATEs #4262 §4's real candidate index name — see
@@ -96,7 +103,8 @@
  * Env knobs:
  *   BENCH_ALLOW_DESTRUCTIVE=1          REQUIRED — first opt-in, see SAFETY above.
  *   BENCH_ALLOW_REMOTE_DB=1            required only if DATABASE_URL's host isn't local, see SAFETY above.
- *   BENCH_ALLOW_NONSTANDARD_DB_NAME=1  required only if the db name doesn't match /bench|test/i, see SAFETY above.
+ *   BENCH_ALLOW_NONSTANDARD_DB_NAME=1  required only if the db name doesn't have "bench"/"test" as a whole
+ *     underscore-delimited token (see SAFETY item 3 / SAFE_DB_NAME_PATTERN above).
  *   BENCH_TIERS         comma-separated record counts (default "1000,5000,10000,50000")
  *   BENCH_ITERS         override the loop-iteration count for EVERY tier (default: scaled per tier)
  *   BENCH_RUN_ID        override the run id used to namespace all seeded ids — MUST match `^[a-z0-9]{1,16}$`
@@ -113,6 +121,10 @@
  *     `process.exit(1)` instead of silently returning 0 with data left behind (P2-3). Never set this in
  *     a real measurement run — it deliberately strands rows on purpose; clean them up by hand afterward
  *     (same `BENCH_RUN_ID`, `BENCH_KEEP_DATA=1`-style manual query) if you run this self-test.
+ *   BENCH_INJECT_USER_INSERT_FAULT=1  TESTING HOOK ONLY (P1-b, round 6): throws inside `ensureBase()`'s
+ *     transaction after the base INSERT but before the user INSERT/COMMIT, to prove the base row is
+ *     rolled back (never leaked) rather than left committed-but-untracked. Never set this in a real
+ *     measurement run.
  */
 import { performance } from 'node:perf_hooks'
 import express, { type Express } from 'express'
@@ -157,6 +169,23 @@ function parseDatabaseUrlOrExit(raw: string): { host: string; dbName: string } {
 
 const LOCAL_DB_HOSTS = new Set(['localhost', '127.0.0.1', '::1', '[::1]'])
 
+/**
+ * Strict, delimiter-anchored db-name allowlist (P1-a fix, round 6): the previous check was a bare
+ * substring match (`/bench|test/i`), which accepted any name merely CONTAINING "test" or "bench" as
+ * part of a longer word — including prod-looking names like `metasheet_latest_prod` (contains
+ * "la-TEST") or `contest_prod` (contains "con-TEST"). Both of the owner's examples slipped past that
+ * guard, defeating the "triple fail-closed" claim.
+ *
+ * This requires "bench" or "test" to appear as a WHOLE underscore-delimited token — bounded on both
+ * sides by `_` or by the start/end of the string — so:
+ *   - `bench`, `test`, `bench_tm`, `metasheet_test`  → PASS (token boundary satisfied)
+ *   - `metasheet_latest_prod`, `contest_prod`        → REJECTED ("test" is embedded mid-word, no
+ *                                                       underscore/start/end boundary on both sides)
+ * The explicit `BENCH_ALLOW_NONSTANDARD_DB_NAME=1` override remains the escape hatch for any
+ * legitimately-named disposable database that doesn't fit this shape.
+ */
+const SAFE_DB_NAME_PATTERN = /(?:^|_)(?:bench|test)(?:$|_)/i
+
 function preflightGuard(): void {
   const rawUrl = process.env.DATABASE_URL
   if (!rawUrl) {
@@ -181,10 +210,13 @@ function preflightGuard(): void {
     )
     process.exit(2)
   }
-  if (!/bench|test/i.test(dbName) && process.env.BENCH_ALLOW_NONSTANDARD_DB_NAME !== '1') {
+  if (!SAFE_DB_NAME_PATTERN.test(dbName) && process.env.BENCH_ALLOW_NONSTANDARD_DB_NAME !== '1') {
     console.error(
-      `FATAL: database name "${dbName}" does not match /bench|test/i — refusing to run against what looks ` +
-        'like a real deployment database.\n' +
+      `FATAL: database name "${dbName}" does not look like a disposable bench/test database — refusing ` +
+        'to run against what looks like a real deployment database. "bench" or "test" must appear as a ' +
+        'WHOLE underscore-delimited token (bounded by "_" or the start/end of the name) — e.g. "bench", ' +
+        '"test", "bench_tm", "metasheet_test" all pass, but a name that merely CONTAINS "test"/"bench" as ' +
+        'a substring of a longer word (e.g. "metasheet_latest_prod", "contest_prod") does not.\n' +
         'Set BENCH_ALLOW_NONSTANDARD_DB_NAME=1 to explicitly triple-opt-in and override this check.',
     )
     process.exit(2)
@@ -331,14 +363,49 @@ interface TierSeed {
   cohortBCount: number // records with a delete->restore cycle (multi-generation chains)
 }
 
+/**
+ * P1-b fix (round 6): the base INSERT and the user INSERT are now issued on ONE dedicated client
+ * inside an explicit `BEGIN`/`COMMIT` — previously they were two separate `q(...)` calls (the shared
+ * pool's `.query()`, each its own implicit, independently auto-committed statement), so if the SECOND
+ * insert failed, the FIRST one's base row was already permanently committed, yet the caller only sets
+ * `baseAndUserCreated = true` after BOTH "succeed" — leaving that base row un-tracked and therefore
+ * unreachable by `cleanup()` (which is scoped strictly to ids this run confirmed it created). Wrapping
+ * both inserts in one transaction makes the pair atomic: either both rows exist (COMMIT) or neither
+ * does (ROLLBACK on ANY failure, including a failure of the COMMIT itself) — so main()'s existing
+ * contract ("`baseAndUserCreated` reflects reality") now actually holds. See §self-test in the P1-b
+ * verification notes for how this is proven (BENCH_INJECT_USER_INSERT_FAULT).
+ */
 async function ensureBase(): Promise<void> {
-  // P1-2(c): plain INSERT, no ON CONFLICT — assertRunIdsAvailableOrExit() (called earlier in main(),
-  // before this function runs) already confirmed neither id exists; a conflict reaching this statement
-  // (a TOCTOU race) is a fatal unique-violation, never a silent "someone else's row, adopt it" no-op.
-  // The caller only marks these ids as "confirmed created by this run" (baseAndUserCreated) once BOTH
-  // inserts below have returned successfully — see main().
-  await q('INSERT INTO meta_bases (id, name) VALUES ($1,$2)', [BASE_ID, `TM Bench ${RUN_ID}`])
-  await q("INSERT INTO users (id, password_hash) VALUES ($1,'x')", [ACTOR_ID])
+  const client = await poolManager.get().getInternalPool().connect()
+  try {
+    await client.query('BEGIN')
+    // P1-2(c): plain INSERT, no ON CONFLICT — assertRunIdsAvailableOrExit() (called earlier in main(),
+    // before this function runs) already confirmed neither id exists; a conflict reaching either
+    // statement below (a TOCTOU race) is a fatal unique-violation that aborts the whole transaction,
+    // never a silent "someone else's row, adopt it" no-op.
+    await client.query('INSERT INTO meta_bases (id, name) VALUES ($1,$2)', [BASE_ID, `TM Bench ${RUN_ID}`])
+    if (process.env.BENCH_INJECT_USER_INSERT_FAULT === '1') {
+      // TESTING HOOK ONLY (P1-b self-test): fires AFTER the base INSERT above but BEFORE the user
+      // INSERT / COMMIT, to prove the base insert is rolled back (never leaked) when the second insert
+      // in this transaction never even runs. Never set this in a real measurement run.
+      throw new Error(
+        '[self-test] BENCH_INJECT_USER_INSERT_FAULT=1 — injected fault between the base INSERT and the ' +
+          "user INSERT inside ensureBase()'s transaction, to verify the base row is rolled back, not leaked",
+      )
+    }
+    await client.query("INSERT INTO users (id, password_hash) VALUES ($1,'x')", [ACTOR_ID])
+    await client.query('COMMIT')
+  } catch (e) {
+    try {
+      await client.query('ROLLBACK')
+    } catch {
+      // best-effort — the connection may already be broken (e.g. the failure was itself in COMMIT);
+      // releasing it below still returns it to the pool, which discards broken connections itself.
+    }
+    throw e
+  } finally {
+    client.release()
+  }
 }
 
 async function seedPeopleSheet(onSheetCreated: (id: string) => void, count = 20): Promise<string[]> {
@@ -896,7 +963,11 @@ async function main() {
     )
 
     await ensureBase()
-    baseAndUserCreated = true // both inserts in ensureBase() succeeded — confirmed created by this run
+    // P1-b: ensureBase() only returns normally once its internal transaction has COMMITted both the
+    // base row and the user row — if either insert (or the COMMIT itself) had failed, ensureBase()
+    // would have thrown (after rolling back) instead of returning, so reaching this line means BOTH
+    // rows are durably present. Never true for "only one of the two exists".
+    baseAndUserCreated = true
     const personIds = await seedPeopleSheet((id) => createdSheetIds.push(id))
     const app = buildApp()
 

@@ -21,8 +21,9 @@ see §0's "Safety guards" bullet and the harness's own header comment). Re-runna
   hold: (1) `BENCH_ALLOW_DESTRUCTIVE=1` is explicitly set — acknowledges this runs real
   revert-execute/reset-execute writes, mass INSERT/DELETE, and index DDL; (2) `DATABASE_URL`'s host is
   `localhost`/`127.0.0.1`/`::1`, or `BENCH_ALLOW_REMOTE_DB=1` is set as a second, independent opt-in;
-  (3) `DATABASE_URL`'s database name matches `/bench|test/i`, or `BENCH_ALLOW_NONSTANDARD_DB_NAME=1` is
-  set as a third, independent opt-in. All three are checked before any database connection is opened.
+  (3) `DATABASE_URL`'s database name has "bench" or "test" as a whole underscore-delimited token
+  (strict, delimiter-anchored — see the round-6 bullet below), or `BENCH_ALLOW_NONSTANDARD_DB_NAME=1`
+  is set as a third, independent opt-in. All three are checked before any database connection is opened.
   Separately, the harness never drops/creates the real, shared `#4262 §4` candidate index (checked
   read-only, informationally, only) — its own "with index" comparison pass uses a separate
   `bench_`-prefixed, run-scoped index it owns outright instead (see §3's safety-update note). All
@@ -48,6 +49,20 @@ see §0's "Safety guards" bullet and the harness's own header comment). Re-runna
   connection string (which could contain the password) — only a redacted `scheme://host:port` form, or
   a fully generic message, is logged. See the harness's own header comment ("Run-id exclusivity" and
   "Cleanup" paragraphs) for the full contract.
+- **Third hardening round (added post-review, round 6 — db-name guard tightened + base/user creation
+  made atomic):** the db-name check (safety item 3 above) was a bare substring match
+  (`/bench|test/i`) that accepted prod-looking names merely CONTAINING "test"/"bench" mid-word —
+  `metasheet_latest_prod` (contains "la-TEST") and `contest_prod` (contains "con-TEST") both slipped
+  past it. It is now a strict, delimiter-anchored check (`SAFE_DB_NAME_PATTERN` in the harness):
+  "bench"/"test" must appear as a WHOLE underscore-delimited token, bounded by `_` or the start/end of
+  the name — `bench`, `test`, `bench_tm`, `metasheet_test` pass; `metasheet_latest_prod`, `contest_prod`
+  do not (verified directly: both now exit fail-closed at the guard, `metasheet_test` still passes).
+  Separately, `ensureBase()`'s base INSERT and user INSERT — previously two independently
+  auto-committed statements, so a failure of the second could leave the first's base row permanently
+  committed but untracked (unreachable by the scoped cleanup) — now run on one client inside a single
+  `BEGIN`/`COMMIT` transaction; `baseAndUserCreated` is set only after that transaction actually
+  commits, so either both rows exist or neither does (verified via the `BENCH_INJECT_USER_INSERT_FAULT`
+  self-test: an injected failure between the two inserts leaves the base-row count unchanged).
 - **Exact code measured (pin this before citing any precheck/contiguity number):** the harness's two
   commits sit directly on `86fa1d85c` — the commit immediately **before** `#4269` (the W0-1
   generation-aware contiguity correction) merged to `main` (merge commit `3356a7ed6`, 2026-07-14, the
@@ -448,7 +463,8 @@ BENCH_ALLOW_DESTRUCTIVE=1 \
 
 **`BENCH_ALLOW_DESTRUCTIVE=1` is now required** (added post-review, P1) — the harness refuses to run
 without it, and refuses further unless `DATABASE_URL`'s host is local (or `BENCH_ALLOW_REMOTE_DB=1`
-double-opts-in to a remote target) and its database name matches `/bench|test/i` (or
+double-opts-in to a remote target) and its database name has "bench"/"test" as a whole
+underscore-delimited token (strict, delimiter-anchored — round-6 hardening, see §0; or
 `BENCH_ALLOW_NONSTANDARD_DB_NAME=1` triple-opts-in to override) — see the harness's own header comment
 for the full preflight contract, and §0's "Safety guards" bullet for a summary.
 
@@ -464,7 +480,9 @@ with-index comparison pass), `BENCH_INJECT_FAULT=1` (testing hook only — verif
 try/finally cleanup path on a simulated mid-run crash; never set this for a real measurement run),
 `BENCH_INJECT_CLEANUP_FAULT=1` (testing hook only, round-5 — verifies a cleanup-only failure still
 forces a non-zero exit; deliberately strands rows on purpose, never set this for a real measurement
-run).
+run), `BENCH_INJECT_USER_INSERT_FAULT=1` (testing hook only, round-6 — throws inside `ensureBase()`'s
+transaction between the base INSERT and the user INSERT, to verify the base row is rolled back rather
+than leaked; never set this for a real measurement run).
 
 **Concurrency caveat, UPDATED post-review:** the two reported runs (`r14c1`, `r14c2b`) predate the P1
 hardening in this PR and used a since-removed methodology that dropped and recreated the REAL, shared
