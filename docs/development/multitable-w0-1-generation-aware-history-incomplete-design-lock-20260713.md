@@ -1,11 +1,22 @@
 # W0-1 (v3.5) — correction lock over landed #4269: causal seq, fenced-txn contract, race-safe time-anchored baseline checkpoint
 
-**Date:** 2026-07-15 (v3.5 — owner 8th-round P2: §8 anchor-race golden assertion DIRECTION corrected [bug returns the post-write baseline for a T in the wait window; correct is pre-write] — the v3.4 wording had it inverted and would have pinned the wrong thing. Core v3.4 contracts unchanged: owner 7th-round P1/P2: §6 **fence-first / `clock_timestamp()` anchor** [`now()`=txn-start would stamp a fence-wait-window write at a stale earlier time → a `T` in the window reconstructs a never-existed state] + **total-order selection** + **retention protects the FLOOR-SELECTED checkpoint** [not "time within horizon"] + orphan-building-row wording corrected) · **Status:** PROPOSED (owner ratify target) — **a correction lock over the MERGED #4269 (`3356a7ed6`)**. · **Supersedes:** v1..v3.3 of this lock, #4250 (closed). · **Model:** Opus.
+**Date:** 2026-07-15 (v3.5 — owner 8th-round P2: §8 anchor-race golden assertion DIRECTION corrected [bug returns the post-write baseline for a T in the wait window; correct is pre-write] — the v3.4 wording had it inverted and would have pinned the wrong thing. Core v3.4 contracts unchanged: owner 7th-round P1/P2: §6 **fence-first / `clock_timestamp()` anchor** [`now()`=txn-start would stamp a fence-wait-window write at a stale earlier time → a `T` in the window reconstructs a never-existed state] + **total-order selection** + **retention protects the FLOOR-SELECTED checkpoint** [not "time within horizon"] + orphan-building-row wording corrected) · **Status:** RATIFIED (explicit owner closeout sequence, after containment PASS run `29422161484`) — **a correction lock over the MERGED #4269 (`3356a7ed6`)**. · **Supersedes:** v1..v3.3 of this lock, #4250 (closed), and #4269's epoch-ms/version/delete-last comparator as a trust primitive. · **Model:** Opus.
 
 > **The base changed:** #4269 (parallel session) landed the generation-aware contiguity precheck + marker table on `main`; #4256 closed; #4278 converged the master-gate flag on `MULTITABLE_ENABLE_SHEET_REVERT`. The owner's review of the *landed* state found it **not yet a trustworthy W0-1 terminal state under flag-on**. v3 = the fix list for the landed code (each defect pinned to `origin/main` file:line) + the remaining unbuilt pieces, absorbing #4269's structural advantages (separate marker table) while replacing its unreliable primitives (cross-generation version uniqueness; created_at ordering).
 
-## §0 CONTAINMENT (standing until this lock is ratified, built, and gated green)
-`MULTITABLE_ENABLE_SHEET_REVERT=false` and `MULTITABLE_ENABLE_PIT_RESET=false` in **every real environment**. Code-default-off ≠ real-env-off: **ops must verify the running hosts' env** (repo-side verified clean 2026-07-14 — no `.env`/CI/docker/source sets either flag true; the deploy-host check is an ops action, a sandbox probe is not evidence). The strict precheck's own flag only controls launch disruption, not this containment.
+## §0 CONTAINMENT (ratification complete; standing until the implementation is built and gated green)
+`MULTITABLE_ENABLE_SHEET_REVERT=false` and `MULTITABLE_ENABLE_PIT_RESET=false` in **every real environment**. Code-default-off ≠ real-env-off. The host-authenticated `target=both` containment run `29422161484` passed on 2026-07-15: both flags were inactive in the production and staging backend containers' running env **and** absent from both rendered next-restart Compose configurations. The strict precheck's own flag only controls launch disruption, not this containment. Ratification does not authorize any flag enablement.
+
+### Ratification record (2026-07-15)
+The owner formally ratified v3.5 after the full containment PASS, with the following rulings:
+1. `seq` is the canonical causal-order mechanism for C2/C3/C6 and supersedes #4269's epoch-ms/version/delete-last comparator.
+2. A duplicate within one generation fails closed as `chain_corrupt`; there is no auto-heal.
+3. The shared sheet-writer fence covers every in-scope writer family, with the same-transaction/same-connection contract in §3.
+4. Trust baselines live in the separate `meta_history_baselines` table, never as synthetic revision actions.
+5. Crossing the trust floor is a hard block, not a warning.
+6. Legacy `seq` backfill is display-only best effort; trust starts at the fenced, time-anchored baseline checkpoint.
+
+This ratification authorizes the default-off L3 → L4/L5 implementation and its constructed-race goldens. It does **not** authorize strict-mode enablement, Revert/Reset flag enablement, or production rollout.
 
 ## §1 Owner findings on the LANDED state → v3 fixes
 | # | Landed defect (origin/main) | v3 fix |
@@ -75,12 +86,12 @@ A sheet-level watermark alone cannot establish a real trust origin; the checkpoi
 - **select-by-T**: an old `T` resolves to the **superseded** checkpoint that governed its era (`trusted_from_at ≤ T`, latest retained), not fail-closed (mutation: select active-only ⇒ old-`T` wrongly refuses). **time-anchor**: trust by wall-clock `T`, never a raw seq. **retention floor = floor-selected checkpoint** (v3.4 P2): for floor instant `F`, the checkpoint selected by `T=F` (latest `trusted_from_at ≤ F`) is protected even though its own time is older than `F`; a checkpoint retires only when its successor `trusted_from_at ≤ F` AND nothing references it. Mutation: retire by "own time within horizon" ⇒ the `C1.time < F < C2.time` case retires `C1` while `T=F` still selects it ⇒ old-`T`-soundness reds. **trash self-sufficiency**: resurrect from a trash baseline rebuilds full data + edges from the **inlined** payload (mutation: store only terminal version ⇒ resurrect-fidelity reds; if edges rely on `tombstone_ref`, prune those tombstones ⇒ resurrect reds unless they're floored).
 - **autocommit-fence trap** (the §3 P1 regression test): acquire the fence via a bare `pool.query` (no txn) ⇒ the constructed race golden reds (lock released at statement end, concurrent write lands); acquire inside the real txn ⇒ greens.
 
-## §9 Open forks (owner; recommendations **bold**)
-1. Marker dup within generation: fail-closed `chain_corrupt` (**recommended**) vs auto-heal.
-2. Fence breadth: all ~10 writers (**recommended**) vs destructive-paths-only (leaves the P1-2 race).
-3. **Baseline mechanism — DECIDED in v3.2 (no longer a fork):** a **separate `meta_history_baselines` table** (§6), not synthetic in-chain `action='checkpoint'` revisions — the owner's P1 that a hidden checkpoint action would pollute History, retention, and the `action` CHECK contract. Left here only as a recorded decision.
-4. Floor severity: hard block (**recommended**) vs warn.
-5. Legacy seq backfill: display-only best-effort (**recommended**, trust comes from the baseline) vs none.
+## §9 Ratified rulings (closed)
+1. Marker dup within generation: fail-closed `chain_corrupt`; no auto-heal.
+2. Fence breadth: all in-scope writers; destructive-paths-only is rejected because it leaves the P1-2 race.
+3. Baseline mechanism: a separate `meta_history_baselines` table (§6), not synthetic in-chain `action='checkpoint'` revisions.
+4. Floor severity: hard block.
+5. Legacy seq backfill: display-only best effort; trust comes from the baseline.
 
 ## §10 Sequence
-① Containment verified by ops (§0) → ② ratify this v3 → ③ impl as Draft behind the strict flag (Opus: migration/seq/fence/checkpoint; Sonnet: goldens; independent Opus adversarial gate with per-lane txn proof + constructed races) → ④ two-phase rollout, checkpoint cutover, then owner decides strict flag-on. Estimates: ~3–5 pw on top of landed #4269 (it built the precheck skeleton + marker table + reset in-txn re-check; v3 corrects primitives and completes the trust envelope).
+① Containment verified by ops (§0, complete) → ② ratify this v3 (complete) → ③ impl as Draft behind the strict flag (Opus: migration/seq/fence/checkpoint; Sonnet: goldens; independent Opus adversarial gate with per-lane txn proof + constructed races) → ④ two-phase rollout, checkpoint cutover, then owner separately decides strict flag-on. Estimates: ~3–5 pw on top of landed #4269 (it built the precheck skeleton + marker table + reset in-txn re-check; v3 corrects primitives and completes the trust envelope).
