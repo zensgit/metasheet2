@@ -92,11 +92,13 @@ export async function getStockPreparationSnapshotDiff(
 // The row detail is NOT values-free just because the backend projects a whitelist — the CLIENT must
 // re-validate at the boundary, because open string types would let a business value planted in a
 // whitelisted field (diffId, keyFingerprint, …) render straight into the DOM. So we parse from
-// `unknown`, validate every field against the backend's frozen shape, and DROP any row that fails.
+// `unknown`, validate every field against the backend's frozen shape, and FAIL-CLOSE the whole envelope
+// (throw → the view's unavailable state) if ANY row is invalid — never a silent per-row drop.
 //
 // These three vocabularies MUST equal the backend's frozen enums (stock-preparation-snapshot-diff.cjs
 // DIFF_TYPES / REVIEW_STATUSES / CHANGE_TYPES) — a bomSnapshotDiff.vocab tripwire pins that so a backend
-// vocab change (which would otherwise make the client silently drop every row of the new kind) fails CI.
+// vocab change (which would otherwise make EVERY row of the new kind invalid → the whole response throws
+// unavailable for real diffs) fails CI instead.
 export const STOCK_PREP_DIFF_TYPES = ['added', 'removed', 'changed', 'unchanged', 'held'] as const
 export const STOCK_PREP_REVIEW_STATUSES = ['ready', 'held'] as const
 export const STOCK_PREP_CHANGE_TYPES = [
@@ -137,9 +139,10 @@ export interface StockPreparationSnapshotDiffRowsFilters {
 }
 
 // Exact backend shapes: diffId = `stockprep_diff_<16 hex>` (stableDiffId), fingerprint = `sha16:<16 hex>`
-// (stableFingerprint). A planted business value matches neither, so it is dropped — and because every
-// retained field is one of these tight shapes / an enum / a non-negative int, there is no loose pattern
-// left for a value to survive under (owner: REASON_RE / HANDLE_RE removed — those fields are gone).
+// (stableFingerprint). A planted business value matches neither, so its row fails validation → the whole
+// response throws — and because every retained field is one of these tight shapes / an enum / a
+// non-negative int, there is no loose pattern left for a value to survive under (owner: REASON_RE /
+// HANDLE_RE removed — those fields are gone).
 const DIFF_ID_RE = /^stockprep_diff_[0-9a-f]{16}$/
 const FINGERPRINT_RE = /^sha16:[0-9a-f]{16}$/
 const INVALID = Symbol('invalid')
@@ -149,7 +152,7 @@ export const SNAPSHOT_DIFF_ROWS_MALFORMED = 'SNAPSHOT_DIFF_ROWS_MALFORMED'
 
 const asMatch = (v: unknown, re: RegExp): string | null => (typeof v === 'string' && re.test(v) ? v : null)
 const asNonNegInt = (v: unknown): number | null => (typeof v === 'number' && Number.isInteger(v) && v >= 0 ? v : null)
-// null/undefined → null (valid absence); present-but-non-matching → INVALID (drop the row).
+// null/undefined → null (valid absence); present-but-non-matching → INVALID (row invalid → envelope throws).
 function asNullableMatch(v: unknown, re: RegExp): string | null | typeof INVALID {
   if (v === null || v === undefined) return null
   const s = asMatch(v, re)
@@ -213,8 +216,8 @@ export function parseStockPreparationSnapshotDiffRowsResult(raw: unknown): Stock
  * GET /api/integration/stock-preparation/snapshot-batches/:snapshotBatchId/diff/rows
  * `projectId` rides the scope (required server-side); the two enum filters are optional and are
  * validated server-side against the frozen vocabularies. The response is re-validated HERE from
- * `unknown` (parseStockPreparationSnapshotDiffRowsResult) so a malformed / value-bearing row is dropped
- * at the client boundary rather than rendered.
+ * `unknown` (parseStockPreparationSnapshotDiffRowsResult); a malformed envelope OR any value-bearing /
+ * invalid row makes the whole call throw (→ the view's unavailable state), never a silently-dropped row.
  */
 export async function listStockPreparationSnapshotDiffRows(
   snapshotBatchId: string,
