@@ -227,6 +227,12 @@ export default defineConfig({
       // skip-green it, and whole-file wired into `Run multitable real-DB integration` in plugin-tests.yml.
       // Two-point wiring: BOTH points or the file silently never runs.
       'tests/integration/multitable-history-contiguity-realdb.test.ts',
+      // W0-1 v3.5 (design lock #4262, §2/§4/C2 — Lane L3): the STRICT (MULTITABLE_HISTORY_CONTIGUITY_STRICT)
+      // seq-ordered generation-aware precheck goldens (P1-1 marker-swallow regression, chain_corrupt,
+      // C3 deleted/trash enumeration, C2 nonmonotonic_history). Real Postgres only — excluded HERE so the
+      // no-DB job cannot skip-green it, whole-file wired into `Run multitable real-DB integration` in
+      // plugin-tests.yml. Two-point wiring: BOTH points or the file silently never runs.
+      'tests/integration/multitable-history-contiguity-strict-seq-realdb.test.ts',
       // D-1c W0 slice ① (form-submit CREATE/EDIT public-form revision goldens): real Postgres only
       // (installs scoped failure/suppression triggers per site and drives the real submit route
       // end-to-end) — excluded HERE so it cannot skip-green in the no-DB lane, whole-file wired into
