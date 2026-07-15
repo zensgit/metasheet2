@@ -15929,6 +15929,9 @@ export function univerMetaRouter(): Router {
         const recordId = attachmentRow.recordId
         const fieldId = attachmentRow.fieldId
         const sheetId = attachmentRow.sheetId
+        // W0-1 L4 (canonical fence): attachment cell-strip mutates meta_records.data — fence + durable-block
+        // check first. No-op & byte-identical when MULTITABLE_ENABLE_WRITER_FENCE is off.
+        await fenceWriterEntry(query, sheetId)
 
         if (recordId && fieldId) {
           const recordRes = await query(
@@ -16557,6 +16560,9 @@ export function univerMetaRouter(): Router {
         // W0-1: the version bump is a legitimate NON-data event; write a lock marker at the new version (same
         // txn) so the generation-aware contiguity precheck reads it as a marker, not an uncaptured-write hole.
         await pool.transaction(async ({ query }) => {
+          // W0-1 L4 (canonical fence): lock bumps version + writes a version marker (chain event) — fence +
+          // durable-block check first. No-op & byte-identical when MULTITABLE_ENABLE_WRITER_FENCE is off.
+          await fenceWriterEntry(query, sheetId)
           // lock-mgmt: LOCK action — sets the lock columns (own canEditRecord authority above).
           // revision-exempt: lock/unlock metadata-only — no `data` column touched, not a user-content edit.
           const upd = await query(
@@ -16578,6 +16584,9 @@ export function univerMetaRouter(): Router {
         // W0-1: write an unlock marker at the new version (same txn) — the version bump is a legitimate
         // non-data event, not an uncaptured-write hole for the contiguity precheck.
         await pool.transaction(async ({ query }) => {
+          // W0-1 L4 (canonical fence): unlock bumps version + writes a version marker — fence + durable-block
+          // check first. No-op & byte-identical when MULTITABLE_ENABLE_WRITER_FENCE is off.
+          await fenceWriterEntry(query, sheetId)
           // lock-mgmt: UNLOCK action — clears the lock columns (own canUnlock authority above).
           // revision-exempt: lock/unlock metadata-only — no `data` column touched, not a user-content edit.
           const upd = await query(

@@ -1,5 +1,6 @@
 import { randomUUID } from 'crypto'
 import { recordRecordRevision } from './record-history-service'
+import { fenceWriterEntry } from './canonical-sheet-fence'
 
 import {
   acquireAutoNumberSheetWriteLock,
@@ -486,6 +487,10 @@ export async function patchRecord(
   input: PatchMultitableRecordInput,
 ): Promise<LoadedMultitableRecord> {
   const query = input.query
+  // W0-1 L4 (canonical fence): the plugin-SDK patch runs its OWN UPDATE (not via RecordService) inside the
+  // SDK-provided transaction — fence + durable-block check first. No-op & byte-identical when
+  // MULTITABLE_ENABLE_WRITER_FENCE is off.
+  await fenceWriterEntry(query, input.sheetId)
   const { fields } = await loadSheetAndFields(query, input.sheetId)
 
   const existing = await getRecord({
@@ -669,6 +674,11 @@ async function deleteRecordWithRecoverability(
   // check is independent of the entry wiring: it also protects callers that do not exist yet. It is not
   // un-deletable — it is pinned by a no-transaction golden (G16).
   await assertTransactionalQuery(query, 'plugin')
+  // W0-1 L4 (canonical fence): the recoverable plugin delete runs inside a txn (asserted above) — fence +
+  // durable-block check before the destructive read/write. No-op & byte-identical when the L4 flag is off.
+  // (The flag-off, non-transactional D-1 delete branch in `deleteRecord` cannot hold a txn-scoped advisory
+  // lock; it is enumerated as an L4-SEAM in the PR matrix — fencing it needs the txn wrap that path lacks.)
+  await fenceWriterEntry(query, input.sheetId)
 
   // FOR UPDATE + the extra columns the trash row needs (created_by / created_at / updated_at) AND the
   // lock columns (see the re-check below). The flag-off path reads only data+version and needs no row
