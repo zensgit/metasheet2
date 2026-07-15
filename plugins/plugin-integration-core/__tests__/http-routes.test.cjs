@@ -2862,7 +2862,7 @@ async function testStagingRoutes() {
       tenantId: 'tenant_1',
       workspaceId: 'workspace_1',
       projectId: 'project_1',
-      baseId: 'base_1',
+      // GHSA hardening: an explicit baseId is now rejected on this write, so it is no longer sent here.
     },
   })
   assertOkResponse(res, 201)
@@ -2870,11 +2870,11 @@ async function testStagingRoutes() {
     standard_materials: 'sheet_materials',
     bom_cleanse: 'sheet_bom',
   })
+  // staging-install now derives tenant/project server-side and never forwards a request baseId.
   assert.deepEqual(findCall(calls, 'installStaging')[1], {
     tenantId: 'tenant_1',
     workspaceId: 'workspace_1',
     projectId: 'tenant_1:integration-core',
-    baseId: 'base_1',
   })
 
   const missingProject = await invoke(routes, 'POST', '/api/integration/staging/install', {
@@ -2898,8 +2898,8 @@ async function testStagingRoutes() {
   assertOkResponse(scopedProject, 201)
   assert.equal(
     findCalls(calls, 'installStaging')[2][1].projectId,
-    'tenant_1:plugin-integration-core',
-    'already plugin-scoped project ids are preserved',
+    'tenant_1:integration-core',
+    'GHSA hardening: a request projectId is IGNORED — staging always resolves to the authenticated tenant’s ${tenant}:integration-core (a request X:integration-core / X:plugin-integration-core can no longer steer the target, cross-tenant or otherwise)',
   )
 }
 
@@ -3828,7 +3828,6 @@ async function testStockPreparationTargetProvisioningRoutes() {
     user: ADMIN_USER,
     body: {
       projectId: 'tenant_1:integration-core',
-      baseId: 'base_stock',
       objectId: 'plm_stock_preparation_sandbox_validation',
       sheetId: 'evil_sheet',
       permission: 'admin',
@@ -3842,7 +3841,6 @@ async function testStockPreparationTargetProvisioningRoutes() {
     user: ADMIN_USER,
     body: {
       projectId: 'tenant_1:integration-core',
-      baseId: 'base_stock',
       objectId: STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.objectId,
     },
   })
@@ -3856,7 +3854,6 @@ async function testStockPreparationTargetProvisioningRoutes() {
     user: ADMIN_USER,
     body: {
       projectId: 'tenant_1:integration-core',
-      baseId: 'base_stock',
       objectId: 'customer_real_table',
     },
   })
@@ -3870,7 +3867,6 @@ async function testStockPreparationTargetProvisioningRoutes() {
     user: ADMIN_USER,
     body: {
       projectId: 'tenant_1:integration-core',
-      baseId: 'base_stock',
       objectId: 'plm_stock_preparation_sandbox_validation',
       optionSets: {
         material_type: [{
@@ -3892,7 +3888,6 @@ async function testStockPreparationTargetProvisioningRoutes() {
     user: ADMIN_USER,
     body: {
       projectId: 'tenant_1:integration-core',
-      baseId: 'base_stock',
       objectId: 'plm_stock_preparation_sandbox_validation',
       optionSets: {},
       configInfo: { rawSQL: [{ value: 'secret' }] },
@@ -3908,7 +3903,6 @@ async function testStockPreparationTargetProvisioningRoutes() {
     user: ADMIN_USER,
     body: {
       projectId: 'tenant_1:integration-core',
-      baseId: 'base_stock',
       objectId: 'plm_stock_preparation_sandbox_validation',
       optionSets: {},
       optionSources: { typo_source: [{ value: 'plate' }] },
@@ -3923,7 +3917,6 @@ async function testStockPreparationTargetProvisioningRoutes() {
     user: ADMIN_USER,
     body: {
       projectId: 'tenant_1:integration-core',
-      baseId: 'base_stock',
       objectId: 'plm_stock_preparation_sandbox_validation',
       optionSets: {
         typo_source: [{ value: 'plate' }],
@@ -3950,7 +3943,7 @@ async function testStockPreparationTargetProvisioningRoutes() {
 
   res = await invoke(routes, 'POST', '/api/integration/stock-preparation/target/ensure', {
     user: ADMIN_USER,
-    body: { projectId: 'tenant_1:integration-core', baseId: 'base_stock' },
+    body: { projectId: 'tenant_1:integration-core' },
   })
   assertOkResponse(res, 201)
   assert.equal(res.body.data.ready, true)
@@ -3965,7 +3958,7 @@ async function testStockPreparationTargetProvisioningRoutes() {
   assert.equal(JSON.stringify(res.body.data.evidence).includes('sheet_stock_canonical_created'), false, 'ensure evidence hides sheet id')
   const ensureCall = findCalls(provisioning.calls, 'ensureObject')[0]
   assert.equal(ensureCall[1].projectId, 'tenant_1:integration-core')
-  assert.equal(ensureCall[1].baseId, 'base_stock')
+  assert.equal(ensureCall[1].baseId, null, 'decision A: a request baseId is never forwarded to provisioning (sanitized to null)')
   assert.deepEqual(
     ensureCall[1].descriptor.fields.map((field) => field.id),
     STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.fields.map((field) => field.id),
@@ -4014,7 +4007,6 @@ async function testStockPreparationTargetProvisioningRoutes() {
     user: ADMIN_USER,
     body: {
       projectId: 'tenant_1:integration-core',
-      baseId: 'base_stock',
       objectId: sandboxObjectId,
       label: 'Sandbox Stock Preparation',
       optionSets: {
@@ -4042,7 +4034,7 @@ async function testStockPreparationTargetProvisioningRoutes() {
   assert.equal(JSON.stringify(res.body.data).includes('Casting'), false, 'sandbox route response hides option labels')
   const sandboxEnsureCall = findCalls(sandboxProvisioning.calls, 'ensureObject')[0]
   assert.equal(sandboxEnsureCall[1].projectId, 'tenant_1:integration-core')
-  assert.equal(sandboxEnsureCall[1].baseId, 'base_stock')
+  assert.equal(sandboxEnsureCall[1].baseId, null, 'decision A: a request baseId is never forwarded to provisioning (sanitized to null)')
   assert.equal(sandboxEnsureCall[1].descriptor.id, sandboxObjectId)
   assert.notEqual(sandboxEnsureCall[1].descriptor.id, STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.objectId)
   assert.deepEqual(
@@ -4084,7 +4076,6 @@ async function testStockPreparationTargetProvisioningRoutes() {
     user: ADMIN_USER,
     body: {
       projectId: 'tenant_1:integration-core',
-      baseId: 'base_stock',
       objectId: sandboxObjectId,
     },
   })
@@ -7573,6 +7564,10 @@ async function main() {
   await testSampleLimitCap()
   await testListOffsetCap()
   await testStockPreparationWritesRefuseWithoutAuditStore()
+  await testStockPreparationTenantScopedWriteSteeringHasNoEffect()
+  await testStockPreparationStructureWriteSteeringHasNoEffect()
+  await testStockPreparationWriteRejectsExplicitBaseId()
+  await testStagingInstallSteeringHasNoEffect()
 
   console.log('http-routes: REST auth/list/upsert/run/dry-run/staging/replay tests passed')
 }
@@ -7618,6 +7613,164 @@ async function testStockPreparationWritesRefuseWithoutAuditStore() {
   const { routes: routesWithStore } = mountRoutes(services)
   const res2 = await invoke(routesWithStore, 'POST', '/api/integration/stock-preparation/material-mappings/retire', { user: admin, body: { projectId: 'proj_1', mappingId: 'm1' } })
   assert.notEqual(res2.body && res2.body.error && res2.body.error.code, 'AUDIT_STORE_UNAVAILABLE', 'with the store present the gate opens')
+}
+
+// GHSA (private) step 1: a tenant-scoped WRITE route must derive its write target from the AUTHENTICATED
+// principal only. A tenant_1 admin that tries to steer the write to another tenant — via a body tenantId,
+// a ?tenantId= query param, OR a projectId shaped like another tenant's staging project
+// (tenant_evil:integration-core) — has ZERO side effect: every staging resolution (findObjectSheet) still
+// targets tenant_1's own `tenant_1:integration-core`, never tenant_evil's.
+async function testStockPreparationTenantScopedWriteSteeringHasNoEffect() {
+  const admin = { id: 'admin_1', tenantId: 'tenant_1', permissions: ['integration:admin'] }
+  // Representative step-1 write routes with a body that reaches the staging resolution (findObjectSheet).
+  const routesUnderTest = [
+    ['/api/integration/stock-preparation/material-mappings/candidates/sync', { projectId: 'proj_1', defaultVersionPolicy: 'drawing_only' }],
+    ['/api/integration/stock-preparation/generation/run', { projectId: 'proj_1' }],
+    ['/api/integration/stock-preparation/exceptions/resolve', { projectId: 'proj_1', exceptionId: 'e1', resolutionAction: 'manual_hold' }],
+  ]
+  // Three steering shapes: body tenantId, query tenantId, projectId = another tenant's staging project.
+  const steerings = [
+    { label: 'body tenantId', body: { tenantId: 'tenant_evil' }, query: {} },
+    { label: 'query tenantId', body: {}, query: { tenantId: 'tenant_evil' } },
+    { label: 'projectId=tenant_evil:integration-core', body: { projectId: 'tenant_evil:integration-core' }, query: {} },
+  ]
+  for (const [routePath, baseBody] of routesUnderTest) {
+    for (const steer of steerings) {
+      const { services } = createMockServices()
+      services.stockPreparationAuditStore = { async append() {}, async list() { return { rowCount: 0, entries: [] } } }
+      const provisioning = createStockPreparationTargetProvisioningApi({ sheetExists: true })
+      const records = createTableActionRecordsApi()
+      const { routes } = mountRoutes(services, { provisioningApi: provisioning.api, recordsApi: records.recordsApi })
+      await invoke(routes, 'POST', routePath, { user: admin, body: { ...baseBody, ...steer.body }, query: steer.query })
+      const targeted = findCalls(provisioning.calls, 'findObjectSheet').map(([, inp]) => inp.projectId)
+      assert.ok(targeted.length > 0, `${routePath} [${steer.label}] reached staging resolution`)
+      assert.ok(
+        targeted.every((pid) => pid === 'tenant_1:integration-core'),
+        `${routePath} [${steer.label}] resolves staging to the AUTHENTICATED tenant (got ${JSON.stringify([...new Set(targeted)])})`,
+      )
+      assert.ok(
+        !targeted.some((pid) => String(pid).includes('tenant_evil')),
+        `${routePath} [${steer.label}] never resolves staging to the steered tenant`,
+      )
+    }
+  }
+}
+
+// GHSA-m6qv-2rpf-q7mh step-1 FOLLOW-UP (owner re-review P1): the step-1 sweep covered only the 10
+// business-ROW write handlers. These SIX additional handlers are the same class — they also derive the
+// tenant/target from the REQUEST (resolveTenantId honors a request tenantId for admins; and
+// resolveIntegrationStagingProjectId returns a request "X:integration-core" projectId VERBATIM) — but
+// they write STRUCTURE (bases/tables) or FIELD METADATA rather than rows. Same two vectors, same fix.
+//
+// The assertion is deliberately BROAD: no provisioning call of ANY method may carry a projectId that
+// mentions the steered tenant. That covers ensureObject/findObjectSheet/patch alike, so a handler that
+// reaches the target through a different provisioning method is still caught.
+async function testStockPreparationStructureWriteSteeringHasNoEffect() {
+  const admin = { id: 'admin_1', tenantId: 'tenant_1', permissions: ['integration:admin'] }
+  const routesUnderTest = [
+    ['/api/integration/stock-preparation/target/ensure', {}],
+    ['/api/integration/stock-preparation/sandbox-target/ensure', { label: 'probe' }],
+    ['/api/integration/stock-preparation/options/sync', {}],
+    ['/api/integration/stock-preparation/mvp/ensure', {}],
+    ['/api/integration/stock-preparation/mvp/options/sync', {}],
+    ['/api/integration/field-options/sync', { presetId: 'stock-preparation-v1' }],
+  ]
+  const steerings = [
+    { label: 'body tenantId', body: { tenantId: 'tenant_evil' }, query: {} },
+    { label: 'query tenantId', body: {}, query: { tenantId: 'tenant_evil' } },
+    { label: 'projectId=tenant_evil:integration-core', body: { projectId: 'tenant_evil:integration-core' }, query: {} },
+  ]
+  let reached = 0
+  for (const [routePath, baseBody] of routesUnderTest) {
+    for (const steer of steerings) {
+      const { services } = createMockServices()
+      services.stockPreparationAuditStore = { async append() {}, async list() { return { rowCount: 0, entries: [] } } }
+      const provisioning = createStockPreparationTargetProvisioningApi({ sheetExists: true })
+      const records = createTableActionRecordsApi()
+      const { routes } = mountRoutes(services, { provisioningApi: provisioning.api, recordsApi: records.recordsApi })
+      await invoke(routes, 'POST', routePath, { user: admin, body: { ...baseBody, ...steer.body }, query: steer.query })
+      // Every projectId this request caused the provisioning layer to touch, whatever the method.
+      const touched = provisioning.calls
+        .map(([, inp]) => inp && inp.projectId)
+        .filter((pid) => typeof pid === 'string')
+      reached += touched.length
+      assert.ok(
+        !touched.some((pid) => pid.includes('tenant_evil')),
+        `${routePath} [${steer.label}] must never touch the steered tenant's project (got ${JSON.stringify([...new Set(touched)])})`,
+      )
+      assert.ok(
+        touched.every((pid) => pid === 'tenant_1:integration-core' || !pid.includes(':integration-core')),
+        `${routePath} [${steer.label}] staging target must be the AUTHENTICATED tenant's (got ${JSON.stringify([...new Set(touched)])})`,
+      )
+    }
+  }
+  // POSITIVE CONTROL: if no route reached the provisioning layer at all, the assertions above are
+  // vacuous (all-fail-closed green) — this suite would "pass" while proving nothing.
+  assert.ok(reached > 0, 'at least one structure-write route must reach the provisioning layer (else the steering assertions are vacuous)')
+}
+
+// GHSA-m6qv-2rpf-q7mh step-1 follow-up (owner decision A): a WRITE request carrying an explicit baseId
+// must be REJECTED fail-closed (400) BEFORE any provisioning call — baseId is a third steering axis
+// (host writes meta_sheets.base_id verbatim, no base-ownership check). RED against the pre-decision-A
+// code (which forwarded input.baseId into provisioning); GREEN after.
+async function testStockPreparationWriteRejectsExplicitBaseId() {
+  const admin = { id: 'admin_1', tenantId: 'tenant_1', permissions: ['integration:admin'] }
+  const routesUnderTest = [
+    ['/api/integration/stock-preparation/target/ensure', {}],
+    ['/api/integration/stock-preparation/sandbox-target/ensure', { objectId: 'obj1', label: 'x' }],
+    ['/api/integration/stock-preparation/mvp/ensure', {}],
+  ]
+  for (const [routePath, baseBody] of routesUnderTest) {
+    const { services } = createMockServices()
+    services.stockPreparationAuditStore = { async append() {}, async list() { return { rowCount: 0, entries: [] } } }
+    const provisioning = createStockPreparationTargetProvisioningApi({ sheetExists: false })
+    const records = createTableActionRecordsApi()
+    const { routes } = mountRoutes(services, { provisioningApi: provisioning.api, recordsApi: records.recordsApi })
+    const res = await invoke(routes, 'POST', routePath, { user: admin, body: { ...baseBody, baseId: 'base_of_tenant_evil' }, query: {} })
+    assert.equal(res.statusCode, 400, `${routePath} must reject an explicit baseId with 400 (got ${res.status})`)
+    assert.equal(res.body && res.body.error && res.body.error.code, 'STOCK_PREPARATION_BASE_ID_NOT_ALLOWED', `${routePath} must fail with STOCK_PREPARATION_BASE_ID_NOT_ALLOWED`)
+    assert.equal(provisioning.calls.length, 0, `${routePath} must fail-closed BEFORE any provisioning call (got ${provisioning.calls.length})`)
+  }
+  // Control: WITHOUT an explicit baseId the same routes are NOT rejected on that ground (they proceed to
+  // provisioning / validation) — proving the reject keys on the explicit baseId, not on the route itself.
+  const { services } = createMockServices()
+  services.stockPreparationAuditStore = { async append() {}, async list() { return { rowCount: 0, entries: [] } } }
+  const provisioning = createStockPreparationTargetProvisioningApi({ sheetExists: false })
+  const records = createTableActionRecordsApi()
+  const { routes } = mountRoutes(services, { provisioningApi: provisioning.api, recordsApi: records.recordsApi })
+  const ok = await invoke(routes, 'POST', '/api/integration/stock-preparation/target/ensure', { user: admin, body: {}, query: {} })
+  assert.notEqual(ok.body && ok.body.error && ok.body.error.code, 'STOCK_PREPARATION_BASE_ID_NOT_ALLOWED', 'no explicit baseId must NOT trip the baseId reject')
+}
+
+// GHSA-m6qv step-1 follow-up (owner P1): stagingInstall must not be steerable by a request
+// tenant/projectId/baseId. RED against the pre-fix inline derivation (resolveTenantId(req, body) +
+// request projectId passthrough + request baseId), GREEN after.
+async function testStagingInstallSteeringHasNoEffect() {
+  const admin = { id: 'admin_1', tenantId: 'tenant_1', permissions: ['integration:admin', 'integration:write'] }
+  // baseId steering -> hard 400 before provisioning, from EITHER the body OR the query string (the query
+  // is a distinct vector: stagingInstall read baseId from firstString(body.baseId, query.baseId)).
+  for (const where of [
+    { label: 'body', body: { baseId: 'base_of_tenant_evil', workspaceId: 'w1' }, query: {} },
+    { label: 'query', body: { workspaceId: 'w1' }, query: { baseId: 'base_of_tenant_evil' } },
+  ]) {
+    const { calls, services } = createMockServices()
+    const { routes } = mountRoutes(services)
+    const res = await invoke(routes, 'POST', '/api/integration/staging/install', { user: admin, body: where.body, query: where.query })
+    assert.equal(res.statusCode, 400, `stagingInstall must reject an explicit baseId (${where.label})`)
+    assert.equal(res.body && res.body.error && res.body.error.code, 'STOCK_PREPARATION_BASE_ID_NOT_ALLOWED', `stagingInstall baseId reject code (${where.label})`)
+    assert.equal(findCalls(calls, 'installStaging').length, 0, `stagingInstall must fail-closed before installStaging (${where.label})`)
+  }
+  // tenant + projectId steering -> resolved to the AUTHENTICATED tenant, never tenant_evil.
+  for (const steer of [{ tenantId: 'tenant_evil' }, { projectId: 'tenant_evil:integration-core' }, { projectId: 'tenant_evil:plugin-integration-core' }]) {
+    const { calls, services } = createMockServices()
+    const { routes } = mountRoutes(services)
+    const res = await invoke(routes, 'POST', '/api/integration/staging/install', { user: admin, body: { workspaceId: 'w1', ...steer }, query: {} })
+    assert.equal(res.statusCode, 201, `stagingInstall proceeds for ${JSON.stringify(steer)}`)
+    const installed = findCall(calls, 'installStaging')[1]
+    assert.equal(installed.tenantId, 'tenant_1', `stagingInstall resolves tenant to the authenticated principal (got ${installed.tenantId})`)
+    assert.equal(installed.projectId, 'tenant_1:integration-core', `stagingInstall pins the staging project to the authenticated tenant (got ${installed.projectId})`)
+    assert.ok(!String(installed.projectId).includes('tenant_evil'), 'stagingInstall never resolves to the steered tenant')
+  }
 }
 
 main().catch((err) => {
