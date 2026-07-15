@@ -18,6 +18,13 @@ import { randomUUID } from 'node:crypto'
 import { afterAll, describe, expect, test } from 'vitest'
 
 import { poolManager } from '../../src/integration/db/connection-pool'
+import {
+  canonicalizeConfig,
+  claimActionApplied,
+  classifyOutboundOutcome,
+  deriveActionKey,
+  deriveOutboundIdempotencyKey,
+} from '../../src/multitable/automation-action-idempotency'
 
 const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
 const q = (sql: string, params?: unknown[]) => poolManager.get().query(sql, params)
@@ -93,5 +100,48 @@ describeIfDatabase('action-idempotency ledger L1 — schema golden (real DB)', (
     }
     const { rows } = await q('SELECT count(*)::int AS c FROM meta_automation_action_applied WHERE action_key=$1', [action])
     expect(Number(rows[0].c)).toBe(0)
+  })
+
+  // ---- L2: derivation + Class-A claim helper + Class-B semantics ----
+
+  test('L2 deriveActionKey: deterministic triple identity — key-order insensitive, value-sensitive, fence-free', () => {
+    const a = deriveActionKey({ structuralPath: 'steps[2].actions[0]', actionType: 'create_record', canonicalConfig: { b: 2, a: 1 } })
+    const b = deriveActionKey({ structuralPath: 'steps[2].actions[0]', actionType: 'create_record', canonicalConfig: { a: 1, b: 2 } })
+    expect(a).toBe(b) // property order does not change identity
+    const c = deriveActionKey({ structuralPath: 'steps[2].actions[0]', actionType: 'create_record', canonicalConfig: { a: 1, b: 3 } })
+    expect(c).not.toBe(a) // config change = new identity
+    expect(canonicalizeConfig({ x: [2, 1] })).toBe('{"x":[2,1]}') // array order preserved (it is meaning)
+    expect(() => deriveActionKey({ structuralPath: ' ', actionType: 'x', canonicalConfig: {} })).toThrow(/non-blank/)
+  })
+
+  test('L2 claimActionApplied: first=claimed, repeat=duplicate; CONCURRENT double-claim → exactly one claimed', async () => {
+    const key = deriveActionKey({ structuralPath: 's[0]', actionType: 'create_record', canonicalConfig: { t: RUN } })
+    const base = { instanceId: INST, ruleId: `rule_${RUN}_l2`, actionKey: key }
+    expect(await claimActionApplied(poolManager.get(), { ...base, id: `aa_${randomUUID()}` })).toBe('claimed')
+    expect(await claimActionApplied(poolManager.get(), { ...base, id: `aa_${randomUUID()}` })).toBe('duplicate')
+    // constructed race on a FRESH key: two connections claim simultaneously
+    const key2 = deriveActionKey({ structuralPath: 's[1]', actionType: 'create_record', canonicalConfig: { t: RUN } })
+    const raw = poolManager.get().getInternalPool()
+    const [ca, cb] = await Promise.all([raw.connect(), raw.connect()])
+    try {
+      const [ra, rb] = await Promise.all([
+        claimActionApplied(ca, { ...base, actionKey: key2, id: `aa_${randomUUID()}` }),
+        claimActionApplied(cb, { ...base, actionKey: key2, id: `aa_${randomUUID()}` }),
+      ])
+      expect([ra, rb].filter((r) => r === 'claimed')).toHaveLength(1) // net-once under the race
+      expect([ra, rb].filter((r) => r === 'duplicate')).toHaveLength(1)
+    } finally {
+      ca.release()
+      cb.release()
+    }
+  })
+
+  test('L2 Class-B: outbound key = stable event+action identity; ambiguity w/o endpoint idempotency = outcome_unknown', () => {
+    const k1 = deriveOutboundIdempotencyKey('evt_1', 'ak_1')
+    expect(k1).toBe('evt_1::ak_1') // no fence, no attempt — identical across zombie + reclaimer
+    expect(classifyOutboundOutcome('delivered', false)).toBe('success')
+    expect(classifyOutboundOutcome('rejected', true)).toBe('permanent_failure')
+    expect(classifyOutboundOutcome('ambiguous', true)).toBe('retryable_failure') // endpoint dedups → safe retry
+    expect(classifyOutboundOutcome('ambiguous', false)).toBe('outcome_unknown') // recorded, NEVER auto-resent
   })
 })
