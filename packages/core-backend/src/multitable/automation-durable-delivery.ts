@@ -36,14 +36,21 @@ export const RESOLVE_PERMITTING_STATUSES: ReadonlySet<OutboxConsumerStatus> = ne
   'dead_letter',
 ])
 
-/** A producer event row (`meta_automation_outbox`), co-committed with its source state change. */
+/**
+ * A producer event row (`meta_automation_outbox`), co-committed with its source state change.
+ *
+ * `eventId` is **non-nullable** (`string`): it is the stable ORIGINAL-event identity (#4203 §producer/identity)
+ * the dispatcher forwards downstream as the per-rule `event_fires` dedup key and the seed for outbound
+ * idempotency keys — a NULL identity would break cutover-window dedup and outbound idempotency. It is NOT
+ * unique (the outbox tolerates the cutover's transient double-emit; dedup happens at the sink, not here).
+ */
 export interface OutboxRow {
   id: string
   eventType: string
   payload: unknown
   automationDepth: number
   manifestVersion: number
-  eventId: string | null
+  eventId: string
   createdAt: Date
 }
 
