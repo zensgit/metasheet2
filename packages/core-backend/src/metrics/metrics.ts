@@ -483,6 +483,25 @@ const approvalSlaSchedulerLeaderGauge = gauge({
   labelNames: ['state'] as const
 })
 
+// DingTalk OAuth state-store operations (packages/core-backend/src/auth/dingtalk-oauth.ts).
+// `operation` is the state-store action ('write' from generateState, 'validate' from
+// validateState); `result` is the outcome ('ok' | 'error'). Cardinality is fixed at 2x2 —
+// state values / user data must never appear in labels.
+const dingtalkOAuthStateOperationsTotal = counter({
+  name: 'metasheet_dingtalk_oauth_state_operations_total',
+  help: 'DingTalk OAuth state store operations (write/validate) by result (ok/error)',
+  labelNames: ['operation', 'result'] as const
+})
+
+// Counts operations that fell back to the in-process memory store because the shared
+// (Redis) state store was unavailable — a normal Redis miss/expiry falling through to
+// memory in single-replica mode does NOT count here, only store-unavailable degradation.
+const dingtalkOAuthStateFallbackTotal = counter({
+  name: 'metasheet_dingtalk_oauth_state_fallback_total',
+  help: 'DingTalk OAuth state operations that used the in-process memory fallback because the shared (Redis) state store was unavailable',
+  labelNames: ['operation'] as const
+})
+
 registry.registerMetric(httpHistogram)
 registry.registerMetric(httpSummary)
 registry.registerMetric(httpRequestsTotal)
@@ -554,6 +573,23 @@ registry.registerMetric(apigwCbStoreUsedTotal)
 registry.registerMetric(apigwCbInitTotal)
 registry.registerMetric(automationSchedulerLeaderGauge)
 registry.registerMetric(approvalSlaSchedulerLeaderGauge)
+registry.registerMetric(dingtalkOAuthStateOperationsTotal)
+registry.registerMetric(dingtalkOAuthStateFallbackTotal)
+
+// Zero-initialize every DingTalk OAuth state label combination at module registration.
+// prom-client emits NO sample line for a labeled counter until its first .inc() call —
+// the DingTalk OAuth-stability check (scripts/ops/dingtalk-oauth-stability-check.sh)
+// matches SAMPLE lines only (`line.startswith('metasheet_dingtalk_oauth_state_operations_total')`;
+// '# HELP'/'# TYPE' comment lines do not count), so a zero-traffic window must still show
+// the metric as PRESENT — this line exists to prove the producer is wired, not that traffic
+// happened. Without this, a freshly-deployed or idle instance would read as "no OAuth
+// metrics" even though generateState/validateState are correctly instrumented.
+for (const dingtalkOAuthStateOperation of ['write', 'validate'] as const) {
+  for (const dingtalkOAuthStateResult of ['ok', 'error'] as const) {
+    dingtalkOAuthStateOperationsTotal.inc({ operation: dingtalkOAuthStateOperation, result: dingtalkOAuthStateResult }, 0)
+  }
+  dingtalkOAuthStateFallbackTotal.inc({ operation: dingtalkOAuthStateOperation }, 0)
+}
 
 function trimConfiguredMetricsToken(raw: string | undefined): string | null {
   const token = typeof raw === 'string' ? raw.trim() : ''
@@ -702,7 +738,10 @@ export const metrics = {
   apigwCbStoreUsedTotal,
   apigwCbInitTotal,
   automationSchedulerLeaderGauge,
-  approvalSlaSchedulerLeaderGauge
+  approvalSlaSchedulerLeaderGauge,
+  // DingTalk OAuth state-store operations
+  dingtalkOAuthStateOperationsTotal,
+  dingtalkOAuthStateFallbackTotal
 }
 
 /**
@@ -719,4 +758,29 @@ export function observeRpcLatency(
   durationSeconds: number
 ): void {
   rpcLatencySeconds.labels(method, plugin, status).observe(durationSeconds)
+}
+
+export type DingTalkOAuthStateOperation = 'write' | 'validate'
+export type DingTalkOAuthStateOperationResult = 'ok' | 'error'
+
+/**
+ * Record a DingTalk OAuth state-store operation outcome (write from generateState,
+ * validate from validateState). Never pass the state value or any user data — only
+ * the fixed 'operation'/'result' enums, to keep label cardinality bounded.
+ */
+export function recordDingTalkOAuthStateOperation(
+  operation: DingTalkOAuthStateOperation,
+  result: DingTalkOAuthStateOperationResult
+): void {
+  dingtalkOAuthStateOperationsTotal.labels(operation, result).inc()
+}
+
+/**
+ * Record that a DingTalk OAuth state operation fell back to the in-process memory store
+ * because the shared (Redis) state store was unavailable. Do NOT call this for a normal
+ * Redis miss/expiry falling through to memory in single-replica mode — only for genuine
+ * store-unavailable degradation.
+ */
+export function recordDingTalkOAuthStateFallback(operation: DingTalkOAuthStateOperation): void {
+  dingtalkOAuthStateFallbackTotal.labels(operation).inc()
 }

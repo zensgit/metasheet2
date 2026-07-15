@@ -75,9 +75,11 @@ const LABELS: Record<MetaApiTokenLabelKey, { en: string; zh: string }> = {
   'tab.tokens': { en: 'API Tokens', zh: 'API 令牌' },
   'tab.webhooks': { en: 'Webhooks', zh: 'Webhook' },
   'tab.dingtalkGroups': { en: 'DingTalk Groups', zh: '钉钉群' },
+  // W1 G-10 terminology dictionary (ratified 2026-07-13, display layer only): Sheet = 数据表 in
+  // every zh string below (was bare '表'). English values are unchanged.
   'notice.dingtalkPermission': {
     en: 'DingTalk group bindings require automation management permission for this table.',
-    zh: '钉钉群绑定需要此表的自动化管理权限。',
+    zh: '钉钉群绑定需要此数据表的自动化管理权限。',
   },
   'token.newShownOnce': { en: 'Your new API token (shown once):', zh: '新的 API 令牌（仅显示一次）：' },
   'token.saveWarning': { en: 'Save this token now. You will not be able to see it again.', zh: '请立即保存此令牌。之后将无法再次查看。' },
@@ -147,14 +149,14 @@ const LABELS: Record<MetaApiTokenLabelKey, { en: string; zh: string }> = {
   'webhook.event.recordUpdated': { en: 'record.updated', zh: '记录已更新' },
   'webhook.event.recordDeleted': { en: 'record.deleted', zh: '记录已删除' },
   'webhook.event.fieldChanged': { en: 'field.changed', zh: '字段已变更' },
-  'dingtalk.scopeNote.title': { en: 'Table-scoped DingTalk groups', zh: '表级钉钉群' },
+  'dingtalk.scopeNote.title': { en: 'Table-scoped DingTalk groups', zh: '数据表级钉钉群' },
   'dingtalk.scopeNote.bound': {
     en: 'Groups created here are bound to this table. You can add multiple groups and choose one or more in automations; organization catalog groups are listed read-only when shared with your organization.',
-    zh: '此处创建的群会绑定到当前表。你可以添加多个群，并在自动化中选择一个或多个；组织共享的目录群会以只读方式展示。',
+    zh: '此处创建的群会绑定到当前数据表。你可以添加多个群，并在自动化中选择一个或多个；组织共享的目录群会以只读方式展示。',
   },
   'dingtalk.scopeNote.delivery': {
     en: 'Register DingTalk robot webhooks as send destinations for this table. This does not import DingTalk group members or control form access.',
-    zh: '将钉钉机器人 Webhook 注册为此表的发送目标。此功能不会导入钉钉群成员，也不会控制表单访问。',
+    zh: '将钉钉机器人 Webhook 注册为此数据表的发送目标。此功能不会导入钉钉群成员，也不会控制表单访问。',
   },
   'dingtalk.newTitle': { en: 'New DingTalk Group', zh: '新建钉钉群' },
   'dingtalk.editTitle': { en: 'Edit DingTalk Group', zh: '编辑钉钉群' },
@@ -164,7 +166,7 @@ const LABELS: Record<MetaApiTokenLabelKey, { en: string; zh: string }> = {
   'dingtalk.webhookPlaceholder': { en: 'https://oapi.dingtalk.com/robot/send?access_token=...', zh: 'https://oapi.dingtalk.com/robot/send?access_token=...' },
   'dingtalk.webhookHelp': {
     en: "Paste the robot webhook from the target DingTalk group robot settings. After saving, this destination appears in this table's automation rule editor. The access token is stored for delivery but masked in this UI.",
-    zh: '粘贴目标钉钉群机器人设置中的 Webhook。保存后，该目标会出现在此表的自动化规则编辑器中。access_token 会用于投递存储，但在界面中脱敏显示。',
+    zh: '粘贴目标钉钉群机器人设置中的 Webhook。保存后，该目标会出现在此数据表的自动化规则编辑器中。access_token 会用于投递存储，但在界面中脱敏显示。',
   },
   'dingtalk.secretOptional': { en: 'Secret (optional)', zh: '密钥（可选）' },
   'dingtalk.secretPlaceholder': { en: 'SEC...', zh: 'SEC...' },
@@ -196,8 +198,8 @@ const LABELS: Record<MetaApiTokenLabelKey, { en: string; zh: string }> = {
   'dingtalk.meta.lastError': { en: 'Last error', zh: '最近错误' },
   'dingtalk.scope.org': { en: 'Organization catalog group', zh: '组织目录群' },
   'dingtalk.scope.orgWithId': { en: 'Organization catalog group', zh: '组织目录群' },
-  'dingtalk.scope.sheet': { en: 'Shared with this sheet', zh: '与此表共享' },
-  'dingtalk.scope.sheetWithId': { en: 'Shared with sheet', zh: '共享到表' },
+  'dingtalk.scope.sheet': { en: 'Shared with this sheet', zh: '与此数据表共享' },
+  'dingtalk.scope.sheetWithId': { en: 'Shared with sheet', zh: '共享到数据表' },
   'dingtalk.scope.private': { en: 'Private legacy group', zh: '私有旧版群' },
   'dingtalk.action.create': { en: 'Create', zh: '创建' },
   'dingtalk.action.update': { en: 'Update', zh: '更新' },

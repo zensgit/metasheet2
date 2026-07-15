@@ -18,6 +18,7 @@ on:
       - 'apps/web/src/multitable/components/cells/MetaCellRenderer.vue'
       - 'apps/web/src/multitable/components/MetaCommentReactions.vue'
       - 'apps/web/src/multitable/components/MetaCommentsDrawer.vue'
+      - 'apps/web/src/multitable/views/MultitableWorkbench.vue' # UI-P2-2c drawer CSS lives here (gate NIT-3)
       - 'apps/web/src/multitable/utils/conditional-formatting.ts'
       - 'apps/web/verification/**'
       - 'apps/web/playwright.verification.config.ts'

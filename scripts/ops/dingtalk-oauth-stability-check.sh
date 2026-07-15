@@ -17,6 +17,11 @@ MAX_ROOT_USE_PERCENT="${MAX_ROOT_USE_PERCENT:-95}"
 DEPLOY_PATH="${DEPLOY_PATH:-metasheet2}"
 DEPLOY_COMPOSE_FILE="${DEPLOY_COMPOSE_FILE:-docker-compose.app.yml}"
 
+# Fail-honest docker-logs match-count pipeline builders (alertmanager_error_count_cmd,
+# bridge_notify_count_cmd, bridge_resolved_count_cmd) — see the file for the contract.
+# shellcheck source=./dingtalk-oauth-stability-log-probe-cmds.sh
+source "${ROOT_DIR}/scripts/ops/dingtalk-oauth-stability-log-probe-cmds.sh"
+
 ssh_cmd() {
   ssh -i "${SSH_KEY}" -o BatchMode=yes -o StrictHostKeyChecking=no "${SSH_USER_HOST}" "$@"
 }
@@ -44,14 +49,78 @@ fi
 REMOTE
 }
 
-WEBHOOK_STATUS="$(bash "${ROOT_DIR}/scripts/ops/set-dingtalk-onprem-alertmanager-webhook-config.sh" --print-status)"
+# DT-CLOSE-01B: this recording is a METRICS-ONLY OAuth-stability check. Its job is the OAuth
+# state-machine signal (/metrics/prom, authenticated per DT-CLOSE-01), /health, and root-disk
+# headroom. The Alertmanager (:9093) + metasheet-alert-webhook alert-DELIVERY topology is a
+# SEPARATE concern that is NOT deployable from current main (docker/observability/ has only
+# Prometheus+Grafana; the alertmanager service + webhook bridge + OAuth alert rules were never
+# landed). Hard-depending on it made every scheduled run fail with `curl (7) :9093` — the OAuth
+# monitor going blind because of an unrelated, undeployed topology. So the alert-topology probes
+# below are SOFT (best-effort; a failure yields a "deferred" marker, not an abort) and, critically,
+# the verdict (report['healthy']) does NOT depend on them. Alert-delivery observability is DEFERRED
+# to a follow-up that actually deploys the topology; this check no longer claims it is "restored".
+ALERT_TOPOLOGY_DEFERRED="false"
+# NOTE: each of these SIX probes (webhook-status, alertmanager-status, alerts, and the three
+# docker-logs match-count probes below) must set ALERT_TOPOLOGY_DEFERRED from the PARENT shell on
+# failure. `WEBHOOK_STATUS="$(cmd || { ALERT_TOPOLOGY_DEFERRED=true; ... })"` is a bug: the `|| { ... }`
+# runs INSIDE the `$( ... )` command substitution, which is a SUBSHELL — the assignment never
+# propagates to the parent shell and ALERT_TOPOLOGY_DEFERRED silently stays "false" even when the
+# probe failed. Repro: `X=false; Y=$(false || { X=true; echo z; }); echo $X` prints `false`. Use a
+# parent-shell if/else instead so the assignment sticks; the `if` consumes the non-zero exit so
+# `set -e` does not abort.
+if WEBHOOK_STATUS="$(bash "${ROOT_DIR}/scripts/ops/set-dingtalk-onprem-alertmanager-webhook-config.sh" --print-status 2>/dev/null)"; then
+  :
+else
+  ALERT_TOPOLOGY_DEFERRED="true"
+  WEBHOOK_STATUS="configured=false"
+fi
 HEALTH_JSON="$(ssh_cmd "curl -fsS http://127.0.0.1:8900/health")"
 METRICS_TEXT="$(remote_authed_curl "http://127.0.0.1:8900/metrics/prom")"
-ALERTMANAGER_STATUS_JSON="$(ssh_cmd "curl -fsS http://127.0.0.1:9093/api/v2/status")"
-ALERTS_JSON="$(ssh_cmd "curl -fsS http://127.0.0.1:9093/api/v2/alerts")"
-ALERTMANAGER_ERROR_COUNT="$(ssh_cmd "docker logs --since ${LOG_WINDOW} metasheet-alertmanager 2>&1 | grep -E 'Notify for alerts failed|no_text' | wc -l | tr -d ' '")"
-BRIDGE_NOTIFY_COUNT="$(ssh_cmd "docker logs --since ${LOG_WINDOW} metasheet-alert-webhook 2>&1 | grep '\"path\": \"/notify\"' | wc -l | tr -d ' '")"
-BRIDGE_RESOLVED_COUNT="$(ssh_cmd "docker logs --since ${LOG_WINDOW} metasheet-alert-webhook 2>&1 | grep '\"path\": \"/notify\"' | grep '\"status\": \"resolved\"' | wc -l | tr -d ' '")"
+if ALERTMANAGER_STATUS_JSON="$(ssh_cmd "curl -fsS http://127.0.0.1:9093/api/v2/status" 2>/dev/null)"; then
+  :
+else
+  ALERT_TOPOLOGY_DEFERRED="true"
+  ALERTMANAGER_STATUS_JSON='{}'
+fi
+if ALERTS_JSON="$(ssh_cmd "curl -fsS http://127.0.0.1:9093/api/v2/alerts" 2>/dev/null)"; then
+  :
+else
+  ALERT_TOPOLOGY_DEFERRED="true"
+  ALERTS_JSON='[]'
+fi
+# SECOND bug class (distinct from the subshell-assignment one above): these three probes pipe
+# `docker logs | grep | wc -l` over ssh. `wc -l` ALWAYS exits 0 no matter what fed it, so a `docker
+# logs` failure (container missing, daemon down) used to be silently reported as a successful "0"
+# count — the `|| printf 0` local fallback never even ran, because the remote pipeline itself never
+# failed. The pipeline strings below (built by the sourced dingtalk-oauth-stability-log-probe-cmds.sh)
+# enable `pipefail` on the remote shell so a `docker logs` failure propagates as a non-zero exit while
+# a genuine zero-match read still exits 0 — see that file for the full contract. Combined with the
+# parent-shell if/else here, a probe failure now correctly sets ALERT_TOPOLOGY_DEFERRED instead of
+# being read as "0 events, alert delivery topology fine".
+# `set -o pipefail` is bash-only, so the pipeline is run under an EXPLICIT `bash -c` on the remote
+# (parity with remote_authed_curl's `bash -s` above) instead of trusting the remote login shell to be
+# bash. A non-bash login shell would have aborted on `set -o pipefail` (fail-safe → deferred), but
+# forcing bash makes the probe work — not just fail safely — regardless of the login-shell config.
+# `printf '%q'` re-quotes the pipeline as backslash-escaped words (no control chars in these strings,
+# so no $'…' forms), which any POSIX login shell can hand to bash unmangled.
+if ALERTMANAGER_ERROR_COUNT="$(ssh_cmd "bash -c $(printf '%q' "$(alertmanager_error_count_cmd)")" 2>/dev/null)"; then
+  :
+else
+  ALERT_TOPOLOGY_DEFERRED="true"
+  ALERTMANAGER_ERROR_COUNT="0"
+fi
+if BRIDGE_NOTIFY_COUNT="$(ssh_cmd "bash -c $(printf '%q' "$(bridge_notify_count_cmd)")" 2>/dev/null)"; then
+  :
+else
+  ALERT_TOPOLOGY_DEFERRED="true"
+  BRIDGE_NOTIFY_COUNT="0"
+fi
+if BRIDGE_RESOLVED_COUNT="$(ssh_cmd "bash -c $(printf '%q' "$(bridge_resolved_count_cmd)")" 2>/dev/null)"; then
+  :
+else
+  ALERT_TOPOLOGY_DEFERRED="true"
+  BRIDGE_RESOLVED_COUNT="0"
+fi
 ROOT_DF_LINE="$(ssh_cmd "df -P / | awk 'NR==2 {print \$2\" \"\$3\" \"\$4\" \"\$5}'")"
 
 WEBHOOK_STATUS_INPUT="${WEBHOOK_STATUS}" \
@@ -67,6 +136,7 @@ SSH_USER_HOST_INPUT="${SSH_USER_HOST}" \
 LOG_WINDOW_INPUT="${LOG_WINDOW}" \
 MAX_ROOT_USE_PERCENT_INPUT="${MAX_ROOT_USE_PERCENT}" \
 JSON_OUTPUT_INPUT="${JSON_OUTPUT}" \
+ALERT_TOPOLOGY_DEFERRED_INPUT="${ALERT_TOPOLOGY_DEFERRED}" \
 python3 - <<'EOF'
 import json
 import os
@@ -147,11 +217,24 @@ health_ok = (
     report['health']['ok'] is True
     or report['health']['status'] == 'ok'
 )
+# DT-CLOSE-01B: metrics-only OAuth-stability verdict. The OAuth signal is present when the state
+# machine is emitting its operation metrics (an authenticated /metrics/prom scrape returned the
+# metasheet_dingtalk_oauth_state_operations_total series). The verdict deliberately does NOT depend
+# on the alert-delivery topology (webhook configured / Slack host / alertmanager notify errors) —
+# that is a separate, currently-DEFERRED concern (docker/observability has no alertmanager service
+# or webhook bridge on main), and coupling it in is what made the OAuth monitor go blind.
+alert_topology_deferred = os.environ.get('ALERT_TOPOLOGY_DEFERRED_INPUT', 'false') == 'true'
+# THREE-STATE: 'observed' requires BOTH (i) none of the alert-topology probes failed AND (ii) the
+# webhook is actually configured. A reachable-but-UNCONFIGURED webhook (the config script can exit 0
+# and print `configured=false` — Alertmanager up, nothing to notify) must also read as deferred, not
+# observed: printing a success exit code is not the same as having delivery observability.
+alert_topology_observed = (not alert_topology_deferred) and report['webhookConfig']['configured'] is True
+report['alertDeliveryObservability'] = 'observed' if alert_topology_observed else 'deferred'
+oauth_metrics_present = len(report['metrics']['operationsSamples']) > 0
+report['oauthMetricsPresent'] = oauth_metrics_present
 report['healthy'] = (
     health_ok
-    and report['webhookConfig']['configured'] is True
-    and report['webhookConfig']['host'] == 'hooks.slack.com'
-    and report['alertmanager']['notifyErrorsLastWindow'] == 0
+    and oauth_metrics_present
     and report['storage']['root']['usePercent'] < report['storage']['root']['maxUsePercent']
 )
 
@@ -161,10 +244,9 @@ else:
     print(f"[oauth-stability] checkedAt={report['checkedAt']}")
     print(f"[oauth-stability] host={report['host']}")
     print(f"[oauth-stability] health.status={report['health']['status']} plugins={report['health']['plugins']} ok={report['health']['ok']}")
-    print(f"[oauth-stability] webhook.configured={report['webhookConfig']['configured']} host={report['webhookConfig']['host']}")
-    print(f"[oauth-stability] alertmanager.activeAlerts={report['alertmanager']['activeAlertsCount']} notifyErrors={report['alertmanager']['notifyErrorsLastWindow']}")
     print(f"[oauth-stability] storage.rootUse={report['storage']['root']['usePercent']}% availKBlocks={report['storage']['root']['availableKBlocks']} maxUse={report['storage']['root']['maxUsePercent']}%")
-    print(f"[oauth-stability] bridge.notifyEvents={report['bridge']['notifyEventsLastWindow']} resolvedEvents={report['bridge']['resolvedEventsLastWindow']}")
-    print(f"[oauth-stability] metrics.operations={len(report['metrics']['operationsSamples'])} fallback={len(report['metrics']['fallbackSamples'])} redis={len(report['metrics']['redisSamples'])}")
+    print(f"[oauth-stability] metrics.operations={len(report['metrics']['operationsSamples'])} fallback={len(report['metrics']['fallbackSamples'])} redis={len(report['metrics']['redisSamples'])} oauthMetricsPresent={str(report['oauthMetricsPresent']).lower()}")
+    print(f"[oauth-stability] alertDeliveryObservability={report['alertDeliveryObservability']} (DEFERRED means the Alertmanager+webhook topology is not deployed — NOT part of the OAuth verdict)")
+    print(f"[oauth-stability] webhook.configured={report['webhookConfig']['configured']} alertmanager.notifyErrors={report['alertmanager']['notifyErrorsLastWindow']} bridge.notifyEvents={report['bridge']['notifyEventsLastWindow']} (informational only)")
     print(f"[oauth-stability] healthy={str(report['healthy']).lower()}")
 EOF
