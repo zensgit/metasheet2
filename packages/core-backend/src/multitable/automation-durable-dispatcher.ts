@@ -6,25 +6,29 @@
  * poll+dispatch loop and the adapters are S2-b / S5.
  *
  * Correctness contract (mirrors the proven AttendanceNotificationDeliveryWorker + FWB-0 lock #4203 Layer 1):
- *   - CLAIM is a single atomic `FOR UPDATE SKIP LOCKED` CTE that also enforces the poison ceiling. For a
- *     reclaimable row (pending, or in_progress past a stale lease):
- *       · attempts < maxAttempts → flip to `in_progress`, stamp a fresh lease, bump `fence` (the monotonic
- *         claim token) and `attempts` (AT CLAIM), and hand it out for dispatch;
- *       · attempts ≥ maxAttempts → **poison it to `dead_letter` right here** and DON'T dispatch it.
- *     Poisoning at claim time (driven only by the persisted `attempts`) is what makes the ceiling
- *     **crash-safe**: a worker that always crashes AFTER claiming never runs a resolve path, yet the row
- *     still terminates — the next reclaim finds `attempts ≥ maxAttempts` and dead-letters it. "非无限
- *     reclaim" (#4203 §poison-terminal). SKIP LOCKED hands concurrent workers disjoint rows.
+ *   - A worker claims ONLY the consumer_keys it knows — `consumerKeys` is REQUIRED and non-empty (a
+ *     registry-managed allow-list). A key it doesn't recognize is never claimed, so it stays `pending`
+ *     for a worker that does know it. This is the rolling-deploy contract (#4203 §246): an N-1 worker must
+ *     NEVER mark an unknown-key row `done`/`dead_letter` (that silently drops an event a newer worker owns),
+ *     and this "unknown → pending + alert" behavior MUST exist in the FIRST dispatcher version — a current
+ *     worker won't hit unknown keys itself, but at the next version bump it becomes N-1. `findUnknownConsumerKeys`
+ *     is the alert seam.
+ *   - CLAIM is a single atomic `FOR UPDATE SKIP LOCKED` CTE that also enforces the poison ceiling: a
+ *     reclaimable row (pending, or in_progress past a stale lease) with `attempts >= maxAttempts` is
+ *     poisoned to `dead_letter` right there — driven only by the persisted `attempts`, so the ceiling is
+ *     **crash-safe** (a worker that always crashes after claiming never resolves, yet the row still
+ *     terminates). Otherwise it flips to `in_progress`, stamps a lease, bumps `fence` (the claim token) and
+ *     `attempts` (AT CLAIM). SKIP LOCKED hands concurrent workers disjoint rows.
  *   - Every resolve is a **fence-CAS** (`WHERE ... AND fence = <claimed> AND status = 'in_progress'`): a
- *     "zombie" whose lease was reclaimed holds a stale fence, so its write matches 0 rows (silent no-op)
- *     while the reclaimer (new fence) owns the row. `fence` is a bigint carried as a `string` (never a JS
+ *     zombie holding a superseded fence writes 0 rows. **`reschedule` and `poison`/`complete` all consume
+ *     the token** — reschedule ATOMICALLY BUMPS the fence, so a late worker holding the original token can
+ *     no longer complete/poison/reschedule the row. `fence` is a bigint carried as a `string` (never a JS
  *     number — 2^53).
- *   - A retryable failure does NOT flip the row back to an immediately-reclaimable state — that would spin
- *     retries with no backoff and burn the ceiling in a tight loop. Instead `reschedule` keeps the row
- *     `in_progress` and pushes its lease out by a backoff, so it is re-claimed only AFTER the lease expires
- *     (#4203 §"租约过期后被 reclaim"). Terminal/lease writes preserve the `lease ⟺ in_progress` biconditional.
- *   - Failure detail is NEVER persisted verbatim (a raw adapter error can carry a secret-shaped URL/token).
- *     Resolves take a typed, values-free `DeliveryFailureReason` code, and only the code reaches the DB.
+ *   - A retryable failure keeps the row `in_progress` with the lease pushed out by a backoff (re-claimed
+ *     only after expiry), never an immediately-reclaimable state (#4203 §"租约过期后被 reclaim").
+ *   - Failure detail is never persisted verbatim: resolves take a typed, values-free `DeliveryFailureReason`.
+ *   - Every numeric bound is a validated SAFE INTEGER within an explicit range (no fractional/huge value
+ *     reaches Postgres as a runtime cast error).
  *
  * Nothing here runs while `AUTOMATION_DURABLE_DELIVERY_ENABLED` is OFF — pure primitives with no caller
  * until the S2-b loop is wired behind the flag.
@@ -39,10 +43,15 @@ export interface Queryable {
 /** Default attempt ceiling before a consumer row is poisoned to `dead_letter`. */
 export const DEFAULT_MAX_DELIVERY_ATTEMPTS = 8
 
+// Explicit upper bounds so a caller bug can't push an out-of-range value into an int/interval cast.
+const MAX_BATCH_SIZE = 10_000
+const MAX_LEASE_MS = 86_400_000 // 24h
+const MAX_DELAY_MS = 86_400_000 // 24h
+const MAX_ATTEMPTS_CEILING = 10_000
+
 /**
  * The ONLY strings that may land in `last_error` — a closed, values-free vocabulary so a raw adapter error
- * (which can embed a secret-shaped URL/token) is never persisted verbatim. The dispatch loop maps an
- * adapter outcome to one of these codes; the real detail belongs in redacted structured logs, not this row.
+ * (which can embed a secret-shaped URL/token) is never persisted verbatim.
  */
 export type DeliveryFailureReason =
   | 'adapter_error'
@@ -51,8 +60,6 @@ export type DeliveryFailureReason =
   | 'max_attempts_exhausted'
   | 'unknown'
 
-/** The closed set of legal reason codes — enforced at RUNTIME so even an untyped caller can't persist a raw
- *  (possibly secret-bearing) string. Values-free by construction, not just by the TS type. */
 const ALLOWED_FAILURE_REASONS: ReadonlySet<string> = new Set<DeliveryFailureReason>([
   'adapter_error',
   'adapter_timeout',
@@ -65,6 +72,20 @@ function assertReason(reason: DeliveryFailureReason): void {
   if (!ALLOWED_FAILURE_REASONS.has(reason)) {
     throw new RangeError('last_error must be a values-free DeliveryFailureReason code, not a raw message')
   }
+}
+
+/** Reject fractional, non-finite, out-of-safe-range, or out-of-bounds numeric params before they hit SQL. */
+function requireBoundedInt(name: string, value: number, min: number, max: number): void {
+  if (!Number.isSafeInteger(value) || value < min || value > max) {
+    throw new RangeError(`${name} must be a safe integer in [${min}, ${max}] (got ${value})`)
+  }
+}
+
+function requireKnownKeys(consumerKeys: string[] | undefined): string[] {
+  if (!Array.isArray(consumerKeys) || consumerKeys.length === 0) {
+    throw new RangeError('consumerKeys is required and must be a non-empty allow-list of keys this worker knows')
+  }
+  return consumerKeys
 }
 
 /** A row claimed for dispatch — carries the claim `fence` (the CAS token) and the joined outbox event. */
@@ -83,42 +104,34 @@ export interface ClaimedConsumer {
 }
 
 export interface ClaimOptions {
-  /** max rows to claim in one batch (default 50). must be > 0. */
+  /** REQUIRED non-empty allow-list — the consumer_keys THIS worker knows. Unknown keys are never claimed. */
+  consumerKeys: string[]
+  /** max rows to claim in one batch (default 50; 1..10000). */
   batchSize?: number
-  /** lease duration in ms (default 30_000). must be > 0 — a non-positive lease would be born already
-   *  expired, making the row instantly reclaimable and spinning claims with no backoff. */
+  /** lease duration in ms (default 30_000; 1..86_400_000). */
   leaseMs?: number
-  /** attempt ceiling; a row that has already been attempted this many times is poisoned at claim (default 8). must be >= 1. */
+  /** attempt ceiling; a row already attempted this many times is poisoned at claim (default 8; 1..10000). */
   maxAttempts?: number
-  /** restrict the claim to specific consumer_keys (default: all). */
-  consumerKeys?: string[]
   /** injectable clock for tests. */
   now?: () => Date
 }
 
 const nowIso = (opts: { now?: () => Date }): string => (opts.now?.() ?? new Date()).toISOString()
 
-function requirePositive(name: string, value: number, min = 1): void {
-  if (!Number.isFinite(value) || value < min) {
-    throw new RangeError(`${name} must be a finite number >= ${min} (got ${value})`)
-  }
-}
-
 /**
- * Atomically claim reclaimable consumer rows and poison any that have hit the attempt ceiling. Returns the
- * rows actually handed out for dispatch (in_progress) with their claim token + joined outbox event; poisoned
- * rows are terminated in the same statement and NOT returned. `FOR UPDATE SKIP LOCKED` gives concurrent
- * workers disjoint rows.
+ * Atomically claim reclaimable rows FOR THE GIVEN known keys, and poison any that have hit the attempt
+ * ceiling. Rows whose key is not in `consumerKeys` are left untouched (they stay `pending`). Returns the
+ * rows handed out for dispatch (in_progress) with their claim token + joined outbox event.
  */
-export async function claimDueConsumers(db: Queryable, opts: ClaimOptions = {}): Promise<ClaimedConsumer[]> {
+export async function claimDueConsumers(db: Queryable, opts: ClaimOptions): Promise<ClaimedConsumer[]> {
+  const keys = requireKnownKeys(opts?.consumerKeys)
   const asOf = nowIso(opts)
   const batchSize = opts.batchSize ?? 50
   const leaseMs = opts.leaseMs ?? 30_000
   const maxAttempts = opts.maxAttempts ?? DEFAULT_MAX_DELIVERY_ATTEMPTS
-  requirePositive('batchSize', batchSize)
-  requirePositive('leaseMs', leaseMs)
-  requirePositive('maxAttempts', maxAttempts)
-  const keys = opts.consumerKeys ?? null
+  requireBoundedInt('batchSize', batchSize, 1, MAX_BATCH_SIZE)
+  requireBoundedInt('leaseMs', leaseMs, 1, MAX_LEASE_MS)
+  requireBoundedInt('maxAttempts', maxAttempts, 1, MAX_ATTEMPTS_CEILING)
   const { rows } = await db.query(
     `WITH claim AS (
        SELECT c.outbox_id, c.consumer_key
@@ -127,7 +140,7 @@ export async function claimDueConsumers(db: Queryable, opts: ClaimOptions = {}):
                 c.status = 'pending'
              OR (c.status = 'in_progress' AND c.lease_expires_at <= $1::timestamptz)
               )
-          AND ($4::text[] IS NULL OR c.consumer_key = ANY($4::text[]))
+          AND c.consumer_key = ANY($4::text[])   -- worker's known keys only; unknown keys stay pending
         ORDER BY c.updated_at ASC
         LIMIT $2::int
         FOR UPDATE SKIP LOCKED
@@ -175,8 +188,32 @@ export async function claimDueConsumers(db: Queryable, opts: ClaimOptions = {}):
 }
 
 /**
- * Terminal success: → `done`, lease cleared. Returns false if the caller lost the lease (a zombie whose
- * fence was superseded by a reclaimer) — its write matched 0 rows and did nothing.
+ * Rolling-deploy alert seam: the consumer_keys of reclaimable rows that this worker does NOT know. The
+ * dispatch loop alerts on these (they are stuck until a worker that knows them runs) but must NEVER claim or
+ * terminate them (#4203 §246). Reclaimable-only — terminal rows are not "stuck".
+ */
+export async function findUnknownConsumerKeys(
+  db: Queryable,
+  knownKeys: string[],
+  opts: { now?: () => Date } = {},
+): Promise<string[]> {
+  const keys = requireKnownKeys(knownKeys)
+  const { rows } = await db.query(
+    `SELECT DISTINCT c.consumer_key
+       FROM meta_automation_outbox_consumer c
+      WHERE (
+              c.status = 'pending'
+           OR (c.status = 'in_progress' AND c.lease_expires_at <= $1::timestamptz)
+            )
+        AND NOT (c.consumer_key = ANY($2::text[]))`,
+    [nowIso(opts), keys],
+  )
+  return rows.map((r) => String(r.consumer_key))
+}
+
+/**
+ * Terminal success: → `done`, lease cleared. Returns false if the caller lost the lease (a zombie or a stale
+ * token superseded by a reclaim/reschedule) — its write matched 0 rows and did nothing.
  */
 export async function completeConsumer(
   db: Queryable,
@@ -196,7 +233,7 @@ export async function completeConsumer(
 
 /**
  * Terminal poison for a DETERMINISTIC permanent failure: → `dead_letter`, lease cleared. (Attempt-exhaustion
- * poison is handled at claim, not here.) Returns false on a lost lease. `reason` is a values-free code.
+ * poison is handled at claim, not here.) Returns false on a lost/stale token. `reason` is a values-free code.
  */
 export async function poisonConsumer(
   db: Queryable,
@@ -217,10 +254,10 @@ export async function poisonConsumer(
 }
 
 /**
- * Non-terminal retry after a TRANSIENT failure: the row STAYS `in_progress` and its lease is pushed out by
- * `retryDelayMs` (a backoff), so it is re-claimed only after the lease expires — never immediately. `attempts`
- * was already bumped at claim (so the row still marches toward the ceiling); this does not touch it. Returns
- * false on a lost lease. `reason` is a values-free code.
+ * Non-terminal retry after a TRANSIENT failure: the row STAYS `in_progress`, its lease is pushed out by
+ * `retryDelayMs` (a backoff, re-claimed only after expiry), and **the fence is ATOMICALLY BUMPED** so the
+ * token the caller just used is dead — a late worker holding it can no longer complete/poison/reschedule.
+ * `attempts` was already bumped at claim; this does not touch it. Returns false on a lost/stale token.
  */
 export async function rescheduleConsumer(
   db: Queryable,
@@ -231,12 +268,13 @@ export async function rescheduleConsumer(
   reason: DeliveryFailureReason,
   opts: { now?: () => Date } = {},
 ): Promise<boolean> {
-  requirePositive('retryDelayMs', retryDelayMs)
+  requireBoundedInt('retryDelayMs', retryDelayMs, 1, MAX_DELAY_MS)
   assertReason(reason)
   const asOf = nowIso(opts)
   const res = await db.query(
     `UPDATE meta_automation_outbox_consumer
-        SET lease_expires_at = $4::timestamptz + ($5::int * interval '1 millisecond'),
+        SET fence = fence + 1,
+            lease_expires_at = $4::timestamptz + ($5::int * interval '1 millisecond'),
             last_error = $6,
             updated_at = $4::timestamptz
       WHERE outbox_id = $1 AND consumer_key = $2 AND fence = $3::bigint AND status = 'in_progress'`,
@@ -263,5 +301,4 @@ export function resolveDisposition(
   }
 }
 
-// Re-exported for callers that narrow on the shared status union.
 export type { OutboxConsumerStatus }
