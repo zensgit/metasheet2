@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { createApp, nextTick, ref, type App as VueApp, type Component } from 'vue'
+import { createApp, h as renderH, nextTick, ref, type App as VueApp, type Component } from 'vue'
 
 // Stock Preparation MVP (#3751 — docs/development/stock-preparation-mvp-design-20260707.md).
 // Frontend MVP view 2: the readonly BOM SNAPSHOT BATCH & DIFF view. Covers the loading → batches
@@ -92,10 +92,12 @@ function batchListTwoComplete(): StockPreparationSnapshotBatchListResult {
   } as unknown as StockPreparationSnapshotBatchListResult
 }
 
-function diffSummary(): StockPreparationSnapshotDiffSummary {
+// `baseId` distinguishes one batch's summary from another's in the DOM (it renders as a <code> handle),
+// so a stale summary is detectable — batch A's `base-of-alpha` must never show while B is selected.
+function diffSummary(baseId = 'batch-beta'): StockPreparationSnapshotDiffSummary {
   return {
     snapshotBatchId: 'batch-alpha',
-    baseSnapshotBatchId: 'batch-beta',
+    baseSnapshotBatchId: baseId,
     changeCounts: {
       added: 2,
       removed: 1,
@@ -543,5 +545,62 @@ describe('StockPreparationSnapshotDiffView (readonly, values-free)', () => {
     await flushUi()
     expect(root.textContent).toContain('diff-gamma-one')
     expect(root.textContent).not.toContain('diff-alpha-one')
+  })
+
+  // ── sibling async loaders: batch-LIST and diff-SUMMARY must drop stale responses too ─────────────
+  // Mount with a REACTIVE projectId so a project switch (the watch) can be driven within one instance.
+  function mountReactiveProject(projectIdRef: { value: string }): HTMLDivElement {
+    app = createApp({ render: () => renderH(StockPreparationSnapshotDiffView as Component, { projectId: projectIdRef.value }) })
+    app.mount(container!)
+    return container!
+  }
+
+  it('a slow batch-LIST response for project A, arriving after switching to B, is dropped (not shown under B)', async () => {
+    let releaseA!: (v: StockPreparationSnapshotBatchListResult) => void
+    h.listBatches.mockImplementation((scope: { projectId?: string }) => {
+      if (scope.projectId === 'proj-A') return new Promise((resolve) => { releaseA = resolve })
+      return Promise.resolve({ projectId: 'proj-B', batchCount: 1, batches: [
+        { snapshotBatchId: 'batch-in-B', snapshotVersion: 1, snapshotStatus: 'active', syncRunId: 'sync-B', lineCount: 2, createdAtPresent: true, incomplete: false },
+      ] } as unknown as StockPreparationSnapshotBatchListResult)
+    })
+    const projectIdRef = ref('proj-A')
+    const root = mountReactiveProject(projectIdRef)
+    await nextTick() // project A's list GET is in flight (deferred)
+
+    projectIdRef.value = 'proj-B' // switch — watch fires loadBatches(B), which resolves immediately
+    await flushUi()
+    expect(root.textContent).toContain('sync-B')
+
+    // A's slow list finally arrives — must be dropped, NOT rendered over B's list.
+    releaseA({ projectId: 'proj-A', batchCount: 1, batches: [
+      { snapshotBatchId: 'batch-in-A', snapshotVersion: 1, snapshotStatus: 'active', syncRunId: 'sync-A', lineCount: 2, createdAtPresent: true, incomplete: false },
+    ] } as unknown as StockPreparationSnapshotBatchListResult)
+    await flushUi()
+    expect(root.textContent).toContain('sync-B')
+    expect(root.textContent).not.toContain('sync-A')
+  })
+
+  it('a slow diff-SUMMARY response for batch A, arriving after selecting B, is dropped (not shown under B)', async () => {
+    let releaseA!: (v: StockPreparationSnapshotDiffSummary) => void
+    h.listBatches.mockResolvedValue(batchListTwoComplete())
+    h.getDiff.mockImplementation((batchId: string) => {
+      if (batchId === 'batch-alpha') return new Promise((resolve) => { releaseA = resolve })
+      return Promise.resolve(diffSummary('base-of-gamma'))
+    })
+    const root = mountView()
+    await flushUi()
+    ;(root.querySelectorAll('[data-testid="stock-prep-snapshot-batch-select"]')[0] as HTMLButtonElement).click() // select A → summary in flight
+    await flushUi()
+    expect(root.querySelector('[data-testid="stock-prep-diff-loading"]')).not.toBeNull()
+
+    ;(root.querySelectorAll('[data-testid="stock-prep-snapshot-batch-select"]')[1] as HTMLButtonElement).click() // select B → resolves
+    await flushUi()
+    expect(root.textContent).toContain('base-of-gamma')
+
+    // A's slow summary finally arrives — must be dropped, NOT overwrite B's summary.
+    releaseA(diffSummary('base-of-alpha'))
+    await flushUi()
+    expect(root.textContent).toContain('base-of-gamma')
+    expect(root.textContent).not.toContain('base-of-alpha')
   })
 })

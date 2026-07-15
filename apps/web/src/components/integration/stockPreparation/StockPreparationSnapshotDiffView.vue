@@ -305,6 +305,9 @@ const hasProject = computed(() => Boolean(props.projectId))
 const loading = ref(Boolean(props.projectId))
 const errored = ref(false)
 const result = ref<StockPreparationSnapshotBatchListResult | null>(null)
+// Monotonic guard for the batch-LIST load: a project switch bumps it, so a slow list response for the
+// previous project (arriving after the operator moved on) is dropped, not committed over the new project.
+let batchListSeq = 0
 
 const isEmpty = computed(() => result.value !== null && result.value.batchCount === 0)
 
@@ -313,6 +316,9 @@ const selectedBatchId = ref<string | null>(null)
 const diffLoading = ref(false)
 const diffErrored = ref(false)
 const diff = ref<StockPreparationSnapshotDiffSummary | null>(null)
+// Monotonic guard for the diff-SUMMARY load: a batch switch (or project switch, via resetDiff) bumps it,
+// so batch A's late summary cannot overwrite batch B's.
+let diffSeq = 0
 
 // Per-row detail sub-state (the view-2 drill-down under the summary). Lazy: the rows GET is issued only
 // when the operator opens the detail, and re-fetched fresh per batch — never eagerly with the summary.
@@ -356,6 +362,7 @@ function resetRowDetail(): void {
 }
 
 function resetDiff(): void {
+  diffSeq += 1 // invalidate any in-flight diff-summary load for the batch/project we are leaving
   selectedBatchId.value = null
   diffLoading.value = false
   diffErrored.value = false
@@ -365,7 +372,9 @@ function resetDiff(): void {
 
 async function loadBatches(): Promise<void> {
   resetDiff()
-  if (!props.projectId) {
+  const seq = (batchListSeq += 1)
+  const projectId = props.projectId
+  if (!projectId) {
     // No project handle → neutral select-a-project state; issue no GET.
     loading.value = false
     errored.value = false
@@ -375,16 +384,16 @@ async function loadBatches(): Promise<void> {
   loading.value = true
   errored.value = false
   try {
-    result.value = await listStockPreparationSnapshotBatches({
-      ...props.scope,
-      projectId: props.projectId,
-    })
+    const listed = await listStockPreparationSnapshotBatches({ ...props.scope, projectId })
+    if (seq !== batchListSeq || projectId !== props.projectId) return // superseded by a newer project load
+    result.value = listed
   } catch {
+    if (seq !== batchListSeq || projectId !== props.projectId) return
     // 404-soft: the backend read route may not exist yet. Surface a neutral state, NEVER the raw body.
     errored.value = true
     result.value = null
   } finally {
-    loading.value = false
+    if (seq === batchListSeq) loading.value = false
   }
 }
 
@@ -393,19 +402,24 @@ async function selectBatch(batch: StockPreparationSnapshotBatchSummary): Promise
   // tested guard, and today it is the ONLY caller, so this line has no reachable second path. It
   // exists solely so any future caller also cannot issue a diff GET for an incomplete batch.
   if (batch.incomplete) return
-  selectedBatchId.value = batch.snapshotBatchId
+  const batchId = batch.snapshotBatchId
+  const seq = (diffSeq += 1)
+  selectedBatchId.value = batchId
   diffLoading.value = true
   diffErrored.value = false
   diff.value = null
   resetRowDetail() // a new batch starts collapsed; its rows are re-fetched fresh when opened
   try {
-    diff.value = await getStockPreparationSnapshotDiff(batch.snapshotBatchId, props.scope)
+    const summary = await getStockPreparationSnapshotDiff(batchId, props.scope)
+    if (seq !== diffSeq || batchId !== selectedBatchId.value) return // superseded — batch A's late summary must not overwrite B
+    diff.value = summary
   } catch {
+    if (seq !== diffSeq || batchId !== selectedBatchId.value) return
     // 404-soft for the diff GET as well.
     diffErrored.value = true
     diff.value = null
   } finally {
-    diffLoading.value = false
+    if (seq === diffSeq) diffLoading.value = false
   }
 }
 
