@@ -1,6 +1,6 @@
 # 多维表 W2 · 统一右侧记录检查器（unified right-side record inspector）· 设计锁
 
-- **Status**: **Rev 2（2026-07-15）— owner 审阅 REQUEST CHANGES 四 Medium+一 Low 已逐条修订；OD-W2-1..8 已由 owner 裁决（§6bis 逐字）。整锁 ratify 待 owner 确认本修订版。** 红线不变：本文不自裁；实现授权按 §7 切片在 owner 确认后单独给。Rev 1 = PROPOSED（Fable 设计交付物）。
+- **Status**: **RATIFIED（owner 2026-07-15 round-3 复审 PASS @ #4310 head `f7eb71846`：「PASS，无阻塞 finding。可以 ratify 并合并。合并后可以按锁从 W2 S1 开始；C2 和 field-undelete flag 仍保持各自独立门禁。」）** 实现授权：S1 起按 §7 切片逐一执行。历史：Rev 1 = PROPOSED；Rev 2/2.1 = owner 两轮 REQUEST CHANGES 修订（四 Medium + 六残留全文收口）。
 - **类型**：设计锁 / docs-only，**零 runtime**。不新增/修改任何组件、composable、client、路由、权限判定、CSS。
 - **母线**：`multitable-unified-roadmap-W0-W5-20260713.md`（#4211，owner 定线）§1/§9 的 **W2 记录工作区**：「围绕一条业务记录完成工作 = T5 + 统一右侧检查器 + PIT Revert UI」。owner 执行顺序（§2）授权 W2 在 **P2-2a/b/c 之后**开工。
 - **基线**：`origin/main` @ `6a10d08c7`（含 T5-safe #4223、comment-affordance token 锁 RATIFIED、P2-2a `MetaSheetViewRail` 抽出、H4-2 焦点环 #4281）。
