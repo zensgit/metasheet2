@@ -46,8 +46,23 @@ vi.mock('socket.io-client', () => ({
   io: (...args: unknown[]) => ioMock(...args),
 }))
 
-async function flushUi(cycles = 4): Promise<void> {
-  for (let index = 0; index < cycles; index += 1) {
+// This view's onMounted chain is 2 sequential awaited apiFetch round-trips (listCommentInbox +
+// getCommentUnreadCount, each going through a mocked Response.json() parse), and the mark-read
+// flow is 2 MORE on top of that (markCommentRead + a second refreshInbox). How many microtask
+// ticks that whole chain needs to fully settle is NOT a portable constant — it empirically differs
+// by Node/undici version: a fixed `flushUi(6)`/`flushUi(10)` cycle count (this spec's original
+// helper, tuned against whatever Node happened to be on hand locally) settles well inside 10 ticks
+// on newer Node but was verified NOT to settle within 10 ticks on Node 20.x (CI's pinned
+// `node-version: 20.x`, the version apps/web/scripts/run-required-web-tests.sh actually runs under)
+// — a deterministic 5/5 failure in ISOLATION under Node 20.20.2, not just in a shared batch. (This
+// is why the spec was pulled from the required gate in #4217/65e0a8c25 as a suspected "batch
+// co-execution" flake — batching wasn't actually the variable; the verifier's local Node version
+// was.) flushUntil polls the real DOM condition instead of guessing a tick count, so it converges
+// correctly regardless of how many ticks the runtime underneath needs, and still fails loudly (via
+// the unchanged `expect` right after it) if the state genuinely never settles.
+async function flushUntil(predicate: () => boolean, maxCycles = 500): Promise<void> {
+  for (let index = 0; index < maxCycles; index += 1) {
+    if (predicate()) return
     await Promise.resolve()
     await nextTick()
   }
@@ -140,7 +155,7 @@ describe('MultitableCommentInboxView', () => {
   it('renders inbox items, opens multitable, and clears unread state locally', async () => {
     app = createApp(MultitableCommentInboxView)
     app.mount(container!)
-    await flushUi(10)
+    await flushUntil(() => container?.textContent?.includes('Jamie') === true)
 
     expect(container?.textContent).toContain('Comment Inbox')
     expect(container?.textContent).toContain('Jamie')
@@ -151,7 +166,10 @@ describe('MultitableCommentInboxView', () => {
 
     const openButton = Array.from(container!.querySelectorAll('button')).find((element) => element.textContent?.includes('Open')) as HTMLButtonElement | undefined
     openButton?.click()
-    await flushUi(10)
+    await flushUntil(() => (
+      container?.querySelector('.mt-comment-inbox__badge--unread') == null
+      && container?.querySelector('.mt-comment-inbox__stat strong')?.textContent === '0'
+    ))
 
     expect(pushSpy).toHaveBeenCalledWith({
       name: 'multitable',
@@ -177,12 +195,15 @@ describe('MultitableCommentInboxView', () => {
   it('marks an inbox item as read from the explicit action button', async () => {
     app = createApp(MultitableCommentInboxView)
     app.mount(container!)
-    await flushUi(6)
+    await flushUntil(() => container?.textContent?.includes('Jamie') === true)
 
     const markReadButton = Array.from(container!.querySelectorAll('button'))
       .find((element) => element.textContent?.includes('Mark read')) as HTMLButtonElement | undefined
     markReadButton?.click()
-    await flushUi(6)
+    await flushUntil(() => (
+      container?.querySelector('.mt-comment-inbox__badge--unread') == null
+      && container?.querySelector('.mt-comment-inbox__stat strong')?.textContent === '0'
+    ))
 
     expect(apiFetchMock).toHaveBeenCalledWith('/api/comments/c1/read', { method: 'POST' })
     expect(container!.querySelector('.mt-comment-inbox__badge--unread')).toBeNull()
