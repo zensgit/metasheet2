@@ -3901,20 +3901,22 @@ function createHandlers(services, options = {}) {
     // internal or external write and no K3 Save/Submit/Audit path.
     async stockPreparationErpMaterialSourceRun(req, res) {
       const user = requireAccess(req, 'admin')
-      const input = normalizeStockPreparationSourceRunBody(
-        requestBody(req),
-        VALID_STOCK_PREPARATION_ERP_SOURCE_RUN_REQUEST_KEYS,
-        'STOCK_PREPARATION_ERP_SOURCE_RUN_REQUEST_INVALID',
-      )
       // T3a OD-2 (security): while this route is read-only, its request-steerable tenant resolution is a
       // deferred GHSA step-2 question. When the T3a auto-persist flag is ON the read gains a WRITE side
       // effect, so the tenant MUST come from the AUTHENTICATED principal (resolveTenantId would honor a
       // request tenantId for admins) — the auto-persist cannot be steered to another tenant's cache. Flag
       // OFF keeps today's read-only behavior byte-for-byte (RC-0 safe).
       const autoPersistEnabled = stockPreparationErpAutoPersistEnabled()
-      // T3a OD-2: when auto-persist is ON the read gains a write side-effect, so reject an explicit request
-      // tenant/projectId FAIL-CLOSED BEFORE any I/O (a steered read would write into the wrong cache).
+      // Reject an explicit request tenant/projectId FAIL-CLOSED BEFORE the body allowlist AND any I/O, so a
+      // steering attempt always gets the DEDICATED steering code — projectId is not in the source-run
+      // allowlist, so if this ran after normalize a body projectId would 400 with the generic invalid-key
+      // code instead of the steering code.
       if (autoPersistEnabled) assertStockPreparationErpAutoPersistNoSteering(req)
+      const input = normalizeStockPreparationSourceRunBody(
+        requestBody(req),
+        VALID_STOCK_PREPARATION_ERP_SOURCE_RUN_REQUEST_KEYS,
+        'STOCK_PREPARATION_ERP_SOURCE_RUN_REQUEST_INVALID',
+      )
       const tenantId = autoPersistEnabled ? resolveAuthUserTenantId(req) : resolveTenantId(req, input)
       const sourceRuntime = await loadStockPreparationReadonlySource(
         req,
