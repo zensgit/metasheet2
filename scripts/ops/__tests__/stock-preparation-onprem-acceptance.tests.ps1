@@ -8,6 +8,11 @@ $ErrorActionPreference = 'Stop'
 $script = Join-Path $PSScriptRoot '..' 'stock-preparation-onprem-acceptance.ps1'
 $src = Get-Content $script -Raw
 $launcher = Join-Path $PSScriptRoot '..' 'multitable-onprem-deploy-launcher.ps1'
+$pm2SampleHelper = Join-Path $PSScriptRoot '..' 'stock-preparation-pm2-sample.mjs'
+$opsDir = Resolve-Path (Join-Path $PSScriptRoot '..')
+$repoRoot = Resolve-Path (Join-Path $opsDir '../..')
+$packageBuild = Join-Path $opsDir 'multitable-onprem-package-build.sh'
+$onPremEnvTemplate = Join-Path $repoRoot 'docker/app.env.multitable-onprem.template'
 $fail = 0
 function Check { param([string]$Name, [bool]$Ok) if ($Ok) { Write-Host "  PASS  $Name" } else { Write-Host "  FAIL  $Name"; $script:fail++ } }
 
@@ -49,6 +54,29 @@ Check "acceptance calls the release launcher with its canonical parameter names"
   'RootDir' -in $bootstrapCallParams -and
   'PackagePath' -notin $bootstrapCallParams -and
   'DeployRoot' -notin $bootstrapCallParams
+)
+
+# The package template and acceptance runner are one operator contract. A stale default makes a healthy
+# service look down, as the corrective-1 entity run proved (configured 8900 vs runner default 8081).
+$portParam = @($acceptanceAst.ParamBlock.Parameters | Where-Object { $_.Name.VariablePath.UserPath -eq 'Port' })
+$templatePortMatch = [regex]::Match((Get-Content $onPremEnvTemplate -Raw), '(?m)^PORT=([0-9]+)\s*$')
+Check "acceptance default port matches the packaged on-prem environment template" (
+  $portParam.Count -eq 1 -and
+  $templatePortMatch.Success -and
+  $portParam[0].DefaultValue.Extent.Text -eq $templatePortMatch.Groups[1].Value
+)
+
+# Windows PowerShell rejects ordinary PM2 payloads containing case-variant environment keys such as
+# Path/PATH. The raw document must cross a Node projection boundary before PowerShell deserializes it,
+# and that projection helper must be a required package asset.
+$packageBuildSrc = Get-Content $packageBuild -Raw
+Check "PM2 jlist is projected by the packaged Node helper before ConvertFrom-Json" (
+  (Test-Path -LiteralPath $pm2SampleHelper -PathType Leaf) -and
+  $src -match '&\s+node\s+\$pm2SampleHelper' -and
+  -not ($src -match 'pm2\s+jlist[^\r\n]*ConvertFrom-Json')
+)
+Check "PM2 projection helper is required by the on-prem package build" (
+  $packageBuildSrc -match '"scripts/ops/stock-preparation-pm2-sample\.mjs"'
 )
 
 # ── 1. Summary is values-free by construction: exactly the 9 whitelisted keys, nothing else. ─────
