@@ -174,6 +174,82 @@
               <dd class="sp-snap__count-value">{{ entry.value }}</dd>
             </div>
           </dl>
+
+          <!-- View-2 per-row drill-down: lazy, values-free (handles + enums + counts + opaque SHA-16
+               fingerprints only — never a raw path key / drawing number / quantity / unit). -->
+          <div class="sp-snap__rows-wrap">
+            <button
+              type="button"
+              class="sp-snap__rows-toggle"
+              data-testid="stock-prep-snapshot-diff-rows-toggle"
+              :aria-expanded="rowDetailOpen"
+              @click="toggleRowDetail"
+            >
+              {{ rowDetailOpen ? bi('收起逐行明细', 'Hide row detail') : bi('查看逐行明细', 'View row detail') }}
+            </button>
+
+            <template v-if="rowDetailOpen">
+              <p
+                v-if="rowsLoading"
+                class="sp-snap__state sp-snap__state--muted"
+                data-testid="stock-prep-snapshot-diff-rows-loading"
+                role="status"
+              >
+                {{ bi('正在加载逐行明细…', 'Loading row detail…') }}
+              </p>
+              <p
+                v-else-if="rowsErrored"
+                class="sp-snap__state sp-snap__state--muted"
+                data-testid="stock-prep-snapshot-diff-rows-error"
+                role="status"
+              >
+                {{ bi('逐行明细暂不可用,稍后再试。', 'Row detail is not available yet — try again later.') }}
+              </p>
+              <p
+                v-else-if="diffRows && diffRows.rowCount === 0"
+                class="sp-snap__state sp-snap__state--muted"
+                data-testid="stock-prep-snapshot-diff-rows-empty"
+              >
+                {{ bi('该批次无差异行。', 'No diff rows for this batch.') }}
+              </p>
+              <div v-else-if="diffRows" data-testid="stock-prep-snapshot-diff-rows">
+                <p class="sp-snap__rows-meta" data-testid="stock-prep-snapshot-diff-rows-meta">
+                  {{ bi('差异行', 'Diff rows') }}: {{ diffRows.rowCount }} ·
+                  {{ bi('待处理', 'Held') }}: {{ diffRows.heldRowCount }}
+                </p>
+                <div class="sp-snap__rows-scroll">
+                  <table class="sp-snap__rows-table" data-testid="stock-prep-snapshot-diff-rows-table">
+                    <thead>
+                      <tr>
+                        <th>{{ bi('差异句柄', 'Diff') }}</th>
+                        <th>{{ bi('类型', 'Type') }}</th>
+                        <th>{{ bi('复核状态', 'Review') }}</th>
+                        <th>{{ bi('变更类别', 'Changes') }}</th>
+                        <th>{{ bi('行数', 'Rows') }}</th>
+                        <th>{{ bi('键指纹', 'Key fp') }}</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <tr
+                        v-for="row in diffRows.rows"
+                        :key="row.diffId"
+                        data-testid="stock-prep-snapshot-diff-row"
+                        :data-diff-type="row.diffType"
+                        :data-review-status="row.reviewStatus"
+                      >
+                        <td><code class="sp-snap__handle">{{ row.diffId }}</code></td>
+                        <td>{{ row.diffType }}</td>
+                        <td>{{ row.reviewStatus }}</td>
+                        <td>{{ row.changeTypes.length ? row.changeTypes.join(', ') : '—' }}</td>
+                        <td>{{ row.rowCount }}</td>
+                        <td><code class="sp-snap__handle">{{ shortFingerprint(row.keyFingerprint) }}</code></td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </template>
+          </div>
         </div>
       </div>
     </div>
@@ -200,9 +276,11 @@ import type { IntegrationScope } from '../../../services/integration/workbench'
 import {
   getStockPreparationSnapshotDiff,
   listStockPreparationSnapshotBatches,
+  listStockPreparationSnapshotDiffRows,
   type StockPreparationSnapshotBatchListResult,
   type StockPreparationSnapshotBatchSummary,
   type StockPreparationSnapshotDiffSummary,
+  type StockPreparationSnapshotDiffRowsResult,
 } from '../../../services/integration/stockPreparation/bomSnapshotDiff'
 
 const props = withDefaults(
@@ -236,6 +314,19 @@ const diffLoading = ref(false)
 const diffErrored = ref(false)
 const diff = ref<StockPreparationSnapshotDiffSummary | null>(null)
 
+// Per-row detail sub-state (the view-2 drill-down under the summary). Lazy: the rows GET is issued only
+// when the operator opens the detail, and re-fetched fresh per batch — never eagerly with the summary.
+const rowDetailOpen = ref(false)
+const rowsLoading = ref(false)
+const rowsErrored = ref(false)
+const diffRows = ref<StockPreparationSnapshotDiffRowsResult | null>(null)
+
+// A diff/path-key fingerprint is already an opaque SHA-16 (never the raw path key); show a short prefix
+// so the table stays scannable while remaining a values-free handle.
+function shortFingerprint(fp: string | null): string {
+  return fp ? fp.slice(0, 10) : '—'
+}
+
 // Fixed whitelist of the eight values-free change-count kinds (counts of lines, never the values).
 const changeCountEntries = computed(() => {
   const counts = diff.value?.changeCounts
@@ -252,11 +343,19 @@ const changeCountEntries = computed(() => {
   ]
 })
 
+function resetRowDetail(): void {
+  rowDetailOpen.value = false
+  rowsLoading.value = false
+  rowsErrored.value = false
+  diffRows.value = null
+}
+
 function resetDiff(): void {
   selectedBatchId.value = null
   diffLoading.value = false
   diffErrored.value = false
   diff.value = null
+  resetRowDetail()
 }
 
 async function loadBatches(): Promise<void> {
@@ -293,6 +392,7 @@ async function selectBatch(batch: StockPreparationSnapshotBatchSummary): Promise
   diffLoading.value = true
   diffErrored.value = false
   diff.value = null
+  resetRowDetail() // a new batch starts collapsed; its rows are re-fetched fresh when opened
   try {
     diff.value = await getStockPreparationSnapshotDiff(batch.snapshotBatchId, props.scope)
   } catch {
@@ -302,6 +402,31 @@ async function selectBatch(batch: StockPreparationSnapshotBatchSummary): Promise
   } finally {
     diffLoading.value = false
   }
+}
+
+async function loadRowDetail(): Promise<void> {
+  if (!selectedBatchId.value) return
+  rowsLoading.value = true
+  rowsErrored.value = false
+  diffRows.value = null
+  try {
+    diffRows.value = await listStockPreparationSnapshotDiffRows(selectedBatchId.value, {
+      ...props.scope,
+      projectId: props.projectId,
+    })
+  } catch {
+    // 404-soft, same as the batch/diff GETs: neutral state, never the raw error body.
+    rowsErrored.value = true
+    diffRows.value = null
+  } finally {
+    rowsLoading.value = false
+  }
+}
+
+function toggleRowDetail(): void {
+  rowDetailOpen.value = !rowDetailOpen.value
+  // Lazy first-open fetch; a re-open reuses what we already have (batch switch clears it via resetRowDetail).
+  if (rowDetailOpen.value && !diffRows.value && !rowsLoading.value) void loadRowDetail()
 }
 
 onMounted(loadBatches)
@@ -491,5 +616,68 @@ watch(() => props.projectId, loadBatches)
   color: var(--ms-text-1);
   font-variant-numeric: tabular-nums;
   font-weight: var(--ms-font-weight-title);
+}
+
+.sp-snap__rows-wrap {
+  margin-top: var(--ms-space-3);
+  display: flex;
+  flex-direction: column;
+  gap: var(--ms-space-2);
+}
+
+.sp-snap__rows-toggle {
+  align-self: flex-start;
+  border: 1px solid var(--ms-border-light);
+  border-radius: 6px;
+  background: transparent;
+  padding: 4px 12px;
+  color: var(--ms-color-primary);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.sp-snap__rows-toggle:hover {
+  background: var(--el-fill-color-light);
+}
+
+.sp-snap__rows-toggle:focus-visible {
+  outline: 2px solid var(--ms-color-primary);
+  outline-offset: 1px;
+}
+
+.sp-snap__rows-meta {
+  margin: 0;
+  color: var(--ms-text-2);
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+
+.sp-snap__rows-scroll {
+  overflow-x: auto;
+}
+
+.sp-snap__rows-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.sp-snap__rows-table th,
+.sp-snap__rows-table td {
+  text-align: left;
+  padding: var(--ms-space-2) var(--ms-space-3);
+  border-bottom: 1px solid var(--ms-border-light);
+  white-space: nowrap;
+}
+
+.sp-snap__rows-table th {
+  color: var(--ms-text-2);
+  font-weight: var(--ms-font-weight-title);
+}
+
+.sp-snap__rows-table td {
+  color: var(--ms-text-1);
+  font-variant-numeric: tabular-nums;
 }
 </style>

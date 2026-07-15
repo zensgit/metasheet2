@@ -13,6 +13,7 @@ const h = vi.hoisted(() => ({
   locale: 'zh-CN' as string,
   listBatches: vi.fn(),
   getDiff: vi.fn(),
+  listRows: vi.fn(),
 }))
 
 vi.mock('../src/composables/useLocale', () => ({
@@ -26,6 +27,7 @@ vi.mock('../src/composables/useLocale', () => ({
 vi.mock('../src/services/integration/stockPreparation/bomSnapshotDiff', () => ({
   listStockPreparationSnapshotBatches: h.listBatches,
   getStockPreparationSnapshotDiff: h.getDiff,
+  listStockPreparationSnapshotDiffRows: h.listRows,
 }))
 
 import StockPreparationSnapshotDiffView from '../src/components/integration/stockPreparation/StockPreparationSnapshotDiffView.vue'
@@ -95,11 +97,60 @@ function diffSummary(): StockPreparationSnapshotDiffSummary {
   }
 }
 
+function diffRowsResult(): unknown {
+  // Planted business values as EXTRA fields on each row — the values-free table must render NONE of them.
+  return {
+    snapshotBatchId: 'batch-alpha',
+    baseSnapshotBatchId: 'batch-beta',
+    rowCount: 2,
+    heldRowCount: 1,
+    rows: [
+      {
+        diffId: 'diff-one',
+        diffType: 'changed',
+        reviewStatus: 'held',
+        changeTypes: ['quantity', 'unit'],
+        reason: 'unit_mismatch',
+        rowCount: 1,
+        previousSnapshotLineId: 'line-prev-one',
+        currentSnapshotLineId: 'line-cur-one',
+        keyFingerprint: 'abcdef0123456789',
+        previousPathKeyFingerprint: 'fedcba9876543210',
+        currentPathKeyFingerprint: '0011223344556677',
+        drawingNo: PLANTED_DRAWING_NO,
+        materialCode: PLANTED_MATERIAL_CODE,
+        projectName: PLANTED_PROJECT_NAME,
+        quantity: PLANTED_QUANTITY,
+      },
+      {
+        diffId: 'diff-two',
+        diffType: 'added',
+        reviewStatus: 'pending',
+        changeTypes: [],
+        reason: null,
+        rowCount: 4,
+        previousSnapshotLineId: null,
+        currentSnapshotLineId: 'line-cur-two',
+        keyFingerprint: '99aabbccddeeff00',
+        previousPathKeyFingerprint: null,
+        currentPathKeyFingerprint: '7788990011223344',
+      },
+    ],
+  }
+}
+
 async function flushUi(cycles = 4): Promise<void> {
   for (let i = 0; i < cycles; i += 1) {
     await Promise.resolve()
     await nextTick()
   }
+}
+
+// Open the row-detail drill-down after a batch's summary is showing.
+async function openRowDetail(root: HTMLDivElement): Promise<void> {
+  const toggle = root.querySelector('[data-testid="stock-prep-snapshot-diff-rows-toggle"]') as HTMLButtonElement
+  toggle.click()
+  await flushUi()
 }
 
 describe('StockPreparationSnapshotDiffView (readonly, values-free)', () => {
@@ -110,6 +161,7 @@ describe('StockPreparationSnapshotDiffView (readonly, values-free)', () => {
     h.locale = 'zh-CN'
     h.listBatches.mockReset()
     h.getDiff.mockReset()
+    h.listRows.mockReset()
     container = document.createElement('div')
     document.body.appendChild(container)
   })
@@ -345,5 +397,97 @@ describe('StockPreparationSnapshotDiffView (readonly, values-free)', () => {
     for (const forbidden of FORBIDDEN) {
       expect(text).not.toContain(forbidden)
     }
+  })
+
+  // ── view-2 per-row drill-down (/diff/rows) ─────────────────────────────────────────────────────
+  async function mountWithDiffShown(): Promise<HTMLDivElement> {
+    h.listBatches.mockResolvedValue(batchListWithPlantedExtras())
+    h.getDiff.mockResolvedValue(diffSummary())
+    const root = mountView()
+    await flushUi()
+    ;(root.querySelector('[data-testid="stock-prep-snapshot-batch-select"]') as HTMLButtonElement).click()
+    await flushUi()
+    return root
+  }
+
+  it('does NOT fetch the row detail until the operator opens it (lazy)', async () => {
+    h.listRows.mockResolvedValue(diffRowsResult())
+    const root = await mountWithDiffShown()
+    // Summary is shown; the rows GET has not been issued, and the table is absent.
+    expect(h.listRows).not.toHaveBeenCalled()
+    expect(root.querySelector('[data-testid="stock-prep-snapshot-diff-rows"]')).toBeNull()
+    const toggle = root.querySelector('[data-testid="stock-prep-snapshot-diff-rows-toggle"]')
+    expect(toggle).not.toBeNull()
+  })
+
+  it('opening the detail loads and renders the values-free diff rows on demand', async () => {
+    h.listRows.mockResolvedValue(diffRowsResult())
+    const root = await mountWithDiffShown()
+    await openRowDetail(root)
+
+    expect(h.listRows).toHaveBeenCalledTimes(1)
+    // Scope carries the projectId; the batch id is the first arg.
+    expect(h.listRows.mock.calls[0][0]).toBe('batch-alpha')
+    const rows = root.querySelectorAll('[data-testid="stock-prep-snapshot-diff-row"]')
+    expect(rows.length).toBe(2)
+
+    const text = root.textContent || ''
+    // Values-free fields DO render: handle, enums, counts, opaque fingerprint prefix.
+    expect(text).toContain('diff-one')
+    expect(text).toContain('held')
+    expect(text).toContain('added')
+    expect(text).toContain('abcdef0123') // the 10-char fingerprint prefix, never the full raw key
+    // The meta line surfaces the counts.
+    expect(root.querySelector('[data-testid="stock-prep-snapshot-diff-rows-meta"]')?.textContent).toContain('2')
+  })
+
+  it('never renders a planted business value in the row detail (values-free)', async () => {
+    h.listRows.mockResolvedValue(diffRowsResult())
+    const root = await mountWithDiffShown()
+    await openRowDetail(root)
+
+    const text = root.textContent || ''
+    for (const forbidden of FORBIDDEN) {
+      expect(text).not.toContain(forbidden)
+    }
+    // The full fingerprint is truncated — the untruncated hash never reaches the DOM either.
+    expect(text).not.toContain('abcdef0123456789')
+  })
+
+  it('404-softs the row detail: neutral error state, never the raw body, table absent', async () => {
+    h.listRows.mockRejectedValue(new Error('secret-backend-detail MAT-ZX9911'))
+    const root = await mountWithDiffShown()
+    await openRowDetail(root)
+
+    expect(root.querySelector('[data-testid="stock-prep-snapshot-diff-rows-error"]')).not.toBeNull()
+    expect(root.querySelector('[data-testid="stock-prep-snapshot-diff-rows-table"]')).toBeNull()
+    expect(root.textContent || '').not.toContain('secret-backend-detail')
+  })
+
+  it('renders the empty state when the batch has zero diff rows', async () => {
+    h.listRows.mockResolvedValue({ snapshotBatchId: 'batch-alpha', baseSnapshotBatchId: null, rowCount: 0, heldRowCount: 0, rows: [] })
+    const root = await mountWithDiffShown()
+    await openRowDetail(root)
+
+    expect(root.querySelector('[data-testid="stock-prep-snapshot-diff-rows-empty"]')).not.toBeNull()
+    expect(root.querySelector('[data-testid="stock-prep-snapshot-diff-rows-table"]')).toBeNull()
+  })
+
+  it('switching batches collapses the detail and re-fetches fresh when re-opened', async () => {
+    h.listRows.mockResolvedValue(diffRowsResult())
+    const root = await mountWithDiffShown()
+    await openRowDetail(root)
+    expect(h.listRows).toHaveBeenCalledTimes(1)
+    expect(root.querySelector('[data-testid="stock-prep-snapshot-diff-rows"]')).not.toBeNull()
+
+    // Select the OTHER (first) batch again — a batch switch must collapse the stale detail.
+    h.getDiff.mockResolvedValue(diffSummary())
+    ;(root.querySelector('[data-testid="stock-prep-snapshot-batch-select"]') as HTMLButtonElement).click()
+    await flushUi()
+    expect(root.querySelector('[data-testid="stock-prep-snapshot-diff-rows"]')).toBeNull()
+
+    // Re-opening issues a FRESH fetch (not the stale cached rows).
+    await openRowDetail(root)
+    expect(h.listRows).toHaveBeenCalledTimes(2)
   })
 })

@@ -87,3 +87,69 @@ export async function getStockPreparationSnapshotDiff(
   )
   return parseIntegrationResponse<StockPreparationSnapshotDiffSummary>(response)
 }
+
+/**
+ * One values-free diff ROW (the per-row drill-down under the summary). The backend projects a FROZEN
+ * whitelist (stock-preparation-snapshot-reads.cjs `DIFF_ROW_KEYS`): opaque MetaSheet handles
+ * (diffId / snapshot-line ids), enum vocabularies (diffType / reviewStatus / changeTypes), a coarse
+ * `reason` code, a `rowCount`, and SHA-16 FINGERPRINTS. The fingerprints are one-way hashes of the
+ * key / path-key — NOT the raw path keys, drawing numbers, quantities, or units — so they stay within
+ * the values-free contract (opaque handles), unlike the raw values that never cross this boundary.
+ */
+export type StockPreparationDiffReviewStatus = 'pending' | 'held' | 'accepted' | string
+export type StockPreparationDiffType = 'added' | 'removed' | 'changed' | string
+
+export interface StockPreparationSnapshotDiffRow {
+  diffId: string
+  diffType: StockPreparationDiffType
+  reviewStatus: StockPreparationDiffReviewStatus
+  changeTypes: string[]
+  reason: string | null
+  rowCount: number
+  previousSnapshotLineId: string | null
+  currentSnapshotLineId: string | null
+  keyFingerprint: string | null
+  previousPathKeyFingerprint: string | null
+  currentPathKeyFingerprint: string | null
+}
+
+export interface StockPreparationSnapshotDiffRowsResult {
+  snapshotBatchId: string
+  baseSnapshotBatchId: string | null
+  rowCount: number
+  heldRowCount: number
+  rows: StockPreparationSnapshotDiffRow[]
+}
+
+/** Optional filters mirroring the two server-validated enum query params. */
+export interface StockPreparationSnapshotDiffRowsFilters {
+  baseSnapshotBatchId?: string | null
+  reviewStatus?: StockPreparationDiffReviewStatus | null
+  diffType?: StockPreparationDiffType | null
+}
+
+/**
+ * Values-free per-row detail for one snapshot batch's diff (view-2 drill-down under the summary).
+ * GET /api/integration/stock-preparation/snapshot-batches/:snapshotBatchId/diff/rows
+ * `projectId` rides the scope (required server-side); the two enum filters are optional and are
+ * validated server-side against the frozen vocabularies (a bad value → values-free 400 with the field
+ * name only), so the client passes them straight through.
+ */
+export async function listStockPreparationSnapshotDiffRows(
+  snapshotBatchId: string,
+  scope: IntegrationScope & { projectId?: string | null } = {},
+  filters: StockPreparationSnapshotDiffRowsFilters = {},
+): Promise<StockPreparationSnapshotDiffRowsResult> {
+  const query = buildQueryString({
+    tenantId: scope.tenantId,
+    workspaceId: scope.workspaceId,
+    projectId: scope.projectId,
+    baseSnapshotBatchId: filters.baseSnapshotBatchId,
+    reviewStatus: filters.reviewStatus,
+    diffType: filters.diffType,
+  })
+  const response = await apiFetch(
+    `/api/integration/stock-preparation/snapshot-batches/${encodeURIComponent(snapshotBatchId)}/diff/rows${query ? `?${query}` : ''}`,
+  )
+  return parseIntegrationResponse<StockPreparationSnapshotDiffRowsResult>(response)
+}
