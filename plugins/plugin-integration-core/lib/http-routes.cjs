@@ -570,6 +570,22 @@ function stockPreparationErpAutoPersistEnabled() {
   return String(process.env.MULTITABLE_STOCK_PREP_ERP_AUTOPERSIST_ENABLED ?? '').trim().toLowerCase() === 'true'
 }
 
+// T3a OD-2: with auto-persist ON the ERP source-run has a write side-effect, so an explicit request
+// tenant/projectId (a steering vector) is rejected FAIL-CLOSED before any I/O — same discipline as
+// assertNoRequestBaseId. workspaceId is a SAME-TENANT scope selector (it never changes the auth-derived
+// tenant or the write target) and is deliberately NOT rejected.
+function assertStockPreparationErpAutoPersistNoSteering(req) {
+  const steers = (src) =>
+    src && (`${src.tenantId ?? ''}`.trim() !== '' || `${src.projectId ?? ''}`.trim() !== '')
+  if (steers(requestBody(req)) || steers(requestQuery(req)) || steers(requestParams(req))) {
+    throw new HttpRouteError(
+      400,
+      'STOCK_PREPARATION_ERP_AUTOPERSIST_STEERING_NOT_ALLOWED',
+      'an explicit tenantId/projectId is not allowed on the auto-persisting ERP source-run; the tenant and cache target are derived from the authenticated principal',
+    )
+  }
+}
+
 function requestBody(req) {
   return req.body && typeof req.body === 'object' ? req.body : {}
 }
@@ -3896,6 +3912,9 @@ function createHandlers(services, options = {}) {
       // request tenantId for admins) — the auto-persist cannot be steered to another tenant's cache. Flag
       // OFF keeps today's read-only behavior byte-for-byte (RC-0 safe).
       const autoPersistEnabled = stockPreparationErpAutoPersistEnabled()
+      // T3a OD-2: when auto-persist is ON the read gains a write side-effect, so reject an explicit request
+      // tenant/projectId FAIL-CLOSED BEFORE any I/O (a steered read would write into the wrong cache).
+      if (autoPersistEnabled) assertStockPreparationErpAutoPersistNoSteering(req)
       const tenantId = autoPersistEnabled ? resolveAuthUserTenantId(req) : resolveTenantId(req, input)
       const sourceRuntime = await loadStockPreparationReadonlySource(
         req,
@@ -3903,33 +3922,43 @@ function createHandlers(services, options = {}) {
         'STOCK_PREPARATION_ERP_SOURCE_RUN_REQUEST_INVALID',
       )
       const actor = user.id || user.email
+      // An empty intake (zero mapped rows) already threw SOURCE_RUN_EMPTY (422) inside here via
+      // assertIntakeReady — so past this line there is always >= 1 mapped row.
       const result = await runErpMaterialReadonlySource({
         permission: 'admin',
         syncRunId: input.syncRunId,
         actor,
         ...sourceRuntime,
       })
-      // T3a OD-1 (default-OFF staged flag): feed the source-run's INTERNAL intake.erpMaterials straight
-      // into T2's persist WITHIN THIS REQUEST — the normalized business rows never cross HTTP (public
-      // result stays values-free). Boundary: internal 9 MVP tables via T2's scoped records API only;
-      // externalWrite stays false (no K3 Save / ERP auto-create); no new endpoint; targetProjectId derived
-      // from the auth tenant with NO request projectId (identical to the T2 route).
-      let autoPersist = null
-      if (autoPersistEnabled) {
-        const targetProjectId = resolveIntegrationStagingProjectId(tenantId, undefined)
-        const persisted = await persistStockPreparationErpMaterialSync({
-          context,
-          permission: 'admin',
-          recordsApi: getMultitableRecordsApi(),
-          provisioning: getMultitableProvisioning(),
-          targetProjectId,
-          syncRunId: input.syncRunId,
-          erpMaterials: result.intake.erpMaterials,
-        })
-        // persisted is already the T2 values-free evidence (counts / modes / field-key names only).
-        autoPersist = persisted
+      const readProjection = publicReadonlySourceRunResult(result)
+      if (!autoPersistEnabled) {
+        // Flag OFF: the response is BYTE-FOR-BYTE today's read-only projection — no autoPersist field added.
+        return sendOk(res, readProjection)
       }
-      return sendOk(res, { ...publicReadonlySourceRunResult(result), autoPersist })
+      // Flag ON (OD-1): feed the source-run's INTERNAL intake.erpMaterials straight into T2's persist WITHIN
+      // THIS REQUEST — the normalized business rows never cross HTTP. Boundary: internal MVP tables via T2's
+      // scoped records API only; externalWrite stays false; targetProjectId from the auth tenant, no request
+      // projectId (identical to the T2 route).
+      const targetProjectId = resolveIntegrationStagingProjectId(tenantId, undefined)
+      const autoPersist = await persistStockPreparationErpMaterialSync({
+        context,
+        permission: 'admin',
+        recordsApi: getMultitableRecordsApi(),
+        provisioning: getMultitableProvisioning(),
+        targetProjectId,
+        syncRunId: input.syncRunId,
+        erpMaterials: result.intake.erpMaterials,
+      })
+      // The read-only projector fixes mode:'dry_run' + evidence.internalWriteExecuted:false — BOTH false now
+      // that a real internal write happened. Override them so the response can never report "not written".
+      // `autoPersist` is T2's values-free evidence (persisted/mode/created/patched/skipped/runStatus/
+      // evidence.targets — counts/modes/statuses/objectIds only, no raw rows). 201 iff a row actually landed.
+      return sendOk(res, {
+        ...readProjection,
+        mode: 'internal_persist',
+        evidence: { ...readProjection.evidence, internalWriteExecuted: true },
+        autoPersist,
+      }, autoPersist.persisted ? 201 : 200)
     },
 
     // T2: COMMIT already-normalized ERP/K3 material-master rows into the internal erp_material_master
