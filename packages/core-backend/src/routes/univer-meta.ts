@@ -232,10 +232,11 @@ import {
 } from '../multitable/auto-number-service'
 import {
   acquireCanonicalSheetFence,
-  assertNoActiveWriterBlock,
+  claimDurableWriterBlock,
   fenceWriterEntry,
   isWriterFenceEnabled,
   setRecoveryWriterState,
+  SheetWriterBlockedError,
 } from '../multitable/canonical-sheet-fence'
 import { normalizeAutoNumberProperty } from '../multitable/auto-number-property'
 import {
@@ -10254,6 +10255,26 @@ export function univerMetaRouter(): Router {
       const { fields, readableEchoFields, readableEchoFieldIds, attachmentFields, fieldById, fieldPermissions } = patchContext
       const deniedIds = (!access.isAdminRole && (await loadRowLevelReadDenyEnabled(pool.query.bind(pool), sheetId)))
         ? await loadDeniedRecordIds(pool.query.bind(pool), sheetId, access.userId) : new Set<string>()
+      // W0-1 L4 durable block (v3.6 §4 item 3): revert-execute mutates across MULTIPLE transactions (the
+      // resurrect txn + the per-record patch loop), so the transaction-scoped canonical advisory fence —
+      // released at each COMMIT — cannot hold external writers off across the whole operation. Commit a
+      // DURABLE `applying` block under the fence in a short claim txn, release the advisory fence, then apply.
+      // Every external fenced writer that later acquires the fence observes `applying` and parks; the block is
+      // cleared (or set `paused_retryable` on failure) in the finally below. No-op when the L4 flag is off.
+      const writerFenceOn = isWriterFenceEnabled()
+      if (writerFenceOn) {
+        try {
+          await pool.transaction(async ({ query }) => {
+            await acquireCanonicalSheetFence(query, sheetId)
+            await claimDurableWriterBlock(query, sheetId)
+          })
+        } catch (claimErr) {
+          if (claimErr instanceof SheetWriterBlockedError) return res.status(409).json({ ok: false, error: { code: 'RECOVERY_IN_PROGRESS', message: 'Another recovery operation is in progress on this sheet; retry shortly.' } })
+          throw claimErr
+        }
+      }
+      let blockResolution: 'clear' | 'paused_retryable' = 'clear'
+      try {
       // T8-1 undelete — run FIRST (atomic, all-or-nothing) so a resurrect conflict aborts the request with ZERO writes
       // BEFORE any best-effort field-revert is applied (no mixed partial). Each resurrect re-inserts the FULL T-snapshot
       // (schema-drift-rejected in computeSheetRevert) under its ORIGINAL id with a FOR UPDATE id-collision reject (L1),
@@ -10269,6 +10290,9 @@ export function univerMetaRouter(): Router {
         const undeleteActorId = getRequestActorId(req)
         try {
           await pool.transaction(async ({ query }) => {
+            // W0-1 L4: the recovery's OWN resurrect writes take the canonical fence (for seq-ordering) but
+            // bypass the durable block THEY committed above. No-op when the L4 flag is off.
+            await fenceWriterEntry(query, sheetId, { bypassBlockCheck: true })
             const sheetAlive = await query('SELECT 1 FROM meta_sheets WHERE id = $1 AND deleted_at IS NULL', [sheetId])
             if ((sheetAlive.rows as unknown[]).length === 0) throw new RecordServiceRestoreConflictError(`Cannot undelete: sheet no longer exists: ${sheetId}`)
             for (const r of resurrects) {
@@ -10355,7 +10379,7 @@ export function univerMetaRouter(): Router {
         })
         if (hasForbidden) { outcomes.push({ recordId: c.recordId, status: 'skipped', skipReason: 'forbidden' }); continue }
         try {
-          const result = await recordWriteService.patchRecords({ sheetId, changesByRecord: new Map([[c.recordId, c.diff]]), actorId: getRequestActorId(req), fields, visiblePropertyFields: readableEchoFields, visiblePropertyFieldIds: readableEchoFieldIds, attachmentFields, fieldById, capabilities, sheetScope, access, source: 'restore' })
+          const result = await recordWriteService.patchRecords({ sheetId, changesByRecord: new Map([[c.recordId, c.diff]]), actorId: getRequestActorId(req), fields, visiblePropertyFields: readableEchoFields, visiblePropertyFieldIds: readableEchoFieldIds, attachmentFields, fieldById, capabilities, sheetScope, access, source: 'restore', bypassWriterBlock: true /* W0-1 L4: recovery's own in-fence patch — bypass the durable block it owns */ })
           outcomes.push({ recordId: c.recordId, status: 'reverted', newVersion: result.updated.find((u) => u.recordId === c.recordId)?.version })
         } catch (err) {
           if (err instanceof ServiceVersionConflictError || err instanceof RecordServiceVersionConflictError) { outcomes.push({ recordId: c.recordId, status: 'skipped', skipReason: 'conflict' }); continue }
@@ -10366,6 +10390,21 @@ export function univerMetaRouter(): Router {
       }
       const revertedCount = outcomes.filter((o) => o.status === 'reverted').length
       return res.json({ ok: true, data: { asOf: asOfIso, strategy: 'revert', records: outcomes, revertedCount, skippedCount: outcomes.length - revertedCount, resurrectedCount: resurrectedIds.length, undeleteRecordIds: resurrectedIds, ...(isRecordUndeleteInboundEnabled() && resurrectedIds.length > 0 ? { undeleteInbound: undeleteInboundTotals } : {}) } })
+      } catch (revertApplyErr) {
+        // W0-1 L4: a failure AFTER the durable block was claimed (and possibly after the resurrect txn already
+        // COMMITTED) = a half-applied recovery. Keep the sheet blocked (`paused_retryable` — recoverable by a
+        // re-run's claim) so no external writer races the partial state; the finally persists it, then the
+        // outer catch maps the error to its response.
+        blockResolution = 'paused_retryable'
+        throw revertApplyErr
+      } finally {
+        if (writerFenceOn) {
+          await pool.transaction(async ({ query }) => {
+            await acquireCanonicalSheetFence(query, sheetId)
+            await setRecoveryWriterState(query, sheetId, blockResolution === 'clear' ? null : 'paused_retryable')
+          })
+        }
+      }
     } catch (err) {
       if (isUndefinedTableError(err, 'meta_record_revisions')) return res.status(404).json({ ok: false, error: { code: 'VERSION_NOT_FOUND', message: 'No revision history available' } })
       const hint = getDbNotReadyMessage(err)
