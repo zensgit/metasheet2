@@ -374,9 +374,13 @@ interface TierSeed {
  * succeeds) or neither does (ROLLBACK on any failure BEFORE the server commits). NOTE (P3, round 7):
  * a lost connection AFTER the server has committed is genuinely indeterminate at the client — the
  * rows may in fact exist while the driver reports an error; so this is "no partial leak of exactly
- * one row", not "a COMMIT error always means nothing was written". The bench mitigates that residual
- * by re-asserting namespaced-id absence on the abort path (the pre-existence assertion + cleanup are
- * both id-scoped). See §self-test P1-b (BENCH_INJECT_USER_INSERT_FAULT).
+ * one row", not "a COMMIT error always means nothing was written". IMPORTANT (round 8): there is NO
+ * abort-path recheck — the pre-existence assertion runs only BEFORE ensureBase(), and after a COMMIT
+ * exception the code only rolls back and rethrows (baseAndUserCreated stays false, so cleanup does not
+ * touch base/user). The residual is bounded by ONE property: a *same-BENCH_RUN_ID retry* fail-closes on
+ * the pre-existence assertion and refuses. An auto-generated new run id would NOT detect a
+ * post-commit-lost-connection leftover. Known, documented, bounded residual (harness is localhost-only,
+ * window is a lost connection during COMMIT). See §self-test P1-b (BENCH_INJECT_USER_INSERT_FAULT).
  */
 async function ensureBase(): Promise<void> {
   const client = await poolManager.get().getInternalPool().connect()
@@ -968,9 +972,10 @@ async function main() {
     await ensureBase()
     // P1-b: ensureBase() returns normally only after its transaction reports a successful COMMIT of
     // both the base row and the user row; a failure before the server commits throws (after ROLLBACK).
-    // So reaching this line means the pair is atomic — never "only one of the two exists". (P3 caveat:
-    // a connection dropped AFTER a server-side commit is indeterminate; the id-scoped pre-existence
-    // assertion on re-run is the backstop for that residual, not this line.)
+    // So reaching this line means the pair is atomic — never "only one of the two exists". (P3 caveat,
+    // round 8: a connection dropped AFTER a server-side commit is indeterminate — a leftover pair may
+    // exist. There is NO abort-path recheck; the ONLY backstop is a same-run-id retry hitting the
+    // pre-existence assertion. An auto-generated new run id would not detect it. Bounded, localhost-only.)
     baseAndUserCreated = true
     const personIds = await seedPeopleSheet((id) => createdSheetIds.push(id))
     const app = buildApp()
