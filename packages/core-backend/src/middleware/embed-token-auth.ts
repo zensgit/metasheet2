@@ -16,12 +16,14 @@ declare global {
   namespace Express {
     interface Request {
       embedToken?: EmbedTokenClaims
-      // PLM-COLLAB Discussion Phase-3 WRITE (Option A, stateless single-use-per-write): the raw
-      // embed JWT string, set ONLY here, ONLY for the lifetime of this request. It exists solely
-      // so a write-relay route can pass it, unmodified, to PLMAdapter.exchangeDiscussionSession
-      // for a Yuantus-side discussion-session credential exchange -- it MUST NEVER be persisted,
-      // cached on any shared object (adapter/module/store), logged, or returned to the client.
-      // The read relay (plm-embed.ts) has no use for this and continues to read only req.embedToken.
+      // PLM-COLLAB Discussion Phase-3 (Option A, stateless single-use-per-relay-call): the raw
+      // embed JWT string, set ONLY here, ONLY for the lifetime of this request. It exists solely so
+      // a discussion relay route can pass it, unmodified, to PLMAdapter for a Yuantus-side
+      // credential exchange -- the WRITE relay to `exchangeDiscussionSession`, and the READ relay
+      // (plm-embed-discussion-read.ts, read-auth sub-slice 2) to `exchangeDiscussionReadSession`.
+      // It MUST NEVER be persisted, cached on any shared object (adapter/module/store), logged, or
+      // returned to the client. The BOM-projection read relay (plm-embed.ts) has no use for it and
+      // reads only req.embedToken.
       embedTokenRaw?: string
     }
   }
