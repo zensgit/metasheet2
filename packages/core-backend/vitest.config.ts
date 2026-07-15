@@ -310,6 +310,10 @@ export default defineConfig({
       // only (checks the migration landed both tables, the status CHECK, FK cascade, defaults). Excluded HERE
       // so it cannot skip-green in the no-DB lane, whole-file wired into plugin-tests.yml. Two-point wiring.
       'tests/integration/multitable-automation-outbox-schema-realdb.test.ts',
+      // P2 durable-delivery S2-a claim engine / fence-CAS — real-DB constructed-concurrency (zombie/SKIP
+      // LOCKED). Excluded HERE so it cannot skip-green in the no-DB lane; whole-file wired into
+      // plugin-tests.yml. Two-point wiring.
+      'tests/integration/multitable-automation-dispatcher-claim-realdb.test.ts',
       // W0 tail (#4279, owner MUST-WRITE OD-6, design-lock §0.5 2026-07-13): field-undelete rehydration
       // revision goldens — proves `recreateFieldFromConfig`'s tombstone-value rehydration UPDATE bumps
       // `version` and emits a `recordRecordRevision` AT THE NEW version, same transaction, for every
