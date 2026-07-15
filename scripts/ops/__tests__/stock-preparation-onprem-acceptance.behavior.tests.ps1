@@ -74,7 +74,20 @@ function New-Fixture {
   if ($WithBootstrap) {
     $bootName = if ($BootstrapName) { $BootstrapName } else { "$pkgBase-deploy-bootstrap.ps1" }
     $bootPath = Join-Path $pkgDir $bootName
-    Set-Content -Path $bootPath -Value 'param($PackagePath,$DeployRoot) exit 0'
+    # Mirror the REAL release sidecar contract (multitable-onprem-deploy-launcher.ps1),
+    # not the acceptance caller. Requiring both named arguments prevents caller and
+    # fixture from drifting together while the packaged sidecar rejects the call.
+    $bootstrapSource = @'
+param(
+  [Parameter(Mandatory = $true)][string]$PackageArchive,
+  [Parameter(Mandatory = $true)][string]$RootDir
+)
+if (-not (Test-Path -LiteralPath $PackageArchive -PathType Leaf)) { exit 81 }
+if (-not (Test-Path -LiteralPath $RootDir -PathType Container)) { exit 82 }
+Set-Content -Path (Join-Path $RootDir 'bootstrap-contract.marker') -Value (Split-Path -Leaf $PackageArchive) -NoNewline
+exit 0
+'@
+    Set-Content -Path $bootPath -Value $bootstrapSource
     $bootHash = if ($BootstrapBadChecksum) { '0' * 64 } else { (Get-FileHash -Path $bootPath -Algorithm SHA256).Hash.ToLower() }
     $shaLines += "$bootHash  $bootName"
   }
@@ -91,7 +104,13 @@ function New-Fixture {
     $js = "const a=process.argv.slice(2); if(a.includes('--confirm')){process.exit($confirmExit)} process.exit(0)"
     Set-Content -Path (Join-Path $migrateDir 'migrate.js') -Value $js
   }
-  [pscustomobject]@{ Root = $root; Package = $pkg; DeployRoot = $deployRoot; Summary = (Join-Path $root 'acceptance-summary.txt') }
+  [pscustomobject]@{
+    Root = $root
+    Package = $pkg
+    DeployRoot = $deployRoot
+    Summary = (Join-Path $root 'acceptance-summary.txt')
+    BootstrapMarker = (Join-Path $deployRoot 'bootstrap-contract.marker')
+  }
 }
 
 function Invoke-Acceptance {
@@ -154,8 +173,13 @@ try {
 
   # ── D2: bootstrap selected by EXACT bound name + verified against SHA256SUMS (owner P1). ─────────────
   # Correctly-named bootstrap with a valid checksum: stage 2 PASSES, stops later at migrate (absent).
-  $r = Invoke-Acceptance (New-Fixture -ProvenanceGitCommit $GOOD_SHA -WithBootstrap $true) $GOOD_SHA
+  $fx = New-Fixture -ProvenanceGitCommit $GOOD_SHA -WithBootstrap $true
+  $r = Invoke-Acceptance $fx $GOOD_SHA
   Check "correct bootstrap name + checksum -> install PASS, stops later at migrate" ($r.Summary.packageShaMatch -eq 'PASS' -and $r.Summary.failedStage -eq 'migrate')
+  Check "bootstrap receives the archive file and deploy root through the release-sidecar contract" (
+    (Test-Path $fx.BootstrapMarker -PathType Leaf) -and
+    (Get-Content $fx.BootstrapMarker -Raw) -eq (Split-Path -Leaf $fx.Package)
+  )
 
   # A DIFFERENT package's bootstrap in the same dir (wrong name) is NOT run — the derived name is absent.
   $r = Invoke-Acceptance (New-Fixture -ProvenanceGitCommit $GOOD_SHA -WithBootstrap $true -BootstrapName 'some-other-pkg-deploy-bootstrap.ps1') $GOOD_SHA

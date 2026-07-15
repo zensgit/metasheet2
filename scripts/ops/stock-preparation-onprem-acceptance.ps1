@@ -278,7 +278,9 @@ function Invoke-BootstrapStage {
   $verdict = Test-Sha256SumsEntry $bootstrapPath $shaPath $bootstrapName
   if (-not $verdict.ok) { Stop-WithFailure 'install' @{ reason = "bootstrap_$($verdict.reason)" } }
 
-  & $bootstrapPath -PackagePath $PackagePath -DeployRoot $DeployRoot
+  # The release sidecar is a copy of multitable-onprem-deploy-launcher.ps1. Map this
+  # runner's operator-facing names onto that launcher's canonical parameter contract.
+  & $bootstrapPath -PackageArchive $PackagePath -RootDir $DeployRoot
   if ($LASTEXITCODE -ne 0) { Stop-WithFailure 'install' @{ exitCode = $LASTEXITCODE } }
   Write-Stage 'stage 2: PASS'
 }

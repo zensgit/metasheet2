@@ -7,8 +7,49 @@
 $ErrorActionPreference = 'Stop'
 $script = Join-Path $PSScriptRoot '..' 'stock-preparation-onprem-acceptance.ps1'
 $src = Get-Content $script -Raw
+$launcher = Join-Path $PSScriptRoot '..' 'multitable-onprem-deploy-launcher.ps1'
 $fail = 0
 function Check { param([string]$Name, [bool]$Ok) if ($Ok) { Write-Host "  PASS  $Name" } else { Write-Host "  FAIL  $Name"; $script:fail++ } }
+
+# Parse both sides of the bootstrap boundary. A fixture that copies the caller's
+# parameter names can let caller and test drift together while the release sidecar
+# has a different contract, which is exactly what the RC-0 entity-machine run found.
+$acceptanceTokens = $null; $acceptanceErrors = $null
+$acceptanceAst = [System.Management.Automation.Language.Parser]::ParseFile(
+  $script, [ref]$acceptanceTokens, [ref]$acceptanceErrors
+)
+$launcherTokens = $null; $launcherErrors = $null
+$launcherAst = [System.Management.Automation.Language.Parser]::ParseFile(
+  $launcher, [ref]$launcherTokens, [ref]$launcherErrors
+)
+$launcherParams = @($launcherAst.ParamBlock.Parameters | ForEach-Object { $_.Name.VariablePath.UserPath })
+$bootstrapCalls = @($acceptanceAst.FindAll({
+  param($node)
+  $node -is [System.Management.Automation.Language.CommandAst] -and
+    $node.InvocationOperator -eq [System.Management.Automation.Language.TokenKind]::Ampersand -and
+    $node.CommandElements.Count -gt 0 -and
+    $node.CommandElements[0].Extent.Text -eq '$bootstrapPath'
+}, $true))
+$bootstrapCallParams = if ($bootstrapCalls.Count -eq 1) {
+  @($bootstrapCalls[0].CommandElements |
+    Where-Object { $_ -is [System.Management.Automation.Language.CommandParameterAst] } |
+    ForEach-Object { $_.ParameterName })
+} else { @() }
+
+Check "acceptance and launcher scripts parse without errors" (
+  $acceptanceErrors.Count -eq 0 -and $launcherErrors.Count -eq 0
+)
+Check "release launcher exposes PackageArchive and RootDir" (
+  'PackageArchive' -in $launcherParams -and 'RootDir' -in $launcherParams
+)
+Check "acceptance calls the release launcher with its canonical parameter names" (
+  $bootstrapCalls.Count -eq 1 -and
+  $bootstrapCallParams.Count -eq 2 -and
+  'PackageArchive' -in $bootstrapCallParams -and
+  'RootDir' -in $bootstrapCallParams -and
+  'PackagePath' -notin $bootstrapCallParams -and
+  'DeployRoot' -notin $bootstrapCallParams
+)
 
 # ── 1. Summary is values-free by construction: exactly the 9 whitelisted keys, nothing else. ─────
 $expected9 = @(
