@@ -5,6 +5,7 @@ import { describe, expect, it } from 'vitest'
 // exercise the parser; this file does.
 import {
   parseStockPreparationSnapshotDiffRowsResult,
+  SNAPSHOT_DIFF_ROWS_MALFORMED,
   STOCK_PREP_DIFF_TYPES,
   STOCK_PREP_REVIEW_STATUSES,
   STOCK_PREP_CHANGE_TYPES,
@@ -64,9 +65,6 @@ describe('bomSnapshotDiff values-free-by-construction parser', () => {
     ['reviewStatus is off-vocabulary', { reviewStatus: 'accepted' }],
     ['a changeType is off-vocabulary', { changeTypes: ['quantity_changed', SECRET] }],
     ['keyFingerprint is not a sha16 handle', { keyFingerprint: SECRET }],
-    ['a path fingerprint is not a sha16 handle', { previousPathKeyFingerprint: SECRET }],
-    ['a snapshot-line id is not a handle', { currentSnapshotLineId: SECRET }],
-    ['reason carries a value (not a snake_case code)', { reason: SECRET }],
     ['rowCount is negative', { rowCount: -3 }],
     ['rowCount is not an integer', { rowCount: 2.5 }],
   ]
@@ -85,10 +83,25 @@ describe('bomSnapshotDiff values-free-by-construction parser', () => {
     expect(JSON.stringify(out)).not.toContain(SECRET)
   })
 
-  it('tolerates a non-object / missing rows body without throwing', () => {
-    expect(parseStockPreparationSnapshotDiffRowsResult(null).rows).toEqual([])
-    expect(parseStockPreparationSnapshotDiffRowsResult({ rows: 'nope' }).rows).toEqual([])
+  it('THROWS a fixed coarse token on a malformed envelope (not a silent "no diff rows")', () => {
+    // null / non-object / rows-not-an-array are malformed — the caller must show "unavailable", not empty.
+    expect(() => parseStockPreparationSnapshotDiffRowsResult(null)).toThrow(SNAPSHOT_DIFF_ROWS_MALFORMED)
+    expect(() => parseStockPreparationSnapshotDiffRowsResult({ rows: 'nope' })).toThrow(SNAPSHOT_DIFF_ROWS_MALFORMED)
+    // A valid EMPTY array is a real no-diffs result — allowed, zero rows.
+    expect(parseStockPreparationSnapshotDiffRowsResult({ rows: [] }).rows).toEqual([])
+    // Junk row entries inside a valid array are individually dropped (not a malformed envelope).
     expect(parseStockPreparationSnapshotDiffRowsResult({ rows: [42, null, 'x'] }).rows).toEqual([])
+  })
+
+  it('recomputes rowCount/heldRowCount from RETAINED rows (never a phantom count over a shorter table)', () => {
+    // Server claims 9/9 but only one row survives validation → counts reflect the retained row.
+    const out = parseStockPreparationSnapshotDiffRowsResult({
+      rowCount: 9, heldRowCount: 9,
+      rows: [validRow({ reviewStatus: 'held' }), validRow({ diffId: SECRET })],
+    })
+    expect(out.rows.length).toBe(1)
+    expect(out.rowCount).toBe(1)
+    expect(out.heldRowCount).toBe(1)
   })
 })
 

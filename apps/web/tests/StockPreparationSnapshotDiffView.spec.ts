@@ -126,12 +126,12 @@ function diffRowsResult(idPrefix = 'diff', batchId = 'batch-alpha'): unknown {
         diffId: `${idPrefix}-one`,
         diffType: 'changed',
         reviewStatus: 'held',
-        changeTypes: ['quantity', 'unit'],
+        changeTypes: ['quantity_changed', 'unit_changed'],
         reason: 'unit_mismatch',
         rowCount: 1,
         previousSnapshotLineId: 'line-prev-one',
         currentSnapshotLineId: 'line-cur-one',
-        keyFingerprint: 'abcdef0123456789',
+        keyFingerprint: 'sha16:0123456789abcdef',
         previousPathKeyFingerprint: 'fedcba9876543210',
         currentPathKeyFingerprint: '0011223344556677',
         drawingNo: PLANTED_DRAWING_NO,
@@ -142,13 +142,13 @@ function diffRowsResult(idPrefix = 'diff', batchId = 'batch-alpha'): unknown {
       {
         diffId: `${idPrefix}-two`,
         diffType: 'added',
-        reviewStatus: 'pending',
+        reviewStatus: 'ready',
         changeTypes: [],
         reason: null,
         rowCount: 4,
         previousSnapshotLineId: null,
         currentSnapshotLineId: 'line-cur-two',
-        keyFingerprint: '99aabbccddeeff00',
+        keyFingerprint: 'sha16:99aabbccddeeff00',
         previousPathKeyFingerprint: null,
         currentPathKeyFingerprint: '7788990011223344',
       },
@@ -453,7 +453,7 @@ describe('StockPreparationSnapshotDiffView (readonly, values-free)', () => {
     expect(text).toContain('diff-one')
     expect(text).toContain('held')
     expect(text).toContain('added')
-    expect(text).toContain('abcdef0123') // the 10-char fingerprint prefix, never the full raw key
+    expect(text).toContain('sha16:0123456789abcdef') // the full opaque sha16 handle (22 chars) — was the misleading 4-hex slice
     // The meta line surfaces the counts.
     expect(root.querySelector('[data-testid="stock-prep-snapshot-diff-rows-meta"]')?.textContent).toContain('2')
   })
@@ -467,8 +467,6 @@ describe('StockPreparationSnapshotDiffView (readonly, values-free)', () => {
     for (const forbidden of FORBIDDEN) {
       expect(text).not.toContain(forbidden)
     }
-    // The full fingerprint is truncated — the untruncated hash never reaches the DOM either.
-    expect(text).not.toContain('abcdef0123456789')
   })
 
   it('404-softs the row detail: neutral error state, never the raw body, table absent', async () => {

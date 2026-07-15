@@ -242,7 +242,7 @@
                         <td>{{ row.reviewStatus }}</td>
                         <td>{{ row.changeTypes.length ? row.changeTypes.join(', ') : '—' }}</td>
                         <td>{{ row.rowCount }}</td>
-                        <td><code class="sp-snap__handle">{{ shortFingerprint(row.keyFingerprint) }}</code></td>
+                        <td><code class="sp-snap__handle">{{ fingerprintLabel(row.keyFingerprint) }}</code></td>
                       </tr>
                     </tbody>
                   </table>
@@ -331,10 +331,10 @@ const diffRows = ref<StockPreparationSnapshotDiffRowsResult | null>(null)
 // being cached under the wrong batch (A's late reply must never show up when B is open).
 let rowsSeq = 0
 
-// A diff/path-key fingerprint is already an opaque SHA-16 (never the raw path key); show a short prefix
-// so the table stays scannable while remaining a values-free handle.
-function shortFingerprint(fp: string | null): string {
-  return fp ? fp.slice(0, 10) : '—'
+// The fingerprint is the full opaque `sha16:<16 hex>` handle (never the raw path key) — 22 chars, short
+// enough to show whole. (The old slice(0,10) cut the `sha16:` prefix down to 4 hex, which was misleading.)
+function fingerprintLabel(fp: string | null): string {
+  return fp ?? '—'
 }
 
 // Fixed whitelist of the eight values-free change-count kinds (counts of lines, never the values).
