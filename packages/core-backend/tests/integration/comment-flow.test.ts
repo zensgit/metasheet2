@@ -163,6 +163,11 @@ function inboxRow(overrides: Record<string, unknown> = {}) {
     sheet_id: 'sheet_a',
     view_id: 'view_1',
     record_id: 'row_1',
+    // G-10 (docket #68): display names alongside the existing ids above.
+    base_name: 'Base One',
+    sheet_name: 'Sheet A',
+    view_name: 'View One',
+    field_name: null,
     ...overrides,
   }
 }
@@ -722,6 +727,60 @@ describe('Week-1 collab semantics — comment-flow integration', () => {
       expect(item.sheetId).toBe('sheet_xyz')
       expect(item.viewId).toBe('view_xyz')
       expect(item.recordId).toBe('row_xyz')
+    })
+
+    it('G-10 (docket #68): getInbox projects baseName/sheetName/viewName alongside the existing ids (additive, ids unchanged)', async () => {
+      const metaItem = inboxRow({
+        id: 'cmt_meta_names',
+        author_id: 'user_other',
+        mentioned: true,
+        base_id: 'base_xyz',
+        sheet_id: 'sheet_xyz',
+        view_id: 'view_xyz',
+        record_id: 'row_xyz',
+        base_name: 'Base XYZ',
+        sheet_name: 'Sheet XYZ',
+        view_name: 'View XYZ',
+      })
+
+      qFirst({ c: 1 })
+      qExec([metaItem])
+
+      const result = await svc.getInbox('user_viewer')
+      const item = result.items[0]
+
+      // additive: the existing id fields are untouched by the name projection
+      expect(item.baseId).toBe('base_xyz')
+      expect(item.sheetId).toBe('sheet_xyz')
+      expect(item.viewId).toBe('view_xyz')
+      expect(item.recordId).toBe('row_xyz')
+      expect(item.baseName).toBe('Base XYZ')
+      expect(item.sheetName).toBe('Sheet XYZ')
+      expect(item.viewName).toBe('View XYZ')
+    })
+
+    it('G-10: getInbox projects fieldName for a field-level comment, null for a record-level one', async () => {
+      const fieldItem = inboxRow({
+        id: 'cmt_field_named',
+        author_id: 'user_other',
+        mentioned: true,
+        field_id: 'fld_status',
+        field_name: 'Status',
+      })
+      const recordItem = inboxRow({
+        id: 'cmt_record_level',
+        author_id: 'user_other',
+        mentioned: true,
+        field_id: null,
+        field_name: null,
+      })
+
+      qFirst({ c: 2 })
+      qExec([fieldItem, recordItem])
+
+      const result = await svc.getInbox('user_viewer')
+      expect(result.items.find((i) => i.id === 'cmt_field_named')?.fieldName).toBe('Status')
+      expect(result.items.find((i) => i.id === 'cmt_record_level')?.fieldName).toBeNull()
     })
 
     it('non-mentioned users can appear in inbox for unread activity (mentioned=false)', async () => {

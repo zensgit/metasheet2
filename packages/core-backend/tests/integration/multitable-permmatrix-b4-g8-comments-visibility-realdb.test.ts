@@ -283,3 +283,68 @@ describeIfDatabase('F1 — comments respect row-level read deny (real DB)', () =
     expect(Number((inserted.rows[0] as { c: number }).c)).toBe(0)
   })
 })
+
+/**
+ * G-10 (docket #68, G-10 audit #4323) — comment inbox entity-name projection (real DB).
+ *
+ * `CommentService.getInbox` (`/api/comments/inbox`) now additively projects `baseName`/`sheetName`/
+ * `viewName`/`fieldName` alongside the existing `baseId`/`sheetId`/`viewId`/`fieldId` (raw ids kept,
+ * names are name-first display sugar). See `CommentService.getInbox`'s doc comment for the
+ * no-WHERE-relaxation reasoning: this endpoint has no per-sheet `resolveSheetReadableCapabilities`
+ * gate (pre-existing, tracked residual from the G-8 verification doc — NOT this PR's scope). This
+ * suite verifies the ADDITIVE projection itself (names correctly resolved alongside unchanged ids for
+ * a row this endpoint already serves). It intentionally does NOT ship a row-selection/exclusion
+ * golden for this endpoint — that would be asserting a property of pre-existing, unmodified query
+ * logic that is out of scope for this PR to characterize.
+ */
+describeIfDatabase('G-10 — comment inbox entity-name projection (real DB)', () => {
+  const ts = Date.now()
+  const baseId = `base_g10_inbox_${ts}`
+  const sheetId = `sheet_g10_inbox_${ts}`
+  const fieldId = `fld_g10_status_${ts}`
+  const recordId = `rec_g10_inbox_${ts}`
+  const viewerCommentId = `cmt_g10_viewer_${ts}` // unread, authored by someone else → appears in viewer's inbox
+  const author = `user_g10_author_${ts}`
+  const viewer = `user_g10_viewer_${ts}`
+  const baseName = 'G10 Inbox Base'
+  const sheetName = 'G10 Inbox Sheet'
+  const fieldName = 'G10 Status Field'
+
+  beforeAll(async () => {
+    await q("INSERT INTO users (id, password_hash) VALUES ($1,'x'), ($2,'x') ON CONFLICT (id) DO NOTHING", [author, viewer])
+    await q('INSERT INTO meta_bases (id, name) VALUES ($1,$2)', [baseId, baseName])
+    await q('INSERT INTO meta_sheets (id, base_id, name) VALUES ($1,$2,$3)', [sheetId, baseId, sheetName])
+    await q('INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6)', [fieldId, sheetId, fieldName, 'string', '{}', 1])
+    await q('INSERT INTO meta_records (id, sheet_id, data, version) VALUES ($1,$2,$3::jsonb,1)', [recordId, sheetId, JSON.stringify({ [fieldId]: 'x' })])
+    await q(
+      `INSERT INTO meta_comments (id, spreadsheet_id, row_id, field_id, container_id, target_id, target_field_id, author_id, content, mentions, created_at, updated_at)
+       VALUES ($1,$2,$3,$4,$2,$3,$4,$5,$6,$7::jsonb, now(), now())`,
+      [viewerCommentId, sheetId, recordId, fieldId, author, 'G10_INBOX_VIEWER_COMMENT', JSON.stringify([viewer])],
+    )
+  })
+
+  afterAll(async () => {
+    await q('DELETE FROM meta_comment_reads WHERE comment_id = $1', [viewerCommentId]).catch(() => {})
+    await q('DELETE FROM meta_comments WHERE spreadsheet_id = $1', [sheetId]).catch(() => {})
+    await q('DELETE FROM meta_records WHERE sheet_id = $1', [sheetId]).catch(() => {})
+    await q('DELETE FROM meta_fields WHERE sheet_id = $1', [sheetId]).catch(() => {})
+    await q('DELETE FROM meta_sheets WHERE id = $1', [sheetId]).catch(() => {})
+    await q('DELETE FROM meta_bases WHERE id = $1', [baseId]).catch(() => {})
+    await q('DELETE FROM users WHERE id = ANY($1::text[])', [[author, viewer]]).catch(() => {})
+  })
+
+  test('inbox item for a comment authored by someone else carries the projected base/sheet/field display names, ids unchanged', async () => {
+    const app = buildApp(viewer, ['comments:read'])
+    const res = await request(app).get('/api/comments/inbox')
+    expect(res.status).toBe(200)
+    const item = (res.body.data.items as Array<Record<string, unknown>>).find((i) => i.id === viewerCommentId)
+    expect(item).toBeTruthy()
+    // additive: existing id fields are untouched by the name projection (backward-compat contract)
+    expect(item?.baseId).toBe(baseId)
+    expect(item?.sheetId).toBe(sheetId)
+    expect(item?.fieldId).toBe(fieldId)
+    expect(item?.baseName).toBe(baseName)
+    expect(item?.sheetName).toBe(sheetName)
+    expect(item?.fieldName).toBe(fieldName)
+  })
+})

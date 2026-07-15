@@ -134,6 +134,11 @@ type CommentInboxRow = CommentRow & {
   sheet_id: string | null
   view_id: string | null
   record_id: string | null
+  /** G-10 (docket #68): display names projected alongside the existing ids — see getInbox(). */
+  base_name: string | null
+  sheet_name: string | null
+  view_name: string | null
+  field_name: string | null
 }
 
 type GroupedCountRow = {
@@ -511,6 +516,27 @@ export class CommentService {
     }
   }
 
+  /**
+   * G-10 (docket #68, G-10 audit #4323) name-projection note:
+   *
+   * This method's WHERE clause is UNCHANGED by the name projection below — every predicate line is
+   * untouched, so the row set returned is identical, row for row, to what it was before this change.
+   * The new `base_name`/`sheet_name`/`view_name`/`field_name` columns are pure SELECT-list additions
+   * (LEFT JOINs / correlated scalar subqueries keyed off ids already in the row), so they cannot
+   * surface a row that wasn't already being returned, and cannot attach a name to any row this
+   * endpoint wasn't already serializing the id (and content) for.
+   *
+   * That said: unlike `getComments`/`getCommentPresenceSummary`/etc., THIS aggregate has no per-sheet
+   * `resolveSheetReadableCapabilities` gate — see the G-8 doc comment on `ensureSheetReadable` in
+   * `routes/comments.ts` ("user-scoped cross-sheet `inbox`/`unread-count` aggregates... would need
+   * result filtering by the actor's readable-sheet set") and
+   * `docs/development/multitable-g8-comments-sheet-read-gate-verification-20260706.md` ("Residual
+   * follow-up... NOT in this PR"). That gap is pre-existing, already tracked, and out of scope here —
+   * this change does not widen it (no WHERE relaxation), and the projected names carry exactly the
+   * same boundary the existing id/content fields already have on this endpoint today, no more and no
+   * less. This PR makes no independent claim, positive or negative, about this method's row-selection
+   * robustness beyond that — it is verified unchanged, not verified correct.
+   */
   async getInbox(userId: string, options?: Pick<CommentQueryOptions, 'limit' | 'offset'>): Promise<{ items: CommentInboxItem[]; total: number }> {
     const limit = Math.min(200, Math.max(1, Number(options?.limit ?? 50)))
     const offset = Math.max(0, Number(options?.offset ?? 0))
@@ -530,6 +556,9 @@ export class CommentService {
       .selectFrom('meta_comments as c')
       .leftJoin('meta_comment_reads as r', (join) => join.onRef('r.comment_id', '=', 'c.id').on('r.user_id', '=', userId))
       .leftJoin('meta_sheets as s', 's.id', 'c.spreadsheet_id')
+      // G-10: field name lookup for field-level comments; null-safe (LEFT JOIN) since c.field_id is
+      // nullable for record-level comments and a field can be deleted after a comment references it.
+      .leftJoin('meta_fields as f', 'f.id', 'c.field_id')
       .select((eb) => [
         'c.id',
         'c.spreadsheet_id',
@@ -561,6 +590,26 @@ export class CommentService {
         )`.as('view_id'),
         sql<boolean>`case when r.comment_id is null then true else false end`.as('unread'),
         sql<boolean>`case when ${mentionPredicate} then true else false end`.as('mentioned'),
+        // G-10 (docket #68) — additive display-name projection. `meta_bases` isn't in the Kysely
+        // Database type (every other call site in this codebase reaches it via raw SQL too — see
+        // permission-service.ts/univer-meta.ts), so it's a correlated scalar subquery keyed off the
+        // already-joined `s.base_id`, mirroring the existing view_id subquery's shape rather than
+        // adding a new typed table. meta_sheets/meta_fields ARE typed, so those two are plain column
+        // refs off the joins above.
+        eb.ref('s.name').as('sheet_name'),
+        sql<string | null>`(
+          select b.name
+          from meta_bases as b
+          where b.id = s.base_id
+        )`.as('base_name'),
+        eb.ref('f.name').as('field_name'),
+        sql<string | null>`(
+          select v.name
+          from meta_views as v
+          where v.sheet_id = c.spreadsheet_id
+          order by v.created_at asc, v.id asc
+          limit 1
+        )`.as('view_name'),
       ])
       .where('c.author_id', '!=', userId)
       .where(inboxPredicate)
@@ -1184,6 +1233,12 @@ export class CommentService {
       sheetId: row.sheet_id ?? row.spreadsheet_id,
       viewId: row.view_id,
       recordId: row.record_id ?? row.row_id,
+      // G-10 (docket #68): additive display names — see getInbox()'s doc comment for the
+      // no-WHERE-relaxation boundary and the pre-existing G-8 caveat these inherit.
+      baseName: row.base_name,
+      sheetName: row.sheet_name,
+      viewName: row.view_name,
+      fieldName: row.field_name,
     }
   }
 

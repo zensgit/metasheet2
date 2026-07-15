@@ -34,11 +34,11 @@
           <div>
             <strong>{{ item.authorName ?? item.authorId }}</strong>
             <p class="mt-comment-inbox__meta">
-              <span v-if="item.baseId">Base {{ item.baseId }}</span>
-              <span>Sheet {{ resolveItemSheetId(item) }}</span>
+              <span v-if="item.baseId" :title="item.baseId">Base {{ item.baseName ?? item.baseId }}</span>
+              <span :title="resolveItemSheetId(item)">Sheet {{ item.sheetName ?? resolveItemSheetId(item) }}</span>
               <span>Row {{ resolveItemRecordId(item) }}</span>
-              <span v-if="item.viewId">View {{ item.viewId }}</span>
-              <span v-if="resolveItemFieldId(item)">Field {{ resolveItemFieldId(item) }}</span>
+              <span v-if="item.viewId" :title="item.viewId">View {{ item.viewName ?? item.viewId }}</span>
+              <span v-if="resolveItemFieldId(item)" :title="resolveItemFieldId(item) ?? undefined">Field {{ item.fieldName ?? resolveItemFieldId(item) }}</span>
             </p>
           </div>
           <div class="mt-comment-inbox__flags">

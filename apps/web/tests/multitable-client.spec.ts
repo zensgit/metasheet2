@@ -420,6 +420,13 @@ describe('MultitableApiClient', () => {
         sheetId: 'sheet_1',
         viewId: 'view_1',
         recordId: 'row_1',
+        // G-10 (docket #68): additive display names — absent from this fixture's raw payload, so
+        // normalizeCommentInbox falls back to null (never undefined, so the FE's `name ?? id`
+        // pattern always has a defined id to fall back to).
+        baseName: null,
+        sheetName: null,
+        viewName: null,
+        fieldName: null,
         spreadsheetId: 'sheet_1',
         rowId: 'row_1',
         parentId: undefined,
@@ -970,6 +977,11 @@ describe('MultitableApiClient', () => {
           sheetId: 'sheet_comments',
           viewId: 'view_comments',
           recordId: 'rec_1',
+          // G-10 (docket #68): raw backend payload carries display names — asserts the client
+          // normalizer passes them through unchanged (not just defaults them to null).
+          baseName: 'Comments Base',
+          sheetName: 'Comments Sheet',
+          viewName: 'Comments View',
           authorId: 'user_2',
           content: 'hello',
           resolved: false,
@@ -996,6 +1008,13 @@ describe('MultitableApiClient', () => {
         sheetId: 'sheet_comments',
         viewId: 'view_comments',
         recordId: 'rec_1',
+        // G-10 (docket #68): pass-through from the raw payload above (not defaulted, since the
+        // backend supplied real strings) — fieldName is null because this fixture is a
+        // record-level comment (no fieldId), matching the id/name null-symmetry contract.
+        baseName: 'Comments Base',
+        sheetName: 'Comments Sheet',
+        viewName: 'Comments View',
+        fieldName: null,
         spreadsheetId: 'sheet_comments',
         rowId: 'rec_1',
         parentId: undefined,
