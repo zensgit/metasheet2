@@ -406,23 +406,42 @@ vi.mock('../src/multitable/components/MetaFormView.vue', () => ({
     },
   }),
 }))
-// W2 S3: MultitableWorkbench.vue now renders MetaRecordInspector.vue directly (the shell that
+// W2 S3/S4: MultitableWorkbench.vue now renders MetaRecordInspector.vue directly (the shell that
 // absorbed the drawer's tablist/header/lock-banner rendering — MetaRecordDrawer.vue itself is now
-// a deprecated thin compat shell no longer mounted by the workbench, OD-W2-7=b). This stub's mock
-// path + name follow that swap 1:1; its behavior (the clickable stand-in buttons below) is otherwise
-// unchanged from the pre-S3 MetaRecordDrawer stub — same props/emits contract, same fixture shape.
+// a deprecated thin compat shell no longer mounted by the workbench, OD-W2-7=b). S4 additionally
+// absorbed the SECOND drawer (MetaCommentsDrawer.vue) — the workbench no longer mounts it either;
+// comments state/emits now flow straight into THIS component (comments-tab props, `comment-`
+// prefixed emits, see MetaRecordInspector.vue's own emit block for why the prefix). This stub folds
+// what used to be the separate MetaCommentsDrawer stub's clickable stand-ins into this one — same
+// data-testids the pre-S4 tests already used (data-submit-comment / data-set-comment-draft /
+// data-reply-comment / data-cancel-reply / data-current-comment-field / data-highlighted-comment /
+// data-mention-suggestions-count), MINUS `data-close-comments` (no such affordance exists anymore —
+// comments has no close chrome of its own now, lock §2 "不含它自己的 __header...close 钮"; the two
+// tests that exercised it were removed, see below). Everything else is otherwise unchanged from the
+// pre-S3 MetaRecordDrawer stub — same props/emits contract, same fixture shape.
 vi.mock('../src/multitable/components/MetaRecordInspector.vue', () => ({
   default: defineComponent({
     name: 'MetaRecordInspector',
     props: {
       visible: { type: Boolean, default: false },
       record: { type: Object, default: null },
+      commentTargetFieldId: { type: String, default: null },
+      highlightedCommentId: { type: String, default: null },
+      mentionSuggestions: { type: Array, default: () => [] },
     },
-    emits: ['close', 'toggle-comments', 'comment-field', 'navigate', 'delete', 'patch'],
+    emits: [
+      'close', 'toggle-comments', 'comment-field', 'navigate', 'delete', 'patch',
+      'comment-submit', 'comment-reply', 'comment-cancel-reply', 'update:comment-draft',
+    ],
     render() {
       if (!this.$props.visible) return null
       const recordId = (this.$props.record as { id?: string } | null)?.id ?? ''
-      return h('div', { 'data-record-drawer': recordId }, [
+      return h('div', {
+        'data-record-drawer': recordId,
+        'data-current-comment-field': this.$props.commentTargetFieldId ?? '',
+        'data-highlighted-comment': this.$props.highlightedCommentId ?? '',
+        'data-mention-suggestions-count': String((this.$props.mentionSuggestions as unknown[]).length),
+      }, [
         h(
           'button',
           {
@@ -471,32 +490,11 @@ vi.mock('../src/multitable/components/MetaRecordInspector.vue', () => ({
           },
           'patch-record',
         ),
-      ])
-    },
-  }),
-}))
-vi.mock('../src/multitable/components/MetaCommentsDrawer.vue', () => ({
-  default: defineComponent({
-    name: 'MetaCommentsDrawer',
-    props: {
-      visible: { type: Boolean, default: false },
-      targetFieldId: { type: String, default: null },
-      highlightedCommentId: { type: String, default: null },
-      mentionSuggestions: { type: Array, default: () => [] },
-    },
-    emits: ['close', 'submit', 'reply', 'cancel-reply', 'update:draft'],
-    render() {
-      if (!this.$props.visible) return null
-      return h('div', {
-        'data-current-comment-field': this.$props.targetFieldId ?? '',
-        'data-highlighted-comment': this.$props.highlightedCommentId ?? '',
-        'data-mention-suggestions-count': String((this.$props.mentionSuggestions as unknown[]).length),
-      }, [
         h(
           'button',
           {
             'data-set-comment-draft': 'true',
-            onClick: () => this.$emit('update:draft', 'Need review'),
+            onClick: () => this.$emit('update:comment-draft', 'Need review'),
           },
           'set-comment-draft',
         ),
@@ -504,7 +502,7 @@ vi.mock('../src/multitable/components/MetaCommentsDrawer.vue', () => ({
           'button',
           {
             'data-submit-comment': 'true',
-            onClick: () => this.$emit('submit', { content: 'Need review', mentions: [] }),
+            onClick: () => this.$emit('comment-submit', { content: 'Need review', mentions: [] }),
           },
           'submit-comment',
         ),
@@ -512,7 +510,7 @@ vi.mock('../src/multitable/components/MetaCommentsDrawer.vue', () => ({
           'button',
           {
             'data-reply-comment': 'comment_parent_1',
-            onClick: () => this.$emit('reply', 'comment_parent_1'),
+            onClick: () => this.$emit('comment-reply', 'comment_parent_1'),
           },
           'reply-comment',
         ),
@@ -520,17 +518,9 @@ vi.mock('../src/multitable/components/MetaCommentsDrawer.vue', () => ({
           'button',
           {
             'data-cancel-reply': 'true',
-            onClick: () => this.$emit('cancel-reply'),
+            onClick: () => this.$emit('comment-cancel-reply'),
           },
           'cancel-reply',
-        ),
-        h(
-          'button',
-          {
-            'data-close-comments': 'true',
-            onClick: () => this.$emit('close'),
-          },
-          'close-comments',
         ),
       ])
     },
@@ -2473,7 +2463,15 @@ describe('MultitableWorkbench view wiring', () => {
     })
   })
 
-  it('prompts before closing the comments drawer when a comment draft exists', async () => {
+  // W2 S4 (OD-W2-7=b): comments no longer has its own close chrome distinct from the inspector's —
+  // the two pre-S4 tests that lived here ("prompts before closing the comments drawer.../localizes
+  // the unsaved comment draft confirm copy in zh-CN") pinned a `data-close-comments` affordance that
+  // no longer exists (see onToggleComments' own doc comment in MultitableWorkbench.vue). Replaced
+  // with a test documenting the new behavior: re-clicking the comment-toggle button while a draft is
+  // pending does NOT prompt (there is nothing to "close" anymore — see the surviving
+  // "prompts before closing the record drawer..." test below for where the comment-draft-discard
+  // guard now lives, `hasRecordScopedDrafts` already folds in `hasCommentDraft`).
+  it('re-clicking the comment-toggle button while a draft is pending does not prompt (no more close-comments-only affordance)', async () => {
     mountWorkbench()
     await flushUi()
 
@@ -2485,31 +2483,13 @@ describe('MultitableWorkbench view wiring', () => {
     await flushUi()
 
     const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false)
-    container!.querySelector<HTMLButtonElement>('[data-close-comments="true"]')!.click()
-    await flushUi()
-
-    expect(confirmSpy).toHaveBeenCalledWith('Discard unsaved comment draft?')
-    expect(container!.querySelector('[data-close-comments="true"]')).toBeTruthy()
-  })
-
-  it('localizes the unsaved comment draft confirm copy in zh-CN', async () => {
-    useLocale().setLocale('zh-CN')
-    mountWorkbench()
-    await flushUi()
-
-    container!.querySelector<HTMLButtonElement>('[data-select-record="rec_1"]')!.click()
-    await flushUi()
     container!.querySelector<HTMLButtonElement>('[data-toggle-comments="true"]')!.click()
     await flushUi()
-    container!.querySelector<HTMLButtonElement>('[data-set-comment-draft="true"]')!.click()
-    await flushUi()
 
-    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false)
-    container!.querySelector<HTMLButtonElement>('[data-close-comments="true"]')!.click()
-    await flushUi()
-
-    expect(confirmSpy).toHaveBeenCalledWith('放弃未保存的评论草稿吗？')
-    expect(container!.querySelector('[data-close-comments="true"]')).toBeTruthy()
+    expect(confirmSpy).not.toHaveBeenCalled()
+    // The record drawer (whole inspector) is still open — only the whole-inspector close (below)
+    // guards a comment draft now.
+    expect(container!.querySelector('[data-record-drawer="rec_1"]')).toBeTruthy()
   })
 
   it('prompts before closing the record drawer when record-scoped drafts are present', async () => {

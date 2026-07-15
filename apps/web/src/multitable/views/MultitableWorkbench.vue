@@ -338,6 +338,25 @@
         :ai-shortcut="aiShortcut.state"
         :button-run-pending="buttonRunPending"
         :mention-suggestions="commentMentionSuggestions"
+        :comments="commentsState.comments.value"
+        :comments-loading="commentsState.loading.value"
+        :can-resolve-comments="effectiveRowActions.canComment"
+        :comment-draft="commentDraft"
+        :highlighted-comment-id="highlightedCommentId"
+        :comment-target-field-id="activeCommentFieldId"
+        :comments-scope-label="commentsScopeLabel"
+        :comment-reply-to-id="selectedReplyCommentId"
+        :comment-editing-id="selectedEditingCommentId"
+        :comment-unread-count="commentInboxState.unreadCount.value"
+        :comment-submitting="commentsState.submitting.value"
+        :comments-error="commentsState.error.value"
+        :comment-resolving-ids="commentsState.resolvingIds.value"
+        :comment-updating-ids="commentsState.updatingIds.value"
+        :comment-deleting-ids="commentsState.deletingIds.value"
+        :comment-reacting-keys="commentsState.reactingKeys.value"
+        :current-user-id="currentUserId"
+        :comment-composer-initial-mentions="commentComposerInitialMentions"
+        :open-comments="showComments"
         @close="onCloseDrawer" @delete="onDeleteRecord" @duplicate="onDuplicateRecord(selectedRecordId)" @patch="onDrawerPatch"
         @toggle-comments="onToggleComments" @comment-field="onToggleFieldComments" @open-automation="openWorkflowDesigner(selectedRecordId ?? undefined)" @open-link-picker="openLinkPicker" @open-person-picker="openPersonPicker"
         @toggle-lock="onToggleRecordLock"
@@ -345,25 +364,7 @@
         @restore="onRestoreRecordVersion"
         @ai-preview="onAiPreviewField" @ai-run="onAiRunField"
         @run-button="onRunButton"
-      />
-      <MetaCommentsDrawer
-        :visible="showComments && !!selectedRecordId" :comments="commentsState.comments.value"
-        :loading="commentsState.loading.value" :can-comment="effectiveRowActions.canComment" :can-resolve="effectiveRowActions.canComment"
-        :highlighted-comment-id="highlightedCommentId"
-        :unread-count="commentInboxState.unreadCount.value"
-        :target-field-id="activeCommentFieldId"
-        :scope-label="commentsScopeLabel"
-        :reply-to-comment-id="selectedReplyCommentId"
-        :editing-comment-id="selectedEditingCommentId"
-        :draft="commentDraft" :submitting="commentsState.submitting.value" :error="commentsState.error.value"
-        :resolving-ids="commentsState.resolvingIds.value"
-        :updating-ids="commentsState.updatingIds.value"
-        :deleting-ids="commentsState.deletingIds.value"
-        :reacting-keys="commentsState.reactingKeys.value"
-        :current-user-id="currentUserId"
-        :mention-suggestions="commentMentionSuggestions"
-        :composer-initial-mentions="commentComposerInitialMentions"
-        @close="onCloseComments" @submit="onSubmitComment" @resolve="onResolveComment" @reply="onReplyToComment" @edit="onEditComment" @delete="onDeleteComment" @cancel-reply="onCancelCommentReply" @cancel-edit="onCancelCommentEdit" @update:draft="commentDraft = $event" @react="onReactToComment" @unreact="onUnreactToComment"
+        @comment-submit="onSubmitComment" @comment-resolve="onResolveComment" @comment-reply="onReplyToComment" @comment-edit="onEditComment" @comment-delete="onDeleteComment" @comment-cancel-reply="onCancelCommentReply" @comment-cancel-edit="onCancelCommentEdit" @update:comment-draft="commentDraft = $event" @comment-react="onReactToComment" @comment-unreact="onUnreactToComment"
       />
     </div>
     <div v-if="showShortcuts" class="mt-workbench__shortcuts-overlay" @click.self="showShortcuts = false">
@@ -605,7 +606,6 @@ import {
   recordsDeleted as fmtRecordsDeleted,
   recordNotFound as fmtRecordNotFound,
 } from '../utils/workbench-labels'
-import { commentLabel } from '../utils/meta-comment-labels'
 import { recordLabel } from '../utils/meta-record-labels'
 import { resolveButtonFieldProperty } from '../utils/field-config'
 import {
@@ -664,7 +664,6 @@ import { resolveSelectionLabels } from '../utils/batch-restore-labels'
 import MetaFormView from '../components/MetaFormView.vue'
 import MetaRecordInspector from '../components/MetaRecordInspector.vue'
 import MetaNotificationBell from '../components/MetaNotificationBell.vue'
-import MetaCommentsDrawer from '../components/MetaCommentsDrawer.vue'
 import MetaLinkPicker from '../components/MetaLinkPicker.vue'
 import MetaPersonPicker from '../components/MetaPersonPicker.vue'
 import MetaTemplateCard from '../components/MetaTemplateCard.vue'
@@ -3105,13 +3104,18 @@ function onCloseDrawer() {
   resetCommentInteractionState()
 }
 
+// W2 S4 (OD-W2-7=b, lock "收编 showComments 分支"): comments is now a tab inside the single
+// inspector, not a second drawer with its own open/close state — there is no "close JUST comments"
+// affordance anymore (MetaCommentsPanel has no header/close chrome of its own, lock §2). So this
+// simplifies to an OPEN-only action: request the comments tab (via the `openComments` prop →
+// MetaRecordInspector's watch, see that component's file-header comment) and reset the scoped
+// comment-field/reply/edit context back to "new top-level comment" — the SAME reset this function
+// already did on its own open branch. Clicking the header comment-toggle button while ALREADY on
+// the comments tab now just re-runs that reset (a mild behavior change from the old toggle-closes
+// semantics; there is no other way to "close comments only" left in the UI — closing the whole
+// inspector via its own × already discards a comment draft the same way, `hasRecordScopedDrafts`
+// already includes `hasCommentDraft`, see `confirmDiscardRecordChanges`).
 function onToggleComments() {
-  if (showComments.value) {
-    if (!confirmDiscardCommentDraft()) return
-    showComments.value = false
-    resetCommentInteractionState()
-    return
-  }
   showComments.value = true
   selectedCommentFieldId.value = null
   selectedReplyCommentId.value = null
@@ -3162,12 +3166,6 @@ function onCancelCommentEdit() {
   commentDraft.value = ''
 }
 
-function onCloseComments() {
-  if (!confirmDiscardCommentDraft()) return
-  showComments.value = false
-  resetCommentInteractionState()
-}
-
 function confirmDiscardContextChanges() {
   if (!hasUnsavedWorkbenchDrafts.value) return true
   return window.confirm(wb('confirm.discardContextChanges', isZh.value))
@@ -3176,11 +3174,6 @@ function confirmDiscardContextChanges() {
 function confirmDiscardRecordChanges() {
   if (!hasRecordScopedDrafts.value) return true
   return window.confirm(wb('confirm.discardRecordChanges', isZh.value))
-}
-
-function confirmDiscardCommentDraft() {
-  if (!hasCommentDraft.value) return true
-  return window.confirm(commentLabel('comment.discardDraftConfirm', isZh.value))
 }
 
 function discardWorkbenchDraftsForExternalContextChange() {

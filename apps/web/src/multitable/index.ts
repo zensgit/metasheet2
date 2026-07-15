@@ -53,6 +53,11 @@ export { default as MetaBasePicker } from './components/MetaBasePicker.vue'
  */
 export { default as MetaRecordDrawer } from './components/MetaRecordDrawer.vue'
 export { default as MetaRecordInspector } from './components/MetaRecordInspector.vue'
+/**
+ * @deprecated W2 S4 (OD-W2-7=b): thin compat shell — its body now delegates to MetaCommentsPanel,
+ * mounted directly as {@link MetaRecordInspector}'s comments tab. Same props/emits contract as
+ * before; `MultitableWorkbench.vue` no longer mounts this component itself.
+ */
 export { default as MetaCommentsDrawer } from './components/MetaCommentsDrawer.vue'
 export { default as MetaMentionPopover } from './components/MetaMentionPopover.vue'
 export { default as MetaLinkPicker } from './components/MetaLinkPicker.vue'
