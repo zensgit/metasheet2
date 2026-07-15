@@ -1,6 +1,6 @@
-# 多维表 UI-P2-2c · 响应式工作台左侧栏（窄屏折叠 + 抽屉）· 设计（PROPOSED）
+# 多维表 UI-P2-2c · 响应式工作台左侧栏（窄屏折叠 + 抽屉）· 设计（IMPLEMENTED）
 
-> 状态：**PROPOSED**（implementer-authored, not owner-ratified). Parent lock
+> 状态：**IMPLEMENTED**（#4290 merged `a52f55845`，2026-07-15；Opus ×2 轮门禁 + 真浏览器验证）。断点语义统一勘误（owner Low）：**`window.innerWidth <= 768` 为窄**（768 含在窄内），文中一切「>= 768」为误写应读作「>= 769/> 768」。Parent lock
 > `multitable-ui-p2-2-left-rail-detail-designlock-20260707.md` §5 lists `🔒 P2-2c 响应式折叠（窄屏抽屉/图标条）—
 > P2-2b 后` as a pending gate with no further detail; the P2-2b design MD (§8.4) explicitly defers all
 > viewport/media-query behavior to this slice ("2b 不加任何视口 media query"). Neither doc specifies a
@@ -97,7 +97,7 @@ remount resets"); a fresh mount always re-runs `syncRailViewportState()` from th
 | **icon-strip** (already existed) | `isRailNarrow && railCollapsed` | 36px strip, only the toggle button visible (rail content `v-show`-hidden) | in-flow (same as P2-2b's desktop-collapsed state) | none — this is literally P2-2b's `.mt-workbench__rail--collapsed`, just auto-entered instead of requiring a click |
 | **drawer** (new) | `isRailNarrow && !railCollapsed` (= `isRailDrawerOpen`) | full rail (base-bar + tree) floats over `.mt-workbench__main` instead of squeezing it | `position: absolute` overlay, `z-index: 5`, `box-shadow: var(--ms-shadow-pop)`, opaque `background: var(--ms-bg-card)`, `width: min(240px, calc(100vw - 32px))` | one new CSS class `.mt-workbench__rail--drawer` on the existing `<aside>` |
 
-At width **>= 768px**: neither state can be entered (`isRailNarrow` is `false`, so `isRailDrawerOpen` is
+At width **> 768px**（即 >= 769）: neither state can be entered (`isRailNarrow` is `false`, so `isRailDrawerOpen` is
 always `false` and the auto-collapse branch never runs) — behavior is **exactly** the pre-2c P2-2b rail,
 unconditionally.
 
@@ -198,14 +198,14 @@ needed since both changed files are already covered).
 
 - **State logic**: verified by the vitest suite above, run for real in this environment (see PR body for
   the actual command + output).
-- **CSS positioning / shadow / z-index / actual visual overlay-vs-push behavior**: **not** verified in a
-  real browser in this environment. Per this task's instructions and this repo's standing rule that
-  jsdom cannot be trusted for style claims (`feedback_css_verify_in_real_browser_not_jsdom.md`), no claim
-  is made here that the drawer visually renders correctly, that `--ms-shadow-pop`/`--ms-bg-card` resolve
-  to the expected computed values, or that it looks correct in dark mode. This is flagged explicitly as a
-  **coordinator verification gap** — the P2-2b PR (#4264) used a vite-harness + Playwright
-  `getComputedStyle` pattern for exactly this kind of claim; the same pattern should be applied here
-  before treating the CSS leg as proven, not just the state-machine leg.
+- **CSS positioning / shadow / z-index / overlay-vs-push（gap 已闭合 — Rev 2 勘误）**: 起草时标注的
+  coordinator verification gap 已在 #4290 落地前闭合,证据两腿:
+  (1) 实现侧在**真 Chromium** 跑 `apps/web/verification/rail-drawer.spec.ts`（vite harness 挂真 tokens.css,
+  Playwright `getComputedStyle`,含正控:default/collapsed 断言 `position: static` 无阴影,drawer 断言
+  `position: absolute`/`z-index`/真 `--ms-shadow-pop` 阴影/不透明底,及 `calc(100vw-32px)` 窄视口收敛);
+  (2) #4290 门禁 round-1 **独立重跑**同一 Playwright 验证并证其承重(harness `position:absolute→static`
+  变异必红),且逐字节 diff 了 harness CSS vs 组件源(防复制漂移空转)。残余(如实):harness 是手工复制的
+  CSS(现时忠实),`multitable-browser-verify.yml` 触发路径已在 #4290 加入 `MultitableWorkbench.vue`。
 - **No new hardcoded hex**: every new/changed CSS declaration in this slice uses an existing `--ms-*`
   token (`--ms-bg-card`, `--ms-shadow-pop`, `--ms-radius-lg`) or a unitless/px layout value in the same
   "raw px for sizing, not color" carve-out P2-2b already used (§6 of the 2b MD) — grep-checkable:

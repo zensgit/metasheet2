@@ -1,6 +1,6 @@
-# W0-1 — `HISTORY_INCOMPLETE` 可信性纠错：连续性 + trusted-since + 同锁事务 — DESIGN LOCK (PROPOSED)
+# W0-1 — `HISTORY_INCOMPLETE` 可信性纠错：连续性 + trusted-since + 同锁事务 — DESIGN LOCK（首刀 SHIPPED；C2/C3/C6 DEFERRED）
 
-- **Status**: **PROPOSED — 2026-07-13. NOT ratified. Design-first, ZERO 运行时改动。** owner 复审判 §0.6 现草案(#4235)「**不能安全落地**」——本锁把 §0.6 从 live-vs-latest 升级为**连续性证明**。**破坏性恢复路径 + 需 schema/行为变更**,故按 owner 一贯纪律(D-1c/D-2/4c-*/R13-C)**design-lock first,ratify 后才动**。W0 顺序门的第一刀,gate 一切 revision 5 刀之前。
+- **Status（owner 处置 2026-07-15，§6.6）**: **首刀已授权并 SHIPPED**（#4269=`3356a7ed6`，owner 主线抽查 PASS）；**C2/C3/C6 DEFERRED（序 C2→C3→C6）**；field-undelete flag **HOLD**。整锁不整份翻 RATIFIED。〔Rev 1 历史状态：PROPOSED 2026-07-13，design-first 零运行时——起草时成立，首刀落地后已过期〕owner 当时复审判 §0.6 现草案(#4235)「**不能安全落地**」——本锁把 §0.6 从 live-vs-latest 升级为**连续性证明**。**破坏性恢复路径 + 需 schema/行为变更**,故按 owner 一贯纪律(D-1c/D-2/4c-*/R13-C)**design-lock first,ratify 后才动**。W0 顺序门的第一刀,gate 一切 revision 5 刀之前。
 - **Provenance**: primary-source @ origin/main;healed-gap flaw **已实证**(golden `/tmp/r13-w0-healed-gap-golden.txt`,对当前 #4235 **红**)。#4235 impl **faithful to §0.6**(其 gate=APPROVE-with-hardening 0P1/0P2),缺陷在 **§0.6 设计**本身。
 
 ## §0 已证缺陷(owner P1,实证)
@@ -48,10 +48,10 @@ execute 的复检 + 恢复写入须**同一事务 + `FOR UPDATE` scope 行**:进
 - **OD-W0-4**:HISTORY_INCOMPLETE 是否**整操作拒**(现 §0.6 = 是)还是**逐记录跳过脏的**。§0.6/owner=整操作拒(最安全,不产半状态)——保持。
 
 ## §5 边界
-- **零运行时改动**;破坏性路径 + schema/行为变更 ⇒ **ratify + 迁移排序纪律**后才实现。**#4235 在本纠错落地前不合**(现 comparator 漏 healed-gap;owner「不能安全落地」)。
+- **〔Rev 1 边界，已达成〕**破坏性路径 + schema/行为变更按纪律走完:首刀经 5 轮 head-scoped 门禁 + 迁移排序 fresh-DB 验落地(#4269);#4235 已按裁定 CLOSED。**「W0 未成可信闭环前不启用更多恢复 flag」继续有效**(field-undelete flag = HOLD,§6.6)。
 - 本锁是 W0 第一刀;5 刀 revision 写入(form/plugin/automation/approval/attachment)+ OD-6 guard(#4227)排其后。**W0 未成可信闭环前不启用更多恢复 flag。**
 
-**收官口径**:design-only;§0.6 升级为连续性证明的设计已锁,healed-gap 已实证;实现待 owner ratify OD-W0-1..4 + 迁移排序验。这是 owner「先把 W0 做成可信闭环」的第一刀设计。
+**收官口径(Rev 2)**:首刀(四件套)已 SHIPPED 于 #4269 并经 owner 复审 PASS;healed-gap 由 fail-first golden 钉死;**剩余 = C2→C3→C6(deferred,owner 定序)与 flag 启用(HOLD)**。
 
 ---
 
@@ -86,3 +86,8 @@ owner「只做这四件」⇒ #4252 的以下条件**本刀不做,但显式 dock
 - **本锁仍非全 RATIFIED**——owner 裁的是**方向 + 首刀 4 项 scope 授权**;C2/C3/C6 延迟、其各自设计/机制未裁。
 - **首刀实现:AUTHORIZED**(HOT-CORE + schema/txn ⇒ Opus 设计/门禁 + zzzz 迁移排序 fresh-DB 验 + mutation-proven goldens)。
 - **#4234(已合的 live-vs-latest §0.6)= 部分守卫**,首刀落地后被 contiguity 取代/升级;在此之前它对 healed-gap **欠检**(如实,不掩盖)。**并行的 #4235(同款 live-vs-latest)按 #4252 建议关闭**(port 其 golden)。
+
+### §6.6 owner 处置(2026-07-15,逐字生效)
+
+- **整锁不整份翻 RATIFIED**。标记为:**首刀已授权并 shipped(#4269=`3356a7ed6`,owner 主线抽查复审 PASS)**;C2/C3/C6 **继续 deferred**,执行顺序 = **C2 → C3 → C6**(owner 定序)。
+- **field-undelete flag = HOLD**:先启用并观察 tombstone capture,再做**非生产 flag-on** smoke(真值/链接/autoNumber 三类)。**现有 containment workflow 只核查 sheet-revert 与 PIT-reset,不能作为 config-undelete 的启用证据**。批量 revision 前置(#4299)已落但不改变 HOLD。
