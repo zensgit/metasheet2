@@ -603,4 +603,59 @@ describe('StockPreparationSnapshotDiffView (readonly, values-free)', () => {
     expect(root.textContent).toContain('base-of-gamma')
     expect(root.textContent).not.toContain('base-of-alpha')
   })
+
+  // A→B→A: the id-match check alone (projectId/batchId) CANNOT catch this — after returning to A, the id
+  // is A again, so only the monotonic SEQ distinguishes the stale first-A load from the fresh third one.
+  it('batch-LIST A→B→A: the STALE first-A response is dropped even after returning to project A', async () => {
+    let releaseA1!: (v: StockPreparationSnapshotBatchListResult) => void
+    let aCall = 0
+    const listFor = (proj: string, run: string) => ({ projectId: proj, batchCount: 1, batches: [
+      { snapshotBatchId: `batch-${run}`, snapshotVersion: 1, snapshotStatus: 'active', syncRunId: run, lineCount: 2, createdAtPresent: true, incomplete: false },
+    ] } as unknown as StockPreparationSnapshotBatchListResult)
+    h.listBatches.mockImplementation((scope: { projectId?: string }) => {
+      if (scope.projectId === 'proj-A') {
+        aCall += 1
+        if (aCall === 1) return new Promise((resolve) => { releaseA1 = resolve }) // stale first-A load
+        return Promise.resolve(listFor('proj-A', 'sync-A-fresh')) // fresh third load
+      }
+      return Promise.resolve(listFor('proj-B', 'sync-B'))
+    })
+    const projectIdRef = ref('proj-A')
+    const root = mountReactiveProject(projectIdRef)
+    await nextTick() // first-A load in flight (deferred)
+    projectIdRef.value = 'proj-B'; await flushUi()
+    projectIdRef.value = 'proj-A'; await flushUi() // back to A → fresh third load resolves
+    expect(root.textContent).toContain('sync-A-fresh')
+
+    releaseA1(listFor('proj-A', 'sync-A-stale')) // stale first-A now arrives — must be dropped
+    await flushUi()
+    expect(root.textContent).toContain('sync-A-fresh')
+    expect(root.textContent).not.toContain('sync-A-stale')
+  })
+
+  it('diff-SUMMARY A→B→A: the STALE first-batch-A summary is dropped even after re-selecting batch A', async () => {
+    let releaseA1!: (v: StockPreparationSnapshotDiffSummary) => void
+    let aCall = 0
+    h.listBatches.mockResolvedValue(batchListTwoComplete())
+    h.getDiff.mockImplementation((batchId: string) => {
+      if (batchId === 'batch-alpha') {
+        aCall += 1
+        if (aCall === 1) return new Promise((resolve) => { releaseA1 = resolve }) // stale first select-A
+        return Promise.resolve(diffSummary('base-alpha-fresh')) // fresh third select-A
+      }
+      return Promise.resolve(diffSummary('base-gamma'))
+    })
+    const root = mountView()
+    await flushUi()
+    const sel = () => root.querySelectorAll('[data-testid="stock-prep-snapshot-batch-select"]')
+    ;(sel()[0] as HTMLButtonElement).click(); await flushUi() // select A → summary #1 deferred
+    ;(sel()[1] as HTMLButtonElement).click(); await flushUi() // select B → resolves
+    ;(sel()[0] as HTMLButtonElement).click(); await flushUi() // re-select A → fresh summary #3 resolves
+    expect(root.textContent).toContain('base-alpha-fresh')
+
+    releaseA1(diffSummary('base-alpha-stale')) // stale first-A summary now arrives — must be dropped
+    await flushUi()
+    expect(root.textContent).toContain('base-alpha-fresh')
+    expect(root.textContent).not.toContain('base-alpha-stale')
+  })
 })
