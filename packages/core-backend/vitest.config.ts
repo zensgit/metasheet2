@@ -325,6 +325,9 @@ export default defineConfig({
       // only (checks the migration landed both tables, the status CHECK, FK cascade, defaults). Excluded HERE
       // so it cannot skip-green in the no-DB lane, whole-file wired into plugin-tests.yml. Two-point wiring.
       'tests/integration/multitable-automation-outbox-schema-realdb.test.ts',
+      // action-idempotency ledger L1 schema golden — real-DB. Excluded HERE so it cannot skip-green
+      // in the no-DB lane; whole-file wired into plugin-tests.yml. Two-point wiring.
+      'tests/integration/multitable-action-applied-ledger-realdb.test.ts',
       // P2 durable-delivery S2-a claim engine / fence-CAS — real-DB constructed-concurrency (zombie/SKIP
       // LOCKED). Excluded HERE so it cannot skip-green in the no-DB lane; whole-file wired into
       // plugin-tests.yml. Two-point wiring.
