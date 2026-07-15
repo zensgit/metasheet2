@@ -27,7 +27,8 @@ function New-Fixture {
     [string]$MetaBootstrapName = $null,      # external metadata windowsFirstHopBootstrap value
     [string]$MigrateBehaviour = $null,       # 'confirm_fails' | 'confirm_ok' | $null (no migrate.js)
     [bool]$NestedOnlyProvenance = $false,    # provenance ONLY in a nested subdir, NOT at the package root (owner P2)
-    [bool]$AmbiguousRoot = $false            # TWO top-level dirs in the archive (no single deterministic root)
+    [bool]$AmbiguousRoot = $false,           # TWO top-level dirs in the archive (no single deterministic root)
+    [string]$MalformedProvenanceRaw = $null  # write literal (invalid) JSON at the root provenance path (owner P2)
   )
   $root = Join-Path ([System.IO.Path]::GetTempPath()) ("t9accept_" + [guid]::NewGuid().ToString('N').Substring(0, 12))
   New-Item -ItemType Directory -Path $root | Out-Null
@@ -52,6 +53,11 @@ function New-Fixture {
     # a recursive first-match reader would wrongly accept this; the root-only reader must reject it.
     $provTarget = if ($NestedOnlyProvenance) { $sub = Join-Path $content 'nested'; New-Item -ItemType Directory -Path $sub -Force | Out-Null; Join-Path $sub 'BUILD_PROVENANCE.json' } else { Join-Path $content 'BUILD_PROVENANCE.json' }
     ($prov | ConvertTo-Json) | Set-Content -Path $provTarget
+  }
+  if ($MalformedProvenanceRaw) {
+    # Literal invalid JSON at the ROOT provenance path — ConvertFrom-Json throws with a message that
+    # echoes this text; the summary must not carry it.
+    Set-Content -Path (Join-Path $content 'BUILD_PROVENANCE.json') -Value $MalformedProvenanceRaw -NoNewline
   }
   if ($AmbiguousRoot) {
     # A SECOND top-level dir → the archive has no single deterministic package root.
@@ -118,6 +124,26 @@ try {
   # owner P2: no single deterministic package root (two top-level dirs) -> FAIL (ambiguous root).
   $r = Invoke-Acceptance (New-Fixture -ProvenanceGitCommit $GOOD_SHA -AmbiguousRoot $true) $GOOD_SHA
   Check "ambiguous package root (2 top-level dirs) -> sha FAIL (provenance_root_ambiguous)" ($r.Exit -eq 1 -and $r.Summary.failedStage -eq 'sha' -and $r.Summary.failDetail.reason -eq 'provenance_root_ambiguous')
+
+  # owner P2: malformed provenance JSON must map to a FIXED reason, never echo the input (a secret in the
+  # bad JSON) into the values-free summary. Version note: on Windows PowerShell 5.1 (the production runtime,
+  # #requires -Version 5.1) ConvertFrom-Json's error message echoes the offending JSON text verbatim — that
+  # was the leak. PS 7 (this test runner) does NOT echo it, so a raw string-scan of the summary would be
+  # VACUOUS here (green whether or not the clamp exists). The load-bearing, version-INDEPENDENT invariant is
+  # instead asserted directly: failDetail.reason must be one of the FIXED coarse tokens — so the summary can
+  # structurally never carry the free-form parse message (hence never any input), on any PowerShell version.
+  $KNOWN_PROV_REASONS = @('provenance_archive_unreadable', 'provenance_missing', 'provenance_root_ambiguous', 'provenance_invalid', 'provenance_git_commit_absent', 'provenance_error')
+  $secret = 'MAT-001-SECRET'
+  $fx = New-Fixture -MalformedProvenanceRaw ('{ "gitCommit": "' + $secret + '", oops-not-json ')
+  $r = Invoke-Acceptance $fx $GOOD_SHA
+  $txt = if (Test-Path $fx.Summary) { Get-Content $fx.Summary -Raw } else { '' }
+  $rawJsonPath = [System.IO.Path]::ChangeExtension($fx.Summary, '.json')
+  $jsonTxt = if (Test-Path $rawJsonPath) { Get-Content $rawJsonPath -Raw } else { '' }
+  Check "malformed provenance JSON -> sha FAIL (provenance_invalid), fixed reason not the parse message" ($r.Exit -eq 1 -and $r.Summary.failedStage -eq 'sha' -and $r.Summary.failDetail.reason -eq 'provenance_invalid')
+  # Load-bearing (goes RED under the raw-message mutation on any PS version): reason is a fixed token.
+  Check "malformed provenance: failDetail.reason is a FIXED coarse token, never the free-form parse message" ($KNOWN_PROV_REASONS -contains "$($r.Summary.failDetail.reason)")
+  # Belt (meaningful on PS 5.1 where the message echoes; vacuous-but-true on PS 7): the secret is absent.
+  Check "malformed provenance: the secret never appears in the summary .txt/.json" (-not ($txt -match $secret) -and -not ($jsonTxt -match $secret))
 
   $r = Invoke-Acceptance (New-Fixture -ProvenanceGitCommit $OTHER_SHA) $GOOD_SHA
   Check "in-archive gitCommit != ExpectedGitSha -> sha FAIL (git_sha_mismatch)" ($r.Exit -eq 1 -and $r.Summary.failDetail.reason -eq 'git_sha_mismatch')

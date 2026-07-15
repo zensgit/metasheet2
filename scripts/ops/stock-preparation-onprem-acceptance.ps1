@@ -159,7 +159,10 @@ function Get-ArchiveProvenanceGitCommit {
     if ($topDirs.Count -ne 1) { throw 'provenance_root_ambiguous' }   # 0 or >1 top-level dirs = not a single package root
     $prov = Join-Path $topDirs[0].FullName 'BUILD_PROVENANCE.json'
     if (-not (Test-Path $prov -PathType Leaf)) { throw 'provenance_missing' }  # nested-only / absent root file
-    $json = Get-Content $prov -Raw | ConvertFrom-Json
+    # Clamp the parse error to a FIXED reason — ConvertFrom-Json's exception message echoes the offending
+    # JSON text (e.g. a property path), which would land verbatim in the values-free summary via
+    # failDetail.reason (owner P2). Every reason this function throws is a fixed coarse token, never input.
+    try { $json = Get-Content $prov -Raw | ConvertFrom-Json } catch { throw 'provenance_invalid' }
     $commit = if ($json.PSObject.Properties.Name -contains 'gitCommit') { "$($json.gitCommit)".ToLower() } else { '' }
     if (-not $commit -or $commit -notmatch '^[0-9a-f]{40}$') { throw 'provenance_git_commit_absent' }
     return $commit
@@ -236,7 +239,13 @@ function Invoke-ShaStage {
     try {
       $archiveCommit = Get-ArchiveProvenanceGitCommit $PackagePath
     } catch {
-      Stop-WithFailure 'sha' @{ reason = "$($_.Exception.Message)" }
+      # Fail-closed to a WHITELIST of coarse tokens — never surface a raw exception message, which can echo
+      # input (e.g. malformed-JSON property paths) into the values-free summary. An unexpected message maps
+      # to a generic 'provenance_error' rather than leaking (owner P2 + audit-surface fail-closed).
+      $known = @('provenance_archive_unreadable', 'provenance_missing', 'provenance_root_ambiguous', 'provenance_invalid', 'provenance_git_commit_absent')
+      $reason = "$($_.Exception.Message)".Trim()
+      if ($known -notcontains $reason) { $reason = 'provenance_error' }
+      Stop-WithFailure 'sha' @{ reason = $reason }
     }
     if ($archiveCommit -ne $ExpectedGitSha.ToLower()) { Stop-WithFailure 'sha' @{ reason = 'git_sha_mismatch' } }
   }

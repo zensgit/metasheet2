@@ -102,7 +102,8 @@ jobs:
       # #4210 T9: the stock-preparation one-click acceptance script's contract + behavioural tests are
       # pure pwsh 7 + tar + node (no DB, no live server — the pm2/health/smoke stages are unit-tested via
       # dot-sourced pure helpers). ubuntu runners ship pwsh, so run them ONCE here (a few seconds) rather
-      # than duplicating across the Node 18/20 matrix. This is the only CI that executes these 31 checks.
+      # than duplicating across the Node 18/20 matrix. This is the only CI that executes these 36 checks
+      # (11 contract + 25 behavioural).
       - name: Run stock-preparation on-prem acceptance tests (T9, pwsh)
         shell: pwsh
         run: |
