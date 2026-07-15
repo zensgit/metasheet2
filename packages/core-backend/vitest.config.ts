@@ -302,6 +302,13 @@ export default defineConfig({
       // whole-file wired into `Run multitable real-DB integration` in plugin-tests.yml.
       'tests/integration/multitable-undelete-inbound-resurrect-realdb.test.ts',
       'tests/integration/multitable-reset-pit-inbound-capture-realdb.test.ts',
+      // T8-2 Reset-to-T goldens (flag-off/on, PIT-2 all-or-nothing, delete-set divergence including the
+      // docket #46 capture-complete deleteScopeHash-mismatch golden, single-txn atomicity, D2 gate): real
+      // Postgres only. Was ALREADY whole-file wired into `Run multitable real-DB integration` in
+      // plugin-tests.yml but MISSING from this list (same pre-existing-gap class the 4c-2 tombstone
+      // cluster comment above documents) — so the no-DB job silently COLLECTED and skip-greened it.
+      // Two-point wiring: BOTH points or the no-DB lane reports it green-with-zero-assertions.
+      'tests/integration/multitable-reset-pit-realdb.test.ts',
       // W6 full-HTTP-path approve->resume seam: mounts authRouter + approvalsRouter on an
       // ephemeral port against real Postgres, so it is excluded from the default run and wired
       // into the dedicated `Run multitable real-DB integration` job in plugin-tests.yml.
