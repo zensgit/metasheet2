@@ -381,7 +381,10 @@ action_deploy() {
   # Validate the candidate renders against the staging compose file BEFORE it goes live — a broken
   # override would otherwise dangle EVERY container's config_files label. On failure, keep the
   # previous known-good override untouched and fail closed.
-  if ! docker compose -f "$STAGING_COMPOSE_FILE" -f "$override_tmp" config >/dev/null 2>&1; then
+  # Validate in the SAME cwd as compose_staging() (line ~155): staging compose uses relative
+  # env_file + .env interpolation, so `cd "$STAGING_DIR"` first — otherwise we'd validate a
+  # different resolved config than the one `up -d` actually executes.
+  if ! (cd "$STAGING_DIR" && docker compose -f "$STAGING_COMPOSE_FILE" -f "$override_tmp" config) >/dev/null 2>&1; then
     rm -f "$override_tmp"
     fail "candidate override failed 'docker compose config' validation; kept previous override at ${OVERRIDE_FILE}"
   fi

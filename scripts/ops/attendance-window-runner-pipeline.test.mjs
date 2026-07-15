@@ -309,6 +309,13 @@ test('persistent override: written atomically — mktemp candidate + docker comp
   const validateIdx = remote.indexOf('docker compose -f "$STAGING_COMPOSE_FILE" -f "$override_tmp" config')
   const mvIdx = remote.indexOf('mv -f "$override_tmp" "$OVERRIDE_FILE"')
   assert.notEqual(validateIdx, -1, 'candidate override must be validated with docker compose config before replacing the live file')
+  // the validation MUST run in the same cwd as compose_staging() (cd "$STAGING_DIR"), or it
+  // resolves relative env_file/.env differently than the config `up -d` actually executes
+  assert.match(
+    remote.slice(Math.max(0, validateIdx - 40), validateIdx),
+    /\(cd "\$STAGING_DIR" &&\s*$/,
+    'candidate override validation must run inside (cd "$STAGING_DIR" && docker compose …), matching compose_staging()',
+  )
   assert.notEqual(mvIdx, -1, 'candidate override must be atomically renamed into place')
   assert.ok(validateIdx < mvIdx, 'validation must come BEFORE the atomic rename')
   assert.doesNotMatch(remote, /\}\s*>\s*"\$OVERRIDE_FILE"\n/, 'the override body must be written to the temp candidate, not truncated directly onto the live override')
