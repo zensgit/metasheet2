@@ -203,6 +203,10 @@ jobs:
           scp $ssh_opts -r "$DEPLOY_USER@$DEPLOY_HOST:${remote_output_dir}/." output/window-runner/ 2>&1 \
             | tee -a output/window-runner/ssh.log
           scp_rc=${PIPESTATUS[0]}
+          # Cleanup removes ONLY the per-run output dir and the checkout tarball dir. It must NEVER
+          # touch the persistent runner override at $HOME/.metasheet2/window-runner — the staging
+          # containers' compose config_files label points there, so deleting it would re-break the
+          # containment check (run 29398270060). The persist dir is deliberately absent from this list.
           ssh $ssh_opts "$DEPLOY_USER@$DEPLOY_HOST" \
             "bash -o pipefail -c 'rm -rf ${remote_output_dir} ${RUNNER_DIR}'" \
             >> output/window-runner/ssh.log 2>&1
