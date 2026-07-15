@@ -283,12 +283,17 @@ test('on-prem archive contract includes migration 066 and the documented postdep
     'build must package the stock-preparation smoke',
   )
   assert.ok(
+    buildScript.includes('"scripts/ops/stock-preparation-onprem-acceptance.ps1"'),
+    'build must package the stock-preparation one-click acceptance script',
+  )
+  assert.ok(
     buildScript.includes('"scripts/ops/multitable-permission-lists-postdeploy-smoke.mjs"'),
     'build must package the permission-list closeout smoke',
   )
   for (const relativePath of [
     'packages/core-backend/migrations/066_create_integration_stock_prep_audit.sql',
     'scripts/ops/stock-preparation-mvp-postdeploy-smoke.mjs',
+    'scripts/ops/stock-preparation-onprem-acceptance.ps1',
     'scripts/ops/multitable-permission-lists-postdeploy-smoke.mjs',
   ]) {
     assert.ok(verifyScript.includes(`"${relativePath}"`), `verifier must require ${relativePath}`)
@@ -297,6 +302,8 @@ test('on-prem archive contract includes migration 066 and the documented postdep
   assert.match(verifyScript, /function verify_stock_preparation_mvp_contract/)
   assert.match(verifyScript, /auditActionsCovered/)
   assert.match(verifyScript, /selfScanClean/)
+  assert.match(verifyScript, /Get-ArchiveProvenanceGitCommit/)
+  assert.match(verifyScript, /externalPlmK3ErpWrite/)
 })
 
 test('Windows apply helper retries post-PM2 healthcheck during warmup and remains fail-closed', () => {
