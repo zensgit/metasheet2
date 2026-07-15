@@ -248,7 +248,7 @@ describe('dingtalk public form link warnings', () => {
 
   it('localizes link warnings while preserving raw view labels', () => {
     expect(listDingTalkPublicFormLinkBlockingErrors('missing_view', views, { nowMs, isZh: true })).toEqual([
-      '公开表单视图 "missing_view" 在此表中不可用；钉钉消息可能不包含可用的填写链接。',
+      '公开表单视图 "missing_view" 在此数据表中不可用；钉钉消息可能不包含可用的填写链接。',
     ])
     expect(listDingTalkPublicFormLinkWarnings('view_form_enabled', views, { nowMs, isZh: true, warnWhenFullyPublic: true })).toEqual([
       '"Enabled Form" 的公开表单分享完全公开；所有能打开钉钉消息链接的人都可提交。若仅允许指定用户填写，请使用钉钉保护访问和 allowlist。',
