@@ -85,6 +85,7 @@ REQUIRED_PATHS=(
   "scripts/ops/integration-k3wise-postdeploy-summary.mjs"
   "scripts/ops/integration-k3wise-gate-contract-check.mjs"
   "scripts/ops/stock-preparation-mvp-postdeploy-smoke.mjs"
+  "scripts/ops/stock-preparation-onprem-acceptance.ps1"
   "scripts/ops/multitable-permission-lists-postdeploy-smoke.mjs"
   "scripts/ops/fixtures/integration-k3wise"
   # Legacy SQL readonly Bridge Agent tooling. BA-M0.5 proves the approved
