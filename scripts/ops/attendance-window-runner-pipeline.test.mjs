@@ -353,3 +353,34 @@ test('persistent override: POSITIVE CONTROL — the exact mktemp template REALLY
   assert.notEqual(p1, p2, 'two mktemp calls produced the SAME path — not randomized')
   assert.ok(existsSync(p1) && existsSync(p2), 'mktemp did not actually create the candidate files')
 })
+
+test('persistent override re-normalization: force_recreate is an explicit deploy-only boolean that defaults off', () => {
+  const workflow = readFileSync(WORKFLOW, 'utf8')
+  assert.match(
+    workflow,
+    /force_recreate:\n\s+description:[^\n]+\n\s+required: false\n\s+type: boolean\n\s+default: false/,
+    'force_recreate must be a boolean workflow input and default to false',
+  )
+  assert.match(
+    workflow,
+    /if \[\[ "\$ACTION" != "deploy" && "\$FORCE_RECREATE" == "true" \]\]; then\n\s+echo "force_recreate=true is only allowed for action=deploy"/,
+    'workflow input validation must reject force_recreate on non-deploy actions',
+  )
+  assert.match(workflow, /export FORCE_RECREATE='\$\{FORCE_RECREATE\}'/, 'validated force_recreate must reach the remote script')
+})
+
+test('persistent override re-normalization: force mode adds --force-recreate while the service set stays exactly backend+web', () => {
+  const remote = readFileSync(REMOTE_SH, 'utf8')
+  const start = remote.indexOf('action_deploy() {')
+  const end = remote.indexOf('\naction_smoke() {', start)
+  assert.ok(start !== -1 && end > start, 'expected action_deploy() bounds')
+  const deploy = remote.slice(start, end)
+  assert.match(deploy, /local -a up_args=\(up -d --no-deps\)/, 'deploy must retain --no-deps')
+  assert.match(
+    deploy,
+    /if \[\[ "\$FORCE_RECREATE" == "true" \]\]; then\n\s+up_args\+=\(--force-recreate\)\n\s+fi/,
+    'force mode must add the load-bearing --force-recreate option',
+  )
+  assert.match(deploy, /up_args\+=\(backend web\)\n\s+compose_staging "\$\{up_args\[@\]\}"/, 'the only recreated services must be backend and web')
+  assert.doesNotMatch(deploy, /up_args\+=\([^\n]*(?:postgres|redis)/, 'postgres/redis must never enter the recreate service list')
+})
