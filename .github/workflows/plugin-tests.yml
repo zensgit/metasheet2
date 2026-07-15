@@ -507,6 +507,7 @@ jobs:
             tests/integration/multitable-tombstone-field-rehydrate-revision-realdb.test.ts \
             tests/integration/multitable-tombstone-record-capture-realdb.test.ts \
             tests/integration/multitable-tombstone-retention-realdb.test.ts \
+            tests/integration/multitable-automation-outbox-schema-realdb.test.ts \
             tests/integration/multitable-attachment-readgate.security.test.ts \
             tests/integration/multitable-ai-write-provenance-batch-grouping-realdb.test.ts \
             tests/integration/multitable-automation-branch-local-wait.test.ts \
