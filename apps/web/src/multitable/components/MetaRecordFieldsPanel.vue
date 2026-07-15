@@ -13,12 +13,11 @@
   moved VERBATIM from the drawer — masking is load-bearing (history-field-mask class of bugs) and is
   not touched here.
 
-  `formatValue` / `textControlValue` / `resolvedCanComment` are intentionally DUPLICATED (not moved)
-  from MetaRecordDrawer.vue: the drawer's still-inline `history` tab (S2's extraction target) and its
-  header comment-toggle button still need them. Both copies are byte-identical wrappers around the
-  same shared utils (`formatFieldDisplay`, `resolveCommentAffordanceStateClass`) and read only props
-  each component receives — no behavior divergence, no new data path. When S2 extracts the history
-  panel, the drawer's copies become dead and can be removed then.
+  `formatValue` / `textControlValue` / `resolvedCanComment` were intentionally DUPLICATED (not moved)
+  from MetaRecordDrawer.vue at S1 time. W2 S2 (design-lock §7 S2, helper-dedup note) hoisted all three
+  into `../utils/recordDisplay.ts` -- this panel now delegates to that shared module (same local
+  wrapper names, template below untouched) instead of owning its own copy. Byte-identical logic, no
+  behavior change; the drawer's own copies (only used by its now-extracted history tab) are removed.
 -->
 <template>
   <div v-if="record" class="meta-record-drawer__fields">
@@ -305,12 +304,16 @@ import type { AiShortcutState } from '../composables/useAiShortcut'
 import {
   dateTimeInputValue,
   dateTimeValueFromLocalInput,
-  formatFieldDisplay,
   locationAddressValue,
   locationValueFromAddress,
 } from '../utils/field-display'
 import { isSystemField } from '../utils/system-fields'
 import { qrSvgFromText } from '../utils/qr-code'
+import {
+  formatRecordFieldValue,
+  resolveCanComment,
+  textControlValue as textControlValueShared,
+} from '../utils/recordDisplay'
 
 const props = withDefaults(defineProps<{
   record?: MetaRecord | null
@@ -369,7 +372,7 @@ watch(() => props.record, () => {
 })
 
 const visibleFields = computed(() => props.fields.filter((field) => props.fieldPermissions?.[field.id]?.visible !== false))
-const resolvedCanComment = computed(() => props.rowActions?.canComment ?? props.canComment)
+const resolvedCanComment = computed(() => resolveCanComment(props.rowActions, props.canComment))
 
 function canEditField(fieldId: string): boolean {
   const field = props.fields.find((item) => item.id === fieldId) ?? null
@@ -450,18 +453,16 @@ function recordFieldAnchorClass(fieldId: string): string {
 }
 
 function formatValue(field: MetaField, v: unknown): string {
-  return formatFieldDisplay({
-    field,
-    value: v,
-    linkSummaries: props.linkSummariesByField?.[field.id],
-    personSummaries: props.personSummariesByField?.[field.id],
-    attachmentSummaries: props.attachmentSummariesByField?.[field.id],
+  return formatRecordFieldValue(field, v, {
+    linkSummariesByField: props.linkSummariesByField,
+    personSummariesByField: props.personSummariesByField,
+    attachmentSummariesByField: props.attachmentSummariesByField,
     isZh: isZh.value,
   })
 }
 
 function textControlValue(value: unknown): string {
-  return value === null || value === undefined ? '' : String(value)
+  return textControlValueShared(value)
 }
 
 // Render-only QR preview for qrcode fields: encode the stored string value.
