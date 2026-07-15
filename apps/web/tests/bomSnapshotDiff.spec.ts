@@ -57,9 +57,10 @@ describe('bomSnapshotDiff values-free-by-construction parser', () => {
     expect(out.rows[0].keyFingerprint).toBe(GOOD_FP)
   })
 
-  // Each whitelisted field is a distinct drop path — a business value planted in ANY of them must drop
-  // the whole row, so it can never reach the DOM.
-  const dropCases: Array<[string, Record<string, unknown>]> = [
+  // Fail-closed at the ENVELOPE: a business value planted in ANY whitelisted field of ANY row THROWS the
+  // whole response into the unavailable state — never a silent per-row drop (which would hide an
+  // all-invalid response as "no diff rows" and a mixed one as a silently-incomplete table).
+  const throwCases: Array<[string, Record<string, unknown>]> = [
     ['diffId carries a business value', { diffId: SECRET }],
     ['diffType is off-vocabulary', { diffType: SECRET }],
     ['reviewStatus is off-vocabulary', { reviewStatus: 'accepted' }],
@@ -68,39 +69,34 @@ describe('bomSnapshotDiff values-free-by-construction parser', () => {
     ['rowCount is negative', { rowCount: -3 }],
     ['rowCount is not an integer', { rowCount: 2.5 }],
   ]
-  for (const [name, override] of dropCases) {
-    it(`drops the row when ${name}`, () => {
-      const out = parseRows([validRow(override)])
-      expect(out.rows.length).toBe(0)
-      expect(JSON.stringify(out)).not.toContain(SECRET)
+  for (const [name, override] of throwCases) {
+    it(`THROWS the whole envelope when ${name}`, () => {
+      expect(() => parseRows([validRow(override)])).toThrow(SNAPSHOT_DIFF_ROWS_MALFORMED)
     })
   }
 
-  it('drops only the invalid row and keeps the valid one alongside it', () => {
-    const out = parseRows([validRow(), validRow({ diffId: 'stockprep_diff_ffffffffffffffff', keyFingerprint: SECRET })])
-    expect(out.rows.length).toBe(1)
-    expect(out.rows[0].diffId).toBe(GOOD_DIFF_ID)
-    expect(JSON.stringify(out)).not.toContain(SECRET)
+  it('a MIXED response (one valid + one invalid row) throws — never a silently-incomplete table', () => {
+    expect(() => parseRows([validRow(), validRow({ diffId: 'stockprep_diff_ffffffffffffffff', keyFingerprint: SECRET })]))
+      .toThrow(SNAPSHOT_DIFF_ROWS_MALFORMED)
   })
 
-  it('THROWS a fixed coarse token on a malformed envelope (not a silent "no diff rows")', () => {
-    // null / non-object / rows-not-an-array are malformed — the caller must show "unavailable", not empty.
+  it('THROWS on a malformed envelope OR any invalid row; only a valid empty [] is the empty state', () => {
+    // null / non-object / rows-not-an-array → unavailable, not empty.
     expect(() => parseStockPreparationSnapshotDiffRowsResult(null)).toThrow(SNAPSHOT_DIFF_ROWS_MALFORMED)
     expect(() => parseStockPreparationSnapshotDiffRowsResult({ rows: 'nope' })).toThrow(SNAPSHOT_DIFF_ROWS_MALFORMED)
-    // A valid EMPTY array is a real no-diffs result — allowed, zero rows.
+    // Junk row entries are invalid rows → the whole envelope is unavailable (NOT silently dropped to []).
+    expect(() => parseStockPreparationSnapshotDiffRowsResult({ rows: [42, null, 'x'] })).toThrow(SNAPSHOT_DIFF_ROWS_MALFORMED)
+    // A genuinely valid EMPTY array is the ONLY thing that yields the empty state.
     expect(parseStockPreparationSnapshotDiffRowsResult({ rows: [] }).rows).toEqual([])
-    // Junk row entries inside a valid array are individually dropped (not a malformed envelope).
-    expect(parseStockPreparationSnapshotDiffRowsResult({ rows: [42, null, 'x'] }).rows).toEqual([])
   })
 
-  it('recomputes rowCount/heldRowCount from RETAINED rows (never a phantom count over a shorter table)', () => {
-    // Server claims 9/9 but only one row survives validation → counts reflect the retained row.
+  it('when EVERY row is valid, rowCount/heldRowCount are computed from them', () => {
     const out = parseStockPreparationSnapshotDiffRowsResult({
-      rowCount: 9, heldRowCount: 9,
-      rows: [validRow({ reviewStatus: 'held' }), validRow({ diffId: SECRET })],
+      rowCount: 9, heldRowCount: 9, // server envelope counts are ignored — recomputed from the parsed rows
+      rows: [validRow({ reviewStatus: 'held' }), validRow({ diffId: 'stockprep_diff_ffffffffffffffff', reviewStatus: 'ready' })],
     })
-    expect(out.rows.length).toBe(1)
-    expect(out.rowCount).toBe(1)
+    expect(out.rows.length).toBe(2)
+    expect(out.rowCount).toBe(2)
     expect(out.heldRowCount).toBe(1)
   })
 })

@@ -184,19 +184,23 @@ function parseDiffRow(raw: unknown): StockPreparationSnapshotDiffRow | null {
 }
 
 /**
- * Parse the /diff/rows body from `unknown`. A MALFORMED envelope (not an object, or `rows` not an array)
- * THROWS a fixed coarse token — the caller must surface the view's unavailable state, never a silent
- * "no diff rows" (a valid EMPTY `rows: []` is a real no-diffs result and is allowed). Invalid rows are
- * dropped; rowCount/heldRowCount are recomputed from the RETAINED rows so the count always matches the
- * rendered table (never a non-zero count over an empty table).
+ * Parse the /diff/rows body from `unknown`. Fail-closed at the ENVELOPE level: a malformed envelope (not
+ * an object / `rows` not an array) OR **any single invalid row** THROWS a fixed coarse token — the caller
+ * surfaces the view's unavailable state. We do NOT silently drop invalid rows: dropping would turn an
+ * all-invalid response into a false "no diff rows" and a mixed response into a silently-incomplete table
+ * (owner). Only a genuinely valid EMPTY `rows: []` is a real no-diffs result (empty state). When every row
+ * is valid, all are returned and rowCount/heldRowCount are computed from them.
  */
 export function parseStockPreparationSnapshotDiffRowsResult(raw: unknown): StockPreparationSnapshotDiffRowsResult {
   if (!raw || typeof raw !== 'object' || !Array.isArray((raw as Record<string, unknown>).rows)) {
     throw new Error(SNAPSHOT_DIFF_ROWS_MALFORMED)
   }
-  const rows = ((raw as Record<string, unknown>).rows as unknown[])
-    .map(parseDiffRow)
-    .filter((x): x is StockPreparationSnapshotDiffRow => x !== null)
+  const rows: StockPreparationSnapshotDiffRow[] = []
+  for (const rawRow of (raw as Record<string, unknown>).rows as unknown[]) {
+    const parsed = parseDiffRow(rawRow)
+    if (parsed === null) throw new Error(SNAPSHOT_DIFF_ROWS_MALFORMED) // any invalid row → whole envelope unavailable
+    rows.push(parsed)
+  }
   return {
     rowCount: rows.length,
     heldRowCount: rows.filter((r) => r.reviewStatus === 'held').length,
