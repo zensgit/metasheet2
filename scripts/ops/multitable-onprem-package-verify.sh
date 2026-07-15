@@ -358,6 +358,7 @@ function verify_stock_preparation_mvp_contract() {
   local migration="${root}/packages/core-backend/migrations/066_create_integration_stock_prep_audit.sql"
   local smoke="${root}/scripts/ops/stock-preparation-mvp-postdeploy-smoke.mjs"
   local acceptance="${root}/scripts/ops/stock-preparation-onprem-acceptance.ps1"
+  local pm2_sample="${root}/scripts/ops/stock-preparation-pm2-sample.mjs"
 
   search_fixed_string 'integration_stock_prep_audit' "$migration" || die "migration 066 must create the stock-preparation audit surface"
   search_fixed_string 'auditActionsCovered' "$smoke" || die "stock-preparation MVP postdeploy smoke must report audit action coverage"
@@ -368,6 +369,8 @@ function verify_stock_preparation_mvp_contract() {
   search_fixed_string 'auditActionsCovered' "$acceptance" || die "stock-preparation one-click acceptance must require complete audit action coverage"
   search_fixed_string 'selfScanClean' "$acceptance" || die "stock-preparation one-click acceptance must require its values-free self scan"
   search_fixed_string 'externalPlmK3ErpWrite' "$acceptance" || die "stock-preparation one-click acceptance must report the external-write invariant"
+  search_fixed_string 'stock-preparation-pm2-sample.mjs' "$acceptance" || die "stock-preparation one-click acceptance must use the PM2 safe projection helper"
+  search_fixed_string 'metasheet-backend' "$pm2_sample" || die "stock-preparation PM2 safe projection helper must be packaged"
 }
 
 function verify_generic_integration_workbench_contract() {
@@ -897,6 +900,7 @@ required=(
   "scripts/ops/integration-k3wise-gate-contract-check.mjs"
   "scripts/ops/stock-preparation-mvp-postdeploy-smoke.mjs"
   "scripts/ops/stock-preparation-onprem-acceptance.ps1"
+  "scripts/ops/stock-preparation-pm2-sample.mjs"
   "scripts/ops/multitable-permission-lists-postdeploy-smoke.mjs"
   "scripts/ops/bridge-agent-driver-smoke.ps1"
   "scripts/ops/fixtures/bridge-agent-driver-smoke/evidence.template.json"

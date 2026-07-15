@@ -370,11 +370,12 @@ test('on-prem release and workflow artifacts publish both first-hop bootstrap si
   )
 })
 
-test('on-prem verifier rejects packages missing the stock-preparation acceptance contract', () => {
+test('on-prem verifier rejects packages missing the stock-preparation acceptance runtime contract', () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ms2-stock-prep-package-'))
   const migrationPath = path.join(root, 'packages/core-backend/migrations/066_create_integration_stock_prep_audit.sql')
   const smokePath = path.join(root, 'scripts/ops/stock-preparation-mvp-postdeploy-smoke.mjs')
   const acceptancePath = path.join(root, 'scripts/ops/stock-preparation-onprem-acceptance.ps1')
+  const pm2SamplePath = path.join(root, 'scripts/ops/stock-preparation-pm2-sample.mjs')
   fs.mkdirSync(path.dirname(migrationPath), { recursive: true })
   fs.mkdirSync(path.dirname(smokePath), { recursive: true })
   fs.writeFileSync(migrationPath, 'CREATE TABLE integration_stock_prep_audit ();\n')
@@ -387,12 +388,20 @@ test('on-prem verifier rejects packages missing the stock-preparation acceptance
       '$Summary.auditActionsCovered = "8/8"',
       '$Summary.selfScanClean = "true"',
       '$Summary.externalPlmK3ErpWrite = "false"',
+      'stock-preparation-pm2-sample.mjs',
     ].join('\n'),
   )
+  fs.writeFileSync(pm2SamplePath, "const APP_NAME = 'metasheet-backend'\n")
 
   try {
     const clean = runStockPreparationVerifier(root)
     assert.equal(clean.status, 0, clean.stderr)
+
+    fs.rmSync(pm2SamplePath)
+    const missingPm2Sample = runStockPreparationVerifier(root)
+    assert.notEqual(missingPm2Sample.status, 0)
+    assert.match(missingPm2Sample.stderr, /PM2 safe projection helper/)
+    fs.writeFileSync(pm2SamplePath, "const APP_NAME = 'metasheet-backend'\n")
 
     fs.rmSync(acceptancePath)
     const missingAcceptance = runStockPreparationVerifier(root)
@@ -412,6 +421,7 @@ test('on-prem verifier rejects packages missing the stock-preparation acceptance
         '$Summary.auditActionsCovered = "8/8"',
         '$Summary.selfScanClean = "true"',
         '$Summary.externalPlmK3ErpWrite = "false"',
+        'stock-preparation-pm2-sample.mjs',
       ].join('\n'),
     )
     fs.rmSync(smokePath)

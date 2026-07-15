@@ -9,8 +9,17 @@
 # need a live server, so their fail-closed logic is unit-tested by DOT-SOURCING the pure helpers.
 $ErrorActionPreference = 'Stop'
 $scriptPath = Join-Path $PSScriptRoot '..' 'stock-preparation-onprem-acceptance.ps1'
+$pm2SampleHelper = Join-Path $PSScriptRoot '..' 'stock-preparation-pm2-sample.mjs'
 $pass = 0; $fail = 0
 function Check { param([string]$Name, [bool]$Ok) if ($Ok) { $script:pass++; Write-Host "  PASS  $Name" } else { $script:fail++; Write-Host "  FAIL  $Name" } }
+
+function Invoke-Pm2Projection {
+  param([string]$Json)
+  $raw = $Json | & node $pm2SampleHelper 2>$null
+  $exit = $LASTEXITCODE
+  $sample = if ($exit -eq 0 -and $raw) { $raw | ConvertFrom-Json } else { $null }
+  [pscustomobject]@{ Exit = $exit; Raw = "$raw"; Sample = $sample }
+}
 
 # A valid 40-hex commit the package claims to be built from (BUILD_PROVENANCE.json.gitCommit is enforced
 # to be a full 40-hex by package-verify.sh, and the acceptance script now requires the same).
@@ -218,6 +227,75 @@ try {
   Check "smoke: selfScanClean ABSENT -> FAIL (fail-closed)" ((-not $o.ok) -and $o.reason -eq 'self_scan_not_clean')
 
   $base = [pscustomobject]@{ state = 'online'; restartTime = 3; uptime = 1000 }
+
+  # Entity corrective-1 reproduction: PM2 includes process.env in jlist; on Windows it commonly carries
+  # both Path and PATH. PowerShell ConvertFrom-Json rejects those case-variant keys, so the Node boundary
+  # must consume the raw payload and return only a fixed coarse projection.
+  $pm2Secret = 'MAT-001-SECRET'
+  $pm2WithDuplicateCaseKeys = '[{"name":"metasheet-backend","pm2_env":{"status":"online","restart_time":3,"pm_uptime":1000,"env":{"Path":"first","PATH":"second","MATERIAL":"' + $pm2Secret + '"}}}]'
+  $projected = Invoke-Pm2Projection $pm2WithDuplicateCaseKeys
+  Check "pm2 projection: Path/PATH duplicate-case payload parses into the three-field sample" (
+    $projected.Exit -eq 0 -and
+    $projected.Sample.state -eq 'online' -and
+    $projected.Sample.restartTime -eq 3 -and
+    $projected.Sample.uptime -eq 1000
+  )
+  Check "pm2 projection: environment and sentinel values never cross the projection" (
+    $projected.Raw -notmatch $pm2Secret -and
+    @($projected.Sample.PSObject.Properties.Name).Count -eq 3
+  )
+
+  # Exercise the actual Get-Pm2Sample native-command pipeline, not only the helper in isolation. This
+  # catches regressions in `$LASTEXITCODE handling or accidentally moving ConvertFrom-Json before Node.
+  $fakePm2Dir = Join-Path ([System.IO.Path]::GetTempPath()) ("t9accept_pm2_" + [guid]::NewGuid().ToString('N').Substring(0, 12))
+  New-Item -ItemType Directory -Path $fakePm2Dir | Out-Null
+  $fakePm2Js = Join-Path $fakePm2Dir 'pm2-fixture.mjs'
+  Set-Content -Path $fakePm2Js -Value @'
+#!/usr/bin/env node
+if (process.argv[2] !== 'jlist') process.exit(2)
+process.stdout.write(process.env.T9_PM2_JLIST || '')
+'@ -NoNewline
+  if ($IsWindows) {
+    Set-Content -Path (Join-Path $fakePm2Dir 'pm2.cmd') -Value @'
+@echo off
+node "%~dp0pm2-fixture.mjs" %*
+'@ -NoNewline
+  } else {
+    $fakePm2 = Join-Path $fakePm2Dir 'pm2'
+    Set-Content -Path $fakePm2 -Value @'
+#!/bin/sh
+exec node "$(dirname "$0")/pm2-fixture.mjs" "$@"
+'@ -NoNewline
+    & chmod +x $fakePm2
+  }
+  $oldPath = $env:PATH
+  try {
+    $env:PATH = "$fakePm2Dir$([IO.Path]::PathSeparator)$oldPath"
+    $env:T9_PM2_JLIST = $pm2WithDuplicateCaseKeys
+    $actualSample = Get-Pm2Sample
+    Check "pm2 projection: Get-Pm2Sample survives duplicate-case keys through the native pipeline" (
+      $actualSample.state -eq 'online' -and $actualSample.restartTime -eq 3 -and $actualSample.uptime -eq 1000
+    )
+  } finally {
+    $env:PATH = $oldPath
+    Remove-Item Env:T9_PM2_JLIST -ErrorAction SilentlyContinue
+  }
+
+  $unknownState = Invoke-Pm2Projection '[{"name":"metasheet-backend","pm2_env":{"status":"MAT-001-SECRET","restart_time":0,"pm_uptime":1}}]'
+  Check "pm2 projection: unknown free-form state is clamped to a coarse token" (
+    $unknownState.Exit -eq 0 -and $unknownState.Sample.state -eq 'unknown' -and $unknownState.Raw -notmatch 'MAT-001-SECRET'
+  )
+
+  $duplicateTarget = Invoke-Pm2Projection '[{"name":"metasheet-backend","pm2_env":{"status":"online","restart_time":0,"pm_uptime":1}},{"name":"metasheet-backend","pm2_env":{"status":"online","restart_time":0,"pm_uptime":1}}]'
+  Check "pm2 projection: duplicate target processes fail closed with no output" (
+    $duplicateTarget.Exit -ne 0 -and -not $duplicateTarget.Raw
+  )
+
+  $invalidCounters = Invoke-Pm2Projection '[{"name":"metasheet-backend","pm2_env":{"status":"online","restart_time":"3","pm_uptime":1000}}]'
+  Check "pm2 projection: malformed counters fail closed with no output" (
+    $invalidCounters.Exit -ne 0 -and -not $invalidCounters.Raw
+  )
+
   Check "pm2: same restart_time + same uptime -> stable" ((Test-Pm2StableSample $base ([pscustomobject]@{ state='online'; restartTime=3; uptime=1000 })).ok)
   Check "pm2: restart_time incremented (crash-loop) -> FAIL (restart_loop)" ((Test-Pm2StableSample $base ([pscustomobject]@{ state='online'; restartTime=4; uptime=1000 })).reason -eq 'restart_loop')
   Check "pm2: pm_uptime moved forward (self-restart) -> FAIL (uptime_reset)" ((Test-Pm2StableSample $base ([pscustomobject]@{ state='online'; restartTime=3; uptime=2000 })).reason -eq 'uptime_reset')
