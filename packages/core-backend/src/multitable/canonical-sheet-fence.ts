@@ -157,6 +157,21 @@ export async function fenceWriterEntry(
 }
 
 /**
+ * Claim the durable writer-block for a MULTI-transaction recovery (revert-execute). MUST run while holding the
+ * canonical fence on THIS connection (the caller acquires it first, in the same claim transaction). Sets
+ * `applying`. RECLAIMS a prior failed run's `paused_retryable` (so that state is recoverable, never a stuck
+ * absorbing state — [[feedback_state_machine_no_stuck_absorbing_state]]); REFUSES (throws
+ * `SheetWriterBlockedError`) only when another recovery is actively holding the sheet (`applying`/`fencing`).
+ */
+export async function claimDurableWriterBlock(query: FenceQuery, sheetId: string): Promise<void> {
+  if (!(await hasRecoveryWriterStateColumn(query))) return
+  const res = await query('SELECT recovery_writer_state FROM meta_sheets WHERE id = $1', [sheetId])
+  const raw = (res.rows[0] as { recovery_writer_state?: unknown } | undefined)?.recovery_writer_state
+  if (raw === 'applying' || raw === 'fencing') throw new SheetWriterBlockedError(sheetId, raw)
+  await query("UPDATE meta_sheets SET recovery_writer_state = 'applying' WHERE id = $1", [sheetId])
+}
+
+/**
  * Set (or clear, with `state === null`) the durable writer-block on a sheet. MUST be called while holding the
  * canonical fence in the same transaction (the caller acquires it first). Returns the number of rows updated
  * (0 ⇒ sheet not found). Column-probed for forward safety.
