@@ -379,8 +379,9 @@ interface TierSeed {
  * exception the code only rolls back and rethrows (baseAndUserCreated stays false, so cleanup does not
  * touch base/user). The residual is bounded by ONE property: a *same-BENCH_RUN_ID retry* fail-closes on
  * the pre-existence assertion and refuses. An auto-generated new run id would NOT detect a
- * post-commit-lost-connection leftover. Known, documented, bounded residual (harness is localhost-only,
- * window is a lost connection during COMMIT). See §self-test P1-b (BENCH_INJECT_USER_INSERT_FAULT).
+ * post-commit-lost-connection leftover. Known, documented, bounded residual (local-only by default;
+ * remote execution requires the explicit BENCH_ALLOW_REMOTE_DB=1 opt-in — the window is a lost
+ * connection during COMMIT). See §self-test P1-b (BENCH_INJECT_USER_INSERT_FAULT).
  */
 async function ensureBase(): Promise<void> {
   const client = await poolManager.get().getInternalPool().connect()
@@ -975,7 +976,8 @@ async function main() {
     // So reaching this line means the pair is atomic — never "only one of the two exists". (P3 caveat,
     // round 8: a connection dropped AFTER a server-side commit is indeterminate — a leftover pair may
     // exist. There is NO abort-path recheck; the ONLY backstop is a same-run-id retry hitting the
-    // pre-existence assertion. An auto-generated new run id would not detect it. Bounded, localhost-only.)
+    // pre-existence assertion. An auto-generated new run id would not detect it. Bounded; local-only by
+    // default, remote requires explicit BENCH_ALLOW_REMOTE_DB=1.)
     baseAndUserCreated = true
     const personIds = await seedPeopleSheet((id) => createdSheetIds.push(id))
     const app = buildApp()
