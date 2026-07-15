@@ -363,6 +363,32 @@ export const GLOBAL_HISTORY_FLAG_MANIFEST = Object.freeze([
     // source: packages/core-backend/src/multitable/meta-revision-retention.ts:311,314-316,342
     source: 'packages/core-backend/src/multitable/meta-revision-retention.ts:311,314-316,342',
   },
+  {
+    key: 'MULTITABLE_HISTORY_CONTIGUITY_STRICT',
+    type: 'boolean',
+    activationValue: 'true',
+    caseInsensitive: true, // isContiguityStrictMode(): `.trim().toLowerCase() === 'true'`
+    dependsOn: [],
+    conflictsWith: [],
+    danger: 'high',
+    purpose:
+      'W0-1 v3.7 §9.3 — STRICT chain-integrity mode: the exact-seq, ALL-generations, C3 deleted-chain contiguity precheck for destructive Revert/Reset. Default OFF; flag-off is byte-identical to #4269. Gating this ON is the trust-substrate correctness switch, NOT an ops convenience.',
+    // source: packages/core-backend/src/multitable/history-integrity-precheck.ts:99-100 (isContiguityStrictMode)
+    source: 'packages/core-backend/src/multitable/history-integrity-precheck.ts:99-100',
+    // P3-2 FLAG-ON PRECONDITION (design lock §3/§9; L5). This flag — and later Revert/Reset enablement — MUST
+    // NOT be turned on for a sheet unless BOTH: (a) an ACTIVE trust checkpoint exists for the sheet, AND
+    // (b) reconstruction causality is satisfied. Condition (b) is NOT yet satisfiable: the reconstructor still
+    // selects by created_at<=T (non-causal) until Lane L6 lands the exact event-anchor resolver, so this
+    // precondition CURRENTLY FAILS CLOSED for every sheet — which is CORRECT ("migration/backfill presence
+    // alone never enables recovery"). Enforced in code by checkStrictEnablementPrecondition; the single L6
+    // seam is the RECONSTRUCTION_CAUSALITY_LANDED constant. This is a GUARD that stays fail-closed until L6;
+    // do not weaken it to pass. (Not modeled as a cross-flag rule: conditions (a)/(b) are runtime STATE, not
+    // other flag env values, so they cannot be expressed as dependsOn/conflictsWith.)
+    enablementPrecondition:
+      'L5/P3-2 (checkStrictEnablementPrecondition): requires (a) an active meta_history_trust_checkpoints row for the sheet AND (b) RECONSTRUCTION_CAUSALITY_LANDED (L6). Fails closed until L6.',
+    enablementPreconditionSource:
+      'packages/core-backend/src/multitable/history-trust-precondition.ts (RECONSTRUCTION_CAUSALITY_LANDED, evaluateStrictEnablementPrecondition, checkStrictEnablementPrecondition)',
+  },
 ])
 
 /** Flat lookup by key, built once. */

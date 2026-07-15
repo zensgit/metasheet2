@@ -26,9 +26,30 @@ export function isSystemPeopleSheetDescription(value: unknown): boolean {
 }
 
 /**
- * True iff the sheet is a system-regenerated read-model excluded from the user-history contiguity model.
- * Pure — the caller supplies the sheet's `baseId` + `description` (both nullable to tolerate legacy rows).
+ * W0-1 v3.7 §3/§8 — the server-owned `meta_sheets.system_kind` values. This column is set ONLY by internal
+ * provisioning (never by a client create/update request), so it is the NON-FORGEABLE system-sheet signal that
+ * hardens the historically user-writable `description` sentinel. `isSystemSheet` treats a recognized
+ * `system_kind` as authoritative.
  */
-export function isSystemSheet(sheet: { baseId?: string | null; description?: unknown }): boolean {
-  return isApprovalProjectionBaseId(sheet.baseId ?? null) || isSystemPeopleSheetDescription(sheet.description)
+export const SYSTEM_SHEET_KINDS = ['people_directory', 'approval_projection'] as const
+
+/** True iff `value` is a recognized server-owned system-sheet kind (non-forgeable). */
+export function isSystemSheetKind(value: unknown): boolean {
+  return typeof value === 'string' && (SYSTEM_SHEET_KINDS as readonly string[]).includes(value)
+}
+
+/**
+ * True iff the sheet is a system-regenerated read-model excluded from the user-history contiguity model.
+ * Pure — the caller supplies the sheet's `systemKind` (the server-owned, non-forgeable signal — v3.7 §3),
+ * plus `baseId` + `description` (retained: `baseId` is server-assigned and non-forgeable; the `description`
+ * sentinel is the LEGACY fallback for rows provisioned before `system_kind` existed and not yet backfilled).
+ * Once `system_kind` is universally set by provisioning + backfill, L4 hardening may drop the `description`
+ * fallback entirely; it is kept here so this additive change regresses nothing.
+ */
+export function isSystemSheet(sheet: { baseId?: string | null; description?: unknown; systemKind?: unknown }): boolean {
+  return (
+    isSystemSheetKind(sheet.systemKind) ||
+    isApprovalProjectionBaseId(sheet.baseId ?? null) ||
+    isSystemPeopleSheetDescription(sheet.description)
+  )
 }
