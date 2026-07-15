@@ -231,8 +231,19 @@ export async function recordRecordRevisionsBatch(query: QueryFn, inputs: RecordR
 /**
  * W0-1 (OD-W0-1 mechanism (b)) — record a lock/unlock version bump as a chain marker in the independent
  * `meta_record_version_markers` table, so the generation-aware contiguity precheck does not read the bump
- * as an uncaptured-data-write HOLE. `kind` is 'lock' | 'unlock'. Idempotent (ON CONFLICT DO NOTHING against
- * the UNIQUE(sheet_id, record_id, version) constraint), so a retry never duplicates.
+ * as an uncaptured-data-write HOLE. `kind` is 'lock' | 'unlock'.
+ *
+ * LOUD BY DESIGN (W0-1 v3.5 §1 P1-1, correcting the landed #4269 shape): this INSERT NO LONGER carries
+ * `ON CONFLICT ... DO NOTHING`. The cross-generation `UNIQUE (sheet_id, record_id, version)` constraint it
+ * used to target is DROPPED by the `zzzz20260715120000_add_meta_record_chain_seq` migration — a resurrected
+ * record resets `version` to 1, so a new generation's lock/unlock can legitimately land at a version the
+ * FIRST generation also marked, and the old `DO NOTHING` SILENTLY SWALLOWED that new marker: the lock/unlock
+ * version bump committed while its marker vanished, leaving an unexplained hole the contiguity walk would
+ * later (falsely) refuse as `chain_hole` on a perfectly healthy record. Any conflict on this INSERT is now a
+ * genuine anomaly (a true within-generation duplicate — the seq-ordered precheck's job to catch as
+ * `chain_corrupt`, never this write's job to paper over), so a conflict (or any other error) THROWS and
+ * fails the enclosing lock/unlock transaction — no silent divergence between "the version bump happened"
+ * and "its marker was recorded" is possible: they now commit or roll back together.
  *
  * Deploy-window safe (mirrors `hasRestoredFromVersionColumn`): the marker table may not exist yet in a
  * rolling deploy (the zzzz migration lands mid-process). A missing table is probed via a txn-safe
@@ -267,10 +278,11 @@ export async function recordVersionMarker(
   input: { sheetId: string; recordId: string; version: number; kind: 'lock' | 'unlock'; actorId?: string | null },
 ): Promise<void> {
   if (!(await hasVersionMarkerTable(query))) return
+  // No ON CONFLICT: the unique constraint this used to target is dropped (see doc comment above). A
+  // conflict/error here MUST propagate and fail the enclosing lock/unlock transaction loudly.
   await query(
     `INSERT INTO meta_record_version_markers (id, sheet_id, record_id, version, kind, actor_id)
-     VALUES (gen_random_uuid(), $1, $2, $3, $4, $5)
-     ON CONFLICT ON CONSTRAINT uq_meta_record_version_markers_sheet_record_version DO NOTHING`,
+     VALUES (gen_random_uuid(), $1, $2, $3, $4, $5)`,
     [input.sheetId, input.recordId, input.version, input.kind, input.actorId ?? null],
   )
 }
