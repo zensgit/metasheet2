@@ -5091,8 +5091,12 @@ async function ensurePeopleSheetPreset(query: QueryFn, baseId: string): Promise<
 
   if (!peopleSheetRow) {
     await query(
-      `INSERT INTO meta_sheets (id, base_id, name, description)
-       VALUES ($1, $2, $3, $4)`,
+      // W0-1 v3.7 §3: set the server-owned, non-forgeable `system_kind` at provisioning time (never from a
+      // client request). Requires the L5 migration (zzzz20260715180000) to have added the column — that
+      // migration is part of this same change and runs before new code serves traffic (deploy SOP:
+      // migrate-then-deploy). Existing People sheets are covered by that migration's one-time backfill.
+      `INSERT INTO meta_sheets (id, base_id, name, description, system_kind)
+       VALUES ($1, $2, $3, $4, 'people_directory')`,
       [peopleSheetId, baseId, SYSTEM_PEOPLE_SHEET_NAME, SYSTEM_PEOPLE_SHEET_DESCRIPTION],
     )
     peopleSheetRow = {
