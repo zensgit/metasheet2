@@ -305,7 +305,7 @@ test('persistent override: lives under $HOME/.metasheet2/window-runner, NOT the 
 
 test('persistent override: written atomically — mktemp candidate + docker compose config validation + rename, never a truncating write straight onto the live file', () => {
   const remote = readFileSync(REMOTE_SH, 'utf8')
-  assert.match(remote, /override_tmp="\$\(mktemp "\$\{RUNNER_PERSIST_DIR\}\/\.override\.XXXXXX\.yml"\)"/, 'expected a mktemp candidate override in the persist dir')
+  assert.match(remote, /override_tmp="\$\(mktemp "\$\{RUNNER_PERSIST_DIR\}\/\.override\.XXXXXX"\)"/, 'expected a mktemp candidate override in the persist dir (X placeholder at the END — no trailing suffix)')
   const validateIdx = remote.indexOf('docker compose -f "$STAGING_COMPOSE_FILE" -f "$override_tmp" config')
   const mvIdx = remote.indexOf('mv -f "$override_tmp" "$OVERRIDE_FILE"')
   assert.notEqual(validateIdx, -1, 'candidate override must be validated with docker compose config before replacing the live file')
@@ -336,4 +336,20 @@ test('persistent override: the workflow cleanup rm -rf never targets the persist
   const workflow = readFileSync(WORKFLOW, 'utf8')
   assert.match(workflow, /rm -rf \$\{remote_output_dir\} \$\{RUNNER_DIR\}/, 'expected the post-run cleanup rm to target only the per-run output + checkout dirs')
   assert.doesNotMatch(workflow, /rm -rf[^\n]*\.metasheet2/, 'workflow cleanup must NEVER rm the persistent .metasheet2 runner override dir')
+})
+
+test('persistent override: POSITIVE CONTROL — the exact mktemp template REALLY randomizes on this platform (a mid-template X run like .XXXXXX.yml makes GNU mktemp error and BSD return the literal)', () => {
+  const remote = readFileSync(REMOTE_SH, 'utf8')
+  const m = remote.match(/mktemp "\$\{RUNNER_PERSIST_DIR\}(\/[^"]+)"/)
+  assert.ok(m, 'expected the mktemp candidate template to extract')
+  const dir = mkdtempSync(join(tmpdir(), 'winrunner-persist-'))
+  const template = `${dir}${m[1]}` // e.g. <dir>/.override.XXXXXX
+  const r1 = spawnSync('mktemp', [template], { encoding: 'utf8' })
+  const r2 = spawnSync('mktemp', [template], { encoding: 'utf8' })
+  assert.equal(r1.status, 0, `mktemp REJECTED the template (non-portable): ${r1.stderr || r1.error}`)
+  assert.equal(r2.status, 0, `mktemp REJECTED the template (non-portable): ${r2.stderr || r2.error}`)
+  const p1 = r1.stdout.trim(), p2 = r2.stdout.trim()
+  assert.notEqual(p1, template, 'mktemp returned the LITERAL template (no randomization) — X placeholder not honored (non-portable)')
+  assert.notEqual(p1, p2, 'two mktemp calls produced the SAME path — not randomized')
+  assert.ok(existsSync(p1) && existsSync(p2), 'mktemp did not actually create the candidate files')
 })

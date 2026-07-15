@@ -87,7 +87,7 @@ MIGRATE_JS="packages/core-backend/dist/src/db/migrate.js"
 # (created fresh each run — never assumed to persist).
 REHEARSAL_DB="window_runner_rehearsal"
 # Host-side backup dir for action=migrate (HOME is writable; the staging repo dir is not
-# — proven by run 29313154282, same reason OVERRIDE_FILE above lives under OUTPUT_DIR).
+# — proven by run 29313154282, same reason OVERRIDE_FILE above lives under ${HOME}/.metasheet2).
 BACKUP_DIR="${HOME}/window-runner-backups"
 
 resolve_home_path() {
@@ -349,7 +349,11 @@ action_deploy() {
   # the flags, so redeploying with none rewrites the SAME file without them (clears the old flags).
   mkdir -p "$RUNNER_PERSIST_DIR"
   local override_tmp
-  override_tmp="$(mktemp "${RUNNER_PERSIST_DIR}/.override.XXXXXX.yml")"
+  # mktemp requires the X placeholder run at the END of the template (a trailing suffix like
+  # .yml makes GNU mktemp error and BSD/macOS return the literal, un-randomized). The candidate
+  # needs no extension — `docker compose config -f <file>` reads it by content, and it is renamed
+  # to the .yml-named live override on success.
+  override_tmp="$(mktemp "${RUNNER_PERSIST_DIR}/.override.XXXXXX")"
   {
     echo "# Written by attendance-staging-window-runner (run ${RUN_STAMP}). Pins the staging"
     echo "# backend/web images to one full-SHA tag; env flips happen ONLY here, together with"
