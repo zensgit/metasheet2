@@ -18,8 +18,7 @@ import { isDurableDeliveryEnabled, RESOLVE_PERMITTING_STATUSES } from '../../src
 const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
 const q = (sql: string, params?: unknown[]) => poolManager.get().query(sql, params)
 
-// A real automation_rules row is required as the outbox rows carry no rule FK, but a consumer-lease test
-// needs a genuine outbox row; we keep everything inside two synthetic ids and clean them up.
+// Outbox rows carry no rule FK, so the schema goldens need only two synthetic outbox ids, cleaned up after.
 const OB1 = `ob_s1_${Math.floor(Date.now() % 1e9)}_a`
 const OB2 = `ob_s1_${Math.floor(Date.now() % 1e9)}_b`
 
@@ -55,12 +54,15 @@ describeIfDatabase('P2 durable-delivery S1 — automation outbox schema + flag (
       `INSERT INTO meta_automation_outbox (id, event_type, payload, manifest_version) VALUES ($1,$2,$3::jsonb,1)`,
       [OB1, 'approval.approved', JSON.stringify({ any: 'payload' })],
     )
-    // positive control: every valid status inserts.
-    for (const s of ['pending', 'in_progress', 'done', 'failed', 'dead_letter'] as const) {
+    // positive control: every valid status inserts. There are exactly four — NO persistent `failed`
+    // (a transient failure only bumps attempts and stays reclaimable; exhaustion → dead_letter). `in_progress`
+    // must carry a lease (the in_progress-needs-lease CHECK), so give it one; the others take a NULL lease.
+    for (const s of ['pending', 'in_progress', 'done', 'dead_letter'] as const) {
+      const lease = s === 'in_progress' ? "now() + interval '5 minutes'" : 'NULL'
       await q(
-        `INSERT INTO meta_automation_outbox_consumer (outbox_id, consumer_key, status)
-         VALUES ($1,$2,$3)
-         ON CONFLICT (outbox_id, consumer_key) DO UPDATE SET status = EXCLUDED.status`,
+        `INSERT INTO meta_automation_outbox_consumer (outbox_id, consumer_key, status, lease_expires_at)
+         VALUES ($1,$2,$3,${lease})
+         ON CONFLICT (outbox_id, consumer_key) DO UPDATE SET status = EXCLUDED.status, lease_expires_at = EXCLUDED.lease_expires_at`,
         [OB1, `ck_${s}`, s],
       )
     }
@@ -73,14 +75,52 @@ describeIfDatabase('P2 durable-delivery S1 — automation outbox schema + flag (
     ).rejects.toThrow()
   })
 
+  test('in_progress REQUIRES a lease: NULL-lease in_progress is rejected, leased in_progress is accepted', async () => {
+    await q(
+      `INSERT INTO meta_automation_outbox (id, event_type, payload, manifest_version) VALUES ($1,'approval.approved','{}'::jsonb,1)
+       ON CONFLICT (id) DO NOTHING`,
+      [OB1],
+    )
+    // negative control: an in_progress row with NULL lease is unreclaimable — the CHECK must reject it.
+    await expect(
+      q(
+        `INSERT INTO meta_automation_outbox_consumer (outbox_id, consumer_key, status, lease_expires_at)
+         VALUES ($1,'ck_inprog_nolease','in_progress',NULL)`,
+        [OB1],
+      ),
+    ).rejects.toThrow()
+    // positive control: the SAME row with a lease is accepted (proves the CHECK gates on the lease, not the status).
+    await expect(
+      q(
+        `INSERT INTO meta_automation_outbox_consumer (outbox_id, consumer_key, status, lease_expires_at)
+         VALUES ($1,'ck_inprog_leased','in_progress',now() + interval '5 minutes')`,
+        [OB1],
+      ),
+    ).resolves.toBeTruthy()
+  })
+
+  test('fence/attempts non-negative CHECKs reject a negative fence', async () => {
+    await q(
+      `INSERT INTO meta_automation_outbox (id, event_type, payload, manifest_version) VALUES ($1,'approval.approved','{}'::jsonb,1)
+       ON CONFLICT (id) DO NOTHING`,
+      [OB1],
+    )
+    await expect(
+      q(
+        `INSERT INTO meta_automation_outbox_consumer (outbox_id, consumer_key, status, fence) VALUES ($1,'ck_negfence','pending',-1)`,
+        [OB1],
+      ),
+    ).rejects.toThrow()
+  })
+
   test('FK cascade: deleting an outbox event removes its per-consumer lease rows', async () => {
     await q(
       `INSERT INTO meta_automation_outbox (id, event_type, payload, manifest_version) VALUES ($1,'approval.approved','{}'::jsonb,1)`,
       [OB2],
     )
     await q(
-      `INSERT INTO meta_automation_outbox_consumer (outbox_id, consumer_key, status, fence, attempts)
-       VALUES ($1,'approval-trigger','in_progress',3,2)`,
+      `INSERT INTO meta_automation_outbox_consumer (outbox_id, consumer_key, status, lease_expires_at, fence, attempts)
+       VALUES ($1,'approval-trigger','in_progress',now() + interval '5 minutes',3,2)`,
       [OB2],
     )
     const before = await q('SELECT count(*)::int AS c FROM meta_automation_outbox_consumer WHERE outbox_id = $1', [OB2])

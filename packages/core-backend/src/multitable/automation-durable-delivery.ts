@@ -21,10 +21,16 @@ export function isDurableDeliveryEnabled(env: NodeJS.ProcessEnv = process.env): 
   return String(env.AUTOMATION_DURABLE_DELIVERY_ENABLED ?? '').trim().toLowerCase() === 'true'
 }
 
-/** Terminal + transient states of a `meta_automation_outbox_consumer` row (the per-consumer lease). */
-export type OutboxConsumerStatus = 'pending' | 'in_progress' | 'done' | 'failed' | 'dead_letter'
+/**
+ * States of a `meta_automation_outbox_consumer` row (the per-consumer lease). There is deliberately NO
+ * persistent `failed` state: a transient failure only bumps `attempts` and leaves the row reclaimable (its
+ * lease expires and the next claimer reclaims it); bounded-attempts-exhausted goes straight to the terminal
+ * `dead_letter`. So every non-terminal state (`pending`, `in_progress`) is reclaimable and every terminal
+ * state is resolve-permitting — a row can never get stuck.
+ */
+export type OutboxConsumerStatus = 'pending' | 'in_progress' | 'done' | 'dead_letter'
 
-/** The set of statuses that let a consumer's adapter resolve (event terminally handled for that consumer). */
+/** The two terminal statuses that let a consumer's adapter resolve (event terminally handled for it). */
 export const RESOLVE_PERMITTING_STATUSES: ReadonlySet<OutboxConsumerStatus> = new Set([
   'done',
   'dead_letter',
@@ -41,13 +47,20 @@ export interface OutboxRow {
   createdAt: Date
 }
 
-/** A per-(outbox_id, consumer_key) delivery-state row (`meta_automation_outbox_consumer`). */
+/**
+ * A per-(outbox_id, consumer_key) delivery-state row (`meta_automation_outbox_consumer`).
+ *
+ * `fence` is a **`string`, not a `number`**: the column is `bigint`, and node-postgres returns bigint as a
+ * string to avoid the JS-number 2^53 precision cliff (the S1 real-DB golden asserts `fence: '0'`). S2's
+ * increment/CAS must treat it as a decimal string (`fence = fence + 1` server-side; compare with the claimed
+ * string), never coerce it through a JS `number`.
+ */
 export interface OutboxConsumerRow {
   outboxId: string
   consumerKey: string
   status: OutboxConsumerStatus
   leaseExpiresAt: Date | null
-  fence: number
+  fence: string
   attempts: number
   lastError: string | null
   updatedAt: Date
