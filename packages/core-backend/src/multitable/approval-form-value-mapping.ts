@@ -97,11 +97,11 @@ export function mapApprovalFormValues(
       errors.push({ formFieldId: m.formFieldId, targetFieldId: m.targetFieldId, code: 'missing_required_value' })
       continue
     }
-    const r = coerce(m, raw)
-    if (r.ok) {
+    const r = coerce(m, raw) as { ok: boolean; v?: string | number; code?: FwbMappingErrorCode }
+    if (r.ok && r.v !== undefined) {
       values[m.targetFieldId] = r.v
     } else {
-      errors.push({ formFieldId: m.formFieldId, targetFieldId: m.targetFieldId, code: r.code })
+      errors.push({ formFieldId: m.formFieldId, targetFieldId: m.targetFieldId, code: r.code ?? 'unsupported_target_type' })
     }
   }
   return errors.length > 0 ? { ok: false, errors } : { ok: true, values }
