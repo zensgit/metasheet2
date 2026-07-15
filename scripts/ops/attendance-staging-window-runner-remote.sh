@@ -3,20 +3,33 @@
 #
 # Remote (deploy-host) half of .github/workflows/attendance-staging-window-runner.yml.
 # Executes ONE action per invocation against the STAGING stack only:
-#   deploy  — pin staging backend+web to a full-SHA image tag, migrate, verify build+auth
-#   smoke   — run one of the five window smokes in-container (bundle doc:
-#             docs/development/attendance-staging-window-bundle-20260702.md)
-#   status  — read-only snapshot (containers, health, settings, pending migrations)
-#   migrate — backup + clone-rehearsal + apply, per
-#             docs/operations/staging-migration-alignment-runbook.md and
-#             docs/development/staging-migration-alignment-runbook-verification-20260519.md.
-#             Only reachable path from a `do_not_run_full_migrate` decision surfaced by
-#             action=deploy's migration-alignment gate: pg_dump the real staging DB to a
-#             HOST file (never uploaded — business data), clone-restore it into a
-#             throwaway `window_runner_rehearsal` DB inside the SAME postgres container,
-#             run migrate.js against ONLY the rehearsal DB, and require it to fully
-#             succeed (pending=0) before ever touching the real staging DB. The rehearsal
-#             DB is always dropped (trap-guarded), including on failure.
+#   deploy         — pin staging backend+web to a full-SHA image tag, migrate, verify build+auth
+#   smoke          — run one of the five window smokes in-container (bundle doc:
+#                    docs/development/attendance-staging-window-bundle-20260702.md)
+#   status         — read-only snapshot (containers, health, settings, pending migrations)
+#   migrate        — backup + clone-rehearsal + apply, per
+#                    docs/operations/staging-migration-alignment-runbook.md and
+#                    docs/development/staging-migration-alignment-runbook-verification-20260519.md.
+#                    Only reachable path from a `do_not_run_full_migrate` decision surfaced by
+#                    action=deploy's migration-alignment gate: pg_dump the real staging DB to a
+#                    HOST file (never uploaded — business data), clone-restore it into a
+#                    throwaway `window_runner_rehearsal` DB inside the SAME postgres container,
+#                    run migrate.js against ONLY the rehearsal DB, and require it to fully
+#                    succeed (pending=0) before ever touching the real staging DB. The rehearsal
+#                    DB is always dropped (trap-guarded), including on failure.
+#   residue-sweep  — bundle §7 "Consolidated final residue sweep": every §7 cross-smoke SQL
+#                    count (users/user_orgs/records/requests/deliveries, OT-bank money-path,
+#                    approval-engine, plus the optional MP-6/HMR-5 blocks), run read-only via
+#                    `docker exec metasheet-staging-postgres psql -tA`, against the REAL
+#                    staging DB (never a rehearsal DB — this action never writes). Fails iff
+#                    any count is nonzero. Also captures env flags + GET
+#                    /api/attendance/settings into the same artifact. See action_residue_sweep
+#                    below for the per-query §7→SQL substitution notes (the bundle's own
+#                    `:otbank_approval_ids` / `:otbank_cycle_ids` / `:mp6_request_ids` /
+#                    `:mp6_approval_ids` / `:rd45_smoke_org` / `:hmr5_org` placeholders name
+#                    captured-id lists the smoke helpers print to logs but never archive to a
+#                    file this script can read back — each is replaced by a
+#                    stamp/prefix-anchored equivalent query, documented at its call site).
 #
 # HARD SAFETY RAILS:
 #   * Operates exclusively on the staging compose file docker-compose.app.staging.yml
@@ -48,10 +61,11 @@ hash_value() {
   fi
 }
 
-ACTION="${ACTION:?ACTION is required (deploy|smoke|status)}"
+ACTION="${ACTION:?ACTION is required (deploy|smoke|status|migrate|residue-sweep)}"
 DEPLOY_SHA="${DEPLOY_SHA:-}"
 SMOKE_ID="${SMOKE_ID:-}"
 SET_WINDOW_ENV="${SET_WINDOW_ENV:-none}"
+STAMPS="${STAMPS:-}"
 STAGING_DEPLOY_PATH="${STAGING_DEPLOY_PATH:-metasheet2-dingtalk-staging}"
 DEPLOY_PATH="${DEPLOY_PATH:-metasheet2}"
 SKIP_HOST_SYNC="${SKIP_HOST_SYNC:-false}"
@@ -530,6 +544,266 @@ action_smoke() {
   log "smoke ${SMOKE_ID} OK (stamp ${stamp})"
 }
 
+# residue_check <pg_user> <pg_db> <name> <sql>
+#
+# Runs ONE read-only §7 count query via `docker exec metasheet-staging-postgres psql -tA`
+# (tuples-only, unaligned — a bare integer, nothing else) against the REAL staging DB,
+# appends "<name>=<value>" to $RESIDUE_RESULTS_FILE, and prints the value to stdout so the
+# caller can decide pass/fail. A query that does not come back as a bare integer (bad SQL,
+# connection drop, wrong column) is a hard failure — never silently treated as "0 residue".
+residue_check() {
+  local pg_user="$1" pg_db="$2" name="$3" sql="$4" value
+  value="$(docker exec "$POSTGRES_CONTAINER" psql -U "$pg_user" -d "$pg_db" -v ON_ERROR_STOP=1 -tA -c "$sql" | tr -d '[:space:]')"
+  [[ "$value" =~ ^[0-9]+$ ]] \
+    || fail "residue-sweep query '${name}' did not return a bare integer (got '${value}'); sql: ${sql}"
+  echo "${name}=${value}" >> "$RESIDUE_RESULTS_FILE"
+  log "residue-sweep ${name}=${value}"
+  printf '%s' "$value"
+}
+
+action_residue_sweep() {
+  # Bundle §7 "Consolidated final residue sweep (window close)": every count in that SQL
+  # block must be 0. This action runs each one individually (not as one multi-statement
+  # script) so a single bad query fails closed with its own name, and so the source-contract
+  # self-test (scripts/ops/attendance-window-runner-pipeline.test.mjs) can grep this file for
+  # each stamp-prefix family independently.
+  #
+  # STAMPS is "ae4,rd45,otbank,mp6,hmr5" (bundle §1 order). ae4/rd45/otbank are the three
+  # core smokes and are REQUIRED (a window always runs them per bundle §4); mp6/hmr5 are the
+  # optional 4th/5th smokes and their fields may be empty ("...,otbankstamp,," or
+  # "...,otbankstamp,mp6stamp,") when that smoke did not run this window (bundle §1/§8:
+  # "skip cleanly if not run").
+  [[ -n "$STAMPS" ]] || fail "STAMPS is required for action=residue-sweep (comma-separated ae4,rd45,otbank,mp6,hmr5 stamps — bundle §7)"
+  local ae4_stamp rd45_stamp otbank_stamp mp6_stamp hmr5_stamp sentinel
+  IFS=',' read -r ae4_stamp rd45_stamp otbank_stamp mp6_stamp hmr5_stamp sentinel <<< "${STAMPS},__sentinel__"
+  [[ -n "$ae4_stamp" && -n "$rd45_stamp" && -n "$otbank_stamp" && "$sentinel" == "__sentinel__" ]] \
+    || fail "STAMPS must be exactly 5 comma-separated fields (ae4,rd45,otbank,mp6,hmr5) with ae4/rd45/otbank non-empty, got: '${STAMPS}'"
+  [[ "$ae4_stamp" =~ ^ae4-smoke-[A-Za-z0-9-]+$ ]] || fail "ae4 stamp must match ^ae4-smoke-[A-Za-z0-9-]+\$, got: '${ae4_stamp}'"
+  [[ "$rd45_stamp" =~ ^rd45-smoke-[A-Za-z0-9-]+$ ]] || fail "rd45 stamp must match ^rd45-smoke-[A-Za-z0-9-]+\$, got: '${rd45_stamp}'"
+  [[ "$otbank_stamp" =~ ^otbank-v18-smoke-[A-Za-z0-9-]+$ ]] || fail "otbank stamp must match ^otbank-v18-smoke-[A-Za-z0-9-]+\$, got: '${otbank_stamp}'"
+  [[ -z "$mp6_stamp" || "$mp6_stamp" =~ ^mp6-smoke-[A-Za-z0-9-]+$ ]] || fail "mp6 stamp must be empty or match ^mp6-smoke-[A-Za-z0-9-]+\$, got: '${mp6_stamp}'"
+  [[ -z "$hmr5_stamp" || "$hmr5_stamp" =~ ^hmr5-smoke-[A-Za-z0-9-]+$ ]] || fail "hmr5 stamp must be empty or match ^hmr5-smoke-[A-Za-z0-9-]+\$, got: '${hmr5_stamp}'"
+
+  local pg_user pg_db
+  read -r pg_user pg_db <<< "$(resolve_postgres_creds)"
+
+  # Deterministic per-stamp business-key reconstruction (NOT captured-id substitution — these
+  # are simple string templates the OT-bank helper builds directly from STAMP, so recomputing
+  # them here is exact, not an approximation):
+  #   otbank_rule_name      mirrors `${STAMP}-ot-rule`             (smoke script: overtimeRuleName)
+  #   otbank_leave_type_code mirrors `${STAMP}-offset`             (smoke script: leaveTypeCode)
+  #   otbank_holiday_name    mirrors `${STAMP} statutory holiday`  (smoke script: holidayName)
+  #   otbank_poison_lot_key  mirrors `otbank-v18-smoke:${STAMP}:poison-statutory-lot` (poisonLotKey)
+  local otbank_rule_name="${otbank_stamp}-ot-rule"
+  local otbank_leave_type_code="${otbank_stamp}-offset"
+  local otbank_holiday_name="${otbank_stamp} statutory holiday"
+  local otbank_poison_lot_key="otbank-v18-smoke:${otbank_stamp}:poison-statutory-lot"
+  # MP-6 and OT-bank v1-8 share the window's org (bundle §5 "Org scope"); the remote script's
+  # own action_smoke never overrides ORG_ID for either, so both default to 'default' exactly
+  # as their smoke scripts do. If a future window ever runs either under an overridden
+  # ORG_ID, this constant must move to a workflow input alongside it.
+  local window_org="default"
+  local otbank_user_prefix="${otbank_stamp}-"
+  local mp6_user_prefix="${mp6_stamp}-"
+
+  local results_file="${OUTPUT_DIR}/residue-sweep.txt"
+  RESIDUE_RESULTS_FILE="$results_file"
+  {
+    echo "# attendance-staging-window-runner residue-sweep — bundle §7 consolidated final residue sweep"
+    echo "# generated=$(date -u +%Y-%m-%dT%H:%M:%SZ) deploy_sha=${DEPLOY_SHA:-<not provided>}"
+    echo "# window-intended-stamps: ae4=${ae4_stamp} rd45=${rd45_stamp} otbank=${otbank_stamp} mp6=${mp6_stamp:-<not run this window>} hmr5=${hmr5_stamp:-<not run this window>}"
+  } > "$results_file"
+
+  local -a nonzero=()
+  local v
+
+  # -- synthetic users and memberships, core families (bundle §7 ¶1) ---------------------
+  v="$(residue_check "$pg_user" "$pg_db" users \
+    "SELECT count(*) FROM users WHERE left(id, 10) = 'ae4-smoke-' OR left(id, 11) = 'rd45-smoke-' OR left(id, 17) = 'otbank-v18-smoke-';")"
+  [[ "$v" == "0" ]] || nonzero+=("users=${v}")
+  v="$(residue_check "$pg_user" "$pg_db" user_orgs \
+    "SELECT count(*) FROM user_orgs WHERE left(user_id, 10) = 'ae4-smoke-' OR left(user_id, 11) = 'rd45-smoke-' OR left(user_id, 17) = 'otbank-v18-smoke-';")"
+  [[ "$v" == "0" ]] || nonzero+=("user_orgs=${v}")
+
+  # -- attendance business rows by stamped meta/user (bundle §7 ¶2) ----------------------
+  v="$(residue_check "$pg_user" "$pg_db" records \
+    "SELECT count(*) FROM attendance_records WHERE meta->>'smokeStamp' IN ('${ae4_stamp}', '${rd45_stamp}', '${otbank_stamp}') OR left(user_id, 10) = 'ae4-smoke-' OR left(user_id, 11) = 'rd45-smoke-' OR left(user_id, 17) = 'otbank-v18-smoke-';")"
+  [[ "$v" == "0" ]] || nonzero+=("records=${v}")
+  v="$(residue_check "$pg_user" "$pg_db" requests \
+    "SELECT count(*) FROM attendance_requests WHERE metadata->>'smokeStamp' IN ('${ae4_stamp}', '${rd45_stamp}', '${otbank_stamp}') OR left(user_id, 10) = 'ae4-smoke-' OR left(user_id, 11) = 'rd45-smoke-' OR left(user_id, 17) = 'otbank-v18-smoke-';")"
+  [[ "$v" == "0" ]] || nonzero+=("requests=${v}")
+
+  # -- shared deliveries table, per source_type + stamped scoping (bundle §7 ¶3) ---------
+  v="$(residue_check "$pg_user" "$pg_db" ae4_deliveries \
+    "SELECT count(*) FROM attendance_notification_deliveries d JOIN attendance_record_result_edits e ON d.source_id = e.id::text AND e.org_id = d.org_id WHERE d.source_type = 'attendance_result_edit' AND left(e.idempotency_key, length('ae4-smoke:${ae4_stamp}:')) = 'ae4-smoke:${ae4_stamp}:';")"
+  [[ "$v" == "0" ]] || nonzero+=("ae4_deliveries=${v}")
+  # SUBSTITUTION: bundle §7 uses `org_id = :rd45_smoke_org` (a single captured org id, default
+  # "<STAMP>-org", never archived to a file this script can read). RD-4/5's own smoke script
+  # (staging-attendance-report-digest-rd45-smoke.mjs) enforces `ORG_ID.startsWith('rd45-smoke-')`
+  # for every TRIGGER_MODE=seam run, so every RD-4/5 disposable org — not just this run's
+  # default-named one — carries the "rd45-smoke-" prefix (bundle §5 table). Scoping on that
+  # PREFIX instead of the one derived org id is strictly broader (also catches an operator
+  # ORG_ID override, or a leftover disposable org from an earlier unswept window) while never
+  # matching a real org (prefixes are mutually exclusive by construction — bundle §5).
+  v="$(residue_check "$pg_user" "$pg_db" rd45_deliveries \
+    "SELECT count(*) FROM attendance_notification_deliveries WHERE source_type = 'attendance_report_digest' AND left(org_id, 11) = 'rd45-smoke-';")"
+  [[ "$v" == "0" ]] || nonzero+=("rd45_deliveries=${v}")
+  v="$(residue_check "$pg_user" "$pg_db" stray_deliveries_to_smoke_users \
+    "SELECT count(*) FROM attendance_notification_deliveries WHERE left(recipient_user_id, 10) = 'ae4-smoke-' OR left(recipient_user_id, 11) = 'rd45-smoke-' OR left(recipient_user_id, 17) = 'otbank-v18-smoke-';")"
+  [[ "$v" == "0" ]] || nonzero+=("stray_deliveries_to_smoke_users=${v}")
+
+  # -- OT-bank money-path tables (bundle §7 ¶4) -------------------------------------------
+  # SUBSTITUTION: bundle §7 uses `cycle_id = ANY(:otbank_cycle_ids::uuid[])` (captured cycle
+  # ids, never archived). The OT-bank smoke script stamps every cycle it creates with
+  # `metadata->>'smokeStamp' = STAMP` (same column the sibling `cycles` query below already
+  # keys on), so the cycle-id list is reconstructed exactly — not approximated — via a
+  # subquery on that same metadata key, scoped to the two smokes that ever write a cycle row
+  # (AE-4 SQL-seeds one stamped closed cycle for its 409 guard — bundle §5 "Payroll cycles").
+  v="$(residue_check "$pg_user" "$pg_db" settlements \
+    "SELECT count(*) FROM attendance_payroll_cycle_settlements WHERE cycle_id IN (SELECT id FROM attendance_payroll_cycles WHERE metadata->>'smokeStamp' IN ('${ae4_stamp}', '${otbank_stamp}'));")"
+  [[ "$v" == "0" ]] || nonzero+=("settlements=${v}")
+  v="$(residue_check "$pg_user" "$pg_db" cycles \
+    "SELECT count(*) FROM attendance_payroll_cycles WHERE metadata->>'smokeStamp' IN ('${ae4_stamp}', '${otbank_stamp}');")"
+  [[ "$v" == "0" ]] || nonzero+=("cycles=${v}")
+  v="$(residue_check "$pg_user" "$pg_db" lots \
+    "SELECT count(*) FROM attendance_leave_balances WHERE left(user_id, 17) = 'otbank-v18-smoke-' OR source_key = '${otbank_poison_lot_key}';")"
+  [[ "$v" == "0" ]] || nonzero+=("lots=${v}")
+  v="$(residue_check "$pg_user" "$pg_db" fixtures \
+    "SELECT count(*) FROM attendance_overtime_rules WHERE name = '${otbank_rule_name}';")"
+  [[ "$v" == "0" ]] || nonzero+=("fixtures=${v}")
+  v="$(residue_check "$pg_user" "$pg_db" leave_types \
+    "SELECT count(*) FROM attendance_leave_types WHERE code = '${otbank_leave_type_code}';")"
+  [[ "$v" == "0" ]] || nonzero+=("leave_types=${v}")
+  v="$(residue_check "$pg_user" "$pg_db" holidays \
+    "SELECT count(*) FROM attendance_holidays WHERE name = '${otbank_holiday_name}';")"
+  [[ "$v" == "0" ]] || nonzero+=("holidays=${v}")
+
+  # -- approval-engine rows written by the v1-8 request chain (bundle §7 ¶5) -------------
+  # SUBSTITUTION: bundle §7 uses `id = ANY(:otbank_approval_ids::text[])` (captured approval
+  # instance ids, never archived). attendance_requests.approval_instance_id (text) links a
+  # request to its approval_instances row; every OT-bank v1-8 request is created by a
+  # STAMP-prefixed user (USER_PREFIX = `${STAMP}-` in the smoke script), so joining through
+  # requests scoped by that prefix reconstructs the exact same approval-instance set the
+  # bundle's captured-id list would have named — this is the literal "approval rows joined to
+  # requests/users with smoke prefixes" substitution the task calls for.
+  v="$(residue_check "$pg_user" "$pg_db" approval_instances \
+    "SELECT count(*) FROM approval_instances ai JOIN attendance_requests r ON r.approval_instance_id = ai.id WHERE left(r.user_id, ${#otbank_user_prefix}) = '${otbank_user_prefix}';")"
+  [[ "$v" == "0" ]] || nonzero+=("approval_instances=${v}")
+
+  # -- MP-6 makeup-punch (optional 4th smoke) — subject-scoped, family-prefix 'mp6-smoke-'
+  # (10 chars). These always run (not gated on mp6_stamp being provided): the prefix is
+  # global to the MP-6 family, not this run's stamp, so it also catches leftover rows from
+  # an earlier unswept window — a strictly safer sweep than skipping when this window didn't
+  # run MP-6 (bundle §7 ¶6).
+  v="$(residue_check "$pg_user" "$pg_db" mp6_requests \
+    "SELECT count(*) FROM attendance_requests WHERE org_id = '${window_org}' AND left(user_id, 10) = 'mp6-smoke-';")"
+  [[ "$v" == "0" ]] || nonzero+=("mp6_requests=${v}")
+  v="$(residue_check "$pg_user" "$pg_db" mp6_records \
+    "SELECT count(*) FROM attendance_records WHERE org_id = '${window_org}' AND left(user_id, 10) = 'mp6-smoke-';")"
+  [[ "$v" == "0" ]] || nonzero+=("mp6_records=${v}")
+  # SUBSTITUTION: bundle §7 uses `meta->>'requestId' = ANY(:mp6_request_ids::text[])`
+  # (captured request ids, never archived) — replaced by the same requests-family-prefix join
+  # as approval_instances above, scoped to the MP-6 family prefix ('mp6-smoke-', 10 chars)
+  # rather than one run's stamp, for the same "catches earlier leftovers too" reason.
+  v="$(residue_check "$pg_user" "$pg_db" mp6_events \
+    "SELECT count(*) FROM attendance_events e WHERE e.org_id = '${window_org}' AND EXISTS (SELECT 1 FROM attendance_requests r WHERE r.id::text = e.meta->>'requestId' AND r.org_id = e.org_id AND left(r.user_id, 10) = 'mp6-smoke-');")"
+  [[ "$v" == "0" ]] || nonzero+=("mp6_events=${v}")
+  # SUBSTITUTION: bundle §7 uses `id = ANY(:mp6_approval_ids::text[])` (captured approval
+  # instance ids, never archived) — replaced by the requests-family-prefix join, same
+  # reasoning as approval_instances above.
+  v="$(residue_check "$pg_user" "$pg_db" mp6_approval_instances \
+    "SELECT count(*) FROM approval_instances ai JOIN attendance_requests r ON r.approval_instance_id = ai.id WHERE r.org_id = '${window_org}' AND left(r.user_id, 10) = 'mp6-smoke-';")"
+  [[ "$v" == "0" ]] || nonzero+=("mp6_approval_instances=${v}")
+  v="$(residue_check "$pg_user" "$pg_db" mp6_users \
+    "SELECT count(*) FROM users WHERE left(id, 10) = 'mp6-smoke-';")"
+  [[ "$v" == "0" ]] || nonzero+=("mp6_users=${v}")
+  v="$(residue_check "$pg_user" "$pg_db" mp6_user_orgs \
+    "SELECT count(*) FROM user_orgs WHERE left(user_id, 10) = 'mp6-smoke-';")"
+  [[ "$v" == "0" ]] || nonzero+=("mp6_user_orgs=${v}")
+  # MP-6 writes NO deliveries — this must be 0 (never delete/query by source_type alone).
+  v="$(residue_check "$pg_user" "$pg_db" mp6_deliveries \
+    "SELECT count(*) FROM attendance_notification_deliveries WHERE org_id = '${window_org}' AND left(recipient_user_id, 10) = 'mp6-smoke-';")"
+  [[ "$v" == "0" ]] || nonzero+=("mp6_deliveries=${v}")
+
+  # -- HMR-5 manual missed-punch reminder (optional 5th smoke) — disposable-org scoped.
+  # SUBSTITUTION: bundle §7 uses `:hmr5_org` (default "<STAMP>-org", a single captured org id)
+  # for every org-scoped HMR-5 query. Same reasoning as rd45_deliveries above: HMR-5's own
+  # smoke script enforces `ORG_ID.startsWith('hmr5-smoke-')`, so scoping on the "hmr5-smoke-"
+  # prefix (11 chars) is a strictly broader, always-safe generalization of the one derived org
+  # id — it needs no stamp at all, so (unlike the deliberately-skippable per-runbook PASS
+  # stamps) these queries always run, including when HMR-5 did not run this window.
+  v="$(residue_check "$pg_user" "$pg_db" hmr5_deliveries \
+    "SELECT count(*) FROM attendance_notification_deliveries WHERE left(org_id, 11) = 'hmr5-smoke-' AND source_type = 'manual_missed_punch_reminder';")"
+  [[ "$v" == "0" ]] || nonzero+=("hmr5_deliveries=${v}")
+  v="$(residue_check "$pg_user" "$pg_db" hmr5_stray_deliveries \
+    "SELECT count(*) FROM attendance_notification_deliveries WHERE left(recipient_user_id, 11) = 'hmr5-smoke-';")"
+  [[ "$v" == "0" ]] || nonzero+=("hmr5_stray_deliveries=${v}")
+  v="$(residue_check "$pg_user" "$pg_db" hmr5_requests \
+    "SELECT count(*) FROM attendance_requests WHERE left(org_id, 11) = 'hmr5-smoke-';")"
+  [[ "$v" == "0" ]] || nonzero+=("hmr5_requests=${v}")
+  v="$(residue_check "$pg_user" "$pg_db" hmr5_records \
+    "SELECT count(*) FROM attendance_records WHERE left(org_id, 11) = 'hmr5-smoke-';")"
+  [[ "$v" == "0" ]] || nonzero+=("hmr5_records=${v}")
+  v="$(residue_check "$pg_user" "$pg_db" hmr5_scopes \
+    "SELECT count(*) FROM attendance_scheduler_scopes WHERE left(org_id, 11) = 'hmr5-smoke-';")"
+  [[ "$v" == "0" ]] || nonzero+=("hmr5_scopes=${v}")
+  v="$(residue_check "$pg_user" "$pg_db" hmr5_user_orgs \
+    "SELECT count(*) FROM user_orgs WHERE left(org_id, 11) = 'hmr5-smoke-';")"
+  [[ "$v" == "0" ]] || nonzero+=("hmr5_user_orgs=${v}")
+  v="$(residue_check "$pg_user" "$pg_db" hmr5_user_roles \
+    "SELECT count(*) FROM user_roles WHERE left(user_id, 11) = 'hmr5-smoke-';")"
+  [[ "$v" == "0" ]] || nonzero+=("hmr5_user_roles=${v}")
+  v="$(residue_check "$pg_user" "$pg_db" hmr5_users \
+    "SELECT count(*) FROM users WHERE left(id, 11) = 'hmr5-smoke-';")"
+  [[ "$v" == "0" ]] || nonzero+=("hmr5_users=${v}")
+
+  # -- env flags + settings baseline capture, same artifact (owner ask: confirm the
+  # env-switch and settings baseline alongside the residue counts, not in a separate run).
+  # A live ATTENDANCE_REPORT_DIGEST_ENABLED=true is a real §3.4 violation (never allowed for
+  # the whole window), so it flips the sweep result to FAIL like any other nonzero count —
+  # but it must not abort mid-sweep and skip the remaining §7 counts, so capture the outcome
+  # instead of letting `set -e` propagate it.
+  local env_flags_ok=1
+  assert_window_env_flags || env_flags_ok=0
+  if [[ "$env_flags_ok" != "1" ]]; then
+    nonzero+=("env_flags_violation=1")
+  fi
+  prepare_container_runner
+  local admin_id admin_token
+  if admin_id="$(find_admin_user)"; then
+    admin_token="$(mint_token "$admin_id" 'admin' 'attendance:read,attendance:admin')"
+    capture_settings "$admin_token" "${OUTPUT_DIR}/settings-sweep.json" >/dev/null || true
+  else
+    echo "no active admin user found; settings snapshot skipped" > "${OUTPUT_DIR}/settings-sweep.json"
+  fi
+
+  local result="ok" nonzero_list="none"
+  if [[ "${#nonzero[@]}" -gt 0 ]]; then
+    result="FAIL"
+    nonzero_list="$(IFS=,; echo "${nonzero[*]}")"
+  fi
+
+  {
+    echo "checks_total=29"
+    echo "result=${result}"
+    echo "nonzero=${nonzero_list}"
+  } >> "$results_file"
+  {
+    echo "action=residue-sweep"
+    echo "deploy_sha=${DEPLOY_SHA:-}"
+    echo "stamps=${STAMPS}"
+    echo "result=${result}"
+    echo "nonzero=${nonzero_list}"
+  } > "${OUTPUT_DIR}/summary.txt"
+
+  echo "CONSOLIDATED_RESIDUE_SWEEP result=${result} nonzero=${nonzero_list}"
+
+  if [[ "$result" != "ok" ]]; then
+    fail "residue sweep found nonzero residue: ${nonzero_list} (see residue-sweep.txt in the artifact; bundle §7 requires every count to be 0 before window close)"
+  fi
+  log "residue-sweep OK: all 29 §7 checks are zero"
+}
+
 action_status() {
   snapshot_staging_ps
   curl -sS --max-time 10 "$STAGING_WEB_HEALTH_URL" > "${OUTPUT_DIR}/health-web.json" 2>&1 \
@@ -755,5 +1029,6 @@ case "$ACTION" in
   smoke) action_smoke ;;
   status) action_status ;;
   migrate) action_migrate ;;
-  *) fail "unknown action: ${ACTION} (expected deploy|smoke|status|migrate)" ;;
+  residue-sweep) action_residue_sweep ;;
+  *) fail "unknown action: ${ACTION} (expected deploy|smoke|status|migrate|residue-sweep)" ;;
 esac
