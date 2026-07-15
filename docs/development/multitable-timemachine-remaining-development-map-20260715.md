@@ -1,12 +1,13 @@
 # Time Machine — remaining-development map, order, model dispatch (design & verification, 2026-07-15)
 
-**Status:** ASSESSMENT (answers "还有哪些开发量" against current `origin/main` + the open board). Supersedes the now-stale #4288 (`ca0a12d11`, written 07-14 before the design review completed and W0 build started). Docs-only.
+**Status:** ASSESSMENT (answers "还有哪些开发量"), updated 2026-07-15 with the owner's `seq` mechanism decision + the L3-backfill trust boundary. Supersedes the now-stale #4288 (`ca0a12d11`, written 07-14 before the design review completed and W0 build started). Docs-only.
 
-> **Headline (must read first — a two-track reconciliation the owner should resolve).** There are **two W0-1 design-lock documents for the same trust problem**, and they diverge on the ordering primitive:
-> - **On main (parallel-session track):** `…global-history-w0-1-history-incomplete-contiguity-trusted-since-design-lock-20260713.md` — records the **first-cut SHIPPED as #4269** (`3356a7ed6`, owner spot-check PASS), with **C2/C3/C6 explicitly DEFERRED** (owner order C2→C3→C6). Its comparator is an **epoch-ms / version / delete-last structured comparison** (per #4307's close-out ledger).
-> - **My track (#4262 v3.5, your rounds 4–9 → APPROVE-for-ratification):** a **correction lock over #4269** that finds the epoch-ms order non-causal and **replaces it with a persistent monotonic `seq`**, and supplies the deferred **C2 (fail-closed monotonicity), C3 (deleted-chain enumeration), C6 (baseline-checkpoint trust anchor)** plus the all-writer fence and non-forgeable `system_kind`. **W0 build Lane L3 (#4309) implements the seq core.**
+> **Headline — OWNER DECIDED 2026-07-15: the ordering primitive is `seq`.** The two-track divergence is resolved at the mechanism level:
+> - **#4262 v3.5's shared persistent causal `seq` is THE (and only) subsequent design for C2/C3/C6.**
+> - **#4269's epoch-ms/version/delete-last comparator is DEMOTED** to: the landed first-cut implementation; the flag-OFF compatibility & rollback path. It is **no longer a trust basis for history completeness**, and **strict mode must NOT fall back to it.** The on-main W0-1 lock doc (`…contiguity-trusted-since-…`) is superseded on ordering + C2/C3/C6 by #4262 v3.5.
+> - **This is a MECHANISM decision only — NOT a formal ratify.** Formally marking #4262 RATIFIED still awaits a full **containment PASS** (§4). #4262 stays PROPOSED with the direction locked.
 >
-> These are complementary in intent (mine *is* the design for the deferred C2/C3/C6) but conflict on the mechanism: **`seq` vs `epoch-ms`.** Both were driven by you (you PASS'd #4269's first-cut *and* mandated `seq` while reviewing #4262 in round 6). **Owner reconciliation item #1:** confirm #4262 v3.5 (seq) is THE design for the deferred C2/C3/C6 and supersedes the epoch-ms comparator, so the two lock docs are unified (mine extends/replaces the parallel one for C2/C3/C6). The rest of this map assumes that resolution.
+> **Trust-origin boundary the owner pinned:** L3 (#4309) landing alone is **NOT** W0 built-to-trust. Its legacy `seq` **backfill numbers the revisions and markers tables separately (row_number per table) ⇒ values can overlap ⇒ the backfilled seq is not causal evidence.** (Forward inserts share one `meta_record_chain_seq` and ARE totally ordered; only the legacy backfill overlaps, which is fine because pre-checkpoint data is fail-closed.) The real trust origin is: **L4 all-writer fence → L5 time-anchored baseline checkpoint → strict enablement.** Strict mode is not trustworthy until L4+L5 land and the checkpoint cutover runs on a PASS'd host.
 
 ---
 
@@ -60,7 +61,7 @@ The recovery-flag containment check (`target=both`) **FAILED CLOSED** (run 29398
 **Remaining ≈ 15–27 dev pw** (Option-B; +6–10 Option-A). Down from #4288's 20–32 because **L3 is built** (Draft) and the design phase is closed. Safe-enable minimum = W0 correction (L4/L5, ~2–4 pw on top of L3) + Revert-atomicity (L8, 2–4 pw). The real critical path remains **owner decisions + containment PASS**, not raw pw.
 
 ## §7 Owner decisions that gate the line
-1. **Reconcile the two W0-1 locks** — confirm #4262 v3.5 (seq) is THE C2/C3/C6 design, superseding the epoch-ms comparator; unify the docs.
+1. **W0-1 mechanism — DECIDED (`seq`, 2026-07-15).** Remaining owner action = **formal ratify of #4262 v3.5, which awaits containment PASS** (not before). The on-main epoch-ms lock is superseded on ordering/C2/C3/C6.
 2. **Ratify #4262 v3.5** (`8828edbd0`) · **#4274 rev7** (`de03c7337`) · **#4224** (after #4273 re-measure).
 3. **Containment:** merge #4316, authorize staging re-normalization, re-run to full PASS (Phase 0).
 4. **#4205 T-state** — revive / fold into History Center / close.
