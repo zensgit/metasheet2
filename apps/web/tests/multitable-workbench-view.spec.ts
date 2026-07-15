@@ -3,6 +3,15 @@ import { computed, createApp, defineComponent, h, nextTick, reactive, ref, type 
 
 const showErrorSpy = vi.fn()
 const showSuccessSpy = vi.fn()
+// G-10 follow-up: captures the xlsx tab name the export path passes down, without writing a real
+// workbook (buildXlsxBuffer's own trim/slice/default behavior is covered by multitable/xlsx-mapping.test.ts).
+// vi.hoisted: the mocked module is imported synchronously by MultitableWorkbench.vue, so a plain
+// top-level const would still be in its TDZ when the factory runs.
+const { buildXlsxBufferMock } = vi.hoisted(() => ({ buildXlsxBufferMock: vi.fn(() => new Uint8Array([1, 2, 3])) }))
+vi.mock('../src/multitable/import/xlsx-mapping', async () => {
+  const actual = await vi.importActual<any>('../src/multitable/import/xlsx-mapping')
+  return { ...actual, buildXlsxBuffer: buildXlsxBufferMock }
+})
 const pushSpy = vi.fn().mockResolvedValue(undefined)
 const useMultitableSheetRealtimeMock = vi.fn()
 // The workflow-designer manager button is gated on caps.canManageAutomation AND
@@ -296,7 +305,7 @@ vi.mock('../src/multitable/components/MetaGridTable.vue', () => ({
       collapsedGroupKeys: { type: Array, default: () => [] },
       rowDensity: { type: String, default: undefined },
     },
-    emits: ['select-record', 'open-comments', 'open-field-comments', 'resize-column', 'toggle-group'],
+    emits: ['select-record', 'open-comments', 'open-field-comments', 'resize-column', 'toggle-group', 'bulk-edit', 'selection-change'],
     render() {
       return h('div', {
         'data-grid-column-widths': JSON.stringify(this.$props.columnWidths ?? {}),
@@ -350,6 +359,22 @@ vi.mock('../src/multitable/components/MetaGridTable.vue', () => ({
             onClick: () => this.$emit('toggle-group', 'todo'),
           },
           'toggle-group',
+        ),
+        h(
+          'button',
+          {
+            'data-bulk-edit': 'true',
+            onClick: () => this.$emit('bulk-edit', { mode: 'clear', recordIds: ['rec_1'] }),
+          },
+          'bulk-edit',
+        ),
+        h(
+          'button',
+          {
+            'data-select-rows': 'rec_1',
+            onClick: () => this.$emit('selection-change', ['rec_1']),
+          },
+          'selection-change',
         ),
       ])
     },
@@ -1093,6 +1118,7 @@ function createGridMock() {
     setGroupField: vi.fn(), setGroupFields: vi.fn(),
     goToPage: vi.fn(),
     patchCell: vi.fn(),
+    bulkPatch: vi.fn(),
     createRecord: vi.fn(),
     deleteRecord: vi.fn(),
     mergeRemoteRecord: vi.fn().mockReturnValue(true),
@@ -1559,6 +1585,114 @@ describe('MultitableWorkbench view wiring', () => {
       Object.defineProperty(URL, 'createObjectURL', { configurable: true, value: originalCreateObjectURL })
       Object.defineProperty(URL, 'revokeObjectURL', { configurable: true, value: originalRevokeObjectURL })
     }
+  })
+
+  // G-10 follow-up (owner ruling 2026-07-15, 普通用户面优先显示名称): the export download filename is a
+  // normal-user surface. When the backend route returns no Content-Disposition filename, the fallback
+  // must be the active sheet's display NAME ('Orders', already in workbench.sheets scope) — never the
+  // raw sheet id ('sheet_orders').
+  it('export filename fallback uses the sheet display name, not the raw sheet id', async () => {
+    workbenchMock.client.exportSheet.mockResolvedValue({
+      blob: new Blob(['Title\nAlpha'], { type: 'text/csv' }),
+      filename: '',
+    })
+    const downloads: string[] = []
+    const originalCreateObjectURL = URL.createObjectURL
+    const originalRevokeObjectURL = URL.revokeObjectURL
+    Object.defineProperty(URL, 'createObjectURL', { configurable: true, value: vi.fn(() => 'blob:multitable-export') })
+    Object.defineProperty(URL, 'revokeObjectURL', { configurable: true, value: vi.fn() })
+    const clickSpy = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(function (this: HTMLAnchorElement) {
+      downloads.push(this.download)
+    })
+    try {
+      mountWorkbench()
+      await flushUi()
+
+      container!.querySelector<HTMLButtonElement>('[data-export-csv="true"]')!.click()
+      await flushUi()
+      document.body.querySelector<HTMLButtonElement>('.meta-export__btn--primary')!.click()
+      await flushUi()
+
+      expect(downloads).toEqual(['Orders.csv'])
+    } finally {
+      clickSpy.mockRestore()
+      Object.defineProperty(URL, 'createObjectURL', { configurable: true, value: originalCreateObjectURL })
+      Object.defineProperty(URL, 'revokeObjectURL', { configurable: true, value: originalRevokeObjectURL })
+    }
+  })
+
+  // G-10 follow-up: the selected-rows client-side export path names BOTH the downloaded file and the
+  // xlsx workbook tab after the sheet's display name (previously both were the raw sheet id).
+  it('selected-rows xlsx export names the file and the workbook tab after the sheet display name', async () => {
+    const downloads: string[] = []
+    const originalCreateObjectURL = URL.createObjectURL
+    const originalRevokeObjectURL = URL.revokeObjectURL
+    Object.defineProperty(URL, 'createObjectURL', { configurable: true, value: vi.fn(() => 'blob:multitable-export') })
+    Object.defineProperty(URL, 'revokeObjectURL', { configurable: true, value: vi.fn() })
+    const clickSpy = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(function (this: HTMLAnchorElement) {
+      downloads.push(this.download)
+    })
+    buildXlsxBufferMock.mockClear()
+    try {
+      mountWorkbench()
+      await flushUi()
+
+      // Select a row (grid multi-select), then open the export dialog and switch to selected+xlsx.
+      container!.querySelector<HTMLButtonElement>('[data-select-rows="rec_1"]')!.click()
+      await flushUi()
+      container!.querySelector<HTMLButtonElement>('[data-export-csv="true"]')!.click()
+      await flushUi()
+      const selectedRadio = document.body.querySelector<HTMLInputElement>('.meta-export__opt input[value="selected"]')
+      expect(selectedRadio).not.toBeNull()
+      expect(selectedRadio!.disabled).toBe(false)
+      selectedRadio!.click()
+      document.body.querySelector<HTMLInputElement>('.meta-export__opt input[value="xlsx"]')!.click()
+      await flushUi()
+      document.body.querySelector<HTMLButtonElement>('.meta-export__btn--primary')!.click()
+      // The xlsx path lazily `import('xlsx')` before building — module loading can take macrotask
+      // time, so poll (bounded) rather than relying on microtask flushes alone.
+      for (let i = 0; i < 100 && downloads.length === 0; i += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 20))
+        await flushUi()
+      }
+
+      expect(downloads).toEqual(['Orders.xlsx'])
+      expect(buildXlsxBufferMock).toHaveBeenCalledTimes(1)
+      expect(buildXlsxBufferMock.mock.calls[0]?.[1]).toEqual(expect.objectContaining({ sheetName: 'Orders' }))
+    } finally {
+      clickSpy.mockRestore()
+      Object.defineProperty(URL, 'createObjectURL', { configurable: true, value: originalCreateObjectURL })
+      Object.defineProperty(URL, 'revokeObjectURL', { configurable: true, value: originalRevokeObjectURL })
+    }
+  })
+
+  // G-10 follow-up: bulk-edit failure samples (dialog error + toast, normal-user surfaces) lead with
+  // the record's display name resolved from the already-loaded rows ('rec_1' → its Title value
+  // 'Alpha'), never the bare record id. The reason string stays raw.
+  it('bulk-edit failure samples lead with the record display name, not the raw record id', async () => {
+    gridMock.bulkPatch.mockResolvedValue({
+      updated: [],
+      failed: [{ recordId: 'rec_1', reason: 'locked' }],
+    })
+    mountWorkbench()
+    await flushUi()
+
+    container!.querySelector<HTMLButtonElement>('[data-bulk-edit="true"]')!.click()
+    await flushUi()
+    // Real MetaBulkEditDialog (teleported): clear mode only needs a field selection to submit.
+    const fieldSelect = document.body.querySelector<HTMLSelectElement>('.meta-bulk-edit__select')
+    expect(fieldSelect).not.toBeNull()
+    fieldSelect!.value = 'fld_title'
+    fieldSelect!.dispatchEvent(new Event('change'))
+    await flushUi()
+    document.body.querySelector<HTMLButtonElement>('.meta-bulk-edit__btn--primary')!.click()
+    await flushUi()
+
+    expect(gridMock.bulkPatch).toHaveBeenCalledWith({ fieldId: 'fld_title', value: null, recordIds: ['rec_1'] })
+    const errorEl = document.body.querySelector('.meta-bulk-edit__error')
+    expect(errorEl?.textContent).toContain('Alpha: locked')
+    expect(errorEl?.textContent).not.toContain('rec_1')
+    expect(showErrorSpy).toHaveBeenCalledWith(expect.stringContaining('Alpha: locked'))
   })
 
   it('syncs external base/sheet/view props after mount', async () => {

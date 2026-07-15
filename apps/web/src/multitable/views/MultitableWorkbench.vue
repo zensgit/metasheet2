@@ -610,6 +610,7 @@ import { recordLabel } from '../utils/meta-record-labels'
 import { resolveButtonFieldProperty } from '../utils/field-config'
 import {
   bulkFailure as fmtBulkFailure,
+  bulkFailureSamples as fmtBulkFailureSamples,
   bulkPartialSuccess as fmtBulkPartialSuccess,
   bulkSuccess as fmtBulkSuccess,
   bulkVersionConflict as fmtBulkVersionConflict,
@@ -3618,6 +3619,17 @@ function onGridSelectionChange(recordIds: string[]) {
 type GridExportField = (typeof scopedGridFields)['value'][number]
 type GridExportRow = (typeof grid.rows)['value'][number]
 
+// G-10 follow-up (owner ruling 2026-07-15): exports are a normal-user surface — the download
+// filename and the xlsx tab use the active sheet's display NAME (already in workbench.sheets
+// scope), never the bare sheetId. When no name resolves, the generic 'export' fallback is used
+// rather than the raw id (HI-1: zero new data paths). The server route path still wins when it
+// supplies a Content-Disposition filename (itself sheet-name based).
+const activeSheetExportName = computed(() => {
+  const id = workbench.activeSheetId.value
+  const name = id ? workbench.sheets.value.find((sheet) => sheet.id === id)?.name : undefined
+  return typeof name === 'string' && name.trim().length > 0 ? name.trim() : ''
+})
+
 function onExportCsv() { openExportDialog('csv') }
 async function onExportXlsx() { openExportDialog('xlsx') }
 
@@ -3654,14 +3666,14 @@ async function exportAllRowsViaRoute(fieldIds: string[], format: 'csv' | 'xlsx')
       fieldIds,
       format,
     })
-    triggerDownloadNamed(blob, filename || `${sheetId}.${format}`)
+    triggerDownloadNamed(blob, filename || `${activeSheetExportName.value || 'export'}.${format}`)
   } catch (err: any) {
     showError(err?.message ?? wb(format === 'csv' ? 'toast.csvExportFailed' : 'toast.excelExportFailed', isZh.value))
   }
 }
 
 function triggerDownload(blob: Blob, extension: string) {
-  triggerDownloadNamed(blob, `${workbench.activeSheetId.value || 'export'}.${extension}`)
+  triggerDownloadNamed(blob, `${activeSheetExportName.value || 'export'}.${extension}`)
 }
 
 // Download a blob under an exact filename (the server's Content-Disposition for the route path).
@@ -3709,7 +3721,10 @@ async function doExportXlsx(fields: GridExportField[], rowList: GridExportRow[])
         return String(v)
       }),
     )
-    const sheetName = (workbench.activeSheetId.value || 'export').slice(0, 31)
+    // Sheet display name for the xlsx tab (G-10 follow-up, same ruling as the filename above).
+    // Excel rejects []:*?/\ in tab names, so replace them; buildXlsxBuffer trims, slices to 31
+    // chars, and falls back to 'Sheet1' if the sanitized name comes out empty.
+    const sheetName = (activeSheetExportName.value || 'export').replace(/[\\/\[\]:*?]/g, ' ')
     const buffer = buildXlsxBuffer(xlsxModule, { sheetName, headers, rows })
     triggerDownload(new Blob([buffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }), 'xlsx')
   } catch (err: any) {
@@ -3877,10 +3892,10 @@ async function onBulkEditApply(payload: { mode: 'set' | 'clear'; fieldId: string
     const updatedCount = result.updated.length
     const requestedCount = payload.recordIds.length
     if (result.failed.length > 0) {
-      const sampleFailures = result.failed
-        .slice(0, 3)
-        .map((failure) => `${failure.recordId}: ${failure.reason}`)
-        .join('; ')
+      // G-10 follow-up (owner ruling 2026-07-15): normal-user surface — each sampled failure leads
+      // with the record's display name (bulkFillRecordName over the already-loaded rows; its own
+      // fallback keeps the raw id only when the row is no longer loaded). Zero new fetches.
+      const sampleFailures = fmtBulkFailureSamples(result.failed, bulkFillRecordName)
       bulkEditDialog.error = fmtBulkFailure(result.failed.length, requestedCount, sampleFailures, isZh.value)
       if (updatedCount > 0) {
         bulkEditDialog.resultMessage = fmtBulkPartialSuccess(updatedCount, requestedCount, payload.mode, isZh.value)
