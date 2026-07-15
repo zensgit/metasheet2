@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { describe, it, expect } from 'vitest'
 
 // --- RecordDrawer field type parity ---
@@ -99,15 +101,53 @@ describe('calendar date field type recognition', () => {
 })
 
 // --- Print CSS coverage ---
+
+/**
+ * All `@media print { ... }` blocks in a source string, brace-matched so the whole block
+ * (including nested rule braces) is captured. Used by the two source-reading tests below.
+ */
+function extractPrintBlocks(source: string): string[] {
+  const blocks: string[] = []
+  const re = /@media print/g
+  let m: RegExpExecArray | null
+  while ((m = re.exec(source)) !== null) {
+    const open = source.indexOf('{', m.index)
+    if (open === -1) continue
+    let depth = 0
+    for (let i = open; i < source.length; i++) {
+      if (source[i] === '{') depth++
+      else if (source[i] === '}' && --depth === 0) {
+        blocks.push(source.slice(open, i + 1))
+        break
+      }
+    }
+  }
+  return blocks
+}
+
+const WEB_ROOT = join(__dirname, '..')
+
+// NOTE (2026-07-14, follow-up #57): 'toolbar hides in print', 'workbench base-bar and actions hide
+// in print' and 'grid interactive elements hide in print' below are self-referential placeholders
+// from the original Phase-12 verification pass — each asserts on a locally-declared string/array
+// and never reads component source, so they cannot go red if the real print CSS drifts. Rewriting
+// them is a docketed follow-up; this pass only re-pinned the two tests that referenced the retired
+// MetaViewTabBar, as real source-reading assertions.
 describe('print CSS coverage', () => {
   it('toolbar hides in print', () => {
     const rule = '@media print { .meta-toolbar { display: none !important; } }'
     expect(rule).toContain('display: none')
   })
 
-  it('view tab bar hides in print', () => {
-    const rule = '@media print { .meta-tab-bar { display: none !important; } }'
-    expect(rule).toContain('display: none')
+  it('sheet/view rail hides in print', () => {
+    // Reads the ACTUAL SFC: post-P2-2a/2b (#4237/#4264) the rail print rule lives in
+    // MetaSheetViewRail.vue (the retired MetaViewTabBar.vue / .meta-tab-bar rule no longer exists
+    // anywhere in the tree). Deleting that print rule turns this test red.
+    const source = readFileSync(join(WEB_ROOT, 'src/multitable/components/MetaSheetViewRail.vue'), 'utf-8')
+    const railPrintBlocks = extractPrintBlocks(source).filter((block) =>
+      /\.meta-view-rail[^{}]*\{[^{}]*display:\s*none/.test(block),
+    )
+    expect(railPrintBlocks.length).toBeGreaterThan(0)
   })
 
   it('workbench base-bar and actions hide in print', () => {
@@ -123,9 +163,20 @@ describe('print CSS coverage', () => {
     expect(hiddenGridSelectors).toHaveLength(5)
   })
 
-  it('complete print chain: tab-bar + toolbar + workbench chrome + grid interactives', () => {
-    const printComponents = ['MetaViewTabBar', 'MetaToolbar', 'MultitableWorkbench', 'MetaGridTable']
-    expect(printComponents).toHaveLength(4)
+  it('complete print chain: sheet/view rail + toolbar + workbench chrome + grid interactives', () => {
+    // Every component in the print chain must exist on disk (readFileSync throws on a rename/move)
+    // and carry at least one @media print block (dropping the block turns this test red).
+    const PRINT_CHAIN: Record<string, string> = {
+      MetaSheetViewRail: 'src/multitable/components/MetaSheetViewRail.vue',
+      MetaToolbar: 'src/multitable/components/MetaToolbar.vue',
+      MultitableWorkbench: 'src/multitable/views/MultitableWorkbench.vue',
+      MetaGridTable: 'src/multitable/components/MetaGridTable.vue',
+    }
+    expect(Object.keys(PRINT_CHAIN)).toHaveLength(4)
+    for (const [name, relPath] of Object.entries(PRINT_CHAIN)) {
+      const source = readFileSync(join(WEB_ROOT, relPath), 'utf-8')
+      expect(extractPrintBlocks(source).length, `${name} (${relPath}) must contain an @media print block`).toBeGreaterThan(0)
+    }
   })
 })
 
