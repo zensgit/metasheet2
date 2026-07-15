@@ -97,62 +97,19 @@
         @open-person-picker="(field) => emit('open-person-picker', field)"
         @run-button="(payload) => emit('run-button', payload)"
       />
-      <div v-else class="meta-record-drawer__history">
-        <div v-if="historyLoading" class="meta-record-drawer__history-state">{{ l('record.historyLoading') }}</div>
-        <div v-else-if="historyError" class="meta-record-drawer__history-state meta-record-drawer__history-state--error">{{ historyError }}</div>
-        <div v-else-if="!canLoadHistory" class="meta-record-drawer__history-state">{{ l('record.historyUnavailable') }}</div>
-        <div v-else-if="historyItems.length === 0" class="meta-record-drawer__history-state">{{ l('record.historyEmpty') }}</div>
-        <ol v-else class="meta-record-drawer__history-list">
-          <li v-for="(item, idx) in historyItems" :key="item.id" class="meta-record-drawer__history-item">
-            <div class="meta-record-drawer__history-main">
-              <span class="meta-record-drawer__history-action">{{ historyActionLabel(item.action) }}</span>
-              <span class="meta-record-drawer__history-version">v{{ item.version }}</span>
-            </div>
-            <div class="meta-record-drawer__history-meta">
-              <span>{{ formatHistoryTime(item.createdAt) }}</span>
-              <span v-if="item.actorId">{{ historyActor(item.actorName || item.actorId, isZh) }}</span>
-              <span>{{ item.source }}</span>
-            </div>
-            <div v-if="item.changedFieldIds.length" class="meta-record-drawer__history-fields">
-              <div
-                v-for="d in historyFieldDiffs(item, idx)"
-                :key="d.fieldId"
-                class="meta-record-drawer__history-diff"
-                data-test="history-field-diff"
-              >
-                <input
-                  v-if="canRestoreTo(item)"
-                  type="checkbox"
-                  class="meta-record-drawer__history-diff-select"
-                  data-test="history-field-select"
-                  :checked="isRestoreFieldSelected(item, d.fieldId)"
-                  :aria-label="d.label"
-                  @change="toggleRestoreField(item, d.fieldId)"
-                />
-                <span class="meta-record-drawer__history-diff-label">{{ d.label }}</span>
-                <span class="meta-record-drawer__history-diff-values">
-                  <span
-                    v-if="d.hasBefore"
-                    class="meta-record-drawer__history-diff-before"
-                    :title="d.before"
-                  >{{ d.before || '—' }}</span>
-                  <span v-if="d.hasBefore" class="meta-record-drawer__history-diff-arrow" aria-hidden="true">→</span>
-                  <span class="meta-record-drawer__history-diff-after" :title="d.after">{{ d.after || '—' }}</span>
-                </span>
-              </div>
-            </div>
-            <button
-              v-if="canRestoreTo(item)"
-              type="button"
-              class="meta-record-drawer__history-restore"
-              data-test="record-history-restore"
-              :title="l('record.restoreTitle')"
-              :disabled="selectedRestoreFields(item).length === 0"
-              @click="requestRestore(item)"
-            >{{ l('record.restore') }}</button>
-          </li>
-        </ol>
-      </div>
+      <MetaRecordHistoryPanel
+        v-else
+        :record="record"
+        :fields="fields"
+        :can-edit="canEdit"
+        :row-actions="rowActions"
+        :link-summaries-by-field="linkSummariesByField"
+        :person-summaries-by-field="personSummariesByField"
+        :attachment-summaries-by-field="attachmentSummariesByField"
+        :sheet-id="sheetId"
+        :api-client="apiClient"
+        @restore="(payload) => emit('restore', payload)"
+      />
     </div>
     <div v-else class="meta-record-drawer__empty">{{ l('record.noRecord') }}</div>
     <MetaRecordPermissionManager
@@ -180,7 +137,6 @@ import type {
   MetaFieldPermission,
   MetaField,
   MetaRecord,
-  MetaRecordRevision,
   MetaRecordSubscriptionStatus,
   MetaRowActions,
 } from '../types'
@@ -189,6 +145,7 @@ import { MtButton } from '../ui'
 import MetaCommentActionChip from './MetaCommentActionChip.vue'
 import MetaRecordPermissionManager from './MetaRecordPermissionManager.vue'
 import MetaRecordFieldsPanel from './MetaRecordFieldsPanel.vue'
+import MetaRecordHistoryPanel from './MetaRecordHistoryPanel.vue'
 import {
   resolveCommentAffordanceStateClass,
   resolveRecordCommentAffordance,
@@ -196,11 +153,10 @@ import {
 import { useLocale } from '../../composables/useLocale'
 import {
   recordLabel,
-  historyActor,
   type MetaRecordLabelKey,
 } from '../utils/meta-record-labels'
 import type { AiShortcutState } from '../composables/useAiShortcut'
-import { formatFieldDisplay } from '../utils/field-display'
+import { resolveCanComment } from '../utils/recordDisplay'
 
 const props = withDefaults(defineProps<{
   visible: boolean
@@ -270,18 +226,12 @@ const l = (key: MetaRecordLabelKey) => recordLabel(key, isZh.value)
 
 const showRecordPermissions = ref(false)
 const activeTab = ref<'details' | 'history'>('details')
-const historyItems = ref<MetaRecordRevision[]>([])
-const historyLoading = ref(false)
-const historyError = ref('')
-let historyRequestId = 0
 const recordSubscribed = ref(false)
 const subscriptionLoading = ref(false)
 const subscriptionError = ref('')
 let subscriptionRequestId = 0
 
 watch(() => props.record, () => {
-  historyItems.value = []
-  historyError.value = ''
   recordSubscribed.value = false
   subscriptionError.value = ''
 })
@@ -294,26 +244,13 @@ watch(
   { immediate: true },
 )
 
-watch(
-  // `record.version` is in the deps so a restore (which bumps the version via the workbench's
-  // refreshSelectedRecordContext) reloads the timeline while the user is still on the History tab —
-  // otherwise the new restore revision wouldn't appear and the list could read stale/empty.
-  [() => activeTab.value, () => props.visible, () => props.record?.id, () => props.record?.version, () => props.sheetId, () => props.apiClient],
-  () => {
-    if (activeTab.value === 'history') void loadRecordHistory()
-  },
-  { immediate: false },
-)
-
 const currentRecordIndex = computed(() => {
   if (!props.record || !props.recordIds.length) return -1
   return props.recordIds.indexOf(props.record.id)
 })
 
-const fieldLabelById = computed(() => new Map(props.fields.map((field) => [field.id, field.name])))
-const canLoadHistory = computed(() => !!props.apiClient && !!props.sheetId && !!props.record?.id)
 const canLoadSubscription = computed(() => !!props.apiClient && !!props.sheetId && !!props.record?.id)
-const resolvedCanComment = computed(() => props.rowActions?.canComment ?? props.canComment)
+const resolvedCanComment = computed(() => resolveCanComment(props.rowActions, props.canComment))
 const resolvedCanDelete = computed(() => props.rowActions?.canDelete ?? props.canDelete)
 const drawerCommentAffordance = computed(() => resolveRecordCommentAffordance(props.commentPresence))
 const drawerCommentButtonClass = computed(() =>
@@ -328,32 +265,6 @@ function navigatePrev() {
 function navigateNext() {
   const idx = currentRecordIndex.value
   if (idx >= 0 && idx < props.recordIds.length - 1) emit('navigate', props.recordIds[idx + 1])
-}
-
-async function loadRecordHistory() {
-  const apiClient = props.apiClient
-  const sheetId = props.sheetId
-  const recordId = props.record?.id
-  if (!apiClient || !sheetId || !recordId) {
-    historyItems.value = []
-    historyLoading.value = false
-    historyError.value = ''
-    return
-  }
-  const requestId = ++historyRequestId
-  historyLoading.value = true
-  historyError.value = ''
-  try {
-    const items = await apiClient.listRecordHistory(sheetId, recordId, { limit: 50 })
-    if (requestId !== historyRequestId) return
-    historyItems.value = items
-  } catch (error: any) {
-    if (requestId !== historyRequestId) return
-    historyItems.value = []
-    historyError.value = error?.message ?? l('record.errorHistoryLoad')
-  } finally {
-    if (requestId === historyRequestId) historyLoading.value = false
-  }
 }
 
 function applySubscriptionStatus(status: MetaRecordSubscriptionStatus) {
@@ -408,105 +319,6 @@ async function toggleRecordSubscription() {
   }
 }
 
-function historyActionLabel(action: MetaRecordRevision['action']): string {
-  if (action === 'create') return l('record.historyActionCreated')
-  if (action === 'delete') return l('record.historyActionDeleted')
-  return l('record.historyActionUpdated')
-}
-
-// Slice 3: a prior NON-delete revision is restorable when the user can edit the record. The current
-// version (== record.version) shows no button (restoring to it is a no-op). Delete revisions are not
-// restorable here (undelete is Slice 2b → the endpoint returns RESTORE_UNSUPPORTED).
-function canRestoreTo(item: MetaRecordRevision): boolean {
-  return (
-    props.canEdit
-    && props.rowActions?.canEdit !== false
-    && !!props.record
-    && item.action !== 'delete'
-    && item.version !== props.record.version
-  )
-}
-
-// Per-field restore selection, keyed by revision id. Default (no entry) = ALL changed fields selected
-// (full restore, the prior behavior). Unchecking narrows to a subset → emits fieldIds; re-checking all
-// → omits fieldIds (canonical full restore). Only the actor-visible changedFieldIds are selectable
-// (they are already permission-masked server-side), so a hidden field can never be targeted.
-const restoreFieldSelection = ref<Record<string, Set<string>>>({})
-function isRestoreFieldSelected(item: MetaRecordRevision, fieldId: string): boolean {
-  const sel = restoreFieldSelection.value[item.id]
-  return sel ? sel.has(fieldId) : true
-}
-function toggleRestoreField(item: MetaRecordRevision, fieldId: string): void {
-  const next = new Set(restoreFieldSelection.value[item.id] ?? item.changedFieldIds)
-  if (next.has(fieldId)) next.delete(fieldId)
-  else next.add(fieldId)
-  restoreFieldSelection.value = { ...restoreFieldSelection.value, [item.id]: next }
-}
-function selectedRestoreFields(item: MetaRecordRevision): string[] {
-  return item.changedFieldIds.filter((fieldId) => isRestoreFieldSelected(item, fieldId))
-}
-
-function requestRestore(item: MetaRecordRevision): void {
-  const record = props.record
-  if (!record || !canRestoreTo(item)) return
-  const selected = selectedRestoreFields(item)
-  if (selected.length === 0) return // nothing selected → no-op (button is also disabled)
-  // All changed fields selected → full restore (omit fieldIds); a proper subset → per-field restore.
-  const fieldIds = selected.length === item.changedFieldIds.length ? undefined : selected
-  emit('restore', { recordId: record.id, targetVersion: item.version, expectedVersion: record.version, ...(fieldIds ? { fieldIds } : {}) })
-}
-
-// Per-field before→after diff for a revision. LEAK-SAFE BY CONSTRUCTION: the backend
-// (redactRecordRevisionEntry / maskStoredRecordFieldIds) already strips fields this actor can't see
-// from changedFieldIds AND patch AND snapshot before they reach the wire, so iterating changedFieldIds
-// and reading only patch/snapshot cannot surface a masked field. `after` = the value at this revision
-// (snapshot preferred, patch fallback when snapshot is unavailable); `before` = the value at the
-// next-older visible revision's snapshot (absent when there's no prior snapshot — e.g. the create row,
-// a pruned gap, or an unavailable snapshot → show after only).
-interface HistoryFieldDiff { fieldId: string; label: string; before: string; after: string; hasBefore: boolean }
-function historyFieldDiffs(item: MetaRecordRevision, index: number): HistoryFieldDiff[] {
-  const olderSnap = historyItems.value[index + 1]?.snapshot ?? null
-  const has = (obj: Record<string, unknown> | null | undefined, key: string): boolean =>
-    !!obj && Object.prototype.hasOwnProperty.call(obj, key)
-  return item.changedFieldIds.map((fieldId) => {
-    const field = props.fields.find((f) => f.id === fieldId) ?? null
-    const fmt = (v: unknown): string => (field ? formatValue(field, v) : textControlValue(v))
-    const afterRaw = has(item.snapshot, fieldId)
-      ? item.snapshot![fieldId]
-      : has(item.patch, fieldId) ? item.patch[fieldId] : undefined
-    const hasBefore = has(olderSnap, fieldId)
-    return {
-      fieldId,
-      label: fieldLabelById.value.get(fieldId) ?? fieldId,
-      before: hasBefore ? fmt(olderSnap![fieldId]) : '',
-      after: fmt(afterRaw),
-      hasBefore,
-    }
-  })
-}
-
-function formatHistoryTime(value: string): string {
-  if (!value) return ''
-  const timestamp = Date.parse(value)
-  if (Number.isNaN(timestamp)) return value
-  return new Date(timestamp).toLocaleString()
-}
-
-function formatValue(field: MetaField, v: unknown): string {
-  return formatFieldDisplay({
-    field,
-    value: v,
-    linkSummaries: props.linkSummariesByField?.[field.id],
-    personSummaries: props.personSummariesByField?.[field.id],
-    attachmentSummaries: props.attachmentSummariesByField?.[field.id],
-    isZh: isZh.value,
-  })
-}
-
-function textControlValue(value: unknown): string {
-  return value === null || value === undefined ? '' : String(value)
-}
-
 </script>
 
 <style scoped>
@@ -541,22 +353,4 @@ function textControlValue(value: unknown): string {
 .meta-record-drawer__tab--active { background: #111827; color: #fff; box-shadow: 0 2px 8px rgba(15, 23, 42, 0.16); }
 .meta-record-drawer__watch-error { margin: -4px 0 12px; color: #b91c1c; font-size: 12px; }
 .meta-record-drawer__empty { padding: 32px; text-align: center; color: #999; }
-.meta-record-drawer__history-state { padding: 18px 12px; border: 1px dashed #d8e1ee; border-radius: 8px; color: #64748b; font-size: 13px; text-align: center; }
-.meta-record-drawer__history-state--error { border-color: #fecaca; color: #b91c1c; background: #fef2f2; }
-.meta-record-drawer__history-list { display: flex; flex-direction: column; gap: 10px; padding: 0; margin: 0; list-style: none; }
-.meta-record-drawer__history-item { padding: 10px 12px; border: 1px solid #e5e7eb; border-radius: 10px; background: #fff; }
-.meta-record-drawer__history-main { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 5px; }
-.meta-record-drawer__history-action { font-size: 13px; font-weight: 700; color: #111827; }
-.meta-record-drawer__history-version { font-size: 11px; font-weight: 700; color: #2563eb; background: #eff6ff; border-radius: 999px; padding: 2px 7px; }
-.meta-record-drawer__history-meta { display: flex; flex-wrap: wrap; gap: 6px; font-size: 11px; color: #64748b; }
-.meta-record-drawer__history-fields { margin-top: 8px; font-size: 12px; color: #374151; word-break: break-word; }
-.meta-record-drawer__history-diff { display: flex; align-items: baseline; gap: 8px; padding: 2px 0; }
-.meta-record-drawer__history-diff + .meta-record-drawer__history-diff { border-top: 1px dashed #f1f5f9; }
-.meta-record-drawer__history-diff-label { flex: 0 0 auto; max-width: 38%; font-weight: 600; color: #475569; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.meta-record-drawer__history-diff-values { flex: 1 1 auto; display: flex; align-items: baseline; gap: 6px; min-width: 0; }
-.meta-record-drawer__history-diff-before { color: #94a3b8; text-decoration: line-through; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 45%; }
-.meta-record-drawer__history-diff-arrow { flex: 0 0 auto; color: #cbd5e1; }
-.meta-record-drawer__history-diff-after { color: #0f172a; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
-.meta-record-drawer__history-diff-select { flex: 0 0 auto; margin: 0 2px 0 0; cursor: pointer; }
-.meta-record-drawer__history-restore:disabled { opacity: 0.45; cursor: not-allowed; }
 </style>
