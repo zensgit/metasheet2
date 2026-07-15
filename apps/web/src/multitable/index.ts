@@ -46,6 +46,11 @@ export { default as MetaBasePicker } from './components/MetaBasePicker.vue'
 // MetaRecordInspector — kept (not removed) for barrel-export consumers with no audited inventory
 // (lock §6bis Medium-4). MetaRecordInspector is the canonical component going forward; exported here
 // so new/external consumers can reach it directly instead of via the deprecated shell.
+/**
+ * @deprecated W2 S3 (OD-W2-7=b): thin compat shell — use {@link MetaRecordInspector} instead.
+ * Same props/emits; this export only delegates to it and will be removed in a future
+ * consumer-audited major cleanup.
+ */
 export { default as MetaRecordDrawer } from './components/MetaRecordDrawer.vue'
 export { default as MetaRecordInspector } from './components/MetaRecordInspector.vue'
 export { default as MetaCommentsDrawer } from './components/MetaCommentsDrawer.vue'

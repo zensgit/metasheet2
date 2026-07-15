@@ -266,6 +266,53 @@ describe('MetaRecordInspector (W2 S3 shell)', () => {
       await flushUi()
       app.unmount()
     })
+
+    // Gate P2 regression golden (PR #4327 verdict): the single root keydown handler receives EVERY
+    // keydown in the inspector subtree, so its arrow-nav branch MUST be scoped to events originating
+    // from a `[role="tab"]` (the `withinTablist` guard in onInspectorKeydown). The gate empirically
+    // proved that guard is load-bearing — removing it makes arrows typed anywhere in a panel hijack
+    // tab navigation — yet no test pinned it (neuterable with all tests green = untested guard).
+    // These two cases red immediately if the `if (!withinTablist) return` line is removed.
+    it('ArrowRight/ArrowLeft from a text input INSIDE the active tabpanel do NOT change the active tab (arrow-scoping guard)', async () => {
+      const { container, app } = mountInspector()
+      await flushUi()
+      const [detailsTab] = tabButtons(container)
+      expect(detailsTab.getAttribute('aria-selected')).toBe('true')
+      // The default harness (string field + canEdit) renders the fields panel's text input — a real
+      // in-panel editing surface where arrow keys mean "move the caret", never "switch tabs".
+      const input = container.querySelector<HTMLInputElement>('.meta-record-drawer__input')!
+      expect(input).not.toBeNull()
+      input.focus()
+      const right = new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true, cancelable: true })
+      input.dispatchEvent(right)
+      await flushUi()
+      expect(detailsTab.getAttribute('aria-selected')).toBe('true')
+      // And the event must NOT be preventDefault-ed either — the browser's own caret movement in the
+      // input must survive (a swallowed-but-not-switching variant would still be a regression).
+      expect(right.defaultPrevented).toBe(false)
+      const left = new KeyboardEvent('keydown', { key: 'ArrowLeft', bubbles: true, cancelable: true })
+      input.dispatchEvent(left)
+      await flushUi()
+      expect(detailsTab.getAttribute('aria-selected')).toBe('true')
+      expect(left.defaultPrevented).toBe(false)
+      app.unmount()
+    })
+
+    it('ArrowRight/Home/End from the tabpanel element itself do NOT change the active tab (arrow-scoping guard, non-input target)', async () => {
+      const { container, app } = mountInspector()
+      await flushUi()
+      const [detailsTab] = tabButtons(container)
+      const panel = tabPanel(container)!
+      panel.focus() // the tabpanel carries tabindex="0" — a keyboard user can land focus on it directly
+      for (const key of ['ArrowRight', 'ArrowLeft', 'Home', 'End']) {
+        const event = new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true })
+        panel.dispatchEvent(event)
+        await flushUi()
+        expect(detailsTab.getAttribute('aria-selected')).toBe('true')
+        expect(event.defaultPrevented).toBe(false)
+      }
+      app.unmount()
+    })
   })
 
   describe('Escape closes the inspector', () => {
