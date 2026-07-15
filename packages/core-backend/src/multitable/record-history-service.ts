@@ -273,6 +273,27 @@ export async function hasVersionMarkerTable(query: QueryFn): Promise<boolean> {
   return false
 }
 
+// W0-1 v3.5 (design lock #4262 §2) deploy-window guard for the `seq` column added to BOTH
+// `meta_record_revisions` and `meta_record_version_markers` by `zzzz20260715120000_add_meta_record_chain_seq`.
+// Mirrors `hasVersionMarkerTable`/`hasRestoredFromVersionColumn`: an information_schema probe (never a raw
+// SELECT that could 42703-abort a caller's transaction), cached only on the POSITIVE result. Consumed
+// EXCLUSIVELY by the strict (`MULTITABLE_HISTORY_CONTIGUITY_STRICT`) precheck path — the default path never
+// references `seq` and is unaffected by a pre-migration deploy window.
+let chainSeqColumnsPresent = false
+export async function hasChainSeqColumns(query: QueryFn): Promise<boolean> {
+  if (chainSeqColumnsPresent) return true
+  const res = await query(
+    `SELECT 1 FROM information_schema.columns
+     WHERE table_name = 'meta_record_revisions' AND column_name = 'seq' AND table_schema = ANY(current_schemas(false))
+     LIMIT 1`,
+  )
+  if ((res.rows as unknown[]).length > 0) {
+    chainSeqColumnsPresent = true
+    return true
+  }
+  return false
+}
+
 export async function recordVersionMarker(
   query: QueryFn,
   input: { sheetId: string; recordId: string; version: number; kind: 'lock' | 'unlock'; actorId?: string | null },
