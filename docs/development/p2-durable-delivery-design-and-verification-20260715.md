@@ -1,6 +1,6 @@
 # P2 Durable Delivery — 设计与验证 (Design & Verification)
 
-**状态 (2026-07-15)**：S1 已落 main;S2-a 全绿待复审;S2-b 起 HOLD。**flag `AUTOMATION_DURABLE_DELIVERY_ENABLED` 恒 OFF**,当前零 runtime 行为。
+**状态 (2026-07-15 傍晚)**：S1 已落 main;S2-a→S2-b→S3→S4-a 四级 stacked PR 链全绿待复审(#4322←#4334←#4335←#4336);S4-b/S5/S6/S7 为余量。**flag `AUTOMATION_DURABLE_DELIVERY_ENABLED` 恒 OFF**,当前零 runtime 行为。
 **授权口径**:owner 逐切片实审 runtime,**无自合**;FWB / 附件 / flag 开启在完整实现 + 八场景验收前保持 gated。
 
 ---
@@ -38,10 +38,11 @@
 |---|---|---|
 | **S1** | outbox 两表 schema + 默认 OFF flag + 行类型 | 🏁 **已落 main** `f07e7fc38` (#4303) |
 | **S2-a** | claim 引擎:claim(含 claim 内 poison)/ complete / reschedule / poison / 未知 key 告警缝 | 📋 **PR #4322 `935a9b909` 全绿待复审** |
-| **S2-b** | poll+dispatch 循环(claim → adapter → resolve;对 `findUnknownConsumerKeys` 告警) | ⛔ HOLD |
-| **S3** | 版本化路由 manifest + 启动期完整性断言 + 滚动部署 | ⬜ |
-| **S4** | producer 侧原子入队(替换全部 commit-then-emit 站点,覆盖 manifest 全事件族) | ⬜ |
-| **S5** | consumer adapter + poison-terminal 接线 | ⬜ |
+| **S2-b** | dispatch 循环:registry(重复注册=启动错误)+ tick(告警→claim→直接 await adapter→fence-CAS resolve)+ 确定性指数 backoff + flag-off 拒启 | 📋 **PR #4334 全绿待复审**(stacked) |
+| **S3** | 版本化路由 manifest(锁 §283-291 全集,frozen)+ **双向**完整性断言 + `SUPPORTED_MANIFEST_VERSIONS` 滚动部署锚 | 📋 **PR #4335 待复审**(stacked) |
+| **S4-a** | producer 原子入队 helper:`enqueueOutboxEvent(trx, event)` 同事务落 outbox+全 fan-out;未路由/空白身份=硬错 | 📋 **PR #4336 待复审**(stacked) |
+| **S4-b** | 把真实 produce 站点(审批完成/record 写/表单提交/评论)接到 enqueue,flag 双路 | ⬜ 余量(热文件,须 S2-a 链定稿后) |
+| **S5** | 真 adapter 替换匿名总线订阅(结构性关闭不可枚举方向)+ 外发幂等键 + poison-terminal 接线 | ⬜ 余量 |
 | **S6/S7** | 升级迁移 backfill;崩溃注入 V 系列 | ⬜ |
 | **后续** | FWB-1 / 附件 / FWB-2 / FWB-3 → **八场景全链验收** | 🔒 gated |
 
@@ -72,6 +73,21 @@
 
 **空转防线**:两点接线(plugin-tests.yml 白名单 + vitest.config.ts exclude)⇒ 不能 skip-green;CI 日志实证 `✓ …dispatcher-claim-realdb.test.ts (13 tests)`。
 
+## 5b. S2-b dispatch 循环 (PR #4334)
+
+真库 12 测:成功/可重试(backoff 随 attempts 递增)/永久三路;adapter **抛异常**(带 secret 形消息)→ values-free `adapter_error`、原文永不入库;**逐行隔离**(A 抛不挡 B done);未知 key 告警且行原样 `pending`;告警回调抛异常不打死 tick;纯 backoff 数学(cap/clamp/防溢出);flag-off 拒启 + flag-on 真排空 + stop()。
+**变异证明**:throw→poison 映射变异 → THROW 测试红;抑制未知 key 探测 → rolling-deploy 测试红。
+
+## 5c. S3 manifest (PR #4335)
+
+v1 = 锁 §283-291 全集(approval.{approved,rejected,revoked,cancelled}→bridge/trigger/projection;task_created→task-trigger;record.*→record-trigger+webhook-bridge;comment.created→webhook-bridge;form.submitted→record-trigger),frozen。**双向**断言以 registry 为唯一枚举源:漏 adapter(行永久 park)与多 adapter(死配置)都点名精确 key 抛错。单测 7/7(跑在 required 无-DB 道 = 它的真实 CI 道);去掉方向 2 → 恰好其测试红。
+锁第三方向(匿名 `eventBus.subscribe` 闭包不可枚举)在 S5 用「替换订阅站点为注册 adapter」结构性关闭。
+
+## 5d. S4-a producer 原子入队 (PR #4336)
+
+`enqueueOutboxEvent(trx, event)`:调用方事务内落 outbox 行 + 每 manifest key 一条 pending 行;REJECT/ROLLBACK 路径**构造性**零投递;未路由事件族/空白身份/非法深度=边界硬错;打 `manifest_version` 戳。
+真库 6 测:**原子性证明**(事务内可见,ROLLBACK 后两表零行)、COMMIT 后精确 3-consumer fan-out、端到端 enqueue→tick **逐 consumer 独立**(bridge 暂败,trigger/projection 照常 done)。变异:只入队第一个 key → fan-out 断言红。**四规格同库回归 45/45**。
+
 ---
 
 ## 6. 验证方法论 (本线standing)
@@ -86,7 +102,7 @@
 
 ## 7. 待办 / 风险
 
-- **S2-b 起全部 HOLD**,等 owner 对 `935a9b909` 的裁决。
+- **S4-b/S5 前置 = owner 复审整条 stack**(S2-a API 已在评审中两改;在未定稿基座上把热文件 automation-service.ts 接进来会放大返工)。S4-b 每站点传**自己的事务客户端**,S7 崩溃注入逐站点证原子性。
 - **S3 的滚动部署对称性**:#4203 §243 要求**双侧对称**(producer 全 N-aware 才可展开只有 N 认识的路由)——I6 只解决 worker 侧;**producer 侧漏写 = 该事件对 K 永远没有行,告警看不到**(无行可 park),必须靠激活门槛而非运行期防线。
 - **外发净一次**依赖 endpoint 幂等键绑稳定事件/动作 identity、跨 fence 不变;端点不支持 ⇒ `outcome_unknown` 不自动重发(#4203 §340)。属 S5。
 - **八场景验收**是 FWB/附件/flag 开启的硬前置。
