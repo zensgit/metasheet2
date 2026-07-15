@@ -46,7 +46,7 @@ describe('dingtalk recipient field warnings', () => {
       fields,
       true,
     )).toEqual([
-      'record.missingDestinationId 不是此表中的已知字段；钉钉群消息需要能解析为目标 ID 的字段 ID。',
+      'record.missingDestinationId 不是此数据表中的已知字段；钉钉群消息需要能解析为目标 ID 的字段 ID。',
       'record.assigneeUserIds 是用户字段；请改用钉钉个人收件人字段。',
     ])
   })

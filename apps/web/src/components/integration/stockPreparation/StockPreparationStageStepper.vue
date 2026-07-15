@@ -208,6 +208,14 @@ const CAVEAT_LABELS: Record<StockPreparationStageCaveat, { zh: string; en: strin
   text-align: left;
 }
 
+/* H4 keyboard: the stage buttons are the dashboard's main navigation surface and are reached by Tab.
+   Without an explicit ring they fall back to the UA default, which is inconsistent across browsers and
+   low-contrast against the status-tinted left border. Same ring as the H4-1 retry (one system). */
+.sp-stage__button:focus-visible {
+  outline: 2px solid var(--ms-color-primary);
+  outline-offset: 1px;
+}
+
 .sp-stage__button:hover {
   background: var(--el-fill-color-light);
 }

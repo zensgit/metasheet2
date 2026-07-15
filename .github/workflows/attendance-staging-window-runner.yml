@@ -4,9 +4,16 @@ run-name: "Attendance Staging Window Runner: ${{ inputs.action }}${{ inputs.acti
 
 # One dispatch = ONE action of the attendance five-window staging acceptance
 # (docs/development/attendance-staging-window-bundle-20260702.md):
-#   deploy — pin staging backend+web to a full-SHA GHCR tag, migrate, verify build+auth
-#   smoke  — run one window smoke (ae4 / rd45 / otbank-v18 / mp6 / hmr5) in-container
-#   status — read-only staging snapshot
+#   deploy  — pin staging backend+web to a full-SHA GHCR tag, migrate, verify build+auth
+#   smoke   — run one window smoke (ae4 / rd45 / otbank-v18 / mp6 / hmr5) in-container
+#   status  — read-only staging snapshot
+#   migrate — backup + clone-rehearsal + apply, per docs/operations/staging-migration-
+#             alignment-runbook.md. The only path forward from action=deploy's migration-
+#             alignment gate reporting `do_not_run_full_migrate`: pg_dump the real staging
+#             DB to a host file (metadata-only in the artifact — never the dump itself),
+#             restore it into a throwaway rehearsal DB inside the same postgres container,
+#             run migrate.js against ONLY the rehearsal DB, and only touch the real staging
+#             DB once that rehearsal is fully green.
 #
 # Modeled on attendance-remote-log-snapshot-prod.yml (SSH via deploy secrets, artifact
 # upload, 15-minute timeout, single concurrency group). Remote logic lives in the
@@ -26,7 +33,7 @@ on:
         description: 'What to run against the STAGING stack'
         required: true
         type: choice
-        options: [deploy, smoke, status]
+        options: [deploy, smoke, status, migrate]
         default: status
       deploy_sha:
         description: 'FULL 40-char commit SHA (GHCR tags are full-SHA). Required for deploy and smoke.'
@@ -71,7 +78,7 @@ jobs:
           SET_WINDOW_ENV: ${{ inputs.set_window_env }}
         run: |
           set -euo pipefail
-          case "$ACTION" in deploy|smoke|status) ;; *) echo "invalid action: $ACTION" >&2; exit 2 ;; esac
+          case "$ACTION" in deploy|smoke|status|migrate) ;; *) echo "invalid action: $ACTION" >&2; exit 2 ;; esac
           if [[ "$ACTION" == "deploy" || "$ACTION" == "smoke" ]]; then
             if [[ ! "$DEPLOY_SHA" =~ ^[0-9a-f]{40}$ ]]; then
               echo "deploy_sha must be the FULL 40-char lowercase commit SHA for action=$ACTION (GHCR tags are full-SHA; short prefixes fail with manifest unknown), got: '$DEPLOY_SHA'" >&2

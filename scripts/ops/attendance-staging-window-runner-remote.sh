@@ -3,10 +3,20 @@
 #
 # Remote (deploy-host) half of .github/workflows/attendance-staging-window-runner.yml.
 # Executes ONE action per invocation against the STAGING stack only:
-#   deploy — pin staging backend+web to a full-SHA image tag, migrate, verify build+auth
-#   smoke  — run one of the five window smokes in-container (bundle doc:
-#            docs/development/attendance-staging-window-bundle-20260702.md)
-#   status — read-only snapshot (containers, health, settings, pending migrations)
+#   deploy  — pin staging backend+web to a full-SHA image tag, migrate, verify build+auth
+#   smoke   — run one of the five window smokes in-container (bundle doc:
+#             docs/development/attendance-staging-window-bundle-20260702.md)
+#   status  — read-only snapshot (containers, health, settings, pending migrations)
+#   migrate — backup + clone-rehearsal + apply, per
+#             docs/operations/staging-migration-alignment-runbook.md and
+#             docs/development/staging-migration-alignment-runbook-verification-20260519.md.
+#             Only reachable path from a `do_not_run_full_migrate` decision surfaced by
+#             action=deploy's migration-alignment gate: pg_dump the real staging DB to a
+#             HOST file (never uploaded — business data), clone-restore it into a
+#             throwaway `window_runner_rehearsal` DB inside the SAME postgres container,
+#             run migrate.js against ONLY the rehearsal DB, and require it to fully
+#             succeed (pending=0) before ever touching the real staging DB. The rehearsal
+#             DB is always dropped (trap-guarded), including on failure.
 #
 # HARD SAFETY RAILS:
 #   * Operates exclusively on the staging compose file docker-compose.app.staging.yml
@@ -25,6 +35,18 @@ source "${HERE}/attendance-window-runner-pipeline.lib.sh"
 
 log() { echo "[window-runner] $*"; }
 fail() { echo "[window-runner][error] $*" >&2; exit 1; }
+
+hash_value() {
+  # sha256 of a file, tool-portable (GNU sha256sum on the deploy host; shasum fallback).
+  local file="$1"
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$file" | awk '{print $1}'
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$file" | awk '{print $1}'
+  else
+    fail "no sha256 tool available (need sha256sum or shasum) to hash ${file}"
+  fi
+}
 
 ACTION="${ACTION:?ACTION is required (deploy|smoke|status)}"
 DEPLOY_SHA="${DEPLOY_SHA:-}"
@@ -46,6 +68,13 @@ STAGING_WEB_HEALTH_URL="http://127.0.0.1:8082/api/health"
 STAGING_BACKEND_HEALTH_URL="http://127.0.0.1:18900/health"
 IN_CONTAINER_BASE_URL="http://127.0.0.1:8900"
 MIGRATE_JS="packages/core-backend/dist/src/db/migrate.js"
+# Fixed, clearly-synthetic rehearsal DB name for action=migrate. Lives inside the SAME
+# postgres container/server as staging, never on a different host, and is always dropped
+# (created fresh each run — never assumed to persist).
+REHEARSAL_DB="window_runner_rehearsal"
+# Host-side backup dir for action=migrate (HOME is writable; the staging repo dir is not
+# — proven by run 29313154282, same reason OVERRIDE_FILE above lives under OUTPUT_DIR).
+BACKUP_DIR="${HOME}/window-runner-backups"
 
 resolve_home_path() {
   local raw="$1"
@@ -116,6 +145,26 @@ staging_exec_env() {
 require_sha() {
   [[ "$DEPLOY_SHA" =~ ^[0-9a-f]{40}$ ]] \
     || fail "deploy_sha must be the FULL 40-char lowercase commit SHA (GHCR tags are full-SHA; a 9-char prefix fails with manifest unknown — 2026-04-26 postmortem), got: '${DEPLOY_SHA}'"
+}
+
+resolve_backend_database_url() {
+  # stdout: the RUNNING staging backend container's own DATABASE_URL (never hardcoded —
+  # read from the container's actual env, sourced from docker/app.staging.env on the host).
+  local dsn
+  dsn="$(docker exec "$BACKEND_CONTAINER" printenv DATABASE_URL 2>/dev/null || true)"
+  [[ -n "$dsn" ]] || fail "could not resolve DATABASE_URL from ${BACKEND_CONTAINER}'s own env"
+  printf '%s' "$dsn"
+}
+
+resolve_postgres_creds() {
+  # stdout: "<POSTGRES_USER> <POSTGRES_DB>" resolved from the RUNNING postgres container's
+  # own env (never hardcoded — same docker/app.staging.env source as the backend's DSN).
+  local pg_user pg_db
+  pg_user="$(docker exec "$POSTGRES_CONTAINER" printenv POSTGRES_USER 2>/dev/null || true)"
+  pg_db="$(docker exec "$POSTGRES_CONTAINER" printenv POSTGRES_DB 2>/dev/null || true)"
+  [[ -n "$pg_user" ]] || fail "could not resolve POSTGRES_USER from ${POSTGRES_CONTAINER}'s own env"
+  [[ -n "$pg_db" ]] || fail "could not resolve POSTGRES_DB from ${POSTGRES_CONTAINER}'s own env"
+  printf '%s %s' "$pg_user" "$pg_db"
 }
 
 fetch_health_commit() {
@@ -396,11 +445,21 @@ action_smoke() {
   local smoke_src="${PROD_REPO_DIR}/scripts/ops/${smoke_script}"
   [[ -f "$smoke_src" ]] || fail "smoke script missing in host-synced repo: ${smoke_src}"
 
-  # The deployed build must BE the SHA the stamps will name (bundle §2).
-  local live_commit
+  # The deployed build must BE the SHA the stamps will name (bundle §2). Same dual-channel
+  # identity as the deploy verifier: staging /api/health build.commit is env-pinned stale
+  # (L6 precedent; proven again by run 29378042837), so fall back to the backend container
+  # image tag — but only for a HEALTHY backend (health must answer ok:true).
+  local live_commit live_image
   live_commit="$(fetch_health_commit)"
-  [[ "$live_commit" == "$DEPLOY_SHA" ]] \
-    || fail "staging /api/health build.commit is '${live_commit:-<unreachable>}' but deploy_sha=${DEPLOY_SHA}; refusing to smoke a mismatched build"
+  if [[ "$live_commit" != "$DEPLOY_SHA" ]]; then
+    live_image="$(docker inspect -f '{{.Config.Image}}' "$BACKEND_CONTAINER" 2>/dev/null || true)"
+    if [[ "$live_image" == "ghcr.io/${IMAGE_OWNER}/metasheet2-backend:${DEPLOY_SHA}" ]] \
+       && curl -sS --max-time 10 "$STAGING_WEB_HEALTH_URL" | grep -q '"ok":true'; then
+      log "smoke identity: health build.commit stale ('${live_commit:-<unreachable>}', env-pinned) but backend image tag matches deploy sha: ${live_image}"
+    else
+      fail "staging identity failed BOTH channels for smoke: /api/health build.commit='${live_commit:-<unreachable>}' and backend image='${live_image:-<none>}' vs deploy_sha=${DEPLOY_SHA}; refusing to smoke a mismatched build"
+    fi
+  fi
 
   prepare_container_runner
   local admin_id admin_token
@@ -506,6 +565,186 @@ action_status() {
   return "$status_rc"
 }
 
+action_migrate_backup() {
+  # Step 2 of the runbook-compliant sequence: pg_dump the REAL staging DB to a HOST file
+  # (never the staging repo dir — not writable by this SSH user; never uploaded as a CI
+  # artifact — it contains business data). Records sha256 + byte size + path only.
+  # Here-string (not `< <(...)` process substitution): bash appends a trailing newline
+  # when feeding a here-string, so `read` sees a complete line and exits 0 even though
+  # resolve_postgres_creds's printf has no trailing \n. With process substitution instead,
+  # `read` would hit EOF before a newline and return 1, tripping `set -e`.
+  local pg_user pg_db
+  read -r pg_user pg_db <<< "$(resolve_postgres_creds)"
+
+  mkdir -p "$BACKUP_DIR"
+  local ts
+  ts="$(date -u +%Y%m%dT%H%M%SZ)"
+  MIGRATE_BACKUP_PATH="${BACKUP_DIR}/staging-${ts}-pre-migrate.dump"
+
+  log "backup: pg_dump -Fc -U ${pg_user} ${pg_db} -> ${MIGRATE_BACKUP_PATH}"
+  docker exec "$POSTGRES_CONTAINER" pg_dump -Fc -U "$pg_user" "$pg_db" > "$MIGRATE_BACKUP_PATH"
+  [[ -s "$MIGRATE_BACKUP_PATH" ]] \
+    || fail "backup file is empty: ${MIGRATE_BACKUP_PATH}; refusing to proceed without a working backup (runbook: pg_dump first is non-negotiable)"
+
+  MIGRATE_BACKUP_SHA256="$(hash_value "$MIGRATE_BACKUP_PATH")"
+  MIGRATE_BACKUP_BYTES="$(wc -c < "$MIGRATE_BACKUP_PATH" | tr -d '[:space:]')"
+  MIGRATE_BACKUP_PG_USER="$pg_user"
+  MIGRATE_BACKUP_PG_DB="$pg_db"
+
+  {
+    echo "path=${MIGRATE_BACKUP_PATH}"
+    echo "sha256=${MIGRATE_BACKUP_SHA256}"
+    echo "bytes=${MIGRATE_BACKUP_BYTES}"
+    echo "pg_user=${pg_user}"
+    echo "pg_db=${pg_db}"
+    echo "note=dump stays on the deploy host at the path above; NOT uploaded (business data, public-repo artifacts are world-downloadable); retention is an operator decision"
+  } > "${OUTPUT_DIR}/backup-metadata.txt"
+  log "backup OK: ${MIGRATE_BACKUP_BYTES} bytes, sha256=${MIGRATE_BACKUP_SHA256} (dump stays on host, not uploaded)"
+}
+
+action_migrate_rehearse() {
+  # Step 3: clone-rehearsal. Restores the just-taken backup into a throwaway DB inside
+  # the SAME postgres container/server, then runs migrate.js against ONLY that DB. The
+  # real staging DB is never touched by this function. The rehearsal DB (and the
+  # container-local copy of the dump used to restore it) are ALWAYS removed on exit —
+  # trap-guarded so an abort mid-rehearsal still cleans up.
+  # Globals (NOT locals): the EXIT trap must see these under every bash invocation mode
+  # (function locals are not reliably visible to traps under `bash -c`). Review P3, round 6.
+  REHEARSAL_PG_USER="$MIGRATE_BACKUP_PG_USER"
+  REHEARSAL_CONTAINER_DUMP_PATH="${CONTAINER_RUNNER_DIR}/rehearsal-${RUN_STAMP}.dump"
+  local pg_user="$REHEARSAL_PG_USER"
+  local container_dump_path="$REHEARSAL_CONTAINER_DUMP_PATH"
+
+  cleanup_rehearsal() {
+    # Fixed synthetic name only — this can never name the real staging DB.
+    docker exec "$POSTGRES_CONTAINER" psql -U "$REHEARSAL_PG_USER" -d postgres -v ON_ERROR_STOP=0 \
+      -c "DROP DATABASE IF EXISTS ${REHEARSAL_DB};" >/dev/null 2>&1 || true
+    docker exec "$POSTGRES_CONTAINER" rm -f "$REHEARSAL_CONTAINER_DUMP_PATH" >/dev/null 2>&1 || true
+  }
+
+  log "rehearsal: dropping any prior ${REHEARSAL_DB} left by an aborted run"
+  cleanup_rehearsal
+  trap cleanup_rehearsal EXIT
+
+  log "rehearsal: creating ${REHEARSAL_DB} (clearly-synthetic fixed name; same postgres server as staging)"
+  docker exec "$POSTGRES_CONTAINER" psql -U "$pg_user" -d postgres -v ON_ERROR_STOP=1 \
+    -c "CREATE DATABASE ${REHEARSAL_DB};" 2>&1 | tee "${OUTPUT_DIR}/rehearsal-create-db.log"
+
+  log "rehearsal: copying the backup into the postgres container (pg_restore -j needs a seekable file, not stdin)"
+  docker exec "$POSTGRES_CONTAINER" mkdir -p "$CONTAINER_RUNNER_DIR"
+  docker cp "$MIGRATE_BACKUP_PATH" "${POSTGRES_CONTAINER}:${container_dump_path}"
+
+  log "rehearsal: restoring into ${REHEARSAL_DB}"
+  # The audit-log partitions inherit a row trigger from their partitioned parent
+  # (set_retention_period), which lives in the PRE-data section and fires during COPY,
+  # querying audit_retention_policies before it is restored (run 29340321213).
+  # pg_restore --disable-triggers is only honored in DATA-ONLY restores and is silently
+  # inert in a full restore (empirically falsified in run 29347058494). The mechanism
+  # that actually holds for a full parallel restore: DB-level
+  # session_replication_role=replica (normal triggers do not fire in replica mode; the
+  # DB-level GUC binds every -j worker connection). RESET before the rehearsal migrate
+  # so migrations run under normal trigger semantics (faithful rehearsal).
+  docker exec "$POSTGRES_CONTAINER" psql -U "$pg_user" -d postgres -v ON_ERROR_STOP=1 \
+    -c "ALTER DATABASE ${REHEARSAL_DB} SET session_replication_role = 'replica';"
+  docker exec "$POSTGRES_CONTAINER" pg_restore -j 2 -U "$pg_user" -d "$REHEARSAL_DB" "$container_dump_path" \
+    2>&1 | tee "${OUTPUT_DIR}/rehearsal-restore.log"
+  docker exec "$POSTGRES_CONTAINER" psql -U "$pg_user" -d postgres -v ON_ERROR_STOP=1 \
+    -c "ALTER DATABASE ${REHEARSAL_DB} RESET session_replication_role;"
+
+  local backend_dsn rehearsal_dsn
+  backend_dsn="$(resolve_backend_database_url)"
+  rehearsal_dsn="$(dsn_replace_database "$backend_dsn" "$REHEARSAL_DB")"
+
+  # Channel-independent isolation guard (review P2, round 6): the -e DATABASE_URL override
+  # only isolates if migrate.js resolves its DSN from process.env (SECRET_PROVIDER=env).
+  # Under file/vault providers the override is SILENTLY IGNORED and the "rehearsal" would
+  # migrate the REAL staging DB. Defend independently of that channel: count applied
+  # migrations in BOTH DBs via direct psql before and after the rehearsal run, and require
+  # the real DB's count to be UNCHANGED and the rehearsal DB's to have ADVANCED.
+  count_applied() { # count_applied <db-name>
+    docker exec "$POSTGRES_CONTAINER" psql -U "$REHEARSAL_PG_USER" -d "$1" -tA \
+      -c "SELECT COALESCE((SELECT count(*) FROM kysely_migration), 0);" 2>/dev/null | tr -d '[:space:]'
+  }
+  local real_db real_before rehearsal_before real_after rehearsal_after
+  real_db="$(dsn_database_name "$backend_dsn")"
+  [[ -n "$real_db" && "$real_db" != "$REHEARSAL_DB" ]] \
+    || fail "could not resolve the real staging DB name distinct from the rehearsal DB (got '${real_db:-<empty>}')"
+  real_before="$(count_applied "$real_db")"
+  rehearsal_before="$(count_applied "$REHEARSAL_DB")"
+  [[ "$real_before" =~ ^[0-9]+$ && "$rehearsal_before" =~ ^[0-9]+$ ]] \
+    || fail "pre-rehearsal applied-migration counts unreadable (real='${real_before}' rehearsal='${rehearsal_before}')"
+  log "rehearsal isolation baseline: applied(real ${real_db})=${real_before} applied(${REHEARSAL_DB})=${rehearsal_before}"
+
+  log "rehearsal: running migrate.js against the REHEARSAL DB only (staging DB untouched so far)"
+  staging_exec_env "DATABASE_URL=${rehearsal_dsn}" -- node "$MIGRATE_JS" < /dev/null 2>&1 \
+    | tee "${OUTPUT_DIR}/rehearsal-migrate-run.log"
+
+  real_after="$(count_applied "$real_db")"
+  rehearsal_after="$(count_applied "$REHEARSAL_DB")"
+  log "rehearsal isolation check: applied(real ${real_db}) ${real_before}->${real_after}; applied(${REHEARSAL_DB}) ${rehearsal_before}->${rehearsal_after}"
+  {
+    echo "real_db=${real_db} real_before=${real_before} real_after=${real_after}"
+    echo "rehearsal_before=${rehearsal_before} rehearsal_after=${rehearsal_after}"
+  } > "${OUTPUT_DIR}/rehearsal-isolation-check.txt"
+  [[ "$real_after" == "$real_before" ]] \
+    || fail "ISOLATION BREACH: real staging DB applied-migration count changed ${real_before}->${real_after} during the rehearsal run — the DATABASE_URL override was ignored (non-env secret provider?). STOP; restore from ${MIGRATE_BACKUP_PATH} per runbook before ANY further action"
+  [[ "$rehearsal_after" -gt "$rehearsal_before" || "$rehearsal_after" -ge "$real_before" ]] \
+    || fail "rehearsal DB applied count did not advance (${rehearsal_before}->${rehearsal_after}) — the rehearsal migrate did not actually run against ${REHEARSAL_DB}; refusing to treat rehearsal as green"
+
+  log "rehearsal: confirming pending=0 against the rehearsal DB"
+  staging_exec_env "DATABASE_URL=${rehearsal_dsn}" -- node "$MIGRATE_JS" --list < /dev/null 2>&1 \
+    | tee "${OUTPUT_DIR}/rehearsal-migrate-list-after.txt"
+  grep -q '^Pending: 0$' "${OUTPUT_DIR}/rehearsal-migrate-list-after.txt" \
+    || fail "rehearsal migrate run did not leave the rehearsal DB at pending=0 (see rehearsal-migrate-list-after.txt); staging DB was NOT touched, stopping per the runbook"
+
+  log "rehearsal: green — dropping ${REHEARSAL_DB} and the in-container dump copy"
+  cleanup_rehearsal
+  trap - EXIT
+  log "rehearsal OK"
+}
+
+action_migrate_apply() {
+  # Step 4: only reached if action_migrate_rehearse fully succeeded. Same before/after
+  # pending-list discipline as action_deploy's migration step, against the REAL staging DB.
+  log "apply: migrate-list BEFORE (real staging DB)"
+  staging_exec node "$MIGRATE_JS" --list < /dev/null 2>&1 | tee "${OUTPUT_DIR}/apply-migrate-list-before.txt"
+
+  log "apply: running migrate.js against the REAL staging DB (rehearsal was green)"
+  staging_exec node "$MIGRATE_JS" < /dev/null 2>&1 | tee "${OUTPUT_DIR}/apply-migrate-run.log"
+
+  staging_exec node "$MIGRATE_JS" --list < /dev/null 2>&1 | tee "${OUTPUT_DIR}/apply-migrate-list-after.txt"
+  grep -q '^Pending: 0$' "${OUTPUT_DIR}/apply-migrate-list-after.txt" \
+    || fail "staging migrate did not end at pending=0 after apply (see apply-migrate-list-after.txt); restore from ${MIGRATE_BACKUP_PATH} if needed (runbook §Failure modes)"
+  log "apply OK: staging migrate ended at pending=0"
+}
+
+action_migrate() {
+  prepare_container_runner
+  action_migrate_backup
+  action_migrate_rehearse
+  action_migrate_apply
+
+  # Step 5: post-checks.
+  curl -fsS --max-time 10 "$STAGING_WEB_HEALTH_URL" > "${OUTPUT_DIR}/health-web.json" \
+    || fail "post-apply health check failed: ${STAGING_WEB_HEALTH_URL} unreachable"
+  grep -q '"ok":true' "${OUTPUT_DIR}/health-web.json" \
+    || fail "post-apply health check did not report ok:true (see health-web.json)"
+  auth_round_trip
+  snapshot_staging_ps
+
+  {
+    echo "action=migrate"
+    echo "backup_path=${MIGRATE_BACKUP_PATH}"
+    echo "backup_sha256=${MIGRATE_BACKUP_SHA256}"
+    echo "backup_bytes=${MIGRATE_BACKUP_BYTES}"
+    echo "rehearsal_db=${REHEARSAL_DB}"
+    echo "rehearsal_result=ok"
+    echo "apply_result=ok"
+    echo "result=ok"
+  } > "${OUTPUT_DIR}/summary.txt"
+  log "migrate OK: backup=${MIGRATE_BACKUP_PATH} rehearsal=ok apply=ok"
+}
+
 # --- main ------------------------------------------------------------------------------
 
 mkdir -p "$OUTPUT_DIR"
@@ -515,5 +754,6 @@ case "$ACTION" in
   deploy) action_deploy ;;
   smoke) action_smoke ;;
   status) action_status ;;
-  *) fail "unknown action: ${ACTION} (expected deploy|smoke|status)" ;;
+  migrate) action_migrate ;;
+  *) fail "unknown action: ${ACTION} (expected deploy|smoke|status|migrate)" ;;
 esac

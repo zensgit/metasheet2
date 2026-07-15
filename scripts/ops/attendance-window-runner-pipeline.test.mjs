@@ -108,6 +108,54 @@ test('workflow shape contract: remote commands run under explicit `bash -o pipef
   assert.doesNotMatch(yaml, /bash\s+-s\b/, 'the workflow must not fall back to `ssh ... bash -s` (login-shell pipefail is not guaranteed)')
 })
 
+test('dsn_database_name: extracts the db-name path segment, stripping the query string', () => {
+  const cases = [
+    ['postgresql://u:p@staging-postgres:5432/metasheet', 'metasheet'],
+    ['postgresql://u:p@staging-postgres:5432/metasheet?sslmode=disable', 'metasheet'],
+    ['postgres://u@h/window_runner_rehearsal?a=1&b=2', 'window_runner_rehearsal'],
+  ]
+  for (const [dsn, expected] of cases) {
+    const result = runPipefailBash(`source '${LIB}'\ndsn_database_name '${dsn}'`)
+    assert.equal(result.status, 0, `expected exit 0 for dsn=${dsn}; stderr: ${result.stderr}`)
+    assert.equal(result.stdout.trim(), expected, `dsn=${dsn}`)
+  }
+})
+
+test('dsn_replace_database: swaps the db-name path segment, preserving host/port/query', () => {
+  const cases = [
+    // [input DSN, new db name, expected output]
+    [
+      'postgres://metasheet:change-me@postgres:5432/metasheet',
+      'window_runner_rehearsal',
+      'postgres://metasheet:change-me@postgres:5432/window_runner_rehearsal',
+    ],
+    [
+      // The exact runbook / app.staging.env.example shape, with the ?sslmode=disable
+      // suffix the docker/app.staging.env.example comment calls out — must survive.
+      'postgres://metasheet:change-me@postgres:5432/metasheet?sslmode=disable',
+      'window_runner_rehearsal',
+      'postgres://metasheet:change-me@postgres:5432/window_runner_rehearsal?sslmode=disable',
+    ],
+    [
+      // postgresql:// scheme + multiple query params.
+      'postgresql://appuser:secret@db-host:5433/dbname?sslmode=require&connect_timeout=10',
+      'window_runner_rehearsal',
+      'postgresql://appuser:secret@db-host:5433/window_runner_rehearsal?sslmode=require&connect_timeout=10',
+    ],
+    [
+      // No explicit port, no query string.
+      'postgres://metasheet@postgres/metasheet',
+      'window_runner_rehearsal',
+      'postgres://metasheet@postgres/window_runner_rehearsal',
+    ],
+  ]
+  for (const [dsn, newDb, expected] of cases) {
+    const result = runPipefailBash(`source '${LIB}'\ndsn_replace_database '${dsn}' '${newDb}'`)
+    assert.equal(result.status, 0, `expected exit 0 for dsn=${dsn}; stderr: ${result.stderr}`)
+    assert.equal(result.stdout, expected, `dsn rewrite mismatch for input: ${dsn}`)
+  }
+})
+
 test('staging-only contract: the remote script names only staging containers', () => {
   const source = readFileSync(REMOTE_SH, 'utf8')
   for (const name of [
@@ -132,4 +180,16 @@ test('staging-only contract: the remote script names only staging containers', (
     /docker-compose\.app\.yml/,
     'remote script must never reference the prod-track compose file',
   )
+})
+
+test('rehearsal restore keeps the replica-role trigger suppression (load-bearing: partition-inherited row triggers fire during COPY without it — runs 29340321213/29347058494; --disable-triggers is inert in full restores)', () => {
+  const remote = readFileSync(REMOTE_SH, 'utf8')
+  const restoreIdx = remote.indexOf('pg_restore -j 2 -U')
+  assert.notEqual(restoreIdx, -1, 'expected the rehearsal pg_restore invocation to exist')
+  const setIdx = remote.indexOf("SET session_replication_role = 'replica'")
+  const resetIdx = remote.indexOf('RESET session_replication_role')
+  assert.notEqual(setIdx, -1, 'rehearsal lost the DB-level replica-role SET before restore')
+  assert.notEqual(resetIdx, -1, 'rehearsal lost the RESET after restore (rehearsal migrate must run under normal trigger semantics)')
+  assert.ok(setIdx < restoreIdx, 'replica-role SET must come BEFORE the pg_restore invocation')
+  assert.ok(restoreIdx < resetIdx, 'RESET must come AFTER the pg_restore invocation')
 })

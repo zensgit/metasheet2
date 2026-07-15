@@ -133,7 +133,10 @@
       @reset-to-shared="onResetToShared"
     />
     <div class="mt-workbench__content">
-      <aside class="mt-workbench__rail" :class="{ 'mt-workbench__rail--collapsed': railCollapsed }">
+      <aside
+        class="mt-workbench__rail"
+        :class="{ 'mt-workbench__rail--collapsed': railCollapsed, 'mt-workbench__rail--drawer': isRailDrawerOpen }"
+      >
         <div class="mt-workbench__rail-head">
           <div v-if="basePickerBases.length" v-show="!railCollapsed" class="mt-workbench__base-bar">
             <MetaBasePicker
@@ -146,6 +149,7 @@
             />
           </div>
           <button
+            ref="railToggleRef"
             type="button"
             data-testid="rail-collapse-toggle"
             class="mt-workbench__rail-toggle"
@@ -1002,6 +1006,32 @@ const showAutomationManager = ref(false)
 // owner decision A pending -> recommended default applied): session-local only, default expanded,
 // NOT persisted (no localStorage/server write) — component remount resets to expanded.
 const railCollapsed = ref(false)
+
+// UI-P2-2c (design docs/development/multitable-ui-p2-2c-responsive-design-20260714.md): narrow-width
+// responsive rail. `isRailNarrow` is viewport-derived (window.innerWidth), NOT user-controlled — it
+// only ever WRITES `railCollapsed` on the transition INTO narrow (auto-collapse to the existing
+// icon-strip), and never touches it while already wide or already narrow, so desktop-width behavior
+// (>= RAIL_NARROW_BREAKPOINT) is a byte-for-byte no-op versus pre-2c code (see syncRailViewportState).
+// `isRailDrawerOpen` composes that with the pre-existing `railCollapsed` toggle: narrow + user-expanded
+// = the rail becomes an absolute-positioned overlay ("drawer") instead of an in-flow column (CSS only,
+// see .mt-workbench__rail--drawer) — the SAME `rail-collapse-toggle` button that already exists closes
+// it, no new emit/prop/testid. Breakpoint is a single JS constant (tokens.css has no --ms-bp-* family,
+// per the 2b design's "no width token vocabulary" carve-out at §6) — deliberately NOT mirrored into a
+// CSS @media query, so there is exactly one source of truth for the threshold.
+const RAIL_NARROW_BREAKPOINT = 768
+const isRailNarrow = ref(false)
+const railToggleRef = ref<HTMLButtonElement | null>(null)
+const isRailDrawerOpen = computed(() => isRailNarrow.value && !railCollapsed.value)
+
+function syncRailViewportState(): void {
+  if (typeof window === 'undefined') return
+  const narrow = window.innerWidth <= RAIL_NARROW_BREAKPOINT
+  const wasNarrow = isRailNarrow.value
+  isRailNarrow.value = narrow
+  if (!narrow) return // wide viewport: never mutate railCollapsed here — desktop path is untouched by 2c
+  if (!wasNarrow) railCollapsed.value = true // just crossed into narrow: auto-collapse to the icon-strip
+}
+
 const showDashboardView = ref(false)
 const showTemplateLibrary = ref(false)
 const TemplateCenterRouteName = AppRouteNames.MULTITABLE_TEMPLATES
@@ -3709,6 +3739,15 @@ function onGlobalKeydown(e: KeyboardEvent) {
   if (mod && e.key === 'z' && !e.shiftKey) { e.preventDefault(); grid.undo() }
   else if (mod && (e.key === 'y' || (e.key === 'z' && e.shiftKey))) { e.preventDefault(); grid.redo() }
   else if (e.key === '?' && !(e.target as HTMLElement)?.closest('input, textarea, select')) { showShortcuts.value = !showShortcuts.value }
+  // UI-P2-2c: Escape closes the narrow-width drawer — scoped to events that originate FROM WITHIN the
+  // rail (the toggle button, a tree node, the base picker) so it never steals Escape from an unrelated
+  // in-progress interaction elsewhere in the workbench (e.g. a cell editor) that isn't inside the rail
+  // and may rely on its own Escape semantics. No focus trap / no scrim in this slice (documented gap,
+  // design MD §5) — this is a non-modal overlay, so background content stays reachable throughout.
+  else if (e.key === 'Escape' && isRailDrawerOpen.value && (e.target as HTMLElement)?.closest('.mt-workbench__rail')) {
+    railCollapsed.value = true
+    void nextTick(() => railToggleRef.value?.focus())
+  }
 }
 
 // --- Record deep-link (read recordId from URL hash) ---
@@ -4245,6 +4284,11 @@ watch(
 
 onMounted(async () => {
   window.addEventListener('beforeunload', onBeforeUnload)
+  syncRailViewportState() // UI-P2-2c: establish narrow/wide state at mount. Runs in onMounted (AFTER the
+  // first paint), so a narrow viewport may show the expanded rail for one frame before auto-collapse;
+  // desktop is unaffected (the wide branch never writes state). Pre-paint sync would need SSR/layout-
+  // effect machinery not used in this app — accepted as a known cosmetic limit (P2-2c gate NIT-2).
+  window.addEventListener('resize', syncRailViewportState)
   void auth.getCurrentUserId().then((userId) => {
     currentUserId.value = userId
   }).catch(() => undefined)
@@ -4294,6 +4338,7 @@ onMounted(async () => {
 
 onBeforeUnmount(() => {
   window.removeEventListener('beforeunload', onBeforeUnload)
+  window.removeEventListener('resize', syncRailViewportState)
   stopDialogMetaRefresh()
   unsubscribeMentionRealtime?.()
   // Cancel a pending column-width persist so a late write can't fire after teardown.
@@ -4338,7 +4383,9 @@ defineExpose({
 
 <style scoped>
 .mt-workbench { display: flex; flex-direction: column; height: 100%; background: #fff; }
-.mt-workbench__content { display: flex; flex: 1; min-height: 0; }
+/* position:relative establishes the positioning context .mt-workbench__rail--drawer (UI-P2-2c) anchors
+   against — inert for every other child, which all stay in normal flow. */
+.mt-workbench__content { display: flex; flex: 1; min-height: 0; position: relative; }
 .mt-workbench__main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
 .mt-workbench__conflict {
   margin: 8px 16px 0;
@@ -4436,6 +4483,22 @@ defineExpose({
   overflow: hidden;
 }
 .mt-workbench__rail--collapsed { width: 36px; }
+/* UI-P2-2c (design docs/development/multitable-ui-p2-2c-responsive-design-20260714.md §3): narrow
+   viewport (<= RAIL_NARROW_BREAKPOINT, JS-only threshold — see script) + user-expanded rail = a floating
+   overlay instead of an in-flow flex column, so it no longer steals width from .mt-workbench__main.
+   Taking the rail out of flow (position:absolute) is what frees that width — no change to __main itself.
+   `--ms-shadow-pop` + an opaque `--ms-bg-card` background are both existing UF tokens (no new hex).
+   width uses the same min(px, calc(100vw - Npx)) idiom as this file's other overlay surfaces (e.g.
+   .mt-workbench__shortcuts) so it never overflows a very narrow viewport. */
+.mt-workbench__rail--drawer {
+  position: absolute;
+  inset: 0 auto 0 0;
+  z-index: 5;
+  width: min(240px, calc(100vw - 32px));
+  background: var(--ms-bg-card);
+  box-shadow: var(--ms-shadow-pop);
+  border-radius: 0 var(--ms-radius-lg) var(--ms-radius-lg) 0;
+}
 .mt-workbench__rail-head { display: flex; align-items: center; justify-content: space-between; }
 .mt-workbench__rail-toggle {
   flex-shrink: 0;

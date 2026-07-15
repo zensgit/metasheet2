@@ -1,0 +1,47 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>UI-P2-2c rail drawer — browser verification harness</title>
+    <!--
+      CSS below is copied VERBATIM from apps/web/src/multitable/views/MultitableWorkbench.vue's
+      <style scoped> block (the .mt-workbench__content / .mt-workbench__rail* rules only — this harness
+      exists solely to prove those exact declarations resolve correctly in a real browser; the
+      interactive STATE logic (which class gets applied when) is already proven in jsdom via
+      apps/web/tests/multitable-workbench-view.spec.ts's 'UI-P2-2c' describe block — this harness does
+      not re-test that, it only drives class toggles directly via harness buttons). Scoped-vs-global CSS
+      does not change the resolved computed-style values being asserted here (position/z-index/width/
+      background-color/box-shadow) — only the selector-matching mechanism, which isn't under test.
+      tokens.css is imported for real by rail-drawer-harness.ts (`import '../src/styles/tokens.css'`),
+      the same statement apps/web/src/main.ts uses — so --ms-bg-card / --ms-shadow-pop / --ms-radius-lg
+      below resolve to the SAME values the real app ships, not a harness-local copy.
+    -->
+    <style>
+      .mt-workbench__content { display: flex; flex: 1; min-height: 0; position: relative; height: 320px; border: 1px dashed #999; }
+      .mt-workbench__main { flex: 1; display: flex; flex-direction: column; min-width: 0; background: #eef; }
+      .mt-workbench__rail {
+        width: 240px;
+        flex-shrink: 0;
+        display: flex;
+        flex-direction: column;
+        border-right: 1px solid var(--ms-border-light);
+        overflow: hidden;
+      }
+      .mt-workbench__rail--collapsed { width: 36px; }
+      .mt-workbench__rail--drawer {
+        position: absolute;
+        inset: 0 auto 0 0;
+        z-index: 5;
+        width: min(240px, calc(100vw - 32px));
+        background: var(--ms-bg-card);
+        box-shadow: var(--ms-shadow-pop);
+        border-radius: 0 var(--ms-radius-lg) var(--ms-radius-lg) 0;
+      }
+    </style>
+  </head>
+  <body style="margin:16px;font-family:system-ui">
+    <h3>UI-P2-2c — narrow-width rail drawer CSS (real-browser getComputedStyle)</h3>
+    <div id="app"></div>
+    <script type="module" src="./rail-drawer-harness.ts"></script>
+  </body>
+</html>

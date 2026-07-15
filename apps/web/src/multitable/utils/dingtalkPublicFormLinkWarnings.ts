@@ -210,7 +210,8 @@ export function listDingTalkPublicFormLinkBlockingErrors(
   const view = views.find((item) => item.id === id)
   if (!view) {
     return [isZh
-      ? `公开表单视图 "${id}" 在此表中不可用；钉钉消息可能不包含可用的填写链接。`
+      // W1 G-10 (display layer only): Sheet = 数据表 (was bare '表').
+      ? `公开表单视图 "${id}" 在此数据表中不可用；钉钉消息可能不包含可用的填写链接。`
       : `Public form view "${id}" is not available in this sheet; DingTalk messages may not include a working fill link.`]
   }
   if (view.type !== 'form') {

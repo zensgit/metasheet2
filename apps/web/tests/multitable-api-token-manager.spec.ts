@@ -617,11 +617,11 @@ describe('MetaApiTokenManager', () => {
     dingTalkTab.click()
     await flushPromises()
     const dingTalkCard = document.querySelector('[data-dingtalk-group-id="dt_1"]') as HTMLElement
-    expect(document.querySelector('[data-dingtalk-groups-scope-note]')?.textContent).toContain('表级钉钉群')
+    expect(document.querySelector('[data-dingtalk-groups-scope-note]')?.textContent).toContain('数据表级钉钉群')
     expect(dingTalkCard.textContent).toContain('Ops DingTalk Group')
     expect(dingTalkCard.textContent).toContain('Webhook: https://oapi.dingtalk.com/robot/send?access_token=***')
     expect(dingTalkCard.textContent).toContain('密钥: 已配置')
-    expect(dingTalkCard.textContent).toContain('共享到表: sheet_1')
+    expect(dingTalkCard.textContent).toContain('共享到数据表: sheet_1')
     expect(dingTalkCard.querySelector('[data-dingtalk-group-status="enabled"]')?.textContent).toContain('已启用')
     const dingTalkDeliveriesBtn = dingTalkCard.querySelector('[data-dingtalk-group-deliveries]') as HTMLButtonElement
     dingTalkDeliveriesBtn.click()
