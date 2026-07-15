@@ -76,13 +76,16 @@ vi.mock('../src/multitable/components/MetaGridTable.vue', () => ({
 }))
 vi.mock('../src/multitable/components/MetaFormView.vue', () => ({ default: stubComponent('MetaFormView') }))
 // Capturing stub for the drawer under wiring test — records the real listeners.
-vi.mock('../src/multitable/components/MetaRecordDrawer.vue', () => ({
+// W2 S3: MultitableWorkbench.vue now renders MetaRecordInspector.vue directly (MetaRecordDrawer.vue
+// is a deprecated thin compat shell no longer mounted by the workbench, OD-W2-7=b); this stub's mock
+// path + name follow that swap 1:1, capture logic unchanged.
+vi.mock('../src/multitable/components/MetaRecordInspector.vue', () => ({
   default: defineComponent({
-    name: 'MetaRecordDrawer',
+    name: 'MetaRecordInspector',
     inheritAttrs: false,
     setup(_props, { attrs }) {
       capturedDrawerAttrs = attrs as Record<string, unknown>
-      return () => h('div', { 'data-stub-MetaRecordDrawer': 'true' })
+      return () => h('div', { 'data-stub-MetaRecordInspector': 'true' })
     },
   }),
 }))

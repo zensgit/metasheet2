@@ -42,7 +42,12 @@ export { default as MetaViewManager } from './components/MetaViewManager.vue'
 export { default as MetaBasePicker } from './components/MetaBasePicker.vue'
 
 // Drawers & pickers
+// W2 S3 (OD-W2-7=b): MetaRecordDrawer is now a deprecated thin compat shell delegating to
+// MetaRecordInspector — kept (not removed) for barrel-export consumers with no audited inventory
+// (lock §6bis Medium-4). MetaRecordInspector is the canonical component going forward; exported here
+// so new/external consumers can reach it directly instead of via the deprecated shell.
 export { default as MetaRecordDrawer } from './components/MetaRecordDrawer.vue'
+export { default as MetaRecordInspector } from './components/MetaRecordInspector.vue'
 export { default as MetaCommentsDrawer } from './components/MetaCommentsDrawer.vue'
 export { default as MetaMentionPopover } from './components/MetaMentionPopover.vue'
 export { default as MetaLinkPicker } from './components/MetaLinkPicker.vue'
