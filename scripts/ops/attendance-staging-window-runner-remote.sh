@@ -557,7 +557,10 @@ residue_check() {
   [[ "$value" =~ ^[0-9]+$ ]] \
     || fail "residue-sweep query '${name}' did not return a bare integer (got '${value}'); sql: ${sql}"
   echo "${name}=${value}" >> "$RESIDUE_RESULTS_FILE"
-  log "residue-sweep ${name}=${value}"
+  # stderr, NOT stdout: callers capture this function's stdout as the numeric count, and a
+  # stdout log line contaminates the comparison (run 29395824577: all 29 counts were 0 yet
+  # the sweep false-FAILED because the captured value was "log-line\n0").
+  log "residue-sweep ${name}=${value}" >&2
   printf '%s' "$value"
 }
 
