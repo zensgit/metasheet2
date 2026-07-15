@@ -65,6 +65,7 @@ ACTION="${ACTION:?ACTION is required (deploy|smoke|status|migrate|residue-sweep)
 DEPLOY_SHA="${DEPLOY_SHA:-}"
 SMOKE_ID="${SMOKE_ID:-}"
 SET_WINDOW_ENV="${SET_WINDOW_ENV:-none}"
+FORCE_RECREATE="${FORCE_RECREATE:-false}"
 STAMPS="${STAMPS:-}"
 STAGING_DEPLOY_PATH="${STAGING_DEPLOY_PATH:-metasheet2-dingtalk-staging}"
 DEPLOY_PATH="${DEPLOY_PATH:-metasheet2}"
@@ -72,6 +73,14 @@ SKIP_HOST_SYNC="${SKIP_HOST_SYNC:-false}"
 OUTPUT_DIR="${OUTPUT_DIR:?OUTPUT_DIR is required}"
 IMAGE_OWNER="${IMAGE_OWNER:-zensgit}"
 RUN_STAMP="${RUN_STAMP:?RUN_STAMP is required (workflow run id marker)}"
+
+case "$FORCE_RECREATE" in
+  true|false) ;;
+  *) fail "FORCE_RECREATE must be true or false, got: '${FORCE_RECREATE}'" ;;
+esac
+if [[ "$ACTION" != "deploy" && "$FORCE_RECREATE" == "true" ]]; then
+  fail "FORCE_RECREATE=true is only allowed for action=deploy"
+fi
 
 BACKEND_CONTAINER="metasheet-staging-backend"
 WEB_CONTAINER="metasheet-staging-web"
@@ -372,7 +381,10 @@ action_deploy() {
   # Validate the candidate renders against the staging compose file BEFORE it goes live — a broken
   # override would otherwise dangle EVERY container's config_files label. On failure, keep the
   # previous known-good override untouched and fail closed.
-  if ! docker compose -f "$STAGING_COMPOSE_FILE" -f "$override_tmp" config >/dev/null 2>&1; then
+  # Validate in the SAME cwd as compose_staging() (line ~155): staging compose uses relative
+  # env_file + .env interpolation, so `cd "$STAGING_DIR"` first — otherwise we'd validate a
+  # different resolved config than the one `up -d` actually executes.
+  if ! (cd "$STAGING_DIR" && docker compose -f "$STAGING_COMPOSE_FILE" -f "$override_tmp" config) >/dev/null 2>&1; then
     rm -f "$override_tmp"
     fail "candidate override failed 'docker compose config' validation; kept previous override at ${OVERRIDE_FILE}"
   fi
@@ -382,7 +394,12 @@ action_deploy() {
 
   compose_staging pull backend web 2>&1 | tee "${OUTPUT_DIR}/compose-pull.log"
   # NEVER recreate postgres/redis: only backend+web, --no-deps.
-  compose_staging up -d --no-deps backend web 2>&1 | tee "${OUTPUT_DIR}/compose-up.log"
+  local -a up_args=(up -d --no-deps)
+  if [[ "$FORCE_RECREATE" == "true" ]]; then
+    up_args+=(--force-recreate)
+  fi
+  up_args+=(backend web)
+  compose_staging "${up_args[@]}" 2>&1 | tee "${OUTPUT_DIR}/compose-up.log"
 
   local pg_id_after redis_id_after
   pg_id_after="$(docker inspect -f '{{.Id}}' "$POSTGRES_CONTAINER")"
@@ -429,6 +446,7 @@ action_deploy() {
     echo "action=deploy"
     echo "deploy_sha=${DEPLOY_SHA}"
     echo "set_window_env=${SET_WINDOW_ENV}"
+    echo "force_recreate=${FORCE_RECREATE}"
     echo "backend_image=${backend_image}"
     echo "web_image=${web_image}"
     echo "result=ok"

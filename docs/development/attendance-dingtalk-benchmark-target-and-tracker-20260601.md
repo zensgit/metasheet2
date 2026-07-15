@@ -58,18 +58,19 @@
 > 僵尸无立即高危;P0 建议 = CI 全新装 schema 护栏,owner 决策）。
 >
 > **余量（更新后口径）**:
-> 1. 🔒 **owner/operator 门**:S7 A2-resolver（等 A1 live 手感）· 档 B 治理门 · T2 三项（§3.1 打卡切外勤 /
->    #2 自助入口 / #8 多段夜班）。**五连 staging smoke → 五个 API/DB **helper** smoke ✅ 全 PASS（2026-07-15,统一 DEPLOY_SHA
->    `d65a77c250d74143e6671cc424deb7319eadeb51`,serial per bundle §4,各刀 residue=0）**:
->    `AE4_RESULT_EDIT_API_DB_SMOKE_PASS deploy=d65a77c2… stamp=ae4-smoke-gh29383379748a1 residue=0`·
->    `RD45_REPORT_DIGEST_API_DB_SMOKE_PASS deploy=d65a77c2… stamp=rd45-smoke-gh29383448054a1 produced=1 dedupOk=1 residue=0` ·
->    `OTBANK_V18_API_DB_SMOKE_PASS deploy=d65a77c2… stamp=otbank-v18-smoke-gh29383549381a1 cycle=cb5e7b71 residue=0` ·
->    `MP6_MAKEUP_PUNCH_API_DB_SMOKE_PASS deploy=d65a77c2… stamp=mp6-smoke-gh29391693975a1 quota=1 approvals=1 residue=0` ·
->    `HMR5_API_DB_SMOKE_PASS deploy=d65a77c2… stamp=hmr5-smoke-gh29391755628a1 sendPosture=worker-on:failed_recognized residue=0`。
->    完整记录 = `attendance-v1-five-window-acceptance-verification-20260715.md`。**最终 `*_STAGING_SMOKE_PASS` 未发**:
->    还差各刀人工浏览器/owner 决策项（AE-3 modal / RD-4 配置卡+sendProof / OT OQ-1·2 / MP OQ-1·3 / HMR-5
->    confirm-snapshot+真实渠道）+ §7 consolidated residue sweep + 严格门 exact-SHA 口径（等价记录待 owner 接受）。**E4 真机 → ✅ #3843 已完成关闭（2026-07-09）**。
-> 2. **P3 硬化小刀池 → ✅ 文件证据/存储完整性硬化池 CLOSED（2026-07-11）**（下方 REOPEN 记录保留作历史）:
+> 1. ✅ **五连 staging acceptance CLOSED（2026-07-15）**:统一 DEPLOY_SHA
+>    `d65a77c250d74143e6671cc424deb7319eadeb51`,五个 API/DB helper smoke serial PASS,人工
+>    AE-3 modal / RD-4 配置卡 / HMR-5 confirm-snapshot 全 PASS,OT/MP OQ 已裁决,真实 DingTalk
+>    HMR delivery 为 `sent` 且 owner 手机确认收到,§7 consolidated residue sweep run
+>    `29397485250` 为 29/29 zero。五个最终 stamp 均已发:
+>    `AE4_RESULT_EDIT_STAGING_SMOKE_PASS` · `RD45_REPORT_DIGEST_STAGING_SMOKE_PASS` ·
+>    `OTBANK_V18_STAGING_SMOKE_PASS` · `MP6_MAKEUP_PUNCH_STAGING_SMOKE_PASS` ·
+>    `HMR5_MANUAL_MISSED_PUNCH_REMINDER_STAGING_SMOKE_PASS`。完整数值与边界记录 =
+>    `attendance-v1-five-window-acceptance-verification-20260715.md`;issue #3317 可在本验证 PR
+>    合并后按账关闭。**E4 真机亦 ✅ #3843（2026-07-09）**。
+> 2. 🔒 **仍属 owner/product 门、未被本窗口吞掉**:S7 A2-resolver（等 A1 live 手感）· 档 B
+>    治理门 · T2 三项（§3.1 打卡切外勤 / #2 自助入口 / #8 多段夜班）· B1 / 飞书 / 原生硬件。
+> 3. **P3 硬化小刀池 → ✅ 文件证据/存储完整性硬化池 CLOSED（2026-07-11）**（下方 REOPEN 记录保留作历史）:
 >    F1/F2/F3/F5/F6/F8/F9/F10 全 on main,owner 2026-07-11 基于 `origin/main@320d37f66` 独立复核 **APPROVE 0 P1 / 0 P2**;
 >    收官对账 = `file-evidence-security-line-pool-closeout-20260711.md`（**F4 权限层仍 gated·retention env 仍属 operator 动作,均未交付**）。
 >    〔历史·2026-07-10 REOPEN 记录〕**Wave-2 两刀已合,但 owner 审阅 REOPEN 硬化池,「已收口」口径曾作废**:
@@ -83,9 +84,9 @@
 >    〔P3 措辞纠正〕magic-byte 是**格式前缀筛查**（BMP 仅 2 字节),不构成「文件为真实图片」的证明。
 >    ~~硬化池在 F1/F2 落地并复审通过前保持 OPEN~~ → **已满足并 CLOSED（2026-07-11）**;
 >    但**考勤线本身仍非零待办**（DingTalk backlog 池等车道另行跟踪）——收官仅限文件证据/存储完整性池,非整条考勤线,不对更广考勤路线作收口声明。
-> 3. **命名前置（按需立项）**:wecom directory population 线 · comp_time 单人调整 primitive ·
+> 4. **命名前置（按需立项）**:wecom directory population 线 · comp_time 单人调整 primitive ·
 >    SMS 渠道（供应商选型 owner 门）· >50 org 计提 fairness 轮转。
-> 4. **新增 owner 决策项（H1 审阅产出）**:never-configured vs suspended 收窄（`has_active/has_any` 双谓词,
+> 5. **新增 owner 决策项（H1 审阅产出）**:never-configured vs suspended 收窄（`has_active/has_any` 双谓词,
 >    从未配集成的 org→安静 skip、仅 suspended→retryable）——收窄了已 ratify 的「无 active 行→retryable」
 >    决定,需 owner ack 后另刀。
 

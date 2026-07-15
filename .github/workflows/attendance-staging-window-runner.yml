@@ -62,6 +62,11 @@ on:
         type: choice
         options: [none, rd-window]
         default: none
+      force_recreate:
+        description: 'deploy only: recreate backend+web even when image/config content is unchanged (used to re-stamp persistent Compose config_files labels). Postgres/Redis remain excluded.'
+        required: false
+        type: boolean
+        default: false
       skip_host_sync:
         description: 'skip the deploy-host repo git sync before smoke (true/false)'
         required: false
@@ -87,6 +92,7 @@ jobs:
           ACTION: ${{ inputs.action }}
           DEPLOY_SHA: ${{ inputs.deploy_sha }}
           SET_WINDOW_ENV: ${{ inputs.set_window_env }}
+          FORCE_RECREATE: ${{ inputs.force_recreate }}
           STAMPS: ${{ inputs.stamps }}
         run: |
           set -euo pipefail
@@ -99,6 +105,11 @@ jobs:
           fi
           if [[ "$ACTION" != "deploy" && "$SET_WINDOW_ENV" != "none" ]]; then
             echo "set_window_env=$SET_WINDOW_ENV is only meaningful for action=deploy (env flips happen together with the deploy, never mid-smoke — bundle §3.4)" >&2
+            exit 2
+          fi
+          case "$FORCE_RECREATE" in true|false) ;; *) echo "force_recreate must be true or false, got: '$FORCE_RECREATE'" >&2; exit 2 ;; esac
+          if [[ "$ACTION" != "deploy" && "$FORCE_RECREATE" == "true" ]]; then
+            echo "force_recreate=true is only allowed for action=deploy" >&2
             exit 2
           fi
           if [[ "$ACTION" == "residue-sweep" ]]; then
@@ -157,6 +168,7 @@ jobs:
           DEPLOY_SHA: ${{ inputs.deploy_sha }}
           SMOKE_ID: ${{ inputs.smoke }}
           SET_WINDOW_ENV: ${{ inputs.set_window_env }}
+          FORCE_RECREATE: ${{ inputs.force_recreate }}
           SKIP_HOST_SYNC: ${{ inputs.skip_host_sync }}
           STAMPS: ${{ inputs.stamps }}
           RUNNER_DIR: ${{ steps.sync.outputs.runner_dir }}
@@ -183,6 +195,7 @@ jobs:
           export DEPLOY_SHA='${DEPLOY_SHA}'
           export SMOKE_ID='${SMOKE_ID}'
           export SET_WINDOW_ENV='${SET_WINDOW_ENV}'
+          export FORCE_RECREATE='${FORCE_RECREATE}'
           export STAGING_DEPLOY_PATH='${STAGING_DEPLOY_PATH}'
           export DEPLOY_PATH='${DEPLOY_PATH}'
           export SKIP_HOST_SYNC='${SKIP_HOST_SYNC}'
@@ -227,6 +240,7 @@ jobs:
           SMOKE_ID: ${{ inputs.smoke }}
           DEPLOY_SHA: ${{ inputs.deploy_sha }}
           SET_WINDOW_ENV: ${{ inputs.set_window_env }}
+          FORCE_RECREATE: ${{ inputs.force_recreate }}
           STAMPS: ${{ inputs.stamps }}
         run: |
           set -euo pipefail
@@ -238,6 +252,7 @@ jobs:
             if [[ "$ACTION" == "residue-sweep" ]]; then echo "- Stamps: \`${STAMPS:-<none>}\`"; fi
             echo "- Deploy SHA: \`${DEPLOY_SHA:-<none>}\`"
             echo "- Window env: \`${SET_WINDOW_ENV}\`"
+            echo "- Force recreate: \`${FORCE_RECREATE}\`"
             echo "- Remote rc: \`${REMOTE_RC:-missing}\`"
             echo "- Artifact: \`${ARTIFACT_NAME:-missing}\`"
             if [[ -f output/window-runner/summary.txt ]]; then

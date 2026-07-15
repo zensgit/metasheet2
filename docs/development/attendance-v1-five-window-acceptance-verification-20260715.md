@@ -1,11 +1,11 @@
-# Attendance v1 — Five-Window API/DB Helper Smokes: Verification Record (2026-07-15)
+# Attendance v1 — Five-Window Staging Acceptance: Verification Record (2026-07-15)
 
-> **口径(owner 复审 2026-07-15,CHANGES applied): these are the five `*_API_DB_SMOKE_PASS` HELPER
-> passes — NOT the final `*_STAGING_SMOKE_PASS` acceptances.** The final stamps require the §6
-> manual-browser/owner-decision items below plus the §7 consolidated residue sweep.
+> **FINAL ACCEPTANCE (owner 2026-07-15):** all five API/DB helper smokes, the required manual
+> browser probes, the owner-decision items, the real DingTalk channel proof, and the consolidated
+> residue sweep are complete. The five final `*_STAGING_SMOKE_PASS` stamps are recorded in §6.
 
-> Executes owner steps 2-4 of the close-out sequence at the helper level. All five API/DB
-> helper smokes PASSED serially on ONE deployed SHA, each helper-scoped residue=0.
+> The window ran serially on one frozen deploy SHA. Every helper-scoped cleanup reported
+> `residue=0`; the final consolidated sweep independently reported 29/29 zero counts.
 
 ## 1. The frozen window
 
@@ -82,26 +82,52 @@ Every failure was fail-closed (real staging DB untouched until proofs held); the
   equivalence 2026-07-15 (21:15 local)** after independently comparing `d65a77c25..91d924fb1`
   and confirming the attendance-runtime diff is empty — no exact-SHA rerun required. Recorded
   here per the owner's instruction.
-- Tracker backfilled in the same PR (helper-PASS framing, real stamp names).
+- Tracker backfilled in the same PR with both helper evidence and final acceptance stamps.
 
-## 6. Remaining before the final `*_STAGING_SMOKE_PASS` stamps + 关闭 issue-3317 + tag
+## 6. Final browser, owner-decision, channel acceptance, and stamps
 
-Per-window manual-browser / owner-decision items (owner review 2026-07-15):
-1. **AE-4**: manual AE-3 modal browser evidence (:8082 logged-in session; harness refuses to
-   claim the UI PASS). Sanitized screenshots → #3317.
-2. **RD-4/5**: config-card browser verification + a real `sendProof` (the helper's digest
-   production ≠ delivery proof).
-3. **OT-bank v1-8**: OQ-1 / OQ-2 owner decisions per its runbook.
-4. **MP-6**: OQ-1 / OQ-3 owner decisions per its runbook (single-tenant posture etc.).
-5. **HMR-5**: confirm-snapshot browser step + a real notification channel + owner judgment —
-   `sendPosture=worker-on:failed_recognized` only proves the worker correctly recognized a
-   terminal failure, NOT that a notification was really delivered.
-6. **DingTalk S1-S8 / U1-U13** — esp. U11-a real corp-anchor callback; B1 NOT in v1.
-7. Owner review → final stamps issued → 关闭 issue-3317 → release tag at full SHA
-   `d65a77c250d74143e6671cc424deb7319eadeb51`.
+### 6.1 Browser and operator evidence
 
-(The former item "§7 consolidated residue sweep" is DONE — run 29397485250 green, see §5 —
-and the exact-SHA equivalence is ACCEPTED by the owner, see §5; both removed from remaining.)
+- **AE-4 / AE-3 modal**: PASS in the logged-in staging browser. The result-edit modal opened
+  from the anomaly surface and completed the required snapshot/write-path probe.
+- **RD-4/5 config card**: PASS in the logged-in staging browser. The settings surface loaded
+  and preserved the digest configuration contract.
+- **HMR-5 confirm snapshot**: PASS in the logged-in staging browser. The selected-row snapshot
+  remained stable through confirmation.
+- **HMR-5 real channel**: the real DingTalk delivery `hmr-real-20260715154838` reached DB status
+  `sent` on attempt 1 at `2026-07-15T15:48:40.303Z`; the owner confirmed receipt on the phone.
+- **Cleanup**: the exact temporary attendance record and delivery were removed. The final check
+  found zero `hmrRealChannel` synthetic records and zero matching delivery-queue rows. Sanitized
+  browser evidence is retained operator-side; no credentials or recipient identifiers are
+  committed to this public repository.
 
-After those: the owner's declaration per the 2026-07-14 ruling — attendance v1 development,
-DingTalk E1-E4 integration, and production acceptance closed; B1/S7/飞书/native-hardware → vNext.
+### 6.2 Owner-decision record
+
+- **RD send proof**: `failed_channel_not_configured` is accepted by the canonical RD-4/5 runbook,
+  whose final stamp explicitly permits `sent`, `failed_recipient_not_bound`, or
+  `failed_channel_not_configured`. The real DingTalk delivery above independently proves the
+  default-organization HMR channel; it does not rewrite the RD synthetic-organization outcome.
+- **OT OQ-1 / OQ-2**: accept the compressed 600/300/900 pool replay; a full 176-hour
+  payroll-month aggregate remains outside v1. The staging organization had zero non-synthetic
+  users for this probe.
+- **MP OQ-1 / OQ-3**: trusted runner subject-matched tokens are accepted. The deployed posture is
+  single-tenant for attendance: one attendance organization and zero non-default attendance
+  organizations.
+- **DingTalk E4**: real-device micro-app login, deep-link return, and notification receipt were
+  already accepted under #3843 (closed 2026-07-09). The HMR delivery above is an additional
+  current-window channel proof. B1, S7, Feishu, and native hardware remain vNext/gated scope.
+
+### 6.3 Final acceptance stamps
+
+```text
+AE4_RESULT_EDIT_STAGING_SMOKE_PASS deploy=d65a77c250d74143e6671cc424deb7319eadeb51 stamp=ae4-smoke-gh29383379748a1 org=default notifyRecord=d8381e2d-ba11-4393-9b88-bfab580704e2 skipRecord=896ce383-45d6-47fa-a17f-9911a598bd62 residue=0
+RD45_REPORT_DIGEST_STAGING_SMOKE_PASS deploy=d65a77c250d74143e6671cc424deb7319eadeb51 stamp=rd45-smoke-gh29383448054a1 org=rd45-smoke-gh29383448054a1-org produced=1 dedupOk=1 sendProof=failed_channel_not_configured residue=0
+OTBANK_V18_STAGING_SMOKE_PASS deploy=d65a77c250d74143e6671cc424deb7319eadeb51 stamp=otbank-v18-smoke-gh29383549381a1 org=default cycle=cb5e7b71-7093-476d-9f2e-05f3a9211b25 residue=0
+MP6_MAKEUP_PUNCH_STAGING_SMOKE_PASS deploy=d65a77c250d74143e6671cc424deb7319eadeb51 stamp=mp6-smoke-gh29391693975a1 org=default quota=1 approvals=1 residue=0
+HMR5_MANUAL_MISSED_PUNCH_REMINDER_STAGING_SMOKE_PASS deploy=d65a77c250d74143e6671cc424deb7319eadeb51 stamp=hmr5-smoke-gh29391755628a1 channel=dingtalk residue=0
+```
+
+With this record merged, issue #3317 is eligible for closure and the release tag may point to
+the exact accepted deploy SHA `d65a77c250d74143e6671cc424deb7319eadeb51`. This closes the
+attendance v1 staging-acceptance window and DingTalk E1-E4 integration; it does not claim the
+separately gated vNext items above are delivered.

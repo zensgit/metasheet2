@@ -182,6 +182,22 @@ components:
             recordId:
               type: string
               nullable: true
+            # G-10 (docket #68): additive display names alongside the ids above. Null when the
+            # underlying entity is unresolvable (deleted/no view yet); recordId intentionally has NO
+            # analogous name field — see CommentService.getInbox for why a record title isn't
+            # synthesized server-side.
+            baseName:
+              type: string
+              nullable: true
+            sheetName:
+              type: string
+              nullable: true
+            viewName:
+              type: string
+              nullable: true
+            fieldName:
+              type: string
+              nullable: true
           required: [unread, mentioned]
     CommentInboxResponse:
       type: object

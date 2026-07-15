@@ -91,6 +91,20 @@ export default defineConfig({
       // no-DB job cannot skip-green it, and wired as a WHOLE FILE into the directory real-DB
       // step in plugin-tests.yml.
       'tests/integration/directory-local-provider-scheduler-exclusion.db.test.ts',
+      // Canonical Org MVP B2 (local departments/accounts/memberships CRUD), design lock §5.2-5.4,
+      // service layer (real DB): department create/rename/archive-keeps-history, account
+      // create+link+deactivate (with a positive control proving the local account never touches
+      // user_external_identities), membership add idempotency, and the explicit primary-department
+      // switch (old primary demoted, exactly one is_primary per account). DATABASE_URL-gated;
+      // excluded here so the no-DB job cannot skip-green it, and wired as a WHOLE FILE into the
+      // directory real-DB step in plugin-tests.yml.
+      'tests/integration/local-directory-org-crud.db.test.ts',
+      // Canonical Org MVP B2, HTTP route layer (real DB): platform-admin gating, per-mutation
+      // audit rows, and the owner hard requirement — an org_id/corp_id (snake_case AND camelCase)
+      // smuggled into a B2 request body is REJECTED (400), never silently dropped. DATABASE_URL-
+      // gated; excluded here so the no-DB job cannot skip-green it, and wired as a WHOLE FILE into
+      // the directory real-DB step in plugin-tests.yml.
+      'tests/integration/local-directory-org-crud-route.db.test.ts',
       // Layer-2 hidden person/button masking (real DB): proves the cross-cutting visibility-key fix actually
       // masks the VALUE end-to-end, with non-vacuous controls. DATABASE_URL-gated; excluded here so the no-DB
       // job cannot skip-green it, and wired as a WHOLE FILE into the multitable real-DB step in

@@ -352,6 +352,11 @@ type RawInboxItem = RawComment & {
   sheetId?: string | null
   viewId?: string | null
   recordId?: string | null
+  // G-10 (docket #68): additive display names alongside the ids above.
+  baseName?: string | null
+  sheetName?: string | null
+  viewName?: string | null
+  fieldName?: string | null
 }
 
 type MultitableCommentIdentityPayload = {
@@ -515,6 +520,13 @@ function normalizeCommentInbox(payload: { items?: RawInboxItem[]; total?: number
             : typeof item.rowId === 'string'
               ? item.rowId
               : null,
+          // G-10 (docket #68): additive display names — string-or-null pass-through, same shape
+          // discipline as the id fields above; anything else (missing key, wrong type) normalizes to
+          // null so the FE's `name ?? id` fallback always has a defined id to fall back to.
+          baseName: typeof item.baseName === 'string' || item.baseName === null ? item.baseName : null,
+          sheetName: typeof item.sheetName === 'string' || item.sheetName === null ? item.sheetName : null,
+          viewName: typeof item.viewName === 'string' || item.viewName === null ? item.viewName : null,
+          fieldName: typeof item.fieldName === 'string' || item.fieldName === null ? item.fieldName : null,
         })) as MultitableCommentInboxItem[]
       : [],
     total: typeof payload.total === 'number' ? payload.total : 0,

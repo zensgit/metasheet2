@@ -221,3 +221,26 @@ reconstruct 到用户挑的 wall-clock T：
 - **禁编造回填**（OD-5）：现存 revision 的 `chain_seq` 恒 NULL，绝不合成 commit 序。
 - **不越界**：C3 / C6 只声明接口，机制留其各自 deferred 的锁。
 - **收官口径**：本锁**不**宣称任何东西「做好了」——它是 C2 机制的 design-lock 草案，等 owner 对 OD-C2-1..5（尤其 OD-C2-3 的锚语义）裁决后方可开工。
+
+---
+
+## §7 owner 裁决(2026-07-15 晚,逐字生效;针对本锁与平行纠正锁 #4262 v3.5 / 实现 Draft #4309 的统一口径)
+
+> owner:「认可一半:**seq 应取代 epoch-ms,作为严格模式的链内排序原语**;但**不 ratify 当前 #4262 v3.5 为完整 C2/C3/C6 设计**。#4309 继续保持 Draft/HELD,现有 MERGE_CLEAN 门禁被两个 High 证伪。修订版必须补齐:
+> 1. **seq 管顺序,另设 fence 后的 `effective_at`/线性化时间或等价 T→seq 边界,重建不得继续单靠事务开始时间**;
+> 2. **预检按目标 asOf generation 检查,或保守检查所选 checkpoint 后所有可能被恢复的 generations**;
+> 3. **strict 启用硬依赖 L4 全 writer fence + L5 active checkpoint**;
+> 4. **seq 全链使用精确 bigint 比较**(不得经 `Number()` 折叠——float64 吞 tiebreak 同类刚发生过);
+> 5. (#4316 归考勤线:compose 验证 cwd 统一后 containment 才算 PASS)。
+> 量级:至少还缺一刀**跨 writer 的时间线性化**与一刀 **asOf-generation 校验**。」
+
+**对本锁 OD 的含义(机械标注,不自裁余项)**:
+- **OD-C2-1/2(机制/计数器)**:方向已裁——**seq 取代 epoch-ms 为 strict 模式排序原语**;因果性非天然,**必须 fence 后分配**(L4 全 writer 同事务同连接取 sheet fence 再取 seq),启用硬依赖 L4+L5。任何「迁移落地即 prospectively causal」类断言过强,禁写。
+- **OD-C2-3(锚语义,本锁最大决策点)**:已裁其否定半——**过滤腿不得单靠 txn-start `created_at<=T`**;肯定半 = 「fence 后 effective_at/线性化时间」或「T→seq 边界」二选一,**留修订版呈案**(本锁 §2 的 event-ordinal 方案是 T→seq 边界的一个候选,与 #3749 picker 咬合)。
+- **OD-C2-4(History UI 排序)**:随 seq 主序自然对齐,bigint 精确比较硬性。
+- **新增 C3 义务(超出本锁原 scope,并入修订)**:asOf-generation 预检——只查终末 generation 不够(用户可把 T 选在旧 generation ⇒ 不可信历史被恢复而预检仍绿)。
+- **owner High-1 的实证意义**:本锁 §1.a-iv/§2 预判的「过滤腿反转」即该 High 的机理;修订版以此为第一优先级。
+
+**两把新增刀(量级修正)**:跨 writer 时间线性化(effective_at/T→seq 边界)· asOf-generation 校验。原 §6 估算相应上调。
+
+**红线不变**:本锁与 #4262 修订版合流后仍 PROPOSED,owner ratify 后才动;平行 session 的 #4309/#4262 归其 session 修订,本文只记录统一口径防止设计分叉。
