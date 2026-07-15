@@ -66,9 +66,12 @@ Every failure was fail-closed (real staging DB untouched until proofs held); the
 
 ## 5. Consolidated close (owner step 7) — status
 
-- Final-state capture: run 29391832015 (`action=status` — settings/env/containers archived).
-  **NOT the §7 sweep** — the cross-smoke residue SQL is being added as `action=residue-sweep`
-  and must run green (every §7 count = 0) before the final stamps can be issued.
+- Final-state capture: run 29391832015 (`action=status`).
+- **§7 consolidated residue sweep: EXECUTED and GREEN** — run **29397485250**
+  (`action=residue-sweep`, all five stamps): `CONSOLIDATED_RESIDUE_SWEEP result=ok
+  nonzero=none`, **29/29 counts = 0**, env flags (`scheduler=true worker=true digest=<unset>`)
+  and settings baseline archived in the same artifact. (First run 29395824577 already showed
+  all 29 counts = 0 but false-FAILED on a harness stdout-capture bug, fixed in #4311.)
 - Strict-gate rerun (prod): run 29391835742 — **overall SUCCESS**, executed at main
   `91d924fb1`, a successor of the frozen `d65a77c25`. **Equivalence record for owner
   acceptance**: `git diff --stat d65a77c25..91d924fb1` over `plugins/plugin-attendance/`,
