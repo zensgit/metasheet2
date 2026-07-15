@@ -235,7 +235,7 @@ import {
   createYjsInvalidationPostCommitHook,
   type YjsInvalidator,
 } from '../multitable/post-commit-hooks'
-import { listRecordRevisions, recordRecordRevision, recordVersionMarker, type RecordRevisionEntry } from '../multitable/record-history-service'
+import { listRecordRevisions, recordRecordRevision, recordRecordRevisionsBatch, recordVersionMarker, type RecordRevisionEntry, type RecordRevisionInput } from '../multitable/record-history-service'
 import { replayInboundLinks, isRecordUndeleteInboundEnabled } from '../multitable/inbound-link-replay'
 import { countInboundLinkCaptureRows, insertInboundLinkTombstones } from '../multitable/tombstone-capture'
 
@@ -6542,7 +6542,7 @@ async function recreateFieldFromConfig(query: TxnQuery, opts: {
     // retype revert's `applyLossyRetypeCellRewrite` above) — `restoredFromVersion` stays reserved for the
     // three record-version restore routes per `RecordRevisionInput`'s own doc comment.
     // lock-exempt: field-undelete schema op — rehydrates the recreated field's key sheet-wide (mirror of the field-delete drop at ~6116); not a per-record user edit, and NOT(data?key) never clobbers.
-    // revision-emitted: field-undelete rehydration — recordRecordRevision (one per rehydrated record) below, same txn.
+    // revision-emitted: field-undelete rehydration — recordRecordRevisionsBatch (batched multi-row INSERT) below, same txn.
     const rehydrated = (await query(
       `UPDATE meta_records m
        SET data = data || jsonb_build_object($3::text, t.value),
@@ -6565,20 +6565,26 @@ async function recreateFieldFromConfig(query: TxnQuery, opts: {
       // the field-order-shift + field-create CONFIG revisions (a different history channel) — reusing it
       // here would cross-wire the two channels' batch grouping.
       const recordBatchId = randomUUID()
-      for (const row of rehydratedRows) {
-        await recordRecordRevision(query, {
-          sheetId,
-          recordId: String(row.id),
-          version: Number(row.version) || 0,
-          action: 'update',
-          source: 'restore',
-          actorId,
-          changedFieldIds: [fieldId],
-          patch: { [fieldId]: row.rehydrated_value as unknown },
-          snapshot: normalizeJson(row.data),
-          batchId: recordBatchId,
-        })
-      }
+      // W0 enablement gate (owner ruling, post-merge review of #4279/#4286): this used to be a per-record
+      // `recordRecordRevision` call in a serial loop — an O(N) round-trip chain the owner ruled must become
+      // a batch write before the field-undelete flag can ever be enabled (the tombstone cap default allows
+      // up to 50,000 rows). `recordRecordRevisionsBatch` collects every rehydrated row's revision input
+      // here and emits them as ONE call (internally chunked at 1000 rows/statement), same transaction, same
+      // per-row column semantics (id/version/patch/snapshot/batchId) as the old loop — see
+      // `record-history-service.ts` for the chunking math and the deploy-window-safe column probe reuse.
+      const revisionInputs: RecordRevisionInput[] = rehydratedRows.map((row) => ({
+        sheetId,
+        recordId: String(row.id),
+        version: Number(row.version) || 0,
+        action: 'update',
+        source: 'restore',
+        actorId,
+        changedFieldIds: [fieldId],
+        patch: { [fieldId]: row.rehydrated_value as unknown },
+        snapshot: normalizeJson(row.data),
+        batchId: recordBatchId,
+      }))
+      await recordRecordRevisionsBatch(query, revisionInputs)
     }
     // Link edges: only between two records that are BOTH currently alive (design-lock §4 R1).
     // Idempotence: meta_links has no unique on (field_id, record_id, foreign_record_id) (PK is the
