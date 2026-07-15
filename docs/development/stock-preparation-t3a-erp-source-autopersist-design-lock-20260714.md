@@ -11,18 +11,26 @@
 
 ## 2. 设计（T3a）
 
-在 **同一请求内**,ERP source-run 成功后,把服务端已有的 `intake` 规范化行**直接**喂给 T2 的 `persistStockPreparationErpMaterialSync`——**行永不过 HTTP**,公开面仍 values-free(增 persist 证据:counts/modes/status)。复用两个已合入且已硬化的服务端件(source-run intake + T2 persist),是**组合接线**,非新能力面。
+在 **同一请求内**,ERP source-run 成功后,把服务端已有的 `intake` 规范化行**直接**喂给 T2 的 `persistStockPreparationErpMaterialSync`——**行永不过 HTTP**,公开面仍 values-free。复用两个已合入且已硬化的服务端件(source-run intake + T2 persist),是**组合接线**,非新能力面。**flag OFF 时响应逐字节不变(不加任何字段);flag ON 时才落库并加 `autoPersist` + 覆盖 projector 的 dry_run/未写标记**(权威契约见 OD-4)。
 
 ```
-source-run 路由:
+source-run 路由(与 http-routes.cjs WIP 922fd2f76 一致):
   admin gate → normalize body
-  → [读租户/项目 scope]           (见 OD-2)
-  → runErpMaterialReadonlySource  (产 intake.erpMaterials，服务端)
-  → [若成功 & 开启] persistStockPreparationErpMaterialSync({
-        erpMaterials: intake.erpMaterials,   // 服务端行，不过 HTTP
-        targetProjectId: resolveIntegrationStagingProjectId(<auth-tenant>, undefined),
-        syncRunId, permission:'admin', recordsApi, provisioning })
-  → sendOk(publicReadonlySourceRunResult(result) + persist 证据)   // values-free
+  autoPersistEnabled = flag                                   (OD-1，默认 OFF)
+  若 ON: assertStockPreparationErpAutoPersistNoSteering(req)   // 请求含 tenantId/projectId → 400,在任何 I/O 前 (OD-2)
+  tenant = ON ? resolveAuthUserTenantId(req) : resolveTenantId(req,input)   // OFF 保持现有只读派生
+  → runErpMaterialReadonlySource         // 产 intake.erpMaterials；空(rows<1) 已在此抛 SOURCE_RUN_EMPTY(422)→到不了下面 (OD-3)
+  readProjection = publicReadonlySourceRunResult(result)      // 固定 mode:'dry_run' / evidence.internalWriteExecuted:false
+  若 OFF: return sendOk(res, readProjection)                   // 逐字节不变，无 autoPersist 字段 (OD-4)
+  若 ON:  autoPersist = persistStockPreparationErpMaterialSync({
+              erpMaterials: intake.erpMaterials,   // 服务端行，不过 HTTP
+              targetProjectId: resolveIntegrationStagingProjectId(<auth-tenant>, undefined),
+              syncRunId, permission:'admin', recordsApi, provisioning })
+          return sendOk({ ...readProjection,
+                          mode:'internal_persist',                              // 覆盖假 dry_run
+                          evidence:{ ...readProjection.evidence, internalWriteExecuted:true },  // 覆盖假「未写」
+                          autoPersist },                                        // T2 真实 values-free 证据
+                        autoPersist.persisted ? 201 : 200)                      // 201 iff 有行落地
 ```
 
 ## 3. 已决策（RATIFY-ready，owner 2026-07-15 定；实现处 `61caf7ff0` WIP 已按此接线）
