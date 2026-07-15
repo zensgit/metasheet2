@@ -564,6 +564,8 @@ jobs:
             tests/integration/directory-tenant-change-immutable.db.test.ts \
             tests/integration/directory-sync-orchestration.db.test.ts \
             tests/integration/directory-sync-schedule-timezone.db.test.ts \
+            tests/integration/directory-local-provider-bootstrap.db.test.ts \
+            tests/integration/directory-local-provider-scheduler-exclusion.db.test.ts \
             tests/integration/attendance-csv-export-bom.test.ts \
             tests/integration/attendance-notification-redelivery.db.test.ts \
             tests/integration/attendance-notification-redelivery-route.db.test.ts \
