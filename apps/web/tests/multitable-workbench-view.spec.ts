@@ -946,6 +946,19 @@ async function flushUi(cycles = 5): Promise<void> {
   }
 }
 
+// UI-P2-2c (design docs/development/multitable-ui-p2-2c-responsive-design-20260714.md §6): shape copied
+// verbatim from apps/web/tests/useAttendanceAdminRailNavigation.spec.ts's own setViewportWidth helper —
+// same jsdom idiom (redefine window.innerWidth, dispatch a real 'resize' event) for the same reason
+// (MultitableWorkbench's syncRailViewportState listens for 'resize', not a matchMedia mock).
+function setViewportWidth(width: number): void {
+  Object.defineProperty(window, 'innerWidth', {
+    configurable: true,
+    writable: true,
+    value: width,
+  })
+  window.dispatchEvent(new Event('resize'))
+}
+
 function createWorkbenchMock() {
   const activeBaseId = ref('base_ops')
   const activeSheetId = ref('sheet_orders')
@@ -2833,6 +2846,113 @@ describe('MultitableWorkbench view wiring', () => {
       expect(railStubRoot().style.display).not.toBe('none')
       const baseBar = container!.querySelector('.mt-workbench__base-bar') as HTMLElement
       expect(baseBar.style.display).not.toBe('none')
+    })
+  })
+
+  // UI-P2-2c (design docs/development/multitable-ui-p2-2c-responsive-design-20260714.md §6): the rail
+  // auto-collapses below RAIL_NARROW_BREAKPOINT (768px, window.innerWidth) and, if the user re-expands it
+  // while narrow, becomes an absolute-positioned "drawer" overlay (`.mt-workbench__rail--drawer`) instead
+  // of squeezing .mt-workbench__main. These are STATE assertions (classes/attributes/focus), not CSS/
+  // layout assertions — the actual positioning/shadow/z-index rendering is a real-browser verification
+  // gap documented in the design MD §7, not claimed as proven here.
+  describe('UI-P2-2c — responsive rail (narrow-width auto-collapse + drawer)', () => {
+    function railEl(): HTMLElement {
+      const rail = container!.querySelector('.mt-workbench__rail') as HTMLElement
+      expect(rail).toBeTruthy()
+      return rail
+    }
+
+    beforeEach(() => setViewportWidth(1280))
+    afterEach(() => setViewportWidth(1280))
+
+    it('desktop width (>= breakpoint): mounting behaves exactly like pre-2c — no auto-collapse, no drawer class', async () => {
+      setViewportWidth(1280)
+      mountWorkbench()
+      await flushUi()
+      const toggle = container!.querySelector('[data-testid="rail-collapse-toggle"]') as HTMLButtonElement
+      expect(toggle.getAttribute('aria-expanded')).toBe('true')
+      expect(railEl().classList.contains('mt-workbench__rail--collapsed')).toBe(false)
+      expect(railEl().classList.contains('mt-workbench__rail--drawer')).toBe(false)
+    })
+
+    it('narrow width at mount: auto-collapses to the icon-strip (no drawer)', async () => {
+      setViewportWidth(600)
+      mountWorkbench()
+      await flushUi()
+      const toggle = container!.querySelector('[data-testid="rail-collapse-toggle"]') as HTMLButtonElement
+      expect(toggle.getAttribute('aria-expanded')).toBe('false')
+      expect(railEl().classList.contains('mt-workbench__rail--collapsed')).toBe(true)
+      expect(railEl().classList.contains('mt-workbench__rail--drawer')).toBe(false)
+    })
+
+    it('resizing to narrow after mount auto-collapses; resizing back to wide does NOT force re-expand', async () => {
+      setViewportWidth(1280)
+      mountWorkbench()
+      await flushUi()
+      const toggle = container!.querySelector('[data-testid="rail-collapse-toggle"]') as HTMLButtonElement
+      expect(toggle.getAttribute('aria-expanded')).toBe('true')
+
+      setViewportWidth(600)
+      await flushUi()
+      expect(toggle.getAttribute('aria-expanded')).toBe('false')
+
+      setViewportWidth(1280)
+      await flushUi()
+      // Deliberate asymmetry (design MD §2): leaving narrow never force-writes railCollapsed.
+      expect(toggle.getAttribute('aria-expanded')).toBe('false')
+    })
+
+    it('re-expanding the rail while narrow enters drawer mode; the same toggle closes it back to the icon-strip', async () => {
+      setViewportWidth(600)
+      mountWorkbench()
+      await flushUi()
+      const toggle = container!.querySelector('[data-testid="rail-collapse-toggle"]') as HTMLButtonElement
+      expect(railEl().classList.contains('mt-workbench__rail--collapsed')).toBe(true)
+
+      toggle.click()
+      await flushUi()
+      expect(toggle.getAttribute('aria-expanded')).toBe('true')
+      expect(railEl().classList.contains('mt-workbench__rail--drawer')).toBe(true)
+      expect(railEl().classList.contains('mt-workbench__rail--collapsed')).toBe(false)
+
+      toggle.click()
+      await flushUi()
+      expect(railEl().classList.contains('mt-workbench__rail--drawer')).toBe(false)
+      expect(railEl().classList.contains('mt-workbench__rail--collapsed')).toBe(true)
+    })
+
+    it('Escape from inside the rail closes the drawer and returns focus to the toggle', async () => {
+      setViewportWidth(600)
+      mountWorkbench()
+      await flushUi()
+      const toggle = container!.querySelector('[data-testid="rail-collapse-toggle"]') as HTMLButtonElement
+      toggle.click()
+      await flushUi()
+      expect(railEl().classList.contains('mt-workbench__rail--drawer')).toBe(true)
+
+      toggle.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
+      await flushUi()
+
+      expect(railEl().classList.contains('mt-workbench__rail--drawer')).toBe(false)
+      expect(toggle.getAttribute('aria-expanded')).toBe('false')
+      expect(document.activeElement).toBe(toggle)
+    })
+
+    it('Escape from outside the rail (main content) does NOT close the drawer — scoped, not global', async () => {
+      setViewportWidth(600)
+      mountWorkbench()
+      await flushUi()
+      const toggle = container!.querySelector('[data-testid="rail-collapse-toggle"]') as HTMLButtonElement
+      toggle.click()
+      await flushUi()
+      expect(railEl().classList.contains('mt-workbench__rail--drawer')).toBe(true)
+
+      const main = container!.querySelector('.mt-workbench__main') as HTMLElement
+      expect(main).toBeTruthy()
+      main.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
+      await flushUi()
+
+      expect(railEl().classList.contains('mt-workbench__rail--drawer')).toBe(true)
     })
   })
 })
