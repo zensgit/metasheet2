@@ -9,13 +9,22 @@
 // fresh by the parent for that one write. This module is the outbound half of that: it posts a
 // `plm-embed:token-request` to the parent and resolves the matching `plm-embed:token-response`.
 //
+// Sub-slice 4 (2026-07-15): the discussion READ-UI child needs the identical on-demand protocol,
+// differing ONLY in the `purpose` field the parent uses to decide what the minted token is good
+// for (the ratified sub-slice-3 parent accepts both `discussion-write` and `discussion-read`). The
+// security-critical protocol body (origin pin, nonce correlation, timeout, dispose-guard, CSPRNG
+// fail-closed) is extracted below into `createTokenClient`, an internal purpose-parameterized
+// factory, so it is written and tested ONCE and shared by both
+// `createPlmEmbedWriteTokenClient` and `createPlmEmbedReadTokenClient` rather than duplicated.
+//
 // Wire contract (child <-> parent), exact shape -- do not rename fields, the parent is a separate
 // build against this same contract:
-//   child -> parent:  { type: 'plm-embed:token-request', nonce: '<crypto-random>', purpose: 'discussion-write' }
+//   child -> parent:  { type: 'plm-embed:token-request', nonce: '<crypto-random>', purpose: 'discussion-write' | 'discussion-read' }
 //   parent -> child:  { type: 'plm-embed:token-response', nonce: '<echoed>', token: '<fresh JWT>' }
 //   parent -> child:  { type: 'plm-embed:token-error',    nonce: '<echoed>', reason: '<opaque>' }
 //
-// Security invariants (each backed by a test in tests/plm-embed-write-token.spec.ts):
+// Security invariants (each backed by a test in tests/plm-embed-write-token.spec.ts, and mirrored
+// for the read purpose in tests/plm-embed-read-token.spec.ts):
 //   1. Pinned origin, not allowlist membership. This module NEVER consults the origin allowlist --
 //      it is handed the origin the READ handshake already pinned (the first valid inbound token's
 //      origin) via `getParentOrigin()`, and requires an EXACT match plus `event.source ===
@@ -44,10 +53,11 @@ const TOKEN_REQUEST_TYPE = 'plm-embed:token-request' as const
 const TOKEN_RESPONSE_TYPE = 'plm-embed:token-response' as const
 const TOKEN_ERROR_TYPE = 'plm-embed:token-error' as const
 
-/** This module's sole purpose today; a distinct field per the locked contract, but NOT treated as
- * an authorization boundary here (a compromised child could send any value) -- the parent, not this
- * module, is responsible for deciding what `purpose` authorizes. */
+/** Distinct `purpose` fields per the locked contract, one per token client this module exports.
+ * NOT treated as an authorization boundary here (a compromised child could send any value) -- the
+ * parent, not this module, is responsible for deciding what `purpose` authorizes. */
 const WRITE_TOKEN_PURPOSE = 'discussion-write' as const
+const READ_TOKEN_PURPOSE = 'discussion-read' as const
 
 const TOKEN_REQUEST_TIMEOUT_MS = 5000
 
@@ -62,6 +72,24 @@ export class PlmEmbedWriteTokenError extends Error {
   constructor(message: string) {
     super(message)
     this.name = 'PlmEmbedWriteTokenError'
+  }
+}
+
+/** Read-purpose siblings of the write errors above -- same shape, distinctly named so a caller can
+ * tell a read-token failure from a write-token failure by `instanceof` without inspecting message
+ * text. Kept as separate classes (rather than reusing the write ones) so neither client's error
+ * messages says the wrong word ("write" on a read failure or vice versa). */
+export class PlmEmbedReadTokenTimeoutError extends Error {
+  constructor() {
+    super('timed out waiting for a fresh PLM embed read token')
+    this.name = 'PlmEmbedReadTokenTimeoutError'
+  }
+}
+
+export class PlmEmbedReadTokenError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'PlmEmbedReadTokenError'
   }
 }
 
@@ -85,6 +113,24 @@ export interface PlmEmbedWriteTokenClient {
   dispose(): void
 }
 
+export interface PlmEmbedReadTokenClient {
+  /**
+   * Requests ONE fresh, single-use embed token for a read. Same lifecycle/security contract as
+   * {@link PlmEmbedWriteTokenClient.requestWriteToken} (memory-only, no replay, 5s timeout) -- the
+   * only difference is the outbound `purpose: 'discussion-read'`.
+   */
+  requestReadToken(): Promise<string>
+  /** Detaches the message listener and rejects any in-flight request. Idempotent. */
+  dispose(): void
+}
+
+/** Error-class pair a `createTokenClient(...)` instance uses to reject with, so the shared factory
+ * below stays purpose-agnostic while each public wrapper still throws its own named error types. */
+interface TokenErrorFactory {
+  timeout(): Error
+  generic(message: string): Error
+}
+
 function randomNonce(): string | null {
   const cryptoApi = globalThis.crypto as { randomUUID?: () => string; getRandomValues?: <T extends ArrayBufferView>(a: T) => T } | undefined
   if (typeof cryptoApi?.randomUUID === 'function') return cryptoApi.randomUUID()
@@ -105,13 +151,25 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 /**
- * Creates the child-side write-token channel. `getParentOrigin` MUST return the origin the read
- * handshake pinned (or `null` before it has pinned one) -- read it live on every call/message
- * rather than capturing a snapshot, so this channel tracks the same single source of truth the
- * read page uses. Callers own the returned client's lifetime: create it once per embed mount,
- * call `dispose()` on unmount.
+ * Internal purpose-parameterized factory: the ENTIRE security-critical protocol body (origin pin,
+ * `window.parent` source check, nonce correlation, memory-only settlement, 5s timeout,
+ * disposed-guard, CSPRNG fail-closed nonce) lives here ONCE, verbatim from the pre-refactor
+ * `createPlmEmbedWriteTokenClient`. `purpose` is the only thing that varies in the outbound
+ * `plm-embed:token-request` payload; `tokenLabel` / `errors` only vary the *wording* and *class* of
+ * the rejections each public wrapper below produces (never the control flow). Not exported --
+ * callers use `createPlmEmbedWriteTokenClient` / `createPlmEmbedReadTokenClient`.
+ *
+ * `getParentOrigin` MUST return the origin the read handshake pinned (or `null` before it has
+ * pinned one) -- read it live on every call/message rather than capturing a snapshot, so this
+ * channel tracks the same single source of truth the read page uses. Callers own the returned
+ * client's lifetime: create it once per embed mount, call `dispose()` on unmount.
  */
-export function createPlmEmbedWriteTokenClient(getParentOrigin: () => string | null): PlmEmbedWriteTokenClient {
+function createTokenClient(
+  getParentOrigin: () => string | null,
+  purpose: typeof WRITE_TOKEN_PURPOSE | typeof READ_TOKEN_PURPOSE,
+  tokenLabel: 'write' | 'read',
+  errors: TokenErrorFactory,
+): { request(): Promise<string>; dispose(): void } {
   let inFlight: InFlightRequest | null = null
   let disposed = false
 
@@ -149,14 +207,14 @@ export function createPlmEmbedWriteTokenClient(getParentOrigin: () => string | n
       if (typeof token === 'string' && token.length > 0) {
         current?.resolve(token)
       } else {
-        current?.reject(new PlmEmbedWriteTokenError('malformed token-response'))
+        current?.reject(errors.generic('malformed token-response'))
       }
       return
     }
     if (type === TOKEN_ERROR_TYPE) {
       const reason = data.reason
       const current = settleInFlight()
-      current?.reject(new PlmEmbedWriteTokenError(typeof reason === 'string' && reason ? reason : 'token-error'))
+      current?.reject(errors.generic(typeof reason === 'string' && reason ? reason : 'token-error'))
       return
     }
     // Any other type sharing our nonce is ignored -- neither resolves nor rejects nor consumes it.
@@ -164,42 +222,79 @@ export function createPlmEmbedWriteTokenClient(getParentOrigin: () => string | n
 
   window.addEventListener('message', onMessage)
 
-  function requestWriteToken(): Promise<string> {
+  function request(): Promise<string> {
     if (disposed) {
       // Fail fast after teardown: never post a spurious token-request (which the parent could
       // mint + burn a single-use jti for) and never hang the caller on a listener that is gone.
-      return Promise.reject(new PlmEmbedWriteTokenError('write-token client is disposed'))
+      return Promise.reject(errors.generic(`${tokenLabel}-token client is disposed`))
     }
     if (inFlight) {
-      return Promise.reject(new PlmEmbedWriteTokenError('a write-token request is already in flight'))
+      return Promise.reject(errors.generic(`a ${tokenLabel}-token request is already in flight`))
     }
     const parentOrigin = getParentOrigin()
     if (!parentOrigin) {
-      return Promise.reject(new PlmEmbedWriteTokenError('parent origin is not pinned yet'))
+      return Promise.reject(errors.generic('parent origin is not pinned yet'))
     }
 
     const nonce = randomNonce()
     if (nonce === null) {
-      return Promise.reject(new PlmEmbedWriteTokenError('secure randomness (Web Crypto) is unavailable'))
+      return Promise.reject(errors.generic('secure randomness (Web Crypto) is unavailable'))
     }
     return new Promise<string>((resolve, reject) => {
       const timeoutHandle = setTimeout(() => {
         settleInFlight()
-        reject(new PlmEmbedWriteTokenTimeoutError())
+        reject(errors.timeout())
       }, TOKEN_REQUEST_TIMEOUT_MS)
       inFlight = { nonce, resolve, reject, timeoutHandle }
       // targetOrigin is ALWAYS the pinned parentOrigin -- never '*'. This is the first outbound
       // postMessage this embed page family makes; see module docstring invariant 4.
-      window.parent.postMessage({ type: TOKEN_REQUEST_TYPE, nonce, purpose: WRITE_TOKEN_PURPOSE }, parentOrigin)
+      window.parent.postMessage({ type: TOKEN_REQUEST_TYPE, nonce, purpose }, parentOrigin)
     })
   }
 
   function dispose(): void {
     disposed = true
     const current = settleInFlight()
-    current?.reject(new PlmEmbedWriteTokenError('write-token client disposed'))
+    current?.reject(errors.generic(`${tokenLabel}-token client disposed`))
     window.removeEventListener('message', onMessage)
   }
 
-  return { requestWriteToken, dispose }
+  return { request, dispose }
+}
+
+const writeTokenErrors: TokenErrorFactory = {
+  timeout: () => new PlmEmbedWriteTokenTimeoutError(),
+  generic: (message: string) => new PlmEmbedWriteTokenError(message),
+}
+
+const readTokenErrors: TokenErrorFactory = {
+  timeout: () => new PlmEmbedReadTokenTimeoutError(),
+  generic: (message: string) => new PlmEmbedReadTokenError(message),
+}
+
+/**
+ * Creates the child-side write-token channel (`purpose: 'discussion-write'`). Thin wrapper over
+ * {@link createTokenClient} -- see that function's docstring for the shared protocol contract.
+ * Behavior is unchanged from before the sub-slice-4 refactor: same wire shape, same rejections.
+ */
+export function createPlmEmbedWriteTokenClient(getParentOrigin: () => string | null): PlmEmbedWriteTokenClient {
+  const client = createTokenClient(getParentOrigin, WRITE_TOKEN_PURPOSE, 'write', writeTokenErrors)
+  return {
+    requestWriteToken: () => client.request(),
+    dispose: () => client.dispose(),
+  }
+}
+
+/**
+ * Creates the child-side read-token channel (`purpose: 'discussion-read'`). Thin wrapper over
+ * {@link createTokenClient} -- identical protocol/security invariants to the write client, just a
+ * different `purpose` and error-class pair. See {@link createPlmEmbedWriteTokenClient}'s docstring
+ * and the module header for the shared contract.
+ */
+export function createPlmEmbedReadTokenClient(getParentOrigin: () => string | null): PlmEmbedReadTokenClient {
+  const client = createTokenClient(getParentOrigin, READ_TOKEN_PURPOSE, 'read', readTokenErrors)
+  return {
+    requestReadToken: () => client.request(),
+    dispose: () => client.dispose(),
+  }
 }

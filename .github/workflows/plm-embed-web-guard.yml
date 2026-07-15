@@ -21,7 +21,9 @@
 # full @metasheet/web vitest suite has historical flakes, so wiring it whole would be red on arrival.
 # Verified green at time of wiring: 27/27. Extended 2026-07-13 to cover the discussion write-UI's
 # on-demand embed-token child protocol layer (plmEmbedWriteToken.ts, listen-only + one outbound
-# postMessage type, not yet wired into the view) — now 40/40.
+# postMessage type, not yet wired into the view) — now 40/40. Extended 2026-07-15 (sub-slice 4) to
+# cover the discussion READ-UI child protocol layer, which shares plmEmbedWriteToken.ts's internal
+# factory (purpose='discussion-read' instead of 'discussion-write') — now 60/60.
 #
 # NOT a required check (mirrors the other *-web-guard workflows): it cannot hang a PR, but it turns
 # a silent FE regression on the embed surface into a visible red.
@@ -45,8 +47,11 @@ on:
       # (child -> parent token-request / parent -> child token-response|token-error). Listen-only
       # today (not yet wired into PlmEmbedBomReviewView.vue -- see that module's docstring), but it
       # is the first OUTBOUND postMessage this embed page family makes, so it gets the same guard.
+      # This same file now also hosts the discussion read-UI's child protocol (sub-slice 4, shared
+      # internal factory, purpose='discussion-read') -- one path trigger covers both.
       - 'apps/web/src/services/integration/plmEmbedWriteToken.ts'
       - 'apps/web/tests/plm-embed-write-token.spec.ts'
+      - 'apps/web/tests/plm-embed-read-token.spec.ts'
       # Server side of the same wire: response shapes these specs pin (config allowlist + context degrade).
       - 'packages/core-backend/src/routes/plm-embed.ts'
       # This guard itself.
@@ -92,8 +97,11 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Run PLM-embed web guard specs (targeted)
-        # Three files, 40 tests. The filter is a substring match — it resolves to exactly
-        # tests/plm-embed-bom-review.spec.ts, tests/plm-embed-service.spec.ts, and
-        # tests/plm-embed-write-token.spec.ts. (This is an explicit enumeration, not a glob — a
-        # future spec file needs its own substring added here or it silently never runs in CI.)
-        run: pnpm --filter @metasheet/web exec vitest run plm-embed-bom-review plm-embed-service plm-embed-write-token --reporter=dot
+        # Four files. The filter is a substring match — it resolves to exactly
+        # tests/plm-embed-bom-review.spec.ts, tests/plm-embed-service.spec.ts,
+        # tests/plm-embed-write-token.spec.ts, and tests/plm-embed-read-token.spec.ts. (This is an
+        # explicit enumeration, not a glob — a future spec file needs its own substring added here
+        # or it silently never runs in CI. NOTE: 'plm-embed-read-token' as a substring would ALSO
+        # match a future 'plm-embed-read-token-foo.spec.ts' -- that's fine, same convention as the
+        # other three entries here.)
+        run: pnpm --filter @metasheet/web exec vitest run plm-embed-bom-review plm-embed-service plm-embed-write-token plm-embed-read-token --reporter=dot
