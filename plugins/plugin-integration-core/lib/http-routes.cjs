@@ -1007,6 +1007,37 @@ function normalizeStockPreparationTargetRequest(input = {}) {
   }
 }
 
+// GHSA-m6qv-2rpf-q7mh step-1 follow-up: WRITE-path input. Same shape as stockPreparationTargetInput, but the
+// tenant comes from the AUTHENTICATED principal only (resolveTenantId would honor a request tenantId
+// for admins) AND the staging project is derived from that tenant WITHOUT a request projectId
+// (resolveIntegrationStagingProjectId returns a request "X:integration-core" VERBATIM). stockPreparationTargetInput
+// itself is UNCHANGED — its READ caller keeps today's behavior; whether an audited cross-tenant admin
+// READ is desirable is GHSA step 2, decided separately.
+// GHSA-m6qv-2rpf-q7mh step-1 follow-up (owner decision A): a stock-preparation WRITE request must NOT
+// carry an explicit baseId. After the tenant/projectId steering vectors are closed, baseId is a THIRD,
+// independent axis: the host writes meta_sheets.base_id from this value with NO base-ownership check
+// (provisioning.ensureSheet INSERTs base_id verbatim), so an explicit baseId parents a structure write
+// into ANOTHER tenant's base. baseId is optional — trial provisioning binds no base — so we reject an
+// explicit one, fail-closed, BEFORE any provisioning call. A future re-binding must derive a writable
+// base from the AUTHENTICATED principal (a host resolveBaseWritable), never trust the request baseId.
+function assertNoRequestBaseId(rawInput) {
+  if (rawInput && Object.prototype.hasOwnProperty.call(rawInput, 'baseId') && `${rawInput.baseId ?? ''}`.trim() !== '') {
+    throw new HttpRouteError(400, 'STOCK_PREPARATION_BASE_ID_NOT_ALLOWED', 'an explicit baseId is not allowed on a stock-preparation write; the target base is derived server-side from the authenticated tenant')
+  }
+}
+
+function stockPreparationTargetWriteInput(req, rawInput = {}) {
+  assertNoRequestBaseId(rawInput)
+  const input = normalizeStockPreparationTargetRequest(rawInput)
+  const tenantId = resolveAuthUserTenantId(req)
+  const projectId = resolveIntegrationStagingProjectId(tenantId, undefined)
+  return {
+    tenantId,
+    workspaceId: input.workspaceId,
+    projectId,
+  }
+}
+
 function stockPreparationTargetInput(req, rawInput = {}) {
   const input = normalizeStockPreparationTargetRequest(rawInput)
   const tenantId = resolveTenantId(req, input)
@@ -1046,6 +1077,27 @@ function normalizeStockPreparationSandboxTargetRequest(input = {}) {
     objectId: firstString(input.objectId),
     label: firstString(input.label),
     optionSets: optionSetAliasValue(input, 'STOCK_PREPARATION_SANDBOX_TARGET_REQUEST_INVALID'),
+  }
+}
+
+// GHSA-m6qv-2rpf-q7mh step-1 follow-up: WRITE-path input. Same shape as stockPreparationSandboxTargetInput, but the
+// tenant comes from the AUTHENTICATED principal only (resolveTenantId would honor a request tenantId
+// for admins) AND the staging project is derived from that tenant WITHOUT a request projectId
+// (resolveIntegrationStagingProjectId returns a request "X:integration-core" VERBATIM). stockPreparationSandboxTargetInput
+// itself is UNCHANGED — its READ caller keeps today's behavior; whether an audited cross-tenant admin
+// READ is desirable is GHSA step 2, decided separately.
+function stockPreparationSandboxTargetWriteInput(req, rawInput = {}) {
+  assertNoRequestBaseId(rawInput)
+  const input = normalizeStockPreparationSandboxTargetRequest(rawInput)
+  const tenantId = resolveAuthUserTenantId(req)
+  const projectId = resolveIntegrationStagingProjectId(tenantId, undefined)
+  return {
+    tenantId,
+    workspaceId: input.workspaceId,
+    projectId,
+    objectId: input.objectId,
+    label: input.label,
+    optionSets: input.optionSets,
   }
 }
 
@@ -1100,8 +1152,12 @@ function normalizeStockPreparationOptionSyncRequest(input = {}) {
 
 function stockPreparationOptionSyncInput(req, rawInput = {}) {
   const input = normalizeStockPreparationOptionSyncRequest(rawInput)
-  const tenantId = resolveTenantId(req, input)
-  const projectId = resolveIntegrationStagingProjectId(tenantId, input.projectId)
+  // GHSA-m6qv-2rpf-q7mh step-1 follow-up: WRITE-only face — hardened IN PLACE (no read caller), so
+  // no steerable variant survives. Tenant from the AUTHENTICATED principal; staging project derived
+  // from it WITHOUT a request projectId (both are steering vectors: resolveTenantId honors a request
+  // tenantId for admins, and resolveIntegrationStagingProjectId returns "X:integration-core" verbatim).
+  const tenantId = resolveAuthUserTenantId(req)
+  const projectId = resolveIntegrationStagingProjectId(tenantId, undefined)
   return {
     tenantId,
     workspaceId: input.workspaceId,
@@ -1142,6 +1198,25 @@ function normalizeStockPreparationMvpTargetRequest(input = {}) {
   }
 }
 
+// GHSA-m6qv-2rpf-q7mh step-1 follow-up: WRITE-path input. Same shape as stockPreparationMvpTargetInput, but the
+// tenant comes from the AUTHENTICATED principal only (resolveTenantId would honor a request tenantId
+// for admins) AND the staging project is derived from that tenant WITHOUT a request projectId
+// (resolveIntegrationStagingProjectId returns a request "X:integration-core" VERBATIM). stockPreparationMvpTargetInput
+// itself is UNCHANGED — its READ caller keeps today's behavior; whether an audited cross-tenant admin
+// READ is desirable is GHSA step 2, decided separately.
+function stockPreparationMvpTargetWriteInput(req, rawInput = {}) {
+  assertNoRequestBaseId(rawInput)
+  const input = normalizeStockPreparationMvpTargetRequest(rawInput)
+  const tenantId = resolveAuthUserTenantId(req)
+  const projectId = resolveIntegrationStagingProjectId(tenantId, undefined)
+  return {
+    tenantId,
+    workspaceId: input.workspaceId,
+    projectId,
+    objectIds: input.objectIds,
+  }
+}
+
 function stockPreparationMvpTargetInput(req, rawInput = {}) {
   const input = normalizeStockPreparationMvpTargetRequest(rawInput)
   const tenantId = resolveTenantId(req, input)
@@ -1175,8 +1250,12 @@ function normalizeStockPreparationMvpOptionSyncRequest(input = {}) {
 
 function stockPreparationMvpOptionSyncInput(req, rawInput = {}) {
   const input = normalizeStockPreparationMvpOptionSyncRequest(rawInput)
-  const tenantId = resolveTenantId(req, input)
-  const projectId = resolveIntegrationStagingProjectId(tenantId, input.projectId)
+  // GHSA-m6qv-2rpf-q7mh step-1 follow-up: WRITE-only face — hardened IN PLACE (no read caller), so
+  // no steerable variant survives. Tenant from the AUTHENTICATED principal; staging project derived
+  // from it WITHOUT a request projectId (both are steering vectors: resolveTenantId honors a request
+  // tenantId for admins, and resolveIntegrationStagingProjectId returns "X:integration-core" verbatim).
+  const tenantId = resolveAuthUserTenantId(req)
+  const projectId = resolveIntegrationStagingProjectId(tenantId, undefined)
   return {
     tenantId,
     workspaceId: input.workspaceId,
@@ -1427,8 +1506,12 @@ function normalizeFieldOptionSyncRequest(input = {}) {
 
 function fieldOptionSyncInput(req, rawInput = {}) {
   const input = normalizeFieldOptionSyncRequest(rawInput)
-  const tenantId = resolveTenantId(req, input)
-  const projectId = resolveIntegrationStagingProjectId(tenantId, input.projectId)
+  // GHSA-m6qv-2rpf-q7mh step-1 follow-up: WRITE-only face — hardened IN PLACE (no read caller), so
+  // no steerable variant survives. Tenant from the AUTHENTICATED principal; staging project derived
+  // from it WITHOUT a request projectId (both are steering vectors: resolveTenantId honors a request
+  // tenantId for admins, and resolveIntegrationStagingProjectId returns "X:integration-core" verbatim).
+  const tenantId = resolveAuthUserTenantId(req)
+  const projectId = resolveIntegrationStagingProjectId(tenantId, undefined)
   return {
     tenantId,
     workspaceId: input.workspaceId,
@@ -3581,7 +3664,7 @@ function createHandlers(services, options = {}) {
 
     async stockPreparationTargetEnsure(req, res) {
       requireAccess(req, 'admin')
-      const input = stockPreparationTargetInput(req, requestBody(req))
+      const input = stockPreparationTargetWriteInput(req, requestBody(req))
       const result = await ensureStockPreparationCanonicalTarget({
         context,
         projectId: input.projectId,
@@ -3610,7 +3693,7 @@ function createHandlers(services, options = {}) {
 
     async stockPreparationSandboxTargetEnsure(req, res) {
       requireAccess(req, 'admin')
-      const input = stockPreparationSandboxTargetInput(req, requestBody(req))
+      const input = stockPreparationSandboxTargetWriteInput(req, requestBody(req))
       try {
         // Ordering rationale: validate (alias + sandbox objectId + option key/source) catches bad inputs
         // BEFORE ensure, so no provisioning happens on bad input. A sync failure AFTER ensure leaves a
@@ -3674,7 +3757,7 @@ function createHandlers(services, options = {}) {
     // (rows always []). No external/PLM/K3 write. 201 when any table was created, else 200.
     async stockPreparationMvpEnsure(req, res) {
       requireAccess(req, 'admin')
-      const input = stockPreparationMvpTargetInput(req, requestBody(req))
+      const input = stockPreparationMvpTargetWriteInput(req, requestBody(req))
       const result = await ensureStockPreparationMvpTargets({
         context,
         projectId: input.projectId,
@@ -3737,8 +3820,8 @@ function createHandlers(services, options = {}) {
       // The MVP tables were provisioned under the INTERNAL staging project (the same derivation the
       // readiness/ensure routes use); the business `projectId` stays on the plan rows. Derive the staging
       // targetProjectId server-side from the auth tenant — never from the request body.
-      const tenantId = resolveTenantId(req, input)
-      const targetProjectId = resolveIntegrationStagingProjectId(tenantId, input.projectId)
+      const tenantId = resolveAuthUserTenantId(req)
+      const targetProjectId = resolveIntegrationStagingProjectId(tenantId, undefined)
       const result = await persistStockPreparationSyncRun({
         context,
         permission: 'admin',
@@ -4035,13 +4118,13 @@ function createHandlers(services, options = {}) {
       const user = requireAccess(req, 'admin')
       const audit = requireStockPreparationAudit()
       const input = normalizeStockPreparationConfirmBody(requestBody(req), VALID_STOCK_PREPARATION_MAPPING_CANDIDATES_SYNC_REQUEST_KEYS, 'STOCK_PREPARATION_MAPPING_CANDIDATES_SYNC_REQUEST_INVALID')
-      const tenantId = resolveTenantId(req, input)
+      const tenantId = resolveAuthUserTenantId(req)
       const result = await syncMaterialMappingCandidates({
         context,
         permission: 'admin',
         recordsApi: getMultitableRecordsApi(),
         provisioning: getMultitableProvisioning(),
-        targetProjectId: resolveIntegrationStagingProjectId(tenantId, input.projectId),
+        targetProjectId: resolveIntegrationStagingProjectId(tenantId, undefined),
         projectId: input.projectId,
         snapshotBatchId: input.snapshotBatchId,
         defaultVersionPolicy: input.defaultVersionPolicy,
@@ -4066,13 +4149,13 @@ function createHandlers(services, options = {}) {
       const user = requireAccess(req, 'admin')
       const audit = requireStockPreparationAudit()
       const input = normalizeStockPreparationConfirmBody(requestBody(req), VALID_STOCK_PREPARATION_MAPPING_CONFIRM_REQUEST_KEYS, 'STOCK_PREPARATION_MAPPING_CONFIRM_REQUEST_INVALID')
-      const tenantId = resolveTenantId(req, input)
+      const tenantId = resolveAuthUserTenantId(req)
       const result = await confirmMaterialMapping({
         context,
         permission: 'admin',
         recordsApi: getMultitableRecordsApi(),
         provisioning: getMultitableProvisioning(),
-        targetProjectId: resolveIntegrationStagingProjectId(tenantId, input.projectId),
+        targetProjectId: resolveIntegrationStagingProjectId(tenantId, undefined),
         mappingId: input.mappingId,
         mapping: input.mapping,
         notes: input.notes,
@@ -4097,13 +4180,13 @@ function createHandlers(services, options = {}) {
       const user = requireAccess(req, 'admin')
       const audit = requireStockPreparationAudit()
       const input = normalizeStockPreparationConfirmBody(requestBody(req), VALID_STOCK_PREPARATION_MAPPING_RETIRE_REQUEST_KEYS, 'STOCK_PREPARATION_MAPPING_RETIRE_REQUEST_INVALID')
-      const tenantId = resolveTenantId(req, input)
+      const tenantId = resolveAuthUserTenantId(req)
       const result = await retireMaterialMapping({
         context,
         permission: 'admin',
         recordsApi: getMultitableRecordsApi(),
         provisioning: getMultitableProvisioning(),
-        targetProjectId: resolveIntegrationStagingProjectId(tenantId, input.projectId),
+        targetProjectId: resolveIntegrationStagingProjectId(tenantId, undefined),
         mappingId: input.mappingId,
       })
       await audit.append({
@@ -4126,13 +4209,13 @@ function createHandlers(services, options = {}) {
       const user = requireAccess(req, 'admin')
       const audit = requireStockPreparationAudit()
       const input = normalizeStockPreparationConfirmBody(requestBody(req), VALID_STOCK_PREPARATION_UNIT_CONFIRM_REQUEST_KEYS, 'STOCK_PREPARATION_UNIT_CONFIRM_REQUEST_INVALID')
-      const tenantId = resolveTenantId(req, input)
+      const tenantId = resolveAuthUserTenantId(req)
       const result = await confirmUnitConversionRule({
         context,
         permission: 'admin',
         recordsApi: getMultitableRecordsApi(),
         provisioning: getMultitableProvisioning(),
-        targetProjectId: resolveIntegrationStagingProjectId(tenantId, input.projectId),
+        targetProjectId: resolveIntegrationStagingProjectId(tenantId, undefined),
         projectId: input.projectId,
         conversionRuleId: input.conversionRuleId,
         contextFingerprint: input.contextFingerprint,
@@ -4159,13 +4242,13 @@ function createHandlers(services, options = {}) {
       const user = requireAccess(req, 'admin')
       const audit = requireStockPreparationAudit()
       const input = normalizeStockPreparationConfirmBody(requestBody(req), VALID_STOCK_PREPARATION_UNIT_RETIRE_REQUEST_KEYS, 'STOCK_PREPARATION_UNIT_RETIRE_REQUEST_INVALID')
-      const tenantId = resolveTenantId(req, input)
+      const tenantId = resolveAuthUserTenantId(req)
       const result = await retireUnitConversionRule({
         context,
         permission: 'admin',
         recordsApi: getMultitableRecordsApi(),
         provisioning: getMultitableProvisioning(),
-        targetProjectId: resolveIntegrationStagingProjectId(tenantId, input.projectId),
+        targetProjectId: resolveIntegrationStagingProjectId(tenantId, undefined),
         conversionRuleId: input.conversionRuleId,
       })
       await audit.append({
@@ -4188,13 +4271,13 @@ function createHandlers(services, options = {}) {
       const user = requireAccess(req, 'admin')
       const audit = requireStockPreparationAudit()
       const input = normalizeStockPreparationConfirmBody(requestBody(req), VALID_STOCK_PREPARATION_GENERATION_RUN_REQUEST_KEYS, 'STOCK_PREPARATION_GENERATION_RUN_REQUEST_INVALID')
-      const tenantId = resolveTenantId(req, input)
+      const tenantId = resolveAuthUserTenantId(req)
       const result = await runStockPreparationGeneration({
         context,
         permission: 'admin',
         recordsApi: getMultitableRecordsApi(),
         provisioning: getMultitableProvisioning(),
-        targetProjectId: resolveIntegrationStagingProjectId(tenantId, input.projectId),
+        targetProjectId: resolveIntegrationStagingProjectId(tenantId, undefined),
         projectId: input.projectId,
         snapshotBatchId: input.snapshotBatchId,
       })
@@ -4223,13 +4306,13 @@ function createHandlers(services, options = {}) {
       const user = requireAccess(req, 'admin')
       const audit = requireStockPreparationAudit()
       const input = normalizeStockPreparationConfirmBody(requestBody(req), VALID_STOCK_PREPARATION_EXCEPTION_RESOLVE_REQUEST_KEYS, 'STOCK_PREPARATION_EXCEPTION_RESOLVE_REQUEST_INVALID')
-      const tenantId = resolveTenantId(req, input)
+      const tenantId = resolveAuthUserTenantId(req)
       const result = await resolveStockPreparationException({
         context,
         permission: 'admin',
         recordsApi: getMultitableRecordsApi(),
         provisioning: getMultitableProvisioning(),
-        targetProjectId: resolveIntegrationStagingProjectId(tenantId, input.projectId),
+        targetProjectId: resolveIntegrationStagingProjectId(tenantId, undefined),
         exceptionId: input.exceptionId,
         resolutionAction: input.resolutionAction,
         resolvedBy: user.id || user.email,
@@ -4253,13 +4336,13 @@ function createHandlers(services, options = {}) {
       const user = requireAccess(req, 'admin')
       const audit = requireStockPreparationAudit()
       const input = normalizeStockPreparationConfirmBody(requestBody(req), VALID_STOCK_PREPARATION_EXCEPTION_BULK_RESOLVE_REQUEST_KEYS, 'STOCK_PREPARATION_EXCEPTION_BULK_RESOLVE_REQUEST_INVALID')
-      const tenantId = resolveTenantId(req, input)
+      const tenantId = resolveAuthUserTenantId(req)
       const result = await bulkResolveStockPreparationExceptions({
         context,
         permission: 'admin',
         recordsApi: getMultitableRecordsApi(),
         provisioning: getMultitableProvisioning(),
-        targetProjectId: resolveIntegrationStagingProjectId(tenantId, input.projectId),
+        targetProjectId: resolveIntegrationStagingProjectId(tenantId, undefined),
         exceptionIds: input.exceptionIds,
         resolutionAction: input.resolutionAction,
         resolvedBy: user.id || user.email,
@@ -4599,15 +4682,19 @@ function createHandlers(services, options = {}) {
       requireAccess(req, 'write')
       const body = requestBody(req)
       const query = requestQuery(req)
-      const tenantId = resolveTenantId(req, body)
-      const requestedProjectId = firstString(body.projectId, query.projectId)
-      const projectId = resolveIntegrationStagingProjectId(tenantId, requestedProjectId)
-      const baseId = firstString(body.baseId, requestQuery(req).baseId)
+      // GHSA-m6qv-2rpf-q7mh step-1 follow-up: staging-install is a tenant-scoped STRUCTURE write (it
+      // installs the staging sheets), so it must derive tenant/target SERVER-SIDE, never from the request
+      // — resolveTenantId(req, body) honors a request tenantId for admins, resolveIntegrationStagingProjectId
+      // returns a request projectId verbatim, and an explicit baseId is the third axis (host writes base_id
+      // with no ownership check). Reject an explicit baseId (body OR query) fail-closed BEFORE provisioning.
+      assertNoRequestBaseId(body)
+      assertNoRequestBaseId(query)
+      const tenantId = resolveAuthUserTenantId(req)
+      const projectId = resolveIntegrationStagingProjectId(tenantId, undefined)
       return sendOk(res, await stagingInstaller.installStaging(scopedInput(req, {
         tenantId,
         workspaceId: body.workspaceId,
         projectId,
-        baseId,
       })), 201)
     },
 

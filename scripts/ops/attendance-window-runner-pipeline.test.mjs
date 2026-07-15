@@ -193,3 +193,103 @@ test('rehearsal restore keeps the replica-role trigger suppression (load-bearing
   assert.ok(setIdx < restoreIdx, 'replica-role SET must come BEFORE the pg_restore invocation')
   assert.ok(restoreIdx < resetIdx, 'RESET must come AFTER the pg_restore invocation')
 })
+
+// --- action=residue-sweep (bundle §7 "Consolidated final residue sweep") --------------
+
+function extractResidueSweepAction() {
+  const remote = readFileSync(REMOTE_SH, 'utf8')
+  const startMarker = 'action_residue_sweep() {'
+  const start = remote.indexOf(startMarker)
+  assert.notEqual(start, -1, 'expected action_residue_sweep() to be defined in the remote script')
+  const end = remote.indexOf('\naction_status() {', start)
+  assert.notEqual(end, -1, 'expected action_status() to immediately follow action_residue_sweep() (used as the end marker)')
+  return remote.slice(start, end)
+}
+
+test('residue-sweep is wired into the remote-script dispatcher and the workflow action choices', () => {
+  const remote = readFileSync(REMOTE_SH, 'utf8')
+  assert.match(
+    remote,
+    /residue-sweep\)\s*action_residue_sweep\s*;;/,
+    'expected the case "$ACTION" dispatcher to route residue-sweep to action_residue_sweep',
+  )
+  const yaml = readFileSync(WORKFLOW, 'utf8')
+  assert.match(
+    yaml,
+    /options:\s*\[deploy,\s*smoke,\s*status,\s*migrate,\s*residue-sweep\]/,
+    'expected the workflow action input to list residue-sweep as a choice',
+  )
+  assert.match(yaml, /stamps:/, 'expected a `stamps` workflow_dispatch input for action=residue-sweep')
+})
+
+test('residue-sweep SQL covers all five bundle §7 stamp-prefix families and the three shared-deliveries source_type families (source-contract, mutation-provable: dropping any one literal below fails its own assertion)', () => {
+  const action = extractResidueSweepAction()
+
+  // bundle §5's mutually-exclusive stamp prefixes — every one of the five smokes must be
+  // represented by at least one literal prefix match in the sweep SQL (not just accepted as
+  // an unused input).
+  const stampPrefixFamilies = {
+    'ae4-smoke-': "'ae4-smoke-'",
+    'rd45-smoke-': "'rd45-smoke-'",
+    'otbank-v18-smoke-': "'otbank-v18-smoke-'",
+    'mp6-smoke-': "'mp6-smoke-'",
+    'hmr5-smoke-': "'hmr5-smoke-'",
+  }
+  for (const [family, literal] of Object.entries(stampPrefixFamilies)) {
+    const count = action.split(literal).length - 1
+    assert.ok(count >= 1, `expected the residue-sweep SQL to reference the ${family} family prefix (${literal}) at least once, found ${count}`)
+  }
+
+  // bundle §5 "The shared deliveries table" — every source_type that writes
+  // attendance_notification_deliveries must be scoped explicitly (never source_type alone).
+  const sourceTypeFamilies = ["'attendance_result_edit'", "'attendance_report_digest'", "'manual_missed_punch_reminder'"]
+  for (const literal of sourceTypeFamilies) {
+    const count = action.split(literal).length - 1
+    assert.ok(count >= 1, `expected the residue-sweep SQL to scope a query by source_type = ${literal}, found ${count}`)
+  }
+})
+
+test('residue-sweep runs all 29 bundle §7 named checks (source-contract, mutation-provable: removing any name below fails)', () => {
+  const action = extractResidueSweepAction()
+  const expectedNames = [
+    'users', 'user_orgs', 'records', 'requests',
+    'ae4_deliveries', 'rd45_deliveries', 'stray_deliveries_to_smoke_users',
+    'settlements', 'cycles', 'lots', 'fixtures', 'leave_types', 'holidays', 'approval_instances',
+    'mp6_requests', 'mp6_records', 'mp6_events', 'mp6_approval_instances', 'mp6_users', 'mp6_user_orgs', 'mp6_deliveries',
+    'hmr5_deliveries', 'hmr5_stray_deliveries', 'hmr5_requests', 'hmr5_records', 'hmr5_scopes', 'hmr5_user_orgs', 'hmr5_user_roles', 'hmr5_users',
+  ]
+  assert.equal(expectedNames.length, 29, 'test fixture itself must list exactly 29 names (bundle §7)')
+  for (const name of expectedNames) {
+    const re = new RegExp(`residue_check\\s+"\\$pg_user"\\s+"\\$pg_db"\\s+${name}\\s`)
+    assert.match(action, re, `expected a residue_check call named "${name}"`)
+  }
+  const calls = action.match(/residue_check\s+"\$pg_user"\s+"\$pg_db"\s+\S+/g) || []
+  assert.equal(calls.length, 29, `expected exactly 29 residue_check invocations, found ${calls.length}`)
+})
+
+test('residue-sweep captured-id substitutions are documented at their call site (bundle §7 named these :otbank_approval_ids / :otbank_cycle_ids / :mp6_request_ids / :mp6_approval_ids / :rd45_smoke_org / :hmr5_org, which no helper archives to a file)', () => {
+  const action = extractResidueSweepAction()
+  for (const needle of ['SUBSTITUTION:', ':otbank_approval_ids', ':otbank_cycle_ids', ':mp6_request_ids', ':mp6_approval_ids', ':rd45_smoke_org', ':hmr5_org']) {
+    assert.ok(action.includes(needle), `expected the residue-sweep action to document the ${needle} substitution`)
+  }
+})
+
+test('residue-sweep fails closed on nonzero residue and emits the CONSOLIDATED_RESIDUE_SWEEP summary line', () => {
+  const action = extractResidueSweepAction()
+  assert.match(action, /result="FAIL"/, 'expected the sweep to set result=FAIL when any check is nonzero')
+  assert.match(
+    action,
+    /echo "CONSOLIDATED_RESIDUE_SWEEP result=\$\{result\} nonzero=\$\{nonzero_list\}"/,
+    'expected the exact CONSOLIDATED_RESIDUE_SWEEP result=<ok|FAIL> nonzero=<list> summary line',
+  )
+  assert.match(action, /fail "residue sweep found nonzero residue/, 'expected the job to fail (non-zero exit) when any check is nonzero')
+})
+
+test('residue-sweep validates the 5-field stamps shape and each stamp against its own STAMP_PATTERN before querying', () => {
+  const action = extractResidueSweepAction()
+  assert.match(action, /\^ae4-smoke-\[A-Za-z0-9-\]\+\$/)
+  assert.match(action, /\^rd45-smoke-\[A-Za-z0-9-\]\+\$/)
+  assert.match(action, /\^otbank-v18-smoke-\[A-Za-z0-9-\]\+\$/)
+  assert.match(action, /\^mp6-smoke-\[A-Za-z0-9-\]\+\$/)
+  assert.match(action, /\^hmr5-smoke-\[A-Za-z0-9-\]\+\$/)
+})
