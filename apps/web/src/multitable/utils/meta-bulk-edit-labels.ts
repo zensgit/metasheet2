@@ -88,6 +88,21 @@ export function bulkFailure(failed: number, requested: number, sampleFailures: s
     : `${failed} of ${requested} ${recordWord(requested)} failed${detail}`
 }
 
+// G-10 follow-up (owner ruling 2026-07-15): the bulk-edit failure sample is a normal-user
+// dialog/toast surface, so each sampled failure leads with the record's display NAME. The caller
+// supplies the resolver over rows it ALREADY has loaded (zero new data paths, HI-1) — that
+// resolver's own fallback keeps the raw record id only when the row is no longer in scope.
+// Failure `reason` strings stay raw per this module's scope note above.
+export function bulkFailureSamples(
+  failures: ReadonlyArray<{ recordId: string; reason: string }>,
+  recordLabelOf: (recordId: string) => string,
+): string {
+  return failures
+    .slice(0, 3)
+    .map((failure) => `${recordLabelOf(failure.recordId)}: ${failure.reason}`)
+    .join('; ')
+}
+
 export function bulkVersionConflict(message: string, isZh: boolean): string {
   const detail = message ? (isZh ? `（${message}）` : ` (${message})`) : ''
   return isZh
