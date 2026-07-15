@@ -79,6 +79,19 @@ function batchListWithPlantedExtras(): StockPreparationSnapshotBatchListResult {
   } as unknown as StockPreparationSnapshotBatchListResult
 }
 
+// TWO selectable (complete) batches, so a real A→B switch can be driven — batch-beta above is
+// incomplete/disabled, so clicking "the batch-select button" only ever re-selects batch-alpha.
+function batchListTwoComplete(): StockPreparationSnapshotBatchListResult {
+  return {
+    projectId: 'proj-alpha',
+    batchCount: 2,
+    batches: [
+      { snapshotBatchId: 'batch-alpha', snapshotVersion: 3, snapshotStatus: 'active', syncRunId: 'sync-run-alpha', lineCount: 7, createdAtPresent: true, incomplete: false },
+      { snapshotBatchId: 'batch-gamma', snapshotVersion: 4, snapshotStatus: 'active', syncRunId: 'sync-run-gamma', lineCount: 9, createdAtPresent: true, incomplete: false },
+    ],
+  } as unknown as StockPreparationSnapshotBatchListResult
+}
+
 function diffSummary(): StockPreparationSnapshotDiffSummary {
   return {
     snapshotBatchId: 'batch-alpha',
@@ -97,16 +110,18 @@ function diffSummary(): StockPreparationSnapshotDiffSummary {
   }
 }
 
-function diffRowsResult(): unknown {
+// `idPrefix` distinguishes one batch's rows from another's, so a stale-batch response is detectable in
+// the DOM (batch A's `diff-alpha-*` must never show while batch B is open).
+function diffRowsResult(idPrefix = 'diff', batchId = 'batch-alpha'): unknown {
   // Planted business values as EXTRA fields on each row — the values-free table must render NONE of them.
   return {
-    snapshotBatchId: 'batch-alpha',
+    snapshotBatchId: batchId,
     baseSnapshotBatchId: 'batch-beta',
     rowCount: 2,
     heldRowCount: 1,
     rows: [
       {
-        diffId: 'diff-one',
+        diffId: `${idPrefix}-one`,
         diffType: 'changed',
         reviewStatus: 'held',
         changeTypes: ['quantity', 'unit'],
@@ -123,7 +138,7 @@ function diffRowsResult(): unknown {
         quantity: PLANTED_QUANTITY,
       },
       {
-        diffId: 'diff-two',
+        diffId: `${idPrefix}-two`,
         diffType: 'added',
         reviewStatus: 'pending',
         changeTypes: [],
@@ -473,21 +488,60 @@ describe('StockPreparationSnapshotDiffView (readonly, values-free)', () => {
     expect(root.querySelector('[data-testid="stock-prep-snapshot-diff-rows-table"]')).toBeNull()
   })
 
-  it('switching batches collapses the detail and re-fetches fresh when re-opened', async () => {
-    h.listRows.mockResolvedValue(diffRowsResult())
-    const root = await mountWithDiffShown()
+  // Mount with TWO complete batches; select the first (batch-alpha) and show its summary.
+  async function mountWithTwoBatches(): Promise<HTMLDivElement> {
+    h.listBatches.mockResolvedValue(batchListTwoComplete())
+    h.getDiff.mockResolvedValue(diffSummary())
+    const root = mountView()
+    await flushUi()
+    ;(root.querySelectorAll('[data-testid="stock-prep-snapshot-batch-select"]')[0] as HTMLButtonElement).click()
+    await flushUi()
+    return root
+  }
+
+  it('a REAL batch switch (A→B) collapses the detail and re-fetches B fresh — B never shows A rows', async () => {
+    h.listRows.mockImplementation((batchId: string) =>
+      Promise.resolve(batchId === 'batch-gamma' ? diffRowsResult('diff-gamma', 'batch-gamma') : diffRowsResult('diff-alpha', 'batch-alpha')),
+    )
+    const root = await mountWithTwoBatches()
     await openRowDetail(root)
     expect(h.listRows).toHaveBeenCalledTimes(1)
-    expect(root.querySelector('[data-testid="stock-prep-snapshot-diff-rows"]')).not.toBeNull()
+    expect(root.textContent).toContain('diff-alpha-one')
 
-    // Select the OTHER (first) batch again — a batch switch must collapse the stale detail.
-    h.getDiff.mockResolvedValue(diffSummary())
-    ;(root.querySelector('[data-testid="stock-prep-snapshot-batch-select"]') as HTMLButtonElement).click()
+    // Select the SECOND batch (batch-gamma) — a real switch. The detail collapses.
+    ;(root.querySelectorAll('[data-testid="stock-prep-snapshot-batch-select"]')[1] as HTMLButtonElement).click()
     await flushUi()
     expect(root.querySelector('[data-testid="stock-prep-snapshot-diff-rows"]')).toBeNull()
 
-    // Re-opening issues a FRESH fetch (not the stale cached rows).
+    // Re-open → a FRESH fetch keyed on batch-gamma; it shows gamma rows, never alpha's.
     await openRowDetail(root)
     expect(h.listRows).toHaveBeenCalledTimes(2)
+    expect(h.listRows.mock.calls[1][0]).toBe('batch-gamma')
+    expect(root.textContent).toContain('diff-gamma-one')
+    expect(root.textContent).not.toContain('diff-alpha-one')
+  })
+
+  it('a slow A response arriving AFTER switching to B is discarded (monotonic guard, not cached under B)', async () => {
+    // Batch A's rows load is DEFERRED; B's resolves immediately.
+    let releaseAlpha!: (v: unknown) => void
+    h.listRows.mockImplementation((batchId: string) => {
+      if (batchId === 'batch-alpha') return new Promise((resolve) => { releaseAlpha = resolve })
+      return Promise.resolve(diffRowsResult('diff-gamma', 'batch-gamma'))
+    })
+    const root = await mountWithTwoBatches()
+    await openRowDetail(root) // opens A → A's rows GET is in flight (deferred)
+    expect(root.querySelector('[data-testid="stock-prep-snapshot-diff-rows-loading"]')).not.toBeNull()
+
+    // Switch to B while A is still pending, and open + resolve B.
+    ;(root.querySelectorAll('[data-testid="stock-prep-snapshot-batch-select"]')[1] as HTMLButtonElement).click()
+    await flushUi()
+    await openRowDetail(root)
+    expect(root.textContent).toContain('diff-gamma-one')
+
+    // NOW A's slow response finally arrives — it must be dropped, NOT cached under B.
+    releaseAlpha(diffRowsResult('diff-alpha', 'batch-alpha'))
+    await flushUi()
+    expect(root.textContent).toContain('diff-gamma-one')
+    expect(root.textContent).not.toContain('diff-alpha-one')
   })
 })

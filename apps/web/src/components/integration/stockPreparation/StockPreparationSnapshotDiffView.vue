@@ -320,6 +320,10 @@ const rowDetailOpen = ref(false)
 const rowsLoading = ref(false)
 const rowsErrored = ref(false)
 const diffRows = ref<StockPreparationSnapshotDiffRowsResult | null>(null)
+// Monotonic guard: only the NEWEST rows load may commit. A batch switch (or re-open) bumps this, so a
+// slow response for the previous batch — arriving after the operator moved on — is discarded instead of
+// being cached under the wrong batch (A's late reply must never show up when B is open).
+let rowsSeq = 0
 
 // A diff/path-key fingerprint is already an opaque SHA-16 (never the raw path key); show a short prefix
 // so the table stays scannable while remaining a values-free handle.
@@ -344,6 +348,7 @@ const changeCountEntries = computed(() => {
 })
 
 function resetRowDetail(): void {
+  rowsSeq += 1 // invalidate any in-flight rows load for the batch we are leaving
   rowDetailOpen.value = false
   rowsLoading.value = false
   rowsErrored.value = false
@@ -405,21 +410,26 @@ async function selectBatch(batch: StockPreparationSnapshotBatchSummary): Promise
 }
 
 async function loadRowDetail(): Promise<void> {
-  if (!selectedBatchId.value) return
+  const batchId = selectedBatchId.value
+  if (!batchId) return
+  const seq = (rowsSeq += 1) // this load owns the newest ticket
   rowsLoading.value = true
   rowsErrored.value = false
   diffRows.value = null
   try {
-    diffRows.value = await listStockPreparationSnapshotDiffRows(selectedBatchId.value, {
+    const result = await listStockPreparationSnapshotDiffRows(batchId, {
       ...props.scope,
       projectId: props.projectId,
     })
+    if (seq !== rowsSeq) return // superseded (batch switched / re-opened) — drop this stale response
+    diffRows.value = result
   } catch {
+    if (seq !== rowsSeq) return
     // 404-soft, same as the batch/diff GETs: neutral state, never the raw error body.
     rowsErrored.value = true
     diffRows.value = null
   } finally {
-    rowsLoading.value = false
+    if (seq === rowsSeq) rowsLoading.value = false
   }
 }
 
