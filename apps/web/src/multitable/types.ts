@@ -659,6 +659,16 @@ export interface MultitableCommentInboxItem extends MultitableComment {
   sheetId?: string | null
   viewId?: string | null
   recordId?: string | null
+  /**
+   * G-10 (docket #68): server-projected display name for the matching id, when resolvable.
+   * Additive — the id fields above are unchanged. Render name-first with an id fallback
+   * (`baseName ?? baseId`, same pattern as the existing `authorName ?? authorId`); `recordId` has no
+   * `recordName` counterpart (no cheap server-side record-title resolver exists yet).
+   */
+  baseName?: string | null
+  sheetName?: string | null
+  viewName?: string | null
+  fieldName?: string | null
 }
 
 export type MetaCommentInboxItem = MultitableCommentInboxItem

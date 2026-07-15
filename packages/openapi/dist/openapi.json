@@ -266,6 +266,22 @@
               "recordId": {
                 "type": "string",
                 "nullable": true
+              },
+              "baseName": {
+                "type": "string",
+                "nullable": true
+              },
+              "sheetName": {
+                "type": "string",
+                "nullable": true
+              },
+              "viewName": {
+                "type": "string",
+                "nullable": true
+              },
+              "fieldName": {
+                "type": "string",
+                "nullable": true
               }
             },
             "required": [
