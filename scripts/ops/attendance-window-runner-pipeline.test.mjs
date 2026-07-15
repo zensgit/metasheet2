@@ -293,3 +293,63 @@ test('residue-sweep validates the 5-field stamps shape and each stamp against it
   assert.match(action, /\^mp6-smoke-\[A-Za-z0-9-\]\+\$/)
   assert.match(action, /\^hmr5-smoke-\[A-Za-z0-9-\]\+\$/)
 })
+
+// --- persistent runner override lifecycle (#3317; fixes containment run 29398270060) ------
+
+test('persistent override: lives under $HOME/.metasheet2/window-runner, NOT the per-run OUTPUT_DIR (a per-run path is deleted on cleanup, dangling each container docker-compose config_files label)', () => {
+  const remote = readFileSync(REMOTE_SH, 'utf8')
+  assert.match(remote, /RUNNER_PERSIST_DIR="\$\{HOME\}\/\.metasheet2\/window-runner"/, 'expected a persistent runner dir under $HOME/.metasheet2/window-runner')
+  assert.match(remote, /OVERRIDE_FILE="\$\{RUNNER_PERSIST_DIR\}\/docker-compose\.window-runner\.override\.yml"/, 'OVERRIDE_FILE must resolve under the persistent dir')
+  assert.doesNotMatch(remote, /OVERRIDE_FILE="\$\{OUTPUT_DIR\}/, 'OVERRIDE_FILE must NOT live under the per-run OUTPUT_DIR')
+})
+
+test('persistent override: written atomically — mktemp candidate + docker compose config validation + rename, never a truncating write straight onto the live file', () => {
+  const remote = readFileSync(REMOTE_SH, 'utf8')
+  assert.match(remote, /override_tmp="\$\(mktemp "\$\{RUNNER_PERSIST_DIR\}\/\.override\.XXXXXX"\)"/, 'expected a mktemp candidate override in the persist dir (X placeholder at the END — no trailing suffix)')
+  const validateIdx = remote.indexOf('docker compose -f "$STAGING_COMPOSE_FILE" -f "$override_tmp" config')
+  const mvIdx = remote.indexOf('mv -f "$override_tmp" "$OVERRIDE_FILE"')
+  assert.notEqual(validateIdx, -1, 'candidate override must be validated with docker compose config before replacing the live file')
+  assert.notEqual(mvIdx, -1, 'candidate override must be atomically renamed into place')
+  assert.ok(validateIdx < mvIdx, 'validation must come BEFORE the atomic rename')
+  assert.doesNotMatch(remote, /\}\s*>\s*"\$OVERRIDE_FILE"\n/, 'the override body must be written to the temp candidate, not truncated directly onto the live override')
+})
+
+test('persistent override: set_window_env=none writes NO flag env — the ATTENDANCE_*_ENABLED echoes in the override BODY are gated behind the rd-window branch, so a none redeploy clears prior flags from the persisted file', () => {
+  const remote = readFileSync(REMOTE_SH, 'utf8')
+  // scope strictly to the override-write heredoc region (ATTENDANCE_SCHEDULER_ENABLED also
+  // appears earlier in the env-flags diagnostic block, which is not the override body)
+  const start = remote.indexOf('override_tmp="$(mktemp')
+  const end = remote.indexOf('> "$override_tmp"', start)
+  assert.ok(start !== -1 && end !== -1 && end > start, 'expected the override-write heredoc region')
+  const body = remote.slice(start, end)
+  const rdIdx = body.indexOf('if [[ "$SET_WINDOW_ENV" == "rd-window" ]]; then')
+  const fiIdx = body.indexOf('\n    fi', rdIdx)
+  const schedIdx = body.indexOf('ATTENDANCE_SCHEDULER_ENABLED')
+  const workerIdx = body.indexOf('ATTENDANCE_NOTIFICATION_DELIVERY_WORKER_ENABLED')
+  assert.notEqual(rdIdx, -1, 'expected the rd-window gate inside the override body')
+  assert.notEqual(fiIdx, -1, 'expected the rd-window gate to be closed with fi')
+  assert.ok(rdIdx < schedIdx && schedIdx < fiIdx, 'the scheduler flag echo must sit INSIDE the rd-window gate')
+  assert.ok(rdIdx < workerIdx && workerIdx < fiIdx, 'the worker flag echo must sit INSIDE the rd-window gate')
+})
+
+test('persistent override: the workflow cleanup rm -rf never targets the persistent runner dir, so the override (and the containers config_files label) survives OUTPUT_DIR removal', () => {
+  const workflow = readFileSync(WORKFLOW, 'utf8')
+  assert.match(workflow, /rm -rf \$\{remote_output_dir\} \$\{RUNNER_DIR\}/, 'expected the post-run cleanup rm to target only the per-run output + checkout dirs')
+  assert.doesNotMatch(workflow, /rm -rf[^\n]*\.metasheet2/, 'workflow cleanup must NEVER rm the persistent .metasheet2 runner override dir')
+})
+
+test('persistent override: POSITIVE CONTROL — the exact mktemp template REALLY randomizes on this platform (a mid-template X run like .XXXXXX.yml makes GNU mktemp error and BSD return the literal)', () => {
+  const remote = readFileSync(REMOTE_SH, 'utf8')
+  const m = remote.match(/mktemp "\$\{RUNNER_PERSIST_DIR\}(\/[^"]+)"/)
+  assert.ok(m, 'expected the mktemp candidate template to extract')
+  const dir = mkdtempSync(join(tmpdir(), 'winrunner-persist-'))
+  const template = `${dir}${m[1]}` // e.g. <dir>/.override.XXXXXX
+  const r1 = spawnSync('mktemp', [template], { encoding: 'utf8' })
+  const r2 = spawnSync('mktemp', [template], { encoding: 'utf8' })
+  assert.equal(r1.status, 0, `mktemp REJECTED the template (non-portable): ${r1.stderr || r1.error}`)
+  assert.equal(r2.status, 0, `mktemp REJECTED the template (non-portable): ${r2.stderr || r2.error}`)
+  const p1 = r1.stdout.trim(), p2 = r2.stdout.trim()
+  assert.notEqual(p1, template, 'mktemp returned the LITERAL template (no randomization) — X placeholder not honored (non-portable)')
+  assert.notEqual(p1, p2, 'two mktemp calls produced the SAME path — not randomized')
+  assert.ok(existsSync(p1) && existsSync(p2), 'mktemp did not actually create the candidate files')
+})

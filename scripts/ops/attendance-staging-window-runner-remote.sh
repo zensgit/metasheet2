@@ -87,7 +87,7 @@ MIGRATE_JS="packages/core-backend/dist/src/db/migrate.js"
 # (created fresh each run — never assumed to persist).
 REHEARSAL_DB="window_runner_rehearsal"
 # Host-side backup dir for action=migrate (HOME is writable; the staging repo dir is not
-# — proven by run 29313154282, same reason OVERRIDE_FILE above lives under OUTPUT_DIR).
+# — proven by run 29313154282, same reason OVERRIDE_FILE above lives under ${HOME}/.metasheet2).
 BACKUP_DIR="${HOME}/window-runner-backups"
 
 resolve_home_path() {
@@ -104,12 +104,18 @@ resolve_home_path() {
 STAGING_DIR="$(resolve_home_path "$STAGING_DEPLOY_PATH")"
 PROD_REPO_DIR="$(resolve_home_path "$DEPLOY_PATH")"
 STAGING_COMPOSE_FILE="${STAGING_DIR}/docker-compose.app.staging.yml"
-# The override lives in the per-run OUTPUT_DIR, NOT the staging repo dir: the SSH user has
-# no write permission inside ${STAGING_DIR} (proven by run 29313154282: "Permission denied"),
-# compose accepts absolute -f paths, and compose_staging() is only used by the deploy action
-# (smoke/status use docker exec by container name), so the override never needs to persist
-# across runs — each deploy rewrites it, preserving the set_window_env=none removal semantic.
-OVERRIDE_FILE="${OUTPUT_DIR}/docker-compose.window-runner.override.yml"
+# The override MUST persist across runs. `docker compose up -d` stamps each container's
+# com.docker.compose.project.config_files label with the -f paths it was given, so any later
+# `docker compose config` (e.g. the recovery-flag containment check) re-reads THIS file BY PATH.
+# When the override lived under the per-run $OUTPUT_DIR (which the workflow rm -rf's on cleanup),
+# that label dangled and staging's next-restart config became unverifiable — run 29398270060
+# FAIL-CLOSED. It still cannot live under ${STAGING_DIR} (the SSH user has no write there — run
+# 29313154282 "Permission denied"), so it lives in a stable, deploy-user-writable directory under
+# $HOME that the workflow cleanup never touches. Rewritten atomically on each deploy (temp file +
+# `docker compose config` validation + rename); set_window_env=none rewrites it WITHOUT the flags,
+# preserving the removal semantic.
+RUNNER_PERSIST_DIR="${HOME}/.metasheet2/window-runner"
+OVERRIDE_FILE="${RUNNER_PERSIST_DIR}/docker-compose.window-runner.override.yml"
 
 # --- staging-only guard (fail closed) -------------------------------------------------
 assert_staging_only() {
@@ -337,6 +343,17 @@ action_deploy() {
   redis_id_before="$(docker inspect -f '{{.Id}}' "$REDIS_CONTAINER")" \
     || fail "staging redis container not found: ${REDIS_CONTAINER}"
 
+  # Persistent override, written ATOMICALLY: candidate → validate → rename. The persistent path
+  # (RUNNER_PERSIST_DIR under $HOME) survives the workflow's OUTPUT_DIR cleanup, so the container
+  # config_files label it stamps never dangles. set_window_env=none takes the branch that omits
+  # the flags, so redeploying with none rewrites the SAME file without them (clears the old flags).
+  mkdir -p "$RUNNER_PERSIST_DIR"
+  local override_tmp
+  # mktemp requires the X placeholder run at the END of the template (a trailing suffix like
+  # .yml makes GNU mktemp error and BSD/macOS return the literal, un-randomized). The candidate
+  # needs no extension — `docker compose config -f <file>` reads it by content, and it is renamed
+  # to the .yml-named live override on success.
+  override_tmp="$(mktemp "${RUNNER_PERSIST_DIR}/.override.XXXXXX")"
   {
     echo "# Written by attendance-staging-window-runner (run ${RUN_STAMP}). Pins the staging"
     echo "# backend/web images to one full-SHA tag; env flips happen ONLY here, together with"
@@ -351,8 +368,17 @@ action_deploy() {
     fi
     echo "  web:"
     echo "    image: ${web_image}"
-  } > "$OVERRIDE_FILE"
-  log "override written: ${OVERRIDE_FILE} (env mode: ${SET_WINDOW_ENV})"
+  } > "$override_tmp"
+  # Validate the candidate renders against the staging compose file BEFORE it goes live — a broken
+  # override would otherwise dangle EVERY container's config_files label. On failure, keep the
+  # previous known-good override untouched and fail closed.
+  if ! docker compose -f "$STAGING_COMPOSE_FILE" -f "$override_tmp" config >/dev/null 2>&1; then
+    rm -f "$override_tmp"
+    fail "candidate override failed 'docker compose config' validation; kept previous override at ${OVERRIDE_FILE}"
+  fi
+  # Same-directory rename ⇒ atomic replace; a concurrent reader never sees a partial file.
+  mv -f "$override_tmp" "$OVERRIDE_FILE"
+  log "override written (persistent, atomic): ${OVERRIDE_FILE} (env mode: ${SET_WINDOW_ENV})"
 
   compose_staging pull backend web 2>&1 | tee "${OUTPUT_DIR}/compose-pull.log"
   # NEVER recreate postgres/redis: only backend+web, --no-deps.
