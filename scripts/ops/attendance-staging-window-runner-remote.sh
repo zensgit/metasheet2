@@ -445,11 +445,21 @@ action_smoke() {
   local smoke_src="${PROD_REPO_DIR}/scripts/ops/${smoke_script}"
   [[ -f "$smoke_src" ]] || fail "smoke script missing in host-synced repo: ${smoke_src}"
 
-  # The deployed build must BE the SHA the stamps will name (bundle §2).
-  local live_commit
+  # The deployed build must BE the SHA the stamps will name (bundle §2). Same dual-channel
+  # identity as the deploy verifier: staging /api/health build.commit is env-pinned stale
+  # (L6 precedent; proven again by run 29378042837), so fall back to the backend container
+  # image tag — but only for a HEALTHY backend (health must answer ok:true).
+  local live_commit live_image
   live_commit="$(fetch_health_commit)"
-  [[ "$live_commit" == "$DEPLOY_SHA" ]] \
-    || fail "staging /api/health build.commit is '${live_commit:-<unreachable>}' but deploy_sha=${DEPLOY_SHA}; refusing to smoke a mismatched build"
+  if [[ "$live_commit" != "$DEPLOY_SHA" ]]; then
+    live_image="$(docker inspect -f '{{.Config.Image}}' "$BACKEND_CONTAINER" 2>/dev/null || true)"
+    if [[ "$live_image" == "ghcr.io/${IMAGE_OWNER}/metasheet2-backend:${DEPLOY_SHA}" ]] \
+       && curl -sS --max-time 10 "$STAGING_WEB_HEALTH_URL" | grep -q '"ok":true'; then
+      log "smoke identity: health build.commit stale ('${live_commit:-<unreachable>}', env-pinned) but backend image tag matches deploy sha: ${live_image}"
+    else
+      fail "staging identity failed BOTH channels for smoke: /api/health build.commit='${live_commit:-<unreachable>}' and backend image='${live_image:-<none>}' vs deploy_sha=${DEPLOY_SHA}; refusing to smoke a mismatched build"
+    fi
+  fi
 
   prepare_container_runner
   local admin_id admin_token
