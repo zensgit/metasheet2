@@ -44,8 +44,12 @@
 <script setup lang="ts">
 // PLM-COLLAB P3-D2 (frontend): the token-bound BOM-review embed page.
 //
-// Handshake (LISTEN-only; this page never posts to the parent, so there is no targetOrigin '*' to
-// leak through):
+// Handshake (LISTEN-only): this page's OWN inbound handshake never posts to the parent. NOTE (owner
+// review P3 — sync with the discussion protocol): the discussion panel this page MOUNTS
+// (PlmEmbedDiscussionPanel) DOES post `plm-embed:token-request` to the parent via the child token
+// protocol (plmEmbedWriteToken.ts's write + read clients) for on-demand write/read tokens — but ALWAYS
+// with targetOrigin === the pinned parentOrigin, NEVER '*'. So "no outbound postMessage" holds for the
+// handshake below, not for the whole page; the pinned-origin (no-'*') invariant covers both paths.
 //   1. fetch /api/plm-embed/config for the parent-origin allowlist -- the SINGLE source of truth,
 //      never a URL parameter, and never containing '*'.
 //   2. wait for the parent to postMessage the PLM-minted embed token. Accept it ONLY from an origin
