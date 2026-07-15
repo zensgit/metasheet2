@@ -161,7 +161,9 @@ export function summarizeAutomationAction(snapshot: ActionSummarySnapshot, isZh:
       const countText = count > 0
         ? pick(isZh, `，${count} 个字段值`, `, ${count} field ${plural(count, 'value', 'values')}`)
         : pick(isZh, '（未填字段值）', ' (no field values)')
-      return `${label}${sep(isZh)}${pick(isZh, '目标表', 'target sheet')} ${sheet}${countText}`
+      // W1 G-10 (display layer only): label normalized to '目标数据表' — the interpolated sheet
+      // id after it stays raw (this summary line never resolves it to a friendly sheet name).
+      return `${label}${sep(isZh)}${pick(isZh, '目标数据表', 'target sheet')} ${sheet}${countText}`
     }
 
     case 'send_webhook': {

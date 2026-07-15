@@ -312,7 +312,7 @@ describe('MultitableHomeView', () => {
     expect(root.textContent).toContain('Project Tracker')
     // MetaTemplateCard now renders 3 metrics: sheets · fields · views.
     // Project Tracker template has 1 sheet, 0 fields (mock), 2 views.
-    expect(root.textContent).toContain('1 个 Sheet · 0 个字段 · 2 个视图')
+    expect(root.textContent).toContain('1 个数据表 · 0 个字段 · 2 个视图')
 
     findButton(root, '使用模板').click()
     await flushUi()

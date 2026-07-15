@@ -12,12 +12,14 @@ export type MetaBasePickerLabelKey =
   | 'basePicker.newBasePlaceholder'
 
 const META_BASE_PICKER_LABELS: Record<MetaBasePickerLabelKey, { en: string; zh: string }> = {
-  'basePicker.selectBase': { en: 'Select Base', zh: '选择多维表' },
-  'basePicker.searchPlaceholder': { en: 'Search bases...', zh: '搜索多维表...' },
+  // W1 G-10 (docs/development/… terminology dictionary, ratified 2026-07-13): Base = 工作区.
+  // Was '多维表' (the product name) — conflated the product with the Base/workspace entity.
+  'basePicker.selectBase': { en: 'Select Base', zh: '选择工作区' },
+  'basePicker.searchPlaceholder': { en: 'Search bases...', zh: '搜索工作区...' },
   'basePicker.favoriteBadge': { en: 'Favorite', zh: '收藏' },
   'basePicker.recentBadge': { en: 'Recent', zh: '最近打开' },
-  'basePicker.empty': { en: 'No bases found', zh: '未找到多维表' },
-  'basePicker.newBasePlaceholder': { en: 'New base name...', zh: '新多维表名称...' },
+  'basePicker.empty': { en: 'No bases found', zh: '未找到工作区' },
+  'basePicker.newBasePlaceholder': { en: 'New base name...', zh: '新工作区名称...' },
 }
 
 export function basePickerLabel(key: MetaBasePickerLabelKey, isZh: boolean): string {

@@ -65,8 +65,8 @@ describe('meta-api-token-labels', () => {
   it('formats DingTalk group scope labels with raw ids preserved', () => {
     expect(apiDingTalkScopeLabel('org', { orgId: 'org_1' }, true)).toBe('组织目录群: org_1')
     expect(apiDingTalkScopeLabel('org', {}, true)).toBe('组织目录群')
-    expect(apiDingTalkScopeLabel('sheet', { sheetId: 'sheet_1' }, true)).toBe('共享到表: sheet_1')
-    expect(apiDingTalkScopeLabel('sheet', {}, true)).toBe('与此表共享')
+    expect(apiDingTalkScopeLabel('sheet', { sheetId: 'sheet_1' }, true)).toBe('共享到数据表: sheet_1')
+    expect(apiDingTalkScopeLabel('sheet', {}, true)).toBe('与此数据表共享')
     expect(apiDingTalkScopeLabel('private', {}, true)).toBe('私有旧版群')
   })
 
