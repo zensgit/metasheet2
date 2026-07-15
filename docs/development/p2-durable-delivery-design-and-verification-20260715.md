@@ -1,6 +1,6 @@
 # P2 Durable Delivery — 设计与验证 (Design & Verification)
 
-**状态 (2026-07-15 终版)**：**开发全量完成**。S1 已落 main;S2-a→S2-b→S3→S4-a→S4-b/S5/S7 五级 stacked PR 链待复审(#4322←#4334←#4335←#4336←#4337);S6 经分析归零(见 §5f)。余量=owner 逐级复审 + 最终站点实参接线核对 + 八场景验收(owner 执行面)。**flag `AUTOMATION_DURABLE_DELIVERY_ENABLED` 恒 OFF**,当前零 runtime 行为。
+**状态 (2026-07-15 终版)**：S1 已落 main;**S2-a #4322 已 APPROVE 并合入 main(merge SHA `336732b5f`)**;S2-b #4334 已 retarget main 复绿中,S3→S4-a→S4-b/S5/S7(#4335/#4336/#4337)stacked 依序,S2-b/S3 已获 owner 授权;S6 经分析归零(§5f);动作级幂等 ledger L1+L2=#4340。余量=owner 逐级复审合入 + FWB-1/附件/record-link/FWB-2/FWB-3 + 八场景验收。**flag `AUTOMATION_DURABLE_DELIVERY_ENABLED` 恒 OFF**,当前零 runtime 行为。
 **授权口径**:owner 逐切片实审 runtime,**无自合**;FWB / 附件 / flag 开启在完整实现 + 八场景验收前保持 gated。
 
 ---
@@ -21,7 +21,7 @@
 | # | 不变量 | 强制点 |
 |---|---|---|
 | I1 | **无卡死吸收态**:每个非终态可回收,每个终态被消费方接受 | 状态机 = `pending\|in_progress\|done\|dead_letter`;**无持久 `failed`**;终态集 = `RESOLVE_PERMITTING_STATUSES` |
-| I2 | **lease ⟺ in_progress**(双向) | DB `CHECK ((lease_expires_at IS NOT NULL) = (status = 'in_progress'))`。反向不是防 reclaim 扫描(该扫描按状态收窄),而是让 lease **恰好**表示「被活着的 in_progress worker 持有」,终态/回收转换必须原子清 lease |
+| I2 | **lease ⟺ in_progress**(双向) | DB `CHECK ((lease_expires_at IS NOT NULL) = (status = 'in_progress'))`。反向不是防 reclaim 扫描(该扫描按状态收窄),而是保证所有权状态唯一:lease 非空 ⟺ in_progress。注意 reschedule 后 lease 也是 **backoff/reclaim-not-before 标记**——此时并无活 worker 持有新 fence;终态/回收/重排转换必须原子更新 lease |
 | I3 | **fence 单写者**:僵尸(活着但租约过期)写 0 行 | 每次 resolve 走 fence-CAS `WHERE fence = <claimed> AND status='in_progress'`;`fence` = `bigint`,TS 侧 **`string`**(2^53) |
 | I4 | **有界 attempts,非无限 reclaim**,且**崩溃安全** | **poison 在 claim 内执行**:`attempts >= maxAttempts` 直接 `dead_letter`,只依赖持久化的 attempts,**不需要活着的 worker** |
 | I5 | **重试 = 租约到期后 reclaim**,绝非立即重投 | `reschedule` 保持 `in_progress` 并把 lease 推后 backoff;**同时原子 `fence++`** 使旧 token 失效 |
@@ -61,7 +61,7 @@
 `claimDueConsumers` / `completeConsumer` / `rescheduleConsumer` / `poisonConsumer` / `findUnknownConsumerKeys` / 纯 `resolveDisposition`。
 镜像已验证的 `AttendanceNotificationDeliveryWorker` claim/CAS 范式(`FOR UPDATE SKIP LOCKED` + 「只有租约持有者可写终态」)。
 
-**验证(真库 13 测,全部构造真实交错,非顺序论证)**:
+**验证(真库 13 测;真正的并发交错为 SKIP-LOCKED 与 zombie fence 两项,poison/unknown-key/reschedule 为确定性状态序列验证)**:
 
 | 守卫 | 构造 | 变异证明 load-bearing |
 |---|---|---|
