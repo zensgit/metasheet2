@@ -42,7 +42,7 @@
 .PARAMETER PackagePath        Path to the .zip or .tgz on-prem package.
 .PARAMETER Sha256SumsPath     Path to the SHA256SUMS sidecar (default: alongside the package).
 .PARAMETER DeployRoot         Existing deploy root the bootstrap installs into.
-.PARAMETER Port               Backend port for health + smoke (default 8081).
+.PARAMETER Port               Backend port for health + smoke (default 8900, matching the on-prem template).
 .PARAMETER TenantId           Optional tenant id passed to the smoke (--tenant-id) when the admin
                               token carries no tenant claim.
 .PARAMETER TargetMigration    Migration name that MUST be applied after migrate (idempotent confirm).
@@ -56,7 +56,7 @@ param(
   [Parameter(Mandatory = $true)][string]$PackagePath,
   [string]$Sha256SumsPath,
   [Parameter(Mandatory = $true)][string]$DeployRoot,
-  [int]$Port = 8081,
+  [int]$Port = 8900,
   [string]$TenantId,
   [string]$TargetMigration = '066_create_integration_stock_prep_audit',
   [string]$ExpectedGitSha,
@@ -307,12 +307,25 @@ function Invoke-MigrationStage {
 # ── Stage 4: pm2 restart + POLL stable-online (command success != stable service) ────────────────
 # Normalize one `pm2 jlist` entry to @{ state; restartTime; uptime } (values-free: no raw jlist echoed).
 function Get-Pm2Sample {
-  $entry = (& pm2 jlist 2>$null | ConvertFrom-Json | Where-Object { $_.name -eq 'metasheet-backend' } | Select-Object -First 1)
-  if (-not $entry) { return $null }
-  [pscustomobject]@{
-    state       = "$($entry.pm2_env.status)"
-    restartTime = [int]($entry.pm2_env.restart_time)
-    uptime      = [long]($entry.pm2_env.pm_uptime)
+  # Do not feed the full PM2 payload to PowerShell's ConvertFrom-Json. PM2 includes the process
+  # environment, where Windows commonly has both `Path` and `PATH`; Windows PowerShell 5.1 treats
+  # those as duplicate keys and rejects the whole document. Node parses the raw payload and emits a
+  # fixed three-field projection. Any missing helper, parse failure, duplicate target, or invalid
+  # number returns $null and the stable-online stage fails closed.
+  $pm2SampleHelper = Join-Path $PSScriptRoot 'stock-preparation-pm2-sample.mjs'
+  if (-not (Test-Path -LiteralPath $pm2SampleHelper -PathType Leaf)) { return $null }
+  $safeJson = (& pm2 jlist 2>$null | & node $pm2SampleHelper 2>$null)
+  $sampleExit = $LASTEXITCODE
+  if ($sampleExit -ne 0 -or -not $safeJson) { return $null }
+  try {
+    $entry = $safeJson | ConvertFrom-Json
+    [pscustomobject]@{
+      state       = "$($entry.state)"
+      restartTime = [int]($entry.restartTime)
+      uptime      = [long]($entry.uptime)
+    }
+  } catch {
+    return $null
   }
 }
 
