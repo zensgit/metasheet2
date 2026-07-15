@@ -26,11 +26,12 @@
 
 | Lane | Work | Model | Depends | Status |
 |---|---|---|---|---|
-| **L3** chain-integrity core (rebuild) | shared bigint seq migration (both tables, exact comparison) + generation-aware precheck: **target-generation** (not terminal-only), deleted/trash chain, dup/illegal-seq fail-close; behind default-off flag | sonnet | — | **🔨 building (this session)** |
-| **L4** all-writer canonical fence | every meta_records writer takes the (renamed) canonical sheet-state fence, same-txn/same-connection; execute recomputes in-fence; per-writer-family production-wiring mutation proof | opus | L3 seq | ⏸ next |
+| **L3** chain-integrity core (rebuild) | shared bigint seq migration (both tables, exact comparison) + generation-aware precheck: **target-generation** (not terminal-only), deleted/trash chain, dup/illegal-seq fail-close; behind default-off flag | sonnet | — | **✅ Draft #4339, gate CLEAR** |
+| **L4** all-writer canonical fence | every meta_records writer takes the (renamed) canonical sheet-state fence, same-txn/same-connection; execute recomputes in-fence; per-writer-family production-wiring mutation proof | opus | L3 seq ✅ | **🔨 building (stacked)** |
+| **L5** trust checkpoint schema | checkpoint table (building→active, `trusted_since_seq`, in-fence `clock_timestamp()` cutover), separate baselines, floor-selected retention, non-forgeable `system_kind`, P3-2 precondition guard | opus | L3 seq ✅ | **🔨 building (stacked)** |
+| **L5-wire** checkpoint activation | wire in-fence checkpoint activation into the live restore/execute path | opus | L4 + L5 | ⏸ |
 | **L6-a** sealed operation-endpoint ledger | `meta_record_history_operations` + `operation_id` on revisions/markers; the mint→events→endpoint-last write protocol; DEFERRABLE FKs + seal-enforcement | opus | L4 fence | ⏸ |
 | **L6-b** exact-anchor recovery API | opaque `anchorBatchId` → endpoint → `anchorSeq` → checkpoint → signed identity → in-fence execute; wall-clock ⇒ exact-anchor-required refusal; anchor picker (FE) | opus + fable | L6-a | ⏸ |
-| **L5** trust checkpoint + identity | checkpoint table (building→active, `trusted_since_seq`, `clock_timestamp()` cutover), retention trust-floor, non-forgeable `system_kind` | opus | L4 | ⏸ |
 | **L7** target-generation + deleted/trash | fold the target-generation + deleted enumeration into the execute/precheck path end-to-end | opus | L3+L6 | ⏸ (L3 lands the precheck leg) |
 | **L8** Revert outer-txn atomicity | Revert single outer transaction (all-or-nothing), aligned with Reset; preview→execute drift ⇒ 409 zero-write | opus | L4 | ⏸ (must-before any Revert enable) |
 | **gate** independent adversarial review | reviews each slice at its exact SHA; does NOT implement; no auto-merge | opus | per-slice | active per-lane |
@@ -45,7 +46,7 @@
 - **No enablement** — CI green + flags-off + host-untouched; strict/Revert/Reset/staging/prod remain separate owner/ops decisions.
 
 ## §4 Exit conditions (owner month plan)
-- **Wk1 (7/15–7/21):** ledger convergence ✅ (this session); ratify #4331 ✅ (owner); L3 rebuild — fresh migrate up/down/replay, real-DB goldens executing, independent gate **0 P1/P2**.
+- **Wk1 (7/15–7/21):** ledger convergence ✅; ratify #4331 ✅ (owner); L3 rebuild ✅ **Draft #4339, independent gate CLEAR 0 P1/P2** (fresh migrate up/down/replay proven, real-DB goldens executed + mutation-proven).
 - **Wk2 (7/22–7/28):** L4 fence + in-fence recompute; L5 checkpoint/floor/retention/`system_kind` — per-writer-family production-wiring mutation tests, constructed TOCTOU reds, atomic checkpoint cutover.
 - **Wk3 (7/29–8/04):** L6 sealed endpoint + exact anchor + signed identity + FE picker; L7 target-generation + deleted/trash — no wall-clock T authority; 2^53/int8 boundary tests pass.
 - **Wk4 (8/05–8/14):** L8 Revert single outer txn (all-or-nothing) + Reset alignment; full regression; #4273 ≥3× 5k benchmark on the corrected trunk; staging dark acceptance + browser acceptance; final MD → an **independent staging-enablement decision package** (flags still OFF).
@@ -53,6 +54,10 @@
 ## §5 Current status (this session)
 - **✅ Ledger convergence** — #4262/#4319/#4288 closed → #4328 + #4331 canonical.
 - **✅ #4329** (window-runner compose-validation cwd fix) merged (`75568af4a`); containment PASS (owner).
-- **🔨 L3 rebuild** — building against v3.7 §9.3/§9.7 (exact bigint, target-generation, deleted-chain, dup/illegal-seq fail-close, P2-C-safe goldens). Draft PR + independent gate to follow.
-- **⏸ L4/L5/L6/L7/L8** — sequenced; not started; all default-off.
+- **✅ L3 rebuild — Draft #4339, gate CLEAR (0 P1 / 0 P2).** Shared bigint `seq` migration (both tables, exact string/bigint comparison, native `ORDER BY seq`), target-generation contiguity (`checkAllGenerationsContiguity` — every generation, not terminal-only), deleted/trash-chain enumeration, loud-marker, P2-C-safe goldens. Independent adversarial gate (pinned SHA `34c02da`, refute-first, every consumer traced) proved the two owner-falsified misses genuinely fixed **by construction** on a real Postgres (C3 target-generation hole reds under terminal-only mutation; C2 honestly deferred to L6, reconstructor untouched, no silent regression), exact-bigint end-to-end, safe `ON CONFLICT` removal, honest raw-data guard, clean migrate up/down/replay, real CI wiring. Findings all P3/NIT.
+  - **Carry-forward P3-1 (provenance):** the v3.7 doc cited by the code lands with #4331 (Draft, not yet on main); sanctioned meanwhile by committed v3.6 §3.2/§3.3. Resolves on #4331 merge.
+  - **Carry-forward P3-2 → L5:** add a fail-closed flag-on precondition (no `STRICT=true` unless an active checkpoint exists AND reconstruction causality holds) + flag-manifest entry.
+- **🔨 L4 all-writer canonical fence** (Opus, stacked on #4339) — rename the auto-number key to one canonical per-sheet fence; every `meta_records` writer takes it same-txn/fence-before-check; durable blocking states `{fencing,applying,paused_retryable}`; in-fence execute recompute seam (anchor API = L6). Verify: per-writer-family production-wiring mutation tests + constructed TOCTOU race (raw clients + `pg_blocking_pids`).
+- **🔨 L5 trust-checkpoint schema** (Opus, stacked on #4339) — `meta_history_trust_checkpoints` (building→active, partial-unique on active, `trusted_since_seq` bigint, `trusted_from_at` via in-fence `clock_timestamp()`), separate `meta_history_baselines`, totally-ordered select-by-T, floor-selected retention, non-forgeable `system_kind`, + the P3-2 precondition guard. **In-fence activation wiring deferred to L5-wire (after L4).**
+- **⏸ L6/L7/L8** — sequenced; not started; all default-off.
 - **Nothing enabled, armed, or host-touched.** This MD updates as each slice lands with its gate verdict.
