@@ -27,6 +27,18 @@ export const EMBED_KEY_ID = 'embed-1'
 export const EMBED_AUDIENCE = 'metasheet2.embed'
 export const EMBED_TTL_SECONDS = '600'
 export const SERVED_TENANT = 'default'
+export const SERVED_ORG = 'org-1'
+// Must match seed_yuantus.py (the seeded login credential the HTTP mint route is reached through).
+export const SEED_USERNAME = 'u42'
+export const SEED_PASSWORD = 'e2e-pw-42'
+// P2-3 / owner P2: the pre-auth rate-limit posture the flag-on provider runs with. GOVERNANCE —
+// pre-auth must NOT be wider than the global inbound default (120/60), so use a reasonable 30/min +
+// burst 20 (both well under the cap). That is enough headroom for this run's pre-auth hits to the
+// single main provider (login + a handful of read-session exchanges) without throttling, while still
+// proving the limiter genuinely enforces the read-exchange path (the E2E asserts X-RateLimit-Limit
+// === the burst below on an allowed response).
+export const PREAUTH_PER_MINUTE = '30'
+export const PREAUTH_BURST = '20'
 
 const HERE = path.dirname(new URL(import.meta.url).pathname)
 const SEED_SCRIPT = path.join(HERE, 'seed_yuantus.py')
@@ -104,6 +116,63 @@ export function mintTokens(keys: EmbedKeys, specs: MintSpec[]): Record<string, s
   return JSON.parse(res.stdout) as Record<string, string>
 }
 
+/** Log in via the REAL POST /api/v1/auth/login -> a bearer token (P2-1: the HTTP mint route is
+ * reached through a genuine login, not a bypass). */
+export async function httpLogin(url: string): Promise<string> {
+  const res = await fetch(`${url}/api/v1/auth/login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      username: SEED_USERNAME,
+      password: SEED_PASSWORD,
+      tenant_id: SERVED_TENANT,
+      org_id: SERVED_ORG,
+    }),
+  })
+  if (res.status !== 200) throw new Error(`login failed ${res.status}: ${await res.text()}`)
+  return ((await res.json()) as { access_token: string }).access_token
+}
+
+/** Mint a REAL embed token through the REAL POST /api/v1/bom/multitable/{partId}/embed-token —
+ * exercising the route's auth + is_entitled + Part-type + permission + origin allowlist + jti
+ * audit. Returns the token and its jti. */
+export async function httpMint(
+  url: string,
+  bearer: string,
+  partId: string,
+): Promise<{ embed_token: string; jti: string }> {
+  const res = await fetch(`${url}/api/v1/bom/multitable/${partId}/embed-token`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${bearer}`,
+      'x-tenant-id': SERVED_TENANT,
+      'x-org-id': SERVED_ORG,
+    },
+    body: JSON.stringify({ origin: EMBED_ORIGIN }),
+  })
+  if (res.status !== 200) throw new Error(`mint failed ${res.status}: ${await res.text()}`)
+  const j = (await res.json()) as { embed_token?: string; jti?: string }
+  if (!j.embed_token || !j.jti) throw new Error(`mint returned no token/jti: ${JSON.stringify(j)}`)
+  return { embed_token: j.embed_token, jti: j.jti }
+}
+
+/** Read the issuance AuditLog rows the mint route wrote (method=MINT) directly from the shared temp
+ * sqlite — stdlib sqlite3 only (no heavy yuantus import). Lets the E2E prove the jti is tracked but
+ * the raw JWT is never persisted. */
+export function queryMintAudit(dbPath: string): Array<Record<string, unknown>> {
+  const py = [
+    'import sqlite3, json, sys',
+    'con = sqlite3.connect(sys.argv[1])',
+    'con.row_factory = sqlite3.Row',
+    "rows = con.execute(\"SELECT * FROM audit_logs WHERE method='MINT'\").fetchall()",
+    'print(json.dumps([dict(r) for r in rows]))',
+  ].join('\n')
+  const res = spawnSync(YUANTUS_PYTHON, ['-c', py, dbPath], { encoding: 'utf8' })
+  if (res.status !== 0) throw new Error(`queryMintAudit failed (status ${res.status}): ${res.stderr}`)
+  return JSON.parse(res.stdout) as Array<Record<string, unknown>>
+}
+
 /** Seed the shared temp sqlite `dbPath` (must run BEFORE the uvicorn that serves it). */
 export function seed(keys: EmbedKeys, dbPath: string): void {
   const res = spawnSync(YUANTUS_PYTHON, [SEED_SCRIPT], {
@@ -160,6 +229,16 @@ export async function startProvider(
     YUANTUS_DATABASE_URL: `sqlite:///${dbPath}`,
     YUANTUS_TENANCY_MODE: 'single',
     YUANTUS_DISCUSSION_READ_SESSION_ENABLED: opts.readSessionEnabled ? '1' : '0',
+    // P2-3: the APPROVED flag-on posture runs the pre-auth rate limiter (the read exchange is in
+    // PREAUTH_RATE_LIMIT_PATHS by design). Enabled with high limits so the full happy path is not
+    // throttled; the default 30/min + burst 10 would 429 this test's many exchange hits.
+    ...(opts.readSessionEnabled
+      ? {
+          YUANTUS_PREAUTH_RATE_LIMIT_ENABLED: 'true',
+          YUANTUS_PREAUTH_RATE_LIMIT_PER_MINUTE: PREAUTH_PER_MINUTE,
+          YUANTUS_PREAUTH_RATE_LIMIT_BURST: PREAUTH_BURST,
+        }
+      : {}),
   })
   const proc = spawn(
     YUANTUS_PYTHON,

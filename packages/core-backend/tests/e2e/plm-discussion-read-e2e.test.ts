@@ -18,17 +18,20 @@
  *
  * Gated behind RUN_PLM_READ_E2E; CI wiring DEFERRED (owner wires it as the final merge gate).
  */
-import crypto from 'node:crypto'
 import express from 'express'
 import request from 'supertest'
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import {
   EMBED_AUDIENCE,
   EMBED_KEY_ID,
+  PREAUTH_BURST,
   SERVED_TENANT,
   generateEmbedKeys,
+  httpLogin,
+  httpMint,
   makeTempDir,
   mintTokens,
+  queryMintAudit,
   rmTempDir,
   seed,
   startProvider,
@@ -68,6 +71,14 @@ vi.mock('../../src/routes/data-sources', () => ({
 
 import plmEmbedDiscussionReadRouter from '../../src/routes/plm-embed-discussion-read'
 import { PLMAdapter } from '../../src/data-adapters/PLMAdapter'
+// The REAL scoped-jti key fn (NOT mocked — only db/redis is). Used to prove the relay did not
+// consume the cross-tenant token's jti.
+import { embedJtiKey } from '../../src/auth/embed-jti-store'
+
+/** Decode an embed JWT's claims (unverified — only to derive the scoped jti key for assertions). */
+function decodeClaims(jwt: string): Record<string, unknown> {
+  return JSON.parse(Buffer.from(jwt.split('.')[1], 'base64url').toString('utf8'))
+}
 
 const DS_ID = 'plm-ds'
 const USER = 42
@@ -82,6 +93,7 @@ let tmpDir: string
 let main: Provider | null = null
 let dark: Provider | null = null
 let tokens: Record<string, string>
+let mintJti: Record<string, string> // jti of each HTTP-minted token (for the audit-log assertion)
 let app: express.Express
 let mainAdapter: PLMAdapter
 let darkAdapter: PLMAdapter
@@ -154,21 +166,26 @@ async function boot(): Promise<void> {
   dsState.adapter = mainAdapter
   app = buildApp()
 
-  // One batch of REAL embed tokens (unique jti each). tenant 'default'/part item-1 unless noted.
-  const T = SERVED_TENANT
-  tokens = mintTokens(keys, [
-    { name: 'list', user_id: USER, tenant_id: T, org_id: 'org-1', part_id: PART },
-    { name: 'detail', user_id: USER, tenant_id: T, org_id: 'org-1', part_id: PART },
-    { name: 'smoke', user_id: USER, tenant_id: T, org_id: 'org-1', part_id: PART },
-    { name: 'replay', user_id: USER, tenant_id: T, org_id: 'org-1', part_id: PART },
-    { name: 'provConsume', user_id: USER, tenant_id: T, org_id: 'org-1', part_id: PART },
-    { name: 'provCtrl', user_id: USER, tenant_id: T, org_id: 'org-1', part_id: PART },
-    { name: 'missingDetail', user_id: USER, tenant_id: T, org_id: 'org-1', part_id: PART },
-    { name: 'crossPartDetail', user_id: USER, tenant_id: T, org_id: 'org-1', part_id: PART },
-    { name: 'dark', user_id: USER, tenant_id: T, org_id: 'org-1', part_id: PART },
-    // Bound to a DIFFERENT tenant than the adapter serves -> relay pre-rejects.
-    { name: 'crossTenant', user_id: USER, tenant_id: 'tenant-a', org_id: 'org-1', part_id: PART },
-  ])
+  // Tokens the REAL HTTP mint route CAN issue (tenant 'default'/part item-1) are obtained through
+  // it: one genuine login, then the real POST .../embed-token per token. This exercises the mint
+  // route's auth/entitlement/permission/part-binding/audit — no direct mint-service bypass here.
+  const bearer = await httpLogin(main.url)
+  tokens = {}
+  mintJti = {}
+  for (const name of ['list', 'detail', 'smoke', 'replay', 'provConsume', 'provCtrl', 'missingDetail', 'crossPartDetail', 'dark']) {
+    const m = await httpMint(main.url, bearer, PART)
+    tokens[name] = m.embed_token
+    mintJti[name] = m.jti
+  }
+  // ONLY the cross-tenant token uses the direct mint service: the HTTP route binds tenant_id to the
+  // authenticated request context (always the served tenant), so it CANNOT issue a token bound to a
+  // different tenant by design. The provider still verifies its real Ed25519 signature.
+  Object.assign(
+    tokens,
+    mintTokens(keys, [
+      { name: 'crossTenant', user_id: USER, tenant_id: 'tenant-a', org_id: 'org-1', part_id: PART },
+    ]),
+  )
 }
 
 describe.skipIf(!RUN)('PLM discussion read-auth — dual-service E2E (sub-slice 6, build-then-HOLD)', () => {
@@ -216,6 +233,21 @@ describe.skipIf(!RUN)('PLM discussion read-auth — dual-service E2E (sub-slice 
       const res = await request(app).get(THREAD_URL('T-open-1')).set('X-PLM-Embed-Token', tokens.detail)
       expect(res.status).toBe(200)
       expect(res.body.data.id).toBe('T-open-1')
+    })
+
+    it('the HTTP mint route audited each issuance by jti WITHOUT persisting the raw JWT (P2-1)', () => {
+      const rows = queryMintAudit(main!.dbPath)
+      expect(rows.length).toBeGreaterThanOrEqual(9) // one MINT row per HTTP-minted token
+      const paths = rows.map((r) => String(r.path))
+      // the happy-path 'list' token's jti is tracked in an issuance audit row...
+      expect(paths.some((p) => p.includes(mintJti.list))).toBe(true)
+      // ...but the raw embed JWT is NEVER written to any audit column (no token plaintext at rest).
+      const dump = JSON.stringify(rows)
+      for (const name of ['list', 'detail']) {
+        expect(dump).not.toContain(tokens[name])
+      }
+      // every MINT row is jti-shaped (…?jti=<uuid>), never a token blob.
+      for (const p of paths) expect(p).toMatch(/\/embed-token\?jti=[0-9a-f-]{36}$/)
     })
   })
 
@@ -278,6 +310,22 @@ describe.skipIf(!RUN)('PLM discussion read-auth — dual-service E2E (sub-slice 
     })
   })
 
+  describe('approved flag-on posture: pre-auth rate limiter enforcing on the read exchange (P2-3)', () => {
+    it('the read-exchange path returns X-RateLimit headers set to the configured burst (limiter genuinely ON, not a silent no-op)', async () => {
+      // A bad token still traverses the pre-auth limiter before the endpoint 401s — the limiter
+      // stamps X-RateLimit-Limit on the (allowed) response, proving PREAUTH_RATE_LIMIT is enabled
+      // AND matches the read-exchange path with THIS config (no token consumed, no throttle).
+      const probe = await fetch(`${main!.url}/api/v1/auth/embed/discussion-read-session`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ embed_token: 'not-a-valid-embed-token' }),
+      })
+      expect(probe.status).toBe(401) // invalid token, past the limiter
+      expect(probe.headers.get('x-ratelimit-limit')).toBe(PREAUTH_BURST)
+      expect(probe.headers.get('x-ratelimit-remaining')).not.toBeNull()
+    })
+  })
+
   describe('dark-flag 401 (provider read exchange disabled on a separate temp Yuantus)', () => {
     it('relay pointed at the dark provider (DISCUSSION_READ_SESSION_ENABLED off) -> uniform 401 EMBED_SESSION_EXCHANGE_FAILED', async () => {
       dsState.adapter = darkAdapter
@@ -289,14 +337,30 @@ describe.skipIf(!RUN)('PLM discussion read-auth — dual-service E2E (sub-slice 
   })
 
   describe('cross-tenant pre-rejection (relay guard, before the exchange)', () => {
-    it('an embed token bound to tenant-a used against a provider serving tenant default -> 403 EMBED_TENANT_MISMATCH, and the jti is untouched (the token still exchanges directly)', async () => {
+    it('an embed token bound to tenant-a -> 403 EMBED_TENANT_MISMATCH; the RELAY Redis jti is NOT consumed (rejected before the consume) (P2-2)', async () => {
       dsState.adapter = mainAdapter
+      const c = decodeClaims(tokens.crossTenant)
+      const scopedKey = embedJtiKey({
+        aud: String(c.aud ?? ''),
+        feature_key: String(c.feature_key ?? ''),
+        tenant_id: String(c.tenant_id ?? ''),
+        part_id: String(c.part_id ?? ''),
+        jti: String(c.jti ?? ''),
+      })
+      const sizeBefore = redisSub.store.size
+      expect(redisSub.store.has(scopedKey)).toBe(false) // not present going in
+
       const res = await request(app).get(THREADS_URL).set('X-PLM-Embed-Token', tokens.crossTenant)
       expect(res.status).toBe(403)
       expect(res.body.error.code).toBe('EMBED_TENANT_MISMATCH')
-      // Pre-rejection evidence: the relay rejected BEFORE consuming the jti / calling the exchange,
-      // so the SAME token can still be exchanged directly at the provider (its provider-side jti was
-      // never burned). Proves the tenant check fires ahead of the single-use consume + exchange.
+
+      // P2-2 core: the relay tenant cross-check fires BEFORE the single-use consume, so the relay's
+      // Redis store gained NO entry for this token (distinct from the provider's AuthEmbedExchangeJti,
+      // which is a SEPARATE store — this asserts the RELAY layer specifically).
+      expect(redisSub.store.has(scopedKey)).toBe(false)
+      expect(redisSub.store.size).toBe(sizeBefore)
+
+      // Corroborating: the provider-side jti is untouched too (the token still exchanges directly).
       const stillExchangeable = await fetch(`${main!.url}/api/v1/auth/embed/discussion-read-session`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -306,5 +370,3 @@ describe.skipIf(!RUN)('PLM discussion read-auth — dual-service E2E (sub-slice 
     })
   })
 })
-
-void crypto

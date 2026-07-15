@@ -52,9 +52,12 @@ def main() -> int:
         Organization,
         Tenant,
     )
+    from yuantus.security.auth.models import AuthCredential
+    from yuantus.security.auth.passwords import hash_password
     from yuantus.security.rbac.models import RBACUser
     from yuantus.meta_engine.models.meta_schema import ItemType
     from yuantus.meta_engine.models.item import Item
+    from yuantus.meta_engine.permission.models import Access, Permission
     from yuantus.meta_engine.app_framework.store_models import AppLicense
     from yuantus.meta_engine.discussion.models import (
         DiscussionThread,
@@ -65,8 +68,11 @@ def main() -> int:
     TENANT = "default"
     ORG = "org-1"
     USER_ID = 42
+    USER_NAME = "u42"
+    USER_PASSWORD = "e2e-pw-42"  # seeded so the HTTP mint route can be reached via a real login
     PART = "item-1"
     PART_OTHER = "item-ro"
+    BOM_LINE_TYPE = "Part BOM"  # the mint route checks GET permission on this type too
 
     # Plain engine with FK enforcement OFF — mirrors the provider's own read-gate test fixture
     # (`test_discussion_router.py::db`), whose seeding order these rows follow. The live uvicorn uses
@@ -83,8 +89,11 @@ def main() -> int:
     try:
         # Identity: the REAL get_current_user path needs an AuthUser + an active OrgMembership
         # (AuthService.get_roles_for_user_org), not just an RBACUser.
-        s.merge(AuthUser(id=USER_ID, tenant_id=TENANT, username="u42", email="u42@x.io"))
-        s.merge(RBACUser(id=USER_ID, user_id=USER_ID, username="u42", is_active=True))
+        s.merge(AuthUser(id=USER_ID, tenant_id=TENANT, username=USER_NAME, email="u42@x.io"))
+        s.merge(RBACUser(id=USER_ID, user_id=USER_ID, username=USER_NAME, is_active=True))
+        # A password credential so the E2E can log in via the REAL POST /api/v1/auth/login and
+        # then call the REAL mint route (P2-1) — not the direct mint service.
+        s.merge(AuthCredential(user_id=USER_ID, password_hash=hash_password(USER_PASSWORD)))
         s.merge(Tenant(id=TENANT))
         s.merge(Organization(id=ORG, tenant_id=TENANT))
         s.merge(
@@ -93,8 +102,26 @@ def main() -> int:
             )
         )
 
+        # Surgical world GET grant so the mint route's permission checks (Part + Part BOM, action
+        # get) pass — check_permission returns False for a type with no permission set, so this is
+        # required to reach the real mint. It grants ONLY get; it does NOT touch the discussion read
+        # gate (that is credential/part-scoped, not MetaPermissionService-gated), so the negative
+        # read cases still fail closed.
+        s.merge(Permission(id="perm-world-get", name="world get"))
+        s.merge(
+            Access(
+                id="perm-world-get:world",
+                permission_id="perm-world-get",
+                identity_id="world",
+                can_get=True,
+                can_update=False,
+            )
+        )
+
         # A readable Part item (the bound part) + a second Part used only as an off-part target.
-        s.merge(ItemType(id="Part", label="Part", is_versionable=True))
+        # The BOM-line type must exist + be gettable for the mint route's second permission check.
+        s.merge(ItemType(id="Part", label="Part", is_versionable=True, permission_id="perm-world-get"))
+        s.merge(ItemType(id=BOM_LINE_TYPE, label=BOM_LINE_TYPE, permission_id="perm-world-get"))
         s.merge(
             Item(
                 id=PART,
@@ -125,6 +152,16 @@ def main() -> int:
                 id="lic-msr-read",
                 app_name="plm.metasheet_review",
                 license_key="k-msr-read",
+                status="Active",
+                tenant_id=TENANT,
+            )
+        )
+        # The mint route gates on is_entitled("bom_multitable") -> app `plm.bom_multitable`.
+        s.merge(
+            AppLicense(
+                id="lic-bom-multitable",
+                app_name="plm.bom_multitable",
+                license_key="k-bom-mt",
                 status="Active",
                 tenant_id=TENANT,
             )
