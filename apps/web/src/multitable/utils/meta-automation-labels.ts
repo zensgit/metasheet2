@@ -729,9 +729,13 @@ const LABELS: Record<AutomationLabelKey, { en: string; zh: string }> = {
   'conditionBranch.addBranch': { en: '+ Branch', zh: '+ 分支' },
   'conditionBranch.default': { en: 'Default branch (no condition)', zh: '默认分支（无条件）' },
   'conditionBranch.addDefault': { en: '+ Default branch', zh: '+ 默认分支' },
+  // W1 G-10 terminology dictionary (ratified 2026-07-13, display layer only): Sheet = 数据表 in
+  // every zh string below (was bare '表'). Raw-ID / admin-only surfaces (targetSheetId manual-entry
+  // escape hatch, Automation Runs admin panel, DingTalk template tokens) are intentionally left —
+  // see the PR body's intentional-leave list.
   'actionConfig.deleteRecordWarning': {
     en: 'Deletes the trigger record in this table. This is permanent and cannot be undone.',
-    zh: '将删除本表中的触发记录。该操作是永久性的，无法撤销。',
+    zh: '将删除本数据表中的触发记录。该操作是永久性的，无法撤销。',
   },
   'actionConfig.deleteRecordAck': {
     en: 'I understand this permanently deletes the trigger record.',
@@ -804,8 +808,8 @@ const LABELS: Record<AutomationLabelKey, { en: string; zh: string }> = {
   'dingtalk.preset': { en: 'Message preset', zh: '消息预设' },
   'dingtalk.addGroups': { en: 'Add DingTalk groups', zh: '添加钉钉群' },
   'dingtalk.addGroupOption': { en: '-- add DingTalk group --', zh: '-- 添加钉钉群 --' },
-  'dingtalk.groupsRegisteredHint': { en: 'DingTalk groups registered for this table or shared from the organization catalog are listed here.', zh: '此处列出为本表注册或从组织目录共享的钉钉群。' },
-  'dingtalk.noGroupsAvailable': { en: 'No DingTalk groups are available for this table yet. Add one in API Tokens & Webhooks > DingTalk Groups, ask an admin to share an organization catalog group, or use a record group field path below.', zh: '此表暂无可用钉钉群。请在 API Token 与 Webhook > 钉钉群中添加，或让管理员共享组织目录群，也可使用下方记录群字段路径。' },
+  'dingtalk.groupsRegisteredHint': { en: 'DingTalk groups registered for this table or shared from the organization catalog are listed here.', zh: '此处列出为本数据表注册或从组织目录共享的钉钉群。' },
+  'dingtalk.noGroupsAvailable': { en: 'No DingTalk groups are available for this table yet. Add one in API Tokens & Webhooks > DingTalk Groups, ask an admin to share an organization catalog group, or use a record group field path below.', zh: '此数据表暂无可用钉钉群。请在 API Token 与 Webhook > 钉钉群中添加，或让管理员共享组织目录群，也可使用下方记录群字段路径。' },
   'dingtalk.remove': { en: 'Remove', zh: '移除' },
   'dingtalk.recordGroupFieldPaths': { en: 'Record group field paths (optional)', zh: '记录群字段路径（可选）' },
   'dingtalk.recordGroupFieldPathHint': { en: 'Use record fields whose value is a DingTalk group destination ID, not a local user, member group, or DingTalk group name.', zh: '使用值为钉钉群目标 ID 的记录字段，不要使用本地用户、成员组或钉钉群名称。' },
@@ -865,7 +869,7 @@ const LABELS: Record<AutomationLabelKey, { en: string; zh: string }> = {
   'dingtalk.internalProcessing': { en: 'Internal processing', zh: '内部处理' },
   'dingtalk.noPublicFormLink': { en: 'No public form link', zh: '无公开表单链接' },
   'dingtalk.allowedAudienceUnavailable': { en: 'Allowed audience unavailable', zh: '允许范围不可用' },
-  'dingtalk.viewUnavailable': { en: 'View unavailable in this sheet', zh: '此表中不可用的视图' },
+  'dingtalk.viewUnavailable': { en: 'View unavailable in this sheet', zh: '此数据表中不可用的视图' },
   'dingtalk.selectedViewNotForm': { en: 'Selected view is not a form', zh: '所选视图不是表单视图' },
   'dingtalk.publicFormNotConfigured': { en: 'Public form sharing is not configured', zh: '未配置公开表单分享' },
   'dingtalk.publicFormDisabled': { en: 'Public form sharing is disabled', zh: '公开表单分享已停用' },
@@ -1244,7 +1248,7 @@ export function automationDingTalkDestinationScopeLabel(scope: AutomationDingTal
     case 'org':
       return isZh ? '组织目录' : 'Organization catalog'
     case 'sheet':
-      return isZh ? '本表' : 'This table'
+      return isZh ? '本数据表' : 'This table'
     case 'private':
       return isZh ? '私有' : 'Private'
     default:
@@ -1258,8 +1262,8 @@ export function automationDingTalkDestinationSubtitle(scope: AutomationDingTalkD
     return isZh ? `组织目录：${id}` : `organization catalog: ${id}`
   }
   if (scope === 'sheet') {
-    if (!id) return isZh ? '本表' : 'this table'
-    return isZh ? `表：${id}` : `sheet: ${id}`
+    if (!id) return isZh ? '本数据表' : 'this table'
+    return isZh ? `数据表：${id}` : `sheet: ${id}`
   }
   return isZh ? '私有' : 'private'
 }

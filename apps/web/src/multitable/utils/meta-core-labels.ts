@@ -179,7 +179,9 @@ const META_CORE_LABELS: Record<MetaCoreLabelKey, { en: string; zh: string }> = {
   'density.normal': { en: 'Normal', zh: '标准' },
   'density.expanded': { en: 'Expanded', zh: '宽松' },
 
-  'grid.aria': { en: 'Data grid', zh: '数据表格' },
+  // W1 G-10: '数据表格' normalized to the dictionary noun '数据表' (Sheet) — avoids a second word
+  // for the same concept next to 'rail.treeLabel' ('数据表与视图') and the workbench toasts.
+  'grid.aria': { en: 'Data grid', zh: '数据表' },
   'grid.setField': { en: 'Set field', zh: '设置字段' },
   'grid.setFieldAria': { en: 'Set field on selected records', zh: '为所选记录设置字段' },
   'grid.clearField': { en: 'Clear field', zh: '清空字段' },

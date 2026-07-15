@@ -56,7 +56,7 @@ describe('MetaGridTable i18n', () => {
     expect(text).toContain('点击')
     expect(text).toContain('+ 新建记录')
     expect(text).toContain('添加第一行')
-    expect(root.querySelector('[role="grid"]')?.getAttribute('aria-label')).toBe('数据表格')
+    expect(root.querySelector('[role="grid"]')?.getAttribute('aria-label')).toBe('数据表')
     expect(text).not.toContain('No records yet')
   })
 
