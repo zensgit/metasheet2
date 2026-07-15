@@ -33,7 +33,8 @@ export function listDingTalkGroupDestinationFieldPathWarnings(
     const field = fieldMap.get(path)
     if (!field) {
       return [isZh
-        ? `record.${path} 不是此表中的已知字段；钉钉群消息需要能解析为目标 ID 的字段 ID。`
+        // W1 G-10 (display layer only): Sheet = 数据表 (was bare '表').
+        ? `record.${path} 不是此数据表中的已知字段；钉钉群消息需要能解析为目标 ID 的字段 ID。`
         : `record.${path} is not a known field in this sheet; DingTalk group messages expect field IDs that resolve to destination IDs.`]
     }
     if (field.type === 'user') {
@@ -75,7 +76,7 @@ export function listDingTalkPersonMemberGroupRecipientFieldPathWarnings(
     const field = fieldMap.get(path)
     if (!field) {
       return [isZh
-        ? `record.${path} 不是此表中的已知字段；钉钉个人成员组收件人需要能解析为成员组 ID 的字段 ID。`
+        ? `record.${path} 不是此数据表中的已知字段；钉钉个人成员组收件人需要能解析为成员组 ID 的字段 ID。`
         : `record.${path} is not a known field in this sheet; DingTalk person member-group recipients expect field IDs that resolve to member group IDs.`]
     }
     if (field.type === 'user') {
