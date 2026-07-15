@@ -4,16 +4,23 @@ run-name: "Attendance Staging Window Runner: ${{ inputs.action }}${{ inputs.acti
 
 # One dispatch = ONE action of the attendance five-window staging acceptance
 # (docs/development/attendance-staging-window-bundle-20260702.md):
-#   deploy  — pin staging backend+web to a full-SHA GHCR tag, migrate, verify build+auth
-#   smoke   — run one window smoke (ae4 / rd45 / otbank-v18 / mp6 / hmr5) in-container
-#   status  — read-only staging snapshot
-#   migrate — backup + clone-rehearsal + apply, per docs/operations/staging-migration-
-#             alignment-runbook.md. The only path forward from action=deploy's migration-
-#             alignment gate reporting `do_not_run_full_migrate`: pg_dump the real staging
-#             DB to a host file (metadata-only in the artifact — never the dump itself),
-#             restore it into a throwaway rehearsal DB inside the same postgres container,
-#             run migrate.js against ONLY the rehearsal DB, and only touch the real staging
-#             DB once that rehearsal is fully green.
+#   deploy         — pin staging backend+web to a full-SHA GHCR tag, migrate, verify build+auth
+#   smoke          — run one window smoke (ae4 / rd45 / otbank-v18 / mp6 / hmr5) in-container
+#   status         — read-only staging snapshot
+#   migrate        — backup + clone-rehearsal + apply, per docs/operations/staging-migration-
+#                    alignment-runbook.md. The only path forward from action=deploy's migration-
+#                    alignment gate reporting `do_not_run_full_migrate`: pg_dump the real staging
+#                    DB to a host file (metadata-only in the artifact — never the dump itself),
+#                    restore it into a throwaway rehearsal DB inside the same postgres container,
+#                    run migrate.js against ONLY the rehearsal DB, and only touch the real staging
+#                    DB once that rehearsal is fully green.
+#   residue-sweep  — bundle §7 "Consolidated final residue sweep": runs every §7 cross-smoke
+#                    SQL count (users/user_orgs/records/requests/deliveries/OT-bank money-path/
+#                    approval-engine/MP-6/HMR-5 optional blocks) via `docker exec
+#                    metasheet-staging-postgres psql -tA` against the running staging DB, plus
+#                    an env-flags + GET /api/attendance/settings capture. Fails iff any §7 count
+#                    is nonzero. Takes the `stamps` input (see below); action=status does NOT
+#                    run this SQL — this is the only action that does.
 #
 # Modeled on attendance-remote-log-snapshot-prod.yml (SSH via deploy secrets, artifact
 # upload, 15-minute timeout, single concurrency group). Remote logic lives in the
@@ -33,7 +40,7 @@ on:
         description: 'What to run against the STAGING stack'
         required: true
         type: choice
-        options: [deploy, smoke, status, migrate]
+        options: [deploy, smoke, status, migrate, residue-sweep]
         default: status
       deploy_sha:
         description: 'FULL 40-char commit SHA (GHCR tags are full-SHA). Required for deploy and smoke.'
@@ -45,6 +52,10 @@ on:
         type: choice
         options: [ae4, rd45, otbank-v18, mp6, hmr5]
         default: ae4
+      stamps:
+        description: 'action=residue-sweep only: comma-separated ae4,rd45,otbank,mp6,hmr5 STAMP values in that order (bundle §7). ae4/rd45/otbank are required; leave mp6/hmr5 blank if that optional smoke did not run this window, e.g. "ae4-smoke-x,rd45-smoke-x,otbank-v18-smoke-x,,".'
+        required: false
+        default: ''
       set_window_env:
         description: 'deploy only: rd-window sets ATTENDANCE_SCHEDULER_ENABLED + ATTENDANCE_NOTIFICATION_DELIVERY_WORKER_ENABLED on the staging backend at deploy time (bundle §3.4). The digest gate always stays unset.'
         required: false
@@ -76,9 +87,10 @@ jobs:
           ACTION: ${{ inputs.action }}
           DEPLOY_SHA: ${{ inputs.deploy_sha }}
           SET_WINDOW_ENV: ${{ inputs.set_window_env }}
+          STAMPS: ${{ inputs.stamps }}
         run: |
           set -euo pipefail
-          case "$ACTION" in deploy|smoke|status|migrate) ;; *) echo "invalid action: $ACTION" >&2; exit 2 ;; esac
+          case "$ACTION" in deploy|smoke|status|migrate|residue-sweep) ;; *) echo "invalid action: $ACTION" >&2; exit 2 ;; esac
           if [[ "$ACTION" == "deploy" || "$ACTION" == "smoke" ]]; then
             if [[ ! "$DEPLOY_SHA" =~ ^[0-9a-f]{40}$ ]]; then
               echo "deploy_sha must be the FULL 40-char lowercase commit SHA for action=$ACTION (GHCR tags are full-SHA; short prefixes fail with manifest unknown), got: '$DEPLOY_SHA'" >&2
@@ -87,6 +99,21 @@ jobs:
           fi
           if [[ "$ACTION" != "deploy" && "$SET_WINDOW_ENV" != "none" ]]; then
             echo "set_window_env=$SET_WINDOW_ENV is only meaningful for action=deploy (env flips happen together with the deploy, never mid-smoke — bundle §3.4)" >&2
+            exit 2
+          fi
+          if [[ "$ACTION" == "residue-sweep" ]]; then
+            IFS=',' read -r sw_ae4 sw_rd45 sw_otbank sw_mp6 sw_hmr5 sw_extra <<< "${STAMPS},__sentinel__"
+            if [[ -z "$sw_ae4" || -z "$sw_rd45" || -z "$sw_otbank" || "$sw_extra" != "__sentinel__" ]]; then
+              echo "stamps must be exactly 5 comma-separated fields (ae4,rd45,otbank,mp6,hmr5) with ae4/rd45/otbank non-empty for action=residue-sweep (bundle §7), got: '$STAMPS'" >&2
+              exit 2
+            fi
+            [[ "$sw_ae4" =~ ^ae4-smoke-[A-Za-z0-9-]+$ ]] || { echo "stamps field 1 (ae4) must match ^ae4-smoke-[A-Za-z0-9-]+\$, got: '$sw_ae4'" >&2; exit 2; }
+            [[ "$sw_rd45" =~ ^rd45-smoke-[A-Za-z0-9-]+$ ]] || { echo "stamps field 2 (rd45) must match ^rd45-smoke-[A-Za-z0-9-]+\$, got: '$sw_rd45'" >&2; exit 2; }
+            [[ "$sw_otbank" =~ ^otbank-v18-smoke-[A-Za-z0-9-]+$ ]] || { echo "stamps field 3 (otbank) must match ^otbank-v18-smoke-[A-Za-z0-9-]+\$, got: '$sw_otbank'" >&2; exit 2; }
+            [[ -z "$sw_mp6" || "$sw_mp6" =~ ^mp6-smoke-[A-Za-z0-9-]+$ ]] || { echo "stamps field 4 (mp6) must be empty or match ^mp6-smoke-[A-Za-z0-9-]+\$, got: '$sw_mp6'" >&2; exit 2; }
+            [[ -z "$sw_hmr5" || "$sw_hmr5" =~ ^hmr5-smoke-[A-Za-z0-9-]+$ ]] || { echo "stamps field 5 (hmr5) must be empty or match ^hmr5-smoke-[A-Za-z0-9-]+\$, got: '$sw_hmr5'" >&2; exit 2; }
+          elif [[ -n "$STAMPS" ]]; then
+            echo "stamps is only meaningful for action=residue-sweep, got action=$ACTION with stamps='$STAMPS'" >&2
             exit 2
           fi
           bash -n scripts/ops/attendance-staging-window-runner-remote.sh
@@ -131,6 +158,7 @@ jobs:
           SMOKE_ID: ${{ inputs.smoke }}
           SET_WINDOW_ENV: ${{ inputs.set_window_env }}
           SKIP_HOST_SYNC: ${{ inputs.skip_host_sync }}
+          STAMPS: ${{ inputs.stamps }}
           RUNNER_DIR: ${{ steps.sync.outputs.runner_dir }}
         run: |
           set -euo pipefail
@@ -158,6 +186,7 @@ jobs:
           export STAGING_DEPLOY_PATH='${STAGING_DEPLOY_PATH}'
           export DEPLOY_PATH='${DEPLOY_PATH}'
           export SKIP_HOST_SYNC='${SKIP_HOST_SYNC}'
+          export STAMPS='${STAMPS}'
           export OUTPUT_DIR='${remote_output_dir}'
           export RUN_STAMP='gh${GITHUB_RUN_ID}a${GITHUB_RUN_ATTEMPT}'
           rm -rf '${remote_output_dir}'
@@ -194,6 +223,7 @@ jobs:
           SMOKE_ID: ${{ inputs.smoke }}
           DEPLOY_SHA: ${{ inputs.deploy_sha }}
           SET_WINDOW_ENV: ${{ inputs.set_window_env }}
+          STAMPS: ${{ inputs.stamps }}
         run: |
           set -euo pipefail
           {
@@ -201,6 +231,7 @@ jobs:
             echo ""
             echo "- Action: \`${ACTION}\`"
             if [[ "$ACTION" == "smoke" ]]; then echo "- Smoke: \`${SMOKE_ID}\`"; fi
+            if [[ "$ACTION" == "residue-sweep" ]]; then echo "- Stamps: \`${STAMPS:-<none>}\`"; fi
             echo "- Deploy SHA: \`${DEPLOY_SHA:-<none>}\`"
             echo "- Window env: \`${SET_WINDOW_ENV}\`"
             echo "- Remote rc: \`${REMOTE_RC:-missing}\`"
