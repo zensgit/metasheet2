@@ -682,7 +682,9 @@ async function toggleRecordSubscription() {
    instance now living in the shell header rather than the deprecated drawer's header. */
 .meta-record-drawer__inbox-link { color: #409eff; font-size: 12px; text-decoration: none; }
 .meta-record-drawer__inbox-link:hover { text-decoration: underline; }
-.meta-record-drawer__inbox-badge { margin-left: 6px; padding: 2px 6px; border-radius: 999px; background: #eff6ff; color: #2563eb; font-size: 11px; }
+/* #2563eb == --ms-color-primary (tokens.css:19, exact) → tokenized; the badge bg #eff6ff and link #409eff
+   are relocated verbatim from the deprecated drawer and have no design-system token yet (docket, not blind-mapped). */
+.meta-record-drawer__inbox-badge { margin-left: 6px; padding: 2px 6px; border-radius: 999px; background: #eff6ff; color: var(--ms-color-primary); font-size: 11px; }
 /* UI-P2-1c T5-safe (owner-ratified 2026-07-13): watch/workflow/permissions/duplicate/delete/unlock
    are now <MtButton> — token-styled, no longer needs bespoke hardcoded-hex. --danger's sole sharer
    (delete) now uses MtButton's own `variant="danger"`; --watch's sole sharer (watch, non-active
