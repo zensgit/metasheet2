@@ -116,3 +116,21 @@ v1 = 锁 §283-291 全集(approval.{approved,rejected,revoked,cancelled}→bridg
 - **S3 的滚动部署对称性**:#4203 §243 要求**双侧对称**(producer 全 N-aware 才可展开只有 N 认识的路由)——I6 只解决 worker 侧;**producer 侧漏写 = 该事件对 K 永远没有行,告警看不到**(无行可 park),必须靠激活门槛而非运行期防线。
 - **外发净一次**依赖 endpoint 幂等键绑稳定事件/动作 identity、跨 fence 不变;端点不支持 ⇒ `outcome_unknown` 不自动重发(#4203 §340)。属 S5。
 - **八场景验收**是 FWB/附件/flag 开启的硬前置。
+
+
+---
+
+## 8. 月计划全车道交付台账 (2026-07-15 收官)
+
+| 车道 | PR | 内容 | 验证 |
+|---|---|---|---|
+| P2 S1/S2-a | 已落 main (`336732b5f`) | outbox schema + claim 引擎 | 真库 14+13 测,CI 实证 |
+| P2 S2-b→S5/S7 | #4334→#4335→#4336→#4337 | loop/manifest/入队/激活缝+崩溃注入 V1-V4 | 各 12/7/6/9 测+变异,总回归 54/54 |
+| 动作级幂等 | #4340 | `meta_automation_action_applied` L1 迁移 + L2(action_key 派生/Class-A 同事务 claim/Class-B outcome_unknown) | 真库 10/10 含双连接竞态 |
+| FWB-1 ①②③ | #4341 | 映射核心(fail-closed all-or-nothing)+§11 Q6 四闸+`write_approval_form_values` 同事务执行器 | 4/4+4/4+真库 4 测(rollback 三者同灭) |
+| record-link/FWB-2 | #4343 | submit 读检查(无存在性 oracle)+执行期三查+更新式执行器 | 2/2 全 fail-closed 腿 |
+| FWB-3 | #4344 | `freezeDecisionValues` 不可变 (node_key,entry_epoch) 快照+节点域写回执行器 | 2/2 含不可变性证明 |
+| 附件① | #4342 | 20/10/50 限额+v1 MIME 白名单(PDF/JPEG/PNG/TXT/CSV)+ext⇄MIME 交叉校验 | 4/4 reject-by-default |
+| S6 | 归零 | outbox 全新无可回填;cutover runbook 项 | §5f 论证 |
+
+**不可先建余量(硬依赖序)**:FWB-1 slice④ dispatchAction 终接线+配置 UI(需 S4/S5 落 main);附件②+(存储 provider/表/路由/前端);**八场景真库/并发/崩溃矩阵(需全链合入后在合并态上跑)**;钉钉 U1-U13 UAT 与 flag 翻转 = owner 门。所有 PR 待 owner 自底向上复审;全部 flags OFF;无自合。
