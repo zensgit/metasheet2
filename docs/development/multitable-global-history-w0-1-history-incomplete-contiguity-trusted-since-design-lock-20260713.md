@@ -82,6 +82,11 @@ owner「只做这四件」⇒ #4252 的以下条件**本刀不做,但显式 dock
 ### §6.4 验收锚(fail-first)
 #4252 §6.1 的 **healed-gap 反例**(record v3、revisions 仅 {v1,v3}、live==v3 ⇒ revert-preview(T∈(v1,v3)) 必 **409**)= 本刀首个 fail-first golden。live-vs-latest 使其绿=证伪;contiguity 使其红→绿=证成。突变(去 contiguity)必红。
 
+### §6.6 owner 处置(2026-07-15,逐字生效)
+
+- **整锁不整份翻 RATIFIED**。标记为:**首刀已授权并 shipped(#4269=`3356a7ed6`,owner 主线抽查复审 PASS)**;C2/C3/C6 **继续 deferred**,执行顺序 = **C2 → C3 → C6**(owner 定序)。
+- **field-undelete flag = HOLD**:先启用并观察 tombstone capture,再做**非生产 flag-on** smoke(真值/链接/autoNumber 三类)。**现有 containment workflow 只核查 sheet-revert 与 PIT-reset,不能作为 config-undelete 的启用证据**。批量 revision 前置(#4299)已落但不改变 HOLD。
+
 ### §6.5 状态与授权
 - **本锁仍非全 RATIFIED**——owner 裁的是**方向 + 首刀 4 项 scope 授权**;C2/C3/C6 延迟、其各自设计/机制未裁。
 - **首刀实现:AUTHORIZED**(HOT-CORE + schema/txn ⇒ Opus 设计/门禁 + zzzz 迁移排序 fresh-DB 验 + mutation-proven goldens)。

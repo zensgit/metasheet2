@@ -1,6 +1,6 @@
-# 多维表 UI-P2-2c · 响应式工作台左侧栏（窄屏折叠 + 抽屉）· 设计（PROPOSED）
+# 多维表 UI-P2-2c · 响应式工作台左侧栏（窄屏折叠 + 抽屉）· 设计（IMPLEMENTED）
 
-> 状态：**PROPOSED**（implementer-authored, not owner-ratified). Parent lock
+> 状态：**IMPLEMENTED**（#4290 merged `a52f55845`，2026-07-15；Opus ×2 轮门禁 + 真浏览器验证）。断点语义统一勘误（owner Low）：**`window.innerWidth <= 768` 为窄**（768 含在窄内），文中一切「>= 768」为误写应读作「>= 769/> 768」。Parent lock
 > `multitable-ui-p2-2-left-rail-detail-designlock-20260707.md` §5 lists `🔒 P2-2c 响应式折叠（窄屏抽屉/图标条）—
 > P2-2b 后` as a pending gate with no further detail; the P2-2b design MD (§8.4) explicitly defers all
 > viewport/media-query behavior to this slice ("2b 不加任何视口 media query"). Neither doc specifies a
@@ -97,7 +97,7 @@ remount resets"); a fresh mount always re-runs `syncRailViewportState()` from th
 | **icon-strip** (already existed) | `isRailNarrow && railCollapsed` | 36px strip, only the toggle button visible (rail content `v-show`-hidden) | in-flow (same as P2-2b's desktop-collapsed state) | none — this is literally P2-2b's `.mt-workbench__rail--collapsed`, just auto-entered instead of requiring a click |
 | **drawer** (new) | `isRailNarrow && !railCollapsed` (= `isRailDrawerOpen`) | full rail (base-bar + tree) floats over `.mt-workbench__main` instead of squeezing it | `position: absolute` overlay, `z-index: 5`, `box-shadow: var(--ms-shadow-pop)`, opaque `background: var(--ms-bg-card)`, `width: min(240px, calc(100vw - 32px))` | one new CSS class `.mt-workbench__rail--drawer` on the existing `<aside>` |
 
-At width **>= 768px**: neither state can be entered (`isRailNarrow` is `false`, so `isRailDrawerOpen` is
+At width **> 768px**（即 >= 769）: neither state can be entered (`isRailNarrow` is `false`, so `isRailDrawerOpen` is
 always `false` and the auto-collapse branch never runs) — behavior is **exactly** the pre-2c P2-2b rail,
 unconditionally.
 
