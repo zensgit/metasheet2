@@ -10,11 +10,14 @@
  *                                        the source state change (approval status write / record write).
  *                                        `manifest_version` stamps the routing manifest that expanded it
  *                                        (a v1 row is dispatched per v1 forever — never re-interpreted).
- *                                        `event_id` is NOT NULL — the stable ORIGINAL-event identity the
- *                                        dispatcher forwards downstream as the per-rule dedup key and the
- *                                        outbound-idempotency seed (#4203 §producer/identity). It is NOT
- *                                        unique: #4203 §cutover tolerates transient double-emit and dedups
- *                                        at the sink, so a second contract-legal enqueue must be allowed.
+ *                                        `event_id` is NOT NULL AND non-blank — the stable ORIGINAL-event
+ *                                        identity the dispatcher forwards downstream as the per-rule dedup
+ *                                        key and the outbound-idempotency seed (#4203 §producer/identity). A
+ *                                        CHECK rejects empty/all-whitespace ids, mirroring the dedup helper
+ *                                        (`automation-event-dedup.ts`: `_eventId.trim()` → no-identity), so a
+ *                                        blank id can't sit in the outbox looking like an identity it isn't.
+ *                                        It is NOT unique: #4203 §cutover tolerates transient double-emit and
+ *                                        dedups at the sink, so a second contract-legal enqueue is allowed.
  *   - `meta_automation_outbox_consumer`— per-(outbox_id, consumer_key) delivery state. `status` is the
  *                                        four-state machine `pending|in_progress|done|dead_letter` — there is
  *                                        NO persistent `failed` state: a transient failure only bumps
@@ -30,8 +33,13 @@
  *                                        lease is EXACTLY the in_progress marker — a BICONDITIONAL CHECK ties
  *                                        `lease IS NOT NULL` to `status='in_progress'` in BOTH directions:
  *                                        in_progress ⇒ leased (else unreclaimable), and non-in_progress ⇒
- *                                        NO lease (a stale lease on a done/pending row would be spuriously
- *                                        reclaimed). Fence/attempts/depth carry non-negative CHECKs.
+ *                                        NO lease. The reverse half is NOT about the reclaim scan (that scan
+ *                                        is status-scoped, so it would never pick up a leftover lease on a
+ *                                        settled row) — it keeps a lease meaning EXACTLY "owned by a live
+ *                                        in_progress worker", so every terminal/reclaim transition must clear
+ *                                        the lease atomically and a settled row can never carry stale
+ *                                        ownership. Fence/attempts/depth carry non-negative CHECKs; `event_id`
+ *                                        is non-blank (mirrors the dedup helper's `.trim()` → no-identity).
  *
  * NOTHING reads or writes these tables yet — the durable dispatcher (S2), the producer-side atomic enqueue
  * (S4), and the consumer adapters (S5) are separate, flag-gated slices. This migration is byte-for-byte
@@ -56,7 +64,13 @@ export async function up(db: Kysely<unknown>): Promise<void> {
                          CONSTRAINT automation_outbox_depth_nonneg CHECK (automation_depth >= 0),
       manifest_version int  NOT NULL
                          CONSTRAINT automation_outbox_manifest_version_positive CHECK (manifest_version >= 1),
-      event_id         text NOT NULL,
+      event_id         text NOT NULL
+                         -- reject empty / all-whitespace ids: the dedup helper (automation-event-dedup.ts)
+                         -- does _eventId.trim() and treats a blank result as NO identity, so a blank id in
+                         -- the outbox would be un-dedupable. [^[:space:]] = at least one non-whitespace char
+                         -- (POSIX class covers space/tab/newline/CR/VT/FF, mirroring JS .trim() over ASCII;
+                         -- a regex, not btrim(), so no backslash escapes leak into this template literal).
+                         CONSTRAINT automation_outbox_event_id_nonblank CHECK (event_id ~ '[^[:space:]]'),
       created_at       timestamptz NOT NULL DEFAULT now()
     )
   `.execute(db)
@@ -85,8 +99,12 @@ export async function up(db: Kysely<unknown>): Promise<void> {
       -- The lease is EXACTLY the in_progress marker — a BICONDITIONAL, not a one-directional guard:
       --   in_progress  => lease present  (else the reclaim scan status=in_progress AND lease < now()
       --                                   could never recover it — a permanently stuck row); AND
-      --   NOT in_progress => lease absent (a stale lease left on a pending/done/dead_letter row would be
-      --                                    spuriously matched by the same reclaim scan).
+      --   NOT in_progress => lease absent. The reason is NOT that the scan would reclaim it — that scan is
+      --                                    status-scoped and would never pick up a leftover lease on a
+      --                                    pending/done/dead_letter row. It is to keep a lease meaning
+      --                                    EXACTLY "owned by a live in_progress worker": every terminal /
+      --                                    reclaim transition must clear the lease atomically, so a settled
+      --                                    row can never carry stale, ambiguous ownership.
       -- Every state transition (claim/complete/reclaim/poison) sets or clears the lease in the SAME
       -- single-row UPDATE that changes the status, so the biconditional holds at every commit boundary.
       CONSTRAINT automation_outbox_consumer_lease_iff_in_progress

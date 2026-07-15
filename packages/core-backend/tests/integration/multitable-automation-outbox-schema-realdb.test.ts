@@ -21,6 +21,8 @@
  * Runs only with DATABASE_URL (sentinel fails-not-skips in CI's real-DB lane; two-point wired into
  * plugin-tests.yml + excluded from the no-DB default job in vitest.config.ts so it cannot skip-green).
  */
+import { randomUUID } from 'node:crypto'
+
 import { afterAll, beforeAll, describe, expect, test } from 'vitest'
 
 import { poolManager } from '../../src/integration/db/connection-pool'
@@ -29,13 +31,15 @@ import { isDurableDeliveryEnabled, RESOLVE_PERMITTING_STATUSES } from '../../src
 const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
 const q = (sql: string, params?: unknown[]) => poolManager.get().query(sql, params)
 
-// Synthetic outbox ids for this run (Date.now()-scoped so parallel files/runs never collide); cleaned up after.
-const RUN = Math.floor(Date.now() % 1e9)
+// Synthetic outbox ids for this run — randomUUID()-scoped so parallel files/runs never collide (Date.now()
+// modulo could, on a fast/parallel runner); cleaned up after.
+const RUN = randomUUID()
 const OB1 = `ob_s1_${RUN}_a`
 const OB2 = `ob_s1_${RUN}_b`
 const OB_MV = `ob_s1_${RUN}_mv` // manifest_version=0 negative control (insert must fail → no row persists)
 const OB_DEPTH = `ob_s1_${RUN}_depth` // automation_depth=-1 negative control (insert must fail → no row persists)
-const ALL_OB = [OB1, OB2, OB_MV, OB_DEPTH]
+const OB_EID = `ob_s1_${RUN}_eid` // event_id non-blank test (negatives fail; the positive persists a row)
+const ALL_OB = [OB1, OB2, OB_MV, OB_DEPTH, OB_EID]
 
 // A fully-valid outbox row — every NOT NULL column supplied, INCLUDING the now-required event_id.
 const insertOutbox = (id: string) =>
@@ -82,6 +86,34 @@ describeIfDatabase('P2 durable-delivery S1 — automation outbox schema + flag (
         [OB_MV],
       ),
     ).rejects.toThrow(/event_id|not-null/i)
+  })
+
+  test('event_id CHECK rejects empty AND all-whitespace ids (mirrors the dedup helper .trim()); non-blank accepted', async () => {
+    // negative: empty string — a blank id the dedup helper would treat as no-identity.
+    await expect(
+      q(
+        `INSERT INTO meta_automation_outbox (id, event_type, payload, automation_depth, manifest_version, event_id)
+         VALUES ($1,'approval.approved','{}'::jsonb,0,1,'')`,
+        [OB_EID],
+      ),
+    ).rejects.toThrow(/automation_outbox_event_id_nonblank/)
+    // negative: all-whitespace (space + tab + newline) — the point of [^[:space:]] over a spaces-only btrim:
+    // the helper's JS .trim() strips tab/newline too, so the CHECK must reject them to mirror it.
+    await expect(
+      q(
+        `INSERT INTO meta_automation_outbox (id, event_type, payload, automation_depth, manifest_version, event_id)
+         VALUES ($1,'approval.approved','{}'::jsonb,0,1,$2)`,
+        [OB_EID, ' \t\n '],
+      ),
+    ).rejects.toThrow(/automation_outbox_event_id_nonblank/)
+    // positive control: a normal non-blank id inserts (proves the CHECK gates on blankness, not on event_id itself).
+    await expect(
+      q(
+        `INSERT INTO meta_automation_outbox (id, event_type, payload, automation_depth, manifest_version, event_id)
+         VALUES ($1,'approval.approved','{}'::jsonb,0,1,'evt_ok')`,
+        [OB_EID],
+      ),
+    ).resolves.toBeTruthy()
   })
 
   test('manifest_version CHECK rejects 0 (must be >= 1) — by constraint name', async () => {
