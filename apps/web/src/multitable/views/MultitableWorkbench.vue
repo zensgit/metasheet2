@@ -4284,7 +4284,10 @@ watch(
 
 onMounted(async () => {
   window.addEventListener('beforeunload', onBeforeUnload)
-  syncRailViewportState() // UI-P2-2c: establish narrow/wide state before first paint decision
+  syncRailViewportState() // UI-P2-2c: establish narrow/wide state at mount. Runs in onMounted (AFTER the
+  // first paint), so a narrow viewport may show the expanded rail for one frame before auto-collapse;
+  // desktop is unaffected (the wide branch never writes state). Pre-paint sync would need SSR/layout-
+  // effect machinery not used in this app — accepted as a known cosmetic limit (P2-2c gate NIT-2).
   window.addEventListener('resize', syncRailViewportState)
   void auth.getCurrentUserId().then((userId) => {
     currentUserId.value = userId
