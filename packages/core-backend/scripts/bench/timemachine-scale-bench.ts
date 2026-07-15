@@ -370,10 +370,13 @@ interface TierSeed {
  * insert failed, the FIRST one's base row was already permanently committed, yet the caller only sets
  * `baseAndUserCreated = true` after BOTH "succeed" — leaving that base row un-tracked and therefore
  * unreachable by `cleanup()` (which is scoped strictly to ids this run confirmed it created). Wrapping
- * both inserts in one transaction makes the pair atomic: either both rows exist (COMMIT) or neither
- * does (ROLLBACK on ANY failure, including a failure of the COMMIT itself) — so main()'s existing
- * contract ("`baseAndUserCreated` reflects reality") now actually holds. See §self-test in the P1-b
- * verification notes for how this is proven (BENCH_INJECT_USER_INSERT_FAULT).
+ * both inserts in one transaction makes the pair atomic: either both rows exist (server COMMIT
+ * succeeds) or neither does (ROLLBACK on any failure BEFORE the server commits). NOTE (P3, round 7):
+ * a lost connection AFTER the server has committed is genuinely indeterminate at the client — the
+ * rows may in fact exist while the driver reports an error; so this is "no partial leak of exactly
+ * one row", not "a COMMIT error always means nothing was written". The bench mitigates that residual
+ * by re-asserting namespaced-id absence on the abort path (the pre-existence assertion + cleanup are
+ * both id-scoped). See §self-test P1-b (BENCH_INJECT_USER_INSERT_FAULT).
  */
 async function ensureBase(): Promise<void> {
   const client = await poolManager.get().getInternalPool().connect()
@@ -963,10 +966,11 @@ async function main() {
     )
 
     await ensureBase()
-    // P1-b: ensureBase() only returns normally once its internal transaction has COMMITted both the
-    // base row and the user row — if either insert (or the COMMIT itself) had failed, ensureBase()
-    // would have thrown (after rolling back) instead of returning, so reaching this line means BOTH
-    // rows are durably present. Never true for "only one of the two exists".
+    // P1-b: ensureBase() returns normally only after its transaction reports a successful COMMIT of
+    // both the base row and the user row; a failure before the server commits throws (after ROLLBACK).
+    // So reaching this line means the pair is atomic — never "only one of the two exists". (P3 caveat:
+    // a connection dropped AFTER a server-side commit is indeterminate; the id-scoped pre-existence
+    // assertion on re-run is the backstop for that residual, not this line.)
     baseAndUserCreated = true
     const personIds = await seedPeopleSheet((id) => createdSheetIds.push(id))
     const app = buildApp()
