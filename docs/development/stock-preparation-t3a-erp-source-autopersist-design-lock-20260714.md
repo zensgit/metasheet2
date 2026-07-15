@@ -52,6 +52,29 @@ source-run 路由:
 - T2 persist 按模板 keyFields[0] upsert(已幂等 + #4206 数字-key 硬化)。重跑 source-run ⇒ 刷新缓存行,零重复。
 - **明确口径:T3a 是「staged、upsert-only 的缓存写入」,不是权威全量同步。** 不删除源里已消失的陈旧缓存行、不做 reconcile/对账、不保证缓存 == 当前 ERP 全集。承诺仅:approved source-run 读到的行被 upsert 进缓存。对外/对实体机描述必须用「落缓存(upsert)」而非「全量同步」,避免过度承诺。全量 reconcile(若需要)是独立后续,非 T3a。
 
+## 3.5 实现契约细化（owner 2026-07-15 re-review — ratify 前补齐这 5 项）
+
+**① 精确 flag 名（单一,不再留两选）**
+`MULTITABLE_STOCK_PREP_ERP_AUTOPERSIST_ENABLED`。默认 OFF;仅规范化字面 `true`（`String(env ?? '').trim().toLowerCase() === 'true'`)为 ON。实现处 `61caf7ff0` 已用此名。**不再保留 `..._SOURCE_AUTOPERSIST_ENABLED` 备选。**
+
+**② 无矛盾的响应契约(OFF 与 ON 都定死,字段恒在)**
+响应恒含 `autoPersist` 字段(非条件出现,避免调用方分支歧义):
+- **flag OFF** → `autoPersist: null`（读only,未写)。source-run 公开面照旧。
+- **flag ON,persist 成功** → `autoPersist: <T2 persist 证据>` = `{ persisted:boolean, mode, created, patched, skippedInvalid, run:{status,...}, fieldKeyNames }`(T2 既有 values-free evidence,无原始行/无 syncRunId 值)。HTTP 201 当真写(created>0 或 patched>0),否则 200。
+- **flag ON,persist 失败** → 见 ③(整请求 values-free 错误,`autoPersist` 不半途返回)。
+- **契约不变式**:`autoPersist===null` ⟺ flag OFF;`autoPersist` 为对象 ⟺ flag ON 且 persist 成功。二者互斥无重叠。
+
+**③ 空输入 / 中途失败语义(定死)**
+- **空 intake(source-run 成功但零行)**:flag ON → persist 零物料 + run 记录(T2 既有语义);`autoPersist.created=0, persisted=false`;HTTP 200。**不是错误**——空是合法结果。
+- **中途失败(source-run 成功、persist 失败)**:整请求返回 persist 的 values-free coarse 错误(如 `ERP_MATERIAL_SYNC_*`),**不返回 source-run 的 autoPersist 半成品**、不返回部分成功。source-run 的外部读已发生但无害(只读);persist 幂等 upsert ⇒ 重试安全(重跑 source-run 再 upsert,零重复)。**不引入跨两步事务**(与本线既有 persist 语义一致)。
+- **source-run 失败**:不 persist,公开面 values-free 错误(现状不变)。
+
+**④ steering-reject guard 的精确落点**
+新 guard `assertStockPreparationErpAutoPersistNoSteering(req)`(镜像 `assertNoRequestBaseId` 纪律),在 handler 内**紧接 `requireAccess` + flag 判定之后、`loadStockPreparationReadonlySource`(source-run 读 I/O)之前**调用:flag ON 且 `requestBody(req)`/`requestQuery(req)`/`requestParams(req)` 任一含**非空 `tenantId` 或 `projectId`** ⇒ `throw new HttpRouteError(400, 'STOCK_PREPARATION_ERP_AUTOPERSIST_STEERING_NOT_ALLOWED', ...)`。**flag OFF 不调用此 guard**(只读路径行为逐字节不变)。⇒ 拒绝发生在任何外部读/写 I/O 之前,zero side-effect。
+
+**⑤ workspaceId 同租户选择语义(不是 steering 向量)**
+`workspaceId` 允许透传,**但它不改租户也不改写目标**:flag ON 下 tenant 恒 `resolveAuthUserTenantId(req)`、写 staging 恒 `resolveIntegrationStagingProjectId(auth-tenant, undefined)`——`workspaceId` **不参与写目标派生**。它仅作认证租户**内部**的 source 配置作用域选择(source-run 读侧沿用现语义)。因此 workspaceId 不是跨租户 steering 向量(改它选不到别租户的写目标),故 ④ 的 guard **只拒 tenantId/projectId,不拒 workspaceId**。若未来 workspaceId 被证实能跨租户选到 source 配置,另立 guard(非本锁范围)。
+
 ## 4. 边界（红线）
 
 - **只写 9 内部 MVP 表**(T2 persist 经 `createTargetScopedRecordsApi` 绑定)。**绝不外部写**(C4:不碰 apply-writer/K3 Save/自动建 ERP 物料);`externalWrite` 恒 false。
