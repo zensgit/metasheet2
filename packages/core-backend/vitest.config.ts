@@ -485,6 +485,8 @@ export default defineConfig({
       // skip-green in the no-DB lane, whole-file wired into `Run multitable real-DB integration` in
       // plugin-tests.yml. Two-point wiring.
       'tests/integration/multitable-fwb-activation-realdb.test.ts',
+      // approval attachment GC worker (TTL sweep + purge-intent drain) — real-DB. Two-point wiring.
+      'tests/integration/approval-attachment-gc-realdb.test.ts',
       // P2 durable-delivery S2-a claim engine / fence-CAS — real-DB constructed-concurrency (zombie/SKIP
       // LOCKED). Excluded HERE so it cannot skip-green in the no-DB lane; whole-file wired into
       // plugin-tests.yml. Two-point wiring.

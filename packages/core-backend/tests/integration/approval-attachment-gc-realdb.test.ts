@@ -1,0 +1,86 @@
+/**
+ * Approval attachments slice ③ — GC worker + TTL sweep (real DB, #4195 §3/§7/O2).
+ *
+ * Constructs: TTL sweep flips ONLY expired unbound rows (bound/fresh untouched) and writes the purge intent
+ * atomically; drain deletes unreferenced blobs (intent → done), leaves failures pending (at-least-once),
+ * and NEVER deletes a blob a live row still references (skip + surface). Two-point wired.
+ */
+import { randomUUID } from 'node:crypto'
+
+import { afterAll, describe, expect, test } from 'vitest'
+
+import { poolManager } from '../../src/integration/db/connection-pool'
+import { drainPurgeIntents, sweepUnboundAttachments } from '../../src/services/approval-attachment-gc'
+
+const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
+const db = () => poolManager.get()
+const RUN = randomUUID()
+const ids: string[] = []
+
+async function seed(over: { status?: string; ageHours?: number; instance?: string | null; key?: string } = {}) {
+  const id = `att_${RUN}_${ids.length}`
+  ids.push(id)
+  await db().query(
+    `INSERT INTO approval_attachments (id, org_id, uploader_id, instance_id, field_id, storage_key, file_name, mime_type, size_bytes, status, created_at)
+     VALUES ($1,'org1','u1',$2,'fld',$3,'a.pdf','application/pdf',1024,$4, now() - ($5::int * interval '1 hour'))`,
+    [id, over.instance ?? null, over.key ?? `key_${id}`, over.status ?? 'unbound', over.ageHours ?? 0],
+  )
+  return id
+}
+
+describeIfDatabase('approval attachment GC (real DB)', () => {
+  afterAll(async () => {
+    await db().query('DELETE FROM approval_attachment_purge_intents WHERE storage_key LIKE $1', [`key_att_${RUN}%`]).catch(() => {})
+    await db().query('DELETE FROM approval_attachments WHERE id = ANY($1)', [ids]).catch(() => {})
+  })
+
+  test('sentinel: DATABASE_URL set', () => {
+    expect(process.env.DATABASE_URL).toBeTruthy()
+  })
+
+  test('TTL sweep: only EXPIRED unbound rows flip to deleted + intent; bound and fresh rows untouched', async () => {
+    const expired = await seed({ ageHours: 200 })
+    const fresh = await seed({ ageHours: 1 })
+    const bound = await seed({ status: 'bound', ageHours: 500, instance: 'apr_x' })
+    const r = await sweepUnboundAttachments(db(), 168)
+    expect(r.swept).toBeGreaterThanOrEqual(1)
+    const st = async (id: string) => (await db().query('SELECT status FROM approval_attachments WHERE id=$1', [id])).rows[0].status
+    expect(await st(expired)).toBe('deleted')
+    expect(await st(fresh)).toBe('unbound')
+    expect(await st(bound)).toBe('bound') // NEVER swept
+    const pi = await db().query('SELECT reason, status FROM approval_attachment_purge_intents WHERE storage_key=$1', [`key_${expired}`])
+    expect(pi.rows[0]).toMatchObject({ reason: 'unbound_ttl', status: 'pending' }) // intent written atomically
+  })
+
+  test('drain: unreferenced blob deleted → done; deleter throw → stays pending (at-least-once)', async () => {
+    const deleted: string[] = []
+    let failOnce = true
+    const r1 = await drainPurgeIntents(db(), async (k) => {
+      if (k.includes(`att_${RUN}`) && failOnce) {
+        failOnce = false
+        throw new Error('store down')
+      }
+      deleted.push(k)
+      return true
+    })
+    expect(r1.failed).toBeGreaterThanOrEqual(1) // first attempt failed, intent kept pending
+    const r2 = await drainPurgeIntents(db(), async (k) => (deleted.push(k), true))
+    expect(r2.purged).toBeGreaterThanOrEqual(1) // retry converges
+    expect(deleted.some((k) => k.includes(`att_${RUN}`))).toBe(true)
+  })
+
+  test('SAFETY: a blob still referenced by a live row is NEVER deleted — skipped and surfaced', async () => {
+    const live = await seed({ status: 'bound', instance: 'apr_y', key: `key_shared_${RUN}` })
+    await db().query(
+      `INSERT INTO approval_attachment_purge_intents (id, storage_key, reason) VALUES ($1,$2,'reconciler_orphan')`,
+      [`pi_manual_${RUN}`, `key_shared_${RUN}`],
+    )
+    const deleted: string[] = []
+    const r = await drainPurgeIntents(db(), async (k) => (deleted.push(k), true))
+    expect(r.skippedStillReferenced).toContain(`key_shared_${RUN}`)
+    expect(deleted).not.toContain(`key_shared_${RUN}`) // live blob untouched
+    const pi = await db().query(`SELECT status FROM approval_attachment_purge_intents WHERE id=$1`, [`pi_manual_${RUN}`])
+    expect(pi.rows[0].status).toBe('pending') // left for the reconciler
+    void live
+  })
+})
