@@ -59,15 +59,16 @@
 >
 > **余量（更新后口径）**:
 > 1. 🔒 **owner/operator 门**:S7 A2-resolver（等 A1 live 手感）· 档 B 治理门 · T2 三项（§3.1 打卡切外勤 /
->    #2 自助入口 / #8 多段夜班）。**五连 staging smoke → ✅ 全 PASS（2026-07-15,统一 DEPLOY_SHA
+>    #2 自助入口 / #8 多段夜班）。**五连 staging smoke → 五个 API/DB **helper** smoke ✅ 全 PASS（2026-07-15,统一 DEPLOY_SHA
 >    `d65a77c250d74143e6671cc424deb7319eadeb51`,serial per bundle §4,各刀 residue=0）**:
->    `AE4_RESULT_EDIT_STAGING_SMOKE_PASS deploy=d65a77c2… stamp=ae4-smoke-gh29383379748a1 residue=0`（API/DB 半;人工 AE-3 modal 证据仍待 owner 浏览器）·
->    `RD45_REPORT_DIGEST_STAGING_SMOKE_PASS deploy=d65a77c2… stamp=rd45-smoke-gh29383448054a1 produced=1 dedupOk=1 residue=0` ·
->    `OTBANK_V18_STAGING_SMOKE_PASS deploy=d65a77c2… stamp=otbank-v18-smoke-gh29383549381a1 cycle=cb5e7b71 residue=0` ·
->    `MP6_MAKEUP_PUNCH_STAGING_SMOKE_PASS deploy=d65a77c2… stamp=mp6-smoke-gh29391693975a1 quota=1 approvals=1 residue=0` ·
->    `HMR5_MANUAL_MISSED_PUNCH_REMINDER_STAGING_SMOKE_PASS deploy=d65a77c2… stamp=hmr5-smoke-gh29391755628a1 sendPosture=worker-on:failed_recognized residue=0`。
->    完整记录 = `attendance-v1-five-window-acceptance-verification-20260715.md`（迁移对齐 backup+隔离证明+pending=0、
->    六个 live-failure 修复、consolidated close）。**E4 真机 → ✅ #3843 已完成关闭（2026-07-09）**。
+>    `AE4_RESULT_EDIT_API_DB_SMOKE_PASS deploy=d65a77c2… stamp=ae4-smoke-gh29383379748a1 residue=0`·
+>    `RD45_REPORT_DIGEST_API_DB_SMOKE_PASS deploy=d65a77c2… stamp=rd45-smoke-gh29383448054a1 produced=1 dedupOk=1 residue=0` ·
+>    `OTBANK_V18_API_DB_SMOKE_PASS deploy=d65a77c2… stamp=otbank-v18-smoke-gh29383549381a1 cycle=cb5e7b71 residue=0` ·
+>    `MP6_MAKEUP_PUNCH_API_DB_SMOKE_PASS deploy=d65a77c2… stamp=mp6-smoke-gh29391693975a1 quota=1 approvals=1 residue=0` ·
+>    `HMR5_API_DB_SMOKE_PASS deploy=d65a77c2… stamp=hmr5-smoke-gh29391755628a1 sendPosture=worker-on:failed_recognized residue=0`。
+>    完整记录 = `attendance-v1-five-window-acceptance-verification-20260715.md`。**最终 `*_STAGING_SMOKE_PASS` 未发**:
+>    还差各刀人工浏览器/owner 决策项（AE-3 modal / RD-4 配置卡+sendProof / OT OQ-1·2 / MP OQ-1·3 / HMR-5
+>    confirm-snapshot+真实渠道）+ §7 consolidated residue sweep + 严格门 exact-SHA 口径（等价记录待 owner 接受）。**E4 真机 → ✅ #3843 已完成关闭（2026-07-09）**。
 > 2. **P3 硬化小刀池 → ✅ 文件证据/存储完整性硬化池 CLOSED（2026-07-11）**（下方 REOPEN 记录保留作历史）:
 >    F1/F2/F3/F5/F6/F8/F9/F10 全 on main,owner 2026-07-11 基于 `origin/main@320d37f66` 独立复核 **APPROVE 0 P1 / 0 P2**;
 >    收官对账 = `file-evidence-security-line-pool-closeout-20260711.md`（**F4 权限层仍 gated·retention env 仍属 operator 动作,均未交付**）。

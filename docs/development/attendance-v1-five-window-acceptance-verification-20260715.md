@@ -1,9 +1,11 @@
-# Attendance v1 — Five-Window Staging Acceptance: Verification Record (2026-07-15)
+# Attendance v1 — Five-Window API/DB Helper Smokes: Verification Record (2026-07-15)
 
-> Executes owner steps 2-4 & 7 of the 2026-07-14 close-out sequence. All five staging smokes
-> PASSED serially on ONE deployed SHA with per-smoke and consolidated residue=0. Remaining
-> pre-close items (§6) are the owner-side steps: manual AE-3 modal evidence, DingTalk
-> S1-S8/U1-U13 (esp. U11-a), 关闭 issue-3317, release tag.
+> **口径(owner 复审 2026-07-15,CHANGES applied): these are the five `*_API_DB_SMOKE_PASS` HELPER
+> passes — NOT the final `*_STAGING_SMOKE_PASS` acceptances.** The final stamps require the §6
+> manual-browser/owner-decision items below plus the §7 consolidated residue sweep.
+
+> Executes owner steps 2-4 of the close-out sequence at the helper level. All five API/DB
+> helper smokes PASSED serially on ONE deployed SHA, each helper-scoped residue=0.
 
 ## 1. The frozen window
 
@@ -35,7 +37,7 @@ Run **29376184845** (`action=migrate`, after two fail-closed attempts hardened t
   under non-env secret providers.
 - **Apply**: real staging DB → `Pending: 0`; health + auth round-trip green.
 
-## 3. The five windows (owner step 4) — all PASS, one SHA, serial per bundle §4
+## 3. The five API/DB helper smokes — all HELPER-PASS, one SHA, serial per bundle §4
 
 | # | Window | Run | Stamp (verbatim) |
 |---|---|---|---|
@@ -62,24 +64,38 @@ keys (verified per-run in the artifacts: settings-before/after + in-log restore 
 Every failure was fail-closed (real staging DB untouched until proofs held); the owner's
 "real acceptance = rerun the rehearsal" principle caught one plausible-but-wrong fix (#4284).
 
-## 5. Consolidated close (owner step 7)
+## 5. Consolidated close (owner step 7) — status
 
-- Consolidated final-state capture: run 29391832015 (`action=status` — settings + container
-  state archived).
-- Strict-gate rerun (prod): run 29391835742 — **overall SUCCESS** (all gates green); prod carries the frozen
-  window SHA as an ancestor (prod auto-deploys per merge; the staging window itself stayed
-  pinned to `d65a77c25` throughout).
-- Tracker backfilled in the same PR (single edit, all five stamps).
+- Final-state capture: run 29391832015 (`action=status` — settings/env/containers archived).
+  **NOT the §7 sweep** — the cross-smoke residue SQL is being added as `action=residue-sweep`
+  and must run green (every §7 count = 0) before the final stamps can be issued.
+- Strict-gate rerun (prod): run 29391835742 — **overall SUCCESS**, executed at main
+  `91d924fb1`, a successor of the frozen `d65a77c25`. **Equivalence record for owner
+  acceptance**: `git diff --stat d65a77c25..91d924fb1` over `plugins/plugin-attendance/`,
+  `packages/core-backend/src/`, and the attendance web views is EMPTY — the 13 intervening
+  commits are attendance harness/ops fixes (#4294/#4296/#4301, scripts/ops only), owner docs
+  ratifications (#4196/#4203/#4195/#4239/#4287), and multitable/web work
+  (#4285/#4290/#4295/#4298/#4300). Zero attendance-runtime change. If the owner does not
+  accept equivalence, the alternative is an exact-SHA rerun.
+- Tracker backfilled in the same PR (helper-PASS framing, real stamp names).
 
-## 6. Remaining before 关闭 issue-3317 + tag (owner steps 5-6, 8)
+## 6. Remaining before the final `*_STAGING_SMOKE_PASS` stamps + 关闭 issue-3317 + tag
 
-1. **Manual AE-3 modal browser evidence** — requires the owner's logged-in in-session browser
-   (:8082); the AE-4 harness explicitly refuses to claim the UI PASS. Sanitized screenshots
-   to be attached to #3317.
-2. **DingTalk S1-S8 / U1-U13** — esp. U11-a real corp-anchor callback; B1 explicitly NOT in
-   v1 (owner ruling).
-3. Owner review of this record → 关闭 issue-3317 → release tag (suggested tag point:
-   `d65a77c25`, the SHA every stamp names).
+Per-window manual-browser / owner-decision items (owner review 2026-07-15):
+1. **AE-4**: manual AE-3 modal browser evidence (:8082 logged-in session; harness refuses to
+   claim the UI PASS). Sanitized screenshots → #3317.
+2. **RD-4/5**: config-card browser verification + a real `sendProof` (the helper's digest
+   production ≠ delivery proof).
+3. **OT-bank v1-8**: OQ-1 / OQ-2 owner decisions per its runbook.
+4. **MP-6**: OQ-1 / OQ-3 owner decisions per its runbook (single-tenant posture etc.).
+5. **HMR-5**: confirm-snapshot browser step + a real notification channel + owner judgment —
+   `sendPosture=worker-on:failed_recognized` only proves the worker correctly recognized a
+   terminal failure, NOT that a notification was really delivered.
+6. **§7 consolidated residue sweep** green (all counts 0) + env-flag rollback + settings
+   baseline confirmation at window close.
+7. **DingTalk S1-S8 / U1-U13** — esp. U11-a real corp-anchor callback; B1 NOT in v1.
+8. Owner review → final stamps issued → 关闭 issue-3317 → release tag at full SHA
+   `d65a77c250d74143e6671cc424deb7319eadeb51`.
 
 After those: the owner's declaration per the 2026-07-14 ruling — attendance v1 development,
 DingTalk E1-E4 integration, and production acceptance closed; B1/S7/飞书/native-hardware → vNext.
