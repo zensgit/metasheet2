@@ -688,8 +688,10 @@ const LABELS: Record<AutomationLabelKey, { en: string; zh: string }> = {
   'condition.addCondition': { en: '+ Add condition', zh: '+ 添加条件' },
   'condition.addGroup': { en: '+ Add group', zh: '+ 添加条件组' },
   'condition.removeConditionTitle': { en: 'Remove condition', zh: '移除条件' },
-  'actionConfig.targetSheetId': { en: 'Target sheet ID', zh: '目标工作表 ID' },
-  'actionConfig.sheetIdPlaceholder': { en: 'Sheet ID', zh: '工作表 ID' },
+  // W1 G-10: '工作表' was a fifth term (neither old nor ratified) that visually collides with
+  // '工作区' (Base) — the label noun follows the dictionary; the ID value itself stays raw.
+  'actionConfig.targetSheetId': { en: 'Target sheet ID', zh: '目标数据表 ID' },
+  'actionConfig.sheetIdPlaceholder': { en: 'Sheet ID', zh: '数据表 ID' },
   // G-B2-27: escape hatch next to the target-sheet dropdown — listSheets() may omit
   // cross-base/future sheets, so typing the ID directly stays available on demand.
   'actionConfig.targetSheetManualToggle': { en: 'Enter ID manually', zh: '手动输入 ID' },
@@ -1233,7 +1235,8 @@ export function automationDingTalkTemplateTokenLabel(token: AutomationDingTalkTe
     case 'recordId':
       return isZh ? '记录 ID' : 'Record ID'
     case 'sheetId':
-      return isZh ? '表 ID' : 'Sheet ID'
+      // W1 G-10: label noun follows the dictionary (数据表); the {{sheetId}} token itself is API surface.
+      return isZh ? '数据表 ID' : 'Sheet ID'
     case 'actorId':
       return isZh ? '触发人 ID' : 'Actor ID'
     case 'recordField':
