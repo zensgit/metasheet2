@@ -5,9 +5,15 @@
  * while meta revision retention is enabled; (c) PIT-2 all-or-nothing — a LOCKED
  * delete-target → 409 RESET_BLOCKED with ZERO writes (mutation-proven: drop the not-locked preflight check → D is
  * deleted → this golden fails); (d) row-deny added after preview → 409 RESET_BLOCKED with ZERO writes and no blocker
- * details; (e) ceiling → 413; (f) typed confirm:'reset' required → 400; (g) delete-set divergence — a record created
- * or edited between preview/execute → 409, NOTHING deleted; (h) single-transaction atomicity — a forced DELETE-revision
- * failure rolls back the already-started A/B reverts too; (i) PIT-7 reveal-non-composition; (j) D2 sheet-admin gate.
+ * details; (e) ceiling → 413; (f) typed confirm:'reset' required → 400; (g1/g2) delete-set divergence via an
+ * UNCAPTURED write (a record inserted/edited by raw SQL, no revision) between preview/execute → 409
+ * HISTORY_INCOMPLETE (the §0.6 precheck refuses on incomplete history BEFORE the identity check ever runs);
+ * (g3) delete-set HASH divergence via a CAPTURE-COMPLETE write (a record created through the REAL plugin-SDK
+ * entry point — history stays complete) → 409 PREVIEW_IDENTITY_INVALID, the deleteScopeHash re-comparison
+ * catching it instead (docket #46 — deferred during the §0.6 precheck work because the pre-capture-complete
+ * world could not construct this scenario without HISTORY_INCOMPLETE masking it first); (h) single-transaction
+ * atomicity — a forced DELETE-revision failure rolls back the already-started A/B reverts too; (i) PIT-7
+ * reveal-non-composition; (j) D2 sheet-admin gate.
  * Runs only with DATABASE_URL.
  */
 import express, { type Express } from 'express'
@@ -18,6 +24,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, test } from 'vitest'
 
 import { poolManager } from '../../src/integration/db/connection-pool'
 import { univerMetaRouter } from '../../src/routes/univer-meta'
+import { MetaSheetServer } from '../../src/index'
 
 const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
 const TS = Date.now()
@@ -37,6 +44,35 @@ const inTrash = async (id: string) => (await q('SELECT record_id FROM meta_recor
 const rev = (id: string, version: number, action: string, snap: Record<string, unknown>, at: string) =>
   q(`INSERT INTO meta_record_revisions (id, sheet_id, record_id, version, action, source, changed_field_ids, patch, snapshot, created_at)
      VALUES (gen_random_uuid(),$1,$2,$3,$4,'rest',ARRAY[$5,$6]::text[],'{}'::jsonb,$7::jsonb,$8)`, [SHEET, id, version, action, NAME, SALARY, JSON.stringify(snap), at])
+
+/** Docket #46 (g3): the REAL plugin-SDK `createRecord` entry point — same technique as
+ *  `multitable-d1c-plugin-revision-realdb.test.ts` — used to inject a NORMAL, capture-complete write between
+ *  preview and execute (records BOTH the `meta_records` row and its version-1 `create` revision in one
+ *  transaction), as opposed to this file's raw-SQL `rev()` helper which the (g1)/(g2) goldens use on purpose
+ *  to construct the UNCAPTURED case. A hand-rolled `INSERT` + `rev()` pair could accidentally diverge from
+ *  what a real write path produces; driving the actual production SDK entry point cannot.
+ */
+type PluginRecordsApi = {
+  createRecord: (input: { sheetId: string; data: Record<string, unknown> }) => Promise<{ id: string; sheetId: string; version: number; data: Record<string, unknown> }>
+}
+function realSdk(): PluginRecordsApi {
+  const server = new MetaSheetServer({ port: 0, host: '127.0.0.1', pluginDirs: [] })
+  const coreApi = (server as unknown as { createCoreAPI: () => { multitable: { records: PluginRecordsApi } } }).createCoreAPI()
+  return coreApi.multitable.records
+}
+
+/** ZERO-WRITES post-assertion for (g3): the full observable write-state of SHEET — records (id/data/version),
+ *  revision count, and trash count — compared before/after the refused execute (deepEqual). */
+async function sheetSnapshot(): Promise<{
+  records: Array<{ id: string; data: Record<string, unknown>; version: number }>
+  revisionCount: number
+  trashCount: number
+}> {
+  const records = (await q('SELECT id, data, version FROM meta_records WHERE sheet_id = $1 ORDER BY id', [SHEET])).rows as Array<{ id: string; data: Record<string, unknown>; version: number }>
+  const revisionCount = Number(((await q('SELECT count(*)::int AS c FROM meta_record_revisions WHERE sheet_id = $1', [SHEET])).rows[0] as { c: number }).c)
+  const trashCount = Number(((await q('SELECT count(*)::int AS c FROM meta_records_trash WHERE sheet_id = $1', [SHEET])).rows[0] as { c: number }).c)
+  return { records, revisionCount, trashCount }
+}
 
 async function seed(): Promise<void> {
   for (const id of [A, B]) { // existed at T1 (old), changed at T2 (new) → reset-to-T1 reverts them to old.
@@ -169,7 +205,9 @@ describeIfDatabase('multitable T8-2 Reset-to-T (DESTRUCTIVE, real DB)', () => {
     const E = `rec_rs_e_${TS}`
     await q('INSERT INTO meta_records (id, sheet_id, data, version) VALUES ($1,$2,$3::jsonb,1)', [E, SHEET, JSON.stringify({ [NAME]: 'sneaked-in' })]) // now post-T-created too
     const ex = await resetExecute({ asOf: T1, previewIdentity: pv.body?.data?.previewIdentity, confirm: 'reset' })
-    // §0.6 restore-marker: original PREVIEW_IDENTITY_INVALID assertion restores after the corresponding revision-slice lands
+    // §0.6 restore-marker RESOLVED: the PREVIEW_IDENTITY_INVALID shape this scenario would hit if E were
+    // captured is now pinned directly by (g3) below (docket #46), which swaps this raw-SQL uncaptured insert
+    // for a real capture-complete create so the deleteScopeHash divergence is what actually fires.
     // E is a live row with ZERO revisions (an uncaptured create injected between preview and execute) — the
     // D-1c §0.6 precheck refuses it FIRST. This is a real TOCTOU and §0.6 refusing is CORRECT: still 409,
     // still zero writes; only the pinned error code changed from the identity-drift shape to the
@@ -183,13 +221,41 @@ describeIfDatabase('multitable T8-2 Reset-to-T (DESTRUCTIVE, real DB)', () => {
     const pv = await resetPreview() // D bound at version 1
     await q('UPDATE meta_records SET data = $2::jsonb, version = version + 1 WHERE id = $1', [D, JSON.stringify({ [NAME]: 'edited-after-preview', [SALARY]: 501 })])
     const ex = await resetExecute({ asOf: T1, previewIdentity: pv.body?.data?.previewIdentity, confirm: 'reset' })
-    // §0.6 restore-marker: original PREVIEW_IDENTITY_INVALID assertion restores after the corresponding revision-slice lands
+    // §0.6 restore-marker RESOLVED: see (g3) below for the capture-complete sibling of this scenario, where
+    // history stays complete and the deleteScopeHash re-comparison is what actually refuses.
     // The raw UPDATE left D's live data disagreeing with its latest (only) revision snapshot — an uncaptured
     // edit injected between preview and execute. The D-1c §0.6 precheck refuses it FIRST: real TOCTOU, §0.6
     // refusing is CORRECT; still 409, still zero writes; only the pinned error code changed.
     expect(ex.status).toBe(409); expect(ex.body?.error?.code).toBe('HISTORY_INCOMPLETE')
     expect((await recordRow(D))?.data?.[NAME]).toBe('edited-after-preview')
     for (const id of [A, B]) { const r = await recordRow(id); expect(r?.data?.[NAME]).toBe('new'); expect(r?.version).toBe(2) }
+  })
+
+  test('(g3) docket #46 — delete-set HASH divergence via a CAPTURE-COMPLETE write: a NORMAL create between preview/execute is NOT caught by §0.6 (history stays complete) — refused via PREVIEW_IDENTITY_INVALID identity mismatch instead, ZERO writes', async () => {
+    const pv = await resetPreview() // delete-set bound = {D at v1}; deleteScopeHash computed over just D
+    // A NORMAL capture-complete write — the REAL plugin-SDK createRecord entry point (source='plugin'),
+    // NOT raw SQL: it writes the meta_records row AND a matching version-1 'create' revision in ONE
+    // transaction (same production wiring `multitable-d1c-plugin-revision-realdb.test.ts` pins), so §0.6's
+    // generation-aware contiguity + content-projection precheck (history-integrity-precheck.ts) passes
+    // clean on this sheet — this scenario is deliberately NOT the (g1)/(g2) HISTORY_INCOMPLETE case.
+    const sdk = realSdk()
+    const created = await sdk.createRecord({ sheetId: SHEET, data: { [NAME]: 'captured-after-preview' } })
+    const before = await sheetSnapshot() // captured AFTER the create so this is a true zero-writes-from-execute check
+    const ex = await resetExecute({ asOf: T1, previewIdentity: pv.body?.data?.previewIdentity, confirm: 'reset' })
+    // The RE-ENUMERATED delete-set at execute now includes `created.id` (absent from the T1 reconstruction,
+    // live now) — its deleteScopeHash (hashDeleteSet, restore-preview-identity.ts) diverges from what is
+    // bound inside previewIdentity, so verifyPitResetPreviewIdentity fails with reason='mismatch_deleteScopeHash'
+    // (never 'expired') → the route maps that to 409 PREVIEW_IDENTITY_INVALID (univer-meta.ts reset-execute,
+    // ~:10454-10457) — never HISTORY_INCOMPLETE, because history really is complete here. This is THE
+    // deferred W0 golden (docket #46): the delete-scope-divergence refusal path, reachable now that a
+    // capture-complete write no longer gets pre-empted by §0.6.
+    expect(ex.status).toBe(409)
+    expect(ex.body?.error?.code).toBe('PREVIEW_IDENTITY_INVALID')
+    // ZERO WRITES — assert the DB, not just the response: identical records/versions, no new revision, no
+    // trash row, for the WHOLE sheet (not just D/created individually).
+    expect(await sheetSnapshot()).toEqual(before)
+    expect(await recordRow(D)).toBeTruthy() // D NOT deleted
+    expect(await recordRow(created.id)).toBeTruthy() // the newly-created record NOT deleted either
   })
 
   test('(h) single-transaction atomicity: DELETE-revision failure rolls back prior A/B reverts AND D delete', async () => {
