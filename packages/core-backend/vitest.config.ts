@@ -76,6 +76,21 @@ export default defineConfig({
       // no-DB job cannot skip-green it, and wired as a WHOLE FILE into the directory real-DB
       // step in plugin-tests.yml.
       'tests/integration/directory-sync-schedule-timezone.db.test.ts',
+      // Canonical Org MVP B1 (#4215 §5.1) local-provider bootstrap (real DB): proves
+      // getOrCreateLocalIntegration's concurrency-safe get-or-create, the
+      // one_active_local_integration_per_org partial index (both halves: caps active rows,
+      // permits inactive history), the creation audit event, and provider-scoped coexistence
+      // with a dingtalk integration. DATABASE_URL-gated; excluded here so the no-DB job cannot
+      // skip-green it, and wired as a WHOLE FILE into the directory real-DB step in
+      // plugin-tests.yml.
+      'tests/integration/directory-local-provider-bootstrap.db.test.ts',
+      // Canonical Org MVP B1 owner round P2-2 (#4215 §5.1): proves, against the scheduler's REAL
+      // startup-scan path (not a mock), that a `provider='local'` row forced to every
+      // schedule-eligible condition is never registered as a cron job, with an identically
+      // configured dingtalk row as a positive control. DATABASE_URL-gated; excluded here so the
+      // no-DB job cannot skip-green it, and wired as a WHOLE FILE into the directory real-DB
+      // step in plugin-tests.yml.
+      'tests/integration/directory-local-provider-scheduler-exclusion.db.test.ts',
       // Layer-2 hidden person/button masking (real DB): proves the cross-cutting visibility-key fix actually
       // masks the VALUE end-to-end, with non-vacuous controls. DATABASE_URL-gated; excluded here so the no-DB
       // job cannot skip-green it, and wired as a WHOLE FILE into the multitable real-DB step in
