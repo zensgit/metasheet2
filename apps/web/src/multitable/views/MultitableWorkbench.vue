@@ -321,7 +321,7 @@
           @selection-change="onGridSelectionChange"
         />
       </div>
-      <MetaRecordDrawer
+      <MetaRecordInspector
         :visible="!!selectedRecordId" :record="selectedRecordResolved" :fields="scopedAllFields"
         :can-edit="effectiveRowActions.canEdit" :can-comment="effectiveRowActions.canComment" :can-delete="effectiveRowActions.canDelete"
         :can-create="caps.canCreateRecord.value"
@@ -662,7 +662,7 @@ import type { ConfigRestoreExecuteConfirm, RestorePreviewChange, RestoreBatchPre
 import { buildBatchExpectedVersions } from '../utils/batch-restore-expected-versions'
 import { resolveSelectionLabels } from '../utils/batch-restore-labels'
 import MetaFormView from '../components/MetaFormView.vue'
-import MetaRecordDrawer from '../components/MetaRecordDrawer.vue'
+import MetaRecordInspector from '../components/MetaRecordInspector.vue'
 import MetaNotificationBell from '../components/MetaNotificationBell.vue'
 import MetaCommentsDrawer from '../components/MetaCommentsDrawer.vue'
 import MetaLinkPicker from '../components/MetaLinkPicker.vue'
