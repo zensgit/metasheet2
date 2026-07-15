@@ -139,7 +139,7 @@ describeIfDatabase('multitable D-1c §0.6 HISTORY_INCOMPLETE precheck (real DB)'
     delete process.env.MULTITABLE_ENABLE_PIT_RESET
     delete process.env.MULTITABLE_ENABLE_SHEET_REVERT
     for (const sheet of [SHEET, SHEET_F, SHEET_S]) {
-      for (const t of ['meta_records_trash', 'meta_record_revisions', 'meta_records', 'meta_fields']) await q(`DELETE FROM ${t} WHERE sheet_id = $1`, [sheet]).catch(() => {})
+      for (const t of ['meta_record_version_markers', 'meta_records_trash', 'meta_record_revisions', 'meta_records', 'meta_fields']) await q(`DELETE FROM ${t} WHERE sheet_id = $1`, [sheet]).catch(() => {})
       await q('DELETE FROM meta_sheets WHERE id = $1', [sheet]).catch(() => {})
     }
     await q('DELETE FROM meta_bases WHERE id = $1', [BASE]).catch(() => {})
@@ -152,6 +152,13 @@ describeIfDatabase('multitable D-1c §0.6 HISTORY_INCOMPLETE precheck (real DB)'
     // the dedicated flag-off/on gate goldens.
     process.env.MULTITABLE_ENABLE_SHEET_REVERT = 'true'
     for (const sheet of [SHEET, SHEET_F, SHEET_S]) {
+      // W0-1 v3.7: `recordVersionMarker` no longer has `ON CONFLICT ... DO NOTHING` (the cross-generation
+      // UNIQUE it targeted was dropped — "loud marker", see history-integrity-precheck.ts's module doc).
+      // G-HI-2 reuses record id X across two tests in this file; a leftover marker from a PRIOR test at the
+      // same (sheet, record, version) — previously silently swallowed by the now-removed ON CONFLICT — would
+      // otherwise coexist with the marker THIS test's real lock/unlock writes, creating a genuine duplicate
+      // occupant. Clear markers every test, exactly like multitable-history-contiguity-realdb.test.ts already does.
+      await q('DELETE FROM meta_record_version_markers WHERE sheet_id = $1', [sheet]).catch(() => {})
       await q('DELETE FROM meta_records_trash WHERE sheet_id = $1', [sheet]).catch(() => {})
       await q('DELETE FROM meta_record_revisions WHERE sheet_id = $1', [sheet])
       await q('DELETE FROM meta_records WHERE sheet_id = $1', [sheet])
