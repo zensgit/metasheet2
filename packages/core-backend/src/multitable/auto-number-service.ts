@@ -1,4 +1,5 @@
 import { normalizeAutoNumberProperty } from './auto-number-property'
+import { acquireCanonicalSheetFence } from './canonical-sheet-fence'
 import type { MultitableField } from './field-codecs'
 
 export type AutoNumberQuery = (
@@ -6,19 +7,20 @@ export type AutoNumberQuery = (
   params?: unknown[],
 ) => Promise<{ rows: unknown[]; rowCount?: number | null }>
 
-function sheetLockKey(sheetId: string): string {
-  return `meta:auto-number:sheet:${sheetId}`
-}
-
 function lockKey(sheetId: string, fieldId: string): string {
   return `meta:auto-number:${sheetId}:${fieldId}`
 }
 
+/**
+ * @deprecated W0-1 L4: renamed/generalised to `acquireCanonicalSheetFence` in `./canonical-sheet-fence`
+ * (the sheet-write lock KEY is unchanged — see that module). This alias is retained so existing importers
+ * keep compiling during the L4 rollout; new code should import `acquireCanonicalSheetFence` directly.
+ */
 export async function acquireAutoNumberSheetWriteLock(
   query: AutoNumberQuery,
   sheetId: string,
 ): Promise<void> {
-  await query('SELECT pg_advisory_xact_lock(hashtext($1))', [sheetLockKey(sheetId)])
+  await acquireCanonicalSheetFence(query, sheetId)
 }
 
 async function acquireFieldLock(query: AutoNumberQuery, sheetId: string, fieldId: string): Promise<void> {
@@ -79,7 +81,7 @@ export async function backfillAutoNumberField(
   opts?: { overwrite?: boolean },
 ): Promise<BackfillAutoNumberFieldResult> {
   const config = normalizeAutoNumberProperty(property)
-  await acquireAutoNumberSheetWriteLock(query, sheetId)
+  await acquireCanonicalSheetFence(query, sheetId)
   await acquireFieldLock(query, sheetId, fieldId)
 
   // Single UPDATE assigns sequential values to all eligible records via
