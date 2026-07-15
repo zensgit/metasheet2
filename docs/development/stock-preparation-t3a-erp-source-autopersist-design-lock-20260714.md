@@ -40,34 +40,37 @@ source-run 路由:
 - T3a **顺带闭合本路由的 GHSA step-2 写相关向量**(因为 flag ON 让它有写后果)。**不碰其它 source-run/plan 路由**(仍 GHSA step-2 owner 决策)。
 - 验证:flag ON 下 body/query/params tenantId 或 projectId → I/O 前 400 + 零 source-run 读 + 零写;flag OFF 下现有读行为不变。
 
-### OD-3 失败/原子性语义
-- source-run 失败 ⇒ 不 persist,公开面 values-free 错误(现状)。
-- source-run 成功 + persist 失败 ⇒ 公开面反映 persist 失败(values-free coarse code),已落部分=T2 的 create/patch 计数(T2 逐行 upsert,缺必填字段计 skip)。**不引入跨两步事务**(T2 persist 自身 upsert 幂等,重跑刷新)——与本线既有 persist 语义一致。
-- 空 intake(零行)⇒ persist 零物料 + run 记录(T2 既有语义)。
+### OD-3 空输入 / 失败语义 — ✅ DECIDED（对齐真实代码,rev 2026-07-15）
+- **空 intake(零行)⇒ 根本到不了 persist**:`assertIntakeReady()` 在 `erpMaterialRows < 1` 时**先抛 `SOURCE_RUN_EMPTY`(422)**(见 stock-preparation-readonly-source-run.cjs)。所以 flag ON 只会在 **≥1 行**时 persist。**修正:不存在「空 intake 返回 200 + 写 run」这一路径**(旧稿有误);空 = 422,零写。现有测试已锁该 422 路径。
+- **source-run 失败 ⇒ 不 persist**,公开面 values-free 错误(现状不变)。
+- **source-run 成功 + persist 失败 ⇒ 整请求返回 persist 的 values-free coarse 错误**(如 `ERP_MATERIAL_SYNC_*`),**不返回半成品 autoPersist、不返回部分成功计数**。T2 逐行 upsert 可能已落部分行——但这**不进响应**(响应只有 coarse 错误);幂等 upsert ⇒ 重跑 source-run 安全刷新,零重复。**不引入跨两步事务**(与本线既有 persist 语义一致)。
+- **非空 intake 但所有行被 persist 跳过**(缺必填字段 → created=0∧patched=0):`autoPersist.persisted=false, autoPersist.mode='skipped_empty'`,HTTP 200,`internalWriteExecuted=true`(写路径已跑,无行落地)。
 
-### OD-4 values-free 契约（双向）— ✅ DECIDED
-`intake.erpMaterials` 携带 ERP 业务值(那就是缓存数据),但**只在服务端 source→persist 流动**;公开面 = **精确复合证据**(不是笼统「counts」):`{ sourceRun: source-run 证据(sourceChannel/pages/sourceRows/completenessProof…), autoPersist: T2 persist 证据(persisted/mode/created·patched·skippedInvalid 计数/field-key NAMES/run status) }`——两块都是本线既有已 values-free 的 evidence,加性拼接,**无原始行、无 syncRunId 值、无物料码/名称**。leak-bait 双路(成功+错误)证之。
+### OD-4 响应契约 + values-free（双向）— ✅ DECIDED（对齐真实代码,rev 2026-07-15）
+- **flag OFF ⇒ 响应逐字节不变** = `publicReadonlySourceRunResult(result)`,**不新增任何字段**(无 autoPersist)。RC-0 安全。(修正旧稿「恒增 autoPersist:null」——那与「逐字节不变」矛盾;现在 OFF 什么都不加。)
+- **flag ON ⇒ 响应 = read 投影 + 覆盖 + autoPersist**:
+  - `publicReadonlySourceRunResult` 固定 `mode:'dry_run'` 且 `evidence.internalWriteExecuted:false`——**发生真实内部写后二者皆为假**,故 ON 路径**覆盖**为 `mode:'internal_persist'` + `evidence.internalWriteExecuted:true`,响应绝不谎报「未写」。(修正旧稿未覆盖 projector。)
+  - 加 `autoPersist` = **T2 persist 的真实返回**(值来自 stock-preparation-erp-material-sync-persist.cjs:397-405):`{ persisted, mode('created'|'refreshed'|'skipped_empty'), created:{materials,run}, patched:{materials,run}, skipped:{materials}, runStatus, evidence:{ …targets:{material,run:{objectId,fieldKeys,keyField}}, targetObjectIds, valuesFree:true } }`。**修正旧稿的错误形状**(不是 `skippedInvalid`/`run:{status}`/`fieldKeyNames`)。
+  - **HTTP 201 iff `autoPersist.persisted`(created>0∨patched>0),否则 200**。实现处 `sendOk(res, body, autoPersist.persisted ? 201 : 200)`(修正旧 WIP 固定 200)。
+- **契约不变式(无矛盾)**:`autoPersist` **存在 ⟺ flag ON**;flag OFF **无此字段**。不存在 null 态。
+- **values-free 双向**:`intake.erpMaterials` 带 ERP 业务值,但**只在服务端 source→persist 流动**;响应只有 source 证据 + T2 values-free evidence(counts/modes/statuses/objectIds/fieldKeys),**无原始行、无 syncRunId 值、无物料码/名称**。leak-bait 双路(成功+错误)证之。
 
 ### OD-5 幂等 + **staged upsert-only（非全量同步）** — ✅ DECIDED
 - T2 persist 按模板 keyFields[0] upsert(已幂等 + #4206 数字-key 硬化)。重跑 source-run ⇒ 刷新缓存行,零重复。
 - **明确口径:T3a 是「staged、upsert-only 的缓存写入」,不是权威全量同步。** 不删除源里已消失的陈旧缓存行、不做 reconcile/对账、不保证缓存 == 当前 ERP 全集。承诺仅:approved source-run 读到的行被 upsert 进缓存。对外/对实体机描述必须用「落缓存(upsert)」而非「全量同步」,避免过度承诺。全量 reconcile(若需要)是独立后续,非 T3a。
 
-## 3.5 实现契约细化（owner 2026-07-15 re-review — ratify 前补齐这 5 项）
+## 3.5 实现契约细化（owner re-review — rev 2026-07-15 对齐真实代码）
+
+> 说明:响应契约(②)与空/失败语义(③)已**就地统一进 OD-4 / OD-3**(不再在此追加平行说法)。此处保留 ①④⑤。所有契约均以 http-routes.cjs WIP `922fd2f76` + T2/source-run 真实返回为准。
 
 **① 精确 flag 名（单一,不再留两选）**
 `MULTITABLE_STOCK_PREP_ERP_AUTOPERSIST_ENABLED`。默认 OFF;仅规范化字面 `true`（`String(env ?? '').trim().toLowerCase() === 'true'`)为 ON。实现处 `61caf7ff0` 已用此名。**不再保留 `..._SOURCE_AUTOPERSIST_ENABLED` 备选。**
 
-**② 无矛盾的响应契约(OFF 与 ON 都定死,字段恒在)**
-响应恒含 `autoPersist` 字段(非条件出现,避免调用方分支歧义):
-- **flag OFF** → `autoPersist: null`（读only,未写)。source-run 公开面照旧。
-- **flag ON,persist 成功** → `autoPersist: <T2 persist 证据>` = `{ persisted:boolean, mode, created, patched, skippedInvalid, run:{status,...}, fieldKeyNames }`(T2 既有 values-free evidence,无原始行/无 syncRunId 值)。HTTP 201 当真写(created>0 或 patched>0),否则 200。
-- **flag ON,persist 失败** → 见 ③(整请求 values-free 错误,`autoPersist` 不半途返回)。
-- **契约不变式**:`autoPersist===null` ⟺ flag OFF;`autoPersist` 为对象 ⟺ flag ON 且 persist 成功。二者互斥无重叠。
+**② 响应契约 → 见 OD-4（已就地统一,不在此重复）**
+避免两处说法漂移:OFF 逐字节不变(无 autoPersist 字段)、ON 覆盖 projector 的 dry_run/internalWriteExecuted 并加 T2 真实 evidence、201/200 规则、契约不变式,**全部在 OD-4**(对齐 stock-preparation-erp-material-sync-persist.cjs 真实返回)。
 
-**③ 空输入 / 中途失败语义(定死)**
-- **空 intake(source-run 成功但零行)**:flag ON → persist 零物料 + run 记录(T2 既有语义);`autoPersist.created=0, persisted=false`;HTTP 200。**不是错误**——空是合法结果。
-- **中途失败(source-run 成功、persist 失败)**:整请求返回 persist 的 values-free coarse 错误(如 `ERP_MATERIAL_SYNC_*`),**不返回 source-run 的 autoPersist 半成品**、不返回部分成功。source-run 的外部读已发生但无害(只读);persist 幂等 upsert ⇒ 重试安全(重跑 source-run 再 upsert,零重复)。**不引入跨两步事务**(与本线既有 persist 语义一致)。
-- **source-run 失败**:不 persist,公开面 values-free 错误(现状不变)。
+**③ 空输入 / 失败语义 → 见 OD-3（已就地统一,不在此重复）**
+空 intake = 422 `SOURCE_RUN_EMPTY`(到不了 persist)、mid-failure = coarse 错误无半成品、全在 **OD-3**(对齐 assertIntakeReady 真实行为)。
 
 **④ steering-reject guard 的精确落点**
 新 guard `assertStockPreparationErpAutoPersistNoSteering(req)`(镜像 `assertNoRequestBaseId` 纪律),在 handler 内**紧接 `requireAccess` + flag 判定之后、`loadStockPreparationReadonlySource`(source-run 读 I/O)之前**调用:flag ON 且 `requestBody(req)`/`requestQuery(req)`/`requestParams(req)` 任一含**非空 `tenantId` 或 `projectId`** ⇒ `throw new HttpRouteError(400, 'STOCK_PREPARATION_ERP_AUTOPERSIST_STEERING_NOT_ALLOWED', ...)`。**flag OFF 不调用此 guard**(只读路径行为逐字节不变)。⇒ 拒绝发生在任何外部读/写 I/O 之前,zero side-effect。
@@ -85,13 +88,14 @@ source-run 路由:
 ## 5. 验证计划（ratify 后实现时）
 
 真库 smoke（plugin-tests.yml 白名单,否则 skip-green）:
-1. approved ERP source-run(flag ON)→ `erp_material_master` 出现物理键行(fieldId 取自 `meta_fields` 交叉核,非代码 sha1 派生)+ run 记录 = erp_material_sync。
-2. 重跑同 source-run → 零重复(幂等 upsert)。
-3. flag OFF → 只读,`erp_material_master` **零行**(负控 + 正控:ON 落 OFF 不落)。
+1. approved ERP source-run(flag ON,≥1 行)→ `erp_material_master` 出现物理键行(fieldId 取自 `meta_fields` 交叉核,非代码 sha1 派生)+ run 记录 = erp_material_sync;**响应 HTTP 201 + `mode:'internal_persist'` + `evidence.internalWriteExecuted:true` + `autoPersist.persisted=true`**(证覆盖了 projector 的 dry_run/未写)。
+2. 重跑同 source-run → 零重复(幂等 upsert);第二次 `autoPersist.mode='refreshed'`,若无变化 HTTP 200。
+3. flag OFF → 响应**逐字节等于**只读投影(**无 autoPersist 字段**)、`erp_material_master` **零行**(负控 + 正控:ON 落 OFF 不落)。
+3b. **空 intake → 422 `SOURCE_RUN_EMPTY`,零写、无 autoPersist**(证空不是 200-写路径)。
 4. values-free leak-bait 双路:公开面 + 错误面无 syncRunId/物料码/名称。
 5. 租户 steering **I/O 前拒绝**(flag ON):admin body/query/params 带 tenantId 或 projectId → **400 + 零 source-run 读 + 零写**(在 `loadStockPreparationReadonlySource`/persist 之前 fail-closed)。无 steering 的正常请求 → 落认证租户 staging。flag OFF → 现有读行为不变(不拒绝)。
 6. mutation(每处证载荷):去 persist 接线 → 缓存零行;去 steering 拒绝 → steering 测红(且证「在 I/O 前」:mock source-run 应零调用);去 auth-tenant 派生 → 落错租户;flag 去掉 → OFF 也落。
-7. flag 进 global-history…否 stock-prep flag manifest(若有)+ O-2/运维契约,生产默认 OFF。
+7. flag `MULTITABLE_STOCK_PREP_ERP_AUTOPERSIST_ENABLED` 进 **stock-prep flag 台账 / O-2 运维契约**(非 global-history manifest——那是 Global History 线的),生产默认 OFF。
 
 ## 6. 交付物
 
