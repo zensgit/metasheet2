@@ -116,9 +116,36 @@ export function parseXlsxBuffer(
 }
 
 /**
+ * Sanitize an arbitrary display string into a workbook tab name SheetJS will accept.
+ *
+ * G-10 follow-up (owner ruling 2026-07-15): exports name the xlsx tab after the sheet's DISPLAY
+ * name, so this boundary must tolerate hostile user-authored names. SheetJS 0.20.3's
+ * `check_ws_name` (called by `book_append_sheet`) THROWS on: names longer than 31 chars, the
+ * chars []:*?/\, a leading or trailing apostrophe, and the reserved name 'History'
+ * (case-insensitive — empirically verified against the pinned dependency). Rules applied in
+ * order: forbidden chars → spaces; trim; cap at 31; strip edge apostrophes (re-trim — the strip
+ * can expose new edge whitespace); reserved 'History' → 'History_' suffix (7 chars, so the
+ * suffix can never overflow the cap); empty → 'Sheet1'.
+ */
+export function safeXlsxSheetName(name: string | undefined): string {
+  const cleaned = (name ?? '')
+    .replace(/[\\/\[\]:*?]/g, ' ')
+    .trim()
+    .slice(0, 31)
+    .replace(/^'+|'+$/g, '')
+    .trim()
+  if (!cleaned) return 'Sheet1'
+  if (/^history$/i.test(cleaned)) return `${cleaned}_`
+  return cleaned
+}
+
+/**
  * Build an `.xlsx` Uint8Array (browser-safe) from a tabular dataset.
  * Headers row first, then string-coerced data rows. Caller is responsible
  * for typing/formatting via the `serialize` callback.
+ *
+ * The tab name is sanitized via `safeXlsxSheetName`, so this function never throws on a
+ * hostile `sheetName` (defense in depth: callers may pre-sanitize, but the boundary holds).
  */
 export function buildXlsxBuffer(
   xlsx: XlsxModule,
@@ -128,7 +155,7 @@ export function buildXlsxBuffer(
     rows: Array<Array<string | number | boolean | null | undefined>>
   },
 ): Uint8Array {
-  const sheetName = (params.sheetName?.trim() || 'Sheet1').slice(0, 31)
+  const sheetName = safeXlsxSheetName(params.sheetName)
   const aoa: unknown[][] = [params.headers.slice()]
   for (const row of params.rows) {
     aoa.push(row.map((cell) => (cell === undefined || cell === null ? '' : cell)))

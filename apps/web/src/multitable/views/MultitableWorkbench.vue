@@ -3722,10 +3722,9 @@ async function doExportXlsx(fields: GridExportField[], rowList: GridExportRow[])
       }),
     )
     // Sheet display name for the xlsx tab (G-10 follow-up, same ruling as the filename above).
-    // Excel rejects []:*?/\ in tab names, so replace them; buildXlsxBuffer trims, slices to 31
-    // chars, and falls back to 'Sheet1' if the sanitized name comes out empty.
-    const sheetName = (activeSheetExportName.value || 'export').replace(/[\\/\[\]:*?]/g, ' ')
-    const buffer = buildXlsxBuffer(xlsxModule, { sheetName, headers, rows })
+    // buildXlsxBuffer's safeXlsxSheetName owns ALL SheetJS tab-name rules (forbidden chars,
+    // 31-char cap, edge apostrophes, reserved 'History') — a hostile display name can't throw.
+    const buffer = buildXlsxBuffer(xlsxModule, { sheetName: activeSheetExportName.value || 'export', headers, rows })
     triggerDownload(new Blob([buffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }), 'xlsx')
   } catch (err: any) {
     showError(err?.message ?? wb('toast.excelExportFailed', isZh.value))
