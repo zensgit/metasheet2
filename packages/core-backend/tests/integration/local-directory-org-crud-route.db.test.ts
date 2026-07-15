@@ -14,6 +14,8 @@ import {
   UPDATE_LOCAL_ACCOUNT_FIELDS,
   UPDATE_LOCAL_DEPARTMENT_FIELD_TYPES,
   UPDATE_LOCAL_DEPARTMENT_FIELDS,
+  UPDATE_LOCAL_MEMBERSHIP_FIELD_TYPES,
+  UPDATE_LOCAL_MEMBERSHIP_FIELDS,
 } from '../../src/directory/local-directory-org-request-schema'
 import { adminDirectoryLocalRouter } from '../../src/routes/admin-directory-local'
 
@@ -633,8 +635,10 @@ describeIfDatabase('Canonical Org MVP — B2 local departments/accounts/membersh
 // *_FIELD_TYPES specs are hand-maintained in parallel. A field added to an allowlist WITHOUT a
 // matching type spec would pass the type gate unchecked — the exact coercion bug class this PR
 // closes. Set-equality per endpoint makes that drift impossible to land silently.
-// SWITCH_LOCAL_MEMBERSHIP_PRIMARY_FIELDS deliberately has no *_FIELD_TYPES pair: its single
-// field `isPrimary` is validated by the route's literal `!== true` check, stricter than any kind.
+// UPDATE_LOCAL_MEMBERSHIP (B3 #4215 §5.4) now DOES carry a *_FIELD_TYPES pair: `isManager` accepts
+// both true/false and so needs a real boolean type gate, and `isPrimary` gets a boolean spec too so
+// the pair stays set-equal here (its stricter literal `!== true` check still runs in the route on
+// top of the type gate).
 // ---------------------------------------------------------------------------------------------
 
 describe('allowlist ↔ type-spec parity (drift guard)', () => {
@@ -644,6 +648,7 @@ describe('allowlist ↔ type-spec parity (drift guard)', () => {
     ['CREATE_LOCAL_ACCOUNT', CREATE_LOCAL_ACCOUNT_FIELDS, CREATE_LOCAL_ACCOUNT_FIELD_TYPES],
     ['UPDATE_LOCAL_ACCOUNT', UPDATE_LOCAL_ACCOUNT_FIELDS, UPDATE_LOCAL_ACCOUNT_FIELD_TYPES],
     ['ADD_LOCAL_MEMBERSHIP', ADD_LOCAL_MEMBERSHIP_FIELDS, ADD_LOCAL_MEMBERSHIP_FIELD_TYPES],
+    ['UPDATE_LOCAL_MEMBERSHIP', UPDATE_LOCAL_MEMBERSHIP_FIELDS, UPDATE_LOCAL_MEMBERSHIP_FIELD_TYPES],
   ]
 
   for (const [label, fields, specs] of PAIRS) {

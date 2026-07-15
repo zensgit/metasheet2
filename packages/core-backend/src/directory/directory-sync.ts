@@ -1064,6 +1064,66 @@ export async function upsertDirectoryAccountDepartments(
 }
 
 /**
+ * Canonical Org MVP — B3 (normalized manager relation), #4215 §5.4.
+ *
+ * Set the first-class `is_manager` flag on ONE existing LOCAL membership row — the write
+ * counterpart to the normalized read path in `ApprovalDirectoryOrg` (dual-source, precedence on
+ * `is_manager`). It updates an existing membership; it does NOT create one (membership creation
+ * stays owned by the B2 local-directory CRUD surface, #4317). This writer is called by the
+ * `PATCH /api/admin/directory/local/memberships/:membershipId` route (platform-admin gated), which
+ * supplies the server-resolved `orgId`, emits the set/unset audit event, and maps a
+ * `{ updated: false }` result to a 404.
+ *
+ * SCOPE — the single UPDATE binds ALL of: the ORG (`i.org_id = $3`); the INTEGRATION
+ * (`i.id = a.integration_id`, and the department's own integration via `d.integration_id =
+ * a.integration_id`, so the account and the department must share ONE integration) AND that
+ * integration's STATUS (`i.status = 'active'` — an inactive/disabled local integration is out of
+ * scope, matching the read side's `selectActiveLocalIntegration`); the PROVIDER, checked on ALL
+ * THREE joined rows (`i.provider = 'local'` AND `a.provider = 'local'` AND `d.provider = 'local'`
+ * — an integration can be local while a child account/department row is mislabeled with a
+ * different provider, e.g. a stray `'dingtalk'` row under a local integration, so the account and
+ * department provider must each be checked independently, not inferred from the integration); and
+ * the ACCOUNT/DEPARTMENT identity (`ad.directory_account_id` / `ad.directory_department_id`).
+ * Anything malformed — an inactive local integration, a DingTalk-synced membership, a mislabeled
+ * account or department row, a local-account × foreign-integration-department pair, or a cross-org
+ * call (`orgId` naming a different org than the account's integration belongs to) — matches ZERO
+ * rows, so the result is a no-op `{ updated: false }`, never an error and never a cross-scope write.
+ *
+ * That local-only, active-only boundary is load-bearing: the resolver's DingTalk bit-identical
+ * guarantee rests on `is_manager` staying default-false for every provider-synced row, so this
+ * writer must never be able to flip it on a non-local or inactive membership.
+ *
+ * No audit here: this is the persistence primitive (it mirrors `upsertDirectoryAccountDepartments`,
+ * which likewise does not audit). The membership-change audit row is written by its caller, the
+ * local-directory membership route, next to every other B2 membership mutation's audit event.
+ */
+export async function setLocalMembershipManager(
+  orgId: string,
+  identity: { directoryAccountId: string; directoryDepartmentId: string },
+  isManager: boolean,
+): Promise<{ updated: boolean }> {
+  const normalizedOrgId = normalizeText(orgId) || DEFAULT_ORG_ID
+  const result = await query(
+    `UPDATE directory_account_departments AS ad
+        SET is_manager = $4
+       FROM directory_accounts a, directory_integrations i, directory_departments d
+      WHERE ad.directory_account_id = $1::uuid
+        AND ad.directory_department_id = $2::uuid
+        AND a.id = ad.directory_account_id
+        AND d.id = ad.directory_department_id
+        AND i.id = a.integration_id
+        AND d.integration_id = a.integration_id
+        AND i.provider = 'local'
+        AND i.status = 'active'
+        AND a.provider = 'local'
+        AND d.provider = 'local'
+        AND i.org_id = $3`,
+    [identity.directoryAccountId, identity.directoryDepartmentId, normalizedOrgId, isManager],
+  )
+  return { updated: (result.rowCount ?? 0) > 0 }
+}
+
+/**
  * DT-HARDEN-02: whether an auto-admitted account can be granted DingTalk login.
  * A grant needs a stable identity key: corp-scoped accounts key on corpId+openId,
  * so a corp account WITHOUT an openId cannot be granted (directory 通讯录's

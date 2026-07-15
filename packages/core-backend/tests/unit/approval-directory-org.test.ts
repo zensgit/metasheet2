@@ -20,7 +20,10 @@ interface FakeDb {
     primary_department_raw: unknown
     primary_department_name?: string | null
   } | null
-  // candidate accounts in the requester's primary department (for manager scan)
+  // B3 normalized relation: memberships of the requester's primary dept flagged is_manager=true
+  // (requester-inclusive existence gate; the resolver excludes the requester on the pick).
+  normalizedDeptManagers?: Array<{ account_id: string; external_user_id: string }>
+  // candidate accounts in the requester's primary department (for the legacy leader_in_dept scan)
   deptCandidates?: Array<{ account_id: string; raw: unknown; external_user_id?: string }>
   // directory_account_id -> linked local user id
   localByAccountId?: Record<string, string | null>
@@ -32,6 +35,13 @@ function makeQuery(db: FakeDb) {
   return async <Row>(text: string, params?: unknown[]): Promise<{ rows: Row[] }> => {
     if (text.includes('FROM directory_account_links l') && text.includes('LEFT JOIN directory_account_departments')) {
       return { rows: (db.requester ? [db.requester] : []) as Row[] }
+    }
+    // B3 normalized-manager gate query (`ad.is_manager = true`). Default-empty means the dept has
+    // no normalized manager, so the resolver falls through to the legacy leader_in_dept scan below
+    // (this is why every pre-B3 fixture keeps its expectations unchanged). Requester-inclusive
+    // existence, requester-exclusive pick — the fake mirrors production self-exclusion via $3.
+    if (text.includes('ad.is_manager = true')) {
+      return { rows: (db.normalizedDeptManagers ?? []) as Row[] }
     }
     if (text.includes('JOIN directory_account_departments ad') && text.includes('d.external_department_id = $2')) {
       // Mirror the production self-exclusion `AND a.external_user_id <> $3` so a
@@ -76,6 +86,63 @@ describe('resolveApprovalRequesterOrgRelations', () => {
     }
     const result = await resolveApprovalRequesterOrgRelations('local-req', makeQuery(db))
     expect(result).toEqual({ managerId: 'local-mgr', deptHeadId: 'local-head' })
+  })
+
+  it('B3 precedence: the normalized is_manager relation wins over a legacy leader_in_dept leader in the same dept', async () => {
+    const db: FakeDb = {
+      requester: {
+        integration_id: 'int-1',
+        account_id: 'acc-req',
+        external_user_id: 'ext-req',
+        raw: {},
+        primary_external_department_id: 'D1',
+        primary_department_raw: {},
+      },
+      // Normalized relation present for D1 → authoritative; the legacy scan must be ignored.
+      normalizedDeptManagers: [{ account_id: 'acc-norm', external_user_id: 'ext-norm' }],
+      deptCandidates: [{ account_id: 'acc-legacy', raw: { leader_in_dept: [{ dept_id: 'D1', leader: true }] } }],
+      localByAccountId: { 'acc-norm': 'local-norm', 'acc-legacy': 'local-legacy' },
+    }
+    const result = await resolveApprovalRequesterOrgRelations('local-req', makeQuery(db))
+    expect(result).toEqual({ managerId: 'local-norm' }) // not 'local-legacy'
+  })
+
+  it('B3 authoritative-when-present: a normalized-managed dept whose flagged manager is unlinked omits managerId and does NOT fall back to legacy', async () => {
+    const db: FakeDb = {
+      requester: {
+        integration_id: 'int-1',
+        account_id: 'acc-req',
+        external_user_id: 'ext-req',
+        raw: {},
+        primary_external_department_id: 'D1',
+        primary_department_raw: {},
+      },
+      normalizedDeptManagers: [{ account_id: 'acc-norm', external_user_id: 'ext-norm' }],
+      localByAccountId: { 'acc-norm': null }, // the normalized manager is not linked to a local user
+      // A legacy leader that WOULD resolve — proving the resolver does not blend back into raw.
+      deptCandidates: [{ account_id: 'acc-legacy', raw: { leader_in_dept: [{ dept_id: 'D1', leader: true }] } }],
+    }
+    const result = await resolveApprovalRequesterOrgRelations('local-req', makeQuery(db))
+    expect(result).toEqual({}) // managerId omitted; legacy 'acc-legacy' intentionally NOT used
+  })
+
+  it('B3 requester-exclusive pick: a normalized dept whose ONLY is_manager row is the requester omits managerId', async () => {
+    const db: FakeDb = {
+      requester: {
+        integration_id: 'int-1',
+        account_id: 'acc-req',
+        external_user_id: 'ext-req',
+        raw: {},
+        primary_external_department_id: 'D1',
+        primary_department_raw: {},
+      },
+      // Gate fires (a normalized row exists) but it is the requester's own → no other manager.
+      normalizedDeptManagers: [{ account_id: 'acc-req', external_user_id: 'ext-req' }],
+      deptCandidates: [{ account_id: 'acc-legacy', raw: { leader_in_dept: [{ dept_id: 'D1', leader: true }] } }],
+      localByAccountId: { 'acc-req': 'local-req', 'acc-legacy': 'local-legacy' },
+    }
+    const result = await resolveApprovalRequesterOrgRelations('local-req', makeQuery(db))
+    expect(result).toEqual({}) // self excluded on pick; still no fallback to legacy
   })
 
   it('RA-1a: resolves the primary department NAME into primaryDepartmentName (server-resolved source)', async () => {
