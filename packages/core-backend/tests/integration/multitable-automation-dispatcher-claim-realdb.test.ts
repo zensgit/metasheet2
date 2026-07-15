@@ -1,18 +1,21 @@
 /**
  * P2 durable-delivery — slice S2-a: claim engine / fence-CAS (real DB).
  *
- * Exercises the four claim-engine primitives against real Postgres, with CONSTRUCTED races (not sequential
- * arguments — a race guard is only proven by the interleaving it must survive):
+ * Exercises the claim-engine primitives against real Postgres with CONSTRUCTED races (a race guard is only
+ * proven by the interleaving it must survive):
  *   - claim flips pending→in_progress, bumps fence + attempts, stamps a lease, joins the outbox event;
- *   - `FOR UPDATE SKIP LOCKED` gives two concurrent claimers disjoint rows (exactly one wins a single due row);
- *   - the ZOMBIE interleaving: a worker claims (fence N), its lease expires, a reclaimer takes it (fence N+1),
- *     and the zombie's stale-fence resolve writes 0 rows while the reclaimer's wins;
- *   - complete/release/poison land the documented terminal/reclaimable states and clear the lease;
- *   - attempts increment AT CLAIM, so a crash-after-claim still marches the row to the poison ceiling.
+ *   - `FOR UPDATE SKIP LOCKED` lets a claimer SKIP a row another transaction holds locked and take a
+ *     different free row (the discriminating test — removing SKIP LOCKED makes it block → lock_timeout → red);
+ *   - the ZOMBIE interleaving: claim (fence N) → lease expires → reclaim (fence N+1) → the stale-fence
+ *     resolve writes 0 rows while the reclaimer wins;
+ *   - **crash-safe poison**: a worker that always crashes after claiming never resolves, yet the row still
+ *     dead-letters — the claim itself poisons a row at the attempt ceiling (driven only by persisted attempts);
+ *   - **backoff, not immediate retry**: reschedule keeps the row in_progress and pushes the lease out, so it
+ *     is re-claimed only after the lease expires (never instantly);
+ *   - failure detail is values-free: only a typed reason code reaches `last_error`.
  *
  * Consumer keys are randomUUID()-scoped so this file never claims rows seeded by a parallel describeIfDatabase
- * sharing the one CI Postgres. Runs only with DATABASE_URL (two-point wired: plugin-tests.yml real-DB run +
- * vitest.config.ts exclude, so it cannot skip-green).
+ * sharing the one CI Postgres. Two-point wired (plugin-tests.yml + vitest.config.ts exclude).
  */
 import { randomUUID } from 'node:crypto'
 
@@ -23,7 +26,7 @@ import {
   claimDueConsumers,
   completeConsumer,
   poisonConsumer,
-  releaseConsumer,
+  rescheduleConsumer,
   resolveDisposition,
 } from '../../src/multitable/automation-durable-dispatcher'
 
@@ -33,7 +36,6 @@ const RUN = randomUUID()
 const outboxIds: string[] = []
 let seq = 0
 
-// Seed a valid outbox event + one consumer row, with a RUN-scoped unique consumer_key (isolation).
 async function seedRow(opts: { status?: string; lease?: string | null } = {}) {
   const id = `ob_s2_${RUN}_${seq}`
   const consumerKey = `ck_${RUN}_${seq}`
@@ -54,11 +56,11 @@ async function seedRow(opts: { status?: string; lease?: string | null } = {}) {
 
 async function readRow(outboxId: string, consumerKey: string) {
   const { rows } = await db().query(
-    `SELECT status, fence::text AS fence, attempts, (lease_expires_at IS NULL) AS lease_null
+    `SELECT status, fence::text AS fence, attempts, last_error, (lease_expires_at IS NULL) AS lease_null
        FROM meta_automation_outbox_consumer WHERE outbox_id=$1 AND consumer_key=$2`,
     [outboxId, consumerKey],
   )
-  return rows[0] as { status: string; fence: string; attempts: number; lease_null: boolean }
+  return rows[0] as { status: string; fence: string; attempts: number; last_error: string | null; lease_null: boolean }
 }
 
 async function expireLease(outboxId: string, consumerKey: string) {
@@ -84,52 +86,52 @@ describeIfDatabase('P2 durable-delivery S2-a — claim engine / fence-CAS (real 
     const { outboxId, consumerKey } = await seedRow()
     const [mine] = await claimDueConsumers(db(), { consumerKeys: [consumerKey], batchSize: 10 })
     expect(mine).toBeTruthy()
-    expect(mine.fence).toBe('1') // 0 -> 1
-    expect(typeof mine.fence).toBe('string') // bigint as string, never a JS number
-    expect(mine.attempts).toBe(1) // 0 -> 1 AT CLAIM
+    expect(mine.fence).toBe('1')
+    expect(typeof mine.fence).toBe('string')
+    expect(mine.attempts).toBe(1)
     expect(mine.eventType).toBe('approval.approved')
     expect(mine.eventId).toBe(`evt_${outboxId}`)
     expect(mine.payload).toMatchObject({ ob: outboxId })
-    expect(await readRow(outboxId, consumerKey)).toMatchObject({
-      status: 'in_progress',
-      fence: '1',
-      attempts: 1,
-      lease_null: false, // in_progress MUST carry a lease (the biconditional)
-    })
+    expect(await readRow(outboxId, consumerKey)).toMatchObject({ status: 'in_progress', fence: '1', attempts: 1, lease_null: false })
   })
 
-  test('SKIP LOCKED: two concurrent claimers over one due row → exactly one wins (no double-claim)', async () => {
-    const { outboxId, consumerKey } = await seedRow()
+  test('SKIP LOCKED: a claimer skips a row another tx holds locked and takes a different FREE row', async () => {
+    const locked = await seedRow()
+    const free = await seedRow()
     const raw = db().getInternalPool()
     const a = await raw.connect()
     const b = await raw.connect()
     try {
-      const [ra, rb] = await Promise.all([
-        claimDueConsumers(a, { consumerKeys: [consumerKey], batchSize: 10 }),
-        claimDueConsumers(b, { consumerKeys: [consumerKey], batchSize: 10 }),
-      ])
-      const wins = [ra, rb].map((rs) => rs.filter((c) => c.outboxId === outboxId).length)
-      expect(wins[0] + wins[1]).toBe(1) // exactly one connection claimed the single due row
+      // B must not block indefinitely if the guard is ever removed — a lock wait then trips this timeout.
+      await b.query("SET lock_timeout = '2000ms'")
+      await a.query('BEGIN')
+      // A holds a row lock on `locked` without committing.
+      await a.query(
+        `SELECT 1 FROM meta_automation_outbox_consumer WHERE outbox_id=$1 AND consumer_key=$2 FOR UPDATE`,
+        [locked.outboxId, locked.consumerKey],
+      )
+      // B claims across both keys: SKIP LOCKED must let it skip `locked` and take `free` — NOT block on the lock.
+      const claimed = await claimDueConsumers(b, { consumerKeys: [locked.consumerKey, free.consumerKey], batchSize: 10 })
+      const keys = new Set(claimed.map((c) => c.consumerKey))
+      expect(keys.has(free.consumerKey)).toBe(true) // took the free row
+      expect(keys.has(locked.consumerKey)).toBe(false) // skipped the locked row, did not block on it
+      await a.query('ROLLBACK')
     } finally {
       a.release()
       b.release()
     }
-    // claimed exactly once → attempts incremented exactly once (not double)
-    expect(await readRow(outboxId, consumerKey)).toMatchObject({ status: 'in_progress', attempts: 1 })
   })
 
   test('ZOMBIE fence-CAS: a stale-fence complete writes 0 rows; the reclaimer (new fence) wins', async () => {
     const { outboxId, consumerKey } = await seedRow()
-    const [first] = await claimDueConsumers(db(), { consumerKeys: [consumerKey] }) // fence 1
+    const [first] = await claimDueConsumers(db(), { consumerKeys: [consumerKey] })
     expect(first.fence).toBe('1')
-    await expireLease(outboxId, consumerKey) // worker stalled past its lease
-    const [second] = await claimDueConsumers(db(), { consumerKeys: [consumerKey] }) // reclaim → fence 2
+    await expireLease(outboxId, consumerKey)
+    const [second] = await claimDueConsumers(db(), { consumerKeys: [consumerKey] })
     expect(second.fence).toBe('2')
-    // the zombie (still holding fence 1) tries to finish: fence-CAS mismatch → no-op
-    expect(await completeConsumer(db(), outboxId, consumerKey, first.fence)).toBe(false)
-    expect(await readRow(outboxId, consumerKey)).toMatchObject({ status: 'in_progress' }) // NOT done — reclaimer owns it
-    // the reclaimer (fence 2) finishes → done
-    expect(await completeConsumer(db(), outboxId, consumerKey, second.fence)).toBe(true)
+    expect(await completeConsumer(db(), outboxId, consumerKey, first.fence)).toBe(false) // zombie: 0 rows
+    expect(await readRow(outboxId, consumerKey)).toMatchObject({ status: 'in_progress' })
+    expect(await completeConsumer(db(), outboxId, consumerKey, second.fence)).toBe(true) // reclaimer wins
     expect(await readRow(outboxId, consumerKey)).toMatchObject({ status: 'done', lease_null: true })
   })
 
@@ -138,37 +140,61 @@ describeIfDatabase('P2 durable-delivery S2-a — claim engine / fence-CAS (real 
     const [c] = await claimDueConsumers(db(), { consumerKeys: [consumerKey] })
     expect(await completeConsumer(db(), outboxId, consumerKey, c.fence)).toBe(true)
     expect(await readRow(outboxId, consumerKey)).toMatchObject({ status: 'done', lease_null: true })
-    // idempotent: the row is no longer in_progress, so the CAS matches 0 rows
     expect(await completeConsumer(db(), outboxId, consumerKey, c.fence)).toBe(false)
   })
 
-  test('release → pending (immediately reclaimable), lease cleared, attempts accumulate on reclaim', async () => {
+  test('reschedule keeps in_progress with a BACKOFF lease — NOT immediately reclaimable; reclaimed after expiry', async () => {
     const { outboxId, consumerKey } = await seedRow()
     const [c1] = await claimDueConsumers(db(), { consumerKeys: [consumerKey] })
-    expect(c1.attempts).toBe(1)
-    expect(await releaseConsumer(db(), outboxId, consumerKey, c1.fence, 'transient boom')).toBe(true)
-    expect(await readRow(outboxId, consumerKey)).toMatchObject({ status: 'pending', lease_null: true, attempts: 1 })
-    const [c2] = await claimDueConsumers(db(), { consumerKeys: [consumerKey] }) // reclaimable right away
-    expect(c2.fence).toBe('2') // fence bumped each claim
-    expect(c2.attempts).toBe(2) // marches toward the ceiling (release did NOT reset it)
+    expect(await rescheduleConsumer(db(), outboxId, consumerKey, c1.fence, 60_000, 'adapter_error')).toBe(true)
+    // stays in_progress (NOT flipped to a pending that would be instantly reclaimable), attempts unchanged
+    expect(await readRow(outboxId, consumerKey)).toMatchObject({ status: 'in_progress', attempts: 1, lease_null: false })
+    // within the backoff window the row is NOT reclaimable
+    expect(await claimDueConsumers(db(), { consumerKeys: [consumerKey] })).toHaveLength(0)
+    // once the backoff lease expires, it IS reclaimed (fence + attempts advance)
+    await expireLease(outboxId, consumerKey)
+    const [c2] = await claimDueConsumers(db(), { consumerKeys: [consumerKey] })
+    expect(c2.fence).toBe('2')
+    expect(c2.attempts).toBe(2)
   })
 
-  test('poison → dead_letter, lease cleared, terminal (never reclaimed by a later claim)', async () => {
+  test('CRASH-SAFE poison: a worker that always crashes after claim still dead-letters at the ceiling', async () => {
+    const { outboxId, consumerKey } = await seedRow()
+    const MAX = 3
+    for (let i = 1; i <= MAX; i++) {
+      const [c] = await claimDueConsumers(db(), { consumerKeys: [consumerKey], maxAttempts: MAX })
+      expect(c.attempts).toBe(i) // dispatched
+      await expireLease(outboxId, consumerKey) // "crash" → no resolve → lease expires
+    }
+    // the next claim finds attempts === ceiling and poisons it WITHOUT dispatching (no worker needed)
+    const poisoned = await claimDueConsumers(db(), { consumerKeys: [consumerKey], maxAttempts: MAX })
+    expect(poisoned).toHaveLength(0)
+    expect(await readRow(outboxId, consumerKey)).toMatchObject({
+      status: 'dead_letter',
+      attempts: MAX, // capped
+      last_error: 'max_attempts_exhausted',
+      lease_null: true,
+    })
+    // terminal: never reclaimed again
+    await expireLease(outboxId, consumerKey).catch(() => {})
+    expect(await claimDueConsumers(db(), { consumerKeys: [consumerKey], maxAttempts: MAX })).toHaveLength(0)
+  })
+
+  test('poison (deterministic permanent failure) → dead_letter, lease cleared, terminal', async () => {
     const { outboxId, consumerKey } = await seedRow()
     const [c] = await claimDueConsumers(db(), { consumerKeys: [consumerKey] })
-    expect(await poisonConsumer(db(), outboxId, consumerKey, c.fence, 'exhausted')).toBe(true)
-    expect(await readRow(outboxId, consumerKey)).toMatchObject({ status: 'dead_letter', lease_null: true })
-    const again = await claimDueConsumers(db(), { consumerKeys: [consumerKey], batchSize: 10 })
-    expect(again.find((x) => x.outboxId === outboxId)).toBeFalsy() // dead_letter is terminal, not reclaimable
+    expect(await poisonConsumer(db(), outboxId, consumerKey, c.fence, 'permanent_rejection')).toBe(true)
+    expect(await readRow(outboxId, consumerKey)).toMatchObject({ status: 'dead_letter', last_error: 'permanent_rejection', lease_null: true })
+    expect(await claimDueConsumers(db(), { consumerKeys: [consumerKey], batchSize: 10 })).toHaveLength(0)
   })
 
-  test('attempts increment AT CLAIM across reclaims (crash-after-claim still marches to the ceiling)', async () => {
+  test('attempts increment AT CLAIM across reclaims (crash-after-claim marches toward the ceiling)', async () => {
     const { outboxId, consumerKey } = await seedRow()
     for (let i = 1; i <= 3; i++) {
-      const [c] = await claimDueConsumers(db(), { consumerKeys: [consumerKey] })
-      expect(c.attempts).toBe(i) // bumped even though the "worker" never resolves (simulated crash)
+      const [c] = await claimDueConsumers(db(), { consumerKeys: [consumerKey], maxAttempts: 100 })
+      expect(c.attempts).toBe(i)
       expect(c.fence).toBe(String(i))
-      await expireLease(outboxId, consumerKey) // crash → lease expires → next round reclaims
+      await expireLease(outboxId, consumerKey)
     }
   })
 
@@ -181,12 +207,28 @@ describeIfDatabase('P2 durable-delivery S2-a — claim engine / fence-CAS (real 
     expect(keys.has(b.consumerKey)).toBe(false)
   })
 
-  test('resolveDisposition (pure): success→complete; failure<ceiling→release; failure≥ceiling→poison', () => {
-    expect(resolveDisposition('success', 1)).toBe('complete')
-    expect(resolveDisposition('failure', 1, 8)).toBe('release')
-    expect(resolveDisposition('failure', 7, 8)).toBe('release')
-    expect(resolveDisposition('failure', 8, 8)).toBe('poison')
-    expect(resolveDisposition('failure', 9, 8)).toBe('poison')
-    expect(resolveDisposition('success', 99, 8)).toBe('complete') // success completes even past the ceiling
+  test('input validation: non-positive leaseMs/retryDelayMs and an off-vocabulary reason all throw', async () => {
+    const { outboxId, consumerKey } = await seedRow()
+    await expect(claimDueConsumers(db(), { consumerKeys: [consumerKey], leaseMs: -1 })).rejects.toThrow(/leaseMs/)
+    await expect(claimDueConsumers(db(), { consumerKeys: [consumerKey], leaseMs: 0 })).rejects.toThrow(/leaseMs/)
+    const [c] = await claimDueConsumers(db(), { consumerKeys: [consumerKey] })
+    await expect(rescheduleConsumer(db(), outboxId, consumerKey, c.fence, 0, 'adapter_error')).rejects.toThrow(/retryDelayMs/)
+    // values-free guard: a raw (secret-shaped) string is rejected before it can reach the DB
+    await expect(
+      poisonConsumer(db(), outboxId, consumerKey, c.fence, 'https://api/internal?token=SECRET' as never),
+    ).rejects.toThrow(/values-free/)
+  })
+
+  test('last_error only ever holds a values-free code (never a raw message)', async () => {
+    const { outboxId, consumerKey } = await seedRow()
+    const [c] = await claimDueConsumers(db(), { consumerKeys: [consumerKey] })
+    await rescheduleConsumer(db(), outboxId, consumerKey, c.fence, 30_000, 'adapter_timeout')
+    expect((await readRow(outboxId, consumerKey)).last_error).toBe('adapter_timeout')
+  })
+
+  test('resolveDisposition (pure): success→complete; retryable→reschedule; permanent→poison', () => {
+    expect(resolveDisposition('success')).toBe('complete')
+    expect(resolveDisposition('retryable_failure')).toBe('reschedule')
+    expect(resolveDisposition('permanent_failure')).toBe('poison')
   })
 })
