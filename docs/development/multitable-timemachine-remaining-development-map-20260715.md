@@ -2,6 +2,8 @@
 
 **Status:** ASSESSMENT (answers "还有哪些开发量"), updated 2026-07-15 with the owner's `seq` mechanism decision + the L3-backfill trust boundary. Supersedes the now-stale #4288 (`ca0a12d11`, written 07-14 before the design review completed and W0 build started). Docs-only.
 
+> **UPDATE — OWNER RE-REVIEW 2026-07-15 (v3.6): `seq` accepted, but #4262 NOT ratified; the L3 gate is FALSIFIED.** The premature v3.5 ratify is retracted and its containment PASS invalidated (compose-validation cwd bug, fix #4329). Two Highs the independent L3 gate missed: **(C2)** reconstruction still selects by `created_at ≤ T` (=txn-start) — needs a NEW **reconstruction-linearization lane** (`effective_at` under the L4 fence → seq boundary, not `created_at`); **(C3)** the precheck checks only the terminal generation — needs an **asOf-generation** check. Plus: seq is allocation- not commit-order (causal only under L4 fence + L5 checkpoint), and L3's `Number(seq)` comparison must become exact bigint. **+2 lanes; W0 build ≈ 5–8 pw (was ~3–5).** Details in #4262 v3.6 §0.6/§2b/§4/§10.
+>
 > **Headline — OWNER DECIDED 2026-07-15: the ordering primitive is `seq`.** The two-track divergence is resolved at the mechanism level:
 > - **#4262 v3.5's shared persistent causal `seq` is THE (and only) subsequent design for C2/C3/C6.**
 > - **#4269's epoch-ms/version/delete-last comparator is DEMOTED** to: the landed first-cut implementation; the flag-OFF compatibility & rollback path. It is **no longer a trust basis for history completeness**, and **strict mode must NOT fall back to it.** The on-main W0-1 lock doc (`…contiguity-trusted-since-…`) is superseded on ordering + C2/C3/C6 by #4262 v3.5.
@@ -26,7 +28,8 @@ The merged #4269 first-cut is the *interim*; it is **not** the trustworthy termi
 ## §3 W0 build — where the implementation actually stands
 | Lane | Work | State | Model |
 |---|---|---|---|
-| **L3** chain-integrity core | seq migration (both tables) + drop cross-gen marker unique + loud marker + seq-ordered contiguity + C2 + C3, behind `MULTITABLE_HISTORY_CONTIGUITY_STRICT` (default-off) | **Draft #4309; independent Opus gate = MERGE_CLEAN 0 P1/0 P2; HELD (see §4)** | opus review / sonnet impl |
+| **L3** chain-integrity core | seq migration + markers + seq-ordered *chain-walk* contiguity, behind default-off flag | **Draft #4309; gate said MERGE_CLEAN but owner re-review FALSIFIED it (C2 reconstruction + C3 terminal-only Highs); needs re-build (exact bigint + asOf-generation); HELD** | opus review / sonnet impl |
+| **L4b** (NEW) reconstruction linearization | `effective_at` under fence + reconstruct-by-`effective_at`→seq (the C2 REAL close) — reconstruction must stop trusting `created_at`=txn-start | **not started; depends on L4** | opus |
 | **L4** all-writer fence | every meta_records writer takes `acquireAutoNumberSheetWriteLock` inside its txn (same-txn/same-connection contract; per-family production-wiring mutation proof) | **not started** | opus |
 | **L5** trust baseline + identity | `meta_history_trust_checkpoints` (building→active state machine, `trusted_from_at` = `clock_timestamp()` under fence, select-by-T, floor-selected retention) + `meta_history_baselines` + non-forgeable `system_kind` | **not started** | opus |
 
@@ -58,7 +61,7 @@ The recovery-flag containment check (`target=both`) **FAILED CLOSED** (run 29398
 - **Phase 3:** **L9 (FE) ‖ L10 (deleted-since-T)**; **L11** only on a new owner slice.
 - **Then O-2** operator enablement (owner/ops).
 
-**Remaining ≈ 15–27 dev pw** (Option-B; +6–10 Option-A). Down from #4288's 20–32 because **L3 is built** (Draft) and the design phase is closed. Safe-enable minimum = W0 correction (L4/L5, ~2–4 pw on top of L3) + Revert-atomicity (L8, 2–4 pw). The real critical path remains **owner decisions + containment PASS**, not raw pw.
+**Remaining ≈ 17–29 dev pw** (Option-B; +6–10 Option-A) — the v3.6 re-review added ~2 lanes (reconstruction linearization + asOf-generation) that the earlier 15–27 estimate omitted; L3 also needs re-build (bigint + asOf-generation), so it is NOT a finished slice. Safe-enable minimum = W0 correction (**L4 + L4b + L5**, ~5–8 pw incl. L3 re-build) + Revert-atomicity (L8, 2–4 pw). The real critical path remains **owner decisions + a VALID containment PASS**, not raw pw.
 
 ## §7 Owner decisions that gate the line
 1. **W0-1 mechanism — DECIDED (`seq`, 2026-07-15).** Remaining owner action = **formal ratify of #4262 v3.5, which awaits containment PASS** (not before). The on-main epoch-ms lock is superseded on ordering/C2/C3/C6.
@@ -70,6 +73,6 @@ The recovery-flag containment check (`target=both`) **FAILED CLOSED** (run 29398
 7. **Housekeeping** — close #4288 (superseded by this doc as the working map); the R13 lane drafts already noted in #4288.
 
 ## §8 Verification
-- Every §1/§3 claim checked against `origin/main` (merged PR# or branch) or the independent gate report (`/tmp/pr4309-review-claude-20260715.md` for L3 = MERGE_CLEAN). The two-track divergence was found by diffing the on-main W0-1 lock (epoch-ms) against #4262 v3.5 (seq) and #4307's ledger.
+- Every §1/§3 claim checked against `origin/main` (merged PR# or branch) or the independent gate report (`/tmp/pr4309-review-claude-20260715.md` for L3 — verdict MERGE_CLEAN, **but owner re-review found two Highs the gate missed** (C2 reconstruction path + C3 terminal-only), a real gate limitation now recorded). The two-track divergence was found by diffing the on-main W0-1 lock (epoch-ms) against #4262 (seq) and #4307's ledger.
 - **Not claimed:** that anything is ratified, that W0 runtime is trustworthy/enabled, or that containment is PASS. This is the grounded map; §7 items are yours.
 - **Discipline encoded in the order:** design-lock ratify before destructive impl; the containment PASS gate (via #4316) before any resume; W0 trust (L3+L4+L5) before T-state/base-wide/scale; Revert-atomicity (L8) before any Revert enable; every recovery flag stays default-off until its trust envelope is green on a PASS'd host.
