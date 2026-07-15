@@ -292,6 +292,10 @@ export default defineConfig({
       // C6/G8 tombstone-table retention sweep (bounded batch, keep-days floor at
       // META_REVISION_RETENTION_MIN_DAYS, disabled-by-default zero rows touched).
       'tests/integration/multitable-tombstone-retention-realdb.test.ts',
+      // P2 durable-delivery S1 (#4203 Layer 1 / #4239): additive outbox-schema + flag golden — real Postgres
+      // only (checks the migration landed both tables, the status CHECK, FK cascade, defaults). Excluded HERE
+      // so it cannot skip-green in the no-DB lane, whole-file wired into plugin-tests.yml. Two-point wiring.
+      'tests/integration/multitable-automation-outbox-schema-realdb.test.ts',
       // W0 tail (#4279, owner MUST-WRITE OD-6, design-lock §0.5 2026-07-13): field-undelete rehydration
       // revision goldens — proves `recreateFieldFromConfig`'s tombstone-value rehydration UPDATE bumps
       // `version` and emits a `recordRecordRevision` AT THE NEW version, same transaction, for every
