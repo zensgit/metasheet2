@@ -40,6 +40,14 @@
     jsdom cannot render CSS, and real-browser verification is §8.3's remit (lands with the responsive
     S7 slice per lock §7); this is a same-token, zero-new-hex, low-risk addition, not a verified claim.
 
+  W2 S5 (design-lock §2 附件面板 row, §7 S5): 4th tab, `MetaRecordAttachmentsPanel` -- mounted with the
+  SAME `fields`/`fieldPermissions`/`attachmentSummariesByField`/`uploadFn`/`deleteAttachmentFn` props
+  this shell already threads to the fields panel (S1) -- no new prop was added to this shell's OWN
+  interface for S5, only a new tabpanel branch + TAB_ORDER entry (HI-1: the shell still makes no
+  fetches of its own; the new panel owns its own already-sanctioned reads per its own file-header
+  comment). Re-emits `patch` upward via the SAME `@patch` this shell already forwards from the fields
+  panel (identical emit name/payload shape, one more source feeding the same sink).
+
   OD-W2-2 (context-driven default, lock §6bis): commentId deep-link -> comments tab, else fields
   (details). S4: `openComments` (a new prop) IS that live signal now -- the workbench already
   computes it (its `showComments` ref, `opts?.openComments === true`, itself set true whenever
@@ -215,7 +223,7 @@
         />
       </div>
       <div
-        v-else
+        v-else-if="activeTab === 'comments'"
         :id="tabPanelId('comments')"
         role="tabpanel"
         :aria-labelledby="tabButtonId('comments')"
@@ -253,6 +261,26 @@
           @retry="emit('comment-retry')"
           @react="(commentId: string, emoji: string) => emit('comment-react', commentId, emoji)"
           @unreact="(commentId: string, emoji: string) => emit('comment-unreact', commentId, emoji)"
+        />
+      </div>
+      <div
+        v-else
+        :id="tabPanelId('attachments')"
+        role="tabpanel"
+        :aria-labelledby="tabButtonId('attachments')"
+        tabindex="0"
+        class="meta-record-drawer__tabpanel"
+      >
+        <MetaRecordAttachmentsPanel
+          :record="record"
+          :fields="fields"
+          :can-edit="canEdit"
+          :field-permissions="fieldPermissions"
+          :row-actions="rowActions"
+          :attachment-summaries-by-field="attachmentSummariesByField"
+          :upload-fn="uploadFn"
+          :delete-attachment-fn="deleteAttachmentFn"
+          @patch="(fieldId, value) => emit('patch', fieldId, value)"
         />
       </div>
     </div>
@@ -294,6 +322,7 @@ import MetaRecordPermissionManager from './MetaRecordPermissionManager.vue'
 import MetaRecordFieldsPanel from './MetaRecordFieldsPanel.vue'
 import MetaRecordHistoryPanel from './MetaRecordHistoryPanel.vue'
 import MetaCommentsPanel from './MetaCommentsPanel.vue'
+import MetaRecordAttachmentsPanel from './MetaRecordAttachmentsPanel.vue'
 import {
   resolveCommentAffordanceStateClass,
   resolveRecordCommentAffordance,
@@ -456,16 +485,19 @@ const hasRouter = !!useRouter()
 const showRecordPermissions = ref(false)
 
 // --- OD-W2-1 (tabs, lock §6bis): extensible union -- S3 shipped 'details' (fields) + 'history'
-// (activity); S4 adds 'comments' (this slice), S5 adds 'attachments'. TAB_ORDER drives roving-tabindex
-// + arrow-key nav generically over however many entries exist, so extending this union + TAB_ORDER is
-// the only change S4/S5 need to make here. The rendered LABEL TEXT for the new tab reuses the EXISTING
+// (activity); S4 added 'comments'; S5 (this slice) adds 'attachments', the 4th and final tab per lock
+// §2's information architecture (字段/动态/评论/附件). TAB_ORDER drives roving-tabindex + arrow-key nav
+// generically over however many entries exist, so extending this union + TAB_ORDER is the only change
+// each new tab needs to make here. The rendered LABEL TEXT for 'comments' reuses the EXISTING
 // 'record.comments' key (already present in meta-record-labels.ts -- it already backs the header
-// comment-toggle button's title -- so no new i18n key was needed here); 'details'/'history' stay
+// comment-toggle button's title -- so no new i18n key was needed there); 'details'/'history' stay
 // 'record.details'/'record.history' (详情/历史) -- the frozen i18n baseline (meta-record-drawer-i18n.
-// spec.ts) pins that exact text; the lock's own §0/§2 prose gloss ("字段"/"动态") names the panels'
-// conceptual identity, not a mandated label-string rename.
-type InspectorTab = 'details' | 'history' | 'comments'
-const TAB_ORDER: readonly InspectorTab[] = ['details', 'history', 'comments']
+// spec.ts) pins that exact text; 'attachments' is a genuinely NEW tab (no pre-existing drawer text to
+// reuse), so S5 adds a new typed key 'record.attachments' (G-10 term 附件) to meta-record-labels.ts.
+// The lock's own §0/§2 prose gloss ("字段"/"动态") names the panels' conceptual identity, not a
+// mandated label-string rename for the pre-existing two.
+type InspectorTab = 'details' | 'history' | 'comments' | 'attachments'
+const TAB_ORDER: readonly InspectorTab[] = ['details', 'history', 'comments', 'attachments']
 
 // OD-W2-2 (context-driven default, lock §6bis): commentId deep-link -> comments, else fields
 // (details). See file-header comment above for why `props.openComments` (not a raw commentId) is
@@ -497,7 +529,8 @@ function tabPanelId(tab: InspectorTab): string {
 function tabLabelFor(id: InspectorTab): string {
   if (id === 'details') return l('record.details')
   if (id === 'history') return l('record.history')
-  return l('record.comments')
+  if (id === 'comments') return l('record.comments')
+  return l('record.attachments')
 }
 
 const tabDescriptors = computed(() => TAB_ORDER.map((id) => ({

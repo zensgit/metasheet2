@@ -1,20 +1,21 @@
 /**
- * W2 S3/S4 (design-lock: docs/development/multitable-w2-unified-record-inspector-design-lock-20260714.md
- * §3.3, §7 S3/S4, §8.2): MetaRecordInspector.vue -- the ARIA tab pattern completion (S3) plus the
- * comments tab + context-driven default (S4).
+ * W2 S3/S4/S5 (design-lock: docs/development/multitable-w2-unified-record-inspector-design-lock-20260714.md
+ * §3.3, §7 S3/S4/S5, §8.2): MetaRecordInspector.vue -- the ARIA tab pattern completion (S3), the
+ * comments tab + context-driven default (S4), and the attachments tab (S5, the 4th and final tab per
+ * lock §2's information architecture).
  * Pins: tab switching (click), the roving-tabindex "exactly one tabindex=0" invariant (survives every
  * switch, click- or keyboard-driven), aria-controls <-> role="tabpanel" pairing, panel-count
- * conservation (never 0, never 2, and now never anything but 1 across 3 tabs), the Left/Right/Home/End
- * keyboard cases (incl. wrap-around -- S4 moved the wrap-around "last tab" from history to comments,
- * the new 3rd/last entry in TAB_ORDER), Escape-closes-the-inspector (guarded so it never fires when a
- * descendant already consumed Escape, and never swallows other keys so mod+z/mod+y/`?` still reach an
- * ancestor's own keydown handler), and OD-W2-2's context-driven default -- S3 shipped the single
- * 'details' branch; S4 makes it real: `openComments` (the resolver's live signal, see
- * MetaRecordInspector.vue's file-header comment) true at mount -> comments tab default, false ->
- * details; and a LATER true-transition (without remounting) re-selects comments via the shell's watch.
- * A final "delegation" describe block proves this ARIA completion + the 3-tab surface survives
- * MetaRecordDrawer.vue's thin-shell delegation (OD-W2-7=b) -- not just when Inspector is mounted
- * directly.
+ * conservation (never 0, never 2, and now never anything but 1 across 4 tabs), the Left/Right/Home/End
+ * keyboard cases (incl. wrap-around -- S4 moved the wrap-around "last tab" from history to comments;
+ * S5 moves it again, from comments to attachments, the new 4th/last entry in TAB_ORDER),
+ * Escape-closes-the-inspector (guarded so it never fires when a descendant already consumed Escape,
+ * and never swallows other keys so mod+z/mod+y/`?` still reach an ancestor's own keydown handler), and
+ * OD-W2-2's context-driven default -- S3 shipped the single 'details' branch; S4 makes it real:
+ * `openComments` (the resolver's live signal, see MetaRecordInspector.vue's file-header comment) true
+ * at mount -> comments tab default, false -> details; and a LATER true-transition (without remounting)
+ * re-selects comments via the shell's watch. A final "delegation" describe block proves this ARIA
+ * completion + the 4-tab surface survives MetaRecordDrawer.vue's thin-shell delegation (OD-W2-7=b) --
+ * not just when Inspector is mounted directly.
  *
  * Pre-existing drawer specs (multitable-record-drawer*.spec.ts, meta-record-drawer-*.spec.ts,
  * multitable-comments-drawer.spec.ts, meta-comments-drawer-*.spec.ts) stay green UNMODIFIED (frozen
@@ -200,14 +201,28 @@ describe('MetaRecordInspector (W2 S3 shell)', () => {
   })
 
   describe('tab structure + ARIA pairing', () => {
-    it('renders a tablist with 3 tabs (S4: details/history/comments) and exactly 1 rendered tabpanel', async () => {
+    it('renders a tablist with 4 tabs (S5: details/history/comments/attachments) and exactly 1 rendered tabpanel', async () => {
       const { container, app } = mountInspector()
       await flushUi()
       expect(container.querySelector('[role="tablist"]')).toBeTruthy()
       const tabs = tabButtons(container)
-      expect(tabs).toHaveLength(3)
-      expect(tabs.map((t) => t.textContent?.trim())).toEqual(['Details', 'History', 'Comments'])
+      expect(tabs).toHaveLength(4)
+      expect(tabs.map((t) => t.textContent?.trim())).toEqual(['Details', 'History', 'Comments', 'Attachments'])
       expect(container.querySelectorAll('[role="tabpanel"]')).toHaveLength(1)
+      app.unmount()
+    })
+
+    it('S5: switching to the attachments tab mounts MetaRecordAttachmentsPanel', async () => {
+      const { container, app } = mountInspector()
+      await flushUi()
+      const attachmentsTab = tabButtons(container).find((t) => t.textContent?.trim() === 'Attachments')!
+      attachmentsTab.click()
+      await flushUi()
+      expect(attachmentsTab.getAttribute('aria-selected')).toBe('true')
+      // The default harness's FIELDS fixture has no attachment-type field, so the panel renders its
+      // own empty state ("No attachments") rather than any group -- proves the child mounted and its
+      // own mask-contract computed ran (an unmounted/crashed child would leave this text absent).
+      expect(tabPanel(container)!.textContent).toContain('No attachments')
       app.unmount()
     })
 
@@ -344,26 +359,26 @@ describe('MetaRecordInspector (W2 S3 shell)', () => {
       app.unmount()
     })
 
-    it('ArrowLeft from the first tab WRAPS to the last tab (S4: comments is now the last tab, not clamped)', async () => {
+    it('ArrowLeft from the first tab WRAPS to the last tab (S5: attachments is now the last tab, not clamped)', async () => {
       const { container, app } = mountInspector()
       await flushUi()
-      const [detailsTab, , commentsTab] = tabButtons(container)
+      const [detailsTab, , , attachmentsTab] = tabButtons(container)
       detailsTab.focus()
       detailsTab.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowLeft', bubbles: true, cancelable: true }))
       await flushUi()
-      expect(commentsTab.getAttribute('aria-selected')).toBe('true')
-      expect(document.activeElement).toBe(commentsTab)
+      expect(attachmentsTab.getAttribute('aria-selected')).toBe('true')
+      expect(document.activeElement).toBe(attachmentsTab)
       app.unmount()
     })
 
-    it('ArrowRight from the last tab WRAPS to the first tab (S4: from comments, not clamped)', async () => {
+    it('ArrowRight from the last tab WRAPS to the first tab (S5: from attachments, not clamped)', async () => {
       const { container, app } = mountInspector()
       await flushUi()
-      const [detailsTab, , commentsTab] = tabButtons(container)
-      commentsTab.click()
+      const [detailsTab, , , attachmentsTab] = tabButtons(container)
+      attachmentsTab.click()
       await flushUi()
-      commentsTab.focus()
-      commentsTab.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true, cancelable: true }))
+      attachmentsTab.focus()
+      attachmentsTab.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true, cancelable: true }))
       await flushUi()
       expect(detailsTab.getAttribute('aria-selected')).toBe('true')
       expect(document.activeElement).toBe(detailsTab)
@@ -383,15 +398,28 @@ describe('MetaRecordInspector (W2 S3 shell)', () => {
       app.unmount()
     })
 
-    it('Home jumps to the first tab, End jumps to the last (S4: last is now comments)', async () => {
+    it('S5: the comments<->attachments boundary -- ArrowRight from comments moves to attachments (the new last tab), not back to details', async () => {
       const { container, app } = mountInspector()
       await flushUi()
-      const [detailsTab, , commentsTab] = tabButtons(container)
+      const [, , commentsTab, attachmentsTab] = tabButtons(container)
+      commentsTab.click()
+      await flushUi()
+      commentsTab.focus()
+      commentsTab.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true, cancelable: true }))
+      await flushUi()
+      expect(attachmentsTab.getAttribute('aria-selected')).toBe('true')
+      app.unmount()
+    })
+
+    it('Home jumps to the first tab, End jumps to the last (S5: last is now attachments)', async () => {
+      const { container, app } = mountInspector()
+      await flushUi()
+      const [detailsTab, , , attachmentsTab] = tabButtons(container)
       detailsTab.focus()
       detailsTab.dispatchEvent(new KeyboardEvent('keydown', { key: 'End', bubbles: true, cancelable: true }))
       await flushUi()
-      expect(commentsTab.getAttribute('aria-selected')).toBe('true')
-      commentsTab.dispatchEvent(new KeyboardEvent('keydown', { key: 'Home', bubbles: true, cancelable: true }))
+      expect(attachmentsTab.getAttribute('aria-selected')).toBe('true')
+      attachmentsTab.dispatchEvent(new KeyboardEvent('keydown', { key: 'Home', bubbles: true, cancelable: true }))
       await flushUi()
       expect(detailsTab.getAttribute('aria-selected')).toBe('true')
       app.unmount()
@@ -457,6 +485,35 @@ describe('MetaRecordInspector (W2 S3 shell)', () => {
         expect(detailsTab.getAttribute('aria-selected')).toBe('true')
         expect(event.defaultPrevented).toBe(false)
       }
+      app.unmount()
+    })
+
+    // S5 extension of the same golden: the attachments tab's own edit surface (a file input, rendered
+    // by MetaRecordAttachmentsPanel when its visible-attachment-field set is non-empty and canEdit) is
+    // a second, independent real in-panel control -- proves the `withinTablist` scoping guard covers
+    // the NEW 4th tabpanel too, not just the fields panel's text input the two cases above already
+    // pin.
+    it('S5: ArrowLeft/ArrowRight from the attachments tab\'s file input do NOT change the active tab (arrow-scoping guard, 4th tab)', async () => {
+      const attachmentField = { id: 'fld_files', name: 'Files', type: 'attachment' } as unknown as MetaField
+      const { container, app } = mountInspector({ fields: [...FIELDS, attachmentField] })
+      await flushUi()
+      const attachmentsTab = tabButtons(container).find((t) => t.textContent?.trim() === 'Attachments')!
+      attachmentsTab.click()
+      await flushUi()
+      expect(attachmentsTab.getAttribute('aria-selected')).toBe('true')
+      const fileInput = container.querySelector<HTMLInputElement>('.meta-record-attachments-panel__file-input')!
+      expect(fileInput).not.toBeNull()
+      fileInput.focus()
+      const right = new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true, cancelable: true })
+      fileInput.dispatchEvent(right)
+      await flushUi()
+      expect(attachmentsTab.getAttribute('aria-selected')).toBe('true')
+      expect(right.defaultPrevented).toBe(false)
+      const left = new KeyboardEvent('keydown', { key: 'ArrowLeft', bubbles: true, cancelable: true })
+      fileInput.dispatchEvent(left)
+      await flushUi()
+      expect(attachmentsTab.getAttribute('aria-selected')).toBe('true')
+      expect(left.defaultPrevented).toBe(false)
       app.unmount()
     })
   })
@@ -530,15 +587,18 @@ describe('MetaRecordInspector (W2 S3 shell)', () => {
   })
 
   describe('panel-count conservation', () => {
-    it('never renders 0 or 2+ tabpanels across mount + several switches over all 3 tabs (click- and keyboard-driven)', async () => {
+    it('never renders 0 or 2+ tabpanels across mount + several switches over all 4 tabs (click- and keyboard-driven)', async () => {
       const { container, app } = mountInspector()
       await flushUi()
       const counts: number[] = [container.querySelectorAll('[role="tabpanel"]').length]
-      const [detailsTab, historyTab, commentsTab] = tabButtons(container)
+      const [detailsTab, historyTab, commentsTab, attachmentsTab] = tabButtons(container)
       historyTab.click()
       await flushUi()
       counts.push(container.querySelectorAll('[role="tabpanel"]').length)
       commentsTab.click()
+      await flushUi()
+      counts.push(container.querySelectorAll('[role="tabpanel"]').length)
+      attachmentsTab.click()
       await flushUi()
       counts.push(container.querySelectorAll('[role="tabpanel"]').length)
       detailsTab.click()
@@ -548,7 +608,7 @@ describe('MetaRecordInspector (W2 S3 shell)', () => {
       detailsTab.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true, cancelable: true }))
       await flushUi()
       counts.push(container.querySelectorAll('[role="tabpanel"]').length)
-      expect(counts).toHaveLength(5)
+      expect(counts).toHaveLength(6)
       expect(counts.every((c) => c === 1)).toBe(true)
       app.unmount()
     })
@@ -598,10 +658,10 @@ describe('MetaRecordInspector (W2 S3 shell)', () => {
   })
 
   describe('delegation: MetaRecordDrawer (deprecated thin shell) renders the same ARIA structure', () => {
-    it('mounting MetaRecordDrawer produces the identical tablist/tabpanel pairing + roving tabindex (S4: now 3 tabs)', async () => {
+    it('mounting MetaRecordDrawer produces the identical tablist/tabpanel pairing + roving tabindex (S5: now 4 tabs)', async () => {
       const { container, app } = mountDrawer()
       await flushUi()
-      expect(tabButtons(container)).toHaveLength(3)
+      expect(tabButtons(container)).toHaveLength(4)
       const active = activeTabButton(container)!
       const panel = tabPanel(container)!
       expect(active.getAttribute('aria-controls')).toBe(panel.id)
