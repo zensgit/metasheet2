@@ -5,6 +5,7 @@ import {
   bulkClearHintSuffix,
   bulkEditLabel,
   bulkFailure,
+  bulkFailureSamples,
   bulkPartialSuccess,
   bulkSuccess,
   bulkSummary,
@@ -45,6 +46,31 @@ describe('meta-bulk-edit-labels', () => {
     expect(bulkFailure(1, 3, '', false)).toBe('1 of 3 records failed')
     expect(bulkFailure(1, 3, 'rec_1: conflict', true)).toBe('3 条记录中有 1 条失败（rec_1: conflict）')
     expect(bulkFailure(1, 3, '', true)).toBe('3 条记录中有 1 条失败')
+  })
+
+  // G-10 follow-up (owner ruling 2026-07-15): the failure sample is a normal-user surface — each
+  // sampled failure leads with the record's display NAME (resolved by the caller from rows already
+  // in scope); the raw record id appears only when the caller's resolver itself falls back to it.
+  it('bulkFailureSamples leads each sample with the resolved record name', () => {
+    const labels: Record<string, string> = { rec_1: 'Alpha', rec_2: 'Beta' }
+    const resolve = (id: string) => labels[id] ?? id
+    expect(bulkFailureSamples([{ recordId: 'rec_1', reason: 'locked' }], resolve)).toBe('Alpha: locked')
+    expect(bulkFailureSamples(
+      [
+        { recordId: 'rec_1', reason: 'locked' },
+        { recordId: 'rec_2', reason: 'conflict' },
+      ],
+      resolve,
+    )).toBe('Alpha: locked; Beta: conflict')
+    // Resolver fallback (row no longer loaded) keeps the raw id — honest, not fabricated.
+    expect(bulkFailureSamples([{ recordId: 'rec_gone', reason: 'missing' }], resolve)).toBe('rec_gone: missing')
+  })
+
+  it('bulkFailureSamples caps the sample at 3 failures', () => {
+    const failures = ['rec_1', 'rec_2', 'rec_3', 'rec_4'].map((id) => ({ recordId: id, reason: 'x' }))
+    const sample = bulkFailureSamples(failures, (id) => id.toUpperCase())
+    expect(sample).toBe('REC_1: x; REC_2: x; REC_3: x')
+    expect(sample).not.toContain('REC_4')
   })
 
   it('formats version conflicts without empty parentheses', () => {

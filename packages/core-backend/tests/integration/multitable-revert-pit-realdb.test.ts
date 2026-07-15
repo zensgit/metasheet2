@@ -29,6 +29,12 @@ let curPerms = ['multitable:read', 'multitable:write', 'multitable:share'] // sh
 const revertPreview = (asOf: string) => request(app).post(`/api/multitable/sheets/${SHEET}/revert-preview`).send({ asOf })
 const revertExecute = (asOf: string, previewIdentity: string) => request(app).post(`/api/multitable/sheets/${SHEET}/revert-execute`).send({ asOf, previewIdentity })
 const recordRow = async (id: string) => (await q('SELECT data, version FROM meta_records WHERE id = $1', [id])).rows[0] as { data: Record<string, unknown>; version: number } | undefined
+// GATE golden helper: sheet-scoped row counts, to prove the flag-off 403 performs literally ZERO writes (no new
+// record row, no new revision row) — not just "the response the client sees looks unwritten".
+const sheetRowCounts = async (): Promise<{ records: number; revisions: number }> => ({
+  records: Number(((await q('SELECT count(*)::int AS n FROM meta_records WHERE sheet_id = $1', [SHEET])).rows[0] as { n: number }).n),
+  revisions: Number(((await q('SELECT count(*)::int AS n FROM meta_record_revisions WHERE sheet_id = $1', [SHEET])).rows[0] as { n: number }).n),
+})
 const rev = (id: string, version: number, action: string, snap: Record<string, unknown>, at: string) =>
   q(`INSERT INTO meta_record_revisions (id, sheet_id, record_id, version, action, source, changed_field_ids, patch, snapshot, created_at)
      VALUES (gen_random_uuid(),$1,$2,$3,$4,'rest',ARRAY[$5,$6]::text[],'{}'::jsonb,$7::jsonb,$8)`, [SHEET, id, version, action, NAME, SALARY, JSON.stringify(snap), at])
@@ -50,6 +56,10 @@ describeIfDatabase('multitable T8-1 Revert-to-T (real DB)', () => {
     app.use(express.json())
     app.use((req, _res, next) => { ;(req as any).user = { id: ACTOR, roles: curRoles, perms: curPerms }; next() })
     process.env.MULTITABLE_SHEET_REVERT_MAX_RECORDS = '10' // test ceiling: seed = 3 records; the ceiling golden adds 8 → 11 > 10
+    // Interim revert-execute master gate (current-risk mitigation, owner-directed): default-OFF now — ON for
+    // every pre-existing golden in this suite (unchanged behavior); the dedicated flag-off/on gate golden below
+    // toggles it locally and restores this value in a finally block.
+    process.env.MULTITABLE_ENABLE_SHEET_REVERT = 'true'
     app.use('/api/multitable', univerMetaRouter())
     await q('INSERT INTO meta_bases (id, name) VALUES ($1,$2)', [BASE, 'RV Base'])
     await q('INSERT INTO meta_sheets (id, base_id, name) VALUES ($1,$2,$3)', [SHEET, BASE, 'RV Sheet'])
@@ -58,6 +68,7 @@ describeIfDatabase('multitable T8-1 Revert-to-T (real DB)', () => {
     await q("INSERT INTO users (id, password_hash) VALUES ($1,'x') ON CONFLICT (id) DO NOTHING", [ACTOR])
   })
   afterAll(async () => {
+    delete process.env.MULTITABLE_ENABLE_SHEET_REVERT
     for (const t of ['meta_record_revisions', 'meta_records', 'meta_fields']) await q(`DELETE FROM ${t} WHERE sheet_id = $1`, [SHEET]).catch(() => {})
     await q('DELETE FROM meta_sheets WHERE id = $1', [SHEET]).catch(() => {})
     await q('DELETE FROM meta_bases WHERE id = $1', [BASE]).catch(() => {})
@@ -142,5 +153,44 @@ describeIfDatabase('multitable T8-1 Revert-to-T (real DB)', () => {
     const res = await revertPreview(T1)
     expect(res.status).toBe(413)
     expect(res.body?.error?.code).toBe('SHEET_TOO_LARGE')
+  })
+
+  // ── Interim revert-execute master gate (current-risk mitigation, owner-directed) ──────────────────────────────
+  // The merged §0.6 precheck (#4234) is live-vs-latest and still blind to the healed-gap + check→write race; until
+  // the full W0-1 correctness fix lands, revert-execute is closed by DEFAULT via MULTITABLE_ENABLE_SHEET_REVERT
+  // (mirrors reset-execute's PIT_RESET_ENABLED gate exactly). This suite runs with the flag ON throughout (set in
+  // beforeAll) so every OTHER golden above is unaffected; this golden toggles the flag OFF locally and restores
+  // it in a finally block so it never leaks into a later test in this file.
+  test('[GATE] flag UNSET → revert-execute is 403 REVERT_DISABLED with ZERO writes; revert-preview stays ungated', async () => {
+    const savedFlag = process.env.MULTITABLE_ENABLE_SHEET_REVERT
+    try {
+      delete process.env.MULTITABLE_ENABLE_SHEET_REVERT
+      // revert-preview is read-only and MUST remain reachable while execute is gated off — the FE preview
+      // screen still needs to render even when the Revert button itself is hidden.
+      const pv = await revertPreview(T1)
+      expect(pv.status).toBe(200)
+      expect(pv.body?.data?.previewIdentity).toBeTruthy()
+
+      const beforeA = await recordRow(A)
+      const beforeCounts = await sheetRowCounts()
+      const res = await revertExecute(T1, pv.body.data.previewIdentity)
+      expect(res.status).toBe(403)
+      expect(res.body).toEqual({ ok: false, error: { code: 'REVERT_DISABLED', message: 'Sheet revert is disabled (MULTITABLE_ENABLE_SHEET_REVERT is off).' } })
+      // ZERO WRITES — assert the DB, not just the response shape: identical record row, identical
+      // sheet-scoped record/revision counts (no new revision of any source, no partial per-record apply).
+      expect(await recordRow(A)).toEqual(beforeA)
+      expect(await sheetRowCounts()).toEqual(beforeCounts)
+    } finally {
+      if (savedFlag === undefined) delete process.env.MULTITABLE_ENABLE_SHEET_REVERT
+      else process.env.MULTITABLE_ENABLE_SHEET_REVERT = savedFlag
+    }
+  })
+
+  test('[GATE] flag SET → revert-execute runs the normal path (unchanged from the pre-existing goldens above)', async () => {
+    expect(process.env.MULTITABLE_ENABLE_SHEET_REVERT).toBe('true') // suite default, set in beforeAll
+    const pv = await revertPreview(T1)
+    const res = await revertExecute(T1, pv.body?.data?.previewIdentity)
+    expect(res.status).toBe(200)
+    expect(res.body?.data?.revertedCount).toBe(2)
   })
 })

@@ -334,6 +334,17 @@ async function postEdit(body, token = adminToken) {
 }
 
 async function postImport(userId, workDate, fields, key) {
+  // Staging enforces ATTENDANCE_IMPORT_REQUIRE_TOKEN=1: every import commit (incl. the
+  // legacy /api/attendance/import route) requires a single-use commitToken issued by
+  // POST /api/attendance/import/prepare (run 29380129251: COMMIT_TOKEN_REQUIRED without it).
+  const prepare = await api(adminToken, '/api/attendance/import/prepare', {
+    method: 'POST',
+    body: { orgId: ORG_ID },
+  })
+  const commitToken = prepare.body?.data?.commitToken
+  if (prepare.status !== 200 || !commitToken) {
+    return prepare
+  }
   const res = await api(adminToken, '/api/attendance/import', {
     method: 'POST',
     body: {
@@ -341,6 +352,7 @@ async function postImport(userId, workDate, fields, key) {
       userId,
       source: 'manual',
       idempotencyKey: key,
+      commitToken,
       batchMeta: { smokeStamp: STAMP, ae4: true },
       rows: [{ workDate, fields }],
       mode: 'override',

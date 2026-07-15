@@ -20,6 +20,8 @@ export type WorkbenchLabelKey =
   | 'toolbar.workflow' | 'toolbar.automations' | 'toolbar.templates'
   | 'toolbar.dashboard' | 'toolbar.shareForm' | 'toolbar.apiWebhooks' | 'toolbar.trash'
   | 'toolbar.mentions'
+  // §3.1b UI-P2-2b rail collapse toggle
+  | 'rail.collapse' | 'rail.expand'
   // §3.3 template library modal
   | 'tpl.title' | 'tpl.subtitle' | 'tpl.loading' | 'tpl.more' | 'tpl.errorLoad'
   // §3.4 keyboard shortcuts modal (explanatory text only)
@@ -93,11 +95,15 @@ const WORKBENCH_LABELS: Record<WorkbenchLabelKey, { en: string; zh: string }> = 
   'toolbar.apiWebhooks': { en: 'API & Webhooks', zh: 'API 与 Webhook' },
   'toolbar.trash': { en: 'Trash', zh: '回收站' },
   'toolbar.mentions': { en: 'Mentions', zh: '提及' },
+  'rail.collapse': { en: 'Collapse sidebar', zh: '折叠侧栏' },
+  'rail.expand': { en: 'Expand sidebar', zh: '展开侧栏' },
 
   'tpl.title': { en: 'Template Library', zh: '模板库' },
+  // W1 G-10 terminology dictionary (ratified 2026-07-13, display layer only): Base = 工作区,
+  // Sheet = 数据表 in all zh strings below. English values are unchanged (out of dictionary scope).
   'tpl.subtitle': {
     en: 'Start a new base from a built-in workspace pattern.',
-    zh: '从内置工作区模板新建一个 Base',
+    zh: '从内置工作区模板新建一个工作区',
   },
   'tpl.loading': { en: 'Loading templates...', zh: '正在加载模板...' },
   'tpl.more': { en: 'More templates →', zh: '更多模板 →' },
@@ -172,17 +178,17 @@ const WORKBENCH_LABELS: Record<WorkbenchLabelKey, { en: string; zh: string }> = 
   'toast.viewCreateFailed': { en: 'Failed to create view', zh: '创建视图失败' },
   'toast.viewUpdateFailed': { en: 'Failed to update view', zh: '更新视图失败' },
   'toast.viewDeleteFailed': { en: 'Failed to delete view', zh: '删除视图失败' },
-  'toast.sheetAccessRefreshFailed': { en: 'Failed to refresh sheet access', zh: '刷新 Sheet 权限失败' },
+  'toast.sheetAccessRefreshFailed': { en: 'Failed to refresh sheet access', zh: '刷新数据表权限失败' },
   'toast.sheetCreateBlocked': {
     en: 'Sheet creation requires multitable write access.',
-    zh: '创建 Sheet 需要多维表写入权限。',
+    zh: '创建数据表需要多维表写入权限。',
   },
   'toast.sheetRefreshFailed': {
     en: 'Created sheet but failed to refresh workbench context',
-    zh: 'Sheet 已创建，但刷新工作台上下文失败',
+    zh: '数据表已创建，但刷新工作台上下文失败',
   },
-  'toast.sheetCreateFailed': { en: 'Failed to create sheet', zh: '创建 Sheet 失败' },
-  'toast.baseLoadFailed': { en: 'Failed to load base', zh: '加载 Base 失败' },
+  'toast.sheetCreateFailed': { en: 'Failed to create sheet', zh: '创建数据表失败' },
+  'toast.baseLoadFailed': { en: 'Failed to load base', zh: '加载工作区失败' },
   'toast.contextSyncFailed': { en: 'Failed to sync workbench context', zh: '同步工作台上下文失败' },
   'toast.externalContextBusy': {
     en: 'Host multitable context change is waiting for the current save or import to finish.',
@@ -194,9 +200,9 @@ const WORKBENCH_LABELS: Record<WorkbenchLabelKey, { en: string; zh: string }> = 
   },
   'toast.baseCreateBlocked': {
     en: 'Base creation requires multitable write access.',
-    zh: '创建 Base 需要多维表写入权限。',
+    zh: '创建工作区需要多维表写入权限。',
   },
-  'toast.baseCreateFailed': { en: 'Failed to create base', zh: '创建 Base 失败' },
+  'toast.baseCreateFailed': { en: 'Failed to create base', zh: '创建工作区失败' },
   'toast.importCancelled': { en: 'Import cancelled', zh: '导入已取消' },
   'toast.importFailed': { en: 'Import failed', zh: '导入失败' },
   'toast.excelExportFailed': { en: 'Excel export failed', zh: 'Excel 导出失败' },
@@ -206,7 +212,7 @@ const WORKBENCH_LABELS: Record<WorkbenchLabelKey, { en: string; zh: string }> = 
 
   'confirm.discardContextChanges': {
     en: 'Discard unsaved changes before leaving the current sheet or view?',
-    zh: '离开当前 Sheet 或视图前放弃未保存的更改吗？',
+    zh: '离开当前数据表或视图前放弃未保存的更改吗？',
   },
   'confirm.discardRecordChanges': {
     en: 'Discard unsaved record changes?',
@@ -258,9 +264,9 @@ const WORKBENCH_LABELS: Record<WorkbenchLabelKey, { en: string; zh: string }> = 
     zh: '存在与模板冲突的对象，安装前请重新检查。',
   },
 
-  'error.loadSheets': { en: 'Failed to load sheets', zh: '加载 Sheet 失败' },
-  'error.loadSheetMetadata': { en: 'Failed to load sheet metadata', zh: '加载 Sheet 元数据失败' },
-  'error.loadBaseMetadata': { en: 'Failed to load base metadata', zh: '加载 Base 元数据失败' },
+  'error.loadSheets': { en: 'Failed to load sheets', zh: '加载数据表失败' },
+  'error.loadSheetMetadata': { en: 'Failed to load sheet metadata', zh: '加载数据表元数据失败' },
+  'error.loadBaseMetadata': { en: 'Failed to load base metadata', zh: '加载工作区元数据失败' },
 }
 
 export function workbenchLabel(key: WorkbenchLabelKey, isZh: boolean): string {
@@ -360,17 +366,17 @@ export function recordNotFound(recordId: string, isZh: boolean): string {
 // show the raw message as secondary detail. Unknown kinds pass through raw.
 export function templateConflictKindLabel(kind: string, isZh: boolean): string {
   switch (kind) {
-    case 'base_exists': return isZh ? 'Base 已存在' : 'Base already exists'
-    case 'sheet_exists': return isZh ? 'Sheet 已存在' : 'Sheet already exists'
+    case 'base_exists': return isZh ? '工作区已存在' : 'Base already exists'
+    case 'sheet_exists': return isZh ? '数据表已存在' : 'Sheet already exists'
     case 'view_exists': return isZh ? '视图已存在' : 'View already exists'
     case 'template_duplicate_id': return isZh ? '模板内部 id 重复' : 'Duplicate id inside template'
     default: return kind
   }
 }
 
-// MetaTemplateCard counts: zh "{n} 个 Sheet/字段/视图"; en pluralized.
+// MetaTemplateCard counts: zh "{n} 个数据表/字段/视图"; en pluralized.
 export function cardSheets(n: number, isZh: boolean): string {
-  return isZh ? `${n} 个 Sheet` : `${n} sheet${n === 1 ? '' : 's'}`
+  return isZh ? `${n} 个数据表` : `${n} sheet${n === 1 ? '' : 's'}`
 }
 
 export function cardFields(n: number, isZh: boolean): string {

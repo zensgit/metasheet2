@@ -35,9 +35,11 @@ export type MetaImportLabelKey =
 
 const META_IMPORT_LABELS: Record<MetaImportLabelKey, { en: string; zh: string }> = {
   'import.title': { en: 'Import Records', zh: '导入记录' },
+  // W1 G-10 (display layer only): Sheet = 数据表 (was bare '表'). 'Google Sheets' below names the
+  // external product and is deliberately left as-is (see PR body intentional-leave list).
   'import.recoveredDraft': {
     en: 'Recovered your previous import draft for this sheet.',
-    zh: '已恢复此表的上次导入草稿。',
+    zh: '已恢复此数据表的上次导入草稿。',
   },
   'import.pasteHint': {
     en: 'Paste tab-separated data from Excel or Google Sheets (first row = headers):',

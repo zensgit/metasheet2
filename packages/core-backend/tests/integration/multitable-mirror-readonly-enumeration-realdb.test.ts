@@ -52,9 +52,12 @@ describeIfDatabase('multitable mirror-read-only hardening — C2/I-1 enumeration
     app = express()
     app.use(express.json())
     app.use((req, _res, next) => { ;(req as express.Request & { user?: unknown }).user = currentUser; next() })
-    // PIT flags read per-request; SHEET_REVERT_MAX_RECORDS captured at ROUTER CREATION → set all three BEFORE univerMetaRouter().
+    // PIT flags read per-request; SHEET_REVERT_MAX_RECORDS captured at ROUTER CREATION → set all four BEFORE univerMetaRouter().
     process.env.MULTITABLE_ENABLE_PIT_UNDELETE = 'true'
     process.env.MULTITABLE_ENABLE_PIT_RESET = 'true'
+    // Interim revert-execute master gate (current-risk mitigation): default-OFF now — keep it on for this
+    // suite's SD-2/G5-style revert-route enumeration goldens, unchanged behavior.
+    process.env.MULTITABLE_ENABLE_SHEET_REVERT = 'true'
     process.env.MULTITABLE_SHEET_REVERT_MAX_RECORDS = '50'
     app.use('/api/multitable', univerMetaRouter())
 
@@ -81,7 +84,7 @@ describeIfDatabase('multitable mirror-read-only hardening — C2/I-1 enumeration
     await q('DELETE FROM meta_sheets WHERE id = ANY($1::text[])', [[SA, SB]]).catch(() => {})
     await q('DELETE FROM meta_bases WHERE id = $1', [BASE]).catch(() => {})
     await q('DELETE FROM users WHERE id = $1', [USER]).catch(() => {})
-    delete process.env.MULTITABLE_ENABLE_PIT_UNDELETE; delete process.env.MULTITABLE_ENABLE_PIT_RESET; delete process.env.MULTITABLE_SHEET_REVERT_MAX_RECORDS
+    delete process.env.MULTITABLE_ENABLE_PIT_UNDELETE; delete process.env.MULTITABLE_ENABLE_PIT_RESET; delete process.env.MULTITABLE_ENABLE_SHEET_REVERT; delete process.env.MULTITABLE_SHEET_REVERT_MAX_RECORDS
   })
 
   test('sentinel: DATABASE_URL set', () => { expect(process.env.DATABASE_URL).toBeTruthy() })

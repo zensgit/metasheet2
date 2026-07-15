@@ -12,17 +12,6 @@
         <MtButton class="mt-workbench__conflict-btn" @click="grid.dismissConflict()">{{ wb('conflict.dismiss', isZh) }}</MtButton>
       </div>
     </div>
-    <div v-if="basePickerBases.length" class="mt-workbench__base-bar">
-      <MetaBasePicker
-        :bases="basePickerBases"
-        :active-base-id="activeBaseId"
-        :can-create="canCreateBasesAndSheets"
-        @select="onSelectBase"
-        @create="onCreateBase"
-        @toggle-favorite="onToggleFavoriteBase"
-      />
-    </div>
-    <MetaSheetViewRail :sheets="workbench.sheets.value" :views="visibleWorkbenchViews" :active-sheet-id="workbench.activeSheetId.value" :active-view-id="workbench.activeViewId.value" :can-create-sheet="canCreateBasesAndSheets" :personal-views-enabled="personalViewsEnabled" :is-personal-mode="personalView.isPersonalMode" @select-sheet="onSelectSheet" @select-view="onSelectView" @create-sheet="onCreateSheet" @toggle-personal="onTogglePersonalView" />
     <div class="mt-workbench__actions">
       <div
         v-if="sheetPresenceState.activeCollaboratorCount.value > 0"
@@ -144,6 +133,34 @@
       @reset-to-shared="onResetToShared"
     />
     <div class="mt-workbench__content">
+      <aside
+        class="mt-workbench__rail"
+        :class="{ 'mt-workbench__rail--collapsed': railCollapsed, 'mt-workbench__rail--drawer': isRailDrawerOpen }"
+      >
+        <div class="mt-workbench__rail-head">
+          <div v-if="basePickerBases.length" v-show="!railCollapsed" class="mt-workbench__base-bar">
+            <MetaBasePicker
+              :bases="basePickerBases"
+              :active-base-id="activeBaseId"
+              :can-create="canCreateBasesAndSheets"
+              @select="onSelectBase"
+              @create="onCreateBase"
+              @toggle-favorite="onToggleFavoriteBase"
+            />
+          </div>
+          <button
+            ref="railToggleRef"
+            type="button"
+            data-testid="rail-collapse-toggle"
+            class="mt-workbench__rail-toggle"
+            :aria-expanded="!railCollapsed"
+            :aria-label="railCollapsed ? wb('rail.expand', isZh) : wb('rail.collapse', isZh)"
+            :title="railCollapsed ? wb('rail.expand', isZh) : wb('rail.collapse', isZh)"
+            @click="railCollapsed = !railCollapsed"
+          >{{ railCollapsed ? '›' : '‹' }}</button>
+        </div>
+        <MetaSheetViewRail v-show="!railCollapsed" :sheets="workbench.sheets.value" :views="visibleWorkbenchViews" :active-sheet-id="workbench.activeSheetId.value" :active-view-id="workbench.activeViewId.value" :can-create-sheet="canCreateBasesAndSheets" :personal-views-enabled="personalViewsEnabled" :is-personal-mode="personalView.isPersonalMode" @select-sheet="onSelectSheet" @select-view="onSelectView" @create-sheet="onCreateSheet" @toggle-personal="onTogglePersonalView" />
+      </aside>
       <div class="mt-workbench__main">
         <MetaDashboardView
           v-if="showDashboardView"
@@ -593,6 +610,7 @@ import { recordLabel } from '../utils/meta-record-labels'
 import { resolveButtonFieldProperty } from '../utils/field-config'
 import {
   bulkFailure as fmtBulkFailure,
+  bulkFailureSamples as fmtBulkFailureSamples,
   bulkPartialSuccess as fmtBulkPartialSuccess,
   bulkSuccess as fmtBulkSuccess,
   bulkVersionConflict as fmtBulkVersionConflict,
@@ -985,6 +1003,36 @@ const personPickerCurrentValue = ref<unknown>(null)
 const showFieldManager = ref(false)
 const showPermissionManager = ref(false)
 const showAutomationManager = ref(false)
+// UI-P2-2b (design docs/development/multitable-ui-p2-2b-vertical-tree-design-20260713.md §3.1,
+// owner decision A pending -> recommended default applied): session-local only, default expanded,
+// NOT persisted (no localStorage/server write) — component remount resets to expanded.
+const railCollapsed = ref(false)
+
+// UI-P2-2c (design docs/development/multitable-ui-p2-2c-responsive-design-20260714.md): narrow-width
+// responsive rail. `isRailNarrow` is viewport-derived (window.innerWidth), NOT user-controlled — it
+// only ever WRITES `railCollapsed` on the transition INTO narrow (auto-collapse to the existing
+// icon-strip), and never touches it while already wide or already narrow, so desktop-width behavior
+// (>= RAIL_NARROW_BREAKPOINT) is a byte-for-byte no-op versus pre-2c code (see syncRailViewportState).
+// `isRailDrawerOpen` composes that with the pre-existing `railCollapsed` toggle: narrow + user-expanded
+// = the rail becomes an absolute-positioned overlay ("drawer") instead of an in-flow column (CSS only,
+// see .mt-workbench__rail--drawer) — the SAME `rail-collapse-toggle` button that already exists closes
+// it, no new emit/prop/testid. Breakpoint is a single JS constant (tokens.css has no --ms-bp-* family,
+// per the 2b design's "no width token vocabulary" carve-out at §6) — deliberately NOT mirrored into a
+// CSS @media query, so there is exactly one source of truth for the threshold.
+const RAIL_NARROW_BREAKPOINT = 768
+const isRailNarrow = ref(false)
+const railToggleRef = ref<HTMLButtonElement | null>(null)
+const isRailDrawerOpen = computed(() => isRailNarrow.value && !railCollapsed.value)
+
+function syncRailViewportState(): void {
+  if (typeof window === 'undefined') return
+  const narrow = window.innerWidth <= RAIL_NARROW_BREAKPOINT
+  const wasNarrow = isRailNarrow.value
+  isRailNarrow.value = narrow
+  if (!narrow) return // wide viewport: never mutate railCollapsed here — desktop path is untouched by 2c
+  if (!wasNarrow) railCollapsed.value = true // just crossed into narrow: auto-collapse to the icon-strip
+}
+
 const showDashboardView = ref(false)
 const showTemplateLibrary = ref(false)
 const TemplateCenterRouteName = AppRouteNames.MULTITABLE_TEMPLATES
@@ -3571,6 +3619,17 @@ function onGridSelectionChange(recordIds: string[]) {
 type GridExportField = (typeof scopedGridFields)['value'][number]
 type GridExportRow = (typeof grid.rows)['value'][number]
 
+// G-10 follow-up (owner ruling 2026-07-15): exports are a normal-user surface — the download
+// filename and the xlsx tab use the active sheet's display NAME (already in workbench.sheets
+// scope), never the bare sheetId. When no name resolves, the generic 'export' fallback is used
+// rather than the raw id (HI-1: zero new data paths). The server route path still wins when it
+// supplies a Content-Disposition filename (itself sheet-name based).
+const activeSheetExportName = computed(() => {
+  const id = workbench.activeSheetId.value
+  const name = id ? workbench.sheets.value.find((sheet) => sheet.id === id)?.name : undefined
+  return typeof name === 'string' && name.trim().length > 0 ? name.trim() : ''
+})
+
 function onExportCsv() { openExportDialog('csv') }
 async function onExportXlsx() { openExportDialog('xlsx') }
 
@@ -3607,14 +3666,14 @@ async function exportAllRowsViaRoute(fieldIds: string[], format: 'csv' | 'xlsx')
       fieldIds,
       format,
     })
-    triggerDownloadNamed(blob, filename || `${sheetId}.${format}`)
+    triggerDownloadNamed(blob, filename || `${activeSheetExportName.value || 'export'}.${format}`)
   } catch (err: any) {
     showError(err?.message ?? wb(format === 'csv' ? 'toast.csvExportFailed' : 'toast.excelExportFailed', isZh.value))
   }
 }
 
 function triggerDownload(blob: Blob, extension: string) {
-  triggerDownloadNamed(blob, `${workbench.activeSheetId.value || 'export'}.${extension}`)
+  triggerDownloadNamed(blob, `${activeSheetExportName.value || 'export'}.${extension}`)
 }
 
 // Download a blob under an exact filename (the server's Content-Disposition for the route path).
@@ -3662,8 +3721,10 @@ async function doExportXlsx(fields: GridExportField[], rowList: GridExportRow[])
         return String(v)
       }),
     )
-    const sheetName = (workbench.activeSheetId.value || 'export').slice(0, 31)
-    const buffer = buildXlsxBuffer(xlsxModule, { sheetName, headers, rows })
+    // Sheet display name for the xlsx tab (G-10 follow-up, same ruling as the filename above).
+    // buildXlsxBuffer's safeXlsxSheetName owns ALL SheetJS tab-name rules (forbidden chars,
+    // 31-char cap, edge apostrophes, reserved 'History') — a hostile display name can't throw.
+    const buffer = buildXlsxBuffer(xlsxModule, { sheetName: activeSheetExportName.value || 'export', headers, rows })
     triggerDownload(new Blob([buffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }), 'xlsx')
   } catch (err: any) {
     showError(err?.message ?? wb('toast.excelExportFailed', isZh.value))
@@ -3692,6 +3753,15 @@ function onGlobalKeydown(e: KeyboardEvent) {
   if (mod && e.key === 'z' && !e.shiftKey) { e.preventDefault(); grid.undo() }
   else if (mod && (e.key === 'y' || (e.key === 'z' && e.shiftKey))) { e.preventDefault(); grid.redo() }
   else if (e.key === '?' && !(e.target as HTMLElement)?.closest('input, textarea, select')) { showShortcuts.value = !showShortcuts.value }
+  // UI-P2-2c: Escape closes the narrow-width drawer — scoped to events that originate FROM WITHIN the
+  // rail (the toggle button, a tree node, the base picker) so it never steals Escape from an unrelated
+  // in-progress interaction elsewhere in the workbench (e.g. a cell editor) that isn't inside the rail
+  // and may rely on its own Escape semantics. No focus trap / no scrim in this slice (documented gap,
+  // design MD §5) — this is a non-modal overlay, so background content stays reachable throughout.
+  else if (e.key === 'Escape' && isRailDrawerOpen.value && (e.target as HTMLElement)?.closest('.mt-workbench__rail')) {
+    railCollapsed.value = true
+    void nextTick(() => railToggleRef.value?.focus())
+  }
 }
 
 // --- Record deep-link (read recordId from URL hash) ---
@@ -3821,10 +3891,10 @@ async function onBulkEditApply(payload: { mode: 'set' | 'clear'; fieldId: string
     const updatedCount = result.updated.length
     const requestedCount = payload.recordIds.length
     if (result.failed.length > 0) {
-      const sampleFailures = result.failed
-        .slice(0, 3)
-        .map((failure) => `${failure.recordId}: ${failure.reason}`)
-        .join('; ')
+      // G-10 follow-up (owner ruling 2026-07-15): normal-user surface — each sampled failure leads
+      // with the record's display name (bulkFillRecordName over the already-loaded rows; its own
+      // fallback keeps the raw id only when the row is no longer loaded). Zero new fetches.
+      const sampleFailures = fmtBulkFailureSamples(result.failed, bulkFillRecordName)
       bulkEditDialog.error = fmtBulkFailure(result.failed.length, requestedCount, sampleFailures, isZh.value)
       if (updatedCount > 0) {
         bulkEditDialog.resultMessage = fmtBulkPartialSuccess(updatedCount, requestedCount, payload.mode, isZh.value)
@@ -4228,6 +4298,11 @@ watch(
 
 onMounted(async () => {
   window.addEventListener('beforeunload', onBeforeUnload)
+  syncRailViewportState() // UI-P2-2c: establish narrow/wide state at mount. Runs in onMounted (AFTER the
+  // first paint), so a narrow viewport may show the expanded rail for one frame before auto-collapse;
+  // desktop is unaffected (the wide branch never writes state). Pre-paint sync would need SSR/layout-
+  // effect machinery not used in this app — accepted as a known cosmetic limit (P2-2c gate NIT-2).
+  window.addEventListener('resize', syncRailViewportState)
   void auth.getCurrentUserId().then((userId) => {
     currentUserId.value = userId
   }).catch(() => undefined)
@@ -4277,6 +4352,7 @@ onMounted(async () => {
 
 onBeforeUnmount(() => {
   window.removeEventListener('beforeunload', onBeforeUnload)
+  window.removeEventListener('resize', syncRailViewportState)
   stopDialogMetaRefresh()
   unsubscribeMentionRealtime?.()
   // Cancel a pending column-width persist so a late write can't fire after teardown.
@@ -4321,7 +4397,9 @@ defineExpose({
 
 <style scoped>
 .mt-workbench { display: flex; flex-direction: column; height: 100%; background: #fff; }
-.mt-workbench__content { display: flex; flex: 1; min-height: 0; }
+/* position:relative establishes the positioning context .mt-workbench__rail--drawer (UI-P2-2c) anchors
+   against — inert for every other child, which all stay in normal flow. */
+.mt-workbench__content { display: flex; flex: 1; min-height: 0; position: relative; }
 .mt-workbench__main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
 .mt-workbench__conflict {
   margin: 8px 16px 0;
@@ -4406,6 +4484,51 @@ defineExpose({
 .mt-workbench__mgr-btn-icon { font-size: 15px; color: currentColor; }
 .mt-workbench__mgr-badge { display: inline-flex; align-items: center; justify-content: center; min-width: 18px; height: 18px; margin-left: 6px; padding: 0 6px; border-radius: 999px; background: #f59e0b; color: #fff; font-size: 11px; font-weight: 600; }
 .mt-workbench__base-bar { padding: 8px 16px 0; border-bottom: 1px solid #f0f0f0; }
+/* UI-P2-2b (design docs/development/multitable-ui-p2-2b-vertical-tree-design-20260713.md §2.1/§3.1):
+   persistent, collapsible left rail housing the base-bar (workspace picker) + the sheet/view tree
+   (MetaSheetViewRail). Width values (240px / 36px) are layout sizing, not color — the token vocabulary
+   has no width family, so these stay raw px per the design's "allowed non-token numbers" carve-out. */
+.mt-workbench__rail {
+  width: 240px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  border-right: 1px solid var(--ms-border-light);
+  overflow: hidden;
+}
+.mt-workbench__rail--collapsed { width: 36px; }
+/* UI-P2-2c (design docs/development/multitable-ui-p2-2c-responsive-design-20260714.md §3): narrow
+   viewport (<= RAIL_NARROW_BREAKPOINT, JS-only threshold — see script) + user-expanded rail = a floating
+   overlay instead of an in-flow flex column, so it no longer steals width from .mt-workbench__main.
+   Taking the rail out of flow (position:absolute) is what frees that width — no change to __main itself.
+   `--ms-shadow-pop` + an opaque `--ms-bg-card` background are both existing UF tokens (no new hex).
+   width uses the same min(px, calc(100vw - Npx)) idiom as this file's other overlay surfaces (e.g.
+   .mt-workbench__shortcuts) so it never overflows a very narrow viewport. */
+.mt-workbench__rail--drawer {
+  position: absolute;
+  inset: 0 auto 0 0;
+  z-index: 5;
+  width: min(240px, calc(100vw - 32px));
+  background: var(--ms-bg-card);
+  box-shadow: var(--ms-shadow-pop);
+  border-radius: 0 var(--ms-radius-lg) var(--ms-radius-lg) 0;
+}
+.mt-workbench__rail-head { display: flex; align-items: center; justify-content: space-between; }
+.mt-workbench__rail-toggle {
+  flex-shrink: 0;
+  width: 24px;
+  height: 24px;
+  margin: 6px;
+  border: none;
+  border-radius: var(--ms-radius-sm);
+  background: transparent;
+  color: var(--ms-text-2);
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+}
+.mt-workbench__rail-toggle:hover { background: var(--ms-bg-card); }
+.mt-workbench__rail-toggle:focus-visible { outline: 2px solid var(--ms-color-primary); outline-offset: -2px; }
 .mt-template-library {
   margin: 8px 16px 0;
   padding: 14px;
@@ -4433,7 +4556,7 @@ defineExpose({
 .mt-workbench__shortcut { display: flex; align-items: center; gap: 12px; font-size: 13px; }
 .mt-workbench__shortcut kbd { background: #f0f0f0; border: 1px solid #ddd; border-radius: 3px; padding: 2px 8px; font-family: monospace; font-size: 12px; min-width: 80px; text-align: center; }
 @media print {
-  .mt-workbench__base-bar, .mt-workbench__actions, .mt-workbench__shortcuts-overlay, .mt-template-library { display: none !important; }
+  .mt-workbench__base-bar, .mt-workbench__actions, .mt-workbench__shortcuts-overlay, .mt-template-library, .mt-workbench__rail { display: none !important; }
   .mt-workbench__content { overflow: visible !important; }
   .mt-workbench__main { overflow: visible !important; }
 }

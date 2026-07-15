@@ -263,6 +263,9 @@ describeIfDatabase('D-2 — side-door delete recoverability (plugin + automation
       next()
     })
     process.env.MULTITABLE_SHEET_REVERT_MAX_RECORDS = '50' // G5 drives the PIT revert route
+    // Interim revert-execute master gate (current-risk mitigation): default-OFF now — keep it on for this
+    // suite's G5 golden (which drives revert-execute), unchanged behavior.
+    process.env.MULTITABLE_ENABLE_SHEET_REVERT = 'true'
     app.use('/api/multitable', univerMetaRouter())
 
     await q("INSERT INTO users (id, password_hash) VALUES ($1,'x') ON CONFLICT (id) DO NOTHING", [OWNER])
@@ -298,6 +301,7 @@ describeIfDatabase('D-2 — side-door delete recoverability (plugin + automation
   afterAll(async () => {
     for (const flag of [SIDE_DOOR_FLAG, CAPTURE_FLAG, CAP_ROWS, INBOUND_FLAG, PIT_UNDELETE_FLAG]) delete process.env[flag]
     delete process.env.MULTITABLE_SHEET_REVERT_MAX_RECORDS
+    delete process.env.MULTITABLE_ENABLE_SHEET_REVERT
     await q('DELETE FROM users WHERE id = $1', [OWNER]).catch(() => {})
     for (const sheet of [SHEET_A, SHEET_B, SHEET_X, SHEET_G5]) {
       await q('DELETE FROM meta_link_tombstones WHERE sheet_id = $1', [sheet]).catch(() => {})

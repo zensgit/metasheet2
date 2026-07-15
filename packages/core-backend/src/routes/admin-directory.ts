@@ -201,7 +201,12 @@ function hasLegacyAdminClaim(req: Request): boolean {
   return false
 }
 
-async function ensurePlatformAdmin(req: Request, res: Response): Promise<string | null> {
+/**
+ * Exported so sibling directory admin route modules (e.g. `admin-directory-local.ts`, Canonical
+ * Org MVP B2) share the SAME platform-admin gate rather than re-implementing the legacy-claim /
+ * RBAC check — duplicated auth guards drift, which is a security-relevant divergence.
+ */
+export async function ensurePlatformAdmin(req: Request, res: Response): Promise<string | null> {
   const userId = getRequestUserId(req)
   if (!userId) {
     jsonError(res, 401, 'UNAUTHENTICATED', 'Authentication required')

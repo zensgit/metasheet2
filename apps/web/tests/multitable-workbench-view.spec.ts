@@ -3,6 +3,15 @@ import { computed, createApp, defineComponent, h, nextTick, reactive, ref, type 
 
 const showErrorSpy = vi.fn()
 const showSuccessSpy = vi.fn()
+// G-10 follow-up: captures the xlsx tab name the export path passes down, without writing a real
+// workbook (buildXlsxBuffer's own trim/slice/default behavior is covered by multitable/xlsx-mapping.test.ts).
+// vi.hoisted: the mocked module is imported synchronously by MultitableWorkbench.vue, so a plain
+// top-level const would still be in its TDZ when the factory runs.
+const { buildXlsxBufferMock } = vi.hoisted(() => ({ buildXlsxBufferMock: vi.fn(() => new Uint8Array([1, 2, 3])) }))
+vi.mock('../src/multitable/import/xlsx-mapping', async () => {
+  const actual = await vi.importActual<any>('../src/multitable/import/xlsx-mapping')
+  return { ...actual, buildXlsxBuffer: buildXlsxBufferMock }
+})
 const pushSpy = vi.fn().mockResolvedValue(undefined)
 const useMultitableSheetRealtimeMock = vi.fn()
 // The workflow-designer manager button is gated on caps.canManageAutomation AND
@@ -296,7 +305,7 @@ vi.mock('../src/multitable/components/MetaGridTable.vue', () => ({
       collapsedGroupKeys: { type: Array, default: () => [] },
       rowDensity: { type: String, default: undefined },
     },
-    emits: ['select-record', 'open-comments', 'open-field-comments', 'resize-column', 'toggle-group'],
+    emits: ['select-record', 'open-comments', 'open-field-comments', 'resize-column', 'toggle-group', 'bulk-edit', 'selection-change'],
     render() {
       return h('div', {
         'data-grid-column-widths': JSON.stringify(this.$props.columnWidths ?? {}),
@@ -350,6 +359,22 @@ vi.mock('../src/multitable/components/MetaGridTable.vue', () => ({
             onClick: () => this.$emit('toggle-group', 'todo'),
           },
           'toggle-group',
+        ),
+        h(
+          'button',
+          {
+            'data-bulk-edit': 'true',
+            onClick: () => this.$emit('bulk-edit', { mode: 'clear', recordIds: ['rec_1'] }),
+          },
+          'bulk-edit',
+        ),
+        h(
+          'button',
+          {
+            'data-select-rows': 'rec_1',
+            onClick: () => this.$emit('selection-change', ['rec_1']),
+          },
+          'selection-change',
         ),
       ])
     },
@@ -946,6 +971,19 @@ async function flushUi(cycles = 5): Promise<void> {
   }
 }
 
+// UI-P2-2c (design docs/development/multitable-ui-p2-2c-responsive-design-20260714.md §6): shape copied
+// verbatim from apps/web/tests/useAttendanceAdminRailNavigation.spec.ts's own setViewportWidth helper —
+// same jsdom idiom (redefine window.innerWidth, dispatch a real 'resize' event) for the same reason
+// (MultitableWorkbench's syncRailViewportState listens for 'resize', not a matchMedia mock).
+function setViewportWidth(width: number): void {
+  Object.defineProperty(window, 'innerWidth', {
+    configurable: true,
+    writable: true,
+    value: width,
+  })
+  window.dispatchEvent(new Event('resize'))
+}
+
 function createWorkbenchMock() {
   const activeBaseId = ref('base_ops')
   const activeSheetId = ref('sheet_orders')
@@ -1080,6 +1118,7 @@ function createGridMock() {
     setGroupField: vi.fn(), setGroupFields: vi.fn(),
     goToPage: vi.fn(),
     patchCell: vi.fn(),
+    bulkPatch: vi.fn(),
     createRecord: vi.fn(),
     deleteRecord: vi.fn(),
     mergeRemoteRecord: vi.fn().mockReturnValue(true),
@@ -1546,6 +1585,114 @@ describe('MultitableWorkbench view wiring', () => {
       Object.defineProperty(URL, 'createObjectURL', { configurable: true, value: originalCreateObjectURL })
       Object.defineProperty(URL, 'revokeObjectURL', { configurable: true, value: originalRevokeObjectURL })
     }
+  })
+
+  // G-10 follow-up (owner ruling 2026-07-15, 普通用户面优先显示名称): the export download filename is a
+  // normal-user surface. When the backend route returns no Content-Disposition filename, the fallback
+  // must be the active sheet's display NAME ('Orders', already in workbench.sheets scope) — never the
+  // raw sheet id ('sheet_orders').
+  it('export filename fallback uses the sheet display name, not the raw sheet id', async () => {
+    workbenchMock.client.exportSheet.mockResolvedValue({
+      blob: new Blob(['Title\nAlpha'], { type: 'text/csv' }),
+      filename: '',
+    })
+    const downloads: string[] = []
+    const originalCreateObjectURL = URL.createObjectURL
+    const originalRevokeObjectURL = URL.revokeObjectURL
+    Object.defineProperty(URL, 'createObjectURL', { configurable: true, value: vi.fn(() => 'blob:multitable-export') })
+    Object.defineProperty(URL, 'revokeObjectURL', { configurable: true, value: vi.fn() })
+    const clickSpy = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(function (this: HTMLAnchorElement) {
+      downloads.push(this.download)
+    })
+    try {
+      mountWorkbench()
+      await flushUi()
+
+      container!.querySelector<HTMLButtonElement>('[data-export-csv="true"]')!.click()
+      await flushUi()
+      document.body.querySelector<HTMLButtonElement>('.meta-export__btn--primary')!.click()
+      await flushUi()
+
+      expect(downloads).toEqual(['Orders.csv'])
+    } finally {
+      clickSpy.mockRestore()
+      Object.defineProperty(URL, 'createObjectURL', { configurable: true, value: originalCreateObjectURL })
+      Object.defineProperty(URL, 'revokeObjectURL', { configurable: true, value: originalRevokeObjectURL })
+    }
+  })
+
+  // G-10 follow-up: the selected-rows client-side export path names BOTH the downloaded file and the
+  // xlsx workbook tab after the sheet's display name (previously both were the raw sheet id).
+  it('selected-rows xlsx export names the file and the workbook tab after the sheet display name', async () => {
+    const downloads: string[] = []
+    const originalCreateObjectURL = URL.createObjectURL
+    const originalRevokeObjectURL = URL.revokeObjectURL
+    Object.defineProperty(URL, 'createObjectURL', { configurable: true, value: vi.fn(() => 'blob:multitable-export') })
+    Object.defineProperty(URL, 'revokeObjectURL', { configurable: true, value: vi.fn() })
+    const clickSpy = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(function (this: HTMLAnchorElement) {
+      downloads.push(this.download)
+    })
+    buildXlsxBufferMock.mockClear()
+    try {
+      mountWorkbench()
+      await flushUi()
+
+      // Select a row (grid multi-select), then open the export dialog and switch to selected+xlsx.
+      container!.querySelector<HTMLButtonElement>('[data-select-rows="rec_1"]')!.click()
+      await flushUi()
+      container!.querySelector<HTMLButtonElement>('[data-export-csv="true"]')!.click()
+      await flushUi()
+      const selectedRadio = document.body.querySelector<HTMLInputElement>('.meta-export__opt input[value="selected"]')
+      expect(selectedRadio).not.toBeNull()
+      expect(selectedRadio!.disabled).toBe(false)
+      selectedRadio!.click()
+      document.body.querySelector<HTMLInputElement>('.meta-export__opt input[value="xlsx"]')!.click()
+      await flushUi()
+      document.body.querySelector<HTMLButtonElement>('.meta-export__btn--primary')!.click()
+      // The xlsx path lazily `import('xlsx')` before building — module loading can take macrotask
+      // time, so poll (bounded) rather than relying on microtask flushes alone.
+      for (let i = 0; i < 100 && downloads.length === 0; i += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 20))
+        await flushUi()
+      }
+
+      expect(downloads).toEqual(['Orders.xlsx'])
+      expect(buildXlsxBufferMock).toHaveBeenCalledTimes(1)
+      expect(buildXlsxBufferMock.mock.calls[0]?.[1]).toEqual(expect.objectContaining({ sheetName: 'Orders' }))
+    } finally {
+      clickSpy.mockRestore()
+      Object.defineProperty(URL, 'createObjectURL', { configurable: true, value: originalCreateObjectURL })
+      Object.defineProperty(URL, 'revokeObjectURL', { configurable: true, value: originalRevokeObjectURL })
+    }
+  })
+
+  // G-10 follow-up: bulk-edit failure samples (dialog error + toast, normal-user surfaces) lead with
+  // the record's display name resolved from the already-loaded rows ('rec_1' → its Title value
+  // 'Alpha'), never the bare record id. The reason string stays raw.
+  it('bulk-edit failure samples lead with the record display name, not the raw record id', async () => {
+    gridMock.bulkPatch.mockResolvedValue({
+      updated: [],
+      failed: [{ recordId: 'rec_1', reason: 'locked' }],
+    })
+    mountWorkbench()
+    await flushUi()
+
+    container!.querySelector<HTMLButtonElement>('[data-bulk-edit="true"]')!.click()
+    await flushUi()
+    // Real MetaBulkEditDialog (teleported): clear mode only needs a field selection to submit.
+    const fieldSelect = document.body.querySelector<HTMLSelectElement>('.meta-bulk-edit__select')
+    expect(fieldSelect).not.toBeNull()
+    fieldSelect!.value = 'fld_title'
+    fieldSelect!.dispatchEvent(new Event('change'))
+    await flushUi()
+    document.body.querySelector<HTMLButtonElement>('.meta-bulk-edit__btn--primary')!.click()
+    await flushUi()
+
+    expect(gridMock.bulkPatch).toHaveBeenCalledWith({ fieldId: 'fld_title', value: null, recordIds: ['rec_1'] })
+    const errorEl = document.body.querySelector('.meta-bulk-edit__error')
+    expect(errorEl?.textContent).toContain('Alpha: locked')
+    expect(errorEl?.textContent).not.toContain('rec_1')
+    expect(showErrorSpy).toHaveBeenCalledWith(expect.stringContaining('Alpha: locked'))
   })
 
   it('syncs external base/sheet/view props after mount', async () => {
@@ -2778,6 +2925,168 @@ describe('MultitableWorkbench view wiring', () => {
       expect(container!.querySelector('[data-toolbar-row-density]')?.getAttribute('data-toolbar-row-density')).toBe('normal')
       expect(container!.querySelector('[data-grid-column-widths]')?.getAttribute('data-grid-column-widths')).toBe('{}')
       expect(container!.querySelector('[data-grid-collapsed-keys]')?.getAttribute('data-grid-collapsed-keys')).toBe('[]')
+    })
+  })
+
+  // UI-P2-2b (design docs/development/multitable-ui-p2-2b-vertical-tree-design-20260713.md §2.1/§3.1,
+  // §8.2-T7): the rail is now a persistent collapsible <aside> wrapping the base-bar + the
+  // MetaSheetViewRail tree (mocked above). Collapse is a workbench-local `railCollapsed` ref — v-show
+  // hides both the rail-stub and the base-bar (display:none => unfocusable/unclickable/out of the a11y
+  // tree, directly assertable via style.display in jsdom). Count-conservation across the round-trip is
+  // already covered by meta-sheet-view-rail.spec.ts's own T3 (this component is mocked here); T7 only
+  // proves the workbench-level collapse wiring itself.
+  describe('UI-P2-2b — rail collapse (T7)', () => {
+    function railStubRoot(): HTMLElement {
+      const rail = container!.querySelector('.mt-workbench__rail') as HTMLElement
+      expect(rail).toBeTruthy()
+      // rail-head (base-bar + toggle) is always the first child; the MetaSheetViewRail stub is the
+      // second — structurally stable regardless of whether the base-bar itself is v-if-rendered.
+      return rail.children[1] as HTMLElement
+    }
+
+    it('defaults to expanded: rail stub and base-bar are visible, toggle aria-expanded=true', async () => {
+      mountWorkbench()
+      await flushUi()
+      const toggle = container!.querySelector('[data-testid="rail-collapse-toggle"]') as HTMLButtonElement
+      expect(toggle).toBeTruthy()
+      expect(toggle.getAttribute('aria-expanded')).toBe('true')
+      expect(railStubRoot().style.display).not.toBe('none')
+      const baseBar = container!.querySelector('.mt-workbench__base-bar') as HTMLElement | null
+      expect(baseBar).toBeTruthy() // listBases() mock resolves 2 bases -> basePickerBases.length > 0
+      expect(baseBar!.style.display).not.toBe('none')
+    })
+
+    it('clicking the collapse toggle hides the rail stub AND the base-bar (display:none), flips aria-expanded to false', async () => {
+      mountWorkbench()
+      await flushUi()
+      const toggle = container!.querySelector('[data-testid="rail-collapse-toggle"]') as HTMLButtonElement
+      toggle.click()
+      await flushUi()
+      expect(toggle.getAttribute('aria-expanded')).toBe('false')
+      expect(railStubRoot().style.display).toBe('none')
+      const baseBar = container!.querySelector('.mt-workbench__base-bar') as HTMLElement
+      expect(baseBar.style.display).toBe('none')
+    })
+
+    it('clicking again restores the rail stub and base-bar to visible (round-trip)', async () => {
+      mountWorkbench()
+      await flushUi()
+      const toggle = container!.querySelector('[data-testid="rail-collapse-toggle"]') as HTMLButtonElement
+      toggle.click()
+      await flushUi()
+      toggle.click()
+      await flushUi()
+      expect(toggle.getAttribute('aria-expanded')).toBe('true')
+      expect(railStubRoot().style.display).not.toBe('none')
+      const baseBar = container!.querySelector('.mt-workbench__base-bar') as HTMLElement
+      expect(baseBar.style.display).not.toBe('none')
+    })
+  })
+
+  // UI-P2-2c (design docs/development/multitable-ui-p2-2c-responsive-design-20260714.md §6): the rail
+  // auto-collapses below RAIL_NARROW_BREAKPOINT (768px, window.innerWidth) and, if the user re-expands it
+  // while narrow, becomes an absolute-positioned "drawer" overlay (`.mt-workbench__rail--drawer`) instead
+  // of squeezing .mt-workbench__main. These are STATE assertions (classes/attributes/focus), not CSS/
+  // layout assertions — the actual positioning/shadow/z-index rendering is a real-browser verification
+  // gap documented in the design MD §7, not claimed as proven here.
+  describe('UI-P2-2c — responsive rail (narrow-width auto-collapse + drawer)', () => {
+    function railEl(): HTMLElement {
+      const rail = container!.querySelector('.mt-workbench__rail') as HTMLElement
+      expect(rail).toBeTruthy()
+      return rail
+    }
+
+    beforeEach(() => setViewportWidth(1280))
+    afterEach(() => setViewportWidth(1280))
+
+    it('desktop width (>= breakpoint): mounting behaves exactly like pre-2c — no auto-collapse, no drawer class', async () => {
+      setViewportWidth(1280)
+      mountWorkbench()
+      await flushUi()
+      const toggle = container!.querySelector('[data-testid="rail-collapse-toggle"]') as HTMLButtonElement
+      expect(toggle.getAttribute('aria-expanded')).toBe('true')
+      expect(railEl().classList.contains('mt-workbench__rail--collapsed')).toBe(false)
+      expect(railEl().classList.contains('mt-workbench__rail--drawer')).toBe(false)
+    })
+
+    it('narrow width at mount: auto-collapses to the icon-strip (no drawer)', async () => {
+      setViewportWidth(600)
+      mountWorkbench()
+      await flushUi()
+      const toggle = container!.querySelector('[data-testid="rail-collapse-toggle"]') as HTMLButtonElement
+      expect(toggle.getAttribute('aria-expanded')).toBe('false')
+      expect(railEl().classList.contains('mt-workbench__rail--collapsed')).toBe(true)
+      expect(railEl().classList.contains('mt-workbench__rail--drawer')).toBe(false)
+    })
+
+    it('resizing to narrow after mount auto-collapses; resizing back to wide does NOT force re-expand', async () => {
+      setViewportWidth(1280)
+      mountWorkbench()
+      await flushUi()
+      const toggle = container!.querySelector('[data-testid="rail-collapse-toggle"]') as HTMLButtonElement
+      expect(toggle.getAttribute('aria-expanded')).toBe('true')
+
+      setViewportWidth(600)
+      await flushUi()
+      expect(toggle.getAttribute('aria-expanded')).toBe('false')
+
+      setViewportWidth(1280)
+      await flushUi()
+      // Deliberate asymmetry (design MD §2): leaving narrow never force-writes railCollapsed.
+      expect(toggle.getAttribute('aria-expanded')).toBe('false')
+    })
+
+    it('re-expanding the rail while narrow enters drawer mode; the same toggle closes it back to the icon-strip', async () => {
+      setViewportWidth(600)
+      mountWorkbench()
+      await flushUi()
+      const toggle = container!.querySelector('[data-testid="rail-collapse-toggle"]') as HTMLButtonElement
+      expect(railEl().classList.contains('mt-workbench__rail--collapsed')).toBe(true)
+
+      toggle.click()
+      await flushUi()
+      expect(toggle.getAttribute('aria-expanded')).toBe('true')
+      expect(railEl().classList.contains('mt-workbench__rail--drawer')).toBe(true)
+      expect(railEl().classList.contains('mt-workbench__rail--collapsed')).toBe(false)
+
+      toggle.click()
+      await flushUi()
+      expect(railEl().classList.contains('mt-workbench__rail--drawer')).toBe(false)
+      expect(railEl().classList.contains('mt-workbench__rail--collapsed')).toBe(true)
+    })
+
+    it('Escape from inside the rail closes the drawer and returns focus to the toggle', async () => {
+      setViewportWidth(600)
+      mountWorkbench()
+      await flushUi()
+      const toggle = container!.querySelector('[data-testid="rail-collapse-toggle"]') as HTMLButtonElement
+      toggle.click()
+      await flushUi()
+      expect(railEl().classList.contains('mt-workbench__rail--drawer')).toBe(true)
+
+      toggle.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
+      await flushUi()
+
+      expect(railEl().classList.contains('mt-workbench__rail--drawer')).toBe(false)
+      expect(toggle.getAttribute('aria-expanded')).toBe('false')
+      expect(document.activeElement).toBe(toggle)
+    })
+
+    it('Escape from outside the rail (main content) does NOT close the drawer — scoped, not global', async () => {
+      setViewportWidth(600)
+      mountWorkbench()
+      await flushUi()
+      const toggle = container!.querySelector('[data-testid="rail-collapse-toggle"]') as HTMLButtonElement
+      toggle.click()
+      await flushUi()
+      expect(railEl().classList.contains('mt-workbench__rail--drawer')).toBe(true)
+
+      const main = container!.querySelector('.mt-workbench__main') as HTMLElement
+      expect(main).toBeTruthy()
+      main.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
+      await flushUi()
+
+      expect(railEl().classList.contains('mt-workbench__rail--drawer')).toBe(true)
     })
   })
 })

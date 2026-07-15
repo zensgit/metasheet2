@@ -136,8 +136,8 @@ describe('MetaSheetPermissionManager', () => {
 
     let text = container!.textContent ?? ''
     expect(text).toContain('管理访问权限')
-    expect(text).toContain('为可授权人员、成员组或角色覆盖表级访问权限')
-    expect(text).toContain('表访问权限')
+    expect(text).toContain('为可授权人员、成员组或角色覆盖数据表级访问权限')
+    expect(text).toContain('数据表访问权限')
     expect(text).toContain('字段权限')
     expect(text).toContain('视图权限')
     expect(text).toContain('当前访问权限')

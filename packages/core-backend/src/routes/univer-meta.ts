@@ -74,7 +74,8 @@ import { createPersonMemberResolver, personRestrictGroupIds, resolvePersonAssign
 import { resolveUserDisplayNames } from '../multitable/user-display'
 import { loadHistoryBatchSummaries, loadHistoryBatchDetail, estimateHistoryHasMore } from '../multitable/history-projection'
 import { reconstructRecordsAtT } from '../multitable/record-reconstructor'
-import { precheckSheetHistoryIntegrity } from '../multitable/history-integrity-precheck'
+import { precheckSheetHistoryIntegrity, HistoryIncompleteInTxnError } from '../multitable/history-integrity-precheck'
+import { SYSTEM_PEOPLE_SHEET_DESCRIPTION, isSystemPeopleSheetDescription } from '../multitable/system-sheet-predicate'
 import { hashPreviewChanges, hashScope, hashResurrectSet, hashDeleteSet, mintRestorePreviewIdentity, mintScopedRestorePreviewIdentity, verifyRestorePreviewIdentity, verifyScopedRestorePreviewIdentity, mintPitRevertPreviewIdentity, verifyPitRevertPreviewIdentity, mintPitResetPreviewIdentity, verifyPitResetPreviewIdentity, mintConfigRestorePreviewIdentity, verifyConfigRestorePreviewIdentity, hashLossSummary, type UncreatePlan, hashUncreatePlan, mintConfigUncreatePreviewIdentity, verifyConfigUncreatePreviewIdentity, type UndeletePlan, hashUndeletePlan, mintConfigUndeletePreviewIdentity, verifyConfigUndeletePreviewIdentity, hashPermissionGrant, mintConfigPermissionRevertPreviewIdentity, verifyConfigPermissionRevertPreviewIdentity } from '../multitable/restore-preview-identity'
 import {
   recordConfigRevision,
@@ -234,7 +235,7 @@ import {
   createYjsInvalidationPostCommitHook,
   type YjsInvalidator,
 } from '../multitable/post-commit-hooks'
-import { listRecordRevisions, recordRecordRevision, type RecordRevisionEntry } from '../multitable/record-history-service'
+import { listRecordRevisions, recordRecordRevision, recordRecordRevisionsBatch, recordVersionMarker, type RecordRevisionEntry, type RecordRevisionInput } from '../multitable/record-history-service'
 import { replayInboundLinks, isRecordUndeleteInboundEnabled } from '../multitable/inbound-link-replay'
 import { countInboundLinkCaptureRows, insertInboundLinkTombstones } from '../multitable/tombstone-capture'
 
@@ -462,8 +463,14 @@ type QueryFn = (sql: string, params?: unknown[]) => Promise<{ rows: unknown[]; r
 
 const DEFAULT_BASE_ID = 'base_legacy'
 const DEFAULT_BASE_NAME = 'Migrated Base'
+// W0-1 C4 fence: fixed namespace int for the per-sheet `pg_advisory_xact_lock` guarding destructive PIT
+// recovery (reset-execute). Paired with `hashtext(sheetId)` as the per-sheet key; two-int advisory lock form
+// keeps this namespace disjoint from any other advisory lock in the codebase.
+const PIT_RECOVERY_LOCK_NS = 0x77303104 // 'w0' + marker; arbitrary fixed int4 namespace
 const SYSTEM_PEOPLE_SHEET_NAME = 'People'
-const SYSTEM_PEOPLE_SHEET_DESCRIPTION = '__metasheet_system:people__'
+// SYSTEM_PEOPLE_SHEET_DESCRIPTION + isSystemPeopleSheetDescription moved to
+// ../multitable/system-sheet-predicate (single source of truth, shared with the W0-1 isSystemSheet
+// history-exclusion predicate); imported at the top of this file.
 const ATTACHMENT_PATH = process.env.ATTACHMENT_PATH || path.join(process.cwd(), 'data', 'attachments')
 const ATTACHMENT_UPLOAD_MAX_SIZE = Number.parseInt(process.env.ATTACHMENT_MAX_SIZE ?? '', 10) || 100 * 1024 * 1024
 const multitableMulter = loadMulter()
@@ -981,10 +988,6 @@ function normalizeJsonArray(value: unknown): string[] {
     }
   }
   return []
-}
-
-function isSystemPeopleSheetDescription(value: unknown): boolean {
-  return typeof value === 'string' && value.trim() === SYSTEM_PEOPLE_SHEET_DESCRIPTION
 }
 
 function filterVisibleSheetRows<T extends { description?: unknown }>(rows: T[]): T[] {
@@ -6524,27 +6527,65 @@ async function recreateFieldFromConfig(query: TxnQuery, opts: {
     // Values: only into records that do NOT already carry this key (never overwrite a value written after
     // this recreate — the recreate above just happened in THIS same transaction, so the only way a record
     // could already have the key is a value legitimately written since — this WHERE clause is the guard).
-    // OD-6 owner ruling (design-lock §0.5 row OD-6, 2026-07-13): this site MUST WRITE REVISION — the audit
-    // had flagged it debatable-EXEMPT (Bucket D), owner overrode to MUST-WRITE. NOT YET IMPLEMENTED: this
-    // UPDATE rehydrates real user cell values from tombstones (`data = data || jsonb_build_object(...)`)
-    // but bumps no `version` and calls no `recordRecordRevision` — the exact fingerprint of the bug class
-    // this guard exists to catch. Out of scope for D-1c's five slices (A1-A8 — this is a field-op, not one
-    // of the eight); tracked as an explicit, named, non-silent gap, NOT a silent exemption — see
-    // KNOWN_REVISION_GAPS in multitable-revision-disposition-guard.guard.test.ts, pending its own rung.
-    // lock-exempt: field-undelete schema op — rehydrates the recreated field's key sheet-wide (mirror of the field-delete drop at ~6116); not a per-record user edit, and NOT(data?key) never clobbers (lock disposition only — see revision-pending below for the SEPARATE, still-open revision disposition).
-    // revision-pending: OD-6 owner-ruled MUST-WRITE, not yet implemented — tracked in KNOWN_REVISION_GAPS.
-    await query(
+    // OD-6 owner ruling (design-lock §0.5 row OD-6, 2026-07-13): this site is MUST-WRITE — the audit had
+    // flagged it debatable-EXEMPT (Bucket D), owner overrode to MUST-WRITE, because it rehydrates real user
+    // cell values from tombstones, the exact fingerprint of the bug class this guard exists to catch. The
+    // UPDATE below bumps `version` and RETURNs the post-write row so a `recordRecordRevision` can be
+    // emitted AT THE NEW version, in this SAME transaction, for every rehydrated row — the W0-1
+    // generation-aware contiguity precheck (every version in [genStart..liveVersion] has EXACTLY ONE
+    // occupant) requires this: bumping the version WITHOUT emitting a revision would leave a hole, and
+    // emitting a revision AT THE OLD (pre-bump) version would create a duplicate occupant. Zero rows
+    // affected (record hard-deleted concurrently, between the tombstone capture and this undelete) emits
+    // NOTHING — a revision with no matching data write is an FK-less ghost (the D-1c slice ②/③ attack this
+    // codebase already hardened against). `source: 'restore'` (not `restoredFromVersion`) mirrors the
+    // OTHER non-record-version-restore `source='restore'` emitters (PIT-resurrect, PIT-reset, the lossy-
+    // retype revert's `applyLossyRetypeCellRewrite` above) — `restoredFromVersion` stays reserved for the
+    // three record-version restore routes per `RecordRevisionInput`'s own doc comment.
+    // lock-exempt: field-undelete schema op — rehydrates the recreated field's key sheet-wide (mirror of the field-delete drop at ~6116); not a per-record user edit, and NOT(data?key) never clobbers.
+    // revision-emitted: field-undelete rehydration — recordRecordRevisionsBatch (batched multi-row INSERT) below, same txn.
+    const rehydrated = (await query(
       `UPDATE meta_records m
-       SET data = data || jsonb_build_object($3::text, t.value)
+       SET data = data || jsonb_build_object($3::text, t.value),
+           version = m.version + 1,
+           updated_at = now()
        FROM meta_field_value_tombstones t
        WHERE m.id = t.record_id
          AND m.sheet_id = $2
          AND t.config_revision_id = $1
          AND t.field_id = $3
          AND t.reason = 'field_delete'
-         AND NOT (m.data ? $3)`,
+         AND NOT (m.data ? $3)
+       RETURNING m.id, m.version, m.data, t.value AS rehydrated_value`,
       [deleteRevisionId, sheetId, fieldId],
-    )
+    )) as any
+    const rehydratedRows = rehydrated.rows as Array<{ id: unknown; version: unknown; data: unknown; rehydrated_value: unknown }>
+    if (rehydratedRows.length > 0) {
+      // One shared batchId across every record THIS field-undelete rehydrates (LOCK-12 — one user action =
+      // one batch). Deliberately its OWN randomUUID, distinct from `configBatchId` above: that one groups
+      // the field-order-shift + field-create CONFIG revisions (a different history channel) — reusing it
+      // here would cross-wire the two channels' batch grouping.
+      const recordBatchId = randomUUID()
+      // W0 enablement gate (owner ruling, post-merge review of #4279/#4286): this used to be a per-record
+      // `recordRecordRevision` call in a serial loop — an O(N) round-trip chain the owner ruled must become
+      // a batch write before the field-undelete flag can ever be enabled (the tombstone cap default allows
+      // up to 50,000 rows). `recordRecordRevisionsBatch` collects every rehydrated row's revision input
+      // here and emits them as ONE call (internally chunked at 1000 rows/statement), same transaction, same
+      // per-row column semantics (id/version/patch/snapshot/batchId) as the old loop — see
+      // `record-history-service.ts` for the chunking math and the deploy-window-safe column probe reuse.
+      const revisionInputs: RecordRevisionInput[] = rehydratedRows.map((row) => ({
+        sheetId,
+        recordId: String(row.id),
+        version: Number(row.version) || 0,
+        action: 'update',
+        source: 'restore',
+        actorId,
+        changedFieldIds: [fieldId],
+        patch: { [fieldId]: row.rehydrated_value as unknown },
+        snapshot: normalizeJson(row.data),
+        batchId: recordBatchId,
+      }))
+      await recordRecordRevisionsBatch(query, revisionInputs)
+    }
     // Link edges: only between two records that are BOTH currently alive (design-lock §4 R1).
     // Idempotence: meta_links has no unique on (field_id, record_id, foreign_record_id) (PK is the
     // random `id` only), so a repeat rehydration would silently duplicate edges. Guard with NOT
@@ -7147,6 +7188,10 @@ export function univerMetaRouter(): Router {
           capabilities: {
             ...capabilities,
             pitResetEnabled: (String(process.env.MULTITABLE_ENABLE_PIT_RESET ?? '').trim().toLowerCase() === 'true') && capabilities.canManageSheetAccess === true,
+            // Interim revert-execute master-gate visibility (current-risk mitigation): SAME flag-derived-capability
+            // pattern as pitResetEnabled — true iff MULTITABLE_ENABLE_SHEET_REVERT is on AND the actor is a
+            // sheet-admin, mirroring revert-preview/-execute's own canManageSheetAccess (D2) floor exactly.
+            sheetRevertEnabled: (String(process.env.MULTITABLE_ENABLE_SHEET_REVERT ?? '').trim().toLowerCase() === 'true') && capabilities.canManageSheetAccess === true,
             personalViewsEnabled: isPersonalViewsEnabled(),
           },
           capabilityOrigin,
@@ -10109,6 +10154,15 @@ export function univerMetaRouter(): Router {
   // resurrects run in ONE transaction (all-or-nothing) while field-reverts stay best-effort per-record. Inbound links
   // are NOT rebuilt (design-lock L4 A) — they re-appear when the linking record is next saved.
   const PIT_UNDELETE_ENABLED = () => String(process.env.MULTITABLE_ENABLE_PIT_UNDELETE ?? '').trim().toLowerCase() === 'true'
+  // Interim revert-execute master gate (current-risk mitigation, owner-directed). The W0-1 generation-aware
+  // contiguity fix (#4269, `3356a7ed6`) has now LANDED, closing the healed-gap + check→write race the earlier
+  // §0.6 live-vs-latest precheck (#4234) was blind to — so the correctness gap this gate was mitigating is
+  // fixed. This flag stays default-OFF regardless: turning revert-execute ON in prod is a separate, deliberate
+  // enablement step (owner-gated rollout decision), not an automatic consequence of the fix landing. Mirrors
+  // reset-execute's PIT_RESET_ENABLED() gate exactly (same String(env).trim().toLowerCase()==='true'
+  // resolution). revert-preview stays UNGATED (read-only, no writes to protect, and the FE preview UI still
+  // needs to render even while the button that would call execute is hidden).
+  const SHEET_REVERT_ENABLED = () => String(process.env.MULTITABLE_ENABLE_SHEET_REVERT ?? '').trim().toLowerCase() === 'true'
 
   router.post('/sheets/:sheetId/revert-preview', async (req: Request, res: Response) => {
     const sheetId = typeof req.params.sheetId === 'string' ? req.params.sheetId.trim() : ''
@@ -10139,7 +10193,10 @@ export function univerMetaRouter(): Router {
         summary: { visibleRevertCount: reverts.length, visibleUndeleteCount: undeleteCount, keptCreatedAfterTCount: keptCreatedAfterT, conflictCount: driftCount },
         records: reverts.map((r) => ({ recordId: r.recordId, fieldIds: r.diff.map((dd) => dd.fieldId) })),
         undeleteRecordIds: resurrects.map((r) => r.recordId),
-        undeleteSupported: PIT_UNDELETE_ENABLED(), previewIdentity,
+        // The undelete-revert face rides INSIDE revert-execute, whose SHEET_REVERT master gate (#4261) is
+        // checked FIRST — so undelete is only actually supported when BOTH gates are on. Reporting
+        // PIT_UNDELETE alone would promise an undelete that revert-execute then refuses with REVERT_DISABLED.
+        undeleteSupported: PIT_UNDELETE_ENABLED() && SHEET_REVERT_ENABLED(), previewIdentity,
       } })
     } catch (err) {
       if (isUndefinedTableError(err, 'meta_record_revisions')) return res.status(404).json({ ok: false, error: { code: 'VERSION_NOT_FOUND', message: 'No revision history available' } })
@@ -10151,6 +10208,7 @@ export function univerMetaRouter(): Router {
   })
 
   router.post('/sheets/:sheetId/revert-execute', async (req: Request, res: Response) => {
+    if (!SHEET_REVERT_ENABLED()) return res.status(403).json({ ok: false, error: { code: 'REVERT_DISABLED', message: 'Sheet revert is disabled (MULTITABLE_ENABLE_SHEET_REVERT is off).' } })
     const sheetId = typeof req.params.sheetId === 'string' ? req.params.sheetId.trim() : ''
     const parsed = z.object({ asOf: z.string().min(1), previewIdentity: z.string().min(1), confirm: z.string().optional() }).safeParse(req.body)
     if (!sheetId || !parsed.success) return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'sheetId, asOf, previewIdentity required' } })
@@ -10413,6 +10471,20 @@ export function univerMetaRouter(): Router {
 
       try {
         await pool.transaction(async ({ query }) => {
+          // W0-1 C4 FENCE (owner §6.2.4): a per-sheet advisory transaction lock, acquired as the FIRST
+          // statement of the destructive transaction. `FOR UPDATE` on scope rows alone does NOT stop a
+          // concurrent NEW-record insert (phantom) landing between the outer/preview check and this write;
+          // the advisory lock serializes recovery operations on the sheet, and combined with the in-txn
+          // re-check below closes the check→write window. Chosen over SERIALIZABLE (lowest blast radius,
+          // does not change global isolation, no serialization-failure retry loop). Namespace int is a fixed
+          // W0-1 constant; `hashtext(sheetId)` is the per-sheet key.
+          await query('SELECT pg_advisory_xact_lock($1::int, hashtext($2)::int)', [PIT_RECOVERY_LOCK_NS, sheetId])
+          // W0-1 C8 (same-txn re-check): re-run the integrity precheck INSIDE the fenced transaction. A
+          // phantom uncaptured write that committed after the outer computeSheetReset precheck (which runs
+          // BEFORE this transaction) is caught HERE — the check and the destructive write are now atomic.
+          // Refusal throws → the whole reset rolls back (zero writes) → mapped to the 409 below.
+          const inTxnIntegrity = await precheckSheetHistoryIntegrity(query, sheetId)
+          if (inTxnIntegrity.ok === false) throw new HistoryIncompleteInTxnError(inTxnIntegrity.reason)
           const baseRow = (await query('SELECT base_id FROM meta_sheets WHERE id = $1', [sheetId])).rows[0] as Record<string, unknown> | undefined
           const baseId = typeof baseRow?.base_id === 'string' ? baseRow.base_id : null
           const lockedRows = affectedIds.length > 0
@@ -10583,6 +10655,9 @@ export function univerMetaRouter(): Router {
           }
         })
       } catch (err) {
+        // W0-1 C8: the in-txn integrity re-check refused — the whole reset rolled back (zero writes). Map to
+        // the same values-free 409 as the outer precheck (no denied-record oracle, no token).
+        if (err instanceof HistoryIncompleteInTxnError) return sendHistoryIncomplete(res)
         if (err instanceof ServiceVersionConflictError || err instanceof RecordServiceVersionConflictError) {
           return res.status(409).json({ ok: false, error: { code: 'PREVIEW_IDENTITY_INVALID', message: 'Reset target changed since preview; nothing written — re-preview.' } })
         }
@@ -16420,13 +16495,19 @@ export function univerMetaRouter(): Router {
           return sendForbidden(res, 'Record editing is not allowed for this row')
         }
         const lockedBy = actorId ?? access.userId
-        // lock-mgmt: LOCK action — sets the lock columns (own canEditRecord authority above).
-        // revision-exempt: lock/unlock metadata-only — no `data` column touched, not a user-content edit.
-        await pool.query(
-          `UPDATE meta_records SET locked = true, locked_by = $2, locked_at = NOW(), version = version + 1, updated_at = NOW()
-           WHERE id = $1 AND sheet_id = $3`,
-          [recordId, lockedBy, sheetId],
-        )
+        // W0-1: the version bump is a legitimate NON-data event; write a lock marker at the new version (same
+        // txn) so the generation-aware contiguity precheck reads it as a marker, not an uncaptured-write hole.
+        await pool.transaction(async ({ query }) => {
+          // lock-mgmt: LOCK action — sets the lock columns (own canEditRecord authority above).
+          // revision-exempt: lock/unlock metadata-only — no `data` column touched, not a user-content edit.
+          const upd = await query(
+            `UPDATE meta_records SET locked = true, locked_by = $2, locked_at = NOW(), version = version + 1, updated_at = NOW()
+             WHERE id = $1 AND sheet_id = $3 RETURNING version`,
+            [recordId, lockedBy, sheetId],
+          )
+          const newVersion = Number((upd.rows[0] as { version?: unknown } | undefined)?.version)
+          if (Number.isFinite(newVersion)) await recordVersionMarker(query, { sheetId, recordId, version: newVersion, kind: 'lock', actorId: actorId ?? access.userId ?? null })
+        })
       } else {
         // UNLOCK: must pass canUnlock (locker ∨ owner ∨ sheet-admin).
         if (!canUnlock(actorId ?? access.userId ?? null, {
@@ -16435,13 +16516,19 @@ export function univerMetaRouter(): Router {
         }, capabilities)) {
           return sendForbidden(res, 'Not allowed to unlock this record')
         }
-        // lock-mgmt: UNLOCK action — clears the lock columns (own canUnlock authority above).
-        // revision-exempt: lock/unlock metadata-only — no `data` column touched, not a user-content edit.
-        await pool.query(
-          `UPDATE meta_records SET locked = false, locked_by = NULL, locked_at = NULL, version = version + 1, updated_at = NOW()
-           WHERE id = $1 AND sheet_id = $2`,
-          [recordId, sheetId],
-        )
+        // W0-1: write an unlock marker at the new version (same txn) — the version bump is a legitimate
+        // non-data event, not an uncaptured-write hole for the contiguity precheck.
+        await pool.transaction(async ({ query }) => {
+          // lock-mgmt: UNLOCK action — clears the lock columns (own canUnlock authority above).
+          // revision-exempt: lock/unlock metadata-only — no `data` column touched, not a user-content edit.
+          const upd = await query(
+            `UPDATE meta_records SET locked = false, locked_by = NULL, locked_at = NULL, version = version + 1, updated_at = NOW()
+             WHERE id = $1 AND sheet_id = $2 RETURNING version`,
+            [recordId, sheetId],
+          )
+          const newVersion = Number((upd.rows[0] as { version?: unknown } | undefined)?.version)
+          if (Number.isFinite(newVersion)) await recordVersionMarker(query, { sheetId, recordId, version: newVersion, kind: 'unlock', actorId: actorId ?? access.userId ?? null })
+        })
       }
 
       const after = await pool.query('SELECT locked, locked_by, locked_at FROM meta_records WHERE id = $1', [recordId])

@@ -2139,6 +2139,112 @@ export async function createDirectoryIntegration(input: DirectoryIntegrationInpu
 }
 
 /**
+ * Canonical Org MVP — B1 (local-provider bootstrap), #4215 §5.1.
+ *
+ * Get-or-create the ONE editable `provider='local'` directory integration that is this org's
+ * canonical organization anchor. Unlike `createDirectoryIntegration` (which is DingTalk-shaped:
+ * it requires appKey/appSecret and runs `assertDingTalkCorpAllowed`), a local integration has
+ * no external credentials and no real corp — its `corp_id` is a deterministic `local:<org_id>`
+ * that satisfies the NOT NULL column and is compatible with a future tenant-scoped directory key.
+ * It is `sync_enabled = false` and, because the DingTalk sync scheduler selects
+ * `WHERE provider = 'dingtalk'` (directory-sync-scheduler.ts), it is NEVER scheduled — proven by
+ * directory-local-provider-scheduler-exclusion.db.test.ts. The absence-sweep path is likewise
+ * unreachable for a local id (every sync entry loads the integration via `getIntegrationRow`'s
+ * `provider = 'dingtalk'` filter and throws "Directory integration not found" first, :3073) —
+ * stated as mechanism, not as a separately-tested invariant.
+ *
+ * Owner round P2-1: `corp_id` immutability for a `provider='local'` row is NOT inherited from the
+ * #4181 `updateDirectoryIntegration` guard — that guard's precursor, `getIntegrationRow`, hard-
+ * filters `WHERE provider = 'dingtalk'`, so a local row's id never reaches it and the guard never
+ * runs for one. The actual guarantee here has two independent halves, both required:
+ *   1. DB — the `local_integration_corp_id_shape` CHECK constraint (this migration's sibling,
+ *      zzzz20260715090000) proves only the CONSISTENCY RELATION `corp_id = 'local:' || org_id`
+ *      for every `provider='local'` row; it does NOT by itself block a rewrite, because a single
+ *      UPDATE that changes BOTH `org_id` and `corp_id` together, keeping that relation, still
+ *      satisfies the CHECK.
+ *   2. API — the B2 write surface must never accept client-submitted `org_id` or `corp_id` on a
+ *      local integration, closing exactly the gap half 1 leaves open.
+ * Neither half alone is "immutable"; only together do they prevent a local row's tenant anchor
+ * from being silently re-tagged.
+ *
+ * Idempotent + concurrency-safe: returns the existing active local integration if present;
+ * otherwise inserts one. Two concurrent callers for the same org cannot both create a row — the
+ * partial unique index `one_active_local_integration_per_org` makes the loser's INSERT raise a
+ * unique_violation (23505), which we catch and resolve by re-reading the winner.
+ */
+export async function getOrCreateLocalIntegration(
+  orgId: string = DEFAULT_ORG_ID,
+): Promise<DirectoryIntegrationSummary> {
+  const normalizedOrgId = normalizeText(orgId) || DEFAULT_ORG_ID
+
+  const existing = await selectActiveLocalIntegration(normalizedOrgId)
+  if (existing) return summarizeIntegration(existing)
+
+  const localCorpId = `local:${normalizedOrgId}`
+  try {
+    const result = await query<DirectoryIntegrationRow>(
+      `INSERT INTO directory_integrations (
+         org_id, provider, name, status, corp_id, config, sync_enabled, schedule_cron, schedule_timezone,
+         default_deprovision_policy, created_at, updated_at
+       )
+       VALUES ($1, 'local', $2, 'active', $3, $4::jsonb, false, NULL, NULL, 'mark_inactive', NOW(), NOW())
+       RETURNING id, org_id, provider, name, status, corp_id, config, sync_enabled, schedule_cron, schedule_timezone,
+                 default_deprovision_policy, last_sync_at, last_success_at, last_error, created_at, updated_at`,
+      [
+        normalizedOrgId,
+        'Local organization',
+        localCorpId,
+        JSON.stringify({ mode: 'editable', source: 'local' }),
+      ],
+    )
+    const created = summarizeIntegration(result.rows[0])
+    try {
+      const { auditLog } = await import('../audit/audit')
+      await auditLog({
+        actorId: 'system',
+        actorType: 'system',
+        action: 'directory.local_integration.bootstrap',
+        resourceType: 'directory-integration',
+        resourceId: created.id,
+        meta: { orgId: normalizedOrgId, provider: 'local', corpId: localCorpId },
+      })
+    } catch (error) {
+      // Owner round P3: `auditLog` itself never rejects (by contract) — the only failure this
+      // catch can see is the dynamic `import('../audit/audit')` itself (e.g. a broken module
+      // graph). That must not be silently swallowed, but it also must not fail row creation:
+      // the row is already committed, so this stays best-effort and the function still returns
+      // normally below. Values-free: integrationId + orgId + an error summary only — no config,
+      // no corp values beyond the already-derived id fields.
+      logger.warn(`Failed to import audit module after local integration bootstrap: ${readErrorMessage(error, 'unknown error')}`, {
+        integrationId: created.id,
+        orgId: normalizedOrgId,
+      })
+    }
+    return created
+  } catch (error) {
+    // Concurrency: another caller won the race and created the one active local integration
+    // (Postgres unique_violation on `one_active_local_integration_per_org`). Re-read the winner.
+    if (isUniqueViolation(error)) {
+      const winner = await selectActiveLocalIntegration(normalizedOrgId)
+      if (winner) return summarizeIntegration(winner)
+    }
+    throw error
+  }
+}
+
+async function selectActiveLocalIntegration(orgId: string): Promise<DirectoryIntegrationRow | null> {
+  const result = await query<DirectoryIntegrationRow>(
+    `SELECT id, org_id, provider, name, status, corp_id, config, sync_enabled, schedule_cron, schedule_timezone,
+            default_deprovision_policy, last_sync_at, last_success_at, last_error, created_at, updated_at
+     FROM directory_integrations
+     WHERE org_id = $1 AND provider = 'local' AND status = 'active'
+     LIMIT 1`,
+    [orgId],
+  )
+  return result.rows[0] ?? null
+}
+
+/**
  * Thrown by `updateDirectoryIntegration` when a generic integration-form save tries to change
  * `corp_id` once it is already set — see the guard's comment there (org-transfer Phase 1 §12.1)
  * for why this is blocked. The rule is absolute (no synced-records probe): once set, corp_id is

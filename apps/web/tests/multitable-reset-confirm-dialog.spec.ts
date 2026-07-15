@@ -111,8 +111,8 @@ describe('ResetConfirmDialog — T8-2 Reset UI', () => {
     expect(q('[data-test="reset-entry"]')?.textContent?.trim()).toBe('重置到 2026-06-20T00:00:00Z…')
     ;(q('[data-test="reset-entry"]') as HTMLButtonElement).click()
     await waitUntil(() => !!q('[data-test="reset-confirm-warn"]'))
-    expect(q('.reset-confirm__title')?.textContent).toBe('将表重置到 2026-06-20T00:00:00Z')
-    expect(q('.reset-confirm-modal')?.getAttribute('aria-label')).toBe('将表重置到某个时间点')
+    expect(q('.reset-confirm__title')?.textContent).toBe('将数据表重置到 2026-06-20T00:00:00Z')
+    expect(q('.reset-confirm-modal')?.getAttribute('aria-label')).toBe('将数据表重置到某个时间点')
     expect(q('.reset-confirm__close')?.getAttribute('aria-label')).toBe('取消')
     // destructive warn: 3 bolded words (重置/并不是/回退) + the deleteCount-embedded clause, all typed
     const warn = q('[data-test="reset-confirm-warn"]')!.textContent ?? ''
@@ -166,10 +166,10 @@ describe('ResetConfirmDialog — T8-2 Reset UI', () => {
       mounted.pop()!.unmount(); document.body.innerHTML = ''
     }
     await errCase(403, 'RESET_DISABLED', '此处未启用重置。')
-    await errCase(403, undefined, '你没有权限重置此表。')
+    await errCase(403, undefined, '你没有权限重置此数据表。')
     await errCase(409, 'RESET_BLOCKED', '某条目标记录被锁定或拒绝 — 未做任何更改。')
-    await errCase(409, undefined, '表在预览之后已发生变化 — 请重新预览后再试。')
-    await errCase(413, undefined, '此表记录过多，无法一次性重置。')
+    await errCase(409, undefined, '数据表在预览之后已发生变化 — 请重新预览后再试。')
+    await errCase(413, undefined, '此数据表记录过多，无法一次性重置。')
     await errCase(400, undefined, '请输入 "reset" 以确认。') // 'reset' literal preserved even in zh
     await errCase(999, undefined, '重置未能完成。请重新预览后再试。')
   })

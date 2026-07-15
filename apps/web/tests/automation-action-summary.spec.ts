@@ -71,7 +71,7 @@ describe('automationActionSummary (G-B2-25)', () => {
     it('reports the target sheet and field-value count', () => {
       const snapshot: ActionSummarySnapshot = { type: 'create_record', createRecord: { targetSheetId: 'sheet_2', fieldValueCount: 2 } }
       expect(summarizeAutomationAction(snapshot, false)).toBe('Create record: target sheet sheet_2, 2 field values')
-      expect(summarizeAutomationAction(snapshot, true)).toBe('创建记录：目标表 sheet_2，2 个字段值')
+      expect(summarizeAutomationAction(snapshot, true)).toBe('创建记录：目标数据表 sheet_2，2 个字段值')
     })
 
     it('is honest when the target sheet is set but no field values are authored', () => {

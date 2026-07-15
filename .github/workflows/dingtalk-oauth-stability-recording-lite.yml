@@ -1,4 +1,9 @@
 name: DingTalk OAuth Stability Recording (Lite)
+# DT-CLOSE-01B: this is a METRICS-ONLY OAuth-stability recording. Its verdict is the OAuth
+# state-machine signal (/metrics/prom, authenticated) + /health + root-disk headroom. The
+# Alertmanager + webhook alert-DELIVERY topology is NOT deployable from current main and is
+# DEFERRED (the check soft-reports it, the verdict does not depend on it). This workflow does
+# NOT claim alert-delivery observability is restored — only OAuth-stability metrics observability.
 
 on:
   schedule:

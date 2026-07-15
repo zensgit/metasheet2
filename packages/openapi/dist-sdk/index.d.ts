@@ -15555,6 +15555,8 @@ export interface components {
             canExport: boolean;
             /** @description True only when MULTITABLE_ENABLE_PIT_RESET is on AND the actor has canManageSheetAccess; populated by GET /context (absent on other capability responses). Drives the FE Reset entry visibility. */
             pitResetEnabled?: boolean;
+            /** @description True only when MULTITABLE_ENABLE_SHEET_REVERT is on AND the actor has canManageSheetAccess; populated by GET /context (absent on other capability responses). Drives the FE Revert entry visibility (interim revert-execute master gate, current-risk mitigation). */
+            sheetRevertEnabled?: boolean;
         };
         /** @enum {string} */
         MultitableSheetPermissionAccessLevel: "read" | "write" | "write-own" | "admin";
