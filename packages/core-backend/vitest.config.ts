@@ -332,6 +332,9 @@ export default defineConfig({
       // P2 durable-delivery S2-b dispatch loop (registry + tick) — real-DB. Excluded HERE so it cannot
       // skip-green in the no-DB lane; whole-file wired into plugin-tests.yml. Two-point wiring.
       'tests/integration/multitable-automation-dispatch-loop-realdb.test.ts',
+      // P2 durable-delivery S4-a producer atomic enqueue — real-DB (txn atomicity + fan-out + e2e tick).
+      // Excluded HERE so it cannot skip-green in the no-DB lane; whole-file wired into plugin-tests.yml.
+      'tests/integration/multitable-automation-outbox-enqueue-realdb.test.ts',
       // W0 tail (#4279, owner MUST-WRITE OD-6, design-lock §0.5 2026-07-13): field-undelete rehydration
       // revision goldens — proves `recreateFieldFromConfig`'s tombstone-value rehydration UPDATE bumps
       // `version` and emits a `recordRecordRevision` AT THE NEW version, same transaction, for every
