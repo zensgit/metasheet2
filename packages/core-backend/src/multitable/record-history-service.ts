@@ -236,8 +236,16 @@ export async function recordRecordRevisionsBatch(query: QueryFn, inputs: RecordR
 /**
  * W0-1 (OD-W0-1 mechanism (b)) — record a lock/unlock version bump as a chain marker in the independent
  * `meta_record_version_markers` table, so the generation-aware contiguity precheck does not read the bump
- * as an uncaptured-data-write HOLE. `kind` is 'lock' | 'unlock'. Idempotent (ON CONFLICT DO NOTHING against
- * the UNIQUE(sheet_id, record_id, version) constraint), so a retry never duplicates.
+ * as an uncaptured-data-write HOLE. `kind` is 'lock' | 'unlock'.
+ *
+ * W0-1 v3.7 (owner-ratified #4331 §9.3 — "loud marker"): this INSERT no longer carries
+ * `ON CONFLICT ... DO NOTHING`. Migration `zzzz20260715160000_add_meta_record_chain_seq` DROPPED the
+ * cross-generation `UNIQUE (sheet_id, record_id, version)` this used to target — that constraint silently
+ * SWALLOWED a resurrected generation's marker (a new generation legally reuses version numbers the FIRST
+ * generation also marked), which left the lock/unlock version bump committed while its marker vanished, and
+ * the strict contiguity walk then saw an unexplained hole in the new generation (false refusal of a healthy
+ * record). A genuine write conflict (there is no longer any unique key to violate under normal operation)
+ * now propagates and fails the enclosing lock/unlock transaction loudly instead of swallowing silently.
  *
  * Deploy-window safe (mirrors `hasRestoredFromVersionColumn`): the marker table may not exist yet in a
  * rolling deploy (the zzzz migration lands mid-process). A missing table is probed via a txn-safe
@@ -267,6 +275,26 @@ export async function hasVersionMarkerTable(query: QueryFn): Promise<boolean> {
   return false
 }
 
+let chainSeqColumnPresent = false
+/**
+ * W0-1 v3.7 (owner-ratified #4331 §9.3 / §1.1) — existence probe for the `seq` column shared by
+ * `meta_record_revisions` and `meta_record_version_markers` (migration
+ * `zzzz20260715160000_add_meta_record_chain_seq`). Mirrors `hasVersionMarkerTable`'s txn-safe
+ * information_schema pattern so the STRICT (`MULTITABLE_HISTORY_CONTIGUITY_STRICT`) precheck path can fail
+ * CLOSED during a rolling deploy window instead of crashing on an undefined column (42703).
+ */
+export async function hasChainSeqColumn(query: QueryFn): Promise<boolean> {
+  if (chainSeqColumnPresent) return true
+  const res = await query(
+    `SELECT 1 FROM information_schema.columns WHERE table_name = 'meta_record_revisions' AND column_name = 'seq' AND table_schema = ANY(current_schemas(false)) LIMIT 1`,
+  )
+  if ((res.rows as unknown[]).length > 0) {
+    chainSeqColumnPresent = true
+    return true
+  }
+  return false
+}
+
 export async function recordVersionMarker(
   query: QueryFn,
   input: { sheetId: string; recordId: string; version: number; kind: 'lock' | 'unlock'; actorId?: string | null },
@@ -274,8 +302,7 @@ export async function recordVersionMarker(
   if (!(await hasVersionMarkerTable(query))) return
   await query(
     `INSERT INTO meta_record_version_markers (id, sheet_id, record_id, version, kind, actor_id)
-     VALUES (gen_random_uuid(), $1, $2, $3, $4, $5)
-     ON CONFLICT ON CONSTRAINT uq_meta_record_version_markers_sheet_record_version DO NOTHING`,
+     VALUES (gen_random_uuid(), $1, $2, $3, $4, $5)`,
     [input.sheetId, input.recordId, input.version, input.kind, input.actorId ?? null],
   )
 }
