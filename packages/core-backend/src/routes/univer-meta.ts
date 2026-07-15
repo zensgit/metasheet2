@@ -10154,11 +10154,11 @@ export function univerMetaRouter(): Router {
   // resurrects run in ONE transaction (all-or-nothing) while field-reverts stay best-effort per-record. Inbound links
   // are NOT rebuilt (design-lock L4 A) — they re-appear when the linking record is next saved.
   const PIT_UNDELETE_ENABLED = () => String(process.env.MULTITABLE_ENABLE_PIT_UNDELETE ?? '').trim().toLowerCase() === 'true'
-  // Interim revert-execute master gate (current-risk mitigation, owner-directed). The W0-1 generation-aware
-  // contiguity fix (#4269, `3356a7ed6`) has now LANDED, closing the healed-gap + check→write race the earlier
-  // §0.6 live-vs-latest precheck (#4234) was blind to — so the correctness gap this gate was mitigating is
-  // fixed. This flag stays default-OFF regardless: turning revert-execute ON in prod is a separate, deliberate
-  // enablement step (owner-gated rollout decision), not an automatic consequence of the fix landing. Mirrors
+  // Interim revert-execute master gate (current-risk mitigation, owner-directed). The first-cut W0-1
+  // generation-aware precheck (#4269) improves on #4234, but exact committed-event anchoring, the all-writer
+  // fence, trust checkpoints, target-generation validation, and Revert's outer transaction are still required
+  // before destructive recovery is enablement-ready. This flag therefore stays default-OFF; turning it on is a
+  // separate owner-gated rollout decision after the complete W0 trust correction lands and passes staging. Mirrors
   // reset-execute's PIT_RESET_ENABLED() gate exactly (same String(env).trim().toLowerCase()==='true'
   // resolution). revert-preview stays UNGATED (read-only, no writes to protect, and the FE preview UI still
   // needs to render even while the button that would call execute is hidden).
