@@ -198,14 +198,14 @@ needed since both changed files are already covered).
 
 - **State logic**: verified by the vitest suite above, run for real in this environment (see PR body for
   the actual command + output).
-- **CSS positioning / shadow / z-index / actual visual overlay-vs-push behavior**: **not** verified in a
-  real browser in this environment. Per this task's instructions and this repo's standing rule that
-  jsdom cannot be trusted for style claims (`feedback_css_verify_in_real_browser_not_jsdom.md`), no claim
-  is made here that the drawer visually renders correctly, that `--ms-shadow-pop`/`--ms-bg-card` resolve
-  to the expected computed values, or that it looks correct in dark mode. This is flagged explicitly as a
-  **coordinator verification gap** — the P2-2b PR (#4264) used a vite-harness + Playwright
-  `getComputedStyle` pattern for exactly this kind of claim; the same pattern should be applied here
-  before treating the CSS leg as proven, not just the state-machine leg.
+- **CSS positioning / shadow / z-index / overlay-vs-push（gap 已闭合 — Rev 2 勘误）**: 起草时标注的
+  coordinator verification gap 已在 #4290 落地前闭合,证据两腿:
+  (1) 实现侧在**真 Chromium** 跑 `apps/web/verification/rail-drawer.spec.ts`（vite harness 挂真 tokens.css,
+  Playwright `getComputedStyle`,含正控:default/collapsed 断言 `position: static` 无阴影,drawer 断言
+  `position: absolute`/`z-index`/真 `--ms-shadow-pop` 阴影/不透明底,及 `calc(100vw-32px)` 窄视口收敛);
+  (2) #4290 门禁 round-1 **独立重跑**同一 Playwright 验证并证其承重(harness `position:absolute→static`
+  变异必红),且逐字节 diff 了 harness CSS vs 组件源(防复制漂移空转)。残余(如实):harness 是手工复制的
+  CSS(现时忠实),`multitable-browser-verify.yml` 触发路径已在 #4290 加入 `MultitableWorkbench.vue`。
 - **No new hardcoded hex**: every new/changed CSS declaration in this slice uses an existing `--ms-*`
   token (`--ms-bg-card`, `--ms-shadow-pop`, `--ms-radius-lg`) or a unitless/px layout value in the same
   "raw px for sizing, not color" carve-out P2-2b already used (§6 of the 2b MD) — grep-checkable:

@@ -34,7 +34,7 @@
 - **自动化编辑器**——同上，保持头部启动入口。
 - **权限管理器改造**——`MetaRecordPermissionManager` 保持为**头部按钮开出的模态**；**不**把权限编辑塞成检查器面板（权限是管理员高级动作，roadmap §3 不变量 2：高级配置只在管理员设置面出现）。本文只承诺权限入口**继续存在**于检查器头部。
 - **sheet 级 PIT Reset / Undelete**（破坏性、`MULTITABLE_ENABLE_PIT_RESET` gated）——**不进**记录检查器；那是 sheet 级危险动作，归 W5 逐 flag smoke。检查器只做**记录级** revert。
-- **响应式窄屏行为的实现**——归 **P2-2c**（P2-2 母锁 §5 独立门；P2-2b §8.4 明文）。本文只**协同定义**左右两栏在窄屏的对称契约（§3.4），实现切片与 P2-2c 同门。
+- **响应式（Rev 2 勘误）**——左栏 P2-2c **已完成**（#4290）；**右栏窄屏实现 = 本锁 S7（owner 裁归 W2）**，与左栏共用 `RAIL_NARROW_BREAKPOINT=768` 常量；1024px 阈值若要 = 另立 P2-2d 同步左栏（§3.4）。
 - **grid 内联编辑 / 看板 / 表单等其它记录表面**——不动；检查器是 grid 行选中后的右侧面。
 - **新术语字符串以外的既有措辞改写**——归 W1 术语映射切片，本文不碰。
 
@@ -48,8 +48,8 @@
 |---|---|---|---|
 | **壳** `MetaRecordInspector.vue`（**新**） | `MetaRecordDrawer` 的 tablist + `activeTab` 逻辑（L44-61）+ header actions（L10-41）+ lock banner（L63-74） | **新建壳**：承接 tab 切换、头部动作、lock banner；把两个面板主体**下放**为子组件；收编 `showComments` 分支 | 无（纯组合层） |
 | **字段面板** `MetaRecordFieldsPanel.vue`（抽取） | `MetaRecordDrawer` 的 `details` 分支主体（L75-312：`visibleFields` 循环 + 全字段编辑器 + per-field AI shortcut + per-field comment anchor） | **抽取**（行为等价搬出，冻结基线：抽出前后既有 drawer spec 逐条绿） | `props.record` / `fields` / `fieldPermissions` / `attachmentSummariesByField` 等**现有 props**；`emit('patch'|'ai-*'|'comment-field'|'open-*-picker'|'run-button')` 原样上抛 |
-| **动态/历史面板** `MetaRecordHistoryPanel.vue`（抽取） | `MetaRecordDrawer` 的 `history` 分支主体（L313-368：`loadRecordHistory` + `historyFieldDiffs` + 逐字段恢复选择 + restore 按钮）| **抽取**；恢复动作按 OD-W2-4 迁预览优先流 | `apiClient.listRecordHistory(sheetId, recordId)` → `MetaRecordRevision[]`（服务端已 field-mask，§4） |
-| **评论面板** `MetaCommentsPanel.vue`（抽取） | `MetaCommentsDrawer.vue` 的 **body**（thread 列表 + composer + reactions + presence；L15+，不含它自己的 `__header` 抽屉外壳与 close 钮） | **抽取 body**；`MetaCommentsDrawer` 的 inbox `RouterLink`（→ `multitable-comment-inbox` 路由）**上移**到检查器头部；`MetaCommentsDrawer` 退成薄壳或退役（**OD-W2-7**） | `commentsState.*`（既有 `useMultitableComments` 等）+ `selectedRecordCommentsScope`（既有，服务端 G-8 gated） |
+| **动态/历史面板** `MetaRecordHistoryPanel.vue`（抽取） | `MetaRecordDrawer` 的 `history` 分支主体（L313-368：`loadRecordHistory` + `historyFieldDiffs` + 逐字段恢复选择 + restore 按钮）| **抽取**；恢复动作**复用既有 preview→dialog→execute 流**（OD-W2-4=a；预览优先已是现状，禁止新增 direct restore 路径） | `apiClient.listRecordHistory(sheetId, recordId)` → `MetaRecordRevision[]`（服务端已 field-mask，§4） |
+| **评论面板** `MetaCommentsPanel.vue`（抽取） | `MetaCommentsDrawer.vue` 的 **body**（thread 列表 + composer + reactions + presence；L15+，不含它自己的 `__header` 抽屉外壳与 close 钮） | **抽取 body**；`MetaCommentsDrawer` 的 inbox `RouterLink`（→ `multitable-comment-inbox` 路由）**上移**到检查器头部；`MetaCommentsDrawer` 退成 **deprecated 薄兼容壳**（OD-W2-7=b，owner 裁；**不退役**——barrel export 面） | `commentsState.*`（既有 `useMultitableComments` 等）+ `selectedRecordCommentsScope`（既有，服务端 G-8 gated） |
 | **附件面板** `MetaRecordAttachmentsPanel.vue`（**新**，纯组合） | 无单独来源——今天附件**只在 attachment 字段内联**（`MetaAttachmentList`，drawer L233-262） | **新建**：**只遍历 layer-2（property-hidden）与 layer-3（RBAC field-mask）均可见的 attachment 字段**——即以 `visibleFields`∩权限可见集为迭代源，**禁止**遍历全部字段或直接枚举 `attachmentSummariesByField` 的 keys（owner 复审 Medium-3：summary keys 可能含不可见字段 ⇒ 掩码旁路）。**复用** `MetaAttachmentList` + 既有 `uploadFn`/`deleteAttachmentFn`。**必配两条负例 golden**：(N1) property-hidden 的 attachment 字段其附件不得渲染；(N2) RBAC-denied 字段同断言（见 §8） | `props.attachmentSummariesByField`（已传入 drawer）——**零新 fetch**；下载 URL 走既有 F2 gated 签发 |
 
 **为什么壳是新建而非改 drawer**：今天 `MetaRecordDrawer` 同时是「壳 + 字段面板 + 历史面板」三合一的 1163 行组件。把壳单拎出来后，(a) 评论/附件面板能作平级 sibling 挂进去（今天它们进不去——评论是另一个抽屉、附件散在字段里）；(b) 字段/历史面板成为可独立测试的纯呈现单元；(c) `activeTab` 从二值扩为四值由壳统一管，ARIA tab pattern 一处补全（§3.3）。
@@ -108,7 +108,7 @@
 ### §4.3 `restored_from_version` 回链（R11）——已知 gap，列 OD
 
 - **实证核验**：R11 回链字段 `restoredFromVersion` 今天在**base 级** `HistoryChange` 类型（`types.ts` L389-391，`HistoryCenterModal` 渲染 badge），**不在**记录抽屉的 `MetaRecordRevision` 类型（L353-368）。故记录检查器 history 面板**当前无法**渲染 R11 恢复 badge。
-- **处置 = OD-W2-5**：(a) 给记录历史读 API + `MetaRecordRevision` 加 `restoredFromVersion`（小数据形改，与 base 中心口径一致，badge 就地渲染）；或 (b) history 面板对 `source='restore'` 条目**链出**到 base History Center。本文**不选**。
+- **处置 = OD-W2-5**：(a) 给记录历史读 API + `MetaRecordRevision` 加 `restoredFromVersion`（小数据形改，与 base 中心口径一致，badge 就地渲染）；或 (b) history 面板对 `source='restore'` 条目**链出**到 base History Center。**owner 已裁 = (a)**（§6bis）。
 
 ### §4.4 字段掩码 goldens（面板不得造掩码旁路）
 
@@ -154,14 +154,14 @@
 
 ## §6 决策台账原文（Rev 1 选项与推荐，供追溯；裁决以 §6bis 为准）
 
-| # | 决策 | 选项 | 推荐（待 owner 确认，非决定） |
+| # | 决策 | 选项 | Rev 1 推荐（**historical/superseded——一切以 §6bis 终裁为准**） |
 |---|---|---|---|
 | **OD-W2-1** | 面板承载：**tab 还是 accordion(分区)** | (a) 横向 tab（沿用今天 details/history 二 tab 的心智）· (b) 纵向分区可折叠（字段常驻、动态/评论/附件折叠） | **(a) tab**——四面板中「字段」与「历史+评论+附件」高度差极大，accordion 会导致长滚动与焦点跳动；tab 复用既有 tablist 与既有 spec。 |
 | **OD-W2-2** | **缺省面板**（打开检查器时选中哪个） | (a) 恒 字段 · (b) 记住上次 · (c) 上下文驱动（`commentId` 深链→评论，否则字段） | **(c)**：`commentId` 存在→评论（=今天行为）；否则字段。不引入跨会话「记住上次」存储（那是新存储面 = owner 决策）。 |
 | **OD-W2-3** | **wide 屏版式**：push 还是 overlay | (a) push（grid 让位，=今天 flex 行为）· (b) overlay（浮于 grid 上）· (c) 提供 pin 切换钮 | **(a) push**——最小 diff、与今天一致；pin 切换（c）留作 W2 之后 polish，不在首刀。 |
 | **OD-W2-4** | **PIT Revert UI 位置**：史面板内嵌 vs 独立 | (a) 内嵌 history 面板（就地预览优先恢复，复用 `RestorePreviewDialog`）· (b) 独立恢复表面（history 面板只读、恢复另开） | **(a) 内嵌**——「围绕一条记录闭环」正是 roadmap W2 目标；sheet 级破坏性 Reset 仍 OUT（§1.2）。**注**：无论 a/b，「预览优先 + execute 零写入」是硬前置非 OD（§4.2）。 |
 | **OD-W2-5** | **R11 `restored_from_version` 回链**呈现 | (a) 扩记录历史 API+`MetaRecordRevision` 加 `restoredFromVersion`，就地 badge · (b) `source='restore'` 条目链出 base History Center · (c) 首刀不做回链 | **(a)**——与 base 中心口径一致、就地可读；是小数据形改（服务端 + 类型 + 渲染），单独小刀，非 W2 首刀阻塞。 |
-| **OD-W2-6** | **窄屏左右两栏关系**（与 P2-2c 协同） | (a) 两栏 overlay 可同屏共存 · (b) 互斥（开右收左）· (c) 全交给 P2-2c 定 | **(a) 可共存但都 overlay**（≤1024px），保证 grid 最小宽度与零横向滚动；最终与 P2-2c 同门实现、届时复核。 |
+| **OD-W2-6** | **窄屏左右两栏关系**（与 P2-2c 协同） | (a) 两栏 overlay 可同屏共存 · (b) 互斥（开右收左）· (c) 全交给 P2-2c 定 | ~~Rev 1 推荐 (a) 1024px 共存~~ **已被 owner 否决;终裁 = (b) 互斥 @768**（§6bis） |
 | **OD-W2-7** | `MetaRecordDrawer`/`MetaCommentsDrawer` 抽取后的**去留** | (a) 退役 · (b) deprecated 薄兼容壳 · (c) 原样保留 | **owner 已裁 = (b)**（§6bis）。**勘误（owner Medium-4）**：两组件均从模块入口 barrel export（`apps/web/src/multitable/index.ts:~45`），**不能只按仓内调用点决定删除**（存在仓外/插件消费可能）；W2 v1 一律保留 deprecated 薄壳委托到检查器，真正移除留待带消费方核查的后续 major 清理。 |
 | **OD-W2-8** | **审批投影是否进检查器** | (a) 不进（非目标，本文默认）· (b) 待审批读投影契约就绪后另立面板 | **(a) 不进**——今天无审批读投影组件，进 = 新数据路径违反 HI-1；`open-automation`/审批入口保持头部启动钮。 |
 
@@ -176,9 +176,9 @@
 | 刀 | 内容 | 前置 | 逐刀验证 | 量级 |
 |---|---|---|---|---|
 | **S1** | 抽 `MetaRecordFieldsPanel`（drawer `details` 主体行为等价搬出） | ratify | 既有 `multitable-record-drawer.spec.ts`/`-button`/`-duplicate`/`-t5-migration` 逐条绿；字段编辑器/AI/comment-anchor emit 逐一等价 | 1 PR |
-| **S2** | 抽 `MetaRecordHistoryPanel`（drawer `history` 主体搬出，恢复暂留直接流） | S1 | 既有 `meta-record-drawer-history-diff.spec.ts` / `meta-record-drawer-restore.spec.ts` 绿；掩码不变量保留 | 1 PR |
-| **S3** | 新建 `MetaRecordInspector` 壳：承接 tablist（补全 ARIA tab pattern §3.3）+ 头部动作 + lock banner；挂 S1/S2 两面板；drawer 退成壳的调用者或退役 | S1,S2 | 新 `multitable-record-inspector.spec.ts`（tab 切换 / roving tabindex 恰一个 0 / aria-controls↔tabpanel / 面板计数守恒）；键盘用例 | 1 PR |
-| **S4** | 抽 `MetaCommentsPanel`（`MetaCommentsDrawer` body 抽出），挂第 3 tab；收编 `showComments` 分支（右边缘只剩一个面）；inbox link 上移头部；按 OD-W2-7 处置旧抽屉 | S3 | 既有 `multitable-comments-drawer.spec.ts` / `multitable-comment-*` 断言吸收无丢；「无双抽屉」用例；G-8 前端镜像不变 | 1 PR |
+| **S2** | 抽 `MetaRecordHistoryPanel`（drawer `history` 主体搬出；恢复沿用既有 preview dialog 流——现状即预览优先，**无 direct restore**） | S1 | 既有 `meta-record-drawer-history-diff.spec.ts` / `meta-record-drawer-restore.spec.ts` 绿；掩码不变量保留 | 1 PR |
+| **S3** | 新建 `MetaRecordInspector` 壳：承接 tablist（补全 ARIA tab pattern §3.3）+ 头部动作 + lock banner；挂 S1/S2 两面板；drawer 退成 **deprecated 薄壳**（OD-W2-7=b，不退役） | S1,S2 | 新 `multitable-record-inspector.spec.ts`（tab 切换 / roving tabindex 恰一个 0 / aria-controls↔tabpanel / 面板计数守恒）；键盘用例 | 1 PR |
+| **S4** | 抽 `MetaCommentsPanel`（`MetaCommentsDrawer` body 抽出），挂第 3 tab；收编 `showComments` 分支（右边缘只剩一个面）；inbox link 上移头部；旧抽屉退 **deprecated 薄壳**（OD-W2-7=b） | S3 | 既有 `multitable-comments-drawer.spec.ts` / `multitable-comment-*` 断言吸收无丢；「无双抽屉」用例；G-8 前端镜像不变 | 1 PR |
 | **S5** | 新建 `MetaRecordAttachmentsPanel`（聚合 `attachmentSummariesByField`，复用 `MetaAttachmentList`），挂第 4 tab | S3 | 新附件面板 spec（聚合计数 / 空态 / 上传删除走既有 fn）；F2 parity（§8） | 1 PR |
 | **S6** | **PIT Revert UI 接线（Rev 2 缩容）**：history 面板恢复动作**接入既有** preview→dialog→execute 流（OD-W2-4=a；预览优先已是现状，非迁移）；`HISTORY_INCOMPLETE` 标注沿既有 dialog 呈现 | S2,S3 | 既有 restore 测试全绿 + 面板发起路径用例（无预览不得 execute 的既有守卫不放松） | 1 PR |
 | **S7** | **响应式（归 W2，owner 裁）**：右检查器 ≤768px overlay 化 + 与左 rail **互斥**（OD-W2-6=b），同一 `RAIL_NARROW_BREAKPOINT` 常量、零阈值分叉；grid 最小宽、零横向滚动 | S1（P2-2c 已落） | 真浏览器（§8）：768px 无溢出、互斥切换、焦点环 | 1 PR |
@@ -231,7 +231,7 @@
 - 不主张 R11 回链今天能在记录检查器渲染——**实证核验** `restoredFromVersion` 不在 `MetaRecordRevision`（§4.3 = OD-W2-5）。
 - 不主张改了 `baseId`/`sheetId`/`recordId` 契约——恰相反，§术语把不改名钉为不变量（roadmap §3）。
 - 不主张检查器新增了任何数据路径——HI-1（§5）钉零新增，parity + 变异证明是其门。
-- 不主张响应式在 W2 内做——§3.4 归 P2-2c，S7 同门。
+- 响应式右栏 = **W2 S7**（owner 裁归 W2）；左栏 P2-2c 已落（#4290）——本文不再声称「归 P2-2c」。
 
 ---
 
@@ -242,6 +242,6 @@
 3. **预览优先**：恢复是否**不可能**绕过预览直接 execute？（refute：删预览步 → incomplete golden 红。）
 4. **ARIA 诚实性**：每个 `role`/`aria-controls`/`aria-selected` 有对应键位 + 测试？roving tabindex 在 props 突变（面板集合变）下 clamp？不声称 typeahead/拖拽？
 5. **抽取等价**：S1/S2/S4 抽出前后既有 spec 逐条绿、emit/payload/gating diff 为空（逐块对照贴 PR）？
-6. **无双抽屉**：S4 后右边缘是否只剩一个检查器（`showComments` 分支已收编，`MetaCommentsDrawer` 按 OD-W2-7 处置无残留 import）？
+6. **无双抽屉**：S4 后右边缘是否只剩一个检查器（`showComments` 分支已收编，`MetaCommentsDrawer` 保留为 deprecated 薄壳（OD-W2-7=b）——断言=workbench 不再直挂双抽屉;**薄壳的兼容 import 允许存在**）？
 7. **CI 接线真生效**：`multitable-web-guard.yml` path-filter + run 列表含新文件名？真浏览器 `multitable-browser-verify.yml` 覆盖焦点环/响应式且带正控腿？
 8. **G-10 术语**：检查器可见文案零出现 Base/Sheet/recordId 字样（普通 UI 只显示 记录/工作区/数据表/视图）？
