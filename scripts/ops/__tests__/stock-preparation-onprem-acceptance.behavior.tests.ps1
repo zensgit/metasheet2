@@ -230,9 +230,12 @@ try {
   # that writes noise to stderr AND a valid values-free summary to stdout must NOT abort the capture (the
   # RC-0 POWERSHELL_NATIVE_STDERR_PROMOTION failure — where 2>&1 promoted native stderr to a terminating
   # error and the smoke's summary was never read), must NOT let the stderr text contaminate the parsed
-  # summary, and must still parse PASS. Mutation guard: flip 2>$null back to 2>&1 in Invoke-SmokeCapture and
-  # the "sentinel is NOT captured" check reds (version-independent: 2>&1 merges stderr into the captured text).
-  $fakeSmoke = Join-Path ([System.IO.Path]::GetTempPath()) ("t9accept_fakesmoke_" + [guid]::NewGuid().ToString('N').Substring(0, 12) + '.mjs')
+  # summary, and must still parse PASS. Mutation guards: flip 2>$null back to 2>&1 and the sentinel check reds;
+  # hard-code the captured exit to zero and the non-zero preservation + stage fail-closed checks red.
+  $fakeSmokeRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("t9accept_fakesmoke_" + [guid]::NewGuid().ToString('N').Substring(0, 12))
+  $fakeSmokeOps = Join-Path $fakeSmokeRoot 'scripts/ops'
+  New-Item -ItemType Directory -Path $fakeSmokeOps -Force | Out-Null
+  $fakeSmoke = Join-Path $fakeSmokeOps 'stock-preparation-mvp-postdeploy-smoke.mjs'
   $sentinel = 'STDERR-LEAK-SENTINEL-7788'
   $fakeLines = @(
     "process.stderr.write('$sentinel\n')",
@@ -252,7 +255,45 @@ try {
   $capOutcome = Test-SmokeOutcome "$($cap.stdout)"
   Check "corrective-3: the stdout values-free summary still parses to PASS (8/8, clean)" ($capOutcome.ok -and $capOutcome.pass -and $capOutcome.audit -eq '8/8' -and $capOutcome.selfScan)
   Check "corrective-3: exit code preserved (0) and the token env var is cleared after capture" ($null -ne $cap -and $cap.exit -eq 0 -and -not (Test-Path Env:METASHEET_AUTH_TOKEN))
-  Remove-Item -LiteralPath $fakeSmoke -Force -ErrorAction SilentlyContinue
+
+  $nonzeroLines = @(
+    "process.stdout.write('mvpSmoke.pass=true\n')",
+    "process.stdout.write('auditActionsCovered=8/8\n')",
+    "process.stdout.write('selfScanClean=true\n')",
+    'process.exit(7)'
+  )
+  Set-Content -LiteralPath $fakeSmoke -Encoding utf8 -Value ($nonzeroLines -join "`n")
+  $nonzeroCap = Invoke-SmokeCapture -NodeArgs @($fakeSmoke) -Token $dummyToken
+  Check "corrective-3: non-zero native exit code is preserved exactly (7), never normalized to success" (
+    $nonzeroCap.exit -eq 7 -and -not (Test-Path Env:METASHEET_AUTH_TOKEN)
+  )
+
+  # Exercise the real stage boundary in a child pwsh process because Stop-WithFailure intentionally exits.
+  # A valid-looking summary with native exit 7 must still fail the stage and retain only the coarse exit code.
+  $stageHarness = Join-Path $fakeSmokeRoot 'invoke-smoke-stage.ps1'
+  $stageSummary = Join-Path $fakeSmokeRoot 'stage-summary.txt'
+  Set-Content -LiteralPath $stageHarness -Encoding utf8 -Value @'
+param(
+  [Parameter(Mandatory = $true)][string]$AcceptanceScript,
+  [Parameter(Mandatory = $true)][string]$DeployRoot,
+  [Parameter(Mandatory = $true)][string]$SummaryPath
+)
+$ErrorActionPreference = 'Stop'
+. $AcceptanceScript -PackagePath $DeployRoot -DeployRoot $DeployRoot -SummaryPath $SummaryPath *> $null
+$token = ConvertTo-SecureString 'dummy-not-a-real-token' -AsPlainText -Force
+Invoke-SmokeStage -Token $token
+'@
+  $stageOutput = & pwsh -NoProfile -File $stageHarness -AcceptanceScript $scriptPath -DeployRoot $fakeSmokeRoot -SummaryPath $stageSummary 2>&1
+  $stageExit = $LASTEXITCODE
+  $stageSummaryJsonPath = [System.IO.Path]::ChangeExtension($stageSummary, '.json')
+  $stageSummaryJson = if (Test-Path $stageSummaryJsonPath) { Get-Content $stageSummaryJsonPath -Raw | ConvertFrom-Json } else { $null }
+  Check "corrective-3: the real smoke stage fails closed on exit 7 and records only the coarse exit" (
+    $stageExit -eq 1 -and
+    $null -ne $stageSummaryJson -and
+    $stageSummaryJson.failedStage -eq 'smoke' -and
+    $stageSummaryJson.failDetail.smokeExit -eq 7 -and
+    "$stageOutput" -notmatch 'dummy-not-a-real-token'
+  )
 
   $base = [pscustomobject]@{ state = 'online'; restartTime = 3; uptime = 1000 }
 
