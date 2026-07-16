@@ -66,6 +66,25 @@ Check "acceptance default port matches the packaged on-prem environment template
   $portParam[0].DefaultValue.Extent.Text -eq $templatePortMatch.Groups[1].Value
 )
 
+# ── corrective-3: stage-6 must DELEGATE the smoke run to the summary-only helper (stdout-only, 2>$null),
+# never invoke node directly or MERGE stderr (2>&1). The behaviour test exercises the helper in isolation,
+# so it cannot catch a revert of the STAGE wiring back to `& node ... 2>&1`; pin that wiring in the AST here
+# (the RC-0 POWERSHELL_NATIVE_STDERR_PROMOTION regression, where merged native stderr aborted the capture).
+$smokeStageAst = @($acceptanceAst.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Invoke-SmokeStage' }, $true))[0]
+$smokeCaptureAst = @($acceptanceAst.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Invoke-SmokeCapture' }, $true))[0]
+$stageCallsCapture = $null -ne $smokeStageAst -and @($smokeStageAst.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] -and $n.GetCommandName() -eq 'Invoke-SmokeCapture' }, $true)).Count -ge 1
+$stageInvokesNode = $null -ne $smokeStageAst -and @($smokeStageAst.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] -and $n.GetCommandName() -eq 'node' }, $true)).Count -gt 0
+Check "corrective-3: stage-6 delegates the smoke run to Invoke-SmokeCapture and never invokes node directly" (
+  $stageCallsCapture -and -not $stageInvokesNode
+)
+$captureNode = if ($null -ne $smokeCaptureAst) { @($smokeCaptureAst.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] -and $n.GetCommandName() -eq 'node' }, $true)) } else { @() }
+$captureRedirs = if ($captureNode.Count -ge 1) { $captureNode[0].Redirections } else { @() }
+$hasErrToFile = @($captureRedirs | Where-Object { $_ -is [System.Management.Automation.Language.FileRedirectionAst] -and $_.FromStream -eq [System.Management.Automation.Language.RedirectionStream]::Error }).Count -ge 1
+$hasErrMerged = @($captureRedirs | Where-Object { $_ -is [System.Management.Automation.Language.MergingRedirectionAst] }).Count -ge 1
+Check "corrective-3: the smoke capture redirects stderr away (2>`$null), never merges it (2>&1)" (
+  $captureNode.Count -ge 1 -and $hasErrToFile -and -not $hasErrMerged
+)
+
 # Windows PowerShell rejects ordinary PM2 payloads containing case-variant environment keys such as
 # Path/PATH. The raw document must cross a Node projection boundary before PowerShell deserializes it,
 # and that projection helper must be a required package asset.

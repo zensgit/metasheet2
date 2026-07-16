@@ -129,8 +129,8 @@ jobs:
       - name: Prod health probe monitor contract
         run: node --test scripts/ops/prod-health-probe-state.test.mjs
 
-      # #4210 T9: the stock-preparation one-click acceptance script's contract + behavioural tests (53
-      # checks = 17 contract + 36 behavioural) are pure pwsh 7 + tar + node (no DB, no live server — the
+      # #4210 T9: the stock-preparation one-click acceptance script's contract + behavioural tests (56
+      # checks = 19 contract + 37 behavioural) are pure pwsh 7 + tar + node (no DB, no live server — the
       # pm2/health/smoke stages are unit-tested via dot-sourced pure helpers). Run inside the REQUIRED
       # `test` gate, but only ONCE (on 20.x — no need across the 18/20 matrix), early (no pnpm install
       # needed: pwsh/tar ship on ubuntu, node is already set up) so a regression fails the required check

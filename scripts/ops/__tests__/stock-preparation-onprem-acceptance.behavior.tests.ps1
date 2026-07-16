@@ -254,6 +254,38 @@ try {
   Check "corrective-3: exit code preserved (0) and the token env var is cleared after capture" ($null -ne $cap -and $cap.exit -eq 0 -and -not (Test-Path Env:METASHEET_AUTH_TOKEN))
   Remove-Item -LiteralPath $fakeSmoke -Force -ErrorAction SilentlyContinue
 
+  # ── D6 (corrective-3): the REAL stage-6 must FAIL CLOSED on a non-zero smoke exit even when the stdout
+  # summary parses PASS — a green summary is not a green process. Driven as a SUBPROCESS because
+  # Stop-WithFailure exits the runspace, and D5 alone (the helper in isolation) only ever exercised exit 0,
+  # so a helper hardcoded to return 0 would slip through. The subprocess mirrors the runner's own orchestrator
+  # try/catch, so it is robust whether or not this pwsh promotes a native non-zero exit to a terminating error.
+  $fcRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("t9accept_failclosed_" + [guid]::NewGuid().ToString('N').Substring(0, 12))
+  $fcSmokeDir = Join-Path $fcRoot 'scripts/ops'
+  New-Item -ItemType Directory -Path $fcSmokeDir -Force | Out-Null
+  Set-Content -LiteralPath (Join-Path $fcSmokeDir 'stock-preparation-mvp-postdeploy-smoke.mjs') -Encoding utf8 -Value (@(
+    "process.stdout.write('mvpSmoke.pass=true\n')",
+    "process.stdout.write('auditActionsCovered=8/8\n')",
+    "process.stdout.write('selfScanClean=true\n')",
+    "process.exit(7)"
+  ) -join "`n")
+  $fcSummary = Join-Path $fcRoot 'acceptance-summary.txt'
+  $fcDriver = Join-Path $fcRoot 'drive.ps1'
+  Set-Content -LiteralPath $fcDriver -Encoding utf8 -Value (@(
+    'param($ScriptPath, $DeployRoot, $SummaryPath)',
+    '. $ScriptPath -PackagePath $DeployRoot -DeployRoot $DeployRoot -SummaryPath $SummaryPath *> $null',
+    '$tok = ConvertTo-SecureString ''drive-dummy'' -AsPlainText -Force',
+    'try { Invoke-SmokeStage -Token $tok } catch { if ($Summary.failedStage -eq ''none'') { $Summary.failedStage = ''smoke'' }; Emit-Summary; exit 1 }',
+    'exit 0'
+  ) -join "`n")
+  & pwsh -NoProfile -File $fcDriver -ScriptPath $scriptPath -DeployRoot $fcRoot -SummaryPath $fcSummary *> $null
+  $fcExit = $LASTEXITCODE
+  $fcJson = [System.IO.Path]::ChangeExtension($fcSummary, '.json')
+  $fcObj = if (Test-Path $fcJson) { Get-Content $fcJson -Raw | ConvertFrom-Json } else { $null }
+  Check "corrective-3: stage-6 FAILS CLOSED on a non-zero smoke exit (7) despite a PASS stdout summary" (
+    $fcExit -eq 1 -and $null -ne $fcObj -and $fcObj.failedStage -eq 'smoke'
+  )
+  Remove-Item -LiteralPath $fcRoot -Recurse -Force -ErrorAction SilentlyContinue
+
   $base = [pscustomobject]@{ state = 'online'; restartTime = 3; uptime = 1000 }
 
   # Entity corrective-1 reproduction: PM2 includes process.env in jlist; on Windows it commonly carries
