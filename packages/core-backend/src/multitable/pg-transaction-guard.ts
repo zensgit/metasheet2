@@ -15,6 +15,13 @@
  * Cost: two trivial SELECTs per guarded call, before any write. Acceptable for the low-volume approval /
  * automation write paths this protects; the failure it prevents (a permanently half-committed outbox / ledger
  * state) is unrecoverable without manual repair.
+ *
+ * THREAT-MODEL BOUNDARY: the guard targets ACCIDENTAL misuse — every honest-but-wrong handle (pool, autocommit
+ * client, forged boolean marker over either) is caught, because the probe asks Postgres itself. A handle that
+ * actively FABRICATES query results (recognizes the probe SQL and answers a fake constant xid while routing
+ * writes elsewhere) can defeat any client-side probe in principle; that class is indistinguishable from a
+ * hostile database driver and is out of scope — no calling-convention or probe can defend against a layer
+ * that lies about what the database said.
  */
 import type { Queryable } from './automation-durable-dispatcher'
 
