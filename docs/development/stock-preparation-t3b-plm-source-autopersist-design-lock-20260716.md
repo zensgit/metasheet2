@@ -149,8 +149,16 @@ ERP cache；T3b 必须有一个业务 project handle。
 - 对每行只投影现有 expansion mapper 接受的闭集合；未知字段不转发；
 - **不丢行**：输入行数必须等于 bridge 输出行数；任一行不合法则整个 envelope
   fail-closed，不得 `.filter()` 后部分写；
-- 将 intake 默认态 `imported` 明确归一为现有 BOM line contract 的 `active`；
-  `active` / `inactive` / `incomplete` 保持；其它状态在 T3b v1 fail-closed，不猜测；
+- 将 intake 在源行未提供状态时生成的默认态 `imported` 明确归一为 `active`；
+  已是 canonical `active` / `inactive` / `incomplete` 的值保持；
+- **T3b v1 选择 source lifecycle 处置 (c)**：不内建 `released` / `obsolete` / `WIP`
+  等跨 PLM 猜测映射。approved config 不得把原始 lifecycle 列直接映射为 `status` 或
+  `lineStatus`；只有上游已产出上述 canonical vocabulary 时才允许映射；
+- source-mapped `status` / `lineStatus` 出现 canonical 集合外的任何值时，整个 envelope
+  必须在 provisioning / persist I/O 前以 422
+  `STOCK_PREPARATION_PLM_AUTOPERSIST_LINE_STATUS_UNSUPPORTED` 拒绝；不得丢行、不得静默改成
+  `active`。错误 details 只允许稳定字段名、canonical allowed set 与 unsupported row count，
+  不得包含原始 lifecycle 值或业务行内容；
 - 复用 intake 已生成的 `snapshotLineId` / `sourceFingerprint`，不得二次发明身份；
 - 产出 `persistStockPreparationSyncRun` 的真实字段：`projectId`、`sourceProjectNo`、
   `projectName`、`sourceSystem`、`syncRunId`、`snapshotBatchId`、`snapshotVersion`、
@@ -159,9 +167,18 @@ ERP cache；T3b 必须有一个业务 project handle。
 本约束刻意不把 `intake.bomSnapshotLines` 直接断言成 `expansionResult`。现有 persist 会再跑
 expansion mapper；bridge 必须用判别测试证明该二次规范化不改变行数、id、qty、unit、
 path、fingerprint 与 active/inactive/incomplete 语义。这里的状态归一不是偏好：当前
-readonly intake 在源行未给状态时默认写 `imported`，而当前 T4 / RC 验收使用的
-`stock_preparation_bom_line_status_v1` 注册集只有 `active` / `inactive` / `incomplete`；若不在
-bridge 收口，T3b 会把一个不在冻结 option contract 中的值送入持久化。
+readonly intake 在源行未给状态时默认写 `imported`，有值时则原样优先读取
+`lineStatus` / `status`。approved `fieldMap.target` 只受 bounded-identifier 形状约束，没有
+status-target 语义 allowlist。与此同时，T4 / RC 验收使用的
+`stock_preparation_bom_line_status_v1` 是管理员提供的运行时 option-source，并不提供编译期
+closed-vocabulary enforcement。T3b v1 的唯一 enforcement point 是 bridge 中的 canonical
+closed set；实现与验收不得依赖 config shape validation 或 records service select validation
+替它拒绝原始 lifecycle 值。
+
+因此 operator contract 明确为：若 approved source 的 lifecycle 值不是 canonical
+`active` / `inactive` / `incomplete`，不要把该列 target 配成 `status` / `lineStatus`。需要支持
+某个 PLM 的 `released` / `obsolete` / `WIP` 语义时，必须先另开具名 mapping design gate；本锁
+不授权隐式映射。
 
 ### OD-4 — idempotency、不可变性与已知原子性边界
 
@@ -243,15 +260,19 @@ corrective-3 的 #4101 结果与 T3b 开发并行；**RC-A 只在**以下三者�
 2. ON 下 body/query/params tenant steering 在 normalization / source I/O 前拒绝；
 3. body `projectId` 正常通过，但 query/params `projectId` 拒绝；
 4. auth tenant 决定 staging target，workspace/body project 都不能改 target；
-5. bridge 精确一对一、未知行/未知状态整 envelope 拒绝；
-6. `imported → active` 与 active/inactive/incomplete 保真；
-7. source/intake identity mismatch 拒绝且零写；
-8. 201 created=`internal_persist/true`；exact replay 200
+5. bridge 精确一对一，未知行整 envelope 拒绝；
+6. 无 source status 时生成的 `imported → active`，canonical
+   active/inactive/incomplete 保真；
+7. source-mapped raw lifecycle（至少覆盖 released/obsolete/WIP）以专用 422 拒绝，persist /
+   provisioning 零调用；错误 details 不含 raw lifecycle；把任一已 canonical 的 source status
+   映射进来则正常通过；
+8. source/intake identity mismatch 拒绝且零写；
+9. 201 created=`internal_persist/true`；exact replay 200
    skipped_existing=`internal_noop/false`；same-id-different-content 与 orphan batch 均 409
    且零后续写；
-9. 成功与错误双向 leak-bait，公开 JSON 不含项目名、项目号、图号、数量、单位、
+10. 成功与错误双向 leak-bait，公开 JSON 不含项目名、项目号、图号、数量、单位、
    fingerprint 原值、config/system id、credential；
-10. 所有拒绝路径 records/provisioning/persist 调用计数为 0。
+11. 所有拒绝路径 records/provisioning/persist 调用计数为 0。
 
 ### 5.2 真 PostgreSQL / real service smoke
 
@@ -275,6 +296,8 @@ corrective-3 的 #4101 结果与 T3b 开发并行；**RC-A 只在**以下三者�
 - 把 bridge 改为逐行 drop；
 - 去掉 identity cross-check；
 - 把 `imported` 原样写入 select contract；
+- 放行任意 source-mapped lifecycle，或把 unsupported lifecycle 静默改成 `active`；
+- 把 unsupported lifecycle 的原始值放进 error details；
 - 把 existing-batch completeness/content conflict 恢复成无条件 skip；
 - 断开 persist 调用；
 - created 不覆盖 dry-run / internalWrite evidence，或 replay 仍硬报 internal write；
@@ -300,7 +323,9 @@ owner ratify 本锁即表示同意：
 
 - [ ] OD-1：独立 default-OFF PLM auto-persist flag；
 - [ ] OD-2：auth tenant 决定物理 target，body projectId 仅作业务键；
-- [ ] OD-3：纯 bridge，一行不丢，`imported → active`，active/inactive/incomplete 保真，其它状态 fail-closed；
+- [ ] OD-3：纯 bridge，一行不丢；缺省 `imported → active`，canonical
+  active/inactive/incomplete 保真；raw lifecycle mapping 在 v1 明确 out-of-scope，并以专用
+  values-free 422 在 persist 前 fail-closed；bridge 是唯一 option enforcement point；
 - [ ] OD-4：exact replay 才可 skip，orphan/content conflict 必须 409；生产常开 barred on P4；
 - [ ] OD-5：OFF byte-equivalent；ON created=`internal_persist/true`、replay=`internal_noop/false`；
 - [ ] OD-6：扩展现有 T4 后只切一次 RC-A；
