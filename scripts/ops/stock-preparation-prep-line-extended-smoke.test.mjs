@@ -9,11 +9,15 @@ import {
   PREP_LINE_ROW_KEYS,
   SUMMARY_HEADER,
   T4_ALLOWED_ERROR_CODES,
+  T4_ALLOWED_MODES,
+  buildApprovedSourcePrelude,
   buildExtendedSmokeFixture,
   formatSummaryBlock,
   prepLineRowProjectionValid,
   prepLineRowResolved,
+  runApprovedSourcePrelude,
   safeCode,
+  safeT4Mode,
 } from './stock-preparation-prep-line-extended-smoke.mjs'
 
 import {
@@ -178,4 +182,127 @@ test('summary block: own header, flat values-free key=value lines', () => {
   assert.ok(block.includes('pass=true'))
   assert.ok(block.includes('auditActionsCovered=8/8'))
   assert.ok(block.includes('externalWrite=false'))
+})
+
+// ── T4-final (T3b OD-6): approved-source prelude ─────────────────────────────────────────────────
+
+const PRELUDE_ARGS = { projectPrefix: 'stockprep-t4', approvedSourceConfigId: 'cfg_approved_ref_1', workspaceId: '' }
+
+function scriptedReq(responses) {
+  const calls = []
+  const req = async (pathname, options = {}) => {
+    calls.push({ pathname, options })
+    const scripted = responses[calls.length - 1]
+    if (!scripted) throw new Error(`unscripted request #${calls.length}: ${pathname}`)
+    const accept = Array.isArray(options.accept) ? options.accept : [200]
+    return { status: scripted.status, body: scripted.body, ok: accept.includes(scripted.status) }
+  }
+  return { calls, req }
+}
+
+function collectMust() {
+  const checks = []
+  return { checks, must: (name, ok, detail = '') => { checks.push({ name, ok: ok === true, detail }) } }
+}
+
+function approvedCreateResponse() {
+  return {
+    status: 201,
+    body: { ok: true, data: {
+      mode: 'internal_persist',
+      evidence: { internalWriteExecuted: true, externalWriteExecuted: false, productionWrite: false, k3SaveSubmitAudit: false, plmExternalWrite: false },
+      autoPersist: { persisted: true, mode: 'created', created: { batch: 1, lines: 3, run: 1 } },
+    } },
+  }
+}
+
+function approvedReplayResponse() {
+  return {
+    status: 200,
+    body: { ok: true, data: {
+      mode: 'internal_noop',
+      evidence: { internalWriteExecuted: false, externalWriteExecuted: false, productionWrite: false, k3SaveSubmitAudit: false, plmExternalWrite: false },
+      autoPersist: { persisted: false, mode: 'skipped_existing', created: { batch: 0, lines: 0, run: 0 } },
+    } },
+  }
+}
+
+test('prelude fixture: closed body shape, own salted id space, sentinels carry the value-bearing tokens', () => {
+  const prelude = buildApprovedSourcePrelude('t123', PRELUDE_ARGS)
+  assert.deepEqual(Object.keys(prelude.body).sort(), [
+    'projectId', 'projectName', 'readSourceConfigId', 'snapshotBatchId', 'snapshotVersion', 'sourceProjectNo', 'syncRunId',
+  ].sort())
+  assert.equal(prelude.body.snapshotVersion, 1)
+  assert.equal(prelude.body.readSourceConfigId, 'cfg_approved_ref_1')
+  // The prelude id space can NEVER collide with the synthetic chain's fixture ids.
+  const fixture = buildExtendedSmokeFixture('t123')
+  assert.notEqual(prelude.body.projectId, fixture.projectId)
+  assert.notEqual(prelude.body.snapshotBatchId, fixture.snapshotBatchId)
+  assert.notEqual(prelude.body.syncRunId, fixture.syncRunId)
+  assert.notEqual(prelude.body.sourceProjectNo, fixture.sourceProjectNo)
+  // Sentinels: config reference + value-bearing tokens; the opaque projectId handle is NOT one.
+  assert.deepEqual(prelude.sentinels, ['cfg_approved_ref_1', prelude.body.sourceProjectNo, prelude.body.projectName])
+  assert.ok(!prelude.sentinels.includes(prelude.body.projectId))
+  // workspaceId appears only when provided (an intra-tenant selector, never required).
+  const scoped = buildApprovedSourcePrelude('t123', { ...PRELUDE_ARGS, workspaceId: 'w9' })
+  assert.equal(scoped.body.workspaceId, 'w9')
+  assert.throws(() => buildApprovedSourcePrelude('t123', { projectPrefix: 'x', approvedSourceConfigId: '' }))
+})
+
+test('prelude modes: the T4-final merged mode registry stays closed', () => {
+  assert.equal(safeT4Mode('internal_persist'), 'internal_persist')
+  assert.equal(safeT4Mode('internal_noop'), 'internal_noop')
+  assert.equal(safeT4Mode('dry_run'), 'dry_run')
+  assert.ok(T4_ALLOWED_MODES.has('created') && T4_ALLOWED_MODES.has('skipped_existing'))
+  assert.equal(safeT4Mode('totally_new_mode'), UNREGISTERED)
+})
+
+test('prelude run: 201 internal_persist + 200 internal_noop replay -> all checks ok, steering-free requests', async () => {
+  const { calls, req } = scriptedReq([approvedCreateResponse(), approvedReplayResponse()])
+  const { checks, must } = collectMust()
+  const summary = {}
+  const prelude = await runApprovedSourcePrelude({ salt: 't123', args: PRELUDE_ARGS, req, must, summary })
+  assert.equal(checks.length, 3)
+  assert.ok(checks.every((c) => c.ok), JSON.stringify(checks))
+  assert.equal(summary.approvedSourceHttp, 201)
+  assert.equal(summary.approvedSourceMode, 'internal_persist')
+  assert.equal(summary.approvedSourceReplayHttp, 200)
+  assert.equal(summary.approvedSourceReplayMode, 'internal_noop')
+  assert.equal(calls.length, 2)
+  for (const call of calls) {
+    // OD-2: the ON-path route fail-closes on query tenantId/projectId carriers — the prelude must
+    // never send a query string; the tenant rides the authenticated token only.
+    assert.ok(!call.pathname.includes('?'), `steering-free path: ${call.pathname}`)
+    assert.ok(call.pathname.endsWith('/mvp/source-runs/plm-bom'))
+    // Every prelude response is leak-scanned — never exempt.
+    assert.notEqual(call.options.leakExempt, true)
+  }
+  assert.deepEqual(prelude.sentinels, ['cfg_approved_ref_1', prelude.body.sourceProjectNo, prelude.body.projectName])
+})
+
+test('prelude run: a 200 dry_run (T3b flag OFF) FAILS the prelude — it can never pass as a read-only run', async () => {
+  const dryRun = { status: 200, body: { ok: true, data: { mode: 'dry_run', evidence: { internalWriteExecuted: false, externalWriteExecuted: false, productionWrite: false, k3SaveSubmitAudit: false, plmExternalWrite: false } } } }
+  const { req } = scriptedReq([dryRun, dryRun])
+  const { checks, must } = collectMust()
+  await runApprovedSourcePrelude({ salt: 't123', args: PRELUDE_ARGS, req, must, summary: {} })
+  assert.equal(checks[0].ok, false, 'the internal_persist check must fail on a dry_run response')
+})
+
+test('prelude run: a replay that hard-claims an internal write FAILS the replay check', async () => {
+  const lyingReplay = approvedReplayResponse()
+  lyingReplay.body.data.mode = 'internal_persist'
+  lyingReplay.body.data.evidence.internalWriteExecuted = true
+  const { req } = scriptedReq([approvedCreateResponse(), lyingReplay])
+  const { checks, must } = collectMust()
+  await runApprovedSourcePrelude({ salt: 't123', args: PRELUDE_ARGS, req, must, summary: {} })
+  assert.equal(checks[2].ok, false, 'the internal_noop replay check must fail')
+})
+
+test('prelude run: any external-write evidence flips the invariant check to FAIL', async () => {
+  const tainted = approvedCreateResponse()
+  tainted.body.data.evidence.externalWriteExecuted = true
+  const { req } = scriptedReq([tainted, approvedReplayResponse()])
+  const { checks, must } = collectMust()
+  await runApprovedSourcePrelude({ salt: 't123', args: PRELUDE_ARGS, req, must, summary: {} })
+  assert.equal(checks[1].ok, false, 'the externalWrite invariant check must fail')
 })

@@ -17,6 +17,9 @@
 //
 // Chain (per-run-salted, self-contained fixture; 3 BOM lines A/B/C):
 //   provisioning : mvp/readiness -> mvp/ensure -> mvp/options/sync (closed vocabulary fixture)
+//   approved-src : (T4-final, opt-in --approved-source-config-id; T3b OD-6) approved PLM read ->
+//                  SAME-REQUEST internal persist (201 internal_persist, batch/lines/run non-empty)
+//                  -> exact replay (200 internal_noop) — requires the service-side T3b flag ON
 //   snapshot     : sync/plan -> sync/persist (201, 3 lines) -> persist replay (200 skipped_existing)
 //   projects     : GET /projects carries the populated project row, values-free (T1 #4190 endpoint)
 //   cache        : POST /mvp/erp-materials/sync (T2 #4206) caches material MA with
@@ -60,13 +63,15 @@
 // Run:
 //   METASHEET_AUTH_TOKEN=... node scripts/ops/stock-preparation-prep-line-extended-smoke.mjs \
 //     --base-url http://HOST:PORT [--tenant-id t] [--workspace-id w] \
-//     [--project-prefix stockprep-t4] [--timeout-ms 15000] [--out-dir output/dir]
+//     [--project-prefix stockprep-t4] [--timeout-ms 15000] [--out-dir output/dir] \
+//     [--approved-source-config-id cfg_ref]   # T4-final OD-6 prelude (service T3b flag must be ON)
 
 import fs from 'node:fs'
 import path from 'node:path'
 
 import {
   ALLOWED_ERROR_CODES,
+  ALLOWED_MODES,
   AUDIT_ACTIONS,
   ENGINE_MESSAGE_SENTINELS,
   buildOptionSetsFixture,
@@ -103,6 +108,15 @@ export const T4_ALLOWED_ERROR_CODES = Object.freeze(new Set([
 ]))
 
 export function safeCode(value) { return registeredValue(value, T4_ALLOWED_ERROR_CODES) }
+
+// T4-final additionally asserts on the T3b source-run response modes, which postdate the W6 registry.
+// Same closed-merge pattern as T4_ALLOWED_ERROR_CODES — an unknown mode still prints '<unregistered>'.
+export const T4_ALLOWED_MODES = Object.freeze(new Set([
+  ...ALLOWED_MODES,
+  'dry_run', 'internal_persist', 'internal_noop',
+]))
+
+export function safeT4Mode(value) { return registeredValue(value, T4_ALLOWED_MODES) }
 
 // The closed values-free per-row projection of GET /prep-lines (shape-lock against the W5 read
 // contract in stock-preparation-confirm-reads.cjs listStockPreparationPrepLines). Optional handles
@@ -210,6 +224,79 @@ export function buildExtendedSmokeFixture(salt, projectPrefix = 'stockprep-t4') 
   }
 }
 
+// T4-final (T3b design-lock OD-6): the approved-source prelude request. A per-run salted business
+// scope for a SEPARATE internal project/batch/run id space, so the prelude can never collide with
+// the synthetic chain's fixture. The config REFERENCE is operator-provided (an approved read-source
+// config; the smoke never carries source credentials or raw payload controls).
+export function buildApprovedSourcePrelude(salt, { projectPrefix = 'stockprep-t4', approvedSourceConfigId, workspaceId = '' } = {}) {
+  if (!approvedSourceConfigId) throw new Error('approvedSourceConfigId is required for the approved-source prelude')
+  const sourceProjectNo = `T4APRJNO-${salt}`
+  const projectName = `T4 Approved Source Project ${salt}`
+  const body = {
+    projectId: `${projectPrefix}-approved-${salt}`,
+    sourceProjectNo,
+    projectName,
+    readSourceConfigId: approvedSourceConfigId,
+    syncRunId: `smoke_t4_approved_syncrun_${salt}`,
+    snapshotBatchId: `smoke_t4_approved_batch_${salt}`,
+    snapshotVersion: 1,
+  }
+  if (workspaceId) body.workspaceId = workspaceId
+  return {
+    body,
+    // The values-free source-run response must never echo the config reference or the request's
+    // value-bearing tokens. projectId is deliberately NOT a sentinel: it is an opaque business
+    // handle that read surfaces (GET /projects) legitimately list.
+    sentinels: [approvedSourceConfigId, sourceProjectNo, projectName],
+  }
+}
+
+// T4-final prelude execution (OD-6 items 1-3 + 5 over real HTTP): approved PLM read -> SAME-REQUEST
+// internal persist -> exact replay noop. Injectable `req`/`must`/`summary` so the stage's PASS/FAIL
+// discipline is unit-testable without a server (corrective-5 fetchImpl precedent). NOTE the prelude
+// deliberately sends NO tenantId/projectId query carriers: with the T3b flag ON those are steering
+// vectors the route fail-closes on — the tenant rides the AUTHENTICATED token only (OD-2).
+export async function runApprovedSourcePrelude({ salt, args, req, must, summary }) {
+  const prelude = buildApprovedSourcePrelude(salt, {
+    projectPrefix: args.projectPrefix,
+    approvedSourceConfigId: args.approvedSourceConfigId,
+    workspaceId: args.workspaceId,
+  })
+  const sourceRun = await req(`${API}/mvp/source-runs/plm-bom`, {
+    method: 'POST', body: prelude.body, accept: [201], label: 'approved-source-run',
+  })
+  const data = (sourceRun.body && sourceRun.body.data) || {}
+  const auto = data.autoPersist || {}
+  summary.approvedSourceHttp = sourceRun.status
+  summary.approvedSourceMode = safeT4Mode(data.mode)
+  summary.approvedSourceCreated = projectCounts(auto.created, ['batch', 'lines', 'run'])
+  // A 200 dry_run here means the T3b flag is OFF on the service — the prelude REQUIRES the flag and
+  // must fail loudly rather than "pass" as a read-only run (OD-6 item 1).
+  must('approved-source run -> 201 internal_persist with non-empty batch/lines/run (T3b flag ON)',
+    sourceRun.ok && data.mode === 'internal_persist' &&
+    data.evidence?.internalWriteExecuted === true &&
+    auto.persisted === true && auto.mode === 'created' &&
+    auto.created?.batch === 1 && safeCount(auto.created?.lines) >= 1 && auto.created?.run === 1,
+    `http=${sourceRun.status} mode=${summary.approvedSourceMode} created=${summary.approvedSourceCreated}`)
+  must('approved-source run keeps every external-write invariant false',
+    data.evidence?.externalWriteExecuted === false && data.evidence?.productionWrite === false &&
+    data.evidence?.k3SaveSubmitAudit === false && data.evidence?.plmExternalWrite === false,
+    `http=${sourceRun.status}`)
+  const replay = await req(`${API}/mvp/source-runs/plm-bom`, {
+    method: 'POST', body: prelude.body, accept: [200], label: 'approved-source-run-replay',
+  })
+  const replayData = (replay.body && replay.body.data) || {}
+  summary.approvedSourceReplayHttp = replay.status
+  summary.approvedSourceReplayMode = safeT4Mode(replayData.mode)
+  must('approved-source exact replay -> 200 internal_noop skipped_existing with zero new rows',
+    replay.ok && replayData.mode === 'internal_noop' &&
+    replayData.evidence?.internalWriteExecuted === false &&
+    replayData.autoPersist?.persisted === false && replayData.autoPersist?.mode === 'skipped_existing' &&
+    replayData.autoPersist?.created?.batch === 0,
+    `http=${replay.status} mode=${summary.approvedSourceReplayMode}`)
+  return prelude
+}
+
 export function formatSummaryBlock(summary) {
   const lines = [SUMMARY_HEADER]
   for (const [key, value] of Object.entries(summary)) lines.push(`${key}=${value}`)
@@ -224,6 +311,7 @@ function parseArgs(argv) {
     projectPrefix: 'stockprep-t4',
     timeoutMs: 15000,
     outDir: '',
+    approvedSourceConfigId: '',
   }
   for (let i = 2; i < argv.length; i++) {
     const flag = argv[i]
@@ -234,6 +322,7 @@ function parseArgs(argv) {
     else if (flag === '--project-prefix') args.projectPrefix = next()
     else if (flag === '--timeout-ms') args.timeoutMs = Number(next())
     else if (flag === '--out-dir') args.outDir = next()
+    else if (flag === '--approved-source-config-id') args.approvedSourceConfigId = next()
     else throw new Error(`unknown flag: ${flag}`)
   }
   if (!args.baseUrl) throw new Error('--base-url is required')
@@ -325,6 +414,16 @@ async function main() {
   must('options sync http 200 + covered every option field',
     optionsSync.ok && S.optionsSyncedFieldCount > 0 && S.optionsSkippedFieldCount === 0,
     `http=${optionsSync.status} synced=${S.optionsSyncedFieldCount} skipped=${S.optionsSkippedFieldCount}`)
+
+  // ── 1b. T4-final approved-source prelude (T3b OD-6): approved PLM read -> internal persist ───
+  // Opt-in via --approved-source-config-id; absent, this run is byte-for-byte the pre-T4-final
+  // smoke (no new request, no new summary key). The prelude proves the approved source -> project/
+  // batch/line/run front-end in ITS OWN salted id space; the synthetic chain below stays the
+  // unchanged non-empty prep-line proof (OD-6: extend, don't rewrite).
+  if (args.approvedSourceConfigId) {
+    const prelude = await runApprovedSourcePrelude({ salt, args, req, must, summary: S })
+    SELF_SCAN_SENTINELS = [...SELF_SCAN_SENTINELS, ...prelude.sentinels]
+  }
 
   // ── 2. snapshot: plan -> persist (201, 3 lines) -> replay (200 skipped_existing) ─────────────
   const planBody = {

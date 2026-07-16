@@ -111,3 +111,28 @@ physically present in the internal `Stock Preparation Line` sheet (`meta_records
 ## Deployed-lane PASS record
 
 _None yet. Record the workflow run URL + summary block here after the first deployed dispatch._
+
+## T4-final：approved-source 前置（T3b OD-6 扩展，2026-07-16）
+
+可选前置，把「approved PLM read → 同请求内部落库」接到本 smoke 前端；合成链判据原样保留（扩展而非重写）。
+
+### 前提（operator 提供，smoke 不自造）
+1. 一份 **approved** read-source config（`readSourceConfigId` 引用即可，smoke 绝不携带凭证或 raw payload 控制）。其 `fieldMap.target` 只允许 bounded 结构目标（如 `pathKey`/`childDrawingNo`/`designQty`）；**不得**映射 `missingChildBom`（T3b 结构守卫会 422 `CONFIG_TARGET_FORBIDDEN`），映射 `status`/`lineStatus` 时上游值必须已是 `imported/active/inactive/incomplete` 词表（否则整包 422 `LINE_STATUS_UNSUPPORTED`）。
+2. 服务侧 **临时** 打开 `MULTITABLE_STOCK_PREP_PLM_AUTOPERSIST_ENABLED=true`：开 → 跑一次 → 恢复 OFF。**禁止**把该 flag 写入任何生产模板（OD-1/OD-6）。
+
+### 运行
+```
+node scripts/ops/stock-preparation-prep-line-extended-smoke.mjs \
+  --base-url http://HOST:PORT ... --approved-source-config-id <cfg_ref>
+```
+（或 workflow_dispatch 输入 `approved_source_config_id`。）
+
+### 判据（全部 values-free）
+- `approvedSourceHttp=201`、`approvedSourceMode=internal_persist`、created 计数 `batch:1 / lines>=1 / run:1`；
+- 外写不变量全 false（`externalWriteExecuted/productionWrite/k3SaveSubmitAudit/plmExternalWrite`）；
+- exact replay：`approvedSourceReplayHttp=200`、`approvedSourceReplayMode=internal_noop`、`skipped_existing`、零增行；
+- flag OFF 时该前置**必失败**（200 dry_run 不满足 201 internal_persist 判据），不会被静默当作通过；
+- 前置请求**不带任何 query 载体**（ON 路径把 query `tenantId/projectId` 视为 steering 并 fail-close；租户只随认证 token）；
+- config 引用与请求中的值面 token（sourceProjectNo/projectName）注册为泄漏哨兵，响应命中即整跑 FAIL。
+
+不带 `--approved-source-config-id` 时，本 smoke 与 T4-final 之前逐字节等价（无新增请求、无新增 summary 键）。
