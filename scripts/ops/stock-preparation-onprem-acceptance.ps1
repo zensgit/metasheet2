@@ -369,20 +369,25 @@ function Invoke-HealthStage {
 
 # ── Summary-only smoke capture (pure, unit-testable). Runs the child smoke and returns ONLY its stdout
 # summary text + exit code. stderr is redirected to $null (2>$null), NEVER merged into the success stream
-# (2>&1). Two reasons: (1) Node warnings / any stderr noise must never contaminate the parsed values-free
-# summary; (2) under PowerShell 7.3+ native-command error handling, a child that writes to stderr while
-# its stream is merged (2>&1) can be PROMOTED to a terminating error that ABORTS the capture before the
-# smoke's summary is ever read — the RC-0 acceptance-runner compatibility failure the entity machine hit
-# (POWERSHELL_NATIVE_STDERR_PROMOTION): the smoke ran, but the runner threw instead of parsing its output.
-# The admin token crosses to the child ONLY as a scoped env var, cleared (with its BSTR) in a finally.
+# (2>&1). Windows PowerShell 5.1 still promotes native stderr under a global ErrorActionPreference=Stop,
+# even with null redirection. Scope Continue to this one native invocation, capture $LASTEXITCODE, and
+# restore the caller's policy in finally. The surrounding runner remains fail-closed. Node warnings / any
+# stderr noise never enter the parsed values-free summary. The admin token crosses to the child ONLY as a
+# scoped env var, cleared (with its BSTR) in the outer finally.
 function Invoke-SmokeCapture {
   param([string[]]$NodeArgs, [SecureString]$Token)
   $bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($Token)
+  $previousErrorActionPreference = $ErrorActionPreference
   try {
     # Token crosses to the child ONLY as a scoped env var — never on the command line / ArgumentList.
     $env:METASHEET_AUTH_TOKEN = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr)
-    $out = & node @NodeArgs 2>$null  # stdout ONLY; stderr discarded (see function header)
-    $exit = $LASTEXITCODE
+    try {
+      $ErrorActionPreference = 'Continue'
+      $out = & node @NodeArgs 2>$null  # stdout ONLY; stderr discarded (see function header)
+      $exit = $LASTEXITCODE
+    } finally {
+      $ErrorActionPreference = $previousErrorActionPreference
+    }
   } finally {
     [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr)
     Remove-Item Env:METASHEET_AUTH_TOKEN -ErrorAction SilentlyContinue
