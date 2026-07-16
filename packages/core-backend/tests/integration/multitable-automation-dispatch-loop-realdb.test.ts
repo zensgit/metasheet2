@@ -33,7 +33,7 @@ import {
 import type { ClaimedConsumer, Queryable } from '../../src/multitable/automation-durable-dispatcher'
 
 /** A minimal always-valid telemetry sink for tests that don't assert on it. */
-const noopObserver: DispatchLoopObserver = { onUnknownConsumerKeys: () => {}, onTickError: () => {} }
+const noopObserver: DispatchLoopObserver = { onUnknownConsumerKeys: () => {}, onTickError: () => {}, onHeartbeatError: () => {} }
 
 const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
 const db = () => poolManager.get()
@@ -252,48 +252,83 @@ describeIfDatabase('P2 durable-delivery S2-b — dispatch loop (real DB)', () =>
     }
   }, 15_000)
 
-  // [#4334 review P1#1] Batch-claim + serial execution: a worker that LOSES its lease mid-batch must not go
-  // on to call the next row's adapter (double external emit). The pre-call fence-CAS renew is the guard.
-  test('P1#1: a stale worker does NOT invoke the adapter for a row a concurrent worker reclaimed mid-batch', async () => {
-    const k1 = `ck_${RUN}_slotA`
-    const k2 = `ck_${RUN}_slotB`
-    const id1 = await seedRow(k1)
-    const id2 = await seedRow(k2)
-    // Deterministic dispatch order: row1 before row2 (claim dispatches ORDER BY outbox.created_at ASC).
+  // [#4334 review P1-A] Per-slot claim: the dispatcher claims ONE row per execution slot, so a row it never
+  // reaches never has its attempt burned (a BATCH claim would bump attempts for every claimed row up front,
+  // letting a starved tail row exhaust attempts and dead-letter WITHOUT its adapter ever running).
+  test('P1-A: per-slot claim never burns an attempt on a row it does not reach', async () => {
+    const k = `ck_${RUN}_slot`
+    const id0 = await seedRow(k)
+    const id1 = await seedRow(k)
+    const id2 = await seedRow(k)
+    // deterministic order id0 < id1 < id2 (claim dispatches oldest-first).
+    await db().query(`UPDATE meta_automation_outbox SET created_at = now() - interval '3 seconds' WHERE id=$1`, [id0])
     await db().query(`UPDATE meta_automation_outbox SET created_at = now() - interval '2 seconds' WHERE id=$1`, [id1])
     await db().query(`UPDATE meta_automation_outbox SET created_at = now() - interval '1 second'  WHERE id=$1`, [id2])
-
-    const callOrder: string[] = []
-    let k2Called = false
+    let processed = 0
     const r = new ConsumerAdapterRegistry()
-    // Row1's adapter simulates a CONCURRENT RECLAIM of row2 (exactly what another worker's claim does: bump
-    // the fence) while THIS worker is mid-batch. When the loop reaches row2, its pre-call renew must fail.
     r.register(
-      adapter(k1, async () => {
-        callOrder.push('k1')
-        await db().query(
-          `UPDATE meta_automation_outbox_consumer SET fence = fence + 1 WHERE outbox_id=$1 AND consumer_key=$2`,
-          [id2, k2],
-        )
+      adapter(k, async () => {
+        processed += 1
         return { outcome: 'success' }
       }),
     )
-    r.register(
-      adapter(k2, async () => {
-        k2Called = true
-        callOrder.push('k2')
-        return { outcome: 'success' }
-      }),
-    )
+    // stop the loop right after the first row: with per-slot claim, the rest are NEVER claimed.
+    const res = await runDispatchTick(db(), r, { shouldStop: () => processed >= 1 })
+    expect(res.claimed).toBe(1)
+    expect(res.completed).toBe(1)
+    expect((await readRow(id0, k)).status).toBe('done')
+    // the unreached rows are untouched — still pending, attempts NOT burned (a batch claim would show attempts=1).
+    expect(await readRow(id1, k)).toMatchObject({ status: 'pending', attempts: 0 })
+    expect(await readRow(id2, k)).toMatchObject({ status: 'pending', attempts: 0 })
+  })
 
-    const res = await runDispatchTick(db(), r)
-    expect(res.claimed).toBe(2)
-    expect(k2Called).toBe(false) // the guard held: the stale row's adapter was never called
-    expect(callOrder).toEqual(['k1']) // only the still-owned row ran
-    expect(res.completed).toBe(1) // row1
-    expect(res.lostLease).toBe(1) // row2 skipped at the pre-call renew
-    expect((await readRow(id1, k1)).status).toBe('done')
-    expect((await readRow(id2, k2)).status).toBe('in_progress') // left to its new owner, untouched by us
+  // [#4334 review P1-A] Three concurrent dispatchers over the same rows: each row is delivered EXACTLY once
+  // (per-slot claim + FOR UPDATE SKIP LOCKED distributes disjoint rows; no double delivery, no starvation).
+  test('P1-A: three concurrent dispatchers deliver each row exactly once', async () => {
+    const k = `ck_${RUN}_3w`
+    const ids = [await seedRow(k), await seedRow(k), await seedRow(k)]
+    let calls = 0
+    const mkReg = () => {
+      const r = new ConsumerAdapterRegistry()
+      r.register(
+        adapter(k, async () => {
+          calls += 1
+          return { outcome: 'success' }
+        }),
+      )
+      return r
+    }
+    const results = await Promise.all([runDispatchTick(db(), mkReg()), runDispatchTick(db(), mkReg()), runDispatchTick(db(), mkReg())])
+    expect(calls).toBe(3) // each row attempted exactly once — no double delivery
+    expect(results.reduce((a, r) => a + r.completed, 0)).toBe(3)
+    expect(results.reduce((a, r) => a + r.claimed, 0)).toBe(3) // three rows claimed across three workers, no double-claim
+    for (const id of ids) expect((await readRow(id, k)).status).toBe('done')
+  })
+
+  // [#4334 review P1-A] A row is dead-lettered by attempt-exhaustion ONLY after its adapter was ACTUALLY
+  // attempted maxAttempts times — never poisoned-without-execution.
+  test('P1-A: dead_letter by exhaustion happens only after maxAttempts real adapter calls', async () => {
+    const k = `ck_${RUN}_exhaust`
+    const id = await seedRow(k)
+    let calls = 0
+    const r = new ConsumerAdapterRegistry()
+    r.register(
+      adapter(k, async () => {
+        calls += 1
+        return { outcome: 'retryable_failure', reason: 'adapter_error' }
+      }),
+    )
+    const forceExpiry = () =>
+      db().query(`UPDATE meta_automation_outbox_consumer SET lease_expires_at = now() - interval '1 second' WHERE outbox_id=$1`, [id])
+    await runDispatchTick(db(), r, { maxAttempts: 2, retryBaseMs: 1_000, retryCapMs: 2_000 })
+    expect(calls).toBe(1)
+    await forceExpiry()
+    await runDispatchTick(db(), r, { maxAttempts: 2, retryBaseMs: 1_000, retryCapMs: 2_000 })
+    expect(calls).toBe(2)
+    await forceExpiry()
+    await runDispatchTick(db(), r, { maxAttempts: 2 }) // this claim poisons (attempts>=max) — no new adapter call
+    expect(calls).toBe(2) // attempted exactly maxAttempts times; NOT poisoned with calls=0
+    expect(await readRow(id, k)).toMatchObject({ status: 'dead_letter', last_error: 'max_attempts_exhausted' })
   })
 
   // [#4334 review P1#2] A malformed adapter verdict must RETRY (values-free adapter_error), never poison —
@@ -356,6 +391,7 @@ describeIfDatabase('P2 durable-delivery S2-b — dispatch loop (real DB)', () =>
         throw new Error('telemetry sink down')
       },
       onTickError: () => {},
+      onHeartbeatError: () => {},
     }
     const handle = startDurableDispatchLoop(db(), r, throwingObserver, {
       env: { AUTOMATION_DURABLE_DELIVERY_ENABLED: 'true' } as unknown as NodeJS.ProcessEnv,
@@ -453,6 +489,102 @@ describeIfDatabase('P2 durable-delivery S2-b — dispatch loop (real DB)', () =>
     expect(await readRow(idBad, badKey)).toMatchObject({ status: 'in_progress', last_error: 'adapter_error' })
     expect((await readRow(idOk, okKey)).status).toBe('done')
   })
+
+  // [#4334 review P1-B] The heartbeat period must be strictly INSIDE the lease (leaseMs/3), not a fixed 1s
+  // floor that can equal/exceed a short lease. At the loop minimum lease (1000ms) the heartbeat fires at
+  // ~333ms and renews BEFORE the old 1s floor would have — provable by the lease still having ample margin.
+  test('P1-B: at the minimum lease the heartbeat renews well before the old 1s floor', async () => {
+    const key = `ck_${RUN}_hbmin`
+    const id = await seedRow(key)
+    const r = new ConsumerAdapterRegistry()
+    r.register(
+      adapter(key, async () => {
+        await new Promise((res2) => setTimeout(res2, 1_200))
+        return { outcome: 'success' }
+      }),
+    )
+    const tick = runDispatchTick(db(), r, { leaseMs: 1_000, adapterTimeoutMs: 9_000 })
+    await new Promise((res2) => setTimeout(res2, 600)) // t≈600ms: after the ~333ms heartbeat, before 1000ms
+    const mid = await readRow(id, key)
+    expect(mid.status).toBe('in_progress')
+    // renewed at ~333ms → lease≈1333 → remaining≈733; a fixed-1s-floor heartbeat would NOT have fired yet (≈400).
+    expect(Number(mid.lease_remaining_ms)).toBeGreaterThan(500)
+    const res = await tick
+    expect(res.completed).toBe(1)
+  }, 15_000)
+
+  // [#4334 review P1-B] Two REAL dispatchers (not manual fence++): while A runs a long adapter under a legal
+  // lease, its heartbeat keeps the lease alive so a second dispatcher B cannot reclaim it — no double call.
+  test('P1-B: two real dispatchers — the heartbeat blocks a concurrent reclaim (no double call)', async () => {
+    const key = `ck_${RUN}_2disp`
+    const id = await seedRow(key)
+    let callsA = 0
+    let callsB = 0
+    const regA = new ConsumerAdapterRegistry()
+    regA.register(
+      adapter(key, async () => {
+        callsA += 1
+        await new Promise((res2) => setTimeout(res2, 1_500))
+        return { outcome: 'success' }
+      }),
+    )
+    const regB = new ConsumerAdapterRegistry()
+    regB.register(
+      adapter(key, async () => {
+        callsB += 1
+        return { outcome: 'success' }
+      }),
+    )
+    const tickA = runDispatchTick(db(), regA, { leaseMs: 1_000, adapterTimeoutMs: 9_000 })
+    await new Promise((res2) => setTimeout(res2, 1_200)) // past the ORIGINAL 1s lease — only the heartbeat keeps it
+    const tickB = await runDispatchTick(db(), regB, { leaseMs: 1_000 })
+    expect(tickB.claimed).toBe(0) // B could not reclaim — A's heartbeat held the lease
+    expect(callsB).toBe(0) // ...so B never called the adapter (no A,B double delivery)
+    const resA = await tickA
+    expect(callsA).toBe(1)
+    expect(resA.completed).toBe(1)
+    expect((await readRow(id, key)).status).toBe('done')
+  }, 20_000)
+
+  // [#4334 review P2-C] A heartbeat renew that hits a DB ERROR is an infra signal — surfaced via a dedicated
+  // telemetry seam and counted distinctly, NEVER masqueraded as a normal (competitor-won) lost lease.
+  test('P2-C: a heartbeat renew DB error is surfaced (onHeartbeatError), not folded into lostLease', async () => {
+    const key = `ck_${RUN}_hbdberr`
+    const id = await seedRow(key)
+    const real = db()
+    let renewCalls = 0
+    // Wrap the pool: let everything through EXCEPT the heartbeat renew (its UPDATE is the only `SET
+    // lease_expires_at` with no `last_error`), which throws to simulate a mid-flight store blip.
+    const failingDb: Queryable = {
+      query: async (sql, params) => {
+        if (/SET\s+lease_expires_at/.test(sql) && !/last_error/.test(sql)) {
+          renewCalls += 1
+          throw new Error('heartbeat db down')
+        }
+        return real.query(sql, params)
+      },
+    }
+    const r = new ConsumerAdapterRegistry()
+    r.register(
+      adapter(key, async () => {
+        await new Promise((res2) => setTimeout(res2, 800)) // long enough for a heartbeat (leaseMs/3 ≈ 333ms)
+        return { outcome: 'success' }
+      }),
+    )
+    let heartbeatErrorsSeen = 0
+    const res = await runDispatchTick(failingDb, r, {
+      leaseMs: 1_000,
+      adapterTimeoutMs: 9_000,
+      onHeartbeatError: () => {
+        heartbeatErrorsSeen += 1
+      },
+    })
+    expect(renewCalls).toBeGreaterThan(0) // the heartbeat renew was attempted and threw
+    expect(heartbeatErrorsSeen).toBeGreaterThan(0) // surfaced via the dedicated seam...
+    expect(res.heartbeatErrors).toBe(1) // ...and counted distinctly
+    expect(res.lostLease).toBe(0) // NOT masqueraded as a normal lost lease
+    expect((await readRow(id, key)).status).toBe('in_progress') // left unresolved for reclaim
+  }, 15_000)
 })
 
 /**
@@ -523,6 +655,26 @@ describe('P2 durable-delivery S2-b — pure guards (no DB)', () => {
     await expect(runDispatchTick(unreachableDb, oneAdapterRegistry(), { batchSize: 2.5 })).rejects.toThrow(/batchSize/)
   })
 
+  test('P1-B: a lease below the loop minimum is rejected (the heartbeat needs margin inside the lease)', async () => {
+    await expect(runDispatchTick(unreachableDb, oneAdapterRegistry(), { leaseMs: 300 })).rejects.toThrow(/leaseMs/)
+    expect(() => startDurableDispatchLoop(unreachableDb, oneAdapterRegistry(), noopObserver, { env: flagOn, leaseMs: 300 })).toThrow(/leaseMs/)
+  })
+
+  test('P2-D: a one-sided backoff override is validated against effective defaults', async () => {
+    // retryBaseMs above the DEFAULT cap (15min), with NO explicit retryCapMs, is still an inversion — reject it.
+    const aboveDefaultCap = 20 * 60_000
+    expect(() => startDurableDispatchLoop(unreachableDb, oneAdapterRegistry(), noopObserver, { env: flagOn, retryBaseMs: aboveDefaultCap })).toThrow(/retryCapMs/)
+    await expect(runDispatchTick(unreachableDb, oneAdapterRegistry(), { retryBaseMs: aboveDefaultCap })).rejects.toThrow(/retryCapMs/)
+  })
+
+  test('P2#4: onHeartbeatError is also a required sink (a degrading store must be observable)', () => {
+    expect(() =>
+      startDurableDispatchLoop(unreachableDb, oneAdapterRegistry(), { onUnknownConsumerKeys: () => {}, onTickError: () => {} } as unknown as DispatchLoopObserver, {
+        env: flagOn,
+      }),
+    ).toThrow(/telemetry sink/)
+  })
+
   test('P2#4: a throwing observer.onTickError never becomes an unhandled rejection (loop survives a DB error)', async () => {
     const rejectingDb: Queryable = {
       query: async () => {
@@ -532,6 +684,7 @@ describe('P2 durable-delivery S2-b — pure guards (no DB)', () => {
     let tickErrorSeen = 0
     const observer: DispatchLoopObserver = {
       onUnknownConsumerKeys: () => {},
+      onHeartbeatError: () => {},
       onTickError: () => {
         tickErrorSeen += 1
         throw new Error('and the error sink is down too')

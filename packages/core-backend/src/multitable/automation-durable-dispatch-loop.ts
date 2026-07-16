@@ -117,6 +117,10 @@ export const DEFAULT_ADAPTER_TIMEOUT_MS = 30_000
 // Explicit upper bounds for the loop's own knobs (the claim/resolve knobs are bounded inside S2-a).
 const MAX_MS_24H = 86_400_000
 const MAX_INTERVAL_MS = 3_600_000 // 1h — an interval beyond this is almost certainly a misconfiguration
+// The claim engine (S2-a) accepts leaseMs >= 1, but a HEARTBEATED dispatch needs the lease long enough that
+// the heartbeat (leaseMs/3) fires and a renew round-trip completes BEFORE the lease expires — otherwise a
+// competitor reclaims a still-running delivery (#4334 review P1-B). 1s is a conservative floor for that margin.
+const MIN_LOOP_LEASE_MS = 1_000
 
 /** Reject fractional, non-finite, out-of-safe-range, or out-of-bounds numeric params before they do anything. */
 function requireBoundedInt(name: string, value: number, min: number, max: number): void {
@@ -142,12 +146,17 @@ function validateDispatchNumericParams(
   },
 ): void {
   if (opts.batchSize !== undefined) requireBoundedInt('batchSize', opts.batchSize, 1, 10_000)
-  if (opts.leaseMs !== undefined) requireBoundedInt('leaseMs', opts.leaseMs, 1, MAX_MS_24H)
+  // leaseMs floor is the loop's, not the claim engine's: the heartbeat needs margin inside the lease (P1-B).
+  if (opts.leaseMs !== undefined) requireBoundedInt('leaseMs', opts.leaseMs, MIN_LOOP_LEASE_MS, MAX_MS_24H)
   if (opts.maxAttempts !== undefined) requireBoundedInt('maxAttempts', opts.maxAttempts, 1, 10_000)
   if (opts.retryBaseMs !== undefined) requireBoundedInt('retryBaseMs', opts.retryBaseMs, 1, MAX_MS_24H)
   if (opts.retryCapMs !== undefined) requireBoundedInt('retryCapMs', opts.retryCapMs, 1, MAX_MS_24H)
-  if (opts.retryBaseMs !== undefined && opts.retryCapMs !== undefined && opts.retryCapMs < opts.retryBaseMs) {
-    throw new RangeError(`retryCapMs (${opts.retryCapMs}) must be >= retryBaseMs (${opts.retryBaseMs})`)
+  // Inversion check on the EFFECTIVE values (defaults synthesized), so a one-sided override — e.g. a
+  // retryBaseMs above the DEFAULT cap with no explicit retryCapMs — is still rejected (#4334 review P2-D).
+  const effRetryBaseMs = opts.retryBaseMs ?? DEFAULT_RETRY_BASE_MS
+  const effRetryCapMs = opts.retryCapMs ?? DEFAULT_RETRY_CAP_MS
+  if (effRetryCapMs < effRetryBaseMs) {
+    throw new RangeError(`effective retryCapMs (${effRetryCapMs}) must be >= effective retryBaseMs (${effRetryBaseMs})`)
   }
   if (opts.adapterTimeoutMs !== undefined) requireBoundedInt('adapterTimeoutMs', opts.adapterTimeoutMs, 1, MAX_MS_24H)
   if (opts.intervalMs !== undefined) requireBoundedInt('intervalMs', opts.intervalMs, 1, MAX_INTERVAL_MS)
@@ -220,6 +229,10 @@ export interface DispatchTickOptions {
   adapterTimeoutMs?: number
   /** Rolling-deploy alert seam (#4203 §246). Best-effort — a throwing callback never fails the tick. */
   onUnknownConsumerKeys?: (keys: string[]) => void
+  /** Heartbeat-renew DB-error seam (#4334 review P2-C). A renew that ERRORS (vs. cleanly losing the row to a
+   *  competitor) is an infra signal — surfaced here, never masqueraded as a normal lost-lease. Values-free
+   *  (internal ids only). Best-effort — a throwing callback never fails the tick. */
+  onHeartbeatError?: (info: { outboxId: string; consumerKey: string }) => void
   /** Cooperative stop: the row loop breaks between rows when this returns true (keeps `stop()` responsive). */
   shouldStop?: () => boolean
   /** Aborted on loop `stop()` — folded into each row's adapter `ctx.signal` so a cooperative adapter cancels
@@ -235,6 +248,8 @@ export interface DispatchTickResult {
   poisoned: number
   /** resolves that hit 0 rows because the fence was superseded (zombie / lost lease) — informational. */
   lostLease: number
+  /** rows whose HEARTBEAT renew hit a DB error mid-flight (an infra signal, distinct from a normal lost lease). */
+  heartbeatErrors: number
   unknownKeys: string[]
 }
 
@@ -245,10 +260,11 @@ interface RowRuntimeConfig {
   retryBaseMs?: number
   retryCapMs?: number
   stopSignal?: AbortSignal
+  onHeartbeatError?: (info: { outboxId: string; consumerKey: string }) => void
   now?: () => Date
 }
 
-type RowDisposition = 'completed' | 'rescheduled' | 'poisoned' | 'lostLease'
+type RowDisposition = 'completed' | 'rescheduled' | 'poisoned' | 'lostLease' | 'heartbeatError'
 
 /**
  * Run a bounded race between the adapter promise and a timeout. Resolves to the marker on timeout (the loop
@@ -258,9 +274,13 @@ type RowDisposition = 'completed' | 'rescheduled' | 'poisoned' | 'lostLease'
 const TIMEOUT_MARKER = Symbol('adapter_timeout')
 
 /**
- * Process one claimed row end-to-end: revalidate the lease, run the adapter under timeout + heartbeat, then
- * resolve via fence-CAS. Only the ADAPTER's own failure is caught here (→ retryable); a DB error on
- * renew/resolve propagates (store-unhealthy is not a per-row condition).
+ * Process one JUST-CLAIMED row (per-slot claim, so it carries a fresh lease + our fence): run the adapter
+ * under a heartbeat + bounded timeout, then resolve via fence-CAS. The heartbeat maintains the lease for a
+ * long call and aborts on a mid-flight reclaim; the terminal fence-CAS is the final state arbiter. Only the
+ * ADAPTER's own failure is caught here (→ retryable); a DB error on renew/resolve propagates (store-unhealthy
+ * is not a per-row condition). No pre-call renew is needed: per-slot claim removes the batch-drift window it
+ * used to guard (the round-2 pre-call renew), and an adapter shorter than the heartbeat is already covered by
+ * the fresh claim lease.
  */
 async function processClaimedRow(
   db: Queryable,
@@ -268,14 +288,8 @@ async function processClaimedRow(
   row: ClaimedConsumer,
   cfg: RowRuntimeConfig,
 ): Promise<RowDisposition> {
-  // 1) Pre-call revalidate + renew: prove we STILL own this row (a serial batch may have drifted past the
-  //    lease) and reset its window. If a concurrent worker reclaimed it, the adapter is never called.
-  if (!(await renewConsumerLease(db, row.outboxId, row.consumerKey, row.fence, cfg.leaseMs, cfg))) {
-    return 'lostLease'
-  }
-
-  // 2) Guards: AbortController (cooperative cancel) + heartbeat (maintain the lease; detect a mid-flight
-  //    reclaim) + timeout (the loop's liveness guarantee).
+  // Guards: AbortController (cooperative cancel) + heartbeat (maintain the lease; detect a mid-flight
+  // reclaim) + timeout (the loop's liveness guarantee).
   const controller = new AbortController()
   // A loop-level stop aborts in-flight adapters too, so stop() returns promptly for a cooperative adapter.
   const onStop = () => controller.abort()
@@ -284,19 +298,22 @@ async function processClaimedRow(
     else cfg.stopSignal.addEventListener('abort', onStop, { once: true })
   }
   let leaseLost = false
+  let heartbeatErrored = false
   const heartbeat = setInterval(() => {
     void renewConsumerLease(db, row.outboxId, row.consumerKey, row.fence, cfg.leaseMs, cfg)
       .then((stillOwned) => {
         if (!stillOwned) {
+          // Renew matched 0 rows: a competitor cleanly reclaimed the row (NORMAL concurrency) — abort.
           leaseLost = true
           controller.abort()
         }
       })
       .catch(() => {
-        // A renew that errors mid-flight leaves ownership uncertain — stop the call conservatively; the
-        // terminal fence-CAS below is the final arbiter of persisted state.
-        leaseLost = true
+        // A renew that ERRORS is an INFRA signal, not a normal lost lease — surface it (never masquerade it
+        // as lostLease) and stop the call conservatively; the terminal fence-CAS is the final state arbiter.
+        heartbeatErrored = true
         controller.abort()
+        cfg.onHeartbeatError?.({ outboxId: row.outboxId, consumerKey: row.consumerKey })
       })
   }, cfg.heartbeatMs)
   heartbeat.unref?.()
@@ -334,8 +351,12 @@ async function processClaimedRow(
     cfg.stopSignal?.removeEventListener('abort', onStop)
   }
 
-  // 3) A mid-flight reclaim means another worker owns the row now — do NOT resolve it (that would clobber
-  //    the new owner's fence-CAS window; our write would match 0 rows anyway).
+  // 3) A heartbeat DB error leaves ownership uncertain — surface it as its own disposition (already reported
+  //    via onHeartbeatError) and do NOT resolve; a mid-flight CLEAN reclaim means another worker owns the row
+  //    now, so also do NOT resolve (our write would match 0 rows and could clobber the new owner's window).
+  if (heartbeatErrored) {
+    return 'heartbeatError'
+  }
   if (leaseLost) {
     return 'lostLease'
   }
@@ -379,8 +400,9 @@ export async function runDispatchTick(
   const knownKeys = registry.keys()
   const leaseMs = opts.leaseMs ?? DEFAULT_LEASE_MS
   const adapterTimeoutMs = opts.adapterTimeoutMs ?? DEFAULT_ADAPTER_TIMEOUT_MS
-  // Heartbeat well inside the lease window so a still-running adapter keeps its hold; floor at 1s.
-  const heartbeatMs = Math.max(1_000, Math.min(Math.floor(leaseMs / 3), leaseMs))
+  // Heartbeat strictly INSIDE the lease window (leaseMs/3, not a fixed floor that can exceed a short lease —
+  // #4334 review P1-B). leaseMs >= MIN_LOOP_LEASE_MS is enforced above, so this is always well below the lease.
+  const heartbeatMs = Math.max(1, Math.floor(leaseMs / 3))
   const cfg: RowRuntimeConfig = {
     leaseMs,
     adapterTimeoutMs,
@@ -388,9 +410,10 @@ export async function runDispatchTick(
     retryBaseMs: opts.retryBaseMs,
     retryCapMs: opts.retryCapMs,
     stopSignal: opts.stopSignal,
+    onHeartbeatError: opts.onHeartbeatError,
     now: opts.now,
   }
-  const result: DispatchTickResult = { claimed: 0, completed: 0, rescheduled: 0, poisoned: 0, lostLease: 0, unknownKeys: [] }
+  const result: DispatchTickResult = { claimed: 0, completed: 0, rescheduled: 0, poisoned: 0, lostLease: 0, heartbeatErrors: 0, unknownKeys: [] }
 
   // 1) rolling-deploy alert: reclaimable rows this worker cannot serve. Never claimed, never terminated.
   try {
@@ -403,20 +426,25 @@ export async function runDispatchTick(
     // below will fail loudly anyway.)
   }
 
-  // 2) claim a batch scoped to the keys this worker knows (ceiling-poison happens inside the claim).
-  const claimed = await claimDueConsumers(db, {
-    consumerKeys: knownKeys,
-    batchSize: opts.batchSize,
-    leaseMs,
-    maxAttempts: opts.maxAttempts,
-    now: opts.now,
-  })
-  result.claimed = claimed.length
-
-  // 3) process each row — per-row isolation, sequential (adapters may share downstream resources; concurrency
-  //    tuning is a later, measured decision). Each row revalidates its lease and runs under a bounded timeout.
-  for (const row of claimed) {
-    if (opts.shouldStop?.()) break // graceful stop: don't start new adapter work once the loop is stopping
+  // 2+3) PER-SLOT claim (#4334 review P1-A): the dispatcher is serial, and the claim increments `attempts`
+  //   AT CLAIM (crash-safe, S2-a). A BATCH claim would burn an attempt on every claimed row even if a slow
+  //   front row starves the tail — so a tail row could reach `max_attempts_exhausted` and dead-letter WITHOUT
+  //   its adapter ever running. Claiming ONE row per execution slot guarantees every claimed row is actually
+  //   attempted: attempts == adapter invocations. `batchSize` becomes the per-tick ceiling on how many slots
+  //   to run. (Cost: one claim query per row — acceptable for a delivery loop; a batched design is a later,
+  //   measured decision.)
+  const maxRowsPerTick = opts.batchSize ?? 50
+  for (let slot = 0; slot < maxRowsPerTick; slot++) {
+    if (opts.shouldStop?.()) break // graceful stop: don't claim/start new adapter work once stopping
+    const [row] = await claimDueConsumers(db, {
+      consumerKeys: knownKeys,
+      batchSize: 1,
+      leaseMs,
+      maxAttempts: opts.maxAttempts,
+      now: opts.now,
+    })
+    if (!row) break // nothing reclaimable this tick
+    result.claimed += 1
     const adapter = registry.get(row.consumerKey)
     if (!adapter) {
       // Cannot happen (claim is scoped to registry keys) unless the registry mutated mid-tick; leave the
@@ -427,6 +455,7 @@ export async function runDispatchTick(
     if (disposition === 'completed') result.completed += 1
     else if (disposition === 'rescheduled') result.rescheduled += 1
     else if (disposition === 'poisoned') result.poisoned += 1
+    else if (disposition === 'heartbeatError') result.heartbeatErrors += 1
     else result.lostLease += 1
   }
   return result
@@ -446,7 +475,10 @@ export interface DispatchLoopObserver {
   onUnknownConsumerKeys(keys: string[]): void
   /** A tick that threw (a DB/claim error) — never swallowed silently. */
   onTickError(err: unknown): void
-  /** Optional per-tick metrics for observability (completed/rescheduled/poisoned/lostLease counts). */
+  /** A heartbeat renew hit a DB error mid-flight (an infra signal, NOT a normal lost lease). Required so a
+   *  degrading store surfaces here instead of hiding inside the lostLease count (#4334 review P2-C). */
+  onHeartbeatError(info: { outboxId: string; consumerKey: string }): void
+  /** Optional per-tick metrics for observability (completed/rescheduled/poisoned/lostLease/heartbeatErrors). */
   onTick?(result: DispatchTickResult): void
 }
 
@@ -483,8 +515,13 @@ export function startDurableDispatchLoop(
   observer: DispatchLoopObserver,
   opts: DispatchTickOptions & { intervalMs?: number; env?: NodeJS.ProcessEnv } = {},
 ): DispatchLoopHandle {
-  if (!observer || typeof observer.onUnknownConsumerKeys !== 'function' || typeof observer.onTickError !== 'function') {
-    throw new TypeError('durable dispatch loop requires a telemetry sink (observer.onUnknownConsumerKeys + observer.onTickError)')
+  if (
+    !observer ||
+    typeof observer.onUnknownConsumerKeys !== 'function' ||
+    typeof observer.onTickError !== 'function' ||
+    typeof observer.onHeartbeatError !== 'function'
+  ) {
+    throw new TypeError('durable dispatch loop requires a telemetry sink (observer.onUnknownConsumerKeys + onTickError + onHeartbeatError)')
   }
   if (!isDurableDeliveryEnabled(opts.env ?? process.env)) {
     throw new Error('durable dispatch loop must not start while AUTOMATION_DURABLE_DELIVERY_ENABLED is off')
@@ -502,9 +539,10 @@ export function startDurableDispatchLoop(
     running = true
     inFlight = runDispatchTick(db, registry, {
       ...opts,
-      // route the alert through the exception-safe sink; break the row loop promptly once stopping;
+      // route the alerts through the exception-safe sink; break the row loop promptly once stopping;
       // fold the loop-stop signal into each adapter's ctx.signal so stop() cancels in-flight work.
       onUnknownConsumerKeys: (keys) => safeInvoke(observer.onUnknownConsumerKeys, keys),
+      onHeartbeatError: (info) => safeInvoke(observer.onHeartbeatError, info),
       shouldStop: () => stopped,
       stopSignal: stopController.signal,
     })
