@@ -246,6 +246,7 @@ import {
   type YjsInvalidator,
 } from '../multitable/post-commit-hooks'
 import { listRecordRevisions, recordRecordRevision, recordRecordRevisionsBatch, recordVersionMarker, type RecordRevisionEntry, type RecordRevisionInput } from '../multitable/record-history-service'
+import { mintOperation, sealOperation } from '../multitable/operation-ledger'
 import { replayInboundLinks, isRecordUndeleteInboundEnabled } from '../multitable/inbound-link-replay'
 import { countInboundLinkCaptureRows, insertInboundLinkTombstones } from '../multitable/tombstone-capture'
 
@@ -14657,6 +14658,9 @@ export function univerMetaRouter(): Router {
         // caught in this handler's catch and mapped to 409 RECOVERY_IN_PROGRESS (same shape as reset/revert).
         await acquireAutoNumberSheetWriteLock(query, view.sheetId)
         if (isWriterFenceEnabled()) await assertNoActiveWriterBlock(query, view.sheetId)
+        // W0-1 L6-a: mint the sealed operation after the fence — covers BOTH the EDIT and CREATE branches of
+        // this handler (one form submit = one operation). Inert ⇒ byte-identical to L4cov.
+        const op = await mintOperation(query, view.sheetId)
 
         if (recordId) {
           const currentRes = await query(
@@ -14727,6 +14731,7 @@ export function univerMetaRouter(): Router {
               changedFieldIds: Object.keys(patch),
               patch,
               snapshot: normalizeJson((updateRes as any).rows[0]?.data),
+              ledger: op,
             })
           } else {
             nextVersion = serverVersion
@@ -14761,6 +14766,8 @@ export function univerMetaRouter(): Router {
               await query('DELETE FROM meta_links WHERE field_id = $1 AND record_id = $2', [fieldId, recordId])
             }
           }
+          // W0-1 L6-a: seal the operation LAST for the EDIT branch (no-op when inert or a no-field-change edit).
+          await sealOperation(query, op)
           return
         }
 
@@ -14816,7 +14823,10 @@ export function univerMetaRouter(): Router {
           changedFieldIds: Object.keys(patch),
           patch,
           snapshot: patch,
+          ledger: op,
         })
+        // W0-1 L6-a: seal the operation LAST for the CREATE branch. No-op when inert.
+        await sealOperation(query, op)
       })
 
       const recordRes = await pool.query(
@@ -16010,6 +16020,9 @@ export function univerMetaRouter(): Router {
         // W0-1 L4 (canonical fence): attachment cell-strip mutates meta_records.data — fence + durable-block
         // check first. No-op & byte-identical when MULTITABLE_ENABLE_WRITER_FENCE is off.
         await fenceWriterEntry(query, sheetId)
+        // W0-1 L6-a: mint the sealed operation after the fence; the cell-strip revision below (when the
+        // attachment is actually present) is this operation's sole event. Inert ⇒ byte-identical to L4cov.
+        const op = await mintOperation(query, sheetId)
 
         if (recordId && fieldId) {
           const recordRes = await query(
@@ -16076,12 +16089,16 @@ export function univerMetaRouter(): Router {
                 changedFieldIds: [fieldId],
                 patch: { [fieldId]: nextIds },
                 snapshot: normalizeJson((updateRes.rows[0] as any)?.data),
+                ledger: op,
               })
             }
           }
         }
 
         await softDeleteAttachmentRowShared({ query, attachmentId })
+        // W0-1 L6-a: seal the operation LAST (no-op when inert or when the attachment id was already absent
+        // ⇒ zero-event operation ⇒ not an executable anchor).
+        await sealOperation(query, op)
       })
 
       const storage = getAttachmentStorageService()
@@ -16641,6 +16658,9 @@ export function univerMetaRouter(): Router {
           // W0-1 L4 (canonical fence): lock bumps version + writes a version marker (chain event) — fence +
           // durable-block check first. No-op & byte-identical when MULTITABLE_ENABLE_WRITER_FENCE is off.
           await fenceWriterEntry(query, sheetId)
+          // W0-1 L6-a: mint the sealed operation after the fence; the lock marker below is this operation's
+          // sole event. Inert ⇒ byte-identical to L4cov.
+          const op = await mintOperation(query, sheetId)
           // lock-mgmt: LOCK action — sets the lock columns (own canEditRecord authority above).
           // revision-exempt: lock/unlock metadata-only — no `data` column touched, not a user-content edit.
           const upd = await query(
@@ -16649,7 +16669,9 @@ export function univerMetaRouter(): Router {
             [recordId, lockedBy, sheetId],
           )
           const newVersion = Number((upd.rows[0] as { version?: unknown } | undefined)?.version)
-          if (Number.isFinite(newVersion)) await recordVersionMarker(query, { sheetId, recordId, version: newVersion, kind: 'lock', actorId: actorId ?? access.userId ?? null })
+          if (Number.isFinite(newVersion)) await recordVersionMarker(query, { sheetId, recordId, version: newVersion, kind: 'lock', actorId: actorId ?? access.userId ?? null, ledger: op })
+          // W0-1 L6-a: seal the operation LAST (endpoint = the marker's seq). No-op when inert.
+          await sealOperation(query, op)
         })
       } else {
         // UNLOCK: must pass canUnlock (locker ∨ owner ∨ sheet-admin).
@@ -16665,6 +16687,8 @@ export function univerMetaRouter(): Router {
           // W0-1 L4 (canonical fence): unlock bumps version + writes a version marker — fence + durable-block
           // check first. No-op & byte-identical when MULTITABLE_ENABLE_WRITER_FENCE is off.
           await fenceWriterEntry(query, sheetId)
+          // W0-1 L6-a: mint the sealed operation after the fence; the unlock marker below is its sole event.
+          const op = await mintOperation(query, sheetId)
           // lock-mgmt: UNLOCK action — clears the lock columns (own canUnlock authority above).
           // revision-exempt: lock/unlock metadata-only — no `data` column touched, not a user-content edit.
           const upd = await query(
@@ -16673,7 +16697,9 @@ export function univerMetaRouter(): Router {
             [recordId, sheetId],
           )
           const newVersion = Number((upd.rows[0] as { version?: unknown } | undefined)?.version)
-          if (Number.isFinite(newVersion)) await recordVersionMarker(query, { sheetId, recordId, version: newVersion, kind: 'unlock', actorId: actorId ?? access.userId ?? null })
+          if (Number.isFinite(newVersion)) await recordVersionMarker(query, { sheetId, recordId, version: newVersion, kind: 'unlock', actorId: actorId ?? access.userId ?? null, ledger: op })
+          // W0-1 L6-a: seal the operation LAST (endpoint = the marker's seq). No-op when inert.
+          await sealOperation(query, op)
         })
       }
 
