@@ -46,13 +46,19 @@ export interface ActionIdentity {
   canonicalConfig: unknown
 }
 
-/** The stable triple-identity action key: `<structuralPath>#<actionType>#sha256(canonicalConfig)[:16]`. */
+/**
+ * The stable triple-identity action key. The three components are joined with an INJECTIVE encoding —
+ * `JSON.stringify([structuralPath, actionType, sha256(canonicalConfig)[:16]])` — NOT a bare delimiter join.
+ * A delimiter like `#` collides when a component contains it: `("a", "b#c")` and `("a#b", "c")` would both
+ * become `"a#b#c#…"`, splitting/merging distinct action identities (#4340 review P2). JSON escapes each
+ * component unambiguously, so the map from the triple to the key is one-to-one.
+ */
 export function deriveActionKey(id: ActionIdentity): string {
   if (!NON_BLANK.test(id.structuralPath ?? '') || !NON_BLANK.test(id.actionType ?? '')) {
     throw new RangeError('deriveActionKey: structuralPath and actionType must be non-blank')
   }
   const cfgHash = createHash('sha256').update(canonicalizeConfig(id.canonicalConfig)).digest('hex').slice(0, 16)
-  return `${id.structuralPath}#${id.actionType}#${cfgHash}`
+  return JSON.stringify([id.structuralPath, id.actionType, cfgHash])
 }
 
 export interface ActionClaim {
@@ -86,12 +92,16 @@ export async function claimActionApplied(trx: Queryable, c: ActionClaim): Promis
   return Number(res.rowCount ?? 0) === 1 ? 'claimed' : 'duplicate'
 }
 
-/** Endpoint idempotency key = stable event+action identity. NEVER fence/attempt-derived (#4203 §340). */
+/**
+ * Endpoint idempotency key = stable event+action identity. NEVER fence/attempt-derived (#4203 §340). Uses the
+ * same INJECTIVE JSON-array encoding as `deriveActionKey` — a bare `::` join would collide if either component
+ * contained `::` (#4340 review P2).
+ */
 export function deriveOutboundIdempotencyKey(eventId: string, actionKey: string): string {
   if (!NON_BLANK.test(eventId) || !NON_BLANK.test(actionKey)) {
     throw new RangeError('deriveOutboundIdempotencyKey: eventId and actionKey must be non-blank')
   }
-  return `${eventId}::${actionKey}`
+  return JSON.stringify([eventId, actionKey])
 }
 
 /**

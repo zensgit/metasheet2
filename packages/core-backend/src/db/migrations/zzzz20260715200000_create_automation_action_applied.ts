@@ -39,7 +39,12 @@ export async function up(db: Kysely<unknown>): Promise<void> {
       application_mode text NOT NULL DEFAULT 'apply'
                          CONSTRAINT action_applied_mode_valid CHECK (application_mode IN ('apply','test_run')),
       result_ref       text,
-      applied_at       timestamptz NOT NULL DEFAULT now()
+      applied_at       timestamptz NOT NULL DEFAULT now(),
+      -- node_key and entry_epoch must move together: BOTH the non-node sentinel ('', 0) OR BOTH a real
+      -- FWB-3 node scope (non-blank node_key, epoch >= 1). Without this, ('', 7) and ('node_A', 0) are
+      -- accepted and can split one idempotency identity into two rows (#4340 review P2).
+      CONSTRAINT action_applied_node_epoch_paired
+        CHECK ((node_key = '' AND entry_epoch = 0) OR (node_key <> '' AND entry_epoch >= 1))
     )
   `.execute(db)
   // the single business-claim key: sentinels (node_key='', entry_epoch=0) cover FWB-1/2; FWB-3 uses real values.
