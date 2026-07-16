@@ -1,10 +1,12 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
 
 import {
   isBlockingTimeCorrectionRequest,
   resolveSmokeWorkDate,
   resolveSmokeWorkDateCandidates,
+  scanBlockingTimeCorrectionRequests,
   selectAvailableSmokeWorkDate,
 } from './attendance-smoke-workdate.mjs'
 
@@ -34,6 +36,58 @@ test('isBlockingTimeCorrectionRequest matches the API request collision contract
     isBlockingTimeCorrectionRequest({ request_type: 'leave', status: 'approved' }),
     false,
   )
+})
+
+test('scanBlockingTimeCorrectionRequests follows production pagination to a blocking row', async () => {
+  const calls = []
+  const blocking = await scanBlockingTimeCorrectionRequests('2031-02-03', {
+    pageSize: 2,
+    maxPages: 3,
+    fetchPage: async (request) => {
+      calls.push(request)
+      if (request.page === 1) {
+        return {
+          items: [
+            { requestType: 'leave', status: 'approved' },
+            { requestType: 'time_correction', status: 'cancelled' },
+          ],
+          total: 3,
+        }
+      }
+      return {
+        items: [{ requestType: 'time_correction', status: 'pending' }],
+        total: 3,
+      }
+    },
+  })
+
+  assert.equal(blocking, true)
+  assert.deepEqual(calls, [
+    { workDate: '2031-02-03', page: 1, pageSize: 2 },
+    { workDate: '2031-02-03', page: 2, pageSize: 2 },
+  ])
+})
+
+test('scanBlockingTimeCorrectionRequests fails closed on an invalid page shape', async () => {
+  await assert.rejects(
+    scanBlockingTimeCorrectionRequests('2031-02-03', {
+      fetchPage: async () => ({ total: 1 }),
+    }),
+    /missing items/,
+  )
+})
+
+test('production smoke awaits the collision-aware work-date resolver', () => {
+  const source = readFileSync(
+    new URL('./attendance-smoke-api.mjs', import.meta.url),
+    'utf8',
+  )
+
+  assert.match(
+    source,
+    /const workDate = await resolveAvailableSmokeWorkDate\(\)/,
+  )
+  assert.match(source, /scanBlockingTimeCorrectionRequests\(workDate,/)
 })
 
 test('resolveSmokeWorkDate honors explicit override', () => {

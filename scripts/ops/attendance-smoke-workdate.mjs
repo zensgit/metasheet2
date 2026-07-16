@@ -21,6 +21,43 @@ export function isBlockingTimeCorrectionRequest(item) {
   )
 }
 
+export async function scanBlockingTimeCorrectionRequests(
+  workDate,
+  options = {},
+) {
+  const {
+    fetchPage,
+    pageSize = 200,
+    maxPages = 20,
+  } = options
+  if (typeof fetchPage !== 'function') {
+    throw new TypeError('fetchPage must be a function')
+  }
+
+  for (let page = 1; page <= maxPages; page += 1) {
+    const result = await fetchPage({ workDate, page, pageSize })
+    const items = result?.items
+    if (!Array.isArray(items)) {
+      throw new Error(
+        `Attendance request availability page ${page} for ${workDate} is missing items`,
+      )
+    }
+    if (items.some(isBlockingTimeCorrectionRequest)) return true
+
+    const total = Number(result?.total)
+    if (
+      items.length < pageSize ||
+      (Number.isFinite(total) && page * pageSize >= total)
+    ) {
+      return false
+    }
+  }
+
+  throw new Error(
+    `Attendance request availability exceeded ${maxPages} pages for ${workDate}`,
+  )
+}
+
 export function resolveSmokeWorkDate(env = process.env) {
   const override = String(env.SMOKE_WORK_DATE || '').trim()
   if (/^\d{4}-\d{2}-\d{2}$/.test(override)) return override

@@ -1,6 +1,6 @@
 import { assertImportTelemetry } from './attendance-import-telemetry-utils.mjs'
 import {
-  isBlockingTimeCorrectionRequest,
+  scanBlockingTimeCorrectionRequests,
   selectAvailableSmokeWorkDate,
 } from './attendance-smoke-workdate.mjs'
 
@@ -155,39 +155,24 @@ async function hasBlockingTimeCorrectionRequest(workDate) {
   const pageSize = 200
   const maxPages = 20
 
-  for (let page = 1; page <= maxPages; page += 1) {
-    const query = new URLSearchParams({
-      from: workDate,
-      to: workDate,
-      page: String(page),
-      pageSize: String(pageSize),
-    })
-    const existing = await apiFetch(
-      `/attendance/requests?${query.toString()}`,
-      { method: 'GET' },
-    )
-    assertOk(existing, 'GET /attendance/requests (work-date availability)')
-
-    const items = existing.body?.data?.items
-    if (!Array.isArray(items)) {
-      throw new Error(
-        'GET /attendance/requests (work-date availability): response missing items',
+  return scanBlockingTimeCorrectionRequests(workDate, {
+    pageSize,
+    maxPages,
+    fetchPage: async ({ page, pageSize: requestedPageSize }) => {
+      const query = new URLSearchParams({
+        from: workDate,
+        to: workDate,
+        page: String(page),
+        pageSize: String(requestedPageSize),
+      })
+      const existing = await apiFetch(
+        `/attendance/requests?${query.toString()}`,
+        { method: 'GET' },
       )
-    }
-    if (items.some(isBlockingTimeCorrectionRequest)) return true
-
-    const total = Number(existing.body?.data?.total)
-    if (
-      items.length < pageSize ||
-      (Number.isFinite(total) && page * pageSize >= total)
-    ) {
-      return false
-    }
-  }
-
-  throw new Error(
-    `GET /attendance/requests (work-date availability): exceeded ${maxPages} pages for ${workDate}`,
-  )
+      assertOk(existing, 'GET /attendance/requests (work-date availability)')
+      return existing.body?.data
+    },
+  })
 }
 
 async function resolveAvailableSmokeWorkDate() {
