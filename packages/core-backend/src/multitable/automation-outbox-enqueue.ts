@@ -10,9 +10,11 @@
  * construction. This applies to EVERY manifest event family, not only approval-completion (§328-333).
  *
  * Hard rules:
- *   - `trx` MUST be the transaction the source change is being written in. Passing a pool here would break
- *     atomicity silently, so the call sites (S4-b wiring) pass the same client/trx they use for the source
- *     write. (Not machine-enforceable at this seam; the crash-injection V-series (S7) proves it per site.)
+ *   - `trx` MUST be the transaction the source change is being written in. This is MACHINE-ENFORCED: the param
+ *     is a `TransactionalQueryable` and a runtime guard rejects anything without the `isTransaction` marker, so
+ *     a pool can never reach the INSERTs (passing one would break atomicity — the outbox row would commit
+ *     before a failing consumer INSERT could roll it back). The S4-b call sites pass the same txn as the
+ *     source write.
  *   - An event type the manifest does not route is a HARD ERROR — silently enqueueing zero rows would be a
  *     silent miss, exactly what the lock forbids.
  *   - `eventId` is the stable ORIGINAL-event identity (dedup basis + outbound-idempotency seed). Validated
@@ -27,6 +29,18 @@ import { randomUUID } from 'node:crypto'
 
 import type { Queryable } from './automation-durable-dispatcher'
 import { CURRENT_ROUTING_MANIFEST, expandConsumerKeysForEvent, type RoutingManifest } from './automation-routing-manifest'
+
+/**
+ * A Queryable that is a TRANSACTION handle, not a connection pool. Enqueue writes TWO statements that must be
+ * atomic; a pg `Pool` runs each on its own auto-committed connection, so a failure on the second INSERT would
+ * leave the first (the outbox row) durably committed and ORPHANED (outbox=1, consumer=0). The `isTransaction`
+ * marker is set ONLY by a real transaction wrapper (the caller writing the source change), and is runtime-
+ * asserted below — a pool can never satisfy it (#4336 review P1: atomicity must not rest on a calling
+ * convention).
+ */
+export interface TransactionalQueryable extends Queryable {
+  readonly isTransaction: true
+}
 
 export interface OutboxEventInput {
   /** Manifest event family, e.g. 'approval.approved' | 'multitable.record.created' | 'form.submitted'. */
@@ -56,10 +70,17 @@ const NON_BLANK_ASCII = /[!-~]/
  * loudly, never half-enqueue.
  */
 export async function enqueueOutboxEvent(
-  trx: Queryable,
+  trx: TransactionalQueryable,
   event: OutboxEventInput,
   manifest: RoutingManifest = CURRENT_ROUTING_MANIFEST,
 ): Promise<EnqueuedOutboxEvent> {
+  // Atomicity is machine-enforced, not conventional: reject anything that is not a real transaction handle
+  // (a Pool would commit the outbox row before a failing consumer INSERT could roll it back — #4336 review P1).
+  if (!trx || (trx as { isTransaction?: unknown }).isTransaction !== true) {
+    throw new TypeError(
+      'enqueueOutboxEvent must run inside a TRANSACTION (a TransactionalQueryable with isTransaction:true), not a pool — the outbox row + consumer fan-out have to commit or roll back together',
+    )
+  }
   const { eventType, eventId } = event
   if (typeof eventType !== 'string' || eventType.trim() === '') {
     throw new RangeError('enqueueOutboxEvent: eventType must be a non-empty string')

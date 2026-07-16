@@ -3,9 +3,11 @@
  *
  * The load-bearing proof is ATOMICITY: enqueue happens inside the caller's transaction, so ROLLBACK leaves
  * ZERO outbox/consumer rows (a crash before commit loses nothing), and COMMIT persists the outbox row plus
- * the manifest-expanded consumer fan-out. Also proves: unrouted event type / blank identity / bad depth are
- * hard errors; manifest_version is stamped; and the enqueued fan-out flows through the S2-b dispatch tick
- * with PER-CONSUMER independence (one consumer's failure never blocks the siblings' `done`).
+ * the manifest-expanded consumer fan-out. Atomicity is MACHINE-ENFORCED: enqueue rejects a pool (isTransaction
+ * guard), so the outbox-committed / consumer-failed orphan is impossible by construction (#4336 review P1).
+ * Also proves: unrouted event type / blank identity / bad depth are hard errors; manifest_version is stamped;
+ * and the enqueued fan-out flows through the S2-b dispatch tick with PER-CONSUMER independence — over a
+ * RUN-UNIQUE manifest so it claims only THIS test's rows on the shared CI DB (#4336 review P2).
  *
  * Two-point wired (plugin-tests.yml + vitest.config.ts exclude) so it cannot skip-green.
  */
@@ -14,14 +16,20 @@ import { randomUUID } from 'node:crypto'
 import { afterAll, describe, expect, test } from 'vitest'
 
 import { poolManager } from '../../src/integration/db/connection-pool'
-import { enqueueOutboxEvent } from '../../src/multitable/automation-outbox-enqueue'
+import { enqueueOutboxEvent, type TransactionalQueryable } from '../../src/multitable/automation-outbox-enqueue'
 import { ConsumerAdapterRegistry, runDispatchTick, type AdapterOutcome } from '../../src/multitable/automation-durable-dispatch-loop'
-import { APPROVAL_COMPLETION_CONSUMERS } from '../../src/multitable/automation-routing-manifest'
+import { APPROVAL_COMPLETION_CONSUMERS, type RoutingManifest } from '../../src/multitable/automation-routing-manifest'
+import type { PoolClient } from 'pg'
 
 const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
 const db = () => poolManager.get()
 const RUN = randomUUID()
 const enqueued: string[] = []
+
+/** Wrap a checked-out client as a real transaction handle (the isTransaction marker the enqueue guard requires). */
+const txn = (client: PoolClient): TransactionalQueryable => ({ isTransaction: true, query: (sql, params) => client.query(sql, params) })
+/** A transaction handle whose query must NOT be reached (validation throws first). */
+const txnStub = (): TransactionalQueryable => ({ isTransaction: true, query: async () => { throw new Error('query should not be reached') } })
 
 async function rowsFor(outboxId: string) {
   const outbox = await db().query('SELECT event_type, event_id, manifest_version, automation_depth FROM meta_automation_outbox WHERE id=$1', [outboxId])
@@ -44,12 +52,11 @@ describeIfDatabase('P2 durable-delivery S4-a — producer atomic enqueue (real D
   })
 
   test('COMMIT persists the outbox row + the exact manifest fan-out (approval family → 3 consumers)', async () => {
-    const raw = db().getInternalPool()
-    const client = await raw.connect()
+    const client = await db().getInternalPool().connect()
     let outboxId = ''
     try {
       await client.query('BEGIN')
-      const res = await enqueueOutboxEvent(client, {
+      const res = await enqueueOutboxEvent(txn(client), {
         eventType: 'approval.approved',
         eventId: `evt_${RUN}_commit`,
         payload: { instanceId: 'apr_1' },
@@ -70,78 +77,111 @@ describeIfDatabase('P2 durable-delivery S4-a — producer atomic enqueue (real D
   })
 
   test('ATOMICITY: ROLLBACK leaves zero outbox and zero consumer rows (crash-before-commit loses nothing)', async () => {
-    const raw = db().getInternalPool()
-    const client = await raw.connect()
+    const client = await db().getInternalPool().connect()
     let outboxId = ''
     try {
       await client.query('BEGIN')
-      const res = await enqueueOutboxEvent(client, {
-        eventType: 'form.submitted',
-        eventId: `evt_${RUN}_rollback`,
-        payload: {},
-      })
+      const res = await enqueueOutboxEvent(txn(client), { eventType: 'form.submitted', eventId: `evt_${RUN}_rollback`, payload: {} })
       outboxId = res.outboxId
-      // rows are visible INSIDE the txn (same client)...
       const inside = await client.query('SELECT count(*)::int AS c FROM meta_automation_outbox WHERE id=$1', [outboxId])
-      expect(Number(inside.rows[0].c)).toBe(1)
+      expect(Number(inside.rows[0].c)).toBe(1) // visible INSIDE the txn (same client)...
       await client.query('ROLLBACK')
     } finally {
       client.release()
     }
-    // ...and completely gone after ROLLBACK — both tables.
-    const { outbox, consumers } = await rowsFor(outboxId)
+    const { outbox, consumers } = await rowsFor(outboxId) // ...and completely gone after ROLLBACK — both tables
     expect(outbox).toHaveLength(0)
     expect(consumers).toHaveLength(0)
   })
 
+  test('P1 pool NEGATIVE: enqueue with a pool is REJECTED before any write (no orphan possible)', async () => {
+    const eid = `evt_${RUN}_poolneg`
+    // db() is the Pool — not a transaction. The guard must reject it (a bare Queryable would have half-written).
+    await expect(enqueueOutboxEvent(db() as unknown as TransactionalQueryable, { eventType: 'approval.approved', eventId: eid, payload: {} })).rejects.toThrow(
+      /must run inside a TRANSACTION/,
+    )
+    // and NOTHING was written — not even the outbox row (contrast the pre-fix pool path: outbox=1, consumer=0)
+    const { rows } = await db().query('SELECT count(*)::int AS c FROM meta_automation_outbox WHERE event_id=$1', [eid])
+    expect(Number(rows[0].c)).toBe(0)
+  })
+
+  test('P1 transaction POSITIVE control: a failure on the 2nd (consumer) INSERT rolls the outbox row back too', async () => {
+    const client = await db().getInternalPool().connect()
+    const eid = `evt_${RUN}_txnpc`
+    let calls = 0
+    // a transaction handle whose SECOND query (the consumer fan-out) fails, as a mid-enqueue DB error would
+    const failingTxn: TransactionalQueryable = {
+      isTransaction: true,
+      query: async (sql, params) => {
+        calls += 1
+        if (calls === 2) throw new Error('simulated DB failure on the consumer INSERT')
+        return client.query(sql, params)
+      },
+    }
+    try {
+      await client.query('BEGIN')
+      await expect(enqueueOutboxEvent(failingTxn, { eventType: 'form.submitted', eventId: eid, payload: {} })).rejects.toThrow(/simulated DB failure/)
+      // the outbox INSERT (1st query) ran but is UNCOMMITTED — visible only inside this txn
+      const inside = await client.query('SELECT count(*)::int AS c FROM meta_automation_outbox WHERE event_id=$1', [eid])
+      expect(Number(inside.rows[0].c)).toBe(1)
+      await client.query('ROLLBACK') // the source write fails → the whole enqueue vanishes, no orphan
+    } finally {
+      client.release()
+    }
+    const { rows } = await db().query('SELECT count(*)::int AS c FROM meta_automation_outbox WHERE event_id=$1', [eid])
+    expect(Number(rows[0].c)).toBe(0)
+  })
+
   test('an unrouted event type is a HARD error and aborts the enclosing work (no half-enqueue)', async () => {
     await expect(
-      enqueueOutboxEvent(db(), { eventType: 'not.a.real.family', eventId: `evt_${RUN}_x`, payload: {} }),
+      enqueueOutboxEvent(txnStub(), { eventType: 'not.a.real.family', eventId: `evt_${RUN}_x`, payload: {} }),
     ).rejects.toThrow(/not routed by manifest v1/)
   })
 
   test('identity/depth validation is a boundary error: blank eventId and bad depth throw before any SQL', async () => {
-    await expect(enqueueOutboxEvent(db(), { eventType: 'form.submitted', eventId: '   ', payload: {} })).rejects.toThrow(/non-blank identity/)
-    await expect(enqueueOutboxEvent(db(), { eventType: 'form.submitted', eventId: ' ﻿', payload: {} })).rejects.toThrow(/non-blank identity/)
+    await expect(enqueueOutboxEvent(txnStub(), { eventType: 'form.submitted', eventId: '   ', payload: {} })).rejects.toThrow(/non-blank identity/)
+    await expect(enqueueOutboxEvent(txnStub(), { eventType: 'form.submitted', eventId: ' ﻿', payload: {} })).rejects.toThrow(/non-blank identity/)
     await expect(
-      enqueueOutboxEvent(db(), { eventType: 'form.submitted', eventId: `evt_${RUN}_d`, payload: {}, automationDepth: -1 }),
+      enqueueOutboxEvent(txnStub(), { eventType: 'form.submitted', eventId: `evt_${RUN}_d`, payload: {}, automationDepth: -1 }),
     ).rejects.toThrow(/automationDepth/)
     await expect(
-      enqueueOutboxEvent(db(), { eventType: 'form.submitted', eventId: `evt_${RUN}_d2`, payload: {}, automationDepth: 1.5 }),
+      enqueueOutboxEvent(txnStub(), { eventType: 'form.submitted', eventId: `evt_${RUN}_d2`, payload: {}, automationDepth: 1.5 }),
     ).rejects.toThrow(/automationDepth/)
   })
 
   test('end-to-end: enqueued fan-out drains through the dispatch tick with PER-CONSUMER independence', async () => {
-    // Real manifest keys collide with parallel suites on the shared CI DB, so claim via a snapshot of
-    // this event's rows only: seed → tick with a registry serving the three approval consumers where
-    // approval-bridge fails transiently — its siblings still complete independently.
-    const res = await enqueueOutboxEvent(db(), {
-      eventType: 'approval.rejected',
-      eventId: `evt_${RUN}_e2e`,
-      payload: { instanceId: 'apr_e2e' },
-    })
-    enqueued.push(res.outboxId)
+    // RUN-UNIQUE consumer keys via a test-local manifest, so the dispatch tick claims ONLY this test's rows on
+    // the shared CI DB (real manifest keys + a big batchSize would claim sibling suites' rows — #4336 review P2).
+    const keys = [`ubridge_${RUN}`, `utrigger_${RUN}`, `uproj_${RUN}`] as const
+    const testManifest: RoutingManifest = { version: 1, routes: { 'approval.rejected': keys } }
+    const client = await db().getInternalPool().connect()
+    let outboxId = ''
+    try {
+      await client.query('BEGIN')
+      const res = await enqueueOutboxEvent(txn(client), { eventType: 'approval.rejected', eventId: `evt_${RUN}_e2e`, payload: { instanceId: 'apr_e2e' } }, testManifest)
+      outboxId = res.outboxId
+      enqueued.push(outboxId)
+      await client.query('COMMIT')
+    } finally {
+      client.release()
+    }
     const registry = new ConsumerAdapterRegistry()
     const handled: string[] = []
-    for (const key of APPROVAL_COMPLETION_CONSUMERS) {
+    for (const key of keys) {
       registry.register({
         key,
-        async handle(e): Promise<AdapterOutcome> {
-          if (e.outboxId !== res.outboxId) return { outcome: 'retryable_failure', reason: 'unknown' } // not ours: leave for the owning suite
+        async handle(): Promise<AdapterOutcome> {
           handled.push(key)
-          return key === 'approval-bridge'
-            ? { outcome: 'retryable_failure', reason: 'adapter_error' }
-            : { outcome: 'success' }
+          return key === keys[0] ? { outcome: 'retryable_failure', reason: 'adapter_error' } : { outcome: 'success' }
         },
       })
     }
-    // ticks: batch big enough to include our three rows even if siblings' rows are pending on the shared DB
-    await runDispatchTick(db(), registry, { batchSize: 500 })
-    const { consumers } = await rowsFor(res.outboxId)
+    await runDispatchTick(db(), registry) // default batch — only this test's 3 unique-key rows are reclaimable by it
+    const { consumers } = await rowsFor(outboxId)
     const byKey = Object.fromEntries(consumers.map((c) => [c.consumer_key, c.status]))
-    expect(byKey['approval-trigger']).toBe('done')
-    expect(byKey['approval-projection']).toBe('done')
-    expect(byKey['approval-bridge']).toBe('in_progress') // rescheduled with backoff — independent of siblings
-    expect(handled.sort()).toEqual([...APPROVAL_COMPLETION_CONSUMERS].sort())
+    expect(byKey[keys[1]]).toBe('done')
+    expect(byKey[keys[2]]).toBe('done')
+    expect(byKey[keys[0]]).toBe('in_progress') // rescheduled with backoff — independent of siblings
+    expect(handled.sort()).toEqual([...keys].sort())
   })
 })
