@@ -41,6 +41,11 @@
         <div class="meta-record-drawer__history-main">
           <span class="meta-record-drawer__history-action">{{ historyActionLabel(item.action) }}</span>
           <span class="meta-record-drawer__history-version">v{{ item.version }}</span>
+          <span
+            v-if="item.restoredFromVersion != null"
+            class="meta-record-drawer__history-restored"
+            data-test="record-history-restored-from"
+          >{{ restoredFromVersionBadge(item.restoredFromVersion, isZh) }}</span>
         </div>
         <div class="meta-record-drawer__history-meta">
           <span>{{ formatHistoryTime(item.createdAt) }}</span>
@@ -105,6 +110,7 @@ import { useLocale } from '../../composables/useLocale'
 import {
   recordLabel,
   historyActor,
+  restoredFromVersionBadge,
   type MetaRecordLabelKey,
 } from '../utils/meta-record-labels'
 import { formatRecordFieldValue, textControlValue as textControlValueShared } from '../utils/recordDisplay'
@@ -282,6 +288,8 @@ function textControlValue(value: unknown): string {
 .meta-record-drawer__history-main { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 5px; }
 .meta-record-drawer__history-action { font-size: 13px; font-weight: 700; color: #111827; }
 .meta-record-drawer__history-version { font-size: 11px; font-weight: 700; color: #2563eb; background: #eff6ff; border-radius: 999px; padding: 2px 7px; }
+/* OD-W2-5a R11 restore badge — muted, reuses the panel's existing meta color (#64748b), no new hex. */
+.meta-record-drawer__history-restored { font-size: 11px; color: #64748b; font-style: italic; }
 .meta-record-drawer__history-meta { display: flex; flex-wrap: wrap; gap: 6px; font-size: 11px; color: #64748b; }
 .meta-record-drawer__history-fields { margin-top: 8px; font-size: 12px; color: #374151; word-break: break-word; }
 .meta-record-drawer__history-diff { display: flex; align-items: baseline; gap: 8px; padding: 2px 0; }

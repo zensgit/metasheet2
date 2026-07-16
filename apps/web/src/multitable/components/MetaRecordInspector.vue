@@ -40,19 +40,51 @@
     jsdom cannot render CSS, and real-browser verification is §8.3's remit (lands with the responsive
     S7 slice per lock §7); this is a same-token, zero-new-hex, low-risk addition, not a verified claim.
 
+  W2 S5 (design-lock §2 附件面板 row, §7 S5): 4th tab, `MetaRecordAttachmentsPanel` -- mounted with the
+  SAME `fields`/`fieldPermissions`/`attachmentSummariesByField`/`uploadFn`/`deleteAttachmentFn` props
+  this shell already threads to the fields panel (S1) -- no new prop was added to this shell's OWN
+  interface for S5, only a new tabpanel branch + TAB_ORDER entry (HI-1: the shell still makes no
+  fetches of its own; the new panel owns its own already-sanctioned reads per its own file-header
+  comment). Re-emits `patch` upward via the SAME `@patch` this shell already forwards from the fields
+  panel (identical emit name/payload shape, one more source feeding the same sink).
+
   OD-W2-2 (context-driven default, lock §6bis): commentId deep-link -> comments tab, else fields
-  (details). See `resolveDefaultTab()` below -- the comments tab ships in S4; today's comment
-  deep-link flow (`MultitableWorkbench.resolveDeepLink` -> `showComments` / `MetaCommentsDrawer`) is
-  entirely outside this component's props, so there is no live commentId signal to branch on yet.
-  `resolveDefaultTab()` is the single seam S4 extends (swap its body for
-  `commentId ? 'comments' : 'details'` once the comments tab + a commentId prop exist); it has exactly
-  one live branch today.
+  (details). S4: `openComments` (a new prop) IS that live signal now -- the workbench already
+  computes it (its `showComments` ref, `opts?.openComments === true`, itself set true whenever
+  `applyCommentDeepLink` sees a `commentId` route param, per `resolveDeepLink`/`selectRecord`'s
+  existing ordering: `selectedRecordId` and `showComments` are both written synchronously in the
+  SAME workbench function call, before Vue's next render flush, so by the time this component's
+  `setup()` first evaluates `resolveDefaultTab()` -- on the exact tick the shell mounts, since
+  `visible`/`v-if` flips true in that same flush -- `props.openComments` already carries the final
+  value for THIS mount). Reusing `openComments` (rather than threading a raw `commentId` prop down)
+  avoids adding a second, redundant signal: every call site that sets `commentId` already routes
+  through `applyCommentDeepLink`, which normalizes it into `openComments` (`Boolean(commentId)` is
+  OR'd in) before it reaches here. A `watch` below additionally re-applies this signal on later
+  true-transitions (e.g. clicking a field's comment icon, or a mention-notification click-through)
+  without remounting the shell -- see `resolveDefaultTab()` and the `watch(() => props.openComments, ...)`
+  call for the two halves of this.
 
   HI-1 (zero new data paths): this shell makes NO fetches of its own beyond what the pre-shell drawer
   already made (`apiClient.getRecordSubscriptionStatus` / `subscribeRecord` / `unsubscribeRecord`,
-  moved verbatim, unchanged). The two mounted panels own their own already-sanctioned reads (lock §2
+  moved verbatim, unchanged). The three mounted panels own their own already-sanctioned reads (lock §2
   table); this shell is pure composition (tablist + header actions + lock banner), same as the lock's
-  own characterization of the shell row.
+  own characterization of the shell row. S4's new comments-tab props are a straight prop/emit
+  pass-through into MetaCommentsPanel — the underlying data source (`commentsState.*` +
+  `selectedRecordCommentsScope`, both server G-8 gated) is unchanged from the pre-S4 second-drawer
+  wiring, only its host component changed.
+
+  W2 S7 (design-lock §3.4, §6bis OD-W2-6=(b), §7 S7): narrow-viewport (<= RAIL_NARROW_BREAKPOINT, the
+  SAME single JS constant already defined in MultitableWorkbench.vue for the left rail — no second
+  threshold here) overlay mode. This component gets NO new prop for it: MultitableWorkbench.vue binds
+  `:class="{ 'meta-record-drawer--overlay': isInspectorOverlay }"` directly onto this component's tag,
+  which Vue's standard fallthrough-attrs merges onto this template's single root element (the same
+  mechanism this file already relies on for e.g. `<MtButton class="meta-record-drawer__btn...">`
+  above) — the workbench alone owns the responsive STATE (isInspectorOverlay / mutual-exclusion with
+  the rail drawer, OD-W2-6=b), this component only owns the CSS the class activates. See
+  `.meta-record-drawer--overlay` below, which mirrors `.mt-workbench__rail--drawer`
+  (MultitableWorkbench.vue) left<->right (anchored to the right edge instead of the left, rounded
+  corners on the open/left edge instead of the open/right edge) — same tokens, same
+  min(px, calc(100vw - 32px)) clamp idiom, no new hex.
 -->
 <template>
   <div v-if="visible" class="meta-record-drawer" @keydown="onInspectorKeydown">
@@ -85,6 +117,29 @@
         >
           <MetaCommentActionChip :label="l('record.comments')" :state="drawerCommentAffordance" />
         </button>
+        <!-- W2 S4 (lock §2 评论面板 row: "MetaCommentsDrawer 的 inbox RouterLink...上移到检查器头部"):
+             moved verbatim from MetaCommentsDrawer.vue's own header (same route name, same badge
+             rule) -- the drawer's own copy stays too (its header is unchanged, deprecated-shell
+             compat), this is a second, independent instance now living at the shell level, gated
+             the same way the comment-toggle button next to it already is.
+             `&& hasRouter`: this shell (unlike MetaCommentsDrawer) is mounted by several PRE-EXISTING
+             frozen specs (multitable-record-drawer*.spec.ts, meta-record-drawer-*.spec.ts) with no
+             vue-router plugin installed at all -- `<RouterLink>`'s own `useLink()` unconditionally
+             dereferences the injected router and throws if it is absent (verified: those specs crashed
+             under this exact failure before this guard was added). `useRouter()` itself never throws
+             (a plain `inject()`, returns undefined when absent) so the guard is safe; `v-if` false means
+             `<RouterLink>` is never even instantiated, so `useLink()` never runs. Every REAL app mount
+             always has a router (this is a route-driven SPA), so this only ever changes rendering in
+             router-less test harnesses -- proven working WITH a router in
+             multitable-record-inspector.spec.ts's own dedicated router-mounted test. -->
+        <RouterLink
+          v-if="resolvedCanComment && hasRouter"
+          class="meta-record-drawer__inbox-link"
+          :to="{ name: 'multitable-comment-inbox' }"
+        >
+          {{ inboxLabel }}
+          <span v-if="commentUnreadCount > 0" class="meta-record-drawer__inbox-badge">{{ commentUnreadCount }}</span>
+        </RouterLink>
         <MtButton v-if="canManageAutomation" class="meta-record-drawer__btn" :title="l('record.workflowTitle')" @click="emit('open-automation')">&#x2699; {{ l('record.workflow') }}</MtButton>
         <MtButton v-if="canManageRecordPermissions" class="meta-record-drawer__btn" :title="l('record.permissionsTitle')" @click="showRecordPermissions = true">&#x1F512; {{ l('record.permissions') }}</MtButton>
         <MtButton v-if="record && canCreate" class="meta-record-drawer__btn meta-record-drawer__btn--duplicate" :title="l('record.duplicateTitle')" @click="emit('duplicate')">{{ l('record.duplicate') }}</MtButton>
@@ -160,7 +215,7 @@
         />
       </div>
       <div
-        v-else
+        v-else-if="activeTab === 'history'"
         :id="tabPanelId('history')"
         role="tabpanel"
         :aria-labelledby="tabButtonId('history')"
@@ -180,6 +235,67 @@
           @restore="(payload) => emit('restore', payload)"
         />
       </div>
+      <div
+        v-else-if="activeTab === 'comments'"
+        :id="tabPanelId('comments')"
+        role="tabpanel"
+        :aria-labelledby="tabButtonId('comments')"
+        tabindex="0"
+        class="meta-record-drawer__tabpanel"
+      >
+        <MetaCommentsPanel
+          :comments="comments"
+          :loading="commentsLoading"
+          :can-comment="canComment"
+          :can-resolve="canResolveComments"
+          :draft="commentDraft"
+          :highlighted-comment-id="highlightedCommentId"
+          :target-field-id="commentTargetFieldId"
+          :scope-label="commentsScopeLabel"
+          :reply-to-comment-id="commentReplyToId"
+          :editing-comment-id="commentEditingId"
+          :submitting="commentSubmitting"
+          :error="commentsError"
+          :resolving-ids="commentResolvingIds"
+          :updating-ids="commentUpdatingIds"
+          :deleting-ids="commentDeletingIds"
+          :reacting-keys="commentReactingKeys"
+          :current-user-id="currentUserId"
+          :mention-suggestions="mentionSuggestions"
+          :composer-initial-mentions="commentComposerInitialMentions"
+          @submit="(payload: { content: string; mentions: string[] }) => emit('comment-submit', payload)"
+          @resolve="(commentId: string) => emit('comment-resolve', commentId)"
+          @reply="(commentId: string) => emit('comment-reply', commentId)"
+          @edit="(commentId: string) => emit('comment-edit', commentId)"
+          @delete="(commentId: string) => emit('comment-delete', commentId)"
+          @cancel-reply="emit('comment-cancel-reply')"
+          @cancel-edit="emit('comment-cancel-edit')"
+          @update:draft="(value: string) => emit('update:comment-draft', value)"
+          @retry="emit('comment-retry')"
+          @react="(commentId: string, emoji: string) => emit('comment-react', commentId, emoji)"
+          @unreact="(commentId: string, emoji: string) => emit('comment-unreact', commentId, emoji)"
+        />
+      </div>
+      <div
+        v-else
+        :id="tabPanelId('attachments')"
+        role="tabpanel"
+        :aria-labelledby="tabButtonId('attachments')"
+        tabindex="0"
+        class="meta-record-drawer__tabpanel"
+      >
+        <MetaRecordAttachmentsPanel
+          :record="record"
+          :fields="fields"
+          :can-edit="canEdit"
+          :field-permissions="fieldPermissions"
+          :row-actions="rowActions"
+          :attachment-summaries-by-field="attachmentSummariesByField"
+          :upload-fn="uploadFn"
+          :delete-attachment-fn="deleteAttachmentFn"
+          @patch="(fieldId, value) => emit('patch', fieldId, value)"
+        />
+      </div>
     </div>
     <div v-else class="meta-record-drawer__empty">{{ l('record.noRecord') }}</div>
     <MetaRecordPermissionManager
@@ -196,6 +312,7 @@
 
 <script setup lang="ts">
 import { computed, nextTick, ref, useId, watch } from 'vue'
+import { RouterLink, useRouter } from 'vue-router'
 import type {
   LinkedRecordSummary,
   PersonSummary,
@@ -203,6 +320,7 @@ import type {
   MetaAttachmentDeleteFn,
   MetaAttachmentUploadFn,
   MetaCommentMentionSuggestion,
+  MultitableComment,
   MultitableCommentPresenceSummary,
   MetaFieldPermission,
   MetaField,
@@ -216,6 +334,8 @@ import MetaCommentActionChip from './MetaCommentActionChip.vue'
 import MetaRecordPermissionManager from './MetaRecordPermissionManager.vue'
 import MetaRecordFieldsPanel from './MetaRecordFieldsPanel.vue'
 import MetaRecordHistoryPanel from './MetaRecordHistoryPanel.vue'
+import MetaCommentsPanel from './MetaCommentsPanel.vue'
+import MetaRecordAttachmentsPanel from './MetaRecordAttachmentsPanel.vue'
 import {
   resolveCommentAffordanceStateClass,
   resolveRecordCommentAffordance,
@@ -225,6 +345,7 @@ import {
   recordLabel,
   type MetaRecordLabelKey,
 } from '../utils/meta-record-labels'
+import { commentLabel } from '../utils/meta-comment-labels'
 import type { AiShortcutState } from '../composables/useAiShortcut'
 import { resolveCanComment } from '../utils/recordDisplay'
 
@@ -258,11 +379,65 @@ const props = withDefaults(defineProps<{
    *  the button on both. Matches the workbench `onRunButton` pending-key format. */
   buttonRunPending?: string[]
   /** B5: people-mention candidates for rich-`longText` field editing in the drawer.
-   *  Fed by the workbench's already-loaded commentMentionSuggestions (no re-fetch). */
+   *  Fed by the workbench's already-loaded commentMentionSuggestions (no re-fetch). Also now the
+   *  comments tab's own mention-suggestion source (W2 S4) -- same underlying
+   *  `commentMentionSuggestions` ref the workbench already threads in for the fields panel, no
+   *  second copy. */
   mentionSuggestions?: MetaCommentMentionSuggestion[]
+  // --- W2 S4 (design-lock §2 评论面板 row, §7 S4): comments-tab pass-through props. All sourced
+  // from the workbench's existing `commentsState` (useMultitableComments) + `selectedRecordCommentsScope`
+  // (server G-8 gated) -- the SAME data the pre-S4 second `<MetaCommentsDrawer>` consumed; only the
+  // host component changed (HI-1, zero new data paths). Named with a `comment(s)` prefix throughout
+  // to keep them visually grouped and to avoid any ambiguity with this shell's OWN unrelated props
+  // (e.g. `canComment`/`currentUserId` are reused as-is since there's no such ambiguity for those two). */
+  comments?: MultitableComment[]
+  commentsLoading?: boolean
+  canResolveComments?: boolean
+  commentDraft?: string
+  highlightedCommentId?: string | null
+  commentTargetFieldId?: string | null
+  commentsScopeLabel?: string | null
+  commentReplyToId?: string | null
+  commentEditingId?: string | null
+  commentUnreadCount?: number
+  commentSubmitting?: boolean
+  commentsError?: string | null
+  commentResolvingIds?: string[]
+  commentUpdatingIds?: string[]
+  commentDeletingIds?: string[]
+  commentReactingKeys?: string[]
+  currentUserId?: string | null
+  commentComposerInitialMentions?: MetaCommentMentionSuggestion[]
+  /** OD-W2-2 (context-driven default + live re-trigger, lock §6bis / file-header comment above):
+   *  the workbench's `showComments` signal, forwarded as-is. `true` on THIS component's initial
+   *  mount tick selects the comments tab as the default (`resolveDefaultTab()`); any LATER
+   *  true-transition while already mounted (e.g. clicking a field's comment icon, a mention
+   *  notification click-through) re-selects it via the `watch` below. A later false-transition is
+   *  intentionally NOT treated as "switch away from comments" -- tab selection is otherwise sticky
+   *  across record navigation already (S3 behavior, unchanged), and this stays consistent with it. */
+  openComments?: boolean
 }>(), {
   recordIds: () => [],
   buttonRunPending: () => [],
+  comments: () => [],
+  commentsLoading: false,
+  canResolveComments: false,
+  commentDraft: '',
+  highlightedCommentId: null,
+  commentTargetFieldId: null,
+  commentsScopeLabel: null,
+  commentReplyToId: null,
+  commentEditingId: null,
+  commentUnreadCount: 0,
+  commentSubmitting: false,
+  commentsError: null,
+  commentResolvingIds: () => [],
+  commentUpdatingIds: () => [],
+  commentDeletingIds: () => [],
+  commentReactingKeys: () => [],
+  currentUserId: null,
+  commentComposerInitialMentions: () => [],
+  openComments: false,
 })
 
 const emit = defineEmits<{
@@ -289,30 +464,71 @@ const emit = defineEmits<{
    * handler — which owns the runButton call + result.status branching + the
    * shared buttonRunPending key — handles both surfaces with no extra logic. */
   (e: 'run-button', payload: { recordId: string; field: MetaField }): void
+  /** W2 S4: re-emitted from MetaCommentsPanel with a `comment-` prefix -- this shell's OWN
+   * `delete`/`close` already mean "delete the record" / "close the inspector", so the prefix keeps
+   * the panel's same-named events (`delete`, and any future collision) from silently misrouting at
+   * this boundary. Every other name/payload shape is unchanged from MetaCommentsPanel's own emits
+   * (which are themselves unchanged from the pre-extraction MetaCommentsDrawer). */
+  (e: 'comment-submit', payload: { content: string; mentions: string[] }): void
+  (e: 'comment-resolve', commentId: string): void
+  (e: 'comment-reply', commentId: string): void
+  (e: 'comment-edit', commentId: string): void
+  (e: 'comment-delete', commentId: string): void
+  (e: 'comment-cancel-reply'): void
+  (e: 'comment-cancel-edit'): void
+  (e: 'update:comment-draft', value: string): void
+  /** Preserved gap, not a new one: the pre-extraction MetaCommentsDrawer already emitted `retry` and
+   * the workbench never bound a listener for it (verified against MultitableWorkbench.vue's pre-S4
+   * `<MetaCommentsDrawer @close=... @submit=...>` binding list — no `@retry`). Forwarded here for
+   * interface completeness with MetaCommentsPanel's own emit set; wiring an actual retry action is
+   * out of this slice's scope (HI-1 verbatim discipline — fixing latent gaps is a separate change). */
+  (e: 'comment-retry'): void
+  (e: 'comment-react', commentId: string, emoji: string): void
+  (e: 'comment-unreact', commentId: string, emoji: string): void
 }>()
 
 const { isZh } = useLocale()
 const l = (key: MetaRecordLabelKey) => recordLabel(key, isZh.value)
+const inboxLabel = computed(() => commentLabel('comment.inbox', isZh.value))
+// See the inbox-link template comment above: `useRouter()` is a plain (non-throwing) `inject()`, so
+// capturing it once here is safe even in the several pre-existing router-less test harnesses that
+// mount this shell.
+const hasRouter = !!useRouter()
 
 const showRecordPermissions = ref(false)
 
-// --- OD-W2-1 (tabs, lock §6bis): extensible union -- S3 ships 'details' (fields) + 'history'
-// (activity); S4 adds 'comments', S5 adds 'attachments'. TAB_ORDER drives roving-tabindex + arrow-key
-// nav generically over however many entries exist, so extending this union + TAB_ORDER is the only
-// change S4/S5 need to make here. The rendered LABEL TEXT deliberately stays 'record.details' /
-// 'record.history' (详情/历史) -- the frozen i18n baseline (meta-record-drawer-i18n.spec.ts) pins
-// this exact text; the lock's own §0/§2 prose gloss ("字段"/"动态") names the panels' conceptual
-// identity, not a mandated label-string rename.
-type InspectorTab = 'details' | 'history'
-const TAB_ORDER: readonly InspectorTab[] = ['details', 'history']
+// --- OD-W2-1 (tabs, lock §6bis): extensible union -- S3 shipped 'details' (fields) + 'history'
+// (activity); S4 added 'comments'; S5 (this slice) adds 'attachments', the 4th and final tab per lock
+// §2's information architecture (字段/动态/评论/附件). TAB_ORDER drives roving-tabindex + arrow-key nav
+// generically over however many entries exist, so extending this union + TAB_ORDER is the only change
+// each new tab needs to make here. The rendered LABEL TEXT for 'comments' reuses the EXISTING
+// 'record.comments' key (already present in meta-record-labels.ts -- it already backs the header
+// comment-toggle button's title -- so no new i18n key was needed there); 'details'/'history' stay
+// 'record.details'/'record.history' (详情/历史) -- the frozen i18n baseline (meta-record-drawer-i18n.
+// spec.ts) pins that exact text; 'attachments' is a genuinely NEW tab (no pre-existing drawer text to
+// reuse), so S5 adds a new typed key 'record.attachments' (G-10 term 附件) to meta-record-labels.ts.
+// The lock's own §0/§2 prose gloss ("字段"/"动态") names the panels' conceptual identity, not a
+// mandated label-string rename for the pre-existing two.
+type InspectorTab = 'details' | 'history' | 'comments' | 'attachments'
+const TAB_ORDER: readonly InspectorTab[] = ['details', 'history', 'comments', 'attachments']
 
 // OD-W2-2 (context-driven default, lock §6bis): commentId deep-link -> comments, else fields
-// (details). See file header comment -- exactly one live branch until S4 adds the comments tab.
+// (details). See file-header comment above for why `props.openComments` (not a raw commentId) is
+// the live signal read here.
 function resolveDefaultTab(): InspectorTab {
-  return 'details'
+  return props.openComments ? 'comments' : 'details'
 }
 
 const activeTab = ref<InspectorTab>(resolveDefaultTab())
+
+// OD-W2-2, second half: re-apply the same signal on any LATER true-transition while this shell stays
+// mounted across a record change (`v-if="!!selectedRecordId"` in the workbench only toggles the whole
+// shell's mount when selection goes empty<->non-empty, not on every record switch — see file-header
+// comment). Only the true-transition switches; see the `openComments` prop doc above for why a
+// false-transition does NOT switch away from comments (tab selection is already sticky otherwise).
+watch(() => props.openComments, (isOpen) => {
+  if (isOpen) activeTab.value = 'comments'
+})
 const tabRefs = ref<Partial<Record<InspectorTab, HTMLButtonElement | null>>>({})
 const inspectorId = useId()
 
@@ -323,9 +539,16 @@ function tabPanelId(tab: InspectorTab): string {
   return `${inspectorId}-panel-${tab}`
 }
 
+function tabLabelFor(id: InspectorTab): string {
+  if (id === 'details') return l('record.details')
+  if (id === 'history') return l('record.history')
+  if (id === 'comments') return l('record.comments')
+  return l('record.attachments')
+}
+
 const tabDescriptors = computed(() => TAB_ORDER.map((id) => ({
   id,
-  label: id === 'details' ? l('record.details') : l('record.history'),
+  label: tabLabelFor(id),
 })))
 
 function setTabRef(tab: InspectorTab, el: HTMLButtonElement | null) {
@@ -492,6 +715,28 @@ async function toggleRecordSubscription() {
 
 <style scoped>
 .meta-record-drawer { width: 360px; border-left: 1px solid #e5e7eb; background: #fff; display: flex; flex-direction: column; overflow-y: auto; }
+/* W2 S7 (design-lock docs/development/multitable-w2-unified-record-inspector-design-lock-20260714.md
+   §3.4/§6bis, OD-W2-6=(b)): narrow viewport (<= RAIL_NARROW_BREAKPOINT, the SAME single JS constant
+   defined in MultitableWorkbench.vue — no second threshold here, applied via the `isInspectorOverlay`
+   class binding on this component's tag, see file-header comment) turns this panel from an in-flow
+   push column into a floating overlay — the mirror image of
+   `.mt-workbench__rail--drawer` (MultitableWorkbench.vue's own <style scoped>, same UI-P2-2c origin):
+   anchored to the RIGHT edge here instead of the left, rounded corners on the open/left edge instead
+   of the open/right edge. Taking it out of flow (position:absolute) is what returns the width
+   `.mt-workbench__main` lost to the push layout — no change needed to `.mt-workbench__main` itself,
+   exactly as already documented for the rail. Width reuses this rule's own 360px push width via the
+   SAME min(px, calc(100vw - 32px)) idiom as the rail drawer, so it never overflows a narrow viewport
+   (no body horizontal scroll). `--ms-shadow-pop` / `--ms-bg-card` / `--ms-radius-lg` are the SAME
+   existing UF tokens the rail drawer already uses — no new hex. */
+.meta-record-drawer--overlay {
+  position: absolute;
+  inset: 0 0 0 auto;
+  z-index: 5;
+  width: min(360px, calc(100vw - 32px));
+  background: var(--ms-bg-card);
+  box-shadow: var(--ms-shadow-pop);
+  border-radius: var(--ms-radius-lg) 0 0 var(--ms-radius-lg);
+}
 .meta-record-drawer__header { display: flex; justify-content: space-between; align-items: center; padding: 12px 16px; border-bottom: 1px solid #eee; }
 .meta-record-drawer__title { font-size: 15px; font-weight: 600; margin: 0; }
 .meta-record-drawer__actions { display: flex; gap: 8px; align-items: center; }
@@ -499,6 +744,15 @@ async function toggleRecordSubscription() {
 .meta-record-drawer__btn--comment { border-radius: 999px; padding: 3px 8px; }
 .meta-record-drawer__btn--comment.meta-record-drawer__btn--comment--active { border-color: var(--ms-color-comment-active-border); background: var(--ms-color-comment-active-bg); color: var(--ms-color-comment-active-text); }
 .meta-record-drawer__btn--comment.meta-record-drawer__btn--comment--idle { border-color: #d8e1ee; background: #fff; color: #64748b; }
+/* W2 S4: inbox link + badge moved verbatim (same values) from MetaCommentsDrawer.vue's own header
+   (`.meta-comments-drawer__inbox-link`/`__inbox-badge`) — renamed under this shell's OWN
+   `meta-record-drawer__` prefix (not reused verbatim) since it is a structurally distinct, second
+   instance now living in the shell header rather than the deprecated drawer's header. */
+.meta-record-drawer__inbox-link { color: #409eff; font-size: 12px; text-decoration: none; }
+.meta-record-drawer__inbox-link:hover { text-decoration: underline; }
+/* #2563eb == --ms-color-primary (tokens.css:19, exact) → tokenized; the badge bg #eff6ff and link #409eff
+   are relocated verbatim from the deprecated drawer and have no design-system token yet (docket, not blind-mapped). */
+.meta-record-drawer__inbox-badge { margin-left: 6px; padding: 2px 6px; border-radius: 999px; background: #eff6ff; color: var(--ms-color-primary); font-size: 11px; }
 /* UI-P2-1c T5-safe (owner-ratified 2026-07-13): watch/workflow/permissions/duplicate/delete/unlock
    are now <MtButton> — token-styled, no longer needs bespoke hardcoded-hex. --danger's sole sharer
    (delete) now uses MtButton's own `variant="danger"`; --watch's sole sharer (watch, non-active

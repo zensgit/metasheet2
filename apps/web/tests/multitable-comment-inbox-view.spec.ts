@@ -91,6 +91,11 @@ describe('MultitableCommentInboxView', () => {
             sheetId: 'sheet_ops',
             viewId: 'view_grid',
             recordId: 'rec_1',
+            // G-10 (docket #68): server-projected display names alongside the ids above.
+            baseName: 'Ops Base',
+            sheetName: 'Ops Sheet',
+            viewName: 'Grid View',
+            fieldName: 'Notes',
             authorId: 'user_2',
             authorName: 'Jamie',
             content: 'Need review',
@@ -122,6 +127,10 @@ describe('MultitableCommentInboxView', () => {
             sheetId: 'sheet_ops',
             viewId: 'view_grid',
             recordId: 'rec_1',
+            baseName: 'Ops Base',
+            sheetName: 'Ops Sheet',
+            viewName: 'Grid View',
+            fieldName: 'Notes',
             authorId: 'user_2',
             authorName: 'Jamie',
             content: 'Need review',
@@ -161,8 +170,26 @@ describe('MultitableCommentInboxView', () => {
     expect(container?.textContent).toContain('Jamie')
     expect(container?.textContent).toContain('Need review')
     expect(container?.textContent).toContain('1')
-    expect(container?.textContent).toContain('View view_grid')
     expect(container?.textContent).toContain('Mention')
+
+    // G-10 (docket #68): cards render entity display names, name-first (id ?? name fallback pattern
+    // mirrored from the existing authorName ?? authorId). The raw ids are demoted to a `title`
+    // tooltip attribute rather than removed outright.
+    expect(container?.textContent).toContain('Base Ops Base')
+    expect(container?.textContent).toContain('Sheet Ops Sheet')
+    expect(container?.textContent).toContain('View Grid View')
+    expect(container?.textContent).toContain('Field Notes')
+    // the raw ids no longer appear as VISIBLE text for the named entities...
+    expect(container?.textContent).not.toContain('Sheet sheet_ops')
+    expect(container?.textContent).not.toContain('View view_grid')
+    expect(container?.textContent).not.toContain('Field fld_notes')
+    // ...but are still present, demoted to a hover tooltip (secondary, not removed).
+    expect(container?.querySelector('[title="base_ops"]')?.textContent).toContain('Ops Base')
+    expect(container?.querySelector('[title="sheet_ops"]')?.textContent).toContain('Ops Sheet')
+    expect(container?.querySelector('[title="view_grid"]')?.textContent).toContain('Grid View')
+    expect(container?.querySelector('[title="fld_notes"]')?.textContent).toContain('Notes')
+    // Row/record has NO name projection (documented server-side disposition) — raw id stays visible.
+    expect(container?.textContent).toContain('Row rec_1')
 
     const openButton = Array.from(container!.querySelectorAll('button')).find((element) => element.textContent?.includes('Open')) as HTMLButtonElement | undefined
     openButton?.click()

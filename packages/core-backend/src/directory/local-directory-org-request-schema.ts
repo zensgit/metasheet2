@@ -54,8 +54,14 @@ export const UPDATE_LOCAL_ACCOUNT_FIELDS = ['name', 'email', 'mobile', 'title'] 
 /** POST /api/admin/directory/local/memberships */
 export const ADD_LOCAL_MEMBERSHIP_FIELDS = ['accountId', 'departmentId'] as const
 
-/** PATCH /api/admin/directory/local/memberships/:membershipId — the explicit primary-department switch. */
-export const SWITCH_LOCAL_MEMBERSHIP_PRIMARY_FIELDS = ['isPrimary'] as const
+/**
+ * PATCH /api/admin/directory/local/memberships/:membershipId — a narrow membership update that
+ * performs EXACTLY ONE of two mutually-exclusive operations per request (the route enforces the
+ * XOR): the explicit primary-department switch (`isPrimary: true`) OR the normalized manager-flag
+ * set/unset (`isManager: true|false`, B3 #4215 §5.4). Both keys in one body — or an empty body —
+ * is a 400 before any write, so a combined request can never partially apply.
+ */
+export const UPDATE_LOCAL_MEMBERSHIP_FIELDS = ['isPrimary', 'isManager'] as const
 
 /**
  * Owner P2 (review on #4317): the allowlists above only ever checked field NAMES. A
@@ -89,7 +95,7 @@ export const SWITCH_LOCAL_MEMBERSHIP_PRIMARY_FIELDS = ['isPrimary'] as const
  * behavior, which silently `Math.trunc`ed any finite number the client sent (so a float or a
  * numeric string masqueraded as accepted input instead of being rejected).
  */
-export type LocalDirectoryFieldKind = 'string' | 'stringOrNull' | 'integer'
+export type LocalDirectoryFieldKind = 'string' | 'stringOrNull' | 'integer' | 'boolean'
 
 export interface LocalDirectoryFieldSpec {
   field: string
@@ -114,6 +120,8 @@ function describeFieldKind(kind: LocalDirectoryFieldKind): string {
       // int4-bounded (see matchesFieldKind) — say so, or a 3e9 rejection reads as a lie
       // ("3000000000 IS an integer"). Message precision is a review contract in this repo.
       return 'an integer within the int4 range'
+    case 'boolean':
+      return 'a boolean'
   }
 }
 
@@ -128,6 +136,8 @@ function matchesFieldKind(value: unknown, kind: LocalDirectoryFieldKind): boolea
       // Number.isInteger gate and then blow up as a 500 at INSERT time — same
       // "type gate exists but the write still fails loudly" seam, closed here as a 400.
       return typeof value === 'number' && Number.isInteger(value) && value >= -2147483648 && value <= 2147483647
+    case 'boolean':
+      return typeof value === 'boolean'
   }
 }
 
@@ -188,8 +198,17 @@ export const ADD_LOCAL_MEMBERSHIP_FIELD_TYPES: readonly LocalDirectoryFieldSpec[
   { field: 'departmentId', kind: 'string' },
 ]
 
-// Note: PATCH /memberships/:membershipId (`SWITCH_LOCAL_MEMBERSHIP_PRIMARY_FIELDS`) has no
-// corresponding *_FIELD_TYPES export — its one field, `isPrimary`, is already validated more
-// strictly than any kind here could express (`body.isPrimary !== true` in admin-directory-local.ts
-// rejects anything that isn't the literal `true`, including `false`, strings, and numbers — the
-// route's own narrow-endpoint contract, not a coercion bug).
+/**
+ * PATCH /api/admin/directory/local/memberships/:membershipId — types for `UPDATE_LOCAL_MEMBERSHIP_FIELDS`.
+ * Both fields are booleans. `isManager` (B3 #4215 §5.4) legitimately accepts BOTH `true` (set the
+ * normalized manager flag) and `false` (unset it), so this type gate is what rejects (400) an
+ * `isManager` sent as a string/number BEFORE the route ever reads it — the same coercion class the
+ * account/department endpoints close. `isPrimary` keeps its stricter route-layer contract too
+ * (`body.isPrimary !== true` in admin-directory-local.ts rejects anything but the literal `true`);
+ * it still gets a boolean spec HERE so the allowlist ↔ type-spec drift guard holds by set-equality —
+ * a field present in an allowlist with NO type spec is exactly the drift this pairing forbids.
+ */
+export const UPDATE_LOCAL_MEMBERSHIP_FIELD_TYPES: readonly LocalDirectoryFieldSpec[] = [
+  { field: 'isPrimary', kind: 'boolean' },
+  { field: 'isManager', kind: 'boolean' },
+]

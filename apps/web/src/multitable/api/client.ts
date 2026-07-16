@@ -352,6 +352,11 @@ type RawInboxItem = RawComment & {
   sheetId?: string | null
   viewId?: string | null
   recordId?: string | null
+  // G-10 (docket #68): additive display names alongside the ids above.
+  baseName?: string | null
+  sheetName?: string | null
+  viewName?: string | null
+  fieldName?: string | null
 }
 
 type MultitableCommentIdentityPayload = {
@@ -515,6 +520,13 @@ function normalizeCommentInbox(payload: { items?: RawInboxItem[]; total?: number
             : typeof item.rowId === 'string'
               ? item.rowId
               : null,
+          // G-10 (docket #68): additive display names — string-or-null pass-through, same shape
+          // discipline as the id fields above; anything else (missing key, wrong type) normalizes to
+          // null so the FE's `name ?? id` fallback always has a defined id to fall back to.
+          baseName: typeof item.baseName === 'string' || item.baseName === null ? item.baseName : null,
+          sheetName: typeof item.sheetName === 'string' || item.sheetName === null ? item.sheetName : null,
+          viewName: typeof item.viewName === 'string' || item.viewName === null ? item.viewName : null,
+          fieldName: typeof item.fieldName === 'string' || item.fieldName === null ? item.fieldName : null,
         })) as MultitableCommentInboxItem[]
       : [],
     total: typeof payload.total === 'number' ? payload.total : 0,
@@ -745,6 +757,10 @@ function normalizeHistoryChange(raw: unknown): HistoryChange {
     changedFieldIds: Array.isArray(p.changedFieldIds) ? p.changedFieldIds.map(String) : [],
     before: p.before && typeof p.before === 'object' ? (p.before as Record<string, unknown>) : null,
     after: p.after && typeof p.after === 'object' ? (p.after as Record<string, unknown>) : null,
+    // OD-W2-5a half-wire fix: the HistoryChange type + backend payload carry restoredFromVersion but this
+    // normalizer dropped it, so the base History Center badge worked in component tests (which inject objects
+    // directly) yet went blank on the real client wire. Pass it through (badge keys on non-null).
+    restoredFromVersion: typeof p.restoredFromVersion === 'number' ? p.restoredFromVersion : null,
   }
 }
 
@@ -786,6 +802,8 @@ function normalizeRecordHistoryEntry(payload: Partial<MetaRecordRevision> | null
       ? null
       : isPlainObject(payload.snapshot) ? payload.snapshot : {},
     createdAt: typeof payload?.createdAt === 'string' ? payload.createdAt : '',
+    // OD-W2-5a: pass through the R11 restore back-reference so the inspector history badge can render it.
+    restoredFromVersion: typeof payload?.restoredFromVersion === 'number' ? payload.restoredFromVersion : null,
   }
 }
 

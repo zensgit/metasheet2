@@ -1,5 +1,8 @@
 import { assertImportTelemetry } from './attendance-import-telemetry-utils.mjs'
-import { resolveSmokeWorkDate } from './attendance-smoke-workdate.mjs'
+import {
+  scanBlockingTimeCorrectionRequests,
+  selectAvailableSmokeWorkDate,
+} from './attendance-smoke-workdate.mjs'
 
 const apiBase = (process.env.API_BASE || '').replace(/\/+$/, '')
 let token = process.env.AUTH_TOKEN || ''
@@ -146,6 +149,43 @@ function assertOk({ res, raw, body }, label) {
   if (body && typeof body === 'object' && body.success === false) {
     throw new Error(`${label}: ${JSON.stringify(body).slice(0, 200)}`)
   }
+}
+
+async function hasBlockingTimeCorrectionRequest(workDate) {
+  const pageSize = 200
+  const maxPages = 20
+
+  return scanBlockingTimeCorrectionRequests(workDate, {
+    pageSize,
+    maxPages,
+    fetchPage: async ({ page, pageSize: requestedPageSize }) => {
+      const query = new URLSearchParams({
+        from: workDate,
+        to: workDate,
+        page: String(page),
+        pageSize: String(requestedPageSize),
+      })
+      const existing = await apiFetch(
+        `/attendance/requests?${query.toString()}`,
+        { method: 'GET' },
+      )
+      assertOk(existing, 'GET /attendance/requests (work-date availability)')
+      return existing.body?.data
+    },
+  })
+}
+
+async function resolveAvailableSmokeWorkDate() {
+  const configuredCount = Number(process.env.SMOKE_WORK_DATE_CANDIDATES || 32)
+  return selectAvailableSmokeWorkDate(process.env, {
+    maxCandidates: configuredCount,
+    hasBlockingRequest: hasBlockingTimeCorrectionRequest,
+    onCollision: (candidate) => {
+      log(
+        `WARN: workDate=${candidate} has an existing pending/approved time_correction request; trying the next date`,
+      )
+    },
+  })
 }
 
 function makeGroupName() {
@@ -460,7 +500,7 @@ async function run() {
   log('template ok')
 
   // 5) preview
-  const workDate = resolveSmokeWorkDate()
+  const workDate = await resolveAvailableSmokeWorkDate()
   const groupName = makeGroupName()
   const idempotencyKey = makeIdempotencyKey()
   const csvText = makeCsv(workDate, userId, groupName)

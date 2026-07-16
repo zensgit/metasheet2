@@ -226,6 +226,82 @@ try {
   $o = Test-SmokeOutcome "mvpSmoke.pass=true`nauditActionsCovered=8/8"
   Check "smoke: selfScanClean ABSENT -> FAIL (fail-closed)" ((-not $o.ok) -and $o.reason -eq 'self_scan_not_clean')
 
+  # ── D5 (corrective-3/4): the stage-6 smoke capture is stdout-ONLY (2>$null), never merged (2>&1).
+  # Corrective-4 also scopes ErrorActionPreference=Continue around only the native invocation so Windows
+  # PowerShell 5.1 does not promote discarded stderr to a terminating error. The dedicated powershell.exe
+  # 5.1 CI test is the load-bearing target-shell proof; this pwsh 7 leg keeps cross-version coverage.
+  $fakeSmokeRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("t9accept_fakesmoke_" + [guid]::NewGuid().ToString('N').Substring(0, 12))
+  $fakeSmokeOps = Join-Path $fakeSmokeRoot 'scripts/ops'
+  New-Item -ItemType Directory -Path $fakeSmokeOps -Force | Out-Null
+  $fakeSmoke = Join-Path $fakeSmokeOps 'stock-preparation-mvp-postdeploy-smoke.mjs'
+  $sentinel = 'STDERR-LEAK-SENTINEL-7788'
+  $fakeLines = @(
+    "process.stderr.write('$sentinel\n')",
+    "process.stderr.write('(node:1) ExperimentalWarning: stderr noise the runner must not capture\n')",
+    "process.stdout.write('mvpSmoke.pass=true\n')",
+    "process.stdout.write('auditActionsCovered=8/8\n')",
+    "process.stdout.write('selfScanClean=true\n')",
+    "process.exit(0)"
+  )
+  Set-Content -LiteralPath $fakeSmoke -Encoding utf8 -Value ($fakeLines -join "`n")
+  $dummyToken = ConvertTo-SecureString 'dummy-not-a-real-token' -AsPlainText -Force
+  $smokeThrew = $false
+  $cap = $null
+  try { $cap = Invoke-SmokeCapture -NodeArgs @($fakeSmoke) -Token $dummyToken } catch { $smokeThrew = $true }
+  Check "corrective-3: a stderr-writing child does NOT abort the capture (no native stderr promotion)" ((-not $smokeThrew) -and $null -ne $cap)
+  Check "corrective-3: the stderr sentinel is NOT captured into the parsed summary (2>`$null, not 2>&1)" ($null -ne $cap -and -not ("$($cap.stdout)" -match [regex]::Escape($sentinel)))
+  $capOutcome = Test-SmokeOutcome "$($cap.stdout)"
+  Check "corrective-3: the stdout values-free summary still parses to PASS (8/8, clean)" ($capOutcome.ok -and $capOutcome.pass -and $capOutcome.audit -eq '8/8' -and $capOutcome.selfScan)
+  Check "corrective-4: exit 0 preserves code, restores error policy, and clears token env" (
+    $null -ne $cap -and
+    $cap.exit -eq 0 -and
+    $ErrorActionPreference -eq 'Stop' -and
+    -not (Test-Path Env:METASHEET_AUTH_TOKEN)
+  )
+
+  $nonzeroLines = @(
+    "process.stderr.write('$sentinel\n')",
+    "process.stdout.write('mvpSmoke.pass=true\n')",
+    "process.stdout.write('auditActionsCovered=8/8\n')",
+    "process.stdout.write('selfScanClean=true\n')",
+    'process.exit(7)'
+  )
+  Set-Content -LiteralPath $fakeSmoke -Encoding utf8 -Value ($nonzeroLines -join "`n")
+  $nonzeroCap = Invoke-SmokeCapture -NodeArgs @($fakeSmoke) -Token $dummyToken
+  Check "corrective-4: stderr-writing exit 7 preserves code, policy, and token cleanup" (
+    $nonzeroCap.exit -eq 7 -and
+    $nonzeroCap.stdout -notmatch [regex]::Escape($sentinel) -and
+    $ErrorActionPreference -eq 'Stop' -and
+    -not (Test-Path Env:METASHEET_AUTH_TOKEN)
+  )
+
+  # Exercise the real stage boundary in a child pwsh process because Stop-WithFailure intentionally exits.
+  # A valid-looking summary with native exit 7 must still fail the stage and retain only the coarse exit code.
+  $stageHarness = Join-Path $fakeSmokeRoot 'invoke-smoke-stage.ps1'
+  $stageSummary = Join-Path $fakeSmokeRoot 'stage-summary.txt'
+  Set-Content -LiteralPath $stageHarness -Encoding utf8 -Value @'
+param(
+  [Parameter(Mandatory = $true)][string]$AcceptanceScript,
+  [Parameter(Mandatory = $true)][string]$DeployRoot,
+  [Parameter(Mandatory = $true)][string]$SummaryPath
+)
+$ErrorActionPreference = 'Stop'
+. $AcceptanceScript -PackagePath $DeployRoot -DeployRoot $DeployRoot -SummaryPath $SummaryPath *> $null
+$token = ConvertTo-SecureString 'dummy-not-a-real-token' -AsPlainText -Force
+Invoke-SmokeStage -Token $token
+'@
+  $stageOutput = & pwsh -NoProfile -File $stageHarness -AcceptanceScript $scriptPath -DeployRoot $fakeSmokeRoot -SummaryPath $stageSummary 2>&1
+  $stageExit = $LASTEXITCODE
+  $stageSummaryJsonPath = [System.IO.Path]::ChangeExtension($stageSummary, '.json')
+  $stageSummaryJson = if (Test-Path $stageSummaryJsonPath) { Get-Content $stageSummaryJsonPath -Raw | ConvertFrom-Json } else { $null }
+  Check "corrective-3: the real smoke stage fails closed on exit 7 and records only the coarse exit" (
+    $stageExit -eq 1 -and
+    $null -ne $stageSummaryJson -and
+    $stageSummaryJson.failedStage -eq 'smoke' -and
+    $stageSummaryJson.failDetail.smokeExit -eq 7 -and
+    "$stageOutput" -notmatch 'dummy-not-a-real-token'
+  )
+
   $base = [pscustomobject]@{ state = 'online'; restartTime = 3; uptime = 1000 }
 
   # Entity corrective-1 reproduction: PM2 includes process.env in jlist; on Windows it commonly carries

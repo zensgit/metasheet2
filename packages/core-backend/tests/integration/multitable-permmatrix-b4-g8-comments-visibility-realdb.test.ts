@@ -283,3 +283,148 @@ describeIfDatabase('F1 — comments respect row-level read deny (real DB)', () =
     expect(Number((inserted.rows[0] as { c: number }).c)).toBe(0)
   })
 })
+
+/**
+ * G-10 (docket #68, G-10 audit #4323) — comment inbox entity-name projection (real DB).
+ *
+ * `CommentService.getInbox` (`/api/comments/inbox`) now additively projects `baseName`/`sheetName`/
+ * `viewName`/`fieldName` alongside the existing `baseId`/`sheetId`/`viewId`/`fieldId` (raw ids kept,
+ * names are name-first display sugar). See `CommentService.getInbox`'s doc comment for the
+ * no-WHERE-relaxation reasoning: this endpoint has no per-sheet `resolveSheetReadableCapabilities`
+ * gate (pre-existing, tracked residual from the G-8 verification doc — NOT this PR's scope). This
+ * suite verifies the ADDITIVE projection itself (names correctly resolved alongside unchanged ids for
+ * a row this endpoint already serves). It intentionally does NOT ship a row-selection/exclusion
+ * golden for this endpoint — that would be asserting a property of pre-existing, unmodified query
+ * logic that is out of scope for this PR to characterize.
+ *
+ * P3 follow-up (docket #71, off PR #4330's gate): the original golden above only pinned
+ * baseName/sheetName/fieldName in real DB — `viewName` (the byte-twin of the already-tested `view_id`
+ * correlated subquery) was mock-only (`comment-flow.test.ts` line ~732), and so was the
+ * null/deleted-entity name path (a comment whose joined entity is absent must still return the row,
+ * with the name null — `comment-flow.test.ts` line ~762). Both gaps are closed below:
+ *   - P3-1: a real `meta_views` row on `sheetId` so `viewId`/`viewName` resolve non-null, asserted as a
+ *     twin pair (same id the pre-existing `view_id` subquery already returns, plus its `name`).
+ *   - P3-2a: a record-level comment (`field_id` NULL) on the SAME sheet — the `meta_fields` LEFT JOIN's
+ *     null-key case — proves the row is not dropped and `fieldName` is explicit `null`.
+ *   - P3-2b: a comment on a SECOND sheet that has NO `meta_views` row at all — the view correlated
+ *     subquery's zero-row case — proves the row is not dropped and `viewId`/`viewName` are both `null`.
+ */
+describeIfDatabase('G-10 — comment inbox entity-name projection (real DB)', () => {
+  const ts = Date.now()
+  const baseId = `base_g10_inbox_${ts}`
+  const sheetId = `sheet_g10_inbox_${ts}`
+  const fieldId = `fld_g10_status_${ts}`
+  const recordId = `rec_g10_inbox_${ts}`
+  const viewerCommentId = `cmt_g10_viewer_${ts}` // unread, authored by someone else → appears in viewer's inbox
+  const author = `user_g10_author_${ts}`
+  const viewer = `user_g10_viewer_${ts}`
+  const baseName = 'G10 Inbox Base'
+  const sheetName = 'G10 Inbox Sheet'
+  const fieldName = 'G10 Status Field'
+
+  // P3-1 (docket #71): a real view on `sheetId` so viewId/viewName resolve non-null.
+  const viewId = `view_g10_inbox_${ts}`
+  const viewName = 'G10 Inbox View'
+
+  // P3-2a (docket #71): a record-level comment (field_id NULL, not field-scoped) on the SAME sheet —
+  // proves the meta_fields LEFT JOIN is null-safe (fieldName: null) and does not drop the row.
+  const recordLevelCommentId = `cmt_g10_recordlevel_${ts}`
+
+  // P3-2b (docket #71): a second sheet with NO meta_views row at all — proves the view correlated
+  // scalar subquery is null-safe (viewId/viewName: null) and does not drop the row either.
+  const noViewSheetId = `sheet_g10_inbox_noview_${ts}`
+  const noViewFieldId = `fld_g10_noview_status_${ts}`
+  const noViewRecordId = `rec_g10_inbox_noview_${ts}`
+  const noViewCommentId = `cmt_g10_noview_${ts}`
+
+  beforeAll(async () => {
+    await q("INSERT INTO users (id, password_hash) VALUES ($1,'x'), ($2,'x') ON CONFLICT (id) DO NOTHING", [author, viewer])
+    await q('INSERT INTO meta_bases (id, name) VALUES ($1,$2)', [baseId, baseName])
+    await q('INSERT INTO meta_sheets (id, base_id, name) VALUES ($1,$2,$3)', [sheetId, baseId, sheetName])
+    await q('INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6)', [fieldId, sheetId, fieldName, 'string', '{}', 1])
+    await q('INSERT INTO meta_records (id, sheet_id, data, version) VALUES ($1,$2,$3::jsonb,1)', [recordId, sheetId, JSON.stringify({ [fieldId]: 'x' })])
+    await q(
+      `INSERT INTO meta_comments (id, spreadsheet_id, row_id, field_id, container_id, target_id, target_field_id, author_id, content, mentions, created_at, updated_at)
+       VALUES ($1,$2,$3,$4,$2,$3,$4,$5,$6,$7::jsonb, now(), now())`,
+      [viewerCommentId, sheetId, recordId, fieldId, author, 'G10_INBOX_VIEWER_COMMENT', JSON.stringify([viewer])],
+    )
+
+    // P3-1: give the sheet exactly one view — the view_id/view_name subquery orders by
+    // (created_at asc, id asc) limit 1, so a single view is unambiguously "the" resolved view.
+    await q('INSERT INTO meta_views (id, sheet_id, name, type) VALUES ($1,$2,$3,$4)', [viewId, sheetId, viewName, 'grid'])
+
+    // P3-2a: record-level comment — field_id/target_field_id both NULL (both columns are nullable;
+    // only target_id/container_id are NOT NULL, and those are still populated).
+    await q(
+      `INSERT INTO meta_comments (id, spreadsheet_id, row_id, field_id, container_id, target_id, target_field_id, author_id, content, mentions, created_at, updated_at)
+       VALUES ($1,$2,$3,NULL,$2,$3,NULL,$4,$5,$6::jsonb, now(), now())`,
+      [recordLevelCommentId, sheetId, recordId, author, 'G10_INBOX_RECORD_LEVEL_COMMENT', JSON.stringify([viewer])],
+    )
+
+    // P3-2b: a wholly separate sheet, with a field-scoped comment, but zero meta_views rows.
+    await q('INSERT INTO meta_sheets (id, base_id, name) VALUES ($1,$2,$3)', [noViewSheetId, baseId, 'G10 Inbox Sheet (no view)'])
+    await q('INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6)', [noViewFieldId, noViewSheetId, 'NoView Status', 'string', '{}', 1])
+    await q('INSERT INTO meta_records (id, sheet_id, data, version) VALUES ($1,$2,$3::jsonb,1)', [noViewRecordId, noViewSheetId, JSON.stringify({ [noViewFieldId]: 'x' })])
+    await q(
+      `INSERT INTO meta_comments (id, spreadsheet_id, row_id, field_id, container_id, target_id, target_field_id, author_id, content, mentions, created_at, updated_at)
+       VALUES ($1,$2,$3,$4,$2,$3,$4,$5,$6,$7::jsonb, now(), now())`,
+      [noViewCommentId, noViewSheetId, noViewRecordId, noViewFieldId, author, 'G10_INBOX_NOVIEW_COMMENT', JSON.stringify([viewer])],
+    )
+  })
+
+  afterAll(async () => {
+    await q('DELETE FROM meta_comment_reads WHERE comment_id = ANY($1::text[])', [[viewerCommentId, recordLevelCommentId, noViewCommentId]]).catch(() => {})
+    await q('DELETE FROM meta_comments WHERE spreadsheet_id = $1', [sheetId]).catch(() => {})
+    await q('DELETE FROM meta_comments WHERE spreadsheet_id = $1', [noViewSheetId]).catch(() => {})
+    await q('DELETE FROM meta_views WHERE sheet_id = $1', [sheetId]).catch(() => {})
+    await q('DELETE FROM meta_records WHERE sheet_id = $1', [sheetId]).catch(() => {})
+    await q('DELETE FROM meta_records WHERE sheet_id = $1', [noViewSheetId]).catch(() => {})
+    await q('DELETE FROM meta_fields WHERE sheet_id = $1', [sheetId]).catch(() => {})
+    await q('DELETE FROM meta_fields WHERE sheet_id = $1', [noViewSheetId]).catch(() => {})
+    await q('DELETE FROM meta_sheets WHERE id = $1', [sheetId]).catch(() => {})
+    await q('DELETE FROM meta_sheets WHERE id = $1', [noViewSheetId]).catch(() => {})
+    await q('DELETE FROM meta_bases WHERE id = $1', [baseId]).catch(() => {})
+    await q('DELETE FROM users WHERE id = ANY($1::text[])', [[author, viewer]]).catch(() => {})
+  })
+
+  test('inbox item for a comment authored by someone else carries the projected base/sheet/view/field display names, ids unchanged (P3-1: viewName twin-consistent with viewId)', async () => {
+    const app = buildApp(viewer, ['comments:read'])
+    const res = await request(app).get('/api/comments/inbox')
+    expect(res.status).toBe(200)
+    const item = (res.body.data.items as Array<Record<string, unknown>>).find((i) => i.id === viewerCommentId)
+    expect(item).toBeTruthy()
+    // additive: existing id fields are untouched by the name projection (backward-compat contract)
+    expect(item?.baseId).toBe(baseId)
+    expect(item?.sheetId).toBe(sheetId)
+    expect(item?.fieldId).toBe(fieldId)
+    expect(item?.viewId).toBe(viewId)
+    expect(item?.baseName).toBe(baseName)
+    expect(item?.sheetName).toBe(sheetName)
+    expect(item?.fieldName).toBe(fieldName)
+    // P3-1 (docket #71): viewName is the byte-twin of the already-tested view_id correlated
+    // subquery — same WHERE/ORDER BY, just the `name` column instead of `id`. Pin both together.
+    expect(item?.viewName).toBe(viewName)
+  })
+
+  test('P3-2a (docket #71): a record-level comment (field_id NULL) still appears in the inbox, with fieldName null — meta_fields LEFT JOIN null-safety, not an INNER-join row drop', async () => {
+    const app = buildApp(viewer, ['comments:read'])
+    const res = await request(app).get('/api/comments/inbox')
+    expect(res.status).toBe(200)
+    const items = res.body.data.items as Array<Record<string, unknown>>
+    const item = items.find((i) => i.id === recordLevelCommentId)
+    expect(item).toBeTruthy() // row not dropped despite the null field_id join key
+    expect(item?.fieldId).toBeUndefined() // falsy field_id serializes as absent (mapRowToComment's `|| undefined`)
+    expect(item?.fieldName).toBeNull() // explicit null, not silently omitted
+  })
+
+  test('P3-2b (docket #71): a comment on a sheet with NO views still appears in the inbox, with viewId/viewName both null — the view correlated subquery is null-safe, not a row-dropping join', async () => {
+    const app = buildApp(viewer, ['comments:read'])
+    const res = await request(app).get('/api/comments/inbox')
+    expect(res.status).toBe(200)
+    const items = res.body.data.items as Array<Record<string, unknown>>
+    const item = items.find((i) => i.id === noViewCommentId)
+    expect(item).toBeTruthy() // row not dropped despite the sheet having zero meta_views rows
+    expect(item?.viewId).toBeNull()
+    expect(item?.viewName).toBeNull()
+  })
+})

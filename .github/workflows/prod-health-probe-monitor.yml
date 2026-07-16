@@ -1,0 +1,302 @@
+name: Prod Health Probe Monitor
+
+run-name: Prod Health Probe Monitor${{ vars.PROD_HEALTH_PROBE_SILENCE == 'true' && ' [SILENCED]' || '' }}
+
+# Steady-state external health probe for the deployed prod stack.
+#
+# - Probes GET /api/health on the prod host from a GitHub-hosted runner every
+#   5 minutes (GitHub cron jitter is acceptable and expected).
+# - Alerts ONLY after 3 consecutive failing runs. Consecutive-failure state is
+#   derived from this workflow's own completed-run history via the Actions API
+#   (no cache, no artifacts, no repo variables needed for state).
+# - Before alerting, dispatches the existing read-only SSH log snapshot
+#   workflow (attendance-remote-log-snapshot-prod.yml, skip_host_sync=true)
+#   as a second vantage point and links that run in the alert.
+# - Alerting = ONE deduplicated GitHub issue (stable title marker
+#   "[prod-health]"); continued failure appends ~hourly heartbeats for the
+#   first ~8h of an outage (streak window caps at 96 runs);
+#   the issue auto-closes after 2 consecutive recoveries.
+# - This monitor NEVER restarts, deploys, or mutates the prod stack. The probe
+#   itself uses no secrets (public endpoint); GITHUB_TOKEN is used only for
+#   checkout of the tested state helper, run-history reads, the snapshot
+#   dispatch, and issue operations.
+# - Silencing (maintenance windows): set repo variable
+#   PROD_HEALTH_PROBE_SILENCE=true (see runbook
+#   docs/development/prod-health-probe-monitor-runbook-20260714.md).
+
+on:
+  schedule:
+    - cron: '*/5 * * * *'
+  workflow_dispatch: {}
+
+concurrency:
+  group: prod-health-probe-monitor
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  issues: write
+  actions: write
+
+env:
+  HEALTH_URL: 'http://23.254.236.11:8081/api/health'
+  ALERT_TITLE: '[prod-health] Prod health probe failing: GET /api/health'
+  WORKFLOW_FILE: 'prod-health-probe-monitor.yml'
+  SNAPSHOT_WORKFLOW_FILE: 'attendance-remote-log-snapshot-prod.yml'
+  FAIL_THRESHOLD: '3'
+  RECOVERY_THRESHOLD: '2'
+  HEARTBEAT_EVERY: '12'
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - name: Checkout tested monitor helper
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Probe health endpoint (no secrets)
+        id: probe
+        run: |
+          set -euo pipefail
+          # This is a health-contract probe, not a reachability probe. A
+          # redirect, auth challenge, or missing route is unhealthy here.
+          #   connection failure / timeout / any non-200 -> fail
+          #   200                                         -> pass
+          # 2 quick retries inside this run before counting the run as a
+          # failure (single-runner jitter guard).
+          attempts=3
+          result="fail"
+          detail="no attempt completed"
+          for attempt in $(seq 1 "$attempts"); do
+            set +e
+            code="$(curl -sS -o /dev/null -w '%{http_code}' --connect-timeout 5 --max-time 10 "$HEALTH_URL")"
+            curl_rc=$?
+            set -e
+            if [[ "$curl_rc" != "0" ]]; then
+              echo "[probe] attempt=$attempt curl_rc=$curl_rc (connection failure or timeout)"
+              result="fail"
+              detail="curl_rc=$curl_rc (connection failure or timeout)"
+            elif [[ "$code" == "200" ]]; then
+              echo "[probe] attempt=$attempt http=200 (pass)"
+              result="pass"
+              detail="http=200"
+              break
+            else
+              echo "[probe] attempt=$attempt http=$code (non-200 -> fail)"
+              result="fail"
+              detail="http=$code"
+            fi
+            if [[ "$attempt" -lt "$attempts" ]]; then sleep 5; fi
+          done
+          echo "[probe] final result=$result detail=$detail"
+          {
+            echo "probe_result=$result"
+            echo "probe_detail=$detail"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Silenced notice
+        if: vars.PROD_HEALTH_PROBE_SILENCE == 'true'
+        run: |
+          set -euo pipefail
+          echo "PROD_HEALTH_PROBE_SILENCE=true: probe ran for logging only; streak/alerting skipped and this run always concludes success." | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Evaluate consecutive-failure state from run history
+        id: streak
+        if: vars.PROD_HEALTH_PROBE_SILENCE != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PROBE_RESULT: ${{ steps.probe.outputs.probe_result }}
+        run: |
+          set -euo pipefail
+          # State persistence: this workflow's own completed runs, newest
+          # first. The tested helper filters to schedule/dispatch on main,
+          # ignores cancelled/skipped runs, and treats [SILENCED] runs as a
+          # streak barrier rather than a successful recovery.
+          history_file="$(mktemp)"
+          trap 'rm -f "$history_file"' EXIT
+          gh api \
+            "repos/${GITHUB_REPOSITORY}/actions/workflows/${WORKFLOW_FILE}/runs?status=completed&per_page=100" \
+            > "$history_file"
+          node scripts/ops/prod-health-probe-state.mjs \
+            --history-file "$history_file" \
+            --probe-result "$PROBE_RESULT" \
+            --max-runs 96 \
+            --fail-threshold "$FAIL_THRESHOLD" \
+            --recovery-threshold "$RECOVERY_THRESHOLD" \
+            --heartbeat-every "$HEARTBEAT_EVERY" \
+            >> "$GITHUB_OUTPUT"
+
+      - name: Dispatch read-only SSH log snapshot (second vantage)
+        id: snapshot
+        if: >-
+          vars.PROD_HEALTH_PROBE_SILENCE != 'true' &&
+          (steps.streak.outputs.crossing == 'true' || steps.streak.outputs.heartbeat == 'true')
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # skip_host_sync=true keeps the snapshot strictly read-only (no git
+          # sync on the deploy host). issue_number is passed empty so the
+          # snapshot workflow does not comment on its default issue; this
+          # monitor links the snapshot run in its own alert instead.
+          cutoff="$(date -u -d '2 minutes ago' +%Y-%m-%dT%H:%M:%SZ)"
+          gh workflow run "$SNAPSHOT_WORKFLOW_FILE" \
+            --repo "$GITHUB_REPOSITORY" \
+            --ref main \
+            -f skip_host_sync=true \
+            -f issue_number=
+          echo "[snapshot] dispatched ${SNAPSHOT_WORKFLOW_FILE} (skip_host_sync=true)"
+
+          snapshot_run_url=""
+          for i in $(seq 1 9); do
+            sleep 5
+            snapshot_run_url="$(gh api \
+              "repos/${GITHUB_REPOSITORY}/actions/workflows/${SNAPSHOT_WORKFLOW_FILE}/runs?event=workflow_dispatch&per_page=5" \
+              --jq "[.workflow_runs[] | select(.created_at >= \"${cutoff}\")]
+                    | sort_by(.created_at) | reverse | (.[0].html_url // empty)")"
+            if [[ -n "$snapshot_run_url" ]]; then break; fi
+          done
+          if [[ -z "$snapshot_run_url" ]]; then
+            snapshot_run_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/workflows/${SNAPSHOT_WORKFLOW_FILE}"
+            echo "[snapshot] dispatched run not visible yet; falling back to workflow runs page link"
+          fi
+          echo "[snapshot] snapshot_run_url=$snapshot_run_url"
+          echo "snapshot_run_url=$snapshot_run_url" >> "$GITHUB_OUTPUT"
+
+      - name: Alert issue operations (find-or-create / heartbeat / auto-close)
+        if: >-
+          vars.PROD_HEALTH_PROBE_SILENCE != 'true' &&
+          (steps.streak.outputs.ensure_open == 'true' ||
+           steps.streak.outputs.should_close == 'true')
+        uses: actions/github-script@v7
+        env:
+          PROBE_RESULT: ${{ steps.probe.outputs.probe_result }}
+          PROBE_DETAIL: ${{ steps.probe.outputs.probe_detail }}
+          CONSECUTIVE_FAILURES: ${{ steps.streak.outputs.consecutive_failures }}
+          CONSECUTIVE_SUCCESSES: ${{ steps.streak.outputs.consecutive_successes }}
+          CROSSING: ${{ steps.streak.outputs.crossing }}
+          HEARTBEAT: ${{ steps.streak.outputs.heartbeat }}
+          ENSURE_OPEN: ${{ steps.streak.outputs.ensure_open }}
+          SHOULD_CLOSE: ${{ steps.streak.outputs.should_close }}
+          SNAPSHOT_RUN_URL: ${{ steps.snapshot.outputs.snapshot_run_url }}
+        with:
+          script: |
+            const crossing = process.env.CROSSING === 'true'
+            const heartbeat = process.env.HEARTBEAT === 'true'
+            const ensureOpen = process.env.ENSURE_OPEN === 'true'
+            const shouldClose = process.env.SHOULD_CLOSE === 'true'
+            if (!ensureOpen && !shouldClose) {
+              core.info('No issue action needed.')
+              return
+            }
+
+            const owner = context.repo.owner
+            const repo = context.repo.repo
+            const title = process.env.ALERT_TITLE
+            const runUrl = `${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}`
+
+            // Deduplicate by exact stable title under the "[prod-health]"
+            // marker (same field-proven pattern as the attendance preflight
+            // escalation in this repo).
+            const q = `repo:${owner}/${repo} type:issue in:title "[prod-health]"`
+            const search = await github.rest.search.issuesAndPullRequests({
+              q,
+              sort: 'updated',
+              order: 'desc',
+              per_page: 20,
+            })
+            const items = Array.isArray(search.data.items) ? search.data.items : []
+            const exact = items.filter((i) => i && !i.pull_request && i.title === title)
+            const openMatch = exact.find((i) => i.state === 'open') || null
+            const anyMatch = exact[0] || null
+
+            if (shouldClose) {
+              if (!openMatch) {
+                core.info('Recovered and no open alert issue found; nothing to close.')
+                return
+              }
+              const recoveries = process.env.CONSECUTIVE_SUCCESSES
+              const body = [
+                'Recovered: probe passing again.',
+                '',
+                `- Consecutive successful probe runs: ${recoveries} (auto-close threshold: ${process.env.RECOVERY_THRESHOLD})`,
+                `- Latest probe detail: \`${process.env.PROBE_DETAIL || '(missing)'}\``,
+                `- Probe run: ${runUrl}`,
+                '',
+                'Auto-closing this alert issue.',
+              ].join('\n')
+              await github.rest.issues.createComment({ owner, repo, issue_number: openMatch.number, body })
+              await github.rest.issues.update({ owner, repo, issue_number: openMatch.number, state: 'closed' })
+              core.info(`Closed alert issue #${openMatch.number} after ${recoveries} consecutive recoveries.`)
+              return
+            }
+
+            const failures = process.env.CONSECUTIVE_FAILURES
+            const detail = process.env.PROBE_DETAIL || '(missing)'
+            const snapshotUrl = process.env.SNAPSHOT_RUN_URL
+              || '(snapshot dispatch unavailable; see probe run logs)'
+            const body = [
+              'Automated prod health probe alert.',
+              '',
+              `- Endpoint: \`GET ${process.env.HEALTH_URL}\``,
+              `- Consecutive failing probe runs: ${failures} (alert threshold: ${process.env.FAIL_THRESHOLD})`,
+              `- Latest probe detail: \`${detail}\` (fail = connection failure / timeout / any non-200)`,
+              `- Probe run: ${runUrl}`,
+              `- Second vantage (read-only SSH log snapshot, skip_host_sync=true): ${snapshotUrl}`,
+              '',
+              'Lifecycle: deduplicated by exact issue title; continued failure appends roughly hourly heartbeat comments for the first ~8 hours of a continuous outage (then heartbeats stop; the issue stays open and the probe keeps running); auto-closes after 2 consecutive successful probe runs.',
+              'This monitor never restarts or deploys anything. Runbook: docs/development/prod-health-probe-monitor-runbook-20260714.md',
+            ].join('\n')
+
+            if (openMatch) {
+              if (crossing || heartbeat) {
+                await github.rest.issues.createComment({ owner, repo, issue_number: openMatch.number, body })
+                core.info(`Appended ${crossing ? 'alert' : 'heartbeat'} comment on open issue #${openMatch.number}.`)
+              } else {
+                core.info(`Alert issue #${openMatch.number} already open; no comment outside crossing/heartbeat.`)
+              }
+            } else if (anyMatch) {
+              await github.rest.issues.update({ owner, repo, issue_number: anyMatch.number, state: 'open' })
+              await github.rest.issues.createComment({ owner, repo, issue_number: anyMatch.number, body })
+              core.info(`Reopened alert issue #${anyMatch.number} for a new outage.`)
+            } else {
+              const created = await github.rest.issues.create({ owner, repo, title, body })
+              core.info(`Created alert issue #${created.data.number}.`)
+            }
+
+      - name: Write step summary
+        if: always()
+        env:
+          PROBE_RESULT: ${{ steps.probe.outputs.probe_result }}
+          PROBE_DETAIL: ${{ steps.probe.outputs.probe_detail }}
+          CONSECUTIVE_FAILURES: ${{ steps.streak.outputs.consecutive_failures }}
+          CONSECUTIVE_SUCCESSES: ${{ steps.streak.outputs.consecutive_successes }}
+          CROSSING: ${{ steps.streak.outputs.crossing }}
+          HEARTBEAT: ${{ steps.streak.outputs.heartbeat }}
+          ENSURE_OPEN: ${{ steps.streak.outputs.ensure_open }}
+          SHOULD_CLOSE: ${{ steps.streak.outputs.should_close }}
+          SILENCED: ${{ vars.PROD_HEALTH_PROBE_SILENCE == 'true' }}
+        run: |
+          set -euo pipefail
+          {
+            echo "## Prod Health Probe"
+            echo ""
+            echo "- Result: \`${PROBE_RESULT:-missing}\` (\`${PROBE_DETAIL:-missing}\`)"
+            echo "- Silenced: \`${SILENCED}\`"
+            echo "- Consecutive failures (incl. this run): \`${CONSECUTIVE_FAILURES:-n/a}\`"
+            echo "- Consecutive successes (incl. this run): \`${CONSECUTIVE_SUCCESSES:-n/a}\`"
+            echo "- Alert crossing: \`${CROSSING:-n/a}\` / heartbeat: \`${HEARTBEAT:-n/a}\` / auto-close check: \`${SHOULD_CLOSE:-n/a}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Fail run when probe failed (feeds consecutive-failure history)
+        if: vars.PROD_HEALTH_PROBE_SILENCE != 'true' && steps.probe.outputs.probe_result != 'pass'
+        env:
+          PROBE_DETAIL: ${{ steps.probe.outputs.probe_detail }}
+        run: |
+          set -euo pipefail
+          echo "Probe failed: ${PROBE_DETAIL:-missing}" >&2
+          exit 1

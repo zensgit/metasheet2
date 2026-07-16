@@ -105,6 +105,13 @@ export default defineConfig({
       // gated; excluded here so the no-DB job cannot skip-green it, and wired as a WHOLE FILE into
       // the directory real-DB step in plugin-tests.yml.
       'tests/integration/local-directory-org-crud-route.db.test.ts',
+      // Canonical Org MVP B3 (#4215 §5.4): proves ApprovalDirectoryOrg's DUAL-SOURCE direct-manager
+      // resolution against real Postgres — normalized `is_manager` relation for a local integration,
+      // the DingTalk `leader_in_dept` regression pin (load-bearing compat leg + is_manager=0 positive
+      // control), precedence, the writer's default/no-raw and local-only boundary. DATABASE_URL-gated;
+      // excluded here so the no-DB job cannot skip-green it, and wired as a WHOLE FILE into the
+      // approval real-DB step in plugin-tests.yml. Two-point wiring — both points, deliberately.
+      'tests/integration/directory-normalized-manager.db.test.ts',
       // Layer-2 hidden person/button masking (real DB): proves the cross-cutting visibility-key fix actually
       // masks the VALUE end-to-end, with non-vacuous controls. DATABASE_URL-gated; excluded here so the no-DB
       // job cannot skip-green it, and wired as a WHOLE FILE into the multitable real-DB step in
@@ -310,6 +317,13 @@ export default defineConfig({
       // only (checks the migration landed both tables, the status CHECK, FK cascade, defaults). Excluded HERE
       // so it cannot skip-green in the no-DB lane, whole-file wired into plugin-tests.yml. Two-point wiring.
       'tests/integration/multitable-automation-outbox-schema-realdb.test.ts',
+      // P2 durable-delivery S2-a claim engine / fence-CAS — real-DB constructed-concurrency (zombie/SKIP
+      // LOCKED). Excluded HERE so it cannot skip-green in the no-DB lane; whole-file wired into
+      // plugin-tests.yml. Two-point wiring.
+      'tests/integration/multitable-automation-dispatcher-claim-realdb.test.ts',
+      // P2 durable-delivery S2-b dispatch loop (registry + tick) — real-DB. Excluded HERE so it cannot
+      // skip-green in the no-DB lane; whole-file wired into plugin-tests.yml. Two-point wiring.
+      'tests/integration/multitable-automation-dispatch-loop-realdb.test.ts',
       // W0 tail (#4279, owner MUST-WRITE OD-6, design-lock §0.5 2026-07-13): field-undelete rehydration
       // revision goldens — proves `recreateFieldFromConfig`'s tombstone-value rehydration UPDATE bumps
       // `version` and emits a `recordRecordRevision` AT THE NEW version, same transaction, for every

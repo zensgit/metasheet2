@@ -1,0 +1,47 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>W2 S7 inspector overlay — browser verification harness</title>
+    <!--
+      CSS below is copied VERBATIM from apps/web/src/multitable/components/MetaRecordInspector.vue's
+      <style scoped> block (the .meta-record-drawer / .meta-record-drawer--overlay rules) plus the
+      apps/web/src/multitable/views/MultitableWorkbench.vue `.mt-workbench__content` / `__main` /
+      `__rail`* rules this component sits beside (same subset rail-drawer-harness.html already copies —
+      this harness exists solely to prove those exact declarations resolve correctly in a real browser,
+      side by side with the rail, so the layout this component actually sits in is reproduced, not a
+      standalone div). The interactive STATE logic (which class gets applied when, mutual exclusion
+      with the rail) is already proven in jsdom via apps/web/tests/multitable-workbench-view.spec.ts's
+      'W2 S7' describe block — this harness does not re-test that, it only drives class toggles
+      directly via harness buttons. tokens.css is imported for real by inspector-overlay-harness.ts
+      (`import '../src/styles/tokens.css'`), the same statement apps/web/src/main.ts uses — so
+      --ms-bg-card / --ms-shadow-pop / --ms-radius-lg below resolve to the SAME values the real app
+      ships, not a harness-local copy.
+    -->
+    <style>
+      /* No body margin (real app default): a meaningful "no horizontal scroll" assertion needs the
+         content row to genuinely span the viewport (width:100%, same as the real app's flex:1 root),
+         not an artificially small fixed box that could never overflow regardless of the overlay CSS
+         under test. */
+      html, body { margin: 0; padding: 0; }
+      .mt-workbench__content { display: flex; flex: 1; min-height: 0; position: relative; height: 320px; width: 100%; border: 1px dashed #999; box-sizing: border-box; }
+      .mt-workbench__main { flex: 1; display: flex; flex-direction: column; min-width: 0; background: #eef; }
+      .mt-workbench__rail { width: 240px; flex-shrink: 0; display: flex; flex-direction: column; border-right: 1px solid var(--ms-border-light); overflow: hidden; }
+      .mt-workbench__rail--collapsed { width: 36px; }
+      .meta-record-drawer { width: 360px; border-left: 1px solid #e5e7eb; background: #fff; display: flex; flex-direction: column; overflow-y: auto; flex-shrink: 0; }
+      .meta-record-drawer--overlay {
+        position: absolute;
+        inset: 0 0 0 auto;
+        z-index: 5;
+        width: min(360px, calc(100vw - 32px));
+        background: var(--ms-bg-card);
+        box-shadow: var(--ms-shadow-pop);
+        border-radius: var(--ms-radius-lg) 0 0 var(--ms-radius-lg);
+      }
+    </style>
+  </head>
+  <body style="font-family:system-ui">
+    <div id="app"></div>
+    <script type="module" src="./inspector-overlay-harness.ts"></script>
+  </body>
+</html>

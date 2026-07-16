@@ -420,6 +420,13 @@ describe('MultitableApiClient', () => {
         sheetId: 'sheet_1',
         viewId: 'view_1',
         recordId: 'row_1',
+        // G-10 (docket #68): additive display names — absent from this fixture's raw payload, so
+        // normalizeCommentInbox falls back to null (never undefined, so the FE's `name ?? id`
+        // pattern always has a defined id to fall back to).
+        baseName: null,
+        sheetName: null,
+        viewName: null,
+        fieldName: null,
         spreadsheetId: 'sheet_1',
         rowId: 'row_1',
         parentId: undefined,
@@ -794,6 +801,9 @@ describe('MultitableApiClient', () => {
             patch: { fld_title: 'Edited again' },
             snapshot: { fld_title: 'Edited again' },
             createdAt: '2026-04-30T10:00:00.000Z',
+            // OD-W2-5a POSITIVE control: this row carries the R11 restore back-reference; it must pass
+            // through. rev_1 (no field) pins the null direction. Guards the required-gate normalizer.
+            restoredFromVersion: 2,
           },
           { id: 'bad' },
         ],
@@ -818,6 +828,7 @@ describe('MultitableApiClient', () => {
         patch: { fld_title: 'Updated' },
         snapshot: { fld_title: 'Updated' },
         createdAt: '2026-04-30T09:00:00.000Z',
+        restoredFromVersion: null,
       },
       {
         id: 'rev_2',
@@ -832,6 +843,7 @@ describe('MultitableApiClient', () => {
         patch: { fld_title: 'Edited again' },
         snapshot: { fld_title: 'Edited again' },
         createdAt: '2026-04-30T10:00:00.000Z',
+        restoredFromVersion: 2,
       },
     ])
     expect(fetchFn).toHaveBeenCalledWith('/api/multitable/sheets/sheet%20history/records/rec%20history/history?limit=25')
@@ -970,6 +982,11 @@ describe('MultitableApiClient', () => {
           sheetId: 'sheet_comments',
           viewId: 'view_comments',
           recordId: 'rec_1',
+          // G-10 (docket #68): raw backend payload carries display names — asserts the client
+          // normalizer passes them through unchanged (not just defaults them to null).
+          baseName: 'Comments Base',
+          sheetName: 'Comments Sheet',
+          viewName: 'Comments View',
           authorId: 'user_2',
           content: 'hello',
           resolved: false,
@@ -996,6 +1013,13 @@ describe('MultitableApiClient', () => {
         sheetId: 'sheet_comments',
         viewId: 'view_comments',
         recordId: 'rec_1',
+        // G-10 (docket #68): pass-through from the raw payload above (not defaulted, since the
+        // backend supplied real strings) — fieldName is null because this fixture is a
+        // record-level comment (no fieldId), matching the id/name null-symmetry contract.
+        baseName: 'Comments Base',
+        sheetName: 'Comments Sheet',
+        viewName: 'Comments View',
+        fieldName: null,
         spreadsheetId: 'sheet_comments',
         rowId: 'rec_1',
         parentId: undefined,

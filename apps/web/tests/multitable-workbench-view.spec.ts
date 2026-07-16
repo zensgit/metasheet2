@@ -406,23 +406,42 @@ vi.mock('../src/multitable/components/MetaFormView.vue', () => ({
     },
   }),
 }))
-// W2 S3: MultitableWorkbench.vue now renders MetaRecordInspector.vue directly (the shell that
+// W2 S3/S4: MultitableWorkbench.vue now renders MetaRecordInspector.vue directly (the shell that
 // absorbed the drawer's tablist/header/lock-banner rendering — MetaRecordDrawer.vue itself is now
-// a deprecated thin compat shell no longer mounted by the workbench, OD-W2-7=b). This stub's mock
-// path + name follow that swap 1:1; its behavior (the clickable stand-in buttons below) is otherwise
-// unchanged from the pre-S3 MetaRecordDrawer stub — same props/emits contract, same fixture shape.
+// a deprecated thin compat shell no longer mounted by the workbench, OD-W2-7=b). S4 additionally
+// absorbed the SECOND drawer (MetaCommentsDrawer.vue) — the workbench no longer mounts it either;
+// comments state/emits now flow straight into THIS component (comments-tab props, `comment-`
+// prefixed emits, see MetaRecordInspector.vue's own emit block for why the prefix). This stub folds
+// what used to be the separate MetaCommentsDrawer stub's clickable stand-ins into this one — same
+// data-testids the pre-S4 tests already used (data-submit-comment / data-set-comment-draft /
+// data-reply-comment / data-cancel-reply / data-current-comment-field / data-highlighted-comment /
+// data-mention-suggestions-count), MINUS `data-close-comments` (no such affordance exists anymore —
+// comments has no close chrome of its own now, lock §2 "不含它自己的 __header...close 钮"; the two
+// tests that exercised it were removed, see below). Everything else is otherwise unchanged from the
+// pre-S3 MetaRecordDrawer stub — same props/emits contract, same fixture shape.
 vi.mock('../src/multitable/components/MetaRecordInspector.vue', () => ({
   default: defineComponent({
     name: 'MetaRecordInspector',
     props: {
       visible: { type: Boolean, default: false },
       record: { type: Object, default: null },
+      commentTargetFieldId: { type: String, default: null },
+      highlightedCommentId: { type: String, default: null },
+      mentionSuggestions: { type: Array, default: () => [] },
     },
-    emits: ['close', 'toggle-comments', 'comment-field', 'navigate', 'delete', 'patch'],
+    emits: [
+      'close', 'toggle-comments', 'comment-field', 'navigate', 'delete', 'patch',
+      'comment-submit', 'comment-reply', 'comment-cancel-reply', 'update:comment-draft',
+    ],
     render() {
       if (!this.$props.visible) return null
       const recordId = (this.$props.record as { id?: string } | null)?.id ?? ''
-      return h('div', { 'data-record-drawer': recordId }, [
+      return h('div', {
+        'data-record-drawer': recordId,
+        'data-current-comment-field': this.$props.commentTargetFieldId ?? '',
+        'data-highlighted-comment': this.$props.highlightedCommentId ?? '',
+        'data-mention-suggestions-count': String((this.$props.mentionSuggestions as unknown[]).length),
+      }, [
         h(
           'button',
           {
@@ -471,32 +490,11 @@ vi.mock('../src/multitable/components/MetaRecordInspector.vue', () => ({
           },
           'patch-record',
         ),
-      ])
-    },
-  }),
-}))
-vi.mock('../src/multitable/components/MetaCommentsDrawer.vue', () => ({
-  default: defineComponent({
-    name: 'MetaCommentsDrawer',
-    props: {
-      visible: { type: Boolean, default: false },
-      targetFieldId: { type: String, default: null },
-      highlightedCommentId: { type: String, default: null },
-      mentionSuggestions: { type: Array, default: () => [] },
-    },
-    emits: ['close', 'submit', 'reply', 'cancel-reply', 'update:draft'],
-    render() {
-      if (!this.$props.visible) return null
-      return h('div', {
-        'data-current-comment-field': this.$props.targetFieldId ?? '',
-        'data-highlighted-comment': this.$props.highlightedCommentId ?? '',
-        'data-mention-suggestions-count': String((this.$props.mentionSuggestions as unknown[]).length),
-      }, [
         h(
           'button',
           {
             'data-set-comment-draft': 'true',
-            onClick: () => this.$emit('update:draft', 'Need review'),
+            onClick: () => this.$emit('update:comment-draft', 'Need review'),
           },
           'set-comment-draft',
         ),
@@ -504,7 +502,7 @@ vi.mock('../src/multitable/components/MetaCommentsDrawer.vue', () => ({
           'button',
           {
             'data-submit-comment': 'true',
-            onClick: () => this.$emit('submit', { content: 'Need review', mentions: [] }),
+            onClick: () => this.$emit('comment-submit', { content: 'Need review', mentions: [] }),
           },
           'submit-comment',
         ),
@@ -512,7 +510,7 @@ vi.mock('../src/multitable/components/MetaCommentsDrawer.vue', () => ({
           'button',
           {
             'data-reply-comment': 'comment_parent_1',
-            onClick: () => this.$emit('reply', 'comment_parent_1'),
+            onClick: () => this.$emit('comment-reply', 'comment_parent_1'),
           },
           'reply-comment',
         ),
@@ -520,17 +518,9 @@ vi.mock('../src/multitable/components/MetaCommentsDrawer.vue', () => ({
           'button',
           {
             'data-cancel-reply': 'true',
-            onClick: () => this.$emit('cancel-reply'),
+            onClick: () => this.$emit('comment-cancel-reply'),
           },
           'cancel-reply',
-        ),
-        h(
-          'button',
-          {
-            'data-close-comments': 'true',
-            onClick: () => this.$emit('close'),
-          },
-          'close-comments',
         ),
       ])
     },
@@ -1150,6 +1140,16 @@ describe('MultitableWorkbench view wiring', () => {
   let container: HTMLDivElement | null = null
 
   beforeEach(() => {
+    // W2 S7 test-isolation fix: `window.location` is a SINGLE shared jsdom object across every test
+    // in this file (unlike `container`, which is fresh per test). MultitableWorkbench's pre-existing
+    // `watch(selectedRecordId, ...)` (URL-hash sync) writes `#recordId=...` via `history.replaceState`
+    // whenever a test selects a record and never explicitly deselects before ending — harmless before
+    // S7 because nothing else read that residue back. S7's mutual-exclusion watch, added below in the
+    // component, DOES react to `selectedRecordId` transitions: `mountWorkbench()`'s `onMounted` calls
+    // `parseDeepLink()`, which reads a leftover `#recordId=...` hash from a PRIOR test and re-selects
+    // that record on the NEXT test's mount — this reset makes each test start from a clean URL, same
+    // hygiene `FAVORITE_BASES_KEY`/`RECENT_BASES_KEY` already get below.
+    try { window.history.replaceState(null, '', window.location.pathname + window.location.search) } catch { /* jsdom URL edge case, non-fatal */ }
     localStorage.removeItem(FAVORITE_BASES_KEY)
     localStorage.removeItem(RECENT_BASES_KEY)
     loadCommentsSpy = vi.fn()
@@ -2473,7 +2473,15 @@ describe('MultitableWorkbench view wiring', () => {
     })
   })
 
-  it('prompts before closing the comments drawer when a comment draft exists', async () => {
+  // W2 S4 (OD-W2-7=b): comments no longer has its own close chrome distinct from the inspector's —
+  // the two pre-S4 tests that lived here ("prompts before closing the comments drawer.../localizes
+  // the unsaved comment draft confirm copy in zh-CN") pinned a `data-close-comments` affordance that
+  // no longer exists (see onToggleComments' own doc comment in MultitableWorkbench.vue). Replaced
+  // with a test documenting the new behavior: re-clicking the comment-toggle button while a draft is
+  // pending does NOT prompt (there is nothing to "close" anymore — see the surviving
+  // "prompts before closing the record drawer..." test below for where the comment-draft-discard
+  // guard now lives, `hasRecordScopedDrafts` already folds in `hasCommentDraft`).
+  it('re-clicking the comment-toggle button while a draft is pending does not prompt (no more close-comments-only affordance)', async () => {
     mountWorkbench()
     await flushUi()
 
@@ -2485,31 +2493,13 @@ describe('MultitableWorkbench view wiring', () => {
     await flushUi()
 
     const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false)
-    container!.querySelector<HTMLButtonElement>('[data-close-comments="true"]')!.click()
-    await flushUi()
-
-    expect(confirmSpy).toHaveBeenCalledWith('Discard unsaved comment draft?')
-    expect(container!.querySelector('[data-close-comments="true"]')).toBeTruthy()
-  })
-
-  it('localizes the unsaved comment draft confirm copy in zh-CN', async () => {
-    useLocale().setLocale('zh-CN')
-    mountWorkbench()
-    await flushUi()
-
-    container!.querySelector<HTMLButtonElement>('[data-select-record="rec_1"]')!.click()
-    await flushUi()
     container!.querySelector<HTMLButtonElement>('[data-toggle-comments="true"]')!.click()
     await flushUi()
-    container!.querySelector<HTMLButtonElement>('[data-set-comment-draft="true"]')!.click()
-    await flushUi()
 
-    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false)
-    container!.querySelector<HTMLButtonElement>('[data-close-comments="true"]')!.click()
-    await flushUi()
-
-    expect(confirmSpy).toHaveBeenCalledWith('放弃未保存的评论草稿吗？')
-    expect(container!.querySelector('[data-close-comments="true"]')).toBeTruthy()
+    expect(confirmSpy).not.toHaveBeenCalled()
+    // The record drawer (whole inspector) is still open — only the whole-inspector close (below)
+    // guards a comment draft now.
+    expect(container!.querySelector('[data-record-drawer="rec_1"]')).toBeTruthy()
   })
 
   it('prompts before closing the record drawer when record-scoped drafts are present', async () => {
@@ -3092,6 +3082,130 @@ describe('MultitableWorkbench view wiring', () => {
       await flushUi()
 
       expect(railEl().classList.contains('mt-workbench__rail--drawer')).toBe(true)
+    })
+  })
+
+  // W2 S7 (design docs/development/multitable-w2-unified-record-inspector-design-lock-20260714.md
+  // §3.4/§6bis, OD-W2-6=(b)): the right record inspector becomes a narrow-width overlay drawer using
+  // the SAME `isRailNarrow`/`RAIL_NARROW_BREAKPOINT` signal as the left rail (P2-2c, describe block
+  // above) — no second breakpoint constant — and is MUTUALLY EXCLUSIVE with the rail drawer while
+  // narrow: opening one auto-closes the other. These are STATE assertions (classes/attributes/DOM
+  // presence), not CSS/layout assertions — the actual overlay positioning/shadow/clamp rendering is
+  // real-browser-verified separately (apps/web/verification/inspector-overlay*).
+  describe('W2 S7 — responsive inspector overlay + rail mutual exclusion (OD-W2-6=b)', () => {
+    function railEl(): HTMLElement {
+      const rail = container!.querySelector('.mt-workbench__rail') as HTMLElement
+      expect(rail).toBeTruthy()
+      return rail
+    }
+
+    function toggleEl(): HTMLButtonElement {
+      return container!.querySelector('[data-testid="rail-collapse-toggle"]') as HTMLButtonElement
+    }
+
+    function inspectorEl(): HTMLElement | null {
+      return container!.querySelector('[data-record-drawer]')
+    }
+
+    beforeEach(() => setViewportWidth(1280))
+    afterEach(() => setViewportWidth(1280))
+
+    it('desktop width (>= breakpoint): selecting a record never touches rail state, and toggling the rail never closes the inspector — both stay open together (OD-W2-3=a, byte-unchanged)', async () => {
+      setViewportWidth(1280)
+      mountWorkbench()
+      await flushUi()
+
+      expect(toggleEl().getAttribute('aria-expanded')).toBe('true') // rail starts expanded (pre-S7 default)
+
+      container!.querySelector<HTMLButtonElement>('[data-select-record="rec_1"]')!.click()
+      await flushUi()
+      expect(inspectorEl()).toBeTruthy() // inspector opened
+      expect(inspectorEl()!.classList.contains('meta-record-drawer--overlay')).toBe(false) // push, not overlay
+      expect(toggleEl().getAttribute('aria-expanded')).toBe('true') // rail UNTOUCHED by opening the inspector
+
+      toggleEl().click() // collapse the rail
+      await flushUi()
+      expect(toggleEl().getAttribute('aria-expanded')).toBe('false')
+      expect(inspectorEl()).toBeTruthy() // inspector UNAFFECTED by collapsing the rail — still open
+      expect(railEl().classList.contains('mt-workbench__rail--drawer')).toBe(false) // desktop never enters drawer mode
+
+      toggleEl().click() // re-expand the rail
+      await flushUi()
+      expect(toggleEl().getAttribute('aria-expanded')).toBe('true')
+      expect(inspectorEl()).toBeTruthy() // inspector still open — both open together at desktop
+    })
+
+    it('narrow width: the open inspector carries the overlay class; resizing to wide removes it (push); resizing back to narrow re-applies it (round-trip)', async () => {
+      setViewportWidth(600)
+      mountWorkbench()
+      await flushUi()
+
+      container!.querySelector<HTMLButtonElement>('[data-select-record="rec_1"]')!.click()
+      await flushUi()
+      expect(inspectorEl()).toBeTruthy()
+      expect(inspectorEl()!.classList.contains('meta-record-drawer--overlay')).toBe(true)
+
+      setViewportWidth(1280)
+      await flushUi()
+      expect(inspectorEl()).toBeTruthy() // stays open across the resize
+      expect(inspectorEl()!.classList.contains('meta-record-drawer--overlay')).toBe(false)
+
+      setViewportWidth(600)
+      await flushUi()
+      expect(inspectorEl()).toBeTruthy()
+      expect(inspectorEl()!.classList.contains('meta-record-drawer--overlay')).toBe(true)
+    })
+
+    it('narrow width: opening the inspector while the rail drawer is open closes the rail drawer', async () => {
+      setViewportWidth(600)
+      mountWorkbench()
+      await flushUi()
+
+      toggleEl().click() // narrow + re-expand -> rail drawer opens (P2-2c)
+      await flushUi()
+      expect(railEl().classList.contains('mt-workbench__rail--drawer')).toBe(true)
+      expect(inspectorEl()).toBeNull()
+
+      container!.querySelector<HTMLButtonElement>('[data-select-record="rec_1"]')!.click()
+      await flushUi()
+      expect(inspectorEl()).toBeTruthy() // inspector opened
+      expect(railEl().classList.contains('mt-workbench__rail--drawer')).toBe(false) // rail drawer auto-closed
+      expect(railEl().classList.contains('mt-workbench__rail--collapsed')).toBe(true) // back to icon-strip
+    })
+
+    it('narrow width: opening the rail drawer while the inspector is open closes the inspector', async () => {
+      setViewportWidth(600)
+      mountWorkbench()
+      await flushUi()
+
+      container!.querySelector<HTMLButtonElement>('[data-select-record="rec_1"]')!.click()
+      await flushUi()
+      expect(inspectorEl()).toBeTruthy()
+      expect(railEl().classList.contains('mt-workbench__rail--drawer')).toBe(false)
+
+      toggleEl().click() // narrow + re-expand -> rail drawer opens
+      await flushUi()
+      expect(railEl().classList.contains('mt-workbench__rail--drawer')).toBe(true)
+      expect(inspectorEl()).toBeNull() // inspector auto-closed
+    })
+
+    it('narrow width: switching from one selected record to another while the rail drawer is open still closes the drawer', async () => {
+      setViewportWidth(600)
+      mountWorkbench()
+      await flushUi()
+
+      // Open the inspector on rec_1 first (narrow, no drawer yet), then open the rail drawer —
+      // by the previous test this already closes the inspector; this test instead re-opens the
+      // inspector by switching records while the drawer is open, proving the guard is keyed off
+      // "selectedRecordId changed to non-null", not just "off -> on".
+      toggleEl().click()
+      await flushUi()
+      expect(railEl().classList.contains('mt-workbench__rail--drawer')).toBe(true)
+
+      container!.querySelector<HTMLButtonElement>('[data-select-record="rec_2"]')!.click()
+      await flushUi()
+      expect(inspectorEl()).toBeTruthy()
+      expect(railEl().classList.contains('mt-workbench__rail--drawer')).toBe(false)
     })
   })
 })

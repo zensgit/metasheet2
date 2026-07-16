@@ -322,6 +322,7 @@
         />
       </div>
       <MetaRecordInspector
+        :class="{ 'meta-record-drawer--overlay': isInspectorOverlay }"
         :visible="!!selectedRecordId" :record="selectedRecordResolved" :fields="scopedAllFields"
         :can-edit="effectiveRowActions.canEdit" :can-comment="effectiveRowActions.canComment" :can-delete="effectiveRowActions.canDelete"
         :can-create="caps.canCreateRecord.value"
@@ -338,6 +339,25 @@
         :ai-shortcut="aiShortcut.state"
         :button-run-pending="buttonRunPending"
         :mention-suggestions="commentMentionSuggestions"
+        :comments="commentsState.comments.value"
+        :comments-loading="commentsState.loading.value"
+        :can-resolve-comments="effectiveRowActions.canComment"
+        :comment-draft="commentDraft"
+        :highlighted-comment-id="highlightedCommentId"
+        :comment-target-field-id="activeCommentFieldId"
+        :comments-scope-label="commentsScopeLabel"
+        :comment-reply-to-id="selectedReplyCommentId"
+        :comment-editing-id="selectedEditingCommentId"
+        :comment-unread-count="commentInboxState.unreadCount.value"
+        :comment-submitting="commentsState.submitting.value"
+        :comments-error="commentsState.error.value"
+        :comment-resolving-ids="commentsState.resolvingIds.value"
+        :comment-updating-ids="commentsState.updatingIds.value"
+        :comment-deleting-ids="commentsState.deletingIds.value"
+        :comment-reacting-keys="commentsState.reactingKeys.value"
+        :current-user-id="currentUserId"
+        :comment-composer-initial-mentions="commentComposerInitialMentions"
+        :open-comments="showComments"
         @close="onCloseDrawer" @delete="onDeleteRecord" @duplicate="onDuplicateRecord(selectedRecordId)" @patch="onDrawerPatch"
         @toggle-comments="onToggleComments" @comment-field="onToggleFieldComments" @open-automation="openWorkflowDesigner(selectedRecordId ?? undefined)" @open-link-picker="openLinkPicker" @open-person-picker="openPersonPicker"
         @toggle-lock="onToggleRecordLock"
@@ -345,25 +365,7 @@
         @restore="onRestoreRecordVersion"
         @ai-preview="onAiPreviewField" @ai-run="onAiRunField"
         @run-button="onRunButton"
-      />
-      <MetaCommentsDrawer
-        :visible="showComments && !!selectedRecordId" :comments="commentsState.comments.value"
-        :loading="commentsState.loading.value" :can-comment="effectiveRowActions.canComment" :can-resolve="effectiveRowActions.canComment"
-        :highlighted-comment-id="highlightedCommentId"
-        :unread-count="commentInboxState.unreadCount.value"
-        :target-field-id="activeCommentFieldId"
-        :scope-label="commentsScopeLabel"
-        :reply-to-comment-id="selectedReplyCommentId"
-        :editing-comment-id="selectedEditingCommentId"
-        :draft="commentDraft" :submitting="commentsState.submitting.value" :error="commentsState.error.value"
-        :resolving-ids="commentsState.resolvingIds.value"
-        :updating-ids="commentsState.updatingIds.value"
-        :deleting-ids="commentsState.deletingIds.value"
-        :reacting-keys="commentsState.reactingKeys.value"
-        :current-user-id="currentUserId"
-        :mention-suggestions="commentMentionSuggestions"
-        :composer-initial-mentions="commentComposerInitialMentions"
-        @close="onCloseComments" @submit="onSubmitComment" @resolve="onResolveComment" @reply="onReplyToComment" @edit="onEditComment" @delete="onDeleteComment" @cancel-reply="onCancelCommentReply" @cancel-edit="onCancelCommentEdit" @update:draft="commentDraft = $event" @react="onReactToComment" @unreact="onUnreactToComment"
+        @comment-submit="onSubmitComment" @comment-resolve="onResolveComment" @comment-reply="onReplyToComment" @comment-edit="onEditComment" @comment-delete="onDeleteComment" @comment-cancel-reply="onCancelCommentReply" @comment-cancel-edit="onCancelCommentEdit" @update:comment-draft="commentDraft = $event" @comment-react="onReactToComment" @comment-unreact="onUnreactToComment"
       />
     </div>
     <div v-if="showShortcuts" class="mt-workbench__shortcuts-overlay" @click.self="showShortcuts = false">
@@ -605,7 +607,6 @@ import {
   recordsDeleted as fmtRecordsDeleted,
   recordNotFound as fmtRecordNotFound,
 } from '../utils/workbench-labels'
-import { commentLabel } from '../utils/meta-comment-labels'
 import { recordLabel } from '../utils/meta-record-labels'
 import { resolveButtonFieldProperty } from '../utils/field-config'
 import {
@@ -664,7 +665,6 @@ import { resolveSelectionLabels } from '../utils/batch-restore-labels'
 import MetaFormView from '../components/MetaFormView.vue'
 import MetaRecordInspector from '../components/MetaRecordInspector.vue'
 import MetaNotificationBell from '../components/MetaNotificationBell.vue'
-import MetaCommentsDrawer from '../components/MetaCommentsDrawer.vue'
 import MetaLinkPicker from '../components/MetaLinkPicker.vue'
 import MetaPersonPicker from '../components/MetaPersonPicker.vue'
 import MetaTemplateCard from '../components/MetaTemplateCard.vue'
@@ -1024,6 +1024,16 @@ const isRailNarrow = ref(false)
 const railToggleRef = ref<HTMLButtonElement | null>(null)
 const isRailDrawerOpen = computed(() => isRailNarrow.value && !railCollapsed.value)
 
+// W2 S7 (design docs/development/multitable-w2-unified-record-inspector-design-lock-20260714.md §3.4,
+// §6bis OD-W2-6=(b)): the right record inspector's overlay-vs-push mode reuses the SAME `isRailNarrow`
+// signal as the left rail — there is deliberately no second breakpoint constant (the lock's own words:
+// "同一 RAIL_NARROW_BREAKPOINT 常量、零阈值分叉"). `isInspectorOverlay` is a plain alias (the literal
+// SAME ref), named separately only so the `<MetaRecordInspector>` class binding below reads clearly; it
+// carries no independent state and is therefore false-by-construction at desktop width for the exact
+// same reason `isRailNarrow` already is (see that ref's own transitions in `syncRailViewportState`'s
+// wide-branch early return) — no separate desktop-invariance proof is needed for the alias itself.
+const isInspectorOverlay = isRailNarrow
+
 function syncRailViewportState(): void {
   if (typeof window === 'undefined') return
   const narrow = window.innerWidth <= RAIL_NARROW_BREAKPOINT
@@ -1032,6 +1042,22 @@ function syncRailViewportState(): void {
   if (!narrow) return // wide viewport: never mutate railCollapsed here — desktop path is untouched by 2c
   if (!wasNarrow) railCollapsed.value = true // just crossed into narrow: auto-collapse to the icon-strip
 }
+
+// OD-W2-6=(b) mutual exclusion (lock §3.4/§6bis): at narrow viewport, the left rail's drawer overlay
+// and the right inspector's overlay cannot both be open — opening one auto-closes the other. Both
+// watches below gate purely on `isRailDrawerOpen`, which is already false-by-construction at desktop
+// width (it requires `isRailNarrow`, which the wide branch of `syncRailViewportState` above never
+// sets), so NEITHER watch ever writes state at desktop — reusing that existing P2-2c invariant rather
+// than re-proving it, so desktop behavior (both rail and inspector may be open together, push layout,
+// OD-W2-3=a) stays a byte-for-byte no-op versus pre-S7 code.
+watch(selectedRecordId, (rid) => {
+  // Opening the inspector (a record just got selected) while the rail drawer is open: close the drawer.
+  if (rid && isRailDrawerOpen.value) railCollapsed.value = true
+})
+watch(isRailDrawerOpen, (open) => {
+  // Opening the rail drawer while the inspector is open: close the inspector.
+  if (open && selectedRecordId.value) selectedRecordId.value = null
+})
 
 const showDashboardView = ref(false)
 const showTemplateLibrary = ref(false)
@@ -3105,13 +3131,18 @@ function onCloseDrawer() {
   resetCommentInteractionState()
 }
 
+// W2 S4 (OD-W2-7=b, lock "收编 showComments 分支"): comments is now a tab inside the single
+// inspector, not a second drawer with its own open/close state — there is no "close JUST comments"
+// affordance anymore (MetaCommentsPanel has no header/close chrome of its own, lock §2). So this
+// simplifies to an OPEN-only action: request the comments tab (via the `openComments` prop →
+// MetaRecordInspector's watch, see that component's file-header comment) and reset the scoped
+// comment-field/reply/edit context back to "new top-level comment" — the SAME reset this function
+// already did on its own open branch. Clicking the header comment-toggle button while ALREADY on
+// the comments tab now just re-runs that reset (a mild behavior change from the old toggle-closes
+// semantics; there is no other way to "close comments only" left in the UI — closing the whole
+// inspector via its own × already discards a comment draft the same way, `hasRecordScopedDrafts`
+// already includes `hasCommentDraft`, see `confirmDiscardRecordChanges`).
 function onToggleComments() {
-  if (showComments.value) {
-    if (!confirmDiscardCommentDraft()) return
-    showComments.value = false
-    resetCommentInteractionState()
-    return
-  }
   showComments.value = true
   selectedCommentFieldId.value = null
   selectedReplyCommentId.value = null
@@ -3162,12 +3193,6 @@ function onCancelCommentEdit() {
   commentDraft.value = ''
 }
 
-function onCloseComments() {
-  if (!confirmDiscardCommentDraft()) return
-  showComments.value = false
-  resetCommentInteractionState()
-}
-
 function confirmDiscardContextChanges() {
   if (!hasUnsavedWorkbenchDrafts.value) return true
   return window.confirm(wb('confirm.discardContextChanges', isZh.value))
@@ -3176,11 +3201,6 @@ function confirmDiscardContextChanges() {
 function confirmDiscardRecordChanges() {
   if (!hasRecordScopedDrafts.value) return true
   return window.confirm(wb('confirm.discardRecordChanges', isZh.value))
-}
-
-function confirmDiscardCommentDraft() {
-  if (!hasCommentDraft.value) return true
-  return window.confirm(commentLabel('comment.discardDraftConfirm', isZh.value))
 }
 
 function discardWorkbenchDraftsForExternalContextChange() {

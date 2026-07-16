@@ -364,6 +364,9 @@ export interface MetaRecordRevision {
   patch: Record<string, unknown>
   snapshot: Record<string, unknown> | null
   createdAt: string
+  /** R11 back-reference (OD-W2-5a): the source record-version this `source='restore'` change restored from, else
+   *  null/absent. Optional so a pre-R11 backend payload still typechecks. The badge renders only when non-null. */
+  restoredFromVersion?: number | null
 }
 
 /** Global History & Point-in-Time Restore — base-level read-only history center (T2/T3). */
@@ -659,6 +662,16 @@ export interface MultitableCommentInboxItem extends MultitableComment {
   sheetId?: string | null
   viewId?: string | null
   recordId?: string | null
+  /**
+   * G-10 (docket #68): server-projected display name for the matching id, when resolvable.
+   * Additive — the id fields above are unchanged. Render name-first with an id fallback
+   * (`baseName ?? baseId`, same pattern as the existing `authorName ?? authorId`); `recordId` has no
+   * `recordName` counterpart (no cheap server-side record-title resolver exists yet).
+   */
+  baseName?: string | null
+  sheetName?: string | null
+  viewName?: string | null
+  fieldName?: string | null
 }
 
 export type MetaCommentInboxItem = MultitableCommentInboxItem

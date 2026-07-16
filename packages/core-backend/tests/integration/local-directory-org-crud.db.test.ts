@@ -310,3 +310,57 @@ describeIfDatabase('Canonical Org MVP — B2 local departments/accounts/membersh
     })
   })
 })
+
+// PB4-1 lock point 4 (owner): the single-UPDATE switch's exactly-one-primary invariant must be
+// proven by REAL CONCURRENCY in the committed suite — a sequential test cannot stand in for it.
+// Two simultaneous switches to different departments, 10 rounds; after each round exactly one
+// membership is primary (whichever writer's statement committed last wins wholly — the UPDATE's
+// own row locks serialize the two statements).
+describeIfDatabase('PB4-1 — concurrent primary switches (real DB)', () => {
+  const raceUserIds: string[] = []
+  const raceOrgs: string[] = []
+
+  afterEach(async () => {
+    for (const org of raceOrgs.splice(0)) {
+      await query(
+        `DELETE FROM directory_accounts WHERE integration_id IN (SELECT id FROM directory_integrations WHERE org_id = $1 AND provider = 'local')`,
+        [org],
+      )
+      await query(
+        `DELETE FROM directory_departments WHERE integration_id IN (SELECT id FROM directory_integrations WHERE org_id = $1 AND provider = 'local')`,
+        [org],
+      )
+      await query(
+        `DELETE FROM audit_logs WHERE resource_type = 'directory-integration' AND resource_id IN (SELECT id::text FROM directory_integrations WHERE org_id = $1 AND provider = 'local')`,
+        [org],
+      )
+      await query(`DELETE FROM directory_integrations WHERE org_id = $1 AND provider = 'local'`, [org])
+    }
+    for (const id of raceUserIds.splice(0)) await query(`DELETE FROM users WHERE id = $1`, [id])
+  })
+
+  it('two CONCURRENT switches to different departments end with exactly one primary, every round (10 rounds)', async () => {
+    const org = orgId('race-switch')
+    raceOrgs.push(org)
+    const uid = newUserId('race-switch')
+    raceUserIds.push(uid)
+    await seedUser(uid, 'Race Switch')
+    const account = await createLocalAccount({ orgId: org, localUserId: uid })
+    const deptA = await createLocalDepartment({ orgId: org, name: 'Race A' })
+    const deptB = await createLocalDepartment({ orgId: org, name: 'Race B' })
+    await addLocalMembership({ orgId: org, accountId: account.id, departmentId: deptA.id })
+    await addLocalMembership({ orgId: org, accountId: account.id, departmentId: deptB.id })
+
+    for (let round = 0; round < 10; round++) {
+      await Promise.all([
+        switchLocalPrimaryDepartment(org, account.id, deptA.id),
+        switchLocalPrimaryDepartment(org, account.id, deptB.id),
+      ])
+      const primaries = await query<{ n: string }>(
+        `SELECT count(*)::text AS n FROM directory_account_departments WHERE directory_account_id = $1 AND is_primary = true`,
+        [account.id],
+      )
+      expect(Number(primaries.rows[0]?.n)).toBe(1)
+    }
+  })
+})

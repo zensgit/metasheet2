@@ -99,6 +99,29 @@ jobs:
             scripts/ops/github-dingtalk-oauth-stability-summary.test.mjs \
             scripts/ops/dingtalk-oauth-stability-workflow-contract.test.mjs
 
+  stock-prep-powershell51:
+    name: stock-prep PowerShell 5.1 acceptance
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 20.x
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20.x
+
+      # The release package runs this acceptance boundary under Windows PowerShell 5.1. pwsh 7 has
+      # different native-stderr semantics and cannot stand in for the target shell contract.
+      - name: Run target-shell smoke capture regression
+        shell: powershell
+        run: |
+          $powershell51 = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
+          & $powershell51 -NoProfile -ExecutionPolicy Bypass -File `
+            scripts/ops/__tests__/stock-preparation-onprem-acceptance.ps51.tests.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
   test:
     runs-on: ubuntu-latest
 
@@ -123,12 +146,16 @@ jobs:
       - name: Global History flag manifest contract (R12-C)
         run: node --test scripts/ops/global-history-flag-manifest.test.mjs scripts/ops/multitable-global-history-flag-status.test.mjs
 
-      # #4210 T9: the stock-preparation one-click acceptance script's contract + behavioural tests (49
-      # checks = 17 contract + 32 behavioural) are pure pwsh 7 + tar + node (no DB, no live server — the
-      # pm2/health/smoke stages are unit-tested via dot-sourced pure helpers). Run inside the REQUIRED
-      # `test` gate, but only ONCE (on 20.x — no need across the 18/20 matrix), early (no pnpm install
-      # needed: pwsh/tar ship on ubuntu, node is already set up) so a regression fails the required check
-      # fast. This is the only CI that executes these checks.
+      # The production monitor invokes the same state helper covered here.
+      # Keep this in the required 18/20 matrix so HTTP classification, silence
+      # barriers, and alert/recovery streak semantics cannot drift silently.
+      - name: Prod health probe monitor contract
+        run: node --test scripts/ops/prod-health-probe-state.test.mjs
+
+      # #4210 T9: the stock-preparation one-click acceptance script's cross-platform contract + behavioural
+      # tests are pure pwsh 7 + tar + node. Run once in the required 20.x arm. The package's target-shell
+      # semantics are covered separately by the Windows PowerShell 5.1 job above; neither shell substitutes
+      # for the other.
       - name: Run stock-preparation on-prem acceptance tests (T9, pwsh)
         if: matrix.node-version == '20.x'
         shell: pwsh
@@ -508,6 +535,8 @@ jobs:
             tests/integration/multitable-tombstone-record-capture-realdb.test.ts \
             tests/integration/multitable-tombstone-retention-realdb.test.ts \
             tests/integration/multitable-automation-outbox-schema-realdb.test.ts \
+            tests/integration/multitable-automation-dispatcher-claim-realdb.test.ts \
+            tests/integration/multitable-automation-dispatch-loop-realdb.test.ts \
             tests/integration/multitable-attachment-readgate.security.test.ts \
             tests/integration/multitable-ai-write-provenance-batch-grouping-realdb.test.ts \
             tests/integration/multitable-automation-branch-local-wait.test.ts \
@@ -515,6 +544,7 @@ jobs:
             tests/integration/multitable-crossbase-realtime-fanout.test.ts \
             tests/integration/multitable-record-duplicate.test.ts \
             tests/integration/approval-record-projection.test.ts \
+            tests/integration/stock-preparation-t3a-erp-autopersist-realdb.test.ts \
             --reporter=dot
 
       - name: Run approval real-DB integration (directory endpoints + P1-C field redaction + P1-B add_sign/reduce_sign + direct_manager create/start + A/E/B/D/G cross-lane acceptance + dept_head sync-plumbing carry-forward + continuous_managers chain walk + common template presets + DT-OPS-01 deprovision selection goldens)
@@ -569,6 +599,7 @@ jobs:
             tests/integration/directory-local-provider-scheduler-exclusion.db.test.ts \
             tests/integration/local-directory-org-crud.db.test.ts \
             tests/integration/local-directory-org-crud-route.db.test.ts \
+            tests/integration/directory-normalized-manager.db.test.ts \
             tests/integration/attendance-csv-export-bom.test.ts \
             tests/integration/attendance-notification-redelivery.db.test.ts \
             tests/integration/attendance-notification-redelivery-route.db.test.ts \

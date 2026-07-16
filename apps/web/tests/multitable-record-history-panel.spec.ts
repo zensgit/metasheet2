@@ -296,4 +296,32 @@ describe('MetaRecordHistoryPanel (W2 S2 extraction)', () => {
       app.unmount()
     })
   })
+
+  describe('OD-W2-5a R11 restored-from badge', () => {
+    it('renders the badge for a revision carrying restoredFromVersion (keyed on the version, not source)', async () => {
+      const { container, app } = mountPanel({
+        revisions: [rev(4, 'update', { source: 'restore', restoredFromVersion: 2 }), rev(1, 'create')],
+      })
+      await flushUi()
+      const badge = container.querySelector('[data-test="record-history-restored-from"]')
+      expect(badge).not.toBeNull()
+      // Locale-robust + exact: the badge must be EXACTLY one of the two known forms for version 2
+      // (EN `Restored from v2` / ZH `从版本 2 恢复`), so this neither breaks if the default mount locale
+      // flips nor passes on a loose stray `2`. The two-locale mapping itself is pinned in the
+      // restoredFromVersionBadge unit; here we assert the component rendered that helper's output verbatim.
+      expect(['Restored from v2', '从版本 2 恢复']).toContain(badge!.textContent!.trim())
+      app.unmount()
+    })
+
+    it('NEG (owner Medium): source=restore but restoredFromVersion=null → NO badge (badge never keys on source)', async () => {
+      const { container, app } = mountPanel({
+        // A `source='restore'` write with a NULL back-reference (PIT-resurrect / reset / lossy-retype-revert
+        // shape). The badge must key on `restoredFromVersion != null`, NEVER on `source === 'restore'`.
+        revisions: [rev(4, 'update', { source: 'restore', restoredFromVersion: null }), rev(1, 'create')],
+      })
+      await flushUi()
+      expect(container.querySelector('[data-test="record-history-restored-from"]')).toBeNull()
+      app.unmount()
+    })
+  })
 })
