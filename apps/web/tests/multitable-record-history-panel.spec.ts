@@ -305,7 +305,11 @@ describe('MetaRecordHistoryPanel (W2 S2 extraction)', () => {
       await flushUi()
       const badge = container.querySelector('[data-test="record-history-restored-from"]')
       expect(badge).not.toBeNull()
-      expect(badge!.textContent).toContain('v2')
+      // Locale-robust + exact: the badge must be EXACTLY one of the two known forms for version 2
+      // (EN `Restored from v2` / ZH `从版本 2 恢复`), so this neither breaks if the default mount locale
+      // flips nor passes on a loose stray `2`. The two-locale mapping itself is pinned in the
+      // restoredFromVersionBadge unit; here we assert the component rendered that helper's output verbatim.
+      expect(['Restored from v2', '从版本 2 恢复']).toContain(badge!.textContent!.trim())
       app.unmount()
     })
 

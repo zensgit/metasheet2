@@ -4,6 +4,7 @@ import {
   commentOnField,
   historyActor,
   requiredField,
+  restoredFromVersionBadge,
 } from '../src/multitable/utils/meta-record-labels'
 
 describe('meta-record-labels static keys', () => {
@@ -117,5 +118,13 @@ describe('meta-record-labels helpers', () => {
     expect(requiredField('Email', false)).toBe('Email is required')
     expect(requiredField('Email', true)).toBe('Email 为必填项')
     expect(requiredField('邮箱', true)).toBe('邮箱 为必填项')
+  })
+
+  it('restoredFromVersionBadge (OD-W2-5a R11) interpolates the source version in both locales', () => {
+    expect(restoredFromVersionBadge(2, false)).toBe('Restored from v2')
+    expect(restoredFromVersionBadge(2, true)).toBe('从版本 2 恢复')
+    // the version is interpolated raw (data), not a fixed literal
+    expect(restoredFromVersionBadge(17, false)).toBe('Restored from v17')
+    expect(restoredFromVersionBadge(17, true)).toBe('从版本 17 恢复')
   })
 })
