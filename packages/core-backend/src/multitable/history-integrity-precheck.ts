@@ -327,7 +327,10 @@ const SEQ_FORMAT = /^[1-9][0-9]*$/
  *     over the (already seq-ordered) timeline; it only inspects `action`, never `seq` magnitude.
  *  3. EVERY generation is validated, not just the terminal one — "terminal-generation-only validation is
  *     forbidden" (§4, verbatim). A hole in an OLDER generation refuses even when the terminal generation is
- *     completely clean (the High-2 regression this lane exists to fix).
+ *     completely clean (the High-2 regression this lane exists to fix). This INCLUDES generation 0: any event
+ *     or marker that precedes the record's FIRST create (owner counterexample, #4339) means an older
+ *     generation's create was never captured — a provably incomplete chain — so it refuses `chain_hole`
+ *     rather than being skipped by a `1..creates` walk that never visits generation 0.
  *  4. Illegal/missing/out-of-range seq fails closed (`comparator_error`), never coerced to zero or dropped.
  *     A within-generation duplicate occupant is `chain_corrupt` (replaces the DROPPED cross-generation marker
  *     UNIQUE, which used to reject this shape at write time).
@@ -368,6 +371,20 @@ export function checkAllGenerationsContiguity(
     generation[i] = creates
   }
   if (creates === 0) return { ok: false, reason: 'chain_hole' } // no create ever captured (updates/markers only)
+
+  // GENERATION 0 (owner High-2 counterexample, #4339 REQUEST-CHANGES). The running `creates` counter starts
+  // at 0 and increments only at a 'create', so `generation[i] === 0` for EVERY item that precedes the record's
+  // FIRST captured create. The `g = 1..creates` walk below never visits generation 0, so without this guard
+  // those items are silently unchecked. A well-formed chain's first item is ALWAYS its create (v1): a marker
+  // happens on a live row, an update/delete presupposes a prior create — so any event or marker before the
+  // first create means an OLDER generation's create was never captured (retention-swept or an uncaptured
+  // hole). That older generation is provably incomplete and cannot be reconstructed. This is exactly the shape
+  // the owner's live counterexample hits — an older generation missing its create + a clean terminal
+  // generation — which returned {ok:true} before this fix. Fail CLOSED (chain_hole); a generation-0 event is
+  // never skipped. `generation[0]` exists (timeline.length > 0 guaranteed by the early return above) and, since
+  // the timeline is seq-ascending and `generation` is monotonic non-decreasing, `generation[0] === 0` iff at
+  // least one generation-0 item exists — one check covers the whole prefix-before-first-create.
+  if (generation[0] === 0) return { ok: false, reason: 'chain_hole' }
 
   // CONSERVATIVE: validate EVERY generation (not terminal-only — v3.7 §4/§9.3 owner High-2 correction).
   for (let g = 1; g <= creates; g++) {

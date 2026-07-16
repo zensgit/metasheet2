@@ -89,6 +89,11 @@ const revExplicitSeq = (sheet: string, id: string, version: number, action: stri
      VALUES (gen_random_uuid(),$1,$2,$3,$4,'rest',ARRAY[]::text[],'{}'::jsonb,$5::jsonb,$6::bigint)`, [sheet, id, version, action, JSON.stringify(snap), seq])
 const insertLive = (sheet: string, id: string, data: Record<string, unknown>, version: number) =>
   q('INSERT INTO meta_records (id, sheet_id, data, version) VALUES ($1,$2,$3::jsonb,$4)', [id, sheet, JSON.stringify(data), version])
+// Ordinary marker insert — seq comes from the shared sequence's DEFAULT nextval() (same as `rev`), so a marker
+// inserted BEFORE a create (sequential await) causally precedes it (lower seq) — used by the generation-0
+// marker golden below. NEVER a `setval` (P2-C).
+const marker = (sheet: string, id: string, version: number, kind: 'lock' | 'unlock') =>
+  q('INSERT INTO meta_record_version_markers (id, sheet_id, record_id, version, kind) VALUES (gen_random_uuid(),$1,$2,$3,$4)', [sheet, id, version, kind])
 const insertTrash = (sheet: string, id: string, data: Record<string, unknown>, originalVersion: number) =>
   q('INSERT INTO meta_records_trash (record_id, sheet_id, data, original_version) VALUES ($1,$2,$3::jsonb,$4)', [id, sheet, JSON.stringify(data), originalVersion])
 const recordRow = async (id: string) => (await q('SELECT data, version FROM meta_records WHERE id = $1', [id])).rows[0] as { data: Record<string, unknown>; version: number } | undefined
@@ -194,6 +199,54 @@ describeIfDatabase('W0-1 v3.7 STRICT history contiguity — seq-ordered, ALL gen
     await rev(SHEET, R, 1, 'create', { [NAME]: 'g2-v1' })
     await rev(SHEET, R, 2, 'update', { [NAME]: 'g2-v2' }) // terminal generation — clean
     await insertLive(SHEET, R, { [NAME]: 'g2-v2' }, 2)
+
+    await expectRevertRefusesWithZeroWrites(SHEET)
+  })
+
+  // ── GENERATION-0 HOLE (owner High-2 counterexample, #4339) ───────────────────────────────────────────────
+  // Events/markers that PRECEDE the record's first captured create sit in generation 0 — which the strict
+  // all-generations walk (g=1..creates) never visited before the fix, so an older generation missing its
+  // create + a clean terminal generation wrongly returned {ok:true}. Live data matches the terminal
+  // generation's latest snapshot in each case, so the content-projection layer does NOT fire — the ONLY reason
+  // to refuse is the generation-0 hole. Mutation proof: delete `if (generation[0] === 0) return … chain_hole`
+  // from checkAllGenerationsContiguity ⇒ each of these reds (revert-preview returns 200 instead of 409).
+  test('GENERATION-0 (owner counterexample) ⇒ 409: an OLDER generation missing its create + a clean terminal generation refuses even though the terminal walk is healthy', async () => {
+    const R = `rec_hcss_gen0_${TS}`
+    // gen0 (create swept — retention/uncaptured): update@2, delete@2. gen1 (terminal, live=2): create@1, update@2 (clean).
+    await rev(SHEET, R, 2, 'update', { [NAME]: 'gA-v2' })
+    await rev(SHEET, R, 2, 'delete', { [NAME]: 'gA-v2' })
+    await rev(SHEET, R, 1, 'create', { [NAME]: 'gB-v1' })
+    await rev(SHEET, R, 2, 'update', { [NAME]: 'gB-v2' })
+    await insertLive(SHEET, R, { [NAME]: 'gB-v2' }, 2) // live == terminal latest snapshot ⇒ content layer clean
+
+    await expectRevertRefusesWithZeroWrites(SHEET)
+  })
+
+  test('GENERATION-0 (b) ⇒ 409: an UPDATE before any create refuses (chain_hole)', async () => {
+    const R = `rec_hcss_gen0_update_${TS}`
+    await rev(SHEET, R, 2, 'update', { [NAME]: 'orphan-v2' }) // generation 0 — no create captured yet
+    await rev(SHEET, R, 1, 'create', { [NAME]: 'v1' })
+    await rev(SHEET, R, 2, 'update', { [NAME]: 'v2' })
+    await insertLive(SHEET, R, { [NAME]: 'v2' }, 2)
+
+    await expectRevertRefusesWithZeroWrites(SHEET)
+  })
+
+  test('GENERATION-0 (c) ⇒ 409: a VERSION MARKER before any create refuses (chain_hole)', async () => {
+    const R = `rec_hcss_gen0_marker_${TS}`
+    await marker(SHEET, R, 2, 'lock') // generation 0 — a lock marker before any captured create
+    await rev(SHEET, R, 1, 'create', { [NAME]: 'v1' })
+    await rev(SHEET, R, 2, 'update', { [NAME]: 'v2' })
+    await insertLive(SHEET, R, { [NAME]: 'v2' }, 2)
+
+    await expectRevertRefusesWithZeroWrites(SHEET)
+  })
+
+  test('GENERATION-0 (d) ⇒ 409: a DELETE before any create refuses (chain_hole)', async () => {
+    const R = `rec_hcss_gen0_delete_${TS}`
+    await rev(SHEET, R, 1, 'delete', { [NAME]: 'orphan' }) // generation 0 — a delete of a swept-create generation
+    await rev(SHEET, R, 1, 'create', { [NAME]: 'v1' })
+    await insertLive(SHEET, R, { [NAME]: 'v1' }, 1)
 
     await expectRevertRefusesWithZeroWrites(SHEET)
   })

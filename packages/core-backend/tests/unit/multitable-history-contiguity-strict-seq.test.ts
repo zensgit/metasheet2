@@ -101,6 +101,39 @@ describe('W0-1 v3.7 checkAllGenerationsContiguity — seq-ordered, ALL generatio
     expect(checkAllGenerationsContiguity(live(0), [ev(1, 'create', '1')])).toEqual({ ok: false, reason: 'out_of_range_version' })
   })
 
+  // ── GENERATION-0 HOLE: events/markers BEFORE the first create (owner High-2 counterexample, #4339) ────────
+  // The running generation counter starts at 0 and increments only at a 'create', so anything preceding the
+  // record's first create sits in generation 0 — which the g=1..creates walk never visits. A well-formed
+  // chain's first item is always its create; an event/marker before it means an OLDER generation's create was
+  // never captured (a provably incomplete chain). Each of these returned {ok:true} before the fix (the gen-0
+  // items were silently skipped) — the mutation proof: delete `if (generation[0] === 0) return … chain_hole`
+  // and all four reds.
+  test('OWNER COUNTEREXAMPLE: an OLDER generation missing its create (its events precede the first create) + a CLEAN terminal generation ⇒ chain_hole (generation-0 hole, not skipped)', () => {
+    // gen0 (create swept): update@2(seq1), delete@2(seq2). gen1 (terminal, live=2): create@1(seq3), update@2(seq4) — clean.
+    expect(checkAllGenerationsContiguity(live(2), [
+      ev(2, 'update', '1'), ev(2, 'delete', '2'), ev(1, 'create', '3'), ev(2, 'update', '4'),
+    ])).toEqual({ ok: false, reason: 'chain_hole' })
+  })
+
+  test('an UPDATE before any create (generation 0) ⇒ chain_hole', () => {
+    expect(checkAllGenerationsContiguity(live(2), [ev(2, 'update', '1'), ev(1, 'create', '2'), ev(2, 'update', '3')]))
+      .toEqual({ ok: false, reason: 'chain_hole' })
+  })
+
+  test('a VERSION MARKER before any create (generation 0) ⇒ chain_hole', () => {
+    expect(checkAllGenerationsContiguity(live(2), [mk(2, '1'), ev(1, 'create', '2'), ev(2, 'update', '3')]))
+      .toEqual({ ok: false, reason: 'chain_hole' })
+  })
+
+  test('a DELETE before any create (generation 0) ⇒ chain_hole', () => {
+    expect(checkAllGenerationsContiguity(live(1), [ev(1, 'delete', '1'), ev(1, 'create', '2')]))
+      .toEqual({ ok: false, reason: 'chain_hole' })
+  })
+
+  test('positive control: the FIRST item being the create (generation starts at 1) is NOT refused by the gen-0 guard', () => {
+    expect(checkAllGenerationsContiguity(live(2), [ev(1, 'create', '1'), ev(2, 'update', '2')])).toEqual({ ok: true })
+  })
+
   // ── ILLEGAL/MALFORMED SEQ FAIL-CLOSE (§9.3 scope item 6) ─────────────────────────────────────────────────
   test('illegal seq "0" (non-positive) → comparator_error, fail-closed', () => {
     expect(checkAllGenerationsContiguity(live(1), [ev(1, 'create', '0')])).toEqual({ ok: false, reason: 'comparator_error' })
