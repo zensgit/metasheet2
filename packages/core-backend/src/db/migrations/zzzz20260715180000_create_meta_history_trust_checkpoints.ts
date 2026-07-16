@@ -44,13 +44,12 @@ import { sql, type Kysely } from 'kysely'
  * description sentinel (and the base_id), which a client could spoof to exclude its own sheet from the
  * contiguity/strict trust checks. `system_kind` is the required server-owned hardening and is now the ONLY
  * trust signal — the description/base_id disjuncts have been REMOVED from `isSystemSheet`. This migration adds
- * the column and BACKFILLS the currently-trusted signals ONCE (a migration-time snapshot of the People-sheet
- * description sentinel + the approval-projection base id) so every pre-existing system sheet is covered; going
- * forward, provisioning (People preset + approval `ensureFamilySheet`) sets it directly and the client
- * sheet-create route never accepts it (see the G-SYSTEM-KIND non-forgeable golden). The backfill values are the stable sentinels
- * `SYSTEM_PEOPLE_SHEET_DESCRIPTION` (`multitable/system-sheet-predicate.ts`) and `APPROVAL_PROJECTION_BASE_ID`
- * (`multitable/approval-projection-constants.ts`) — duplicated here as literals because a migration must be a
- * frozen point-in-time snapshot, not a live import that could drift after it has run.
+ * the column ONLY; it deliberately performs NO backfill (owner P1, 2026-07-16): the previously-planned
+ * sentinel backfill (description / base_id) would have let a sheet forged BEFORE the migration launder a
+ * permanent trusted identity. Going forward, provisioning (People preset + approval `ensureFamilySheet`)
+ * stamps `system_kind` server-side at INSERT and the client sheet-create route never accepts it (see the
+ * G-SYSTEM-KIND non-forgeable golden); pre-existing sheets stay NULL and are strict-checked like any
+ * ordinary sheet (fail-closed — no exclusion is ever granted from user-writable data).
  *
  * zzzz-timestamped ([[feedback_migration_zzzz_ordering]]): FKs `meta_history_trust_checkpoints.sheet_id` and
  * alters `meta_sheets` (both zzz/zzzz-created), and references `meta_record_chain_seq` (the L3 zzzz migration
@@ -108,18 +107,15 @@ export async function up(db: Kysely<unknown>): Promise<void> {
 
   // ── meta_sheets.system_kind (server-owned, non-forgeable) ─────────────────────────────────────────────
   await sql`ALTER TABLE meta_sheets ADD COLUMN IF NOT EXISTS system_kind text`.execute(db)
-  // One-time backfill of the CURRENTLY-trusted signals (migration-time snapshot; the literals below mirror
-  // SYSTEM_PEOPLE_SHEET_DESCRIPTION and APPROVAL_PROJECTION_BASE_ID — see the module doc comment).
-  await sql`
-    UPDATE meta_sheets
-    SET system_kind = 'people_directory'
-    WHERE system_kind IS NULL AND description = '__metasheet_system:people__'
-  `.execute(db)
-  await sql`
-    UPDATE meta_sheets
-    SET system_kind = 'approval_projection'
-    WHERE system_kind IS NULL AND base_id = 'base_apr_projection'
-  `.execute(db)
+  // NO sentinel backfill (owner P1, 2026-07-16). An earlier draft backfilled from the People-sheet
+  // `description` sentinel and the approval-projection `base_id` — but BOTH are user-writable at sheet
+  // create, so a sheet forged BEFORE this migration runs would be laundered into a permanent trusted
+  // identity that bypasses the strict checks. `system_kind` may therefore only ever be written by the
+  // server-side provisioning paths (People preset + approval `ensureFamilySheet`, which stamp it at
+  // INSERT). Pre-existing sheets whose identity cannot be proven from a non-user-writable source stay
+  // NULL and are treated as ordinary sheets by the strict path — fail-closed: they get strict-checked,
+  // they never gain an exclusion. If a provable internal registry for legacy system sheets is
+  // identified, migrating from it belongs in a NEW migration with its own review, not here.
 }
 
 export async function down(db: Kysely<unknown>): Promise<void> {
