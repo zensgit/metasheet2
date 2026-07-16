@@ -6,7 +6,8 @@
 # stdout and stderr must still return its stdout and exact exit code while the runner's global
 # ErrorActionPreference remains Stop.
 $ErrorActionPreference = 'Stop'
-$scriptPath = Join-Path $PSScriptRoot '..' 'stock-preparation-onprem-acceptance.ps1'
+$opsDir = Join-Path $PSScriptRoot '..'
+$scriptPath = Join-Path $opsDir 'stock-preparation-onprem-acceptance.ps1'
 $pass = 0
 $fail = 0
 
