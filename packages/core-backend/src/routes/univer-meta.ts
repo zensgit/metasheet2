@@ -5103,7 +5103,9 @@ async function ensurePeopleSheetPreset(query: QueryFn, baseId: string): Promise<
       // W0-1 v3.7 §3: set the server-owned, non-forgeable `system_kind` at provisioning time (never from a
       // client request). Requires the L5 migration (zzzz20260715180000) to have added the column — that
       // migration is part of this same change and runs before new code serves traffic (deploy SOP:
-      // migrate-then-deploy). Existing People sheets are covered by that migration's one-time backfill.
+      // migrate-then-deploy). The migration performs NO backfill (owner P1: a description-sentinel backfill
+      // would launder a pre-migration forged sheet): a pre-existing People sheet stays NULL fail-closed until
+      // re-provisioned through this server-side path — an exclusion is never minted from user-writable data.
       `INSERT INTO meta_sheets (id, base_id, name, description, system_kind)
        VALUES ($1, $2, $3, $4, 'people_directory')`,
       [peopleSheetId, baseId, SYSTEM_PEOPLE_SHEET_NAME, SYSTEM_PEOPLE_SHEET_DESCRIPTION],

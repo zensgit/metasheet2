@@ -403,9 +403,11 @@ export class ApprovalRecordProjectionService {
   ): Promise<void> {
     // W0-1 L5 P1-a: set the server-owned, non-forgeable `system_kind` at provisioning time so the history
     // trust predicate (`isSystemSheet`) still excludes this server-regenerated read-model AFTER the forgeable
-    // base_id/description trust signals were removed. `system_kind` is set only here (server-side) and by the
-    // People-preset + L5 backfill — never from a client request. Column-tolerant: a pre-migration deploy
-    // window (column absent) degrades to the legacy 4-column insert, and the L5 backfill covers it by base_id.
+    // base_id/description trust signals were removed. `system_kind` is set ONLY by server-side provisioning
+    // (here + the People preset) — never from a client request, and the L5 migration performs NO backfill
+    // (owner P1: sentinel backfills launder forged sheets). Column-tolerant: a pre-migration deploy window
+    // (column absent) degrades to the legacy 4-column insert; such a sheet stays NULL fail-closed (strict-
+    // checked, never excluded) until re-provisioned through this path.
     try {
       await client.query(
         `INSERT INTO meta_sheets (id, base_id, name, description, system_kind)
