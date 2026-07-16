@@ -13,6 +13,10 @@ on:
       - 'pnpm-lock.yaml'
       - '.github/workflows/migration-replay.yml'
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   migration-replay:
     runs-on: ubuntu-latest
