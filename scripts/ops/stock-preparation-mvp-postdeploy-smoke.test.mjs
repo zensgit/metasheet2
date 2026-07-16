@@ -286,3 +286,29 @@ test('computeFailureClass: NONE on pass, FATAL_EXCEPTION on throw, SELF_SCAN_FAI
   r = mk({ pass: false, selfScanClean: false }); computeFailureClass(r); assert.equal(r.summary.failureClass, 'SELF_SCAN_FAILED')
   r = mk({ pass: false, selfScanClean: true }); computeFailureClass(r); assert.equal(r.summary.failureClass, 'CHECK_FAILED')
 })
+
+test('computeDiagnosticLocus: a THROW inside RESPONSE_LEAK_SCAN (leakScanClean not yet produced) reports AUDIT_TRAIL + NOT_RUN — never the contradictory completed-pair', () => {
+  // Owner P2 repro: reached the final phase but died before leakScanClean was assigned.
+  const result = { summary: { leakScanClean: undefined }, checks: [{ name: 'x', ok: true, phase: 'AUDIT_TRAIL' }] }
+  computeDiagnosticLocus(result, SMOKE_PHASES.length - 1)
+  assert.equal(result.summary.lastCompletedPhase, 'AUDIT_TRAIL')
+  assert.equal(result.summary.responseLeakScanStatus, 'NOT_RUN')
+  // the contradictory pair must be impossible: completed-last implies a boolean product
+  assert.notEqual(result.summary.lastCompletedPhase === 'RESPONSE_LEAK_SCAN' && result.summary.responseLeakScanStatus === 'NOT_RUN', true)
+  // and a FAIL product still counts as completed (completed ≠ clean):
+  const failed = { summary: { leakScanClean: false }, checks: [] }
+  computeDiagnosticLocus(failed, SMOKE_PHASES.length - 1)
+  assert.equal(failed.summary.lastCompletedPhase, 'RESPONSE_LEAK_SCAN')
+  assert.equal(failed.summary.responseLeakScanStatus, 'FAIL')
+})
+
+test('diagnostic output face is EXACTLY the five declared fields (no reachedPhase or other internals leak into the summary)', () => {
+  const result = { summary: { leakScanClean: true }, checks: [] }
+  computeDiagnosticLocus(result, SMOKE_PHASES.length - 1)
+  computeFailureClass(result)
+  const diagKeys = Object.keys(result.summary).filter((k) => k !== 'leakScanClean')
+  assert.deepEqual(diagKeys.sort(), [
+    'failedCheckCount', 'failureClass', 'firstFailedCheck', 'lastCompletedPhase', 'responseLeakScanStatus',
+  ])
+  assert.ok(!('reachedPhase' in result.summary), 'internal phase cursor must never appear in the output face')
+})
