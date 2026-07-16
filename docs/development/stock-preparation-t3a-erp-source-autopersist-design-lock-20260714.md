@@ -37,7 +37,7 @@ source-run 路由(与 http-routes.cjs WIP bb9724494 一致):
 ## 3. 已决策（RATIFY-ready，owner 2026-07-15 定；实现处 `bb9724494` WIP 已按此接线）
 
 ### OD-1 自动落库 vs 门控 — ✅ DECIDED：默认关闭 flag，分级启用
-- **裁决 A**:新增默认-OFF flag（规范化字面 `true`,trim+小写）。OFF ⇒ 今日行为逐字节不变(只读,不落库);ON ⇒ 自动落缓存。符合本线 staged-optin 纪律 + O-2 阶梯。**默认 OFF ⇒ 即便早合也零运行时影响,可在实体机等待期安全合并。**
+- **裁决 A**:新增默认-OFF flag（规范化字面 `true`,trim+小写）。OFF ⇒ 今日行为逐字节不变(只读,不落库);ON ⇒ 自动落缓存。符合本线 staged-optin 纪律。**默认 OFF ⇒ 即便早合也零运行时影响,可在实体机等待期安全合并。**
 - 实现处 flag 名 = `MULTITABLE_STOCK_PREP_ERP_AUTOPERSIST_ENABLED`（WIP 已用,唯一名,无备选）。**台账**:本线**无**专门 flag manifest 文件(不同于 Global History 的 `scripts/ops/multitable-global-history-flag-status.mjs`);该 flag 记于本设计锁 + 实现 PR + 部署 runbook,生产默认 OFF(env 未设即 OFF)。
 
 ### OD-2 租户派生（**安全关键**——T3a 让读变得有后果）— ✅ DECIDED
