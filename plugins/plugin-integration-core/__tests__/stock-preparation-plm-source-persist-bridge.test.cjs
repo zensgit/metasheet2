@@ -274,4 +274,71 @@ run('module dependency surface is pure and contains no platform I/O calls', () =
   }
 })
 
+
+// ── T3b-1c structural config guard (owner P2): fieldMap.target=missingChildBom must be rejected at the
+// CONFIG level, because the marker+explicit-status combination is invisible to the value-level 422. ────
+const {
+  FORBIDDEN_FIELD_MAP_TARGETS,
+  assertPlmAutoPersistSourceConfigSafe,
+} = require(path.join(__dirname, '..', 'lib', 'stock-preparation-plm-source-persist-bridge.cjs'))
+
+run('config guard: a clean fieldMap passes', () => {
+  assert.doesNotThrow(() => assertPlmAutoPersistSourceConfigSafe({
+    fieldMap: [
+      { source: 'path', target: 'pathKey' },
+      { source: 'childCode', target: 'childDrawingNo' },
+      { source: 'quantity', target: 'designQty' },
+    ],
+  }))
+})
+
+run('config guard: fieldMap.target=missingChildBom is structurally rejected with the dedicated coarse 422', () => {
+  let thrown = null
+  try {
+    assertPlmAutoPersistSourceConfigSafe({
+      fieldMap: [
+        { source: 'path', target: 'pathKey' },
+        { source: 'HasMissingChild', target: 'missingChildBom' },
+      ],
+    })
+  } catch (error) { thrown = error }
+  assert.ok(thrown instanceof StockPreparationPlmSourcePersistBridgeError)
+  assert.equal(thrown.status, 422)
+  assert.equal(thrown.code, 'STOCK_PREPARATION_PLM_AUTOPERSIST_CONFIG_TARGET_FORBIDDEN')
+  // values-free: details name only the forbidden TARGET vocabulary, never the source column.
+  assert.equal(JSON.stringify(thrown.details).includes('HasMissingChild'), false)
+  assert.deepEqual(FORBIDDEN_FIELD_MAP_TARGETS, ['missingChildBom'])
+})
+
+run('config guard: a config without a fieldMap array fails closed (shape invalid), never passes silently', () => {
+  for (const bad of [null, {}, { fieldMap: 'nope' }, { fieldMap: null }]) {
+    assert.throws(() => assertPlmAutoPersistSourceConfigSafe(bad), (error) =>
+      error instanceof StockPreparationPlmSourcePersistBridgeError &&
+      error.status === 422 && error.code === 'STOCK_PREPARATION_PLM_AUTOPERSIST_CONFIG_SHAPE_INVALID')
+  }
+})
+
+run('WHY the config guard is load-bearing (owner bypass repro): marker+explicit-active rows PASS the value-level bridge — the marker is silently dropped, so only the config guard can catch it', () => {
+  // A config mapping {target: missingChildBom} + {target: lineStatus} produces intake rows like this:
+  const bypass = intake({
+    bomSnapshotLines: [line({ missingChildBom: true, lineStatus: 'active' })],
+  })
+  // The bridge ACCEPTS this envelope (lineStatus 'active' is canonical) and its closed projection drops
+  // the marker — no 422 fires anywhere at the VALUE level. This is exactly the silent-signal-loss path
+  // the structural config guard exists to close, BEFORE any source read happens.
+  const out = buildPlmSourcePersistInput({ request: request(), intake: bypass })
+  assert.equal(out.expansionResult.length, 1)
+  assert.equal(out.expansionResult[0].lineStatus, 'active')
+  assert.equal('missingChildBom' in out.expansionResult[0], false)
+})
+
+run('config guard is pure: no I/O tokens and no new requires in the module source', () => {
+  const source = fs.readFileSync(path.join(__dirname, '..', 'lib', 'stock-preparation-plm-source-persist-bridge.cjs'), 'utf8')
+  const requiredModules = [...source.matchAll(/require\('([^']+)'\)/g)].map((match) => match[1])
+  assert.deepEqual(requiredModules, ['./stock-preparation-common.cjs'])
+  for (const token of ['queryRecords(', 'createRecord(', 'patchRecord(', 'fetch(', 'getForRuntime(']) {
+    assert.equal(source.includes(token), false, `${token} is absent from the pure bridge`)
+  }
+})
+
 process.stdout.write('all stock-preparation-plm-source-persist-bridge tests passed\n')

@@ -185,6 +185,19 @@ closed set；实现与验收不得依赖 config shape validation 或 records ser
 某个 PLM 的 `released` / `obsolete` / `WIP` 语义时，必须先另开具名 mapping design gate；本锁
 不授权隐式映射。
 
+**结构性 config guard（owner P2，2026-07-16 复审补强）**：value-level 422 抓不住**组合映射
+绕过** —— approved config 同时把某列 target 配成内部 marker 名 `missingChildBom`（布尔）并显式
+映射 `lineStatus`（如 `active`）时，intake 优先保留显式 status、marker 在下游被静默丢弃，
+缺子 BOM 信号端到端消失且整包 422 永不触发。因此 **T3b-1c 路由必须在任何 source read /
+provisioning / persist I/O 之前**，对 approved config 调用纯守卫
+`assertPlmAutoPersistSourceConfigSafe(config)`（bridge 模块导出）：`fieldMap.target ∈
+FORBIDDEN_FIELD_MAP_TARGETS`（当前 = `missingChildBom`）→ 专用 values-free 422
+`STOCK_PREPARATION_PLM_AUTOPERSIST_CONFIG_TARGET_FORBIDDEN`；fieldMap 缺失/非数组 → 422
+`STOCK_PREPARATION_PLM_AUTOPERSIST_CONFIG_SHAPE_INVALID`。error details 只含 forbidden
+TARGET 词表，绝不含 source 列名。1c 接线测试必须证明该拒绝路径 **records/provisioning/
+source-adapter 调用计数为 0**。已有的 `lineStatus='missing_child_bom'` 值级整包 422 保持不变；
+**不采用** missing_child_bom → incomplete 的静默归一（Option B 有丢信号风险）。
+
 ### OD-4 — idempotency、不可变性与已知原子性边界
 
 **裁决：分两级。**
@@ -333,6 +346,7 @@ values-free summary 不足以定位首个失败 phase。#4101 的诊断/修复�
 - 把 `imported` 原样写入 select contract；
 - 放行任意 source-mapped lifecycle，或把 unsupported lifecycle 静默改成 `active`；
 - 把 unsupported lifecycle 的原始值放进 error details；
+- 去掉/绕过 `assertPlmAutoPersistSourceConfigSafe`（config guard 在 I/O 之后才调、或 `missingChildBom` 从 forbidden targets 移除）；
 - 把 existing-batch completeness/content conflict 恢复成无条件 skip；
 - 把完整 line 投影判等退化成 `snapshotLineId + sourceFingerprint` 判等；
 - 只读取 existing lines 第一页，或把 page-bound 当成完整结果；

@@ -161,11 +161,44 @@ function buildPlmSourcePersistInput({ request, intake } = {}) {
   return output
 }
 
+// ── T3b-1c structural config guard (owner P2, #4390 review round). The bridge's closed status vocabulary
+// 422s a row whose lineStatus IS 'missing_child_bom' — but a config that maps a target literally named
+// `missingChildBom` (boolean marker) TOGETHER WITH an explicit lineStatus (e.g. 'active') slips the marker
+// past the status check entirely: intake keeps the explicit status and the marker is silently dropped
+// downstream, erasing the missing-child signal. Values cannot catch that combination — the CONFIG must.
+// The T3b-1c route MUST call this on the approved config BEFORE any source read / provisioning / persist
+// I/O. Pure: inspects only the given config object; throws the dedicated coarse 422 (values-free).
+const FORBIDDEN_FIELD_MAP_TARGETS = Object.freeze(['missingChildBom'])
+function assertPlmAutoPersistSourceConfigSafe(config) {
+  const fieldMap = config && Array.isArray(config.fieldMap) ? config.fieldMap : null
+  if (!fieldMap) {
+    throw new StockPreparationPlmSourcePersistBridgeError(
+      422,
+      'STOCK_PREPARATION_PLM_AUTOPERSIST_CONFIG_SHAPE_INVALID',
+      'approved source config must carry a fieldMap array',
+      { field: 'fieldMap' },
+    )
+  }
+  for (const entry of fieldMap) {
+    const target = entry && typeof entry.target === 'string' ? entry.target : ''
+    if (FORBIDDEN_FIELD_MAP_TARGETS.includes(target)) {
+      throw new StockPreparationPlmSourcePersistBridgeError(
+        422,
+        'STOCK_PREPARATION_PLM_AUTOPERSIST_CONFIG_TARGET_FORBIDDEN',
+        'approved source config maps a forbidden internal marker target for the auto-persisting PLM source-run',
+        { target, forbiddenTargets: FORBIDDEN_FIELD_MAP_TARGETS.slice() },
+      )
+    }
+  }
+}
+
 module.exports = {
   ACCEPTED_LINE_STATUSES,
   CANONICAL_LINE_STATUSES,
   EXPANSION_ROW_KEYS,
+  FORBIDDEN_FIELD_MAP_TARGETS,
   StockPreparationPlmSourcePersistBridgeError,
+  assertPlmAutoPersistSourceConfigSafe,
   buildPlmSourcePersistInput,
   __internals: {
     canonicalLineStatus,
