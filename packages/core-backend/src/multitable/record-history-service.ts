@@ -55,9 +55,10 @@ export interface RecordRevisionInput {
   /**
    * W0-1 L6-a (sealed operation endpoints — `operation-ledger.ts`): the active operation ledger for the
    * fenced write transaction. When present AND active (`ledger.operationId !== null`, i.e. the L4 fence flag
-   * is on and the L6 migration is deployed), this revision is TAGGED with `operation_id = ledger.operationId`,
-   * its `batch_id` is aligned to the same operation id (one operation = one batch), and its exact `seq` is fed
-   * back into the ledger for the endpoint seal. Omitted / inert ⇒ `operation_id` stays NULL and the write is
+   * is on and the L6 migration is deployed), this revision is TAGGED with `operation_id = ledger.operationId`
+   * and its exact `seq` is fed back into the ledger for the endpoint seal. `batch_id` is UNTOUCHED (finding #1,
+   * owner ruling 2026-07-16): it keeps the S1 user-action grouping — one batch may span N operations; the two
+   * identities are permanently decoupled. Omitted / inert ⇒ `operation_id` stays NULL and the write is
    * byte-identical to L4cov (legacy/untrusted, never an executable anchor).
    */
   ledger?: OperationLedger | null
@@ -105,11 +106,14 @@ async function hasRestoredFromVersionColumn(query: QueryFn): Promise<boolean> {
 export async function recordRecordRevision(query: QueryFn, input: RecordRevisionInput): Promise<string> {
   const id = input.id ?? randomUUID()
   const changedFieldIds = Array.from(new Set((input.changedFieldIds ?? []).filter(Boolean)))
-  // W0-1 L6-a: when the ledger is active, TAG this revision with the operation id and align batch_id to it
-  // (one operation = one batch — the design's "batch_id == operation_id" for trusted writes). Inert/omitted
-  // ledger ⇒ operationId null ⇒ base columns + batch_id default, byte-identical to L4cov.
+  // W0-1 finding #1 (owner ruling 2026-07-16, v3.7 lock §10): batch_id and operation_id are PERMANENTLY
+  // DECOUPLED. batch_id keeps the S1 user-action grouping — one commit action may span N per-row transactions
+  // sharing ONE caller-supplied batchId — and is NEVER overwritten by the operation id (the earlier
+  // "batch_id == operation_id" alignment re-split one AI commit into N History batches). operation_id is the
+  // per-transaction sealed-endpoint anchor and rides in its OWN column below. Inert/omitted ledger ⇒
+  // operationId null ⇒ base columns, byte-identical to L4cov.
   const operationId = input.ledger?.operationId ?? null
-  const batchId = operationId ?? input.batchId ?? id
+  const batchId = input.batchId ?? id
 
   // Base INSERT is the default for every write (zero deploy-window risk). Only a record-version restore
   // (restoredFromVersion non-null) uses the extended column, gated by a txn-safe column-existence probe so a
@@ -191,10 +195,11 @@ const BATCH_CHUNK_ROWS = 1000
 export async function recordRecordRevisionsBatch(query: QueryFn, inputs: RecordRevisionInput[]): Promise<string[]> {
   if (inputs.length === 0) return []
 
-  // W0-1 L6-a: all rows of one batch belong to the SAME operation (the caller threads one ledger through
-  // every input). Read it once; when active, TAG every row with the operation id, align batch_id to it, add
-  // `RETURNING seq`, and feed each returned seq into the ledger (order-independent — the endpoint needs only
-  // exact count + MAX). Inert/omitted ledger ⇒ operationId null ⇒ byte-identical to L4cov.
+  // W0-1 L6-a: all rows of one CALL belong to the SAME operation (the caller threads one ledger through
+  // every input). Read it once; when active, TAG every row with the operation id, add `RETURNING seq`, and
+  // feed each returned seq into the ledger (order-independent — the endpoint needs only exact count + MAX).
+  // batch_id is NOT aligned to it (finding #1, owner ruling 2026-07-16 — S1 grouping stays caller-owned).
+  // Inert/omitted ledger ⇒ operationId null ⇒ byte-identical to L4cov.
   const ledger = inputs[0]?.ledger ?? null
   const operationId = ledger?.operationId ?? null
 
@@ -211,7 +216,8 @@ export async function recordRecordRevisionsBatch(query: QueryFn, inputs: RecordR
       changedFieldIds: Array.from(new Set((input.changedFieldIds ?? []).filter(Boolean))),
       patch: JSON.stringify(input.patch ?? {}),
       snapshot: input.snapshot === undefined ? null : JSON.stringify(input.snapshot),
-      batchId: operationId ?? input.batchId ?? id,
+      // finding #1 decouple (owner ruling 2026-07-16): NEVER operationId here — batch_id is the S1 grouping key.
+      batchId: input.batchId ?? id,
       restoredFromVersion: input.restoredFromVersion ?? null,
     }
   })

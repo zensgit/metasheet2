@@ -17,8 +17,9 @@ import { isWriterFenceEnabled } from './canonical-sheet-fence'
  *   1. `const op = await mintOperation(query, sheetId)` — AFTER the fence, mint one server-side operation id.
  *   2. Write each revision/marker THROUGH the history-service helpers, passing `ledger: op`. Each tagged
  *      event carries `operation_id = op.operationId` and its exact `seq` (returned by the INSERT) is fed back
- *      into the ledger via `op.track(seq)`; the helper also aligns `batch_id = op.operationId` so a trusted
- *      write satisfies the design's "batch_id == operation_id" invariant.
+ *      into the ledger via `op.track(seq)`. `batch_id` is NOT touched (finding #1, owner ruling 2026-07-16,
+ *      v3.7 lock §10): it keeps the S1 user-action grouping — one commit action may span N transactions
+ *      sharing one batchId, so one batch maps to N operations; the two identities are permanently decoupled.
  *   3. `await sealOperation(query, op)` — LAST, before COMMIT: insert the endpoint row with
  *      `endpoint_seq = MAX(tracked seq)` and `event_count = number of tracked events`.
  *   4. COMMIT. An aborted txn exposes neither events nor endpoint (the endpoint is only visible post-commit —

@@ -339,16 +339,21 @@ describeIfDatabase('W0-1 L6-a — sealed operation-endpoint ledger (real DB)', (
       access,
     }
     const result = await mkWriteService().patchRecords(input)
-    const opId = (result as { batchId?: string }).batchId as string
-    expect(opId).toMatch(/^[0-9a-f-]{36}$/)
+    // finding #1 decouple (owner ruling 2026-07-16): the echo is the S1 user-action batch id, NOT the
+    // per-transaction operation id — the deep-link must match the stored batch_id rows.
+    const echoedBatchId = (result as { batchId?: string }).batchId as string
+    expect(echoedBatchId).toMatch(/^[0-9a-f-]{36}$/)
 
-    // every revision this op wrote carries the SAME operation_id, aligned to batch_id
-    const revs = (await q('SELECT seq::text AS seq, operation_id, batch_id FROM meta_record_revisions WHERE sheet_id=$1 AND operation_id=$2 ORDER BY seq ASC', [SHEET, opId])).rows as Array<{ seq: string; operation_id: string; batch_id: string }>
+    // every revision of this call carries the echoed batch_id AND one shared operation_id — two DISTINCT identities
+    const revs = (await q('SELECT seq::text AS seq, operation_id, batch_id FROM meta_record_revisions WHERE sheet_id=$1 AND batch_id=$2 ORDER BY seq ASC', [SHEET, echoedBatchId])).rows as Array<{ seq: string; operation_id: string; batch_id: string }>
     expect(revs).toHaveLength(ids.length)
+    const opId = revs[0]!.operation_id
+    expect(opId).toMatch(/^[0-9a-f-]{36}$/)
     for (const r of revs) {
-      expect(r.operation_id).toBe(opId)
-      expect(r.batch_id).toBe(opId) // one operation == one batch
+      expect(r.operation_id).toBe(opId) // ONE transaction ⇒ one shared operation
+      expect(r.batch_id).toBe(echoedBatchId) // batch_id NEVER overwritten by the operation id
     }
+    expect(opId).not.toBe(echoedBatchId) // permanently decoupled identities
     // the endpoint sits AFTER all rows: endpoint_seq == exact MAX, count == N, and NO revision exceeds it
     const ep = await endpointOf(opId)
     expect(ep).toBeDefined()
@@ -380,6 +385,56 @@ describeIfDatabase('W0-1 L6-a — sealed operation-endpoint ledger (real DB)', (
     // minted AFTER the fence ⇒ the endpoint seq equals the op's own event seq (commit-order reflection)
     expect(ep!.endpoint_seq).toBe(rev.seq)
     expect(ep!.event_count).toBe(1)
+  })
+
+  // ── §G-MULTIOP-BATCH (owner-mandated, ruling 2026-07-16 — pins the original finding-#1 defect) ──────
+  // One S1 commit action spanning N per-row patchRecords TRANSACTIONS sharing ONE caller batchId (the AI
+  // bulk-commit shape, S1 LOCK-B/B2). Covers ruling parts (a)-(c): same batch_id on every revision, N distinct
+  // operation_ids + N sealed endpoints, and ONE History grouping key. Parts (d) resolver-max-endpoint_seq and
+  // (e) EXACT_ANCHOR_REQUIRED refusal live in L6-b (the resolver does not exist yet) — deferred, not skipped.
+  test('G-MULTIOP [S1 shape] one commit action across N transactions: ONE batch_id, N operation_ids + N endpoints, ONE History grouping key', async () => {
+    const ids = [mkRecord('mo1'), mkRecord('mo2'), mkRecord('mo3')]
+    for (const id of ids) await seedRecord(id)
+    process.env[FLAG] = 'true'
+    const commitBatchId = mkOpId() // the S1 server-minted commit-action batch id, shared across all N calls
+    const mkInput = (id: string): WriteRecordPatchInput => ({
+      sheetId: SHEET,
+      changesByRecord: new Map([[id, [{ fieldId: F_STR, value: `multiop-${id}` }]]]),
+      actorId: ACTOR,
+      batchId: commitBatchId, // ← threaded through every per-row call, exactly like the AI commit
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      fields: [{ id: F_STR, name: 'Note', type: 'string', property: {}, order: 1 }] as any,
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      visiblePropertyFields: [{ id: F_STR, name: 'Note', type: 'string', property: {}, order: 1 }] as any,
+      visiblePropertyFieldIds: new Set([F_STR]),
+      attachmentFields: [],
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      fieldById: new Map([[F_STR, { type: 'string', readOnly: false, hidden: false } as Record<string, unknown>]]) as any,
+      capabilities,
+      access,
+    })
+    const svc = mkWriteService()
+    for (const id of ids) {
+      const res = await svc.patchRecords(mkInput(id)) // each call = its OWN transaction (the S1 multi-txn shape)
+      // (echo leg) every per-row call echoes the SHARED commit batch id, never its private operation id
+      expect((res as { batchId?: string }).batchId).toBe(commitBatchId)
+    }
+
+    const revs = (await q('SELECT operation_id, batch_id FROM meta_record_revisions WHERE sheet_id=$1 AND batch_id=$2', [SHEET, commitBatchId])).rows as Array<{ operation_id: string; batch_id: string }>
+    // (a) ALL N revisions keep the SAME S1 batch_id — operation_id never overwrote it
+    expect(revs).toHaveLength(ids.length)
+    for (const r of revs) expect(r.batch_id).toBe(commitBatchId)
+    // (b) N DISTINCT operation_ids, one per transaction — and N sealed endpoints exist
+    const opIds = [...new Set(revs.map((r) => r.operation_id))]
+    expect(opIds).toHaveLength(ids.length)
+    for (const op of opIds) {
+      expect(op).toMatch(/^[0-9a-f-]{36}$/)
+      expect(op).not.toBe(commitBatchId)
+      expect(await endpointOf(op)).toBeDefined()
+    }
+    // (c) the History projection grouping key (COALESCE(batch_id, id)) yields ONE batch for the whole commit
+    const groups = (await q('SELECT COUNT(DISTINCT COALESCE(batch_id, id::text))::int AS n FROM meta_record_revisions WHERE sheet_id=$1 AND batch_id=$2', [SHEET, commitBatchId])).rows[0] as { n: number }
+    expect(groups.n).toBe(1)
   })
 
   // ── §P — flag-off PARITY: no operation id, no endpoint, byte-identical to L4cov ─────────────────────

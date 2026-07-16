@@ -1462,10 +1462,12 @@ export class RecordWriteService {
       ...(patchAttachmentSummaries ? { attachmentSummaries: patchAttachmentSummaries } : {}),
       ...(crossSheetRelated.length > 0 ? { relatedRecords: crossSheetRelated } : {}),
       // W3-5: only echo the batchId when something was actually written under it (never point a caller's
-      // history deep-link at a batch with zero revisions). W0-1 L6-a: when the operation ledger is active
-      // the stored batch_id is aligned to the operation id (one operation = one batch), so echo THAT so the
-      // caller's deep-link matches the persisted rows; inert ledger ⇒ the pre-existing bulkBatchId.
-      ...(updates.length > 0 ? { batchId: ledger.operationId ?? bulkBatchId } : {}),
+      // history deep-link at a batch with zero revisions). W0-1 finding #1 (owner ruling 2026-07-16):
+      // batch_id is DECOUPLED from operation_id — the stored batch_id is always the S1 user-action batch
+      // (the caller's explicit batchId or this call's bulkBatchId), so echo THAT. Echoing the per-transaction
+      // operation id would point the History deep-link at a batch id that matches ZERO stored rows for any
+      // S1 multi-transaction commit.
+      ...(updates.length > 0 ? { batchId: bulkBatchId } : {}),
     }
   }
 
