@@ -48,6 +48,7 @@ import {
 } from './post-commit-hooks'
 import { isFieldAlwaysReadOnly, isFieldPermissionHidden } from './permission-derivation'
 import { publishMultitableSheetRealtime } from './realtime-publish'
+import { mintOperation, sealOperation } from './operation-ledger'
 import { recordRecordRevision } from './record-history-service'
 import { replayInboundLinks, isRecordUndeleteInboundEnabled, type InboundReplayResult } from './inbound-link-replay'
 import {
@@ -525,6 +526,9 @@ export class RecordService {
       // NEW, flag-gated part is the durable-block refusal AFTER the fence (fence-before-check ordering).
       await acquireCanonicalSheetFence(query, sheetId)
       if (isWriterFenceEnabled()) await assertNoActiveWriterBlock(query, sheetId)
+      // W0-1 L6-a: mint the sealed operation AFTER the fence (so seq reflects commit order). Inert when the
+      // fence flag is off / L6 migration absent ⇒ byte-identical to L4cov.
+      const op = await mintOperation(query, sheetId)
 
       const fieldRes = await query(
         'SELECT id, name, type, property FROM meta_fields WHERE sheet_id = $1',
@@ -723,6 +727,7 @@ export class RecordService {
         changedFieldIds: Object.keys(patch),
         patch,
         snapshot: patch,
+        ledger: op,
       })
 
       // OAPI-2a §6: committed token-write audit INSIDE the create txn (fail-closed). No-op for session.
@@ -730,6 +735,8 @@ export class RecordService {
         await insertCommittedAuditInTxn(query, input.oapiAudit, { recordIds: [recordId] })
       }
 
+      // W0-1 L6-a: seal the operation LAST (endpoint row = the exact committed boundary). No-op when inert.
+      await sealOperation(query, op)
       return inserted
     })
 
@@ -817,6 +824,8 @@ export class RecordService {
       // W0-1 L4 (canonical fence): fence FIRST (before any read/check), then refuse if a recovery holds a
       // durable block. No-op & byte-identical when MULTITABLE_ENABLE_WRITER_FENCE is off.
       await fenceWriterEntry(query, sheetId)
+      // W0-1 L6-a: mint the sealed operation after the fence; inert ⇒ byte-identical to L4cov.
+      const op = await mintOperation(query, sheetId)
       const lockedRecordRes = await query(
         'SELECT id, sheet_id, version, data FROM meta_records WHERE id = $1 FOR UPDATE',
         [recordId],
@@ -866,6 +875,7 @@ export class RecordService {
         patch: {},
         id: recordDeleteRevisionId,
         snapshot,
+        ledger: op,
       })
 
       // #15 recycle bin: copy the row into the trash table in the SAME txn before the hard delete, so it
@@ -909,6 +919,9 @@ export class RecordService {
       if (input.oapiAudit) {
         await insertCommittedAuditInTxn(query, input.oapiAudit, { recordIds: [recordId] })
       }
+
+      // W0-1 L6-a: seal the operation LAST. No-op when inert.
+      await sealOperation(query, op)
     })
 
     publishMultitableSheetRealtime({
@@ -1085,6 +1098,8 @@ export class RecordService {
       // W0-1 L4 (canonical fence): fence FIRST, then refuse if a recovery holds a durable block. No-op &
       // byte-identical when MULTITABLE_ENABLE_WRITER_FENCE is off.
       await fenceWriterEntry(query, sheetId)
+      // W0-1 L6-a: mint the sealed operation after the fence; inert ⇒ byte-identical to L4cov.
+      const op = await mintOperation(query, sheetId)
       // 4c-3 C4: the trash row is re-read FOR UPDATE inside the txn — two concurrent restores of the
       // same record serialize here; the loser sees the row gone (winner deleted it on success) and
       // gets a clean 409 instead of racing to a duplicate insert / double replay.
@@ -1150,8 +1165,11 @@ export class RecordService {
         changedFieldIds: Object.keys(snapshot),
         patch: snapshot,
         snapshot,
+        ledger: op,
       })
       await query('DELETE FROM meta_records_trash WHERE id = $1', [trashPk])
+      // W0-1 L6-a: seal the operation LAST. No-op when inert.
+      await sealOperation(query, op)
     })
 
     publishMultitableSheetRealtime({
@@ -1350,6 +1368,8 @@ export class RecordService {
       // W0-1 L4 (canonical fence): fence FIRST, then refuse if a recovery holds a durable block. No-op &
       // byte-identical when MULTITABLE_ENABLE_WRITER_FENCE is off.
       await fenceWriterEntry(query, sheetId)
+      // W0-1 L6-a: mint the sealed operation after the fence; inert ⇒ byte-identical to L4cov.
+      const op = await mintOperation(query, sheetId)
       const currentRes = await query(
         'SELECT id, version, data, created_by, locked, locked_by FROM meta_records WHERE id = $1 AND sheet_id = $2 FOR UPDATE',
         [recordId, sheetId],
@@ -1421,6 +1441,7 @@ export class RecordService {
           changedFieldIds: Object.keys(patch),
           patch,
           snapshot: { ...previousData, ...patch },
+          ledger: op,
         })
         pendingSubscriberNotification = {
           sheetId,
@@ -1471,6 +1492,10 @@ export class RecordService {
       if (input.oapiAudit) {
         await insertCommittedAuditInTxn(query, input.oapiAudit, { recordIds: [recordId] })
       }
+
+      // W0-1 L6-a: seal the operation LAST. No-op when inert OR when the patch had no field change (a
+      // no-op patch emits no revision ⇒ zero-event operation ⇒ not an executable anchor, so no endpoint).
+      await sealOperation(query, op)
     })
 
     if (pendingSubscriberNotification) {
