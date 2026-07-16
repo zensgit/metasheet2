@@ -2,63 +2,79 @@
   <section class="platform-app-launcher">
     <header class="platform-app-launcher__hero">
       <div>
-        <p class="platform-app-launcher__eyebrow">Platform Apps</p>
-        <h1>App Launcher</h1>
+        <p class="platform-app-launcher__eyebrow">{{ platformAppLabel('header.eyebrow', isZh) }}</p>
+        <h1>{{ platformAppLabel('header.title', isZh) }}</h1>
         <p class="platform-app-launcher__lead">
-          统一展示当前平台可用应用，先从 app catalog 和标准入口收口。
+          {{ platformAppLabel('header.subtitle', isZh) }}
         </p>
       </div>
-      <button class="platform-app-launcher__refresh" type="button" :disabled="loading" @click="refresh">
-        Refresh
+      <button
+        class="platform-app-launcher__refresh"
+        type="button"
+        :disabled="loading"
+        :aria-label="platformAppLabel(loading ? 'action.refreshing' : 'action.refresh', isZh)"
+        :title="platformAppLabel(loading ? 'action.refreshing' : 'action.refresh', isZh)"
+        @click="refresh"
+      >
+        <RefreshIcon aria-hidden="true" />
       </button>
     </header>
 
-    <p v-if="error" class="platform-app-launcher__error">{{ error }}</p>
-    <p v-else-if="loading" class="platform-app-launcher__state">Loading platform apps...</p>
-    <p v-else-if="apps.length === 0" class="platform-app-launcher__state">No platform apps discovered.</p>
+    <p v-if="error" class="platform-app-launcher__error" role="alert">
+      {{ platformAppLabel('state.error', isZh) }}
+    </p>
+    <p v-else-if="loading" class="platform-app-launcher__state" aria-live="polite">
+      {{ platformAppLabel('state.loading', isZh) }}
+    </p>
+    <p v-else-if="apps.length === 0" class="platform-app-launcher__state">
+      {{ platformAppLabel('state.empty', isZh) }}
+    </p>
 
     <div v-else class="platform-app-launcher__grid">
       <article v-for="card in appCards" :key="card.app.id" class="platform-app-launcher__card">
         <div class="platform-app-launcher__card-head">
           <div>
             <p class="platform-app-launcher__app-id">{{ card.app.id }}</p>
-            <h2>{{ card.app.displayName }}</h2>
+            <h2>{{ card.displayName }}</h2>
           </div>
-          <span class="platform-app-launcher__status" :data-status="card.app.pluginStatus">{{ card.app.pluginStatus }}</span>
+          <span class="platform-app-launcher__status" :data-status="card.app.pluginStatus">
+            {{ card.pluginStatusLabel }}
+          </span>
         </div>
 
         <p class="platform-app-launcher__description">
-          {{ card.app.boundedContext.description || 'No bounded-context description.' }}
+          {{ card.description }}
         </p>
 
         <dl class="platform-app-launcher__meta">
           <div>
-            <dt>Plugin</dt>
+            <dt>{{ platformAppLabel('meta.plugin', isZh) }}</dt>
             <dd>{{ card.app.pluginName }}</dd>
           </div>
           <div>
-            <dt>Install</dt>
-            <dd>{{ card.installState }}</dd>
+            <dt>{{ platformAppLabel('meta.install', isZh) }}</dt>
+            <dd>{{ card.installStateLabel }}</dd>
           </div>
           <div>
-            <dt>Dependencies</dt>
+            <dt>{{ platformAppLabel('meta.dependencies', isZh) }}</dt>
             <dd>{{ card.app.platformDependencies.length }}</dd>
           </div>
           <div>
-            <dt>Objects</dt>
+            <dt>{{ platformAppLabel('meta.objects', isZh) }}</dt>
             <dd>{{ card.app.objects.length }}</dd>
           </div>
           <div>
-            <dt>Workflows</dt>
+            <dt>{{ platformAppLabel('meta.workflows', isZh) }}</dt>
             <dd>{{ card.app.workflows.length }}</dd>
           </div>
           <div>
-            <dt>Project</dt>
+            <dt>{{ platformAppLabel('meta.project', isZh) }}</dt>
             <dd>{{ card.projectLabel }}</dd>
           </div>
         </dl>
 
         <p
+          v-if="card.instanceLabel"
           class="platform-app-launcher__instance"
           :data-state="card.installState"
         >
@@ -71,17 +87,24 @@
 
         <div class="platform-app-launcher__actions">
           <RouterLink
+            v-if="card.primaryAction.route && (card.primaryAction.kind !== 'inspect' || canInspectShell)"
             class="platform-app-launcher__primary"
             :to="card.primaryAction.route || card.shellRoute"
           >
             {{ card.primaryAction.label }}
           </RouterLink>
+          <span
+            v-else-if="card.primaryAction.kind === 'inspect'"
+            class="platform-app-launcher__admin-only"
+          >
+            {{ platformAppLabel('action.adminOnly', isZh) }}
+          </span>
           <RouterLink
-            v-if="card.primaryAction.route !== card.shellRoute"
+            v-if="canInspectShell && card.primaryAction.route !== card.shellRoute"
             class="platform-app-launcher__ghost"
             :to="card.shellRoute"
           >
-            Open shell
+            {{ platformAppLabel('action.adminDiagnostics', isZh) }}
           </RouterLink>
         </div>
       </article>
@@ -90,8 +113,11 @@
 </template>
 
 <script setup lang="ts">
+import { Refresh as RefreshIcon } from '@element-plus/icons-vue'
 import { computed, onMounted } from 'vue'
 import { RouterLink } from 'vue-router'
+import { useAuth } from '../composables/useAuth'
+import { useLocale } from '../composables/useLocale'
 import {
   type PlatformAppSummary,
   resolvePlatformAppInstallState,
@@ -100,20 +126,36 @@ import {
   resolvePlatformAppProjectLabel,
   usePlatformApps,
 } from '../composables/usePlatformApps'
+import {
+  platformAppDescription,
+  platformAppDisplayName,
+  platformAppInstallStateLabel,
+  platformAppLabel,
+  platformAppStatusLabel,
+} from '../utils/platformAppLabels'
 
 const { apps, loading, error, fetchApps } = usePlatformApps()
+const { isZh } = useLocale()
+const canInspectShell = useAuth().hasAdminAccess()
 
 function resolveShellRoute(app: PlatformAppSummary): string {
   return `/apps/${encodeURIComponent(app.id)}`
 }
 
 const appCards = computed(() => apps.value.map((app) => {
-  const primaryAction = resolvePlatformAppPrimaryAction(app)
+  const installState = resolvePlatformAppInstallState(app)
+  const primaryAction = resolvePlatformAppPrimaryAction(app, undefined, isZh.value)
   return {
     app,
-    installState: resolvePlatformAppInstallState(app),
-    instanceLabel: resolvePlatformAppInstanceLabel(app),
-    projectLabel: resolvePlatformAppProjectLabel(app),
+    displayName: platformAppDisplayName(app.id, app.displayName, isZh.value),
+    description: platformAppDescription(app.id, app.boundedContext.description, isZh.value),
+    pluginStatusLabel: platformAppStatusLabel(app.pluginStatus, isZh.value),
+    installState,
+    installStateLabel: platformAppInstallStateLabel(installState, isZh.value),
+    instanceLabel: app.runtimeModel === 'direct'
+      ? null
+      : resolvePlatformAppInstanceLabel(app, isZh.value),
+    projectLabel: resolvePlatformAppProjectLabel(app, isZh.value),
     primaryAction,
     shellRoute: resolveShellRoute(app),
   }
@@ -165,17 +207,37 @@ onMounted(async () => {
 .platform-app-launcher__primary,
 .platform-app-launcher__ghost {
   border: none;
-  border-radius: 12px;
+  border-radius: 8px;
   padding: 10px 14px;
   font: inherit;
   cursor: pointer;
   text-decoration: none;
 }
 
-.platform-app-launcher__refresh,
-.platform-app-launcher__primary {
+.platform-app-launcher__refresh {
   background: #fff;
   color: #0f172a;
+}
+
+.platform-app-launcher__primary {
+  background: #2563eb;
+  color: #fff;
+  font-weight: 600;
+}
+
+.platform-app-launcher__refresh {
+  display: inline-flex;
+  width: 40px;
+  height: 40px;
+  flex: 0 0 40px;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+}
+
+.platform-app-launcher__refresh svg {
+  width: 18px;
+  height: 18px;
 }
 
 .platform-app-launcher__ghost {
@@ -195,8 +257,9 @@ onMounted(async () => {
   gap: 16px;
   padding: 20px;
   border: 1px solid #dbe2ea;
-  border-radius: 18px;
+  border-radius: 8px;
   background: #fff;
+  color: #0f172a;
 }
 
 .platform-app-launcher__card-head {
@@ -232,6 +295,7 @@ onMounted(async () => {
 .platform-app-launcher__meta dd {
   margin: 4px 0 0;
   font-weight: 600;
+  color: #0f172a;
 }
 
 .platform-app-launcher__actions {
@@ -267,6 +331,11 @@ onMounted(async () => {
   font-size: 14px;
 }
 
+.platform-app-launcher__admin-only {
+  color: #475569;
+  font-size: 13px;
+}
+
 .platform-app-launcher__status {
   display: inline-flex;
   align-items: center;
@@ -293,9 +362,10 @@ onMounted(async () => {
 .platform-app-launcher__error,
 .platform-app-launcher__state {
   padding: 16px 18px;
-  border-radius: 14px;
+  border-radius: 8px;
   background: #fff;
   border: 1px solid #dbe2ea;
+  color: #334155;
 }
 
 .platform-app-launcher__error {

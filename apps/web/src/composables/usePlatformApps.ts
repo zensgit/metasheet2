@@ -1,5 +1,6 @@
 import { computed, ref } from 'vue'
 import { apiGet } from '../utils/api'
+import { platformAppLabel } from '../utils/platformAppLabels'
 
 const TENANT_HINT_KEYS = ['tenantId', 'workspaceId'] as const
 
@@ -224,29 +225,30 @@ export function resolvePlatformAppInstallState(
   return app.instance?.status ?? 'not-installed'
 }
 
-export function resolvePlatformAppProjectLabel(app: PlatformAppSummary): string {
+export function resolvePlatformAppProjectLabel(app: PlatformAppSummary, isZh = false): string {
   if (app.runtimeModel === 'direct') {
-    return 'n/a'
+    return platformAppLabel('value.notRequired', isZh)
   }
-  return app.instance?.projectId || 'Unavailable'
+  return app.instance?.projectId || platformAppLabel('value.unavailable', isZh)
 }
 
-export function resolvePlatformAppInstanceLabel(app: PlatformAppSummary): string {
+export function resolvePlatformAppInstanceLabel(app: PlatformAppSummary, isZh = false): string {
   if (app.runtimeModel === 'direct') {
-    return 'This app runs directly from its entry route and does not require tenant installation.'
+    return platformAppLabel('instance.direct', isZh)
   }
-  return app.instance?.displayName || 'App instance not installed for this tenant yet.'
+  return app.instance?.displayName || platformAppLabel('instance.notInstalled', isZh)
 }
 
 export function resolvePlatformAppPrimaryAction(
   app: PlatformAppSummary,
   runtimeInstallState?: PlatformAppRuntimeInstallState | null,
+  isZh = false,
 ): PlatformAppActionDescriptor {
   if (app.pluginStatus === 'failed') {
     return {
       kind: 'inspect',
-      label: 'Inspect shell',
-      description: 'Plugin runtime is degraded. Review shell state before entering the app.',
+      label: platformAppLabel('action.diagnostics', isZh),
+      description: platformAppLabel('action.description.failed', isZh),
       route: resolveShellRoute(app.id),
     }
   }
@@ -254,8 +256,8 @@ export function resolvePlatformAppPrimaryAction(
   if (app.runtimeModel === 'direct') {
     return {
       kind: 'open',
-      label: 'Open app',
-      description: 'This app runs directly from its entry route and does not require tenant installation.',
+      label: platformAppLabel('action.open', isZh),
+      description: platformAppLabel('action.description.direct', isZh),
       route: app.entryPath || resolveShellRoute(app.id),
     }
   }
@@ -266,8 +268,8 @@ export function resolvePlatformAppPrimaryAction(
     if (app.runtimeBindings?.installPath) {
       return {
         kind: 'install',
-        label: 'Install app',
-        description: 'No tenant-scoped app instance exists yet. Open the platform shell to install it with the app-defined runtime contract.',
+        label: platformAppLabel('action.install', isZh),
+        description: platformAppLabel('action.description.install', isZh),
         route: resolveShellRoute(app.id),
         mutation: {
           path: app.runtimeBindings.installPath,
@@ -277,8 +279,8 @@ export function resolvePlatformAppPrimaryAction(
     }
     return {
       kind: 'onboard',
-      label: 'Open onboarding',
-      description: 'No tenant-scoped app instance exists yet. Enter the app to initialize it.',
+      label: platformAppLabel('action.onboard', isZh),
+      description: platformAppLabel('action.description.onboard', isZh),
       route: app.entryPath || resolveShellRoute(app.id),
     }
   }
@@ -287,8 +289,8 @@ export function resolvePlatformAppPrimaryAction(
     if (app.runtimeBindings?.installPath) {
       return {
         kind: 'reinstall',
-        label: 'Reinstall app',
-        description: 'The current app runtime snapshot is degraded. Open the platform shell to reinstall it with the existing runtime contract.',
+        label: platformAppLabel('action.reinstall', isZh),
+        description: platformAppLabel('action.description.reinstall', isZh),
         route: resolveShellRoute(app.id),
         mutation: {
           path: app.runtimeBindings.installPath,
@@ -301,8 +303,8 @@ export function resolvePlatformAppPrimaryAction(
     }
     return {
       kind: 'recover',
-      label: 'Open recovery',
-      description: 'The current app runtime snapshot is degraded. Enter the app to repair or reinstall it.',
+      label: platformAppLabel('action.recover', isZh),
+      description: platformAppLabel('action.description.recover', isZh),
       route: app.entryPath || resolveShellRoute(app.id),
     }
   }
@@ -310,16 +312,16 @@ export function resolvePlatformAppPrimaryAction(
   if (resolvedInstallState === 'inactive' || app.instance.status === 'inactive') {
     return {
       kind: 'inspect',
-      label: 'Review shell',
-      description: 'The app instance exists but is inactive. Review shell state before reopening runtime entry.',
+      label: platformAppLabel('action.diagnostics', isZh),
+      description: platformAppLabel('action.description.inactive', isZh),
       route: resolveShellRoute(app.id),
     }
   }
 
   return {
     kind: 'open',
-    label: 'Open app',
-    description: 'The app instance is active and ready for direct entry.',
+    label: platformAppLabel('action.open', isZh),
+    description: platformAppLabel('action.description.active', isZh),
     route: app.entryPath || resolveShellRoute(app.id),
   }
 }
