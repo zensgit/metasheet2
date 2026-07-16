@@ -8881,9 +8881,10 @@ export function univerMetaRouter(): Router {
         if (confirm.trim() !== 'uncreate') return res.status(400).json({ ok: false, error: { code: 'CONFIRM_REQUIRED', message: 'Type "uncreate" to confirm dropping the created entity.' } })
         const failure = await pool.transaction(async ({ query }): Promise<{ status: number; code: string; message: string } | null> => {
           // W0-1 L4cov (fence the config-restore-execute record writes — un-create branch). `dropFieldCascade`
-          // below strips the dropped field's key from EVERY record of this sheet (`UPDATE meta_records SET
-          // data = data - $1`), so this txn is a `meta_records` writer and must converge onto the canonical
-          // fence: acquire it first, then refuse (409 in the outer catch) if a recovery holds a durable block.
+          // below strips the dropped field's key from EVERY record of this sheet's `data` (a whole-sheet
+          // record-data write via the shared field-drop cascade helper), so this txn is a record writer and
+          // must converge onto the canonical fence: acquire it first, then refuse (409 in the outer catch) if
+          // a recovery holds a durable block. (dropFieldCascade carries its own revision disposition.)
           // Flag-off ⇒ no-op / byte-identical.
           await fenceWriterEntry(query, sheetId)
           let fieldRow: any = null
