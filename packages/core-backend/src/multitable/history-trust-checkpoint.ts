@@ -203,7 +203,7 @@ export async function activateCheckpoint(tx: QueryFn, input: { sheetId: string }
     `SELECT DISTINCT t.record_id
      FROM meta_records_trash t
      LEFT JOIN meta_record_revisions r
-       ON r.id = t.delete_revision_id AND r.sheet_id = t.sheet_id AND r.record_id = t.record_id AND r.action = 'delete'
+       ON r.id::text = t.delete_revision_id AND r.sheet_id = t.sheet_id AND r.record_id = t.record_id AND r.action = 'delete'
      WHERE t.sheet_id = $1
        AND r.id IS NULL
        AND NOT EXISTS (SELECT 1 FROM meta_records lr WHERE lr.id = t.record_id AND lr.sheet_id = t.sheet_id)
@@ -222,7 +222,7 @@ export async function activateCheckpoint(tx: QueryFn, input: { sheetId: string }
      SELECT DISTINCT ON (t.record_id) $1, t.sheet_id, t.record_id, t.data, t.original_version, true
      FROM meta_records_trash t
      JOIN meta_record_revisions r
-       ON r.id = t.delete_revision_id AND r.sheet_id = t.sheet_id AND r.record_id = t.record_id AND r.action = 'delete'
+       ON r.id::text = t.delete_revision_id AND r.sheet_id = t.sheet_id AND r.record_id = t.record_id AND r.action = 'delete'
      WHERE t.sheet_id = $2
      ORDER BY t.record_id, r.seq DESC, t.deleted_at DESC, t.id DESC
      ON CONFLICT (checkpoint_id, record_id) DO NOTHING`,
