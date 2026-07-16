@@ -24,11 +24,30 @@ import {
   classifyOutboundOutcome,
   deriveActionKey,
   deriveOutboundIdempotencyKey,
+  type TransactionalQueryable,
 } from '../../src/multitable/automation-action-idempotency'
-import type { Queryable } from '../../src/multitable/automation-durable-dispatcher'
+import type { PoolClient } from 'pg'
 
 const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
 const q = (sql: string, params?: unknown[]) => poolManager.get().query(sql, params)
+
+/** Wrap a checked-out client (after BEGIN) as a branded transaction handle for the claim helper. */
+const txn = (client: PoolClient): TransactionalQueryable => ({ isTransaction: true, query: (sql, params) => client.query(sql, params) })
+/** Run fn inside a real committed transaction on its own client (ROLLBACK on error). */
+async function inTxn<T>(fn: (trx: TransactionalQueryable, client: PoolClient) => Promise<T>): Promise<T> {
+  const client = await poolManager.get().getInternalPool().connect()
+  try {
+    await client.query('BEGIN')
+    const r = await fn(txn(client), client)
+    await client.query('COMMIT')
+    return r
+  } catch (e) {
+    await client.query('ROLLBACK').catch(() => {})
+    throw e
+  } finally {
+    client.release()
+  }
+}
 const RUN = randomUUID()
 const INST = `apr_${RUN}`
 
@@ -86,12 +105,13 @@ describeIfDatabase('action-idempotency ledger L1 — schema golden (real DB)', (
 
   test('claimActionApplied validates the (node_key, entry_epoch) PAIR at the JS layer, before the write', async () => {
     const base = { instanceId: INST, ruleId: `rule_${RUN}_pjs`, actionKey: `ak_${RUN}_pjs` }
-    // valid: sentinel and a real node scope both claim
-    expect(await claimActionApplied(poolManager.get(), { ...base, id: `aa_${randomUUID()}` })).toBe('claimed')
+    // valid: sentinel and a real node scope both claim (inside real transactions — the probe requires it)
+    expect(await inTxn((t) => claimActionApplied(t, { ...base, id: `aa_${randomUUID()}` }))).toBe('claimed')
     expect(
-      await claimActionApplied(poolManager.get(), { ...base, actionKey: `ak_${RUN}_pjs2`, nodeKey: 'node_X', entryEpoch: 1, id: `aa_${randomUUID()}` }),
+      await inTxn((t) => claimActionApplied(t, { ...base, actionKey: `ak_${RUN}_pjs2`, nodeKey: 'node_X', entryEpoch: 1, id: `aa_${randomUUID()}` })),
     ).toBe('claimed')
-    // mixed pairs (incl. whitespace/tab node with a positive epoch) throw at the JS layer — nothing is written
+    // mixed pairs (incl. whitespace/tab node with a positive epoch) throw at the JS layer BEFORE the txn probe
+    // and before any SQL — a pool handle proves nothing is even queried.
     for (const bad of [
       { nodeKey: '', entryEpoch: 5 },
       { nodeKey: 'node_Y', entryEpoch: 0 },
@@ -99,7 +119,7 @@ describeIfDatabase('action-idempotency ledger L1 — schema golden (real DB)', (
       { nodeKey: '\t', entryEpoch: 1 },
     ]) {
       await expect(
-        claimActionApplied(poolManager.get(), { ...base, actionKey: `ak_${RUN}_pjs_bad`, ...bad, id: `aa_${randomUUID()}` }),
+        claimActionApplied(poolManager.get() as unknown as TransactionalQueryable, { ...base, actionKey: `ak_${RUN}_pjs_bad`, ...bad, id: `aa_${randomUUID()}` }),
       ).rejects.toThrow(/must be the.*sentinel/)
     }
   })
@@ -117,21 +137,45 @@ describeIfDatabase('action-idempotency ledger L1 — schema golden (real DB)', (
     await expect(claim({ rule: '\t' })).rejects.toThrow(/fwb_action_applied_rule_nonblank/)
   })
 
-  test('same-transaction guarantee: the REAL claimActionApplied inside a rolled-back txn leaves NO ledger row', async () => {
+  test('same-transaction guarantee: a failed business write rolls the claim back too — the retry CLAIMS again (never a permanent skip)', async () => {
     const raw = poolManager.get().getInternalPool()
     const c = await raw.connect()
     const action = `ak_${RUN}_txn`
     // exercise the REAL helper on the checked-out connection (not a hand-written INSERT) so the test proves
     // claimActionApplied's own write is bound to the caller's txn (#4340 review P3).
-    const trx: Queryable = { query: (sql, params) => c.query(sql, params) }
     try {
       await c.query('BEGIN')
-      const r = await claimActionApplied(trx, { id: `aa_${randomUUID()}`, instanceId: INST, ruleId: `rule_${RUN}_txn`, actionKey: action })
+      const r = await claimActionApplied(txn(c), { id: `aa_${randomUUID()}`, instanceId: INST, ruleId: `rule_${RUN}_txn`, actionKey: action })
       expect(r).toBe('claimed') // the real helper claimed inside the txn...
       await c.query('ROLLBACK') // ...but the record write failed → the claim must vanish with it
     } finally {
       c.release()
     }
+    const { rows } = await q('SELECT count(*)::int AS c FROM meta_fwb_action_applied WHERE action_key=$1', [action])
+    expect(Number(rows[0].c)).toBe(0)
+    // the owner's P1 scenario disproven: the RETRY claims again — it is NOT a permanent 'duplicate' skip
+    // (a pool-committed orphan claim would have made this 'duplicate' and silently dropped the write forever).
+    expect(await inTxn((t) => claimActionApplied(t, { id: `aa_${randomUUID()}`, instanceId: INST, ruleId: `rule_${RUN}_txn`, actionKey: action }))).toBe(
+      'claimed',
+    )
+  })
+
+  test('P1: a pool / forged marker / bare autocommit client is REJECTED by the xid probe (the claim can never auto-commit apart from the business write)', async () => {
+    const action = `ak_${RUN}_poolneg`
+    const c1 = { id: `aa_${randomUUID()}`, instanceId: INST, ruleId: `rule_${RUN}_pn`, actionKey: action }
+    // 1) the Pool itself, cast past the compile-time brand
+    await expect(claimActionApplied(poolManager.get() as unknown as TransactionalQueryable, c1)).rejects.toThrow(/real database TRANSACTION/)
+    // 2) a FORGED isTransaction marker wrapping the pool — the probe asks Postgres, not the caller
+    const forged: TransactionalQueryable = { isTransaction: true, query: (sql, params) => poolManager.get().query(sql, params) }
+    await expect(claimActionApplied(forged, { ...c1, id: `aa_${randomUUID()}` })).rejects.toThrow(/real database TRANSACTION/)
+    // 3) a bare client WITHOUT BEGIN (autocommit): each statement its own implicit txn — rejected
+    const bare = await poolManager.get().getInternalPool().connect()
+    try {
+      await expect(claimActionApplied(txn(bare), { ...c1, id: `aa_${randomUUID()}` })).rejects.toThrow(/real database TRANSACTION/)
+    } finally {
+      bare.release()
+    }
+    // nothing was written by any of the rejected attempts
     const { rows } = await q('SELECT count(*)::int AS c FROM meta_fwb_action_applied WHERE action_key=$1', [action])
     expect(Number(rows[0].c)).toBe(0)
   })
@@ -156,23 +200,18 @@ describeIfDatabase('action-idempotency ledger L1 — schema golden (real DB)', (
   test('L2 claimActionApplied: first=claimed, repeat=duplicate; CONCURRENT double-claim → exactly one claimed', async () => {
     const key = deriveActionKey({ structuralPath: 's[0]', actionType: 'create_record', canonicalConfig: { t: RUN } })
     const base = { instanceId: INST, ruleId: `rule_${RUN}_l2`, actionKey: key }
-    expect(await claimActionApplied(poolManager.get(), { ...base, id: `aa_${randomUUID()}` })).toBe('claimed')
-    expect(await claimActionApplied(poolManager.get(), { ...base, id: `aa_${randomUUID()}` })).toBe('duplicate')
-    // constructed race on a FRESH key: two connections claim simultaneously
+    expect(await inTxn((t) => claimActionApplied(t, { ...base, id: `aa_${randomUUID()}` }))).toBe('claimed')
+    expect(await inTxn((t) => claimActionApplied(t, { ...base, id: `aa_${randomUUID()}` }))).toBe('duplicate')
+    // constructed race on a FRESH key: two CONCURRENT TRANSACTIONS claim simultaneously — the loser blocks on
+    // the winner's speculative-insert lock until it commits, then resolves 'duplicate' (each txn commits
+    // inside its own promise, so the race is between two full transactions with no orchestration deadlock).
     const key2 = deriveActionKey({ structuralPath: 's[1]', actionType: 'create_record', canonicalConfig: { t: RUN } })
-    const raw = poolManager.get().getInternalPool()
-    const [ca, cb] = await Promise.all([raw.connect(), raw.connect()])
-    try {
-      const [ra, rb] = await Promise.all([
-        claimActionApplied(ca, { ...base, actionKey: key2, id: `aa_${randomUUID()}` }),
-        claimActionApplied(cb, { ...base, actionKey: key2, id: `aa_${randomUUID()}` }),
-      ])
-      expect([ra, rb].filter((r) => r === 'claimed')).toHaveLength(1) // net-once under the race
-      expect([ra, rb].filter((r) => r === 'duplicate')).toHaveLength(1)
-    } finally {
-      ca.release()
-      cb.release()
-    }
+    const [ra, rb] = await Promise.all([
+      inTxn((t) => claimActionApplied(t, { ...base, actionKey: key2, id: `aa_${randomUUID()}` })),
+      inTxn((t) => claimActionApplied(t, { ...base, actionKey: key2, id: `aa_${randomUUID()}` })),
+    ])
+    expect([ra, rb].filter((r) => r === 'claimed')).toHaveLength(1) // net-once under the race
+    expect([ra, rb].filter((r) => r === 'duplicate')).toHaveLength(1)
   })
 
   test('L2 Class-B: outbound key = stable event+action identity; ambiguity w/o endpoint idempotency = outcome_unknown', () => {
@@ -186,31 +225,54 @@ describeIfDatabase('action-idempotency ledger L1 — schema golden (real DB)', (
     expect(classifyOutboundOutcome('ambiguous', false)).toBe('outcome_unknown') // recorded, NEVER auto-resent
   })
 
-  // [#4340 review P1] Table-name coexistence: this FWB ledger lives on `meta_fwb_action_applied` and must NOT
-  // squat `meta_automation_action_applied`, which #4196 §2.2 reserves for the EXECUTION-SCOPED retry ledger
-  // (a DIFFERENT schema with a `kind` column). Prove both tables coexist and #4196's own INSERT works.
-  test('coexists with the #4196 execution-scoped meta_automation_action_applied (kind schema) — no name squat', async () => {
+  // [#4340 review P1+P2] Table-name coexistence: this FWB ledger lives on `meta_fwb_action_applied` and must
+  // NOT squat `meta_automation_action_applied`, which #4196 §2.2 reserves for the EXECUTION-SCOPED retry
+  // ledger (a DIFFERENT schema with a `kind` column). The whole probe runs INSIDE ONE ROLLED-BACK TRANSACTION
+  // (DDL is transactional in Postgres) — the test never DROPs, creates, or pollutes anything persistent, so a
+  // FUTURE real #4196 table is reused untouched instead of being destroyed (#4340 review P2).
+  test('coexists with the #4196 execution-scoped meta_automation_action_applied (kind schema) — no squat, no destructive cleanup', async () => {
     // this suite's migration created ONLY the FWB table under its FWB-specific name
     const fwbExists = await q(`SELECT to_regclass('public.meta_fwb_action_applied') IS NOT NULL AS ok`)
     expect(fwbExists.rows[0].ok).toBe(true)
-    // the #4196 name is FREE — stand up its LOCKED (§2.2) execution-scoped shape and run its exact claim INSERT
-    await q(`CREATE TABLE IF NOT EXISTS meta_automation_action_applied (
-               kind text NOT NULL, root_execution_id text NOT NULL, action_key text NOT NULL,
-               action_type text, applied_at timestamptz NOT NULL DEFAULT now(),
-               UNIQUE (kind, root_execution_id, action_key))`)
+    const preExisting = Boolean((await q(`SELECT to_regclass('public.meta_automation_action_applied') IS NOT NULL AS ok`)).rows[0].ok)
+    const root = `root_${RUN}`
+    const key = deriveActionKey({ structuralPath: 's[coexist]', actionType: 'create_record', canonicalConfig: { t: RUN } })
+    const client = await poolManager.get().getInternalPool().connect()
     try {
-      // #4196 §2's INSERT — would have thrown `column "kind" does not exist` if the FWB table had squatted the name
-      await q(`INSERT INTO meta_automation_action_applied (kind, root_execution_id, action_key)
-               VALUES ('execution', $1, 'ak_exec') ON CONFLICT DO NOTHING`, [`root_${RUN}`])
-      const execRow = await q(`SELECT count(*)::int AS c FROM meta_automation_action_applied WHERE root_execution_id=$1`, [`root_${RUN}`])
+      await client.query('BEGIN')
+      // stand up (or, in a future where the real table exists, REUSE) the #4196 §2.2 execution-scoped shape —
+      // entirely inside this transaction, so ROLLBACK below leaves the database exactly as it was.
+      await client.query(`CREATE TABLE IF NOT EXISTS meta_automation_action_applied (
+                            kind text NOT NULL, root_execution_id text NOT NULL, action_key text NOT NULL,
+                            action_type text, applied_at timestamptz NOT NULL DEFAULT now(),
+                            UNIQUE (kind, root_execution_id, action_key))`)
+      // #4196 §2's INSERT — would have thrown `column "kind" does not exist` if the FWB table squatted the name
+      await client.query(
+        `INSERT INTO meta_automation_action_applied (kind, root_execution_id, action_key)
+         VALUES ('execution', $1, 'ak_exec') ON CONFLICT DO NOTHING`,
+        [root],
+      )
+      const execRow = await client.query(`SELECT count(*)::int AS c FROM meta_automation_action_applied WHERE root_execution_id=$1`, [root])
       expect(Number(execRow.rows[0].c)).toBe(1)
-      // and the FWB ledger claims INTO ITS OWN table, independently
-      const key = deriveActionKey({ structuralPath: 's[coexist]', actionType: 'create_record', canonicalConfig: { t: RUN } })
-      expect(await claimActionApplied(poolManager.get(), { instanceId: INST, ruleId: `rule_${RUN}_cx`, actionKey: key, id: `aa_${randomUUID()}` })).toBe('claimed')
-      const fwbRow = await q(`SELECT count(*)::int AS c FROM meta_fwb_action_applied WHERE instance_id=$1 AND action_key=$2`, [INST, key])
-      expect(Number(fwbRow.rows[0].c)).toBe(1) // the two ledgers are disjoint tables
+      // and the FWB ledger claims INTO ITS OWN table in the SAME transaction — disjoint ledgers, one atomic scope
+      expect(await claimActionApplied(txn(client), { instanceId: INST, ruleId: `rule_${RUN}_cx`, actionKey: key, id: `aa_${randomUUID()}` })).toBe('claimed')
+      const fwbRow = await client.query(`SELECT count(*)::int AS c FROM meta_fwb_action_applied WHERE instance_id=$1 AND action_key=$2`, [INST, key])
+      expect(Number(fwbRow.rows[0].c)).toBe(1)
+      await client.query('ROLLBACK') // discard EVERYTHING the probe did — never a DROP
+    } catch (e) {
+      await client.query('ROLLBACK').catch(() => {})
+      throw e
     } finally {
-      await q(`DROP TABLE IF EXISTS meta_automation_action_applied`).catch(() => {})
+      client.release()
     }
+    // the #4196 name is EXACTLY as it was before the test: absent today; untouched if a real table existed
+    const post = Boolean((await q(`SELECT to_regclass('public.meta_automation_action_applied') IS NOT NULL AS ok`)).rows[0].ok)
+    expect(post).toBe(preExisting)
+    if (post) {
+      const leftover = await q(`SELECT count(*)::int AS c FROM meta_automation_action_applied WHERE root_execution_id=$1`, [root])
+      expect(Number(leftover.rows[0].c)).toBe(0) // a pre-existing real table gained nothing from this test
+    }
+    const fwbLeft = await q('SELECT count(*)::int AS c FROM meta_fwb_action_applied WHERE action_key=$1', [key])
+    expect(Number(fwbLeft.rows[0].c)).toBe(0) // the FWB probe row rolled back too
   })
 })

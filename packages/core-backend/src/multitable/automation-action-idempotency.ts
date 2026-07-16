@@ -19,7 +19,9 @@
  */
 import { createHash } from 'node:crypto'
 
-import type { Queryable } from './automation-durable-dispatcher'
+import { assertInTransaction, type TransactionalQueryable } from './pg-transaction-guard'
+
+export type { TransactionalQueryable } from './pg-transaction-guard'
 
 const NON_BLANK = /[!-~]/
 
@@ -77,8 +79,14 @@ export interface ActionClaim {
 /**
  * Class-A same-transaction business claim. Call on the SAME trx as the record write; 'duplicate' means a
  * prior apply already holds the key (net-once satisfied) — the caller skips its write and completes.
+ *
+ * The same-transaction requirement is MACHINE-ENFORCED against the DATABASE's own transaction state
+ * (pg-transaction-guard xid probe): a pool / autocommit client / forged marker is rejected BEFORE the claim.
+ * Otherwise the claim would auto-commit separately from the business write — and after a failed business
+ * write, the orphaned committed claim makes every retry return 'duplicate', permanently skipping the missing
+ * write (#4340 review P1).
  */
-export async function claimActionApplied(trx: Queryable, c: ActionClaim): Promise<'claimed' | 'duplicate'> {
+export async function claimActionApplied(trx: TransactionalQueryable, c: ActionClaim): Promise<'claimed' | 'duplicate'> {
   for (const [name, v] of [['instanceId', c.instanceId], ['ruleId', c.ruleId], ['actionKey', c.actionKey]] as const) {
     if (typeof v !== 'string' || !NON_BLANK.test(v)) throw new RangeError(`claimActionApplied: ${name} must be non-blank`)
   }
@@ -92,6 +100,8 @@ export async function claimActionApplied(trx: Queryable, c: ActionClaim): Promis
   if (!isSentinel && !isNodeScope) {
     throw new RangeError('claimActionApplied: (node_key, entry_epoch) must be the ("",0) sentinel or a non-blank node_key with entry_epoch >= 1')
   }
+  // The claim must ride the SAME transaction as the business write — probed against the DB itself (#4340 P1).
+  await assertInTransaction(trx, 'claimActionApplied')
   const mode = c.applicationMode ?? 'apply'
   const res = await trx.query(
     `INSERT INTO meta_fwb_action_applied (id, instance_id, rule_id, action_key, node_key, entry_epoch, application_mode, result_ref)
