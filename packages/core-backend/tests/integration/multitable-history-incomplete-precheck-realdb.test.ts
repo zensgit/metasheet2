@@ -139,7 +139,7 @@ describeIfDatabase('multitable D-1c §0.6 HISTORY_INCOMPLETE precheck (real DB)'
     delete process.env.MULTITABLE_ENABLE_PIT_RESET
     delete process.env.MULTITABLE_ENABLE_SHEET_REVERT
     for (const sheet of [SHEET, SHEET_F, SHEET_S]) {
-      for (const t of ['meta_records_trash', 'meta_record_revisions', 'meta_records', 'meta_fields']) await q(`DELETE FROM ${t} WHERE sheet_id = $1`, [sheet]).catch(() => {})
+      for (const t of ['meta_record_version_markers', 'meta_records_trash', 'meta_record_revisions', 'meta_records', 'meta_fields']) await q(`DELETE FROM ${t} WHERE sheet_id = $1`, [sheet]).catch(() => {})
       await q('DELETE FROM meta_sheets WHERE id = $1', [sheet]).catch(() => {})
     }
     await q('DELETE FROM meta_bases WHERE id = $1', [BASE]).catch(() => {})
@@ -152,6 +152,12 @@ describeIfDatabase('multitable D-1c §0.6 HISTORY_INCOMPLETE precheck (real DB)'
     // the dedicated flag-off/on gate goldens.
     process.env.MULTITABLE_ENABLE_SHEET_REVERT = 'true'
     for (const sheet of [SHEET, SHEET_F, SHEET_S]) {
+      // W0-1 v3.5: the marker INSERT is now loud (no ON CONFLICT DO NOTHING — see record-history-service.ts),
+      // and the cross-generation UNIQUE it used to rely on is dropped, so a leftover marker row from a PRIOR
+      // test on the SAME reused record id (X below is a fixed per-file constant) is no longer silently
+      // deduped by the DB — it becomes a genuine second occupant at the same version and false-refuses G-HI-2
+      // as duplicate_version_event. Markers must be cleaned per-sheet exactly like revisions/records are.
+      await q('DELETE FROM meta_record_version_markers WHERE sheet_id = $1', [sheet]).catch(() => {})
       await q('DELETE FROM meta_records_trash WHERE sheet_id = $1', [sheet]).catch(() => {})
       await q('DELETE FROM meta_record_revisions WHERE sheet_id = $1', [sheet])
       await q('DELETE FROM meta_records WHERE sheet_id = $1', [sheet])

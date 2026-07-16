@@ -131,6 +131,20 @@ export const GLOBAL_HISTORY_FLAG_MANIFEST = Object.freeze([
     ],
   },
   {
+    key: 'MULTITABLE_HISTORY_CONTIGUITY_STRICT',
+    type: 'boolean',
+    activationValue: 'true',
+    caseInsensitive: true,
+    dependsOn: [],
+    conflictsWith: [],
+    danger: 'medium',
+    purpose:
+      'W0-1 v3.5 (design lock #4262, Lane L3) — switches the shared HISTORY_INCOMPLETE precheck (precheckSheetHistoryIntegrity, consumed by BOTH revert and reset preview/execute) from the landed #4269 epoch/version structural comparator to a TRUE seq-ordered generation-aware comparator: real causal `seq` order (one shared sequence across meta_record_revisions AND meta_record_version_markers) instead of created_at/version; generation-by-create-count instead of "everything after the last delete"; C2 seq-vs-version monotonicity (fail-closed — #4269 has no equivalent check, i.e. is fail-open on this class of corruption); and C3 deleted/trashed-record enumeration (revision chain ∪ meta_records_trash), which #4269 never performed at all (live rows only). Default OFF: byte-identical to #4269 when off. Danger=medium, NOT high: turning this ON can only make the precheck MORE conservative (adds refusals — an availability/operational risk if it false-refuses legitimate pre-checkpoint sheets, since the durable trusted-since checkpoint that would grandfather pre-migration history, design lock §6, is a SEPARATE deferred lane), never LESS conservative — it cannot itself unlock a new destructive write path. §0 containment note: this flag is orthogonal to MULTITABLE_ENABLE_SHEET_REVERT / MULTITABLE_ENABLE_PIT_RESET (it changes the PRECHECK verdict those routes consume, on both preview — ungated — and execute, not whether the routes are reachable at all), so it has observable effect even while both master gates stay off (a stricter preview verdict is still visible).',
+    // source: packages/core-backend/src/multitable/history-integrity-precheck.ts:73 (isContiguityStrictMode,
+    //         `.trim().toLowerCase() === 'true'` guard — same case-insensitive family as PIT_RESET/SHEET_REVERT)
+    source: 'packages/core-backend/src/multitable/history-integrity-precheck.ts:73',
+  },
+  {
     key: 'MULTITABLE_ENABLE_SHEET_REVERT',
     type: 'boolean',
     activationValue: 'true',

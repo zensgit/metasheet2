@@ -1,7 +1,7 @@
 import { mapFieldType, isSystemFieldType } from './field-codecs'
 import type { QueryFn } from './permission-service'
 import { isSystemSheet } from './system-sheet-predicate'
-import { hasVersionMarkerTable } from './record-history-service'
+import { hasVersionMarkerTable, hasChainSeqColumns } from './record-history-service'
 
 /**
  * Global History — W0-1: `HISTORY_INCOMPLETE`, the fail-closed integrity PRECHECK for the destructive
@@ -46,7 +46,32 @@ import { hasVersionMarkerTable } from './record-history-service'
  *  - C3 deleted/tombstoned + resurrected (multi-generation) chains — live-only enumeration here; a resurrected
  *    record refuses fail-closed (duplicate create at v1), full handling is C3.
  *  - C6 durable trusted-since watermark + rollout protocol (grandfathers pre-marker lock holes).
+ *
+ * W0-1 v3.5 (design lock #4262) STRICT MODE — `MULTITABLE_HISTORY_CONTIGUITY_STRICT` (default OFF; flag-off
+ * is BYTE-IDENTICAL to the #4269 behavior documented above — the epoch/version structural comparator,
+ * live-rows-only, no C2, no C3). When the flag is on, `precheckSheetHistoryIntegrity` switches to:
+ *   - §2 TRUE CAUSAL ORDER: events and markers are ordered by the real `seq` column (one shared PG sequence
+ *     across both tables — `zzzz20260715120000_add_meta_record_chain_seq`), not `created_at`/`version`.
+ *   - §2 GENERATION BY COUNT: `generation = COUNT(*) FILTER (WHERE action='create') OVER (ORDER BY seq)` —
+ *     the owner's exact formula, replacing the "everything after the last delete" boundary. A within-
+ *     generation duplicate is `chain_corrupt` (a NEW code — distinct from the legacy `duplicate_version_event`,
+ *     because it replaces the DROPPED marker unique constraint, not the legacy live-vs-latest content check).
+ *   - C2 (fail-CLOSED, was fail-open in #4269): within the terminal generation, seq order and version order
+ *     must agree (delete-reuse excepted) — disagreement ⇒ `nonmonotonic_history`.
+ *   - C3 (in scope): deleted/trashed records (revision chain ∪ `meta_records_trash`, minus live ids) are
+ *     ALSO enumerated — Revert/Reset can resurrect them, so their terminal (most recent, pre-delete)
+ *     generation must pass the SAME per-generation contiguity or the whole sheet-wide operation refuses.
+ *     Scope note (deliberate, symmetric with the live-record model): only the TERMINAL generation of a
+ *     deleted record is checked, exactly as only the CURRENT generation of a live record is checked — older
+ *     generations of either are out of scope here (full backward multi-generation reconstruction is not
+ *     required by this lane). A deleted record whose trash row survives but whose ENTIRE revision chain has
+ *     been retention-swept cannot be verified at all and is refused (`chain_hole`) — expected until the §6
+ *     durable trusted-since checkpoint (DEFERRED, a later lane) grandfathers pre-checkpoint history; this is
+ *     exactly why strict mode is not meant to be enabled over a mature environment without that checkpoint.
  */
+export function isContiguityStrictMode(): boolean {
+  return String(process.env.MULTITABLE_HISTORY_CONTIGUITY_STRICT ?? '').trim().toLowerCase() === 'true'
+}
 
 /** The unified refusal code (rule 1). Routes surface it as HTTP 409 with a values-free body. */
 export const HISTORY_INCOMPLETE = 'HISTORY_INCOMPLETE' as const
@@ -89,6 +114,10 @@ export type HistoryIntegrityReason =
   // content projection (retained §1.3 second layer)
   | 'content_mismatch'
   | 'comparator_error'
+  // STRICT MODE ONLY (design lock #4262 v3.5 §2/§8) — never returned when
+  // MULTITABLE_HISTORY_CONTIGUITY_STRICT is off.
+  | 'chain_corrupt' // within-generation duplicate occupant (replaces the dropped marker UNIQUE)
+  | 'nonmonotonic_history' // C2: seq order and version order disagree within a generation
 
 export type HistoryIntegrityVerdict = { ok: true } | { ok: false; reason: HistoryIntegrityReason }
 
@@ -112,18 +141,23 @@ const canonicalize = (v: unknown): string => {
 
 export type ChainEventAction = 'create' | 'update' | 'delete'
 /** A revision chain event. `orderKey` is the RAW `created_at` epoch-ms (exact in float64 — never packed with
- *  the version; see `chainOrderAfter`). Rank + version tiebreaks are compared structurally off the event. */
+ *  the version; see `chainOrderAfter`). Rank + version tiebreaks are compared structurally off the event.
+ *  `seq` (optional here — required by `checkRecordChainContiguityStrict`) is the W0-1 v3.5 causal sequence
+ *  column shared with markers (design lock §2); the default (non-strict) comparator never reads it. */
 export interface ChainEvent {
   version: number
   action: ChainEventAction
   orderKey?: number
+  seq?: number
 }
 /** A legitimate non-data version bump (lock/unlock) recorded out-of-chain in `meta_record_version_markers`.
- *  `orderKey` = raw `created_at` epoch-ms; a marker ranks with updates (it happens on a LIVE row). */
+ *  `orderKey` = raw `created_at` epoch-ms; a marker ranks with updates (it happens on a LIVE row). `seq` —
+ *  see `ChainEvent` above; same causal domain, shared sequence. */
 export interface VersionMarker {
   version: number
   kind: 'lock' | 'unlock'
   orderKey?: number
+  seq?: number
 }
 
 /**
@@ -236,6 +270,105 @@ export function checkRecordChainContiguity(
 }
 
 // ==============================================================================================================
+// STRICT MODE (design lock #4262 v3.5 §2/C2/C3) — seq-ordered generation-aware contiguity. PURE,
+// unit-testable core, gated behind MULTITABLE_HISTORY_CONTIGUITY_STRICT at the caller
+// (`precheckSheetHistoryIntegrity`). Every `ChainEvent`/`VersionMarker` passed in MUST carry a real `.seq`
+// (from the shared `meta_record_chain_seq` sequence) — a missing seq is a caller bug and fails CLOSED
+// (`comparator_error`), never silently falls back to epoch/version ordering.
+// ==============================================================================================================
+
+type SeqTimelineItem =
+  | { kind: 'event'; version: number; action: ChainEventAction; seq: number }
+  | { kind: 'marker'; version: number; seq: number }
+
+/**
+ * Generation-aware contiguity, TRUE CAUSAL ORDER (design lock §2). Three differences from
+ * `checkRecordChainContiguity` above:
+ *   1. Order comes from the real `seq` column (one shared sequence across revisions AND markers), never
+ *      `created_at`/`version` structural comparison — no same-ms collisions, no float packing.
+ *   2. Generation = `COUNT(*) FILTER (WHERE action='create') OVER (ORDER BY seq)` — the owner's exact
+ *      formula. This lets a DELETED (non-live) record's chain be generation-scoped exactly like a live
+ *      one: `liveVersion === null` scopes the check to the record's TERMINAL generation using the
+ *      terminal (delete) event's own `.version` as V (delete-reuse semantics), for the C3 caller.
+ *   3. C2: within the terminal generation, seq order and version order must agree (the terminal delete, if
+ *      any, is exempt — it legitimately REUSES the prior version). A disagreement is `nonmonotonic_history`,
+ *      fail-CLOSED (§2's fail-open in #4269 is corrected here).
+ * A within-generation duplicate occupant is `chain_corrupt` (new code — see design lock §2: replaces the
+ * DROPPED cross-generation marker UNIQUE, which used to reject this at write time).
+ */
+export function checkRecordChainContiguityStrict(
+  liveVersion: number | null,
+  events: ReadonlyArray<ChainEvent>,
+  markers: ReadonlyArray<VersionMarker>,
+): ContiguityResult {
+  const anyCreateOrUpdate = events.some((e) => e.action !== 'delete')
+  if (!anyCreateOrUpdate && markers.length === 0) return { ok: false, reason: 'zero_revision_live_row' }
+  if (events.some((e) => e.seq === undefined) || markers.some((m) => m.seq === undefined)) {
+    return { ok: false, reason: 'comparator_error' } // caller bug: strict mode requires real seq everywhere
+  }
+
+  const timeline: SeqTimelineItem[] = [
+    ...events.map((e): SeqTimelineItem => ({ kind: 'event', version: e.version, action: e.action, seq: e.seq as number })),
+    ...markers.map((m): SeqTimelineItem => ({ kind: 'marker', version: m.version, seq: m.seq as number })),
+  ].sort((a, b) => a.seq - b.seq)
+  if (timeline.length === 0) return { ok: false, reason: 'zero_revision_live_row' }
+
+  // Generation number per timeline position: count of 'create' events at-or-before this seq.
+  let creates = 0
+  const generations: number[] = new Array(timeline.length)
+  for (let i = 0; i < timeline.length; i++) {
+    const item = timeline[i]
+    if (item.kind === 'event' && item.action === 'create') creates += 1
+    generations[i] = creates
+  }
+  if (creates === 0) return { ok: false, reason: 'chain_hole' } // no create ever captured (updates/markers only)
+
+  const terminalItem = timeline[timeline.length - 1]
+  const terminalGen = generations[generations.length - 1]
+
+  // LIVE record: the terminal event must not be a delete (uncaptured resurrection). A DELETED record
+  // (liveVersion === null, the C3 caller) is expected to end in a delete; the caller has already verified
+  // that before calling, so this branch only applies when a record IS live.
+  if (liveVersion !== null && terminalItem.kind === 'event' && terminalItem.action === 'delete') {
+    return { ok: false, reason: 'live_row_after_delete_revision' }
+  }
+
+  const genItems = timeline.filter((_, i) => generations[i] === terminalGen)
+  const genCreates = genItems.filter((it): it is Extract<SeqTimelineItem, { kind: 'event' }> => it.kind === 'event' && it.action === 'create')
+  if (genCreates.length !== 1) return { ok: false, reason: 'chain_hole' } // must open with exactly one create
+  const genStart = genCreates[0].version
+
+  const V = liveVersion !== null ? Math.trunc(liveVersion) : Math.trunc((terminalItem as { version: number }).version)
+  if (!Number.isFinite(V) || V < 1) return { ok: false, reason: 'chain_hole' }
+  if (!Number.isInteger(genStart) || genStart < 1 || genStart > V) return { ok: false, reason: 'out_of_range_version' }
+
+  // C2 MONOTONICITY: within the terminal generation, seq order and version order must agree. The terminal
+  // delete (if the terminal item IS a delete) is EXEMPT — delete legitimately REUSES the prior version.
+  let prevVersion = -Infinity
+  for (const it of genItems) {
+    const isTerminalDelete = it === terminalItem && it.kind === 'event' && it.action === 'delete'
+    if (isTerminalDelete) continue
+    if (it.version < prevVersion) return { ok: false, reason: 'nonmonotonic_history' }
+    prevVersion = it.version
+  }
+
+  // Occupancy (C5 + marker uniqueness, §2): exactly one non-delete occupant per version in [genStart..V].
+  // Delete events are excluded from occupancy (delete-reuse), matching the legacy comparator's semantics.
+  const occupant = new Map<number, number>()
+  for (const it of genItems) {
+    if (it.kind === 'event' && it.action === 'delete') continue
+    if (!Number.isInteger(it.version) || it.version < genStart || it.version > V) return { ok: false, reason: 'out_of_range_version' }
+    occupant.set(it.version, (occupant.get(it.version) ?? 0) + 1)
+  }
+  for (let k = genStart; k <= V; k++) {
+    const c = occupant.get(k) ?? 0
+    if (c === 0) return { ok: false, reason: 'chain_hole' }
+    if (c > 1) return { ok: false, reason: 'chain_corrupt' } // within-generation duplicate (§2)
+  }
+  return { ok: true }
+}
+
+// ==============================================================================================================
 
 const toNumber = (v: unknown): number => (typeof v === 'number' && Number.isFinite(v) ? v : Number(v) || 0)
 /** Raw created_at epoch-ms — exact in float64. NEVER pack version into this (see chainOrderAfter). */
@@ -253,6 +386,8 @@ export async function precheckSheetHistoryIntegrity(
   query: QueryFn,
   sheetId: string,
 ): Promise<HistoryIntegrityVerdict> {
+  const strict = isContiguityStrictMode()
+
   // System sheets (approval projection / people directory) are server-regenerated read models — excluded.
   const sheetRes = await query('SELECT base_id, description FROM meta_sheets WHERE id = $1', [sheetId])
   const sheetRow = sheetRes.rows[0] as { base_id?: unknown; description?: unknown } | undefined
@@ -267,17 +402,24 @@ export async function precheckSheetHistoryIntegrity(
   }
   const liveRes = await query('SELECT id, data, version FROM meta_records WHERE sheet_id = $1', [sheetId])
   const liveRows = liveRes.rows as Array<{ id: unknown; data: unknown; version: unknown }>
-  if (liveRows.length === 0) return { ok: true }
+  // Non-strict: unchanged shortcut (an empty sheet has nothing to refuse) — BYTE-IDENTICAL to #4269.
+  // Strict mode cannot take this shortcut: C3 (§4) must still enumerate deleted/trashed records even when
+  // the sheet currently has zero LIVE rows (e.g. every record in it was deleted).
+  if (liveRows.length === 0 && !strict) return { ok: true }
 
   try {
+    // Strict mode needs the real seq column; a pre-migration deploy window (column absent) fails CLOSED via
+    // the pure functions below (every event/marker gets seq=undefined ⇒ comparator_error), never a crash.
+    const seqColumnsPresent = strict && (await hasChainSeqColumns(query))
+
     // FULL chain per record (contiguity needs every event, not just the latest) — all versions/actions.
     const revRes = await query(
-      `SELECT record_id, version, action, snapshot, created_at, id
+      `SELECT record_id, version, action, snapshot, created_at, id${seqColumnsPresent ? ', seq' : ''}
        FROM meta_record_revisions
        WHERE sheet_id = $1`,
       [sheetId],
     )
-    type RevRow = { record_id: unknown; version: unknown; action: unknown; snapshot: unknown; created_at: unknown; id: unknown }
+    type RevRow = { record_id: unknown; version: unknown; action: unknown; snapshot: unknown; created_at: unknown; id: unknown; seq?: unknown }
     const eventsByRecord = new Map<string, ChainEvent[]>()
     const latestSnapByRecord = new Map<string, { action: ChainEventAction; snapshot: unknown; version: number; orderKey: number }>()
     for (const r of revRes.rows as RevRow[]) {
@@ -285,8 +427,9 @@ export async function precheckSheetHistoryIntegrity(
       const version = toNumber(r.version)
       const action: ChainEventAction = (r.action === 'create' || r.action === 'delete') ? r.action : 'update'
       const orderKey = epochOf(r.created_at)
+      const seq: number | undefined = seqColumnsPresent && r.seq !== undefined && r.seq !== null ? toNumber(r.seq) : undefined
       const list = eventsByRecord.get(rid) ?? []
-      list.push({ version, action, orderKey })
+      list.push({ version, action, orderKey, seq })
       eventsByRecord.set(rid, list)
       const prev = latestSnapByRecord.get(rid)
       const cand = { action, snapshot: r.snapshot, version, orderKey }
@@ -301,17 +444,20 @@ export async function precheckSheetHistoryIntegrity(
     const markersByRecord = new Map<string, VersionMarker[]>()
     if (await hasVersionMarkerTable(query)) {
       const markerRes = await query(
-        `SELECT record_id, version, kind, created_at FROM meta_record_version_markers WHERE sheet_id = $1`,
+        `SELECT record_id, version, kind, created_at${seqColumnsPresent ? ', seq' : ''} FROM meta_record_version_markers WHERE sheet_id = $1`,
         [sheetId],
       )
-      for (const m of markerRes.rows as Array<{ record_id: unknown; version: unknown; kind: unknown; created_at: unknown }>) {
+      for (const m of markerRes.rows as Array<{ record_id: unknown; version: unknown; kind: unknown; created_at: unknown; seq?: unknown }>) {
         const rid = String(m.record_id)
         const version = toNumber(m.version)
+        const seq: number | undefined = seqColumnsPresent && m.seq !== undefined && m.seq !== null ? toNumber(m.seq) : undefined
         const list = markersByRecord.get(rid) ?? []
-        list.push({ version, kind: m.kind === 'unlock' ? 'unlock' : 'lock', orderKey: epochOf(m.created_at) })
+        list.push({ version, kind: m.kind === 'unlock' ? 'unlock' : 'lock', orderKey: epochOf(m.created_at), seq })
         markersByRecord.set(rid, list)
       }
     }
+
+    const liveIds = new Set(liveRows.map((r) => String(r.id)))
 
     for (const row of liveRows) {
       const rid = String(row.id)
@@ -319,8 +465,11 @@ export async function precheckSheetHistoryIntegrity(
       const events = eventsByRecord.get(rid) ?? []
       const markers = markersByRecord.get(rid) ?? []
 
-      // PRIMARY: generation-aware contiguity.
-      const contiguity = checkRecordChainContiguity(liveVersion, events, markers)
+      // PRIMARY: generation-aware contiguity — strict (seq-ordered, §2/C2) or the legacy (epoch-ordered,
+      // #4269) comparator, selected ONCE per call by the flag (never mixed within one precheck run).
+      const contiguity = strict
+        ? checkRecordChainContiguityStrict(liveVersion, events, markers)
+        : checkRecordChainContiguity(liveVersion, events, markers)
       if (!contiguity.ok) return contiguity
 
       // SECOND LAYER (retained §1.3): live user-field content must equal the latest captured snapshot.
@@ -333,6 +482,41 @@ export async function precheckSheetHistoryIntegrity(
         }
       }
     }
+
+    // C3 (strict only, design lock §4): deleted/trashed records. Revert/Reset can resurrect them, so their
+    // TERMINAL (most recent, pre-delete) generation must ALSO pass contiguity, or the whole sheet-wide
+    // operation refuses. Enumerated from the revision chain (already fetched above, unscoped by liveness) ∪
+    // `meta_records_trash` (belt-and-suspenders: a trash row can in principle outlive its own chain under
+    // retention sweeps — see the fail-closed branch below).
+    if (strict) {
+      const deletedRecordIds = new Set<string>()
+      for (const rid of eventsByRecord.keys()) if (!liveIds.has(rid)) deletedRecordIds.add(rid)
+      const trashRes = await query('SELECT DISTINCT record_id FROM meta_records_trash WHERE sheet_id = $1', [sheetId])
+      for (const r of trashRes.rows as Array<{ record_id: unknown }>) {
+        const rid = String(r.record_id)
+        if (!liveIds.has(rid)) deletedRecordIds.add(rid)
+      }
+
+      for (const rid of deletedRecordIds) {
+        const events = eventsByRecord.get(rid) ?? []
+        const markers = markersByRecord.get(rid) ?? []
+        if (events.length === 0) {
+          // A trash row survives but this record's ENTIRE revision chain has been retention-swept — there is
+          // nothing left to verify. Fail-closed (expected until the deferred §6 durable trusted-since
+          // checkpoint grandfathers pre-checkpoint history — see the module doc comment).
+          return { ok: false, reason: 'chain_hole' }
+        }
+        const terminal = [...events].sort((a, b) => (a.seq ?? 0) - (b.seq ?? 0))[events.length - 1]
+        if (terminal.action !== 'delete') {
+          // Anomaly: not live, chain exists, but its last event isn't a delete. Fail-closed defensively
+          // rather than guess at what state this record is actually in.
+          return { ok: false, reason: 'chain_hole' }
+        }
+        const contiguity = checkRecordChainContiguityStrict(null, events, markers)
+        if (!contiguity.ok) return contiguity
+      }
+    }
+
     return { ok: true }
   } catch {
     return { ok: false, reason: 'comparator_error' } // rule 4 fail-closed
