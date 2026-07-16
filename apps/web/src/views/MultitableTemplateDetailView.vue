@@ -24,11 +24,11 @@
           {{ template.icon || template.name.slice(0, 1).toUpperCase() }}
         </span>
         <div class="multitable-template-detail__heading">
-          <h1>{{ template.name }}</h1>
-          <p class="multitable-template-detail__description">{{ template.description }}</p>
+          <h1>{{ displayTemplate?.name }}</h1>
+          <p class="multitable-template-detail__description">{{ displayTemplate?.description }}</p>
           <small class="multitable-template-detail__meta">
             {{ categoryDisplay }} ·
-            {{ cardSheets(template.sheets.length, isZh) }} ·
+            {{ cardSheets(displayTemplate?.sheets.length ?? 0, isZh) }} ·
             {{ cardFields(fieldCount, isZh) }} ·
             {{ cardViews(viewCount, isZh) }}
           </small>
@@ -36,7 +36,7 @@
       </header>
 
       <section
-        v-for="sheet in template.sheets"
+        v-for="sheet in displayTemplate?.sheets ?? []"
         :key="sheet.id"
         class="multitable-template-detail__sheet"
       >
@@ -56,7 +56,7 @@
           <tbody>
             <tr v-for="field in sheet.fields" :key="field.id">
               <td>{{ field.name }}</td>
-              <td><code>{{ field.type }}</code></td>
+              <td><code>{{ fieldTypeLabel(field.type, isZh) }}</code></td>
             </tr>
           </tbody>
         </table>
@@ -65,7 +65,7 @@
         <ul class="multitable-template-detail__views" data-testid="template-detail-views">
           <li v-for="view in sheet.views" :key="view.id">
             <strong>{{ view.name }}</strong>
-            <code>{{ view.type }}</code>
+            <code>{{ viewTypeLabel(view.type, isZh) }}</code>
             <span v-if="groupByFieldName(sheet, view)">
               {{ workbenchLabel('detail.groupBy', isZh) }}: {{ groupByFieldName(sheet, view) }}
             </span>
@@ -156,7 +156,12 @@ import { useRoute } from 'vue-router'
 import { multitableClient } from '../multitable/api/client'
 import { useTemplateInstall } from '../multitable/composables/useTemplateInstall'
 import { useLocale } from '../composables/useLocale'
-import { categoryLabel } from '../multitable/utils/category-labels'
+import { fieldTypeLabel } from '../multitable/utils/meta-core-labels'
+import { viewTypeLabel } from '../multitable/utils/meta-manager-labels'
+import {
+  localizeTemplate,
+  templateDefaultBaseName,
+} from '../multitable/utils/template-localization'
 import {
   cardFields,
   cardSheets,
@@ -190,6 +195,10 @@ const { installingTemplateId, errorMessage: installError, installAndOpen } = use
 
 const templateId = computed(() => String(route.params.templateId ?? '').trim())
 const installing = computed(() => installingTemplateId.value === template.value?.id)
+const displayTemplate = computed(() => {
+  if (!template.value) return null
+  return localizeTemplate(template.value, isZh.value ? 'zh-CN' : 'en')
+})
 // Conflicts block install (design §2.2); no dry-run yet keeps the existing
 // optimistic install path (the server still 409s as the hard backstop).
 const installDisabled = computed(
@@ -197,23 +206,17 @@ const installDisabled = computed(
 )
 
 const categoryDisplay = computed(() => {
-  if (!template.value) return ''
-  return categoryLabel(template.value.category, isZh.value ? 'zh-CN' : 'en')
+  if (!displayTemplate.value) return ''
+  return displayTemplate.value.category
 })
 
 const fieldCount = computed(
-  () => template.value?.sheets.reduce((sum, sheet) => sum + sheet.fields.length, 0) ?? 0,
+  () => displayTemplate.value?.sheets.reduce((sum, sheet) => sum + sheet.fields.length, 0) ?? 0,
 )
 
 const viewCount = computed(
-  () => template.value?.sheets.reduce((sum, sheet) => sum + sheet.views.length, 0) ?? 0,
+  () => displayTemplate.value?.sheets.reduce((sum, sheet) => sum + sheet.views.length, 0) ?? 0,
 )
-
-// Mirrors the default baseName useTemplateInstall sends on install, so the
-// dry-run answers the question for the install the button would actually run.
-function defaultBaseName(tpl: MetaTemplate): string {
-  return `${tpl.name} Base`
-}
 
 function groupByFieldName(sheet: MetaTemplateSheet, view: MetaTemplateView): string {
   if (!view.groupByFieldId) return ''
@@ -241,7 +244,7 @@ async function runDryRun(): Promise<void> {
   dryRunError.value = ''
   try {
     dryRun.value = await multitableClient.dryRunTemplate(template.value.id, {
-      baseName: defaultBaseName(template.value),
+      baseName: templateDefaultBaseName(template.value, isZh.value),
     })
   } catch (error) {
     dryRun.value = null

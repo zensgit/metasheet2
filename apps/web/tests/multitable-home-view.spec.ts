@@ -284,6 +284,13 @@ describe('MultitableHomeView', () => {
           category: 'Project management',
           icon: 'P',
           color: '#2563eb',
+          translations: {
+            'zh-CN': {
+              name: '项目跟进',
+              description: '跟踪项目工作。',
+              category: '项目管理',
+            },
+          },
           sheets: [
             {
               id: 'template-sheet',
@@ -309,7 +316,8 @@ describe('MultitableHomeView', () => {
     const root = mountView()
     await flushUi()
 
-    expect(root.textContent).toContain('Project Tracker')
+    expect(root.textContent).toContain('项目跟进')
+    expect(root.textContent).toContain('跟踪项目工作。')
     // MetaTemplateCard now renders 3 metrics: sheets · fields · views.
     // Project Tracker template has 1 sheet, 0 fields (mock), 2 views.
     expect(root.textContent).toContain('1 个数据表 · 0 个字段 · 2 个视图')
@@ -317,7 +325,7 @@ describe('MultitableHomeView', () => {
     findButton(root, '使用模板').click()
     await flushUi()
 
-    expect(mocks.installTemplate).toHaveBeenCalledWith('project-tracker', { baseName: 'Project Tracker Base' })
+    expect(mocks.installTemplate).toHaveBeenCalledWith('project-tracker', { baseName: '项目跟进工作区' })
     expect(mocks.push).toHaveBeenCalledWith({
       name: AppRouteNames.MULTITABLE,
       params: { sheetId: 'sheet_template', viewId: 'view_template' },
@@ -336,5 +344,39 @@ describe('MultitableHomeView', () => {
     expect(link).not.toBeNull()
     expect(link?.textContent?.trim()).toContain('查看全部模板')
     expect(link?.getAttribute('data-router-link-to')).toContain(AppRouteNames.MULTITABLE_TEMPLATES)
+  })
+
+  it('updates template content and template-section copy when locale changes', async () => {
+    mocks.listBases.mockResolvedValue({ bases: [] })
+    mocks.listTemplates.mockResolvedValue({
+      templates: [{
+        id: 'project-tracker',
+        name: 'Project Tracker',
+        description: 'Track project work.',
+        category: 'Project management',
+        icon: 'kanban',
+        color: '#2563eb',
+        translations: {
+          'zh-CN': {
+            name: '项目跟进',
+            description: '跟踪项目工作。',
+            category: '项目管理',
+          },
+        },
+        sheets: [],
+      }],
+    })
+
+    const root = mountView()
+    await flushUi()
+    expect(root.textContent).toContain('项目跟进')
+    expect(root.textContent).toContain('查看全部模板')
+
+    useLocale().setLocale('en')
+    await flushUi()
+
+    expect(root.textContent).toContain('Project Tracker')
+    expect(root.textContent).toContain('View all templates')
+    expect(mocks.listTemplates).toHaveBeenCalledTimes(1)
   })
 })

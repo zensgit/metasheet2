@@ -189,7 +189,9 @@ describe('multitable template library', () => {
       'asset-inventory',
     ])
     first[0].sheets[0].fields[0].name = 'mutated'
+    first[0].translations!['zh-CN']!.sheets.tasks.fields.task = '已修改'
     expect(second[0].sheets[0].fields[0].name).toBe('Task')
+    expect(second[0].translations!['zh-CN']!.sheets.tasks.fields.task).toBe('任务')
   })
 
   it('installs a template as one base with mapped fields and views', async () => {
@@ -278,6 +280,23 @@ describe('template library quality contract', () => {
       // single sheet
       expect(template.sheets).toHaveLength(1)
       const sheet = template.sheets[0]
+      const zh = template.translations?.['zh-CN']
+
+      expect(zh).toBeDefined()
+      expect(zh!.name.trim()).not.toBe('')
+      expect(zh!.description.trim()).not.toBe('')
+      expect(zh!.category.trim()).not.toBe('')
+      expect(Object.keys(zh!.sheets).sort()).toEqual(template.sheets.map((item) => item.id).sort())
+
+      const translatedSheet = zh!.sheets[sheet.id]
+      expect(translatedSheet.name.trim()).not.toBe('')
+      expect(translatedSheet.description?.trim()).not.toBe('')
+      expect(Object.keys(translatedSheet.fields).sort()).toEqual(
+        sheet.fields.map((field) => field.id).sort(),
+      )
+      expect(Object.keys(translatedSheet.views).sort()).toEqual(
+        sheet.views.map((view) => view.id).sort(),
+      )
 
       // 5-8 fields
       expect(sheet.fields.length).toBeGreaterThanOrEqual(5)

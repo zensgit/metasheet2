@@ -3029,6 +3029,72 @@
           "views"
         ]
       },
+      "MultitableTemplateTranslationSheet": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string",
+            "nullable": true
+          },
+          "fields": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            }
+          },
+          "views": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "name",
+          "fields",
+          "views"
+        ]
+      },
+      "MultitableTemplateTranslation": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "category": {
+            "type": "string"
+          },
+          "sheets": {
+            "type": "object",
+            "additionalProperties": {
+              "$ref": "#/components/schemas/MultitableTemplateTranslationSheet"
+            }
+          }
+        },
+        "required": [
+          "name",
+          "description",
+          "category",
+          "sheets"
+        ]
+      },
+      "MultitableTemplateTranslations": {
+        "type": "object",
+        "properties": {
+          "zh-CN": {
+            "$ref": "#/components/schemas/MultitableTemplateTranslation"
+          }
+        },
+        "required": [
+          "zh-CN"
+        ]
+      },
       "MultitableTemplate": {
         "type": "object",
         "properties": {
@@ -3050,6 +3116,9 @@
           "color": {
             "type": "string"
           },
+          "translations": {
+            "$ref": "#/components/schemas/MultitableTemplateTranslations"
+          },
           "sheets": {
             "type": "array",
             "items": {
@@ -3064,6 +3133,7 @@
           "category",
           "icon",
           "color",
+          "translations",
           "sheets"
         ]
       },

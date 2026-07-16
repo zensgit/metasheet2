@@ -607,6 +607,10 @@ import {
   recordsDeleted as fmtRecordsDeleted,
   recordNotFound as fmtRecordNotFound,
 } from '../utils/workbench-labels'
+import {
+  localizeTemplate,
+  templateDefaultBaseName,
+} from '../utils/template-localization'
 import { recordLabel } from '../utils/meta-record-labels'
 import { resolveButtonFieldProperty } from '../utils/field-config'
 import {
@@ -3429,7 +3433,9 @@ async function onInstallTemplate(template: MetaTemplate) {
   if (!confirmDiscardContextChanges()) return
   installingTemplateId.value = template.id
   try {
-    const result = await workbench.client.installTemplate(template.id)
+    const result = await workbench.client.installTemplate(template.id, {
+      baseName: templateDefaultBaseName(template, isZh.value),
+    })
     if (!bases.value.some((base) => base.id === result.base.id)) {
       bases.value.push(result.base)
     }
@@ -3444,7 +3450,11 @@ async function onInstallTemplate(template: MetaTemplate) {
     }
     rememberWorkbenchBaseOpen(result.base.id)
     showTemplateLibrary.value = false
-    showSuccess(fmtTemplateInstalled(result.template.name, isZh.value))
+    const installedTemplate = localizeTemplate(
+      result.template,
+      isZh.value ? 'zh-CN' : 'en',
+    )
+    showSuccess(fmtTemplateInstalled(installedTemplate.name, isZh.value))
   } catch (e: any) {
     showError(e.message ?? wb('toast.templateInstallFailed', isZh.value))
   } finally {

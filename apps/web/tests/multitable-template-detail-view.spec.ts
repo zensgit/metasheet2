@@ -46,6 +46,28 @@ const PROJECT_TRACKER = {
   category: 'Project management',
   icon: 'kanban',
   color: '#2563eb',
+  translations: {
+    'zh-CN': {
+      name: '项目跟进',
+      description: '跟踪负责人、优先级、截止日期、状态和执行备注。',
+      category: '项目管理',
+      sheets: {
+        tasks: {
+          name: '任务',
+          description: '项目任务流程',
+          fields: {
+            task: '任务',
+            status: '状态',
+            dueDate: '截止日期',
+          },
+          views: {
+            grid: '全部任务',
+            kanban: '按状态',
+          },
+        },
+      },
+    },
+  },
   sheets: [
     {
       id: 'tasks',
@@ -68,7 +90,7 @@ function cleanDryRunResult() {
   return {
     templateId: 'project-tracker',
     wouldCreate: {
-      base: { id: 'base_abc', name: 'Project Tracker Base' },
+      base: { id: 'base_abc', name: '项目跟进工作区' },
       sheets: [{ id: 'sheet_abc', name: 'Tasks', fieldCount: 3, viewCount: 2 }],
       fields: [
         { id: 'fld_1', sheetId: 'sheet_abc', name: 'Task', type: 'string' },
@@ -151,30 +173,47 @@ describe('MultitableTemplateDetailView', () => {
     await flushUi()
 
     expect(mocks.listTemplates).toHaveBeenCalledTimes(1)
-    expect(root.textContent).toContain('Project Tracker')
-    expect(root.textContent).toContain('Tasks')
+    expect(root.textContent).toContain('项目跟进')
+    expect(root.textContent).toContain('任务')
 
     const fieldRows = Array.from(root.querySelectorAll('[data-testid="template-detail-fields"] tbody tr'))
     expect(fieldRows.map((row) =>
       Array.from(row.querySelectorAll('td')).map((cell) => cell.textContent?.trim()).join(' | '),
     )).toEqual([
-      'Task | string',
-      'Status | select',
-      'Due Date | date',
+      '任务 | 文本',
+      '状态 | 单选',
+      '截止日期 | 日期',
     ])
 
     const viewItems = Array.from(root.querySelectorAll('[data-testid="template-detail-views"] li'))
     expect(viewItems).toHaveLength(2)
-    expect(viewItems[0].textContent).toContain('All Tasks')
-    expect(viewItems[0].textContent).toContain('grid')
-    expect(viewItems[1].textContent).toContain('By Status')
+    expect(viewItems[0].textContent).toContain('全部任务')
+    expect(viewItems[0].textContent).toContain('网格')
+    expect(viewItems[1].textContent).toContain('按状态')
     // groupByFieldId resolved to the field NAME, not the raw id.
-    expect(viewItems[1].textContent).toContain('Status')
+    expect(viewItems[1].textContent).toContain('状态')
 
     // No dry-run result before the user asks for one.
     expect(root.querySelector('[data-testid="template-detail-dryrun-result"]')).toBeNull()
     // Install stays enabled until a dry-run reports conflicts.
     expect(findButton(root, '使用模板').disabled).toBe(false)
+  })
+
+  it('switches the descriptor back to complete English without refetching', async () => {
+    const root = mountView()
+    await flushUi()
+    expect(root.textContent).toContain('项目跟进')
+
+    useLocale().setLocale('en')
+    await flushUi()
+
+    expect(root.textContent).toContain('Project Tracker')
+    expect(root.textContent).toContain('Track owners, priorities, due dates, status, and execution notes.')
+    const fieldRows = Array.from(root.querySelectorAll('[data-testid="template-detail-fields"] tbody tr'))
+    expect(fieldRows[0].textContent).toContain('Task')
+    expect(fieldRows[0].textContent).toContain('text')
+    expect(root.textContent).toContain('All Tasks')
+    expect(mocks.listTemplates).toHaveBeenCalledTimes(1)
   })
 
   it('shows a not-found state for an unknown templateId', async () => {
@@ -193,11 +232,11 @@ describe('MultitableTemplateDetailView', () => {
     findButton(root, '检查可安装性').click()
     await flushUi()
 
-    expect(mocks.dryRunTemplate).toHaveBeenCalledWith('project-tracker', { baseName: 'Project Tracker Base' })
+    expect(mocks.dryRunTemplate).toHaveBeenCalledWith('project-tracker', { baseName: '项目跟进工作区' })
     const result = root.querySelector('[data-testid="template-detail-dryrun-result"]')
     expect(result).not.toBeNull()
     expect(result?.textContent).toContain('可以安装')
-    expect(result?.textContent).toContain('Project Tracker Base')
+    expect(result?.textContent).toContain('项目跟进工作区')
     expect(result?.textContent).toContain('1 个数据表')
     expect(result?.textContent).toContain('3 个字段')
     expect(result?.textContent).toContain('2 个视图')
@@ -253,7 +292,7 @@ describe('MultitableTemplateDetailView', () => {
     findButton(root, '使用模板').click()
     await flushUi()
 
-    expect(mocks.installTemplate).toHaveBeenCalledWith('project-tracker', { baseName: 'Project Tracker Base' })
+    expect(mocks.installTemplate).toHaveBeenCalledWith('project-tracker', { baseName: '项目跟进工作区' })
     expect(mocks.push).toHaveBeenCalledWith({
       name: AppRouteNames.MULTITABLE,
       params: { sheetId: 'sheet_new', viewId: 'view_new' },
