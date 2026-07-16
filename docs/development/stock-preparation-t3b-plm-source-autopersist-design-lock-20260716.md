@@ -1,10 +1,10 @@
 # T3b 设计锁 — approved PLM source-run 服务端直落 project / snapshot / run
 
-**状态：PROPOSED — design-lock only，authorizes no runtime。**
+**状态：RATIFY-ready — design-lock only，owner ratification pending，authorizes no runtime。**
 
 日期：2026-07-16
 前置：T3a runtime #4357 已合；T4 非空 `prep-line` smoke #4266 已合；RC-0
-corrective-3 正在 #4101 等实体机回贴。owner 已同意起草本锁，但 **ratify 与 runtime
+corrective-4（#4369）已合并、已切 exact-SHA 包，正在 #4101 等实体机回贴。owner 已同意起草本锁，但 **ratify 与 runtime
 实现仍是后续独立门**。
 
 ## 0. 目的与当前断点
@@ -149,15 +149,17 @@ ERP cache；T3b 必须有一个业务 project handle。
 - 对每行只投影现有 expansion mapper 接受的闭集合；未知字段不转发；
 - **不丢行**：输入行数必须等于 bridge 输出行数；任一行不合法则整个 envelope
   fail-closed，不得 `.filter()` 后部分写；
-- 将 intake 在源行未提供状态时生成的默认态 `imported` 明确归一为 `active`；
-  已是 canonical `active` / `inactive` / `incomplete` 的值保持；
+- bridge 输入词表固定为 `imported` / `active` / `inactive` / `incomplete`：`imported`
+  始终归一为 `active`，其余三个 canonical 值保持。intake 已把“缺省生成 imported”和
+  “source 实际映射出 imported”折叠成同一值，bridge 无法也不应伪造 provenance 区分；
 - **T3b v1 选择 source lifecycle 处置 (c)**：不内建 `released` / `obsolete` / `WIP`
   等跨 PLM 猜测映射。approved config 不得把原始 lifecycle 列直接映射为 `status` 或
-  `lineStatus`；只有上游已产出上述 canonical vocabulary 时才允许映射；
-- source-mapped `status` / `lineStatus` 出现 canonical 集合外的任何值时，整个 envelope
+  `lineStatus`；只有上游已产出上述 bridge 输入词表时才允许映射；
+- source-mapped `status` / `lineStatus` 出现上述 bridge 输入词表外的任何值时，整个 envelope
   必须在 provisioning / persist I/O 前以 422
   `STOCK_PREPARATION_PLM_AUTOPERSIST_LINE_STATUS_UNSUPPORTED` 拒绝；不得丢行、不得静默改成
-  `active`。错误 details 只允许稳定字段名、canonical allowed set 与 unsupported row count，
+  `active`。错误 details 只允许稳定字段名、accepted input set、canonical output set 与
+  unsupported row count，
   不得包含原始 lifecycle 值或业务行内容；
 - 复用 intake 已生成的 `snapshotLineId` / `sourceFingerprint`，不得二次发明身份；
 - 产出 `persistStockPreparationSyncRun` 的真实字段：`projectId`、`sourceProjectNo`、
@@ -175,8 +177,8 @@ closed-vocabulary enforcement。T3b v1 的唯一 enforcement point 是 bridge �
 closed set；实现与验收不得依赖 config shape validation 或 records service select validation
 替它拒绝原始 lifecycle 值。
 
-因此 operator contract 明确为：若 approved source 的 lifecycle 值不是 canonical
-`active` / `inactive` / `incomplete`，不要把该列 target 配成 `status` / `lineStatus`。需要支持
+因此 operator contract 明确为：若 approved source 的 lifecycle 值不是 bridge 可接受的
+`imported` / `active` / `inactive` / `incomplete`，不要把该列 target 配成 `status` / `lineStatus`。需要支持
 某个 PLM 的 `released` / `obsolete` / `WIP` 语义时，必须先另开具名 mapping design gate；本锁
 不授权隐式映射。
 
@@ -185,25 +187,43 @@ closed set；实现与验收不得依赖 config shape validation 或 records ser
 **建议：分两级。**
 
 T3b v1 复用现有 persist 的 create-only 写路径，但 **不得原样继承“batch 命中即成功
-skip”**。在返回 `skipped_existing` 前必须由 persist 内部完成闭形状核对：
+skip”**。在第一次写或返回 `skipped_existing` 前，persist 必须完成以下闭形状核对：
 
-- 首次 batch：201，create project/batch/lines/run；
-- 已有 batch 必须唯一，且 projectId / syncRunId / snapshotVersion 与当前 plan 一致；
-- 已有 snapshot lines 的数量及 `snapshotLineId + sourceFingerprint` 集合必须与当前 plan
-  一致；对应 run row 必须存在且 identity 一致；
-- 只有上述核对全部成立，exact replay 才返回 200 `skipped_existing`；
+- 当前 plan 的 `snapshotBatchId`、`snapshotLineId`、`runId` 各自必须唯一；重复 line key
+  在任何 records/provisioning I/O 前以 422 `PERSIST_PLAN_LINE_KEY_AMBIGUOUS` 拒绝，
+  不得把 duplicate path 产生的同 key 行交给底座；
+- 首次 batch：201，create batch/lines/run，再按既有 contract upsert project；首次写前
+  project key 查询只允许 0 或 1 行，2+ 行以 values-free conflict 拒绝，不得先种 batch；
+- 已有 batch 查询只允许恰好 1 行，2+ 行为 409 `PERSIST_IDEMPOTENCY_CONFLICT`；对应
+  run row 同样必须恰好 1 行；
+- snapshot lines 必须按 `snapshotBatchId` 做**有界分页全量读取**，直到 short page；达到页界
+  仍无法证明完整时以 409 `PERSIST_EXISTING_BATCH_READ_UNPROVABLE` 拒绝，不得只比较首屏；
+- batch、run 与每条 line 都按冻结 template 的**完整持久化投影**规范化后比较：只取各自
+  `*_FIELD_IDS`，忽略 records 元数据 `id/version`，按 template type 规范 string/select/number，
+  丢弃 create path 同样不写的 null/undefined；line 以唯一 `snapshotLineId` 建图后逐字段比较，
+  行数、key 集合和每个字段都必须一致；
+- `sourceFingerprint` 只是完整 line 投影中的一个字段，**不得**用
+  `snapshotLineId + sourceFingerprint` 集合替代完整内容判等。桥接归一逻辑变化时，原始
+  fingerprint 可能不变而 `lineStatus` 等持久化值已变化；这种重放必须 409，而不是 false skip；
+- exact replay 还必须按当前 plan 的业务 `projectId` 查到恰好 1 条 project row：0 条说明
+  首次 commit 可能在 project upsert 前中断，属于 incomplete；2+ 条属于 conflict。project 是
+  live pointer，不要求 `lastSyncRunId` 等于被 replay 的旧 run，也不在 replay 时 patch；
+- 只有 batch/lines/run 三个完整投影相同且 project 存在且唯一，exact replay 才返回 200
+  `skipped_existing`；
 - batch 存在但 lines/run 缺失 ⇒ 409 `PERSIST_EXISTING_BATCH_INCOMPLETE`；同 ID 不同
-  identity/content ⇒ 409 `PERSIST_IDEMPOTENCY_CONFLICT`；两者均 values-free、均不修补；
-- 快照 batch/line/run 不 patch；project live pointer 仍按既有 contract upsert；
-- 不删除旧 snapshot，不做“最新覆盖”。
+  identity/content、重复既有 key ⇒ 409 `PERSIST_IDEMPOTENCY_CONFLICT`；所有错误均
+  values-free、均不修补；
+- 快照 batch/line/run 不 patch；project live pointer 只在首次成功 commit 后按既有 contract
+  upsert；不删除旧 snapshot，不做“最新覆盖”。
 
 这是一项 T3b 前置的共享 persist hardening：它只把既有 false-success 改成显式冲突，不
 新增写面。判等只在服务端读闭形状字段，不把 line id/fingerprint/业务值放进 response、
 error details、log 或 audit。
 
-但现有 persist 是 batch-first 的多表顺序写。若进程在 batch 后、lines/run 前退出，retry
-会因 batch 已存在而 skip，可能留下可见的不完整 batch。T3b 设计不得把它写成“原子”或
-“可自动修复”。裁决：
+当前 main 的 persist 是 batch-first 的多表顺序写；若进程在 batch 后、lines/run 前退出，
+当前实现会因 batch 已存在而 false skip。上述 hardening 落地后，retry 必须改为 409
+`PERSIST_EXISTING_BATCH_INCOMPLETE`，但孤儿 batch 仍会保留且不会自动修复。T3b 设计不得
+把这一行为写成“原子”或“可自动修复”。裁决：
 
 - runtime 可默认 OFF 合并；
 - RC-A 可在隔离实体机窗口临时 ON 做一次受控验收；
@@ -244,9 +264,9 @@ approved-source 前置模式：
 5. summary 固定 `externalWrite=false`；
 6. run 后恢复 flag，禁止把该 flag 常开写入生产模板。
 
-corrective-3 的 #4101 结果与 T3b 开发并行；**RC-A 只在**以下三者齐备后切一次：
+corrective-4 的 #4101 实体机结果与 T3b 开发并行；**RC-A 只在**以下三者齐备后切一次：
 
-- corrective-3 实体机 runner 路径已判定；
+- corrective-4 实体机验收结果已回贴并完成 owner 判读；
 - T3b runtime + 真库证据已合；
 - T4 approved-source 扩展通过。
 
@@ -261,7 +281,7 @@ corrective-3 的 #4101 结果与 T3b 开发并行；**RC-A 只在**以下三者�
 3. body `projectId` 正常通过，但 query/params `projectId` 拒绝；
 4. auth tenant 决定 staging target，workspace/body project 都不能改 target；
 5. bridge 精确一对一，未知行整 envelope 拒绝；
-6. 无 source status 时生成的 `imported → active`，canonical
+6. `imported → active`（同时覆盖缺省 imported 与 source-mapped imported），canonical
    active/inactive/incomplete 保真；
 7. source-mapped raw lifecycle（至少覆盖 released/obsolete/WIP）以专用 422 拒绝，persist /
    provisioning 零调用；错误 details 不含 raw lifecycle；把任一已 canonical 的 source status
@@ -269,10 +289,16 @@ corrective-3 的 #4101 结果与 T3b 开发并行；**RC-A 只在**以下三者�
 8. source/intake identity mismatch 拒绝且零写；
 9. 201 created=`internal_persist/true`；exact replay 200
    skipped_existing=`internal_noop/false`；same-id-different-content 与 orphan batch 均 409
-   且零后续写；
-10. 成功与错误双向 leak-bait，公开 JSON 不含项目名、项目号、图号、数量、单位、
+   且零后续写；判别测试必须在保持 `snapshotLineId + sourceFingerprint` 不变时分别改变
+   `pathKey`、`designQty`、`designUnit`、`lineStatus`，证明完整投影任一字段漂移都会冲突；
+10. plan line key 重复、已有 batch/run/line key 重复均 fail-closed；line replay 读取覆盖至少
+    两页，并证明达到 page bound 时不会拿部分结果判 exact replay；
+11. 首次 commit 前 project key 2+ 行须在 batch create 前拒绝；exact replay 下 project 0 行
+    判 incomplete、2+ 行判 conflict、恰好 1 行才允许 skip，且 replay 不 patch project；
+12. 成功与错误双向 leak-bait，公开 JSON 不含项目名、项目号、图号、数量、单位、
    fingerprint 原值、config/system id、credential；
-11. 所有拒绝路径 records/provisioning/persist 调用计数为 0。
+13. 所有 bridge/steering/plan 拒绝路径 records/provisioning/persist 调用计数为 0；已有数据
+    冲突路径只允许完成证明冲突所需的 scoped reads，写调用计数必须为 0。
 
 ### 5.2 真 PostgreSQL / real service smoke
 
@@ -299,6 +325,10 @@ corrective-3 的 #4101 结果与 T3b 开发并行；**RC-A 只在**以下三者�
 - 放行任意 source-mapped lifecycle，或把 unsupported lifecycle 静默改成 `active`；
 - 把 unsupported lifecycle 的原始值放进 error details；
 - 把 existing-batch completeness/content conflict 恢复成无条件 skip；
+- 把完整 line 投影判等退化成 `snapshotLineId + sourceFingerprint` 判等；
+- 只读取 existing lines 第一页，或把 page-bound 当成完整结果；
+- 允许重复 plan/existing key 取第一行继续；
+- existing batch 完整但 project row 缺失时仍返回 successful skip；
 - 断开 persist 调用；
 - created 不覆盖 dry-run / internalWrite evidence，或 replay 仍硬报 internal write；
 - 把业务行或 config/system id 注入 response；
@@ -310,11 +340,11 @@ corrective-3 的 #4101 结果与 T3b 开发并行；**RC-A 只在**以下三者�
 
 | 级 | 交付 | 门 |
 |---|---|---|
-| T3b-0 | 本 design-lock | 本 PR 仅 PROPOSED |
+| T3b-0 | 本 design-lock | 本 PR 仅 RATIFY-ready；owner ratify 前不授权 runtime |
 | T3b-1 | persist false-skip hardening + pure bridge + route flag/guard + focused tests | owner RATIFY 后 |
 | T3b-2 | real-DB route smoke + CI whitelist + 对抗审阅 | T3b-1 通过 |
 | T4-final | 现有 #4266 approved-source 扩展 | T3b-2 合入 |
-| RC-A | 单次 exact-SHA 包 + 实体机验收 | #4101 判定 + T4-final |
+| RC-A | 单次 exact-SHA 包 + 实体机验收 | #4101 corrective-4 判定 + T4-final |
 | P4 | persist 原子性 / repair hardening | 独立设计门；生产常开前置 |
 
 ## 7. Ratify checklist
@@ -323,8 +353,8 @@ owner ratify 本锁即表示同意：
 
 - [ ] OD-1：独立 default-OFF PLM auto-persist flag；
 - [ ] OD-2：auth tenant 决定物理 target，body projectId 仅作业务键；
-- [ ] OD-3：纯 bridge，一行不丢；缺省 `imported → active`，canonical
-  active/inactive/incomplete 保真；raw lifecycle mapping 在 v1 明确 out-of-scope，并以专用
+- [ ] OD-3：纯 bridge，一行不丢；bridge 输入 `imported → active`，canonical
+  active/inactive/incomplete 保真；其它 raw lifecycle mapping 在 v1 明确 out-of-scope，并以专用
   values-free 422 在 persist 前 fail-closed；bridge 是唯一 option enforcement point；
 - [ ] OD-4：exact replay 才可 skip，orphan/content conflict 必须 409；生产常开 barred on P4；
 - [ ] OD-5：OFF byte-equivalent；ON created=`internal_persist/true`、replay=`internal_noop/false`；
