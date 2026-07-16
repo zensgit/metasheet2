@@ -20741,36 +20741,81 @@ async function deactivateAttendanceApprovalAssignments(client, approvalId) {
   )
 }
 
-async function userHasAnyRole(db, userId, roleIds, logger) {
-  if (!roleIds || roleIds.length === 0) return false
+async function loadAttendanceActorRoleIds(client, userId, logger) {
   try {
-    const rows = await db.query(
-      'SELECT 1 FROM user_roles WHERE user_id = $1 AND role_id = ANY($2) LIMIT 1',
-      [userId, roleIds]
+    const rows = await client.query(
+      'SELECT role_id FROM user_roles WHERE user_id = $1',
+      [userId]
     )
-    return rows.length > 0
+    return rows.map(row => String(row.role_id)).filter(Boolean)
   } catch (error) {
     if (isDatabaseSchemaError(error) && allowRbacDegradation) {
       if (!rbacDegraded) {
         logger.warn('RBAC service degraded - user_roles table not found')
         rbacDegraded = true
       }
-      return true
+      // Fail-closed for the assignment check: an actor whose roles cannot be read
+      // matches no role/source_queue assignment (they can still match a user assignment).
+      return []
     }
     throw error
   }
 }
 
-async function isApproverAllowed(db, userId, step, logger) {
-  if (!step) return true
-  const approverUserIds = Array.isArray(step.approverUserIds) ? step.approverUserIds : []
-  const approverRoleIds = Array.isArray(step.approverRoleIds) ? step.approverRoleIds : []
-  if (approverUserIds.length === 0 && approverRoleIds.length === 0) return true
-  if (approverUserIds.includes(userId)) return true
-  if (approverRoleIds.length > 0) {
-    return userHasAnyRole(db, userId, approverRoleIds, logger)
+async function loadAttendanceActorPermissionCodes(client, userId, logger) {
+  try {
+    const rows = await client.query(
+      `SELECT permission_code FROM user_permissions WHERE user_id = $1
+       UNION
+       SELECT rp.permission_code
+       FROM user_roles ur
+       JOIN role_permissions rp ON rp.role_id = ur.role_id
+       WHERE ur.user_id = $1`,
+      [userId]
+    )
+    return rows.map(row => String(row.permission_code)).filter(Boolean)
+  } catch (error) {
+    if (isDatabaseSchemaError(error) && allowRbacDegradation) {
+      if (!rbacDegraded) {
+        logger.warn('RBAC service degraded - permission tables not found')
+        rbacDegraded = true
+      }
+      // Fail-closed for the assignment check (see loadAttendanceActorRoleIds).
+      return []
+    }
+    throw error
   }
-  return false
+}
+
+// S7-0 (RATIFIED S7 lock §3.1/§3.2): the ACTIVE approval_assignments rows for the current node are
+// the action-authorization source of truth for attendance approve/reject. The per-type match mirrors
+// the central engine's authoritative predicate VERBATIM
+// (packages/core-backend/src/services/ApprovalBridgeService.ts:359-363, under is_active = TRUE):
+//   user         -> assignee_id == actorId
+//   role         -> assignee_id ∈ the actor's role ids
+//   source_queue -> assignee_id ∈ the actor's permission strings
+// Empty role/permission arrays are replaced by the '__none__' sentinel so an actor with no
+// roles/permissions can never match via an empty-ANY accident (ApprovalBridgeService.ts:305-306).
+async function isAttendanceActorAssignedForNode(client, approvalId, nodeKey, actorId, logger) {
+  const actorRoleIds = await loadAttendanceActorRoleIds(client, actorId, logger)
+  const actorPermissions = await loadAttendanceActorPermissionCodes(client, actorId, logger)
+  const roleParam = actorRoleIds.length > 0 ? actorRoleIds : ['__none__']
+  const permissionParam = actorPermissions.length > 0 ? actorPermissions : ['__none__']
+  const rows = await client.query(
+    `SELECT 1
+     FROM approval_assignments
+     WHERE instance_id = $1
+       AND node_key = $2
+       AND is_active = TRUE
+       AND (
+         (assignment_type = 'user' AND assignee_id = $3)
+         OR (assignment_type = 'role' AND assignee_id = ANY($4))
+         OR (assignment_type = 'source_queue' AND assignee_id = ANY($5))
+       )
+     LIMIT 1`,
+    [approvalId, nodeKey, actorId, roleParam, permissionParam]
+  )
+  return rows.length > 0
 }
 
 module.exports = {
@@ -28915,13 +28960,28 @@ module.exports = {
             : 0
           const currentStep = flowSteps[currentStepIndex]
 
-          if (action === 'approve') {
-            const canApprove = await isApproverAllowed(trx, requesterId, currentStep, logger)
-            if (!canApprove) {
-              const adminOverride = await hasAttendanceAdminAccess(requesterId)
-              if (!adminOverride) {
-                throw new HttpError(403, 'FORBIDDEN', 'Not authorized for this approval step')
-              }
+          // S7-0 (RATIFIED S7 lock §3.1/§3.2): authorize the actor against the ACTIVE
+          // approval_assignments rows for the current node — the same rows
+          // replaceAttendanceApprovalAssignments/deactivateAttendanceApprovalAssignments maintain —
+          // for BOTH approve and reject. Previously the reject path had NO assignment authorization
+          // check at all, and approve read only the legacy static step fields
+          // (approverUserIds/approverRoleIds), not the assignments table that actually gates who may
+          // act. The per-type match adopts the central engine's predicate verbatim (user / role /
+          // source_queue); the admin override (hasAttendanceAdminAccess) applies ONLY AFTER a failed
+          // match, symmetric on both actions. This precedes the instance UPDATE and every assignment
+          // mutation, inside the existing transaction.
+          const currentNodeKey = buildAttendanceApprovalNodeKey(currentStepIndex)
+          const actorIsAssigned = await isAttendanceActorAssignedForNode(
+            trx,
+            approvalId,
+            currentNodeKey,
+            requesterId,
+            logger
+          )
+          if (!actorIsAssigned) {
+            const adminOverride = await hasAttendanceAdminAccess(requesterId)
+            if (!adminOverride) {
+              throw new HttpError(403, 'FORBIDDEN', 'Not authorized for this approval step')
             }
           }
 
