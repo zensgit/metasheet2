@@ -557,6 +557,7 @@ jobs:
             tests/integration/approval-record-projection.test.ts \
             tests/integration/stock-preparation-t3a-erp-autopersist-realdb.test.ts \
             tests/integration/stock-preparation-t3b-replay-hardening-realdb.test.ts \
+            tests/integration/stock-preparation-t3b-plm-autopersist-realdb.test.ts \
             tests/integration/multitable-l4-canonical-fence-realdb.test.ts \
             --reporter=dot
 
