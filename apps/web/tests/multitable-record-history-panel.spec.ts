@@ -296,4 +296,28 @@ describe('MetaRecordHistoryPanel (W2 S2 extraction)', () => {
       app.unmount()
     })
   })
+
+  describe('OD-W2-5a R11 restored-from badge', () => {
+    it('renders the badge for a revision carrying restoredFromVersion (keyed on the version, not source)', async () => {
+      const { container, app } = mountPanel({
+        revisions: [rev(4, 'update', { source: 'restore', restoredFromVersion: 2 }), rev(1, 'create')],
+      })
+      await flushUi()
+      const badge = container.querySelector('[data-test="record-history-restored-from"]')
+      expect(badge).not.toBeNull()
+      expect(badge!.textContent).toContain('v2')
+      app.unmount()
+    })
+
+    it('NEG (owner Medium): source=restore but restoredFromVersion=null → NO badge (badge never keys on source)', async () => {
+      const { container, app } = mountPanel({
+        // A `source='restore'` write with a NULL back-reference (PIT-resurrect / reset / lossy-retype-revert
+        // shape). The badge must key on `restoredFromVersion != null`, NEVER on `source === 'restore'`.
+        revisions: [rev(4, 'update', { source: 'restore', restoredFromVersion: null }), rev(1, 'create')],
+      })
+      await flushUi()
+      expect(container.querySelector('[data-test="record-history-restored-from"]')).toBeNull()
+      app.unmount()
+    })
+  })
 })
