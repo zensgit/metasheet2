@@ -182,11 +182,13 @@ function assertPlmAutoPersistSourceConfigSafe(config) {
   // pre-I/O safety boundary and must NOT lean on an upstream validator always being correct. A non-array
   // fieldMap, an EMPTY fieldMap, or ANY malformed entry (non-object, or a non-string / empty `target`) is
   // rejected here — before it can reach source read / provisioning / persist.
-  if (!config || typeof config !== 'object') configShapeInvalid('config_object_required')
+  // isPlainObject (module convention) rejects arrays-carrying-props and prototype-bearing objects that a
+  // bare `typeof x === 'object'` would wave through (owner P3, #4391).
+  if (!isPlainObject(config)) configShapeInvalid('config_object_required')
   if (!Array.isArray(config.fieldMap)) configShapeInvalid('fieldmap_array_required')
   if (config.fieldMap.length < 1) configShapeInvalid('fieldmap_empty')
   for (const entry of config.fieldMap) {
-    if (!entry || typeof entry !== 'object') configShapeInvalid('entry_object_required')
+    if (!isPlainObject(entry)) configShapeInvalid('entry_object_required')
     if (typeof entry.target !== 'string' || entry.target.length === 0) configShapeInvalid('entry_target_string_required')
     if (FORBIDDEN_FIELD_MAP_TARGETS.includes(entry.target)) {
       throw new StockPreparationPlmSourcePersistBridgeError(

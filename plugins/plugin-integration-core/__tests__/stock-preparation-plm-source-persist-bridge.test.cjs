@@ -320,6 +320,8 @@ run('config guard is fully shape-fail-closed: empty array + every malformed entr
     { fieldMap: [{ target: 42 }] },            // non-string target (was ACCEPTED)
     { fieldMap: [{ target: '' }] },            // empty-string target
     { fieldMap: [{ source: 'x', target: 'ok' }, {}] }, // one valid + one malformed → whole config rejected
+    (() => { const a = []; a.target = 'missingChildBom'; return { fieldMap: [a] } })(), // array-carrying-prop entry (owner P3)
+    { fieldMap: [Object.assign(Object.create({ target: 'ok' }), {})] }, // prototype-bearing entry (owner P3)
   ]
   for (const bad of badConfigs) {
     assert.throws(() => assertPlmAutoPersistSourceConfigSafe(bad), (error) =>
