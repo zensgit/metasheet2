@@ -36,6 +36,26 @@
 > DECIDED (resolve-at-submit inherited, concretized in §3.4 — no gate); OD-S7-5 and OD-S7-6 remain
 > OPEN. **Status stays PROPOSED — NOT
 > RATIFIED** — this amendment answers the round-1 review; the owner, not this document, ratifies it.
+>
+> **Amendment round 2 (2026-07-16, owner round-2 on PR #4356 head `db103d5bb` — 2 P1 / 1 P2 + two OD
+> rulings).** Resolutions, each with fresh `origin/main` code citations: **§3.2 per-type assignment
+> MATCHING semantics** (P1 — "read the active assignments" was under-specified; the check must match
+> the actor per `assignment_type` ∈ {user, role, source_queue} using the central engine's authoritative
+> predicate, quoted verbatim from `ApprovalBridgeService.ts:359-363`, with admin override applied ONLY
+> after that match fails); **§4.1 runtime fail-closed** (P1 — the 422 authoring gate alone leaves a
+> window: a dynamic-kind step reached at request creation or step-advance while the flag is off, the
+> resolver port is missing, or the resolver is unavailable must fail explicitly BEFORE any
+> assignment/instance mutation, never legacy admin fallback; "flag-off ⇒ byte-identical legacy
+> behavior" is now scoped to flows containing NO dynamic kind); **§7 S7-1 discriminated-union step
+> persistence contract** (P2 — a step is EITHER static OR dynamic, mutually exclusive;
+> `manager_at_level` must carry integer `level` ∈ [1, `MAX_MANAGER_CHAIN_LEVELS`], mirroring the
+> kernel's enum-strict validation at `ApprovalProductService.ts:512-519`; all malformed shapes 422 at
+> authoring; the OD-S7-2 leftover authoring max-N is settled = the same kernel constant). **OD-S7-5 is
+> DECIDED = (d)** (context.services narrow org-scoped resolver port; no runtime dependency on the whole
+> core package, no resolver copy; missing port ⇒ fail-closed per §4.1) and **OD-S7-6 is DECIDED = (a)**
+> (authoring-time explicit warning, no hard save-block; the correctness gate is the runtime
+> block-with-error). OD ledger after round 2: OD-S7-1/2/4/5/6 DECIDED; OD-S7-3 DECIDED-CONDITIONAL
+> (gated on §3.3 landing). **Status stays PROPOSED — NOT RATIFIED.**
 
 ---
 
@@ -233,6 +253,39 @@ fields alone:
   authorization check to read this table is what makes both sources authoritative uniformly; it also
   means `isApproverAllowed`'s current legacy-only read (`index.cjs:20766-20768`) is superseded, not
   duplicated.
+- **Per-type matching semantics (P1, owner round-2 amendment — LOCKED, not implementation detail):**
+  "read the active assignments" is not a sufficient specification, because `approval_assignments`
+  rows carry `assignment_type ∈ {user, role, source_queue}` — `buildAttendanceApprovalAssignments`
+  writes all three today (`user`/`role` from the step at `index.cjs:20574-20581`, `role:'admin'` +
+  `source_queue:<permission>` in the legacy-empty fallback at `index.cjs:20583-20588`). The actor
+  match MUST therefore be per-type, and it MUST adopt the central engine's authoritative predicate
+  **verbatim** — the one the kernel's pending-tab visibility already uses
+  (`packages/core-backend/src/services/ApprovalBridgeService.ts:359-363`, under `is_active = TRUE`
+  at `:358`):
+
+  ```sql
+  (assignment_type = 'user' AND assignee_id = $actorId)
+  OR (assignment_type = 'role' AND assignee_id = ANY($actorRoleIds))
+  OR (assignment_type = 'source_queue' AND assignee_id = ANY($actorPermissions))
+  ```
+
+  i.e. `user` matches on actor identity, `role` matches when `assignee_id` is one of the actor's
+  role ids, `source_queue` matches when `assignee_id` is one of the actor's permission strings
+  (that is what the kernel binds into the third parameter — `actorPermissions`,
+  `ApprovalBridgeService.ts:346-347`; note also the kernel's `'__none__'` sentinel for empty
+  role/permission arrays at `:305-306`, so an actor with no roles/permissions can never match via an
+  empty-`ANY` accident). **Admin override (`hasAttendanceAdminAccess`) is applied ONLY AFTER this
+  per-type match fails** — override is a fallback for a non-matching actor, never a substitute for
+  evaluating the match. Failure modes this per-type contract prevents, named explicitly:
+  - *Role/queue approvers locked out:* a check that only implements `assignee_id === actorId`
+    (user-equality) would 403 every legitimate role-assigned approver and every legacy-fallback
+    queue approver (`role:'admin'` / `source_queue:'attendance:approve'` rows,
+    `index.cjs:20583-20588`) — breaking today's working legacy flows the moment S7-0 lands.
+  - *Anyone-can-act degeneration:* a check that only asserts "an active assignment row EXISTS for
+    the current node" without matching it against the actor is vacuously true for every pending
+    step (every step has at least one active row — the legacy fallback guarantees it), collapsing
+    the authorization back to the broad scheduler-scope gate — the exact P1 this section exists to
+    close.
 - **Symmetry:** the same check MUST run before both branches take effect — i.e. immediately inside (or
   ahead of) the `if (action === 'approve')` block AND a new equivalent branch for
   `action === 'reject'`, both before `newStatus` is computed (`index.cjs:28929-28931`) and before any
@@ -242,13 +295,20 @@ fields alone:
   admin who is not the resolved assignee may still act. This override MUST apply identically to reject
   (today reject has no check to override, so the admin override is currently moot for reject — fixing
   the gap and preserving the override are the same change). Reuse `hasAttendanceAdminAccess` unchanged;
-  do not introduce a second admin-detection path.
+  do not introduce a second admin-detection path. Ordering per the round-2 lock-down above: per-type
+  match first, override only on non-match.
 - **Negative real-DB tests, required per slice that touches this path (S7-0, and re-verified by every
   slice that writes a new assignment kind — S7-2/S7-3/S7-4):** a scope-authorized-but-not-assigned actor
   must be rejected (403) on BOTH approve and reject; the resolved/legacy assignee must succeed on
   whichever action they attempt; an admin override must still succeed on both without being the
   assignee; a mutation test must prove the old code path (reject with no check) fails the "unassigned
-  actor is rejected" assertion before the fix and passes after.
+  actor is rejected" assertion before the fix and passes after. **Round-2 addition: positive AND
+  negative tests for ALL THREE `assignment_type` values, each on BOTH approve and reject** — (i)
+  `user`: the assigned user succeeds, a different scope-authorized user 403s; (ii) `role`: an actor
+  holding the assigned role succeeds, an actor without it 403s; (iii) `source_queue`: an actor holding
+  the assigned permission string succeeds, an actor without it 403s — six positive + six negative legs
+  minimum, so a user-equality-only implementation and an exists-any-row implementation both fail the
+  suite (each would pass a subset; only the correct per-type predicate passes all twelve).
 
 ### 3.3 Org anchor for the resolver's directory lookup (P1, owner round-1 amendment)
 
@@ -380,6 +440,52 @@ only the NEW dynamic-source-unresolvable case this lock introduces. A missing di
 runtime for a dynamic-kind step (no manager linked, vacant dept head, chain shorter than the configured
 level) is a hard block, not a silent skip, silent auto-approve, or silent admin-route.
 
+### 4.1 Runtime fail-closed for an unavailable resolver (P1, owner round-2 amendment)
+
+The 422 authoring gate (§7 S7-1) covers flow **create/update** only. That alone leaves a window the
+owner's round-2 P1 names: a dynamic-kind step can already be persisted (authored while the flag was on
+and the resolver available) and then be **reached at runtime** under different conditions — the flag
+has since been turned off, the OD-S7-5(d) resolver port was never injected in this deployment, or the
+resolver call fails. §4's block-with-error ruling covers the *unresolvable-relation* case (resolver ran,
+found nothing); this subsection locks the *resolver-unavailable* case with the same posture:
+
+- **Trigger set (any of):** the dynamic-assignee flag is OFF; the `context.services` resolver port
+  (OD-S7-5(d), §6) is absent (`context?.services?.<port>` undefined — same presence-check idiom the
+  plugin already uses for `workdayCalendar` at `index.cjs:21095`); or the port call throws / is
+  otherwise unavailable.
+- **Where it must be enforced — BOTH runtime encounters with a dynamic kind:**
+  1. **Request creation** — every request-create path that builds assignments for step 0
+     (`buildAttendanceApprovalAssignments(steps, 0)` call sites: `index.cjs:24972`, `27537`, `27864`,
+     `28279`, `28783`). If any step in the flow (not just step 0 — a flow whose LATER step is dynamic
+     must not be allowed to start and then strand mid-flight) carries a dynamic `kind` while the
+     trigger set holds, the request-create MUST fail with an explicit error (surfaced as 422 to the
+     client, consistent with §7 S7-1's error-code family) **before** the request/instance/assignment
+     inserts run.
+  2. **Step-advance** — `resolveRequest`'s non-final branch (`index.cjs:28949-28955`), where the next
+     step's assignments are rebuilt. If the NEXT step carries a dynamic `kind` while the trigger set
+     holds, the advance MUST fail explicitly **before** the `UPDATE approval_instances`
+     (`index.cjs:28936-28945`) and before `replaceAttendanceApprovalAssignments` — the check runs
+     first, and since the whole branch already executes inside `db.transaction`
+     (`index.cjs:28878`), any later-detected failure must still roll back atomically, leaving no
+     partial mutation (no advanced `current_step`, no swapped assignments, no appended record).
+- **NEVER the legacy admin fallback.** Under no trigger condition may a dynamic-kind step fall
+  through to the `role:'admin'` + `source_queue` legacy-empty fallback (`index.cjs:20583-20588`).
+  That fallback remains reserved exclusively for LEGACY static steps with empty
+  `approverUserIds`/`approverRoleIds`.
+- **Flag-off byte-identity, re-scoped:** the §5 "flag-off must be byte-identical to today's behavior"
+  boundary applies ONLY to flows containing **no** dynamic kind. A flow that contains a dynamic kind
+  has no legacy behavior to be byte-identical to — for such flows, flag-off means explicit failure
+  (this subsection), not silent legacy routing.
+- **Required tests (owner-named, both paths):**
+  - (a) flag ON → author a dynamic-kind flow (accepted) → flip flag OFF → submit a request against
+    that flow → request creation fails explicitly; no `attendance_requests` /
+    `approval_instances` / `approval_assignments` rows persisted.
+  - (b) flag ON → create a request on a flow whose step 2 is dynamic → flip flag OFF → step 1
+    assignee calls approve (in this engine the advance to step 2 happens synchronously inside that
+    call, `index.cjs:28935-28955`) → the call fails explicitly and the transaction rolls back; the
+    instance still shows step 1 pending semantics (no `current_step` bump, no assignment swap, no
+    appended approval record, no admin-fallback rows).
+
 ---
 
 ## 5. Hard boundaries
@@ -413,10 +519,15 @@ level) is a hard block, not a silent skip, silent auto-approve, or silent admin-
   multi-org/cross-base resolution, added in this slice.
 - **No auto-enable.** Ships behind a default-OFF flag (name TBD at implementation time, e.g.
   `ATTENDANCE_APPROVAL_DYNAMIC_ASSIGNEE_SOURCES_ENABLED`); flag-off must be byte-identical to today's
-  `{name, approverUserIds, approverRoleIds}`-only behavior. **Amendment (§7 S7-0/S7-1): flag-off does
+  `{name, approverUserIds, approverRoleIds}`-only behavior **for flows containing no dynamic kind —
+  round-2 re-scoping (§4.1): a flow that DOES contain a dynamic kind has no legacy behavior to be
+  byte-identical to; under flag-off it fails explicitly at request creation / step-advance, never
+  routes via the legacy admin fallback.** **Amendment (§7 S7-0/S7-1): flag-off does
   NOT mean "inert config accepted silently" — a step authored with a `kind` value that is either
   flag-disabled or has no implemented resolver yet MUST be rejected fail-closed (422) at
-  create/update time, never accepted and left dormant. See §7.**
+  create/update time, never accepted and left dormant (see §7); and per §4.1 the same fail-closed
+  posture applies at RUNTIME for dynamic-kind steps already persisted (flag-off / port missing /
+  resolver unavailable ⇒ explicit failure before any mutation).**
 - **Zero runtime in this PR.** This lock is docs-only. No changes to `index.cjs`,
   `ApprovalAssigneeResolver.ts`, `ApprovalDirectoryOrg.ts`, or the FE editor land here.
 - **Checked for cross-lock constraints, found none.** Per the dispatch's request, I grepped the three
@@ -435,18 +546,21 @@ level) is a hard block, not a silent skip, silent auto-approve, or silent admin-
 | OD | Question | Options | Status |
 |---|---|---|---|
 | **OD-S7-1** | Fallback behavior for an unresolvable dynamic assignee (§4) | (a) block-with-error · (b) fallback-to-named-role · (c) route-to-admin (existing precedent, `index.cjs:20583-20588`) | **DECIDED (owner round-1, 2026-07-16): (a) block-with-error, LOCKED.** See §4. |
-| **OD-S7-2** | Multi-level depth semantics (§2.3) | (i) surface `continuous_managers` only (chain-as-set) · (ii) surface `manager_at_level` only (per-level sequential/B1) · (iii) surface both · plus: attendance-side authoring max-N, independent of the kernel's env-tunable 10/50 cap | **DECIDED (owner round-1, 2026-07-16): (ii) `manager_at_level` only for v1.** `continuous_managers` moves to explicitly-OUT-of-v1 (§8) — quorum-semantics gap, re-entry condition = an attendance quorum/count-of-acted-assignees engine. See §2.3 amendment note and §3. |
+| **OD-S7-2** | Multi-level depth semantics (§2.3) | (i) surface `continuous_managers` only (chain-as-set) · (ii) surface `manager_at_level` only (per-level sequential/B1) · (iii) surface both · plus: attendance-side authoring max-N, independent of the kernel's env-tunable 10/50 cap | **DECIDED (owner round-1, 2026-07-16): (ii) `manager_at_level` only for v1.** `continuous_managers` moves to explicitly-OUT-of-v1 (§8) — quorum-semantics gap, re-entry condition = an attendance quorum/count-of-acted-assignees engine. See §2.3 amendment note and §3. **Round-2 addendum — the leftover authoring max-N is settled: attendance's authoring-side maximum `level` = the kernel's `MAX_MANAGER_CHAIN_LEVELS` constant itself (`ApprovalDirectoryOrg.ts:101`; env-resolved, default 10 at `:76`, hard ceiling 50 at `:79`), NOT an independent attendance-side number — one constant, two surfaces, no drift. See §7 S7-1's discriminated-union contract.** |
 | **OD-S7-3** | Department-head / direct-manager definition — already decided at the kernel (§2.1/§2.2, data-source-driven: `is_manager` flag → legacy `leader_in_dept` fallback for manager; `dept_manager_userid_list` for dept head), not role-based. Does attendance's new step kinds inherit this exact definition? | (a recommended) yes, byte-identical semantics regardless of OD-S7-5's answer — two approval surfaces disagreeing about "who is my manager" would be a worse outcome than either being wrong consistently · (b) attendance defines its own (would require its own design rationale; not recommended without a stated reason) | **DECIDED-CONDITIONAL (owner round-1, 2026-07-16): (a) yes, byte-identical — for `direct_manager`/`dept_head`/`manager_at_level` only (OD-S7-2 narrows the kind set), and GATED on the §3.3 org-anchor fix landing first** — byte-identical semantics only holds if the underlying account pick is anchored to the correct org; an unscoped pick could be byte-identical to the WRONG org's kernel answer. |
 | **OD-S7-4** | Stale-org-data / resolve-timing posture — already decided at the kernel (§2, "freeze point": resolve-at-submit, frozen into the requester snapshot, never re-queried live at dispatch/admin-jump/return). Does attendance inherit this same point-in-time-freeze? | (a recommended) yes — inherit resolve-at-submit; a manager reorg mid-flight cannot silently change who can approve an in-flight request, matching the kernel's deliberate posture · (b) resolve-at-each-step (more "live," but reopens the exact staleness/race class the kernel closed; would need its own justification) | **DECIDED (owner round-1, 2026-07-16): (a) yes — inherit resolve-at-submit, concretized at named extension points (§3.4).** |
-| **OD-S7-5** | **Architecture: does plugin-attendance reuse the kernel's resolver/org-relation code, or reimplement it?** This is upstream of OD-S7-3/OD-S7-4 in practice — if (a) is chosen, those two collapse automatically; if (b), they become hand-verified invariants. | (a) add `@metasheet/core-backend` as a **real runtime** dependency of `plugin-attendance` (pnpm workspace already includes both `packages/*` and `plugins/*`, so a `workspace:*` dependency resolves) and call the existing `resolveApprovalRequesterOrgRelations`/`resolveApprovalAssignees`-equivalent read paths directly — zero logic duplication, automatic parity with the kernel's already-hardened cycle guards/self-exclusion/B3 precedence. **Caveat, verified:** every existing plugin→`@metasheet/core-backend` import found in this repo (`plugin-audit-logger`, `plugin-view-gantt`, `plugin-intelligent-restore`) is `import type` only — compile-time-erased, zero runtime dependency. This would be **the first runtime cross-package import from a plugin**, a new precedent, not an established pattern · (b) duplicate the read-only `directory_*` SELECT + chain-walk logic locally inside `index.cjs`, consistent with the plugin's current fully self-contained packaging (only `zod` as a dependency, no `src/` build step) — but forks ~150 lines of already-hardened logic (cycle guard, self-exclusion, B3 dual-source precedence, dense-chain walk) and creates an ongoing drift risk between the two approval surfaces · (c) don't wire attendance's own resolution this slice — migrate attendance approval-flow creation to route through `ApprovalProductService.createApproval` entirely, retiring `buildAttendanceApprovalAssignments`. Much larger, cross-cutting refactor (touches the whole `attendance_approval_flows` runtime, not just assignee resolution); likely out of scope for a first S7 slice · **(d) [RECOMMENDED, owner round-1, 2026-07-16] host-injected, narrow, org-scoped resolver PORT via `context.services`**, following the EXISTING `workdayCalendar` capability pattern byte-for-byte: `PluginServices.workdayCalendar` is declared as an optional, narrowly-typed port (`packages/core-backend/src/types/plugin.ts:958-980`, the port's `resolve(orgId, asOf)` signature is itself org-scoped by construction — direct precedent for §3.3's org-anchor requirement); the host registers a per-plugin binding at plugin-load time (`packages/core-backend/src/index.ts:1715-1719`, tracked via `registerPluginWorkdayCalendarProvider`, `index.ts:939-949`, unbound on plugin reload/deactivate, `index.ts:951-958`); the CONSUMER checks `context?.services?.<port>?.<method>` before calling (`plugin-attendance/index.cjs:21095-21098`, itself the PROVIDER side of that particular port — S7's new port would run the same shape in the opposite direction: core-backend as PROVIDER, plugin-attendance as CONSUMER). This gets (a)'s "call the kernel's hardened logic directly, zero duplication" property without (a)'s "first runtime cross-package import from a plugin" precedent-break, and without (b)'s ~150-line fork/drift risk — the kernel code stays inside `packages/core-backend`'s own process boundary; only a narrow, typed function crosses via `context.services`, exactly like `workdayCalendar` already does today for the reverse (attendance→approval) direction. | **OPEN — recommendation added, not yet owner-ratified.** (d) is the owner's stated preference ("narrow host-injected resolver port") but the OD itself remains open pending explicit architecture ratification; (a)/(b)/(c) stay listed for completeness. |
-| **OD-S7-6** | Unlinked-directory / no-sync precondition. `resolveApprovalRequesterOrgRelations` returns `{}` for any requester with no linked directory account (`ApprovalDirectoryOrg.ts:202`) — meaning every dynamic-source step for a not-yet-synced or purely-local user resolves empty on day one, for every such user, invisibly. Should attendance authoring proactively warn/guard when picking a dynamic-source kind for an org without directory sync configured, or is this left to fall through to OD-S7-1's fallback at runtime? | (a) authoring-time warning only (mirrors A1's existing soft-warning idiom for empty static approvers, `attendanceApprovalSteps.ts:126-141`) — non-blocking, surfaces the risk without hard-gating · (b) no authoring-time signal; rely entirely on the OD-S7-1 runtime fallback · (c) hard-block authoring a dynamic-source step for an org with zero linked directory accounts | OPEN — unchanged by this amendment. |
+| **OD-S7-5** | **Architecture: does plugin-attendance reuse the kernel's resolver/org-relation code, or reimplement it?** This is upstream of OD-S7-3/OD-S7-4 in practice — if (a) is chosen, those two collapse automatically; if (b), they become hand-verified invariants. | (a) add `@metasheet/core-backend` as a **real runtime** dependency of `plugin-attendance` (pnpm workspace already includes both `packages/*` and `plugins/*`, so a `workspace:*` dependency resolves) and call the existing `resolveApprovalRequesterOrgRelations`/`resolveApprovalAssignees`-equivalent read paths directly — zero logic duplication, automatic parity with the kernel's already-hardened cycle guards/self-exclusion/B3 precedence. **Caveat, verified:** every existing plugin→`@metasheet/core-backend` import found in this repo (`plugin-audit-logger`, `plugin-view-gantt`, `plugin-intelligent-restore`) is `import type` only — compile-time-erased, zero runtime dependency. This would be **the first runtime cross-package import from a plugin**, a new precedent, not an established pattern · (b) duplicate the read-only `directory_*` SELECT + chain-walk logic locally inside `index.cjs`, consistent with the plugin's current fully self-contained packaging (only `zod` as a dependency, no `src/` build step) — but forks ~150 lines of already-hardened logic (cycle guard, self-exclusion, B3 dual-source precedence, dense-chain walk) and creates an ongoing drift risk between the two approval surfaces · (c) don't wire attendance's own resolution this slice — migrate attendance approval-flow creation to route through `ApprovalProductService.createApproval` entirely, retiring `buildAttendanceApprovalAssignments`. Much larger, cross-cutting refactor (touches the whole `attendance_approval_flows` runtime, not just assignee resolution); likely out of scope for a first S7 slice · **(d) [RECOMMENDED, owner round-1, 2026-07-16] host-injected, narrow, org-scoped resolver PORT via `context.services`**, following the EXISTING `workdayCalendar` capability pattern byte-for-byte: `PluginServices.workdayCalendar` is declared as an optional, narrowly-typed port (`packages/core-backend/src/types/plugin.ts:958-980`, the port's `resolve(orgId, asOf)` signature is itself org-scoped by construction — direct precedent for §3.3's org-anchor requirement); the host registers a per-plugin binding at plugin-load time (`packages/core-backend/src/index.ts:1715-1719`, tracked via `registerPluginWorkdayCalendarProvider`, `index.ts:939-949`, unbound on plugin reload/deactivate, `index.ts:951-958`); the CONSUMER checks `context?.services?.<port>?.<method>` before calling (`plugin-attendance/index.cjs:21095-21098`, itself the PROVIDER side of that particular port — S7's new port would run the same shape in the opposite direction: core-backend as PROVIDER, plugin-attendance as CONSUMER). This gets (a)'s "call the kernel's hardened logic directly, zero duplication" property without (a)'s "first runtime cross-package import from a plugin" precedent-break, and without (b)'s ~150-line fork/drift risk — the kernel code stays inside `packages/core-backend`'s own process boundary; only a narrow, typed function crosses via `context.services`, exactly like `workdayCalendar` already does today for the reverse (attendance→approval) direction. | **DECIDED (owner round-2, 2026-07-16): (d) — `context.services` narrow, org-scoped resolver port.** Owner's ruling: the plugin must NOT take a runtime dependency on the whole core package (rules out (a)) and must NOT copy the resolver logic locally (rules out (b)); a dynamic flow encountered while the port is missing fails closed per §4.1 (never legacy admin fallback). (a)/(b)/(c) remain listed as the considered-and-rejected menu. |
+| **OD-S7-6** | Unlinked-directory / no-sync precondition. `resolveApprovalRequesterOrgRelations` returns `{}` for any requester with no linked directory account (`ApprovalDirectoryOrg.ts:202`) — meaning every dynamic-source step for a not-yet-synced or purely-local user resolves empty on day one, for every such user, invisibly. Should attendance authoring proactively warn/guard when picking a dynamic-source kind for an org without directory sync configured, or is this left to fall through to OD-S7-1's fallback at runtime? | (a) authoring-time warning only (mirrors A1's existing soft-warning idiom for empty static approvers, `attendanceApprovalSteps.ts:126-141`) — non-blocking, surfaces the risk without hard-gating · (b) no authoring-time signal; rely entirely on the OD-S7-1 runtime fallback · (c) hard-block authoring a dynamic-source step for an org with zero linked directory accounts | **DECIDED (owner round-2, 2026-07-16): (a) — authoring-time explicit warning, NO hard save-block.** The correctness gate is the RUNTIME block-with-error (§4 / §4.1), not the authoring gate — this deliberately allows a configure-first-sync-later rollout (author the dynamic flow before directory sync is wired, warned but not blocked) without ever risking silent reassignment: an unresolvable step still hard-blocks at runtime. Extends the A1 soft-warning idiom (`attendanceApprovalSteps.ts:126-141`). |
 
-OD-S7-1 and OD-S7-2 are now DECIDED per explicit owner ruling (round-1, 2026-07-16). OD-S7-3 is
-DECIDED-CONDITIONAL (byte-identical inheritance locked, gated on the §3.3 org-anchor fix landing
-first). OD-S7-4 is DECIDED (resolve-at-submit inherited, concretized in §3.4 — no gate).
-OD-S7-5 gains a marked recommendation but remains open pending explicit architecture
-ratification. OD-S7-6 is untouched. **None of this flips the document's own Status (front matter) to
-RATIFIED** — that is a separate, owner-only action following re-review of this amendment.
+OD ledger after round 2 (2026-07-16): **OD-S7-1 DECIDED** (block-with-error, round-1), **OD-S7-2
+DECIDED** (`manager_at_level` only, round-1; authoring max-N settled = `MAX_MANAGER_CHAIN_LEVELS`,
+round-2), **OD-S7-3 DECIDED-CONDITIONAL** (byte-identical inheritance locked, gated on the §3.3
+org-anchor fix landing first), **OD-S7-4 DECIDED** (resolve-at-submit inherited, concretized in §3.4
+— no gate), **OD-S7-5 DECIDED** ((d) `context.services` narrow org-scoped resolver port, round-2),
+**OD-S7-6 DECIDED** ((a) authoring warning + runtime hard block, round-2). No OD remains OPEN;
+OD-S7-3's condition (§3.3 lands first) is the only outstanding gate. **None of this flips the
+document's own Status (front matter) to RATIFIED** — that is a separate, owner-only action following
+re-review of this amendment.
 
 ---
 
@@ -468,15 +582,22 @@ review with 0 P1/P2 before merge — the same completion bar A1 used
   independent of S7's new kinds (the reject-path gap is pre-existing against LEGACY `approverUserIds`/
   `approverRoleIds` too) and is a hard prerequisite before S7-2 starts writing dynamic assignments —
   writing a correct dynamic assignee without this fix is exactly the vulnerability the owner's P1
-  finding named. Real-DB tests per §3.2's required-test list (unassigned-actor-rejected on both
-  actions, resolved/legacy assignee succeeds, admin override succeeds without being the assignee,
-  mutation test proving the pre-fix reject path lets an unassigned actor through).
-- **S7-1 — contract + extension point + fail-closed authoring gate (amended).** Resolves OD-S7-5
-  (architecture) first, since it gates everything downstream. Extends the `attendance_approval_flows`
-  step JSON contract with an optional `kind` field (backward compatible — absent `kind` keeps today's
-  `user`/`role` behavior byte-for-byte); removes the two silent-drop layers (`approvalStepSchema`
-  gains the new optional fields or `.passthrough()` scoped correctly; `normalizeApprovalSteps` stops
-  reconstructing from a three-key allowlist). **Amendment (P2, owner round-1): schema-accepting a
+  finding named. **Round-2 lock-down: the check's matching semantics are per-`assignment_type`,
+  adopting the `ApprovalBridgeService.ts:359-363` predicate verbatim (§3.2) — `user` on actor id,
+  `role` on the actor's role ids, `source_queue` on the actor's permission strings — with the admin
+  override applied only after a failed match.** Real-DB tests per §3.2's required-test list
+  (unassigned-actor-rejected on both actions, resolved/legacy assignee succeeds, admin override
+  succeeds without being the assignee, mutation test proving the pre-fix reject path lets an
+  unassigned actor through) **plus the round-2 twelve-leg matrix: positive + negative per
+  `assignment_type` ∈ {user, role, source_queue}, each on BOTH approve and reject.**
+- **S7-1 — contract + extension point + fail-closed authoring gate (amended).** Implements the
+  OD-S7-5(d) architecture (DECIDED, §6 — `context.services` resolver port; the port's TYPE/injection
+  seam lands here even though the first consuming resolver arrives in S7-2). Extends the
+  `attendance_approval_flows` step JSON contract with an optional `kind` field (backward compatible —
+  absent `kind` keeps today's `user`/`role` behavior byte-for-byte); removes the two silent-drop
+  layers (`approvalStepSchema` gains the new optional fields — NOT blanket `.passthrough()`, see the
+  discriminated union below; `normalizeApprovalSteps` stops reconstructing from a three-key
+  allowlist). **Amendment (P2, owner round-1): schema-accepting a
   `kind` value is NOT sufficient — the create (`POST /api/attendance/approval-flows`,
   `index.cjs:30300-30351`) and update (`PUT /api/attendance/approval-flows/:id`, `index.cjs:30353+`)
   route handlers, both of which already call `normalizeApprovalSteps` on the parsed steps before
@@ -490,9 +611,36 @@ review with 0 P1/P2 before merge — the same completion bar A1 used
   never round-trip inert with no static approvers and no working resolver, silently falling through to
   the legacy admin-queue fallback (`index.cjs:20583-20588`) at runtime. `continuous_managers` is
   EXCLUDED from the acceptable-kind set even once the flag is on and even after any future re-entry
-  work (§8) — its exclusion is a v1-scope decision (OD-S7-2), not a flag state.
+  work (§8) — its exclusion is a v1-scope decision (OD-S7-2), not a flag state.** The authoring gate is
+  complemented by the §4.1 RUNTIME fail-closed gate (P1, round-2) for dynamic-kind steps that were
+  validly authored and are later reached under flag-off / port-missing / resolver-unavailable
+  conditions.
+
+  **Round-2 amendment (P2) — persisted step-shape contract is a DISCRIMINATED UNION, locked:**
+  a persisted step is EITHER **static** — `{name?, approverUserIds?, approverRoleIds?}`, NO `kind`
+  key — OR **dynamic** — `{name?, kind, ...kind-specific params}`, NO `approverUserIds`/
+  `approverRoleIds` keys. The two shapes are mutually exclusive; a step carrying both a `kind` and
+  either static approver array MUST 422 at create/update (mixing would create an ambiguous
+  precedence question — does the static list back-stop the dynamic resolution? — that this lock
+  refuses to leave implicit; a backstop, if ever wanted, is OD-S7-1(b), which the owner did not
+  choose). Per-kind params, mirroring the kernel's own discriminated union
+  (`packages/core-backend/src/types/approval-product.ts:145-166`):
+  - `kind: 'direct_manager'` — no params;
+  - `kind: 'dept_head'` — no params;
+  - `kind: 'manager_at_level'` — REQUIRED `level`: integer, `1 ≤ level ≤ MAX_MANAGER_CHAIN_LEVELS`
+    (the kernel constant, `ApprovalDirectoryOrg.ts:101` — env-resolved via
+    `APPROVAL_MANAGER_CHAIN_MAX_LEVELS`, default 10 at `:76`, hard ceiling 50 at `:79`). This
+    mirrors the kernel's enum-strict validation byte-for-byte: `ApprovalProductService.ts:512-519`
+    rejects a missing / non-number / non-integer / `< 1` / `> MAX_MANAGER_CHAIN_LEVELS` level with
+    an explicit validation failure ("never silently defaulted (enum-strictness)", `:513-514`), and
+    an unrecognized `kind` falls to the `default:` rejection arm (`ApprovalProductService.ts:529-531`).
+    Attendance's authoring gate MUST reject the same five malformed shapes the same way — unknown
+    `kind`, missing `level`, non-integer `level`, out-of-range `level`, static/dynamic key mixing —
+    all `HttpError(422, ...)`, never coerced, defaulted, or stripped. This also settles OD-S7-2's
+    leftover authoring max-N: the attendance-side maximum IS `MAX_MANAGER_CHAIN_LEVELS` — one shared
+    constant, no independent attendance cap to drift.
 - **S7-2 — 直属上级.** Wires `buildAttendanceApprovalAssignments` to resolve `kind:'direct_manager'`
-  steps via the OD-S7-5 path chosen in S7-1, reading ONLY the frozen `requesterSnapshot.managerId`
+  steps via the OD-S7-5(d) resolver port (DECIDED, §6), reading ONLY the frozen `requesterSnapshot.managerId`
   hydrated at creation (§3.4) — never a live directory re-query. Real-DB tests: linked requester
   resolves correctly, self-exclusion, unlinked requester triggers OD-S7-1's `block-with-error`
   (§4, now LOCKED), org-anchor two-org/one-local-user test (§3.3), plus the S7-0 authorization tests
@@ -513,19 +661,30 @@ review with 0 P1/P2 before merge — the same completion bar A1 used
   gains a step-kind picker offering `direct_manager`/`dept_head`/`manager_at_level` ONLY (NOT
   `continuous_managers` — narrowed per OD-S7-2); preview JSON reflects the new shape; the existing
   empty-approver warning (`stepHasNoApprover`, `attendanceApprovalSteps.ts:122-124`) is extended per
-  OD-S7-6's chosen posture (still open). Payload-shape discipline from A1
+  OD-S7-6's DECIDED posture (§6, round-2: (a) explicit authoring-time warning for dynamic-kind steps
+  in an org without directory linkage, NO hard save-block — the runtime block-with-error is the
+  correctness gate). Payload-shape discipline from A1
   (`{name,requestType,steps,isActive,orgId}` unchanged at the top level) carries forward unchanged.
 
-**Completion bar per slice (amended):** real-DB tests including (1) a negative/mutation check for the
-fallback path locked in OD-S7-1 — an unresolvable-assignee test must fail the OLD way (silent skip or
-silent auto-approve) before the fix and pass the NEW way (block-with-error) after; (2) for S7-0 and
-every kind-resolving slice (S7-2/S7-3/S7-4): the §3.2 authorization negative tests (unassigned actor
-rejected on both approve and reject, admin override preserved, mutation test on the pre-fix reject
-gap); (3) for every kind-resolving slice: the §3.3 org-anchor two-org/one-local-user test; (4) for
-every kind-resolving slice: the §3.4 freeze test (mutate directory relations between step 1 and step 2,
-assert the assignee does not change); (5) for S7-1: the fail-closed-422 test above (an unimplemented or
-flag-off `kind` is rejected at create/update, not accepted); (6) flag-off byte-identity test;
-(7) adversarial review 0 P1/P2; (8) verification MD.
+**Completion bar per slice (amended round 2):** real-DB tests including (1) a negative/mutation check
+for the fallback path locked in OD-S7-1 — an unresolvable-assignee test must fail the OLD way (silent
+skip or silent auto-approve) before the fix and pass the NEW way (block-with-error) after; (2) for S7-0
+and every kind-resolving slice (S7-2/S7-3/S7-4): the §3.2 authorization negative tests (unassigned
+actor rejected on both approve and reject, admin override preserved, mutation test on the pre-fix
+reject gap) **including the round-2 twelve-leg per-`assignment_type` matrix (positive + negative for
+`user`/`role`/`source_queue`, each on approve AND reject)**; (3) for every kind-resolving slice: the
+§3.3 org-anchor two-org/one-local-user test; (4) for every kind-resolving slice: the §3.4 freeze test
+(mutate directory relations between step 1 and step 2, assert the assignee does not change); (5) for
+S7-1: the fail-closed-422 authoring tests — an unimplemented or flag-off `kind` is rejected at
+create/update, not accepted, **plus the round-2 discriminated-union rejection matrix: unknown `kind`,
+missing `level`, non-integer `level`, out-of-range `level` (0 and `MAX_MANAGER_CHAIN_LEVELS + 1`), and
+static/dynamic key mixing — each 422, each asserted on both create and update routes**; (6) **for the
+slice that lands the §4.1 runtime gate (S7-1, and re-verified by S7-2..S7-4): the two owner-named
+flag-flip paths — (a) flag-off between authoring and request submission ⇒ request creation fails with
+zero persisted rows; (b) flag-off between step 1 approval and the dynamic step 2 advance ⇒ the
+approve call fails and rolls back with the instance still pending at step 1**; (7) flag-off
+byte-identity test — scoped per §4.1 to flows with no dynamic kind; (8) adversarial review 0 P1/P2;
+(9) verification MD.
 
 ---
 
@@ -550,7 +709,10 @@ flag-off `kind` is rejected at create/update, not accepted); (6) flag-off byte-i
   something a future S7 sub-slice can add as a side effect.
 - **An unimplemented-or-flag-off `kind` value landing inert in the schema — NEW, amendment, §7
   S7-1.** Fail-closed 422 at authoring time, never a silent round-trip into a dormant admin-fallback
-  step.
+  step. **Round-2 extension (§4.1): the same fail-closed posture at RUNTIME — a persisted dynamic-kind
+  step reached at request creation or step-advance while the flag is off, the resolver port is missing,
+  or the resolver is unavailable fails explicitly before any assignment/instance mutation, never the
+  legacy admin fallback.**
 
 **Relation to the A1 observation window:** A1's own closeout note recommended the owner watch A1 live
 before deciding on A2: *"A1 落地后部署，建议 owner 在 live 环境目视审批流创建界面手感，再决定 A2"*
