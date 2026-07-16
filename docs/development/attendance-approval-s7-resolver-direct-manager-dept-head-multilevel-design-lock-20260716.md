@@ -1,9 +1,13 @@
 # 考勤审批人 resolver·直属上级/部门主管/多级上级(档 A2 / S7)design-lock — 2026-07-16
 
-> **Status: PROPOSED — NOT RATIFIED.** This document is drafted for owner review; it does not
-> self-ratify. Implementation (S7-0..S7-5, §7) may not start until this lock carries an explicit
-> owner ratification status flip (mirroring the `docs(approval): … lock — RATIFIED (owner …); status
-> flip, content unchanged` idiom used for #4196/#4203/#4239). Owner scope-opening ruling (2026-07-16,
+> **Status: RATIFIED (owner 2026-07-16; status flip, content unchanged).** Owner round-3 verdict:
+> APPROVE, 0 P1 / 0 P2, at head ee5634a5d — all round-2 findings substantively closed (three-type
+> matching semantics + 12-leg matrix; authoring + both runtime entries fail-closed, admin fallback
+> forbidden; discriminated union + level + enum-strict 422 matrix). Runtime remains separately
+> opt-in; slice order LOCKED: **S7-0 → S7-1 → S7-2/3/4 → S7-5**; `continuous_managers` stays OUT.
+> Non-blocking implementation note (owner): the S7-1 host port should expose the host-resolved
+> `MAX_MANAGER_CHAIN_LEVELS` (or a same-source validation method) so the plugin never re-parses
+> the env var into a second constant. Owner scope-opening ruling (2026-07-16,
 > per dispatch): v1 (A1, #3893) closed; vNext first slice = S7 resolver support for 直属上级
 > (direct manager) / 部门主管 (department head) / 多级上级 (multi-level up-chain). "A1 编辑器已经落地，
 > 底层 ApprovalAssigneeResolver 也已存在，产品价值比继续做视觉微调更高."
@@ -58,7 +62,7 @@
 > core package, no resolver copy; missing port ⇒ fail-closed per §4.1) and **OD-S7-6 is DECIDED = (a)**
 > (authoring-time explicit warning, no hard save-block; the correctness gate is the runtime
 > block-with-error). OD ledger after round 2: OD-S7-1/2/4/5/6 DECIDED; OD-S7-3 DECIDED-CONDITIONAL
-> (gated on §3.3 landing). **Status stays PROPOSED — NOT RATIFIED.**
+> (gated on §3.3 landing). **Status: RATIFIED per the owner 2026-07-16 verdict recorded in the header.**
 
 ---
 
