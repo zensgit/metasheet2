@@ -34,8 +34,10 @@ import {
   pruneRetainedCheckpoints,
 } from '../../src/multitable/history-trust-checkpoint'
 import { checkStrictEnablementPrecondition } from '../../src/multitable/history-trust-precondition'
-import { precheckSheetHistoryIntegrity } from '../../src/multitable/history-integrity-precheck'
+import { precheckSheetHistoryIntegrity, precheckSheetHistoryIntegrityStrict } from '../../src/multitable/history-integrity-precheck'
 import { SYSTEM_PEOPLE_SHEET_DESCRIPTION } from '../../src/multitable/system-sheet-predicate'
+import { db as kyselyDb } from '../../src/db/db'
+import { up as migrationUp } from '../../src/db/migrations/zzzz20260715180000_create_meta_history_trust_checkpoints'
 
 const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
 const TS = Date.now()
@@ -364,6 +366,30 @@ describeIfDatabase('W0-1 v3.7 L5 trust checkpoint (real DB)', () => {
     const res = await activate(S)
     const b = await q('SELECT data FROM meta_history_baselines WHERE checkpoint_id = $1 AND record_id = $2', [res.checkpointId, R])
     expect((b.rows[0] as { data: Record<string, unknown> }).data[NAME]).toBe('vintage-a')
+  })
+
+  // ── FORGED-MIGRATION (owner P1, verbatim: forge BEFORE migration up(), then run up()) ─────────────────
+  test('FORGED-MIGRATION: a sheet carrying the forged description sentinel BEFORE migration up() runs is NOT laundered — system_kind stays NULL and its broken chain is still strict-refused', async () => {
+    // (1) the forged sheet exists FIRST (what a pre-migration attacker controls: description is user-writable)
+    const S = `sheet_l5ck_forgedmig_${TS}`
+    await q('INSERT INTO meta_sheets (id, base_id, name, description) VALUES ($1,$2,$3,$4)', [S, BASE, 'forged', '__metasheet_system:people__'])
+    await q('INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6)', [`${S}_f`, S, 'Name', 'string', '{}', 1])
+    // broken chain: live v3 with only a v1 create captured (mid-chain hole).
+    await q('INSERT INTO meta_records (id, sheet_id, data, version) VALUES ($1,$2,$3::jsonb,3)', [`${S}_r`, S, JSON.stringify({ [`${S}_f`]: 'x' })])
+    await q(`INSERT INTO meta_record_revisions (id, sheet_id, record_id, version, action, source, changed_field_ids, patch, snapshot)
+             VALUES (gen_random_uuid(),$1,$2,1,'create','rest',ARRAY[]::text[],'{}'::jsonb,$3::jsonb)`, [S, `${S}_r`, JSON.stringify({ [`${S}_f`]: 'x' })])
+
+    // (2) run the L5 migration up() over it (idempotent IF NOT EXISTS everywhere) — the laundering window.
+    //     If anyone re-introduces a description/base_id sentinel backfill, this stamps the forged sheet and
+    //     the assertions below red.
+    await migrationUp(kyselyDb as never)
+
+    // (3) not laundered: no trusted identity minted from user-writable data…
+    const sk = await q('SELECT system_kind FROM meta_sheets WHERE id = $1', [S])
+    expect((sk.rows[0] as { system_kind: unknown }).system_kind).toBeNull()
+    // …and the forged sheet is NOT excluded: its broken chain is strict-refused like any user sheet.
+    const pool = poolManager.get()
+    expect(await precheckSheetHistoryIntegrityStrict(pool.query.bind(pool), S)).toEqual({ ok: false, reason: 'chain_hole' })
   })
 
   // ── system_kind NON-FORGEABLE ────────────────────────────────────────────────────────────────────────
