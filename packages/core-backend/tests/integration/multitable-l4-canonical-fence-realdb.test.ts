@@ -44,7 +44,8 @@
  *   UNFENCED entirely → L4-cov-services follow-up (no canonical fence at all — the residual bug class):
  *       automation update/create/delete/lock (automation-executor.ts), approval resultWriteback
  *       (automation-service.ts), formula-engine recompute (formula-engine.ts), approval-record projection
- *       (approval-record-projection-service.ts), field-undelete rehydration (flag HOLD), plugin delete's
+ *       (approval-record-projection-service.ts), field-undelete tombstone inbound-replay rehydration (4c-3, flag
+ *       HOLD — distinct from the config-restore config-undelete branch, which IS fenced: see l4cov B7), plugin delete's
  *       NON-transactional flag-off branch (records.ts, disclosed in-code as an "L4-SEAM" —
  *       `deleteRecordWithRecoverability` right above it IS fenced via `fenceWriterEntry`, but the D-1 flag-off
  *       `deleteRecord` branch cannot hold a txn-scoped advisory lock without the transaction wrap that path

@@ -20,10 +20,17 @@
  *                        records.ts::createRecord     ⇒ A1 (block still proceeds) RED.
  *   - auto-number backfill  same removal in auto-number-service.ts::backfillAutoNumberField ⇒ A2 RED.
  *   - form-submit        remove the block-check after `acquireAutoNumberSheetWriteLock` in the submit txn
- *                        ⇒ B1c/B2c (409 becomes 200) RED.
+ *                        ⇒ B1 (409 becomes 200) RED (B1c is the flag-off parity leg).
  *   - create-field backfill  (shares the backfill mutation) ⇒ B3 RED.
  *   - config-restore un-create / lossy-retype  remove `await fenceWriterEntry(query, sheetId)` from the branch's
  *                        txn entry ⇒ B4c / B5 (409 becomes the downstream status) RED.
+ *   - FORWARD field-delete route (`DELETE /fields/:fieldId`)  remove `await fenceWriterEntry(query, sheetId)`
+ *                        from the delete-field txn ⇒ B6 (409 becomes 200) RED. [re-gate P1: this route shared
+ *                        dropFieldCascade with un-create but was the ONE unfenced sibling — hole now closed + tested.]
+ *   - config-restore UNDELETE branch  remove `await fenceWriterEntry(query, sheetId)` from the undelete txn
+ *                        ⇒ B7 (409 becomes the downstream status) RED. [re-gate P2: the undelete fence was
+ *                        present but untested; B7 covers it. config-undelete stays flag-HOLD — this golden is
+ *                        the precondition to un-holding it.]
  *
  * P2-C hygiene (v3.7): all fixtures are isolated synthetic rows with unique ids; this file NEVER calls `setval`
  * on the shared `meta_record_chain_seq`; `afterAll` cleans up ONLY this suite's own rows. Locally the whole
@@ -55,6 +62,7 @@ const q = (sql: string, params?: unknown[]) => poolManager.get().query(sql, para
 
 const FLAG = 'MULTITABLE_ENABLE_WRITER_FENCE'
 const UNCREATE_FLAG = 'MULTITABLE_ENABLE_CONFIG_UNCREATE'
+const UNDELETE_FLAG = 'MULTITABLE_ENABLE_CONFIG_UNDELETE'
 const RETYPE_FLAG = 'MULTITABLE_ENABLE_FIELD_RETYPE_REVERT'
 const RETYPE_LOSSY_FLAG = 'MULTITABLE_ENABLE_FIELD_RETYPE_REVERT_LOSSY'
 
@@ -115,6 +123,10 @@ const restoreExecute = (body: Record<string, unknown>) => {
   actor = MEMBER
   return request(app).post(`/api/multitable/sheets/${SHEET}/config-restore-execute`).send(body)
 }
+const deleteField = (fieldId: string) => {
+  actor = MEMBER
+  return request(app).delete(`/api/multitable/fields/${fieldId}`)
+}
 
 /** Seed a field `create` config revision (un-create eligible: isSupportedUncreate). */
 const insertFieldCreateRev = async (fieldId: string, name: string): Promise<string> => {
@@ -123,6 +135,16 @@ const insertFieldCreateRev = async (fieldId: string, name: string): Promise<stri
     `INSERT INTO meta_config_revisions (sheet_id, entity_type, entity_id, action, before, after, changed_keys, batch_id, actor_id, source)
      VALUES ($1,'field',$2,'create',NULL,$3::jsonb,$4::text[],gen_random_uuid(),$5,'mutation') RETURNING id`,
     [SHEET, fieldId, after, ['name', 'type', 'property', 'order'], ACTOR],
+  )
+  return (r.rows[0] as { id: string }).id
+}
+/** Seed a field `delete` config revision (undelete eligible: isSupportedUndelete = action 'delete' + field). */
+const insertFieldDeleteRev = async (fieldId: string, name: string): Promise<string> => {
+  const before = JSON.stringify({ name, type: 'string', property: {}, order: 9 })
+  const r = await q(
+    `INSERT INTO meta_config_revisions (sheet_id, entity_type, entity_id, action, before, after, changed_keys, batch_id, actor_id, source)
+     VALUES ($1,'field',$2,'delete',$3::jsonb,NULL,$4::text[],gen_random_uuid(),$5,'mutation') RETURNING id`,
+    [SHEET, fieldId, before, ['name', 'type', 'property', 'order'], ACTOR],
   )
   return (r.rows[0] as { id: string }).id
 }
@@ -157,12 +179,12 @@ describeIfDatabase('W0-1 L4cov — univer-meta/records/auto-number writer fence 
   })
 
   afterEach(async () => {
-    for (const f of [FLAG, UNCREATE_FLAG, RETYPE_FLAG, RETYPE_LOSSY_FLAG]) delete process.env[f]
+    for (const f of [FLAG, UNCREATE_FLAG, UNDELETE_FLAG, RETYPE_FLAG, RETYPE_LOSSY_FLAG]) delete process.env[f]
     await setBlock(null).catch(() => {})
   })
 
   afterAll(async () => {
-    for (const f of [FLAG, UNCREATE_FLAG, RETYPE_FLAG, RETYPE_LOSSY_FLAG]) delete process.env[f]
+    for (const f of [FLAG, UNCREATE_FLAG, UNDELETE_FLAG, RETYPE_FLAG, RETYPE_LOSSY_FLAG]) delete process.env[f]
     await q('DELETE FROM meta_config_revisions WHERE sheet_id = $1', [SHEET]).catch(() => {})
     await q('DELETE FROM meta_record_revisions WHERE sheet_id = $1', [SHEET]).catch(() => {})
     await q('DELETE FROM meta_field_auto_number_sequences WHERE sheet_id = $1', [SHEET]).catch(() => {})
@@ -459,6 +481,81 @@ describeIfDatabase('W0-1 L4cov — univer-meta/records/auto-number writer fence 
     await setBlock(null)
     await q('DELETE FROM meta_config_revisions WHERE entity_id = $1', [F]).catch(() => {})
     await q('DELETE FROM meta_fields WHERE id = $1', [F]).catch(() => {})
+  })
+
+  // ── §B6 — the FORWARD field-delete route (`DELETE /fields/:fieldId`). Its txn calls the SAME dropFieldCascade
+  // as the un-create sibling (B4) but was UNFENCED (the P1 coverage hole this rung's re-gate found: 200 under an
+  // applying block where the sibling 409s). Now fenced-first. Same three legs as B4: block⇒409, no-block⇒200
+  // (positive control it isn't just always-refusing), flag-off⇒block inert. MUTATION: remove
+  // `await fenceWriterEntry(query, sheetId)` from the delete-field route txn ⇒ B6 (409 becomes 200) RED.
+  test('B6 [forward field-delete route] applying block ⇒ 409 RECOVERY_IN_PROGRESS, field survives (flag ON)', async () => {
+    const F = mkField('b6')
+    await q('INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6)', [F, SHEET, 'B6F', 'string', '{}', 9])
+    process.env[FLAG] = 'true'
+    await setBlock('applying')
+    const res = await deleteField(F)
+    expect(res.status).toBe(409)
+    expect(res.body?.error?.code).toBe('RECOVERY_IN_PROGRESS')
+    expect(await fieldExists(F)).toBe(true) // NOT dropped — the forward route now fences like its un-create sibling
+    expect(await readBlock()).toBe('applying') // block untouched
+    await q('DELETE FROM meta_fields WHERE id = $1', [F]).catch(() => {})
+  })
+
+  test('B6b [forward field-delete route] POSITIVE CONTROL: NO block ⇒ 200 drops the field + strips its key from records (flag ON)', async () => {
+    const F = mkField('b6b')
+    await q('INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6)', [F, SHEET, 'B6bF', 'string', '{}', 9])
+    const R = mkRecord('b6b')
+    await q('INSERT INTO meta_records (id, sheet_id, data, version, created_by) VALUES ($1,$2,$3::jsonb,1,$4)', [R, SHEET, JSON.stringify({ [F]: 'carried' }), ACTOR])
+    process.env[FLAG] = 'true'
+    await setBlock(null)
+    const res = await deleteField(F)
+    expect(res.status).toBe(200)
+    expect(await fieldExists(F)).toBe(false) // dropped — no active recovery blocked it
+    const rowAfter = await q('SELECT data FROM meta_records WHERE id = $1', [R])
+    expect(((rowAfter.rows[0] as { data: Record<string, unknown> }).data)[F]).toBeUndefined() // the cascade stripped the key
+    await q('DELETE FROM meta_records WHERE id = $1', [R]).catch(() => {})
+  })
+
+  test('B6c [forward field-delete route] FLAG OFF: an applying block is INERT ⇒ the delete PROCEEDS (byte-identical pre-L4cov)', async () => {
+    const F = mkField('b6c')
+    await q('INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6)', [F, SHEET, 'B6cF', 'string', '{}', 9])
+    delete process.env[FLAG] // fence OFF
+    await setBlock('applying')
+    const res = await deleteField(F)
+    expect(res.status).toBe(200) // fence no-op ⇒ delete proceeds despite the block — the refusal is flag-gated
+    expect(await fieldExists(F)).toBe(false)
+  })
+
+  // ── §B7 — the config-restore UNDELETE branch (re-gate P2: the fence was present but untested). A field DELETE
+  // config revision is undelete-eligible (isSupportedUndelete); the undelete txn fences as its FIRST statement
+  // (before the id-occupied FOR UPDATE + preview-token verify), so a dummy token still 409s at the fence under a
+  // block — exactly like un-create (B4). MUTATION: remove `await fenceWriterEntry(query, sheetId)` from the
+  // undelete txn ⇒ B7 (409 becomes the downstream PREVIEW_IDENTITY_INVALID) RED. config-undelete stays flag-HOLD.
+  test('B7 [config-restore undelete] applying block ⇒ 409 RECOVERY_IN_PROGRESS (fence FIRST), field stays deleted (flag ON)', async () => {
+    const F = mkField('b7')
+    const rev = await insertFieldDeleteRev(F, 'B7F')
+    process.env[FLAG] = 'true'
+    process.env[UNDELETE_FLAG] = 'true'
+    await setBlock('applying')
+    const res = await restoreExecute({ revisionId: rev, previewToken: 'dummy-token', confirm: 'undelete' })
+    expect(res.status).toBe(409)
+    expect(res.body?.error?.code).toBe('RECOVERY_IN_PROGRESS')
+    expect(await fieldExists(F)).toBe(false) // NOT recreated — the fence refused before the undelete plan ran
+    expect(await readBlock()).toBe('applying') // block untouched
+    await q('DELETE FROM meta_config_revisions WHERE entity_id = $1', [F]).catch(() => {})
+  })
+
+  test('B7c [config-restore undelete] FLAG OFF: an applying block is INERT ⇒ NOT 409 RECOVERY (fence no-op)', async () => {
+    const F = mkField('b7c')
+    const rev = await insertFieldDeleteRev(F, 'B7cF')
+    delete process.env[FLAG] // fence OFF
+    process.env[UNDELETE_FLAG] = 'true'
+    await setBlock('applying')
+    // Fence no-op ⇒ the request proceeds PAST the fence into the (dummy) token verify → a NON-fence status,
+    // NOT the fence's 409 RECOVERY_IN_PROGRESS. Proves the block-refusal is flag-gated.
+    const res = await restoreExecute({ revisionId: rev, previewToken: 'dummy-token', confirm: 'undelete' })
+    expect(res.body?.error?.code).not.toBe('RECOVERY_IN_PROGRESS')
+    await q('DELETE FROM meta_config_revisions WHERE entity_id = $1', [F]).catch(() => {})
   })
 
   // ── §R — CONSTRUCTED RACE on a NEWLY-fenced writer (plugin-create). Two raw pg clients + pg_blocking_pids.
