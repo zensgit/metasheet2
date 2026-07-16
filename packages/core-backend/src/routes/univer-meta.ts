@@ -232,6 +232,7 @@ import {
 } from '../multitable/auto-number-service'
 import {
   acquireCanonicalSheetFence,
+  assertNoActiveWriterBlock,
   claimDurableWriterBlock,
   fenceWriterEntry,
   isWriterFenceEnabled,
@@ -8879,6 +8880,12 @@ export function univerMetaRouter(): Router {
         const confirm = typeof req.body?.confirm === 'string' ? req.body.confirm : ''
         if (confirm.trim() !== 'uncreate') return res.status(400).json({ ok: false, error: { code: 'CONFIRM_REQUIRED', message: 'Type "uncreate" to confirm dropping the created entity.' } })
         const failure = await pool.transaction(async ({ query }): Promise<{ status: number; code: string; message: string } | null> => {
+          // W0-1 L4cov (fence the config-restore-execute record writes — un-create branch). `dropFieldCascade`
+          // below strips the dropped field's key from EVERY record of this sheet (`UPDATE meta_records SET
+          // data = data - $1`), so this txn is a `meta_records` writer and must converge onto the canonical
+          // fence: acquire it first, then refuse (409 in the outer catch) if a recovery holds a durable block.
+          // Flag-off ⇒ no-op / byte-identical.
+          await fenceWriterEntry(query, sheetId)
           let fieldRow: any = null
           let viewRow: any = null
           if (rev.entity_type === 'field') {
@@ -8937,6 +8944,11 @@ export function univerMetaRouter(): Router {
         let failure: { status: number; code: string; message: string } | null = null
         try {
           failure = await pool.transaction(async ({ query }): Promise<{ status: number; code: string; message: string } | null> => {
+            // W0-1 L4cov (fence the config-restore-execute record writes — undelete branch). For a field
+            // undelete, `recreateFieldFromConfig` below re-materializes the field's cells across this sheet's
+            // `meta_records`, so this txn is a record writer: take the canonical fence first, then refuse (409
+            // in the outer catch) under an active recovery block. Flag-off ⇒ no-op / byte-identical.
+            await fenceWriterEntry(query, sheetId)
             // U4-L5 id-occupied check (FOR UPDATE) — also the idempotency guard: undelete when the entity already exists → reject.
             const table = rev.entity_type === 'field' ? 'meta_fields' : 'meta_views'
             const occ = (await query(`SELECT 1 FROM ${table} WHERE id = $1 FOR UPDATE`, [rev.entity_id])) as any
@@ -9034,6 +9046,14 @@ export function univerMetaRouter(): Router {
           const lossyRevisionId = randomUUID() // pre-generated: the 4c-2 pre-image anchors to THIS revert's revision
           let lossyExecuteSummary: LossSummary = { unchanged: 0, coerced: 0, dropped: 0 }
           const failure = await pool.transaction(async ({ query }): Promise<{ status: number; code: string; message: string } | null> => {
+            // W0-1 L4cov (fence the config-restore-execute record writes — lossy retype-revert branch). This is
+            // the highest-value config-restore fence: `applyLossyRetypeCellRewrite` below rewrites the coerced/
+            // dropped cells AND emits one `recordRecordRevision` per changed cell (C5 history completeness), so
+            // it ALLOCATES `seq` on `meta_record_revisions`. Without the canonical fence that seq allocation
+            // could interleave with a concurrent recovery's, breaking the allocation-order == commit-order
+            // guarantee this lane exists to protect. Fence first, then refuse (409 in the outer catch) under an
+            // active recovery block. Flag-off ⇒ no-op / byte-identical.
+            await fenceWriterEntry(query, sheetId)
             const fieldRow = await loadLossyRetypeFieldRow(query, rev.entity_id, true)
             if (!fieldRow) return { status: 409, code: 'ENTITY_GONE', message: 'The field no longer exists; cannot restore.' }
             if (fieldRow.sheetId !== sheetId) return { status: 400, code: 'INVALID_REVISION', message: 'field revision entity does not belong to this sheet.' }
@@ -9142,6 +9162,11 @@ export function univerMetaRouter(): Router {
       if (rev.entity_type === 'field') invalidateFieldCache(sheetId)
       return res.json({ ok: true, data: { restored: { revisionId, entityType: rev.entity_type, entityId: rev.entity_id, changedKeys: rev.changed_keys } } })
     } catch (err: unknown) {
+      // W0-1 L4cov: a fenced config-restore branch (uncreate / undelete / lossy retype-revert) observed a
+      // durable recovery writer-block → refuse with the same 409 RECOVERY_IN_PROGRESS shape as reset/revert.
+      if (err instanceof SheetWriterBlockedError) {
+        return res.status(409).json({ ok: false, error: { code: 'RECOVERY_IN_PROGRESS', message: 'Another recovery operation is in progress on this sheet; retry shortly.' } })
+      }
       if (err instanceof TombstoneCaptureCapExceededError) {
         return res.status(422).json({ ok: false, error: { code: 'TOMBSTONE_CAPTURE_CAP_EXCEEDED', message: err.message } })
       }
@@ -11218,6 +11243,11 @@ export function univerMetaRouter(): Router {
       invalidateFieldCache(sheetId)
       return res.status(201).json({ ok: true, data: { field: serializeFieldRow((fieldRes as any).rows[0]) } })
     } catch (err: any) {
+      // W0-1 L4cov: creating an auto-number field runs `backfillAutoNumberField`, now fence-then-block-checked;
+      // a durable recovery block surfaces here → 409 RECOVERY_IN_PROGRESS (same shape as reset/revert).
+      if (err instanceof SheetWriterBlockedError) {
+        return res.status(409).json({ ok: false, error: { code: 'RECOVERY_IN_PROGRESS', message: 'Another recovery operation is in progress on this sheet; retry shortly.' } })
+      }
       if (err instanceof NotFoundError) {
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: err.message } })
       }
@@ -11736,6 +11766,11 @@ export function univerMetaRouter(): Router {
 
       return res.json({ ok: true, data: { field: updated, ...(bulkRecompute ? { bulkRecompute } : {}) } })
     } catch (err: any) {
+      // W0-1 L4cov: changing an auto-number field property runs `backfillAutoNumberField` (overwrite), now
+      // fence-then-block-checked; a durable recovery block surfaces here → 409 RECOVERY_IN_PROGRESS.
+      if (err instanceof SheetWriterBlockedError) {
+        return res.status(409).json({ ok: false, error: { code: 'RECOVERY_IN_PROGRESS', message: 'Another recovery operation is in progress on this sheet; retry shortly.' } })
+      }
       if (err instanceof NotFoundError) {
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: err.message } })
       }
@@ -14614,7 +14649,14 @@ export function univerMetaRouter(): Router {
       let nextVersion = 1
 
       await pool.transaction(async ({ query }) => {
+        // W0-1 L4cov (close the form-submit create/edit PARTIAL gap — L4 map's univer-meta.ts:14585). The
+        // canonical sheet fence stays UNCONDITIONAL (the pre-existing auto-number serialization lock — the
+        // form-submit CREATE branch allocates auto-numbers below; byte-identical when the L4 flag is off), then
+        // a flag-gated durable recovery-block refusal covers BOTH the EDIT (UPDATE @14655) and CREATE (INSERT
+        // @14743) branches of this handler in one place. A block observed here throws `SheetWriterBlockedError`,
+        // caught in this handler's catch and mapped to 409 RECOVERY_IN_PROGRESS (same shape as reset/revert).
         await acquireAutoNumberSheetWriteLock(query, view.sheetId)
+        if (isWriterFenceEnabled()) await assertNoActiveWriterBlock(query, view.sheetId)
 
         if (recordId) {
           const currentRes = await query(
@@ -14923,6 +14965,10 @@ export function univerMetaRouter(): Router {
         },
       })
     } catch (err) {
+      // W0-1 L4cov: the fence's durable-block refusal (added at this handler's txn entry) surfaces here.
+      if (err instanceof SheetWriterBlockedError) {
+        return res.status(409).json({ ok: false, error: { code: 'RECOVERY_IN_PROGRESS', message: 'Another recovery operation is in progress on this sheet; retry shortly.' } })
+      }
       if (err instanceof VersionConflictError) {
         return res.status(409).json({
           ok: false,
