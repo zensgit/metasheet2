@@ -61,6 +61,24 @@ async function insertLive(sheetId: string, recordId: string, data: Record<string
 async function insertTrash(sheetId: string, recordId: string, data: Record<string, unknown>, originalVersion: number) {
   await q('INSERT INTO meta_records_trash (record_id, sheet_id, data, original_version) VALUES ($1,$2,$3::jsonb,$4)', [recordId, sheetId, JSON.stringify(data), originalVersion])
 }
+/** ATTRIBUTABLE trash: inserts the delete revision (natural shared-sequence seq — causal) and a trash row
+ *  whose `delete_revision_id` points at it. P1-b: a trashed-only record with any UNattributable trash row now
+ *  ABORTS activation, so every fixture where activation must SUCCEED uses this helper; bare `insertTrash`
+ *  remains for the abort goldens themselves. Returns the delete revision id. */
+async function insertAttributableTrash(sheetId: string, recordId: string, data: Record<string, unknown>, originalVersion: number): Promise<string> {
+  const r = await q(
+    `INSERT INTO meta_record_revisions (id, sheet_id, record_id, version, action, source, changed_field_ids, patch, snapshot)
+     VALUES (gen_random_uuid(),$1,$2,$3,'delete','rest',ARRAY[]::text[],'{}'::jsonb,$4::jsonb)
+     RETURNING id::text AS id`,
+    [sheetId, recordId, originalVersion, JSON.stringify(data)],
+  )
+  const revId = String((r.rows[0] as { id: string }).id)
+  await q(
+    'INSERT INTO meta_records_trash (record_id, sheet_id, data, original_version, delete_revision_id) VALUES ($1,$2,$3::jsonb,$4,$5)',
+    [recordId, sheetId, JSON.stringify(data), originalVersion, revId],
+  )
+  return revId
+}
 /** Run `activateCheckpoint` inside a real transaction (the seam L4 will provide, holding the fence). */
 async function activate(sheetId: string) {
   return poolManager.get().transaction(async ({ query }) => activateCheckpoint(query as unknown as QueryFn, { sheetId }))
@@ -120,7 +138,7 @@ describeIfDatabase('W0-1 v3.7 L5 trust checkpoint (real DB)', () => {
     const S = await mkSheet()
     await insertLive(S, `${S}_r1`, { [NAME]: 'a' }, 1)
     await insertLive(S, `${S}_r2`, { [NAME]: 'b' }, 3)
-    await insertTrash(S, `${S}_t1`, { [NAME]: 'gone' }, 2)
+    await insertAttributableTrash(S, `${S}_t1`, { [NAME]: 'gone' }, 2) // trashed-only ⇒ must be causally attributable (P1-b)
 
     const res = await activate(S)
     expect(res.baselineCount).toBe(3)
@@ -250,12 +268,13 @@ describeIfDatabase('W0-1 v3.7 L5 trust checkpoint (real DB)', () => {
     const floor = await retentionFloorSeq(q, S)
     expect(floor).toBe(b.trustedSinceSeq)
 
-    // Request a cutoff WAY above the floor (prune "everything up to a huge seq"). The clamp must pin it to
-    // the floor so the ACTIVE checkpoint (seq == floor) survives; only the older superseded one is pruned.
-    // Mutation: remove the clamp (use requestedCutoff directly) ⇒ the active checkpoint gets pruned ⇒ reds.
+    // Anchor horizon WAY above every checkpoint: the anchor-covering protected floor resolves to the NEWEST
+    // checkpoint (= the active one), so the active checkpoint survives; only the older superseded one is
+    // pruned. Mutation: prune with the raw requested seq (no covering floor) ⇒ the active checkpoint gets
+    // pruned ⇒ reds.
     const requested = (BigInt(b.trustedSinceSeq) + 1_000_000n).toString()
     const result = await poolManager.get().transaction(async ({ query }) => pruneRetainedCheckpoints(query as unknown as QueryFn, S, requested))
-    expect(result.clampedCutoffSeq).toBe(b.trustedSinceSeq) // clamped down to the floor
+    expect(result.protectedFloorSeq).toBe(b.trustedSinceSeq) // covering = max(seq <= anchor) = the active checkpoint
     expect(result.prunedCount).toBe(1) // only the superseded one
 
     const ca = await checkpointRow(a.checkpointId)
@@ -263,6 +282,23 @@ describeIfDatabase('W0-1 v3.7 L5 trust checkpoint (real DB)', () => {
     expect(cb?.pruned_at).toBeNull() // ACTIVE checkpoint survived the clamp
     expect(cb?.state).toBe('active')
     expect(ca?.pruned_at).toBeTruthy() // the older superseded checkpoint was pruned
+  })
+
+  // ── RETAINED-ANCHOR COUNTEREXAMPLE (owner P1-c, verbatim: C1.seq < oldest-legal-anchor < C2.seq) ──────
+  test('RETAINED-ANCHOR: with C1.seq < anchor < C2.seq the prune PROTECTS C1 — a recovery to the anchor needs C1, so active-only protection would be wrong', async () => {
+    const S = await mkSheet()
+    const c1 = await activate(S) // C1 — superseded after c2, but still the anchor-covering checkpoint
+    const c2 = await activate(S) // C2 — active
+    // An anchor strictly between the two checkpoint seqs (the shared sequence guarantees c2.seq > c1.seq).
+    const anchor = (BigInt(c2.trustedSinceSeq) - 1n).toString()
+    expect(BigInt(anchor) >= BigInt(c1.trustedSinceSeq)).toBe(true) // sanity: C1.seq <= anchor < C2.seq
+
+    const result = await poolManager.get().transaction(async ({ query }) => pruneRetainedCheckpoints(query as unknown as QueryFn, S, anchor))
+    // covering = max(checkpoint.seq <= anchor) = C1 — it and everything after it survive; nothing to prune.
+    expect(result.protectedFloorSeq).toBe(c1.trustedSinceSeq)
+    expect(result.prunedCount).toBe(0)
+    expect((await checkpointRow(c1.checkpointId))?.pruned_at).toBeNull() // C1 SURVIVES (active-only protection would prune it)
+    expect((await checkpointRow(c2.checkpointId))?.pruned_at).toBeNull()
   })
 
   // ── system_kind NON-FORGEABLE ────────────────────────────────────────────────────────────────────────
