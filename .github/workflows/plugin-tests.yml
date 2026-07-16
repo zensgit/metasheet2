@@ -683,6 +683,7 @@ jobs:
           : "${DATABASE_URL:?DATABASE_URL is required for attendance integration}"
           pnpm --filter @metasheet/core-backend exec vitest --config vitest.integration.config.ts run \
             tests/integration/attendance-plugin.test.ts \
+            tests/integration/attendance-approval-action-authorization.db.test.ts \
             tests/integration/attendance-expiry-service.test.ts \
             tests/integration/attendance-unscheduled-reminder.test.ts \
             tests/integration/attendance-outdoor-punch.test.ts \
