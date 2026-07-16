@@ -524,9 +524,10 @@ export async function addLocalMembership(input: AddLocalMembershipInput): Promis
 /**
  * The explicit primary-department switch (design lock §5.4). Requires the membership to already
  * exist (`addLocalMembership` first) — this function only ever moves the primary flag, it does
- * not create memberships. Demotes every OTHER membership for the account, then promotes this
- * one, inside one transaction, so at most one row is ever `is_primary=true` for a given account
- * at any point another reader can observe.
+ * not create memberships. A SINGLE atomic UPDATE sets `is_primary = (this dept)` across every
+ * membership of the account (demote-others + promote-this in one statement), so at most one row
+ * is ever `is_primary=true` for the account at any point another reader can observe — see the
+ * inline comment below for the EXISTS-guard / 404 semantics.
  */
 export async function switchLocalPrimaryDepartment(
   orgId: string,
@@ -535,24 +536,24 @@ export async function switchLocalPrimaryDepartment(
 ): Promise<LocalMembershipSummary> {
   await assertLocalMembershipTargets(orgId, accountId, departmentId)
 
-  const membershipExists = await query<{ exists: boolean }>(
-    `SELECT EXISTS(
-       SELECT 1 FROM directory_account_departments
-        WHERE directory_account_id = $1 AND directory_department_id = $2
-     ) AS exists`,
+  // PB4-1 (owner P3 hardening shape): the existence check lives INSIDE the statement and the
+  // demote+promote is ONE atomic UPDATE — `is_primary = (directory_department_id = $2)` flips
+  // every membership row of the account in a single statement (whose row locks are the
+  // serialization point the 2-way race test proves). The EXISTS guard makes a missing target
+  // membership update ZERO rows (never demoting the others first), which is exactly the 404 case.
+  const switched = await query(
+    `UPDATE directory_account_departments AS ad
+        SET is_primary = (ad.directory_department_id = $2)
+      WHERE ad.directory_account_id = $1
+        AND EXISTS (
+              SELECT 1 FROM directory_account_departments t
+               WHERE t.directory_account_id = $1 AND t.directory_department_id = $2
+            )`,
     [accountId, departmentId],
   )
-  if (!membershipExists.rows[0]?.exists) {
+  if ((switched.rowCount ?? 0) === 0) {
     throw new LocalDirectoryNotFoundError('membership not found; add the membership before setting it primary')
   }
-
-  await transaction(async (client) => {
-    await client.query(`UPDATE directory_account_departments SET is_primary = false WHERE directory_account_id = $1`, [accountId])
-    await client.query(
-      `UPDATE directory_account_departments SET is_primary = true WHERE directory_account_id = $1 AND directory_department_id = $2`,
-      [accountId, departmentId],
-    )
-  })
 
   const result = await query<LocalMembershipRow>(
     `SELECT directory_account_id, directory_department_id, is_primary, created_at

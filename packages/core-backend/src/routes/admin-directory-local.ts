@@ -116,11 +116,31 @@ function rejectInvalidFieldTypes(req: Request, res: Response, specs: readonly Lo
   return true
 }
 
+// Pre-B4 hardening item 1: every :id route param feeds a `... = $n::uuid`-shaped predicate (or a
+// uuid column comparison) in the service/writer SQL. A non-UUID value used to reach Postgres'
+// uuid cast and surface as a 500 (invalid_text_representation); shape-validate at the route edge
+// so it is a 400 instead. Case-insensitive RFC-4122 textual form, values-free error messages.
+const UUID_SHAPE_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+
+function isUuidShaped(value: string): boolean {
+  return UUID_SHAPE_RE.test(value)
+}
+
+/** Returns true (and writes the 400) when the given route param is not UUID-shaped. */
+function rejectNonUuidParam(res: Response, paramName: string, value: string): boolean {
+  if (isUuidShaped(value)) return false
+  jsonError(res, 400, 'DIRECTORY_LOCAL_INVALID_INPUT', `${paramName} must be a UUID`)
+  return true
+}
+
 function parseMembershipId(raw: string): { accountId: string; departmentId: string } | null {
   const parts = raw.split(':')
   if (parts.length !== 2) return null
   const [accountId, departmentId] = parts
   if (!accountId || !departmentId) return null
+  // Item 1: both halves must be UUID-shaped — 'foo:bar' used to pass this parser and 500 at the
+  // writer's `::uuid` cast. The caller's existing null-handling 400 covers the rejection.
+  if (!isUuidShaped(accountId) || !isUuidShaped(departmentId)) return null
   return { accountId, departmentId }
 }
 
@@ -138,6 +158,11 @@ export function adminDirectoryLocalRouter(): Router {
     const body = (req.body ?? {}) as Record<string, unknown>
     const name = typeof body.name === 'string' ? body.name : ''
     const parentDepartmentId = typeof body.parentDepartmentId === 'string' ? body.parentDepartmentId : null
+    // Gate P3-1: parentDepartmentId (when present as a string) also feeds a uuid-column lookup.
+    if (parentDepartmentId !== null && !isUuidShaped(parentDepartmentId)) {
+      jsonError(res, 400, 'DIRECTORY_LOCAL_INVALID_INPUT', 'parentDepartmentId must be a UUID')
+      return
+    }
     const orderIndex = typeof body.orderIndex === 'number' ? body.orderIndex : undefined
 
     try {
@@ -171,11 +196,17 @@ export function adminDirectoryLocalRouter(): Router {
     if (typeof body.name === 'string') input.name = body.name
     if (Object.prototype.hasOwnProperty.call(body, 'parentDepartmentId')) {
       input.parentDepartmentId = body.parentDepartmentId === null ? null : typeof body.parentDepartmentId === 'string' ? body.parentDepartmentId : null
+      // Gate P3-1: same uuid-column cast surface as the create path above.
+      if (input.parentDepartmentId !== null && !isUuidShaped(input.parentDepartmentId)) {
+        jsonError(res, 400, 'DIRECTORY_LOCAL_INVALID_INPUT', 'parentDepartmentId must be a UUID')
+        return
+      }
     }
     if (typeof body.orderIndex === 'number') input.orderIndex = body.orderIndex
 
     try {
       const orgId = resolveLocalDirectoryOrgId(req)
+      if (rejectNonUuidParam(res, 'departmentId', req.params.departmentId)) return
       const department = await updateLocalDepartment(orgId, req.params.departmentId, input)
       if (!department) {
         jsonError(res, 404, 'DIRECTORY_LOCAL_NOT_FOUND', 'Local department not found')
@@ -207,6 +238,7 @@ export function adminDirectoryLocalRouter(): Router {
 
     try {
       const orgId = resolveLocalDirectoryOrgId(req)
+      if (rejectNonUuidParam(res, 'departmentId', req.params.departmentId)) return
       const department = await archiveLocalDepartment(orgId, req.params.departmentId)
       if (!department) {
         jsonError(res, 404, 'DIRECTORY_LOCAL_NOT_FOUND', 'Local department not found')
@@ -273,6 +305,7 @@ export function adminDirectoryLocalRouter(): Router {
 
     try {
       const orgId = resolveLocalDirectoryOrgId(req)
+      if (rejectNonUuidParam(res, 'accountId', req.params.accountId)) return
       const account = await updateLocalAccount(orgId, req.params.accountId, input)
       if (!account) {
         jsonError(res, 404, 'DIRECTORY_LOCAL_NOT_FOUND', 'Local account not found')
@@ -305,6 +338,7 @@ export function adminDirectoryLocalRouter(): Router {
 
     try {
       const orgId = resolveLocalDirectoryOrgId(req)
+      if (rejectNonUuidParam(res, 'accountId', req.params.accountId)) return
       const account = await archiveLocalAccount(orgId, req.params.accountId)
       if (!account) {
         jsonError(res, 404, 'DIRECTORY_LOCAL_NOT_FOUND', 'Local account not found')
@@ -341,6 +375,10 @@ export function adminDirectoryLocalRouter(): Router {
       if (!accountId || !departmentId) {
         throw new LocalDirectoryValidationError('accountId and departmentId are required')
       }
+      // Gate P3-1 (same class as the :id route params): these body-carried ids feed uuid-column
+      // predicates in the service SQL — a non-UUID string 500s at the cast without this.
+      if (!isUuidShaped(accountId)) throw new LocalDirectoryValidationError('accountId must be a UUID')
+      if (!isUuidShaped(departmentId)) throw new LocalDirectoryValidationError('departmentId must be a UUID')
       const membership = await addLocalMembership({ orgId, accountId, departmentId })
       await auditLog({
         actorId: adminUserId,
