@@ -110,7 +110,9 @@ POST .../source-runs/plm-bom
 - 仅 `String(value).trim().toLowerCase() === 'true'` 开启；
 - 默认 OFF；OFF 时 route 响应、tenant 解析与 I/O 次数保持现状；
 - flag 只控制 PLM source-run 的内部持久化，不控制 T3a ERP cache；
-- runtime 可在默认 OFF 下先合并，部署不得隐式打开。
+- 仅 bridge + route wiring 片可凭默认 OFF 保持新路径 inert；OD-4 的共享 persist hardening
+  会无条件收紧现有 `/mvp/sync/persist` 重放语义，不受本 flag 保护，必须独立审阅与验证；
+- 部署不得隐式打开本 flag。
 
 ### OD-2 — tenant、workspace 与 business project 的边界
 
@@ -225,7 +227,9 @@ error details、log 或 audit。
 `PERSIST_EXISTING_BATCH_INCOMPLETE`，但孤儿 batch 仍会保留且不会自动修复。T3b 设计不得
 把这一行为写成“原子”或“可自动修复”。裁决：
 
-- runtime 可默认 OFF 合并；
+- route wiring 可在 default-OFF 下 inert 合并；共享 persist hardening **不是 inert**：它会让
+  现有 `/mvp/sync/persist` 的 orphan/conflict replay 从 200 false skip 变为 409，必须作为
+  独立 PR 对现有 route 做兼容回归、真库证据与 owner review 后再合；
 - RC-A 可在隔离实体机窗口临时 ON 做一次受控验收；
 - **生产常开保持 barred**，直到独立 P4 完成事务 / 两阶段状态 / repair protocol
   之一并有 crash-injection 证据，或 owner 另行书面接受该有界风险；
@@ -341,8 +345,10 @@ corrective-4 的 #4101 实体机结果与 T3b 开发并行；**RC-A 只在**以�
 | 级 | 交付 | 门 |
 |---|---|---|
 | T3b-0 | 本 design-lock | 本 PR 仅 RATIFY-ready；owner ratify 前不授权 runtime |
-| T3b-1 | persist false-skip hardening + pure bridge + route flag/guard + focused tests | owner RATIFY 后 |
-| T3b-2 | real-DB route smoke + CI whitelist + 对抗审阅 | T3b-1 通过 |
+| T3b-1a | shared persist false-skip hardening + existing `/mvp/sync/persist` 回归 | owner RATIFY 后；非 flag-inert，独立 PR |
+| T3b-1b | pure bridge + focused contract tests | owner RATIFY 后；可与 1a 并行，零 I/O |
+| T3b-1c | source-run route flag/guard + 1a/1b integration | 1a + 1b 通过；default-OFF inert |
+| T3b-2 | real-DB route smoke + CI whitelist + 对抗审阅 | T3b-1c 通过 |
 | T4-final | 现有 #4266 approved-source 扩展 | T3b-2 合入 |
 | RC-A | 单次 exact-SHA 包 + 实体机验收 | #4101 corrective-4 判定 + T4-final |
 | P4 | persist 原子性 / repair hardening | 独立设计门；生产常开前置 |
@@ -357,6 +363,8 @@ owner ratify 本锁即表示同意：
   active/inactive/incomplete 保真；其它 raw lifecycle mapping 在 v1 明确 out-of-scope，并以专用
   values-free 422 在 persist 前 fail-closed；bridge 是唯一 option enforcement point；
 - [ ] OD-4：exact replay 才可 skip，orphan/content conflict 必须 409；生产常开 barred on P4；
+- [ ] 交付拆分：共享 persist hardening 非 flag-inert，独立审阅；pure bridge 可并行；route
+  wiring 等两者通过后再接；
 - [ ] OD-5：OFF byte-equivalent；ON created=`internal_persist/true`、replay=`internal_noop/false`；
 - [ ] OD-6：扩展现有 T4 后只切一次 RC-A；
 - [ ] 本锁不授权外部写、OD-W3-1 值面读或 runtime 自行合并。
