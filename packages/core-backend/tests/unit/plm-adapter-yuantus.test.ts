@@ -1595,3 +1595,202 @@ describe('PLMAdapter Yuantus discussion writes', () => {
     expect(fetchMock).not.toHaveBeenCalled()
   })
 })
+
+// PLM-COLLAB Discussion read-relay (metasheet2 sub-slice 2): exchangeDiscussionReadSession +
+// getDiscussionsWithReadToken/getDiscussionThreadWithReadToken. SAME auth style as the WRITE
+// methods above -- they bypass this.select/this.query (whose interceptor overwrites Authorization
+// with the adapter's SERVICE token) and issue a raw fetch() carrying the CALLER-supplied read
+// credential, never the service account. These tests exercise the REAL fetch seam (not the route
+// mocks) so a typo in a path/param/header is caught.
+describe('PLMAdapter Yuantus discussion read-relay methods', () => {
+  const jsonResponse = (status: number, body: unknown) => ({
+    ok: status >= 200 && status < 300,
+    status,
+    json: async () => body,
+  })
+
+  const threadSummary = (overrides: Record<string, unknown> = {}) => ({
+    id: 'thread-1',
+    target_type: 'item',
+    target_id: 'P1',
+    title: 'Check tolerance',
+    status: 'open',
+    created_by_id: 1,
+    created_at: '2026-07-09T00:00:00.000Z',
+    resolved_by_id: null,
+    resolved_at: null,
+    last_comment_at: '2026-07-09T00:05:00.000Z',
+    comment_count: 1,
+    anchor: null,
+    ...overrides,
+  })
+
+  beforeEach(() => {
+    ;(fetch as Mock).mockClear()
+  })
+
+  it('exchanges an embed token for a discussion READ credential at /discussion-read-session, sending NO Authorization header', async () => {
+    const adapter = createAdapter()
+    const fetchMock = fetch as Mock
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, {
+      access_token: 'read-token-abc',
+      token_type: 'bearer',
+      expires_in: 300,
+      aud: 'discussion',
+    }))
+
+    const result = await adapter.exchangeDiscussionReadSession('embed-token-1')
+
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    const [url, init] = fetchMock.mock.calls[0]
+    expect(url).toBe('http://localhost:8001/api/v1/auth/embed/discussion-read-session')
+    expect(init.method).toBe('POST')
+    expect(JSON.parse(init.body)).toEqual({ embed_token: 'embed-token-1' })
+    expect(init.headers).not.toHaveProperty('Authorization')
+
+    expect(result.error).toBeUndefined()
+    expect(result.data[0]).toMatchObject({ access_token: 'read-token-abc', aud: 'discussion' })
+  })
+
+  it('fails closed and uniform on a 401 read-session exchange (dark-flag-off and an invalid token are indistinguishable)', async () => {
+    const adapter = createAdapter()
+    const fetchMock = fetch as Mock
+    fetchMock.mockResolvedValueOnce(jsonResponse(401, { detail: 'invalid or expired embed token' }))
+
+    const result = await adapter.exchangeDiscussionReadSession('bad-embed-token')
+
+    expect(result.data).toHaveLength(0)
+    expect(result.error).toBeDefined()
+    expect((result.error as any)?.response?.status).toBe(401)
+  })
+
+  it('lists discussions with the read token as bearer, hitting /discussions with target_type/target_id ONLY (no include_children)', async () => {
+    const adapter = createAdapter()
+    const fetchMock = fetch as Mock
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, {
+      threads: [threadSummary()],
+      next_cursor: null,
+    }))
+
+    const result = await adapter.getDiscussionsWithReadToken('read-token-1', { targetType: 'item', targetId: 'P1' })
+
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    const [url, init] = fetchMock.mock.calls[0]
+    expect(url).toBe('http://localhost:8001/api/v1/discussions?target_type=item&target_id=P1&include_resolved=true')
+    expect(init.method).toBe('GET')
+    expect(init.headers.Authorization).toBe('Bearer read-token-1')
+    // FIXED include_resolved=true so a resolved thread stays visible/reopenable (owner review P2);
+    // still NO include_children (provider forbids it for read creds), and neither is client-injectable.
+    expect(url).toContain('include_resolved=true')
+    expect(url).not.toContain('include_children')
+    expect(init.body).toBeUndefined()
+
+    expect(result.error).toBeUndefined()
+    expect(result.data[0]).toMatchObject({
+      threads: [expect.objectContaining({ id: 'thread-1', status: 'open' })],
+      next_cursor: null,
+    })
+  })
+
+  it('URL-encodes the list target params', async () => {
+    const adapter = createAdapter()
+    const fetchMock = fetch as Mock
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, { threads: [], next_cursor: null }))
+
+    await adapter.getDiscussionsWithReadToken('read-token-1', { targetType: 'item', targetId: 'part id/with?chars' })
+
+    const [url] = fetchMock.mock.calls[0]
+    expect(url).toBe('http://localhost:8001/api/v1/discussions?target_type=item&target_id=part+id%2Fwith%3Fchars&include_resolved=true')
+  })
+
+  it('the list request carries a FIXED include_resolved=true so resolved threads stay visible (owner P2), and it is not client-injectable', async () => {
+    const adapter = createAdapter()
+    const fetchMock = fetch as Mock
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, {
+      threads: [threadSummary({ id: 'thread-open', status: 'open' }), threadSummary({ id: 'thread-resolved', status: 'resolved' })],
+      next_cursor: null,
+    }))
+
+    const result = await adapter.getDiscussionsWithReadToken('read-token-1', { targetType: 'item', targetId: 'P1' })
+
+    const [url] = fetchMock.mock.calls[0]
+    // include_resolved=true is always sent; the caller has no way to pass query params to this
+    // method (the relay only ever hands it { targetType, targetId } from the verified claim).
+    expect(url).toContain('include_resolved=true')
+    // A resolved thread from the provider is returned to the caller (visible for reopen).
+    const statuses = (result.data[0] as { threads: Array<{ id: string; status: string }> }).threads.map((t) => t.status)
+    expect(statuses).toContain('resolved')
+    expect(statuses).toContain('open')
+  })
+
+  it('fetches one thread with the read token as bearer, hitting /discussions/{thread_id} with no query params', async () => {
+    const adapter = createAdapter()
+    const fetchMock = fetch as Mock
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, { ...threadSummary(), comments: [] }))
+
+    const result = await adapter.getDiscussionThreadWithReadToken('read-token-1', 'thread-1')
+
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    const [url, init] = fetchMock.mock.calls[0]
+    expect(url).toBe('http://localhost:8001/api/v1/discussions/thread-1')
+    expect(init.method).toBe('GET')
+    expect(init.headers.Authorization).toBe('Bearer read-token-1')
+    expect(init.body).toBeUndefined()
+
+    expect(result.error).toBeUndefined()
+    expect(result.data[0]).toMatchObject({ id: 'thread-1', comments: [] })
+  })
+
+  it('URL-encodes the thread id in the detail path', async () => {
+    const adapter = createAdapter()
+    const fetchMock = fetch as Mock
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, { ...threadSummary(), comments: [] }))
+
+    await adapter.getDiscussionThreadWithReadToken('read-token-1', 'weird/id?x=1')
+
+    const [url] = fetchMock.mock.calls[0]
+    expect(url).toBe('http://localhost:8001/api/v1/discussions/weird%2Fid%3Fx%3D1')
+  })
+
+  it('surfaces the provider no-leak 404 as a QueryResult error, never a thrown exception (list)', async () => {
+    const adapter = createAdapter()
+    const fetchMock = fetch as Mock
+    fetchMock.mockResolvedValueOnce(jsonResponse(404, { detail: 'discussion target not found' }))
+
+    const result = await adapter.getDiscussionsWithReadToken('read-token-1', { targetType: 'item', targetId: 'missing' })
+
+    expect(result.data).toHaveLength(0)
+    expect(result.error).toBeDefined()
+    expect((result.error as any)?.response?.status).toBe(404)
+  })
+
+  it('surfaces the provider no-leak 404 as a QueryResult error (detail)', async () => {
+    const adapter = createAdapter()
+    const fetchMock = fetch as Mock
+    fetchMock.mockResolvedValueOnce(jsonResponse(404, { detail: 'discussion target not found' }))
+
+    const result = await adapter.getDiscussionThreadWithReadToken('read-token-1', 'missing-thread')
+
+    expect(result.data).toHaveLength(0)
+    expect(result.error).toBeDefined()
+    expect((result.error as any)?.response?.status).toBe(404)
+  })
+
+  it('is not gated by apiMode !== yuantus (legacy PLM has no discussion read-relay surface)', async () => {
+    const adapter = createAdapter()
+    ;(adapter as any).apiMode = 'legacy'
+    const fetchMock = fetch as Mock
+
+    const exchangeResult = await adapter.exchangeDiscussionReadSession('embed-token-1')
+    expect(exchangeResult.error).toBeDefined()
+
+    const listResult = await adapter.getDiscussionsWithReadToken('read-token-1', { targetType: 'item', targetId: 'P1' })
+    expect(listResult.error).toBeDefined()
+
+    const detailResult = await adapter.getDiscussionThreadWithReadToken('read-token-1', 'thread-1')
+    expect(detailResult.error).toBeDefined()
+
+    // never reaches the network in legacy mode
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+})
