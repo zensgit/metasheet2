@@ -648,11 +648,19 @@ describe('P2 durable-delivery S2-b — pure guards (no DB)', () => {
     expect(() => startDurableDispatchLoop(unreachableDb, oneAdapterRegistry(), noopObserver, { env: flagOn, intervalMs: 0 })).toThrow(/intervalMs/)
     // fractional / inverted backoff — rejected at loop start and at tick entry, before claim/side effects.
     expect(() => startDurableDispatchLoop(unreachableDb, oneAdapterRegistry(), noopObserver, { env: flagOn, retryBaseMs: 1.5 })).toThrow(/retryBaseMs/)
-    expect(() => startDurableDispatchLoop(unreachableDb, oneAdapterRegistry(), noopObserver, { env: flagOn, retryBaseMs: 10, retryCapMs: 5 })).toThrow(
+    expect(() => startDurableDispatchLoop(unreachableDb, oneAdapterRegistry(), noopObserver, { env: flagOn, retryBaseMs: 2000, retryCapMs: 1000 })).toThrow(
       /retryCapMs/,
     )
     await expect(runDispatchTick(unreachableDb, oneAdapterRegistry(), { adapterTimeoutMs: -1 })).rejects.toThrow(/adapterTimeoutMs/)
     await expect(runDispatchTick(unreachableDb, oneAdapterRegistry(), { batchSize: 2.5 })).rejects.toThrow(/batchSize/)
+  })
+
+  // [#4334 round-3 adversarial P3] A sub-tick backoff would busy-spin a rescheduled row within one tick under
+  // per-slot claim (burning attempts back-to-back). The retryBaseMs floor makes that config unrepresentable.
+  test('P3-busyspin: a sub-second retry backoff is rejected (no same-tick re-claim spin)', async () => {
+    await expect(runDispatchTick(unreachableDb, oneAdapterRegistry(), { retryBaseMs: 1 })).rejects.toThrow(/retryBaseMs/)
+    await expect(runDispatchTick(unreachableDb, oneAdapterRegistry(), { retryBaseMs: 999 })).rejects.toThrow(/retryBaseMs/)
+    expect(() => startDurableDispatchLoop(unreachableDb, oneAdapterRegistry(), noopObserver, { env: flagOn, retryBaseMs: 1 })).toThrow(/retryBaseMs/)
   })
 
   test('P1-B: a lease below the loop minimum is rejected (the heartbeat needs margin inside the lease)', async () => {

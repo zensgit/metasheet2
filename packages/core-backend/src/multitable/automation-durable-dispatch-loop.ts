@@ -1,10 +1,10 @@
 /**
  * P2 durable-delivery — slice S2-b: the dispatch loop (registry + tick).
  *
- * Drives the S2-a claim engine end-to-end: alert on unknown keys → claim a batch for the keys THIS worker
- * knows → for each row **revalidate the lease, run the adapter under a bounded timeout + heartbeat, then
- * resolve via fence-CAS** (complete / reschedule with backoff / poison). Consumer adapters themselves are S5 —
- * this module defines their contract and the loop.
+ * Drives the S2-a claim engine end-to-end: alert on unknown keys → claim ONE row per execution slot for the
+ * keys THIS worker knows → run its adapter under a bounded timeout + heartbeat → resolve via fence-CAS
+ * (complete / reschedule with backoff / poison). Consumer adapters themselves are S5 — this module defines
+ * their contract and the loop.
  *
  * Contract (FWB-0 lock #4203 Layer 1):
  *   - **Registry asserts uniqueness at registration**: a duplicate consumer_key is a STARTUP ERROR, never a
@@ -13,14 +13,17 @@
  *   - **Unknown keys are alerted, never claimed**: rows whose consumer_key this worker doesn't know are
  *     surfaced through `observer.onUnknownConsumerKeys` and left `pending` for a worker that knows them
  *     (#4203 §246 rolling-deploy). Observer calls are best-effort — a throwing sink never fails the tick.
- *   - **A claimed row's lease is re-validated immediately before the adapter runs, and maintained by a
- *     heartbeat while it runs** (both are fence-CAS renews that do NOT bump the fence). A worker that drifted
- *     past its lease during a serial batch — or lost the row to a concurrent reclaim mid-flight — never
- *     produces (or keeps producing) the external side effect: the pre-call renew fails → the adapter is not
- *     called; the heartbeat renew fails → the in-flight call is aborted and the row is left to its new owner.
- *     This is defense in depth over the terminal fence-CAS (which only protects persisted STATE); the
- *     irreducible residue — an adapter mid-emit at the exact instant its lease is lost — is at-least-once and
- *     absorbed by SINK idempotency, per the durable-delivery doctrine.
+ *   - **PER-SLOT claim**: the tick claims ONE reclaimable row at a time (up to `batchSize` slots) and processes
+ *     it immediately — never a batch. The claim increments `attempts` AT CLAIM (crash-safe, S2-a), so a batch
+ *     claim would let a slow front row starve a tail row into `max_attempts` exhaustion WITHOUT its adapter
+ *     ever running; per-slot claim guarantees `attempts == adapter invocations`.
+ *   - **The lease is maintained by a heartbeat while the adapter runs** (a fence-CAS renew, leaseMs/3 period,
+ *     which does NOT bump the fence). A row lost to a concurrent reclaim mid-flight is detected — the renew
+ *     matches 0 rows → the in-flight call is aborted and the row is left to its new owner. This is defense in
+ *     depth over the terminal fence-CAS (which only protects persisted STATE); the irreducible residue — an
+ *     adapter mid-emit at the exact instant its lease is lost — is at-least-once and absorbed by SINK
+ *     idempotency, per the durable-delivery doctrine. (No pre-call renew: per-slot claim gives every row a
+ *     fresh lease at the moment it is processed, so there is no batch-drift window to guard.)
  *   - **The adapter runs under a bounded `adapterTimeoutMs`**: one hung Promise can never freeze the tick,
  *     later rows, or `stop()`. A timeout maps to a retryable `adapter_timeout` (rescheduled with backoff) and
  *     the loop moves on; the dangling promise is neutralized (its later settle can no longer touch the row —
@@ -30,17 +33,19 @@
  *     (S5) and may misbehave. A malformed verdict (unknown outcome, missing/invalid reason, non-object, null)
  *     is a retryable `adapter_error`, NEVER a poison: a bad verdict must not silently drop the event. Only an
  *     exact `{ outcome: 'permanent_failure', reason: 'permanent_rejection' }` dead-letters.
- *   - **Per-row isolation**: one adapter failing/throwing/timing-out never blocks the rest of the batch. (A DB
- *     error on claim/renew/resolve is NOT isolated — it means the store is unhealthy, so it propagates and the
- *     caller's loop surfaces it via `onTickError` and retries next tick.)
+ *   - **Per-row isolation**: one adapter failing/throwing/timing-out never blocks the next row. (A DB error on
+ *     claim/renew/resolve is NOT isolated — it means the store is unhealthy, so it propagates and the caller's
+ *     loop surfaces it via `onTickError` and retries next tick.)
  *   - **Backoff is deterministic exponential with a cap** (no Math.random — reproducible in tests; jitter can
- *     be layered later without changing the persisted contract).
+ *     be layered later without changing the persisted contract), floored so a rescheduled row cannot be
+ *     re-claimed within the same tick (retry stays a future-tick event, not an intra-tick spin).
  *   - **Every numeric knob is a validated safe-integer within an explicit range, checked BEFORE any work** —
- *     at tick entry (before the claim) and at loop start (before the timer). `intervalMs=0` (hot loop) and a
- *     fractional/huge backoff are rejected up front, never after the adapter already ran.
- *   - **The long-running loop requires a telemetry sink**: `onUnknownConsumerKeys` + `onTickError` are
- *     mandatory (a silent stuck-row or a swallowed tick error is an operational blind spot), and every
- *     observer call is exception-safe — a broken sink can neither kill the process nor stop delivery.
+ *     at tick entry (before the claim) and at loop start (before the timer). `intervalMs=0` (hot loop), a
+ *     fractional/huge backoff, a sub-minimum lease, and an effective backoff inversion are rejected up front.
+ *   - **The long-running loop requires a telemetry sink**: `onUnknownConsumerKeys` + `onTickError` +
+ *     `onHeartbeatError` are mandatory (a silent stuck row, a swallowed tick error, or a hidden heartbeat DB
+ *     error is an operational blind spot), and every observer call is exception-safe — a broken sink can
+ *     neither kill the process nor stop delivery.
  *
  * Nothing here runs while `AUTOMATION_DURABLE_DELIVERY_ENABLED` is OFF: `startDurableDispatchLoop` refuses
  * to start when the flag is off, and no production code calls it yet (that wiring is S5/S4 activation).
@@ -121,6 +126,13 @@ const MAX_INTERVAL_MS = 3_600_000 // 1h — an interval beyond this is almost ce
 // the heartbeat (leaseMs/3) fires and a renew round-trip completes BEFORE the lease expires — otherwise a
 // competitor reclaims a still-running delivery (#4334 review P1-B). 1s is a conservative floor for that margin.
 const MIN_LOOP_LEASE_MS = 1_000
+// Per-slot claim re-claims within one tick if a rescheduled row becomes reclaimable again immediately. A
+// pathological sub-tick backoff (e.g. 1ms) turns retry into a same-tick busy-spin that burns attempts
+// back-to-back and defeats the point of backoff (spreading retries over time). Flooring the backoff base at 1s
+// means a rescheduled row can only be re-claimed after ≥1s of REAL elapsed time — a legitimate retry, not an
+// intra-tick spin (#4334 round-3 adversarial P3). Correctness held either way (attempts == adapter calls), but
+// this keeps the retry schedule honest.
+const MIN_RETRY_BASE_MS = 1_000
 
 /** Reject fractional, non-finite, out-of-safe-range, or out-of-bounds numeric params before they do anything. */
 function requireBoundedInt(name: string, value: number, min: number, max: number): void {
@@ -149,8 +161,9 @@ function validateDispatchNumericParams(
   // leaseMs floor is the loop's, not the claim engine's: the heartbeat needs margin inside the lease (P1-B).
   if (opts.leaseMs !== undefined) requireBoundedInt('leaseMs', opts.leaseMs, MIN_LOOP_LEASE_MS, MAX_MS_24H)
   if (opts.maxAttempts !== undefined) requireBoundedInt('maxAttempts', opts.maxAttempts, 1, 10_000)
-  if (opts.retryBaseMs !== undefined) requireBoundedInt('retryBaseMs', opts.retryBaseMs, 1, MAX_MS_24H)
-  if (opts.retryCapMs !== undefined) requireBoundedInt('retryCapMs', opts.retryCapMs, 1, MAX_MS_24H)
+  // retryBaseMs floor prevents a sub-tick backoff from busy-spinning a rescheduled row (adversarial P3).
+  if (opts.retryBaseMs !== undefined) requireBoundedInt('retryBaseMs', opts.retryBaseMs, MIN_RETRY_BASE_MS, MAX_MS_24H)
+  if (opts.retryCapMs !== undefined) requireBoundedInt('retryCapMs', opts.retryCapMs, MIN_RETRY_BASE_MS, MAX_MS_24H)
   // Inversion check on the EFFECTIVE values (defaults synthesized), so a one-sided override — e.g. a
   // retryBaseMs above the DEFAULT cap with no explicit retryCapMs — is still rejected (#4334 review P2-D).
   const effRetryBaseMs = opts.retryBaseMs ?? DEFAULT_RETRY_BASE_MS
@@ -313,7 +326,13 @@ async function processClaimedRow(
         // as lostLease) and stop the call conservatively; the terminal fence-CAS is the final state arbiter.
         heartbeatErrored = true
         controller.abort()
-        cfg.onHeartbeatError?.({ outboxId: row.outboxId, consumerKey: row.consumerKey })
+        // This runs inside a voided promise chain — a THROWING seam here would be an unhandled rejection, so
+        // the tick-level callback is self-protected too (the loop already wraps it in safeInvoke).
+        try {
+          cfg.onHeartbeatError?.({ outboxId: row.outboxId, consumerKey: row.consumerKey })
+        } catch {
+          /* best-effort telemetry — never let it escape the heartbeat */
+        }
       })
   }, cfg.heartbeatMs)
   heartbeat.unref?.()
