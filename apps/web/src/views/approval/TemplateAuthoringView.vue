@@ -1,13 +1,23 @@
 <template>
-  <PageShell width="default">
+  <PageShell width="wide">
     <PageHeader
       class="template-authoring__header"
       :title="isEditMode ? '编辑审批模板' : '新建审批模板'"
-      subtitle="面向模板管理员的线性审批模板编辑器"
+      subtitle="分步完成基础信息、表单、流程与发布校验"
       back
       back-label="返回模板列表"
       @back="goBack"
     >
+      <template #meta>
+        <span
+          class="template-authoring__save-state"
+          :class="{ 'template-authoring__save-state--dirty': isDraftDirty }"
+        >
+          {{ draftStateLabel }}
+        </span>
+        <span class="template-authoring__meta-count">{{ draft.fields.length }} 个表单字段</span>
+        <span class="template-authoring__meta-count">{{ authoringFlowNodeCount }} 个流程节点</span>
+      </template>
       <template #actions>
         <div class="template-authoring__actions">
           <el-button
@@ -81,8 +91,41 @@
     </el-alert>
 
     <div v-loading="loading" class="template-authoring__body">
+      <div class="template-authoring__workspace">
+        <nav class="template-authoring__steps" aria-label="模板配置步骤">
+          <div class="template-authoring__steps-heading">
+            <strong>模板配置</strong>
+            <span>按步骤完成，随时可保存草稿</span>
+          </div>
+          <el-button
+            v-for="(section, index) in authoringSections"
+            :key="section.id"
+            class="template-authoring__step"
+            :class="{ 'is-active': activeAuthoringSection === section.id }"
+            text
+            :data-testid="`approval-template-section-${section.id}`"
+            @click="selectAuthoringSection(section.id)"
+          >
+            <span class="template-authoring__step-index">{{ index + 1 }}</span>
+            <span class="template-authoring__step-copy">
+              <strong>{{ section.label }}</strong>
+              <small>{{ section.description }}</small>
+            </span>
+            <span
+              v-if="section.id === 'fields'"
+              class="template-authoring__step-count"
+            >{{ draft.fields.length }}</span>
+            <span
+              v-else-if="section.id === 'flow'"
+              class="template-authoring__step-count"
+            >{{ authoringFlowNodeCount }}</span>
+          </el-button>
+        </nav>
+
+        <main class="template-authoring__content">
       <el-card
         v-if="showPresetLibrary"
+        v-show="activeAuthoringSection === 'basic'"
         class="template-authoring__panel"
         shadow="never"
         data-testid="approval-template-preset-library"
@@ -117,7 +160,7 @@
         </div>
       </el-card>
 
-      <el-card class="template-authoring__panel" shadow="never">
+      <el-card v-show="activeAuthoringSection === 'basic'" class="template-authoring__panel" shadow="never">
         <template #header>
           <strong>基本信息</strong>
         </template>
@@ -165,7 +208,7 @@
         </el-form>
       </el-card>
 
-      <el-card class="template-authoring__panel" shadow="never">
+      <el-card v-show="activeAuthoringSection === 'fields'" class="template-authoring__panel" shadow="never">
         <template #header>
           <div class="template-authoring__panel-header">
             <strong>表单字段</strong>
@@ -393,7 +436,7 @@
         </div>
       </el-card>
 
-      <el-card class="template-authoring__panel" shadow="never">
+      <el-card v-show="activeAuthoringSection === 'flow'" class="template-authoring__panel" shadow="never">
         <template #header>
           <div class="template-authoring__panel-header">
             <strong>{{ graphReadOnly ? '审批流程（结构）' : '审批步骤' }}</strong>
@@ -1179,7 +1222,7 @@
         </div>
       </el-card>
 
-      <el-card class="template-authoring__panel" shadow="never">
+      <el-card v-show="activeAuthoringSection === 'review'" class="template-authoring__panel" shadow="never">
         <template #header>
           <strong>JSON 预览</strong>
         </template>
@@ -1198,6 +1241,7 @@
            the shared race-guard controller (RP-2's createRoutePreviewController, made generic). -->
       <el-card
         v-if="canManageTemplates"
+        v-show="activeAuthoringSection === 'review'"
         class="template-authoring__panel"
         shadow="never"
         data-testid="approval-template-tryrun-panel"
@@ -1396,6 +1440,34 @@
           </ul>
         </div>
       </el-card>
+          <div class="template-authoring__section-actions">
+            <el-button
+              :disabled="authoringSectionIndex === 0"
+              data-testid="approval-template-section-previous"
+              @click="moveAuthoringSection(-1)"
+            >
+              上一步
+            </el-button>
+            <el-button
+              v-if="authoringSectionIndex < authoringSections.length - 1"
+              type="primary"
+              data-testid="approval-template-section-next"
+              @click="moveAuthoringSection(1)"
+            >
+              下一步
+            </el-button>
+            <el-button
+              v-else
+              type="primary"
+              :disabled="!canSave"
+              data-testid="approval-template-section-publish"
+              @click="openPublishChecklist"
+            >
+              检查并发布
+            </el-button>
+          </div>
+        </main>
+      </div>
     </div>
 
     <!-- B2-03: publish pre-flight checklist — replaces the old "confirm first, validate after"
@@ -1554,6 +1626,18 @@ const unsupportedReason = ref<string | null>(null)
 // unsupported — the form/metadata stay editable and save preserves the graph verbatim.
 const graphReadOnlyMessage = ref<string | null>(null)
 const draft = ref<TemplateAuthoringDraft>(createEmptyTemplateDraft())
+type AuthoringSectionId = 'basic' | 'fields' | 'flow' | 'review'
+const authoringSections: Array<{
+  id: AuthoringSectionId
+  label: string
+  description: string
+}> = [
+  { id: 'basic', label: '基础设置', description: '名称、范围与模板起点' },
+  { id: 'fields', label: '表单设计', description: '字段、校验与显隐规则' },
+  { id: 'flow', label: '审批流程', description: '审批人、分支与字段权限' },
+  { id: 'review', label: '测试发布', description: '预览、试运行与发布检查' },
+]
+const activeAuthoringSection = ref<AuthoringSectionId>('basic')
 // B1-07: dirty baseline for discard protection — refreshed on every load/save so only real
 // unsaved edits trigger the leave confirm. Serialized compare; the draft is rebuilt from the
 // same builders on load/save, so key order is deterministic.
@@ -1576,6 +1660,30 @@ const readOnly = computed(() => !canManageTemplates.value || Boolean(unsupported
 // linear steps editor is hidden. The graph is preserved on save, so this does NOT disable save.
 const graphReadOnly = computed(() => Boolean(graphReadOnlyMessage.value))
 const canSave = computed(() => canManageTemplates.value && !unsupportedReason.value && !loading.value)
+const draftStateLabel = computed(() => {
+  if (!isEditMode.value && !isDraftDirty.value) return '新模板'
+  return isDraftDirty.value ? '有未保存更改' : '已保存'
+})
+const authoringFlowNodeCount = computed(() => (
+  graphReadOnly.value
+    ? draft.value.preservedGraph?.nodes.length ?? 0
+    : draft.value.steps.length
+))
+const authoringSectionIndex = computed(() => (
+  authoringSections.findIndex(section => section.id === activeAuthoringSection.value)
+))
+
+function selectAuthoringSection(section: AuthoringSectionId) {
+  activeAuthoringSection.value = section
+}
+
+function moveAuthoringSection(delta: -1 | 1) {
+  const nextIndex = Math.min(
+    authoringSections.length - 1,
+    Math.max(0, authoringSectionIndex.value + delta),
+  )
+  activeAuthoringSection.value = authoringSections[nextIndex].id
+}
 
 // G-1 read-only structured render of a preserved complex graph: a per-node summary of the
 // config the v1 editor doesn't yet author, so authors can SEE the flow they're preserving.
@@ -2513,18 +2621,167 @@ onUnmounted(() => {
   justify-content: flex-end;
 }
 
+.template-authoring__header {
+  position: sticky;
+  top: 0;
+  z-index: 3;
+  padding: var(--ms-space-3) 0;
+  border-bottom: 1px solid var(--ms-border-light);
+  background: var(--ms-bg-page);
+}
+
+.template-authoring__save-state,
+.template-authoring__meta-count {
+  display: inline-flex;
+  align-items: center;
+  min-height: 26px;
+  padding: var(--ms-space-1) var(--ms-space-3);
+  border: 1px solid var(--ms-border-light);
+  border-radius: 999px;
+  background: var(--ms-bg-card);
+  color: var(--ms-text-2);
+  font-size: 12px;
+}
+
+.template-authoring__save-state::before {
+  width: 7px;
+  height: 7px;
+  margin-right: var(--ms-space-2);
+  border-radius: 50%;
+  background: var(--ms-color-success);
+  content: '';
+}
+
+.template-authoring__save-state--dirty::before {
+  background: var(--ms-color-warning);
+}
+
 .template-authoring__alert {
   margin-bottom: 16px;
 }
 
 .template-authoring__body {
+  min-height: 560px;
+}
+
+.template-authoring__workspace {
+  display: grid;
+  grid-template-columns: 232px minmax(0, 1fr);
+  align-items: start;
+  gap: var(--ms-space-5);
+}
+
+.template-authoring__steps {
+  position: sticky;
+  top: 116px;
+  display: grid;
+  gap: var(--ms-space-2);
+  padding: var(--ms-space-3);
+  border: 1px solid var(--ms-border-light);
+  border-radius: var(--ms-radius-lg);
+  background: var(--ms-bg-card);
+  box-shadow: var(--ms-shadow-card);
+}
+
+.template-authoring__steps-heading {
+  display: grid;
+  gap: var(--ms-space-1);
+  padding: var(--ms-space-2) var(--ms-space-2) var(--ms-space-3);
+  color: var(--ms-text-1);
+}
+
+.template-authoring__steps-heading span {
+  color: var(--ms-text-3);
+  font-size: 12px;
+}
+
+.template-authoring__step {
+  width: 100%;
+  height: auto;
+  min-height: 58px;
+  margin: 0;
+  padding: var(--ms-space-2);
+  color: var(--ms-text-2);
+  white-space: normal;
+}
+
+.template-authoring__step :deep(> span) {
+  display: grid;
+  grid-template-columns: 28px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--ms-space-2);
+  width: 100%;
+  text-align: left;
+}
+
+.template-authoring__step.is-active {
+  background: var(--el-color-primary-light-9);
+  color: var(--ms-color-primary);
+}
+
+.template-authoring__step-index,
+.template-authoring__step-count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  background: var(--el-fill-color-light);
+  color: var(--ms-text-2);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.template-authoring__step.is-active .template-authoring__step-index {
+  background: var(--ms-color-primary);
+  color: var(--ms-bg-card);
+}
+
+.template-authoring__step-count {
+  width: auto;
+  min-width: 24px;
+  height: 22px;
+  padding: 0 var(--ms-space-1);
+  border-radius: 999px;
+}
+
+.template-authoring__step-copy {
+  display: grid;
+  gap: 2px;
+}
+
+.template-authoring__step-copy small {
+  color: var(--ms-text-3);
+  font-size: 11px;
+  font-weight: 400;
+}
+
+.template-authoring__content {
   display: flex;
+  min-width: 0;
   flex-direction: column;
-  gap: 16px;
+  gap: var(--ms-space-4);
 }
 
 .template-authoring__panel {
-  border-radius: 8px;
+  border-color: var(--ms-border-light);
+  border-radius: var(--ms-radius-lg);
+  box-shadow: var(--ms-shadow-card);
+}
+
+.template-authoring__section-actions {
+  position: sticky;
+  bottom: 0;
+  z-index: 2;
+  display: flex;
+  justify-content: space-between;
+  gap: var(--ms-space-3);
+  padding: var(--ms-space-3) var(--ms-space-4);
+  border: 1px solid var(--ms-border-light);
+  border-radius: var(--ms-radius-lg);
+  background: var(--ms-bg-card);
+  box-shadow: var(--ms-shadow-pop);
 }
 
 .template-authoring__panel-header,
@@ -2810,13 +3067,58 @@ pre {
   font-size: 12px;
 }
 
+@media (max-width: 1024px) {
+  .template-authoring__workspace {
+    grid-template-columns: 1fr;
+  }
+
+  .template-authoring__steps {
+    position: sticky;
+    top: 108px;
+    z-index: 2;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+
+  .template-authoring__steps-heading {
+    display: none;
+  }
+
+  .template-authoring__step-copy small,
+  .template-authoring__step-count {
+    display: none;
+  }
+
+  .template-authoring__step :deep(> span) {
+    grid-template-columns: 28px minmax(0, 1fr);
+  }
+}
+
 @media (max-width: 760px) {
+  .template-authoring__header {
+    position: static;
+  }
+
+  .template-authoring__actions,
+  .template-authoring__actions :deep(.el-button) {
+    width: 100%;
+  }
+
+  .template-authoring__steps {
+    top: 0;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
   .template-authoring__grid {
     grid-template-columns: 1fr;
   }
 
   .template-authoring__preset-grid {
     grid-template-columns: 1fr;
+  }
+
+  .template-authoring__section-actions :deep(.el-button) {
+    flex: 1;
+    min-height: 44px;
   }
 }
 
