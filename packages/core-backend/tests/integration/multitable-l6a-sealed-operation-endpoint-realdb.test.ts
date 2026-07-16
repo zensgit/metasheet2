@@ -409,4 +409,39 @@ describeIfDatabase('W0-1 L6-a — sealed operation-endpoint ledger (real DB)', (
     const after = (await q('SELECT count(*)::int AS n FROM meta_record_history_operations WHERE sheet_id=$1', [SHEET])).rows[0] as { n: number }
     expect(after.n).toBe(before.n) // no endpoint minted with the flag off
   })
+
+  // §F2 (finding #2, owner review 2026-07-16): v3.7 §1.3 reads the recovery anchorSeq from "that immutable
+  // endpoint row". The INSERT trigger seals it at mint; nothing forbade a later UPDATE, so a sealed endpoint's
+  // endpoint_seq / event_count / created_at could be silently moved — shifting an already-committed recovery
+  // anchor. The migration now installs trg_mrho_reject_update (BEFORE UPDATE → RAISE). This golden seals a real
+  // endpoint, attempts each column UPDATE, asserts the DB rejects fail-closed, and (positive control) that the
+  // anchor is byte-unchanged after. Mutation: dropping trg_mrho_reject_update makes every expect().rejects red.
+  test('§F2 a SEALED operation endpoint is DB-immutable — UPDATE of endpoint_seq/event_count/created_at is rejected; anchor never moves', async () => {
+    const op = mkOpId()
+    const R = mkRecord('f2imm')
+    await inTxn(async (run) => {
+      await synthRevision(run, R, 1, '9001', op)
+      await synthRevision(run, R, 2, '9002', op)
+      await insertEndpoint(run, op, '9002', 2) // endpoint written LAST, count/max exact
+    })
+    expect(await endpointOf(op)).toEqual({ endpoint_seq: '9002', event_count: 2 })
+
+    // every UPDATE of a sealed column is rejected at the DB level (fail-closed, not app-level)
+    await expect(
+      q('UPDATE meta_record_history_operations SET endpoint_seq = 999999 WHERE sheet_id=$1 AND operation_id=$2', [SHEET, op]),
+    ).rejects.toThrow(/immutable \(UPDATE forbidden\)/)
+    await expect(
+      q('UPDATE meta_record_history_operations SET event_count = 999 WHERE sheet_id=$1 AND operation_id=$2', [SHEET, op]),
+    ).rejects.toThrow(/immutable \(UPDATE forbidden\)/)
+    await expect(
+      q("UPDATE meta_record_history_operations SET created_at = now() + interval '1 year' WHERE sheet_id=$1 AND operation_id=$2", [SHEET, op]),
+    ).rejects.toThrow(/immutable \(UPDATE forbidden\)/)
+    // even a no-op UPDATE (same values) is rejected — the row is write-once, period
+    await expect(
+      q('UPDATE meta_record_history_operations SET endpoint_seq = endpoint_seq WHERE sheet_id=$1 AND operation_id=$2', [SHEET, op]),
+    ).rejects.toThrow(/immutable \(UPDATE forbidden\)/)
+
+    // positive control: the sealed anchor is byte-unchanged after every rejected attempt
+    expect(await endpointOf(op)).toEqual({ endpoint_seq: '9002', event_count: 2 })
+  })
 })

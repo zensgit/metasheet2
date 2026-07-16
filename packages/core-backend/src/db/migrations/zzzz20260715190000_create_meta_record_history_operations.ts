@@ -169,12 +169,36 @@ export async function up(db: Kysely<unknown>): Promise<void> {
     BEFORE INSERT ON meta_record_history_operations
     FOR EACH ROW EXECUTE FUNCTION meta_record_history_operations_validate_endpoint()
   `.execute(db)
+
+  // Finding #2 (owner review 2026-07-16): the sealed endpoint row is the immutable recovery anchor —
+  // v3.7 §1.3 takes anchorSeq from "that immutable endpoint row". The INSERT trigger above validates the
+  // seal at mint time, but nothing forbade a later UPDATE, so `UPDATE ... SET endpoint_seq=999999` (or
+  // event_count / created_at) on a sealed row would silently MOVE an already-sealed anchor. The endpoint is
+  // write-once by design (minted last, then only read), so a blanket UPDATE-reject at the DB level is the
+  // correct fail-closed guard. (DELETE is left to retention design, not this constraint.)
+  await sql`
+    CREATE OR REPLACE FUNCTION meta_record_history_operations_reject_update()
+    RETURNS trigger AS $fn$
+    BEGIN
+      RAISE EXCEPTION 'sealed operation endpoint % on sheet % is immutable (UPDATE forbidden)',
+        OLD.operation_id, OLD.sheet_id USING ERRCODE = 'check_violation';
+    END;
+    $fn$ LANGUAGE plpgsql
+  `.execute(db)
+  await sql`DROP TRIGGER IF EXISTS trg_mrho_reject_update ON meta_record_history_operations`.execute(db)
+  await sql`
+    CREATE TRIGGER trg_mrho_reject_update
+    BEFORE UPDATE ON meta_record_history_operations
+    FOR EACH ROW EXECUTE FUNCTION meta_record_history_operations_reject_update()
+  `.execute(db)
 }
 
 export async function down(db: Kysely<unknown>): Promise<void> {
+  await sql`DROP TRIGGER IF EXISTS trg_mrho_reject_update ON meta_record_history_operations`.execute(db)
   await sql`DROP TRIGGER IF EXISTS trg_mrho_validate_endpoint ON meta_record_history_operations`.execute(db)
   await sql`DROP TRIGGER IF EXISTS trg_mrr_reject_append_sealed ON meta_record_revisions`.execute(db)
   await sql`DROP TRIGGER IF EXISTS trg_mrvm_reject_append_sealed ON meta_record_version_markers`.execute(db)
+  await sql`DROP FUNCTION IF EXISTS meta_record_history_operations_reject_update()`.execute(db)
   await sql`DROP FUNCTION IF EXISTS meta_record_history_operations_validate_endpoint()`.execute(db)
   await sql`DROP FUNCTION IF EXISTS meta_record_reject_append_to_sealed_operation()`.execute(db)
 
