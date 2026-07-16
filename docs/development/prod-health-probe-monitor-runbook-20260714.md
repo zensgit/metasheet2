@@ -10,9 +10,9 @@ A steady-state, external, read-only health probe for the deployed prod stack:
   every 5 minutes (`schedule: */5 * * * *`; GitHub cron jitter is expected and
   acceptable — the alert logic counts runs, not wall-clock minutes).
 - The probe uses **no secrets** (public endpoint). `GITHUB_TOKEN` is used only
-  for run-history reads, dispatching the snapshot workflow, and issue
-  operations. Workflow permissions are scoped to `issues: write` +
-  `actions: write` only.
+  to check out the tested state helper, read run history, dispatch the snapshot
+  workflow, and operate the alert issue. Workflow permissions are scoped to
+  `contents: read` + `issues: write` + `actions: write`.
 - The monitor **never** restarts services, deploys, or mutates the prod host
   in any way. Diagnosis and remediation are manual.
 
@@ -24,9 +24,8 @@ Per run, up to 3 attempts (2 quick retries, 5 s apart) with
 | Outcome | Classification |
 |---|---|
 | connection failure / timeout | fail |
-| HTTP 5xx | fail |
 | HTTP 200 | pass |
-| any other HTTP status (e.g. 4xx, 3xx) | pass-with-note (endpoint reachable; note recorded in the run summary) |
+| any HTTP status other than 200 (including 3xx/4xx/5xx) | fail |
 
 A run concludes `failure` only when all attempts are fail-class. The final
 workflow step deliberately fails the run in that case so the run conclusion
@@ -37,9 +36,12 @@ itself carries the state (see next section).
 No cache, artifact, or repo-variable state. Each run queries **this
 workflow's own completed-run history** via
 `gh api repos/<repo>/actions/workflows/prod-health-probe-monitor.yml/runs?status=completed`
-and counts the leading streak of `success` / `failure` conclusions
-(schedule/dispatch runs on `main` only; `cancelled`/`skipped`/`startup_failure`
-runs are ignored for streak purposes).
+and passes the response through the tested
+`scripts/ops/prod-health-probe-state.mjs` helper. It counts the leading streak
+of `success` / `failure` conclusions (schedule/dispatch runs on `main` only;
+`cancelled`/`skipped`/`startup_failure` runs are ignored). A run whose custom
+display title contains `[SILENCED]` is retained as a **streak barrier**: it
+resets pre-maintenance history but is not counted as a successful recovery.
 
 - `consecutive_failures = leading failure streak + 1` when the current probe
   fails.
@@ -96,10 +98,12 @@ While silenced:
 
 - the probe still runs and logs its result (run-name shows `[SILENCED]`),
 - streak evaluation, snapshot dispatch, and all issue operations are skipped,
-- the run always concludes success — so silenced runs **reset the failure
-  streak**; after unsilencing, alerting requires 3 fresh consecutive failing
-  runs. This is intentional: a maintenance window should not pre-arm an
-  alert.
+- the run always concludes success, but its `[SILENCED]` display-title marker
+  is interpreted as a streak barrier rather than a recovery; after
+  unsilencing, alerting requires 3 fresh consecutive failing runs and
+  auto-close requires 2 fresh consecutive successful runs. This is
+  intentional: a maintenance window should neither pre-arm an alert nor
+  prematurely close an existing one.
 
 Alternative (heavier) switch: disable the workflow entirely —
 `gh workflow disable "Prod Health Probe Monitor" --repo zensgit/metasheet2`
@@ -116,5 +120,7 @@ probe logging and is visible in run names.
 
 - Trigger one run by hand: `gh workflow run "Prod Health Probe Monitor" --repo zensgit/metasheet2`
   then check the run's step summary (result, streak, actions taken).
+- Run the state and workflow contract suite locally:
+  `node --test scripts/ops/prod-health-probe-state.test.mjs`.
 - The schedule only activates once the workflow file is on the default
   branch (`main`).

@@ -18,7 +18,8 @@ run-name: Prod Health Probe Monitor${{ vars.PROD_HEALTH_PROBE_SILENCE == 'true' 
 #   the issue auto-closes after 2 consecutive recoveries.
 # - This monitor NEVER restarts, deploys, or mutates the prod stack. The probe
 #   itself uses no secrets (public endpoint); GITHUB_TOKEN is used only for
-#   run-history reads, the snapshot dispatch, and issue operations.
+#   checkout of the tested state helper, run-history reads, the snapshot
+#   dispatch, and issue operations.
 # - Silencing (maintenance windows): set repo variable
 #   PROD_HEALTH_PROBE_SILENCE=true (see runbook
 #   docs/development/prod-health-probe-monitor-runbook-20260714.md).
@@ -33,6 +34,7 @@ concurrency:
   cancel-in-progress: false
 
 permissions:
+  contents: read
   issues: write
   actions: write
 
@@ -50,20 +52,24 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 8
     steps:
+      - name: Checkout tested monitor helper
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
       - name: Probe health endpoint (no secrets)
         id: probe
         run: |
           set -euo pipefail
-          # Classification (owner spec):
-          #   connection failure / timeout / 5xx  -> fail
-          #   200                                 -> pass
-          #   any other HTTP status (e.g. 4xx)    -> pass-with-note (endpoint reachable)
+          # This is a health-contract probe, not a reachability probe. A
+          # redirect, auth challenge, or missing route is unhealthy here.
+          #   connection failure / timeout / any non-200 -> fail
+          #   200                                         -> pass
           # 2 quick retries inside this run before counting the run as a
           # failure (single-runner jitter guard).
           attempts=3
           result="fail"
           detail="no attempt completed"
-          note=""
           for attempt in $(seq 1 "$attempts"); do
             set +e
             code="$(curl -sS -o /dev/null -w '%{http_code}' --connect-timeout 5 --max-time 10 "$HEALTH_URL")"
@@ -78,16 +84,10 @@ jobs:
               result="pass"
               detail="http=200"
               break
-            elif [[ "$code" =~ ^5[0-9][0-9]$ ]]; then
-              echo "[probe] attempt=$attempt http=$code (5xx -> fail)"
+            else
+              echo "[probe] attempt=$attempt http=$code (non-200 -> fail)"
               result="fail"
               detail="http=$code"
-            else
-              echo "[probe] attempt=$attempt http=$code (endpoint reachable, non-200 -> pass-with-note)"
-              result="pass"
-              detail="http=$code"
-              note="endpoint reachable but returned http=$code (expected 200)"
-              break
             fi
             if [[ "$attempt" -lt "$attempts" ]]; then sleep 5; fi
           done
@@ -95,7 +95,6 @@ jobs:
           {
             echo "probe_result=$result"
             echo "probe_detail=$detail"
-            echo "probe_note=$note"
           } >> "$GITHUB_OUTPUT"
 
       - name: Silenced notice
@@ -112,68 +111,23 @@ jobs:
           PROBE_RESULT: ${{ steps.probe.outputs.probe_result }}
         run: |
           set -euo pipefail
-          # State persistence: this workflow's own completed-run conclusions,
-          # newest first. Only schedule/dispatch runs on main count; anything
-          # other than success/failure (cancelled, skipped, startup_failure)
-          # is ignored for streak purposes.
-          history="$(gh api \
+          # State persistence: this workflow's own completed runs, newest
+          # first. The tested helper filters to schedule/dispatch on main,
+          # ignores cancelled/skipped runs, and treats [SILENCED] runs as a
+          # streak barrier rather than a successful recovery.
+          history_file="$(mktemp)"
+          trap 'rm -f "$history_file"' EXIT
+          gh api \
             "repos/${GITHUB_REPOSITORY}/actions/workflows/${WORKFLOW_FILE}/runs?status=completed&per_page=100" \
-            --jq '[.workflow_runs[]
-                    | select((.event=="schedule" or .event=="workflow_dispatch") and .head_branch=="main")
-                    | .conclusion]
-                  | map(select(. == "success" or . == "failure"))
-                  | .[0:96] | join(" ")')"
-          echo "[streak] recent completed conclusions (newest first): ${history:-<none>}"
-
-          prev_fail_streak=0
-          prev_success_streak=0
-          for c in $history; do
-            if [[ "$c" == "failure" && "$prev_success_streak" -eq 0 ]]; then
-              prev_fail_streak=$((prev_fail_streak + 1))
-            elif [[ "$c" == "success" && "$prev_fail_streak" -eq 0 ]]; then
-              prev_success_streak=$((prev_success_streak + 1))
-            else
-              break
-            fi
-          done
-
-          consecutive_failures=0
-          consecutive_successes=0
-          crossing=false
-          heartbeat=false
-          ensure_open=false
-          should_close=false
-          if [[ "$PROBE_RESULT" == "fail" ]]; then
-            consecutive_failures=$((prev_fail_streak + 1))
-            if [[ "$consecutive_failures" -ge "$FAIL_THRESHOLD" ]]; then
-              # Self-heal: every failing run at/past the threshold ensures the
-              # alert issue exists (covers a missed crossing when the exact
-              # cf==3 run hit a transient API error) — comments still only
-              # append at crossing/heartbeat.
-              ensure_open=true
-            fi
-            if [[ "$consecutive_failures" -eq "$FAIL_THRESHOLD" ]]; then
-              crossing=true
-            elif [[ "$consecutive_failures" -gt "$FAIL_THRESHOLD" ]] && \
-                 [[ $((consecutive_failures % HEARTBEAT_EVERY)) -eq 0 ]]; then
-              heartbeat=true
-            fi
-          else
-            consecutive_successes=$((prev_success_streak + 1))
-            if [[ "$consecutive_successes" -ge "$RECOVERY_THRESHOLD" ]]; then
-              should_close=true
-            fi
-          fi
-
-          echo "[streak] consecutive_failures=$consecutive_failures consecutive_successes=$consecutive_successes crossing=$crossing heartbeat=$heartbeat should_close=$should_close"
-          {
-            echo "consecutive_failures=$consecutive_failures"
-            echo "consecutive_successes=$consecutive_successes"
-            echo "crossing=$crossing"
-            echo "heartbeat=$heartbeat"
-            echo "ensure_open=$ensure_open"
-            echo "should_close=$should_close"
-          } >> "$GITHUB_OUTPUT"
+            > "$history_file"
+          node scripts/ops/prod-health-probe-state.mjs \
+            --history-file "$history_file" \
+            --probe-result "$PROBE_RESULT" \
+            --max-runs 96 \
+            --fail-threshold "$FAIL_THRESHOLD" \
+            --recovery-threshold "$RECOVERY_THRESHOLD" \
+            --heartbeat-every "$HEARTBEAT_EVERY" \
+            >> "$GITHUB_OUTPUT"
 
       - name: Dispatch read-only SSH log snapshot (second vantage)
         id: snapshot
@@ -290,7 +244,7 @@ jobs:
               '',
               `- Endpoint: \`GET ${process.env.HEALTH_URL}\``,
               `- Consecutive failing probe runs: ${failures} (alert threshold: ${process.env.FAIL_THRESHOLD})`,
-              `- Latest probe detail: \`${detail}\` (fail = connection failure / timeout / 5xx)`,
+              `- Latest probe detail: \`${detail}\` (fail = connection failure / timeout / any non-200)`,
               `- Probe run: ${runUrl}`,
               `- Second vantage (read-only SSH log snapshot, skip_host_sync=true): ${snapshotUrl}`,
               '',
@@ -319,7 +273,6 @@ jobs:
         env:
           PROBE_RESULT: ${{ steps.probe.outputs.probe_result }}
           PROBE_DETAIL: ${{ steps.probe.outputs.probe_detail }}
-          PROBE_NOTE: ${{ steps.probe.outputs.probe_note }}
           CONSECUTIVE_FAILURES: ${{ steps.streak.outputs.consecutive_failures }}
           CONSECUTIVE_SUCCESSES: ${{ steps.streak.outputs.consecutive_successes }}
           CROSSING: ${{ steps.streak.outputs.crossing }}
@@ -333,9 +286,6 @@ jobs:
             echo "## Prod Health Probe"
             echo ""
             echo "- Result: \`${PROBE_RESULT:-missing}\` (\`${PROBE_DETAIL:-missing}\`)"
-            if [[ -n "${PROBE_NOTE:-}" ]]; then
-              echo "- Note: ${PROBE_NOTE}"
-            fi
             echo "- Silenced: \`${SILENCED}\`"
             echo "- Consecutive failures (incl. this run): \`${CONSECUTIVE_FAILURES:-n/a}\`"
             echo "- Consecutive successes (incl. this run): \`${CONSECUTIVE_SUCCESSES:-n/a}\`"
