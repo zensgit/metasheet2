@@ -192,6 +192,20 @@ export const GLOBAL_HISTORY_FLAG_MANIFEST = Object.freeze([
     ],
   },
   {
+    key: 'MULTITABLE_ENABLE_WRITER_FENCE',
+    type: 'boolean',
+    activationValue: 'true',
+    caseInsensitive: true, // canonical-sheet-fence.ts isWriterFenceEnabled(): `.trim().toLowerCase() === 'true'`
+    dependsOn: [],
+    conflictsWith: [],
+    danger: 'medium',
+    purpose:
+      "W0-1 L4 canonical sheet-state fence. Default OFF ⇒ byte-identical writer behavior (no fence acquired, no durable-block checks, the auto-number advisory key keeps its pre-L4 single-caller semantics). When ON, every fenced meta_records writer serializes through the per-sheet canonical advisory fence (pg_advisory_xact_lock) and refuses 409 RECOVERY_IN_PROGRESS while a durable recovery writer-block ({fencing,applying,paused_retryable} in meta_sheets.recovery_writer_state) is active; revert/reset-execute claim that durable block across their windows (reset additionally checks it fence-first — the recovery-vs-recovery exclusion). danger=medium, not high: the flag never enables a destructive write (Revert/Reset stay behind their own gates) — it changes writer concurrency semantics (advisory-lock serialization + fail-closed refusal windows), which is a production behavior change but a protective one.",
+    // source: packages/core-backend/src/multitable/canonical-sheet-fence.ts:137 (isWriterFenceEnabled) — read by
+    //         record-service/record-write-service/records/auto-number-service/univer-meta writer entry points.
+    source: 'packages/core-backend/src/multitable/canonical-sheet-fence.ts:137',
+  },
+  {
     key: 'MULTITABLE_HISTORY_CONTIGUITY_STRICT',
     type: 'boolean',
     activationValue: 'true',
