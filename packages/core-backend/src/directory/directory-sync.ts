@@ -2274,6 +2274,13 @@ export async function createDirectoryIntegration(input: DirectoryIntegrationInpu
  * partial unique index `one_active_local_integration_per_org` makes the loser's INSERT raise a
  * unique_violation (23505), which we catch and resolve by re-reading the winner.
  */
+// The canonical local anchor's name — the ONE `provider='local'` integration bootstrap creates per
+// org. Used for both the bootstrap INSERT and the PB4-4 reactivation WHERE, so the reactivation
+// targets exactly that anchor and — because `idx_directory_integrations_org_provider_name` is unique
+// on (org_id, provider, name) — flips at most ONE row (differently-named local rows are only
+// creatable by raw ops, never by this service, and are out of scope for reactivation).
+const LOCAL_INTEGRATION_NAME = 'Local organization'
+
 export async function getOrCreateLocalIntegration(
   orgId: string = DEFAULT_ORG_ID,
 ): Promise<DirectoryIntegrationSummary> {
@@ -2281,6 +2288,60 @@ export async function getOrCreateLocalIntegration(
 
   const existing = await selectActiveLocalIntegration(normalizedOrgId)
   if (existing) return summarizeIntegration(existing)
+
+  // PB4-4 (reactivation, owner design lock): before bootstrapping a NEW integration, revive a
+  // previously-deactivated local integration IN PLACE — same id, so its departments, accounts, and
+  // future B4 department-binding refs (all FK'd to integration_id) survive. A blind INSERT here
+  // collides on idx_directory_integrations_org_provider_name (the fixed 'Local organization' name),
+  // and the old B1 catch below — which only re-selects ACTIVE rows — cannot recover from that, so
+  // the org's local directory would be bricked (every getOrCreate throws) after a single deactivate.
+  //
+  // The conditional UPDATE is a race-safe latch: `WHERE status <> 'active'` is re-evaluated under
+  // READ COMMITTED after the row lock, so among N concurrent callers exactly ONE flips the row
+  // (RETURNING it) and writes the reactivation audit; every other caller's UPDATE matches zero rows
+  // (the row is already active by the time its lock is granted) and falls through to re-select the
+  // now-active winner below — same id, and exactly ONE `directory.local_integration.reactivate`
+  // audit no matter how many callers raced. (`idx_directory_integrations_org_provider_name` keeps at
+  // most one such (org, 'local', name) row, so this flips exactly the one deactivated anchor, never
+  // two — even if raw ops left extra differently-named inactive local rows around.)
+  const reactivated = await query<DirectoryIntegrationRow>(
+    `UPDATE directory_integrations
+        SET status = 'active', updated_at = NOW()
+      WHERE org_id = $1 AND provider = 'local' AND name = $2 AND status <> 'active'
+      RETURNING id, org_id, provider, name, status, corp_id, config, sync_enabled, schedule_cron, schedule_timezone,
+                default_deprovision_policy, last_sync_at, last_success_at, last_error, created_at, updated_at`,
+    [normalizedOrgId, LOCAL_INTEGRATION_NAME],
+  )
+  if (reactivated.rows.length === 1) {
+    const revived = summarizeIntegration(reactivated.rows[0])
+    try {
+      const { auditLog } = await import('../audit/audit')
+      await auditLog({
+        actorId: 'system',
+        actorType: 'system',
+        action: 'directory.local_integration.reactivate',
+        resourceType: 'directory-integration',
+        resourceId: revived.id,
+        // Values-free: integrationId (resourceId) + orgId + provider only. corp_id is immutable and
+        // already `local:<orgId>` by the CHECK — no need to echo it.
+        meta: { orgId: normalizedOrgId, provider: 'local' },
+      })
+    } catch (error) {
+      // Same best-effort contract as bootstrap below: only the dynamic import can fail here, and the
+      // status flip is already committed, so we log values-free and still return the revived anchor.
+      logger.warn(`Failed to import audit module after local integration reactivation: ${readErrorMessage(error, 'unknown error')}`, {
+        integrationId: revived.id,
+        orgId: normalizedOrgId,
+      })
+    }
+    return revived
+  }
+
+  // Zero rows flipped: either a concurrent caller just reactivated/bootstrapped the active row, or
+  // there is genuinely no local integration yet. Re-check for an active winner before creating one —
+  // this is the losing side of a reactivation race (return the winner, no second audit).
+  const reactivationWinner = await selectActiveLocalIntegration(normalizedOrgId)
+  if (reactivationWinner) return summarizeIntegration(reactivationWinner)
 
   const localCorpId = `local:${normalizedOrgId}`
   try {
@@ -2294,7 +2355,7 @@ export async function getOrCreateLocalIntegration(
                  default_deprovision_policy, last_sync_at, last_success_at, last_error, created_at, updated_at`,
       [
         normalizedOrgId,
-        'Local organization',
+        LOCAL_INTEGRATION_NAME,
         localCorpId,
         JSON.stringify({ mode: 'editable', source: 'local' }),
       ],
