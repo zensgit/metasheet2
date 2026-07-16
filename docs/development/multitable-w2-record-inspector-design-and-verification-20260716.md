@@ -8,7 +8,7 @@
 
 ## §0 一句话
 
-W2 把「记录右缘三个抢位组件」(MetaRecordDrawer 三合一 + 第二个 MetaCommentsDrawer + 权限 modal)统一成**单一 MetaRecordInspector 四 tab 壳**(字段/动态/评论/附件),drawer 退为 deprecated 兼容薄壳;**七刀全落 main、每刀 mutation-proven**;安全关键的附件掩码合同与响应式互斥经构造攻击验证。**唯一未落:OD-W2-5a(R11 回链 badge)——其依赖 `restored_from_version` 不在 main,待 owner 指认承载分支**(§5)。
+W2 把「记录右缘三个抢位组件」(MetaRecordDrawer 三合一 + 第二个 MetaCommentsDrawer + 权限 modal)统一成**单一 MetaRecordInspector 四 tab 壳**(字段/动态/评论/附件),drawer 退为 deprecated 兼容薄壳;**七刀全落 main、每刀 mutation-proven**;安全关键的附件掩码合同与响应式互斥经构造攻击验证。**最后一刀:OD-W2-5a(R11 回链 badge)a-read-through 进行中**——依赖 `restored_from_version` 早由 #4124 落 main(初稿误判已勘误,§5),owner 2026-07-16 授权直接 GO。
 
 ---
 
@@ -56,17 +56,22 @@ W2 把「记录右缘三个抢位组件」(MetaRecordDrawer 三合一 + 第二�
 - **CI-mirror 全量**:每刀合前跑完整 `run-required-web-tests.sh`(S7 时 340 文件/4009 测试)+ vue-tsc;真库刀 fresh PG + CI MIGRATION_EXCLUDE。
 - **HI-1 零新数据路径**:每面板 source-scan + fetch-monkeypatch,注入 fetch 必红。
 
-## §5 唯一开发开放项:OD-W2-5a(依赖缺失,非 owner 裁决问题)
+## §5 最后一刀:OD-W2-5a a-read-through(owner 2026-07-16 授权直接 GO,进行中)
 
-owner 裁 OD-W2-5=(a) a-read-through:record-history 读透传 `restoredFromVersion`、`MetaRecordRevision`/`normalizeRecordHistoryEntry` 保留、`MetaRecordHistoryPanel` 复用 `restoredFromVersionBadge()`、同刀修 `normalizeHistoryChange()`、badge 只看 `restoredFromVersion != null`、42703 滚动部署 fallback。
+**⚠️ 勘误(owner 2026-07-16 驳回原盘点)**:本文初稿 §5 曾断言 `restored_from_version` 依赖「全库 0 命中、不在 main、在 #4339」——**全错,可证伪**。根因:我用 `grep -rln` **打了 canonical 工作树**(session-start 陈旧 detached HEAD `0ef106293`),而非 `origin/main`;`git fetch` 更新 ref 不更新工作文件。对 ref 正确核实:`git ls-tree -r 42dc78e68` 直接可见 `zzzz20260711000000_add_meta_record_revisions_restored_from_version.ts`,`git grep origin/main` 命中 11 文件。**该列 + 写 seam + 四处 version-restore 穿线 + History Center badge 早由 #4124(2026-07-11)落 main**;#4339 是 causal-seq(`meta_record_chain_seq`)另一回事、只是继承了它,**不是** OD-W2-5a 的 blocker。教训入 `feedback_verify_against_current_main_not_stale_base`(第三次同根因复发)。
 
-**阻塞事实(穷举核实,2026-07-16 origin/main `42dc78e68`)**:`restored_from_version`/`restoredFromVersion` = **0 文件**(全库 case-insensitive 全扩展名);`restoredFromVersionBadge()` = 0 文件;`history-projection.ts` HistoryChange 无 restored 字段;`gh pr list --search restored_from_version` = 空;owner 引的 `65dec7b36` = directory 提交(#4318),与 restore 无关。**FE normalizer 函数(`normalizeHistoryChange`/`normalizeRecordHistoryEntry`)真实存在**,但无 `restoredFromVersion` 可透传。
+**owner 裁决 = 直接 GO a-read-through,不需 owner 再决定、不需 #4339**。gap 只在**记录级读链 + 一个 FE 半连接**:
+- 后端:`listRecordRevisions` SELECT 投影 `restored_from_version` → `RecordRevisionEntry.restoredFromVersion`(entry type 已声明该字段),复用现有 42703 `information_schema` 列探针 fallback(部署窗列缺→null 不 500)。
+- FE 类型 + normalizer:`MetaRecordRevision` 加 `restoredFromVersion`;`normalizeRecordHistoryEntry()` 透传。
+- **同刀修半连接**:`normalizeHistoryChange()` 现丢弃 `HistoryChange` 已带的 `restoredFromVersion`(base History Center 组件测试注入对象绕过 normalizer 故假绿)——补透传。
+- 组件:`MetaRecordHistoryPanel` 复用现有 `restoredFromVersionBadge()`,**仅 `restoredFromVersion != null` 显示**。
+- goldens 正负:API/client/component;**`source='restore'` 但字段 NULL 必不显示**(badge 只看 version 非 source)。
 
-⇒ 该列/迁移/回填/badge helper **多半在某条平行 session 未合的 restore/history 分支**(候选:`multitable-pit-history-restore-designlock` / `r13-lane-b-tstate-history-designlock` / `r14-basewide-restore-decision` / L3 v3.5/v3.7 PR)。**待 owner 指认承载分支;其落 main 后按 a-read-through 谱一把小 PR + 真 API/client/component goldens**,那之后本文补 §附录 A(a-read-through 验证)方为 W2 最终收官(owner 口径:MD 等 a-read-through 落地)。**本文不主张 OD-W2-5a 已完成。**
+**状态**:a-read-through PR 进行中(owner 授权,本轮自主完成)。其落地后 §附录 A 补 a-read-through 验证台账、方为 W2 最终收官。**本文不主张 OD-W2-5a 已完成**——它是本线最后一刀,进行中。
 
 ## §6 owner-gated 残余(明标,不被「W2 收官」掩盖)
 
-- **OD-W2-5a**:依赖缺失(§5),待 owner 指认分支。
+- **OD-W2-5a**:a-read-through 进行中(owner 授权,§5);非阻塞、非 owner 裁决项。
 - **correctness 子线 C2/C3/C6**:v3.6 统一修订锁 PROPOSED(#4328),待 owner OD-V36-*(尤其 L4-0 canonical-fence 收敛——v3.5 fence 前提在 main 为假);C2 §7 裁决已录(#4325)。#4309 Draft/HELD 归其 session。
 - **私有 comment-inbox authz 缺陷**:report-owner-only、独立 G-8 血缘 rung,待 owner 处置决定;公开面零机制披露。
 - **field-undelete flag = HOLD**:tombstone 观察窗 + 非生产 flag-on smoke 待 owner 起表(批量前置 #4299 已落但不改 HOLD)。
@@ -74,7 +79,7 @@ owner 裁 OD-W2-5=(a) a-read-through:record-history 读透传 `restoredFromVersi
 
 ## §7 本文不主张什么
 
-- 不主张 OD-W2-5a 已做(§5 依赖缺失,明标)。
+- 不主张 OD-W2-5a 已做(§5 a-read-through 进行中,明标);其依赖在 main 的勘误亦明标。
 - 不主张 W2 锁被完整 ratify 超出 §6bis(那是 owner round-3 已裁的八项 + 设计;实现授权按刀)。
 - 不主张任何 flag 开启 / C2-C6 已解 / 私有缺陷已修。
 - 不主张「整条多维表线全部开发好了」——主张的是:**W2 检查器七刀开发侧完成且经对抗验证;剩余 = 一个依赖缺失刀 + owner 裁决/处置项**,逐条在案。
