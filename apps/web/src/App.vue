@@ -1,10 +1,11 @@
 <template>
   <div id="app">
-    <nav class="app-nav" v-if="showNav">
-      <div class="nav-brand">
+    <nav class="app-nav" v-if="showNav" aria-label="Primary navigation">
+      <router-link class="nav-brand" to="/apps" aria-label="MetaSheet">
+        <span class="brand-mark" aria-hidden="true">MS</span>
         <span class="brand-text">{{ brandText }}</span>
-      </div>
-      <div class="nav-links">
+      </router-link>
+      <div class="nav-links" aria-label="Workspace navigation">
         <router-link v-if="attendanceFocused" to="/attendance" class="nav-link">{{ navLabels.attendance }}</router-link>
 
         <template v-else>
@@ -20,36 +21,47 @@
             <router-link to="/multitable" class="nav-link">{{ navLabels.multitable }}</router-link>
             <router-link v-if="hasFeature('workflow')" to="/workflows" class="nav-link">{{ navLabels.workflows }}</router-link>
             <router-link v-if="canUseApprovals" to="/approvals" class="nav-link">{{ navLabels.approvals }}</router-link>
-            <router-link
-              v-for="item in pluginNavItems"
-              :key="item.id"
-              :to="item.path"
-              class="nav-link"
-            >
-              {{ item.label }}
-            </router-link>
-            <router-link v-if="canManageUsers" to="/admin/users" class="nav-link">{{ navLabels.users }}</router-link>
-            <router-link v-if="canManageUsers" to="/admin/roles" class="nav-link">{{ navLabels.roles }}</router-link>
-            <router-link v-if="canManageUsers" to="/admin/permissions" class="nav-link">{{ navLabels.permissions }}</router-link>
-            <router-link v-if="canManageUsers" to="/admin/audit" class="nav-link">{{ navLabels.adminAudit }}</router-link>
-            <router-link v-if="canManageUsers" to="/admin/automation-executions" class="nav-link">{{ navLabels.automationRuns }}</router-link>
-            <router-link v-if="canManageUsers" to="/approvals/metrics" class="nav-link">{{ navLabels.approvalMetrics }}</router-link>
-            <router-link v-if="canUseIntegration" to="/integrations/workbench" class="nav-link">{{ navLabels.systemIntegration }}</router-link>
-            <router-link v-if="canUseIntegration" to="/stock-prep" class="nav-link">{{ navLabels.stockPreparation }}</router-link>
-            <router-link v-if="canUseIntegration" to="/data-sources" class="nav-link">{{ navLabels.dataSources }}</router-link>
-            <router-link v-if="isAdmin" to="/admin/plugins" class="nav-link">{{ navLabels.plugins }}</router-link>
-            <router-link v-if="canUsePlm" to="/plm" class="nav-link">{{ navLabels.plm }}</router-link>
-            <router-link v-if="canUsePlm" to="/plm/audit" class="nav-link">{{ navLabels.audit }}</router-link>
+            <details v-if="canUseIntegration || canUsePlm" class="nav-menu">
+              <summary class="nav-menu__trigger">{{ navLabels.operations }}</summary>
+              <div class="nav-menu__panel" role="group" :aria-label="navLabels.operations">
+                <router-link v-if="canUseIntegration" to="/integrations/workbench" class="nav-menu__item">{{ navLabels.systemIntegration }}</router-link>
+                <router-link v-if="canUseIntegration" to="/stock-prep" class="nav-menu__item">{{ navLabels.stockPreparation }}</router-link>
+                <router-link v-if="canUseIntegration" to="/data-sources" class="nav-menu__item">{{ navLabels.dataSources }}</router-link>
+                <router-link v-if="canUsePlm" to="/plm" class="nav-menu__item">{{ navLabels.plm }}</router-link>
+                <router-link v-if="canUsePlm" to="/plm/audit" class="nav-menu__item">{{ navLabels.audit }}</router-link>
+              </div>
+            </details>
+            <details v-if="canManageUsers || isAdmin" class="nav-menu">
+              <summary class="nav-menu__trigger">{{ navLabels.management }}</summary>
+              <div class="nav-menu__panel" role="group" :aria-label="navLabels.management">
+                <router-link v-if="canManageUsers" to="/admin/users" class="nav-menu__item">{{ navLabels.users }}</router-link>
+                <router-link v-if="canManageUsers" to="/admin/roles" class="nav-menu__item">{{ navLabels.roles }}</router-link>
+                <router-link v-if="canManageUsers" to="/admin/permissions" class="nav-menu__item">{{ navLabels.permissions }}</router-link>
+                <router-link v-if="canManageUsers" to="/admin/audit" class="nav-menu__item">{{ navLabels.adminAudit }}</router-link>
+                <router-link v-if="canManageUsers" to="/admin/automation-executions" class="nav-menu__item">{{ navLabels.automationRuns }}</router-link>
+                <router-link v-if="canManageUsers" to="/approvals/metrics" class="nav-menu__item">{{ navLabels.approvalMetrics }}</router-link>
+                <router-link v-if="isAdmin" to="/admin/plugins" class="nav-menu__item">{{ navLabels.plugins }}</router-link>
+              </div>
+            </details>
+            <details v-if="pluginNavItems.length" class="nav-menu">
+              <summary class="nav-menu__trigger">{{ navLabels.extensions }}</summary>
+              <div class="nav-menu__panel" role="group" :aria-label="navLabels.extensions">
+                <router-link v-for="item in pluginNavItems" :key="item.id" :to="item.path" class="nav-menu__item">
+                  {{ item.label }}
+                </router-link>
+              </div>
+            </details>
           </template>
         </template>
       </div>
 
       <div class="nav-actions">
         <label class="nav-locale">
-          <span class="nav-locale__label">{{ navLabels.language }}</span>
           <select
             class="nav-locale__select"
             data-testid="locale-switcher"
+            :aria-label="navLabels.language"
+            :title="navLabels.language"
             :value="locale"
             @change="onLocaleChange"
           >
@@ -58,9 +70,17 @@
           </select>
         </label>
         <template v-if="isLoggedIn">
-          <span v-if="accountEmail" class="nav-user">{{ accountEmail }}</span>
-          <router-link to="/settings" class="nav-link">{{ navLabels.mySessions }}</router-link>
-          <button class="nav-link nav-link--button" type="button" @click="logout">{{ navLabels.signOut }}</button>
+          <details class="nav-account">
+            <summary class="nav-account__trigger" :title="accountEmail || navLabels.account">
+              <span class="nav-account__avatar" aria-hidden="true">{{ accountInitial }}</span>
+              <span v-if="accountEmail" class="nav-user">{{ accountEmail }}</span>
+            </summary>
+            <div class="nav-account__panel">
+              <span v-if="accountEmail" class="nav-account__email">{{ accountEmail }}</span>
+              <router-link to="/settings" class="nav-menu__item">{{ navLabels.mySessions }}</router-link>
+              <button class="nav-menu__item nav-menu__item--button" type="button" @click="logout">{{ navLabels.signOut }}</button>
+            </div>
+          </details>
         </template>
       </div>
     </nav>
@@ -136,6 +156,9 @@ const navLabels = computed(() => {
       systemIntegration: '数据工厂',
       stockPreparation: '备料工作台',
       dataSources: '外接数据源',
+      operations: '运营',
+      management: '管理',
+      extensions: '扩展',
       plugins: '插件',
       plm: 'PLM',
       audit: '审计',
@@ -143,6 +166,7 @@ const navLabels = computed(() => {
       mySessions: '我的会话',
       signOut: '退出登录',
       language: '语言',
+      account: '账户',
     }
   }
   return {
@@ -160,6 +184,9 @@ const navLabels = computed(() => {
     systemIntegration: 'Data Factory',
     stockPreparation: 'Stock Preparation',
     dataSources: 'Data Sources',
+    operations: 'Operations',
+    management: 'Management',
+    extensions: 'Extensions',
     plugins: 'Plugins',
     plm: 'PLM',
     audit: 'Audit',
@@ -167,6 +194,7 @@ const navLabels = computed(() => {
     mySessions: 'My Sessions',
     signOut: 'Sign out',
     language: 'Language',
+    account: 'Account',
   }
 })
 
@@ -182,6 +210,8 @@ const accountEmail = computed(() => {
   void route.fullPath
   return getAccessSnapshot().email
 })
+
+const accountInitial = computed(() => accountEmail.value?.trim().charAt(0).toUpperCase() || 'M')
 
 async function logout(): Promise<void> {
   const token = getToken()
@@ -255,33 +285,48 @@ html, body {
 .app-nav {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 0 20px;
-  height: 50px;
-  background: #fff;
-  border-bottom: 1px solid #e0e0e0;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
+  gap: 16px;
+  min-height: 56px;
+  padding: 0 18px;
+  background: #ffffff;
+  border-bottom: 1px solid #dce4ee;
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
 }
 
 .nav-brand {
   display: flex;
   align-items: center;
   flex: 0 0 auto;
-  gap: 10px;
+  gap: 8px;
+  color: inherit;
+  text-decoration: none;
+}
+
+.brand-mark {
+  display: inline-grid;
+  width: 30px;
+  height: 30px;
+  place-items: center;
+  border-radius: 7px;
+  background: #0f766e;
+  color: #ffffff;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0;
 }
 
 .brand-text {
-  font-size: 18px;
-  font-weight: 600;
-  color: var(--ms-color-primary);
+  color: #0f172a;
+  font-size: 15px;
+  font-weight: 700;
   white-space: nowrap;
 }
 
 .nav-links {
   display: flex;
   flex: 1 1 auto;
-  gap: 8px;
+  align-items: center;
+  gap: 4px;
   min-width: 0;
   overflow-x: auto;
   overscroll-behavior-x: contain;
@@ -295,8 +340,8 @@ html, body {
 .nav-actions {
   display: flex;
   align-items: center;
-  flex: 0 1 auto;
-  gap: 12px;
+  flex: 0 0 auto;
+  gap: 8px;
   min-width: 0;
 }
 
@@ -314,50 +359,164 @@ html, body {
   display: inline-flex;
   align-items: center;
   flex: 0 0 auto;
-  gap: 6px;
   white-space: nowrap;
-}
-
-.nav-locale__label {
-  color: #6b7280;
-  font-size: 12px;
 }
 
 .nav-locale__select {
-  border: 1px solid #d1d5db;
+  height: 32px;
+  border: 1px solid #d5deea;
   border-radius: 6px;
-  padding: 4px 6px;
-  background: #fff;
-  color: #374151;
+  padding: 0 7px;
+  background: #f8fafc;
+  color: #475569;
+  font-size: 12px;
+  font-weight: 600;
 }
 
-.nav-link {
+.nav-link,
+.nav-menu__trigger {
   display: inline-flex;
   align-items: center;
+  justify-content: center;
   flex: 0 0 auto;
-  line-height: 1.2;
-  padding: 8px 16px;
+  min-height: 32px;
+  padding: 0 10px;
+  border: 1px solid transparent;
+  border-radius: 6px;
   text-decoration: none;
-  color: #666;
-  border-radius: 4px;
-  transition: all 0.2s;
+  color: #526174;
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.2;
+  transition: border-color 0.16s ease, background-color 0.16s ease, color 0.16s ease;
   white-space: nowrap;
 }
 
-.nav-link--button {
-  background: transparent;
-  border: 1px solid transparent;
-  cursor: pointer;
-}
-
-.nav-link:hover {
-  background-color: #f0f0f0;
-  color: #333;
+.nav-link:hover,
+.nav-menu__trigger:hover {
+  background: #f1f5f9;
+  color: #0f172a;
 }
 
 .nav-link.router-link-active {
-  background-color: var(--el-color-primary-light-9);
-  color: var(--ms-color-primary);
+  border-color: #c7e5df;
+  background: #eaf7f4;
+  color: #0f766e;
+}
+
+.nav-menu,
+.nav-account {
+  position: relative;
+  flex: 0 0 auto;
+}
+
+.nav-menu__trigger,
+.nav-account__trigger {
+  list-style: none;
+  cursor: pointer;
+}
+
+.nav-menu__trigger::-webkit-details-marker,
+.nav-account__trigger::-webkit-details-marker {
+  display: none;
+}
+
+.nav-menu__trigger::after {
+  content: '';
+  width: 5px;
+  height: 5px;
+  margin-left: 7px;
+  border-right: 1.5px solid currentColor;
+  border-bottom: 1.5px solid currentColor;
+  transform: translateY(-2px) rotate(45deg);
+}
+
+.nav-menu[open] .nav-menu__trigger {
+  border-color: #d5deea;
+  background: #f8fafc;
+  color: #0f172a;
+}
+
+.nav-menu__panel,
+.nav-account__panel {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  z-index: 30;
+  display: grid;
+  min-width: 184px;
+  padding: 6px;
+  border: 1px solid #dbe4ef;
+  border-radius: 8px;
+  background: #ffffff;
+  box-shadow: 0 12px 28px rgba(15, 23, 42, 0.14);
+}
+
+.nav-menu__item {
+  display: flex;
+  align-items: center;
+  min-height: 34px;
+  padding: 0 9px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: #334155;
+  font: inherit;
+  font-size: 13px;
+  text-align: left;
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+.nav-menu__item:hover,
+.nav-menu__item.router-link-active {
+  background: #eff6f5;
+  color: #0f766e;
+}
+
+.nav-menu__item--button {
+  width: 100%;
+  cursor: pointer;
+}
+
+.nav-account__trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 32px;
+  padding: 0 4px;
+}
+
+.nav-account__avatar {
+  display: inline-grid;
+  width: 28px;
+  height: 28px;
+  place-items: center;
+  border: 1px solid #b7d9d1;
+  border-radius: 50%;
+  background: #eaf7f4;
+  color: #0f766e;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.nav-account[open] .nav-account__avatar {
+  border-color: #0f766e;
+}
+
+.nav-account__panel {
+  min-width: 208px;
+}
+
+.nav-account__email {
+  display: block;
+  padding: 6px 9px 8px;
+  border-bottom: 1px solid #e6edf5;
+  color: #64748b;
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .app-main {
@@ -367,35 +526,46 @@ html, body {
 
 @media (max-width: 768px) {
   .app-nav {
-    height: auto;
-    flex-wrap: wrap;
-    align-items: flex-start;
-    padding: 12px 16px;
-    gap: 8px 12px;
+    gap: 10px;
+    padding: 0 12px;
   }
 
-  .nav-brand,
-  .nav-links,
-  .nav-actions {
-    width: 100%;
+  .nav-links {
+    gap: 2px;
   }
 
-  .nav-links,
-  .nav-actions {
-    flex-wrap: wrap;
-  }
-
-  .nav-actions {
-    gap: 8px;
+  .nav-link,
+  .nav-menu__trigger {
+    padding: 0 8px;
   }
 
   .nav-user {
-    width: 100%;
-    max-width: 100%;
+    display: none;
   }
 
-  .nav-link {
-    padding: 8px 12px;
+  .nav-menu__panel,
+  .nav-account__panel {
+    position: fixed;
+    top: 62px;
+    right: 12px;
+    left: 12px;
+    min-width: 0;
+  }
+}
+
+@media (max-width: 480px) {
+  .app-nav {
+    gap: 8px;
+    padding: 0 10px;
+  }
+
+  .brand-text {
+    display: none;
+  }
+
+  .nav-locale__select {
+    width: 38px;
+    padding: 0 3px;
   }
 }
 
@@ -407,26 +577,29 @@ html, body {
   }
 
   .app-nav {
-    background: #2d2d2d;
-    border-bottom-color: #404040;
+    background: #17212f;
+    border-bottom-color: #334155;
   }
 
   .brand-text {
-    color: #64b5f6;
+    color: #e2e8f0;
   }
 
-  .nav-link {
-    color: #aaa;
+  .nav-link,
+  .nav-menu__trigger {
+    color: #cbd5e1;
   }
 
-  .nav-link:hover {
-    background-color: #3d3d3d;
-    color: #fff;
+  .nav-link:hover,
+  .nav-menu__trigger:hover {
+    background: #263548;
+    color: #ffffff;
   }
 
   .nav-link.router-link-active {
-    background-color: #1e3a5f;
-    color: #64b5f6;
+    border-color: #2d8278;
+    background: #173f3a;
+    color: #8de0d2;
   }
 }
 </style>
