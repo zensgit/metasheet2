@@ -33,7 +33,9 @@ import {
   type DurableConsumerHandlers,
 } from '../../src/multitable/automation-durable-activation'
 import { claimDueConsumers, completeConsumer, type ClaimedConsumer } from '../../src/multitable/automation-durable-dispatcher'
-import { runDispatchTick } from '../../src/multitable/automation-durable-dispatch-loop'
+import { runDispatchTick, type DispatchLoopObserver } from '../../src/multitable/automation-durable-dispatch-loop'
+import type { TransactionalQueryable } from '../../src/multitable/pg-transaction-guard'
+import type { OutboxEventInput } from '../../src/multitable/automation-outbox-enqueue'
 
 const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
 const db = () => poolManager.get()
@@ -41,6 +43,29 @@ const RUN = randomUUID()
 const FLAG_ON = { AUTOMATION_DURABLE_DELIVERY_ENABLED: 'true' } as unknown as NodeJS.ProcessEnv
 const FLAG_OFF = {} as NodeJS.ProcessEnv
 const enqueued: string[] = []
+/** Required telemetry sink (boot now demands one, per the loop's observability doctrine). */
+const noopObserver: DispatchLoopObserver = {
+  onUnknownConsumerKeys: () => {},
+  onTickError: () => {},
+  onHeartbeatError: () => {},
+  onClaimTimePoison: () => {},
+}
+/** Produce inside a REAL committed transaction (the enqueue txn probe requires one) and return the result. */
+async function produceCommitted(input: OutboxEventInput, env: NodeJS.ProcessEnv) {
+  const client = await db().getInternalPool().connect()
+  try {
+    await client.query('BEGIN')
+    const trx: TransactionalQueryable = { isTransaction: true, query: (sql, params) => client.query(sql, params) }
+    const res = await produceAutomationEvent(trx, input, env)
+    await client.query('COMMIT')
+    return res
+  } catch (e) {
+    await client.query('ROLLBACK').catch(() => {})
+    throw e
+  } finally {
+    client.release()
+  }
+}
 
 // Handlers that record deliveries for OUR rows and defensively re-throw for foreign rows (retryable → left
 // reclaimable for whichever suite owns them; never terminated by us).
@@ -74,17 +99,17 @@ describeIfDatabase('P2 durable-delivery S4-b/S5 activation + S7 crash-injection 
 
   test('flag OFF is byte-neutral: produce → null + zero rows; boot → null (no loop, no reads)', async () => {
     const before = await db().query('SELECT count(*)::int AS c FROM meta_automation_outbox')
-    const res = await produceAutomationEvent(db(), { eventType: 'approval.approved', eventId: `evt_${RUN}_off`, payload: {} }, FLAG_OFF)
+    const res = await produceAutomationEvent(db() as unknown as TransactionalQueryable, { eventType: 'approval.approved', eventId: `evt_${RUN}_off`, payload: {} }, FLAG_OFF)
     expect(res).toBeNull()
     const after = await db().query('SELECT count(*)::int AS c FROM meta_automation_outbox')
     expect(Number(after.rows[0].c)).toBe(Number(before.rows[0].c)) // nothing written
-    expect(bootDurableDelivery(db(), recordingHandlers([]), { env: FLAG_OFF })).toBeNull()
+    expect(bootDurableDelivery(db(), recordingHandlers([]), noopObserver, { env: FLAG_OFF })).toBeNull()
   })
 
   test('boot fails loudly on a missing handler (before any claim)', () => {
     const handlers = recordingHandlers([]) as Record<string, unknown>
     delete handlers['approval-projection']
-    expect(() => bootDurableDelivery(db(), handlers as unknown as DurableConsumerHandlers, { env: FLAG_ON })).toThrow(/missing handler.*approval-projection/)
+    expect(() => bootDurableDelivery(db(), handlers as unknown as DurableConsumerHandlers, noopObserver, { env: FLAG_ON })).toThrow(/missing handler.*approval-projection/)
   })
 
   test('registry from handlers passes the bidirectional manifest completeness assertion', () => {
@@ -98,7 +123,7 @@ describeIfDatabase('P2 durable-delivery S4-b/S5 activation + S7 crash-injection 
     let outboxId = ''
     try {
       await client.query('BEGIN')
-      const res = await produceAutomationEvent(client, { eventType: 'approval.approved', eventId: `evt_${RUN}_e2e`, payload: { i: 1 } }, FLAG_ON)
+      const res = await produceAutomationEvent({ isTransaction: true, query: (s, p) => client.query(s, p) }, { eventType: 'approval.approved', eventId: `evt_${RUN}_e2e`, payload: { i: 1 } }, FLAG_ON)
       outboxId = res!.outboxId
       enqueued.push(outboxId)
       await client.query('COMMIT')
@@ -106,7 +131,7 @@ describeIfDatabase('P2 durable-delivery S4-b/S5 activation + S7 crash-injection 
       client.release()
     }
     const seen: Array<{ key: string; eventId: string; fence: string }> = []
-    const handle = bootDurableDelivery(db(), recordingHandlers(seen, { failBridgePermanently: true }), {
+    const handle = bootDurableDelivery(db(), recordingHandlers(seen, { failBridgePermanently: true }), noopObserver, {
       env: FLAG_ON,
       intervalMs: 100,
       batchSize: 500,
@@ -135,7 +160,7 @@ describeIfDatabase('P2 durable-delivery S4-b/S5 activation + S7 crash-injection 
     let outboxId = ''
     try {
       await client.query('BEGIN')
-      const res = await produceAutomationEvent(client, { eventType: 'form.submitted', eventId: `evt_${RUN}_v1`, payload: {} }, FLAG_ON)
+      const res = await produceAutomationEvent({ isTransaction: true, query: (s, p) => client.query(s, p) }, { eventType: 'form.submitted', eventId: `evt_${RUN}_v1`, payload: {} }, FLAG_ON)
       outboxId = res!.outboxId
       await client.query('ROLLBACK') // crash before commit
     } finally {
@@ -146,7 +171,7 @@ describeIfDatabase('P2 durable-delivery S4-b/S5 activation + S7 crash-injection 
   })
 
   test('V2: commit-then-crash-before-dispatch → rows are durable; a later tick (restart) delivers', async () => {
-    const res = await produceAutomationEvent(db(), { eventType: 'multitable.comment.created', eventId: `evt_${RUN}_v2`, payload: {} }, FLAG_ON)
+    const res = await produceCommitted({ eventType: 'multitable.comment.created', eventId: `evt_${RUN}_v2`, payload: {} }, FLAG_ON)
     enqueued.push(res!.outboxId)
     // "crash": no dispatcher runs. Rows sit durable & pending:
     expect(await consumerStatuses(res!.outboxId)).toEqual({ 'webhook-event-bridge': 'pending' })
@@ -158,7 +183,7 @@ describeIfDatabase('P2 durable-delivery S4-b/S5 activation + S7 crash-injection 
   })
 
   test('V3: crash-after-claim → reclaim redelivers (at-least-once) with the SAME stable eventId across fences', async () => {
-    const res = await produceAutomationEvent(db(), { eventType: 'form.submitted', eventId: `evt_${RUN}_v3`, payload: {} }, FLAG_ON)
+    const res = await produceCommitted({ eventType: 'form.submitted', eventId: `evt_${RUN}_v3`, payload: {} }, FLAG_ON)
     enqueued.push(res!.outboxId)
     // worker A claims and "crashes" (never resolves)
     const [a] = await claimDueConsumers(db(), { consumerKeys: ['automation-record-trigger'], batchSize: 500 })
@@ -175,7 +200,7 @@ describeIfDatabase('P2 durable-delivery S4-b/S5 activation + S7 crash-injection 
   })
 
   test('V4: zombie + reclaimer both reach send → identical idempotency SEED across fences; zombie terminal write = 0 rows', async () => {
-    const res = await produceAutomationEvent(db(), { eventType: 'multitable.record.updated', eventId: `evt_${RUN}_v4`, payload: {} }, FLAG_ON)
+    const res = await produceCommitted({ eventType: 'multitable.record.updated', eventId: `evt_${RUN}_v4`, payload: {} }, FLAG_ON)
     enqueued.push(res!.outboxId)
     // zombie Z claims (fence F1) and stalls past its lease — but stays alive
     const zAll = await claimDueConsumers(db(), { consumerKeys: ['automation-record-trigger', 'webhook-event-bridge'], batchSize: 500 })

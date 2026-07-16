@@ -33,9 +33,11 @@ import {
   startDurableDispatchLoop,
   type AdapterOutcome,
   type DispatchLoopHandle,
+  type DispatchLoopObserver,
   type DispatchTickOptions,
 } from './automation-durable-dispatch-loop'
 import { isDurableDeliveryEnabled } from './automation-durable-delivery'
+import type { TransactionalQueryable } from './pg-transaction-guard'
 
 /** Throw this from a handler to mark a DETERMINISTIC permanent failure (→ dead_letter, not retried). */
 export class PermanentDeliveryFailure extends Error {}
@@ -61,10 +63,12 @@ export const DURABLE_CONSUMER_KEYS = [
 
 /**
  * Produce-site seam: durable enqueue when the flag is ON, no-op when OFF. MUST be called on the SAME
- * transaction client as the source state change — atomicity is the whole point (#4203 §producer/identity).
+ * transaction client as the source state change — atomicity is the whole point (#4203 §producer/identity),
+ * and it is MACHINE-ENFORCED downstream: `enqueueOutboxEvent` probes the database's own transaction state
+ * (pg-transaction-guard), so a pool / autocommit client / forged marker is rejected before any write.
  */
 export async function produceAutomationEvent(
-  trx: Queryable,
+  trx: TransactionalQueryable,
   input: OutboxEventInput,
   env: NodeJS.ProcessEnv = process.env,
 ): Promise<EnqueuedOutboxEvent | null> {
@@ -100,21 +104,26 @@ export function buildConsumerAdapterRegistry(handlers: DurableConsumerHandlers):
 export interface BootOptions extends DispatchTickOptions {
   intervalMs?: number
   env?: NodeJS.ProcessEnv
-  onTickError?: (err: unknown) => void
 }
 
 /**
  * Startup entry: flag OFF → null (byte-for-byte no-op); flag ON → registry + BIDIRECTIONAL manifest
  * completeness assertion (a boot misconfiguration fails loudly before any claim) + dispatch loop.
+ *
+ * `observer` is REQUIRED (the loop's telemetry doctrine): unknown consumer keys, tick errors, heartbeat DB
+ * errors, and claim-time poisons must all be observable — the boot site wires them to real logging/metrics.
+ * `db` MUST be a pg Pool (or equivalent running queries on independent connections), never a single
+ * checked-out client — the loop's heartbeat renews run concurrently with adapters and resolves.
  */
 export function bootDurableDelivery(
   db: Queryable,
   handlers: DurableConsumerHandlers,
+  observer: DispatchLoopObserver,
   opts: BootOptions = {},
 ): DispatchLoopHandle | null {
   const env = opts.env ?? process.env
   if (!isDurableDeliveryEnabled(env)) return null
   const registry = buildConsumerAdapterRegistry(handlers)
   assertManifestCompleteness(registry, CURRENT_ROUTING_MANIFEST)
-  return startDurableDispatchLoop(db, registry, { ...opts, env })
+  return startDurableDispatchLoop(db, registry, observer, { ...opts, env })
 }
