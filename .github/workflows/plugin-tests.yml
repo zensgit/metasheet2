@@ -99,6 +99,29 @@ jobs:
             scripts/ops/github-dingtalk-oauth-stability-summary.test.mjs \
             scripts/ops/dingtalk-oauth-stability-workflow-contract.test.mjs
 
+  stock-prep-powershell51:
+    name: stock-prep PowerShell 5.1 acceptance
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 20.x
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20.x
+
+      # The release package runs this acceptance boundary under Windows PowerShell 5.1. pwsh 7 has
+      # different native-stderr semantics and cannot stand in for the target shell contract.
+      - name: Run target-shell smoke capture regression
+        shell: powershell
+        run: |
+          $powershell51 = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
+          & $powershell51 -NoProfile -ExecutionPolicy Bypass -File `
+            scripts/ops/__tests__/stock-preparation-onprem-acceptance.ps51.tests.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
   test:
     runs-on: ubuntu-latest
 
@@ -129,12 +152,10 @@ jobs:
       - name: Prod health probe monitor contract
         run: node --test scripts/ops/prod-health-probe-state.test.mjs
 
-      # #4210 T9: the stock-preparation one-click acceptance script's contract + behavioural tests (56
-      # checks = 18 contract + 38 behavioural) are pure pwsh 7 + tar + node (no DB, no live server — the
-      # pm2/health/smoke stages are unit-tested via dot-sourced pure helpers). Run inside the REQUIRED
-      # `test` gate, but only ONCE (on 20.x — no need across the 18/20 matrix), early (no pnpm install
-      # needed: pwsh/tar ship on ubuntu, node is already set up) so a regression fails the required check
-      # fast. This is the only CI that executes these checks.
+      # #4210 T9: the stock-preparation one-click acceptance script's cross-platform contract + behavioural
+      # tests are pure pwsh 7 + tar + node. Run once in the required 20.x arm. The package's target-shell
+      # semantics are covered separately by the Windows PowerShell 5.1 job above; neither shell substitutes
+      # for the other.
       - name: Run stock-preparation on-prem acceptance tests (T9, pwsh)
         if: matrix.node-version == '20.x'
         shell: pwsh

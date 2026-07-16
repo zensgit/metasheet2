@@ -45,6 +45,11 @@ $smokeStages = @($acceptanceAst.FindAll({
   $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
     $node.Name -eq 'Invoke-SmokeStage'
 }, $true))
+$smokeCaptureFunctions = @($acceptanceAst.FindAll({
+  param($node)
+  $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+    $node.Name -eq 'Invoke-SmokeCapture'
+}, $true))
 $smokeCaptureCalls = if ($smokeStages.Count -eq 1) {
   @($smokeStages[0].Body.FindAll({
     param($node)
@@ -86,6 +91,20 @@ Check "smoke stage delegates native execution to the summary-only capture bounda
   'NodeArgs' -in $smokeCaptureParams -and
   'Token' -in $smokeCaptureParams -and
   $directSmokeNodeCalls.Count -eq 0
+)
+$scopedPolicyTry = if ($smokeCaptureFunctions.Count -eq 1) {
+  @($smokeCaptureFunctions[0].Body.FindAll({
+    param($node)
+    $node -is [System.Management.Automation.Language.TryStatementAst] -and
+      $null -ne $node.Finally -and
+      $node.Body.Extent.Text -match '\$ErrorActionPreference\s*=\s*["'']Continue["'']' -and
+      $node.Finally.Extent.Text -match '\$ErrorActionPreference\s*=\s*\$previousErrorActionPreference'
+  }, $true))
+} else { @() }
+Check "native smoke invocation scopes and restores ErrorActionPreference" (
+  $smokeCaptureFunctions.Count -eq 1 -and
+  $smokeCaptureFunctions[0].Extent.Text -match '\$previousErrorActionPreference\s*=\s*\$ErrorActionPreference' -and
+  $scopedPolicyTry.Count -eq 1
 )
 
 # The package template and acceptance runner are one operator contract. A stale default makes a healthy

@@ -226,12 +226,10 @@ try {
   $o = Test-SmokeOutcome "mvpSmoke.pass=true`nauditActionsCovered=8/8"
   Check "smoke: selfScanClean ABSENT -> FAIL (fail-closed)" ((-not $o.ok) -and $o.reason -eq 'self_scan_not_clean')
 
-  # ── D5 (corrective-3): the stage-6 smoke capture is stdout-ONLY (2>$null), never merged (2>&1). A child
-  # that writes noise to stderr AND a valid values-free summary to stdout must NOT abort the capture (the
-  # RC-0 POWERSHELL_NATIVE_STDERR_PROMOTION failure — where 2>&1 promoted native stderr to a terminating
-  # error and the smoke's summary was never read), must NOT let the stderr text contaminate the parsed
-  # summary, and must still parse PASS. Mutation guards: flip 2>$null back to 2>&1 and the sentinel check reds;
-  # hard-code the captured exit to zero and the non-zero preservation + stage fail-closed checks red.
+  # ── D5 (corrective-3/4): the stage-6 smoke capture is stdout-ONLY (2>$null), never merged (2>&1).
+  # Corrective-4 also scopes ErrorActionPreference=Continue around only the native invocation so Windows
+  # PowerShell 5.1 does not promote discarded stderr to a terminating error. The dedicated powershell.exe
+  # 5.1 CI test is the load-bearing target-shell proof; this pwsh 7 leg keeps cross-version coverage.
   $fakeSmokeRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("t9accept_fakesmoke_" + [guid]::NewGuid().ToString('N').Substring(0, 12))
   $fakeSmokeOps = Join-Path $fakeSmokeRoot 'scripts/ops'
   New-Item -ItemType Directory -Path $fakeSmokeOps -Force | Out-Null
@@ -254,9 +252,15 @@ try {
   Check "corrective-3: the stderr sentinel is NOT captured into the parsed summary (2>`$null, not 2>&1)" ($null -ne $cap -and -not ("$($cap.stdout)" -match [regex]::Escape($sentinel)))
   $capOutcome = Test-SmokeOutcome "$($cap.stdout)"
   Check "corrective-3: the stdout values-free summary still parses to PASS (8/8, clean)" ($capOutcome.ok -and $capOutcome.pass -and $capOutcome.audit -eq '8/8' -and $capOutcome.selfScan)
-  Check "corrective-3: exit code preserved (0) and the token env var is cleared after capture" ($null -ne $cap -and $cap.exit -eq 0 -and -not (Test-Path Env:METASHEET_AUTH_TOKEN))
+  Check "corrective-4: exit 0 preserves code, restores error policy, and clears token env" (
+    $null -ne $cap -and
+    $cap.exit -eq 0 -and
+    $ErrorActionPreference -eq 'Stop' -and
+    -not (Test-Path Env:METASHEET_AUTH_TOKEN)
+  )
 
   $nonzeroLines = @(
+    "process.stderr.write('$sentinel\n')",
     "process.stdout.write('mvpSmoke.pass=true\n')",
     "process.stdout.write('auditActionsCovered=8/8\n')",
     "process.stdout.write('selfScanClean=true\n')",
@@ -264,8 +268,11 @@ try {
   )
   Set-Content -LiteralPath $fakeSmoke -Encoding utf8 -Value ($nonzeroLines -join "`n")
   $nonzeroCap = Invoke-SmokeCapture -NodeArgs @($fakeSmoke) -Token $dummyToken
-  Check "corrective-3: non-zero native exit code is preserved exactly (7), never normalized to success" (
-    $nonzeroCap.exit -eq 7 -and -not (Test-Path Env:METASHEET_AUTH_TOKEN)
+  Check "corrective-4: stderr-writing exit 7 preserves code, policy, and token cleanup" (
+    $nonzeroCap.exit -eq 7 -and
+    $nonzeroCap.stdout -notmatch [regex]::Escape($sentinel) -and
+    $ErrorActionPreference -eq 'Stop' -and
+    -not (Test-Path Env:METASHEET_AUTH_TOKEN)
   )
 
   # Exercise the real stage boundary in a child pwsh process because Stop-WithFailure intentionally exits.
