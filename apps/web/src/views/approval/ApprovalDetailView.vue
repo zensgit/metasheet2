@@ -1725,6 +1725,15 @@ watch(
 }
 
 .approval-detail__form,
+.approval-detail__timeline {
+  min-width: 0;
+  padding: var(--ms-space-5);
+  border: 1px solid var(--ms-border-light);
+  border-radius: var(--ms-radius-lg);
+  background: var(--ms-bg-card);
+  box-shadow: var(--ms-shadow-card);
+}
+
 .approval-detail__actor-avatar {
   display: inline-flex;
   align-items: center;
@@ -1740,18 +1749,12 @@ watch(
   vertical-align: middle;
 }
 
-.approval-detail__timeline {
-  background: var(--ms-bg-card);
-  border: 1px solid var(--el-border-color-lighter);
-  border-radius: 8px;
-  padding: 20px;
-}
-
 .approval-detail__form h2,
 .approval-detail__timeline h2 {
-  font-size: 16px;
-  font-weight: 600;
-  margin: 0 0 16px;
+  margin: 0 0 var(--ms-space-4);
+  color: var(--ms-text-1);
+  font-size: var(--ms-font-size-section-title);
+  font-weight: var(--ms-font-weight-title);
 }
 
 .approval-detail__meta {
@@ -1937,12 +1940,13 @@ watch(
    snapshot / timeline scroll underneath, instead of requiring a scroll-to-bottom first. The
    safe-area padding keeps the buttons clear of the home-indicator area on notched devices. */
 .approval-detail__actions {
-  margin-top: 24px;
-  padding: 16px 20px;
+  margin-top: var(--ms-space-5);
+  padding: var(--ms-space-4) var(--ms-space-5);
   padding-bottom: calc(8px + env(safe-area-inset-bottom));
-  background: var(--el-bg-color);
-  border: 1px solid var(--el-border-color-lighter);
-  border-radius: 8px;
+  background: var(--ms-bg-card);
+  border: 1px solid var(--ms-border-light);
+  border-radius: var(--ms-radius-lg);
+  box-shadow: var(--ms-shadow-pop);
   display: flex;
   align-items: center;
   justify-content: space-between;

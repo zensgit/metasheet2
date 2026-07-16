@@ -1,13 +1,43 @@
 <template>
-  <PageShell width="default">
-    <PageHeader class="approval-center__header" title="审批中心">
+  <PageShell width="wide">
+    <PageHeader
+      class="approval-center__header"
+      title="审批中心"
+      subtitle="集中处理待办、跟进我发起的申请，并快速识别超时事项"
+    >
+      <template #meta>
+        <span class="approval-center__stat">
+          <span>待办</span>
+          <strong>{{ pendingTotalCount }}</strong>
+        </span>
+        <span class="approval-center__stat approval-center__stat--unread">
+          <span>未读</span>
+          <strong>{{ pendingBadgeCount }}</strong>
+        </span>
+        <span v-if="activeFilterCount > 0" class="approval-center__filter-summary">
+          已启用 {{ activeFilterCount }} 项筛选
+        </span>
+      </template>
       <template #actions>
-        <div class="approval-center__toolbar">
+        <el-button
+          v-if="canWrite"
+          type="primary"
+          class="approval-center__create-button"
+          @click="router.push({ name: 'approval-template-list' })"
+        >
+          发起审批
+        </el-button>
+      </template>
+    </PageHeader>
+
+    <section class="approval-center__filters" aria-label="审批筛选">
+      <div class="approval-center__filters-primary">
           <el-input
             v-model="searchText"
-            placeholder="搜索审批编号或标题"
+            placeholder="搜索标题或审批编号"
             clearable
             class="approval-center__toolbar-search"
+            data-testid="approval-search-input"
             @clear="handleSearch"
             @keyup.enter="handleSearch"
           >
@@ -15,6 +45,32 @@
               <el-icon><Search /></el-icon>
             </template>
           </el-input>
+          <el-select
+            v-model="sourceSystemFilter"
+            placeholder="来源系统"
+            class="approval-center__toolbar-select"
+            data-testid="approval-source-filter"
+            @change="handleSourceSystemChange"
+          >
+            <el-option label="全部来源" value="all" />
+            <el-option label="平台审批" value="platform" />
+            <el-option label="PLM 审批" value="plm" />
+          </el-select>
+          <el-button
+            class="approval-center__filter-toggle"
+            :type="filtersExpanded ? 'primary' : 'default'"
+            :plain="filtersExpanded"
+            data-testid="approval-more-filters"
+            @click="filtersExpanded = !filtersExpanded"
+          >
+            {{ filtersExpanded ? '收起筛选' : '更多筛选' }}
+            <span v-if="advancedFilterCount > 0" class="approval-center__filter-count">
+              {{ advancedFilterCount }}
+            </span>
+          </el-button>
+      </div>
+
+      <div v-show="filtersExpanded" class="approval-center__filters-advanced">
           <el-select
             v-model="statusFilter"
             placeholder="状态筛选"
@@ -26,17 +82,6 @@
             <el-option label="已通过" value="approved" />
             <el-option label="已驳回" value="rejected" />
             <el-option label="已撤回" value="revoked" />
-          </el-select>
-          <el-select
-            v-model="sourceSystemFilter"
-            placeholder="来源系统"
-            class="approval-center__toolbar-select"
-            data-testid="approval-source-filter"
-            @change="handleSourceSystemChange"
-          >
-            <el-option label="全部来源" value="all" />
-            <el-option label="平台审批" value="platform" />
-            <el-option label="PLM 审批" value="plm" />
           </el-select>
           <!-- B3-03 (模板/时间筛选): additive filters composing with the existing status/source
                filters above — templateId + a created-at window, mirroring the backend's own
@@ -72,16 +117,16 @@
             @change="handleSearch"
           />
           <el-button
-            v-if="canWrite"
-            type="primary"
-            class="approval-center__toolbar-button"
-            @click="router.push({ name: 'approval-template-list' })"
+            text
+            class="approval-center__clear-filters"
+            :disabled="activeFilterCount === 0"
+            data-testid="approval-clear-filters"
+            @click="clearFilters"
           >
-            发起审批
+            清空筛选
           </el-button>
-        </div>
-      </template>
-    </PageHeader>
+      </div>
+    </section>
 
     <el-alert
       v-if="store.error"
@@ -967,9 +1012,24 @@ const sourceSystemFilter = ref<'all' | 'platform' | 'plm'>('all')
 const templateFilter = ref('')
 const templateOptions = ref<Array<{ id: string; name: string }>>([])
 const createdRange = ref<[string, string] | null>(null)
+const filtersExpanded = ref(false)
 const currentPage = ref(1)
 const pageSize = ref(10)
 const attendanceRequestsSection = 'attendance-overview-requests'
+
+const advancedFilterCount = computed(() => [
+  statusFilter.value,
+  templateFilter.value,
+  createdRange.value,
+].filter(Boolean).length)
+
+const activeFilterCount = computed(() => [
+  searchText.value.trim(),
+  sourceSystemFilter.value === 'all' ? '' : sourceSystemFilter.value,
+  statusFilter.value,
+  templateFilter.value,
+  createdRange.value,
+].filter(Boolean).length)
 
 // B3-03: `createdRange` holds plain `YYYY-MM-DD` day boundaries from the picker (or a deep link);
 // widen to inclusive day-start/day-end ISO timestamps for the server, the same convention
@@ -1023,6 +1083,17 @@ function handleTabChange() {
 }
 
 function handleSearch() {
+  currentPage.value = 1
+  clearPendingSelection()
+  loadCurrentTab()
+}
+
+function clearFilters() {
+  searchText.value = ''
+  statusFilter.value = ''
+  sourceSystemFilter.value = 'all'
+  templateFilter.value = ''
+  createdRange.value = null
   currentPage.value = 1
   clearPendingSelection()
   loadCurrentTab()
@@ -1104,6 +1175,7 @@ function applyDeepLinkFilters(): void {
   const fromDate = typeof rawCreatedFrom === 'string' && rawCreatedFrom ? rawCreatedFrom.slice(0, 10) : ''
   const toDate = typeof rawCreatedTo === 'string' && rawCreatedTo ? rawCreatedTo.slice(0, 10) : ''
   createdRange.value = fromDate && toDate ? [fromDate, toDate] : null
+  filtersExpanded.value = Boolean(templateFilter.value || createdRange.value)
 }
 
 // B3-03: params-only navigation to /approvals (e.g. a second 看板钻取 link clicked while this
@@ -1149,10 +1221,76 @@ onMounted(() => {
   padding: var(--ms-space-4) 0;
 }
 
-.approval-center__toolbar {
+.approval-center__header {
+  margin-bottom: var(--ms-space-4);
+}
+
+.approval-center__stat,
+.approval-center__filter-summary {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--ms-space-2);
+  min-height: 28px;
+  padding: var(--ms-space-1) var(--ms-space-3);
+  border: 1px solid var(--ms-border-light);
+  border-radius: 999px;
+  background: var(--ms-bg-card);
+  color: var(--ms-text-2);
+  font-size: 13px;
+}
+
+.approval-center__stat strong {
+  color: var(--ms-text-1);
+  font-size: 15px;
+}
+
+.approval-center__stat--unread strong {
+  color: var(--ms-color-danger);
+}
+
+.approval-center__filter-summary {
+  background: var(--el-color-primary-light-9);
+  border-color: var(--el-color-primary-light-7);
+  color: var(--ms-color-primary);
+}
+
+.approval-center__filters {
+  display: grid;
+  gap: var(--ms-space-3);
+  margin-bottom: var(--ms-space-4);
+  padding: var(--ms-space-4);
+  border: 1px solid var(--ms-border-light);
+  border-radius: var(--ms-radius-lg);
+  background: var(--ms-bg-card);
+  box-shadow: var(--ms-shadow-card);
+}
+
+.approval-center__filters-primary,
+.approval-center__filters-advanced {
   display: flex;
   align-items: center;
   gap: var(--ms-space-3);
+  flex-wrap: wrap;
+}
+
+.approval-center__filters-advanced {
+  padding-top: var(--ms-space-3);
+  border-top: 1px solid var(--ms-border-light);
+}
+
+.approval-center__filter-count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 20px;
+  height: 20px;
+  margin-left: var(--ms-space-1);
+  padding: 0 var(--ms-space-1);
+  border-radius: 999px;
+  background: var(--el-color-primary-light-8);
+  color: var(--ms-color-primary);
+  font-size: 12px;
+  font-weight: 600;
 }
 
 .approval-center__toolbar-search {
@@ -1174,11 +1312,20 @@ onMounted(() => {
 }
 
 .approval-center__error {
-  margin-bottom: 16px;
+  margin-bottom: var(--ms-space-4);
 }
 
 .approval-center__tabs {
-  margin-top: 8px;
+  min-height: 480px;
+  padding: 0 var(--ms-space-4) var(--ms-space-4);
+  border: 1px solid var(--ms-border-light);
+  border-radius: var(--ms-radius-lg);
+  background: var(--ms-bg-card);
+  box-shadow: var(--ms-shadow-card);
+}
+
+.approval-center__tabs :deep(.el-tabs__header) {
+  margin-bottom: var(--ms-space-4);
 }
 
 .approval-center__pagination {
@@ -1326,6 +1473,16 @@ onMounted(() => {
   line-height: 1.5;
 }
 
+@media (max-width: 1100px) {
+  .approval-center__toolbar-search {
+    flex: 1 1 320px;
+  }
+
+  .approval-center__toolbar-daterange {
+    flex: 1 1 260px;
+  }
+}
+
 @media (max-width: 720px) {
   .approval-center__attendance-entry {
     align-items: flex-start;
@@ -1338,8 +1495,12 @@ onMounted(() => {
    should reflow on any narrow viewport so the search + filters never overflow
    horizontally. */
 @media (max-width: 768px) {
-  .approval-center__toolbar {
-    flex-wrap: wrap;
+  .approval-center__filters {
+    padding: var(--ms-space-3);
+  }
+
+  .approval-center__filters-primary,
+  .approval-center__filters-advanced {
     gap: var(--ms-space-2);
   }
 
@@ -1350,8 +1511,14 @@ onMounted(() => {
   .approval-center__toolbar-search,
   .approval-center__toolbar-select,
   .approval-center__toolbar-daterange,
-  .approval-center__toolbar-button {
+  .approval-center__filter-toggle,
+  .approval-center__clear-filters,
+  .approval-center__create-button {
     width: 100%;
+  }
+
+  .approval-center__tabs {
+    padding: 0 var(--ms-space-3) var(--ms-space-3);
   }
 
   .approval-center__pagination {

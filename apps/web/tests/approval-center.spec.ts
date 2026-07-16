@@ -308,6 +308,7 @@ const ElInput = defineComponent({
     return h('input', {
       'data-el-input': 'true',
       value: this.modelValue ?? '',
+      placeholder: this.placeholder,
       onInput: (e: Event) => this.$emit('update:modelValue', (e.target as HTMLInputElement).value),
     })
   },
@@ -691,8 +692,29 @@ describe('ApprovalCenterView', () => {
 
   it('renders search input and status filter', async () => {
     await mountView()
-    expect(container!.querySelector('[data-el-input]')).toBeTruthy()
+    const search = container!.querySelector('[data-testid="approval-search-input"]') as HTMLInputElement
+    expect(search).toBeTruthy()
+    expect(search.placeholder).toBe('搜索标题或审批编号')
     expect(container!.querySelector('[data-el-select]')).toBeTruthy()
+  })
+
+  it('clears filters with one list reload and one pending-count refresh', async () => {
+    await mountView()
+
+    const source = container!.querySelector('[data-testid="approval-source-filter"]') as HTMLSelectElement
+    source.value = 'platform'
+    source.dispatchEvent(new Event('change'))
+    await flushUi()
+
+    loadPendingSpy.mockClear()
+    getPendingCountSpy.mockClear()
+    ;(container!.querySelector('[data-testid="approval-clear-filters"]') as HTMLButtonElement).click()
+    await flushUi()
+
+    expect(loadPendingSpy).toHaveBeenCalledTimes(1)
+    expect(loadPendingSpy).toHaveBeenCalledWith(expect.objectContaining({ sourceSystem: 'all', page: 1 }))
+    expect(getPendingCountSpy).toHaveBeenCalledTimes(1)
+    expect(getPendingCountSpy).toHaveBeenCalledWith('all')
   })
 
   it('routes the attendance approval queue entry to the first pending attendance request', async () => {

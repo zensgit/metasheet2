@@ -399,34 +399,8 @@ html, body {
   }
 }
 
-/* Dark mode support */
-@media (prefers-color-scheme: dark) {
-  html, body {
-    background-color: #1a1a1a;
-    color: #e0e0e0;
-  }
-
-  .app-nav {
-    background: #2d2d2d;
-    border-bottom-color: #404040;
-  }
-
-  .brand-text {
-    color: #64b5f6;
-  }
-
-  .nav-link {
-    color: #aaa;
-  }
-
-  .nav-link:hover {
-    background-color: #3d3d3d;
-    color: #fff;
-  }
-
-  .nav-link.router-link-active {
-    background-color: #1e3a5f;
-    color: #64b5f6;
-  }
-}
+/* The UI foundation currently defines a complete light theme only. Do not partially
+   switch the application shell from the operating-system preference: doing so places
+   light Element Plus surfaces and dark-token text on a dark page. A future dark theme
+   must switch the complete token set and component-library variables together. */
 </style>

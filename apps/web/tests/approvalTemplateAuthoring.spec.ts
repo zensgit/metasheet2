@@ -286,6 +286,9 @@ function buildTemplate(overrides: Partial<ApprovalTemplateDetailDTO> = {}): Appr
 
 let container: HTMLDivElement | null = null
 let app: VueApp<Element> | null = null
+let scrollIntoViewSpy: ReturnType<typeof vi.fn>
+let scrolledElements: HTMLElement[] = []
+const originalScrollIntoView = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'scrollIntoView')
 
 async function mountView() {
   container = document.createElement('div')
@@ -658,6 +661,14 @@ describe('TemplateAuthoringView', () => {
     }))
     publishTemplateSpy.mockResolvedValue({})
     dryRunApprovalConditionFormulaSpy.mockResolvedValue({ success: true, result: true })
+    scrolledElements = []
+    scrollIntoViewSpy = vi.fn(function (this: HTMLElement) {
+      scrolledElements.push(this)
+    })
+    Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', {
+      configurable: true,
+      value: scrollIntoViewSpy,
+    })
   })
 
   afterEach(() => {
@@ -665,6 +676,65 @@ describe('TemplateAuthoringView', () => {
     container?.remove()
     app = null
     container = null
+    if (originalScrollIntoView) {
+      Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', originalScrollIntoView)
+    } else {
+      delete (HTMLElement.prototype as { scrollIntoView?: unknown }).scrollIntoView
+    }
+  })
+
+  it('scrolls every section navigation path to the workspace start and exposes the active step', async () => {
+    await mountView()
+
+    const content = container!.querySelector('[data-testid="approval-template-workspace-content"]')
+    const basic = container!.querySelector('[data-testid="approval-template-section-basic"]')
+    const fields = container!.querySelector('[data-testid="approval-template-section-fields"]')
+    const review = container!.querySelector('[data-testid="approval-template-section-review"]')
+    expect(basic?.getAttribute('aria-current')).toBe('step')
+
+    ;(container!.querySelector('[data-testid="approval-template-section-next"]') as HTMLButtonElement).click()
+    await flushUi()
+    expect(fields?.getAttribute('aria-current')).toBe('step')
+    expect(scrolledElements.at(-1)).toBe(content)
+
+    ;(container!.querySelector('[data-testid="approval-template-section-previous"]') as HTMLButtonElement).click()
+    await flushUi()
+    expect(basic?.getAttribute('aria-current')).toBe('step')
+    expect(scrolledElements.at(-1)).toBe(content)
+
+    ;(review as HTMLButtonElement).click()
+    await flushUi()
+    expect(review?.getAttribute('aria-current')).toBe('step')
+    expect(scrolledElements.at(-1)).toBe(content)
+    expect(scrollIntoViewSpy).toHaveBeenLastCalledWith({ behavior: 'smooth', block: 'start' })
+  })
+
+  it('reveals and focuses field validation errors when saving from another section', async () => {
+    await mountView()
+
+    setInput('approval-template-key', 'travel')
+    setInput('approval-template-name', '出差审批')
+    ;(container!.querySelector('[data-testid="approval-template-section-fields"]') as HTMLButtonElement).click()
+    await flushUi()
+
+    const fieldId = container!.querySelector('[data-testid="approval-template-field-row"] input') as HTMLInputElement
+    fieldId.value = ''
+    fieldId.dispatchEvent(new Event('input'))
+    ;(container!.querySelector('[data-testid="approval-template-section-review"]') as HTMLButtonElement).click()
+    await flushUi()
+    scrollIntoViewSpy.mockClear()
+    scrolledElements = []
+
+    ;(container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement).click()
+    await flushUi()
+
+    const fieldsStep = container!.querySelector('[data-testid="approval-template-section-fields"]')
+    const summary = container!.querySelector('[data-testid="approval-template-validation-summary"]')
+    expect(createTemplateSpy).not.toHaveBeenCalled()
+    expect(fieldsStep?.getAttribute('aria-current')).toBe('step')
+    expect(summary?.textContent).toContain('字段 id 必填')
+    expect(document.activeElement).toBe(summary)
+    expect(scrolledElements.at(-1)).toBe(summary)
   })
 
   it('creates a draft through the existing backend endpoint wrapper path', async () => {
