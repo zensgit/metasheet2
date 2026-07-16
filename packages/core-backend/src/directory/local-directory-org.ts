@@ -246,7 +246,9 @@ export async function updateLocalDepartment(
       // ancestor walk observes every prior reparent already committed. READ COMMITTED is required
       // for that observation (a frozen REPEATABLE READ snapshot would miss the just-committed
       // concurrent reparent, defeating the guard); it is the server default here, but we pin it so
-      // the guard cannot be silently defeated by a `default_transaction_isolation` change.
+      // the guard cannot be silently defeated by a `default_transaction_isolation` change. (This SET
+      // is defense-in-depth — under the production RC default it is a no-op; its mechanism is proven
+      // in local-directory-org-cycle-detection.db.test.ts's "SET ... READ COMMITTED is effective".)
       await client.query('SET TRANSACTION ISOLATION LEVEL READ COMMITTED')
       await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [`directory:reparent:${integration.id}`])
 
@@ -288,8 +290,11 @@ export async function updateLocalDepartment(
         // would close a cycle. We walk the new parent's ancestor chain via the external-parent
         // self-join; the `path` accumulator makes the recursion terminate even on a pre-existing
         // malformed loop (defense in depth — the guard prevents NEW loops, but a hand-inserted one
-        // must not hang the walk). Sound because reparents are serialized on the advisory lock
-        // above, so the parent-pointer graph is stable for the duration of this walk.
+        // must not hang the walk). Sound because reparents are serialized on the advisory lock above,
+        // and the only OTHER writers of external_parent_department_id are clear-to-root (removes an
+        // edge) and leaf create (adds a fresh key nothing references) — neither can add a
+        // cycle-forming edge, so the parent-pointer graph is stable W.R.T. CYCLES for this walk (a
+        // single-statement CTE, atomic under RC).
         const cycle = await client.query(
           `WITH RECURSIVE ancestors AS (
              SELECT d.external_department_id, d.external_parent_department_id,

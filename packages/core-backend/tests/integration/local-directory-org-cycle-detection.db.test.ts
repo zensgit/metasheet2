@@ -37,6 +37,11 @@ import {
  *     engage (the service reparent never parks) → T6 reds.
  *   - delete the `cycle.rows.length > 0` reject  → T2/T3/T5/T6 all red (the walk no longer bites).
  *   - delete the `NOT (... = ANY(a.path))` guard → T7 hangs on the raw loop → times out red.
+ * The `SET TRANSACTION ISOLATION LEVEL READ COMMITTED` line is defense-in-depth against a
+ * `default_transaction_isolation` change; production default is RC so its effect is not observable
+ * in this RC-run suite (deleting it stays green on a stock DB). Its MECHANISM is proven directly in
+ * the "SET ... READ COMMITTED is effective" test below (a raw RR-default session); a service-level
+ * RR mutation-guard is deliberately omitted — it would require altering the shared CI DB default.
  *
  * Positive control (fail-closed discipline): the un-raced C→B reparent SUCCEEDS (T6b) — the guard
  * rejects the RACE, not all reparents.
@@ -245,6 +250,52 @@ describeIfDatabase('PB4-3 — department cycle detection (real DB, service layer
     // walk of X's ancestors hits the X↔Y loop but the path guard stops it; Z ∉ {X,Y} ⇒ no NEW cycle
     const moved = await updateLocalDepartment(org, z, { parentDepartmentId: x })
     expect(moved?.parentDepartmentId).toBe(x)
+  })
+
+  it('mechanism proof: `SET TRANSACTION ISOLATION LEVEL READ COMMITTED` is effective — on a REPEATABLE-READ-default session the post-lock read still observes a concurrently-committed row', async () => {
+    // The production default is READ COMMITTED, so line-250 `SET TRANSACTION ISOLATION LEVEL
+    // READ COMMITTED` has no OBSERVABLE effect in the RC-run suite above — deleting it stays green
+    // on a stock DB (the gate's P3). A full service-level RR mutation-guard is deliberately NOT
+    // added: forcing the POOLED service connection to RR would require altering the shared CI DB's
+    // default_transaction_isolation, which pollutes every other file sharing that DB. Instead this
+    // proves the MECHANISM the guard relies on, on a dedicated raw connection whose SESSION default
+    // is REPEATABLE READ — the exact hostile config the SET defends against:
+    //   (a) pure RR (no SET): the reader's snapshot freezes at its first read, so a row a writer
+    //       commits afterwards is INVISIBLE to a later read in the same txn — the stale-tree failure
+    //       that would let the walk miss a just-committed concurrent reparent.
+    //   (b) with the SET as the txn's first statement: the same later read SEES the committed row.
+    // (a) is the negative control (proves RR really would defeat the walk); (b) proves the SET fixes
+    // it. Together they show line 250 is not a no-op.
+    const org = orgId('t9')
+    seededOrgIds.push(org)
+    const d = await dept(org, 'Probe')
+
+    const reader = new Client({ connectionString: process.env.DATABASE_URL })
+    await reader.connect()
+    try {
+      await reader.query(`SET SESSION default_transaction_isolation = 'repeatable read'`)
+
+      // (a) pure REPEATABLE READ — the concurrent commit is NOT observed (stale snapshot)
+      await reader.query('BEGIN')
+      const a1 = (await reader.query('SELECT name FROM directory_departments WHERE id = $1', [d])).rows[0].name
+      await query('UPDATE directory_departments SET name = $1 WHERE id = $2', ['changed-under-rr', d])
+      const a2 = (await reader.query('SELECT name FROM directory_departments WHERE id = $1', [d])).rows[0].name
+      await reader.query('COMMIT')
+      expect(a1).not.toBe('changed-under-rr')
+      expect(a2).toBe(a1) // frozen snapshot — RR really would let the walk read a stale tree
+
+      // (b) WITH the SET — the concurrent commit IS observed (fresh snapshot per statement)
+      await reader.query('BEGIN')
+      await reader.query('SET TRANSACTION ISOLATION LEVEL READ COMMITTED')
+      const b1 = (await reader.query('SELECT name FROM directory_departments WHERE id = $1', [d])).rows[0].name
+      await query('UPDATE directory_departments SET name = $1 WHERE id = $2', ['changed-under-rc', d])
+      const b2 = (await reader.query('SELECT name FROM directory_departments WHERE id = $1', [d])).rows[0].name
+      await reader.query('COMMIT')
+      expect(b1).toBe('changed-under-rr') // starts from (a)'s committed value
+      expect(b2).toBe('changed-under-rc') // the SET makes the concurrent commit visible
+    } finally {
+      await reader.end()
+    }
   })
 
   it('deadlock-freedom: concurrent reparent × add-member × disjoint reparent, many rounds, never 40P01', async () => {
