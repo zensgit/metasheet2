@@ -1,7 +1,19 @@
 # P2 Durable Delivery — 设计与验证 (Design & Verification)
 
-**状态 (2026-07-15 终版)**：S1 已落 main;**S2-a #4322 已 APPROVE 并合入 main(merge SHA `336732b5f`)**;S2-b #4334 已 retarget main 复绿中,S3→S4-a→S4-b/S5/S7(#4335/#4336/#4337)stacked 依序,S2-b/S3 已获 owner 授权;S6 经分析归零(§5f);动作级幂等 ledger L1+L2=#4340。余量=owner 逐级复审合入 + FWB-1/附件/record-link/FWB-2/FWB-3 + 八场景验收。**flag `AUTOMATION_DURABLE_DELIVERY_ENABLED` 恒 OFF**,当前零 runtime 行为。
+**状态 (2026-07-15 — INTERIM,非终版)**:S1 已落 main;S2-a #4322 已合入 main(merge SHA `336732b5f`,owner 判为「无调用方的 S2-a 基础原语,条件放行」);S2-b/S3/S4-a/S4-b/S5/S7(#4334/#4335/#4336/#4337)stacked,**均 REQUEST_CHANGES,未完成、未合**;动作级幂等 ledger L1+L2=#4340(独立)。**flag `AUTOMATION_DURABLE_DELIVERY_ENABLED` 恒 OFF**,当前零 runtime 行为。
 **授权口径**:owner 逐切片实审 runtime,**无自合**;FWB / 附件 / flag 开启在完整实现 + 八场景验收前保持 gated。
+
+> ## ⚠️ 撤回 (owner 复审 2026-07-15)
+> 本文档早前版本自称「终版 / 开发全量完成 / S6 经分析归零 / 余量全在 owner 面」——**这些结论全部撤回**。P2 durable-delivery **不是闭环**;flag 默认 OFF 只避免当前线上风险,不代表功能完成。owner 复审的实况:
+> - **[P1] #4337 生产零接线**:`produceAutomationEvent` / `bootDurableDelivery` 在整个 stacked head 中除自身+测试外**引用数为 0**;producer 仍 post-commit `eventBus.emit`,consumer 仍裸 `subscribe`;测试用假 `recordingHandlers` 手工调 facade,未驱动真实服务/真实源写事务/生命周期。**即使开 flag 也不会自动产 outbox 行或启 dispatcher**。缺:全事件站点同事务入队 + 服务启动接线 + 真实 typed adapters + 旧总线降级 + 逐站点 rollback/crash goldens。
+> - **[P1] S6 未「归零」,原始丢失窗口仍在**:`meta_automation_event_fires` 仍只有终态主键;`claimEventDelivery` 仍是 execute 前 `INSERT … ON CONFLICT DO NOTHING`;bridge 仍在 continuation 前写 `resumed`。⇒ claim 后崩溃时 outbox 虽重投,但 sink 因墓碑跳过,**工作永久丢失**。#4203 要求的 event_fires/bridge 的 lease/fence/attempts/终态推进/既有行 done 回填升级测试**均未开发**。
+> - **[P1] S2-b 无真 adapter timeout**:`runDispatchTick` 整批领租后逐条**无限期** `await adapter.handle()`;`adapter_timeout` 只由假 adapter 主动返回,无计时器/取消/续租;never-resolve 探针确认 tick 永久 pending,`stop()` 一并卡死。
+> - **[P2] manifest version 未参与 claim**:`SUPPORTED_MANIFEST_VERSIONS` 只被测试 `.has(1)`;claim SQL 只返回 `manifest_version` 未过滤 → 旧 worker 会处理版本未知行。须改为保持 pending + 告警 + 真实 N/N-1 golden。
+> - **[P2] 「frozen manifest」只是浅冻结**:routes 对象冻了,内部数组 + exported Set 可改(探针成功推 mutant-consumer 入 v1、加版本 99,7/7 单测仍绿)。须深冻结/不可变构造 + 嵌套变异测试。
+>
+> **逐 PR 判定**:#4322 条件放行(但 auto-merge 与「待复审、零自合」冲突,已发生);#4334 REQUEST_CHANGES(真 timeout/卡死恢复/数值边界);#4335 REQUEST_CHANGES(manifest-version claim gate/告警/深不可变);#4336 helper 可留但非 S4 完成(需真实源写同事务接线证明);#4337 **blocker**(生产零接线/真实 adapters/sink 恢复态缺失);#4333 本文档退回 interim。
+>
+> 下方 §5e/§5f/§7/§8 的「全量完成 / S6 归零 / 余量全在 owner 面」表述以本 banner 为准,视为**已撤回的历史草稿**,待按上述 REQUEST_CHANGES 重写。
 
 ---
 
@@ -43,7 +55,7 @@
 | **S4-a** | producer 原子入队 helper:`enqueueOutboxEvent(trx, event)` 同事务落 outbox+全 fan-out;未路由/空白身份=硬错 | 📋 **PR #4336 待复审**(stacked) |
 | **S4-b/S5** | 激活缝 `automation-durable-activation.ts`:`produceAutomationEvent`(flag ON=事务内入队/OFF=null 零写)+ 六 adapter 工厂(注入真实 service handler,结构性替换匿名订阅)+ `bootDurableDelivery`(完整性断言先于任何 claim) | 📋 **PR #4337 待复审**(stacked) |
 | **S7** | 崩溃注入 V 系列:V1 提交前崩=零行零投;V2 提交后崩=行持久、重启即投;V3 claim 后崩=reclaim 重投且 eventId 跨 fence 不变;V4 僵尸+reclaimer 双达 send=幂等 seed(`eventId::consumer_key`,无 fence)完全相同+僵尸终态写 0 行 | 📋 **同 PR #4337**(9 测含 V1-V4) |
-| **S6** | 升级 backfill:**经分析归零**——outbox 表全新,无历史持久态可回填;切换窗双投已由 sink 幂等承接(锁的迁移安全论证)。落 runbook 项,非代码。 | ✅ 归零(§5f) |
+| **S6** | ~~升级 backfill:经分析归零~~ **撤回**:原始丢失窗口仍在(event_fires 终态主键 + `ON CONFLICT DO NOTHING` + bridge 提前写 resumed);#4203 lease/fence/attempts/终态推进/done 回填升级**未开发**。 | ❌ **未归零(owner 复审)** |
 | **后续** | FWB-1 / 附件 / FWB-2 / FWB-3 → **八场景全链验收** | 🔒 gated |
 
 ---
@@ -94,7 +106,9 @@ v1 = 锁 §283-291 全集(approval.{approved,rejected,revoked,cancelled}→bridg
 真库 9 测:flag-OFF 零写零启;缺 handler 启动即抛;flag-ON 端到端排空(bridge 永久拒→dead_letter,trigger/projection→done,eventId 稳定);V1-V4 崩溃注入全过。**五规格同库总回归 54/54**。
 **最终接线核对项(复审时)**:handler 实参须为真实 service 方法(`handleApprovalCompletionResume`/`...Trigger`/projection/task/record/webhook-bridge),站点传**自己的事务客户端**给 `produceAutomationEvent`。
 
-## 5f. S6 归零论证
+## 5f. ~~S6 归零论证~~ — **撤回 (owner 复审 2026-07-15)**
+
+> **此节结论已撤回。** S6 **未**归零:`meta_automation_event_fires` 仍只有终态主键、`claimEventDelivery` 仍 `INSERT … ON CONFLICT DO NOTHING`、bridge 仍在 continuation 前写 `resumed` ⇒ claim 后崩溃 sink 因墓碑跳过、工作永久丢失。#4203 要求的 event_fires/bridge lease/fence/attempts/终态推进/既有行 done 回填升级测试均未开发。下方为已撤回的历史草稿论证,保留供重写参考。
 
 「升级迁移 backfill」的对象是**遗留持久投递状态**——但 outbox 两表是本线新建,启用前不存在任何历史行;旧 `claimEventDelivery` 墓碑(`meta_automation_event_fires`)在切换后**继续原样承担 sink 级去重**,无需迁移。切换窗内旧总线与 durable 双投的净一次由 sink 幂等承接(#4203 §316-325 的迁移安全论证)。⇒ S6 无代码;唯一残留是 **cutover runbook 项**:启用 flag 前确认 producer/worker 全 N-aware(§243 对称性)+ 观察窗内监控 `event_fires` 去重命中率。
 
@@ -112,7 +126,7 @@ v1 = 锁 §283-291 全集(approval.{approved,rejected,revoked,cancelled}→bridg
 
 ## 7. 待办 / 风险
 
-- **余量全在 owner 面**:自底向上复审 #4322→#4334→#4335→#4336→#4337(逐级 retarget→CI 重门→合);最终站点实参接线核对(§5e);八场景验收;之后才是 FWB-1/附件/FWB-2/FWB-3 与 flag 开启。
+- **~~余量全在 owner 面~~ 撤回**:仍有**大量开发未完成**(非仅复审)——#4337 全事件站点同事务入队 + 服务启动接线 + 真实 typed adapters + 旧总线降级 + 逐站点 rollback/crash goldens;S6 的 event_fires/bridge lease/fence/attempts/终态推进/done 回填(#4203);S2-b 真 adapter timeout/取消/续租 + 卡死恢复;S3 manifest-version claim gate + 告警 + 深不可变。这些**完成**后才轮到 owner 逐级复审合入 + 站点实参接线核对(§5e)+ 八场景验收 + FWB/附件/flag 开启。
 - **S3 的滚动部署对称性**:#4203 §243 要求**双侧对称**(producer 全 N-aware 才可展开只有 N 认识的路由)——I6 只解决 worker 侧;**producer 侧漏写 = 该事件对 K 永远没有行,告警看不到**(无行可 park),必须靠激活门槛而非运行期防线。
 - **外发净一次**依赖 endpoint 幂等键绑稳定事件/动作 identity、跨 fence 不变;端点不支持 ⇒ `outcome_unknown` 不自动重发(#4203 §340)。属 S5。
 - **八场景验收**是 FWB/附件/flag 开启的硬前置。
@@ -120,7 +134,9 @@ v1 = 锁 §283-291 全集(approval.{approved,rejected,revoked,cancelled}→bridg
 
 ---
 
-## 8. 月计划全车道交付台账 (2026-07-15 收官)
+## 8. 月计划车道台账 (2026-07-15 — INTERIM,非收官)
+
+> ⚠️ 下表早前标「收官/全量完成」,**已撤回**(见顶部 banner)。除 S1/S2-a 已落 main 外,S2-b→S7 均 REQUEST_CHANGES 未完成;FWB/附件/record-link 等行为**设计+切片草稿**,非「已交付」。逐 PR 实况以 GitHub 与 owner 复审为准。
 
 | 车道 | PR | 内容 | 验证 |
 |---|---|---|---|
@@ -131,7 +147,7 @@ v1 = 锁 §283-291 全集(approval.{approved,rejected,revoked,cancelled}→bridg
 | record-link/FWB-2 | #4343 | submit 读检查(无存在性 oracle)+执行期三查+更新式执行器 | 2/2 全 fail-closed 腿 |
 | FWB-3 | #4344 | `freezeDecisionValues` 不可变 (node_key,entry_epoch) 快照+节点域写回执行器 | 2/2 含不可变性证明 |
 | 附件① | #4342 | 20/10/50 限额+v1 MIME 白名单(PDF/JPEG/PNG/TXT/CSV)+ext⇄MIME 交叉校验 | 4/4 reject-by-default |
-| S6 | 归零 | outbox 全新无可回填;cutover runbook 项 | §5f 论证 |
+| S6 | ❌ **未归零(撤回)** | 丢失窗口仍在;需 #4203 event_fires/bridge lease/fence/attempts/终态推进/done 回填 | 未开发 |
 
 **不可先建余量(硬依赖序)**:FWB-1 slice④ dispatchAction 终接线+配置 UI(需 S4/S5 落 main);附件②+(存储 provider/表/路由/前端);**八场景真库/并发/崩溃矩阵(需全链合入后在合并态上跑)**;钉钉 U1-U13 UAT 与 flag 翻转 = owner 门。所有 PR 待 owner 自底向上复审;全部 flags OFF;无自合。
 
