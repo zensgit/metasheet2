@@ -6,7 +6,7 @@
 //   (a) happy path — batch -> lines -> run each written to its OWN resolved MVP sheet; every write's
 //       objectId (mapped back from the recorded sheetId) is in the frozen MVP set; ordering is
 //       batch-first, run-last; patchRecord is never called ON THE BATCH/LINE/RUN sheets;
-//   (b) idempotency — a second persist of the same snapshotBatchId is SKIPPED (no new batch create);
+//   (b) idempotency — only an exact full-projection replay is SKIPPED; orphan/conflicting rows return 409;
 //   (c) immutability — patchRecord / update is NEVER called on the batch/line/run sheets on any path;
 //   (d) grounding — a stamped missing_child_bom line persists WITHOUT the plan-internal missingChildBom
 //       marker (records service rejects unknown fieldIds), and every persisted line key is template-declared;
@@ -31,7 +31,7 @@ const {
   RUN_OBJECT_ID,
   PROJECT_OBJECT_ID,
   PROJECT_KEY_FIELD,
-  __internals: { MVP_OBJECT_ID_SET },
+  __internals: { MVP_OBJECT_ID_SET, READ_PAGE_LIMIT, READ_MAX_PAGES, readExistingSnapshotLines },
 } = require(path.join(__dirname, '..', 'lib', 'stock-preparation-sync-run-persist.cjs'))
 const {
   __internals: { LINE_FIELD_IDS },
@@ -40,6 +40,7 @@ const {
   makeFakeProvisioning,
   makeStrictRecordsApi,
   physicalFieldId,
+  physicalRow,
   logicalData,
 } = require(path.join(__dirname, 'fixtures', 'stock-preparation-multitable-fakes.cjs'))
 
@@ -85,8 +86,24 @@ const OBJECT_ID_BY_SHEET_ID = Object.fromEntries(Object.entries(SHEET_ID_BY_OBJE
 // the sheet's object, exactly like the real service (`Unknown fieldId: X` otherwise). The old fake here
 // accepted the templates' LOGICAL keys, which is why the whole suite was green while every write 500'd
 // in production. Point this fake at the pre-fix module and it throws `Unknown fieldId: snapshotBatchId`.
-function makeRecordsApi() {
-  return makeStrictRecordsApi({ objectIdBySheetId: OBJECT_ID_BY_SHEET_ID, stagingProjectId: STAGING_PROJECT_ID })
+function makeRecordsApi(options = {}) {
+  return makeStrictRecordsApi({
+    objectIdBySheetId: OBJECT_ID_BY_SHEET_ID,
+    stagingProjectId: STAGING_PROJECT_ID,
+    ...options,
+  })
+}
+
+function makePaginatedRecordsApi(options = {}) {
+  const api = makeRecordsApi(options)
+  const queryRecords = api.queryRecords.bind(api)
+  api.queryRecords = async (input = {}) => {
+    const rows = await queryRecords(input)
+    const offset = Number.isInteger(input.offset) ? input.offset : 0
+    const limit = Number.isInteger(input.limit) ? input.limit : rows.length
+    return rows.slice(offset, offset + limit)
+  }
+  return api
 }
 
 // Fake provisioning: a DISTINCT sheetId per MVP objectId (sheet_<objectId>), but ONLY under the STAGING
@@ -129,6 +146,16 @@ function cleanExpansionResult() {
     { componentSourceId: 'CS1', componentCode: 'A-100', sourceVersion: 'V1', path: '/root/A-100', rawQuantity: 3 },
     { componentSourceId: 'CS2', componentCode: 'B-200', sourceVersion: 'V2', path: '/root/B-200', rawQuantity: 5, parentSourceId: 'CS1' },
   ]
+}
+
+function manyExpansionRows(count) {
+  return Array.from({ length: count }, (_value, index) => ({
+    componentSourceId: `CS-${index}`,
+    componentCode: `PART-${index}`,
+    sourceVersion: 'V1',
+    path: `/root/PART-${index}`,
+    rawQuantity: index + 1,
+  }))
 }
 
 // `projectId` is the BUSINESS project (rides the plan rows); `targetProjectId` is the internal STAGING
@@ -379,13 +406,205 @@ async function main() {
     assert.equal(second.mode, 'skipped_existing')
     assert.deepEqual(second.created, { batch: 0, lines: 0, run: 0 })
     assert.equal(second.evidence.existingBatchMatched, true)
-    // #4163 T1: a duplicate/retried persist of the SAME snapshotBatchId leaves the project row
-    // COMPLETELY untouched too (no query, no create, no patch) — the whole commit is a no-op skip.
+    // A duplicate/retried persist of the SAME snapshotBatchId verifies project existence but leaves the
+    // live pointer untouched (no create/patch) — the whole commit is a proven no-op replay.
     assert.deepEqual(second.project, { mode: 'skipped' })
 
     // No new writes on the skip path — the batch/lines/run/project are all left alone.
     assert.equal(recordsApi.createCalls.length, createsAfterFirst, 'no new createRecord on skip')
     assert.equal(recordsApi.patchCalls.length, 0, 'patchRecord never called across both persists (same batch retried)')
+  })
+
+  await run('duplicate planned snapshotLineId fails before provisioning or records I/O', async () => {
+    const recordsApi = makeRecordsApi()
+    const provisioning = makeProvisioning()
+    await assert.rejects(
+      () => persistStockPreparationSyncRun({
+        permission: 'admin',
+        recordsApi,
+        provisioning,
+        ...basePlanInputs({ expansionResult: [cleanExpansionResult()[0], cleanExpansionResult()[0]] }),
+      }),
+      (error) => error instanceof StockPreparationSyncRunPersistError &&
+        error.status === 422 &&
+        error.code === 'PERSIST_PLAN_LINE_KEY_AMBIGUOUS',
+    )
+    assert.equal(provisioning.findObjectSheetCalls, 0)
+    assert.equal(recordsApi.queryCalls.length, 0)
+    assert.equal(recordsApi.createCalls.length, 0)
+  })
+
+  await run('duplicate project keys fail before the first batch write', async () => {
+    const projectRows = [
+      physicalRow(STAGING_PROJECT_ID, PROJECT_OBJECT_ID, { projectId: 'proj_1', sourceProjectNo: 'PN-1' }, 'project-1'),
+      physicalRow(STAGING_PROJECT_ID, PROJECT_OBJECT_ID, { projectId: 'proj_1', sourceProjectNo: 'PN-1' }, 'project-2'),
+    ]
+    const recordsApi = makeRecordsApi({ rowsBySheet: { [PROJECT_SHEET_ID]: projectRows } })
+    await assert.rejects(
+      () => persistStockPreparationSyncRun({
+        permission: 'admin',
+        recordsApi,
+        provisioning: makeProvisioning(),
+        ...basePlanInputs(),
+      }),
+      (error) => error instanceof StockPreparationSyncRunPersistError &&
+        error.status === 409 &&
+        error.code === 'PERSIST_IDEMPOTENCY_CONFLICT' &&
+        error.details.target === 'project',
+    )
+    assert.equal(recordsApi.createCalls.length, 0, 'batch is not planted before project uniqueness is proven')
+    assert.equal(recordsApi.patchCalls.length, 0)
+  })
+
+  await run('an existing project row without a patchable record id fails before the first batch write', async () => {
+    const recordsApi = makeRecordsApi({
+      rowsBySheet: {
+        [PROJECT_SHEET_ID]: [physicalRow(STAGING_PROJECT_ID, PROJECT_OBJECT_ID, { projectId: 'proj_1' })],
+      },
+    })
+    await assert.rejects(
+      () => persistStockPreparationSyncRun({
+        permission: 'admin',
+        recordsApi,
+        provisioning: makeProvisioning(),
+        ...basePlanInputs(),
+      }),
+      (error) => error instanceof StockPreparationSyncRunPersistError &&
+        error.status === 409 &&
+        error.code === 'PERSIST_IDEMPOTENCY_CONFLICT' &&
+        error.details.target === 'project' &&
+        error.details.reason === 'missing_record_id',
+    )
+    assert.equal(recordsApi.createCalls.length, 0)
+    assert.equal(recordsApi.patchCalls.length, 0)
+  })
+
+  await run('batch and run projection mismatches conflict without repairing immutable rows', async () => {
+    for (const target of ['snapshot_batch', 'run']) {
+      const recordsApi = makeRecordsApi()
+      const provisioning = makeProvisioning()
+      await persistStockPreparationSyncRun({ permission: 'admin', recordsApi, provisioning, ...basePlanInputs() })
+      const sheetId = target === 'snapshot_batch' ? BATCH_SHEET_ID : RUN_SHEET_ID
+      const objectId = target === 'snapshot_batch' ? BATCH_OBJECT_ID : RUN_OBJECT_ID
+      const fieldId = target === 'snapshot_batch' ? 'snapshotStatus' : 'status'
+      recordsApi.store.get(sheetId)[0].data[physicalFieldId(STAGING_PROJECT_ID, objectId, fieldId)] = 'conflicting'
+      const createsBefore = recordsApi.createCalls.length
+      await assert.rejects(
+        () => persistStockPreparationSyncRun({ permission: 'admin', recordsApi, provisioning, ...basePlanInputs() }),
+        (error) => error instanceof StockPreparationSyncRunPersistError &&
+          error.code === 'PERSIST_IDEMPOTENCY_CONFLICT' &&
+          error.details.target === target &&
+          error.details.reason === 'content_mismatch',
+      )
+      assert.equal(recordsApi.createCalls.length, createsBefore)
+      assert.equal(recordsApi.patchCalls.length, 0)
+    }
+  })
+
+  for (const [fieldId, changedValue] of [
+    ['pathKey', `/changed/${SECRET}`],
+    ['designQty', 999],
+    ['designUnit', ' pcs '],
+    ['lineStatus', 'inactive'],
+  ]) {
+    await run(`same fingerprint with changed persisted ${fieldId} is a conflict, not a false skip`, async () => {
+      const recordsApi = makeRecordsApi()
+      const provisioning = makeProvisioning()
+      await persistStockPreparationSyncRun({ permission: 'admin', recordsApi, provisioning, ...basePlanInputs() })
+      const line = recordsApi.store.get(LINE_SHEET_ID)[0]
+      const fingerprintField = physicalFieldId(STAGING_PROJECT_ID, LINE_OBJECT_ID, 'sourceFingerprint')
+      const originalFingerprint = line.data[fingerprintField]
+      line.data[physicalFieldId(STAGING_PROJECT_ID, LINE_OBJECT_ID, fieldId)] = changedValue
+      const createsBefore = recordsApi.createCalls.length
+      let caught
+      try {
+        await persistStockPreparationSyncRun({ permission: 'admin', recordsApi, provisioning, ...basePlanInputs() })
+      } catch (error) {
+        caught = error
+      }
+      assert.ok(caught instanceof StockPreparationSyncRunPersistError)
+      assert.equal(caught.code, 'PERSIST_IDEMPOTENCY_CONFLICT')
+      assert.equal(caught.details.target, 'snapshot_line')
+      assert.equal(JSON.stringify(caught).includes(SECRET), false, 'conflict response is values-free')
+      assert.equal(line.data[fingerprintField], originalFingerprint, 'fingerprint stayed identical for the discriminating case')
+      assert.equal(recordsApi.createCalls.length, createsBefore)
+      assert.equal(recordsApi.patchCalls.length, 0)
+    })
+  }
+
+  for (const missingTarget of ['run', 'snapshot_line', 'project']) {
+    await run(`an existing batch with a missing ${missingTarget} row returns incomplete`, async () => {
+      const recordsApi = makeRecordsApi()
+      const provisioning = makeProvisioning()
+      await persistStockPreparationSyncRun({ permission: 'admin', recordsApi, provisioning, ...basePlanInputs() })
+      const sheetId = missingTarget === 'run'
+        ? RUN_SHEET_ID
+        : (missingTarget === 'snapshot_line' ? LINE_SHEET_ID : PROJECT_SHEET_ID)
+      recordsApi.store.set(sheetId, [])
+      const createsBefore = recordsApi.createCalls.length
+      await assert.rejects(
+        () => persistStockPreparationSyncRun({ permission: 'admin', recordsApi, provisioning, ...basePlanInputs() }),
+        (error) => error instanceof StockPreparationSyncRunPersistError &&
+          error.status === 409 &&
+          error.code === 'PERSIST_EXISTING_BATCH_INCOMPLETE' &&
+          error.details.target === missingTarget,
+      )
+      assert.equal(recordsApi.createCalls.length, createsBefore)
+      assert.equal(recordsApi.patchCalls.length, 0)
+    })
+  }
+
+  await run('duplicate existing batch/run/line keys fail closed as idempotency conflicts', async () => {
+    for (const target of ['snapshot_batch', 'run', 'snapshot_line']) {
+      const recordsApi = makeRecordsApi()
+      const provisioning = makeProvisioning()
+      await persistStockPreparationSyncRun({ permission: 'admin', recordsApi, provisioning, ...basePlanInputs() })
+      const sheetId = target === 'snapshot_batch' ? BATCH_SHEET_ID : (target === 'run' ? RUN_SHEET_ID : LINE_SHEET_ID)
+      const rows = recordsApi.store.get(sheetId)
+      rows.push({ ...rows[0], id: `${rows[0].id}-duplicate`, data: { ...rows[0].data } })
+      const createsBefore = recordsApi.createCalls.length
+      await assert.rejects(
+        () => persistStockPreparationSyncRun({ permission: 'admin', recordsApi, provisioning, ...basePlanInputs() }),
+        (error) => error instanceof StockPreparationSyncRunPersistError &&
+          error.code === 'PERSIST_IDEMPOTENCY_CONFLICT' &&
+          error.details.target === target,
+      )
+      assert.equal(recordsApi.createCalls.length, createsBefore)
+      assert.equal(recordsApi.patchCalls.length, 0)
+    }
+  })
+
+  await run('exact replay reads all line pages and normalizes persisted number serialization', async () => {
+    const recordsApi = makePaginatedRecordsApi()
+    const provisioning = makeProvisioning()
+    const inputs = basePlanInputs({ expansionResult: manyExpansionRows(READ_PAGE_LIMIT + 1), snapshotVersion: 1 })
+    await persistStockPreparationSyncRun({ permission: 'admin', recordsApi, provisioning, ...inputs })
+    const batch = recordsApi.store.get(BATCH_SHEET_ID)[0]
+    batch.data[physicalFieldId(STAGING_PROJECT_ID, BATCH_OBJECT_ID, 'snapshotVersion')] = '1'
+    const createsBefore = recordsApi.createCalls.length
+    const replay = await persistStockPreparationSyncRun({ permission: 'admin', recordsApi, provisioning, ...inputs })
+    assert.equal(replay.mode, 'skipped_existing')
+    const lineQueries = recordsApi.queryCalls.filter((call) => call.sheetId === LINE_SHEET_ID)
+    assert.ok(lineQueries.length >= 2, 'more than one bounded page was read')
+    assert.equal(recordsApi.createCalls.length, createsBefore)
+    assert.equal(recordsApi.patchCalls.length, 0)
+  })
+
+  await run('a full final line page at the maximum page bound is unprovable', async () => {
+    let calls = 0
+    const page = Array.from({ length: READ_PAGE_LIMIT }, () => ({ id: 'opaque', data: {} }))
+    await assert.rejects(
+      () => readExistingSnapshotLines({
+        async queryRecords() {
+          calls += 1
+          return page
+        },
+      }, 'batch-opaque'),
+      (error) => error instanceof StockPreparationSyncRunPersistError &&
+        error.status === 409 &&
+        error.code === 'PERSIST_EXISTING_BATCH_READ_UNPROVABLE',
+    )
+    assert.equal(calls, READ_MAX_PAGES)
   })
 
   // ---- #4163 T1: a SECOND, genuinely-new batch for the SAME project PATCHES the project row ----
@@ -459,6 +678,21 @@ async function main() {
 
     // Batch/line/run rows for the FIRST batch are untouched — patchRecord never touches those sheets.
     assert.equal(recordsApi.patchCalls.filter((call) => call.sheetId !== PROJECT_SHEET_ID).length, 0)
+
+    // Replaying the older exact snapshot remains a no-op even though the live project pointer now refers
+    // to run_2. Replay checks project cardinality, not mutable live-pointer contents, and never rolls it back.
+    const patchCountBeforeReplay = recordsApi.patchCalls.length
+    const replay = await persistStockPreparationSyncRun({
+      permission: 'admin',
+      recordsApi,
+      provisioning,
+      ...basePlanInputs({ sourceProjectNo: 'PN-ORIGINAL', projectName: 'Original Name' }),
+    })
+    assert.equal(replay.mode, 'skipped_existing')
+    assert.deepEqual(replay.project, { mode: 'skipped' })
+    assert.equal(recordsApi.patchCalls.length, patchCountBeforeReplay)
+    const projectAfterReplay = logicalData(STAGING_PROJECT_ID, PROJECT_OBJECT_ID, recordsApi.store.get(PROJECT_SHEET_ID)[0].data)
+    assert.equal(projectAfterReplay.lastSyncRunId, 'run_2')
   })
 
   // ---- (e) target not provisioned -> fail closed, NO writes ----

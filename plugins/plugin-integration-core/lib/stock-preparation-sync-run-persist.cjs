@@ -23,9 +23,10 @@
 //   - internal-only: every createRecord / queryRecords goes through a scoped API bound to a resolved
 //     MVP sheet whose objectId is in the frozen 9-table set. There is NO external ERP / K3 / PLM write,
 //     NO apply-writer import, NO raw SQL, and NO fetch / live HTTP I/O of any kind.
-//   - idempotent + immutable: an already-persisted snapshotBatchId SKIPS the whole commit (old
-//     snapshots are immutable — never patched or overwritten). Only when absent do we create rows, and
-//     ONLY via createRecord — the create path never mutates an existing row (no patch / update / delete).
+//   - idempotent + immutable: an already-persisted snapshotBatchId SKIPS only after the complete frozen
+//     batch/line/run projection and the project-row existence are proven. Partial or conflicting replays
+//     fail closed. Only when absent do we create rows, and ONLY via createRecord — the create path never
+//     mutates an existing snapshot row (no patch / update / delete).
 //     The project row is the ONE deliberate exception to "never patched" (see above) — it is a live
 //     pointer (last sync run/time/status), not an immutable snapshot.
 //   - values-free evidence: counts / statuses / field-key NAMES / public objectId constants / booleans
@@ -66,6 +67,10 @@ const BATCH_OBJECT_ID = BATCH_TEMPLATE.objectId
 const LINE_OBJECT_ID = LINE_TEMPLATE.objectId
 const RUN_OBJECT_ID = RUN_TEMPLATE.objectId
 const BATCH_KEY_FIELD = BATCH_TEMPLATE.keyFields[0] // 'snapshotBatchId' — the idempotency key.
+const LINE_KEY_FIELD = LINE_TEMPLATE.keyFields[0]
+const RUN_KEY_FIELD = RUN_TEMPLATE.keyFields[0]
+const READ_PAGE_LIMIT = 500
+const READ_MAX_PAGES = 50
 
 // #4163 T1: the PROJECT table template — grounds the project-row upsert the SAME way BATCH/LINE/RUN are
 // grounded above (frozen template, never an invented field name).
@@ -158,21 +163,182 @@ function groundLineRow(line) {
   return out
 }
 
+const INVALID_TEMPLATE_VALUE = Symbol('invalid-template-value')
+
+function normalizeTemplateValue(value, type) {
+  if (value === undefined || value === null) return undefined
+  if (type === 'number') {
+    if (typeof value === 'string' && value.trim() === '') return INVALID_TEMPLATE_VALUE
+    const normalized = Number(value)
+    return Number.isFinite(normalized) ? normalized : INVALID_TEMPLATE_VALUE
+  }
+  if (type === 'boolean') return typeof value === 'boolean' ? value : INVALID_TEMPLATE_VALUE
+  if (type === 'string' || type === 'select' || type === 'date') {
+    // The records service validates but does not trim these types. Preserve every byte so a whitespace
+    // change in a frozen persisted field cannot be mistaken for an exact replay.
+    return typeof value === 'string' ? value : INVALID_TEMPLATE_VALUE
+  }
+  return value
+}
+
+// Compare only the fields the frozen template allows the create path to persist. Records metadata
+// (id/sheetId/version) is outside `data` and therefore never participates. Null/undefined is omitted on
+// both sides exactly as the create path omits it; number/string/select/date values are normalized by the
+// template type so storage serialization differences cannot create a false conflict.
+function frozenProjection(template, value) {
+  const data = isPlainObject(value && value.data) ? value.data : value
+  if (!isPlainObject(data)) return null
+  const out = {}
+  for (const field of template.fields) {
+    const normalized = normalizeTemplateValue(data[field.id], field.type)
+    if (normalized === INVALID_TEMPLATE_VALUE) return null
+    if (normalized !== undefined) out[field.id] = normalized
+  }
+  return out
+}
+
+function projectionsEqual(template, expected, actual) {
+  const left = frozenProjection(template, expected)
+  const right = frozenProjection(template, actual)
+  return left !== null && right !== null && JSON.stringify(left) === JSON.stringify(right)
+}
+
+function idempotencyConflict(target, reason) {
+  throw new StockPreparationSyncRunPersistError(
+    409,
+    'PERSIST_IDEMPOTENCY_CONFLICT',
+    'existing stock-preparation snapshot rows conflict with the requested immutable replay',
+    { target, reason },
+  )
+}
+
+function existingBatchIncomplete(target, reason) {
+  throw new StockPreparationSyncRunPersistError(
+    409,
+    'PERSIST_EXISTING_BATCH_INCOMPLETE',
+    'existing stock-preparation snapshot commit is incomplete',
+    { target, reason },
+  )
+}
+
+function assertPlanIdentityKeys(plan, snapshotLines) {
+  if (!optionalString(plan && plan.snapshotBatch && plan.snapshotBatch[BATCH_KEY_FIELD])) {
+    throw new StockPreparationSyncRunPersistError(422, 'PERSIST_CONFIG_INVALID', 'planned snapshot batch key is required', { field: BATCH_KEY_FIELD })
+  }
+  if (!optionalString(plan && plan.syncRun && plan.syncRun[RUN_KEY_FIELD])) {
+    throw new StockPreparationSyncRunPersistError(422, 'PERSIST_CONFIG_INVALID', 'planned run key is required', { field: RUN_KEY_FIELD })
+  }
+  const seen = new Set()
+  for (const line of snapshotLines) {
+    const key = optionalString(line && line[LINE_KEY_FIELD])
+    if (!key || seen.has(key)) {
+      throw new StockPreparationSyncRunPersistError(
+        422,
+        'PERSIST_PLAN_LINE_KEY_AMBIGUOUS',
+        'planned snapshot line keys must be present and unique',
+        { field: LINE_KEY_FIELD },
+      )
+    }
+    seen.add(key)
+  }
+}
+
+async function queryProjectRows(scoped, projectId) {
+  const rows = await scoped.queryRecords({
+    filters: { [PROJECT_KEY_FIELD]: projectId },
+    limit: 2,
+    offset: 0,
+  })
+  if (!Array.isArray(rows)) {
+    throw new StockPreparationSyncRunPersistError(500, 'PERSIST_RECORDS_API_INVALID', 'queryRecords must return an array')
+  }
+  if (rows.length > 1) idempotencyConflict('project', 'duplicate_key')
+  if (rows.length === 1 && !optionalString(rows[0] && rows[0].id)) {
+    idempotencyConflict('project', 'missing_record_id')
+  }
+  return rows
+}
+
+async function readExistingSnapshotLines(scoped, snapshotBatchId) {
+  const rows = []
+  for (let page = 0; page < READ_MAX_PAGES; page += 1) {
+    const pageRows = await scoped.queryRecords({
+      filters: { snapshotBatchId },
+      limit: READ_PAGE_LIMIT,
+      offset: page * READ_PAGE_LIMIT,
+    })
+    if (!Array.isArray(pageRows)) {
+      throw new StockPreparationSyncRunPersistError(500, 'PERSIST_RECORDS_API_INVALID', 'queryRecords must return an array')
+    }
+    if (pageRows.length > READ_PAGE_LIMIT) {
+      throw new StockPreparationSyncRunPersistError(
+        409,
+        'PERSIST_EXISTING_BATCH_READ_UNPROVABLE',
+        'existing snapshot lines exceeded the bounded read page size',
+        { pageLimit: READ_PAGE_LIMIT, maxPages: READ_MAX_PAGES },
+      )
+    }
+    rows.push(...pageRows)
+    if (pageRows.length < READ_PAGE_LIMIT) return rows
+  }
+  throw new StockPreparationSyncRunPersistError(
+    409,
+    'PERSIST_EXISTING_BATCH_READ_UNPROVABLE',
+    'existing snapshot lines exceeded the bounded read page count',
+    { pageLimit: READ_PAGE_LIMIT, maxPages: READ_MAX_PAGES },
+  )
+}
+
+async function assertExactReplay({
+  existingBatch,
+  plan,
+  snapshotLines,
+  lineScoped,
+  runScoped,
+  projectRows,
+}) {
+  if (!projectionsEqual(BATCH_TEMPLATE, plan.snapshotBatch, existingBatch)) {
+    idempotencyConflict('snapshot_batch', 'content_mismatch')
+  }
+
+  const runId = plan.syncRun[RUN_KEY_FIELD]
+  const existingRuns = await runScoped.queryRecords({ filters: { [RUN_KEY_FIELD]: runId }, limit: 2, offset: 0 })
+  if (!Array.isArray(existingRuns)) {
+    throw new StockPreparationSyncRunPersistError(500, 'PERSIST_RECORDS_API_INVALID', 'queryRecords must return an array')
+  }
+  if (existingRuns.length > 1) idempotencyConflict('run', 'duplicate_key')
+  if (existingRuns.length === 0) existingBatchIncomplete('run', 'missing')
+  if (!projectionsEqual(RUN_TEMPLATE, plan.syncRun, existingRuns[0])) {
+    idempotencyConflict('run', 'content_mismatch')
+  }
+
+  const existingLines = await readExistingSnapshotLines(lineScoped, plan.snapshotBatch[BATCH_KEY_FIELD])
+  const expectedByKey = new Map(snapshotLines.map((line) => [line[LINE_KEY_FIELD], line]))
+  const actualByKey = new Map()
+  for (const row of existingLines) {
+    const key = optionalString(row && row.data && row.data[LINE_KEY_FIELD])
+    if (!key || actualByKey.has(key)) idempotencyConflict('snapshot_line', 'duplicate_or_missing_key')
+    if (!expectedByKey.has(key)) idempotencyConflict('snapshot_line', 'unexpected_key')
+    actualByKey.set(key, row)
+  }
+  for (const [key, expected] of expectedByKey) {
+    const actual = actualByKey.get(key)
+    if (!actual) existingBatchIncomplete('snapshot_line', 'missing')
+    if (!projectionsEqual(LINE_TEMPLATE, groundLineRow(expected), actual)) {
+      idempotencyConflict('snapshot_line', 'content_mismatch')
+    }
+  }
+
+  if (projectRows.length === 0) existingBatchIncomplete('project', 'missing')
+}
+
 // #4163 T1 — upsert the PROJECT row: query by the key field first (never trust "it must be new"), then
 // EITHER createRecord (absent) OR patchRecord (present). The patch `changes` object is a closed,
 // hand-built set of exactly 3 keys — `owner` (human_preserved) and `sourceProjectNo` / `projectName`
 // are STRUCTURALLY absent from it (not merely "not updated"), so a resync can never overwrite them.
 // `projectName` is passthrough-only on CREATE too: it is written only when the caller actually supplied
 // one — this module never invents a project name.
-async function upsertStockPreparationProject({ scoped, projectId, sourceProjectNo, projectName, sourceSystem, syncRunId }) {
-  const existing = await scoped.queryRecords({
-    filters: { [PROJECT_KEY_FIELD]: projectId },
-    limit: 2,
-    offset: 0,
-  })
-  if (!Array.isArray(existing)) {
-    throw new StockPreparationSyncRunPersistError(500, 'PERSIST_RECORDS_API_INVALID', 'queryRecords must return an array')
-  }
+async function upsertStockPreparationProject({ scoped, existing, projectId, sourceProjectNo, projectName, sourceSystem, syncRunId }) {
   const lastSyncedAt = new Date().toISOString()
   if (existing.length === 0) {
     const data = {
@@ -265,6 +431,7 @@ async function persistStockPreparationSyncRun(input = {}) {
     throw new StockPreparationSyncRunPersistError(422, 'PERSIST_CONFIG_INVALID', 'planned snapshotBatchId is required', { field: BATCH_KEY_FIELD })
   }
   const snapshotLines = Array.isArray(plan.snapshotLines) ? plan.snapshotLines : []
+  assertPlanIdentityKeys(plan, snapshotLines)
 
   // The MVP tables are provisioned under an INTERNAL STAGING project (readiness/ensure route
   // resolveIntegrationStagingProjectId -> `<tenant>:integration-core`), NOT the business projectId. So
@@ -284,8 +451,9 @@ async function persistStockPreparationSyncRun(input = {}) {
   const runTarget = await resolveScopedTarget(recordsApi, provisioning, targetProjectId, RUN_OBJECT_ID)
   const projectTarget = await resolveScopedTarget(recordsApi, provisioning, targetProjectId, PROJECT_OBJECT_ID)
 
-  // 4. idempotency + immutability: if a BATCH row with this snapshotBatchId already exists, SKIP the
-  //    whole commit — old snapshots are immutable, so we never overwrite an existing batch or its lines.
+  // 4. Idempotency + immutability. A batch-key hit is only a successful replay after every immutable
+  //    batch/line/run projection and the project-row existence check match exactly. Partial commits and
+  //    same-key/different-content requests fail closed; this module never repairs or patches snapshots.
   const existingBatch = await batchTarget.scoped.queryRecords({
     filters: { [BATCH_KEY_FIELD]: snapshotBatchId },
     limit: 2,
@@ -294,11 +462,21 @@ async function persistStockPreparationSyncRun(input = {}) {
   if (!Array.isArray(existingBatch)) {
     throw new StockPreparationSyncRunPersistError(500, 'PERSIST_RECORDS_API_INVALID', 'queryRecords must return an array')
   }
-  if (existingBatch.length > 0) {
-    // A duplicate/retried commit of the SAME snapshotBatchId: batch/lines/run are immutable and skip
-    // whole-hog (unchanged behavior). The project row is left untouched too — nothing NEW was learned
-    // about the project by a commit that turned out to be a no-op repeat (its lastSyncedAt already
-    // reflects the ORIGINAL, non-duplicate commit that first created this batch).
+  if (existingBatch.length > 1) idempotencyConflict('snapshot_batch', 'duplicate_key')
+
+  // The project preflight occurs before the first write. It both rejects duplicate project keys and
+  // supplies the exact row (if any) that the final live-pointer upsert may patch.
+  const projectRows = await queryProjectRows(projectTarget.scoped, projectId)
+
+  if (existingBatch.length === 1) {
+    await assertExactReplay({
+      existingBatch: existingBatch[0],
+      plan,
+      snapshotLines,
+      lineScoped: lineTarget.scoped,
+      runScoped: runTarget.scoped,
+      projectRows,
+    })
     const created = { batch: 0, lines: 0, run: 0 }
     return {
       persisted: false,
@@ -310,8 +488,8 @@ async function persistStockPreparationSyncRun(input = {}) {
   }
 
   // 5. create-only path: batch row, then each line row, then the run row. createRecord ONLY — no
-  //    existing row is ever mutated. (Batch-first is required so the idempotency key is planted before
-  //    the lines/run; a crash mid-commit therefore skips on retry rather than duplicating rows.)
+  //    existing row is ever mutated. Batch-first plants the idempotency key before lines/run; a crash
+  //    mid-commit is therefore visible on retry as an incomplete 409, never a duplicate or silent skip.
   await batchTarget.scoped.createRecord({ data: plan.snapshotBatch })
   let linesCreated = 0
   for (const line of snapshotLines) {
@@ -326,6 +504,7 @@ async function persistStockPreparationSyncRun(input = {}) {
   // same row rather than creating a duplicate — the multi-sync-run case the populator exists for.
   const projectSync = await upsertStockPreparationProject({
     scoped: projectTarget.scoped,
+    existing: projectRows,
     projectId,
     sourceProjectNo,
     projectName,
@@ -362,7 +541,15 @@ module.exports = {
     groundLineRow,
     upsertStockPreparationProject,
     buildEvidence,
+    frozenProjection,
+    projectionsEqual,
+    assertPlanIdentityKeys,
+    queryProjectRows,
+    readExistingSnapshotLines,
+    assertExactReplay,
     MVP_OBJECT_ID_SET,
     PROJECT_FIELD_IDS,
+    READ_PAGE_LIMIT,
+    READ_MAX_PAGES,
   },
 }
