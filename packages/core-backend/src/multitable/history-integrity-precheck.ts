@@ -462,17 +462,17 @@ export async function precheckSheetHistoryIntegrity(
 ): Promise<HistoryIntegrityVerdict> {
   if (isContiguityStrictMode()) {
     // L5 P3-2 STRICT-ENABLEMENT GATE (wired here — the authoritative strict-mode entry the recovery routes
-    // call). Strict mode may NOT be relied upon for a sheet that has ENTERED the trust-checkpoint regime (an
-    // ACTIVE checkpoint exists) unless the full enablement precondition holds. With RECONSTRUCTION_CAUSALITY_
-    // LANDED=false, condition (b) is unmet, so a checkpoint-bearing sheet is REFUSED fail-closed until L6 —
-    // "migration/backfill presence alone never enables recovery" (design lock §3). The refusal is scoped to
-    // checkpoint-bearing sheets via `unmet` (the precondition's condition (a) is MET): this preserves the L3
-    // strict-comparator goldens, which force the flag on WITHOUT ever provisioning a checkpoint and must keep
-    // exercising the comparator (module `history-trust-precondition.ts` documents exactly this tension). SEAM:
-    // once L5-wire activates a checkpoint on every recovery path, no-checkpoint sheets no longer exist and this
-    // gate covers them uniformly; the Revert/Reset routes inherit this refusal through this single entry.
+    // call). BOTH preconditions must hold — (a) an ACTIVE trust checkpoint exists for the sheet AND (b)
+    // reconstruction causality has landed — before strict mode may be relied upon; `!canEnable` refuses
+    // UNCONDITIONALLY (owner P2, 2026-07-16: an earlier draft exempted `no_active_checkpoint`, which let an
+    // operator flip strict on and have every checkpoint-LESS sheet walk straight into the strict comparator —
+    // a production bypass that existed to keep test fixtures convenient; tests that need the comparator call
+    // `precheckSheetHistoryIntegrityStrict` directly instead). With RECONSTRUCTION_CAUSALITY_LANDED=false,
+    // (b) is unmet for EVERY sheet, so the production strict path refuses fail-closed until L6 lands —
+    // "migration/backfill presence alone never enables recovery" (design lock §3). The Revert/Reset routes
+    // inherit this refusal through this single entry.
     const enablement = await checkStrictEnablementPrecondition(query, sheetId)
-    if (!enablement.canEnable && !enablement.unmet.includes('no_active_checkpoint')) {
+    if (!enablement.canEnable) {
       return { ok: false, reason: 'strict_enablement_unmet' }
     }
     return precheckSheetHistoryIntegrityStrict(query, sheetId)

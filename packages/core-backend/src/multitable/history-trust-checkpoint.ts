@@ -34,6 +34,26 @@ export class SeqComparatorError extends Error {
   }
 }
 
+/**
+ * Fail-closed abort for `activateCheckpoint` (owner P1, 2026-07-16): a TRASHED-ONLY record has a trash row
+ * whose vintage cannot be causally attributed (NULL/dangling `delete_revision_id`) — the row might be the
+ * newest vintage, so no baseline choice for that record is trustworthy. Activation aborts; the caller's
+ * transaction rolls the `building` checkpoint back.
+ */
+export class CheckpointUnattributableTrashError extends Error {
+  readonly code = 'checkpoint_unattributable_trash' as const
+  readonly sheetId: string
+  readonly recordIds: readonly string[]
+  constructor(sheetId: string, recordIds: readonly string[]) {
+    super(
+      `checkpoint activation aborted (fail-closed): sheet ${sheetId} has trashed-only record(s) with causally unattributable trash vintages: ${recordIds.join(', ')}`,
+    )
+    this.name = 'CheckpointUnattributableTrashError'
+    this.sheetId = sheetId
+    this.recordIds = recordIds
+  }
+}
+
 /** Fail-closed guard: throws `SeqComparatorError` (never coerces to zero) on a non-decimal-integer seq. */
 export function assertSeqString(value: unknown, context: string): asserts value is string {
   if (!isSeqString(value)) {
@@ -171,9 +191,32 @@ export async function activateCheckpoint(tx: QueryFn, input: { sheetId: string }
   // Select the LATEST vintage DETERMINISTICALLY by the causal `seq` of the delete revision that produced each
   // trash row (`meta_records_trash.delete_revision_id → meta_record_revisions.seq`, exact SQL bigint ORDER BY
   // — never Number()). `DISTINCT ON (record_id) … ORDER BY record_id, r.seq DESC` keeps only the newest-delete
-  // row per record. The JOIN is INNER, so a trash row whose vintage CANNOT be causally attributed (no
-  // `delete_revision_id`, or the delete revision was retention-swept) is EXCLUDED — fail-closed, never
-  // silently frozen (design lock §3). ON CONFLICT still yields to the live row captured above.
+  // row per record. ON CONFLICT still yields to the live row captured above.
+  //
+  // Fail-closed means ABORT, not omit (owner P1, 2026-07-16): for a TRASHED-ONLY record (no live row — the
+  // live snapshot above always wins when one exists), a trash row whose vintage cannot be causally attributed
+  // (NULL/dangling `delete_revision_id`, or the delete revision was retention-swept) might be the NEWEST
+  // vintage — with no seq there is no way to order it, so neither picking an older attributable row (stale
+  // snapshot again) nor dropping the record (baseline silently missing a record yet marked trusted) is safe.
+  // Any such row aborts the whole activation; the surrounding txn rolls the `building` row back.
+  const unattributable = await tx(
+    `SELECT DISTINCT t.record_id
+     FROM meta_records_trash t
+     LEFT JOIN meta_record_revisions r
+       ON r.id = t.delete_revision_id AND r.sheet_id = t.sheet_id AND r.record_id = t.record_id AND r.action = 'delete'
+     WHERE t.sheet_id = $1
+       AND r.id IS NULL
+       AND NOT EXISTS (SELECT 1 FROM meta_records lr WHERE lr.id = t.record_id AND lr.sheet_id = t.sheet_id)
+     ORDER BY t.record_id
+     LIMIT 5`,
+    [sheetId],
+  )
+  if (unattributable.rows.length > 0) {
+    throw new CheckpointUnattributableTrashError(
+      sheetId,
+      (unattributable.rows as Array<{ record_id: string }>).map((r) => r.record_id),
+    )
+  }
   await tx(
     `INSERT INTO meta_history_baselines (checkpoint_id, sheet_id, record_id, data, version, is_trashed)
      SELECT DISTINCT ON (t.record_id) $1, t.sheet_id, t.record_id, t.data, t.original_version, true
