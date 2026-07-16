@@ -192,8 +192,8 @@ closed set；实现与验收不得依赖 config shape validation 或 records ser
 provisioning / persist I/O 之前**，对 approved config 调用纯守卫
 `assertPlmAutoPersistSourceConfigSafe(config)`（bridge 模块导出）：`fieldMap.target ∈
 FORBIDDEN_FIELD_MAP_TARGETS`（当前 = `missingChildBom`）→ 专用 values-free 422
-`STOCK_PREPARATION_PLM_AUTOPERSIST_CONFIG_TARGET_FORBIDDEN`；fieldMap 缺失/非数组 → 422
-`STOCK_PREPARATION_PLM_AUTOPERSIST_CONFIG_SHAPE_INVALID`。error details 只含 forbidden
+`STOCK_PREPARATION_PLM_AUTOPERSIST_CONFIG_TARGET_FORBIDDEN`；fieldMap 缺失/非数组/**空数组**/**任一畸形 entry(非对象或 target 非非空字符串)** → 422
+`STOCK_PREPARATION_PLM_AUTOPERSIST_CONFIG_SHAPE_INVALID`(coarse reason,values-free;守卫不依赖上游 validator 永远正确)。error details 只含 forbidden
 TARGET 词表，绝不含 source 列名。1c 接线测试必须证明该拒绝路径 **records/provisioning/
 source-adapter 调用计数为 0**。已有的 `lineStatus='missing_child_bom'` 值级整包 422 保持不变；
 **不采用** missing_child_bom → incomplete 的静默归一（Option B 有丢信号风险）。
