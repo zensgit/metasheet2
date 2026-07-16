@@ -7,6 +7,7 @@
 import { describe, expect, test } from 'vitest'
 
 import {
+  APPROVAL_COMPLETION_CONSUMERS,
   assertManifestCompleteness,
   CURRENT_ROUTING_MANIFEST,
   expandConsumerKeysForEvent,
@@ -39,6 +40,20 @@ describe('P2 S3 — routing manifest v1 (lock #4203 §283-291 full set)', () => 
     expect(expandConsumerKeysForEvent('form.submitted')).toEqual(['automation-record-trigger'])
     // the distinct key universe is exactly the six ratified consumers — no stragglers, none missing
     expect([...manifestConsumerKeys()].sort()).toEqual([...FULL_V1_KEYS].sort())
+    // EXACT event-family set — a route ADDED/removed/renamed reds even if it reuses an existing consumer
+    // (the per-key checks + the distinct-key universe would otherwise stay green) (#4335 review P2).
+    expect(Object.keys(ROUTING_MANIFEST_V1.routes).sort()).toEqual([
+      'approval.approved',
+      'approval.cancelled',
+      'approval.rejected',
+      'approval.revoked',
+      'approval.task_created',
+      'form.submitted',
+      'multitable.comment.created',
+      'multitable.record.created',
+      'multitable.record.deleted',
+      'multitable.record.updated',
+    ])
   })
 
   test('an unrouted event type expands to undefined (the producer must treat that as a hard error)', () => {
@@ -46,9 +61,19 @@ describe('P2 S3 — routing manifest v1 (lock #4203 §283-291 full set)', () => 
     expect(expandConsumerKeysForEvent('')).toBeUndefined()
   })
 
-  test('the manifest object is frozen (a v1 row is dispatched per v1 forever — no in-place edits)', () => {
+  test('the manifest is DEEP-frozen (a v1 row is dispatched per v1 forever — no in-place edits, incl. arrays)', () => {
     expect(Object.isFrozen(ROUTING_MANIFEST_V1)).toBe(true)
     expect(Object.isFrozen(ROUTING_MANIFEST_V1.routes)).toBe(true)
+    // the CONSUMER ARRAYS must be frozen too — `as const` is compile-time only; a bare outer freeze leaves
+    // `routes[e].pop()` / a pop on the shared approval array able to silently rewrite v1 (#4335 review P2).
+    for (const arr of Object.values(ROUTING_MANIFEST_V1.routes)) {
+      expect(Object.isFrozen(arr)).toBe(true)
+    }
+    expect(Object.isFrozen(APPROVAL_COMPLETION_CONSUMERS)).toBe(true)
+    expect(() => (ROUTING_MANIFEST_V1.routes['approval.approved'] as string[]).pop()).toThrow(TypeError)
+    expect(() => (APPROVAL_COMPLETION_CONSUMERS as string[]).push('x')).toThrow(TypeError)
+    // the mutation attempts changed nothing
+    expect(expandConsumerKeysForEvent('approval.approved')).toEqual(['approval-bridge', 'approval-trigger', 'approval-projection'])
     expect(CURRENT_ROUTING_MANIFEST).toBe(ROUTING_MANIFEST_V1)
     expect(SUPPORTED_MANIFEST_VERSIONS.has(1)).toBe(true)
   })

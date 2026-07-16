@@ -40,23 +40,38 @@ export interface RoutingManifest {
   readonly routes: Readonly<Record<string, readonly string[]>>
 }
 
-export const APPROVAL_COMPLETION_CONSUMERS = ['approval-bridge', 'approval-trigger', 'approval-projection'] as const
+/**
+ * DEEP-freeze a manifest so v1 routing is immutable at RUNTIME. `as const` / a bare outer `Object.freeze` are
+ * NOT enough: the CONSUMER ARRAYS inside `routes` stay mutable, so `manifest.routes[e].pop()` (or a pop on the
+ * shared APPROVAL_COMPLETION_CONSUMERS array) would silently rewrite v1's routing (#4335 review P2). Freeze
+ * every route array, the routes record, and the object itself.
+ */
+function deepFreezeManifest(m: RoutingManifest): RoutingManifest {
+  for (const keys of Object.values(m.routes)) {
+    Object.freeze(keys)
+  }
+  Object.freeze(m.routes)
+  return Object.freeze(m)
+}
 
-/** v1 — the lock's ratified full set (#4203 §283-291). Frozen: never mutate; new needs = new version. */
-export const ROUTING_MANIFEST_V1: RoutingManifest = Object.freeze({
+/** Shared across the four approval-completion routes — frozen so no route can mutate it out from under the others. */
+export const APPROVAL_COMPLETION_CONSUMERS: readonly string[] = Object.freeze(['approval-bridge', 'approval-trigger', 'approval-projection'])
+
+/** v1 — the lock's ratified full set (#4203 §283-291). Deep-frozen: never mutate at runtime; new needs = new version. */
+export const ROUTING_MANIFEST_V1: RoutingManifest = deepFreezeManifest({
   version: 1,
-  routes: Object.freeze({
+  routes: {
     'approval.approved': APPROVAL_COMPLETION_CONSUMERS,
     'approval.rejected': APPROVAL_COMPLETION_CONSUMERS,
     'approval.revoked': APPROVAL_COMPLETION_CONSUMERS,
     'approval.cancelled': APPROVAL_COMPLETION_CONSUMERS,
-    'approval.task_created': ['approval-task-trigger'] as const,
-    'multitable.record.created': ['automation-record-trigger', 'webhook-event-bridge'] as const,
-    'multitable.record.updated': ['automation-record-trigger', 'webhook-event-bridge'] as const,
-    'multitable.record.deleted': ['automation-record-trigger', 'webhook-event-bridge'] as const,
-    'multitable.comment.created': ['webhook-event-bridge'] as const,
-    'form.submitted': ['automation-record-trigger'] as const,
-  }),
+    'approval.task_created': ['approval-task-trigger'],
+    'multitable.record.created': ['automation-record-trigger', 'webhook-event-bridge'],
+    'multitable.record.updated': ['automation-record-trigger', 'webhook-event-bridge'],
+    'multitable.record.deleted': ['automation-record-trigger', 'webhook-event-bridge'],
+    'multitable.comment.created': ['webhook-event-bridge'],
+    'form.submitted': ['automation-record-trigger'],
+  },
 })
 
 export const CURRENT_ROUTING_MANIFEST: RoutingManifest = ROUTING_MANIFEST_V1
