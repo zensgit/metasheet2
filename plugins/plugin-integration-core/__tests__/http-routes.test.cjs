@@ -7733,6 +7733,8 @@ async function testStockPreparationErpSourceRunAutoPersistSteering() {
       ['body.projectId', { body: { readSourceConfigId: T3A_ERP_CONFIG_ID, syncRunId: 'steer_2', projectId: 'tenant_evil:integration-core' } }],
       ['query.tenantId', { body: { readSourceConfigId: T3A_ERP_CONFIG_ID, syncRunId: 'steer_3' }, query: { tenantId: 'tenant_evil' } }],
       ['query.projectId', { body: { readSourceConfigId: T3A_ERP_CONFIG_ID, syncRunId: 'steer_4' }, query: { projectId: 'tenant_evil:integration-core' } }],
+      ['params.tenantId', { body: { readSourceConfigId: T3A_ERP_CONFIG_ID, syncRunId: 'steer_5' }, params: { tenantId: 'tenant_evil' } }],
+      ['params.projectId', { body: { readSourceConfigId: T3A_ERP_CONFIG_ID, syncRunId: 'steer_6' }, params: { projectId: 'tenant_evil:integration-core' } }],
     ]
     for (const [label, reqExtra] of vectors) {
       const bomb = createCountingThrowMvpApis()
@@ -7769,7 +7771,7 @@ async function testStockPreparationErpSourceRunAutoPersistOffInert() {
     // the read has no write side effect, so the steering guard is not engaged and no autoPersist is added.
     const res = await invoke(routes, 'POST', T3A_SOURCE_RUN_PATH, {
       user: ADMIN_USER,
-      body: { readSourceConfigId: T3A_ERP_CONFIG_ID, syncRunId: 'off_inert_1' },
+      body: { tenantId: 'tenant_evil', readSourceConfigId: T3A_ERP_CONFIG_ID, syncRunId: 'off_inert_1' },
     })
     assertOkResponse(res, 200)
     assert.equal(res.body.data.mode, 'dry_run')
