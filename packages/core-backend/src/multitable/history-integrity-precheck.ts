@@ -442,9 +442,13 @@ export async function precheckSheetHistoryIntegrity(
   if (isContiguityStrictMode()) return precheckSheetHistoryIntegrityStrict(query, sheetId)
 
   // System sheets (approval projection / people directory) are server-regenerated read models — excluded.
-  const sheetRes = await query('SELECT base_id, description FROM meta_sheets WHERE id = $1', [sheetId])
-  const sheetRow = sheetRes.rows[0] as { base_id?: unknown; description?: unknown } | undefined
-  if (sheetRow && isSystemSheet({ baseId: typeof sheetRow.base_id === 'string' ? sheetRow.base_id : null, description: sheetRow.description })) {
+  // `system_kind` (v3.7 §3, server-owned non-forgeable signal) is read column-tolerantly via `to_jsonb`: a
+  // rolling-deploy window where the L5 migration has not yet added the column returns NULL here instead of a
+  // 42703 that would poison the C8 in-txn re-check (mirrors the txn-safe intent of hasChainSeqColumn). When
+  // absent, isSystemSheet falls back to the legacy base_id/description signals — byte-identical to pre-L5.
+  const sheetRes = await query("SELECT base_id, description, (to_jsonb(s) ->> 'system_kind') AS system_kind FROM meta_sheets s WHERE id = $1", [sheetId])
+  const sheetRow = sheetRes.rows[0] as { base_id?: unknown; description?: unknown; system_kind?: unknown } | undefined
+  if (sheetRow && isSystemSheet({ baseId: typeof sheetRow.base_id === 'string' ? sheetRow.base_id : null, description: sheetRow.description, systemKind: sheetRow.system_kind })) {
     return { ok: true }
   }
 
@@ -548,9 +552,13 @@ type StrictRawTimelineRow = {
  */
 async function precheckSheetHistoryIntegrityStrict(query: QueryFn, sheetId: string): Promise<HistoryIntegrityVerdict> {
   // System sheets excluded — identical predicate/semantics to the non-strict path.
-  const sheetRes = await query('SELECT base_id, description FROM meta_sheets WHERE id = $1', [sheetId])
-  const sheetRow = sheetRes.rows[0] as { base_id?: unknown; description?: unknown } | undefined
-  if (sheetRow && isSystemSheet({ baseId: typeof sheetRow.base_id === 'string' ? sheetRow.base_id : null, description: sheetRow.description })) {
+  // `system_kind` (v3.7 §3, server-owned non-forgeable signal) is read column-tolerantly via `to_jsonb`: a
+  // rolling-deploy window where the L5 migration has not yet added the column returns NULL here instead of a
+  // 42703 that would poison the C8 in-txn re-check (mirrors the txn-safe intent of hasChainSeqColumn). When
+  // absent, isSystemSheet falls back to the legacy base_id/description signals — byte-identical to pre-L5.
+  const sheetRes = await query("SELECT base_id, description, (to_jsonb(s) ->> 'system_kind') AS system_kind FROM meta_sheets s WHERE id = $1", [sheetId])
+  const sheetRow = sheetRes.rows[0] as { base_id?: unknown; description?: unknown; system_kind?: unknown } | undefined
+  if (sheetRow && isSystemSheet({ baseId: typeof sheetRow.base_id === 'string' ? sheetRow.base_id : null, description: sheetRow.description, systemKind: sheetRow.system_kind })) {
     return { ok: true }
   }
 
