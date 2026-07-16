@@ -576,6 +576,7 @@ jobs:
             tests/integration/directory-local-provider-scheduler-exclusion.db.test.ts \
             tests/integration/local-directory-org-crud.db.test.ts \
             tests/integration/local-directory-org-crud-route.db.test.ts \
+            tests/integration/directory-normalized-manager.db.test.ts \
             tests/integration/attendance-csv-export-bom.test.ts \
             tests/integration/attendance-notification-redelivery.db.test.ts \
             tests/integration/attendance-notification-redelivery-route.db.test.ts \
