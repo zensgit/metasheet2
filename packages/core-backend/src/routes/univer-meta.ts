@@ -8880,12 +8880,12 @@ export function univerMetaRouter(): Router {
         const confirm = typeof req.body?.confirm === 'string' ? req.body.confirm : ''
         if (confirm.trim() !== 'uncreate') return res.status(400).json({ ok: false, error: { code: 'CONFIRM_REQUIRED', message: 'Type "uncreate" to confirm dropping the created entity.' } })
         const failure = await pool.transaction(async ({ query }): Promise<{ status: number; code: string; message: string } | null> => {
-          // W0-1 L4cov (fence the config-restore-execute record writes — un-create branch). `dropFieldCascade`
+          // MUTATION(l4cov-uncreate): fenceWriterEntry removed -- // W0-1 L4cov (fence the config-restore-execute record writes — un-create branch). `dropFieldCascade`
           // below strips the dropped field's key from EVERY record of this sheet (`UPDATE meta_records SET
           // data = data - $1`), so this txn is a `meta_records` writer and must converge onto the canonical
           // fence: acquire it first, then refuse (409 in the outer catch) if a recovery holds a durable block.
           // Flag-off ⇒ no-op / byte-identical.
-          await fenceWriterEntry(query, sheetId)
+          // MUTATION(l4cov-uncreate) await fenceWriterEntry(query, sheetId)
           let fieldRow: any = null
           let viewRow: any = null
           if (rev.entity_type === 'field') {
@@ -9053,7 +9053,7 @@ export function univerMetaRouter(): Router {
             // could interleave with a concurrent recovery's, breaking the allocation-order == commit-order
             // guarantee this lane exists to protect. Fence first, then refuse (409 in the outer catch) under an
             // active recovery block. Flag-off ⇒ no-op / byte-identical.
-            await fenceWriterEntry(query, sheetId)
+            // MUTATION(l4cov-lossy) await fenceWriterEntry(query, sheetId)
             const fieldRow = await loadLossyRetypeFieldRow(query, rev.entity_id, true)
             if (!fieldRow) return { status: 409, code: 'ENTITY_GONE', message: 'The field no longer exists; cannot restore.' }
             if (fieldRow.sheetId !== sheetId) return { status: 400, code: 'INVALID_REVISION', message: 'field revision entity does not belong to this sheet.' }
