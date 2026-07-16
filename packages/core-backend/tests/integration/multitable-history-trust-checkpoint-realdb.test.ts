@@ -301,6 +301,71 @@ describeIfDatabase('W0-1 v3.7 L5 trust checkpoint (real DB)', () => {
     expect((await checkpointRow(c2.checkpointId))?.pruned_at).toBeNull()
   })
 
+  // ── MULTI-VINTAGE (owner P1-b, verbatim four-case matrix) ─────────────────────────────────────────────
+  test('MULTI-VINTAGE 1/4: two ATTRIBUTABLE vintages — the baseline freezes the LATEST by the delete revision\'s causal seq, not arbitrary physical order', async () => {
+    const S = await mkSheet()
+    const R = `${S}_mv`
+    await insertAttributableTrash(S, R, { [NAME]: 'old-vintage' }, 1) // earlier delete revision (lower seq)
+    await insertAttributableTrash(S, R, { [NAME]: 'new-vintage' }, 2) // later delete revision (higher seq)
+
+    const res = await activate(S)
+    const b = await q('SELECT data, version, is_trashed FROM meta_history_baselines WHERE checkpoint_id = $1 AND record_id = $2', [res.checkpointId, R])
+    const row = b.rows[0] as { data: Record<string, unknown>; version: number; is_trashed: boolean }
+    expect(row.data[NAME]).toBe('new-vintage') // causal-seq-latest, deterministically
+    expect(row.version).toBe(2)
+    expect(row.is_trashed).toBe(true)
+  })
+
+  test('MULTI-VINTAGE 2/4: a NEWER unattributable vintage ABORTS activation (it might be the newest state — no baseline choice is trustworthy)', async () => {
+    const S = await mkSheet()
+    const R = `${S}_mvna`
+    await insertAttributableTrash(S, R, { [NAME]: 'attributable-old' }, 1)
+    await insertTrash(S, R, { [NAME]: 'unattributable-new' }, 2) // NULL delete_revision_id
+
+    await expect(activate(S)).rejects.toMatchObject({ code: 'checkpoint_unattributable_trash' })
+    // fail-closed all-or-nothing: the building checkpoint row rolled back with the abort.
+    expect(Number(((await q('SELECT count(*)::int c FROM meta_history_trust_checkpoints WHERE sheet_id=$1', [S])).rows[0] as { c: number }).c)).toBe(0)
+  })
+
+  test('MULTI-VINTAGE 3/4: ALL vintages unattributable ABORTS activation', async () => {
+    const S = await mkSheet()
+    await insertTrash(S, `${S}_mvau`, { [NAME]: 'ghost' }, 1) // trashed-only, NULL anchor
+    await expect(activate(S)).rejects.toMatchObject({ code: 'checkpoint_unattributable_trash' })
+    expect(Number(((await q('SELECT count(*)::int c FROM meta_history_trust_checkpoints WHERE sheet_id=$1', [S])).rows[0] as { c: number }).c)).toBe(0)
+  })
+
+  test('MULTI-VINTAGE 4/4: a LIVE row explicitly wins — unattributable trash for a live record never aborts and never enters the baseline over the live row', async () => {
+    const S = await mkSheet()
+    const R = `${S}_mvlive`
+    await insertLive(S, R, { [NAME]: 'live-truth' }, 3)
+    await insertTrash(S, R, { [NAME]: 'stale-ghost' }, 1) // unattributable, but the record is LIVE
+
+    const res = await activate(S) // must NOT abort — live-wins
+    const b = await q('SELECT data, version, is_trashed FROM meta_history_baselines WHERE checkpoint_id = $1 AND record_id = $2', [res.checkpointId, R])
+    const row = b.rows[0] as { data: Record<string, unknown>; version: number; is_trashed: boolean }
+    expect(row.data[NAME]).toBe('live-truth')
+    expect(row.version).toBe(3)
+    expect(row.is_trashed).toBe(false)
+  })
+
+  // ── SAME-REVISION DUPLICATE (owner P2, 2026-07-16) ────────────────────────────────────────────────────
+  test('SAME-REVISION DUPLICATE: a second trash row pointing at the SAME delete revision is REFUSED at the DB layer (unique causal anchor) — a conflicting snapshot can never be persisted', async () => {
+    const S = await mkSheet()
+    const R = `${S}_dup`
+    const revId = await insertAttributableTrash(S, R, { [NAME]: 'vintage-a' }, 1)
+    // A second row with the SAME causal anchor but a DIFFERENT snapshot: DISTINCT ON would tiebreak by
+    // deleted_at/id — deterministic but NOT causal. The partial unique index refuses it outright.
+    await expect(
+      q('INSERT INTO meta_records_trash (record_id, sheet_id, data, original_version, delete_revision_id) VALUES ($1,$2,$3::jsonb,$4,$5)',
+        [R, S, JSON.stringify({ [NAME]: 'vintage-b-conflicting' }), 1, revId]),
+    ).rejects.toMatchObject({ code: '23505' }) // unique_violation on uq_meta_records_trash_delete_revision
+    // exactly one row with that anchor persists; activation stays deterministic.
+    expect(Number(((await q('SELECT count(*)::int c FROM meta_records_trash WHERE delete_revision_id = $1', [revId])).rows[0] as { c: number }).c)).toBe(1)
+    const res = await activate(S)
+    const b = await q('SELECT data FROM meta_history_baselines WHERE checkpoint_id = $1 AND record_id = $2', [res.checkpointId, R])
+    expect((b.rows[0] as { data: Record<string, unknown> }).data[NAME]).toBe('vintage-a')
+  })
+
   // ── system_kind NON-FORGEABLE ────────────────────────────────────────────────────────────────────────
   test('system_kind is NON-FORGEABLE: a client-supplied system_kind on POST /sheets is ignored (persisted NULL)', async () => {
     const forgeId = `sheet_l5ck_forge_${TS}`

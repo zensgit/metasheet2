@@ -105,6 +105,19 @@ export async function up(db: Kysely<unknown>): Promise<void> {
     ON meta_history_baselines (checkpoint_id)
   `.execute(db)
 
+  // ── one delete revision ⇔ one trash row (owner P2, 2026-07-16) ────────────────────────────────────────
+  // The checkpoint baseline picks a trashed-only record's vintage by the CAUSAL seq of its delete revision.
+  // Two trash rows pointing at the SAME delete revision (same seq, possibly different snapshots) would make
+  // that choice fall through to deleted_at/id ordering — deterministic, but NOT causal. Enforce uniqueness at
+  // the DB layer; NULL anchors are exempt (they are handled by the fail-closed activation abort instead).
+  // Deliberately NOT `IF NOT EXISTS`-tolerant of duplicates: if a deployment has historic duplicate anchors,
+  // CREATE UNIQUE INDEX fails LOUD and an operator must resolve them — never silently dedupe trust data.
+  await sql`
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_meta_records_trash_delete_revision
+    ON meta_records_trash (delete_revision_id)
+    WHERE delete_revision_id IS NOT NULL
+  `.execute(db)
+
   // ── meta_sheets.system_kind (server-owned, non-forgeable) ─────────────────────────────────────────────
   await sql`ALTER TABLE meta_sheets ADD COLUMN IF NOT EXISTS system_kind text`.execute(db)
   // NO sentinel backfill (owner P1, 2026-07-16). An earlier draft backfilled from the People-sheet
@@ -121,6 +134,8 @@ export async function up(db: Kysely<unknown>): Promise<void> {
 export async function down(db: Kysely<unknown>): Promise<void> {
   await sql`DROP TABLE IF EXISTS meta_history_baselines`.execute(db)
   await sql`DROP TABLE IF EXISTS meta_history_trust_checkpoints`.execute(db)
-  // Dropping the column also drops the backfilled values (forward-only backfill, no data to restore).
+  await sql`DROP INDEX IF EXISTS uq_meta_records_trash_delete_revision`.execute(db)
+  // Dropping the column drops any server-side provisioning-stamped values (up() performs NO backfill; the
+  // only writers are the People-preset / ensureFamilySheet provisioning paths).
   await sql`ALTER TABLE meta_sheets DROP COLUMN IF EXISTS system_kind`.execute(db)
 }

@@ -7,8 +7,10 @@
  * `base_id` disjunct were USER/REQUEST-influenceable: `POST /sheets` accepts a free-form `description`, so an
  * ordinary sheet could carry the People sentinel and be misclassified as a system sheet — excluding itself
  * from the strict/contiguity trust checks. The trust predicate now keys SOLELY off `meta_sheets.system_kind`,
- * a server-owned column set only by internal provisioning (never by a client create/update request) and
- * one-time-backfilled by the L5 migration for every pre-existing system sheet. It is the NON-FORGEABLE signal.
+ * a server-owned column set ONLY by internal provisioning (never by a client create/update request). The L5
+ * migration performs NO backfill (owner P1, 2026-07-16: a sentinel backfill from user-writable description/
+ * base_id would let a pre-migration forged sheet launder a trusted identity) — pre-existing sheets stay NULL
+ * and are strict-checked like ordinary sheets, fail-closed. It is the NON-FORGEABLE signal.
  *
  * `SYSTEM_PEOPLE_SHEET_DESCRIPTION` + `isSystemPeopleSheetDescription` still live HERE (single source of
  * truth) and remain exported for the People-sheet LIST-FILTERING display concern in `routes/univer-meta.ts`
@@ -30,8 +32,8 @@ export function isSystemPeopleSheetDescription(value: unknown): boolean {
 
 /**
  * W0-1 v3.7 §3/§8 — the server-owned `meta_sheets.system_kind` values. This column is set ONLY by internal
- * provisioning (People-sheet preset + approval-projection `ensureFamilySheet`) and the L5 migration backfill,
- * NEVER by a client create/update request, so it is the NON-FORGEABLE system-sheet signal. `isSystemSheet`
+ * provisioning (People-sheet preset + approval-projection `ensureFamilySheet`) — the L5 migration performs NO
+ * backfill — and NEVER by a client create/update request, so it is the NON-FORGEABLE system-sheet signal. `isSystemSheet`
  * treats a recognized `system_kind` as the ONLY authoritative trust signal.
  */
 export const SYSTEM_SHEET_KINDS = ['people_directory', 'approval_projection'] as const
@@ -47,8 +49,9 @@ export function isSystemSheetKind(value: unknown): boolean {
  *
  * P1-a: this is a TRUST boundary, so it keys SOLELY off `systemKind`. It intentionally does NOT read
  * `description` or `baseId` — both are reachable by a client create request and were the forgeable bypass. A
- * legitimate system sheet ALWAYS carries `system_kind` (provisioning sets it; the L5 migration backfilled
- * every pre-existing one). A sheet without a recognized `system_kind` is a user sheet and IS strict-checked.
+ * system sheet provisioned AFTER L5 always carries `system_kind` (provisioning stamps it at INSERT); a
+ * PRE-EXISTING system sheet stays NULL (no backfill — unprovable identity is never granted) and is therefore
+ * strict-checked like any user sheet: fail-closed, an exclusion is never minted from user-writable data.
  */
 export function isSystemSheet(sheet: { systemKind?: unknown }): boolean {
   return isSystemSheetKind(sheet.systemKind)
