@@ -156,6 +156,12 @@ jobs:
       - name: PB4-2 archive-read-only CI wiring contract
         run: node --test scripts/ops/pb4-2-archive-readonly-ci-wiring.test.mjs
 
+      # PB4-3 CI two-point wiring contract (no DB): the cycle-detection suite (advisory-lock barrier
+      # + termination proof) must stay wired into BOTH vitest.config.ts (exclude) AND plugin-tests.yml
+      # (directory real-DB step). Dropping either point silently disables the concurrency proof.
+      - name: PB4-3 cycle-detection CI wiring contract
+        run: node --test scripts/ops/pb4-3-cycle-detection-ci-wiring.test.mjs
+
       # The production monitor invokes the same state helper covered here.
       # Keep this in the required 18/20 matrix so HTTP classification, silence
       # barriers, and alert/recovery streak semantics cannot drift silently.
@@ -613,6 +619,7 @@ jobs:
             tests/integration/local-directory-org-crud.db.test.ts \
             tests/integration/local-directory-org-crud-route.db.test.ts \
             tests/integration/local-directory-org-archive-readonly.db.test.ts \
+            tests/integration/local-directory-org-cycle-detection.db.test.ts \
             tests/integration/directory-normalized-manager.db.test.ts \
             tests/integration/attendance-csv-export-bom.test.ts \
             tests/integration/attendance-notification-redelivery.db.test.ts \

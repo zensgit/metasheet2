@@ -113,6 +113,14 @@ export default defineConfig({
       // directory real-DB step in plugin-tests.yml (both points asserted by
       // pb4-2-archive-readonly-ci-wiring.test.mjs so neither can silently drop).
       'tests/integration/local-directory-org-archive-readonly.db.test.ts',
+      // Canonical Org MVP PB4-3: department cycle detection — in-transaction recursive ancestor
+      // walk + per-integration serialized reparent (advisory xact lock). Includes a TWO-CONNECTION
+      // barrier proving the advisory lock catches the disjoint cross-mount 4-cycle race, plus a
+      // termination proof on malformed loop data — meaningless without a real DB. DATABASE_URL-gated;
+      // excluded here so the no-DB job cannot skip-green it, and wired as a WHOLE FILE into the
+      // directory real-DB step in plugin-tests.yml (both points asserted by
+      // pb4-3-cycle-detection-ci-wiring.test.mjs so neither can silently drop).
+      'tests/integration/local-directory-org-cycle-detection.db.test.ts',
       // Canonical Org MVP B3 (#4215 §5.4): proves ApprovalDirectoryOrg's DUAL-SOURCE direct-manager
       // resolution against real Postgres — normalized `is_manager` relation for a local integration,
       // the DingTalk `leader_in_dept` regression pin (load-bearing compat leg + is_manager=0 positive
