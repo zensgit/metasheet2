@@ -3,8 +3,9 @@
  *
  * The load-bearing proof is ATOMICITY: enqueue happens inside the caller's transaction, so ROLLBACK leaves
  * ZERO outbox/consumer rows (a crash before commit loses nothing), and COMMIT persists the outbox row plus
- * the manifest-expanded consumer fan-out. Atomicity is MACHINE-ENFORCED: enqueue rejects a pool (isTransaction
- * guard), so the outbox-committed / consumer-failed orphan is impossible by construction (#4336 review P1).
+ * the manifest-expanded consumer fan-out. Atomicity is MACHINE-ENFORCED against the DATABASE's own transaction
+ * state (pg_current_xact_id probe — a pool, an autocommit client, and a FORGED isTransaction marker all fail),
+ * so the outbox-committed / consumer-failed orphan is impossible by construction (#4336 review P1).
  * Also proves: unrouted event type / blank identity / bad depth are hard errors; manifest_version is stamped;
  * and the enqueued fan-out flows through the S2-b dispatch tick with PER-CONSUMER independence — over a
  * RUN-UNIQUE manifest so it claims only THIS test's rows on the shared CI DB (#4336 review P2).
@@ -94,13 +95,25 @@ describeIfDatabase('P2 durable-delivery S4-a — producer atomic enqueue (real D
     expect(consumers).toHaveLength(0)
   })
 
-  test('P1 pool NEGATIVE: enqueue with a pool is REJECTED before any write (no orphan possible)', async () => {
+  test('P1 pool NEGATIVE: a pool — even with a FORGED isTransaction marker — is REJECTED by the xid probe before any write', async () => {
     const eid = `evt_${RUN}_poolneg`
-    // db() is the Pool — not a transaction. The guard must reject it (a bare Queryable would have half-written).
+    // 1) the Pool itself (cast past the compile-time brand): the DB probe rejects it — the marker proves nothing.
     await expect(enqueueOutboxEvent(db() as unknown as TransactionalQueryable, { eventType: 'approval.approved', eventId: eid, payload: {} })).rejects.toThrow(
-      /must run inside a TRANSACTION/,
+      /real database TRANSACTION/,
     )
-    // and NOTHING was written — not even the outbox row (contrast the pre-fix pool path: outbox=1, consumer=0)
+    // 2) a FORGED marker wrapping the pool (the owner's counter-example): still rejected — the probe asks
+    //    Postgres, not the caller (two statements on a pool land in different transactions).
+    const forged: TransactionalQueryable = { isTransaction: true, query: (sql, params) => db().query(sql, params) }
+    await expect(enqueueOutboxEvent(forged, { eventType: 'approval.approved', eventId: eid, payload: {} })).rejects.toThrow(/real database TRANSACTION/)
+    // 3) a single client in AUTOCOMMIT (no BEGIN): each statement is its own implicit txn — rejected too.
+    const bare = await db().getInternalPool().connect()
+    try {
+      const bareTxn: TransactionalQueryable = { isTransaction: true, query: (sql, params) => bare.query(sql, params) }
+      await expect(enqueueOutboxEvent(bareTxn, { eventType: 'approval.approved', eventId: eid, payload: {} })).rejects.toThrow(/real database TRANSACTION/)
+    } finally {
+      bare.release()
+    }
+    // and NOTHING was written in any case — not even the outbox row (pre-fix pool path: outbox=1, consumer=0)
     const { rows } = await db().query('SELECT count(*)::int AS c FROM meta_automation_outbox WHERE event_id=$1', [eid])
     expect(Number(rows[0].c)).toBe(0)
   })
@@ -108,13 +121,11 @@ describeIfDatabase('P2 durable-delivery S4-a — producer atomic enqueue (real D
   test('P1 transaction POSITIVE control: a failure on the 2nd (consumer) INSERT rolls the outbox row back too', async () => {
     const client = await db().getInternalPool().connect()
     const eid = `evt_${RUN}_txnpc`
-    let calls = 0
-    // a transaction handle whose SECOND query (the consumer fan-out) fails, as a mid-enqueue DB error would
+    // a transaction handle whose consumer-fan-out INSERT fails, as a mid-enqueue DB error would
     const failingTxn: TransactionalQueryable = {
       isTransaction: true,
       query: async (sql, params) => {
-        calls += 1
-        if (calls === 2) throw new Error('simulated DB failure on the consumer INSERT')
+        if (/meta_automation_outbox_consumer/.test(sql)) throw new Error('simulated DB failure on the consumer INSERT')
         return client.query(sql, params)
       },
     }
