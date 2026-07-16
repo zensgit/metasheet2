@@ -34,9 +34,10 @@
       <div class="approval-center__filters-primary">
           <el-input
             v-model="searchText"
-            placeholder="搜索标题、发起人或审批编号"
+            placeholder="搜索标题或审批编号"
             clearable
             class="approval-center__toolbar-search"
+            data-testid="approval-search-input"
             @clear="handleSearch"
             @keyup.enter="handleSearch"
           >
@@ -1096,7 +1097,6 @@ function clearFilters() {
   currentPage.value = 1
   clearPendingSelection()
   loadCurrentTab()
-  void refreshPendingBadgeCount()
 }
 
 function handleSourceSystemChange() {

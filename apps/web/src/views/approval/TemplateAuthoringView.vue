@@ -75,20 +75,27 @@
       data-testid="approval-template-graph-readonly-alert"
     />
 
-    <el-alert
+    <div
       v-if="loadError || validationErrors.length"
-      :title="loadError || '请修正后再保存'"
-      type="error"
-      show-icon
-      class="template-authoring__alert"
-      @close="clearErrors"
+      ref="validationSummaryRef"
+      class="template-authoring__validation-summary"
+      data-testid="approval-template-validation-summary"
+      tabindex="-1"
     >
-      <template v-if="validationErrors.length" #default>
-        <ul class="template-authoring__error-list">
-          <li v-for="error in validationErrors" :key="error">{{ error }}</li>
-        </ul>
-      </template>
-    </el-alert>
+      <el-alert
+        :title="loadError || '请修正后再保存'"
+        type="error"
+        show-icon
+        class="template-authoring__alert"
+        @close="clearErrors"
+      >
+        <template v-if="validationErrors.length" #default>
+          <ul class="template-authoring__error-list">
+            <li v-for="error in validationErrors" :key="error">{{ error }}</li>
+          </ul>
+        </template>
+      </el-alert>
+    </div>
 
     <div v-loading="loading" class="template-authoring__body">
       <div class="template-authoring__workspace">
@@ -103,6 +110,7 @@
             class="template-authoring__step"
             :class="{ 'is-active': activeAuthoringSection === section.id }"
             text
+            :aria-current="activeAuthoringSection === section.id ? 'step' : undefined"
             :data-testid="`approval-template-section-${section.id}`"
             @click="selectAuthoringSection(section.id)"
           >
@@ -122,7 +130,11 @@
           </el-button>
         </nav>
 
-        <main class="template-authoring__content">
+        <main
+          ref="authoringContentRef"
+          class="template-authoring__content"
+          data-testid="approval-template-workspace-content"
+        >
       <el-card
         v-if="showPresetLibrary"
         v-show="activeAuthoringSection === 'basic'"
@@ -1522,7 +1534,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import PageShell from '../../components/layout/PageShell.vue'
 import PageHeader from '../../components/layout/PageHeader.vue'
 import { onBeforeRouteLeave, useRoute, useRouter } from 'vue-router'
@@ -1549,6 +1561,7 @@ import {
   buildApprovalGraph,
   buildCreateTemplatePayload,
   buildFormSchema,
+  buildSlaHours,
   buildUpdateTemplatePayload,
   createEmptyDetailColumnDraft,
   createEmptyFieldDraft,
@@ -1562,7 +1575,6 @@ import {
   stepFieldAccess,
   setStepFieldPermission,
   unsupportedTemplateAuthoringReason,
-  validateTemplateDraft,
   validateTemplateFormFields,
   validateTemplateApprovalFlow,
   placeholderRoleNodeKeys,
@@ -1638,6 +1650,8 @@ const authoringSections: Array<{
   { id: 'review', label: '测试发布', description: '预览、试运行与发布检查' },
 ]
 const activeAuthoringSection = ref<AuthoringSectionId>('basic')
+const authoringContentRef = ref<HTMLElement | null>(null)
+const validationSummaryRef = ref<HTMLElement | null>(null)
 // B1-07: dirty baseline for discard protection — refreshed on every load/save so only real
 // unsaved edits trigger the leave confirm. Serialized compare; the draft is rebuilt from the
 // same builders on load/save, so key order is deterministic.
@@ -1673,16 +1687,24 @@ const authoringSectionIndex = computed(() => (
   authoringSections.findIndex(section => section.id === activeAuthoringSection.value)
 ))
 
-function selectAuthoringSection(section: AuthoringSectionId) {
-  activeAuthoringSection.value = section
+function scrollAuthoringTarget(target: HTMLElement | null, focus = false) {
+  if (!target) return
+  if (focus) target.focus({ preventScroll: true })
+  target.scrollIntoView?.({ behavior: 'smooth', block: 'start' })
 }
 
-function moveAuthoringSection(delta: -1 | 1) {
+async function selectAuthoringSection(section: AuthoringSectionId) {
+  activeAuthoringSection.value = section
+  await nextTick()
+  scrollAuthoringTarget(authoringContentRef.value)
+}
+
+async function moveAuthoringSection(delta: -1 | 1) {
   const nextIndex = Math.min(
     authoringSections.length - 1,
     Math.max(0, authoringSectionIndex.value + delta),
   )
-  activeAuthoringSection.value = authoringSections[nextIndex].id
+  await selectAuthoringSection(authoringSections[nextIndex].id)
 }
 
 // G-1 read-only structured render of a preserved complex graph: a per-node summary of the
@@ -2378,17 +2400,33 @@ async function loadTemplateForEdit() {
   }
 }
 
-function validate(): boolean {
-  validationErrors.value = validateTemplateDraft(draft.value, unsupportedReason.value)
+function firstInvalidAuthoringSection(formErrors: string[]): AuthoringSectionId {
+  const hasBasicSettingsError = Boolean(unsupportedReason.value)
+    || !draft.value.key.trim()
+    || !draft.value.name.trim()
+    || (draft.value.visibilityType !== 'all' && parseIdsText(draft.value.visibilityIdsText).length === 0)
+    || Number.isNaN(buildSlaHours(draft.value))
+  if (hasBasicSettingsError) return 'basic'
+  if (formErrors.length > 0) return 'fields'
+  return 'flow'
+}
+
+async function validate(): Promise<boolean> {
+  const formErrors = validateTemplateFormFields(draft.value, unsupportedReason.value)
+  const flowErrors = validateTemplateApprovalFlow(draft.value)
+  validationErrors.value = [...formErrors, ...flowErrors]
   if (validationErrors.value.length > 0) {
+    activeAuthoringSection.value = firstInvalidAuthoringSection(formErrors)
     ElMessage.warning('请先修正模板配置')
+    await nextTick()
+    scrollAuthoringTarget(validationSummaryRef.value, true)
     return false
   }
   return true
 }
 
 async function persistDraft() {
-  if (!validate()) return null
+  if (!(await validate())) return null
   saving.value = true
   try {
     if (draft.value.templateId) {
@@ -2658,6 +2696,16 @@ onUnmounted(() => {
 
 .template-authoring__alert {
   margin-bottom: 16px;
+}
+
+.template-authoring__validation-summary,
+.template-authoring__content {
+  scroll-margin-top: 124px;
+}
+
+.template-authoring__validation-summary:focus {
+  outline: 2px solid var(--ms-color-primary);
+  outline-offset: 2px;
 }
 
 .template-authoring__body {
@@ -3096,6 +3144,11 @@ pre {
 @media (max-width: 760px) {
   .template-authoring__header {
     position: static;
+  }
+
+  .template-authoring__validation-summary,
+  .template-authoring__content {
+    scroll-margin-top: var(--ms-space-3);
   }
 
   .template-authoring__actions,
