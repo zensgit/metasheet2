@@ -439,12 +439,19 @@ function check(name, ok, detail = '') {
   return ok === true
 }
 
-async function requestJson(baseUrl, pathname, { token, timeoutMs, method = 'GET', body, accept = [200], label = '', leakExempt = false } = {}) {
+async function requestJson(baseUrl, pathname, { token, timeoutMs, tenantId, method = 'GET', body, accept = [200], label = '', leakExempt = false } = {}) {
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), timeoutMs)
   try {
     const headers = { Accept: 'application/json' }
     if (token) headers.Authorization = `Bearer ${token}`
+    // Tenant context rides the platform's tenant-context HEADER, not only the query string. The
+    // tenant-hardened WRITE routes (resolveAuthUserTenantId) deliberately ignore request query/body
+    // tenant params; for a principal without an intrinsic tenant claim, the deployment's sanctioned
+    // context mechanism is the x-tenant-id header (jwt-middleware backfill). Without this header the
+    // smoke fails its FIRST write (mvp/ensure -> 400 TENANT_REQUIRED) on any post-hardening package —
+    // the RC-0 corrective-4 entity failure (auditActionsCovered=N/8) reproduced locally.
+    if (tenantId) headers['x-tenant-id'] = tenantId
     const init = { method, headers, signal: controller.signal }
     if (body !== undefined) {
       headers['Content-Type'] = 'application/json'
@@ -484,7 +491,7 @@ async function main() {
   const S = RESULT.summary
   let failed = false
   const must = (name, ok, detail) => { if (!check(name, ok, detail)) failed = true }
-  const req = (pathname, options) => requestJson(args.baseUrl, pathname, { token, timeoutMs: args.timeoutMs, ...options })
+  const req = (pathname, options) => requestJson(args.baseUrl, pathname, { token, timeoutMs: args.timeoutMs, tenantId: args.tenantId, ...options })
   const scope = (extra) => scopeQuery(args, extra)
   SELF_SCAN_SENTINELS = [...fixture.sentinels, ...ENGINE_MESSAGE_SENTINELS]
   S.salt = salt
