@@ -226,6 +226,34 @@ try {
   $o = Test-SmokeOutcome "mvpSmoke.pass=true`nauditActionsCovered=8/8"
   Check "smoke: selfScanClean ABSENT -> FAIL (fail-closed)" ((-not $o.ok) -and $o.reason -eq 'self_scan_not_clean')
 
+  # ── D5 (corrective-3): the stage-6 smoke capture is stdout-ONLY (2>$null), never merged (2>&1). A child
+  # that writes noise to stderr AND a valid values-free summary to stdout must NOT abort the capture (the
+  # RC-0 POWERSHELL_NATIVE_STDERR_PROMOTION failure — where 2>&1 promoted native stderr to a terminating
+  # error and the smoke's summary was never read), must NOT let the stderr text contaminate the parsed
+  # summary, and must still parse PASS. Mutation guard: flip 2>$null back to 2>&1 in Invoke-SmokeCapture and
+  # the "sentinel is NOT captured" check reds (version-independent: 2>&1 merges stderr into the captured text).
+  $fakeSmoke = Join-Path ([System.IO.Path]::GetTempPath()) ("t9accept_fakesmoke_" + [guid]::NewGuid().ToString('N').Substring(0, 12) + '.mjs')
+  $sentinel = 'STDERR-LEAK-SENTINEL-7788'
+  $fakeLines = @(
+    "process.stderr.write('$sentinel\n')",
+    "process.stderr.write('(node:1) ExperimentalWarning: stderr noise the runner must not capture\n')",
+    "process.stdout.write('mvpSmoke.pass=true\n')",
+    "process.stdout.write('auditActionsCovered=8/8\n')",
+    "process.stdout.write('selfScanClean=true\n')",
+    "process.exit(0)"
+  )
+  Set-Content -LiteralPath $fakeSmoke -Encoding utf8 -Value ($fakeLines -join "`n")
+  $dummyToken = ConvertTo-SecureString 'dummy-not-a-real-token' -AsPlainText -Force
+  $smokeThrew = $false
+  $cap = $null
+  try { $cap = Invoke-SmokeCapture -NodeArgs @($fakeSmoke) -Token $dummyToken } catch { $smokeThrew = $true }
+  Check "corrective-3: a stderr-writing child does NOT abort the capture (no native stderr promotion)" ((-not $smokeThrew) -and $null -ne $cap)
+  Check "corrective-3: the stderr sentinel is NOT captured into the parsed summary (2>`$null, not 2>&1)" ($null -ne $cap -and -not ("$($cap.stdout)" -match [regex]::Escape($sentinel)))
+  $capOutcome = Test-SmokeOutcome "$($cap.stdout)"
+  Check "corrective-3: the stdout values-free summary still parses to PASS (8/8, clean)" ($capOutcome.ok -and $capOutcome.pass -and $capOutcome.audit -eq '8/8' -and $capOutcome.selfScan)
+  Check "corrective-3: exit code preserved (0) and the token env var is cleared after capture" ($null -ne $cap -and $cap.exit -eq 0 -and -not (Test-Path Env:METASHEET_AUTH_TOKEN))
+  Remove-Item -LiteralPath $fakeSmoke -Force -ErrorAction SilentlyContinue
+
   $base = [pscustomobject]@{ state = 'online'; restartTime = 3; uptime = 1000 }
 
   # Entity corrective-1 reproduction: PM2 includes process.env in jlist; on Windows it commonly carries

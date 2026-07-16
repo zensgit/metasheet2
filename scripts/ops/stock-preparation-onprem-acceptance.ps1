@@ -367,34 +367,47 @@ function Invoke-HealthStage {
   Write-Stage 'stage 5: PASS'
 }
 
+# ── Summary-only smoke capture (pure, unit-testable). Runs the child smoke and returns ONLY its stdout
+# summary text + exit code. stderr is redirected to $null (2>$null), NEVER merged into the success stream
+# (2>&1). Two reasons: (1) Node warnings / any stderr noise must never contaminate the parsed values-free
+# summary; (2) under PowerShell 7.3+ native-command error handling, a child that writes to stderr while
+# its stream is merged (2>&1) can be PROMOTED to a terminating error that ABORTS the capture before the
+# smoke's summary is ever read — the RC-0 acceptance-runner compatibility failure the entity machine hit
+# (POWERSHELL_NATIVE_STDERR_PROMOTION): the smoke ran, but the runner threw instead of parsing its output.
+# The admin token crosses to the child ONLY as a scoped env var, cleared (with its BSTR) in a finally.
+function Invoke-SmokeCapture {
+  param([string[]]$NodeArgs, [SecureString]$Token)
+  $bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($Token)
+  try {
+    # Token crosses to the child ONLY as a scoped env var — never on the command line / ArgumentList.
+    $env:METASHEET_AUTH_TOKEN = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr)
+    $out = & node @NodeArgs 2>$null  # stdout ONLY; stderr discarded (see function header)
+    $exit = $LASTEXITCODE
+  } finally {
+    [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr)
+    Remove-Item Env:METASHEET_AUTH_TOKEN -ErrorAction SilentlyContinue
+  }
+  return @{ stdout = ($out | Out-String); exit = $exit }
+}
+
 # ── Stage 6: in-package stock-preparation smoke (token via scoped env, cleared in finally) ───────
 function Invoke-SmokeStage {
   param([SecureString]$Token)
   Write-Stage 'stage 6: stock-preparation smoke'
   $smoke = Join-Path $DeployRoot 'scripts/ops/stock-preparation-mvp-postdeploy-smoke.mjs'
   if (-not (Test-Path $smoke)) { Stop-WithFailure 'smoke' @{ reason = 'smoke_script_missing' } }
-  $args = @($smoke, '--base-url', "http://localhost:$Port")
-  if ($TenantId) { $args += @('--tenant-id', $TenantId) }
-  $bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($Token)
-  try {
-    # Token crosses to the child ONLY as a scoped env var — never on the command line / ArgumentList.
-    $env:METASHEET_AUTH_TOKEN = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr)
-    $out = & node @args 2>&1
-    $exit = $LASTEXITCODE
-  } finally {
-    [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr)
-    Remove-Item Env:METASHEET_AUTH_TOKEN -ErrorAction SilentlyContinue
-  }
-  # Parse ONLY the values-free summary fields the smoke prints; never echo the raw $out.
-  $joined = ($out | Out-String)
-  $outcome = Test-SmokeOutcome $joined
+  $nodeArgs = @($smoke, '--base-url', "http://localhost:$Port")
+  if ($TenantId) { $nodeArgs += @('--tenant-id', $TenantId) }
+  # Summary-only capture: stdout is parsed for the values-free fields; stderr is discarded (never echoed).
+  $captured = Invoke-SmokeCapture -NodeArgs $nodeArgs -Token $Token
+  $outcome = Test-SmokeOutcome $captured.stdout
   $Summary['mvpSmoke.pass'] = if ($outcome.pass) { 'true' } else { 'false' }
   $Summary.auditActionsCovered = $outcome.audit
   $Summary.selfScanClean = if ($outcome.selfScan) { 'true' } else { 'false' }
   # Fail-closed: a green exit is NOT a steady state unless the audit surface is fully covered (8/8) and
   # the self-scan is clean. An absent/unparseable field records 'N/8'/'false' and FAILS here — it never
   # passes silently (owner P2).
-  if ($exit -ne 0) { Stop-WithFailure 'smoke' @{ smokeExit = $exit } }
+  if ($captured.exit -ne 0) { Stop-WithFailure 'smoke' @{ smokeExit = $captured.exit } }
   if (-not $outcome.ok) { Stop-WithFailure 'smoke' @{ reason = $outcome.reason } }
   Write-Stage 'stage 6: PASS'
 }
