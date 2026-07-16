@@ -261,7 +261,8 @@ test('prelude run: 201 internal_persist + 200 internal_noop replay -> all checks
   const { calls, req } = scriptedReq([approvedCreateResponse(), approvedReplayResponse()])
   const { checks, must } = collectMust()
   const summary = {}
-  const prelude = await runApprovedSourcePrelude({ salt: 't123', args: PRELUDE_ARGS, req, must, summary })
+  const registered = []
+  const prelude = await runApprovedSourcePrelude({ salt: 't123', args: PRELUDE_ARGS, req, must, summary, registerSentinels: (list) => registered.push(...list) })
   assert.equal(checks.length, 3)
   assert.ok(checks.every((c) => c.ok), JSON.stringify(checks))
   assert.equal(summary.approvedSourceHttp, 201)
@@ -278,13 +279,26 @@ test('prelude run: 201 internal_persist + 200 internal_noop replay -> all checks
     assert.notEqual(call.options.leakExempt, true)
   }
   assert.deepEqual(prelude.sentinels, ['cfg_approved_ref_1', prelude.body.sourceProjectNo, prelude.body.projectName])
+  // P3-1 hardening pin: the prelude ITSELF registers its exact sentinel list into the run-level
+  // leak scan — the caller cannot forget it.
+  assert.deepEqual(registered, prelude.sentinels)
+})
+
+test('prelude run: the sentinel-registration callback is REQUIRED — omitting it throws before any request', async () => {
+  const { calls, req } = scriptedReq([approvedCreateResponse(), approvedReplayResponse()])
+  const { must } = collectMust()
+  await assert.rejects(
+    () => runApprovedSourcePrelude({ salt: 't123', args: PRELUDE_ARGS, req, must, summary: {} }),
+    /registerSentinels/,
+  )
+  assert.equal(calls.length, 0, 'no request may run without the leak-scan registration contract')
 })
 
 test('prelude run: a 200 dry_run (T3b flag OFF) FAILS the prelude — it can never pass as a read-only run', async () => {
   const dryRun = { status: 200, body: { ok: true, data: { mode: 'dry_run', evidence: { internalWriteExecuted: false, externalWriteExecuted: false, productionWrite: false, k3SaveSubmitAudit: false, plmExternalWrite: false } } } }
   const { req } = scriptedReq([dryRun, dryRun])
   const { checks, must } = collectMust()
-  await runApprovedSourcePrelude({ salt: 't123', args: PRELUDE_ARGS, req, must, summary: {} })
+  await runApprovedSourcePrelude({ salt: 't123', args: PRELUDE_ARGS, req, must, summary: {}, registerSentinels: () => {} })
   assert.equal(checks[0].ok, false, 'the internal_persist check must fail on a dry_run response')
 })
 
@@ -294,7 +308,7 @@ test('prelude run: a replay that hard-claims an internal write FAILS the replay 
   lyingReplay.body.data.evidence.internalWriteExecuted = true
   const { req } = scriptedReq([approvedCreateResponse(), lyingReplay])
   const { checks, must } = collectMust()
-  await runApprovedSourcePrelude({ salt: 't123', args: PRELUDE_ARGS, req, must, summary: {} })
+  await runApprovedSourcePrelude({ salt: 't123', args: PRELUDE_ARGS, req, must, summary: {}, registerSentinels: () => {} })
   assert.equal(checks[2].ok, false, 'the internal_noop replay check must fail')
 })
 
@@ -303,6 +317,6 @@ test('prelude run: any external-write evidence flips the invariant check to FAIL
   tainted.body.data.evidence.externalWriteExecuted = true
   const { req } = scriptedReq([tainted, approvedReplayResponse()])
   const { checks, must } = collectMust()
-  await runApprovedSourcePrelude({ salt: 't123', args: PRELUDE_ARGS, req, must, summary: {} })
+  await runApprovedSourcePrelude({ salt: 't123', args: PRELUDE_ARGS, req, must, summary: {}, registerSentinels: () => {} })
   assert.equal(checks[1].ok, false, 'the externalWrite invariant check must fail')
 })

@@ -256,12 +256,16 @@ export function buildApprovedSourcePrelude(salt, { projectPrefix = 'stockprep-t4
 // discipline is unit-testable without a server (corrective-5 fetchImpl precedent). NOTE the prelude
 // deliberately sends NO tenantId/projectId query carriers: with the T3b flag ON those are steering
 // vectors the route fail-closes on — the tenant rides the AUTHENTICATED token only (OD-2).
-export async function runApprovedSourcePrelude({ salt, args, req, must, summary }) {
+export async function runApprovedSourcePrelude({ salt, args, req, must, summary, registerSentinels }) {
+  if (typeof registerSentinels !== 'function') {
+    throw new Error('runApprovedSourcePrelude requires a registerSentinels callback — the prelude sentinels MUST join the run-level leak scan')
+  }
   const prelude = buildApprovedSourcePrelude(salt, {
     projectPrefix: args.projectPrefix,
     approvedSourceConfigId: args.approvedSourceConfigId,
     workspaceId: args.workspaceId,
   })
+  registerSentinels(prelude.sentinels)
   const sourceRun = await req(`${API}/mvp/source-runs/plm-bom`, {
     method: 'POST', body: prelude.body, accept: [201], label: 'approved-source-run',
   })
@@ -421,8 +425,10 @@ async function main() {
   // batch/line/run front-end in ITS OWN salted id space; the synthetic chain below stays the
   // unchanged non-empty prep-line proof (OD-6: extend, don't rewrite).
   if (args.approvedSourceConfigId) {
-    const prelude = await runApprovedSourcePrelude({ salt, args, req, must, summary: S })
-    SELF_SCAN_SENTINELS = [...SELF_SCAN_SENTINELS, ...prelude.sentinels]
+    await runApprovedSourcePrelude({
+      salt, args, req, must, summary: S,
+      registerSentinels: (sentinels) => { SELF_SCAN_SENTINELS = [...SELF_SCAN_SENTINELS, ...sentinels] },
+    })
   }
 
   // ── 2. snapshot: plan -> persist (201, 3 lines) -> replay (200 skipped_existing) ─────────────
