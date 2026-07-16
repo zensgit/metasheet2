@@ -587,8 +587,13 @@ type StrictRawTimelineRow = {
  * STRICT MODE precheck (v3.7 §9.3). Same UNIFIED REFUSAL / FAIL-CLOSED doctrine as the non-strict function
  * (rules 1 and 4 in the module doc comment) — the differences are entirely in HOW contiguity is proven (see
  * `checkAllGenerationsContiguity`'s doc comment) and WHAT is enumerated (C3 deleted/trashed records too).
+ *
+ * Exported for the chain-level real-DB goldens ONLY (owner P2, 2026-07-16: tests that need the comparator
+ * call it directly — never a production bypass around the enablement gate). It is read-only/refuse-only; the
+ * enablement precondition lives at the single production entry `precheckSheetHistoryIntegrity` above, which
+ * every recovery route goes through — production code must NOT call this directly.
  */
-async function precheckSheetHistoryIntegrityStrict(query: QueryFn, sheetId: string): Promise<HistoryIntegrityVerdict> {
+export async function precheckSheetHistoryIntegrityStrict(query: QueryFn, sheetId: string): Promise<HistoryIntegrityVerdict> {
   // System sheets excluded — identical predicate/semantics to the non-strict path. P1-a: the TRUST signal is
   // `meta_sheets.system_kind` ONLY (server-owned, non-forgeable), read column-tolerantly via `to_jsonb` (a
   // pre-migration rolling-deploy window returns NULL instead of a 42703 that would poison the C8 in-txn
