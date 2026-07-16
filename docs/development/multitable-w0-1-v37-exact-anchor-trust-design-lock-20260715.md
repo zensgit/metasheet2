@@ -1,13 +1,16 @@
 # W0-1 (v3.7) - exact event anchor + causal seq + all-writer fence + trust checkpoint - DESIGN LOCK
 
-- **Status (2026-07-15): PROPOSED - NOT ratified.** Design plus operator-copy correction only; zero runtime
-  semantics. This document authorizes no migration, flag, staging, or production change.
-- **Finding #1 resolved (owner review 2026-07-16), still PROPOSED — ready for owner ratification.** The owner's
-  adversarial review found this lock's §1.2 `batch_id == operation_id` aliasing breaks the ratified S1 batch-grouping
-  lock (one commit action = one batch spanning N transactions). §1.2 and §1.3 are corrected below to make `batch_id`
-  (S1 user-action grouping) and `operation_id` (per-transaction sealed endpoint) **distinct**, and the recovery anchor
-  keys on the operation endpoint, not the batch. This is the owner's step-1 prerequisite ("resolve batch_id vs
-  operation_id first, then ratify"); the ratify flip is the owner's — not self-applied here.
+- **Status (2026-07-16): RATIFIED — owner directive 2026-07-16, mechanically recorded (not self-approval).** The
+  owner's review resolved finding #1 (batch/operation decoupling, §1.2/§1.3/§10) and explicitly authorized: merge the
+  finding-#1 revision into #4331, flip this lock to RATIFIED, and merge #4331 into main — with **zero runtime in the
+  same step**. Ratification authorizes default-off implementation slices only (§9 tail unchanged): no strict-mode
+  enablement, no Revert/Reset enablement, no host mutation, no staging cutover, no production rollout, all flags OFF.
+- **Finding #1 resolved (owner review 2026-07-16).** The owner's adversarial review found this lock's §1.2
+  `batch_id == operation_id` aliasing breaks the ratified S1 batch-grouping lock (one commit action = one batch
+  spanning N transactions). §1.2 and §1.3 are corrected below to make `batch_id` (S1 user-action grouping) and
+  `operation_id` (per-transaction sealed endpoint) **distinct**, the recovery anchor keys on the operation endpoint
+  (v1 = the selected batch's terminal operation, §10 ruling 5), and §10 records the owner's eight ratified terms +
+  the mandated G-MULTIOP-BATCH golden (§6).
 - **Canonical scope:** this is the single fix-forward design for the W0 trust substrate. It supersedes the proposed
   v3.6 document merged in #4328 and the still-open #4262 mechanism text. The useful L3 work in Draft #4309 is an
   implementation input, not an authority and not merge-ready until this lock is ratified and its L3 corrections land.
@@ -143,10 +146,17 @@ The executable API takes an opaque/server-resolved history anchor, not an author
 
 1. UI selects a committed recovery point. The shipped A2 picker selects a History **batch**; because one S1 `batch_id`
    spans **N** sealed operations (§1.2 finding #1 correction), the picker/server MUST resolve that selection to a single
-   **operation endpoint** — the recovery anchor is *"the sheet state after operation E committed"*, so the resolved
-   endpoint is the **terminal operation of the selected batch** (its `operation_id` with the greatest `endpoint_seq`),
-   or the picker offers operation-level granularity for a mid-batch point. The anchor identity is an `operation_id`, not
-   a `batch_id`.
+   **operation endpoint** — the recovery anchor is *"the sheet state after operation E committed"*. **v1 is FIXED
+   (owner ruling 2026-07-16): the resolved endpoint is the terminal operation of the selected batch — the sealed
+   endpoint with the greatest `endpoint_seq` among the SAME-sheet, SAME-batch sealed endpoints.** An operation-level
+   mid-batch selector is explicitly **OUT of v1** — if wanted later it is a separate follow-up slice with its own lock,
+   not an implementation choice left to L6-b. The anchor identity is an `operation_id`, not a `batch_id`.
+   **Interleaving honesty (owner ruling)**: other writers' legitimate writes that commit BETWEEN the batch's member
+   transactions are part of the real sheet state at that terminal endpoint and MUST NOT be filtered out to fabricate a
+   fictional "batch-atomic state" — the anchor means the true committed sheet state at that endpoint, nothing else.
+   **Legacy/unsealed batches (owner ruling)**: a selected batch with no sealed same-sheet endpoint (legacy rows,
+   pre-cutover writes, unsealed operations) returns the uniform `EXACT_ANCHOR_REQUIRED`-class refusal — it NEVER falls
+   back to wall-clock resolution.
 2. Preview sends `anchorOperationId` (an opaque operation-endpoint handle, **not** a bare `batch_id` — the two are no
    longer equal); server validates actor + sheet scope, resolves it to the sealed same-sheet operation whose
    `operation_id` matches, and returns one values-free refusal for missing, pruned, cross-sheet, or inaccessible
@@ -287,6 +297,15 @@ All real-DB tests must be explicitly listed in `plugin-tests.yml` and mutation-p
 - **G-BATCH-ENDPOINT:** multi-row same-transaction batch anchors after all rows, never at an intermediate seq; cross-sheet
   or later batch-id reuse cannot move signed B. Mutations that omit endpoint insertion, append after sealing, publish a
   wrong event count/max, or move endpoint insertion to another transaction each red and roll back the writer.
+- **G-MULTIOP-BATCH (owner-mandated, 2026-07-16 — pins the original finding-#1 defect):** one AI commit spanning **N**
+  per-row `patchRecords` transactions (the S1 LOCK-B shape) must show, on a real DB: (a) ALL N revisions keep the SAME
+  S1 `batch_id` — the ledger's `operation_id` never overwrites it; (b) N DISTINCT `operation_id`s and N sealed
+  endpoints are minted (one per transaction); (c) the History projection still aggregates the commit as **ONE** batch
+  and the batch deep-link (`GET /bases/:baseId/history/events/:batchId`) resolves unchanged; (d) the anchor resolver
+  selects the greatest `endpoint_seq` **only among the same-sheet, same-batch sealed endpoints** (v1 terminal
+  operation); (e) a legacy/unsealed batch gets the uniform `EXACT_ANCHOR_REQUIRED`-class refusal with NO wall-clock
+  fallback. Mutations: restoring the `batch_id := operation_id` overwrite reds (a)+(c); resolving across a different
+  batch's or sheet's endpoints reds (d); any wall-clock fallback path reds (e).
 - **G-BIG-1/2:** explicit fixture seq values at 2^53 neighbors and near int8 max remain distinct through SQL/TS/API
   strings. No global production-sequence `setval`.
 - **G-FENCE-FAMILY:** remove/wrong-client/late-acquire fence per writer family -> its constructed race reds.
@@ -334,7 +353,7 @@ review, `git diff --check`, and a full-text contradiction sweep for the rejected
 terminal-generation, and production-sequence-`setval` designs. No runtime test is claimed by this docs-only lock; the
 required executable evidence is the mutation-proven matrix in section 6.
 
-## 9. Owner decisions requested
+## 9. Owner decisions requested (RULED 2026-07-16 — ratified with the batch/operation terms in §10)
 
 Recommended ratification bundle:
 
@@ -349,3 +368,25 @@ Recommended ratification bundle:
 
 Ratification authorizes default-off implementation slices only. It does not authorize strict-mode enablement,
 Revert/Reset enablement, host mutation, staging cutover, or production rollout.
+
+## 10. Owner ruling record (2026-07-16) — batch/operation decoupling ratified terms
+
+The owner's 2026-07-16 review approved the following design decisions verbatim (mechanically recorded here; this
+section is the authority the finding-#1 runtime decouple and L6-b implement against):
+
+1. `batch_id` and `operation_id` are **permanently decoupled**.
+2. `batch_id` keeps the user commit-action grouping (S1); it must **never be overwritten** by an operation id.
+3. One batch may map to **multiple** transaction operations.
+4. Recovery identity is **`anchorOperationId`**.
+5. **v1 fixed choice:** the anchor resolves to the selected batch's terminal operation — greatest `endpoint_seq`
+   among the SAME-sheet sealed endpoints of that batch.
+6. An operation-level mid-batch selector is explicitly **OUT** — a separate follow-up slice, not an L6-b freedom.
+7. Other writers' legitimate writes interleaved between the batch's member transactions belong to the endpoint's
+   REAL sheet state; they must not be filtered into a fictional "batch-atomic state".
+8. A legacy/unsealed batch returns the uniform `EXACT_ANCHOR_REQUIRED`-class refusal; **no wall-clock fallback**.
+
+The same ruling mandates the **G-MULTIOP-BATCH** golden (§6) pinning the original defect (one AI commit across N
+`patchRecords` transactions), and authorizes: merging this revision into #4331, flipping #4331 to RATIFIED, and
+merging #4331 into main — **without** any runtime merge in the same step. Runtime integration then proceeds
+L3 → L5 → L4 → L4cov → L6-a (+ endpoint-immutability + runtime decouple), each layer on then-current main with full
+required CI and an exact-head independent gate; all flags stay OFF.
