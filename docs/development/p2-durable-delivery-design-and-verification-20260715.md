@@ -134,3 +134,25 @@ v1 = 锁 §283-291 全集(approval.{approved,rejected,revoked,cancelled}→bridg
 | S6 | 归零 | outbox 全新无可回填;cutover runbook 项 | §5f 论证 |
 
 **不可先建余量(硬依赖序)**:FWB-1 slice④ dispatchAction 终接线+配置 UI(需 S4/S5 落 main);附件②+(存储 provider/表/路由/前端);**八场景真库/并发/崩溃矩阵(需全链合入后在合并态上跑)**;钉钉 U1-U13 UAT 与 flag 翻转 = owner 门。所有 PR 待 owner 自底向上复审;全部 flags OFF;无自合。
+
+---
+
+## 9. ④-b / flag 接线 — apply-ready 补丁规格 (合并后即落)
+
+### 9.1 FWB-1 ④-b(automation-actions.ts + automation-service.ts,单 PR)
+1. `automation-actions.ts`:`AutomationActionType` 联合与 `ALL_ACTION_TYPES` 增 `'write_approval_form_values'`;新增 `WriteApprovalFormValuesConfig { targetSheetId: string; mappings: FwbFieldMapping[] }` + 进 `validateActionConfig` 的 per-type 校验(复用 `validateFwbMappingConfig` 语义:未知字段/非 v1 类型/select 无选项/重复目标/空配置=拒)。
+2. `automation-service.ts` 执行器 switch 增一 case,委派预演分支已验证的 `FwbActionDispatcher.dispatch(trx, ruleCtx, config)`(136cfd639,3/3+八场景回归):
+   - `trx` = 该规则执行已持有的事务客户端(与 approval 状态写同事务,D9);
+   - `ruleCtx.structuralPath` = #4196-C4 结构化步径(执行器遍历时已有 index 路径);
+   - `ruleCtx.formValues` = approval-completion 事件携带的表单快照;
+   - `configurerUserId/sourceTemplateId` 取自规则行;`eventId` = 原始事件 id;`automationDepth` 照传。
+   - 构造器 flag-off 抛错 ⇒ case 必须包在 `isDurableDeliveryEnabled()` 检查内(OFF 时该 action 校验期即拒,不进执行器)。
+3. 验证:预演分支 `multitable-fwb-dispatch-wiring-realdb.test.ts` 原样迁入 + 一条穿真实 switch 的端到端(approval.completed → 规则 → 记录+账本+outbox 同事务)。
+
+### 9.2 附件 flag 接线(单 PR)
+1. index.ts 启动:`createApprovalAttachmentRouter({db, store: LocalFsApprovalAttachmentStore(root), authChecks, viewerId})` 非 null 时 `app.use(...)`(工厂 OFF 返 null=零休眠路由,已验)。
+2. `ApprovalNewView.vue:382-393` B2-28 诚实禁用桩 → flag ON 时渲染上传控件(绑 `attachmentUpload.ts`,已验);提交路径接 `bindAttachmentsOnSubmit`(提交事务内,已验)。
+3. GC/reconciler 定时器挂启动(flag-gated),`prefillFromSnapshot.ts:55` 的 attachment-skip 注释同步更新。
+
+### 9.3 合并态正式验收
+10 PR 落齐后:`multitable-p2-fwb-eight-scenario-matrix.test.ts` 已在两点接线内 ⇒ 合并态 CI 每 PR 自动重跑 = 正式验收即持续生效;另跑一次 fresh-PG 全量(§6 方法论)存证。
