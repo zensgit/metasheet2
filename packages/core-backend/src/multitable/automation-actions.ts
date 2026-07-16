@@ -24,6 +24,10 @@ export type AutomationActionType =
   // business side effect (no record write / no outbound / no job). Dispatched
   // through the SAME executor path as every other action (no parallel path).
   | 'record_click'
+  // FWB-1: write approved form values into a target multitable sheet as a NEW record. Rides the durable
+  // outbox + action-idempotency ledger (claim+record+revision+outbox same-txn); dispatched only while
+  // AUTOMATION_DURABLE_DELIVERY_ENABLED is on (skipped otherwise — no half-durable path).
+  | 'write_approval_form_values'
 
 export const ALL_ACTION_TYPES: AutomationActionType[] = [
   'update_record',
@@ -41,7 +45,16 @@ export const ALL_ACTION_TYPES: AutomationActionType[] = [
   'start_approval',
   'parallel_branch',
   'record_click',
+  'write_approval_form_values',
 ]
+
+/** Config shape for write_approval_form_values (FWB-1). */
+export interface WriteApprovalFormValuesConfig {
+  /** target multitable sheet to create the record in. */
+  targetSheetId: string
+  /** template form field → target sheet field mappings (text/number/date/select). */
+  mappings: Array<{ formFieldId: string; targetFieldId: string; targetType: 'text' | 'number' | 'date' | 'select'; selectOptions?: string[] }>
+}
 
 /** Config shape for update_record */
 export interface UpdateRecordConfig {

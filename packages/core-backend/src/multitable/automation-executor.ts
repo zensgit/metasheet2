@@ -3,8 +3,14 @@
  * Core execution pipeline: evaluate conditions, run actions in sequence.
  */
 
-import { randomUUID } from 'crypto'
+import { createHash, randomUUID } from 'crypto'
 import { recordRecordRevision, recordVersionMarker } from './record-history-service'
+import { deriveActionKey } from './automation-action-idempotency'
+import { produceAutomationEvent } from './automation-durable-activation'
+import { isDurableDeliveryEnabled } from './automation-durable-delivery'
+import { executeWriteApprovalFormValues } from './approval-fwb-write-action'
+import { recheckFwbPermissionGates, type FwbGateChecks } from './approval-fwb-permission-gates'
+import type { WriteApprovalFormValuesConfig } from './automation-actions'
 import { Logger } from '../core/logger'
 import { withAutomationEventId } from './automation-event-dedup'
 import { redactString } from './automation-log-redact'
@@ -832,9 +838,31 @@ export async function consumeSharedCrossBaseWriteQuota(
   return count <= limit
 }
 
+/** Fail-closed FWB gate checks — used when no real gates are injected (a write_approval_form_values action
+ *  must never run on an unconfigured gate set; every check denies). */
+const DEFAULT_DENY_FWB_GATES: FwbGateChecks = {
+  isAdmin: async () => false,
+  canManageSheetAccess: async () => false,
+  canReadTemplate: async () => false,
+  canWriteSheet: async () => false,
+  hasRecordedConfirmation: async () => false,
+}
+
+/** Normalize an AutomationDeps queryFn to the durable modules' Queryable shape (rowCount required). */
+function toQueryable(query: (sql: string, params?: unknown[]) => Promise<{ rows: unknown[]; rowCount?: number | null }>) {
+  return {
+    query: async (sql: string, params?: unknown[]) => {
+      const r = await query(sql, params)
+      return { rows: (r.rows ?? []) as Array<Record<string, unknown>>, rowCount: r.rowCount ?? 0 }
+    },
+  }
+}
+
 export interface AutomationDeps {
   eventBus: EventBus
   queryFn: (sql: string, params?: unknown[]) => Promise<{ rows: unknown[]; rowCount?: number | null }>
+  /** FWB-1 ④-b: injected §11 Q6 permission checks; defaults to fail-closed deny when omitted. */
+  fwbGateChecks?: FwbGateChecks
   transaction?: <T>(
     handler: (client: { query: AutomationDeps['queryFn'] }) => Promise<T>,
   ) => Promise<T>
@@ -1741,6 +1769,9 @@ export class AutomationExecutor {
           // SAME dispatch as every other action (no parallel path).
           result = { actionType: 'record_click', status: 'success' }
           break
+        case 'write_approval_form_values':
+          result = await this.executeWriteApprovalFormValues(action.config as unknown as WriteApprovalFormValuesConfig, context)
+          break
         default:
           result = {
             actionType: action.type,
@@ -2569,6 +2600,72 @@ export class AutomationExecutor {
       return { actionType: 'create_record', status: 'success', output: { recordId, sheetId: targetSheetId } }
     } catch (err) {
       return { actionType: 'create_record', status: 'failed', error: err instanceof Error ? err.message : String(err) }
+    }
+  }
+
+  /**
+   * FWB-1 slice ④-b — write_approval_form_values. Delegates to the reviewed executor
+   * (gates → fail-closed mapping → same-txn claim + record + revision + outbox). Flag-gated: while the
+   * durable flag is OFF the action is a no-op skip (no half-durable path). The record write mirrors
+   * executeCreateRecord (INSERT meta_records + recordRecordRevision('create'), same txn), and the outbox
+   * enqueue rides produceAutomationEvent — so claim/record/revision/outbox all commit or roll back together.
+   *
+   * NOTE (evidence build): the #4196-C4 `structuralPath` is derived from the action config hash here; the
+   * production PR threads the real (stepIndex / parallel stepKey) position — see the design MD §9.4. The
+   * idempotency property (same delivery → same key → net-once) holds either way; only two byte-identical
+   * actions in ONE rule would need the positional path to differ.
+   */
+  private async executeWriteApprovalFormValues(
+    config: WriteApprovalFormValuesConfig,
+    context: ExecutionContext,
+  ): Promise<AutomationStepResult> {
+    if (!isDurableDeliveryEnabled()) {
+      return { actionType: 'write_approval_form_values', status: 'skipped', error: 'durable delivery flag off' }
+    }
+    const evt = (context.triggerEvent as Record<string, unknown> | null) ?? {}
+    const instanceId = (evt.instanceId as string) || context.executionId
+    const eventId = (evt._eventId as string) || context.executionId
+    const structuralPath = `cfg#${createHash('sha256').update(JSON.stringify({ t: config.targetSheetId, m: config.mappings })).digest('hex').slice(0, 12)}`
+    const actionKey = deriveActionKey({ structuralPath, actionType: 'write_approval_form_values', canonicalConfig: config })
+    const gates: FwbGateChecks = this.deps.fwbGateChecks ?? DEFAULT_DENY_FWB_GATES // fail-closed if unbound
+    try {
+      let recordId = ''
+      const outcome = await this.withTransaction(async (query) => {
+        const trx = toQueryable(query)
+        return executeWriteApprovalFormValues(
+          trx,
+          {
+            claimId: `aa_${createHash('sha256').update(`${eventId}:${actionKey}`).digest('hex').slice(0, 24)}`,
+            instanceId,
+            ruleId: context.ruleId,
+            actionKey,
+            gateSubject: { configurerUserId: context.ruleCreatedBy, ruleId: context.ruleId, sourceTemplateId: (evt.templateId as string) || context.ruleId, targetSheetId: config.targetSheetId },
+            mappings: config.mappings,
+            formValues: (evt.formValues as Record<string, unknown>) ?? {},
+            eventId: `${eventId}::fwb::${actionKey.slice(-12)}`,
+            automationDepth: ((evt._automationDepth as number) ?? 0) + 1,
+          },
+          gates,
+          {
+            createRecordWithRevision: async (t, sheetId, values) => {
+              recordId = `rec_${randomUUID()}`
+              await t.query(`INSERT INTO meta_records (id, sheet_id, data, version) VALUES ($1, $2, $3::jsonb, 1)`, [recordId, sheetId, JSON.stringify(values)])
+              await recordRecordRevision((sql: string, params?: unknown[]) => t.query(sql, params), {
+                sheetId, recordId, version: 1, action: 'create', source: 'automation',
+                actorId: context.actorId ?? null, changedFieldIds: Object.keys(values), patch: values, snapshot: values,
+              })
+              return recordId
+            },
+            enqueueOutbox: async (t, e) => {
+              await produceAutomationEvent({ query: (sql: string, params?: unknown[]) => t.query(sql, params) }, { eventType: e.eventType, eventId: e.eventId, payload: e.payload, automationDepth: e.automationDepth })
+            },
+          },
+        )
+      })
+      if (outcome.status === 'rejected') return { actionType: 'write_approval_form_values', status: 'failed', error: `fwb_rejected:${outcome.reason}` }
+      return { actionType: 'write_approval_form_values', status: 'success', output: outcome.status === 'applied' ? { recordId } : { deduped: true } }
+    } catch (err) {
+      return { actionType: 'write_approval_form_values', status: 'failed', error: err instanceof Error ? err.message : String(err) }
     }
   }
 
