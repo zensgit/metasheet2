@@ -82,12 +82,22 @@ export async function claimActionApplied(trx: Queryable, c: ActionClaim): Promis
   for (const [name, v] of [['instanceId', c.instanceId], ['ruleId', c.ruleId], ['actionKey', c.actionKey]] as const) {
     if (typeof v !== 'string' || !NON_BLANK.test(v)) throw new RangeError(`claimActionApplied: ${name} must be non-blank`)
   }
+  // node_key / entry_epoch must be PAIRED — the ('', 0) non-node sentinel OR a non-BLANK node_key with epoch
+  // >= 1. Validated here (not only at the DB CHECK) so a mixed pair — incl. a whitespace/tab-only node_key
+  // with a positive epoch — fails fast with a clear error before the write (#4340 review P2).
+  const nodeKey = c.nodeKey ?? ''
+  const entryEpoch = c.entryEpoch ?? 0
+  const isSentinel = nodeKey === '' && entryEpoch === 0
+  const isNodeScope = NON_BLANK.test(nodeKey) && Number.isInteger(entryEpoch) && entryEpoch >= 1
+  if (!isSentinel && !isNodeScope) {
+    throw new RangeError('claimActionApplied: (node_key, entry_epoch) must be the ("",0) sentinel or a non-blank node_key with entry_epoch >= 1')
+  }
   const mode = c.applicationMode ?? 'apply'
   const res = await trx.query(
     `INSERT INTO meta_automation_action_applied (id, instance_id, rule_id, action_key, node_key, entry_epoch, application_mode, result_ref)
      VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
      ON CONFLICT (instance_id, rule_id, action_key, node_key, entry_epoch, application_mode) DO NOTHING`,
-    [c.id, c.instanceId, c.ruleId, c.actionKey, c.nodeKey ?? '', c.entryEpoch ?? 0, mode, c.resultRef ?? null],
+    [c.id, c.instanceId, c.ruleId, c.actionKey, nodeKey, entryEpoch, mode, c.resultRef ?? null],
   )
   return Number(res.rowCount ?? 0) === 1 ? 'claimed' : 'duplicate'
 }

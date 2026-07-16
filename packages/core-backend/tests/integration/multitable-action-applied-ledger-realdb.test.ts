@@ -79,6 +79,29 @@ describeIfDatabase('action-idempotency ledger L1 — schema golden (real DB)', (
     // mixed pairs split one idempotency identity — rejected by the paired CHECK, named
     await expect(claim({ action: `ak_${RUN}_bad_a`, node: '', epoch: 7 })).rejects.toThrow(/action_applied_node_epoch_paired/)
     await expect(claim({ action: `ak_${RUN}_bad_b`, node: 'node_C', epoch: 0 })).rejects.toThrow(/action_applied_node_epoch_paired/)
+    // a WHITESPACE/TAB-only node_key is NOT a real node — `~ '[!-~]'` (not `<> ''`) rejects it with a positive epoch
+    await expect(claim({ action: `ak_${RUN}_bad_ws`, node: ' ', epoch: 7 })).rejects.toThrow(/action_applied_node_epoch_paired/)
+    await expect(claim({ action: `ak_${RUN}_bad_tab`, node: '\t', epoch: 3 })).rejects.toThrow(/action_applied_node_epoch_paired/)
+  })
+
+  test('claimActionApplied validates the (node_key, entry_epoch) PAIR at the JS layer, before the write', async () => {
+    const base = { instanceId: INST, ruleId: `rule_${RUN}_pjs`, actionKey: `ak_${RUN}_pjs` }
+    // valid: sentinel and a real node scope both claim
+    expect(await claimActionApplied(poolManager.get(), { ...base, id: `aa_${randomUUID()}` })).toBe('claimed')
+    expect(
+      await claimActionApplied(poolManager.get(), { ...base, actionKey: `ak_${RUN}_pjs2`, nodeKey: 'node_X', entryEpoch: 1, id: `aa_${randomUUID()}` }),
+    ).toBe('claimed')
+    // mixed pairs (incl. whitespace/tab node with a positive epoch) throw at the JS layer — nothing is written
+    for (const bad of [
+      { nodeKey: '', entryEpoch: 5 },
+      { nodeKey: 'node_Y', entryEpoch: 0 },
+      { nodeKey: ' ', entryEpoch: 2 },
+      { nodeKey: '\t', entryEpoch: 1 },
+    ]) {
+      await expect(
+        claimActionApplied(poolManager.get(), { ...base, actionKey: `ak_${RUN}_pjs_bad`, ...bad, id: `aa_${randomUUID()}` }),
+      ).rejects.toThrow(/must be the.*sentinel/)
+    }
   })
 
   test('test_run isolation: a test_run claim does not block (or get blocked by) a real apply', async () => {
