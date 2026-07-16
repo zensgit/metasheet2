@@ -70,11 +70,13 @@ export const SMOKE_PHASES = Object.freeze([
 ])
 export const SMOKE_FAILURE_CLASSES = Object.freeze(['NONE', 'CHECK_FAILED', 'SELF_SCAN_FAILED', 'FATAL_EXCEPTION'])
 export const SMOKE_LEAK_SCAN_STATUSES = Object.freeze(['NOT_RUN', 'PASS', 'FAIL'])
-const DIAG = { reachedIdx: -1 }
-export function resetDiagnostics() { DIAG.reachedIdx = -1 }
+// Internal-only phase cursor (P3: never written into the summary — the output face is EXACTLY the five
+// declared diagnostic fields; check() reads the current phase from here, not from the summary).
+const DIAG = { reachedIdx: -1, reachedName: 'NONE' }
+export function resetDiagnostics() { DIAG.reachedIdx = -1; DIAG.reachedName = 'NONE' }
 function beginPhase(name) {
   DIAG.reachedIdx = SMOKE_PHASES.indexOf(name)
-  RESULT.summary.reachedPhase = name
+  DIAG.reachedName = name
 }
 // The 4 LOCUS fields (added before the self-scan so it covers them). `result` + sentinels are passed in
 // for testability. lastCompletedPhase: on a run that reached the last phase, everything completed; an
@@ -84,14 +86,19 @@ export function computeDiagnosticLocus(result, reachedIdx = DIAG.reachedIdx) {
   const failedChecks = result.checks.filter((c) => c.ok !== true)
   const last = SMOKE_PHASES.length - 1
   S.failedCheckCount = failedChecks.length
-  S.lastCompletedPhase = reachedIdx >= last ? SMOKE_PHASES[last] : (reachedIdx > 0 ? SMOKE_PHASES[reachedIdx - 1] : 'NONE')
+  // ENTERING a phase only proves the PREVIOUS one completed. The final phase is special-cased on its own
+  // product (owner P2): RESPONSE_LEAK_SCAN counts as completed ONLY once leakScanClean is a boolean — a
+  // mid-phase throw otherwise reported the contradictory pair lastCompletedPhase=RESPONSE_LEAK_SCAN +
+  // responseLeakScanStatus=NOT_RUN; it must report AUDIT_TRAIL + NOT_RUN instead.
+  const lastPhaseCompleted = reachedIdx >= last && typeof S.leakScanClean === 'boolean'
+  S.lastCompletedPhase = lastPhaseCompleted
+    ? SMOKE_PHASES[last]
+    : (reachedIdx > 0 ? SMOKE_PHASES[Math.min(reachedIdx, last) - 1] : 'NONE')
   // firstFailedCheck is the PHASE of the first failed check — a FIXED enum, never a free-form check name
   // (a name could contain a value); each check records its phase at push time.
   const firstPhase = failedChecks.length ? String(failedChecks[0].phase || 'NONE') : 'NONE'
   S.firstFailedCheck = (firstPhase === 'NONE' || SMOKE_PHASES.includes(firstPhase)) ? firstPhase : 'UNKNOWN'
-  S.responseLeakScanStatus = (reachedIdx >= last && typeof S.leakScanClean === 'boolean')
-    ? (S.leakScanClean ? 'PASS' : 'FAIL')
-    : 'NOT_RUN'
+  S.responseLeakScanStatus = lastPhaseCompleted ? (S.leakScanClean ? 'PASS' : 'FAIL') : 'NOT_RUN'
 }
 // failureClass needs the final pass/selfScanClean, so it is computed AFTER the self-scan.
 export function computeFailureClass(result, { fatal = false } = {}) {
@@ -426,7 +433,7 @@ export function formatSummaryBlock(summary) {
 }
 
 function check(name, ok, detail = '') {
-  RESULT.checks.push({ name, ok: ok === true, detail, phase: RESULT.summary.reachedPhase || 'NONE' })
+  RESULT.checks.push({ name, ok: ok === true, detail, phase: DIAG.reachedName })
   const mark = ok === true ? 'ok' : 'FAIL'
   process.stderr.write(`[smoke] ${name}: ${mark}${detail ? ` (${detail})` : ''}\n`)
   return ok === true
