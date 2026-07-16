@@ -2,6 +2,12 @@
 
 - **Status (2026-07-15): PROPOSED - NOT ratified.** Design plus operator-copy correction only; zero runtime
   semantics. This document authorizes no migration, flag, staging, or production change.
+- **Finding #1 resolved (owner review 2026-07-16), still PROPOSED — ready for owner ratification.** The owner's
+  adversarial review found this lock's §1.2 `batch_id == operation_id` aliasing breaks the ratified S1 batch-grouping
+  lock (one commit action = one batch spanning N transactions). §1.2 and §1.3 are corrected below to make `batch_id`
+  (S1 user-action grouping) and `operation_id` (per-transaction sealed endpoint) **distinct**, and the recovery anchor
+  keys on the operation endpoint, not the batch. This is the owner's step-1 prerequisite ("resolve batch_id vs
+  operation_id first, then ratify"); the ratify flip is the owner's — not self-applied here.
 - **Canonical scope:** this is the single fix-forward design for the W0 trust substrate. It supersedes the proposed
   v3.6 document merged in #4328 and the still-open #4262 mechanism text. The useful L3 work in Draft #4309 is an
   implementation input, not an authority and not merge-ready until this lock is ratified and its L3 corrections land.
@@ -97,8 +103,17 @@ Add a post-cutover operation ledger (name illustrative, schema contract normativ
 
 `meta_record_history_operations(sheet_id, operation_id, endpoint_seq, event_count, created_at)` with primary key
 `(sheet_id, operation_id)`. Add nullable `operation_id` to revisions and version markers; new trusted writers set it,
-while legacy/backfilled rows remain outside the trust checkpoint. A revision may continue to expose `batch_id` for the
-existing History UI, but for trusted writes `batch_id == operation_id`; marker rows gain the same operation identity.
+while legacy/backfilled rows remain outside the trust checkpoint. A revision continues to expose `batch_id` for the
+existing History UI **as an INDEPENDENT column**: `batch_id` and `operation_id` are **distinct and MUST NOT be aliased**
+(finding #1 correction, owner review 2026-07-16). Per the ratified S1 batch-grouping lock
+(`…batch-grouping-s1-designlock`, LOCK-B B2: *"one COMMIT ACTION = one batch"* — a commit action MAY span the several
+per-row `patchRecords` transactions that share one server-minted `batchId`), `batch_id` remains the **user-action
+grouping** key: one commit action → one `batch_id` → **N** `operation_id`s (one sealed transaction endpoint per
+transaction). A trusted revision therefore carries **both** — its S1 `batch_id` (grouping, unchanged) and its
+per-transaction `operation_id` (the sealed transaction endpoint). Setting `batch_id := operation_id` is **forbidden**: it
+would re-split one History batch into N single-row batches at the projection grouping key (`row.batch_id ?? row.id`) and
+break the batch deep-link, reverting the ratified S1 goldens G2/G5. Marker rows gain the operation identity **in their
+own `operation_id` column**, never by overwriting `batch_id`.
 
 The write protocol is one transaction and one connection:
 
@@ -126,15 +141,22 @@ anchors; schema writers still take the L4 fence so checkpoint and execute see a 
 
 The executable API takes an opaque/server-resolved history anchor, not an authoritative client seq:
 
-1. UI selects a committed History batch (the shipped A2 picker already does this).
-2. Preview sends `anchorBatchId`; server validates actor + sheet scope, resolves it to the sealed same-sheet operation
-   whose `operation_id` matches, and returns one values-free refusal for missing, pruned, cross-sheet, or inaccessible
+1. UI selects a committed recovery point. The shipped A2 picker selects a History **batch**; because one S1 `batch_id`
+   spans **N** sealed operations (§1.2 finding #1 correction), the picker/server MUST resolve that selection to a single
+   **operation endpoint** — the recovery anchor is *"the sheet state after operation E committed"*, so the resolved
+   endpoint is the **terminal operation of the selected batch** (its `operation_id` with the greatest `endpoint_seq`),
+   or the picker offers operation-level granularity for a mid-batch point. The anchor identity is an `operation_id`, not
+   a `batch_id`.
+2. Preview sends `anchorOperationId` (an opaque operation-endpoint handle, **not** a bare `batch_id` — the two are no
+   longer equal); server validates actor + sheet scope, resolves it to the sealed same-sheet operation whose
+   `operation_id` matches, and returns one values-free refusal for missing, pruned, cross-sheet, or inaccessible
    evidence.
 3. Server takes `anchorSeq` from that immutable endpoint row. It verifies the endpoint's count/max against retained
-   event rows; it never derives authority from a fresh `MAX(seq) WHERE batch_id=...` scan.
+   event rows; it never derives authority from a fresh `MAX(seq) WHERE batch_id=...` scan (a batch spanning N operations
+   would make such a scan meaningless as an anchor).
 4. Server selects the latest retained checkpoint with `trusted_since_seq <= anchorSeq`, ordered by
    `(trusted_since_seq DESC, id DESC)`.
-5. Preview identity binds at least `{sheetId, anchorBatchId, anchorSeq, checkpointId, actorId, scope hashes}`.
+5. Preview identity binds at least `{sheetId, anchorOperationId, anchorSeq, checkpointId, actorId, scope hashes}`.
 6. Execute verifies the signed claims, uses the token-bound `anchorSeq`, and reruns the full target computation under
    the fence. It does not recompute `MAX(seq)` as its authority. Missing/pruned/mismatched anchor evidence is 409 and
    zero writes.
