@@ -26,6 +26,24 @@
  * gated behind the flag. The migration adds a nullable `meta_sheets.recovery_writer_state` column (schema
  * change — NOT "byte-identical", per v3.6 §6 G-FLAG-OFF), but at runtime with the flag off the column is
  * never written and never read.
+ *
+ * RECOVERY-VS-RECOVERY (P2 follow-up, v3.6 §4.1): reset-execute and revert-execute are both destructive and
+ * must never interleave. Two directions, closed by TWO DIFFERENT mechanisms (do not conflate them):
+ *   (1) reset starting during revert's apply window — revert's multi-transaction shape releases the
+ *       canonical fence BETWEEN its transactions, so a reset that begins in that gap would find the fence
+ *       free. Closed by reset-execute calling `fenceWriterEntry` (this module's standard entry, the SAME
+ *       one every other fully-fenced writer uses) immediately after entering its transaction: fence THEN
+ *       `assertNoActiveWriterBlock`, so reset observes revert's committed `applying` block and refuses
+ *       (409 RECOVERY_IN_PROGRESS) — it never reaches the destructive work.
+ *   (2) revert starting during an active reset — reset's destructive work is ONE single transaction that
+ *       holds the canonical fence continuously from first statement to commit/rollback. Revert's claim
+ *       transaction acquires that SAME fence key, so it PARKS for the duration and only proceeds once
+ *       reset's transaction has fully concluded (committed or rolled back) — never concurrently. No
+ *       separate durable block is needed for this direction; it falls out of reset being single-transaction.
+ * `PIT_RECOVERY_LOCK_NS` (below) is ALSO taken by both operations, in the fixed canonical-then-PIT order —
+ * per the design, but NOT the mechanism that closes either race above (see reset-execute's own comment for
+ * why: the two operations' respective PIT-lock holding windows do not span the same gaps their fence/block
+ * discipline does).
  */
 
 export type FenceQuery = (
@@ -40,6 +58,19 @@ export type FenceQuery = (
 export function canonicalSheetFenceKey(sheetId: string): string {
   return `meta:auto-number:sheet:${sheetId}`
 }
+
+/**
+ * v3.6 §4.1 fixed namespace int for the per-sheet `pg_advisory_xact_lock(PIT_RECOVERY_LOCK_NS::int,
+ * hashtext(sheetId)::int)` recovery-only lock. The design's canonical→PIT lock order applies to BOTH
+ * destructive recoveries' state-transition transactions: reset-execute's single destructive transaction
+ * (pre-existing, unconditional — predates L4) AND revert-execute's claim/release transactions (added by the
+ * P2 recovery-vs-recovery fix, gated behind `MULTITABLE_ENABLE_WRITER_FENCE` since it is NEW for revert).
+ * SINGLE SOURCE OF TRUTH here (moved from a local `univer-meta.ts` constant) so the two call sites can never
+ * drift onto two different ints — a drift would silently reopen a disjoint-lock bug of the same shape as the
+ * v3.6 §0.2-i one this module exists to fix. Two-int advisory lock form keeps this namespace disjoint from
+ * any other advisory lock in the codebase.
+ */
+export const PIT_RECOVERY_LOCK_NS = 0x77303104 // 'w0' + marker; arbitrary fixed int4 namespace
 
 /**
  * Acquire the canonical per-sheet write fence for the CURRENT transaction/connection. `pg_advisory_xact_lock`

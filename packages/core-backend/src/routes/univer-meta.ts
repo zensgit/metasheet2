@@ -235,6 +235,7 @@ import {
   claimDurableWriterBlock,
   fenceWriterEntry,
   isWriterFenceEnabled,
+  PIT_RECOVERY_LOCK_NS,
   setRecoveryWriterState,
   SheetWriterBlockedError,
 } from '../multitable/canonical-sheet-fence'
@@ -471,10 +472,9 @@ type QueryFn = (sql: string, params?: unknown[]) => Promise<{ rows: unknown[]; r
 
 const DEFAULT_BASE_ID = 'base_legacy'
 const DEFAULT_BASE_NAME = 'Migrated Base'
-// W0-1 C4 fence: fixed namespace int for the per-sheet `pg_advisory_xact_lock` guarding destructive PIT
-// recovery (reset-execute). Paired with `hashtext(sheetId)` as the per-sheet key; two-int advisory lock form
-// keeps this namespace disjoint from any other advisory lock in the codebase.
-const PIT_RECOVERY_LOCK_NS = 0x77303104 // 'w0' + marker; arbitrary fixed int4 namespace
+// W0-1 C4 fence: `PIT_RECOVERY_LOCK_NS` (recovery-only advisory lock namespace, paired with
+// `hashtext(sheetId)` as the per-sheet key) now lives in `canonical-sheet-fence.ts` — single source of
+// truth shared by reset-execute AND revert-execute (see that module's RECOVERY-VS-RECOVERY doc section).
 const SYSTEM_PEOPLE_SHEET_NAME = 'People'
 // SYSTEM_PEOPLE_SHEET_DESCRIPTION + isSystemPeopleSheetDescription moved to
 // ../multitable/system-sheet-predicate (single source of truth, shared with the W0-1 isSystemSheet
@@ -10261,11 +10261,21 @@ export function univerMetaRouter(): Router {
       // DURABLE `applying` block under the fence in a short claim txn, release the advisory fence, then apply.
       // Every external fenced writer that later acquires the fence observes `applying` and parks; the block is
       // cleared (or set `paused_retryable` on failure) in the finally below. No-op when the L4 flag is off.
+      //
+      // P2 follow-up (v3.6 §4.1 fixed lock order): the claim ALSO takes `PIT_RECOVERY_LOCK_NS`, right after
+      // the canonical fence — the SAME order reset-execute uses. This was previously missing entirely (revert
+      // took no PIT lock at all), so reset-execute's comment claiming the PIT lock "serializes recovery-vs-
+      // recovery" was an overclaim: the two operations' PIT locks never intersected. It is not what closes
+      // the reset-during-revert race (that's reset's `assertNoActiveWriterBlock` below, catching the
+      // committed durable block across revert's released-fence gap — see canonical-sheet-fence.ts's
+      // RECOVERY-VS-RECOVERY doc); it brings revert into the same fixed canonical→PIT discipline as reset so
+      // the two mechanisms actually intersect where their transactions do overlap.
       const writerFenceOn = isWriterFenceEnabled()
       if (writerFenceOn) {
         try {
           await pool.transaction(async ({ query }) => {
             await acquireCanonicalSheetFence(query, sheetId)
+            await query('SELECT pg_advisory_xact_lock($1::int, hashtext($2)::int)', [PIT_RECOVERY_LOCK_NS, sheetId])
             await claimDurableWriterBlock(query, sheetId)
           })
         } catch (claimErr) {
@@ -10401,6 +10411,8 @@ export function univerMetaRouter(): Router {
         if (writerFenceOn) {
           await pool.transaction(async ({ query }) => {
             await acquireCanonicalSheetFence(query, sheetId)
+            // P2 follow-up: same fixed canonical→PIT order as the claim above (see its comment).
+            await query('SELECT pg_advisory_xact_lock($1::int, hashtext($2)::int)', [PIT_RECOVERY_LOCK_NS, sheetId])
             await setRecoveryWriterState(query, sheetId, blockResolution === 'clear' ? null : 'paused_retryable')
           })
         }
@@ -10518,19 +10530,35 @@ export function univerMetaRouter(): Router {
       try {
         await pool.transaction(async ({ query }) => {
           // W0-1 L4 (§4.1 canonical fence convergence — the §0.2-i fix): acquire the CANONICAL sheet-write
-          // fence (the same advisory key every ordinary writer now takes) as the FIRST statement, BEFORE the
-          // recovery-only PIT lock. This is the load-bearing correction: pre-L4, reset held ONLY
-          // PIT_RECOVERY_LOCK_NS, which is DISJOINT from the auto-number/writer fence — so a concurrent
-          // fenced writer did NOT block on reset and the causal-seq guarantee evaporated. Lock ORDER is fixed
-          // (canonical → PIT) across all recovery paths, so no deadlock is introduced. No-op when the L4 flag
-          // is off ⇒ this destructive txn keeps its exact pre-L4 lock shape (byte-identical).
-          if (isWriterFenceEnabled()) await acquireCanonicalSheetFence(query, sheetId)
-          // W0-1 C4 FENCE (owner §6.2.4): the recovery-only advisory lock, retained to serialize recovery-vs-
-          // recovery. `FOR UPDATE` on scope rows alone does NOT stop a concurrent NEW-record insert (phantom)
-          // landing between the outer/preview check and this write; the advisory lock plus the in-txn re-check
-          // below closes the check→write window. Chosen over SERIALIZABLE (lowest blast radius, no
-          // serialization-failure retry loop). Namespace int is a fixed W0-1 constant; `hashtext(sheetId)` is
-          // the per-sheet key.
+          // fence (the same advisory key every ordinary writer now takes) as the FIRST statement, THEN
+          // refuse if a recovery already holds a durable writer-block — `fenceWriterEntry` is the SAME
+          // standard L4 entry point every other fully-fenced writer uses (REST/bulk/plugin/attachment/
+          // lock-unlock; see canonical-sheet-fence.ts). This is the load-bearing correction for TWO separate
+          // bugs, fixed together because they're both "reset didn't converge onto the shared fence
+          // discipline": (a) pre-L4, reset held ONLY `PIT_RECOVERY_LOCK_NS`, DISJOINT from the auto-
+          // number/writer fence, so an ordinary concurrent fenced writer did not block on reset and the
+          // causal-seq guarantee evaporated (v3.6 §0.2-i); (b) reset never checked `recovery_writer_state`
+          // at all, so a reset that began during revert-execute's multi-txn apply window — where the
+          // canonical fence is released BETWEEN revert's own transactions but its durable `applying` block
+          // is already committed — proceeded and interleaved two destructive recoveries (P2 follow-up: see
+          // canonical-sheet-fence.ts's RECOVERY-VS-RECOVERY doc for the full two-direction analysis). A
+          // block observed here throws `SheetWriterBlockedError`, caught below and mapped to the same 409
+          // RECOVERY_IN_PROGRESS revert-execute's own claim step returns. No-op when the L4 flag is off ⇒
+          // this destructive txn keeps its exact pre-L4 lock shape (byte-identical).
+          await fenceWriterEntry(query, sheetId)
+          // W0-1 C4 FENCE (owner §6.2.4) + v3.6 §4.1 fixed lock order (canonical → PIT, always in this
+          // order to introduce no deadlock): the recovery-only advisory lock, retained UNCONDITIONALLY
+          // (pre-L4 behaviour, flag or no flag). `FOR UPDATE` on scope rows alone does NOT stop a concurrent
+          // NEW-record insert (phantom) landing between the outer/preview check and this write; the
+          // advisory lock plus the in-txn re-check below closes the check→write window. Chosen over
+          // SERIALIZABLE (lowest blast radius, no serialization-failure retry loop). Namespace int is the
+          // fixed W0-1 constant exported from canonical-sheet-fence.ts (single source of truth — revert-
+          // execute's claim/release steps take the SAME lock, same order); `hashtext(sheetId)` is the
+          // per-sheet key. NOTE this lock is NOT what closes the reset-vs-revert race above: reset's window
+          // holding it does not overlap revert's (revert only holds it briefly during its own claim/release,
+          // not across its multi-txn apply gap) — the `fenceWriterEntry` block-check above is the mechanism
+          // that does that job; this lock is the design's mandated companion for the windows where the two
+          // operations' transactions DO overlap (see canonical-sheet-fence.ts).
           await query('SELECT pg_advisory_xact_lock($1::int, hashtext($2)::int)', [PIT_RECOVERY_LOCK_NS, sheetId])
           // W0-1 C8 (same-txn re-check): re-run the integrity precheck INSIDE the fenced transaction. A
           // phantom uncaptured write that committed after the outer computeSheetReset precheck (which runs
@@ -10714,6 +10742,10 @@ export function univerMetaRouter(): Router {
           }
         })
       } catch (err) {
+        // W0-1 L4 P2 follow-up: `fenceWriterEntry` observed another recovery's durable writer-block
+        // (revert-execute mid-apply) and refused BEFORE any read/write in this transaction — same
+        // RECOVERY_IN_PROGRESS 409 shape as revert-execute's own claim-step refusal.
+        if (err instanceof SheetWriterBlockedError) return res.status(409).json({ ok: false, error: { code: 'RECOVERY_IN_PROGRESS', message: 'Another recovery operation is in progress on this sheet; retry shortly.' } })
         // W0-1 C8: the in-txn integrity re-check refused — the whole reset rolled back (zero writes). Map to
         // the same values-free 409 as the outer precheck (no denied-record oracle, no token).
         if (err instanceof HistoryIncompleteInTxnError) return sendHistoryIncomplete(res)
