@@ -17,7 +17,7 @@
           </template>
           <template v-else>
             <router-link v-if="hasFeature('attendance')" to="/attendance" class="nav-link">{{ navLabels.attendance }}</router-link>
-            <router-link to="/apps" class="nav-link">{{ navLabels.apps }}</router-link>
+            <router-link v-if="canUseAppCenter" to="/apps" class="nav-link">{{ navLabels.apps }}</router-link>
             <router-link to="/multitable" class="nav-link">{{ navLabels.multitable }}</router-link>
             <router-link v-if="hasFeature('workflow')" to="/workflows" class="nav-link">{{ navLabels.workflows }}</router-link>
             <router-link v-if="canUseApprovals" to="/approvals" class="nav-link">{{ navLabels.approvals }}</router-link>
@@ -97,6 +97,7 @@ import { useRoute } from 'vue-router'
 import { useAuth } from './composables/useAuth'
 import { useLocale } from './composables/useLocale'
 import { usePlugins } from './composables/usePlugins'
+import { usePlatformApps } from './composables/usePlatformApps'
 import { setMultitableApiErrorLocaleResolver } from './multitable/api/client'
 import { resolveRouteDocumentTitle } from './router/routeTitles'
 import { useFeatureFlags } from './stores/featureFlags'
@@ -104,6 +105,7 @@ import { clearStoredAuthState, getApiBase } from './utils/api'
 
 const route = useRoute()
 const { navItems: pluginNavItems, fetchPlugins } = usePlugins()
+const { apps: platformApps, fetchApps: fetchPlatformApps } = usePlatformApps()
 const { isAttendanceFocused, isPlmWorkbenchFocused, hasFeature, loadProductFeatures } = useFeatureFlags()
 const { clearToken, getAccessSnapshot, getToken, hasPermission } = useAuth()
 const { locale, isZh, setLocale } = useLocale()
@@ -126,6 +128,7 @@ const canManageUsers = computed(() => {
   void route.fullPath
   return getAccessSnapshot().isAdmin
 })
+const canUseAppCenter = computed(() => canManageUsers.value || platformApps.value.length > 0)
 const canUseIntegration = computed(() => {
   void route.fullPath
   return hasPermission('integration:write')
@@ -146,7 +149,7 @@ const navLabels = computed(() => {
       multitable: '多维表',
       workflows: '流程',
       approvals: '审批中心',
-      apps: '应用',
+      apps: '应用中心',
       users: '用户',
       roles: '角色',
       permissions: '权限',
@@ -174,7 +177,7 @@ const navLabels = computed(() => {
     multitable: 'Multitable',
     workflows: 'Workflows',
     approvals: 'Approvals',
-    apps: 'Apps',
+    apps: 'App Center',
     users: 'Users',
     roles: 'Roles',
     permissions: 'Permissions',
@@ -250,7 +253,10 @@ onMounted(async () => {
   if (isPublicRoute.value || attendanceFocused.value || plmWorkbenchFocused.value) {
     return
   }
-  await fetchPlugins()
+  await Promise.all([
+    fetchPlugins(),
+    fetchPlatformApps(),
+  ])
 })
 
 watch(documentTitle, (nextTitle) => {

@@ -95,7 +95,7 @@ export const appRoutes: RouteRecordRaw[] = [
     path: '/apps',
     name: 'platform-app-launcher',
     component: PlatformAppLauncherView,
-    meta: { title: 'Apps', titleZh: '应用', requiresAuth: true }
+    meta: { title: 'App Center', titleZh: '应用中心', requiresAuth: true }
   },
   {
     path: '/apps/:appId',
