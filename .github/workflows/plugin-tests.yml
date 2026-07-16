@@ -561,6 +561,7 @@ jobs:
             tests/integration/stock-preparation-t3b-replay-hardening-realdb.test.ts \
             tests/integration/stock-preparation-t3b-plm-autopersist-realdb.test.ts \
             tests/integration/multitable-l4-canonical-fence-realdb.test.ts \
+            tests/integration/multitable-l4cov-univer-meta-writers-realdb.test.ts \
             --reporter=dot
 
       - name: Run approval real-DB integration (directory endpoints + P1-C field redaction + P1-B add_sign/reduce_sign + direct_manager create/start + A/E/B/D/G cross-lane acceptance + dept_head sync-plumbing carry-forward + continuous_managers chain walk + common template presets + DT-OPS-01 deprovision selection goldens)
