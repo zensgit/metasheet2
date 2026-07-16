@@ -4868,6 +4868,7 @@ module.exports = {
     hasPermission,
     requireAccess,
     resolveTenantId,
+    resolveAuthUserTenantId,
     scopedInput,
     sendError,
     inferHttpStatus,

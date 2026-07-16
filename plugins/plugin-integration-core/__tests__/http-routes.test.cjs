@@ -7504,6 +7504,299 @@ async function testStockPreparationSourceRunRejectsUnapprovedConfig() {
   console.log('  testStockPreparationSourceRunRejectsUnapprovedConfig OK')
 }
 
+// ── T3a: ERP source-run server-side auto-persist (flag MULTITABLE_STOCK_PREP_ERP_AUTOPERSIST_ENABLED) ──
+// design-lock: docs/development/stock-preparation-t3a-erp-source-autopersist-design-lock-20260714.md
+const T3A_ERP_CONFIG_ID = 'private_erp_config_t3a_7788'
+const T3A_ERP_SYSTEM_ID = 'private_erp_system_t3a_7788'
+const T3A_ERP_CODE = 'RAW-ERP-CODE-T3A-7788' // FNumber -> erpMaterialCode (a REQUIRED field, so it reaches persist)
+const T3A_ERP_NAME = 'RAW-ERP-NAME-T3A-7788' // FName -> erpMaterialName
+const T3A_ERP_CREDENTIAL = 'PRIVATE-ERP-CRED-T3A-7788'
+const T3A_SOURCE_RUN_PATH = '/api/integration/stock-preparation/mvp/source-runs/erp-materials'
+
+// One recursive "does any string anywhere contain `needle`" scan, applied in BOTH directions of the
+// leak-bait so the positive leg (value present in the internal write sink) proves the scan works before
+// the negative leg (value absent from the HTTP response) is trusted.
+function deepStringIncludes(value, needle) {
+  if (typeof value === 'string') return value.includes(needle)
+  if (Array.isArray(value)) return value.some((entry) => deepStringIncludes(entry, needle))
+  if (value && typeof value === 'object') return Object.values(value).some((entry) => deepStringIncludes(entry, needle))
+  return false
+}
+
+// Faithful in-memory multitable records+provisioning for the internal MVP cache. `resolveFieldIds`
+// returns an IDENTITY map so the real createTargetScopedRecordsApi translation layer runs as a no-op;
+// records are a per-sheet key/value store honoring the frozen key fields. `writes` captures every
+// createRecord data / patchRecord changes — that IS the internal write sink the leak-bait scans.
+function createInMemoryMvpPersistStore() {
+  const sheets = new Map() // sheetId -> Map(recordId -> { id, sheetId, data })
+  const writes = []
+  const findObjectSheetCalls = []
+  let seq = 0
+  const sheetFor = (sheetId) => {
+    if (!sheets.has(sheetId)) sheets.set(sheetId, new Map())
+    return sheets.get(sheetId)
+  }
+  const recordsApi = {
+    async queryRecords({ sheetId, filters } = {}) {
+      const rows = [...sheetFor(sheetId).values()]
+      const predicate = filters && typeof filters === 'object' ? filters : {}
+      return rows
+        .filter((row) => Object.entries(predicate).every(([key, val]) => row.data[key] === val))
+        .map((row) => ({ id: row.id, sheetId: row.sheetId, data: { ...row.data } }))
+    },
+    async createRecord({ sheetId, data } = {}) {
+      seq += 1
+      const id = `rec_t3a_${seq}`
+      sheetFor(sheetId).set(id, { id, sheetId, data: { ...data } })
+      writes.push({ op: 'create', sheetId, data: { ...data } })
+      return { id, sheetId, data: { ...data } }
+    },
+    async patchRecord({ sheetId, recordId, changes } = {}) {
+      const existing = sheetFor(sheetId).get(recordId)
+      if (!existing) throw new Error(`patchRecord: unknown record ${recordId}`)
+      const data = { ...existing.data }
+      for (const [key, val] of Object.entries(changes || {})) {
+        if (val === null) delete data[key]
+        else data[key] = val
+      }
+      sheetFor(sheetId).set(recordId, { id: recordId, sheetId, data })
+      writes.push({ op: 'patch', sheetId, data: { ...changes } })
+      return { id: recordId, sheetId, data: { ...data } }
+    },
+  }
+  const provisioningApi = {
+    async findObjectSheet({ projectId, objectId } = {}) {
+      findObjectSheetCalls.push({ projectId, objectId })
+      return { id: `sheet_${objectId}` }
+    },
+    async resolveFieldIds({ fieldIds } = {}) {
+      return Object.fromEntries((fieldIds || []).map((fieldId) => [fieldId, fieldId]))
+    },
+  }
+  return { recordsApi, provisioningApi, writes, findObjectSheetCalls }
+}
+
+// A records+provisioning facade that COUNTS and THROWS on every call — for the guard/OFF paths, which
+// must reach NO records or provisioning I/O at all.
+function createCountingThrowMvpApis() {
+  const state = { calls: 0 }
+  const bomb = (name) => async () => {
+    state.calls += 1
+    throw new Error(`${name} must not run on this path`)
+  }
+  return {
+    state,
+    recordsApi: { queryRecords: bomb('queryRecords'), createRecord: bomb('createRecord'), patchRecord: bomb('patchRecord') },
+    provisioningApi: { findObjectSheet: bomb('findObjectSheet'), resolveFieldIds: bomb('resolveFieldIds') },
+  }
+}
+
+function t3aNormalizedErpConfig() {
+  const validation = validateReadSourceConfig({
+    version: 1,
+    systemId: T3A_ERP_SYSTEM_ID,
+    requiredKind: 'erp:k3-wise-webapi',
+    object: 'stock-preparation-source',
+    mode: 'list_page',
+    readPath: '/readonly/stock-preparation',
+    readMethod: 'POST',
+    operations: ['read'],
+    containerPaths: ['Rows'],
+    fieldMap: [
+      { source: 'FItemID', target: 'erpMaterialInternalId' },
+      { source: 'FNumber', target: 'erpMaterialCode' },
+      { source: 'FName', target: 'erpMaterialName' },
+    ],
+  })
+  assert.equal(validation.valid, true, JSON.stringify(validation.errors))
+  return validation.normalized
+}
+
+// Approved ERP read-source + a mock K3 adapter emitting ONE material row carrying sentinel business
+// values, mounted with the caller-supplied records/provisioning facade.
+function createErpAutoPersistHarness({ recordsApi, provisioningApi } = {}) {
+  const erpConfig = t3aNormalizedErpConfig()
+  const sourceReadCalls = []
+  const externalWriteCalls = []
+  const { services } = createMockServices({
+    readSourceConfigStore: {
+      async getForRuntime(input) {
+        if (input.id === T3A_ERP_CONFIG_ID) {
+          return { id: T3A_ERP_CONFIG_ID, status: 'approved', systemId: T3A_ERP_SYSTEM_ID, config: erpConfig }
+        }
+        throw new Error('unexpected config reference')
+      },
+    },
+    externalSystemRegistry: {
+      async getExternalSystemForAdapter(input) {
+        return { id: input.id, tenantId: input.tenantId, kind: 'erp:k3-wise-webapi', credentials: { password: T3A_ERP_CREDENTIAL }, config: {} }
+      },
+    },
+    adapterRegistry: {
+      createAdapter(system) {
+        return {
+          async read(request) {
+            sourceReadCalls.push({ kind: system.kind, request })
+            const rows = [{ FItemID: 'erp_internal_t3a_1', FNumber: T3A_ERP_CODE, FName: T3A_ERP_NAME }]
+            return { records: rows, raw: { Rows: rows }, metadata: { dataRowCount: 1, dataPageIndex: 1, returnedRecordCount: rows.length } }
+          },
+          async upsert(input) { externalWriteCalls.push(['upsert', input]) },
+          async save(input) { externalWriteCalls.push(['save', input]) },
+          async submit(input) { externalWriteCalls.push(['submit', input]) },
+          async audit(input) { externalWriteCalls.push(['audit', input]) },
+        }
+      },
+    },
+  })
+  const { routes } = mountRoutes(services, { recordsApi, provisioningApi })
+  return { routes, sourceReadCalls, externalWriteCalls }
+}
+
+function withAutoPersistFlag(value, run) {
+  const prev = process.env.MULTITABLE_STOCK_PREP_ERP_AUTOPERSIST_ENABLED
+  if (value === undefined) delete process.env.MULTITABLE_STOCK_PREP_ERP_AUTOPERSIST_ENABLED
+  else process.env.MULTITABLE_STOCK_PREP_ERP_AUTOPERSIST_ENABLED = value
+  return Promise.resolve()
+    .then(run)
+    .finally(() => {
+      if (prev === undefined) delete process.env.MULTITABLE_STOCK_PREP_ERP_AUTOPERSIST_ENABLED
+      else process.env.MULTITABLE_STOCK_PREP_ERP_AUTOPERSIST_ENABLED = prev
+    })
+}
+
+async function testStockPreparationErpSourceRunAutoPersistOn() {
+  await withAutoPersistFlag('true', async () => {
+    const store = createInMemoryMvpPersistStore()
+    const { routes, sourceReadCalls, externalWriteCalls } = createErpAutoPersistHarness({
+      recordsApi: store.recordsApi,
+      provisioningApi: store.provisioningApi,
+    })
+
+    const first = await invoke(routes, 'POST', T3A_SOURCE_RUN_PATH, {
+      user: ADMIN_USER,
+      body: { workspaceId: 'workspace_1', readSourceConfigId: T3A_ERP_CONFIG_ID, syncRunId: 'erp_autopersist_run_1' },
+    })
+    // Flag ON: the read gains a real internal write — the read-only projector's fixed mode:'dry_run' and
+    // evidence.internalWriteExecuted:false are OVERRIDDEN, and a landed row makes it 201 (design-lock OD-4).
+    assertOkResponse(first, 201)
+    assert.equal(first.body.data.mode, 'internal_persist')
+    assert.equal(first.body.data.evidence.internalWriteExecuted, true)
+    assert.equal(first.body.data.autoPersist.persisted, true)
+    assert.equal(first.body.data.autoPersist.mode, 'created')
+    assert.equal(first.body.data.autoPersist.created.materials, 1)
+    assert.equal(first.body.data.autoPersist.evidence.valuesFree, true)
+    // externalWrite invariant stays false on the auto-persist path (internal MVP cache only).
+    assert.equal(externalWriteCalls.length, 0, 'auto-persist never calls an external write operation')
+    assert.equal(first.body.data.evidence.externalWriteExecuted, false)
+    assert.equal(first.body.data.evidence.productionWrite, false)
+    assert.equal(first.body.data.evidence.k3SaveSubmitAudit, false)
+
+    // Target derives from the AUTHENTICATED principal only (never the request): the staging project is
+    // `${authTenant}:integration-core`, and provisioning resolves under exactly that project.
+    assert.ok(store.findObjectSheetCalls.length > 0, 'the auto-persist resolves at least one MVP target sheet')
+    for (const call of store.findObjectSheetCalls) {
+      assert.equal(call.projectId, `${ADMIN_USER.tenantId}:integration-core`, 'persist target project derives from the auth tenant')
+    }
+
+    // Leak-bait, BOTH directions with the SAME scan: the sentinel reached the internal write sink (positive
+    // control) yet never appears in the values-free HTTP response.
+    assert.equal(deepStringIncludes(store.writes, T3A_ERP_CODE), true, 'positive control: the ERP code reached the internal write sink')
+    assert.equal(deepStringIncludes(first.body, T3A_ERP_CODE), false, 'values-free: the ERP code never crosses the HTTP response')
+    assert.equal(deepStringIncludes(first.body, T3A_ERP_NAME), false, 'values-free: the ERP name never crosses the HTTP response')
+    assert.equal(deepStringIncludes(first.body, T3A_ERP_CREDENTIAL), false, 'values-free: source credentials never cross the HTTP response')
+    assert.equal(Object.prototype.hasOwnProperty.call(first.body.data, 'intake'), false)
+    assert.equal(Object.prototype.hasOwnProperty.call(first.body.data, 'erpMaterials'), false)
+
+    // Re-run the SAME rows under the SAME syncRunId: upsertErpMaterials patches UNCONDITIONALLY, so the
+    // second run refreshes → still HTTP 201 (there is no "no change → 200" path) (design-lock P2-1).
+    const readsBeforeSecond = sourceReadCalls.length
+    const second = await invoke(routes, 'POST', T3A_SOURCE_RUN_PATH, {
+      user: ADMIN_USER,
+      body: { workspaceId: 'workspace_1', readSourceConfigId: T3A_ERP_CONFIG_ID, syncRunId: 'erp_autopersist_run_1' },
+    })
+    assertOkResponse(second, 201)
+    assert.equal(second.body.data.autoPersist.mode, 'refreshed')
+    assert.equal(second.body.data.autoPersist.patched.materials, 1)
+    assert.equal(second.body.data.autoPersist.created.materials, 0)
+    assert.ok(sourceReadCalls.length > readsBeforeSecond, 'the re-run reads the source again')
+  })
+  console.log('  testStockPreparationErpSourceRunAutoPersistOn OK')
+}
+
+async function testStockPreparationErpSourceRunAutoPersistSteering() {
+  await withAutoPersistFlag('true', async () => {
+    // Every steering vector must be rejected with the DEDICATED code BEFORE any source read or records I/O
+    // (guard runs before the body allowlist AND before I/O). projectId is not in the allowlist, so if the
+    // guard ran after normalize a body projectId would 400 with the GENERIC invalid-key code instead.
+    const vectors = [
+      ['body.tenantId', { body: { readSourceConfigId: T3A_ERP_CONFIG_ID, syncRunId: 'steer_1', tenantId: 'tenant_evil' } }],
+      ['body.projectId', { body: { readSourceConfigId: T3A_ERP_CONFIG_ID, syncRunId: 'steer_2', projectId: 'tenant_evil:integration-core' } }],
+      ['query.tenantId', { body: { readSourceConfigId: T3A_ERP_CONFIG_ID, syncRunId: 'steer_3' }, query: { tenantId: 'tenant_evil' } }],
+      ['query.projectId', { body: { readSourceConfigId: T3A_ERP_CONFIG_ID, syncRunId: 'steer_4' }, query: { projectId: 'tenant_evil:integration-core' } }],
+    ]
+    for (const [label, reqExtra] of vectors) {
+      const bomb = createCountingThrowMvpApis()
+      const { routes, sourceReadCalls, externalWriteCalls } = createErpAutoPersistHarness({
+        recordsApi: bomb.recordsApi,
+        provisioningApi: bomb.provisioningApi,
+      })
+      const res = await invoke(routes, 'POST', T3A_SOURCE_RUN_PATH, { user: ADMIN_USER, ...reqExtra })
+      assert.equal(res.statusCode, 400, `${label}: steering rejected`)
+      assert.equal(res.body.error.code, 'STOCK_PREPARATION_ERP_AUTOPERSIST_STEERING_NOT_ALLOWED', `${label}: DEDICATED steering code`)
+      assert.equal(sourceReadCalls.length, 0, `${label}: guard fires before any source read`)
+      assert.equal(externalWriteCalls.length, 0, `${label}: guard fires before any external write`)
+      assert.equal(bomb.state.calls, 0, `${label}: guard fires before any records/provisioning I/O`)
+    }
+
+    // workspaceId is a SAME-TENANT scope selector, NOT a steering vector — a request carrying only
+    // workspaceId proceeds past the guard and persists (201), never 400'd.
+    const store = createInMemoryMvpPersistStore()
+    const { routes } = createErpAutoPersistHarness({ recordsApi: store.recordsApi, provisioningApi: store.provisioningApi })
+    const ok = await invoke(routes, 'POST', T3A_SOURCE_RUN_PATH, {
+      user: ADMIN_USER,
+      body: { workspaceId: 'workspace_9', readSourceConfigId: T3A_ERP_CONFIG_ID, syncRunId: 'workspace_allowed_1' },
+    })
+    assert.equal(ok.statusCode, 201, 'workspaceId alone is allowed through the steering guard and persists')
+  })
+  console.log('  testStockPreparationErpSourceRunAutoPersistSteering OK')
+}
+
+async function testStockPreparationErpSourceRunAutoPersistOffInert() {
+  await withAutoPersistFlag(undefined, async () => {
+    const bomb = createCountingThrowMvpApis()
+    const { routes, externalWriteCalls } = createErpAutoPersistHarness({ recordsApi: bomb.recordsApi, provisioningApi: bomb.provisioningApi })
+    // Flag OFF (unset): today's read-only behavior byte-for-byte — even a body tenantId is harmless because
+    // the read has no write side effect, so the steering guard is not engaged and no autoPersist is added.
+    const res = await invoke(routes, 'POST', T3A_SOURCE_RUN_PATH, {
+      user: ADMIN_USER,
+      body: { readSourceConfigId: T3A_ERP_CONFIG_ID, syncRunId: 'off_inert_1' },
+    })
+    assertOkResponse(res, 200)
+    assert.equal(res.body.data.mode, 'dry_run')
+    assert.equal(res.body.data.evidence.internalWriteExecuted, false)
+    assert.equal(Object.prototype.hasOwnProperty.call(res.body.data, 'autoPersist'), false, 'OFF adds no autoPersist field')
+    assert.equal(bomb.state.calls, 0, 'OFF never touches records/provisioning')
+    assert.equal(externalWriteCalls.length, 0)
+  })
+  console.log('  testStockPreparationErpSourceRunAutoPersistOffInert OK')
+}
+
+async function testStockPreparationErpAutoPersistTenantResolversDiffer() {
+  // Defense-in-depth for OD-2: the auto-persist route derives its tenant from the AUTHENTICATED principal
+  // (resolveAuthUserTenantId), never resolveTenantId — which for an admin honors a request-supplied tenantId.
+  // The steering guard already blocks a request tenantId at the route, so this difference is not route-
+  // observable; this DIRECT unit test proves the two helpers genuinely differ, so choosing the write-safe
+  // one is load-bearing (changing resolveAuthUserTenantId to read the request would red here).
+  const { resolveTenantId, resolveAuthUserTenantId } = httpRoutes.__internals
+  // A request that carries a steering tenantId (query vector) so the difference is observable: an admin's
+  // resolveTenantId READS it; the write-safe resolveAuthUserTenantId must IGNORE it. If the write-safe
+  // helper were changed to consult the request, this assertion would red.
+  const req = { user: { id: 'user_admin', tenantId: 'tenant_1', roles: ['admin'], permissions: ['integration:admin'] }, query: { tenantId: 'tenant_evil' }, params: {} }
+  assert.equal(resolveTenantId(req), 'tenant_evil', 'resolveTenantId honors an admin request tenantId (the steering vector)')
+  assert.equal(resolveAuthUserTenantId(req), 'tenant_1', 'resolveAuthUserTenantId ignores the request and returns the authenticated tenant')
+  console.log('  testStockPreparationErpAutoPersistTenantResolversDiffer OK')
+}
+
 async function main() {
   await testTemplatesCrudRoutes()
   await testUnauthenticatedWriteRequestIsRejected()
@@ -7535,6 +7828,10 @@ async function main() {
   await testStockPreparationReadonlySourceRunRoutes()
   await testStockPreparationSourceRunRejectsUnapprovedConfig()
   await testStockPreparationSourceRunRejectsSystemKindMismatch()
+  await testStockPreparationErpSourceRunAutoPersistOn()
+  await testStockPreparationErpSourceRunAutoPersistSteering()
+  await testStockPreparationErpSourceRunAutoPersistOffInert()
+  await testStockPreparationErpAutoPersistTenantResolversDiffer()
   await testExternalSystemUpsertPreservesObjectSchema()
   await testExternalSystemTestPersistsFailureAndPreservesInactive()
   await testExternalSystemTestClearsErrorToActiveOnSuccess()
