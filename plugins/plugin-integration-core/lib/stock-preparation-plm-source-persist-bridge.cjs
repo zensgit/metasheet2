@@ -169,24 +169,31 @@ function buildPlmSourcePersistInput({ request, intake } = {}) {
 // The T3b-1c route MUST call this on the approved config BEFORE any source read / provisioning / persist
 // I/O. Pure: inspects only the given config object; throws the dedicated coarse 422 (values-free).
 const FORBIDDEN_FIELD_MAP_TARGETS = Object.freeze(['missingChildBom'])
+function configShapeInvalid(reason) {
+  throw new StockPreparationPlmSourcePersistBridgeError(
+    422,
+    'STOCK_PREPARATION_PLM_AUTOPERSIST_CONFIG_SHAPE_INVALID',
+    'approved source config fieldMap is malformed for the auto-persisting PLM source-run',
+    { field: 'fieldMap', reason },
+  )
+}
 function assertPlmAutoPersistSourceConfigSafe(config) {
-  const fieldMap = config && Array.isArray(config.fieldMap) ? config.fieldMap : null
-  if (!fieldMap) {
-    throw new StockPreparationPlmSourcePersistBridgeError(
-      422,
-      'STOCK_PREPARATION_PLM_AUTOPERSIST_CONFIG_SHAPE_INVALID',
-      'approved source config must carry a fieldMap array',
-      { field: 'fieldMap' },
-    )
-  }
-  for (const entry of fieldMap) {
-    const target = entry && typeof entry.target === 'string' ? entry.target : ''
-    if (FORBIDDEN_FIELD_MAP_TARGETS.includes(target)) {
+  // Fail-closed by construction (owner P2, #4391 review): this helper is defined as T3b-1c's independent,
+  // pre-I/O safety boundary and must NOT lean on an upstream validator always being correct. A non-array
+  // fieldMap, an EMPTY fieldMap, or ANY malformed entry (non-object, or a non-string / empty `target`) is
+  // rejected here — before it can reach source read / provisioning / persist.
+  if (!config || typeof config !== 'object') configShapeInvalid('config_object_required')
+  if (!Array.isArray(config.fieldMap)) configShapeInvalid('fieldmap_array_required')
+  if (config.fieldMap.length < 1) configShapeInvalid('fieldmap_empty')
+  for (const entry of config.fieldMap) {
+    if (!entry || typeof entry !== 'object') configShapeInvalid('entry_object_required')
+    if (typeof entry.target !== 'string' || entry.target.length === 0) configShapeInvalid('entry_target_string_required')
+    if (FORBIDDEN_FIELD_MAP_TARGETS.includes(entry.target)) {
       throw new StockPreparationPlmSourcePersistBridgeError(
         422,
         'STOCK_PREPARATION_PLM_AUTOPERSIST_CONFIG_TARGET_FORBIDDEN',
         'approved source config maps a forbidden internal marker target for the auto-persisting PLM source-run',
-        { target, forbiddenTargets: FORBIDDEN_FIELD_MAP_TARGETS.slice() },
+        { target: entry.target, forbiddenTargets: FORBIDDEN_FIELD_MAP_TARGETS.slice() },
       )
     }
   }

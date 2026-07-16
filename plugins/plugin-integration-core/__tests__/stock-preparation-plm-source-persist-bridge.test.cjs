@@ -310,11 +310,22 @@ run('config guard: fieldMap.target=missingChildBom is structurally rejected with
   assert.deepEqual(FORBIDDEN_FIELD_MAP_TARGETS, ['missingChildBom'])
 })
 
-run('config guard: a config without a fieldMap array fails closed (shape invalid), never passes silently', () => {
-  for (const bad of [null, {}, { fieldMap: 'nope' }, { fieldMap: null }]) {
+run('config guard is fully shape-fail-closed: empty array + every malformed entry throws SHAPE_INVALID (owner P2, #4391)', () => {
+  const badConfigs = [
+    null, undefined, 'nope', 42,
+    {}, { fieldMap: null }, { fieldMap: 'nope' }, { fieldMap: {} },
+    { fieldMap: [] },                          // empty array (was previously ACCEPTED)
+    { fieldMap: [null] },                      // null entry (was ACCEPTED)
+    { fieldMap: [{}] },                        // entry without target (was ACCEPTED)
+    { fieldMap: [{ target: 42 }] },            // non-string target (was ACCEPTED)
+    { fieldMap: [{ target: '' }] },            // empty-string target
+    { fieldMap: [{ source: 'x', target: 'ok' }, {}] }, // one valid + one malformed → whole config rejected
+  ]
+  for (const bad of badConfigs) {
     assert.throws(() => assertPlmAutoPersistSourceConfigSafe(bad), (error) =>
       error instanceof StockPreparationPlmSourcePersistBridgeError &&
-      error.status === 422 && error.code === 'STOCK_PREPARATION_PLM_AUTOPERSIST_CONFIG_SHAPE_INVALID')
+      error.status === 422 && error.code === 'STOCK_PREPARATION_PLM_AUTOPERSIST_CONFIG_SHAPE_INVALID',
+      `expected SHAPE_INVALID for ${JSON.stringify(bad)}`)
   }
 })
 
