@@ -79,17 +79,17 @@ function beginPhase(name) {
 // The 4 LOCUS fields (added before the self-scan so it covers them). `result` + sentinels are passed in
 // for testability. lastCompletedPhase: on a run that reached the last phase, everything completed; an
 // early-return/throw within phase i means the last COMPLETED phase is i-1 (early-returns are mid-phase).
-export function computeDiagnosticLocus(result, sentinels = SELF_SCAN_SENTINELS) {
+export function computeDiagnosticLocus(result) {
   const S = result.summary
   const failedChecks = result.checks.filter((c) => c.ok !== true)
   const reachedIdx = DIAG.reachedIdx
   const last = SMOKE_PHASES.length - 1
   S.failedCheckCount = failedChecks.length
   S.lastCompletedPhase = reachedIdx >= last ? SMOKE_PHASES[last] : (reachedIdx > 0 ? SMOKE_PHASES[reachedIdx - 1] : 'NONE')
-  // check names are fixed hardcoded literals; the extra leakScan guard makes firstFailedCheck values-free
-  // even if a future name interpolated a value (it would surface as REDACTED, never the value).
-  const name = failedChecks.length ? String(failedChecks[0].name) : 'NONE'
-  S.firstFailedCheck = leakScan(name, sentinels) ? name : 'REDACTED'
+  // firstFailedCheck is the PHASE of the first failed check — a FIXED enum, never a free-form check name
+  // (a name could contain a value); each check records its phase at push time.
+  const firstPhase = failedChecks.length ? String(failedChecks[0].phase || 'NONE') : 'NONE'
+  S.firstFailedCheck = (firstPhase === 'NONE' || SMOKE_PHASES.includes(firstPhase)) ? firstPhase : 'UNKNOWN'
   S.responseLeakScanStatus = (reachedIdx >= last && typeof S.leakScanClean === 'boolean')
     ? (S.leakScanClean ? 'PASS' : 'FAIL')
     : 'NOT_RUN'
@@ -427,7 +427,7 @@ export function formatSummaryBlock(summary) {
 }
 
 function check(name, ok, detail = '') {
-  RESULT.checks.push({ name, ok: ok === true, detail })
+  RESULT.checks.push({ name, ok: ok === true, detail, phase: RESULT.summary.reachedPhase || 'NONE' })
   const mark = ok === true ? 'ok' : 'FAIL'
   process.stderr.write(`[smoke] ${name}: ${mark}${detail ? ` (${detail})` : ''}\n`)
   return ok === true

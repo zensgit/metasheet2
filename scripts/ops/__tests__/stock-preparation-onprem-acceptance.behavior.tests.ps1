@@ -302,6 +302,58 @@ Invoke-SmokeStage -Token $token
     "$stageOutput" -notmatch 'dummy-not-a-real-token'
   )
 
+  # ── corrective-5: a smoke that early-returns (exit 1) with a valid-looking summary must still PROPAGATE
+  # its bounded diagnostics into the acceptance summary, so the failure is localizable even though the runner
+  # discards the child's raw output. Drive the REAL Invoke-SmokeStage; assert the emitted .json carries them.
+  $diagLines = @(
+    "process.stdout.write('mvpSmoke.pass=false\n')",
+    "process.stdout.write('auditActionsCovered=N/8\n')",
+    "process.stdout.write('selfScanClean=true\n')",
+    "process.stdout.write('failureClass=CHECK_FAILED\n')",
+    "process.stdout.write('lastCompletedPhase=AUTH\n')",
+    "process.stdout.write('firstFailedCheck=PROVISIONING\n')",
+    "process.stdout.write('failedCheckCount=2\n')",
+    "process.stdout.write('responseLeakScanStatus=NOT_RUN\n')",
+    'process.exit(1)'
+  )
+  Set-Content -LiteralPath $fakeSmoke -Encoding utf8 -Value ($diagLines -join "`n")
+  $diagSummary = Join-Path $fakeSmokeRoot 'diag-summary.txt'
+  & pwsh -NoProfile -File $stageHarness -AcceptanceScript $scriptPath -DeployRoot $fakeSmokeRoot -SummaryPath $diagSummary *> $null
+  $diagExit = $LASTEXITCODE
+  $diagJsonPath = [System.IO.Path]::ChangeExtension($diagSummary, '.json')
+  $diagJson = if (Test-Path $diagJsonPath) { Get-Content $diagJsonPath -Raw | ConvertFrom-Json } else { $null }
+  Check "corrective-5: an exit-1 smoke still fails closed AND propagates its bounded diagnostics into the summary" (
+    $diagExit -eq 1 -and
+    $null -ne $diagJson -and
+    $diagJson.failedStage -eq 'smoke' -and
+    $diagJson.'mvpSmoke.failureClass' -eq 'CHECK_FAILED' -and
+    $diagJson.'mvpSmoke.lastCompletedPhase' -eq 'AUTH' -and
+    $diagJson.'mvpSmoke.firstFailedCheck' -eq 'PROVISIONING' -and
+    $diagJson.'mvpSmoke.failedCheckCount' -eq '2' -and
+    $diagJson.'mvpSmoke.responseLeakScanStatus' -eq 'NOT_RUN'
+  )
+  # values-free hardening: an off-vocabulary / business-value diagnostic never reaches the summary.
+  $leakLines = @(
+    "process.stdout.write('mvpSmoke.pass=false\n')",
+    "process.stdout.write('selfScanClean=true\n')",
+    "process.stdout.write('failureClass=DWG-88472-A\n')",
+    "process.stdout.write('lastCompletedPhase=SECRET_TENANT_evil\n')",
+    "process.stdout.write('firstFailedCheck=material chinese steel Q235 x 99\n')",
+    'process.exit(1)'
+  )
+  Set-Content -LiteralPath $fakeSmoke -Encoding utf8 -Value ($leakLines -join "`n")
+  $leakSummary = Join-Path $fakeSmokeRoot 'diag-leak-summary.txt'
+  & pwsh -NoProfile -File $stageHarness -AcceptanceScript $scriptPath -DeployRoot $fakeSmokeRoot -SummaryPath $leakSummary *> $null
+  $leakJsonPath = [System.IO.Path]::ChangeExtension($leakSummary, '.json')
+  $leakJson = if (Test-Path $leakJsonPath) { Get-Content $leakJsonPath -Raw | ConvertFrom-Json } else { $null }
+  Check "corrective-5: an off-vocabulary / business-value diagnostic is coerced to NOT_RUN/UNKNOWN, never surfaced" (
+    $null -ne $leakJson -and
+    (@('NOT_RUN', 'UNKNOWN') -contains $leakJson.'mvpSmoke.failureClass') -and
+    $leakJson.'mvpSmoke.lastCompletedPhase' -eq 'UNKNOWN' -and
+    (@('NOT_RUN', 'UNKNOWN') -contains $leakJson.'mvpSmoke.firstFailedCheck') -and
+    ((Get-Content ([System.IO.Path]::ChangeExtension($leakSummary, '.txt')) -Raw) -notmatch 'DWG-88472|Q235|SECRET_TENANT')
+  )
+
   $base = [pscustomobject]@{ state = 'online'; restartTime = 3; uptime = 1000 }
 
   # Entity corrective-1 reproduction: PM2 includes process.env in jlist; on Windows it commonly carries

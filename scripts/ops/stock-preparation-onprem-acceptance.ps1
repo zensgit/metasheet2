@@ -225,8 +225,9 @@ function Test-SmokeOutcome {
   if ($lastPhase -ne 'NOT_RUN' -and $allowedPhase -notcontains $lastPhase) { $lastPhase = 'UNKNOWN' }
   $leakScan = if ($Joined -match '(?m)^responseLeakScanStatus=(NOT_RUN|PASS|FAIL)\s*$') { $Matches[1] } else { 'NOT_RUN' }
   $failedCount = if ($Joined -match '(?m)^failedCheckCount=(\d{1,4})\s*$') { $Matches[1] } else { '0' }
-  $firstFailed = if ($Joined -match '(?m)^firstFailedCheck=(.+?)\s*$') { $Matches[1] } else { 'NOT_RUN' }
-  if ($firstFailed -notmatch '^[A-Za-z0-9 _/:>=.,()\-]{1,80}$') { $firstFailed = 'UNKNOWN' }
+  # firstFailedCheck is the PHASE of the first failed check — allowlisted like lastCompletedPhase.
+  $firstFailed = if ($Joined -match '(?m)^firstFailedCheck=([A-Za-z_]+)\s*$') { $Matches[1] } else { 'NOT_RUN' }
+  if ($firstFailed -ne 'NOT_RUN' -and $allowedPhase -notcontains $firstFailed) { $firstFailed = 'UNKNOWN' }
 
   return @{
     pass = $pass; audit = $audit; selfScan = $selfScan; ok = $ok; reason = $reason
