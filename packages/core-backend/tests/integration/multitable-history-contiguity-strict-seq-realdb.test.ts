@@ -238,7 +238,7 @@ describeIfDatabase('W0-1 v3.7 STRICT history contiguity — seq-ordered, ALL gen
     await rev(SHEET, R, 2, 'update', { [NAME]: 'gB-v2' })
     await insertLive(SHEET, R, { [NAME]: 'gB-v2' }, 2) // live == terminal latest snapshot ⇒ content layer clean
 
-    await expectRevertRefusesWithZeroWrites(SHEET)
+    await expectRevertRefusesWithZeroWrites(SHEET, 'chain_hole')
   })
 
   test('GENERATION-0 (b) ⇒ 409: an UPDATE before any create refuses (chain_hole)', async () => {
@@ -248,7 +248,7 @@ describeIfDatabase('W0-1 v3.7 STRICT history contiguity — seq-ordered, ALL gen
     await rev(SHEET, R, 2, 'update', { [NAME]: 'v2' })
     await insertLive(SHEET, R, { [NAME]: 'v2' }, 2)
 
-    await expectRevertRefusesWithZeroWrites(SHEET)
+    await expectRevertRefusesWithZeroWrites(SHEET, 'chain_hole')
   })
 
   test('GENERATION-0 (c) ⇒ 409: a VERSION MARKER before any create refuses (chain_hole)', async () => {
@@ -258,7 +258,7 @@ describeIfDatabase('W0-1 v3.7 STRICT history contiguity — seq-ordered, ALL gen
     await rev(SHEET, R, 2, 'update', { [NAME]: 'v2' })
     await insertLive(SHEET, R, { [NAME]: 'v2' }, 2)
 
-    await expectRevertRefusesWithZeroWrites(SHEET)
+    await expectRevertRefusesWithZeroWrites(SHEET, 'chain_hole')
   })
 
   test('GENERATION-0 (d) ⇒ 409: a DELETE before any create refuses (chain_hole)', async () => {
@@ -267,7 +267,7 @@ describeIfDatabase('W0-1 v3.7 STRICT history contiguity — seq-ordered, ALL gen
     await rev(SHEET, R, 1, 'create', { [NAME]: 'v1' })
     await insertLive(SHEET, R, { [NAME]: 'v1' }, 1)
 
-    await expectRevertRefusesWithZeroWrites(SHEET)
+    await expectRevertRefusesWithZeroWrites(SHEET, 'chain_hole')
   })
 
   // ── DUP-WITHIN-GENERATION ────────────────────────────────────────────────────────────────────────────────
