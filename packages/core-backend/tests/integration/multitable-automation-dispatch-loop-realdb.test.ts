@@ -33,7 +33,12 @@ import {
 import type { ClaimedConsumer, Queryable } from '../../src/multitable/automation-durable-dispatcher'
 
 /** A minimal always-valid telemetry sink for tests that don't assert on it. */
-const noopObserver: DispatchLoopObserver = { onUnknownConsumerKeys: () => {}, onTickError: () => {}, onHeartbeatError: () => {} }
+const noopObserver: DispatchLoopObserver = {
+  onUnknownConsumerKeys: () => {},
+  onTickError: () => {},
+  onHeartbeatError: () => {},
+  onClaimTimePoison: () => {},
+}
 
 const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
 const db = () => poolManager.get()
@@ -260,10 +265,11 @@ describeIfDatabase('P2 durable-delivery S2-b — dispatch loop (real DB)', () =>
     const id0 = await seedRow(k)
     const id1 = await seedRow(k)
     const id2 = await seedRow(k)
-    // deterministic order id0 < id1 < id2 (claim dispatches oldest-first).
-    await db().query(`UPDATE meta_automation_outbox SET created_at = now() - interval '3 seconds' WHERE id=$1`, [id0])
-    await db().query(`UPDATE meta_automation_outbox SET created_at = now() - interval '2 seconds' WHERE id=$1`, [id1])
-    await db().query(`UPDATE meta_automation_outbox SET created_at = now() - interval '1 second'  WHERE id=$1`, [id2])
+    // deterministic claim order id0 < id1 < id2 — the claim CTE picks by consumer.updated_at ASC (NOT outbox
+    // created_at, which only orders the returned batch), so pin updated_at to control which row is claimed first.
+    await db().query(`UPDATE meta_automation_outbox_consumer SET updated_at = now() - interval '3 seconds' WHERE outbox_id=$1`, [id0])
+    await db().query(`UPDATE meta_automation_outbox_consumer SET updated_at = now() - interval '2 seconds' WHERE outbox_id=$1`, [id1])
+    await db().query(`UPDATE meta_automation_outbox_consumer SET updated_at = now() - interval '1 second'  WHERE outbox_id=$1`, [id2])
     let processed = 0
     const r = new ConsumerAdapterRegistry()
     r.register(
@@ -339,8 +345,9 @@ describeIfDatabase('P2 durable-delivery S2-b — dispatch loop (real DB)', () =>
     const kNew = `ck_${RUN}_holNew`
     const idOld = await seedRow(kOld)
     const idNew = await seedRow(kNew)
-    await db().query(`UPDATE meta_automation_outbox SET created_at = now() - interval '2 seconds' WHERE id=$1`, [idOld])
-    await db().query(`UPDATE meta_automation_outbox SET created_at = now() - interval '1 second'  WHERE id=$1`, [idNew])
+    // claim order is by consumer.updated_at ASC — pin it (not outbox created_at) so idOld is the claimed HEAD.
+    await db().query(`UPDATE meta_automation_outbox_consumer SET updated_at = now() - interval '2 seconds' WHERE outbox_id=$1`, [idOld])
+    await db().query(`UPDATE meta_automation_outbox_consumer SET updated_at = now() - interval '1 second'  WHERE outbox_id=$1`, [idNew])
     // the old row is ALREADY at the ceiling (attempts=2, maxAttempts=2) → poisoned at claim, returns no row.
     await db().query(`UPDATE meta_automation_outbox_consumer SET attempts = 2 WHERE outbox_id=$1`, [idOld])
     let newCalled = 0
@@ -423,6 +430,7 @@ describeIfDatabase('P2 durable-delivery S2-b — dispatch loop (real DB)', () =>
       },
       onTickError: () => {},
       onHeartbeatError: () => {},
+      onClaimTimePoison: () => {},
     }
     const handle = startDurableDispatchLoop(db(), r, throwingObserver, {
       env: { AUTOMATION_DURABLE_DELIVERY_ENABLED: 'true' } as unknown as NodeJS.ProcessEnv,
@@ -706,11 +714,21 @@ describe('P2 durable-delivery S2-b — pure guards (no DB)', () => {
     await expect(runDispatchTick(unreachableDb, oneAdapterRegistry(), { retryBaseMs: aboveDefaultCap })).rejects.toThrow(/retryCapMs/)
   })
 
-  test('P2#4: onHeartbeatError is also a required sink (a degrading store must be observable)', () => {
+  test('P2#4: onHeartbeatError and onClaimTimePoison are also required sinks (degrading store / claim-time dead-letter must be observable)', () => {
+    // missing onHeartbeatError
     expect(() =>
       startDurableDispatchLoop(unreachableDb, oneAdapterRegistry(), { onUnknownConsumerKeys: () => {}, onTickError: () => {} } as unknown as DispatchLoopObserver, {
         env: flagOn,
       }),
+    ).toThrow(/telemetry sink/)
+    // missing onClaimTimePoison (has the other three)
+    expect(() =>
+      startDurableDispatchLoop(
+        unreachableDb,
+        oneAdapterRegistry(),
+        { onUnknownConsumerKeys: () => {}, onTickError: () => {}, onHeartbeatError: () => {} } as unknown as DispatchLoopObserver,
+        { env: flagOn },
+      ),
     ).toThrow(/telemetry sink/)
   })
 
@@ -724,6 +742,7 @@ describe('P2 durable-delivery S2-b — pure guards (no DB)', () => {
     const observer: DispatchLoopObserver = {
       onUnknownConsumerKeys: () => {},
       onHeartbeatError: () => {},
+      onClaimTimePoison: () => {},
       onTickError: () => {
         tickErrorSeen += 1
         throw new Error('and the error sink is down too')

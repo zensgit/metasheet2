@@ -48,9 +48,9 @@
  *     at tick entry (before the claim) and at loop start (before the timer). `intervalMs=0` (hot loop), a
  *     fractional/huge backoff, a sub-minimum lease, and an effective backoff inversion are rejected up front.
  *   - **The long-running loop requires a telemetry sink**: `onUnknownConsumerKeys` + `onTickError` +
- *     `onHeartbeatError` are mandatory (a silent stuck row, a swallowed tick error, or a hidden heartbeat DB
- *     error is an operational blind spot), and every observer call is exception-safe — a broken sink can
- *     neither kill the process nor stop delivery.
+ *     `onHeartbeatError` + `onClaimTimePoison` are mandatory (a silent stuck row, a swallowed tick error, a
+ *     hidden heartbeat DB error, or an unobserved claim-time dead-letter is an operational blind spot), and
+ *     every observer call is exception-safe — a broken sink can neither kill the process nor stop delivery.
  *
  * Nothing here runs while `AUTOMATION_DURABLE_DELIVERY_ENABLED` is OFF: `startDurableDispatchLoop` refuses
  * to start when the flag is off, and no production code calls it yet (that wiring is S5/S4 activation).
@@ -131,12 +131,14 @@ const MAX_INTERVAL_MS = 3_600_000 // 1h — an interval beyond this is almost ce
 // the heartbeat (leaseMs/3) fires and a renew round-trip completes BEFORE the lease expires — otherwise a
 // competitor reclaims a still-running delivery (#4334 review P1-B). 1s is a conservative floor for that margin.
 const MIN_LOOP_LEASE_MS = 1_000
-// Per-slot claim re-claims within one tick if a rescheduled row becomes reclaimable again immediately. A
-// pathological sub-tick backoff (e.g. 1ms) turns retry into a same-tick busy-spin that burns attempts
-// back-to-back and defeats the point of backoff (spreading retries over time). Flooring the backoff base at 1s
-// means a rescheduled row can only be re-claimed after ≥1s of REAL elapsed time — a legitimate retry, not an
-// intra-tick spin (#4334 round-3 adversarial P3). Correctness held either way (attempts == adapter calls), but
-// this keeps the retry schedule honest.
+// A RESCHEDULED row (a retry) must not become reclaimable again within the SAME tick. With per-slot claim a
+// pathological sub-tick backoff (e.g. 1ms) would let a just-rescheduled row be re-claimed slot-after-slot —
+// a same-tick busy-spin that burns its attempts back-to-back and defeats backoff's purpose (spreading retries
+// over time). Flooring the backoff base at 1s means a rescheduled row can only be re-claimed after ≥1s of REAL
+// elapsed time — a legitimate future retry, not an intra-tick spin (#4334 round-3 adversarial P3). (This is
+// distinct from a claim-time-poisoned HEAD, which IS scanned past within the same tick — see runDispatchTick.)
+// Delivery correctness held without the floor (a claimed row is always attempted); the floor keeps the retry
+// SCHEDULE honest.
 const MIN_RETRY_BASE_MS = 1_000
 
 /** Reject fractional, non-finite, out-of-safe-range, or out-of-bounds numeric params before they do anything. */
@@ -526,7 +528,10 @@ export interface DispatchLoopObserver {
   /** A heartbeat renew hit a DB error mid-flight (an infra signal, NOT a normal lost lease). Required so a
    *  degrading store surfaces here instead of hiding inside the lostLease count (#4334 review P2-C). */
   onHeartbeatError(info: { outboxId: string; consumerKey: string }): void
-  /** Optional per-tick metrics for observability (completed/rescheduled/poisoned/lostLease/heartbeatErrors). */
+  /** A row poisoned AT CLAIM (already at the attempt ceiling → dead_letter, never dispatched). Required so the
+   *  terminal transition is observable instead of vanishing behind an empty claim (#4334 review head-of-line). */
+  onClaimTimePoison(info: { outboxId: string; consumerKey: string; attempts: number }): void
+  /** Optional per-tick metrics for observability (completed/rescheduled/poisoned/lostLease/heartbeatErrors/claimTimePoisoned). */
   onTick?(result: DispatchTickResult): void
 }
 
@@ -567,9 +572,10 @@ export function startDurableDispatchLoop(
     !observer ||
     typeof observer.onUnknownConsumerKeys !== 'function' ||
     typeof observer.onTickError !== 'function' ||
-    typeof observer.onHeartbeatError !== 'function'
+    typeof observer.onHeartbeatError !== 'function' ||
+    typeof observer.onClaimTimePoison !== 'function'
   ) {
-    throw new TypeError('durable dispatch loop requires a telemetry sink (observer.onUnknownConsumerKeys + onTickError + onHeartbeatError)')
+    throw new TypeError('durable dispatch loop requires a telemetry sink (observer.onUnknownConsumerKeys + onTickError + onHeartbeatError + onClaimTimePoison)')
   }
   if (!isDurableDeliveryEnabled(opts.env ?? process.env)) {
     throw new Error('durable dispatch loop must not start while AUTOMATION_DURABLE_DELIVERY_ENABLED is off')
@@ -591,6 +597,7 @@ export function startDurableDispatchLoop(
       // fold the loop-stop signal into each adapter's ctx.signal so stop() cancels in-flight work.
       onUnknownConsumerKeys: (keys) => safeInvoke(observer.onUnknownConsumerKeys, keys),
       onHeartbeatError: (info) => safeInvoke(observer.onHeartbeatError, info),
+      onClaimTimePoison: (info) => safeInvoke(observer.onClaimTimePoison, info),
       shouldStop: () => stopped,
       stopSignal: stopController.signal,
     })
