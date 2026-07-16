@@ -114,7 +114,9 @@ const mkWriteService = () => {
 const setBlock = async (state: WriterBlockState | null) =>
   q('UPDATE meta_sheets SET recovery_writer_state = $2 WHERE id = $1', [SHEET, state])
 const readBlock = async (): Promise<unknown> =>
-  (await q('SELECT recovery_writer_state FROM meta_sheets WHERE id = $1', [SHEET])).rows[0] as unknown
+  ((await q('SELECT recovery_writer_state FROM meta_sheets WHERE id = $1', [SHEET])).rows[0] as
+    | { recovery_writer_state: unknown }
+    | undefined)?.recovery_writer_state ?? null
 const recordData = async (id: string): Promise<Record<string, unknown> | undefined> =>
   ((await q('SELECT data FROM meta_records WHERE id = $1', [id])).rows[0] as { data: Record<string, unknown> } | undefined)?.data
 const recordExists = async (id: string): Promise<boolean> =>
@@ -451,9 +453,10 @@ describeIfDatabase('W0-1 L4 — all-writer canonical fence (real DB)', () => {
   test('S1 exact-bigint seq ordering on synthetic revisions (never setval; Number() would collapse these)', async () => {
     const R = mkRecord('s1')
     await seedRecord(R)
-    // Two seq values that are DISTINCT as bigints but EQUAL as float64 (differ below the 2^53 ULP).
-    const seqLo = '9007199254740993' // 2^53 + 1
-    const seqHi = '9007199254740995' // 2^53 + 3  (Number() maps both to 9007199254740992/…994 region → collapse)
+    // Two seq values that are DISTINCT as bigints but EQUAL as float64: above 2^53 the ULP is 2, so the odd
+    // value 2^53+1 has no float64 representation and rounds down to 2^53 — colliding with 2^53 itself.
+    const seqLo = '9007199254740992' // 2^53 (exactly representable)
+    const seqHi = '9007199254740993' // 2^53 + 1 (Number() rounds to 2^53 → collides with seqLo)
     expect(Number(seqLo)).toBe(Number(seqHi)) // the trap: float64 cannot tell them apart
     expect(BigInt(seqLo) < BigInt(seqHi)).toBe(true) // exact bigint can
     // Persist them on isolated fixture revision rows (explicit seq literals — NOT nextval, NOT setval).
