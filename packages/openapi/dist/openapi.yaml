@@ -184,6 +184,18 @@ components:
             recordId:
               type: string
               nullable: true
+            baseName:
+              type: string
+              nullable: true
+            sheetName:
+              type: string
+              nullable: true
+            viewName:
+              type: string
+              nullable: true
+            fieldName:
+              type: string
+              nullable: true
           required:
             - unread
             - mentioned
@@ -2792,6 +2804,13 @@ components:
             True only when MULTITABLE_ENABLE_PIT_RESET is on AND the actor has
             canManageSheetAccess; populated by GET /context (absent on other
             capability responses). Drives the FE Reset entry visibility.
+        sheetRevertEnabled:
+          type: boolean
+          description: >-
+            True only when MULTITABLE_ENABLE_SHEET_REVERT is on AND the actor
+            has canManageSheetAccess; populated by GET /context (absent on other
+            capability responses). Drives the FE Revert entry visibility
+            (interim revert-execute master gate, current-risk mitigation).
       required:
         - canRead
         - canCreateRecord

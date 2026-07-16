@@ -6,7 +6,7 @@
 
 ## 1. Flag 清单（本线相关，全部默认 OFF）
 
-> **单一真源（R12-C，2026-07-12）**：本表是人读摘要、**并不完整**（本线共 **19** 个 flag）。**权威、完整、机器校验的清单 = `scripts/ops/global-history-flag-manifest.mjs`**；开关前请跑 `node scripts/ops/multitable-global-history-flag-status.mjs --strict`（展示全部 flag + 拒绝非法组合：lossy 无 base / side-door 无 capture / PIT-reset 撞 retention）。**本表若与 manifest 冲突，以 manifest 为准。**
+> **单一真源（R12-C，2026-07-12；#4261 revert 总闸 +1 → 2026-07-14）**：本表是人读摘要、**并不完整**（本线共 **20** 个 flag，#4261 加入 `MULTITABLE_ENABLE_SHEET_REVERT`）。**权威、完整、机器校验的清单 = `scripts/ops/global-history-flag-manifest.mjs`**；开关前请跑 `node scripts/ops/multitable-global-history-flag-status.mjs --strict`（展示全部 flag + 拒绝非法组合：lossy 无 base / side-door 无 capture / PIT-reset 撞 retention / **undelete 无 revert 总闸**）。**本表若与 manifest 冲突，以 manifest 为准。**
 
 | Flag | 激活值 | 作用 | 出处 |
 |---|---|---|---|
@@ -16,7 +16,8 @@
 | `MULTITABLE_ENABLE_RECORD_UNDELETE_INBOUND` | `'true'` | 4c-3 重放层：restore / PIT-resurrect 重建 inbound 边（Option A 邻居同意） | 4c-3 锁 |
 | `MULTITABLE_ENABLE_FIELD_RETYPE_REVERT` | `'true'` | 4c-1 field retype revert **BASE** flag（**仅**无损/结构性 revert；base OFF ⇒ 整面 403。**旧表把它写成「lossy」= 错**，有损另需下一行的 `_LOSSY`） | 4c-1 锁 |
 | `MULTITABLE_ENABLE_FIELD_RETYPE_REVERT_LOSSY` | `'true'`（**且** base 也须 `'true'`） | 4c-1 **有损** retype revert（双门：`isLossyRetypeRevertEnabled = _LOSSY==='true' && base==='true'`，`lossy-retype-oracle.ts`；base 未开时 helper `--strict` 拒绝） | 4c-1 锁 |
-| `MULTITABLE_ENABLE_PIT_UNDELETE` | `'true'` | T8-1 PIT undelete-execute（resurrect 面；4c-3 的第二重放面挂在它之下） | T8-1 锁 |
+| `MULTITABLE_ENABLE_SHEET_REVERT` | `'true'`（规范化字面 `'true'`） | **#4261 interim revert-execute 总闸**：destructive `revert-execute` 默认 **OFF**（入口第一道判断即 403 `REVERT_DISABLED`，早于 parse/auth/DB/写；镜像 PIT_RESET 闸 + canManageSheetAccess floor）。**生产保持 OFF，直到完整 W0-1 正确性修复落地**（TOCTOU / healed-gap 未缓解）。只读 `revert-preview` 不 gated。**undelete 成功路径需同时开本闸 + `MULTITABLE_ENABLE_PIT_UNDELETE`**（总闸在最前）。 | #4261 |
+| `MULTITABLE_ENABLE_PIT_UNDELETE` | `'true'` | T8-1 PIT undelete-execute（resurrect 面；4c-3 的第二重放面挂在它之下）。**依赖 `MULTITABLE_ENABLE_SHEET_REVERT`**：undelete 在 revert-execute 内，总闸先判，单开本闸无效（preview `undeleteSupported=false`，execute 403 `REVERT_DISABLED`）。 | T8-1 锁 |
 | `MULTITABLE_META_REVISION_RETENTION_ENABLED` | **`'1'`**（⚠ 非 `'true'`） | retention janitor：revisions/config-revisions/tombstones 老化 | T9/4c-2 |
 | `MULTITABLE_META_REVISION_RETENTION_POLICY / _KEEP_N / _DAYS / _BATCH / _INTERVAL_MS` | 见代码默认 | retention 细节旋钮 | 同上 |
 
@@ -65,7 +66,7 @@
 |---|---|---|
 | L1 | staging 开 `TOMBSTONE_CAPTURE_ENABLED='true'` | 删一条被引用记录 → `meta_link_tombstones` 出现 `reason='record_delete'` 组；trash 行带 `delete_revision_id` |
 | L2 | staging 开 `RECORD_UNDELETE_INBOUND='true'` | 回收站恢复该记录 → 响应带 `inbound.replayed≥1`；邻居单元格重新显示该记录；trash 列表出现 `inboundEdgesRecoverable:true` |
-| L3 | staging 开 `ENABLE_PIT_UNDELETE='true'`（若走 PIT 面） | revert-execute confirm:'undelete' → 响应带 `undeleteInbound`；真库金测同形状（P3-2a/b/c） |
+| L3 | staging 开 **两把闸**：`ENABLE_SHEET_REVERT='true'` **且** `ENABLE_PIT_UNDELETE='true'`（若走 PIT 面）。**#4261**：undelete-revert 在 revert-execute 内，总闸 `SHEET_REVERT` 先判，单开 UNDELETE 无效（preview `undeleteSupported=false`，execute 403 `REVERT_DISABLED`）。 | revert-execute confirm:'undelete' → 响应带 `undeleteInbound`；真库金测同形状（P3-2a/b/c） |
 | **L3.5** | **（D-2，产品语义变更——需 owner 单独确认再上 prod）staging 开 `SIDE_DOOR_DELETE_TRASH_ENABLED='true'`**（前置：L1 已开，否则只有 trash 无捕获） | 用 automation `delete_record` 删一条被引用记录 → 该记录**出现在回收站**、`inboundEdgesRecoverable:true`；restore 后邻居单元格重新显示；plugin-SDK 删除同形状（`deleted_by` 为 NULL）。**并确认可接受**：机器删除自此可被任何有 `canDeleteRecord` 的人恢复，restore 会重放事件（可能再次触发自动化）；超 cap 的机器删除会开始失败（§2.4） |
 | L4 | （可选）staging 开 retention（值=**'1'**）并设 `_DAYS` | 观察 janitor 日志；确认地板：有存活 trash 引用的组不被清（RB10 / D-2 G8 同形状——侧门锚同样受地板保护） |
 | L5 | prod 逐级重复 L1→L3（retention 与 **L3.5/D-2** 是否上 prod 各自独立决定） | 同上 + 观察 cap 拒绝率（若出现 422 / step-failed 频发→调 cap 或审视扇入）+ trash 行数增长（§2.7） |

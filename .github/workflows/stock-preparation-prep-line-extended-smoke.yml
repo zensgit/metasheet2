@@ -1,0 +1,137 @@
+name: Stock Preparation Prep-Line Extended Smoke
+
+# Stock-preparation T4 (#3751, closeout §5b) — NON-EMPTY prep-line extended smoke lane.
+# Pull requests touching the harness (or the W6 smoke it imports its sanitizing layer from) run the
+# local contract tests — no server, no database, no secrets. The deployed-environment chain is
+# workflow_dispatch only and writes values-free evidence: statuses, booleans, counts, modes, coarse
+# codes (#3600 discipline; the harness leak-scans every response against its own fixture sentinels).
+#
+# DISPATCH-ONLY for the deployed job, same posture as stock-preparation-mvp-postdeploy-smoke.yml.
+# Serial-run assumption: the harness attributes candidate ids via before/after diffs of TENANT-level
+# lists — the fixed concurrency group serializes this lane, and operators must not dispatch it
+# concurrently with the W6 postdeploy smoke lane (they share the tenant-level mapping/rule/material
+# tables). cancel-in-progress stays false so a second dispatch QUEUES instead of killing a running
+# chain mid-way (a cancelled run would leave active smoke rows behind).
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/stock-preparation-prep-line-extended-smoke.yml'
+      - 'scripts/ops/stock-preparation-prep-line-extended-smoke.mjs'
+      - 'scripts/ops/stock-preparation-prep-line-extended-smoke.test.mjs'
+      - 'scripts/ops/stock-preparation-mvp-postdeploy-smoke.mjs'
+      - 'scripts/ops/stock-preparation-mvp-postdeploy-smoke.test.mjs'
+  workflow_dispatch:
+    inputs:
+      base_url:
+        description: Deployed backend base URL (defaults to repo var / entity host)
+        required: false
+      tenant_id:
+        description: Tenant scope (defaults to repo var)
+        required: false
+      workspace_id:
+        description: Workspace scope (optional)
+        required: false
+      project_prefix:
+        description: Business-project prefix for the salted smoke fixture
+        required: false
+        default: stockprep-t4
+      timeout_ms:
+        description: Per-request timeout in ms
+        required: false
+        default: '15000'
+
+permissions:
+  contents: read
+
+jobs:
+  contract:
+    name: prep-line extended smoke contract
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Run T4 harness contract tests (no server, no DB)
+        run: node --test scripts/ops/stock-preparation-prep-line-extended-smoke.test.mjs
+      - name: Run W6 harness contract tests (T4 imports its sanitizing layer)
+        run: node --test scripts/ops/stock-preparation-mvp-postdeploy-smoke.test.mjs
+
+  smoke:
+    name: deployed prep-line extended smoke
+    if: github.event_name == 'workflow_dispatch'
+    needs: contract
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    concurrency:
+      group: stock-preparation-prep-line-extended-smoke
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Resolve smoke token
+        id: token
+        env:
+          METASHEET_K3WISE_SMOKE_TOKEN_SECRET: ${{ secrets.METASHEET_K3WISE_SMOKE_TOKEN }}
+          K3_WISE_TOKEN_RESOLVE_REQUIRED: 'true'
+          K3_WISE_TOKEN_AUTO_DISCOVER_TENANT: ${{ vars.K3_WISE_TOKEN_AUTO_DISCOVER_TENANT || 'false' }}
+          METASHEET_TENANT_ID: ${{ github.event.inputs.tenant_id || vars.METASHEET_TENANT_ID || '' }}
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          DEPLOY_SSH_KEY_B64: ${{ secrets.DEPLOY_SSH_KEY_B64 }}
+          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
+          DEPLOY_COMPOSE_FILE: ${{ secrets.DEPLOY_COMPOSE_FILE }}
+        run: |
+          set -euo pipefail
+          scripts/ops/resolve-k3wise-smoke-token.sh
+
+      - name: Run stock-preparation prep-line extended smoke
+        id: smoke
+        env:
+          METASHEET_BASE_URL: ${{ github.event.inputs.base_url || vars.METASHEET_BASE_URL || vars.PUBLIC_APP_URL || 'http://23.254.236.11:8081' }}
+          METASHEET_TENANT_ID: ${{ github.event.inputs.tenant_id || vars.METASHEET_TENANT_ID || '' }}
+          METASHEET_WORKSPACE_ID: ${{ github.event.inputs.workspace_id || '' }}
+          SMOKE_PROJECT_PREFIX: ${{ github.event.inputs.project_prefix || 'stockprep-t4' }}
+          TIMEOUT_MS: ${{ github.event.inputs.timeout_ms || '15000' }}
+        run: |
+          set -euo pipefail
+          out_dir="output/stock-preparation-prep-line-extended-smoke/manual"
+          rm -rf "$out_dir"
+          mkdir -p "$out_dir"
+
+          args=(
+            --base-url "$METASHEET_BASE_URL"
+            --project-prefix "$SMOKE_PROJECT_PREFIX"
+            --timeout-ms "$TIMEOUT_MS"
+            --out-dir "$out_dir"
+          )
+          if [[ -n "${METASHEET_TENANT_ID:-}" ]]; then args+=(--tenant-id "$METASHEET_TENANT_ID"); fi
+          if [[ -n "${METASHEET_WORKSPACE_ID:-}" ]]; then args+=(--workspace-id "$METASHEET_WORKSPACE_ID"); fi
+          if [[ -n "${K3_WISE_SMOKE_TOKEN:-}" ]]; then
+            export METASHEET_AUTH_TOKEN="$K3_WISE_SMOKE_TOKEN"
+          fi
+
+          node scripts/ops/stock-preparation-prep-line-extended-smoke.mjs "${args[@]}"
+
+      - name: Write summary
+        if: always()
+        run: |
+          set -euo pipefail
+          echo "## Stock Preparation Prep-Line Extended Smoke (T4)" >> "$GITHUB_STEP_SUMMARY"
+          echo '```text' >> "$GITHUB_STEP_SUMMARY"
+          cat output/stock-preparation-prep-line-extended-smoke/manual/summary.txt 2>/dev/null >> "$GITHUB_STEP_SUMMARY" || echo "no summary produced" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: stock-preparation-prep-line-extended-smoke
+          path: output/stock-preparation-prep-line-extended-smoke/manual
+          if-no-files-found: ignore

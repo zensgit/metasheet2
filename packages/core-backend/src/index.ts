@@ -162,6 +162,7 @@ import { viewsRouter } from './routes/views'
 import { initAdminRoutes } from './routes/admin-routes'
 import { adminUsersRouter } from './routes/admin-users'
 import { adminDirectoryRouter } from './routes/admin-directory'
+import { adminDirectoryLocalRouter } from './routes/admin-directory-local'
 import { startDirectorySyncScheduler, stopDirectorySyncScheduler } from './directory/directory-sync-scheduler'
 import { canaryRoutes } from './routes/canary-routes'
 import { CanaryRouter } from './canary/CanaryRouter'
@@ -171,6 +172,7 @@ import workflowRouter from './routes/workflow'
 import workflowDesignerRouter from './routes/workflow-designer'
 import plmWorkbenchRouter from './routes/plm-workbench'
 import plmEmbedRouter from './routes/plm-embed'
+import plmEmbedDiscussionWriteRouter from './routes/plm-embed-discussion'
 import { createHostPluginStorage } from './plugins/plugin-durable-storage'
 import { univerMockRouter } from './routes/univer-mock'
 import { univerMetaRouter } from './routes/univer-meta'
@@ -1141,6 +1143,7 @@ export class MetaSheetServer {
     if (plmEnabled) {
       this.app.use(plmWorkbenchRouter)
       this.app.use(plmEmbedRouter())
+      this.app.use(plmEmbedDiscussionWriteRouter())
     } else {
       this.app.use('/api/plm-workbench', disabledFeatureHandler('PLM workbench is disabled in this deployment'))
       this.app.use('/api/plm-embed', disabledFeatureHandler('PLM embed is disabled in this deployment'))
@@ -1253,6 +1256,9 @@ export class MetaSheetServer {
     }))
     this.app.use(adminUsersRouter())
     this.app.use('/api/admin/directory', adminDirectoryRouter())
+    // Canonical Org MVP B2 (local departments/accounts/memberships CRUD) — mounted alongside
+    // adminDirectoryRouter under the same base path, sharing its `ensurePlatformAdmin` RBAC gate.
+    this.app.use('/api/admin/directory/local', adminDirectoryLocalRouter())
 
     // Canary routing (behind ENABLE_CANARY_ROUTING feature flag)
     const canaryEnabled = process.env.ENABLE_CANARY_ROUTING === 'true'

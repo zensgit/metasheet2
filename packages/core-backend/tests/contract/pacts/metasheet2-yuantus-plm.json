@@ -4462,6 +4462,283 @@
       }
     },
     {
+      "description": "exchange a valid BOM-review embed token for a discussion-session credential",
+      "providerStates": [
+        {
+          "name": "a valid embed token exchanges for a discussion-session credential"
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "path": "/api/v1/auth/embed/discussion-session",
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "body": {
+          "embed_token": "eyJhbGciOiJFZERTQSJ9.example-bom-multitable-embed-token"
+        },
+        "matchingRules": {
+          "body": {
+            "$.embed_token": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            }
+          }
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "body": {
+          "access_token": "eyJhbGciOiJIUzI1NiJ9.discussion-session-example",
+          "token_type": "bearer",
+          "expires_in": 300,
+          "aud": "discussion"
+        },
+        "matchingRules": {
+          "body": {
+            "$.access_token": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.token_type": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.expires_in": {
+              "matchers": [
+                {
+                  "match": "integer"
+                }
+              ]
+            },
+            "$.aud": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "description": "add a comment on a discussion thread using a discussion-session credential authorized to comment",
+      "providerStates": [
+        {
+          "name": "the discussion-session credential authorizes a comment write (can_comment true)"
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "path": "/api/v1/discussions/01H000000000000000000000T2/comments",
+        "headers": {
+          "Authorization": "Bearer eyJhbGciOiJIUzI1NiJ9.discussion-session-example",
+          "Content-Type": "application/json"
+        },
+        "body": {
+          "body": "Confirmed with vendor -- tolerance is fine"
+        },
+        "matchingRules": {
+          "header": {
+            "$.Authorization": {
+              "matchers": [
+                {
+                  "match": "regex",
+                  "regex": "^Bearer .+"
+                }
+              ]
+            }
+          },
+          "body": {
+            "$.body": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            }
+          }
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "body": {
+          "id": "01H000000000000000000000T2",
+          "target_type": "item",
+          "target_id": "01H000000000000000000000T1",
+          "title": "Check tolerance on mounting hole",
+          "status": "open",
+          "created_by_id": 1,
+          "created_at": "2026-07-09T00:00:00.000Z",
+          "resolved_by_id": null,
+          "resolved_at": null,
+          "last_comment_at": "2026-07-09T00:10:00.000Z",
+          "comment_count": 2,
+          "anchor": null,
+          "comments": [
+            {
+              "id": "01H000000000000000000000T3",
+              "parent_comment_id": null,
+              "body": "Tolerance looks tight -- can we confirm with the vendor?",
+              "body_format": "text",
+              "author_user_id": 1,
+              "mentioned_user_ids": [],
+              "created_at": "2026-07-09T00:05:00.000Z",
+              "edited_at": null,
+              "deleted_at": null,
+              "anchor": null
+            },
+            {
+              "id": "01H000000000000000000000T4",
+              "parent_comment_id": null,
+              "body": "Confirmed with vendor -- tolerance is fine",
+              "body_format": "text",
+              "author_user_id": 2,
+              "mentioned_user_ids": [],
+              "created_at": "2026-07-09T00:10:00.000Z",
+              "edited_at": null,
+              "deleted_at": null,
+              "anchor": null
+            }
+          ]
+        },
+        "matchingRules": {
+          "body": {
+            "$.id": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.status": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.comment_count": {
+              "matchers": [
+                {
+                  "match": "integer",
+                  "min": 1
+                }
+              ]
+            },
+            "$.comments": {
+              "matchers": [
+                {
+                  "match": "type",
+                  "min": 1
+                }
+              ]
+            },
+            "$.comments[*].id": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.comments[*].author_user_id": {
+              "matchers": [
+                {
+                  "match": "integer"
+                }
+              ]
+            },
+            "$.comments[*].created_at": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.created_at": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.last_comment_at": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "description": "reject a comment write from a discussion-session credential without comment permission",
+      "providerStates": [
+        {
+          "name": "the discussion-session credential is forbidden from writing (can_comment false)"
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "path": "/api/v1/discussions/01H000000000000000000000T2/comments",
+        "headers": {
+          "Authorization": "Bearer eyJhbGciOiJIUzI1NiJ9.discussion-session-example",
+          "Content-Type": "application/json"
+        },
+        "body": {
+          "body": "trying to comment without permission"
+        },
+        "matchingRules": {
+          "header": {
+            "$.Authorization": {
+              "matchers": [
+                {
+                  "match": "regex",
+                  "regex": "^Bearer .+"
+                }
+              ]
+            }
+          },
+          "body": {
+            "$.body": {
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            }
+          }
+        }
+      },
+      "response": {
+        "status": 403,
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "body": {
+          "detail": "not permitted for this discussion target"
+        }
+      }
+    },
+    {
       "description": "mint a MetaSheet BOM review embed token for the Yuantus parent host",
       "providerStates": [
         {

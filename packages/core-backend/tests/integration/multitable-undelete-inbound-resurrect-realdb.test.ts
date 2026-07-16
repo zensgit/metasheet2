@@ -50,6 +50,7 @@ const NAME = `fld_rvi_name_${TS}`
 const ACTOR = `user_rvi_${TS}`
 const UNDELETE_FLAG = 'MULTITABLE_ENABLE_PIT_UNDELETE'
 const INBOUND_FLAG = 'MULTITABLE_ENABLE_RECORD_UNDELETE_INBOUND'
+const SHEET_REVERT_FLAG = 'MULTITABLE_ENABLE_SHEET_REVERT'
 const T0 = '2026-01-01T00:00:00.000Z'
 const T0_5 = '2026-01-01T12:00:00.000Z'
 const T1 = '2026-01-02T00:00:00.000Z'
@@ -105,11 +106,15 @@ describeIfDatabase('4c-3 §7 — PIT-resurrect inbound-edge replay heuristic anc
     await q('INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6)', [NAME, SHEET_A, 'Name', 'string', '{}', 0])
     await q("INSERT INTO users (id, password_hash) VALUES ($1,'x') ON CONFLICT (id) DO NOTHING", [ACTOR])
     process.env[UNDELETE_FLAG] = 'true'
+    // Interim revert-execute master gate (current-risk mitigation): default-OFF now — keep it on for this
+    // suite's resurrect-via-revert-execute goldens, unchanged behavior.
+    process.env[SHEET_REVERT_FLAG] = 'true'
   })
 
   afterAll(async () => {
     delete process.env[UNDELETE_FLAG]
     delete process.env[INBOUND_FLAG]
+    delete process.env[SHEET_REVERT_FLAG]
     delete process.env.MULTITABLE_SHEET_REVERT_MAX_RECORDS
     for (const sheet of [SHEET_A, SHEET_B]) {
       await q('DELETE FROM meta_link_tombstones WHERE sheet_id = $1', [sheet]).catch(() => {})

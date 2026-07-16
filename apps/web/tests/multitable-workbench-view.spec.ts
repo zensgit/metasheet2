@@ -3,6 +3,15 @@ import { computed, createApp, defineComponent, h, nextTick, reactive, ref, type 
 
 const showErrorSpy = vi.fn()
 const showSuccessSpy = vi.fn()
+// G-10 follow-up: captures the xlsx tab name the export path passes down, without writing a real
+// workbook (buildXlsxBuffer's own trim/slice/default behavior is covered by multitable/xlsx-mapping.test.ts).
+// vi.hoisted: the mocked module is imported synchronously by MultitableWorkbench.vue, so a plain
+// top-level const would still be in its TDZ when the factory runs.
+const { buildXlsxBufferMock } = vi.hoisted(() => ({ buildXlsxBufferMock: vi.fn(() => new Uint8Array([1, 2, 3])) }))
+vi.mock('../src/multitable/import/xlsx-mapping', async () => {
+  const actual = await vi.importActual<any>('../src/multitable/import/xlsx-mapping')
+  return { ...actual, buildXlsxBuffer: buildXlsxBufferMock }
+})
 const pushSpy = vi.fn().mockResolvedValue(undefined)
 const useMultitableSheetRealtimeMock = vi.fn()
 // The workflow-designer manager button is gated on caps.canManageAutomation AND
@@ -296,7 +305,7 @@ vi.mock('../src/multitable/components/MetaGridTable.vue', () => ({
       collapsedGroupKeys: { type: Array, default: () => [] },
       rowDensity: { type: String, default: undefined },
     },
-    emits: ['select-record', 'open-comments', 'open-field-comments', 'resize-column', 'toggle-group'],
+    emits: ['select-record', 'open-comments', 'open-field-comments', 'resize-column', 'toggle-group', 'bulk-edit', 'selection-change'],
     render() {
       return h('div', {
         'data-grid-column-widths': JSON.stringify(this.$props.columnWidths ?? {}),
@@ -351,6 +360,22 @@ vi.mock('../src/multitable/components/MetaGridTable.vue', () => ({
           },
           'toggle-group',
         ),
+        h(
+          'button',
+          {
+            'data-bulk-edit': 'true',
+            onClick: () => this.$emit('bulk-edit', { mode: 'clear', recordIds: ['rec_1'] }),
+          },
+          'bulk-edit',
+        ),
+        h(
+          'button',
+          {
+            'data-select-rows': 'rec_1',
+            onClick: () => this.$emit('selection-change', ['rec_1']),
+          },
+          'selection-change',
+        ),
       ])
     },
   }),
@@ -381,18 +406,42 @@ vi.mock('../src/multitable/components/MetaFormView.vue', () => ({
     },
   }),
 }))
-vi.mock('../src/multitable/components/MetaRecordDrawer.vue', () => ({
+// W2 S3/S4: MultitableWorkbench.vue now renders MetaRecordInspector.vue directly (the shell that
+// absorbed the drawer's tablist/header/lock-banner rendering — MetaRecordDrawer.vue itself is now
+// a deprecated thin compat shell no longer mounted by the workbench, OD-W2-7=b). S4 additionally
+// absorbed the SECOND drawer (MetaCommentsDrawer.vue) — the workbench no longer mounts it either;
+// comments state/emits now flow straight into THIS component (comments-tab props, `comment-`
+// prefixed emits, see MetaRecordInspector.vue's own emit block for why the prefix). This stub folds
+// what used to be the separate MetaCommentsDrawer stub's clickable stand-ins into this one — same
+// data-testids the pre-S4 tests already used (data-submit-comment / data-set-comment-draft /
+// data-reply-comment / data-cancel-reply / data-current-comment-field / data-highlighted-comment /
+// data-mention-suggestions-count), MINUS `data-close-comments` (no such affordance exists anymore —
+// comments has no close chrome of its own now, lock §2 "不含它自己的 __header...close 钮"; the two
+// tests that exercised it were removed, see below). Everything else is otherwise unchanged from the
+// pre-S3 MetaRecordDrawer stub — same props/emits contract, same fixture shape.
+vi.mock('../src/multitable/components/MetaRecordInspector.vue', () => ({
   default: defineComponent({
-    name: 'MetaRecordDrawer',
+    name: 'MetaRecordInspector',
     props: {
       visible: { type: Boolean, default: false },
       record: { type: Object, default: null },
+      commentTargetFieldId: { type: String, default: null },
+      highlightedCommentId: { type: String, default: null },
+      mentionSuggestions: { type: Array, default: () => [] },
     },
-    emits: ['close', 'toggle-comments', 'comment-field', 'navigate', 'delete', 'patch'],
+    emits: [
+      'close', 'toggle-comments', 'comment-field', 'navigate', 'delete', 'patch',
+      'comment-submit', 'comment-reply', 'comment-cancel-reply', 'update:comment-draft',
+    ],
     render() {
       if (!this.$props.visible) return null
       const recordId = (this.$props.record as { id?: string } | null)?.id ?? ''
-      return h('div', { 'data-record-drawer': recordId }, [
+      return h('div', {
+        'data-record-drawer': recordId,
+        'data-current-comment-field': this.$props.commentTargetFieldId ?? '',
+        'data-highlighted-comment': this.$props.highlightedCommentId ?? '',
+        'data-mention-suggestions-count': String((this.$props.mentionSuggestions as unknown[]).length),
+      }, [
         h(
           'button',
           {
@@ -441,32 +490,11 @@ vi.mock('../src/multitable/components/MetaRecordDrawer.vue', () => ({
           },
           'patch-record',
         ),
-      ])
-    },
-  }),
-}))
-vi.mock('../src/multitable/components/MetaCommentsDrawer.vue', () => ({
-  default: defineComponent({
-    name: 'MetaCommentsDrawer',
-    props: {
-      visible: { type: Boolean, default: false },
-      targetFieldId: { type: String, default: null },
-      highlightedCommentId: { type: String, default: null },
-      mentionSuggestions: { type: Array, default: () => [] },
-    },
-    emits: ['close', 'submit', 'reply', 'cancel-reply', 'update:draft'],
-    render() {
-      if (!this.$props.visible) return null
-      return h('div', {
-        'data-current-comment-field': this.$props.targetFieldId ?? '',
-        'data-highlighted-comment': this.$props.highlightedCommentId ?? '',
-        'data-mention-suggestions-count': String((this.$props.mentionSuggestions as unknown[]).length),
-      }, [
         h(
           'button',
           {
             'data-set-comment-draft': 'true',
-            onClick: () => this.$emit('update:draft', 'Need review'),
+            onClick: () => this.$emit('update:comment-draft', 'Need review'),
           },
           'set-comment-draft',
         ),
@@ -474,7 +502,7 @@ vi.mock('../src/multitable/components/MetaCommentsDrawer.vue', () => ({
           'button',
           {
             'data-submit-comment': 'true',
-            onClick: () => this.$emit('submit', { content: 'Need review', mentions: [] }),
+            onClick: () => this.$emit('comment-submit', { content: 'Need review', mentions: [] }),
           },
           'submit-comment',
         ),
@@ -482,7 +510,7 @@ vi.mock('../src/multitable/components/MetaCommentsDrawer.vue', () => ({
           'button',
           {
             'data-reply-comment': 'comment_parent_1',
-            onClick: () => this.$emit('reply', 'comment_parent_1'),
+            onClick: () => this.$emit('comment-reply', 'comment_parent_1'),
           },
           'reply-comment',
         ),
@@ -490,17 +518,9 @@ vi.mock('../src/multitable/components/MetaCommentsDrawer.vue', () => ({
           'button',
           {
             'data-cancel-reply': 'true',
-            onClick: () => this.$emit('cancel-reply'),
+            onClick: () => this.$emit('comment-cancel-reply'),
           },
           'cancel-reply',
-        ),
-        h(
-          'button',
-          {
-            'data-close-comments': 'true',
-            onClick: () => this.$emit('close'),
-          },
-          'close-comments',
         ),
       ])
     },
@@ -946,6 +966,19 @@ async function flushUi(cycles = 5): Promise<void> {
   }
 }
 
+// UI-P2-2c (design docs/development/multitable-ui-p2-2c-responsive-design-20260714.md §6): shape copied
+// verbatim from apps/web/tests/useAttendanceAdminRailNavigation.spec.ts's own setViewportWidth helper —
+// same jsdom idiom (redefine window.innerWidth, dispatch a real 'resize' event) for the same reason
+// (MultitableWorkbench's syncRailViewportState listens for 'resize', not a matchMedia mock).
+function setViewportWidth(width: number): void {
+  Object.defineProperty(window, 'innerWidth', {
+    configurable: true,
+    writable: true,
+    value: width,
+  })
+  window.dispatchEvent(new Event('resize'))
+}
+
 function createWorkbenchMock() {
   const activeBaseId = ref('base_ops')
   const activeSheetId = ref('sheet_orders')
@@ -1080,6 +1113,7 @@ function createGridMock() {
     setGroupField: vi.fn(), setGroupFields: vi.fn(),
     goToPage: vi.fn(),
     patchCell: vi.fn(),
+    bulkPatch: vi.fn(),
     createRecord: vi.fn(),
     deleteRecord: vi.fn(),
     mergeRemoteRecord: vi.fn().mockReturnValue(true),
@@ -1546,6 +1580,114 @@ describe('MultitableWorkbench view wiring', () => {
       Object.defineProperty(URL, 'createObjectURL', { configurable: true, value: originalCreateObjectURL })
       Object.defineProperty(URL, 'revokeObjectURL', { configurable: true, value: originalRevokeObjectURL })
     }
+  })
+
+  // G-10 follow-up (owner ruling 2026-07-15, 普通用户面优先显示名称): the export download filename is a
+  // normal-user surface. When the backend route returns no Content-Disposition filename, the fallback
+  // must be the active sheet's display NAME ('Orders', already in workbench.sheets scope) — never the
+  // raw sheet id ('sheet_orders').
+  it('export filename fallback uses the sheet display name, not the raw sheet id', async () => {
+    workbenchMock.client.exportSheet.mockResolvedValue({
+      blob: new Blob(['Title\nAlpha'], { type: 'text/csv' }),
+      filename: '',
+    })
+    const downloads: string[] = []
+    const originalCreateObjectURL = URL.createObjectURL
+    const originalRevokeObjectURL = URL.revokeObjectURL
+    Object.defineProperty(URL, 'createObjectURL', { configurable: true, value: vi.fn(() => 'blob:multitable-export') })
+    Object.defineProperty(URL, 'revokeObjectURL', { configurable: true, value: vi.fn() })
+    const clickSpy = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(function (this: HTMLAnchorElement) {
+      downloads.push(this.download)
+    })
+    try {
+      mountWorkbench()
+      await flushUi()
+
+      container!.querySelector<HTMLButtonElement>('[data-export-csv="true"]')!.click()
+      await flushUi()
+      document.body.querySelector<HTMLButtonElement>('.meta-export__btn--primary')!.click()
+      await flushUi()
+
+      expect(downloads).toEqual(['Orders.csv'])
+    } finally {
+      clickSpy.mockRestore()
+      Object.defineProperty(URL, 'createObjectURL', { configurable: true, value: originalCreateObjectURL })
+      Object.defineProperty(URL, 'revokeObjectURL', { configurable: true, value: originalRevokeObjectURL })
+    }
+  })
+
+  // G-10 follow-up: the selected-rows client-side export path names BOTH the downloaded file and the
+  // xlsx workbook tab after the sheet's display name (previously both were the raw sheet id).
+  it('selected-rows xlsx export names the file and the workbook tab after the sheet display name', async () => {
+    const downloads: string[] = []
+    const originalCreateObjectURL = URL.createObjectURL
+    const originalRevokeObjectURL = URL.revokeObjectURL
+    Object.defineProperty(URL, 'createObjectURL', { configurable: true, value: vi.fn(() => 'blob:multitable-export') })
+    Object.defineProperty(URL, 'revokeObjectURL', { configurable: true, value: vi.fn() })
+    const clickSpy = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(function (this: HTMLAnchorElement) {
+      downloads.push(this.download)
+    })
+    buildXlsxBufferMock.mockClear()
+    try {
+      mountWorkbench()
+      await flushUi()
+
+      // Select a row (grid multi-select), then open the export dialog and switch to selected+xlsx.
+      container!.querySelector<HTMLButtonElement>('[data-select-rows="rec_1"]')!.click()
+      await flushUi()
+      container!.querySelector<HTMLButtonElement>('[data-export-csv="true"]')!.click()
+      await flushUi()
+      const selectedRadio = document.body.querySelector<HTMLInputElement>('.meta-export__opt input[value="selected"]')
+      expect(selectedRadio).not.toBeNull()
+      expect(selectedRadio!.disabled).toBe(false)
+      selectedRadio!.click()
+      document.body.querySelector<HTMLInputElement>('.meta-export__opt input[value="xlsx"]')!.click()
+      await flushUi()
+      document.body.querySelector<HTMLButtonElement>('.meta-export__btn--primary')!.click()
+      // The xlsx path lazily `import('xlsx')` before building — module loading can take macrotask
+      // time, so poll (bounded) rather than relying on microtask flushes alone.
+      for (let i = 0; i < 100 && downloads.length === 0; i += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 20))
+        await flushUi()
+      }
+
+      expect(downloads).toEqual(['Orders.xlsx'])
+      expect(buildXlsxBufferMock).toHaveBeenCalledTimes(1)
+      expect(buildXlsxBufferMock.mock.calls[0]?.[1]).toEqual(expect.objectContaining({ sheetName: 'Orders' }))
+    } finally {
+      clickSpy.mockRestore()
+      Object.defineProperty(URL, 'createObjectURL', { configurable: true, value: originalCreateObjectURL })
+      Object.defineProperty(URL, 'revokeObjectURL', { configurable: true, value: originalRevokeObjectURL })
+    }
+  })
+
+  // G-10 follow-up: bulk-edit failure samples (dialog error + toast, normal-user surfaces) lead with
+  // the record's display name resolved from the already-loaded rows ('rec_1' → its Title value
+  // 'Alpha'), never the bare record id. The reason string stays raw.
+  it('bulk-edit failure samples lead with the record display name, not the raw record id', async () => {
+    gridMock.bulkPatch.mockResolvedValue({
+      updated: [],
+      failed: [{ recordId: 'rec_1', reason: 'locked' }],
+    })
+    mountWorkbench()
+    await flushUi()
+
+    container!.querySelector<HTMLButtonElement>('[data-bulk-edit="true"]')!.click()
+    await flushUi()
+    // Real MetaBulkEditDialog (teleported): clear mode only needs a field selection to submit.
+    const fieldSelect = document.body.querySelector<HTMLSelectElement>('.meta-bulk-edit__select')
+    expect(fieldSelect).not.toBeNull()
+    fieldSelect!.value = 'fld_title'
+    fieldSelect!.dispatchEvent(new Event('change'))
+    await flushUi()
+    document.body.querySelector<HTMLButtonElement>('.meta-bulk-edit__btn--primary')!.click()
+    await flushUi()
+
+    expect(gridMock.bulkPatch).toHaveBeenCalledWith({ fieldId: 'fld_title', value: null, recordIds: ['rec_1'] })
+    const errorEl = document.body.querySelector('.meta-bulk-edit__error')
+    expect(errorEl?.textContent).toContain('Alpha: locked')
+    expect(errorEl?.textContent).not.toContain('rec_1')
+    expect(showErrorSpy).toHaveBeenCalledWith(expect.stringContaining('Alpha: locked'))
   })
 
   it('syncs external base/sheet/view props after mount', async () => {
@@ -2321,7 +2463,15 @@ describe('MultitableWorkbench view wiring', () => {
     })
   })
 
-  it('prompts before closing the comments drawer when a comment draft exists', async () => {
+  // W2 S4 (OD-W2-7=b): comments no longer has its own close chrome distinct from the inspector's —
+  // the two pre-S4 tests that lived here ("prompts before closing the comments drawer.../localizes
+  // the unsaved comment draft confirm copy in zh-CN") pinned a `data-close-comments` affordance that
+  // no longer exists (see onToggleComments' own doc comment in MultitableWorkbench.vue). Replaced
+  // with a test documenting the new behavior: re-clicking the comment-toggle button while a draft is
+  // pending does NOT prompt (there is nothing to "close" anymore — see the surviving
+  // "prompts before closing the record drawer..." test below for where the comment-draft-discard
+  // guard now lives, `hasRecordScopedDrafts` already folds in `hasCommentDraft`).
+  it('re-clicking the comment-toggle button while a draft is pending does not prompt (no more close-comments-only affordance)', async () => {
     mountWorkbench()
     await flushUi()
 
@@ -2333,31 +2483,13 @@ describe('MultitableWorkbench view wiring', () => {
     await flushUi()
 
     const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false)
-    container!.querySelector<HTMLButtonElement>('[data-close-comments="true"]')!.click()
-    await flushUi()
-
-    expect(confirmSpy).toHaveBeenCalledWith('Discard unsaved comment draft?')
-    expect(container!.querySelector('[data-close-comments="true"]')).toBeTruthy()
-  })
-
-  it('localizes the unsaved comment draft confirm copy in zh-CN', async () => {
-    useLocale().setLocale('zh-CN')
-    mountWorkbench()
-    await flushUi()
-
-    container!.querySelector<HTMLButtonElement>('[data-select-record="rec_1"]')!.click()
-    await flushUi()
     container!.querySelector<HTMLButtonElement>('[data-toggle-comments="true"]')!.click()
     await flushUi()
-    container!.querySelector<HTMLButtonElement>('[data-set-comment-draft="true"]')!.click()
-    await flushUi()
 
-    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false)
-    container!.querySelector<HTMLButtonElement>('[data-close-comments="true"]')!.click()
-    await flushUi()
-
-    expect(confirmSpy).toHaveBeenCalledWith('放弃未保存的评论草稿吗？')
-    expect(container!.querySelector('[data-close-comments="true"]')).toBeTruthy()
+    expect(confirmSpy).not.toHaveBeenCalled()
+    // The record drawer (whole inspector) is still open — only the whole-inspector close (below)
+    // guards a comment draft now.
+    expect(container!.querySelector('[data-record-drawer="rec_1"]')).toBeTruthy()
   })
 
   it('prompts before closing the record drawer when record-scoped drafts are present', async () => {
@@ -2833,6 +2965,113 @@ describe('MultitableWorkbench view wiring', () => {
       expect(railStubRoot().style.display).not.toBe('none')
       const baseBar = container!.querySelector('.mt-workbench__base-bar') as HTMLElement
       expect(baseBar.style.display).not.toBe('none')
+    })
+  })
+
+  // UI-P2-2c (design docs/development/multitable-ui-p2-2c-responsive-design-20260714.md §6): the rail
+  // auto-collapses below RAIL_NARROW_BREAKPOINT (768px, window.innerWidth) and, if the user re-expands it
+  // while narrow, becomes an absolute-positioned "drawer" overlay (`.mt-workbench__rail--drawer`) instead
+  // of squeezing .mt-workbench__main. These are STATE assertions (classes/attributes/focus), not CSS/
+  // layout assertions — the actual positioning/shadow/z-index rendering is a real-browser verification
+  // gap documented in the design MD §7, not claimed as proven here.
+  describe('UI-P2-2c — responsive rail (narrow-width auto-collapse + drawer)', () => {
+    function railEl(): HTMLElement {
+      const rail = container!.querySelector('.mt-workbench__rail') as HTMLElement
+      expect(rail).toBeTruthy()
+      return rail
+    }
+
+    beforeEach(() => setViewportWidth(1280))
+    afterEach(() => setViewportWidth(1280))
+
+    it('desktop width (>= breakpoint): mounting behaves exactly like pre-2c — no auto-collapse, no drawer class', async () => {
+      setViewportWidth(1280)
+      mountWorkbench()
+      await flushUi()
+      const toggle = container!.querySelector('[data-testid="rail-collapse-toggle"]') as HTMLButtonElement
+      expect(toggle.getAttribute('aria-expanded')).toBe('true')
+      expect(railEl().classList.contains('mt-workbench__rail--collapsed')).toBe(false)
+      expect(railEl().classList.contains('mt-workbench__rail--drawer')).toBe(false)
+    })
+
+    it('narrow width at mount: auto-collapses to the icon-strip (no drawer)', async () => {
+      setViewportWidth(600)
+      mountWorkbench()
+      await flushUi()
+      const toggle = container!.querySelector('[data-testid="rail-collapse-toggle"]') as HTMLButtonElement
+      expect(toggle.getAttribute('aria-expanded')).toBe('false')
+      expect(railEl().classList.contains('mt-workbench__rail--collapsed')).toBe(true)
+      expect(railEl().classList.contains('mt-workbench__rail--drawer')).toBe(false)
+    })
+
+    it('resizing to narrow after mount auto-collapses; resizing back to wide does NOT force re-expand', async () => {
+      setViewportWidth(1280)
+      mountWorkbench()
+      await flushUi()
+      const toggle = container!.querySelector('[data-testid="rail-collapse-toggle"]') as HTMLButtonElement
+      expect(toggle.getAttribute('aria-expanded')).toBe('true')
+
+      setViewportWidth(600)
+      await flushUi()
+      expect(toggle.getAttribute('aria-expanded')).toBe('false')
+
+      setViewportWidth(1280)
+      await flushUi()
+      // Deliberate asymmetry (design MD §2): leaving narrow never force-writes railCollapsed.
+      expect(toggle.getAttribute('aria-expanded')).toBe('false')
+    })
+
+    it('re-expanding the rail while narrow enters drawer mode; the same toggle closes it back to the icon-strip', async () => {
+      setViewportWidth(600)
+      mountWorkbench()
+      await flushUi()
+      const toggle = container!.querySelector('[data-testid="rail-collapse-toggle"]') as HTMLButtonElement
+      expect(railEl().classList.contains('mt-workbench__rail--collapsed')).toBe(true)
+
+      toggle.click()
+      await flushUi()
+      expect(toggle.getAttribute('aria-expanded')).toBe('true')
+      expect(railEl().classList.contains('mt-workbench__rail--drawer')).toBe(true)
+      expect(railEl().classList.contains('mt-workbench__rail--collapsed')).toBe(false)
+
+      toggle.click()
+      await flushUi()
+      expect(railEl().classList.contains('mt-workbench__rail--drawer')).toBe(false)
+      expect(railEl().classList.contains('mt-workbench__rail--collapsed')).toBe(true)
+    })
+
+    it('Escape from inside the rail closes the drawer and returns focus to the toggle', async () => {
+      setViewportWidth(600)
+      mountWorkbench()
+      await flushUi()
+      const toggle = container!.querySelector('[data-testid="rail-collapse-toggle"]') as HTMLButtonElement
+      toggle.click()
+      await flushUi()
+      expect(railEl().classList.contains('mt-workbench__rail--drawer')).toBe(true)
+
+      toggle.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
+      await flushUi()
+
+      expect(railEl().classList.contains('mt-workbench__rail--drawer')).toBe(false)
+      expect(toggle.getAttribute('aria-expanded')).toBe('false')
+      expect(document.activeElement).toBe(toggle)
+    })
+
+    it('Escape from outside the rail (main content) does NOT close the drawer — scoped, not global', async () => {
+      setViewportWidth(600)
+      mountWorkbench()
+      await flushUi()
+      const toggle = container!.querySelector('[data-testid="rail-collapse-toggle"]') as HTMLButtonElement
+      toggle.click()
+      await flushUi()
+      expect(railEl().classList.contains('mt-workbench__rail--drawer')).toBe(true)
+
+      const main = container!.querySelector('.mt-workbench__main') as HTMLElement
+      expect(main).toBeTruthy()
+      main.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
+      await flushUi()
+
+      expect(railEl().classList.contains('mt-workbench__rail--drawer')).toBe(true)
     })
   })
 })

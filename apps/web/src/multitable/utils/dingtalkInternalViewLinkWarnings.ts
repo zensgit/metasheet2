@@ -14,7 +14,8 @@ export function listDingTalkInternalViewLinkBlockingErrors(
   const view = views.find((item) => item.id === id)
   if (!view) {
     return [isZh
-      ? `内部处理视图 "${id}" 在此表中不可用；钉钉消息可能不包含可用的处理链接。`
+      // W1 G-10 (display layer only): Sheet = 数据表 (was bare '表').
+      ? `内部处理视图 "${id}" 在此数据表中不可用；钉钉消息可能不包含可用的处理链接。`
       : `Internal processing view "${id}" is not available in this sheet; DingTalk messages may not include a working processing link.`]
   }
 

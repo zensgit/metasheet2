@@ -21,6 +21,7 @@ const EMPTY_CAPABILITIES: MetaCapabilities = {
   canManageFields: false,
   canManageSheetAccess: false,
   pitResetEnabled: false,
+  sheetRevertEnabled: false,
   personalViewsEnabled: false,
   canManageViews: false,
   canComment: false,

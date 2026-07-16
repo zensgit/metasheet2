@@ -134,6 +134,147 @@ export async function recordRecordRevision(query: QueryFn, input: RecordRevision
   return id
 }
 
+// W0 enablement gate (owner ruling, post-merge review of #4279/#4286): the field-undelete rehydration site
+// (`recreateFieldFromConfig` in univer-meta.ts) previously called `recordRecordRevision` once PER rehydrated
+// record, serially, inside the same transaction — an O(N) round-trip chain that the owner ruled must become a
+// single batch write before the field-undelete flag can ever be enabled (the tombstone cap default allows up
+// to 50,000 rows per undelete). `recordRecordRevisionsBatch` is that batch path: one multi-row INSERT per
+// chunk, with EXACTLY the same column semantics/defaults as `recordRecordRevision` above (same id generation
+// via `randomUUID()` when omitted, same `changedFieldIds` de-dup, same `source`/`batchId` defaults, same
+// `snapshot`/`patch` JSON handling, same deploy-window-safe `restoredFromVersion` column probe — reusing
+// `hasRestoredFromVersionColumn` so the two helpers can never disagree about whether the column exists).
+const BATCH_CHUNK_ROWS = 1000
+
+/**
+ * Batch counterpart to `recordRecordRevision`: inserts `inputs.length` rows with as few statements as
+ * possible instead of one `recordRecordRevision` call per row. Runs on the caller's own `QueryFn` (so it
+ * participates in the caller's transaction exactly like the single-row helper), and returns the ids in the
+ * same order as `inputs` (mirroring `recordRecordRevision`'s single-id return).
+ *
+ * Chunking math: each row binds 11 params in the base shape (12 if any row in the whole batch carries a
+ * non-null `restoredFromVersion` AND the column exists — see below), so `BATCH_CHUNK_ROWS = 1000` keeps a
+ * full chunk at ≤12,000 bound parameters, comfortably under PostgreSQL's 65,535-parameter-per-statement
+ * ceiling (drivers/pgbouncer add their own lower practical ceilings too — 1000 rows/statement stays well
+ * clear of those as well). A tombstone-cap-sized undelete (50,000 rows) becomes 50 statements instead of
+ * 50,000 — the exact O(N)→O(N/1000) shape the owner's enablement gate asked for.
+ *
+ * `restoredFromVersion` handling mirrors the single-row helper's deploy-window guard, but decided ONCE for
+ * the whole batch (not per chunk, not per row) so every chunk of a single call uses the SAME column list —
+ * required for a well-formed multi-row `INSERT ... VALUES (...), (...), ...` (every tuple must have the same
+ * arity). If ANY input in the batch sets a non-null `restoredFromVersion` AND the column exists, EVERY row
+ * in EVERY chunk is inserted with the extended (12-column) shape — rows that didn't set it get an explicit
+ * SQL `NULL` for that column, which is byte-identical in the stored row to the base shape omitting it
+ * entirely. If the column does not exist (pre-migration deploy window), every row degrades to the base shape
+ * and any `restoredFromVersion` values are silently dropped — identical to the single-row helper's own
+ * degrade behavior.
+ */
+export async function recordRecordRevisionsBatch(query: QueryFn, inputs: RecordRevisionInput[]): Promise<string[]> {
+  if (inputs.length === 0) return []
+
+  const prepared = inputs.map((input) => {
+    const id = input.id ?? randomUUID()
+    return {
+      id,
+      sheetId: input.sheetId,
+      recordId: input.recordId,
+      version: input.version,
+      action: input.action,
+      source: input.source ?? 'rest',
+      actorId: input.actorId ?? null,
+      changedFieldIds: Array.from(new Set((input.changedFieldIds ?? []).filter(Boolean))),
+      patch: JSON.stringify(input.patch ?? {}),
+      snapshot: input.snapshot === undefined ? null : JSON.stringify(input.snapshot),
+      batchId: input.batchId ?? id,
+      restoredFromVersion: input.restoredFromVersion ?? null,
+    }
+  })
+
+  const anyRestoredFromVersion = prepared.some((row) => row.restoredFromVersion !== null)
+  const useExtendedShape = anyRestoredFromVersion && (await hasRestoredFromVersionColumn(query))
+  const columns = useExtendedShape
+    ? ['id', 'sheet_id', 'record_id', 'version', 'action', 'source', 'actor_id', 'changed_field_ids', 'patch', 'snapshot', 'batch_id', 'restored_from_version']
+    : ['id', 'sheet_id', 'record_id', 'version', 'action', 'source', 'actor_id', 'changed_field_ids', 'patch', 'snapshot', 'batch_id']
+  const paramsPerRow = columns.length
+
+  for (let start = 0; start < prepared.length; start += BATCH_CHUNK_ROWS) {
+    const chunk = prepared.slice(start, start + BATCH_CHUNK_ROWS)
+    const params: unknown[] = []
+    const valueTuples: string[] = []
+    chunk.forEach((row, i) => {
+      const base = i * paramsPerRow
+      const placeholders = [
+        `$${base + 1}::uuid`,
+        `$${base + 2}`,
+        `$${base + 3}`,
+        `$${base + 4}`,
+        `$${base + 5}`,
+        `$${base + 6}`,
+        `$${base + 7}`,
+        `$${base + 8}::text[]`,
+        `$${base + 9}::jsonb`,
+        `$${base + 10}::jsonb`,
+        `$${base + 11}`,
+      ]
+      params.push(row.id, row.sheetId, row.recordId, row.version, row.action, row.source, row.actorId, row.changedFieldIds, row.patch, row.snapshot, row.batchId)
+      if (useExtendedShape) {
+        placeholders.push(`$${base + 12}`)
+        params.push(row.restoredFromVersion)
+      }
+      valueTuples.push(`(${placeholders.join(', ')})`)
+    })
+    await query(`INSERT INTO meta_record_revisions (${columns.join(', ')}) VALUES ${valueTuples.join(', ')}`, params)
+  }
+
+  return prepared.map((row) => row.id)
+}
+
+/**
+ * W0-1 (OD-W0-1 mechanism (b)) — record a lock/unlock version bump as a chain marker in the independent
+ * `meta_record_version_markers` table, so the generation-aware contiguity precheck does not read the bump
+ * as an uncaptured-data-write HOLE. `kind` is 'lock' | 'unlock'. Idempotent (ON CONFLICT DO NOTHING against
+ * the UNIQUE(sheet_id, record_id, version) constraint), so a retry never duplicates.
+ *
+ * Deploy-window safe (mirrors `hasRestoredFromVersionColumn`): the marker table may not exist yet in a
+ * rolling deploy (the zzzz migration lands mid-process). A missing table is probed via a txn-safe
+ * information_schema SELECT (never poisons the enclosing transaction with a 42P01) — if absent, the marker
+ * write is SKIPPED and the lock/unlock version bump still commits. That leaves a transient pre-migration
+ * hole for that record; per the design lock (§1.4) the durable trusted-since watermark that grandfathers
+ * pre-marker holes is C6, explicitly DEFERRED — until then such a record fails CLOSED (refused), never a
+ * silent destructive write.
+ */
+let versionMarkerTablePresent = false
+/**
+ * Txn-safe existence probe for `meta_record_version_markers`. Uses `information_schema.tables`, which
+ * returns zero rows (never throws `42P01`) when the table is absent — so callers inside a transaction
+ * can gate a direct marker SELECT/INSERT without poisoning the enclosing txn during the pre-migration
+ * rolling-deploy window. Shared by the WRITE path (recordVersionMarker) and the READ path
+ * (history-integrity-precheck) so both avoid the 42P01-abort trap identically.
+ */
+export async function hasVersionMarkerTable(query: QueryFn): Promise<boolean> {
+  if (versionMarkerTablePresent) return true
+  const res = await query(
+    `SELECT 1 FROM information_schema.tables WHERE table_name = 'meta_record_version_markers' AND table_schema = ANY(current_schemas(false)) LIMIT 1`,
+  )
+  if ((res.rows as unknown[]).length > 0) {
+    versionMarkerTablePresent = true
+    return true
+  }
+  return false
+}
+
+export async function recordVersionMarker(
+  query: QueryFn,
+  input: { sheetId: string; recordId: string; version: number; kind: 'lock' | 'unlock'; actorId?: string | null },
+): Promise<void> {
+  if (!(await hasVersionMarkerTable(query))) return
+  await query(
+    `INSERT INTO meta_record_version_markers (id, sheet_id, record_id, version, kind, actor_id)
+     VALUES (gen_random_uuid(), $1, $2, $3, $4, $5)
+     ON CONFLICT ON CONSTRAINT uq_meta_record_version_markers_sheet_record_version DO NOTHING`,
+    [input.sheetId, input.recordId, input.version, input.kind, input.actorId ?? null],
+  )
+}
+
 export async function listRecordRevisions(
   query: QueryFn,
   input: { sheetId: string; recordId: string; limit?: number; offset?: number },

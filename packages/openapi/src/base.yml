@@ -182,6 +182,22 @@ components:
             recordId:
               type: string
               nullable: true
+            # G-10 (docket #68): additive display names alongside the ids above. Null when the
+            # underlying entity is unresolvable (deleted/no view yet); recordId intentionally has NO
+            # analogous name field — see CommentService.getInbox for why a record title isn't
+            # synthesized server-side.
+            baseName:
+              type: string
+              nullable: true
+            sheetName:
+              type: string
+              nullable: true
+            viewName:
+              type: string
+              nullable: true
+            fieldName:
+              type: string
+              nullable: true
           required: [unread, mentioned]
     CommentInboxResponse:
       type: object
@@ -2574,6 +2590,9 @@ components:
         pitResetEnabled:
           type: boolean
           description: True only when MULTITABLE_ENABLE_PIT_RESET is on AND the actor has canManageSheetAccess; populated by GET /context (absent on other capability responses). Drives the FE Reset entry visibility.
+        sheetRevertEnabled:
+          type: boolean
+          description: True only when MULTITABLE_ENABLE_SHEET_REVERT is on AND the actor has canManageSheetAccess; populated by GET /context (absent on other capability responses). Drives the FE Revert entry visibility (interim revert-execute master gate, current-risk mitigation).
       required:
         - canRead
         - canCreateRecord

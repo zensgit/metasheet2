@@ -169,6 +169,22 @@ describe('StockPreparationDashboardView', () => {
     expect(text).not.toContain('secret')
   })
 
+  it('H4-1: the error state offers a Retry that re-runs the overview load and recovers', async () => {
+    h.getOverview.mockRejectedValueOnce(new Error('503 backend not ready'))
+    h.getOverview.mockResolvedValue(buildOverview()) // the retry succeeds
+    const root = mountView()
+    await flushUi()
+    const retry = root.querySelector('[data-testid="stock-prep-dashboard-retry"]') as HTMLButtonElement | null
+    expect(retry).not.toBeNull()
+    expect(root.querySelector('[data-testid="stock-prep-dashboard-error"]')).not.toBeNull()
+    const callsBefore = h.getOverview.mock.calls.length
+    retry!.click()
+    await flushUi()
+    expect(h.getOverview.mock.calls.length).toBeGreaterThan(callsBefore) // loadOverview was re-invoked
+    expect(root.querySelector('[data-testid="stock-prep-dashboard-error"]')).toBeNull() // error state cleared
+    expect(root.querySelector('[data-testid="stock-prep-dashboard-body"]')).not.toBeNull() // renders normally after recovery
+  })
+
   it('renders the empty state when no projects are synced yet', async () => {
     h.getOverview.mockResolvedValue({ projectCount: 0, statusCounts: {}, projects: [] })
     const root = mountView()
@@ -288,6 +304,107 @@ describe('StockPreparationDashboardView', () => {
     expect(recommend.textContent).not.toContain('需要管理员权限') // and not mislabelled as a permission problem
   })
 
+  // ── H4-1: detail-stage retry (only for a transient detail_unavailable, never a 403) ──────────────
+  function mockDetailUnavailable(): void {
+    h.getOverview.mockResolvedValue(buildOverview(0))
+    h.listSnapshotBatches.mockRejectedValue(new Error('backend not ready'))
+    h.getMappingSummary.mockRejectedValue(new Error('backend not ready'))
+    h.getUnitSummary.mockRejectedValue(new Error('backend not ready'))
+    h.listPrepLines.mockRejectedValue(new StockPreparationConfirmApiError(500, 'BACKEND_NOT_READY', null))
+    h.listExceptions.mockRejectedValue(new StockPreparationConfirmApiError(500, 'BACKEND_NOT_READY', null))
+  }
+
+  it('H4-1: detail_unavailable offers a Retry that re-runs loadStageDetail and recovers', async () => {
+    mockDetailUnavailable()
+    const root = mountView({ projectId: 'proj-alpha' })
+    await flushUi()
+    expect(root.querySelector('[data-testid="stock-prep-dashboard-recommend"]')?.getAttribute('data-kind')).toBe('detail_unavailable')
+    const retry = root.querySelector('[data-testid="stock-prep-dashboard-detail-retry"]') as HTMLButtonElement | null
+    expect(retry).not.toBeNull()
+    mockClearStageReads() // the retry succeeds
+    const before = h.listSnapshotBatches.mock.calls.length
+    retry!.click()
+    await flushUi()
+    expect(h.listSnapshotBatches.mock.calls.length).toBeGreaterThan(before) // loadStageDetail re-invoked
+    expect(root.querySelector('[data-testid="stock-prep-dashboard-recommend"]')?.getAttribute('data-kind')).not.toBe('detail_unavailable') // recovered
+  })
+
+  it('H4-1: a 403 (admin_required / forbidden) detail state has NO retry — a permission denial is not transient', async () => {
+    h.getOverview.mockResolvedValue(buildOverview(0))
+    h.listSnapshotBatches.mockRejectedValue(new Error('Insufficient integration permissions'))
+    h.getMappingSummary.mockRejectedValue(new Error('Insufficient integration permissions'))
+    h.getUnitSummary.mockRejectedValue(new Error('Insufficient integration permissions'))
+    h.listPrepLines.mockRejectedValue(new StockPreparationConfirmApiError(403, 'FORBIDDEN', null))
+    h.listExceptions.mockRejectedValue(new StockPreparationConfirmApiError(403, 'FORBIDDEN', null))
+    const root = mountView({ projectId: 'proj-alpha' })
+    await flushUi()
+    // A confirmed 403 is never classified detail_unavailable → the detail-retry button must be absent.
+    expect(root.querySelector('[data-testid="stock-prep-dashboard-recommend"]')?.getAttribute('data-kind')).not.toBe('detail_unavailable')
+    expect(root.querySelector('[data-testid="stock-prep-dashboard-detail-retry"]')).toBeNull()
+  })
+
+  it('H4-1: the detail retry button is bilingual + carries an accessible name (aria-label)', async () => {
+    h.locale = 'en'
+    mockDetailUnavailable()
+    const root = mountView({ projectId: 'proj-alpha' })
+    await flushUi()
+    const detailRetry = root.querySelector('[data-testid="stock-prep-dashboard-detail-retry"]') as HTMLButtonElement
+    expect(detailRetry.textContent?.trim()).toBe('Retry')
+    expect(detailRetry.getAttribute('aria-label')).toBe('Retry loading stage detail')
+  })
+
+  it('H4-1: the overview retry button is bilingual + carries an accessible name (aria-label)', async () => {
+    h.locale = 'en'
+    h.getOverview.mockRejectedValue(new Error('503'))
+    const root = mountView()
+    await flushUi()
+    const overviewRetry = root.querySelector('[data-testid="stock-prep-dashboard-retry"]') as HTMLButtonElement
+    expect(overviewRetry.textContent?.trim()).toBe('Retry')
+    expect(overviewRetry.getAttribute('aria-label')).toBe('Retry loading workbench overview')
+  })
+
+  it('H4-1: a project switch DURING a detail retry drops the stale retry (retry path honors the seq guard)', async () => {
+    h.getOverview.mockResolvedValue({
+      projectCount: 2, statusCounts: { active: 2 },
+      projects: [
+        // snapshotBatchCount ≥ 1 so the tier-1 no-snapshot nudge does NOT fire — an unknown detail read
+        // with clean tier-1 then classifies detail_unavailable (which is what carries the retry button).
+        { projectId: 'proj-A', projectStatus: 'active', lastSyncRunId: 'r-a', snapshotBatchCount: 2, openExceptionCount: 0, readyLineCount: 0, heldLineCount: 0 },
+        { projectId: 'proj-B', projectStatus: 'active', lastSyncRunId: 'r-b', snapshotBatchCount: 2, openExceptionCount: 0, readyLineCount: 0, heldLineCount: 0 },
+      ],
+    } as unknown as StockPreparationWorkspaceOverview)
+    // proj-A: FIRST load all reject (→ detail_unavailable + a retry button); the RETRY's snapshot read is
+    // held with a stale batchCount 99. proj-B resolves cleanly to 7.
+    let releaseRetryA!: () => void
+    const retryA = new Promise((resolve) => { releaseRetryA = () => resolve({ batchCount: 99, batches: [] }) })
+    let aSnap = 0
+    h.listSnapshotBatches.mockImplementation((scope: { projectId?: string }) => {
+      if (scope.projectId === 'proj-A') { aSnap += 1; return aSnap === 1 ? Promise.reject(new Error('backend not ready')) : retryA }
+      return Promise.resolve({ batchCount: 7, batches: [] }) // B
+    })
+    const failFirstA = (ok: unknown) => { let n = 0; return (scope: { projectId?: string }) => (scope.projectId === 'proj-A' && ++n === 1 ? Promise.reject(new StockPreparationConfirmApiError(500, 'X', null)) : Promise.resolve(ok)) }
+    h.getMappingSummary.mockImplementation(failFirstA({ activeMappingCount: 0, pendingConfirmCount: 0 }))
+    h.getUnitSummary.mockImplementation(failFirstA({ pendingUnitLineCount: 0 }))
+    h.listPrepLines.mockImplementation(failFirstA({ rowCount: 0, byPrepStatus: {} }))
+    h.listExceptions.mockImplementation(failFirstA({ rowCount: 0, unresolvedBlockingCount: 0 }))
+
+    const projectId = ref<string>('proj-A')
+    app = createApp({ render: () => renderH(StockPreparationDashboardView as Component, { projectId: projectId.value, scope: {} }) })
+    app.mount(container!)
+    await flushUi() // A mount → detail_unavailable
+    const retry = container!.querySelector('[data-testid="stock-prep-dashboard-detail-retry"]') as HTMLButtonElement
+    expect(retry).not.toBeNull()
+    retry.click()             // retry for A → snapshot read (99) HELD
+    await flushUi()
+    projectId.value = 'proj-B' // switch mid-retry → B loads (7)
+    await flushUi()
+    releaseRetryA()            // the stale A retry (99) finally resolves — lower seq, must be dropped
+    await flushUi()
+    const text = container!.textContent || ''
+    expect(text).toContain('7')
+    expect(text).not.toContain('99')
+  })
+
   it('is values-free: planted business-looking strings on the project row never render', async () => {
     h.getOverview.mockResolvedValue(buildOverview())
     mockClearStageReads()
@@ -332,7 +449,7 @@ describe('StockPreparationDashboardView', () => {
     h.listExceptions.mockResolvedValue({ rowCount: 0, unresolvedBlockingCount: 0 })
 
     const projectId = ref<string>('proj-A')
-    app = createApp({ render: () => renderH(StockPreparationDashboardView as Component, { projectId: projectId.value, scope: () => ({}) }) })
+    app = createApp({ render: () => renderH(StockPreparationDashboardView as Component, { projectId: projectId.value, scope: {} }) })
     app.mount(container!)
     await flushUi() // project A's stage-detail load is in flight (its snapshot-batches read is held)
 
@@ -373,7 +490,7 @@ describe('StockPreparationDashboardView', () => {
     h.listExceptions.mockResolvedValue({ rowCount: 0, unresolvedBlockingCount: 0 })
 
     const projectId = ref<string>('proj-A')
-    app = createApp({ render: () => renderH(StockPreparationDashboardView as Component, { projectId: projectId.value, scope: () => ({}) }) })
+    app = createApp({ render: () => renderH(StockPreparationDashboardView as Component, { projectId: projectId.value, scope: {} }) })
     app.mount(container!)
     await flushUi()            // load#1 (A) in flight — its snapshot-batches read (99) is held
 
@@ -425,7 +542,7 @@ describe('StockPreparationDashboardView', () => {
     h.listExceptions.mockResolvedValue({ rowCount: 0, unresolvedBlockingCount: 0 })
 
     const projectId = ref<string>('proj-A')
-    app = createApp({ render: () => renderH(StockPreparationDashboardView as Component, { projectId: projectId.value, scope: () => ({}) }) })
+    app = createApp({ render: () => renderH(StockPreparationDashboardView as Component, { projectId: projectId.value, scope: {} }) })
     app.mount(container!)
     await flushUi()            // load#1 (A) in flight — its snapshot-batches read is held
 
@@ -446,5 +563,65 @@ describe('StockPreparationDashboardView', () => {
     releaseSecondA()
     await flushUi()
     expect(container!.textContent || '').toContain('3') // the fresh reselect load settles cleanly
+  })
+
+  // ── H4-2 keyboard ────────────────────────────────────────────────────────────────────────────────
+  // Scope note: reachability/activation are already satisfied because every control this view owns is a
+  // native <button>/<select> — so there is deliberately NO Enter/Space→navigate test here (jsdom does not
+  // synthesize a native button's default activation from a synthetic keydown, so such a test would assert
+  // jsdom, not our code). The focus RING itself is CSS `:focus-visible`, which jsdom does not compute — it
+  // is verified through the screenshot channel, not here. What IS load-bearing in jsdom is below.
+
+  it('H4-2: every dashboard control is a NATIVE focusable element (a div@click regression goes red here)', async () => {
+    h.getOverview.mockResolvedValue(buildOverview())
+    mockClearStageReads()
+    const root = mountView({ projectId: 'proj-alpha' })
+    await flushUi()
+    const controls = [
+      root.querySelector('[data-testid="stock-prep-dashboard-project-select"]'),
+      ...Array.from(root.querySelectorAll('[data-testid^="stock-prep-stage-nav-"]')),
+    ].filter(Boolean) as HTMLElement[]
+    expect(controls.length).toBeGreaterThanOrEqual(7) // 1 picker + the six stage buttons
+    for (const el of controls) {
+      el.focus()
+      // A <div @click> without tabindex is NOT focusable: activeElement stays on <body> → this fails.
+      expect(document.activeElement).toBe(el)
+    }
+  })
+
+  it('H4-2: a failed retry returns focus to the retry button (our own :disabled dropped it to body)', async () => {
+    h.getOverview.mockRejectedValue(new Error('503'))
+    const root = mountView()
+    await flushUi()
+    const retry = root.querySelector('[data-testid="stock-prep-dashboard-retry"]') as HTMLButtonElement
+    retry.focus()
+    expect(document.activeElement).toBe(retry)
+    retry.click() // still failing → button re-renders; :disabled during the load drops focus to <body>
+    await flushUi()
+    expect(root.querySelector('[data-testid="stock-prep-dashboard-retry"]')).not.toBeNull()
+    expect(document.activeElement).toBe(root.querySelector('[data-testid="stock-prep-dashboard-retry"]'))
+  })
+
+  it('H4-2: a retry does NOT steal focus back if the operator Tabbed elsewhere while it was in flight', async () => {
+    let releaseRetry: (v: unknown) => void = () => {}
+    h.getOverview.mockRejectedValueOnce(new Error('503'))
+    const root = mountView()
+    await flushUi()
+    const retry = root.querySelector('[data-testid="stock-prep-dashboard-retry"]') as HTMLButtonElement
+    retry.focus()
+    // Hold the retry's load in flight, and fail it again so the retry button is still rendered on settle.
+    h.getOverview.mockImplementation(() => new Promise((_res, rej) => { releaseRetry = () => rej(new Error('503')) }))
+    retry.click()
+    await flushUi()
+    // The operator Tabs away to another control WHILE the retry is still loading.
+    const elsewhere = document.createElement('button')
+    document.body.appendChild(elsewhere)
+    elsewhere.focus()
+    expect(document.activeElement).toBe(elsewhere)
+    releaseRetry(null)
+    await flushUi()
+    // Focus stays where the operator put it — restoring it here would be focus theft.
+    expect(document.activeElement).toBe(elsewhere)
+    elsewhere.remove()
   })
 })

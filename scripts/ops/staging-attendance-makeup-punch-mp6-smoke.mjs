@@ -425,7 +425,11 @@ function makeupBody(workDate, requestType, { reason, attachment = true } = {}) {
     workDate,
     requestType,
     reason: reason === undefined ? `MP-6 smoke ${STAMP} ${requestType} ${workDate}` : reason,
-    metadata: attachment ? { attachmentUrl: ATTACHMENT_URL } : {},
+    // The server's draft resolver reads the attachment from the TOP-LEVEL body field
+    // (parsedData.attachmentUrl) and rebuilds metadata from scratch — a body.metadata
+    // attachment is silently dropped (run 29383604023: valid leg 422
+    // MAKEUP_PUNCH_ATTACHMENT_REQUIRED despite metadata.attachmentUrl being set).
+    ...(attachment ? { attachmentUrl: ATTACHMENT_URL } : {}),
   }
   if (requestType === 'missed_check_in') body.requestedInAt = `${workDate}T01:00:00.000Z`
   else body.requestedOutAt = `${workDate}T10:00:00.000Z`

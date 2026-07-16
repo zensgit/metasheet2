@@ -42,22 +42,24 @@ import { enumerateSites, listRuntimeTsFiles, readSrcFile, type Site } from './li
 const SRC = join(__dirname, '../../src')
 
 /**
- * The SOLE currently-known MUST-WRITE-but-not-yet-emitting site: `univer-meta.ts` `recreateFieldFromConfig`
- * (field-undelete rehydration). The design-lock's audit (§7a Bucket D) had flagged it debatable-EXEMPT;
- * the owner's OD-6 ruling (§0.5, 2026-07-13) directs MUST-WRITE instead — it rehydrates real captured user
- * cell values from tombstones (`data = data || jsonb_build_object(...)`), which is exactly the fingerprint
- * of the bug class this guard exists to catch. It is OUT of scope for D-1c's five slices (those are A1-A8,
- * the bucket-A user-write-entry-point sweep; this is a field-op, not one of the eight) and is NOT silently
- * exempted — it is a loud, named, pinned, tracked gap. A site may use `revision-pending:` ONLY if its
- * `siteId` is listed here; see the hygiene test below for both directions of that check.
+ * EMPTY as of the W0 tail rung: the sole entry this list ever held —
+ * `univer-meta.ts` `recreateFieldFromConfig` (field-undelete rehydration, OD-6 owner ruling §0.5,
+ * 2026-07-13: MUST-WRITE, not silently exempt) — now emits. The UPDATE bumps `version` and RETURNs the
+ * post-write row so a `recordRecordRevision` is written AT THE NEW version for every rehydrated record,
+ * same transaction; zero rows affected (concurrent delete) emits nothing (no FK-less ghost revision). See
+ * the site itself (`// revision-emitted: field-undelete rehydration`, just above the UPDATE) and its
+ * real-DB goldens in `tests/integration/multitable-tombstone-field-rehydrate-revision-realdb.test.ts`.
  *
- * To regenerate a siteId after a legitimate edit to this exact statement/anchor: run the scanner against
- * `src/routes/univer-meta.ts` and read the `recreateFieldFromConfig` UPDATE's `siteId` — see
- * `multitable-revision-disposition-scanner.test.ts` for how to call `enumerateSites` directly.
+ * A site may use `revision-pending:` ONLY if its `siteId` is listed here — see the hygiene test below for
+ * both directions of that check (including the "stale allowlist entry" direction, which is what forced
+ * this list back to empty the moment the site above flipped from `revision-pending:` to `revision-emitted:`
+ * without ALSO deleting its entry here).
+ *
+ * To regenerate a siteId after a legitimate edit to a still-pending statement/anchor: run the scanner
+ * against the target file and read the mutation's `siteId` — see `multitable-revision-disposition-
+ * scanner.test.ts` for how to call `enumerateSites` directly.
  */
-const KNOWN_REVISION_GAPS: ReadonlySet<string> = new Set([
-  '456ec0c986a1b1af', // routes/univer-meta.ts recreateFieldFromConfig — field-undelete rehydration (OD-6 owner ruling: MUST-WRITE, not yet implemented)
-])
+const KNOWN_REVISION_GAPS: ReadonlySet<string> = new Set([])
 
 describe('OD-6 revision-disposition guard — durable structural guard (D-1c final rung)', () => {
   const allSites: Site[] = listRuntimeTsFiles(SRC).flatMap((file) => enumerateSites(file, readSrcFile(SRC, file)))
@@ -113,9 +115,13 @@ describe('OD-6 revision-disposition guard — durable structural guard (D-1c fin
         `(regenerate it): ${staleAllowlistEntries.join(', ')}`,
     ).toEqual([])
 
-    // exactly one known gap today (field-undelete rehydration) — a bound, not a hardcode of WHICH, so a
-    // second legitimate gap can be added without this test needing surgery, but a silent explosion trips it.
-    expect(pendingSites.length).toBe(1)
+    // ZERO known gaps today — the W0 tail rung (field-undelete rehydration) closed the last one. A bound,
+    // not a hardcode of WHICH, so a future legitimate gap can be added without this test needing surgery,
+    // but a silent explosion (someone dodging the guard with "pending") trips it. This assertion, together
+    // with direction 2 above, is exactly what forces KNOWN_REVISION_GAPS to be edited in lockstep with the
+    // site's own marker — an empty Set is handled correctly by both directions (spread-of-empty is `[]`,
+    // `.filter` and `.toEqual([])` are no-ops on it).
+    expect(pendingSites.length).toBe(0)
   })
 
   test('every EMITTED-labelled FILE actually calls recordRecordRevision( somewhere in it (a label cannot fake a call)', () => {

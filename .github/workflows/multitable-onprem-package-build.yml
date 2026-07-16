@@ -23,6 +23,10 @@ on:
         description: 'Release display name (optional)'
         required: false
         default: ''
+      expected_sha:
+        description: 'Expected git commit SHA. If set, the build FAILS unless the checked-out HEAD matches it — prevents shipping a package whose main state is uncertain (e.g. a "corrective-8" tag built from an unknown commit).'
+        required: false
+        default: ''
 
 permissions:
   contents: write
@@ -34,6 +38,19 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Verify expected SHA + record build SHA
+        env:
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+        run: |
+          set -euo pipefail
+          BUILD_SHA="$(git rev-parse HEAD)"
+          echo "BUILD_SHA=$BUILD_SHA" >> "$GITHUB_ENV"
+          if [[ -n "${EXPECTED_SHA}" && "${EXPECTED_SHA}" != "${BUILD_SHA}" ]]; then
+            echo "expected_sha mismatch: expected ${EXPECTED_SHA}, checked out ${BUILD_SHA} — refusing to build a package whose main state is uncertain" >&2
+            exit 1
+          fi
+          echo "Building on-prem package at commit ${BUILD_SHA}"
 
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
@@ -106,6 +123,14 @@ jobs:
           echo "PACKAGE_VERIFY_ZIP_JSON=$verify_zip_json" >> "$GITHUB_ENV"
           echo "PACKAGE_VERIFY_ZIP_MD=$verify_zip_md" >> "$GITHUB_ENV"
 
+      - name: Bind build SHA into package metadata
+        run: |
+          set -euo pipefail
+          tmp="$(mktemp)"
+          jq --arg sha "$BUILD_SHA" '. + {gitSha: $sha}' "$PACKAGE_META_FILE" > "$tmp"
+          mv "$tmp" "$PACKAGE_META_FILE"
+          echo "gitSha=$BUILD_SHA bound into $(basename "$PACKAGE_META_FILE") for human/tooling reference. NOTE: the one-click acceptance -ExpectedGitSha lock verifies BUILD_PROVENANCE.json.gitCommit INSIDE the archive (the checksummed bytes), NOT this external sidecar — an old archive cannot be laundered by a fresh sidecar."
+
       - name: Publish GitHub Release
         if: ${{ inputs.publish_release == 'true' }}
         env:
@@ -119,7 +144,7 @@ jobs:
             exit 1
           fi
 
-          resolved_name="${RELEASE_NAME:-Multitable On-Prem Package ${RELEASE_TAG}}"
+          resolved_name="${RELEASE_NAME:-Multitable On-Prem Package ${RELEASE_TAG} (${BUILD_SHA})}"
           assets=(
             "$PACKAGE_FILE"
             "$PACKAGE_FILE_ZIP"

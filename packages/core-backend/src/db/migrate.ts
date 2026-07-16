@@ -82,6 +82,26 @@ async function commandList(): Promise<void> {
   await db.destroy()
 }
 
+// Positive confirmation that a SPECIFIC migration is applied. `--latest` exiting 0 is NOT proof a
+// given migration ran (an empty pending set, an excluded/no-op entry, or a partially-applied history
+// all exit 0), so acceptance tooling needs a name-level check against the unified ledger. Exit codes:
+//   0 = applied, 1 = known but still pending, 2 = name not found among known migrations.
+async function commandConfirm(name: string): Promise<void> {
+  const migrator = buildMigrator()
+  const all = await migrator.getMigrations()
+  await db.destroy()
+  const target = all.find((m) => m.name === name)
+  if (!target) {
+    console.error(`migration "${name}" not found among the known migrations`)
+    process.exit(2)
+  }
+  if (!target.executedAt) {
+    console.error(`migration "${name}" is NOT applied (still pending)`)
+    process.exit(1)
+  }
+  console.log(`migration "${name}" is applied`)
+}
+
 async function commandRollback(): Promise<void> {
   const migrator = buildMigrator()
   await exitOnError('roll back', () => migrator.migrateDown())
@@ -107,6 +127,7 @@ function printHelp(): void {
 
   (no flag)    Migrate to latest (default; same as --latest).
   --list       Show applied count + pending migration names. Read-only.
+  --confirm N  Confirm migration N is applied (exit 0 applied / 1 pending / 2 unknown). Read-only.
   --rollback   Roll back the most recently applied migration (one step).
   --reset      Roll back ALL migrations. Requires ALLOW_DB_RESET=true env.
   --help       Show this message.
@@ -118,7 +139,20 @@ Notes:
 }
 
 async function main(): Promise<void> {
-  const command = parseCommand(process.argv.slice(2))
+  const argv = process.argv.slice(2)
+
+  // --confirm <name>: read-only name-level check (takes an argument, so handled before the flag parser).
+  const confirmIdx = argv.indexOf('--confirm')
+  if (confirmIdx !== -1) {
+    const name = argv[confirmIdx + 1]
+    if (!name || name.startsWith('--')) {
+      console.error('--confirm requires a migration name, e.g. --confirm 066_create_integration_stock_prep_audit')
+      process.exit(2)
+    }
+    return commandConfirm(name)
+  }
+
+  const command = parseCommand(argv)
 
   if (command === 'help') {
     printHelp()

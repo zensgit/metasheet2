@@ -490,6 +490,11 @@ export interface MetaCapabilities {
   /** T8-2 Reset flag-visibility signal (#3239): flag-derived (MULTITABLE_ENABLE_PIT_RESET ∧ sheet-admin), set by
    *  /context. Optional — absent/false ⇒ the Reset entry is HIDDEN (the FE half of "inert until enabled"). */
   pitResetEnabled?: boolean
+  /** Interim revert-execute master-gate flag-visibility signal (current-risk mitigation): flag-derived
+   *  (MULTITABLE_ENABLE_SHEET_REVERT ∧ sheet-admin), set by /context — SAME pattern as pitResetEnabled. Optional —
+   *  absent/false ⇒ any Revert entry the FE builds MUST be HIDDEN (fail-closed, same discipline as Reset). No
+   *  consuming component exists yet in this PR; this is the type-contract half only. */
+  sheetRevertEnabled?: boolean
   /** Slice 3 personal-views "My view" toggle flag-visibility signal (design-lock
    *  multitable-personal-views-slice3-fe-toggle-design-lock-20260706.md §7 Q1): flag-derived
    *  (MULTITABLE_ENABLE_PERSONAL_VIEWS), set by /context. Optional — absent/false ⇒ the toggle + reset-to-shared
@@ -654,6 +659,16 @@ export interface MultitableCommentInboxItem extends MultitableComment {
   sheetId?: string | null
   viewId?: string | null
   recordId?: string | null
+  /**
+   * G-10 (docket #68): server-projected display name for the matching id, when resolvable.
+   * Additive — the id fields above are unchanged. Render name-first with an id fallback
+   * (`baseName ?? baseId`, same pattern as the existing `authorName ?? authorId`); `recordId` has no
+   * `recordName` counterpart (no cheap server-side record-title resolver exists yet).
+   */
+  baseName?: string | null
+  sheetName?: string | null
+  viewName?: string | null
+  fieldName?: string | null
 }
 
 export type MetaCommentInboxItem = MultitableCommentInboxItem

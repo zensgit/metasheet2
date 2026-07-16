@@ -174,6 +174,82 @@
               <dd class="sp-snap__count-value">{{ entry.value }}</dd>
             </div>
           </dl>
+
+          <!-- View-2 per-row drill-down: lazy, values-free (handles + enums + counts + opaque SHA-16
+               fingerprints only — never a raw path key / drawing number / quantity / unit). -->
+          <div class="sp-snap__rows-wrap">
+            <button
+              type="button"
+              class="sp-snap__rows-toggle"
+              data-testid="stock-prep-snapshot-diff-rows-toggle"
+              :aria-expanded="rowDetailOpen"
+              @click="toggleRowDetail"
+            >
+              {{ rowDetailOpen ? bi('收起逐行明细', 'Hide row detail') : bi('查看逐行明细', 'View row detail') }}
+            </button>
+
+            <template v-if="rowDetailOpen">
+              <p
+                v-if="rowsLoading"
+                class="sp-snap__state sp-snap__state--muted"
+                data-testid="stock-prep-snapshot-diff-rows-loading"
+                role="status"
+              >
+                {{ bi('正在加载逐行明细…', 'Loading row detail…') }}
+              </p>
+              <p
+                v-else-if="rowsErrored"
+                class="sp-snap__state sp-snap__state--muted"
+                data-testid="stock-prep-snapshot-diff-rows-error"
+                role="status"
+              >
+                {{ bi('逐行明细暂不可用,稍后再试。', 'Row detail is not available yet — try again later.') }}
+              </p>
+              <p
+                v-else-if="diffRows && diffRows.rowCount === 0"
+                class="sp-snap__state sp-snap__state--muted"
+                data-testid="stock-prep-snapshot-diff-rows-empty"
+              >
+                {{ bi('该批次无差异行。', 'No diff rows for this batch.') }}
+              </p>
+              <div v-else-if="diffRows" data-testid="stock-prep-snapshot-diff-rows">
+                <p class="sp-snap__rows-meta" data-testid="stock-prep-snapshot-diff-rows-meta">
+                  {{ bi('差异行', 'Diff rows') }}: {{ diffRows.rowCount }} ·
+                  {{ bi('待处理', 'Held') }}: {{ diffRows.heldRowCount }}
+                </p>
+                <div class="sp-snap__rows-scroll">
+                  <table class="sp-snap__rows-table" data-testid="stock-prep-snapshot-diff-rows-table">
+                    <thead>
+                      <tr>
+                        <th>{{ bi('差异句柄', 'Diff') }}</th>
+                        <th>{{ bi('类型', 'Type') }}</th>
+                        <th>{{ bi('复核状态', 'Review') }}</th>
+                        <th>{{ bi('变更类别', 'Changes') }}</th>
+                        <th>{{ bi('行数', 'Rows') }}</th>
+                        <th>{{ bi('键指纹', 'Key fp') }}</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <tr
+                        v-for="row in diffRows.rows"
+                        :key="row.diffId"
+                        data-testid="stock-prep-snapshot-diff-row"
+                        :data-diff-type="row.diffType"
+                        :data-review-status="row.reviewStatus"
+                      >
+                        <td><code class="sp-snap__handle">{{ row.diffId }}</code></td>
+                        <td>{{ row.diffType }}</td>
+                        <td>{{ row.reviewStatus }}</td>
+                        <td>{{ row.changeTypes.length ? row.changeTypes.join(', ') : '—' }}</td>
+                        <td>{{ row.rowCount }}</td>
+                        <td><code class="sp-snap__handle">{{ fingerprintLabel(row.keyFingerprint) }}</code></td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </template>
+          </div>
         </div>
       </div>
     </div>
@@ -200,9 +276,11 @@ import type { IntegrationScope } from '../../../services/integration/workbench'
 import {
   getStockPreparationSnapshotDiff,
   listStockPreparationSnapshotBatches,
+  listStockPreparationSnapshotDiffRows,
   type StockPreparationSnapshotBatchListResult,
   type StockPreparationSnapshotBatchSummary,
   type StockPreparationSnapshotDiffSummary,
+  type StockPreparationSnapshotDiffRowsResult,
 } from '../../../services/integration/stockPreparation/bomSnapshotDiff'
 
 const props = withDefaults(
@@ -227,6 +305,9 @@ const hasProject = computed(() => Boolean(props.projectId))
 const loading = ref(Boolean(props.projectId))
 const errored = ref(false)
 const result = ref<StockPreparationSnapshotBatchListResult | null>(null)
+// Monotonic guard for the batch-LIST load: a project switch bumps it, so a slow list response for the
+// previous project (arriving after the operator moved on) is dropped, not committed over the new project.
+let batchListSeq = 0
 
 const isEmpty = computed(() => result.value !== null && result.value.batchCount === 0)
 
@@ -235,6 +316,26 @@ const selectedBatchId = ref<string | null>(null)
 const diffLoading = ref(false)
 const diffErrored = ref(false)
 const diff = ref<StockPreparationSnapshotDiffSummary | null>(null)
+// Monotonic guard for the diff-SUMMARY load: a batch switch (or project switch, via resetDiff) bumps it,
+// so batch A's late summary cannot overwrite batch B's.
+let diffSeq = 0
+
+// Per-row detail sub-state (the view-2 drill-down under the summary). Lazy: the rows GET is issued only
+// when the operator opens the detail, and re-fetched fresh per batch — never eagerly with the summary.
+const rowDetailOpen = ref(false)
+const rowsLoading = ref(false)
+const rowsErrored = ref(false)
+const diffRows = ref<StockPreparationSnapshotDiffRowsResult | null>(null)
+// Monotonic guard: only the NEWEST rows load may commit. A batch switch (or re-open) bumps this, so a
+// slow response for the previous batch — arriving after the operator moved on — is discarded instead of
+// being cached under the wrong batch (A's late reply must never show up when B is open).
+let rowsSeq = 0
+
+// The fingerprint is the full opaque `sha16:<16 hex>` handle (never the raw path key) — 22 chars, short
+// enough to show whole. (The old slice(0,10) cut the `sha16:` prefix down to 4 hex, which was misleading.)
+function fingerprintLabel(fp: string | null): string {
+  return fp ?? '—'
+}
 
 // Fixed whitelist of the eight values-free change-count kinds (counts of lines, never the values).
 const changeCountEntries = computed(() => {
@@ -252,16 +353,28 @@ const changeCountEntries = computed(() => {
   ]
 })
 
+function resetRowDetail(): void {
+  rowsSeq += 1 // invalidate any in-flight rows load for the batch we are leaving
+  rowDetailOpen.value = false
+  rowsLoading.value = false
+  rowsErrored.value = false
+  diffRows.value = null
+}
+
 function resetDiff(): void {
+  diffSeq += 1 // invalidate any in-flight diff-summary load for the batch/project we are leaving
   selectedBatchId.value = null
   diffLoading.value = false
   diffErrored.value = false
   diff.value = null
+  resetRowDetail()
 }
 
 async function loadBatches(): Promise<void> {
   resetDiff()
-  if (!props.projectId) {
+  const seq = (batchListSeq += 1)
+  const projectId = props.projectId
+  if (!projectId) {
     // No project handle → neutral select-a-project state; issue no GET.
     loading.value = false
     errored.value = false
@@ -271,16 +384,16 @@ async function loadBatches(): Promise<void> {
   loading.value = true
   errored.value = false
   try {
-    result.value = await listStockPreparationSnapshotBatches({
-      ...props.scope,
-      projectId: props.projectId,
-    })
+    const listed = await listStockPreparationSnapshotBatches({ ...props.scope, projectId })
+    if (seq !== batchListSeq || projectId !== props.projectId) return // superseded by a newer project load
+    result.value = listed
   } catch {
+    if (seq !== batchListSeq || projectId !== props.projectId) return
     // 404-soft: the backend read route may not exist yet. Surface a neutral state, NEVER the raw body.
     errored.value = true
     result.value = null
   } finally {
-    loading.value = false
+    if (seq === batchListSeq) loading.value = false
   }
 }
 
@@ -289,19 +402,55 @@ async function selectBatch(batch: StockPreparationSnapshotBatchSummary): Promise
   // tested guard, and today it is the ONLY caller, so this line has no reachable second path. It
   // exists solely so any future caller also cannot issue a diff GET for an incomplete batch.
   if (batch.incomplete) return
-  selectedBatchId.value = batch.snapshotBatchId
+  const batchId = batch.snapshotBatchId
+  const seq = (diffSeq += 1)
+  selectedBatchId.value = batchId
   diffLoading.value = true
   diffErrored.value = false
   diff.value = null
+  resetRowDetail() // a new batch starts collapsed; its rows are re-fetched fresh when opened
   try {
-    diff.value = await getStockPreparationSnapshotDiff(batch.snapshotBatchId, props.scope)
+    const summary = await getStockPreparationSnapshotDiff(batchId, props.scope)
+    if (seq !== diffSeq || batchId !== selectedBatchId.value) return // superseded — batch A's late summary must not overwrite B
+    diff.value = summary
   } catch {
+    if (seq !== diffSeq || batchId !== selectedBatchId.value) return
     // 404-soft for the diff GET as well.
     diffErrored.value = true
     diff.value = null
   } finally {
-    diffLoading.value = false
+    if (seq === diffSeq) diffLoading.value = false
   }
+}
+
+async function loadRowDetail(): Promise<void> {
+  const batchId = selectedBatchId.value
+  if (!batchId) return
+  const seq = (rowsSeq += 1) // this load owns the newest ticket
+  rowsLoading.value = true
+  rowsErrored.value = false
+  diffRows.value = null
+  try {
+    const result = await listStockPreparationSnapshotDiffRows(batchId, {
+      ...props.scope,
+      projectId: props.projectId,
+    })
+    if (seq !== rowsSeq) return // superseded (batch switched / re-opened) — drop this stale response
+    diffRows.value = result
+  } catch {
+    if (seq !== rowsSeq) return
+    // 404-soft, same as the batch/diff GETs: neutral state, never the raw error body.
+    rowsErrored.value = true
+    diffRows.value = null
+  } finally {
+    if (seq === rowsSeq) rowsLoading.value = false
+  }
+}
+
+function toggleRowDetail(): void {
+  rowDetailOpen.value = !rowDetailOpen.value
+  // Lazy first-open fetch; a re-open reuses what we already have (batch switch clears it via resetRowDetail).
+  if (rowDetailOpen.value && !diffRows.value && !rowsLoading.value) void loadRowDetail()
 }
 
 onMounted(loadBatches)
@@ -491,5 +640,68 @@ watch(() => props.projectId, loadBatches)
   color: var(--ms-text-1);
   font-variant-numeric: tabular-nums;
   font-weight: var(--ms-font-weight-title);
+}
+
+.sp-snap__rows-wrap {
+  margin-top: var(--ms-space-3);
+  display: flex;
+  flex-direction: column;
+  gap: var(--ms-space-2);
+}
+
+.sp-snap__rows-toggle {
+  align-self: flex-start;
+  border: 1px solid var(--ms-border-light);
+  border-radius: 6px;
+  background: transparent;
+  padding: 4px 12px;
+  color: var(--ms-color-primary);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.sp-snap__rows-toggle:hover {
+  background: var(--el-fill-color-light);
+}
+
+.sp-snap__rows-toggle:focus-visible {
+  outline: 2px solid var(--ms-color-primary);
+  outline-offset: 1px;
+}
+
+.sp-snap__rows-meta {
+  margin: 0;
+  color: var(--ms-text-2);
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+
+.sp-snap__rows-scroll {
+  overflow-x: auto;
+}
+
+.sp-snap__rows-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.sp-snap__rows-table th,
+.sp-snap__rows-table td {
+  text-align: left;
+  padding: var(--ms-space-2) var(--ms-space-3);
+  border-bottom: 1px solid var(--ms-border-light);
+  white-space: nowrap;
+}
+
+.sp-snap__rows-table th {
+  color: var(--ms-text-2);
+  font-weight: var(--ms-font-weight-title);
+}
+
+.sp-snap__rows-table td {
+  color: var(--ms-text-1);
+  font-variant-numeric: tabular-nums;
 }
 </style>
