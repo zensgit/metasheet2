@@ -1,6 +1,9 @@
-# T3a 设计锁 — ERP approved source-run 服务端直落 `erp_material_master`（决策已定，待 RATIFY, rev 2026-07-15）
+# T3a 设计锁 — ERP approved source-run 服务端直落 `erp_material_master`（RATIFIED / runtime 已落）
 
-状态：**决策已写实（RATIFY-ready）** — OD-1..OD-5 全部裁决落定（§3），owner 2026-07-15 授权「推进 T3a/T3b」。实现处 `bb9724494`（分支 `claude/stock-prep-t3a-erp-autopersist`）**WIP 已按本锁核心接线**（flag 条件 tenant + auto-persist，flag OFF 证实 inert）；**flag ON 的安全验证(steering 拒绝 red-first + 真库 smoke + mutation)待补**（§5）。模型：实现=Opus 主循环（权限+真实写+mutation 证明，owner 政策）。**ratify 是 owner 的门**——本 rev 只把决策写实,不自我 ratify。
+> 2026-07-16 收账：design-lock #4263 与 runtime #4357 已合入 main。T3b 的独立后续锁见
+> `stock-preparation-t3b-plm-source-autopersist-design-lock-20260716.md`。
+
+状态：**RATIFIED / runtime MERGED** — OD-1..OD-5 已裁决，#4357 已完成 flag ON steering、真库 smoke、mutation 与 values-free 双向验证并合入 main（`f49322c75`）。本文保留 T3a 的设计契约；不授权后续 T3b runtime。
 
 ## 1. 问题（owner P1 功能断点，已核实）
 
@@ -14,7 +17,7 @@
 在 **同一请求内**,ERP source-run 成功后,把服务端已有的 `intake` 规范化行**直接**喂给 T2 的 `persistStockPreparationErpMaterialSync`——**行永不过 HTTP**,公开面仍 values-free。复用两个已合入且已硬化的服务端件(source-run intake + T2 persist),是**组合接线**,非新能力面。**flag OFF 时响应逐字节不变(不加任何字段);flag ON 时才落库并加 `autoPersist` + 覆盖 projector 的 dry_run/未写标记**(权威契约见 OD-4)。
 
 ```
-source-run 路由(与 http-routes.cjs WIP bb9724494 一致):
+source-run 路由（与 #4357 merged implementation 一致）：
   admin gate
   autoPersistEnabled = flag                                   (OD-1，默认 OFF)
   若 ON: assertStockPreparationErpAutoPersistNoSteering(req)   // 请求含 tenantId/projectId → 400,在 body allowlist 与任何 I/O 之前 (OD-2)
@@ -34,18 +37,18 @@ source-run 路由(与 http-routes.cjs WIP bb9724494 一致):
                         autoPersist.persisted ? 201 : 200)                      // 201 iff 有行落地
 ```
 
-## 3. 已决策（RATIFY-ready，owner 2026-07-15 定；实现处 `bb9724494` WIP 已按此接线）
+## 3. 已决策（RATIFIED，owner 2026-07-15 定；#4357 已按此落地）
 
 ### OD-1 自动落库 vs 门控 — ✅ DECIDED：默认关闭 flag，分级启用
 - **裁决 A**:新增默认-OFF flag（规范化字面 `true`,trim+小写）。OFF ⇒ 今日行为逐字节不变(只读,不落库);ON ⇒ 自动落缓存。符合本线 staged-optin 纪律。**默认 OFF ⇒ 即便早合也零运行时影响,可在实体机等待期安全合并。**
-- 实现处 flag 名 = `MULTITABLE_STOCK_PREP_ERP_AUTOPERSIST_ENABLED`（WIP 已用,唯一名,无备选）。**台账**:本线**无**专门 flag manifest 文件(不同于 Global History 的 `scripts/ops/multitable-global-history-flag-status.mjs`);该 flag 记于本设计锁 + 实现 PR + 部署 runbook,生产默认 OFF(env 未设即 OFF)。
+- 实现 flag 名 = `MULTITABLE_STOCK_PREP_ERP_AUTOPERSIST_ENABLED`（#4357，唯一名，无备选）。**台账**：本线**无**专门 flag manifest 文件（不同于 Global History 的 `scripts/ops/multitable-global-history-flag-status.mjs`）；该 flag 记于本设计锁 + 实现 PR + 部署 runbook，生产默认 OFF（env 未设即 OFF）。
 
 ### OD-2 租户派生（**安全关键**——T3a 让读变得有后果）— ✅ DECIDED
 现路由读侧用 `resolveTenantId(req, input)`（admin 采信请求 tenantId=GHSA 同款 steering,此前作 GHSA step-2 只读**延后**)。**T3a 使该读产生写副作用 ⇒ 读侧 steering 升级为写相关向量**:admin 可把读引到 tenant_evil 的源配置,再把 tenant_evil 的 ERP 数据落进某租户缓存。
 - **裁决:租户派生随 flag 条件化。**
   - **flag OFF**:保持现有 `resolveTenantId(req, input)` 只读路径,**逐字节不变**——GHSA step-2 的只读 steering 问题仍**延后**,不在 T3a 内动。
   - **flag ON**:读+写租户都**从认证主体派生**(`resolveAuthUserTenantId`),写 staging 用 `resolveIntegrationStagingProjectId(auth-tenant, undefined)`(#4206 模式)。
-- **强化(owner 2026-07-15):flag ON 时,请求侧显式 tenant/projectId steering fail-closed 拒绝,且在 body allowlist(`normalizeStockPreparationSourceRunBody`)与任何 I/O 之前**——不是静默忽略。**落点关键(owner P2)**:guard 必须在 normalize 之**前**,因为 `projectId` **不在** source-run allowlist(keys 仅 tenantId/workspaceId/readSourceConfigId/inputs/syncRunId),若 guard 在 normalize 之后,body `projectId` 会先被 normalize 以通用 `STOCK_PREPARATION_ERP_SOURCE_RUN_REQUEST_INVALID` 拒掉,拿不到专用 steering 码。故 WIP 已把 `assertStockPreparationErpAutoPersistNoSteering(req)` 移到 `requireAccess` + flag 判定后、normalize 前:body/query/params 带 `tenantId` 或 `projectId` ⇒ 400 `STOCK_PREPARATION_ERP_AUTOPERSIST_STEERING_NOT_ALLOWED`(专用码,零 I/O)。理由:auto-persist 下被引导的读会真实落进缓存;拒绝比忽略更早、更明确、审计更清晰,与 baseId `assertNoRequestBaseId` 同纪律。
+- **强化(owner 2026-07-15):flag ON 时,请求侧显式 tenant/projectId steering fail-closed 拒绝,且在 body allowlist(`normalizeStockPreparationSourceRunBody`)与任何 I/O 之前**——不是静默忽略。**落点关键(owner P2)**:guard 必须在 normalize 之**前**,因为 `projectId` **不在** source-run allowlist(keys 仅 tenantId/workspaceId/readSourceConfigId/inputs/syncRunId),若 guard 在 normalize 之后,body `projectId` 会先被 normalize 以通用 `STOCK_PREPARATION_ERP_SOURCE_RUN_REQUEST_INVALID` 拒掉,拿不到专用 steering 码。#4357 已把 `assertStockPreparationErpAutoPersistNoSteering(req)` 放在 `requireAccess` + flag 判定后、normalize 前:body/query/params 带 `tenantId` 或 `projectId` ⇒ 400 `STOCK_PREPARATION_ERP_AUTOPERSIST_STEERING_NOT_ALLOWED`(专用码,零 I/O)。理由:auto-persist 下被引导的读会真实落进缓存;拒绝比忽略更早、更明确、审计更清晰,与 baseId `assertNoRequestBaseId` 同纪律。
 - T3a **顺带闭合本路由的 GHSA step-2 写相关向量**(因为 flag ON 让它有写后果)。**不碰其它 source-run/plan 路由**(仍 GHSA step-2 owner 决策)。
 - 验证:flag ON 下 body/query/params tenantId 或 projectId → I/O 前 400 + 零 source-run 读 + 零写;flag OFF 下现有读行为不变。
 
@@ -70,10 +73,10 @@ source-run 路由(与 http-routes.cjs WIP bb9724494 一致):
 
 ## 3.5 实现契约细化（owner re-review — rev 2026-07-15 对齐真实代码）
 
-> 说明:响应契约(②)与空/失败语义(③)已**就地统一进 OD-4 / OD-3**(不再在此追加平行说法)。此处保留 ①④⑤。所有契约均以 http-routes.cjs WIP `bb9724494` + T2/source-run 真实返回为准。
+> 说明:响应契约(②)与空/失败语义(③)已**就地统一进 OD-4 / OD-3**(不再在此追加平行说法)。此处保留 ①④⑤。所有契约均以 #4357 的 `http-routes.cjs` + T2/source-run 真实返回为准。
 
 **① 精确 flag 名（单一,不再留两选）**
-`MULTITABLE_STOCK_PREP_ERP_AUTOPERSIST_ENABLED`（唯一名,无备选)。默认 OFF;仅规范化字面 `true`（`String(env ?? '').trim().toLowerCase() === 'true'`)为 ON。WIP 已用此名。
+`MULTITABLE_STOCK_PREP_ERP_AUTOPERSIST_ENABLED`（唯一名,无备选)。默认 OFF;仅规范化字面 `true`（`String(env ?? '').trim().toLowerCase() === 'true'`)为 ON。#4357 已用此名。
 
 **② 响应契约 → 见 OD-4（已就地统一,不在此重复）**
 避免两处说法漂移:OFF 逐字节不变(无 autoPersist 字段)、ON 覆盖 projector 的 dry_run/internalWriteExecuted 并加 T2 真实 evidence、201/200 规则、契约不变式,**全部在 OD-4**(对齐 stock-preparation-erp-material-sync-persist.cjs 真实返回)。
@@ -108,9 +111,9 @@ source-run 路由(与 http-routes.cjs WIP bb9724494 一致):
 
 ## 6. 交付物
 
-- 本设计锁(决策已定,RATIFY-ready)。
-- 实现（Opus 主循环）:核心接线 `bb9724494` WIP 已落 = source-run 路由 flag 条件 tenant + auto-persist(flag OFF inert 已证)。**待补** = flag ON 的 §5 验证(steering I/O 前拒绝 red-first + 真库 smoke + mutation + values-free 双向）。**不 arm/合,独立对抗审后 owner GO**(首次「读→自动写」组合,虽在内部写边界内,建议 owner 点头)。**因 flag 默认 OFF,可在实体机等待期安全合并。**
+- 本设计锁（RATIFIED）。
+- runtime #4357（MERGED）：source-run 路由 flag 条件 tenant + auto-persist；flag OFF inert、flag ON steering I/O 前拒绝、真库 smoke、mutation 与 values-free 双向证据均已完成。
 
 ## 7. 与 T3b 关系 — **T3b 走独立设计门**
 
-T3b（PLM approved source → 服务端直落 project/snapshot/run）= 同构(PLM source-run 的 `intake.plmBomLines` → sync-run persist),但**实体不同、写目标不同(project/snapshot/run vs erp_material_master)、幂等/不可变语义不同**。owner 2026-07-15 裁决:**T3b 单独设计锁,不折进本 T3a 锁**;T3a 落地后串行推进(同写热点不并行)。本锁**只管 ERP→erp_material_master**。
+T3b（PLM approved source → 服务端直落 project/snapshot/run）= 同构但独立的后续级。真实 source-run outcome 字段是 `intake.bomSnapshotLines`（不是早期草稿误写的 `intake.plmBomLines`）；它与 T3a 的**实体、写目标(project/snapshot/run vs erp_material_master)、幂等/不可变语义均不同**。owner 2026-07-15 裁决：**T3b 单独设计锁，不折进本 T3a 锁**。权威后续锁为 `stock-preparation-t3b-plm-source-autopersist-design-lock-20260716.md`；本锁**只管 ERP→erp_material_master**。
