@@ -331,6 +331,37 @@ describeIfDatabase('P2 durable-delivery S2-b — dispatch loop (real DB)', () =>
     expect(await readRow(id, k)).toMatchObject({ status: 'dead_letter', last_error: 'max_attempts_exhausted' })
   })
 
+  // [#4334 review P2 head-of-line] When the OLDEST reclaimable row is already at the attempt ceiling it is
+  // poisoned AT CLAIM and not dispatched — the per-slot loop must SCAN PAST it (a healthy row is queued behind
+  // it), not mistake the empty claim for "no work" and break. The claim-time poison is counted + surfaced.
+  test('P2: a claim-time-poisoned oldest row does not block a healthy row behind it', async () => {
+    const kOld = `ck_${RUN}_holOld`
+    const kNew = `ck_${RUN}_holNew`
+    const idOld = await seedRow(kOld)
+    const idNew = await seedRow(kNew)
+    await db().query(`UPDATE meta_automation_outbox SET created_at = now() - interval '2 seconds' WHERE id=$1`, [idOld])
+    await db().query(`UPDATE meta_automation_outbox SET created_at = now() - interval '1 second'  WHERE id=$1`, [idNew])
+    // the old row is ALREADY at the ceiling (attempts=2, maxAttempts=2) → poisoned at claim, returns no row.
+    await db().query(`UPDATE meta_automation_outbox_consumer SET attempts = 2 WHERE outbox_id=$1`, [idOld])
+    let newCalled = 0
+    const claimPoisons: string[] = []
+    const r = new ConsumerAdapterRegistry()
+    r.register(adapter(kOld, ok)) // never actually invoked (poisoned at claim, before any adapter call)
+    r.register(
+      adapter(kNew, async () => {
+        newCalled += 1
+        return { outcome: 'success' }
+      }),
+    )
+    const res = await runDispatchTick(db(), r, { batchSize: 2, maxAttempts: 2, onClaimTimePoison: (i) => claimPoisons.push(i.consumerKey) })
+    expect(newCalled).toBe(1) // the healthy row behind the poisoned one WAS delivered — no head-of-line block
+    expect(res.completed).toBe(1)
+    expect(res.claimTimePoisoned).toBe(1) // the terminal transition is counted...
+    expect(claimPoisons).toContain(kOld) // ...and surfaced to telemetry
+    expect((await readRow(idOld, kOld)).status).toBe('dead_letter')
+    expect((await readRow(idNew, kNew)).status).toBe('done')
+  })
+
   // [#4334 review P1#2] A malformed adapter verdict must RETRY (values-free adapter_error), never poison —
   // poisoning drops the event. Only an exact permanent verdict dead-letters.
   test('P1#2: malformed adapter verdicts reschedule as adapter_error (never dead_letter)', async () => {

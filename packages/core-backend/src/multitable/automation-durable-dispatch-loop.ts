@@ -14,9 +14,12 @@
  *     surfaced through `observer.onUnknownConsumerKeys` and left `pending` for a worker that knows them
  *     (#4203 §246 rolling-deploy). Observer calls are best-effort — a throwing sink never fails the tick.
  *   - **PER-SLOT claim**: the tick claims ONE reclaimable row at a time (up to `batchSize` slots) and processes
- *     it immediately — never a batch. The claim increments `attempts` AT CLAIM (crash-safe, S2-a), so a batch
- *     claim would let a slow front row starve a tail row into `max_attempts` exhaustion WITHOUT its adapter
- *     ever running; per-slot claim guarantees `attempts == adapter invocations`.
+ *     it immediately — never a batch. The claim increments `attempts` AT CLAIM (crash-safe, S2-a: a
+ *     crash-after-claim still counts toward the ceiling, which is intended). A batch claim would additionally
+ *     let a slow front row starve a tail row into `max_attempts` exhaustion WITHOUT its adapter running; per-slot
+ *     claim removes that — in NORMAL operation a row is only attempted when it is about to be processed, so it is
+ *     never poisoned-by-exhaustion without having run. (A row poisoned AT CLAIM because it was ALREADY at the
+ *     ceiling is not dispatched; the loop scans past it and counts it — it does not stop the poll.)
  *   - **The lease is maintained by a heartbeat while the adapter runs** (a fence-CAS renew, leaseMs/3 period,
  *     which does NOT bump the fence). A row lost to a concurrent reclaim mid-flight is detected — the renew
  *     matches 0 rows → the in-flight call is aborted and the row is left to its new owner. This is defense in
@@ -33,9 +36,11 @@
  *     (S5) and may misbehave. A malformed verdict (unknown outcome, missing/invalid reason, non-object, null)
  *     is a retryable `adapter_error`, NEVER a poison: a bad verdict must not silently drop the event. Only an
  *     exact `{ outcome: 'permanent_failure', reason: 'permanent_rejection' }` dead-letters.
- *   - **Per-row isolation**: one adapter failing/throwing/timing-out never blocks the next row. (A DB error on
- *     claim/renew/resolve is NOT isolated — it means the store is unhealthy, so it propagates and the caller's
- *     loop surfaces it via `onTickError` and retries next tick.)
+ *   - **Per-row isolation**: one adapter failing/throwing/timing-out never blocks the next row. A DB error on
+ *     the CLAIM or a terminal RESOLVE is NOT isolated — it means the store is unhealthy, so it propagates and
+ *     the caller's loop surfaces it via `onTickError` and retries next tick. A DB error on the HEARTBEAT renew
+ *     is caught per-row and surfaced via `onHeartbeatError` (the row is left for reclaim), so a transient blip
+ *     mid-delivery does not fail the whole tick.
  *   - **Backoff is deterministic exponential with a cap** (no Math.random — reproducible in tests; jitter can
  *     be layered later without changing the persisted contract), floored so a rescheduled row cannot be
  *     re-claimed within the same tick (retry stays a future-tick event, not an intra-tick spin).
@@ -246,6 +251,9 @@ export interface DispatchTickOptions {
    *  competitor) is an infra signal — surfaced here, never masqueraded as a normal lost-lease. Values-free
    *  (internal ids only). Best-effort — a throwing callback never fails the tick. */
   onHeartbeatError?: (info: { outboxId: string; consumerKey: string }) => void
+  /** Claim-time poison seam (#4334 review: head-of-line). A row already at the attempt ceiling is dead-lettered
+   *  AT CLAIM (not dispatched); surfaced here so the terminal transition is observable. Best-effort. */
+  onClaimTimePoison?: (info: { outboxId: string; consumerKey: string; attempts: number }) => void
   /** Cooperative stop: the row loop breaks between rows when this returns true (keeps `stop()` responsive). */
   shouldStop?: () => boolean
   /** Aborted on loop `stop()` — folded into each row's adapter `ctx.signal` so a cooperative adapter cancels
@@ -263,6 +271,8 @@ export interface DispatchTickResult {
   lostLease: number
   /** rows whose HEARTBEAT renew hit a DB error mid-flight (an infra signal, distinct from a normal lost lease). */
   heartbeatErrors: number
+  /** rows poisoned AT CLAIM (attempts already >= ceiling → dead_letter, never dispatched) this tick. */
+  claimTimePoisoned: number
   unknownKeys: string[]
 }
 
@@ -432,7 +442,7 @@ export async function runDispatchTick(
     onHeartbeatError: opts.onHeartbeatError,
     now: opts.now,
   }
-  const result: DispatchTickResult = { claimed: 0, completed: 0, rescheduled: 0, poisoned: 0, lostLease: 0, heartbeatErrors: 0, unknownKeys: [] }
+  const result: DispatchTickResult = { claimed: 0, completed: 0, rescheduled: 0, poisoned: 0, lostLease: 0, heartbeatErrors: 0, claimTimePoisoned: 0, unknownKeys: [] }
 
   // 1) rolling-deploy alert: reclaimable rows this worker cannot serve. Never claimed, never terminated.
   try {
@@ -448,21 +458,40 @@ export async function runDispatchTick(
   // 2+3) PER-SLOT claim (#4334 review P1-A): the dispatcher is serial, and the claim increments `attempts`
   //   AT CLAIM (crash-safe, S2-a). A BATCH claim would burn an attempt on every claimed row even if a slow
   //   front row starves the tail — so a tail row could reach `max_attempts_exhausted` and dead-letter WITHOUT
-  //   its adapter ever running. Claiming ONE row per execution slot guarantees every claimed row is actually
-  //   attempted: attempts == adapter invocations. `batchSize` becomes the per-tick ceiling on how many slots
-  //   to run. (Cost: one claim query per row — acceptable for a delivery loop; a batched design is a later,
-  //   measured decision.)
+  //   its adapter ever running. Claiming ONE row per execution slot means a row is only attempted when it is
+  //   about to be processed (a crash-after-claim still counts an attempt — that is the intended crash-safe
+  //   ceiling, S2-a — but normal operation never poisons a row it did not run). `batchSize` = the per-tick
+  //   ceiling on slots. (Cost: one claim query per row; a batched design is a later, measured decision.)
+  //
+  //   A claim can POISON the oldest row at claim-time (attempts already >= ceiling) and return NO dispatchable
+  //   row. That is NOT "no work" — healthy rows may be queued behind it — so an empty result with a claim-time
+  //   poison CONTINUES to the next slot (bounded by the budget) instead of breaking (#4334 review: head-of-line
+  //   block). The poison is counted + surfaced so the terminal transition is observable.
   const maxRowsPerTick = opts.batchSize ?? 50
   for (let slot = 0; slot < maxRowsPerTick; slot++) {
     if (opts.shouldStop?.()) break // graceful stop: don't claim/start new adapter work once stopping
+    let poisonedThisSlot = 0
     const [row] = await claimDueConsumers(db, {
       consumerKeys: knownKeys,
       batchSize: 1,
       leaseMs,
       maxAttempts: opts.maxAttempts,
       now: opts.now,
+      onClaimTimePoison: (info) => {
+        poisonedThisSlot += 1
+        result.claimTimePoisoned += 1
+        try {
+          opts.onClaimTimePoison?.(info)
+        } catch {
+          /* best-effort telemetry */
+        }
+      },
     })
-    if (!row) break // nothing reclaimable this tick
+    if (!row) {
+      // Distinguish "the candidate was terminated at claim" (scan past it) from "truly nothing reclaimable".
+      if (poisonedThisSlot > 0) continue
+      break
+    }
     result.claimed += 1
     const adapter = registry.get(row.consumerKey)
     if (!adapter) {
