@@ -315,6 +315,9 @@ export default defineConfig({
       'tests/integration/multitable-action-applied-ledger-realdb.test.ts',
       // FWB-1 slice ③ write_approval_form_values same-txn composition — real-DB. Two-point wiring.
       'tests/integration/multitable-fwb-write-action-realdb.test.ts',
+      // FWB dispatch wiring + eight-scenario acceptance matrix — real-DB. Two-point wiring.
+      'tests/integration/multitable-fwb-dispatch-wiring-realdb.test.ts',
+      'tests/integration/multitable-p2-fwb-eight-scenario-matrix.test.ts',
       // P2 durable-delivery S2-a claim engine / fence-CAS — real-DB constructed-concurrency (zombie/SKIP
       // LOCKED). Excluded HERE so it cannot skip-green in the no-DB lane; whole-file wired into
       // plugin-tests.yml. Two-point wiring.
