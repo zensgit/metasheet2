@@ -8,7 +8,7 @@
 
 ## §0 一句话
 
-W2 把「记录右缘三个抢位组件」(MetaRecordDrawer 三合一 + 第二个 MetaCommentsDrawer + 权限 modal)统一成**单一 MetaRecordInspector 四 tab 壳**(字段/动态/评论/附件),drawer 退为 deprecated 兼容薄壳;**七刀全落 main、每刀 mutation-proven**;安全关键的附件掩码合同与响应式互斥经构造攻击验证。**最后一刀:OD-W2-5a(R11 回链 badge)a-read-through 进行中**——依赖 `restored_from_version` 早由 #4124 落 main(初稿误判已勘误,§5),owner 2026-07-16 授权直接 GO。
+W2 把「记录右缘三个抢位组件」(MetaRecordDrawer 三合一 + 第二个 MetaCommentsDrawer + 权限 modal)统一成**单一 MetaRecordInspector 四 tab 壳**(字段/动态/评论/附件),drawer 退为 deprecated 兼容薄壳;**七刀 + OD-W2-5a a-read-through 全落 main、每刀 mutation-proven**;安全关键的附件掩码合同与响应式互斥经构造攻击验证。**W2 收官**:最后一刀 OD-W2-5a(R11 回链 badge)= 记录级读链透传 `restoredFromVersion` + 修复 base History Center `normalizeHistoryChange` 半连接,已落 **#4367(`0940e1a9e`)**、独立 Opus 门禁两轮 PASS,验证台账见 §附录 A。其依赖 `restored_from_version` 早由 #4124 落 main(初稿误判已勘误,§5)。
 
 ---
 
@@ -56,7 +56,7 @@ W2 把「记录右缘三个抢位组件」(MetaRecordDrawer 三合一 + 第二�
 - **CI-mirror 全量**:每刀合前跑完整 `run-required-web-tests.sh`(S7 时 340 文件/4009 测试)+ vue-tsc;真库刀 fresh PG + CI MIGRATION_EXCLUDE。
 - **HI-1 零新数据路径**:每面板 source-scan + fetch-monkeypatch,注入 fetch 必红。
 
-## §5 最后一刀:OD-W2-5a a-read-through(owner 2026-07-16 授权直接 GO,进行中)
+## §5 最后一刀:OD-W2-5a a-read-through(owner 2026-07-16 授权直接 GO,已合入 #4367 `0940e1a9e`)
 
 **⚠️ 勘误(owner 2026-07-16 驳回原盘点)**:本文初稿 §5 曾断言 `restored_from_version` 依赖「全库 0 命中、不在 main、在 #4339」——**全错,可证伪**。根因:我用 `grep -rln` **打了 canonical 工作树**(session-start 陈旧 detached HEAD `0ef106293`),而非 `origin/main`;`git fetch` 更新 ref 不更新工作文件。对 ref 正确核实:`git ls-tree -r 42dc78e68` 直接可见 `zzzz20260711000000_add_meta_record_revisions_restored_from_version.ts`,`git grep origin/main` 命中 11 文件。**该列 + 写 seam + 四处 version-restore 穿线 + History Center badge 早由 #4124(2026-07-11)落 main**;#4339 是 causal-seq(`meta_record_chain_seq`)另一回事、只是继承了它,**不是** OD-W2-5a 的 blocker。教训入 `feedback_verify_against_current_main_not_stale_base`(第三次同根因复发)。
 
@@ -67,11 +67,11 @@ W2 把「记录右缘三个抢位组件」(MetaRecordDrawer 三合一 + 第二�
 - 组件:`MetaRecordHistoryPanel` 复用现有 `restoredFromVersionBadge()`,**仅 `restoredFromVersion != null` 显示**。
 - goldens 正负:API/client/component;**`source='restore'` 但字段 NULL 必不显示**(badge 只看 version 非 source)。
 
-**状态**:a-read-through PR 进行中(owner 授权,本轮自主完成)。其落地后 §附录 A 补 a-read-through 验证台账、方为 W2 最终收官。**本文不主张 OD-W2-5a 已完成**——它是本线最后一刀,进行中。
+**状态**:**已合入 `#4367`(squash `0940e1a9e`)**。原分支名与一条平行 session 的 force-push 冲突,按 bounded-thrash 纪律迁到独立分支重开 #4367(4 个 runtime 文件与门禁 head `78be4552b` 逐 blob 相同);Opus 门禁两轮:`78be4552b` PASS-WITH-NITS → 补 F1(接线半连接 golden 进必需 runner)/F4(badge 断言 locale-robust + 两语种单元)后 `30dbb26ec` **PASS(P1 无、P2 无)**。以 `--match-head-commit` 落于门禁 SHA。a-read-through 验证台账见 **§附录 A**——**至此 W2 收官**。
 
 ## §6 owner-gated 残余(明标,不被「W2 收官」掩盖)
 
-- **OD-W2-5a**:a-read-through 进行中(owner 授权,§5);非阻塞、非 owner 裁决项。
+- ~~**OD-W2-5a**~~:a-read-through **已落 #4367 `0940e1a9e`**(§5 + §附录 A);不再是残余。
 - **correctness 子线 C2/C3/C6**:v3.6 统一修订锁 PROPOSED(#4328),待 owner OD-V36-*(尤其 L4-0 canonical-fence 收敛——v3.5 fence 前提在 main 为假);C2 §7 裁决已录(#4325)。#4309 Draft/HELD 归其 session。
 - **私有 comment-inbox authz 缺陷**:report-owner-only、独立 G-8 血缘 rung,待 owner 处置决定;公开面零机制披露。
 - **field-undelete flag = HOLD**:tombstone 观察窗 + 非生产 flag-on smoke 待 owner 起表(批量前置 #4299 已落但不改 HOLD)。
@@ -79,7 +79,35 @@ W2 把「记录右缘三个抢位组件」(MetaRecordDrawer 三合一 + 第二�
 
 ## §7 本文不主张什么
 
-- 不主张 OD-W2-5a 已做(§5 a-read-through 进行中,明标);其依赖在 main 的勘误亦明标。
 - 不主张 W2 锁被完整 ratify 超出 §6bis(那是 owner round-3 已裁的八项 + 设计;实现授权按刀)。
 - 不主张任何 flag 开启 / C2-C6 已解 / 私有缺陷已修。
-- 不主张「整条多维表线全部开发好了」——主张的是:**W2 检查器七刀开发侧完成且经对抗验证;剩余 = 一个依赖缺失刀 + owner 裁决/处置项**,逐条在案。
+- 不主张「整条多维表线全部开发好了」——主张的是:**W2 检查器七刀 + OD-W2-5a a-read-through 开发侧全部完成且经对抗验证并落 main(§1 + §附录 A);W2 收官**;剩余 = **owner 裁决/处置项**(§6:C2/C3/C6 v3.6 锁、私有 authz 缺陷处置、field-undelete HOLD 观察窗、#72 设计 token)——**不属 W2 检查器线的开发量**,逐条在案。
+
+## §附录 A:OD-W2-5a a-read-through 验证台账(落地后补,W2 最终收官)
+
+**状态:已合入 `#4367`(squash `0940e1a9e`)。** OD-W2-5=(a) a-read-through 全链落地并经独立 Opus 门禁两轮判定:初版 head `78be4552b` = PASS-WITH-NITS(P1 无),勘误依赖盘点 + 补门禁要求的测试/CI 加固后,现 head `30dbb26ec`(4 个 runtime 文件与 `78be4552b` **逐 blob 相同**,仅 test/CI delta)= **PASS(P1 无、P2 无)**;以 `--match-head-commit` 落于门禁 SHA。
+
+### A.1 实现(读透传 + 半连接修复 + badge)
+- **后端读**:`listRecordRevisions` 把 `restored_from_version` 投影进 `RecordRevisionEntry.restoredFromVersion`,复用写侧既有 `hasRestoredFromVersionColumn`(`information_schema` 列探针,含正结果缓存)——滚动部署窗列缺时从列清单省略、`serializeRecordRevision` 归一为 `null`,与「列已迁移但从未 restore」的行形状一致,**不 42703/500**。
+- **HTTP route 透传核实**:`/history` handler 的 `redactRecordRevisionEntry` 与 actorName enrich **都是 `{...item}` spread**(非字段映射),字段不会在 service→wire 间被丢——半连接类问题外移一层的隐患已排除。
+- **FE**:`MetaRecordRevision` 带字段;`normalizeRecordHistoryEntry` 透传;**同刀修 `normalizeHistoryChange` 半连接**(base History Center badge 之前在组件测试里注入成形对象所以「假绿」,真 client 线上却丢字段变空)。
+- **组件**:`MetaRecordHistoryPanel` 复用 `restoredFromVersionBadge(version, isZh)`,**仅 `restoredFromVersion != null` 时渲染**;`source='restore'` 但字段为 NULL(PIT-resurrect / reset / lossy-retype-revert 形状)**不显示 badge**——badge 键在字段非空,**永不键在 `source==='restore'`**。
+
+### A.2 owner 强制的 API / client / component 正负 goldens(各 mutation-proven)
+| 层 | 文件 | 正 | 负 | CI 门禁 | mutation |
+|---|---|---|---|---|---|
+| API 真库 | `multitable-restore-backreference-realdb.test.ts`(G4) | restore 行 `restoredFromVersion=1` | v1/v2 行为 null | `plugin-tests.yml:364`(既有白名单,G4 加进既有文件) | 去掉读投影 ⇒ G4 红;drop 列 ⇒ 归 null 无 500 |
+| client | `multitable-record-history-client-restored-from.spec.ts` | 两 fetcher(listRecordHistory→normalizeRecordHistoryEntry、getHistoryBatch→normalizeHistoryChange)透传数字 | 缺失/非数值 → null | **F1 新接线**进 `run-required-web-tests.sh`(web-tests.yml 必需 + multitable-web-guard 共用同一 runner) | 抹平两 normalizer 透传 ⇒ 2 正断言红 |
+| client(必需门) | `multitable-client.spec.ts` | rev_2 `restoredFromVersion:2` | rev_1 null | 既有必需门 | 加字段进 `toEqual` golden,镜像既有 actorName 正负模式 |
+| component | `multitable-record-history-panel.spec.ts` | 带字段行渲染 badge(locale-robust:精确匹配两语种其一) | `source='restore'`+NULL ⇒ 无 badge | 既有必需门(runner) | v-if 改键 source ⇒ 负例红 |
+| label unit | `meta-record-labels.spec.ts` | `restoredFromVersionBadge` 两语种(EN `Restored from v2` / ZH `从版本 2 恢复`) | — | 既有必需门(runner) | 交换三元 ⇒ 单元红 |
+
+### A.3 门禁裁决要点(`30dbb26ec` PASS)
+- **F1(原 P2,已闭)**:半连接的 `normalizeHistoryChange` 侧原本零门禁覆盖——已门禁的 `multitable-history-center-inline-diff` 在该透传被抹平时**仍绿**(它注入成形对象)。接线后:mutation 抹平透传 ⇒ 已门禁的 client spec 红、`multitable-client`/`inline-diff` 仍绿,**证明是 runner 接线在抓这个洞**。
+- **F2(曾报 P3,已撤)**:realdb 文件其实早在 `plugin-tests.yml:364` 白名单里(本 PR 只往既有文件加 G4)⇒ G4 本就 CI 门禁;原 P3 是审阅者对陈旧 canonical 工作树 grep 的假警,已在门禁 MD 撤回。
+- **F3(NIT,未闭,非阻塞)**:读侧 42703 降级无专属 committed「列缺」测试,正确性靠**复用写侧 #4124 已验证的同一探针 + 静态分析 + 手工 drop 列验证**;PR body 已据实弱化措辞(不声称有该 committed 测试)。
+
+### A.4 依赖盘点勘误(承 §5)
+`restored_from_version` 迁移 + 写 seam + 四处 version-restore 穿线 + History Center badge **早由 #4124(2026-07-11)落 main**(`git ls-tree 42dc78e68` / origin/main 可见)。初稿「全库 0 命中/在 #4339」= 对 session-start 陈旧 detached HEAD `0ef106293` 用 `grep -r` 工作树的假阴性;#4339 是 causal-seq(`meta_record_chain_seq`)另一线、只继承该列。教训入 `feedback_verify_against_current_main_not_stale_base`(同根因第三次复发)。
+
+⇒ **W2(S1–S7 + OD-W2-5a)全部落地、每刀 mutation-proven、安全/正确性承重线经构造攻击验证,W2 收官。**
