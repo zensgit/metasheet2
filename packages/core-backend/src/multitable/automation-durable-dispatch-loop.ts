@@ -185,23 +185,28 @@ const RETRYABLE_REASONS: ReadonlySet<string> = new Set<DeliveryFailureReason>(['
  * dropped on a single bad verdict.
  */
 export function normalizeAdapterVerdict(raw: unknown): NormalizedVerdict {
-  if (typeof raw === 'object' && raw !== null) {
-    const outcome = (raw as { outcome?: unknown }).outcome
-    if (outcome === 'success') {
-      return { action: 'complete' }
-    }
-    if (outcome === 'permanent_failure' && (raw as { reason?: unknown }).reason === 'permanent_rejection') {
-      return { action: 'poison', reason: 'permanent_rejection' }
-    }
-    if (outcome === 'retryable_failure') {
-      const reason = (raw as { reason?: unknown }).reason
-      return {
-        action: 'reschedule',
-        reason: typeof reason === 'string' && RETRYABLE_REASONS.has(reason) ? (reason as DeliveryFailureReason) : 'unknown',
+  try {
+    if (typeof raw === 'object' && raw !== null) {
+      const outcome = (raw as { outcome?: unknown }).outcome
+      if (outcome === 'success') {
+        return { action: 'complete' }
+      }
+      if (outcome === 'permanent_failure' && (raw as { reason?: unknown }).reason === 'permanent_rejection') {
+        return { action: 'poison', reason: 'permanent_rejection' }
+      }
+      if (outcome === 'retryable_failure') {
+        const reason = (raw as { reason?: unknown }).reason
+        return {
+          action: 'reschedule',
+          reason: typeof reason === 'string' && RETRYABLE_REASONS.has(reason) ? (reason as DeliveryFailureReason) : 'unknown',
+        }
       }
     }
+  } catch {
+    // A hostile/throwing getter (or prototype-polluted object) on the adapter's return value must NOT throw
+    // here — the doctrine is "the loop never throws for one adapter, and never drops". Treat it as malformed.
   }
-  // null / non-object / unknown outcome / malformed permanent → RETRY, never drop, never poison.
+  // null / non-object / unknown outcome / malformed permanent / a throwing getter → RETRY, never drop, never poison.
   return { action: 'reschedule', reason: 'adapter_error' }
 }
 
@@ -217,6 +222,9 @@ export interface DispatchTickOptions {
   onUnknownConsumerKeys?: (keys: string[]) => void
   /** Cooperative stop: the row loop breaks between rows when this returns true (keeps `stop()` responsive). */
   shouldStop?: () => boolean
+  /** Aborted on loop `stop()` — folded into each row's adapter `ctx.signal` so a cooperative adapter cancels
+   *  its in-flight work immediately (a non-cooperative one is still bounded by `adapterTimeoutMs`). */
+  stopSignal?: AbortSignal
   now?: () => Date
 }
 
@@ -236,6 +244,7 @@ interface RowRuntimeConfig {
   heartbeatMs: number
   retryBaseMs?: number
   retryCapMs?: number
+  stopSignal?: AbortSignal
   now?: () => Date
 }
 
@@ -268,6 +277,12 @@ async function processClaimedRow(
   // 2) Guards: AbortController (cooperative cancel) + heartbeat (maintain the lease; detect a mid-flight
   //    reclaim) + timeout (the loop's liveness guarantee).
   const controller = new AbortController()
+  // A loop-level stop aborts in-flight adapters too, so stop() returns promptly for a cooperative adapter.
+  const onStop = () => controller.abort()
+  if (cfg.stopSignal) {
+    if (cfg.stopSignal.aborted) controller.abort()
+    else cfg.stopSignal.addEventListener('abort', onStop, { once: true })
+  }
   let leaseLost = false
   const heartbeat = setInterval(() => {
     void renewConsumerLease(db, row.outboxId, row.consumerKey, row.fence, cfg.leaseMs, cfg)
@@ -316,6 +331,7 @@ async function processClaimedRow(
   } finally {
     clearInterval(heartbeat)
     if (timeoutTimer) clearTimeout(timeoutTimer)
+    cfg.stopSignal?.removeEventListener('abort', onStop)
   }
 
   // 3) A mid-flight reclaim means another worker owns the row now — do NOT resolve it (that would clobber
@@ -371,6 +387,7 @@ export async function runDispatchTick(
     heartbeatMs,
     retryBaseMs: opts.retryBaseMs,
     retryCapMs: opts.retryCapMs,
+    stopSignal: opts.stopSignal,
     now: opts.now,
   }
   const result: DispatchTickResult = { claimed: 0, completed: 0, rescheduled: 0, poisoned: 0, lostLease: 0, unknownKeys: [] }
@@ -450,6 +467,15 @@ function safeInvoke<A>(fn: ((arg: A) => unknown) | undefined, arg: A): void {
  * The long-running loop: one tick every `intervalMs`, with an overlap guard (a slow tick never runs
  * concurrently with the next). REQUIRES a telemetry sink and REFUSES to start while the master flag is OFF —
  * the flag is the only activation switch, and S1..S4 all land with it off.
+ *
+ * PRECONDITION (S4/S5 wiring): `db` MUST be a concurrency-capable Queryable — a pg `Pool` (or equivalent that
+ * runs queries on independent connections), NOT a single checked-out client. A row's heartbeat renew runs
+ * CONCURRENTLY with that row's adapter and its terminal resolve; on one serialized connection those queries
+ * would block each other (or deadlock). Pass the pool, never `pool.connect()`'s client.
+ *
+ * `stop()` is prompt for cooperative adapters (the loop-stop signal is folded into each adapter's
+ * `ctx.signal`); a non-cooperative adapter that ignores its signal still bounds `stop()` to at most one
+ * `adapterTimeoutMs`.
  */
 export function startDurableDispatchLoop(
   db: Queryable,
@@ -470,14 +496,17 @@ export function startDurableDispatchLoop(
   let running = false
   let stopped = false
   let inFlight: Promise<void> = Promise.resolve()
+  const stopController = new AbortController()
   const timer = setInterval(() => {
     if (running || stopped) return
     running = true
     inFlight = runDispatchTick(db, registry, {
       ...opts,
-      // route the alert through the exception-safe sink; break the row loop promptly once stopping.
+      // route the alert through the exception-safe sink; break the row loop promptly once stopping;
+      // fold the loop-stop signal into each adapter's ctx.signal so stop() cancels in-flight work.
       onUnknownConsumerKeys: (keys) => safeInvoke(observer.onUnknownConsumerKeys, keys),
       shouldStop: () => stopped,
+      stopSignal: stopController.signal,
     })
       .then((result) => {
         safeInvoke(observer.onTick, result)
@@ -494,6 +523,7 @@ export function startDurableDispatchLoop(
   return {
     async stop() {
       stopped = true
+      stopController.abort()
       clearInterval(timer)
       await inFlight
     },

@@ -373,6 +373,86 @@ describeIfDatabase('P2 durable-delivery S2-b — dispatch loop (real DB)', () =>
       await handle.stop()
     }
   }, 15_000)
+
+  // [#4334 adversarial P3-1 leg 1] The heartbeat must DETECT a mid-flight reclaim and ABORT the in-flight
+  // adapter (so a cooperative adapter stops emitting the instant it loses the row).
+  test('P3-1a: heartbeat aborts the in-flight adapter when the row is reclaimed mid-flight', async () => {
+    const key = `ck_${RUN}_hb_abort`
+    const id = await seedRow(key)
+    let abortedObserved = false
+    const r = new ConsumerAdapterRegistry()
+    r.register({
+      key,
+      handle: async (_e, ctx) => {
+        // simulate a CONCURRENT worker reclaiming THIS row mid-flight (a reclaim bumps the fence).
+        await db().query(
+          `UPDATE meta_automation_outbox_consumer SET fence = fence + 1 WHERE outbox_id=$1 AND consumer_key=$2`,
+          [id, key],
+        )
+        // wait for the heartbeat to notice the lost fence and abort us (bounded so a broken guard can't hang).
+        const start = Date.now()
+        while (!ctx?.signal.aborted && Date.now() - start < 6_000) {
+          await new Promise((res2) => setTimeout(res2, 50))
+        }
+        abortedObserved = ctx?.signal.aborted ?? false
+        return { outcome: 'success' }
+      },
+    })
+    // small lease → heartbeat at ~1s; generous adapterTimeout so the TIMEOUT doesn't preempt the heartbeat.
+    const res = await runDispatchTick(db(), r, { leaseMs: 1_500, adapterTimeoutMs: 9_000 })
+    expect(abortedObserved).toBe(true) // the heartbeat detected the reclaim and aborted the call
+    expect(res.lostLease).toBe(1) // we did not resolve a row we no longer own
+    expect(res.completed).toBe(0)
+  }, 15_000)
+
+  // [#4334 adversarial P3-1 leg 2] The heartbeat must RENEW the lease of a long adapter so it outlives the
+  // original claim window (otherwise a competitor could reclaim a still-running delivery).
+  test('P3-1b: heartbeat renews a long adapter\'s lease past the original claim window', async () => {
+    const key = `ck_${RUN}_hb_renew`
+    const id = await seedRow(key)
+    const r = new ConsumerAdapterRegistry()
+    r.register({
+      key,
+      handle: async () => {
+        await new Promise((res2) => setTimeout(res2, 2_600)) // runs well past the 1500ms claim lease
+        return { outcome: 'success' }
+      },
+    })
+    const tick = runDispatchTick(db(), r, { leaseMs: 1_500, adapterTimeoutMs: 9_000 })
+    await new Promise((res2) => setTimeout(res2, 1_900)) // t≈1.9s: the ORIGINAL 1.5s lease would be expired now
+    const mid = await readRow(id, key)
+    expect(mid.status).toBe('in_progress')
+    expect(Number(mid.lease_remaining_ms)).toBeGreaterThan(300) // the heartbeat (t≈1s) pushed the lease out
+    const res = await tick
+    expect(res.completed).toBe(1) // the long adapter still resolved cleanly (never lost its lease)
+    expect((await readRow(id, key)).status).toBe('done')
+  }, 15_000)
+
+  // [#4334 adversarial P3-2] A hostile/throwing-getter return value must NOT throw the batch — it is a
+  // malformed verdict → retryable adapter_error, and a sibling row still completes (per-row isolation).
+  test('P3-2: a throwing-getter adapter return → adapter_error (not a thrown batch); sibling still completes', async () => {
+    const badKey = `ck_${RUN}_getterthrow`
+    const okKey = `ck_${RUN}_getterthrow_ok`
+    const idBad = await seedRow(badKey)
+    const idOk = await seedRow(okKey)
+    const r = new ConsumerAdapterRegistry()
+    r.register({
+      key: badKey,
+      handle: async () =>
+        ({
+          get outcome() {
+            throw new Error('hostile getter')
+          },
+        }) as unknown as AdapterOutcome,
+    })
+    r.register(adapter(okKey, ok))
+    const res = await runDispatchTick(db(), r)
+    expect(res.claimed).toBe(2)
+    expect(res.rescheduled).toBe(1) // the hostile row retried, not dropped, not a thrown batch
+    expect(res.completed).toBe(1) // the sibling completed — per-row isolation held
+    expect(await readRow(idBad, badKey)).toMatchObject({ status: 'in_progress', last_error: 'adapter_error' })
+    expect((await readRow(idOk, okKey)).status).toBe('done')
+  })
 })
 
 /**
@@ -410,6 +490,16 @@ describe('P2 durable-delivery S2-b — pure guards (no DB)', () => {
     }
     expect(normalizeAdapterVerdict({ outcome: 'bogus' })).toEqual({ action: 'reschedule', reason: 'adapter_error' })
     expect(normalizeAdapterVerdict({ outcome: 'retryable_failure', reason: 'garbage' })).toEqual({ action: 'reschedule', reason: 'unknown' })
+  })
+
+  test('P3-2: normalizeAdapterVerdict never throws on a hostile/throwing getter (never drops the batch)', () => {
+    const hostile = {
+      get outcome(): string {
+        throw new Error('boom')
+      },
+    }
+    expect(() => normalizeAdapterVerdict(hostile)).not.toThrow()
+    expect(normalizeAdapterVerdict(hostile)).toEqual({ action: 'reschedule', reason: 'adapter_error' })
   })
 
   test('P2#4: startDurableDispatchLoop requires a telemetry sink', () => {
