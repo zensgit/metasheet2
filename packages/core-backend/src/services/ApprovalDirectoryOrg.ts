@@ -204,27 +204,55 @@ export async function resolveApprovalRequesterOrgRelations(
   const integrationId = requester.integration_id
   const requesterDeptId = normalizeExternalId(requester.primary_external_department_id)
 
-  // 2) Direct manager: the account flagged leader for the requester's primary
-  //    department in its own `leader_in_dept`. Exclude the requester themselves.
+  // 2) Direct manager — DUAL-SOURCE with precedence (B3, design-lock §5.4).
+  //    The manager relationship is now a first-class, provider-neutral flag on the
+  //    membership row (`directory_account_departments.is_manager`) — product truth an
+  //    admin sets on a LOCAL org — NOT parsed from a provider's raw JSON. Precedence:
+  //      - if the requester's primary department has ANY membership marked
+  //        `is_manager = true`, resolve the manager from that normalized relation;
+  //      - OTHERWISE fall back to the legacy DingTalk `raw.leader_in_dept` parse below,
+  //        which stays byte-for-byte unchanged.
+  //    DingTalk-synced rows never set `is_manager` (the sync writer leaves it default-false —
+  //    see `setLocalMembershipManager`'s local-only writer boundary), so the normalized gate is
+  //    always 0 rows for a DingTalk integration and its approval routing stays bit-identical.
+  //    B6 proves local/DingTalk manager parity end-to-end; B3 only opens the normalized read
+  //    seam for the DIRECT manager here. The manager CHAIN (step 4) and the department HEAD
+  //    (step 3, a distinct `dept_manager_userid_list` source) are intentionally left on their
+  //    legacy sources in this increment.
   let managerId: string | undefined
   if (requesterDeptId) {
-    const candidateRows = await query<{ account_id: string; raw: unknown }>(
-      `SELECT a.id::text AS account_id, a.raw AS raw
-         FROM directory_accounts a
-         JOIN directory_account_departments ad
-           ON ad.directory_account_id = a.id
-         JOIN directory_departments d
-           ON d.id = ad.directory_department_id
-        WHERE a.integration_id = $1::uuid
-          AND a.is_active = true
-          AND d.external_department_id = $2
-          AND a.external_user_id <> $3`,
-      [integrationId, requesterDeptId, requester.external_user_id],
+    const normalized = await resolveNormalizedDeptManager(
+      integrationId,
+      requesterDeptId,
+      requester.external_user_id,
+      query,
     )
-    const managerAccountId = candidateRows.rows.find((row) =>
-      parseLeaderDeptIds(asRecord(row.raw)).includes(requesterDeptId))?.account_id
-    if (managerAccountId) {
-      managerId = await resolveLinkedLocalUserId(managerAccountId, query)
+    if (normalized.present) {
+      // The dept is normalized-managed: the normalized relation is authoritative even when it
+      // resolves to no LINKED local user (e.g. the flagged manager is unlinked) — we never blend
+      // back into the provider raw for a dept an admin explicitly manages.
+      managerId = normalized.managerId
+    } else {
+      // LEGACY (unchanged): the account flagged leader for the requester's primary
+      // department in its own `leader_in_dept`. Exclude the requester themselves.
+      const candidateRows = await query<{ account_id: string; raw: unknown }>(
+        `SELECT a.id::text AS account_id, a.raw AS raw
+           FROM directory_accounts a
+           JOIN directory_account_departments ad
+             ON ad.directory_account_id = a.id
+           JOIN directory_departments d
+             ON d.id = ad.directory_department_id
+          WHERE a.integration_id = $1::uuid
+            AND a.is_active = true
+            AND d.external_department_id = $2
+            AND a.external_user_id <> $3`,
+        [integrationId, requesterDeptId, requester.external_user_id],
+      )
+      const managerAccountId = candidateRows.rows.find((row) =>
+        parseLeaderDeptIds(asRecord(row.raw)).includes(requesterDeptId))?.account_id
+      if (managerAccountId) {
+        managerId = await resolveLinkedLocalUserId(managerAccountId, query)
+      }
     }
   }
 
@@ -376,6 +404,56 @@ async function resolveManagerChain(
   }
 
   return chain
+}
+
+/**
+ * B3 (design-lock §5.4) — resolve the requester's direct manager from the NORMALIZED relation:
+ * the `directory_account_departments.is_manager` flag on a membership of the requester's primary
+ * department. Returns a discriminated result so the caller can honour the precedence rule:
+ *   - `present = false` — the department has NO `is_manager = true` membership, so the caller
+ *     falls back to the legacy `raw.leader_in_dept` source (this is always the case for a
+ *     DingTalk integration, whose rows never set the flag → its routing is bit-identical);
+ *   - `present = true` — the department IS normalized-managed, so this result is authoritative,
+ *     including `managerId = undefined` when the flagged manager is not linked to a local user
+ *     (we do not blend back into the provider raw for an explicitly-managed dept).
+ *
+ * The existence gate is requester-INCLUSIVE (any `is_manager` row for the dept flips to
+ * normalized), while the pick is requester-EXCLUSIVE (a person is never their own manager). The
+ * pick is deterministic — ordered by `external_user_id` then account id — since, unlike the
+ * legacy `.find` over arbitrary heap order, this is a fresh read path.
+ *
+ * The department is bound to the SAME integration as the account (`d.integration_id = $1` alongside
+ * the account's `a.integration_id = $1`): `external_department_id` is unique only WITHIN an
+ * integration, so without this a repeated external id in another integration — or a malformed
+ * cross-integration membership — could leak a foreign dept's manager into this integration's
+ * routing. Both sides bind the one requester integration scope.
+ */
+async function resolveNormalizedDeptManager(
+  integrationId: string,
+  deptExternalId: string,
+  requesterExternalId: string,
+  query: QueryFn,
+): Promise<{ present: boolean; managerId?: string }> {
+  const rows = await query<{ account_id: string; external_user_id: string }>(
+    `SELECT a.id::text        AS account_id,
+            a.external_user_id AS external_user_id
+       FROM directory_account_departments ad
+       JOIN directory_accounts a
+         ON a.id = ad.directory_account_id
+        AND a.is_active = true
+       JOIN directory_departments d
+         ON d.id = ad.directory_department_id
+      WHERE a.integration_id = $1::uuid
+        AND d.integration_id = $1::uuid
+        AND d.external_department_id = $2
+        AND ad.is_manager = true
+      ORDER BY a.external_user_id ASC, a.id ASC`,
+    [integrationId, deptExternalId],
+  )
+  if (rows.rows.length === 0) return { present: false }
+  const manager = rows.rows.find((row) => row.external_user_id !== requesterExternalId)
+  if (!manager) return { present: true }
+  return { present: true, managerId: await resolveLinkedLocalUserId(manager.account_id, query) }
 }
 
 async function resolveLinkedLocalUserId(accountId: string, query: QueryFn): Promise<string | undefined> {

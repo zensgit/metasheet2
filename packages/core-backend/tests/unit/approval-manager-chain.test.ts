@@ -47,6 +47,13 @@ function makeOrgQuery(org: OrgModel) {
         }] as Row[],
       }
     }
+    // 1b) B3 normalized-manager gate (`ad.is_manager = true`) — empty here so the DIRECT-manager
+    //     resolution falls through to the legacy leader_in_dept scan (branch 3). The chain walk
+    //     (step 4 / branch 2) is on the legacy source and unaffected by B3; the normalized
+    //     direct-manager path is covered by approval-directory-org.test.ts.
+    if (text.includes('ad.is_manager = true')) {
+      return { rows: [] }
+    }
     // 2) chain hop query (find dept leader + their primary dept) — recognized by
     //    `primary_dept_external_id`; MUST precede the legacy scan below.
     if (text.includes('primary_dept_external_id') && text.includes('d.external_department_id = $2')) {

@@ -10,11 +10,12 @@ import {
   CREATE_LOCAL_ACCOUNT_FIELDS,
   CREATE_LOCAL_DEPARTMENT_FIELD_TYPES,
   CREATE_LOCAL_DEPARTMENT_FIELDS,
-  SWITCH_LOCAL_MEMBERSHIP_PRIMARY_FIELDS,
   UPDATE_LOCAL_ACCOUNT_FIELD_TYPES,
   UPDATE_LOCAL_ACCOUNT_FIELDS,
   UPDATE_LOCAL_DEPARTMENT_FIELD_TYPES,
   UPDATE_LOCAL_DEPARTMENT_FIELDS,
+  UPDATE_LOCAL_MEMBERSHIP_FIELD_TYPES,
+  UPDATE_LOCAL_MEMBERSHIP_FIELDS,
   checkFieldAllowlist,
   checkFieldTypes,
   type LocalDirectoryFieldSpec,
@@ -32,6 +33,7 @@ import {
   updateLocalAccount,
   updateLocalDepartment,
 } from '../directory/local-directory-org'
+import { setLocalMembershipManager } from '../directory/directory-sync'
 import { jsonError, jsonOk } from '../util/response'
 
 const logger = new Logger('AdminDirectoryLocalRoutes')
@@ -357,7 +359,8 @@ export function adminDirectoryLocalRouter(): Router {
   router.patch('/memberships/:membershipId', async (req: Request, res: Response) => {
     const adminUserId = await ensurePlatformAdmin(req, res)
     if (!adminUserId) return
-    if (rejectUnlistedFields(req, res, SWITCH_LOCAL_MEMBERSHIP_PRIMARY_FIELDS)) return
+    if (rejectUnlistedFields(req, res, UPDATE_LOCAL_MEMBERSHIP_FIELDS)) return
+    if (rejectInvalidFieldTypes(req, res, UPDATE_LOCAL_MEMBERSHIP_FIELD_TYPES)) return
 
     const parsed = parseMembershipId(req.params.membershipId)
     if (!parsed) {
@@ -366,16 +369,62 @@ export function adminDirectoryLocalRouter(): Router {
     }
 
     const body = (req.body ?? {}) as Record<string, unknown>
-    // This route is deliberately narrow: the ONLY supported operation is the explicit primary
-    // switch (design lock §5.4). `{isPrimary: true}` is required — anything else (missing,
-    // false, non-boolean) is rejected rather than guessed at.
+    // This endpoint performs EXACTLY ONE of two mutually-exclusive membership operations per
+    // request — the explicit primary-department switch (`isPrimary`) OR the normalized manager-flag
+    // set/unset (`isManager`, B3 §5.4). Enforcing the XOR HERE, before any service call, is what
+    // makes a combined `{isPrimary, isManager}` (or an empty `{}`) a 400 that can never partially
+    // apply: no column is touched on the rejected path.
+    const hasPrimary = Object.prototype.hasOwnProperty.call(body, 'isPrimary')
+    const hasManager = Object.prototype.hasOwnProperty.call(body, 'isManager')
+    if (hasPrimary === hasManager) {
+      jsonError(res, 400, 'DIRECTORY_LOCAL_INVALID_INPUT', 'exactly one of isPrimary | isManager is required')
+      return
+    }
+
+    const orgId = resolveLocalDirectoryOrgId(req)
+
+    if (hasManager) {
+      // `isManager` is guaranteed a boolean by rejectInvalidFieldTypes above; both `true` (set the
+      // normalized manager flag) and `false` (unset it) are valid operations. The writer is scoped
+      // to LOCAL memberships in THIS org — a no-op `{ updated: false }` (missing, non-local,
+      // cross-org, or cross-integration membership) becomes a 404, and it emits no cross-scope write.
+      const isManager = body.isManager as boolean
+      try {
+        const result = await setLocalMembershipManager(
+          orgId,
+          { directoryAccountId: parsed.accountId, directoryDepartmentId: parsed.departmentId },
+          isManager,
+        )
+        if (!result.updated) {
+          jsonError(res, 404, 'DIRECTORY_LOCAL_NOT_FOUND', 'Local membership not found')
+          return
+        }
+        await auditLog({
+          actorId: adminUserId,
+          actorType: 'user',
+          action: 'directory.local_membership.set_manager',
+          resourceType: 'directory-account-department',
+          resourceId: `${parsed.accountId}:${parsed.departmentId}`,
+          // Values-free: IDs (references) + the boolean operation flag, no names/PII.
+          meta: { accountId: parsed.accountId, departmentId: parsed.departmentId, isManager },
+        })
+        jsonOk(res, {
+          membership: { id: `${parsed.accountId}:${parsed.departmentId}`, accountId: parsed.accountId, departmentId: parsed.departmentId, isManager },
+        })
+      } catch (error) {
+        handleLocalDirectoryError(res, error, 'Failed to set local membership manager flag')
+      }
+      return
+    }
+
+    // Primary-switch branch (unchanged contract): `{isPrimary: true}` is required — `false` or any
+    // non-`true` value is rejected rather than guessed at (narrow-endpoint contract, design lock §5.4).
     if (body.isPrimary !== true) {
       jsonError(res, 400, 'DIRECTORY_LOCAL_INVALID_INPUT', 'isPrimary must be true — this endpoint only performs the explicit primary-department switch')
       return
     }
 
     try {
-      const orgId = resolveLocalDirectoryOrgId(req)
       const membership = await switchLocalPrimaryDepartment(orgId, parsed.accountId, parsed.departmentId)
       await auditLog({
         actorId: adminUserId,
