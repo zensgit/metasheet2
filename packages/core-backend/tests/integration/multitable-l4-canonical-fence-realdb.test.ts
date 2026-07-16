@@ -19,7 +19,10 @@
  * FENCED vs PARTIAL vs UNFENCED (verified against the impl on this branch — see the lane report):
  *   FULLY FENCED (advisory fence + durable-block refusal): REST create/patch/delete/restore, bulk/AI/OAPI
  *       patch (RecordWriteService), plugin patch, plugin recoverable delete, attachment cell-strip, HTTP
- *       lock/unlock, revert-execute (durable block), reset-execute (fence-first).
+ *       lock/unlock, revert-execute (durable block, now also the recovery-only PIT lock — P2 follow-up),
+ *       reset-execute (fence + durable-block refusal via `fenceWriterEntry` — P2 follow-up; previously
+ *       fence-first only, with NO block-check, so a reset begun during revert's released-fence apply window
+ *       slipped past its committed `applying` block — see RXR1/RXR2 below).
  *   PARTIAL (advisory canonical fence for seq-ordering, but NO durable-block check ⇒ slips past a
  *       multi-txn `applying` recovery): plugin create (records.ts:592), auto-number backfill
  *       (auto-number-service.ts:84), form-submit create/edit (univer-meta.ts:14585). GX1/GX2 EXPOSE this.
@@ -28,7 +31,11 @@
  *       (automation-service.ts), formula-engine recompute (formula-engine.ts), approval-record projection
  *       (approval-record-projection-service.ts), post-commit derived-value recompute (univer-meta.ts:2973 /
  *       :3869), config-restore-execute record writes (univer-meta.ts:6171 / :6449 / :6555), people/seed
- *       presets (:5188 / :5825), field-undelete rehydration (flag HOLD). Enumerated in the report; behavioral
+ *       presets (:5188 / :5825), field-undelete rehydration (flag HOLD), plugin delete's NON-transactional
+ *       flag-off branch (records.ts:852, disclosed in-code as an "L4-SEAM" — `deleteRecordWithRecoverability`
+ *       right above it in the same file IS fenced via `fenceWriterEntry`, but the D-1 flag-off `deleteRecord`
+ *       branch cannot hold a txn-scoped advisory lock without the transaction wrap that path deliberately
+ *       lacks — §1.9 byte-identity keeps it as the D-1 code verbatim). Enumerated in the report; behavioral
  *       exposure of these is deferred (their end-to-end harnesses are heavy) — see GX3 for the design of the
  *       exposure, driven for the two cheap, high-signal PARTIAL families here.
  *
@@ -42,7 +49,8 @@
  * Runs only with DATABASE_URL; the sentinel below fails-not-skips inside the real-DB allowlist step.
  */
 import { EventEmitter } from 'events'
-import type { Request } from 'express'
+import express, { type Express, type Request } from 'express'
+import request from 'supertest'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from 'vitest'
 
 import { poolManager } from '../../src/integration/db/connection-pool'
@@ -52,7 +60,7 @@ import {
   RecordWriteService,
   type RecordPatchInput as WriteRecordPatchInput,
 } from '../../src/multitable/record-write-service'
-import { createRecordWriteHelpers } from '../../src/routes/univer-meta'
+import { createRecordWriteHelpers, univerMetaRouter } from '../../src/routes/univer-meta'
 import { deriveCapabilities, type AccessInfo } from '../../src/multitable/sheet-capabilities'
 import {
   patchRecord as pluginPatchRecord,
@@ -69,6 +77,7 @@ import {
   acquireCanonicalSheetFence,
   canonicalSheetFenceKey,
   isWriterBlockState,
+  PIT_RECOVERY_LOCK_NS,
   __resetRecoveryWriterStateColumnProbe,
   type WriterBlockState,
 } from '../../src/multitable/canonical-sheet-fence'
@@ -476,5 +485,192 @@ describeIfDatabase('W0-1 L4 — all-writer canonical fence (real DB)', () => {
     expect(rows[0]!.seq).toBe(seqLo)
     expect(rows[1]!.seq).toBe(seqHi)
     expect(BigInt(rows[0]!.seq) < BigInt(rows[1]!.seq)).toBe(true)
+  })
+})
+
+// ── §RXR — RECOVERY-VS-RECOVERY constructed race (P2 follow-up, real DB) ──────────────────────────────────
+//
+// The finding: reset-execute and revert-execute are both destructive and must never interleave. Pre-fix,
+// reset-execute took the canonical fence + PIT_RECOVERY_LOCK_NS but NEVER consulted
+// `recovery_writer_state` — so a reset begun during revert-execute's multi-txn apply window (fence
+// released between revert's own transactions, but its durable `applying` block already committed) slipped
+// past that block and interleaved with the in-flight revert. Drives the REAL HTTP routes (not just the
+// shared `fenceWriterEntry` primitive R1 already covers) so the fix's ACTUAL wiring — the block-check
+// inside reset-execute's transaction AND its catch mapping to 409 RECOVERY_IN_PROGRESS — is what's proven,
+// not a hand-copy. Same two-raw-pg-clients + `pg_blocking_pids` + throw-if-never-parked technique as R1.
+describeIfDatabase('W0-1 L4 P2 — reset-vs-revert recovery-vs-recovery (real DB)', () => {
+  const RBASE = `base_l4_rxr_${TS}`
+  const RSHEET = `sheet_l4_rxr_${TS}`
+  const RNAME = `fld_l4_rxr_name_${TS}`
+  const RACTOR = `user_l4_rxr_${TS}`
+  const T0 = '2026-01-01T00:00:00.000Z'
+  const T1 = '2026-01-02T00:00:00.000Z'
+  const T2 = '2026-01-03T00:00:00.000Z'
+
+  let app: Express
+  const resetPreview = () => request(app).post(`/api/multitable/sheets/${RSHEET}/reset-preview`).send({ asOf: T1 })
+  const resetExecute = (body: Record<string, unknown>) => request(app).post(`/api/multitable/sheets/${RSHEET}/reset-execute`).send(body)
+  const revertPreview = () => request(app).post(`/api/multitable/sheets/${RSHEET}/revert-preview`).send({ asOf: T1 })
+  const revertExecute = (body: Record<string, unknown>) => request(app).post(`/api/multitable/sheets/${RSHEET}/revert-execute`).send(body)
+  const rev = (id: string, version: number, action: string, snap: Record<string, unknown>, at: string) =>
+    q(
+      `INSERT INTO meta_record_revisions (id, sheet_id, record_id, version, action, source, changed_field_ids, patch, snapshot, created_at)
+       VALUES (gen_random_uuid(),$1,$2,$3,$4,'rest',ARRAY[$5]::text[],'{}'::jsonb,$6::jsonb,$7)`,
+      [RSHEET, id, version, action, RNAME, JSON.stringify(snap), at],
+    )
+  const recordRow = async (id: string) =>
+    (await q('SELECT data, version FROM meta_records WHERE id = $1', [id])).rows[0] as
+      | { data: Record<string, unknown>; version: number }
+      | undefined
+
+  /** supertest/superagent Test objects are LAZY: the underlying HTTP request is only actually dispatched
+   *  the first time `.then()`/`.end()` is invoked (see `RequestBase.prototype.then` — it calls `self.end()`
+   *  itself). Just holding `const p = resetExecute(...)` WITHOUT awaiting it does NOT put a request in
+   *  flight — a naive "fire, then poll for parking, then await" construction would silently degrade into
+   *  fully sequential (request only sent once we `await`, by which point B has already committed), which
+   *  would make `waitUntilBlockedOnFence` correctly throw (as it did before this helper was added). This
+   *  wrapper calls `.end()` explicitly so the request is genuinely in flight before we poll. */
+  function fireNow(t: { end: (cb: (err: unknown, res: request.Response) => void) => void }): Promise<request.Response> {
+    return new Promise((resolve, reject) => {
+      t.end((err, res) => {
+        if (err && !res) reject(err)
+        else resolve(res)
+      })
+    })
+  }
+
+  /** Same technique as R1's `waitUntilBlockedOnFence`, redefined locally (this describe has its own
+   *  connection lifecycle) — polls for a backend genuinely parked on `blockerPid`'s advisory lock. */
+  async function waitUntilBlockedOnFence(blockerPid: number, timeoutMs = 5000): Promise<void> {
+    const deadline = Date.now() + timeoutMs
+    while (Date.now() < deadline) {
+      const r = await q(
+        `SELECT COUNT(*)::int AS c FROM pg_stat_activity
+          WHERE datname = current_database()
+            AND wait_event_type = 'Lock'
+            AND $1 = ANY(pg_blocking_pids(pid))
+            AND query ILIKE '%pg_advisory_xact_lock%'`,
+        [blockerPid],
+      )
+      if ((r.rows[0] as { c: number }).c >= 1) return
+      await new Promise((resolve) => setTimeout(resolve, 25))
+    }
+    throw new Error('the concurrent HTTP call never parked on the held fence — the race did not occur')
+  }
+
+  beforeAll(async () => {
+    app = express()
+    app.use(express.json())
+    app.use((req, _res, next) => { ;(req as any).user = { id: RACTOR, roles: ['member'], perms: ['multitable:read', 'multitable:write', 'multitable:share'] }; next() })
+    app.use('/api/multitable', univerMetaRouter())
+    await q("INSERT INTO users (id, password_hash) VALUES ($1,'x') ON CONFLICT (id) DO NOTHING", [RACTOR])
+    await q('INSERT INTO meta_bases (id, name) VALUES ($1,$2)', [RBASE, 'L4 RXR Base'])
+    await q('INSERT INTO meta_sheets (id, base_id, name) VALUES ($1,$2,$3)', [RSHEET, RBASE, 'L4 RXR Sheet'])
+    await q('INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6)', [RNAME, RSHEET, 'Note', 'string', '{}', 1])
+  })
+
+  afterAll(async () => {
+    delete process.env.MULTITABLE_ENABLE_WRITER_FENCE
+    delete process.env.MULTITABLE_ENABLE_PIT_RESET
+    delete process.env.MULTITABLE_ENABLE_SHEET_REVERT
+    await q('DELETE FROM meta_record_revisions WHERE sheet_id = $1', [RSHEET]).catch(() => {})
+    await q('DELETE FROM meta_records WHERE sheet_id = $1', [RSHEET]).catch(() => {})
+    await q('DELETE FROM meta_fields WHERE sheet_id = $1', [RSHEET]).catch(() => {})
+    await q('DELETE FROM meta_sheets WHERE id = $1', [RSHEET]).catch(() => {})
+    await q('DELETE FROM meta_bases WHERE id = $1', [RBASE]).catch(() => {})
+    await q('DELETE FROM users WHERE id = $1', [RACTOR]).catch(() => {})
+  })
+
+  beforeEach(async () => {
+    process.env.MULTITABLE_ENABLE_WRITER_FENCE = 'true'
+    process.env.MULTITABLE_ENABLE_PIT_RESET = 'true'
+    process.env.MULTITABLE_ENABLE_SHEET_REVERT = 'true'
+    delete process.env.MULTITABLE_META_REVISION_RETENTION_ENABLED
+    __resetRecoveryWriterStateColumnProbe()
+    await q('DELETE FROM meta_record_revisions WHERE sheet_id = $1', [RSHEET])
+    await q('DELETE FROM meta_records WHERE sheet_id = $1', [RSHEET])
+    await q('UPDATE meta_sheets SET recovery_writer_state = NULL WHERE id = $1', [RSHEET])
+  })
+
+  test('sentinel: DATABASE_URL is set (this suite must RUN, never skip-green)', () => {
+    expect(process.env.DATABASE_URL).toBeTruthy()
+  })
+
+  test('RXR1 [reset vs revert] a concurrent reset-execute REFUSES (409 RECOVERY_IN_PROGRESS) while revert holds/commits its durable applying block — fence-before-check, never interleaves', async () => {
+    const R = `rec_l4_rxr1_${TS}`
+    await q('INSERT INTO meta_records (id, sheet_id, data, version) VALUES ($1,$2,$3::jsonb,2)', [R, RSHEET, JSON.stringify({ [RNAME]: 'new' })])
+    await rev(R, 1, 'create', { [RNAME]: 'old' }, T0)
+    await rev(R, 2, 'update', { [RNAME]: 'new' }, T2)
+
+    const pv = await resetPreview()
+    expect(pv.status).toBe(200)
+    const previewIdentity = pv.body?.data?.previewIdentity as string
+    expect(previewIdentity).toBeTruthy()
+
+    const b = await poolManager.get().getInternalPool().connect()
+    let resetRes: Awaited<ReturnType<typeof resetExecute>> | undefined
+    try {
+      await b.query('BEGIN')
+      const bPid = Number((await b.query('SELECT pg_backend_pid() AS pid')).rows[0]!.pid)
+      // Simulates revert-execute's real claim transaction: canonical fence THEN the (P2 follow-up) PIT lock.
+      await b.query('SELECT pg_advisory_xact_lock(hashtext($1))', [canonicalSheetFenceKey(RSHEET)])
+      await b.query('SELECT pg_advisory_xact_lock($1::int, hashtext($2)::int)', [PIT_RECOVERY_LOCK_NS, RSHEET])
+
+      const resetPromise = fireNow(resetExecute({ asOf: T1, previewIdentity, confirm: 'reset' }))
+      await waitUntilBlockedOnFence(bPid) // proves reset's fence-acquire genuinely parked on B, not racing free
+
+      await b.query("UPDATE meta_sheets SET recovery_writer_state = 'applying' WHERE id = $1", [RSHEET]) // revert's committed claim
+      await b.query('COMMIT') // releases both locks; the durable block STAYS committed (revert's apply window)
+      resetRes = await resetPromise
+    } finally {
+      await b.query('ROLLBACK').catch(() => {})
+      b.release()
+    }
+
+    expect(resetRes!.status).toBe(409)
+    expect(resetRes!.body?.error?.code).toBe('RECOVERY_IN_PROGRESS')
+    const row = await recordRow(R)
+    expect(row?.data?.[RNAME]).toBe('new') // ZERO writes — reset never reached its destructive work
+    expect(row?.version).toBe(2)
+    await q('UPDATE meta_sheets SET recovery_writer_state = NULL WHERE id = $1', [RSHEET])
+  })
+
+  test("RXR2 [revert vs reset] revert PARKS on an in-flight reset's held fence and only proceeds AFTER reset concludes — never interleaves (symmetric direction)", async () => {
+    const R = `rec_l4_rxr2_${TS}`
+    await q('INSERT INTO meta_records (id, sheet_id, data, version) VALUES ($1,$2,$3::jsonb,2)', [R, RSHEET, JSON.stringify({ [RNAME]: 'new' })])
+    await rev(R, 1, 'create', { [RNAME]: 'old' }, T0)
+    await rev(R, 2, 'update', { [RNAME]: 'new' }, T2)
+
+    const pv = await revertPreview()
+    expect(pv.status).toBe(200)
+    const previewIdentity = pv.body?.data?.previewIdentity as string
+    expect(previewIdentity).toBeTruthy()
+
+    const b = await poolManager.get().getInternalPool().connect()
+    let revertRes: Awaited<ReturnType<typeof revertExecute>> | undefined
+    try {
+      await b.query('BEGIN')
+      const bPid = Number((await b.query('SELECT pg_backend_pid() AS pid')).rows[0]!.pid)
+      // Simulates reset-execute's real (single, whole-operation) destructive transaction: canonical fence
+      // THEN the PIT lock, held open for reset's "duration" (here: until this test releases it below).
+      await b.query('SELECT pg_advisory_xact_lock(hashtext($1))', [canonicalSheetFenceKey(RSHEET)])
+      await b.query('SELECT pg_advisory_xact_lock($1::int, hashtext($2)::int)', [PIT_RECOVERY_LOCK_NS, RSHEET])
+
+      const revertPromise = fireNow(revertExecute({ asOf: T1, previewIdentity }))
+      await waitUntilBlockedOnFence(bPid) // proves revert's claim genuinely parked on B (reset's held fence)
+
+      await b.query('COMMIT') // "reset concludes" — releases both locks; recovery_writer_state stays NULL (reset never sets one)
+      revertRes = await revertPromise
+    } finally {
+      await b.query('ROLLBACK').catch(() => {})
+      b.release()
+    }
+
+    // Proceeded — but ONLY after B released the fence, never concurrently (no interleaving in this
+    // direction either): reset holding the SAME canonical fence for its entire single transaction is what
+    // makes this direction safe by construction, without needing revert to receive an explicit refusal.
+    expect(revertRes!.status).toBe(200)
+    expect(revertRes!.body?.data?.revertedCount).toBe(1)
+    await q('UPDATE meta_sheets SET recovery_writer_state = NULL WHERE id = $1', [RSHEET])
   })
 })

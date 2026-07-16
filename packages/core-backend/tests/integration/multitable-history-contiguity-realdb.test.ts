@@ -32,6 +32,7 @@ import { EventBus } from '../../src/integration/events/event-bus'
 import { APPROVAL_PROJECTION_BASE_ID } from '../../src/multitable/approval-projection-constants'
 import { SYSTEM_PEOPLE_SHEET_DESCRIPTION } from '../../src/multitable/system-sheet-predicate'
 import { precheckSheetHistoryIntegrity } from '../../src/multitable/history-integrity-precheck'
+import { PIT_RECOVERY_LOCK_NS } from '../../src/multitable/canonical-sheet-fence'
 
 const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
 const TS = Date.now()
@@ -43,7 +44,7 @@ const NAME = `fld_hc_name_${TS}`, SALARY = `fld_hc_salary_${TS}`
 const PNAME = `fld_hc_pname_${TS}`
 const ACTOR = `user_hc_${TS}`
 const T0 = '2026-01-01T00:00:00.000Z', T1 = '2026-01-02T00:00:00.000Z', T2 = '2026-01-03T00:00:00.000Z'
-const NS = 0x77303104 // PIT_RECOVERY_LOCK_NS (must match univer-meta.ts)
+const NS = PIT_RECOVERY_LOCK_NS // single source of truth (canonical-sheet-fence.ts) — was a hand-copied literal
 
 const HISTORY_INCOMPLETE_BODY = {
   ok: false,
