@@ -21,7 +21,10 @@
 > **Amendment (2026-07-16, owner round-1 on PR #4356 — CHANGES REQUESTED, 3 P1 / 3 P2, wording taken
 > verbatim from the PR review comment).** All six findings are resolved below, each with fresh
 > `origin/main` code citations (verified at `d64f0a6d8` core-backend / `plugin-attendance` state, which
-> is byte-identical to current `origin/main` for every file cited — checked directly, not assumed):
+> is byte-identical to current `origin/main` for every file cited EXCEPT
+> `packages/core-backend/src/index.ts`, which has since drifted +2 lines (an unrelated
+> `plmEmbedDiscussionReadRouter` insertion) — the OD-S7-5(d) index.ts citations are exact against the
+> pinned basis and land +1/+2 lines later on current main, zero design impact):
 > new **§3 Action authorization semantics** (P1 — dynamic/legacy assignment must gate BOTH approve and
 > reject, not approve-only, §3.1/§3.2); new **§3.3 org anchor** for the resolver's directory lookup
 > (P1 — the kernel's requester-org lookup has no org filter, a locked contract requirement carried into
