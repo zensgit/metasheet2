@@ -80,6 +80,18 @@ async function activeCount(sheetId: string): Promise<number> {
   return Number((r.rows[0] as { c: number }).c)
 }
 
+// Red-not-skip-green sentinel — TOP-LEVEL (outside describeIfDatabase) so it runs even without a DB and FAILS,
+// rather than silently skipping, when the REAL-DB ALLOWLIST STEP runs this file without DATABASE_URL. Scoped to
+// that step via the workflow-injected METASHEET_REAL_DB_TEST_STEP env: the normal no-DB core-backend test job
+// also collects this file (CI=true, no DATABASE_URL) and there the sentinel MUST pass — the describeIfDatabase
+// goldens legitimately skip in that job; we don't red it. (Pattern mirrors the sibling real-DB files.)
+test('sentinel: the real-DB allowlist step must have DATABASE_URL (fail-not-skip, scoped to that step)', () => {
+  if (process.env.METASHEET_REAL_DB_TEST_STEP === '1' && !process.env.DATABASE_URL) {
+    throw new Error('real-DB allowlist step is missing DATABASE_URL — the harness is broken, not legitimately skippable')
+  }
+  expect(true).toBe(true)
+})
+
 describeIfDatabase('W0-1 v3.7 L5 trust checkpoint (real DB)', () => {
   beforeAll(async () => {
     app = express()
