@@ -1,5 +1,5 @@
 /**
- * Action-idempotency ledger L1 — meta_automation_action_applied schema golden (real DB).
+ * Action-idempotency ledger L1 — meta_fwb_action_applied schema golden (real DB).
  *
  * Proves the #4203 §2.3 business-claim contract at the DB layer:
  *   - the composite UNIQUE key (instance_id, rule_id, action_key, node_key, entry_epoch, application_mode)
@@ -34,7 +34,7 @@ const INST = `apr_${RUN}`
 
 const claim = (over: Partial<Record<'id'|'instance'|'rule'|'action'|'node'|'mode', string>> & { epoch?: number } = {}) =>
   q(
-    `INSERT INTO meta_automation_action_applied (id, instance_id, rule_id, action_key, node_key, entry_epoch, application_mode, result_ref)
+    `INSERT INTO meta_fwb_action_applied (id, instance_id, rule_id, action_key, node_key, entry_epoch, application_mode, result_ref)
      VALUES ($1,$2,$3,$4,$5,$6,$7,'rec_id_only')`,
     [
       over.id ?? `aa_${randomUUID()}`,
@@ -49,7 +49,7 @@ const claim = (over: Partial<Record<'id'|'instance'|'rule'|'action'|'node'|'mode
 
 describeIfDatabase('action-idempotency ledger L1 — schema golden (real DB)', () => {
   afterAll(async () => {
-    await q('DELETE FROM meta_automation_action_applied WHERE instance_id = $1', [INST]).catch(() => {})
+    await q('DELETE FROM meta_fwb_action_applied WHERE instance_id = $1', [INST]).catch(() => {})
   })
 
   test('sentinel: DATABASE_URL set', () => {
@@ -58,7 +58,7 @@ describeIfDatabase('action-idempotency ledger L1 — schema golden (real DB)', (
 
   test('duplicate apply of the SAME (instance, rule, action) collides on the named UNIQUE index', async () => {
     await claim()
-    await expect(claim()).rejects.toThrow(/uq_action_applied_business_claim/)
+    await expect(claim()).rejects.toThrow(/uq_fwb_action_applied_business_claim/)
   })
 
   test('a SECOND rule and a SECOND action on the same instance are NOT blocked (no bare-instance UNIQUE)', async () => {
@@ -68,7 +68,7 @@ describeIfDatabase('action-idempotency ledger L1 — schema golden (real DB)', (
 
   test('FWB-3 node scoping: same action re-entered with a NEW entry_epoch claims independently', async () => {
     await claim({ action: `ak_${RUN}_n`, node: 'node_A', epoch: 1 })
-    await expect(claim({ action: `ak_${RUN}_n`, node: 'node_A', epoch: 1 })).rejects.toThrow(/uq_action_applied_business_claim/)
+    await expect(claim({ action: `ak_${RUN}_n`, node: 'node_A', epoch: 1 })).rejects.toThrow(/uq_fwb_action_applied_business_claim/)
     await expect(claim({ action: `ak_${RUN}_n`, node: 'node_A', epoch: 2 })).resolves.toBeTruthy() // 退回→新 epoch
   })
 
@@ -77,11 +77,11 @@ describeIfDatabase('action-idempotency ledger L1 — schema golden (real DB)', (
     await expect(claim({ action: `ak_${RUN}_p0`, node: '', epoch: 0 })).resolves.toBeTruthy() // non-node sentinel
     await expect(claim({ action: `ak_${RUN}_p1`, node: 'node_B', epoch: 1 })).resolves.toBeTruthy() // real FWB-3 scope
     // mixed pairs split one idempotency identity — rejected by the paired CHECK, named
-    await expect(claim({ action: `ak_${RUN}_bad_a`, node: '', epoch: 7 })).rejects.toThrow(/action_applied_node_epoch_paired/)
-    await expect(claim({ action: `ak_${RUN}_bad_b`, node: 'node_C', epoch: 0 })).rejects.toThrow(/action_applied_node_epoch_paired/)
+    await expect(claim({ action: `ak_${RUN}_bad_a`, node: '', epoch: 7 })).rejects.toThrow(/fwb_action_applied_node_epoch_paired/)
+    await expect(claim({ action: `ak_${RUN}_bad_b`, node: 'node_C', epoch: 0 })).rejects.toThrow(/fwb_action_applied_node_epoch_paired/)
     // a WHITESPACE/TAB-only node_key is NOT a real node — `~ '[!-~]'` (not `<> ''`) rejects it with a positive epoch
-    await expect(claim({ action: `ak_${RUN}_bad_ws`, node: ' ', epoch: 7 })).rejects.toThrow(/action_applied_node_epoch_paired/)
-    await expect(claim({ action: `ak_${RUN}_bad_tab`, node: '\t', epoch: 3 })).rejects.toThrow(/action_applied_node_epoch_paired/)
+    await expect(claim({ action: `ak_${RUN}_bad_ws`, node: ' ', epoch: 7 })).rejects.toThrow(/fwb_action_applied_node_epoch_paired/)
+    await expect(claim({ action: `ak_${RUN}_bad_tab`, node: '\t', epoch: 3 })).rejects.toThrow(/fwb_action_applied_node_epoch_paired/)
   })
 
   test('claimActionApplied validates the (node_key, entry_epoch) PAIR at the JS layer, before the write', async () => {
@@ -107,14 +107,14 @@ describeIfDatabase('action-idempotency ledger L1 — schema golden (real DB)', (
   test('test_run isolation: a test_run claim does not block (or get blocked by) a real apply', async () => {
     await claim({ action: `ak_${RUN}_t`, mode: 'test_run' })
     await expect(claim({ action: `ak_${RUN}_t`, mode: 'apply' })).resolves.toBeTruthy()
-    await expect(claim({ action: `ak_${RUN}_t`, mode: 'test_run' })).rejects.toThrow(/uq_action_applied_business_claim/)
-    await expect(claim({ action: `ak_${RUN}_bogusmode`, mode: 'bogus' })).rejects.toThrow(/action_applied_mode_valid/)
+    await expect(claim({ action: `ak_${RUN}_t`, mode: 'test_run' })).rejects.toThrow(/uq_fwb_action_applied_business_claim/)
+    await expect(claim({ action: `ak_${RUN}_bogusmode`, mode: 'bogus' })).rejects.toThrow(/fwb_action_applied_mode_valid/)
   })
 
   test('non-blank CHECKs reject blank identity parts by constraint name', async () => {
-    await expect(claim({ action: '  ' })).rejects.toThrow(/action_applied_action_key_nonblank/)
-    await expect(claim({ instance: '' })).rejects.toThrow(/action_applied_instance_nonblank/)
-    await expect(claim({ rule: '\t' })).rejects.toThrow(/action_applied_rule_nonblank/)
+    await expect(claim({ action: '  ' })).rejects.toThrow(/fwb_action_applied_action_key_nonblank/)
+    await expect(claim({ instance: '' })).rejects.toThrow(/fwb_action_applied_instance_nonblank/)
+    await expect(claim({ rule: '\t' })).rejects.toThrow(/fwb_action_applied_rule_nonblank/)
   })
 
   test('same-transaction guarantee: the REAL claimActionApplied inside a rolled-back txn leaves NO ledger row', async () => {
@@ -132,7 +132,7 @@ describeIfDatabase('action-idempotency ledger L1 — schema golden (real DB)', (
     } finally {
       c.release()
     }
-    const { rows } = await q('SELECT count(*)::int AS c FROM meta_automation_action_applied WHERE action_key=$1', [action])
+    const { rows } = await q('SELECT count(*)::int AS c FROM meta_fwb_action_applied WHERE action_key=$1', [action])
     expect(Number(rows[0].c)).toBe(0)
   })
 
@@ -184,5 +184,33 @@ describeIfDatabase('action-idempotency ledger L1 — schema golden (real DB)', (
     expect(classifyOutboundOutcome('rejected', true)).toBe('permanent_failure')
     expect(classifyOutboundOutcome('ambiguous', true)).toBe('retryable_failure') // endpoint dedups → safe retry
     expect(classifyOutboundOutcome('ambiguous', false)).toBe('outcome_unknown') // recorded, NEVER auto-resent
+  })
+
+  // [#4340 review P1] Table-name coexistence: this FWB ledger lives on `meta_fwb_action_applied` and must NOT
+  // squat `meta_automation_action_applied`, which #4196 §2.2 reserves for the EXECUTION-SCOPED retry ledger
+  // (a DIFFERENT schema with a `kind` column). Prove both tables coexist and #4196's own INSERT works.
+  test('coexists with the #4196 execution-scoped meta_automation_action_applied (kind schema) — no name squat', async () => {
+    // this suite's migration created ONLY the FWB table under its FWB-specific name
+    const fwbExists = await q(`SELECT to_regclass('public.meta_fwb_action_applied') IS NOT NULL AS ok`)
+    expect(fwbExists.rows[0].ok).toBe(true)
+    // the #4196 name is FREE — stand up its LOCKED (§2.2) execution-scoped shape and run its exact claim INSERT
+    await q(`CREATE TABLE IF NOT EXISTS meta_automation_action_applied (
+               kind text NOT NULL, root_execution_id text NOT NULL, action_key text NOT NULL,
+               action_type text, applied_at timestamptz NOT NULL DEFAULT now(),
+               UNIQUE (kind, root_execution_id, action_key))`)
+    try {
+      // #4196 §2's INSERT — would have thrown `column "kind" does not exist` if the FWB table had squatted the name
+      await q(`INSERT INTO meta_automation_action_applied (kind, root_execution_id, action_key)
+               VALUES ('execution', $1, 'ak_exec') ON CONFLICT DO NOTHING`, [`root_${RUN}`])
+      const execRow = await q(`SELECT count(*)::int AS c FROM meta_automation_action_applied WHERE root_execution_id=$1`, [`root_${RUN}`])
+      expect(Number(execRow.rows[0].c)).toBe(1)
+      // and the FWB ledger claims INTO ITS OWN table, independently
+      const key = deriveActionKey({ structuralPath: 's[coexist]', actionType: 'create_record', canonicalConfig: { t: RUN } })
+      expect(await claimActionApplied(poolManager.get(), { instanceId: INST, ruleId: `rule_${RUN}_cx`, actionKey: key, id: `aa_${randomUUID()}` })).toBe('claimed')
+      const fwbRow = await q(`SELECT count(*)::int AS c FROM meta_fwb_action_applied WHERE instance_id=$1 AND action_key=$2`, [INST, key])
+      expect(Number(fwbRow.rows[0].c)).toBe(1) // the two ledgers are disjoint tables
+    } finally {
+      await q(`DROP TABLE IF EXISTS meta_automation_action_applied`).catch(() => {})
+    }
   })
 })

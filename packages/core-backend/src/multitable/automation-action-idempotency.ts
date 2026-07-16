@@ -94,7 +94,7 @@ export async function claimActionApplied(trx: Queryable, c: ActionClaim): Promis
   }
   const mode = c.applicationMode ?? 'apply'
   const res = await trx.query(
-    `INSERT INTO meta_automation_action_applied (id, instance_id, rule_id, action_key, node_key, entry_epoch, application_mode, result_ref)
+    `INSERT INTO meta_fwb_action_applied (id, instance_id, rule_id, action_key, node_key, entry_epoch, application_mode, result_ref)
      VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
      ON CONFLICT (instance_id, rule_id, action_key, node_key, entry_epoch, application_mode) DO NOTHING`,
     [c.id, c.instanceId, c.ruleId, c.actionKey, nodeKey, entryEpoch, mode, c.resultRef ?? null],
