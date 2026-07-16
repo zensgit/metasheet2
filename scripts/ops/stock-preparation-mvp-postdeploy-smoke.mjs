@@ -57,6 +57,51 @@ import fs from 'node:fs'
 import path from 'node:path'
 
 const RESULT = { checks: [], summary: {} }
+
+// ── Bounded values-free diagnostic contract (corrective-5). A FIXED phase ladder so a failure that
+// early-returns or throws still reports WHERE it stopped and WHAT failed first. Every diagnostic field is
+// a fixed enum or a non-negative integer — never a business value. computeDiagnosticLocus() runs BEFORE
+// the finish()/catch self-scan, so the self-scan re-proves the diagnostic fields are sentinel-clean too;
+// firstFailedCheck is additionally guarded so a hostile check name can never smuggle a value.
+export const SMOKE_PHASES = Object.freeze([
+  'AUTH', 'PROVISIONING', 'SYNC_PERSIST', 'PROJECTS', 'SNAPSHOT_DIFF', 'MATERIAL_MAPPINGS',
+  'UNIT_CONVERSIONS', 'GENERATION_RUN', 'FAILCLOSED_PROBES', 'ERP_MATERIAL_SYNC', 'CLEANUP_RETIRES',
+  'AUDIT_TRAIL', 'RESPONSE_LEAK_SCAN',
+])
+export const SMOKE_FAILURE_CLASSES = Object.freeze(['NONE', 'CHECK_FAILED', 'SELF_SCAN_FAILED', 'FATAL_EXCEPTION'])
+export const SMOKE_LEAK_SCAN_STATUSES = Object.freeze(['NOT_RUN', 'PASS', 'FAIL'])
+const DIAG = { reachedIdx: -1 }
+export function resetDiagnostics() { DIAG.reachedIdx = -1 }
+function beginPhase(name) {
+  DIAG.reachedIdx = SMOKE_PHASES.indexOf(name)
+  RESULT.summary.reachedPhase = name
+}
+// The 4 LOCUS fields (added before the self-scan so it covers them). `result` + sentinels are passed in
+// for testability. lastCompletedPhase: on a run that reached the last phase, everything completed; an
+// early-return/throw within phase i means the last COMPLETED phase is i-1 (early-returns are mid-phase).
+export function computeDiagnosticLocus(result, sentinels = SELF_SCAN_SENTINELS) {
+  const S = result.summary
+  const failedChecks = result.checks.filter((c) => c.ok !== true)
+  const reachedIdx = DIAG.reachedIdx
+  const last = SMOKE_PHASES.length - 1
+  S.failedCheckCount = failedChecks.length
+  S.lastCompletedPhase = reachedIdx >= last ? SMOKE_PHASES[last] : (reachedIdx > 0 ? SMOKE_PHASES[reachedIdx - 1] : 'NONE')
+  // check names are fixed hardcoded literals; the extra leakScan guard makes firstFailedCheck values-free
+  // even if a future name interpolated a value (it would surface as REDACTED, never the value).
+  const name = failedChecks.length ? String(failedChecks[0].name) : 'NONE'
+  S.firstFailedCheck = leakScan(name, sentinels) ? name : 'REDACTED'
+  S.responseLeakScanStatus = (reachedIdx >= last && typeof S.leakScanClean === 'boolean')
+    ? (S.leakScanClean ? 'PASS' : 'FAIL')
+    : 'NOT_RUN'
+}
+// failureClass needs the final pass/selfScanClean, so it is computed AFTER the self-scan.
+export function computeFailureClass(result, { fatal = false } = {}) {
+  const S = result.summary
+  S.failureClass = S.pass === true ? 'NONE'
+    : fatal ? 'FATAL_EXCEPTION'
+    : (S.selfScanClean === false ? 'SELF_SCAN_FAILED' : 'CHECK_FAILED')
+}
+
 // Every response body (except the counted /plan exemption) lands here for the final leak scan.
 const COLLECTED = []
 // Set by main() once the fixture exists; finish() self-scans the composed summary + checks against
@@ -439,12 +484,14 @@ async function main() {
   S.salt = salt
 
   // ── 0. auth round-trip (deploy SOP: a silent 401 usually means schema/token gap) ────────────────
+  beginPhase('AUTH')
   const status = await req(`/api/integration/status${scope()}`, { label: 'status' })
   S.statusHttp = status.status
   must('status auth round-trip', status.ok, `http=${status.status}`)
   if (!status.ok) return finish(failed, args)
 
   // ── 1. MVP provisioning: readiness -> ensure (idempotent) -> options/sync ────────────────────────
+  beginPhase('PROVISIONING')
   const readiness1 = await req(`${API}/mvp/readiness${scope()}`, { label: 'mvp-readiness-pre' })
   S.readinessPreHttp = readiness1.status
   S.readinessPreReady = readiness1.body?.data?.ready === true
@@ -475,6 +522,7 @@ async function main() {
     `synced=${S.optionsSyncedFieldCount} skipped=${S.optionsSkippedFieldCount}`)
 
   // ── 2. sync/plan -> sync/persist (201) -> persist replay (200 skipped_existing) ─────────────────
+  beginPhase('SYNC_PERSIST')
   const planBody = {
     projectId: fixture.projectId,
     syncRunId: fixture.syncRunId,
@@ -524,6 +572,7 @@ async function main() {
     `http=${replay.status} mode=${S.persistReplayMode}`)
 
   // ── 2b. #4163 T1: GET /projects — the populator's project row landed, values-free ────────────────
+  beginPhase('PROJECTS')
   // Proves the FULL gap end-to-end against a real Postgres: the FE project-selector's endpoint (which
   // had NO server route before this) now returns the project the persist call above just populated,
   // and — the values-free hard boundary — never echoes fixture.sourceProjectNo / fixture.projectName
@@ -544,6 +593,7 @@ async function main() {
     `status=${S.projectStatus} batches=${S.projectSnapshotBatchCount}`)
 
   // ── 3. snapshot-batches list -> diff (counts) -> diff/rows (11-key projection) ───────────────────
+  beginPhase('SNAPSHOT_DIFF')
   const batchList = await req(`${API}/snapshot-batches${scope({ projectId: fixture.projectId })}`, { label: 'batch-list' })
   const batchData = batchList.body?.data || {}
   const ourBatch = (batchData.batches || []).find((entry) => entry.snapshotBatchId === fixture.snapshotBatchId) || null
@@ -581,6 +631,7 @@ async function main() {
     rows.every((row) => row.diffType === 'added' && ['ready', 'held'].includes(row.reviewStatus)))
 
   // ── 4. material mappings: candidates/sync -> confirm (create) -> human_preserved survival ───────
+  beginPhase('MATERIAL_MAPPINGS')
   const candidateIds = async (label) => {
     const list = await req(`${API}/material-mappings/candidates${scope({ projectId: fixture.projectId })}`, { label })
     const listRows = Array.isArray(list.body?.data?.rows) ? list.body.data.rows : []
@@ -649,6 +700,7 @@ async function main() {
     idsAfterResync.length === 1 && idsAfterResync[0] === confirmedMappingId, `newIds=${idsAfterResync.length}`)
 
   // ── 5. unit conversions: COMPUTED candidates -> confirm (manual rule mode) ───────────────────────
+  beginPhase('UNIT_CONVERSIONS')
   const unitCandidates = await req(`${API}/unit-conversions/candidates${scope({ projectId: fixture.projectId, snapshotBatchId: fixture.snapshotBatchId })}`, { label: 'unit-candidates' })
   const unitData = unitCandidates.body?.data || {}
   const unitRows = Array.isArray(unitData.rows) ? unitData.rows : []
@@ -689,6 +741,7 @@ async function main() {
     `http=${unitConfirmReplay.status} mode=${S.unitConfirmReplayMode}`)
 
   // ── 6. generation run -> invariant -> resolve (single + bulk) -> re-run flip ─────────────────────
+  beginPhase('GENERATION_RUN')
   const generationBody = { projectId: fixture.projectId, snapshotBatchId: fixture.snapshotBatchId }
   const run1 = await req(`${API}/generation/run${scope()}`, { method: 'POST', body: generationBody, accept: [201], label: 'generation-run-1' })
   const run1Data = run1.body?.data || {}
@@ -801,6 +854,7 @@ async function main() {
     prepLines.ok && S.prepLineRowCount === 0, `http=${prepLines.status} rows=${S.prepLineRowCount}`)
 
   // ── 7. remaining fail-closed probes (exact status + code each) ───────────────────────────────────
+  beginPhase('FAILCLOSED_PROBES')
   const badPolicy = await req(`${API}/material-mappings/candidates/sync${scope()}`, {
     method: 'POST',
     body: { projectId: fixture.projectId, snapshotBatchId: fixture.snapshotBatchId, defaultVersionPolicy: 'bogus_policy' },
@@ -843,6 +897,7 @@ async function main() {
     `http=${ghostCurrent.status} code=${S.probeGhostCurrentCode}`)
 
   // ── 7z. T2: ERP material-master cache sync (POST /mvp/erp-materials/sync) ────────────────────────
+  beginPhase('ERP_MATERIAL_SYNC')
   // Deployed-lane coverage of the T2 route: persist an ALREADY-NORMALIZED ERP material into the internal
   // erp_material_master cache, then re-sync to prove the idempotent upsert (patch, not a duplicate).
   // NON-PERTURBING by construction: erpCodeA (SMKERP-A-…) is a DIFFERENT value from the BOM drawings
@@ -883,6 +938,7 @@ async function main() {
     `http=${erpResync.status} mode=${S.erpResyncMode} patched=${S.erpResyncPatched}`)
 
   // ── 8. cleanup retires (also the mapping_retire / unit_retire audit actions) ─────────────────────
+  beginPhase('CLEANUP_RETIRES')
   let retiredMappings = 0
   for (const mappingId of [confirmedMappingId, ...createdCandidateIds]) {
     const retire = await req(`${API}/material-mappings/retire${scope()}`, {
@@ -901,6 +957,7 @@ async function main() {
   must('unit rule retire -> 200 retired', unitRetire.ok && S.unitRetireMode === 'retired', `http=${unitRetire.status} mode=${S.unitRetireMode}`)
 
   // ── 9. audit trail: every triggered action left a values-free row for THIS run's project ────────
+  beginPhase('AUDIT_TRAIL')
   let auditActionsCovered = 0
   for (const action of AUDIT_ACTIONS) {
     const audit = await req(`${API}/audit${scope({ projectId: fixture.projectId, action, limit: 100 })}`, { label: `audit-${action}` })
@@ -912,6 +969,7 @@ async function main() {
   S.auditActionsCovered = `${auditActionsCovered}/${AUDIT_ACTIONS.length}`
 
   // ── 10. global leak scan over every collected (non-exempt) response body ─────────────────────────
+  beginPhase('RESPONSE_LEAK_SCAN')
   const sentinels = SELF_SCAN_SENTINELS
   const scanned = COLLECTED.filter((entry) => !entry.exempt)
   const exempted = COLLECTED.filter((entry) => entry.exempt)
@@ -932,8 +990,10 @@ function finish(failed, args) {
   // P2-2 backstop: the OUTPUT itself (summary + checks, i.e. everything this run prints or writes)
   // is scanned against the run's sentinels BEFORE it is emitted. The sanitizing accessors make a hit
   // structurally impossible; a hit here means the output layer was bypassed and the run must FAIL.
+  computeDiagnosticLocus(RESULT)
   S.selfScanClean = leakScan({ summary: S, checks: RESULT.checks }, SELF_SCAN_SENTINELS)
   S.pass = !failed && RESULT.checks.every((c) => c.ok) && S.selfScanClean === true
+  computeFailureClass(RESULT, { fatal: false })
   const block = formatSummaryBlock(S)
   process.stdout.write(`${block}\n`)
   if (args.outDir) {
@@ -950,6 +1010,9 @@ if (invokedDirectly) {
     process.stderr.write(`[smoke] fatal: ${error && error.name ? error.name : 'Error'}\n`)
     RESULT.summary.pass = false
     RESULT.summary.fatal = true
+    computeDiagnosticLocus(RESULT)
+    RESULT.summary.selfScanClean = leakScan({ summary: RESULT.summary, checks: RESULT.checks }, SELF_SCAN_SENTINELS)
+    computeFailureClass(RESULT, { fatal: true })
     process.stdout.write(`${formatSummaryBlock(RESULT.summary)}\n`)
     process.exitCode = 1
   })
