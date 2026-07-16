@@ -35,6 +35,7 @@ import {
 } from './hierarchy-cycle-guard'
 import { recordRecordRevision } from './record-history-service'
 import { fenceWriterEntry } from './canonical-sheet-fence'
+import { mintOperation, sealOperation, OperationLedger } from './operation-ledger'
 import {
   notifyRecordSubscribersBestEffort,
   type NotifyRecordSubscribersInput,
@@ -773,12 +774,19 @@ export class RecordWriteService {
       group.mirrorFieldIds.add(cfg.mirrorFieldId)
       mirrorInvalidationBySheet.set(mirrorSheetId, group)
     }
+    // W0-1 L6-a: hoisted so the post-txn response echo can use the operation id as batch_id (below). Inert
+    // unless the L4 fence flag is on and the L6 migration is deployed.
+    let ledger: OperationLedger = new OperationLedger(sheetId, null)
     const updates = await this.pool.transaction(async ({ query }) => {
       // W0-1 L4 (canonical fence): fence FIRST — before the preWriteGuard check and every mutation — then
       // refuse if a recovery holds a durable block. Covers the bulk / AI / OAPI patch family in one place.
       // No-op & byte-identical when MULTITABLE_ENABLE_WRITER_FENCE is off. `bypassWriterBlock` is set only by
       // revert-execute's own in-fence patch loop (it owns the block).
       await fenceWriterEntry(query, sheetId, { bypassBlockCheck: input.bypassWriterBlock === true })
+      // W0-1 L6-a: mint the sealed operation AFTER the fence. Recovery-owned calls (bypassWriterBlock — the
+      // revert-execute in-fence patch loop) are the recovery API's own writes; L6-a leaves those UNMINTED
+      // (their sealing is the deferred recovery-execute lane's concern), so they keep an inert ledger.
+      if (input.bypassWriterBlock !== true) ledger = await mintOperation(query, sheetId)
       // C2 mirror write-through: in-transaction authority/no-oracle guard (see RecordPatchInput.preWriteGuard).
       if (input.preWriteGuard) await input.preWriteGuard(query)
       const updated: Array<{ recordId: string; version: number }> = []
@@ -1022,6 +1030,7 @@ export class RecordWriteService {
           patch: revisionPatch,
           snapshot: afterImage,
           batchId: bulkBatchId,
+          ledger,
         })
         pendingSubscriberNotifications.push({
           sheetId,
@@ -1110,6 +1119,10 @@ export class RecordWriteService {
         })
       }
 
+      // W0-1 L6-a: seal the operation LAST — endpoint_seq = MAX(seq) across every revision this bulk op
+      // wrote, event_count = the number written. No-op when inert or zero-event. This is THE multi-event
+      // anchor case (G-BATCH-ENDPOINT): the endpoint sits after ALL rows, never at an intermediate seq.
+      await sealOperation(query, ledger)
       return updated
     })
 
@@ -1449,8 +1462,10 @@ export class RecordWriteService {
       ...(patchAttachmentSummaries ? { attachmentSummaries: patchAttachmentSummaries } : {}),
       ...(crossSheetRelated.length > 0 ? { relatedRecords: crossSheetRelated } : {}),
       // W3-5: only echo the batchId when something was actually written under it (never point a caller's
-      // history deep-link at a batch with zero revisions).
-      ...(updates.length > 0 ? { batchId: bulkBatchId } : {}),
+      // history deep-link at a batch with zero revisions). W0-1 L6-a: when the operation ledger is active
+      // the stored batch_id is aligned to the operation id (one operation = one batch), so echo THAT so the
+      // caller's deep-link matches the persisted rows; inert ledger ⇒ the pre-existing bulkBatchId.
+      ...(updates.length > 0 ? { batchId: ledger.operationId ?? bulkBatchId } : {}),
     }
   }
 
