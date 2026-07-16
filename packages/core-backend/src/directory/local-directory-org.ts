@@ -238,6 +238,18 @@ export async function updateLocalDepartment(
     let parentRow: LockedDepartmentRow | undefined
 
     if (reparenting) {
+      // PB4-3 (cycle detection, owner design lock): a reparent is the only write that can close a
+      // department cycle, and two DISJOINT reparents (X→Y ∥ P→Q) can each pass an ancestor check
+      // on the stale committed tree yet jointly form a longer loop — the two-row FOR UPDATE below
+      // does NOT serialize them, because their locked row sets don't overlap. We therefore serialize
+      // ALL reparents within an integration on a single advisory xact lock, so each reparent's
+      // ancestor walk observes every prior reparent already committed. READ COMMITTED is required
+      // for that observation (a frozen REPEATABLE READ snapshot would miss the just-committed
+      // concurrent reparent, defeating the guard); it is the server default here, but we pin it so
+      // the guard cannot be silently defeated by a `default_transaction_isolation` change.
+      await client.query('SET TRANSACTION ISOLATION LEVEL READ COMMITTED')
+      await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [`directory:reparent:${integration.id}`])
+
       const locked = await client.query(
         `SELECT ${LOCKED_DEPARTMENT_COLUMNS}
            FROM directory_departments
@@ -270,6 +282,39 @@ export async function updateLocalDepartment(
       } else {
         if (!parentRow) throw new LocalDirectoryNotFoundError('parent department not found')
         if (!parentRow.is_active) throw new LocalDirectoryConflictError('parent department is archived (read-only)')
+
+        // PB4-3: reject if the child is the new parent itself or an ANCESTOR of the new parent —
+        // i.e. the new parent is a descendant of the child, so re-pointing the child under it
+        // would close a cycle. We walk the new parent's ancestor chain via the external-parent
+        // self-join; the `path` accumulator makes the recursion terminate even on a pre-existing
+        // malformed loop (defense in depth — the guard prevents NEW loops, but a hand-inserted one
+        // must not hang the walk). Sound because reparents are serialized on the advisory lock
+        // above, so the parent-pointer graph is stable for the duration of this walk.
+        const cycle = await client.query(
+          `WITH RECURSIVE ancestors AS (
+             SELECT d.external_department_id, d.external_parent_department_id,
+                    ARRAY[d.external_department_id] AS path
+               FROM directory_departments d
+              WHERE d.id = $1 AND d.integration_id = $2 AND d.provider = 'local'
+             UNION ALL
+             SELECT p.external_department_id, p.external_parent_department_id,
+                    a.path || p.external_department_id
+               FROM ancestors a
+               JOIN directory_departments p
+                 ON p.integration_id = $2 AND p.provider = 'local'
+                AND p.external_department_id = a.external_parent_department_id
+              WHERE a.external_parent_department_id IS NOT NULL
+                AND NOT (p.external_department_id = ANY(a.path))
+           )
+           SELECT 1 FROM ancestors WHERE external_department_id = $3 LIMIT 1`,
+          [parentId, integration.id, childRow.external_department_id],
+        )
+        if (cycle.rows.length > 0) {
+          throw new LocalDirectoryConflictError(
+            'reparent would create a department cycle (the target parent is a descendant of this department)',
+          )
+        }
+
         nextParentExternalId = parentRow.external_department_id
       }
     }
