@@ -7,6 +7,8 @@ import {
   ALLOWED_MODES,
   ALLOWED_STATUS_VALUES,
   AUDIT_ACTIONS,
+  buildRequestHeaders,
+  requestJson,
   SMOKE_PHASES,
   computeDiagnosticLocus,
   computeFailureClass,
@@ -311,4 +313,47 @@ test('diagnostic output face is EXACTLY the five declared fields (no reachedPhas
     'failedCheckCount', 'failureClass', 'firstFailedCheck', 'lastCompletedPhase', 'responseLeakScanStatus',
   ])
   assert.ok(!('reachedPhase' in result.summary), 'internal phase cursor must never appear in the output face')
+})
+
+// ── corrective-5 root-cause guard (owner P2): the tenant-context HEADER is load-bearing ──────────────
+// Deleting the x-tenant-id line passed 22/22 before — because nothing exercised requestJson's headers.
+// These drive the REAL requestJson via an injected fetch and assert the header contract; the delete
+// mutation now reds.
+test('buildRequestHeaders: tenant present -> x-tenant-id sent alongside Authorization; body -> Content-Type', () => {
+  const h = buildRequestHeaders({ token: 'tok', tenantId: 'tenant-9', hasBody: true })
+  assert.equal(h['x-tenant-id'], 'tenant-9')
+  assert.equal(h.Authorization, 'Bearer tok')
+  assert.equal(h['Content-Type'], 'application/json')
+})
+
+test('buildRequestHeaders: tenant absent -> NO x-tenant-id, Authorization still present', () => {
+  const h = buildRequestHeaders({ token: 'tok', tenantId: '', hasBody: false })
+  assert.equal('x-tenant-id' in h, false)
+  assert.equal(h.Authorization, 'Bearer tok')
+  assert.equal('Content-Type' in h, false)
+})
+
+test('requestJson actually SENDS x-tenant-id on a write (POST) — the entity N/8 root-cause guard', async () => {
+  const seen = []
+  const fetchImpl = async (url, init) => {
+    seen.push({ url, headers: { ...init.headers }, method: init.method, body: init.body })
+    return { status: 201, text: async () => JSON.stringify({ ok: true }) }
+  }
+  const res = await requestJson('http://x', '/api/integration/stock-preparation/mvp/ensure', {
+    token: 'tok', tenantId: 'tenant-9', timeoutMs: 1000, method: 'POST', body: { a: 1 }, accept: [201], fetchImpl,
+  })
+  assert.equal(res.status, 201)
+  assert.equal(seen.length, 1)
+  assert.equal(seen[0].headers['x-tenant-id'], 'tenant-9') // WITHOUT the header line the entity 400s TENANT_REQUIRED
+  assert.equal(seen[0].headers.Authorization, 'Bearer tok')
+  assert.equal(seen[0].method, 'POST')
+  assert.equal(seen[0].body, JSON.stringify({ a: 1 }))
+})
+
+test('requestJson omits x-tenant-id when no tenant is configured, but still sends Authorization', async () => {
+  const seen = []
+  const fetchImpl = async (url, init) => { seen.push({ ...init.headers }); return { status: 200, text: async () => '{}' } }
+  await requestJson('http://x', '/api/integration/status', { token: 'tok', tenantId: '', timeoutMs: 1000, fetchImpl })
+  assert.equal('x-tenant-id' in seen[0], false)
+  assert.equal(seen[0].Authorization, 'Bearer tok')
 })

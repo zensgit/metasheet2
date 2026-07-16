@@ -439,25 +439,30 @@ function check(name, ok, detail = '') {
   return ok === true
 }
 
-async function requestJson(baseUrl, pathname, { token, timeoutMs, tenantId, method = 'GET', body, accept = [200], label = '', leakExempt = false } = {}) {
+// Pure request-header builder — the load-bearing tenant-context contract lives here so it can be tested
+// directly (owner P2: a smoke that fails to send x-tenant-id fails on the entity but not in CI). Tenant
+// context rides the platform's tenant-context HEADER, not only the query string: the tenant-hardened WRITE
+// routes (resolveAuthUserTenantId) deliberately ignore request query/body tenant params, and for a
+// principal without an intrinsic tenant claim the deployment's sanctioned mechanism is the x-tenant-id
+// header (jwt-middleware backfill). Without it the smoke fails its FIRST write (mvp/ensure -> 400
+// TENANT_REQUIRED) on any post-hardening package — the RC-0 corrective-4 N/8 entity failure.
+export function buildRequestHeaders({ token, tenantId, hasBody = false } = {}) {
+  const headers = { Accept: 'application/json' }
+  if (token) headers.Authorization = `Bearer ${token}`
+  if (tenantId) headers['x-tenant-id'] = tenantId
+  if (hasBody) headers['Content-Type'] = 'application/json'
+  return headers
+}
+
+export async function requestJson(baseUrl, pathname, { token, timeoutMs, tenantId, method = 'GET', body, accept = [200], label = '', leakExempt = false, fetchImpl } = {}) {
+  const doFetch = fetchImpl || fetch
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), timeoutMs)
   try {
-    const headers = { Accept: 'application/json' }
-    if (token) headers.Authorization = `Bearer ${token}`
-    // Tenant context rides the platform's tenant-context HEADER, not only the query string. The
-    // tenant-hardened WRITE routes (resolveAuthUserTenantId) deliberately ignore request query/body
-    // tenant params; for a principal without an intrinsic tenant claim, the deployment's sanctioned
-    // context mechanism is the x-tenant-id header (jwt-middleware backfill). Without this header the
-    // smoke fails its FIRST write (mvp/ensure -> 400 TENANT_REQUIRED) on any post-hardening package —
-    // the RC-0 corrective-4 entity failure (auditActionsCovered=N/8) reproduced locally.
-    if (tenantId) headers['x-tenant-id'] = tenantId
+    const headers = buildRequestHeaders({ token, tenantId, hasBody: body !== undefined })
     const init = { method, headers, signal: controller.signal }
-    if (body !== undefined) {
-      headers['Content-Type'] = 'application/json'
-      init.body = JSON.stringify(body)
-    }
-    const response = await fetch(`${baseUrl}${pathname}`, init)
+    if (body !== undefined) init.body = JSON.stringify(body)
+    const response = await doFetch(`${baseUrl}${pathname}`, init)
     const text = await response.text()
     let parsed = null
     try { parsed = text ? JSON.parse(text) : null } catch { parsed = null }
