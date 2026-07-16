@@ -322,6 +322,7 @@
         />
       </div>
       <MetaRecordInspector
+        :class="{ 'meta-record-drawer--overlay': isInspectorOverlay }"
         :visible="!!selectedRecordId" :record="selectedRecordResolved" :fields="scopedAllFields"
         :can-edit="effectiveRowActions.canEdit" :can-comment="effectiveRowActions.canComment" :can-delete="effectiveRowActions.canDelete"
         :can-create="caps.canCreateRecord.value"
@@ -1023,6 +1024,16 @@ const isRailNarrow = ref(false)
 const railToggleRef = ref<HTMLButtonElement | null>(null)
 const isRailDrawerOpen = computed(() => isRailNarrow.value && !railCollapsed.value)
 
+// W2 S7 (design docs/development/multitable-w2-unified-record-inspector-design-lock-20260714.md §3.4,
+// §6bis OD-W2-6=(b)): the right record inspector's overlay-vs-push mode reuses the SAME `isRailNarrow`
+// signal as the left rail — there is deliberately no second breakpoint constant (the lock's own words:
+// "同一 RAIL_NARROW_BREAKPOINT 常量、零阈值分叉"). `isInspectorOverlay` is a plain alias (the literal
+// SAME ref), named separately only so the `<MetaRecordInspector>` class binding below reads clearly; it
+// carries no independent state and is therefore false-by-construction at desktop width for the exact
+// same reason `isRailNarrow` already is (see that ref's own transitions in `syncRailViewportState`'s
+// wide-branch early return) — no separate desktop-invariance proof is needed for the alias itself.
+const isInspectorOverlay = isRailNarrow
+
 function syncRailViewportState(): void {
   if (typeof window === 'undefined') return
   const narrow = window.innerWidth <= RAIL_NARROW_BREAKPOINT
@@ -1031,6 +1042,22 @@ function syncRailViewportState(): void {
   if (!narrow) return // wide viewport: never mutate railCollapsed here — desktop path is untouched by 2c
   if (!wasNarrow) railCollapsed.value = true // just crossed into narrow: auto-collapse to the icon-strip
 }
+
+// OD-W2-6=(b) mutual exclusion (lock §3.4/§6bis): at narrow viewport, the left rail's drawer overlay
+// and the right inspector's overlay cannot both be open — opening one auto-closes the other. Both
+// watches below gate purely on `isRailDrawerOpen`, which is already false-by-construction at desktop
+// width (it requires `isRailNarrow`, which the wide branch of `syncRailViewportState` above never
+// sets), so NEITHER watch ever writes state at desktop — reusing that existing P2-2c invariant rather
+// than re-proving it, so desktop behavior (both rail and inspector may be open together, push layout,
+// OD-W2-3=a) stays a byte-for-byte no-op versus pre-S7 code.
+watch(selectedRecordId, (rid) => {
+  // Opening the inspector (a record just got selected) while the rail drawer is open: close the drawer.
+  if (rid && isRailDrawerOpen.value) railCollapsed.value = true
+})
+watch(isRailDrawerOpen, (open) => {
+  // Opening the rail drawer while the inspector is open: close the inspector.
+  if (open && selectedRecordId.value) selectedRecordId.value = null
+})
 
 const showDashboardView = ref(false)
 const showTemplateLibrary = ref(false)
