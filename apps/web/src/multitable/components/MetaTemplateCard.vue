@@ -5,8 +5,17 @@
     :data-template-id="template.id"
   >
     <div class="meta-template-card__top">
-      <span class="meta-template-card__icon" :style="{ background: template.color || '#2563eb' }">
-        {{ template.icon || template.name.slice(0, 1).toUpperCase() }}
+      <span
+        class="meta-template-card__icon"
+        :style="{ background: template.color || '#2563eb' }"
+        aria-hidden="true"
+      >
+        <component
+          :is="templateIcon"
+          v-if="templateIcon"
+          class="meta-template-card__icon-svg"
+        />
+        <span v-else class="meta-template-card__icon-fallback">{{ templateIconInitial }}</span>
       </span>
       <span class="meta-template-card__category">{{ categoryDisplay }}</span>
     </div>
@@ -50,6 +59,7 @@ import {
   cardViews,
   workbenchLabel,
 } from '../utils/workbench-labels'
+import { resolveTemplateIcon, templateIconFallback } from '../utils/template-icons'
 import { MtButton } from '../ui'
 
 const props = defineProps<{
@@ -70,6 +80,9 @@ const { isZh } = useLocale()
 const categoryDisplay = computed(() =>
   categoryLabel(props.template.category, isZh.value ? 'zh-CN' : 'en'),
 )
+
+const templateIcon = computed(() => resolveTemplateIcon(props.template.icon))
+const templateIconInitial = computed(() => templateIconFallback(props.template.name))
 
 const fieldCount = computed(() => {
   return props.template.sheets.reduce((sum, sheet) => sum + sheet.fields.length, 0)
@@ -105,10 +118,21 @@ const viewCount = computed(() => {
   justify-content: center;
   width: 2.25rem;
   height: 2.25rem;
+  flex: 0 0 2.25rem;
   border-radius: 8px;
   color: #ffffff;
   font-weight: 600;
   font-size: 1rem;
+  overflow: hidden;
+}
+
+.meta-template-card__icon-svg {
+  width: 1.25rem;
+  height: 1.25rem;
+}
+
+.meta-template-card__icon-fallback {
+  line-height: 1;
 }
 
 .meta-template-card__category {
