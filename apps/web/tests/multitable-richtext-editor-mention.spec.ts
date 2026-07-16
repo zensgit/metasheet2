@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { createApp, h, nextTick, ref } from 'vue'
 import MetaRichLongTextEditor from '../src/multitable/components/cells/MetaRichLongTextEditor.vue'
 import type { MetaCommentMentionSuggestion } from '../src/multitable/types'
+import { metaCoreLabel } from '../src/multitable/utils/meta-core-labels'
 
 // B5 — MetaRichLongTextEditor mention behaviour at the COMPONENT level.
 //
@@ -114,4 +115,49 @@ describe('MetaRichLongTextEditor — B5 mention popover + host gate', () => {
     await nextTick()
     expect(container!.querySelector('[data-test="rich-longtext-mention-popover"]')).toBeNull()
   })
+})
+
+describe('MetaRichLongTextEditor — B5 aria labels come from the typed label module (i18n strict-zero)', () => {
+  // Before this fix the toolbar/content aria labels were unconditional Chinese
+  // consts (`const ariaToolbar = '富文本格式工具栏'`) — an English-locale screen
+  // reader read Chinese. They must now come from meta-core-labels (richText.*)
+  // in BOTH locales; equality with the module output per locale pins that (a
+  // hardcoded string in the component would fail one of the two locales).
+  let container: HTMLDivElement | null = null
+
+  afterEach(() => {
+    container?.remove()
+    container = null
+  })
+
+  function mount(props: Record<string, unknown>) {
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    const app = createApp({ setup: () => () => h(MetaRichLongTextEditor, props) })
+    app.mount(container)
+  }
+
+  for (const isZh of [true, false]) {
+    it(`renders module-sourced, non-empty toolbar + content aria labels (isZh=${isZh})`, async () => {
+      mount({ modelValue: '', isZh })
+      await nextTick()
+
+      const toolbar = container!.querySelector('.meta-rich-editor__toolbar[role="toolbar"]')
+      const editable = container!.querySelector('[data-test="rich-longtext-editor"]')
+      expect(toolbar).not.toBeNull()
+      expect(editable).not.toBeNull()
+
+      const toolbarAria = toolbar!.getAttribute('aria-label')
+      const contentAria = editable!.getAttribute('aria-label')
+      expect(toolbarAria).toBe(metaCoreLabel('richText.toolbarAria', isZh))
+      expect(contentAria).toBe(metaCoreLabel('richText.contentAria', isZh))
+      expect((toolbarAria ?? '').trim().length).toBeGreaterThan(0)
+      expect((contentAria ?? '').trim().length).toBeGreaterThan(0)
+      if (!isZh) {
+        // The original B5 bug: unconditional Chinese in an English locale.
+        expect(toolbarAria).not.toMatch(/[一-鿿]/)
+        expect(contentAria).not.toMatch(/[一-鿿]/)
+      }
+    })
+  }
 })

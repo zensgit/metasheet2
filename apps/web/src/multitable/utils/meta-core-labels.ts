@@ -92,6 +92,8 @@ export type MetaCoreLabelKey =
   | 'linkedRecord.empty'
   // --- Rich-longText in-cell @mention (B5) ---
   | 'mention.suggestionsAria'
+  // --- Rich-longText editor chrome aria (B5 i18n fix — was unconditional zh) ---
+  | 'richText.toolbarAria' | 'richText.contentAria'
   // --- Auth chrome (file-location closure tightening per #1803) ---
   | 'auth.notAuthenticated'
 
@@ -277,6 +279,11 @@ const META_CORE_LABELS: Record<MetaCoreLabelKey, { en: string; zh: string }> = {
   'linkedRecord.close': { en: 'Close', zh: '关闭' },
   'linkedRecord.empty': { en: 'No fields to show', zh: '没有可显示的字段' },
   'mention.suggestionsAria': { en: 'Mention people', zh: '提及成员' },
+  // MetaRichLongTextEditor toolbar/content-surface aria labels. zh keeps the
+  // exact pre-fix strings; en was previously missing (the consts were
+  // unconditional Chinese — a screen reader in an English UI read Chinese).
+  'richText.toolbarAria': { en: 'Rich text formatting toolbar', zh: '富文本格式工具栏' },
+  'richText.contentAria': { en: 'Rich text content editor', zh: '富文本内容编辑区' },
 }
 
 export function metaCoreLabel(key: MetaCoreLabelKey, isZh: boolean): string {
