@@ -265,6 +265,68 @@ describeIfDatabase('W0 tail — field-undelete rehydration emits revisions (real
     expect(diesRevs[0]?.action).toBe('create')
   })
 
+  // W0 enablement gate (owner ruling, post-merge review of #4279/#4286): the per-record serial
+  // `recordRecordRevision` loop was replaced with `recordRecordRevisionsBatch` (one chunked multi-row
+  // INSERT). The two tests above only exercise 1-2 records — not enough to catch a chunking off-by-one
+  // (e.g. an exclusive vs inclusive slice bound dropping or duplicating the LAST row of a chunk, or a
+  // wrong `base` param-offset arithmetic scrambling rows into the wrong tuple). This test rehydrates 25
+  // records in ONE field-undelete and asserts exactly 25 revisions exist, each at the correct new version,
+  // each with its OWN correct patch/snapshot (not a neighbor's) — the per-row-correctness half of the
+  // chunking proof. The numeric chunk-boundary math itself (999/1000/1001/2500 rows, exact statement
+  // counts) is unit-tested directly against `recordRecordRevisionsBatch` in
+  // `record-history-service-batch.test.ts` (no DB needed there); this real-DB test is the end-to-end
+  // complement proving the chunked INSERT actually lands correctly through the real route + real trigger
+  // surface, not just in isolation.
+  test('multi-record rehydration (25 records) produces exactly 25 revisions, each with its OWN correct per-row snapshot (chunking off-by-one / row-scramble guard)', async () => {
+    const s = await freshSheet('multi25')
+    const F = mkFieldId('multi25')
+    await insertField(s, F, 'Multi25Val', 'string', 1)
+
+    const N = 25
+    const records = Array.from({ length: N }, (_, i) => mkRecordId(`multi25_${i}`))
+    const T0 = new Date(Date.now() - 60_000).toISOString()
+    for (let i = 0; i < N; i += 1) {
+      await insertRecord(s, records[i], { [F]: `val-${i}`, other: `x${i}` })
+      await seedCreateRevision(s, records[i], { other: `x${i}` }, T0)
+    }
+
+    expect((await deleteField(F)).status).toBe(200)
+    const revF = await lastFieldDeleteRevisionId(s, F)
+
+    const p = await preview(s, revF)
+    expect(p.status).toBe(200)
+    expect(p.body?.data?.undelete?.tombstoneAvailable).toBe(true)
+    const ok = await execute(s, { revisionId: revF, previewToken: p.body.data.previewToken, confirm: 'undelete' })
+    expect(ok.status).toBe(200)
+
+    let sharedBatchId: string | null = null
+    for (let i = 0; i < N; i += 1) {
+      const row = await recordRow(records[i])
+      expect(row?.version).toBe(2)
+      expect(row?.data).toEqual({ [F]: `val-${i}`, other: `x${i}` })
+
+      const revs = await revisionsFor(records[i])
+      expect(revs).toHaveLength(2) // seeded create@1 + the batched rehydration@2 — no dupes, no drops
+      const rehydrateRev = revs.find((r) => r.version === 2)
+      expect(rehydrateRev).toMatchObject({
+        action: 'update',
+        source: 'restore',
+        actor_id: MANAGER.id,
+        changed_field_ids: [F],
+        patch: { [F]: `val-${i}` }, // THIS record's own value, never a neighbor's (row-scramble guard)
+        snapshot: { [F]: `val-${i}`, other: `x${i}` },
+      })
+      if (sharedBatchId === null) sharedBatchId = rehydrateRev?.batch_id ?? null
+      else expect(rehydrateRev?.batch_id).toBe(sharedBatchId) // LOCK-12: one shared batch across all 25
+    }
+    expect(sharedBatchId).toBeTruthy()
+
+    // Sheet-wide total: exactly N seeded creates + N batched rehydrations, nothing extra (no ghost rows
+    // from a chunk boundary being processed twice).
+    const total = await q('SELECT COUNT(*)::int AS n FROM meta_record_revisions WHERE sheet_id = $1', [s])
+    expect(Number((total.rows[0] as { n: number }).n)).toBe(N * 2)
+  })
+
   // Owner post-merge review of #4279 (Medium finding #2): the two tests above prove the success path and
   // the zero-row leg, but neither forces a `meta_record_revisions` INSERT failure AFTER the row data/version
   // updates — so neither actually pins that the WHOLE field-undelete (field re-creation + its order-shift +

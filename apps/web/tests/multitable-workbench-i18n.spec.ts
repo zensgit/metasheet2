@@ -17,6 +17,7 @@ import {
   cardSheets,
   cardFields,
   cardViews,
+  templateConflictKindLabel,
   type WorkbenchLabelKey,
 } from '../src/multitable/utils/workbench-labels'
 
@@ -86,8 +87,31 @@ describe('workbench-labels static table', () => {
     expect(workbenchLabel('conflict.fieldFallback', false)).toBe('cell')
     expect(workbenchLabel('card.install', true)).toBe('使用模板')
     expect(workbenchLabel('card.installing', false)).toBe('Installing...')
-    expect(workbenchLabel('error.loadSheets', true)).toBe('加载 Sheet 失败')
+    expect(workbenchLabel('error.loadSheets', true)).toBe('加载数据表失败')
     expect(workbenchLabel('error.loadSheetMetadata', false)).toBe('Failed to load sheet metadata')
+  })
+
+  // W1 G-10 (2026-07-13, display layer only): Sheet = 数据表, Base = 工作区 in zh — locks the
+  // normalized terminology dictionary values across the workbench toast/error/confirm strings.
+  it('G-10: normalizes Sheet/Base terminology in zh toast, error, and confirm strings', () => {
+    expect(workbenchLabel('toast.sheetAccessRefreshFailed', true)).toBe('刷新数据表权限失败')
+    expect(workbenchLabel('toast.sheetCreateBlocked', true)).toBe('创建数据表需要多维表写入权限。')
+    expect(workbenchLabel('toast.sheetRefreshFailed', true)).toBe('数据表已创建，但刷新工作台上下文失败')
+    expect(workbenchLabel('toast.sheetCreateFailed', true)).toBe('创建数据表失败')
+    expect(workbenchLabel('toast.baseLoadFailed', true)).toBe('加载工作区失败')
+    expect(workbenchLabel('toast.baseCreateBlocked', true)).toBe('创建工作区需要多维表写入权限。')
+    expect(workbenchLabel('toast.baseCreateFailed', true)).toBe('创建工作区失败')
+    expect(workbenchLabel('confirm.discardContextChanges', true)).toBe('离开当前数据表或视图前放弃未保存的更改吗？')
+    expect(workbenchLabel('error.loadSheetMetadata', true)).toBe('加载数据表元数据失败')
+    expect(workbenchLabel('error.loadBaseMetadata', true)).toBe('加载工作区元数据失败')
+    expect(workbenchLabel('tpl.subtitle', true)).toBe('从内置工作区模板新建一个工作区')
+    expect(templateConflictKindLabel('base_exists', true)).toBe('工作区已存在')
+    expect(templateConflictKindLabel('sheet_exists', true)).toBe('数据表已存在')
+    expect(templateConflictKindLabel('view_exists', true)).toBe('视图已存在')
+    // English values are unchanged — the dictionary only governs zh display strings.
+    expect(workbenchLabel('toast.sheetCreateFailed', false)).toBe('Failed to create sheet')
+    expect(workbenchLabel('toast.baseCreateFailed', false)).toBe('Failed to create base')
+    expect(templateConflictKindLabel('base_exists', false)).toBe('Base already exists')
   })
 })
 
@@ -139,7 +163,7 @@ describe('workbench-labels interpolation helpers', () => {
     expect(mentionsRecords(4, false)).toBe('4 records')
     expect(mentionsRecords(4, true)).toBe('4 条记录')
 
-    expect(cardSheets(1, true)).toBe('1 个 Sheet')
+    expect(cardSheets(1, true)).toBe('1 个数据表')
     expect(cardSheets(1, false)).toBe('1 sheet')
     expect(cardSheets(2, false)).toBe('2 sheets')
     expect(cardFields(0, true)).toBe('0 个字段')

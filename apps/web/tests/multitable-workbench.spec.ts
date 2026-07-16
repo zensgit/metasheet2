@@ -362,7 +362,7 @@ describe('useMultitableWorkbench', () => {
 
     await wb.loadSheets()
 
-    expect(wb.error.value).toBe('加载 Sheet 失败')
+    expect(wb.error.value).toBe('加载数据表失败')
   })
 
   it('keeps backend load errors raw ahead of localized fallbacks', async () => {

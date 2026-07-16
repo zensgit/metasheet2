@@ -133,7 +133,10 @@
       @reset-to-shared="onResetToShared"
     />
     <div class="mt-workbench__content">
-      <aside class="mt-workbench__rail" :class="{ 'mt-workbench__rail--collapsed': railCollapsed }">
+      <aside
+        class="mt-workbench__rail"
+        :class="{ 'mt-workbench__rail--collapsed': railCollapsed, 'mt-workbench__rail--drawer': isRailDrawerOpen }"
+      >
         <div class="mt-workbench__rail-head">
           <div v-if="basePickerBases.length" v-show="!railCollapsed" class="mt-workbench__base-bar">
             <MetaBasePicker
@@ -146,6 +149,7 @@
             />
           </div>
           <button
+            ref="railToggleRef"
             type="button"
             data-testid="rail-collapse-toggle"
             class="mt-workbench__rail-toggle"
@@ -317,7 +321,7 @@
           @selection-change="onGridSelectionChange"
         />
       </div>
-      <MetaRecordDrawer
+      <MetaRecordInspector
         :visible="!!selectedRecordId" :record="selectedRecordResolved" :fields="scopedAllFields"
         :can-edit="effectiveRowActions.canEdit" :can-comment="effectiveRowActions.canComment" :can-delete="effectiveRowActions.canDelete"
         :can-create="caps.canCreateRecord.value"
@@ -334,6 +338,25 @@
         :ai-shortcut="aiShortcut.state"
         :button-run-pending="buttonRunPending"
         :mention-suggestions="commentMentionSuggestions"
+        :comments="commentsState.comments.value"
+        :comments-loading="commentsState.loading.value"
+        :can-resolve-comments="effectiveRowActions.canComment"
+        :comment-draft="commentDraft"
+        :highlighted-comment-id="highlightedCommentId"
+        :comment-target-field-id="activeCommentFieldId"
+        :comments-scope-label="commentsScopeLabel"
+        :comment-reply-to-id="selectedReplyCommentId"
+        :comment-editing-id="selectedEditingCommentId"
+        :comment-unread-count="commentInboxState.unreadCount.value"
+        :comment-submitting="commentsState.submitting.value"
+        :comments-error="commentsState.error.value"
+        :comment-resolving-ids="commentsState.resolvingIds.value"
+        :comment-updating-ids="commentsState.updatingIds.value"
+        :comment-deleting-ids="commentsState.deletingIds.value"
+        :comment-reacting-keys="commentsState.reactingKeys.value"
+        :current-user-id="currentUserId"
+        :comment-composer-initial-mentions="commentComposerInitialMentions"
+        :open-comments="showComments"
         @close="onCloseDrawer" @delete="onDeleteRecord" @duplicate="onDuplicateRecord(selectedRecordId)" @patch="onDrawerPatch"
         @toggle-comments="onToggleComments" @comment-field="onToggleFieldComments" @open-automation="openWorkflowDesigner(selectedRecordId ?? undefined)" @open-link-picker="openLinkPicker" @open-person-picker="openPersonPicker"
         @toggle-lock="onToggleRecordLock"
@@ -341,25 +364,7 @@
         @restore="onRestoreRecordVersion"
         @ai-preview="onAiPreviewField" @ai-run="onAiRunField"
         @run-button="onRunButton"
-      />
-      <MetaCommentsDrawer
-        :visible="showComments && !!selectedRecordId" :comments="commentsState.comments.value"
-        :loading="commentsState.loading.value" :can-comment="effectiveRowActions.canComment" :can-resolve="effectiveRowActions.canComment"
-        :highlighted-comment-id="highlightedCommentId"
-        :unread-count="commentInboxState.unreadCount.value"
-        :target-field-id="activeCommentFieldId"
-        :scope-label="commentsScopeLabel"
-        :reply-to-comment-id="selectedReplyCommentId"
-        :editing-comment-id="selectedEditingCommentId"
-        :draft="commentDraft" :submitting="commentsState.submitting.value" :error="commentsState.error.value"
-        :resolving-ids="commentsState.resolvingIds.value"
-        :updating-ids="commentsState.updatingIds.value"
-        :deleting-ids="commentsState.deletingIds.value"
-        :reacting-keys="commentsState.reactingKeys.value"
-        :current-user-id="currentUserId"
-        :mention-suggestions="commentMentionSuggestions"
-        :composer-initial-mentions="commentComposerInitialMentions"
-        @close="onCloseComments" @submit="onSubmitComment" @resolve="onResolveComment" @reply="onReplyToComment" @edit="onEditComment" @delete="onDeleteComment" @cancel-reply="onCancelCommentReply" @cancel-edit="onCancelCommentEdit" @update:draft="commentDraft = $event" @react="onReactToComment" @unreact="onUnreactToComment"
+        @comment-submit="onSubmitComment" @comment-resolve="onResolveComment" @comment-reply="onReplyToComment" @comment-edit="onEditComment" @comment-delete="onDeleteComment" @comment-cancel-reply="onCancelCommentReply" @comment-cancel-edit="onCancelCommentEdit" @update:comment-draft="commentDraft = $event" @comment-react="onReactToComment" @comment-unreact="onUnreactToComment"
       />
     </div>
     <div v-if="showShortcuts" class="mt-workbench__shortcuts-overlay" @click.self="showShortcuts = false">
@@ -601,11 +606,11 @@ import {
   recordsDeleted as fmtRecordsDeleted,
   recordNotFound as fmtRecordNotFound,
 } from '../utils/workbench-labels'
-import { commentLabel } from '../utils/meta-comment-labels'
 import { recordLabel } from '../utils/meta-record-labels'
 import { resolveButtonFieldProperty } from '../utils/field-config'
 import {
   bulkFailure as fmtBulkFailure,
+  bulkFailureSamples as fmtBulkFailureSamples,
   bulkPartialSuccess as fmtBulkPartialSuccess,
   bulkSuccess as fmtBulkSuccess,
   bulkVersionConflict as fmtBulkVersionConflict,
@@ -657,9 +662,8 @@ import type { ConfigRestoreExecuteConfirm, RestorePreviewChange, RestoreBatchPre
 import { buildBatchExpectedVersions } from '../utils/batch-restore-expected-versions'
 import { resolveSelectionLabels } from '../utils/batch-restore-labels'
 import MetaFormView from '../components/MetaFormView.vue'
-import MetaRecordDrawer from '../components/MetaRecordDrawer.vue'
+import MetaRecordInspector from '../components/MetaRecordInspector.vue'
 import MetaNotificationBell from '../components/MetaNotificationBell.vue'
-import MetaCommentsDrawer from '../components/MetaCommentsDrawer.vue'
 import MetaLinkPicker from '../components/MetaLinkPicker.vue'
 import MetaPersonPicker from '../components/MetaPersonPicker.vue'
 import MetaTemplateCard from '../components/MetaTemplateCard.vue'
@@ -1002,6 +1006,32 @@ const showAutomationManager = ref(false)
 // owner decision A pending -> recommended default applied): session-local only, default expanded,
 // NOT persisted (no localStorage/server write) — component remount resets to expanded.
 const railCollapsed = ref(false)
+
+// UI-P2-2c (design docs/development/multitable-ui-p2-2c-responsive-design-20260714.md): narrow-width
+// responsive rail. `isRailNarrow` is viewport-derived (window.innerWidth), NOT user-controlled — it
+// only ever WRITES `railCollapsed` on the transition INTO narrow (auto-collapse to the existing
+// icon-strip), and never touches it while already wide or already narrow, so desktop-width behavior
+// (>= RAIL_NARROW_BREAKPOINT) is a byte-for-byte no-op versus pre-2c code (see syncRailViewportState).
+// `isRailDrawerOpen` composes that with the pre-existing `railCollapsed` toggle: narrow + user-expanded
+// = the rail becomes an absolute-positioned overlay ("drawer") instead of an in-flow column (CSS only,
+// see .mt-workbench__rail--drawer) — the SAME `rail-collapse-toggle` button that already exists closes
+// it, no new emit/prop/testid. Breakpoint is a single JS constant (tokens.css has no --ms-bp-* family,
+// per the 2b design's "no width token vocabulary" carve-out at §6) — deliberately NOT mirrored into a
+// CSS @media query, so there is exactly one source of truth for the threshold.
+const RAIL_NARROW_BREAKPOINT = 768
+const isRailNarrow = ref(false)
+const railToggleRef = ref<HTMLButtonElement | null>(null)
+const isRailDrawerOpen = computed(() => isRailNarrow.value && !railCollapsed.value)
+
+function syncRailViewportState(): void {
+  if (typeof window === 'undefined') return
+  const narrow = window.innerWidth <= RAIL_NARROW_BREAKPOINT
+  const wasNarrow = isRailNarrow.value
+  isRailNarrow.value = narrow
+  if (!narrow) return // wide viewport: never mutate railCollapsed here — desktop path is untouched by 2c
+  if (!wasNarrow) railCollapsed.value = true // just crossed into narrow: auto-collapse to the icon-strip
+}
+
 const showDashboardView = ref(false)
 const showTemplateLibrary = ref(false)
 const TemplateCenterRouteName = AppRouteNames.MULTITABLE_TEMPLATES
@@ -3074,13 +3104,18 @@ function onCloseDrawer() {
   resetCommentInteractionState()
 }
 
+// W2 S4 (OD-W2-7=b, lock "收编 showComments 分支"): comments is now a tab inside the single
+// inspector, not a second drawer with its own open/close state — there is no "close JUST comments"
+// affordance anymore (MetaCommentsPanel has no header/close chrome of its own, lock §2). So this
+// simplifies to an OPEN-only action: request the comments tab (via the `openComments` prop →
+// MetaRecordInspector's watch, see that component's file-header comment) and reset the scoped
+// comment-field/reply/edit context back to "new top-level comment" — the SAME reset this function
+// already did on its own open branch. Clicking the header comment-toggle button while ALREADY on
+// the comments tab now just re-runs that reset (a mild behavior change from the old toggle-closes
+// semantics; there is no other way to "close comments only" left in the UI — closing the whole
+// inspector via its own × already discards a comment draft the same way, `hasRecordScopedDrafts`
+// already includes `hasCommentDraft`, see `confirmDiscardRecordChanges`).
 function onToggleComments() {
-  if (showComments.value) {
-    if (!confirmDiscardCommentDraft()) return
-    showComments.value = false
-    resetCommentInteractionState()
-    return
-  }
   showComments.value = true
   selectedCommentFieldId.value = null
   selectedReplyCommentId.value = null
@@ -3131,12 +3166,6 @@ function onCancelCommentEdit() {
   commentDraft.value = ''
 }
 
-function onCloseComments() {
-  if (!confirmDiscardCommentDraft()) return
-  showComments.value = false
-  resetCommentInteractionState()
-}
-
 function confirmDiscardContextChanges() {
   if (!hasUnsavedWorkbenchDrafts.value) return true
   return window.confirm(wb('confirm.discardContextChanges', isZh.value))
@@ -3145,11 +3174,6 @@ function confirmDiscardContextChanges() {
 function confirmDiscardRecordChanges() {
   if (!hasRecordScopedDrafts.value) return true
   return window.confirm(wb('confirm.discardRecordChanges', isZh.value))
-}
-
-function confirmDiscardCommentDraft() {
-  if (!hasCommentDraft.value) return true
-  return window.confirm(commentLabel('comment.discardDraftConfirm', isZh.value))
 }
 
 function discardWorkbenchDraftsForExternalContextChange() {
@@ -3588,6 +3612,17 @@ function onGridSelectionChange(recordIds: string[]) {
 type GridExportField = (typeof scopedGridFields)['value'][number]
 type GridExportRow = (typeof grid.rows)['value'][number]
 
+// G-10 follow-up (owner ruling 2026-07-15): exports are a normal-user surface — the download
+// filename and the xlsx tab use the active sheet's display NAME (already in workbench.sheets
+// scope), never the bare sheetId. When no name resolves, the generic 'export' fallback is used
+// rather than the raw id (HI-1: zero new data paths). The server route path still wins when it
+// supplies a Content-Disposition filename (itself sheet-name based).
+const activeSheetExportName = computed(() => {
+  const id = workbench.activeSheetId.value
+  const name = id ? workbench.sheets.value.find((sheet) => sheet.id === id)?.name : undefined
+  return typeof name === 'string' && name.trim().length > 0 ? name.trim() : ''
+})
+
 function onExportCsv() { openExportDialog('csv') }
 async function onExportXlsx() { openExportDialog('xlsx') }
 
@@ -3624,14 +3659,14 @@ async function exportAllRowsViaRoute(fieldIds: string[], format: 'csv' | 'xlsx')
       fieldIds,
       format,
     })
-    triggerDownloadNamed(blob, filename || `${sheetId}.${format}`)
+    triggerDownloadNamed(blob, filename || `${activeSheetExportName.value || 'export'}.${format}`)
   } catch (err: any) {
     showError(err?.message ?? wb(format === 'csv' ? 'toast.csvExportFailed' : 'toast.excelExportFailed', isZh.value))
   }
 }
 
 function triggerDownload(blob: Blob, extension: string) {
-  triggerDownloadNamed(blob, `${workbench.activeSheetId.value || 'export'}.${extension}`)
+  triggerDownloadNamed(blob, `${activeSheetExportName.value || 'export'}.${extension}`)
 }
 
 // Download a blob under an exact filename (the server's Content-Disposition for the route path).
@@ -3679,8 +3714,10 @@ async function doExportXlsx(fields: GridExportField[], rowList: GridExportRow[])
         return String(v)
       }),
     )
-    const sheetName = (workbench.activeSheetId.value || 'export').slice(0, 31)
-    const buffer = buildXlsxBuffer(xlsxModule, { sheetName, headers, rows })
+    // Sheet display name for the xlsx tab (G-10 follow-up, same ruling as the filename above).
+    // buildXlsxBuffer's safeXlsxSheetName owns ALL SheetJS tab-name rules (forbidden chars,
+    // 31-char cap, edge apostrophes, reserved 'History') — a hostile display name can't throw.
+    const buffer = buildXlsxBuffer(xlsxModule, { sheetName: activeSheetExportName.value || 'export', headers, rows })
     triggerDownload(new Blob([buffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }), 'xlsx')
   } catch (err: any) {
     showError(err?.message ?? wb('toast.excelExportFailed', isZh.value))
@@ -3709,6 +3746,15 @@ function onGlobalKeydown(e: KeyboardEvent) {
   if (mod && e.key === 'z' && !e.shiftKey) { e.preventDefault(); grid.undo() }
   else if (mod && (e.key === 'y' || (e.key === 'z' && e.shiftKey))) { e.preventDefault(); grid.redo() }
   else if (e.key === '?' && !(e.target as HTMLElement)?.closest('input, textarea, select')) { showShortcuts.value = !showShortcuts.value }
+  // UI-P2-2c: Escape closes the narrow-width drawer — scoped to events that originate FROM WITHIN the
+  // rail (the toggle button, a tree node, the base picker) so it never steals Escape from an unrelated
+  // in-progress interaction elsewhere in the workbench (e.g. a cell editor) that isn't inside the rail
+  // and may rely on its own Escape semantics. No focus trap / no scrim in this slice (documented gap,
+  // design MD §5) — this is a non-modal overlay, so background content stays reachable throughout.
+  else if (e.key === 'Escape' && isRailDrawerOpen.value && (e.target as HTMLElement)?.closest('.mt-workbench__rail')) {
+    railCollapsed.value = true
+    void nextTick(() => railToggleRef.value?.focus())
+  }
 }
 
 // --- Record deep-link (read recordId from URL hash) ---
@@ -3838,10 +3884,10 @@ async function onBulkEditApply(payload: { mode: 'set' | 'clear'; fieldId: string
     const updatedCount = result.updated.length
     const requestedCount = payload.recordIds.length
     if (result.failed.length > 0) {
-      const sampleFailures = result.failed
-        .slice(0, 3)
-        .map((failure) => `${failure.recordId}: ${failure.reason}`)
-        .join('; ')
+      // G-10 follow-up (owner ruling 2026-07-15): normal-user surface — each sampled failure leads
+      // with the record's display name (bulkFillRecordName over the already-loaded rows; its own
+      // fallback keeps the raw id only when the row is no longer loaded). Zero new fetches.
+      const sampleFailures = fmtBulkFailureSamples(result.failed, bulkFillRecordName)
       bulkEditDialog.error = fmtBulkFailure(result.failed.length, requestedCount, sampleFailures, isZh.value)
       if (updatedCount > 0) {
         bulkEditDialog.resultMessage = fmtBulkPartialSuccess(updatedCount, requestedCount, payload.mode, isZh.value)
@@ -4245,6 +4291,11 @@ watch(
 
 onMounted(async () => {
   window.addEventListener('beforeunload', onBeforeUnload)
+  syncRailViewportState() // UI-P2-2c: establish narrow/wide state at mount. Runs in onMounted (AFTER the
+  // first paint), so a narrow viewport may show the expanded rail for one frame before auto-collapse;
+  // desktop is unaffected (the wide branch never writes state). Pre-paint sync would need SSR/layout-
+  // effect machinery not used in this app — accepted as a known cosmetic limit (P2-2c gate NIT-2).
+  window.addEventListener('resize', syncRailViewportState)
   void auth.getCurrentUserId().then((userId) => {
     currentUserId.value = userId
   }).catch(() => undefined)
@@ -4294,6 +4345,7 @@ onMounted(async () => {
 
 onBeforeUnmount(() => {
   window.removeEventListener('beforeunload', onBeforeUnload)
+  window.removeEventListener('resize', syncRailViewportState)
   stopDialogMetaRefresh()
   unsubscribeMentionRealtime?.()
   // Cancel a pending column-width persist so a late write can't fire after teardown.
@@ -4338,7 +4390,9 @@ defineExpose({
 
 <style scoped>
 .mt-workbench { display: flex; flex-direction: column; height: 100%; background: #fff; }
-.mt-workbench__content { display: flex; flex: 1; min-height: 0; }
+/* position:relative establishes the positioning context .mt-workbench__rail--drawer (UI-P2-2c) anchors
+   against — inert for every other child, which all stay in normal flow. */
+.mt-workbench__content { display: flex; flex: 1; min-height: 0; position: relative; }
 .mt-workbench__main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
 .mt-workbench__conflict {
   margin: 8px 16px 0;
@@ -4436,6 +4490,22 @@ defineExpose({
   overflow: hidden;
 }
 .mt-workbench__rail--collapsed { width: 36px; }
+/* UI-P2-2c (design docs/development/multitable-ui-p2-2c-responsive-design-20260714.md §3): narrow
+   viewport (<= RAIL_NARROW_BREAKPOINT, JS-only threshold — see script) + user-expanded rail = a floating
+   overlay instead of an in-flow flex column, so it no longer steals width from .mt-workbench__main.
+   Taking the rail out of flow (position:absolute) is what frees that width — no change to __main itself.
+   `--ms-shadow-pop` + an opaque `--ms-bg-card` background are both existing UF tokens (no new hex).
+   width uses the same min(px, calc(100vw - Npx)) idiom as this file's other overlay surfaces (e.g.
+   .mt-workbench__shortcuts) so it never overflows a very narrow viewport. */
+.mt-workbench__rail--drawer {
+  position: absolute;
+  inset: 0 auto 0 0;
+  z-index: 5;
+  width: min(240px, calc(100vw - 32px));
+  background: var(--ms-bg-card);
+  box-shadow: var(--ms-shadow-pop);
+  border-radius: 0 var(--ms-radius-lg) var(--ms-radius-lg) 0;
+}
 .mt-workbench__rail-head { display: flex; align-items: center; justify-content: space-between; }
 .mt-workbench__rail-toggle {
   flex-shrink: 0;

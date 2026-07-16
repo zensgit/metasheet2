@@ -162,6 +162,7 @@ import { viewsRouter } from './routes/views'
 import { initAdminRoutes } from './routes/admin-routes'
 import { adminUsersRouter } from './routes/admin-users'
 import { adminDirectoryRouter } from './routes/admin-directory'
+import { adminDirectoryLocalRouter } from './routes/admin-directory-local'
 import { startDirectorySyncScheduler, stopDirectorySyncScheduler } from './directory/directory-sync-scheduler'
 import { canaryRoutes } from './routes/canary-routes'
 import { CanaryRouter } from './canary/CanaryRouter'
@@ -1255,6 +1256,9 @@ export class MetaSheetServer {
     }))
     this.app.use(adminUsersRouter())
     this.app.use('/api/admin/directory', adminDirectoryRouter())
+    // Canonical Org MVP B2 (local departments/accounts/memberships CRUD) — mounted alongside
+    // adminDirectoryRouter under the same base path, sharing its `ensurePlatformAdmin` RBAC gate.
+    this.app.use('/api/admin/directory/local', adminDirectoryLocalRouter())
 
     // Canary routing (behind ENABLE_CANARY_ROUTING feature flag)
     const canaryEnabled = process.env.ENABLE_CANARY_ROUTING === 'true'

@@ -91,8 +91,8 @@ describe('MetaBasePicker', () => {
     root.querySelector<HTMLElement>('.meta-base-picker__current')?.click()
     await flushUi()
 
-    expect(root.querySelector<HTMLInputElement>('.meta-base-picker__search-input')?.getAttribute('placeholder')).toBe('搜索多维表...')
-    expect(root.querySelector<HTMLInputElement>('.meta-base-picker__create-input')?.getAttribute('placeholder')).toBe('新多维表名称...')
+    expect(root.querySelector<HTMLInputElement>('.meta-base-picker__search-input')?.getAttribute('placeholder')).toBe('搜索工作区...')
+    expect(root.querySelector<HTMLInputElement>('.meta-base-picker__create-input')?.getAttribute('placeholder')).toBe('新工作区名称...')
     expect(root.textContent).toContain('Sales Base')
     expect(root.textContent).toContain('Ops Base')
     expect(root.textContent).toContain('收藏')
@@ -110,7 +110,7 @@ describe('MetaBasePicker', () => {
     })
     await flushUi()
 
-    expect(root.querySelector('.meta-base-picker__name')?.textContent).toBe('选择多维表')
+    expect(root.querySelector('.meta-base-picker__name')?.textContent).toBe('选择工作区')
 
     root.querySelector<HTMLElement>('.meta-base-picker__current')?.click()
     await flushUi()
@@ -121,7 +121,7 @@ describe('MetaBasePicker', () => {
     search!.dispatchEvent(new Event('input', { bubbles: true }))
     await flushUi()
 
-    expect(root.textContent).toContain('未找到多维表')
+    expect(root.textContent).toContain('未找到工作区')
     expect(root.textContent).not.toContain('No bases found')
   })
 })

@@ -7,6 +7,7 @@ import {
   buildXlsxBuffer,
   mapXlsxColumnsToFields,
   parseXlsxBuffer,
+  safeXlsxSheetName,
 } from '../../src/multitable/import/xlsx-mapping'
 
 const xlsxModule = XLSX as unknown as Parameters<typeof parseXlsxBuffer>[0]
@@ -137,6 +138,57 @@ describe('xlsx-mapping helpers', () => {
       })
       const parsed = parseXlsxBuffer(xlsxModule, buffer)
       expect(parsed.sheetName.length).toBeLessThanOrEqual(31)
+    })
+
+    // G-10 follow-up hardening: exports now name the tab after the sheet's user-authored DISPLAY
+    // name, and SheetJS's check_ws_name (real module, no mocks here) THROWS on the reserved name
+    // 'History' (case-insensitive), on leading/trailing apostrophes, and on []:*?/\ chars. These
+    // goldens drive the REAL write path end-to-end: build must not throw and the tab must be valid.
+    it.each([
+      ['History', 'History_'],
+      ['history', 'history_'],
+      ['HISTORY', 'HISTORY_'],
+      ["'Plan", 'Plan'],
+      ["Plan'", 'Plan'],
+      ["'History'", 'History_'], // edge-apostrophe strip must happen BEFORE the reserved check
+      ['Q1/Q2: [draft]?*', 'Q1 Q2   draft'],
+      ["''", 'Sheet1'], // nothing left after stripping ⇒ default
+    ])('writes a real workbook for hostile sheet name %j (tab %j)', (hostile, expectedTab) => {
+      const buffer = buildXlsxBuffer(xlsxModule, {
+        sheetName: hostile,
+        headers: ['x'],
+        rows: [['1']],
+      })
+      const parsed = parseXlsxBuffer(xlsxModule, buffer)
+      expect(parsed.sheetName).toBe(expectedTab)
+      expect(parsed.rows).toEqual([['1']])
+    })
+
+    it('keeps interior apostrophes and ordinary names untouched', () => {
+      const buffer = buildXlsxBuffer(xlsxModule, {
+        sheetName: "Bob's Orders",
+        headers: ['x'],
+        rows: [['1']],
+      })
+      expect(parseXlsxBuffer(xlsxModule, buffer).sheetName).toBe("Bob's Orders")
+    })
+  })
+
+  describe('safeXlsxSheetName', () => {
+    it('applies rules in order: chars → trim → cap → edge apostrophes → reserved → default', () => {
+      expect(safeXlsxSheetName('Orders')).toBe('Orders')
+      expect(safeXlsxSheetName(undefined)).toBe('Sheet1')
+      expect(safeXlsxSheetName('   ')).toBe('Sheet1')
+      expect(safeXlsxSheetName('History')).toBe('History_')
+      expect(safeXlsxSheetName('hIsToRy')).toBe('hIsToRy_')
+      expect(safeXlsxSheetName("'Plan'")).toBe('Plan')
+      expect(safeXlsxSheetName("' History '")).toBe('History_')
+      expect(safeXlsxSheetName('a/b\\c[d]e:f*g?h')).toBe('a b c d e f g h')
+      // The cap applies before the apostrophe strip, so a cut exposing an edge apostrophe is
+      // still stripped; the result stays within 31 chars.
+      const cut = safeXlsxSheetName(`${'a'.repeat(30)}'x`)
+      expect(cut).toBe('a'.repeat(30))
+      expect(cut.length).toBeLessThanOrEqual(31)
     })
   })
 

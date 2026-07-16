@@ -76,6 +76,35 @@ export default defineConfig({
       // no-DB job cannot skip-green it, and wired as a WHOLE FILE into the directory real-DB
       // step in plugin-tests.yml.
       'tests/integration/directory-sync-schedule-timezone.db.test.ts',
+      // Canonical Org MVP B1 (#4215 §5.1) local-provider bootstrap (real DB): proves
+      // getOrCreateLocalIntegration's concurrency-safe get-or-create, the
+      // one_active_local_integration_per_org partial index (both halves: caps active rows,
+      // permits inactive history), the creation audit event, and provider-scoped coexistence
+      // with a dingtalk integration. DATABASE_URL-gated; excluded here so the no-DB job cannot
+      // skip-green it, and wired as a WHOLE FILE into the directory real-DB step in
+      // plugin-tests.yml.
+      'tests/integration/directory-local-provider-bootstrap.db.test.ts',
+      // Canonical Org MVP B1 owner round P2-2 (#4215 §5.1): proves, against the scheduler's REAL
+      // startup-scan path (not a mock), that a `provider='local'` row forced to every
+      // schedule-eligible condition is never registered as a cron job, with an identically
+      // configured dingtalk row as a positive control. DATABASE_URL-gated; excluded here so the
+      // no-DB job cannot skip-green it, and wired as a WHOLE FILE into the directory real-DB
+      // step in plugin-tests.yml.
+      'tests/integration/directory-local-provider-scheduler-exclusion.db.test.ts',
+      // Canonical Org MVP B2 (local departments/accounts/memberships CRUD), design lock §5.2-5.4,
+      // service layer (real DB): department create/rename/archive-keeps-history, account
+      // create+link+deactivate (with a positive control proving the local account never touches
+      // user_external_identities), membership add idempotency, and the explicit primary-department
+      // switch (old primary demoted, exactly one is_primary per account). DATABASE_URL-gated;
+      // excluded here so the no-DB job cannot skip-green it, and wired as a WHOLE FILE into the
+      // directory real-DB step in plugin-tests.yml.
+      'tests/integration/local-directory-org-crud.db.test.ts',
+      // Canonical Org MVP B2, HTTP route layer (real DB): platform-admin gating, per-mutation
+      // audit rows, and the owner hard requirement — an org_id/corp_id (snake_case AND camelCase)
+      // smuggled into a B2 request body is REJECTED (400), never silently dropped. DATABASE_URL-
+      // gated; excluded here so the no-DB job cannot skip-green it, and wired as a WHOLE FILE into
+      // the directory real-DB step in plugin-tests.yml.
+      'tests/integration/local-directory-org-crud-route.db.test.ts',
       // Layer-2 hidden person/button masking (real DB): proves the cross-cutting visibility-key fix actually
       // masks the VALUE end-to-end, with non-vacuous controls. DATABASE_URL-gated; excluded here so the no-DB
       // job cannot skip-green it, and wired as a WHOLE FILE into the multitable real-DB step in
@@ -277,6 +306,14 @@ export default defineConfig({
       // C6/G8 tombstone-table retention sweep (bounded batch, keep-days floor at
       // META_REVISION_RETENTION_MIN_DAYS, disabled-by-default zero rows touched).
       'tests/integration/multitable-tombstone-retention-realdb.test.ts',
+      // P2 durable-delivery S1 (#4203 Layer 1 / #4239): additive outbox-schema + flag golden — real Postgres
+      // only (checks the migration landed both tables, the status CHECK, FK cascade, defaults). Excluded HERE
+      // so it cannot skip-green in the no-DB lane, whole-file wired into plugin-tests.yml. Two-point wiring.
+      'tests/integration/multitable-automation-outbox-schema-realdb.test.ts',
+      // P2 durable-delivery S2-a claim engine / fence-CAS — real-DB constructed-concurrency (zombie/SKIP
+      // LOCKED). Excluded HERE so it cannot skip-green in the no-DB lane; whole-file wired into
+      // plugin-tests.yml. Two-point wiring.
+      'tests/integration/multitable-automation-dispatcher-claim-realdb.test.ts',
       // W0 tail (#4279, owner MUST-WRITE OD-6, design-lock §0.5 2026-07-13): field-undelete rehydration
       // revision goldens — proves `recreateFieldFromConfig`'s tombstone-value rehydration UPDATE bumps
       // `version` and emits a `recordRecordRevision` AT THE NEW version, same transaction, for every
@@ -302,6 +339,13 @@ export default defineConfig({
       // whole-file wired into `Run multitable real-DB integration` in plugin-tests.yml.
       'tests/integration/multitable-undelete-inbound-resurrect-realdb.test.ts',
       'tests/integration/multitable-reset-pit-inbound-capture-realdb.test.ts',
+      // T8-2 Reset-to-T goldens (flag-off/on, PIT-2 all-or-nothing, delete-set divergence including the
+      // docket #46 capture-complete deleteScopeHash-mismatch golden, single-txn atomicity, D2 gate): real
+      // Postgres only. Was ALREADY whole-file wired into `Run multitable real-DB integration` in
+      // plugin-tests.yml but MISSING from this list (same pre-existing-gap class the 4c-2 tombstone
+      // cluster comment above documents) — so the no-DB job silently COLLECTED and skip-greened it.
+      // Two-point wiring: BOTH points or the no-DB lane reports it green-with-zero-assertions.
+      'tests/integration/multitable-reset-pit-realdb.test.ts',
       // W6 full-HTTP-path approve->resume seam: mounts authRouter + approvalsRouter on an
       // ephemeral port against real Postgres, so it is excluded from the default run and wired
       // into the dedicated `Run multitable real-DB integration` job in plugin-tests.yml.

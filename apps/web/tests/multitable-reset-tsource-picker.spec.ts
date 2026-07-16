@@ -184,7 +184,7 @@ describe('ResetToPointPicker — T8-2 Reset UI T-source', () => {
     useLocale().setLocale('zh-CN')
     mount(); await nextTick()
     await waitUntil(() => (q('[data-test="reset-picker-history-select"]') as HTMLSelectElement | null)?.options.length === 3)
-    expect(q('.reset-picker__heading')?.textContent).toBe('将此表重置到某个全局历史点')
+    expect(q('.reset-picker__heading')?.textContent).toBe('将此数据表重置到某个全局历史点')
     expect(q('[data-test="reset-picker-history"] .reset-picker__label > span')?.textContent).toBe('历史点')
     expect((q('[data-test="reset-picker-history-select"]') as HTMLSelectElement).options[0].textContent).toBe('选择一个最近的历史批次')
     // history option zh: record count uses the measure-word form; the wire `action` value and actor 'Ada'

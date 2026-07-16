@@ -123,6 +123,19 @@ jobs:
       - name: Global History flag manifest contract (R12-C)
         run: node --test scripts/ops/global-history-flag-manifest.test.mjs scripts/ops/multitable-global-history-flag-status.test.mjs
 
+      # #4210 T9: the stock-preparation one-click acceptance script's contract + behavioural tests (49
+      # checks = 17 contract + 32 behavioural) are pure pwsh 7 + tar + node (no DB, no live server — the
+      # pm2/health/smoke stages are unit-tested via dot-sourced pure helpers). Run inside the REQUIRED
+      # `test` gate, but only ONCE (on 20.x — no need across the 18/20 matrix), early (no pnpm install
+      # needed: pwsh/tar ship on ubuntu, node is already set up) so a regression fails the required check
+      # fast. This is the only CI that executes these checks.
+      - name: Run stock-preparation on-prem acceptance tests (T9, pwsh)
+        if: matrix.node-version == '20.x'
+        shell: pwsh
+        run: |
+          ./scripts/ops/__tests__/stock-preparation-onprem-acceptance.tests.ps1
+          ./scripts/ops/__tests__/stock-preparation-onprem-acceptance.behavior.tests.ps1
+
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
         with:
@@ -494,6 +507,8 @@ jobs:
             tests/integration/multitable-tombstone-field-rehydrate-revision-realdb.test.ts \
             tests/integration/multitable-tombstone-record-capture-realdb.test.ts \
             tests/integration/multitable-tombstone-retention-realdb.test.ts \
+            tests/integration/multitable-automation-outbox-schema-realdb.test.ts \
+            tests/integration/multitable-automation-dispatcher-claim-realdb.test.ts \
             tests/integration/multitable-attachment-readgate.security.test.ts \
             tests/integration/multitable-ai-write-provenance-batch-grouping-realdb.test.ts \
             tests/integration/multitable-automation-branch-local-wait.test.ts \
@@ -551,6 +566,10 @@ jobs:
             tests/integration/directory-tenant-change-immutable.db.test.ts \
             tests/integration/directory-sync-orchestration.db.test.ts \
             tests/integration/directory-sync-schedule-timezone.db.test.ts \
+            tests/integration/directory-local-provider-bootstrap.db.test.ts \
+            tests/integration/directory-local-provider-scheduler-exclusion.db.test.ts \
+            tests/integration/local-directory-org-crud.db.test.ts \
+            tests/integration/local-directory-org-crud-route.db.test.ts \
             tests/integration/attendance-csv-export-bom.test.ts \
             tests/integration/attendance-notification-redelivery.db.test.ts \
             tests/integration/attendance-notification-redelivery-route.db.test.ts \

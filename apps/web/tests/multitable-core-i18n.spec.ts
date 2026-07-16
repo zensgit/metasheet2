@@ -18,7 +18,7 @@ describe('meta-core-labels static keys', () => {
     expect(metaCoreLabel('presence.collaboratingNow', false)).toBe('Collaborating now')
     expect(metaCoreLabel('toolbar.fields', true)).toBe('字段')
     expect(metaCoreLabel('toolbar.fields', false)).toBe('Fields')
-    expect(metaCoreLabel('grid.aria', true)).toBe('数据表格')
+    expect(metaCoreLabel('grid.aria', true)).toBe('数据表')
     expect(metaCoreLabel('grid.aria', false)).toBe('Data grid')
     expect(metaCoreLabel('toolbar.aria', true)).toBe('表格工具栏')
     expect(metaCoreLabel('grid.errorLoadViewData', true)).toBe('加载视图数据失败')

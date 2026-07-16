@@ -182,12 +182,212 @@ test('staging-only contract: the remote script names only staging containers', (
   )
 })
 
-test('rehearsal pg_restore keeps --disable-triggers (load-bearing: partition-inherited row triggers fire during COPY without it — run 29340321213)', () => {
+test('rehearsal restore keeps the replica-role trigger suppression (load-bearing: partition-inherited row triggers fire during COPY without it — runs 29340321213/29347058494; --disable-triggers is inert in full restores)', () => {
   const remote = readFileSync(REMOTE_SH, 'utf8')
-  const restoreLines = remote.split('\n').filter((l) => l.includes('pg_restore') && l.includes('$REHEARSAL_DB'))
-  assert.ok(restoreLines.length >= 1, 'expected the rehearsal pg_restore invocation to exist')
-  for (const line of restoreLines) {
-    assert.ok(line.includes('--disable-triggers'),
-      `rehearsal pg_restore lost --disable-triggers: ${line.trim()}`)
+  const restoreIdx = remote.indexOf('pg_restore -j 2 -U')
+  assert.notEqual(restoreIdx, -1, 'expected the rehearsal pg_restore invocation to exist')
+  const setIdx = remote.indexOf("SET session_replication_role = 'replica'")
+  const resetIdx = remote.indexOf('RESET session_replication_role')
+  assert.notEqual(setIdx, -1, 'rehearsal lost the DB-level replica-role SET before restore')
+  assert.notEqual(resetIdx, -1, 'rehearsal lost the RESET after restore (rehearsal migrate must run under normal trigger semantics)')
+  assert.ok(setIdx < restoreIdx, 'replica-role SET must come BEFORE the pg_restore invocation')
+  assert.ok(restoreIdx < resetIdx, 'RESET must come AFTER the pg_restore invocation')
+})
+
+// --- action=residue-sweep (bundle §7 "Consolidated final residue sweep") --------------
+
+function extractResidueSweepAction() {
+  const remote = readFileSync(REMOTE_SH, 'utf8')
+  const startMarker = 'action_residue_sweep() {'
+  const start = remote.indexOf(startMarker)
+  assert.notEqual(start, -1, 'expected action_residue_sweep() to be defined in the remote script')
+  const end = remote.indexOf('\naction_status() {', start)
+  assert.notEqual(end, -1, 'expected action_status() to immediately follow action_residue_sweep() (used as the end marker)')
+  return remote.slice(start, end)
+}
+
+test('residue-sweep is wired into the remote-script dispatcher and the workflow action choices', () => {
+  const remote = readFileSync(REMOTE_SH, 'utf8')
+  assert.match(
+    remote,
+    /residue-sweep\)\s*action_residue_sweep\s*;;/,
+    'expected the case "$ACTION" dispatcher to route residue-sweep to action_residue_sweep',
+  )
+  const yaml = readFileSync(WORKFLOW, 'utf8')
+  assert.match(
+    yaml,
+    /options:\s*\[deploy,\s*smoke,\s*status,\s*migrate,\s*residue-sweep\]/,
+    'expected the workflow action input to list residue-sweep as a choice',
+  )
+  assert.match(yaml, /stamps:/, 'expected a `stamps` workflow_dispatch input for action=residue-sweep')
+})
+
+test('residue-sweep SQL covers all five bundle §7 stamp-prefix families and the three shared-deliveries source_type families (source-contract, mutation-provable: dropping any one literal below fails its own assertion)', () => {
+  const action = extractResidueSweepAction()
+
+  // bundle §5's mutually-exclusive stamp prefixes — every one of the five smokes must be
+  // represented by at least one literal prefix match in the sweep SQL (not just accepted as
+  // an unused input).
+  const stampPrefixFamilies = {
+    'ae4-smoke-': "'ae4-smoke-'",
+    'rd45-smoke-': "'rd45-smoke-'",
+    'otbank-v18-smoke-': "'otbank-v18-smoke-'",
+    'mp6-smoke-': "'mp6-smoke-'",
+    'hmr5-smoke-': "'hmr5-smoke-'",
   }
+  for (const [family, literal] of Object.entries(stampPrefixFamilies)) {
+    const count = action.split(literal).length - 1
+    assert.ok(count >= 1, `expected the residue-sweep SQL to reference the ${family} family prefix (${literal}) at least once, found ${count}`)
+  }
+
+  // bundle §5 "The shared deliveries table" — every source_type that writes
+  // attendance_notification_deliveries must be scoped explicitly (never source_type alone).
+  const sourceTypeFamilies = ["'attendance_result_edit'", "'attendance_report_digest'", "'manual_missed_punch_reminder'"]
+  for (const literal of sourceTypeFamilies) {
+    const count = action.split(literal).length - 1
+    assert.ok(count >= 1, `expected the residue-sweep SQL to scope a query by source_type = ${literal}, found ${count}`)
+  }
+})
+
+test('residue-sweep runs all 29 bundle §7 named checks (source-contract, mutation-provable: removing any name below fails)', () => {
+  const action = extractResidueSweepAction()
+  const expectedNames = [
+    'users', 'user_orgs', 'records', 'requests',
+    'ae4_deliveries', 'rd45_deliveries', 'stray_deliveries_to_smoke_users',
+    'settlements', 'cycles', 'lots', 'fixtures', 'leave_types', 'holidays', 'approval_instances',
+    'mp6_requests', 'mp6_records', 'mp6_events', 'mp6_approval_instances', 'mp6_users', 'mp6_user_orgs', 'mp6_deliveries',
+    'hmr5_deliveries', 'hmr5_stray_deliveries', 'hmr5_requests', 'hmr5_records', 'hmr5_scopes', 'hmr5_user_orgs', 'hmr5_user_roles', 'hmr5_users',
+  ]
+  assert.equal(expectedNames.length, 29, 'test fixture itself must list exactly 29 names (bundle §7)')
+  for (const name of expectedNames) {
+    const re = new RegExp(`residue_check\\s+"\\$pg_user"\\s+"\\$pg_db"\\s+${name}\\s`)
+    assert.match(action, re, `expected a residue_check call named "${name}"`)
+  }
+  const calls = action.match(/residue_check\s+"\$pg_user"\s+"\$pg_db"\s+\S+/g) || []
+  assert.equal(calls.length, 29, `expected exactly 29 residue_check invocations, found ${calls.length}`)
+})
+
+test('residue-sweep captured-id substitutions are documented at their call site (bundle §7 named these :otbank_approval_ids / :otbank_cycle_ids / :mp6_request_ids / :mp6_approval_ids / :rd45_smoke_org / :hmr5_org, which no helper archives to a file)', () => {
+  const action = extractResidueSweepAction()
+  for (const needle of ['SUBSTITUTION:', ':otbank_approval_ids', ':otbank_cycle_ids', ':mp6_request_ids', ':mp6_approval_ids', ':rd45_smoke_org', ':hmr5_org']) {
+    assert.ok(action.includes(needle), `expected the residue-sweep action to document the ${needle} substitution`)
+  }
+})
+
+test('residue-sweep fails closed on nonzero residue and emits the CONSOLIDATED_RESIDUE_SWEEP summary line', () => {
+  const action = extractResidueSweepAction()
+  assert.match(action, /result="FAIL"/, 'expected the sweep to set result=FAIL when any check is nonzero')
+  assert.match(
+    action,
+    /echo "CONSOLIDATED_RESIDUE_SWEEP result=\$\{result\} nonzero=\$\{nonzero_list\}"/,
+    'expected the exact CONSOLIDATED_RESIDUE_SWEEP result=<ok|FAIL> nonzero=<list> summary line',
+  )
+  assert.match(action, /fail "residue sweep found nonzero residue/, 'expected the job to fail (non-zero exit) when any check is nonzero')
+})
+
+test('residue-sweep validates the 5-field stamps shape and each stamp against its own STAMP_PATTERN before querying', () => {
+  const action = extractResidueSweepAction()
+  assert.match(action, /\^ae4-smoke-\[A-Za-z0-9-\]\+\$/)
+  assert.match(action, /\^rd45-smoke-\[A-Za-z0-9-\]\+\$/)
+  assert.match(action, /\^otbank-v18-smoke-\[A-Za-z0-9-\]\+\$/)
+  assert.match(action, /\^mp6-smoke-\[A-Za-z0-9-\]\+\$/)
+  assert.match(action, /\^hmr5-smoke-\[A-Za-z0-9-\]\+\$/)
+})
+
+// --- persistent runner override lifecycle (#3317; fixes containment run 29398270060) ------
+
+test('persistent override: lives under $HOME/.metasheet2/window-runner, NOT the per-run OUTPUT_DIR (a per-run path is deleted on cleanup, dangling each container docker-compose config_files label)', () => {
+  const remote = readFileSync(REMOTE_SH, 'utf8')
+  assert.match(remote, /RUNNER_PERSIST_DIR="\$\{HOME\}\/\.metasheet2\/window-runner"/, 'expected a persistent runner dir under $HOME/.metasheet2/window-runner')
+  assert.match(remote, /OVERRIDE_FILE="\$\{RUNNER_PERSIST_DIR\}\/docker-compose\.window-runner\.override\.yml"/, 'OVERRIDE_FILE must resolve under the persistent dir')
+  assert.doesNotMatch(remote, /OVERRIDE_FILE="\$\{OUTPUT_DIR\}/, 'OVERRIDE_FILE must NOT live under the per-run OUTPUT_DIR')
+})
+
+test('persistent override: written atomically — mktemp candidate + docker compose config validation + rename, never a truncating write straight onto the live file', () => {
+  const remote = readFileSync(REMOTE_SH, 'utf8')
+  assert.match(remote, /override_tmp="\$\(mktemp "\$\{RUNNER_PERSIST_DIR\}\/\.override\.XXXXXX"\)"/, 'expected a mktemp candidate override in the persist dir (X placeholder at the END — no trailing suffix)')
+  const validateIdx = remote.indexOf('docker compose -f "$STAGING_COMPOSE_FILE" -f "$override_tmp" config')
+  const mvIdx = remote.indexOf('mv -f "$override_tmp" "$OVERRIDE_FILE"')
+  assert.notEqual(validateIdx, -1, 'candidate override must be validated with docker compose config before replacing the live file')
+  // the validation MUST run in the same cwd as compose_staging() (cd "$STAGING_DIR"), or it
+  // resolves relative env_file/.env differently than the config `up -d` actually executes
+  assert.match(
+    remote.slice(Math.max(0, validateIdx - 40), validateIdx),
+    /\(cd "\$STAGING_DIR" &&\s*$/,
+    'candidate override validation must run inside (cd "$STAGING_DIR" && docker compose …), matching compose_staging()',
+  )
+  assert.notEqual(mvIdx, -1, 'candidate override must be atomically renamed into place')
+  assert.ok(validateIdx < mvIdx, 'validation must come BEFORE the atomic rename')
+  assert.doesNotMatch(remote, /\}\s*>\s*"\$OVERRIDE_FILE"\n/, 'the override body must be written to the temp candidate, not truncated directly onto the live override')
+})
+
+test('persistent override: set_window_env=none writes NO flag env — the ATTENDANCE_*_ENABLED echoes in the override BODY are gated behind the rd-window branch, so a none redeploy clears prior flags from the persisted file', () => {
+  const remote = readFileSync(REMOTE_SH, 'utf8')
+  // scope strictly to the override-write heredoc region (ATTENDANCE_SCHEDULER_ENABLED also
+  // appears earlier in the env-flags diagnostic block, which is not the override body)
+  const start = remote.indexOf('override_tmp="$(mktemp')
+  const end = remote.indexOf('> "$override_tmp"', start)
+  assert.ok(start !== -1 && end !== -1 && end > start, 'expected the override-write heredoc region')
+  const body = remote.slice(start, end)
+  const rdIdx = body.indexOf('if [[ "$SET_WINDOW_ENV" == "rd-window" ]]; then')
+  const fiIdx = body.indexOf('\n    fi', rdIdx)
+  const schedIdx = body.indexOf('ATTENDANCE_SCHEDULER_ENABLED')
+  const workerIdx = body.indexOf('ATTENDANCE_NOTIFICATION_DELIVERY_WORKER_ENABLED')
+  assert.notEqual(rdIdx, -1, 'expected the rd-window gate inside the override body')
+  assert.notEqual(fiIdx, -1, 'expected the rd-window gate to be closed with fi')
+  assert.ok(rdIdx < schedIdx && schedIdx < fiIdx, 'the scheduler flag echo must sit INSIDE the rd-window gate')
+  assert.ok(rdIdx < workerIdx && workerIdx < fiIdx, 'the worker flag echo must sit INSIDE the rd-window gate')
+})
+
+test('persistent override: the workflow cleanup rm -rf never targets the persistent runner dir, so the override (and the containers config_files label) survives OUTPUT_DIR removal', () => {
+  const workflow = readFileSync(WORKFLOW, 'utf8')
+  assert.match(workflow, /rm -rf \$\{remote_output_dir\} \$\{RUNNER_DIR\}/, 'expected the post-run cleanup rm to target only the per-run output + checkout dirs')
+  assert.doesNotMatch(workflow, /rm -rf[^\n]*\.metasheet2/, 'workflow cleanup must NEVER rm the persistent .metasheet2 runner override dir')
+})
+
+test('persistent override: POSITIVE CONTROL — the exact mktemp template REALLY randomizes on this platform (a mid-template X run like .XXXXXX.yml makes GNU mktemp error and BSD return the literal)', () => {
+  const remote = readFileSync(REMOTE_SH, 'utf8')
+  const m = remote.match(/mktemp "\$\{RUNNER_PERSIST_DIR\}(\/[^"]+)"/)
+  assert.ok(m, 'expected the mktemp candidate template to extract')
+  const dir = mkdtempSync(join(tmpdir(), 'winrunner-persist-'))
+  const template = `${dir}${m[1]}` // e.g. <dir>/.override.XXXXXX
+  const r1 = spawnSync('mktemp', [template], { encoding: 'utf8' })
+  const r2 = spawnSync('mktemp', [template], { encoding: 'utf8' })
+  assert.equal(r1.status, 0, `mktemp REJECTED the template (non-portable): ${r1.stderr || r1.error}`)
+  assert.equal(r2.status, 0, `mktemp REJECTED the template (non-portable): ${r2.stderr || r2.error}`)
+  const p1 = r1.stdout.trim(), p2 = r2.stdout.trim()
+  assert.notEqual(p1, template, 'mktemp returned the LITERAL template (no randomization) — X placeholder not honored (non-portable)')
+  assert.notEqual(p1, p2, 'two mktemp calls produced the SAME path — not randomized')
+  assert.ok(existsSync(p1) && existsSync(p2), 'mktemp did not actually create the candidate files')
+})
+
+test('persistent override re-normalization: force_recreate is an explicit deploy-only boolean that defaults off', () => {
+  const workflow = readFileSync(WORKFLOW, 'utf8')
+  assert.match(
+    workflow,
+    /force_recreate:\n\s+description:[^\n]+\n\s+required: false\n\s+type: boolean\n\s+default: false/,
+    'force_recreate must be a boolean workflow input and default to false',
+  )
+  assert.match(
+    workflow,
+    /if \[\[ "\$ACTION" != "deploy" && "\$FORCE_RECREATE" == "true" \]\]; then\n\s+echo "force_recreate=true is only allowed for action=deploy"/,
+    'workflow input validation must reject force_recreate on non-deploy actions',
+  )
+  assert.match(workflow, /export FORCE_RECREATE='\$\{FORCE_RECREATE\}'/, 'validated force_recreate must reach the remote script')
+})
+
+test('persistent override re-normalization: force mode adds --force-recreate while the service set stays exactly backend+web', () => {
+  const remote = readFileSync(REMOTE_SH, 'utf8')
+  const start = remote.indexOf('action_deploy() {')
+  const end = remote.indexOf('\naction_smoke() {', start)
+  assert.ok(start !== -1 && end > start, 'expected action_deploy() bounds')
+  const deploy = remote.slice(start, end)
+  assert.match(deploy, /local -a up_args=\(up -d --no-deps\)/, 'deploy must retain --no-deps')
+  assert.match(
+    deploy,
+    /if \[\[ "\$FORCE_RECREATE" == "true" \]\]; then\n\s+up_args\+=\(--force-recreate\)\n\s+fi/,
+    'force mode must add the load-bearing --force-recreate option',
+  )
+  assert.match(deploy, /up_args\+=\(backend web\)\n\s+compose_staging "\$\{up_args\[@\]\}"/, 'the only recreated services must be backend and web')
+  assert.doesNotMatch(deploy, /up_args\+=\([^\n]*(?:postgres|redis)/, 'postgres/redis must never enter the recreate service list')
 })

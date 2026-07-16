@@ -27,7 +27,17 @@ const CONSUMER_FILES = [
   'src/multitable/components/MetaTimelineView.vue',
   'src/multitable/components/MetaHierarchyView.vue',
   'src/multitable/components/MetaFormView.vue',
-  'src/multitable/components/MetaRecordDrawer.vue',
+  // W2 S3 (2026-07-15): MetaRecordDrawer.vue is now a deprecated thin compat shell — its ENTIRE
+  // template (including the header comment-toggle button's `--active`/`--idle` rule) moved to the
+  // new MetaRecordInspector.vue shell (OD-W2-7=b). Swapped in place of MetaRecordDrawer.vue so this
+  // lock keeps covering that rule at its new home instead of silently losing it off the guarded
+  // list — MetaRecordDrawer.vue's own <style> block is now empty (nothing left to scan).
+  'src/multitable/components/MetaRecordInspector.vue',
+  // W2 S1 (2026-07-15): MetaRecordFieldsPanel.vue was extracted from MetaRecordDrawer.vue's
+  // `details` tab body and took the per-field comment anchor's `--active`/`--idle` rule with it
+  // (scoped CSS must live with the template that renders it). Added here so this lock keeps
+  // covering that rule at its new home instead of silently losing it off the guarded list.
+  'src/multitable/components/MetaRecordFieldsPanel.vue',
   'src/multitable/components/MetaCommentActionChip.vue',
   'src/multitable/components/MetaCommentAffordance.vue',
 ] as const

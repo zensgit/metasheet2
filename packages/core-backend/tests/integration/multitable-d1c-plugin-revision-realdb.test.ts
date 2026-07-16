@@ -54,13 +54,25 @@
  * hand-rolled `query: txQuery` calling `patchRecord`/`createRecord` directly could never detect (it would
  * silently supply its own transaction and stay green regardless of production wiring).
  *
+ * ALSO IN THIS FILE — docket #51 (a W0 test follow-up, unrelated to slice ②'s A2/A5 sites but colocated
+ * here because it needs the SAME real plugin-SDK `createRecord` entry point): slices ②/③ argued
+ * STRUCTURALLY, but never PINNED, what the create-path revision snapshot does with an `autoNumber`
+ * field. `records.ts`'s `createRecord` calls `allocateAutoNumberValues` (`auto-number-service.ts`) and
+ * folds the result into the SAME `patch` object written to both `meta_records.data` and the revision
+ * `snapshot` (`records.ts:591,639` — `snapshot: patch`), so the golden below pins MATERIALIZED-and-
+ * matching, not absent — see the "AutoNumber snapshot pin" describe block near the end of this file for
+ * the reality pin and the §1.3 content-projection cross-check.
+ *
  * Runs only with DATABASE_URL (plugin-tests.yml multitable real-DB job).
  */
+import express, { type Express } from 'express'
+import request from 'supertest'
 import { afterAll, beforeAll, describe, expect, test } from 'vitest'
 
 import { poolManager } from '../../src/integration/db/connection-pool'
 import { MetaSheetServer } from '../../src/index'
 import { reconstructRecordsAtT } from '../../src/multitable/record-reconstructor'
+import { univerMetaRouter } from '../../src/routes/univer-meta'
 
 const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
 
@@ -73,6 +85,10 @@ const SHEET_LINK_TARGET = `sheet_d1c2_linktgt_${TS}`
 const SHEET_FAIL_CREATE = `sheet_d1c2_failcreate_${TS}`
 const SHEET_FAIL_PATCH = `sheet_d1c2_failpatch_${TS}`
 const SHEET_RACE = `sheet_d1c2_race_${TS}`
+// Docket #51 — dedicated sheet (NOT SHEET_MAIN): an autoNumber field on SHEET_MAIN would silently join
+// every create's `patch`/snapshot and break the exact-key assertions above (e.g. Site A2's
+// `expect(Object.keys(updateRev.snapshot ?? {})).toEqual([FLD_TITLE])`), so this pin gets its own sheet.
+const SHEET_AUTONUM = `sheet_d1c2_autonum_${TS}`
 
 const FLD_TITLE = `fld_d1c2_title_${TS}`
 const FLD_NOTES = `fld_d1c2_notes_${TS}`
@@ -82,8 +98,12 @@ const FLD_RACE_TITLE = `fld_d1c2_rtitle_${TS}`
 const FLD_LINK_TITLE = `fld_d1c2_ltitle_${TS}`
 const FLD_LINK = `fld_d1c2_link_${TS}`
 const FLD_LINK_TARGET_NAME = `fld_d1c2_tgtname_${TS}`
+const FLD_AUTONUM_TITLE = `fld_d1c2_antitle_${TS}`
+const FLD_AUTONUM_SERIAL = `fld_d1c2_anserial_${TS}`
+const ACTOR = `user_d1c2_${TS}` // docket #51 only — the express app's req.user for the revert-preview cross-check
 
 const q = (sql: string, params?: unknown[]) => poolManager.get().query(sql, params)
+let app: Express // docket #51 only — the other goldens in this file drive the plugin SDK directly, no HTTP
 
 /** The slice of the real core API this golden drives (index.ts builds it; we do not re-declare it). */
 type CoreApiShape = {
@@ -228,6 +248,7 @@ describeIfDatabase('D-1c slice ② — plugin-SDK createRecord/patchRecord write
     await makeSheet(SHEET_FAIL_CREATE, 'D1C2 Fail Create')
     await makeSheet(SHEET_FAIL_PATCH, 'D1C2 Fail Patch')
     await makeSheet(SHEET_RACE, 'D1C2 Race')
+    await makeSheet(SHEET_AUTONUM, 'D1C2 AutoNumber') // docket #51
 
     await makeField(FLD_TITLE, SHEET_MAIN, 'Title', 'string', {}, 1)
     await makeField(FLD_NOTES, SHEET_MAIN, 'Notes', 'string', {}, 2) // 2nd field on SHEET_MAIN — G4 merge-trap golden
@@ -237,6 +258,8 @@ describeIfDatabase('D-1c slice ② — plugin-SDK createRecord/patchRecord write
     await makeField(FLD_LINK_TARGET_NAME, SHEET_LINK_TARGET, 'Name', 'string')
     await makeField(FLD_LINK_TITLE, SHEET_LINK, 'Title', 'string')
     await makeField(FLD_LINK, SHEET_LINK, 'Linked', 'link', { foreignSheetId: SHEET_LINK_TARGET })
+    await makeField(FLD_AUTONUM_TITLE, SHEET_AUTONUM, 'Title', 'string', {}, 1) // docket #51
+    await makeField(FLD_AUTONUM_SERIAL, SHEET_AUTONUM, 'Serial', 'autoNumber', {}, 2) // docket #51 — default start=1
 
     // Seed one target record for the link-edge golden (not itself under test — plain SQL insert is fine,
     // this sheet is never scanned by any §0.6/revert/reset precheck in this file).
@@ -246,10 +269,22 @@ describeIfDatabase('D-1c slice ② — plugin-SDK createRecord/patchRecord write
       SHEET_LINK_TARGET,
       JSON.stringify({ [FLD_LINK_TARGET_NAME]: 'target' }),
     ])
+
+    // Docket #51 only: a minimal express app mounting the REAL univer-meta router, so the §1.3
+    // content-projection cross-check can hit the actual `revert-preview` HTTP route (not just the
+    // internal `precheckSheetHistoryIntegrity` function) — same auth-stub pattern as
+    // `multitable-reset-pit-realdb.test.ts` / `multitable-history-incomplete-precheck-realdb.test.ts`.
+    // 'multitable:share' → canManageSheetAccess, the D2 gate revert-preview's route enforces.
+    await q("INSERT INTO users (id, password_hash) VALUES ($1,'x') ON CONFLICT (id) DO NOTHING", [ACTOR])
+    app = express()
+    app.use(express.json())
+    app.use((req, _res, next) => { ;(req as any).user = { id: ACTOR, roles: ['member'], perms: ['multitable:read', 'multitable:write', 'multitable:share'] }; next() })
+    app.use('/api/multitable', univerMetaRouter())
   })
 
   afterAll(async () => {
-    for (const sheet of [SHEET_MAIN, SHEET_LINK, SHEET_LINK_TARGET, SHEET_FAIL_CREATE, SHEET_FAIL_PATCH, SHEET_RACE]) {
+    await q('DELETE FROM users WHERE id = $1', [ACTOR]).catch(() => {}) // docket #51
+    for (const sheet of [SHEET_MAIN, SHEET_LINK, SHEET_LINK_TARGET, SHEET_FAIL_CREATE, SHEET_FAIL_PATCH, SHEET_RACE, SHEET_AUTONUM]) {
       await q(
         'DELETE FROM meta_record_revisions WHERE record_id IN (SELECT id FROM meta_records WHERE sheet_id = $1)',
         [sheet],
@@ -547,5 +582,56 @@ describeIfDatabase('D-1c slice ② — plugin-SDK createRecord/patchRecord write
       // proxy), so there is no live row left to compare a "did it change" assertion against.
       expect(await recordRow(created.id)).toBeUndefined()
     }, 15000)
+  })
+
+  // ── Docket #51 — create-path auto-number snapshot pin ─────────────────────────────────────────────────
+  // Unrelated to sites A2/A5's REVISION-EMISSION fix above (this file's main subject) — a separate,
+  // previously-deferred NIT: slices ②/③ argued STRUCTURALLY, but never PINNED, what the create-path
+  // revision snapshot does with an autoNumber field's value. Picked THIS file (plugin creates) over the
+  // sibling `multitable-d1c-automation-revision-realdb.test.ts` (automation creates) because the plugin
+  // path's `createRecord` (`records.ts:583`) actually calls `allocateAutoNumberValues` before building
+  // its `patch` — the "cleaner", more informative fixture (a real MATERIALIZED value to pin); the
+  // automation path's `executeCreateRecord` (`automation-executor.ts:2497`) does a BARE INSERT of
+  // `config.data` with NO auto-number allocation call at all, so it would only pin an absent-field
+  // no-op, less useful as a drift trip-wire.
+  describe('AutoNumber snapshot pin (docket #51, real DB)', () => {
+    test('createRecord MATERIALIZES the auto-number value into BOTH meta_records.data AND the create revision snapshot (matching, not absent)', async () => {
+      const created = await sdk.createRecord({
+        sheetId: SHEET_AUTONUM,
+        data: { [FLD_AUTONUM_TITLE]: 'row-1' }, // autoNumber is server-readonly — never supplied by the caller
+      })
+      expect(created.version).toBe(1)
+
+      // THE REALITY PIN: allocateAutoNumberValues (auto-number-service.ts) runs BEFORE the INSERT and its
+      // result is folded into the SAME `patch` object written to meta_records.data (records.ts:591-603) —
+      // MATERIALIZED, not absent. This is the OPPOSITE shape from a formula/lookup field, which the
+      // sibling `multitable-history-incomplete-precheck-realdb.test.ts` G-HI-3 golden pins as
+      // materializing POST-commit and staying absent from the create revision (a stray write, not a
+      // fixture — that file's SHEET_F/AUTON record is raw-SQL-seeded to construct an adversarial state,
+      // never claiming to be what a real create produces).
+      expect(created.data[FLD_AUTONUM_SERIAL]).toBe(1)
+      const row = await recordRow(created.id)
+      expect(row?.data?.[FLD_AUTONUM_SERIAL]).toBe(1)
+
+      const revs = await revisionsOf(created.id)
+      expect(revs).toHaveLength(1)
+      expect(revs[0]!.action).toBe('create')
+      expect(revs[0]!.source).toBe('plugin')
+      // THE PIN: the emitted revision snapshot carries the SAME materialized value as meta_records.data —
+      // not absent, not a different value. `snapshot: patch` at records.ts:639 writes the identical
+      // object as the INSERT, so a fresh create can never independently drift the two.
+      expect(revs[0]!.snapshot?.[FLD_AUTONUM_SERIAL]).toBe(1)
+      expect(revs[0]!.snapshot?.[FLD_AUTONUM_SERIAL]).toBe(row?.data?.[FLD_AUTONUM_SERIAL])
+
+      // §1.3 content projection agrees: revert-preview must NOT content_mismatch-refuse this record even
+      // though the auto-number key sits in `data` — DERIVED_FIELD_TYPES (history-integrity-precheck.ts)
+      // excludes 'autoNumber' from the user-authored-field projection entirely (line 70:
+      // `Set(['formula', 'rollup', 'lookup', 'autoNumber'])`), so the projection's per-field loop
+      // (history-integrity-precheck.ts's `for (const fid of userFieldIds)`) never even inspects this key.
+      const asOf = await cutoffAfter(created.id, 1) // strictly after this create — nothing to revert to "now"
+      const pv = await request(app).post(`/api/multitable/sheets/${SHEET_AUTONUM}/revert-preview`).send({ asOf })
+      expect(pv.status).toBe(200) // NOT 409 content_mismatch — the exclusion holds even though the values match here
+      expect(pv.body?.data?.summary?.visibleRevertCount).toBe(0) // live == the T-state at `asOf` — nothing to revert
+    })
   })
 })

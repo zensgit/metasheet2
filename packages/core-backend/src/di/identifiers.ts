@@ -314,6 +314,24 @@ export interface CommentInboxItem extends CommentRecord {
     viewId?: string | null;
     /** The record ID for deep-link navigation. */
     recordId?: string | null;
+    /**
+     * G-10 (docket #68): display name of `baseId` (`meta_bases.name`), when the base row still
+     * resolves. Additive projection alongside the existing id — never a substitute for it. Null
+     * when the base was deleted/unresolvable, NOT when absent (record-level comments with no base
+     * still carry `baseId: null` and therefore `baseName: null` too).
+     */
+    baseName?: string | null;
+    /** G-10: display name of `sheetId` (`meta_sheets.name`), same null semantics as `baseName`. */
+    sheetName?: string | null;
+    /** G-10: display name of `viewId` (`meta_views.name`), same null semantics as `baseName`. */
+    viewName?: string | null;
+    /**
+     * G-10: display name of the commented field (`meta_fields.name`), when this is a field-level
+     * comment (`targetFieldId` set) AND the field still exists. Null for record-level comments and
+     * for a deleted field. `recordId` intentionally has NO analogous `recordName` — see
+     * `CommentService.getInbox` for why a record title is not synthesized here.
+     */
+    fieldName?: string | null;
 }
 
 /** Per-row comment presence summary used by the sheet grid indicator. */

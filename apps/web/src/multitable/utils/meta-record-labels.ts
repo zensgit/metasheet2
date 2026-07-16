@@ -38,6 +38,9 @@ export type MetaRecordLabelKey =
   | 'record.delete' | 'record.close'
   | 'record.tabsAria'
   | 'record.details' | 'record.history'
+  // --- W2 S5 (design-lock multitable-w2-unified-record-inspector-design-lock-20260714.md §2 附件面板
+  //     row, §7 S5): the 4th inspector tab label (G-10 term 附件). ---
+  | 'record.attachments'
   | 'record.historyLoading' | 'record.historyUnavailable' | 'record.historyEmpty'
   | 'record.historyActionCreated' | 'record.historyActionDeleted' | 'record.historyActionUpdated'
   // --- Layer 1 record-level restore (Slice 3) ---
@@ -140,6 +143,7 @@ const META_RECORD_LABELS: Record<MetaRecordLabelKey, { en: string; zh: string }>
   'record.tabsAria': { en: 'Record drawer sections', zh: '记录抽屉分区' },
   'record.details': { en: 'Details', zh: '详情' },
   'record.history': { en: 'History', zh: '历史' },
+  'record.attachments': { en: 'Attachments', zh: '附件' },
   'record.historyLoading': { en: 'Loading history...', zh: '正在加载历史...' },
   'record.historyUnavailable': { en: 'History unavailable for this record.', zh: '此记录的历史不可用。' },
   'record.historyEmpty': { en: 'No history yet.', zh: '暂无历史。' },
@@ -154,7 +158,7 @@ const META_RECORD_LABELS: Record<MetaRecordLabelKey, { en: string; zh: string }>
   'record.restorePreviewTitle': { en: 'Review restore', zh: '确认恢复' },
   'record.restorePreviewWillChange': { en: 'These fields will change:', zh: '以下字段将被修改：' },
   'record.restorePreviewNoChanges': { en: 'Nothing would change — the record already matches this version.', zh: '没有变化 — 记录已与该版本一致。' },
-  'record.restorePreviewConflict': { en: 'Cannot restore: the schema changed since this version (a field no longer exists). Restore is blocked to avoid a partial result.', zh: '无法恢复：该版本之后表结构已变化（某字段已不存在）。为避免部分恢复，已阻止。' },
+  'record.restorePreviewConflict': { en: 'Cannot restore: the schema changed since this version (a field no longer exists). Restore is blocked to avoid a partial result.', zh: '无法恢复：该版本之后数据表结构已变化（某字段已不存在）。为避免部分恢复，已阻止。' },
   'record.restorePreviewExecute': { en: 'Restore', zh: '恢复' },
   'record.restorePreviewCancel': { en: 'Cancel', zh: '取消' },
   'record.restorePreviewLoading': { en: 'Loading preview…', zh: '正在加载预览…' },
@@ -197,7 +201,7 @@ const META_RECORD_LABELS: Record<MetaRecordLabelKey, { en: string; zh: string }>
   'record.configHistoryEntityField': { en: 'Field', zh: '字段' },
   'record.configHistoryEntityView': { en: 'View', zh: '视图' },
   'record.configHistoryEntityPermission': { en: 'Permission', zh: '权限' },
-  'record.configHistoryEntitySheetConfig': { en: 'Sheet config', zh: '表配置' },
+  'record.configHistoryEntitySheetConfig': { en: 'Sheet config', zh: '数据表配置' },
   'record.configHistoryActionCreate': { en: 'Created', zh: '新建' },
   'record.configHistoryActionUpdate': { en: 'Updated', zh: '更新' },
   'record.configHistoryActionDelete': { en: 'Deleted', zh: '删除' },
@@ -249,7 +253,7 @@ const META_RECORD_LABELS: Record<MetaRecordLabelKey, { en: string; zh: string }>
   // T8-2 Reset UI T-source picker (ResetToPointPicker.vue, R5b strict-zero closeout — the component was born
   // after the i18n line closed and shipped all-English; flag (pitResetEnabled) is dormant by default so this
   // is a shape-only migration, no behavior change).
-  'record.resetPickerHeading': { en: 'Reset this sheet to a Global History point', zh: '将此表重置到某个全局历史点' },
+  'record.resetPickerHeading': { en: 'Reset this sheet to a Global History point', zh: '将此数据表重置到某个全局历史点' },
   'record.resetPickerHistoryLabel': { en: 'History point', zh: '历史点' },
   'record.resetPickerHistoryPlaceholder': { en: 'Select a recent history batch', zh: '选择一个最近的历史批次' },
   'record.resetPickerRefresh': { en: 'Refresh', zh: '刷新' },
@@ -269,15 +273,15 @@ const META_RECORD_LABELS: Record<MetaRecordLabelKey, { en: string; zh: string }>
   // T8-2 Reset UI confirm dialog (ResetConfirmDialog.vue, R5c strict-zero closeout — the final microslice of
   // this line; ResetToPointPicker/R5b was the other post-closure component, now landed). Static labels only;
   // the asOf/count-interpolated strings live in the helper functions below.
-  'record.resetConfirmDialogAria': { en: 'Reset sheet to a point in time', zh: '将表重置到某个时间点' },
+  'record.resetConfirmDialogAria': { en: 'Reset sheet to a point in time', zh: '将数据表重置到某个时间点' },
   'record.resetConfirmCancelAria': { en: 'Cancel', zh: '取消' },
   'record.resetConfirmLoading': { en: 'Loading preview…', zh: '正在加载预览…' },
   'record.resetConfirmViewInTrash': { en: 'View in Trash', zh: '在回收站中查看' },
   'record.resetConfirmErrorDisabled': { en: 'Reset is not enabled here.', zh: '此处未启用重置。' },
-  'record.resetConfirmErrorForbidden': { en: 'You do not have permission to reset this sheet.', zh: '你没有权限重置此表。' },
+  'record.resetConfirmErrorForbidden': { en: 'You do not have permission to reset this sheet.', zh: '你没有权限重置此数据表。' },
   'record.resetConfirmErrorBlocked': { en: 'A target record is locked or denied — nothing was changed.', zh: '某条目标记录被锁定或拒绝 — 未做任何更改。' },
-  'record.resetConfirmErrorStale': { en: 'The sheet changed since the preview — please re-preview and try again.', zh: '表在预览之后已发生变化 — 请重新预览后再试。' },
-  'record.resetConfirmErrorTooLarge': { en: 'This sheet has too many records for a one-shot reset.', zh: '此表记录过多，无法一次性重置。' },
+  'record.resetConfirmErrorStale': { en: 'The sheet changed since the preview — please re-preview and try again.', zh: '数据表在预览之后已发生变化 — 请重新预览后再试。' },
+  'record.resetConfirmErrorTooLarge': { en: 'This sheet has too many records for a one-shot reset.', zh: '此数据表记录过多，无法一次性重置。' },
   // The 400 (type-mismatch) response fires when the operator's typed confirm text didn't match the server's
   // expected literal. `reset` is the same server-authoritative token as the type-to-confirm input below — kept
   // untranslated in both locales.
@@ -395,7 +399,7 @@ export function resetConfirmEntryLabel(asOf: string, isZh: boolean): string {
 
 // resetConfirmTitle: the dialog header ("Reset sheet to <T>").
 export function resetConfirmTitle(asOf: string, isZh: boolean): string {
-  return isZh ? `将表重置到 ${asOf}` : `Reset sheet to ${asOf}`
+  return isZh ? `将数据表重置到 ${asOf}` : `Reset sheet to ${asOf}`
 }
 
 // resetConfirmResultSummary: the post-execute result line (deleted + reverted counts + asOf).

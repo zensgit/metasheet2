@@ -173,7 +173,7 @@ describe('ConditionalFormattingDialog i18n', () => {
     await flush()
 
     expect(container.textContent).toContain('暂无规则。添加规则后，可根据字段值为单元格或整行着色。')
-    expect(container.textContent).toContain('请先向 Sheet 添加字段，再创建格式规则。')
+    expect(container.textContent).toContain('请先向数据表添加字段，再创建格式规则。')
 
     app.unmount()
   })

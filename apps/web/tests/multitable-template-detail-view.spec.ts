@@ -198,7 +198,7 @@ describe('MultitableTemplateDetailView', () => {
     expect(result).not.toBeNull()
     expect(result?.textContent).toContain('可以安装')
     expect(result?.textContent).toContain('Project Tracker Base')
-    expect(result?.textContent).toContain('1 个 Sheet')
+    expect(result?.textContent).toContain('1 个数据表')
     expect(result?.textContent).toContain('3 个字段')
     expect(result?.textContent).toContain('2 个视图')
     expect(root.querySelector('[data-testid="template-detail-conflicts"]')).toBeNull()
@@ -216,7 +216,7 @@ describe('MultitableTemplateDetailView', () => {
     expect(root.textContent).toContain('检测到冲突')
     const conflictItems = Array.from(root.querySelectorAll('[data-testid="template-detail-conflicts"] li'))
     expect(conflictItems).toHaveLength(1)
-    expect(conflictItems[0].textContent).toContain('Sheet 已存在')
+    expect(conflictItems[0].textContent).toContain('数据表已存在')
     expect(conflictItems[0].textContent).toContain('Sheet already exists: sheet_abc')
     // Review 2026-06-11 F4: truthful copy — must NOT suggest changing the
     // base name (baseName never enters id derivation; no such input exists).
