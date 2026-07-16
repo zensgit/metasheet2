@@ -29,7 +29,9 @@ import { sql, type Kysely } from 'kysely'
  *     the sheet's own `meta_sheets.system_kind` at activation; a client/request can never set it (the
  *     activation function derives it server-side and never reads a caller value).
  *   - `pruned_at TIMESTAMPTZ` — retention tombstone; NULL = retained. Retention must never prune below the
- *     ACTIVE checkpoint's `trusted_since_seq` (the floor) — see `pruneRetainedCheckpoints`.
+ *     ANCHOR-COVERING checkpoint `max(trusted_since_seq <= oldestLegalAnchorSeq)` — the checkpoint the oldest
+ *     still-legal recovery anchor resolves to — NOT merely the active checkpoint (P1-c) — see
+ *     `pruneRetainedCheckpoints`.
  *
  * ── meta_history_baselines ────────────────────────────────────────────────────────────────────────────────
  * A SEPARATE table (design lock §3: "Checkpoint and baselines stay in separate tables; no synthetic history
@@ -38,12 +40,14 @@ import { sql, type Kysely } from 'kysely'
  * `trusted_since_seq < seq <= B`; the baseline stands in for everything at/below `trusted_since_seq`.
  *
  * ── meta_sheets.system_kind ───────────────────────────────────────────────────────────────────────────────
- * Design lock §3/§8: the present `isSystemSheet` predicate trusts a USER-WRITABLE People-sheet description
- * sentinel, which a client can spoof to exclude its own sheet from the contiguity model. `system_kind` is the
- * required server-owned hardening. This migration adds the column and BACKFILLS the currently-trusted signals
- * ONCE (a migration-time snapshot of the People-sheet description sentinel + the approval-projection base id);
- * going forward, provisioning sets it directly and the client sheet-create route never accepts it (see the
- * G-SYSTEM-KIND non-forgeable golden). The backfill values are the stable sentinels
+ * Design lock §3/§8 (P1-a): the previous `isSystemSheet` predicate trusted a USER-WRITABLE People-sheet
+ * description sentinel (and the base_id), which a client could spoof to exclude its own sheet from the
+ * contiguity/strict trust checks. `system_kind` is the required server-owned hardening and is now the ONLY
+ * trust signal — the description/base_id disjuncts have been REMOVED from `isSystemSheet`. This migration adds
+ * the column and BACKFILLS the currently-trusted signals ONCE (a migration-time snapshot of the People-sheet
+ * description sentinel + the approval-projection base id) so every pre-existing system sheet is covered; going
+ * forward, provisioning (People preset + approval `ensureFamilySheet`) sets it directly and the client
+ * sheet-create route never accepts it (see the G-SYSTEM-KIND non-forgeable golden). The backfill values are the stable sentinels
  * `SYSTEM_PEOPLE_SHEET_DESCRIPTION` (`multitable/system-sheet-predicate.ts`) and `APPROVAL_PROJECTION_BASE_ID`
  * (`multitable/approval-projection-constants.ts`) — duplicated here as literals because a migration must be a
  * frozen point-in-time snapshot, not a live import that could drift after it has run.

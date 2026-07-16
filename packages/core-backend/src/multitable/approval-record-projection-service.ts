@@ -56,6 +56,13 @@ import { APPROVAL_PROJECTION_BASE_ID } from './approval-projection-constants'
 /** Reserved owner/actor for the system-managed base + record rows (not a real user). */
 export const APPROVAL_PROJECTION_SYSTEM_OWNER = 'system:approval-projection'
 
+/** Pre-migration deploy-window guard (PG 42703): the `system_kind` column may not exist yet. */
+function isUndefinedColumnError(err: unknown, columnName: string): boolean {
+  const code = (err as { code?: string } | null)?.code
+  const message = err instanceof Error ? err.message : String(err)
+  return code === '42703' && message.includes(columnName)
+}
+
 /** Terminal approval outcomes projected to the neutral read-model (Q9). */
 const TERMINAL_STATUSES = new Set(['approved', 'rejected', 'revoked', 'cancelled'])
 
@@ -394,17 +401,37 @@ export class ApprovalRecordProjectionService {
     templateId: string,
     templateName: string | null,
   ): Promise<void> {
-    await client.query(
-      `INSERT INTO meta_sheets (id, base_id, name, description)
-       VALUES ($1, $2, $3, $4)
-       ON CONFLICT (id) DO NOTHING`,
-      [
-        sheetId,
-        APPROVAL_PROJECTION_BASE_ID,
-        `Approval · ${templateName ?? templateId}`,
-        'System-managed approval read-model projection (T3-6)',
-      ],
-    )
+    // W0-1 L5 P1-a: set the server-owned, non-forgeable `system_kind` at provisioning time so the history
+    // trust predicate (`isSystemSheet`) still excludes this server-regenerated read-model AFTER the forgeable
+    // base_id/description trust signals were removed. `system_kind` is set only here (server-side) and by the
+    // People-preset + L5 backfill — never from a client request. Column-tolerant: a pre-migration deploy
+    // window (column absent) degrades to the legacy 4-column insert, and the L5 backfill covers it by base_id.
+    try {
+      await client.query(
+        `INSERT INTO meta_sheets (id, base_id, name, description, system_kind)
+         VALUES ($1, $2, $3, $4, 'approval_projection')
+         ON CONFLICT (id) DO NOTHING`,
+        [
+          sheetId,
+          APPROVAL_PROJECTION_BASE_ID,
+          `Approval · ${templateName ?? templateId}`,
+          'System-managed approval read-model projection (T3-6)',
+        ],
+      )
+    } catch (err) {
+      if (!isUndefinedColumnError(err, 'system_kind')) throw err
+      await client.query(
+        `INSERT INTO meta_sheets (id, base_id, name, description)
+         VALUES ($1, $2, $3, $4)
+         ON CONFLICT (id) DO NOTHING`,
+        [
+          sheetId,
+          APPROVAL_PROJECTION_BASE_ID,
+          `Approval · ${templateName ?? templateId}`,
+          'System-managed approval read-model projection (T3-6)',
+        ],
+      )
+    }
     for (let order = 0; order < PROJECTION_COLUMNS.length; order += 1) {
       const column = PROJECTION_COLUMNS[order]
       await client.query(

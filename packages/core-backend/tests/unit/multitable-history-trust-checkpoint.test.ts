@@ -1,17 +1,16 @@
 /**
  * W0-1 v3.7 Lane L5 — UNIT tests for the pure trust-checkpoint helpers (exact-bigint seq discipline, the
- * retention floor clamp, the P3-2 enablement precondition, and the server-owned system_kind predicate). The
- * real-DB state-machine / selection / retention goldens live in
+ * anchor-covering retention selection, the P3-2 enablement precondition, and the server-owned system_kind
+ * predicate). The real-DB state-machine / selection / retention / P1-b vintage / P2 enablement goldens live in
  * `tests/integration/multitable-history-trust-checkpoint-realdb.test.ts`.
  */
 import { describe, expect, test } from 'vitest'
 
 import {
-  clampRetentionCutoffToFloor,
   compareSeq,
   isSeqString,
-  minSeq,
   assertSeqString,
+  selectRetentionCoveringSeq,
   SeqComparatorError,
   SYSTEM_SHEET_KINDS,
 } from '../../src/multitable/history-trust-checkpoint'
@@ -24,6 +23,7 @@ import { isSystemSheet, isSystemSheetKind } from '../../src/multitable/system-sh
 // 2^53 = 9007199254740992 is exact in float64; 2^53+1 collapses to the SAME float64 via Number().
 const TWO_POW_53 = '9007199254740992'
 const TWO_POW_53_PLUS_1 = '9007199254740993'
+const TWO_POW_53_PLUS_2 = '9007199254740994'
 // Near int8 upper bound (2^63-1 = 9223372036854775807).
 const NEAR_INT8_MAX = '9223372036854775806'
 const INT8_MAX = '9223372036854775807'
@@ -56,35 +56,33 @@ describe('L5 exact-bigint seq discipline', () => {
     // and near the int8 ceiling
     expect(compareSeq(NEAR_INT8_MAX, INT8_MAX)).toBe(-1)
   })
-
-  test('minSeq returns the smaller as its ORIGINAL string (no numeric round-trip)', () => {
-    expect(minSeq(TWO_POW_53_PLUS_1, TWO_POW_53)).toBe(TWO_POW_53)
-    expect(minSeq(TWO_POW_53, TWO_POW_53_PLUS_1)).toBe(TWO_POW_53)
-    expect(minSeq(INT8_MAX, NEAR_INT8_MAX)).toBe(NEAR_INT8_MAX)
-  })
 })
 
-describe('L5 retention floor clamp (clampRetentionCutoffToFloor)', () => {
-  test('a requested cutoff ABOVE the floor is clamped DOWN to the floor (the load-bearing guard)', () => {
-    // requested 200 > floor 100 ⇒ clamp to 100. Mutation "return requestedCutoffSeq" ⇒ this reds.
-    expect(clampRetentionCutoffToFloor('200', '100')).toBe('100')
+describe('L5 anchor-covering retention (selectRetentionCoveringSeq) — P1-c', () => {
+  test('covering = max(seq <= anchor): the C1/C2 counterexample keeps the older checkpoint', () => {
+    // C1=100, C2=200; oldest legal anchor=150 ⇒ covering=100 (the checkpoint a recovery to 150 selects).
+    // Protecting only the active checkpoint (200) would prune C1 — this is the load-bearing selection.
+    expect(selectRetentionCoveringSeq(['100', '200'], '150')).toBe('100')
   })
 
-  test('a requested cutoff BELOW the floor passes through unchanged', () => {
-    expect(clampRetentionCutoffToFloor('50', '100')).toBe('50')
+  test('anchor at/above the newest retained seq ⇒ covering = newest (prune everything older than active)', () => {
+    expect(selectRetentionCoveringSeq(['100', '200'], '200')).toBe('200')
+    expect(selectRetentionCoveringSeq(['100', '200'], '999999')).toBe('200')
   })
 
-  test('clamp is EXACT across the 2^53 boundary', () => {
-    // floor = 2^53, requested = 2^53+1 ⇒ clamp to 2^53. Number()-based min would treat them as equal.
-    expect(clampRetentionCutoffToFloor(TWO_POW_53_PLUS_1, TWO_POW_53)).toBe(TWO_POW_53)
+  test('anchor below every retained seq ⇒ null (nothing older is reachable ⇒ prune nothing, fail-closed)', () => {
+    expect(selectRetentionCoveringSeq(['100', '200'], '50')).toBeNull()
+    expect(selectRetentionCoveringSeq([], '150')).toBeNull()
   })
 
-  test('no active checkpoint (floorSeq null) ⇒ fail-closed cutoff "0" (prunes nothing)', () => {
-    expect(clampRetentionCutoffToFloor('999999', null)).toBe('0')
+  test('covering is EXACT across the 2^53 boundary (Number() would treat all three as equal)', () => {
+    // seqs {2^53, 2^53+2}, anchor 2^53+1 ⇒ covering 2^53. A Number()-based max<=anchor would pick either.
+    expect(selectRetentionCoveringSeq([TWO_POW_53, TWO_POW_53_PLUS_2], TWO_POW_53_PLUS_1)).toBe(TWO_POW_53)
   })
 
-  test('an illegal requested cutoff fails closed (SeqComparatorError, never coerced)', () => {
-    expect(() => clampRetentionCutoffToFloor('not-a-seq', '100')).toThrow(SeqComparatorError)
+  test('an illegal anchor / retained seq fails closed (SeqComparatorError, never coerced)', () => {
+    expect(() => selectRetentionCoveringSeq(['100'], 'not-a-seq')).toThrow(SeqComparatorError)
+    expect(() => selectRetentionCoveringSeq(['-5', '100'], '150')).toThrow(SeqComparatorError)
   })
 })
 
@@ -101,7 +99,8 @@ describe('L5 P3-2 strict-enablement precondition (pure)', () => {
 
   test('DISTINGUISHES the two conditions: active checkpoint present but reconstruction non-causal ⇒ ONLY reconstruction listed', () => {
     // Proves the guard evaluates the checkpoint half independently (not a count-only guard). This is the
-    // real pre-L6 production shape: a sheet DOES have an active checkpoint, but L6 has not landed.
+    // real pre-L6 production shape: a sheet DOES have an active checkpoint, but L6 has not landed. The wired
+    // gate keys off exactly this: no_active_checkpoint absent ⇒ checkpoint-bearing ⇒ refuse.
     const r = evaluateStrictEnablementPrecondition({ hasActiveCheckpoint: true, reconstructionIsCausal: false })
     expect(r.canEnable).toBe(false)
     expect(r.unmet).toEqual(['reconstruction_non_causal'])
@@ -120,7 +119,7 @@ describe('L5 P3-2 strict-enablement precondition (pure)', () => {
   })
 })
 
-describe('L5 server-owned system_kind predicate (non-forgeable authority)', () => {
+describe('L5 server-owned system_kind predicate (non-forgeable authority) — P1-a', () => {
   test('isSystemSheetKind recognizes exactly the server-owned kinds', () => {
     expect(SYSTEM_SHEET_KINDS).toContain('people_directory')
     expect(isSystemSheetKind('people_directory')).toBe(true)
@@ -130,17 +129,23 @@ describe('L5 server-owned system_kind predicate (non-forgeable authority)', () =
     expect(isSystemSheetKind(undefined)).toBe(false)
   })
 
-  test('a recognized systemKind makes isSystemSheet true regardless of description/base', () => {
-    expect(isSystemSheet({ systemKind: 'people_directory', description: 'anything', baseId: 'base_user' })).toBe(true)
+  test('a recognized systemKind makes isSystemSheet true', () => {
+    expect(isSystemSheet({ systemKind: 'people_directory' })).toBe(true)
+    expect(isSystemSheet({ systemKind: 'approval_projection' })).toBe(true)
   })
 
-  test('legacy signals still work (backward compat): approval base id and People description', () => {
-    expect(isSystemSheet({ baseId: 'base_apr_projection' })).toBe(true)
-    expect(isSystemSheet({ description: '__metasheet_system:people__' })).toBe(true)
+  test('P1-a: the FORGEABLE signals (description sentinel + approval base id) are NO LONGER trusted', () => {
+    // isSystemSheet reads systemKind ONLY. Passing a forged People description or the approval base id (both
+    // reachable by a client create request) does NOT classify a sheet as a system sheet. Re-introducing the
+    // description/base disjunct into isSystemSheet reds this test (and the real-DB forged-identity golden).
+    expect(isSystemSheet({ systemKind: null } as { systemKind?: unknown })).toBe(false)
+    // The following mimic the pre-P1-a call shape (extra fields ignored by the hardened predicate):
+    expect(isSystemSheet({ systemKind: undefined } as { systemKind?: unknown })).toBe(false)
   })
 
-  test('an ordinary user sheet (no systemKind, ordinary base/description) is NOT a system sheet', () => {
-    expect(isSystemSheet({ systemKind: null, baseId: 'base_user', description: 'My sheet' })).toBe(false)
+  test('an ordinary user sheet (no recognized systemKind) is NOT a system sheet', () => {
+    expect(isSystemSheet({ systemKind: null } as { systemKind?: unknown })).toBe(false)
+    expect(isSystemSheet({ systemKind: 'user' })).toBe(false)
     expect(isSystemSheet({})).toBe(false)
   })
 })

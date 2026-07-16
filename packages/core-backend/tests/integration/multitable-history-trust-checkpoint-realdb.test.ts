@@ -21,7 +21,7 @@
  */
 import express, { type Express } from 'express'
 import request from 'supertest'
-import { afterAll, beforeAll, describe, expect, test } from 'vitest'
+import { afterAll, afterEach, beforeAll, describe, expect, test } from 'vitest'
 
 import { poolManager } from '../../src/integration/db/connection-pool'
 import { univerMetaRouter } from '../../src/routes/univer-meta'
@@ -34,6 +34,8 @@ import {
   pruneRetainedCheckpoints,
 } from '../../src/multitable/history-trust-checkpoint'
 import { checkStrictEnablementPrecondition } from '../../src/multitable/history-trust-precondition'
+import { precheckSheetHistoryIntegrity } from '../../src/multitable/history-integrity-precheck'
+import { SYSTEM_PEOPLE_SHEET_DESCRIPTION } from '../../src/multitable/system-sheet-predicate'
 
 const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
 const TS = Date.now()

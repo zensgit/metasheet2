@@ -50,11 +50,6 @@ export function compareSeq(a: string, b: string): -1 | 0 | 1 {
   return av < bv ? -1 : av > bv ? 1 : 0
 }
 
-/** Exact bigint minimum, returned as the original string (no numeric round-trip). */
-export function minSeq(a: string, b: string): string {
-  return compareSeq(a, b) <= 0 ? a : b
-}
-
 // ── types ───────────────────────────────────────────────────────────────────────────────────────────────
 
 export type CheckpointState = 'building' | 'active' | 'superseded'
@@ -171,9 +166,22 @@ export async function activateCheckpoint(tx: QueryFn, input: { sheetId: string }
      SELECT $1, sheet_id, id, data, version, false FROM meta_records WHERE sheet_id = $2`,
     [checkpointId, sheetId],
   )
+  // P1-b: a record that went through several delete/restore cycles has MULTIPLE trash rows. The old
+  // "insert all + ON CONFLICT DO NOTHING" froze an ARBITRARY (physical-order) vintage — a stale snapshot.
+  // Select the LATEST vintage DETERMINISTICALLY by the causal `seq` of the delete revision that produced each
+  // trash row (`meta_records_trash.delete_revision_id → meta_record_revisions.seq`, exact SQL bigint ORDER BY
+  // — never Number()). `DISTINCT ON (record_id) … ORDER BY record_id, r.seq DESC` keeps only the newest-delete
+  // row per record. The JOIN is INNER, so a trash row whose vintage CANNOT be causally attributed (no
+  // `delete_revision_id`, or the delete revision was retention-swept) is EXCLUDED — fail-closed, never
+  // silently frozen (design lock §3). ON CONFLICT still yields to the live row captured above.
   await tx(
     `INSERT INTO meta_history_baselines (checkpoint_id, sheet_id, record_id, data, version, is_trashed)
-     SELECT $1, sheet_id, record_id, data, original_version, true FROM meta_records_trash WHERE sheet_id = $2
+     SELECT DISTINCT ON (t.record_id) $1, t.sheet_id, t.record_id, t.data, t.original_version, true
+     FROM meta_records_trash t
+     JOIN meta_record_revisions r
+       ON r.id = t.delete_revision_id AND r.sheet_id = t.sheet_id AND r.record_id = t.record_id AND r.action = 'delete'
+     WHERE t.sheet_id = $2
+     ORDER BY t.record_id, r.seq DESC, t.deleted_at DESC, t.id DESC
      ON CONFLICT (checkpoint_id, record_id) DO NOTHING`,
     [checkpointId, sheetId],
   )
@@ -247,12 +255,13 @@ export async function selectCheckpointByT(
   return row ? mapCheckpointRow(row) : null
 }
 
-// ── retention (floor-clamped) ───────────────────────────────────────────────────────────────────────────
+// ── retention (anchor-covering) ─────────────────────────────────────────────────────────────────────────
 
 /**
- * The retention floor for a sheet = the ACTIVE checkpoint's `trusted_since_seq`. Retention must never prune
- * below it (dropping the active checkpoint or its baseline would leave nothing to reconstruct from). Returns
- * a decimal string, or `null` when there is no active checkpoint.
+ * The ACTIVE checkpoint's `trusted_since_seq` — observability/belt reference. NOTE (P1-c): this is NOT the
+ * retention protection boundary. Protecting only the active checkpoint drops a checkpoint that an older-but-
+ * still-legal recovery anchor requires (see `pruneRetainedCheckpoints`). Returns a decimal string, or `null`
+ * when there is no active checkpoint.
  */
 export async function retentionFloorSeq(query: QueryFn, sheetId: string): Promise<string | null> {
   const res = await query(
@@ -267,47 +276,79 @@ export async function retentionFloorSeq(query: QueryFn, sheetId: string): Promis
 }
 
 /**
- * Clamp a requested retention cutoff seq at the floor: the effective "prune everything with
- * `trusted_since_seq < cutoff`" boundary may never exceed the active checkpoint's `trusted_since_seq`
- * (the floor). Exact bigint min (`minSeq`). When there is no active checkpoint (`floorSeq === null`) nothing
- * is protectable, so we fail CLOSED and return `'0'` — a cutoff below every positive seq, i.e. prune nothing.
+ * The RETENTION-COVERING seq for an anchor horizon: `max(seq)` among the retained checkpoint seqs that is
+ * `<= oldestLegalAnchorSeq` — i.e. the checkpoint a recovery to the OLDEST still-legal anchor would resolve
+ * to (same `seq <= anchor` rule as `selectCheckpointByAnchorSeq`). That checkpoint AND every checkpoint after
+ * it must survive retention: every legal anchor (>= oldestLegalAnchorSeq) selects it or a newer one. Exact
+ * bigint (`compareSeq` — never `Number()`/`parseInt`/subtraction). Returns `null` when NO retained checkpoint
+ * is at-or-below the anchor (nothing older is reachable ⇒ the caller prunes nothing, fail-closed).
  */
-export function clampRetentionCutoffToFloor(requestedCutoffSeq: string, floorSeq: string | null): string {
-  assertSeqString(requestedCutoffSeq, 'clampRetentionCutoffToFloor.requestedCutoffSeq')
-  if (floorSeq === null) return '0'
-  return minSeq(requestedCutoffSeq, floorSeq)
+export function selectRetentionCoveringSeq(retainedSeqs: readonly string[], oldestLegalAnchorSeq: string): string | null {
+  assertSeqString(oldestLegalAnchorSeq, 'selectRetentionCoveringSeq.oldestLegalAnchorSeq')
+  let covering: string | null = null
+  for (const s of retainedSeqs) {
+    assertSeqString(s, 'selectRetentionCoveringSeq.retainedSeq')
+    if (compareSeq(s, oldestLegalAnchorSeq) <= 0 && (covering === null || compareSeq(s, covering) > 0)) covering = s
+  }
+  return covering
 }
 
 export interface RetentionPruneResult {
   prunedCount: number
-  /** the cutoff actually applied after clamping (decimal string) */
-  clampedCutoffSeq: string
-  /** the active-checkpoint floor at prune time (decimal string) or null */
+  /** the protected floor actually applied — the anchor-covering checkpoint seq (decimal string), or `null`
+   *  (no covering checkpoint ⇒ nothing pruned) */
+  protectedFloorSeq: string | null
+  /** the active-checkpoint floor at prune time (decimal string) or null — observability only */
   floorSeq: string | null
+  /** the anchor horizon the prune was computed against (decimal string) */
+  oldestLegalAnchorSeq: string
 }
 
 /**
- * Prune (tombstone `pruned_at`) retained checkpoints below a requested cutoff, CLAMPED at the active floor.
- * The active checkpoint is protected SOLELY by the clamp (`clampedCutoffSeq <= floorSeq`, and the active
- * checkpoint's `trusted_since_seq == floorSeq`, so `floorSeq < clampedCutoffSeq` is never true) — there is no
- * separate `state <> 'active'` belt masking the clamp, so removing the clamp genuinely prunes the active
- * checkpoint and reds the floor golden. Caller SHOULD run this inside a transaction.
+ * Prune (tombstone `pruned_at`) retained checkpoints that NO retained recovery anchor can still need.
+ *
+ * P1-c: the protected floor is NOT the active checkpoint's seq. Protecting only the active checkpoint drops a
+ * checkpoint an older-but-still-legal anchor requires. Counterexample: C1(seq=100), C2(seq=200, active);
+ * oldest legal anchor seq = 150. A recovery to 150 selects C1 (latest checkpoint with `seq <= 150`), so C1
+ * must survive — active-only protection prunes it. The protected floor is the ANCHOR-COVERING checkpoint
+ * `max(seq <= oldestLegalAnchorSeq)` (`selectRetentionCoveringSeq`): that checkpoint AND every checkpoint
+ * after it (all reachable by any retained anchor) survive; only checkpoints strictly below it are pruned.
+ * Because the covering seq is always `<=` the active floor, the active checkpoint is ALWAYS protected by this
+ * SAME cutoff — there is NO separate `state <> 'active'` belt, so reverting to active-only protection genuinely
+ * prunes the covering checkpoint and reds the C1/C2 golden. Exact bigint throughout. Caller SHOULD run this
+ * inside a transaction.
  */
 export async function pruneRetainedCheckpoints(
   tx: QueryFn,
   sheetId: string,
-  requestedCutoffSeq: string,
+  oldestLegalAnchorSeq: string,
 ): Promise<RetentionPruneResult> {
+  assertSeqString(oldestLegalAnchorSeq, 'pruneRetainedCheckpoints.oldestLegalAnchorSeq')
   const floorSeq = await retentionFloorSeq(tx, sheetId)
-  const clampedCutoffSeq = clampRetentionCutoffToFloor(requestedCutoffSeq, floorSeq)
+  // Retained = selectable checkpoints (active|superseded, not pruned, not still building) — the exact set
+  // `selectCheckpointByAnchorSeq` can resolve. `::text` keeps seq an exact bigint string end-to-end.
+  const retainedRes = await tx(
+    `SELECT trusted_since_seq::text AS s FROM meta_history_trust_checkpoints
+     WHERE sheet_id = $1 AND state IN ('active','superseded') AND pruned_at IS NULL`,
+    [sheetId],
+  )
+  const retainedSeqs = (retainedRes.rows as Array<{ s?: unknown }>).map((r) => {
+    assertSeqString(r.s, 'pruneRetainedCheckpoints.retainedSeq')
+    return r.s
+  })
+  const protectedFloorSeq = selectRetentionCoveringSeq(retainedSeqs, oldestLegalAnchorSeq)
+  if (protectedFloorSeq === null) {
+    // No retained checkpoint at-or-below the anchor ⇒ nothing older is reachable ⇒ prune nothing (fail-closed).
+    return { prunedCount: 0, protectedFloorSeq: null, floorSeq, oldestLegalAnchorSeq }
+  }
   const res = await tx(
     `UPDATE meta_history_trust_checkpoints
      SET pruned_at = clock_timestamp()
      WHERE sheet_id = $1 AND pruned_at IS NULL AND trusted_since_seq < $2::bigint
      RETURNING id`,
-    [sheetId, clampedCutoffSeq],
+    [sheetId, protectedFloorSeq],
   )
-  return { prunedCount: (res.rows as unknown[]).length, clampedCutoffSeq, floorSeq }
+  return { prunedCount: (res.rows as unknown[]).length, protectedFloorSeq, floorSeq, oldestLegalAnchorSeq }
 }
 
 /** True iff the sheet currently has an `active`, non-pruned trust checkpoint. */

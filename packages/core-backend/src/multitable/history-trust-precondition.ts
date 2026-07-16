@@ -14,12 +14,18 @@ import { hasActiveTrustCheckpoint } from './history-trust-checkpoint'
  * recovery"; §9.7: ratification authorizes default-off slices only, not strict-mode enablement). This guard
  * MUST stay fail-closed until L6; it must not be weakened to pass.
  *
- * This module is a GUARD + documented seam. It is deliberately NOT wired into the live strict precheck path
- * (that in-fence activation is L5-wire / L6, deferred): wiring an always-fail-closed gate into the live path
- * now would break the L3 strict-mode goldens that legitimately exercise the strict comparator with the flag
- * forced on inside their own test process. The pure {@link evaluateStrictEnablementPrecondition} proves the
- * two-condition logic (including the positive control where both hold); {@link checkStrictEnablementPrecondition}
- * proves the checkpoint-existence half against a real DB.
+ * WIRED (L5 P2): {@link checkStrictEnablementPrecondition} is called by the authoritative strict-mode entry
+ * point `precheckSheetHistoryIntegrity` (history-integrity-precheck.ts) — the function the Revert/Reset
+ * recovery routes go through. When the strict flag is ON, a sheet that has ENTERED the trust-checkpoint regime
+ * (condition (a) `no_active_checkpoint` is NOT in `unmet`) but whose full precondition is unmet is REFUSED
+ * fail-closed (`strict_enablement_unmet`). The refusal is SCOPED to checkpoint-bearing sheets precisely so the
+ * L3 strict-comparator goldens — which force the flag on WITHOUT ever provisioning a checkpoint — keep
+ * exercising the comparator (the concern that previously kept this "deliberately NOT wired"): a no-checkpoint
+ * sheet is not yet under the gate. SEAM: L5-wire activates a checkpoint on every recovery path, after which no
+ * no-checkpoint sheet remains and the gate covers every strict recovery uniformly (see the entry-point note).
+ * The pure {@link evaluateStrictEnablementPrecondition} proves the two-condition logic (including the positive
+ * control where both hold); the real-DB behavioral golden in
+ * `multitable-history-trust-checkpoint-realdb.test.ts` proves strict-on is refused by this WIRED path.
  */
 
 /**

@@ -376,18 +376,25 @@ export const GLOBAL_HISTORY_FLAG_MANIFEST = Object.freeze([
     // source: packages/core-backend/src/multitable/history-integrity-precheck.ts:99-100 (isContiguityStrictMode)
     source: 'packages/core-backend/src/multitable/history-integrity-precheck.ts:99-100',
     // P3-2 FLAG-ON PRECONDITION (design lock §3/§9; L5). This flag — and later Revert/Reset enablement — MUST
-    // NOT be turned on for a sheet unless BOTH: (a) an ACTIVE trust checkpoint exists for the sheet, AND
+    // NOT be relied upon for a sheet unless BOTH: (a) an ACTIVE trust checkpoint exists for the sheet, AND
     // (b) reconstruction causality is satisfied. Condition (b) is NOT yet satisfiable: the reconstructor still
     // selects by created_at<=T (non-causal) until Lane L6 lands the exact event-anchor resolver, so this
-    // precondition CURRENTLY FAILS CLOSED for every sheet — which is CORRECT ("migration/backfill presence
-    // alone never enables recovery"). Enforced in code by checkStrictEnablementPrecondition; the single L6
-    // seam is the RECONSTRUCTION_CAUSALITY_LANDED constant. This is a GUARD that stays fail-closed until L6;
-    // do not weaken it to pass. (Not modeled as a cross-flag rule: conditions (a)/(b) are runtime STATE, not
-    // other flag env values, so they cannot be expressed as dependsOn/conflictsWith.)
+    // precondition CURRENTLY FAILS CLOSED for every checkpoint-bearing sheet — which is CORRECT ("migration/
+    // backfill presence alone never enables recovery"). WIRED (L5 P2): enforced by
+    // checkStrictEnablementPrecondition, CALLED from precheckSheetHistoryIntegrity's strict branch (the
+    // authoritative strict-mode entry the Revert/Reset routes traverse). A checkpoint-bearing sheet with the
+    // strict flag on is refused fail-closed (`strict_enablement_unmet`) until L6; the single L6 seam is the
+    // RECONSTRUCTION_CAUSALITY_LANDED constant. SCOPE SEAM: the refusal is scoped to checkpoint-bearing sheets
+    // (condition (a) met) so the L3 strict-comparator goldens — flag on, no checkpoint — still exercise the
+    // comparator; L5-wire (checkpoint activation on the recovery path) removes the no-checkpoint case and the
+    // gate then covers every strict recovery uniformly. Do not weaken it to pass. (Not modeled as a cross-flag
+    // rule: conditions (a)/(b) are runtime STATE, not other flag env values.)
     enablementPrecondition:
       'L5/P3-2 (checkStrictEnablementPrecondition): requires (a) an active meta_history_trust_checkpoints row for the sheet AND (b) RECONSTRUCTION_CAUSALITY_LANDED (L6). Fails closed until L6.',
     enablementPreconditionSource:
       'packages/core-backend/src/multitable/history-trust-precondition.ts (RECONSTRUCTION_CAUSALITY_LANDED, evaluateStrictEnablementPrecondition, checkStrictEnablementPrecondition)',
+    enablementEnforcedVia:
+      'packages/core-backend/src/multitable/history-integrity-precheck.ts precheckSheetHistoryIntegrity (strict branch) — refuses strict_enablement_unmet for a checkpoint-bearing sheet when canEnable is false',
   },
 ])
 
