@@ -2,23 +2,45 @@
  * P2 durable-delivery — slice S2-b: the dispatch loop (registry + tick).
  *
  * Drives the S2-a claim engine end-to-end: alert on unknown keys → claim a batch for the keys THIS worker
- * knows → `await` each row's consumer adapter directly → resolve via fence-CAS (complete / reschedule with
- * backoff / poison). Consumer adapters themselves are S5 — this module defines their contract and the loop.
+ * knows → for each row **revalidate the lease, run the adapter under a bounded timeout + heartbeat, then
+ * resolve via fence-CAS** (complete / reschedule with backoff / poison). Consumer adapters themselves are S5 —
+ * this module defines their contract and the loop.
  *
  * Contract (FWB-0 lock #4203 Layer 1):
  *   - **Registry asserts uniqueness at registration**: a duplicate consumer_key is a STARTUP ERROR, never a
  *     silent double-run. The registry is the single enumeration source for this worker's known keys — the
  *     claim scope, the unknown-key alert, and (S3) the manifest completeness assertion all read from it.
  *   - **Unknown keys are alerted, never claimed**: rows whose consumer_key this worker doesn't know are
- *     surfaced through `onUnknownConsumerKeys` and left `pending` for a worker that knows them (#4203 §246
- *     rolling-deploy). The alert callback must never throw the tick over (best-effort).
- *   - **The dispatcher directly `await`s the adapter** (no eventemitter3 in the durable path). An adapter
- *     THROW is a transient `adapter_error` (rescheduled with backoff); only an explicit
- *     `permanent_failure` verdict poisons. Attempt-exhaustion poison is claim-driven (S2-a) — the loop
- *     never has to be alive for the ceiling to hold.
- *   - **Per-row isolation**: one adapter failing/throwing never blocks the rest of the batch.
- *   - **Backoff is deterministic exponential with a cap** (no Math.random — reproducible in tests; jitter
- *     can be layered later without changing the persisted contract).
+ *     surfaced through `observer.onUnknownConsumerKeys` and left `pending` for a worker that knows them
+ *     (#4203 §246 rolling-deploy). Observer calls are best-effort — a throwing sink never fails the tick.
+ *   - **A claimed row's lease is re-validated immediately before the adapter runs, and maintained by a
+ *     heartbeat while it runs** (both are fence-CAS renews that do NOT bump the fence). A worker that drifted
+ *     past its lease during a serial batch — or lost the row to a concurrent reclaim mid-flight — never
+ *     produces (or keeps producing) the external side effect: the pre-call renew fails → the adapter is not
+ *     called; the heartbeat renew fails → the in-flight call is aborted and the row is left to its new owner.
+ *     This is defense in depth over the terminal fence-CAS (which only protects persisted STATE); the
+ *     irreducible residue — an adapter mid-emit at the exact instant its lease is lost — is at-least-once and
+ *     absorbed by SINK idempotency, per the durable-delivery doctrine.
+ *   - **The adapter runs under a bounded `adapterTimeoutMs`**: one hung Promise can never freeze the tick,
+ *     later rows, or `stop()`. A timeout maps to a retryable `adapter_timeout` (rescheduled with backoff) and
+ *     the loop moves on; the dangling promise is neutralized (its later settle can no longer touch the row —
+ *     the reschedule bumped the fence). `Promise.race` alone is not the guarantee — it is paired with the
+ *     fence-CAS + idempotency above.
+ *   - **The adapter's return value is parsed against a closed verdict set at runtime** — adapters are external
+ *     (S5) and may misbehave. A malformed verdict (unknown outcome, missing/invalid reason, non-object, null)
+ *     is a retryable `adapter_error`, NEVER a poison: a bad verdict must not silently drop the event. Only an
+ *     exact `{ outcome: 'permanent_failure', reason: 'permanent_rejection' }` dead-letters.
+ *   - **Per-row isolation**: one adapter failing/throwing/timing-out never blocks the rest of the batch. (A DB
+ *     error on claim/renew/resolve is NOT isolated — it means the store is unhealthy, so it propagates and the
+ *     caller's loop surfaces it via `onTickError` and retries next tick.)
+ *   - **Backoff is deterministic exponential with a cap** (no Math.random — reproducible in tests; jitter can
+ *     be layered later without changing the persisted contract).
+ *   - **Every numeric knob is a validated safe-integer within an explicit range, checked BEFORE any work** —
+ *     at tick entry (before the claim) and at loop start (before the timer). `intervalMs=0` (hot loop) and a
+ *     fractional/huge backoff are rejected up front, never after the adapter already ran.
+ *   - **The long-running loop requires a telemetry sink**: `onUnknownConsumerKeys` + `onTickError` are
+ *     mandatory (a silent stuck-row or a swallowed tick error is an operational blind spot), and every
+ *     observer call is exception-safe — a broken sink can neither kill the process nor stop delivery.
  *
  * Nothing here runs while `AUTOMATION_DURABLE_DELIVERY_ENABLED` is OFF: `startDurableDispatchLoop` refuses
  * to start when the flag is off, and no production code calls it yet (that wiring is S5/S4 activation).
@@ -27,11 +49,10 @@ import type { ClaimedConsumer, DeliveryFailureReason, Queryable } from './automa
 import {
   claimDueConsumers,
   completeConsumer,
-  DEFAULT_MAX_DELIVERY_ATTEMPTS,
   findUnknownConsumerKeys,
   poisonConsumer,
+  renewConsumerLease,
   rescheduleConsumer,
-  resolveDisposition,
 } from './automation-durable-dispatcher'
 import { isDurableDeliveryEnabled } from './automation-durable-delivery'
 
@@ -45,8 +66,13 @@ export type AdapterOutcome =
 export interface ConsumerAdapter {
   /** The consumer_key this adapter serves (must be unique across the registry). */
   readonly key: string
-  /** Handle one claimed event. Idempotency is the SINK's job (per-rule event_fires / business UNIQUE keys). */
-  handle(event: ClaimedConsumer): Promise<AdapterOutcome>
+  /**
+   * Handle one claimed event. Idempotency is the SINK's job (per-rule event_fires / business UNIQUE keys).
+   * `ctx.signal` is aborted on timeout or on a mid-flight lease loss — a cooperative adapter should stop its
+   * in-flight work when it fires (a non-cooperative adapter still can't freeze the loop: the timeout wins the
+   * race regardless).
+   */
+  handle(event: ClaimedConsumer, ctx?: { signal: AbortSignal }): Promise<AdapterOutcome>
 }
 
 /**
@@ -84,6 +110,48 @@ export class ConsumerAdapterRegistry {
 // Deterministic exponential backoff: base·2^(attempts-1), capped. attempts is the POST-claim count (>=1).
 export const DEFAULT_RETRY_BASE_MS = 5_000
 export const DEFAULT_RETRY_CAP_MS = 15 * 60_000 // 15 min
+export const DEFAULT_LEASE_MS = 30_000
+/** Default per-adapter execution ceiling. A call that outruns this is a retryable `adapter_timeout`. */
+export const DEFAULT_ADAPTER_TIMEOUT_MS = 30_000
+
+// Explicit upper bounds for the loop's own knobs (the claim/resolve knobs are bounded inside S2-a).
+const MAX_MS_24H = 86_400_000
+const MAX_INTERVAL_MS = 3_600_000 // 1h — an interval beyond this is almost certainly a misconfiguration
+
+/** Reject fractional, non-finite, out-of-safe-range, or out-of-bounds numeric params before they do anything. */
+function requireBoundedInt(name: string, value: number, min: number, max: number): void {
+  if (!Number.isSafeInteger(value) || value < min || value > max) {
+    throw new RangeError(`${name} must be a safe integer in [${min}, ${max}] (got ${value})`)
+  }
+}
+
+/**
+ * Validate every numeric knob a tick / loop may use, BEFORE any side effect. Called at tick entry (before the
+ * claim) and at loop start (before the timer) so a misconfiguration fails fast rather than after the adapter
+ * already ran (#4203 review P2: "应在 claim 和 timer 启动前统一校验").
+ */
+function validateDispatchNumericParams(
+  opts: {
+    batchSize?: number
+    leaseMs?: number
+    maxAttempts?: number
+    retryBaseMs?: number
+    retryCapMs?: number
+    adapterTimeoutMs?: number
+    intervalMs?: number
+  },
+): void {
+  if (opts.batchSize !== undefined) requireBoundedInt('batchSize', opts.batchSize, 1, 10_000)
+  if (opts.leaseMs !== undefined) requireBoundedInt('leaseMs', opts.leaseMs, 1, MAX_MS_24H)
+  if (opts.maxAttempts !== undefined) requireBoundedInt('maxAttempts', opts.maxAttempts, 1, 10_000)
+  if (opts.retryBaseMs !== undefined) requireBoundedInt('retryBaseMs', opts.retryBaseMs, 1, MAX_MS_24H)
+  if (opts.retryCapMs !== undefined) requireBoundedInt('retryCapMs', opts.retryCapMs, 1, MAX_MS_24H)
+  if (opts.retryBaseMs !== undefined && opts.retryCapMs !== undefined && opts.retryCapMs < opts.retryBaseMs) {
+    throw new RangeError(`retryCapMs (${opts.retryCapMs}) must be >= retryBaseMs (${opts.retryBaseMs})`)
+  }
+  if (opts.adapterTimeoutMs !== undefined) requireBoundedInt('adapterTimeoutMs', opts.adapterTimeoutMs, 1, MAX_MS_24H)
+  if (opts.intervalMs !== undefined) requireBoundedInt('intervalMs', opts.intervalMs, 1, MAX_INTERVAL_MS)
+}
 
 export function computeRetryDelayMs(
   attempts: number,
@@ -96,14 +164,59 @@ export function computeRetryDelayMs(
   return Math.min(baseMs * 2 ** exp, capMs)
 }
 
+/** A resolve action derived from a (possibly malformed) adapter return value. */
+export type NormalizedVerdict =
+  | { action: 'complete' }
+  | { action: 'reschedule'; reason: DeliveryFailureReason }
+  | { action: 'poison'; reason: DeliveryFailureReason }
+
+const RETRYABLE_REASONS: ReadonlySet<string> = new Set<DeliveryFailureReason>(['adapter_error', 'adapter_timeout', 'unknown'])
+
+/**
+ * Parse an adapter's return value against the closed verdict set at RUNTIME. Adapters are external (S5) and
+ * may return anything; a malformed verdict must NEVER poison (that silently drops the event) and must never
+ * throw. The fail-safe direction is retry:
+ *   - exact `{ outcome: 'success' }`                                            → complete
+ *   - `{ outcome: 'permanent_failure', reason: 'permanent_rejection' }` (exact) → poison (the only drop path)
+ *   - `{ outcome: 'retryable_failure', reason: <valid> }`                       → reschedule with that reason
+ *   - `{ outcome: 'retryable_failure', reason: <invalid/absent> }`              → reschedule, values-free `unknown`
+ *   - anything else (unknown outcome, non-object, null, malformed permanent)    → reschedule `adapter_error`
+ * A malformed permanent still terminates eventually — via the claim-time attempt ceiling — but is never
+ * dropped on a single bad verdict.
+ */
+export function normalizeAdapterVerdict(raw: unknown): NormalizedVerdict {
+  if (typeof raw === 'object' && raw !== null) {
+    const outcome = (raw as { outcome?: unknown }).outcome
+    if (outcome === 'success') {
+      return { action: 'complete' }
+    }
+    if (outcome === 'permanent_failure' && (raw as { reason?: unknown }).reason === 'permanent_rejection') {
+      return { action: 'poison', reason: 'permanent_rejection' }
+    }
+    if (outcome === 'retryable_failure') {
+      const reason = (raw as { reason?: unknown }).reason
+      return {
+        action: 'reschedule',
+        reason: typeof reason === 'string' && RETRYABLE_REASONS.has(reason) ? (reason as DeliveryFailureReason) : 'unknown',
+      }
+    }
+  }
+  // null / non-object / unknown outcome / malformed permanent → RETRY, never drop, never poison.
+  return { action: 'reschedule', reason: 'adapter_error' }
+}
+
 export interface DispatchTickOptions {
   batchSize?: number
   leaseMs?: number
   maxAttempts?: number
   retryBaseMs?: number
   retryCapMs?: number
+  /** per-adapter execution ceiling (default 30s; 1..86_400_000). A call that outruns it is `adapter_timeout`. */
+  adapterTimeoutMs?: number
   /** Rolling-deploy alert seam (#4203 §246). Best-effort — a throwing callback never fails the tick. */
   onUnknownConsumerKeys?: (keys: string[]) => void
+  /** Cooperative stop: the row loop breaks between rows when this returns true (keeps `stop()` responsive). */
+  shouldStop?: () => boolean
   now?: () => Date
 }
 
@@ -112,15 +225,129 @@ export interface DispatchTickResult {
   completed: number
   rescheduled: number
   poisoned: number
-  /** resolves that hit 0 rows because the fence was superseded mid-flight (zombie writes) — informational. */
+  /** resolves that hit 0 rows because the fence was superseded (zombie / lost lease) — informational. */
   lostLease: number
   unknownKeys: string[]
 }
 
+interface RowRuntimeConfig {
+  leaseMs: number
+  adapterTimeoutMs: number
+  heartbeatMs: number
+  retryBaseMs?: number
+  retryCapMs?: number
+  now?: () => Date
+}
+
+type RowDisposition = 'completed' | 'rescheduled' | 'poisoned' | 'lostLease'
+
 /**
- * One dispatch tick: alert unknown keys, claim a batch for the registry's keys, await each adapter, resolve
- * each row via fence-CAS. Never throws for a single adapter's failure; a DB error on claim does propagate
- * (the caller's loop handles/schedules the next tick).
+ * Run a bounded race between the adapter promise and a timeout. Resolves to the marker on timeout (the loop
+ * proceeds even if the adapter never settles); a synchronous throw or async rejection of the adapter
+ * propagates so the caller can map it to `adapter_error`.
+ */
+const TIMEOUT_MARKER = Symbol('adapter_timeout')
+
+/**
+ * Process one claimed row end-to-end: revalidate the lease, run the adapter under timeout + heartbeat, then
+ * resolve via fence-CAS. Only the ADAPTER's own failure is caught here (→ retryable); a DB error on
+ * renew/resolve propagates (store-unhealthy is not a per-row condition).
+ */
+async function processClaimedRow(
+  db: Queryable,
+  adapter: ConsumerAdapter,
+  row: ClaimedConsumer,
+  cfg: RowRuntimeConfig,
+): Promise<RowDisposition> {
+  // 1) Pre-call revalidate + renew: prove we STILL own this row (a serial batch may have drifted past the
+  //    lease) and reset its window. If a concurrent worker reclaimed it, the adapter is never called.
+  if (!(await renewConsumerLease(db, row.outboxId, row.consumerKey, row.fence, cfg.leaseMs, cfg))) {
+    return 'lostLease'
+  }
+
+  // 2) Guards: AbortController (cooperative cancel) + heartbeat (maintain the lease; detect a mid-flight
+  //    reclaim) + timeout (the loop's liveness guarantee).
+  const controller = new AbortController()
+  let leaseLost = false
+  const heartbeat = setInterval(() => {
+    void renewConsumerLease(db, row.outboxId, row.consumerKey, row.fence, cfg.leaseMs, cfg)
+      .then((stillOwned) => {
+        if (!stillOwned) {
+          leaseLost = true
+          controller.abort()
+        }
+      })
+      .catch(() => {
+        // A renew that errors mid-flight leaves ownership uncertain — stop the call conservatively; the
+        // terminal fence-CAS below is the final arbiter of persisted state.
+        leaseLost = true
+        controller.abort()
+      })
+  }, cfg.heartbeatMs)
+  heartbeat.unref?.()
+
+  let raw: unknown
+  let timedOut = false
+  let threw = false
+  let timeoutTimer: ReturnType<typeof setTimeout> | undefined
+  try {
+    const handlePromise = Promise.resolve().then(() => adapter.handle(row, { signal: controller.signal }))
+    // Neutralize the dangling promise: after a timeout its later rejection must not become an unhandledRejection.
+    handlePromise.catch(() => undefined)
+    const timeoutPromise = new Promise<typeof TIMEOUT_MARKER>((resolve) => {
+      timeoutTimer = setTimeout(() => {
+        try {
+          controller.abort()
+        } catch {
+          /* ignore */
+        }
+        resolve(TIMEOUT_MARKER)
+      }, cfg.adapterTimeoutMs)
+      timeoutTimer.unref?.()
+    })
+    const outcome = await Promise.race([handlePromise, timeoutPromise])
+    if (outcome === TIMEOUT_MARKER) {
+      timedOut = true
+    } else {
+      raw = outcome
+    }
+  } catch {
+    threw = true
+  } finally {
+    clearInterval(heartbeat)
+    if (timeoutTimer) clearTimeout(timeoutTimer)
+  }
+
+  // 3) A mid-flight reclaim means another worker owns the row now — do NOT resolve it (that would clobber
+  //    the new owner's fence-CAS window; our write would match 0 rows anyway).
+  if (leaseLost) {
+    return 'lostLease'
+  }
+
+  // 4) Derive the resolve action: timeout → adapter_timeout; a throw → adapter_error; else parse the verdict.
+  const verdict: NormalizedVerdict = timedOut
+    ? { action: 'reschedule', reason: 'adapter_timeout' }
+    : threw
+      ? { action: 'reschedule', reason: 'adapter_error' }
+      : normalizeAdapterVerdict(raw)
+
+  // 5) Terminal fence-CAS resolve — false means the token was superseded between renew and resolve (lost lease).
+  if (verdict.action === 'complete') {
+    return (await completeConsumer(db, row.outboxId, row.consumerKey, row.fence, cfg)) ? 'completed' : 'lostLease'
+  }
+  if (verdict.action === 'reschedule') {
+    const delay = computeRetryDelayMs(row.attempts, cfg.retryBaseMs, cfg.retryCapMs)
+    return (await rescheduleConsumer(db, row.outboxId, row.consumerKey, row.fence, delay, verdict.reason, cfg))
+      ? 'rescheduled'
+      : 'lostLease'
+  }
+  return (await poisonConsumer(db, row.outboxId, row.consumerKey, row.fence, verdict.reason, cfg)) ? 'poisoned' : 'lostLease'
+}
+
+/**
+ * One dispatch tick: validate knobs, alert unknown keys, claim a batch for the registry's keys, process each
+ * row (revalidate → run under timeout+heartbeat → fence-CAS resolve). Never throws for a single adapter's
+ * failure; a DB error on claim/renew/resolve does propagate (the caller's loop handles/schedules the next tick).
  */
 export async function runDispatchTick(
   db: Queryable,
@@ -130,7 +357,22 @@ export async function runDispatchTick(
   if (registry.size === 0) {
     throw new RangeError('runDispatchTick requires a registry with at least one adapter (empty known-keys would claim nothing and hide misconfiguration)')
   }
+  // Validate BEFORE any find/claim/side effect (#4203 review P2#5).
+  validateDispatchNumericParams(opts)
+
   const knownKeys = registry.keys()
+  const leaseMs = opts.leaseMs ?? DEFAULT_LEASE_MS
+  const adapterTimeoutMs = opts.adapterTimeoutMs ?? DEFAULT_ADAPTER_TIMEOUT_MS
+  // Heartbeat well inside the lease window so a still-running adapter keeps its hold; floor at 1s.
+  const heartbeatMs = Math.max(1_000, Math.min(Math.floor(leaseMs / 3), leaseMs))
+  const cfg: RowRuntimeConfig = {
+    leaseMs,
+    adapterTimeoutMs,
+    heartbeatMs,
+    retryBaseMs: opts.retryBaseMs,
+    retryCapMs: opts.retryCapMs,
+    now: opts.now,
+  }
   const result: DispatchTickResult = { claimed: 0, completed: 0, rescheduled: 0, poisoned: 0, lostLease: 0, unknownKeys: [] }
 
   // 1) rolling-deploy alert: reclaimable rows this worker cannot serve. Never claimed, never terminated.
@@ -148,43 +390,27 @@ export async function runDispatchTick(
   const claimed = await claimDueConsumers(db, {
     consumerKeys: knownKeys,
     batchSize: opts.batchSize,
-    leaseMs: opts.leaseMs,
+    leaseMs,
     maxAttempts: opts.maxAttempts,
     now: opts.now,
   })
   result.claimed = claimed.length
 
-  // 3) await each adapter and resolve — per-row isolation, sequential (adapters may share downstream
-  //    resources; concurrency tuning is a later, measured decision, not a default).
+  // 3) process each row — per-row isolation, sequential (adapters may share downstream resources; concurrency
+  //    tuning is a later, measured decision). Each row revalidates its lease and runs under a bounded timeout.
   for (const row of claimed) {
+    if (opts.shouldStop?.()) break // graceful stop: don't start new adapter work once the loop is stopping
     const adapter = registry.get(row.consumerKey)
     if (!adapter) {
       // Cannot happen (claim is scoped to registry keys) unless the registry mutated mid-tick; leave the
       // row alone — its lease expires and a correctly-configured worker reclaims it.
       continue
     }
-    let verdict: AdapterOutcome
-    try {
-      verdict = await adapter.handle(row)
-    } catch {
-      verdict = { outcome: 'retryable_failure', reason: 'adapter_error' }
-    }
-    const action = resolveDisposition(verdict.outcome)
-    let applied = false
-    if (action === 'complete') {
-      applied = await completeConsumer(db, row.outboxId, row.consumerKey, row.fence, opts)
-      if (applied) result.completed += 1
-    } else if (action === 'reschedule') {
-      const reason = verdict.outcome === 'retryable_failure' ? verdict.reason : 'unknown'
-      const delay = computeRetryDelayMs(row.attempts, opts.retryBaseMs, opts.retryCapMs)
-      applied = await rescheduleConsumer(db, row.outboxId, row.consumerKey, row.fence, delay, reason, opts)
-      if (applied) result.rescheduled += 1
-    } else {
-      const reason = verdict.outcome === 'permanent_failure' ? verdict.reason : 'permanent_rejection'
-      applied = await poisonConsumer(db, row.outboxId, row.consumerKey, row.fence, reason, opts)
-      if (applied) result.poisoned += 1
-    }
-    if (!applied) result.lostLease += 1
+    const disposition = await processClaimedRow(db, adapter, row, cfg)
+    if (disposition === 'completed') result.completed += 1
+    else if (disposition === 'rescheduled') result.rescheduled += 1
+    else if (disposition === 'poisoned') result.poisoned += 1
+    else result.lostLease += 1
   }
   return result
 }
@@ -194,29 +420,70 @@ export interface DispatchLoopHandle {
 }
 
 /**
+ * Mandatory telemetry sink for the long-running loop. Unknown keys and tick errors are operational signals
+ * that must be observable — leaving them optional lets a stuck row or a swallowed error go unseen. Every call
+ * is exception-safe inside the loop, so a broken sink can neither kill the process nor stop delivery.
+ */
+export interface DispatchLoopObserver {
+  /** Reclaimable rows carrying a consumer_key this worker doesn't know (rolling-deploy alert). */
+  onUnknownConsumerKeys(keys: string[]): void
+  /** A tick that threw (a DB/claim error) — never swallowed silently. */
+  onTickError(err: unknown): void
+  /** Optional per-tick metrics for observability (completed/rescheduled/poisoned/lostLease counts). */
+  onTick?(result: DispatchTickResult): void
+}
+
+/** Invoke an observer callback without ever letting its throw/rejection escape into the loop. */
+function safeInvoke<A>(fn: ((arg: A) => unknown) | undefined, arg: A): void {
+  if (typeof fn !== 'function') return
+  try {
+    const r = fn(arg)
+    if (r && typeof (r as { then?: unknown }).then === 'function') {
+      void (r as Promise<unknown>).catch(() => undefined)
+    }
+  } catch {
+    // a broken telemetry sink must never kill delivery or the process
+  }
+}
+
+/**
  * The long-running loop: one tick every `intervalMs`, with an overlap guard (a slow tick never runs
- * concurrently with the next). REFUSES to start while the master flag is OFF — the flag is the only
- * activation switch, and S1..S4 all land with it off.
+ * concurrently with the next). REQUIRES a telemetry sink and REFUSES to start while the master flag is OFF —
+ * the flag is the only activation switch, and S1..S4 all land with it off.
  */
 export function startDurableDispatchLoop(
   db: Queryable,
   registry: ConsumerAdapterRegistry,
-  opts: DispatchTickOptions & { intervalMs?: number; env?: NodeJS.ProcessEnv; onTickError?: (err: unknown) => void } = {},
+  observer: DispatchLoopObserver,
+  opts: DispatchTickOptions & { intervalMs?: number; env?: NodeJS.ProcessEnv } = {},
 ): DispatchLoopHandle {
+  if (!observer || typeof observer.onUnknownConsumerKeys !== 'function' || typeof observer.onTickError !== 'function') {
+    throw new TypeError('durable dispatch loop requires a telemetry sink (observer.onUnknownConsumerKeys + observer.onTickError)')
+  }
   if (!isDurableDeliveryEnabled(opts.env ?? process.env)) {
     throw new Error('durable dispatch loop must not start while AUTOMATION_DURABLE_DELIVERY_ENABLED is off')
   }
+  // Validate every knob (incl. intervalMs) BEFORE the timer exists — no hot loop, no fractional backoff (P2#5).
+  validateDispatchNumericParams(opts)
   const intervalMs = opts.intervalMs ?? 1_000
+
   let running = false
   let stopped = false
   let inFlight: Promise<void> = Promise.resolve()
   const timer = setInterval(() => {
     if (running || stopped) return
     running = true
-    inFlight = runDispatchTick(db, registry, opts)
-      .then(() => undefined)
+    inFlight = runDispatchTick(db, registry, {
+      ...opts,
+      // route the alert through the exception-safe sink; break the row loop promptly once stopping.
+      onUnknownConsumerKeys: (keys) => safeInvoke(observer.onUnknownConsumerKeys, keys),
+      shouldStop: () => stopped,
+    })
+      .then((result) => {
+        safeInvoke(observer.onTick, result)
+      })
       .catch((err) => {
-        opts.onTickError?.(err)
+        safeInvoke(observer.onTickError, err)
       })
       .finally(() => {
         running = false

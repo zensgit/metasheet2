@@ -284,6 +284,36 @@ export async function rescheduleConsumer(
 }
 
 /**
+ * Revalidate-and-renew the lease on a claimed row (S2-b pre-call guard + heartbeat). A **fence-CAS that does
+ * NOT bump the fence**: it pushes `lease_expires_at` out by `leaseMs` only while THIS worker still holds the
+ * claim token and the row is still `in_progress`. Returns false the instant the worker has lost the row — a
+ * concurrent reclaim bumped the fence, or the row already reached a terminal status. The S2-b loop calls this
+ * immediately before each adapter invocation (so a worker that drifted past its lease during a serial batch
+ * never calls the adapter for a row another worker now owns) and periodically DURING a long adapter call (so a
+ * mid-flight reclaim aborts the in-flight work). Unlike `rescheduleConsumer`, renewing keeps the same fence:
+ * the worker is extending its own hold, not handing the row off.
+ */
+export async function renewConsumerLease(
+  db: Queryable,
+  outboxId: string,
+  consumerKey: string,
+  fence: string,
+  leaseMs: number,
+  opts: { now?: () => Date } = {},
+): Promise<boolean> {
+  requireBoundedInt('leaseMs', leaseMs, 1, MAX_LEASE_MS)
+  const asOf = nowIso(opts)
+  const res = await db.query(
+    `UPDATE meta_automation_outbox_consumer
+        SET lease_expires_at = $4::timestamptz + ($5::int * interval '1 millisecond'),
+            updated_at = $4::timestamptz
+      WHERE outbox_id = $1 AND consumer_key = $2 AND fence = $3::bigint AND status = 'in_progress'`,
+    [outboxId, consumerKey, fence, asOf, leaseMs],
+  )
+  return Number(res.rowCount ?? 0) === 1
+}
+
+/**
  * Map an adapter outcome to a resolve action. Attempt-exhaustion is NOT an outcome here — it is enforced at
  * claim (crash-safe), so a plain `retryable_failure` at the ceiling is still `reschedule` and the next claim
  * poisons it. Kept pure so the S2-b loop's branching is unit-testable without a DB.
