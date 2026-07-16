@@ -19,6 +19,10 @@ on:
       - 'packages/openapi/**'
       - '.github/workflows/observability-strict.yml'
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   observability-strict:
     name: Strict E2E with Enhanced Gates
