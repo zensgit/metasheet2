@@ -40,6 +40,30 @@ $bootstrapCallParams = if ($bootstrapCalls.Count -eq 1) {
     Where-Object { $_ -is [System.Management.Automation.Language.CommandParameterAst] } |
     ForEach-Object { $_.ParameterName })
 } else { @() }
+$smokeStages = @($acceptanceAst.FindAll({
+  param($node)
+  $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+    $node.Name -eq 'Invoke-SmokeStage'
+}, $true))
+$smokeCaptureCalls = if ($smokeStages.Count -eq 1) {
+  @($smokeStages[0].Body.FindAll({
+    param($node)
+    $node -is [System.Management.Automation.Language.CommandAst] -and
+      $node.GetCommandName() -eq 'Invoke-SmokeCapture'
+  }, $true))
+} else { @() }
+$smokeCaptureParams = if ($smokeCaptureCalls.Count -eq 1) {
+  @($smokeCaptureCalls[0].CommandElements |
+    Where-Object { $_ -is [System.Management.Automation.Language.CommandParameterAst] } |
+    ForEach-Object { $_.ParameterName })
+} else { @() }
+$directSmokeNodeCalls = if ($smokeStages.Count -eq 1) {
+  @($smokeStages[0].Body.FindAll({
+    param($node)
+    $node -is [System.Management.Automation.Language.CommandAst] -and
+      $node.GetCommandName() -eq 'node'
+  }, $true))
+} else { @() }
 
 Check "acceptance and launcher scripts parse without errors" (
   $acceptanceErrors.Count -eq 0 -and $launcherErrors.Count -eq 0
@@ -54,6 +78,14 @@ Check "acceptance calls the release launcher with its canonical parameter names"
   'RootDir' -in $bootstrapCallParams -and
   'PackagePath' -notin $bootstrapCallParams -and
   'DeployRoot' -notin $bootstrapCallParams
+)
+Check "smoke stage delegates native execution to the summary-only capture boundary" (
+  $smokeStages.Count -eq 1 -and
+  $smokeCaptureCalls.Count -eq 1 -and
+  $smokeCaptureParams.Count -eq 2 -and
+  'NodeArgs' -in $smokeCaptureParams -and
+  'Token' -in $smokeCaptureParams -and
+  $directSmokeNodeCalls.Count -eq 0
 )
 
 # The package template and acceptance runner are one operator contract. A stale default makes a healthy
