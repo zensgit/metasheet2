@@ -72,6 +72,19 @@
   pass-through into MetaCommentsPanel — the underlying data source (`commentsState.*` +
   `selectedRecordCommentsScope`, both server G-8 gated) is unchanged from the pre-S4 second-drawer
   wiring, only its host component changed.
+
+  W2 S7 (design-lock §3.4, §6bis OD-W2-6=(b), §7 S7): narrow-viewport (<= RAIL_NARROW_BREAKPOINT, the
+  SAME single JS constant already defined in MultitableWorkbench.vue for the left rail — no second
+  threshold here) overlay mode. This component gets NO new prop for it: MultitableWorkbench.vue binds
+  `:class="{ 'meta-record-drawer--overlay': isInspectorOverlay }"` directly onto this component's tag,
+  which Vue's standard fallthrough-attrs merges onto this template's single root element (the same
+  mechanism this file already relies on for e.g. `<MtButton class="meta-record-drawer__btn...">`
+  above) — the workbench alone owns the responsive STATE (isInspectorOverlay / mutual-exclusion with
+  the rail drawer, OD-W2-6=b), this component only owns the CSS the class activates. See
+  `.meta-record-drawer--overlay` below, which mirrors `.mt-workbench__rail--drawer`
+  (MultitableWorkbench.vue) left<->right (anchored to the right edge instead of the left, rounded
+  corners on the open/left edge instead of the open/right edge) — same tokens, same
+  min(px, calc(100vw - 32px)) clamp idiom, no new hex.
 -->
 <template>
   <div v-if="visible" class="meta-record-drawer" @keydown="onInspectorKeydown">
@@ -702,6 +715,28 @@ async function toggleRecordSubscription() {
 
 <style scoped>
 .meta-record-drawer { width: 360px; border-left: 1px solid #e5e7eb; background: #fff; display: flex; flex-direction: column; overflow-y: auto; }
+/* W2 S7 (design-lock docs/development/multitable-w2-unified-record-inspector-design-lock-20260714.md
+   §3.4/§6bis, OD-W2-6=(b)): narrow viewport (<= RAIL_NARROW_BREAKPOINT, the SAME single JS constant
+   defined in MultitableWorkbench.vue — no second threshold here, applied via the `isInspectorOverlay`
+   class binding on this component's tag, see file-header comment) turns this panel from an in-flow
+   push column into a floating overlay — the mirror image of
+   `.mt-workbench__rail--drawer` (MultitableWorkbench.vue's own <style scoped>, same UI-P2-2c origin):
+   anchored to the RIGHT edge here instead of the left, rounded corners on the open/left edge instead
+   of the open/right edge. Taking it out of flow (position:absolute) is what returns the width
+   `.mt-workbench__main` lost to the push layout — no change needed to `.mt-workbench__main` itself,
+   exactly as already documented for the rail. Width reuses this rule's own 360px push width via the
+   SAME min(px, calc(100vw - 32px)) idiom as the rail drawer, so it never overflows a narrow viewport
+   (no body horizontal scroll). `--ms-shadow-pop` / `--ms-bg-card` / `--ms-radius-lg` are the SAME
+   existing UF tokens the rail drawer already uses — no new hex. */
+.meta-record-drawer--overlay {
+  position: absolute;
+  inset: 0 0 0 auto;
+  z-index: 5;
+  width: min(360px, calc(100vw - 32px));
+  background: var(--ms-bg-card);
+  box-shadow: var(--ms-shadow-pop);
+  border-radius: var(--ms-radius-lg) 0 0 var(--ms-radius-lg);
+}
 .meta-record-drawer__header { display: flex; justify-content: space-between; align-items: center; padding: 12px 16px; border-bottom: 1px solid #eee; }
 .meta-record-drawer__title { font-size: 15px; font-weight: 600; margin: 0; }
 .meta-record-drawer__actions { display: flex; gap: 8px; align-items: center; }
