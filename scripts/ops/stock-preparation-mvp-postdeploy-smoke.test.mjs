@@ -7,6 +7,11 @@ import {
   ALLOWED_MODES,
   ALLOWED_STATUS_VALUES,
   AUDIT_ACTIONS,
+  buildRequestHeaders,
+  requestJson,
+  SMOKE_PHASES,
+  computeDiagnosticLocus,
+  computeFailureClass,
   DIFF_ROW_KEYS,
   ENGINE_MESSAGE_SENTINELS,
   MISSING,
@@ -231,4 +236,124 @@ test('safeHandle admits only platform handle shapes', () => {
   assert.equal(safeHandle('MAT-001'), UNREGISTERED)
   assert.equal(safeHandle(''), MISSING)
   assert.equal(safeHandle(42), UNREGISTERED)
+})
+
+// ── corrective-5: bounded values-free diagnostic contract ────────────────────────────────────────
+test('SMOKE_PHASES is the closed 13-phase ladder with no values-free-forbidden substrings', () => {
+  assert.equal(SMOKE_PHASES.length, 13)
+  assert.equal(SMOKE_PHASES[0], 'AUTH')
+  assert.equal(SMOKE_PHASES[SMOKE_PHASES.length - 1], 'RESPONSE_LEAK_SCAN')
+  for (const p of SMOKE_PHASES) {
+    assert.ok(/^[A-Z_]+$/.test(p), `phase token ${p} must be an all-caps enum`)
+    assert.ok(!/drawing|qty|quantity|unit|material|host|token|password|secret/i.test(p), `phase token ${p} must not contain a forbidden substring`)
+  }
+})
+
+test('computeDiagnosticLocus: a check-failed early-return localizes to the phase before the stop + the first failed phase', () => {
+  const result = {
+    summary: { leakScanClean: undefined },
+    checks: [
+      { name: 'auth ok', ok: true, phase: 'AUTH' },
+      { name: 'readiness covers 9', ok: false, phase: 'PROVISIONING' },
+      { name: 'options synced', ok: false, phase: 'PROVISIONING' },
+    ],
+  }
+  computeDiagnosticLocus(result, SMOKE_PHASES.indexOf('PROVISIONING')) // stopped in PROVISIONING
+  assert.equal(result.summary.lastCompletedPhase, 'AUTH')       // AUTH completed, PROVISIONING did not
+  assert.equal(result.summary.firstFailedCheck, 'PROVISIONING') // first failed check's phase — a fixed enum
+  assert.equal(result.summary.failedCheckCount, 2)
+  assert.equal(result.summary.responseLeakScanStatus, 'NOT_RUN') // never reached the leak-scan phase
+})
+
+test('computeDiagnosticLocus: firstFailedCheck is a FIXED enum — an off-vocabulary check.phase becomes UNKNOWN, never a value', () => {
+  const result = { summary: {}, checks: [{ name: 'x', ok: false, phase: 'DWG-88472-A material Q235' }] }
+  computeDiagnosticLocus(result, 2)
+  assert.equal(result.summary.firstFailedCheck, 'UNKNOWN')
+  assert.ok(!/DWG-88472|Q235|material/.test(result.summary.firstFailedCheck))
+})
+
+test('computeDiagnosticLocus: a full pass reaching the last phase reports RESPONSE_LEAK_SCAN completed + PASS', () => {
+  const result = { summary: { leakScanClean: true }, checks: [{ name: 'x', ok: true, phase: 'RESPONSE_LEAK_SCAN' }] }
+  computeDiagnosticLocus(result, SMOKE_PHASES.length - 1)
+  assert.equal(result.summary.lastCompletedPhase, 'RESPONSE_LEAK_SCAN')
+  assert.equal(result.summary.firstFailedCheck, 'NONE')
+  assert.equal(result.summary.failedCheckCount, 0)
+  assert.equal(result.summary.responseLeakScanStatus, 'PASS')
+})
+
+test('computeFailureClass: NONE on pass, FATAL_EXCEPTION on throw, SELF_SCAN_FAILED, else CHECK_FAILED', () => {
+  const mk = (over) => { const r = { summary: over }; return r }
+  let r = mk({ pass: true }); computeFailureClass(r); assert.equal(r.summary.failureClass, 'NONE')
+  r = mk({ pass: false }); computeFailureClass(r, { fatal: true }); assert.equal(r.summary.failureClass, 'FATAL_EXCEPTION')
+  r = mk({ pass: false, selfScanClean: false }); computeFailureClass(r); assert.equal(r.summary.failureClass, 'SELF_SCAN_FAILED')
+  r = mk({ pass: false, selfScanClean: true }); computeFailureClass(r); assert.equal(r.summary.failureClass, 'CHECK_FAILED')
+})
+
+test('computeDiagnosticLocus: a THROW inside RESPONSE_LEAK_SCAN (leakScanClean not yet produced) reports AUDIT_TRAIL + NOT_RUN — never the contradictory completed-pair', () => {
+  // Owner P2 repro: reached the final phase but died before leakScanClean was assigned.
+  const result = { summary: { leakScanClean: undefined }, checks: [{ name: 'x', ok: true, phase: 'AUDIT_TRAIL' }] }
+  computeDiagnosticLocus(result, SMOKE_PHASES.length - 1)
+  assert.equal(result.summary.lastCompletedPhase, 'AUDIT_TRAIL')
+  assert.equal(result.summary.responseLeakScanStatus, 'NOT_RUN')
+  // the contradictory pair must be impossible: completed-last implies a boolean product
+  assert.notEqual(result.summary.lastCompletedPhase === 'RESPONSE_LEAK_SCAN' && result.summary.responseLeakScanStatus === 'NOT_RUN', true)
+  // and a FAIL product still counts as completed (completed ≠ clean):
+  const failed = { summary: { leakScanClean: false }, checks: [] }
+  computeDiagnosticLocus(failed, SMOKE_PHASES.length - 1)
+  assert.equal(failed.summary.lastCompletedPhase, 'RESPONSE_LEAK_SCAN')
+  assert.equal(failed.summary.responseLeakScanStatus, 'FAIL')
+})
+
+test('diagnostic output face is EXACTLY the five declared fields (no reachedPhase or other internals leak into the summary)', () => {
+  const result = { summary: { leakScanClean: true }, checks: [] }
+  computeDiagnosticLocus(result, SMOKE_PHASES.length - 1)
+  computeFailureClass(result)
+  const diagKeys = Object.keys(result.summary).filter((k) => k !== 'leakScanClean')
+  assert.deepEqual(diagKeys.sort(), [
+    'failedCheckCount', 'failureClass', 'firstFailedCheck', 'lastCompletedPhase', 'responseLeakScanStatus',
+  ])
+  assert.ok(!('reachedPhase' in result.summary), 'internal phase cursor must never appear in the output face')
+})
+
+// ── corrective-5 root-cause guard (owner P2): the tenant-context HEADER is load-bearing ──────────────
+// Deleting the x-tenant-id line passed 22/22 before — because nothing exercised requestJson's headers.
+// These drive the REAL requestJson via an injected fetch and assert the header contract; the delete
+// mutation now reds.
+test('buildRequestHeaders: tenant present -> x-tenant-id sent alongside Authorization; body -> Content-Type', () => {
+  const h = buildRequestHeaders({ token: 'tok', tenantId: 'tenant-9', hasBody: true })
+  assert.equal(h['x-tenant-id'], 'tenant-9')
+  assert.equal(h.Authorization, 'Bearer tok')
+  assert.equal(h['Content-Type'], 'application/json')
+})
+
+test('buildRequestHeaders: tenant absent -> NO x-tenant-id, Authorization still present', () => {
+  const h = buildRequestHeaders({ token: 'tok', tenantId: '', hasBody: false })
+  assert.equal('x-tenant-id' in h, false)
+  assert.equal(h.Authorization, 'Bearer tok')
+  assert.equal('Content-Type' in h, false)
+})
+
+test('requestJson actually SENDS x-tenant-id on a write (POST) — the entity N/8 root-cause guard', async () => {
+  const seen = []
+  const fetchImpl = async (url, init) => {
+    seen.push({ url, headers: { ...init.headers }, method: init.method, body: init.body })
+    return { status: 201, text: async () => JSON.stringify({ ok: true }) }
+  }
+  const res = await requestJson('http://x', '/api/integration/stock-preparation/mvp/ensure', {
+    token: 'tok', tenantId: 'tenant-9', timeoutMs: 1000, method: 'POST', body: { a: 1 }, accept: [201], fetchImpl,
+  })
+  assert.equal(res.status, 201)
+  assert.equal(seen.length, 1)
+  assert.equal(seen[0].headers['x-tenant-id'], 'tenant-9') // WITHOUT the header line the entity 400s TENANT_REQUIRED
+  assert.equal(seen[0].headers.Authorization, 'Bearer tok')
+  assert.equal(seen[0].method, 'POST')
+  assert.equal(seen[0].body, JSON.stringify({ a: 1 }))
+})
+
+test('requestJson omits x-tenant-id when no tenant is configured, but still sends Authorization', async () => {
+  const seen = []
+  const fetchImpl = async (url, init) => { seen.push({ ...init.headers }); return { status: 200, text: async () => '{}' } }
+  await requestJson('http://x', '/api/integration/status', { token: 'tok', tenantId: '', timeoutMs: 1000, fetchImpl })
+  assert.equal('x-tenant-id' in seen[0], false)
+  assert.equal(seen[0].Authorization, 'Bearer tok')
 })
