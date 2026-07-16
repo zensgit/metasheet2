@@ -123,6 +123,12 @@ jobs:
       - name: Global History flag manifest contract (R12-C)
         run: node --test scripts/ops/global-history-flag-manifest.test.mjs scripts/ops/multitable-global-history-flag-status.test.mjs
 
+      # The production monitor invokes the same state helper covered here.
+      # Keep this in the required 18/20 matrix so HTTP classification, silence
+      # barriers, and alert/recovery streak semantics cannot drift silently.
+      - name: Prod health probe monitor contract
+        run: node --test scripts/ops/prod-health-probe-state.test.mjs
+
       # #4210 T9: the stock-preparation one-click acceptance script's contract + behavioural tests (49
       # checks = 17 contract + 32 behavioural) are pure pwsh 7 + tar + node (no DB, no live server — the
       # pm2/health/smoke stages are unit-tested via dot-sourced pure helpers). Run inside the REQUIRED
