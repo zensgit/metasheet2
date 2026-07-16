@@ -4,7 +4,8 @@
 
 日期：2026-07-16
 前置：T3a runtime #4357 已合；T4 非空 `prep-line` smoke #4266 已合；RC-0
-corrective-4（#4369）已合并、已切 exact-SHA 包，正在 #4101 等实体机回贴。owner 已同意起草本锁，但 **ratify 与 runtime
+corrective-4（#4369）已合并并完成实体机 1/1：runner 已成功捕获 summary，但 packaged smoke
+返回 exit 1，`mvpSmoke.pass=false`，#4101 仍 OPEN。owner 已同意起草本锁，但 **ratify 与 runtime
 实现仍是后续独立门**。
 
 ## 0. 目的与当前断点
@@ -268,9 +269,13 @@ approved-source 前置模式：
 5. summary 固定 `externalWrite=false`；
 6. run 后恢复 flag，禁止把该 flag 常开写入生产模板。
 
-corrective-4 的 #4101 实体机结果与 T3b 开发并行；**RC-A 只在**以下三者齐备后切一次：
+corrective-4 已证明 Windows PowerShell 5.1 runner 修复成立，但实体机 smoke 本身 FAIL，且现有
+values-free summary 不足以定位首个失败 phase。#4101 的诊断/修复可与 T3b 开发并行；**RC-A
+只在**以下三者齐备后切一次：
 
-- corrective-4 实体机验收结果已回贴并完成 owner 判读；
+- #4101 的 RC-0 最终达到 PASS：package/provenance/migration/PM2/health 均 PASS，且
+  `mvpSmoke.pass=true`、`auditActionsCovered=8/8`、`selfScanClean=true`、
+  `externalPlmK3ErpWrite=false`；仅 runner 修好或一次已判读的 smoke FAIL 均不满足此门；
 - T3b runtime + 真库证据已合；
 - T4 approved-source 扩展通过。
 
@@ -350,7 +355,7 @@ corrective-4 的 #4101 实体机结果与 T3b 开发并行；**RC-A 只在**以�
 | T3b-1c | source-run route flag/guard + 1a/1b integration | 1a + 1b 通过；default-OFF inert |
 | T3b-2 | real-DB route smoke + CI whitelist + 对抗审阅 | T3b-1c 通过 |
 | T4-final | 现有 #4266 approved-source 扩展 | T3b-2 合入 |
-| RC-A | 单次 exact-SHA 包 + 实体机验收 | #4101 corrective-4 判定 + T4-final |
+| RC-A | 单次 exact-SHA 包 + 实体机验收 | #4101 RC-0 最终 PASS + T4-final |
 | P4 | persist 原子性 / repair hardening | 独立设计门；生产常开前置 |
 
 ## 7. Ratify checklist
@@ -366,5 +371,5 @@ owner ratify 本锁即表示同意：
 - [ ] 交付拆分：共享 persist hardening 非 flag-inert，独立审阅；pure bridge 可并行；route
   wiring 等两者通过后再接；
 - [ ] OD-5：OFF byte-equivalent；ON created=`internal_persist/true`、replay=`internal_noop/false`；
-- [ ] OD-6：扩展现有 T4 后只切一次 RC-A；
+- [ ] OD-6：#4101 RC-0 最终 PASS + 扩展现有 T4 后只切一次 RC-A；reviewed FAIL 不解锁；
 - [ ] 本锁不授权外部写、OD-W3-1 值面读或 runtime 自行合并。
