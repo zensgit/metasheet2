@@ -7,6 +7,9 @@ import {
   ALLOWED_MODES,
   ALLOWED_STATUS_VALUES,
   AUDIT_ACTIONS,
+  SMOKE_PHASES,
+  computeDiagnosticLocus,
+  computeFailureClass,
   DIFF_ROW_KEYS,
   ENGINE_MESSAGE_SENTINELS,
   MISSING,
@@ -231,4 +234,55 @@ test('safeHandle admits only platform handle shapes', () => {
   assert.equal(safeHandle('MAT-001'), UNREGISTERED)
   assert.equal(safeHandle(''), MISSING)
   assert.equal(safeHandle(42), UNREGISTERED)
+})
+
+// ── corrective-5: bounded values-free diagnostic contract ────────────────────────────────────────
+test('SMOKE_PHASES is the closed 13-phase ladder with no values-free-forbidden substrings', () => {
+  assert.equal(SMOKE_PHASES.length, 13)
+  assert.equal(SMOKE_PHASES[0], 'AUTH')
+  assert.equal(SMOKE_PHASES[SMOKE_PHASES.length - 1], 'RESPONSE_LEAK_SCAN')
+  for (const p of SMOKE_PHASES) {
+    assert.ok(/^[A-Z_]+$/.test(p), `phase token ${p} must be an all-caps enum`)
+    assert.ok(!/drawing|qty|quantity|unit|material|host|token|password|secret/i.test(p), `phase token ${p} must not contain a forbidden substring`)
+  }
+})
+
+test('computeDiagnosticLocus: a check-failed early-return localizes to the phase before the stop + the first failed phase', () => {
+  const result = {
+    summary: { leakScanClean: undefined },
+    checks: [
+      { name: 'auth ok', ok: true, phase: 'AUTH' },
+      { name: 'readiness covers 9', ok: false, phase: 'PROVISIONING' },
+      { name: 'options synced', ok: false, phase: 'PROVISIONING' },
+    ],
+  }
+  computeDiagnosticLocus(result, SMOKE_PHASES.indexOf('PROVISIONING')) // stopped in PROVISIONING
+  assert.equal(result.summary.lastCompletedPhase, 'AUTH')       // AUTH completed, PROVISIONING did not
+  assert.equal(result.summary.firstFailedCheck, 'PROVISIONING') // first failed check's phase — a fixed enum
+  assert.equal(result.summary.failedCheckCount, 2)
+  assert.equal(result.summary.responseLeakScanStatus, 'NOT_RUN') // never reached the leak-scan phase
+})
+
+test('computeDiagnosticLocus: firstFailedCheck is a FIXED enum — an off-vocabulary check.phase becomes UNKNOWN, never a value', () => {
+  const result = { summary: {}, checks: [{ name: 'x', ok: false, phase: 'DWG-88472-A material Q235' }] }
+  computeDiagnosticLocus(result, 2)
+  assert.equal(result.summary.firstFailedCheck, 'UNKNOWN')
+  assert.ok(!/DWG-88472|Q235|material/.test(result.summary.firstFailedCheck))
+})
+
+test('computeDiagnosticLocus: a full pass reaching the last phase reports RESPONSE_LEAK_SCAN completed + PASS', () => {
+  const result = { summary: { leakScanClean: true }, checks: [{ name: 'x', ok: true, phase: 'RESPONSE_LEAK_SCAN' }] }
+  computeDiagnosticLocus(result, SMOKE_PHASES.length - 1)
+  assert.equal(result.summary.lastCompletedPhase, 'RESPONSE_LEAK_SCAN')
+  assert.equal(result.summary.firstFailedCheck, 'NONE')
+  assert.equal(result.summary.failedCheckCount, 0)
+  assert.equal(result.summary.responseLeakScanStatus, 'PASS')
+})
+
+test('computeFailureClass: NONE on pass, FATAL_EXCEPTION on throw, SELF_SCAN_FAILED, else CHECK_FAILED', () => {
+  const mk = (over) => { const r = { summary: over }; return r }
+  let r = mk({ pass: true }); computeFailureClass(r); assert.equal(r.summary.failureClass, 'NONE')
+  r = mk({ pass: false }); computeFailureClass(r, { fatal: true }); assert.equal(r.summary.failureClass, 'FATAL_EXCEPTION')
+  r = mk({ pass: false, selfScanClean: false }); computeFailureClass(r); assert.equal(r.summary.failureClass, 'SELF_SCAN_FAILED')
+  r = mk({ pass: false, selfScanClean: true }); computeFailureClass(r); assert.equal(r.summary.failureClass, 'CHECK_FAILED')
 })

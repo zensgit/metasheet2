@@ -38,10 +38,10 @@ try {
   $dummyToken = ConvertTo-SecureString 'dummy-not-a-real-token' -AsPlainText -Force
 
   Set-Content -LiteralPath $fakeSmoke -Encoding ASCII -Value @(
-    "process.stderr.write('$sentinel\\n')"
-    "process.stdout.write('mvpSmoke.pass=true\\n')"
-    "process.stdout.write('auditActionsCovered=8/8\\n')"
-    "process.stdout.write('selfScanClean=true\\n')"
+    "process.stderr.write('$sentinel\n')"
+    "process.stdout.write('mvpSmoke.pass=true\n')"
+    "process.stdout.write('auditActionsCovered=8/8\n')"
+    "process.stdout.write('selfScanClean=true\n')"
     'process.exit(0)'
   )
 
@@ -67,10 +67,10 @@ try {
   )
 
   Set-Content -LiteralPath $fakeSmoke -Encoding ASCII -Value @(
-    "process.stderr.write('$sentinel\\n')"
-    "process.stdout.write('mvpSmoke.pass=true\\n')"
-    "process.stdout.write('auditActionsCovered=8/8\\n')"
-    "process.stdout.write('selfScanClean=true\\n')"
+    "process.stderr.write('$sentinel\n')"
+    "process.stdout.write('mvpSmoke.pass=true\n')"
+    "process.stdout.write('auditActionsCovered=8/8\n')"
+    "process.stdout.write('selfScanClean=true\n')"
     'process.exit(7)'
   )
 
@@ -92,6 +92,32 @@ try {
   Check 'exit-7 restores error policy and clears token env' (
     $ErrorActionPreference -eq 'Stop' -and -not (Test-Path Env:METASHEET_AUTH_TOKEN)
   )
+
+  # corrective-5: a non-zero smoke that writes bounded diagnostic lines to stdout (and noise to stderr)
+  # must have its diagnostics captured and parseable under Windows PowerShell 5.1, stderr discarded, exit
+  # preserved exactly. This is the target-shell coverage for the diagnostic contract.
+  Set-Content -LiteralPath $fakeSmoke -Encoding ASCII -Value @(
+    "process.stderr.write('$sentinel\n')"
+    "process.stdout.write('mvpSmoke.pass=false\n')"
+    "process.stdout.write('failureClass=CHECK_FAILED\n')"
+    "process.stdout.write('lastCompletedPhase=SYNC_PERSIST\n')"
+    "process.stdout.write('firstFailedCheck=PROVISIONING\n')"
+    "process.stdout.write('failedCheckCount=3\n')"
+    "process.stdout.write('responseLeakScanStatus=NOT_RUN\n')"
+    'process.exit(1)'
+  )
+  $diagCapture = Invoke-SmokeCapture -NodeArgs @($fakeSmoke) -Token $dummyToken
+  $diagOutcome = Test-SmokeOutcome $diagCapture.stdout
+  Check 'exit-1 diagnostic stdout is captured, stderr excluded, exit preserved' (
+    $null -ne $diagCapture -and $diagCapture.exit -eq 1 -and $diagCapture.stdout -notmatch $sentinel
+  )
+  Check 'exit-1 diagnostics parse to the fixed enums under Windows PowerShell 5.1' (
+    $diagOutcome.failureClass -eq 'CHECK_FAILED' -and
+    $diagOutcome.lastCompletedPhase -eq 'SYNC_PERSIST' -and
+    $diagOutcome.firstFailedCheck -eq 'PROVISIONING' -and
+    $diagOutcome.failedCheckCount -eq '3' -and
+    $diagOutcome.responseLeakScanStatus -eq 'NOT_RUN'
+  )
 } finally {
   Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue
   Remove-Item Env:METASHEET_AUTH_TOKEN -ErrorAction SilentlyContinue
@@ -102,5 +128,5 @@ if ($fail -gt 0) {
   exit 1
 }
 
-Write-Host "ALL POWERSHELL 5.1 CHECKS PASS ($pass/10)"
+Write-Host "ALL POWERSHELL 5.1 CHECKS PASS ($pass checks)"
 exit 0

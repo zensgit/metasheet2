@@ -79,10 +79,9 @@ function beginPhase(name) {
 // The 4 LOCUS fields (added before the self-scan so it covers them). `result` + sentinels are passed in
 // for testability. lastCompletedPhase: on a run that reached the last phase, everything completed; an
 // early-return/throw within phase i means the last COMPLETED phase is i-1 (early-returns are mid-phase).
-export function computeDiagnosticLocus(result) {
+export function computeDiagnosticLocus(result, reachedIdx = DIAG.reachedIdx) {
   const S = result.summary
   const failedChecks = result.checks.filter((c) => c.ok !== true)
-  const reachedIdx = DIAG.reachedIdx
   const last = SMOKE_PHASES.length - 1
   S.failedCheckCount = failedChecks.length
   S.lastCompletedPhase = reachedIdx >= last ? SMOKE_PHASES[last] : (reachedIdx > 0 ? SMOKE_PHASES[reachedIdx - 1] : 'NONE')
