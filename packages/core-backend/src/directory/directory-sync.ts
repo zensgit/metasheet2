@@ -1071,10 +1071,10 @@ export async function upsertDirectoryAccountDepartments(
  * `is_manager`). It updates an existing membership; it does NOT create one (membership creation
  * stays owned by the B2 local-directory CRUD surface, #4317). This writer is called by the
  * `PATCH /api/admin/directory/local/memberships/:membershipId` route (platform-admin gated), which
- * supplies the server-resolved `orgId`, emits the set/unset audit event, and maps a
- * `{ updated: false }` result to a 404.
+ * supplies the server-resolved `orgId`, emits the set/unset audit event, and maps the discriminated
+ * result: `updated` → 200 + audit, `archived` → 409, `not_found` → 404.
  *
- * SCOPE — the single UPDATE binds ALL of: the ORG (`i.org_id = $3`); the INTEGRATION
+ * SCOPE — the locked SELECT binds ALL of: the ORG (`i.org_id = $3`); the INTEGRATION
  * (`i.id = a.integration_id`, and the department's own integration via `d.integration_id =
  * a.integration_id`, so the account and the department must share ONE integration) AND that
  * integration's STATUS (`i.status = 'active'` — an inactive/disabled local integration is out of
@@ -1087,7 +1087,11 @@ export async function upsertDirectoryAccountDepartments(
  * Anything malformed — an inactive local integration, a DingTalk-synced membership, a mislabeled
  * account or department row, a local-account × foreign-integration-department pair, or a cross-org
  * call (`orgId` naming a different org than the account's integration belongs to) — matches ZERO
- * rows, so the result is a no-op `{ updated: false }`, never an error and never a cross-scope write.
+ * rows, so the result is a no-op `{ outcome: 'not_found' }`, never an error and never a cross-scope
+ * write. A row that IS in scope but whose account or department has been ARCHIVED (`is_active=false`)
+ * yields `{ outcome: 'archived' }` — the PB4-2 read-only guard, enforced at this write point under
+ * two explicit account-then-department `FOR UPDATE` row locks (fixed order §2, deadlock-free), NOT
+ * delegated to any route pre-check.
  *
  * That local-only, active-only boundary is load-bearing: the resolver's DingTalk bit-identical
  * guarantee rests on `is_manager` staying default-false for every provider-synced row, so this
@@ -1097,30 +1101,68 @@ export async function upsertDirectoryAccountDepartments(
  * which likewise does not audit). The membership-change audit row is written by its caller, the
  * local-directory membership route, next to every other B2 membership mutation's audit event.
  */
+export type SetLocalMembershipManagerResult = { outcome: 'updated' | 'archived' | 'not_found' }
+
 export async function setLocalMembershipManager(
   orgId: string,
   identity: { directoryAccountId: string; directoryDepartmentId: string },
   isManager: boolean,
-): Promise<{ updated: boolean }> {
+): Promise<SetLocalMembershipManagerResult> {
   const normalizedOrgId = normalizeText(orgId) || DEFAULT_ORG_ID
-  const result = await query(
-    `UPDATE directory_account_departments AS ad
-        SET is_manager = $4
-       FROM directory_accounts a, directory_integrations i, directory_departments d
-      WHERE ad.directory_account_id = $1::uuid
-        AND ad.directory_department_id = $2::uuid
-        AND a.id = ad.directory_account_id
-        AND d.id = ad.directory_department_id
-        AND i.id = a.integration_id
-        AND d.integration_id = a.integration_id
-        AND i.provider = 'local'
-        AND i.status = 'active'
-        AND a.provider = 'local'
-        AND d.provider = 'local'
-        AND i.org_id = $3`,
-    [identity.directoryAccountId, identity.directoryDepartmentId, normalizedOrgId, isManager],
-  )
-  return { updated: (result.rowCount ?? 0) > 0 }
+  // PB4-2 (owner design lock, WRITE-POINT enforcement): the writer is the REAL archived guard — it
+  // may NOT rely on any route pre-check. It locks the ACCOUNT row first, then the DEPARTMENT row, in
+  // TWO explicit statements — the same fixed account-before-department order (design lock §2) the B2
+  // membership writers use. A single-join `FOR UPDATE OF a, d` is deliberately NOT used: its row-lock
+  // acquisition order is plan-dependent, so a concurrent add/switch (which locks account-then-
+  // department explicitly) could grab the same pair in the opposite order and deadlock. Both
+  // statements keep the full B3 scoping (membership exists AND account+department are under this
+  // org's ACTIVE local integration); a row out of scope matches nothing → `not_found`. The is_active
+  // reads and the write are in ONE transaction behind these locks, so a concurrent archive is
+  // serialized: it commits first (we see is_active=false → `archived`) or waits behind us (we win,
+  // it applies after). No getOrCreateLocalIntegration call — a manager write must not bootstrap.
+  return await transaction(async (client) => {
+    const accountRes = await client.query(
+      `SELECT a.is_active
+         FROM directory_account_departments ad
+         JOIN directory_accounts a ON a.id = ad.directory_account_id
+         JOIN directory_integrations i ON i.id = a.integration_id
+        WHERE ad.directory_account_id = $1::uuid
+          AND ad.directory_department_id = $2::uuid
+          AND i.provider = 'local'
+          AND i.status = 'active'
+          AND a.provider = 'local'
+          AND i.org_id = $3
+        FOR UPDATE OF a`,
+      [identity.directoryAccountId, identity.directoryDepartmentId, normalizedOrgId],
+    )
+    const accountRow = accountRes.rows[0] as { is_active: boolean } | undefined
+    if (!accountRow) return { outcome: 'not_found' }
+
+    const departmentRes = await client.query(
+      `SELECT d.is_active
+         FROM directory_account_departments ad
+         JOIN directory_accounts a ON a.id = ad.directory_account_id
+         JOIN directory_departments d ON d.id = ad.directory_department_id
+        WHERE ad.directory_account_id = $1::uuid
+          AND ad.directory_department_id = $2::uuid
+          AND d.integration_id = a.integration_id
+          AND d.provider = 'local'
+        FOR UPDATE OF d`,
+      [identity.directoryAccountId, identity.directoryDepartmentId],
+    )
+    const departmentRow = departmentRes.rows[0] as { is_active: boolean } | undefined
+    if (!departmentRow) return { outcome: 'not_found' }
+
+    if (!accountRow.is_active || !departmentRow.is_active) return { outcome: 'archived' }
+
+    await client.query(
+      `UPDATE directory_account_departments
+          SET is_manager = $3
+        WHERE directory_account_id = $1::uuid AND directory_department_id = $2::uuid`,
+      [identity.directoryAccountId, identity.directoryDepartmentId, isManager],
+    )
+    return { outcome: 'updated' }
+  })
 }
 
 /**

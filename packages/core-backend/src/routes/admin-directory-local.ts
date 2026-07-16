@@ -424,8 +424,9 @@ export function adminDirectoryLocalRouter(): Router {
     if (hasManager) {
       // `isManager` is guaranteed a boolean by rejectInvalidFieldTypes above; both `true` (set the
       // normalized manager flag) and `false` (unset it) are valid operations. The writer is scoped
-      // to LOCAL memberships in THIS org — a no-op `{ updated: false }` (missing, non-local,
-      // cross-org, or cross-integration membership) becomes a 404, and it emits no cross-scope write.
+      // to LOCAL memberships in THIS org — an out-of-scope membership (missing, non-local, cross-org,
+      // or cross-integration) resolves to `not_found` → 404 and an in-scope but ARCHIVED target to
+      // `archived` → 409; neither emits a cross-scope write.
       const isManager = body.isManager as boolean
       try {
         const result = await setLocalMembershipManager(
@@ -433,8 +434,15 @@ export function adminDirectoryLocalRouter(): Router {
           { directoryAccountId: parsed.accountId, directoryDepartmentId: parsed.departmentId },
           isManager,
         )
-        if (!result.updated) {
+        // PB4-2: the writer is the archived guard; its discriminated result distinguishes a
+        // genuinely-missing/out-of-scope membership (404) from an in-scope but ARCHIVED target (409),
+        // the same 404-vs-409 discipline as the B2 CRUD surface.
+        if (result.outcome === 'not_found') {
           jsonError(res, 404, 'DIRECTORY_LOCAL_NOT_FOUND', 'Local membership not found')
+          return
+        }
+        if (result.outcome === 'archived') {
+          jsonError(res, 409, 'DIRECTORY_LOCAL_CONFLICT', 'Local membership target is archived (read-only)')
           return
         }
         await auditLog({

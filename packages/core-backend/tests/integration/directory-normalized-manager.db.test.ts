@@ -1,3 +1,4 @@
+import { Client } from 'pg'
 import express from 'express'
 import request from 'supertest'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
@@ -6,6 +7,7 @@ import {
   getOrCreateLocalIntegration,
   setLocalMembershipManager,
 } from '../../src/directory/directory-sync'
+import { archiveLocalAccount, archiveLocalDepartment } from '../../src/directory/local-directory-org'
 import { adminDirectoryLocalRouter } from '../../src/routes/admin-directory-local'
 import { resolveApprovalRequesterOrgRelations } from '../../src/services/ApprovalDirectoryOrg'
 
@@ -240,7 +242,7 @@ describeIfDatabase('B3 normalized manager relation — ApprovalDirectoryOrg dual
     // Exercise the writer as the flag source (the PATCH /memberships route calls it in production).
     expect(
       await setLocalMembershipManager(id('a-org'), { directoryAccountId: localMgrAccountA, directoryDepartmentId: localDeptA }, true),
-    ).toEqual({ updated: true })
+    ).toEqual({ outcome: 'updated' })
 
     const rel = await resolveApprovalRequesterOrgRelations(U_A_REQ, queryFn)
     // Exact shape: manager from the normalized relation; department name lifted; no title/head seeded.
@@ -284,7 +286,7 @@ describeIfDatabase('B3 normalized manager relation — ApprovalDirectoryOrg dual
 
     expect(
       await setLocalMembershipManager(id('d-org'), { directoryAccountId: localAccountD, directoryDepartmentId: localDeptD }, true),
-    ).toEqual({ updated: true })
+    ).toEqual({ outcome: 'updated' })
     expect(await readIsManager(localAccountD, localDeptD)).toBe(true)
 
     // No raw write: the account's provider-raw JSON is untouched by the normalized-flag write.
@@ -294,7 +296,7 @@ describeIfDatabase('B3 normalized manager relation — ApprovalDirectoryOrg dual
     // Round-trips back to false.
     expect(
       await setLocalMembershipManager(id('d-org'), { directoryAccountId: localAccountD, directoryDepartmentId: localDeptD }, false),
-    ).toEqual({ updated: true })
+    ).toEqual({ outcome: 'updated' })
     expect(await readIsManager(localAccountD, localDeptD)).toBe(false)
   })
 
@@ -303,7 +305,7 @@ describeIfDatabase('B3 normalized manager relation — ApprovalDirectoryOrg dual
     // if provider weren't the blocker — isolating the boundary to the `i.provider = 'local'` gate.
     expect(
       await setLocalMembershipManager('default', { directoryAccountId: dtAccountE, directoryDepartmentId: dtDeptE }, true),
-    ).toEqual({ updated: false })
+    ).toEqual({ outcome: 'not_found' })
     expect(await readIsManager(dtAccountE, dtDeptE)).toBe(false)
   })
 })
@@ -335,7 +337,7 @@ describeIfDatabase('B3 writer four-way scope + resolver integration binding (rea
     }
   })
 
-  it('writer refuses a CROSS-ORG call (org mismatch) — updated:false, is_manager untouched; correct org flips it', async () => {
+  it('writer refuses a CROSS-ORG call (org mismatch) — not_found, is_manager untouched; correct org flips it', async () => {
     const local = await getOrCreateLocalIntegration(id('wx-org'))
     integrationIds.push(local.id)
     const dept = await seedDept(local.id, 'local', id('wx-dept'), 'WX')
@@ -345,18 +347,18 @@ describeIfDatabase('B3 writer four-way scope + resolver integration binding (rea
     // Same account+dept, but a DIFFERENT org string → the `i.org_id = $3` gate fails → no match.
     expect(
       await setLocalMembershipManager(id('wx-OTHER-org'), { directoryAccountId: acct, directoryDepartmentId: dept }, true),
-    ).toEqual({ updated: false })
+    ).toEqual({ outcome: 'not_found' })
     expect(await readIsManager(acct, dept)).toBe(false)
 
     // Control: the CORRECT org DOES flip it (proves the fixture is otherwise writable — the org
     // gate, not some unrelated bind, is what refused the cross-org call above).
     expect(
       await setLocalMembershipManager(id('wx-org'), { directoryAccountId: acct, directoryDepartmentId: dept }, true),
-    ).toEqual({ updated: true })
+    ).toEqual({ outcome: 'updated' })
     expect(await readIsManager(acct, dept)).toBe(true)
   })
 
-  it('writer refuses a LOCAL-account × DINGTALK-department malformed membership — updated:false', async () => {
+  it('writer refuses a LOCAL-account × DINGTALK-department malformed membership — not_found', async () => {
     const local = await getOrCreateLocalIntegration(id('wf-org'))
     integrationIds.push(local.id)
     const localAcct = await seedAccount(local.id, 'local', id('wf-ext'), id('wf-key'), 'WF', {})
@@ -377,11 +379,11 @@ describeIfDatabase('B3 writer four-way scope + resolver integration binding (rea
     // route describe block below for the m-dprov-isolated case.
     expect(
       await setLocalMembershipManager(id('wf-org'), { directoryAccountId: localAcct, directoryDepartmentId: dtDept }, true),
-    ).toEqual({ updated: false })
+    ).toEqual({ outcome: 'not_found' })
     expect(await readIsManager(localAcct, dtDept)).toBe(false)
   })
 
-  it('writer refuses a LOCAL-account × LOCAL-department pair from DIFFERENT integrations — updated:false (m2 target, isolated from provider checks)', async () => {
+  it('writer refuses a LOCAL-account × LOCAL-department pair from DIFFERENT integrations — not_found (m2 target, isolated from provider checks)', async () => {
     const localA = await getOrCreateLocalIntegration(id('wf2-org-a'))
     integrationIds.push(localA.id)
     const acctA = await seedAccount(localA.id, 'local', id('wf2-ext-a'), id('wf2-key-a'), 'WF2A', {})
@@ -397,7 +399,7 @@ describeIfDatabase('B3 writer four-way scope + resolver integration binding (rea
 
     expect(
       await setLocalMembershipManager(id('wf2-org-a'), { directoryAccountId: acctA, directoryDepartmentId: deptB }, true),
-    ).toEqual({ updated: false })
+    ).toEqual({ outcome: 'not_found' })
     expect(await readIsManager(acctA, deptB)).toBe(false)
   })
 
@@ -647,8 +649,8 @@ describeIfDatabase('B3 set-manager route — PATCH /memberships/:id {isManager} 
   // try/finally so it is guaranteed back to 'active' for every test after this one, regardless of
   // assertion outcome. A dedicated fresh account+dept keeps the blast radius off `deptId` /
   // `mgrAccountId`. Mutation m-status: dropping `i.status = 'active'` from the writer's UPDATE
-  // must redden this test (the `updated: false` / 404 assertions below would flip to true/200).
-  it('writer + route refuse an INACTIVE local integration — updated:false / 404 / no audit; reactivating restores the write (m-status target)', async () => {
+  // must redden this test (the `not_found` / 404 assertions below would flip to updated/200).
+  it('writer + route refuse an INACTIVE local integration — not_found / 404 / no audit; reactivating restores the write (m-status target)', async () => {
     const dept = await seedDept(localInt, 'local', rid('inact-dept'), 'RouteInactDept')
     extraDeptIds.push(dept)
     const acct = await seedAccount(localInt, 'local', rid('inact-ext'), rid('inact-key'), 'RouteInactAcct', {})
@@ -658,10 +660,8 @@ describeIfDatabase('B3 set-manager route — PATCH /memberships/:id {isManager} 
 
     await query(`UPDATE directory_integrations SET status = 'inactive' WHERE id = $1`, [localInt])
     try {
-      // (a) writer directly: updated:false, is_manager unchanged.
-      expect(await setLocalMembershipManager('default', { directoryAccountId: acct, directoryDepartmentId: dept }, true)).toEqual({
-        updated: false,
-      })
+      // (a) writer directly: outcome not_found, is_manager unchanged.
+      expect(await setLocalMembershipManager('default', { directoryAccountId: acct, directoryDepartmentId: dept }, true)).toEqual({ outcome: 'not_found' })
       expect(await readIsManager(acct, dept)).toBe(false)
 
       // (b) the route: 404, no audit row.
@@ -679,9 +679,7 @@ describeIfDatabase('B3 set-manager route — PATCH /memberships/:id {isManager} 
     }
 
     // (c) positive control: same account/dept, integration reactivated → the writer now applies.
-    expect(await setLocalMembershipManager('default', { directoryAccountId: acct, directoryDepartmentId: dept }, true)).toEqual({
-      updated: true,
-    })
+    expect(await setLocalMembershipManager('default', { directoryAccountId: acct, directoryDepartmentId: dept }, true)).toEqual({ outcome: 'updated' })
     expect(await readIsManager(acct, dept)).toBe(true)
   })
 
@@ -691,7 +689,7 @@ describeIfDatabase('B3 set-manager route — PATCH /memberships/:id {isManager} 
   // the department's), isolating this test to the `a.provider = 'local'` predicate. Mutation
   // m-aprov: dropping that predicate must redden this test without affecting the department-
   // provider test below.
-  it('writer + route refuse an ACCOUNT row mislabeled provider — updated:false / 404 / no audit; restoring re-enables the write (m-aprov target)', async () => {
+  it('writer + route refuse an ACCOUNT row mislabeled provider — not_found / 404 / no audit; restoring re-enables the write (m-aprov target)', async () => {
     const dept = await seedDept(localInt, 'local', rid('aprov-dept'), 'RouteAprovDept')
     extraDeptIds.push(dept)
     const acct = await seedAccount(localInt, 'local', rid('aprov-ext'), rid('aprov-key'), 'RouteAprovAcct', {})
@@ -701,9 +699,7 @@ describeIfDatabase('B3 set-manager route — PATCH /memberships/:id {isManager} 
 
     await query(`UPDATE directory_accounts SET provider = 'dingtalk' WHERE id = $1`, [acct])
     try {
-      expect(await setLocalMembershipManager('default', { directoryAccountId: acct, directoryDepartmentId: dept }, true)).toEqual({
-        updated: false,
-      })
+      expect(await setLocalMembershipManager('default', { directoryAccountId: acct, directoryDepartmentId: dept }, true)).toEqual({ outcome: 'not_found' })
       expect(await readIsManager(acct, dept)).toBe(false)
 
       const res = await request(adminApp).patch(`/api/admin/directory/local/memberships/${mid}`).send({ isManager: true })
@@ -720,9 +716,7 @@ describeIfDatabase('B3 set-manager route — PATCH /memberships/:id {isManager} 
     }
 
     // Positive control: same account/dept, provider restored to 'local' → the writer now applies.
-    expect(await setLocalMembershipManager('default', { directoryAccountId: acct, directoryDepartmentId: dept }, true)).toEqual({
-      updated: true,
-    })
+    expect(await setLocalMembershipManager('default', { directoryAccountId: acct, directoryDepartmentId: dept }, true)).toEqual({ outcome: 'updated' })
     expect(await readIsManager(acct, dept)).toBe(true)
   })
 
@@ -732,7 +726,7 @@ describeIfDatabase('B3 set-manager route — PATCH /memberships/:id {isManager} 
   // test to the `d.provider = 'local'` predicate. Mutation m-dprov: dropping that predicate must
   // redden THIS test while the account-provider test above stays green — proving the two
   // predicates (and their tests) are independently load-bearing.
-  it('writer + route refuse a DEPARTMENT row mislabeled provider — updated:false / 404 / no audit; restoring re-enables the write (m-dprov target)', async () => {
+  it('writer + route refuse a DEPARTMENT row mislabeled provider — not_found / 404 / no audit; restoring re-enables the write (m-dprov target)', async () => {
     const dept = await seedDept(localInt, 'local', rid('dprov-dept'), 'RouteDprovDept')
     extraDeptIds.push(dept)
     const acct = await seedAccount(localInt, 'local', rid('dprov-ext'), rid('dprov-key'), 'RouteDprovAcct', {})
@@ -742,9 +736,7 @@ describeIfDatabase('B3 set-manager route — PATCH /memberships/:id {isManager} 
 
     await query(`UPDATE directory_departments SET provider = 'dingtalk' WHERE id = $1`, [dept])
     try {
-      expect(await setLocalMembershipManager('default', { directoryAccountId: acct, directoryDepartmentId: dept }, true)).toEqual({
-        updated: false,
-      })
+      expect(await setLocalMembershipManager('default', { directoryAccountId: acct, directoryDepartmentId: dept }, true)).toEqual({ outcome: 'not_found' })
       expect(await readIsManager(acct, dept)).toBe(false)
 
       const res = await request(adminApp).patch(`/api/admin/directory/local/memberships/${mid}`).send({ isManager: true })
@@ -761,9 +753,173 @@ describeIfDatabase('B3 set-manager route — PATCH /memberships/:id {isManager} 
     }
 
     // Positive control: same account/dept, provider restored to 'local' → the writer now applies.
-    expect(await setLocalMembershipManager('default', { directoryAccountId: acct, directoryDepartmentId: dept }, true)).toEqual({
-      updated: true,
-    })
+    expect(await setLocalMembershipManager('default', { directoryAccountId: acct, directoryDepartmentId: dept }, true)).toEqual({ outcome: 'updated' })
     expect(await readIsManager(acct, dept)).toBe(true)
+  })
+})
+
+// =============================================================================================
+// PB4-2 — the manager writer is the archived read-only guard (owner design lock §3): it must
+// self-contain `a.is_active = true AND d.is_active = true` in its OWN locked transaction and NOT
+// rely on any route pre-check. Its discriminated result maps archived → 409 (distinct from
+// missing → 404). Proves BOTH: the DIRECT writer classifies archived, and a TWO-CONNECTION barrier
+// serializes the write point against a concurrent archive in both linearizations.
+// =============================================================================================
+describeIfDatabase('PB4-2 — manager writer archived read-only (real DB)', () => {
+  const P = Date.now()
+  const pid = (s: string): string => `pb42-mgr-${P}-${s}`
+  const createdOrgs: string[] = []
+  const defaultScopedAccounts: string[] = []
+  const defaultScopedDepts: string[] = []
+
+  function appAs(user: unknown): express.Express {
+    const app = express()
+    app.use(express.json())
+    if (user !== undefined) {
+      app.use((req, _res, next) => {
+        ;(req as express.Request & { user?: unknown }).user = user
+        next()
+      })
+    }
+    app.use('/api/admin/directory/local', adminDirectoryLocalRouter())
+    return app
+  }
+  const adminApp = appAs({ id: `pb42-mgr-admin-${P}`, role: 'admin' })
+
+  async function withHolder(fn: (holder: Client) => Promise<void>): Promise<void> {
+    const holder = new Client({ connectionString: process.env.DATABASE_URL })
+    await holder.connect()
+    try {
+      await fn(holder)
+    } finally {
+      await holder.end()
+    }
+  }
+  async function waitForBlockedDirectoryWriter(min = 1): Promise<void> {
+    for (let i = 0; i < 400; i++) {
+      const r = await query<{ n: number }>(
+        `SELECT count(*)::int AS n FROM pg_stat_activity
+          WHERE wait_event_type = 'Lock' AND state = 'active' AND query ILIKE '%directory_%'`,
+      )
+      if ((r.rows[0]?.n ?? 0) >= min) return
+      await new Promise((res) => setTimeout(res, 20))
+    }
+    throw new Error('timed out waiting for a blocked directory writer (barrier never engaged)')
+  }
+  function settled<T>(p: Promise<T>): Promise<unknown> {
+    return p.then(
+      (v) => v,
+      (e) => e,
+    )
+  }
+
+  async function seedLocalMembership(tag: string): Promise<{ org: string; acct: string; dept: string; membershipId: string }> {
+    const org = pid(`${tag}-org`)
+    createdOrgs.push(org)
+    const local = await getOrCreateLocalIntegration(org)
+    const dept = await seedDept(local.id, 'local', pid(`${tag}-dept`), 'MgrDept')
+    const acct = await seedAccount(local.id, 'local', pid(`${tag}-ext`), pid(`${tag}-key`), 'MgrAcct', {})
+    await membership(acct, dept, false)
+    return { org, acct, dept, membershipId: `${acct}:${dept}` }
+  }
+
+  afterAll(async () => {
+    try {
+      for (const acct of defaultScopedAccounts) await query(`DELETE FROM directory_accounts WHERE id = $1`, [acct])
+      for (const dept of defaultScopedDepts) await query(`DELETE FROM directory_departments WHERE id = $1`, [dept])
+      for (const org of createdOrgs) await query(`DELETE FROM directory_integrations WHERE org_id = $1`, [org])
+    } catch {
+      /* best effort */
+    }
+  })
+
+  it('sentinel: DATABASE_URL is set', () => {
+    expect(process.env.DATABASE_URL).toBeTruthy()
+  })
+
+  it('A. DIRECT writer returns { outcome: "archived" } when the ACCOUNT is archived — is_manager untouched', async () => {
+    const { org, acct, dept } = await seedLocalMembership('a-acct')
+    await query(`UPDATE directory_accounts SET is_active = false WHERE id = $1`, [acct])
+
+    expect(await setLocalMembershipManager(org, { directoryAccountId: acct, directoryDepartmentId: dept }, true)).toEqual({
+      outcome: 'archived',
+    })
+    expect(await readIsManager(acct, dept)).toBe(false)
+  })
+
+  it('A. DIRECT writer returns { outcome: "archived" } when the DEPARTMENT is archived — is_manager untouched', async () => {
+    const { org, acct, dept } = await seedLocalMembership('a-dept')
+    await query(`UPDATE directory_departments SET is_active = false WHERE id = $1`, [dept])
+
+    expect(await setLocalMembershipManager(org, { directoryAccountId: acct, directoryDepartmentId: dept }, true)).toEqual({
+      outcome: 'archived',
+    })
+    expect(await readIsManager(acct, dept)).toBe(false)
+  })
+
+  it('B. barrier (ii) — archive holds the account lock first → the writer sees is_active=false → { outcome: "archived" }, no write', async () => {
+    const { org, acct, dept } = await seedLocalMembership('b-ii')
+
+    await withHolder(async (holder) => {
+      await holder.query('BEGIN')
+      await holder.query(`UPDATE directory_accounts SET is_active = false WHERE id = $1`, [acct])
+      const writePromise = setLocalMembershipManager(org, { directoryAccountId: acct, directoryDepartmentId: dept }, true)
+      void settled(writePromise)
+      await waitForBlockedDirectoryWriter() // the writer is parked behind the holder's account-row lock
+      await holder.query('COMMIT')
+      expect(await writePromise).toEqual({ outcome: 'archived' })
+    })
+    expect(await readIsManager(acct, dept)).toBe(false)
+  })
+
+  it('B. barrier (i) — a SQL stand-in for the writer holds the locks first → a concurrent archive parks → is_manager set, archive applies after', async () => {
+    const { org, acct, dept } = await seedLocalMembership('b-i')
+
+    await withHolder(async (holder) => {
+      await holder.query('BEGIN')
+      // The writer's stand-in acquires the SAME locks (account before department, fixed order) and
+      // sets is_manager — a SQL STAND-IN for setLocalMembershipManager winning the lock (the real
+      // service opens+commits its own transaction, so it cannot be held open while the archive runs).
+      await holder.query(`SELECT id FROM directory_accounts WHERE id = $1 FOR UPDATE`, [acct])
+      await holder.query(`SELECT id FROM directory_departments WHERE id = $1 FOR UPDATE`, [dept])
+      await holder.query(
+        `UPDATE directory_account_departments SET is_manager = true
+          WHERE directory_account_id = $1 AND directory_department_id = $2`,
+        [acct, dept],
+      )
+      const archivePromise = archiveLocalDepartment(org, dept)
+      void settled(archivePromise)
+      await waitForBlockedDirectoryWriter() // the archive is parked behind the writer's dept-row lock
+      await holder.query('COMMIT')
+      await archivePromise
+    })
+
+    expect(await readIsManager(acct, dept)).toBe(true) // the manager write won
+    const drow = await query<{ is_active: boolean }>(`SELECT is_active FROM directory_departments WHERE id = $1`, [dept])
+    expect(drow.rows[0].is_active).toBe(false) // archive applied AFTER
+  })
+
+  it('C. ROUTE maps an archived membership to 409 (distinct from the 404 for a missing one) — no audit', async () => {
+    // The route resolves org 'default' server-side, so this fixture lives in the default local
+    // integration; a dedicated account/dept keeps the archive off every other 'default' fixture.
+    const local = await getOrCreateLocalIntegration('default')
+    const dept = await seedDept(local.id, 'local', pid('route-dept'), 'RouteMgrDept')
+    const acct = await seedAccount(local.id, 'local', pid('route-ext'), pid('route-key'), 'RouteMgrAcct', {})
+    defaultScopedDepts.push(dept)
+    defaultScopedAccounts.push(acct)
+    await membership(acct, dept, false)
+    const mid = `${acct}:${dept}`
+    await query(`UPDATE directory_accounts SET is_active = false WHERE id = $1`, [acct])
+
+    const res = await request(adminApp).patch(`/api/admin/directory/local/memberships/${mid}`).send({ isManager: true })
+    expect(res.status).toBe(409)
+    expect(res.body.error.code).toBe('DIRECTORY_LOCAL_CONFLICT')
+    expect(await readIsManager(acct, dept)).toBe(false)
+
+    const audit = await query(
+      `SELECT 1 FROM audit_logs WHERE action = 'directory.local_membership.set_manager' AND resource_id = $1`,
+      [mid],
+    )
+    expect(audit.rows.length).toBe(0)
   })
 })

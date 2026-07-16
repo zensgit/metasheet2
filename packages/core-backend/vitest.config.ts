@@ -105,6 +105,14 @@ export default defineConfig({
       // gated; excluded here so the no-DB job cannot skip-green it, and wired as a WHOLE FILE into
       // the directory real-DB step in plugin-tests.yml.
       'tests/integration/local-directory-org-crud-route.db.test.ts',
+      // Canonical Org MVP PB4-2: archive → FULL read-only enforced at the WRITE POINT — direct-writer
+      // archived enforcement + two-connection deterministic barriers (archive-first → 409 / write-
+      // first → write-wins) + primary-switch full-read-only/cross-scope + deadlock-freedom. This is a
+      // TWO-CONNECTION concurrency suite that is meaningless without a real DB. DATABASE_URL-gated;
+      // excluded here so the no-DB job cannot skip-green it, and wired as a WHOLE FILE into the
+      // directory real-DB step in plugin-tests.yml (both points asserted by
+      // pb4-2-archive-readonly-ci-wiring.test.mjs so neither can silently drop).
+      'tests/integration/local-directory-org-archive-readonly.db.test.ts',
       // Canonical Org MVP B3 (#4215 §5.4): proves ApprovalDirectoryOrg's DUAL-SOURCE direct-manager
       // resolution against real Postgres — normalized `is_manager` relation for a local integration,
       // the DingTalk `leader_in_dept` regression pin (load-bearing compat leg + is_manager=0 positive

@@ -150,6 +150,12 @@ jobs:
       - name: Global History flag manifest contract (R12-C)
         run: node --test scripts/ops/global-history-flag-manifest.test.mjs scripts/ops/multitable-global-history-flag-status.test.mjs
 
+      # PB4-2 CI two-point wiring contract (no DB): the archive-read-only two-connection suite must
+      # stay wired into BOTH vitest.config.ts (exclude) AND plugin-tests.yml (directory real-DB step).
+      # Dropping either point makes the whole barrier suite silently never run while CI stays green.
+      - name: PB4-2 archive-read-only CI wiring contract
+        run: node --test scripts/ops/pb4-2-archive-readonly-ci-wiring.test.mjs
+
       # The production monitor invokes the same state helper covered here.
       # Keep this in the required 18/20 matrix so HTTP classification, silence
       # barriers, and alert/recovery streak semantics cannot drift silently.
@@ -606,6 +612,7 @@ jobs:
             tests/integration/directory-local-provider-scheduler-exclusion.db.test.ts \
             tests/integration/local-directory-org-crud.db.test.ts \
             tests/integration/local-directory-org-crud-route.db.test.ts \
+            tests/integration/local-directory-org-archive-readonly.db.test.ts \
             tests/integration/directory-normalized-manager.db.test.ts \
             tests/integration/attendance-csv-export-bom.test.ts \
             tests/integration/attendance-notification-redelivery.db.test.ts \

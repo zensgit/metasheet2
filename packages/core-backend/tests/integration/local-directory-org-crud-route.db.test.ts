@@ -786,3 +786,77 @@ describeIfDatabase('PB4-1 — body-carried id fields are 400 on non-UUID', () =>
     expect(patch.status).toBe(400)
   })
 })
+
+// PB4-2 owner round: a switch-primary whose TARGET membership is provider-MISLABELED (a
+// dingtalk-provider department under the SAME local integration) must be a 404 (not a valid local
+// membership to make primary), NOT a 409 — proven at the HTTP route layer, with zero audit and no
+// primary bits changed. This pins the `targetRow.provider !== 'local'` predicate that the
+// service-layer cross-scope test (which only varied integration) could not (deleting only the
+// provider predicate leaves the service file green; this route test reddens instead).
+describeIfDatabase('PB4-2 — provider-mislabeled switch TARGET is 404 at the route (real DB, HTTP)', () => {
+  const deptIds: string[] = []
+  const accountIds: string[] = []
+  const userIds: string[] = []
+  const rawDeptIds: string[] = []
+
+  afterEach(async () => {
+    for (const id of rawDeptIds.splice(0)) await query(`DELETE FROM directory_departments WHERE id = $1`, [id])
+    for (const id of deptIds.splice(0)) await query(`DELETE FROM directory_departments WHERE id = $1`, [id])
+    for (const id of accountIds.splice(0)) await query(`DELETE FROM directory_accounts WHERE id = $1`, [id])
+    for (const id of userIds.splice(0)) await query(`DELETE FROM users WHERE id = $1`, [id])
+  })
+
+  it('PATCH primary to a dingtalk-provider target under the local integration → 404, zero switch_primary audit, primaries unchanged', async () => {
+    const userId = await seedUser()
+    userIds.push(userId)
+    const acctRes = await request(adminApp).post('/api/admin/directory/local/accounts').send({ localUserId: userId, name: fixtureName('mt-acct') })
+    expect(acctRes.status).toBe(200)
+    const accountId = acctRes.body.data.account.id as string
+    accountIds.push(accountId)
+
+    const deptRes = await request(adminApp).post('/api/admin/directory/local/departments').send({ name: fixtureName('mt-local-dept') })
+    expect(deptRes.status).toBe(200)
+    const localDeptId = deptRes.body.data.department.id as string
+    deptIds.push(localDeptId)
+
+    // legit local membership, made primary through the real route.
+    expect((await request(adminApp).post('/api/admin/directory/local/memberships').send({ accountId, departmentId: localDeptId })).status).toBe(200)
+    expect((await request(adminApp).patch(`/api/admin/directory/local/memberships/${accountId}:${localDeptId}`).send({ isPrimary: true })).status).toBe(200)
+
+    // the org's active local integration (the route resolves org 'default'), then a provider-MISLABELED
+    // department under it + a raw membership — the malformed shape a provider sync could produce.
+    const integ = await query<{ id: string }>(`SELECT id FROM directory_integrations WHERE org_id = 'default' AND provider = 'local' AND status = 'active'`)
+    const integrationId = integ.rows[0].id
+    const dtDept = await query<{ id: string }>(
+      `INSERT INTO directory_departments (integration_id, provider, external_department_id, name, is_active, raw)
+       VALUES ($1, 'dingtalk', $2, $3, true, '{}'::jsonb) RETURNING id`,
+      [integrationId, `dingtalk:${STAMP}:mt-target`, 'Mislabeled Target'],
+    )
+    const dtDeptId = dtDept.rows[0].id
+    rawDeptIds.push(dtDeptId)
+    await query(`INSERT INTO directory_account_departments (directory_account_id, directory_department_id, is_primary) VALUES ($1, $2, false)`, [accountId, dtDeptId])
+
+    const auditBefore = await query<{ n: string }>(
+      `SELECT count(*)::text AS n FROM audit_logs WHERE action = 'directory.local_membership.switch_primary' AND resource_id = $1`,
+      [`${accountId}:${dtDeptId}`],
+    )
+    const res = await request(adminApp).patch(`/api/admin/directory/local/memberships/${accountId}:${dtDeptId}`).send({ isPrimary: true })
+    expect(res.status).toBe(404)
+    expect(res.body.error.code).toBe('DIRECTORY_LOCAL_NOT_FOUND')
+
+    const auditAfter = await query<{ n: string }>(
+      `SELECT count(*)::text AS n FROM audit_logs WHERE action = 'directory.local_membership.switch_primary' AND resource_id = $1`,
+      [`${accountId}:${dtDeptId}`],
+    )
+    expect(auditAfter.rows[0]?.n).toBe(auditBefore.rows[0]?.n) // zero switch_primary audit on the rejected path
+
+    // primary bits unchanged: the legit local dept stays primary, the mislabeled target stays non-primary.
+    const primaries = await query<{ directory_department_id: string; is_primary: boolean }>(
+      `SELECT directory_department_id, is_primary FROM directory_account_departments WHERE directory_account_id = $1 ORDER BY directory_department_id`,
+      [accountId],
+    )
+    const primaryMap = new Map(primaries.rows.map((r) => [r.directory_department_id, r.is_primary]))
+    expect(primaryMap.get(localDeptId)).toBe(true)
+    expect(primaryMap.get(dtDeptId)).toBe(false)
+  })
+})
