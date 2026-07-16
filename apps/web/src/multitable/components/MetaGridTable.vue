@@ -398,6 +398,7 @@ import {
   resolveRecordCommentAffordance,
 } from '../utils/comment-affordance'
 import { isSystemField } from '../utils/system-fields'
+import { isFieldAlwaysReadOnly } from '../utils/field-permissions'
 import { useLocale } from '../../composables/useLocale'
 import { frozenPrefixCount } from '../utils/frozen-columns'
 import {
@@ -1070,9 +1071,15 @@ function canShowLockAction(recordId: string): boolean {
   return isRowLocked(recordId) ? canUnlockRow(recordId) : resolveRowActions(recordId).canEdit
 }
 
+// B4: `!isFieldAlwaysReadOnly(f)` is ADDITIVE to `!fieldReadOnlyIds?.includes(f.id)` (the server-supplied,
+// ID-threaded flag that already carries mirror/system/formula/lookup/rollup readOnly via
+// deriveFieldPermissions) — a client-side mirror of the same predicate the server write paths reject on,
+// so a mirror-link cell (or any field.property.mirrorOf/readOnly) is never editable even if the
+// per-field permission map is stale, not yet loaded, or a future call site forgets to thread it.
 const isEditable = (recordId: string, f: MetaField) =>
   !isRowLocked(recordId) &&
-  resolveRowActions(recordId).canEdit && EDITABLE.has(f.type) && !isSystemField(f) && !props.fieldReadOnlyIds?.includes(f.id)
+  resolveRowActions(recordId).canEdit && EDITABLE.has(f.type) && !isSystemField(f) &&
+  !isFieldAlwaysReadOnly(f) && !props.fieldReadOnlyIds?.includes(f.id)
 const isEditing = (rid: string, fid: string) => editCell.value?.recordId === rid && editCell.value?.fieldId === fid
 
 function cellStyle(rid: string, fid: string, ci?: number) {
