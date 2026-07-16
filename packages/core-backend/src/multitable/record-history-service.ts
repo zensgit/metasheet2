@@ -65,6 +65,11 @@ export interface RecordRevisionEntry {
   snapshot: Record<string, unknown> | null
   batchId?: string | null
   createdAt: string
+  /** OD-W2-5a read-through: the R11 SOURCE record-version this `source='restore'` row restored from, else
+   *  null (only the three record-version restore routes populate `restored_from_version`; every other
+   *  emitter leaves it NULL). The inspector history badge keys on NON-NULL, never on `source='restore'`.
+   *  Null in a pre-migration read window (the SELECT omits the column when the 42703 probe says it's absent). */
+  restoredFromVersion?: number | null
 }
 
 // R11 deploy-window guard for restored_from_version (migration zzzz20260711000000_add_meta_record_revisions_restored_from_version). recordRecordRevision runs INSIDE
@@ -281,6 +286,12 @@ export async function listRecordRevisions(
 ): Promise<RecordRevisionEntry[]> {
   const limit = Math.min(Math.max(Number(input.limit ?? 50), 1), 100)
   const offset = Math.max(Number(input.offset ?? 0), 0)
+  // OD-W2-5a read-through: project `restored_from_version` for the R11 inspector badge. Mirrors the WRITE
+  // side's deploy-window discipline — reuse the same txn-safe 42703 probe; when the column is absent (a
+  // rolling deploy before the migration lands) omit it from the SELECT so the read degrades to the base
+  // shape (serializeRecordRevision then sees undefined ⇒ restoredFromVersion: null) rather than erroring.
+  // The column name is a fixed literal, not user input — no injection surface.
+  const restoredCol = (await hasRestoredFromVersionColumn(query)) ? 'restored_from_version,\n       ' : ''
   const result = await query(
     `SELECT
        id,
@@ -294,7 +305,7 @@ export async function listRecordRevisions(
        patch,
        snapshot,
        batch_id,
-       created_at
+       ${restoredCol}created_at
      FROM meta_record_revisions
      WHERE sheet_id = $1 AND record_id = $2
      ORDER BY version DESC, created_at DESC
@@ -318,6 +329,8 @@ function serializeRecordRevision(row: Record<string, unknown>): RecordRevisionEn
     snapshot: row.snapshot === null || row.snapshot === undefined ? null : normalizeJsonObject(row.snapshot),
     batchId: typeof row.batch_id === 'string' ? row.batch_id : null,
     createdAt: row.created_at instanceof Date ? row.created_at.toISOString() : String(row.created_at ?? ''),
+    // OD-W2-5a: undefined when the SELECT omitted the column (pre-migration deploy window) ⇒ null.
+    restoredFromVersion: row.restored_from_version == null ? null : Number(row.restored_from_version),
   }
 }
 

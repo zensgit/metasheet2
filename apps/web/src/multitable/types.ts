@@ -364,6 +364,9 @@ export interface MetaRecordRevision {
   patch: Record<string, unknown>
   snapshot: Record<string, unknown> | null
   createdAt: string
+  /** R11 back-reference (OD-W2-5a): the source record-version this `source='restore'` change restored from, else
+   *  null/absent. Optional so a pre-R11 backend payload still typechecks. The badge renders only when non-null. */
+  restoredFromVersion?: number | null
 }
 
 /** Global History & Point-in-Time Restore — base-level read-only history center (T2/T3). */

@@ -27,7 +27,7 @@ import { afterAll, beforeAll, describe, expect, test } from 'vitest'
 
 import { poolManager } from '../../src/integration/db/connection-pool'
 import { univerMetaRouter } from '../../src/routes/univer-meta'
-import { recordRecordRevision } from '../../src/multitable/record-history-service'
+import { recordRecordRevision, listRecordRevisions } from '../../src/multitable/record-history-service'
 
 const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
 const TS = Date.now()
@@ -108,6 +108,23 @@ describeIfDatabase('R11 restore back-reference — restored_from_version (real D
     // the pre-existing non-restore revisions stay NULL
     expect(await restoredFromOf(rid, 1)).toBeNull()
     expect(await restoredFromOf(rid, 2)).toBeNull()
+  })
+
+  test('G4 (OD-W2-5a): the record-history READ (listRecordRevisions) surfaces restoredFromVersion — not just the DB column', async () => {
+    const rid = `rec_rbr_g4_${TS}`
+    await seedRestorable(rid)
+    const res = await restoreReq(rid, { targetVersion: 1, expectedVersion: 2 })
+    expect(res.status).toBe(200)
+    const newVersion = res.body?.data?.newVersion as number
+
+    // This is what the inspector history panel consumes. Before OD-W2-5a the SELECT omitted the column so the
+    // read returned undefined here even though the DB column was populated (proven by G1). Now it passes through.
+    const entries = await listRecordRevisions(q, { sheetId: SHEET_ID, recordId: rid, limit: 50 })
+    const restoreEntry = entries.find((e) => e.version === newVersion)
+    expect(restoreEntry?.restoredFromVersion).toBe(1)
+    // non-restore revisions read back as null (never source-inferred)
+    expect(entries.find((e) => e.version === 1)?.restoredFromVersion ?? null).toBeNull()
+    expect(entries.find((e) => e.version === 2)?.restoredFromVersion ?? null).toBeNull()
   })
 
   test('G1b recordRecordRevision seam: restoredFromVersion=N writes the column; the three routes all share this primitive', async () => {
