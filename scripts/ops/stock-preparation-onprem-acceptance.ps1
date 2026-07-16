@@ -77,6 +77,14 @@ $Summary = [ordered]@{
   'mvpSmoke.pass'        = 'false'
   auditActionsCovered    = 'N/8'
   selfScanClean          = 'false'
+  # corrective-5 bounded values-free diagnostics — propagated even when the smoke exits 1 so an
+  # early-return/throw is localizable (the runner discards the child's raw stdout/stderr). All fixed
+  # enums / a non-negative integer / a length-capped safe-label; never a business value.
+  'mvpSmoke.failureClass'           = 'NOT_RUN'
+  'mvpSmoke.lastCompletedPhase'     = 'NOT_RUN'
+  'mvpSmoke.firstFailedCheck'       = 'NOT_RUN'
+  'mvpSmoke.failedCheckCount'       = '0'
+  'mvpSmoke.responseLeakScanStatus' = 'NOT_RUN'
   externalPlmK3ErpWrite  = 'false'   # invariant: this line NEVER touches an external write.
   failedStage            = 'none'
 }
@@ -202,7 +210,29 @@ function Test-SmokeOutcome {
   if (-not $pass) { $ok = $false; $reason = 'smoke_not_pass' }
   elseif ($audit -ne '8/8') { $ok = $false; $reason = 'audit_incomplete' }
   elseif (-not $selfScan) { $ok = $false; $reason = 'self_scan_not_clean' }
-  return @{ pass = $pass; audit = $audit; selfScan = $selfScan; ok = $ok; reason = $reason }
+
+  # ── corrective-5: parse the bounded values-free diagnostics. The 4 enum fields are allowlisted (any
+  # off-vocabulary token becomes UNKNOWN, never a raw value); firstFailedCheck is a structural check label
+  # accepted ONLY if it matches a safe-label shape and is length-capped — so a wild/leaky value can never
+  # reach the runner summary (the smoke additionally REDACTs it upstream).
+  $allowedFailure = @('NONE', 'CHECK_FAILED', 'SELF_SCAN_FAILED', 'FATAL_EXCEPTION')
+  $allowedPhase = @('NONE', 'AUTH', 'PROVISIONING', 'SYNC_PERSIST', 'PROJECTS', 'SNAPSHOT_DIFF', 'MAPPINGS',
+    'CONVERSIONS', 'GENERATION_RUN', 'FAILCLOSED_PROBES', 'ERP_CACHE_SYNC', 'CLEANUP_RETIRES', 'AUDIT_TRAIL',
+    'RESPONSE_LEAK_SCAN')
+  $failureClass = if ($Joined -match '(?m)^failureClass=([A-Za-z_]+)\s*$') { $Matches[1] } else { 'NOT_RUN' }
+  if ($failureClass -ne 'NOT_RUN' -and $allowedFailure -notcontains $failureClass) { $failureClass = 'UNKNOWN' }
+  $lastPhase = if ($Joined -match '(?m)^lastCompletedPhase=([A-Za-z_]+)\s*$') { $Matches[1] } else { 'NOT_RUN' }
+  if ($lastPhase -ne 'NOT_RUN' -and $allowedPhase -notcontains $lastPhase) { $lastPhase = 'UNKNOWN' }
+  $leakScan = if ($Joined -match '(?m)^responseLeakScanStatus=(NOT_RUN|PASS|FAIL)\s*$') { $Matches[1] } else { 'NOT_RUN' }
+  $failedCount = if ($Joined -match '(?m)^failedCheckCount=(\d{1,4})\s*$') { $Matches[1] } else { '0' }
+  $firstFailed = if ($Joined -match '(?m)^firstFailedCheck=(.+?)\s*$') { $Matches[1] } else { 'NOT_RUN' }
+  if ($firstFailed -notmatch '^[A-Za-z0-9 _/:>=.,()\-]{1,80}$') { $firstFailed = 'UNKNOWN' }
+
+  return @{
+    pass = $pass; audit = $audit; selfScan = $selfScan; ok = $ok; reason = $reason
+    failureClass = $failureClass; lastCompletedPhase = $lastPhase; firstFailedCheck = $firstFailed
+    failedCheckCount = $failedCount; responseLeakScanStatus = $leakScan
+  }
 }
 
 # ── Read the admin token WITHOUT ever exposing it (env var, else secure prompt). ─────────────────
@@ -409,6 +439,13 @@ function Invoke-SmokeStage {
   $Summary['mvpSmoke.pass'] = if ($outcome.pass) { 'true' } else { 'false' }
   $Summary.auditActionsCovered = $outcome.audit
   $Summary.selfScanClean = if ($outcome.selfScan) { 'true' } else { 'false' }
+  # corrective-5: propagate the bounded diagnostics INTO the summary BEFORE the exit/outcome gates below,
+  # so an exit-1 smoke (Stop-WithFailure) still emits them in the values-free acceptance summary.
+  $Summary['mvpSmoke.failureClass'] = $outcome.failureClass
+  $Summary['mvpSmoke.lastCompletedPhase'] = $outcome.lastCompletedPhase
+  $Summary['mvpSmoke.firstFailedCheck'] = $outcome.firstFailedCheck
+  $Summary['mvpSmoke.failedCheckCount'] = $outcome.failedCheckCount
+  $Summary['mvpSmoke.responseLeakScanStatus'] = $outcome.responseLeakScanStatus
   # Fail-closed: a green exit is NOT a steady state unless the audit surface is fully covered (8/8) and
   # the self-scan is clean. An absent/unparseable field records 'N/8'/'false' and FAILS here — it never
   # passes silently (owner P2).

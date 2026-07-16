@@ -64,8 +64,8 @@ const RESULT = { checks: [], summary: {} }
 // the finish()/catch self-scan, so the self-scan re-proves the diagnostic fields are sentinel-clean too;
 // firstFailedCheck is additionally guarded so a hostile check name can never smuggle a value.
 export const SMOKE_PHASES = Object.freeze([
-  'AUTH', 'PROVISIONING', 'SYNC_PERSIST', 'PROJECTS', 'SNAPSHOT_DIFF', 'MATERIAL_MAPPINGS',
-  'UNIT_CONVERSIONS', 'GENERATION_RUN', 'FAILCLOSED_PROBES', 'ERP_MATERIAL_SYNC', 'CLEANUP_RETIRES',
+  'AUTH', 'PROVISIONING', 'SYNC_PERSIST', 'PROJECTS', 'SNAPSHOT_DIFF', 'MAPPINGS',
+  'CONVERSIONS', 'GENERATION_RUN', 'FAILCLOSED_PROBES', 'ERP_CACHE_SYNC', 'CLEANUP_RETIRES',
   'AUDIT_TRAIL', 'RESPONSE_LEAK_SCAN',
 ])
 export const SMOKE_FAILURE_CLASSES = Object.freeze(['NONE', 'CHECK_FAILED', 'SELF_SCAN_FAILED', 'FATAL_EXCEPTION'])
@@ -631,7 +631,7 @@ async function main() {
     rows.every((row) => row.diffType === 'added' && ['ready', 'held'].includes(row.reviewStatus)))
 
   // ── 4. material mappings: candidates/sync -> confirm (create) -> human_preserved survival ───────
-  beginPhase('MATERIAL_MAPPINGS')
+  beginPhase('MAPPINGS')
   const candidateIds = async (label) => {
     const list = await req(`${API}/material-mappings/candidates${scope({ projectId: fixture.projectId })}`, { label })
     const listRows = Array.isArray(list.body?.data?.rows) ? list.body.data.rows : []
@@ -700,7 +700,7 @@ async function main() {
     idsAfterResync.length === 1 && idsAfterResync[0] === confirmedMappingId, `newIds=${idsAfterResync.length}`)
 
   // ── 5. unit conversions: COMPUTED candidates -> confirm (manual rule mode) ───────────────────────
-  beginPhase('UNIT_CONVERSIONS')
+  beginPhase('CONVERSIONS')
   const unitCandidates = await req(`${API}/unit-conversions/candidates${scope({ projectId: fixture.projectId, snapshotBatchId: fixture.snapshotBatchId })}`, { label: 'unit-candidates' })
   const unitData = unitCandidates.body?.data || {}
   const unitRows = Array.isArray(unitData.rows) ? unitData.rows : []
@@ -897,7 +897,7 @@ async function main() {
     `http=${ghostCurrent.status} code=${S.probeGhostCurrentCode}`)
 
   // ── 7z. T2: ERP material-master cache sync (POST /mvp/erp-materials/sync) ────────────────────────
-  beginPhase('ERP_MATERIAL_SYNC')
+  beginPhase('ERP_CACHE_SYNC')
   // Deployed-lane coverage of the T2 route: persist an ALREADY-NORMALIZED ERP material into the internal
   // erp_material_master cache, then re-sync to prove the idempotent upsert (patch, not a duplicate).
   // NON-PERTURBING by construction: erpCodeA (SMKERP-A-…) is a DIFFERENT value from the BOM drawings

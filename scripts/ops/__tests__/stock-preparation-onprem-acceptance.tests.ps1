@@ -130,15 +130,19 @@ Check "PM2 projection helper is required by the on-prem package build" (
   $packageBuildSrc -match '"scripts/ops/stock-preparation-pm2-sample\.mjs"'
 )
 
-# ── 1. Summary is values-free by construction: exactly the 9 whitelisted keys, nothing else. ─────
-$expected9 = @(
+# ── 1. Summary is values-free by construction: exactly the 14 whitelisted keys, nothing else. ────
+# (9 original + 5 corrective-5 bounded diagnostics; every added default is a fixed enum / integer.)
+$expectedFields = @(
   'packageShaMatch','migrationStatus','pm2StableOnline','healthcheck',
-  'mvpSmoke.pass','auditActionsCovered','selfScanClean','externalPlmK3ErpWrite','failedStage'
+  'mvpSmoke.pass','auditActionsCovered','selfScanClean',
+  'mvpSmoke.failureClass','mvpSmoke.lastCompletedPhase','mvpSmoke.firstFailedCheck',
+  'mvpSmoke.failedCheckCount','mvpSmoke.responseLeakScanStatus',
+  'externalPlmK3ErpWrite','failedStage'
 )
 $summaryBlock = if ($src -match "(?s)\`$Summary = \[ordered\]@\{(.*?)\}") { $Matches[1] } else { '' }
 $foundKeys = [regex]::Matches($summaryBlock, "(?m)^\s*'?([A-Za-z0-9.]+)'?\s*=") | ForEach-Object { $_.Groups[1].Value }
-Check "summary declares exactly the 9 whitelisted fields" (
-  ($foundKeys.Count -eq 9) -and (($expected9 | Where-Object { $_ -notin $foundKeys }).Count -eq 0)
+Check "summary declares exactly the 14 whitelisted fields" (
+  ($foundKeys.Count -eq 14) -and (($expectedFields | Where-Object { $_ -notin $foundKeys }).Count -eq 0)
 )
 Check "summary has NO value-plane field (drawing/qty/unit/material/host/token)" (
   -not ($summaryBlock -match '(?i)drawing|qty|quantity|unit|material|host|token|password|secret|projectName')
