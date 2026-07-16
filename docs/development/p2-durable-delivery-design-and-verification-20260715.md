@@ -156,3 +156,15 @@ v1 = 锁 §283-291 全集(approval.{approved,rejected,revoked,cancelled}→bridg
 
 ### 9.3 合并态正式验收
 10 PR 落齐后:`multitable-p2-fwb-eight-scenario-matrix.test.ts` 已在两点接线内 ⇒ 合并态 CI 每 PR 自动重跑 = 正式验收即持续生效;另跑一次 fresh-PG 全量(§6 方法论)存证。
+
+### 9.4 ④-b 对码校准(2026-07-16,读 automation-executor.ts 后修正规格)
+
+审阅真实执行器后,§9.1 的两处措辞需按代码修正——**避免在合并态盲写时踩事务模型的坑**:
+
+1. **执行器有干净的 dispatch switch**:`automation-executor.ts:1690` `executeSingleAction(action, context)` 的 `switch (action.type)`,`case 'create_record'` 在 `:1702`。④-b 加一个 `case 'write_approval_form_values'` 即可,**不需要重铺 structuralPath 递归**——`stepIndex` 已由生命周期钩子(`onStart(stepIndex, action)` 等)提供,`structuralPath = 'actions[' + stepIndex + ']'`(条件/并行分支的嵌套路径由现有 `branchCursor` 簿记给出)。
+2. **事务模型 = 每动作自开事务,非跨审批状态写共享**:`executeCreateRecord` 用 `await this.withTransaction(async (query) => { INSERT meta_records ...; recordRecordRevision('create', ...) })`(`:2534` 起,D-1c slice③ 已把 INSERT+revision 收进一个 txn)。`ExecutionContext`(`:734`)**不带**共享事务句柄。
+   ⇒ **修正 D9 的落法**:FWB 的"claim+record+revision+outbox 同事务"指的是**④-b case 内单个 `withTransaction` 的那一个 `query` 客户端**——把它作为 `trx` 传给 `executeWriteApprovalFormValues`,四写即原子。**跨投递的 net-once 不依赖与审批状态写同事务**,而由账本 `claimActionApplied` 的 UNIQUE 键独立提供(僵尸重投撞键回滚)。这与既有执行器模型天然兼容,无需改动审批完成写路径。
+3. **record-service 缝的真实实现** = 照抄 `executeCreateRecord` 的 `INSERT meta_records (id,sheet_id,data,version) VALUES (...,1)` + `recordRecordRevision(query, {action:'create', recordId, ...})` + `sanitizeRichLongTextInWritePayload` + `evaluateCrossBaseWrite` 门(FWB 目标表可能跨 base)。即 `FwbWireDeps.createRecordWithRevision(query, sheetId, values)` 内联这一段。
+4. **flag 门**:`case` 体首行 `if (!isDurableDeliveryEnabled(env)) return { status:'skipped', ... }`;且 `validateActionConfig` 对该 type 的校验在 flag OFF 时直接拒(与 `FwbActionDispatcher` 构造器拒启一致,双保险)。
+
+⇒ 结论:④-b 是**一个中等 hot-file PR**(automation-actions.ts 增 3 处 + automation-executor.ts 增 1 case + 1 私有方法),风险点仅在「照抄 executeCreateRecord 的 revision/gate/sanitize 三件」——已逐条定位到行号。**必须基于合并后 main 作独立可评审 PR**(本会话在预演分支上盲改这个巨型热文件会产出不可评审 diff,且本线已有 11 个并发/事务缺陷证明盲写风险)。④-a 的 `FwbActionDispatcher`(136cfd639,3/3+八场景 11/11)已是该 PR 的承重内核,届时直接复用。
