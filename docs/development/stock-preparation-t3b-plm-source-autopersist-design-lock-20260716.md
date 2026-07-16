@@ -1,12 +1,12 @@
 # T3b 设计锁 — approved PLM source-run 服务端直落 project / snapshot / run
 
-**状态：RATIFY-ready — design-lock only，owner ratification pending，authorizes no runtime。**
+**状态：RATIFIED — design-lock only，runtime slices remain separately gated。**
 
 日期：2026-07-16
 前置：T3a runtime #4357 已合；T4 非空 `prep-line` smoke #4266 已合；RC-0
 corrective-4（#4369）已合并并完成实体机 1/1：runner 已成功捕获 summary，但 packaged smoke
-返回 exit 1，`mvpSmoke.pass=false`，#4101 仍 OPEN。owner 已同意起草本锁，但 **ratify 与 runtime
-实现仍是后续独立门**。
+返回 exit 1，`mvpSmoke.pass=false`，#4101 仍 OPEN。owner 于 2026-07-16 ratify exact
+contract head `f3c1a0bedbf4365dc6715450845cc04414957623`；**ratification 不等于 runtime 自行合并**。
 
 ## 0. 目的与当前断点
 
@@ -100,11 +100,11 @@ POST .../source-runs/plm-bom
   }
 ```
 
-## 4. 提议裁决（ratify 时整体确认）
+## 4. 已裁决（owner RATIFIED）
 
 ### OD-1 — 独立、默认关闭的 flag
 
-**建议：GO。**唯一 flag：
+**裁决：GO。**唯一 flag：
 
 `MULTITABLE_STOCK_PREP_PLM_AUTOPERSIST_ENABLED`
 
@@ -117,7 +117,7 @@ POST .../source-runs/plm-bom
 
 ### OD-2 — tenant、workspace 与 business project 的边界
 
-**建议：GO，采用分层语义。**
+**裁决：GO，采用分层语义。**
 
 flag ON 时：
 
@@ -138,7 +138,7 @@ ERP cache；T3b 必须有一个业务 project handle。
 
 ### OD-3 — `intake` → persist 的唯一纯 bridge
 
-**建议：GO，但禁止直接 cast / spread。**新增一个纯 helper（命名可在实现时微调）：
+**裁决：GO，但禁止直接 cast / spread。**新增一个纯 helper（命名可在实现时微调）：
 
 `buildPlmSourcePersistInput({ request, intake })`
 
@@ -187,7 +187,7 @@ closed set；实现与验收不得依赖 config shape validation 或 records ser
 
 ### OD-4 — idempotency、不可变性与已知原子性边界
 
-**建议：分两级。**
+**裁决：分两级。**
 
 T3b v1 复用现有 persist 的 create-only 写路径，但 **不得原样继承“batch 命中即成功
 skip”**。在第一次写或返回 `skipped_existing` 前，persist 必须完成以下闭形状核对：
@@ -240,7 +240,7 @@ error details、log 或 audit。
 
 ### OD-5 — 响应与失败语义
 
-**建议：与 T3a 保持同一公开阶梯。**
+**裁决：与 T3a 保持同一公开阶梯。**
 
 - OFF：现有 `publicReadonlySourceRunResult` 逐字节不变，无 `autoPersist`；
 - source empty / required shape missing：沿用 422，persist 零调用；
@@ -257,7 +257,7 @@ error details、log 或 audit。
 
 ### OD-6 — T4 与 RC-A 的关系
 
-**建议：扩展而非重写。**
+**裁决：扩展而非重写。**
 
 #4266 已证明 synthetic plan body 后半链。T3b 落地后只给现有 T4 增加一个
 approved-source 前置模式：
@@ -349,7 +349,7 @@ values-free summary 不足以定位首个失败 phase。#4101 的诊断/修复�
 
 | 级 | 交付 | 门 |
 |---|---|---|
-| T3b-0 | 本 design-lock | 本 PR 仅 RATIFY-ready；owner ratify 前不授权 runtime |
+| T3b-0 | 本 design-lock | RATIFIED；runtime 仍按 1a/1b/1c 独立过门 |
 | T3b-1a | shared persist false-skip hardening + existing `/mvp/sync/persist` 回归 | owner RATIFY 后；非 flag-inert，独立 PR |
 | T3b-1b | pure bridge + focused contract tests | owner RATIFY 后；可与 1a 并行，零 I/O |
 | T3b-1c | source-run route flag/guard + 1a/1b integration | 1a + 1b 通过；default-OFF inert |
@@ -358,18 +358,18 @@ values-free summary 不足以定位首个失败 phase。#4101 的诊断/修复�
 | RC-A | 单次 exact-SHA 包 + 实体机验收 | #4101 RC-0 最终 PASS + T4-final |
 | P4 | persist 原子性 / repair hardening | 独立设计门；生产常开前置 |
 
-## 7. Ratify checklist
+## 7. Ratified checklist
 
-owner ratify 本锁即表示同意：
+owner ratification 已确认：
 
-- [ ] OD-1：独立 default-OFF PLM auto-persist flag；
-- [ ] OD-2：auth tenant 决定物理 target，body projectId 仅作业务键；
-- [ ] OD-3：纯 bridge，一行不丢；bridge 输入 `imported → active`，canonical
+- [x] OD-1：独立 default-OFF PLM auto-persist flag；
+- [x] OD-2：auth tenant 决定物理 target，body projectId 仅作业务键；
+- [x] OD-3：纯 bridge，一行不丢；bridge 输入 `imported → active`，canonical
   active/inactive/incomplete 保真；其它 raw lifecycle mapping 在 v1 明确 out-of-scope，并以专用
   values-free 422 在 persist 前 fail-closed；bridge 是唯一 option enforcement point；
-- [ ] OD-4：exact replay 才可 skip，orphan/content conflict 必须 409；生产常开 barred on P4；
-- [ ] 交付拆分：共享 persist hardening 非 flag-inert，独立审阅；pure bridge 可并行；route
+- [x] OD-4：exact replay 才可 skip，orphan/content conflict 必须 409；生产常开 barred on P4；
+- [x] 交付拆分：共享 persist hardening 非 flag-inert，独立审阅；pure bridge 可并行；route
   wiring 等两者通过后再接；
-- [ ] OD-5：OFF byte-equivalent；ON created=`internal_persist/true`、replay=`internal_noop/false`；
-- [ ] OD-6：#4101 RC-0 最终 PASS + 扩展现有 T4 后只切一次 RC-A；reviewed FAIL 不解锁；
-- [ ] 本锁不授权外部写、OD-W3-1 值面读或 runtime 自行合并。
+- [x] OD-5：OFF byte-equivalent；ON created=`internal_persist/true`、replay=`internal_noop/false`；
+- [x] OD-6：#4101 RC-0 最终 PASS + 扩展现有 T4 后只切一次 RC-A；reviewed FAIL 不解锁；
+- [x] 本锁不授权外部写、OD-W3-1 值面读或 runtime 自行合并。
