@@ -192,6 +192,20 @@ export const GLOBAL_HISTORY_FLAG_MANIFEST = Object.freeze([
     ],
   },
   {
+    key: 'MULTITABLE_HISTORY_CONTIGUITY_STRICT',
+    type: 'boolean',
+    activationValue: 'true',
+    caseInsensitive: true,
+    dependsOn: [],
+    conflictsWith: [],
+    danger: 'low',
+    purpose:
+      "W0-1 v3.7 (#4331 §9) STRICT history-integrity precheck. Default OFF ⇒ BYTE-IDENTICAL to the #4269 live-vs-latest + generation-aware-contiguity comparator (unchanged code path/exports). When ON (`String(env).trim().toLowerCase() === 'true'`, so 'TRUE'/' true ' also activate it — same case-insensitive family as PIT_RESET/SHEET_REVERT/PIT_UNDELETE), precheckSheetHistoryIntegrity delegates ENTIRELY to precheckSheetHistoryIntegrityStrict: seq-ordered (exact bigint) causal order, ALL generations validated (incl. generation 0 — events before the first create refuse chain_hole), C3 deleted/trashed-chain enumeration, and dup/illegal-seq fail-close. This is a PURE-READ refusal gate: it only makes revert/reset preview+execute refuse MORE (fail-closed HISTORY_INCOMPLETE), never enables any destructive write, so danger=low. It does NOT itself unlock Revert or Reset — those stay behind MULTITABLE_ENABLE_SHEET_REVERT / MULTITABLE_ENABLE_PIT_RESET; this flag only changes HOW their shared precheck proves the chain is trustworthy (and it also runs read-only inside the UNGATED revert-preview), so it is deliberately left out of dependsOn/conflictsWith — the strict precheck is well-defined regardless of whether either destructive gate is on.",
+    // source: packages/core-backend/src/multitable/history-integrity-precheck.ts:100 (isContiguityStrictMode,
+    //         `.trim().toLowerCase() === 'true'`), :459 (precheckSheetHistoryIntegrity delegates to the strict path)
+    source: 'packages/core-backend/src/multitable/history-integrity-precheck.ts:100,459',
+  },
+  {
     key: 'MULTITABLE_ENABLE_RECORD_UNDELETE_INBOUND',
     type: 'boolean',
     activationValue: 'true',

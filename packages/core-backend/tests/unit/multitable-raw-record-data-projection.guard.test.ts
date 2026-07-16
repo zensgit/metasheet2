@@ -142,6 +142,12 @@ const ALLOWLIST: Record<string, Record<string, { disposition: Disposition; reaso
       reason: 'plugin-SDK patchRecord builds nextData = { ...existing.data, ...patch } to WRITE to meta_records; not a response echo',
     },
   },
+  'multitable/history-integrity-precheck.ts': {
+    'data: r.data': {
+      disposition: 'INTERNAL',
+      reason: 'W0-1 v3.7 STRICT precheck (precheckSheetHistoryIntegrityStrict): liveById internal hydration map used ONLY for the content-projection layer\'s live-vs-latest-snapshot equality check; the function returns only {ok, reason} — never echoes record data to any response',
+    },
+  },
 }
 
 describe('n2 raw record-data projection guard — egress-guard blind-spot closure', () => {
