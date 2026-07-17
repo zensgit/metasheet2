@@ -1,0 +1,428 @@
+/**
+ * W0-1 v3.7 (owner-ratified #4331 §3) — Lane L5 TRUST-CHECKPOINT real-DB goldens: the building→active state
+ * machine (partial-unique one-active guard + concurrent double-activation), seq-based + display-T selection
+ * (totally ordered, exact bigint), the floor-clamped retention prune, the server-owned non-forgeable
+ * system_kind, and the P3-2 enablement precondition. Pure-helper goldens live in
+ * `tests/unit/multitable-history-trust-checkpoint.test.ts`.
+ *
+ * This is a DEFAULT-OFF slice: nothing here enables strict mode, Revert, or Reset in any real environment,
+ * and nothing wires checkpoint activation into the live restore/execute path (that in-fence cutover is
+ * L5-wire, deferred until L4's fence lands). `activateCheckpoint` is exercised in isolation by opening a
+ * transaction here — the "L4 wires this in" seam.
+ *
+ * Fixture hygiene (v3.7 P2-C): every checkpoint is created either via `activateCheckpoint` (which allocates
+ * from the shared `meta_record_chain_seq` via NORMAL `nextval` — never `setval`) or by inserting EXPLICIT
+ * synthetic `trusted_since_seq` literals into isolated fixture rows. This file NEVER calls `setval` on the
+ * shared sequence. Every sheet is created under this file's own base; `afterAll` cascade-deletes them, which
+ * cascades to checkpoints + baselines (FK ON DELETE CASCADE).
+ *
+ * Two-point wiring: plugin-tests.yml real-DB run list + vitest.integration.config.ts. Runs only with
+ * DATABASE_URL.
+ */
+import express, { type Express } from 'express'
+import request from 'supertest'
+import { afterAll, afterEach, beforeAll, describe, expect, test } from 'vitest'
+
+import { poolManager } from '../../src/integration/db/connection-pool'
+import { univerMetaRouter } from '../../src/routes/univer-meta'
+import type { QueryFn } from '../../src/multitable/permission-service'
+import {
+  activateCheckpoint,
+  selectCheckpointByAnchorSeq,
+  selectCheckpointByT,
+  retentionFloorSeq,
+  pruneRetainedCheckpoints,
+} from '../../src/multitable/history-trust-checkpoint'
+import { checkStrictEnablementPrecondition } from '../../src/multitable/history-trust-precondition'
+import { precheckSheetHistoryIntegrity, precheckSheetHistoryIntegrityStrict } from '../../src/multitable/history-integrity-precheck'
+import { SYSTEM_PEOPLE_SHEET_DESCRIPTION } from '../../src/multitable/system-sheet-predicate'
+import { db as kyselyDb } from '../../src/db/db'
+import { up as migrationUp } from '../../src/db/migrations/zzzz20260715180000_create_meta_history_trust_checkpoints'
+
+const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
+const TS = Date.now()
+const BASE = `base_l5ck_${TS}`
+const ACTOR = `user_l5ck_${TS}`
+const NAME = `fld_l5ck_name_${TS}`
+
+const q = (sql: string, params?: unknown[]) => poolManager.get().query(sql, params)
+let app: Express
+let sheetSeq = 0
+
+/** A fresh, file-namespaced sheet (its OWN active-checkpoint domain — no cross-test coupling). */
+async function mkSheet(opts?: { systemKind?: string }): Promise<string> {
+  const id = `sheet_l5ck_${TS}_${sheetSeq++}`
+  await q('INSERT INTO meta_sheets (id, base_id, name) VALUES ($1,$2,$3)', [id, BASE, `L5 ${id}`])
+  await q('INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6)', [`${id}_f`, id, NAME, 'string', '{}', 1])
+  if (opts?.systemKind) await q('UPDATE meta_sheets SET system_kind = $2 WHERE id = $1', [id, opts.systemKind])
+  return id
+}
+async function insertLive(sheetId: string, recordId: string, data: Record<string, unknown>, version: number) {
+  await q('INSERT INTO meta_records (id, sheet_id, data, version) VALUES ($1,$2,$3::jsonb,$4)', [recordId, sheetId, JSON.stringify(data), version])
+}
+async function insertTrash(sheetId: string, recordId: string, data: Record<string, unknown>, originalVersion: number) {
+  await q('INSERT INTO meta_records_trash (record_id, sheet_id, data, original_version) VALUES ($1,$2,$3::jsonb,$4)', [recordId, sheetId, JSON.stringify(data), originalVersion])
+}
+/** ATTRIBUTABLE trash: inserts the delete revision (natural shared-sequence seq — causal) and a trash row
+ *  whose `delete_revision_id` points at it. P1-b: a trashed-only record with any UNattributable trash row now
+ *  ABORTS activation, so every fixture where activation must SUCCEED uses this helper; bare `insertTrash`
+ *  remains for the abort goldens themselves. Returns the delete revision id. */
+async function insertAttributableTrash(sheetId: string, recordId: string, data: Record<string, unknown>, originalVersion: number): Promise<string> {
+  const r = await q(
+    `INSERT INTO meta_record_revisions (id, sheet_id, record_id, version, action, source, changed_field_ids, patch, snapshot)
+     VALUES (gen_random_uuid(),$1,$2,$3,'delete','rest',ARRAY[]::text[],'{}'::jsonb,$4::jsonb)
+     RETURNING id::text AS id`,
+    [sheetId, recordId, originalVersion, JSON.stringify(data)],
+  )
+  const revId = String((r.rows[0] as { id: string }).id)
+  await q(
+    'INSERT INTO meta_records_trash (record_id, sheet_id, data, original_version, delete_revision_id) VALUES ($1,$2,$3::jsonb,$4,$5)',
+    [recordId, sheetId, JSON.stringify(data), originalVersion, revId],
+  )
+  return revId
+}
+/** Run `activateCheckpoint` inside a real transaction (the seam L4 will provide, holding the fence). */
+async function activate(sheetId: string) {
+  return poolManager.get().transaction(async ({ query }) => activateCheckpoint(query as unknown as QueryFn, { sheetId }))
+}
+/** Insert a SYNTHETIC checkpoint with an EXPLICIT seq (isolated fixture; never a setval on the shared seq). */
+async function insertSyntheticCheckpoint(input: { id: string; sheetId: string; state: string; seq: string; trustedFromAt?: string | null }) {
+  await q(
+    `INSERT INTO meta_history_trust_checkpoints (id, sheet_id, state, trusted_since_seq, trusted_from_at)
+     VALUES ($1,$2,$3,$4::bigint,$5)`,
+    [input.id, input.sheetId, input.state, input.seq, input.trustedFromAt ?? null],
+  )
+}
+async function checkpointRow(id: string) {
+  const r = await q(`SELECT id, state, trusted_since_seq::text AS seq, system_kind, pruned_at, trusted_from_at, activated_at FROM meta_history_trust_checkpoints WHERE id = $1`, [id])
+  return r.rows[0] as { id: string; state: string; seq: string; system_kind: string | null; pruned_at: Date | null; trusted_from_at: Date | null; activated_at: Date | null } | undefined
+}
+async function activeCount(sheetId: string): Promise<number> {
+  const r = await q(`SELECT count(*)::int AS c FROM meta_history_trust_checkpoints WHERE sheet_id=$1 AND state='active'`, [sheetId])
+  return Number((r.rows[0] as { c: number }).c)
+}
+
+// Red-not-skip-green sentinel — TOP-LEVEL (outside describeIfDatabase) so it runs even without a DB and FAILS,
+// rather than silently skipping, when the REAL-DB ALLOWLIST STEP runs this file without DATABASE_URL. Scoped to
+// that step via the workflow-injected METASHEET_REAL_DB_TEST_STEP env: the normal no-DB core-backend test job
+// also collects this file (CI=true, no DATABASE_URL) and there the sentinel MUST pass — the describeIfDatabase
+// goldens legitimately skip in that job; we don't red it. (Pattern mirrors the sibling real-DB files.)
+test('sentinel: the real-DB allowlist step must have DATABASE_URL (fail-not-skip, scoped to that step)', () => {
+  if (process.env.METASHEET_REAL_DB_TEST_STEP === '1' && !process.env.DATABASE_URL) {
+    throw new Error('real-DB allowlist step is missing DATABASE_URL — the harness is broken, not legitimately skippable')
+  }
+  expect(true).toBe(true)
+})
+
+describeIfDatabase('W0-1 v3.7 L5 trust checkpoint (real DB)', () => {
+  beforeAll(async () => {
+    app = express()
+    app.use(express.json())
+    app.use((req, _res, next) => { ;(req as any).user = { id: ACTOR, roles: ['member'], perms: ['multitable:read', 'multitable:write', 'multitable:share'] }; next() })
+    app.use('/api/multitable', univerMetaRouter())
+    await q('INSERT INTO meta_bases (id, name) VALUES ($1,$2)', [BASE, 'L5 Checkpoint Base'])
+    await q("INSERT INTO users (id, password_hash) VALUES ($1,'x') ON CONFLICT (id) DO NOTHING", [ACTOR])
+  })
+  afterAll(async () => {
+    // Cascade: deleting sheets under this base drops their checkpoints + baselines (FK ON DELETE CASCADE).
+    await q('DELETE FROM meta_records_trash WHERE sheet_id IN (SELECT id FROM meta_sheets WHERE base_id = $1)', [BASE]).catch(() => {})
+    await q('DELETE FROM meta_records WHERE sheet_id IN (SELECT id FROM meta_sheets WHERE base_id = $1)', [BASE]).catch(() => {})
+    await q('DELETE FROM meta_fields WHERE sheet_id IN (SELECT id FROM meta_sheets WHERE base_id = $1)', [BASE]).catch(() => {})
+    await q('DELETE FROM meta_sheets WHERE base_id = $1', [BASE]).catch(() => {})
+    await q('DELETE FROM meta_bases WHERE id = $1', [BASE]).catch(() => {})
+    await q('DELETE FROM users WHERE id = $1', [ACTOR]).catch(() => {})
+  })
+
+  test('sentinel: DATABASE_URL set', () => { expect(process.env.DATABASE_URL).toBeTruthy() })
+
+  // ── BASELINE SNAPSHOT + ATOMIC FLIP ──────────────────────────────────────────────────────────────────
+  test('activation snapshots live + recoverable-trash rows into a SEPARATE baselines table and flips building→active atomically', async () => {
+    const S = await mkSheet()
+    await insertLive(S, `${S}_r1`, { [NAME]: 'a' }, 1)
+    await insertLive(S, `${S}_r2`, { [NAME]: 'b' }, 3)
+    await insertAttributableTrash(S, `${S}_t1`, { [NAME]: 'gone' }, 2) // trashed-only ⇒ must be causally attributable (P1-b)
+
+    const res = await activate(S)
+    expect(res.baselineCount).toBe(3)
+    const ck = await checkpointRow(res.checkpointId)
+    expect(ck?.state).toBe('active')
+    expect(ck?.trusted_from_at).toBeTruthy() // clock_timestamp() stamped at the flip (NOT null)
+    expect(ck?.activated_at).toBeTruthy()
+    expect(BigInt(ck!.seq) > 0n).toBe(true)
+
+    const baselines = await q('SELECT record_id, version, is_trashed FROM meta_history_baselines WHERE checkpoint_id = $1 ORDER BY record_id', [res.checkpointId])
+    const rows = baselines.rows as Array<{ record_id: string; version: number; is_trashed: boolean }>
+    expect(rows.map((r) => [r.record_id.replace(`${S}_`, ''), r.version, r.is_trashed])).toEqual([
+      ['r1', 1, false],
+      ['r2', 3, false],
+      ['t1', 2, true],
+    ])
+  })
+
+  // ── SEQUENTIAL RE-ACTIVATION (supersede) ─────────────────────────────────────────────────────────────
+  test('a second activation supersedes the first — exactly one active, both retained, seq strictly increases', async () => {
+    const S = await mkSheet()
+    const a = await activate(S)
+    const b = await activate(S)
+    expect(await activeCount(S)).toBe(1)
+    const ca = await checkpointRow(a.checkpointId)
+    const cb = await checkpointRow(b.checkpointId)
+    expect(ca?.state).toBe('superseded')
+    expect(cb?.state).toBe('active')
+    expect(BigInt(b.trustedSinceSeq) > BigInt(a.trustedSinceSeq)).toBe(true) // exact bigint, monotonic
+    expect(ca?.pruned_at).toBeNull() // superseded is still retained (selectable by an older anchor)
+  })
+
+  // ── CONCURRENT DOUBLE-ACTIVATION (constructed race, two raw clients) ──────────────────────────────────
+  test('two concurrent activations on one sheet → the partial-unique reds the loser; exactly ONE active survives', async () => {
+    const S = await mkSheet()
+    const pool = poolManager.get().getInternalPool()
+    const c1 = await pool.connect()
+    const c2 = await pool.connect()
+    const c1q: QueryFn = (sql, params) => c1.query(sql, params as unknown[])
+    const c2q: QueryFn = (sql, params) => c2.query(sql, params as unknown[])
+    try {
+      await c1.query('BEGIN')
+      // c1 runs the whole activation and holds its building→active flip in an UNCOMMITTED txn (holding the
+      // partial-unique key for (sheet)).
+      await activateCheckpoint(c1q, { sheetId: S })
+
+      await c2.query('BEGIN')
+      // c2's activation runs concurrently; its flip to state='active' MUST block on c1's uncommitted key.
+      const p2 = activateCheckpoint(c2q, { sheetId: S })
+
+      // Positive control that the race is genuinely constructed (not sequential): poll until c2's backend
+      // is blocked BY c1's backend ([[feedback_toctou_needs_constructed_race]]).
+      const c2pid = (c2 as any).processID as number
+      let blocked = false
+      for (let i = 0; i < 100 && !blocked; i++) {
+        const r = await c1.query('SELECT cardinality(pg_blocking_pids($1)) AS n', [c2pid])
+        if (Number((r.rows[0] as { n: number }).n) > 0) blocked = true
+        else await new Promise((r2) => setTimeout(r2, 20))
+      }
+      expect(blocked).toBe(true)
+
+      // Commit c1 → releases the key → c2's flip resolves with a unique_violation (23505).
+      await c1.query('COMMIT')
+      await expect(p2).rejects.toMatchObject({ code: '23505' })
+      await c2.query('ROLLBACK')
+    } finally {
+      c1.release()
+      c2.release()
+    }
+    expect(await activeCount(S)).toBe(1)
+  })
+
+  // ── SELECT-BY-ANCHORSEQ: totally ordered, EXACT BIGINT ───────────────────────────────────────────────
+  test('selectCheckpointByAnchorSeq returns the latest retained checkpoint with trusted_since_seq <= anchor (exact bigint across 2^53)', async () => {
+    const S = await mkSheet()
+    // Two synthetic checkpoints straddling 2^53 — Number() would collapse these to one float64.
+    const LO = '9007199254740992' // 2^53
+    const HI = '9007199254740993' // 2^53 + 1
+    await insertSyntheticCheckpoint({ id: `${S}_ck_lo`, sheetId: S, state: 'superseded', seq: LO })
+    await insertSyntheticCheckpoint({ id: `${S}_ck_hi`, sheetId: S, state: 'active', seq: HI })
+
+    const atHi = await selectCheckpointByAnchorSeq(q, S, HI)
+    expect(atHi?.id).toBe(`${S}_ck_hi`)
+    expect(atHi?.trustedSinceSeq).toBe(HI) // exact — not collapsed to LO
+
+    const atLo = await selectCheckpointByAnchorSeq(q, S, LO)
+    expect(atLo?.id).toBe(`${S}_ck_lo`) // HI (2^53+1) is > LO, excluded — proves the boundary is exact
+
+    const below = await selectCheckpointByAnchorSeq(q, S, '1')
+    expect(below).toBeNull()
+  })
+
+  // ── SELECT tiebreak: NEVER two candidates (deterministic id DESC) ────────────────────────────────────
+  test('selectCheckpointByAnchorSeq is TOTALLY ordered: two checkpoints sharing a seq resolve deterministically by id DESC', async () => {
+    const S = await mkSheet()
+    const SEQ = '5000000000000'
+    // Same trusted_since_seq — only the id tiebreak separates them. Expected winner = the lexicographically
+    // greater id ('...zzz'). Mutation: flip the ORDER BY tiebreak id DESC → id ASC ⇒ returns '...aaa' ⇒ reds.
+    await insertSyntheticCheckpoint({ id: `${S}_ck_aaa`, sheetId: S, state: 'superseded', seq: SEQ })
+    await insertSyntheticCheckpoint({ id: `${S}_ck_zzz`, sheetId: S, state: 'superseded', seq: SEQ })
+
+    const sel1 = await selectCheckpointByAnchorSeq(q, S, SEQ)
+    const sel2 = await selectCheckpointByAnchorSeq(q, S, SEQ)
+    expect(sel1?.id).toBe(`${S}_ck_zzz`)
+    expect(sel2?.id).toBe(`${S}_ck_zzz`) // deterministic across repeated calls — never two candidates
+  })
+
+  // ── SELECT-BY-T (display path) ───────────────────────────────────────────────────────────────────────
+  test('selectCheckpointByT selects the latest retained checkpoint with trusted_from_at <= T (display metadata, not the recovery authority)', async () => {
+    const S = await mkSheet()
+    await insertSyntheticCheckpoint({ id: `${S}_ck_old`, sheetId: S, state: 'superseded', seq: '100', trustedFromAt: '2026-02-01T00:00:00.000Z' })
+    await insertSyntheticCheckpoint({ id: `${S}_ck_new`, sheetId: S, state: 'active', seq: '200', trustedFromAt: '2026-02-03T00:00:00.000Z' })
+
+    const atMid = await selectCheckpointByT(q, S, '2026-02-02T00:00:00.000Z')
+    expect(atMid?.id).toBe(`${S}_ck_old`)
+    const atLater = await selectCheckpointByT(q, S, '2026-02-04T00:00:00.000Z')
+    expect(atLater?.id).toBe(`${S}_ck_new`)
+    const atBefore = await selectCheckpointByT(q, S, '2026-01-01T00:00:00.000Z')
+    expect(atBefore).toBeNull()
+  })
+
+  // ── RETENTION FLOOR CLAMP ────────────────────────────────────────────────────────────────────────────
+  test('retention prune is CLAMPED at the active-checkpoint floor: a cutoff above the floor never prunes the active checkpoint', async () => {
+    const S = await mkSheet()
+    const a = await activate(S) // becomes superseded after b
+    const b = await activate(S) // ACTIVE — its seq is the floor
+    const floor = await retentionFloorSeq(q, S)
+    expect(floor).toBe(b.trustedSinceSeq)
+
+    // Anchor horizon WAY above every checkpoint: the anchor-covering protected floor resolves to the NEWEST
+    // checkpoint (= the active one), so the active checkpoint survives; only the older superseded one is
+    // pruned. Mutation: prune with the raw requested seq (no covering floor) ⇒ the active checkpoint gets
+    // pruned ⇒ reds.
+    const requested = (BigInt(b.trustedSinceSeq) + 1_000_000n).toString()
+    const result = await poolManager.get().transaction(async ({ query }) => pruneRetainedCheckpoints(query as unknown as QueryFn, S, requested))
+    expect(result.protectedFloorSeq).toBe(b.trustedSinceSeq) // covering = max(seq <= anchor) = the active checkpoint
+    expect(result.prunedCount).toBe(1) // only the superseded one
+
+    const ca = await checkpointRow(a.checkpointId)
+    const cb = await checkpointRow(b.checkpointId)
+    expect(cb?.pruned_at).toBeNull() // ACTIVE checkpoint survived the clamp
+    expect(cb?.state).toBe('active')
+    expect(ca?.pruned_at).toBeTruthy() // the older superseded checkpoint was pruned
+  })
+
+  // ── RETAINED-ANCHOR COUNTEREXAMPLE (owner P1-c, verbatim: C1.seq < oldest-legal-anchor < C2.seq) ──────
+  test('RETAINED-ANCHOR: with C1.seq < anchor < C2.seq the prune PROTECTS C1 — a recovery to the anchor needs C1, so active-only protection would be wrong', async () => {
+    const S = await mkSheet()
+    const c1 = await activate(S) // C1 — superseded after c2, but still the anchor-covering checkpoint
+    const c2 = await activate(S) // C2 — active
+    // An anchor strictly between the two checkpoint seqs (the shared sequence guarantees c2.seq > c1.seq).
+    const anchor = (BigInt(c2.trustedSinceSeq) - 1n).toString()
+    expect(BigInt(anchor) >= BigInt(c1.trustedSinceSeq)).toBe(true) // sanity: C1.seq <= anchor < C2.seq
+
+    const result = await poolManager.get().transaction(async ({ query }) => pruneRetainedCheckpoints(query as unknown as QueryFn, S, anchor))
+    // covering = max(checkpoint.seq <= anchor) = C1 — it and everything after it survive; nothing to prune.
+    expect(result.protectedFloorSeq).toBe(c1.trustedSinceSeq)
+    expect(result.prunedCount).toBe(0)
+    expect((await checkpointRow(c1.checkpointId))?.pruned_at).toBeNull() // C1 SURVIVES (active-only protection would prune it)
+    expect((await checkpointRow(c2.checkpointId))?.pruned_at).toBeNull()
+  })
+
+  // ── MULTI-VINTAGE (owner P1-b, verbatim four-case matrix) ─────────────────────────────────────────────
+  test('MULTI-VINTAGE 1/4: two ATTRIBUTABLE vintages — the baseline freezes the LATEST by the delete revision\'s causal seq, not arbitrary physical order', async () => {
+    const S = await mkSheet()
+    const R = `${S}_mv`
+    await insertAttributableTrash(S, R, { [NAME]: 'old-vintage' }, 1) // earlier delete revision (lower seq)
+    await insertAttributableTrash(S, R, { [NAME]: 'new-vintage' }, 2) // later delete revision (higher seq)
+
+    const res = await activate(S)
+    const b = await q('SELECT data, version, is_trashed FROM meta_history_baselines WHERE checkpoint_id = $1 AND record_id = $2', [res.checkpointId, R])
+    const row = b.rows[0] as { data: Record<string, unknown>; version: number; is_trashed: boolean }
+    expect(row.data[NAME]).toBe('new-vintage') // causal-seq-latest, deterministically
+    expect(row.version).toBe(2)
+    expect(row.is_trashed).toBe(true)
+  })
+
+  test('MULTI-VINTAGE 2/4: a NEWER unattributable vintage ABORTS activation (it might be the newest state — no baseline choice is trustworthy)', async () => {
+    const S = await mkSheet()
+    const R = `${S}_mvna`
+    await insertAttributableTrash(S, R, { [NAME]: 'attributable-old' }, 1)
+    await insertTrash(S, R, { [NAME]: 'unattributable-new' }, 2) // NULL delete_revision_id
+
+    await expect(activate(S)).rejects.toMatchObject({ code: 'checkpoint_unattributable_trash' })
+    // fail-closed all-or-nothing: the building checkpoint row rolled back with the abort.
+    expect(Number(((await q('SELECT count(*)::int c FROM meta_history_trust_checkpoints WHERE sheet_id=$1', [S])).rows[0] as { c: number }).c)).toBe(0)
+  })
+
+  test('MULTI-VINTAGE 3/4: ALL vintages unattributable ABORTS activation', async () => {
+    const S = await mkSheet()
+    await insertTrash(S, `${S}_mvau`, { [NAME]: 'ghost' }, 1) // trashed-only, NULL anchor
+    await expect(activate(S)).rejects.toMatchObject({ code: 'checkpoint_unattributable_trash' })
+    expect(Number(((await q('SELECT count(*)::int c FROM meta_history_trust_checkpoints WHERE sheet_id=$1', [S])).rows[0] as { c: number }).c)).toBe(0)
+  })
+
+  test('MULTI-VINTAGE 4/4: a LIVE row explicitly wins — unattributable trash for a live record never aborts and never enters the baseline over the live row', async () => {
+    const S = await mkSheet()
+    const R = `${S}_mvlive`
+    await insertLive(S, R, { [NAME]: 'live-truth' }, 3)
+    await insertTrash(S, R, { [NAME]: 'stale-ghost' }, 1) // unattributable, but the record is LIVE
+
+    const res = await activate(S) // must NOT abort — live-wins
+    const b = await q('SELECT data, version, is_trashed FROM meta_history_baselines WHERE checkpoint_id = $1 AND record_id = $2', [res.checkpointId, R])
+    const row = b.rows[0] as { data: Record<string, unknown>; version: number; is_trashed: boolean }
+    expect(row.data[NAME]).toBe('live-truth')
+    expect(row.version).toBe(3)
+    expect(row.is_trashed).toBe(false)
+  })
+
+  // ── SAME-REVISION DUPLICATE (owner P2, 2026-07-16) ────────────────────────────────────────────────────
+  test('SAME-REVISION DUPLICATE: a second trash row pointing at the SAME delete revision is REFUSED at the DB layer (unique causal anchor) — a conflicting snapshot can never be persisted', async () => {
+    const S = await mkSheet()
+    const R = `${S}_dup`
+    const revId = await insertAttributableTrash(S, R, { [NAME]: 'vintage-a' }, 1)
+    // A second row with the SAME causal anchor but a DIFFERENT snapshot: DISTINCT ON would tiebreak by
+    // deleted_at/id — deterministic but NOT causal. The partial unique index refuses it outright.
+    await expect(
+      q('INSERT INTO meta_records_trash (record_id, sheet_id, data, original_version, delete_revision_id) VALUES ($1,$2,$3::jsonb,$4,$5)',
+        [R, S, JSON.stringify({ [NAME]: 'vintage-b-conflicting' }), 1, revId]),
+    ).rejects.toMatchObject({ code: '23505' }) // unique_violation on uq_meta_records_trash_delete_revision
+    // exactly one row with that anchor persists; activation stays deterministic.
+    expect(Number(((await q('SELECT count(*)::int c FROM meta_records_trash WHERE delete_revision_id = $1', [revId])).rows[0] as { c: number }).c)).toBe(1)
+    const res = await activate(S)
+    const b = await q('SELECT data FROM meta_history_baselines WHERE checkpoint_id = $1 AND record_id = $2', [res.checkpointId, R])
+    expect((b.rows[0] as { data: Record<string, unknown> }).data[NAME]).toBe('vintage-a')
+  })
+
+  // ── FORGED-MIGRATION (owner P1, verbatim: forge BEFORE migration up(), then run up()) ─────────────────
+  test('FORGED-MIGRATION: a sheet carrying the forged description sentinel BEFORE migration up() runs is NOT laundered — system_kind stays NULL and its broken chain is still strict-refused', async () => {
+    // (1) the forged sheet exists FIRST (what a pre-migration attacker controls: description is user-writable)
+    const S = `sheet_l5ck_forgedmig_${TS}`
+    await q('INSERT INTO meta_sheets (id, base_id, name, description) VALUES ($1,$2,$3,$4)', [S, BASE, 'forged', '__metasheet_system:people__'])
+    await q('INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6)', [`${S}_f`, S, 'Name', 'string', '{}', 1])
+    // broken chain: live v3 with only a v1 create captured (mid-chain hole).
+    await q('INSERT INTO meta_records (id, sheet_id, data, version) VALUES ($1,$2,$3::jsonb,3)', [`${S}_r`, S, JSON.stringify({ [`${S}_f`]: 'x' })])
+    await q(`INSERT INTO meta_record_revisions (id, sheet_id, record_id, version, action, source, changed_field_ids, patch, snapshot)
+             VALUES (gen_random_uuid(),$1,$2,1,'create','rest',ARRAY[]::text[],'{}'::jsonb,$3::jsonb)`, [S, `${S}_r`, JSON.stringify({ [`${S}_f`]: 'x' })])
+
+    // (2) run the L5 migration up() over it (idempotent IF NOT EXISTS everywhere) — the laundering window.
+    //     If anyone re-introduces a description/base_id sentinel backfill, this stamps the forged sheet and
+    //     the assertions below red.
+    await migrationUp(kyselyDb as never)
+
+    // (3) not laundered: no trusted identity minted from user-writable data…
+    const sk = await q('SELECT system_kind FROM meta_sheets WHERE id = $1', [S])
+    expect((sk.rows[0] as { system_kind: unknown }).system_kind).toBeNull()
+    // …and the forged sheet is NOT excluded: its broken chain is strict-refused like any user sheet.
+    const pool = poolManager.get()
+    expect(await precheckSheetHistoryIntegrityStrict(pool.query.bind(pool), S)).toEqual({ ok: false, reason: 'chain_hole' })
+  })
+
+  // ── system_kind NON-FORGEABLE ────────────────────────────────────────────────────────────────────────
+  test('system_kind is NON-FORGEABLE: a client-supplied system_kind on POST /sheets is ignored (persisted NULL)', async () => {
+    const forgeId = `sheet_l5ck_forge_${TS}`
+    const res = await request(app).post('/api/multitable/sheets').send({ id: forgeId, baseId: BASE, name: 'forge attempt', system_kind: 'people_directory' })
+    expect([200, 201]).toContain(res.status)
+    const row = await q('SELECT system_kind FROM meta_sheets WHERE id = $1', [forgeId])
+    expect((row.rows[0] as { system_kind: unknown }).system_kind).toBeNull() // client value ignored
+    await q('DELETE FROM meta_sheets WHERE id = $1', [forgeId]).catch(() => {})
+  })
+
+  test('checkpoint system_kind is DERIVED server-side from the sheet (never a caller value)', async () => {
+    // A sheet whose system_kind was set only server-side (provisioning/backfill) — the activation function
+    // reads it from meta_sheets; there is no caller channel to supply or override it.
+    const S = await mkSheet({ systemKind: 'approval_projection' })
+    const res = await activate(S)
+    const ck = await checkpointRow(res.checkpointId)
+    expect(ck?.system_kind).toBe('approval_projection')
+  })
+
+  // ── P3-2 ENABLEMENT PRECONDITION (real-DB checkpoint half) ───────────────────────────────────────────
+  test('checkStrictEnablementPrecondition detects the active-checkpoint half against a real DB, and stays fail-closed until L6', async () => {
+    const S = await mkSheet()
+    // No checkpoint yet: both conditions unmet.
+    const before = await checkStrictEnablementPrecondition(q, S)
+    expect(before.canEnable).toBe(false)
+    expect([...before.unmet].sort()).toEqual(['no_active_checkpoint', 'reconstruction_non_causal'])
+
+    await activate(S)
+    // Checkpoint half now satisfied — ONLY reconstruction remains unmet (still fail-closed: L6 not landed).
+    const after = await checkStrictEnablementPrecondition(q, S)
+    expect(after.canEnable).toBe(false) // GUARD stays fail-closed until L6 — must not pass
+    expect(after.unmet).toEqual(['reconstruction_non_causal'])
+  })
+})

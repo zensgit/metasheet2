@@ -206,20 +206,6 @@ export const GLOBAL_HISTORY_FLAG_MANIFEST = Object.freeze([
     source: 'packages/core-backend/src/multitable/canonical-sheet-fence.ts:137',
   },
   {
-    key: 'MULTITABLE_HISTORY_CONTIGUITY_STRICT',
-    type: 'boolean',
-    activationValue: 'true',
-    caseInsensitive: true,
-    dependsOn: [],
-    conflictsWith: [],
-    danger: 'low',
-    purpose:
-      "W0-1 v3.7 (#4331 §9) STRICT history-integrity precheck. Default OFF ⇒ BYTE-IDENTICAL to the #4269 live-vs-latest + generation-aware-contiguity comparator (unchanged code path/exports). When ON (`String(env).trim().toLowerCase() === 'true'`, so 'TRUE'/' true ' also activate it — same case-insensitive family as PIT_RESET/SHEET_REVERT/PIT_UNDELETE), precheckSheetHistoryIntegrity delegates ENTIRELY to precheckSheetHistoryIntegrityStrict: seq-ordered (exact bigint) causal order, ALL generations validated (incl. generation 0 — events before the first create refuse chain_hole), C3 deleted/trashed-chain enumeration, and dup/illegal-seq fail-close. This is a PURE-READ refusal gate: it only makes revert/reset preview+execute refuse MORE (fail-closed HISTORY_INCOMPLETE), never enables any destructive write, so danger=low. It does NOT itself unlock Revert or Reset — those stay behind MULTITABLE_ENABLE_SHEET_REVERT / MULTITABLE_ENABLE_PIT_RESET; this flag only changes HOW their shared precheck proves the chain is trustworthy (and it also runs read-only inside the UNGATED revert-preview), so it is deliberately left out of dependsOn/conflictsWith — the strict precheck is well-defined regardless of whether either destructive gate is on.",
-    // source: packages/core-backend/src/multitable/history-integrity-precheck.ts:100 (isContiguityStrictMode,
-    //         `.trim().toLowerCase() === 'true'`), :459 (precheckSheetHistoryIntegrity delegates to the strict path)
-    source: 'packages/core-backend/src/multitable/history-integrity-precheck.ts:100,459',
-  },
-  {
     key: 'MULTITABLE_ENABLE_RECORD_UNDELETE_INBOUND',
     type: 'boolean',
     activationValue: 'true',
@@ -362,6 +348,39 @@ export const GLOBAL_HISTORY_FLAG_MANIFEST = Object.freeze([
       'Scheduler tick interval for the retention janitor. Default and ceiling 24h (86400000ms), floor 60000ms (60s) — an out-of-range value is clamped, not rejected.',
     // source: packages/core-backend/src/multitable/meta-revision-retention.ts:311,314-316,342
     source: 'packages/core-backend/src/multitable/meta-revision-retention.ts:311,314-316,342',
+  },
+  {
+    key: 'MULTITABLE_HISTORY_CONTIGUITY_STRICT',
+    type: 'boolean',
+    activationValue: 'true',
+    caseInsensitive: true, // isContiguityStrictMode(): `.trim().toLowerCase() === 'true'`
+    dependsOn: [],
+    conflictsWith: [],
+    danger: 'high',
+    purpose:
+      'W0-1 v3.7 §9.3 — STRICT chain-integrity mode: the exact-seq, ALL-generations, C3 deleted-chain contiguity precheck for destructive Revert/Reset. Default OFF; flag-off is byte-identical to #4269. Gating this ON is the trust-substrate correctness switch, NOT an ops convenience.',
+    // source: packages/core-backend/src/multitable/history-integrity-precheck.ts:99-100 (isContiguityStrictMode)
+    source: 'packages/core-backend/src/multitable/history-integrity-precheck.ts:100,459',
+    // P3-2 FLAG-ON PRECONDITION (design lock §3/§9; L5). This flag — and later Revert/Reset enablement — MUST
+    // NOT be relied upon for a sheet unless BOTH: (a) an ACTIVE trust checkpoint exists for the sheet, AND
+    // (b) reconstruction causality is satisfied. Condition (b) is NOT yet satisfiable: the reconstructor still
+    // selects by created_at<=T (non-causal) until Lane L6 lands the exact event-anchor resolver, so this
+    // precondition CURRENTLY FAILS CLOSED for every checkpoint-bearing sheet — which is CORRECT ("migration/
+    // backfill presence alone never enables recovery"). WIRED (L5 P2): enforced by
+    // checkStrictEnablementPrecondition, CALLED from precheckSheetHistoryIntegrity's strict branch (the
+    // authoritative strict-mode entry the Revert/Reset routes traverse). A checkpoint-bearing sheet with the
+    // strict flag on is refused fail-closed (`strict_enablement_unmet`) until L6; the single L6 seam is the
+    // RECONSTRUCTION_CAUSALITY_LANDED constant. The refusal is UNCONDITIONAL on !canEnable (owner P2,
+    // 2026-07-16 — an earlier scope-seam exemption for no-checkpoint sheets was a production bypass and is
+    // REMOVED); goldens that need the comparator call the exported precheckSheetHistoryIntegrityStrict
+    // directly. Do not weaken it to pass. (Not modeled as a cross-flag rule: conditions (a)/(b) are runtime
+    // STATE, not other flag env values.)
+    enablementPrecondition:
+      'L5/P3-2 (checkStrictEnablementPrecondition): requires (a) an active meta_history_trust_checkpoints row for the sheet AND (b) RECONSTRUCTION_CAUSALITY_LANDED (L6). Fails closed until L6.',
+    enablementPreconditionSource:
+      'packages/core-backend/src/multitable/history-trust-precondition.ts (RECONSTRUCTION_CAUSALITY_LANDED, evaluateStrictEnablementPrecondition, checkStrictEnablementPrecondition)',
+    enablementEnforcedVia:
+      'packages/core-backend/src/multitable/history-integrity-precheck.ts precheckSheetHistoryIntegrity (strict branch) — refuses strict_enablement_unmet UNCONDITIONALLY when canEnable is false (no no-checkpoint exemption)',
   },
 ])
 
