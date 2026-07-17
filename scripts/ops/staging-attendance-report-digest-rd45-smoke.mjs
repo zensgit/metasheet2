@@ -42,11 +42,31 @@ export const SETTINGS_CACHE_TTL_MS = 60_000 // in-process settings cache in the 
 export const DELIVERY_CHANNEL_ALLOWLIST = ['dingtalk_work_notification', 'email_smtp']
 
 // Terminal 'failed' reasons that still count as the design lock's "worker sends/FAILS visibly":
-// unbound recipient under the real work-notification channel env, or no channel registered at all.
+// no channel registered at all (worker-level markFailed before any channel dispatch).
 export const RECOGNIZED_TERMINAL_FAILURES = [
-  'dingtalk_recipient_not_bound',
   'attendance_delivery_channel_not_configured',
 ]
+
+// Terminal 'skipped' reasons that count as visibly proven. H1 hardening (review #3920 P3-1) made the
+// DingTalk channel's unbound-recipient miss a `skip: true` dispatch — the worker terminates it as
+// status='skipped' (structural "not onboarded", NOT a fault), never 'failed'. The directory fixture
+// (seedDirectoryFixture) guarantees exactly this reason: the disposable org HAS an active integration
+// (so the H1 disambiguation does NOT take the org-level-outage branch, which returns the RETRYABLE
+// 'dingtalk_org_integration_inactive' — the Day-2 retrying-timeout root cause) and the member has no
+// account link (so resolution misses → skip).
+export const RECOGNIZED_STRUCTURAL_SKIPS = [
+  'dingtalk_recipient_not_bound',
+]
+
+// Single source of truth for the directory-fixture INSERT — exported so the companion test can pin the
+// column list against the committed schema (review #4422 P1: an earlier draft omitted the NOT-NULL
+// `corp_id`, the .catch swallowed the violation, and the never-seeded fixture reproduced the exact Day-2
+// retrying trap it was built to fix). `corp_id` is required (zzzz20260324150000:20, no default); the only
+// shape CHECK (`local_integration_corp_id_shape`) binds provider='local' rows, so a stamped synthetic
+// value is valid for provider='dingtalk'. $1=org_id, $2=corp_id, $3=name.
+export const DIRECTORY_FIXTURE_INSERT_SQL = `INSERT INTO directory_integrations (org_id, corp_id, provider, name, status, sync_enabled)
+     VALUES ($1, $2, 'dingtalk', $3, 'active', false)
+     ON CONFLICT (org_id, provider, name) DO UPDATE SET status = 'active', sync_enabled = false, corp_id = EXCLUDED.corp_id`
 
 // Every table this helper can dirty. system_configs is mutated via PUT /settings and restored —
 // never deleted — so it is preflighted but intentionally NOT in this delete/count triple-check list.
@@ -164,26 +184,53 @@ export function classifySendOutcome(rows) {
     sending: 0,
     retrying: 0,
     failedRecognized: 0,
+    skippedRecognized: 0,
     failedOther: [],
+    skippedOther: [],
     unknown: [],
+    // Direct failure evidence for NON-terminal rows (pending/sending/retrying). The prior helper only
+    // captured last_error for terminal failedOther rows, so a run that timed out in `retrying` — and then
+    // deleted the row in cleanup — left NO record of WHY (which retryable last_error, how many attempts,
+    // when the next backoff was due). Populated for exactly the states that can leave the send-proof stuck.
+    nonTerminal: [],
   }
   for (const row of rows) {
     const status = String(row.status ?? '')
     if (status === 'sent') outcome.sent += 1
-    else if (status === 'pending') outcome.pending += 1
-    else if (status === 'sending') outcome.sending += 1
-    else if (status === 'retrying') outcome.retrying += 1
+    else if (status === 'pending') { outcome.pending += 1; outcome.nonTerminal.push(describeStuckDelivery(row)) }
+    else if (status === 'sending') { outcome.sending += 1; outcome.nonTerminal.push(describeStuckDelivery(row)) }
+    else if (status === 'retrying') { outcome.retrying += 1; outcome.nonTerminal.push(describeStuckDelivery(row)) }
     else if (status === 'failed') {
       if (RECOGNIZED_TERMINAL_FAILURES.includes(String(row.last_error ?? ''))) outcome.failedRecognized += 1
       else outcome.failedOther.push({ id: row.id ?? null, lastError: row.last_error ?? null })
+    } else if (status === 'skipped') {
+      // H1 skip semantics: a structural "recipient not onboarded" terminates as `skipped` — a visible,
+      // attributable terminal outcome when the reason is on the recognized list. Any OTHER skipped
+      // reason is not a posture; surface it (with last_error) instead of hiding it in `unknown`.
+      if (RECOGNIZED_STRUCTURAL_SKIPS.includes(String(row.last_error ?? ''))) outcome.skippedRecognized += 1
+      else outcome.skippedOther.push({ id: row.id ?? null, lastError: row.last_error ?? null })
     } else outcome.unknown.push({ id: row.id ?? null, status })
   }
-  outcome.terminal = outcome.sent + outcome.failedRecognized + outcome.failedOther.length
+  outcome.terminal = outcome.sent + outcome.failedRecognized + outcome.skippedRecognized
+    + outcome.failedOther.length + outcome.skippedOther.length
   outcome.visiblyProven = rows.length > 0
-    && outcome.sent + outcome.failedRecognized === rows.length
+    && outcome.sent + outcome.failedRecognized + outcome.skippedRecognized === rows.length
     && outcome.failedOther.length === 0
+    && outcome.skippedOther.length === 0
     && outcome.unknown.length === 0
   return outcome
+}
+
+// The last-hammer evidence a stuck send-proof needs: which retryable error, how many attempts so far, and
+// when the worker's exponential backoff (60s→5m→15m→60m→6h) next fires. Pure/deterministic for the test.
+export function describeStuckDelivery(row) {
+  return {
+    id: row.id ?? null,
+    status: String(row.status ?? ''),
+    lastError: row.last_error ?? null,
+    attemptCount: row.attempt_count == null ? null : Number(row.attempt_count),
+    nextAttemptAt: row.next_attempt_at == null ? null : String(row.next_attempt_at),
+  }
 }
 
 // Env-only contract (no CLI args), mirroring the AE-4 / OT-bank v1-8 helpers: BASE_URL/DATABASE_URL
@@ -271,6 +318,8 @@ const USER_PREFIX = `${STAMP}-`
 const MEMBER_USER = process.env.MEMBER_USER_ID || `${USER_PREFIX}member`
 const INACTIVE_USER = process.env.INACTIVE_USER_ID || `${USER_PREFIX}inactive`
 const ADMIN_USER = process.env.ADMIN_USER_ID || `${USER_PREFIX}admin`
+// Stamped name for the no-send DingTalk directory fixture (unique index is (org_id, provider, name)).
+const DIRECTORY_FIXTURE_NAME = `${STAMP}-dingtalk-fixture`
 
 // The period is pinned once at process start (policy timezone is set to UTC by this smoke, so the
 // helper-side computation matches the producer). The seam track passes this todayKey explicitly and
@@ -305,6 +354,13 @@ function ok(condition, label, detail) {
 function assertSyntheticUser(userId, label) {
   if (typeof userId === 'string' && userId.startsWith(USER_PREFIX) && userId.length > USER_PREFIX.length) return
   throw new Error(`refusing to run: ${label} "${userId}" is not stamped with ${USER_PREFIX}. This smoke deletes its synthetic users during cleanup.`)
+}
+
+// The disposable seam org is stamped (`${STAMP}-org`). The directory fixture DELETEs org-scoped rows from
+// the SHARED directory_* tables, so it must NEVER run against a non-stamped / default org — this gate is a
+// hard precondition on every destructive directory op (seed + cleanup), independent of TRIGGER_MODE.
+function isDisposableOrg() {
+  return typeof ORG_ID === 'string' && ORG_ID.startsWith(STAMP) && ORG_ID.length > STAMP.length
 }
 
 function sleep(ms) {
@@ -493,6 +549,54 @@ async function seedUsers() {
   ok(true, `seeded synthetic member (active) + inactive-membership user into org "${ORG_ID}"`, { stamp: STAMP })
 }
 
+async function seedDirectoryFixture() {
+  // Make the RD-5 send outcome DETERMINISTIC without ever calling DingTalk or switching a staging env.
+  // H1 hardening (review #3920 P3-1) disambiguates resolveRecipient's 0-row miss: an org with NO active
+  // DingTalk integration gets the RETRYABLE 'dingtalk_org_integration_inactive' (org-level outage,
+  // self-heals on re-activation) — which for a bare disposable smoke org means an endless backoff loop
+  // the 135s poll can never outlast (the Day-2 retrying-timeout root cause). An org WITH an active
+  // integration but an unlinked member gets the skip dispatch -> terminal status='skipped' with
+  // last_error='dingtalk_recipient_not_bound' -> RECOGNIZED_STRUCTURAL_SKIPS -> visibly proven.
+  // So the fixture pins the SECOND branch: (1) clear any stray/synced link for the synthetic member;
+  // (2) fully control the org's DingTalk directory by dropping any stray integration (FK-cascade clears
+  // its accounts/links) and seeding ONE active, sync_enabled=false integration with no account — no sync
+  // worker can (re)link the member and the channel never reaches its config/token/send path
+  // (resolveRecipient short-circuits first).
+  //
+  // HARD SCOPE: seam track only, AND only when the org is the stamped disposable org — these DELETEs touch
+  // the SHARED directory_* tables, so the default/real org's directory must never be seeded or deleted.
+  if (TRIGGER_MODE !== 'seam') return
+  if (!isDisposableOrg()) {
+    throw new Error(`refusing to seed the directory fixture: org "${ORG_ID}" is not the stamped disposable org (${STAMP}-…). The fixture DELETEs org-scoped directory_* rows.`)
+  }
+  assertSyntheticUser(MEMBER_USER, 'directory-fixture member')
+  // Fail-closed, NOT best-effort (review #4422 P1/P2-a): a swallowed error here silently flips the H1
+  // branch — a failed INSERT leaves the org integration-less (→ retryable org_integration_inactive →
+  // the Day-2 retrying trap), and a failed link-clear can leave a BOUND recipient (→ a real DingTalk
+  // send attempt). Any error must abort the smoke at the seed stage, before the send-proof.
+  await pool.query('DELETE FROM directory_account_links WHERE local_user_id = $1', [MEMBER_USER])
+  await pool.query("DELETE FROM directory_integrations WHERE org_id = $1 AND provider = 'dingtalk'", [ORG_ID])
+  await pool.query(DIRECTORY_FIXTURE_INSERT_SQL, [ORG_ID, `${STAMP}-corp`, DIRECTORY_FIXTURE_NAME])
+  // Positive-control read-back: prove the state the send-proof depends on actually exists, instead of
+  // trusting the writes. Exactly ONE active dingtalk integration; ZERO account links for the member.
+  const seeded = (await q(
+    `SELECT
+       (SELECT count(*)::int FROM directory_integrations WHERE org_id = $1 AND provider = 'dingtalk' AND status = 'active') AS integrations,
+       (SELECT count(*)::int FROM directory_account_links WHERE local_user_id = $2) AS member_links`,
+    [ORG_ID, MEMBER_USER],
+  ))[0] || {}
+  const integrations = Number(seeded.integrations ?? -1)
+  const memberLinks = Number(seeded.member_links ?? -1)
+  ok(
+    integrations === 1 && memberLinks === 0,
+    `directory fixture read-back: exactly ONE active dingtalk integration and ZERO member links for disposable org "${ORG_ID}" — pins the H1 skip branch (skipped/dingtalk_recipient_not_bound), never calls DingTalk`,
+    { integrations, memberLinks, integration: DIRECTORY_FIXTURE_NAME },
+  )
+  if (integrations !== 1 || memberLinks !== 0) {
+    throw new Error(`directory fixture failed read-back (integrations=${integrations}, memberLinks=${memberLinks}) — aborting before the send-proof; a mis-seeded fixture would reproduce the Day-2 retrying trap or risk a real send`)
+  }
+}
+
 async function resolveExpectedSubjects() {
   // Same join discipline as the producer's subject loader: active membership AND active user.
   const rows = await q(
@@ -587,7 +691,7 @@ async function runSeamOnce({ envEnabled = true } = {}) {
 async function fetchDigestRows() {
   return q(
     `SELECT id, org_id, source_type, source_id, source_key, recipient_user_id, recipient_role,
-            channel, status, last_error, payload
+            channel, status, last_error, attempt_count, next_attempt_at, payload
      FROM attendance_notification_deliveries
      WHERE org_id = $1 AND source_type = $2 AND left(source_key, $3) = $4
      ORDER BY source_key ASC`,
@@ -626,7 +730,7 @@ async function produceViaScheduler(subjects) {
 
 // --- assertions --------------------------------------------------------------------------------
 
-const KNOWN_STATUSES = ['pending', 'sending', 'sent', 'retrying', 'failed']
+const KNOWN_STATUSES = ['pending', 'sending', 'sent', 'retrying', 'failed', 'skipped']
 
 function assertProducedGrain(rows, subjects) {
   ok(rows.length === subjects.length, `producer wrote exactly one row per active subject (expected ${subjects.length})`, { rows: rows.length })
@@ -773,13 +877,21 @@ async function assertSendPosture(subjects) {
   }
   ok(
     outcome.visiblyProven,
-    `RD-5 send proof: worker visibly resolved every row (sent=${outcome.sent}, failedRecognized=${outcome.failedRecognized}, pending=${outcome.pending}, sending=${outcome.sending}, retrying=${outcome.retrying}, failedOther=${outcome.failedOther.length})`,
+    `RD-5 send proof: worker visibly resolved every row (sent=${outcome.sent}, failedRecognized=${outcome.failedRecognized}, skippedRecognized=${outcome.skippedRecognized}, pending=${outcome.pending}, sending=${outcome.sending}, retrying=${outcome.retrying}, failedOther=${outcome.failedOther.length}, skippedOther=${outcome.skippedOther.length})`,
     outcome,
   )
   if (!outcome.visiblyProven) {
-    throw new Error('delivery worker did not visibly resolve the digest rows — verify the worker env gate, channel envs, and the scheduler interval on the backend, then consult the runbook send-posture table')
+    // Print the direct evidence BEFORE the throw so it survives even though cleanup then deletes the rows:
+    // for each stuck row, its last_error / attempt_count / next_attempt_at (the missing last hammer).
+    if (outcome.nonTerminal.length > 0) {
+      console.error('  STUCK-DELIVERY EVIDENCE (non-terminal rows — recorded before cleanup deletes them):')
+      for (const d of outcome.nonTerminal) {
+        console.error(`    id=${d.id} status=${d.status} attempt_count=${d.attemptCount} next_attempt_at=${d.nextAttemptAt} last_error=${d.lastError}`)
+      }
+    }
+    throw new Error(`delivery worker did not visibly resolve the digest rows — verify the worker env gate, channel envs, and the scheduler interval on the backend, then consult the runbook send-posture table. stuck=${stableJson(outcome.nonTerminal)} skippedOther=${stableJson(outcome.skippedOther)}`)
   }
-  return `worker-on:sent=${outcome.sent},failed_recognized=${outcome.failedRecognized}`
+  return `worker-on:sent=${outcome.sent},failed_recognized=${outcome.failedRecognized},skipped_recognized=${outcome.skippedRecognized}`
 }
 
 async function assertNoDefaultOrgLeakage() {
@@ -847,6 +959,13 @@ async function cleanup({ strictSettingsRestore = false } = {}) {
   }
   await pool.query('DELETE FROM user_orgs WHERE org_id = $1 AND left(user_id, $2) = $3', [ORG_ID, USER_PREFIX.length, USER_PREFIX]).catch(() => undefined)
   await pool.query('DELETE FROM users WHERE left(id, $1) = $2', [USER_PREFIX.length, USER_PREFIX]).catch(() => undefined)
+  // Directory fixture cleanup — same HARD SCOPE as seedDirectoryFixture (seam + stamped disposable org).
+  // Deleting the integration FK-cascades to its directory_accounts/directory_account_links; the explicit
+  // link delete also clears any stray/synced link the member may have picked up during the run.
+  if (TRIGGER_MODE === 'seam' && isDisposableOrg()) {
+    await pool.query('DELETE FROM directory_account_links WHERE local_user_id = $1', [MEMBER_USER]).catch(() => undefined)
+    await pool.query("DELETE FROM directory_integrations WHERE org_id = $1 AND provider = 'dingtalk'", [ORG_ID]).catch(() => undefined)
+  }
 }
 
 async function residueCounts() {
@@ -872,6 +991,19 @@ async function residueCounts() {
   if (ORG_ID !== DEFAULT_ORG_ID) {
     residue.default_org_digest_delta = (await countOrgDigestRows(DEFAULT_ORG_ID)) - defaultOrgDigestBaseline
   }
+  // Directory fixture residue — only meaningful (and only safe to count org-wide) for the stamped
+  // disposable seam org; on the default org we never seed directory rows, so counting its real
+  // integrations would be a false residue. Both must be 0 after cleanup.
+  if (TRIGGER_MODE === 'seam' && isDisposableOrg()) {
+    const dir = (await q(
+      `SELECT
+         (SELECT count(*)::int FROM directory_integrations WHERE org_id = $1 AND provider = 'dingtalk') AS fixture_integrations,
+         (SELECT count(*)::int FROM directory_account_links WHERE local_user_id = $2) AS member_links`,
+      [ORG_ID, MEMBER_USER],
+    ))[0] || {}
+    residue.fixture_integrations = Number(dir.fixture_integrations ?? -1)
+    residue.member_directory_links = Number(dir.member_links ?? -1)
+  }
   return residue
 }
 
@@ -890,6 +1022,7 @@ async function main() {
   originalSettings = await getSettings()
 
   await seedUsers()
+  await seedDirectoryFixture()
   const subjects = await resolveExpectedSubjects()
   await enableDigestPolicy()
 
