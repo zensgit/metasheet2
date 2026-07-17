@@ -47,6 +47,11 @@ export class AutomationLogService {
         rule_snapshot: persisted.ruleSnapshotJsonb,
         finished_at: execution.finishedAt ?? null,
         schema_version: execution.schemaVersion ?? AUTOMATION_EXECUTION_SCHEMA_VERSION,
+        // #4196 §4: a values-free sha256 of the RAW action identities — NOT redacted (no business values).
+        // Wired in BOTH insert paths (this kysely one and recordWithQuery's raw SQL) — missing it here left
+        // every production execution with a NULL fingerprint, silently disarming the retry RULE_CHANGED
+        // guard (caught by the real-DB suspend/resume T2 immutability golden in CI).
+        rule_action_fingerprint: execution.ruleActionFingerprint ?? null,
         // A5 retry provenance — plain identifiers, NOT redacted (an execution id / a user id).
         rerun_of_execution_id: execution.rerunOfExecutionId ?? null,
         initiated_by: execution.initiatedBy ?? null,
