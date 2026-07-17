@@ -1,4 +1,5 @@
 import type {
+  ApprovalAssigneeSource,
   ApprovalGraph,
   ApprovalNode,
   ParallelJoinMode,
@@ -136,6 +137,84 @@ export function validateParallelEdits(edits: ParallelEdits): string[] {
   for (const edit of Object.values(edits)) {
     if (!isParallelJoinMode(edit.joinMode)) {
       errors.push(`并行节点 ${edit.nodeKey} 的汇聚模式无效`)
+    }
+  }
+  return errors
+}
+
+/**
+ * Fingerprint of a DYNAMIC assignee source: same fingerprint ⇒ the source PROVABLY resolves to the
+ * same user(s) for every request (same kind + same parameters). Static sources return null — the
+ * backend already rejects duplicate static assignees across parallel branches at save time.
+ * MUST stay in lockstep with the backend `dynamicAssigneeSourceFingerprint`
+ * (ApprovalProductService.ts) so authoring flags exactly what publish rejects.
+ */
+function dynamicAssigneeSourceFingerprint(source: ApprovalAssigneeSource): string | null {
+  switch (source.kind) {
+    case 'requester':
+    case 'direct_manager':
+    case 'dept_head':
+      return source.kind
+    case 'continuous_managers':
+      return `continuous_managers:${source.levels}`
+    case 'manager_at_level':
+      return `manager_at_level:${source.level}`
+    case 'form_field_user':
+      return `form_field_user:${source.fieldId.trim()}`
+    default:
+      return null
+  }
+}
+
+/**
+ * Publish-preflight PREVIEW (surfaced in the publish checklist, NOT the save gate): flag a parallel
+ * gateway whose branches carry PROVABLY-IDENTICAL dynamic assignee sources. At runtime the fan-out
+ * raises a typed 409 (`APPROVAL_ASSIGNEE_PARALLEL_DYNAMIC_CONFLICT`) whenever two branches resolve
+ * to the same user — for identical dynamic sources (requester×requester, direct_manager×direct_manager,
+ * same-parameter manager levels / form fields) that is EVERY request, so the template is unpublishable
+ * in practice. The backend publish gate (`assertNoParallelDynamicAssigneeConflicts`) rejects the same
+ * shape with the same code; this mirror surfaces it BEFORE the rejected request. Only
+ * provably-identical sources are flagged — DIFFERENT kinds or DIFFERENT parameters may still collide
+ * for some org shapes and stay the runtime guard's job. Walk mirrors the backend's conservative
+ * first-outgoing-edge walk per branch, deduped within a branch (sequential same-source nodes in ONE
+ * branch are not a parallel conflict).
+ */
+export function parallelDynamicAssigneeConflicts(graph: ApprovalGraph): string[] {
+  const errors: string[] = []
+  const edgeByKey = new Map(graph.edges.map((edge) => [edge.key, edge]))
+  const firstOutgoing = new Map<string, string>()
+  for (const edge of graph.edges) {
+    if (!firstOutgoing.has(edge.source)) firstOutgoing.set(edge.source, edge.target)
+  }
+  const nodeByKey = new Map(graph.nodes.map((node) => [node.key, node]))
+  for (const node of graph.nodes) {
+    if (node.type !== 'parallel' || !isParallelConfig(node.config)) continue
+    const config = node.config
+    const seenAcrossBranches = new Set<string>()
+    for (const branchEdgeKey of config.branches) {
+      const branchFingerprints = new Set<string>()
+      let currentKey: string | undefined = edgeByKey.get(branchEdgeKey)?.target
+      const visited = new Set<string>()
+      while (currentKey && currentKey !== config.joinNodeKey && !visited.has(currentKey)) {
+        visited.add(currentKey)
+        const current = nodeByKey.get(currentKey)
+        if (!current) break
+        if (current.type === 'approval') {
+          const sources = (current.config as { assigneeSources?: ApprovalAssigneeSource[] }).assigneeSources ?? []
+          for (const source of sources) {
+            const fingerprint = dynamicAssigneeSourceFingerprint(source)
+            if (fingerprint) branchFingerprints.add(fingerprint)
+          }
+        }
+        currentKey = firstOutgoing.get(currentKey)
+      }
+      for (const fingerprint of branchFingerprints) {
+        if (seenAcrossBranches.has(fingerprint)) {
+          errors.push(`并行节点 ${node.key} 的多个分支使用了相同的动态审批人来源（${fingerprint}），发起审批时会因重复审批人失败，请为各分支配置不同的审批人`)
+        } else {
+          seenAcrossBranches.add(fingerprint)
+        }
+      }
     }
   }
   return errors

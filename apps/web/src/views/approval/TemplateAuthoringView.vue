@@ -1660,6 +1660,7 @@ import {
   validateTemplateApprovalFlow,
   placeholderRoleNodeKeys,
   approvalFormulaInsertOptions,
+  parallelDynamicAssigneeConflicts,
   CONDITION_RULE_OPERATORS,
   PARALLEL_JOIN_MODES,
   CC_TARGET_TYPES,
@@ -2242,6 +2243,11 @@ const publishFormFieldIssues = computed<string[]>(() => validateTemplateFormFiel
 const publishApprovalFlowIssues = computed<string[]>(() => [
   ...validateTemplateApprovalFlow(draft.value),
   ...canvasValidity.value,
+  // F2 publish preflight: parallel branches with provably-identical DYNAMIC approver sources 409
+  // every request at runtime; the backend publish gate rejects the same shape
+  // (APPROVAL_ASSIGNEE_PARALLEL_DYNAMIC_CONFLICT). Checklist-scoped (like the placeholder-role
+  // item): the draft still SAVES — publish is what the conflicting shape can never reach.
+  ...parallelDynamicAssigneeConflicts(canvasEffectiveGraph.value),
 ])
 const publishPlaceholderRoleKeys = computed<string[]>(() => placeholderRoleNodeKeys(draft.value.approvalNodeEdits ?? {}))
 const publishPlaceholderRoleIssues = computed<string[]>(() =>
