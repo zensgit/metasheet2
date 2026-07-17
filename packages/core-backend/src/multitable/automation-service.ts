@@ -2437,13 +2437,50 @@ export class AutomationService {
     return { execution: continued }
   }
 
-  async handleApprovalCompletionEvent(event: ApprovalCompletionEventV1): Promise<void> {
+  async handleApprovalCompletionEvent(event: ApprovalCompletionEventV1, env: NodeJS.ProcessEnv = process.env): Promise<void> {
     if (event.version !== 1 || event.source !== 'approval-product') return
     if (!['approval.approved', 'approval.rejected', 'approval.revoked', 'approval.cancelled'].includes(event.eventType)) return
 
-    const bridge = await this.approvalBridgeService.claimCompletion(event)
+    const leased = isDurableDeliveryEnabled(env)
+    const bridge = await this.approvalBridgeService.claimCompletion(event, env)
     if (!bridge) return
 
+    if (!leased) {
+      // LEGACY (flag OFF): claimCompletion already flipped the bridge to the terminal `resumed` BEFORE the
+      // continuation — byte-identical to the pre-P1#1 behavior (the window the P1 finding is about).
+      await this.resumeApprovalBridgeContinuation(bridge, event)
+      return
+    }
+    // P1#1 (flag ON): the bridge holds a RECLAIMABLE lease (in_progress). Run the continuation, THEN write the
+    // terminal `resumed` via fence-CAS — NO terminal-early write. A crash before markBridgeResumed leaves the
+    // lease to expire; the redelivered completion event reclaims it (bounded → dead_letter). The tail's own
+    // idempotency (Class-A same-txn claim / Class-B intent) makes the reclaim redelivery exactly-once at the
+    // effect level (at-least-once delivery + sink idempotency — the durable-delivery doctrine).
+    try {
+      await this.resumeApprovalBridgeContinuation(bridge, event)
+    } catch (err) {
+      // an UNEXPECTED throw (NOT a handled deterministic failure — those `return` inside the continuation):
+      // do NOT mark terminal. Let the lease expire so the work is reclaimed and retried; rethrow so a durable
+      // dispatcher driving this records a retryable failure.
+      logger.error(`Approval bridge continuation crashed for ${bridge.id}; leaving lease to expire for reclaim`, err instanceof Error ? err : undefined)
+      throw err
+    }
+    const won = await this.approvalBridgeService.markBridgeResumed(bridge.id, bridge.fence)
+    if (!won) {
+      // our lease expired mid-continuation and a reclaimer took the row (fence advanced); the continuation's
+      // effects are idempotent and the reclaimer writes the terminal state — nothing to do here.
+      logger.warn(`Approval bridge ${bridge.id} terminal write lost the fence-CAS (reclaimed mid-flight); reclaimer owns it`)
+    }
+  }
+
+  /**
+   * The bridge resume continuation — extracted VERBATIM so the legacy (terminal-early) path and the P1#1 lease
+   * path share ONE body. Its early `return`s are the DETERMINISTIC failures (missing execution, missing/disabled
+   * rule, changed fingerprint, non-approved outcome, record gone); each settles the execution and returns
+   * normally (no throw), so the caller then writes the terminal bridge state (legacy: already done by
+   * claimCompletion; lease: markBridgeResumed). Only an UNEXPECTED throw escapes to the caller's reclaim path.
+   */
+  private async resumeApprovalBridgeContinuation(bridge: AutomationApprovalBridgeRow, event: ApprovalCompletionEventV1): Promise<void> {
     const execution = await this.logService.getById(bridge.executionId)
     if (!execution) {
       logger.error(`start_approval bridge ${bridge.id} references missing execution ${bridge.executionId}`)
