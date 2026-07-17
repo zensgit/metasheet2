@@ -1744,7 +1744,12 @@ export class MetaSheetServer {
         // workdayCalendar (plugin-provided), core-backend is the PROVIDER here; plugin-attendance
         // consumes it and fail-closes when it is absent. At S7-1 it reports every dynamic kind
         // unimplemented, so a dynamic-kind step can never round-trip inert — see buildApprovalAssigneeResolverPort.
-        approvalAssigneeResolver: this.buildApprovalAssigneeResolverPort(),
+        // S7-2 precursor (owner P3 on #4415): least-privilege — ONLY plugin-attendance receives the
+        // port (same posture as the plugin-integration-core dataSources facade above). Before the
+        // resolver reads real directory data, "narrow port" must be a capability boundary, not a type
+        // description; every other plugin gets undefined and the consumer's fail-closed path.
+        approvalAssigneeResolver:
+          manifest.name === 'plugin-attendance' ? this.buildApprovalAssigneeResolverPort() : undefined,
         automationRegistry,
         rbacProvisioning,
         platformAppInstances,
