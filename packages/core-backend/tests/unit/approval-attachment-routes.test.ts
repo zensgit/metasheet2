@@ -4,6 +4,7 @@ import request from 'supertest'
 import { describe, expect, test } from 'vitest'
 
 import { createApprovalAttachmentRouter, isApprovalAttachmentsEnabled } from '../../src/routes/approval-attachments'
+import { APPROVAL_ATTACHMENT_LIMITS } from '../../src/services/approval-attachment-validation'
 import type { ApprovalAttachmentStore } from '../../src/services/approval-attachment-storage'
 
 const FLAG_ON = { APPROVAL_ATTACHMENTS_ENABLED: 'true' } as unknown as NodeJS.ProcessEnv
@@ -96,6 +97,29 @@ describe('approval attachment routes (flag-gated)', () => {
       .attach('file', Buffer.from('MZ'), { filename: 'x.exe', contentType: 'application/x-msdownload' })
     expect(bad.status).toBe(422)
     expect(bad.body.rejected[0].code).toBe('mime_not_allowed')
+  })
+
+  // #6 route error handling: multer limit errors → values-free reject (not a framework 500 with a stack).
+  test('upload over the multer byte cap → 413 values-free reject (no stack, no limit echo)', async () => {
+    const { app, blobs } = makeApp()
+    const tooBig = Buffer.alloc(APPROVAL_ATTACHMENT_LIMITS.maxFileBytes + 1)
+    const r = await request(app)
+      .post('/api/approval/attachments')
+      .field('fieldId', 'fld1')
+      .field('templateId', 'tpl1')
+      .attach('file', tooBig, { filename: 'big.pdf', contentType: 'application/pdf' })
+    expect(r.status).toBe(413)
+    expect(r.body).toEqual({ error: 'rejected', rejected: [{ code: 'file_too_large' }] }) // values-free
+    expect(blobs.size).toBe(0) // never written
+  })
+
+  // #6: an async db/store rejection becomes a values-free 500, never an unhandled rejection / hung request.
+  test('download whose blob store rejects → 500 (handled), not a hang', async () => {
+    const row = { status: 'bound', uploader_id: 'up1', instance_id: 'i1', field_id: 'fld1', storage_key: 'gone', file_name: 'a.pdf', mime_type: 'application/pdf' }
+    const app = makeApp({ rows: [row], participant: true }) // blob 'gone' is never seeded → store.get throws
+    const r = await request(app.app).get('/api/approval/attachments/att_1/download')
+    expect(r.status).toBe(500)
+    expect(r.body).toEqual({ error: 'internal_error' }) // values-free
   })
 
   // G2: a fieldId that is NOT an attachment-typed field in the template schema is rejected (400).
