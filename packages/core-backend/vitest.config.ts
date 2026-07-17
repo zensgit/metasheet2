@@ -149,6 +149,11 @@ export default defineConfig({
       // wired as a WHOLE FILE into the directory real-DB step (both points asserted by
       // b5b-routing-resolver-ci-wiring.test.mjs).
       'tests/integration/org-directory-routing-policy-resolver.db.test.ts',
+      // B5-b owner P1 (fail-open closure): broken/unreadable routing policy must fail-close ALL
+      // FOUR org assignee sources at approval create (422/503, zero instances, zero assignments) —
+      // real MetaSheetServer + real createApproval. DATABASE_URL-gated; wired as a WHOLE FILE into
+      // the APPROVAL real-DB step (both points asserted by b5b-failclose-ci-wiring.test.mjs).
+      'tests/integration/approval-routing-policy-failclose.api.test.ts',
       // Canonical Org MVP B3 (#4215 §5.4): proves ApprovalDirectoryOrg's DUAL-SOURCE direct-manager
       // resolution against real Postgres — normalized `is_manager` relation for a local integration,
       // the DingTalk `leader_in_dept` regression pin (load-bearing compat leg + is_manager=0 positive

@@ -184,6 +184,10 @@ jobs:
       - name: B5-b routing-resolver CI wiring contract
         run: node --test scripts/ops/b5b-routing-resolver-ci-wiring.test.mjs
 
+      # B5-b P1 fail-close CI two-point wiring contract (no DB).
+      - name: B5-b fail-close CI wiring contract
+        run: node --test scripts/ops/b5b-failclose-ci-wiring.test.mjs
+
       # The production monitor invokes the same state helper covered here.
       # Keep this in the required 18/20 matrix so HTTP classification, silence
       # barriers, and alert/recovery streak semantics cannot drift silently.
@@ -617,6 +621,7 @@ jobs:
             tests/integration/approval-p1c-field-permissions.api.test.ts \
             tests/integration/approval-wp-add-reduce-sign.api.test.ts \
             tests/integration/approval-direct-manager.api.test.ts \
+            tests/integration/approval-routing-policy-failclose.api.test.ts \
             tests/integration/approval-postgate-acceptance.api.test.ts \
             tests/integration/dept-head-sync-plumbing.test.ts \
             tests/integration/approval-manager-chain.db.test.ts \
