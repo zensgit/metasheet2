@@ -69,6 +69,40 @@ describeIfDatabase('approval attachment GC (real DB)', () => {
     expect(deleted.some((k) => k.includes(`att_${RUN}`))).toBe(true)
   })
 
+  // §12 item 18 — a persistent non-not-found error dead-letters after the bounded cap (alert seam fired);
+  // not-found stays terminal-success. The transient-recovers control is covered by the drain test above.
+  test('purge-worker dead-letter: persistent EACCES → terminal dead_letter after the cap + values-free alert', async () => {
+    const deadRow = await seed({ status: 'deleted', key: `key_att_${RUN}_dl` }) // deleted ⇒ unreferenced ⇒ claimable
+    await db().query(
+      `INSERT INTO approval_attachment_purge_intents (id, storage_key, reason) VALUES ($1,$2,'reconciler_orphan')`,
+      [`pi_dl_${RUN}`, `key_att_${RUN}_dl`],
+    )
+    const alerts: Array<[string, string]> = []
+    const persistentDeleter = async () => {
+      throw Object.assign(new Error('permission denied /secret/blob/path'), { code: 'EACCES' })
+    }
+    // cap = 2 keeps the loop short; drive drains until the intent reaches dead_letter
+    for (let i = 0; i < 6; i++) {
+      await drainPurgeIntents(db(), persistentDeleter, {
+        maxAttempts: 2,
+        onDeadLetter: (id, key, code) => alerts.push([id, code]),
+      })
+      const st = (await db().query('SELECT status FROM approval_attachment_purge_intents WHERE id=$1', [`pi_dl_${RUN}`])).rows[0]
+      if (st.status === 'dead_letter') break
+    }
+    const final = (await db().query('SELECT status, last_error FROM approval_attachment_purge_intents WHERE id=$1', [`pi_dl_${RUN}`])).rows[0]
+    expect(final.status).toBe('dead_letter')
+    expect(final.last_error).toBe('EACCES') // values-free code — NOT the raw message with the path
+    expect(alerts.some(([, code]) => code === 'EACCES')).toBe(true) // alert seam fired once
+    // a dead_letter intent is NEVER re-claimed by a later drain (no unbounded retry)
+    const before = final.status
+    await drainPurgeIntents(db(), persistentDeleter, { maxAttempts: 2 })
+    const after = (await db().query('SELECT status FROM approval_attachment_purge_intents WHERE id=$1', [`pi_dl_${RUN}`])).rows[0].status
+    expect(after).toBe(before)
+    await db().query('DELETE FROM approval_attachment_purge_intents WHERE id=$1', [`pi_dl_${RUN}`]).catch(() => {})
+    void deadRow
+  })
+
   test('SAFETY: a blob still referenced by a live row is NEVER deleted — skipped and surfaced', async () => {
     const live = await seed({ status: 'bound', instance: 'apr_y', key: `key_shared_${RUN}` })
     await db().query(
