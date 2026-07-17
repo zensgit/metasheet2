@@ -383,10 +383,10 @@
               max-height="320"
               stripe
             >
-              <el-table-column label="版本" width="90">
+              <el-table-column label="版本" :width="isNarrowViewport ? 72 : 90">
                 <template #default="{ row }">v{{ row.version }}</template>
               </el-table-column>
-              <el-table-column label="状态" width="140">
+              <el-table-column label="状态" :width="isNarrowViewport ? 120 : 140">
                 <template #default="{ row }">
                   <el-tag size="small" :type="versionStatusTagType(row.status)">
                     {{ versionStatusLabel(row.status) }}
@@ -399,21 +399,118 @@
                   >
                     当前生效
                   </el-tag>
+                  <el-tag
+                    v-if="row.restoredFromVersionId"
+                    size="small"
+                    type="warning"
+                    class="template-detail__version-source-tag"
+                  >
+                    恢复自 {{ restoredSourceLabel(row.restoredFromVersionId) }}
+                  </el-tag>
                 </template>
               </el-table-column>
-              <el-table-column label="发布说明" min-width="240">
+              <el-table-column v-if="!isNarrowViewport" label="发布说明" min-width="240">
                 <template #default="{ row }">
                   <span v-if="row.publishNote" class="template-detail__version-note">{{ row.publishNote }}</span>
                   <span v-else>-</span>
                 </template>
               </el-table-column>
-              <el-table-column label="更新时间" width="180">
+              <el-table-column v-if="!isNarrowViewport" label="更新时间" width="180">
                 <template #default="{ row }">{{ formatDate(row.updatedAt) }}</template>
+              </el-table-column>
+              <el-table-column
+                label="操作"
+                :width="isNarrowViewport ? 142 : 190"
+                :fixed="isNarrowViewport ? undefined : 'right'"
+              >
+                <template #default="{ row }">
+                  <el-button
+                    link
+                    type="primary"
+                    :icon="View"
+                    :loading="versionDiffLoading && selectedVersionId === row.id"
+                    :data-testid="`template-version-compare-${row.id}`"
+                    @click="openVersionDiff(row)"
+                  >
+                    查看变化
+                  </el-button>
+                  <el-button
+                    v-if="row.id !== template.latestVersionId"
+                    link
+                    type="warning"
+                    :icon="RefreshLeft"
+                    :loading="restoringVersionId === row.id"
+                    :data-testid="`template-version-restore-${row.id}`"
+                    @click="handleRestoreVersion(row)"
+                  >
+                    恢复
+                  </el-button>
+                </template>
               </el-table-column>
               <template #empty>
                 <el-empty description="暂无版本记录" :image-size="60" />
               </template>
             </el-table>
+
+            <div
+              v-if="selectedVersionId"
+              v-loading="versionDiffLoading"
+              class="template-detail__version-diff"
+              data-testid="template-version-diff"
+            >
+              <div class="template-detail__version-diff-header">
+                <div>
+                  <h3>{{ versionDiffTitle }}</h3>
+                  <span v-if="selectedVersion?.restoredFromVersionId" class="template-detail__version-source">
+                    恢复自 {{ restoredSourceLabel(selectedVersion.restoredFromVersionId) }}
+                  </span>
+                </div>
+                <el-button
+                  circle
+                  text
+                  :icon="Close"
+                  title="关闭版本比较"
+                  aria-label="关闭版本比较"
+                  @click="closeVersionDiff"
+                />
+              </div>
+              <template v-if="versionDiff">
+                <div class="template-detail__version-diff-summary">
+                  <span>表单字段 {{ versionDiff.fieldChanges }}</span>
+                  <span>流程节点 {{ versionDiff.nodeChanges }}</span>
+                  <span>连线 {{ versionDiff.edgeChanges }}</span>
+                </div>
+                <el-empty
+                  v-if="versionDiff.totalChanges === 0"
+                  description="与上一版本无结构变化"
+                  :image-size="48"
+                />
+                <ul v-else class="template-detail__version-change-list">
+                  <li
+                    v-for="change in versionDiff.changes"
+                    :key="`${change.entity}-${change.key}-${change.kind}`"
+                  >
+                    <el-tag
+                      size="small"
+                      :type="versionChangeTagType(change.kind)"
+                      class="template-detail__version-change-kind"
+                    >
+                      {{ versionChangeKindLabel(change.kind) }}
+                    </el-tag>
+                    <span class="template-detail__version-change-entity">
+                      {{ versionChangeEntityLabel(change.entity) }}
+                    </span>
+                    <strong>{{ change.label }}</strong>
+                  </li>
+                </ul>
+              </template>
+              <el-alert
+                v-else-if="versionDiffError"
+                type="warning"
+                :title="versionDiffError"
+                :closable="false"
+              />
+            </div>
           </div>
         </div>
       </div>
@@ -424,7 +521,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import PageShell from '../../components/layout/PageShell.vue'
 import PageHeader from '../../components/layout/PageHeader.vue'
 import StatusTag from '../../components/status/StatusTag.vue'
@@ -435,6 +532,9 @@ import {
   Message,
   QuestionFilled,
   CircleCheckFilled,
+  View,
+  RefreshLeft,
+  Close,
 } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import type {
@@ -445,6 +545,7 @@ import type {
   ApprovalTemplateVisibilityScope,
   ApprovalTemplateVisibilityType,
   ApprovalTemplateVersionSummaryDTO,
+  ApprovalTemplateVersionDetailDTO,
   ApprovalTemplateStatus,
 } from '../../types/approval'
 import { useApprovalTemplateStore } from '../../approvals/templateStore'
@@ -456,8 +557,16 @@ import {
   getTemplateUsage,
   archiveTemplate,
   unarchiveTemplate,
+  getTemplateVersion,
   listTemplateVersions,
+  restoreTemplateVersion,
 } from '../../approvals/api'
+import {
+  diffApprovalTemplateVersions,
+  type TemplateVersionChangeEntity,
+  type TemplateVersionChangeKind,
+  type TemplateVersionDiff,
+} from '../../approvals/templateVersionDiff'
 import { describeFieldVisibilityRule } from '../../approvals/fieldVisibility'
 import { templateArchiveConfirmMessage, templateUnarchiveConfirmMessage } from '../../approvals/templateArchiveConfirm'
 
@@ -495,6 +604,12 @@ const slaDraft = ref<number | null>(null)
 const slaSaving = ref(false)
 // B3-08 — 停用/启用 state.
 const archiving = ref(false)
+const isNarrowViewport = ref(false)
+let narrowViewportQuery: MediaQueryList | null = null
+
+function syncNarrowViewport(event?: MediaQueryListEvent) {
+  isNarrowViewport.value = event?.matches ?? narrowViewportQuery?.matches ?? false
+}
 
 function beginEditSla() {
   if (!template.value) return
@@ -785,7 +900,22 @@ async function handleUnarchive() {
 // request (the endpoint would 403 them anyway).
 const versionHistory = ref<ApprovalTemplateVersionSummaryDTO[]>([])
 const versionHistoryError = ref('')
+const selectedVersionId = ref<string | null>(null)
+const selectedVersion = ref<ApprovalTemplateVersionDetailDTO | null>(null)
+const selectedBaseline = ref<ApprovalTemplateVersionSummaryDTO | null>(null)
+const versionDiff = ref<TemplateVersionDiff | null>(null)
+const versionDiffLoading = ref(false)
+const versionDiffError = ref('')
+const restoringVersionId = ref<string | null>(null)
+const versionDetailCache = new Map<string, ApprovalTemplateVersionDetailDTO>()
 let versionHistoryFetched = false
+
+const versionDiffTitle = computed(() => {
+  if (!selectedVersion.value) return '版本变化'
+  return selectedBaseline.value
+    ? `v${selectedBaseline.value.version} -> v${selectedVersion.value.version}`
+    : `v${selectedVersion.value.version} 初始内容`
+})
 
 const VERSION_STATUS_LABELS: Record<ApprovalTemplateStatus, string> = {
   draft: '草稿',
@@ -815,6 +945,119 @@ async function loadVersionHistory() {
   }
 }
 
+async function refreshVersionHistory() {
+  versionHistory.value = await listTemplateVersions(route.params.id as string)
+  versionHistoryError.value = ''
+  versionHistoryFetched = true
+}
+
+function emptyVersionSnapshot(): Pick<ApprovalTemplateVersionDetailDTO, 'formSchema' | 'approvalGraph'> {
+  return { formSchema: { fields: [] }, approvalGraph: { nodes: [], edges: [] } }
+}
+
+async function loadVersionDetail(versionId: string): Promise<ApprovalTemplateVersionDetailDTO> {
+  const cached = versionDetailCache.get(versionId)
+  if (cached) return cached
+  const detail = await getTemplateVersion(route.params.id as string, versionId)
+  versionDetailCache.set(versionId, detail)
+  return detail
+}
+
+async function openVersionDiff(row: ApprovalTemplateVersionSummaryDTO) {
+  selectedVersionId.value = row.id
+  selectedVersion.value = null
+  versionDiff.value = null
+  versionDiffError.value = ''
+  versionDiffLoading.value = true
+  const rowIndex = versionHistory.value.findIndex((entry) => entry.id === row.id)
+  const baseline = rowIndex >= 0 ? versionHistory.value[rowIndex + 1] ?? null : null
+  selectedBaseline.value = baseline
+  try {
+    const [current, previous] = await Promise.all([
+      loadVersionDetail(row.id),
+      baseline ? loadVersionDetail(baseline.id) : Promise.resolve(emptyVersionSnapshot()),
+    ])
+    if (selectedVersionId.value !== row.id) return
+    selectedVersion.value = current
+    versionDiff.value = diffApprovalTemplateVersions(previous, current)
+  } catch (e: any) {
+    if (selectedVersionId.value === row.id) {
+      versionDiffError.value = e?.message ?? '版本变化加载失败'
+    }
+  } finally {
+    if (selectedVersionId.value === row.id) versionDiffLoading.value = false
+  }
+}
+
+function closeVersionDiff() {
+  selectedVersionId.value = null
+  selectedVersion.value = null
+  selectedBaseline.value = null
+  versionDiff.value = null
+  versionDiffError.value = ''
+}
+
+function restoredSourceLabel(versionId: string): string {
+  const source = versionHistory.value.find((entry) => entry.id === versionId)
+  return source ? `v${source.version}` : '历史版本'
+}
+
+async function handleRestoreVersion(row: ApprovalTemplateVersionSummaryDTO) {
+  const currentTemplate = template.value
+  if (!currentTemplate?.latestVersionId || restoringVersionId.value) return
+  try {
+    await ElMessageBox.confirm(
+      `将 v${row.version} 复制为新的草稿版本。当前已发布版本和运行中的审批不会改变。`,
+      `恢复 v${row.version}`,
+      { confirmButtonText: '恢复为新草稿', cancelButtonText: '取消', type: 'warning' },
+    )
+  } catch {
+    return
+  }
+
+  restoringVersionId.value = row.id
+  try {
+    const restored = await restoreTemplateVersion(currentTemplate.id, row.id, {
+      expectedLatestVersionId: currentTemplate.latestVersionId,
+    })
+    versionDetailCache.set(restored.id, restored)
+    await Promise.all([store.loadTemplate(currentTemplate.id), refreshVersionHistory()])
+    ElMessage.success(`已恢复为草稿 v${restored.version}`)
+    const restoredRow = versionHistory.value.find((entry) => entry.id === restored.id)
+    if (restoredRow) await openVersionDiff(restoredRow)
+  } catch (e: any) {
+    ElMessage.error(e?.message ?? '恢复版本失败')
+  } finally {
+    restoringVersionId.value = null
+  }
+}
+
+const VERSION_CHANGE_KIND_LABELS: Record<TemplateVersionChangeKind, string> = {
+  added: '新增',
+  removed: '删除',
+  changed: '修改',
+}
+
+const VERSION_CHANGE_ENTITY_LABELS: Record<TemplateVersionChangeEntity, string> = {
+  field: '字段',
+  node: '节点',
+  edge: '连线',
+}
+
+function versionChangeKindLabel(kind: TemplateVersionChangeKind): string {
+  return VERSION_CHANGE_KIND_LABELS[kind]
+}
+
+function versionChangeEntityLabel(entity: TemplateVersionChangeEntity): string {
+  return VERSION_CHANGE_ENTITY_LABELS[entity]
+}
+
+function versionChangeTagType(kind: TemplateVersionChangeKind): 'success' | 'danger' | 'warning' {
+  if (kind === 'added') return 'success'
+  if (kind === 'removed') return 'danger'
+  return 'warning'
+}
+
 watch(
   canManageTemplates,
   (isAdmin) => {
@@ -824,8 +1067,18 @@ watch(
 )
 
 onMounted(() => {
+  if (typeof window !== 'undefined' && typeof window.matchMedia === 'function') {
+    narrowViewportQuery = window.matchMedia('(max-width: 768px)')
+    syncNarrowViewport()
+    narrowViewportQuery.addEventListener('change', syncNarrowViewport)
+  }
   const id = route.params.id as string
   store.loadTemplate(id)
+})
+
+onBeforeUnmount(() => {
+  narrowViewportQuery?.removeEventListener('change', syncNarrowViewport)
+  narrowViewportQuery = null
 })
 </script>
 
@@ -919,15 +1172,87 @@ onMounted(() => {
   margin-left: 8px;
 }
 
+.template-detail__version-source-tag {
+  margin-left: 8px;
+}
+
 .template-detail__version-note {
   white-space: pre-wrap;
   word-break: break-word;
+}
+
+.template-detail__version-diff {
+  margin-top: 16px;
+  padding-top: 16px;
+  border-top: 1px solid var(--el-border-color-lighter);
+}
+
+.template-detail__version-diff-header,
+.template-detail__version-diff-summary,
+.template-detail__version-change-list li {
+  display: flex;
+  align-items: center;
+}
+
+.template-detail__version-diff-header {
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.template-detail__version-diff-header h3 {
+  margin: 0;
+  font-size: 16px;
+}
+
+.template-detail__version-source {
+  color: var(--el-text-color-secondary);
+  font-size: 12px;
+}
+
+.template-detail__version-diff-summary {
+  gap: 20px;
+  margin: 12px 0;
+  color: var(--el-text-color-regular);
+  font-size: 13px;
+}
+
+.template-detail__version-change-list {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.template-detail__version-change-list li {
+  gap: 8px;
+  min-width: 0;
+}
+
+.template-detail__version-change-list strong {
+  overflow-wrap: anywhere;
+}
+
+.template-detail__version-change-kind,
+.template-detail__version-change-entity {
+  flex: 0 0 auto;
+}
+
+.template-detail__version-change-entity {
+  color: var(--el-text-color-secondary);
+  font-size: 12px;
 }
 
 @media (max-width: 768px) {
   .template-detail__meta {
     flex-direction: column;
     gap: 8px;
+  }
+
+  .template-detail__version-diff-summary {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 4px;
   }
 }
 </style>
