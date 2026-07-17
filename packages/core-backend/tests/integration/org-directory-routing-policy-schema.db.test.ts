@@ -158,15 +158,40 @@ describeIfDatabase('Canonical Org MVP — B5-a routing policy schema (real DB)',
     expect(ok.id).toBeTruthy()
   })
 
-  it('G. schema contract: named constraints exist on THIS table and both org FKs are two-column', async () => {
-    const own = await query<{ conname: string; ncols: number | null }>(
-      `SELECT conname, array_length(conkey, 1) AS ncols FROM pg_constraint
+  it('G. schema contract: named constraints exist, both org FKs are two-column AND both are ON DELETE RESTRICT', async () => {
+    const own = await query<{ conname: string; ncols: number | null; confdeltype: string | null }>(
+      `SELECT conname, array_length(conkey, 1) AS ncols, confdeltype FROM pg_constraint
         WHERE conrelid = 'org_directory_routing_policy'::regclass`,
     )
-    const byName = new Map(own.rows.map((r) => [r.conname, r.ncols]))
+    const byName = new Map(own.rows.map((r) => [r.conname, r]))
     expect(byName.has('orp_org_purpose_uniq')).toBe(true)
     expect(byName.has('orp_purpose_chk')).toBe(true)
-    expect(byName.get('orp_canonical_int_org_fk')).toBe(2) // (canonical_integration_id, org_id)
-    expect(byName.get('orp_fallback_int_org_fk')).toBe(2) // (fallback_integration_id, org_id)
+    expect(byName.get('orp_canonical_int_org_fk')?.ncols).toBe(2) // (canonical_integration_id, org_id)
+    expect(byName.get('orp_fallback_int_org_fk')?.ncols).toBe(2) // (fallback_integration_id, org_id)
+    // B5-a gate P2: the DELETE ACTION is load-bearing — a CASCADE here would SILENTLY delete the
+    // policy row when its referenced integration is deleted (the exact §6 mass-misrouting hazard),
+    // and a SET NULL on the composite FK would null org_id. Pin 'r' (RESTRICT) for BOTH FKs so any
+    // delete-action regression (CASCADE 'c', SET NULL 'n', NO ACTION 'a') reds this line.
+    expect(byName.get('orp_canonical_int_org_fk')?.confdeltype).toBe('r')
+    expect(byName.get('orp_fallback_int_org_fk')?.confdeltype).toBe('r')
+  })
+
+  it('H. RESTRICT is behavioral on the FALLBACK leg too: deleting a fallback-referenced integration is a loud 23503, never a silent policy-row loss', async () => {
+    const org = orgId('fb-restrict')
+    seededOrgIds.push(org)
+    const local = await getOrCreateLocalIntegration(org)
+    const fb = await dingtalkIntegration(org, 'fbr')
+    await insertPolicy({ org, canonical: local.id, fallback: fb })
+
+    const err = await reject(() => query(`DELETE FROM directory_integrations WHERE id = $1`, [fb]))
+    expect(err?.code).toBe('23503')
+    expect(err?.constraint).toBe('orp_fallback_int_org_fk')
+
+    // the policy row survived INTACT (a CASCADE would have silently removed it)
+    const rows = await query<{ n: number }>(
+      `SELECT count(*)::int AS n FROM org_directory_routing_policy WHERE org_id = $1`,
+      [org],
+    )
+    expect(rows.rows[0].n).toBe(1)
   })
 })
