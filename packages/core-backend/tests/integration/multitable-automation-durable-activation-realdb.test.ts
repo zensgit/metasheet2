@@ -4,19 +4,30 @@
  * Activation (flag semantics — the byte-neutral proof):
  *   - flag OFF: produceAutomationEvent → null + ZERO rows; bootDurableDelivery → null (no registry, no loop);
  *   - missing handler → boot throws before any claim; incomplete registry → completeness assertion throws;
- *   - flag ON: produce inside a txn → boot → loop drains the fan-out; PermanentDeliveryFailure → dead_letter.
+ *   - flag ON: produce inside a txn via the REAL seam enqueues the exact manifest fan-out (approval → 3
+ *     consumers, pending — asserted WITHOUT draining, so no shared-row claim); poison → dead_letter is proven
+ *     separately on a run-unique key.
+ *
+ * SCOPE: this file covers the activation seam + the S7 crash-injection tests ONLY. The S5/S6 PRODUCTION work
+ * — meta_automation_event_fires lease-ification + upgrade backfill; recoverable bridge/trigger/projection
+ * sinks; real producer/consumer/boot wiring — is NOT implemented here and ships as separate slices (the
+ * review's open P1). Nothing below claims S6 is done or exempt.
  *
  * Crash-injection V-series (crash = "no further calls from that worker" + lease expiry — the same observable
- * a killed process leaves):
+ * a killed process leaves). To avoid mutating sibling suites' due rows on the shared CI DB, every V-test that
+ * claims/reclaims does so over a RUN-UNIQUE single-consumer manifest and claims only its own key (proven by
+ * the ISOLATION golden below, which seeds a real-key foreign due row and asserts it byte-identical after):
  *   V1 produce-then-crash-BEFORE-commit  → ROLLBACK: zero rows, zero deliveries (nothing phantom).
- *   V2 commit-then-crash-before-dispatch → rows durable; a later tick ("restarted worker") delivers.
+ *   V2 commit-then-crash-before-dispatch → rows durable; a later run-unique tick ("restarted worker") delivers.
  *   V3 crash-after-claim                 → lease expiry → reclaim redelivers: at-least-once, and the handler
  *                                          sees the SAME stable eventId on every delivery (fence-free identity).
- *   V4 zombie + reclaimer both live      → both sides can reach "send"; the outbound idempotency SEED
- *                                          (eventId + consumer_key) is IDENTICAL across fences (#4203 §340 —
- *                                          the endpoint dedups), and the zombie's terminal write hits 0 rows.
+ *   V4 zombie + reclaimer both live      → BOTH actually call a real idempotent endpoint; the outbound seed is
+ *                                          the EVENT+ACTION identity via deriveOutboundIdempotencyKey (NOT
+ *                                          consumer_key, which can't distinguish two actions in one consumer),
+ *                                          so 2 sends collapse to 1 effect (#4203 §340); a different-event
+ *                                          positive control proves that is non-vacuous; zombie terminal write
+ *                                          hits 0 rows.
  *
- * Uses the real manifest consumer keys; adapters defensively skip rows not seeded by this file (shared CI DB).
  * Two-point wired (plugin-tests.yml + vitest.config.ts exclude).
  */
 import { randomUUID } from 'node:crypto'
@@ -35,7 +46,7 @@ import {
 import { claimDueConsumers, completeConsumer, type ClaimedConsumer } from '../../src/multitable/automation-durable-dispatcher'
 import { runDispatchTick, ConsumerAdapterRegistry, type AdapterOutcome, type DispatchLoopObserver } from '../../src/multitable/automation-durable-dispatch-loop'
 import type { TransactionalQueryable } from '../../src/multitable/pg-transaction-guard'
-import { enqueueOutboxEvent, type OutboxEventInput } from '../../src/multitable/automation-outbox-enqueue'
+import { enqueueOutboxEvent } from '../../src/multitable/automation-outbox-enqueue'
 import { deriveOutboundIdempotencyKey } from '../../src/multitable/automation-action-idempotency'
 import { APPROVAL_COMPLETION_CONSUMERS, type RoutingManifest } from '../../src/multitable/automation-routing-manifest'
 import type { PoolClient } from 'pg'
@@ -76,22 +87,6 @@ const noopObserver: DispatchLoopObserver = {
   onTickError: () => {},
   onHeartbeatError: () => {},
   onClaimTimePoison: () => {},
-}
-/** Produce inside a REAL committed transaction (the enqueue txn probe requires one) and return the result. */
-async function produceCommitted(input: OutboxEventInput, env: NodeJS.ProcessEnv) {
-  const client = await db().getInternalPool().connect()
-  try {
-    await client.query('BEGIN')
-    const trx: TransactionalQueryable = { isTransaction: true, query: (sql, params) => client.query(sql, params) }
-    const res = await produceAutomationEvent(trx, input, env)
-    await client.query('COMMIT')
-    return res
-  } catch (e) {
-    await client.query('ROLLBACK').catch(() => {})
-    throw e
-  } finally {
-    client.release()
-  }
 }
 
 /**
@@ -149,6 +144,16 @@ async function consumerStatuses(outboxId: string) {
   return Object.fromEntries((rows as Array<{ consumer_key: string; status: string }>).map((r) => [r.consumer_key, r.status]))
 }
 
+/** The four mutable fields a stray claim would disturb — for the foreign-row isolation golden. */
+async function consumerSnapshot(outboxId: string) {
+  const { rows } = await db().query(
+    `SELECT status, attempts, coalesce(lease_expires_at::text,'') AS lease, coalesce(last_error,'') AS last_error
+       FROM meta_automation_outbox_consumer WHERE outbox_id=$1`,
+    [outboxId],
+  )
+  return rows[0] as { status: string; attempts: number; lease: string; last_error: string }
+}
+
 describeIfDatabase('P2 durable-delivery S4-b/S5 activation + S7 crash-injection (real DB)', () => {
   afterAll(async () => {
     if (enqueued.length) {
@@ -158,6 +163,34 @@ describeIfDatabase('P2 durable-delivery S4-b/S5 activation + S7 crash-injection 
 
   test('sentinel: DATABASE_URL set', () => {
     expect(process.env.DATABASE_URL).toBeTruthy()
+  })
+
+  test('ISOLATION golden: a foreign DUE row (real manifest key) is byte-identical after this suite drains a run-unique row', async () => {
+    // seed a foreign row exactly as a sibling suite would leave one: a REAL manifest key, fresh `pending`
+    // (no lease — the schema's lease_iff_in_progress CHECK forbids a lease on a pending row). A fresh pending
+    // row IS claimable/due. If this suite ever claimed by real keys + a big batch (the pre-fix hazard), THIS
+    // row's status/attempts/lease/last_error would move.
+    const fid = `obx_foreign_${RUN}`
+    await db().query(
+      `INSERT INTO meta_automation_outbox (id, event_type, payload, automation_depth, manifest_version, event_id)
+       VALUES ($1,'multitable.record.updated','{}'::jsonb,0,1,$2)`,
+      [fid, `evt_foreign_${RUN}`],
+    )
+    await db().query(
+      `INSERT INTO meta_automation_outbox_consumer (outbox_id, consumer_key, status)
+       VALUES ($1,'automation-record-trigger','pending')`,
+      [fid],
+    )
+    enqueued.push(fid)
+    const before = await consumerSnapshot(fid)
+    // run THIS suite's isolation pattern: enqueue a run-unique row and drain it via a run-unique tick
+    const keyF = `uiso_${RUN}`
+    const r = await enqueueUnique('multitable.record.updated', `evt_${RUN}_iso`, keyF)
+    await runDispatchTick(db(), uniqueRegistry(keyF, () => {}))
+    expect(await consumerStatuses(r.outboxId)).toEqual({ [keyF]: 'done' }) // our own row DID drain
+    // the foreign row is UNTOUCHED — a run-unique claim can never reach a real-key row
+    expect(await consumerSnapshot(fid)).toEqual(before) // status + attempts + lease + last_error all identical
+    expect(before).toMatchObject({ status: 'pending', attempts: 0, last_error: '' })
   })
 
   test('flag OFF is byte-neutral: produce → null + zero rows; boot → null (no loop, no reads)', async () => {
@@ -233,7 +266,6 @@ describeIfDatabase('P2 durable-delivery S4-b/S5 activation + S7 crash-injection 
   })
 
   test('V2: commit-then-crash-before-dispatch → rows are durable; a later tick (restart) delivers', async () => {
-    const res = await produceCommitted({ eventType: 'multitable.comment.created', eventId: `evt_${RUN}_v2`, payload: {} }, FLAG_ON)
     // "crash": no dispatcher runs. Rows sit durable & pending (run-unique key — only ours):
     const key2 = `uv2_${RUN}`
     const r2 = await enqueueUnique('multitable.comment.created', `evt_${RUN}_v2`, key2)
