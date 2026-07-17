@@ -313,6 +313,46 @@ describeIfDatabase('W0-1 L4-cov-services — service writers on the canonical fe
     expect(off?.[F_FORMULA]).toBe(2)
   })
 
+  test('F2 formula recompute is fence-SERIALIZED against recovery: a raw client holding the canonical fence PARKS the recompute until release (recovery-exclusion)', async () => {
+    // What this proves: the formula recompute genuinely ACQUIRES the canonical fence, so it cannot run
+    // concurrently with a fence holder (a recovery holds the fence for its cutover/apply). The TOCTOU
+    // CLOSURE itself — the fence held continuously from block-check THROUGH the UPDATE — is a STRUCTURAL
+    // property (engine wraps fenceWriterEntry + UPDATE in ONE `poolManager.get().transaction`, both on the
+    // same `fq` connection); the precise block-check→UPDATE interleaving is not deterministically
+    // constructible without injecting an engine pause, so it is code-reviewed + reasoned, the same posture
+    // the L8 gate accepted for its two-token race. This test's load-bearing half is that the fence is
+    // acquired at all (removing `fenceWriterEntry` reds both F1 and F2).
+    const R = mkRecord('f2')
+    await seedRecord(R, { [F_STR]: 'x' })
+    const engine = new MultitableFormulaEngine()
+    const fields = [
+      { id: F_STR, sheetId: SHEET, name: 'Note', type: 'string', property: {}, order: 1 },
+      { id: F_FORMULA, sheetId: SHEET, name: 'Calc', type: 'formula', property: { expression: '1+1' }, order: 2 },
+    ] as never
+    process.env[FLAG] = 'true'
+    const query = ((sql: string, params?: unknown[]) => q(sql, params)) as MultitableRecordsQueryFn
+    expect(pool).toBeTruthy()
+    const holder = await pool!.connect()
+    try {
+      await holder.query('BEGIN')
+      await holder.query('SELECT pg_advisory_xact_lock(hashtext($1))', [`meta:auto-number:sheet:${SHEET}`])
+      const inflight = engine.recalculateRecordFromData(query, SHEET, R, { [F_STR]: 'x' }, fields)
+      let sawWaiter = false
+      for (let i = 0; i < 100; i++) {
+        const waiters = await holder.query(`SELECT count(*)::int AS c FROM pg_locks WHERE locktype = 'advisory' AND NOT granted`)
+        if (Number((waiters.rows[0] as { c: number }).c) > 0) { sawWaiter = true; break }
+        await new Promise((r) => setTimeout(r, 50))
+      }
+      expect(sawWaiter).toBe(true) // the recompute genuinely parked behind the fence holder
+      await holder.query('COMMIT') // release ⇒ the recompute proceeds and materializes
+      const result = await inflight
+      expect(result?.[F_FORMULA]).toBe(2)
+      expect((await recordRow(R))?.data?.[F_FORMULA]).toBe(2)
+    } finally {
+      holder.release()
+    }
+  })
+
   // ── §P APPROVAL-PROJECTION reconcile ───────────────────────────────────────────────────────────────────
   const PRJ_TEMPLATE = randomUUID()
   const PRJ_INSTANCE = randomUUID()

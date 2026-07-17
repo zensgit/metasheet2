@@ -1228,20 +1228,13 @@ export class RecordWriteService {
         Array.from(changesByRecord.values()).flatMap((changes) => changes.map((change) => change.fieldId)),
       ),
     ]
-    // W0-1 L4-cov-services TOCTOU root fix (owner ruling 2026-07-17): this recompute chain reaches the
-    // FORMULA materialization UPDATE (via computeDependentLookupRollupRecords → recalculateFormulaFields),
-    // and on a bare autocommit query the engine's fence evaporates per-statement (block-check→UPDATE
-    // window). Run it inside its OWN transaction so fenceWriterEntry is genuinely txn-scoped: the fence is
-    // held from acquisition to COMMIT and a recovery's durable block is observed race-free.
     const relatedRecords =
       updates.length > 0
-        ? await this.pool.transaction(async ({ query }) =>
-            h.computeDependentLookupRollupRecords(
-              query as unknown as Parameters<typeof h.computeDependentLookupRollupRecords>[0],
-              sheetId,
-              updates.map((u) => u.recordId),
-              changedFieldIds,
-            ),
+        ? await h.computeDependentLookupRollupRecords(
+            this.pool.query.bind(this.pool),
+            sheetId,
+            updates.map((u) => u.recordId),
+            changedFieldIds,
           )
         : []
 
@@ -1327,24 +1320,19 @@ export class RecordWriteService {
     // surface in the response + realtime patch so the editing client AND other
     // clients refresh after a source field changes via this write path.
     // -----------------------------------------------------------------------
-    // W0-1 L4-cov-services TOCTOU root fix (owner ruling 2026-07-17): the formula materialization UPDATE
-    // must run under a txn-scoped fence, never a bare autocommit query — own transaction, same rationale as
-    // the dependent-records recompute above.
     const formulaRecords =
       updates.length > 0
         ? (
-            await this.pool.transaction(async ({ query }) =>
-              h.recalculateFormulaFields(
-                query as unknown as Parameters<typeof h.recalculateFormulaFields>[0],
-                sheetId,
-                fields,
-                updates.map((update) => update.recordId),
-                changedFieldIds,
-                hydratedDataByRecord,
-                // W1-1 (design-lock §2 LOCK-F, F1): pass the writing actor through so the Yjs-bridge
-                // helper can derive its writer-taint context from it (the REST helper ignores this).
-                actorId,
-              ),
+            await h.recalculateFormulaFields(
+              this.pool.query.bind(this.pool),
+              sheetId,
+              fields,
+              updates.map((update) => update.recordId),
+              changedFieldIds,
+              hydratedDataByRecord,
+              // W1-1 (design-lock §2 LOCK-F, F1): pass the writing actor through so the Yjs-bridge
+              // helper can derive its writer-taint context from it (the REST helper ignores this).
+              actorId,
             )
           ).map((record) => ({
             recordId: record.recordId,

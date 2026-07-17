@@ -11741,21 +11741,15 @@ export function univerMetaRouter(): Router {
         for (let i = 0; i < bulkRecomputeRecordIds.length; i += BULK_RECOMPUTE_CHUNK_SIZE) {
           const chunk = bulkRecomputeRecordIds.slice(i, i + BULK_RECOMPUTE_CHUNK_SIZE)
           try {
-            // W0-1 L4-cov-services TOCTOU root fix (owner ruling 2026-07-17): each chunk's formula
-            // materialization runs in its OWN transaction so the engine's fence is txn-scoped (held from
-            // acquisition to COMMIT — a bare autocommit query released it per statement, leaving a
-            // block-check→UPDATE window). Per-chunk txn bounds the fence hold time.
-            const results = await pool.transaction(async ({ query }) =>
-              recalculateFormulaFields(
-                req,
-                query as unknown as Parameters<typeof recalculateFormulaFields>[1],
-                sheetId,
-                freshFields,
-                chunk,
-                [],
-                undefined,
-                explicitFormulaFieldIds,
-              ),
+            const results = await recalculateFormulaFields(
+              req,
+              pool.query.bind(pool),
+              sheetId,
+              freshFields,
+              chunk,
+              [],
+              undefined,
+              explicitFormulaFieldIds,
             )
             recomputed += results.length
             processedCount += chunk.length
