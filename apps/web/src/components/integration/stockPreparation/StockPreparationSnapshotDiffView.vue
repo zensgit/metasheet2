@@ -30,12 +30,13 @@
       <p class="sp-snap__state-msg">{{ bi('同步后端尚未就绪,稍后再试。', 'Backend read not ready yet — try again later.') }}</p>
       <!-- H4-3 retry: re-runs the same readonly batch-list load(); idempotent, no new endpoint. -->
       <button
+        ref="batchRetryEl"
         type="button"
         class="sp-snap__retry"
         data-testid="stock-prep-snapshot-retry"
         :disabled="loading"
         :aria-label="bi('重试读取快照批次', 'Retry loading snapshot batches')"
-        @click="loadBatches"
+        @click="onBatchRetry"
       >
         {{ bi('重试', 'Retry') }}
       </button>
@@ -167,12 +168,13 @@
           <p class="sp-snap__state-msg">{{ bi('同步后端尚未就绪,稍后再试。', 'Backend read not ready yet — try again later.') }}</p>
           <!-- H4-3 retry: re-fetches the diff summary for the SAME selected batch (no re-selection). -->
           <button
+            ref="diffRetryEl"
             type="button"
             class="sp-snap__retry"
             data-testid="stock-prep-diff-retry"
             :disabled="diffLoading"
             :aria-label="bi('重试读取差异', 'Retry loading the diff')"
-            @click="retryDiff"
+            @click="onDiffRetry"
           >
             {{ bi('重试', 'Retry') }}
           </button>
@@ -237,12 +239,13 @@
                 <p class="sp-snap__state-msg">{{ bi('逐行明细暂不可用,稍后再试。', 'Row detail is not available yet — try again later.') }}</p>
                 <!-- H4-3 retry: re-runs the existing loadRowDetail() for the same batch. -->
                 <button
+                  ref="rowsRetryEl"
                   type="button"
                   class="sp-snap__retry"
                   data-testid="stock-prep-snapshot-diff-rows-retry"
                   :disabled="rowsLoading"
                   :aria-label="bi('重试读取逐行明细', 'Retry loading row detail')"
-                  @click="loadRowDetail"
+                  @click="onRowsRetry"
                 >
                   {{ bi('重试', 'Retry') }}
                 </button>
@@ -320,7 +323,7 @@
 // a visible column, nor any customer business value — no drawing numbers, material codes,
 // quantities, versions of parts, path keys, or project names — because the summary shapes carry none
 // and the template reads a fixed whitelist of fields rather than stringifying the row.
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, ref, watch, type Ref } from 'vue'
 import { useLocale } from '../../../composables/useLocale'
 import type { IntegrationScope } from '../../../services/integration/workbench'
 import {
@@ -518,6 +521,38 @@ function toggleRowDetail(): void {
   rowDetailOpen.value = !rowDetailOpen.value
   // Lazy first-open fetch; a re-open reuses what we already have (batch switch clears it via resetRowDetail).
   if (rowDetailOpen.value && !diffRows.value && !rowsLoading.value) void loadRowDetail()
+}
+
+// H4-3 keyboard — retry focus restore (same pattern as StockPreparationDashboardView.vue's H4-1
+// retry). Each of the three retry buttons above carries `:disabled` while its own load is in
+// flight, and a NATIVE disabled button is pulled from the tab order — the browser drops focus to
+// <body>, stranding a keyboard operator who just pressed Retry. After the load settles we put focus
+// back on the button, but ONLY when it is still rendered (the retry failed again, so there is
+// something to press) AND focus is still on <body> (our own disable dropped it, and the operator
+// has not Tabbed elsewhere meanwhile) — the second condition is REQUIRED so this can never steal
+// focus from wherever the operator moved to.
+const batchRetryEl = ref<HTMLButtonElement | null>(null)
+const diffRetryEl = ref<HTMLButtonElement | null>(null)
+const rowsRetryEl = ref<HTMLButtonElement | null>(null)
+
+async function restoreRetryFocus(el: Ref<HTMLButtonElement | null>): Promise<void> {
+  await nextTick()
+  if (document.activeElement === document.body) el.value?.focus()
+}
+
+async function onBatchRetry(): Promise<void> {
+  await loadBatches()
+  await restoreRetryFocus(batchRetryEl)
+}
+
+async function onDiffRetry(): Promise<void> {
+  await retryDiff()
+  await restoreRetryFocus(diffRetryEl)
+}
+
+async function onRowsRetry(): Promise<void> {
+  await loadRowDetail()
+  await restoreRetryFocus(rowsRetryEl)
 }
 
 onMounted(loadBatches)

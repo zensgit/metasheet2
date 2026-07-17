@@ -716,6 +716,52 @@ describe('StockPreparationSnapshotDiffView (readonly, values-free)', () => {
     expect(root.querySelector('[data-testid="stock-prep-snapshot-diff-rows-table"]')).not.toBeNull()
   })
 
+  // ── H4-2 keyboard (H4-1 pattern, StockPreparationDashboardView.vue): a NATIVE disabled button is
+  // pulled from the tab order, so the browser drops focus to <body> when a re-failed retry re-renders
+  // with `:disabled` — a keyboard operator who pressed Retry must not be stranded there. ─────────────
+
+  it('H4-2: a failed batch-list retry returns focus to the retry button (our own :disabled dropped it to body)', async () => {
+    h.listBatches.mockRejectedValue(new Error('boom'))
+    const root = mountView()
+    await flushUi()
+    const retry = root.querySelector('[data-testid="stock-prep-snapshot-retry"]') as HTMLButtonElement
+    retry.focus()
+    expect(document.activeElement).toBe(retry)
+    retry.click() // still failing → button re-renders; :disabled during the load drops focus to <body>
+    await flushUi()
+    expect(root.querySelector('[data-testid="stock-prep-snapshot-retry"]')).not.toBeNull()
+    expect(document.activeElement).toBe(root.querySelector('[data-testid="stock-prep-snapshot-retry"]'))
+  })
+
+  it('H4-2: a failed diff-summary retry returns focus to the retry button', async () => {
+    h.listBatches.mockResolvedValue(batchListWithPlantedExtras())
+    h.getDiff.mockRejectedValue(new Error('boom'))
+    const root = mountView()
+    await flushUi()
+    ;(root.querySelector('[data-testid="stock-prep-snapshot-batch-select"]') as HTMLButtonElement).click()
+    await flushUi()
+    const retry = root.querySelector('[data-testid="stock-prep-diff-retry"]') as HTMLButtonElement
+    retry.focus()
+    expect(document.activeElement).toBe(retry)
+    retry.click() // still failing → button re-renders; :disabled during the load drops focus to <body>
+    await flushUi()
+    expect(root.querySelector('[data-testid="stock-prep-diff-retry"]')).not.toBeNull()
+    expect(document.activeElement).toBe(root.querySelector('[data-testid="stock-prep-diff-retry"]'))
+  })
+
+  it('H4-2: a failed row-detail retry returns focus to the retry button', async () => {
+    h.listRows.mockRejectedValue(new Error('boom'))
+    const root = await mountWithDiffShown()
+    await openRowDetail(root)
+    const retry = root.querySelector('[data-testid="stock-prep-snapshot-diff-rows-retry"]') as HTMLButtonElement
+    retry.focus()
+    expect(document.activeElement).toBe(retry)
+    retry.click() // still failing → button re-renders; :disabled during the load drops focus to <body>
+    await flushUi()
+    expect(root.querySelector('[data-testid="stock-prep-snapshot-diff-rows-retry"]')).not.toBeNull()
+    expect(document.activeElement).toBe(root.querySelector('[data-testid="stock-prep-snapshot-diff-rows-retry"]'))
+  })
+
   // H4-3 keyboard: BOTH scroll wraps in this view are jsdom-testable, load-bearing scroll regions —
   // attribute presence is what a future refactor could silently delete (unlike the CSS focus ring,
   // which jsdom cannot compute and is verified only via the browser harness in the PR description).
