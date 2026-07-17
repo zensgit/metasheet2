@@ -10221,6 +10221,14 @@ export function univerMetaRouter(): Router {
     if (!TRUST_CHECKPOINT_ACTIVATION_ENABLED()) {
       return res.status(403).json({ ok: false, error: { code: 'TRUST_CHECKPOINT_ACTIVATION_DISABLED', message: 'Trust-checkpoint activation is disabled (MULTITABLE_ENABLE_TRUST_CHECKPOINT_ACTIVATION is off).' } })
     }
+    // Gate P2 (independent gate, 2026-07-17): a checkpoint's trust DEPENDS on the canonical fence — the §3
+    // cutover allocates `trusted_since_seq` and snapshots baselines, and without the L4 fence a concurrent
+    // write can interleave between the two (torn baseline: a record's baseline row disagrees with the seq
+    // boundary), minting a DURABLE untrustworthy artifact that persists into the fence-on era. Fail closed:
+    // activation refuses unless the fence flag is on. Env-only check — before any DB read (no oracle).
+    if (!isWriterFenceEnabled()) {
+      return res.status(409).json({ ok: false, error: { code: 'TRUST_CHECKPOINT_FENCE_REQUIRED', message: 'Trust-checkpoint activation requires the canonical writer fence (MULTITABLE_ENABLE_WRITER_FENCE) to be enabled.' } })
+    }
     const sheetId = typeof req.params.sheetId === 'string' ? req.params.sheetId.trim() : ''
     if (!sheetId) return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'sheetId required' } })
     try {
@@ -10249,6 +10257,12 @@ export function univerMetaRouter(): Router {
       }
       if (err instanceof SheetWriterBlockedError) {
         return res.status(409).json({ ok: false, error: { code: 'RECOVERY_IN_PROGRESS', message: 'A recovery operation is in progress on this sheet; try again once it completes.' } })
+      }
+      // Belt-and-braces (gate P3): a RACING second activation trips the one-active partial-unique at the
+      // building→active flip — surface it as a conflict, not a 500. (With the fence required above, two
+      // activations serialize on the fence and this is near-unreachable; kept for the raw-SQL edge.)
+      if (typeof err === 'object' && err !== null && (err as { code?: unknown }).code === '23505') {
+        return res.status(409).json({ ok: false, error: { code: 'ACTIVATION_CONFLICT', message: 'Another trust-checkpoint activation for this sheet completed first; retry to supersede it.' } })
       }
       console.error('[univer-meta] trust-checkpoint-activate failed:', err)
       return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to activate trust checkpoint' } })

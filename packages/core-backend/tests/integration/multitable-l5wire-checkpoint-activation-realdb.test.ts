@@ -32,6 +32,9 @@ import { __resetRecoveryWriterStateColumnProbe } from '../../src/multitable/cano
 
 const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
 const FLAG = 'MULTITABLE_ENABLE_TRUST_CHECKPOINT_ACTIVATION'
+const FENCE_FLAG = 'MULTITABLE_ENABLE_WRITER_FENCE'
+// Gate M1: activation requires the canonical fence — the standard posture for these goldens is BOTH ON.
+const enableBoth = () => { process.env[FLAG] = 'true'; process.env[FENCE_FLAG] = 'true' }
 const TS = Date.now()
 const BASE = `base_l5w_${TS}`
 const SHEET = `sheet_l5w_${TS}`
@@ -70,6 +73,7 @@ describeIfDatabase('W0-1 L5-wire — trust-checkpoint activation route (real DB)
   })
   afterEach(async () => {
     delete process.env[FLAG]
+    delete process.env[FENCE_FLAG]
     __resetRecoveryWriterStateColumnProbe()
     actor = { id: ADMIN, perms: ['multitable:read', 'multitable:write', 'multitable:share'] }
     for (const t of ['meta_history_baselines', 'meta_history_trust_checkpoints', 'meta_records_trash', 'meta_record_revisions', 'meta_records'])
@@ -95,8 +99,33 @@ describeIfDatabase('W0-1 L5-wire — trust-checkpoint activation route (real DB)
     expect(await checkpointRows()).toEqual([])
   })
 
-  test('NON-ADMIN: a plain writer is refused (D2 floor), zero rows', async () => {
+  test('FENCE-REQUIRED (gate M1): activation flag ON but the L4 fence flag OFF ⇒ 409 TRUST_CHECKPOINT_FENCE_REQUIRED, zero rows', async () => {
+    // A checkpoint minted without the canonical fence is a DURABLE untrustworthy artifact (a concurrent
+    // write can interleave between the trusted_since_seq allocation and the baseline snapshot — torn
+    // baseline). The route must fail closed rather than provision it.
     process.env[FLAG] = 'true'
+    delete process.env[FENCE_FLAG]
+    const res = await activateReq()
+    expect(res.status).toBe(409)
+    expect(res.body?.error?.code).toBe('TRUST_CHECKPOINT_FENCE_REQUIRED')
+    expect(await checkpointRows()).toEqual([])
+  })
+
+  test('RECOVERY_IN_PROGRESS (gate M2): a durable writer block on the sheet refuses the activation with zero rows', async () => {
+    enableBoth()
+    await q(`UPDATE meta_sheets SET recovery_writer_state = 'applying' WHERE id = $1`, [SHEET])
+    try {
+      const res = await activateReq()
+      expect(res.status).toBe(409)
+      expect(res.body?.error?.code).toBe('RECOVERY_IN_PROGRESS')
+      expect(await checkpointRows()).toEqual([])
+    } finally {
+      await q('UPDATE meta_sheets SET recovery_writer_state = NULL WHERE id = $1', [SHEET])
+    }
+  })
+
+  test('NON-ADMIN: a plain writer is refused (D2 floor), zero rows', async () => {
+    enableBoth()
     actor = { id: WRITER, perms: ['multitable:read', 'multitable:write'] }
     const res = await activateReq()
     expect(res.status).toBe(403)
@@ -104,7 +133,7 @@ describeIfDatabase('W0-1 L5-wire — trust-checkpoint activation route (real DB)
   })
 
   test('HAPPY: admin + flag ON activates; baselines snapshot live rows; a second activation supersedes (exactly one active)', async () => {
-    process.env[FLAG] = 'true'
+    enableBoth()
     await q('INSERT INTO meta_records (id, sheet_id, data, version, created_by) VALUES ($1,$2,$3::jsonb,1,$4)', [`rec_l5w_a_${TS}`, SHEET, JSON.stringify({ [F_STR]: 'a' }), ADMIN])
     await q('INSERT INTO meta_records (id, sheet_id, data, version, created_by) VALUES ($1,$2,$3::jsonb,1,$4)', [`rec_l5w_b_${TS}`, SHEET, JSON.stringify({ [F_STR]: 'b' }), ADMIN])
 
@@ -125,7 +154,7 @@ describeIfDatabase('W0-1 L5-wire — trust-checkpoint activation route (real DB)
   })
 
   test('UNATTRIBUTABLE trash: 409 HISTORY_INCOMPLETE (values-free) and the WHOLE activation rolls back', async () => {
-    process.env[FLAG] = 'true'
+    enableBoth()
     // A trashed-only record whose vintage cannot be causally attributed (NULL delete_revision_id, no live row).
     await q('INSERT INTO meta_records_trash (record_id, sheet_id, data, original_version) VALUES ($1,$2,$3::jsonb,1)', [`rec_l5w_ghost_${TS}`, SHEET, '{}'])
     const res = await activateReq()
@@ -137,13 +166,13 @@ describeIfDatabase('W0-1 L5-wire — trust-checkpoint activation route (real DB)
   })
 
   test('NOT-FOUND: unknown sheet ⇒ 404', async () => {
-    process.env[FLAG] = 'true'
+    enableBoth()
     const res = await activateReq(`sheet_l5w_missing_${TS}`)
     expect(res.status).toBe(404)
   })
 
   test('FENCE-PARK (constructed race): a raw client holding the canonical fence parks the activation until release', async () => {
-    process.env[FLAG] = 'true'
+    enableBoth()
     expect(pool).toBeTruthy()
     const holder = await pool!.connect()
     try {

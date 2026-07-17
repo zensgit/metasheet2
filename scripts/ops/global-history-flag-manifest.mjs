@@ -135,7 +135,11 @@ export const GLOBAL_HISTORY_FLAG_MANIFEST = Object.freeze([
     type: 'boolean',
     activationValue: 'true',
     caseInsensitive: true, // `.trim().toLowerCase() === 'true'`, same resolution family as SHEET_REVERT/PIT_RESET
-    dependsOn: [],
+    // Gate P2 (2026-07-17): a checkpoint minted without the canonical fence is a DURABLE untrustworthy
+    // artifact (torn baseline vs the allocated trusted_since_seq). The route ALSO fails closed at runtime
+    // (409 TRUST_CHECKPOINT_FENCE_REQUIRED when the fence flag is off) — this dep is the operator-facing
+    // declaration of the same invariant.
+    dependsOn: ['MULTITABLE_ENABLE_WRITER_FENCE'],
     conflictsWith: [],
     danger: 'medium',
     purpose:
