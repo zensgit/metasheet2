@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import type { ApprovalGraph, ApprovalTemplateDetailDTO, ApprovalAssigneeSource } from '../src/types/approval'
+import type { ApprovalGraph, ApprovalNode, ApprovalTemplateDetailDTO, ApprovalAssigneeSource } from '../src/types/approval'
 import { APPROVAL_ROLE_CONFIGURE_SENTINEL } from '../src/types/approval'
 import { parallelDynamicAssigneeConflicts } from '../src/approvals/parallelEdit'
 import { placeholderRoleNodeKeys } from '../src/approvals/approvalNodeEdit'
@@ -304,6 +304,74 @@ describe('applyTopologyToComplexDraft — engine ↔ complex draft bridge (one s
     expect(node(built, 'approval_1')).toEqual(node(LINEAR, 'approval_1'))
     expect(built.nodes.some((candidate) => candidate.type === 'parallel')).toBe(true)
     expect(Object.keys(next.parallelEdits ?? {})).toHaveLength(1)
+  })
+
+  // F3 (adversarial review #4433): the LINEAR fixture above carries the flatten-to-default values
+  // (approvalMode 'single' / emptyAssigneePolicy 'error'), so a buildStepConfig that silently
+  // flattened them still passed (mutation M1 survived every suite). This fixture makes every
+  // authorable dimension NON-default so any flatten REDs the byte-equal round-trip.
+  const RICH_LINEAR: ApprovalGraph = {
+    nodes: [
+      { key: 'start', type: 'start', name: '发起', config: {} },
+      {
+        key: 'approval_1',
+        type: 'approval',
+        name: '主管',
+        config: {
+          assigneeSources: [{ kind: 'direct_manager' }],
+          approvalMode: 'all',
+          emptyAssigneePolicy: 'auto-approve',
+          autoApprovalPolicy: {
+            mergeWithRequester: true,
+            mergeAdjacentApprover: true,
+            dedupeHistoricalApprover: true,
+            actorMode: 'original_approver',
+          },
+          fieldPermissions: [{ fieldId: 'amount', access: 'readonly' }],
+        },
+      },
+      { key: 'end', type: 'end', name: '结束', config: {} },
+    ],
+    edges: [
+      { key: 'e-start-a1', source: 'start', target: 'approval_1' },
+      { key: 'e-a1-end', source: 'approval_1', target: 'end' },
+    ],
+  }
+
+  it('promote preserves NON-DEFAULT approval config byte-equal (mode/policy/auto-approval/permissions — M1 flatten catcher)', () => {
+    const draft = draftFromTemplate(tpl(RICH_LINEAR))
+    const next = applyTopologyToDraft(draft, (graph) => insertParallelGateway(graph, 'approval_1'))
+    const built = buildApprovalGraph(next)
+    // Full-config equality — approvalMode 'all', emptyAssigneePolicy 'auto-approve', the complete
+    // 4-field autoApprovalPolicy AND fieldPermissions must all survive hydrate → promote → rebuild.
+    expect(node(built, 'approval_1')).toEqual(node(RICH_LINEAR, 'approval_1'))
+    // The same non-defaults ALSO survive a second rebuild from the promoted draft (steady state).
+    expect(node(buildApprovalGraph(next), 'approval_1')).toEqual(node(RICH_LINEAR, 'approval_1'))
+  })
+
+  it('a topology op on a COMPLEX draft preserves an untouched node timeout byte-equal (pure-layer anti-flatten floor)', () => {
+    // `timeout` is not linear-authorable, so it can only exist on the complex path; the pure
+    // apply/rebuild layer must still pass it through verbatim (applyApprovalNodeEditsToGraph's
+    // original-config spread). NB: the VIEW additionally locks timeout-carrying complex templates
+    // read-only via the backend-drop allowlist — this pins the engine-level floor beneath that.
+    const TIMEOUT_CONDITION: ApprovalGraph = {
+      ...CONDITION,
+      nodes: CONDITION.nodes.map((n) => (n.key === 'app_high'
+        ? {
+            ...n,
+            config: {
+              assigneeSources: [{ kind: 'dept_head' }],
+              approvalMode: 'single',
+              emptyAssigneePolicy: 'error',
+              timeout: { afterMinutes: 30, effect: 'remind' },
+            } as ApprovalNode['config'],
+          }
+        : n)),
+    }
+    const draft = draftFromTemplate(tpl(TIMEOUT_CONDITION))
+    const next = applyTopologyToComplexDraft(draft, (g) => addConditionBranch(g, 'cond_1', '中额'))
+    const built = buildApprovalGraph(next)
+    expect(node(built, 'app_high')).toEqual(node(TIMEOUT_CONDITION, 'app_high'))
   })
 
   it('blocks save after inserting a condition until its starter rule is configured', () => {
