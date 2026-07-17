@@ -19,6 +19,9 @@
  *    skipped (taintSkipped == attempted, recomputed == 0), old values preserved; an unmasked
  *    editor's identical PATCH recomputes fully.
  *  - GF8: an injected mid-chunk failure aborts the remaining chunk (failed:true, coarse error)
+ *  - GF8-ON: flag-ON parity — a failure INSIDE the engine's fenced txn (trigger-injected; the pool.query
+ *    monkeypatch can't reach that client) still propagates: failed:true, poisoned record zero-committed,
+ *    earlier record retained (per-record txn independence), later record not attempted
  *    while whatever already persisted stands; a same-expression re-save (the B1 no-op-resave
  *    trigger) re-runs the recompute and converges to full freshness.
  *  - GF12: a same-expression re-save fires the bulk recompute but records ZERO new
@@ -84,6 +87,21 @@ const REC_GF8_B = `rec_w11bulk_gf8_b_${TS}`
 const REC_GF8_C = `rec_w11bulk_gf8_c_${TS}`
 const REC_GF12 = [`rec_w11bulk_gf12_1_${TS}`, `rec_w11bulk_gf12_2_${TS}`]
 
+// GF8-ON — the flag-ON parity of GF8. PURE formula (no relation-agg) so the write goes through the
+// ENGINE's fenced-txn path (`recalculateRecordFromData` under MULTITABLE_ENABLE_WRITER_FENCE), which is
+// exactly the surface GF8's pool.query monkeypatch cannot reach (the engine txn runs on its own client).
+// Alphabetical a/b/c for the route's deterministic ORDER BY id ASC processing order.
+const SHEET_GF8ON = `sheet_w11bulk_gf8on_${TS}`
+const FLD_GF8ON_NAME = `fld_w11bulk_gf8on_name_${TS}`
+const FLD_GF8ON_FORMULA = `fld_w11bulk_gf8on_formula_${TS}`
+const REC_GF8ON_A = `rec_w11bulk_gf8on_a_${TS}`
+const REC_GF8ON_B = `rec_w11bulk_gf8on_b_${TS}`
+const REC_GF8ON_C = `rec_w11bulk_gf8on_c_${TS}`
+// Injection artifacts (shared-DB discipline: the trigger is WHEN-scoped to exactly REC_GF8ON_B, so no
+// other file/fixture in the sequential real-DB bundle can ever fire it; both are dropped in finally).
+const GF8ON_POISON_FN = `w11bulk_gf8on_poison_${TS}`
+const GF8ON_POISON_TRG = `trg_w11bulk_gf8on_poison_${TS}`
+
 function buildApp(userId: string): Express {
   const a = express()
   a.use(express.json())
@@ -130,7 +148,7 @@ const relCountExpr = (linkFieldId: string) => `RELCOUNTIF("${linkFieldId}","${FL
 describeIfDatabase('W1-1 LOCK-B golden matrix — expression-change bulk recompute (real DB)', () => {
   beforeAll(async () => {
     await q('INSERT INTO meta_bases (id, name) VALUES ($1,$2)', [BASE_ID, 'W1-1 Bulk Base'])
-    for (const sheetId of [SHEET_GF5, SHEET_GF6, SHEET_GF7, SHEET_GF8, SHEET_GF12, SHEET_FOREIGN]) {
+    for (const sheetId of [SHEET_GF5, SHEET_GF6, SHEET_GF7, SHEET_GF8, SHEET_GF8ON, SHEET_GF12, SHEET_FOREIGN]) {
       await q('INSERT INTO meta_sheets (id, base_id, name) VALUES ($1,$2,$3)', [sheetId, BASE_ID, sheetId])
     }
     for (const id of [WRITER, MASKED]) {
@@ -195,6 +213,16 @@ describeIfDatabase('W1-1 LOCK-B golden matrix — expression-change bulk recompu
     }
 
     // ---- GF12 sheet: pure formula, 2 records, re-save decoupling ----
+    // GF8-ON fixture: pure formula `={name}` seeded stale — the engine fenced-txn write path's sheet.
+    await q('INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6)', [FLD_GF8ON_NAME, SHEET_GF8ON, 'Name', 'string', '{}', 1])
+    await q(
+      'INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6)',
+      [FLD_GF8ON_FORMULA, SHEET_GF8ON, 'Formula', 'formula', JSON.stringify({ expression: `={${FLD_GF8ON_NAME}}` }), 2],
+    )
+    for (const [i, rid] of [REC_GF8ON_A, REC_GF8ON_B, REC_GF8ON_C].entries()) {
+      await q('INSERT INTO meta_records (id, sheet_id, data, version) VALUES ($1,$2,$3::jsonb,1)', [rid, SHEET_GF8ON, JSON.stringify({ [FLD_GF8ON_NAME]: `n${i}`, [FLD_GF8ON_FORMULA]: 'stale' })])
+    }
+
     await q('INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6)', [FLD_GF12_NAME, SHEET_GF12, 'Name', 'string', '{}', 1])
     await q(
       'INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6)',
@@ -212,7 +240,7 @@ describeIfDatabase('W1-1 LOCK-B golden matrix — expression-change bulk recompu
   })
 
   afterAll(async () => {
-    const allSheets = [SHEET_GF5, SHEET_GF6, SHEET_GF7, SHEET_GF8, SHEET_GF12, SHEET_FOREIGN]
+    const allSheets = [SHEET_GF5, SHEET_GF6, SHEET_GF7, SHEET_GF8, SHEET_GF8ON, SHEET_GF12, SHEET_FOREIGN]
     await q('DELETE FROM meta_links WHERE field_id = ANY($1::text[])', [[FLD_GF7_LINK, FLD_GF8_LINK]]).catch(() => {})
     await q('DELETE FROM formula_dependencies WHERE sheet_id = ANY($1::text[])', [allSheets]).catch(() => {})
     await q('DELETE FROM field_permissions WHERE sheet_id = $1', [SHEET_FOREIGN]).catch(() => {})
@@ -322,6 +350,53 @@ describeIfDatabase('W1-1 LOCK-B golden matrix — expression-change bulk recompu
     }
     // The re-save is a config no-op (identical expression) -> no NEW meta_config_revisions row.
     expect(await configRevisionCount(SHEET_GF8, FLD_GF8_FORMULA)).toBe(revBefore)
+  })
+
+  test('GF8-ON: a failure INSIDE the engine fenced txn (flag ON) propagates — failed:true, poisoned record ZERO-committed, earlier record retained, later record not executed; healthy re-save converges', async () => {
+    // The GF8 pool.query monkeypatch cannot reach this surface: under MULTITABLE_ENABLE_WRITER_FENCE the
+    // engine's fence+UPDATE run on their OWN transaction client (poolManager.transaction). The injection is
+    // therefore a WHEN-scoped BEFORE UPDATE trigger — it fires inside that fenced txn by construction.
+    // Contract pinned here (owner GF8-ON review, 2026-07-17, adapted to the v2 per-record txn architecture):
+    //  • the v2 atomicity unit is ONE record's fence+UPDATE txn — the poisoned record is ZERO-committed;
+    //  • records already materialized earlier in the chunk KEEP their committed values (the original GF8
+    //    partial-progress contract — per-record independence, NOT v1's per-chunk rollback);
+    //  • the failure PROPAGATES: bulkRecompute reports failed:true (B6 abort) instead of silently
+    //    mislabeling an infra failure as taintSkipped with failed:false (the pre-fix engine swallowed the
+    //    fenced-txn error to null — reverting FormulaFencedWriteError propagation reds exactly this test);
+    //  • records after the poison are NOT attempted (abort semantics, same as GF8).
+    await q(`CREATE OR REPLACE FUNCTION ${GF8ON_POISON_FN}() RETURNS trigger AS $$
+             BEGIN RAISE EXCEPTION 'injected fenced-txn failure (GF8-ON)'; END $$ LANGUAGE plpgsql`)
+    await q(`CREATE TRIGGER ${GF8ON_POISON_TRG} BEFORE UPDATE ON meta_records
+             FOR EACH ROW WHEN (NEW.id = '${REC_GF8ON_B}') EXECUTE FUNCTION ${GF8ON_POISON_FN}()`)
+    const prevFence = process.env.MULTITABLE_ENABLE_WRITER_FENCE
+    process.env.MULTITABLE_ENABLE_WRITER_FENCE = 'true'
+    try {
+      const res = await patchField(WRITER, FLD_GF8ON_FORMULA, { property: { expression: `={${FLD_GF8ON_NAME}}` } })
+      expect(res.status).toBe(200) // the config PATCH stands — recompute failure never rolls it back
+      expect(res.body?.data?.bulkRecompute?.failed).toBe(true)
+      expect(res.body?.data?.bulkRecompute?.error).toBe('BULK_RECOMPUTE_FAILED')
+      // rec_a (before the poison in ORDER BY id ASC): its OWN fenced txn committed — retained.
+      expect(await readFormulaField(REC_GF8ON_A, FLD_GF8ON_FORMULA)).toBe('n0')
+      // rec_b: the fenced txn rolled back — ZERO-committed, stale value byte-preserved.
+      expect(await readFormulaField(REC_GF8ON_B, FLD_GF8ON_FORMULA)).toBe('stale')
+      // rec_c (after the poison): never attempted (abort remaining).
+      expect(await readFormulaField(REC_GF8ON_C, FLD_GF8ON_FORMULA)).toBe('stale')
+
+      // Positive control for the HEALTHY flag-ON path (anti-vacuous): drop the poison, keep the fence ON —
+      // a same-expression re-save converges every record through the fenced txn.
+      await q(`DROP TRIGGER IF EXISTS ${GF8ON_POISON_TRG} ON meta_records`)
+      const resave = await patchField(WRITER, FLD_GF8ON_FORMULA, { property: { expression: `={${FLD_GF8ON_NAME}}` } })
+      expect(resave.status).toBe(200)
+      expect(resave.body?.data?.bulkRecompute).toMatchObject({ attempted: 3, recomputed: 3, taintSkipped: 0, failed: false })
+      expect(await readFormulaField(REC_GF8ON_A, FLD_GF8ON_FORMULA)).toBe('n0')
+      expect(await readFormulaField(REC_GF8ON_B, FLD_GF8ON_FORMULA)).toBe('n1')
+      expect(await readFormulaField(REC_GF8ON_C, FLD_GF8ON_FORMULA)).toBe('n2')
+    } finally {
+      if (prevFence === undefined) delete process.env.MULTITABLE_ENABLE_WRITER_FENCE
+      else process.env.MULTITABLE_ENABLE_WRITER_FENCE = prevFence
+      await q(`DROP TRIGGER IF EXISTS ${GF8ON_POISON_TRG} ON meta_records`).catch(() => {})
+      await q(`DROP FUNCTION IF EXISTS ${GF8ON_POISON_FN}()`).catch(() => {})
+    }
   })
 
   test('GF12: a same-expression re-save fires the bulk recompute but records ZERO new meta_config_revisions rows (recompute-trigger and config-audit-trigger are decoupled)', async () => {
