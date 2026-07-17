@@ -133,18 +133,31 @@ if ($PSVersionTable.PSEdition -eq 'Desktop') {
   New-Item -ItemType Directory -Path $hygieneDir | Out-Null
   try {
     # -Encoding ASCII is LOAD-BEARING: Windows PowerShell 5.1 Set-Content defaults to UTF-16LE,
-    # and a BOM'd .mjs/.cmd fixture cannot be executed by node/cmd (entity re-review finding).
-    Set-Content -Path (Join-Path $hygieneDir 'pm2-fixture.mjs') -Encoding ASCII -Value @'
+    # and a BOM'd .mjs fixture cannot be executed by node (entity re-review finding).
+    $hygieneFixture = Join-Path $hygieneDir 'pm2-fixture.mjs'
+    Set-Content -Path $hygieneFixture -Encoding ASCII -Value @'
 #!/usr/bin/env node
 if (process.argv[2] !== 'jlist') process.exit(2)
 process.stdout.write(process.env.T9_PS51_JLIST || '')
 '@ -NoNewline
-    Set-Content -Path (Join-Path $hygieneDir 'pm2.cmd') -Encoding ASCII -Value "@echo off`r`nnode `"%~dp0pm2-fixture.mjs`" %*" -NoNewline
-    $oldPath = $env:PATH
+    # A FUNCTION shim (not a PATH .cmd): PowerShell resolves functions ahead of external commands
+    # and without PATH-cache refresh semantics, which differ between WinPS 5.1 and pwsh — the
+    # runner's own `& pm2` call inside Get-Pm2Sample resolves to this shim deterministically.
+    $script:T9Ps51HygieneFixture = $hygieneFixture
+    function script:pm2 {
+      param([Parameter(ValueFromRemainingArguments = $true)][string[]]$Pm2Args)
+      & node $script:T9Ps51HygieneFixture @Pm2Args
+    }
     try {
-      $env:PATH = "$hygieneDir;$oldPath"
       $env:T9_PS51_JLIST = '[{"name":"metasheet-backend","pm2_env":{"status":"online","restart_time":3,"pm_uptime":1000,"env":{"Path":"first","PATH":"second","metasheet_admin_token":"LEAKED-PS51-9911"}}}]'
       $leakSample = Get-Pm2Sample
+      if ($null -eq $leakSample) {
+        # Values-free localization (exit codes / lengths / booleans only — never payloads).
+        $helperPath = Join-Path $opsDir 'stock-preparation-pm2-sample.mjs'
+        $shimRaw = (& pm2 jlist 2>$null); $shimExit = $LASTEXITCODE
+        $directRaw = ($env:T9_PS51_JLIST | & node $helperPath 'METASHEET_ADMIN_TOKEN' 2>$null); $directExit = $LASTEXITCODE
+        Write-Host ("  DIAG ps51-hygiene: helperExists=" + (Test-Path -LiteralPath $helperPath) + " shimExit=$shimExit shimLen=" + ("$shimRaw").Length + " directExit=$directExit directLen=" + ("$directRaw").Length)
+      }
       Check 'ps51 hygiene: case-variant admin token projects to adminTokenNonEmpty=true through the 5.1 pipeline' (
         $null -ne $leakSample -and $leakSample.adminTokenNonEmpty -eq $true -and $leakSample.authTokenNonEmpty -eq $false
       )
@@ -162,8 +175,8 @@ process.stdout.write(process.env.T9_PS51_JLIST || '')
         (Test-Pm2TokenHygieneSample ([pscustomobject]@{ state = 'online'; restartTime = 3; uptime = 1000 })).reason -eq 'hygiene_fields_missing'
       )
     } finally {
-      $env:PATH = $oldPath
       Remove-Item Env:T9_PS51_JLIST -ErrorAction SilentlyContinue
+      Remove-Item Function:script:pm2 -ErrorAction SilentlyContinue
     }
   } finally {
     Remove-Item -Recurse -Force $hygieneDir -ErrorAction SilentlyContinue
