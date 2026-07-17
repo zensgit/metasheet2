@@ -74,7 +74,7 @@ describe('approval template version diff', () => {
     ]))
   })
 
-  it('treats field reordering as a visible change but ignores object-key order', () => {
+  it('reports repositioned-but-unchanged fields as moved, and ignores object-key order', () => {
     const before = version()
     const after = version({
       formSchema: { fields: [...before.formSchema.fields].reverse() },
@@ -93,5 +93,51 @@ describe('approval template version diff', () => {
     expect(diff.fieldChanges).toBe(2)
     expect(diff.nodeChanges).toBe(0)
     expect(diff.edgeChanges).toBe(0)
+    // Reordering stays visible, but never masquerades as a content edit.
+    expect(diff.changes).toEqual(expect.arrayContaining([
+      { kind: 'moved', entity: 'field', key: 'amount', label: '金额' },
+      { kind: 'moved', entity: 'field', key: 'reason', label: '原因' },
+    ]))
+    expect(diff.changes.filter((change) => change.kind === 'changed')).toEqual([])
+  })
+
+  it('does not re-attribute untouched neighbours of a middle insertion', () => {
+    const before = version()
+    const after = version({
+      formSchema: {
+        fields: [
+          before.formSchema.fields[0],
+          { id: 'costCenter', type: 'text', label: '成本中心' },
+          before.formSchema.fields[1],
+        ],
+      },
+    })
+
+    const diff = diffApprovalTemplateVersions(before, after)
+    // ONE insertion is ONE change — the index-shifted (but content-identical, relative-order-
+    // preserved) neighbours must not surface as 'changed' or 'moved'.
+    expect(diff.fieldChanges).toBe(1)
+    expect(diff.changes.filter((change) => change.entity === 'field')).toEqual([
+      { kind: 'added', entity: 'field', key: 'costCenter', label: '成本中心' },
+    ])
+  })
+
+  it('attributes a content edit as changed even when the field also moved', () => {
+    const before = version()
+    const after = version({
+      formSchema: {
+        fields: [
+          { id: 'reason', type: 'text', label: '申请原因' },
+          before.formSchema.fields[0],
+        ],
+      },
+    })
+
+    const diff = diffApprovalTemplateVersions(before, after)
+    expect(diff.fieldChanges).toBe(2)
+    expect(diff.changes).toEqual(expect.arrayContaining([
+      { kind: 'changed', entity: 'field', key: 'reason', label: '申请原因' },
+      { kind: 'moved', entity: 'field', key: 'amount', label: '金额' },
+    ]))
   })
 })
