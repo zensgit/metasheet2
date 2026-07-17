@@ -247,9 +247,31 @@ Verified directly against `origin/main`, code and line numbers below.
 
 ### 3.2 Locked requirement
 
+> **ERRATUM (owner ruling 2026-07-16, OD-S7-0 scheduler-scope carve-out — NARROW).** The
+> assignment-authoritative rule stated in this §3.2 is the DEFAULT and applies to every request
+> type **except** one precisely-scoped carve-out. The authorization mode is keyed on the request's
+> **creation-frozen** `approvalFlow.steps` snapshot (the same frozen snapshot S7-2..4's freeze reads
+> — `requestRow.metadata.approvalFlow.steps`), **NOT** on whether `approval_assignments` rows exist:
+> - **`schedule_dispatch` with `flowSteps.length === 0` ⇒ SCOPE-NATIVE.** A zero-step dispatch's only
+>   assignments are the legacy `role:'admin'` + `source_queue:'attendance:approve'/'attendance:admin'`
+>   fallback, so the per-node assignment predicate below would collapse to "actor holds
+>   `attendance:approve`" — meaningless for dispatch. For this case the authoritative gate is the
+>   **latest-detail dispatch scope** check (`assertScheduleDispatchRequestScopeAllowed`, throwing
+>   `SCHEDULER_SCOPE_FORBIDDEN`), which MUST run for **both approve and reject BEFORE any state
+>   write**, mirroring — and additive to — the existing final-approve dispatch revalidation (which is
+>   kept). The per-node assignment check is skipped for this case only.
+> - **Everything else ⇒ ASSIGNMENT-AUTHORITATIVE (unchanged §3.2 below).** This explicitly INCLUDES
+>   `schedule_dispatch` **with non-empty frozen steps** (which must satisfy BOTH the per-node
+>   assignment check AND the dispatch scope), and any **unknown/future `requestType`**, which MUST
+>   default to assignment-authoritative and never auto-enter the carve-out.
+>
+> The decision reads the frozen steps, never `SELECT ... FROM approval_assignments`. Nothing else in
+> §3.2 (the per-type predicate, `__none__` sentinel, admin-override ordering, symmetry) is broadened
+> or changed by this erratum; the carve-out is limited to the zero-step `schedule_dispatch` case.
+
 Both `action === 'approve'` and `action === 'reject'` in `resolveRequest` (`index.cjs:28846`) MUST
 authorize the actor against the **active assignment set for the current node**, not the legacy step
-fields alone:
+fields alone (subject to the §3.2 ERRATUM carve-out above for zero-step `schedule_dispatch`):
 
 - **Authorization source of truth:** the active row(s) in `approval_assignments` for
   `(instance_id = approvalId, node_key = currentNodeKey, is_active = TRUE)` — the same rows

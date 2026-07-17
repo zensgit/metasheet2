@@ -28960,28 +28960,55 @@ module.exports = {
             : 0
           const currentStep = flowSteps[currentStepIndex]
 
-          // S7-0 (RATIFIED S7 lock §3.1/§3.2): authorize the actor against the ACTIVE
-          // approval_assignments rows for the current node — the same rows
-          // replaceAttendanceApprovalAssignments/deactivateAttendanceApprovalAssignments maintain —
-          // for BOTH approve and reject. Previously the reject path had NO assignment authorization
-          // check at all, and approve read only the legacy static step fields
-          // (approverUserIds/approverRoleIds), not the assignments table that actually gates who may
-          // act. The per-type match adopts the central engine's predicate verbatim (user / role /
-          // source_queue); the admin override (hasAttendanceAdminAccess) applies ONLY AFTER a failed
-          // match, symmetric on both actions. This precedes the instance UPDATE and every assignment
-          // mutation, inside the existing transaction.
-          const currentNodeKey = buildAttendanceApprovalNodeKey(currentStepIndex)
-          const actorIsAssigned = await isAttendanceActorAssignedForNode(
-            trx,
-            approvalId,
-            currentNodeKey,
-            requesterId,
-            logger
-          )
-          if (!actorIsAssigned) {
-            const adminOverride = await hasAttendanceAdminAccess(requesterId)
-            if (!adminOverride) {
-              throw new HttpError(403, 'FORBIDDEN', 'Not authorized for this approval step')
+          // Action authorization (RATIFIED S7 lock §3.1/§3.2 + owner erratum 2026-07-16, OD-S7-0
+          // scheduler-scope carve-out). The mode is keyed on the request's CREATION-FROZEN
+          // approvalFlow.steps (requestRow.metadata.approvalFlow.steps, read above as `flowSteps` — the
+          // same frozen snapshot S7-2..4's freeze reads), NOT on whether approval_assignments rows
+          // exist:
+          //   • schedule_dispatch with ZERO frozen steps => SCOPE-NATIVE. Its only assignments are the
+          //     legacy admin + attendance:approve/admin queue fallback, so the per-node assignment check
+          //     would collapse to "holds attendance:approve" — meaningless for dispatch. The
+          //     authoritative gate is the LATEST-detail dispatch scope, run here for BOTH approve and
+          //     reject, BEFORE any state write (the existing final-approve dispatch revalidation below is
+          //     kept).
+          //   • everything else — including schedule_dispatch WITH non-empty steps, and unknown/future
+          //     request types (which must NEVER auto-enter the carve-out) => ASSIGNMENT-AUTHORITATIVE:
+          //     the S7-0 per-node assignment check (per-type user/role/source_queue predicate reused
+          //     verbatim from the central engine; admin override only AFTER a failed match). A non-empty
+          //     dispatch flow must ADDITIONALLY satisfy the dispatch scope (both checks, both actions).
+          // This precedes the instance UPDATE and every assignment mutation, inside the transaction.
+          const isScheduleDispatch = requestType === 'schedule_dispatch'
+          const isScopeNativeDispatch = isScheduleDispatch && flowSteps.length === 0
+          const assertDispatchScopeAllowed = async () => {
+            await assertScheduleDispatchRequestScopeAllowed(
+              trx,
+              orgId,
+              requestId,
+              { userId: requesterId, orgId, fullAdmin: await hasAttendanceAdminAccess(requesterId) },
+              { forUpdate: true }
+            )
+          }
+
+          if (isScopeNativeDispatch) {
+            await assertDispatchScopeAllowed()
+          } else {
+            const currentNodeKey = buildAttendanceApprovalNodeKey(currentStepIndex)
+            const actorIsAssigned = await isAttendanceActorAssignedForNode(
+              trx,
+              approvalId,
+              currentNodeKey,
+              requesterId,
+              logger
+            )
+            if (!actorIsAssigned) {
+              const adminOverride = await hasAttendanceAdminAccess(requesterId)
+              if (!adminOverride) {
+                throw new HttpError(403, 'FORBIDDEN', 'Not authorized for this approval step')
+              }
+            }
+            if (isScheduleDispatch) {
+              // Non-empty dispatch flow: assignee AND dispatch scope must both hold.
+              await assertDispatchScopeAllowed()
             }
           }
 
