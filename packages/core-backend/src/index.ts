@@ -2340,6 +2340,13 @@ export class MetaSheetServer {
           onTickError: (err) => this.logger.error('Durable delivery dispatch tick error', err instanceof Error ? err : new Error(String(err))),
           onHeartbeatError: (info) => this.logger.warn(`Durable delivery heartbeat renew DB error for ${info.consumerKey} (outbox ${info.outboxId}); row left for reclaim`),
           onClaimTimePoison: (info) => this.logger.warn(`Durable delivery dead-lettered ${info.consumerKey} (outbox ${info.outboxId}) after ${info.attempts} attempts`),
+        }, {
+          // Clock alignment (sink audit 2026-07-17): the OUTBOX consumer lease must outlive the SINK leases
+          // (EVENT_DELIVERY_LEASE_MS / BRIDGE_COMPLETION_LEASE_MS, both 60s) — with the 30s default, a crash
+          // redelivers while the dead worker's sink lease is still live, burning retries on 'busy'. 90s means
+          // the first post-crash redelivery already finds the sink lease expired and reclaims. The busy→
+          // retryable mapping in the sinks is the structural guard; this alignment just avoids wasted spins.
+          leaseMs: 90_000,
         })
         if (this.durableDeliveryLoop) this.logger.info('Durable delivery dispatch loop started (AUTOMATION_DURABLE_DELIVERY_ENABLED)')
       }

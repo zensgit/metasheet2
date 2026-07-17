@@ -61,6 +61,18 @@ export interface AutomationApprovalBridgeRow {
   triggerEvent: unknown
 }
 
+/**
+ * Discriminated completion-claim result (done/busy split — sink-recoverability audit 2026-07-17).
+ * `claimed` = THIS caller owns the bridge (fresh or reclaimed; legacy terminal-early also maps here);
+ * `none` = nothing to do (no bridge for the approval / already terminal / just poisoned) — skip is correct;
+ * `busy` = ANOTHER worker holds a LIVE lease — the caller must fail retryably, NEVER resolve `done` (a
+ * crashed holder's continuation would be dropped forever) and NEVER run (a live holder would double-drive).
+ */
+export type ApprovalBridgeClaimResult =
+  | { kind: 'claimed'; row: AutomationApprovalBridgeRow }
+  | { kind: 'none' }
+  | { kind: 'busy' }
+
 export interface StartApprovalBridgeResult {
   suspended: boolean
   result?: AutomationStepResult
@@ -337,11 +349,11 @@ export class AutomationApprovalBridgeService {
   async claimCompletion(
     event: ApprovalCompletionEventV1,
     env: NodeJS.ProcessEnv = process.env,
-  ): Promise<AutomationApprovalBridgeRow | null> {
+  ): Promise<ApprovalBridgeClaimResult> {
     const approvalId = event.approval.instanceId
 
     if (!isDurableDeliveryEnabled(env)) {
-      // LEGACY terminal-early path — byte-identical to the pre-P1#1 behavior.
+      // LEGACY terminal-early path — byte-identical to the pre-P1#1 behavior (never 'busy').
       const claimed = await db
         .updateTable('multitable_automation_approval_bridges')
         .set({
@@ -354,7 +366,7 @@ export class AutomationApprovalBridgeService {
         .where('status', '=', 'pending')
         .returningAll()
         .executeTakeFirst()
-      return claimed ? this.mapRow(claimed as Record<string, unknown>) : null
+      return claimed ? { kind: 'claimed', row: this.mapRow(claimed as Record<string, unknown>) } : { kind: 'none' }
     }
 
     // FLAG-ON reclaimable-lease path. Raw SQL for the fence-CAS + lease arithmetic (mirrors S6 event_fires).
@@ -369,7 +381,7 @@ export class AutomationApprovalBridgeService {
       WHERE approval_instance_id = ${approvalId} AND status = 'pending'
       RETURNING *
     `.execute(db)
-    if (fresh.rows.length > 0) return this.mapRow(fresh.rows[0])
+    if (fresh.rows.length > 0) return { kind: 'claimed', row: this.mapRow(fresh.rows[0]) }
 
     // 2) POISON at reclaim: an EXPIRED in_progress that has already exhausted its attempts → dead_letter
     //    (terminal, lease cleared). Returns null (skip) — the work will not be retried again.
@@ -380,7 +392,7 @@ export class AutomationApprovalBridgeService {
         AND lease_expires_at < now() AND attempts >= ${BRIDGE_COMPLETION_MAX_ATTEMPTS}
       RETURNING id
     `.execute(db)
-    if (poisoned.rows.length > 0) return null
+    if (poisoned.rows.length > 0) return { kind: 'none' }
 
     // 3) RECLAIM an EXPIRED in_progress lease (crashed worker): fence+1, attempts+1, new lease. Concurrent
     //    reclaimers race — exactly one matches (the winner's new future lease makes the loser's `< now()`
@@ -392,7 +404,21 @@ export class AutomationApprovalBridgeService {
         AND lease_expires_at < now() AND attempts < ${BRIDGE_COMPLETION_MAX_ATTEMPTS}
       RETURNING *
     `.execute(db)
-    return reclaim.rows.length > 0 ? this.mapRow(reclaim.rows[0]) : null
+    if (reclaim.rows.length > 0) return { kind: 'claimed', row: this.mapRow(reclaim.rows[0]) }
+    // Neither claimed, poisoned, nor reclaimed: classify (done/busy split — sink audit 2026-07-17). NO row
+    // for this approval (the dominant case — most approvals have no automation bridge) or a TERMINAL row
+    // (resumed / failed / dead_letter — the completion is consumed) → 'none' (skip is correct). A LIVE
+    // in_progress lease → 'busy' (the caller fails retryably rather than resolving the delivery `done` and
+    // dropping a crashed holder's continuation). A racing `pending` (appeared between the fresh UPDATE and
+    // this SELECT) is also 'busy' — fail-closed toward retry; the redelivery claims it.
+    const row = await sql<{ status: string }>`
+      SELECT status FROM multitable_automation_approval_bridges WHERE approval_instance_id = ${approvalId}
+    `.execute(db)
+    const status = row.rows[0]?.status
+    if (status === undefined || status === 'resumed' || status === 'failed' || status === 'dead_letter') {
+      return { kind: 'none' }
+    }
+    return { kind: 'busy' }
   }
 
   /**

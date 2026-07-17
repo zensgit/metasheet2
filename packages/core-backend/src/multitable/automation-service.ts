@@ -32,7 +32,7 @@ import {
   type InboundWebhookRejectReason,
 } from './automation-inbound-webhook'
 import { isValidIanaTimeZone } from './automation-timezone'
-import { isDurableDeliveryEnabled } from './automation-durable-delivery'
+import { DurableSinkBusyError, isDurableDeliveryEnabled } from './automation-durable-delivery'
 import { enqueueRecordEventIfDurable, emitRecordEventIfLegacy } from './automation-producer-emit'
 import { claimEventFiresLease, markEventFiresDone } from './automation-event-fires-lease'
 
@@ -1596,7 +1596,15 @@ export class AutomationService {
       return
     }
     const lease = await claimEventFiresLease(this.db, ruleId, dedupKey, EVENT_DELIVERY_LEASE_MS)
-    if (lease === 'skip') return
+    if (lease === 'done') return
+    if (lease === 'busy') {
+      // Composed-timing hole (sink audit 2026-07-17): the outbox lease can expire before this sink lease, so
+      // a crashed worker's redelivery lands while the dead worker's sink lease is still LIVE. Returning here
+      // would resolve the delivery `done` and PERMANENTLY drop the work; running would double-run a live
+      // holder. Throw retryably instead — the dispatch loop's backoff outlives the sink lease, and the next
+      // redelivery reclaims (crashed holder) or reads `done` (live holder finished).
+      throw new DurableSinkBusyError('event_fires', `${ruleId}:${dedupKey}`)
+    }
     await run()
     await markEventFiresDone(this.db, ruleId, dedupKey, lease.fence)
   }
@@ -2443,8 +2451,16 @@ export class AutomationService {
     if (!['approval.approved', 'approval.rejected', 'approval.revoked', 'approval.cancelled'].includes(event.eventType)) return
 
     const leased = isDurableDeliveryEnabled(env)
-    const bridge = await this.approvalBridgeService.claimCompletion(event, env)
-    if (!bridge) return
+    const claim = await this.approvalBridgeService.claimCompletion(event, env)
+    if (claim.kind === 'none') return
+    if (claim.kind === 'busy') {
+      // Same composed-timing hole as runWithEventDedup (sink audit 2026-07-17): another worker's LIVE bridge
+      // lease. Resolving `done` here would drop a crashed holder's continuation forever; running would
+      // double-drive a live holder. Fail retryably — the redelivery after backoff reclaims an expired lease
+      // or reads the terminal row. (The legacy flag-OFF path never returns 'busy'.)
+      throw new DurableSinkBusyError('approval_bridge', event.approval.instanceId)
+    }
+    const bridge = claim.row
 
     if (!leased) {
       // LEGACY (flag OFF): claimCompletion already flipped the bridge to the terminal `resumed` BEFORE the

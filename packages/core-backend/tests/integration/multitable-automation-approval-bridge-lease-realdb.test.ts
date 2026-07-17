@@ -23,9 +23,14 @@
  */
 import { randomUUID } from 'node:crypto'
 
-import { afterAll, describe, expect, test } from 'vitest'
+import { afterAll, beforeAll, describe, expect, test } from 'vitest'
 
 import { poolManager } from '../../src/integration/db/connection-pool'
+import { EventBus } from '../../src/integration/events/event-bus'
+import { AutomationService } from '../../src/multitable/automation-service'
+import { DurableSinkBusyError } from '../../src/multitable/automation-durable-delivery'
+import { claimEventFiresLease, markEventFiresDone } from '../../src/multitable/automation-event-fires-lease'
+import { db as kyselyDb } from '../../src/db/db'
 import {
   AutomationApprovalBridgeService,
   BRIDGE_COMPLETION_MAX_ATTEMPTS,
@@ -96,60 +101,66 @@ describeIfDatabase('P1#1 approval-bridge lease runtime crash matrix (real DB)', 
   test('fresh claim → in_progress (fence 1, attempts 1, lease + outcome set); markBridgeResumed → resumed; redelivery skips', async () => {
     const inst = `inst_fresh_${RUN}`
     const id = await seedBridge('pending', { instanceId: inst })
-    const claimed = await service.claimCompletion(eventFor(inst, 'approved'), FLAG_ON)
-    expect(claimed?.id).toBe(id)
-    expect(claimed?.status).toBe('in_progress')
-    expect(claimed?.fence).toBe('1')
+    const claim = await service.claimCompletion(eventFor(inst, 'approved'), FLAG_ON)
+    expect(claim.kind).toBe('claimed')
+    const claimed = claim.kind === 'claimed' ? claim.row : (undefined as never)
+    expect(claimed.id).toBe(id)
+    expect(claimed.status).toBe('in_progress')
+    expect(claimed.fence).toBe('1')
     const afterClaim = await rowById(id)
     expect(afterClaim).toMatchObject({ status: 'in_progress', attempts: 1, fence: '1', outcome: 'approved' })
     expect(afterClaim.lease).not.toBe('') // lease held
 
     // terminal write AFTER the continuation
-    expect(await service.markBridgeResumed(id, claimed!.fence)).toBe(true)
+    expect(await service.markBridgeResumed(id, claimed.fence)).toBe(true)
     expect(await rowById(id)).toMatchObject({ status: 'resumed', lease: '' })
 
-    // a redelivery finds a terminal row → null (skip, no double-run)
-    expect(await service.claimCompletion(eventFor(inst, 'approved'), FLAG_ON)).toBeNull()
+    // a redelivery finds a terminal row → 'none' (skip, no double-run — and NOT 'busy': terminal ≠ live lease)
+    expect(await service.claimCompletion(eventFor(inst, 'approved'), FLAG_ON)).toEqual({ kind: 'none' })
   })
 
   test('crash-after-claim → lease expires → the redelivered event RECLAIMS the same row (at-least-once, fence 2)', async () => {
     const inst = `inst_reclaim_${RUN}`
     const id = await seedBridge('pending', { instanceId: inst })
     const first = await service.claimCompletion(eventFor(inst), FLAG_ON)
-    expect(first?.fence).toBe('1')
+    expect(first.kind === 'claimed' && first.row.fence).toBe('1')
     // "crash": no markBridgeResumed; force the lease to expire
     await db().query(`UPDATE multitable_automation_approval_bridges SET lease_expires_at = now() - interval '1 min' WHERE id=$1`, [id])
     // redelivery reclaims the SAME row: fence 2, attempts 2
     const second = await service.claimCompletion(eventFor(inst), FLAG_ON)
-    expect(second?.id).toBe(id)
-    expect(second?.status).toBe('in_progress')
-    expect(second?.fence).toBe('2')
+    expect(second.kind).toBe('claimed')
+    const secondRow = second.kind === 'claimed' ? second.row : (undefined as never)
+    expect(secondRow.id).toBe(id)
+    expect(secondRow.status).toBe('in_progress')
+    expect(secondRow.fence).toBe('2')
     expect((await rowById(id)).attempts).toBe(2)
   })
 
   test('zombie fence-CAS: after a reclaim (fence 2), the zombie markBridgeResumed(fence 1) writes 0 rows; only the reclaimer wins', async () => {
     const inst = `inst_zombie_${RUN}`
     const id = await seedBridge('pending', { instanceId: inst })
-    const zombie = await service.claimCompletion(eventFor(inst), FLAG_ON) // fence 1
-    expect(zombie?.fence).toBe('1')
+    const zombieClaim = await service.claimCompletion(eventFor(inst), FLAG_ON) // fence 1
+    const zombie = zombieClaim.kind === 'claimed' ? zombieClaim.row : (undefined as never)
+    expect(zombie.fence).toBe('1')
     await db().query(`UPDATE multitable_automation_approval_bridges SET lease_expires_at = now() - interval '1 min' WHERE id=$1`, [id])
-    const reclaimer = await service.claimCompletion(eventFor(inst), FLAG_ON) // fence 2
-    expect(reclaimer?.fence).toBe('2')
+    const reclaimerClaim = await service.claimCompletion(eventFor(inst), FLAG_ON) // fence 2
+    const reclaimer = reclaimerClaim.kind === 'claimed' ? reclaimerClaim.row : (undefined as never)
+    expect(reclaimer.fence).toBe('2')
     // zombie (stale fence 1) tries to write terminal → fence-CAS 0 rows (single-writer)
-    expect(await service.markBridgeResumed(id, zombie!.fence)).toBe(false)
+    expect(await service.markBridgeResumed(id, zombie.fence)).toBe(false)
     expect((await rowById(id)).status).toBe('in_progress') // still owned by the reclaimer
     // reclaimer (fence 2) wins
-    expect(await service.markBridgeResumed(id, reclaimer!.fence)).toBe(true)
+    expect(await service.markBridgeResumed(id, reclaimer.fence)).toBe(true)
     expect(await rowById(id)).toMatchObject({ status: 'resumed', lease: '' })
   })
 
-  test('a redelivery under a LIVE lease returns null (another worker owns it — no double delivery)', async () => {
+  test("a redelivery under a LIVE lease returns 'busy' (another worker owns it — neither double-run NOR a silent done-resolve that would drop a crashed holder's work)", async () => {
     const inst = `inst_live_${RUN}`
     await seedBridge('pending', { instanceId: inst })
     const claimed = await service.claimCompletion(eventFor(inst), FLAG_ON) // fence 1, LIVE 60s lease
-    expect(claimed?.fence).toBe('1')
-    // no lease expiry → a concurrent redelivery must skip
-    expect(await service.claimCompletion(eventFor(inst), FLAG_ON)).toBeNull()
+    expect(claimed.kind === 'claimed' && claimed.row.fence).toBe('1')
+    // no lease expiry → a concurrent redelivery must fail retryably, not skip
+    expect(await service.claimCompletion(eventFor(inst), FLAG_ON)).toEqual({ kind: 'busy' })
   })
 
   test('bounded attempts: an EXPIRED in_progress at the ceiling is DEAD-LETTERED at claim (null, terminal — no infinite reclaim)', async () => {
@@ -157,29 +168,105 @@ describeIfDatabase('P1#1 approval-bridge lease runtime crash matrix (real DB)', 
     // seed an in_progress row at the attempt ceiling with an already-expired lease (the crashed-N-times state)
     const id = await seedBridge('in_progress', { instanceId: inst, attempts: BRIDGE_COMPLETION_MAX_ATTEMPTS })
     const res = await service.claimCompletion(eventFor(inst), FLAG_ON)
-    expect(res).toBeNull() // not reclaimed
+    expect(res).toEqual({ kind: 'none' }) // not reclaimed — poisoned terminally
     expect(await rowById(id)).toMatchObject({ status: 'dead_letter', lease: '' }) // terminal, lease cleared
-    // a further redelivery still skips (terminal)
-    expect(await service.claimCompletion(eventFor(inst), FLAG_ON)).toBeNull()
+    // a further redelivery still skips (terminal → 'none', not 'busy')
+    expect(await service.claimCompletion(eventFor(inst), FLAG_ON)).toEqual({ kind: 'none' })
   })
 
   test('one below the ceiling is RECLAIMED, not dead-lettered (boundary is >=, not >)', async () => {
     const inst = `inst_boundary_${RUN}`
     const id = await seedBridge('in_progress', { instanceId: inst, attempts: BRIDGE_COMPLETION_MAX_ATTEMPTS - 1 })
     const res = await service.claimCompletion(eventFor(inst), FLAG_ON)
-    expect(res?.id).toBe(id)
-    expect(res?.status).toBe('in_progress')
+    expect(res.kind).toBe('claimed')
+    const resRow = res.kind === 'claimed' ? res.row : (undefined as never)
+    expect(resRow.id).toBe(id)
+    expect(resRow.status).toBe('in_progress')
     expect((await rowById(id)).attempts).toBe(BRIDGE_COMPLETION_MAX_ATTEMPTS) // reclaimed → attempts bumped to the ceiling
   })
 
   test('flag OFF is byte-identical legacy: pending → resumed TERMINALLY at claim, fence stays 0 (no lease)', async () => {
     const inst = `inst_off_${RUN}`
     const id = await seedBridge('pending', { instanceId: inst })
-    const claimed = await service.claimCompletion(eventFor(inst, 'approved'), FLAG_OFF)
-    expect(claimed?.id).toBe(id)
-    expect(claimed?.status).toBe('resumed') // terminal-early, exactly as before P1#1
+    const claim = await service.claimCompletion(eventFor(inst, 'approved'), FLAG_OFF)
+    const claimed = claim.kind === 'claimed' ? claim.row : (undefined as never)
+    expect(claimed.id).toBe(id)
+    expect(claimed.status).toBe('resumed') // terminal-early, exactly as before P1#1
     expect(await rowById(id)).toMatchObject({ status: 'resumed', fence: '0', lease: '', outcome: 'approved' })
-    // legacy claim is single-shot: a second flag-OFF claim finds no pending row → null
-    expect(await service.claimCompletion(eventFor(inst, 'approved'), FLAG_OFF)).toBeNull()
+    // legacy claim is single-shot: a second flag-OFF claim finds no pending row → 'none' (legacy never 'busy')
+    expect(await service.claimCompletion(eventFor(inst, 'approved'), FLAG_OFF)).toEqual({ kind: 'none' })
+  })
+})
+
+/**
+ * Busy-mapping WIRE goldens (sink audit 2026-07-17): the done/busy split is only load-bearing if the REAL
+ * service maps 'busy' to a retryable throw — a silent return would resolve the outbox delivery `done` and
+ * permanently drop a crashed holder's work. These drive the real AutomationService entry points.
+ */
+describeIfDatabase('busy mapping — wire level (real AutomationService)', () => {
+  const pool = () => poolManager.get()
+  const svc = () => new AutomationService(new EventBus(), kyselyDb as never, pool().query.bind(pool()))
+  // event_fires carries an FK to automation_rules(id) — seed a real base/sheet/rule for the (rule, dedup) keys.
+  const WIRE_BASE = `base_wire_${RUN}`
+  const WIRE_SHEET = `sheet_wire_${RUN}`
+  const WIRE_RULE = `rule_wire_${RUN}`
+
+  beforeAll(async () => {
+    await pool().query('INSERT INTO meta_bases (id, name, owner_id) VALUES ($1,$2,$3)', [WIRE_BASE, 'Wire Base', `u_wire_${RUN}`])
+    await pool().query('INSERT INTO meta_sheets (id, base_id, name) VALUES ($1,$2,$3)', [WIRE_SHEET, WIRE_BASE, 'Wire Sheet'])
+    await pool().query(
+      `INSERT INTO automation_rules (id, sheet_id, trigger_type, action_type) VALUES ($1,$2,'record.created','send_notification')`,
+      [WIRE_RULE, WIRE_SHEET],
+    )
+  })
+
+  afterAll(async () => {
+    await pool().query('DELETE FROM automation_rules WHERE id = $1', [WIRE_RULE]).catch(() => {})
+    await pool().query('DELETE FROM meta_sheets WHERE id = $1', [WIRE_SHEET]).catch(() => {})
+    await pool().query('DELETE FROM meta_bases WHERE id = $1', [WIRE_BASE]).catch(() => {})
+  })
+
+  test("W1 handleApprovalCompletionEvent under a LIVE foreign bridge lease → DurableSinkBusyError, row byte-untouched", async () => {
+    const inst = `inst_wire_busy_${RUN}`
+    const id = await seedBridge('pending', { instanceId: inst })
+    // a "foreign worker" takes the live lease
+    const held = await service.claimCompletion(eventFor(inst), FLAG_ON)
+    expect(held.kind).toBe('claimed')
+    const before = await rowById(id)
+    // the redelivered event on ANOTHER worker must fail retryably — never resolve, never run the continuation
+    await expect(svc().handleApprovalCompletionEvent(eventFor(inst), FLAG_ON)).rejects.toThrow(DurableSinkBusyError)
+    expect(await rowById(id)).toEqual(before) // fence/attempts/status all untouched by the busy loser
+  })
+
+  test("W2 runWithEventDedup under a LIVE foreign event_fires lease → retryable throw, handler NOT run; after done → silent skip", async () => {
+    const rule = WIRE_RULE
+    const dedup = `wire_dedup_${RUN}`
+    const held = await claimEventFiresLease(kyselyDb, rule, dedup, 60_000)
+    expect(typeof held).toBe('object')
+    let runs = 0
+    const call = () =>
+      (svc() as unknown as { runWithEventDedup: (r: string, d: string, run: () => Promise<unknown>, env: NodeJS.ProcessEnv) => Promise<void> })
+        .runWithEventDedup(rule, dedup, async () => { runs += 1 }, FLAG_ON)
+    // live foreign lease → busy throw, handler NOT run (running would double-run the live holder)
+    await expect(call()).rejects.toThrow(DurableSinkBusyError)
+    expect(runs).toBe(0)
+    // the holder finishes → 'done' → silent skip (NOT busy, NOT a re-run)
+    await markEventFiresDone(kyselyDb, rule, dedup, (held as { fence: string }).fence)
+    await call()
+    expect(runs).toBe(0)
+    await kyselyDb.deleteFrom('meta_automation_event_fires' as never).where('dedup_key' as never, '=', dedup as never).execute()
+  })
+
+  test('W3 runWithEventDedup over an EXPIRED foreign lease → RECLAIMS and RUNS (crash recovery, not busy)', async () => {
+    const rule = WIRE_RULE
+    const dedup = `wire_dedup_exp_${RUN}`
+    const held = await claimEventFiresLease(kyselyDb, rule, dedup, 1) // 1ms — expires immediately
+    expect(typeof held).toBe('object')
+    await new Promise((r) => setTimeout(r, 20))
+    let runs = 0
+    await (svc() as unknown as { runWithEventDedup: (r: string, d: string, run: () => Promise<unknown>, env: NodeJS.ProcessEnv) => Promise<void> })
+      .runWithEventDedup(rule, dedup, async () => { runs += 1 }, FLAG_ON)
+    expect(runs).toBe(1) // reclaimed the crashed holder's work and ran it
+    await kyselyDb.deleteFrom('meta_automation_event_fires' as never).where('dedup_key' as never, '=', dedup as never).execute()
   })
 })
