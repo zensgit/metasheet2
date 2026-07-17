@@ -84,9 +84,14 @@ not transfer to #4409, which passed its own required CI + independent four-lens 
 retention caller instead):**
 - **P3-R** — the prune function's trailing `set_config('metasheet.mrho_retention', 'off', true)` reset is
   **load-bearing inside the caller's transaction**: without it, the txn-local GUC stays `'on'` for the remainder of
-  that transaction and H1 is bypassed for any subsequent ad-hoc endpoint DELETE in the same txn. This reset has **no
-  test today**. A golden proving the GUC is back to `'off'` after `…_prune()` returns (an ad-hoc DELETE later in the
-  SAME transaction still RAISES) MUST land **before the first production retention caller** is wired.
+  that transaction and H1 is bypassed for any subsequent ad-hoc endpoint DELETE in the same txn.
+  **STATUS: the golden EXISTS — #4438 `3a5596bfd` G2** (`multitable-l4cov-services-fence-realdb.test.ts`): one
+  explicit caller transaction — `…_prune(op0)` succeeds, `current_setting` reads back non-`'on'` inside the SAME
+  txn, and an ad-hoc DELETE of another endpoint later in that transaction still RAISES. Mutation-proven
+  (`CREATE OR REPLACE` of the fn WITHOUT the trailing reset ⇒ exactly G2 red; restore ⇒ green) and owner-APPROVED
+  (2026-07-17 review). Note G2 (same-transaction) is the load-bearing test — its sibling G1 (same-connection,
+  separate statement) stays green even without the reset. The pre-condition is satisfied once #4438 merges;
+  the first production retention caller remains gated on that merge.
 
 **Guardrails currently intact:** the full Phase-A DAG is on `main`; #4368/#4380/#4385/#4412 CLOSED as superseded;
 nothing self-ratified or self-merged; all recovery/mint flags default-OFF.
