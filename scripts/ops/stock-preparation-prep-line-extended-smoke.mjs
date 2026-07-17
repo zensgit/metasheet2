@@ -346,6 +346,13 @@ function check(name, ok, detail = '') {
   return ok === true
 }
 
+// T4 corrective P3-1 (reviewer): the per-request defaults main() feeds into EVERY requestJson call,
+// extracted pure so the tenant passthrough is unit-pinnable — deleting tenantId here reds a test
+// instead of silently reverting the entity run to the corrective-5 N/8 failure class.
+export function buildRequestDefaults(args, token) {
+  return { token, timeoutMs: args.timeoutMs, tenantId: args.tenantId }
+}
+
 // T4 corrective (owner review, 2026-07-16): headers come from the SAME builder the W6 smoke uses —
 // x-tenant-id rides on EVERY request when --tenant-id is given. The jwt middleware backfills the
 // authenticated principal's tenant from that header, and the T3b/T2 write routes resolve the tenant
@@ -396,7 +403,7 @@ async function main() {
   const S = RESULT.summary
   let failed = false
   const must = (name, ok, detail) => { if (!check(name, ok, detail)) failed = true }
-  const req = (pathname, options) => requestJson(args.baseUrl, pathname, { token, timeoutMs: args.timeoutMs, tenantId: args.tenantId, ...options })
+  const req = (pathname, options) => requestJson(args.baseUrl, pathname, { ...buildRequestDefaults(args, token), ...options })
   const scope = (extra) => scopeQuery(args, extra)
   SELF_SCAN_SENTINELS = [...fixture.sentinels, ...ENGINE_MESSAGE_SENTINELS]
   S.salt = salt

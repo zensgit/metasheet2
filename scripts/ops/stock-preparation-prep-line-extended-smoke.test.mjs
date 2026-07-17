@@ -15,6 +15,7 @@ import {
   formatSummaryBlock,
   prepLineRowProjectionValid,
   prepLineRowResolved,
+  buildRequestDefaults,
   requestJson,
   runApprovedSourcePrelude,
   safeCode,
@@ -341,4 +342,12 @@ test('requestJson (REAL header assembly): x-tenant-id rides when tenantId is giv
   await requestJson('http://smoke.test', '/api/y', { token: 'tok_1', timeoutMs: 1000, fetchImpl })
   assert.equal(Object.prototype.hasOwnProperty.call(seen[1].init.headers, 'x-tenant-id'), false, 'no tenantId -> no header')
   assert.equal(Object.prototype.hasOwnProperty.call(seen[1].init.headers, 'Content-Type'), false, 'no body -> no Content-Type')
+})
+
+
+test('request defaults: main()\'s per-request wiring carries --tenant-id into EVERY call (P3-1 pin)', () => {
+  const defaults = buildRequestDefaults({ tenantId: 'tenant_probe', timeoutMs: 1234 }, 'tok_9')
+  assert.deepEqual(defaults, { token: 'tok_9', timeoutMs: 1234, tenantId: 'tenant_probe' })
+  const noTenant = buildRequestDefaults({ tenantId: '', timeoutMs: 1234 }, 'tok_9')
+  assert.equal(noTenant.tenantId, '', 'empty stays empty — requestJson/buildRequestHeaders omit the header')
 })
