@@ -166,6 +166,11 @@ export default defineConfig({
       // DATABASE_URL-gated; wired as a WHOLE FILE into the APPROVAL real-DB step (server-based,
       // like approval-direct-manager) — both points asserted by b6-equivalence-ci-wiring.test.mjs.
       'tests/integration/approval-routing-policy-equivalence.db.test.ts',
+      // Canonical Org MVP B7 (§9): suggest-only reconciliation — remote disappearance stales the
+      // BINDING only (local dept row byte-identical), heal/idempotent sweep, ambiguous names never
+      // auto-matched, suggest read-only. DATABASE_URL-gated; wired as a WHOLE FILE into the
+      // directory real-DB step (both points asserted by b7-reconciliation-ci-wiring.test.mjs).
+      'tests/integration/directory-binding-reconciliation.db.test.ts',
       // Canonical Org MVP B3 (#4215 §5.4): proves ApprovalDirectoryOrg's DUAL-SOURCE direct-manager
       // resolution against real Postgres — normalized `is_manager` relation for a local integration,
       // the DingTalk `leader_in_dept` regression pin (load-bearing compat leg + is_manager=0 positive
