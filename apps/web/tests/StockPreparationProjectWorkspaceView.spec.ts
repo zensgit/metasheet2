@@ -245,4 +245,43 @@ describe('StockPreparationProjectWorkspaceView (readonly, values-free)', () => {
     expect(wrap.getAttribute('role')).toBe('region')
     expect(wrap.getAttribute('aria-label')).toBeTruthy()
   })
+
+  // H4-2 keyboard (H4-1 pattern, StockPreparationDashboardView.vue): a NATIVE disabled button is
+  // pulled from the tab order, so the browser drops focus to <body> when a re-failed retry re-renders
+  // with `:disabled` — a keyboard operator who pressed Retry must not be stranded there.
+  it('H4-2: a failed retry returns focus to the retry button (our own :disabled dropped it to body)', async () => {
+    h.getOverview.mockRejectedValue(new Error('503'))
+    const root = mountView()
+    await flushUi()
+    const retry = root.querySelector('[data-testid="stock-prep-project-retry"]') as HTMLButtonElement
+    retry.focus()
+    expect(document.activeElement).toBe(retry)
+    retry.click() // still failing → button re-renders; :disabled during the load drops focus to <body>
+    await flushUi()
+    expect(root.querySelector('[data-testid="stock-prep-project-retry"]')).not.toBeNull()
+    expect(document.activeElement).toBe(root.querySelector('[data-testid="stock-prep-project-retry"]'))
+  })
+
+  it('H4-2: a retry does NOT steal focus back if the operator Tabbed elsewhere while it was in flight', async () => {
+    let releaseRetry: (v: unknown) => void = () => {}
+    h.getOverview.mockRejectedValueOnce(new Error('503'))
+    const root = mountView()
+    await flushUi()
+    const retry = root.querySelector('[data-testid="stock-prep-project-retry"]') as HTMLButtonElement
+    retry.focus()
+    // Hold the retry's load in flight, and fail it again so the retry button is still rendered on settle.
+    h.getOverview.mockImplementation(() => new Promise((_res, rej) => { releaseRetry = () => rej(new Error('503')) }))
+    retry.click()
+    await flushUi()
+    // The operator Tabs away to another control WHILE the retry is still loading.
+    const elsewhere = document.createElement('button')
+    document.body.appendChild(elsewhere)
+    elsewhere.focus()
+    expect(document.activeElement).toBe(elsewhere)
+    releaseRetry(null)
+    await flushUi()
+    // Focus stays where the operator put it — restoring it here would be focus theft.
+    expect(document.activeElement).toBe(elsewhere)
+    elsewhere.remove()
+  })
 })
