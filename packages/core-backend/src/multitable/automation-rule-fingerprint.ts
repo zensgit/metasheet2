@@ -4,23 +4,31 @@
  * The suspend/resume + bridge guards use `computeActionFingerprint` (automation-suspension-service.ts), which
  * per §2.1 hashes ONLY the sequence of action TYPES — it cannot see a config-only edit (same types, changed
  * config), which is exactly the "rule changed" a retry must refuse (§4). This module derives a fingerprint
- * over the SAME injective identity the applied-ledger locks for `action_key` — `{ structuralPath, action.type,
- * canonicalConfig }` (`deriveActionKey`) — so a config edit, a type swap in place, or an action reorder all
- * change the fingerprint.
+ * over the SAME injective identity the applied-ledger locks for `action_key` — `deriveActionKey({
+ * structuralPath, actionType, canonicalConfig })` — so a config edit, a type swap in place, an action
+ * reorder, or a branch-key change all change the fingerprint.
  *
- * `enumerateRuleActions` is the SHARED canonical walk: it assigns every action (top-level AND nested inside a
- * `parallel_branch` / `condition_branch`, both of which nest via `config.branches[].actions[]`) a stable
- * structural path. The retry rule-change guard AND the future Class-A claim wiring both consume THIS walk, so
- * the structural paths they compare can never drift apart — the exact path string is an internal detail as
- * long as it is injective and position-sensitive, which this scheme is.
+ * `enumerateRuleActions` assigns every action (top-level AND nested inside a `parallel_branch` /
+ * `condition_branch`) the EXACT step-key the executor stamps, via the shared `automation-step-key` builder —
+ * `${i}` / `${i}.parallel.${branchKey}.${j}` / `${i}.branch.${branchKey}.${j}`. The retry guard AND the
+ * future Class-A claim consume THIS walk, so the identities they compare are the executor's own identities,
+ * never a divergent index-based path (#4420 review P1). Config is passed RAW to `deriveActionKey` (which
+ * canonicalizes internally) so the enumerator's key is byte-identical to a direct `deriveActionKey` call
+ * on the same action — i.e. the fingerprint really shares the applied-ledger identity (#4420 review P2).
  */
 import { createHash } from 'node:crypto'
 
-import { canonicalizeConfig, deriveActionKey } from './automation-action-idempotency'
+import { deriveActionKey } from './automation-action-idempotency'
+import { branchChildStepKey, topLevelStepKey, type BranchKind } from './automation-step-key'
 
 interface RuleAction {
   type: string
   config?: unknown
+}
+
+interface Branch {
+  key?: unknown
+  actions?: ReadonlyArray<RuleAction>
 }
 
 export interface RuleActionFingerprint {
@@ -30,50 +38,66 @@ export interface RuleActionFingerprint {
   hash: string
 }
 
-const MAX_NESTING_DEPTH = 8 // guard against a pathological/cyclic config; real rules nest at most a couple deep
+const MAX_NESTING_DEPTH = 8 // guard a pathological/cyclic config; real rules nest a couple deep at most
+
+/** The `.parallel.` vs `.branch.` segment is chosen by the PARENT action's type (matches the executor). */
+function branchKindForParent(parentType: string): BranchKind | null {
+  if (parentType === 'parallel_branch') return 'parallel'
+  if (parentType === 'condition_branch') return 'branch'
+  return null
+}
 
 /**
- * Yield every action in the rule with its canonical structural path, recursing into `config.branches[].actions[]`
- * (the shared nesting shape of parallel_branch and condition_branch). Deterministic order: top-level index, then
- * branch index, then nested action index.
+ * Yield every action in the rule with its canonical executor step-key. Deterministic order: top-level index,
+ * then branch order, then nested action index. A branch's identity is its stable `key` (NOT its array index),
+ * so reordering branches does not move a child's identity.
  */
 export function* enumerateRuleActions(
   actions: ReadonlyArray<RuleAction> | undefined,
-  prefix = 'actions',
-  depth = 0,
 ): Generator<{ action: RuleAction; structuralPath: string }> {
-  if (!Array.isArray(actions) || depth > MAX_NESTING_DEPTH) return
+  if (!Array.isArray(actions)) return
   for (let i = 0; i < actions.length; i++) {
     const action = actions[i]
     if (!action || typeof action.type !== 'string') continue
-    const structuralPath = `${prefix}[${i}]`
-    yield { action, structuralPath }
+    yield { action, structuralPath: topLevelStepKey(i) }
+    const kind = branchKindForParent(action.type)
+    if (!kind) continue
     const config = action.config
     const branches = config && typeof config === 'object' ? (config as { branches?: unknown }).branches : undefined
-    if (Array.isArray(branches)) {
-      for (let b = 0; b < branches.length; b++) {
-        const branch = branches[b] as { actions?: ReadonlyArray<RuleAction> } | undefined
-        yield* enumerateRuleActions(branch?.actions, `${structuralPath}.branches[${b}].actions`, depth + 1)
-      }
+    if (!Array.isArray(branches)) continue
+    for (const branch of branches as Branch[]) {
+      const branchKey = typeof branch?.key === 'string' ? branch.key : ''
+      yield* enumerateBranchActions(branch?.actions, i, kind, branchKey, 1)
     }
+  }
+}
+
+function* enumerateBranchActions(
+  actions: ReadonlyArray<RuleAction> | undefined,
+  parentStepIndex: number,
+  kind: BranchKind,
+  branchKey: string,
+  depth: number,
+): Generator<{ action: RuleAction; structuralPath: string }> {
+  if (!Array.isArray(actions) || depth > MAX_NESTING_DEPTH) return
+  for (let j = 0; j < actions.length; j++) {
+    const action = actions[j]
+    if (!action || typeof action.type !== 'string') continue
+    yield { action, structuralPath: branchChildStepKey(parentStepIndex, kind, branchKey, j) }
   }
 }
 
 /**
  * Fingerprint the rule's action set over the §2.1 identity. Two rules with the same fingerprint have the same
- * actions at the same structural positions with the same types AND the same canonical config; ANY difference
- * (config-only, type swap, reorder, add/remove, nested-branch edit) changes it.
+ * actions at the same structural step-keys with the same types AND the same config; ANY difference
+ * (config-only, type swap, reorder, add/remove, branch-key change) changes it.
  */
 export function deriveRuleActionSetFingerprint(actions: ReadonlyArray<RuleAction> | undefined): RuleActionFingerprint {
   const keys: string[] = []
   for (const { action, structuralPath } of enumerateRuleActions(actions)) {
-    keys.push(
-      deriveActionKey({
-        structuralPath,
-        actionType: action.type,
-        canonicalConfig: canonicalizeConfig(action.config ?? {}),
-      }),
-    )
+    // RAW config — deriveActionKey canonicalizes internally; passing pre-canonicalized text would double-apply
+    // it and diverge from the applied-ledger key (#4420 review P2).
+    keys.push(deriveActionKey({ structuralPath, actionType: action.type, canonicalConfig: action.config ?? {} }))
   }
   keys.sort()
   const hash = createHash('sha256').update(JSON.stringify(keys)).digest('hex')
