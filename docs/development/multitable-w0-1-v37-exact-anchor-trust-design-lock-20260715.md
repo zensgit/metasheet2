@@ -399,8 +399,11 @@ from §10. This amendment is the **OPERATIVE order and SUPERSEDES the order clau
 in §1–§6 are unchanged.)
 
 **Why the divergence (no rollback):** L4 (all-writer canonical fence, #4346) merged to `main` (default-OFF) before the
-reorder was finalized. It is NOT rolled back — the whole lane is flags-OFF (zero production exposure), and L5 was
-re-gated on a combined ancestry that already includes L4 + L4cov, so safety is no lower than §10's L5-first order.
+reorder was finalized. It is NOT rolled back — the lane's runtime wiring IS present in production code paths on `main`,
+but every fence/mint call is gated behind flags that stay default-OFF (inert no-op while OFF; this is *gated exposure*,
+not zero exposure), and L5 was re-gated on a combined ancestry that already includes L4 + L4cov, so safety is no lower
+than §10's L5-first order. (With the L6-a H3 hardening, flag-ON against an incomplete schema fails closed — the writer
+transaction rolls back rather than degrading to an inert ledger.)
 
 **Slice split (finer than §7's "L5"/"L6"):**
 - §7 row 3 "L5" → **L5** (trust-checkpoint SCHEMA + state machine — Phase A) + **L5-wire** (checkpoint ACTIVATION runtime — Phase B).
@@ -411,8 +414,11 @@ re-gated on a combined ancestry that already includes L4 + L4cov, so safety is n
 > **L3 → L4 → L4cov → L5 → L6-a**
 
 Each layer rebased on then-current `main`, with **full required CI + an exact-head independent gate before merge**;
-flags OFF. **L6-a is merged as a COMBINED rung** with its two riders — endpoint-immutability (#4380) + batch/operation
-runtime decouple (#4385) — gated ONCE on the combined head with a fresh G-MULTIOP-BATCH mutation run.
+flags OFF. **L6-a is merged as a COMBINED rung** — one PR carrying the sealed-endpoint ledger together with its two
+riders, endpoint-immutability + batch/operation runtime decouple — gated once on the combined head with a fresh
+G-MULTIOP-BATCH mutation run. *(As landed: the combined rung is **#4409** `2f456571e`, which carries all of the above
+plus the H1/H2/H3 owner hardenings; the draft stack #4368/#4380/#4385 and the alternative combined branch #4412 were
+closed as superseded by it — see the companion status doc.)*
 
 **Phase B — recovery-consuming layers — clarifies §7's `L6→L7→L8`; starts ONLY after the Phase A DAG is fully on `main`:**
 > integration + exact-head gate order = **L5-wire → L6-b → L7 → L8**, where **L8 is based on BOTH L6-b AND L7**

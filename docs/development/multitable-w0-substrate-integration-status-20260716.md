@@ -8,15 +8,15 @@ integration ORDER, dependencies, and take-over discipline live in the v3.7 desig
 ## Integration order (authority = v3.7 lock §11, supersedes §7/§10)
 
 - **Phase A — trusted-substrate DAG → `main`:** **L3 → L4 → L4cov → L5 → L6-a**. Each rung: rebase on then-current
-  `main` → full required CI → exact-head independent gate → merge. **L6-a is a COMBINED rung** (L6-a + #4380
-  endpoint-immutability + #4385 batch/operation decouple), gated once on the combined head with a fresh
-  G-MULTIOP-BATCH mutation.
+  `main` → full required CI → exact-head independent gate → merge. **L6-a is a COMBINED rung** (ledger +
+  endpoint-immutability + batch/operation decouple in one gated PR); **as landed, the combined rung is #4409
+  `2f456571e`** (which also carries the H1/H2/H3 owner hardenings — see Live status below).
 - **Phase B — recovery layers (only after the Phase A DAG is fully on `main`):** merge order **L5-wire → L6-b → L7 → L8**,
   with **L8 based on BOTH L6-b AND L7**. Drafting may be parallel; each MERGE is serial + exact-head gated. Flags OFF.
 - **Phase C — enablement:** owner/ops-only (strict/Revert/Reset enablement, staging cutover, #4273 re-measure). Not
   autonomous. All flags stay default-OFF throughout A + B.
 
-## Live status (2026-07-16, updated after L5 landing + L6-a combined gate)
+## Live status (final, 2026-07-17 — Phase A COMPLETE on `main`)
 
 | Rung | PR | State | Gate |
 |---|---|---|---|
@@ -24,45 +24,61 @@ integration ORDER, dependencies, and take-over discipline live in the v3.7 desig
 | L4 all-writer fence | #4346 | ✅ MERGED `502b1df1c` | landed; default-OFF |
 | L4cov writer-coverage | #4362 | ✅ MERGED `f2020509a` | independent gate CLEAR (P1 forward-field-delete hole found+fixed; B6/B7 mutation-proven) |
 | L5 trust-checkpoint | #4347 | ✅ MERGED `5b0ccf791` | independent re-gate CLEAR |
-| **L6-a (COMBINED)** sealed endpoints + immutability + decouple | **#4412** | 🟢 OPEN Draft @`713f71f60` (base `0105994a8`), **independent opus gate CLEAR-WITH-NITS (0 P1/0 P2)** — **ready to merge, HELD for owner GO** | CLEAR-WITH-NITS |
-| — component: sealed endpoint ledger | #4368 | 🟡 OPEN, superseded by #4412 (owner decides close) | folded |
-| — component: endpoint immutability | #4380 | 🟡 OPEN, superseded by #4412 | folded |
-| — component: batch/operation decouple + G-MULTIOP | #4385 | 🟡 OPEN, superseded by #4412 | folded |
+| **L6-a** sealed operation-endpoint ledger + owner hardening | **#4409** | ✅ **MERGED `2f456571e`** (2026-07-17) | required CI green + independent four-lens gate CLEAR (owner-reviewed) |
+| — draft stack: ledger / immutability / decouple | #4368 / #4380 / #4385 | ❌ CLOSED, superseded by #4409 | — |
+| — alternative combined branch | #4412 | ❌ CLOSED, superseded by #4409 (owner NO-GO; see below) | (historical: CLEAR-WITH-NITS on its own head `713f71f60`) |
 
-**Phase-A DAG status:** L3 → L4 → L4cov → L5 are **all on `main`**. L6-a is the last Phase-A rung — built as the
-superseding combined branch #4412, gated CLEAR-WITH-NITS, awaiting owner GO. On GO, the Phase-A trusted-substrate DAG
-is fully landed (all default-OFF).
+**The Phase-A trusted-substrate DAG — `L3 → L4 → L4cov → L5 → L6-a` — is fully on `main`.** All flags default-OFF.
 
-### Verification evidence — L6-a combined gate (`713f71f60`, real postgres:14)
+### L6-a as landed = #4409 (`2f456571e`), NOT the draft stack
 
-Construction: `git rebase --onto <main 0105994a8> 779ea55a0 <#4385 tip ae5d16932>` replays **only the 5 L6-a commits**
-onto current main; the L3/L4/L4cov base commits in the original stack are dropped (already landed as squashes). Source
-integrity pre-verified (#4368/#4380 heads == the commits inside the #4385 stack).
+#4409 carries everything the draft stack (#4368 + #4380 + #4385) and the alternative combined branch #4412 contained —
+sealed operation-endpoint ledger + mint protocol, batch/operation runtime decouple (§10), endpoint UPDATE-immutability,
+and all writer wiring — **plus three owner hardenings the superseded branches lacked** (verified on `main`, migration
+`zzzz20260715210000_create_meta_record_history_operations.ts`):
 
-| Check | Result |
-|---|---|
-| Construction integrity | ✅ only L6-a-owned files; no L3/L4/L4cov/L5 reintroduced; 7 non-conflict files byte-identical to original stack (1047 lines) |
-| No silent revert | ✅ L4cov P1 fence intact (13/13 `fenceWriterEntry`, comment survives); L5 univer-meta wiring intact; only the 2 lock/unlock marker lines are mint-rewired; all 5 univer-meta mint sites survived auto-merge (0 missing) |
-| CI run-list | ✅ both L5 trust-checkpoint spec (@444) and L6-a golden (@572) execute |
-| `tsc` typecheck (core-backend) | ✅ 0 errors |
-| Migrations | ✅ clean; `meta_record_history_operations` + `trg_mrho_reject_update` live |
-| Golden (real DB, isolation) | ✅ 18/18 |
-| **Full CI bundle (217 specs, the 20.x-gated run-list)** | ✅ **217/217 files, 1995 tests pass / 3 pre-existing skips, 0 fail** on fresh postgres:14 — the L6-a shared-table BEFORE-triggers (`trg_mrr_reject_append_sealed`/`trg_mrvm_reject_append_sealed`) disrupt none of the other 216 specs |
-| Mutation A — re-couple `batch_id = operationId` (runtime) | ✅ load-bearing: `G-MULTIOP [S1]` + `W1 G-BATCH-ENDPOINT` RED; restore → green |
-| Mutation B — disable `trg_mrho_reject_update` (runtime) | ✅ load-bearing: `§F2 DB-immutable` RED; re-enable → green |
-| Flag default-OFF | ✅ mint INERT before any DB call (`=== 'true'`), operation_id NULL, no endpoint row |
-| Independent adversarial gate (opus) | ✅ **CLEAR-WITH-NITS** — 7/7 claims upheld, 0 P1/0 P2 (report `/tmp/l6a-combined-gate-review.md`) |
+- **H1 — ordinary endpoint DELETE is fail-closed:** `trg_mrho_reject_delete` (BEFORE DELETE) RAISES unless the
+  transaction-local GUC `metasheet.mrho_retention` is `'on'` (`current_setting(..., true)` is missing-OK, so an ad-hoc
+  DELETE always raises). Migration :220–237. (#4412 left DELETE to future retention.)
+- **H2 — whole-operation atomic retention:** the only sanctioned bypass of H1 is the SQL function
+  `meta_record_history_operations_prune(sheet_id, operation_id)` (migration :246–260), which deletes both event tables'
+  rows AND the endpoint row for exactly one operation in one transaction under the GUC; the DEFERRABLE FKs
+  (`fk_mrr_operation`/`fk_mrvm_operation`, :104–122) make any torn/partial prune RAISE at COMMIT.
+- **H3 — flag-ON with incomplete schema fails closed:** `mintOperation` (`operation-ledger.ts` ~:150) THROWS
+  `OperationLedgerSchemaError` when the writer-fence flag is ON but `operation_id` is absent from the schema — the
+  writer transaction ROLLS BACK instead of degrading to an inert ledger (which is what #4412 did).
 
-**Gate P3 findings (coverage nits, NOT blocking this inert/fail-closed rung) → L6-b pre-arm conditions:**
-- **P3-1** — plugin `records.ts` / form-submit / attachment-strip / lock-unlock marker mint surfaces have **no golden
-  yet**. Inert + fail-closed today (NULL operation_id → untrusted, never silent trust). **L6-b MUST add plugin-path +
-  marker-path goldens before `MULTITABLE_ENABLE_WRITER_FENCE` (or any mint-consuming flag) is ever armed.**
-- **P3-2** — `recordRecordRevisionsBatch` decouple (site 2) is forward-wired but unexercised (its only caller,
-  field-undelete rehydration, passes no ledger); only site 1 is load-bearing/tested today.
+**Owner NO-GO on #4412 (2026-07-16/17), recorded:** #4409 merged to `main` first and is strictly more complete;
+rebasing + merging #4412 would have regressed H1/H2/H3 and duplicated the operation-ledger migration (#4412's `190000`
+vs #4409's `210000`). #4412's green required checks bound only its old head `713f71f60` and were not merge evidence
+after it went conflicting. Decision: close #4412/#4368/#4380/#4385 as superseded — the runtime Phase A was completed
+by #4409; what remained was this governance-record close-out, not another L6-a merge.
 
-**Guardrails currently intact:** L3/L4/L4cov/L5 on `main`; L6-a = #4412 (superseding combined branch), gated, HELD for
-owner GO; component PRs #4368/#4380/#4385 remain OPEN and untouched (owner decides whether to close); nothing
-self-ratified or self-merged; all recovery/mint flags default-OFF.
+**Exposure phrasing (corrected):** with #4409 on `main`, the L6-a mint/seal writer wiring **is present in production
+code paths** — "zero production exposure" is not accurate. The accurate statement: every mint/seal call is a no-op
+while the mint/fence flag stays default-OFF (*gated* exposure), and if the flag is turned ON against an incomplete
+schema, H3 fails the writer transaction closed (rollback) rather than silently degrading.
+
+### Historical gate record — superseded branch #4412 (audit trail only)
+
+Before #4409's supersession was identified, #4412 (`713f71f60`, a `rebase --onto` fold of #4368+#4380+#4385 onto
+then-main `0105994a8`) passed a full gate on its own head: construction-integrity + no-silent-revert verification,
+tsc 0 errors, isolation golden 18/18, full 217-spec 20.x CI bundle green (217/217 files, 1995 tests), dual runtime
+mutation (re-couple → G-MULTIOP red; disable UPDATE-trigger → §F2 red), and an independent opus adversarial gate
+CLEAR-WITH-NITS (0 P1/0 P2). That verdict was head-scoped to `713f71f60` and is recorded here for audit only — it does
+not transfer to #4409, which passed its own required CI + independent four-lens gate.
+
+**Gate P3 findings — carried forward and RE-CHECKED against #4409 on `main` (still applicable) → L6-b pre-arm conditions:**
+- **P3-1** — plugin `records.ts` / form-submit / attachment-strip / lock-unlock marker mint surfaces have **no
+  production-path golden** (the #4409 golden — 21 tests — adds H1/H2/H3 coverage but still drives only
+  record-service/record-write-service). Inert + fail-closed today (NULL operation_id → untrusted, never silent trust).
+  **L6-b MUST add plugin-path + marker-path goldens before `MULTITABLE_ENABLE_WRITER_FENCE` (or any mint-consuming
+  flag) is ever armed.**
+- **P3-2** — `recordRecordRevisionsBatch` decouple (site 2) is forward-wired but unexercised (its only caller, the
+  field-undelete rehydration at `univer-meta.ts` :6561, passes no ledger); only site 1 is load-bearing/tested today.
+
+**Guardrails currently intact:** the full Phase-A DAG is on `main`; #4368/#4380/#4385/#4412 CLOSED as superseded;
+nothing self-ratified or self-merged; all recovery/mint flags default-OFF.
 
 ## Take-over discipline (authority = v3.7 lock §11)
 
@@ -81,9 +97,10 @@ that does not touch the original PR. (Correction adopted 2026-07-16 per owner: t
 | L8 (Revert outer-txn atomicity) | sonnet5 impl + opus gate (opus mutation battery) | destructive write-path atomicity + TOCTOU |
 | final design+verification MD | fable5 | consolidation |
 
-Execution-ready lane briefs (scope, files, goldens per lock §6, deps) are prepared; Phase B does NOT auto-start —
-it begins only after the Phase A DAG is fully on `main` **and** the owner confirms (plan-review: do not auto-advance
-Phase B).
+Execution-ready lane briefs (scope, files, goldens per lock §6, deps) are prepared; Phase B does NOT auto-start.
+The Phase A DAG is now fully on `main`; per the owner's supersession ruling, Phase B **begins from L5-wire only after
+this corrected status record is merged and the owner confirms** — merge order stays serial **L5-wire → L6-b → L7 → L8**
+(L8 based on both L6-b and L7), each on then-current `main` with full CI + an exact-head independent gate, flags OFF.
 
 **L6-b entry conditions carried from the L6-a gate:** L6-b MUST close gate findings **P3-1** (plugin/form-submit/
 attachment/marker mint-surface goldens) and **P3-2** (`recordRecordRevisionsBatch` site-2 coverage) before any
