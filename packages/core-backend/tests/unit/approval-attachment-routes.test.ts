@@ -101,6 +101,15 @@ describe('approval attachment routes (flag-gated)', () => {
     expect((await request(missing.app).get('/api/approval/attachments/att_x/download')).status).toBe(404)
   })
 
+  // G6 (no deleted-row oracle): the deleted lifecycle signal is emitted ONLY to an authorized viewer.
+  test('download of a deleted row: participant sees 410 (tombstone); NON-participant sees 404 (no oracle)', async () => {
+    const deleted = { status: 'deleted', uploader_id: 'up1', instance_id: 'i1', field_id: 'fld1', storage_key: 'k1', file_name: 'a.pdf', mime_type: 'application/pdf' }
+    const authed = makeApp({ rows: [deleted], participant: true })
+    expect((await request(authed.app).get('/api/approval/attachments/att_1/download')).status).toBe(410)
+    const outsider = makeApp({ rows: [deleted], participant: false })
+    expect((await request(outsider.app).get('/api/approval/attachments/att_1/download')).status).toBe(404) // NOT 410 — no 404→410 existence oracle
+  })
+
   // approval-attachment-hidden-redaction (lock G7 / §4.2 gate 2 / test 6): a field hidden at the
   // active node serves NO bytes at the byte path — even to an authorized instance participant — the
   // same way redactHiddenFormFields strips it from the echoed snapshot. Non-hidden still serves.

@@ -117,26 +117,37 @@ export async function authorizeAttachmentDownload(
   viewerId: string,
   checks: DownloadAuthChecks,
 ): Promise<DownloadAuthResult> {
+  // Gate 1: instance-visibility. Evaluated BEFORE any deleted/gone signal so an unauthorized outsider
+  // always gets the same authorization denial (→ 404) and never a 404→410 existence/lifecycle oracle
+  // (G6). Unbound (no instance) is uploader-only; bound/cascade-deleted uses the participant predicate.
+  let authorized: boolean
+  let denyCode: 'not_uploader' | 'not_participant'
+  if (!row.instanceId) {
+    authorized = row.uploaderId === viewerId // pre-submit: only the uploader
+    denyCode = 'not_uploader'
+  } else {
+    denyCode = 'not_participant'
+    try {
+      authorized = await checks.isInstanceParticipant(viewerId, row.instanceId)
+    } catch {
+      authorized = false // fail-closed
+    }
+  }
+  if (!authorized) return { ok: false, code: denyCode }
+  // Gate 2 (G7): even an authorized participant gets NO bytes for a field hidden at the active node —
+  // the byte path inherits the snapshot's redaction. Bound rows only (unbound has no active node).
+  // Fail-closed: if we cannot confirm not-hidden, refuse.
+  if (row.instanceId) {
+    let hidden = true
+    try {
+      hidden = await checks.isFieldHiddenAtActiveNode(row.instanceId, row.fieldId)
+    } catch {
+      hidden = true // fail-closed: an ACL/graph-load failure must never leak a byte a hidden field would strip
+    }
+    if (hidden) return { ok: false, code: 'hidden' }
+  }
+  // Gate 3: lifecycle. Only an AUTHORIZED viewer reaches this — they see the deleted tombstone (410);
+  // an outsider was already denied at gate 1, so the deleted state is never an oracle for them (G6).
   if (row.status === 'deleted') return { ok: false, code: 'gone' }
-  if (row.status === 'unbound') {
-    return row.uploaderId === viewerId ? { ok: true } : { ok: false, code: 'not_uploader' } // pre-submit: only the uploader
-  }
-  // bound: any instance participant
-  if (!row.instanceId) return { ok: false, code: 'not_participant' } // defensive: bound-without-instance is barred by the DB CHECK
-  let participant = false
-  try {
-    participant = await checks.isInstanceParticipant(viewerId, row.instanceId)
-  } catch {
-    participant = false // fail-closed
-  }
-  if (!participant) return { ok: false, code: 'not_participant' }
-  // Gate 2 (G7): even a participant gets NO bytes for a field hidden at the active node — the byte
-  // path inherits the snapshot's redaction. Fail-closed: if we cannot confirm not-hidden, refuse.
-  let hidden = true
-  try {
-    hidden = await checks.isFieldHiddenAtActiveNode(row.instanceId, row.fieldId)
-  } catch {
-    hidden = true // fail-closed: an ACL/graph-load failure must never leak a byte a hidden field would strip
-  }
-  return hidden ? { ok: false, code: 'hidden' } : { ok: true }
+  return { ok: true }
 }

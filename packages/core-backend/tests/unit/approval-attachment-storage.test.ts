@@ -52,6 +52,18 @@ describe('attachment storage + download auth', () => {
     expect(await authorizeAttachmentDownload({ status: 'deleted', uploaderId: 'u1', instanceId: 'i1', fieldId: 'f' }, 'u1', yes)).toEqual({ ok: false, code: 'gone' })
   })
 
+  test('G6 no deleted-row oracle: an UNAUTHORIZED viewer of a deleted row gets the SAME denial as a live row (not gone)', async () => {
+    const yes = { isInstanceParticipant: async () => true, isFieldHiddenAtActiveNode: async () => false }
+    const no = { isInstanceParticipant: async () => false, isFieldHiddenAtActiveNode: async () => false }
+    // deleted bound row: a NON-participant must see not_participant (→404), NEVER gone (→410) — no lifecycle oracle
+    expect(await authorizeAttachmentDownload({ status: 'deleted', uploaderId: 'u1', instanceId: 'i1', fieldId: 'f' }, 'u2', no)).toEqual({ ok: false, code: 'not_participant' })
+    // deleted unbound row: a NON-uploader must see not_uploader (→404), NEVER gone
+    expect(await authorizeAttachmentDownload({ status: 'deleted', uploaderId: 'u1', instanceId: null, fieldId: 'f' }, 'u2', yes)).toEqual({ ok: false, code: 'not_uploader' })
+    // only an AUTHORIZED viewer sees the tombstone (gone → 410)
+    expect(await authorizeAttachmentDownload({ status: 'deleted', uploaderId: 'u1', instanceId: 'i1', fieldId: 'f' }, 'u2', yes)).toEqual({ ok: false, code: 'gone' })
+    expect(await authorizeAttachmentDownload({ status: 'deleted', uploaderId: 'u1', instanceId: null, fieldId: 'f' }, 'u1', no)).toEqual({ ok: false, code: 'gone' })
+  })
+
   test('G7 hidden-field byte gate: a hidden-at-active-node field serves NO bytes even to a participant; fail-closed', async () => {
     const participantHidden = { isInstanceParticipant: async () => true, isFieldHiddenAtActiveNode: async () => true }
     const participantVisible = { isInstanceParticipant: async () => true, isFieldHiddenAtActiveNode: async () => false }
