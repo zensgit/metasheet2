@@ -40,8 +40,15 @@ import { resolveApprovalRequesterOrgRelations } from '../../src/services/Approva
  *      first instance's constancy is meaningful, not "nothing changed anywhere").
  *
  * Proof-slice vacuity discipline: this ticket adds NO production code, so the load-bearing
- * mutation runs against the CONSUMED B5-b predicate — deleting the policy-scoped
- * `AND a.integration_id = $2::uuid` restriction reds leg 1 (run out-of-band, recorded in the PR).
+ * mutation runs against the CONSUMED B5-b predicate — neutering the policy-scoped
+ * `AND a.integration_id = $2::uuid` restriction with a PARAM-PRESERVING no-op (e.g.
+ * `AND ($2::uuid IS NOT NULL OR a.integration_id = $2::uuid)`) reds the sentinel leg with the
+ * exact source-collapse signature (`expected 'DT-SENTINEL' to be 'LOCAL-SENTINEL'`) — a literal
+ * deletion also reds but only via a PG param-count error, which proves less (gate P3-3).
+ * On the in-flight leg: the byte-identical re-read is a RESIDUE PIN (today no code path rewrites
+ * snapshots, so it is structurally stable); the LOAD-BEARING invariance evidence is the positive
+ * control — instance #2 differing proves the flip changed new resolutions while #1 stayed frozen
+ * (gate P3-1, stated honestly).
  */
 const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
 
@@ -152,6 +159,9 @@ describeIfDatabase('Canonical Org MVP — B6 approval-routing local/DingTalk equ
 
   afterAll(async () => {
     try {
+      // gate P3-2: the 'default' routing policy is the single most cross-suite-dangerous residue —
+      // delete it FIRST so a throw later in this block can never leak it into serially-later suites.
+      await query(`DELETE FROM org_directory_routing_policy WHERE org_id = ANY($1)`, [['default', ...cleanupOrgs]])
       const pool = poolManager.get()
       const tids = (await pool.query(`SELECT id FROM approval_templates WHERE key LIKE $1`, [`%-${TS}`])).rows.map((r) => r.id as string)
       if (tids.length > 0) {
@@ -166,7 +176,6 @@ describeIfDatabase('Canonical Org MVP — B6 approval-routing local/DingTalk equ
         await pool.query(`DELETE FROM approval_published_definitions WHERE template_id = ANY($1)`, [tids])
         await pool.query(`DELETE FROM approval_templates WHERE id = ANY($1)`, [tids])
       }
-      await query(`DELETE FROM org_directory_routing_policy WHERE org_id = ANY($1)`, [['default', ...cleanupOrgs]])
       for (const id of cleanupAccountIds.splice(0)) await query(`DELETE FROM directory_accounts WHERE id = $1`, [id])
       for (const id of cleanupIntegrationIds.splice(0)) await query(`DELETE FROM directory_integrations WHERE id = $1`, [id])
       for (const org of cleanupOrgs.splice(0)) await query(`DELETE FROM directory_integrations WHERE org_id = $1`, [org])
