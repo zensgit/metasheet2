@@ -102,6 +102,10 @@ import {
   stopApprovalSlaScheduler,
 } from './services/ApprovalSlaScheduler'
 import { ApprovalProductService } from './services/ApprovalProductService'
+// S7-1 (OD-S7-5=d): the host-resolved chain-depth cap the attendance dynamic-assignee resolver PORT
+// exposes to plugin-attendance, so the plugin validates `manager_at_level.level` against the SAME
+// source the kernel uses and never re-parses APPROVAL_MANAGER_CHAIN_MAX_LEVELS into a second constant.
+import { MAX_MANAGER_CHAIN_LEVELS } from './services/ApprovalDirectoryOrg'
 import {
   resolveAttendanceSchedulerIntervalMs,
   resolveAttendanceSchedulerLeaderOptions,
@@ -937,6 +941,23 @@ export class MetaSheetServer {
     return wrappedUnregister
   }
 
+  // S7-1 (RATIFIED attendance-approval-s7 resolver lock, OD-S7-5=d): construct the host binding for the
+  // narrow, org-scoped dynamic approval-assignee resolver port plugin-attendance consumes. It exposes
+  // the SAME MAX_MANAGER_CHAIN_LEVELS constant the kernel uses (no plugin env re-parse) and — at S7-1 —
+  // a resolver that reports EVERY dynamic kind unimplemented (`implementedKinds: []`, `resolve` →
+  // `{ status: 'unimplemented' }`), so the plugin fail-closes at both authoring and runtime. S7-2/S7-3/
+  // S7-4 populate `implementedKinds` and implement per-kind, org-scoped, directory-read-only resolution
+  // here (never a write, never outside the core-backend process boundary).
+  private buildApprovalAssigneeResolverPort(): NonNullable<
+    import('./types/plugin').PluginServices['approvalAssigneeResolver']
+  > {
+    return {
+      maxManagerChainLevels: MAX_MANAGER_CHAIN_LEVELS,
+      implementedKinds: [],
+      resolve: async () => ({ status: 'unimplemented' as const }),
+    }
+  }
+
   private registerPluginWorkdayCalendarProvider(pluginName: string, provider: WorkdayCalendarPort): (() => void) {
     getWorkdayCalendarRegistry().register(provider)
     this.workdayCalendarProviderOwner = pluginName
@@ -1719,6 +1740,11 @@ export class MetaSheetServer {
         workdayCalendar: {
           register: (provider: WorkdayCalendarPort) => this.registerPluginWorkdayCalendarProvider(pluginName, provider),
         },
+        // S7-1 (OD-S7-5=d): the host binding for the dynamic approval-assignee resolver port. Unlike
+        // workdayCalendar (plugin-provided), core-backend is the PROVIDER here; plugin-attendance
+        // consumes it and fail-closes when it is absent. At S7-1 it reports every dynamic kind
+        // unimplemented, so a dynamic-kind step can never round-trip inert — see buildApprovalAssigneeResolverPort.
+        approvalAssigneeResolver: this.buildApprovalAssigneeResolverPort(),
         automationRegistry,
         rbacProvisioning,
         platformAppInstances,
