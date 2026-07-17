@@ -162,6 +162,18 @@ describe('Attendance experience entrypoints', () => {
     expect(overviewView?.dataset.requestId).toBe('request-123')
   })
 
+  it('routes the attendance anomaly shortcut into the overview anomaly section', async () => {
+    routeState.query = { section: 'attendance-overview-anomalies' }
+
+    app = createApp(AttendanceExperienceView)
+    app.mount(container!)
+    await flushUi()
+
+    const overviewView = container!.querySelector<HTMLElement>('[data-view="overview"]')
+    expect(overviewView).toBeTruthy()
+    expect(overviewView?.dataset.section).toBe('attendance-overview-anomalies')
+  })
+
   it('routes the reports entrypoint into a dedicated reports view', async () => {
     routeState.query = { tab: 'reports' }
 

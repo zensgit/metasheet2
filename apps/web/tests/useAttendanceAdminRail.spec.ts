@@ -125,7 +125,7 @@ describe('useAttendanceAdminRail', () => {
     scope.stop()
   })
 
-  it('reloads and persists focused mode per org-scoped storage bucket', async () => {
+  it('normalizes legacy show-all preferences when the org storage bucket changes', async () => {
     window.localStorage.setItem(
       scopedKey(ADMIN_NAV_FOCUS_MODE_STORAGE_KEY, 'org-b'),
       JSON.stringify(false),
@@ -148,10 +148,7 @@ describe('useAttendanceAdminRail', () => {
 
     scopeRef.value = 'org-b'
     await flushUi()
-    expect(rail.adminFocusedMode.value).toBe(false)
-
-    rail.adminFocusedMode.value = true
-    await flushUi()
+    expect(rail.adminFocusedMode.value).toBe(true)
     expect(window.localStorage.getItem(scopedKey(ADMIN_NAV_FOCUS_MODE_STORAGE_KEY, 'org-b'))).toBe('true')
 
     scope.stop()

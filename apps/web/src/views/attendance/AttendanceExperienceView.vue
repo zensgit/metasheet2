@@ -50,6 +50,13 @@ import AttendanceWorkflowDesigner from './AttendanceWorkflowDesigner.vue'
 
 type AttendanceTab = 'overview' | 'reports' | 'admin' | 'import' | 'workflow'
 
+const ATTENDANCE_OVERVIEW_SECTION_IDS = new Set([
+  'attendance-overview-requests',
+  'attendance-overview-anomalies',
+  'attendance-overview-request-report',
+  'attendance-overview-records',
+])
+
 const route = useRoute()
 const router = useRouter()
 const { hasFeature, loadProductFeatures } = useFeatureFlags()
@@ -123,7 +130,7 @@ const desktopOnlyMessage = computed(() => {
 
 const overviewInitialSectionId = computed(() => {
   const section = Array.isArray(route.query.section) ? route.query.section[0] : route.query.section
-  return section === 'attendance-overview-requests' ? section : ''
+  return typeof section === 'string' && ATTENDANCE_OVERVIEW_SECTION_IDS.has(section) ? section : ''
 })
 
 const overviewInitialRequestId = computed(() => {

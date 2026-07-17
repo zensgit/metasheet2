@@ -154,29 +154,54 @@ describe('Attendance admin anchor navigation', () => {
     expect(container!.querySelector('[data-admin-anchor-recent]')).toBeNull()
   })
 
-  it('renders a task-oriented admin home and routes task actions to existing sections', async () => {
+  it('renders the four task groups as the first admin context and opens one workspace at a time', async () => {
     app = createApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi()
 
+    const homeContext = container!.querySelector<HTMLElement>('[data-admin-home-context="true"]')
+    const sectionWorkspace = container!.querySelector<HTMLElement>('[data-admin-section-workspace="true"]')
     const taskHome = container!.querySelector<HTMLElement>('[data-admin-task-home="true"]')
+    expect(homeContext?.style.display).not.toBe('none')
+    expect(sectionWorkspace?.style.display).toBe('none')
     expect(taskHome).toBeTruthy()
-    expect(taskHome?.textContent).toContain('Admin workflow')
-    expect(taskHome?.textContent).toContain('Today queue')
-    expect(taskHome?.textContent).toContain('Monthly processing')
-    expect(taskHome?.textContent).toContain('Base configuration')
-    expect(taskHome?.textContent).toContain('Audit and rollback')
+    expect(taskHome?.textContent).toContain('Attendance management')
+    expect(Array.from(taskHome!.querySelectorAll('[data-admin-task-group]')).map(group => group.getAttribute('data-admin-task-group'))).toEqual([
+      'daily-operations',
+      'people-groups',
+      'work-time-policies',
+      'reporting-payroll',
+    ])
+    expect(taskHome?.textContent).toContain('Daily operations')
+    expect(taskHome?.textContent).toContain('People and attendance groups')
+    expect(taskHome?.textContent).toContain('Work time and policies')
+    expect(taskHome?.textContent).toContain('Reporting and payroll')
 
     const pendingApprovalsLink = taskHome!.querySelector<HTMLAnchorElement>('[data-admin-task-action="pending-attendance-approvals"]')
     expect(pendingApprovalsLink?.getAttribute('href')).toBe('/attendance?section=attendance-overview-requests')
+    expect(taskHome!.querySelector<HTMLAnchorElement>('[data-admin-task-action="attendance-anomalies"]')?.getAttribute('href'))
+      .toBe('/attendance?section=attendance-overview-anomalies')
+    for (const action of ['attendance-groups', 'shifts', 'holidays', 'rule-sets', 'daily-import']) {
+      expect(taskHome!.querySelector(`[data-admin-task-action="${action}"]`)).toBeTruthy()
+    }
 
-    const importButton = taskHome!.querySelector<HTMLButtonElement>('[data-admin-task-action="monthly-import"]')
+    const importButton = taskHome!.querySelector<HTMLButtonElement>('[data-admin-task-action="daily-import"]')
     expect(importButton).toBeTruthy()
     importButton!.click()
     await flushUi(2)
 
+    expect(homeContext?.style.display).toBe('none')
+    expect(sectionWorkspace?.style.display).not.toBe('none')
     const currentSectionBar = container!.querySelector<HTMLElement>('[data-admin-current-section="true"]')
     expect(currentSectionBar?.textContent).toContain('Import')
+
+    container!.querySelector<HTMLButtonElement>('[data-admin-task-home-return="true"]')!.click()
+    await flushUi(2)
+
+    expect(homeContext?.style.display).not.toBe('none')
+    expect(sectionWorkspace?.style.display).toBe('none')
+    expect(window.location.hash).toBe('')
+    expect(document.activeElement?.id).toBe('attendance-admin-task-home-title')
   })
 
   it('creates an attendance group from the detail pane and selects it for people management', async () => {
@@ -789,7 +814,10 @@ describe('Attendance admin anchor navigation', () => {
   })
 
   it('renders a sticky current-section bar in the right pane', async () => {
-    app = createApp(AttendanceView, { mode: 'admin' })
+    app = createApp(AttendanceView, {
+      mode: 'admin',
+      initialSectionId: 'attendance-admin-settings',
+    })
     app.mount(container!)
     await flushUi()
 
@@ -797,7 +825,8 @@ describe('Attendance admin anchor navigation', () => {
     expect(currentSectionBar).toBeTruthy()
     expect(currentSectionBar?.textContent).toContain('Current section')
     expect(currentSectionBar?.textContent).toContain('Workspace · Settings')
-    expect(currentSectionBar?.textContent).toContain('Quick switch: Alt+↑ previous')
+    expect(currentSectionBar?.textContent).toContain('Management home')
+    expect(currentSectionBar?.textContent).not.toContain('Quick switch')
     expect(currentSectionBar?.querySelector('[data-admin-quick-jump="true"]')).toBeTruthy()
     expect(currentSectionBar?.querySelector('[data-admin-focus-toggle="true"]')).toBeNull()
     expect(currentSectionBar?.querySelector('[data-admin-prev-section]')?.getAttribute('data-admin-prev-section-id')).toBe('')
@@ -1180,21 +1209,17 @@ describe('Attendance admin anchor navigation', () => {
     expect(container!.textContent).toContain('Recent admin shortcuts cleared.')
   })
 
-  it('restores the last active admin section when no hash is present', async () => {
+  it('keeps the task home as the first context when only a remembered section exists', async () => {
     window.localStorage.setItem(scopedAdminNavStorageKey(ADMIN_NAV_LAST_SECTION_STORAGE_KEY), 'attendance-admin-approval-flows')
     app = createApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi()
 
-    expect(scrollIntoViewSpy).toHaveBeenCalled()
     const scrolledTargets = scrollIntoViewSpy.mock.instances as HTMLElement[]
-    expect(scrolledTargets.some(target => target.id === 'attendance-admin-approval-flows')).toBe(true)
-    expect(scrolledTargets.some(target => target.dataset.adminAnchor === 'attendance-admin-approval-flows')).toBe(true)
-
-    const button = container!.querySelector<HTMLButtonElement>('[data-admin-anchor="attendance-admin-approval-flows"]')
-    expect(button?.classList.contains('attendance__admin-nav-link--active')).toBe(true)
-    expect(button?.getAttribute('aria-current')).toBe('true')
-    expect(window.location.hash).toBe('#attendance-admin-approval-flows')
+    expect(scrolledTargets.some(target => target.id === 'attendance-admin-approval-flows')).toBe(false)
+    expect(container!.querySelector<HTMLElement>('[data-admin-home-context="true"]')?.style.display).not.toBe('none')
+    expect(container!.querySelector<HTMLElement>('[data-admin-section-workspace="true"]')?.style.display).toBe('none')
+    expect(window.location.hash).toBe('')
   })
 
   it('isolates admin rail persistence by org id', async () => {
@@ -1224,9 +1249,9 @@ describe('Attendance admin anchor navigation', () => {
       item => item.textContent?.trim() || '',
     )
     expect(labels).toEqual(['Data & Payroll · Payroll Cycles', 'Data & Payroll · Import batches'])
-    expect(scrollIntoViewSpy).toHaveBeenCalled()
     const scrolledTargets = scrollIntoViewSpy.mock.instances as HTMLElement[]
-    expect(scrolledTargets.some(target => target.id === 'attendance-admin-payroll-cycles')).toBe(true)
+    expect(scrolledTargets.some(target => target.id === 'attendance-admin-payroll-cycles')).toBe(false)
+    expect(container!.querySelector<HTMLElement>('[data-admin-home-context="true"]')?.style.display).not.toBe('none')
   })
 
   it('collapses the grouped rail behind a toggle on narrow screens', async () => {

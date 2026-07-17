@@ -540,7 +540,9 @@ export function useAttendanceAdminRail({
     if (scope === previousScope) return
     adminCollapsedGroupIds.value = loadAdminNavCollapsedGroups(scope)
     adminRecentSectionIds.value = loadAdminNavRecentSections(scope)
-    adminFocusedMode.value = loadAdminNavFocusedMode(scope)
+    const focusedMode = loadAdminNavFocusedMode(scope)
+    adminFocusedMode.value = focusedMode
+    persistAdminNavFocusedMode(scope, focusedMode)
     if (previousScope !== undefined) {
       setAdminNavScopeFeedback(scope)
     }
