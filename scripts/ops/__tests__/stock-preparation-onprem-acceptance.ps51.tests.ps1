@@ -123,6 +123,101 @@ try {
   Remove-Item Env:METASHEET_AUTH_TOKEN -ErrorAction SilentlyContinue
 }
 
+
+# ── corrective-6: token-hygiene projection + verdict under REAL Windows PowerShell 5.1 ───────────
+# (PSObject.Properties indexing, [bool] typing, FUNCTION pm2 shim, ConvertFrom-Json of the 5-key
+# sample, and the 5.1 native-stdin pipe with whatever $OutputEncoding the host session carries —
+# the CI session emits a UTF-8 BOM, which the helper must strip). Desktop-gated: on any other host
+# the suite ALREADY fails loudly at the host check above, so this can never green-skip.
+if ($PSVersionTable.PSEdition -eq 'Desktop') {
+  $hygieneDir = Join-Path ([System.IO.Path]::GetTempPath()) ("t9ps51_pm2_" + [guid]::NewGuid().ToString('N').Substring(0, 12))
+  New-Item -ItemType Directory -Path $hygieneDir | Out-Null
+  try {
+    # -Encoding ASCII pins the fixture bytes deterministically regardless of the host's
+    # Set-Content default encoding (which varies across 5.1 configurations).
+    $hygieneFixture = Join-Path $hygieneDir 'pm2-fixture.mjs'
+    Set-Content -Path $hygieneFixture -Encoding ASCII -Value @'
+#!/usr/bin/env node
+if (process.argv[2] !== 'jlist') process.exit(2)
+process.stdout.write(process.env.T9_PS51_JLIST || '')
+'@ -NoNewline
+    # A FUNCTION shim (not a PATH .cmd): PowerShell resolves functions ahead of external commands
+    # and without PATH-cache refresh semantics, which differ between WinPS 5.1 and pwsh — the
+    # runner's own `& pm2` call inside Get-Pm2Sample resolves to this shim deterministically.
+    $script:T9Ps51HygieneFixture = $hygieneFixture
+    function script:pm2 {
+      param([Parameter(ValueFromRemainingArguments = $true)][string[]]$Pm2Args)
+      & node $script:T9Ps51HygieneFixture @Pm2Args
+    }
+    try {
+      $env:T9_PS51_JLIST = '[{"name":"metasheet-backend","pm2_env":{"status":"online","restart_time":3,"pm_uptime":1000,"env":{"Path":"first","PATH":"second","metasheet_admin_token":"LEAKED-PS51-9911"}}}]'
+      $leakSample = Get-Pm2Sample
+      if ($null -eq $leakSample) {
+        # Values-free localization (exit codes / lengths / redacted first-line only — never payloads).
+        $helperPath = Join-Path $opsDir 'stock-preparation-pm2-sample.mjs'
+        $shimRaw = (& pm2 jlist 2>$null); $shimExit = $LASTEXITCODE
+        $directRaw = ($env:T9_PS51_JLIST | & node $helperPath 'METASHEET_ADMIN_TOKEN' 2>$null); $directExit = $LASTEXITCODE
+        $directErr = ''
+        try { $directErr = (($env:T9_PS51_JLIST | & node $helperPath 'METASHEET_ADMIN_TOKEN' 2>&1 1>$null) | Out-String) } catch { $directErr = "thrown:$($_.Exception.GetType().Name)" }
+        $directErr = ($directErr -replace 'LEAKED-PS51-9911', '<REDACTED>')
+        if ($directErr.Length -gt 200) { $directErr = $directErr.Substring(0, 200) }
+        # Owner-prescribed values-free PAYLOAD probes: byte count, BOM/NUL booleans, utf8 decode +
+        # JSON.parse verdicts (raw vs BOM-stripped), target entry count and counter-type booleans.
+        $probeFixture = Join-Path $hygieneDir 'payload-probe.mjs'
+        Set-Content -Path $probeFixture -Encoding ASCII -Value @'
+import fs from "node:fs"
+const buf = fs.readFileSync(0)
+const text = buf.toString("utf8")
+const out = {
+  byteLen: buf.length,
+  bomPrefix: buf.length >= 3 && buf[0] === 0xEF && buf[1] === 0xBB && buf[2] === 0xBF,
+  hasNul: buf.includes(0),
+  firstByteHex: buf.length ? buf[0].toString(16) : "empty",
+}
+let rawOk = false, strippedOk = false, targetCount = -1, countersOk = false
+try { JSON.parse(text); rawOk = true } catch {}
+try {
+  const parsed = JSON.parse(text.replace(/^\uFEFF/, ""))
+  strippedOk = true
+  const matches = Array.isArray(parsed) ? parsed.filter((entry) => entry && entry.name === "metasheet-backend") : []
+  targetCount = matches.length
+  const env = matches[0] && matches[0].pm2_env
+  countersOk = Boolean(env) && Number.isSafeInteger(env.restart_time) && Number.isSafeInteger(env.pm_uptime)
+} catch {}
+out.parseRawOk = rawOk; out.parseBomStrippedOk = strippedOk; out.targetCount = targetCount; out.countersOk = countersOk
+console.log(Object.entries(out).map(([k, v]) => k + "=" + v).join(" "))
+'@ -NoNewline
+        $payloadProbe = ($env:T9_PS51_JLIST | & node $probeFixture 2>$null); $probeExit = $LASTEXITCODE
+        $evtProbe = ('hello' | & node -e "let r='';process.stdin.on('data',d=>r+=d).on('end',()=>console.log('EVT='+r.length))" 2>$null); $evtExit = $LASTEXITCODE
+        Write-Host ("  DIAG ps51-hygiene: helperExists=" + (Test-Path -LiteralPath $helperPath) + " shimExit=$shimExit shimLen=" + ("$shimRaw").Length + " directExit=$directExit directLen=" + ("$directRaw").Length + " evt=[$evtProbe/$evtExit]")
+        Write-Host ("  DIAG ps51-payload: [" + $payloadProbe + "] probeExit=$probeExit")
+        Write-Host ("  DIAG ps51-hygiene stderr: [" + $directErr.Trim() + "]")
+      }
+      Check 'ps51 hygiene: case-variant admin token projects to adminTokenNonEmpty=true through the 5.1 pipeline' (
+        $null -ne $leakSample -and $leakSample.adminTokenNonEmpty -eq $true -and $leakSample.authTokenNonEmpty -eq $false
+      )
+      $leakVerdict = Test-Pm2TokenHygieneSample $leakSample
+      Check 'ps51 hygiene: leaked sample fails closed with the dedicated coarse reason' (
+        (-not $leakVerdict.ok) -and $leakVerdict.reason -eq 'PM2_ENV_METASHEET_ADMIN_TOKEN_NONEMPTY'
+      )
+      $env:T9_PS51_JLIST = '[{"name":"metasheet-backend","pm2_env":{"status":"online","restart_time":3,"pm_uptime":1000,"env":{"Path":"first","PATH":"second"}}}]'
+      $cleanSample = Get-Pm2Sample
+      $cleanVerdict = Test-Pm2TokenHygieneSample $cleanSample
+      Check 'ps51 hygiene: clean env parses and passes under 5.1' (
+        $null -ne $cleanSample -and $cleanSample.adminTokenNonEmpty -eq $false -and $cleanVerdict.ok
+      )
+      Check 'ps51 hygiene: stale projection without booleans fails closed' (
+        (Test-Pm2TokenHygieneSample ([pscustomobject]@{ state = 'online'; restartTime = 3; uptime = 1000 })).reason -eq 'hygiene_fields_missing'
+      )
+    } finally {
+      Remove-Item Env:T9_PS51_JLIST -ErrorAction SilentlyContinue
+      Remove-Item Function:script:pm2 -ErrorAction SilentlyContinue
+    }
+  } finally {
+    Remove-Item -Recurse -Force $hygieneDir -ErrorAction SilentlyContinue
+  }
+}
+
 if ($fail -gt 0) {
   Write-Host "FAILED: $fail check(s); $pass passed"
   exit 1
