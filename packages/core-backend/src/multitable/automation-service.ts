@@ -33,6 +33,7 @@ import {
 } from './automation-inbound-webhook'
 import { isValidIanaTimeZone } from './automation-timezone'
 import { isDurableDeliveryEnabled } from './automation-durable-delivery'
+import { enqueueRecordEventIfDurable, emitRecordEventIfLegacy } from './automation-producer-emit'
 import { claimEventFiresLease, markEventFiresDone } from './automation-event-fires-lease'
 
 /** S6 event-delivery lease window: long enough to cover a normal executeRule, short enough that a crashed
@@ -2955,6 +2956,15 @@ export class AutomationService {
       missingMessage?: string
     },
   ): Promise<boolean> {
+    // P1#2 REPLACE — build the chaining-event payload ONCE (stable `_eventId`) so the same-txn durable enqueue
+    // (inside the txn, flag ON) and the legacy post-commit emit (flag OFF) carry the same event identity.
+    const chainEventPayload = withAutomationEventId({
+      sheetId,
+      recordId,
+      changes: patch,
+      actorId: opts.chainActorId,
+      _automationDepth: opts.automationDepth,
+    })
     const wrote = await this.withTransaction(sheetId, async (query) => {
       const lockRes = await query(
         'SELECT locked, locked_by, created_by FROM meta_records WHERE id = $1 AND sheet_id = $2',
@@ -2990,17 +3000,27 @@ export class AutomationService {
           snapshot: normalizeJson(updatedRow.data),
         })
       }
+      // P1#2 REPLACE: same-transaction durable enqueue on the SUCCESS path (flag ON) — atomic with the
+      // writeback UPDATE + revision. A rollback (locked / gone target throws or returns false above) enqueues
+      // nothing by construction. Flag OFF ⇒ no-op (the legacy emit below fires instead).
+      await enqueueRecordEventIfDurable(
+        {
+          isTransaction: true,
+          query: async (sql, params) => {
+            const r = await query(sql, params)
+            return { rows: (r.rows ?? []) as Array<Record<string, unknown>>, rowCount: r.rowCount ?? null }
+          },
+        },
+        'multitable.record.updated',
+        chainEventPayload,
+      )
       return true
     })
     if (!wrote) return false
 
-    this.eventBus.emit('multitable.record.updated', withAutomationEventId({
-      sheetId,
-      recordId,
-      changes: patch,
-      actorId: opts.chainActorId,
-      _automationDepth: opts.automationDepth,
-    }))
+    // P1#2 REPLACE: flag OFF ⇒ legacy post-commit emit (byte-identical); flag ON ⇒ SUPPRESSED (the same-txn
+    // enqueue above is the delivery path — keep-both would double-deliver the non-idempotent webhook sink).
+    emitRecordEventIfLegacy(this.eventBus, 'multitable.record.updated', chainEventPayload)
     try {
       publishMultitableSheetRealtime({
         spreadsheetId: sheetId,

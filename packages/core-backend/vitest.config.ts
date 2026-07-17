@@ -267,6 +267,9 @@ export default defineConfig({
       // P1#1 approval-bridge LEASE claim/reclaim runtime crash matrix (terminal-early removal): real DB.
       // Excluded here so it cannot skip-green, whole-file wired into plugin-tests.yml's attendance real-DB step.
       'tests/integration/multitable-automation-approval-bridge-lease-realdb.test.ts',
+      // P1#2 producer REPLACE seam same-txn goldens (enqueueRecordEventIfDurable commit/rollback/off): real DB.
+      // Excluded here so it cannot skip-green, whole-file wired into plugin-tests.yml's attendance real-DB step.
+      'tests/integration/multitable-automation-producer-emit-realdb.test.ts',
       // F9 owner CHANGES-REQUESTED (GF9-1/GF9-2): multitable_attachments blob_purged_at migration +
       // deleteAttachmentBinary index-free delete + sweepMultitableAttachmentBlobPurge compensating-sweep
       // matrix, same shape/rationale as the F5 entry immediately above (DATABASE_URL-gated describeDb,
