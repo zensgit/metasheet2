@@ -260,6 +260,10 @@ export default defineConfig({
       // S6 event_fires LEASE claim/reclaim (window-2 fix): isolated-schema real DB. Excluded here so it cannot
       // skip-green, whole-file wired into the attendance real-DB step in plugin-tests.yml.
       'tests/integration/multitable-automation-event-fires-lease-realdb.db.test.ts',
+      // P1#1 approval-bridge terminal→lease UPGRADE migration (existing rows keep status; new lease columns):
+      // isolated-schema real UPGRADE path. Excluded here so it cannot skip-green, whole-file wired into
+      // plugin-tests.yml's attendance real-DB step.
+      'tests/integration/multitable-automation-approval-bridge-lease-migration.db.test.ts',
       // F9 owner CHANGES-REQUESTED (GF9-1/GF9-2): multitable_attachments blob_purged_at migration +
       // deleteAttachmentBinary index-free delete + sweepMultitableAttachmentBlobPurge compensating-sweep
       // matrix, same shape/rationale as the F5 entry immediately above (DATABASE_URL-gated describeDb,
