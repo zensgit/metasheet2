@@ -41,7 +41,12 @@ try {
 }
 
 try {
-  const processes = JSON.parse(raw)
+  // Windows PowerShell 5.1 pipes strings to native stdin through the console host, which HARD-WRAPS
+  // at the console buffer width - a CRLF can land in the middle of any JSON token (observed on the
+  // CI windows arm: short probes survive, a 176-char payload does not). Valid JSON cannot contain a
+  // raw CR/LF inside a string literal and no two JSON tokens are delimited by whitespace alone, so
+  // stripping every raw CR/LF provably reconstructs a parseable document.
+  const processes = JSON.parse(raw.replace(/[\r\n]+/g, ''))
   if (!Array.isArray(processes)) throw new Error('invalid_shape')
 
   const matches = processes.filter((entry) => entry?.name === APP_NAME)
