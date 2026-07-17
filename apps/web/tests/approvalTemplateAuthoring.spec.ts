@@ -1127,10 +1127,24 @@ describe('TemplateAuthoringView', () => {
     await flushUi()
     expect(container!.querySelectorAll('[data-testid="approval-graph-node-row"]').length).toBe(rowsBefore + 1) // a new approval node appeared
 
+    // P1 fix (review #4433 F1): the added branch seeds an INCOMPLETE starter rule — saving as-is
+    // is BLOCKED (an empty/unconfigured branch must never publish and capture all traffic).
+    ;(container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement).click()
+    await flushUi()
+    expect(updateTemplateSpy).not.toHaveBeenCalled()
+
+    // Configure the new branch's rule field, then save persists the new structure.
+    const ruleFields = container!.querySelectorAll('[data-testid="approval-condition-rule-field"]')
+    const newRuleField = ruleFields[ruleFields.length - 1] as HTMLSelectElement
+    newRuleField.value = 'amount'
+    newRuleField.dispatchEvent(new Event('change'))
+    await flushUi()
     ;(container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement).click()
     await flushUi()
     const payload = updateTemplateSpy.mock.calls[0]?.[1] as any
-    expect(payload.approvalGraph.nodes.find((n: any) => n.key === 'cond_1').config.branches).toHaveLength(2) // the added branch is saved
+    const branches = payload.approvalGraph.nodes.find((n: any) => n.key === 'cond_1').config.branches
+    expect(branches).toHaveLength(2) // the added branch is saved
+    expect(branches[1].rules[0].fieldId).toBe('amount') // …with its configured rule, never rules: []
   })
 
   it('promotes a blank linear template into graph authoring when a condition gateway is inserted', async () => {
@@ -1355,6 +1369,18 @@ describe('TemplateAuthoringView', () => {
     ;(container!.querySelector('[data-testid="approval-canvas-add-condition-cond_1"]') as HTMLButtonElement).click()
     await flushUi()
     expect(container!.querySelectorAll('[data-testid="approval-canvas-node"]').length).toBe(before + 1) // new node on canvas
+    // P1 fix (review #4433 F1): the canvas-added branch seeds an INCOMPLETE starter rule too —
+    // configure it in the list view before the save can go through (empty branch never saves clean).
+    ;(container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement).click()
+    await flushUi()
+    expect(updateTemplateSpy).not.toHaveBeenCalled()
+    ;(container!.querySelector('[data-testid="approval-view-list"]') as HTMLButtonElement).click()
+    await flushUi()
+    const ruleFields = container!.querySelectorAll('[data-testid="approval-condition-rule-field"]')
+    const newRuleField = ruleFields[ruleFields.length - 1] as HTMLSelectElement
+    newRuleField.value = 'amount'
+    newRuleField.dispatchEvent(new Event('change'))
+    await flushUi()
     ;(container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement).click()
     await flushUi()
     const payload = updateTemplateSpy.mock.calls[0]?.[1] as any

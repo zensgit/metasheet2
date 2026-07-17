@@ -305,8 +305,12 @@ export function removeParallelBranch(graph: ApprovalGraph, parallelNodeKey: stri
 
 /**
  * Add a condition branch: a fresh edge from `conditionNodeKey` to a new approval target, plus a new
- * `branches[]` entry (empty rules — the admin fills the rule via the G-2 editor). The new target then
- * flows to the nearest node reachable from every existing condition path.
+ * `branches[]` entry seeded with the SAME deliberately-incomplete starter rule as
+ * `insertConditionGateway` — the authoring validator blocks save until the admin selects a real form
+ * field. An EMPTY rules array would be far worse than incomplete: the runtime evaluates a rules-mode
+ * branch as `rules.every(...)`, which is vacuously TRUE over `[]`, so an empty branch would silently
+ * capture ALL traffic (first-match-wins) and dead-code the default edge. The new target then flows
+ * to the nearest node reachable from every existing condition path.
  */
 export function addConditionBranch(graph: ApprovalGraph, conditionNodeKey: string, name = '条件分支'): ApprovalGraph {
   const node = graph.nodes.find((n) => n.key === conditionNodeKey)
@@ -325,7 +329,20 @@ export function addConditionBranch(graph: ApprovalGraph, conditionNodeKey: strin
   const rejoinEdge = uniqueKey('edge', eKeys)
   const newNode: ApprovalNode = { key: newNodeKey, type: 'approval', name, config: defaultApprovalConfig() }
   return {
-    nodes: graph.nodes.map((n) => (n.key === conditionNodeKey ? { ...clone(n), config: { ...config, branches: [...config.branches, { edgeKey: branchEdge, rules: [] }] } } : clone(n))).concat([newNode]),
+    nodes: graph.nodes.map((n) => (n.key === conditionNodeKey
+      ? {
+          ...clone(n),
+          config: {
+            ...config,
+            branches: [
+              ...config.branches,
+              // Mirrors insertConditionGateway's starter EXACTLY: an incomplete rule the validator
+              // rejects (需要选择字段) — never `rules: []`, which the runtime would match-all.
+              { edgeKey: branchEdge, conjunction: 'and' as const, rules: [{ fieldId: '', operator: 'eq' as const, value: '' }] },
+            ],
+          },
+        }
+      : clone(n))).concat([newNode]),
     edges: [
       ...graph.edges.map(clone),
       { key: branchEdge, source: conditionNodeKey, target: newNodeKey },
