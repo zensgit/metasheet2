@@ -9,8 +9,9 @@
  * raw-config claim identity. So the RAW fingerprint is captured at execution time and stored here (it is a
  * one-way sha256 of the action identities — no business values, safe to store un-redacted).
  *
- * Nullable: executions that ran BEFORE this column existed have none; the retry guard fails CLOSED on a
- * missing fingerprint (cannot prove the rule is unchanged → refuse), per the lock's missing-input doctrine.
+ * Nullable: executions that ran BEFORE this column existed have none; for them the retry guard is SKIPPED
+ * (rollout-safe / non-regressing) — a missing fingerprint means "cannot check", NOT a refusal, so every
+ * pre-column execution stays retryable. The guard only fires when a fingerprint IS present and differs.
  * Additive only; nothing reads it until the executor/retry wiring lands with it.
  */
 import { sql, type Kysely } from 'kysely'
