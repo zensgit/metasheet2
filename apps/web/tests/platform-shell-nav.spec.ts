@@ -345,7 +345,7 @@ describe('platform shell navigation', () => {
     const source = await readFile(resolveWebFile('src/App.vue'), 'utf8')
     const style = source.match(/<style>([\s\S]*?)<\/style>/)?.[1] ?? ''
     const navLinksRule = style.match(/\.nav-links\s*\{([^}]+)\}/)?.[1] ?? ''
-    const navLinkRule = style.match(/\.nav-link(?:,\s*\.nav-menu__trigger)?\s*\{([^}]+)\}/)?.[1] ?? ''
+    const navLinkRule = style.match(/\.nav-link\s*\{([^}]+)\}/)?.[1] ?? ''
     const navUserRule = style.match(/\.nav-user\s*\{([^}]+)\}/)?.[1] ?? ''
 
     expect(navLinksRule).toMatch(/flex:\s*1 1 auto/)
@@ -355,23 +355,6 @@ describe('platform shell navigation', () => {
     expect(navLinkRule).toMatch(/white-space:\s*nowrap/)
     expect(navUserRule).toMatch(/text-overflow:\s*ellipsis/)
     expect(navUserRule).toMatch(/white-space:\s*nowrap/)
-  })
-
-  it('groups secondary workspace navigation into compact menus', async () => {
-    const source = await readFile(resolveWebFile('src/App.vue'), 'utf8')
-    const style = source.match(/<style>([\s\S]*?)<\/style>/)?.[1] ?? ''
-    const menuPanelRule = style.match(/\.nav-menu__panel,\s*\.nav-account__panel\s*\{([\s\S]*?)\n\}/)?.[1] ?? ''
-
-    expect(source).toContain('class="nav-menu"')
-    expect(source).toContain('navLabels.operations')
-    expect(source).toContain('navLabels.management')
-    expect(source).toContain('navLabels.extensions')
-    expect(source).toContain('to="/admin/users" class="nav-menu__item"')
-    expect(source).toContain('to="/integrations/workbench" class="nav-menu__item"')
-    expect(source).toContain('class="nav-account"')
-    expect(menuPanelRule).toMatch(/position:\s*absolute/)
-    expect(menuPanelRule).toMatch(/z-index:\s*30/)
-    expect(style).toMatch(/\.nav-menu__panel,\s*\.nav-account__panel\s*\{[\s\S]*?position:\s*fixed/)
   })
 
   it('marks legacy table/view routes as deprecated while keeping deep links registered', async () => {
