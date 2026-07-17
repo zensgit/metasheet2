@@ -288,10 +288,15 @@ export async function runApprovedSourcePrelude({ salt, args, req, must, summary,
   // Owner review P3: a failed first call already fails the run — do NOT keep reading the external
   // source or risk creating internal rows with a second call.
   if (!createdOk) return prelude
-  must('approved-source run keeps every external-write invariant false',
+  // Owner re-review (2026-07-17): the SAME stop applies when the create looked right but the
+  // external-write evidence is tainted — a 201 with externalWriteExecuted=true is a failed
+  // acceptance, and a failed acceptance never replays.
+  const externalWriteClean =
     data.evidence?.externalWriteExecuted === false && data.evidence?.productionWrite === false &&
-    data.evidence?.k3SaveSubmitAudit === false && data.evidence?.plmExternalWrite === false,
+    data.evidence?.k3SaveSubmitAudit === false && data.evidence?.plmExternalWrite === false
+  must('approved-source run keeps every external-write invariant false', externalWriteClean,
     `http=${sourceRun.status}`)
+  if (!externalWriteClean) return prelude
   const replay = await req(`${API}/mvp/source-runs/plm-bom`, {
     method: 'POST', body: prelude.body, accept: [200], label: 'approved-source-run-replay',
   })

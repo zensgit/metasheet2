@@ -316,13 +316,15 @@ test('prelude run: a replay that hard-claims an internal write FAILS the replay 
   assert.equal(checks[2].ok, false, 'the internal_noop replay check must fail')
 })
 
-test('prelude run: any external-write evidence flips the invariant check to FAIL', async () => {
+test('prelude run: any external-write evidence flips the invariant check to FAIL and STOPS the replay', async () => {
   const tainted = approvedCreateResponse()
   tainted.body.data.evidence.externalWriteExecuted = true
-  const { req } = scriptedReq([tainted, approvedReplayResponse()])
+  const { calls, req } = scriptedReq([tainted, approvedReplayResponse()])
   const { checks, must } = collectMust()
   await runApprovedSourcePrelude({ salt: 't123', args: PRELUDE_ARGS, req, must, summary: {}, registerSentinels: () => {} })
   assert.equal(checks[1].ok, false, 'the externalWrite invariant check must fail')
+  assert.equal(checks.length, 2, 'a tainted acceptance records no replay check')
+  assert.equal(calls.length, 1, 'a tainted acceptance never replays (owner re-review)')
 })
 
 

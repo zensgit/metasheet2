@@ -80,7 +80,7 @@ POST /api/integration/stock-preparation/mvp/source-runs/plm-bom   (admin)
 - `stock-preparation-mvp-postdeploy-smoke.test.mjs`：`tests 26 / pass 26 / fail 0`（逐字）。
 - PowerShell 契约/行为面（pwsh 7.6.2, macOS）：contract `ALL CONTRACT CHECKS PASS`；behavior `ALL 40 BEHAVIOURAL CHECKS PASS`；ps51 套件 11/12——唯一 FAIL 是「host 必须为 Windows PowerShell 5.1 Desktop」的环境守卫（macOS 上结构性不可满足；该套件的目标环境是 CI `windows-latest` 步骤，见 `plugin-tests.yml` 的 PS 5.1 arm）。
 - core-backend `tsc --noEmit` exit 0。
-- T4-final harness（#4402）：prep-line smoke 契约测试 18/18（10 基线 + 8 新行为测试，经可注入 `req/must/registerSentinels` 驱动——happy path、dry_run(flag OFF)必败且**不再 replay**、replay 谎报写入必败、外写证据污染必败、steering-free 请求、哨兵注册契约必需即抛；另以**真实 `requestJson` + 注入 `fetchImpl`** 钉住 `x-tenant-id` 上线——owner 复审 P2 指出此前测试全走 scripted req、真实 header 组装从未被执行）；W6 冻结面零改动且其测试仍 26/0；两 PR（#4398/#4402）均经独立 Opus 对抗审阅（APPROVE，0 P1 / 0 P2；#4402 的 P3-1 hardening 当场闭合）。
+- T4-final harness（#4402）：prep-line smoke 契约测试 19/19（10 基线 + 9 新行为测试，含 buildRequestDefaults 透传钉与外写污染即停，经可注入 `req/must/registerSentinels` 驱动——happy path、dry_run(flag OFF)必败且**不再 replay**、replay 谎报写入必败、外写证据污染必败、steering-free 请求、哨兵注册契约必需即抛；另以**真实 `requestJson` + 注入 `fetchImpl`** 钉住 `x-tenant-id` 上线——owner 复审 P2 指出此前测试全走 scripted req、真实 header 组装从未被执行）；W6 冻结面零改动且其测试仍 26/0；两 PR（#4398/#4402）均经独立 Opus 对抗审阅（APPROVE，0 P1 / 0 P2；#4402 的 P3-1 hardening 当场闭合）。
 
 ### 5.2 真库（本地 PostgreSQL，CI 同款 MIGRATION_EXCLUDE 迁移）
 `stock-preparation-t3b-plm-autopersist-realdb.test.ts`（新，走**真 route handler + 真 provisioning/records**，物理 fieldId 从 `meta_fields` 交叉核对、拒绝逻辑 id 自证）4/4：
