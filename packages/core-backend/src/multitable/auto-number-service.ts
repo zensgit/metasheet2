@@ -1,5 +1,9 @@
 import { normalizeAutoNumberProperty } from './auto-number-property'
-import { acquireCanonicalSheetFence } from './canonical-sheet-fence'
+import {
+  acquireCanonicalSheetFence,
+  assertNoActiveWriterBlock,
+  isWriterFenceEnabled,
+} from './canonical-sheet-fence'
 import type { MultitableField } from './field-codecs'
 
 export type AutoNumberQuery = (
@@ -81,7 +85,16 @@ export async function backfillAutoNumberField(
   opts?: { overwrite?: boolean },
 ): Promise<BackfillAutoNumberFieldResult> {
   const config = normalizeAutoNumberProperty(property)
+  // W0-1 L4cov (close the auto-number-backfill PARTIAL gap — L4 map's auto-number-service.ts:84). The canonical
+  // sheet fence stays UNCONDITIONAL: it is the CREATE-FIELD-backfill-vs-record-create serialization lock (see
+  // the concurrency-safety note below), so gating it behind the L4 flag would regress that guarantee when the
+  // flag is off; the module's flag-off-parity contract also keeps backfill an unconditional fence caller. The
+  // durable recovery-block check is then flag-gated (flag-off ⇒ byte-identical: fence taken, block ignored) —
+  // with the flag ON this is exactly `fenceWriterEntry`'s fence-then-check, so a backfill that begins while a
+  // recovery holds an `applying`/`fencing`/`paused_retryable` block on this sheet refuses instead of slipping
+  // past it (the gap GX2 exposed).
   await acquireCanonicalSheetFence(query, sheetId)
+  if (isWriterFenceEnabled()) await assertNoActiveWriterBlock(query, sheetId)
   await acquireFieldLock(query, sheetId, fieldId)
 
   // Single UPDATE assigns sequential values to all eligible records via

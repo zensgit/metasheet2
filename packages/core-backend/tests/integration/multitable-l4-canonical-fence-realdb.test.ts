@@ -16,28 +16,41 @@
  * every writer onto ONE canonical fence and, for multi-transaction recoveries, a DURABLE block committed
  * under that fence. The goldens below are FENCE-BEFORE-CHECK behavioral proofs, not source-text assertions.
  *
- * FENCED vs PARTIAL vs UNFENCED (verified against the impl on this branch — see the lane report):
+ * FENCED vs DEFERRED vs UNFENCED (verified against the impl on this branch + the stacked L4-coverage lane —
+ * see the lane report). The three formerly-PARTIAL families and the in-txn config-restore record writers are
+ * now FULLY FENCED by the L4-coverage lane (`multitable-l4cov-univer-meta-writers-realdb.test.ts`):
  *   FULLY FENCED (advisory fence + durable-block refusal): REST create/patch/delete/restore, bulk/AI/OAPI
  *       patch (RecordWriteService), plugin patch, plugin recoverable delete, attachment cell-strip, HTTP
  *       lock/unlock, revert-execute (durable block, now also the recovery-only PIT lock — P2 follow-up),
  *       reset-execute (fence + durable-block refusal via `fenceWriterEntry` — P2 follow-up; previously
  *       fence-first only, with NO block-check, so a reset begun during revert's released-fence apply window
- *       slipped past its committed `applying` block — see RXR1/RXR2 below).
- *   PARTIAL (advisory canonical fence for seq-ordering, but NO durable-block check ⇒ slips past a
- *       multi-txn `applying` recovery): plugin create (records.ts:592), auto-number backfill
- *       (auto-number-service.ts:84), form-submit create/edit (univer-meta.ts:14585). GX1/GX2 EXPOSE this.
- *   UNFENCED entirely (no canonical fence at all — the residual bug class): automation
- *       update/create/delete/lock (automation-executor.ts), approval resultWriteback
+ *       slipped past its committed `applying` block — see RXR1/RXR2 below);
+ *       — added by L4-coverage — plugin create (records.ts::createRecord), auto-number backfill
+ *       (auto-number-service.ts::backfillAutoNumberField), form-submit create/edit (univer-meta.ts submit),
+ *       and config-restore-execute record writes: un-create (dropFieldCascade column strip), undelete
+ *       (recreateFieldFromConfig), lossy retype-revert (applyLossyRetypeCellRewrite — the seq-ALLOCATING one,
+ *       one recordRecordRevision per cell). The three formerly-PARTIAL families keep their pre-existing
+ *       UNCONDITIONAL canonical fence (the auto-number allocation-serialization lock) and gained a FLAG-GATED
+ *       block-check, so flag-off is byte-identical (fence taken, block ignored). GX1/GX2 below, which used to
+ *       assert those families PROCEED under a block, are flipped to assert REFUSAL.
+ *   ANALYZED → DEFERRED (documented, NOT force-fenced): the POST-COMMIT derived-value recompute
+ *       (univer-meta.ts relation-agg materialization @≈2973 / fan-out @≈3869 + formula-engine.ts
+ *       recalculateRecordFromData) runs on a fresh pool connection AFTER the fenced write txn commits, but every
+ *       one of those writes is an in-place `UPDATE meta_records SET data` with NO revision and NO `seq`
+ *       allocation — so it does NOT breach the non-causal-`seq` hole this fence protects; a fence there would be
+ *       behavior-changing (see the L4-cov §C write-up). Also deferred: people/seed presets
+ *       (ensurePeopleSheetPreset / createSeededSheet) — revision-exempt system/scaffold writes, no `seq`, sheet
+ *       resolved mid-txn / created at sheet-birth (no possible active recovery to observe).
+ *   UNFENCED entirely → L4-cov-services follow-up (no canonical fence at all — the residual bug class):
+ *       automation update/create/delete/lock (automation-executor.ts), approval resultWriteback
  *       (automation-service.ts), formula-engine recompute (formula-engine.ts), approval-record projection
- *       (approval-record-projection-service.ts), post-commit derived-value recompute (univer-meta.ts:2973 /
- *       :3869), config-restore-execute record writes (univer-meta.ts:6171 / :6449 / :6555), people/seed
- *       presets (:5188 / :5825), field-undelete rehydration (flag HOLD), plugin delete's NON-transactional
- *       flag-off branch (records.ts:852, disclosed in-code as an "L4-SEAM" — `deleteRecordWithRecoverability`
- *       right above it in the same file IS fenced via `fenceWriterEntry`, but the D-1 flag-off `deleteRecord`
- *       branch cannot hold a txn-scoped advisory lock without the transaction wrap that path deliberately
- *       lacks — §1.9 byte-identity keeps it as the D-1 code verbatim). Enumerated in the report; behavioral
- *       exposure of these is deferred (their end-to-end harnesses are heavy) — see GX3 for the design of the
- *       exposure, driven for the two cheap, high-signal PARTIAL families here.
+ *       (approval-record-projection-service.ts), field-undelete tombstone inbound-replay rehydration (4c-3, flag
+ *       HOLD — distinct from the config-restore config-undelete branch, which IS fenced: see l4cov B7), plugin delete's
+ *       NON-transactional flag-off branch (records.ts, disclosed in-code as an "L4-SEAM" —
+ *       `deleteRecordWithRecoverability` right above it IS fenced via `fenceWriterEntry`, but the D-1 flag-off
+ *       `deleteRecord` branch cannot hold a txn-scoped advisory lock without the transaction wrap that path
+ *       deliberately lacks — §1.9 byte-identity keeps it as the D-1 code verbatim). Enumerated in the report;
+ *       these service-file families are left untouched here to avoid cross-lane collision.
  *
  * P2-C hygiene (v3.7): every seq comparison uses EXACT bigint (BigInt(), never Number()/parseInt/+/-); this
  * file NEVER calls `setval` on the shared `meta_record_chain_seq`; all fixtures are isolated synthetic rows
@@ -339,36 +352,38 @@ describeIfDatabase('W0-1 L4 — all-writer canonical fence (real DB)', () => {
     expect(await recordExists(R)).toBe(true)
   })
 
-  // ── §X — GAP EXPOSURE. These families take the canonical advisory fence (for seq-ordering) but do NOT
-  //         perform the durable-block check, so with the flag ON and an `applying` block they PROCEED —
-  //         slipping past a multi-txn recovery. The positive control (F1: REST create) REFUSES the same
-  //         block, so this is a genuine ASYMMETRY, not a flag/plumbing artifact. When the impl closes the
-  //         gap (adds `assertNoActiveWriterBlock` to these entries), these two goldens flip RED — convert
-  //         them to `rejects.toBeInstanceOf(SheetWriterBlockedError)` at that point.
-  test('GX1 [plugin create — PARTIAL] records.createRecord PROCEEDS under an applying block (no durable-block check) — asymmetric with F1', async () => {
+  // ── §X — the former GAP, now CLOSED by the L4-coverage lane. These families took the canonical advisory
+  //         fence (for seq-ordering) but omitted the durable-block check, so with the flag ON and an
+  //         `applying` block they PROCEEDED — slipping past a multi-txn recovery (the ASYMMETRY vs F1 REST
+  //         create, which always refused). L4-cov added the flag-gated `assertNoActiveWriterBlock` AFTER the
+  //         (still-UNCONDITIONAL, byte-identical-when-off) canonical fence, so they now REFUSE symmetrically
+  //         with F1. These goldens were flipped from "PROCEEDS" to "refuses" exactly as this header foretold.
+  //         (Fuller per-writer wiring/flag-off/race goldens live in
+  //         `multitable-l4cov-univer-meta-writers-realdb.test.ts`.)
+  test('GX1 [plugin create] records.createRecord REFUSES under an applying block (fence + flag-gated block-check) — now symmetric with F1', async () => {
     process.env[FLAG] = 'true'
     await setBlock('applying')
-    const created = await poolManager.get().transaction(async ({ query }) =>
-      pluginCreateRecord({ query: query as never, sheetId: SHEET, data: { [F_STR]: 'plugin-created-during-recovery' } }),
-    )
-    // The gap: an insert landed on a sheet a recovery has durably blocked. (F1 proves REST create refuses.)
-    expect((created as { id: string }).id).toBeTruthy()
-    expect(await recordExists((created as { id: string }).id)).toBe(true)
-    // The block itself is untouched — the writer neither observed nor cleared it.
-    expect(await readBlock()).toBe('applying')
-    await q('DELETE FROM meta_records WHERE id = $1', [(created as { id: string }).id]).catch(() => {})
+    const before = (await q('SELECT count(*)::int AS n FROM meta_records WHERE sheet_id=$1', [SHEET])).rows[0] as { n: number }
+    await expect(
+      poolManager.get().transaction(async ({ query }) =>
+        pluginCreateRecord({ query: query as never, sheetId: SHEET, data: { [F_STR]: 'plugin-created-during-recovery' } }),
+      ),
+    ).rejects.toBeInstanceOf(SheetWriterBlockedError)
+    const after = (await q('SELECT count(*)::int AS n FROM meta_records WHERE sheet_id=$1', [SHEET])).rows[0] as { n: number }
+    expect(after.n).toBe(before.n) // refused BEFORE any insert
+    expect(await readBlock()).toBe('applying') // block untouched
   })
 
-  test('GX2 [auto-number backfill — PARTIAL] backfillAutoNumberField PROCEEDS under an applying block (advisory fence only, no durable-block check)', async () => {
+  test('GX2 [auto-number backfill] backfillAutoNumberField REFUSES under an applying block (fence + flag-gated block-check)', async () => {
     const R = mkRecord('gx2')
     await seedRecord(R)
     process.env[FLAG] = 'true'
     await setBlock('applying')
     const property = { prefix: '', digits: 3 }
-    // Fence acquired (advisory) but no block-check ⇒ backfill runs its UPDATE despite the recovery block.
-    const res = await backfillAutoNumberField(q as never, SHEET, F_AN, property as never, { overwrite: true })
-    expect(res).toBeTruthy()
-    expect(await readBlock()).toBe('applying') // block untouched — writer slipped past it
+    await expect(
+      backfillAutoNumberField(q as never, SHEET, F_AN, property as never, { overwrite: true }),
+    ).rejects.toBeInstanceOf(SheetWriterBlockedError)
+    expect(await readBlock()).toBe('applying') // block untouched — writer refused, never ran its UPDATE
   })
 
   // ── §P — flag-off PARITY: with the fence flag OFF, a durable block is inert; every writer behaves

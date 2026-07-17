@@ -1,6 +1,10 @@
 import { randomUUID } from 'crypto'
 import { recordRecordRevision } from './record-history-service'
-import { fenceWriterEntry } from './canonical-sheet-fence'
+import {
+  assertNoActiveWriterBlock,
+  fenceWriterEntry,
+  isWriterFenceEnabled,
+} from './canonical-sheet-fence'
 
 import {
   acquireAutoNumberSheetWriteLock,
@@ -589,7 +593,18 @@ export async function createRecord(
   input: CreateMultitableRecordInput,
 ): Promise<CreatedMultitableRecord> {
   const query = input.query
+  // W0-1 L4cov (close the plugin-create PARTIAL gap — L4 map's records.ts:592). The sheet-write fence is
+  // acquired UNCONDITIONALLY: it predates L4 as the auto-number allocation-serialization lock (it serialises
+  // record-create against CREATE-FIELD auto-number backfill — see auto-number-service.ts), so gating it behind
+  // the L4 flag would REGRESS auto-number correctness when the flag is off, and the module's flag-off-parity
+  // contract explicitly keeps plugin-create as an unconditional `acquireCanonicalSheetFence` caller. We then add
+  // — flag-gated, so flag-off stays byte-identical — the durable recovery-block check `fenceWriterEntry` runs:
+  // if a recovery holds a durable `{fencing,applying,paused_retryable}` block on this sheet, refuse with
+  // `SheetWriterBlockedError`. Net effect with the flag ON is exactly `fenceWriterEntry` (fence-then-check); the
+  // split (vs. the sibling plugin patchRecord above, which uses `fenceWriterEntry` directly) exists ONLY to
+  // preserve the pre-existing unconditional fence.
   await acquireAutoNumberSheetWriteLock(query, input.sheetId)
+  if (isWriterFenceEnabled()) await assertNoActiveWriterBlock(query, input.sheetId)
   const { fields } = await loadSheetAndFields(query, input.sheetId)
 
   const { patch, linkUpdates } = await buildNormalizedPatch(query, fields, input.data)
