@@ -15,6 +15,10 @@ integration ORDER, dependencies, and take-over discipline live in the v3.7 desig
   with **L8 based on BOTH L6-b AND L7**. Drafting may be parallel; each MERGE is serial + exact-head gated. Flags OFF.
 - **Phase C — enablement:** owner/ops-only (strict/Revert/Reset enablement, staging cutover, #4273 re-measure). Not
   autonomous. All flags stay default-OFF throughout A + B.
+- **Phase D — durable recovery archive + sheet version restore:** owner-directed roadmap addition; starts after
+  Phase B is frozen. It preserves exact recovery points beyond hot-history retention and adds whole-sheet/selected
+  record/selected-field bulk restore. PLANNED only; implementation requires its own design lock and does not change
+  current retention behavior or any flag. Authority = v3.7 lock §12.
 
 ## Live status (final, 2026-07-17 — Phase A COMPLETE on `main`)
 
@@ -122,3 +126,25 @@ this corrected status record is merged and the owner confirms** — merge order 
 attachment/marker mint-surface goldens) and **P3-2** (`recordRecordRevisionsBatch` site-2 coverage) before any
 mint-consuming flag is armed — the resolver that L6-b introduces is the first consumer of `operation_id`, so those
 surfaces stop being inert exactly when L6-b lands.
+
+## Phase D planned — durable recovery archive + sheet version restore
+
+**Status (2026-07-17): PLANNED / zero runtime / zero flag change.** The owner directed that the Time Machine roadmap
+include recovery after hot-history retention and a bulk sheet-version restore so customers do not have to recover
+records one by one. The durable contract is v3.7 lock §12; this section is only its live status pointer.
+
+Dependency boundary:
+
+> Phase B frozen on `main` (`L5-wire → L6-b → L7 → L8`) → D1 archive design lock → D2 archive-before-prune →
+> D3 recovery-point catalog → D4 archive reconstruction → D5 bulk restore → D6 UI → D7 staging evidence.
+
+The product separates **history retention** (hot event detail) from **recovery retention** (verified immutable
+archives). Hot revision/tombstone pruning may not claim post-retention recoverability unless D2 has verified the
+matching archive. The current PIT-Reset/retention conflict remains fail-closed; Phase D planning does not relax it.
+
+V1 is single-sheet and exact-operation anchored. It supports whole-sheet, selected-record, and selected-field restore;
+large restores use an idempotent asynchronous operation. Permission policy restore, cross-sheet atomicity, recovery of
+already-purged pre-archive bytes, and production enablement remain outside this planning addition.
+
+Estimated development volume after Phase B: **8–12 person-weeks**. Two isolated implementation lanes may work in
+parallel where file ownership permits, with an independent adversarial gate; merge order remains dependency-driven.
