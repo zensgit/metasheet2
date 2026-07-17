@@ -17,6 +17,7 @@
  * wiring lands with the FWB activation slice behind its own gate.
  */
 import type { Queryable } from './automation-durable-dispatcher'
+import type { TransactionalQueryable } from './pg-transaction-guard'
 import { claimActionApplied } from './automation-action-idempotency'
 import { mapApprovalFormValues, type FwbFieldMapping } from './approval-form-value-mapping'
 import { recheckFwbPermissionGates, type FwbGateChecks, type FwbGateId, type FwbGateSubject } from './approval-fwb-permission-gates'
@@ -50,9 +51,14 @@ export type FwbWriteActionResult =
   | { status: 'already_applied' }
   | { status: 'rejected'; reason: 'permission_gates' | 'mapping'; failedGates?: FwbGateId[] }
 
-/** Execute the write action INSIDE the caller's transaction. See module doc for the four-step contract. */
+/**
+ * Execute the write action INSIDE the caller's transaction. See module doc for the four-step contract.
+ * `trx` carries the TransactionalQueryable brand (post-#4336/#4340 hardening): the brand is compile-time
+ * documentation only — the REAL enforcement is `claimActionApplied`'s pg_current_xact_id probe, which
+ * rejects any pool/autocommit handle at runtime regardless of the brand.
+ */
 export async function executeWriteApprovalFormValues(
-  trx: Queryable,
+  trx: TransactionalQueryable,
   input: FwbWriteActionInput,
   gates: FwbGateChecks,
   seam: FwbRecordWriteSeam,
