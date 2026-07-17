@@ -10,6 +10,11 @@ import { useRouter } from 'vue-router'
 import { multitableClient } from '../api/client'
 import type { MetaSheet, MetaTemplate, MetaView } from '../types'
 import { AppRouteNames } from '../../router/types'
+import { useLocale } from '../../composables/useLocale'
+import {
+  templateCatalogLabel,
+  templateDefaultBaseName,
+} from '../utils/template-localization'
 
 export interface TemplateInstallSuccess {
   baseId: string
@@ -24,6 +29,7 @@ export type TemplateInstallOutcome =
 
 export function useTemplateInstall() {
   const router = useRouter()
+  const { isZh } = useLocale()
   const installingTemplateId = ref<string | null>(null)
   const errorMessage = ref('')
 
@@ -36,12 +42,12 @@ export function useTemplateInstall() {
     errorMessage.value = ''
     try {
       const result = await multitableClient.installTemplate(template.id, {
-        baseName: opts?.baseName ?? `${template.name} Base`,
+        baseName: opts?.baseName ?? templateDefaultBaseName(template, isZh.value),
       })
       const sheet = result.sheets[0]
       const view = sheet ? result.views.find((v) => v.sheetId === sheet.id) ?? result.views[0] : null
       if (!sheet || !view) {
-        errorMessage.value = '模板已创建，但默认视图尚未就绪。请刷新后重试。'
+        errorMessage.value = templateCatalogLabel('install.noView', isZh.value)
         return { status: 'installed-no-view', baseId: result.base.id }
       }
       await router.push({
@@ -54,7 +60,9 @@ export function useTemplateInstall() {
         success: { baseId: result.base.id, sheet, view },
       }
     } catch (error) {
-      const message = error instanceof Error ? error.message : '模板创建失败'
+      const message = error instanceof Error
+        ? error.message
+        : templateCatalogLabel('install.failed', isZh.value)
       errorMessage.value = message
       return { status: 'failed', error: message }
     } finally {

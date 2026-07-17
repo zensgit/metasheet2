@@ -801,6 +801,20 @@ export interface MetaTemplateSheet {
   views: MetaTemplateView[]
 }
 
+export interface MetaTemplateTranslationSheet {
+  name?: string
+  description?: string | null
+  fields?: Record<string, string>
+  views?: Record<string, string>
+}
+
+export interface MetaTemplateTranslation {
+  name?: string
+  description?: string
+  category?: string
+  sheets?: Record<string, MetaTemplateTranslationSheet>
+}
+
 export interface MetaTemplate {
   id: string
   name: string
@@ -808,6 +822,7 @@ export interface MetaTemplate {
   category: string
   icon: string
   color: string
+  translations?: Partial<Record<'zh-CN', MetaTemplateTranslation>>
   sheets: MetaTemplateSheet[]
 }
 

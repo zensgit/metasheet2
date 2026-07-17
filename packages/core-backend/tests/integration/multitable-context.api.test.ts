@@ -692,6 +692,17 @@ describe('Multitable context API', () => {
       'meeting-minutes',
       'asset-inventory',
     ])
+    expect(response.body.data.templates[0].translations['zh-CN']).toMatchObject({
+      name: '项目跟进',
+      category: '项目管理',
+      sheets: {
+        tasks: {
+          name: '任务',
+          fields: { task: '任务' },
+          views: { grid: '全部任务' },
+        },
+      },
+    })
   })
 
   test('installs a built-in template as a new base in one transaction', async () => {

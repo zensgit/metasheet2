@@ -24,6 +24,7 @@ const expectedFieldTypes = [
   'currency',
   'percent',
   'rating',
+  'duration',
   'url',
   'email',
   'phone',
@@ -128,6 +129,14 @@ test('multitable openapi stays aligned with runtime contracts', () => {
   assert.equal(
     schemas.MultitableTemplateView?.properties?.type?.$ref,
     '#/components/schemas/MultitableViewType',
+  )
+  assert.equal(
+    schemas.MultitableTemplate?.properties?.translations?.$ref,
+    '#/components/schemas/MultitableTemplateTranslations',
+  )
+  assert.equal(
+    schemas.MultitableTemplateTranslations?.properties?.['zh-CN']?.$ref,
+    '#/components/schemas/MultitableTemplateTranslation',
   )
   assert.equal(
     paths['/api/multitable/fields']?.post?.requestBody?.content?.['application/json']?.schema?.properties?.type?.$ref,

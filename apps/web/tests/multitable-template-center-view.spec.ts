@@ -1,5 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createApp, h, nextTick, type App as VueApp, type Component } from 'vue'
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
 import MultitableTemplateCenterView from '../src/views/MultitableTemplateCenterView.vue'
 import { AppRouteNames } from '../src/router/types'
 import { useLocale } from '../src/composables/useLocale'
@@ -137,6 +139,107 @@ describe('MultitableTemplateCenterView', () => {
     expect(mocks.listTemplates).toHaveBeenCalledTimes(1)
     expect(readCardNames(root)).toEqual(['Project Tracker', 'Sales CRM'])
     expect(root.querySelector('[data-testid="multitable-template-center"]')).not.toBeNull()
+  })
+
+  it('renders localized catalog content and reacts to locale changes without refetching', async () => {
+    const project = {
+      ...makeTemplate({
+        id: 'project-tracker',
+        name: 'Project Tracker',
+        description: 'Track project work.',
+        category: 'Project management',
+      }),
+      translations: {
+        'zh-CN': {
+          name: '项目跟进',
+          description: '跟踪项目工作。',
+          category: '项目管理',
+        },
+      },
+    }
+    const sales = {
+      ...makeTemplate({
+        id: 'sales-crm',
+        name: 'Sales CRM',
+        description: 'Manage customer relationships.',
+        category: 'Sales',
+      }),
+      translations: {
+        'zh-CN': {
+          name: '销售 CRM',
+          description: '管理客户关系。',
+          category: 'CRM',
+        },
+      },
+    }
+    mocks.listTemplates.mockResolvedValue({ templates: [project, sales] })
+
+    const root = mountView()
+    await flushUi()
+
+    expect(readCardNames(root)).toEqual(['项目跟进', '销售 CRM'])
+    expect(root.textContent).toContain('跟踪项目工作。')
+    expect(root.textContent).toContain('模板中心')
+
+    const searchInput = root.querySelector<HTMLInputElement>('.multitable-templates__search input')
+    if (!searchInput) throw new Error('Search input not found')
+    searchInput.value = '客户关系'
+    searchInput.dispatchEvent(new Event('input'))
+    await flushUi()
+    expect(readCardNames(root)).toEqual(['销售 CRM'])
+
+    searchInput.value = ''
+    searchInput.dispatchEvent(new Event('input'))
+    useLocale().setLocale('en')
+    await flushUi()
+
+    expect(readCardNames(root)).toEqual(['Project Tracker', 'Sales CRM'])
+    expect(root.textContent).toContain('Track project work.')
+    expect(root.textContent).toContain('Template Center')
+    expect(root.textContent).toContain('Back to multitable home')
+    expect(mocks.listTemplates).toHaveBeenCalledTimes(1)
+  })
+
+  it('uses the localized template name for the default installed workspace', async () => {
+    const project = {
+      ...makeTemplate({ id: 'project-tracker', name: 'Project Tracker' }),
+      translations: {
+        'zh-CN': {
+          name: '项目跟进',
+          description: '跟踪项目工作。',
+          category: '项目管理',
+        },
+      },
+    }
+    mocks.listTemplates.mockResolvedValue({ templates: [project] })
+    mocks.installTemplate.mockResolvedValue({
+      template: project,
+      base: { id: 'base_new', name: '项目跟进工作区' },
+      sheets: [{ id: 'sheet_new', baseId: 'base_new', name: 'Tasks' }],
+      fields: [],
+      views: [{ id: 'view_new', sheetId: 'sheet_new', name: 'Grid', type: 'grid' }],
+    })
+
+    const root = mountView()
+    await flushUi()
+    findButton(root, '使用模板').click()
+    await flushUi()
+
+    expect(mocks.installTemplate).toHaveBeenCalledWith('project-tracker', {
+      baseName: '项目跟进工作区',
+    })
+  })
+
+  it('keeps translated hero and search copy readable at narrow widths', () => {
+    const source = readFileSync(
+      join(__dirname, '../src/views/MultitableTemplateCenterView.vue'),
+      'utf8',
+    )
+
+    expect(source).toMatch(/@media \(max-width: 640px\)/)
+    expect(source).toMatch(/\.multitable-templates__hero\s*{\s*flex-direction: column;/)
+    expect(source).toMatch(/\.multitable-templates__search\s*{[^}]*flex-direction: column;/s)
+    expect(source).toMatch(/\.multitable-templates__search input\s*{[^}]*width: 100%;/s)
   })
 
   it('filters templates by category tab', async () => {

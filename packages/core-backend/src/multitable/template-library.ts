@@ -34,6 +34,20 @@ export type MultitableTemplateSheet = {
   views: MultitableTemplateView[]
 }
 
+export type MultitableTemplateTranslationSheet = {
+  name: string
+  description?: string | null
+  fields: Record<string, string>
+  views: Record<string, string>
+}
+
+export type MultitableTemplateTranslation = {
+  name: string
+  description: string
+  category: string
+  sheets: Record<string, MultitableTemplateTranslationSheet>
+}
+
 export type MultitableTemplate = {
   id: string
   name: string
@@ -41,6 +55,7 @@ export type MultitableTemplate = {
   category: string
   icon: string
   color: string
+  translations?: Partial<Record<'zh-CN', MultitableTemplateTranslation>>
   sheets: MultitableTemplateSheet[]
 }
 
@@ -122,6 +137,32 @@ const TEMPLATE_LIBRARY: MultitableTemplate[] = [
     category: 'Project management',
     icon: 'kanban',
     color: '#2563eb',
+    translations: {
+      'zh-CN': {
+        name: '项目跟进',
+        description: '跟踪负责人、优先级、截止日期、状态和执行备注。',
+        category: '项目管理',
+        sheets: {
+          tasks: {
+            name: '任务',
+            description: '项目任务流程',
+            fields: {
+              task: '任务',
+              status: '状态',
+              owner: '负责人',
+              priority: '优先级',
+              dueDate: '截止日期',
+              notes: '备注',
+            },
+            views: {
+              grid: '全部任务',
+              kanban: '按状态',
+              calendar: '截止日历',
+            },
+          },
+        },
+      },
+    },
     sheets: [
       {
         id: 'tasks',
@@ -150,6 +191,32 @@ const TEMPLATE_LIBRARY: MultitableTemplate[] = [
     category: 'Sales',
     icon: 'pipeline',
     color: '#16a34a',
+    translations: {
+      'zh-CN': {
+        name: '销售 CRM',
+        description: '管理客户、联系人、阶段、交易金额和下一步行动。',
+        category: 'CRM',
+        sheets: {
+          deals: {
+            name: '商机',
+            description: '销售机会管道',
+            fields: {
+              account: '客户',
+              contact: '联系人',
+              stage: '阶段',
+              value: '交易金额',
+              closeDate: '预计成交日期',
+              nextAction: '下一步行动',
+            },
+            views: {
+              grid: '全部商机',
+              pipeline: '销售管道',
+              calendar: '成交日历',
+            },
+          },
+        },
+      },
+    },
     sheets: [
       {
         id: 'deals',
@@ -178,6 +245,32 @@ const TEMPLATE_LIBRARY: MultitableTemplate[] = [
     category: 'Engineering',
     icon: 'bug',
     color: '#dc2626',
+    translations: {
+      'zh-CN': {
+        name: '问题跟踪',
+        description: '记录缺陷、严重程度、负责人、截止日期和复现步骤。',
+        category: '工程',
+        sheets: {
+          issues: {
+            name: '问题',
+            description: '缺陷与问题分诊',
+            fields: {
+              issue: '问题',
+              severity: '严重程度',
+              status: '状态',
+              assignee: '负责人',
+              dueDate: '截止日期',
+              reproSteps: '复现步骤',
+            },
+            views: {
+              grid: '全部问题',
+              severity: '按严重程度',
+              timeline: '截止时间线',
+            },
+          },
+        },
+      },
+    },
     sheets: [
       {
         id: 'issues',
@@ -206,6 +299,34 @@ const TEMPLATE_LIBRARY: MultitableTemplate[] = [
     category: 'Contract',
     icon: 'contract',
     color: '#7c3aed',
+    translations: {
+      'zh-CN': {
+        name: '合同管理',
+        description: '跟踪合同相对方、金额、状态、签署日期和到期日期。',
+        category: '合同管理',
+        sheets: {
+          contracts: {
+            name: '合同',
+            description: '合同生命周期跟踪',
+            fields: {
+              name: '合同名称',
+              party: '相对方',
+              amount: '金额',
+              status: '状态',
+              signedAt: '签署日期',
+              expiresAt: '到期日期',
+              owner: '负责人',
+              notes: '备注',
+            },
+            views: {
+              grid: '全部合同',
+              byStatus: '按状态',
+              expiry: '到期日历',
+            },
+          },
+        },
+      },
+    },
     sheets: [
       {
         id: 'contracts',
@@ -236,6 +357,33 @@ const TEMPLATE_LIBRARY: MultitableTemplate[] = [
     category: 'Inspection',
     icon: 'inspection',
     color: '#ea580c',
+    translations: {
+      'zh-CN': {
+        name: '现场巡检',
+        description: '记录现场巡检、发现项、严重程度和整改进展。',
+        category: '巡检',
+        sheets: {
+          inspections: {
+            name: '巡检记录',
+            description: '现场巡检与整改跟踪',
+            fields: {
+              site: '地点',
+              inspector: '巡检人',
+              inspectedAt: '巡检日期',
+              finding: '发现项',
+              severity: '严重程度',
+              status: '状态',
+              dueDate: '整改截止日期',
+            },
+            views: {
+              grid: '全部巡检',
+              bySeverity: '按严重程度',
+              due: '整改时间线',
+            },
+          },
+        },
+      },
+    },
     sheets: [
       {
         id: 'inspections',
@@ -265,6 +413,33 @@ const TEMPLATE_LIBRARY: MultitableTemplate[] = [
     category: 'Recruitment',
     icon: 'recruit',
     color: '#0891b2',
+    translations: {
+      'zh-CN': {
+        name: '招聘流程',
+        description: '跟踪候选人、岗位、阶段、招聘负责人和下一步行动。',
+        category: '招聘',
+        sheets: {
+          candidates: {
+            name: '候选人',
+            description: '招聘流程跟踪',
+            fields: {
+              candidate: '候选人',
+              role: '岗位',
+              stage: '阶段',
+              recruiter: '招聘负责人',
+              appliedAt: '申请日期',
+              nextStep: '下一步',
+              rating: '评价',
+            },
+            views: {
+              grid: '全部候选人',
+              pipeline: '招聘流程',
+              applied: '申请日历',
+            },
+          },
+        },
+      },
+    },
     sheets: [
       {
         id: 'candidates',
@@ -294,6 +469,34 @@ const TEMPLATE_LIBRARY: MultitableTemplate[] = [
     category: 'Operations',
     icon: 'notes',
     color: '#475569',
+    translations: {
+      'zh-CN': {
+        name: '会议纪要',
+        description: '记录会议决策并跟踪行动项直至完成。',
+        category: '运营',
+        sheets: {
+          meetings: {
+            name: '会议',
+            description: '会议记录与行动项',
+            fields: {
+              topic: '主题',
+              meetingDate: '会议日期',
+              attendees: '参会人',
+              decisions: '决策',
+              actionItem: '行动项',
+              assignee: '负责人',
+              status: '状态',
+              dueDate: '行动截止日期',
+            },
+            views: {
+              grid: '全部会议',
+              byStatus: '行动看板',
+              dueCal: '行动日历',
+            },
+          },
+        },
+      },
+    },
     sheets: [
       {
         id: 'meetings',
@@ -324,6 +527,34 @@ const TEMPLATE_LIBRARY: MultitableTemplate[] = [
     category: 'Operations',
     icon: 'asset',
     color: '#0d9488',
+    translations: {
+      'zh-CN': {
+        name: '资产台账',
+        description: '登记设备和资产的地点、负责人及状态。',
+        category: '运营',
+        sheets: {
+          assets: {
+            name: '资产',
+            description: '设备与资产登记',
+            fields: {
+              asset: '资产',
+              category: '类别',
+              serialNumber: '序列号',
+              location: '地点',
+              owner: '负责人',
+              status: '状态',
+              purchaseDate: '采购日期',
+              notes: '备注',
+            },
+            views: {
+              grid: '全部资产',
+              byStatus: '按状态',
+              purchase: '采购日历',
+            },
+          },
+        },
+      },
+    },
     sheets: [
       {
         id: 'assets',
@@ -350,8 +581,24 @@ const TEMPLATE_LIBRARY: MultitableTemplate[] = [
 ]
 
 function normalizeTemplate(template: MultitableTemplate): MultitableTemplate {
+  const zhTranslation = template.translations?.['zh-CN']
   return {
     ...template,
+    translations: zhTranslation ? {
+      'zh-CN': {
+        ...zhTranslation,
+        sheets: Object.fromEntries(
+          Object.entries(zhTranslation.sheets).map(([sheetId, sheet]) => [
+            sheetId,
+            {
+              ...sheet,
+              fields: { ...sheet.fields },
+              views: { ...sheet.views },
+            },
+          ]),
+        ),
+      },
+    } : undefined,
     sheets: template.sheets.map((sheet) => ({
       ...sheet,
       fields: sheet.fields.map((field) => ({ ...field, property: { ...(field.property ?? {}) } })),

@@ -2,30 +2,41 @@
   <section class="multitable-templates" data-testid="multitable-template-center">
     <header class="multitable-templates__hero">
       <div>
-        <p class="multitable-templates__eyebrow">Multitable Templates</p>
-        <h1>模板中心</h1>
+        <p class="multitable-templates__eyebrow">
+          {{ templateCatalogLabel('center.eyebrow', isZh) }}
+        </p>
+        <h1>{{ templateCatalogLabel('center.title', isZh) }}</h1>
         <p class="multitable-templates__subtitle">
-          从行业模板开始一个新的多维表 Base。安装时会自动跳转到新建 Base 的默认视图。
+          {{ templateCatalogLabel('center.subtitle', isZh) }}
         </p>
       </div>
       <div class="multitable-templates__hero-actions">
         <router-link class="multitable-templates__back" :to="{ name: HomeRouteName }">
-          ← 返回多维表首页
+          {{ templateCatalogLabel('center.back', isZh) }}
         </router-link>
         <MtButton class="multitable-templates__refresh" :disabled="loading" @click="loadTemplates">
-          {{ loading ? '加载中...' : '刷新' }}
+          {{ loading
+            ? templateCatalogLabel('center.refreshing', isZh)
+            : templateCatalogLabel('center.refresh', isZh) }}
         </MtButton>
       </div>
     </header>
 
-    <section class="multitable-templates__controls" aria-label="筛选与搜索">
-      <nav v-if="categories.length" class="multitable-templates__categories" aria-label="分类筛选">
+    <section
+      class="multitable-templates__controls"
+      :aria-label="templateCatalogLabel('center.controlsAria', isZh)"
+    >
+      <nav
+        v-if="categories.length"
+        class="multitable-templates__categories"
+        :aria-label="templateCatalogLabel('center.categoriesAria', isZh)"
+      >
         <MtButton
           class="multitable-templates__category-btn"
           :class="{ 'multitable-templates__category-btn--active': activeCategory === ALL_CATEGORY }"
           @click="activeCategory = ALL_CATEGORY"
         >
-          全部
+          {{ templateCatalogLabel('center.all', isZh) }}
           <span class="multitable-templates__category-count">{{ templates.length }}</span>
         </MtButton>
         <MtButton
@@ -41,12 +52,12 @@
         </MtButton>
       </nav>
       <label class="multitable-templates__search">
-        <span>搜索模板</span>
+        <span>{{ templateCatalogLabel('center.search', isZh) }}</span>
         <input
           v-model="searchQuery"
           type="search"
-          placeholder="按名称、描述或分类搜索"
-          aria-label="Search templates"
+          :placeholder="templateCatalogLabel('center.searchPlaceholder', isZh)"
+          :aria-label="templateCatalogLabel('center.search', isZh)"
         />
       </label>
     </section>
@@ -57,7 +68,9 @@
 
     <p v-if="errorMessage" class="multitable-templates__error" role="alert">
       {{ errorMessage }}
-      <MtButton class="multitable-templates__retry" @click="loadTemplates">重试</MtButton>
+      <MtButton class="multitable-templates__retry" @click="loadTemplates">
+        {{ templateCatalogLabel('center.retry', isZh) }}
+      </MtButton>
     </p>
 
     <p v-if="installError" class="multitable-templates__warning" role="status">
@@ -65,13 +78,13 @@
     </p>
 
     <div v-if="loading && !templates.length" class="multitable-templates__state">
-      正在加载模板...
+      {{ templateCatalogLabel('center.loading', isZh) }}
     </div>
     <div v-else-if="!templates.length && !errorMessage" class="multitable-templates__empty">
-      暂无可用模板。请刷新或返回首页直接新建空白 Base。
+      {{ templateCatalogLabel('center.empty', isZh) }}
     </div>
     <div v-else-if="!visibleTemplates.length" class="multitable-templates__empty">
-      没有匹配的模板。请调整分类或搜索关键词。
+      {{ templateCatalogLabel('center.noMatch', isZh) }}
     </div>
     <div v-else class="multitable-templates__grid">
       <MetaTemplateCard
@@ -93,7 +106,13 @@ import { useRouter } from 'vue-router'
 import MetaTemplateCard from '../multitable/components/MetaTemplateCard.vue'
 import { multitableClient } from '../multitable/api/client'
 import { useTemplateInstall } from '../multitable/composables/useTemplateInstall'
-import { categoryLabel } from '../multitable/utils/category-labels'
+import { useLocale } from '../composables/useLocale'
+import {
+  localizeTemplate,
+  templateCatalogLabel,
+  templateMatchCount,
+  templateTotal,
+} from '../multitable/utils/template-localization'
 import type { MetaTemplate } from '../multitable/types'
 import { AppRouteNames } from '../router/types'
 import { MtButton } from '../multitable/ui'
@@ -102,6 +121,7 @@ const ALL_CATEGORY = '__all__'
 const HomeRouteName = AppRouteNames.MULTITABLE_HOME
 
 const router = useRouter()
+const { isZh } = useLocale()
 const templates = ref<MetaTemplate[]>([])
 const loading = ref(false)
 const errorMessage = ref('')
@@ -110,14 +130,23 @@ const searchQuery = ref('')
 
 const { installingTemplateId, errorMessage: installError, installAndOpen } = useTemplateInstall()
 
+const activeLocale = computed(() => isZh.value ? 'zh-CN' : 'en')
+
 const categories = computed(() => {
   const counts = new Map<string, number>()
   for (const tpl of templates.value) {
     counts.set(tpl.category, (counts.get(tpl.category) ?? 0) + 1)
   }
   return Array.from(counts.entries())
-    .map(([value, count]) => ({ value, label: categoryLabel(value), count }))
-    .sort((a, b) => a.label.localeCompare(b.label, 'zh-CN'))
+    .map(([value, count]) => {
+      const sample = templates.value.find((template) => template.category === value)
+      return {
+        value,
+        label: sample ? localizeTemplate(sample, activeLocale.value).category : value,
+        count,
+      }
+    })
+    .sort((a, b) => a.label.localeCompare(b.label, activeLocale.value))
 })
 
 const visibleTemplates = computed<MetaTemplate[]>(() => {
@@ -127,12 +156,15 @@ const visibleTemplates = computed<MetaTemplate[]>(() => {
       return false
     }
     if (!query) return true
-    return (
-      tpl.name.toLowerCase().includes(query) ||
-      tpl.description.toLowerCase().includes(query) ||
-      tpl.category.toLowerCase().includes(query) ||
-      categoryLabel(tpl.category).toLowerCase().includes(query)
-    )
+    const localized = localizeTemplate(tpl, activeLocale.value)
+    return [
+      tpl.name,
+      tpl.description,
+      tpl.category,
+      localized.name,
+      localized.description,
+      localized.category,
+    ].some((value) => value.toLowerCase().includes(query))
   })
 })
 
@@ -142,9 +174,9 @@ const visibleStats = computed(() => {
   const total = templates.value.length
   const shown = visibleTemplates.value.length
   if (shown === total && activeCategory.value === ALL_CATEGORY && !searchQuery.value.trim()) {
-    return `共 ${total} 个模板`
+    return templateTotal(total, isZh.value)
   }
-  return `匹配 ${shown} / ${total} 个模板`
+  return templateMatchCount(shown, total, isZh.value)
 })
 
 async function loadTemplates(): Promise<void> {
@@ -154,7 +186,9 @@ async function loadTemplates(): Promise<void> {
     const data = await multitableClient.listTemplates()
     templates.value = data.templates ?? []
   } catch (error) {
-    errorMessage.value = error instanceof Error ? error.message : '加载模板失败'
+    errorMessage.value = error instanceof Error
+      ? error.message
+      : templateCatalogLabel('center.loadFailed', isZh.value)
   } finally {
     loading.value = false
   }
@@ -342,5 +376,27 @@ onMounted(() => {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
   gap: 1rem;
+}
+
+@media (max-width: 640px) {
+  .multitable-templates__hero {
+    flex-direction: column;
+  }
+
+  .multitable-templates__hero-actions {
+    flex-wrap: wrap;
+    width: 100%;
+  }
+
+  .multitable-templates__search {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .multitable-templates__search input {
+    flex: 1 1 auto;
+    min-width: 0;
+    width: 100%;
+  }
 }
 </style>

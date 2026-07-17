@@ -35,26 +35,31 @@
     <p v-if="errorMessage" class="multitable-home__error" role="alert">{{ errorMessage }}</p>
     <p v-if="templateError" class="multitable-home__warning" role="status">{{ templateError }}</p>
 
-    <section class="multitable-home__panel" aria-label="Template quick start">
+    <section
+      class="multitable-home__panel"
+      :aria-label="templateCatalogLabel('home.aria', isZh)"
+    >
       <div class="multitable-home__panel-head">
         <div class="multitable-home__panel-title">
-          <h2>模板快速开始</h2>
-          <span class="multitable-home__panel-subtitle">{{ templates.length }} 个</span>
+          <h2>{{ templateCatalogLabel('home.title', isZh) }}</h2>
+          <span class="multitable-home__panel-subtitle">{{ templateCount(templates.length, isZh) }}</span>
         </div>
         <router-link
           class="multitable-home__panel-link"
           :to="{ name: TemplateCenterRouteName }"
           data-testid="multitable-home-template-center-link"
         >
-          查看全部模板 →
+          {{ templateCatalogLabel('home.viewAll', isZh) }}
         </router-link>
       </div>
 
       <p v-if="installError" class="multitable-home__error" role="alert">{{ installError }}</p>
 
-      <div v-if="templateLoading" class="multitable-home__state">正在加载模板...</div>
+      <div v-if="templateLoading" class="multitable-home__state">
+        {{ templateCatalogLabel('home.loading', isZh) }}
+      </div>
       <div v-else-if="!templates.length" class="multitable-home__empty">
-        暂无可用模板。你仍可直接新建空白 Base。
+        {{ templateCatalogLabel('home.empty', isZh) }}
       </div>
       <div v-else class="multitable-home__template-grid">
         <MetaTemplateCard
@@ -155,10 +160,16 @@ import { AppRouteNames } from '../router/types'
 import MetaTemplateCard from '../multitable/components/MetaTemplateCard.vue'
 import { useTemplateInstall } from '../multitable/composables/useTemplateInstall'
 import { MtButton } from '../multitable/ui'
+import { useLocale } from '../composables/useLocale'
+import {
+  templateCatalogLabel,
+  templateCount,
+} from '../multitable/utils/template-localization'
 
 const TemplateCenterRouteName = AppRouteNames.MULTITABLE_TEMPLATES
 
 const router = useRouter()
+const { isZh } = useLocale()
 
 const bases = ref<MetaBase[]>([])
 const templates = ref<MetaTemplate[]>([])
@@ -225,7 +236,9 @@ async function loadTemplates(): Promise<void> {
     const data = await multitableClient.listTemplates()
     templates.value = data.templates ?? []
   } catch (error) {
-    templateError.value = error instanceof Error ? error.message : '模板加载失败，可继续新建空白 Base。'
+    templateError.value = error instanceof Error
+      ? error.message
+      : templateCatalogLabel('home.loadFailed', isZh.value)
   } finally {
     templateLoading.value = false
   }
