@@ -138,16 +138,22 @@ function getApprovalStepKind(step) {
 }
 
 // S7-1 §7 authoring gate — the DISCRIMINATED-UNION step contract, enforced on flow create AND update
-// against the RAW (zod-parsed) steps before persistence. Throws HttpError(422, <distinct code>, …) —
-// each violation carries a DISTINCT code so a test can assert the specific guard (and a mutation that
+// against the PRE-zod raw steps (zod strips unmodeled keys, so only the raw payload can prove a dynamic
+// step carries nothing outside its closed union). Throws HttpError(422, <distinct code>, …) — each
+// violation carries a DISTINCT code so a test can assert the specific guard (and a mutation that
 // removes one guard reddens exactly its leg rather than being masked by a later 422). Order matters:
-//   1) static/dynamic mixing         → APPROVAL_STEP_STATIC_DYNAMIC_MIXED
+//   1) static/dynamic mixing — either approver KEY carried, even as an empty array; the lock constrains
+//      the union's key shape, not whether the approver set is non-empty → APPROVAL_STEP_STATIC_DYNAMIC_MIXED
 //   2) unknown kind (incl. the OUT-of-v1 continuous_managers) → APPROVAL_STEP_KIND_INVALID
-//   3) manager_at_level level shape (missing / non-integer / < 1 / > host MAX) → APPROVAL_STEP_LEVEL_INVALID
-//   4) availability (flag OFF / port absent / kind not resolver-implemented) → APPROVAL_STEP_KIND_UNAVAILABLE
-// The level UPPER bound uses the HOST-resolved MAX (context.services.approvalAssigneeResolver
-// .maxManagerChainLevels), never a plugin-parsed env — one source, two surfaces, no drift. At S7-1
-// `implementedKinds` is empty, so every well-formed dynamic step lands on (4) — correct and safe.
+//   3) closed per-kind param union — {name, kind} ∪ ({level} iff manager_at_level); any other key on a
+//      dynamic step 422s instead of being silently dropped downstream → APPROVAL_STEP_PARAMS_INVALID
+//   4) manager_at_level level shape (missing / non-integer / < 1 / > host MAX) → APPROVAL_STEP_LEVEL_INVALID
+//   5) availability (flag OFF / port absent / kind not resolver-implemented) → APPROVAL_STEP_KIND_UNAVAILABLE
+// Static (kind-less) steps return early: their legacy tolerance (unmodeled keys stripped by zod, A1
+// round-trip) is deliberately unchanged. The level UPPER bound uses the HOST-resolved MAX
+// (context.services.approvalAssigneeResolver.maxManagerChainLevels), never a plugin-parsed env — one
+// source, two surfaces, no drift. At S7-1 `implementedKinds` is empty, so every well-formed dynamic
+// step lands on (5) — correct and safe.
 function assertApprovalStepsContract(steps, context) {
   if (!Array.isArray(steps)) return
   const port = context && context.services ? context.services.approvalAssigneeResolver : undefined
@@ -168,15 +174,17 @@ function assertApprovalStepsContract(steps, context) {
       return // static (or empty legacy) step — unchanged path, no dynamic validation
     }
 
-    // (1) discriminated union: a dynamic step must NOT also carry static approver arrays.
-    const hasStaticApprovers =
-      (Array.isArray(step.approverUserIds) && step.approverUserIds.length > 0) ||
-      (Array.isArray(step.approverRoleIds) && step.approverRoleIds.length > 0)
-    if (hasStaticApprovers) {
+    // (1) discriminated union: a dynamic step must NOT carry either static approver KEY at all —
+    // carrying the key (even as `[]` or `null`) is mixing. The lock's union is a KEY-shape constraint
+    // (owner P2 on #4415): an empty array would otherwise be silently key-dropped by the normalizer,
+    // the exact silent-drop-instead-of-422 the contract forbids. "Carried" is value !== undefined, NOT
+    // hasOwnProperty: normalizeApprovalStepPayload materializes BOTH keys as `undefined` on every step
+    // (camel/snake alias resolution), so undefined here proves the client payload had no such key.
+    if (step.approverUserIds !== undefined || step.approverRoleIds !== undefined) {
       throw new HttpError(
         422,
         'APPROVAL_STEP_STATIC_DYNAMIC_MIXED',
-        `${stepLabel}: 步骤为静态(approverUserIds/approverRoleIds)或动态(kind)二选一，不能同时存在`
+        `${stepLabel}: 步骤为静态(approverUserIds/approverRoleIds)或动态(kind)二选一，不能同时携带两类键`
       )
     }
 
@@ -185,7 +193,23 @@ function assertApprovalStepsContract(steps, context) {
       throw new HttpError(422, 'APPROVAL_STEP_KIND_INVALID', `${stepLabel}: 未知的动态审批人类型 "${kind}"`)
     }
 
-    // (3) per-kind params — manager_at_level requires an integer level ∈ [1, host MAX].
+    // (3) closed per-kind param union: direct_manager/dept_head take NO params; only manager_at_level
+    // takes `level`. Any other key CARRIED on a dynamic step (value !== undefined, same semantics as
+    // the mixing check above) is rejected here — never silently dropped by zod/the normalizer.
+    const allowedDynamicKeys =
+      kind === ATTENDANCE_MANAGER_AT_LEVEL_KIND ? ['name', 'kind', 'level'] : ['name', 'kind']
+    for (const key of Object.keys(step)) {
+      if (step[key] === undefined) continue
+      if (!allowedDynamicKeys.includes(key)) {
+        throw new HttpError(
+          422,
+          'APPROVAL_STEP_PARAMS_INVALID',
+          `${stepLabel}: 动态步骤(${kind})不允许参数 "${key}"(合法键: ${allowedDynamicKeys.join('/')})`
+        )
+      }
+    }
+
+    // (4) per-kind params — manager_at_level requires an integer level ∈ [1, host MAX].
     if (kind === ATTENDANCE_MANAGER_AT_LEVEL_KIND) {
       const level = step.level
       if (typeof level !== 'number' || !Number.isInteger(level) || level < 1) {
@@ -200,7 +224,7 @@ function assertApprovalStepsContract(steps, context) {
       }
     }
 
-    // (4) availability — the kind must be BOTH flag-enabled AND resolver-implemented at this moment.
+    // (5) availability — the kind must be BOTH flag-enabled AND resolver-implemented at this moment.
     if (!flagEnabled || !port || !implementedKinds.includes(kind)) {
       throw new HttpError(
         422,
@@ -30590,16 +30614,18 @@ module.exports = {
       'POST',
       '/api/attendance/approval-flows',
       withPermission('attendance:admin', async (req, res) => {
-        const parsed = approvalFlowCreateSchema.safeParse(normalizeApprovalFlowPayload(req.body))
+        const rawPayload = normalizeApprovalFlowPayload(req.body)
+        const parsed = approvalFlowCreateSchema.safeParse(rawPayload)
         if (!parsed.success) {
           res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
           return
         }
 
-        // S7-1 §7 authoring gate — enforce the discriminated-union step contract on the RAW parsed steps
-        // (kind/level still present) before persistence. Throws HttpError(422, <distinct code>) → caught
-        // by withAnyPermission's wrapper. A malformed/unavailable dynamic kind can never round-trip inert.
-        assertApprovalStepsContract(parsed.data.steps, context)
+        // S7-1 §7 authoring gate — enforce the discriminated-union step contract on the PRE-zod raw
+        // steps (zod strips unmodeled keys, so only the raw shape can prove a dynamic step's closed
+        // union). Throws HttpError(422, <distinct code>) → caught by withAnyPermission's wrapper.
+        // A malformed/unavailable dynamic kind can never round-trip inert.
+        assertApprovalStepsContract(rawPayload.steps, context)
 
         const orgId = getOrgId(req)
         const steps = normalizeApprovalSteps(parsed.data.steps)
@@ -30648,15 +30674,16 @@ module.exports = {
       'PUT',
       '/api/attendance/approval-flows/:id',
       withPermission('attendance:admin', async (req, res) => {
-        const parsed = approvalFlowUpdateSchema.safeParse(normalizeApprovalFlowPayload(req.body ?? {}))
+        const rawPayload = normalizeApprovalFlowPayload(req.body ?? {})
+        const parsed = approvalFlowUpdateSchema.safeParse(rawPayload)
         if (!parsed.success) {
           res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
           return
         }
 
         // S7-1 §7 authoring gate on update — same discriminated-union contract as create, applied to the
-        // RAW parsed steps when the update supplies them (undefined ⇒ no-op, existing steps untouched).
-        assertApprovalStepsContract(parsed.data.steps, context)
+        // PRE-zod raw steps when the update supplies them (undefined ⇒ no-op, existing steps untouched).
+        assertApprovalStepsContract(rawPayload.steps, context)
 
         const orgId = getOrgId(req)
         const flowId = normalizeUuidString(req.params.id)

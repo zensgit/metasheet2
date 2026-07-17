@@ -111,6 +111,65 @@ describe('S7-1 assertApprovalStepsContract — discriminated-union authoring mat
       .toEqual({ status: 422, code: 'APPROVAL_STEP_STATIC_DYNAMIC_MIXED' })
   })
 
+  // Owner P2 (#4415 round 2): the lock's union is a KEY-shape constraint — an EMPTY array still carries
+  // the static key, so it must 422 MIXED, never be silently key-dropped by the normalizer.
+  it('dynamic + approverUserIds: [] (empty array carries the key) → MIXED', () => {
+    setFlag(true)
+    expect(httpCode(() => assertApprovalStepsContract([{ kind: 'direct_manager', approverUserIds: [] }], allImplemented())))
+      .toEqual({ status: 422, code: 'APPROVAL_STEP_STATIC_DYNAMIC_MIXED' })
+  })
+
+  it('dynamic + approverRoleIds: [] (empty array carries the key) → MIXED', () => {
+    setFlag(true)
+    expect(httpCode(() => assertApprovalStepsContract([{ kind: 'direct_manager', approverRoleIds: [] }], allImplemented())))
+      .toEqual({ status: 422, code: 'APPROVAL_STEP_STATIC_DYNAMIC_MIXED' })
+  })
+
+  it('dynamic + approverUserIds: null (JSON null carries the key) → MIXED', () => {
+    setFlag(true)
+    expect(httpCode(() => assertApprovalStepsContract([{ kind: 'direct_manager', approverUserIds: null }], allImplemented())))
+      .toEqual({ status: 422, code: 'APPROVAL_STEP_STATIC_DYNAMIC_MIXED' })
+  })
+
+  it('undefined-valued approver keys are NOT mixing (normalizeApprovalStepPayload materializes both keys as undefined on every step)', () => {
+    setFlag(true)
+    expect(httpCode(() => assertApprovalStepsContract(
+      [{ kind: 'manager_at_level', level: 2, approverUserIds: undefined, approverRoleIds: undefined }],
+      allImplemented(),
+    ))).toBeNull()
+  })
+
+  // Owner P2 (#4415 round 2): closed per-kind param union — {name, kind} ∪ ({level} iff manager_at_level).
+  it('direct_manager + level (no-param kind) → APPROVAL_STEP_PARAMS_INVALID', () => {
+    setFlag(true)
+    expect(httpCode(() => assertApprovalStepsContract([{ kind: 'direct_manager', level: 2 }], allImplemented())))
+      .toEqual({ status: 422, code: 'APPROVAL_STEP_PARAMS_INVALID' })
+  })
+
+  it('dept_head + level (no-param kind) → APPROVAL_STEP_PARAMS_INVALID', () => {
+    setFlag(true)
+    expect(httpCode(() => assertApprovalStepsContract([{ kind: 'dept_head', level: 1 }], allImplemented())))
+      .toEqual({ status: 422, code: 'APPROVAL_STEP_PARAMS_INVALID' })
+  })
+
+  it('unmodeled dynamic param (dept_head + target) → APPROVAL_STEP_PARAMS_INVALID', () => {
+    setFlag(true)
+    expect(httpCode(() => assertApprovalStepsContract([{ kind: 'dept_head', target: 'x' }], allImplemented())))
+      .toEqual({ status: 422, code: 'APPROVAL_STEP_PARAMS_INVALID' })
+  })
+
+  it('PARAMS_INVALID still surfaces with flag OFF + no implemented kinds (shape precedes availability)', () => {
+    setFlag(false)
+    expect(httpCode(() => assertApprovalStepsContract([{ kind: 'direct_manager', level: 2 }], makeContext())))
+      .toEqual({ status: 422, code: 'APPROVAL_STEP_PARAMS_INVALID' })
+  })
+
+  it('name + level on manager_at_level are inside the closed union (no throw)', () => {
+    setFlag(true)
+    expect(httpCode(() => assertApprovalStepsContract([{ name: '主管', kind: 'manager_at_level', level: 2 }], allImplemented())))
+      .toBeNull()
+  })
+
   it('unknown kind → APPROVAL_STEP_KIND_INVALID', () => {
     setFlag(true)
     expect(httpCode(() => assertApprovalStepsContract([{ kind: 'bogus_kind' }], allImplemented())))

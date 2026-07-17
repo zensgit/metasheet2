@@ -224,6 +224,14 @@ describeIfDatabase('S7-1 dynamic-kind step contract + fail-closed (authoring + r
     { label: 'manager_at_level level 0', steps: [{ kind: 'manager_at_level', level: 0 }], code: 'APPROVAL_STEP_LEVEL_INVALID' },
     { label: 'manager_at_level level MAX+1', steps: [{ kind: 'manager_at_level', level: HOST_MAX_LEVEL + 1 }], code: 'APPROVAL_STEP_LEVEL_INVALID' },
     { label: 'static/dynamic mixed', steps: [{ kind: 'direct_manager', approverUserIds: ['u1'] }], code: 'APPROVAL_STEP_STATIC_DYNAMIC_MIXED' },
+    // Owner P2 round 2: the union is a KEY-shape constraint — empty arrays still carry the static key.
+    { label: 'dynamic + EMPTY approverUserIds key', steps: [{ kind: 'direct_manager', approverUserIds: [] }], code: 'APPROVAL_STEP_STATIC_DYNAMIC_MIXED' },
+    { label: 'dynamic + EMPTY approverRoleIds key', steps: [{ kind: 'direct_manager', approverRoleIds: [] }], code: 'APPROVAL_STEP_STATIC_DYNAMIC_MIXED' },
+    // Owner P2 round 2: closed per-kind param union — level is manager_at_level-only.
+    { label: 'level on a no-param kind (direct_manager)', steps: [{ kind: 'direct_manager', level: 2 }], code: 'APPROVAL_STEP_PARAMS_INVALID' },
+    // Unmodeled param: zod strips `target` from its parse, so this leg only 422s if the contract is
+    // wired to the PRE-zod raw steps — it pins the raw-steps call-site, not just the validator.
+    { label: 'unmodeled dynamic param (dept_head + target)', steps: [{ kind: 'dept_head', target: 'x' }], code: 'APPROVAL_STEP_PARAMS_INVALID' },
   ]
 
   for (const c of shapeCases) {
@@ -264,6 +272,15 @@ describeIfDatabase('S7-1 dynamic-kind step contract + fail-closed (authoring + r
     const flowId = (created.body as { data?: { id?: string } }).data?.id as string
     const updated = await updateFlow(flowId, [{ name: 'LM2', approverUserIds: [requester] }])
     expect(updated.status, updated.raw).toBe(200)
+  })
+
+  it('CREATE accepts a STATIC step with a stray unmodeled key (legacy tolerance unchanged — closed union is dynamic-only)', async () => {
+    setFlag(false)
+    const created = await createFlow(
+      [{ name: 'LM', approverUserIds: [requester], legacyStray: 'kept-tolerant' }],
+      `s7-1-static-stray-${runSuffix}`,
+    )
+    expect(created.status, created.raw).toBe(201)
   })
 
   // ── §4.1 runtime create fail-closed: a dynamic flow reached at request submission, flag OFF ──
