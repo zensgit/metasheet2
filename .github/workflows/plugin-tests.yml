@@ -726,6 +726,7 @@ jobs:
             tests/integration/files-storage-key-migration.db.test.ts \
             tests/integration/files-orphan-blob-retention.db.test.ts \
             tests/integration/multitable-automation-event-fires-lease-migration.db.test.ts \
+            tests/integration/multitable-automation-event-fires-lease-realdb.db.test.ts \
             tests/integration/multitable-attachment-blob-purge.db.test.ts \
             tests/integration/multitable-attachment-root-escape.db.test.ts \
             tests/integration/stock-prep-audit-immutable-trigger.db.test.ts \

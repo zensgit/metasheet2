@@ -257,6 +257,9 @@ export default defineConfig({
       // isolated per-test schema, real UPGRADE path (old schema + rows → migrate → assert). Excluded here so it
       // cannot skip-green, whole-file wired into `Run attendance integration tests` in plugin-tests.yml.
       'tests/integration/multitable-automation-event-fires-lease-migration.db.test.ts',
+      // S6 event_fires LEASE claim/reclaim (window-2 fix): isolated-schema real DB. Excluded here so it cannot
+      // skip-green, whole-file wired into the attendance real-DB step in plugin-tests.yml.
+      'tests/integration/multitable-automation-event-fires-lease-realdb.db.test.ts',
       // F9 owner CHANGES-REQUESTED (GF9-1/GF9-2): multitable_attachments blob_purged_at migration +
       // deleteAttachmentBinary index-free delete + sweepMultitableAttachmentBlobPurge compensating-sweep
       // matrix, same shape/rationale as the F5 entry immediately above (DATABASE_URL-gated describeDb,
