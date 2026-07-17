@@ -35,31 +35,52 @@ export interface StaleSweepResult {
   healed: number
 }
 
-export async function sweepStaleDepartmentBindings(orgId: string): Promise<StaleSweepResult> {
+/**
+ * @param opts.remoteIntegrationId — Q6 (owner ruling): the post-sync hook narrows the sweep to the
+ * integration that just synced; the admin retry endpoint may narrow the same way or sweep the org.
+ */
+export async function sweepStaleDepartmentBindings(
+  orgId: string,
+  opts: { remoteIntegrationId?: string } = {},
+): Promise<StaleSweepResult> {
+  // Owner review (#4436) — two remote-INTEGRATION guards on BOTH directions:
+  //   - `ri.status = 'active'`: a disabled/frozen remote integration's data is a snapshot, not a
+  //     live fact stream — its bindings must not churn (neither stale nor heal) until it is live.
+  //   - `ri.provider <> 'local'`: the remote side of a binding is by definition a provider;
+  //     belt-and-suspenders here (B4's provider FK + CHECK already make a local remote side
+  //     unconstructible), so a raw-malformed row can never be swept as if it were provider truth.
+  const narrow = opts.remoteIntegrationId ? ' AND b.remote_integration_id = $2::uuid' : ''
+  const params: unknown[] = opts.remoteIntegrationId ? [orgId, opts.remoteIntegrationId] : [orgId]
   // Mark ACTIVE bindings whose remote department disappeared (is_active = false) as STALE.
   const staled = await query<{ id: string }>(
     `UPDATE directory_department_bindings b
         SET status = 'stale', updated_at = NOW()
-       FROM directory_departments rd
+       FROM directory_departments rd, directory_integrations ri
       WHERE rd.id = b.remote_department_id
+        AND ri.id = b.remote_integration_id
+        AND ri.status = 'active'
+        AND ri.provider <> 'local'
         AND b.org_id = $1
         AND b.status = 'active'
-        AND rd.is_active = false
+        AND rd.is_active = false${narrow}
       RETURNING b.id`,
-    [orgId],
+    params,
   )
   // Heal STALE bindings whose remote department is live again. Both directions only ever reflect
   // provider-side FACTS onto the binding row — never onto the local department.
   const healed = await query<{ id: string }>(
     `UPDATE directory_department_bindings b
         SET status = 'active', updated_at = NOW()
-       FROM directory_departments rd
+       FROM directory_departments rd, directory_integrations ri
       WHERE rd.id = b.remote_department_id
+        AND ri.id = b.remote_integration_id
+        AND ri.status = 'active'
+        AND ri.provider <> 'local'
         AND b.org_id = $1
         AND b.status = 'stale'
-        AND rd.is_active = true
+        AND rd.is_active = true${narrow}
       RETURNING b.id`,
-    [orgId],
+    params,
   )
   return { staled: staled.rows.length, healed: healed.rows.length }
 }

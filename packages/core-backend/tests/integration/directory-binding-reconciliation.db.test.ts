@@ -207,6 +207,40 @@ describeIfDatabase('Canonical Org MVP — B7 suggest-only reconciliation (real D
     expect(res.ambiguous).toHaveLength(0)
   })
 
+  it('G. remote-INTEGRATION guard (owner #4436): a disabled remote integration is frozen — its bindings neither stale nor heal until re-enabled', async () => {
+    const { org, dt, rDept, binding } = await boundFixture('ig')
+    // archive the remote dept AND disable the whole remote integration
+    await query(`UPDATE directory_departments SET is_active = false WHERE id = $1`, [rDept])
+    await query(`UPDATE directory_integrations SET status = 'disabled' WHERE id = $1`, [dt])
+
+    expect(await sweepStaleDepartmentBindings(org)).toEqual({ staled: 0, healed: 0 }) // frozen: no churn
+    expect(await bindingStatus(binding)).toBe('active')
+
+    // positive control: re-enable the integration → the SAME sweep now stales the binding
+    await query(`UPDATE directory_integrations SET status = 'active' WHERE id = $1`, [dt])
+    expect(await sweepStaleDepartmentBindings(org)).toEqual({ staled: 1, healed: 0 })
+    expect(await bindingStatus(binding)).toBe('stale')
+  })
+
+  it('H. Q6 narrowing: a sweep narrowed to integration X leaves integration Y bindings untouched in the SAME org', async () => {
+    const org = orgId('narrow')
+    seededOrgIds.push(org)
+    const local = await getOrCreateLocalIntegration(org)
+    const lD1 = await createLocalDepartment({ orgId: org, name: 'N1' })
+    const lD2 = await createLocalDepartment({ orgId: org, name: 'N2' })
+    const dtX = await dingtalkIntegration(org, 'nx')
+    const dtY = await dingtalkIntegration(org, 'ny')
+    const rX = await dtDept(dtX, `n-x-${STAMP}`, 'N1')
+    const rY = await dtDept(dtY, `n-y-${STAMP}`, 'N2')
+    const bX = await bind(org, local.id, lD1.id, dtX, rX)
+    const bY = await bind(org, local.id, lD2.id, dtY, rY)
+    await query(`UPDATE directory_departments SET is_active = false WHERE id IN ($1, $2)`, [rX, rY])
+
+    expect(await sweepStaleDepartmentBindings(org, { remoteIntegrationId: dtX })).toEqual({ staled: 1, healed: 0 })
+    expect(await bindingStatus(bX)).toBe('stale')
+    expect(await bindingStatus(bY)).toBe('active') // narrowed out — the sync hook's exact scope
+  })
+
   it('E. suggest is READ-ONLY: binding rows byte-identical before and after', async () => {
     const { org, binding } = await boundFixture('ro')
     const before = await query<{ fp: string }>(`SELECT to_jsonb(b)::text AS fp FROM directory_department_bindings b WHERE id = $1`, [binding])
