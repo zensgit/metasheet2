@@ -201,7 +201,20 @@ export class ApprovalRoutingPolicyError extends Error {
 export async function resolveApprovalRequesterOrgRelations(
   localUserId: string,
   query: QueryFn,
-  options: { includeManagerChain?: boolean; maxLevels?: number; orgId?: string } = {},
+  options: {
+    includeManagerChain?: boolean
+    maxLevels?: number
+    orgId?: string
+    /**
+     * B5-c read-only PREVIEW hook: `undefined` (default) = run the real policy probe;
+     * `null` = force the LEGACY path; a string = resolve AS IF that integration were the policy's
+     * canonical — WITHOUT reading or writing any policy row. Only the admin preview route passes
+     * this (it validates the candidate is same-org + active first); production approval creation
+     * never sets it, so the probe stays the sole authority there. Using the same resolver for both
+     * preview legs is deliberate: a separate preview resolution would drift from the real one.
+     */
+    overrideCanonicalIntegrationId?: string | null
+  } = {},
 ): Promise<ApprovalRequesterOrgRelations> {
   const userId = localUserId.trim()
   if (!userId) return {}
@@ -243,9 +256,17 @@ export async function resolveApprovalRequesterOrgRelations(
   //      - NO same-org policy → fall through to the S7 org-anchored requester SELECT.
   //      - ONE same-org policy → AUTHORITATIVE canonical-integration pick (within the tenant).
   //      - (multi-org ambiguity cannot fire: foreign policies are filtered out by p.org_id = $2.)
-  const policyRows = await query<RoutingPolicyProbeRow>(
-    orgId
-      ? `SELECT DISTINCT p.org_id                            AS org_id,
+  //
+  //    B5-c PREVIEW: when overrideCanonicalIntegrationId is defined, skip the probe entirely and
+  //    resolve AS-IF that integration were canonical (or force legacy when null). Production never
+  //    sets this option — the real policy row remains the sole authority there.
+  let canonicalIntegrationId: string | null = null
+  const policyRows =
+    options.overrideCanonicalIntegrationId !== undefined
+      ? { rows: [] as RoutingPolicyProbeRow[] }
+      : await query<RoutingPolicyProbeRow>(
+          orgId
+            ? `SELECT DISTINCT p.org_id                            AS org_id,
             p.canonical_integration_id::text             AS canonical_integration_id,
             ci.status                                    AS canonical_status
        FROM directory_account_links l
@@ -262,7 +283,7 @@ export async function resolveApprovalRequesterOrgRelations(
       WHERE l.local_user_id = $1
         AND l.link_status = 'linked'
         AND p.org_id = $2`
-      : `SELECT DISTINCT p.org_id                            AS org_id,
+            : `SELECT DISTINCT p.org_id                            AS org_id,
             p.canonical_integration_id::text             AS canonical_integration_id,
             ci.status                                    AS canonical_status
        FROM directory_account_links l
@@ -278,9 +299,11 @@ export async function resolveApprovalRequesterOrgRelations(
          ON ci.id = p.canonical_integration_id
       WHERE l.local_user_id = $1
         AND l.link_status = 'linked'`,
-    orgId ? [userId, orgId] : [userId],
-  )
-  let canonicalIntegrationId: string | null = null
+          orgId ? [userId, orgId] : [userId],
+        )
+  if (options.overrideCanonicalIntegrationId !== undefined) {
+    canonicalIntegrationId = options.overrideCanonicalIntegrationId
+  }
   if (policyRows.rows.length > 0) {
     const orgs = new Set(policyRows.rows.map((r) => r.org_id))
     if (orgs.size > 1) {
