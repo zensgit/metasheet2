@@ -240,6 +240,8 @@ import {
   setRecoveryWriterState,
   SheetWriterBlockedError,
 } from '../multitable/canonical-sheet-fence'
+import { activateCheckpoint, CheckpointUnattributableTrashError } from '../multitable/history-trust-checkpoint'
+import type { QueryFn as TrustCheckpointQueryFn } from '../multitable/permission-service'
 import { normalizeAutoNumberProperty } from '../multitable/auto-number-property'
 import {
   createYjsInvalidationPostCommitHook,
@@ -10204,6 +10206,54 @@ export function univerMetaRouter(): Router {
   // resolution). revert-preview stays UNGATED (read-only, no writes to protect, and the FE preview UI still
   // needs to render even while the button that would call execute is hidden).
   const SHEET_REVERT_ENABLED = () => String(process.env.MULTITABLE_ENABLE_SHEET_REVERT ?? '').trim().toLowerCase() === 'true'
+
+  // ── W0-1 L5-wire: trust-checkpoint ACTIVATION (the production caller for activateCheckpoint) ────────────
+  // Owner review 2026-07-17: activateCheckpoint had NO production caller — without an activated checkpoint,
+  // exact-anchor recovery (L6-b) can only ever refuse `no-covering-checkpoint`. This route is the canonical
+  // L5-wire slice (order: L5-wire → L6-b → L7 → L8). It is ADDITIVE-ONLY trust provisioning: one fenced
+  // transaction that snapshots baselines and activates a checkpoint (design lock §3 cutover) — it performs no
+  // destructive write and enables nothing by itself (strict/Revert/Reset stay behind their own flags).
+  // Default-OFF flag + sheet-admin (D2) floor, mirroring the recovery routes' gating discipline exactly.
+  const TRUST_CHECKPOINT_ACTIVATION_ENABLED = () =>
+    String(process.env.MULTITABLE_ENABLE_TRUST_CHECKPOINT_ACTIVATION ?? '').trim().toLowerCase() === 'true'
+
+  router.post('/sheets/:sheetId/trust-checkpoint-activate', async (req: Request, res: Response) => {
+    if (!TRUST_CHECKPOINT_ACTIVATION_ENABLED()) {
+      return res.status(403).json({ ok: false, error: { code: 'TRUST_CHECKPOINT_ACTIVATION_DISABLED', message: 'Trust-checkpoint activation is disabled (MULTITABLE_ENABLE_TRUST_CHECKPOINT_ACTIVATION is off).' } })
+    }
+    const sheetId = typeof req.params.sheetId === 'string' ? req.params.sheetId.trim() : ''
+    if (!sheetId) return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'sheetId required' } })
+    try {
+      const pool = poolManager.get()
+      const { access, capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      if (!access.userId) return res.status(401).json({ ok: false, error: { code: 'UNAUTHENTICATED', message: 'Authentication required' } })
+      // D2 floor: provisioning the trust anchor for destructive recovery is a sheet-admin capability, the
+      // same floor as revert/reset themselves — a plain writer must not move the sheet's trust floor.
+      if (!capabilities.canManageSheetAccess) return sendForbidden(res)
+      const exists = await pool.query('SELECT 1 FROM meta_sheets WHERE id = $1', [sheetId])
+      if (exists.rows.length === 0) return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
+
+      // Design lock §3: ONE fenced transaction — canonical fence first (serializes against every fenced
+      // writer AND any in-flight recovery; observes a durable block), then the cutover. Any failure —
+      // including the fail-closed unattributable-trash abort — rolls the whole activation back.
+      const result = await pool.transaction(async ({ query }) => {
+        await fenceWriterEntry(query as unknown as TrustCheckpointQueryFn, sheetId)
+        return activateCheckpoint(query as unknown as TrustCheckpointQueryFn, { sheetId })
+      })
+      return res.json({ ok: true, data: { checkpointId: result.checkpointId, trustedSinceSeq: result.trustedSinceSeq, baselineCount: result.baselineCount } })
+    } catch (err) {
+      if (err instanceof CheckpointUnattributableTrashError) {
+        // Fail-closed abort (owner P1, L5): a trashed-only record whose vintage cannot be causally attributed
+        // makes the baseline untrustworthy. Values-free envelope (no record ids, no counts — D-1c rule 1).
+        return res.status(409).json({ ok: false, error: { code: 'HISTORY_INCOMPLETE', message: 'Record history for this sheet is incomplete or inconsistent with its live data; the trust checkpoint was not activated and nothing was written.' } })
+      }
+      if (err instanceof SheetWriterBlockedError) {
+        return res.status(409).json({ ok: false, error: { code: 'RECOVERY_IN_PROGRESS', message: 'A recovery operation is in progress on this sheet; try again once it completes.' } })
+      }
+      console.error('[univer-meta] trust-checkpoint-activate failed:', err)
+      return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to activate trust checkpoint' } })
+    }
+  })
 
   router.post('/sheets/:sheetId/revert-preview', async (req: Request, res: Response) => {
     const sheetId = typeof req.params.sheetId === 'string' ? req.params.sheetId.trim() : ''
