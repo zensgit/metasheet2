@@ -58,6 +58,16 @@ export const RECOGNIZED_STRUCTURAL_SKIPS = [
   'dingtalk_recipient_not_bound',
 ]
 
+// Single source of truth for the directory-fixture INSERT — exported so the companion test can pin the
+// column list against the committed schema (review #4422 P1: an earlier draft omitted the NOT-NULL
+// `corp_id`, the .catch swallowed the violation, and the never-seeded fixture reproduced the exact Day-2
+// retrying trap it was built to fix). `corp_id` is required (zzzz20260324150000:20, no default); the only
+// shape CHECK (`local_integration_corp_id_shape`) binds provider='local' rows, so a stamped synthetic
+// value is valid for provider='dingtalk'. $1=org_id, $2=corp_id, $3=name.
+export const DIRECTORY_FIXTURE_INSERT_SQL = `INSERT INTO directory_integrations (org_id, corp_id, provider, name, status, sync_enabled)
+     VALUES ($1, $2, 'dingtalk', $3, 'active', false)
+     ON CONFLICT (org_id, provider, name) DO UPDATE SET status = 'active', sync_enabled = false, corp_id = EXCLUDED.corp_id`
+
 // Every table this helper can dirty. system_configs is mutated via PUT /settings and restored —
 // never deleted — so it is preflighted but intentionally NOT in this delete/count triple-check list.
 export const RESIDUE_TABLES = ['attendance_notification_deliveries', 'user_orgs', 'users']
@@ -560,19 +570,31 @@ async function seedDirectoryFixture() {
     throw new Error(`refusing to seed the directory fixture: org "${ORG_ID}" is not the stamped disposable org (${STAMP}-…). The fixture DELETEs org-scoped directory_* rows.`)
   }
   assertSyntheticUser(MEMBER_USER, 'directory-fixture member')
-  await pool.query('DELETE FROM directory_account_links WHERE local_user_id = $1', [MEMBER_USER]).catch(() => undefined)
-  await pool.query("DELETE FROM directory_integrations WHERE org_id = $1 AND provider = 'dingtalk'", [ORG_ID]).catch(() => undefined)
-  await pool.query(
-    `INSERT INTO directory_integrations (org_id, provider, name, status, sync_enabled)
-     VALUES ($1, 'dingtalk', $2, 'active', false)
-     ON CONFLICT (org_id, provider, name) DO UPDATE SET status = 'active', sync_enabled = false`,
-    [ORG_ID, DIRECTORY_FIXTURE_NAME],
-  ).catch(() => undefined)
+  // Fail-closed, NOT best-effort (review #4422 P1/P2-a): a swallowed error here silently flips the H1
+  // branch — a failed INSERT leaves the org integration-less (→ retryable org_integration_inactive →
+  // the Day-2 retrying trap), and a failed link-clear can leave a BOUND recipient (→ a real DingTalk
+  // send attempt). Any error must abort the smoke at the seed stage, before the send-proof.
+  await pool.query('DELETE FROM directory_account_links WHERE local_user_id = $1', [MEMBER_USER])
+  await pool.query("DELETE FROM directory_integrations WHERE org_id = $1 AND provider = 'dingtalk'", [ORG_ID])
+  await pool.query(DIRECTORY_FIXTURE_INSERT_SQL, [ORG_ID, `${STAMP}-corp`, DIRECTORY_FIXTURE_NAME])
+  // Positive-control read-back: prove the state the send-proof depends on actually exists, instead of
+  // trusting the writes. Exactly ONE active dingtalk integration; ZERO account links for the member.
+  const seeded = (await q(
+    `SELECT
+       (SELECT count(*)::int FROM directory_integrations WHERE org_id = $1 AND provider = 'dingtalk' AND status = 'active') AS integrations,
+       (SELECT count(*)::int FROM directory_account_links WHERE local_user_id = $2) AS member_links`,
+    [ORG_ID, MEMBER_USER],
+  ))[0] || {}
+  const integrations = Number(seeded.integrations ?? -1)
+  const memberLinks = Number(seeded.member_links ?? -1)
   ok(
-    true,
-    `seeded no-send DingTalk directory fixture (active, sync_enabled=false, no bound account) for disposable org "${ORG_ID}" — worker terminates as skipped/dingtalk_recipient_not_bound, never calls DingTalk`,
-    { integration: DIRECTORY_FIXTURE_NAME },
+    integrations === 1 && memberLinks === 0,
+    `directory fixture read-back: exactly ONE active dingtalk integration and ZERO member links for disposable org "${ORG_ID}" — pins the H1 skip branch (skipped/dingtalk_recipient_not_bound), never calls DingTalk`,
+    { integrations, memberLinks, integration: DIRECTORY_FIXTURE_NAME },
   )
+  if (integrations !== 1 || memberLinks !== 0) {
+    throw new Error(`directory fixture failed read-back (integrations=${integrations}, memberLinks=${memberLinks}) — aborting before the send-proof; a mis-seeded fixture would reproduce the Day-2 retrying trap or risk a real send`)
+  }
 }
 
 async function resolveExpectedSubjects() {

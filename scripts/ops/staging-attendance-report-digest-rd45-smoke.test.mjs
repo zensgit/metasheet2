@@ -24,6 +24,7 @@ import {
   classifySendOutcome,
   describeStuckDelivery,
   RECOGNIZED_STRUCTURAL_SKIPS,
+  DIRECTORY_FIXTURE_INSERT_SQL,
   resolveEnvConfig,
 } from './staging-attendance-report-digest-rd45-smoke.mjs'
 
@@ -293,6 +294,27 @@ test('rd45 helper residue triple-check covers every table the smoke can dirty; s
   assert.match(script, /if \(TRIGGER_MODE !== 'seam'\) return/, 'directory fixture is seam-only')
   assert.match(script, /is not the stamped disposable org/, 'directory fixture refuses a non-disposable org')
   assert.match(script, /function isDisposableOrg\(\)/, 'a disposable-org gate exists for the shared directory_* deletes')
+})
+
+test('rd45 directory-fixture INSERT satisfies the committed schema and the seed is fail-closed (review #4422 P1/P2)', () => {
+  // The exported constant IS what pool.query executes — pinning it here is mutation-coupled, not a
+  // source-text regex over dead code. corp_id is NOT NULL with no default (zzzz20260324150000:20); an
+  // INSERT without it fails, and review #4422 proved the pre-fix draft silently never seeded (the .catch
+  // swallowed the violation), reproducing the exact Day-2 retrying trap.
+  assert.match(DIRECTORY_FIXTURE_INSERT_SQL, /INSERT INTO directory_integrations \(org_id, corp_id, provider, name, status, sync_enabled\)/,
+    'column list names every NOT-NULL-without-default column, corp_id included')
+  const placeholders = DIRECTORY_FIXTURE_INSERT_SQL.match(/\$\d+/g) ?? []
+  assert.deepEqual([...new Set(placeholders)].sort(), ['$1', '$2', '$3'], 'exactly $1=org_id, $2=corp_id, $3=name are parameterized')
+  assert.match(DIRECTORY_FIXTURE_INSERT_SQL, /'active', false/, 'fixture pins status=active (H1 skip branch) + sync_enabled=false (no sync worker can link the member)')
+  assert.match(DIRECTORY_FIXTURE_INSERT_SQL, /ON CONFLICT \(org_id, provider, name\)/, 'conflict target matches idx_directory_integrations_org_provider_name')
+  assert.match(script, /pool\.query\(DIRECTORY_FIXTURE_INSERT_SQL, \[ORG_ID, `\$\{STAMP\}-corp`, DIRECTORY_FIXTURE_NAME\]\)/,
+    'the runtime executes THIS constant with org/corp/name bound in order')
+  // Fail-closed seed: no .catch swallow on the three seed statements, and a read-back positive control
+  // (exactly ONE active integration, ZERO member links) that throws before the send-proof can run.
+  assert.match(script, /directory fixture read-back/, 'read-back positive control exists')
+  assert.match(script, /directory fixture failed read-back/, 'read-back failure aborts the smoke (throw), not a warning')
+  const seedBlock = script.slice(script.indexOf('async function seedDirectoryFixture'), script.indexOf('async function resolveExpectedSubjects'))
+  assert.doesNotMatch(seedBlock, /\.catch\(\(\) => undefined\)/, 'seed statements must not swallow errors (a silent seed failure flips the H1 branch or risks a real send)')
 })
 
 test('rd45 helper cleanup is stamped/prefix-scoped, LIKE-free, and restores settings BEFORE deleting rows (re-insert trap)', () => {
