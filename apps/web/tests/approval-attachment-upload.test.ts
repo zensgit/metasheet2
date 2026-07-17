@@ -52,12 +52,17 @@ describe('approval attachment upload client', () => {
   test('upload client: 201 returns id; 422 surfaces the server code; pre-reject never hits the network', async () => {
     const ok = vi.fn(async () => new Response(JSON.stringify({ id: 'att_1', sizeBytes: 3 }), { status: 201 }))
     const file = new File([new Uint8Array([1, 2, 3])], 'a.pdf', { type: 'application/pdf' })
-    expect(await uploadApprovalAttachment(file, 'fld', 'org', ok as unknown as typeof fetch)).toEqual({ id: 'att_1', sizeBytes: 3 })
+    expect(await uploadApprovalAttachment(file, 'tpl', 'fld', ok as unknown as typeof fetch)).toEqual({ id: 'att_1', sizeBytes: 3 })
+    // the body carries {templateId, fieldId} and NEVER an org id (org is server-derived)
+    const sentForm = (ok.mock.calls[0][1] as RequestInit).body as FormData
+    expect(sentForm.get('templateId')).toBe('tpl')
+    expect(sentForm.get('fieldId')).toBe('fld')
+    expect(sentForm.get('orgId')).toBeNull()
     const r422 = vi.fn(async () => new Response(JSON.stringify({ rejected: [{ code: 'mime_not_allowed' }] }), { status: 422 }))
-    await expect(uploadApprovalAttachment(file, 'fld', 'org', r422 as unknown as typeof fetch)).rejects.toThrow(/mime_not_allowed/)
+    await expect(uploadApprovalAttachment(file, 'tpl', 'fld', r422 as unknown as typeof fetch)).rejects.toThrow(/mime_not_allowed/)
     const bad = new File([new Uint8Array([1])], 'x.exe', { type: 'application/x-msdownload' })
     const net = vi.fn()
-    await expect(uploadApprovalAttachment(bad, 'fld', 'org', net as unknown as typeof fetch)).rejects.toThrow(/mime_not_allowed/)
+    await expect(uploadApprovalAttachment(bad, 'tpl', 'fld', net as unknown as typeof fetch)).rejects.toThrow(/mime_not_allowed/)
     expect(net).not.toHaveBeenCalled() // pre-validated locally, no round trip
   })
 })
