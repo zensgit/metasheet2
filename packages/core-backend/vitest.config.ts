@@ -142,6 +142,13 @@ export default defineConfig({
       // WHOLE FILE into the directory real-DB step in plugin-tests.yml (both points asserted by
       // b5a-routing-policy-ci-wiring.test.mjs so neither can silently drop).
       'tests/integration/org-directory-routing-policy-schema.db.test.ts',
+      // Canonical Org MVP B5-b (design lock Lock 2 + Q4): the routing-policy RESOLVER — policy-
+      // authoritative vs latest-updated guessing, fail-closed on broken canonical, multi-org
+      // ambiguity, data-absence {} semantics, and the no-policy legacy control. Real-DB end-to-end
+      // through resolveApprovalRequesterOrgRelations — meaningless without a DB. DATABASE_URL-gated;
+      // wired as a WHOLE FILE into the directory real-DB step (both points asserted by
+      // b5b-routing-resolver-ci-wiring.test.mjs).
+      'tests/integration/org-directory-routing-policy-resolver.db.test.ts',
       // Canonical Org MVP B3 (#4215 §5.4): proves ApprovalDirectoryOrg's DUAL-SOURCE direct-manager
       // resolution against real Postgres — normalized `is_manager` relation for a local integration,
       // the DingTalk `leader_in_dept` regression pin (load-bearing compat leg + is_manager=0 positive
