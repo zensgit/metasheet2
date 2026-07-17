@@ -2282,11 +2282,14 @@ export class AutomationExecutor {
         // pre-②b leniency (a missing trigger record yields a 0-row UPDATE reported as success) to avoid
         // any behavior regression.
         if (gate.crossBase && !lockRow) {
-          return {
-            actionType: 'update_record',
-            status: 'failed',
-            error: `Cross-base update_record target record not found in target sheet: ${effectiveRecordId} ∉ ${effectiveSheetId}`,
-          } satisfies AutomationStepResult
+          // #4196 atomicity: THROW (not return) so this transaction — and the Class-A claim taken above —
+          // ROLLS BACK. A non-throwing `return {failed}` would COMMIT the claim for an action that never
+          // mutated, so a legitimate retry would skip as a FALSE duplicate (a lost update — the exact hazard
+          // this ledger exists to prevent). The method's outer catch reports the identical failed result.
+          // Consistent with the lock-conflict check just below, which already throws to roll back.
+          throw new Error(
+            `Cross-base update_record target record not found in target sheet: ${effectiveRecordId} ∉ ${effectiveSheetId}`,
+          )
         }
         if (lockRow) {
           ensureRecordNotLocked(context.actorId ?? null, lockRow, () => new Error('Record is locked'))
@@ -2441,11 +2444,14 @@ export class AutomationExecutor {
         // no-op success). Same-base keeps its leniency (a missing trigger record yields a 0-row DELETE
         // reported as success) to avoid any behavior regression vs the other same-base sinks.
         if (gate.crossBase && !lockRow) {
-          return {
-            actionType: 'delete_record',
-            status: 'failed',
-            error: `Cross-base delete_record target record not found in target sheet: ${effectiveRecordId} ∉ ${effectiveSheetId}`,
-          } satisfies AutomationStepResult
+          // #4196 atomicity: THROW (not return) so this transaction — and the Class-A claim taken above —
+          // ROLLS BACK. A non-throwing `return {failed}` would COMMIT the claim for an action that never
+          // deleted anything, so a legitimate retry would skip as a FALSE duplicate (the exact hazard this
+          // ledger exists to prevent). The method's outer catch reports the identical failed result.
+          // Consistent with the lock-conflict check just below, which already throws to roll back.
+          throw new Error(
+            `Cross-base delete_record target record not found in target sheet: ${effectiveRecordId} ∉ ${effectiveSheetId}`,
+          )
         }
         if (lockRow) {
           ensureRecordNotLocked(context.actorId ?? null, lockRow, () => new Error('Record is locked'))

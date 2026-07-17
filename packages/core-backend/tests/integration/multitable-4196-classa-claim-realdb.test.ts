@@ -20,6 +20,10 @@
  *       applies (proving a crash before COMMIT never permanently skips the missing write).
  *   G4  FLAG-OFF POSITIVE CONTROL: with the claim flag OFF, a replay on the same root RE-APPLIES (a second
  *       record) — proving the claim, not some incidental guard, is what enforces at-most-once.
+ *   G5  LOGICAL-FAILURE ROLLS BACK THE CLAIM: a cross-base update/delete whose gate passes but whose target
+ *       record does not exist fails AFTER the claim WITHOUT a DB exception. That path rolls the claim back
+ *       (throws, not `return {failed}`), so a retry re-attempts rather than being skipped as a false
+ *       duplicate. Complements G3 (DB-exception rollback) with the non-throwing logical-failure case.
  *
  * Cannot run locally (no DATABASE_URL). Wired into plugin-tests.yml's multitable real-DB run-list AND
  * excluded from the default no-DB vitest config (two-point convention), mirroring the d1c goldens.
@@ -41,6 +45,9 @@ const BASE = `base_ca_${TS}`
 const SHEET = `sheet_ca_${TS}`
 const SHEET_CRASH = `sheet_ca_crash_${TS}`
 const SHEET_OFF = `sheet_ca_off_${TS}`
+// G5 cross-base: a SECOND base OWNER owns (so the write-gate grants base-write) — the not-found target lives here.
+const BASE_XB = `base_ca_xb_${TS}`
+const SHEET_XB = `sheet_ca_xb_${TS}`
 const FLD_TITLE = `fld_ca_title_${TS}`
 
 const q = (sql: string, params?: unknown[]) => poolManager.get().query(sql, params)
@@ -55,7 +62,7 @@ function realService(): AutomationService {
 
 function ruleFor(
   sheetId: string,
-  action: { type: 'create_record' | 'update_record'; config: Record<string, unknown> },
+  action: { type: 'create_record' | 'update_record' | 'delete_record'; config: Record<string, unknown> },
 ): AutomationRule {
   return {
     id: `atr_ca_${TS}_${Math.random().toString(36).slice(2, 8)}`,
@@ -144,6 +151,9 @@ describeIfDatabase('#4196 Class-A same-transaction claim (real DB)', () => {
         sheet,
       ])
     }
+    // G5: a second base OWNER owns + a sheet in it (the cross-base write target).
+    await q('INSERT INTO meta_bases (id, name, owner_id) VALUES ($1,$2,$3)', [BASE_XB, 'Class-A XBase', OWNER])
+    await q('INSERT INTO meta_sheets (id, base_id, name) VALUES ($1,$2,$3)', [SHEET_XB, BASE_XB, 'Class-A XSheet'])
   })
 
   afterAll(async () => {
@@ -156,7 +166,9 @@ describeIfDatabase('#4196 Class-A same-transaction claim (real DB)', () => {
       await q('DELETE FROM meta_fields WHERE sheet_id = $1', [sheet]).catch(() => {})
       await q('DELETE FROM meta_sheets WHERE id = $1', [sheet]).catch(() => {})
     }
-    await q('DELETE FROM meta_bases WHERE id = $1', [BASE]).catch(() => {})
+    await q('DELETE FROM meta_records WHERE sheet_id = $1', [SHEET_XB]).catch(() => {})
+    await q('DELETE FROM meta_sheets WHERE id = $1', [SHEET_XB]).catch(() => {})
+    await q('DELETE FROM meta_bases WHERE id = ANY($1::text[])', [[BASE, BASE_XB]]).catch(() => {})
     delete process.env[FLAG]
   })
 
@@ -277,4 +289,36 @@ describeIfDatabase('#4196 Class-A same-transaction claim (real DB)', () => {
       process.env[FLAG] = 'true'
     }
   })
+
+  // G5 — LOGICAL failure (non-throwing return) after the claim also ROLLS BACK ─────────────────────────
+  // The claim is the first statement in the txn, but a Class-A method can reject an action AFTER the claim
+  // WITHOUT throwing a DB error — e.g. a cross-base update/delete whose write-gate PASSES (OWNER owns the
+  // target base) but whose targetRecordId does not exist in the target sheet. That path must roll the claim
+  // back (it now THROWS instead of `return {failed}`), else the claim would persist for an action that never
+  // mutated and every retry would be skipped as a FALSE duplicate — a permanently-lost update. G3 proves the
+  // DB-exception path rolls back; G5 proves the LOGICAL-failure path does too.
+  for (const kind of ['update_record', 'delete_record'] as const) {
+    test(`G5 ${kind}: a cross-base target-not-found (logical failure after claim) leaves NO claim → retry re-attempts`, async () => {
+      const ghost = `ca_ghost_${kind}_${TS}` // a record id that does NOT exist in SHEET_XB
+      const config =
+        kind === 'update_record'
+          ? { targetBaseId: BASE_XB, targetSheetId: SHEET_XB, targetRecordId: ghost, fields: { [FLD_TITLE]: 'x' } }
+          : { targetBaseId: BASE_XB, targetSheetId: SHEET_XB, targetRecordId: ghost }
+      const rule = ruleFor(SHEET, { type: kind, config })
+
+      const first = await svc.executeRule(rule, { actorId: OWNER, data: {} })
+      expect(first.status).toBe('failed')
+      expect(first.steps[0]?.error).toMatch(/target record not found/)
+      // THE POINT: the transaction rolled back, so the claim is NOT durable (no orphan skip).
+      expect(await claimRowsFor(first.id)).toHaveLength(0)
+
+      // A retry on the SAME root is NOT skipped as a duplicate — it re-attempts and fails the same way,
+      // and STILL leaves no claim. Before the throw-to-rollback fix this returned `alreadyApplied` success.
+      const retry = await replay(svc, rule, { actorId: OWNER, data: {} }, first)
+      expect(retry.status).toBe('failed')
+      expect(retry.steps[0]?.alreadyApplied).toBeUndefined()
+      expect(retry.steps[0]?.error).toMatch(/target record not found/)
+      expect(await claimRowsFor(first.id)).toHaveLength(0)
+    })
+  }
 })
