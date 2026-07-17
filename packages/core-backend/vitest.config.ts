@@ -448,9 +448,9 @@ export default defineConfig({
       // job (plugin-tests.yml), where it is green — so it is CI-covered, not invisible debt.
       'tests/integration/multitable-context.api.test.ts',
       'tests/integration/multitable-record-form.api.test.ts',
-      // multitable-sheet-permissions.api.test.ts uses an in-file mock pool and now centralizes the small set
-      // of production query projections that differ from its behavior-focused fixtures. It intentionally stays
-      // IN the standard Node 18/20 test job so future SQL drift fails required CI instead of becoming invisible.
+      // multitable-sheet-permissions.api.test.ts keeps its mock handlers aligned with production projections
+      // and treats unknown SQL as a hard failure. It intentionally stays IN the standard Node 18/20 test job
+      // so future SQL drift fails required CI instead of becoming invisible.
       'tests/integration/multitable-sheet-realtime.api.test.ts',
       // Six DB-gated specs (describeIfDatabase) that were previously NOT excluded here — meaning the
       // no-DB `test` job collected and skip-greened them (0 assertions ever executed) inside the
