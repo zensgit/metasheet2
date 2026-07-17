@@ -2207,6 +2207,33 @@ export function runtimeGraphUsesManagerChain(runtimeGraph: RuntimeGraph): boolea
 }
 
 /**
+ * B5-b owner P1: does the graph use ANY org-derived assignee source? All four kinds resolve from
+ * `orgRelations` — so when the org read FAILED (transient) or the routing POLICY is misconfigured,
+ * an empty `orgRelations` is not "requester has no manager", it is "we could not find out". Letting
+ * that empty flow into assignment resolution turns `emptyAssigneePolicy: 'auto-approve'` into a
+ * FAIL-OPEN (a broken routing policy silently auto-approves approvals). The create-time guard keyed
+ * on this detector fail-closes instead: 422 for the persistent policy config error, 503 for the
+ * transient read failure — with NO instance and NO assignment created. Genuine data absence (the
+ * read SUCCEEDED, the requester simply has no manager) still follows `emptyAssigneePolicy`.
+ */
+export function runtimeGraphUsesOrgAssigneeSource(runtimeGraph: RuntimeGraph): boolean {
+  return runtimeGraph.nodes.some((node) => {
+    if (node.type !== 'approval') return false
+    const config: unknown = node.config
+    const sources = isRecord(config) ? config.assigneeSources : undefined
+    if (!Array.isArray(sources)) return false
+    return sources.some(
+      (source) =>
+        isRecord(source) &&
+        (source.kind === 'direct_manager' ||
+          source.kind === 'dept_head' ||
+          source.kind === 'continuous_managers' ||
+          source.kind === 'manager_at_level'),
+    )
+  })
+}
+
+/**
  * Does the published runtime graph route on `requester.<attr>` (e.g. `department` / `title`)? Used by the
  * create-time wedge guard — a transient directory-read failure must fail the create fast (retryable) when
  * such a condition exists, rather than freezing an absent attribute that would wedge every later approval
@@ -3667,6 +3694,30 @@ export class ApprovalProductService {
     //   - read SUCCEEDED but empty (genuine row-level absence) -> 422, the requester's department is unset.
     // Only fires when the graph actually routes on requester.department (manager-chain / dept-head and
     // non-department templates are unaffected; genuine absence on those follows their emptyAssigneePolicy).
+    // B5-b owner P1 (fail-open closure): when the ORG READ failed — transient throw OR a
+    // misconfigured routing policy — an empty `orgRelations` must NOT flow into any org-derived
+    // assignee source (direct_manager / dept_head / continuous_managers / manager_at_level). It
+    // would resolve to an empty assignee set and, under `emptyAssigneePolicy: 'auto-approve'`,
+    // silently AUTO-APPROVE the instance: a broken policy becomes a fail-open. Fail-close at
+    // create instead, BEFORE any instance/assignment insert: 422 for the persistent config error
+    // ("contact an administrator" — retrying never fixes a policy), 503 for the transient failure
+    // (retryable). Genuine absence (read succeeded, requester has no manager) is untouched and
+    // still follows `emptyAssigneePolicy` — that is the pre-existing, deliberate semantic.
+    if (orgReadFailed && runtimeGraphUsesOrgAssigneeSource(runtimeGraph)) {
+      if (orgPolicyMisconfigured) {
+        throw new ServiceError(
+          'The directory routing policy for this organization is misconfigured, so approver resolution cannot run. Contact an administrator.',
+          422,
+          'APPROVAL_ROUTING_POLICY_MISCONFIGURED',
+        )
+      }
+      throw new ServiceError(
+        'Could not resolve the requester organization relations required by this approval template. Please retry.',
+        503,
+        'APPROVAL_REQUESTER_ORG_UNRESOLVED',
+      )
+    }
+
     if (!orgRelations.primaryDepartmentName && runtimeGraphUsesRequesterAttribute(runtimeGraph, 'department')) {
       if (orgPolicyMisconfigured) {
         // persistent CONFIG error — retrying never fixes a broken routing policy
