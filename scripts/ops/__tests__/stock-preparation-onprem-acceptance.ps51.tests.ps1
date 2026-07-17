@@ -132,12 +132,14 @@ if ($PSVersionTable.PSEdition -eq 'Desktop') {
   $hygieneDir = Join-Path ([System.IO.Path]::GetTempPath()) ("t9ps51_pm2_" + [guid]::NewGuid().ToString('N').Substring(0, 12))
   New-Item -ItemType Directory -Path $hygieneDir | Out-Null
   try {
-    Set-Content -Path (Join-Path $hygieneDir 'pm2-fixture.mjs') -Value @'
+    # -Encoding ASCII is LOAD-BEARING: Windows PowerShell 5.1 Set-Content defaults to UTF-16LE,
+    # and a BOM'd .mjs/.cmd fixture cannot be executed by node/cmd (entity re-review finding).
+    Set-Content -Path (Join-Path $hygieneDir 'pm2-fixture.mjs') -Encoding ASCII -Value @'
 #!/usr/bin/env node
 if (process.argv[2] !== 'jlist') process.exit(2)
 process.stdout.write(process.env.T9_PS51_JLIST || '')
 '@ -NoNewline
-    Set-Content -Path (Join-Path $hygieneDir 'pm2.cmd') -Value "@echo off`r`nnode `"%~dp0pm2-fixture.mjs`" %*" -NoNewline
+    Set-Content -Path (Join-Path $hygieneDir 'pm2.cmd') -Encoding ASCII -Value "@echo off`r`nnode `"%~dp0pm2-fixture.mjs`" %*" -NoNewline
     $oldPath = $env:PATH
     try {
       $env:PATH = "$hygieneDir;$oldPath"

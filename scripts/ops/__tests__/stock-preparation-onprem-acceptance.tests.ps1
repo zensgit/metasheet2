@@ -130,7 +130,7 @@ Check "PM2 projection helper is required by the on-prem package build" (
   $packageBuildSrc -match '"scripts/ops/stock-preparation-pm2-sample\.mjs"'
 )
 
-# ── 1. Summary is values-free by construction: exactly the 14 whitelisted keys, nothing else. ────
+# ── 1. Summary is values-free by construction: exactly the 15 whitelisted keys, nothing else. ────
 # (9 original + 5 corrective-5 bounded diagnostics; every added default is a fixed enum / integer.)
 $expectedFields = @(
   'packageShaMatch','migrationStatus','pm2StableOnline','healthcheck',

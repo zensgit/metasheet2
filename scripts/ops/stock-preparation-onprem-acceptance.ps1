@@ -16,7 +16,7 @@
                           restart COMMAND returned 0 — a command success is not a stable service).
     5. healthcheck      — GET /api/health.
     6. mvpSmoke         — the in-package stock-preparation smoke (postdeploy-smoke.mjs).
-    7. summary          — one values-free acceptance-summary.txt + .json: the 9 whitelisted status
+    7. summary          — one values-free acceptance-summary.txt + .json: the 15 whitelisted status
                           fields ALWAYS, plus — only on failure — a values-free failDetail block
                           (failedStage + at most a migration name / SQLSTATE / HTTP code, never a value).
 
@@ -27,7 +27,7 @@
       ArgumentList. It is handed to the child smoke ONLY through a scoped process env var that is
       cleared in a finally block.
     * The values-free guarantee is scoped to the SUMMARY ARTIFACTS (acceptance-summary.txt / .json): those
-      can only ever contain the 9 whitelisted status fields — each a PASS/FAIL/enum/count/coarse-code —
+      can only ever contain the 15 whitelisted status fields — each a PASS/FAIL/enum/count/coarse-code —
       never a drawing number, quantity, unit, material name, host, credential, or raw log line. On failure
       they add only failedStage + a coarse code (migration name / SQLSTATE / HTTP status / coarse reason),
       never a full log. The values-free construction is: only whitelisted fields are ever assigned into

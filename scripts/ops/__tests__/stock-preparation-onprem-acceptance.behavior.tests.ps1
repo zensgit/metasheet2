@@ -362,7 +362,7 @@ Invoke-SmokeStage -Token $token
   $pm2Secret = 'MAT-001-SECRET'
   $pm2WithDuplicateCaseKeys = '[{"name":"metasheet-backend","pm2_env":{"status":"online","restart_time":3,"pm_uptime":1000,"env":{"Path":"first","PATH":"second","MATERIAL":"' + $pm2Secret + '"}}}]'
   $projected = Invoke-Pm2Projection $pm2WithDuplicateCaseKeys
-  Check "pm2 projection: Path/PATH duplicate-case payload parses into the three-field sample" (
+  Check "pm2 projection: Path/PATH duplicate-case payload parses into the five-field sample" (
     $projected.Exit -eq 0 -and
     $projected.Sample.state -eq 'online' -and
     $projected.Sample.restartTime -eq 3 -and
