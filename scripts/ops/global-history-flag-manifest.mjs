@@ -131,6 +131,22 @@ export const GLOBAL_HISTORY_FLAG_MANIFEST = Object.freeze([
     ],
   },
   {
+    key: 'MULTITABLE_ENABLE_TRUST_CHECKPOINT_ACTIVATION',
+    type: 'boolean',
+    activationValue: 'true',
+    caseInsensitive: true, // `.trim().toLowerCase() === 'true'`, same resolution family as SHEET_REVERT/PIT_RESET
+    // Gate P2 (2026-07-17): a checkpoint minted without the canonical fence is a DURABLE untrustworthy
+    // artifact (torn baseline vs the allocated trusted_since_seq). The route ALSO fails closed at runtime
+    // (409 TRUST_CHECKPOINT_FENCE_REQUIRED when the fence flag is off) — this dep is the operator-facing
+    // declaration of the same invariant.
+    dependsOn: ['MULTITABLE_ENABLE_WRITER_FENCE'],
+    conflictsWith: [],
+    danger: 'medium',
+    purpose:
+      'W0-1 L5-wire (owner review 2026-07-17): the production caller for activateCheckpoint — POST /sheets/:sheetId/trust-checkpoint-activate provisions a trust checkpoint for one sheet in ONE fenced transaction (canonical fence first, then the design-lock §3 cutover: allocate trusted_since_seq, snapshot live + attributable-trash baselines, supersede the prior active checkpoint, activate). ADDITIVE-ONLY trust provisioning: no destructive write, and activating a checkpoint enables NOTHING by itself — strict mode and Revert/Reset stay behind their own default-OFF flags; a checkpoint is merely the (a)-half of the strict-enablement precondition. Fail-closed: an unattributable trashed-only record aborts the whole activation (409 HISTORY_INCOMPLETE, values-free). Sheet-admin (canManageSheetAccess, D2) floor — provisioning the trust floor for destructive recovery is an admin capability. danger=medium (not high): it writes only checkpoint/baseline rows, never live record data, but it moves the sheet\'s trust floor that later destructive recoveries anchor on, so it is not a plain ops convenience either.',
+    source: 'packages/core-backend/src/routes/univer-meta.ts#TRUST_CHECKPOINT_ACTIVATION_ENABLED,/trust-checkpoint-activate',
+  },
+  {
     key: 'MULTITABLE_ENABLE_SHEET_REVERT',
     type: 'boolean',
     activationValue: 'true',
