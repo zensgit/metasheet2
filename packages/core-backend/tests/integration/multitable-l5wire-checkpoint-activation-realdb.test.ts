@@ -171,6 +171,55 @@ describeIfDatabase('W0-1 L5-wire — trust-checkpoint activation route (real DB)
     expect(res.status).toBe(404)
   })
 
+  test('CONCURRENT-ACTIVATION (two real connections, persistent CI golden — owner P2): route-level race serializes on the fence; module-level race is caught by the one-active partial-unique', async () => {
+    enableBoth()
+    // (a) ROUTE level: two concurrent requests. The fence serializes the two cutover transactions, so the
+    // outcome is deterministic in SHAPE: every success activated exactly once, later success supersedes,
+    // and the DB ends with EXACTLY ONE active row. (A loser that interleaves at the flip maps to 409
+    // ACTIVATION_CONFLICT — accepted; never a 500, never two actives.)
+    const [r1, r2] = await Promise.all([activateReq().then((r) => r), activateReq().then((r) => r)])
+    const statuses = [r1.status, r2.status].sort()
+    expect([[200, 200], [200, 409]]).toContainEqual(statuses)
+    const rows = await checkpointRows()
+    expect(rows.filter((r) => r.state === 'active').length).toBe(1)
+    expect(rows.length).toBe([r1, r2].filter((r) => r.status === 200).length)
+
+    // (b) MODULE level (the DB backstop itself): two raw clients race activateCheckpoint WITHOUT the fence
+    // (the exact bypass the route's M1 guard forbids) — the one-active partial-unique must let exactly one
+    // commit; the loser gets a unique violation and rolls back fully.
+    expect(pool).toBeTruthy()
+    const [c1, c2] = await Promise.all([pool!.connect(), pool!.connect()])
+    try {
+      await q('DELETE FROM meta_history_baselines WHERE sheet_id = $1', [SHEET])
+      await q('DELETE FROM meta_history_trust_checkpoints WHERE sheet_id = $1', [SHEET])
+      const { activateCheckpoint } = await import('../../src/multitable/history-trust-checkpoint')
+      const raceOne = async (client: (typeof c1)) => {
+        await client.query('BEGIN')
+        try {
+          const res = await activateCheckpoint(((sql: string, params?: unknown[]) => client.query(sql, params)) as never, { sheetId: SHEET })
+          await client.query('COMMIT')
+          return { ok: true as const, id: res.checkpointId }
+        } catch (e) {
+          await client.query('ROLLBACK').catch(() => undefined)
+          return { ok: false as const, code: (e as { code?: string }).code }
+        }
+      }
+      const [a, b] = await Promise.all([raceOne(c1), raceOne(c2)])
+      const winners = [a, b].filter((r) => r.ok)
+      const losers = [a, b].filter((r) => !r.ok)
+      // Either they serialized on row locks (both commit, second supersedes) or the partial-unique caught
+      // the true flip race (loser 23505) — in EVERY outcome: exactly one active, loser left zero rows.
+      expect(winners.length).toBeGreaterThanOrEqual(1)
+      for (const l of losers) expect(l.code).toBe('23505')
+      const finalRows = await checkpointRows()
+      expect(finalRows.filter((r) => r.state === 'active').length).toBe(1)
+      expect(finalRows.length).toBe(winners.length)
+    } finally {
+      c1.release()
+      c2.release()
+    }
+  })
+
   test('FENCE-PARK (constructed race): a raw client holding the canonical fence parks the activation until release', async () => {
     enableBoth()
     expect(pool).toBeTruthy()
