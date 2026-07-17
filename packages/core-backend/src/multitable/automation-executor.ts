@@ -28,6 +28,7 @@ import { computeActionFingerprint } from './automation-suspension-service'
 import type { ConditionBranchResumeCursor } from './automation-resume-cursor'
 import { isRichLongTextProperty, normalizeJson, sanitizeRichLongText } from './field-codecs'
 import { ensureRecordNotLocked } from './record-lock'
+import { fenceWriterEntry, isWriterFenceEnabled } from './canonical-sheet-fence'
 import {
   assertTransactionalQuery,
   captureSideDoorInboundTombstones,
@@ -2276,7 +2277,7 @@ export class AutomationExecutor {
       // `poolManager.get().transaction(...)` — is re-verified for THIS slice by the atomicity golden,
       // not assumed from D-1). A failed revision INSERT rolls the UPDATE back too — no half-write (an
       // updated `meta_records` row with no matching `meta_record_revisions` row) is possible.
-      const txResult = await this.withTransaction(async (query) => {
+      const txResult = await this.withTransaction(effectiveSheetId, async (query) => {
         // #4196 Class-A claim — FIRST statement, SAME transaction as the mutation+revision below. A
         // duplicate (retry/replay) short-circuits: return the already-applied success and skip the UPDATE
         // and its revision entirely. The (no-op) transaction still commits cleanly.
@@ -2425,7 +2426,7 @@ export class AutomationExecutor {
         effectiveRecordId = targetRecordId
       }
 
-      const step = await this.withTransaction(async (query) => {
+      const step = await this.withTransaction(effectiveSheetId, async (query) => {
         // #4196 Class-A claim — FIRST statement, SAME transaction as the delete+revision below. A
         // duplicate (retry/replay) short-circuits: return the already-applied success and skip the DELETE,
         // link cleanup, tombstones and revision entirely. The (no-op) transaction still commits cleanly.
@@ -2590,11 +2591,34 @@ export class AutomationExecutor {
     }
   }
 
+  /**
+   * W0-1 L4-cov-services: every automation record write runs through here, so this is the single seam
+   * where the canonical per-sheet write fence (L4) covers the AUTOMATION writer class. Fence-FIRST inside
+   * the transaction (advisory xact lock ⇒ meaningful only txn-scoped), then the durable-block check —
+   * `fenceWriterEntry` is flag-gated (`MULTITABLE_ENABLE_WRITER_FENCE`), so with the flag OFF this is
+   * byte-identical to the pre-L4cov behaviour. A `SheetWriterBlockedError` thrown here propagates to each
+   * action's catch and fails the step honestly (surfaces in the execution log; automation retry semantics
+   * apply) — an automation write must never land inside a recovery's applying window.
+   *
+   * FAIL-CLOSED (mirrors the L6-a H3 precedent): with the fence flag ON but NO transaction seam available,
+   * an advisory xact lock taken on the bare autocommit `queryFn` would evaporate immediately — the fence
+   * guarantee cannot hold. That configuration throws instead of degrading silently. Production always has
+   * the seam (`AutomationService` hard-wires `deps.transaction` to a real `poolManager.get().transaction`).
+   */
   private async withTransaction<T>(
+    sheetId: string,
     handler: (query: AutomationDeps['queryFn']) => Promise<T>,
   ): Promise<T> {
     if (this.deps.transaction) {
-      return this.deps.transaction(async ({ query }) => handler(query))
+      return this.deps.transaction(async ({ query }) => {
+        await fenceWriterEntry(query, sheetId) // L4 fence-first; no-op when the fence flag is OFF
+        return handler(query)
+      })
+    }
+    if (isWriterFenceEnabled()) {
+      throw new Error(
+        'MULTITABLE_ENABLE_WRITER_FENCE is on but this AutomationExecutor has no transaction seam — the canonical write fence cannot be honoured (fail-closed, no silent unfenced write)',
+      )
     }
     return handler(this.deps.queryFn)
   }
@@ -2688,7 +2712,7 @@ export class AutomationExecutor {
       // xbase-write-gated: routes through evaluateCrossBaseWrite (gate computed above) — a cross-base
       // create is rejected before this INSERT unless claim==truth + trigger-actor base-write. This is
       // the §1.3 create-to-another-base vector the gate closes. revision-emitted: D-1c slice ③ (A4) — recordRecordRevision(action:'create') below, same txn.
-      const skipped = await this.withTransaction(async (query) => {
+      const skipped = await this.withTransaction(targetSheetId, async (query) => {
         // #4196 Class-A claim — FIRST statement, SAME transaction as the INSERT+revision below. A duplicate
         // (retry/replay) short-circuits: skip the INSERT and its birth revision entirely. The (no-op)
         // transaction still commits cleanly; the caller returns the already-applied success below.
@@ -3905,7 +3929,7 @@ export class AutomationExecutor {
         // withTransaction (mirrors the HTTP lock path) — a transient error between the two must not leave
         // a durable version hole that fail-closed-refuses revert/reset until C6. The three disposition
         // markers live INSIDE the callback: each structural guard scans a fixed window above the SQL line.
-        const skipped = await this.withTransaction(async (query) => {
+        const skipped = await this.withTransaction(effectiveSheetId, async (query) => {
           // #4196 Class-A claim — FIRST statement, SAME transaction as the lock UPDATE+marker below. A
           // duplicate (retry/replay) short-circuits: skip the version bump and the lock marker entirely.
           if (await this.claimClassAOrSkip(query, identity, 'lock_record', config) === 'duplicate') {
@@ -3929,7 +3953,7 @@ export class AutomationExecutor {
         // W0-1: write an unlock marker at the new version — legitimate non-data bump, not a hole. Bump +
         // marker are atomic inside withTransaction (mirrors the HTTP unlock path) — no durable version hole.
         // Disposition markers live INSIDE the callback (fixed guard scan windows above the SQL line).
-        const skipped = await this.withTransaction(async (query) => {
+        const skipped = await this.withTransaction(effectiveSheetId, async (query) => {
           // #4196 Class-A claim — FIRST statement, SAME transaction as the unlock UPDATE+marker below. A
           // duplicate (retry/replay) short-circuits: skip the version bump and the unlock marker entirely.
           if (await this.claimClassAOrSkip(query, identity, 'lock_record', config) === 'duplicate') {

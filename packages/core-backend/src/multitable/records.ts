@@ -702,8 +702,9 @@ async function deleteRecordWithRecoverability(
   await assertTransactionalQuery(query, 'plugin')
   // W0-1 L4 (canonical fence): the recoverable plugin delete runs inside a txn (asserted above) — fence +
   // durable-block check before the destructive read/write. No-op & byte-identical when the L4 flag is off.
-  // (The flag-off, non-transactional D-1 delete branch in `deleteRecord` cannot hold a txn-scoped advisory
-  // lock; it is enumerated as an L4-SEAM in the PR matrix — fencing it needs the txn wrap that path lacks.)
+  // (The D-1 delete branch in `deleteRecord` is fenced too as of L4-cov-services: with the flag ON it
+  // enforces the OD-7 transactional-query contract, takes this same fence, and mints/seals its operation —
+  // the former "L4-SEAM: needs the txn wrap" enumeration is closed, not merely recorded.)
   await fenceWriterEntry(query, input.sheetId)
   // W0-1 L6-a: mint the sealed operation after the fence; inert ⇒ byte-identical to L4cov.
   const op = await mintOperation(query, input.sheetId)
@@ -860,6 +861,20 @@ export async function deleteRecord(
     return await deleteRecordWithRecoverability(input)
   }
 
+  // W0-1 L4-cov-services (owner directive: fold the deferred D-1 delete branch into H1-DELETE's
+  // IMPLEMENTATION matrix, so it can never again sit in "recorded gap" state): with the L4 fence flag ON
+  // this branch now (a) enforces the transactional-`query` contract OD-7 already pins on the sole
+  // production wiring (index.ts plugin-SDK txn wrap), (b) takes the canonical fence + durable-block check,
+  // and (c) mints a sealed operation below so the delete revision is ledger-tagged — its sealed endpoint is
+  // then H1-immutable (UPDATE/DELETE-reject triggers) exactly like every other delete sink's. With the flag
+  // OFF: the guard is not reached, `mintOperation` returns the inert ledger, `ledger: op` tags nothing, and
+  // `sealOperation` no-ops — this branch stays byte-identical D-1 behaviour (§1.9).
+  if (isWriterFenceEnabled()) {
+    await assertTransactionalQuery(query, 'plugin')
+    await fenceWriterEntry(query, input.sheetId)
+  }
+  const op = await mintOperation(query, input.sheetId)
+
   // D-1 (destruction-path gap audit, owner-ratified): read the row BEFORE destroying anything so the
   // delete revision below can carry the record's final snapshot. PIT/as-of-T existence is derived
   // PURELY from meta_record_revisions — without a delete revision this path left the record "alive"
@@ -907,7 +922,12 @@ export async function deleteRecord(
     changedFieldIds: [],
     patch: {},
     snapshot: snapshotRow?.data ?? null,
+    ledger: op,
   })
+
+  // W0-1 L6-a / L4-cov-services: seal the operation LAST (endpoint row after its tagged event, satisfying
+  // the deferred FK + endpoint-validation trigger at COMMIT). No-op when the ledger is inert (flag off).
+  await sealOperation(query, op)
 
   return {
     id: input.recordId,

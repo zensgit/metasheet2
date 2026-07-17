@@ -53,6 +53,7 @@ const logger = new Logger('ApprovalRecordProjection')
  *  re-exported here for existing importers. */
 export { APPROVAL_PROJECTION_BASE_ID } from './approval-projection-constants'
 import { APPROVAL_PROJECTION_BASE_ID } from './approval-projection-constants'
+import { fenceWriterEntry } from './canonical-sheet-fence'
 /** Reserved owner/actor for the system-managed base + record rows (not a real user). */
 export const APPROVAL_PROJECTION_SYSTEM_OWNER = 'system:approval-projection'
 
@@ -207,6 +208,14 @@ export class ApprovalRecordProjectionService {
     const client = await pool.connect()
     try {
       await client.query('BEGIN')
+      // W0-1 L4-cov-services: the PROJECTION writer class joins the canonical per-sheet fence (flag-gated
+      // no-op when `MULTITABLE_ENABLE_WRITER_FENCE` is off). Projection sheets are system sheets
+      // (`system_kind='approval_projection'`) and thus never a recovery target today, so the durable-block
+      // check should never fire — this is the uniform all-writer discipline (v3.7 §2 all-writer matrix), and
+      // it future-proofs against any later widening of recovery scope. LOCK ORDER: canonical fence FIRST,
+      // then the per-instance projection lock — no other code path takes the projection lock, so no path can
+      // hold projection-then-canonical, and the order cannot deadlock against fenced writers.
+      await fenceWriterEntry((sql, params) => client.query(sql, params), sheetId)
       // Serialize every reconcile for THIS instance (auto-approve create-hook↔event, sweep↔terminal).
       await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [`approval-projection:${instanceId}`])
 

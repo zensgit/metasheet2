@@ -7,6 +7,8 @@
 import { FormulaEngine, type CellValue, type FormulaContext } from '../formula/engine'
 import type { MultitableField } from './field-codecs'
 import type { MultitableRecordsQueryFn } from './records'
+import { fenceWriterEntry, isWriterFenceEnabled } from './canonical-sheet-fence'
+import { poolManager } from '../integration/db/connection-pool'
 import { Logger } from '../core/logger'
 
 const logger = new Logger('MultitableFormulaEngine')
@@ -342,10 +344,40 @@ export class MultitableFormulaEngine {
       // version bump: formula values are derived, not an authoritative user edit.
       // lock-exempt: system formula materialization — derived value, no user actor (lock = read-only to USERS).
       // revision-exempt: derived formula materialization, no version bump — pure fn of inputs, recompute-on-read.
-      await query(
-        `UPDATE meta_records SET data = data || $1::jsonb, updated_at = now() WHERE id = $2 AND sheet_id = $3`,
-        [JSON.stringify(updates), recordId, sheetId],
-      )
+      //
+      // W0-1 L4-cov-services: the FORMULA writer class joins the canonical fence (flag-gated no-op when
+      // `MULTITABLE_ENABLE_WRITER_FENCE` is off). Even a derived-value write must not land inside a
+      // recovery's applying window — a materialization computed from PRE-recovery inputs would clobber the
+      // just-recovered `data`. TOCTOU root fix (owner ruling 2026-07-17): the fence-check→UPDATE PAIR runs in
+      // its OWN short transaction so `pg_advisory_xact_lock` is held from acquisition to COMMIT (a bare
+      // autocommit query released it per statement, leaving a block-check→UPDATE window). This is
+      // SELF-CONTAINED in the engine — callers still pass their ordinary (pool) query for the READS above
+      // (preserving per-record independence: each record's materialization commits/rolls back on its own,
+      // exactly the partial-progress the bulk-recompute contract depends on), and the fence's txn-scope is no
+      // longer a caller obligation. A durable recovery block ⇒ `fenceWriterEntry` throws inside the txn ⇒ the
+      // txn rolls back ⇒ the outer catch returns null (no materialization). Only the fence+UPDATE are inside
+      // this txn; the `data || $updates` merge re-reads the live row at UPDATE time.
+      if (isWriterFenceEnabled()) {
+        await poolManager.get().transaction(async ({ query: fencedQuery }) => {
+          const fq = fencedQuery as unknown as MultitableRecordsQueryFn
+          await fenceWriterEntry(fq, sheetId)
+          // lock-exempt: system formula materialization — derived value, no user actor (lock = read-only to USERS)
+          // revision-exempt: derived formula materialization, no version bump — pure fn of inputs, recompute-on-read
+          await fq(
+            `UPDATE meta_records SET data = data || $1::jsonb, updated_at = now() WHERE id = $2 AND sheet_id = $3`,
+            [JSON.stringify(updates), recordId, sheetId],
+          )
+        })
+      } else {
+        // Flag OFF (default, and what unit/mock callers run under): BYTE-IDENTICAL to pre-L4cov — a direct
+        // UPDATE on the passed query, no fence, no real-pool transaction (so a mock query stays honored).
+        // lock-exempt: system formula materialization — derived value, no user actor (lock = read-only to USERS)
+        // revision-exempt: derived formula materialization, no version bump — pure fn of inputs, recompute-on-read
+        await query(
+          `UPDATE meta_records SET data = data || $1::jsonb, updated_at = now() WHERE id = $2 AND sheet_id = $3`,
+          [JSON.stringify(updates), recordId, sheetId],
+        )
+      }
       return { ...data, ...updates }
     } catch (error) {
       logger.error('recalculateRecordFromData failed:', error as Error)

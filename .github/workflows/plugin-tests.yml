@@ -584,6 +584,7 @@ jobs:
             tests/integration/stock-preparation-t3b-plm-autopersist-realdb.test.ts \
             tests/integration/multitable-l4-canonical-fence-realdb.test.ts \
             tests/integration/multitable-l4cov-univer-meta-writers-realdb.test.ts \
+            tests/integration/multitable-l4cov-services-fence-realdb.test.ts \
             tests/integration/multitable-l6a-sealed-operation-endpoint-realdb.test.ts \
             --reporter=dot
 
