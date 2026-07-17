@@ -1,6 +1,10 @@
 import { computed, ref } from 'vue'
 import { apiGet } from '../utils/api'
-import { platformAppLabel } from '../utils/platformAppLabels'
+import {
+  platformAppLabel,
+  type PlatformAppInstallState,
+  type PlatformAppPluginStatus,
+} from '../utils/platformAppLabels'
 
 const TENANT_HINT_KEYS = ['tenantId', 'workspaceId'] as const
 
@@ -22,7 +26,7 @@ export interface PlatformAppInstanceSummary {
   instanceKey: string
   projectId: string
   displayName: string
-  status: 'active' | 'inactive' | 'failed'
+  status: PlatformAppPluginStatus
   config: Record<string, unknown>
   metadata: Record<string, unknown>
   createdAt?: string
@@ -35,7 +39,7 @@ export interface PlatformAppSummary {
   pluginName: string
   pluginVersion?: string
   pluginDisplayName?: string
-  pluginStatus: 'active' | 'inactive' | 'failed'
+  pluginStatus: PlatformAppPluginStatus
   pluginError?: string
   displayName: string
   runtimeModel: 'instance' | 'direct'
@@ -77,7 +81,9 @@ function resolveShellRoute(appId: string): string {
 
 export type PlatformAppRuntimeInstallState = 'not-installed' | 'installed' | 'partial' | 'failed'
 
-const runtimeInstallStateByAppId = ref<Record<string, PlatformAppRuntimeInstallState>>({})
+type PlatformAppStoredInstallState = Exclude<PlatformAppRuntimeInstallState, 'installed'>
+
+const runtimeInstallStateByAppId = ref<Record<string, PlatformAppStoredInstallState>>({})
 
 function readRuntimeScopeHint(): string {
   if (typeof localStorage !== 'undefined') {
@@ -113,7 +119,7 @@ function resolveRuntimeScopeKey(appId: string, scopeId?: string | null): string 
   return normalizedScopeId ? `${normalizedScopeId}:${appId}` : appId
 }
 
-function clearRuntimeStateForApp(next: Record<string, PlatformAppRuntimeInstallState>, appId: string): void {
+function clearRuntimeStateForApp(next: Record<string, PlatformAppStoredInstallState>, appId: string): void {
   for (const key of Object.keys(next)) {
     if (key === appId || key.endsWith(`:${appId}`)) {
       delete next[key]
@@ -142,7 +148,7 @@ export function setPlatformAppRuntimeInstallState(
 function resolveRuntimeInstallState(
   app: PlatformAppSummary,
   runtimeInstallState?: PlatformAppRuntimeInstallState | null,
-): PlatformAppRuntimeInstallState | 'active' | 'inactive' | 'direct' {
+): PlatformAppInstallState {
   if (app.runtimeModel === 'direct') {
     return 'direct'
   }
@@ -212,7 +218,7 @@ async function syncRuntimeInstallStates(appList: PlatformAppSummary[]): Promise<
 export function resolvePlatformAppInstallState(
   app: PlatformAppSummary,
   runtimeInstallState?: PlatformAppRuntimeInstallState | null,
-): string {
+): PlatformAppInstallState {
   if (app.runtimeModel === 'direct') {
     return 'direct'
   }

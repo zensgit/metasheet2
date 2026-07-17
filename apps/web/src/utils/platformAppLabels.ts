@@ -111,20 +111,24 @@ const PLATFORM_APP_LABELS: Record<PlatformAppLabelKey, LocalizedLabel> = {
   },
 }
 
-const PLATFORM_APP_STATUS_LABELS: Record<string, LocalizedLabel> = {
+const PLATFORM_APP_STATUS_LABELS = {
   active: { en: 'Active', zh: '可用' },
   inactive: { en: 'Inactive', zh: '已停用' },
   failed: { en: 'Unavailable', zh: '异常' },
-}
+} satisfies Record<string, LocalizedLabel>
 
-const PLATFORM_APP_INSTALL_STATE_LABELS: Record<string, LocalizedLabel> = {
+export type PlatformAppPluginStatus = keyof typeof PLATFORM_APP_STATUS_LABELS
+
+const PLATFORM_APP_INSTALL_STATE_LABELS = {
   direct: { en: 'Direct entry', zh: '直接使用' },
   active: { en: 'Ready', zh: '已就绪' },
   inactive: { en: 'Inactive', zh: '已停用' },
   failed: { en: 'Failed', zh: '安装失败' },
   partial: { en: 'Incomplete', zh: '安装不完整' },
   'not-installed': { en: 'Not installed', zh: '未安装' },
-}
+} satisfies Record<string, LocalizedLabel>
+
+export type PlatformAppInstallState = keyof typeof PLATFORM_APP_INSTALL_STATE_LABELS
 
 const PLATFORM_APP_COPY: Record<string, { name: LocalizedLabel; description: LocalizedLabel }> = {
   attendance: {
@@ -151,12 +155,12 @@ export function platformAppLabel(key: PlatformAppLabelKey, isZh: boolean): strin
   return resolveLocalizedLabel(PLATFORM_APP_LABELS[key], isZh)
 }
 
-export function platformAppStatusLabel(status: string, isZh: boolean): string {
+export function platformAppStatusLabel(status: PlatformAppPluginStatus, isZh: boolean): string {
   const entry = PLATFORM_APP_STATUS_LABELS[status]
   return entry ? resolveLocalizedLabel(entry, isZh) : status
 }
 
-export function platformAppInstallStateLabel(state: string, isZh: boolean): string {
+export function platformAppInstallStateLabel(state: PlatformAppInstallState, isZh: boolean): string {
   const entry = PLATFORM_APP_INSTALL_STATE_LABELS[state]
   return entry ? resolveLocalizedLabel(entry, isZh) : state
 }

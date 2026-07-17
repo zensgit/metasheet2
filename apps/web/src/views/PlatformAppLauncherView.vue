@@ -89,7 +89,7 @@
           <RouterLink
             v-if="card.primaryAction.route && (card.primaryAction.kind !== 'inspect' || canInspectShell)"
             class="platform-app-launcher__primary"
-            :to="card.primaryAction.route || card.shellRoute"
+            :to="card.primaryAction.route"
           >
             {{ card.primaryAction.label }}
           </RouterLink>

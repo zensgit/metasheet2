@@ -1,8 +1,7 @@
-import { readFileSync } from 'node:fs'
-import { resolve } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createApp, nextTick, type App as VueApp, type Component } from 'vue'
 import { useLocale } from '../src/composables/useLocale'
+import launcherSource from '../src/views/PlatformAppLauncherView.vue?raw'
 import {
   setPlatformAppRuntimeInstallState,
   type PlatformAppSummary,
@@ -115,9 +114,22 @@ async function flushUi(cycles = 4): Promise<void> {
   }
 }
 
+function installLauncherStyles(): HTMLStyleElement {
+  const openingTag = '<style scoped>'
+  const start = launcherSource.indexOf(openingTag)
+  const end = launcherSource.indexOf('</style>', start)
+  if (start < 0 || end < 0) throw new Error('PlatformAppLauncherView scoped styles not found')
+
+  const style = document.createElement('style')
+  style.textContent = launcherSource.slice(start + openingTag.length, end)
+  document.head.appendChild(style)
+  return style
+}
+
 describe('PlatformAppLauncherView', () => {
   let app: VueApp<Element> | null = null
   let container: HTMLDivElement | null = null
+  let launcherStyle: HTMLStyleElement | null = null
 
   beforeEach(() => {
     setPlatformAppRuntimeInstallState('after-sales', null)
@@ -134,8 +146,10 @@ describe('PlatformAppLauncherView', () => {
   afterEach(() => {
     if (app) app.unmount()
     if (container) container.remove()
+    if (launcherStyle) launcherStyle.remove()
     app = null
     container = null
+    launcherStyle = null
     setPlatformAppRuntimeInstallState('after-sales', null)
     useLocale().setLocale('en')
     window.localStorage.removeItem('user_roles')
@@ -226,20 +240,31 @@ describe('PlatformAppLauncherView', () => {
   it('renders a locale-safe error state without exposing backend fallback text', async () => {
     useLocale().setLocale('zh-CN')
     apiGetMock.mockRejectedValueOnce(new Error('Failed to load platform apps'))
+    launcherStyle = installLauncherStyles()
 
     await mountLauncher()
 
     const alert = container.querySelector<HTMLElement>('[role="alert"]')
     expect(alert?.textContent?.trim()).toBe('应用加载失败，请重试。')
     expect(container.textContent).not.toContain('Failed to load platform apps')
+    expect(getComputedStyle(alert!).backgroundColor).toBe('rgb(255, 255, 255)')
+    expect(getComputedStyle(alert!).color).toBe('rgb(185, 28, 28)')
   })
 
-  it('pins readable foreground colors on light launcher surfaces', () => {
-    const source = readFileSync(resolve(__dirname, '../src/views/PlatformAppLauncherView.vue'), 'utf8')
+  it('pins readable foreground colors on rendered light launcher surfaces', async () => {
+    apiGetMock.mockResolvedValueOnce({ list: [createDirectApp()] })
+    launcherStyle = installLauncherStyles()
 
-    expect(source).toMatch(/\.platform-app-launcher__card\s*\{[^}]*background:\s*#fff;[^}]*color:\s*#0f172a;/s)
-    expect(source).toMatch(/\.platform-app-launcher__meta dd\s*\{[^}]*color:\s*#0f172a;/s)
-    expect(source).toMatch(/\.platform-app-launcher__error,\s*\.platform-app-launcher__state\s*\{[^}]*background:\s*#fff;[^}]*color:\s*#334155;/s)
-    expect(source).toMatch(/\.platform-app-launcher__primary\s*\{[^}]*background:\s*#2563eb;[^}]*color:\s*#fff;/s)
+    await mountLauncher()
+
+    const card = container.querySelector<HTMLElement>('.platform-app-launcher__card')!
+    const metadata = container.querySelector<HTMLElement>('.platform-app-launcher__meta dd')!
+    const primaryAction = container.querySelector<HTMLElement>('.platform-app-launcher__primary')!
+
+    expect(getComputedStyle(card).backgroundColor).toBe('rgb(255, 255, 255)')
+    expect(getComputedStyle(card).color).toBe('rgb(15, 23, 42)')
+    expect(getComputedStyle(metadata).color).toBe('rgb(15, 23, 42)')
+    expect(getComputedStyle(primaryAction).backgroundColor).toBe('rgb(37, 99, 235)')
+    expect(getComputedStyle(primaryAction).color).toBe('rgb(255, 255, 255)')
   })
 })
