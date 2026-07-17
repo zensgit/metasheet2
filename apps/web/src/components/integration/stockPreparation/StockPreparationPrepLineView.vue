@@ -145,7 +145,17 @@
       <!-- VALUES-FREE rows: handles + status enums + counts + presence booleans ONLY. The drawing
            number, design/issue quantity, and unit columns are OWNER-GATED value surfaces (OD-W3-1)
            and are DELIBERATELY not shown in the MVP. -->
-      <div v-else class="sp-line__table-wrap">
+      <!-- H4-3 keyboard: this table has NO focusable content in ANY row (plain-text/badge cells
+           only — the drawing-number/quantity/unit columns are OWNER-GATED and deliberately absent).
+           Without this, a keyboard operator would have no way to reach its horizontal scroll at all,
+           so the wrap itself is a native scroll-region. -->
+      <div
+        v-else
+        class="sp-line__table-wrap"
+        tabindex="0"
+        role="region"
+        :aria-label="bi('备料明细表格,可滚动', 'Prep line table, scrollable')"
+      >
         <table class="sp-line__table" data-testid="stock-prep-line-table">
           <thead>
             <tr>
@@ -490,6 +500,11 @@ watch(statusFilter, reloadList)
 .sp-line__table-wrap {
   max-height: 420px;
   overflow: auto;
+}
+
+.sp-line__table-wrap:focus-visible {
+  outline: 2px solid var(--ms-color-primary);
+  outline-offset: 1px;
 }
 
 .sp-line__table {

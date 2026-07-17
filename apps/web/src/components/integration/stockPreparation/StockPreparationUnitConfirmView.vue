@@ -167,7 +167,16 @@
         <p v-if="candidates.rowCount === 0" class="sp-unit__state sp-unit__state--muted" data-testid="stock-prep-unit-empty">
           {{ bi('当前批次没有需要单位换算的上下文。', 'No unit-conversion contexts in this batch.') }}
         </p>
-        <div v-else class="sp-unit__table-wrap">
+        <!-- H4-3 keyboard: the Confirm button only renders (v-if, not just :disabled) for
+             candidate+hasCandidate rows — a filter/view with no such row leaves NO focusable content
+             in the table, so the wrap itself is ALSO a native scroll-region. -->
+        <div
+          v-else
+          class="sp-unit__table-wrap"
+          tabindex="0"
+          role="region"
+          :aria-label="bi('单位换算计算候选表格,可滚动', 'Unit-conversion candidate table, scrollable')"
+        >
           <table class="sp-unit__table" data-testid="stock-prep-unit-queue">
             <thead>
               <tr>
@@ -725,6 +734,11 @@ watch(() => props.projectId, loadAll)
 .sp-unit__table-wrap {
   max-height: 420px;
   overflow: auto;
+}
+
+.sp-unit__table-wrap:focus-visible {
+  outline: 2px solid var(--ms-color-primary);
+  outline-offset: 1px;
 }
 
 .sp-unit__table {

@@ -58,7 +58,16 @@
         </span>
       </header>
 
-      <div class="sp-snap__table-wrap">
+      <!-- H4-3 keyboard: this wrap is the scroll container (both axes). Most rows carry a "View diff"
+           button, but an incomplete batch's entry is DISABLED (removed from tab order) — if every
+           batch happened to be incomplete the row content alone would give a keyboard operator no way
+           to reach this scroll area, so the wrap itself is ALSO a native scroll-region. -->
+      <div
+        class="sp-snap__table-wrap"
+        tabindex="0"
+        role="region"
+        :aria-label="bi('快照批次表格,可滚动', 'Snapshot batches table, scrollable')"
+      >
         <table class="sp-snap__table">
           <thead>
             <tr>
@@ -250,7 +259,15 @@
                   {{ bi('差异行', 'Diff rows') }}: {{ diffRows.rowCount }} ·
                   {{ bi('待处理', 'Held') }}: {{ diffRows.heldRowCount }}
                 </p>
-                <div class="sp-snap__rows-scroll">
+                <!-- H4-3 keyboard: this drill-down table has NO focusable content in any row (plain
+                     text cells only) — without this, a keyboard operator would have no way to reach
+                     its horizontal scroll at all, so the wrap itself is a native scroll-region. -->
+                <div
+                  class="sp-snap__rows-scroll"
+                  tabindex="0"
+                  role="region"
+                  :aria-label="bi('逐行差异明细表格,可滚动', 'Row-detail diff table, scrollable')"
+                >
                   <table class="sp-snap__rows-table" data-testid="stock-prep-snapshot-diff-rows-table">
                     <thead>
                       <tr>
@@ -582,6 +599,11 @@ watch(() => props.projectId, loadBatches)
   overflow: auto;
 }
 
+.sp-snap__table-wrap:focus-visible {
+  outline: 2px solid var(--ms-color-primary);
+  outline-offset: 1px;
+}
+
 .sp-snap__table {
   width: 100%;
   min-width: 720px;
@@ -777,6 +799,11 @@ watch(() => props.projectId, loadBatches)
 .sp-snap__rows-scroll {
   max-height: 360px;
   overflow: auto;
+}
+
+.sp-snap__rows-scroll:focus-visible {
+  outline: 2px solid var(--ms-color-primary);
+  outline-offset: 1px;
 }
 
 .sp-snap__rows-table {

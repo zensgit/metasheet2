@@ -165,7 +165,17 @@
       <!-- VALUES-FREE queue rows: handles + enums + booleans only — the exception message (business
            text) never crosses the wire, so it can never render here. Resolved rows are READ-ONLY:
            selection and resolve are disabled. -->
-      <div v-else class="sp-exq__table-wrap">
+      <!-- H4-3 keyboard: this wrap is the scroll container (both axes). The select-checkbox and
+           Resolve button are BOTH disabled once a row is resolved — a filter/view where every row is
+           already resolved would leave NO focusable content, so the wrap itself is ALSO a native
+           scroll-region. -->
+      <div
+        v-else
+        class="sp-exq__table-wrap"
+        tabindex="0"
+        role="region"
+        :aria-label="bi('异常队列表格,可滚动', 'Exception queue table, scrollable')"
+      >
         <table class="sp-exq__table" data-testid="stock-prep-exception-queue">
           <thead>
             <tr>
@@ -620,6 +630,11 @@ watch([statusFilter, typeFilter], reloadList)
 .sp-exq__table-wrap {
   max-height: 420px;
   overflow: auto;
+}
+
+.sp-exq__table-wrap:focus-visible {
+  outline: 2px solid var(--ms-color-primary);
+  outline-offset: 1px;
 }
 
 .sp-exq__table {

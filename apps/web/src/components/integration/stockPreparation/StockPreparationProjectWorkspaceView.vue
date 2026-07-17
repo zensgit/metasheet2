@@ -56,7 +56,15 @@
         </span>
       </header>
 
-      <div class="sp-project__table-wrap">
+      <!-- H4-3 keyboard: this wrap is the scroll container (both axes) — every row DOES carry a
+           focusable action button, but a keyboard operator can also Tab to the WRAP ITSELF (native
+           scroll-region idiom) and scroll with arrow/Page keys without depending on row content. -->
+      <div
+        class="sp-project__table-wrap"
+        tabindex="0"
+        role="region"
+        :aria-label="bi('项目工作台表格,可滚动', 'Project workspace table, scrollable')"
+      >
         <table class="sp-project__table">
           <thead>
             <tr>
@@ -258,6 +266,11 @@ onMounted(load)
 .sp-project__table-wrap {
   max-height: 420px;
   overflow: auto;
+}
+
+.sp-project__table-wrap:focus-visible {
+  outline: 2px solid var(--ms-color-primary);
+  outline-offset: 1px;
 }
 
 .sp-project__table {

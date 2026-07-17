@@ -142,7 +142,17 @@
       <p v-if="queue.rowCount === 0" class="sp-map__state sp-map__state--muted" data-testid="stock-prep-mapping-empty">
         {{ bi('当前无候选映射行。', 'No candidate mapping rows.') }}
       </p>
-      <div v-else class="sp-map__table-wrap">
+      <!-- H4-3 keyboard: this wrap is the scroll container (both axes). Confirm/Retire are DISABLED
+           when a row lacks mappingId/hasErpTarget — if every row in the current filter lacked those,
+           row content alone would give a keyboard operator no way to reach this scroll area, so the
+           wrap itself is ALSO a native scroll-region. -->
+      <div
+        v-else
+        class="sp-map__table-wrap"
+        tabindex="0"
+        role="region"
+        :aria-label="bi('物料映射候选行表格,可滚动', 'Material-mapping candidate table, scrollable')"
+      >
         <table class="sp-map__table" data-testid="stock-prep-mapping-queue">
           <thead>
             <tr>
@@ -701,6 +711,11 @@ watch(statusFilter, reloadQueue)
 .sp-map__table-wrap {
   max-height: 420px;
   overflow: auto;
+}
+
+.sp-map__table-wrap:focus-visible {
+  outline: 2px solid var(--ms-color-primary);
+  outline-offset: 1px;
 }
 
 .sp-map__table {
