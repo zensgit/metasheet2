@@ -22,6 +22,7 @@ import {
   parseDigestSourceKey,
   buildRestoreDigestPolicyBody,
   classifySendOutcome,
+  describeStuckDelivery,
   resolveEnvConfig,
 } from './staging-attendance-report-digest-rd45-smoke.mjs'
 
@@ -208,6 +209,33 @@ test('rd45 send-outcome classifier: sent / recognized visible failure = proven; 
   assert.equal(classifySendOutcome([]).visiblyProven, false, 'zero rows prove nothing')
 })
 
+test('rd45 classifier captures direct evidence (last_error/attempt_count/next_attempt_at) for every non-terminal row', () => {
+  const retrying = classifySendOutcome([{
+    id: 'd1', status: 'retrying', last_error: 'dingtalk_request_500: upstream busy',
+    attempt_count: 2, next_attempt_at: '2026-07-17T01:42:00Z',
+  }])
+  assert.equal(retrying.retrying, 1)
+  assert.equal(retrying.visiblyProven, false)
+  // The last hammer: the retrying row's evidence is captured, not discarded (the pre-fix gap).
+  assert.equal(retrying.nonTerminal.length, 1)
+  assert.deepEqual(retrying.nonTerminal[0], {
+    id: 'd1', status: 'retrying', lastError: 'dingtalk_request_500: upstream busy',
+    attemptCount: 2, nextAttemptAt: '2026-07-17T01:42:00Z',
+  })
+  // pending and sending rows are captured too; terminal rows (sent / failed) are NOT in nonTerminal.
+  const mix = classifySendOutcome([
+    { id: 'p', status: 'pending' },
+    { id: 's', status: 'sending', attempt_count: 1 },
+    { id: 'ok', status: 'sent' },
+    { id: 'f', status: 'failed', last_error: 'dingtalk_recipient_not_bound' },
+  ])
+  assert.deepEqual(mix.nonTerminal.map(d => d.id).sort(), ['p', 's'])
+  // describeStuckDelivery null-safety: absent numeric/timestamp fields normalize to null, not NaN/'undefined'.
+  assert.deepEqual(describeStuckDelivery({ id: 'x', status: 'retrying' }), {
+    id: 'x', status: 'retrying', lastError: null, attemptCount: null, nextAttemptAt: null,
+  })
+})
+
 test('rd45 helper does not claim the final staging pass and prints the exact API/DB pass-line shape', () => {
   assert.match(script, /RD45_REPORT_DIGEST_API_DB_SMOKE_PASS deploy=\$\{DEPLOY_SHA\} stamp=\$\{STAMP\} org=\$\{ORG_ID\} produced=\$\{subjects\.length\} dedupOk=\$\{dedupOk \? 1 : 0\} residue=0/)
   assert.doesNotMatch(script, /RD45_REPORT_DIGEST_STAGING_SMOKE_PASS/)
@@ -241,6 +269,17 @@ test('rd45 helper residue triple-check covers every table the smoke can dirty; s
   // this smoke writes no other attendance business rows
   assert.doesNotMatch(script, /DELETE FROM attendance_records/)
   assert.doesNotMatch(script, /DELETE FROM attendance_requests/)
+  // The seam directory fixture (deterministic dingtalk_recipient_not_bound) dirties two SHARED directory_*
+  // tables — so the "every table the smoke can dirty" invariant must extend to them: both are counted in
+  // residue AND cleaned (integration delete FK-cascades to accounts; the member-link delete is explicit).
+  for (const table of ['directory_integrations', 'directory_account_links']) {
+    assert.match(script, new RegExp(`FROM ${table}`), `${table} is counted in residue`)
+    assert.match(script, new RegExp(`DELETE FROM ${table}`), `${table} is cleaned`)
+  }
+  // Directory ops are HARD-SCOPED: seam track + stamped disposable org only, never the default/real org.
+  assert.match(script, /if \(TRIGGER_MODE !== 'seam'\) return/, 'directory fixture is seam-only')
+  assert.match(script, /is not the stamped disposable org/, 'directory fixture refuses a non-disposable org')
+  assert.match(script, /function isDisposableOrg\(\)/, 'a disposable-org gate exists for the shared directory_* deletes')
 })
 
 test('rd45 helper cleanup is stamped/prefix-scoped, LIKE-free, and restores settings BEFORE deleting rows (re-insert trap)', () => {
