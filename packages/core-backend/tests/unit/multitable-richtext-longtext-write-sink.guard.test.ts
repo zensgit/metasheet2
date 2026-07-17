@@ -92,9 +92,10 @@ const ALLOWLIST: Record<string, { disposition: 'CHOKEPOINT' | 'SAFE'; reason: st
     disposition: 'SAFE',
     reason: 'T3-6 read-model projection writes ONLY the fixed system columns (requestNo/templateId/name/status/outcome/requesterId/approverId/timestamps/currentNodeKey) derived from approval_instances+approval_records — never form_snapshot or a user-supplied rich-longText carrier',
   },
-  'multitable/formula-engine.ts': {
+  'multitable/derived-write-fence.ts': {
     disposition: 'SAFE',
-    reason: 'writes ONLY computed formula-result keys — derived server-side, never raw user HTML',
+    reason:
+      'the SHARED flag-gated fence+UPDATE seam for derived-value materializations (formula engine + the univer-meta relation-agg resolvers route through it since the #4438 post-merge follow-up) — writes ONLY computed formula/relation-agg result keys, derived server-side, never raw user HTML',
   },
   'multitable/automation-service.ts': {
     disposition: 'SAFE',
