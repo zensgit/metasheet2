@@ -44,7 +44,8 @@ import { afterAll, beforeAll, beforeEach, describe, expect, test } from 'vitest'
 
 import { poolManager } from '../../src/integration/db/connection-pool'
 import { univerMetaRouter } from '../../src/routes/univer-meta'
-import { precheckSheetHistoryIntegrity } from '../../src/multitable/history-integrity-precheck'
+import { precheckSheetHistoryIntegrity, precheckSheetHistoryIntegrityStrict } from '../../src/multitable/history-integrity-precheck'
+import { activateCheckpoint, type QueryFn } from '../../src/multitable/history-trust-checkpoint'
 
 const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
 const TS = Date.now()
@@ -104,7 +105,17 @@ async function sheetWriteState(sheet: string) {
   return { records, revisionCount }
 }
 
-async function expectRevertRefusesWithZeroWrites(sheet: string): Promise<void> {
+/**
+ * Owner P2 (2026-07-16): under the flipped strict-enablement gate, EVERY strict-flag-on production request
+ * refuses `strict_enablement_unmet` before the comparator runs — so the HTTP 409 alone would be a VACUOUS
+ * proof of the chain-level verdict. This helper therefore asserts BOTH layers: the comparator itself (called
+ * directly — the pure strict function, per the owner's prescription) returns the expected chain-level reason,
+ * AND the production path refuses with the values-free unified envelope + zero writes (D-1c rule 1: the body
+ * is deliberately indistinguishable from any other integrity refusal — no oracle).
+ */
+async function expectRevertRefusesWithZeroWrites(sheet: string, expectedReason: 'chain_hole' | 'chain_corrupt' | 'comparator_error'): Promise<void> {
+  const pool = poolManager.get()
+  expect(await precheckSheetHistoryIntegrityStrict(pool.query.bind(pool), sheet)).toEqual({ ok: false, reason: expectedReason })
   const before = await sheetWriteState(sheet)
   const pv = await revertPreview(sheet)
   expect(pv.status).toBe(409)
@@ -170,22 +181,30 @@ describeIfDatabase('W0-1 v3.7 STRICT history contiguity — seq-ordered, ALL gen
     expect(await precheckSheetHistoryIntegrity(pool.query.bind(pool), SHEET)).toEqual({ ok: true }) // legacy: terminal generation only, clean
 
     process.env.MULTITABLE_HISTORY_CONTIGUITY_STRICT = 'true'
-    expect(await precheckSheetHistoryIntegrity(pool.query.bind(pool), SHEET)).toEqual({ ok: false, reason: 'chain_hole' }) // strict: all generations
+    // Owner P2: the gated production entry now refuses BEFORE the comparator (enablement precondition);
+    // the chain-level verdict is asserted against the strict comparator directly.
+    expect(await precheckSheetHistoryIntegrity(pool.query.bind(pool), SHEET)).toEqual({ ok: false, reason: 'strict_enablement_unmet' })
+    expect(await precheckSheetHistoryIntegrityStrict(pool.query.bind(pool), SHEET)).toEqual({ ok: false, reason: 'chain_hole' }) // strict comparator: all generations
   })
 
   // ── GENERATION-2-LOCK-SURVIVES ───────────────────────────────────────────────────────────────────────────
   test('GENERATION-2-LOCK-SURVIVES: a lock marker in the SECOND generation (via the real HTTP lock endpoint) fills the hole → passes', async () => {
     const R = `rec_hcss_gen2lock_${TS}`
-    // gen1: create@1, delete@1 (reuse). gen2 (terminal, live starts at 1): create@1.
-    await rev(SHEET, R, 1, 'create', { [NAME]: 'gen1' })
-    await rev(SHEET, R, 1, 'delete', { [NAME]: 'gen1' })
-    await rev(SHEET, R, 1, 'create', { [NAME]: 'gen2' })
+    // gen1: create@1, delete@1 (reuse). gen2 (terminal, live starts at 1): create@1. Explicit well-separated
+    // timestamps: the flag-off HTTP leg below exercises the LEGACY (created_at-ordered) comparator, which
+    // collapses same-millisecond inserts (see the `rev` helper's doc comment).
+    await rev(SHEET, R, 1, 'create', { [NAME]: 'gen1' }, '2026-01-01T00:00:00.000Z')
+    await rev(SHEET, R, 1, 'delete', { [NAME]: 'gen1' }, '2026-01-01T00:00:01.000Z')
+    await rev(SHEET, R, 1, 'create', { [NAME]: 'gen2' }, '2026-01-01T00:00:02.000Z')
     await insertLive(SHEET, R, { [NAME]: 'gen2' }, 1)
     // Real HTTP lock: version 1→2, marker written at v2 via the (ON-CONFLICT-free) recordVersionMarker path.
     const lockRes = await lockRecord(R, true)
     expect(lockRes.status).toBe(200)
     expect((await recordRow(R))?.version).toBe(2)
 
+    const pool = poolManager.get()
+    expect(await precheckSheetHistoryIntegrityStrict(pool.query.bind(pool), SHEET)).toEqual({ ok: true })
+    delete process.env.MULTITABLE_HISTORY_CONTIGUITY_STRICT // strict-on HTTP is gate-refused (see ENABLEMENT-GATE golden)
     const pv = await revertPreview(SHEET)
     expect(pv.status).toBe(200)
   })
@@ -200,7 +219,7 @@ describeIfDatabase('W0-1 v3.7 STRICT history contiguity — seq-ordered, ALL gen
     await rev(SHEET, R, 2, 'update', { [NAME]: 'g2-v2' }) // terminal generation — clean
     await insertLive(SHEET, R, { [NAME]: 'g2-v2' }, 2)
 
-    await expectRevertRefusesWithZeroWrites(SHEET)
+    await expectRevertRefusesWithZeroWrites(SHEET, 'chain_hole')
   })
 
   // ── GENERATION-0 HOLE (owner High-2 counterexample, #4339) ───────────────────────────────────────────────
@@ -219,7 +238,7 @@ describeIfDatabase('W0-1 v3.7 STRICT history contiguity — seq-ordered, ALL gen
     await rev(SHEET, R, 2, 'update', { [NAME]: 'gB-v2' })
     await insertLive(SHEET, R, { [NAME]: 'gB-v2' }, 2) // live == terminal latest snapshot ⇒ content layer clean
 
-    await expectRevertRefusesWithZeroWrites(SHEET)
+    await expectRevertRefusesWithZeroWrites(SHEET, 'chain_hole')
   })
 
   test('GENERATION-0 (b) ⇒ 409: an UPDATE before any create refuses (chain_hole)', async () => {
@@ -229,7 +248,7 @@ describeIfDatabase('W0-1 v3.7 STRICT history contiguity — seq-ordered, ALL gen
     await rev(SHEET, R, 2, 'update', { [NAME]: 'v2' })
     await insertLive(SHEET, R, { [NAME]: 'v2' }, 2)
 
-    await expectRevertRefusesWithZeroWrites(SHEET)
+    await expectRevertRefusesWithZeroWrites(SHEET, 'chain_hole')
   })
 
   test('GENERATION-0 (c) ⇒ 409: a VERSION MARKER before any create refuses (chain_hole)', async () => {
@@ -239,7 +258,7 @@ describeIfDatabase('W0-1 v3.7 STRICT history contiguity — seq-ordered, ALL gen
     await rev(SHEET, R, 2, 'update', { [NAME]: 'v2' })
     await insertLive(SHEET, R, { [NAME]: 'v2' }, 2)
 
-    await expectRevertRefusesWithZeroWrites(SHEET)
+    await expectRevertRefusesWithZeroWrites(SHEET, 'chain_hole')
   })
 
   test('GENERATION-0 (d) ⇒ 409: a DELETE before any create refuses (chain_hole)', async () => {
@@ -248,7 +267,7 @@ describeIfDatabase('W0-1 v3.7 STRICT history contiguity — seq-ordered, ALL gen
     await rev(SHEET, R, 1, 'create', { [NAME]: 'v1' })
     await insertLive(SHEET, R, { [NAME]: 'v1' }, 1)
 
-    await expectRevertRefusesWithZeroWrites(SHEET)
+    await expectRevertRefusesWithZeroWrites(SHEET, 'chain_hole')
   })
 
   // ── DUP-WITHIN-GENERATION ────────────────────────────────────────────────────────────────────────────────
@@ -260,8 +279,8 @@ describeIfDatabase('W0-1 v3.7 STRICT history contiguity — seq-ordered, ALL gen
     await insertLive(SHEET, R, { [NAME]: 'v2-b' }, 2)
 
     const pool = poolManager.get()
-    expect(await precheckSheetHistoryIntegrity(pool.query.bind(pool), SHEET)).toEqual({ ok: false, reason: 'chain_corrupt' })
-    await expectRevertRefusesWithZeroWrites(SHEET)
+    expect(await precheckSheetHistoryIntegrityStrict(pool.query.bind(pool), SHEET)).toEqual({ ok: false, reason: 'chain_corrupt' })
+    await expectRevertRefusesWithZeroWrites(SHEET, 'chain_corrupt')
   })
 
   // ── DELETED-GAP (C3) ─────────────────────────────────────────────────────────────────────────────────────
@@ -272,7 +291,7 @@ describeIfDatabase('W0-1 v3.7 STRICT history contiguity — seq-ordered, ALL gen
     await rev(SHEET, BAD, 3, 'delete', { [NAME]: 'd3' })
     await insertTrash(SHEET, BAD, { [NAME]: 'd3' }, 3)
     // BAD is not live (never inserted into meta_records) — enumerated via chain ∪ trash.
-    await expectRevertRefusesWithZeroWrites(SHEET)
+    await expectRevertRefusesWithZeroWrites(SHEET, 'chain_hole')
 
     // Positive control: replace BAD with a CLEAN deleted chain — the sheet must pass again.
     await q('DELETE FROM meta_record_revisions WHERE sheet_id = $1 AND record_id = $2', [SHEET, BAD])
@@ -282,6 +301,9 @@ describeIfDatabase('W0-1 v3.7 STRICT history contiguity — seq-ordered, ALL gen
     await rev(SHEET, GOOD, 2, 'update', { [NAME]: 'g2' })
     await rev(SHEET, GOOD, 2, 'delete', { [NAME]: 'g2' }) // clean, delete-reuse
     await insertTrash(SHEET, GOOD, { [NAME]: 'g2' }, 2)
+    const pool = poolManager.get()
+    expect(await precheckSheetHistoryIntegrityStrict(pool.query.bind(pool), SHEET)).toEqual({ ok: true })
+    delete process.env.MULTITABLE_HISTORY_CONTIGUITY_STRICT
     const pv = await revertPreview(SHEET)
     expect(pv.status).toBe(200)
   })
@@ -299,7 +321,8 @@ describeIfDatabase('W0-1 v3.7 STRICT history contiguity — seq-ordered, ALL gen
     await insertLive(SHEET, R, { [NAME]: 'v2' }, 2)
 
     const pool = poolManager.get()
-    expect(await precheckSheetHistoryIntegrity(pool.query.bind(pool), SHEET)).toEqual({ ok: true })
+    expect(await precheckSheetHistoryIntegrityStrict(pool.query.bind(pool), SHEET)).toEqual({ ok: true })
+    delete process.env.MULTITABLE_HISTORY_CONTIGUITY_STRICT
     const pv = await revertPreview(SHEET)
     expect(pv.status).toBe(200)
   })
@@ -311,8 +334,8 @@ describeIfDatabase('W0-1 v3.7 STRICT history contiguity — seq-ordered, ALL gen
     await insertLive(SHEET, R, { [NAME]: 'v1' }, 1)
 
     const pool = poolManager.get()
-    expect(await precheckSheetHistoryIntegrity(pool.query.bind(pool), SHEET)).toEqual({ ok: false, reason: 'comparator_error' })
-    await expectRevertRefusesWithZeroWrites(SHEET)
+    expect(await precheckSheetHistoryIntegrityStrict(pool.query.bind(pool), SHEET)).toEqual({ ok: false, reason: 'comparator_error' })
+    await expectRevertRefusesWithZeroWrites(SHEET, 'comparator_error')
   })
 
   // ── FORMULA-NOT-REFUSED ──────────────────────────────────────────────────────────────────────────────────
@@ -324,13 +347,17 @@ describeIfDatabase('W0-1 v3.7 STRICT history contiguity — seq-ordered, ALL gen
     await insertLive(SHEET, R, { [NAME]: 'x', [FORMULA_FIELD]: 999 }, 1)
 
     const pool = poolManager.get()
-    expect(await precheckSheetHistoryIntegrity(pool.query.bind(pool), SHEET)).toEqual({ ok: true })
+    expect(await precheckSheetHistoryIntegrityStrict(pool.query.bind(pool), SHEET)).toEqual({ ok: true })
+    delete process.env.MULTITABLE_HISTORY_CONTIGUITY_STRICT
     const pv = await revertPreview(SHEET)
     expect(pv.status).toBe(200)
   })
 
   // ── POSITIVE CONTROL ─────────────────────────────────────────────────────────────────────────────────────
-  test('POSITIVE CONTROL: a full healthy chain reverts and executes under strict mode', async () => {
+  test('POSITIVE CONTROL: strict comparator passes the healthy chain; the full revert executes end-to-end (flag off — strict-on HTTP is gate-refused pre-L6)', async () => {
+    const pool = poolManager.get()
+    expect(await precheckSheetHistoryIntegrityStrict(pool.query.bind(pool), SHEET)).toEqual({ ok: true })
+    delete process.env.MULTITABLE_HISTORY_CONTIGUITY_STRICT
     const pv = await revertPreview(SHEET)
     expect(pv.status).toBe(200)
     expect(pv.body?.data?.summary?.visibleRevertCount).toBe(1)
@@ -339,5 +366,32 @@ describeIfDatabase('W0-1 v3.7 STRICT history contiguity — seq-ordered, ALL gen
     const h = await recordRow(`rec_h_${TS}`)
     expect(h?.data?.[NAME]).toBe('old')
     expect(h?.version).toBe(3)
+  })
+
+  // ── STRICT-ENABLEMENT GATE (owner P2, 2026-07-16 — the no-checkpoint refusal golden) ────────────────────
+  test('ENABLEMENT-GATE: with the strict flag ON the production path refuses fail-closed with zero writes — for a NO-checkpoint sheet AND for a checkpoint-bearing sheet (causality unlanded) — via the same values-free envelope', async () => {
+    // The shared fixture record is HEALTHY (the strict comparator passes it) — the refusal below is therefore
+    // attributable ONLY to the enablement gate, not to any chain verdict.
+    const pool = poolManager.get()
+    expect(await precheckSheetHistoryIntegrityStrict(pool.query.bind(pool), SHEET)).toEqual({ ok: true })
+
+    // (a) NO active checkpoint: refuse, zero writes, unified values-free envelope (no oracle — D-1c rule 1).
+    const before = await sheetWriteState(SHEET)
+    const pv1 = await revertPreview(SHEET)
+    expect(pv1.status).toBe(409)
+    expect(pv1.body).toEqual(HISTORY_INCOMPLETE_BODY)
+    expect(await sheetWriteState(SHEET)).toEqual(before)
+
+    // (b) checkpoint-BEARING sheet: STILL refused (condition (b) reconstruction causality is unlanded pre-L6)
+    // — proving the refusal is unconditional on !canEnable, not scoped to the no-checkpoint case (the exact
+    // production bypass the owner rejected).
+    await pool.transaction(async ({ query }) => activateCheckpoint(query as unknown as QueryFn, { sheetId: SHEET }))
+    const pv2 = await revertPreview(SHEET)
+    expect(pv2.status).toBe(409)
+    expect(pv2.body).toEqual(HISTORY_INCOMPLETE_BODY)
+    expect(await sheetWriteState(SHEET)).toEqual(before)
+    // cleanup: remove the checkpoint rows so sibling tests see a checkpoint-free sheet.
+    await q('DELETE FROM meta_history_baselines WHERE sheet_id = $1', [SHEET]).catch(() => {})
+    await q('DELETE FROM meta_history_trust_checkpoints WHERE sheet_id = $1', [SHEET]).catch(() => {})
   })
 })

@@ -1070,16 +1070,26 @@ describe('attendance UUID route validation', () => {
     expect(db.transaction).not.toHaveBeenCalled()
   })
 
-  it('keeps existing attendance approval permission resolving requests without scheduler scopes', async () => {
+  it('blocks a non-assignee attendance:approve holder from resolving a request under S7-0', async () => {
+    // S7-0 (RATIFIED S7 lock §3.1/§3.2) makes the ACTIVE approval_assignments set the action-
+    // authorization source of truth for BOTH approve and reject. approver-1 holds attendance:approve
+    // (so it still passes the broad scheduler-scope gate via canAccessOtherUsers) but is NOT in the
+    // current node's active assignment set and is not admin — so reject must now 403 where the
+    // pre-S7-0 "holding attendance:approve authorizes resolution" contract used to return 200. This
+    // is intended positive evidence for the tightening; deliberately NOT seeded with an assignment.
     const { db, routes } = await createHarness('false')
 
     db.query.mockImplementation(async (sql: string, params: unknown[] = []) => {
       if (sql.includes('FROM user_roles') && sql.includes('role_id = $2')) return []
+      // S7-0 actor-role-ids loader (distinct from the isAdmin role_id=$2 probe): approver-1 has no roles.
+      if (sql.includes('SELECT role_id FROM user_roles')) return []
       if (sql.includes('FROM user_permissions') && params[1] === 'attendance:approve') return [{ ok: 1 }]
       if (sql.includes('FROM user_permissions')) return []
       if (sql.includes('JOIN role_permissions')) return []
       if (sql.includes('SELECT * FROM attendance_requests WHERE id = $1 FOR UPDATE')) return [attendanceRequestRow()]
       if (sql.includes('SELECT * FROM approval_instances WHERE id = $1 FOR UPDATE')) return [approvalInstanceRow()]
+      // S7-0 assignment probe: NO active assignment matches approver-1 at the current node → denied.
+      if (sql.includes('FROM approval_assignments')) return []
       if (sql.includes('UPDATE approval_instances')) return []
       if (sql.includes('UPDATE approval_assignments')) return []
       if (sql.includes('INSERT INTO approval_records')) return []
@@ -1093,17 +1103,18 @@ describe('attendance UUID route validation', () => {
       user: { id: 'approver-1', orgId: 'default' },
     })
 
-    expect(res.statusCode).toBe(200)
+    expect(res.statusCode).toBe(403)
     expect(res.body).toMatchObject({
-      ok: true,
-      data: {
-        requestId: attendanceRequestId,
-        status: 'rejected',
-        userId: 'worker-1',
-      },
+      ok: false,
+      error: { code: 'FORBIDDEN' },
     })
+    // The broad gate was satisfied by attendance:approve, so the scheduler-scope path is never
+    // consulted — the 403 is the S7-0 assignment check (FORBIDDEN), not SCHEDULER_SCOPE_FORBIDDEN.
     expect(db.query).not.toHaveBeenCalledWith(expect.stringContaining('FROM attendance_scheduler_scopes'), expect.anything())
+    // The check runs inside the transaction and throws before any mutation → nothing is written.
     expect(db.transaction).toHaveBeenCalledTimes(1)
+    expect(db.query.mock.calls.map(([sql]) => String(sql)).some(sql => sql.includes('UPDATE attendance_requests'))).toBe(false)
+    expect(db.query.mock.calls.map(([sql]) => String(sql)).some(sql => sql.includes('INSERT INTO approval_records'))).toBe(false)
   })
 
   it('lets scoped non-admin schedulers approve requests inside their scheduler scope', async () => {
@@ -1112,6 +1123,9 @@ describe('attendance UUID route validation', () => {
     db.query.mockImplementation(async (sql: string, params: unknown[] = []) => {
       const rbac = rbacQueryResult(sql, params)
       if (rbac !== undefined) return rbac
+      // S7-0 actor-role-ids loader (rbacQueryResult only knows the isAdmin role_id=$2 probe): the
+      // scheduler holds no roles; its assignment match comes from the user-type assignment below.
+      if (sql.includes('SELECT role_id FROM user_roles')) return []
       if (sql.includes('SELECT * FROM attendance_requests WHERE id = $1 FOR UPDATE')) return [attendanceRequestRow()]
       const actor = actorContextQueryResult(sql)
       if (actor !== undefined) return actor
@@ -1121,6 +1135,9 @@ describe('attendance UUID route validation', () => {
         return [{ schedule_group_id: scheduleGroupId, department_ref: 'factory-1' }]
       }
       if (sql.includes('SELECT * FROM approval_instances WHERE id = $1 FOR UPDATE')) return [approvalInstanceRow()]
+      // S7-0 assignment probe: scheduler-1 IS the active assignee for the current node → authorized
+      // by the per-type match (no admin override needed), so approve proceeds exactly as before.
+      if (sql.includes('FROM approval_assignments')) return [{ ok: 1 }]
       if (sql.includes('UPDATE approval_instances')) return []
       if (sql.includes('UPDATE approval_assignments')) return []
       if (sql.includes('INSERT INTO approval_assignments')) return []

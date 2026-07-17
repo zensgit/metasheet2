@@ -19,6 +19,7 @@
 | #4391 | T3b-1c 前置：结构性 config guard（`fieldMap.target=missingChildBom` 禁映射） | `343b48bba` |
 | #4398 | T3b-1c + T3b-2：route 接线（default-OFF）+ 真库 route smoke + CI 白名单 | `6789bcca7` |
 | #4402 | T4-final：prep-line smoke 的 approved-source 前置（OD-6 扩展） | `5447fbcd1` |
+| T4-corr | T4 corrective（owner 复审 P2/P3）：T4 `requestJson` 复用 W6 `buildRequestHeaders` 发送 `x-tenant-id`（corrective-5 N/8 同类缺陷）+ prelude 首调失败即停不 replay | （本修正 PR，合并后生效） |
 | #4351 | corrective-3：acceptance runner 的 smoke 捕获 stdout-only 化 + AST 接线守卫 | `9ae9f94ce` |
 | #4369 | corrective-4：Windows PowerShell 5.1 下 native stderr promotion 修复 | `56c6d28e6` |
 | #4390 | corrective-5：有界 values-free smoke 诊断契约 + x-tenant-id 根因修复 | `3bf7292e1` |
@@ -79,7 +80,7 @@ POST /api/integration/stock-preparation/mvp/source-runs/plm-bom   (admin)
 - `stock-preparation-mvp-postdeploy-smoke.test.mjs`：`tests 26 / pass 26 / fail 0`（逐字）。
 - PowerShell 契约/行为面（pwsh 7.6.2, macOS）：contract `ALL CONTRACT CHECKS PASS`；behavior `ALL 40 BEHAVIOURAL CHECKS PASS`；ps51 套件 11/12——唯一 FAIL 是「host 必须为 Windows PowerShell 5.1 Desktop」的环境守卫（macOS 上结构性不可满足；该套件的目标环境是 CI `windows-latest` 步骤，见 `plugin-tests.yml` 的 PS 5.1 arm）。
 - core-backend `tsc --noEmit` exit 0。
-- T4-final harness（#4402）：prep-line smoke 契约测试 17/17（10 基线 + 7 新行为测试，经可注入 `req/must/registerSentinels` 驱动——happy path、dry_run(flag OFF)必败、replay 谎报写入必败、外写证据污染必败、steering-free 请求、哨兵注册契约必需即抛）；W6 冻结面零改动且其测试仍 26/0；两 PR（#4398/#4402）均经独立 Opus 对抗审阅（APPROVE，0 P1 / 0 P2；#4402 的 P3-1 hardening 当场闭合）。
+- T4-final harness（#4402）：prep-line smoke 契约测试 18/18（10 基线 + 8 新行为测试，经可注入 `req/must/registerSentinels` 驱动——happy path、dry_run(flag OFF)必败且**不再 replay**、replay 谎报写入必败、外写证据污染必败、steering-free 请求、哨兵注册契约必需即抛；另以**真实 `requestJson` + 注入 `fetchImpl`** 钉住 `x-tenant-id` 上线——owner 复审 P2 指出此前测试全走 scripted req、真实 header 组装从未被执行）；W6 冻结面零改动且其测试仍 26/0；两 PR（#4398/#4402）均经独立 Opus 对抗审阅（APPROVE，0 P1 / 0 P2；#4402 的 P3-1 hardening 当场闭合）。
 
 ### 5.2 真库（本地 PostgreSQL，CI 同款 MIGRATION_EXCLUDE 迁移）
 `stock-preparation-t3b-plm-autopersist-realdb.test.ts`（新，走**真 route handler + 真 provisioning/records**，物理 fieldId 从 `meta_fields` 交叉核对、拒绝逻辑 id 自证）4/4：
@@ -103,7 +104,7 @@ POST /api/integration/stock-preparation/mvp/source-runs/plm-bom   (admin)
 | M7 | 物理 target 采用 body projectId | `the body projectId can never move the physical target` |
 | M8 | ON 路径 tenant 换回 `resolveTenantId(req,input)` | **route 级 green（如实记录）**：steering guard 封死全部显式载体后该交换不可观测；承重防线 = M2 + 既有 resolver-differ 直测（T3a ratified 先例） |
 
-T4-final（#4402）smoke 侧 mutation：TM1 放宽接受 dry_run → `✖ ... a 200 dry_run (T3b flag OFF) FAILS the prelude`；TM2 请求携带 query steering 载体 → `✖ ... steering-free requests`；HM1 删哨兵注册调用 → 16/1 RED；均恢复后复绿。
+T4-final（#4402）smoke 侧 mutation：TM1 放宽接受 dry_run → `✖ ... a 200 dry_run (T3b flag OFF) FAILS the prelude`；TM2 请求携带 query steering 载体 → `✖ ... steering-free requests`；HM1 删哨兵注册调用 → 16/1 RED；TC1 删 `x-tenant-id` header 装配 → header 钉测 RED；TC2 删首调失败即停 → 单调用断言 RED；均恢复后复绿。
 corrective-5 侧关键 mutation（#4390 复审轮已 KILL）：删 `x-tenant-id` 头 → `pass 24 / fail 2`；伪造末相位完成 → P2-1 gate RED；`fieldMap` 空数组/畸形 entry 放行 → guard 单测 RED。
 白名单移除类 mutation（`plugin-tests.yml` 去行）为**文档化声明**：兄弟切片（T3a/T3b-1a realdb）同无 wiring-guard，遵循同模式如实记录，未虚称已被测试钉死。
 
@@ -117,7 +118,7 @@ corrective-5 侧关键 mutation（#4390 复审轮已 KILL）：删 `x-tenant-id`
 ## 6. 冻结面与剩余门（如实边界）
 
 - **实体机纯等待中**：corrective-5 包/runner/smoke 冻结；PASS → corrective-4 标记 `[SUPERSEDED]`、关 #4101；FAIL → 保留现场，按 5 个诊断字段定位相位/检查点。本文不将实体机结果计为已达成。
-- **T4-final**（OD-6 扩展）：harness 已交付（#4402）——`--approved-source-config-id` 可选前置，独立盐化 id 空间证明 approved source → project/batch/line/run 前段，合成链判据原样保留。**活体端到端执行按锁归 RC-A 的单次受控窗口**（operator 临时开 flag → 跑 → 恢复；本文不将其计为已执行）。
+- **T4-final**（OD-6 扩展）：harness 已交付（#4402 + T4 corrective：租户 header 与失败即停）；**RC-A 须在 T4 corrective 合并后才可执行**。原 #4402——`--approved-source-config-id` 可选前置，独立盐化 id 空间证明 approved source → project/batch/line/run 前段，合成链判据原样保留。**活体端到端执行按锁归 RC-A 的单次受控窗口**（operator 临时开 flag → 跑 → 恢复；本文不将其计为已执行）。
 - **RC-A**：单次 exact-SHA 包 + 实体机验收，三前置见 OD-6；reviewed FAIL 不解锁。
 - **P4**：persist 原子性/repair 硬化，独立设计门；此前**生产常开保持 barred**（本弧从未声称跨表原子或孤儿 batch 可自愈——1a 只是把 false-success 改成显式 409）。
 - 部署模板不写死任何 auto-persist flag；两 flag 均 default OFF。

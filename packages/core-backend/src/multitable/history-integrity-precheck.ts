@@ -2,6 +2,7 @@ import { mapFieldType, isSystemFieldType } from './field-codecs'
 import type { QueryFn } from './permission-service'
 import { isSystemSheet } from './system-sheet-predicate'
 import { hasVersionMarkerTable, hasChainSeqColumn } from './record-history-service'
+import { checkStrictEnablementPrecondition } from './history-trust-precondition'
 
 /**
  * Global History — W0-1: `HISTORY_INCOMPLETE`, the fail-closed integrity PRECHECK for the destructive
@@ -143,6 +144,9 @@ export type HistoryIntegrityReason =
   | 'comparator_error'
   // STRICT MODE ONLY (v3.7 §9.3) — never returned when MULTITABLE_HISTORY_CONTIGUITY_STRICT is off.
   | 'chain_corrupt' // within-generation duplicate occupant (replaces the dropped marker UNIQUE constraint)
+  // STRICT-ENABLEMENT gate (L5 P3-2, wired) — strict flag ON for a checkpoint-bearing sheet whose enablement
+  // precondition is unmet (pre-L6: reconstruction non-causal). Fail-closed refusal; never returned flag-off.
+  | 'strict_enablement_unmet'
 
 export type HistoryIntegrityVerdict = { ok: true } | { ok: false; reason: HistoryIntegrityReason }
 
@@ -456,12 +460,33 @@ export async function precheckSheetHistoryIntegrity(
   query: QueryFn,
   sheetId: string,
 ): Promise<HistoryIntegrityVerdict> {
-  if (isContiguityStrictMode()) return precheckSheetHistoryIntegrityStrict(query, sheetId)
+  if (isContiguityStrictMode()) {
+    // L5 P3-2 STRICT-ENABLEMENT GATE (wired here — the authoritative strict-mode entry the recovery routes
+    // call). BOTH preconditions must hold — (a) an ACTIVE trust checkpoint exists for the sheet AND (b)
+    // reconstruction causality has landed — before strict mode may be relied upon; `!canEnable` refuses
+    // UNCONDITIONALLY (owner P2, 2026-07-16: an earlier draft exempted `no_active_checkpoint`, which let an
+    // operator flip strict on and have every checkpoint-LESS sheet walk straight into the strict comparator —
+    // a production bypass that existed to keep test fixtures convenient; tests that need the comparator call
+    // `precheckSheetHistoryIntegrityStrict` directly instead). With RECONSTRUCTION_CAUSALITY_LANDED=false,
+    // (b) is unmet for EVERY sheet, so the production strict path refuses fail-closed until L6 lands —
+    // "migration/backfill presence alone never enables recovery" (design lock §3). The Revert/Reset routes
+    // inherit this refusal through this single entry.
+    const enablement = await checkStrictEnablementPrecondition(query, sheetId)
+    if (!enablement.canEnable) {
+      return { ok: false, reason: 'strict_enablement_unmet' }
+    }
+    return precheckSheetHistoryIntegrityStrict(query, sheetId)
+  }
 
   // System sheets (approval projection / people directory) are server-regenerated read models — excluded.
-  const sheetRes = await query('SELECT base_id, description FROM meta_sheets WHERE id = $1', [sheetId])
-  const sheetRow = sheetRes.rows[0] as { base_id?: unknown; description?: unknown } | undefined
-  if (sheetRow && isSystemSheet({ baseId: typeof sheetRow.base_id === 'string' ? sheetRow.base_id : null, description: sheetRow.description })) {
+  // P1-a: the TRUST signal is `meta_sheets.system_kind` ONLY (server-owned, non-forgeable). It is read
+  // column-tolerantly via `to_jsonb`: a rolling-deploy window where the L5 migration has not yet added the
+  // column returns NULL here instead of a 42703 that would poison the C8 in-txn re-check (mirrors the txn-safe
+  // intent of hasChainSeqColumn). When NULL, isSystemSheet returns false — a user-writable `description`
+  // sentinel can NO LONGER exclude a sheet from the strict/contiguity checks (the forged-identity bypass).
+  const sheetRes = await query("SELECT (to_jsonb(s) ->> 'system_kind') AS system_kind FROM meta_sheets s WHERE id = $1", [sheetId])
+  const sheetRow = sheetRes.rows[0] as { system_kind?: unknown } | undefined
+  if (sheetRow && isSystemSheet({ systemKind: sheetRow.system_kind })) {
     return { ok: true }
   }
 
@@ -562,12 +587,20 @@ type StrictRawTimelineRow = {
  * STRICT MODE precheck (v3.7 §9.3). Same UNIFIED REFUSAL / FAIL-CLOSED doctrine as the non-strict function
  * (rules 1 and 4 in the module doc comment) — the differences are entirely in HOW contiguity is proven (see
  * `checkAllGenerationsContiguity`'s doc comment) and WHAT is enumerated (C3 deleted/trashed records too).
+ *
+ * Exported for the chain-level real-DB goldens ONLY (owner P2, 2026-07-16: tests that need the comparator
+ * call it directly — never a production bypass around the enablement gate). It is read-only/refuse-only; the
+ * enablement precondition lives at the single production entry `precheckSheetHistoryIntegrity` above, which
+ * every recovery route goes through — production code must NOT call this directly.
  */
-async function precheckSheetHistoryIntegrityStrict(query: QueryFn, sheetId: string): Promise<HistoryIntegrityVerdict> {
-  // System sheets excluded — identical predicate/semantics to the non-strict path.
-  const sheetRes = await query('SELECT base_id, description FROM meta_sheets WHERE id = $1', [sheetId])
-  const sheetRow = sheetRes.rows[0] as { base_id?: unknown; description?: unknown } | undefined
-  if (sheetRow && isSystemSheet({ baseId: typeof sheetRow.base_id === 'string' ? sheetRow.base_id : null, description: sheetRow.description })) {
+export async function precheckSheetHistoryIntegrityStrict(query: QueryFn, sheetId: string): Promise<HistoryIntegrityVerdict> {
+  // System sheets excluded — identical predicate/semantics to the non-strict path. P1-a: the TRUST signal is
+  // `meta_sheets.system_kind` ONLY (server-owned, non-forgeable), read column-tolerantly via `to_jsonb` (a
+  // pre-migration rolling-deploy window returns NULL instead of a 42703 that would poison the C8 in-txn
+  // re-check). A user-writable `description` sentinel can NO LONGER exclude a sheet from the strict checks.
+  const sheetRes = await query("SELECT (to_jsonb(s) ->> 'system_kind') AS system_kind FROM meta_sheets s WHERE id = $1", [sheetId])
+  const sheetRow = sheetRes.rows[0] as { system_kind?: unknown } | undefined
+  if (sheetRow && isSystemSheet({ systemKind: sheetRow.system_kind })) {
     return { ok: true }
   }
 
