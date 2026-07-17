@@ -32,6 +32,12 @@ export interface ApprovalAttachmentRouteDeps {
   authChecks: DownloadAuthChecks
   /** authenticated viewer/uploader id from the request (session/JWT middleware) — never the body. */
   viewerId(req: Request): string | null
+  /**
+   * The authenticated principal's org id, derived SERVER-SIDE from the session/JWT — NEVER the body.
+   * A body-supplied org_id is a cross-tenant attribution forgery into the durable row; the org that
+   * owns the attachment is a property of the caller's identity, not a client-writable field.
+   */
+  orgId(req: Request): string | null
   env?: NodeJS.ProcessEnv
 }
 
@@ -51,11 +57,13 @@ export function createApprovalAttachmentRouter(deps: ApprovalAttachmentRouteDeps
   router.post('/api/approval/attachments', upload.single('file'), async (req: Request, res: Response) => {
     const uploaderId = deps.viewerId(req)
     if (!uploaderId) return res.status(401).json({ error: 'unauthenticated' })
+    const orgId = deps.orgId(req) // server-derived from the principal — never the body (no cross-tenant forgery)
+    if (!orgId) return res.status(403).json({ error: 'no_org' })
     const f = (req as Request & { file?: { originalname: string; mimetype: string; size: number; buffer: Buffer } }).file
     if (!f) return res.status(400).json({ error: 'file_required' })
     const fieldId = typeof req.body?.fieldId === 'string' && /[!-~]/.test(req.body.fieldId) ? req.body.fieldId : null
-    const orgId = typeof req.body?.orgId === 'string' && /[!-~]/.test(req.body.orgId) ? req.body.orgId : null
-    if (!fieldId || !orgId) return res.status(400).json({ error: 'field_and_org_required' })
+    const templateId = typeof req.body?.templateId === 'string' && /[!-~]/.test(req.body.templateId) ? req.body.templateId : null
+    if (!fieldId || !templateId) return res.status(400).json({ error: 'template_and_field_required' })
     const verdict = validateApprovalAttachments([{ fileName: f.originalname, mimeType: f.mimetype, sizeBytes: f.size }]) as {
       ok: boolean
       rejected?: Array<{ fileName: string; code: string }>
