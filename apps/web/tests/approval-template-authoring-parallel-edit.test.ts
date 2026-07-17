@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import type { ApprovalGraph, ApprovalTemplateDetailDTO } from '../src/types/approval'
+import type { ApprovalAssigneeSource, ApprovalGraph, ApprovalTemplateDetailDTO } from '../src/types/approval'
 import {
   buildApprovalGraph,
   draftFromTemplate,
@@ -9,6 +9,7 @@ import {
 } from '../src/approvals/templateAuthoring'
 import {
   applyParallelEditsToGraph,
+  parallelDynamicAssigneeConflicts,
   parallelEditsFromGraph,
   validateParallelEdits,
   PARALLEL_JOIN_MODES,
@@ -360,5 +361,94 @@ describe('G-3 validation preview (UX-only; backend normalizeApprovalGraph is fin
   it('an untouched parallel draft produces NO parallel validation errors (valid graph stays valid)', () => {
     const draft: TemplateAuthoringDraft = draftFromTemplate(buildTemplate(PARALLEL_GRAPH))
     expect(validateTemplateDraft(draft, null).filter((message) => message.includes('汇聚模式'))).toEqual([])
+  })
+})
+
+// ── F2 (adversarial review #4433): publish-preflight for provably-identical DYNAMIC approver
+// sources across parallel branches. Runtime raises a typed 409
+// (APPROVAL_ASSIGNEE_PARALLEL_DYNAMIC_CONFLICT) whenever two branches resolve to the same user —
+// for identical dynamic sources that is EVERY request. This mirror (surfaced in the publish
+// checklist, not the save gate) must flag ONLY provably-identical sources: different kinds or
+// different parameters may still be legal for some org shapes and stay the runtime guard's job. ──
+describe('parallelDynamicAssigneeConflicts — publish preflight (F2)', () => {
+  const withBranchSources = (a: ApprovalAssigneeSource[], b: ApprovalAssigneeSource[]): ApprovalGraph => ({
+    ...PARALLEL_GRAPH,
+    nodes: PARALLEL_GRAPH.nodes.map((node) => {
+      if (node.key === 'approval_a') return { ...node, config: { ...(node.config as Record<string, unknown>), assigneeSources: a } as never }
+      if (node.key === 'approval_b') return { ...node, config: { ...(node.config as Record<string, unknown>), assigneeSources: b } as never }
+      return node
+    }),
+  })
+
+  it('flags requester × requester across two branches (the old untouched-starter shape — 409s every request)', () => {
+    const errors = parallelDynamicAssigneeConflicts(withBranchSources([{ kind: 'requester' }], [{ kind: 'requester' }]))
+    expect(errors).toHaveLength(1)
+    expect(errors[0]).toContain('fork_1')
+    expect(errors[0]).toContain('requester')
+  })
+
+  it('flags identical parameterized sources: same manager_at_level level, same form_field_user field', () => {
+    expect(parallelDynamicAssigneeConflicts(
+      withBranchSources([{ kind: 'manager_at_level', level: 2 }], [{ kind: 'manager_at_level', level: 2 }]),
+    )).toHaveLength(1)
+    expect(parallelDynamicAssigneeConflicts(
+      withBranchSources([{ kind: 'form_field_user', fieldId: 'owner' }], [{ kind: 'form_field_user', fieldId: 'owner' }]),
+    )).toHaveLength(1)
+  })
+
+  it('does NOT flag different dynamic kinds or different parameters (negative control — no false positives)', () => {
+    expect(parallelDynamicAssigneeConflicts(
+      withBranchSources([{ kind: 'requester' }], [{ kind: 'direct_manager' }]),
+    )).toEqual([])
+    expect(parallelDynamicAssigneeConflicts(
+      withBranchSources([{ kind: 'manager_at_level', level: 1 }], [{ kind: 'manager_at_level', level: 2 }]),
+    )).toEqual([])
+    expect(parallelDynamicAssigneeConflicts(
+      withBranchSources([{ kind: 'form_field_user', fieldId: 'owner' }], [{ kind: 'form_field_user', fieldId: 'reviewer' }]),
+    )).toEqual([])
+    expect(parallelDynamicAssigneeConflicts(
+      withBranchSources([{ kind: 'continuous_managers', levels: 1 }], [{ kind: 'continuous_managers', levels: 3 }]),
+    )).toEqual([])
+  })
+
+  it('does NOT flag static duplicates (the backend static check owns those) and ignores the join node itself', () => {
+    // PARALLEL_GRAPH as-is: static finance/legal branches + a requester JOIN node — no conflict:
+    // the join runs sequentially after the fan-in, and statics are save-time-rejected server-side.
+    expect(parallelDynamicAssigneeConflicts(PARALLEL_GRAPH)).toEqual([])
+    expect(parallelDynamicAssigneeConflicts(
+      withBranchSources([{ kind: 'static_role', roleIds: ['finance'] }], [{ kind: 'static_role', roleIds: ['finance'] }]),
+    )).toEqual([])
+  })
+
+  it('does NOT flag the same dynamic source twice WITHIN one branch (sequential steps are not a parallel conflict)', () => {
+    const oneBranchTwoSteps: ApprovalGraph = {
+      nodes: [
+        { key: 'start', type: 'start', name: '发起', config: {} },
+        { key: 'fork_1', type: 'parallel', name: '并行', config: { branches: ['e-fork-a', 'e-fork-b'], joinMode: 'all', joinNodeKey: 'join_1' } },
+        { key: 'a1', type: 'approval', name: 'A1', config: { assigneeSources: [{ kind: 'direct_manager' }], approvalMode: 'single', emptyAssigneePolicy: 'error' } },
+        { key: 'a2', type: 'approval', name: 'A2', config: { assigneeSources: [{ kind: 'direct_manager' }], approvalMode: 'single', emptyAssigneePolicy: 'error' } },
+        { key: 'b', type: 'approval', name: 'B', config: { assigneeSources: [{ kind: 'static_role', roleIds: ['legal'] }], approvalMode: 'single', emptyAssigneePolicy: 'error' } },
+        { key: 'join_1', type: 'approval', name: '汇聚', config: { assigneeSources: [{ kind: 'requester' }], approvalMode: 'single', emptyAssigneePolicy: 'error' } },
+        { key: 'end', type: 'end', name: '结束', config: {} },
+      ],
+      edges: [
+        { key: 'e-start-fork', source: 'start', target: 'fork_1' },
+        { key: 'e-fork-a', source: 'fork_1', target: 'a1' },
+        { key: 'e-a1-a2', source: 'a1', target: 'a2' },
+        { key: 'e-a2-join', source: 'a2', target: 'join_1' },
+        { key: 'e-fork-b', source: 'fork_1', target: 'b' },
+        { key: 'e-b-join', source: 'b', target: 'join_1' },
+        { key: 'e-join-end', source: 'join_1', target: 'end' },
+      ],
+    }
+    expect(parallelDynamicAssigneeConflicts(oneBranchTwoSteps)).toEqual([])
+    // …but the SAME source appearing in the OTHER branch still conflicts.
+    const conflicted: ApprovalGraph = {
+      ...oneBranchTwoSteps,
+      nodes: oneBranchTwoSteps.nodes.map((node) => (node.key === 'b'
+        ? { ...node, config: { assigneeSources: [{ kind: 'direct_manager' }], approvalMode: 'single', emptyAssigneePolicy: 'error' } as never }
+        : node)),
+    }
+    expect(parallelDynamicAssigneeConflicts(conflicted)).toHaveLength(1)
   })
 })
