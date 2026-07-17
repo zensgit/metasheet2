@@ -15,6 +15,7 @@
  * Injected seams as in FWB-1/2; no production caller until the FWB activation slice.
  */
 import type { Queryable } from './automation-durable-dispatcher'
+import type { TransactionalQueryable } from './pg-transaction-guard'
 import { claimActionApplied } from './automation-action-idempotency'
 import { mapApprovalFormValues, type FwbFieldMapping } from './approval-form-value-mapping'
 import { recheckFwbPermissionGates, type FwbGateChecks, type FwbGateId, type FwbGateSubject } from './approval-fwb-permission-gates'
@@ -74,7 +75,7 @@ export type FwbDecisionWriteResult =
 
 /** FWB-3 executor: gates → bound-record recheck → map the FROZEN snapshot → node-scoped claim → UPDATE + outbox. */
 export async function executeWriteDecisionValues(
-  trx: Queryable,
+  trx: TransactionalQueryable, // brand=compile-time doc; real enforcement = claimActionApplied's xid probe (#4336/#4340 hardening)
   input: FwbDecisionWriteInput,
   gates: FwbGateChecks,
   linkChecks: RecordLinkChecks,
