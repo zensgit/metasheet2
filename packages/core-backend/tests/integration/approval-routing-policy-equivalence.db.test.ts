@@ -32,12 +32,16 @@ import { resolveApprovalRequesterOrgRelations } from '../../src/services/Approva
  *      stays legacy; not exercised here — includeManagerChain is not opted into.)
  *
  * IN-FLIGHT INVARIANCE (instance-level, real server + real createApproval, org 'default'):
- *   4. An approval created under policy→dingtalk bakes `requester_snapshot.directoryTitle` from
- *      the DingTalk source; FLIPPING the policy to local afterwards leaves that stored snapshot
- *      BYTE-IDENTICAL (jsonb::text compared pre/post) — in-flight approvals keep baked routing;
- *      historical instances are not rewritten. A NEW approval created after the flip bakes the
- *      LOCAL title — the positive control proving the flip really changed new resolutions (so the
- *      first instance's constancy is meaningful, not "nothing changed anywhere").
+ *   4. Owner rework (#4434): the invariance subject is a GENUINE PENDING instance with a LIVE
+ *      assignment — the requester has a resolvable manager on BOTH sides, and the template uses
+ *      `emptyAssigneePolicy: 'error'` so an unresolvable manager fails the test loudly instead of
+ *      silently auto-approving into a terminal state (a terminal instance's constancy is a trivial
+ *      proposition). Under policy→dingtalk, instance #1 is created PENDING with an assignment and
+ *      bakes `directoryTitle='DingTalk Title'`; FLIPPING the policy to local leaves #1 STILL
+ *      PENDING with its `requester_snapshot` AND its assignment rows BYTE-IDENTICAL
+ *      (jsonb::text fingerprints pre/post) — in-flight approvals keep baked routing; historical
+ *      instances are never rewritten. A NEW instance after the flip is likewise PENDING and bakes
+ *      the LOCAL title — the positive control proving the flip really changed new resolutions.
  *
  * Proof-slice vacuity discipline: this ticket adds NO production code, so the load-bearing
  * mutation runs against the CONSUMED B5-b predicate — neutering the policy-scoped
@@ -245,24 +249,41 @@ describeIfDatabase('Canonical Org MVP — B6 approval-routing local/DingTalk equ
     expect(viaDt.deptHeadId).toBe(manager)
   })
 
-  it('in-flight invariance: a policy flip leaves an existing instance requester_snapshot byte-identical; a new instance follows the new policy', async () => {
-    // fixtures in 'default' — the org the approval routes resolve for the dev-token requester
-    cleanupUsers.push(REQ)
+  it('in-flight invariance: a policy flip leaves a PENDING instance (snapshot + assignment) byte-identical; a new instance follows the new policy', async () => {
+    // fixtures in 'default' — REQ has a resolvable MANAGER on BOTH sides so instances stay PENDING
+    const MGR = `b6-mgr-${TS}`
+    cleanupUsers.push(REQ, MGR)
     await seedUser(REQ)
+    await seedUser(MGR)
+
+    // local side (product writers): dept + accounts + primary + is_manager
     const local = await getOrCreateLocalIntegration('default')
-    const lAcc = await createLocalAccount({ orgId: 'default', localUserId: REQ, title: 'Local Title' })
+    const lDept = await createLocalDepartment({ orgId: 'default', name: `B6 Inflight ${TS}` })
+    const lReq = await createLocalAccount({ orgId: 'default', localUserId: REQ, title: 'Local Title' })
+    const lMgr = await createLocalAccount({ orgId: 'default', localUserId: MGR, title: 'Local Mgr' })
+    cleanupAccountIds.push(lReq.id, lMgr.id)
+    await addLocalMembership({ orgId: 'default', accountId: lReq.id, departmentId: lDept.id })
+    await switchLocalPrimaryDepartment('default', lReq.id, lDept.id)
+    await addLocalMembership({ orgId: 'default', accountId: lMgr.id, departmentId: lDept.id })
+    await setLocalMembershipManager('default', { directoryAccountId: lMgr.id, directoryDepartmentId: lDept.id }, true)
+
+    // dingtalk side (provider-shaped): dept + REQ primary + MGR leader_in_dept
     const dt = await dingtalkIntegration('default', 'inflight')
     cleanupIntegrationIds.push(dt)
-    const dAcc = await dtAccount(dt, REQ, 'DingTalk Title', {})
-    cleanupAccountIds.push(lAcc.id, dAcc)
+    const DT_DEPT = `b6-if-dept-${TS}`
+    const dDept = await dtDept(dt, DT_DEPT, `B6 Inflight DT ${TS}`)
+    const dReq = await dtAccount(dt, REQ, 'DingTalk Title', { dept_ids: [DT_DEPT] }, dDept)
+    const dMgr = await dtAccount(dt, MGR, 'DT Mgr', { leader_in_dept: [{ dept_id: DT_DEPT, leader: true }] }, dDept)
+    cleanupAccountIds.push(dReq, dMgr)
 
     await setPolicy('default', dt)
 
-    // publish a minimal auto-approve template (no department/title routing → no create-time wedge)
+    // emptyAssigneePolicy: 'error' — an unresolvable manager must FAIL the create loudly, never
+    // silently auto-approve into a terminal instance (the owner-caught flaw in the first version)
     const graph = {
       nodes: [
         { key: 'start', type: 'start', name: 's', config: {} },
-        { key: 'approval_1', type: 'approval', name: 'mgr', config: { assigneeSources: [{ kind: 'direct_manager' }], approvalMode: 'single', emptyAssigneePolicy: 'auto-approve' } },
+        { key: 'approval_1', type: 'approval', name: 'mgr', config: { assigneeSources: [{ kind: 'direct_manager' }], approvalMode: 'single', emptyAssigneePolicy: 'error' } },
         { key: 'end', type: 'end', name: 'e', config: {} },
       ],
       edges: [
@@ -284,27 +305,38 @@ describeIfDatabase('Canonical Org MVP — B6 approval-routing local/DingTalk equ
       const body = (await started.json()) as { id?: string; data?: { id: string } }
       return (body.id ?? body.data?.id) as string
     }
-    const snapshotOf = async (aid: string): Promise<{ text: string; title: string | null }> => {
-      const r = await query<{ snap: string; title: string | null }>(
-        `SELECT requester_snapshot::text AS snap, requester_snapshot->>'directoryTitle' AS title FROM approval_instances WHERE id = $1`,
+    const stateOf = async (aid: string) => {
+      const inst = await query<{ status: string; snap: string; title: string | null }>(
+        `SELECT status, requester_snapshot::text AS snap, requester_snapshot->>'directoryTitle' AS title
+           FROM approval_instances WHERE id = $1`,
         [aid],
       )
-      return { text: r.rows[0].snap, title: r.rows[0].title }
+      const asg = await query<{ fp: string }>(
+        `SELECT to_jsonb(a)::text AS fp FROM approval_assignments a WHERE a.instance_id = $1 ORDER BY a.id`,
+        [aid],
+      )
+      return { status: inst.rows[0].status, snap: inst.rows[0].snap, title: inst.rows[0].title, assignments: asg.rows.map((r) => r.fp) }
     }
 
-    // #1 under policy→dingtalk: bakes the DingTalk title
+    // #1 under policy→dingtalk: PENDING, with a live assignment, DingTalk-baked snapshot
     const a1 = await start()
-    const before = await snapshotOf(a1)
+    const before = await stateOf(a1)
     expect(before.title).toBe('DingTalk Title')
+    expect(['pending', 'in_progress', 'running', 'active']).toContain(before.status) // NOT terminal
+    expect(before.assignments.length).toBeGreaterThan(0) // a REAL live assignment
 
-    // FLIP the policy — in-flight #1 must stay byte-identical
+    // FLIP the policy — the PENDING in-flight instance must stay byte-identical: status, snapshot, assignments
     await setPolicy('default', local.id)
-    const after = await snapshotOf(a1)
-    expect(after.text).toBe(before.text) // stored jsonb unchanged, byte-for-byte
+    const after = await stateOf(a1)
+    expect(after.status).toBe(before.status) // still pending — not re-dispatched or auto-resolved
+    expect(after.snap).toBe(before.snap) // stored snapshot unchanged, byte-for-byte
+    expect(after.assignments).toEqual(before.assignments) // assignment rows unchanged, byte-for-byte
 
-    // #2 after the flip: bakes the LOCAL title — the positive control (the flip changed NEW resolutions)
+    // #2 after the flip: likewise PENDING with an assignment, LOCAL-baked snapshot (positive control)
     const a2 = await start()
-    const second = await snapshotOf(a2)
+    const second = await stateOf(a2)
     expect(second.title).toBe('Local Title')
+    expect(['pending', 'in_progress', 'running', 'active']).toContain(second.status)
+    expect(second.assignments.length).toBeGreaterThan(0)
   })
 })
