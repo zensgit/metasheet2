@@ -36,18 +36,36 @@ describe('attachment storage + download auth', () => {
   })
 
   test('download auth: unbound=uploader-only; bound=participant (fail-closed on error); deleted=gone', async () => {
-    const yes = { isInstanceParticipant: async () => true }
-    const no = { isInstanceParticipant: async () => false }
+    const yes = { isInstanceParticipant: async () => true, isFieldHiddenAtActiveNode: async () => false }
+    const no = { isInstanceParticipant: async () => false, isFieldHiddenAtActiveNode: async () => false }
     const boom = {
       isInstanceParticipant: async () => {
         throw new Error('acl down')
       },
+      isFieldHiddenAtActiveNode: async () => false,
     }
-    expect(await authorizeAttachmentDownload({ status: 'unbound', uploaderId: 'u1', instanceId: null }, 'u1', no)).toEqual({ ok: true })
-    expect(await authorizeAttachmentDownload({ status: 'unbound', uploaderId: 'u1', instanceId: null }, 'u2', yes)).toEqual({ ok: false, code: 'not_uploader' })
-    expect(await authorizeAttachmentDownload({ status: 'bound', uploaderId: 'u1', instanceId: 'i1' }, 'u2', yes)).toEqual({ ok: true })
-    expect(await authorizeAttachmentDownload({ status: 'bound', uploaderId: 'u1', instanceId: 'i1' }, 'u2', no)).toEqual({ ok: false, code: 'not_participant' })
-    expect(await authorizeAttachmentDownload({ status: 'bound', uploaderId: 'u1', instanceId: 'i1' }, 'u2', boom)).toEqual({ ok: false, code: 'not_participant' })
-    expect(await authorizeAttachmentDownload({ status: 'deleted', uploaderId: 'u1', instanceId: 'i1' }, 'u1', yes)).toEqual({ ok: false, code: 'gone' })
+    expect(await authorizeAttachmentDownload({ status: 'unbound', uploaderId: 'u1', instanceId: null, fieldId: 'f' }, 'u1', no)).toEqual({ ok: true })
+    expect(await authorizeAttachmentDownload({ status: 'unbound', uploaderId: 'u1', instanceId: null, fieldId: 'f' }, 'u2', yes)).toEqual({ ok: false, code: 'not_uploader' })
+    expect(await authorizeAttachmentDownload({ status: 'bound', uploaderId: 'u1', instanceId: 'i1', fieldId: 'f' }, 'u2', yes)).toEqual({ ok: true })
+    expect(await authorizeAttachmentDownload({ status: 'bound', uploaderId: 'u1', instanceId: 'i1', fieldId: 'f' }, 'u2', no)).toEqual({ ok: false, code: 'not_participant' })
+    expect(await authorizeAttachmentDownload({ status: 'bound', uploaderId: 'u1', instanceId: 'i1', fieldId: 'f' }, 'u2', boom)).toEqual({ ok: false, code: 'not_participant' })
+    expect(await authorizeAttachmentDownload({ status: 'deleted', uploaderId: 'u1', instanceId: 'i1', fieldId: 'f' }, 'u1', yes)).toEqual({ ok: false, code: 'gone' })
+  })
+
+  test('G7 hidden-field byte gate: a hidden-at-active-node field serves NO bytes even to a participant; fail-closed', async () => {
+    const participantHidden = { isInstanceParticipant: async () => true, isFieldHiddenAtActiveNode: async () => true }
+    const participantVisible = { isInstanceParticipant: async () => true, isFieldHiddenAtActiveNode: async () => false }
+    const participantHiddenThrows = {
+      isInstanceParticipant: async () => true,
+      isFieldHiddenAtActiveNode: async () => {
+        throw new Error('graph load down')
+      },
+    }
+    // hidden ⇒ refused with the 'hidden' code (route maps it to 404, the snapshot-redaction shape)
+    expect(await authorizeAttachmentDownload({ status: 'bound', uploaderId: 'u1', instanceId: 'i1', fieldId: 'secret' }, 'u2', participantHidden)).toEqual({ ok: false, code: 'hidden' })
+    // not hidden ⇒ the same participant still gets the bytes (positive control)
+    expect(await authorizeAttachmentDownload({ status: 'bound', uploaderId: 'u1', instanceId: 'i1', fieldId: 'open' }, 'u2', participantVisible)).toEqual({ ok: true })
+    // fail-closed: a hidden-check failure must refuse, never leak the byte
+    expect(await authorizeAttachmentDownload({ status: 'bound', uploaderId: 'u1', instanceId: 'i1', fieldId: 'secret' }, 'u2', participantHiddenThrows)).toEqual({ ok: false, code: 'hidden' })
   })
 })

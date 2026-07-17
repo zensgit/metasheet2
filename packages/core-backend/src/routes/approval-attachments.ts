@@ -77,16 +77,16 @@ export function createApprovalAttachmentRouter(deps: ApprovalAttachmentRouteDeps
     const viewerId = deps.viewerId(req)
     if (!viewerId) return res.status(401).json({ error: 'unauthenticated' })
     const { rows } = await deps.db.query(
-      `SELECT status, uploader_id, instance_id, storage_key, file_name, mime_type FROM approval_attachments WHERE id=$1`,
+      `SELECT status, uploader_id, instance_id, field_id, storage_key, file_name, mime_type FROM approval_attachments WHERE id=$1`,
       [String(req.params.id)],
     )
     if (rows.length === 0) return res.status(404).json({ error: 'not_found' })
-    const row = rows[0] as { status: 'unbound' | 'bound' | 'deleted'; uploader_id: string; instance_id: string | null; storage_key: string; file_name: string; mime_type: string }
+    const row = rows[0] as { status: 'unbound' | 'bound' | 'deleted'; uploader_id: string; instance_id: string | null; field_id: string; storage_key: string; file_name: string; mime_type: string }
     const auth = (await authorizeAttachmentDownload(
-      { status: row.status, uploaderId: row.uploader_id, instanceId: row.instance_id },
+      { status: row.status, uploaderId: row.uploader_id, instanceId: row.instance_id, fieldId: row.field_id },
       viewerId,
       deps.authChecks,
-    )) as { ok: boolean; code?: 'gone' | 'not_uploader' | 'not_participant' }
+    )) as { ok: boolean; code?: 'gone' | 'not_uploader' | 'not_participant' | 'hidden' }
     if (!auth.ok) {
       // gone → 410; authorization failures → 404 (no existence oracle for outsiders)
       return auth.code === 'gone' ? res.status(410).json({ error: 'gone' }) : res.status(404).json({ error: 'not_found' })
