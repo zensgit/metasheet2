@@ -491,4 +491,48 @@ describeIfDatabase('W0-1 L4-cov-services — service writers on the canonical fe
       client.release()
     }
   })
+
+  // ── §G2 — P3-R (owner review, 2026-07-17): the prune fn's trailing reset is load-bearing IN-TXN ─────────
+  test('G2 P3-R: after prune() returns, a later ad-hoc endpoint DELETE in the SAME caller transaction still RAISES (the trailing set_config-off reset is load-bearing)', async () => {
+    process.env[FLAG] = 'true'
+    // Two sealed single-event operations (same real D-1 plugin-delete producer as G1).
+    const R1 = mkRecord('g2a')
+    const R2 = mkRecord('g2b')
+    await seedRecord(R1)
+    await seedRecord(R2)
+    const ops: string[] = []
+    for (const R of [R1, R2]) {
+      await poolManager.get().transaction(async ({ query }) =>
+        pluginDeleteRecord({ query: ((sql: string, params?: unknown[]) => query(sql, params)) as never, sheetId: SHEET, recordId: R }),
+      )
+      const rev = (await q(`SELECT operation_id::text AS op FROM meta_record_revisions WHERE sheet_id = $1 AND record_id = $2 AND action = 'delete'`, [SHEET, R])).rows[0] as { op: string }
+      ops.push(rev.op)
+    }
+
+    // ONE explicit transaction: prune op[0], then — LATER IN THE SAME TXN — attempt an ad-hoc DELETE of
+    // op[1]. Without the prune fn's trailing `set_config('metasheet.mrho_retention','off',true)`, the
+    // txn-local GUC would still read 'on' here and H1 would be silently bypassed for the REST of the caller
+    // transaction. This is the P3-R golden gating the first production retention caller.
+    expect(pool).toBeTruthy()
+    const client = await pool!.connect()
+    try {
+      await client.query('BEGIN')
+      await client.query('SELECT meta_record_history_operations_prune($1, $2::uuid)', [SHEET, ops[0]])
+      // the sanctioned prune worked inside this txn...
+      const gone = await client.query('SELECT 1 FROM meta_record_history_operations WHERE sheet_id = $1 AND operation_id = $2::uuid', [SHEET, ops[0]])
+      expect(gone.rows.length).toBe(0)
+      // ...and the GUC is already back to 'off' INSIDE the same txn, so H1 holds for everything after.
+      const guc = await client.query(`SELECT current_setting('metasheet.mrho_retention', true) AS v`)
+      expect((guc.rows[0] as { v: string | null }).v).not.toBe('on')
+      await expect(
+        client.query('DELETE FROM meta_record_history_operations WHERE sheet_id = $1 AND operation_id = $2::uuid', [SHEET, ops[1]]),
+      ).rejects.toThrow(/immutable|sealed|reject|retention/i)
+      await client.query('ROLLBACK') // the failed DELETE aborted the txn; roll back (op[0]'s prune undone too — fixture hygiene)
+    } finally {
+      client.release()
+    }
+    // Positive control: op[1]'s endpoint survived the aborted txn (nothing leaked out of the rollback).
+    const survived = await q('SELECT 1 FROM meta_record_history_operations WHERE sheet_id = $1 AND operation_id = $2::uuid', [SHEET, ops[1]])
+    expect(survived.rows.length).toBe(1)
+  })
 })
