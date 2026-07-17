@@ -42,10 +42,20 @@ export const SETTINGS_CACHE_TTL_MS = 60_000 // in-process settings cache in the 
 export const DELIVERY_CHANNEL_ALLOWLIST = ['dingtalk_work_notification', 'email_smtp']
 
 // Terminal 'failed' reasons that still count as the design lock's "worker sends/FAILS visibly":
-// unbound recipient under the real work-notification channel env, or no channel registered at all.
+// no channel registered at all (worker-level markFailed before any channel dispatch).
 export const RECOGNIZED_TERMINAL_FAILURES = [
-  'dingtalk_recipient_not_bound',
   'attendance_delivery_channel_not_configured',
+]
+
+// Terminal 'skipped' reasons that count as visibly proven. H1 hardening (review #3920 P3-1) made the
+// DingTalk channel's unbound-recipient miss a `skip: true` dispatch — the worker terminates it as
+// status='skipped' (structural "not onboarded", NOT a fault), never 'failed'. The directory fixture
+// (seedDirectoryFixture) guarantees exactly this reason: the disposable org HAS an active integration
+// (so the H1 disambiguation does NOT take the org-level-outage branch, which returns the RETRYABLE
+// 'dingtalk_org_integration_inactive' — the Day-2 retrying-timeout root cause) and the member has no
+// account link (so resolution misses → skip).
+export const RECOGNIZED_STRUCTURAL_SKIPS = [
+  'dingtalk_recipient_not_bound',
 ]
 
 // Every table this helper can dirty. system_configs is mutated via PUT /settings and restored —
@@ -164,7 +174,9 @@ export function classifySendOutcome(rows) {
     sending: 0,
     retrying: 0,
     failedRecognized: 0,
+    skippedRecognized: 0,
     failedOther: [],
+    skippedOther: [],
     unknown: [],
     // Direct failure evidence for NON-terminal rows (pending/sending/retrying). The prior helper only
     // captured last_error for terminal failedOther rows, so a run that timed out in `retrying` — and then
@@ -181,12 +193,20 @@ export function classifySendOutcome(rows) {
     else if (status === 'failed') {
       if (RECOGNIZED_TERMINAL_FAILURES.includes(String(row.last_error ?? ''))) outcome.failedRecognized += 1
       else outcome.failedOther.push({ id: row.id ?? null, lastError: row.last_error ?? null })
+    } else if (status === 'skipped') {
+      // H1 skip semantics: a structural "recipient not onboarded" terminates as `skipped` — a visible,
+      // attributable terminal outcome when the reason is on the recognized list. Any OTHER skipped
+      // reason is not a posture; surface it (with last_error) instead of hiding it in `unknown`.
+      if (RECOGNIZED_STRUCTURAL_SKIPS.includes(String(row.last_error ?? ''))) outcome.skippedRecognized += 1
+      else outcome.skippedOther.push({ id: row.id ?? null, lastError: row.last_error ?? null })
     } else outcome.unknown.push({ id: row.id ?? null, status })
   }
-  outcome.terminal = outcome.sent + outcome.failedRecognized + outcome.failedOther.length
+  outcome.terminal = outcome.sent + outcome.failedRecognized + outcome.skippedRecognized
+    + outcome.failedOther.length + outcome.skippedOther.length
   outcome.visiblyProven = rows.length > 0
-    && outcome.sent + outcome.failedRecognized === rows.length
+    && outcome.sent + outcome.failedRecognized + outcome.skippedRecognized === rows.length
     && outcome.failedOther.length === 0
+    && outcome.skippedOther.length === 0
     && outcome.unknown.length === 0
   return outcome
 }
@@ -521,15 +541,17 @@ async function seedUsers() {
 
 async function seedDirectoryFixture() {
   // Make the RD-5 send outcome DETERMINISTIC without ever calling DingTalk or switching a staging env.
-  // The real work-notification channel resolves a recipient via directory_account_links(linked) ->
-  // directory_accounts(active) -> directory_integrations(active, org-anchored). With NO linked active
-  // account for the member, resolveRecipient returns the non-retryable 'dingtalk_recipient_not_bound' ->
-  // terminal failed -> RECOGNIZED_TERMINAL_FAILURES -> visibly proven (the runbook's
-  // sendProof=failed_recipient_not_bound posture). This is the last-hammer determinism the retrying
-  // timeout lacked: (1) clear any stray/synced link for the synthetic member; (2) fully control the org's
-  // DingTalk directory by dropping any stray integration (FK-cascade clears its accounts/links) and
-  // seeding ONE sync_enabled=false integration with no account — so no sync worker can (re)link the member
-  // and the channel can never reach its config/token/send path (resolveRecipient short-circuits first).
+  // H1 hardening (review #3920 P3-1) disambiguates resolveRecipient's 0-row miss: an org with NO active
+  // DingTalk integration gets the RETRYABLE 'dingtalk_org_integration_inactive' (org-level outage,
+  // self-heals on re-activation) — which for a bare disposable smoke org means an endless backoff loop
+  // the 135s poll can never outlast (the Day-2 retrying-timeout root cause). An org WITH an active
+  // integration but an unlinked member gets the skip dispatch -> terminal status='skipped' with
+  // last_error='dingtalk_recipient_not_bound' -> RECOGNIZED_STRUCTURAL_SKIPS -> visibly proven.
+  // So the fixture pins the SECOND branch: (1) clear any stray/synced link for the synthetic member;
+  // (2) fully control the org's DingTalk directory by dropping any stray integration (FK-cascade clears
+  // its accounts/links) and seeding ONE active, sync_enabled=false integration with no account — no sync
+  // worker can (re)link the member and the channel never reaches its config/token/send path
+  // (resolveRecipient short-circuits first).
   //
   // HARD SCOPE: seam track only, AND only when the org is the stamped disposable org — these DELETEs touch
   // the SHARED directory_* tables, so the default/real org's directory must never be seeded or deleted.
@@ -548,7 +570,7 @@ async function seedDirectoryFixture() {
   ).catch(() => undefined)
   ok(
     true,
-    `seeded no-send DingTalk directory fixture (sync_enabled=false, no bound account) for disposable org "${ORG_ID}" — worker resolves to dingtalk_recipient_not_bound, never calls DingTalk`,
+    `seeded no-send DingTalk directory fixture (active, sync_enabled=false, no bound account) for disposable org "${ORG_ID}" — worker terminates as skipped/dingtalk_recipient_not_bound, never calls DingTalk`,
     { integration: DIRECTORY_FIXTURE_NAME },
   )
 }
@@ -686,7 +708,7 @@ async function produceViaScheduler(subjects) {
 
 // --- assertions --------------------------------------------------------------------------------
 
-const KNOWN_STATUSES = ['pending', 'sending', 'sent', 'retrying', 'failed']
+const KNOWN_STATUSES = ['pending', 'sending', 'sent', 'retrying', 'failed', 'skipped']
 
 function assertProducedGrain(rows, subjects) {
   ok(rows.length === subjects.length, `producer wrote exactly one row per active subject (expected ${subjects.length})`, { rows: rows.length })
@@ -833,7 +855,7 @@ async function assertSendPosture(subjects) {
   }
   ok(
     outcome.visiblyProven,
-    `RD-5 send proof: worker visibly resolved every row (sent=${outcome.sent}, failedRecognized=${outcome.failedRecognized}, pending=${outcome.pending}, sending=${outcome.sending}, retrying=${outcome.retrying}, failedOther=${outcome.failedOther.length})`,
+    `RD-5 send proof: worker visibly resolved every row (sent=${outcome.sent}, failedRecognized=${outcome.failedRecognized}, skippedRecognized=${outcome.skippedRecognized}, pending=${outcome.pending}, sending=${outcome.sending}, retrying=${outcome.retrying}, failedOther=${outcome.failedOther.length}, skippedOther=${outcome.skippedOther.length})`,
     outcome,
   )
   if (!outcome.visiblyProven) {
@@ -845,9 +867,9 @@ async function assertSendPosture(subjects) {
         console.error(`    id=${d.id} status=${d.status} attempt_count=${d.attemptCount} next_attempt_at=${d.nextAttemptAt} last_error=${d.lastError}`)
       }
     }
-    throw new Error(`delivery worker did not visibly resolve the digest rows — verify the worker env gate, channel envs, and the scheduler interval on the backend, then consult the runbook send-posture table. stuck=${stableJson(outcome.nonTerminal)}`)
+    throw new Error(`delivery worker did not visibly resolve the digest rows — verify the worker env gate, channel envs, and the scheduler interval on the backend, then consult the runbook send-posture table. stuck=${stableJson(outcome.nonTerminal)} skippedOther=${stableJson(outcome.skippedOther)}`)
   }
-  return `worker-on:sent=${outcome.sent},failed_recognized=${outcome.failedRecognized}`
+  return `worker-on:sent=${outcome.sent},failed_recognized=${outcome.failedRecognized},skipped_recognized=${outcome.skippedRecognized}`
 }
 
 async function assertNoDefaultOrgLeakage() {

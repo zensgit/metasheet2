@@ -284,10 +284,18 @@ terminal, explainable state:
 | Backend channel env | Expected terminal state | Posture |
 |---|---|---|
 | `ATTENDANCE_NOTIFICATION_FAKE_CHANNEL_ENABLED=true` (recommended) | `status='sent'`, `delivered_at` set | **default / strongest** — a visible send through the real worker state machine |
-| real work-notification channel env enabled | `status='failed'`, `last_error='dingtalk_recipient_not_bound'` (synthetic users have no directory binding) | acceptable — a visible, attributable failure (the design lock demands "sends **or fails** visibly") |
+| real work-notification channel env enabled (helper seeds the no-send directory fixture) | `status='skipped'`, `last_error='dingtalk_recipient_not_bound'` (H1 hardening, review #3920 P3-1: an unbound recipient in an org WITH an active integration is a structural skip, not a `failed`) | acceptable — a visible, attributable terminal outcome (the design lock demands "sends **or fails** visibly"; H1 renamed this leg's terminal to `skipped`) |
 | no channel env registered | `status='failed'`, `last_error='attendance_delivery_channel_not_configured'` | weakest — visible but proves only the claim/fail path; prefer the fake channel |
 
-Anything else — rows stuck `pending`/`retrying`, or `failed` with an
+Caution (Day-2 lesson, run 29547832431): under the real channel env, a smoke
+org with **no active DingTalk integration at all** takes H1's org-level-outage
+branch — the RETRYABLE `dingtalk_org_integration_inactive` — and the row loops
+`retrying` on the worker's 60s/5m/15m/60m/6h backoff, which the helper's poll
+window can never outlast. The helper's `seedDirectoryFixture` (active,
+`sync_enabled=false`, zero bound accounts, stray member links cleared) exists
+precisely to pin the `skipped` branch instead.
+
+Anything else — rows stuck `pending`/`retrying`, or `failed`/`skipped` with an
 unrecognized error — is a smoke FAIL, not a posture. Record the observed
 posture in the worksheet; it becomes the `sendProof=` field of the final
 stamp. (`WORKER_EXPECTED=0` runs assert rows REMAIN `pending` instead — a
@@ -384,7 +392,7 @@ Use this exact shape after the helper PASS, the RD-4 browser probe, the send
 posture record, and the residue block all succeed:
 
 ```text
-RD45_REPORT_DIGEST_STAGING_SMOKE_PASS deploy=<sha> stamp=<rd45-smoke-...> org=<rd45-smoke-...-org> produced=<n> dedupOk=1 sendProof=<sent|failed_recipient_not_bound|failed_channel_not_configured> residue=0
+RD45_REPORT_DIGEST_STAGING_SMOKE_PASS deploy=<sha> stamp=<rd45-smoke-...> org=<rd45-smoke-...-org> produced=<n> dedupOk=1 sendProof=<sent|skipped_recipient_not_bound|failed_channel_not_configured> residue=0
 ```
 
 Backfill text:
@@ -412,9 +420,13 @@ Backfill text:
   CONFLICT path) — do not pass.
 - Disabled path still produces: gate layering regressed — do not pass.
 - Rows stuck `pending`/`retrying` with the worker expected on: send gate or
-  channel env not effective on the deployed process — fix env, rerun.
-- `failed` with an unrecognized `last_error`: not a posture; investigate before
-  any rerun.
+  channel env not effective on the deployed process — or (Day-2 lesson) the
+  retryable `dingtalk_org_integration_inactive` because the smoke org has no
+  active integration; the helper prints each stuck row's
+  last_error/attempt_count/next_attempt_at before cleanup — read that first,
+  fix env/fixture, rerun.
+- `failed` or `skipped` with an unrecognized `last_error`: not a posture;
+  investigate before any rerun.
 - Default-org digest delta ≠ 0: backend producer gate was on — disable it,
   clean by deterministic prefix on org `default` only, run FAILED.
 - Settings restore mismatch: **blocks the whole window** (bundle §4) until

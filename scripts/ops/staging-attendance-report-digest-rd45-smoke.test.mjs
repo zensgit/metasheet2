@@ -23,6 +23,7 @@ import {
   buildRestoreDigestPolicyBody,
   classifySendOutcome,
   describeStuckDelivery,
+  RECOGNIZED_STRUCTURAL_SKIPS,
   resolveEnvConfig,
 } from './staging-attendance-report-digest-rd45-smoke.mjs'
 
@@ -184,16 +185,28 @@ test('rd45 settings restore body never PUTs an empty snapshot (deep-merge lesson
   assert.deepEqual(fromNull.attendanceReportDigestPolicy, DISABLED_DIGEST_POLICY_DEFAULT)
 })
 
-test('rd45 send-outcome classifier: sent / recognized visible failure = proven; stuck or unexplained = not proven', () => {
-  assert.deepEqual(RECOGNIZED_TERMINAL_FAILURES, ['dingtalk_recipient_not_bound', 'attendance_delivery_channel_not_configured'])
+test('rd45 send-outcome classifier: sent / recognized visible failure or structural skip = proven; stuck or unexplained = not proven', () => {
+  // H1 hardening (review #3920 P3-1): unbound-recipient is a structural SKIP (status='skipped'), no
+  // longer a terminal 'failed' — the recognized sets are split accordingly.
+  assert.deepEqual(RECOGNIZED_TERMINAL_FAILURES, ['attendance_delivery_channel_not_configured'])
+  assert.deepEqual(RECOGNIZED_STRUCTURAL_SKIPS, ['dingtalk_recipient_not_bound'])
 
   const allSent = classifySendOutcome([{ status: 'sent' }, { status: 'sent' }])
   assert.equal(allSent.visiblyProven, true)
   assert.equal(allSent.sent, 2)
 
-  const mixed = classifySendOutcome([{ status: 'sent' }, { status: 'failed', last_error: 'dingtalk_recipient_not_bound' }])
-  assert.equal(mixed.visiblyProven, true, 'unbound-recipient failure is a documented VISIBLE worker outcome')
-  assert.equal(mixed.failedRecognized, 1)
+  const mixed = classifySendOutcome([{ status: 'sent' }, { status: 'skipped', last_error: 'dingtalk_recipient_not_bound' }])
+  assert.equal(mixed.visiblyProven, true, 'unbound-recipient structural skip is a documented VISIBLE worker outcome (H1)')
+  assert.equal(mixed.skippedRecognized, 1)
+
+  const preH1NotBoundAsFailed = classifySendOutcome([{ status: 'failed', last_error: 'dingtalk_recipient_not_bound' }])
+  assert.equal(preH1NotBoundAsFailed.visiblyProven, false, 'failed/not_bound is NOT a recognized posture post-H1 (a deployed worker producing it deserves investigation, not a pass)')
+  assert.equal(preH1NotBoundAsFailed.failedOther.length, 1)
+
+  const skippedUnrecognized = classifySendOutcome([{ status: 'skipped', last_error: 'mystery_skip' }])
+  assert.equal(skippedUnrecognized.visiblyProven, false, 'an unrecognized skipped reason is not a posture')
+  assert.equal(skippedUnrecognized.skippedOther.length, 1)
+  assert.equal(skippedUnrecognized.skippedOther[0].lastError, 'mystery_skip', 'unrecognized skip surfaces its last_error, not an anonymous unknown')
 
   const channelMissing = classifySendOutcome([{ status: 'failed', last_error: 'attendance_delivery_channel_not_configured' }])
   assert.equal(channelMissing.visiblyProven, true, 'channel-not-configured is terminal and visible (weakest posture; runbook prefers the deterministic fake channel)')
