@@ -7,6 +7,9 @@ import { randomUUID } from 'crypto'
 import { recordRecordRevision, recordVersionMarker } from './record-history-service'
 import { branchChildStepKey, topLevelStepKey } from './automation-step-key'
 import { deriveRuleActionSetFingerprint } from './automation-rule-fingerprint'
+import { claimExecutionAction, isClassAExecutionClaimEnabled } from './automation-execution-ledger'
+import { deriveActionKey } from './automation-action-idempotency'
+import type { TransactionalQueryable } from './pg-transaction-guard'
 import { Logger } from '../core/logger'
 import { withAutomationEventId } from './automation-event-dedup'
 import { redactString } from './automation-log-redact'
@@ -738,6 +741,25 @@ export interface AutomationStepResult {
   output?: unknown
   error?: string
   durationMs?: number
+  /**
+   * #4196 Class-A at-most-once marker. Set true ONLY when a Class-A action was SKIPPED because its
+   * (rootExecutionId, actionKey) claim was already held by a prior apply — i.e. a retry/replay hit a
+   * duplicate. The step still reports `status:'success'` so the execution proceeds, but NO mutation,
+   * NO revision, and NO downstream effect ran. Distinguishable so callers/tests can assert the skip.
+   */
+  alreadyApplied?: boolean
+}
+
+/**
+ * #4196 Class-A action identity threaded to the four Class-A executors so each can claim its
+ * (lineage-root, structural-path, action-type, config) tuple in the SAME transaction as its mutation.
+ * Absent (undefined) ⇒ no claim (e.g. the ad-hoc single-action dispatch, which is not a replayable
+ * execution action). `structuralPath` is the executor's canonical step-key (automation-step-key.ts);
+ * `rootExecutionId` is the execution lineage root (the original execution's id; a retry threads it).
+ */
+export interface ClassAActionIdentity {
+  structuralPath: string
+  rootExecutionId: string
 }
 
 export interface ExecutionContext {
@@ -749,6 +771,13 @@ export interface ExecutionContext {
   ruleCreatedBy: string
   actorId?: string | null
   triggerEvent: unknown
+  /**
+   * #4196 execution lineage root — the id of the FIRST execution in this retry lineage (defaults to the
+   * execution's own id when there is no parent; a retry threads the original root through
+   * AutomationService). Class-A claims key on this so a retry of the SAME action is a duplicate. Optional
+   * for back-compat: builders that omit it fall back to `executionId` at the claim call site.
+   */
+  rootExecutionId?: string
 }
 
 // ── Dependencies interface for action executors ───────────────────────────
@@ -887,6 +916,7 @@ export class AutomationExecutor {
     rule: AutomationRule,
     triggerEvent: unknown,
     jobLifecycleFactory?: ActionJobLifecycleFactory,
+    rootExecutionId?: string,
   ): Promise<AutomationExecution> {
     const executionId = `axe_${randomUUID()}`
     // A6-1: opt-in rules get a per-action job lifecycle bound to this executionId. The factory
@@ -925,6 +955,9 @@ export class AutomationExecutor {
       ruleCreatedBy: rule.createdBy,
       actorId: (payload?.actorId as string) ?? null,
       triggerEvent,
+      // #4196: the lineage root. A retry threads the original execution's root in; a first run has no
+      // parent, so it defaults to its own id. Class-A claims key on this (retry of the same action → dup).
+      rootExecutionId: rootExecutionId ?? executionId,
     }
 
     // Evaluate conditions
@@ -1130,7 +1163,10 @@ export class AutomationExecutor {
         }
 
         await jobLifecycle.onStart(cursor.parentStepIndex, branchAction, meta)
-        const branchActionResult = await this.executeSingleAction(branchAction, context)
+        const branchActionResult = await this.executeSingleAction(branchAction, context, {
+          structuralPath: stepKey,
+          rootExecutionId: context.rootExecutionId ?? context.executionId,
+        })
         await jobLifecycle.onSettled(cursor.parentStepIndex, branchAction, branchActionResult, meta)
         upstreamJobId = jobId
         if (branchActionResult.status === 'failed') {
@@ -1369,7 +1405,11 @@ export class AutomationExecutor {
       // A6-1 fail-closed: onStart runs BEFORE the inner try, so a job-create failure propagates
       // to execute()'s outer catch (execution fails) — and the action's side effect never runs.
       if (jobLifecycle) await jobLifecycle.onStart(index, action, topLevelMeta)
-      const result = await this.executeSingleAction(action, context)
+      // #4196 Class-A identity — the SAME canonical top-level step-key the job/fingerprint plane uses.
+      const result = await this.executeSingleAction(action, context, {
+        structuralPath: topLevelStepKey(index),
+        rootExecutionId: context.rootExecutionId ?? context.executionId,
+      })
 
       results.push(result)
 
@@ -1443,7 +1483,10 @@ export class AutomationExecutor {
         childJobIds.push(jobId)
 
         await jobLifecycle.onStart(stepIndex, branchAction, meta)
-        const branchActionResult = await this.executeSingleAction(branchAction, context)
+        const branchActionResult = await this.executeSingleAction(branchAction, context, {
+          structuralPath: stepKey,
+          rootExecutionId: context.rootExecutionId ?? context.executionId,
+        })
         await jobLifecycle.onSettled(stepIndex, branchAction, branchActionResult, meta)
 
         upstreamJobId = jobId
@@ -1640,7 +1683,10 @@ export class AutomationExecutor {
       }
 
       await jobLifecycle.onStart(stepIndex, branchAction, meta)
-      const branchActionResult = await this.executeSingleAction(branchAction, context)
+      const branchActionResult = await this.executeSingleAction(branchAction, context, {
+        structuralPath: stepKey,
+        rootExecutionId: context.rootExecutionId ?? context.executionId,
+      })
       await jobLifecycle.onSettled(stepIndex, branchAction, branchActionResult, meta)
       lastJobId = jobId
       upstreamJobId = jobId
@@ -1695,12 +1741,20 @@ export class AutomationExecutor {
     action: AutomationAction,
     context: ExecutionContext,
   ): Promise<AutomationStepResult> {
-    return this.executeSingleAction(action, context)
+    // #4196: NO Class-A claim here (identity undefined). A single ad-hoc action dispatch (a button
+    // click / run route) is not a replayable EXECUTION action — it has no execution lineage root and no
+    // retry semantics, so there is nothing to dedup against. Claiming here would need a lineage root that
+    // does not exist for this path.
+    return this.executeSingleAction(action, context, undefined)
   }
 
   private async executeSingleAction(
     action: AutomationAction,
     context: ExecutionContext,
+    // #4196 Class-A identity. Every rule-driven call site passes its canonical step-key; the ad-hoc
+    // single-action dispatch (runSingleAction) passes undefined → no claim. The four Class-A methods
+    // claim-then-skip-on-duplicate; every other action ignores it.
+    identity?: ClassAActionIdentity,
   ): Promise<AutomationStepResult> {
     const startMs = Date.now()
     let result: AutomationStepResult
@@ -1708,13 +1762,13 @@ export class AutomationExecutor {
     try {
       switch (action.type) {
         case 'update_record':
-          result = await this.executeUpdateRecord(action.config, context)
+          result = await this.executeUpdateRecord(action.config, context, identity)
           break
         case 'create_record':
-          result = await this.executeCreateRecord(action.config, context)
+          result = await this.executeCreateRecord(action.config, context, identity)
           break
         case 'delete_record':
-          result = await this.executeDeleteRecord(action.config, context)
+          result = await this.executeDeleteRecord(action.config, context, identity)
           break
         case 'send_webhook':
           result = await this.executeSendWebhook(action.config, context)
@@ -1735,7 +1789,7 @@ export class AutomationExecutor {
           result = await this.executeSendDingTalkApprovalCard(context)
           break
         case 'lock_record':
-          result = await this.executeLockRecord(action.config, context)
+          result = await this.executeLockRecord(action.config, context, identity)
           break
         case 'start_approval':
           result = {
@@ -2150,6 +2204,7 @@ export class AutomationExecutor {
   private async executeUpdateRecord(
     config: Record<string, unknown>,
     context: ExecutionContext,
+    identity?: ClassAActionIdentity,
   ): Promise<AutomationStepResult> {
     const fields = config.fields as Record<string, unknown> | undefined
     if (!fields || Object.keys(fields).length === 0) {
@@ -2202,6 +2257,12 @@ export class AutomationExecutor {
       // not assumed from D-1). A failed revision INSERT rolls the UPDATE back too — no half-write (an
       // updated `meta_records` row with no matching `meta_record_revisions` row) is possible.
       const txResult = await this.withTransaction(async (query) => {
+        // #4196 Class-A claim — FIRST statement, SAME transaction as the mutation+revision below. A
+        // duplicate (retry/replay) short-circuits: return the already-applied success and skip the UPDATE
+        // and its revision entirely. The (no-op) transaction still commits cleanly.
+        if (await this.claimClassAOrSkip(query, identity, 'update_record', config) === 'duplicate') {
+          return this.alreadyAppliedResult('update_record')
+        }
         // Record-lock guard (rank-8 review B1; decisions d/e/f). An automation acting on behalf of its
         // actor is NOT implicitly the locker/owner — overwriting a locked record is blocked. To write
         // through a lock the rule must first run a `lock_record{locked:false}` action (decision f). The
@@ -2221,11 +2282,14 @@ export class AutomationExecutor {
         // pre-②b leniency (a missing trigger record yields a 0-row UPDATE reported as success) to avoid
         // any behavior regression.
         if (gate.crossBase && !lockRow) {
-          return {
-            actionType: 'update_record',
-            status: 'failed',
-            error: `Cross-base update_record target record not found in target sheet: ${effectiveRecordId} ∉ ${effectiveSheetId}`,
-          } satisfies AutomationStepResult
+          // #4196 atomicity: THROW (not return) so this transaction — and the Class-A claim taken above —
+          // ROLLS BACK. A non-throwing `return {failed}` would COMMIT the claim for an action that never
+          // mutated, so a legitimate retry would skip as a FALSE duplicate (a lost update — the exact hazard
+          // this ledger exists to prevent). The method's outer catch reports the identical failed result.
+          // Consistent with the lock-conflict check just below, which already throws to roll back.
+          throw new Error(
+            `Cross-base update_record target record not found in target sheet: ${effectiveRecordId} ∉ ${effectiveSheetId}`,
+          )
         }
         if (lockRow) {
           ensureRecordNotLocked(context.actorId ?? null, lockRow, () => new Error('Record is locked'))
@@ -2308,6 +2372,7 @@ export class AutomationExecutor {
   private async executeDeleteRecord(
     config: Record<string, unknown>,
     context: ExecutionContext,
+    identity?: ClassAActionIdentity,
   ): Promise<AutomationStepResult> {
     // Phase C2a cross-base addressing — MIRRORS executeUpdateRecord. The resolved target sheet is
     // `config.targetSheetId ?? context.sheetId`. For a CROSS-BASE delete, `targetSheetId` +
@@ -2341,6 +2406,12 @@ export class AutomationExecutor {
       }
 
       const step = await this.withTransaction(async (query) => {
+        // #4196 Class-A claim — FIRST statement, SAME transaction as the delete+revision below. A
+        // duplicate (retry/replay) short-circuits: return the already-applied success and skip the DELETE,
+        // link cleanup, tombstones and revision entirely. The (no-op) transaction still commits cleanly.
+        if (await this.claimClassAOrSkip(query, identity, 'delete_record', config) === 'duplicate') {
+          return this.alreadyAppliedResult('delete_record')
+        }
         // Record-lock guard: you cannot delete a record locked by someone you can't unlock. The SELECT and
         // the DELETE below BOTH read `effectiveSheetId`/`effectiveRecordId`, so a cross-base delete checks
         // the TARGET record's lock (not the trigger record's) — lock priority over base-write.
@@ -2373,11 +2444,14 @@ export class AutomationExecutor {
         // no-op success). Same-base keeps its leniency (a missing trigger record yields a 0-row DELETE
         // reported as success) to avoid any behavior regression vs the other same-base sinks.
         if (gate.crossBase && !lockRow) {
-          return {
-            actionType: 'delete_record',
-            status: 'failed',
-            error: `Cross-base delete_record target record not found in target sheet: ${effectiveRecordId} ∉ ${effectiveSheetId}`,
-          } satisfies AutomationStepResult
+          // #4196 atomicity: THROW (not return) so this transaction — and the Class-A claim taken above —
+          // ROLLS BACK. A non-throwing `return {failed}` would COMMIT the claim for an action that never
+          // deleted anything, so a legitimate retry would skip as a FALSE duplicate (the exact hazard this
+          // ledger exists to prevent). The method's outer catch reports the identical failed result.
+          // Consistent with the lock-conflict check just below, which already throws to roll back.
+          throw new Error(
+            `Cross-base delete_record target record not found in target sheet: ${effectiveRecordId} ∉ ${effectiveSheetId}`,
+          )
         }
         if (lockRow) {
           ensureRecordNotLocked(context.actorId ?? null, lockRow, () => new Error('Record is locked'))
@@ -2505,9 +2579,59 @@ export class AutomationExecutor {
     return handler(this.deps.queryFn)
   }
 
+  /**
+   * #4196 Class-A claim gate. Active ONLY when (a) the runtime flag is ON AND (b) `deps.transaction` is
+   * present — a REAL transaction. Condition (b) is not optional: `claimExecutionAction` runs
+   * `assertInTransaction` (a `pg_current_xact_id()` probe), which THROWS on the autocommit `queryFn`
+   * fallback `withTransaction` uses when `deps.transaction` is absent (many unit tests). Gating on it keeps
+   * every legacy/autocommit path unchanged. When this returns false the caller runs its original body.
+   */
+  private classAClaimActive(): boolean {
+    return isClassAExecutionClaimEnabled() && this.deps.transaction != null
+  }
+
+  /**
+   * #4196: the FIRST statement inside a Class-A method's `withTransaction` callback. Claims the action's
+   * (rootExecutionId, actionKey) tuple in THIS transaction. Returns 'proceed' when the gate is inactive or
+   * no identity is supplied (no claim — byte-identical legacy path) OR the claim was won ('claimed'); returns
+   * 'duplicate' when a prior apply already holds the claim, in which case the caller returns
+   * {@link alreadyAppliedResult} and skips its mutation entirely. `config` is passed RAW — `deriveActionKey`
+   * canonicalizes it (deep key-sort + sha256) internally, so the key matches the §4 fingerprint's per-action
+   * identity exactly. `query` is `withTransaction`'s transactional query fn; wrapped as a
+   * TransactionalQueryable so the ledger's DB-level xid probe runs against the SAME ongoing transaction.
+   */
+  private async claimClassAOrSkip(
+    query: AutomationDeps['queryFn'],
+    identity: ClassAActionIdentity | undefined,
+    actionType: AutomationActionType,
+    config: unknown,
+  ): Promise<'proceed' | 'duplicate'> {
+    if (!this.classAClaimActive() || !identity) return 'proceed'
+    const outcome = await claimExecutionAction(
+      { query, isTransaction: true } as unknown as TransactionalQueryable,
+      {
+        kind: 'execution',
+        rootExecutionId: identity.rootExecutionId,
+        actionKey: deriveActionKey({ structuralPath: identity.structuralPath, actionType, canonicalConfig: config }),
+        actionType,
+      },
+    )
+    return outcome === 'duplicate' ? 'duplicate' : 'proceed'
+  }
+
+  /**
+   * #4196: the step result for a Class-A action skipped as a duplicate claim. Looks like a success (so the
+   * execution proceeds past it) but carries `alreadyApplied:true` — NO mutation, NO revision, NO event/
+   * realtime fan-out ran (those all sit AFTER the `withTransaction` early-return in each Class-A method).
+   */
+  private alreadyAppliedResult(actionType: AutomationActionType): AutomationStepResult {
+    return { actionType, status: 'success', alreadyApplied: true, output: { alreadyApplied: true } }
+  }
+
   private async executeCreateRecord(
     config: Record<string, unknown>,
     context: ExecutionContext,
+    identity?: ClassAActionIdentity,
   ): Promise<AutomationStepResult> {
     const targetSheetId = (config.sheetId as string) || context.sheetId
     const declaredTargetBaseId = typeof config.targetBaseId === 'string' ? config.targetBaseId : undefined
@@ -2544,7 +2668,16 @@ export class AutomationExecutor {
       // xbase-write-gated: routes through evaluateCrossBaseWrite (gate computed above) — a cross-base
       // create is rejected before this INSERT unless claim==truth + trigger-actor base-write. This is
       // the §1.3 create-to-another-base vector the gate closes. revision-emitted: D-1c slice ③ (A4) — recordRecordRevision(action:'create') below, same txn.
-      await this.withTransaction(async (query) => {
+      const skipped = await this.withTransaction(async (query) => {
+        // #4196 Class-A claim — FIRST statement, SAME transaction as the INSERT+revision below. A duplicate
+        // (retry/replay) short-circuits: skip the INSERT and its birth revision entirely. The (no-op)
+        // transaction still commits cleanly; the caller returns the already-applied success below.
+        if (await this.claimClassAOrSkip(query, identity, 'create_record', config) === 'duplicate') {
+          return 'duplicate' as const
+        }
+        // xbase-write-gated: routes through evaluateCrossBaseWrite (gate computed above) — a cross-base
+        // create is rejected before this INSERT unless claim==truth + trigger-actor base-write (§1.3 vector).
+        // revision-emitted: D-1c slice ③ (A4) — recordRecordRevision(action:'create') below, same txn.
         await query(
           `INSERT INTO meta_records (id, sheet_id, data, version) VALUES ($1, $2, $3::jsonb, 1)`,
           [recordId, targetSheetId, JSON.stringify(data)],
@@ -2564,7 +2697,11 @@ export class AutomationExecutor {
           patch: data,
           snapshot: data,
         })
+        return null
       })
+      // #4196: a duplicate claim skipped the INSERT/revision — report the already-applied success and
+      // emit NO create event and NO real-time fan-out (a replay must produce zero downstream effect).
+      if (skipped === 'duplicate') return this.alreadyAppliedResult('create_record')
 
       this.deps.eventBus.emit('multitable.record.created', withAutomationEventId({
         sheetId: targetSheetId,
@@ -3444,6 +3581,7 @@ export class AutomationExecutor {
   private async executeLockRecord(
     config: Record<string, unknown>,
     context: ExecutionContext,
+    identity?: ClassAActionIdentity,
   ): Promise<AutomationStepResult> {
     const locked = config.locked !== false // default to true (decision f: config.locked === false → unlock)
 
@@ -3500,7 +3638,12 @@ export class AutomationExecutor {
         // withTransaction (mirrors the HTTP lock path) — a transient error between the two must not leave
         // a durable version hole that fail-closed-refuses revert/reset until C6. The three disposition
         // markers live INSIDE the callback: each structural guard scans a fixed window above the SQL line.
-        await this.withTransaction(async (query) => {
+        const skipped = await this.withTransaction(async (query) => {
+          // #4196 Class-A claim — FIRST statement, SAME transaction as the lock UPDATE+marker below. A
+          // duplicate (retry/replay) short-circuits: skip the version bump and the lock marker entirely.
+          if (await this.claimClassAOrSkip(query, identity, 'lock_record', config) === 'duplicate') {
+            return 'duplicate' as const
+          }
           // xbase-write-gated: routes through evaluateCrossBaseWrite (gate above) — cross-base lock rejected unless claim==truth + base-write.
           // lock-mgmt: LOCK action — sets the lock columns themselves (not a data edit of a locked row).
           // revision-exempt: lock/unlock metadata-only — no `data` column touched, not a user-content edit.
@@ -3512,12 +3655,19 @@ export class AutomationExecutor {
           )
           const newVersion = Number((upd.rows[0] as { version?: unknown } | undefined)?.version)
           if (Number.isFinite(newVersion)) await recordVersionMarker(query, { sheetId: effectiveSheetId, recordId: effectiveRecordId, version: newVersion, kind: 'lock', actorId: typeof context.actorId === 'string' ? context.actorId : null })
+          return null
         })
+        if (skipped === 'duplicate') return this.alreadyAppliedResult('lock_record')
       } else {
         // W0-1: write an unlock marker at the new version — legitimate non-data bump, not a hole. Bump +
         // marker are atomic inside withTransaction (mirrors the HTTP unlock path) — no durable version hole.
         // Disposition markers live INSIDE the callback (fixed guard scan windows above the SQL line).
-        await this.withTransaction(async (query) => {
+        const skipped = await this.withTransaction(async (query) => {
+          // #4196 Class-A claim — FIRST statement, SAME transaction as the unlock UPDATE+marker below. A
+          // duplicate (retry/replay) short-circuits: skip the version bump and the unlock marker entirely.
+          if (await this.claimClassAOrSkip(query, identity, 'lock_record', config) === 'duplicate') {
+            return 'duplicate' as const
+          }
           // xbase-write-gated: routes through evaluateCrossBaseWrite (gate above) — cross-base unlock rejected unless claim==truth + base-write.
           // lock-mgmt: UNLOCK action — clears the lock columns (decision f: automation may unlock).
           // revision-exempt: lock/unlock metadata-only — no `data` column touched, not a user-content edit.
@@ -3529,7 +3679,9 @@ export class AutomationExecutor {
           )
           const newVersion = Number((upd.rows[0] as { version?: unknown } | undefined)?.version)
           if (Number.isFinite(newVersion)) await recordVersionMarker(query, { sheetId: effectiveSheetId, recordId: effectiveRecordId, version: newVersion, kind: 'unlock', actorId: typeof context.actorId === 'string' ? context.actorId : null })
+          return null
         })
+        if (skipped === 'duplicate') return this.alreadyAppliedResult('lock_record')
       }
 
       return {
