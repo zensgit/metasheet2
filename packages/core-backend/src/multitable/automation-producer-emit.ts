@@ -70,3 +70,45 @@ export function emitRecordEventIfLegacy(
   bus.emit(eventType, payload)
   return true
 }
+
+/**
+ * The identity shape of an approval-domain event as built by `buildApprovalCompletionEvent` /
+ * `buildApprovalTaskCreatedEvent` (`src/services/Approval*Event.ts`). Unlike record events (family 2/3), an
+ * approval event carries its stable identity in a top-level `eventId` (NOT the record-event `_eventId`) and its
+ * family in `eventType`. Only these two identity fields are read here; the caller passes the FULL event object,
+ * which is forwarded verbatim as the durable payload (all its properties serialize at runtime). Deliberately
+ * NOT an index-signature type, so a concrete `Approval*EventV1` (no index signature) is assignable.
+ */
+export interface ApprovalEventLike {
+  eventType: string
+  eventId: string
+}
+
+/**
+ * P1#2e producer family 1 seam (approval completion + task_created). Flag ON ⇒ enqueue the approval `event`
+ * on the SAME transaction as the terminal-transition / assignment write that produced it (REPLACE — the
+ * legacy `emitApproval*Event` post-commit bus emit is then SUPPRESSED at its choke, so keep-both cannot
+ * double-deliver the non-idempotent webhook sink). Flag OFF ⇒ no-op (the legacy emit is the delivery path).
+ *
+ * Two identity notes, both load-bearing:
+ *   - approval events carry `eventId` (the dedup basis + outbound-idempotency seed) at the TOP LEVEL, NOT the
+ *     record-event `_eventId` — so this reads `event.eventId`, and forwards the WHOLE event as `payload`.
+ *   - `automationDepth: 0` — an approval completion / task_created event is an ORIGINAL producer event, never
+ *     a link in an automation chain, so it seeds depth 0 (downstream consumers inherit +1).
+ *
+ * `trx` MUST be the source-write transaction handle — `produceAutomationEvent`'s xid probe rejects a pool /
+ * autocommit client / forged marker, so a half-committed enqueue is unrepresentable. Returns true iff enqueued.
+ */
+export async function enqueueApprovalEventIfDurable(
+  trx: TransactionalQueryable,
+  event: ApprovalEventLike,
+  env: NodeJS.ProcessEnv = process.env,
+): Promise<boolean> {
+  if (!isDurableDeliveryEnabled(env)) return false
+  const res = await produceAutomationEvent(
+    trx,
+    { eventType: event.eventType, eventId: event.eventId, payload: event, automationDepth: 0 },
+    env,
+  )
+  return res !== null
+}

@@ -278,6 +278,9 @@ export default defineConfig({
       // P1#2b producer family 4 (record-service CRUD + record-write bulk) site-wiring goldens: real DB.
       // Excluded here so it cannot skip-green, whole-file wired into plugin-tests.yml's attendance real-DB step.
       'tests/integration/multitable-automation-producer-family4-realdb.test.ts',
+      // P1#2e producer family 1 (approval completion + task_created) REPLACE site goldens: real DB, same shape.
+      // Excluded here so it cannot skip-green, whole-file wired into plugin-tests.yml's attendance real-DB step.
+      'tests/integration/multitable-automation-producer-family1-realdb.test.ts',
       // F9 owner CHANGES-REQUESTED (GF9-1/GF9-2): multitable_attachments blob_purged_at migration +
       // deleteAttachmentBinary index-free delete + sweepMultitableAttachmentBlobPurge compensating-sweep
       // matrix, same shape/rationale as the F5 entry immediately above (DATABASE_URL-gated describeDb,

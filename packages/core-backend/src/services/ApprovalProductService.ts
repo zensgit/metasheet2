@@ -77,10 +77,14 @@ import {
 } from './ApprovalCompletionEvent'
 import {
   buildApprovalTaskCreatedEvent,
+  collectLiveApprovalTaskCreatedEvents,
   emitApprovalTaskCreatedEvent,
   type ApprovalTaskCreatedInstanceSnapshot,
   type ApprovalTaskCreatedTaskSnapshot,
 } from './ApprovalTaskCreatedEvent'
+import { enqueueApprovalEventIfDurable } from '../multitable/automation-producer-emit'
+import { isDurableDeliveryEnabled } from '../multitable/automation-durable-delivery'
+import type { TransactionalQueryable } from '../multitable/pg-transaction-guard'
 import { getApprovalRecordProjectionService } from '../multitable/approval-record-projection-service'
 import { supersedeDingTalkApprovalCardDeliveriesForInstance } from '../integrations/dingtalk/approval-card-deliveries'
 import { Logger } from '../core/logger'
@@ -291,6 +295,23 @@ type AdminJumpEventPayload = {
 type ApprovalDbClient = {
   query: typeof pool.query
   release: () => void
+}
+
+/**
+ * P1#2e producer family 1 — wrap an in-transaction pg client (the connection that has BEGUN and not yet
+ * COMMITted) as the durable seam's `TransactionalQueryable`. The `isTransaction: true` marker documents intent
+ * but proves nothing on its own; `produceAutomationEvent`'s `pg_current_xact_id()` probe (pg-transaction-guard)
+ * is the real guard and THROWS at runtime on a pool / autocommit client / forged marker, so a half-committed
+ * approval-event enqueue is unrepresentable. Only ever hand this the same `client` the source write ran on.
+ */
+function approvalTxnHandle(client: ApprovalDbClient): TransactionalQueryable {
+  return {
+    isTransaction: true,
+    query: async (sql: string, params?: unknown[]) => {
+      const r = await client.query(sql, params)
+      return { rows: (r.rows ?? []) as Array<Record<string, unknown>>, rowCount: r.rowCount ?? null }
+    },
+  }
 }
 
 type ValidationContext = {
@@ -3973,8 +3994,14 @@ export class ApprovalProductService {
           },
           actor: null,
         })
+        // P1#2e REPLACE (family 1) — same-txn durable enqueue of the completion event, atomic with the
+        // terminal transition written above. Flag OFF ⇒ no-op (the post-commit emit is the delivery path).
+        await enqueueApprovalEventIfDurable(approvalTxnHandle(client), completionEvent)
       }
 
+      // P1#2e REPLACE (family 1) — flag-ON in-txn task_created enqueue at the END of the txn (after every
+      // assignment write + same-txn cascade). Flag OFF ⇒ no-op. Legacy post-commit emit stays below.
+      await this.enqueueApprovalTaskCreatedEventsInTxn(client, instanceId, createdTaskEvents)
       await client.query('COMMIT')
     } catch (error) {
       await rollbackQuietly(client)
@@ -4252,7 +4279,11 @@ export class ApprovalProductService {
           },
           { id: actor.userId, name: actor.userName || actor.userId },
         )
+        // P1#2e REPLACE (family 1) — same-txn durable enqueue, atomic with the jump→approved transition.
+        await enqueueApprovalEventIfDurable(approvalTxnHandle(client), completionEvent)
       }
+      // P1#2e REPLACE (family 1) — flag-ON in-txn task_created enqueue at the END of the txn (flag OFF no-op).
+      await this.enqueueApprovalTaskCreatedEventsInTxn(client, id, createdTaskEvents)
       await client.query('COMMIT')
       await this.emitApprovalTaskCreatedEventsPostCommit(id, createdTaskEvents) // A-2a
 
@@ -4488,6 +4519,8 @@ export class ApprovalProductService {
           }, actor)
         }
 
+        // P1#2e REPLACE (family 1) — flag-ON in-txn task_created enqueue at the END of this instance's txn.
+        await this.enqueueApprovalTaskCreatedEventsInTxn(client, instanceId, createdTaskEvents)
         await client.query('COMMIT')
         await this.emitApprovalTaskCreatedEventsPostCommit(instanceId, createdTaskEvents) // A-2a
         result.succeeded.push(instanceId)
@@ -4660,6 +4693,8 @@ export class ApprovalProductService {
           targetUserId,
         })
         await consumeTimeout()
+        // P1#2e REPLACE (family 1) — flag-ON in-txn task_created enqueue at the END of the transfer txn.
+        await this.enqueueApprovalTaskCreatedEventsInTxn(client, id, createdTaskEvents)
         await client.query('COMMIT')
         await this.emitApprovalTaskCreatedEventsPostCommit(id, createdTaskEvents) // A-2a
         return 'applied'
@@ -4754,8 +4789,12 @@ export class ApprovalProductService {
           },
           { id: APPROVAL_TIMEOUT_SYSTEM_ACTOR, name: APPROVAL_TIMEOUT_SYSTEM_ACTOR },
         )
+        // P1#2e REPLACE (family 1) — same-txn durable enqueue, atomic with the timeout jump→approved transition.
+        await enqueueApprovalEventIfDurable(approvalTxnHandle(client), completionEvent)
       }
       await consumeTimeout()
+      // P1#2e REPLACE (family 1) — flag-ON in-txn task_created enqueue at the END of the timeout-jump txn.
+      await this.enqueueApprovalTaskCreatedEventsInTxn(client, id, createdTaskEvents)
       await client.query('COMMIT')
       await this.emitApprovalTaskCreatedEventsPostCommit(id, createdTaskEvents) // A-2a
 
@@ -5027,6 +5066,8 @@ export class ApprovalProductService {
           metadata: { nodeKey: currentNodeKey },
           targetUserId: request.targetUserId,
         }, actor)
+        // P1#2e REPLACE (family 1) — flag-ON in-txn task_created enqueue at the END of the transfer txn.
+        await this.enqueueApprovalTaskCreatedEventsInTxn(client, id, createdTaskEvents)
         await client.query('COMMIT')
         await this.emitApprovalTaskCreatedEventsPostCommit(id, createdTaskEvents) // A-2a
         return (await this.getApproval(id))!
@@ -5085,6 +5126,8 @@ export class ApprovalProductService {
           metadata: { nodeKey: currentNodeKey, addSignMode, addedUserIds: targetUserIds },
           targetUserId: targetUserIds[0],
         }, actor)
+        // P1#2e REPLACE (family 1) — flag-ON in-txn task_created enqueue at the END of the add_sign txn.
+        await this.enqueueApprovalTaskCreatedEventsInTxn(client, id, createdTaskEvents)
         await client.query('COMMIT')
         await this.emitApprovalTaskCreatedEventsPostCommit(id, createdTaskEvents) // A-2a
         return (await this.getApproval(id))!
@@ -5224,6 +5267,8 @@ export class ApprovalProductService {
           },
           { id: actor.userId, name: actorName },
         )
+        // P1#2e REPLACE (family 1) — same-txn durable enqueue, atomic with the revoke transition above.
+        await enqueueApprovalEventIfDurable(approvalTxnHandle(client), completionEvent)
         await client.query('COMMIT')
         emitApprovalCompletionEvent(completionEvent)
         this.emitTerminalMetric(id, 'revoked')
@@ -5323,6 +5368,8 @@ export class ApprovalProductService {
         }, actor)
         await this.insertAutoApprovalEvents(client, id, nextVersion, resolution.status, resolution.autoApprovalEvents, returnEntryEpoch)
         await this.insertCcEvents(client, id, nextVersion, resolution.status, resolution.ccEvents)
+        // P1#2e REPLACE (family 1) — flag-ON in-txn task_created enqueue at the END of the return txn.
+        await this.enqueueApprovalTaskCreatedEventsInTxn(client, id, createdTaskEvents)
         await client.query('COMMIT')
         await this.emitApprovalTaskCreatedEventsPostCommit(id, createdTaskEvents) // A-2a
         this.emitNodeDecisionMetric(id, currentNodeKey, actor.userId)
@@ -5372,6 +5419,8 @@ export class ApprovalProductService {
           },
           { id: actor.userId, name: actorName },
         )
+        // P1#2e REPLACE (family 1) — same-txn durable enqueue, atomic with the reject transition above.
+        await enqueueApprovalEventIfDurable(approvalTxnHandle(client), completionEvent)
         await client.query('COMMIT')
         this.emitNodeDecisionMetric(id, currentNodeKey, actor.userId)
         emitApprovalCompletionEvent(completionEvent)
@@ -5817,6 +5866,14 @@ export class ApprovalProductService {
           )
         : null
 
+      // P1#2e REPLACE (family 1) — same-txn durable enqueue of the completion event (only when this advance is
+      // terminal), atomic with the approve→approved transition above. Flag OFF ⇒ no-op.
+      if (completionEvent) {
+        await enqueueApprovalEventIfDurable(approvalTxnHandle(client), completionEvent)
+      }
+      // P1#2e REPLACE (family 1) — flag-ON in-txn task_created enqueue at the END of the advance txn (after
+      // every assignment write + same-txn auto-approval / parallel-cancel cascade). Flag OFF ⇒ no-op.
+      await this.enqueueApprovalTaskCreatedEventsInTxn(client, id, createdTaskEvents)
       await client.query('COMMIT')
       await this.emitApprovalTaskCreatedEventsPostCommit(id, createdTaskEvents) // A-2a
       // P1-1 defense-in-depth: the node just advanced past `currentNodeKey`, so sweep every still-`sent`
@@ -6136,6 +6193,12 @@ export class ApprovalProductService {
    * created by the just-committed operation. Best-effort by contract: a lookup/emit failure NEVER
    * fails the approval flow (the T2-6 dedupe ledger also absorbs any later re-emission), and the
    * instance snapshot is re-read AFTER commit so the event reflects durable state.
+   *
+   * P1#2e producer family 1 — flag-OFF delivery leg. The recheck+dedup+instance-read+build logic is now the
+   * SHARED `collectLiveApprovalTaskCreatedEvents` core (parameterized on the query fn); this leg passes
+   * `pool.query`, so it is BYTE-IDENTICAL to the pre-P1#2e inline logic. When the flag is ON, the individual
+   * `emitApprovalTaskCreatedEvent` is choke-suppressed (the in-txn `enqueueApprovalTaskCreatedEventsInTxn` leg
+   * is the delivery path); the post-commit collector read here is then harmless (read-only, values-free).
    */
   private async emitApprovalTaskCreatedEventsPostCommit(
     instanceId: string,
@@ -6143,42 +6206,48 @@ export class ApprovalProductService {
   ): Promise<void> {
     if (tasks.length === 0) return
     try {
-      // Same-transaction cascades (auto-approve at entry, immediate handover) can deactivate a row
-      // BEFORE commit — only still-active assignments are real pending items, so re-check against
-      // durable state and drop the rest (values-free: key fields only).
-      const activeResult = await pool.query(
-        `SELECT node_key, assignee_id, entry_epoch FROM approval_assignments
-          WHERE instance_id = $1 AND is_active = TRUE AND assignment_type = 'user'`,
-        [instanceId],
+      const events = await collectLiveApprovalTaskCreatedEvents(
+        (sql, params) => pool.query(sql, params),
+        instanceId,
+        tasks,
       )
-      const activeKeys = new Set(
-        (activeResult.rows as Array<{ node_key: string; assignee_id: string; entry_epoch: number | string | null }>).map(
-          (row) => `${row.node_key}:${row.entry_epoch === null ? 'null' : String(Number(row.entry_epoch))}:${row.assignee_id}`,
-        ),
-      )
-      const seen = new Set<string>()
-      const liveTasks = tasks.filter((task) => {
-        const key = `${task.nodeKey}:${task.entryEpoch === null ? 'null' : String(task.entryEpoch)}:${task.assigneeUserId}`
-        if (seen.has(key) || !activeKeys.has(key)) return false
-        seen.add(key)
-        return true
-      })
-      if (liveTasks.length === 0) return
-      const result = await pool.query(
-        `SELECT id, request_no, template_id, template_version_id, published_definition_id,
-                business_key, workflow_key, requester_snapshot
-           FROM approval_instances WHERE id = $1`,
-        [instanceId],
-      )
-      const instance = result.rows[0] as ApprovalTaskCreatedInstanceSnapshot | undefined
-      if (!instance) return
-      for (const task of liveTasks) {
-        emitApprovalTaskCreatedEvent(buildApprovalTaskCreatedEvent({ instance, task }))
+      for (const event of events) {
+        emitApprovalTaskCreatedEvent(event)
       }
     } catch (error) {
       approvalProductLogger.warn(
         `approval.task_created post-commit emission failed for ${instanceId}: ${error instanceof Error ? error.message : String(error)}`,
       )
+    }
+  }
+
+  /**
+   * P1#2e producer family 1 — flag-ON delivery leg for approval.task_created. Runs at the END of a source txn
+   * (after every assignment write AND same-transaction cascade deactivation in that txn) with the SOURCE-TXN
+   * query fn, so the SHARED collector's `is_active` recheck observes the txn's own pre-commit view — identical
+   * filtering to the post-commit read of committed state (design §4a). Each surviving event is enqueued on the
+   * SAME transaction as the source writes, so the outbox rows commit or roll back atomically with them.
+   *
+   * NOT best-effort (unlike the post-commit leg): a failed enqueue THROWS and rolls back the whole transition —
+   * that atomicity is the entire point of durable delivery. Flag OFF ⇒ pure no-op (no extra txn reads), which
+   * keeps the flag-OFF path byte-identical. `client` MUST be the same in-transaction connection as the writes.
+   */
+  private async enqueueApprovalTaskCreatedEventsInTxn(
+    client: ApprovalDbClient,
+    instanceId: string,
+    tasks: ApprovalTaskCreatedTaskSnapshot[],
+  ): Promise<void> {
+    if (!isDurableDeliveryEnabled()) return
+    if (tasks.length === 0) return
+    const events = await collectLiveApprovalTaskCreatedEvents(
+      (sql, params) => client.query(sql, params),
+      instanceId,
+      tasks,
+    )
+    if (events.length === 0) return
+    const trx = approvalTxnHandle(client)
+    for (const event of events) {
+      await enqueueApprovalEventIfDurable(trx, event)
     }
   }
 
