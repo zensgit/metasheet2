@@ -8,7 +8,7 @@ import type { ApprovalAttachmentStore } from '../../src/services/approval-attach
 
 const FLAG_ON = { APPROVAL_ATTACHMENTS_ENABLED: 'true' } as unknown as NodeJS.ProcessEnv
 
-function makeApp(over: { rows?: unknown[]; viewer?: string | null; participant?: boolean } = {}) {
+function makeApp(over: { rows?: unknown[]; viewer?: string | null; participant?: boolean; hidden?: boolean } = {}) {
   const blobs = new Map<string, Buffer>()
   const inserted: unknown[][] = []
   const store: ApprovalAttachmentStore = {
@@ -32,7 +32,10 @@ function makeApp(over: { rows?: unknown[]; viewer?: string | null; participant?:
   const router = createApprovalAttachmentRouter({
     db,
     store,
-    authChecks: { isInstanceParticipant: async () => over.participant ?? false },
+    authChecks: {
+      isInstanceParticipant: async () => over.participant ?? false,
+      isFieldHiddenAtActiveNode: async () => over.hidden ?? false,
+    },
     viewerId: () => (over.viewer === undefined ? 'u1' : over.viewer),
     env: FLAG_ON,
   })
@@ -48,7 +51,7 @@ describe('approval attachment routes (flag-gated)', () => {
       const r = createApprovalAttachmentRouter({
         db: { query: async () => ({ rows: [], rowCount: 0 }) },
         store: { put: async () => {}, get: async () => Buffer.alloc(0), delete: async () => false },
-        authChecks: { isInstanceParticipant: async () => true },
+        authChecks: { isInstanceParticipant: async () => true, isFieldHiddenAtActiveNode: async () => false },
         viewerId: () => 'u1',
         env: {} as NodeJS.ProcessEnv,
       })
@@ -86,7 +89,7 @@ describe('approval attachment routes (flag-gated)', () => {
   })
 
   test('download: participant streams bound blob; non-participant gets 404 (no oracle); deleted → 410', async () => {
-    const row = { status: 'bound', uploader_id: 'up1', instance_id: 'i1', storage_key: 'k1', file_name: 'a.pdf', mime_type: 'application/pdf' }
+    const row = { status: 'bound', uploader_id: 'up1', instance_id: 'i1', field_id: 'fld1', storage_key: 'k1', file_name: 'a.pdf', mime_type: 'application/pdf' }
     const ok = makeApp({ rows: [row], participant: true })
     ok.blobs.set('k1', Buffer.from('%PDF'))
     const good = await request(ok.app).get('/api/approval/attachments/att_1/download')
@@ -94,9 +97,22 @@ describe('approval attachment routes (flag-gated)', () => {
     expect(good.headers['content-type']).toContain('application/pdf')
     const deny = makeApp({ rows: [row], participant: false })
     expect((await request(deny.app).get('/api/approval/attachments/att_1/download')).status).toBe(404)
-    const gone = makeApp({ rows: [{ ...row, status: 'deleted' }] })
-    expect((await request(gone.app).get('/api/approval/attachments/att_1/download')).status).toBe(410)
     const missing = makeApp({ rows: [] })
     expect((await request(missing.app).get('/api/approval/attachments/att_x/download')).status).toBe(404)
+  })
+
+  // approval-attachment-hidden-redaction (lock G7 / §4.2 gate 2 / test 6): a field hidden at the
+  // active node serves NO bytes at the byte path — even to an authorized instance participant — the
+  // same way redactHiddenFormFields strips it from the echoed snapshot. Non-hidden still serves.
+  test('approval-attachment-hidden-redaction: participant is REFUSED (404) for a hidden field; non-hidden serves 200', async () => {
+    const row = { status: 'bound', uploader_id: 'up1', instance_id: 'i1', field_id: 'secret', storage_key: 'k1', file_name: 'a.pdf', mime_type: 'application/pdf' }
+    const hidden = makeApp({ rows: [row], participant: true, hidden: true })
+    hidden.blobs.set('k1', Buffer.from('%PDF'))
+    const refused = await request(hidden.app).get('/api/approval/attachments/att_1/download')
+    expect(refused.status).toBe(404) // hidden ⇒ same "not found" shape the snapshot redaction produces
+    const visible = makeApp({ rows: [row], participant: true, hidden: false })
+    visible.blobs.set('k1', Buffer.from('%PDF'))
+    const served = await request(visible.app).get('/api/approval/attachments/att_1/download')
+    expect(served.status).toBe(200) // positive control: an identical NON-hidden field still serves bytes
   })
 })

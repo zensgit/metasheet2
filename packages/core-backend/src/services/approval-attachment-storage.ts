@@ -85,16 +85,33 @@ export interface AttachmentRowForAuth {
   status: 'unbound' | 'bound' | 'deleted'
   uploaderId: string
   instanceId: string | null
+  /** the attachment field's id in the template form schema — the key the hidden-redaction gate reads (G7). */
+  fieldId: string
 }
 
 export interface DownloadAuthChecks {
   /** is the viewer a participant (initiator/approver/cc) of the instance? */
   isInstanceParticipant(viewerId: string, instanceId: string): Promise<boolean>
+  /**
+   * Does the instance's ACTIVE node(s) mark `fieldId` as `access:'hidden'`? (§4.2 gate 2 / G7.)
+   * The production wiring MUST back this with the SAME `collectHiddenFieldIds(...)` the snapshot
+   * redaction uses (`approval-form-redaction.ts`), keyed on the instance's active node(s) — never a
+   * re-derived hidden decision — so the byte path and the echoed snapshot cannot drift on "hidden".
+   */
+  isFieldHiddenAtActiveNode(instanceId: string, fieldId: string): Promise<boolean>
 }
 
-export type DownloadAuthResult = { ok: true } | { ok: false; code: 'gone' | 'not_uploader' | 'not_participant' }
+export type DownloadAuthResult =
+  | { ok: true }
+  | { ok: false; code: 'gone' | 'not_uploader' | 'not_participant' | 'hidden' }
 
-/** Recomputed on EVERY download; fail-closed on error. */
+/**
+ * Recomputed on EVERY download; fail-closed on error. Two gates in order (§4.2):
+ *   1. instance-visibility (uploader while unbound; instance participant once bound);
+ *   2. hidden-field redaction — a field the snapshot would hide serves NO bytes to ANYONE (G7).
+ * The `deleted → gone` lifecycle signal is emitted LAST, so an unauthorized outsider always gets the
+ * same authorization denial and never a 404→410 existence/lifecycle oracle (P2 #3 moves it here / G6).
+ */
 export async function authorizeAttachmentDownload(
   row: AttachmentRowForAuth,
   viewerId: string,
@@ -112,5 +129,14 @@ export async function authorizeAttachmentDownload(
   } catch {
     participant = false // fail-closed
   }
-  return participant ? { ok: true } : { ok: false, code: 'not_participant' }
+  if (!participant) return { ok: false, code: 'not_participant' }
+  // Gate 2 (G7): even a participant gets NO bytes for a field hidden at the active node — the byte
+  // path inherits the snapshot's redaction. Fail-closed: if we cannot confirm not-hidden, refuse.
+  let hidden = true
+  try {
+    hidden = await checks.isFieldHiddenAtActiveNode(row.instanceId, row.fieldId)
+  } catch {
+    hidden = true // fail-closed: an ACL/graph-load failure must never leak a byte a hidden field would strip
+  }
+  return hidden ? { ok: false, code: 'hidden' } : { ok: true }
 }
