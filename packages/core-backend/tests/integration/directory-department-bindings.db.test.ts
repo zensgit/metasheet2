@@ -356,10 +356,14 @@ describeIfDatabase('Canonical Org MVP — B4 department binding table (real DB)'
       expect(names).toContain(c)
     }
 
+    // conname is NOT database-unique (same lesson as the migration's own probes): pin each parent
+    // constraint to ITS table via conrelid, so a same-named constraint elsewhere can't fake the 3.
     const parents = await query<{ conname: string }>(
       `SELECT conname FROM pg_constraint
-        WHERE conname IN ('uq_directory_integrations_id_org','uq_directory_integrations_id_provider','uq_directory_departments_id_integration')
-          AND contype = 'u'`,
+        WHERE contype = 'u'
+          AND ((conname = 'uq_directory_integrations_id_org'      AND conrelid = 'directory_integrations'::regclass)
+            OR (conname = 'uq_directory_integrations_id_provider' AND conrelid = 'directory_integrations'::regclass)
+            OR (conname = 'uq_directory_departments_id_integration' AND conrelid = 'directory_departments'::regclass))`,
     )
     expect(parents.rows.length).toBe(3)
   })
