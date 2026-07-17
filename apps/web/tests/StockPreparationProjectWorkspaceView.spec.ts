@@ -246,9 +246,9 @@ describe('StockPreparationProjectWorkspaceView (readonly, values-free)', () => {
     expect(wrap.getAttribute('aria-label')).toBeTruthy()
   })
 
-  // H4-2 keyboard (H4-1 pattern, StockPreparationDashboardView.vue): a NATIVE disabled button is
-  // pulled from the tab order, so the browser drops focus to <body> when a re-failed retry re-renders
-  // with `:disabled` — a keyboard operator who pressed Retry must not be stranded there.
+  // H4-2 keyboard (H4-1 pattern, StockPreparationDashboardView.vue): the error branch unmounts
+  // the retry button while the load is in flight, so the browser drops focus to <body>. A keyboard
+  // operator who pressed Retry must not be stranded there when the failed state re-renders.
   it('H4-2: a failed retry returns focus to the retry button (our own unmount dropped it to body)', async () => {
     h.getOverview.mockRejectedValue(new Error('503'))
     const root = mountView()
