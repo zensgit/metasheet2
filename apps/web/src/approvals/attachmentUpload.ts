@@ -49,7 +49,11 @@ export function preValidateAttachments(files: ReadonlyArray<{ name: string; type
     const mime = (f.type ?? '').toLowerCase().trim()
     const i = f.name.lastIndexOf('.')
     const ext = i < 0 ? '' : f.name.slice(i + 1).toLowerCase()
-    const allowed = ALLOW[mime]
+    // Object.hasOwn guard (server parity): a plain-object `ALLOW[mime]` lookup keyed by an
+    // attacker-controlled `mime` ('constructor' / '__proto__') would otherwise resolve an INHERITED
+    // Object.prototype member — truthy, not an array — and `allowed.includes(ext)` would throw an
+    // uncaught TypeError. Only own properties may resolve; anything else rejects as mime_not_allowed.
+    const allowed = Object.hasOwn(ALLOW, mime) ? ALLOW[mime] : undefined
     const extKnown = Object.values(ALLOW).some((xs) => xs.includes(ext))
     if (!allowed) rejected.push({ fileName: f.name, code: 'mime_not_allowed' })
     else if (!extKnown) rejected.push({ fileName: f.name, code: 'extension_not_allowed' })

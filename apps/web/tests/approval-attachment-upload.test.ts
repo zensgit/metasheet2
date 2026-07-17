@@ -37,6 +37,18 @@ describe('approval attachment upload client', () => {
     expect(preValidateAttachments(Array.from({ length: 3 }, (_, i) => F({ name: `g${i}.pdf`, size: 18 * 1024 * 1024 }))).some((r) => r.code === 'submission_too_large')).toBe(true)
   })
 
+  test('prototype-pollution guard (server parity): an Object.prototype-name MIME rejects as unknown, never throws', () => {
+    // Without the Object.hasOwn guard, ALLOW['constructor'] / ALLOW['__proto__'] resolves an INHERITED
+    // member and allowed.includes(ext) throws an uncaught TypeError — even though '.pdf' is allowlisted.
+    for (const type of ['constructor', '__proto__']) {
+      let out: ReturnType<typeof preValidateAttachments> | undefined
+      expect(() => {
+        out = preValidateAttachments([F({ name: 'x.pdf', type })])
+      }).not.toThrow()
+      expect(out).toEqual([{ fileName: 'x.pdf', code: 'mime_not_allowed' }])
+    }
+  })
+
   test('upload client: 201 returns id; 422 surfaces the server code; pre-reject never hits the network', async () => {
     const ok = vi.fn(async () => new Response(JSON.stringify({ id: 'att_1', sizeBytes: 3 }), { status: 201 }))
     const file = new File([new Uint8Array([1, 2, 3])], 'a.pdf', { type: 'application/pdf' })
