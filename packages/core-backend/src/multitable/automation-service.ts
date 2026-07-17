@@ -2623,8 +2623,6 @@ export class AutomationService {
         continue
       }
       try {
-        const claimed = await this.claimEventDelivery(rule.id, `approval.completed:${event.eventId}`)
-        if (!claimed) continue
         // Q3 record-less payload: the approval event rides along as the trigger event; actions are
         // save-restricted to non-record-targeting side effects, so the empty record context is never read.
         const payload: AutomationEventPayload & Record<string, unknown> = {
@@ -2640,7 +2638,7 @@ export class AutomationService {
           transition: event.transition,
           requester: event.requester,
         }
-        await this.executeRule(toExecutorRule(rule), payload)
+        await this.runWithEventDedup(rule.id, `approval.completed:${event.eventId}`, () => this.executeRule(toExecutorRule(rule), payload))
       } catch (err) {
         logger.error(`approval.completed rule ${rule.id} failed`, err instanceof Error ? err : undefined)
       }
@@ -2683,8 +2681,6 @@ export class AutomationService {
         continue
       }
       try {
-        const claimed = await this.claimEventDelivery(rule.id, `approval.task_created:${event.eventId}`)
-        if (!claimed) continue
         const payload: AutomationEventPayload & Record<string, unknown> = {
           sheetId: rule.sheet_id,
           recordId: '',
@@ -2698,7 +2694,7 @@ export class AutomationService {
           task: event.task,
           requester: event.requester,
         }
-        await this.executeRule(toExecutorRule(rule), payload)
+        await this.runWithEventDedup(rule.id, `approval.task_created:${event.eventId}`, () => this.executeRule(toExecutorRule(rule), payload))
       } catch (err) {
         logger.error(`approval.task_created rule ${rule.id} failed`, err instanceof Error ? err : undefined)
       }
