@@ -171,6 +171,13 @@ export default defineConfig({
       // auto-matched, suggest read-only. DATABASE_URL-gated; wired as a WHOLE FILE into the
       // directory real-DB step (both points asserted by b7-reconciliation-ci-wiring.test.mjs).
       'tests/integration/directory-binding-reconciliation.db.test.ts',
+      // B7 owner round (#4436): the binding ADMIN routes (list/suggestions/sweep+audit) and the
+      // Q6 POST-SYNC auto-sweep hook (end-to-end through the REAL sync with a mocked provider
+      // pull; narrowing + failure isolation). DATABASE_URL-gated; wired as WHOLE FILES into the
+      // directory (routes) and approval (sync-hook) real-DB steps; both points asserted by
+      // b7-round2-ci-wiring.test.mjs.
+      'tests/integration/directory-binding-admin-routes.db.test.ts',
+      'tests/integration/directory-binding-sync-hook.db.test.ts',
       // Canonical Org MVP B3 (#4215 §5.4): proves ApprovalDirectoryOrg's DUAL-SOURCE direct-manager
       // resolution against real Postgres — normalized `is_manager` relation for a local integration,
       // the DingTalk `leader_in_dept` regression pin (load-bearing compat leg + is_manager=0 positive
