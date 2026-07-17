@@ -398,6 +398,24 @@ describe('StockPreparationPrepLineView (view 5: values-free prep lines + generat
     expect(retry.getAttribute('aria-label')).toBe('Retry loading prep lines')
   })
 
+  // H4-2 keyboard (H4-1 pattern, StockPreparationDashboardView.vue): a NATIVE disabled button is
+  // pulled from the tab order, so the browser drops focus to <body> when a re-failed retry re-renders
+  // with `:disabled` — a keyboard operator who pressed Retry must not be stranded there.
+  it('H4-2: a failed retry returns focus to the retry button (our own :disabled dropped it to body)', async () => {
+    h.apiFetch.mockImplementation(async () => fail(500, 'BACKEND_NOT_READY'))
+    const root = mountView()
+    await waitForSelector(root, '[data-testid="stock-prep-line-error"]')
+    const retry = root.querySelector('[data-testid="stock-prep-line-retry"]') as HTMLButtonElement
+    retry.focus()
+    expect(document.activeElement).toBe(retry)
+    const callsBefore = h.apiFetch.mock.calls.length
+    retry.click() // still failing → button unmounts during the load, then re-renders; drops focus to <body>
+    await waitForCondition(() => h.apiFetch.mock.calls.length > callsBefore)
+    await waitForSelector(root, '[data-testid="stock-prep-line-error"]')
+    await waitForCondition(() => document.activeElement === root.querySelector('[data-testid="stock-prep-line-retry"]'))
+    expect(document.activeElement).toBe(root.querySelector('[data-testid="stock-prep-line-retry"]'))
+  })
+
   // H4-3 keyboard: the table wrap is a jsdom-testable, load-bearing scroll region — attribute
   // presence is what a future refactor could silently delete (unlike the CSS focus ring, which
   // jsdom cannot compute and is verified only via the browser harness in the PR description). This

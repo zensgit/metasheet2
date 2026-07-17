@@ -30,12 +30,13 @@
       <p class="sp-line__state-msg">{{ bi('同步后端尚未就绪,稍后再试。', 'Backend read not ready yet — try again later.') }}</p>
       <!-- H4-3 retry: re-runs the same readonly loadList(); idempotent, no new endpoint. -->
       <button
+        ref="retryEl"
         type="button"
         class="sp-line__retry"
         data-testid="stock-prep-line-retry"
         :disabled="loading"
         :aria-label="bi('重试读取备料明细', 'Retry loading prep lines')"
-        @click="loadList"
+        @click="onRetry"
       >
         {{ bi('重试', 'Retry') }}
       </button>
@@ -218,7 +219,7 @@
 // presence booleans, and sha16 handles (stockPrepLineId / createdFromRunId). The drawing-number /
 // quantity / unit columns are OWNER-GATED value surfaces (OD-W3-1) and are deliberately NOT shown
 // in the MVP; error surfaces render only the clamped code / field NAME, never the raw body.
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, ref, watch, type Ref } from 'vue'
 import { useLocale } from '../../../composables/useLocale'
 import type { IntegrationScope } from '../../../services/integration/workbench'
 import { StockPreparationConfirmApiError } from '../../../services/integration/stockPreparation/confirmApi'
@@ -330,6 +331,26 @@ async function runGeneration(): Promise<void> {
   } finally {
     busy.value = false
   }
+}
+
+// H4-3 keyboard — retry focus restore (same pattern as StockPreparationDashboardView.vue's H4-1
+// retry). The retry button carries `:disabled` while its own load is in flight, and a NATIVE
+// disabled button is pulled from the tab order — the browser drops focus to <body>, stranding a
+// keyboard operator who just pressed Retry. After the load settles we put focus back on the button,
+// but ONLY when it is still rendered (the retry failed again, so there is something to press) AND
+// focus is still on <body> (our own disable dropped it, and the operator has not Tabbed elsewhere
+// meanwhile) — the second condition is REQUIRED so this can never steal focus from wherever the
+// operator moved to.
+const retryEl = ref<HTMLButtonElement | null>(null)
+
+async function restoreRetryFocus(el: Ref<HTMLButtonElement | null>): Promise<void> {
+  await nextTick()
+  if (document.activeElement === document.body) el.value?.focus()
+}
+
+async function onRetry(): Promise<void> {
+  await loadList()
+  await restoreRetryFocus(retryEl)
 }
 
 onMounted(loadList)
