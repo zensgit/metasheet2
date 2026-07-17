@@ -42,8 +42,11 @@ and all writer wiring — **plus three owner hardenings the superseded branches 
   DELETE always raises). Migration :220–237. (#4412 left DELETE to future retention.)
 - **H2 — whole-operation atomic retention:** the only sanctioned bypass of H1 is the SQL function
   `meta_record_history_operations_prune(sheet_id, operation_id)` (migration :246–260), which deletes both event tables'
-  rows AND the endpoint row for exactly one operation in one transaction under the GUC; the DEFERRABLE FKs
-  (`fk_mrr_operation`/`fk_mrvm_operation`, :104–122) make any torn/partial prune RAISE at COMMIT.
+  rows AND the endpoint row for exactly one operation in one transaction under the GUC. The two torn-prune directions
+  have **different protection mechanisms**: *endpoint-gone-but-events-remain* is DB-enforced — the DEFERRABLE FKs
+  (`fk_mrr_operation`/`fk_mrvm_operation`, :104–122) RAISE at COMMIT when surviving events reference a vanished
+  endpoint; *events-gone-but-endpoint-remains* (an orphan endpoint) is **NOT rejected by any FK** — that direction is
+  protected only by the prune function's own implementation (all three DELETEs in one call) plus its golden coverage.
 - **H3 — flag-ON with incomplete schema fails closed:** `mintOperation` (`operation-ledger.ts` ~:150) THROWS
   `OperationLedgerSchemaError` when the writer-fence flag is ON but `operation_id` is absent from the schema — the
   writer transaction ROLLS BACK instead of degrading to an inert ledger (which is what #4412 did).
@@ -76,6 +79,14 @@ not transfer to #4409, which passed its own required CI + independent four-lens 
   flag) is ever armed.**
 - **P3-2** — `recordRecordRevisionsBatch` decouple (site 2) is forward-wired but unexercised (its only caller, the
   field-undelete rehydration at `univer-meta.ts` :6561, passes no ledger); only site 1 is load-bearing/tested today.
+
+**Retention pre-condition from #4409's own gate (separate track — NOT an L6-b item; gates the FIRST production
+retention caller instead):**
+- **P3-R** — the prune function's trailing `set_config('metasheet.mrho_retention', 'off', true)` reset is
+  **load-bearing inside the caller's transaction**: without it, the txn-local GUC stays `'on'` for the remainder of
+  that transaction and H1 is bypassed for any subsequent ad-hoc endpoint DELETE in the same txn. This reset has **no
+  test today**. A golden proving the GUC is back to `'off'` after `…_prune()` returns (an ad-hoc DELETE later in the
+  SAME transaction still RAISES) MUST land **before the first production retention caller** is wired.
 
 **Guardrails currently intact:** the full Phase-A DAG is on `main`; #4368/#4380/#4385/#4412 CLOSED as superseded;
 nothing self-ratified or self-merged; all recovery/mint flags default-OFF.
