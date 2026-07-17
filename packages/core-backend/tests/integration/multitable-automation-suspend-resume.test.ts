@@ -123,7 +123,23 @@ describeIfDatabase('multitable automation suspend/resume (A6-2, real DB)', () =>
     const svc = makeService()
     const ruleId = await createWaitRule(svc, 't2')
     const exec = await suspend(svc, ruleId)
+
+    // #4196 §4 immutability control — capture the fingerprint the INSERT wrote (before the resume's UPDATE).
+    const fpBefore = (
+      await q('SELECT rule_action_fingerprint FROM multitable_automation_executions WHERE id = $1', [exec.id])
+    ).rows[0]?.rule_action_fingerprint
+    expect(fpBefore).toBeTruthy() // captured at execution start, unconditionally
+
     const result = await svc.resumeExecution(await tokenFor(exec.id), 'admin_t2')
+
+    // The resume path calls updateRecordedExecution with a REBUILT execution object that does not carry
+    // ruleActionFingerprint. The column is deliberately excluded from that UPDATE, so the value the INSERT
+    // wrote MUST survive unchanged. Before that fix the resume nulled it, silently disarming the retry
+    // RULE_CHANGED guard for every suspended-then-resumed execution.
+    const fpAfter = (
+      await q('SELECT rule_action_fingerprint FROM multitable_automation_executions WHERE id = $1', [exec.id])
+    ).rows[0]?.rule_action_fingerprint
+    expect(fpAfter).toBe(fpBefore)
 
     expect('execution' in result).toBe(true)
     if ('execution' in result) {

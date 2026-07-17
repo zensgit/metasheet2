@@ -257,6 +257,9 @@ export default defineConfig({
       // isolated per-test schema, real UPGRADE path (old schema + rows → migrate → assert). Excluded here so it
       // cannot skip-green, whole-file wired into `Run attendance integration tests` in plugin-tests.yml.
       'tests/integration/multitable-automation-event-fires-lease-migration.db.test.ts',
+      // S6 event_fires LEASE claim/reclaim (window-2 fix): isolated-schema real DB. Excluded here so it cannot
+      // skip-green, whole-file wired into the attendance real-DB step in plugin-tests.yml.
+      'tests/integration/multitable-automation-event-fires-lease-realdb.db.test.ts',
       // F9 owner CHANGES-REQUESTED (GF9-1/GF9-2): multitable_attachments blob_purged_at migration +
       // deleteAttachmentBinary index-free delete + sweepMultitableAttachmentBlobPurge compensating-sweep
       // matrix, same shape/rationale as the F5 entry immediately above (DATABASE_URL-gated describeDb,
@@ -316,6 +319,12 @@ export default defineConfig({
       // skip-green in the no-DB lane, whole-file wired into `Run multitable real-DB integration` in
       // plugin-tests.yml.
       'tests/integration/multitable-d1c-automation-revision-realdb.test.ts',
+      // #4196 Class-A same-transaction idempotency claim goldens (replay no-op for create/update, crash
+      // rolls the claim back, flag-OFF positive control), driven through the real
+      // AutomationService.executeRule entry point (constructor hard-wires deps.transaction to a real
+      // poolManager.get().transaction). Real Postgres only — excluded HERE so it cannot skip-green in the
+      // no-DB lane, whole-file wired into `Run multitable real-DB integration` in plugin-tests.yml.
+      'tests/integration/multitable-4196-classa-claim-realdb.test.ts',
       // D-1c W0 slice ④ (approval resultWriteback revision goldens, driven through the real
       // dispatchAction -> approval.completed event bus -> AutomationService.handleApprovalCompletionEvent
       // -> writeApprovalResultBack chain + the concurrent-delete zero-row fail-closed golden, which uses a
@@ -359,6 +368,10 @@ export default defineConfig({
       // §6.1 derived test-run root): real Postgres only — excluded HERE so it cannot skip-green in the
       // no-DB lane, whole-file wired into `Run multitable real-DB integration` in plugin-tests.yml.
       'tests/integration/multitable-automation-execution-ledger-realdb.test.ts',
+      // #4196 Class-B outbound two-phase intent/outcome (§3 table + two-phase state machine + crash-flip +
+      // status='pending' single-writer guard): real Postgres only — excluded HERE so it cannot skip-green in
+      // the no-DB lane, whole-file wired into `Run multitable real-DB integration` in plugin-tests.yml.
+      'tests/integration/multitable-automation-outbound-intent-realdb.test.ts',
       // P2 durable-delivery S2-a claim engine / fence-CAS — real-DB constructed-concurrency (zombie/SKIP
       // LOCKED). Excluded HERE so it cannot skip-green in the no-DB lane; whole-file wired into
       // plugin-tests.yml. Two-point wiring.

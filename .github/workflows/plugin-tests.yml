@@ -457,6 +457,7 @@ jobs:
             tests/integration/multitable-d1c-form-submit-revision-realdb.test.ts \
             tests/integration/multitable-d1c-plugin-revision-realdb.test.ts \
             tests/integration/multitable-d1c-automation-revision-realdb.test.ts \
+            tests/integration/multitable-4196-classa-claim-realdb.test.ts \
             tests/integration/multitable-d1c-approval-revision-realdb.test.ts \
             tests/integration/multitable-d1c-attachment-revision-realdb.test.ts \
             tests/integration/multitable-reset-pit-inbound-capture-realdb.test.ts \
@@ -567,6 +568,7 @@ jobs:
             tests/integration/multitable-automation-outbox-schema-realdb.test.ts \
             tests/integration/multitable-action-applied-ledger-realdb.test.ts \
             tests/integration/multitable-automation-execution-ledger-realdb.test.ts \
+            tests/integration/multitable-automation-outbound-intent-realdb.test.ts \
             tests/integration/multitable-automation-dispatcher-claim-realdb.test.ts \
             tests/integration/multitable-automation-dispatch-loop-realdb.test.ts \
             tests/integration/multitable-automation-outbox-enqueue-realdb.test.ts \
@@ -726,6 +728,7 @@ jobs:
             tests/integration/files-storage-key-migration.db.test.ts \
             tests/integration/files-orphan-blob-retention.db.test.ts \
             tests/integration/multitable-automation-event-fires-lease-migration.db.test.ts \
+            tests/integration/multitable-automation-event-fires-lease-realdb.db.test.ts \
             tests/integration/multitable-attachment-blob-purge.db.test.ts \
             tests/integration/multitable-attachment-root-escape.db.test.ts \
             tests/integration/stock-prep-audit-immutable-trigger.db.test.ts \

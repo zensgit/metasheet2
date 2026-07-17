@@ -106,6 +106,39 @@ describe('jwt auth middleware', () => {
     expect(next).toHaveBeenCalledTimes(1)
   })
 
+  it('does not let x-tenant-id replace an authenticated tenant binding', async () => {
+    authServiceMocks.verifyToken.mockResolvedValue({
+      id: 'user-bound',
+      email: 'bound@example.com',
+      name: 'Bound User',
+      role: 'admin',
+      permissions: ['*:*'],
+      tenantId: 'tenant_bound',
+      created_at: new Date('2026-04-11T00:00:00.000Z'),
+      updated_at: new Date('2026-04-11T00:00:00.000Z'),
+    })
+
+    const req = {
+      headers: {
+        authorization: 'Bearer bound-token',
+        'x-tenant-id': 'tenant_other',
+      },
+    } as unknown as Request
+    const res = {
+      status: vi.fn().mockReturnThis(),
+      json: vi.fn().mockReturnThis(),
+    } as unknown as Response
+    const next = vi.fn() as NextFunction
+
+    await jwtAuthMiddleware(req, res, next)
+
+    expect(req.user).toMatchObject({
+      id: 'user-bound',
+      tenantId: 'tenant_bound',
+    })
+    expect(next).toHaveBeenCalledTimes(1)
+  })
+
   it('backfills tenantId from x-tenant-id for legacy tenant-less tokens', async () => {
     authServiceMocks.verifyToken.mockResolvedValue({
       id: 'user-2',
