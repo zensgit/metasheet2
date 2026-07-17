@@ -66,26 +66,57 @@ export interface ReconcileResult {
   missingBlobs: string[]
 }
 
-/** Bidirectional bucket⇄table reconciliation. `listBlobs` yields every storage key currently in the bucket. */
-export async function reconcileBucket(db: Queryable, listBlobs: () => Promise<string[]>): Promise<ReconcileResult> {
-  const blobKeys = await listBlobs()
+/**
+ * Default orphan grace window (§7/G15). The upload path is `store.put(blob)` THEN `INSERT row`, so a
+ * blob briefly exists with NO row on the NORMAL happy path (the window between put and commit). The
+ * reconciler MUST NOT mistake that in-flight object for an upload-crash orphan, so it only enqueues a
+ * blob with no row once it is OLDER than this window — which MUST exceed the max plausible
+ * upload→row-commit latency. Overridable via `reconcileBucket(..., { graceMs })` for ops tuning.
+ */
+export const RECONCILER_ORPHAN_GRACE_MS = 60 * 60 * 1000 // 1h ≫ any single synchronous multipart upload→commit
+
+/** One object in the bucket, carrying its age so the reconciler can apply the grace window (G15). */
+export interface ReconcilerBlob {
+  key: string
+  /** age of the object in the store: `now - written_at`, in ms (never negative in practice). */
+  ageMs: number
+}
+
+/**
+ * Bidirectional bucket⇄table reconciliation. `listBlobs` yields every object currently in the approval
+ * bucket WITH its age. An orphan is enqueued ONLY when it has no row AND is older than the grace window
+ * (G15): a row-less object younger than the grace is treated as a possibly-mid-upload/commit object and
+ * is NEVER purged — the load-bearing guard against deleting a live upload's blob on the happy path.
+ */
+export async function reconcileBucket(
+  db: Queryable,
+  listBlobs: () => Promise<ReconcilerBlob[]>,
+  opts: { graceMs?: number } = {},
+): Promise<ReconcileResult> {
+  const graceMs = opts.graceMs ?? RECONCILER_ORPHAN_GRACE_MS
+  if (!Number.isSafeInteger(graceMs) || graceMs < 0) {
+    throw new RangeError(`graceMs must be a non-negative safe integer (got ${graceMs})`)
+  }
+  const blobs = await listBlobs()
   const { rows } = await db.query(`SELECT storage_key, status FROM approval_attachments`)
   const rowByKey = new Map((rows as Array<{ storage_key: string; status: string }>).map((r) => [r.storage_key, r.status]))
   const result: ReconcileResult = { orphanBlobsQueued: 0, missingBlobs: [] }
-  // (a) blob with NO row at all → orphan (crashed upload); queue idempotent purge intent.
-  for (const key of blobKeys) {
-    if (!rowByKey.has(key)) {
-      const res = await db.query(
-        `INSERT INTO approval_attachment_purge_intents (id, storage_key, reason)
-         VALUES ('pi_rec_' || md5($1), $1, 'reconciler_orphan')
-         ON CONFLICT (id) DO NOTHING`,
-        [key],
-      )
-      result.orphanBlobsQueued += Number(res.rowCount ?? 0)
-    }
+  // (a) blob with NO row at all AND older than the grace window → orphan (crashed upload); queue
+  //     an idempotent purge intent. A row-less object younger than the grace is skipped: it may be a
+  //     normal upload still between store.put and the row INSERT — purging it would be silent data loss.
+  for (const { key, ageMs } of blobs) {
+    if (rowByKey.has(key)) continue
+    if (ageMs < graceMs) continue // younger than grace ⇒ possibly mid-upload/commit; NEVER an orphan (G15)
+    const res = await db.query(
+      `INSERT INTO approval_attachment_purge_intents (id, storage_key, reason)
+       VALUES ('pi_rec_' || md5($1), $1, 'reconciler_orphan')
+       ON CONFLICT (id) DO NOTHING`,
+      [key],
+    )
+    result.orphanBlobsQueued += Number(res.rowCount ?? 0)
   }
   // (b) live row whose blob vanished → surface, never delete.
-  const blobSet = new Set(blobKeys)
+  const blobSet = new Set(blobs.map((b) => b.key))
   for (const [key, status] of rowByKey) {
     if (status !== 'deleted' && !blobSet.has(key)) result.missingBlobs.push(key)
   }
