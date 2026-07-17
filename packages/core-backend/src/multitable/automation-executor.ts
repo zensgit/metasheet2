@@ -18,6 +18,7 @@ import {
   recordOutboundOutcome,
   type OutboundAttemptResult,
   type OutboundIntentIdentity,
+  type OutboundOutcome,
 } from './automation-outbound-intent'
 import type { TransactionalQueryable } from './pg-transaction-guard'
 import { Logger } from '../core/logger'
@@ -82,7 +83,7 @@ import type {
 import type { ConditionGroup } from './automation-conditions'
 import { evaluateConditions } from './automation-conditions'
 import type { AutomationTrigger } from './automation-triggers'
-import type { NotificationService } from '../types/plugin'
+import type { Notification, NotificationResult, NotificationService } from '../types/plugin'
 import { WebhookService } from './webhook-service'
 
 const logger = new Logger('AutomationExecutor')
@@ -1790,7 +1791,11 @@ export class AutomationExecutor {
           result = await this.executeSendNotification(action.config, context)
           break
         case 'send_email':
-          result = await this.executeSendEmail(action.config as unknown as SendEmailConfig, context)
+          // #4196 Class-B follow-up: thread the execution identity so send_email can take the two-phase
+          // intent/outcome path when AUTOMATION_CLASSB_OUTBOUND_ENABLED is ON (flag OFF ⇒ identity ignored,
+          // byte-identical legacy send). The typed `config` is the same runtime object used for the §2.1
+          // action-key, exactly as send_webhook passes its raw config.
+          result = await this.executeSendEmail(action.config as unknown as SendEmailConfig, context, identity)
           break
         case 'send_dingtalk_group_message':
           result = await this.executeSendDingTalkGroupMessage(action.config as unknown as SendDingTalkGroupMessageConfig, context)
@@ -1799,7 +1804,9 @@ export class AutomationExecutor {
           result = await this.executeSendDingTalkPersonMessage(action.config as unknown as SendDingTalkPersonMessageConfig, context)
           break
         case 'send_dingtalk_approval_card':
-          result = await this.executeSendDingTalkApprovalCard(context)
+          // #4196 Class-B follow-up: thread the raw config + execution identity so the approval card can take
+          // the two-phase intent/outcome path when the flag is ON (flag OFF ⇒ both ignored, byte-identical).
+          result = await this.executeSendDingTalkApprovalCard(context, action.config, identity)
           break
         case 'lock_record':
           result = await this.executeLockRecord(action.config, context, identity)
@@ -2972,6 +2979,9 @@ export class AutomationExecutor {
   private async executeSendEmail(
     config: SendEmailConfig,
     context: ExecutionContext,
+    // #4196 Class-B identity. Present on every rule-driven call; undefined for the ad-hoc single-action
+    // dispatch (runSingleAction). Ignored entirely when AUTOMATION_CLASSB_OUTBOUND_ENABLED is OFF.
+    identity?: ClassAActionIdentity,
   ): Promise<AutomationStepResult> {
     const recipients = Array.from(new Set(
       (Array.isArray(config.recipients) ? config.recipients : [])
@@ -2995,6 +3005,8 @@ export class AutomationExecutor {
       return { actionType: 'send_email', status: 'failed', error: 'NotificationService is not configured for send_email automation action' }
     }
 
+    // Non-null after the guard above; captured so the two-phase helper shares the exact instance.
+    const notificationService = this.deps.notificationService
     const templateData: Record<string, unknown> = {
       sheetId: context.sheetId,
       recordId: context.recordId,
@@ -3004,7 +3016,7 @@ export class AutomationExecutor {
     const subject = renderAutomationTemplate(subjectTemplate, templateData).trim()
     const content = renderAutomationTemplate(bodyTemplate, templateData).trim()
 
-    const result = await this.deps.notificationService.send({
+    const notification: Notification = {
       channel: 'email',
       subject,
       content,
@@ -3017,7 +3029,18 @@ export class AutomationExecutor {
         recordId: context.recordId,
         actorId: context.actorId ?? null,
       },
-    })
+    }
+
+    // #4196 Class-B two-phase (flag ON + identity present). Intent (Tx A) commits BEFORE the send; a prior
+    // `sent`/`outcome_unknown` short-circuits with NO send. Flag OFF (or no execution identity — the
+    // runSingleAction ad-hoc path) ⇒ the legacy send below runs BYTE-IDENTICAL to pre-slice (no intent
+    // row, no classification, no outcome write).
+    const outboundId = this.classBOutboundIdentity(identity, 'send_email', config)
+    if (outboundId) {
+      return this.executeSendEmailTwoPhase(outboundId, notificationService, notification, recipients.length)
+    }
+
+    const result = await notificationService.send(notification)
 
     if (result.status === 'failed') {
       return {
@@ -3040,6 +3063,80 @@ export class AutomationExecutor {
   }
 
   /**
+   * #4196 Class-B two-phase send for send_email. Tx A (claim) already decided we may attempt; here we attempt
+   * EXACTLY ONCE (at-most-once — no in-call resend on an ambiguous failure), classify, record the outcome
+   * (Tx B, guarded single-writer), and map to a step result.
+   *
+   * CLASSIFICATION (fail-closed, see the PR body): `NotificationService.send()` catches every transport
+   * error internally and returns `{ status:'failed', failedReason:<REDACTED string> }` (or throws, rarely).
+   * It NEVER surfaces the socket-level error code that would distinguish DEFINITE pre-dispatch non-delivery
+   * (DNS / connection-refused / TLS handshake = nothing left the client) from post-dispatch loss (timeout /
+   * reset after the DATA phase = the message MAY have been delivered). So `classifyOutboundResult` /
+   * `classifyFetchError` are INAPPLICABLE here (there is no HTTP status and no undici code to read). Because
+   * pre-dispatch non-delivery CANNOT be proven, a failed/thrown send maps to `outcome_unknown`, NEVER a plain
+   * `failed` — a plain `failed` is retryable and a resend would risk a DUPLICATE email. Only a non-failed
+   * result is `sent`. There is therefore no `failed` (retryable) terminal state on this path by construction.
+   */
+  private async executeSendEmailTwoPhase(
+    outboundId: OutboundIntentIdentity,
+    notificationService: Pick<NotificationService, 'send'>,
+    notification: Notification,
+    recipientCount: number,
+  ): Promise<AutomationStepResult> {
+    // Tx A — intent committed BEFORE the send. A prior sent/unknown short-circuits with no send.
+    const decision = await claimOutboundIntent(this.deps.queryFn, outboundId)
+    if (decision === 'skip_sent' || decision === 'skip_unknown') {
+      return this.alreadyAppliedResult('send_email')
+    }
+
+    // decision is 'proceed' | 'retry_failed' → attempt ONCE.
+    let outcome: OutboundOutcome
+    let reason: string
+    let sendResult: NotificationResult | null = null
+    try {
+      sendResult = await notificationService.send(notification)
+      // Fail-closed mapping (see the method doc): only a non-failed result proves the send left the client;
+      // a 'failed' result carries a REDACTED reason with no socket code, so it is un-provable as pre-dispatch
+      // non-delivery ⇒ outcome_unknown (never a false `failed` that would permit a resend / duplicate email).
+      outcome = sendResult.status === 'failed' ? 'outcome_unknown' : 'sent'
+      reason = sendResult.status === 'failed' ? 'email_send_failed' : 'sent'
+    } catch {
+      // send() is not expected to throw (it catches internally), but a throw is equally un-provable as
+      // pre-dispatch non-delivery ⇒ fail closed to outcome_unknown, never plain failed.
+      outcome = 'outcome_unknown'
+      reason = 'email_send_threw'
+    }
+
+    // Tx B — record the terminal outcome (guarded `status='pending'`, single-writer).
+    await recordOutboundOutcome(this.deps.queryFn, outboundId, outcome, reason)
+
+    if (outcome === 'sent') {
+      return {
+        actionType: 'send_email',
+        status: 'success',
+        output: {
+          outcome: 'sent',
+          notificationId: sendResult?.id,
+          notificationStatus: sendResult?.status,
+          recipientCount,
+        },
+      }
+    }
+    // outcome_unknown — the email MAY have been delivered; surfaced as failed so the run does NOT silently
+    // succeed, and NEVER auto-resent (a retry consults the intent row and skips).
+    return {
+      actionType: 'send_email',
+      status: 'failed',
+      error: `send_email outcome_unknown (${reason}); recorded, not auto-resent`,
+      output: {
+        outcome: 'outcome_unknown',
+        reason,
+        ...(sendResult ? { notificationStatus: sendResult.status, failedReason: sendResult.failedReason } : {}),
+      },
+    }
+  }
+
+  /**
    * A-2b (one-tap lock #3594, owner-ratified): approval-card delivery.
    * - Only meaningful on approval.task_created rules: the recipient is FIXED from the trigger
    *   event's assignee (rule authors cannot supply users — no misdelivery surface).
@@ -3050,7 +3147,13 @@ export class AutomationExecutor {
    * - The deep link carries ONLY the delivery id + an HMAC token (values-free): the decision page
    *   resolves everything server-side through the card-delivery wrapper (§4/§5), never raw /actions.
    */
-  private async executeSendDingTalkApprovalCard(context: ExecutionContext): Promise<AutomationStepResult> {
+  private async executeSendDingTalkApprovalCard(
+    context: ExecutionContext,
+    // #4196 Class-B follow-up. `config` (raw action config) feeds the §2.1 action-key; `identity` is the
+    // execution lineage. Both are ignored when AUTOMATION_CLASSB_OUTBOUND_ENABLED is OFF (byte-identical).
+    config: unknown,
+    identity?: ClassAActionIdentity,
+  ): Promise<AutomationStepResult> {
     const actionType = 'send_dingtalk_approval_card' as const
     const event = context.triggerEvent as {
       eventType?: unknown
@@ -3170,6 +3273,20 @@ export class AutomationExecutor {
         ruleId: context.ruleId,
       })
     }
+    // #4196 Class-B two-phase (flag ON + identity present). Claim the outbound intent (Tx A) BEFORE the
+    // card-delivery row is inserted, so a replay that already `sent` (or is ambiguously `outcome_unknown`)
+    // short-circuits with NO card row and NO send. This sits AFTER every validation early-return above (those
+    // are DEFINITE pre-send failures that must NOT leave a phantom `pending` intent that a later replay would
+    // fail-close to unknown). Flag OFF (or the ad-hoc no-identity path) ⇒ outboundId null ⇒ everything below,
+    // including the existing card-delivery ledger, is BYTE-IDENTICAL to pre-slice.
+    const outboundId = this.classBOutboundIdentity(identity, 'send_dingtalk_approval_card', config)
+    if (outboundId) {
+      const decision = await claimOutboundIntent(this.deps.queryFn, outboundId)
+      if (decision === 'skip_sent' || decision === 'skip_unknown') {
+        return this.alreadyAppliedResult('send_dingtalk_approval_card')
+      }
+    }
+
     const delivery = await insertDingTalkApprovalCardDelivery(this.deps.queryFn, {
       instanceId,
       nodeKey,
@@ -3195,6 +3312,10 @@ export class AutomationExecutor {
       '请点击下方按钮处理。',
     ].filter(Boolean)
 
+    // #4196 Class-B: tracks whether the DingTalk send call RETURNED (the card was delivered). Used in the
+    // catch to distinguish a post-send bookkeeping failure (markSent / Tx-B throw AFTER a successful send —
+    // must never be recorded as a retryable `failed` that would resend a delivered card) from a send failure.
+    let sendReturned = false
     try {
       const result = await (async () => {
         if (useInteractiveCard) {
@@ -3238,6 +3359,12 @@ export class AutomationExecutor {
           { fetchFn: this.deps.fetchFn },
         )
       })()
+      // The send RETURNED → the card was delivered. #4196 Class-B: record the terminal `sent` outcome
+      // (Tx B) BEFORE the card-ledger mark, so a subsequent bookkeeping failure (markSent throw) lands in
+      // the catch with the intent ALREADY `sent` and cannot be mis-recorded as a retryable `failed`. Guarded
+      // WHERE status='pending' (single-writer); reason is a bounded, values-free class.
+      sendReturned = true
+      if (outboundId) await recordOutboundOutcome(this.deps.queryFn, outboundId, 'sent', 'dingtalk_card_sent')
       await markDingTalkApprovalCardDeliverySent(this.deps.queryFn, delivery.id, result.taskId ?? null)
       return {
         actionType,
@@ -3276,6 +3403,23 @@ export class AutomationExecutor {
         logger.error(
           `DingTalk approval-card delivery ${delivery.id} is stuck pending: failed to record the send ${outcomeUnknown ? 'outcome-unknown state' : 'failure'}`,
           markError instanceof Error ? markError : new Error(ledgerError),
+        )
+      }
+      // #4196 Class-B outcome (Tx B), recorded AFTER the existing card-ledger mark so that ledger's behavior
+      // is byte-identical when the flag is OFF. Mapping:
+      //   - sendReturned → the send DID return (only a post-send bookkeeping write threw): record `sent`,
+      //     NEVER a retryable `failed` (a resend would DUPLICATE a delivered card). Guarded WHERE
+      //     status='pending', so if the success path already flipped it to `sent` this is a no-op.
+      //   - else, REUSE the transport's own send-tier signal (`isDingTalkOutcomeUnknown`, computed above —
+      //     we do NOT re-run classifyFetchError on a result the DingTalk transport already interpreted):
+      //     ambiguous ⇒ outcome_unknown (the card may have reached the recipient; never auto-resent);
+      //     definite (HTTP 429 / non-5xx / business error — nothing delivered) ⇒ failed (re-attemptable).
+      if (outboundId) {
+        await recordOutboundOutcome(
+          this.deps.queryFn,
+          outboundId,
+          sendReturned ? 'sent' : outcomeUnknown ? 'outcome_unknown' : 'failed',
+          sendReturned ? 'dingtalk_card_sent' : outcomeUnknown ? 'dingtalk_send_outcome_unknown' : 'dingtalk_send_failed',
         )
       }
       return {
