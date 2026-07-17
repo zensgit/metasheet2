@@ -42,6 +42,7 @@ import { ensureRecordNotLocked } from './record-lock'
 import { publishMultitableSheetRealtime } from './realtime-publish'
 import { extractSelectOptions, normalizeJson } from './field-codecs'
 import { recordRecordRevision } from './record-history-service'
+import { fenceWriterEntry } from './canonical-sheet-fence'
 import {
   ConditionGroupValidationError,
   normalizeConditionGroupInput,
@@ -2845,9 +2846,16 @@ export class AutomationService {
    * wiring this class already hard-wires for the executor's `deps.transaction` in the constructor above:
    * a real `poolManager.get().transaction(...)`). Used ONLY by `applyResultWritebackPatch` — every other
    * `AutomationService` call site keeps its pre-existing `this.queryFn` shape untouched.
+   *
+   * W0-1 L4-cov-services: the result-writeback record write is a fenced writer — canonical fence FIRST
+   * inside the transaction (flag-gated no-op when `MULTITABLE_ENABLE_WRITER_FENCE` is off), then the
+   * durable-block check, so a writeback can never land inside a recovery's applying window. A
+   * `SheetWriterBlockedError` propagates to the writeback caller's failure handling (the step fails
+   * honestly; retry semantics apply).
    */
-  private async withTransaction<T>(handler: (query: AutomationQueryFn) => Promise<T>): Promise<T> {
+  private async withTransaction<T>(sheetId: string, handler: (query: AutomationQueryFn) => Promise<T>): Promise<T> {
     return poolManager.get().transaction(async ({ query }) => {
+      await fenceWriterEntry(query, sheetId) // L4 fence-first; no-op when the fence flag is OFF
       const txQuery: AutomationQueryFn = async (sqlText, params) => {
         const result = await query(sqlText, params)
         return {
@@ -2910,7 +2918,7 @@ export class AutomationService {
       missingMessage?: string
     },
   ): Promise<boolean> {
-    const wrote = await this.withTransaction(async (query) => {
+    const wrote = await this.withTransaction(sheetId, async (query) => {
       const lockRes = await query(
         'SELECT locked, locked_by, created_by FROM meta_records WHERE id = $1 AND sheet_id = $2',
         [recordId, sheetId],

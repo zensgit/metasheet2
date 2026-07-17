@@ -7,6 +7,7 @@
 import { FormulaEngine, type CellValue, type FormulaContext } from '../formula/engine'
 import type { MultitableField } from './field-codecs'
 import type { MultitableRecordsQueryFn } from './records'
+import { fenceWriterEntry } from './canonical-sheet-fence'
 import { Logger } from '../core/logger'
 
 const logger = new Logger('MultitableFormulaEngine')
@@ -342,6 +343,17 @@ export class MultitableFormulaEngine {
       // version bump: formula values are derived, not an authoritative user edit.
       // lock-exempt: system formula materialization — derived value, no user actor (lock = read-only to USERS).
       // revision-exempt: derived formula materialization, no version bump — pure fn of inputs, recompute-on-read.
+      //
+      // W0-1 L4-cov-services: the FORMULA writer class joins the canonical fence (flag-gated no-op when
+      // `MULTITABLE_ENABLE_WRITER_FENCE` is off). Even a derived-value write must not land inside a
+      // recovery's applying window — a materialization computed from PRE-recovery inputs would clobber the
+      // just-recovered `data`. When the caller already holds the fence (the PATCH write path runs this
+      // inside its fenced transaction), `pg_advisory_xact_lock` is reentrant on the same transaction, so
+      // this adds only the durable-block re-check; for a caller outside any fence, this is where the
+      // formula write parks/refuses against an active recovery.
+      await fenceWriterEntry(query, sheetId)
+      // lock-exempt: system formula materialization — derived value, no user actor (lock = read-only to USERS)
+      // revision-exempt: derived formula materialization, no version bump — pure fn of inputs, recompute-on-read
       await query(
         `UPDATE meta_records SET data = data || $1::jsonb, updated_at = now() WHERE id = $2 AND sheet_id = $3`,
         [JSON.stringify(updates), recordId, sheetId],
