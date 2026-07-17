@@ -15,6 +15,8 @@ import {
   formatSummaryBlock,
   prepLineRowProjectionValid,
   prepLineRowResolved,
+  buildRequestDefaults,
+  requestJson,
   runApprovedSourcePrelude,
   safeCode,
   safeT4Mode,
@@ -294,12 +296,14 @@ test('prelude run: the sentinel-registration callback is REQUIRED — omitting i
   assert.equal(calls.length, 0, 'no request may run without the leak-scan registration contract')
 })
 
-test('prelude run: a 200 dry_run (T3b flag OFF) FAILS the prelude — it can never pass as a read-only run', async () => {
+test('prelude run: a 200 dry_run (T3b flag OFF) FAILS the prelude and STOPS — no replay after a failed first call', async () => {
   const dryRun = { status: 200, body: { ok: true, data: { mode: 'dry_run', evidence: { internalWriteExecuted: false, externalWriteExecuted: false, productionWrite: false, k3SaveSubmitAudit: false, plmExternalWrite: false } } } }
-  const { req } = scriptedReq([dryRun, dryRun])
+  const { calls, req } = scriptedReq([dryRun, dryRun])
   const { checks, must } = collectMust()
   await runApprovedSourcePrelude({ salt: 't123', args: PRELUDE_ARGS, req, must, summary: {}, registerSentinels: () => {} })
   assert.equal(checks[0].ok, false, 'the internal_persist check must fail on a dry_run response')
+  assert.equal(checks.length, 1, 'a failed first call records no further checks')
+  assert.equal(calls.length, 1, 'a failed acceptance never re-reads the source (owner review P3)')
 })
 
 test('prelude run: a replay that hard-claims an internal write FAILS the replay check', async () => {
@@ -319,4 +323,31 @@ test('prelude run: any external-write evidence flips the invariant check to FAIL
   const { checks, must } = collectMust()
   await runApprovedSourcePrelude({ salt: 't123', args: PRELUDE_ARGS, req, must, summary: {}, registerSentinels: () => {} })
   assert.equal(checks[1].ok, false, 'the externalWrite invariant check must fail')
+})
+
+
+test('requestJson (REAL header assembly): x-tenant-id rides when tenantId is given — the corrective-5 N/8 class stays fixed', async () => {
+  const seen = []
+  const fetchImpl = async (url, init) => {
+    seen.push({ url, init })
+    return { status: 200, text: async () => JSON.stringify({ ok: true, data: {} }) }
+  }
+  const withTenant = await requestJson('http://smoke.test', '/api/x', {
+    token: 'tok_1', tenantId: 'tenant_probe', timeoutMs: 1000, method: 'POST', body: { a: 1 }, accept: [200], label: 't', fetchImpl,
+  })
+  assert.equal(withTenant.status, 200)
+  assert.equal(seen[0].init.headers['x-tenant-id'], 'tenant_probe', 'the tenant header MUST ride on the wire')
+  assert.equal(seen[0].init.headers.Authorization, 'Bearer tok_1')
+  assert.equal(seen[0].init.headers['Content-Type'], 'application/json')
+  await requestJson('http://smoke.test', '/api/y', { token: 'tok_1', timeoutMs: 1000, fetchImpl })
+  assert.equal(Object.prototype.hasOwnProperty.call(seen[1].init.headers, 'x-tenant-id'), false, 'no tenantId -> no header')
+  assert.equal(Object.prototype.hasOwnProperty.call(seen[1].init.headers, 'Content-Type'), false, 'no body -> no Content-Type')
+})
+
+
+test('request defaults: main()\'s per-request wiring carries --tenant-id into EVERY call (P3-1 pin)', () => {
+  const defaults = buildRequestDefaults({ tenantId: 'tenant_probe', timeoutMs: 1234 }, 'tok_9')
+  assert.deepEqual(defaults, { token: 'tok_9', timeoutMs: 1234, tenantId: 'tenant_probe' })
+  const noTenant = buildRequestDefaults({ tenantId: '', timeoutMs: 1234 }, 'tok_9')
+  assert.equal(noTenant.tenantId, '', 'empty stays empty — requestJson/buildRequestHeaders omit the header')
 })
