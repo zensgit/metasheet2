@@ -502,6 +502,46 @@ describe('StockPreparationUnitConfirmView (view 4: confirm reads + human confirm
     expect(retry.getAttribute('aria-label')).toBe('Retry loading unit-conversion confirmation')
   })
 
+  // H4-2 keyboard (H4-1 pattern, StockPreparationDashboardView.vue): a NATIVE disabled button is
+  // pulled from the tab order, so the browser drops focus to <body> when a re-failed retry re-renders
+  // with `:disabled` — a keyboard operator who pressed Retry must not be stranded there.
+  it('H4-2: a failed summary retry returns focus to the retry button (our own :disabled dropped it to body)', async () => {
+    h.apiFetch.mockImplementation(async () => fail(500, 'BACKEND_NOT_READY'))
+    const root = mountView()
+    await waitForSelector(root, '[data-testid="stock-prep-unit-error"]')
+    const retry = root.querySelector('[data-testid="stock-prep-unit-retry"]') as HTMLButtonElement
+    retry.focus()
+    expect(document.activeElement).toBe(retry)
+    const callsBefore = h.apiFetch.mock.calls.length
+    retry.click() // still failing → button unmounts during the load, then re-renders; drops focus to <body>
+    await waitForCondition(() => h.apiFetch.mock.calls.length > callsBefore)
+    await waitForSelector(root, '[data-testid="stock-prep-unit-error"]')
+    await waitForCondition(() => document.activeElement === root.querySelector('[data-testid="stock-prep-unit-retry"]'))
+    expect(document.activeElement).toBe(root.querySelector('[data-testid="stock-prep-unit-retry"]'))
+  })
+
+  // The candidates-retry entry is the one where `:disabled` alone was NEVER load-bearing for the
+  // double-click guard — loadCandidates() never touched the summary `loading` flag (fixed here by a
+  // dedicated candidatesLoading flag). But the FOCUS-drop itself is driven by the surrounding
+  // `v-else-if="candidatesErrored"` block: loadCandidates() resets candidatesErrored to false before
+  // its GET, so the button's whole parent unmounts for the duration of the retry — that unmount (not
+  // just :disabled) is what drops focus to <body>, and the remount on re-failure is what this test
+  // exercises the restore against.
+  it('H4-2: a failed candidates retry returns focus to the retry button (our own :disabled dropped it to body)', async () => {
+    mockRoutes({ candidates: () => fail(500, 'BACKEND_NOT_READY') })
+    const root = mountView()
+    await waitForSelector(root, '[data-testid="stock-prep-unit-candidates-error"]')
+    const retry = root.querySelector('[data-testid="stock-prep-unit-candidates-retry"]') as HTMLButtonElement
+    retry.focus()
+    expect(document.activeElement).toBe(retry)
+    const callsBefore = h.apiFetch.mock.calls.length
+    retry.click() // still failing → the candidatesErrored branch unmounts the button during the load
+    await waitForCondition(() => h.apiFetch.mock.calls.length > callsBefore)
+    await waitForSelector(root, '[data-testid="stock-prep-unit-candidates-error"]')
+    await waitForCondition(() => document.activeElement === root.querySelector('[data-testid="stock-prep-unit-candidates-retry"]'))
+    expect(document.activeElement).toBe(root.querySelector('[data-testid="stock-prep-unit-candidates-retry"]'))
+  })
+
   // H4-3 keyboard: the table wrap is a jsdom-testable, load-bearing scroll region — attribute
   // presence is what a future refactor could silently delete (unlike the CSS focus ring, which
   // jsdom cannot compute and is verified only via the browser harness in the PR description).

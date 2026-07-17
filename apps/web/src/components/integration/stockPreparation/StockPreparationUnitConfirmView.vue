@@ -30,12 +30,13 @@
       <p class="sp-unit__state-msg">{{ bi('同步后端尚未就绪,稍后再试。', 'Backend read not ready yet — try again later.') }}</p>
       <!-- H4-3 retry: re-runs the same readonly loadAll(); idempotent, no new endpoint. -->
       <button
+        ref="retryEl"
         type="button"
         class="sp-unit__retry"
         data-testid="stock-prep-unit-retry"
         :disabled="loading"
         :aria-label="bi('重试读取单位换算确认', 'Retry loading unit-conversion confirmation')"
-        @click="loadAll"
+        @click="onRetry"
       >
         {{ bi('重试', 'Retry') }}
       </button>
@@ -131,14 +132,23 @@
         role="status"
       >
         <p class="sp-unit__state-msg">{{ bi('候选读取尚未就绪,稍后再试。', 'Candidate read not ready yet — try again later.') }}</p>
-        <!-- H4-3 retry: re-runs the existing loadCandidates() for the same project/batch. -->
+        <!-- H4-3 retry: re-runs the existing loadCandidates() for the same project/batch. Bound to its
+             OWN candidatesLoading flag (NOT the summary `loading`) — loadCandidates never touched
+             `loading`, so the NIT-1 `:disabled="loading"` binding never actually flipped true here and
+             the in-flight double-click guard it was meant to provide was dead on this entry. (The
+             keyboard focus-restore below does NOT depend on this: loadCandidates also resets
+             candidatesErrored to false before its GET, so the surrounding v-else-if unmounts this
+             button's whole parent for the retry's duration regardless of :disabled — that unmount is
+             what drops focus to <body>, verified by re-running the H4-2 candidates spec with the stale
+             `:disabled="loading"` binding restored, which still passed.) -->
         <button
+          ref="candidatesRetryEl"
           type="button"
           class="sp-unit__retry"
           data-testid="stock-prep-unit-candidates-retry"
-          :disabled="loading"
+          :disabled="candidatesLoading"
           :aria-label="bi('重试读取计算候选行', 'Retry loading computed candidate rows')"
-          @click="loadCandidates"
+          @click="onCandidatesRetry"
         >
           {{ bi('重试', 'Retry') }}
         </button>
@@ -325,7 +335,7 @@
 // carry none), and error surfaces render only the clamped code / field NAME. Operator-entered rule
 // values flow only UPWARD through the closed rule allowlist; confirmedBy / confirmedAt never enter
 // any body.
-import { computed, onMounted, reactive, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, reactive, ref, watch, type Ref } from 'vue'
 import { useLocale } from '../../../composables/useLocale'
 import type { IntegrationScope } from '../../../services/integration/workbench'
 import { StockPreparationConfirmApiError } from '../../../services/integration/stockPreparation/confirmApi'
@@ -371,6 +381,10 @@ const errored = ref(false)
 const summary = ref<StockPreparationUnitConversionSummary | null>(null)
 const candidates = ref<StockPreparationUnitConversionCandidateList | null>(null)
 const candidatesErrored = ref(false)
+// Own loading flag for the candidates-only load (H4-3 keyboard): `loading` is owned by loadAll() and
+// never flips during a loadCandidates()-only retry, so the candidates-retry button's :disabled must
+// read THIS flag, not `loading`, or the button would never actually leave the tab order on retry.
+const candidatesLoading = ref(false)
 const noCompleteBatch = ref(false)
 const staleCandidates = ref(false)
 
@@ -410,6 +424,7 @@ function requestScope(): IntegrationScope & { projectId: string } {
 async function loadCandidates(): Promise<void> {
   candidatesErrored.value = false
   noCompleteBatch.value = false
+  candidatesLoading.value = true
   try {
     candidates.value = await listStockPreparationUnitConversionCandidates(requestScope())
   } catch (error) {
@@ -420,6 +435,8 @@ async function loadCandidates(): Promise<void> {
     } else {
       candidatesErrored.value = true
     }
+  } finally {
+    candidatesLoading.value = false
   }
 }
 
@@ -590,6 +607,32 @@ async function submitRule(): Promise<void> {
   } finally {
     busy.value = false
   }
+}
+
+// H4-3 keyboard — retry focus restore (same pattern as StockPreparationDashboardView.vue's H4-1
+// retry). Both retry buttons above carry `:disabled` while their own load is in flight, and a NATIVE
+// disabled button is pulled from the tab order — the browser drops focus to <body>, stranding a
+// keyboard operator who just pressed Retry. After the load settles we put focus back on the button,
+// but ONLY when it is still rendered (the retry failed again, so there is something to press) AND
+// focus is still on <body> (our own disable dropped it, and the operator has not Tabbed elsewhere
+// meanwhile) — the second condition is REQUIRED so this can never steal focus from wherever the
+// operator moved to.
+const retryEl = ref<HTMLButtonElement | null>(null)
+const candidatesRetryEl = ref<HTMLButtonElement | null>(null)
+
+async function restoreRetryFocus(el: Ref<HTMLButtonElement | null>): Promise<void> {
+  await nextTick()
+  if (document.activeElement === document.body) el.value?.focus()
+}
+
+async function onRetry(): Promise<void> {
+  await loadAll()
+  await restoreRetryFocus(retryEl)
+}
+
+async function onCandidatesRetry(): Promise<void> {
+  await loadCandidates()
+  await restoreRetryFocus(candidatesRetryEl)
 }
 
 onMounted(loadAll)
