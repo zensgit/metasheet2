@@ -29,6 +29,8 @@ interface FakeDb {
   localByAccountId?: Record<string, string | null>
   // external_user_id -> linked local user id
   localByExternalId?: Record<string, string | null>
+  // B5-b routing-policy probe rows (default undefined/empty = no policy = legacy path)
+  policies?: Array<{ org_id: string; canonical_integration_id: string; canonical_status: string | null }>
 }
 
 function makeQuery(db: FakeDb & {
@@ -39,6 +41,13 @@ function makeQuery(db: FakeDb & {
   lastRequesterSql?: string
 }) {
   return async <Row>(text: string, params?: unknown[]): Promise<{ rows: Row[] }> => {
+    // B5-b routing-policy probe (`org_directory_routing_policy`). Default-empty means NO policy
+    // governs any org the user is linked in, so the resolver runs the LEGACY path byte-identical —
+    // which is why every pre-B5 fixture below keeps its expectations unchanged (same convention as
+    // the B3 normalized-manager default-empty note further down). Policy scenarios set db.policies.
+    if (text.includes('FROM directory_account_links l') && text.includes('org_directory_routing_policy')) {
+      return { rows: (db.policies ?? []) as Row[] }
+    }
     if (text.includes('FROM directory_account_links l') && text.includes('LEFT JOIN directory_account_departments')) {
       db.lastRequesterSql = text
       // Org-anchored SELECT joins directory_integrations and binds org_id as $2.

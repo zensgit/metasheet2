@@ -56,7 +56,7 @@ import {
   formulaReferencesRequesterAttribute,
   parseApprovalConditionFormula,
 } from './ApprovalConditionFormula'
-import { resolveApprovalRequesterOrgRelations, MAX_MANAGER_CHAIN_LEVELS, type ApprovalRequesterOrgRelations } from './ApprovalDirectoryOrg'
+import { resolveApprovalRequesterOrgRelations, ApprovalRoutingPolicyError, MAX_MANAGER_CHAIN_LEVELS, type ApprovalRequesterOrgRelations } from './ApprovalDirectoryOrg'
 import { resolveApprovalRequesterRoleIds } from './ApprovalRequesterRoles'
 import { fetchCuratedApprovalRoleIds } from './approval-directory'
 import { resolveActiveDelegationMap } from './ApprovalDelegations'
@@ -3616,12 +3616,20 @@ export class ApprovalProductService {
     const needsManagerChain = runtimeGraphUsesManagerChain(runtimeGraph)
     let orgRelations: ApprovalRequesterOrgRelations = {}
     let orgReadFailed = false
+    // B5-b: a routing-POLICY config error (policy points at a missing/inactive integration, or the
+    // requester is linked in >1 policy-governed org) is persistent, not transient — "please retry"
+    // is actively misleading for it. Track it separately so the wedge guards below surface a
+    // distinct, actionable code. Same guard POSITIONS as before (fires only when the graph actually
+    // routes on the attribute) — the blast radius of a broken policy stays scoped to templates that
+    // consume org data, exactly like today's transient-failure semantics.
+    let orgPolicyMisconfigured = false
     try {
       orgRelations = await resolveApprovalRequesterOrgRelations(effectiveRequester.userId, pool.query.bind(pool), {
         includeManagerChain: needsManagerChain,
       })
     } catch (error) {
       orgReadFailed = true
+      orgPolicyMisconfigured = error instanceof ApprovalRoutingPolicyError
       metricsLogger.warn(
         `Failed to resolve requester org relations for ${effectiveRequester.userId}: ${
           error instanceof Error ? error.message : 'unknown error'
@@ -3660,6 +3668,14 @@ export class ApprovalProductService {
     // Only fires when the graph actually routes on requester.department (manager-chain / dept-head and
     // non-department templates are unaffected; genuine absence on those follows their emptyAssigneePolicy).
     if (!orgRelations.primaryDepartmentName && runtimeGraphUsesRequesterAttribute(runtimeGraph, 'department')) {
+      if (orgPolicyMisconfigured) {
+        // persistent CONFIG error — retrying never fixes a broken routing policy
+        throw new ServiceError(
+          'The directory routing policy for this organization is misconfigured, so the requester department cannot be resolved. Contact an administrator.',
+          422,
+          'APPROVAL_ROUTING_POLICY_MISCONFIGURED',
+        )
+      }
       if (orgReadFailed) {
         throw new ServiceError(
           'Could not resolve the requester department required by this approval template. Please retry.',
@@ -3679,6 +3695,13 @@ export class ApprovalProductService {
     // applies: a directory read that THREW -> 503 (retryable); a read that SUCCEEDED but left title unset
     // -> 422 (genuine row-level absence). Only fires when the graph actually routes on requester.title.
     if (!orgRelations.primaryTitle && runtimeGraphUsesRequesterAttribute(runtimeGraph, 'title')) {
+      if (orgPolicyMisconfigured) {
+        throw new ServiceError(
+          'The directory routing policy for this organization is misconfigured, so the requester title cannot be resolved. Contact an administrator.',
+          422,
+          'APPROVAL_ROUTING_POLICY_MISCONFIGURED',
+        )
+      }
       if (orgReadFailed) {
         throw new ServiceError(
           'Could not resolve the requester title required by this approval template. Please retry.',
