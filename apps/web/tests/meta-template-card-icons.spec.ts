@@ -76,6 +76,8 @@ describe('template icon mapping', () => {
     expect(templateIconFallback('  custom template')).toBe('C')
     expect(templateIconFallback('istanbul tracker')).toBe('I')
     expect(templateIconFallback('')).toBe('?')
+    expect(templateIconFallback(null)).toBe('?')
+    expect(templateIconFallback(undefined)).toBe('?')
   })
 })
 

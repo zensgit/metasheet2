@@ -26,7 +26,7 @@ export function resolveTemplateIcon(token: string | null | undefined): Component
   return normalized ? TEMPLATE_ICON_COMPONENTS[normalized] ?? null : null
 }
 
-export function templateIconFallback(name: string): string {
-  const [firstCharacter] = Array.from(name.trim())
+export function templateIconFallback(name: string | null | undefined): string {
+  const [firstCharacter] = Array.from(name?.trim() ?? '')
   return firstCharacter ? firstCharacter.toUpperCase() : '?'
 }
