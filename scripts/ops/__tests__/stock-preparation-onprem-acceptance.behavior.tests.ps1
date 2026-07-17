@@ -14,8 +14,8 @@ $pass = 0; $fail = 0
 function Check { param([string]$Name, [bool]$Ok) if ($Ok) { $script:pass++; Write-Host "  PASS  $Name" } else { $script:fail++; Write-Host "  FAIL  $Name" } }
 
 function Invoke-Pm2Projection {
-  param([string]$Json)
-  $raw = $Json | & node $pm2SampleHelper 2>$null
+  param([string]$Json, [string[]]$HelperArgs = @())
+  $raw = $Json | & node $pm2SampleHelper @HelperArgs 2>$null
   $exit = $LASTEXITCODE
   $sample = if ($exit -eq 0 -and $raw) { $raw | ConvertFrom-Json } else { $null }
   [pscustomobject]@{ Exit = $exit; Raw = "$raw"; Sample = $sample }
@@ -438,6 +438,40 @@ exec node "$(dirname "$0")/pm2-fixture.mjs" "$@"
     $tokenClean.Exit -eq 0 -and $tokenClean.Sample.adminTokenNonEmpty -eq $false -and $tokenClean.Sample.authTokenNonEmpty -eq $false
   )
 
+  # Owner P2: Windows env names are case-insensitive — ANY case variant must count as leaked.
+  $tokenLower = Invoke-Pm2Projection '[{"name":"metasheet-backend","pm2_env":{"status":"online","restart_time":0,"pm_uptime":1,"env":{"metasheet_admin_token":"LEAKED-LOWER-9911"}}}]'
+  Check "pm2 projection: lower-case admin carrier variant still counts as leaked" (
+    $tokenLower.Exit -eq 0 -and $tokenLower.Sample.adminTokenNonEmpty -eq $true -and $tokenLower.Raw -notmatch 'LEAKED-LOWER-9911'
+  )
+  $tokenMixed = Invoke-Pm2Projection '[{"name":"metasheet-backend","pm2_env":{"status":"online","restart_time":0,"pm_uptime":1,"MetaSheet_Auth_Token":"LEAKED-MIXED-9911"}}]'
+  Check "pm2 projection: mixed-case auth carrier variant on pm2_env still counts as leaked" (
+    $tokenMixed.Exit -eq 0 -and $tokenMixed.Sample.authTokenNonEmpty -eq $true -and $tokenMixed.Raw -notmatch 'LEAKED-MIXED-9911'
+  )
+  # Owner P2: an operator-configured carrier (-AdminTokenEnvVar) is detected when passed to the
+  # helper — and deliberately NOT guessed when it is not configured.
+  $customCarrierJson = '[{"name":"metasheet-backend","pm2_env":{"status":"online","restart_time":0,"pm_uptime":1,"env":{"CUSTOM_ACCEPTANCE_TOKEN":"LEAKED-CUSTOM-9911"}}}]'
+  $customDetected = Invoke-Pm2Projection $customCarrierJson -HelperArgs @('CUSTOM_ACCEPTANCE_TOKEN')
+  Check "pm2 projection: configured custom carrier folds into adminTokenNonEmpty" (
+    $customDetected.Exit -eq 0 -and $customDetected.Sample.adminTokenNonEmpty -eq $true -and $customDetected.Raw -notmatch 'LEAKED-CUSTOM-9911'
+  )
+  $customUnconfigured = Invoke-Pm2Projection $customCarrierJson
+  Check "pm2 projection: an unconfigured custom carrier is not guessed" (
+    $customUnconfigured.Exit -eq 0 -and $customUnconfigured.Sample.adminTokenNonEmpty -eq $false
+  )
+
+  # Owner P1 (entry scrub, in-process legs): a token on an UNSELECTED carrier is scrubbed and NOT
+  # captured; the selected carrier is captured AND scrubbed.
+  $env:METASHEET_AUTH_TOKEN = 'PRESET-AUTH-9911'
+  $unselected = Read-AdminTokenSecureFromEnv
+  Check "entry scrub: unselected auth carrier -> scrubbed from env, nothing captured" (
+    ($null -eq $unselected) -and (-not [Environment]::GetEnvironmentVariable('METASHEET_AUTH_TOKEN'))
+  )
+  $env:METASHEET_ADMIN_TOKEN = 'PRESET-ADMIN-9911'
+  $selectedTok = Read-AdminTokenSecureFromEnv
+  Check "entry scrub: selected admin carrier -> captured as SecureString AND scrubbed from env" (
+    ($selectedTok -is [SecureString]) -and (-not [Environment]::GetEnvironmentVariable('METASHEET_ADMIN_TOKEN'))
+  )
+
   # corrective-6: the PURE hygiene verdict is fail-closed (a stale packaged helper is a FAIL, not a skip).
   # The runner GATES on `.ok` — every FAIL-side check asserts ok=false AND the coarse reason, so a
   # mutant that keeps the reason while flipping ok to true cannot survive (CM2 lesson).
@@ -450,6 +484,67 @@ exec node "$(dirname "$0")/pm2-fixture.mjs" "$@"
   $hAuth = Test-Pm2TokenHygieneSample ([pscustomobject]@{ adminTokenNonEmpty=$false; authTokenNonEmpty=$true })
   Check "hygiene: auth token non-empty -> FAIL with the dedicated coarse reason" ((-not $hAuth.ok) -and $hAuth.reason -eq 'PM2_ENV_METASHEET_AUTH_TOKEN_NONEMPTY')
   Check "hygiene: both clean -> ok" ((Test-Pm2TokenHygieneSample ([pscustomobject]@{ adminTokenNonEmpty=$false; authTokenNonEmpty=$false })).ok)
+
+  # Owner P2 (pre-PM2 guard load-bearing): run the REAL Invoke-Pm2StableStage in a child with a
+  # token preset and a marker-touching fake pm2 — the guard must stop the stage BEFORE pm2 ever runs
+  # and write the fixed hygiene failure. Neutering the condition or moving the guard after the
+  # restart makes the marker appear and this check red.
+  $guardRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("t9accept_guard_" + [guid]::NewGuid().ToString('N').Substring(0, 12))
+  New-Item -ItemType Directory -Path $guardRoot | Out-Null
+  $guardMarker = Join-Path $guardRoot 'pm2-invoked.marker'
+  $guardPm2Js = Join-Path $guardRoot 'pm2-fixture.mjs'
+  Set-Content -Path $guardPm2Js -Value @"
+#!/usr/bin/env node
+require('node:fs').writeFileSync(String.raw`$guardMarker`, 'invoked')
+"@ -NoNewline
+  if ($IsWindows) {
+    Set-Content -Path (Join-Path $guardRoot 'pm2.cmd') -Value "@echo off`r`nnode `"%~dp0pm2-fixture.mjs`" %*" -NoNewline
+  } else {
+    $guardPm2 = Join-Path $guardRoot 'pm2'
+    Set-Content -Path $guardPm2 -Value "#!/bin/sh`nexec node `"`$(dirname `"`$0`")/pm2-fixture.mjs`" `"`$@`"" -NoNewline
+    & chmod +x $guardPm2
+  }
+  $guardSummary = Join-Path $guardRoot 'guard-summary.txt'
+  $guardChild = Join-Path $guardRoot 'invoke-guard.ps1'
+  Set-Content -LiteralPath $guardChild -Encoding utf8 -Value @'
+param(
+  [Parameter(Mandatory = $true)][string]$AcceptanceScript,
+  [Parameter(Mandatory = $true)][string]$DeployRoot,
+  [Parameter(Mandatory = $true)][string]$SummaryPath,
+  [Parameter(Mandatory = $true)][string]$FakePm2Dir,
+  [string]$PresetAuthToken
+)
+$env:PATH = "$FakePm2Dir$([IO.Path]::PathSeparator)$env:PATH"
+$env:METASHEET_ADMIN_TOKEN = 'PRESET-GUARD-TOKEN-9911'
+if ($PresetAuthToken) { $env:METASHEET_AUTH_TOKEN = $PresetAuthToken }
+. $AcceptanceScript -PackagePath $DeployRoot -DeployRoot $DeployRoot -SummaryPath $SummaryPath *> $null
+if ($env:T9_GUARD_MODE -eq 'entry') { $null = Read-AdminTokenSecureFromEnv } else { Invoke-Pm2StableStage }
+exit 0
+'@
+  & pwsh -NoProfile -File $guardChild -AcceptanceScript $scriptPath -DeployRoot $guardRoot -SummaryPath $guardSummary -FakePm2Dir $guardRoot *> $null
+  $guardExit = $LASTEXITCODE
+  $guardJsonPath = [System.IO.Path]::ChangeExtension($guardSummary, '.json')
+  $guardJson = if (Test-Path $guardJsonPath) { Get-Content $guardJsonPath -Raw | ConvertFrom-Json } else { $null }
+  Check "pre-PM2 guard: token in runner env -> stage fails closed BEFORE pm2 is ever invoked" (
+    $guardExit -eq 1 -and (-not (Test-Path $guardMarker)) -and $null -ne $guardJson -and
+    $guardJson.failedStage -eq 'credentialHygiene' -and $guardJson.postRunCredentialHygiene -eq 'FAIL' -and
+    ((Get-Content $guardSummary -Raw) -match 'token_env_present_before_pm2')
+  )
+
+  # Owner P1 (multi-carrier entry, child leg): BOTH carriers non-empty -> fixed fail-closed reason
+  # before any stage; the summary carries the dedicated coarse reason.
+  $entrySummary = Join-Path $guardRoot 'entry-summary.txt'
+  $env:T9_GUARD_MODE = 'entry'
+  & pwsh -NoProfile -File $guardChild -AcceptanceScript $scriptPath -DeployRoot $guardRoot -SummaryPath $entrySummary -FakePm2Dir $guardRoot -PresetAuthToken 'PRESET-AUTH-AMBIG-9911' *> $null
+  $entryExit = $LASTEXITCODE
+  Remove-Item Env:T9_GUARD_MODE -ErrorAction SilentlyContinue
+  $entryJsonPath = [System.IO.Path]::ChangeExtension($entrySummary, '.json')
+  $entryJson = if (Test-Path $entryJsonPath) { Get-Content $entryJsonPath -Raw | ConvertFrom-Json } else { $null }
+  Check "entry scrub: MULTIPLE non-empty carriers -> fail-closed with the fixed reason before any stage" (
+    $entryExit -eq 1 -and $null -ne $entryJson -and
+    $entryJson.failedStage -eq 'credentialHygiene' -and $entryJson.postRunCredentialHygiene -eq 'FAIL' -and
+    ((Get-Content $entrySummary -Raw) -match 'multiple_token_carriers_present')
+  )
 
   Check "pm2: same restart_time + same uptime -> stable" ((Test-Pm2StableSample $base ([pscustomobject]@{ state='online'; restartTime=3; uptime=1000 })).ok)
   Check "pm2: restart_time incremented (crash-loop) -> FAIL (restart_loop)" ((Test-Pm2StableSample $base ([pscustomobject]@{ state='online'; restartTime=4; uptime=1000 })).reason -eq 'restart_loop')

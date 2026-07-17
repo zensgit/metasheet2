@@ -107,7 +107,7 @@ function Stop-WithFailure {
 }
 
 function Emit-Summary {
-  # Build the .txt (9 whitelisted lines) + optional coarse fail detail, and a matching .json.
+  # Build the .txt (the 15 whitelisted summary lines) + optional coarse fail detail, and a matching .json.
   $lines = @()
   foreach ($k in $Summary.Keys) { $lines += "$k=$($Summary[$k])" }
   if ($FailDetail.Count -gt 0) { foreach ($k in $FailDetail.Keys) { $lines += "$k=$($FailDetail[$k])" } }
@@ -247,13 +247,27 @@ function Test-SmokeOutcome {
 # the interactive fallback stays at the smoke stage because Read-Host feeds the SecureString
 # directly and never touches the environment.
 function Read-AdminTokenSecureFromEnv {
-  $fromEnv = [Environment]::GetEnvironmentVariable($AdminTokenEnvVar)
-  if ($fromEnv) {
-    $secure = ConvertTo-SecureString $fromEnv -AsPlainText -Force
-    Remove-Item "Env:$AdminTokenEnvVar" -ErrorAction SilentlyContinue
-    return $secure
+  # Owner P1: EVERY known carrier is scrubbed here — the configured one AND both fixed defaults. A
+  # token that pre-exists on an unselected carrier (e.g. METASHEET_AUTH_TOKEN in the operator shell)
+  # would otherwise ride through SHA/bootstrap/migration into the pm2 daemon exactly like the entity
+  # finding. The SELECTED carrier is captured; more than one non-empty carrier is ambiguous and
+  # fails closed BEFORE any stage (env already scrubbed by then).
+  $carriers = @($AdminTokenEnvVar, 'METASHEET_ADMIN_TOKEN', 'METASHEET_AUTH_TOKEN') | Select-Object -Unique
+  $nonEmpty = @()
+  $selected = $null
+  foreach ($carrier in $carriers) {
+    $value = [Environment]::GetEnvironmentVariable($carrier)
+    if ($value) {
+      $nonEmpty += $carrier
+      if ($carrier -eq $AdminTokenEnvVar) { $selected = ConvertTo-SecureString $value -AsPlainText -Force }
+    }
+    Remove-Item "Env:$carrier" -ErrorAction SilentlyContinue
   }
-  return $null
+  if ($nonEmpty.Count -gt 1) {
+    $Summary.postRunCredentialHygiene = 'FAIL'
+    Stop-WithFailure 'credentialHygiene' @{ reason = 'multiple_token_carriers_present' }
+  }
+  return $selected
 }
 
 # ── Stage 1: package SHA256 vs SHA256SUMS (+ optional git-sha vs metadata) ───────────────────────
@@ -344,16 +358,18 @@ function Invoke-MigrationStage {
 }
 
 # ── Stage 4: pm2 restart + POLL stable-online (command success != stable service) ────────────────
-# Normalize one `pm2 jlist` entry to @{ state; restartTime; uptime } (values-free: no raw jlist echoed).
+# Normalize one `pm2 jlist` entry to the closed 5-key sample (state/restartTime/uptime + the two
+# token-hygiene booleans; values-free: no raw jlist echoed).
 function Get-Pm2Sample {
   # Do not feed the full PM2 payload to PowerShell's ConvertFrom-Json. PM2 includes the process
   # environment, where Windows commonly has both `Path` and `PATH`; Windows PowerShell 5.1 treats
-  # those as duplicate keys and rejects the whole document. Node parses the raw payload and emits a
-  # fixed three-field projection. Any missing helper, parse failure, duplicate target, or invalid
-  # number returns $null and the stable-online stage fails closed.
+  # those as duplicate keys and rejects the whole document. Node parses the raw payload and emits the
+  # fixed five-field projection. Any missing helper, parse failure, duplicate target, or invalid
+  # number returns $null and the stable-online stage fails closed. The configured admin carrier name is
+  # passed so a custom -AdminTokenEnvVar is detected too (case-insensitively, like Windows env names).
   $pm2SampleHelper = Join-Path $PSScriptRoot 'stock-preparation-pm2-sample.mjs'
   if (-not (Test-Path -LiteralPath $pm2SampleHelper -PathType Leaf)) { return $null }
-  $safeJson = (& pm2 jlist 2>$null | & node $pm2SampleHelper 2>$null)
+  $safeJson = (& pm2 jlist 2>$null | & node $pm2SampleHelper $AdminTokenEnvVar 2>$null)
   $sampleExit = $LASTEXITCODE
   if ($sampleExit -ne 0 -or -not $safeJson) { return $null }
   try {
@@ -395,7 +411,7 @@ function Invoke-Pm2StableStage {
   # runner's environment before pm2 can spawn/refresh anything that inherits it (the token was read
   # and scrubbed at entry — see the orchestration block). The entity-machine FAIL was exactly a pm2
   # restart executed while METASHEET_ADMIN_TOKEN still sat in the runner env.
-  foreach ($tokenVar in @($AdminTokenEnvVar, 'METASHEET_AUTH_TOKEN')) {
+  foreach ($tokenVar in (@($AdminTokenEnvVar, 'METASHEET_ADMIN_TOKEN', 'METASHEET_AUTH_TOKEN') | Select-Object -Unique)) {
     if ([Environment]::GetEnvironmentVariable($tokenVar)) {
       $Summary.postRunCredentialHygiene = 'FAIL'
       Stop-WithFailure 'credentialHygiene' @{ reason = 'token_env_present_before_pm2' }

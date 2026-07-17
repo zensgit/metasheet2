@@ -21,7 +21,12 @@ const ALLOWED_STATES = new Set([
   'one-launch-status',
   'waiting restart',
 ])
-const TOKEN_ENV_VARS = ['METASHEET_ADMIN_TOKEN', 'METASHEET_AUTH_TOKEN']
+// Windows environment names are case-INSENSITIVE, so detection matches any case variant (owner P2:
+// `metasheet_admin_token=LEAKED` must count). An optional argv[2] names the operator-configured admin
+// carrier (-AdminTokenEnvVar) and folds into the admin boolean.
+const CUSTOM_ADMIN_CARRIER = typeof process.argv[2] === 'string' && process.argv[2].trim() ? process.argv[2].trim() : null
+const ADMIN_CARRIERS = [...new Set([CUSTOM_ADMIN_CARRIER, 'METASHEET_ADMIN_TOKEN'].filter(Boolean))]
+const AUTH_CARRIERS = ['METASHEET_AUTH_TOKEN']
 
 let raw = ''
 for await (const chunk of process.stdin) raw += chunk
@@ -40,12 +45,18 @@ try {
   if (!Number.isSafeInteger(restartTime) || restartTime < 0) throw new Error('restart_time')
   if (!Number.isSafeInteger(uptime) || uptime < 0) throw new Error('uptime')
 
-  // pm2 exposes the captured environment both merged into pm2_env and under pm2_env.env;
-  // a token counts as leaked if it is a non-empty string on EITHER carrier.
+  // pm2 exposes the captured environment both merged into pm2_env and under pm2_env.env; a token
+  // counts as leaked if ANY case variant of a carrier name holds a non-empty string on EITHER bag.
   const envBag = pm2Env && typeof pm2Env.env === 'object' && pm2Env.env !== null ? pm2Env.env : {}
-  const tokenNonEmpty = (name) => {
-    for (const candidate of [envBag[name], pm2Env?.[name]]) {
-      if (typeof candidate === 'string' && candidate.trim().length > 0) return true
+  const carrierNonEmpty = (names) => {
+    const targets = new Set(names.map((name) => name.toUpperCase()))
+    for (const bag of [envBag, pm2Env]) {
+      if (!bag || typeof bag !== 'object') continue
+      for (const key of Object.keys(bag)) {
+        if (!targets.has(key.toUpperCase())) continue
+        const value = bag[key]
+        if (typeof value === 'string' && value.trim().length > 0) return true
+      }
     }
     return false
   }
@@ -54,8 +65,8 @@ try {
     state: ALLOWED_STATES.has(rawState) ? rawState : 'unknown',
     restartTime,
     uptime,
-    adminTokenNonEmpty: tokenNonEmpty(TOKEN_ENV_VARS[0]),
-    authTokenNonEmpty: tokenNonEmpty(TOKEN_ENV_VARS[1]),
+    adminTokenNonEmpty: carrierNonEmpty(ADMIN_CARRIERS),
+    authTokenNonEmpty: carrierNonEmpty(AUTH_CARRIERS),
   }))
 } catch {
   process.exitCode = 1
