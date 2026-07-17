@@ -2321,8 +2321,9 @@ export class MetaSheetServer {
     // the six REAL consumer adapters (delegating to the SAME service methods the legacy bus subscribers call —
     // handleApprovalCompletionEvent / ...Trigger / projection reconcile / handleEvent / webhook deliverEvent),
     // asserts manifest completeness before any claim, and drains meta_automation_outbox_consumer. The legacy
-    // bus subscriptions above stay wired during the cutover; double delivery is collapsed by the sinks'
-    // idempotency (per the #4203 §316-325 migration-safety contract). stop() is registered in this.stop().
+    // bus subscriptions above stay wired — with the flag ON they serve only UN-routed event types (routed
+    // families' producers enqueue same-txn and SUPPRESS their legacy emit, the P1#2 REPLACE contract), and
+    // with the flag OFF they are the delivery path exactly as before. stop() is registered in this.stop().
     try {
       const { bootDurableDelivery } = await import('./multitable/automation-durable-activation')
       const { buildDurableConsumerHandlers } = await import('./multitable/automation-durable-consumer-handlers')

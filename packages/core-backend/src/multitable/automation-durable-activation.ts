@@ -8,11 +8,12 @@
  *   - `produceAutomationEvent(trx, input)` — the produce-site seam. Call it INSIDE the same transaction as
  *     the source state change (approval status write / record write / form submit / comment). Flag ON →
  *     durable enqueue (outbox + fan-out, atomic with the source change); flag OFF → no-op returning null.
- *     Cutover contract (#4203 §316-325): call sites KEEP their legacy post-commit `eventBus.emit` in both
- *     modes for now — during the window where both paths fire, double delivery is collapsed by the SINKS'
- *     idempotency (per-rule `event_fires` dedup on the forwarded ORIGINAL `eventId`, business UNIQUE keys),
- *     which is exactly the lock's migration-safety argument. The legacy emit is demoted to non-load-bearing
- *     and removed per-site only after the 8-scenario acceptance.
+ *     Cutover contract — RESOLVED to REPLACE (P1#2, per FWB0 lock §Layer-1 L318-324: flag ON ⇒ the old bus
+ *     is "降级为非承重" and "稳态下双跑……都不允许存活"): every wired producer family enqueues same-txn via
+ *     `automation-producer-emit.ts` and SUPPRESSES its legacy post-commit emit when the flag is ON (flag
+ *     OFF ⇒ legacy emit, byte-identical). REPLACE is necessary, not stylistic — the webhook sink has no
+ *     event-id dedup, so keep-both would double-deliver every webhook. An earlier draft of this header
+ *     described a transitional keep-both window; that described only the pre-P1#2 state and is superseded.
  *   - `buildConsumerAdapterRegistry(handlers)` — the six ratified consumers (manifest v1 universe), each a
  *     thin adapter delegating to an injected handler (S5 wiring passes the REAL service methods —
  *     `handleApprovalCompletionResume` / `...Trigger` / projection / task / record / webhook-bridge — which
