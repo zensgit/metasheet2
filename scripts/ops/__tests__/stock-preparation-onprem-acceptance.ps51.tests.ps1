@@ -152,11 +152,18 @@ process.stdout.write(process.env.T9_PS51_JLIST || '')
       $env:T9_PS51_JLIST = '[{"name":"metasheet-backend","pm2_env":{"status":"online","restart_time":3,"pm_uptime":1000,"env":{"Path":"first","PATH":"second","metasheet_admin_token":"LEAKED-PS51-9911"}}}]'
       $leakSample = Get-Pm2Sample
       if ($null -eq $leakSample) {
-        # Values-free localization (exit codes / lengths / booleans only — never payloads).
+        # Values-free localization (exit codes / lengths / redacted first-line only — never payloads).
         $helperPath = Join-Path $opsDir 'stock-preparation-pm2-sample.mjs'
         $shimRaw = (& pm2 jlist 2>$null); $shimExit = $LASTEXITCODE
         $directRaw = ($env:T9_PS51_JLIST | & node $helperPath 'METASHEET_ADMIN_TOKEN' 2>$null); $directExit = $LASTEXITCODE
-        Write-Host ("  DIAG ps51-hygiene: helperExists=" + (Test-Path -LiteralPath $helperPath) + " shimExit=$shimExit shimLen=" + ("$shimRaw").Length + " directExit=$directExit directLen=" + ("$directRaw").Length)
+        $directErr = ''
+        try { $directErr = (($env:T9_PS51_JLIST | & node $helperPath 'METASHEET_ADMIN_TOKEN' 2>&1 1>$null) | Out-String) } catch { $directErr = "thrown:$($_.Exception.GetType().Name)" }
+        $directErr = ($directErr -replace 'LEAKED-PS51-9911', '<REDACTED>')
+        if ($directErr.Length -gt 200) { $directErr = $directErr.Substring(0, 200) }
+        $evtProbe = ('hello' | & node -e "let r='';process.stdin.on('data',d=>r+=d).on('end',()=>console.log('EVT='+r.length))" 2>$null); $evtExit = $LASTEXITCODE
+        $aitProbe = ('hello' | & node --input-type=module -e "let r='';for await (const c of process.stdin) r+=c; console.log('AIT='+r.length)" 2>$null); $aitExit = $LASTEXITCODE
+        Write-Host ("  DIAG ps51-hygiene: helperExists=" + (Test-Path -LiteralPath $helperPath) + " shimExit=$shimExit shimLen=" + ("$shimRaw").Length + " directExit=$directExit directLen=" + ("$directRaw").Length + " evt=[$evtProbe/$evtExit] ait=[$aitProbe/$aitExit]")
+        Write-Host ("  DIAG ps51-hygiene stderr: [" + $directErr.Trim() + "]")
       }
       Check 'ps51 hygiene: case-variant admin token projects to adminTokenNonEmpty=true through the 5.1 pipeline' (
         $null -ne $leakSample -and $leakSample.adminTokenNonEmpty -eq $true -and $leakSample.authTokenNonEmpty -eq $false

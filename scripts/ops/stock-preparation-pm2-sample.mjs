@@ -28,8 +28,17 @@ const CUSTOM_ADMIN_CARRIER = typeof process.argv[2] === 'string' && process.argv
 const ADMIN_CARRIERS = [...new Set([CUSTOM_ADMIN_CARRIER, 'METASHEET_ADMIN_TOKEN'].filter(Boolean))]
 const AUTH_CARRIERS = ['METASHEET_AUTH_TOKEN']
 
+import fs from 'node:fs'
+
+// fs.readFileSync(0) instead of the async stdin iterator: Windows PowerShell 5.1 string-pipes can
+// race an ESM module's async stdin attach (observed as an empty read -> silent exit 1 on the CI
+// windows arm), while a synchronous fd-0 read drains whatever the pipe delivered.
 let raw = ''
-for await (const chunk of process.stdin) raw += chunk
+try {
+  raw = fs.readFileSync(0, 'utf8')
+} catch {
+  raw = ''
+}
 
 try {
   const processes = JSON.parse(raw)
