@@ -61,7 +61,11 @@ export function validateApprovalAttachments(files: readonly AttachmentUploadCand
     total += f.sizeBytes
     if (f.sizeBytes > APPROVAL_ATTACHMENT_LIMITS.maxFileBytes) rejected.push({ fileName: f.fileName, code: 'file_too_large' })
     const mime = (f.mimeType ?? '').toLowerCase().trim()
-    const allowedExts = V1_ALLOWLIST[mime]
+    // Object.hasOwn guard: a plain-object lookup keyed by attacker-controlled `mime` (e.g.
+    // 'constructor' or '__proto__') would otherwise resolve an INHERITED Object.prototype
+    // member — truthy but not an array — and `allowedExts.includes(ext)` below would throw
+    // an uncaught TypeError (request-crashing DoS). Only own properties may resolve.
+    const allowedExts = Object.hasOwn(V1_ALLOWLIST, mime) ? V1_ALLOWLIST[mime] : undefined
     const ext = extOf(f.fileName ?? '')
     const extKnown = Object.values(V1_ALLOWLIST).some((xs) => xs.includes(ext))
     if (!allowedExts) rejected.push({ fileName: f.fileName, code: 'mime_not_allowed' })
