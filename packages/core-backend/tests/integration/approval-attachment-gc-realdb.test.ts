@@ -16,10 +16,19 @@ const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
 const db = () => poolManager.get()
 const RUN = randomUUID()
 const ids: string[] = []
+const instanceIds = new Set<string>()
+
+/** instance_id is an FK to approval_instances (ON DELETE CASCADE) — a bound row needs a real instance. */
+async function ensureInstance(id: string | null | undefined) {
+  if (!id || instanceIds.has(id)) return
+  instanceIds.add(id)
+  await db().query(`INSERT INTO approval_instances (id, status) VALUES ($1,'pending') ON CONFLICT (id) DO NOTHING`, [id])
+}
 
 async function seed(over: { status?: string; ageHours?: number; instance?: string | null; key?: string } = {}) {
   const id = `att_${RUN}_${ids.length}`
   ids.push(id)
+  await ensureInstance(over.instance)
   await db().query(
     `INSERT INTO approval_attachments (id, org_id, uploader_id, instance_id, field_id, storage_key, file_name, mime_type, size_bytes, status, created_at)
      VALUES ($1,'org1','u1',$2,'fld',$3,'a.pdf','application/pdf',1024,$4, now() - ($5::int * interval '1 hour'))`,
@@ -30,8 +39,11 @@ async function seed(over: { status?: string; ageHours?: number; instance?: strin
 
 describeIfDatabase('approval attachment GC (real DB)', () => {
   afterAll(async () => {
-    await db().query('DELETE FROM approval_attachment_purge_intents WHERE storage_key LIKE $1', [`key_att_${RUN}%`]).catch(() => {})
+    // delete attachments first (fires the row-delete trigger, enqueuing RUN-scoped intents), then the
+    // instances (no attachments left to cascade), then the RUN-scoped intents.
     await db().query('DELETE FROM approval_attachments WHERE id = ANY($1)', [ids]).catch(() => {})
+    await db().query('DELETE FROM approval_instances WHERE id = ANY($1)', [[...instanceIds]]).catch(() => {})
+    await db().query('DELETE FROM approval_attachment_purge_intents WHERE storage_key LIKE $1', [`key_att_${RUN}%`]).catch(() => {})
   })
 
   test('sentinel: DATABASE_URL set', () => {
@@ -116,5 +128,28 @@ describeIfDatabase('approval attachment GC (real DB)', () => {
     const pi = await db().query(`SELECT status FROM approval_attachment_purge_intents WHERE id=$1`, [`pi_manual_${RUN}`])
     expect(pi.rows[0].status).toBe('pending') // left for the reconciler
     void live
+  })
+
+  // §12 item 14 / G12 — the §3-bis row-delete trigger fires on the instance ON DELETE CASCADE path, so
+  // an instance deletion enqueues a row_deleted purge intent per bound blob; a co-existing LIVE instance
+  // is untouched. (The worker then deletes the object-store blobs — proven by the drain tests above.)
+  test('cascade blob cleanup (G12): deleting an instance enqueues row_deleted intents for its bound blobs; a live instance is untouched', async () => {
+    const deadInst = `apr_${RUN}_dead`
+    const liveInst = `apr_${RUN}_live`
+    const deadAtt = await seed({ status: 'bound', instance: deadInst, key: `key_att_${RUN}_cascade_dead` })
+    const liveAtt = await seed({ status: 'bound', instance: liveInst, key: `key_att_${RUN}_cascade_live` })
+    // delete the instance → ON DELETE CASCADE drops the bound row → the trigger enqueues its purge intent
+    await db().query('DELETE FROM approval_instances WHERE id=$1', [deadInst])
+    const dead = await db().query(
+      `SELECT count(*)::int AS c FROM approval_attachment_purge_intents WHERE storage_key=$1 AND reason='row_deleted'`,
+      [`key_att_${RUN}_cascade_dead`],
+    )
+    expect(Number(dead.rows[0].c)).toBe(1) // enqueued by the cascade path, no application code involved
+    const deadRow = await db().query('SELECT count(*)::int AS c FROM approval_attachments WHERE id=$1', [deadAtt])
+    expect(Number(deadRow.rows[0].c)).toBe(0) // the row is gone (cascade)
+    // positive control: the LIVE instance's bound blob is NEVER enqueued/purged
+    const liveIntent = await db().query('SELECT count(*)::int AS c FROM approval_attachment_purge_intents WHERE storage_key=$1', [`key_att_${RUN}_cascade_live`])
+    expect(Number(liveIntent.rows[0].c)).toBe(0)
+    void liveAtt
   })
 })
