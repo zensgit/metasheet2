@@ -1403,6 +1403,11 @@ export interface MultitableAutomationApprovalBridgesTable {
   created_at: CreatedAt
   completed_at: Date | string | null
   resumed_at: Date | string | null
+  // P2 durable-delivery P1#1 — reclaimable lease (zzzz20260717120000_approval_bridge_lease). NULL/0 for every
+  // row written before the upgrade and on the flag-OFF legacy path.
+  lease_expires_at: Date | string | null
+  attempts: number
+  fence: string | number
 }
 
 export interface MultitableAutomationExecutionsTable {
