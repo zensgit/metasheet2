@@ -2,13 +2,22 @@ import { describe, expect, it } from 'vitest'
 import type { ApprovalGraph, ApprovalTemplateDetailDTO } from '../src/types/approval'
 import {
   appendApprovalNode,
+  insertConditionGateway,
+  insertParallelGateway,
   removeLinearNode,
   addParallelBranch,
   removeParallelBranch,
   addConditionBranch,
   removeConditionBranch,
 } from '../src/approvals/graphTopologyEdit'
-import { applyTopologyToComplexDraft, buildApprovalGraph, draftFromTemplate, moveItemToIndex } from '../src/approvals/templateAuthoring'
+import {
+  applyTopologyToComplexDraft,
+  applyTopologyToDraft,
+  buildApprovalGraph,
+  draftFromTemplate,
+  moveItemToIndex,
+  validateTemplateApprovalFlow,
+} from '../src/approvals/templateAuthoring'
 
 describe('moveItemToIndex (D-4 field drag-reorder logic)', () => {
   it('moves an item to an arbitrary index (pure, returns a new array)', () => {
@@ -94,12 +103,66 @@ describe('appendApprovalNode', () => {
   })
 })
 
+describe('insertConditionGateway', () => {
+  it('turns a linear edge into a configurable branch plus a default path that rejoin', () => {
+    const before = snap(LINEAR)
+    const out = insertConditionGateway(LINEAR, 'approval_1')
+    expect(LINEAR).toEqual(before)
+    const condition = out.nodes.find((candidate) => candidate.type === 'condition')!
+    const config = condition.config as { branches: Array<{ edgeKey: string; rules: Array<{ fieldId: string }> }>; defaultEdgeKey: string }
+    const branchEdge = out.edges.find((edge) => edge.key === config.branches[0].edgeKey)!
+    const defaultEdge = out.edges.find((edge) => edge.key === config.defaultEdgeKey)!
+    const branchNode = node(out, branchEdge.target)!
+    const defaultNode = node(out, defaultEdge.target)!
+    expect(config.branches[0].rules[0].fieldId).toBe('')
+    expect(branchNode.type).toBe('approval')
+    expect(edgeBetween(out, 'approval_1', condition.key)).toBeTruthy()
+    expect(defaultNode.type).toBe('approval')
+    expect(edgeBetween(out, branchNode.key, 'end')).toBeTruthy()
+    expect(edgeBetween(out, defaultNode.key, 'end')).toBeTruthy()
+    expect(edgeBetween(out, 'approval_1', 'end')).toBeFalsy()
+  })
+
+  it('refuses an ambiguous branching insertion point', () => {
+    expect(() => insertConditionGateway(PARALLEL, 'parallel_1')).toThrow(/exactly one outgoing/)
+  })
+})
+
+describe('insertParallelGateway', () => {
+  it('turns a linear edge into a two-branch fork rejoining at the original target', () => {
+    const before = snap(LINEAR)
+    const out = insertParallelGateway(LINEAR, 'approval_1')
+    expect(LINEAR).toEqual(before)
+    const parallel = out.nodes.find((candidate) => candidate.type === 'parallel')!
+    const config = parallel.config as { branches: string[]; joinMode: string; joinNodeKey: string }
+    expect(config).toMatchObject({ joinMode: 'all', joinNodeKey: 'end' })
+    expect(config.branches).toHaveLength(2)
+    const branchTargets = config.branches.map((edgeKey) => out.edges.find((edge) => edge.key === edgeKey)!.target)
+    expect(new Set(branchTargets).size).toBe(2)
+    expect(branchTargets.every((target) => node(out, target)?.type === 'approval')).toBe(true)
+    expect(branchTargets.every((target) => Boolean(edgeBetween(out, target, 'end')))).toBe(true)
+    expect(edgeBetween(out, 'approval_1', parallel.key)).toBeTruthy()
+    expect(edgeBetween(out, 'approval_1', 'end')).toBeFalsy()
+  })
+})
+
 describe('removeLinearNode', () => {
   it('removes a single-in/out approval node and bridges pred→succ', () => {
     const out = removeLinearNode(LINEAR, 'approval_1')
     expect(node(out, 'approval_1')).toBeUndefined()
     expect(edgeBetween(out, 'start', 'end')).toBeTruthy() // bridged
     expect(out.edges).toHaveLength(1)
+  })
+  it('preserves a condition branch edge key when removing its first approval node', () => {
+    const graph = insertConditionGateway(LINEAR, 'approval_1')
+    const condition = graph.nodes.find((candidate) => candidate.type === 'condition')!
+    const branchEdgeKey = (condition.config as { branches: Array<{ edgeKey: string }> }).branches[0].edgeKey
+    const branchTarget = graph.edges.find((edge) => edge.key === branchEdgeKey)!.target
+    const out = removeLinearNode(graph, branchTarget)
+    expect(out.edges.find((edge) => edge.key === branchEdgeKey)).toMatchObject({
+      source: condition.key,
+      target: 'end',
+    })
   })
   it('refuses to remove start/end/condition/parallel', () => {
     expect(() => removeLinearNode(CONDITION, 'cond_1')).toThrow(/only approval\/cc/)
@@ -137,6 +200,17 @@ describe('addConditionBranch / removeConditionBranch', () => {
     expect(newEdge.source).toBe('cond_1')
     expect(edgeBetween(out, newEdge.target, 'end')).toBeTruthy() // rejoins where the default edge went
   })
+  it('adds a sibling at the true convergence point when the default path has its own approval node', () => {
+    const graph = insertConditionGateway(LINEAR, 'approval_1')
+    const condition = graph.nodes.find((candidate) => candidate.type === 'condition')!
+    const before = condition.config as { branches: Array<{ edgeKey: string }>; defaultEdgeKey: string }
+    const defaultTarget = graph.edges.find((edge) => edge.key === before.defaultEdgeKey)!.target
+    const out = addConditionBranch(graph, condition.key, '第三分支')
+    const config = node(out, condition.key)!.config as { branches: Array<{ edgeKey: string }> }
+    const addedTarget = out.edges.find((edge) => edge.key === config.branches.at(-1)!.edgeKey)!.target
+    expect(edgeBetween(out, addedTarget, 'end')).toBeTruthy()
+    expect(edgeBetween(out, addedTarget, defaultTarget)).toBeFalsy()
+  })
   it('removes a non-default branch; refuses to remove the default fall-through edge', () => {
     const two = addConditionBranch(CONDITION, 'cond_1')
     const cfg = two.nodes.find((n) => n.key === 'cond_1')!.config as { branches: Array<{ edgeKey: string }> }
@@ -170,5 +244,25 @@ describe('applyTopologyToComplexDraft — engine ↔ complex draft bridge (one s
     const built = buildApprovalGraph(next)
     expect((node(built, newApproval.key)!.config as { assigneeSources: unknown }).assigneeSources).toEqual([{ kind: 'dept_head' }])
     expect(node(built, 'app_a')).toEqual(node(PARALLEL, 'app_a')) // original branch untouched
+  })
+
+  it('promotes a linear draft before inserting a gateway, preserving existing approval config', () => {
+    const draft = draftFromTemplate(tpl(LINEAR))
+    const next = applyTopologyToDraft(draft, (graph) => insertParallelGateway(graph, 'approval_1'))
+    const built = buildApprovalGraph(next)
+    expect(next.steps).toEqual([])
+    expect(next.preservedGraph).toBeTruthy()
+    expect(node(built, 'approval_1')).toEqual(node(LINEAR, 'approval_1'))
+    expect(built.nodes.some((candidate) => candidate.type === 'parallel')).toBe(true)
+    expect(Object.keys(next.parallelEdits ?? {})).toHaveLength(1)
+  })
+
+  it('blocks save after inserting a condition until its starter rule is configured', () => {
+    const draft = draftFromTemplate(tpl(LINEAR))
+    const next = applyTopologyToDraft(draft, (graph) => insertConditionGateway(graph, 'approval_1'))
+    expect(validateTemplateApprovalFlow(next).some((error) => error.includes('需要选择字段'))).toBe(true)
+    const conditionKey = next.preservedGraph!.nodes.find((candidate) => candidate.type === 'condition')!.key
+    next.conditionEdits![conditionKey].branches[0].rules[0].fieldId = 'amount'
+    expect(validateTemplateApprovalFlow(next).some((error) => error.includes('需要选择字段'))).toBe(false)
   })
 })
