@@ -4,6 +4,8 @@ const FAVORITE_BASE_IDS_KEY = 'metasheet:multitable:favorite-base-ids:v1'
 const RECENT_BASE_OPENS_KEY = 'metasheet:multitable:recent-base-opens:v1'
 const RECENT_BASE_OPENS_LIMIT = 20
 
+export const QUICK_ACCESS_BASE_LIMIT = 6
+
 export interface RecentBaseOpen {
   baseId: string
   openedAt: string
@@ -142,3 +144,12 @@ export function decorateAndSortBases(
     .map(({ index: _index, ...base }) => base)
 }
 
+export function selectQuickAccessBases(
+  bases: readonly DecoratedBase[],
+  limit = QUICK_ACCESS_BASE_LIMIT,
+): DecoratedBase[] {
+  const safeLimit = Math.max(0, Math.floor(limit))
+  return bases
+    .filter((base) => base.isFavorite || base.lastOpenedAt !== null)
+    .slice(0, safeLimit)
+}
