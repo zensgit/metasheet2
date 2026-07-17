@@ -313,6 +313,8 @@ Invoke-SmokeStage -Token $token
     "process.stdout.write('lastCompletedPhase=AUTH\n')",
     "process.stdout.write('firstFailedCheck=PROVISIONING\n')",
     "process.stdout.write('failedCheckCount=2\n')",
+    "process.stdout.write('firstFailedHttpStatus=403\n')",
+    "process.stdout.write('firstFailedErrorClass=AUTHORIZATION\n')",
     "process.stdout.write('responseLeakScanStatus=NOT_RUN\n')",
     'process.exit(1)'
   )
@@ -330,6 +332,8 @@ Invoke-SmokeStage -Token $token
     $diagJson.'mvpSmoke.lastCompletedPhase' -eq 'AUTH' -and
     $diagJson.'mvpSmoke.firstFailedCheck' -eq 'PROVISIONING' -and
     $diagJson.'mvpSmoke.failedCheckCount' -eq '2' -and
+    $diagJson.'mvpSmoke.firstFailedHttpStatus' -eq '403' -and
+    $diagJson.'mvpSmoke.firstFailedErrorClass' -eq 'AUTHORIZATION' -and
     $diagJson.'mvpSmoke.responseLeakScanStatus' -eq 'NOT_RUN'
   )
   # values-free hardening: an off-vocabulary / business-value diagnostic never reaches the summary.
@@ -339,6 +343,8 @@ Invoke-SmokeStage -Token $token
     "process.stdout.write('failureClass=DWG-88472-A\n')",
     "process.stdout.write('lastCompletedPhase=SECRET_TENANT_evil\n')",
     "process.stdout.write('firstFailedCheck=material chinese steel Q235 x 99\n')",
+    "process.stdout.write('firstFailedHttpStatus=88472\n')",
+    "process.stdout.write('firstFailedErrorClass=MATERIAL_SECRET\n')",
     'process.exit(1)'
   )
   Set-Content -LiteralPath $fakeSmoke -Encoding utf8 -Value ($leakLines -join "`n")
@@ -351,6 +357,8 @@ Invoke-SmokeStage -Token $token
     (@('NOT_RUN', 'UNKNOWN') -contains $leakJson.'mvpSmoke.failureClass') -and
     $leakJson.'mvpSmoke.lastCompletedPhase' -eq 'UNKNOWN' -and
     (@('NOT_RUN', 'UNKNOWN') -contains $leakJson.'mvpSmoke.firstFailedCheck') -and
+    $leakJson.'mvpSmoke.firstFailedHttpStatus' -eq '0' -and
+    $leakJson.'mvpSmoke.firstFailedErrorClass' -eq 'UNKNOWN' -and
     ((Get-Content ([System.IO.Path]::ChangeExtension($leakSummary, '.txt')) -Raw) -notmatch 'DWG-88472|Q235|SECRET_TENANT')
   )
 

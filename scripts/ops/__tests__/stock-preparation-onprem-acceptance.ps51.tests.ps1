@@ -103,6 +103,8 @@ try {
     "process.stdout.write('lastCompletedPhase=SYNC_PERSIST\n')"
     "process.stdout.write('firstFailedCheck=PROVISIONING\n')"
     "process.stdout.write('failedCheckCount=3\n')"
+    "process.stdout.write('firstFailedHttpStatus=400\n')"
+    "process.stdout.write('firstFailedErrorClass=TENANT_CONTEXT\n')"
     "process.stdout.write('responseLeakScanStatus=NOT_RUN\n')"
     'process.exit(1)'
   )
@@ -116,6 +118,8 @@ try {
     $diagOutcome.lastCompletedPhase -eq 'SYNC_PERSIST' -and
     $diagOutcome.firstFailedCheck -eq 'PROVISIONING' -and
     $diagOutcome.failedCheckCount -eq '3' -and
+    $diagOutcome.firstFailedHttpStatus -eq '400' -and
+    $diagOutcome.firstFailedErrorClass -eq 'TENANT_CONTEXT' -and
     $diagOutcome.responseLeakScanStatus -eq 'NOT_RUN'
   )
 } finally {

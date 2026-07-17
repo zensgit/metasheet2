@@ -2,7 +2,7 @@
 # Static contract tests for stock-preparation-onprem-acceptance.ps1 (#3751 T9).
 # The full deploy path is Windows-only and cannot run in CI/sandbox, so these lock the two
 # security-critical, statically-verifiable invariants: (1) the summary is values-free by construction
-# (exactly the 15 whitelisted fields), (2) the admin token never crosses into the summary / a file /
+# (exactly the 17 whitelisted fields), (2) the admin token never crosses into the summary / a file /
 # a log — it only ever rides a scoped process env var that is cleared in a finally.
 $ErrorActionPreference = 'Stop'
 $script = Join-Path $PSScriptRoot '..' 'stock-preparation-onprem-acceptance.ps1'
@@ -130,19 +130,20 @@ Check "PM2 projection helper is required by the on-prem package build" (
   $packageBuildSrc -match '"scripts/ops/stock-preparation-pm2-sample\.mjs"'
 )
 
-# ── 1. Summary is values-free by construction: exactly the 15 whitelisted keys, nothing else. ────
-# (9 original + 5 corrective-5 bounded diagnostics; every added default is a fixed enum / integer.)
+# ── 1. Summary is values-free by construction: exactly the 17 whitelisted keys, nothing else. ────
+# (corrective-7 adds only a bounded HTTP status + fixed error class; no response value/message.)
 $expectedFields = @(
   'packageShaMatch','migrationStatus','pm2StableOnline','healthcheck',
   'mvpSmoke.pass','auditActionsCovered','selfScanClean',
   'mvpSmoke.failureClass','mvpSmoke.lastCompletedPhase','mvpSmoke.firstFailedCheck',
-  'mvpSmoke.failedCheckCount','mvpSmoke.responseLeakScanStatus',
+  'mvpSmoke.failedCheckCount','mvpSmoke.firstFailedHttpStatus','mvpSmoke.firstFailedErrorClass',
+  'mvpSmoke.responseLeakScanStatus',
   'externalPlmK3ErpWrite','postRunCredentialHygiene','failedStage'
 )
 $summaryBlock = if ($src -match "(?s)\`$Summary = \[ordered\]@\{(.*?)\}") { $Matches[1] } else { '' }
 $foundKeys = [regex]::Matches($summaryBlock, "(?m)^\s*'?([A-Za-z0-9.]+)'?\s*=") | ForEach-Object { $_.Groups[1].Value }
-Check "summary declares exactly the 15 whitelisted fields" (
-  ($foundKeys.Count -eq 15) -and (($expectedFields | Where-Object { $_ -notin $foundKeys }).Count -eq 0)
+Check "summary declares exactly the 17 whitelisted fields" (
+  ($foundKeys.Count -eq 17) -and (($expectedFields | Where-Object { $_ -notin $foundKeys }).Count -eq 0)
 )
 Check "summary has NO value-plane field (drawing/qty/unit/material/host/token)" (
   -not ($summaryBlock -match '(?i)drawing|qty|quantity|unit|material|host|token|password|secret|projectName')
