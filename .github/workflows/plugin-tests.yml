@@ -168,6 +168,12 @@ jobs:
       - name: PB4-4 reactivation CI wiring contract
         run: node --test scripts/ops/pb4-4-reactivation-ci-wiring.test.mjs
 
+      # B4 CI two-point wiring contract (no DB): the department-bindings FK-chain suite must stay
+      # wired into BOTH vitest.config.ts (exclude) AND plugin-tests.yml (directory real-DB step).
+      # Dropping either point silently disables the cross-org-FK-impossible proof.
+      - name: B4 department-bindings CI wiring contract
+        run: node --test scripts/ops/b4-department-bindings-ci-wiring.test.mjs
+
       # The production monitor invokes the same state helper covered here.
       # Keep this in the required 18/20 matrix so HTTP classification, silence
       # barriers, and alert/recovery streak semantics cannot drift silently.
@@ -634,6 +640,7 @@ jobs:
             tests/integration/local-directory-org-archive-readonly.db.test.ts \
             tests/integration/local-directory-org-cycle-detection.db.test.ts \
             tests/integration/directory-local-integration-reactivation.db.test.ts \
+            tests/integration/directory-department-bindings.db.test.ts \
             tests/integration/directory-normalized-manager.db.test.ts \
             tests/integration/attendance-csv-export-bom.test.ts \
             tests/integration/attendance-notification-redelivery.db.test.ts \

@@ -16,7 +16,7 @@
                           restart COMMAND returned 0 — a command success is not a stable service).
     5. healthcheck      — GET /api/health.
     6. mvpSmoke         — the in-package stock-preparation smoke (postdeploy-smoke.mjs).
-    7. summary          — one values-free acceptance-summary.txt + .json: the 15 whitelisted status
+    7. summary          — one values-free acceptance-summary.txt + .json: the 17 whitelisted status
                           fields ALWAYS, plus — only on failure — a values-free failDetail block
                           (failedStage + at most a migration name / SQLSTATE / HTTP code, never a value).
 
@@ -27,7 +27,7 @@
       ArgumentList. It is handed to the child smoke ONLY through a scoped process env var that is
       cleared in a finally block.
     * The values-free guarantee is scoped to the SUMMARY ARTIFACTS (acceptance-summary.txt / .json): those
-      can only ever contain the 15 whitelisted status fields — each a PASS/FAIL/enum/count/coarse-code —
+      can only ever contain the 17 whitelisted status fields — each a PASS/FAIL/enum/count/coarse-code —
       never a drawing number, quantity, unit, material name, host, credential, or raw log line. On failure
       they add only failedStage + a coarse code (migration name / SQLSTATE / HTTP status / coarse reason),
       never a full log. The values-free construction is: only whitelisted fields are ever assigned into
@@ -84,6 +84,8 @@ $Summary = [ordered]@{
   'mvpSmoke.lastCompletedPhase'     = 'NOT_RUN'
   'mvpSmoke.firstFailedCheck'       = 'NOT_RUN'
   'mvpSmoke.failedCheckCount'       = '0'
+  'mvpSmoke.firstFailedHttpStatus'  = '0'
+  'mvpSmoke.firstFailedErrorClass'  = 'NOT_RUN'
   'mvpSmoke.responseLeakScanStatus' = 'NOT_RUN'
   externalPlmK3ErpWrite  = 'false'   # invariant: this line NEVER touches an external write.
   # corrective-6 (entity finding): PASS only when the deployed pm2 process environment provably
@@ -107,7 +109,7 @@ function Stop-WithFailure {
 }
 
 function Emit-Summary {
-  # Build the .txt (the 15 whitelisted summary lines) + optional coarse fail detail, and a matching .json.
+  # Build the .txt (the 17 whitelisted summary lines) + optional coarse fail detail, and a matching .json.
   $lines = @()
   foreach ($k in $Summary.Keys) { $lines += "$k=$($Summary[$k])" }
   if ($FailDetail.Count -gt 0) { foreach ($k in $FailDetail.Keys) { $lines += "$k=$($FailDetail[$k])" } }
@@ -215,7 +217,7 @@ function Test-SmokeOutcome {
   elseif ($audit -ne '8/8') { $ok = $false; $reason = 'audit_incomplete' }
   elseif (-not $selfScan) { $ok = $false; $reason = 'self_scan_not_clean' }
 
-  # ── corrective-5: parse the bounded values-free diagnostics. The 4 enum fields are allowlisted (any
+  # ── corrective-5/7: parse the bounded values-free diagnostics. Every enum is allowlisted (any
   # off-vocabulary token becomes UNKNOWN, never a raw value); firstFailedCheck is a structural check label
   # accepted ONLY if it matches a safe-label shape and is length-capped — so a wild/leaky value can never
   # reach the runner summary (the smoke additionally REDACTs it upstream).
@@ -232,11 +234,24 @@ function Test-SmokeOutcome {
   # firstFailedCheck is the PHASE of the first failed check — allowlisted like lastCompletedPhase.
   $firstFailed = if ($Joined -match '(?m)^firstFailedCheck=([A-Za-z_]+)\s*$') { $Matches[1] } else { 'NOT_RUN' }
   if ($firstFailed -ne 'NOT_RUN' -and $allowedPhase -notcontains $firstFailed) { $firstFailed = 'UNKNOWN' }
+  # corrective-7: the entity's PROVISIONING 3/3 failure needs a values-free discriminator. Preserve
+  # only a real HTTP status (or 0) plus one closed coarse class; raw response codes/messages are never
+  # accepted by this parser or copied into the acceptance summary.
+  $firstFailedHttp = if ($Joined -match '(?m)^firstFailedHttpStatus=(0|[1-5][0-9]{2})\s*$') { $Matches[1] } else { '0' }
+  $allowedHttpErrorClass = @(
+    'NONE', 'NOT_HTTP', 'TENANT_CONTEXT', 'AUTHENTICATION', 'AUTHORIZATION', 'NOT_FOUND',
+    'API_UNAVAILABLE', 'CONFIG_INVALID', 'SERVER_ERROR', 'CLIENT_ERROR', 'RESPONSE_CONTRACT', 'UNKNOWN'
+  )
+  $firstFailedErrorClass = if ($Joined -match '(?m)^firstFailedErrorClass=([A-Z_]+)\s*$') { $Matches[1] } else { 'NOT_RUN' }
+  if ($firstFailedErrorClass -ne 'NOT_RUN' -and $allowedHttpErrorClass -notcontains $firstFailedErrorClass) {
+    $firstFailedErrorClass = 'UNKNOWN'
+  }
 
   return @{
     pass = $pass; audit = $audit; selfScan = $selfScan; ok = $ok; reason = $reason
     failureClass = $failureClass; lastCompletedPhase = $lastPhase; firstFailedCheck = $firstFailed
-    failedCheckCount = $failedCount; responseLeakScanStatus = $leakScan
+    failedCheckCount = $failedCount; firstFailedHttpStatus = $firstFailedHttp
+    firstFailedErrorClass = $firstFailedErrorClass; responseLeakScanStatus = $leakScan
   }
 }
 
@@ -503,12 +518,14 @@ function Invoke-SmokeStage {
   $Summary['mvpSmoke.pass'] = if ($outcome.pass) { 'true' } else { 'false' }
   $Summary.auditActionsCovered = $outcome.audit
   $Summary.selfScanClean = if ($outcome.selfScan) { 'true' } else { 'false' }
-  # corrective-5: propagate the bounded diagnostics INTO the summary BEFORE the exit/outcome gates below,
+  # corrective-5/7: propagate the bounded diagnostics INTO the summary BEFORE the exit/outcome gates below,
   # so an exit-1 smoke (Stop-WithFailure) still emits them in the values-free acceptance summary.
   $Summary['mvpSmoke.failureClass'] = $outcome.failureClass
   $Summary['mvpSmoke.lastCompletedPhase'] = $outcome.lastCompletedPhase
   $Summary['mvpSmoke.firstFailedCheck'] = $outcome.firstFailedCheck
   $Summary['mvpSmoke.failedCheckCount'] = $outcome.failedCheckCount
+  $Summary['mvpSmoke.firstFailedHttpStatus'] = $outcome.firstFailedHttpStatus
+  $Summary['mvpSmoke.firstFailedErrorClass'] = $outcome.firstFailedErrorClass
   $Summary['mvpSmoke.responseLeakScanStatus'] = $outcome.responseLeakScanStatus
   # Fail-closed: a green exit is NOT a steady state unless the audit surface is fully covered (8/8) and
   # the self-scan is clean. An absent/unparseable field records 'N/8'/'false' and FAILS here — it never
