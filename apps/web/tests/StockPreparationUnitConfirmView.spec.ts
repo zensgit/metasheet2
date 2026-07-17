@@ -459,4 +459,46 @@ describe('StockPreparationUnitConfirmView (view 4: confirm reads + human confirm
     await nextTick()
     expect(root.querySelector('[data-testid="stock-prep-unit-no-project"]')?.textContent).toMatch(/select a project/i)
   })
+
+  // H4-3 (responsive + long-table usability): both error surfaces (summary + candidates) offer a
+  // Retry that re-runs the SAME readonly load — same idiom as the H4-1 dashboard retry.
+  it('H4-3: the summary error state offers a Retry that re-runs loadAll() and recovers', async () => {
+    h.apiFetch.mockImplementation(async () => fail(500, 'BACKEND_NOT_READY'))
+    const root = mountView()
+    await waitForSelector(root, '[data-testid="stock-prep-unit-error"]')
+    const retry = root.querySelector('[data-testid="stock-prep-unit-retry"]') as HTMLButtonElement | null
+    expect(retry).not.toBeNull()
+    expect(retry?.getAttribute('aria-label')).toBe('重试读取单位换算确认')
+
+    mockRoutes() // the retry succeeds
+    const callsBefore = h.apiFetch.mock.calls.length
+    retry!.click()
+    await waitForSelector(root, '[data-testid="stock-prep-unit-queue"]')
+    expect(h.apiFetch.mock.calls.length).toBeGreaterThan(callsBefore)
+    expect(root.querySelector('[data-testid="stock-prep-unit-error"]')).toBeNull()
+  })
+
+  it('H4-3: the candidates error state offers a Retry that re-runs loadCandidates() and recovers', async () => {
+    mockRoutes({ candidates: () => fail(500, 'BACKEND_NOT_READY') })
+    const root = mountView()
+    await waitForSelector(root, '[data-testid="stock-prep-unit-candidates-error"]')
+    const retry = root.querySelector('[data-testid="stock-prep-unit-candidates-retry"]') as HTMLButtonElement | null
+    expect(retry).not.toBeNull()
+    expect(retry?.getAttribute('aria-label')).toBe('重试读取计算候选行')
+
+    mockRoutes() // the retry succeeds
+    retry!.click()
+    await waitForSelector(root, '[data-testid="stock-prep-unit-queue"]')
+    expect(root.querySelector('[data-testid="stock-prep-unit-candidates-error"]')).toBeNull()
+  })
+
+  it('H4-3: the summary retry button is bilingual + carries an accessible name (aria-label)', async () => {
+    h.locale = 'en'
+    h.apiFetch.mockImplementation(async () => fail(500, 'BACKEND_NOT_READY'))
+    const root = mountView()
+    await waitForSelector(root, '[data-testid="stock-prep-unit-error"]')
+    const retry = root.querySelector('[data-testid="stock-prep-unit-retry"]') as HTMLButtonElement
+    expect(retry.textContent?.trim()).toBe('Retry')
+    expect(retry.getAttribute('aria-label')).toBe('Retry loading unit-conversion confirmation')
+  })
 })

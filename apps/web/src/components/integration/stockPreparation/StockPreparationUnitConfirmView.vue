@@ -21,14 +21,25 @@
     </p>
 
     <!-- Summary error / endpoint-not-ready: neutral, never the raw body. -->
-    <p
+    <div
       v-else-if="errored"
       class="sp-unit__state sp-unit__state--muted"
       data-testid="stock-prep-unit-error"
       role="status"
     >
-      {{ bi('同步后端尚未就绪,稍后再试。', 'Backend read not ready yet — try again later.') }}
-    </p>
+      <p class="sp-unit__state-msg">{{ bi('同步后端尚未就绪,稍后再试。', 'Backend read not ready yet — try again later.') }}</p>
+      <!-- H4-3 retry: re-runs the same readonly loadAll(); idempotent, no new endpoint. -->
+      <button
+        type="button"
+        class="sp-unit__retry"
+        data-testid="stock-prep-unit-retry"
+        :disabled="loading"
+        :aria-label="bi('重试读取单位换算确认', 'Retry loading unit-conversion confirmation')"
+        @click="loadAll"
+      >
+        {{ bi('重试', 'Retry') }}
+      </button>
+    </div>
 
     <div v-else-if="summary" class="sp-unit__overview" data-testid="stock-prep-unit-overview">
       <!-- Summary header card: the six values-free summary indicators. -->
@@ -113,14 +124,24 @@
       >
         {{ bi('该项目尚无完整快照批次,无法计算单位候选。', 'No complete snapshot batch for this project yet — unit candidates cannot be computed.') }}
       </p>
-      <p
+      <div
         v-else-if="candidatesErrored"
         class="sp-unit__state sp-unit__state--muted"
         data-testid="stock-prep-unit-candidates-error"
         role="status"
       >
-        {{ bi('候选读取尚未就绪,稍后再试。', 'Candidate read not ready yet — try again later.') }}
-      </p>
+        <p class="sp-unit__state-msg">{{ bi('候选读取尚未就绪,稍后再试。', 'Candidate read not ready yet — try again later.') }}</p>
+        <!-- H4-3 retry: re-runs the existing loadCandidates() for the same project/batch. -->
+        <button
+          type="button"
+          class="sp-unit__retry"
+          data-testid="stock-prep-unit-candidates-retry"
+          :aria-label="bi('重试读取计算候选行', 'Retry loading computed candidate rows')"
+          @click="loadCandidates"
+        >
+          {{ bi('重试', 'Retry') }}
+        </button>
+      </div>
       <div v-else-if="candidates" class="sp-unit__candidates">
         <div class="sp-unit__queue-head">
           <span class="sp-unit__queue-count" data-testid="stock-prep-unit-queue-count">
@@ -593,6 +614,35 @@ watch(() => props.projectId, loadAll)
   color: var(--ms-color-danger, #c45656);
 }
 
+.sp-unit__state-msg {
+  margin: 0 0 var(--ms-space-2);
+}
+
+.sp-unit__retry {
+  border: 1px solid var(--ms-border-light);
+  border-radius: 6px;
+  background: transparent;
+  padding: 4px 12px;
+  color: var(--ms-color-primary);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.sp-unit__retry:hover:not(:disabled) {
+  background: var(--el-fill-color-light);
+}
+
+.sp-unit__retry:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.sp-unit__retry:focus-visible {
+  outline: 2px solid var(--ms-color-primary);
+  outline-offset: 1px;
+}
+
 .sp-unit__overview,
 .sp-unit__candidates {
   display: flex;
@@ -669,12 +719,17 @@ watch(() => props.projectId, loadAll)
   font-size: 13px;
 }
 
+/* H4-3 long-table: bounded height + BOTH-axis overflow, so the table scrolls inside its OWN box and
+   the sticky thead below has an actual scroll range to stick within (an `overflow-x: auto`-only wrap
+   never scrolls vertically, so a sticky header inside it would never engage). */
 .sp-unit__table-wrap {
-  overflow-x: auto;
+  max-height: 420px;
+  overflow: auto;
 }
 
 .sp-unit__table {
   width: 100%;
+  min-width: 700px;
   border-collapse: collapse;
   font-size: 13px;
 }
@@ -688,6 +743,10 @@ watch(() => props.projectId, loadAll)
 }
 
 .sp-unit__table th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--ms-bg-card);
   color: var(--ms-text-3);
   font-weight: var(--ms-font-weight-title);
 }
@@ -723,6 +782,16 @@ watch(() => props.projectId, loadAll)
 
 .sp-unit__action:hover:not(:disabled) {
   background: var(--el-fill-color-light);
+}
+
+/* H4-3 keyboard: one focus-ring system across the stock-prep surface (same idiom as the H4-2
+   dashboard/stepper rings). Covers the confirm/retire/submit/stale-refresh buttons and every field
+   control (the stale-refresh button above already carries this class). */
+.sp-unit__action:focus-visible,
+.sp-unit__field input:focus-visible,
+.sp-unit__field select:focus-visible {
+  outline: 2px solid var(--ms-color-primary);
+  outline-offset: 1px;
 }
 
 .sp-unit__retire {

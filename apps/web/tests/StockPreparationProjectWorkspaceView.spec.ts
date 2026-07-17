@@ -202,4 +202,33 @@ describe('StockPreparationProjectWorkspaceView (readonly, values-free)', () => {
     expect(errorEl).not.toBeNull()
     expect(errorEl.textContent).toMatch(/not ready/i)
   })
+
+  // H4-3 (responsive + long-table usability): the error state offers a Retry that re-runs the same
+  // readonly load() and recovers — same idiom as the H4-1 dashboard retry.
+  it('H4-3: the error state offers a Retry that re-runs load() and recovers', async () => {
+    h.getOverview.mockRejectedValue(new Error('boom'))
+    const root = mountView()
+    await flushUi()
+    const retry = root.querySelector('[data-testid="stock-prep-project-retry"]') as HTMLButtonElement | null
+    expect(retry).not.toBeNull()
+    expect(retry?.getAttribute('aria-label')).toBe('重试读取项目工作台')
+
+    h.getOverview.mockResolvedValue(overviewWithPlantedExtras()) // the retry succeeds
+    const callsBefore = h.getOverview.mock.calls.length
+    retry!.click()
+    await flushUi()
+    expect(h.getOverview.mock.calls.length).toBeGreaterThan(callsBefore)
+    expect(root.querySelector('[data-testid="stock-prep-project-error"]')).toBeNull()
+    expect(root.querySelector('[data-testid="stock-prep-project-overview"]')).not.toBeNull()
+  })
+
+  it('H4-3: the retry button is bilingual + carries an accessible name (aria-label)', async () => {
+    h.locale = 'en'
+    h.getOverview.mockRejectedValue(new Error('boom'))
+    const root = mountView()
+    await flushUi()
+    const retry = root.querySelector('[data-testid="stock-prep-project-retry"]') as HTMLButtonElement
+    expect(retry.textContent?.trim()).toBe('Retry')
+    expect(retry.getAttribute('aria-label')).toBe('Retry loading the project workspace')
+  })
 })

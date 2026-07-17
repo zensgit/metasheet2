@@ -21,14 +21,25 @@
     </p>
 
     <!-- Error / endpoint-not-ready (GET rejects or 404s): neutral, never the raw body. -->
-    <p
+    <div
       v-else-if="errored"
       class="sp-map__state sp-map__state--muted"
       data-testid="stock-prep-mapping-error"
       role="status"
     >
-      {{ bi('同步后端尚未就绪,稍后再试。', 'Backend read not ready yet — try again later.') }}
-    </p>
+      <p class="sp-map__state-msg">{{ bi('同步后端尚未就绪,稍后再试。', 'Backend read not ready yet — try again later.') }}</p>
+      <!-- H4-3 retry: re-runs the same readonly loadAll(); idempotent, no new endpoint. -->
+      <button
+        type="button"
+        class="sp-map__retry"
+        data-testid="stock-prep-mapping-retry"
+        :disabled="loading"
+        :aria-label="bi('重试读取物料映射确认', 'Retry loading the material-mapping confirmation queue')"
+        @click="loadAll"
+      >
+        {{ bi('重试', 'Retry') }}
+      </button>
+    </div>
 
     <div v-else-if="summary && queue" class="sp-map__overview" data-testid="stock-prep-mapping-overview">
       <!-- Summary header card: the five values-free summary indicators. -->
@@ -549,6 +560,35 @@ watch(statusFilter, reloadQueue)
   color: var(--ms-color-danger, #c45656);
 }
 
+.sp-map__state-msg {
+  margin: 0 0 var(--ms-space-2);
+}
+
+.sp-map__retry {
+  border: 1px solid var(--ms-border-light);
+  border-radius: 6px;
+  background: transparent;
+  padding: 4px 12px;
+  color: var(--ms-color-primary);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.sp-map__retry:hover:not(:disabled) {
+  background: var(--el-fill-color-light);
+}
+
+.sp-map__retry:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.sp-map__retry:focus-visible {
+  outline: 2px solid var(--ms-color-primary);
+  outline-offset: 1px;
+}
+
 .sp-map__overview {
   display: flex;
   flex-direction: column;
@@ -655,12 +695,17 @@ watch(statusFilter, reloadQueue)
   font-style: italic;
 }
 
+/* H4-3 long-table: bounded height + BOTH-axis overflow, so the table scrolls inside its OWN box and
+   the sticky thead below has an actual scroll range to stick within (an `overflow-x: auto`-only wrap
+   never scrolls vertically, so a sticky header inside it would never engage). */
 .sp-map__table-wrap {
-  overflow-x: auto;
+  max-height: 420px;
+  overflow: auto;
 }
 
 .sp-map__table {
   width: 100%;
+  min-width: 920px;
   border-collapse: collapse;
   font-size: 13px;
 }
@@ -674,6 +719,10 @@ watch(statusFilter, reloadQueue)
 }
 
 .sp-map__table th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--ms-bg-card);
   color: var(--ms-text-3);
   font-weight: var(--ms-font-weight-title);
 }
@@ -714,6 +763,15 @@ watch(statusFilter, reloadQueue)
 
 .sp-map__action:hover:not(:disabled) {
   background: var(--el-fill-color-light);
+}
+
+/* H4-3 keyboard: one focus-ring system across the stock-prep surface (same idiom as the H4-2
+   dashboard/stepper rings). Covers the sync/confirm/retire/submit buttons and every field control. */
+.sp-map__action:focus-visible,
+.sp-map__field input:focus-visible,
+.sp-map__field select:focus-visible {
+  outline: 2px solid var(--ms-color-primary);
+  outline-offset: 1px;
 }
 
 .sp-map__form {

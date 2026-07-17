@@ -369,4 +369,32 @@ describe('StockPreparationPrepLineView (view 5: values-free prep lines + generat
     await nextTick()
     expect(root.querySelector('[data-testid="stock-prep-line-no-project"]')?.textContent).toMatch(/select a project/i)
   })
+
+  // H4-3 (responsive + long-table usability): the error state offers a Retry that re-runs loadList()
+  // and recovers — same idiom as the H4-1 dashboard retry.
+  it('H4-3: the error state offers a Retry that re-runs loadList() and recovers', async () => {
+    h.apiFetch.mockImplementation(async () => fail(500, 'BACKEND_NOT_READY'))
+    const root = mountView()
+    await waitForSelector(root, '[data-testid="stock-prep-line-error"]')
+    const retry = root.querySelector('[data-testid="stock-prep-line-retry"]') as HTMLButtonElement | null
+    expect(retry).not.toBeNull()
+    expect(retry?.getAttribute('aria-label')).toBe('重试读取备料明细')
+
+    mockRoutes() // the retry succeeds
+    const callsBefore = h.apiFetch.mock.calls.length
+    retry!.click()
+    await waitForSelector(root, '[data-testid="stock-prep-line-overview"]')
+    expect(h.apiFetch.mock.calls.length).toBeGreaterThan(callsBefore)
+    expect(root.querySelector('[data-testid="stock-prep-line-error"]')).toBeNull()
+  })
+
+  it('H4-3: the retry button is bilingual + carries an accessible name (aria-label)', async () => {
+    h.locale = 'en'
+    h.apiFetch.mockImplementation(async () => fail(500, 'BACKEND_NOT_READY'))
+    const root = mountView()
+    await waitForSelector(root, '[data-testid="stock-prep-line-error"]')
+    const retry = root.querySelector('[data-testid="stock-prep-line-retry"]') as HTMLButtonElement
+    expect(retry.textContent?.trim()).toBe('Retry')
+    expect(retry.getAttribute('aria-label')).toBe('Retry loading prep lines')
+  })
 })

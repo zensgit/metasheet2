@@ -176,6 +176,14 @@ const stockPreparationTargetBaseId = defineModel<string>('stockPreparationTarget
   border-color: var(--ms-color-primary);
 }
 
+/* H4-3 keyboard: same ring idiom as the rest of the stock-prep surface (H4-2 dashboard/stepper
+   rings) — this panel's readiness/ensure buttons fall back to the UA default otherwise, which is
+   inconsistent across browsers. */
+.integration-workbench__button:focus-visible {
+  outline: 2px solid var(--ms-color-primary);
+  outline-offset: 1px;
+}
+
 .integration-workbench__button:disabled {
   cursor: not-allowed;
   opacity: 0.55;

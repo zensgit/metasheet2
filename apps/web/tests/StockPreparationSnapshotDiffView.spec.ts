@@ -656,4 +656,63 @@ describe('StockPreparationSnapshotDiffView (readonly, values-free)', () => {
     expect(root.textContent).toContain('base-alpha-fresh')
     expect(root.textContent).not.toContain('base-alpha-stale')
   })
+
+  // ── H4-3 (responsive + long-table usability): each of the three error surfaces (batch list, diff
+  // summary, row detail) offers a Retry that re-runs the SAME readonly load — same idiom as the H4-1
+  // dashboard retry. ──────────────────────────────────────────────────────────────────────────────
+
+  it('H4-3: the batch-list error state offers a Retry that re-runs loadBatches() and recovers', async () => {
+    h.listBatches.mockRejectedValue(new Error('boom'))
+    const root = mountView()
+    await flushUi()
+    const retry = root.querySelector('[data-testid="stock-prep-snapshot-retry"]') as HTMLButtonElement | null
+    expect(retry).not.toBeNull()
+    expect(retry?.getAttribute('aria-label')).toBe('重试读取快照批次')
+
+    h.listBatches.mockResolvedValue(batchListWithPlantedExtras()) // the retry succeeds
+    const callsBefore = h.listBatches.mock.calls.length
+    retry!.click()
+    await flushUi()
+    expect(h.listBatches.mock.calls.length).toBeGreaterThan(callsBefore)
+    expect(root.querySelector('[data-testid="stock-prep-snapshot-error"]')).toBeNull()
+    expect(root.querySelector('[data-testid="stock-prep-snapshot-overview"]')).not.toBeNull()
+  })
+
+  it('H4-3: the diff-summary error state offers a Retry that re-fetches for the SAME selected batch', async () => {
+    h.listBatches.mockResolvedValue(batchListWithPlantedExtras())
+    h.getDiff.mockRejectedValue(new Error('boom'))
+    const root = mountView()
+    await flushUi()
+    ;(root.querySelector('[data-testid="stock-prep-snapshot-batch-select"]') as HTMLButtonElement).click()
+    await flushUi()
+    const retry = root.querySelector('[data-testid="stock-prep-diff-retry"]') as HTMLButtonElement | null
+    expect(retry).not.toBeNull()
+    expect(retry?.getAttribute('aria-label')).toBe('重试读取差异')
+
+    h.getDiff.mockResolvedValue(diffSummary()) // the retry succeeds
+    const callsBefore = h.getDiff.mock.calls.length
+    retry!.click()
+    await flushUi()
+    expect(h.getDiff.mock.calls.length).toBeGreaterThan(callsBefore)
+    expect(h.getDiff.mock.calls.at(-1)?.[0]).toBe('batch-alpha') // same batch, no re-selection
+    expect(root.querySelector('[data-testid="stock-prep-diff-error"]')).toBeNull()
+    expect(root.querySelector('[data-testid="stock-prep-snapshot-diff"]')).not.toBeNull()
+  })
+
+  it('H4-3: the row-detail error state offers a Retry that re-runs loadRowDetail() and recovers', async () => {
+    h.listRows.mockRejectedValue(new Error('boom'))
+    const root = await mountWithDiffShown()
+    await openRowDetail(root)
+    const retry = root.querySelector('[data-testid="stock-prep-snapshot-diff-rows-retry"]') as HTMLButtonElement | null
+    expect(retry).not.toBeNull()
+    expect(retry?.getAttribute('aria-label')).toBe('重试读取逐行明细')
+
+    h.listRows.mockResolvedValue(diffRowsResult()) // the retry succeeds
+    const callsBefore = h.listRows.mock.calls.length
+    retry!.click()
+    await flushUi()
+    expect(h.listRows.mock.calls.length).toBeGreaterThan(callsBefore)
+    expect(root.querySelector('[data-testid="stock-prep-snapshot-diff-rows-error"]')).toBeNull()
+    expect(root.querySelector('[data-testid="stock-prep-snapshot-diff-rows-table"]')).not.toBeNull()
+  })
 })

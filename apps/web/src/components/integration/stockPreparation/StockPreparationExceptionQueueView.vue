@@ -21,14 +21,25 @@
     </p>
 
     <!-- Error / endpoint-not-ready (GET rejects or 404s): neutral, never the raw body. -->
-    <p
+    <div
       v-else-if="errored"
       class="sp-exq__state sp-exq__state--muted"
       data-testid="stock-prep-exception-error"
       role="status"
     >
-      {{ bi('同步后端尚未就绪,稍后再试。', 'Backend read not ready yet — try again later.') }}
-    </p>
+      <p class="sp-exq__state-msg">{{ bi('同步后端尚未就绪,稍后再试。', 'Backend read not ready yet — try again later.') }}</p>
+      <!-- H4-3 retry: re-runs the same readonly loadList(); idempotent, no new endpoint. -->
+      <button
+        type="button"
+        class="sp-exq__retry"
+        data-testid="stock-prep-exception-retry"
+        :disabled="loading"
+        :aria-label="bi('重试读取异常队列', 'Retry loading the exception queue')"
+        @click="loadList"
+      >
+        {{ bi('重试', 'Retry') }}
+      </button>
+    </div>
 
     <div v-else-if="list" class="sp-exq__overview" data-testid="stock-prep-exception-overview">
       <!-- Header cards: the blocking gate count + total + values-free type/status counts. -->
@@ -468,6 +479,35 @@ watch([statusFilter, typeFilter], reloadList)
   color: var(--ms-color-danger, #c45656);
 }
 
+.sp-exq__state-msg {
+  margin: 0 0 var(--ms-space-2);
+}
+
+.sp-exq__retry {
+  border: 1px solid var(--ms-border-light);
+  border-radius: 6px;
+  background: transparent;
+  padding: 4px 12px;
+  color: var(--ms-color-primary);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.sp-exq__retry:hover:not(:disabled) {
+  background: var(--el-fill-color-light);
+}
+
+.sp-exq__retry:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.sp-exq__retry:focus-visible {
+  outline: 2px solid var(--ms-color-primary);
+  outline-offset: 1px;
+}
+
 .sp-exq__overview {
   display: flex;
   flex-direction: column;
@@ -574,12 +614,17 @@ watch([statusFilter, typeFilter], reloadList)
   font-size: 13px;
 }
 
+/* H4-3 long-table: bounded height + BOTH-axis overflow, so the table scrolls inside its OWN box and
+   the sticky thead below has an actual scroll range to stick within (an `overflow-x: auto`-only wrap
+   never scrolls vertically, so a sticky header inside it would never engage). */
 .sp-exq__table-wrap {
-  overflow-x: auto;
+  max-height: 420px;
+  overflow: auto;
 }
 
 .sp-exq__table {
   width: 100%;
+  min-width: 840px;
   border-collapse: collapse;
   font-size: 13px;
 }
@@ -593,6 +638,10 @@ watch([statusFilter, typeFilter], reloadList)
 }
 
 .sp-exq__table th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--ms-bg-card);
   color: var(--ms-text-3);
   font-weight: var(--ms-font-weight-title);
 }
@@ -628,5 +677,15 @@ watch([statusFilter, typeFilter], reloadList)
 
 .sp-exq__action:hover:not(:disabled) {
   background: var(--el-fill-color-light);
+}
+
+/* H4-3 keyboard: one focus-ring system across the stock-prep surface (same idiom as the H4-2
+   dashboard/stepper rings). Covers the resolve/bulk-resolve buttons, the 3 filter/action selects, and
+   the per-row select-checkbox (native, but the UA default ring is inconsistent across browsers). */
+.sp-exq__action:focus-visible,
+.sp-exq__field select:focus-visible,
+.sp-exq__col-select input[type='checkbox']:focus-visible {
+  outline: 2px solid var(--ms-color-primary);
+  outline-offset: 1px;
 }
 </style>

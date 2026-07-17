@@ -11,14 +11,25 @@
     </p>
 
     <!-- Error / endpoint-not-ready (GET rejects or 404s): neutral, non-alarming, never the raw body. -->
-    <p
+    <div
       v-else-if="errored"
       class="sp-project__state sp-project__state--muted"
       data-testid="stock-prep-project-error"
       role="status"
     >
-      {{ bi('同步后端尚未就绪,稍后再试。', 'Backend read not ready yet — try again later.') }}
-    </p>
+      <p class="sp-project__state-msg">{{ bi('同步后端尚未就绪,稍后再试。', 'Backend read not ready yet — try again later.') }}</p>
+      <!-- H4-3 retry: re-runs the same readonly load(); idempotent, no new endpoint. -->
+      <button
+        type="button"
+        class="sp-project__retry"
+        data-testid="stock-prep-project-retry"
+        :disabled="loading"
+        :aria-label="bi('重试读取项目工作台', 'Retry loading the project workspace')"
+        @click="load"
+      >
+        {{ bi('重试', 'Retry') }}
+      </button>
+    </div>
 
     <!-- Empty: no projects have been synced yet. -->
     <p
@@ -189,6 +200,35 @@ onMounted(load)
   color: var(--ms-text-3);
 }
 
+.sp-project__state-msg {
+  margin: 0 0 var(--ms-space-2);
+}
+
+.sp-project__retry {
+  border: 1px solid var(--ms-border-light);
+  border-radius: 6px;
+  background: transparent;
+  padding: 4px 12px;
+  color: var(--ms-color-primary);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.sp-project__retry:hover:not(:disabled) {
+  background: var(--el-fill-color-light);
+}
+
+.sp-project__retry:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.sp-project__retry:focus-visible {
+  outline: 2px solid var(--ms-color-primary);
+  outline-offset: 1px;
+}
+
 .sp-project__summary {
   display: flex;
   flex-wrap: wrap;
@@ -211,12 +251,18 @@ onMounted(load)
   font-size: 12px;
 }
 
+/* H4-3 long-table: bounded height + BOTH-axis overflow so the table scrolls inside its OWN box —
+   never the page body — and the sticky thead below has an actual scroll range to stick within
+   (a wrap with `overflow-x: auto` alone never scrolls vertically, so a sticky header inside it would
+   never engage; see StockPreparationMappingConfirmView.vue for the identical pattern reused here). */
 .sp-project__table-wrap {
-  overflow-x: auto;
+  max-height: 420px;
+  overflow: auto;
 }
 
 .sp-project__table {
   width: 100%;
+  min-width: 760px;
   border-collapse: collapse;
   font-size: 13px;
 }
@@ -230,6 +276,10 @@ onMounted(load)
 }
 
 .sp-project__table th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--ms-bg-card);
   color: var(--ms-text-3);
   font-weight: var(--ms-font-weight-title);
 }
@@ -272,5 +322,12 @@ onMounted(load)
 
 .sp-project__select:hover {
   background: var(--el-fill-color-light);
+}
+
+/* H4-3 keyboard: one focus-ring system across the stock-prep surface (same idiom as the H4-2
+   dashboard/stepper rings). */
+.sp-project__select:focus-visible {
+  outline: 2px solid var(--ms-color-primary);
+  outline-offset: 1px;
 }
 </style>

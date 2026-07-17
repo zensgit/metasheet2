@@ -21,14 +21,25 @@
     </p>
 
     <!-- Error / endpoint-not-ready (GET rejects or 404s): neutral, never the raw body. -->
-    <p
+    <div
       v-else-if="errored"
       class="sp-line__state sp-line__state--muted"
       data-testid="stock-prep-line-error"
       role="status"
     >
-      {{ bi('同步后端尚未就绪,稍后再试。', 'Backend read not ready yet — try again later.') }}
-    </p>
+      <p class="sp-line__state-msg">{{ bi('同步后端尚未就绪,稍后再试。', 'Backend read not ready yet — try again later.') }}</p>
+      <!-- H4-3 retry: re-runs the same readonly loadList(); idempotent, no new endpoint. -->
+      <button
+        type="button"
+        class="sp-line__retry"
+        data-testid="stock-prep-line-retry"
+        :disabled="loading"
+        :aria-label="bi('重试读取备料明细', 'Retry loading prep lines')"
+        @click="loadList"
+      >
+        {{ bi('重试', 'Retry') }}
+      </button>
+    </div>
 
     <div v-else-if="list" class="sp-line__overview" data-testid="stock-prep-line-overview">
       <!-- Header cards: total + the three values-free status count groups. -->
@@ -346,6 +357,35 @@ watch(statusFilter, reloadList)
   color: var(--ms-color-danger, #c45656);
 }
 
+.sp-line__state-msg {
+  margin: 0 0 var(--ms-space-2);
+}
+
+.sp-line__retry {
+  border: 1px solid var(--ms-border-light);
+  border-radius: 6px;
+  background: transparent;
+  padding: 4px 12px;
+  color: var(--ms-color-primary);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.sp-line__retry:hover:not(:disabled) {
+  background: var(--el-fill-color-light);
+}
+
+.sp-line__retry:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.sp-line__retry:focus-visible {
+  outline: 2px solid var(--ms-color-primary);
+  outline-offset: 1px;
+}
+
 .sp-line__overview {
   display: flex;
   flex-direction: column;
@@ -444,12 +484,17 @@ watch(statusFilter, reloadList)
   font-size: 12px;
 }
 
+/* H4-3 long-table: bounded height + BOTH-axis overflow, so the table scrolls inside its OWN box and
+   the sticky thead below has an actual scroll range to stick within (an `overflow-x: auto`-only wrap
+   never scrolls vertically, so a sticky header inside it would never engage). */
 .sp-line__table-wrap {
-  overflow-x: auto;
+  max-height: 420px;
+  overflow: auto;
 }
 
 .sp-line__table {
   width: 100%;
+  min-width: 820px;
   border-collapse: collapse;
   font-size: 13px;
 }
@@ -463,6 +508,10 @@ watch(statusFilter, reloadList)
 }
 
 .sp-line__table th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--ms-bg-card);
   color: var(--ms-text-3);
   font-weight: var(--ms-font-weight-title);
 }
@@ -495,5 +544,13 @@ watch(statusFilter, reloadList)
 
 .sp-line__action:hover:not(:disabled) {
   background: var(--el-fill-color-light);
+}
+
+/* H4-3 keyboard: one focus-ring system across the stock-prep surface (same idiom as the H4-2
+   dashboard/stepper rings). Covers the generate button and the prep-status filter. */
+.sp-line__action:focus-visible,
+.sp-line__field select:focus-visible {
+  outline: 2px solid var(--ms-color-primary);
+  outline-offset: 1px;
 }
 </style>

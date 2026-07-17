@@ -21,14 +21,25 @@
     </p>
 
     <!-- Error / endpoint-not-ready (GET rejects or 404s): neutral, non-alarming, never the raw body. -->
-    <p
+    <div
       v-else-if="errored"
       class="sp-snap__state sp-snap__state--muted"
       data-testid="stock-prep-snapshot-error"
       role="status"
     >
-      {{ bi('同步后端尚未就绪,稍后再试。', 'Backend read not ready yet — try again later.') }}
-    </p>
+      <p class="sp-snap__state-msg">{{ bi('同步后端尚未就绪,稍后再试。', 'Backend read not ready yet — try again later.') }}</p>
+      <!-- H4-3 retry: re-runs the same readonly batch-list load(); idempotent, no new endpoint. -->
+      <button
+        type="button"
+        class="sp-snap__retry"
+        data-testid="stock-prep-snapshot-retry"
+        :disabled="loading"
+        :aria-label="bi('重试读取快照批次', 'Retry loading snapshot batches')"
+        @click="loadBatches"
+      >
+        {{ bi('重试', 'Retry') }}
+      </button>
+    </div>
 
     <!-- Empty: the project exists but has produced no immutable snapshot batches yet. -->
     <p
@@ -138,14 +149,25 @@
         </p>
 
         <!-- Diff error / endpoint-not-ready: neutral copy, never the raw body. -->
-        <p
+        <div
           v-else-if="diffErrored"
           class="sp-snap__state sp-snap__state--muted"
           data-testid="stock-prep-diff-error"
           role="status"
         >
-          {{ bi('同步后端尚未就绪,稍后再试。', 'Backend read not ready yet — try again later.') }}
-        </p>
+          <p class="sp-snap__state-msg">{{ bi('同步后端尚未就绪,稍后再试。', 'Backend read not ready yet — try again later.') }}</p>
+          <!-- H4-3 retry: re-fetches the diff summary for the SAME selected batch (no re-selection). -->
+          <button
+            type="button"
+            class="sp-snap__retry"
+            data-testid="stock-prep-diff-retry"
+            :disabled="diffLoading"
+            :aria-label="bi('重试读取差异', 'Retry loading the diff')"
+            @click="retryDiff"
+          >
+            {{ bi('重试', 'Retry') }}
+          </button>
+        </div>
 
         <!-- Diff data: values-free per-kind change counts + blocking-exception count + base handle. -->
         <div v-else-if="diff" class="sp-snap__diff" data-testid="stock-prep-snapshot-diff">
@@ -197,14 +219,25 @@
               >
                 {{ bi('正在加载逐行明细…', 'Loading row detail…') }}
               </p>
-              <p
+              <div
                 v-else-if="rowsErrored"
                 class="sp-snap__state sp-snap__state--muted"
                 data-testid="stock-prep-snapshot-diff-rows-error"
                 role="status"
               >
-                {{ bi('逐行明细暂不可用,稍后再试。', 'Row detail is not available yet — try again later.') }}
-              </p>
+                <p class="sp-snap__state-msg">{{ bi('逐行明细暂不可用,稍后再试。', 'Row detail is not available yet — try again later.') }}</p>
+                <!-- H4-3 retry: re-runs the existing loadRowDetail() for the same batch. -->
+                <button
+                  type="button"
+                  class="sp-snap__retry"
+                  data-testid="stock-prep-snapshot-diff-rows-retry"
+                  :disabled="rowsLoading"
+                  :aria-label="bi('重试读取逐行明细', 'Retry loading row detail')"
+                  @click="loadRowDetail"
+                >
+                  {{ bi('重试', 'Retry') }}
+                </button>
+              </div>
               <p
                 v-else-if="diffRows && diffRows.rowCount === 0"
                 class="sp-snap__state sp-snap__state--muted"
@@ -397,18 +430,13 @@ async function loadBatches(): Promise<void> {
   }
 }
 
-async function selectBatch(batch: StockPreparationSnapshotBatchSummary): Promise<void> {
-  // Defense-in-depth (Layer B). Layer A — the row button's `:disabled` binding — is the observable,
-  // tested guard, and today it is the ONLY caller, so this line has no reachable second path. It
-  // exists solely so any future caller also cannot issue a diff GET for an incomplete batch.
-  if (batch.incomplete) return
-  const batchId = batch.snapshotBatchId
+// Shared by selectBatch (first load) and retryDiff (H4-3 error retry) — both fetch the diff summary
+// for a batch already recorded in selectedBatchId, under the SAME monotonic diffSeq guard, so a
+// retry can never let a stale response (from a batch switch mid-retry) win.
+async function fetchDiffSummary(batchId: string): Promise<void> {
   const seq = (diffSeq += 1)
-  selectedBatchId.value = batchId
   diffLoading.value = true
   diffErrored.value = false
-  diff.value = null
-  resetRowDetail() // a new batch starts collapsed; its rows are re-fetched fresh when opened
   try {
     const summary = await getStockPreparationSnapshotDiff(batchId, props.scope)
     if (seq !== diffSeq || batchId !== selectedBatchId.value) return // superseded — batch A's late summary must not overwrite B
@@ -421,6 +449,28 @@ async function selectBatch(batch: StockPreparationSnapshotBatchSummary): Promise
   } finally {
     if (seq === diffSeq) diffLoading.value = false
   }
+}
+
+async function selectBatch(batch: StockPreparationSnapshotBatchSummary): Promise<void> {
+  // Defense-in-depth (Layer B). Layer A — the row button's `:disabled` binding — is the observable,
+  // tested guard, and today it is the ONLY caller, so this line has no reachable second path. It
+  // exists solely so any future caller also cannot issue a diff GET for an incomplete batch.
+  if (batch.incomplete) return
+  const batchId = batch.snapshotBatchId
+  selectedBatchId.value = batchId
+  diff.value = null
+  resetRowDetail() // a new batch starts collapsed; its rows are re-fetched fresh when opened
+  await fetchDiffSummary(batchId)
+}
+
+// H4-3 retry: re-fetch the diff summary for the CURRENTLY selected batch (selectedBatchId is already
+// set — selectBatch sets it before the first fetch, and it is never cleared on a failed fetch), without
+// re-running resetRowDetail — a plain retry of the summary should not discard an already-open row
+// detail from a PRIOR successful load for this same batch.
+async function retryDiff(): Promise<void> {
+  const batchId = selectedBatchId.value
+  if (!batchId) return
+  await fetchDiffSummary(batchId)
 }
 
 async function loadRowDetail(): Promise<void> {
@@ -477,6 +527,35 @@ watch(() => props.projectId, loadBatches)
   color: var(--ms-text-3);
 }
 
+.sp-snap__state-msg {
+  margin: 0 0 var(--ms-space-2);
+}
+
+.sp-snap__retry {
+  border: 1px solid var(--ms-border-light);
+  border-radius: 6px;
+  background: transparent;
+  padding: 4px 12px;
+  color: var(--ms-color-primary);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.sp-snap__retry:hover:not(:disabled) {
+  background: var(--el-fill-color-light);
+}
+
+.sp-snap__retry:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.sp-snap__retry:focus-visible {
+  outline: 2px solid var(--ms-color-primary);
+  outline-offset: 1px;
+}
+
 .sp-snap__overview {
   display: flex;
   flex-direction: column;
@@ -495,12 +574,17 @@ watch(() => props.projectId, loadBatches)
   font-weight: var(--ms-font-weight-title);
 }
 
+/* H4-3 long-table: bounded height + BOTH-axis overflow, so the table scrolls inside its OWN box and
+   the sticky thead below has an actual scroll range to stick within (an `overflow-x: auto`-only wrap
+   never scrolls vertically, so a sticky header inside it would never engage). */
 .sp-snap__table-wrap {
-  overflow-x: auto;
+  max-height: 420px;
+  overflow: auto;
 }
 
 .sp-snap__table {
   width: 100%;
+  min-width: 720px;
   border-collapse: collapse;
   font-size: 13px;
 }
@@ -514,6 +598,10 @@ watch(() => props.projectId, loadBatches)
 }
 
 .sp-snap__table th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--ms-bg-card);
   color: var(--ms-text-3);
   font-weight: var(--ms-font-weight-title);
 }
@@ -585,6 +673,13 @@ watch(() => props.projectId, loadBatches)
 
 .sp-snap__select:disabled:hover {
   background: transparent;
+}
+
+/* H4-3 keyboard: same ring idiom as the H4-2 dashboard/stepper rings and this file's own
+   rows-toggle ring below — one focus-ring system across the stock-prep surface. */
+.sp-snap__select:focus-visible {
+  outline: 2px solid var(--ms-color-primary);
+  outline-offset: 1px;
 }
 
 .sp-snap__diff-wrap {
@@ -677,12 +772,16 @@ watch(() => props.projectId, loadBatches)
   font-variant-numeric: tabular-nums;
 }
 
+/* H4-3 long-table: bounded height (smaller than the batches table above — this is the secondary,
+   nested drill-down) + BOTH-axis overflow, so its sticky thead has a real scroll range. */
 .sp-snap__rows-scroll {
-  overflow-x: auto;
+  max-height: 360px;
+  overflow: auto;
 }
 
 .sp-snap__rows-table {
   width: 100%;
+  min-width: 720px;
   border-collapse: collapse;
   font-size: 13px;
 }
@@ -696,6 +795,10 @@ watch(() => props.projectId, loadBatches)
 }
 
 .sp-snap__rows-table th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--ms-bg-card);
   color: var(--ms-text-2);
   font-weight: var(--ms-font-weight-title);
 }
