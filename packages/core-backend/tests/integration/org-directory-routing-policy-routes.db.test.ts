@@ -209,7 +209,7 @@ describeIfDatabase('Canonical Org MVP — B5-c routing-policy admin routes (real
     expect(audits.rows[0].n).toBe(0)
   })
 
-  it('E. preview validations: unsupported purpose 400; non-UUID 400; cross-org 404; inactive 409', async () => {
+  it('E. preview validations: unsupported purpose 400; non-UUID 400; cross-org 404; inactive candidate 409; broken CURRENT policy 409', async () => {
     const e1 = await request(adminApp).get(`${BASE}/permission_scope/preview`).query({ candidate: randomUUID() })
     expect(e1.status).toBe(400)
     const e2 = await request(adminApp).get(`${BASE}/approval_routing/preview`).query({ candidate: 'nope' })
@@ -223,6 +223,18 @@ describeIfDatabase('Canonical Org MVP — B5-c routing-policy admin routes (real
     cleanupIntegrationIds.push(inactive)
     const e4 = await request(adminApp).get(`${BASE}/approval_routing/preview`).query({ candidate: inactive })
     expect(e4.status).toBe(409)
+
+    // gate P3: a broken CURRENT policy (its canonical went non-active AFTER being set) must 409
+    // with the MISCONFIGURED code — the operator fixes the live policy before previewing a switch.
+    const local = await getOrCreateLocalIntegration(orgId)
+    const willBreak = await dingtalkIntegration(orgId, 'pbrk')
+    cleanupIntegrationIds.push(willBreak)
+    const set = await request(adminApp).patch(`${BASE}/approval_routing`).send({ canonicalIntegrationId: willBreak })
+    expect(set.status).toBe(200)
+    await query(`UPDATE directory_integrations SET status = 'disabled' WHERE id = $1`, [willBreak])
+    const e5 = await request(adminApp).get(`${BASE}/approval_routing/preview`).query({ candidate: local.id })
+    expect(e5.status).toBe(409)
+    expect((e5.body.error?.code ?? e5.body.code)).toBe('ROUTING_POLICY_MISCONFIGURED')
   })
 
   it('F. non-admin: 403 on list, set, and preview (real RBAC path)', async () => {
