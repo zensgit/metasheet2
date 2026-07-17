@@ -21,14 +21,26 @@
     </p>
 
     <!-- Summary error / endpoint-not-ready: neutral, never the raw body. -->
-    <p
+    <div
       v-else-if="errored"
       class="sp-unit__state sp-unit__state--muted"
       data-testid="stock-prep-unit-error"
       role="status"
     >
-      {{ bi('同步后端尚未就绪,稍后再试。', 'Backend read not ready yet — try again later.') }}
-    </p>
+      <p class="sp-unit__state-msg">{{ bi('同步后端尚未就绪,稍后再试。', 'Backend read not ready yet — try again later.') }}</p>
+      <!-- H4-3 retry: re-runs the same readonly loadAll(); idempotent, no new endpoint. -->
+      <button
+        ref="retryEl"
+        type="button"
+        class="sp-unit__retry"
+        data-testid="stock-prep-unit-retry"
+        :disabled="loading"
+        :aria-label="bi('重试读取单位换算确认', 'Retry loading unit-conversion confirmation')"
+        @click="onRetry"
+      >
+        {{ bi('重试', 'Retry') }}
+      </button>
+    </div>
 
     <div v-else-if="summary" class="sp-unit__overview" data-testid="stock-prep-unit-overview">
       <!-- Summary header card: the six values-free summary indicators. -->
@@ -113,14 +125,34 @@
       >
         {{ bi('该项目尚无完整快照批次,无法计算单位候选。', 'No complete snapshot batch for this project yet — unit candidates cannot be computed.') }}
       </p>
-      <p
+      <div
         v-else-if="candidatesErrored"
         class="sp-unit__state sp-unit__state--muted"
         data-testid="stock-prep-unit-candidates-error"
         role="status"
       >
-        {{ bi('候选读取尚未就绪,稍后再试。', 'Candidate read not ready yet — try again later.') }}
-      </p>
+        <p class="sp-unit__state-msg">{{ bi('候选读取尚未就绪,稍后再试。', 'Candidate read not ready yet — try again later.') }}</p>
+        <!-- H4-3 retry: re-runs the existing loadCandidates() for the same project/batch. Bound to its
+             OWN candidatesLoading flag (NOT the summary `loading`) — loadCandidates never touched
+             `loading`, so the NIT-1 `:disabled="loading"` binding never actually flipped true here and
+             the in-flight double-click guard it was meant to provide was dead on this entry. (The
+             keyboard focus-restore below does NOT depend on this: loadCandidates also resets
+             candidatesErrored to false before its GET, so the surrounding v-else-if unmounts this
+             button's whole parent for the retry's duration regardless of :disabled — that unmount is
+             what drops focus to <body>, verified by re-running the H4-2 candidates spec with the stale
+             `:disabled="loading"` binding restored, which still passed.) -->
+        <button
+          ref="candidatesRetryEl"
+          type="button"
+          class="sp-unit__retry"
+          data-testid="stock-prep-unit-candidates-retry"
+          :disabled="candidatesLoading"
+          :aria-label="bi('重试读取计算候选行', 'Retry loading computed candidate rows')"
+          @click="onCandidatesRetry"
+        >
+          {{ bi('重试', 'Retry') }}
+        </button>
+      </div>
       <div v-else-if="candidates" class="sp-unit__candidates">
         <div class="sp-unit__queue-head">
           <span class="sp-unit__queue-count" data-testid="stock-prep-unit-queue-count">
@@ -146,7 +178,16 @@
         <p v-if="candidates.rowCount === 0" class="sp-unit__state sp-unit__state--muted" data-testid="stock-prep-unit-empty">
           {{ bi('当前批次没有需要单位换算的上下文。', 'No unit-conversion contexts in this batch.') }}
         </p>
-        <div v-else class="sp-unit__table-wrap">
+        <!-- H4-3 keyboard: the Confirm button only renders (v-if, not just :disabled) for
+             candidate+hasCandidate rows — a filter/view with no such row leaves NO focusable content
+             in the table, so the wrap itself is ALSO a native scroll-region. -->
+        <div
+          v-else
+          class="sp-unit__table-wrap"
+          tabindex="0"
+          role="region"
+          :aria-label="bi('单位换算计算候选表格,可滚动', 'Unit-conversion candidate table, scrollable')"
+        >
           <table class="sp-unit__table" data-testid="stock-prep-unit-queue">
             <thead>
               <tr>
@@ -294,7 +335,7 @@
 // carry none), and error surfaces render only the clamped code / field NAME. Operator-entered rule
 // values flow only UPWARD through the closed rule allowlist; confirmedBy / confirmedAt never enter
 // any body.
-import { computed, onMounted, reactive, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, reactive, ref, watch, type Ref } from 'vue'
 import { useLocale } from '../../../composables/useLocale'
 import type { IntegrationScope } from '../../../services/integration/workbench'
 import { StockPreparationConfirmApiError } from '../../../services/integration/stockPreparation/confirmApi'
@@ -340,6 +381,10 @@ const errored = ref(false)
 const summary = ref<StockPreparationUnitConversionSummary | null>(null)
 const candidates = ref<StockPreparationUnitConversionCandidateList | null>(null)
 const candidatesErrored = ref(false)
+// Own loading flag for the candidates-only load (H4-3 keyboard): `loading` is owned by loadAll() and
+// never flips during a loadCandidates()-only retry, so the candidates-retry button's :disabled must
+// read THIS flag, not `loading`, or the button would never actually leave the tab order on retry.
+const candidatesLoading = ref(false)
 const noCompleteBatch = ref(false)
 const staleCandidates = ref(false)
 
@@ -379,6 +424,7 @@ function requestScope(): IntegrationScope & { projectId: string } {
 async function loadCandidates(): Promise<void> {
   candidatesErrored.value = false
   noCompleteBatch.value = false
+  candidatesLoading.value = true
   try {
     candidates.value = await listStockPreparationUnitConversionCandidates(requestScope())
   } catch (error) {
@@ -389,6 +435,8 @@ async function loadCandidates(): Promise<void> {
     } else {
       candidatesErrored.value = true
     }
+  } finally {
+    candidatesLoading.value = false
   }
 }
 
@@ -561,6 +609,32 @@ async function submitRule(): Promise<void> {
   }
 }
 
+// H4-3 keyboard — retry focus restore (same pattern as StockPreparationDashboardView.vue's H4-1
+// retry). Both retry buttons above carry `:disabled` while their own load is in flight, and the button UNMOUNTS — its error branch
+// yields to the loading branch, leaving the DOM entirely — the browser drops focus to <body>, stranding a
+// keyboard operator who just pressed Retry. After the load settles we put focus back on the button,
+// but ONLY when it is still rendered (the retry failed again, so there is something to press) AND
+// focus is still on <body> (our own unmount dropped it, and the operator has not Tabbed elsewhere
+// meanwhile) — the second condition is REQUIRED so this can never steal focus from wherever the
+// operator moved to.
+const retryEl = ref<HTMLButtonElement | null>(null)
+const candidatesRetryEl = ref<HTMLButtonElement | null>(null)
+
+async function restoreRetryFocus(el: Ref<HTMLButtonElement | null>): Promise<void> {
+  await nextTick()
+  if (document.activeElement === document.body) el.value?.focus()
+}
+
+async function onRetry(): Promise<void> {
+  await loadAll()
+  await restoreRetryFocus(retryEl)
+}
+
+async function onCandidatesRetry(): Promise<void> {
+  await loadCandidates()
+  await restoreRetryFocus(candidatesRetryEl)
+}
+
 onMounted(loadAll)
 watch(() => props.projectId, loadAll)
 </script>
@@ -591,6 +665,35 @@ watch(() => props.projectId, loadAll)
 
 .sp-unit__state--warn {
   color: var(--ms-color-danger, #c45656);
+}
+
+.sp-unit__state-msg {
+  margin: 0 0 var(--ms-space-2);
+}
+
+.sp-unit__retry {
+  border: 1px solid var(--ms-border-light);
+  border-radius: 6px;
+  background: transparent;
+  padding: 4px 12px;
+  color: var(--ms-color-primary);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.sp-unit__retry:hover:not(:disabled) {
+  background: var(--el-fill-color-light);
+}
+
+.sp-unit__retry:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.sp-unit__retry:focus-visible {
+  outline: 2px solid var(--ms-color-primary);
+  outline-offset: 1px;
 }
 
 .sp-unit__overview,
@@ -669,12 +772,22 @@ watch(() => props.projectId, loadAll)
   font-size: 13px;
 }
 
+/* H4-3 long-table: bounded height + BOTH-axis overflow, so the table scrolls inside its OWN box and
+   the sticky thead below has an actual scroll range to stick within (an `overflow-x: auto`-only wrap
+   never scrolls vertically, so a sticky header inside it would never engage). */
 .sp-unit__table-wrap {
-  overflow-x: auto;
+  max-height: 420px;
+  overflow: auto;
+}
+
+.sp-unit__table-wrap:focus-visible {
+  outline: 2px solid var(--ms-color-primary);
+  outline-offset: 1px;
 }
 
 .sp-unit__table {
   width: 100%;
+  min-width: 700px;
   border-collapse: collapse;
   font-size: 13px;
 }
@@ -688,6 +801,10 @@ watch(() => props.projectId, loadAll)
 }
 
 .sp-unit__table th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--ms-bg-card);
   color: var(--ms-text-3);
   font-weight: var(--ms-font-weight-title);
 }
@@ -723,6 +840,16 @@ watch(() => props.projectId, loadAll)
 
 .sp-unit__action:hover:not(:disabled) {
   background: var(--el-fill-color-light);
+}
+
+/* H4-3 keyboard: one focus-ring system across the stock-prep surface (same idiom as the H4-2
+   dashboard/stepper rings). Covers the confirm/retire/submit/stale-refresh buttons and every field
+   control (the stale-refresh button above already carries this class). */
+.sp-unit__action:focus-visible,
+.sp-unit__field input:focus-visible,
+.sp-unit__field select:focus-visible {
+  outline: 2px solid var(--ms-color-primary);
+  outline-offset: 1px;
 }
 
 .sp-unit__retire {

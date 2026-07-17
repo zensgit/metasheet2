@@ -21,14 +21,26 @@
     </p>
 
     <!-- Error / endpoint-not-ready (GET rejects or 404s): neutral, non-alarming, never the raw body. -->
-    <p
+    <div
       v-else-if="errored"
       class="sp-snap__state sp-snap__state--muted"
       data-testid="stock-prep-snapshot-error"
       role="status"
     >
-      {{ bi('同步后端尚未就绪,稍后再试。', 'Backend read not ready yet — try again later.') }}
-    </p>
+      <p class="sp-snap__state-msg">{{ bi('同步后端尚未就绪,稍后再试。', 'Backend read not ready yet — try again later.') }}</p>
+      <!-- H4-3 retry: re-runs the same readonly batch-list load(); idempotent, no new endpoint. -->
+      <button
+        ref="batchRetryEl"
+        type="button"
+        class="sp-snap__retry"
+        data-testid="stock-prep-snapshot-retry"
+        :disabled="loading"
+        :aria-label="bi('重试读取快照批次', 'Retry loading snapshot batches')"
+        @click="onBatchRetry"
+      >
+        {{ bi('重试', 'Retry') }}
+      </button>
+    </div>
 
     <!-- Empty: the project exists but has produced no immutable snapshot batches yet. -->
     <p
@@ -47,7 +59,16 @@
         </span>
       </header>
 
-      <div class="sp-snap__table-wrap">
+      <!-- H4-3 keyboard: this wrap is the scroll container (both axes). Most rows carry a "View diff"
+           button, but an incomplete batch's entry is DISABLED (removed from tab order) — if every
+           batch happened to be incomplete the row content alone would give a keyboard operator no way
+           to reach this scroll area, so the wrap itself is ALSO a native scroll-region. -->
+      <div
+        class="sp-snap__table-wrap"
+        tabindex="0"
+        role="region"
+        :aria-label="bi('快照批次表格,可滚动', 'Snapshot batches table, scrollable')"
+      >
         <table class="sp-snap__table">
           <thead>
             <tr>
@@ -138,14 +159,26 @@
         </p>
 
         <!-- Diff error / endpoint-not-ready: neutral copy, never the raw body. -->
-        <p
+        <div
           v-else-if="diffErrored"
           class="sp-snap__state sp-snap__state--muted"
           data-testid="stock-prep-diff-error"
           role="status"
         >
-          {{ bi('同步后端尚未就绪,稍后再试。', 'Backend read not ready yet — try again later.') }}
-        </p>
+          <p class="sp-snap__state-msg">{{ bi('同步后端尚未就绪,稍后再试。', 'Backend read not ready yet — try again later.') }}</p>
+          <!-- H4-3 retry: re-fetches the diff summary for the SAME selected batch (no re-selection). -->
+          <button
+            ref="diffRetryEl"
+            type="button"
+            class="sp-snap__retry"
+            data-testid="stock-prep-diff-retry"
+            :disabled="diffLoading"
+            :aria-label="bi('重试读取差异', 'Retry loading the diff')"
+            @click="onDiffRetry"
+          >
+            {{ bi('重试', 'Retry') }}
+          </button>
+        </div>
 
         <!-- Diff data: values-free per-kind change counts + blocking-exception count + base handle. -->
         <div v-else-if="diff" class="sp-snap__diff" data-testid="stock-prep-snapshot-diff">
@@ -197,14 +230,26 @@
               >
                 {{ bi('正在加载逐行明细…', 'Loading row detail…') }}
               </p>
-              <p
+              <div
                 v-else-if="rowsErrored"
                 class="sp-snap__state sp-snap__state--muted"
                 data-testid="stock-prep-snapshot-diff-rows-error"
                 role="status"
               >
-                {{ bi('逐行明细暂不可用,稍后再试。', 'Row detail is not available yet — try again later.') }}
-              </p>
+                <p class="sp-snap__state-msg">{{ bi('逐行明细暂不可用,稍后再试。', 'Row detail is not available yet — try again later.') }}</p>
+                <!-- H4-3 retry: re-runs the existing loadRowDetail() for the same batch. -->
+                <button
+                  ref="rowsRetryEl"
+                  type="button"
+                  class="sp-snap__retry"
+                  data-testid="stock-prep-snapshot-diff-rows-retry"
+                  :disabled="rowsLoading"
+                  :aria-label="bi('重试读取逐行明细', 'Retry loading row detail')"
+                  @click="onRowsRetry"
+                >
+                  {{ bi('重试', 'Retry') }}
+                </button>
+              </div>
               <p
                 v-else-if="diffRows && diffRows.rowCount === 0"
                 class="sp-snap__state sp-snap__state--muted"
@@ -217,7 +262,15 @@
                   {{ bi('差异行', 'Diff rows') }}: {{ diffRows.rowCount }} ·
                   {{ bi('待处理', 'Held') }}: {{ diffRows.heldRowCount }}
                 </p>
-                <div class="sp-snap__rows-scroll">
+                <!-- H4-3 keyboard: this drill-down table has NO focusable content in any row (plain
+                     text cells only) — without this, a keyboard operator would have no way to reach
+                     its horizontal scroll at all, so the wrap itself is a native scroll-region. -->
+                <div
+                  class="sp-snap__rows-scroll"
+                  tabindex="0"
+                  role="region"
+                  :aria-label="bi('逐行差异明细表格,可滚动', 'Row-detail diff table, scrollable')"
+                >
                   <table class="sp-snap__rows-table" data-testid="stock-prep-snapshot-diff-rows-table">
                     <thead>
                       <tr>
@@ -270,7 +323,7 @@
 // a visible column, nor any customer business value — no drawing numbers, material codes,
 // quantities, versions of parts, path keys, or project names — because the summary shapes carry none
 // and the template reads a fixed whitelist of fields rather than stringifying the row.
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, ref, watch, type Ref } from 'vue'
 import { useLocale } from '../../../composables/useLocale'
 import type { IntegrationScope } from '../../../services/integration/workbench'
 import {
@@ -397,18 +450,13 @@ async function loadBatches(): Promise<void> {
   }
 }
 
-async function selectBatch(batch: StockPreparationSnapshotBatchSummary): Promise<void> {
-  // Defense-in-depth (Layer B). Layer A — the row button's `:disabled` binding — is the observable,
-  // tested guard, and today it is the ONLY caller, so this line has no reachable second path. It
-  // exists solely so any future caller also cannot issue a diff GET for an incomplete batch.
-  if (batch.incomplete) return
-  const batchId = batch.snapshotBatchId
+// Shared by selectBatch (first load) and retryDiff (H4-3 error retry) — both fetch the diff summary
+// for a batch already recorded in selectedBatchId, under the SAME monotonic diffSeq guard, so a
+// retry can never let a stale response (from a batch switch mid-retry) win.
+async function fetchDiffSummary(batchId: string): Promise<void> {
   const seq = (diffSeq += 1)
-  selectedBatchId.value = batchId
   diffLoading.value = true
   diffErrored.value = false
-  diff.value = null
-  resetRowDetail() // a new batch starts collapsed; its rows are re-fetched fresh when opened
   try {
     const summary = await getStockPreparationSnapshotDiff(batchId, props.scope)
     if (seq !== diffSeq || batchId !== selectedBatchId.value) return // superseded — batch A's late summary must not overwrite B
@@ -421,6 +469,28 @@ async function selectBatch(batch: StockPreparationSnapshotBatchSummary): Promise
   } finally {
     if (seq === diffSeq) diffLoading.value = false
   }
+}
+
+async function selectBatch(batch: StockPreparationSnapshotBatchSummary): Promise<void> {
+  // Defense-in-depth (Layer B). Layer A — the row button's `:disabled` binding — is the observable,
+  // tested guard, and today it is the ONLY caller, so this line has no reachable second path. It
+  // exists solely so any future caller also cannot issue a diff GET for an incomplete batch.
+  if (batch.incomplete) return
+  const batchId = batch.snapshotBatchId
+  selectedBatchId.value = batchId
+  diff.value = null
+  resetRowDetail() // a new batch starts collapsed; its rows are re-fetched fresh when opened
+  await fetchDiffSummary(batchId)
+}
+
+// H4-3 retry: re-fetch the diff summary for the CURRENTLY selected batch (selectedBatchId is already
+// set — selectBatch sets it before the first fetch, and it is never cleared on a failed fetch), without
+// re-running resetRowDetail — a plain retry of the summary should not discard an already-open row
+// detail from a PRIOR successful load for this same batch.
+async function retryDiff(): Promise<void> {
+  const batchId = selectedBatchId.value
+  if (!batchId) return
+  await fetchDiffSummary(batchId)
 }
 
 async function loadRowDetail(): Promise<void> {
@@ -453,6 +523,38 @@ function toggleRowDetail(): void {
   if (rowDetailOpen.value && !diffRows.value && !rowsLoading.value) void loadRowDetail()
 }
 
+// H4-3 keyboard — retry focus restore (same pattern as StockPreparationDashboardView.vue's H4-1
+// retry). Each of the three retry buttons above carries `:disabled` while its own load is in
+// flight, and the button UNMOUNTS (its error branch yields to the loading branch, leaving the DOM) — the browser drops focus to
+// <body>, stranding a keyboard operator who just pressed Retry. After the load settles we put focus
+// back on the button, but ONLY when it is still rendered (the retry failed again, so there is
+// something to press) AND focus is still on <body> (our own unmount dropped it, and the operator
+// has not Tabbed elsewhere meanwhile) — the second condition is REQUIRED so this can never steal
+// focus from wherever the operator moved to.
+const batchRetryEl = ref<HTMLButtonElement | null>(null)
+const diffRetryEl = ref<HTMLButtonElement | null>(null)
+const rowsRetryEl = ref<HTMLButtonElement | null>(null)
+
+async function restoreRetryFocus(el: Ref<HTMLButtonElement | null>): Promise<void> {
+  await nextTick()
+  if (document.activeElement === document.body) el.value?.focus()
+}
+
+async function onBatchRetry(): Promise<void> {
+  await loadBatches()
+  await restoreRetryFocus(batchRetryEl)
+}
+
+async function onDiffRetry(): Promise<void> {
+  await retryDiff()
+  await restoreRetryFocus(diffRetryEl)
+}
+
+async function onRowsRetry(): Promise<void> {
+  await loadRowDetail()
+  await restoreRetryFocus(rowsRetryEl)
+}
+
 onMounted(loadBatches)
 watch(() => props.projectId, loadBatches)
 </script>
@@ -477,6 +579,35 @@ watch(() => props.projectId, loadBatches)
   color: var(--ms-text-3);
 }
 
+.sp-snap__state-msg {
+  margin: 0 0 var(--ms-space-2);
+}
+
+.sp-snap__retry {
+  border: 1px solid var(--ms-border-light);
+  border-radius: 6px;
+  background: transparent;
+  padding: 4px 12px;
+  color: var(--ms-color-primary);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.sp-snap__retry:hover:not(:disabled) {
+  background: var(--el-fill-color-light);
+}
+
+.sp-snap__retry:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.sp-snap__retry:focus-visible {
+  outline: 2px solid var(--ms-color-primary);
+  outline-offset: 1px;
+}
+
 .sp-snap__overview {
   display: flex;
   flex-direction: column;
@@ -495,12 +626,22 @@ watch(() => props.projectId, loadBatches)
   font-weight: var(--ms-font-weight-title);
 }
 
+/* H4-3 long-table: bounded height + BOTH-axis overflow, so the table scrolls inside its OWN box and
+   the sticky thead below has an actual scroll range to stick within (an `overflow-x: auto`-only wrap
+   never scrolls vertically, so a sticky header inside it would never engage). */
 .sp-snap__table-wrap {
-  overflow-x: auto;
+  max-height: 420px;
+  overflow: auto;
+}
+
+.sp-snap__table-wrap:focus-visible {
+  outline: 2px solid var(--ms-color-primary);
+  outline-offset: 1px;
 }
 
 .sp-snap__table {
   width: 100%;
+  min-width: 720px;
   border-collapse: collapse;
   font-size: 13px;
 }
@@ -514,6 +655,10 @@ watch(() => props.projectId, loadBatches)
 }
 
 .sp-snap__table th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--ms-bg-card);
   color: var(--ms-text-3);
   font-weight: var(--ms-font-weight-title);
 }
@@ -585,6 +730,13 @@ watch(() => props.projectId, loadBatches)
 
 .sp-snap__select:disabled:hover {
   background: transparent;
+}
+
+/* H4-3 keyboard: same ring idiom as the H4-2 dashboard/stepper rings and this file's own
+   rows-toggle ring below — one focus-ring system across the stock-prep surface. */
+.sp-snap__select:focus-visible {
+  outline: 2px solid var(--ms-color-primary);
+  outline-offset: 1px;
 }
 
 .sp-snap__diff-wrap {
@@ -677,12 +829,21 @@ watch(() => props.projectId, loadBatches)
   font-variant-numeric: tabular-nums;
 }
 
+/* H4-3 long-table: bounded height (smaller than the batches table above — this is the secondary,
+   nested drill-down) + BOTH-axis overflow, so its sticky thead has a real scroll range. */
 .sp-snap__rows-scroll {
-  overflow-x: auto;
+  max-height: 360px;
+  overflow: auto;
+}
+
+.sp-snap__rows-scroll:focus-visible {
+  outline: 2px solid var(--ms-color-primary);
+  outline-offset: 1px;
 }
 
 .sp-snap__rows-table {
   width: 100%;
+  min-width: 720px;
   border-collapse: collapse;
   font-size: 13px;
 }
@@ -696,6 +857,10 @@ watch(() => props.projectId, loadBatches)
 }
 
 .sp-snap__rows-table th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--ms-bg-card);
   color: var(--ms-text-2);
   font-weight: var(--ms-font-weight-title);
 }

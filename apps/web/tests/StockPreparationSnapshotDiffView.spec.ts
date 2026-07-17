@@ -656,4 +656,161 @@ describe('StockPreparationSnapshotDiffView (readonly, values-free)', () => {
     expect(root.textContent).toContain('base-alpha-fresh')
     expect(root.textContent).not.toContain('base-alpha-stale')
   })
+
+  // ── H4-3 (responsive + long-table usability): each of the three error surfaces (batch list, diff
+  // summary, row detail) offers a Retry that re-runs the SAME readonly load — same idiom as the H4-1
+  // dashboard retry. ──────────────────────────────────────────────────────────────────────────────
+
+  it('H4-3: the batch-list error state offers a Retry that re-runs loadBatches() and recovers', async () => {
+    h.listBatches.mockRejectedValue(new Error('boom'))
+    const root = mountView()
+    await flushUi()
+    const retry = root.querySelector('[data-testid="stock-prep-snapshot-retry"]') as HTMLButtonElement | null
+    expect(retry).not.toBeNull()
+    expect(retry?.getAttribute('aria-label')).toBe('重试读取快照批次')
+
+    h.listBatches.mockResolvedValue(batchListWithPlantedExtras()) // the retry succeeds
+    const callsBefore = h.listBatches.mock.calls.length
+    retry!.click()
+    await flushUi()
+    expect(h.listBatches.mock.calls.length).toBeGreaterThan(callsBefore)
+    expect(root.querySelector('[data-testid="stock-prep-snapshot-error"]')).toBeNull()
+    expect(root.querySelector('[data-testid="stock-prep-snapshot-overview"]')).not.toBeNull()
+  })
+
+  it('H4-3: the diff-summary error state offers a Retry that re-fetches for the SAME selected batch', async () => {
+    h.listBatches.mockResolvedValue(batchListWithPlantedExtras())
+    h.getDiff.mockRejectedValue(new Error('boom'))
+    const root = mountView()
+    await flushUi()
+    ;(root.querySelector('[data-testid="stock-prep-snapshot-batch-select"]') as HTMLButtonElement).click()
+    await flushUi()
+    const retry = root.querySelector('[data-testid="stock-prep-diff-retry"]') as HTMLButtonElement | null
+    expect(retry).not.toBeNull()
+    expect(retry?.getAttribute('aria-label')).toBe('重试读取差异')
+
+    h.getDiff.mockResolvedValue(diffSummary()) // the retry succeeds
+    const callsBefore = h.getDiff.mock.calls.length
+    retry!.click()
+    await flushUi()
+    expect(h.getDiff.mock.calls.length).toBeGreaterThan(callsBefore)
+    expect(h.getDiff.mock.calls.at(-1)?.[0]).toBe('batch-alpha') // same batch, no re-selection
+    expect(root.querySelector('[data-testid="stock-prep-diff-error"]')).toBeNull()
+    expect(root.querySelector('[data-testid="stock-prep-snapshot-diff"]')).not.toBeNull()
+  })
+
+  it('H4-3: the row-detail error state offers a Retry that re-runs loadRowDetail() and recovers', async () => {
+    h.listRows.mockRejectedValue(new Error('boom'))
+    const root = await mountWithDiffShown()
+    await openRowDetail(root)
+    const retry = root.querySelector('[data-testid="stock-prep-snapshot-diff-rows-retry"]') as HTMLButtonElement | null
+    expect(retry).not.toBeNull()
+    expect(retry?.getAttribute('aria-label')).toBe('重试读取逐行明细')
+
+    h.listRows.mockResolvedValue(diffRowsResult()) // the retry succeeds
+    const callsBefore = h.listRows.mock.calls.length
+    retry!.click()
+    await flushUi()
+    expect(h.listRows.mock.calls.length).toBeGreaterThan(callsBefore)
+    expect(root.querySelector('[data-testid="stock-prep-snapshot-diff-rows-error"]')).toBeNull()
+    expect(root.querySelector('[data-testid="stock-prep-snapshot-diff-rows-table"]')).not.toBeNull()
+  })
+
+  // ── H4-2 keyboard (H4-1 pattern, StockPreparationDashboardView.vue): while a load is in flight the
+  // retry button UNMOUNTS (its error branch yields to the loading branch), so the browser drops focus to
+  // <body>; on a re-failed retry the button re-mounts and we restore focus — a keyboard operator who
+  // pressed Retry must not be stranded at <body>, but focus is never stolen if they Tabbed away. ──────
+
+  it('H4-2: a failed batch-list retry returns focus to the retry button (our own unmount dropped it to body)', async () => {
+    h.listBatches.mockRejectedValue(new Error('boom'))
+    const root = mountView()
+    await flushUi()
+    const retry = root.querySelector('[data-testid="stock-prep-snapshot-retry"]') as HTMLButtonElement
+    retry.focus()
+    expect(document.activeElement).toBe(retry)
+    retry.click() // still failing → the button unmounts during the load, dropping focus to <body>, then re-mounts
+    await flushUi()
+    expect(root.querySelector('[data-testid="stock-prep-snapshot-retry"]')).not.toBeNull()
+    expect(document.activeElement).toBe(root.querySelector('[data-testid="stock-prep-snapshot-retry"]'))
+  })
+
+  // Review P3-1: the reverse no-steal guard (`document.activeElement === document.body`) is regression-
+  // covered in a SECOND view here (not only ProjectWorkspace) since the code is byte-identical across all
+  // six. If the operator Tabs away while the retry is in flight, the re-mounted button must NOT steal focus.
+  it('H4-2: a batch-list retry does NOT steal focus if the operator Tabbed elsewhere while it was in flight', async () => {
+    let releaseRetry: (v: unknown) => void = () => {}
+    h.listBatches.mockRejectedValueOnce(new Error('503'))
+    const root = mountView()
+    await flushUi()
+    const retry = root.querySelector('[data-testid="stock-prep-snapshot-retry"]') as HTMLButtonElement
+    retry.focus()
+    // Hold the retry's load in flight, and fail it again so the retry button is still rendered on settle.
+    h.listBatches.mockImplementation(() => new Promise((_res, rej) => { releaseRetry = () => rej(new Error('503')) }))
+    retry.click()
+    await flushUi()
+    // The operator Tabs away to another control WHILE the retry is still loading.
+    const elsewhere = document.createElement('button')
+    document.body.appendChild(elsewhere)
+    elsewhere.focus()
+    expect(document.activeElement).toBe(elsewhere)
+    releaseRetry(null)
+    await flushUi()
+    // Focus stays where the operator put it — restoring it here would be focus theft.
+    expect(document.activeElement).toBe(elsewhere)
+    elsewhere.remove()
+  })
+
+  it('H4-2: a failed diff-summary retry returns focus to the retry button', async () => {
+    h.listBatches.mockResolvedValue(batchListWithPlantedExtras())
+    h.getDiff.mockRejectedValue(new Error('boom'))
+    const root = mountView()
+    await flushUi()
+    ;(root.querySelector('[data-testid="stock-prep-snapshot-batch-select"]') as HTMLButtonElement).click()
+    await flushUi()
+    const retry = root.querySelector('[data-testid="stock-prep-diff-retry"]') as HTMLButtonElement
+    retry.focus()
+    expect(document.activeElement).toBe(retry)
+    retry.click() // still failing → the button unmounts during the load, dropping focus to <body>, then re-mounts
+    await flushUi()
+    expect(root.querySelector('[data-testid="stock-prep-diff-retry"]')).not.toBeNull()
+    expect(document.activeElement).toBe(root.querySelector('[data-testid="stock-prep-diff-retry"]'))
+  })
+
+  it('H4-2: a failed row-detail retry returns focus to the retry button', async () => {
+    h.listRows.mockRejectedValue(new Error('boom'))
+    const root = await mountWithDiffShown()
+    await openRowDetail(root)
+    const retry = root.querySelector('[data-testid="stock-prep-snapshot-diff-rows-retry"]') as HTMLButtonElement
+    retry.focus()
+    expect(document.activeElement).toBe(retry)
+    retry.click() // still failing → the button unmounts during the load, dropping focus to <body>, then re-mounts
+    await flushUi()
+    expect(root.querySelector('[data-testid="stock-prep-snapshot-diff-rows-retry"]')).not.toBeNull()
+    expect(document.activeElement).toBe(root.querySelector('[data-testid="stock-prep-snapshot-diff-rows-retry"]'))
+  })
+
+  // H4-3 keyboard: BOTH scroll wraps in this view are jsdom-testable, load-bearing scroll regions —
+  // attribute presence is what a future refactor could silently delete (unlike the CSS focus ring,
+  // which jsdom cannot compute and is verified only via the browser harness in the PR description).
+  it('H4-3: the batch-list wrap is a keyboard-reachable scroll region (tabindex/role/aria-label)', async () => {
+    h.listBatches.mockResolvedValue(batchListWithPlantedExtras())
+    const root = mountView()
+    await flushUi()
+    const wrap = root.querySelector('.sp-snap__table-wrap') as HTMLElement
+    expect(wrap).not.toBeNull()
+    expect(wrap.getAttribute('tabindex')).toBe('0')
+    expect(wrap.getAttribute('role')).toBe('region')
+    expect(wrap.getAttribute('aria-label')).toBeTruthy()
+  })
+
+  it('H4-3: the row-detail wrap is a keyboard-reachable scroll region (tabindex/role/aria-label)', async () => {
+    h.listRows.mockResolvedValue(diffRowsResult())
+    const root = await mountWithDiffShown()
+    await openRowDetail(root)
+    const wrap = root.querySelector('.sp-snap__rows-scroll') as HTMLElement
+    expect(wrap).not.toBeNull()
+    expect(wrap.getAttribute('tabindex')).toBe('0')
+    expect(wrap.getAttribute('role')).toBe('region')
+    expect(wrap.getAttribute('aria-label')).toBeTruthy()
+  })
 })

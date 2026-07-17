@@ -202,4 +202,86 @@ describe('StockPreparationProjectWorkspaceView (readonly, values-free)', () => {
     expect(errorEl).not.toBeNull()
     expect(errorEl.textContent).toMatch(/not ready/i)
   })
+
+  // H4-3 (responsive + long-table usability): the error state offers a Retry that re-runs the same
+  // readonly load() and recovers — same idiom as the H4-1 dashboard retry.
+  it('H4-3: the error state offers a Retry that re-runs load() and recovers', async () => {
+    h.getOverview.mockRejectedValue(new Error('boom'))
+    const root = mountView()
+    await flushUi()
+    const retry = root.querySelector('[data-testid="stock-prep-project-retry"]') as HTMLButtonElement | null
+    expect(retry).not.toBeNull()
+    expect(retry?.getAttribute('aria-label')).toBe('重试读取项目工作台')
+
+    h.getOverview.mockResolvedValue(overviewWithPlantedExtras()) // the retry succeeds
+    const callsBefore = h.getOverview.mock.calls.length
+    retry!.click()
+    await flushUi()
+    expect(h.getOverview.mock.calls.length).toBeGreaterThan(callsBefore)
+    expect(root.querySelector('[data-testid="stock-prep-project-error"]')).toBeNull()
+    expect(root.querySelector('[data-testid="stock-prep-project-overview"]')).not.toBeNull()
+  })
+
+  it('H4-3: the retry button is bilingual + carries an accessible name (aria-label)', async () => {
+    h.locale = 'en'
+    h.getOverview.mockRejectedValue(new Error('boom'))
+    const root = mountView()
+    await flushUi()
+    const retry = root.querySelector('[data-testid="stock-prep-project-retry"]') as HTMLButtonElement
+    expect(retry.textContent?.trim()).toBe('Retry')
+    expect(retry.getAttribute('aria-label')).toBe('Retry loading the project workspace')
+  })
+
+  // H4-3 keyboard: the table wrap is a jsdom-testable, load-bearing scroll region — attribute
+  // presence is what a future refactor could silently delete (unlike the CSS focus ring, which
+  // jsdom cannot compute and is verified only via the browser harness in the PR description).
+  it('H4-3: the table wrap is a keyboard-reachable scroll region (tabindex/role/aria-label)', async () => {
+    h.getOverview.mockResolvedValue(overviewWithPlantedExtras())
+    const root = mountView()
+    await flushUi()
+    const wrap = root.querySelector('.sp-project__table-wrap') as HTMLElement
+    expect(wrap).not.toBeNull()
+    expect(wrap.getAttribute('tabindex')).toBe('0')
+    expect(wrap.getAttribute('role')).toBe('region')
+    expect(wrap.getAttribute('aria-label')).toBeTruthy()
+  })
+
+  // H4-2 keyboard (H4-1 pattern, StockPreparationDashboardView.vue): the error branch unmounts
+  // the retry button while the load is in flight, so the browser drops focus to <body>. A keyboard
+  // operator who pressed Retry must not be stranded there when the failed state re-renders.
+  it('H4-2: a failed retry returns focus to the retry button (our own unmount dropped it to body)', async () => {
+    h.getOverview.mockRejectedValue(new Error('503'))
+    const root = mountView()
+    await flushUi()
+    const retry = root.querySelector('[data-testid="stock-prep-project-retry"]') as HTMLButtonElement
+    retry.focus()
+    expect(document.activeElement).toBe(retry)
+    retry.click() // still failing → the button unmounts during the load, dropping focus to <body>, then re-mounts
+    await flushUi()
+    expect(root.querySelector('[data-testid="stock-prep-project-retry"]')).not.toBeNull()
+    expect(document.activeElement).toBe(root.querySelector('[data-testid="stock-prep-project-retry"]'))
+  })
+
+  it('H4-2: a retry does NOT steal focus back if the operator Tabbed elsewhere while it was in flight', async () => {
+    let releaseRetry: (v: unknown) => void = () => {}
+    h.getOverview.mockRejectedValueOnce(new Error('503'))
+    const root = mountView()
+    await flushUi()
+    const retry = root.querySelector('[data-testid="stock-prep-project-retry"]') as HTMLButtonElement
+    retry.focus()
+    // Hold the retry's load in flight, and fail it again so the retry button is still rendered on settle.
+    h.getOverview.mockImplementation(() => new Promise((_res, rej) => { releaseRetry = () => rej(new Error('503')) }))
+    retry.click()
+    await flushUi()
+    // The operator Tabs away to another control WHILE the retry is still loading.
+    const elsewhere = document.createElement('button')
+    document.body.appendChild(elsewhere)
+    elsewhere.focus()
+    expect(document.activeElement).toBe(elsewhere)
+    releaseRetry(null)
+    await flushUi()
+    // Focus stays where the operator put it — restoring it here would be focus theft.
+    expect(document.activeElement).toBe(elsewhere)
+    elsewhere.remove()
+  })
 })
