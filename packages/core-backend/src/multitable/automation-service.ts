@@ -32,6 +32,12 @@ import {
   type InboundWebhookRejectReason,
 } from './automation-inbound-webhook'
 import { isValidIanaTimeZone } from './automation-timezone'
+import { isDurableDeliveryEnabled } from './automation-durable-delivery'
+import { claimEventFiresLease, markEventFiresDone } from './automation-event-fires-lease'
+
+/** S6 event-delivery lease window: long enough to cover a normal executeRule, short enough that a crashed
+ *  worker's row is reclaimable promptly. Only consulted on the durable-delivery (flag ON) lease path. */
+const EVENT_DELIVERY_LEASE_MS = 60_000
 import { ensureRecordNotLocked } from './record-lock'
 import { publishMultitableSheetRealtime } from './realtime-publish'
 import { extractSelectOptions, normalizeJson } from './field-codecs'
@@ -1560,6 +1566,37 @@ export class AutomationService {
   }
 
   /**
+   * S6 (durable-delivery flag ON only): claim the (rule, dedup) with a reclaimable LEASE instead of the
+   * permanent tombstone, so a crash BETWEEN the claim and `executeRule` finishing leaves the row RECLAIMABLE
+   * rather than dropping the work forever (design lock §Layer-1 window-2). Returns `{ fence }` when THIS caller
+   * owns the claim — a fresh row (fence 1) OR a reclaimed EXPIRED lease (fence bumped) — or `'skip'` when the
+   * row is already `done` (delivered) or held by a LIVE lease (another worker owns it; do NOT double-run).
+   * The claimer must `markEventDeliveryDone(ruleId, dedupKey, fence)` after `executeRule` succeeds; a zombie
+   * whose fence is stale loses the fence-CAS there (single-writer persisted state). Flag OFF still uses the
+   * legacy tombstone `claimEventDelivery` above — byte-neutral: the #4413 migration's `status DEFAULT 'done'`
+   * makes every legacy tombstone row read as delivered, so the two paths interoperate on the shared table.
+   */
+  /**
+   * Run `run` under the event-dedup ledger, choosing the S6 lease flow when durable delivery is enabled and
+   * the legacy tombstone flow otherwise. Both return early (do nothing) when the delivery is already claimed
+   * by someone else / already done. The lease flow marks the row `done` (fence-CAS) only AFTER `run` succeeds;
+   * if `run` throws, the lease is left to expire so the next scan reclaims it (window-2 fix). Flag OFF is
+   * byte-neutral (legacy at-most-once tombstone). Lease semantics live in automation-event-fires-lease.ts.
+   */
+  private async runWithEventDedup(ruleId: string, dedupKey: string, run: () => Promise<unknown>, env: NodeJS.ProcessEnv = process.env): Promise<void> {
+    if (!isDurableDeliveryEnabled(env)) {
+      const claimed = await this.claimEventDelivery(ruleId, dedupKey)
+      if (!claimed) return
+      await run()
+      return
+    }
+    const lease = await claimEventFiresLease(this.db, ruleId, dedupKey, EVENT_DELIVERY_LEASE_MS)
+    if (lease === 'skip') return
+    await run()
+    await markEventFiresDone(this.db, ruleId, dedupKey, lease.fence)
+  }
+
+  /**
    * Date-reminder scan (`schedule.date_field`). For each record in the rule's sheet whose date field yields a
    * DUE occurrence, claim it in the idempotency ledger and fire the rule once with the record as context.
    *
@@ -2067,10 +2104,10 @@ export class AutomationService {
 
       try {
         if (dedupKey) {
-          const claimed = await this.claimEventDelivery(rule.id, dedupKey)
-          if (!claimed) continue
+          await this.runWithEventDedup(rule.id, dedupKey, () => this.executeRule(execRule, payload))
+        } else {
+          await this.executeRule(execRule, payload)
         }
-        await this.executeRule(execRule, payload)
       } catch (err) {
         logger.error(
           `Automation rule ${rule.id} action failed`,
@@ -2552,8 +2589,6 @@ export class AutomationService {
         continue
       }
       try {
-        const claimed = await this.claimEventDelivery(rule.id, `approval.completed:${event.eventId}`)
-        if (!claimed) continue
         // Q3 record-less payload: the approval event rides along as the trigger event; actions are
         // save-restricted to non-record-targeting side effects, so the empty record context is never read.
         const payload: AutomationEventPayload & Record<string, unknown> = {
@@ -2569,7 +2604,7 @@ export class AutomationService {
           transition: event.transition,
           requester: event.requester,
         }
-        await this.executeRule(toExecutorRule(rule), payload)
+        await this.runWithEventDedup(rule.id, `approval.completed:${event.eventId}`, () => this.executeRule(toExecutorRule(rule), payload))
       } catch (err) {
         logger.error(`approval.completed rule ${rule.id} failed`, err instanceof Error ? err : undefined)
       }
@@ -2612,8 +2647,6 @@ export class AutomationService {
         continue
       }
       try {
-        const claimed = await this.claimEventDelivery(rule.id, `approval.task_created:${event.eventId}`)
-        if (!claimed) continue
         const payload: AutomationEventPayload & Record<string, unknown> = {
           sheetId: rule.sheet_id,
           recordId: '',
@@ -2627,7 +2660,7 @@ export class AutomationService {
           task: event.task,
           requester: event.requester,
         }
-        await this.executeRule(toExecutorRule(rule), payload)
+        await this.runWithEventDedup(rule.id, `approval.task_created:${event.eventId}`, () => this.executeRule(toExecutorRule(rule), payload))
       } catch (err) {
         logger.error(`approval.task_created rule ${rule.id} failed`, err instanceof Error ? err : undefined)
       }
