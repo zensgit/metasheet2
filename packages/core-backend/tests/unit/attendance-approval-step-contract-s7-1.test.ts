@@ -245,9 +245,9 @@ describe('S7-1 assertDynamicFlowStepsRuntimeAvailable — §4.1 runtime fail-clo
 })
 
 describe('S7-1 buildAttendanceApprovalAssignments — dynamic step never reaches the admin fallback', () => {
-  it('a dynamic current step throws APPROVAL_STEP_KIND_UNAVAILABLE (defense-in-depth)', () => {
+  it('a dynamic current step throws APPROVAL_STEP_DYNAMIC_UNGATED (defense-in-depth, distinct from the gates)', () => {
     expect(httpCode(() => buildAttendanceApprovalAssignments([{ kind: 'direct_manager' }], 0)))
-      .toEqual({ status: 422, code: 'APPROVAL_STEP_KIND_UNAVAILABLE' })
+      .toEqual({ status: 422, code: 'APPROVAL_STEP_DYNAMIC_UNGATED' })
   })
 
   it('legacy static + empty-approver fallback behavior is preserved', () => {

@@ -20706,10 +20706,14 @@ function buildAttendanceApprovalAssignments(flowSteps, stepIndex = 0) {
   // closed with an explicit error instead of silently admin-routing the resolved-less step.
   const dynamicKind = getApprovalStepKind(currentStep)
   if (dynamicKind) {
+    // DISTINCT code from the §4.1 gates' APPROVAL_STEP_KIND_UNAVAILABLE: reaching here means a runtime
+    // gate was BYPASSED (a "should never happen" internal invariant), not the normal feature-off /
+    // port-missing path — so removing a gate surfaces this alarming code instead of being masked by the
+    // gates' own code (which is what makes each gate independently mutation-provable).
     throw new HttpError(
       422,
-      'APPROVAL_STEP_KIND_UNAVAILABLE',
-      `动态审批人类型 "${dynamicKind}" 无对应 resolver(fail-closed)——不得回退到管理员兜底队列`
+      'APPROVAL_STEP_DYNAMIC_UNGATED',
+      `动态审批人类型 "${dynamicKind}" 未经运行时门控即到达指派构建(fail-closed)——不得回退到管理员兜底队列`
     )
   }
   const nodeKey = buildAttendanceApprovalNodeKey(index)
