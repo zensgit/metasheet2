@@ -60,7 +60,7 @@ describeDb('S6 event_fires tombstone→lease upgrade migration (real DB, isolate
   const rowsOf = async (ruleId: string) =>
     (
       await sql<{ dedup_key: string; status: string; lease: string | null; attempts: number; fence: string }>`
-        SELECT dedup_key, status, lease_expires_at::text AS lease, attempts, fence::text AS fence
+        SELECT dedup_key, status, lease_expires_at::text AS lease, attempts, fence
         FROM meta_automation_event_fires WHERE rule_id = ${ruleId} ORDER BY dedup_key
       `.execute(testDb)
     ).rows
@@ -94,15 +94,16 @@ describeDb('S6 event_fires tombstone→lease upgrade migration (real DB, isolate
   it('FENCE is a monotonic single-writer token: claim increments, a stale-fence CAS writes 0 rows, bigint round-trips as string past 2^53', async () => {
     await insertOld('rule_F', 'record.created:evt_f')
     await migrateUp(testDb)
-    // claim: fence 0 → 1 via fence-CAS (WHERE fence = current)
+    // claim: fence 0 → 1 via fence-CAS (WHERE fence = current). RAW `RETURNING fence` (no ::text) — the driver
+    // must hand back the bigint as it will at runtime.
     const claim = await sql<{ fence: string }>`
       UPDATE meta_automation_event_fires SET fence = fence + 1, status='in_progress', lease_expires_at = now() + interval '30 s'
-      WHERE rule_id='rule_F' AND fence = 0 RETURNING fence::text AS fence
+      WHERE rule_id='rule_F' AND fence = 0 RETURNING fence
     `.execute(testDb)
     expect(claim.rows[0].fence).toBe('1')
     // reclaim: fence 1 → 2
     const reclaim = await sql<{ fence: string }>`
-      UPDATE meta_automation_event_fires SET fence = fence + 1 WHERE rule_id='rule_F' AND fence = 1 RETURNING fence::text AS fence
+      UPDATE meta_automation_event_fires SET fence = fence + 1 WHERE rule_id='rule_F' AND fence = 1 RETURNING fence
     `.execute(testDb)
     expect(reclaim.rows[0].fence).toBe('2')
     // a ZOMBIE holding the stale fence 1 tries to write a terminal — fence-CAS hits 0 rows (single-writer)
@@ -110,10 +111,13 @@ describeDb('S6 event_fires tombstone→lease upgrade migration (real DB, isolate
       UPDATE meta_automation_event_fires SET status='done', lease_expires_at = NULL WHERE rule_id='rule_F' AND fence = 1
     `.execute(testDb)
     expect(Number(zombie.numAffectedRows ?? 0)).toBe(0)
-    // bigint precision: a fence past 2^53 must round-trip EXACTLY as a string (a JS number would corrupt it)
+    // bigint DRIVER BOUNDARY: a fence past 2^53 must survive a RAW `SELECT fence` (NO ::text cast — the cast
+    // would make Postgres itself return text and prove nothing). node-postgres returns int8 as a STRING to
+    // preserve precision; a JS number would corrupt 2^53+1. Assert BOTH the type and the exact value.
     const big = '9007199254740993' // 2^53 + 1
     await sql`UPDATE meta_automation_event_fires SET fence = ${big}::bigint WHERE rule_id='rule_F' AND fence = 2`.execute(testDb)
-    const back = await sql<{ fence: string }>`SELECT fence::text AS fence FROM meta_automation_event_fires WHERE rule_id='rule_F'`.execute(testDb)
+    const back = await sql<{ fence: string }>`SELECT fence FROM meta_automation_event_fires WHERE rule_id='rule_F'`.execute(testDb)
+    expect(typeof back.rows[0].fence).toBe('string')
     expect(back.rows[0].fence).toBe(big)
     // fence CHECK: negative rejected by the named constraint
     await expect(

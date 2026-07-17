@@ -5,8 +5,9 @@
  * `claimEventDelivery` writes a bare `(rule_id, dedup_key)` "came-through" row BEFORE `executeRule`. If the
  * process crashes after the claim but before the rule finishes, the row already exists, so redelivery is
  * skipped — the work is PERMANENTLY LOST, not retried. The fix upgrades the tombstone into a reclaimable
- * lease: `status` (pending|in_progress|done|dead_letter) + `lease_expires_at` + `attempts`, so a crash mid-
- * execution leaves the row reclaimable (lease expires → the next scan reclaims it).
+ * lease: `status` (pending|in_progress|done|outcome_unknown|failed|dead_letter) + `lease_expires_at` +
+ * `attempts` + a monotonic `fence` (see below), so a crash mid-execution leaves the row reclaimable (lease
+ * expires → the next scan reclaims it) and fence-CAS keeps persistent state single-writer.
  *
  * BACKFILL (design lock item 5, "迁移回填 — 关键"): every PRE-EXISTING row in a deployed environment is a
  * historical, already-completed delivery. It MUST be backfilled to `status='done'`, else on the day of
