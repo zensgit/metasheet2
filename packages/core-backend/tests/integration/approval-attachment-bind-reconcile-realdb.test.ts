@@ -15,22 +15,33 @@ const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
 const db = () => poolManager.get()
 const RUN = randomUUID()
 const ids: string[] = []
+const instanceIds = new Set<string>()
+const BOUND_INSTANCE = `apr6_${RUN}_pre`
+
+/** instance_id is an FK to approval_instances (ON DELETE CASCADE) — bind/bound rows need a real instance. */
+async function ensureInstance(id: string) {
+  if (instanceIds.has(id)) return
+  instanceIds.add(id)
+  await db().query(`INSERT INTO approval_instances (id, status) VALUES ($1,'pending') ON CONFLICT (id) DO NOTHING`, [id])
+}
 
 async function seed(over: { uploader?: string; status?: string; key?: string; size?: number } = {}) {
   const id = `att6_${RUN}_${ids.length}`
   ids.push(id)
+  if (over.status === 'bound') await ensureInstance(BOUND_INSTANCE)
   await db().query(
     `INSERT INTO approval_attachments (id, org_id, uploader_id, field_id, storage_key, file_name, mime_type, size_bytes, status, instance_id)
      VALUES ($1,'org1',$2,'fldA',$3,'a.pdf','application/pdf',$4,$5,$6)`,
-    [id, over.uploader ?? 'u1', over.key ?? `key_${id}`, over.size ?? 1024, over.status ?? 'unbound', over.status === 'bound' ? 'apr_pre' : null],
+    [id, over.uploader ?? 'u1', over.key ?? `key_${id}`, over.size ?? 1024, over.status ?? 'unbound', over.status === 'bound' ? BOUND_INSTANCE : null],
   )
   return id
 }
 
 describeIfDatabase('attachment bind (form-freeze) + reconciler (real DB)', () => {
   afterAll(async () => {
-    await db().query('DELETE FROM approval_attachment_purge_intents WHERE storage_key LIKE $1', [`key_att6_${RUN}%`]).catch(() => {})
     await db().query('DELETE FROM approval_attachments WHERE id = ANY($1)', [ids]).catch(() => {})
+    await db().query('DELETE FROM approval_instances WHERE id = ANY($1)', [[...instanceIds]]).catch(() => {})
+    await db().query('DELETE FROM approval_attachment_purge_intents WHERE storage_key LIKE $1', [`key_att6_${RUN}%`]).catch(() => {})
   })
 
   test('sentinel: DATABASE_URL set', () => {
@@ -40,6 +51,7 @@ describeIfDatabase('attachment bind (form-freeze) + reconciler (real DB)', () =>
   test('bind: submitter-owned unbound rows freeze to bound+instance; a FOREIGN row fails the WHOLE submission (rollback)', async () => {
     const mine = await seed()
     const theirs = await seed({ uploader: 'u2' })
+    await ensureInstance(`apr_${RUN}`)
     const raw = db().getInternalPool()
     const c = await raw.connect()
     try {
@@ -69,6 +81,7 @@ describeIfDatabase('attachment bind (form-freeze) + reconciler (real DB)', () =>
     const a = await seed({ size: 18 * 1024 * 1024 })
     const b = await seed({ size: 18 * 1024 * 1024 })
     const c3 = await seed({ size: 18 * 1024 * 1024 })
+    await ensureInstance(`apr_${RUN}_big`)
     const raw = db().getInternalPool()
     const c = await raw.connect()
     try {

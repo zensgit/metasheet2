@@ -24,7 +24,10 @@ export async function up(db: Kysely<unknown>): Promise<void> {
                        CONSTRAINT approval_att_org_nonblank CHECK (org_id ~ '[!-~]'),
       uploader_id    text NOT NULL
                        CONSTRAINT approval_att_uploader_nonblank CHECK (uploader_id ~ '[!-~]'),
-      instance_id    text,
+      -- bound rows reference their instance; ON DELETE CASCADE drops the ROWS on instance deletion
+      -- (the object-store blobs are enqueued for purge by the row-delete trigger below — §3-bis).
+      instance_id    text
+                       CONSTRAINT approval_att_instance_fk REFERENCES approval_instances(id) ON DELETE CASCADE,
       field_id       text NOT NULL
                        CONSTRAINT approval_att_field_nonblank CHECK (field_id ~ '[!-~]'),
       storage_key    text NOT NULL
@@ -79,9 +82,45 @@ export async function up(db: Kysely<unknown>): Promise<void> {
     CREATE INDEX IF NOT EXISTS idx_approval_purge_pending
     ON approval_attachment_purge_intents (status, created_at)
   `.execute(db)
+
+  // Idempotent FK convergence for an environment that already created approval_attachments without the
+  // instance FK. NOT VALID skips the initial full-table scan (avoids failing a replay on pre-existing
+  // rows) while still enforcing the constraint + ON DELETE CASCADE for all new/changed rows.
+  await sql`
+    DO $$ BEGIN
+      IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'approval_att_instance_fk') THEN
+        ALTER TABLE approval_attachments
+          ADD CONSTRAINT approval_att_instance_fk
+          FOREIGN KEY (instance_id) REFERENCES approval_instances(id) ON DELETE CASCADE NOT VALID;
+      END IF;
+    END $$;
+  `.execute(db)
+
+  // §3-bis row-delete trigger: a DB cascade (or admin purge / retention hard-delete / test cleanup)
+  // deletes the ROWS but can never reach the object store to delete the BLOBS. This trigger enqueues a
+  // 'row_deleted' purge intent for EVERY DELETE-statement path (cascade included) so the idempotent
+  // worker (approval-attachment-gc) is the sole blob-deleter and no orphan blob is left in the bucket.
+  await sql`
+    CREATE OR REPLACE FUNCTION approval_attachment_enqueue_purge_on_delete() RETURNS trigger AS $$
+    BEGIN
+      INSERT INTO approval_attachment_purge_intents (id, storage_key, reason)
+      VALUES ('pi_trg_' || md5(OLD.storage_key), OLD.storage_key, 'row_deleted')
+      ON CONFLICT (id) DO NOTHING;
+      RETURN OLD;
+    END;
+    $$ LANGUAGE plpgsql
+  `.execute(db)
+  await sql`DROP TRIGGER IF EXISTS approval_attachment_purge_on_delete ON approval_attachments`.execute(db)
+  await sql`
+    CREATE TRIGGER approval_attachment_purge_on_delete
+    AFTER DELETE ON approval_attachments
+    FOR EACH ROW EXECUTE FUNCTION approval_attachment_enqueue_purge_on_delete()
+  `.execute(db)
 }
 
 export async function down(db: Kysely<unknown>): Promise<void> {
+  await sql`DROP TRIGGER IF EXISTS approval_attachment_purge_on_delete ON approval_attachments`.execute(db)
+  await sql`DROP FUNCTION IF EXISTS approval_attachment_enqueue_purge_on_delete()`.execute(db)
   await sql`DROP TABLE IF EXISTS approval_attachment_purge_intents`.execute(db)
   await sql`DROP TABLE IF EXISTS approval_attachments`.execute(db)
 }
