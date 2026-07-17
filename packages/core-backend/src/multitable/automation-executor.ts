@@ -5,6 +5,7 @@
 
 import { randomUUID } from 'crypto'
 import { recordRecordRevision, recordVersionMarker } from './record-history-service'
+import { branchChildStepKey, topLevelStepKey } from './automation-step-key'
 import { Logger } from '../core/logger'
 import { withAutomationEventId } from './automation-event-dedup'
 import { redactString } from './automation-log-redact'
@@ -1079,7 +1080,7 @@ export class AutomationExecutor {
       let failedAtBranchIndex = -1
       for (let i = cursor.branchActionIndex + 1; i < branchActions.length; i++) {
         const branchAction = branchActions[i]
-        const stepKey = `${cursor.parentStepIndex}.branch.${cursor.branchKey}.${i}`
+        const stepKey = branchChildStepKey(cursor.parentStepIndex, 'branch', cursor.branchKey, i)
         const jobId = `${context.executionId}:job:${cursor.parentStepIndex}:branch:${cursor.branchKey}:${i}`
         const meta = { stepKey, jobId, upstreamJobId }
 
@@ -1140,7 +1141,7 @@ export class AutomationExecutor {
       // plane complete instead of leaving downstream branch work invisible.
       if (branchFailed && failedAtBranchIndex >= 0) {
         for (let j = failedAtBranchIndex + 1; j < branchActions.length; j++) {
-          const skippedStepKey = `${cursor.parentStepIndex}.branch.${cursor.branchKey}.${j}`
+          const skippedStepKey = branchChildStepKey(cursor.parentStepIndex, 'branch', cursor.branchKey, j)
           const skippedJobId = `${context.executionId}:job:${cursor.parentStepIndex}:branch:${cursor.branchKey}:${j}`
           await jobLifecycle.onSkipped(cursor.parentStepIndex, branchActions[j], {
             stepKey: skippedStepKey,
@@ -1169,7 +1170,7 @@ export class AutomationExecutor {
       execution.steps.push(parentStepResult)
       await jobLifecycle.onSettled(cursor.parentStepIndex, parentAction, parentStepResult, {
         jobId: cursor.parentJobId,
-        stepKey: String(cursor.parentStepIndex),
+        stepKey: topLevelStepKey(cursor.parentStepIndex),
       })
 
       // 4. Top-level tail: continue on success; on failure, fail-stop the remaining top-level
@@ -1426,7 +1427,7 @@ export class AutomationExecutor {
       let branchFailed = false
       for (let actionIndex = 0; actionIndex < branchActions.length; actionIndex++) {
         const branchAction = branchActions[actionIndex]
-        const stepKey = `${stepIndex}.parallel.${branchKey}.${actionIndex}`
+        const stepKey = branchChildStepKey(stepIndex, 'parallel', branchKey, actionIndex)
         const jobId = `${context.executionId}:job:${stepIndex}:parallel:${branchKey}:${actionIndex}`
         const meta = { stepKey, jobId, upstreamJobId }
         childJobIds.push(jobId)
@@ -1441,7 +1442,7 @@ export class AutomationExecutor {
           branchFailed = true
           for (let skippedIndex = actionIndex + 1; skippedIndex < branchActions.length; skippedIndex++) {
             const skippedAction = branchActions[skippedIndex]
-            const skippedStepKey = `${stepIndex}.parallel.${branchKey}.${skippedIndex}`
+            const skippedStepKey = branchChildStepKey(stepIndex, 'parallel', branchKey, skippedIndex)
             const skippedJobId = `${context.executionId}:job:${stepIndex}:parallel:${branchKey}:${skippedIndex}`
             await jobLifecycle.onSkipped(stepIndex, skippedAction, {
               stepKey: skippedStepKey,
