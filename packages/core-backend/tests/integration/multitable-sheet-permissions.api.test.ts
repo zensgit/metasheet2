@@ -11,6 +11,48 @@ type QueryResult = {
 
 type QueryHandler = (sql: string, params?: unknown[]) => QueryResult | Promise<QueryResult>
 
+function legacyPermissionFixtureSql(sql: string): string | undefined {
+  const projectionReplacements: Array<[string, string]> = [
+    [
+      'SELECT id, sheet_id, version, data, created_by, locked, locked_by, locked_at FROM meta_records WHERE id = $1',
+      'SELECT id, sheet_id, version, data, created_by FROM meta_records WHERE id = $1',
+    ],
+    [
+      'SELECT id, version, data, locked, locked_by, locked_at FROM meta_records WHERE sheet_id = $1 ORDER BY created_at ASC, id ASC',
+      'SELECT id, version, data FROM meta_records WHERE sheet_id = $1 ORDER BY created_at ASC, id ASC',
+    ],
+    [
+      'SELECT id, sheet_id, created_by, locked, locked_by, created_at, updated_at FROM meta_records WHERE id = $1',
+      'SELECT id, sheet_id, created_by FROM meta_records WHERE id = $1',
+    ],
+    [
+      'SELECT id, version, data, created_by, locked, locked_by FROM meta_records WHERE sheet_id = $1 AND id = $2 FOR UPDATE',
+      'SELECT id, version, data, created_by FROM meta_records WHERE sheet_id = $1 AND id = $2 FOR UPDATE',
+    ],
+    [
+      'SELECT id, version, data, created_by, locked, locked_by FROM meta_records WHERE id = $1 AND sheet_id = $2 FOR UPDATE',
+      'SELECT id, version, data, created_by FROM meta_records WHERE id = $1 AND sheet_id = $2 FOR UPDATE',
+    ],
+    [
+      'SELECT id, version, data, locked, locked_by, locked_at FROM meta_records WHERE id = $1 AND sheet_id = $2',
+      'SELECT id, version, data FROM meta_records WHERE id = $1 AND sheet_id = $2',
+    ],
+    [
+      'SELECT id, name, type, property, "order" FROM meta_fields WHERE sheet_id = $1 ORDER BY "order" ASC, id ASC',
+      'SELECT id, name, type FROM meta_fields WHERE sheet_id = $1 ORDER BY "order" ASC, id ASC',
+    ],
+  ]
+
+  for (const [currentProjection, fixtureProjection] of projectionReplacements) {
+    if (sql.includes(currentProjection)) return sql.replace(currentProjection, fixtureProjection)
+  }
+  return undefined
+}
+
+function isUnhandledFixtureSql(error: unknown): error is Error {
+  return error instanceof Error && error.message.startsWith('Unhandled SQL in test:')
+}
+
 function createMockPool(
   queryHandler: QueryHandler,
   userPermissionMap: Record<string, string[]> = {},
@@ -34,6 +76,20 @@ function createMockPool(
     }
     if (sql.includes('SELECT pg_advisory_xact_lock(hashtext($1))')) {
       return { rows: [], rowCount: 1 }
+    }
+    if (sql.includes('SELECT 1 FROM meta_sheets WHERE id = $1 FOR UPDATE')) {
+      return { rows: [{}], rowCount: 1 }
+    }
+    if (sql.includes('DELETE FROM meta_links WHERE foreign_record_id IN (SELECT id FROM meta_records WHERE sheet_id = $1)')) {
+      return { rows: [], rowCount: 0 }
+    }
+    if (
+      sql.includes('SELECT perm_code FROM spreadsheet_permissions')
+      && sql.includes('subject_type = $2')
+      && sql.includes('subject_id = $3')
+      && sql.includes('perm_code = ANY($4::text[])')
+    ) {
+      return { rows: [], rowCount: 0 }
     }
     if (
       sql.includes('FROM user_permissions up')
@@ -82,7 +138,14 @@ function createMockPool(
         })),
       }
     }
-    return queryHandler(sql, params)
+    try {
+      return await queryHandler(sql, params)
+    } catch (error) {
+      // Retry only explicit legacy-fixture misses; assertions and unknown SQL still fail normally.
+      const fixtureSql = isUnhandledFixtureSql(error) ? legacyPermissionFixtureSql(sql) : undefined
+      if (!fixtureSql) throw error
+      return queryHandler(fixtureSql, params)
+    }
   })
   const transaction = vi.fn(async (fn: (client: { query: typeof query }) => Promise<unknown>) => fn({ query }))
   return { query, transaction }
@@ -1008,6 +1071,14 @@ describe('Multitable sheet-scoped permissions API', () => {
           expect(params).toEqual(['rec_owned'])
           return { rows: [] }
         }
+        if (sql.includes('SELECT base_id FROM meta_sheets WHERE id = $1')) {
+          expect(params).toEqual(['sheet_ops'])
+          return { rows: [{ base_id: 'base_ops' }] }
+        }
+        if (sql.includes('INSERT INTO meta_records_trash')) {
+          expect(params?.slice(0, 3)).toEqual(['rec_owned', 'sheet_ops', 'base_ops'])
+          return { rows: [], rowCount: 1 }
+        }
         if (sql.includes('DELETE FROM meta_records WHERE id = $1')) {
           expect(params).toEqual(['rec_owned'])
           records.delete('rec_owned')
@@ -1364,7 +1435,12 @@ describe('Multitable sheet-scoped permissions API', () => {
           const row = views.get(viewId)
           return { rows: row ? [{ ...row }] : [] }
         }
-        if (sql.includes('UPDATE meta_views\n         SET name = $2, type = $3, filter_info = $4::jsonb, sort_info = $5::jsonb, group_info = $6::jsonb, hidden_field_ids = $7::jsonb, config = $8::jsonb')) {
+        if (
+          sql.includes('UPDATE meta_views')
+          && sql.includes('SET name = $2')
+          && sql.includes('config = $8::jsonb')
+          && sql.includes('WHERE id = $1')
+        ) {
           const [viewId, name, type, filterJson, sortJson, groupJson, hiddenJson, configJson] = params as [string, string, string, string, string, string, string, string]
           const row = views.get(viewId)
           if (!row) return { rows: [] }
@@ -2631,6 +2707,9 @@ describe('Multitable sheet-scoped permissions API', () => {
           }
         }
         if (sql.includes('SELECT id, base_id, name, description FROM meta_sheets WHERE id = $1')) {
+          if (params?.[0] === 'sheet_source') {
+            return { rows: [{ id: 'sheet_source', base_id: 'base_ops', name: 'Orders', description: null }] }
+          }
           expect(params).toEqual(['sheet_target'])
           return { rows: [{ id: 'sheet_target', base_id: 'base_ops', name: 'Vendors', description: null }] }
         }
@@ -2675,6 +2754,9 @@ describe('Multitable sheet-scoped permissions API', () => {
           }
         }
         if (sql.includes('SELECT id, base_id, name, description FROM meta_sheets WHERE id = $1')) {
+          if (params?.[0] === 'sheet_source') {
+            return { rows: [{ id: 'sheet_source', base_id: 'base_ops', name: 'Orders', description: null }] }
+          }
           expect(params).toEqual(['sheet_target'])
           return { rows: [{ id: 'sheet_target', base_id: 'base_ops', name: 'Vendors', description: null }] }
         }
@@ -2739,6 +2821,11 @@ describe('Multitable sheet-scoped permissions API', () => {
           }
         }
         if (sql.includes('SELECT id, base_id, name, description FROM meta_sheets WHERE id = $1')) {
+          if (params?.[0] === 'sheet_vendors') {
+            return {
+              rows: [{ id: 'sheet_vendors', base_id: 'base_ops', name: 'Vendors', description: null }],
+            }
+          }
           expect(params).toEqual(['sheet_orders'])
           return {
             rows: [{ id: 'sheet_orders', base_id: 'base_ops', name: 'Orders', description: null }],
