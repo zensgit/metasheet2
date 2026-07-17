@@ -51,17 +51,30 @@ export async function up(db: Kysely<unknown>): Promise<void> {
 
   await sql`
     CREATE TABLE IF NOT EXISTS approval_attachment_purge_intents (
-      id           text PRIMARY KEY,
-      storage_key  text NOT NULL
-                     CONSTRAINT approval_purge_key_nonblank CHECK (storage_key ~ '[!-~]'),
-      reason       text NOT NULL
-                     CONSTRAINT approval_purge_reason_valid CHECK (reason IN ('unbound_ttl','row_deleted','reconciler_orphan')),
-      status       text NOT NULL DEFAULT 'pending'
-                     CONSTRAINT approval_purge_status_valid CHECK (status IN ('pending','done')),
-      created_at   timestamptz NOT NULL DEFAULT now(),
-      purged_at    timestamptz
+      id               text PRIMARY KEY,
+      storage_key      text NOT NULL
+                         CONSTRAINT approval_purge_key_nonblank CHECK (storage_key ~ '[!-~]'),
+      reason           text NOT NULL
+                         CONSTRAINT approval_purge_reason_valid CHECK (reason IN ('unbound_ttl','row_deleted','reconciler_orphan')),
+      -- §3-bis full state machine: pending → in_progress (claimed under a live lease) → done | dead_letter.
+      status           text NOT NULL DEFAULT 'pending'
+                         CONSTRAINT approval_purge_status_valid CHECK (status IN ('pending','in_progress','done','dead_letter')),
+      attempts         int NOT NULL DEFAULT 0,         -- incremented ATOMICALLY at claim (so an always-crash-after-claim poison still reaches dead_letter)
+      lease_expires_at timestamptz,                    -- short worker lease; an expired in_progress lease is reclaimable
+      fence            bigint NOT NULL DEFAULT 0,       -- monotonic, bumped on every claim; fences a zombie worker's late write
+      last_error       text,                            -- values-free error code (e.g. EACCES) recorded on dead-letter; never raw text
+      created_at       timestamptz NOT NULL DEFAULT now(),
+      purged_at        timestamptz
     )
   `.execute(db)
+  // Idempotent convergence for any environment that already created the earlier ('pending'|'done')-only
+  // shape: add the new columns and widen the status CHECK so a replay lands the full state machine.
+  await sql`ALTER TABLE approval_attachment_purge_intents ADD COLUMN IF NOT EXISTS attempts int NOT NULL DEFAULT 0`.execute(db)
+  await sql`ALTER TABLE approval_attachment_purge_intents ADD COLUMN IF NOT EXISTS lease_expires_at timestamptz`.execute(db)
+  await sql`ALTER TABLE approval_attachment_purge_intents ADD COLUMN IF NOT EXISTS fence bigint NOT NULL DEFAULT 0`.execute(db)
+  await sql`ALTER TABLE approval_attachment_purge_intents ADD COLUMN IF NOT EXISTS last_error text`.execute(db)
+  await sql`ALTER TABLE approval_attachment_purge_intents DROP CONSTRAINT IF EXISTS approval_purge_status_valid`.execute(db)
+  await sql`ALTER TABLE approval_attachment_purge_intents ADD CONSTRAINT approval_purge_status_valid CHECK (status IN ('pending','in_progress','done','dead_letter'))`.execute(db)
   await sql`
     CREATE INDEX IF NOT EXISTS idx_approval_purge_pending
     ON approval_attachment_purge_intents (status, created_at)
