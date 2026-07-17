@@ -54,4 +54,20 @@ describe('approval attachment validation (v1)', () => {
     expect(r.ok).toBe(false)
     if (!r.ok) expect(r.rejected).toEqual([{ fileName: 'bad.exe', code: 'mime_not_allowed' }])
   })
+
+  test('prototype-pollution guard: an Object.prototype-name MIME must reject as unknown, never throw', () => {
+    // A plain-object `V1_ALLOWLIST[mime]` lookup with attacker-controlled `mime` would otherwise
+    // resolve an INHERITED Object.prototype member (truthy, not an array) for keys like
+    // 'constructor' or '__proto__' — and the subsequent `allowedExts.includes(ext)` call would
+    // throw an uncaught TypeError (request-crashing DoS). Each of these must reject cleanly with
+    // `mime_not_allowed` and must NOT throw, even though `x.pdf`'s extension is allowlisted.
+    for (const mimeType of ['constructor', '__proto__']) {
+      let r: ReturnType<typeof validateApprovalAttachments> | undefined
+      expect(() => {
+        r = validateApprovalAttachments([F({ fileName: 'x.pdf', mimeType })])
+      }).not.toThrow()
+      expect(r?.ok).toBe(false)
+      if (r && !r.ok) expect(r.rejected).toEqual([{ fileName: 'x.pdf', code: 'mime_not_allowed' }])
+    }
+  })
 })
