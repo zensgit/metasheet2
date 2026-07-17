@@ -68,18 +68,22 @@ export interface UploadedAttachment {
   sizeBytes: number
 }
 
-/** Upload one file; the server re-validates (authoritative) and returns the attachment id. */
+/**
+ * Upload one file; the server re-validates (authoritative) and returns the attachment id. The body is
+ * the lock's `{ templateId, fieldId }` — the owning ORG is derived server-side from the authenticated
+ * principal, never sent by the client (a client org_id would be a cross-tenant attribution forgery).
+ */
 export async function uploadApprovalAttachment(
   file: File,
+  templateId: string,
   fieldId: string,
-  orgId: string,
   fetcher: typeof fetch = fetch,
 ): Promise<UploadedAttachment> {
   const pre = preValidateAttachments([{ name: file.name, type: file.type, size: file.size }])
   if (pre.length > 0) throw new Error(`attachment rejected: ${pre[0].code}`)
   const form = new FormData()
+  form.append('templateId', templateId)
   form.append('fieldId', fieldId)
-  form.append('orgId', orgId)
   form.append('file', file)
   const res = await fetcher('/api/approval/attachments', { method: 'POST', body: form, credentials: 'include' })
   if (res.status === 201) return (await res.json()) as UploadedAttachment

@@ -8,7 +8,7 @@ import type { ApprovalAttachmentStore } from '../../src/services/approval-attach
 
 const FLAG_ON = { APPROVAL_ATTACHMENTS_ENABLED: 'true' } as unknown as NodeJS.ProcessEnv
 
-function makeApp(over: { rows?: unknown[]; viewer?: string | null; participant?: boolean; hidden?: boolean } = {}) {
+function makeApp(over: { rows?: unknown[]; viewer?: string | null; participant?: boolean; hidden?: boolean; org?: string | null } = {}) {
   const blobs = new Map<string, Buffer>()
   const inserted: unknown[][] = []
   const store: ApprovalAttachmentStore = {
@@ -37,6 +37,7 @@ function makeApp(over: { rows?: unknown[]; viewer?: string | null; participant?:
       isFieldHiddenAtActiveNode: async () => over.hidden ?? false,
     },
     viewerId: () => (over.viewer === undefined ? 'u1' : over.viewer),
+    orgId: () => (over.org === undefined ? 'org1' : over.org),
     env: FLAG_ON,
   })
   const app = express()
@@ -53,6 +54,7 @@ describe('approval attachment routes (flag-gated)', () => {
         store: { put: async () => {}, get: async () => Buffer.alloc(0), delete: async () => false },
         authChecks: { isInstanceParticipant: async () => true, isFieldHiddenAtActiveNode: async () => false },
         viewerId: () => 'u1',
+        orgId: () => 'org1',
         env: {} as NodeJS.ProcessEnv,
       })
       return { router: r }
@@ -60,29 +62,35 @@ describe('approval attachment routes (flag-gated)', () => {
     expect(router).toBeNull()
   })
 
-  test('upload happy path: 201, server-derived key persisted, client filename not used as path', async () => {
+  test('upload happy path: 201, server-derived key + server-derived org persisted, client filename not used as path', async () => {
     const { app, inserted, blobs } = makeApp()
     const r = await request(app)
       .post('/api/approval/attachments')
       .field('fieldId', 'fld1')
-      .field('orgId', 'org1')
+      .field('templateId', 'tpl1')
+      .field('orgId', 'FORGED-ORG') // a forged body org_id must be IGNORED
       .attach('file', Buffer.from('%PDF-1.4'), { filename: '../../evil.pdf', contentType: 'application/pdf' })
     expect(r.status).toBe(201)
     expect(r.body.id).toMatch(/^att_/)
+    const orgPersisted = inserted[0][1] as string
+    expect(orgPersisted).toBe('org1') // the principal's org (deps.orgId), NOT the forged body value
     const storageKey = inserted[0][4] as string
     expect(storageKey).toMatch(/^approval\/\d{4}-\d{2}\/[0-9a-f-]{36}\.pdf$/) // server key, no client path parts
     expect(blobs.has(storageKey)).toBe(true)
   })
 
-  test('upload rejects: unauthenticated 401; missing file 400; disallowed MIME 422 with values-free codes', async () => {
+  test('upload rejects: unauthenticated 401; principal without org 403; missing template/field 400; disallowed MIME 422', async () => {
     const anon = makeApp({ viewer: null })
-    expect((await request(anon.app).post('/api/approval/attachments').field('fieldId', 'f').field('orgId', 'o')).status).toBe(401)
+    expect((await request(anon.app).post('/api/approval/attachments').field('fieldId', 'f').field('templateId', 't')).status).toBe(401)
+    const noOrg = makeApp({ org: null })
+    expect((await request(noOrg.app).post('/api/approval/attachments').field('fieldId', 'f').field('templateId', 't')).status).toBe(403)
     const { app } = makeApp()
-    expect((await request(app).post('/api/approval/attachments').field('fieldId', 'f').field('orgId', 'o')).status).toBe(400)
+    // missing file → 400; and a missing template/field also 400
+    expect((await request(app).post('/api/approval/attachments').field('fieldId', 'f').field('templateId', 't')).status).toBe(400)
     const bad = await request(app)
       .post('/api/approval/attachments')
       .field('fieldId', 'f')
-      .field('orgId', 'o')
+      .field('templateId', 't')
       .attach('file', Buffer.from('MZ'), { filename: 'x.exe', contentType: 'application/x-msdownload' })
     expect(bad.status).toBe(422)
     expect(bad.body.rejected[0].code).toBe('mime_not_allowed')
