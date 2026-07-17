@@ -1036,6 +1036,7 @@ const VERSION_CHANGE_KIND_LABELS: Record<TemplateVersionChangeKind, string> = {
   added: '新增',
   removed: '删除',
   changed: '修改',
+  moved: '移动',
 }
 
 const VERSION_CHANGE_ENTITY_LABELS: Record<TemplateVersionChangeEntity, string> = {
@@ -1052,9 +1053,10 @@ function versionChangeEntityLabel(entity: TemplateVersionChangeEntity): string {
   return VERSION_CHANGE_ENTITY_LABELS[entity]
 }
 
-function versionChangeTagType(kind: TemplateVersionChangeKind): 'success' | 'danger' | 'warning' {
+function versionChangeTagType(kind: TemplateVersionChangeKind): 'success' | 'danger' | 'warning' | 'info' {
   if (kind === 'added') return 'success'
   if (kind === 'removed') return 'danger'
+  if (kind === 'moved') return 'info'
   return 'warning'
 }
 
