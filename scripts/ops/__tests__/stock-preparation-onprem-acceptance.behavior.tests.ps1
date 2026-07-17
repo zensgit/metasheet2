@@ -439,10 +439,16 @@ exec node "$(dirname "$0")/pm2-fixture.mjs" "$@"
   )
 
   # corrective-6: the PURE hygiene verdict is fail-closed (a stale packaged helper is a FAIL, not a skip).
-  Check "hygiene: missing sample -> FAIL (sample_missing)" ((Test-Pm2TokenHygieneSample $null).reason -eq 'sample_missing')
-  Check "hygiene: projection without hygiene booleans -> FAIL (hygiene_fields_missing)" ((Test-Pm2TokenHygieneSample ([pscustomobject]@{ state='online'; restartTime=0; uptime=1 })).reason -eq 'hygiene_fields_missing')
-  Check "hygiene: admin token non-empty -> dedicated coarse reason" ((Test-Pm2TokenHygieneSample ([pscustomobject]@{ adminTokenNonEmpty=$true; authTokenNonEmpty=$false })).reason -eq 'PM2_ENV_METASHEET_ADMIN_TOKEN_NONEMPTY')
-  Check "hygiene: auth token non-empty -> dedicated coarse reason" ((Test-Pm2TokenHygieneSample ([pscustomobject]@{ adminTokenNonEmpty=$false; authTokenNonEmpty=$true })).reason -eq 'PM2_ENV_METASHEET_AUTH_TOKEN_NONEMPTY')
+  # The runner GATES on `.ok` — every FAIL-side check asserts ok=false AND the coarse reason, so a
+  # mutant that keeps the reason while flipping ok to true cannot survive (CM2 lesson).
+  $hMissing = Test-Pm2TokenHygieneSample $null
+  Check "hygiene: missing sample -> FAIL (sample_missing)" ((-not $hMissing.ok) -and $hMissing.reason -eq 'sample_missing')
+  $hStale = Test-Pm2TokenHygieneSample ([pscustomobject]@{ state='online'; restartTime=0; uptime=1 })
+  Check "hygiene: projection without hygiene booleans -> FAIL (hygiene_fields_missing)" ((-not $hStale.ok) -and $hStale.reason -eq 'hygiene_fields_missing')
+  $hAdmin = Test-Pm2TokenHygieneSample ([pscustomobject]@{ adminTokenNonEmpty=$true; authTokenNonEmpty=$false })
+  Check "hygiene: admin token non-empty -> FAIL with the dedicated coarse reason" ((-not $hAdmin.ok) -and $hAdmin.reason -eq 'PM2_ENV_METASHEET_ADMIN_TOKEN_NONEMPTY')
+  $hAuth = Test-Pm2TokenHygieneSample ([pscustomobject]@{ adminTokenNonEmpty=$false; authTokenNonEmpty=$true })
+  Check "hygiene: auth token non-empty -> FAIL with the dedicated coarse reason" ((-not $hAuth.ok) -and $hAuth.reason -eq 'PM2_ENV_METASHEET_AUTH_TOKEN_NONEMPTY')
   Check "hygiene: both clean -> ok" ((Test-Pm2TokenHygieneSample ([pscustomobject]@{ adminTokenNonEmpty=$false; authTokenNonEmpty=$false })).ok)
 
   Check "pm2: same restart_time + same uptime -> stable" ((Test-Pm2StableSample $base ([pscustomobject]@{ state='online'; restartTime=3; uptime=1000 })).ok)
