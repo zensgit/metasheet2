@@ -28,6 +28,16 @@ import { assertInTransaction, type TransactionalQueryable } from './pg-transacti
 
 export type ExecutionLedgerKind = 'execution' | 'test_run'
 
+/**
+ * #4196 Class-A same-transaction claim RUNTIME GATE — default OFF. The executor's Class-A action methods
+ * (update/create/delete/lock_record) only claim-then-skip-on-duplicate when this is ON. Off ⇒ every
+ * Class-A path is BYTE-IDENTICAL to pre-slice (no claim INSERT, no `assertInTransaction` probe, no skip).
+ * Follows the repo flag convention (`env.<NAME> === 'true'`, e.g. isSideDoorDeleteTrashEnabled).
+ */
+export function isClassAExecutionClaimEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  return env.AUTOMATION_CLASSA_CLAIM_ENABLED === 'true'
+}
+
 const LEDGER_KINDS: ReadonlySet<string> = new Set<ExecutionLedgerKind>(['execution', 'test_run'])
 const NON_BLANK = /[!-~]/
 /** §6.1: the clientOperationId is an opaque bounded token — restricted charset, bounded length. */

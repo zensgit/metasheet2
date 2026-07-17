@@ -319,6 +319,12 @@ export default defineConfig({
       // skip-green in the no-DB lane, whole-file wired into `Run multitable real-DB integration` in
       // plugin-tests.yml.
       'tests/integration/multitable-d1c-automation-revision-realdb.test.ts',
+      // #4196 Class-A same-transaction idempotency claim goldens (replay no-op for create/update, crash
+      // rolls the claim back, flag-OFF positive control), driven through the real
+      // AutomationService.executeRule entry point (constructor hard-wires deps.transaction to a real
+      // poolManager.get().transaction). Real Postgres only — excluded HERE so it cannot skip-green in the
+      // no-DB lane, whole-file wired into `Run multitable real-DB integration` in plugin-tests.yml.
+      'tests/integration/multitable-4196-classa-claim-realdb.test.ts',
       // D-1c W0 slice ④ (approval resultWriteback revision goldens, driven through the real
       // dispatchAction -> approval.completed event bus -> AutomationService.handleApprovalCompletionEvent
       // -> writeApprovalResultBack chain + the concurrent-delete zero-row fail-closed golden, which uses a

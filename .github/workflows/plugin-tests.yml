@@ -457,6 +457,7 @@ jobs:
             tests/integration/multitable-d1c-form-submit-revision-realdb.test.ts \
             tests/integration/multitable-d1c-plugin-revision-realdb.test.ts \
             tests/integration/multitable-d1c-automation-revision-realdb.test.ts \
+            tests/integration/multitable-4196-classa-claim-realdb.test.ts \
             tests/integration/multitable-d1c-approval-revision-realdb.test.ts \
             tests/integration/multitable-d1c-attachment-revision-realdb.test.ts \
             tests/integration/multitable-reset-pit-inbound-capture-realdb.test.ts \

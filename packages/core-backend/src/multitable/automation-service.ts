@@ -2135,7 +2135,10 @@ export class AutomationService {
     const jobLifecycleFactory = persistJobs
       ? (executionId: string) => this.buildJobLifecycle(executionId, rule, triggerEvent, retryMeta?.rootExecutionId)
       : undefined
-    const execution = await this.executor.execute(rule, triggerEvent, jobLifecycleFactory)
+    // #4196: thread the retry lineage root into the executor so its ExecutionContext.rootExecutionId keys
+    // Class-A claims on the ORIGINAL execution's root (a retry re-running the same action → duplicate →
+    // skip). A first run has no retryMeta, so the executor defaults the root to its own execution id.
+    const execution = await this.executor.execute(rule, triggerEvent, jobLifecycleFactory, retryMeta?.rootExecutionId)
     if (retryMeta) {
       // A5: stamp retry provenance onto the NEW execution before persistence.
       execution.rerunOfExecutionId = retryMeta.rerunOfExecutionId
@@ -2418,6 +2421,9 @@ export class AutomationService {
     }
     const lineageIds = await this.collectExecutionLineageIds(execution)
     const rootExecutionId = lineageIds.at(-1) ?? execution.id
+    // #4196: carry the lineage root onto the resumed context so Class-A actions in the resumed tail claim
+    // on the SAME root as the original run (a resumed action re-applying itself → duplicate → skip).
+    context.rootExecutionId = rootExecutionId
     const jobLifecycle = this.buildJobLifecycle(execution.id, execRule, triggerEvent, rootExecutionId)
     const continued = resumeCursor.kind === 'condition_branch'
       ? await this.executor.continueBranchExecution(execution, execRule, context, resumeCursor.cursor, jobLifecycle)
@@ -2494,6 +2500,9 @@ export class AutomationService {
       ruleCreatedBy: execRule.createdBy,
       actorId: event.actor?.id ?? event.requester.id ?? null,
       triggerEvent,
+      // #4196: the bridge carries the lineage root; carry it onto the resumed context so Class-A actions
+      // in the approval-resumed tail claim on the same root.
+      rootExecutionId: bridge.rootExecutionId,
     }
     const continued = await this.executor.continueExecution(
       execution,
