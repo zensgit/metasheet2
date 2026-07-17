@@ -347,10 +347,16 @@ export class MultitableFormulaEngine {
       // W0-1 L4-cov-services: the FORMULA writer class joins the canonical fence (flag-gated no-op when
       // `MULTITABLE_ENABLE_WRITER_FENCE` is off). Even a derived-value write must not land inside a
       // recovery's applying window — a materialization computed from PRE-recovery inputs would clobber the
-      // just-recovered `data`. When the caller already holds the fence (the PATCH write path runs this
-      // inside its fenced transaction), `pg_advisory_xact_lock` is reentrant on the same transaction, so
-      // this adds only the durable-block re-check; for a caller outside any fence, this is where the
-      // formula write parks/refuses against an active recovery.
+      // just-recovered `data`. Caller reality (gate-audited, 2026-07-17): the production recompute callers
+      // pass a BARE pool query (autocommit — e.g. record-write-service.ts's hook and the univer-meta bulk
+      // recompute), so the advisory-lock half evaporates per statement; what this line durably provides on
+      // that path is the DURABLE-BLOCK REFUSAL against an already-committed recovery block (proven by the
+      // F1 golden on exactly this autocommit shape), leaving a narrow block-read→UPDATE window. That
+      // residual is acceptable for this writer class: formula writes allocate NO chain seq (no
+      // revision/marker), merge only derived recompute-on-read keys, and never bump version — no
+      // seq-ordering or PIT impact. A caller that DOES run inside a fenced transaction gets the full
+      // reentrant fence. Hardening (txn-wrapping the bulk recompute or executor-style fail-closed) is an
+      // enumerated follow-up, not silently assumed.
       await fenceWriterEntry(query, sheetId)
       // lock-exempt: system formula materialization — derived value, no user actor (lock = read-only to USERS)
       // revision-exempt: derived formula materialization, no version bump — pure fn of inputs, recompute-on-read

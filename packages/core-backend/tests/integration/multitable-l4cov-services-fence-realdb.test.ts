@@ -409,6 +409,54 @@ describeIfDatabase('W0-1 L4-cov-services — service writers on the canonical fe
     expect(after).toBe(before)
   })
 
+  test('D3 BLOCK-REFUSAL (gate P2-1): flag ON + applying block ⇒ the D-1 plugin delete refuses, record + revision/endpoint state untouched', async () => {
+    const R = mkRecord('d3')
+    await seedRecord(R)
+    process.env[FLAG] = 'true'
+    await setBlock('applying')
+    const revCount = async () => Number(((await q('SELECT count(*)::int c FROM meta_record_revisions WHERE sheet_id = $1 AND record_id = $2', [SHEET, R])).rows[0] as { c: number }).c)
+    const epCount = async () => Number(((await q('SELECT count(*)::int c FROM meta_record_history_operations WHERE sheet_id = $1', [SHEET])).rows[0] as { c: number }).c)
+    const epsBefore = await epCount()
+    // The D-1 branch's own fence (fence-before-check) must observe the committed block and refuse BEFORE any
+    // destructive write — the exact same block-refusal leg every other writer in this lane carries.
+    await expect(
+      poolManager.get().transaction(async ({ query }) =>
+        pluginDeleteRecord({ query: ((sql: string, params?: unknown[]) => query(sql, params)) as never, sheetId: SHEET, recordId: R }),
+      ),
+    ).rejects.toThrow(SheetWriterBlockedError)
+    expect(await recordRow(R)).toBeDefined() // row survives
+    expect(await revCount()).toBe(0) // no delete revision
+    expect(await epCount()).toBe(epsBefore) // no endpoint
+
+    // POSITIVE CONTROL: clear the block ⇒ the same delete proceeds.
+    await setBlock(null)
+    await poolManager.get().transaction(async ({ query }) =>
+      pluginDeleteRecord({ query: ((sql: string, params?: unknown[]) => query(sql, params)) as never, sheetId: SHEET, recordId: R }),
+    )
+    expect(await recordRow(R)).toBeUndefined()
+  })
+
+  test('D4 NON-TXN NEGATIVE (gate P2-2, the G16 analogue): flag ON + a NON-transactional caller ⇒ refused BEFORE any destructive write', async () => {
+    const R = mkRecord('d4')
+    await seedRecord(R)
+    process.env[FLAG] = 'true'
+    // A bare autocommit query is NOT transactional — assertTransactionalQuery must throw before the
+    // meta_links/meta_records deletes run. Without this guard the tagged revision INSERT would trip the
+    // deferred FK on its own autocommit statement AFTER the record was destroyed — a record deleted with NO
+    // delete revision, the exact PIT lie D-1 exists to prevent.
+    await expect(
+      pluginDeleteRecord({ query: ((sql: string, params?: unknown[]) => q(sql, params)) as never, sheetId: SHEET, recordId: R }),
+    ).rejects.toThrow(/transaction/i)
+    expect(await recordRow(R)).toBeDefined() // row survives — nothing destructive ran
+    const links = await q('SELECT count(*)::int c FROM meta_record_revisions WHERE sheet_id = $1 AND record_id = $2', [SHEET, R])
+    expect(Number((links.rows[0] as { c: number }).c)).toBe(0)
+
+    // POSITIVE CONTROL (flag OFF): the same bare caller keeps the legacy D-1 behaviour (guard not reached).
+    delete process.env[FLAG]
+    await pluginDeleteRecord({ query: ((sql: string, params?: unknown[]) => q(sql, params)) as never, sheetId: SHEET, recordId: R })
+    expect(await recordRow(R)).toBeUndefined()
+  })
+
   // ── §G retention-GUC containment ───────────────────────────────────────────────────────────────────────
   test('G1 the prune GUC unlock is TRANSACTION-LOCAL: after a successful prune, a plain endpoint DELETE on the SAME connection still rejects', async () => {
     process.env[FLAG] = 'true'
