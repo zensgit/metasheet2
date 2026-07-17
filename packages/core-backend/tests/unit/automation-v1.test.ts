@@ -56,7 +56,8 @@ vi.mock('../../src/db/db', () => {
 })
 
 import { AutomationLogService } from '../../src/multitable/automation-log-service'
-import { AutomationRuleValidationError, AutomationService } from '../../src/multitable/automation-service'
+import { AutomationRuleValidationError, AutomationService, toExecutorRule } from '../../src/multitable/automation-service'
+import { deriveRuleActionSetFingerprint } from '../../src/multitable/automation-rule-fingerprint'
 import { AutomationJobService } from '../../src/multitable/automation-job-service'
 import { normalizeWorkflowJob } from '../../src/multitable/workflow-job-contract'
 
@@ -4143,6 +4144,38 @@ describe('AutomationService — retryExecution (A5)', () => {
     expect(await service.retryExecution('axe_orig', 'admin1')).toMatchObject({ status: 409, code: 'RULE_MISSING_OR_DISABLED' })
     getRule.mockResolvedValue(currentRule({ enabled: false }))
     expect(await service.retryExecution('axe_orig', 'admin1')).toMatchObject({ status: 409, code: 'RULE_MISSING_OR_DISABLED' })
+  })
+
+  // #4196 §4 — the RAW-config rule-change guard.
+  it('409 RULE_CHANGED when the current rule fingerprint differs from the one captured at the original run', async () => {
+    const getRule = vi.spyOn(service, 'getRule').mockResolvedValue(currentRule({ action_config: { url: 'https://x', token: 'ROTATED' } }))
+    const execSpy = vi.spyOn(service, 'executeRule')
+    // the original captured a fingerprint that will NOT match the (changed) current rule
+    vi.spyOn(service.logs, 'getById').mockResolvedValue(storedExecution({ ruleActionFingerprint: 'stale-fingerprint-hash' }))
+    const r = await service.retryExecution('axe_orig', 'admin1')
+    expect(r).toMatchObject({ status: 409, code: 'RULE_CHANGED' })
+    expect(execSpy).not.toHaveBeenCalled() // refused BEFORE running against mismatched action_keys
+    expect(getRule).toHaveBeenCalled()
+  })
+
+  it('retries when the current rule fingerprint MATCHES the captured one (unchanged rule)', async () => {
+    const rule = currentRule()
+    const matchingFp = deriveRuleActionSetFingerprint(toExecutorRule(rule as never).actions).hash
+    vi.spyOn(service, 'getRule').mockResolvedValue(rule)
+    vi.spyOn(service.logs, 'getById').mockResolvedValue(storedExecution({ ruleActionFingerprint: matchingFp }))
+    const execSpy = vi.spyOn(service, 'executeRule').mockResolvedValue(storedExecution({ id: 'axe_new', status: 'success' }))
+    const r = await service.retryExecution('axe_orig', 'admin1')
+    expect('execution' in r).toBe(true)
+    expect(execSpy).toHaveBeenCalled()
+  })
+
+  it('rollout-safe: a pre-column execution (no captured fingerprint) is NOT guarded — retry proceeds', async () => {
+    vi.spyOn(service, 'getRule').mockResolvedValue(currentRule())
+    vi.spyOn(service.logs, 'getById').mockResolvedValue(storedExecution({ ruleActionFingerprint: undefined }))
+    const execSpy = vi.spyOn(service, 'executeRule').mockResolvedValue(storedExecution({ id: 'axe_new', status: 'success' }))
+    const r = await service.retryExecution('axe_orig', 'admin1')
+    expect('execution' in r).toBe(true) // non-regressing for executions that predate the column
+    expect(execSpy).toHaveBeenCalled()
   })
 
   it('failed retry delegates to executeRule with stored trigger_event + retry provenance', async () => {

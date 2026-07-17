@@ -77,11 +77,11 @@ export class AutomationLogService {
       `INSERT INTO multitable_automation_executions (
          id, rule_id, triggered_by, triggered_at, status, steps, error, duration,
          sheet_id, trigger_event, rule_snapshot, finished_at, schema_version,
-         rerun_of_execution_id, initiated_by
+         rerun_of_execution_id, initiated_by, rule_action_fingerprint
        ) VALUES (
          $1, $2, $3, $4, $5, $6::jsonb, $7, $8,
          $9, $10::jsonb, $11::jsonb, $12, $13,
-         $14, $15
+         $14, $15, $16
        )`,
       [
         execution.id,
@@ -99,6 +99,8 @@ export class AutomationLogService {
         execution.schemaVersion ?? AUTOMATION_EXECUTION_SCHEMA_VERSION,
         execution.rerunOfExecutionId ?? null,
         execution.initiatedBy ?? null,
+        // #4196 §4: a values-free sha256 of the RAW action identities — NOT redacted (no business values).
+        execution.ruleActionFingerprint ?? null,
       ],
     )
   }
@@ -122,6 +124,7 @@ export class AutomationLogService {
         rule_snapshot: persisted.ruleSnapshotJsonb,
         finished_at: execution.finishedAt ?? null,
         schema_version: execution.schemaVersion ?? AUTOMATION_EXECUTION_SCHEMA_VERSION,
+        rule_action_fingerprint: execution.ruleActionFingerprint ?? null,
         rerun_of_execution_id: execution.rerunOfExecutionId ?? null,
         initiated_by: execution.initiatedBy ?? null,
       })
@@ -297,6 +300,8 @@ function toExecution(row: Record<string, unknown>): AutomationExecution {
           ? row.finished_at.toISOString()
           : String(row.finished_at),
     schemaVersion: row.schema_version != null ? Number(row.schema_version) : undefined,
+    // #4196 §4 — null for pre-column executions (the retry guard is skipped on a missing fingerprint; rollout-safe).
+    ruleActionFingerprint: (row.rule_action_fingerprint as string) ?? undefined,
     // A5 retry provenance — null-safe for non-retry / pre-A5 rows.
     rerunOfExecutionId: (row.rerun_of_execution_id as string) ?? undefined,
     initiatedBy: (row.initiated_by as string) ?? undefined,
