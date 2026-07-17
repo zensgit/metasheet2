@@ -245,6 +245,7 @@ export default defineConfig({
       // isolated per-test schema). Excluded from the no-DB default job so it doesn't skip-green, and
       // wired as a WHOLE FILE into the `Run attendance integration tests` step in plugin-tests.yml.
       'tests/integration/multitable-attachment-blob-purge.db.test.ts',
+      'tests/integration/attendance-approval-action-authorization.db.test.ts',
       'tests/integration/attendance-comp-time-expiry-reminder.test.ts',
       'tests/integration/attendance-expiry-service.test.ts',
       'tests/integration/attendance-notification-deliveries.test.ts',

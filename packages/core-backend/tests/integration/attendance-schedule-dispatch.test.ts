@@ -975,6 +975,171 @@ describeDb('schedule-dispatch D1 contract (real DB, route-level)', () => {
     }
   })
 
+  // ---- S7-0 OD-S7-0 scheduler-scope carve-out (owner erratum 2026-07-16) ------------------------
+  // The authorization mode is keyed on the request's CREATION-FROZEN approvalFlow.steps:
+  //   schedule_dispatch + zero frozen steps  => SCOPE-NATIVE  (dispatch-scope check, both actions)
+  //   everything else (incl. dispatch w/ steps) => ASSIGNMENT-AUTHORITATIVE (S7-0 per-node check)
+  // Under RBAC_BYPASS='false' these actors hold NO DB permissions/roles — authorization comes purely
+  // from scheduler scopes, so the scope-native path is exercised in isolation from the assignment path.
+
+  const insertSchedulerScope = async (subjectRef: string, actions: string[], scope: Record<string, unknown>) => {
+    await pool.query(
+      `INSERT INTO attendance_scheduler_scopes
+         (id, org_id, subject_type, subject_ref, actions, scope, is_active, created_by, updated_by)
+       VALUES ($1, $2, 'user', $3, $4::text[], $5::jsonb, true, 'integration-test', 'integration-test')`,
+      [randomUUID(), ORG, subjectRef, actions, JSON.stringify(scope)],
+    )
+  }
+
+  it('S7-0 (a): zero-step dispatch is scope-native — an UNASSIGNED actor with approve + dispatch scope may approve AND reject', async () => {
+    const prefix = `dispatch-s7a-${Date.now().toString(36)}`
+    const adminToken = await mintToken(`${prefix}-admin`, 'attendance:read,attendance:write,attendance:admin,attendance:approve')
+    const actorId = `${prefix}-actor`
+    const dispatchedUserId = `${prefix}-user`
+    const previousRbacBypass = process.env.RBAC_BYPASS
+    const { scheduleGroupId, shiftId, departmentRef } = await seedDispatchTargets(prefix)
+    const approvalFlowId = await seedDispatchFlow(prefix) // steps: [] → zero-step → scope-native
+    const actorToken = await mintToken(actorId, 'attendance:read')
+    try {
+      const approveReqId = await createScheduleDispatchRequest(adminToken, {
+        userId: dispatchedUserId, targetScheduleGroupId: scheduleGroupId, targetShiftId: shiftId,
+        startDate: '2051-03-01', endDate: '2051-03-01', approvalFlowId,
+      })
+      const rejectReqId = await createScheduleDispatchRequest(adminToken, {
+        userId: dispatchedUserId, targetScheduleGroupId: scheduleGroupId, targetShiftId: shiftId,
+        startDate: '2051-03-02', endDate: '2051-03-02', approvalFlowId,
+      })
+      process.env.RBAC_BYPASS = 'false'
+      // approve scope satisfies the broad gate; dispatch scope satisfies the scope-native dispatch check.
+      await insertSchedulerScope(actorId, ['approve'], { userIds: [dispatchedUserId] })
+      await insertSchedulerScope(actorId, ['dispatch'], { userIds: [dispatchedUserId], scheduleGroupIds: [scheduleGroupId], departments: [departmentRef] })
+
+      const approve = await requestJson(`${baseUrl}/api/attendance/requests/${approveReqId}/approve`, {
+        method: 'POST', headers: authHeaders(actorToken), body: JSON.stringify({ comment: `${prefix} approve` }),
+      })
+      expect(approve.status, approve.raw).toBe(200)
+      expect((approve.body as { data?: { status?: string } } | undefined)?.data?.status).toBe('approved')
+
+      const reject = await requestJson(`${baseUrl}/api/attendance/requests/${rejectReqId}/reject`, {
+        method: 'POST', headers: authHeaders(actorToken), body: JSON.stringify({ comment: `${prefix} reject` }),
+      })
+      expect(reject.status, reject.raw).toBe(200)
+      expect((reject.body as { data?: { status?: string } } | undefined)?.data?.status).toBe('rejected')
+    } finally {
+      if (previousRbacBypass === undefined) delete process.env.RBAC_BYPASS
+      else process.env.RBAC_BYPASS = previousRbacBypass
+      await cleanupPrefix(prefix)
+    }
+  })
+
+  it('S7-0 (b): zero-step dispatch — approve-scope-only actor MISSING dispatch scope is SCHEDULER_SCOPE_FORBIDDEN on approve AND reject', async () => {
+    const prefix = `dispatch-s7b-${Date.now().toString(36)}`
+    const adminToken = await mintToken(`${prefix}-admin`, 'attendance:read,attendance:write,attendance:admin,attendance:approve')
+    const actorId = `${prefix}-actor`
+    const dispatchedUserId = `${prefix}-user`
+    const previousRbacBypass = process.env.RBAC_BYPASS
+    const { scheduleGroupId, shiftId } = await seedDispatchTargets(prefix)
+    const approvalFlowId = await seedDispatchFlow(prefix) // zero-step → scope-native
+    const actorToken = await mintToken(actorId, 'attendance:read')
+    try {
+      const approveReqId = await createScheduleDispatchRequest(adminToken, {
+        userId: dispatchedUserId, targetScheduleGroupId: scheduleGroupId, targetShiftId: shiftId,
+        startDate: '2052-03-01', endDate: '2052-03-01', approvalFlowId,
+      })
+      const rejectReqId = await createScheduleDispatchRequest(adminToken, {
+        userId: dispatchedUserId, targetScheduleGroupId: scheduleGroupId, targetShiftId: shiftId,
+        startDate: '2052-03-02', endDate: '2052-03-02', approvalFlowId,
+      })
+      process.env.RBAC_BYPASS = 'false'
+      // approve scope satisfies the broad gate; NO dispatch scope → scope-native check must deny both actions.
+      await insertSchedulerScope(actorId, ['approve'], { userIds: [dispatchedUserId] })
+
+      const approve = await requestJson(`${baseUrl}/api/attendance/requests/${approveReqId}/approve`, {
+        method: 'POST', headers: authHeaders(actorToken), body: JSON.stringify({ comment: `${prefix} approve` }),
+      })
+      expect(approve.status, approve.raw).toBe(403)
+      expect((approve.body as { error?: { code?: string } } | undefined)?.error?.code).toBe('SCHEDULER_SCOPE_FORBIDDEN')
+
+      const reject = await requestJson(`${baseUrl}/api/attendance/requests/${rejectReqId}/reject`, {
+        method: 'POST', headers: authHeaders(actorToken), body: JSON.stringify({ comment: `${prefix} reject` }),
+      })
+      expect(reject.status, reject.raw).toBe(403)
+      expect((reject.body as { error?: { code?: string } } | undefined)?.error?.code).toBe('SCHEDULER_SCOPE_FORBIDDEN')
+
+      // No mutation on either denied action (dispatch-scope check precedes every state write).
+      const statuses = await pool.query(
+        'SELECT status FROM attendance_requests WHERE id = ANY($1::uuid[])',
+        [[approveReqId, rejectReqId]],
+      )
+      for (const row of statuses.rows) expect(row.status).toBe('pending')
+    } finally {
+      if (previousRbacBypass === undefined) delete process.env.RBAC_BYPASS
+      else process.env.RBAC_BYPASS = previousRbacBypass
+      await cleanupPrefix(prefix)
+    }
+  })
+
+  it('S7-0 (c): NON-EMPTY-step dispatch is assignment-authoritative — a scope-valid but UNASSIGNED actor is FORBIDDEN on approve AND reject', async () => {
+    const prefix = `dispatch-s7c-${Date.now().toString(36)}`
+    const adminToken = await mintToken(`${prefix}-admin`, 'attendance:read,attendance:write,attendance:admin,attendance:approve')
+    const actorId = `${prefix}-actor`
+    const stepApproverId = `${prefix}-step-approver`
+    const dispatchedUserId = `${prefix}-user`
+    const previousRbacBypass = process.env.RBAC_BYPASS
+    const { scheduleGroupId, shiftId, departmentRef } = await seedDispatchTargets(prefix)
+    // A dispatch flow WITH a non-empty step (a specific user approver) → assignment-authoritative.
+    const flowRes = await requestJson(`${baseUrl}/api/attendance/approval-flows`, {
+      method: 'POST',
+      headers: authHeaders(await mintToken(`${prefix}-flow-admin`, 'attendance:read,attendance:write,attendance:admin,attendance:approve')),
+      body: JSON.stringify({
+        name: `${prefix}-flow`, requestType: 'schedule_dispatch', isActive: true,
+        steps: [{ name: 'dispatch-approver', approverUserIds: [stepApproverId] }],
+      }),
+    })
+    expect(flowRes.status, flowRes.raw).toBe(201)
+    const approvalFlowId = (flowRes.body as { data?: { id?: string } } | undefined)?.data?.id as string
+    expect(approvalFlowId).toBeTruthy()
+    const actorToken = await mintToken(actorId, 'attendance:read')
+    try {
+      const approveReqId = await createScheduleDispatchRequest(adminToken, {
+        userId: dispatchedUserId, targetScheduleGroupId: scheduleGroupId, targetShiftId: shiftId,
+        startDate: '2053-03-01', endDate: '2053-03-01', approvalFlowId,
+      })
+      const rejectReqId = await createScheduleDispatchRequest(adminToken, {
+        userId: dispatchedUserId, targetScheduleGroupId: scheduleGroupId, targetShiftId: shiftId,
+        startDate: '2053-03-02', endDate: '2053-03-02', approvalFlowId,
+      })
+      process.env.RBAC_BYPASS = 'false'
+      // The actor is fully scope-valid (approve + dispatch scope covering the target) but is NOT the
+      // configured step approver — for a non-empty dispatch flow the per-node assignment check governs,
+      // so this must be FORBIDDEN (not SCHEDULER_SCOPE_FORBIDDEN — the dispatch-scope check is never reached).
+      await insertSchedulerScope(actorId, ['approve'], { userIds: [dispatchedUserId] })
+      await insertSchedulerScope(actorId, ['dispatch'], { userIds: [dispatchedUserId], scheduleGroupIds: [scheduleGroupId], departments: [departmentRef] })
+
+      const approve = await requestJson(`${baseUrl}/api/attendance/requests/${approveReqId}/approve`, {
+        method: 'POST', headers: authHeaders(actorToken), body: JSON.stringify({ comment: `${prefix} approve` }),
+      })
+      expect(approve.status, approve.raw).toBe(403)
+      expect((approve.body as { error?: { code?: string } } | undefined)?.error?.code).toBe('FORBIDDEN')
+
+      const reject = await requestJson(`${baseUrl}/api/attendance/requests/${rejectReqId}/reject`, {
+        method: 'POST', headers: authHeaders(actorToken), body: JSON.stringify({ comment: `${prefix} reject` }),
+      })
+      expect(reject.status, reject.raw).toBe(403)
+      expect((reject.body as { error?: { code?: string } } | undefined)?.error?.code).toBe('FORBIDDEN')
+
+      const statuses = await pool.query(
+        'SELECT status FROM attendance_requests WHERE id = ANY($1::uuid[])',
+        [[approveReqId, rejectReqId]],
+      )
+      for (const row of statuses.rows) expect(row.status).toBe('pending')
+    } finally {
+      if (previousRbacBypass === undefined) delete process.env.RBAC_BYPASS
+      else process.env.RBAC_BYPASS = previousRbacBypass
+      await cleanupPrefix(prefix)
+    }
+  })
+
   it('enforces schedule-dispatch slot semantics at create and final approval', async () => {
     const prefix = `dispatch-final-slot-${Date.now().toString(36)}`
     const token = await mintToken(`${prefix}-admin`, 'attendance:read,attendance:write,attendance:admin,attendance:approve')
