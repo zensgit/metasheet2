@@ -10,6 +10,7 @@ import { afterAll, describe, expect, test } from 'vitest'
 
 import { poolManager } from '../../src/integration/db/connection-pool'
 import { bindAttachmentsOnSubmit, reconcileBucket } from '../../src/services/approval-attachment-reconciler'
+import { sweepUnboundAttachments } from '../../src/services/approval-attachment-gc'
 
 const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
 const db = () => poolManager.get()
@@ -25,14 +26,14 @@ async function ensureInstance(id: string) {
   await db().query(`INSERT INTO approval_instances (id, status) VALUES ($1,'pending') ON CONFLICT (id) DO NOTHING`, [id])
 }
 
-async function seed(over: { uploader?: string; status?: string; key?: string; size?: number } = {}) {
+async function seed(over: { uploader?: string; status?: string; key?: string; size?: number; ageHours?: number } = {}) {
   const id = `att6_${RUN}_${ids.length}`
   ids.push(id)
   if (over.status === 'bound') await ensureInstance(BOUND_INSTANCE)
   await db().query(
-    `INSERT INTO approval_attachments (id, org_id, uploader_id, field_id, storage_key, file_name, mime_type, size_bytes, status, instance_id)
-     VALUES ($1,'org1',$2,'fldA',$3,'a.pdf','application/pdf',$4,$5,$6)`,
-    [id, over.uploader ?? 'u1', over.key ?? `key_${id}`, over.size ?? 1024, over.status ?? 'unbound', over.status === 'bound' ? BOUND_INSTANCE : null],
+    `INSERT INTO approval_attachments (id, org_id, uploader_id, field_id, storage_key, file_name, mime_type, size_bytes, status, instance_id, created_at)
+     VALUES ($1,'org1',$2,'fldA',$3,'a.pdf','application/pdf',$4,$5,$6, now() - ($7::int * interval '1 hour'))`,
+    [id, over.uploader ?? 'u1', over.key ?? `key_${id}`, over.size ?? 1024, over.status ?? 'unbound', over.status === 'bound' ? BOUND_INSTANCE : null, over.ageHours ?? 0],
   )
   return id
 }
@@ -117,5 +118,82 @@ describeIfDatabase('attachment bind (form-freeze) + reconciler (real DB)', () =>
     expect(r.orphanBlobsQueued).toBe(0) // positive control: the just-uploaded blob is left alone
     const pi = await db().query('SELECT count(*)::int AS c FROM approval_attachment_purge_intents WHERE storage_key=$1', [inflightKey])
     expect(Number(pi.rows[0].c)).toBe(0)
+  })
+
+  // §12 item 4 / G4 — CONSTRUCTED concurrent double-submit: two create-instance binds RACE on the same
+  // unbound id. The row-locked `WHERE status='unbound'` serializes them → EXACTLY ONE binds; the loser
+  // sees a bound row (0 rows updated) and its whole submission throws. A sequential rebind-refused check
+  // does NOT satisfy G4 — this holds A's row lock open while B blocks, then commits A to release B.
+  test('double-submit race (G4): exactly one create binds the shared id; the loser fails whole', async () => {
+    const id = await seed()
+    const instA = `apr_${RUN}_raceA`
+    const instB = `apr_${RUN}_raceB`
+    await ensureInstance(instA)
+    await ensureInstance(instB)
+    const raw = db().getInternalPool()
+    const a = await raw.connect()
+    const b = await raw.connect()
+    try {
+      await a.query('BEGIN')
+      // A binds first: acquires the row lock and sets status='bound' in A's uncommitted txn
+      expect(await bindAttachmentsOnSubmit(a, 'u1', instA, { fldA: [id] })).toEqual({ bound: 1 })
+      await b.query('BEGIN')
+      // B races on the SAME id — its UPDATE blocks on A's row lock (promise stays pending)
+      const bBind = bindAttachmentsOnSubmit(b, 'u1', instB, { fldA: [id] })
+      // release A → B unblocks, re-reads the now-committed bound row, matches 0 rows, throws
+      await a.query('COMMIT')
+      await expect(bBind).rejects.toThrow(/bindable|rejected/)
+      await b.query('ROLLBACK')
+    } finally {
+      a.release()
+      b.release()
+    }
+    // exactly one winner: the row is bound to A, never to B, never double-bound
+    const row = await db().query('SELECT status, instance_id FROM approval_attachments WHERE id=$1', [id])
+    expect(row.rows[0]).toMatchObject({ status: 'bound', instance_id: instA })
+  })
+
+  // §12 item 13 / G11 — CONSTRUCTED GC↔bind race, BOTH interleavings.
+  test('GC↔bind race (G11): (i) bind wins → blob survives, no intent; (ii) GC wins → bind fails closed', async () => {
+    // (i) BIND WINS: bind holds the row lock; a concurrent sweep SKIP-LOCKS past it → the just-bound row
+    //     is NOT swept, NO purge intent is written, the blob survives.
+    const winId = await seed({ ageHours: 200 }) // old enough that the sweep WOULD claim it if unlocked
+    const winInst = `apr_${RUN}_bindwins`
+    await ensureInstance(winInst)
+    const raw = db().getInternalPool()
+    const conn = await raw.connect()
+    try {
+      await conn.query('BEGIN')
+      await bindAttachmentsOnSubmit(conn, 'u1', winInst, { fldA: [winId] }) // row locked + bound (uncommitted)
+      const swept = await sweepUnboundAttachments(db(), 168) // separate connection → SKIP LOCKED skips the locked row
+      void swept
+      await conn.query('COMMIT')
+    } finally {
+      conn.release()
+    }
+    const winRow = await db().query('SELECT status FROM approval_attachments WHERE id=$1', [winId])
+    expect(winRow.rows[0].status).toBe('bound') // bind won; never soft-deleted
+    const winIntent = await db().query('SELECT count(*)::int AS c FROM approval_attachment_purge_intents WHERE storage_key=$1', [`key_${winId}`])
+    expect(Number(winIntent.rows[0].c)).toBe(0) // NO purge intent for the just-bound blob
+
+    // (ii) GC WINS: the sweep claims the row first (status='deleted' + intent). A subsequent bind sees no
+    //      unbound row → its whole submission fails closed → no "bound but blob gone".
+    const loseId = await seed({ ageHours: 200 })
+    const loseInst = `apr_${RUN}_gcwins`
+    await ensureInstance(loseInst)
+    await sweepUnboundAttachments(db(), 168) // claims loseId (old, unbound) → deleted + intent
+    const conn2 = await raw.connect()
+    try {
+      await conn2.query('BEGIN')
+      await expect(bindAttachmentsOnSubmit(conn2, 'u1', loseInst, { fldA: [loseId] })).rejects.toThrow(/bindable|rejected/)
+      await conn2.query('ROLLBACK')
+    } finally {
+      conn2.release()
+    }
+    const loseRow = await db().query('SELECT status, instance_id FROM approval_attachments WHERE id=$1', [loseId])
+    expect(loseRow.rows[0].status).toBe('deleted') // GC won; the bind did NOT resurrect it
+    expect(loseRow.rows[0].instance_id).toBeNull() // never "bound but blob gone"
+    const loseIntent = await db().query('SELECT count(*)::int AS c FROM approval_attachment_purge_intents WHERE storage_key=$1', [`key_${loseId}`])
+    expect(Number(loseIntent.rows[0].c)).toBe(1) // GC's intent is durable
   })
 })
