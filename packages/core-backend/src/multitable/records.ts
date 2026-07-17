@@ -1,6 +1,11 @@
 import { randomUUID } from 'crypto'
 import { recordRecordRevision } from './record-history-service'
-import { fenceWriterEntry } from './canonical-sheet-fence'
+import { mintOperation, sealOperation } from './operation-ledger'
+import {
+  assertNoActiveWriterBlock,
+  fenceWriterEntry,
+  isWriterFenceEnabled,
+} from './canonical-sheet-fence'
 
 import {
   acquireAutoNumberSheetWriteLock,
@@ -491,6 +496,8 @@ export async function patchRecord(
   // SDK-provided transaction — fence + durable-block check first. No-op & byte-identical when
   // MULTITABLE_ENABLE_WRITER_FENCE is off.
   await fenceWriterEntry(query, input.sheetId)
+  // W0-1 L6-a: mint the sealed operation after the fence; inert ⇒ byte-identical to L4cov.
+  const op = await mintOperation(query, input.sheetId)
   const { fields } = await loadSheetAndFields(query, input.sheetId)
 
   const existing = await getRecord({
@@ -572,7 +579,10 @@ export async function patchRecord(
     changedFieldIds: Object.keys(patch),
     patch,
     snapshot: nextData,
+    ledger: op,
   })
+  // W0-1 L6-a: seal the operation LAST. No-op when inert.
+  await sealOperation(query, op)
 
   return {
     id: existing.id,
@@ -589,7 +599,20 @@ export async function createRecord(
   input: CreateMultitableRecordInput,
 ): Promise<CreatedMultitableRecord> {
   const query = input.query
+  // W0-1 L4cov (close the plugin-create PARTIAL gap — L4 map's records.ts:592). The sheet-write fence is
+  // acquired UNCONDITIONALLY: it predates L4 as the auto-number allocation-serialization lock (it serialises
+  // record-create against CREATE-FIELD auto-number backfill — see auto-number-service.ts), so gating it behind
+  // the L4 flag would REGRESS auto-number correctness when the flag is off, and the module's flag-off-parity
+  // contract explicitly keeps plugin-create as an unconditional `acquireCanonicalSheetFence` caller. We then add
+  // — flag-gated, so flag-off stays byte-identical — the durable recovery-block check `fenceWriterEntry` runs:
+  // if a recovery holds a durable `{fencing,applying,paused_retryable}` block on this sheet, refuse with
+  // `SheetWriterBlockedError`. Net effect with the flag ON is exactly `fenceWriterEntry` (fence-then-check); the
+  // split (vs. the sibling plugin patchRecord above, which uses `fenceWriterEntry` directly) exists ONLY to
+  // preserve the pre-existing unconditional fence.
   await acquireAutoNumberSheetWriteLock(query, input.sheetId)
+  if (isWriterFenceEnabled()) await assertNoActiveWriterBlock(query, input.sheetId)
+  // W0-1 L6-a: mint the sealed operation after the fence; inert ⇒ byte-identical to L4cov.
+  const op = await mintOperation(query, input.sheetId)
   const { fields } = await loadSheetAndFields(query, input.sheetId)
 
   const { patch, linkUpdates } = await buildNormalizedPatch(query, fields, input.data)
@@ -642,7 +665,10 @@ export async function createRecord(
     changedFieldIds: Object.keys(patch),
     patch,
     snapshot: patch,
+    ledger: op,
   })
+  // W0-1 L6-a: seal the operation LAST. No-op when inert.
+  await sealOperation(query, op)
 
   return {
     id: recordId,
@@ -679,6 +705,8 @@ async function deleteRecordWithRecoverability(
   // (The flag-off, non-transactional D-1 delete branch in `deleteRecord` cannot hold a txn-scoped advisory
   // lock; it is enumerated as an L4-SEAM in the PR matrix — fencing it needs the txn wrap that path lacks.)
   await fenceWriterEntry(query, input.sheetId)
+  // W0-1 L6-a: mint the sealed operation after the fence; inert ⇒ byte-identical to L4cov.
+  const op = await mintOperation(query, input.sheetId)
 
   // FOR UPDATE + the extra columns the trash row needs (created_by / created_at / updated_at) AND the
   // lock columns (see the re-check below). The flag-off path reads only data+version and needs no row
@@ -753,6 +781,7 @@ async function deleteRecordWithRecoverability(
     patch: {},
     id: deleteRevisionId,
     snapshot: snapshotRow.data ?? null,
+    ledger: op,
   })
 
   // Fail-closed on a missing trash schema (§1.8): NO 42P01/42703 swallow here, unlike the UI path's
@@ -786,6 +815,9 @@ async function deleteRecordWithRecoverability(
   if (!row) {
     throw new MultitableRecordNotFoundError(`Record not found: ${input.recordId}`)
   }
+
+  // W0-1 L6-a: seal the operation LAST. No-op when inert.
+  await sealOperation(query, op)
 
   return {
     id: input.recordId,

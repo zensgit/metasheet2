@@ -70,7 +70,11 @@ export const SMOKE_PHASES = Object.freeze([
 ])
 export const SMOKE_FAILURE_CLASSES = Object.freeze(['NONE', 'CHECK_FAILED', 'SELF_SCAN_FAILED', 'FATAL_EXCEPTION'])
 export const SMOKE_LEAK_SCAN_STATUSES = Object.freeze(['NOT_RUN', 'PASS', 'FAIL'])
-// Internal-only phase cursor (P3: never written into the summary — the output face is EXACTLY the five
+export const HTTP_FAILURE_CLASSES = Object.freeze([
+  'NONE', 'NOT_HTTP', 'TENANT_CONTEXT', 'AUTHENTICATION', 'AUTHORIZATION', 'NOT_FOUND',
+  'API_UNAVAILABLE', 'CONFIG_INVALID', 'SERVER_ERROR', 'CLIENT_ERROR', 'RESPONSE_CONTRACT', 'UNKNOWN',
+])
+// Internal-only phase cursor (P3: never written into the summary — the output face is EXACTLY the seven
 // declared diagnostic fields; check() reads the current phase from here, not from the summary).
 const DIAG = { reachedIdx: -1, reachedName: 'NONE' }
 export function resetDiagnostics() { DIAG.reachedIdx = -1; DIAG.reachedName = 'NONE' }
@@ -84,6 +88,7 @@ function beginPhase(name) {
 export function computeDiagnosticLocus(result, reachedIdx = DIAG.reachedIdx) {
   const S = result.summary
   const failedChecks = result.checks.filter((c) => c.ok !== true)
+  const firstFailed = failedChecks[0] || null
   const last = SMOKE_PHASES.length - 1
   S.failedCheckCount = failedChecks.length
   // ENTERING a phase only proves the PREVIOUS one completed. The final phase is special-cased on its own
@@ -98,6 +103,9 @@ export function computeDiagnosticLocus(result, reachedIdx = DIAG.reachedIdx) {
   // (a name could contain a value); each check records its phase at push time.
   const firstPhase = failedChecks.length ? String(failedChecks[0].phase || 'NONE') : 'NONE'
   S.firstFailedCheck = (firstPhase === 'NONE' || SMOKE_PHASES.includes(firstPhase)) ? firstPhase : 'UNKNOWN'
+  S.firstFailedHttpStatus = firstFailed ? safeHttpStatus(firstFailed.httpStatus) : 0
+  const firstErrorClass = firstFailed ? String(firstFailed.errorClass || 'NOT_HTTP') : 'NONE'
+  S.firstFailedErrorClass = HTTP_FAILURE_CLASSES.includes(firstErrorClass) ? firstErrorClass : 'UNKNOWN'
   S.responseLeakScanStatus = lastPhaseCompleted ? (S.leakScanClean ? 'PASS' : 'FAIL') : 'NOT_RUN'
 }
 // failureClass needs the final pass/selfScanClean, so it is computed AFTER the self-scan.
@@ -276,6 +284,40 @@ export function safeCount(value) {
   return Number.isFinite(parsed) ? parsed : -1
 }
 
+// Corrective-7 diagnostic boundary: preserve only an HTTP status and one closed error class. Raw
+// response codes/messages never cross into RESULT, the runner summary, or shareable evidence.
+export function safeHttpStatus(value) {
+  const parsed = Number(value)
+  return Number.isInteger(parsed) && parsed >= 100 && parsed <= 599 ? parsed : 0
+}
+
+export function classifyHttpFailure(statusValue, codeValue) {
+  const status = safeHttpStatus(statusValue)
+  const code = typeof codeValue === 'string' ? codeValue : ''
+  if (status >= 200 && status < 300) return 'NONE'
+  if (code.startsWith('TENANT_')) return 'TENANT_CONTEXT'
+  if (code === 'UNAUTHENTICATED' || status === 401) return 'AUTHENTICATION'
+  if (code === 'FORBIDDEN' || code.includes('PERMISSION_DENIED') || status === 403) return 'AUTHORIZATION'
+  if (status === 404) return 'NOT_FOUND'
+  if (code.includes('API_UNAVAILABLE') || [501, 502, 503, 504].includes(status)) return 'API_UNAVAILABLE'
+  if (
+    code.includes('CONFIG_INVALID') || code.includes('REQUEST_INVALID') ||
+    code.includes('SCHEMA_INCOMPLETE') || code.includes('OBJECT_ID_INVALID') ||
+    status === 400 || status === 422
+  ) return 'CONFIG_INVALID'
+  if (status >= 500) return 'SERVER_ERROR'
+  if (status >= 400) return 'CLIENT_ERROR'
+  return status === 0 ? 'NOT_HTTP' : 'UNKNOWN'
+}
+
+export function httpCheckDiagnostic(response) {
+  const code = response?.body?.error?.code ?? response?.body?.code
+  return {
+    httpStatus: safeHttpStatus(response?.status),
+    errorClass: classifyHttpFailure(response?.status, code),
+  }
+}
+
 // Key-by-key projection of a count object: KNOWN keys -> Number(); everything else dropped. A
 // response fragment is never stringified wholesale.
 export function projectCounts(object, keys) {
@@ -432,11 +474,17 @@ export function formatSummaryBlock(summary) {
   return lines.join('\n')
 }
 
-function check(name, ok, detail = '') {
-  RESULT.checks.push({ name, ok: ok === true, detail, phase: DIAG.reachedName })
+function check(name, ok, detail = '', diagnostic = {}) {
+  const passed = ok === true
+  const httpStatus = safeHttpStatus(diagnostic.httpStatus)
+  let errorClass = HTTP_FAILURE_CLASSES.includes(diagnostic.errorClass) ? diagnostic.errorClass : 'UNKNOWN'
+  if (passed) errorClass = 'NONE'
+  else if (errorClass === 'NONE') errorClass = httpStatus >= 200 && httpStatus < 300 ? 'RESPONSE_CONTRACT' : 'UNKNOWN'
+  else if (errorClass === 'UNKNOWN' && httpStatus === 0 && diagnostic.errorClass === undefined) errorClass = 'NOT_HTTP'
+  RESULT.checks.push({ name, ok: passed, detail, phase: DIAG.reachedName, httpStatus, errorClass })
   const mark = ok === true ? 'ok' : 'FAIL'
   process.stderr.write(`[smoke] ${name}: ${mark}${detail ? ` (${detail})` : ''}\n`)
-  return ok === true
+  return passed
 }
 
 // Pure request-header builder — the load-bearing tenant-context contract lives here so it can be tested
@@ -495,7 +543,7 @@ async function main() {
   const fixture = buildSmokeFixture(salt, args.projectPrefix)
   const S = RESULT.summary
   let failed = false
-  const must = (name, ok, detail) => { if (!check(name, ok, detail)) failed = true }
+  const must = (name, ok, detail, diagnostic) => { if (!check(name, ok, detail, diagnostic)) failed = true }
   const req = (pathname, options) => requestJson(args.baseUrl, pathname, { token, timeoutMs: args.timeoutMs, tenantId: args.tenantId, ...options })
   const scope = (extra) => scopeQuery(args, extra)
   SELF_SCAN_SENTINELS = [...fixture.sentinels, ...ENGINE_MESSAGE_SENTINELS]
@@ -504,40 +552,45 @@ async function main() {
   // ── 0. auth round-trip (deploy SOP: a silent 401 usually means schema/token gap) ────────────────
   beginPhase('AUTH')
   const status = await req(`/api/integration/status${scope()}`, { label: 'status' })
+  const statusDiagnostic = httpCheckDiagnostic(status)
   S.statusHttp = status.status
-  must('status auth round-trip', status.ok, `http=${status.status}`)
+  must('status auth round-trip', status.ok, `http=${status.status}`, statusDiagnostic)
   if (!status.ok) return finish(failed, args)
 
   // ── 1. MVP provisioning: readiness -> ensure (idempotent) -> options/sync ────────────────────────
   beginPhase('PROVISIONING')
   const readiness1 = await req(`${API}/mvp/readiness${scope()}`, { label: 'mvp-readiness-pre' })
+  const readiness1Diagnostic = httpCheckDiagnostic(readiness1)
   S.readinessPreHttp = readiness1.status
   S.readinessPreReady = readiness1.body?.data?.ready === true
   S.readinessTableCount = safeCount(readiness1.body?.data?.evidence?.tableCount)
-  must('mvp readiness pre http 200', readiness1.ok, `http=${readiness1.status}`)
-  must('mvp readiness covers 9 frozen tables', S.readinessTableCount === 9, `tables=${S.readinessTableCount}`)
+  must('mvp readiness pre http 200', readiness1.ok, `http=${readiness1.status}`, readiness1Diagnostic)
+  must('mvp readiness covers 9 frozen tables', S.readinessTableCount === 9, `tables=${S.readinessTableCount}`, readiness1Diagnostic)
 
   const ensure = await req(`${API}/mvp/ensure${scope()}`, { method: 'POST', body: {}, accept: [200, 201], label: 'mvp-ensure' })
+  const ensureDiagnostic = httpCheckDiagnostic(ensure)
   S.ensureHttp = ensure.status
   S.ensureReady = ensure.body?.data?.ready === true
   S.ensureCreatedCount = safeCount(ensure.body?.data?.evidence?.createdCount)
-  must('mvp ensure http 200/201 + ready', ensure.ok && S.ensureReady, `http=${ensure.status} created=${S.ensureCreatedCount}`)
+  must('mvp ensure http 200/201 + ready', ensure.ok && S.ensureReady, `http=${ensure.status} created=${S.ensureCreatedCount}`, ensureDiagnostic)
   if (!ensure.ok || !S.ensureReady) return finish(true, args)
 
   const readiness2 = await req(`${API}/mvp/readiness${scope()}`, { label: 'mvp-readiness-post' })
+  const readiness2Diagnostic = httpCheckDiagnostic(readiness2)
   S.readinessPostHttp = readiness2.status
   S.readinessPostReady = readiness2.body?.data?.ready === true
-  must('mvp readiness post-ensure ready', readiness2.ok && S.readinessPostReady, `http=${readiness2.status}`)
+  must('mvp readiness post-ensure ready', readiness2.ok && S.readinessPostReady, `http=${readiness2.status}`, readiness2Diagnostic)
 
   const optionsSync = await req(`${API}/mvp/options/sync${scope()}`, {
     method: 'POST', body: { optionSets: buildOptionSetsFixture() }, label: 'mvp-options-sync',
   })
+  const optionsSyncDiagnostic = httpCheckDiagnostic(optionsSync)
   S.optionsSyncHttp = optionsSync.status
   S.optionsSyncedFieldCount = safeCount(optionsSync.body?.data?.evidence?.syncedFieldCount)
   S.optionsSkippedFieldCount = safeCount(optionsSync.body?.data?.evidence?.skippedFieldCount)
-  must('options sync http 200', optionsSync.ok, `http=${optionsSync.status}`)
+  must('options sync http 200', optionsSync.ok, `http=${optionsSync.status}`, optionsSyncDiagnostic)
   must('options sync covered every option field', S.optionsSyncedFieldCount > 0 && S.optionsSkippedFieldCount === 0,
-    `synced=${S.optionsSyncedFieldCount} skipped=${S.optionsSkippedFieldCount}`)
+    `synced=${S.optionsSyncedFieldCount} skipped=${S.optionsSkippedFieldCount}`, optionsSyncDiagnostic)
 
   // ── 2. sync/plan -> sync/persist (201) -> persist replay (200 skipped_existing) ─────────────────
   beginPhase('SYNC_PERSIST')

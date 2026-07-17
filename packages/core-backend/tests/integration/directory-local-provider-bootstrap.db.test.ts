@@ -193,9 +193,10 @@ describeIfDatabase('Canonical Org MVP — B1 local provider bootstrap (real DB)'
     // the constant name 'Local organization', so driving this through the service would collide
     // on the pre-existing UNIQUE(org_id, provider, name) index — the SAME confound test (b) is
     // written to dodge — and prove nothing about `one_active_local_integration_per_org` itself.
-    // Whether/how the service should ever re-bootstrap after a local row goes inactive (today no
-    // code path sets one inactive — scheduler/deprovision both exclude provider='local') is a
-    // service-layer naming question, not this index's job; this test isolates the index alone.
+    // How the SERVICE handles a deactivated anchor is answered separately by PB4-4: getOrCreate now
+    // REACTIVATES the canonical `name='Local organization'` anchor in place (same id) rather than
+    // bootstrapping a second row — see directory-local-integration-reactivation.db.test.ts. This
+    // test isolates the INDEX alone (raw inserts, differently-named rows), which is unchanged.
     const org = orgId('active-only')
     seededOrgIds.push(org)
 

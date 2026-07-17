@@ -1,6 +1,6 @@
-# 备料对接线 T3 弧收口 — 设计与验证记录（T3a → T3b → corrective-3/4/5）
+# 备料对接线 T3 弧收口 — 设计与验证记录（T3a → T3b → corrective-3/4/5/6）
 
-日期：2026-07-16
+日期：2026-07-16（2026-07-17 corrective-6 + 预防性诊断 addendum）
 范围：数据库/系统对接线（stock-preparation ERP/PLM approved source → 内部 MVP 表自动落库）
 本弧不变量：**externalWrite=false 恒定**；无 K3 Save / Submit / Audit；无生产写；公开面 values-free。
 
@@ -19,9 +19,12 @@
 | #4391 | T3b-1c 前置：结构性 config guard（`fieldMap.target=missingChildBom` 禁映射） | `343b48bba` |
 | #4398 | T3b-1c + T3b-2：route 接线（default-OFF）+ 真库 route smoke + CI 白名单 | `6789bcca7` |
 | #4402 | T4-final：prep-line smoke 的 approved-source 前置（OD-6 扩展） | `5447fbcd1` |
+| T4-corr | T4 corrective（owner 复审 P2/P3）：T4 `requestJson` 复用 W6 `buildRequestHeaders` 发送 `x-tenant-id`（corrective-5 N/8 同类缺陷）+ prelude 首调失败即停不 replay | （本修正 PR，合并后生效） |
 | #4351 | corrective-3：acceptance runner 的 smoke 捕获 stdout-only 化 + AST 接线守卫 | `9ae9f94ce` |
 | #4369 | corrective-4：Windows PowerShell 5.1 下 native stderr promotion 修复 | `56c6d28e6` |
 | #4390 | corrective-5：有界 values-free smoke 诊断契约 + x-tenant-id 根因修复 | `3bf7292e1` |
+| #4410 | corrective-6：验收 token 在任何 child/PM2 前 scrub + PM2 环境双重 hygiene gate | `f5c449782` |
+| #4423 | corrective-6 实体 provisioning 失败的 values-free HTTP/错误类预防性诊断扩展 | 本变更 |
 
 ## 2. 设计裁决摘要（两把设计锁的落地形态）
 
@@ -70,6 +73,8 @@ POST /api/integration/stock-preparation/mvp/source-runs/plm-bom   (admin)
 - **corrective-5（#4390）**：两件事。
   1. **有界 values-free 诊断契约**：smoke 侧 13 相位冻结枚举（`AUTH → PROVISIONING → SYNC_PERSIST → PROJECTS → SNAPSHOT_DIFF → MAPPINGS → CONVERSIONS → GENERATION_RUN → FAILCLOSED_PROBES → ERP_CACHE_SYNC → CLEANUP_RETIRES → AUDIT_TRAIL → RESPONSE_LEAK_SCAN`）+ 5 个诊断输出（`failureClass / lastCompletedPhase / firstFailedCheck / failedCheckCount / responseLeakScanStatus`，全部固定枚举或整数，exit 1 时也随 summary 传播）；runner 侧 `$Summary` 由 9 → 14 个白名单字段，`Test-SmokeOutcome` 对枚举做 allowlist 钳制（词表外→`UNKNOWN`，非枚举形→`NOT_RUN`）；末相位只有 `leakScanClean` 为 boolean 才算完成（防「误报最终阶段已完成」）。
   2. **实体机 N/8 根因修复**：smoke 原来只在 query string 携带租户，而租户加固后的写路由只认 `x-tenant-id` 头 → 首个写 400 `TENANT_REQUIRED` → 提前返回 → `N/8`。修复为 `buildRequestHeaders` 统一注入 `x-tenant-id`（`stock-preparation-mvp-postdeploy-smoke.mjs:449-452`），并以可注入 `fetchImpl`（:457-458）把该头钉进测试（删除该头 → `pass 24 / fail 2`，mutation KILLED）。
+- **corrective-6（#4410）**：corrective-5 的 smoke 五项本身全 PASS，但实体后验发现验收 token 被 PM2 继承。修复把选中 carrier 在 orchestration 入口捕获为 `SecureString` 并立即 scrub；PM2 restart 前检查 runner env，restart 后及 smoke 后分别检查 PM2 投影中的 token-presence boolean。首次 corrective-6 实体执行证明旧 failure class 未复现（独立 hygiene PASS），但因 runner 调用漏传非空 `-TenantId`，smoke 在 `PROVISIONING` 早退并记录 3 个失败检查。同一包、同一 SHA、同一 admin principal 补齐本地 tenant 参数后从 stage 1 单次重跑，六项验收判据全 PASS，根因闭环为执行参数遗漏，非包或 runtime 缺陷。
+- **预防性诊断扩展（#4423，本变更）**：在不保留 response body/code/message 的前提下，把诊断面从五字段扩为七字段：新增 `firstFailedHttpStatus`（仅 `0` 或 `100..599`）和 `firstFailedErrorClass`（固定枚举 `NONE/NOT_HTTP/TENANT_CONTEXT/AUTHENTICATION/AUTHORIZATION/NOT_FOUND/API_UNAVAILABLE/CONFIG_INVALID/SERVER_ERROR/CLIENT_ERROR/RESPONSE_CONTRACT/UNKNOWN`）。smoke 只在 check 记录安全二元组，runner 再做独立 regex + allowlist 钳制；恶意/业务值只能降为 `0` 与 `NOT_RUN/UNKNOWN`。该变更只防止未来同类失败再次只剩 phase/count；它不是 corrective-6 PASS 的前置，不需要 corrective-7 包或新的实体机执行。
 
 ## 5. 验证证据
 
@@ -78,8 +83,9 @@ POST /api/integration/stock-preparation/mvp/source-runs/plm-bom   (admin)
 - `http-routes.test.cjs`：T3b-1c 新增 6 测试——ON 全链（双向 leak-bait：正控证明哨兵值确实抵达内部写沉降面，再证明其绝不过 HTTP；行落沉 2/2；`imported→active` 在写沉降面证明且原词 `imported` 不落）、steering 5 向量 + body `projectId` 必填 + staging 形状 body projectId 不可转向物理 target、config guard 前置（adapter 创建/读取、records、provisioning 计数全 0）、raw lifecycle（released/obsolete/WIP）与 Option A 值级整包 422（details 不含原值）、OFF 双拼写（unset/'false'）响应 deepEqual 字节等价、mid-persist 注入失败 → coarse error 无哨兵泄漏。
 - `stock-preparation-mvp-postdeploy-smoke.test.mjs`：`tests 26 / pass 26 / fail 0`（逐字）。
 - PowerShell 契约/行为面（pwsh 7.6.2, macOS）：contract `ALL CONTRACT CHECKS PASS`；behavior `ALL 40 BEHAVIOURAL CHECKS PASS`；ps51 套件 11/12——唯一 FAIL 是「host 必须为 Windows PowerShell 5.1 Desktop」的环境守卫（macOS 上结构性不可满足；该套件的目标环境是 CI `windows-latest` 步骤，见 `plugin-tests.yml` 的 PS 5.1 arm）。
+- #4423 预防性诊断增量：smoke 单测 30/30（含完整 child smoke + 本地 HTTP 403 provisioning 早退链）；PowerShell contract 全 PASS（精确 17 字段）；behavior 57/57；Windows PowerShell 5.1 仍由 required CI arm 验证新字段捕获与 allowlist 解析。
 - core-backend `tsc --noEmit` exit 0。
-- T4-final harness（#4402）：prep-line smoke 契约测试 17/17（10 基线 + 7 新行为测试，经可注入 `req/must/registerSentinels` 驱动——happy path、dry_run(flag OFF)必败、replay 谎报写入必败、外写证据污染必败、steering-free 请求、哨兵注册契约必需即抛）；W6 冻结面零改动且其测试仍 26/0；两 PR（#4398/#4402）均经独立 Opus 对抗审阅（APPROVE，0 P1 / 0 P2；#4402 的 P3-1 hardening 当场闭合）。
+- T4-final harness（#4402）：prep-line smoke 契约测试 19/19（10 基线 + 9 新行为测试，含 buildRequestDefaults 透传钉与外写污染即停，经可注入 `req/must/registerSentinels` 驱动——happy path、dry_run(flag OFF)必败且**不再 replay**、replay 谎报写入必败、外写证据污染必败、steering-free 请求、哨兵注册契约必需即抛；另以**真实 `requestJson` + 注入 `fetchImpl`** 钉住 `x-tenant-id` 上线——owner 复审 P2 指出此前测试全走 scripted req、真实 header 组装从未被执行）；W6 冻结面零改动且其测试仍 26/0；两 PR（#4398/#4402）均经独立 Opus 对抗审阅（APPROVE，0 P1 / 0 P2；#4402 的 P3-1 hardening 当场闭合）。
 
 ### 5.2 真库（本地 PostgreSQL，CI 同款 MIGRATION_EXCLUDE 迁移）
 `stock-preparation-t3b-plm-autopersist-realdb.test.ts`（新，走**真 route handler + 真 provisioning/records**，物理 fieldId 从 `meta_fields` 交叉核对、拒绝逻辑 id 自证）4/4：
@@ -103,7 +109,7 @@ POST /api/integration/stock-preparation/mvp/source-runs/plm-bom   (admin)
 | M7 | 物理 target 采用 body projectId | `the body projectId can never move the physical target` |
 | M8 | ON 路径 tenant 换回 `resolveTenantId(req,input)` | **route 级 green（如实记录）**：steering guard 封死全部显式载体后该交换不可观测；承重防线 = M2 + 既有 resolver-differ 直测（T3a ratified 先例） |
 
-T4-final（#4402）smoke 侧 mutation：TM1 放宽接受 dry_run → `✖ ... a 200 dry_run (T3b flag OFF) FAILS the prelude`；TM2 请求携带 query steering 载体 → `✖ ... steering-free requests`；HM1 删哨兵注册调用 → 16/1 RED；均恢复后复绿。
+T4-final（#4402）smoke 侧 mutation：TM1 放宽接受 dry_run → `✖ ... a 200 dry_run (T3b flag OFF) FAILS the prelude`；TM2 请求携带 query steering 载体 → `✖ ... steering-free requests`；HM1 删哨兵注册调用 → 16/1 RED；TC1 删 `x-tenant-id` header 装配 → header 钉测 RED；TC2 删首调失败即停 → 单调用断言 RED；均恢复后复绿。
 corrective-5 侧关键 mutation（#4390 复审轮已 KILL）：删 `x-tenant-id` 头 → `pass 24 / fail 2`；伪造末相位完成 → P2-1 gate RED；`fieldMap` 空数组/畸形 entry 放行 → guard 单测 RED。
 白名单移除类 mutation（`plugin-tests.yml` 去行）为**文档化声明**：兄弟切片（T3a/T3b-1a realdb）同无 wiring-guard，遵循同模式如实记录，未虚称已被测试钉死。
 
@@ -111,17 +117,17 @@ corrective-5 侧关键 mutation（#4390 复审轮已 KILL）：删 `x-tenant-id`
 本地起真实服务 + 真库，完整重放验收轮：`mvpSmoke.pass=true`、`auditActionsCovered=8/8`、`selfScanClean=true`、`responseLeakScanStatus=PASS`（48 个响应逐个 leak-scan clean）。达标后才切包。
 
 ### 5.5 发布与执行指针
-- Release：`stock-prep-onprem-rc0-corrective5-20260716-3bf7292e1`（**Pre-release**，14 assets）；`BUILD_PROVENANCE.gitCommit == 3bf7292e16cdfcdf24bbf0857a9cbc5d653831d4`（= #4390 merge SHA，逐字节核对）。
-- #4101（OPEN）最新权威指令 = corrective-5 values-free 执行指针（issuecomment-4993413137）：stage 1 起完整重跑 + 五条 PASS 判据；corrective-4 release 在实体机 PASS 前**不**标 `[SUPERSEDED]`。
+- 最新已执行 release：`stock-prep-onprem-rc0-corrective6-20260717-f5c449782`（**Pre-release**，14 assets）；`BUILD_PROVENANCE.gitCommit == f5c4497828915f861a948a9e08326b88ff4497e3`（= #4410 merge SHA，独立校验）。
+- #4101 已记录 corrected corrective-6 结果：包/迁移/PM2/健康、`mvpSmoke.pass=true`、`auditActionsCovered=8/8`、`selfScanClean=true`、`responseLeakScanStatus=PASS`、`externalPlmK3ErpWrite=false`、`postRunCredentialHygiene=PASS`；post-run 只读复核亦全 PASS，`repeatability=1/1`。#4101 已按 W3-W6 Windows on-prem 包/runtime 验收范围 CLOSED；不扩张到 product 决策、外写、rollout 或未来实体执行。
 
 ## 6. 冻结面与剩余门（如实边界）
 
-- **实体机纯等待中**：corrective-5 包/runner/smoke 冻结；PASS → corrective-4 标记 `[SUPERSEDED]`、关 #4101；FAIL → 保留现场，按 5 个诊断字段定位相位/检查点。本文不将实体机结果计为已达成。
-- **T4-final**（OD-6 扩展）：harness 已交付（#4402）——`--approved-source-config-id` 可选前置，独立盐化 id 空间证明 approved source → project/batch/line/run 前段，合成链判据原样保留。**活体端到端执行按锁归 RC-A 的单次受控窗口**（operator 临时开 flag → 跑 → 恢复；本文不将其计为已执行）。
-- **RC-A**：单次 exact-SHA 包 + 实体机验收，三前置见 OD-6；reviewed FAIL 不解锁。
+- **RC-0 实体机验收已完成**：corrective-6 同包同 SHA 在补齐非空 `-TenantId` 后单次 stage-1 执行达成六项 PASS；corrective-4/5 release 已标记 `[SUPERSEDED→corrective-6]`，corrective-6 为已验收的 RC-0 包。#4423 只是预防性诊断加固，不重切包、不要求新的实体机执行。
+- **T4-final**（OD-6 扩展）：harness 已交付（#4402 + T4 corrective：租户 header 与失败即停）；**RC-A 须在 T4 corrective 合并后才可执行**。原 #4402——`--approved-source-config-id` 可选前置，独立盐化 id 空间证明 approved source → project/batch/line/run 前段，合成链判据原样保留。**活体端到端执行按锁归 RC-A 的单次受控窗口**（operator 临时开 flag → 跑 → 恢复；本文不将其计为已执行）。
+- **RC-A**：单次 exact-SHA 包 + 实体机验收，三前置见 OD-6；RC-0 PASS 不自动授权 RC-A，仍须 owner 独立放行。
 - **P4**：persist 原子性/repair 硬化，独立设计门；此前**生产常开保持 barred**（本弧从未声称跨表原子或孤儿 batch 可自愈——1a 只是把 false-success 改成显式 409）。
 - 部署模板不写死任何 auto-persist flag；两 flag 均 default OFF。
 
 ## 7. 结论
 
-T3 弧的代码侧交付按阶梯全部落 main：T3a（锁+runtime）、T3b-0/1a/1b/1c/2（锁 + persist 硬化 + 纯桥 + 结构守卫 + route 接线 + 真库 smoke）、T4-final（approved-source 前置 harness）、corrective-3/4/5（判据面三修 + 有界诊断契约 + 根因修复 + 本地全量预演 + 发包/指针）。剩余为**门控项**而非开发缺口：实体机 RC-0 终判、RC-A 单切（含 T4-final 活体执行）、P4 设计门。
+T3 弧的主体代码与 RC-0 实体机验收已闭环：T3a（锁+runtime）、T3b-0/1a/1b/1c/2（锁 + persist 硬化 + 纯桥 + 结构守卫 + route 接线 + 真库 smoke）、T4-final（approved-source 前置 harness）、corrective-3/4/5/6。#4423 只补足未来实体失败的 values-free 安全判定面，不是新的发包/实体验收阶梯。剩余皆为本弧外的 owner-gated 产品/部署决策，包括 RC-A 单切（含 T4-final 活体执行）与 P4 设计门。

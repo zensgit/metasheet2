@@ -232,6 +232,7 @@ import {
 } from '../multitable/auto-number-service'
 import {
   acquireCanonicalSheetFence,
+  assertNoActiveWriterBlock,
   claimDurableWriterBlock,
   fenceWriterEntry,
   isWriterFenceEnabled,
@@ -245,6 +246,7 @@ import {
   type YjsInvalidator,
 } from '../multitable/post-commit-hooks'
 import { listRecordRevisions, recordRecordRevision, recordRecordRevisionsBatch, recordVersionMarker, type RecordRevisionEntry, type RecordRevisionInput } from '../multitable/record-history-service'
+import { mintOperation, sealOperation } from '../multitable/operation-ledger'
 import { replayInboundLinks, isRecordUndeleteInboundEnabled } from '../multitable/inbound-link-replay'
 import { countInboundLinkCaptureRows, insertInboundLinkTombstones } from '../multitable/tombstone-capture'
 
@@ -5099,8 +5101,14 @@ async function ensurePeopleSheetPreset(query: QueryFn, baseId: string): Promise<
 
   if (!peopleSheetRow) {
     await query(
-      `INSERT INTO meta_sheets (id, base_id, name, description)
-       VALUES ($1, $2, $3, $4)`,
+      // W0-1 v3.7 §3: set the server-owned, non-forgeable `system_kind` at provisioning time (never from a
+      // client request). Requires the L5 migration (zzzz20260715180000) to have added the column — that
+      // migration is part of this same change and runs before new code serves traffic (deploy SOP:
+      // migrate-then-deploy). The migration performs NO backfill (owner P1: a description-sentinel backfill
+      // would launder a pre-migration forged sheet): a pre-existing People sheet stays NULL fail-closed until
+      // re-provisioned through this server-side path — an exclusion is never minted from user-writable data.
+      `INSERT INTO meta_sheets (id, base_id, name, description, system_kind)
+       VALUES ($1, $2, $3, $4, 'people_directory')`,
       [peopleSheetId, baseId, SYSTEM_PEOPLE_SHEET_NAME, SYSTEM_PEOPLE_SHEET_DESCRIPTION],
     )
     peopleSheetRow = {
@@ -8879,6 +8887,13 @@ export function univerMetaRouter(): Router {
         const confirm = typeof req.body?.confirm === 'string' ? req.body.confirm : ''
         if (confirm.trim() !== 'uncreate') return res.status(400).json({ ok: false, error: { code: 'CONFIRM_REQUIRED', message: 'Type "uncreate" to confirm dropping the created entity.' } })
         const failure = await pool.transaction(async ({ query }): Promise<{ status: number; code: string; message: string } | null> => {
+          // W0-1 L4cov (fence the config-restore-execute record writes — un-create branch). `dropFieldCascade`
+          // below strips the dropped field's key from EVERY record of this sheet's `data` (a whole-sheet
+          // record-data write via the shared field-drop cascade helper), so this txn is a record writer and
+          // must converge onto the canonical fence: acquire it first, then refuse (409 in the outer catch) if
+          // a recovery holds a durable block. (dropFieldCascade carries its own revision disposition.)
+          // Flag-off ⇒ no-op / byte-identical.
+          await fenceWriterEntry(query, sheetId)
           let fieldRow: any = null
           let viewRow: any = null
           if (rev.entity_type === 'field') {
@@ -8937,6 +8952,11 @@ export function univerMetaRouter(): Router {
         let failure: { status: number; code: string; message: string } | null = null
         try {
           failure = await pool.transaction(async ({ query }): Promise<{ status: number; code: string; message: string } | null> => {
+            // W0-1 L4cov (fence the config-restore-execute record writes — undelete branch). For a field
+            // undelete, `recreateFieldFromConfig` below re-materializes the field's cells across this sheet's
+            // `meta_records`, so this txn is a record writer: take the canonical fence first, then refuse (409
+            // in the outer catch) under an active recovery block. Flag-off ⇒ no-op / byte-identical.
+            await fenceWriterEntry(query, sheetId)
             // U4-L5 id-occupied check (FOR UPDATE) — also the idempotency guard: undelete when the entity already exists → reject.
             const table = rev.entity_type === 'field' ? 'meta_fields' : 'meta_views'
             const occ = (await query(`SELECT 1 FROM ${table} WHERE id = $1 FOR UPDATE`, [rev.entity_id])) as any
@@ -9034,6 +9054,14 @@ export function univerMetaRouter(): Router {
           const lossyRevisionId = randomUUID() // pre-generated: the 4c-2 pre-image anchors to THIS revert's revision
           let lossyExecuteSummary: LossSummary = { unchanged: 0, coerced: 0, dropped: 0 }
           const failure = await pool.transaction(async ({ query }): Promise<{ status: number; code: string; message: string } | null> => {
+            // W0-1 L4cov (fence the config-restore-execute record writes — lossy retype-revert branch). This is
+            // the highest-value config-restore fence: `applyLossyRetypeCellRewrite` below rewrites the coerced/
+            // dropped cells AND emits one `recordRecordRevision` per changed cell (C5 history completeness), so
+            // it ALLOCATES `seq` on `meta_record_revisions`. Without the canonical fence that seq allocation
+            // could interleave with a concurrent recovery's, breaking the allocation-order == commit-order
+            // guarantee this lane exists to protect. Fence first, then refuse (409 in the outer catch) under an
+            // active recovery block. Flag-off ⇒ no-op / byte-identical.
+            await fenceWriterEntry(query, sheetId)
             const fieldRow = await loadLossyRetypeFieldRow(query, rev.entity_id, true)
             if (!fieldRow) return { status: 409, code: 'ENTITY_GONE', message: 'The field no longer exists; cannot restore.' }
             if (fieldRow.sheetId !== sheetId) return { status: 400, code: 'INVALID_REVISION', message: 'field revision entity does not belong to this sheet.' }
@@ -9142,6 +9170,11 @@ export function univerMetaRouter(): Router {
       if (rev.entity_type === 'field') invalidateFieldCache(sheetId)
       return res.json({ ok: true, data: { restored: { revisionId, entityType: rev.entity_type, entityId: rev.entity_id, changedKeys: rev.changed_keys } } })
     } catch (err: unknown) {
+      // W0-1 L4cov: a fenced config-restore branch (uncreate / undelete / lossy retype-revert) observed a
+      // durable recovery writer-block → refuse with the same 409 RECOVERY_IN_PROGRESS shape as reset/revert.
+      if (err instanceof SheetWriterBlockedError) {
+        return res.status(409).json({ ok: false, error: { code: 'RECOVERY_IN_PROGRESS', message: 'Another recovery operation is in progress on this sheet; retry shortly.' } })
+      }
       if (err instanceof TombstoneCaptureCapExceededError) {
         return res.status(422).json({ ok: false, error: { code: 'TOMBSTONE_CAPTURE_CAP_EXCEEDED', message: err.message } })
       }
@@ -11218,6 +11251,11 @@ export function univerMetaRouter(): Router {
       invalidateFieldCache(sheetId)
       return res.status(201).json({ ok: true, data: { field: serializeFieldRow((fieldRes as any).rows[0]) } })
     } catch (err: any) {
+      // W0-1 L4cov: creating an auto-number field runs `backfillAutoNumberField`, now fence-then-block-checked;
+      // a durable recovery block surfaces here → 409 RECOVERY_IN_PROGRESS (same shape as reset/revert).
+      if (err instanceof SheetWriterBlockedError) {
+        return res.status(409).json({ ok: false, error: { code: 'RECOVERY_IN_PROGRESS', message: 'Another recovery operation is in progress on this sheet; retry shortly.' } })
+      }
       if (err instanceof NotFoundError) {
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: err.message } })
       }
@@ -11736,6 +11774,11 @@ export function univerMetaRouter(): Router {
 
       return res.json({ ok: true, data: { field: updated, ...(bulkRecompute ? { bulkRecompute } : {}) } })
     } catch (err: any) {
+      // W0-1 L4cov: changing an auto-number field property runs `backfillAutoNumberField` (overwrite), now
+      // fence-then-block-checked; a durable recovery block surfaces here → 409 RECOVERY_IN_PROGRESS.
+      if (err instanceof SheetWriterBlockedError) {
+        return res.status(409).json({ ok: false, error: { code: 'RECOVERY_IN_PROGRESS', message: 'Another recovery operation is in progress on this sheet; retry shortly.' } })
+      }
       if (err instanceof NotFoundError) {
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: err.message } })
       }
@@ -11777,10 +11820,15 @@ export function univerMetaRouter(): Router {
       const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
       if (!capabilities.canManageFields) return sendForbidden(res)
       const result = await pool.transaction(async ({ query }) => {
+        // W0-1 L4cov: dropFieldCascade below strips the dropped field's key from every record of this sheet's
+        // `data` (a whole-sheet record-data write via the shared field-drop cascade helper — the SAME cascade
+        // the config-restore un-create branch fences at ~8888), so the FORWARD field-delete txn is a record
+        // writer too and must take the canonical fence FIRST, then refuse (409 RECOVERY_IN_PROGRESS in the
+        // catch) if a recovery holds a durable block. Flag-off ⇒ no-op / byte-identical.
+        await fenceWriterEntry(query, sheetId)
         const existing = await query('SELECT id, sheet_id, name, type, property, "order" FROM meta_fields WHERE id = $1', [fieldId])
         if ((existing as any).rows.length === 0) throw new NotFoundError(`Field not found: ${fieldId}`)
         const row = (existing as any).rows[0]
-        const sheetId = String(row.sheet_id)
         // U3-L2: the field-delete cascade is the shared dropFieldCascade (also used by the un-create execute).
         await dropFieldCascade(query, {
           sheetId, fieldId,
@@ -11802,6 +11850,11 @@ export function univerMetaRouter(): Router {
       }
       const hint = getDbNotReadyMessage(err)
       if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
+      // W0-1 L4cov: fence-then-block-checked forward field-delete → a durable recovery block surfaces here as
+      // 409 RECOVERY_IN_PROGRESS (same shape as reset/revert and the un-create sibling).
+      if (err instanceof SheetWriterBlockedError) {
+        return res.status(409).json({ ok: false, error: { code: 'RECOVERY_IN_PROGRESS', message: 'Another recovery operation is in progress on this sheet; retry shortly.' } })
+      }
       console.error('[univer-meta] delete field failed:', err)
       return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to delete field' } })
     }
@@ -14614,7 +14667,17 @@ export function univerMetaRouter(): Router {
       let nextVersion = 1
 
       await pool.transaction(async ({ query }) => {
+        // W0-1 L4cov (close the form-submit create/edit PARTIAL gap — L4 map's univer-meta.ts:14585). The
+        // canonical sheet fence stays UNCONDITIONAL (the pre-existing auto-number serialization lock — the
+        // form-submit CREATE branch allocates auto-numbers below; byte-identical when the L4 flag is off), then
+        // a flag-gated durable recovery-block refusal covers BOTH the EDIT (UPDATE @14655) and CREATE (INSERT
+        // @14743) branches of this handler in one place. A block observed here throws `SheetWriterBlockedError`,
+        // caught in this handler's catch and mapped to 409 RECOVERY_IN_PROGRESS (same shape as reset/revert).
         await acquireAutoNumberSheetWriteLock(query, view.sheetId)
+        if (isWriterFenceEnabled()) await assertNoActiveWriterBlock(query, view.sheetId)
+        // W0-1 L6-a: mint the sealed operation after the fence — covers BOTH the EDIT and CREATE branches of
+        // this handler (one form submit = one operation). Inert ⇒ byte-identical to L4cov.
+        const op = await mintOperation(query, view.sheetId)
 
         if (recordId) {
           const currentRes = await query(
@@ -14685,6 +14748,7 @@ export function univerMetaRouter(): Router {
               changedFieldIds: Object.keys(patch),
               patch,
               snapshot: normalizeJson((updateRes as any).rows[0]?.data),
+              ledger: op,
             })
           } else {
             nextVersion = serverVersion
@@ -14719,6 +14783,8 @@ export function univerMetaRouter(): Router {
               await query('DELETE FROM meta_links WHERE field_id = $1 AND record_id = $2', [fieldId, recordId])
             }
           }
+          // W0-1 L6-a: seal the operation LAST for the EDIT branch (no-op when inert or a no-field-change edit).
+          await sealOperation(query, op)
           return
         }
 
@@ -14774,7 +14840,10 @@ export function univerMetaRouter(): Router {
           changedFieldIds: Object.keys(patch),
           patch,
           snapshot: patch,
+          ledger: op,
         })
+        // W0-1 L6-a: seal the operation LAST for the CREATE branch. No-op when inert.
+        await sealOperation(query, op)
       })
 
       const recordRes = await pool.query(
@@ -14923,6 +14992,10 @@ export function univerMetaRouter(): Router {
         },
       })
     } catch (err) {
+      // W0-1 L4cov: the fence's durable-block refusal (added at this handler's txn entry) surfaces here.
+      if (err instanceof SheetWriterBlockedError) {
+        return res.status(409).json({ ok: false, error: { code: 'RECOVERY_IN_PROGRESS', message: 'Another recovery operation is in progress on this sheet; retry shortly.' } })
+      }
       if (err instanceof VersionConflictError) {
         return res.status(409).json({
           ok: false,
@@ -15964,6 +16037,9 @@ export function univerMetaRouter(): Router {
         // W0-1 L4 (canonical fence): attachment cell-strip mutates meta_records.data — fence + durable-block
         // check first. No-op & byte-identical when MULTITABLE_ENABLE_WRITER_FENCE is off.
         await fenceWriterEntry(query, sheetId)
+        // W0-1 L6-a: mint the sealed operation after the fence; the cell-strip revision below (when the
+        // attachment is actually present) is this operation's sole event. Inert ⇒ byte-identical to L4cov.
+        const op = await mintOperation(query, sheetId)
 
         if (recordId && fieldId) {
           const recordRes = await query(
@@ -16030,12 +16106,16 @@ export function univerMetaRouter(): Router {
                 changedFieldIds: [fieldId],
                 patch: { [fieldId]: nextIds },
                 snapshot: normalizeJson((updateRes.rows[0] as any)?.data),
+                ledger: op,
               })
             }
           }
         }
 
         await softDeleteAttachmentRowShared({ query, attachmentId })
+        // W0-1 L6-a: seal the operation LAST (no-op when inert or when the attachment id was already absent
+        // ⇒ zero-event operation ⇒ not an executable anchor).
+        await sealOperation(query, op)
       })
 
       const storage = getAttachmentStorageService()
@@ -16595,6 +16675,9 @@ export function univerMetaRouter(): Router {
           // W0-1 L4 (canonical fence): lock bumps version + writes a version marker (chain event) — fence +
           // durable-block check first. No-op & byte-identical when MULTITABLE_ENABLE_WRITER_FENCE is off.
           await fenceWriterEntry(query, sheetId)
+          // W0-1 L6-a: mint the sealed operation after the fence; the lock marker below is this operation's
+          // sole event. Inert ⇒ byte-identical to L4cov.
+          const op = await mintOperation(query, sheetId)
           // lock-mgmt: LOCK action — sets the lock columns (own canEditRecord authority above).
           // revision-exempt: lock/unlock metadata-only — no `data` column touched, not a user-content edit.
           const upd = await query(
@@ -16603,7 +16686,9 @@ export function univerMetaRouter(): Router {
             [recordId, lockedBy, sheetId],
           )
           const newVersion = Number((upd.rows[0] as { version?: unknown } | undefined)?.version)
-          if (Number.isFinite(newVersion)) await recordVersionMarker(query, { sheetId, recordId, version: newVersion, kind: 'lock', actorId: actorId ?? access.userId ?? null })
+          if (Number.isFinite(newVersion)) await recordVersionMarker(query, { sheetId, recordId, version: newVersion, kind: 'lock', actorId: actorId ?? access.userId ?? null, ledger: op })
+          // W0-1 L6-a: seal the operation LAST (endpoint = the marker's seq). No-op when inert.
+          await sealOperation(query, op)
         })
       } else {
         // UNLOCK: must pass canUnlock (locker ∨ owner ∨ sheet-admin).
@@ -16619,6 +16704,8 @@ export function univerMetaRouter(): Router {
           // W0-1 L4 (canonical fence): unlock bumps version + writes a version marker — fence + durable-block
           // check first. No-op & byte-identical when MULTITABLE_ENABLE_WRITER_FENCE is off.
           await fenceWriterEntry(query, sheetId)
+          // W0-1 L6-a: mint the sealed operation after the fence; the unlock marker below is its sole event.
+          const op = await mintOperation(query, sheetId)
           // lock-mgmt: UNLOCK action — clears the lock columns (own canUnlock authority above).
           // revision-exempt: lock/unlock metadata-only — no `data` column touched, not a user-content edit.
           const upd = await query(
@@ -16627,7 +16714,9 @@ export function univerMetaRouter(): Router {
             [recordId, sheetId],
           )
           const newVersion = Number((upd.rows[0] as { version?: unknown } | undefined)?.version)
-          if (Number.isFinite(newVersion)) await recordVersionMarker(query, { sheetId, recordId, version: newVersion, kind: 'unlock', actorId: actorId ?? access.userId ?? null })
+          if (Number.isFinite(newVersion)) await recordVersionMarker(query, { sheetId, recordId, version: newVersion, kind: 'unlock', actorId: actorId ?? access.userId ?? null, ledger: op })
+          // W0-1 L6-a: seal the operation LAST (endpoint = the marker's seq). No-op when inert.
+          await sealOperation(query, op)
         })
       }
 

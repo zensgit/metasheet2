@@ -488,6 +488,12 @@ function isAdmin(user) {
   return permissions.includes('role:admin') || permissions.includes('integration:admin')
 }
 
+function isTenantlessPlatformAdmin(user) {
+  if (!listUserPermissions(user).includes('role:admin')) return false
+  const userTenantId = typeof (user && user.tenantId) === 'string' ? user.tenantId.trim() : ''
+  return userTenantId.length === 0
+}
+
 function requireAccess(req, action) {
   const user = getUser(req)
   if (!user) {
@@ -512,7 +518,9 @@ function resolveTenantId(req, input = {}) {
   if (!tenantId) {
     throw new HttpRouteError(400, 'TENANT_REQUIRED', 'tenantId is required')
   }
-  if (user && !isAdmin(user)) {
+  // Tenant-bound principals stay confined to their authenticated tenant, including tenant admins.
+  // Only a tenantless platform admin retains the existing explicit cross-tenant read capability.
+  if (user && !isTenantlessPlatformAdmin(user)) {
     const userTenantId = typeof user.tenantId === 'string' ? user.tenantId.trim() : ''
     if (!userTenantId) {
       throw new HttpRouteError(403, 'TENANT_CONTEXT_REQUIRED', 'tenant context is required')
@@ -525,10 +533,9 @@ function resolveTenantId(req, input = {}) {
 }
 
 // A tenant-scoped WRITE must derive its tenant from the AUTHENTICATED principal ONLY — never from the
-// request. resolveTenantId above honors a request-supplied tenantId for admins (platform-admin
-// cross-tenant READS depend on that), which on a write route is a steering vector: a tenant_1 admin
-// could pass tenantId: tenant_evil and redirect the write to another tenant's staging project. This
-// fail-closed helper is the write-safe derivation — the request cannot influence it at all.
+// request. resolveTenantId above honors a request-supplied tenantId only for tenantless platform
+// admins (cross-tenant READS depend on that). On a write route even that allowance is a steering
+// vector, so this fail-closed helper derives the tenant without consulting the request at all.
 function resolveAuthUserTenantId(req) {
   const user = getUser(req)
   const tenantId = typeof (user && user.tenantId) === 'string' ? user.tenantId.trim() : ''
@@ -3996,11 +4003,9 @@ function createHandlers(services, options = {}) {
     // internal or external write and no K3 Save/Submit/Audit path.
     async stockPreparationErpMaterialSourceRun(req, res) {
       const user = requireAccess(req, 'admin')
-      // T3a OD-2 (security): while this route is read-only, its request-steerable tenant resolution is a
-      // deferred GHSA step-2 question. When the T3a auto-persist flag is ON the read gains a WRITE side
-      // effect, so the tenant MUST come from the AUTHENTICATED principal (resolveTenantId would honor a
-      // request tenantId for admins) — the auto-persist cannot be steered to another tenant's cache. Flag
-      // OFF keeps today's read-only behavior byte-for-byte (RC-0 safe).
+      // T3a OD-2: OFF stays readonly, but the shared resolver still confines a tenant-bound principal
+      // to its authenticated tenant. ON gains a write side effect and therefore uses the stricter
+      // request-independent resolver even for a tenantless platform admin.
       const autoPersistEnabled = stockPreparationErpAutoPersistEnabled()
       // Reject an explicit request tenant/projectId FAIL-CLOSED BEFORE the body allowlist AND any I/O, so a
       // steering attempt always gets the DEDICATED steering code — projectId is not in the source-run
@@ -4843,9 +4848,10 @@ function createHandlers(services, options = {}) {
       const query = requestQuery(req)
       // GHSA-m6qv-2rpf-q7mh step-1 follow-up: staging-install is a tenant-scoped STRUCTURE write (it
       // installs the staging sheets), so it must derive tenant/target SERVER-SIDE, never from the request
-      // — resolveTenantId(req, body) honors a request tenantId for admins, resolveIntegrationStagingProjectId
-      // returns a request projectId verbatim, and an explicit baseId is the third axis (host writes base_id
-      // with no ownership check). Reject an explicit baseId (body OR query) fail-closed BEFORE provisioning.
+      // — a tenantless platform admin may explicitly select a read tenant, but no write may inherit that
+      // request-selected scope; resolveIntegrationStagingProjectId also returns a request projectId verbatim,
+      // and an explicit baseId is the third axis (host writes base_id with no ownership check). Reject an
+      // explicit baseId (body OR query) fail-closed BEFORE provisioning.
       assertNoRequestBaseId(body)
       assertNoRequestBaseId(query)
       const tenantId = resolveAuthUserTenantId(req)

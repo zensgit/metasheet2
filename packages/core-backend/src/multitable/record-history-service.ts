@@ -1,5 +1,7 @@
 import { randomUUID } from 'crypto'
 
+import type { OperationLedger } from './operation-ledger'
+
 export type QueryFn = (
   sql: string,
   params?: unknown[],
@@ -50,6 +52,16 @@ export interface RecordRevisionInput {
    * every pre-existing call site's behavior).
    */
   id?: string
+  /**
+   * W0-1 L6-a (sealed operation endpoints — `operation-ledger.ts`): the active operation ledger for the
+   * fenced write transaction. When present AND active (`ledger.operationId !== null`, i.e. the L4 fence flag
+   * is on and the L6 migration is deployed), this revision is TAGGED with `operation_id = ledger.operationId`
+   * and its exact `seq` is fed back into the ledger for the endpoint seal. `batch_id` is UNTOUCHED (finding #1,
+   * owner ruling 2026-07-16): it keeps the S1 user-action grouping — one batch may span N operations; the two
+   * identities are permanently decoupled. Omitted / inert ⇒ `operation_id` stays NULL and the write is
+   * byte-identical to L4cov (legacy/untrusted, never an executable anchor).
+   */
+  ledger?: OperationLedger | null
 }
 
 export interface RecordRevisionEntry {
@@ -99,7 +111,25 @@ async function hasRestoredFromVersionColumn(query: QueryFn): Promise<boolean> {
 export async function recordRecordRevision(query: QueryFn, input: RecordRevisionInput): Promise<string> {
   const id = input.id ?? randomUUID()
   const changedFieldIds = Array.from(new Set((input.changedFieldIds ?? []).filter(Boolean)))
-  const baseCols = [
+  // W0-1 finding #1 (owner ruling 2026-07-16, v3.7 lock §10): batch_id and operation_id are PERMANENTLY
+  // DECOUPLED. batch_id keeps the S1 user-action grouping — one commit action may span N per-row transactions
+  // sharing ONE caller-supplied batchId — and is NEVER overwritten by the operation id (the earlier
+  // "batch_id == operation_id" alignment re-split one AI commit into N History batches). operation_id is the
+  // per-transaction sealed-endpoint anchor and rides in its OWN column below. Inert/omitted ledger ⇒
+  // operationId null ⇒ base columns, byte-identical to L4cov.
+  const operationId = input.ledger?.operationId ?? null
+  const batchId = input.batchId ?? id
+
+  // Base INSERT is the default for every write (zero deploy-window risk). Only a record-version restore
+  // (restoredFromVersion non-null) uses the extended column, gated by a txn-safe column-existence probe so a
+  // pre-migration deploy window degrades to the base shape (restored_from_version silently NULL) rather than
+  // poisoning the enclosing transaction. operation_id is appended only when the ledger is active.
+  const restoredFromVersion = input.restoredFromVersion ?? null
+  const includeRestored = restoredFromVersion !== null && (await hasRestoredFromVersionColumn(query))
+
+  const cols = ['id', 'sheet_id', 'record_id', 'version', 'action', 'source', 'actor_id', 'changed_field_ids', 'patch', 'snapshot', 'batch_id']
+  const placeholders = ['$1::uuid', '$2', '$3', '$4', '$5', '$6', '$7', '$8::text[]', '$9::jsonb', '$10::jsonb', '$11']
+  const params: unknown[] = [
     id,
     input.sheetId,
     input.recordId,
@@ -110,32 +140,26 @@ export async function recordRecordRevision(query: QueryFn, input: RecordRevision
     changedFieldIds,
     JSON.stringify(input.patch ?? {}),
     input.snapshot === undefined ? null : JSON.stringify(input.snapshot),
-    input.batchId ?? id,
+    batchId,
   ]
-  const baseInsert = () =>
-    query(
-      `INSERT INTO meta_record_revisions (
-         id, sheet_id, record_id, version, action, source, actor_id, changed_field_ids, patch, snapshot, batch_id
-      )
-       VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, $8::text[], $9::jsonb, $10::jsonb, $11)`,
-      baseCols,
-    )
-  // Base INSERT is the default for every write (zero deploy-window risk). Only a record-version restore
-  // (restoredFromVersion non-null) uses the extended INSERT, gated by a txn-safe column-existence probe so a
-  // pre-migration deploy window degrades to the base shape (restored_from_version silently NULL) rather than
-  // poisoning the enclosing transaction.
-  const restoredFromVersion = input.restoredFromVersion ?? null
-  if (restoredFromVersion === null || !(await hasRestoredFromVersionColumn(query))) {
-    await baseInsert()
-    return id
+  if (includeRestored) {
+    params.push(restoredFromVersion)
+    cols.push('restored_from_version')
+    placeholders.push(`$${params.length}`)
   }
-  await query(
-    `INSERT INTO meta_record_revisions (
-       id, sheet_id, record_id, version, action, source, actor_id, changed_field_ids, patch, snapshot, batch_id, restored_from_version
-    )
-     VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, $8::text[], $9::jsonb, $10::jsonb, $11, $12)`,
-    [...baseCols, restoredFromVersion],
+  if (operationId !== null) {
+    params.push(operationId)
+    cols.push('operation_id')
+    placeholders.push(`$${params.length}::uuid`)
+  }
+  const returning = operationId !== null ? ' RETURNING seq' : ''
+  const res = await query(
+    `INSERT INTO meta_record_revisions (${cols.join(', ')}) VALUES (${placeholders.join(', ')})${returning}`,
+    params,
   )
+  if (operationId !== null && input.ledger) {
+    input.ledger.track(String((res.rows[0] as { seq?: unknown } | undefined)?.seq))
+  }
   return id
 }
 
@@ -176,6 +200,14 @@ const BATCH_CHUNK_ROWS = 1000
 export async function recordRecordRevisionsBatch(query: QueryFn, inputs: RecordRevisionInput[]): Promise<string[]> {
   if (inputs.length === 0) return []
 
+  // W0-1 L6-a: all rows of one CALL belong to the SAME operation (the caller threads one ledger through
+  // every input). Read it once; when active, TAG every row with the operation id, add `RETURNING seq`, and
+  // feed each returned seq into the ledger (order-independent — the endpoint needs only exact count + MAX).
+  // batch_id is NOT aligned to it (finding #1, owner ruling 2026-07-16 — S1 grouping stays caller-owned).
+  // Inert/omitted ledger ⇒ operationId null ⇒ byte-identical to L4cov.
+  const ledger = inputs[0]?.ledger ?? null
+  const operationId = ledger?.operationId ?? null
+
   const prepared = inputs.map((input) => {
     const id = input.id ?? randomUUID()
     return {
@@ -189,6 +221,7 @@ export async function recordRecordRevisionsBatch(query: QueryFn, inputs: RecordR
       changedFieldIds: Array.from(new Set((input.changedFieldIds ?? []).filter(Boolean))),
       patch: JSON.stringify(input.patch ?? {}),
       snapshot: input.snapshot === undefined ? null : JSON.stringify(input.snapshot),
+      // finding #1 decouple (owner ruling 2026-07-16): NEVER operationId here — batch_id is the S1 grouping key.
       batchId: input.batchId ?? id,
       restoredFromVersion: input.restoredFromVersion ?? null,
     }
@@ -196,10 +229,11 @@ export async function recordRecordRevisionsBatch(query: QueryFn, inputs: RecordR
 
   const anyRestoredFromVersion = prepared.some((row) => row.restoredFromVersion !== null)
   const useExtendedShape = anyRestoredFromVersion && (await hasRestoredFromVersionColumn(query))
-  const columns = useExtendedShape
-    ? ['id', 'sheet_id', 'record_id', 'version', 'action', 'source', 'actor_id', 'changed_field_ids', 'patch', 'snapshot', 'batch_id', 'restored_from_version']
-    : ['id', 'sheet_id', 'record_id', 'version', 'action', 'source', 'actor_id', 'changed_field_ids', 'patch', 'snapshot', 'batch_id']
+  const columns = ['id', 'sheet_id', 'record_id', 'version', 'action', 'source', 'actor_id', 'changed_field_ids', 'patch', 'snapshot', 'batch_id']
+  if (useExtendedShape) columns.push('restored_from_version')
+  if (operationId !== null) columns.push('operation_id')
   const paramsPerRow = columns.length
+  const returning = operationId !== null ? ' RETURNING seq' : ''
 
   for (let start = 0; start < prepared.length; start += BATCH_CHUNK_ROWS) {
     const chunk = prepared.slice(start, start + BATCH_CHUNK_ROWS)
@@ -221,13 +255,23 @@ export async function recordRecordRevisionsBatch(query: QueryFn, inputs: RecordR
         `$${base + 11}`,
       ]
       params.push(row.id, row.sheetId, row.recordId, row.version, row.action, row.source, row.actorId, row.changedFieldIds, row.patch, row.snapshot, row.batchId)
+      let next = base + 12
       if (useExtendedShape) {
-        placeholders.push(`$${base + 12}`)
+        placeholders.push(`$${next}`)
         params.push(row.restoredFromVersion)
+        next += 1
+      }
+      if (operationId !== null) {
+        placeholders.push(`$${next}::uuid`)
+        params.push(operationId)
+        next += 1
       }
       valueTuples.push(`(${placeholders.join(', ')})`)
     })
-    await query(`INSERT INTO meta_record_revisions (${columns.join(', ')}) VALUES ${valueTuples.join(', ')}`, params)
+    const res = await query(`INSERT INTO meta_record_revisions (${columns.join(', ')}) VALUES ${valueTuples.join(', ')}${returning}`, params)
+    if (operationId !== null && ledger) {
+      for (const r of res.rows as Array<{ seq?: unknown }>) ledger.track(String(r.seq))
+    }
   }
 
   return prepared.map((row) => row.id)
@@ -297,14 +341,27 @@ export async function hasChainSeqColumn(query: QueryFn): Promise<boolean> {
 
 export async function recordVersionMarker(
   query: QueryFn,
-  input: { sheetId: string; recordId: string; version: number; kind: 'lock' | 'unlock'; actorId?: string | null },
+  input: { sheetId: string; recordId: string; version: number; kind: 'lock' | 'unlock'; actorId?: string | null; ledger?: OperationLedger | null },
 ): Promise<void> {
   if (!(await hasVersionMarkerTable(query))) return
-  await query(
-    `INSERT INTO meta_record_version_markers (id, sheet_id, record_id, version, kind, actor_id)
-     VALUES (gen_random_uuid(), $1, $2, $3, $4, $5)`,
-    [input.sheetId, input.recordId, input.version, input.kind, input.actorId ?? null],
+  // W0-1 L6-a: a lock/unlock marker is an event of its operation too — tag it with the operation id and feed
+  // its seq into the ledger so the endpoint's count/max cover markers as well as revisions. Inert ledger ⇒
+  // operation_id NULL, byte-identical to L4cov.
+  const operationId = input.ledger?.operationId ?? null
+  if (operationId === null) {
+    await query(
+      `INSERT INTO meta_record_version_markers (id, sheet_id, record_id, version, kind, actor_id)
+       VALUES (gen_random_uuid(), $1, $2, $3, $4, $5)`,
+      [input.sheetId, input.recordId, input.version, input.kind, input.actorId ?? null],
+    )
+    return
+  }
+  const res = await query(
+    `INSERT INTO meta_record_version_markers (id, sheet_id, record_id, version, kind, actor_id, operation_id)
+     VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, $6::uuid) RETURNING seq`,
+    [input.sheetId, input.recordId, input.version, input.kind, input.actorId ?? null, operationId],
   )
+  input.ledger?.track(String((res.rows[0] as { seq?: unknown } | undefined)?.seq))
 }
 
 export async function listRecordRevisions(

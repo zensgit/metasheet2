@@ -112,8 +112,13 @@ describeIfDatabase('W0-1 generation-aware history contiguity (real DB)', () => {
     await q('INSERT INTO meta_bases (id, name) VALUES ($1,$2)', [BASE, 'HC Base'])
     await q('INSERT INTO meta_bases (id, name) VALUES ($1,$2) ON CONFLICT (id) DO NOTHING', [APPROVAL_PROJECTION_BASE_ID, 'Approval Projection']) // shared system base
     // plain sheet + a projection-base sheet + a people-sentinel sheet
-    await q('INSERT INTO meta_sheets (id, base_id, name) VALUES ($1,$2,$3),($4,$5,$6)', [SHEET, BASE, 'HC', SHEET_PROJ, APPROVAL_PROJECTION_BASE_ID, 'HC Proj'])
-    await q('INSERT INTO meta_sheets (id, base_id, name, description) VALUES ($1,$2,$3,$4)', [SHEET_PEOPLE, BASE, 'People', SYSTEM_PEOPLE_SHEET_DESCRIPTION])
+    // P1-a (owner 2026-07-16): the trust predicate keys SOLELY off server-owned `system_kind` — the
+    // description sentinel / projection base_id are user-writable and NO LONGER classify a system sheet.
+    // These fixtures therefore stamp `system_kind` directly, exactly as the server-side provisioning paths
+    // do at INSERT (the description/base_id are kept for realism of the provisioned shape only).
+    await q('INSERT INTO meta_sheets (id, base_id, name) VALUES ($1,$2,$3)', [SHEET, BASE, 'HC'])
+    await q("INSERT INTO meta_sheets (id, base_id, name, system_kind) VALUES ($1,$2,$3,'approval_projection')", [SHEET_PROJ, APPROVAL_PROJECTION_BASE_ID, 'HC Proj'])
+    await q("INSERT INTO meta_sheets (id, base_id, name, description, system_kind) VALUES ($1,$2,$3,$4,'people_directory')", [SHEET_PEOPLE, BASE, 'People', SYSTEM_PEOPLE_SHEET_DESCRIPTION])
     await q('INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6)', [NAME, SHEET, 'Name', 'string', '{}', 1])
     for (const s of [SHEET_PROJ, SHEET_PEOPLE]) {
       await q('INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6)', [`${NAME}_${s}`, s, 'Name', 'string', '{}', 1])

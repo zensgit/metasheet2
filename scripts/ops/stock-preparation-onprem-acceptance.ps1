@@ -16,7 +16,7 @@
                           restart COMMAND returned 0 — a command success is not a stable service).
     5. healthcheck      — GET /api/health.
     6. mvpSmoke         — the in-package stock-preparation smoke (postdeploy-smoke.mjs).
-    7. summary          — one values-free acceptance-summary.txt + .json: the 9 whitelisted status
+    7. summary          — one values-free acceptance-summary.txt + .json: the 17 whitelisted status
                           fields ALWAYS, plus — only on failure — a values-free failDetail block
                           (failedStage + at most a migration name / SQLSTATE / HTTP code, never a value).
 
@@ -27,7 +27,7 @@
       ArgumentList. It is handed to the child smoke ONLY through a scoped process env var that is
       cleared in a finally block.
     * The values-free guarantee is scoped to the SUMMARY ARTIFACTS (acceptance-summary.txt / .json): those
-      can only ever contain the 9 whitelisted status fields — each a PASS/FAIL/enum/count/coarse-code —
+      can only ever contain the 17 whitelisted status fields — each a PASS/FAIL/enum/count/coarse-code —
       never a drawing number, quantity, unit, material name, host, credential, or raw log line. On failure
       they add only failedStage + a coarse code (migration name / SQLSTATE / HTTP status / coarse reason),
       never a full log. The values-free construction is: only whitelisted fields are ever assigned into
@@ -84,8 +84,14 @@ $Summary = [ordered]@{
   'mvpSmoke.lastCompletedPhase'     = 'NOT_RUN'
   'mvpSmoke.firstFailedCheck'       = 'NOT_RUN'
   'mvpSmoke.failedCheckCount'       = '0'
+  'mvpSmoke.firstFailedHttpStatus'  = '0'
+  'mvpSmoke.firstFailedErrorClass'  = 'NOT_RUN'
   'mvpSmoke.responseLeakScanStatus' = 'NOT_RUN'
   externalPlmK3ErpWrite  = 'false'   # invariant: this line NEVER touches an external write.
+  # corrective-6 (entity finding): PASS only when the deployed pm2 process environment provably
+  # carries NO acceptance credential after the run (booleans from the Node projection — never a
+  # value). FAIL stops the acceptance; NOT_RUN means an earlier stage failed first.
+  postRunCredentialHygiene = 'NOT_RUN'
   failedStage            = 'none'
 }
 # Coarse failure detail (values-free): failedStage + at most a migration name / SQLSTATE / HTTP code.
@@ -103,7 +109,7 @@ function Stop-WithFailure {
 }
 
 function Emit-Summary {
-  # Build the .txt (9 whitelisted lines) + optional coarse fail detail, and a matching .json.
+  # Build the .txt (the 17 whitelisted summary lines) + optional coarse fail detail, and a matching .json.
   $lines = @()
   foreach ($k in $Summary.Keys) { $lines += "$k=$($Summary[$k])" }
   if ($FailDetail.Count -gt 0) { foreach ($k in $FailDetail.Keys) { $lines += "$k=$($FailDetail[$k])" } }
@@ -211,7 +217,7 @@ function Test-SmokeOutcome {
   elseif ($audit -ne '8/8') { $ok = $false; $reason = 'audit_incomplete' }
   elseif (-not $selfScan) { $ok = $false; $reason = 'self_scan_not_clean' }
 
-  # ── corrective-5: parse the bounded values-free diagnostics. The 4 enum fields are allowlisted (any
+  # ── corrective-5/7: parse the bounded values-free diagnostics. Every enum is allowlisted (any
   # off-vocabulary token becomes UNKNOWN, never a raw value); firstFailedCheck is a structural check label
   # accepted ONLY if it matches a safe-label shape and is length-capped — so a wild/leaky value can never
   # reach the runner summary (the smoke additionally REDACTs it upstream).
@@ -228,24 +234,55 @@ function Test-SmokeOutcome {
   # firstFailedCheck is the PHASE of the first failed check — allowlisted like lastCompletedPhase.
   $firstFailed = if ($Joined -match '(?m)^firstFailedCheck=([A-Za-z_]+)\s*$') { $Matches[1] } else { 'NOT_RUN' }
   if ($firstFailed -ne 'NOT_RUN' -and $allowedPhase -notcontains $firstFailed) { $firstFailed = 'UNKNOWN' }
+  # corrective-7: the entity's PROVISIONING 3/3 failure needs a values-free discriminator. Preserve
+  # only a real HTTP status (or 0) plus one closed coarse class; raw response codes/messages are never
+  # accepted by this parser or copied into the acceptance summary.
+  $firstFailedHttp = if ($Joined -match '(?m)^firstFailedHttpStatus=(0|[1-5][0-9]{2})\s*$') { $Matches[1] } else { '0' }
+  $allowedHttpErrorClass = @(
+    'NONE', 'NOT_HTTP', 'TENANT_CONTEXT', 'AUTHENTICATION', 'AUTHORIZATION', 'NOT_FOUND',
+    'API_UNAVAILABLE', 'CONFIG_INVALID', 'SERVER_ERROR', 'CLIENT_ERROR', 'RESPONSE_CONTRACT', 'UNKNOWN'
+  )
+  $firstFailedErrorClass = if ($Joined -match '(?m)^firstFailedErrorClass=([A-Z_]+)\s*$') { $Matches[1] } else { 'NOT_RUN' }
+  if ($firstFailedErrorClass -ne 'NOT_RUN' -and $allowedHttpErrorClass -notcontains $firstFailedErrorClass) {
+    $firstFailedErrorClass = 'UNKNOWN'
+  }
 
   return @{
     pass = $pass; audit = $audit; selfScan = $selfScan; ok = $ok; reason = $reason
     failureClass = $failureClass; lastCompletedPhase = $lastPhase; firstFailedCheck = $firstFailed
-    failedCheckCount = $failedCount; responseLeakScanStatus = $leakScan
+    failedCheckCount = $failedCount; firstFailedHttpStatus = $firstFailedHttp
+    firstFailedErrorClass = $firstFailedErrorClass; responseLeakScanStatus = $leakScan
   }
 }
 
 # ── Read the admin token WITHOUT ever exposing it (env var, else secure prompt). ─────────────────
-function Read-AdminTokenSecure {
-  $fromEnv = [Environment]::GetEnvironmentVariable($AdminTokenEnvVar)
-  if ($fromEnv) {
-    $secure = ConvertTo-SecureString $fromEnv -AsPlainText -Force
-    # Best-effort scrub of the plaintext env var so it does not linger in this process env.
-    Remove-Item "Env:$AdminTokenEnvVar" -ErrorAction SilentlyContinue
-    return $secure
+# corrective-6: capture+SCRUB the env-var token at orchestration entry — the env var is the ONLY
+# carrier that can contaminate children (bootstrap may start the pm2 daemon; stage 4 restarts the
+# app; both inherit this process env). Returns $null when the operator did not provide the env var;
+# the interactive fallback stays at the smoke stage because Read-Host feeds the SecureString
+# directly and never touches the environment.
+function Read-AdminTokenSecureFromEnv {
+  # Owner P1: EVERY known carrier is scrubbed here — the configured one AND both fixed defaults. A
+  # token that pre-exists on an unselected carrier (e.g. METASHEET_AUTH_TOKEN in the operator shell)
+  # would otherwise ride through SHA/bootstrap/migration into the pm2 daemon exactly like the entity
+  # finding. The SELECTED carrier is captured; more than one non-empty carrier is ambiguous and
+  # fails closed BEFORE any stage (env already scrubbed by then).
+  $carriers = @($AdminTokenEnvVar, 'METASHEET_ADMIN_TOKEN', 'METASHEET_AUTH_TOKEN') | Select-Object -Unique
+  $nonEmpty = @()
+  $selected = $null
+  foreach ($carrier in $carriers) {
+    $value = [Environment]::GetEnvironmentVariable($carrier)
+    if ($value) {
+      $nonEmpty += $carrier
+      if ($carrier -eq $AdminTokenEnvVar) { $selected = ConvertTo-SecureString $value -AsPlainText -Force }
+    }
+    Remove-Item "Env:$carrier" -ErrorAction SilentlyContinue
   }
-  return (Read-Host -AsSecureString "Admin token (input hidden)")
+  if ($nonEmpty.Count -gt 1) {
+    $Summary.postRunCredentialHygiene = 'FAIL'
+    Stop-WithFailure 'credentialHygiene' @{ reason = 'multiple_token_carriers_present' }
+  }
+  return $selected
 }
 
 # ── Stage 1: package SHA256 vs SHA256SUMS (+ optional git-sha vs metadata) ───────────────────────
@@ -336,32 +373,65 @@ function Invoke-MigrationStage {
 }
 
 # ── Stage 4: pm2 restart + POLL stable-online (command success != stable service) ────────────────
-# Normalize one `pm2 jlist` entry to @{ state; restartTime; uptime } (values-free: no raw jlist echoed).
+# Normalize one `pm2 jlist` entry to the closed 5-key sample (state/restartTime/uptime + the two
+# token-hygiene booleans; values-free: no raw jlist echoed).
 function Get-Pm2Sample {
   # Do not feed the full PM2 payload to PowerShell's ConvertFrom-Json. PM2 includes the process
   # environment, where Windows commonly has both `Path` and `PATH`; Windows PowerShell 5.1 treats
-  # those as duplicate keys and rejects the whole document. Node parses the raw payload and emits a
-  # fixed three-field projection. Any missing helper, parse failure, duplicate target, or invalid
-  # number returns $null and the stable-online stage fails closed.
+  # those as duplicate keys and rejects the whole document. Node parses the raw payload and emits the
+  # fixed five-field projection. Any missing helper, parse failure, duplicate target, or invalid
+  # number returns $null and the stable-online stage fails closed. The configured admin carrier name is
+  # passed so a custom -AdminTokenEnvVar is detected too (case-insensitively, like Windows env names).
   $pm2SampleHelper = Join-Path $PSScriptRoot 'stock-preparation-pm2-sample.mjs'
   if (-not (Test-Path -LiteralPath $pm2SampleHelper -PathType Leaf)) { return $null }
-  $safeJson = (& pm2 jlist 2>$null | & node $pm2SampleHelper 2>$null)
+  $safeJson = (& pm2 jlist 2>$null | & node $pm2SampleHelper $AdminTokenEnvVar 2>$null)
   $sampleExit = $LASTEXITCODE
   if ($sampleExit -ne 0 -or -not $safeJson) { return $null }
   try {
     $entry = $safeJson | ConvertFrom-Json
+    $adminTokenNonEmpty = if ($entry.PSObject.Properties['adminTokenNonEmpty'] -and $entry.adminTokenNonEmpty -is [bool]) { [bool]$entry.adminTokenNonEmpty } else { $null }
+    $authTokenNonEmpty = if ($entry.PSObject.Properties['authTokenNonEmpty'] -and $entry.authTokenNonEmpty -is [bool]) { [bool]$entry.authTokenNonEmpty } else { $null }
     [pscustomobject]@{
-      state       = "$($entry.state)"
-      restartTime = [int]($entry.restartTime)
-      uptime      = [long]($entry.uptime)
+      state              = "$($entry.state)"
+      restartTime        = [int]($entry.restartTime)
+      uptime             = [long]($entry.uptime)
+      adminTokenNonEmpty = $adminTokenNonEmpty
+      authTokenNonEmpty  = $authTokenNonEmpty
     }
   } catch {
     return $null
   }
 }
 
+# corrective-6: the token-hygiene verdict over one pm2 sample. PURE (unit-testable) and fail-closed:
+# a missing sample or a projection without the hygiene booleans (a stale packaged helper) is a FAIL,
+# never a skip. Reasons are a fixed values-free vocabulary.
+function Test-Pm2TokenHygieneSample {
+  param($Sample)
+  if (-not $Sample) { return @{ ok = $false; reason = 'sample_missing' } }
+  # StrictMode-safe reads: a projection from a STALE packaged helper simply lacks these properties.
+  $adminProperty = $Sample.PSObject.Properties['adminTokenNonEmpty']
+  $authProperty = $Sample.PSObject.Properties['authTokenNonEmpty']
+  $admin = if ($adminProperty) { $adminProperty.Value } else { $null }
+  $auth = if ($authProperty) { $authProperty.Value } else { $null }
+  if (-not ($admin -is [bool]) -or -not ($auth -is [bool])) { return @{ ok = $false; reason = 'hygiene_fields_missing' } }
+  if ($admin) { return @{ ok = $false; reason = 'PM2_ENV_METASHEET_ADMIN_TOKEN_NONEMPTY' } }
+  if ($auth) { return @{ ok = $false; reason = 'PM2_ENV_METASHEET_AUTH_TOKEN_NONEMPTY' } }
+  return @{ ok = $true; reason = 'clean' }
+}
+
 function Invoke-Pm2StableStage {
   Write-Stage 'stage 4: pm2 restart + stable-online poll'
+  # corrective-6 fail-closed regression guard: the acceptance token vars must ALREADY be out of THIS
+  # runner's environment before pm2 can spawn/refresh anything that inherits it (the token was read
+  # and scrubbed at entry — see the orchestration block). The entity-machine FAIL was exactly a pm2
+  # restart executed while METASHEET_ADMIN_TOKEN still sat in the runner env.
+  foreach ($tokenVar in (@($AdminTokenEnvVar, 'METASHEET_ADMIN_TOKEN', 'METASHEET_AUTH_TOKEN') | Select-Object -Unique)) {
+    if ([Environment]::GetEnvironmentVariable($tokenVar)) {
+      $Summary.postRunCredentialHygiene = 'FAIL'
+      Stop-WithFailure 'credentialHygiene' @{ reason = 'token_env_present_before_pm2' }
+    }
+  }
   # Coarsen the restart output (do not echo raw pm2 lines) — the values-free guarantee covers the summary
   # artifacts; keep the transcript free of raw tool output too.
   & pm2 restart metasheet-backend *> $null
@@ -380,8 +450,16 @@ function Invoke-Pm2StableStage {
     if (-not $verdict.ok) { Stop-WithFailure 'pm2StableOnline' @{ pm2State = $verdict.reason } }
     Start-Sleep -Seconds 2
   }
+  # corrective-6: check the freshly restarted APP environment immediately — a pm2 daemon left over
+  # from a previous contaminated run can re-inject a token into the app env even when THIS runner's
+  # env is clean. Failing here stops the acceptance before health/smoke ever run.
+  $earlyHygiene = Test-Pm2TokenHygieneSample (Get-Pm2Sample)
+  if (-not $earlyHygiene.ok) {
+    $Summary.postRunCredentialHygiene = 'FAIL'
+    Stop-WithFailure 'credentialHygiene' @{ reason = $earlyHygiene.reason }
+  }
   $Summary.pm2StableOnline = 'PASS'
-  Write-Stage 'stage 4: PASS (stayed online, no restart-loop)'
+  Write-Stage 'stage 4: PASS (stayed online, no restart-loop, app env token-clean)'
 }
 
 # ── Stage 5: /api/health ─────────────────────────────────────────────────────────────────────────
@@ -440,12 +518,14 @@ function Invoke-SmokeStage {
   $Summary['mvpSmoke.pass'] = if ($outcome.pass) { 'true' } else { 'false' }
   $Summary.auditActionsCovered = $outcome.audit
   $Summary.selfScanClean = if ($outcome.selfScan) { 'true' } else { 'false' }
-  # corrective-5: propagate the bounded diagnostics INTO the summary BEFORE the exit/outcome gates below,
+  # corrective-5/7: propagate the bounded diagnostics INTO the summary BEFORE the exit/outcome gates below,
   # so an exit-1 smoke (Stop-WithFailure) still emits them in the values-free acceptance summary.
   $Summary['mvpSmoke.failureClass'] = $outcome.failureClass
   $Summary['mvpSmoke.lastCompletedPhase'] = $outcome.lastCompletedPhase
   $Summary['mvpSmoke.firstFailedCheck'] = $outcome.firstFailedCheck
   $Summary['mvpSmoke.failedCheckCount'] = $outcome.failedCheckCount
+  $Summary['mvpSmoke.firstFailedHttpStatus'] = $outcome.firstFailedHttpStatus
+  $Summary['mvpSmoke.firstFailedErrorClass'] = $outcome.firstFailedErrorClass
   $Summary['mvpSmoke.responseLeakScanStatus'] = $outcome.responseLeakScanStatus
   # Fail-closed: a green exit is NOT a steady state unless the audit surface is fully covered (8/8) and
   # the self-scan is clean. An absent/unparseable field records 'N/8'/'false' and FAILS here — it never
@@ -455,19 +535,41 @@ function Invoke-SmokeStage {
   Write-Stage 'stage 6: PASS'
 }
 
+# ── Stage 7 (corrective-6): post-run credential hygiene — the deployed pm2 process env must carry
+# NO acceptance token after the run. Uses the SAME Node projection as stage 4 (booleans only, never
+# a value); any violation fails the acceptance with a values-free coarse reason.
+function Invoke-PostRunHygieneStage {
+  Write-Stage 'stage 7: post-run credential hygiene'
+  $verdict = Test-Pm2TokenHygieneSample (Get-Pm2Sample)
+  if (-not $verdict.ok) {
+    $Summary.postRunCredentialHygiene = 'FAIL'
+    Stop-WithFailure 'credentialHygiene' @{ reason = $verdict.reason }
+  }
+  $Summary.postRunCredentialHygiene = 'PASS'
+  Write-Stage 'stage 7: PASS (no acceptance token in the pm2 environment)'
+}
+
 # ── Orchestrate ──────────────────────────────────────────────────────────────────────────────────
 # Entry-point guard: when the script is DOT-SOURCED (InvocationName '.') only the functions are defined,
 # so the behavioural tests can exercise the pure helpers (Test-SmokeOutcome / Test-Pm2StableSample) with
 # crafted inputs — the pm2/health/smoke stages cannot be driven end-to-end off a Windows host + live pm2.
 if ($MyInvocation.InvocationName -ne '.') {
   try {
+    # corrective-6 (entity FAIL ACCEPTANCE_TOKEN_PERSISTED_IN_PM2_ENV): the env-var token is read into
+    # a SecureString and SCRUBBED from this process environment BEFORE ANY stage can spawn a child —
+    # stage 2's bootstrap may start the pm2 daemon and stage 4 restarts the app, and both inherit this
+    # environment. The previous read-after-health left METASHEET_ADMIN_TOKEN in the env pm2 captured.
+    $token = Read-AdminTokenSecureFromEnv
     Invoke-ShaStage
     Invoke-BootstrapStage
     Invoke-MigrationStage
     Invoke-Pm2StableStage
     Invoke-HealthStage
-    $token = Read-AdminTokenSecure
+    # Interactive fallback (no env-var token): prompts feed the SecureString directly — the
+    # environment is never touched, so this path cannot contaminate pm2.
+    if (-not $token) { $token = (Read-Host -AsSecureString "Admin token (input hidden)") }
     Invoke-SmokeStage -Token $token
+    Invoke-PostRunHygieneStage
     Emit-Summary
     Write-Stage 'ACCEPTANCE PASS — all stages green'
     exit 0

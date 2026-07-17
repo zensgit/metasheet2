@@ -113,6 +113,28 @@ export default defineConfig({
       // directory real-DB step in plugin-tests.yml (both points asserted by
       // pb4-2-archive-readonly-ci-wiring.test.mjs so neither can silently drop).
       'tests/integration/local-directory-org-archive-readonly.db.test.ts',
+      // Canonical Org MVP PB4-3: department cycle detection — in-transaction recursive ancestor
+      // walk + per-integration serialized reparent (advisory xact lock). Includes a TWO-CONNECTION
+      // barrier proving the advisory lock catches the disjoint cross-mount 4-cycle race, plus a
+      // termination proof on malformed loop data — meaningless without a real DB. DATABASE_URL-gated;
+      // excluded here so the no-DB job cannot skip-green it, and wired as a WHOLE FILE into the
+      // directory real-DB step in plugin-tests.yml (both points asserted by
+      // pb4-3-cycle-detection-ci-wiring.test.mjs so neither can silently drop).
+      'tests/integration/local-directory-org-cycle-detection.db.test.ts',
+      // Canonical Org MVP PB4-4: local integration REACTIVATION — getOrCreate revives the deactivated
+      // canonical anchor in place (same id, children preserved) instead of a bricking name-collision.
+      // Includes 2-way/5-way concurrency proving a single reactivate audit — meaningless without a
+      // real DB. DATABASE_URL-gated; excluded here so the no-DB job cannot skip-green it, and wired as
+      // a WHOLE FILE into the directory real-DB step in plugin-tests.yml (both points asserted by
+      // pb4-4-reactivation-ci-wiring.test.mjs so neither can silently drop).
+      'tests/integration/directory-local-integration-reactivation.db.test.ts',
+      // Canonical Org MVP B4 (#4215 §5.5): directory_department_bindings buildable FK chain — a
+      // cross-org binding is FK-IMPOSSIBLE to insert (both integrations pinned to one org_id column;
+      // NOT NULL closes the MATCH SIMPLE hole). Proves rejection BY the org-chain FK by name + the
+      // NOT NULL/FK mutations — meaningless without a real DB. DATABASE_URL-gated; excluded here so
+      // the no-DB job cannot skip-green it, and wired as a WHOLE FILE into the directory real-DB step
+      // in plugin-tests.yml (both points asserted by b4-department-bindings-ci-wiring.test.mjs).
+      'tests/integration/directory-department-bindings.db.test.ts',
       // Canonical Org MVP B3 (#4215 §5.4): proves ApprovalDirectoryOrg's DUAL-SOURCE direct-manager
       // resolution against real Postgres — normalized `is_manager` relation for a local integration,
       // the DingTalk `leader_in_dept` regression pin (load-bearing compat leg + is_manager=0 positive
@@ -231,12 +253,20 @@ export default defineConfig({
       // step in plugin-tests.yml (alongside files-storage-key-migration.db.test.ts) where it runs
       // against real Postgres every PR.
       'tests/integration/files-orphan-blob-retention.db.test.ts',
+      // S6 event_fires tombstone→lease upgrade migration (backfill historical rows → done): DATABASE_URL-gated,
+      // isolated per-test schema, real UPGRADE path (old schema + rows → migrate → assert). Excluded here so it
+      // cannot skip-green, whole-file wired into `Run attendance integration tests` in plugin-tests.yml.
+      'tests/integration/multitable-automation-event-fires-lease-migration.db.test.ts',
+      // S6 event_fires LEASE claim/reclaim (window-2 fix): isolated-schema real DB. Excluded here so it cannot
+      // skip-green, whole-file wired into the attendance real-DB step in plugin-tests.yml.
+      'tests/integration/multitable-automation-event-fires-lease-realdb.db.test.ts',
       // F9 owner CHANGES-REQUESTED (GF9-1/GF9-2): multitable_attachments blob_purged_at migration +
       // deleteAttachmentBinary index-free delete + sweepMultitableAttachmentBlobPurge compensating-sweep
       // matrix, same shape/rationale as the F5 entry immediately above (DATABASE_URL-gated describeDb,
       // isolated per-test schema). Excluded from the no-DB default job so it doesn't skip-green, and
       // wired as a WHOLE FILE into the `Run attendance integration tests` step in plugin-tests.yml.
       'tests/integration/multitable-attachment-blob-purge.db.test.ts',
+      'tests/integration/attendance-approval-action-authorization.db.test.ts',
       'tests/integration/attendance-comp-time-expiry-reminder.test.ts',
       'tests/integration/attendance-expiry-service.test.ts',
       'tests/integration/attendance-notification-deliveries.test.ts',
@@ -289,6 +319,12 @@ export default defineConfig({
       // skip-green in the no-DB lane, whole-file wired into `Run multitable real-DB integration` in
       // plugin-tests.yml.
       'tests/integration/multitable-d1c-automation-revision-realdb.test.ts',
+      // #4196 Class-A same-transaction idempotency claim goldens (replay no-op for create/update, crash
+      // rolls the claim back, flag-OFF positive control), driven through the real
+      // AutomationService.executeRule entry point (constructor hard-wires deps.transaction to a real
+      // poolManager.get().transaction). Real Postgres only — excluded HERE so it cannot skip-green in the
+      // no-DB lane, whole-file wired into `Run multitable real-DB integration` in plugin-tests.yml.
+      'tests/integration/multitable-4196-classa-claim-realdb.test.ts',
       // D-1c W0 slice ④ (approval resultWriteback revision goldens, driven through the real
       // dispatchAction -> approval.completed event bus -> AutomationService.handleApprovalCompletionEvent
       // -> writeApprovalResultBack chain + the concurrent-delete zero-row fail-closed golden, which uses a
@@ -328,6 +364,14 @@ export default defineConfig({
       // action-idempotency ledger L1 schema golden — real-DB. Excluded HERE so it cannot skip-green
       // in the no-DB lane; whole-file wired into plugin-tests.yml. Two-point wiring.
       'tests/integration/multitable-action-applied-ledger-realdb.test.ts',
+      // #4196 execution-scoped applied ledger foundation (§2.2 locked table + §2 Class-A claim +
+      // §6.1 derived test-run root): real Postgres only — excluded HERE so it cannot skip-green in the
+      // no-DB lane, whole-file wired into `Run multitable real-DB integration` in plugin-tests.yml.
+      'tests/integration/multitable-automation-execution-ledger-realdb.test.ts',
+      // #4196 Class-B outbound two-phase intent/outcome (§3 table + two-phase state machine + crash-flip +
+      // status='pending' single-writer guard): real Postgres only — excluded HERE so it cannot skip-green in
+      // the no-DB lane, whole-file wired into `Run multitable real-DB integration` in plugin-tests.yml.
+      'tests/integration/multitable-automation-outbound-intent-realdb.test.ts',
       // P2 durable-delivery S2-a claim engine / fence-CAS — real-DB constructed-concurrency (zombie/SKIP
       // LOCKED). Excluded HERE so it cannot skip-green in the no-DB lane; whole-file wired into
       // plugin-tests.yml. Two-point wiring.

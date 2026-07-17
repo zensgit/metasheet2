@@ -144,7 +144,7 @@ for (const handler of STRUCTURE_WRITE_HANDLERS) {
     assert.equal(
       body.includes('resolveTenantId(req, input)'),
       false,
-      `${handler}'s normalizer ${normName} calls resolveTenantId(req, input) — resolveTenantId honors a request tenantId for admins, so a structure/metadata write could be steered into another tenant's project`,
+      `${handler}'s normalizer ${normName} calls resolveTenantId(req, input) — a tenantless platform admin may select a read tenant, but a structure/metadata write must never inherit request-selected scope`,
     )
   })
 
@@ -206,7 +206,7 @@ for (const name of ['stockPreparationTargetWriteInput', 'stockPreparationSandbox
     assert.equal(body.includes('resolveAuthUserTenantId(req)'), true, 'stagingInstall must call resolveAuthUserTenantId(req)')
   })
   check('stagingInstall: does NOT derive tenant from the request-steerable resolveTenantId(req, ...)', () => {
-    assert.equal(/resolveTenantId\(req,/.test(body), false, 'stagingInstall must not call resolveTenantId(req, body/input) — that honors a request tenantId for admins')
+    assert.equal(/resolveTenantId\(req,/.test(body), false, 'stagingInstall must not call resolveTenantId(req, body/input) — writes cannot inherit a tenantless platform admin request-selected read scope')
   })
   check('stagingInstall: the ONLY staging-project derivation passes undefined (no request projectId steers it)', () => {
     const calls = body.match(/resolveIntegrationStagingProjectId\(tenantId, [^)]*\)/g) || []

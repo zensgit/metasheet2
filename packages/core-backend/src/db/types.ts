@@ -1420,6 +1420,9 @@ export interface MultitableAutomationExecutionsTable {
   rule_snapshot: JsonObjectColumn
   finished_at: Date | string | null
   schema_version: number
+  // #4196 §4: the RAW-config §2.1 action-set fingerprint captured at execution time (nullable; pre-column
+  // executions have none → the retry rule-change guard is SKIPPED for them, rollout-safe/non-regressing).
+  rule_action_fingerprint: string | null
   // A5 retry provenance columns (nullable; set only on a retry-created execution).
   rerun_of_execution_id: string | null
   initiated_by: string | null

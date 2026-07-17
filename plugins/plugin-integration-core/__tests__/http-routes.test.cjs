@@ -4203,10 +4203,9 @@ async function testStockPreparationErpMaterialSyncRoute() {
   assert.equal(res.body.error.details.field, 'permission')
   assert.equal(wrote(), 0)
 
-  // (5) TENANT STEERING (owner review P1): resolveTenantId honors a request tenantId for admins, so an
-  //     admin could redirect the write to another tenant's staging project. This route derives the tenant
-  //     from the authenticated user only AND drops tenantId from the request allowlist — so a tenant_1
-  //     admin passing tenantId: tenant_evil is rejected by the allowlist before any write. Zero write.
+  // (5) TENANT STEERING: writes derive the tenant from the authenticated user only AND drop tenantId
+  //     from the request allowlist. This remains stricter than the read resolver because even a tenantless
+  //     platform admin may not steer a write through a request-selected tenant.
   res = await invoke(routes, 'POST', ROUTE, {
     user: ADMIN_USER, // tenantId: 'tenant_1'
     body: { syncRunId: 'r1', erpMaterials: [], tenantId: 'tenant_evil' },
@@ -7765,38 +7764,102 @@ async function testStockPreparationErpSourceRunAutoPersistSteering() {
 
 async function testStockPreparationErpSourceRunAutoPersistOffInert() {
   await withAutoPersistFlag(undefined, async () => {
-    const bomb = createCountingThrowMvpApis()
-    const { routes, externalWriteCalls } = createErpAutoPersistHarness({ recordsApi: bomb.recordsApi, provisioningApi: bomb.provisioningApi })
-    // Flag OFF (unset): today's read-only behavior byte-for-byte — even a body tenantId is harmless because
-    // the read has no write side effect, so the steering guard is not engaged and no autoPersist is added.
-    const res = await invoke(routes, 'POST', T3A_SOURCE_RUN_PATH, {
-      user: ADMIN_USER,
-      body: { tenantId: 'tenant_evil', readSourceConfigId: T3A_ERP_CONFIG_ID, syncRunId: 'off_inert_1' },
-    })
-    assertOkResponse(res, 200)
-    assert.equal(res.body.data.mode, 'dry_run')
-    assert.equal(res.body.data.evidence.internalWriteExecuted, false)
-    assert.equal(Object.prototype.hasOwnProperty.call(res.body.data, 'autoPersist'), false, 'OFF adds no autoPersist field')
-    assert.equal(bomb.state.calls, 0, 'OFF never touches records/provisioning')
-    assert.equal(externalWriteCalls.length, 0)
+    // Flag OFF remains a readonly dry-run for an unsteered request: no internal persist and no
+    // response-shape change. Tenant confinement is an authorization correction, not a write path.
+    {
+      const bomb = createCountingThrowMvpApis()
+      const { routes, sourceReadCalls, externalWriteCalls } = createErpAutoPersistHarness({
+        recordsApi: bomb.recordsApi,
+        provisioningApi: bomb.provisioningApi,
+      })
+      const res = await invoke(routes, 'POST', T3A_SOURCE_RUN_PATH, {
+        user: ADMIN_USER,
+        body: { readSourceConfigId: T3A_ERP_CONFIG_ID, syncRunId: 'off_inert_1' },
+      })
+      assertOkResponse(res, 200)
+      assert.equal(res.body.data.mode, 'dry_run')
+      assert.equal(res.body.data.evidence.internalWriteExecuted, false)
+      assert.equal(Object.prototype.hasOwnProperty.call(res.body.data, 'autoPersist'), false, 'OFF adds no autoPersist field')
+      assert.ok(sourceReadCalls.length > 0, 'the legitimate readonly request still reaches the approved source')
+      assert.equal(bomb.state.calls, 0, 'OFF never touches records/provisioning')
+      assert.equal(externalWriteCalls.length, 0)
+    }
+
+    // A tenant-bound admin is not a platform-global principal. Every request tenant carrier must
+    // fail before config/source/records I/O instead of selecting another tenant's approved source.
+    const vectors = [
+      ['body.tenantId', { body: { tenantId: 'tenant_evil', readSourceConfigId: T3A_ERP_CONFIG_ID, syncRunId: 'off_steer_1' } }],
+      ['query.tenantId', { body: { readSourceConfigId: T3A_ERP_CONFIG_ID, syncRunId: 'off_steer_2' }, query: { tenantId: 'tenant_evil' } }],
+      ['params.tenantId', { body: { readSourceConfigId: T3A_ERP_CONFIG_ID, syncRunId: 'off_steer_3' }, params: { tenantId: 'tenant_evil' } }],
+    ]
+    for (const [label, request] of vectors) {
+      const bomb = createCountingThrowMvpApis()
+      const { routes, sourceReadCalls, externalWriteCalls } = createErpAutoPersistHarness({
+        recordsApi: bomb.recordsApi,
+        provisioningApi: bomb.provisioningApi,
+      })
+      const res = await invoke(routes, 'POST', T3A_SOURCE_RUN_PATH, { user: ADMIN_USER, ...request })
+      assert.equal(res.statusCode, 403, `${label}: tenant-bound admin steering is rejected`)
+      assert.equal(res.body.error.code, 'TENANT_MISMATCH', `${label}: stable authorization code`)
+      assert.equal(sourceReadCalls.length, 0, `${label}: rejected before approved-config/source I/O`)
+      assert.equal(bomb.state.calls, 0, `${label}: rejected before records/provisioning I/O`)
+      assert.equal(externalWriteCalls.length, 0, `${label}: rejected before external adapter I/O`)
+    }
   })
   console.log('  testStockPreparationErpSourceRunAutoPersistOffInert OK')
 }
 
-async function testStockPreparationErpAutoPersistTenantResolversDiffer() {
-  // Defense-in-depth for OD-2: the auto-persist route derives its tenant from the AUTHENTICATED principal
-  // (resolveAuthUserTenantId), never resolveTenantId — which for an admin honors a request-supplied tenantId.
-  // The steering guard already blocks a request tenantId at the route, so this difference is not route-
-  // observable; this DIRECT unit test proves the two helpers genuinely differ, so choosing the write-safe
-  // one is load-bearing (changing resolveAuthUserTenantId to read the request would red here).
+async function testStockPreparationTenantResolverScopes() {
   const { resolveTenantId, resolveAuthUserTenantId } = httpRoutes.__internals
-  // A request that carries a steering tenantId (query vector) so the difference is observable: an admin's
-  // resolveTenantId READS it; the write-safe resolveAuthUserTenantId must IGNORE it. If the write-safe
-  // helper were changed to consult the request, this assertion would red.
-  const req = { user: { id: 'user_admin', tenantId: 'tenant_1', roles: ['admin'], permissions: ['integration:admin'] }, query: { tenantId: 'tenant_evil' }, params: {} }
-  assert.equal(resolveTenantId(req), 'tenant_evil', 'resolveTenantId honors an admin request tenantId (the steering vector)')
-  assert.equal(resolveAuthUserTenantId(req), 'tenant_1', 'resolveAuthUserTenantId ignores the request and returns the authenticated tenant')
-  console.log('  testStockPreparationErpAutoPersistTenantResolversDiffer OK')
+  const tenantBoundAdmin = {
+    user: { id: 'tenant_admin', tenantId: 'tenant_1', roles: ['admin'], permissions: ['integration:admin'] },
+    query: { tenantId: 'tenant_evil' },
+    params: {},
+  }
+  assert.throws(
+    () => resolveTenantId(tenantBoundAdmin),
+    (error) => error && error.code === 'TENANT_MISMATCH',
+    'a tenant-bound admin cannot steer a read to another tenant',
+  )
+  assert.equal(
+    resolveAuthUserTenantId(tenantBoundAdmin),
+    'tenant_1',
+    'the write-safe resolver remains bound to the authenticated tenant',
+  )
+
+  const tenantlessPlatformAdmin = {
+    user: { id: 'platform_admin', roles: ['admin'], permissions: ['integration:admin'] },
+    query: { tenantId: 'tenant_2' },
+    params: {},
+  }
+  assert.equal(
+    resolveTenantId(tenantlessPlatformAdmin),
+    'tenant_2',
+    'a tenantless platform admin retains the explicit cross-tenant read capability',
+  )
+
+  const tenantlessDelegatedAdmin = {
+    user: { id: 'delegated_admin', permissions: ['integration:admin'] },
+    query: { tenantId: 'tenant_2' },
+    params: {},
+  }
+  assert.throws(
+    () => resolveTenantId(tenantlessDelegatedAdmin),
+    (error) => error && error.code === 'TENANT_CONTEXT_REQUIRED',
+    'a tenantless delegated integration admin is not promoted to platform-global scope',
+  )
+
+  const headerScopedLegacyAdmin = {
+    user: { id: 'legacy_admin', tenantId: 'tenant_header', roles: ['admin'], permissions: ['integration:admin'] },
+    query: {},
+    params: {},
+  }
+  assert.equal(
+    resolveTenantId(headerScopedLegacyAdmin),
+    'tenant_header',
+    'a legacy tenantless admin backfilled from x-tenant-id retains its selected read scope',
+  )
+  console.log('  testStockPreparationTenantResolverScopes OK')
 }
 
 // ── T3b-1c: PLM source-run server-side auto-persist (flag MULTITABLE_STOCK_PREP_PLM_AUTOPERSIST_ENABLED) ──
@@ -8158,24 +8221,47 @@ async function testStockPreparationPlmSourceRunAutoPersistLineStatus() {
 }
 
 async function testStockPreparationPlmSourceRunAutoPersistOffInert() {
-  const offBody = t3bRequestBody({ tenantId: 'tenant_evil', syncRunId: 'plm_autopersist_off_1', snapshotBatchId: 'plm_autopersist_snapshot_off_1' })
+  const offBody = t3bRequestBody({ syncRunId: 'plm_autopersist_off_1', snapshotBatchId: 'plm_autopersist_snapshot_off_1' })
   const responses = []
   for (const flagValue of [undefined, 'false']) {
     await withPlmAutoPersistFlag(flagValue, async () => {
-      const bomb = createCountingThrowMvpApis()
-      const { routes, externalWriteCalls, sourceReadCalls } = createPlmAutoPersistHarness({ recordsApi: bomb.recordsApi, provisioningApi: bomb.provisioningApi })
-      // Flag OFF (unset AND explicit 'false'): today's read-only behavior byte-for-byte — even a body
-      // tenantId is harmless because the read has no write side effect; the steering guard is not
-      // engaged and no autoPersist field is added.
-      const res = await invoke(routes, 'POST', T3B_SOURCE_RUN_PATH, { user: ADMIN_USER, body: { ...offBody } })
-      assertOkResponse(res, 200)
-      assert.equal(res.body.data.mode, 'dry_run')
-      assert.equal(res.body.data.evidence.internalWriteExecuted, false)
-      assert.equal(Object.prototype.hasOwnProperty.call(res.body.data, 'autoPersist'), false, 'OFF adds no autoPersist field')
-      assert.equal(bomb.state.calls, 0, 'OFF never touches records/provisioning')
-      assert.equal(externalWriteCalls.length, 0)
-      assert.equal(sourceReadCalls.length, 1, 'OFF still performs exactly the one read-only source read')
-      responses.push(JSON.parse(JSON.stringify(res.body)))
+      {
+        const bomb = createCountingThrowMvpApis()
+        const { routes, externalWriteCalls, sourceReadCalls } = createPlmAutoPersistHarness({
+          recordsApi: bomb.recordsApi,
+          provisioningApi: bomb.provisioningApi,
+        })
+        // OFF remains byte-identical for a legitimate readonly request: one source read, no internal
+        // persist, no external write, and no autoPersist response field.
+        const res = await invoke(routes, 'POST', T3B_SOURCE_RUN_PATH, { user: ADMIN_USER, body: { ...offBody } })
+        assertOkResponse(res, 200)
+        assert.equal(res.body.data.mode, 'dry_run')
+        assert.equal(res.body.data.evidence.internalWriteExecuted, false)
+        assert.equal(Object.prototype.hasOwnProperty.call(res.body.data, 'autoPersist'), false, 'OFF adds no autoPersist field')
+        assert.equal(bomb.state.calls, 0, 'OFF never touches records/provisioning')
+        assert.equal(externalWriteCalls.length, 0)
+        assert.equal(sourceReadCalls.length, 1, 'OFF still performs exactly the one read-only source read')
+        responses.push(JSON.parse(JSON.stringify(res.body)))
+      }
+
+      const vectors = [
+        ['body.tenantId', { body: { ...offBody, tenantId: 'tenant_evil' } }],
+        ['query.tenantId', { body: { ...offBody }, query: { tenantId: 'tenant_evil' } }],
+        ['params.tenantId', { body: { ...offBody }, params: { tenantId: 'tenant_evil' } }],
+      ]
+      for (const [label, request] of vectors) {
+        const bomb = createCountingThrowMvpApis()
+        const { routes, externalWriteCalls, sourceReadCalls } = createPlmAutoPersistHarness({
+          recordsApi: bomb.recordsApi,
+          provisioningApi: bomb.provisioningApi,
+        })
+        const res = await invoke(routes, 'POST', T3B_SOURCE_RUN_PATH, { user: ADMIN_USER, ...request })
+        assert.equal(res.statusCode, 403, `${flagValue ?? 'unset'} ${label}: tenant-bound admin steering is rejected`)
+        assert.equal(res.body.error.code, 'TENANT_MISMATCH', `${flagValue ?? 'unset'} ${label}: stable authorization code`)
+        assert.equal(sourceReadCalls.length, 0, `${flagValue ?? 'unset'} ${label}: rejected before approved-config/source I/O`)
+        assert.equal(bomb.state.calls, 0, `${flagValue ?? 'unset'} ${label}: rejected before records/provisioning I/O`)
+        assert.equal(externalWriteCalls.length, 0, `${flagValue ?? 'unset'} ${label}: rejected before external adapter I/O`)
+      }
     })
   }
   // Byte-equivalence between the two OFF spellings: the response is deterministic and identical.
@@ -8246,7 +8332,7 @@ async function main() {
   await testStockPreparationErpSourceRunAutoPersistOn()
   await testStockPreparationErpSourceRunAutoPersistSteering()
   await testStockPreparationErpSourceRunAutoPersistOffInert()
-  await testStockPreparationErpAutoPersistTenantResolversDiffer()
+  await testStockPreparationTenantResolverScopes()
   await testStockPreparationPlmSourceRunAutoPersistOn()
   await testStockPreparationPlmSourceRunAutoPersistSteering()
   await testStockPreparationPlmSourceRunAutoPersistConfigGuard()
@@ -8376,7 +8462,7 @@ async function testStockPreparationTenantScopedWriteSteeringHasNoEffect() {
 
 // GHSA-m6qv-2rpf-q7mh step-1 FOLLOW-UP (owner re-review P1): the step-1 sweep covered only the 10
 // business-ROW write handlers. These SIX additional handlers are the same class — they also derive the
-// tenant/target from the REQUEST (resolveTenantId honors a request tenantId for admins; and
+// tenant/target from the REQUEST (a tenantless platform admin can select a read tenant, and
 // resolveIntegrationStagingProjectId returns a request "X:integration-core" projectId VERBATIM) — but
 // they write STRUCTURE (bases/tables) or FIELD METADATA rather than rows. Same two vectors, same fix.
 //

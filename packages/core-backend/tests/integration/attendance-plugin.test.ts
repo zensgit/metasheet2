@@ -15783,7 +15783,7 @@ attendanceIntegrationDescribe(
     }
   })
 
-  it('H1 scheduler-scope smoke keeps approve/import reachable for scope-only actors', async () => {
+  it('H1 scheduler-scope smoke: import stays reachable for scope-only actors; ordinary-request approve is now assignment-gated (S7-0)', async () => {
     if (!baseUrl) return
     const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
     if (!dbUrl) return
@@ -15885,13 +15885,23 @@ attendanceIntegrationDescribe(
         [scopeId, orgId, actorId, JSON.stringify({ userIds: [targetId] })]
       )
 
+      // S7-0 (RATIFIED S7 lock §3.1/§3.2 + owner erratum OD-S7-0): an ordinary request is
+      // ASSIGNMENT-AUTHORITATIVE. Holding a scheduler 'approve' scope still satisfies the broad gate,
+      // but is no longer sufficient to resolve — the actor must be in the active assignment set (or be
+      // admin). This scope-only actor holds neither the leave flow's fallback assignments
+      // (role:'admin' + source_queue:'attendance:approve'/'attendance:admin') nor admin, so the S7-0
+      // assignment check blocks it with FORBIDDEN (distinct from the broad gate's
+      // SCHEDULER_SCOPE_FORBIDDEN). The scope-native carve-out is schedule_dispatch-only; leave never
+      // enters it. This is the intended S7-0 tightening (was 200 pre-S7-0).
       const approveInsideScope = await requestJson(`${baseUrl}/api/attendance/requests/${targetRequestId}/approve`, {
         method: 'POST',
         headers,
         body: JSON.stringify({ comment: 'scope-only approve' }),
       })
-      expect(approveInsideScope.status, approveInsideScope.raw).toBe(200)
-      expect((approveInsideScope.body as { data?: { status?: string } } | undefined)?.data?.status).toBe('approved')
+      expect(approveInsideScope.status, approveInsideScope.raw).toBe(403)
+      expect((approveInsideScope.body as { error?: { code?: string } } | undefined)?.error?.code).toBe('FORBIDDEN')
+      const insideScopeStatus = (await pool.query('SELECT status FROM attendance_requests WHERE id = $1', [targetRequestId])).rows[0]?.status
+      expect(insideScopeStatus).toBe('pending')
 
       const outsideRequestId = await createPendingLeaveRequest(outsideTargetId, '2036-06-27')
       const approveOutsideScope = await requestJson(`${baseUrl}/api/attendance/requests/${outsideRequestId}/approve`, {

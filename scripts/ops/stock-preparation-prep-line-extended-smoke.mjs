@@ -75,6 +75,7 @@ import {
   AUDIT_ACTIONS,
   ENGINE_MESSAGE_SENTINELS,
   buildOptionSetsFixture,
+  buildRequestHeaders,
   leakScan,
   newIds,
   projectCounts,
@@ -276,16 +277,26 @@ export async function runApprovedSourcePrelude({ salt, args, req, must, summary,
   summary.approvedSourceCreated = projectCounts(auto.created, ['batch', 'lines', 'run'])
   // A 200 dry_run here means the T3b flag is OFF on the service — the prelude REQUIRES the flag and
   // must fail loudly rather than "pass" as a read-only run (OD-6 item 1).
-  must('approved-source run -> 201 internal_persist with non-empty batch/lines/run (T3b flag ON)',
+  const createdOk =
     sourceRun.ok && data.mode === 'internal_persist' &&
     data.evidence?.internalWriteExecuted === true &&
     auto.persisted === true && auto.mode === 'created' &&
-    auto.created?.batch === 1 && safeCount(auto.created?.lines) >= 1 && auto.created?.run === 1,
+    auto.created?.batch === 1 && safeCount(auto.created?.lines) >= 1 && auto.created?.run === 1
+  must('approved-source run -> 201 internal_persist with non-empty batch/lines/run (T3b flag ON)',
+    createdOk,
     `http=${sourceRun.status} mode=${summary.approvedSourceMode} created=${summary.approvedSourceCreated}`)
-  must('approved-source run keeps every external-write invariant false',
+  // Owner review P3: a failed first call already fails the run — do NOT keep reading the external
+  // source or risk creating internal rows with a second call.
+  if (!createdOk) return prelude
+  // Owner re-review (2026-07-17): the SAME stop applies when the create looked right but the
+  // external-write evidence is tainted — a 201 with externalWriteExecuted=true is a failed
+  // acceptance, and a failed acceptance never replays.
+  const externalWriteClean =
     data.evidence?.externalWriteExecuted === false && data.evidence?.productionWrite === false &&
-    data.evidence?.k3SaveSubmitAudit === false && data.evidence?.plmExternalWrite === false,
+    data.evidence?.k3SaveSubmitAudit === false && data.evidence?.plmExternalWrite === false
+  must('approved-source run keeps every external-write invariant false', externalWriteClean,
     `http=${sourceRun.status}`)
+  if (!externalWriteClean) return prelude
   const replay = await req(`${API}/mvp/source-runs/plm-bom`, {
     method: 'POST', body: prelude.body, accept: [200], label: 'approved-source-run-replay',
   })
@@ -340,18 +351,30 @@ function check(name, ok, detail = '') {
   return ok === true
 }
 
-async function requestJson(baseUrl, pathname, { token, timeoutMs, method = 'GET', body, accept = [200], label = '', leakExempt = false } = {}) {
+// T4 corrective P3-1 (reviewer): the per-request defaults main() feeds into EVERY requestJson call,
+// extracted pure so the tenant passthrough is unit-pinnable — deleting tenantId here reds a test
+// instead of silently reverting the entity run to the corrective-5 N/8 failure class.
+export function buildRequestDefaults(args, token) {
+  return { token, timeoutMs: args.timeoutMs, tenantId: args.tenantId }
+}
+
+// T4 corrective (owner review, 2026-07-16): headers come from the SAME builder the W6 smoke uses —
+// x-tenant-id rides on EVERY request when --tenant-id is given. The jwt middleware backfills the
+// authenticated principal's tenant from that header, and the T3b/T2 write routes resolve the tenant
+// from the principal only (resolveAuthUserTenantId) — without the header a tenant-scoped token-less
+// deployment 400s TENANT_REQUIRED, the exact corrective-5 N/8 root cause. fetchImpl is injectable so
+// the REAL header assembly is test-pinned (never a scripted stand-in).
+export async function requestJson(baseUrl, pathname, { token, timeoutMs, tenantId, method = 'GET', body, accept = [200], label = '', leakExempt = false, fetchImpl } = {}) {
+  const doFetch = fetchImpl || fetch
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), timeoutMs)
   try {
-    const headers = { Accept: 'application/json' }
-    if (token) headers.Authorization = `Bearer ${token}`
+    const headers = buildRequestHeaders({ token, tenantId, hasBody: body !== undefined })
     const init = { method, headers, signal: controller.signal }
     if (body !== undefined) {
-      headers['Content-Type'] = 'application/json'
       init.body = JSON.stringify(body)
     }
-    const response = await fetch(`${baseUrl}${pathname}`, init)
+    const response = await doFetch(`${baseUrl}${pathname}`, init)
     const text = await response.text()
     let parsed = null
     try { parsed = text ? JSON.parse(text) : null } catch { parsed = null }
@@ -385,7 +408,7 @@ async function main() {
   const S = RESULT.summary
   let failed = false
   const must = (name, ok, detail) => { if (!check(name, ok, detail)) failed = true }
-  const req = (pathname, options) => requestJson(args.baseUrl, pathname, { token, timeoutMs: args.timeoutMs, ...options })
+  const req = (pathname, options) => requestJson(args.baseUrl, pathname, { ...buildRequestDefaults(args, token), ...options })
   const scope = (extra) => scopeQuery(args, extra)
   SELF_SCAN_SENTINELS = [...fixture.sentinels, ...ENGINE_MESSAGE_SENTINELS]
   S.salt = salt

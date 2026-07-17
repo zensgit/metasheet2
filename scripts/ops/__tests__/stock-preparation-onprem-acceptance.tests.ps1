@@ -2,7 +2,7 @@
 # Static contract tests for stock-preparation-onprem-acceptance.ps1 (#3751 T9).
 # The full deploy path is Windows-only and cannot run in CI/sandbox, so these lock the two
 # security-critical, statically-verifiable invariants: (1) the summary is values-free by construction
-# (exactly the 9 whitelisted fields), (2) the admin token never crosses into the summary / a file /
+# (exactly the 17 whitelisted fields), (2) the admin token never crosses into the summary / a file /
 # a log — it only ever rides a scoped process env var that is cleared in a finally.
 $ErrorActionPreference = 'Stop'
 $script = Join-Path $PSScriptRoot '..' 'stock-preparation-onprem-acceptance.ps1'
@@ -130,22 +130,58 @@ Check "PM2 projection helper is required by the on-prem package build" (
   $packageBuildSrc -match '"scripts/ops/stock-preparation-pm2-sample\.mjs"'
 )
 
-# ── 1. Summary is values-free by construction: exactly the 14 whitelisted keys, nothing else. ────
-# (9 original + 5 corrective-5 bounded diagnostics; every added default is a fixed enum / integer.)
+# ── 1. Summary is values-free by construction: exactly the 17 whitelisted keys, nothing else. ────
+# (corrective-7 adds only a bounded HTTP status + fixed error class; no response value/message.)
 $expectedFields = @(
   'packageShaMatch','migrationStatus','pm2StableOnline','healthcheck',
   'mvpSmoke.pass','auditActionsCovered','selfScanClean',
   'mvpSmoke.failureClass','mvpSmoke.lastCompletedPhase','mvpSmoke.firstFailedCheck',
-  'mvpSmoke.failedCheckCount','mvpSmoke.responseLeakScanStatus',
-  'externalPlmK3ErpWrite','failedStage'
+  'mvpSmoke.failedCheckCount','mvpSmoke.firstFailedHttpStatus','mvpSmoke.firstFailedErrorClass',
+  'mvpSmoke.responseLeakScanStatus',
+  'externalPlmK3ErpWrite','postRunCredentialHygiene','failedStage'
 )
 $summaryBlock = if ($src -match "(?s)\`$Summary = \[ordered\]@\{(.*?)\}") { $Matches[1] } else { '' }
 $foundKeys = [regex]::Matches($summaryBlock, "(?m)^\s*'?([A-Za-z0-9.]+)'?\s*=") | ForEach-Object { $_.Groups[1].Value }
-Check "summary declares exactly the 14 whitelisted fields" (
-  ($foundKeys.Count -eq 14) -and (($expectedFields | Where-Object { $_ -notin $foundKeys }).Count -eq 0)
+Check "summary declares exactly the 17 whitelisted fields" (
+  ($foundKeys.Count -eq 17) -and (($expectedFields | Where-Object { $_ -notin $foundKeys }).Count -eq 0)
 )
 Check "summary has NO value-plane field (drawing/qty/unit/material/host/token)" (
   -not ($summaryBlock -match '(?i)drawing|qty|quantity|unit|material|host|token|password|secret|projectName')
+)
+
+# ── 1b. corrective-6 token-hygiene wiring (entity FAIL ACCEPTANCE_TOKEN_PERSISTED_IN_PM2_ENV) ────
+# The token must be read+scrubbed at the TOP of the orchestration (before ANY stage can spawn a
+# child that inherits the env), the pm2 stage must assert the runner env is token-free before the
+# restart, and a post-run hygiene stage must run between the smoke stage and Emit-Summary.
+$orchestrationStart = $src.IndexOf("if (`$MyInvocation.InvocationName -ne '.')")
+$orchestration = $src.Substring([Math]::Max($orchestrationStart, 0))
+Check "env-var token is read+scrubbed BEFORE the first stage in the orchestration" (
+  $orchestrationStart -ge 0 -and
+  $orchestration.IndexOf('Read-AdminTokenSecureFromEnv') -ge 0 -and
+  $orchestration.IndexOf('Read-AdminTokenSecureFromEnv') -lt $orchestration.IndexOf('Invoke-ShaStage')
+)
+Check "post-run hygiene stage runs after the smoke stage and before Emit-Summary" (
+  $orchestration.IndexOf('Invoke-PostRunHygieneStage') -gt $orchestration.IndexOf('Invoke-SmokeStage') -and
+  $orchestration.IndexOf('Invoke-PostRunHygieneStage') -lt $orchestration.IndexOf('Emit-Summary')
+)
+Check "pm2 stage asserts the runner env is token-free before the restart" (
+  $src -match 'token_env_present_before_pm2'
+)
+Check "hygiene verdict is fail-closed and values-free (fixed coarse reasons)" (
+  $src -match 'sample_missing' -and $src -match 'hygiene_fields_missing' -and
+  $src -match 'PM2_ENV_METASHEET_ADMIN_TOKEN_NONEMPTY' -and $src -match 'PM2_ENV_METASHEET_AUTH_TOKEN_NONEMPTY'
+)
+$pm2HelperSrc = Get-Content $pm2SampleHelper -Raw
+Check "pm2 projection helper reports token presence as BOOLEANS (never values)" (
+  $pm2HelperSrc -match 'adminTokenNonEmpty' -and $pm2HelperSrc -match 'authTokenNonEmpty' -and
+  $pm2HelperSrc -match 'METASHEET_ADMIN_TOKEN' -and $pm2HelperSrc -match 'carrierNonEmpty'
+)
+Check "entry scrub handles ALL carriers and fails closed on ambiguity (owner P1)" (
+  $src -match 'multiple_token_carriers_present' -and
+  ($src -match "@\(\`$AdminTokenEnvVar, 'METASHEET_ADMIN_TOKEN', 'METASHEET_AUTH_TOKEN'\)")
+)
+Check "pm2 projection receives the configured admin carrier (owner P2)" (
+  $src -match '\$pm2SampleHelper\s+\$AdminTokenEnvVar'
 )
 
 # ── 2. Token discipline. ─────────────────────────────────────────────────────────────────────────
