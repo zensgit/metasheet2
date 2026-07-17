@@ -24,7 +24,7 @@
 
 **每次 `createRecord`/`patchRecord` 是它自己的一个 poolManager 事务**（`packages/core-backend/src/index.ts:595-596`
 create、:633-634 patch；`queryRecords` 是普通池查询 :573-585）。跨写**没有共享事务**：plugin API 面只收
-`{sheetId, data}`，**无任何事务/client 传递参数**（`packages/core-backend/src/types/plugin.ts:436-504`，
+`{sheetId, data}`，**无任何事务/client 传递参数**（`packages/core-backend/src/types/plugin.ts:436-499`，
 `MultitableRecordsAPI` 共 6 个单记录方法，无 bulk/batch/unit-of-work）。崩溃只会落在整行提交之间，
 部分状态永远是「整数个完整行」。
 
@@ -32,7 +32,7 @@ create、:633-634 patch；`queryRecords` 是普通池查询 :573-585）。跨写
 （`rec_${randomUUID()}`），**逻辑键上没有任何唯一约束**（DDL
 `zzz20251231_create_meta_schema.ts:44-51`；索引全部非唯一，含 GIN(data)，
 `zzzz20260413110000_add_meta_records_query_indexes.ts:12-15`）。`snapshotBatchId` 唯一性**只靠**
-persist 模块的 limit-2 预检 + 409。
+persist 模块的 limit-2 预检 + 409。（plugin 面 API 完整清单：`types/plugin.ts:436-499`。）
 
 ### 0.2 崩溃窗口 CW1-CW5
 
@@ -63,7 +63,13 @@ persist 模块的 limit-2 预检 + 409。
 - **同 project 异 batch 首写竞态**：project 预检在最早（:469），create-vs-patch 决策在最后（:505），
   TOCTOU 跨越整个 persist。双首写各 create 一条 project 行 → `queryProjectRows` 见 2 行 →
   该**项目整体毒化**为 409 `{project,duplicate_key}`（:255）。已存在 project 行的 patch-vs-patch
-  竞态则被行内 fence 序列化（`records.ts:491-546`，patch 无 expectedVersion 但 fence 先于读）。
+  竞态**不产生重复行但也不被 fence 序列化**：patch 路径的 `fenceWriterEntry`（`records.ts:498`）
+  是 flag-gated no-op（`MULTITABLE_ENABLE_WRITER_FENCE` 默认 OFF，
+  `canonical-sheet-fence.ts:134-138,185`；`records.ts:495-497` 注释明言 OFF 时 byte-identical）——
+  默认部署下读（:503，普通 SELECT 无 FOR UPDATE）与 UPDATE（:519-525）之间是**未序列化的
+  read-modify-write，行级 UPDATE 锁上 last-writer-wins**。对本模块只写 3 个 pointer key 的闭集
+  patch 是良性的（无重复行、无毒化），但对 project 行其他字段存在 lost-update 面——这也进一步
+  支持方案 A 把 project patch 收进事务。
 - 底座**乐于**插入两条同逻辑键的行（INSERT 无 ON CONFLICT，:627-632；无唯一索引）——
   **即便有跨写事务，并发重复窗口也不闭合**，须另配 key 级锁或唯一表达式索引（见 §3）。
 
@@ -89,18 +95,23 @@ persist 模块的 limit-2 预检 + 409。
 词表**没有 `pending`**：`snapshot_status ∈ {draft, active, superseded, rejected}`
 （`stock-preparation-sync-run-plan.cjs:36,42`；契约 optionSource key
 `stock_preparation_snapshot_status_v1`，`stock-preparation-templates.cjs:633-634`），写入方**只写
-`draft` 且永不翻转**（:303 注释「status draft, never active」）——完整提交与崩溃孤儿在状态上
-**不可区分**，完整性只能结构性证明（run 行 + 完整 line 集 + project 行），这正是
+`draft` 且永不翻转**（:296 注释「status 'draft', never 'active'」+ :303 赋值）——完整提交与崩溃
+孤儿在状态上**不可区分**，完整性只能结构性证明（run 行 + 完整 line 集 + project 行），这正是
 `assertExactReplay` 的算法。run status ∈ {running, succeeded, failed, partial}；prep-line 实际词表只有
-{draft, held}。**没有任何 reader 按 `snapshotStatus` 过滤**（全仓唯一消费点是 :199 的原样回显）。
+{draft, held}。**没有任何 reader 按 `snapshotStatus` 过滤**（存储值的唯一读取点是
+`snapshot-reads.cjs:199` 的原样回显；persist/plan 侧另有对 plan 值的 evidence 回显，FE 对回显值
+裸渲染）。
 
 ### 0.6 错误面与调用方
 
-- 中途底座失败 → 无 `.status` 的异常 → 500 `INTERNAL_ERROR`（`http-routes.cjs:432-453`），
-  **不泄露 partial counters / identity**（`linesCreated` 是局部变量，仅进成功返回 :515）。
+- 中途底座失败 → 无 `.status` 的异常 → HTTP 500，公开 code = 原始 `error.code || error.name`
+  （pg 错误会以 SQLSTATE 形态出现；字面 `INTERNAL_ERROR` 实际几乎不可达；name-regex 分支可产生
+  400/404/409/422，`http-routes.cjs:402,432-453`）。**不泄露 partial counters / identity**
+  （`linesCreated` 是局部变量，仅进成功返回 :515）。
 - 生产调用方恰两个，共享同一模块：`POST /mvp/sync/persist`（:3887-3915）与 T3b flag-gated
-  source-run 桥（:3982，默认 OFF）。T3a ERP 走**兄弟模块** `erp-material-sync-persist.cjs`
-  （upsert-by-key 语义，不在本锁范围，见 §10）。apps/ 无前端调用方。
+  source-run 桥（:3982，默认 OFF）。T3a ERP 走**兄弟模块**
+  `stock-preparation-erp-material-sync-persist.cjs`（upsert-by-key 缓存语义，不在本锁范围，
+  见 §10 决策点 5）。apps/ 无前端调用方。
 
 ## 1. 继承的权威约束（不重开已裁决项）
 
@@ -112,9 +123,9 @@ persist 模块的 limit-2 预检 + 409。
 - **values-free**：新增状态、错误、修复动作的公开面不得含 partial counters / identity / 业务值。
 - **外部写零授权**：本锁与外部写无关，`externalWrite=false` 姿态不变。
 - **W6/T4 smoke 现有断言**（`stock-preparation-mvp-postdeploy-smoke.mjs:630-700`、
-  `prep-line-extended-smoke.mjs:281-309,485-496`）：201 created→200 skipped_existing 幂等对、
+  `prep-line-extended-smoke.mjs:45,281-309,485-496`）：201 created→200 skipped_existing 幂等对、
   batchCount===1、incomplete===false、teardown 视 batch/lines/prep-lines/exceptions 为
-  **immutable audit substrate**。任何方案落地时这些断言是回归面。
+  **immutable audit substrate**（:45 头注）。任何方案落地时这些断言是回归面。
 
 ## 2. 方案定义域
 
@@ -144,12 +155,22 @@ sheet，治理成本更高，仅作备选记录。）
 
 **代价（真实成本，须写进验收）**：
 - 组合事务持有至多 4 张 sheet 的 advisory xact lock 直至 COMMIT（`auto-number-service.ts:23-31`
-  per-create fence）——**锁获取次序必须固定**（如按 objectId 字典序），否则与其他写者可成环死锁；
-- 行循环上界大（read bound 500×50 = 至多 25,000 行，persist.cjs:77-78）→ 单长事务；须裁量行数上限
-  或分段策略（分段则回到部分可见，须在锁文里显式取舍——建议 v1 直接沿用现有 plan 规模上限并压测）；
+  per-create fence）——**锁获取次序必须固定**；kernel 已有现成纪律与 helper：
+  `acquireCanonicalSheetFencesInOrder`（`canonical-sheet-fence.ts:91`，去重 + **sheet-id 排序**，
+  注释明言为未来多 sheet 写者预留）——组合原语应复用该次序，不另立约定；
+- 行数上界：replay 读路径的可证界为 500×50 = 25,000 行（`persist.cjs:72-73`，超界
+  409 `PERSIST_EXISTING_BATCH_READ_UNPROVABLE`）；**create 循环自身无强制上界**（与 §9 H-3 一致，
+  「现仅由读界隐含」）→ 单长事务风险按该隐含界评估；须裁量显式上限或分段策略（分段则回到部分
+  可见，须显式取舍——建议 v1 直接沿用现有 plan 规模上限并压测）；
 - flag-gated `assertNoActiveWriterBlock` 每 create 跑一次（:612-614），事务内语义不变但持锁时长增加；
 - kernel API 面新增 = 跨插件契约，需 W0 canonical fence 相容性审（组合内逐行 revision 发射同事务，
   初判相容，须在验证里证明）。
+
+**落地/迁移姿态（须 owner 裁，写进实现 PR 门）**：persist 模块被两个生产调用方**共享**
+（`/mvp/sync/persist` 路由 :3895 + T3b 桥 :3982）——采用组合原语是**两口同时切**。T3b OD-4 先例
+（t3b lock :244-246）把共享 persist 变更定为**非 inert**：须独立 PR + 对现有路由兼容回归 + 真库
+证据 + owner review。可选姿态：(i) default-OFF flag 下并存双路径（顺序路径为回退，代价=双路径
+维护）或 (ii) 硬切换 + OD-4 式独立 PR 纪律。倾向 (ii)（双路径违背「一个写面」原则），留 owner。
 
 **覆盖**：CW1-CW4 全闭（单提交点，中途失败=全回滚，零残留）；CW4-existing 的 project patch 进事务
 → stale 指针窗口闭合；TOCTOU 毒化闭合（in-tx 锁）。**残留**：存量孤儿/毒化行不自愈（一次性清理归
@@ -162,6 +183,11 @@ sheet，治理成本更高，仅作备选记录。）
 (B2) 新增词表值（如 `staged`）——须走 optionSource 契约
 `stock_preparation_snapshot_status_v1` 的治理扩词（option-sync 供给 + 迁移次序纪律）；
 (B3) 不动 batch 行，新增独立 commit-marker 行（第 5 类对象）。
+
+**标记位置钉死**：终笔标记必须落在 **project upsert 之后**（成为整个 commit 的最后一笔）——
+放在 run 与 project 之间会「先宣告完整、后写 project 行」，严格更差。由此 CW1-CW3 **与 CW4-first**
+在 B 下同样是「未标记=staged 可判」；CW4-existing 例外：B 的再入补标逻辑按结构复检通过后补标，
+会把 stale 指针**重新静默化**（复检只查存在性时），除非补标前显式校验指针内容。
 
 **硬约束冲突面（本锁不粉饰）**：
 - **`frozenProjection` 含 `snapshotStatus` 且 plan 恒发 `draft`**（§1）——B1/B2 翻转后，同 plan 的
@@ -218,8 +244,8 @@ dashboard 阻断提示。**评估**：D 在 1/5 上站得住；2-4 让「有界�
 | 维度 | A 事务(+锁) | B 两阶段 | C repair | D 风险接受 |
 |---|---|---|---|---|
 | CW1-CW3 孤儿 | **预防**（零残留） | 标记可判（仍产生） | 事后可愈 | 保持（409 可见） |
-| CW4-first | 预防 | 不覆盖（标记在其后） | 可愈 | 保持（409 可见） |
-| CW4-existing stale 指针 | **预防** | 不覆盖 | **可愈（唯一治存量者）** | **静默保持** |
+| CW4-first | 预防 | 标记可判（仍产生） | 可愈 | 保持（409 可见） |
+| CW4-existing stale 指针 | **预防** | 不覆盖（再入补标反而再静默化，§4） | **可愈（唯一治存量者）** | **静默保持** |
 | 同 batch TOCTOU 毒化 | **预防**（in-tx 锁） | 不覆盖 | 不可修 | 保持（手工 SQL） |
 | 同 project 首写毒化 | **预防** | 不覆盖 | 不可修 | 保持（手工 SQL） |
 | 读侧 staged 可见窗口 | 无（单提交点） | 有，须全读端改造 | 有（修复前） | 有 |
@@ -268,7 +294,8 @@ dashboard 阻断提示。**评估**：D 在 1/5 上站得住；2-4 让「有界�
 
 **留给 owner 的决策点**：
 1. 选型 A / B / C / D（或 A+C 组合）；
-2. 若 A：是否接受 kernel API 面新增（跨插件契约）+ 长事务上界裁量（§3 代价段）；
+2. 若 A：是否接受 kernel API 面新增（跨插件契约）+ 长事务上界裁量 + 落地姿态
+   （default-OFF 双路径 vs 硬切换+OD-4 式独立 PR 纪律，§3 代价/落地段）；
 3. H-1/H-2/H-3 是否与选型解耦先行；
 4. 存量孤儿/毒化行的处置口径（工具清理 vs 保留为审计残留）；
 5. T3a ERP 兄弟模块（upsert-by-key 语义，无同型孤儿面但未审）是否纳入同一门。
@@ -278,4 +305,5 @@ dashboard 阻断提示。**评估**：D 在 1/5 上站得住；2-4 让「有界�
 - 不改 RC-A 包与 #4437 流程；不动 `/mvp/sync/persist` 现有 replay 语义（#4382 已裁，本文仅引用）；
 - 不推翻 batch-first 写序（:490-492 的设计意图保留）；
 - 不引入外部写；不放宽 values-free；不在本锁内实现任何运行时代码；
-- T3a `erp-material-sync-persist.cjs` 的原子性面留待 §10.5 owner 裁决后另行处理。
+- T3a `stock-preparation-erp-material-sync-persist.cjs` 的原子性面留待 §10 决策点 5 owner 裁决后
+  另行处理。
