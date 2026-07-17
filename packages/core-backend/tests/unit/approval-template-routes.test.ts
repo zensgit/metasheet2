@@ -1084,6 +1084,29 @@ describe('approval template routes', () => {
       expect(routeState.state.templates.get(template.id)?.latest_version_id).toBe(v2.id)
     })
 
+    it('rejects a restore that omits the optimistic concurrency anchor', async () => {
+      const template = routeState.createTemplateFixture()
+      const v1 = routeState.createVersionFixture(template.id, { version: 1 })
+      const v2 = routeState.createVersionFixture(template.id, { version: 2 })
+      template.latest_version_id = v2.id
+      const beforeCount = routeState.state.versions.size
+
+      const app = createApp()
+      const missing = await request(app)
+        .post(`/api/approval-templates/${template.id}/versions/${v1.id}/restore`)
+        .send({})
+      const blank = await request(app)
+        .post(`/api/approval-templates/${template.id}/versions/${v1.id}/restore`)
+        .send({ expectedLatestVersionId: '   ' })
+
+      expect(missing.status).toBe(400)
+      expect(missing.body.error.code).toBe('VALIDATION_ERROR')
+      expect(blank.status).toBe(400)
+      expect(blank.body.error.code).toBe('VALIDATION_ERROR')
+      expect(routeState.state.versions.size).toBe(beforeCount)
+      expect(routeState.state.templates.get(template.id)?.latest_version_id).toBe(v2.id)
+    })
+
     it('rejects restoring the latest version as a redundant copy', async () => {
       const template = routeState.createTemplateFixture()
       const latest = routeState.createVersionFixture(template.id)
