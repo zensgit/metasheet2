@@ -23,6 +23,7 @@ import type {
   UpdateApprovalTemplateRequest,
   PublishApprovalTemplateRequest,
   ApprovalTemplateUsageDTO,
+  RestoreApprovalTemplateVersionRequest,
   FormSchema,
 } from '../types/approval'
 
@@ -114,6 +115,7 @@ function mockVersionDetail(templateId: string, versionId: string): ApprovalTempl
     },
     publishedDefinitionId: 'def_1',
     publishNote: null,
+    restoredFromVersionId: null,
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
   }
@@ -214,7 +216,7 @@ function mockApproval(index: number): UnifiedApprovalDTO {
   }
 }
 
-function mockHistory(approvalId: string): UnifiedApprovalHistoryDTO[] {
+function mockHistory(_approvalId: string): UnifiedApprovalHistoryDTO[] {
   // Dev-mode fixture: preserve the existing workflow story then append an any-mode (或签)
   // completion event so the timeline exercises the first-wins aggregateCancelled path.
   return [
@@ -863,7 +865,8 @@ export async function listTemplateVersions(
   templateId: string,
 ): Promise<ApprovalTemplateVersionSummaryDTO[]> {
   if (USE_MOCK) {
-    const detail = mockVersionDetail(templateId, `ver_${templateId}_1`)
+    const template = mockTemplateDetail(templateId)
+    const detail = mockVersionDetail(templateId, template.latestVersionId ?? `ver_${templateId}_1`)
     return [
       {
         id: detail.id,
@@ -872,6 +875,7 @@ export async function listTemplateVersions(
         status: detail.status,
         publishNote: detail.publishNote,
         publishedDefinitionId: detail.publishedDefinitionId,
+        restoredFromVersionId: detail.restoredFromVersionId,
         createdAt: detail.createdAt,
         updatedAt: detail.updatedAt,
       },
@@ -881,6 +885,28 @@ export async function listTemplateVersions(
     `/api/approval-templates/${encodeURIComponent(templateId)}/versions`,
   )
   return response.versions
+}
+
+export async function restoreTemplateVersion(
+  templateId: string,
+  versionId: string,
+  request: RestoreApprovalTemplateVersionRequest,
+): Promise<ApprovalTemplateVersionDetailDTO> {
+  if (USE_MOCK) {
+    const restored = mockVersionDetail(templateId, `ver_${templateId}_${Date.now()}`)
+    return {
+      ...restored,
+      version: restored.version + 1,
+      status: 'draft',
+      runtimeGraph: null,
+      publishedDefinitionId: null,
+      restoredFromVersionId: versionId,
+    }
+  }
+  return apiPost(
+    `/api/approval-templates/${encodeURIComponent(templateId)}/versions/${encodeURIComponent(versionId)}/restore`,
+    request,
+  )
 }
 
 export async function listApprovals(

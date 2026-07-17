@@ -41,6 +41,10 @@ export default defineConfig({
       'tests/integration/approval-wp-add-reduce-sign.api.test.ts',
       'tests/integration/approval-direct-manager.api.test.ts',
       'tests/integration/approval-postgate-acceptance.api.test.ts',
+      // Template authoring + version-restore real HTTP/DB acceptance. Excluded from the no-DB
+      // default job so describeIfDatabase cannot skip-green it; wired as a whole file in the
+      // approval real-DB workflow step.
+      'tests/integration/approval-template-authoring-uat.api.test.ts',
       'tests/integration/dept-head-sync-plumbing.test.ts',
       // DT-HARDEN-02 orphan guard (real DB): proves the admission SAVEPOINT rolls back a users
       // INSERT when the bind throws after it. DATABASE_URL-gated; excluded here so the no-DB job
