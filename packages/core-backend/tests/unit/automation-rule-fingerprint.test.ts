@@ -115,4 +115,27 @@ describe('#4196 §2.1 rule action-set fingerprint', () => {
     expect(deriveRuleActionSetFingerprint([])).toEqual(deriveRuleActionSetFingerprint(undefined))
     expect(deriveRuleActionSetFingerprint([]).count).toBe(0)
   })
+
+  // §4 anti-false-positive: the captured fingerprint is persisted to JSONB and the compare side is read back
+  // from the rule row. JSONB does NOT preserve object key ORDER, so an UNCHANGED rule whose config keys come
+  // back reordered must still fingerprint IDENTICALLY — otherwise a legitimate retry gets a spurious 409
+  // RULE_CHANGED. This pins the canonicalization (deep key-sort) the guard's correctness depends on.
+  it('a JSONB round-trip that reorders config keys does NOT change the fingerprint (no false RULE_CHANGED)', () => {
+    // authored order
+    const authored = [
+      A('update_record', { fields: { zeta: 3, alpha: 1, mid: 2 }, note: 'n', target: 't' }),
+      A('parallel_branch', {
+        branches: [{ key: 'p0', actions: [A('send_webhook', { headers: { b: 2, a: 1 }, url: 'x', method: 'POST' })] }],
+      }),
+    ]
+    // simulate persist→JSONB→read: JSON round-trip + a deliberately different key insertion order at every level
+    const reordered = [
+      A('update_record', { target: 't', note: 'n', fields: { mid: 2, alpha: 1, zeta: 3 } }),
+      A('parallel_branch', {
+        branches: [{ key: 'p0', actions: [A('send_webhook', { method: 'POST', url: 'x', headers: { a: 1, b: 2 } })] }],
+      }),
+    ]
+    const roundTripped = JSON.parse(JSON.stringify(reordered))
+    expect(deriveRuleActionSetFingerprint(roundTripped).hash).toBe(deriveRuleActionSetFingerprint(authored).hash)
+  })
 })

@@ -64,6 +64,7 @@ import { randomBytes } from 'crypto'
 import { AutomationLogService } from './automation-log-service'
 import { AutomationJobService } from './automation-job-service'
 import { AutomationSuspensionService, computeActionFingerprint } from './automation-suspension-service'
+import { deriveRuleActionSetFingerprint } from './automation-rule-fingerprint'
 import {
   AutomationApprovalBridgeService,
   hasPermissionCode,
@@ -739,8 +740,10 @@ export interface UpdateRuleInput {
 
 /**
  * Convert a legacy DB rule to the executor rule format.
+ * Exported for test parity: the retry RULE_CHANGED guard fingerprints `toExecutorRule(rule).actions`,
+ * so a test that asserts a MATCHING fingerprint must normalize the DB row through this same transform.
  */
-function toExecutorRule(rule: AutomationRule): ExecutorRule {
+export function toExecutorRule(rule: AutomationRule): ExecutorRule {
   const trigger: AutomationTrigger = {
     type: rule.trigger_type as AutomationTriggerType,
     config: rule.trigger_config ?? {},
@@ -2247,6 +2250,22 @@ export class AutomationService {
       return { status: 409, code: 'RULE_MISSING_OR_DISABLED', message: `Rule ${original.ruleId} is missing or disabled; cannot retry` }
     }
     const execRule = toExecutorRule(rule)
+    // #4196 §4 — refuse a retry whose rule changed since the original run. A config-only edit (same action
+    // types, rotated URL/token/target) silently rebinds the action's identity, so replaying the OLD execution
+    // against the NEW config could double-apply or apply to the wrong target. Compare the current rule's
+    // RAW-config §2.1 fingerprint against the one captured at the original run (the type-only
+    // computeActionFingerprint the suspend/resume guards use is blind to config-only edits). Rollout-safe:
+    // executions that predate the fingerprint column carry `null` and are NOT guarded (non-regressing).
+    if (
+      original.ruleActionFingerprint != null &&
+      deriveRuleActionSetFingerprint(execRule.actions).hash !== original.ruleActionFingerprint
+    ) {
+      return {
+        status: 409,
+        code: 'RULE_CHANGED',
+        message: 'Rule actions changed since the original execution; cannot retry safely',
+      }
+    }
     const execution = await this.executeRule(execRule, original.triggerEvent, {
       rerunOfExecutionId: original.id,
       initiatedBy,

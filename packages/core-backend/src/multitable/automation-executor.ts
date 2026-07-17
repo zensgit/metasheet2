@@ -6,6 +6,7 @@
 import { randomUUID } from 'crypto'
 import { recordRecordRevision, recordVersionMarker } from './record-history-service'
 import { branchChildStepKey, topLevelStepKey } from './automation-step-key'
+import { deriveRuleActionSetFingerprint } from './automation-rule-fingerprint'
 import { Logger } from '../core/logger'
 import { withAutomationEventId } from './automation-event-dedup'
 import { redactString } from './automation-log-redact'
@@ -713,6 +714,13 @@ export interface AutomationExecution {
   triggerEvent?: unknown
   /** The rule as it was at execution time (diagnosis / future retry source). */
   ruleSnapshot?: AutomationRule
+  /**
+   * #4196 §4: the §2.1 action-set fingerprint over the RAW config, captured at execution time. A retry
+   * compares the current rule's fingerprint to THIS to refuse a config-changed rule (409 RULE_CHANGED). NOT
+   * re-derived from ruleSnapshot (which is redacted → would diverge from the raw Class-A claim identity); a
+   * values-free sha256, safe to persist un-redacted.
+   */
+  ruleActionFingerprint?: string
   /** When the execution finished (cleaner provenance anchor than duration alone). */
   finishedAt?: string
   /** Forward-compat tag for the snapshot shape. */
@@ -897,6 +905,8 @@ export class AutomationExecutor {
       sheetId: rule.sheetId,
       triggerEvent,
       ruleSnapshot: rule,
+      // #4196 §4: the RAW-config §2.1 fingerprint (the Class-A claim identity) captured before any redaction.
+      ruleActionFingerprint: deriveRuleActionSetFingerprint(rule.actions).hash,
       schemaVersion: AUTOMATION_EXECUTION_SCHEMA_VERSION,
     }
 
