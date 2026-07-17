@@ -344,10 +344,13 @@ describeIfDatabase('W0-1 L4-cov-services — service writers on the canonical fe
       // `pg_locks … NOT granted` count could be satisfied by an UNRELATED suite sharing this database.
       // Attribute the waiter to THIS holder via pg_blocking_pids — same pattern as the sibling
       // waitUntilBlockedOnFence helper in the univer-meta writers suite. Poll via `q` (the
-      // poolManager channel, the waiter's OWN session user), NOT via `holder`: the raw internal-pool
-      // client's session cannot see other sessions' `query`/`wait_event_type` in pg_stat_activity
-      // (permission-masked rows), which reads as "no waiter" forever — pg_locks was visible only
-      // because the lock table is not masked.
+      // poolManager channel — the waiter's own session), NOT via `holder`: observed empirically
+      // during development (twice, deterministic until switched), the raw internal-pool client's
+      // pg_stat_activity view returned NO client-backend rows at all — reading as "no waiter"
+      // forever — while `pg_locks` (shared lock state) still showed the parked lock from the same
+      // connection, and the identical poll through `q` saw the waiter immediately. Mechanism
+      // unresolved (both channels nominally share one pool); polling where the waiter's session is
+      // provably visible is the load-bearing choice either way.
       let sawWaiter = false
       for (let i = 0; i < 100; i++) {
         const waiters = await q(

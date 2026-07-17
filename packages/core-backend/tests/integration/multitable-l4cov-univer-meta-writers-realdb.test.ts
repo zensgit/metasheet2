@@ -650,6 +650,16 @@ describeIfDatabase('W0-1 L4cov — univer-meta/records/auto-number writer fence 
 
     const setBlockFor = async (sheetId: string, state: WriterBlockState | null) =>
       q('UPDATE meta_sheets SET recovery_writer_state = $2 WHERE id = $1', [sheetId, state])
+    const blockOf = async (sheetId: string): Promise<unknown> =>
+      ((await q('SELECT recovery_writer_state FROM meta_sheets WHERE id = $1', [sheetId])).rows[0] as
+        | { recovery_writer_state: unknown }
+        | undefined)?.recovery_writer_state ?? null
+    // Gate P2 hardening: every §C test asserts a clean-block precondition so a stale block from a
+    // prior test (or a parallel process) fails HERE with a diagnosable message instead of as a
+    // baffling positive-control red deeper in the test.
+    const assertNoStaleBlocks = async (): Promise<void> => {
+      for (const s of [C_SRC, C_DEP, C_DEP2]) expect(await blockOf(s)).toBeNull()
+    }
     const rowOf = async (id: string): Promise<{ data: Record<string, unknown>; version: number; updatedAt: string }> => {
       const r = await q('SELECT data, version, updated_at FROM meta_records WHERE id = $1', [id])
       const row = r.rows[0] as { data: Record<string, unknown>; version: unknown; updated_at: Date }
@@ -716,7 +726,10 @@ describeIfDatabase('W0-1 L4cov — univer-meta/records/auto-number writer fence 
     })
 
     afterEach(async () => {
-      for (const s of [C_SRC, C_DEP, C_DEP2]) await setBlockFor(s, null).catch(() => {})
+      // Gate P2 hardening: clears fail LOUDLY (no catch-swallow) — a silently failed clear here is
+      // exactly the stale-block shape that would red a later test's POSITIVE control with a
+      // misleading message. The sheets exist for the whole suite, so a failure is a real defect.
+      for (const s of [C_SRC, C_DEP, C_DEP2]) await setBlockFor(s, null)
     })
 
     afterAll(async () => {
@@ -729,6 +742,7 @@ describeIfDatabase('W0-1 L4cov — univer-meta/records/auto-number writer fence 
     })
 
     test('C1 same-record: block ⇒ silent skip (no throw, no write, no echo); positive control materializes; flag-off parity', async () => {
+      await assertNoStaleBlocks()
       const SR1 = mkRecord('c1s1')
       const SR2 = mkRecord('c1s2')
       const DR = mkRecord('c1d')
@@ -770,9 +784,11 @@ describeIfDatabase('W0-1 L4cov — univer-meta/records/auto-number writer fence 
       )
       expect(parity).toEqual([{ recordId: DRB, data: { [F_DEP_SUM]: 10 } }])
       expect((await rowOf(DRB)).data[F_DEP_SUM]).toBe(10)
+      await setBlockFor(C_DEP, null) // belt-and-braces: don't rely on afterEach alone
     })
 
     test('C2 fan-out: block on ONE dependent sheet skips ONLY that sheet (200, source applied, healthy sheet materializes); flag-off parity', async () => {
+      await assertNoStaleBlocks()
       const SR1 = mkRecord('c2s1')
       const SR2 = mkRecord('c2s2')
       const DR = mkRecord('c2d')
@@ -821,9 +837,11 @@ describeIfDatabase('W0-1 L4cov — univer-meta/records/auto-number writer fence 
       const res3 = await patchVia(C_SRC, SR1, F_SRC_AMT, 31)
       expect(res3.status).toBe(200)
       expect((await rowOf(DR)).data[F_DEP_SUM]).toBe(231) // 31+200, despite the (inert) block
+      await setBlockFor(C_DEP, null) // belt-and-braces: don't rely on afterEach alone
     })
 
     test('C3 POST /patch primary-fence refusal maps to 409 RECOVERY_IN_PROGRESS (not 500); positive control; flag-off parity', async () => {
+      await assertNoStaleBlocks()
       const SR = mkRecord('c3s')
       await seedSrc(SR, 5)
 
@@ -852,6 +870,7 @@ describeIfDatabase('W0-1 L4cov — univer-meta/records/auto-number writer fence 
       const res3 = await patchVia(C_SRC, SR, F_SRC_AMT, 9)
       expect(res3.status).toBe(200)
       expect((await rowOf(SR)).data[F_SRC_AMT]).toBe(9)
+      await setBlockFor(C_SRC, null) // belt-and-braces: don't rely on afterEach alone
     })
   })
 })
