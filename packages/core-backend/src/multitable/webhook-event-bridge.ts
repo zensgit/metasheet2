@@ -15,7 +15,10 @@
  * Posture (at-least-once, fire-and-forget): `deliverEvent` persists a durable
  * delivery row BEFORE the HTTP attempt and only then fires the request without
  * awaiting it, so a crash mid-flight leaves a `pending` row the retry tick picks
- * up. The bridge subscription itself is fire-and-forget (errors are logged, never
+ * up — including a FIRST attempt that died before its outcome handler stamped
+ * `next_retry_at` (the stray-grace leg of `retryFailedDeliveries`; before that
+ * leg existed such rows were a stuck absorbing state this header wrongly claimed
+ * were retried). The bridge subscription itself is fire-and-forget (errors are logged, never
  * propagated back to the emitting write). A full transactional outbox (emit inside
  * the write transaction) is out of scope — see the rank-5 wiring deliverable.
  */

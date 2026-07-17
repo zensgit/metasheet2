@@ -31,6 +31,10 @@ const BASE_RETRY_DELAY_MS = WEBHOOK_DEFAULT_BASE_RETRY_DELAY_MS
 // long enough to out-live the HTTP attempt + backoff recompute so a concurrent
 // replica's tick skips it; short enough that a crashed tick's row is retried soon.
 const RETRY_CLAIM_LEASE_MS = DELIVERY_TIMEOUT_MS * 4
+/** How long a pending row may sit with next_retry_at NULL (a first attempt whose outcome never landed)
+ *  before the retry tick claims it as a crashed-process stray. Must exceed DELIVERY_TIMEOUT_MS by a wide
+ *  margin so a live in-flight first attempt is never double-fired. */
+const FIRST_ATTEMPT_STRAY_GRACE_MS = Math.max(5 * 60_000, DELIVERY_TIMEOUT_MS * 10)
 
 function generateId(): string {
   return randomBytes(16).toString('hex')
@@ -442,8 +446,23 @@ export class WebhookService {
         .selectFrom('multitable_webhook_deliveries')
         .selectAll()
         .where('status', '=', 'pending')
-        .where('next_retry_at', 'is not', null)
-        .where('next_retry_at', '<=', new Date(now))
+        .where((eb) =>
+          eb.or([
+            // scheduled retries whose backoff has elapsed
+            eb.and([eb('next_retry_at', 'is not', null), eb('next_retry_at', '<=', new Date(now))]),
+            // FIRST-ATTEMPT strays (sink audit 2026-07-17): deliverEvent persists the row and fires the HTTP
+            // attempt WITHOUT awaiting; the outcome handler is what stamps status/next_retry_at. A process
+            // crash between the INSERT and that handler leaves pending + next_retry_at NULL — which the
+            // scheduled-retry leg above can never select, a stuck absorbing state (the module header's
+            // "the retry tick picks it up" was false for first attempts). Claim them after a grace period
+            // long enough that a LIVE in-flight first attempt (outcome lands within DELIVERY_TIMEOUT_MS)
+            // is never double-fired.
+            eb.and([
+              eb('next_retry_at', 'is', null),
+              eb('created_at', '<=', new Date(now - FIRST_ATTEMPT_STRAY_GRACE_MS)),
+            ]),
+          ]),
+        )
         .forUpdate()
         .skipLocked()
         .execute()
