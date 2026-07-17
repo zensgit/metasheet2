@@ -21,14 +21,26 @@
     </p>
 
     <!-- Error / endpoint-not-ready (GET rejects or 404s): neutral, never the raw body. -->
-    <p
+    <div
       v-else-if="errored"
       class="sp-exq__state sp-exq__state--muted"
       data-testid="stock-prep-exception-error"
       role="status"
     >
-      {{ bi('同步后端尚未就绪,稍后再试。', 'Backend read not ready yet — try again later.') }}
-    </p>
+      <p class="sp-exq__state-msg">{{ bi('同步后端尚未就绪,稍后再试。', 'Backend read not ready yet — try again later.') }}</p>
+      <!-- H4-3 retry: re-runs the same readonly loadList(); idempotent, no new endpoint. -->
+      <button
+        ref="retryEl"
+        type="button"
+        class="sp-exq__retry"
+        data-testid="stock-prep-exception-retry"
+        :disabled="loading"
+        :aria-label="bi('重试读取异常队列', 'Retry loading the exception queue')"
+        @click="onRetry"
+      >
+        {{ bi('重试', 'Retry') }}
+      </button>
+    </div>
 
     <div v-else-if="list" class="sp-exq__overview" data-testid="stock-prep-exception-overview">
       <!-- Header cards: the blocking gate count + total + values-free type/status counts. -->
@@ -154,7 +166,17 @@
       <!-- VALUES-FREE queue rows: handles + enums + booleans only — the exception message (business
            text) never crosses the wire, so it can never render here. Resolved rows are READ-ONLY:
            selection and resolve are disabled. -->
-      <div v-else class="sp-exq__table-wrap">
+      <!-- H4-3 keyboard: this wrap is the scroll container (both axes). The select-checkbox and
+           Resolve button are BOTH disabled once a row is resolved — a filter/view where every row is
+           already resolved would leave NO focusable content, so the wrap itself is ALSO a native
+           scroll-region. -->
+      <div
+        v-else
+        class="sp-exq__table-wrap"
+        tabindex="0"
+        role="region"
+        :aria-label="bi('异常队列表格,可滚动', 'Exception queue table, scrollable')"
+      >
         <table class="sp-exq__table" data-testid="stock-prep-exception-queue">
           <thead>
             <tr>
@@ -242,7 +264,7 @@
 // exceptionTypes — a pure convenience mirror; the server's 409 EXCEPTION_BULK_MIXED_TYPES gate
 // (checked BEFORE any patch) stays authoritative and lands in the same error surface.
 // resolvedBy / resolvedAt are server-stamped and NEVER enter any request body.
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, ref, watch, type Ref } from 'vue'
 import { useLocale } from '../../../composables/useLocale'
 import type { IntegrationScope } from '../../../services/integration/workbench'
 import { StockPreparationConfirmApiError } from '../../../services/integration/stockPreparation/confirmApi'
@@ -433,6 +455,26 @@ async function bulkResolve(): Promise<void> {
   }
 }
 
+// H4-3 keyboard — retry focus restore (same pattern as StockPreparationDashboardView.vue's H4-1
+// retry). The retry button carries `:disabled` while its own load is in flight, and the button UNMOUNTS — its error branch
+// yields to the loading branch, leaving the DOM entirely — the browser drops focus to <body>, stranding a
+// keyboard operator who just pressed Retry. After the load settles we put focus back on the button,
+// but ONLY when it is still rendered (the retry failed again, so there is something to press) AND
+// focus is still on <body> (our own unmount dropped it, and the operator has not Tabbed elsewhere
+// meanwhile) — the second condition is REQUIRED so this can never steal focus from wherever the
+// operator moved to.
+const retryEl = ref<HTMLButtonElement | null>(null)
+
+async function restoreRetryFocus(el: Ref<HTMLButtonElement | null>): Promise<void> {
+  await nextTick()
+  if (document.activeElement === document.body) el.value?.focus()
+}
+
+async function onRetry(): Promise<void> {
+  await loadList()
+  await restoreRetryFocus(retryEl)
+}
+
 onMounted(loadList)
 watch(() => props.projectId, loadList)
 // watch (not @change) so the reload always sees the UPDATED filter value — v-model's own change
@@ -466,6 +508,35 @@ watch([statusFilter, typeFilter], reloadList)
 
 .sp-exq__state--warn {
   color: var(--ms-color-danger, #c45656);
+}
+
+.sp-exq__state-msg {
+  margin: 0 0 var(--ms-space-2);
+}
+
+.sp-exq__retry {
+  border: 1px solid var(--ms-border-light);
+  border-radius: 6px;
+  background: transparent;
+  padding: 4px 12px;
+  color: var(--ms-color-primary);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.sp-exq__retry:hover:not(:disabled) {
+  background: var(--el-fill-color-light);
+}
+
+.sp-exq__retry:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.sp-exq__retry:focus-visible {
+  outline: 2px solid var(--ms-color-primary);
+  outline-offset: 1px;
 }
 
 .sp-exq__overview {
@@ -574,12 +645,22 @@ watch([statusFilter, typeFilter], reloadList)
   font-size: 13px;
 }
 
+/* H4-3 long-table: bounded height + BOTH-axis overflow, so the table scrolls inside its OWN box and
+   the sticky thead below has an actual scroll range to stick within (an `overflow-x: auto`-only wrap
+   never scrolls vertically, so a sticky header inside it would never engage). */
 .sp-exq__table-wrap {
-  overflow-x: auto;
+  max-height: 420px;
+  overflow: auto;
+}
+
+.sp-exq__table-wrap:focus-visible {
+  outline: 2px solid var(--ms-color-primary);
+  outline-offset: 1px;
 }
 
 .sp-exq__table {
   width: 100%;
+  min-width: 840px;
   border-collapse: collapse;
   font-size: 13px;
 }
@@ -593,6 +674,10 @@ watch([statusFilter, typeFilter], reloadList)
 }
 
 .sp-exq__table th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--ms-bg-card);
   color: var(--ms-text-3);
   font-weight: var(--ms-font-weight-title);
 }
@@ -628,5 +713,15 @@ watch([statusFilter, typeFilter], reloadList)
 
 .sp-exq__action:hover:not(:disabled) {
   background: var(--el-fill-color-light);
+}
+
+/* H4-3 keyboard: one focus-ring system across the stock-prep surface (same idiom as the H4-2
+   dashboard/stepper rings). Covers the resolve/bulk-resolve buttons, the 3 filter/action selects, and
+   the per-row select-checkbox (native, but the UA default ring is inconsistent across browsers). */
+.sp-exq__action:focus-visible,
+.sp-exq__field select:focus-visible,
+.sp-exq__col-select input[type='checkbox']:focus-visible {
+  outline: 2px solid var(--ms-color-primary);
+  outline-offset: 1px;
 }
 </style>

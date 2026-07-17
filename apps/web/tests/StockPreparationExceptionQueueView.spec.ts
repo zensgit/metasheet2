@@ -483,4 +483,64 @@ describe('StockPreparationExceptionQueueView (view 6: queue reads + human resolu
     await nextTick()
     expect(root.querySelector('[data-testid="stock-prep-exception-no-project"]')?.textContent).toMatch(/select a project/i)
   })
+
+  // H4-3 (responsive + long-table usability): the error state offers a Retry that re-runs loadList()
+  // and recovers — same idiom as the H4-1 dashboard retry.
+  it('H4-3: the error state offers a Retry that re-runs loadList() and recovers', async () => {
+    h.apiFetch.mockImplementation(async () => fail(500, 'BACKEND_NOT_READY'))
+    const root = mountView()
+    await waitForSelector(root, '[data-testid="stock-prep-exception-error"]')
+    const retry = root.querySelector('[data-testid="stock-prep-exception-retry"]') as HTMLButtonElement | null
+    expect(retry).not.toBeNull()
+    expect(retry?.getAttribute('aria-label')).toBe('重试读取异常队列')
+
+    mockRoutes() // the retry succeeds
+    const callsBefore = h.apiFetch.mock.calls.length
+    retry!.click()
+    await waitForSelector(root, '[data-testid="stock-prep-exception-overview"]')
+    expect(h.apiFetch.mock.calls.length).toBeGreaterThan(callsBefore)
+    expect(root.querySelector('[data-testid="stock-prep-exception-error"]')).toBeNull()
+  })
+
+  it('H4-3: the retry button is bilingual + carries an accessible name (aria-label)', async () => {
+    h.locale = 'en'
+    h.apiFetch.mockImplementation(async () => fail(500, 'BACKEND_NOT_READY'))
+    const root = mountView()
+    await waitForSelector(root, '[data-testid="stock-prep-exception-error"]')
+    const retry = root.querySelector('[data-testid="stock-prep-exception-retry"]') as HTMLButtonElement
+    expect(retry.textContent?.trim()).toBe('Retry')
+    expect(retry.getAttribute('aria-label')).toBe('Retry loading the exception queue')
+  })
+
+  // H4-2 keyboard (H4-1 pattern, StockPreparationDashboardView.vue): the error branch unmounts
+  // the retry button while the load is in flight, so the browser drops focus to <body>. A keyboard
+  // operator who pressed Retry must not be stranded there when the failed state re-renders.
+  it('H4-2: a failed retry returns focus to the retry button (our own unmount dropped it to body)', async () => {
+    h.apiFetch.mockImplementation(async () => fail(500, 'BACKEND_NOT_READY'))
+    const root = mountView()
+    await waitForSelector(root, '[data-testid="stock-prep-exception-error"]')
+    const retry = root.querySelector('[data-testid="stock-prep-exception-retry"]') as HTMLButtonElement
+    retry.focus()
+    expect(document.activeElement).toBe(retry)
+    const callsBefore = h.apiFetch.mock.calls.length
+    retry.click() // still failing → button unmounts during the load, then re-renders; drops focus to <body>
+    await waitForCondition(() => h.apiFetch.mock.calls.length > callsBefore)
+    await waitForSelector(root, '[data-testid="stock-prep-exception-error"]')
+    await waitForCondition(() => document.activeElement === root.querySelector('[data-testid="stock-prep-exception-retry"]'))
+    expect(document.activeElement).toBe(root.querySelector('[data-testid="stock-prep-exception-retry"]'))
+  })
+
+  // H4-3 keyboard: the table wrap is a jsdom-testable, load-bearing scroll region — attribute
+  // presence is what a future refactor could silently delete (unlike the CSS focus ring, which
+  // jsdom cannot compute and is verified only via the browser harness in the PR description).
+  it('H4-3: the table wrap is a keyboard-reachable scroll region (tabindex/role/aria-label)', async () => {
+    mockRoutes()
+    const root = mountView()
+    await waitForSelector(root, '[data-testid="stock-prep-exception-queue"]')
+    const wrap = root.querySelector('.sp-exq__table-wrap') as HTMLElement
+    expect(wrap).not.toBeNull()
+    expect(wrap.getAttribute('tabindex')).toBe('0')
+    expect(wrap.getAttribute('role')).toBe('region')
+    expect(wrap.getAttribute('aria-label')).toBeTruthy()
+  })
 })

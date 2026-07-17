@@ -21,14 +21,26 @@
     </p>
 
     <!-- Error / endpoint-not-ready (GET rejects or 404s): neutral, never the raw body. -->
-    <p
+    <div
       v-else-if="errored"
       class="sp-map__state sp-map__state--muted"
       data-testid="stock-prep-mapping-error"
       role="status"
     >
-      {{ bi('同步后端尚未就绪,稍后再试。', 'Backend read not ready yet — try again later.') }}
-    </p>
+      <p class="sp-map__state-msg">{{ bi('同步后端尚未就绪,稍后再试。', 'Backend read not ready yet — try again later.') }}</p>
+      <!-- H4-3 retry: re-runs the same readonly loadAll(); idempotent, no new endpoint. -->
+      <button
+        ref="retryEl"
+        type="button"
+        class="sp-map__retry"
+        data-testid="stock-prep-mapping-retry"
+        :disabled="loading"
+        :aria-label="bi('重试读取物料映射确认', 'Retry loading the material-mapping confirmation queue')"
+        @click="onRetry"
+      >
+        {{ bi('重试', 'Retry') }}
+      </button>
+    </div>
 
     <div v-else-if="summary && queue" class="sp-map__overview" data-testid="stock-prep-mapping-overview">
       <!-- Summary header card: the five values-free summary indicators. -->
@@ -131,7 +143,17 @@
       <p v-if="queue.rowCount === 0" class="sp-map__state sp-map__state--muted" data-testid="stock-prep-mapping-empty">
         {{ bi('当前无候选映射行。', 'No candidate mapping rows.') }}
       </p>
-      <div v-else class="sp-map__table-wrap">
+      <!-- H4-3 keyboard: this wrap is the scroll container (both axes). Confirm/Retire are DISABLED
+           when a row lacks mappingId/hasErpTarget — if every row in the current filter lacked those,
+           row content alone would give a keyboard operator no way to reach this scroll area, so the
+           wrap itself is ALSO a native scroll-region. -->
+      <div
+        v-else
+        class="sp-map__table-wrap"
+        tabindex="0"
+        role="region"
+        :aria-label="bi('物料映射候选行表格,可滚动', 'Material-mapping candidate table, scrollable')"
+      >
         <table class="sp-map__table" data-testid="stock-prep-mapping-queue">
           <thead>
             <tr>
@@ -270,7 +292,7 @@
 // number, material name, spec, or ERP identifier FROM the server (the read shapes carry none), and
 // error surfaces render only the clamped code / field NAME. Operator-entered form values flow only
 // UPWARD through the closed create-mode allowlist; confirmedBy / confirmedAt never enter any body.
-import { computed, onMounted, reactive, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, reactive, ref, watch, type Ref } from 'vue'
 import { useLocale } from '../../../composables/useLocale'
 import type { IntegrationScope } from '../../../services/integration/workbench'
 import { StockPreparationConfirmApiError } from '../../../services/integration/stockPreparation/confirmApi'
@@ -514,6 +536,26 @@ async function submitCreate(): Promise<void> {
   }
 }
 
+// H4-3 keyboard — retry focus restore (same pattern as StockPreparationDashboardView.vue's H4-1
+// retry). The retry button carries `:disabled` while its own load is in flight, and the button UNMOUNTS — its error branch
+// yields to the loading branch, leaving the DOM entirely — the browser drops focus to <body>, stranding a
+// keyboard operator who just pressed Retry. After the load settles we put focus back on the button,
+// but ONLY when it is still rendered (the retry failed again, so there is something to press) AND
+// focus is still on <body> (our own unmount dropped it, and the operator has not Tabbed elsewhere
+// meanwhile) — the second condition is REQUIRED so this can never steal focus from wherever the
+// operator moved to.
+const retryEl = ref<HTMLButtonElement | null>(null)
+
+async function restoreRetryFocus(el: Ref<HTMLButtonElement | null>): Promise<void> {
+  await nextTick()
+  if (document.activeElement === document.body) el.value?.focus()
+}
+
+async function onRetry(): Promise<void> {
+  await loadAll()
+  await restoreRetryFocus(retryEl)
+}
+
 onMounted(loadAll)
 watch(() => props.projectId, loadAll)
 // watch (not @change) so the reload always sees the UPDATED filter value — v-model's own change
@@ -547,6 +589,35 @@ watch(statusFilter, reloadQueue)
 
 .sp-map__state--warn {
   color: var(--ms-color-danger, #c45656);
+}
+
+.sp-map__state-msg {
+  margin: 0 0 var(--ms-space-2);
+}
+
+.sp-map__retry {
+  border: 1px solid var(--ms-border-light);
+  border-radius: 6px;
+  background: transparent;
+  padding: 4px 12px;
+  color: var(--ms-color-primary);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.sp-map__retry:hover:not(:disabled) {
+  background: var(--el-fill-color-light);
+}
+
+.sp-map__retry:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.sp-map__retry:focus-visible {
+  outline: 2px solid var(--ms-color-primary);
+  outline-offset: 1px;
 }
 
 .sp-map__overview {
@@ -655,12 +726,22 @@ watch(statusFilter, reloadQueue)
   font-style: italic;
 }
 
+/* H4-3 long-table: bounded height + BOTH-axis overflow, so the table scrolls inside its OWN box and
+   the sticky thead below has an actual scroll range to stick within (an `overflow-x: auto`-only wrap
+   never scrolls vertically, so a sticky header inside it would never engage). */
 .sp-map__table-wrap {
-  overflow-x: auto;
+  max-height: 420px;
+  overflow: auto;
+}
+
+.sp-map__table-wrap:focus-visible {
+  outline: 2px solid var(--ms-color-primary);
+  outline-offset: 1px;
 }
 
 .sp-map__table {
   width: 100%;
+  min-width: 920px;
   border-collapse: collapse;
   font-size: 13px;
 }
@@ -674,6 +755,10 @@ watch(statusFilter, reloadQueue)
 }
 
 .sp-map__table th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--ms-bg-card);
   color: var(--ms-text-3);
   font-weight: var(--ms-font-weight-title);
 }
@@ -714,6 +799,15 @@ watch(statusFilter, reloadQueue)
 
 .sp-map__action:hover:not(:disabled) {
   background: var(--el-fill-color-light);
+}
+
+/* H4-3 keyboard: one focus-ring system across the stock-prep surface (same idiom as the H4-2
+   dashboard/stepper rings). Covers the sync/confirm/retire/submit buttons and every field control. */
+.sp-map__action:focus-visible,
+.sp-map__field input:focus-visible,
+.sp-map__field select:focus-visible {
+  outline: 2px solid var(--ms-color-primary);
+  outline-offset: 1px;
 }
 
 .sp-map__form {
