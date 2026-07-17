@@ -270,7 +270,7 @@ describeIfDatabase('P2 durable-delivery S4-b/S5 activation + S7 crash-injection 
     let outboxId = ''
     try {
       await client.query('BEGIN')
-      const res = await produceAutomationEvent({ isTransaction: true, query: (s, p) => client.query(s, p) }, { eventType: 'form.submitted', eventId: `evt_${RUN}_v1`, payload: {} }, FLAG_ON)
+      const res = await produceAutomationEvent({ isTransaction: true, query: (s, p) => client.query(s, p) }, { eventType: 'multitable.form.submitted', eventId: `evt_${RUN}_v1`, payload: {} }, FLAG_ON)
       outboxId = res!.outboxId
       await client.query('ROLLBACK') // crash before commit
     } finally {
@@ -294,7 +294,7 @@ describeIfDatabase('P2 durable-delivery S4-b/S5 activation + S7 crash-injection 
 
   test('V3: crash-after-claim → reclaim redelivers (at-least-once) with the SAME stable eventId across fences', async () => {
     const key3 = `uv3_${RUN}`
-    const res = await enqueueUnique('form.submitted', `evt_${RUN}_v3`, key3)
+    const res = await enqueueUnique('multitable.form.submitted', `evt_${RUN}_v3`, key3)
     // worker A claims its OWN run-unique row and "crashes" (never resolves)
     const claimed = await claimDueConsumers(db(), { consumerKeys: [key3], batchSize: 50 })
     const mine = claimed.find((c) => c.outboxId === res.outboxId)

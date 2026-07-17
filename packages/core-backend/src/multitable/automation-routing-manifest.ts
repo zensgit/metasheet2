@@ -12,7 +12,16 @@
  *   approval.task_created                          → approval-task-trigger
  *   multitable.record.{created,updated,deleted}    → automation-record-trigger, webhook-event-bridge
  *   multitable.comment.created                     → webhook-event-bridge
- *   form.submitted                                 → automation-record-trigger
+ *   multitable.form.submitted                      → automation-record-trigger
+ *
+ * NOTE on the form-submission literal: the lock's §283-291 prose names the family by its TRIGGER TYPE
+ * (`form.submitted`), but the manifest keys on BUS EVENT TYPES — and the lock's own grounding citation
+ * (`automation-service.ts:892-936`) subscribes to `multitable.form.submitted` (the trigger-type mapping
+ * `multitable.form.submitted → form.submitted` lives in `automation-triggers.ts`). The v1 literal
+ * originally transcribed the lock's shorthand (`form.submitted`) — an event type NOTHING ever emits, so
+ * the durable path could never route a form submission (the producer's fail-closed expand would throw).
+ * Corrected to the real bus event type; flagged for owner review in PR #4337 (ratified-set transcription
+ * fix, not a routing change — same family, same consumer set).
  *
  * Completeness is asserted BIDIRECTIONALLY at startup with the adapter registry as the single enumeration
  * source (#4203 §293-300): (a) every consumer_key the manifest routes to has a registered adapter — a
@@ -70,7 +79,7 @@ export const ROUTING_MANIFEST_V1: RoutingManifest = deepFreezeManifest({
     'multitable.record.updated': ['automation-record-trigger', 'webhook-event-bridge'],
     'multitable.record.deleted': ['automation-record-trigger', 'webhook-event-bridge'],
     'multitable.comment.created': ['webhook-event-bridge'],
-    'form.submitted': ['automation-record-trigger'],
+    'multitable.form.submitted': ['automation-record-trigger'],
   },
 })
 

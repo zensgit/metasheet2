@@ -37,7 +37,10 @@ describe('P2 S3 — routing manifest v1 (lock #4203 §283-291 full set)', () => 
       expect(expandConsumerKeysForEvent(t)).toEqual(['automation-record-trigger', 'webhook-event-bridge'])
     }
     expect(expandConsumerKeysForEvent('multitable.comment.created')).toEqual(['webhook-event-bridge'])
-    expect(expandConsumerKeysForEvent('form.submitted')).toEqual(['automation-record-trigger'])
+    // BUS event type (what univer-meta emits + automation-service subscribes) — NOT the trigger type
+    // 'form.submitted' the lock's prose shorthand used; the bare trigger-type literal routes nothing.
+    expect(expandConsumerKeysForEvent('multitable.form.submitted')).toEqual(['automation-record-trigger'])
+    expect(expandConsumerKeysForEvent('form.submitted')).toBeUndefined()
     // the distinct key universe is exactly the six ratified consumers — no stragglers, none missing
     expect([...manifestConsumerKeys()].sort()).toEqual([...FULL_V1_KEYS].sort())
     // EXACT event-family set — a route ADDED/removed/renamed reds even if it reuses an existing consumer
@@ -48,8 +51,8 @@ describe('P2 S3 — routing manifest v1 (lock #4203 §283-291 full set)', () => 
       'approval.rejected',
       'approval.revoked',
       'approval.task_created',
-      'form.submitted',
       'multitable.comment.created',
+      'multitable.form.submitted',
       'multitable.record.created',
       'multitable.record.deleted',
       'multitable.record.updated',
