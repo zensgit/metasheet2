@@ -14,7 +14,7 @@
  *   - Uploader identity comes from the app's authenticated request (injected extractor) — never from the body.
  */
 import { randomUUID } from 'node:crypto'
-import { Router, type Request, type Response } from 'express'
+import { Router, type NextFunction, type Request, type Response } from 'express'
 import multer from 'multer'
 
 import type { Queryable } from '../multitable/automation-durable-dispatcher'
@@ -61,7 +61,41 @@ export function createApprovalAttachmentRouter(deps: ApprovalAttachmentRouteDeps
   })
   const router = Router()
 
-  router.post('/api/approval/attachments', upload.single('file'), async (req: Request, res: Response) => {
+  /**
+   * Run multer, mapping its limit errors to the values-free reject contract instead of letting them
+   * reach Express's default handler (a 500 with a stack). No filename, no limit value is echoed.
+   */
+  const runUpload = (req: Request, res: Response, next: NextFunction): void => {
+    upload.single('file')(req, res, (err: unknown) => {
+      if (!err) return next()
+      const mErr = err as { name?: unknown; code?: unknown }
+      if (mErr.name === 'MulterError') {
+        const code =
+          mErr.code === 'LIMIT_FILE_SIZE'
+            ? 'file_too_large'
+            : mErr.code === 'LIMIT_FILE_COUNT' || mErr.code === 'LIMIT_UNEXPECTED_FILE'
+              ? 'too_many_files'
+              : 'upload_rejected'
+        res.status(code === 'upload_rejected' ? 400 : 413).json({ error: 'rejected', rejected: [{ code }] })
+        return
+      }
+      res.status(400).json({ error: 'upload_failed' }) // any other parse error, values-free
+    })
+  }
+
+  /**
+   * Wrap an async handler so a db/store rejection becomes a values-free 500 instead of an unhandled
+   * promise rejection (which under Express 4 hangs the request / can crash the process — a DoS lever).
+   */
+  const asyncHandler =
+    (fn: (req: Request, res: Response) => Promise<unknown>) =>
+    (req: Request, res: Response): void => {
+      void fn(req, res).catch(() => {
+        if (!res.headersSent) res.status(500).json({ error: 'internal_error' })
+      })
+    }
+
+  router.post('/api/approval/attachments', runUpload, asyncHandler(async (req: Request, res: Response) => {
     const uploaderId = deps.viewerId(req)
     if (!uploaderId) return res.status(401).json({ error: 'unauthenticated' })
     const orgId = deps.orgId(req) // server-derived from the principal — never the body (no cross-tenant forgery)
@@ -90,9 +124,9 @@ export function createApprovalAttachmentRouter(deps: ApprovalAttachmentRouteDeps
       [id, orgId, uploaderId, fieldId, storageKey, f.originalname.slice(0, 255), f.mimetype.toLowerCase().trim(), f.size],
     )
     return res.status(201).json({ id, sizeBytes: f.size })
-  })
+  }))
 
-  router.get('/api/approval/attachments/:id/download', async (req: Request, res: Response) => {
+  router.get('/api/approval/attachments/:id/download', asyncHandler(async (req: Request, res: Response) => {
     const viewerId = deps.viewerId(req)
     if (!viewerId) return res.status(401).json({ error: 'unauthenticated' })
     const { rows } = await deps.db.query(
@@ -115,7 +149,7 @@ export function createApprovalAttachmentRouter(deps: ApprovalAttachmentRouteDeps
     res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(row.file_name)}"`)
     res.setHeader('X-Content-Type-Options', 'nosniff')
     return res.status(200).send(blob)
-  })
+  }))
 
   return router
 }
