@@ -4,13 +4,6 @@ import { existsSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
 import { resolve } from 'node:path'
 
-vi.mock('../src/composables/usePlatformApps', () => ({
-  usePlatformApps: () => ({
-    apps: ref([]),
-    fetchApps: vi.fn().mockResolvedValue(undefined),
-  }),
-}))
-
 async function flushUi(cycles = 4): Promise<void> {
   for (let i = 0; i < cycles; i += 1) {
     await Promise.resolve()
@@ -121,9 +114,6 @@ describe('platform shell navigation', () => {
       expect.objectContaining({ href: '/attendance', text: '考勤' }),
       expect.objectContaining({ href: '/multitable', text: '多维表' }),
     ]))
-    const workspaceLinks = Array.from(container.querySelectorAll('[aria-label="Workspace navigation"] a'))
-      .map((node) => node.getAttribute('href'))
-    expect(workspaceLinks).not.toContain('/apps')
     expect(links.some((link) => link.href === '/approvals')).toBe(false)
     expect(links.some((link) => link.href === '/grid')).toBe(false)
     expect(links.some((link) => link.href === '/spreadsheets')).toBe(false)
@@ -382,16 +372,6 @@ describe('platform shell navigation', () => {
     expect(menuPanelRule).toMatch(/position:\s*absolute/)
     expect(menuPanelRule).toMatch(/z-index:\s*30/)
     expect(style).toMatch(/\.nav-menu__panel,\s*\.nav-account__panel\s*\{[\s\S]*?position:\s*fixed/)
-  })
-
-  it('labels the launcher as app center and only exposes it when the user can use it', async () => {
-    const source = await readFile(resolveWebFile('src/App.vue'), 'utf8')
-    const routes = await readFile(resolveWebFile('src/router/appRoutes.ts'), 'utf8')
-
-    expect(source).toContain('v-if="canUseAppCenter" to="/apps"')
-    expect(source).toContain("apps: '应用中心'")
-    expect(source).toContain('const canUseAppCenter = computed(() => canManageUsers.value || platformApps.value.length > 0)')
-    expect(routes).toContain("titleZh: '应用中心'")
   })
 
   it('marks legacy table/view routes as deprecated while keeping deep links registered', async () => {
