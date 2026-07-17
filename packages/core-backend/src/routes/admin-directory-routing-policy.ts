@@ -30,6 +30,12 @@ function isPurpose(value: string): value is Purpose {
   return (PURPOSES as readonly string[]).includes(value)
 }
 
+/** Owner review (#4431): default-OFF capability gate for canonical=local (staged opt-in pattern). */
+function isLocalCanonicalEnabled(): boolean {
+  const v = process.env.DIRECTORY_ROUTING_LOCAL_CANONICAL_ENABLED
+  return v === '1' || v === 'true'
+}
+
 const UUID_SHAPE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 function isUuidShaped(value: string): boolean {
   return UUID_SHAPE.test(value)
@@ -130,6 +136,14 @@ export function adminDirectoryRoutingPolicyRouter(): Router {
       jsonError(res, 400, 'ROUTING_POLICY_INVALID_PURPOSE', 'Unknown routing purpose')
       return
     }
+    // Owner review (#4431): v1 has exactly ONE consumer — approval_routing (B6 parity). Writing a
+    // policy for the other four §6 purposes would create DEAD CONFIG no resolver reads (and imply
+    // governance that does not exist). The schema CHECK keeps the full closed set for the future;
+    // the WRITE surface only opens a purpose when its consumer + parity proof land (§10.2+).
+    if (purpose !== 'approval_routing') {
+      jsonError(res, 400, 'ROUTING_POLICY_PURPOSE_UNSUPPORTED', 'v1 supports approval_routing only; other purposes have no consumer yet')
+      return
+    }
 
     // Field allowlist (B2 convention): ONLY canonicalIntegrationId; anything else — org/corp
     // identity especially — is rejected loudly, never silently dropped.
@@ -182,6 +196,16 @@ export function adminDirectoryRoutingPolicyRouter(): Router {
         // fail at WRITE time — a policy pointing at a broken target would fail-close every
         // policy-consuming approval later (B5-b), which is strictly worse than rejecting here.
         jsonError(res, 409, 'ROUTING_POLICY_TARGET_NOT_ACTIVE', 'The target integration is not active')
+        return
+      }
+      // Owner review (#4431): switching approval routing to the LOCAL provider is a capability
+      // decision, not a config edit — it must be explicitly enabled (env-gate, default OFF, the
+      // repo's staged-opt-in pattern) after the owner accepts the B6 parity evidence for the
+      // deployment. Until then a local canonical is rejected at the WRITE surface. (Preview stays
+      // available for local candidates on purpose — it is the read-only evidence tool for making
+      // exactly this decision.)
+      if (integration.provider === 'local' && !isLocalCanonicalEnabled()) {
+        jsonError(res, 409, 'ROUTING_POLICY_LOCAL_NOT_ENABLED', 'Routing to the local provider is not enabled (set DIRECTORY_ROUTING_LOCAL_CANONICAL_ENABLED=1 after accepting parity evidence)')
         return
       }
 

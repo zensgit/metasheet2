@@ -125,6 +125,7 @@ describeIfDatabase('Canonical Org MVP — B5-c routing-policy admin routes (real
   })
 
   it('B. PATCH set → audit + GET shows policy; PATCH null clears (audited once, idempotent after)', async () => {
+    process.env.DIRECTORY_ROUTING_LOCAL_CANONICAL_ENABLED = '1' // owner #4431: local canonical is env-gated
     const local = await getOrCreateLocalIntegration(orgId)
     const rid = `${orgId}:approval_routing`
 
@@ -147,6 +148,7 @@ describeIfDatabase('Canonical Org MVP — B5-c routing-policy admin routes (real
     expect(again.status).toBe(200)
     expect(again.body.data?.cleared ?? again.body.cleared).toBe(false)
     expect(await auditCount('directory.routing_policy.clear', rid)).toBe(1) // no second audit
+    delete process.env.DIRECTORY_ROUTING_LOCAL_CANONICAL_ENABLED
   })
 
   it('C. PATCH validations reject without auditing: bad purpose / non-UUID / smuggled field / cross-org / inactive target', async () => {
@@ -172,6 +174,20 @@ describeIfDatabase('Canonical Org MVP — B5-c routing-policy admin routes (real
     cleanupIntegrationIds.push(inactive)
     const bad5 = await request(adminApp).patch(`${BASE}/approval_routing`).send({ canonicalIntegrationId: inactive })
     expect(bad5.status).toBe(409) // broken-target policies are rejected at WRITE time
+
+    // owner #4431: a purpose with NO consumer cannot be written (dead config) — even a valid §6 one
+    const active = await dingtalkIntegration(orgId, 'ps-ok')
+    cleanupIntegrationIds.push(active)
+    const bad6 = await request(adminApp).patch(`${BASE}/permission_scope`).send({ canonicalIntegrationId: active })
+    expect(bad6.status).toBe(400)
+    expect(JSON.stringify(bad6.body)).toContain('ROUTING_POLICY_PURPOSE_UNSUPPORTED')
+
+    // owner #4431: canonical=local is capability-gated (default OFF) — rejected without the env
+    delete process.env.DIRECTORY_ROUTING_LOCAL_CANONICAL_ENABLED
+    const local = await getOrCreateLocalIntegration(orgId)
+    const bad7 = await request(adminApp).patch(`${BASE}/approval_routing`).send({ canonicalIntegrationId: local.id })
+    expect(bad7.status).toBe(409)
+    expect(JSON.stringify(bad7.body)).toContain('ROUTING_POLICY_LOCAL_NOT_ENABLED')
 
     expect(await auditCount('directory.routing_policy.set', rid)).toBe(0)
     const count = await query<{ n: number }>(`SELECT count(*)::int AS n FROM org_directory_routing_policy WHERE org_id = $1`, [orgId])
