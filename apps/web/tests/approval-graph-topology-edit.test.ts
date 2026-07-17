@@ -5,6 +5,7 @@ import { parallelDynamicAssigneeConflicts } from '../src/approvals/parallelEdit'
 import { placeholderRoleNodeKeys } from '../src/approvals/approvalNodeEdit'
 import {
   appendApprovalNode,
+  collectParallelRegionNodeKeys,
   insertConditionGateway,
   insertParallelGateway,
   removeLinearNode,
@@ -184,6 +185,23 @@ describe('insertParallelGateway', () => {
     expect((node(out, newTarget)!.config as { assigneeSources: ApprovalAssigneeSource[] }).assigneeSources)
       .toEqual([{ kind: 'static_role', roleIds: [APPROVAL_ROLE_CONFIGURE_SENTINEL] }])
     expect(parallelDynamicAssigneeConflicts(out)).toEqual([])
+  })
+})
+
+describe('collectParallelRegionNodeKeys + nested-parallel prevention (F4)', () => {
+  it('collects exactly the branch nodes between fork and join (join and fork excluded)', () => {
+    expect(collectParallelRegionNodeKeys(PARALLEL)).toEqual(new Set(['app_a', 'app_b']))
+    expect(collectParallelRegionNodeKeys(LINEAR)).toEqual(new Set())
+    expect(collectParallelRegionNodeKeys(CONDITION)).toEqual(new Set())
+  })
+
+  it('insertParallelGateway REFUSES a node inside a parallel branch (backend rejects nested parallel at save)', () => {
+    expect(() => insertParallelGateway(PARALLEL, 'app_a')).toThrow(/nested parallel/)
+  })
+
+  it('insertConditionGateway inside a parallel branch stays ALLOWED (condition-in-parallel is legal)', () => {
+    const out = insertConditionGateway(PARALLEL, 'app_a')
+    expect(out.nodes.some((n) => n.type === 'condition')).toBe(true)
   })
 })
 

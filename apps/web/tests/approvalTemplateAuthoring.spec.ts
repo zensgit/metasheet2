@@ -1387,6 +1387,38 @@ describe('TemplateAuthoringView', () => {
     expect(payload.approvalGraph.nodes.find((n: any) => n.key === 'cond_1').config.branches).toHaveLength(2) // saved
   })
 
+  it('F4: no +并行 affordance INSIDE a parallel branch (backend rejects nested parallel), while +条件 stays offered', async () => {
+    routeParams = { id: 'tpl_nested_guard' }
+    getTemplateSpy.mockResolvedValue(buildTemplate({
+      approvalGraph: {
+        nodes: [
+          { key: 'start', type: 'start', name: '发起', config: {} },
+          { key: 'fork_1', type: 'parallel', name: '并行', config: { branches: ['e-fork-a', 'e-fork-b'], joinMode: 'all', joinNodeKey: 'join_1' } },
+          { key: 'app_a', type: 'approval', name: 'A', config: { assigneeSources: [{ kind: 'dept_head' }], approvalMode: 'single', emptyAssigneePolicy: 'error' } },
+          { key: 'app_b', type: 'approval', name: 'B', config: { assigneeSources: [{ kind: 'static_role', roleIds: ['legal'] }], approvalMode: 'single', emptyAssigneePolicy: 'error' } },
+          { key: 'join_1', type: 'approval', name: '汇聚', config: { assigneeSources: [{ kind: 'requester' }], approvalMode: 'single', emptyAssigneePolicy: 'error' } },
+          { key: 'end', type: 'end', name: '结束', config: {} },
+        ],
+        edges: [
+          { key: 'e-start-fork', source: 'start', target: 'fork_1' },
+          { key: 'e-fork-a', source: 'fork_1', target: 'app_a' },
+          { key: 'e-fork-b', source: 'fork_1', target: 'app_b' },
+          { key: 'e-a-join', source: 'app_a', target: 'join_1' },
+          { key: 'e-b-join', source: 'app_b', target: 'join_1' },
+          { key: 'e-join-end', source: 'join_1', target: 'end' },
+        ],
+      },
+    }))
+    await mountView()
+    await flushUi()
+    // In-region branch node: parallel insert HIDDEN, condition insert still offered.
+    expect(container!.querySelector('[data-testid="approval-topology-insert-parallel-after-app_a"]')).toBeNull()
+    expect(container!.querySelector('[data-testid="approval-topology-insert-condition-after-app_a"]')).not.toBeNull()
+    // Out-of-region single-out nodes (start / the join) keep the parallel insert.
+    expect(container!.querySelector('[data-testid="approval-topology-insert-parallel-after-start"]')).not.toBeNull()
+    expect(container!.querySelector('[data-testid="approval-topology-insert-parallel-after-join_1"]')).not.toBeNull()
+  })
+
   it('dept_head reads back editable: a saved dept_head template is NOT fail-closed (no unsupported alert, save enabled, sourceKind hydrated)', async () => {
     routeParams = { id: 'tpl_dh' }
     getTemplateSpy.mockResolvedValue(buildTemplate({
