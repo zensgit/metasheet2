@@ -347,16 +347,13 @@ export class MultitableFormulaEngine {
       // W0-1 L4-cov-services: the FORMULA writer class joins the canonical fence (flag-gated no-op when
       // `MULTITABLE_ENABLE_WRITER_FENCE` is off). Even a derived-value write must not land inside a
       // recovery's applying window — a materialization computed from PRE-recovery inputs would clobber the
-      // just-recovered `data`. Caller reality (gate-audited, 2026-07-17): the production recompute callers
-      // pass a BARE pool query (autocommit — e.g. record-write-service.ts's hook and the univer-meta bulk
-      // recompute), so the advisory-lock half evaporates per statement; what this line durably provides on
-      // that path is the DURABLE-BLOCK REFUSAL against an already-committed recovery block (proven by the
-      // F1 golden on exactly this autocommit shape), leaving a narrow block-read→UPDATE window. That
-      // residual is acceptable for this writer class: formula writes allocate NO chain seq (no
-      // revision/marker), merge only derived recompute-on-read keys, and never bump version — no
-      // seq-ordering or PIT impact. A caller that DOES run inside a fenced transaction gets the full
-      // reentrant fence. Hardening (txn-wrapping the bulk recompute or executor-style fail-closed) is an
-      // enumerated follow-up, not silently assumed.
+      // just-recovered `data`. CALLER CONTRACT (TOCTOU root fix, owner ruling 2026-07-17): every PRODUCTION
+      // recompute caller now passes a TRANSACTION-scoped query (record-write-service wraps both its
+      // dependent-records and formula recomputes in `pool.transaction`; the univer-meta bulk recompute wraps
+      // each chunk) — so this fence is held from acquisition to COMMIT, and the durable-block check is
+      // race-free. A NON-transactional caller degrades to block-check-only (the F1 golden pins that the
+      // refusal still fires on an autocommit shape), which is acceptable ONLY for test/diagnostic callers —
+      // do not add a production caller with a bare pool query.
       await fenceWriterEntry(query, sheetId)
       // lock-exempt: system formula materialization — derived value, no user actor (lock = read-only to USERS)
       // revision-exempt: derived formula materialization, no version bump — pure fn of inputs, recompute-on-read
