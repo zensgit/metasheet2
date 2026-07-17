@@ -136,6 +136,7 @@
           type="button"
           class="sp-unit__retry"
           data-testid="stock-prep-unit-candidates-retry"
+          :disabled="loading"
           :aria-label="bi('重试读取计算候选行', 'Retry loading computed candidate rows')"
           @click="loadCandidates"
         >
