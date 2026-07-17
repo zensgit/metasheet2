@@ -515,7 +515,7 @@ describe('StockPreparationExceptionQueueView (view 6: queue reads + human resolu
   // H4-2 keyboard (H4-1 pattern, StockPreparationDashboardView.vue): a NATIVE disabled button is
   // pulled from the tab order, so the browser drops focus to <body> when a re-failed retry re-renders
   // with `:disabled` — a keyboard operator who pressed Retry must not be stranded there.
-  it('H4-2: a failed retry returns focus to the retry button (our own :disabled dropped it to body)', async () => {
+  it('H4-2: a failed retry returns focus to the retry button (our own unmount dropped it to body)', async () => {
     h.apiFetch.mockImplementation(async () => fail(500, 'BACKEND_NOT_READY'))
     const root = mountView()
     await waitForSelector(root, '[data-testid="stock-prep-exception-error"]')

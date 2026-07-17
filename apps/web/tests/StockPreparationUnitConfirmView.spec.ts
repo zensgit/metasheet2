@@ -505,7 +505,7 @@ describe('StockPreparationUnitConfirmView (view 4: confirm reads + human confirm
   // H4-2 keyboard (H4-1 pattern, StockPreparationDashboardView.vue): a NATIVE disabled button is
   // pulled from the tab order, so the browser drops focus to <body> when a re-failed retry re-renders
   // with `:disabled` — a keyboard operator who pressed Retry must not be stranded there.
-  it('H4-2: a failed summary retry returns focus to the retry button (our own :disabled dropped it to body)', async () => {
+  it('H4-2: a failed summary retry returns focus to the retry button (our own unmount dropped it to body)', async () => {
     h.apiFetch.mockImplementation(async () => fail(500, 'BACKEND_NOT_READY'))
     const root = mountView()
     await waitForSelector(root, '[data-testid="stock-prep-unit-error"]')
@@ -527,7 +527,7 @@ describe('StockPreparationUnitConfirmView (view 4: confirm reads + human confirm
   // its GET, so the button's whole parent unmounts for the duration of the retry — that unmount (not
   // just :disabled) is what drops focus to <body>, and the remount on re-failure is what this test
   // exercises the restore against.
-  it('H4-2: a failed candidates retry returns focus to the retry button (our own :disabled dropped it to body)', async () => {
+  it('H4-2: a failed candidates retry returns focus to the retry button (our own unmount dropped it to body)', async () => {
     mockRoutes({ candidates: () => fail(500, 'BACKEND_NOT_READY') })
     const root = mountView()
     await waitForSelector(root, '[data-testid="stock-prep-unit-candidates-error"]')

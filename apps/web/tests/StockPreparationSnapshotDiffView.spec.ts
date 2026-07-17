@@ -716,21 +716,48 @@ describe('StockPreparationSnapshotDiffView (readonly, values-free)', () => {
     expect(root.querySelector('[data-testid="stock-prep-snapshot-diff-rows-table"]')).not.toBeNull()
   })
 
-  // ── H4-2 keyboard (H4-1 pattern, StockPreparationDashboardView.vue): a NATIVE disabled button is
-  // pulled from the tab order, so the browser drops focus to <body> when a re-failed retry re-renders
-  // with `:disabled` — a keyboard operator who pressed Retry must not be stranded there. ─────────────
+  // ── H4-2 keyboard (H4-1 pattern, StockPreparationDashboardView.vue): while a load is in flight the
+  // retry button UNMOUNTS (its error branch yields to the loading branch), so the browser drops focus to
+  // <body>; on a re-failed retry the button re-mounts and we restore focus — a keyboard operator who
+  // pressed Retry must not be stranded at <body>, but focus is never stolen if they Tabbed away. ──────
 
-  it('H4-2: a failed batch-list retry returns focus to the retry button (our own :disabled dropped it to body)', async () => {
+  it('H4-2: a failed batch-list retry returns focus to the retry button (our own unmount dropped it to body)', async () => {
     h.listBatches.mockRejectedValue(new Error('boom'))
     const root = mountView()
     await flushUi()
     const retry = root.querySelector('[data-testid="stock-prep-snapshot-retry"]') as HTMLButtonElement
     retry.focus()
     expect(document.activeElement).toBe(retry)
-    retry.click() // still failing → button re-renders; :disabled during the load drops focus to <body>
+    retry.click() // still failing → the button unmounts during the load, dropping focus to <body>, then re-mounts
     await flushUi()
     expect(root.querySelector('[data-testid="stock-prep-snapshot-retry"]')).not.toBeNull()
     expect(document.activeElement).toBe(root.querySelector('[data-testid="stock-prep-snapshot-retry"]'))
+  })
+
+  // Review P3-1: the reverse no-steal guard (`document.activeElement === document.body`) is regression-
+  // covered in a SECOND view here (not only ProjectWorkspace) since the code is byte-identical across all
+  // six. If the operator Tabs away while the retry is in flight, the re-mounted button must NOT steal focus.
+  it('H4-2: a batch-list retry does NOT steal focus if the operator Tabbed elsewhere while it was in flight', async () => {
+    let releaseRetry: (v: unknown) => void = () => {}
+    h.listBatches.mockRejectedValueOnce(new Error('503'))
+    const root = mountView()
+    await flushUi()
+    const retry = root.querySelector('[data-testid="stock-prep-snapshot-retry"]') as HTMLButtonElement
+    retry.focus()
+    // Hold the retry's load in flight, and fail it again so the retry button is still rendered on settle.
+    h.listBatches.mockImplementation(() => new Promise((_res, rej) => { releaseRetry = () => rej(new Error('503')) }))
+    retry.click()
+    await flushUi()
+    // The operator Tabs away to another control WHILE the retry is still loading.
+    const elsewhere = document.createElement('button')
+    document.body.appendChild(elsewhere)
+    elsewhere.focus()
+    expect(document.activeElement).toBe(elsewhere)
+    releaseRetry(null)
+    await flushUi()
+    // Focus stays where the operator put it — restoring it here would be focus theft.
+    expect(document.activeElement).toBe(elsewhere)
+    elsewhere.remove()
   })
 
   it('H4-2: a failed diff-summary retry returns focus to the retry button', async () => {
@@ -743,7 +770,7 @@ describe('StockPreparationSnapshotDiffView (readonly, values-free)', () => {
     const retry = root.querySelector('[data-testid="stock-prep-diff-retry"]') as HTMLButtonElement
     retry.focus()
     expect(document.activeElement).toBe(retry)
-    retry.click() // still failing → button re-renders; :disabled during the load drops focus to <body>
+    retry.click() // still failing → the button unmounts during the load, dropping focus to <body>, then re-mounts
     await flushUi()
     expect(root.querySelector('[data-testid="stock-prep-diff-retry"]')).not.toBeNull()
     expect(document.activeElement).toBe(root.querySelector('[data-testid="stock-prep-diff-retry"]'))
@@ -756,7 +783,7 @@ describe('StockPreparationSnapshotDiffView (readonly, values-free)', () => {
     const retry = root.querySelector('[data-testid="stock-prep-snapshot-diff-rows-retry"]') as HTMLButtonElement
     retry.focus()
     expect(document.activeElement).toBe(retry)
-    retry.click() // still failing → button re-renders; :disabled during the load drops focus to <body>
+    retry.click() // still failing → the button unmounts during the load, dropping focus to <body>, then re-mounts
     await flushUi()
     expect(root.querySelector('[data-testid="stock-prep-snapshot-diff-rows-retry"]')).not.toBeNull()
     expect(document.activeElement).toBe(root.querySelector('[data-testid="stock-prep-snapshot-diff-rows-retry"]'))

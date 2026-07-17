@@ -249,14 +249,14 @@ describe('StockPreparationProjectWorkspaceView (readonly, values-free)', () => {
   // H4-2 keyboard (H4-1 pattern, StockPreparationDashboardView.vue): a NATIVE disabled button is
   // pulled from the tab order, so the browser drops focus to <body> when a re-failed retry re-renders
   // with `:disabled` — a keyboard operator who pressed Retry must not be stranded there.
-  it('H4-2: a failed retry returns focus to the retry button (our own :disabled dropped it to body)', async () => {
+  it('H4-2: a failed retry returns focus to the retry button (our own unmount dropped it to body)', async () => {
     h.getOverview.mockRejectedValue(new Error('503'))
     const root = mountView()
     await flushUi()
     const retry = root.querySelector('[data-testid="stock-prep-project-retry"]') as HTMLButtonElement
     retry.focus()
     expect(document.activeElement).toBe(retry)
-    retry.click() // still failing → button re-renders; :disabled during the load drops focus to <body>
+    retry.click() // still failing → the button unmounts during the load, dropping focus to <body>, then re-mounts
     await flushUi()
     expect(root.querySelector('[data-testid="stock-prep-project-retry"]')).not.toBeNull()
     expect(document.activeElement).toBe(root.querySelector('[data-testid="stock-prep-project-retry"]'))

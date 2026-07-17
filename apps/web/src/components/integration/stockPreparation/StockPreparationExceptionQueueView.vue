@@ -456,11 +456,11 @@ async function bulkResolve(): Promise<void> {
 }
 
 // H4-3 keyboard — retry focus restore (same pattern as StockPreparationDashboardView.vue's H4-1
-// retry). The retry button carries `:disabled` while its own load is in flight, and a NATIVE
-// disabled button is pulled from the tab order — the browser drops focus to <body>, stranding a
+// retry). The retry button carries `:disabled` while its own load is in flight, and the button UNMOUNTS — its error branch
+// yields to the loading branch, leaving the DOM entirely — the browser drops focus to <body>, stranding a
 // keyboard operator who just pressed Retry. After the load settles we put focus back on the button,
 // but ONLY when it is still rendered (the retry failed again, so there is something to press) AND
-// focus is still on <body> (our own disable dropped it, and the operator has not Tabbed elsewhere
+// focus is still on <body> (our own unmount dropped it, and the operator has not Tabbed elsewhere
 // meanwhile) — the second condition is REQUIRED so this can never steal focus from wherever the
 // operator moved to.
 const retryEl = ref<HTMLButtonElement | null>(null)
