@@ -659,3 +659,204 @@ describe('allowlist ↔ type-spec parity (drift guard)', () => {
     })
   }
 })
+
+// -------------------------------------------------------------------------------------------
+// PB4-1 (owner ticket: membership input validation + primary-switch atomicity). Each guard gets
+// a rejection leg AND a positive control so none can pass vacuously. PB4-2/3/4 land separately.
+// -------------------------------------------------------------------------------------------
+describeIfDatabase('PB4-1 — input validation + atomic primary switch (real DB, HTTP)', () => {
+  const deptIds: string[] = []
+  const accountIds: string[] = []
+  const userIds: string[] = []
+
+  afterEach(async () => {
+    for (const id of deptIds.splice(0)) await query(`DELETE FROM directory_departments WHERE id = $1`, [id])
+    for (const id of accountIds.splice(0)) await query(`DELETE FROM directory_accounts WHERE id = $1`, [id])
+    for (const id of userIds.splice(0)) await query(`DELETE FROM users WHERE id = $1`, [id])
+  })
+
+  async function mkDept(name: string, parentDepartmentId?: string): Promise<string> {
+    const res = await request(adminApp)
+      .post('/api/admin/directory/local/departments')
+      .send(parentDepartmentId ? { name, parentDepartmentId } : { name })
+    expect(res.status).toBe(200)
+    deptIds.push(res.body.data.department.id)
+    return res.body.data.department.id
+  }
+
+  async function mkAccount(tag: string): Promise<string> {
+    const userId = await seedUser()
+    userIds.push(userId)
+    const res = await request(adminApp)
+      .post('/api/admin/directory/local/accounts')
+      .send({ localUserId: userId, name: fixtureName(tag) })
+    expect(res.status).toBe(200)
+    accountIds.push(res.body.data.account.id)
+    return res.body.data.account.id
+  }
+
+  // ---- item 1: non-UUID :id params are a 400, never a 500 --------------------------------
+  it('item 1: non-UUID membershipId ("foo:bar") is a 400, not a 500 at the ::uuid cast — and writes ZERO audit rows', async () => {
+    const res = await request(adminApp).patch('/api/admin/directory/local/memberships/foo:bar').send({ isPrimary: true })
+    expect(res.status).toBe(400)
+    expect(res.body.error.code).toBe('DIRECTORY_LOCAL_INVALID_INPUT')
+    // Scoped to THIS request's would-be resource (parallel-safe in the shared-DB run — a global
+    // action-prefix count races other tests' writes): a rejected request emits nothing.
+    const audit = await query(`SELECT 1 FROM audit_logs WHERE resource_id = 'foo:bar'`)
+    expect(audit.rows.length).toBe(0)
+  })
+
+  it('item 1: non-UUID departmentId / accountId route params are a 400, not a 500 (zero audit rows)', async () => {
+    const dept = await request(adminApp).patch('/api/admin/directory/local/departments/not-a-uuid').send({ name: 'x' })
+    expect(dept.status).toBe(400)
+    expect(dept.body.error.code).toBe('DIRECTORY_LOCAL_INVALID_INPUT')
+
+    const arch = await request(adminApp).post('/api/admin/directory/local/departments/not-a-uuid/archive').send({})
+    expect(arch.status).toBe(400)
+
+    const acct = await request(adminApp).patch('/api/admin/directory/local/accounts/also-not-a-uuid').send({ name: 'x' })
+    expect(acct.status).toBe(400)
+
+    const acctArch = await request(adminApp).post('/api/admin/directory/local/accounts/also-not-a-uuid/archive').send({})
+    expect(acctArch.status).toBe(400)
+
+    // The invalid tokens can never be a real audit resource_id (which is always a uuid or uuid:uuid).
+    const audit = await query(`SELECT 1 FROM audit_logs WHERE resource_id IN ('not-a-uuid', 'also-not-a-uuid')`)
+    expect(audit.rows.length).toBe(0)
+  })
+
+
+
+
+
+
+  // ---- item 5: single-UPDATE primary switch cannot demote-then-miss ------------------------
+  it('item 5: a primary switch to a NONEXISTENT membership is a 404 AND leaves the existing primary undemoted', async () => {
+    const acct = await mkAccount('no-demote')
+    const d1 = await mkDept(fixtureName('no-demote-d1'))
+    const d2 = await mkDept(fixtureName('no-demote-d2'))
+    await request(adminApp).post('/api/admin/directory/local/memberships').send({ accountId: acct, departmentId: d1 })
+    const mkPrimary = await request(adminApp).patch(`/api/admin/directory/local/memberships/${acct}:${d1}`).send({ isPrimary: true })
+    expect(mkPrimary.status).toBe(200)
+
+    // d2 exists as a department but the (acct, d2) MEMBERSHIP does not — the old two-step shape
+    // would have demoted d1 before discovering that; the single atomic UPDATE's EXISTS guard
+    // makes the whole statement update zero rows instead.
+    const missing = await request(adminApp).patch(`/api/admin/directory/local/memberships/${acct}:${d2}`).send({ isPrimary: true })
+    expect(missing.status).toBe(404)
+
+    const still = await query<{ is_primary: boolean }>(
+      `SELECT is_primary FROM directory_account_departments WHERE directory_account_id = $1 AND directory_department_id = $2`,
+      [acct, d1],
+    )
+    expect(still.rows).toEqual([{ is_primary: true }])
+  })
+})
+
+// PB4-1, body-carried surface (gate P3-1 of the earlier bundled review): non-UUID ids arriving
+// in REQUEST BODIES also used to reach uuid-column casts as 500s.
+describeIfDatabase('PB4-1 — body-carried id fields are 400 on non-UUID', () => {
+  const deptIds: string[] = []
+  afterEach(async () => {
+    for (const id of deptIds.splice(0)) await query(`DELETE FROM directory_departments WHERE id = $1`, [id])
+  })
+
+  it('POST /memberships with non-UUID body ids is a 400, not a 500 — and writes ZERO audit rows', async () => {
+    const res = await request(adminApp)
+      .post('/api/admin/directory/local/memberships')
+      .send({ accountId: 'not-a-uuid', departmentId: 'also-not-a-uuid' })
+    expect(res.status).toBe(400)
+    expect(res.body.error.code).toBe('DIRECTORY_LOCAL_INVALID_INPUT')
+    const audit = await query(`SELECT 1 FROM audit_logs WHERE resource_id IN ('not-a-uuid', 'also-not-a-uuid', 'not-a-uuid:also-not-a-uuid')`)
+    expect(audit.rows.length).toBe(0)
+  })
+
+  it('POST and PATCH /departments with a non-UUID parentDepartmentId string are 400s, not 500s', async () => {
+    const create = await request(adminApp)
+      .post('/api/admin/directory/local/departments')
+      .send({ name: fixtureName('p31-create'), parentDepartmentId: 'not-a-uuid' })
+    expect(create.status).toBe(400)
+
+    const mk = await request(adminApp).post('/api/admin/directory/local/departments').send({ name: fixtureName('p31-victim') })
+    expect(mk.status).toBe(200)
+    deptIds.push(mk.body.data.department.id)
+    const patch = await request(adminApp)
+      .patch(`/api/admin/directory/local/departments/${mk.body.data.department.id}`)
+      .send({ parentDepartmentId: 'not-a-uuid' })
+    expect(patch.status).toBe(400)
+  })
+})
+
+// PB4-2 owner round: a switch-primary whose TARGET membership is provider-MISLABELED (a
+// dingtalk-provider department under the SAME local integration) must be a 404 (not a valid local
+// membership to make primary), NOT a 409 — proven at the HTTP route layer, with zero audit and no
+// primary bits changed. This pins the `targetRow.provider !== 'local'` predicate that the
+// service-layer cross-scope test (which only varied integration) could not (deleting only the
+// provider predicate leaves the service file green; this route test reddens instead).
+describeIfDatabase('PB4-2 — provider-mislabeled switch TARGET is 404 at the route (real DB, HTTP)', () => {
+  const deptIds: string[] = []
+  const accountIds: string[] = []
+  const userIds: string[] = []
+  const rawDeptIds: string[] = []
+
+  afterEach(async () => {
+    for (const id of rawDeptIds.splice(0)) await query(`DELETE FROM directory_departments WHERE id = $1`, [id])
+    for (const id of deptIds.splice(0)) await query(`DELETE FROM directory_departments WHERE id = $1`, [id])
+    for (const id of accountIds.splice(0)) await query(`DELETE FROM directory_accounts WHERE id = $1`, [id])
+    for (const id of userIds.splice(0)) await query(`DELETE FROM users WHERE id = $1`, [id])
+  })
+
+  it('PATCH primary to a dingtalk-provider target under the local integration → 404, zero switch_primary audit, primaries unchanged', async () => {
+    const userId = await seedUser()
+    userIds.push(userId)
+    const acctRes = await request(adminApp).post('/api/admin/directory/local/accounts').send({ localUserId: userId, name: fixtureName('mt-acct') })
+    expect(acctRes.status).toBe(200)
+    const accountId = acctRes.body.data.account.id as string
+    accountIds.push(accountId)
+
+    const deptRes = await request(adminApp).post('/api/admin/directory/local/departments').send({ name: fixtureName('mt-local-dept') })
+    expect(deptRes.status).toBe(200)
+    const localDeptId = deptRes.body.data.department.id as string
+    deptIds.push(localDeptId)
+
+    // legit local membership, made primary through the real route.
+    expect((await request(adminApp).post('/api/admin/directory/local/memberships').send({ accountId, departmentId: localDeptId })).status).toBe(200)
+    expect((await request(adminApp).patch(`/api/admin/directory/local/memberships/${accountId}:${localDeptId}`).send({ isPrimary: true })).status).toBe(200)
+
+    // the org's active local integration (the route resolves org 'default'), then a provider-MISLABELED
+    // department under it + a raw membership — the malformed shape a provider sync could produce.
+    const integ = await query<{ id: string }>(`SELECT id FROM directory_integrations WHERE org_id = 'default' AND provider = 'local' AND status = 'active'`)
+    const integrationId = integ.rows[0].id
+    const dtDept = await query<{ id: string }>(
+      `INSERT INTO directory_departments (integration_id, provider, external_department_id, name, is_active, raw)
+       VALUES ($1, 'dingtalk', $2, $3, true, '{}'::jsonb) RETURNING id`,
+      [integrationId, `dingtalk:${STAMP}:mt-target`, 'Mislabeled Target'],
+    )
+    const dtDeptId = dtDept.rows[0].id
+    rawDeptIds.push(dtDeptId)
+    await query(`INSERT INTO directory_account_departments (directory_account_id, directory_department_id, is_primary) VALUES ($1, $2, false)`, [accountId, dtDeptId])
+
+    const auditBefore = await query<{ n: string }>(
+      `SELECT count(*)::text AS n FROM audit_logs WHERE action = 'directory.local_membership.switch_primary' AND resource_id = $1`,
+      [`${accountId}:${dtDeptId}`],
+    )
+    const res = await request(adminApp).patch(`/api/admin/directory/local/memberships/${accountId}:${dtDeptId}`).send({ isPrimary: true })
+    expect(res.status).toBe(404)
+    expect(res.body.error.code).toBe('DIRECTORY_LOCAL_NOT_FOUND')
+
+    const auditAfter = await query<{ n: string }>(
+      `SELECT count(*)::text AS n FROM audit_logs WHERE action = 'directory.local_membership.switch_primary' AND resource_id = $1`,
+      [`${accountId}:${dtDeptId}`],
+    )
+    expect(auditAfter.rows[0]?.n).toBe(auditBefore.rows[0]?.n) // zero switch_primary audit on the rejected path
+
+    // primary bits unchanged: the legit local dept stays primary, the mislabeled target stays non-primary.
+    const primaries = await query<{ directory_department_id: string; is_primary: boolean }>(
+      `SELECT directory_department_id, is_primary FROM directory_account_departments WHERE directory_account_id = $1 ORDER BY directory_department_id`,
+      [accountId],
+    )
+    const primaryMap = new Map(primaries.rows.map((r) => [r.directory_department_id, r.is_primary]))
+    expect(primaryMap.get(localDeptId)).toBe(true)
+    expect(primaryMap.get(dtDeptId)).toBe(false)
+  })
+})

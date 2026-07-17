@@ -230,6 +230,35 @@ describe('MetaRecordAttachmentsPanel (W2 S5)', () => {
       expect(container.querySelector('.meta-record-attachments-panel__file-input')).toBeNull()
       expect(container.querySelector('.meta-attachment-list__remove')).toBeNull()
     })
+
+    // B4 re-port (refs #4267 continuation): `isFieldAlwaysReadOnly` (apps/web/src/multitable/utils/
+    // field-permissions.ts) is ADDITIVE to fieldPermissions[id].readOnly, same as the fields panel's
+    // canEditField -- this pins the mirror-panel copy of that gate (see MetaRecordAttachmentsPanel.vue's
+    // canEditField). Deliberately NO fieldPermissions prop, proving the gate is field-property-derived,
+    // not solely dependent on a server-threaded permission map.
+    it('a field with raw property.readonly=true does not get a file input or remove button, even with NO fieldPermissions supplied', async () => {
+      const container = mount({
+        record: RECORD({ fld_a: ['att_1'] }),
+        fields: [{ id: 'fld_a', name: 'Contracts', type: 'attachment', property: { readonly: true } }] as MetaField[],
+        canEdit: true,
+        attachmentSummariesByField: { fld_a: [attachment('att_1', 'contract.pdf')] },
+      })
+      await flushUi()
+      expect(container.querySelector('.meta-record-attachments-panel__file-input')).toBeNull()
+      expect(container.querySelector('.meta-attachment-list__remove')).toBeNull()
+    })
+
+    it('negative leg: an ordinary attachment field with no special property stays editable (file input + remove button render)', async () => {
+      const container = mount({
+        record: RECORD({ fld_a: ['att_1'] }),
+        fields: [{ id: 'fld_a', name: 'Contracts', type: 'attachment' }] as MetaField[],
+        canEdit: true,
+        attachmentSummariesByField: { fld_a: [attachment('att_1', 'contract.pdf')] },
+      })
+      await flushUi()
+      expect(container.querySelector('.meta-record-attachments-panel__file-input')).not.toBeNull()
+      expect(container.querySelector('.meta-attachment-list__remove')).not.toBeNull()
+    })
   })
 
   describe('upload/delete emit parity via the reused component (MetaAttachmentList + uploadFn/deleteAttachmentFn)', () => {

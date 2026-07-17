@@ -4,8 +4,9 @@ Date: 2026-07-13
 Milestone: **Canonical Org & Provider Transfer v1** (the SECOND milestone — distinct from DingTalk
 Sync Hardening v1, which is a runtime-closeout milestone tracked by the DT-CLOSE tickets).
 Baseline: `origin/main` (post-#4215 / #3944).
-Status: **implementation-sequencing plan. Not started. Starts only after Hardening v1 is closed
-(DT-CLOSE-01…05 done + owner go).**
+Status: **IN PROGRESS** (owner go given 2026-07-15). B1 merged `849f1d53d` (#4304), B2 merged
+`bf52b9513` (#4317), B3 merged `65dec7b36` (#4318). Rolling status lives in
+`canonical-org-mvp-progress-ledger-20260716.md` — this file stays the sequencing/design reference.
 
 This plan does NOT re-design anything — the design is already ratified-by-merge:
 
@@ -18,9 +19,11 @@ lands incrementally (approval-routing parity first) instead of as a big-bang mig
 
 ## 0. Two non-negotiable ordering constraints
 
-1. **Hardening v1 must close first.** The org line depends on a healthy, observable directory sync
-   (DT-CLOSE-01 restored that) and on the switch ledger (DT-CLOSE-04) being resolved — don't start
-   org-substrate impl on an unclosed hardening milestone.
+1. **Hardening v1 dev-side runtime-closeout + owner go unlocks DEVELOPMENT** (owner ruling
+   2026-07-15/16, supersedes the original "must close first" wording): B1-B3 started on that go.
+   The still-open owner/ops items — real UAT (U1-U13 + callback corp-anchor), switch-ledger owners,
+   switch rulings — run in PARALLEL with B4-B7 and block **Canonical Org production release /
+   MVP DONE**, not development.
 2. **Canonical Org MVP before Transfer MVP.** The transfer engine (Wave 4) rebinds provider handles
    *under* a stable local anchor; that anchor (the `provider='local'` substrate) must exist and have
    at least one real consumer (approval routing) proven at real-DB parity before any transfer code.
@@ -37,7 +40,7 @@ departments only produce reconciliation *suggestions*, and when they disappear o
 | --- | --- | --- | --- | --- |
 | **B1** | **Local provider bootstrap** — get-or-create one `provider='local'` integration per org; `corp_id = local:<org_id>` (immutable); the **at-most-one-active-local** partial unique index; no external creds, no scheduler | §5.1 | DB has exactly-cap-one enforced; two concurrent bootstraps can't both create; audit event on create | migration + service — Sonnet, Opus gate |
 | **B2** | **Local departments + accounts + memberships** — CRUD on `directory_departments`/`directory_accounts`/`directory_account_departments` under the local integration; archive-not-delete; explicit primary department | §5.2–5.4 | membership idempotency; archive keeps history; NO manager in `raw` | Sonnet |
-| **B3** | **Normalized manager relation** — the owner-ruled first-class `is_manager`/head relation (NOT `raw.leader_in_dept`); `ApprovalDirectoryOrg` reads it | §5.4 | approval routing resolves manager from the normalized relation; a real-DB test proves it | **Opus** (routing-core) |
+| **B3** | **Normalized direct-manager relation** — the owner-ruled first-class `is_manager` relation (NOT `raw.leader_in_dept`); `ApprovalDirectoryOrg`'s direct-manager step reads it. Manager CHAIN and department-HEAD stay on their legacy sources — explicitly left to B5/B6 | §5.4 | approval routing resolves manager from the normalized relation; a real-DB test proves it | **Opus** (routing-core) |
 | **B4** | **Department binding table** — `directory_department_bindings` with the **buildable FK chain** (binding carries both integration ids; `(dept,integration)`→`departments(id,integration)` + `(integration,org)`→`integrations(id,org)`, both sides; provider-role via trigger/redundant FK) | §5.5 | a cross-org binding is **impossible to insert** (FK rejects); real-DB test | **Opus** (data-integrity) |
 | **B5** | **`(org, purpose)` routing policy + read-only preview** — stored policy; resolver picks canonical integration per purpose fail-closed; **preview shows before/after impacted approval/permission/attendance surfaces before any switch** | §6 | resolver never "array[0]"; fail-closed on unset; preview is read-only | **Opus** (governance) |
 | **B6** | **Approval-routing local/DingTalk real-DB equivalence** (the FIRST consumer, not all) | §10.1 | seeded equivalent data → `provider='local'` produces the SAME requester dept/title/manager outputs as DingTalk; in-flight approvals keep baked routing; new ones follow the selected policy | **Opus** (parity proof) |
@@ -57,7 +60,8 @@ guard already forbids it). Feishu/WeCom drivers deferred until a named customer 
 | --- | --- | --- | --- | --- |
 | **T1** | **Schema + API skeleton** — `provider_org_transfers` + `provider_org_transfer_decisions` migrations; admin-only create/read/scan/dry-run/apply/cancel; **no-op adapter** + contract tests | §7, §6.3 | new tables + admin API; no real writes yet; audit on lifecycle | Sonnet, **Opus** gate |
 | **T2** | **Source freeze** — freeze the source integration's sync while a transfer is active (the §12.2 deferral this unblocks) | §12.2 | an active transfer blocks the destructive absence sweep; real-DB test | **Opus** (sync-core) |
-| **T2-Gate** | **Two-corp coexistence proof** — stage two DingTalk corps, one overlapping person; prove whether `directory_accounts(provider, external_key)` collides (unionId is union-scoped ⇒ expected to collide ⇒ tenant-scoped key `(provider, tenant_key, external_key)` almost certainly required) | §3.4 | **owner/ops + staging** — sandbox cannot create real corps; DB-level collision mechanism can be shown, the production proof cannot | — (gated) |
+| **T2-Gate** | **Two-corp coexistence proof** — stage two DingTalk corps, one overlapping person; prove whether `directory_accounts(provider, external_key)` collides (NOT yet proven either way — the source audit's conclusion is that only a staging two-corp proof can decide; the T2.5 row below carries the conditional consequence) | §3.4 | **owner/ops + staging** — sandbox cannot create real corps; DB-level collision mechanism can be shown, the production proof cannot | — (gated) |
+| **T2.5** | **Conditional — tenant-scoped key migration** (owner ruling 2026-07-16, explicit decision branch): if T2-Gate CONFIRMS the `(provider, external_key)` collision, a tenant-scoped key migration to `(provider, tenant_key, external_key)` MUST land BEFORE any T3 work — T3 may not start directly off a confirmed collision. If T2-Gate disproves the collision, T2.5 is skipped and T3 proceeds. | §3.4 | migration + backfill + uniqueness proof on staging data | **Opus** (identity-key) |
 | **T3** | **Single-transaction user rebind** — clear source link WITHOUT deleting the identity, upsert the one `user_external_identities` row in place source→target, enable grant, link target — NOT public unbind+bind | §9.3 | real-DB atomic-rewrite mutation test; a target identity row exists after rebind (no next-login wait) | **Opus** (identity-core) |
 | **T4** | **Group-destination rebind/drop** — rebind webhook+secret keeping `destinationId` stable; drop = disable | §10 | automation rule keeps `destinationId`; drop disables without touching the form | Sonnet |
 | **T5** | **Admin workbench** — transfer list/detail, source/target selector, decision worklist, dry-run, apply progress | §13 | UI over the backend; dry-run required before apply | Sonnet + FE |
@@ -83,5 +87,5 @@ direct `corp_id` edit; the two-corp key strategy is proven in staging; identity 
 ## 5. How this runs (the goal loop, repeatable)
 
 Each increment: recon → parallel model-by-difficulty lanes → adversarial Opus gate (refute-first,
-load-bearing mutation) → land behind a done-gate → update this plan's status. Nothing lands without a
+load-bearing mutation) → land behind a done-gate → update the rolling ledger (`canonical-org-mvp-progress-ledger-20260716.md`). Nothing lands without a
 gate; nothing is claimed verified without a real-DB proof; the two milestones stay named separately.

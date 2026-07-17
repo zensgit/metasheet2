@@ -59,6 +59,22 @@ describe('meta-core-labels static keys', () => {
     expect(metaCoreLabel('toolbar.checkedTrue', true)).toBe('已勾选 / true')
     expect(metaCoreLabel('toolbar.uncheckedFalse', true)).toBe('未勾选 / false')
   })
+
+  it('B5: rich-text editor chrome aria labels exist and are non-empty in BOTH locales', () => {
+    // zh keeps the exact pre-fix strings (the consts hardcoded in
+    // MetaRichLongTextEditor.vue before B5); en must exist and must not
+    // contain CJK (the original bug: English screen readers read Chinese).
+    expect(metaCoreLabel('richText.toolbarAria', true)).toBe('富文本格式工具栏')
+    expect(metaCoreLabel('richText.contentAria', true)).toBe('富文本内容编辑区')
+    expect(metaCoreLabel('richText.toolbarAria', false)).toBe('Rich text formatting toolbar')
+    expect(metaCoreLabel('richText.contentAria', false)).toBe('Rich text content editor')
+    for (const key of ['richText.toolbarAria', 'richText.contentAria'] as const) {
+      for (const isZh of [true, false]) {
+        expect(metaCoreLabel(key, isZh).trim().length).toBeGreaterThan(0)
+      }
+      expect(metaCoreLabel(key, false)).not.toMatch(/[一-鿿]/)
+    }
+  })
 })
 
 describe('meta-core-labels helpers', () => {

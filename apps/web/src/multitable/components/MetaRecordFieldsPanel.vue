@@ -308,6 +308,7 @@ import {
   locationValueFromAddress,
 } from '../utils/field-display'
 import { isSystemField } from '../utils/system-fields'
+import { isFieldAlwaysReadOnly } from '../utils/field-permissions'
 import { qrSvgFromText } from '../utils/qr-code'
 import {
   formatRecordFieldValue,
@@ -374,12 +375,20 @@ watch(() => props.record, () => {
 const visibleFields = computed(() => props.fields.filter((field) => props.fieldPermissions?.[field.id]?.visible !== false))
 const resolvedCanComment = computed(() => resolveCanComment(props.rowActions, props.canComment))
 
+// B4 (W2 re-port, refs #4267 continuation): `!isFieldAlwaysReadOnly(field)` is ADDITIVE to
+// `fieldPermissions?.[fieldId]?.readOnly !== true` (the server-supplied flag already carrying
+// mirror/system/formula/lookup/rollup readOnly) — see the matching comment in
+// MetaGridTable.isEditable / apps/web/src/multitable/utils/field-permissions.ts for the
+// defense-in-depth rationale. Originally wired in the pre-W2-refactor MetaRecordDrawer.vue
+// (canEditField); this function moved VERBATIM here at W2 S1 (see file header) and this gate moves
+// with it — same call sites, same behavior contract.
 function canEditField(fieldId: string): boolean {
   const field = props.fields.find((item) => item.id === fieldId) ?? null
   return props.canEdit
     && props.rowActions?.canEdit !== false
     && props.fieldPermissions?.[fieldId]?.readOnly !== true
     && !isSystemField(field)
+    && !isFieldAlwaysReadOnly(field)
 }
 
 // --- A3 AI shortcut (drawer = primary trigger surface) ---

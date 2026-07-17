@@ -801,6 +801,9 @@ describe('MultitableApiClient', () => {
             patch: { fld_title: 'Edited again' },
             snapshot: { fld_title: 'Edited again' },
             createdAt: '2026-04-30T10:00:00.000Z',
+            // OD-W2-5a POSITIVE control: this row carries the R11 restore back-reference; it must pass
+            // through. rev_1 (no field) pins the null direction. Guards the required-gate normalizer.
+            restoredFromVersion: 2,
           },
           { id: 'bad' },
         ],
@@ -825,6 +828,7 @@ describe('MultitableApiClient', () => {
         patch: { fld_title: 'Updated' },
         snapshot: { fld_title: 'Updated' },
         createdAt: '2026-04-30T09:00:00.000Z',
+        restoredFromVersion: null,
       },
       {
         id: 'rev_2',
@@ -839,6 +843,7 @@ describe('MultitableApiClient', () => {
         patch: { fld_title: 'Edited again' },
         snapshot: { fld_title: 'Edited again' },
         createdAt: '2026-04-30T10:00:00.000Z',
+        restoredFromVersion: 2,
       },
     ])
     expect(fetchFn).toHaveBeenCalledWith('/api/multitable/sheets/sheet%20history/records/rec%20history/history?limit=25')

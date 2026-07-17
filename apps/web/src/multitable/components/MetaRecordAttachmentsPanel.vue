@@ -110,7 +110,7 @@ import {
   shouldReplaceAttachmentSelection,
   validateAttachmentSelection,
 } from '../utils/field-config'
-import { filterPropertyVisibleFields } from '../utils/field-permissions'
+import { filterPropertyVisibleFields, isFieldAlwaysReadOnly } from '../utils/field-permissions'
 import { isSystemField } from '../utils/system-fields'
 import { useLocale } from '../../composables/useLocale'
 import { attachmentActivityLabel, metaCoreLabel, type MetaCoreLabelKey } from '../utils/meta-core-labels'
@@ -153,12 +153,19 @@ const visibleAttachmentFields = computed(() =>
   ),
 )
 
+// B4 (W2 S5 re-port, refs #4267 continuation): `!isFieldAlwaysReadOnly(field)` is ADDITIVE to
+// `fieldPermissions?.[fieldId]?.readOnly !== true` — same defense-in-depth rationale as
+// MetaRecordFieldsPanel.vue's canEditField (this panel's copy of the same helper, S5 new-build per
+// the file header, aggregating attachment fields into a 4th tab). Kept in parity with the fields
+// panel's gate so an attachment field flagged readonly/mirrorOf cannot be edited from this surface
+// either, even before/without a fresh server round trip.
 function canEditField(fieldId: string): boolean {
   const field = props.fields.find((item) => item.id === fieldId) ?? null
   return props.canEdit
     && props.rowActions?.canEdit !== false
     && props.fieldPermissions?.[fieldId]?.readOnly !== true
     && !isSystemField(field)
+    && !isFieldAlwaysReadOnly(field)
 }
 
 function attachmentList(fieldId: string): string[] {

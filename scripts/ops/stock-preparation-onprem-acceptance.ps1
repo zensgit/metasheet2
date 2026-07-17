@@ -77,6 +77,14 @@ $Summary = [ordered]@{
   'mvpSmoke.pass'        = 'false'
   auditActionsCovered    = 'N/8'
   selfScanClean          = 'false'
+  # corrective-5 bounded values-free diagnostics — propagated even when the smoke exits 1 so an
+  # early-return/throw is localizable (the runner discards the child's raw stdout/stderr). All fixed
+  # enums / a non-negative integer / a length-capped safe-label; never a business value.
+  'mvpSmoke.failureClass'           = 'NOT_RUN'
+  'mvpSmoke.lastCompletedPhase'     = 'NOT_RUN'
+  'mvpSmoke.firstFailedCheck'       = 'NOT_RUN'
+  'mvpSmoke.failedCheckCount'       = '0'
+  'mvpSmoke.responseLeakScanStatus' = 'NOT_RUN'
   externalPlmK3ErpWrite  = 'false'   # invariant: this line NEVER touches an external write.
   failedStage            = 'none'
 }
@@ -202,7 +210,30 @@ function Test-SmokeOutcome {
   if (-not $pass) { $ok = $false; $reason = 'smoke_not_pass' }
   elseif ($audit -ne '8/8') { $ok = $false; $reason = 'audit_incomplete' }
   elseif (-not $selfScan) { $ok = $false; $reason = 'self_scan_not_clean' }
-  return @{ pass = $pass; audit = $audit; selfScan = $selfScan; ok = $ok; reason = $reason }
+
+  # ── corrective-5: parse the bounded values-free diagnostics. The 4 enum fields are allowlisted (any
+  # off-vocabulary token becomes UNKNOWN, never a raw value); firstFailedCheck is a structural check label
+  # accepted ONLY if it matches a safe-label shape and is length-capped — so a wild/leaky value can never
+  # reach the runner summary (the smoke additionally REDACTs it upstream).
+  $allowedFailure = @('NONE', 'CHECK_FAILED', 'SELF_SCAN_FAILED', 'FATAL_EXCEPTION')
+  $allowedPhase = @('NONE', 'AUTH', 'PROVISIONING', 'SYNC_PERSIST', 'PROJECTS', 'SNAPSHOT_DIFF', 'MAPPINGS',
+    'CONVERSIONS', 'GENERATION_RUN', 'FAILCLOSED_PROBES', 'ERP_CACHE_SYNC', 'CLEANUP_RETIRES', 'AUDIT_TRAIL',
+    'RESPONSE_LEAK_SCAN')
+  $failureClass = if ($Joined -match '(?m)^failureClass=([A-Za-z_]+)\s*$') { $Matches[1] } else { 'NOT_RUN' }
+  if ($failureClass -ne 'NOT_RUN' -and $allowedFailure -notcontains $failureClass) { $failureClass = 'UNKNOWN' }
+  $lastPhase = if ($Joined -match '(?m)^lastCompletedPhase=([A-Za-z_]+)\s*$') { $Matches[1] } else { 'NOT_RUN' }
+  if ($lastPhase -ne 'NOT_RUN' -and $allowedPhase -notcontains $lastPhase) { $lastPhase = 'UNKNOWN' }
+  $leakScan = if ($Joined -match '(?m)^responseLeakScanStatus=(NOT_RUN|PASS|FAIL)\s*$') { $Matches[1] } else { 'NOT_RUN' }
+  $failedCount = if ($Joined -match '(?m)^failedCheckCount=(\d{1,4})\s*$') { $Matches[1] } else { '0' }
+  # firstFailedCheck is the PHASE of the first failed check — allowlisted like lastCompletedPhase.
+  $firstFailed = if ($Joined -match '(?m)^firstFailedCheck=([A-Za-z_]+)\s*$') { $Matches[1] } else { 'NOT_RUN' }
+  if ($firstFailed -ne 'NOT_RUN' -and $allowedPhase -notcontains $firstFailed) { $firstFailed = 'UNKNOWN' }
+
+  return @{
+    pass = $pass; audit = $audit; selfScan = $selfScan; ok = $ok; reason = $reason
+    failureClass = $failureClass; lastCompletedPhase = $lastPhase; firstFailedCheck = $firstFailed
+    failedCheckCount = $failedCount; responseLeakScanStatus = $leakScan
+  }
 }
 
 # ── Read the admin token WITHOUT ever exposing it (env var, else secure prompt). ─────────────────
@@ -367,34 +398,59 @@ function Invoke-HealthStage {
   Write-Stage 'stage 5: PASS'
 }
 
+# ── Summary-only smoke capture (pure, unit-testable). Runs the child smoke and returns ONLY its stdout
+# summary text + exit code. stderr is redirected to $null (2>$null), NEVER merged into the success stream
+# (2>&1). Windows PowerShell 5.1 still promotes native stderr under a global ErrorActionPreference=Stop,
+# even with null redirection. Scope Continue to this one native invocation, capture $LASTEXITCODE, and
+# restore the caller's policy in finally. The surrounding runner remains fail-closed. Node warnings / any
+# stderr noise never enter the parsed values-free summary. The admin token crosses to the child ONLY as a
+# scoped env var, cleared (with its BSTR) in the outer finally.
+function Invoke-SmokeCapture {
+  param([string[]]$NodeArgs, [SecureString]$Token)
+  $bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($Token)
+  $previousErrorActionPreference = $ErrorActionPreference
+  try {
+    # Token crosses to the child ONLY as a scoped env var — never on the command line / ArgumentList.
+    $env:METASHEET_AUTH_TOKEN = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr)
+    try {
+      $ErrorActionPreference = 'Continue'
+      $out = & node @NodeArgs 2>$null  # stdout ONLY; stderr discarded (see function header)
+      $exit = $LASTEXITCODE
+    } finally {
+      $ErrorActionPreference = $previousErrorActionPreference
+    }
+  } finally {
+    [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr)
+    Remove-Item Env:METASHEET_AUTH_TOKEN -ErrorAction SilentlyContinue
+  }
+  return @{ stdout = ($out | Out-String); exit = $exit }
+}
+
 # ── Stage 6: in-package stock-preparation smoke (token via scoped env, cleared in finally) ───────
 function Invoke-SmokeStage {
   param([SecureString]$Token)
   Write-Stage 'stage 6: stock-preparation smoke'
   $smoke = Join-Path $DeployRoot 'scripts/ops/stock-preparation-mvp-postdeploy-smoke.mjs'
   if (-not (Test-Path $smoke)) { Stop-WithFailure 'smoke' @{ reason = 'smoke_script_missing' } }
-  $args = @($smoke, '--base-url', "http://localhost:$Port")
-  if ($TenantId) { $args += @('--tenant-id', $TenantId) }
-  $bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($Token)
-  try {
-    # Token crosses to the child ONLY as a scoped env var — never on the command line / ArgumentList.
-    $env:METASHEET_AUTH_TOKEN = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr)
-    $out = & node @args 2>&1
-    $exit = $LASTEXITCODE
-  } finally {
-    [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr)
-    Remove-Item Env:METASHEET_AUTH_TOKEN -ErrorAction SilentlyContinue
-  }
-  # Parse ONLY the values-free summary fields the smoke prints; never echo the raw $out.
-  $joined = ($out | Out-String)
-  $outcome = Test-SmokeOutcome $joined
+  $nodeArgs = @($smoke, '--base-url', "http://localhost:$Port")
+  if ($TenantId) { $nodeArgs += @('--tenant-id', $TenantId) }
+  # Summary-only capture: stdout is parsed for the values-free fields; stderr is discarded (never echoed).
+  $captured = Invoke-SmokeCapture -NodeArgs $nodeArgs -Token $Token
+  $outcome = Test-SmokeOutcome $captured.stdout
   $Summary['mvpSmoke.pass'] = if ($outcome.pass) { 'true' } else { 'false' }
   $Summary.auditActionsCovered = $outcome.audit
   $Summary.selfScanClean = if ($outcome.selfScan) { 'true' } else { 'false' }
+  # corrective-5: propagate the bounded diagnostics INTO the summary BEFORE the exit/outcome gates below,
+  # so an exit-1 smoke (Stop-WithFailure) still emits them in the values-free acceptance summary.
+  $Summary['mvpSmoke.failureClass'] = $outcome.failureClass
+  $Summary['mvpSmoke.lastCompletedPhase'] = $outcome.lastCompletedPhase
+  $Summary['mvpSmoke.firstFailedCheck'] = $outcome.firstFailedCheck
+  $Summary['mvpSmoke.failedCheckCount'] = $outcome.failedCheckCount
+  $Summary['mvpSmoke.responseLeakScanStatus'] = $outcome.responseLeakScanStatus
   # Fail-closed: a green exit is NOT a steady state unless the audit surface is fully covered (8/8) and
   # the self-scan is clean. An absent/unparseable field records 'N/8'/'false' and FAILS here — it never
   # passes silently (owner P2).
-  if ($exit -ne 0) { Stop-WithFailure 'smoke' @{ smokeExit = $exit } }
+  if ($captured.exit -ne 0) { Stop-WithFailure 'smoke' @{ smokeExit = $captured.exit } }
   if (-not $outcome.ok) { Stop-WithFailure 'smoke' @{ reason = $outcome.reason } }
   Write-Stage 'stage 6: PASS'
 }

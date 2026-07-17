@@ -29,9 +29,14 @@ import {
   loadHierarchyParentFieldIds,
 } from './hierarchy-cycle-guard'
 import {
-  acquireAutoNumberSheetWriteLock,
   allocateAutoNumberValues,
 } from './auto-number-service'
+import {
+  acquireCanonicalSheetFence,
+  assertNoActiveWriterBlock,
+  fenceWriterEntry,
+  isWriterFenceEnabled,
+} from './canonical-sheet-fence'
 import { getDefaultValidationRules, validateRecord } from './field-validation-engine'
 import type { FieldValidationConfig } from './field-validation'
 import { loadFieldsForSheet } from './loaders'
@@ -515,7 +520,11 @@ export class RecordService {
     const patch: Record<string, unknown> = {}
     const recordId = `rec_${randomUUID()}`
     const recordRes = await this.pool.transaction(async ({ query }) => {
-      await acquireAutoNumberSheetWriteLock(query, sheetId)
+      // W0-1 L4 (canonical fence): create ALREADY takes this fence unconditionally (the auto-number key,
+      // now renamed to `acquireCanonicalSheetFence` — same key). Byte-identical when the flag is off. The
+      // NEW, flag-gated part is the durable-block refusal AFTER the fence (fence-before-check ordering).
+      await acquireCanonicalSheetFence(query, sheetId)
+      if (isWriterFenceEnabled()) await assertNoActiveWriterBlock(query, sheetId)
 
       const fieldRes = await query(
         'SELECT id, name, type, property FROM meta_fields WHERE sheet_id = $1',
@@ -805,6 +814,9 @@ export class RecordService {
     ensureRecordNotLocked(actorId, recordRow, () => new RecordPermissionError('Record is locked'))
 
     await this.pool.transaction(async ({ query }) => {
+      // W0-1 L4 (canonical fence): fence FIRST (before any read/check), then refuse if a recovery holds a
+      // durable block. No-op & byte-identical when MULTITABLE_ENABLE_WRITER_FENCE is off.
+      await fenceWriterEntry(query, sheetId)
       const lockedRecordRes = await query(
         'SELECT id, sheet_id, version, data FROM meta_records WHERE id = $1 FOR UPDATE',
         [recordId],
@@ -1070,6 +1082,9 @@ export class RecordService {
     let inboundOut: (InboundReplayResult & { recoverable: boolean }) | undefined
     const inboundEnabled = isRecordUndeleteInboundEnabled()
     await this.pool.transaction(async ({ query }) => {
+      // W0-1 L4 (canonical fence): fence FIRST, then refuse if a recovery holds a durable block. No-op &
+      // byte-identical when MULTITABLE_ENABLE_WRITER_FENCE is off.
+      await fenceWriterEntry(query, sheetId)
       // 4c-3 C4: the trash row is re-read FOR UPDATE inside the txn — two concurrent restores of the
       // same record serialize here; the loser sees the row gone (winner deleted it on success) and
       // gets a clean 409 instead of racing to a duplicate insert / double replay.
@@ -1332,6 +1347,9 @@ export class RecordService {
     let nextVersion = 1
     let pendingSubscriberNotification: NotifyRecordSubscribersInput | null = null
     await this.pool.transaction(async ({ query }) => {
+      // W0-1 L4 (canonical fence): fence FIRST, then refuse if a recovery holds a durable block. No-op &
+      // byte-identical when MULTITABLE_ENABLE_WRITER_FENCE is off.
+      await fenceWriterEntry(query, sheetId)
       const currentRes = await query(
         'SELECT id, version, data, created_by, locked, locked_by FROM meta_records WHERE id = $1 AND sheet_id = $2 FOR UPDATE',
         [recordId, sheetId],

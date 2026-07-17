@@ -105,6 +105,22 @@ export default defineConfig({
       // gated; excluded here so the no-DB job cannot skip-green it, and wired as a WHOLE FILE into
       // the directory real-DB step in plugin-tests.yml.
       'tests/integration/local-directory-org-crud-route.db.test.ts',
+      // Canonical Org MVP PB4-2: archive → FULL read-only enforced at the WRITE POINT — direct-writer
+      // archived enforcement + two-connection deterministic barriers (archive-first → 409 / write-
+      // first → write-wins) + primary-switch full-read-only/cross-scope + deadlock-freedom. This is a
+      // TWO-CONNECTION concurrency suite that is meaningless without a real DB. DATABASE_URL-gated;
+      // excluded here so the no-DB job cannot skip-green it, and wired as a WHOLE FILE into the
+      // directory real-DB step in plugin-tests.yml (both points asserted by
+      // pb4-2-archive-readonly-ci-wiring.test.mjs so neither can silently drop).
+      'tests/integration/local-directory-org-archive-readonly.db.test.ts',
+      // Canonical Org MVP PB4-3: department cycle detection — in-transaction recursive ancestor
+      // walk + per-integration serialized reparent (advisory xact lock). Includes a TWO-CONNECTION
+      // barrier proving the advisory lock catches the disjoint cross-mount 4-cycle race, plus a
+      // termination proof on malformed loop data — meaningless without a real DB. DATABASE_URL-gated;
+      // excluded here so the no-DB job cannot skip-green it, and wired as a WHOLE FILE into the
+      // directory real-DB step in plugin-tests.yml (both points asserted by
+      // pb4-3-cycle-detection-ci-wiring.test.mjs so neither can silently drop).
+      'tests/integration/local-directory-org-cycle-detection.db.test.ts',
       // Canonical Org MVP B3 (#4215 §5.4): proves ApprovalDirectoryOrg's DUAL-SOURCE direct-manager
       // resolution against real Postgres — normalized `is_manager` relation for a local integration,
       // the DingTalk `leader_in_dept` regression pin (load-bearing compat leg + is_manager=0 positive
@@ -317,10 +333,19 @@ export default defineConfig({
       // only (checks the migration landed both tables, the status CHECK, FK cascade, defaults). Excluded HERE
       // so it cannot skip-green in the no-DB lane, whole-file wired into plugin-tests.yml. Two-point wiring.
       'tests/integration/multitable-automation-outbox-schema-realdb.test.ts',
+      // action-idempotency ledger L1 schema golden — real-DB. Excluded HERE so it cannot skip-green
+      // in the no-DB lane; whole-file wired into plugin-tests.yml. Two-point wiring.
+      'tests/integration/multitable-action-applied-ledger-realdb.test.ts',
       // P2 durable-delivery S2-a claim engine / fence-CAS — real-DB constructed-concurrency (zombie/SKIP
       // LOCKED). Excluded HERE so it cannot skip-green in the no-DB lane; whole-file wired into
       // plugin-tests.yml. Two-point wiring.
       'tests/integration/multitable-automation-dispatcher-claim-realdb.test.ts',
+      // P2 durable-delivery S2-b dispatch loop (registry + tick) — real-DB. Excluded HERE so it cannot
+      // skip-green in the no-DB lane; whole-file wired into plugin-tests.yml. Two-point wiring.
+      'tests/integration/multitable-automation-dispatch-loop-realdb.test.ts',
+      // P2 durable-delivery S4-a producer atomic enqueue — real-DB (txn atomicity + fan-out + e2e tick).
+      // Excluded HERE so it cannot skip-green in the no-DB lane; whole-file wired into plugin-tests.yml.
+      'tests/integration/multitable-automation-outbox-enqueue-realdb.test.ts',
       // W0 tail (#4279, owner MUST-WRITE OD-6, design-lock §0.5 2026-07-13): field-undelete rehydration
       // revision goldens — proves `recreateFieldFromConfig`'s tombstone-value rehydration UPDATE bumps
       // `version` and emits a `recordRecordRevision` AT THE NEW version, same transaction, for every

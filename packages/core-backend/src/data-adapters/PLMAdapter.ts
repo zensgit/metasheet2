@@ -2631,6 +2631,117 @@ export class PLMAdapter extends HTTPAdapter {
   }
 
   /**
+   * PLM-COLLAB Discussion read-relay (metasheet2 sub-slice 2, Yuantus provider sub-slice 1b):
+   * exchange the SAME BOM-review embed token (feature_key="bom_multitable") for a discussion
+   * READ-ONLY credential (`POST /api/v1/auth/embed/discussion-read-session`). Mirrors
+   * `exchangeDiscussionSession` EXACTLY -- pre-auth (sends NO Authorization header), fail-closed
+   * and uniform: dark-flag-off and an invalid/expired embed token both come back as the SAME 401,
+   * surfaced as `QueryResult.error`, never thrown. The returned `access_token` is short-TTL and
+   * part-scoped; it authorizes ONLY `getDiscussionsWithReadToken`/`getDiscussionThreadWithReadToken`
+   * below (the provider rejects it on any write route). This adapter never stores it.
+   */
+  async exchangeDiscussionReadSession(embedToken: string): Promise<QueryResult<DiscussionSessionCredential>> {
+    if (this.mockMode) {
+      return {
+        data: [{ access_token: 'mock-discussion-read-session-token', token_type: 'bearer', expires_in: 300, aud: 'discussion' }],
+        metadata: { totalCount: 1 },
+      }
+    }
+    if (this.apiMode !== 'yuantus') {
+      return { data: [], error: new Error('Discussion reads are not supported for this PLM API mode') }
+    }
+
+    return this.yuantusDiscussionFetch<DiscussionSessionCredential>('/api/v1/auth/embed/discussion-read-session', {
+      method: 'POST',
+      body: { embed_token: embedToken },
+    })
+  }
+
+  /**
+   * PLM-COLLAB Discussion read-relay: list discussion threads bound to a PLM target, authenticated
+   * with a discussion READ credential (`readToken`, from `exchangeDiscussionReadSession`) as the
+   * bearer -- NOT the adapter's own service token. Deliberately goes through
+   * `yuantusDiscussionFetch` (bypasses `this.query`'s interceptor, which unconditionally overwrites
+   * `Authorization` with the service token) rather than `getDiscussions`, which uses `this.query`
+   * and therefore authenticates as the service account, not the caller's read credential.
+   *
+   * Sends target_type/target_id + a FIXED `include_resolved=true`, and NOTHING else. Yuantus's list
+   * defaults to open-only (`include_resolved=False`), so WITHOUT this a resolved thread vanishes on
+   * the next list load and can never be reopened from the panel (owner review P2). `include_resolved`
+   * is hardcoded here, NEVER read from a client query param -- the relay derives every list arg from
+   * the verified embed claims, so a caller still cannot inject or widen anything. It does NOT widen
+   * the PART scope: the provider still enforces target_type=="item" and target_id==the credential's
+   * bound part, and rejects include_children outright; it only makes the bound part's resolved
+   * threads visible alongside its open ones. Any mismatch is the provider's uniform 404 (no leak).
+   */
+  async getDiscussionsWithReadToken(
+    readToken: string,
+    target: { targetType: string; targetId: string },
+  ): Promise<QueryResult<DiscussionThreadListResult>> {
+    if (this.mockMode) {
+      return {
+        data: [{ threads: [], next_cursor: null }],
+        metadata: { totalCount: 1 },
+      }
+    }
+    if (this.apiMode !== 'yuantus') {
+      return { data: [], error: new Error('Discussions are not supported for this PLM API mode') }
+    }
+
+    const query = new URLSearchParams({
+      target_type: target.targetType,
+      target_id: target.targetId,
+      include_resolved: 'true',
+    }).toString()
+    return this.yuantusDiscussionFetch<DiscussionThreadListResult>(`/api/v1/discussions?${query}`, {
+      method: 'GET',
+      headers: { Authorization: `Bearer ${readToken}` },
+    })
+  }
+
+  /**
+   * PLM-COLLAB Discussion read-relay: fetch one discussion thread with its comments, authenticated
+   * with a discussion READ credential as the bearer. Same rationale as
+   * `getDiscussionsWithReadToken` for bypassing `this.query`/`getDiscussionThread`. No query
+   * params -- the provider enforces the thread resolves back to the credential's bound part,
+   * surfacing any mismatch as the same uniform 404 as an absent thread id. (Detail is per-thread,
+   * so resolved/open is irrelevant here -- only the LIST needs include_resolved.)
+   */
+  async getDiscussionThreadWithReadToken(
+    readToken: string,
+    threadId: string,
+  ): Promise<QueryResult<DiscussionThreadDetail>> {
+    if (this.mockMode) {
+      return {
+        data: [{
+          id: threadId,
+          target_type: 'item',
+          target_id: 'mock-item-1',
+          title: 'Mock discussion thread',
+          status: 'open',
+          created_by_id: 1,
+          created_at: new Date().toISOString(),
+          resolved_by_id: null,
+          resolved_at: null,
+          last_comment_at: null,
+          comment_count: 0,
+          anchor: null,
+          comments: [],
+        }],
+        metadata: { totalCount: 1 },
+      }
+    }
+    if (this.apiMode !== 'yuantus') {
+      return { data: [], error: new Error('Discussions are not supported for this PLM API mode') }
+    }
+
+    return this.yuantusDiscussionFetch<DiscussionThreadDetail>(`/api/v1/discussions/${encodeURIComponent(threadId)}`, {
+      method: 'GET',
+      headers: { Authorization: `Bearer ${readToken}` },
+    })
+  }
+
+  /**
    * PLM-COLLAB Discussion Phase 3 slice-2 (WRITE): open a new discussion thread
    * (`POST /api/v1/discussions`). `sessionToken` is the `access_token` from
    * `exchangeDiscussionSession`, passed explicitly on every call -- see the type-block docstring

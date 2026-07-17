@@ -112,6 +112,14 @@ export interface ClaimOptions {
   leaseMs?: number
   /** attempt ceiling; a row already attempted this many times is poisoned at claim (default 8; 1..10000). */
   maxAttempts?: number
+  /**
+   * Called for each row that was POISONED at claim (attempts already >= ceiling → dead_letter). Such rows are
+   * NOT returned in the dispatchable list, so without this the caller cannot tell "no reclaimable candidate"
+   * from "the candidate(s) were terminated" — the latter must NOT stop a per-slot poll loop (healthy rows may
+   * be behind them) and the terminal transition must reach telemetry (#4334 review: claim-time poison
+   * head-of-line block). Best-effort — a throwing callback never fails the claim.
+   */
+  onClaimTimePoison?: (info: { outboxId: string; consumerKey: string; attempts: number }) => void
   /** injectable clock for tests. */
   now?: () => Date
 }
@@ -121,7 +129,9 @@ const nowIso = (opts: { now?: () => Date }): string => (opts.now?.() ?? new Date
 /**
  * Atomically claim reclaimable rows FOR THE GIVEN known keys, and poison any that have hit the attempt
  * ceiling. Rows whose key is not in `consumerKeys` are left untouched (they stay `pending`). Returns the
- * rows handed out for dispatch (in_progress) with their claim token + joined outbox event.
+ * rows handed out for dispatch (in_progress) with their claim token + joined outbox event; rows poisoned at
+ * claim (dead_letter) are NOT returned but are reported via `opts.onClaimTimePoison` so a caller can scan
+ * past them (they must not stop a poll loop) and record the terminal transition.
  */
 export async function claimDueConsumers(db: Queryable, opts: ClaimOptions): Promise<ClaimedConsumer[]> {
   const keys = requireKnownKeys(opts?.consumerKeys)
@@ -163,6 +173,7 @@ export async function claimDueConsumers(db: Queryable, opts: ClaimOptions): Prom
             r.consumer_key    AS consumer_key,
             r.fence           AS fence,
             r.attempts        AS attempts,
+            r.status          AS status,
             o.event_type      AS event_type,
             o.event_id        AS event_id,
             o.payload         AS payload,
@@ -170,21 +181,35 @@ export async function claimDueConsumers(db: Queryable, opts: ClaimOptions): Prom
             o.manifest_version AS manifest_version
        FROM resolved r
        JOIN meta_automation_outbox o ON o.id = r.outbox_id
-      WHERE r.status = 'in_progress'   -- poisoned rows are terminated, not dispatched
+      WHERE r.status IN ('in_progress', 'dead_letter')   -- dead_letter = poisoned at claim, reported not dispatched
       ORDER BY o.created_at ASC`,
     [asOf, batchSize, leaseMs, keys, maxAttempts],
   )
-  return rows.map((r) => ({
-    outboxId: String(r.outbox_id),
-    consumerKey: String(r.consumer_key),
-    fence: String(r.fence),
-    attempts: Number(r.attempts),
-    eventType: String(r.event_type),
-    eventId: String(r.event_id),
-    payload: r.payload,
-    automationDepth: Number(r.automation_depth),
-    manifestVersion: Number(r.manifest_version),
-  }))
+  const claimed: ClaimedConsumer[] = []
+  for (const r of rows) {
+    if (String(r.status) === 'dead_letter') {
+      // Poisoned at claim (attempts already >= ceiling). Not dispatchable — report it so the caller keeps
+      // scanning past it and the terminal transition is observable. Best-effort: never let it fail the claim.
+      try {
+        opts.onClaimTimePoison?.({ outboxId: String(r.outbox_id), consumerKey: String(r.consumer_key), attempts: Number(r.attempts) })
+      } catch {
+        /* best-effort telemetry */
+      }
+      continue
+    }
+    claimed.push({
+      outboxId: String(r.outbox_id),
+      consumerKey: String(r.consumer_key),
+      fence: String(r.fence),
+      attempts: Number(r.attempts),
+      eventType: String(r.event_type),
+      eventId: String(r.event_id),
+      payload: r.payload,
+      automationDepth: Number(r.automation_depth),
+      manifestVersion: Number(r.manifest_version),
+    })
+  }
+  return claimed
 }
 
 /**
@@ -279,6 +304,35 @@ export async function rescheduleConsumer(
             updated_at = $4::timestamptz
       WHERE outbox_id = $1 AND consumer_key = $2 AND fence = $3::bigint AND status = 'in_progress'`,
     [outboxId, consumerKey, fence, asOf, retryDelayMs, reason],
+  )
+  return Number(res.rowCount ?? 0) === 1
+}
+
+/**
+ * Renew the lease on a claimed row (the S2-b heartbeat). A **fence-CAS that does NOT bump the fence**: it
+ * pushes `lease_expires_at` out by `leaseMs` only while THIS worker still holds the claim token and the row is
+ * still `in_progress`. Returns false the instant the worker has lost the row — a concurrent reclaim bumped the
+ * fence, or the row already reached a terminal status. The S2-b loop calls this PERIODICALLY while a long
+ * adapter runs (a heartbeat), so a still-running delivery keeps its hold and a mid-flight reclaim aborts the
+ * in-flight work. Unlike `rescheduleConsumer`, renewing keeps the same fence: the worker is extending its own
+ * hold, not handing the row off.
+ */
+export async function renewConsumerLease(
+  db: Queryable,
+  outboxId: string,
+  consumerKey: string,
+  fence: string,
+  leaseMs: number,
+  opts: { now?: () => Date } = {},
+): Promise<boolean> {
+  requireBoundedInt('leaseMs', leaseMs, 1, MAX_LEASE_MS)
+  const asOf = nowIso(opts)
+  const res = await db.query(
+    `UPDATE meta_automation_outbox_consumer
+        SET lease_expires_at = $4::timestamptz + ($5::int * interval '1 millisecond'),
+            updated_at = $4::timestamptz
+      WHERE outbox_id = $1 AND consumer_key = $2 AND fence = $3::bigint AND status = 'in_progress'`,
+    [outboxId, consumerKey, fence, asOf, leaseMs],
   )
   return Number(res.rowCount ?? 0) === 1
 }

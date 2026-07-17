@@ -1,5 +1,10 @@
 import { randomUUID } from 'crypto'
 import { recordRecordRevision } from './record-history-service'
+import {
+  assertNoActiveWriterBlock,
+  fenceWriterEntry,
+  isWriterFenceEnabled,
+} from './canonical-sheet-fence'
 
 import {
   acquireAutoNumberSheetWriteLock,
@@ -486,6 +491,10 @@ export async function patchRecord(
   input: PatchMultitableRecordInput,
 ): Promise<LoadedMultitableRecord> {
   const query = input.query
+  // W0-1 L4 (canonical fence): the plugin-SDK patch runs its OWN UPDATE (not via RecordService) inside the
+  // SDK-provided transaction — fence + durable-block check first. No-op & byte-identical when
+  // MULTITABLE_ENABLE_WRITER_FENCE is off.
+  await fenceWriterEntry(query, input.sheetId)
   const { fields } = await loadSheetAndFields(query, input.sheetId)
 
   const existing = await getRecord({
@@ -584,7 +593,18 @@ export async function createRecord(
   input: CreateMultitableRecordInput,
 ): Promise<CreatedMultitableRecord> {
   const query = input.query
+  // W0-1 L4cov (close the plugin-create PARTIAL gap — L4 map's records.ts:592). The sheet-write fence is
+  // acquired UNCONDITIONALLY: it predates L4 as the auto-number allocation-serialization lock (it serialises
+  // record-create against CREATE-FIELD auto-number backfill — see auto-number-service.ts), so gating it behind
+  // the L4 flag would REGRESS auto-number correctness when the flag is off, and the module's flag-off-parity
+  // contract explicitly keeps plugin-create as an unconditional `acquireCanonicalSheetFence` caller. We then add
+  // — flag-gated, so flag-off stays byte-identical — the durable recovery-block check `fenceWriterEntry` runs:
+  // if a recovery holds a durable `{fencing,applying,paused_retryable}` block on this sheet, refuse with
+  // `SheetWriterBlockedError`. Net effect with the flag ON is exactly `fenceWriterEntry` (fence-then-check); the
+  // split (vs. the sibling plugin patchRecord above, which uses `fenceWriterEntry` directly) exists ONLY to
+  // preserve the pre-existing unconditional fence.
   await acquireAutoNumberSheetWriteLock(query, input.sheetId)
+  if (isWriterFenceEnabled()) await assertNoActiveWriterBlock(query, input.sheetId)
   const { fields } = await loadSheetAndFields(query, input.sheetId)
 
   const { patch, linkUpdates } = await buildNormalizedPatch(query, fields, input.data)
@@ -669,6 +689,11 @@ async function deleteRecordWithRecoverability(
   // check is independent of the entry wiring: it also protects callers that do not exist yet. It is not
   // un-deletable — it is pinned by a no-transaction golden (G16).
   await assertTransactionalQuery(query, 'plugin')
+  // W0-1 L4 (canonical fence): the recoverable plugin delete runs inside a txn (asserted above) — fence +
+  // durable-block check before the destructive read/write. No-op & byte-identical when the L4 flag is off.
+  // (The flag-off, non-transactional D-1 delete branch in `deleteRecord` cannot hold a txn-scoped advisory
+  // lock; it is enumerated as an L4-SEAM in the PR matrix — fencing it needs the txn wrap that path lacks.)
+  await fenceWriterEntry(query, input.sheetId)
 
   // FOR UPDATE + the extra columns the trash row needs (created_by / created_at / updated_at) AND the
   // lock columns (see the re-check below). The flag-off path reads only data+version and needs no row

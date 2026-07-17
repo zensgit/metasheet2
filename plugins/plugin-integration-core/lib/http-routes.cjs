@@ -296,6 +296,12 @@ const { planBomSnapshotSyncRun } = require('./stock-preparation-sync-run-plan.cj
 // its batch + line + run rows into the internal MVP tables via a target-scoped records API — the FIRST
 // business-row write. Internal-only (structural), idempotent, immutable, admin-gated, values-free.
 const { persistStockPreparationSyncRun } = require('./stock-preparation-sync-run-persist.cjs')
+// T3b-1c: the pure intake→persist bridge (OD-3) + the pre-I/O structural config guard (OD-3 amendment).
+// Both are pure — the route stays the only place that sequences them against real I/O.
+const {
+  assertPlmAutoPersistSourceConfigSafe,
+  buildPlmSourcePersistInput,
+} = require('./stock-preparation-plm-source-persist-bridge.cjs')
 // #3889: approved PLM / ERP-K3 readonly config -> existing pure intake contract. Routes return only
 // the values-free projection; normalized rows remain an internal backend data plane.
 const {
@@ -561,6 +567,60 @@ function isIntegrationCoreProjectId(projectId) {
 function resolveIntegrationStagingProjectId(tenantId, requestedProjectId) {
   if (isIntegrationCoreProjectId(requestedProjectId)) return requestedProjectId.trim()
   return `${tenantId}:integration-core`
+}
+
+// T3a (OD-1): the ERP source-run auto-persist gate. Default OFF (staged) — a truthy value only when the
+// env var is EXACTLY 'true' (trimmed, case-insensitive), same idiom as the other MULTITABLE_ gates. Off
+// keeps the source-run read-only; on wires its intake into T2 persist within the same request.
+function stockPreparationErpAutoPersistEnabled() {
+  return String(process.env.MULTITABLE_STOCK_PREP_ERP_AUTOPERSIST_ENABLED ?? '').trim().toLowerCase() === 'true'
+}
+
+// T3a OD-2: with auto-persist ON the ERP source-run has a write side-effect, so an explicit request
+// tenant/projectId (a steering vector) is rejected FAIL-CLOSED before any I/O — same discipline as
+// assertNoRequestBaseId. workspaceId is a SAME-TENANT scope selector (it never changes the auth-derived
+// tenant or the write target) and is deliberately NOT rejected.
+function assertStockPreparationErpAutoPersistNoSteering(req) {
+  const steers = (src) =>
+    src && (`${src.tenantId ?? ''}`.trim() !== '' || `${src.projectId ?? ''}`.trim() !== '')
+  if (steers(requestBody(req)) || steers(requestQuery(req)) || steers(requestParams(req))) {
+    throw new HttpRouteError(
+      400,
+      'STOCK_PREPARATION_ERP_AUTOPERSIST_STEERING_NOT_ALLOWED',
+      'an explicit tenantId/projectId is not allowed on the auto-persisting ERP source-run; the tenant and cache target are derived from the authenticated principal',
+    )
+  }
+}
+
+// T3b (OD-1): the PLM source-run auto-persist gate — a SEPARATE flag from the T3a ERP one (the lock
+// forbids folding T3b into the T3a flag or reusing the ERP cache's autoPersist gate). Same strict
+// idiom: only the literal 'true' (trimmed, case-insensitive) turns it on; default OFF keeps the PLM
+// source-run read-only byte-for-byte.
+function stockPreparationPlmAutoPersistEnabled() {
+  return String(process.env.MULTITABLE_STOCK_PREP_PLM_AUTOPERSIST_ENABLED ?? '').trim().toLowerCase() === 'true'
+}
+
+// T3b OD-2 (layered semantics — deliberately NOT a copy of the ERP guard): with auto-persist ON the
+// PLM source-run gains a write side-effect, so an explicit tenantId on ANY carrier is a steering
+// vector and is rejected fail-closed BEFORE body normalization and any I/O. projectId differs from
+// T3a: the BODY projectId is the REQUIRED business project key carried on the written rows (it never
+// derives the tenant or the physical target), so only a query/params projectId — a second, ambiguous
+// carrier — is rejected. workspaceId stays a same-tenant approved-config selector and is not rejected.
+function assertStockPreparationPlmAutoPersistNoSteering(req) {
+  const explicit = (src, key) => Boolean(src) && `${src[key] ?? ''}`.trim() !== ''
+  const body = requestBody(req)
+  const query = requestQuery(req)
+  const params = requestParams(req)
+  if (
+    explicit(body, 'tenantId') || explicit(query, 'tenantId') || explicit(params, 'tenantId') ||
+    explicit(query, 'projectId') || explicit(params, 'projectId')
+  ) {
+    throw new HttpRouteError(
+      400,
+      'STOCK_PREPARATION_PLM_AUTOPERSIST_STEERING_NOT_ALLOWED',
+      'an explicit tenantId (any carrier) or a query/params projectId is not allowed on the auto-persisting PLM source-run; the tenant and staging target derive from the authenticated principal and the business projectId rides only in the body',
+    )
+  }
 }
 
 function requestBody(req) {
@@ -2418,6 +2478,9 @@ function createHandlers(services, options = {}) {
     return {
       preparedRead,
       system,
+      // T3b-1c: the APPROVED config row itself, so the auto-persist path can run its pure structural
+      // guard on it BEFORE any source-adapter creation. Additive — the read-only paths ignore it.
+      config: row.config,
       createAdapter: (adapterSystem) => adapterRegistry.createAdapter(adapterSystem, {
         principal: requestPrincipal(req),
       }),
@@ -3845,20 +3908,38 @@ function createHandlers(services, options = {}) {
     },
 
     // #3889: execute an approved PLM readonly config and feed its mapped rows through the existing
-    // pure intake contract. Dry-run/read only: no business-row write and no raw/value-bearing result.
+    // pure intake contract. Dry-run/read only by default: no business-row write and no raw/value-
+    // bearing result. T3b-1c: with MULTITABLE_STOCK_PREP_PLM_AUTOPERSIST_ENABLED the SAME request
+    // feeds the server-side intake through the pure bridge into the existing sync-run persist —
+    // the business rows still never cross HTTP.
     async stockPreparationPlmBomSourceRun(req, res) {
       const user = requireAccess(req, 'admin')
+      // T3b OD-2: with auto-persist ON the read gains a write side-effect, so tenant steering (and the
+      // ambiguous query/params projectId carriers) are rejected with the DEDICATED code BEFORE the body
+      // allowlist AND any I/O. The BODY projectId stays allowed — it is the required business project
+      // key on the written rows, never a physical-target selector. Flag OFF never engages the guard.
+      const autoPersistEnabled = stockPreparationPlmAutoPersistEnabled()
+      if (autoPersistEnabled) assertStockPreparationPlmAutoPersistNoSteering(req)
       const input = normalizeStockPreparationSourceRunBody(
         requestBody(req),
         VALID_STOCK_PREPARATION_PLM_SOURCE_RUN_REQUEST_KEYS,
         'STOCK_PREPARATION_PLM_SOURCE_RUN_REQUEST_INVALID',
       )
-      const tenantId = resolveTenantId(req, input)
+      // OD-2: ON derives the tenant from the AUTHENTICATED principal only (resolveTenantId would honor
+      // a request tenantId for admins); OFF keeps today's read-only resolution byte-for-byte.
+      const tenantId = autoPersistEnabled ? resolveAuthUserTenantId(req) : resolveTenantId(req, input)
       const sourceRuntime = await loadStockPreparationReadonlySource(
         req,
         { ...input, tenantId },
         'STOCK_PREPARATION_PLM_SOURCE_RUN_REQUEST_INVALID',
       )
+      // T3b OD-3 amendment (owner P2): the value-level status vocabulary cannot catch a COMBINED
+      // mapping bypass (a config that maps some column onto the internal `missingChildBom` marker
+      // while also mapping an explicit lineStatus), so the approved CONFIG itself is structurally
+      // guarded here — after the config-store read that produced it, but BEFORE any source-adapter
+      // creation/read, provisioning, or persist I/O. Only the auto-persist path engages it: flag OFF
+      // keeps the read-only route byte-for-byte, including for configs this guard would reject.
+      if (autoPersistEnabled) assertPlmAutoPersistSourceConfigSafe(sourceRuntime.config)
       const actor = user.id || user.email
       const result = await runPlmBomReadonlySource({
         permission: 'admin',
@@ -3871,32 +3952,110 @@ function createHandlers(services, options = {}) {
         actor,
         ...sourceRuntime,
       })
-      return sendOk(res, publicReadonlySourceRunResult(result))
+      const readProjection = publicReadonlySourceRunResult(result)
+      if (!autoPersistEnabled) {
+        // Flag OFF: the response is BYTE-FOR-BYTE today's read-only projection — no autoPersist field.
+        return sendOk(res, readProjection)
+      }
+      // Flag ON: bridge the server-side intake into the EXISTING sync-run persist within this request
+      // (OD-3 — the pure bridge is the only intake→persist projection; no direct cast/spread). The
+      // physical target derives from the auth tenant's staging project exactly like the sibling MVP
+      // persist route — the body projectId rides on the rows as a business key only (OD-2).
+      const targetProjectId = resolveIntegrationStagingProjectId(tenantId, undefined)
+      const persistInput = buildPlmSourcePersistInput({
+        request: {
+          projectId: input.projectId,
+          sourceProjectNo: input.sourceProjectNo,
+          syncRunId: input.syncRunId,
+          snapshotBatchId: input.snapshotBatchId,
+          snapshotVersion: input.snapshotVersion,
+        },
+        intake: result.intake,
+      })
+      const autoPersist = await persistStockPreparationSyncRun({
+        context,
+        permission: 'admin',
+        recordsApi: getMultitableRecordsApi(),
+        provisioning: getMultitableProvisioning(),
+        targetProjectId,
+        ...persistInput,
+      })
+      // OD-5: created overrides the read-only projector's fixed mode:'dry_run' / internalWriteExecuted:
+      // false (a real write happened — the response may never report "not written"); an exact replay is
+      // an internal NOOP and must say so (never a hard-coded internal-write claim just because the flag
+      // is ON). `autoPersist` is the persist's existing values-free evidence. 201 iff a row landed.
+      return sendOk(res, {
+        ...readProjection,
+        mode: autoPersist.persisted ? 'internal_persist' : 'internal_noop',
+        evidence: { ...readProjection.evidence, internalWriteExecuted: autoPersist.persisted },
+        autoPersist,
+      }, autoPersist.persisted ? 201 : 200)
     },
 
     // #3889: approved ERP/K3 readonly config -> pure material-cache intake shape summary. There is no
     // internal or external write and no K3 Save/Submit/Audit path.
     async stockPreparationErpMaterialSourceRun(req, res) {
       const user = requireAccess(req, 'admin')
+      // T3a OD-2 (security): while this route is read-only, its request-steerable tenant resolution is a
+      // deferred GHSA step-2 question. When the T3a auto-persist flag is ON the read gains a WRITE side
+      // effect, so the tenant MUST come from the AUTHENTICATED principal (resolveTenantId would honor a
+      // request tenantId for admins) — the auto-persist cannot be steered to another tenant's cache. Flag
+      // OFF keeps today's read-only behavior byte-for-byte (RC-0 safe).
+      const autoPersistEnabled = stockPreparationErpAutoPersistEnabled()
+      // Reject an explicit request tenant/projectId FAIL-CLOSED BEFORE the body allowlist AND any I/O, so a
+      // steering attempt always gets the DEDICATED steering code — projectId is not in the source-run
+      // allowlist, so if this ran after normalize a body projectId would 400 with the generic invalid-key
+      // code instead of the steering code.
+      if (autoPersistEnabled) assertStockPreparationErpAutoPersistNoSteering(req)
       const input = normalizeStockPreparationSourceRunBody(
         requestBody(req),
         VALID_STOCK_PREPARATION_ERP_SOURCE_RUN_REQUEST_KEYS,
         'STOCK_PREPARATION_ERP_SOURCE_RUN_REQUEST_INVALID',
       )
-      const tenantId = resolveTenantId(req, input)
+      const tenantId = autoPersistEnabled ? resolveAuthUserTenantId(req) : resolveTenantId(req, input)
       const sourceRuntime = await loadStockPreparationReadonlySource(
         req,
         { ...input, tenantId },
         'STOCK_PREPARATION_ERP_SOURCE_RUN_REQUEST_INVALID',
       )
       const actor = user.id || user.email
+      // An empty intake (zero mapped rows) already threw SOURCE_RUN_EMPTY (422) inside here via
+      // assertIntakeReady — so past this line there is always >= 1 mapped row.
       const result = await runErpMaterialReadonlySource({
         permission: 'admin',
         syncRunId: input.syncRunId,
         actor,
         ...sourceRuntime,
       })
-      return sendOk(res, publicReadonlySourceRunResult(result))
+      const readProjection = publicReadonlySourceRunResult(result)
+      if (!autoPersistEnabled) {
+        // Flag OFF: the response is BYTE-FOR-BYTE today's read-only projection — no autoPersist field added.
+        return sendOk(res, readProjection)
+      }
+      // Flag ON (OD-1): feed the source-run's INTERNAL intake.erpMaterials straight into T2's persist WITHIN
+      // THIS REQUEST — the normalized business rows never cross HTTP. Boundary: internal MVP tables via T2's
+      // scoped records API only; externalWrite stays false; targetProjectId from the auth tenant, no request
+      // projectId (identical to the T2 route).
+      const targetProjectId = resolveIntegrationStagingProjectId(tenantId, undefined)
+      const autoPersist = await persistStockPreparationErpMaterialSync({
+        context,
+        permission: 'admin',
+        recordsApi: getMultitableRecordsApi(),
+        provisioning: getMultitableProvisioning(),
+        targetProjectId,
+        syncRunId: input.syncRunId,
+        erpMaterials: result.intake.erpMaterials,
+      })
+      // The read-only projector fixes mode:'dry_run' + evidence.internalWriteExecuted:false — BOTH false now
+      // that a real internal write happened. Override them so the response can never report "not written".
+      // `autoPersist` is T2's values-free evidence (persisted/mode/created/patched/skipped/runStatus/
+      // evidence.targets — counts/modes/statuses/objectIds only, no raw rows). 201 iff a row actually landed.
+      return sendOk(res, {
+        ...readProjection,
+        mode: 'internal_persist',
+        evidence: { ...readProjection.evidence, internalWriteExecuted: true },
+        autoPersist,
+      }, autoPersist.persisted ? 201 : 200)
     },
 
     // T2: COMMIT already-normalized ERP/K3 material-master rows into the internal erp_material_master
@@ -4804,6 +4963,7 @@ module.exports = {
     hasPermission,
     requireAccess,
     resolveTenantId,
+    resolveAuthUserTenantId,
     scopedInput,
     sendError,
     inferHttpStatus,

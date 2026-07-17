@@ -40,6 +40,13 @@ on:
         description: Per-request timeout in ms
         required: false
         default: '15000'
+      approved_source_config_id:
+        description: >-
+          T4-final (T3b OD-6) approved-source prelude — an APPROVED read-source config reference.
+          Requires the service-side MULTITABLE_STOCK_PREP_PLM_AUTOPERSIST_ENABLED=true for the run
+          (flip on, run once, restore). Empty = prelude skipped (byte-for-byte legacy smoke).
+        required: false
+        default: ''
 
 permissions:
   contents: read
@@ -99,6 +106,7 @@ jobs:
           METASHEET_WORKSPACE_ID: ${{ github.event.inputs.workspace_id || '' }}
           SMOKE_PROJECT_PREFIX: ${{ github.event.inputs.project_prefix || 'stockprep-t4' }}
           TIMEOUT_MS: ${{ github.event.inputs.timeout_ms || '15000' }}
+          APPROVED_SOURCE_CONFIG_ID: ${{ github.event.inputs.approved_source_config_id || '' }}
         run: |
           set -euo pipefail
           out_dir="output/stock-preparation-prep-line-extended-smoke/manual"
@@ -113,6 +121,7 @@ jobs:
           )
           if [[ -n "${METASHEET_TENANT_ID:-}" ]]; then args+=(--tenant-id "$METASHEET_TENANT_ID"); fi
           if [[ -n "${METASHEET_WORKSPACE_ID:-}" ]]; then args+=(--workspace-id "$METASHEET_WORKSPACE_ID"); fi
+          if [[ -n "${APPROVED_SOURCE_CONFIG_ID:-}" ]]; then args+=(--approved-source-config-id "$APPROVED_SOURCE_CONFIG_ID"); fi
           if [[ -n "${K3_WISE_SMOKE_TOKEN:-}" ]]; then
             export METASHEET_AUTH_TOKEN="$K3_WISE_SMOKE_TOKEN"
           fi

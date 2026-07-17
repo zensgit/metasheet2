@@ -1,6 +1,6 @@
 <template>
   <div class="meta-rich-editor">
-    <div class="meta-rich-editor__toolbar" role="toolbar" :aria-label="ariaToolbar">
+    <div class="meta-rich-editor__toolbar" role="toolbar" :aria-label="l('richText.toolbarAria')">
       <button
         v-for="cmd in inlineCommands"
         :key="cmd.command"
@@ -64,7 +64,7 @@
         contenteditable="true"
         role="textbox"
         aria-multiline="true"
-        :aria-label="ariaContent"
+        :aria-label="l('richText.contentAria')"
         data-test="rich-longtext-editor"
         @focus="onFocus"
         @input="onInput"
@@ -154,12 +154,10 @@ const editableRef = ref<HTMLDivElement | null>(null)
 const focused = ref(false)
 
 const zh = () => props.isZh !== false
-// Reuse the cell-editor family's typed label module (B5 mention.* keys). The
-// existing toolbar ternaries stay as-is (out of B5 scope, per the map).
+// Reuse the cell-editor family's typed label module (B5 mention.* keys +
+// richText.* toolbar/content aria — previously unconditional Chinese consts).
+// The existing toolbar ternaries stay as-is (out of B5 scope, per the map).
 const l = (key: MetaCoreLabelKey) => metaCoreLabel(key, zh())
-
-const ariaToolbar = '富文本格式工具栏'
-const ariaContent = '富文本内容编辑区'
 
 // --- B5 people-mention popover state ---
 // True only when a host actually fed candidates → the popover is structurally

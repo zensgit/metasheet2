@@ -26,7 +26,17 @@
         未找到该 Part 的 BOM 数据。
       </p>
 
-      <PlmBomReviewTable v-else-if="reviewState === 'table' && context" :context="context" />
+      <template v-else-if="reviewState === 'table' && context">
+        <PlmBomReviewTable :context="context" />
+        <!-- Discussion panel (create + reply + resolve + reopen). Runtime stays DARK: with
+             DISCUSSION_SESSION_ENABLED off, an action's exchange returns the uniform 401 and the panel
+             shows a clean error. Keyed by part_id so switching Part remounts a fresh token client. -->
+        <PlmEmbedDiscussionPanel
+          :key="context.part.part_id"
+          :parent-origin="parentOrigin"
+          :target="{ target_type: 'item', target_id: context.part.part_id }"
+        />
+      </template>
     </div>
   </section>
 </template>
@@ -34,8 +44,12 @@
 <script setup lang="ts">
 // PLM-COLLAB P3-D2 (frontend): the token-bound BOM-review embed page.
 //
-// Handshake (LISTEN-only; this page never posts to the parent, so there is no targetOrigin '*' to
-// leak through):
+// Handshake (LISTEN-only): this page's OWN inbound handshake never posts to the parent. NOTE (owner
+// review P3 — sync with the discussion protocol): the discussion panel this page MOUNTS
+// (PlmEmbedDiscussionPanel) DOES post `plm-embed:token-request` to the parent via the child token
+// protocol (plmEmbedWriteToken.ts's write + read clients) for on-demand write/read tokens — but ALWAYS
+// with targetOrigin === the pinned parentOrigin, NEVER '*'. So "no outbound postMessage" holds for the
+// handshake below, not for the whole page; the pinned-origin (no-'*') invariant covers both paths.
 //   1. fetch /api/plm-embed/config for the parent-origin allowlist -- the SINGLE source of truth,
 //      never a URL parameter, and never containing '*'.
 //   2. wait for the parent to postMessage the PLM-minted embed token. Accept it ONLY from an origin
@@ -50,6 +64,7 @@ import {
   type PlmEmbedBomResult,
 } from '../services/integration/plmEmbed'
 import PlmBomReviewTable from '../components/plm/PlmBomReviewTable.vue'
+import PlmEmbedDiscussionPanel from '../components/plm/PlmEmbedDiscussionPanel.vue'
 
 // the inbound postMessage envelope: { type: 'plm-embed:token', token: '<jwt>' }
 const EMBED_TOKEN_MESSAGE_TYPE = 'plm-embed:token'

@@ -19,7 +19,11 @@
 #
 # Scope: deliberately TARGETED (same convention as multitable/approval/attendance web-guards) — the
 # full @metasheet/web vitest suite has historical flakes, so wiring it whole would be red on arrival.
-# Verified green at time of wiring: 27/27.
+# Verified green at time of wiring: 27/27. Extended 2026-07-13 to cover the discussion write-UI's
+# on-demand embed-token child protocol layer (plmEmbedWriteToken.ts, listen-only + one outbound
+# postMessage type, not yet wired into the view) — now 40/40. Extended 2026-07-15 (sub-slice 4) to
+# cover the discussion READ-UI child protocol layer, which shares plmEmbedWriteToken.ts's internal
+# factory (purpose='discussion-read' instead of 'discussion-write') — now 60/60.
 #
 # NOT a required check (mirrors the other *-web-guard workflows): it cannot hang a PR, but it turns
 # a silent FE regression on the embed surface into a visible red.
@@ -39,6 +43,25 @@ on:
       # The specs themselves.
       - 'apps/web/tests/plm-embed-bom-review.spec.ts'
       - 'apps/web/tests/plm-embed-service.spec.ts'
+      # The child protocol layer for the discussion write-UI's on-demand embed-token handshake
+      # (child -> parent token-request / parent -> child token-response|token-error). Listen-only
+      # today (not yet wired into PlmEmbedBomReviewView.vue -- see that module's docstring), but it
+      # is the first OUTBOUND postMessage this embed page family makes, so it gets the same guard.
+      # This same file now also hosts the discussion read-UI's child protocol (sub-slice 4, shared
+      # internal factory, purpose='discussion-read') -- one path trigger covers both.
+      - 'apps/web/src/services/integration/plmEmbedWriteToken.ts'
+      - 'apps/web/tests/plm-embed-write-token.spec.ts'
+      - 'apps/web/tests/plm-embed-read-token.spec.ts'
+      # Cut 3 + read-UI sub-slice 5: the visible discussion panel (create + reply/resolve/reopen +
+      # the read list/detail with reply-gating) + its relay write/read services, and the panel
+      # integration spec (drives the panel through the real token clients + a route-aware mocked relay).
+      - 'apps/web/src/components/plm/PlmEmbedDiscussionPanel.vue'
+      - 'apps/web/src/services/integration/plmEmbedDiscussionWrite.ts'
+      # read-UI sub-slice 5: the relay READ service the panel drives for list/detail. Without this
+      # path trigger, a future standalone edit to the read service would silently skip this guard
+      # (owner review P3).
+      - 'apps/web/src/services/integration/plmEmbedDiscussionRead.ts'
+      - 'apps/web/tests/plm-embed-discussion-panel.spec.ts'
       # Server side of the same wire: response shapes these specs pin (config allowlist + context degrade).
       - 'packages/core-backend/src/routes/plm-embed.ts'
       # This guard itself.
@@ -84,6 +107,9 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Run PLM-embed web guard specs (targeted)
-        # Two files, 27 tests. The filter is a substring match — it resolves to exactly
-        # tests/plm-embed-bom-review.spec.ts and tests/plm-embed-service.spec.ts.
-        run: pnpm --filter @metasheet/web exec vitest run plm-embed-bom-review plm-embed-service --reporter=dot
+        # Five files. The filter is a substring match — it resolves to exactly
+        # tests/plm-embed-bom-review.spec.ts, tests/plm-embed-service.spec.ts,
+        # tests/plm-embed-write-token.spec.ts, tests/plm-embed-read-token.spec.ts, and
+        # tests/plm-embed-discussion-panel.spec.ts. (This is an explicit enumeration, not a glob — a
+        # future spec file needs its own substring added here or it silently never runs in CI.)
+        run: pnpm --filter @metasheet/web exec vitest run plm-embed-bom-review plm-embed-service plm-embed-write-token plm-embed-read-token plm-embed-discussion-panel --reporter=dot

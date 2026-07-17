@@ -7504,6 +7504,714 @@ async function testStockPreparationSourceRunRejectsUnapprovedConfig() {
   console.log('  testStockPreparationSourceRunRejectsUnapprovedConfig OK')
 }
 
+// ── T3a: ERP source-run server-side auto-persist (flag MULTITABLE_STOCK_PREP_ERP_AUTOPERSIST_ENABLED) ──
+// design-lock: docs/development/stock-preparation-t3a-erp-source-autopersist-design-lock-20260714.md
+const T3A_ERP_CONFIG_ID = 'private_erp_config_t3a_7788'
+const T3A_ERP_SYSTEM_ID = 'private_erp_system_t3a_7788'
+const T3A_ERP_CODE = 'RAW-ERP-CODE-T3A-7788' // FNumber -> erpMaterialCode (a REQUIRED field, so it reaches persist)
+const T3A_ERP_NAME = 'RAW-ERP-NAME-T3A-7788' // FName -> erpMaterialName
+const T3A_ERP_CREDENTIAL = 'PRIVATE-ERP-CRED-T3A-7788'
+const T3A_SOURCE_RUN_PATH = '/api/integration/stock-preparation/mvp/source-runs/erp-materials'
+
+// One recursive "does any string anywhere contain `needle`" scan, applied in BOTH directions of the
+// leak-bait so the positive leg (value present in the internal write sink) proves the scan works before
+// the negative leg (value absent from the HTTP response) is trusted.
+function deepStringIncludes(value, needle) {
+  if (typeof value === 'string') return value.includes(needle)
+  if (Array.isArray(value)) return value.some((entry) => deepStringIncludes(entry, needle))
+  if (value && typeof value === 'object') return Object.values(value).some((entry) => deepStringIncludes(entry, needle))
+  return false
+}
+
+// Faithful in-memory multitable records+provisioning for the internal MVP cache. `resolveFieldIds`
+// returns an IDENTITY map so the real createTargetScopedRecordsApi translation layer runs as a no-op;
+// records are a per-sheet key/value store honoring the frozen key fields. `writes` captures every
+// createRecord data / patchRecord changes — that IS the internal write sink the leak-bait scans.
+function createInMemoryMvpPersistStore() {
+  const sheets = new Map() // sheetId -> Map(recordId -> { id, sheetId, data })
+  const writes = []
+  const findObjectSheetCalls = []
+  let seq = 0
+  const sheetFor = (sheetId) => {
+    if (!sheets.has(sheetId)) sheets.set(sheetId, new Map())
+    return sheets.get(sheetId)
+  }
+  const recordsApi = {
+    async queryRecords({ sheetId, filters } = {}) {
+      const rows = [...sheetFor(sheetId).values()]
+      const predicate = filters && typeof filters === 'object' ? filters : {}
+      return rows
+        .filter((row) => Object.entries(predicate).every(([key, val]) => row.data[key] === val))
+        .map((row) => ({ id: row.id, sheetId: row.sheetId, data: { ...row.data } }))
+    },
+    async createRecord({ sheetId, data } = {}) {
+      seq += 1
+      const id = `rec_t3a_${seq}`
+      sheetFor(sheetId).set(id, { id, sheetId, data: { ...data } })
+      writes.push({ op: 'create', sheetId, data: { ...data } })
+      return { id, sheetId, data: { ...data } }
+    },
+    async patchRecord({ sheetId, recordId, changes } = {}) {
+      const existing = sheetFor(sheetId).get(recordId)
+      if (!existing) throw new Error(`patchRecord: unknown record ${recordId}`)
+      const data = { ...existing.data }
+      for (const [key, val] of Object.entries(changes || {})) {
+        if (val === null) delete data[key]
+        else data[key] = val
+      }
+      sheetFor(sheetId).set(recordId, { id: recordId, sheetId, data })
+      writes.push({ op: 'patch', sheetId, data: { ...changes } })
+      return { id: recordId, sheetId, data: { ...data } }
+    },
+  }
+  const provisioningApi = {
+    async findObjectSheet({ projectId, objectId } = {}) {
+      findObjectSheetCalls.push({ projectId, objectId })
+      return { id: `sheet_${objectId}` }
+    },
+    async resolveFieldIds({ fieldIds } = {}) {
+      return Object.fromEntries((fieldIds || []).map((fieldId) => [fieldId, fieldId]))
+    },
+  }
+  return { recordsApi, provisioningApi, writes, findObjectSheetCalls }
+}
+
+// A records+provisioning facade that COUNTS and THROWS on every call — for the guard/OFF paths, which
+// must reach NO records or provisioning I/O at all.
+function createCountingThrowMvpApis() {
+  const state = { calls: 0 }
+  const bomb = (name) => async () => {
+    state.calls += 1
+    throw new Error(`${name} must not run on this path`)
+  }
+  return {
+    state,
+    recordsApi: { queryRecords: bomb('queryRecords'), createRecord: bomb('createRecord'), patchRecord: bomb('patchRecord') },
+    provisioningApi: { findObjectSheet: bomb('findObjectSheet'), resolveFieldIds: bomb('resolveFieldIds') },
+  }
+}
+
+function t3aNormalizedErpConfig() {
+  const validation = validateReadSourceConfig({
+    version: 1,
+    systemId: T3A_ERP_SYSTEM_ID,
+    requiredKind: 'erp:k3-wise-webapi',
+    object: 'stock-preparation-source',
+    mode: 'list_page',
+    readPath: '/readonly/stock-preparation',
+    readMethod: 'POST',
+    operations: ['read'],
+    containerPaths: ['Rows'],
+    fieldMap: [
+      { source: 'FItemID', target: 'erpMaterialInternalId' },
+      { source: 'FNumber', target: 'erpMaterialCode' },
+      { source: 'FName', target: 'erpMaterialName' },
+    ],
+  })
+  assert.equal(validation.valid, true, JSON.stringify(validation.errors))
+  return validation.normalized
+}
+
+// Approved ERP read-source + a mock K3 adapter emitting ONE material row carrying sentinel business
+// values, mounted with the caller-supplied records/provisioning facade.
+function createErpAutoPersistHarness({ recordsApi, provisioningApi } = {}) {
+  const erpConfig = t3aNormalizedErpConfig()
+  const sourceReadCalls = []
+  const externalWriteCalls = []
+  const { services } = createMockServices({
+    readSourceConfigStore: {
+      async getForRuntime(input) {
+        if (input.id === T3A_ERP_CONFIG_ID) {
+          return { id: T3A_ERP_CONFIG_ID, status: 'approved', systemId: T3A_ERP_SYSTEM_ID, config: erpConfig }
+        }
+        throw new Error('unexpected config reference')
+      },
+    },
+    externalSystemRegistry: {
+      async getExternalSystemForAdapter(input) {
+        return { id: input.id, tenantId: input.tenantId, kind: 'erp:k3-wise-webapi', credentials: { password: T3A_ERP_CREDENTIAL }, config: {} }
+      },
+    },
+    adapterRegistry: {
+      createAdapter(system) {
+        return {
+          async read(request) {
+            sourceReadCalls.push({ kind: system.kind, request })
+            const rows = [{ FItemID: 'erp_internal_t3a_1', FNumber: T3A_ERP_CODE, FName: T3A_ERP_NAME }]
+            return { records: rows, raw: { Rows: rows }, metadata: { dataRowCount: 1, dataPageIndex: 1, returnedRecordCount: rows.length } }
+          },
+          async upsert(input) { externalWriteCalls.push(['upsert', input]) },
+          async save(input) { externalWriteCalls.push(['save', input]) },
+          async submit(input) { externalWriteCalls.push(['submit', input]) },
+          async audit(input) { externalWriteCalls.push(['audit', input]) },
+        }
+      },
+    },
+  })
+  const { routes } = mountRoutes(services, { recordsApi, provisioningApi })
+  return { routes, sourceReadCalls, externalWriteCalls }
+}
+
+function withAutoPersistFlag(value, run) {
+  const prev = process.env.MULTITABLE_STOCK_PREP_ERP_AUTOPERSIST_ENABLED
+  if (value === undefined) delete process.env.MULTITABLE_STOCK_PREP_ERP_AUTOPERSIST_ENABLED
+  else process.env.MULTITABLE_STOCK_PREP_ERP_AUTOPERSIST_ENABLED = value
+  return Promise.resolve()
+    .then(run)
+    .finally(() => {
+      if (prev === undefined) delete process.env.MULTITABLE_STOCK_PREP_ERP_AUTOPERSIST_ENABLED
+      else process.env.MULTITABLE_STOCK_PREP_ERP_AUTOPERSIST_ENABLED = prev
+    })
+}
+
+async function testStockPreparationErpSourceRunAutoPersistOn() {
+  await withAutoPersistFlag('true', async () => {
+    const store = createInMemoryMvpPersistStore()
+    const { routes, sourceReadCalls, externalWriteCalls } = createErpAutoPersistHarness({
+      recordsApi: store.recordsApi,
+      provisioningApi: store.provisioningApi,
+    })
+
+    const first = await invoke(routes, 'POST', T3A_SOURCE_RUN_PATH, {
+      user: ADMIN_USER,
+      body: { workspaceId: 'workspace_1', readSourceConfigId: T3A_ERP_CONFIG_ID, syncRunId: 'erp_autopersist_run_1' },
+    })
+    // Flag ON: the read gains a real internal write — the read-only projector's fixed mode:'dry_run' and
+    // evidence.internalWriteExecuted:false are OVERRIDDEN, and a landed row makes it 201 (design-lock OD-4).
+    assertOkResponse(first, 201)
+    assert.equal(first.body.data.mode, 'internal_persist')
+    assert.equal(first.body.data.evidence.internalWriteExecuted, true)
+    assert.equal(first.body.data.autoPersist.persisted, true)
+    assert.equal(first.body.data.autoPersist.mode, 'created')
+    assert.equal(first.body.data.autoPersist.created.materials, 1)
+    assert.equal(first.body.data.autoPersist.evidence.valuesFree, true)
+    // externalWrite invariant stays false on the auto-persist path (internal MVP cache only).
+    assert.equal(externalWriteCalls.length, 0, 'auto-persist never calls an external write operation')
+    assert.equal(first.body.data.evidence.externalWriteExecuted, false)
+    assert.equal(first.body.data.evidence.productionWrite, false)
+    assert.equal(first.body.data.evidence.k3SaveSubmitAudit, false)
+
+    // Target derives from the AUTHENTICATED principal only (never the request): the staging project is
+    // `${authTenant}:integration-core`, and provisioning resolves under exactly that project.
+    assert.ok(store.findObjectSheetCalls.length > 0, 'the auto-persist resolves at least one MVP target sheet')
+    for (const call of store.findObjectSheetCalls) {
+      assert.equal(call.projectId, `${ADMIN_USER.tenantId}:integration-core`, 'persist target project derives from the auth tenant')
+    }
+
+    // Leak-bait, BOTH directions with the SAME scan: the sentinel reached the internal write sink (positive
+    // control) yet never appears in the values-free HTTP response.
+    assert.equal(deepStringIncludes(store.writes, T3A_ERP_CODE), true, 'positive control: the ERP code reached the internal write sink')
+    assert.equal(deepStringIncludes(first.body, T3A_ERP_CODE), false, 'values-free: the ERP code never crosses the HTTP response')
+    assert.equal(deepStringIncludes(first.body, T3A_ERP_NAME), false, 'values-free: the ERP name never crosses the HTTP response')
+    assert.equal(deepStringIncludes(first.body, T3A_ERP_CREDENTIAL), false, 'values-free: source credentials never cross the HTTP response')
+    assert.equal(Object.prototype.hasOwnProperty.call(first.body.data, 'intake'), false)
+    assert.equal(Object.prototype.hasOwnProperty.call(first.body.data, 'erpMaterials'), false)
+
+    // Re-run the SAME rows under the SAME syncRunId: upsertErpMaterials patches UNCONDITIONALLY, so the
+    // second run refreshes → still HTTP 201 (there is no "no change → 200" path) (design-lock P2-1).
+    const readsBeforeSecond = sourceReadCalls.length
+    const second = await invoke(routes, 'POST', T3A_SOURCE_RUN_PATH, {
+      user: ADMIN_USER,
+      body: { workspaceId: 'workspace_1', readSourceConfigId: T3A_ERP_CONFIG_ID, syncRunId: 'erp_autopersist_run_1' },
+    })
+    assertOkResponse(second, 201)
+    assert.equal(second.body.data.autoPersist.mode, 'refreshed')
+    assert.equal(second.body.data.autoPersist.patched.materials, 1)
+    assert.equal(second.body.data.autoPersist.created.materials, 0)
+    assert.ok(sourceReadCalls.length > readsBeforeSecond, 'the re-run reads the source again')
+  })
+  console.log('  testStockPreparationErpSourceRunAutoPersistOn OK')
+}
+
+async function testStockPreparationErpSourceRunAutoPersistSteering() {
+  await withAutoPersistFlag('true', async () => {
+    // Every steering vector must be rejected with the DEDICATED code BEFORE any source read or records I/O
+    // (guard runs before the body allowlist AND before I/O). projectId is not in the allowlist, so if the
+    // guard ran after normalize a body projectId would 400 with the GENERIC invalid-key code instead.
+    const vectors = [
+      ['body.tenantId', { body: { readSourceConfigId: T3A_ERP_CONFIG_ID, syncRunId: 'steer_1', tenantId: 'tenant_evil' } }],
+      ['body.projectId', { body: { readSourceConfigId: T3A_ERP_CONFIG_ID, syncRunId: 'steer_2', projectId: 'tenant_evil:integration-core' } }],
+      ['query.tenantId', { body: { readSourceConfigId: T3A_ERP_CONFIG_ID, syncRunId: 'steer_3' }, query: { tenantId: 'tenant_evil' } }],
+      ['query.projectId', { body: { readSourceConfigId: T3A_ERP_CONFIG_ID, syncRunId: 'steer_4' }, query: { projectId: 'tenant_evil:integration-core' } }],
+      ['params.tenantId', { body: { readSourceConfigId: T3A_ERP_CONFIG_ID, syncRunId: 'steer_5' }, params: { tenantId: 'tenant_evil' } }],
+      ['params.projectId', { body: { readSourceConfigId: T3A_ERP_CONFIG_ID, syncRunId: 'steer_6' }, params: { projectId: 'tenant_evil:integration-core' } }],
+    ]
+    for (const [label, reqExtra] of vectors) {
+      const bomb = createCountingThrowMvpApis()
+      const { routes, sourceReadCalls, externalWriteCalls } = createErpAutoPersistHarness({
+        recordsApi: bomb.recordsApi,
+        provisioningApi: bomb.provisioningApi,
+      })
+      const res = await invoke(routes, 'POST', T3A_SOURCE_RUN_PATH, { user: ADMIN_USER, ...reqExtra })
+      assert.equal(res.statusCode, 400, `${label}: steering rejected`)
+      assert.equal(res.body.error.code, 'STOCK_PREPARATION_ERP_AUTOPERSIST_STEERING_NOT_ALLOWED', `${label}: DEDICATED steering code`)
+      assert.equal(sourceReadCalls.length, 0, `${label}: guard fires before any source read`)
+      assert.equal(externalWriteCalls.length, 0, `${label}: guard fires before any external write`)
+      assert.equal(bomb.state.calls, 0, `${label}: guard fires before any records/provisioning I/O`)
+    }
+
+    // workspaceId is a SAME-TENANT scope selector, NOT a steering vector — a request carrying only
+    // workspaceId proceeds past the guard and persists (201), never 400'd.
+    const store = createInMemoryMvpPersistStore()
+    const { routes } = createErpAutoPersistHarness({ recordsApi: store.recordsApi, provisioningApi: store.provisioningApi })
+    const ok = await invoke(routes, 'POST', T3A_SOURCE_RUN_PATH, {
+      user: ADMIN_USER,
+      body: { workspaceId: 'workspace_9', readSourceConfigId: T3A_ERP_CONFIG_ID, syncRunId: 'workspace_allowed_1' },
+    })
+    assert.equal(ok.statusCode, 201, 'workspaceId alone is allowed through the steering guard and persists')
+  })
+  console.log('  testStockPreparationErpSourceRunAutoPersistSteering OK')
+}
+
+async function testStockPreparationErpSourceRunAutoPersistOffInert() {
+  await withAutoPersistFlag(undefined, async () => {
+    const bomb = createCountingThrowMvpApis()
+    const { routes, externalWriteCalls } = createErpAutoPersistHarness({ recordsApi: bomb.recordsApi, provisioningApi: bomb.provisioningApi })
+    // Flag OFF (unset): today's read-only behavior byte-for-byte — even a body tenantId is harmless because
+    // the read has no write side effect, so the steering guard is not engaged and no autoPersist is added.
+    const res = await invoke(routes, 'POST', T3A_SOURCE_RUN_PATH, {
+      user: ADMIN_USER,
+      body: { tenantId: 'tenant_evil', readSourceConfigId: T3A_ERP_CONFIG_ID, syncRunId: 'off_inert_1' },
+    })
+    assertOkResponse(res, 200)
+    assert.equal(res.body.data.mode, 'dry_run')
+    assert.equal(res.body.data.evidence.internalWriteExecuted, false)
+    assert.equal(Object.prototype.hasOwnProperty.call(res.body.data, 'autoPersist'), false, 'OFF adds no autoPersist field')
+    assert.equal(bomb.state.calls, 0, 'OFF never touches records/provisioning')
+    assert.equal(externalWriteCalls.length, 0)
+  })
+  console.log('  testStockPreparationErpSourceRunAutoPersistOffInert OK')
+}
+
+async function testStockPreparationErpAutoPersistTenantResolversDiffer() {
+  // Defense-in-depth for OD-2: the auto-persist route derives its tenant from the AUTHENTICATED principal
+  // (resolveAuthUserTenantId), never resolveTenantId — which for an admin honors a request-supplied tenantId.
+  // The steering guard already blocks a request tenantId at the route, so this difference is not route-
+  // observable; this DIRECT unit test proves the two helpers genuinely differ, so choosing the write-safe
+  // one is load-bearing (changing resolveAuthUserTenantId to read the request would red here).
+  const { resolveTenantId, resolveAuthUserTenantId } = httpRoutes.__internals
+  // A request that carries a steering tenantId (query vector) so the difference is observable: an admin's
+  // resolveTenantId READS it; the write-safe resolveAuthUserTenantId must IGNORE it. If the write-safe
+  // helper were changed to consult the request, this assertion would red.
+  const req = { user: { id: 'user_admin', tenantId: 'tenant_1', roles: ['admin'], permissions: ['integration:admin'] }, query: { tenantId: 'tenant_evil' }, params: {} }
+  assert.equal(resolveTenantId(req), 'tenant_evil', 'resolveTenantId honors an admin request tenantId (the steering vector)')
+  assert.equal(resolveAuthUserTenantId(req), 'tenant_1', 'resolveAuthUserTenantId ignores the request and returns the authenticated tenant')
+  console.log('  testStockPreparationErpAutoPersistTenantResolversDiffer OK')
+}
+
+// ── T3b-1c: PLM source-run server-side auto-persist (flag MULTITABLE_STOCK_PREP_PLM_AUTOPERSIST_ENABLED) ──
+// design-lock: docs/development/stock-preparation-t3b-plm-source-autopersist-design-lock-20260716.md
+const T3B_PLM_CONFIG_ID = 'private_plm_config_t3b_9911'
+const T3B_PLM_SYSTEM_ID = 'private_plm_system_t3b_9911'
+const T3B_PLM_CHILD_1 = 'RAW-PLM-CHILD-T3B-9911' // childCode -> childDrawingNo (business value sentinel)
+const T3B_PLM_CHILD_2 = 'RAW-PLM-CHILD2-T3B-9911'
+const T3B_PLM_CREDENTIAL = 'PRIVATE-PLM-CRED-T3B-9911'
+const T3B_SOURCE_PROJECT_NO = 'SOURCE-PROJECT-SECRET-T3B-9911'
+const T3B_PROJECT_NAME = 'Secret project name T3B 9911'
+const T3B_SOURCE_RUN_PATH = '/api/integration/stock-preparation/mvp/source-runs/plm-bom'
+const T3B_DEFAULT_FIELD_MAP = Object.freeze([
+  { source: 'path', target: 'pathKey' },
+  { source: 'childCode', target: 'childDrawingNo' },
+  { source: 'quantity', target: 'designQty' },
+])
+const T3B_DEFAULT_ROWS = Object.freeze([
+  { path: '/root/asm-1', childCode: T3B_PLM_CHILD_1, quantity: 2 },
+  { path: '/root/asm-1/part-2', childCode: T3B_PLM_CHILD_2, quantity: 1 },
+])
+
+function t3bNormalizedPlmConfig(fieldMap) {
+  const validation = validateReadSourceConfig({
+    version: 1,
+    systemId: T3B_PLM_SYSTEM_ID,
+    requiredKind: 'plm:yuantus-wrapper',
+    object: 'stock-preparation-source',
+    mode: 'list_page',
+    readPath: '/readonly/stock-preparation',
+    readMethod: 'POST',
+    operations: ['read'],
+    containerPaths: ['Rows'],
+    fieldMap,
+  })
+  assert.equal(validation.valid, true, JSON.stringify(validation.errors))
+  return validation.normalized
+}
+
+// Approved PLM read-source + a mock adapter emitting BOM rows carrying sentinel business values. The
+// harness counts adapter CREATION separately from reads: the config-guard rejection path must show the
+// adapter was never even constructed (design-lock: rejection with records/provisioning/source-adapter
+// call counts at ZERO).
+function createPlmAutoPersistHarness({ recordsApi, provisioningApi, fieldMap = T3B_DEFAULT_FIELD_MAP, rows = T3B_DEFAULT_ROWS } = {}) {
+  const plmConfig = t3bNormalizedPlmConfig(Array.isArray(fieldMap) ? fieldMap.map((entry) => ({ ...entry })) : fieldMap)
+  const sourceReadCalls = []
+  const adapterCreateCalls = []
+  const externalWriteCalls = []
+  const { services } = createMockServices({
+    readSourceConfigStore: {
+      async getForRuntime(input) {
+        if (input.id === T3B_PLM_CONFIG_ID) {
+          return { id: T3B_PLM_CONFIG_ID, status: 'approved', systemId: T3B_PLM_SYSTEM_ID, config: plmConfig }
+        }
+        throw new Error('unexpected config reference')
+      },
+    },
+    externalSystemRegistry: {
+      async getExternalSystemForAdapter(input) {
+        return { id: input.id, tenantId: input.tenantId, kind: 'plm:yuantus-wrapper', credentials: { password: T3B_PLM_CREDENTIAL }, config: {} }
+      },
+    },
+    adapterRegistry: {
+      createAdapter(system) {
+        adapterCreateCalls.push(system.kind)
+        return {
+          async read(request) {
+            sourceReadCalls.push({ kind: system.kind, request })
+            const pageRows = rows.map((row) => ({ ...row }))
+            return { records: pageRows, raw: { Rows: pageRows }, metadata: { totalCount: pageRows.length, returnedRecordCount: pageRows.length } }
+          },
+          async upsert(input) { externalWriteCalls.push(['upsert', input]) },
+          async save(input) { externalWriteCalls.push(['save', input]) },
+          async submit(input) { externalWriteCalls.push(['submit', input]) },
+          async audit(input) { externalWriteCalls.push(['audit', input]) },
+        }
+      },
+    },
+  })
+  const { routes } = mountRoutes(services, { recordsApi, provisioningApi })
+  return { routes, sourceReadCalls, adapterCreateCalls, externalWriteCalls }
+}
+
+function t3bRequestBody(overrides = {}) {
+  return {
+    workspaceId: 'workspace_1',
+    projectId: 'business_project_t3b',
+    sourceProjectNo: T3B_SOURCE_PROJECT_NO,
+    projectName: T3B_PROJECT_NAME,
+    readSourceConfigId: T3B_PLM_CONFIG_ID,
+    syncRunId: 'plm_autopersist_run_1',
+    snapshotBatchId: 'plm_autopersist_snapshot_1',
+    snapshotVersion: 1,
+    ...overrides,
+  }
+}
+
+function withPlmAutoPersistFlag(value, run) {
+  const prev = process.env.MULTITABLE_STOCK_PREP_PLM_AUTOPERSIST_ENABLED
+  if (value === undefined) delete process.env.MULTITABLE_STOCK_PREP_PLM_AUTOPERSIST_ENABLED
+  else process.env.MULTITABLE_STOCK_PREP_PLM_AUTOPERSIST_ENABLED = value
+  return Promise.resolve()
+    .then(run)
+    .finally(() => {
+      if (prev === undefined) delete process.env.MULTITABLE_STOCK_PREP_PLM_AUTOPERSIST_ENABLED
+      else process.env.MULTITABLE_STOCK_PREP_PLM_AUTOPERSIST_ENABLED = prev
+    })
+}
+
+async function testStockPreparationPlmSourceRunAutoPersistOn() {
+  await withPlmAutoPersistFlag('true', async () => {
+    const store = createInMemoryMvpPersistStore()
+    const { routes, sourceReadCalls, externalWriteCalls } = createPlmAutoPersistHarness({
+      recordsApi: store.recordsApi,
+      provisioningApi: store.provisioningApi,
+    })
+
+    const first = await invoke(routes, 'POST', T3B_SOURCE_RUN_PATH, { user: ADMIN_USER, body: t3bRequestBody() })
+    // OD-5 created leg: a real internal write happened — the read-only projector's fixed mode:'dry_run' /
+    // internalWriteExecuted:false are overridden and a landed batch makes it 201.
+    assertOkResponse(first, 201)
+    assert.equal(first.body.data.mode, 'internal_persist')
+    assert.equal(first.body.data.evidence.internalWriteExecuted, true)
+    assert.equal(first.body.data.autoPersist.persisted, true)
+    assert.equal(first.body.data.autoPersist.mode, 'created')
+    // externalWrite invariant: the auto-persist path never touches an external write operation.
+    assert.equal(externalWriteCalls.length, 0, 'auto-persist never calls an external write operation')
+    assert.equal(first.body.data.evidence.externalWriteExecuted, false)
+    assert.equal(first.body.data.evidence.productionWrite, false)
+    assert.equal(first.body.data.evidence.k3SaveSubmitAudit, false)
+    assert.equal(first.body.data.evidence.plmExternalWrite, false)
+
+    // OD-2: the physical target derives from the AUTHENTICATED principal's staging project only — the
+    // body projectId is a business key on the rows, never a target selector.
+    assert.ok(store.findObjectSheetCalls.length > 0, 'the auto-persist resolves at least one MVP target sheet')
+    for (const call of store.findObjectSheetCalls) {
+      assert.equal(call.projectId, `${ADMIN_USER.tenantId}:integration-core`, 'persist target project derives from the auth tenant')
+    }
+
+    // OD-3 "not one row dropped", proven in the write sink: BOTH source rows landed on the snapshot-line
+    // sheet, and the default 'imported' intake status crossed the bridge as canonical 'active'.
+    const lineObjectIds = store.findObjectSheetCalls.map((call) => call.objectId).filter((objectId) => /line/i.test(String(objectId)))
+    assert.ok(lineObjectIds.length > 0, 'a snapshot-line sheet was resolved')
+    const lineSheetIds = new Set(lineObjectIds.map((objectId) => `sheet_${objectId}`))
+    const lineCreates = store.writes.filter((write) => write.op === 'create' && lineSheetIds.has(write.sheetId))
+    assert.equal(lineCreates.length, T3B_DEFAULT_ROWS.length, 'every intake row lands as exactly one snapshot-line create')
+    assert.equal(deepStringIncludes(lineCreates, 'active'), true, "default 'imported' intake status persists as canonical 'active'")
+    assert.equal(deepStringIncludes(store.writes, 'imported'), false, "the raw 'imported' vocabulary never reaches the write sink")
+
+    // Leak-bait, BOTH directions with the SAME scan: the sentinels reached the internal write sink
+    // (positive control proves the scan works) yet never appear in the values-free HTTP response.
+    assert.equal(deepStringIncludes(store.writes, T3B_PLM_CHILD_1), true, 'positive control: the PLM child code reached the internal write sink')
+    for (const forbidden of [T3B_PLM_CHILD_1, T3B_PLM_CHILD_2, T3B_PLM_CREDENTIAL, T3B_SOURCE_PROJECT_NO, T3B_PROJECT_NAME, T3B_PLM_CONFIG_ID, T3B_PLM_SYSTEM_ID]) {
+      assert.equal(deepStringIncludes(first.body, forbidden), false, `values-free: ${forbidden} never crosses the HTTP response`)
+    }
+    assert.equal(Object.prototype.hasOwnProperty.call(first.body.data, 'intake'), false)
+    assert.equal(Object.prototype.hasOwnProperty.call(first.body.data, 'bomSnapshotLines'), false)
+
+    // OD-4/OD-5 exact-replay leg: the SAME request is an internal NOOP — 200 + mode:'internal_noop' +
+    // internalWriteExecuted:false (never a hard-coded internal-write claim), and the sink gains no rows.
+    const createsBeforeReplay = store.writes.filter((write) => write.op === 'create').length
+    const readsBeforeReplay = sourceReadCalls.length
+    const replay = await invoke(routes, 'POST', T3B_SOURCE_RUN_PATH, { user: ADMIN_USER, body: t3bRequestBody() })
+    assertOkResponse(replay, 200)
+    assert.equal(replay.body.data.mode, 'internal_noop')
+    assert.equal(replay.body.data.evidence.internalWriteExecuted, false)
+    assert.equal(replay.body.data.autoPersist.persisted, false)
+    assert.equal(replay.body.data.autoPersist.mode, 'skipped_existing')
+    assert.ok(sourceReadCalls.length > readsBeforeReplay, 'the replay reads the source again')
+    assert.equal(store.writes.filter((write) => write.op === 'create').length, createsBeforeReplay, 'an exact replay creates no new rows')
+  })
+  console.log('  testStockPreparationPlmSourceRunAutoPersistOn OK')
+}
+
+async function testStockPreparationPlmSourceRunAutoPersistSteering() {
+  await withPlmAutoPersistFlag('true', async () => {
+    // OD-2 layered semantics: tenantId is rejected on EVERY carrier; projectId is rejected only on the
+    // ambiguous query/params carriers. Every rejection carries the DEDICATED code and fires BEFORE the
+    // body allowlist AND any I/O (adapter creation, source read, records, provisioning).
+    const vectors = [
+      ['body.tenantId', { body: t3bRequestBody({ tenantId: 'tenant_evil' }) }],
+      ['query.tenantId', { body: t3bRequestBody(), query: { tenantId: 'tenant_evil' } }],
+      ['params.tenantId', { body: t3bRequestBody(), params: { tenantId: 'tenant_evil' } }],
+      ['query.projectId', { body: t3bRequestBody(), query: { projectId: 'tenant_evil:integration-core' } }],
+      ['params.projectId', { body: t3bRequestBody(), params: { projectId: 'tenant_evil:integration-core' } }],
+    ]
+    for (const [label, reqExtra] of vectors) {
+      const bomb = createCountingThrowMvpApis()
+      const { routes, sourceReadCalls, adapterCreateCalls, externalWriteCalls } = createPlmAutoPersistHarness({
+        recordsApi: bomb.recordsApi,
+        provisioningApi: bomb.provisioningApi,
+      })
+      const res = await invoke(routes, 'POST', T3B_SOURCE_RUN_PATH, { user: ADMIN_USER, ...reqExtra })
+      assert.equal(res.statusCode, 400, `${label}: steering rejected`)
+      assert.equal(res.body.error.code, 'STOCK_PREPARATION_PLM_AUTOPERSIST_STEERING_NOT_ALLOWED', `${label}: DEDICATED steering code`)
+      assert.equal(adapterCreateCalls.length, 0, `${label}: guard fires before any source adapter exists`)
+      assert.equal(sourceReadCalls.length, 0, `${label}: guard fires before any source read`)
+      assert.equal(externalWriteCalls.length, 0, `${label}: guard fires before any external write`)
+      assert.equal(bomb.state.calls, 0, `${label}: guard fires before any records/provisioning I/O`)
+    }
+
+    // The BODY projectId is REQUIRED — omitting it fails the source-run's own validation with ZERO
+    // records/provisioning I/O (it is a business key, not an optional decoration).
+    const bomb = createCountingThrowMvpApis()
+    const missing = createPlmAutoPersistHarness({ recordsApi: bomb.recordsApi, provisioningApi: bomb.provisioningApi })
+    const noProject = await invoke(missing.routes, 'POST', T3B_SOURCE_RUN_PATH, {
+      user: ADMIN_USER,
+      body: t3bRequestBody({ projectId: undefined }),
+    })
+    assert.equal(noProject.statusCode, 422, 'a missing body projectId is rejected')
+    assert.equal(noProject.body.error.code, 'SOURCE_RUN_CONFIG_INVALID')
+    assert.equal(noProject.body.error.details.field, 'projectId')
+    assert.equal(bomb.state.calls, 0, 'a missing body projectId causes no records/provisioning I/O')
+
+    // A body projectId SHAPED like another tenant's staging project id is still just a business key:
+    // the run persists (201) but every physical target stays under the AUTH tenant's staging project.
+    const store = createInMemoryMvpPersistStore()
+    const { routes } = createPlmAutoPersistHarness({ recordsApi: store.recordsApi, provisioningApi: store.provisioningApi })
+    const shaped = await invoke(routes, 'POST', T3B_SOURCE_RUN_PATH, {
+      user: ADMIN_USER,
+      body: t3bRequestBody({ projectId: 'tenant_evil:integration-core', syncRunId: 'plm_autopersist_shaped_1', snapshotBatchId: 'plm_autopersist_snapshot_shaped_1' }),
+    })
+    assert.equal(shaped.statusCode, 201, 'a staging-shaped BODY projectId is a business key, not a steering vector')
+    assert.ok(store.findObjectSheetCalls.length > 0)
+    for (const call of store.findObjectSheetCalls) {
+      assert.equal(call.projectId, `${ADMIN_USER.tenantId}:integration-core`, 'the body projectId can never move the physical target')
+    }
+  })
+  console.log('  testStockPreparationPlmSourceRunAutoPersistSteering OK')
+}
+
+async function testStockPreparationPlmSourceRunAutoPersistConfigGuard() {
+  // OD-3 amendment (owner P2): a config that maps ANY column onto the internal `missingChildBom` marker
+  // is structurally rejected on the auto-persist path BEFORE the source adapter is even constructed —
+  // the value-level status vocabulary cannot catch the combined-mapping bypass (marker + explicit
+  // lineStatus), so the CONFIG is the enforcement point.
+  const forbiddenFieldMap = [
+    { source: 'path', target: 'pathKey' },
+    { source: 'childCode', target: 'childDrawingNo' },
+    { source: 'quantity', target: 'designQty' },
+    { source: 'secretSourceColumn9911', target: 'missingChildBom' },
+    { source: 'state', target: 'lineStatus' },
+  ]
+  // The EXACT combined-mapping bypass rows the lock describes: the marker is TRUE while an explicit
+  // canonical lineStatus rides beside it — value-level checks see only 'active' and the missing-child
+  // signal would vanish end-to-end. (The read runtime itself 422s on fieldMap sources absent from the
+  // returned rows, so these columns must really exist on the wire.)
+  const bypassRows = [
+    { path: '/root/asm-1', childCode: T3B_PLM_CHILD_1, quantity: 2, state: 'active', secretSourceColumn9911: false },
+    { path: '/root/asm-1/part-2', childCode: T3B_PLM_CHILD_2, quantity: 1, state: 'active', secretSourceColumn9911: true },
+  ]
+  await withPlmAutoPersistFlag('true', async () => {
+    const bomb = createCountingThrowMvpApis()
+    const { routes, sourceReadCalls, adapterCreateCalls, externalWriteCalls } = createPlmAutoPersistHarness({
+      recordsApi: bomb.recordsApi,
+      provisioningApi: bomb.provisioningApi,
+      fieldMap: forbiddenFieldMap,
+      rows: bypassRows,
+    })
+    const res = await invoke(routes, 'POST', T3B_SOURCE_RUN_PATH, { user: ADMIN_USER, body: t3bRequestBody() })
+    assert.equal(res.statusCode, 422, 'forbidden marker target rejects the whole run')
+    assert.equal(res.body.error.code, 'STOCK_PREPARATION_PLM_AUTOPERSIST_CONFIG_TARGET_FORBIDDEN')
+    // The rejection names only the forbidden TARGET vocabulary — never the source column.
+    assert.equal(deepStringIncludes(res.body, 'missingChildBom'), true, 'the forbidden target vocabulary is named')
+    assert.equal(deepStringIncludes(res.body, 'secretSourceColumn9911'), false, 'the source column name never crosses the response')
+    assert.equal(adapterCreateCalls.length, 0, 'config guard fires before any source adapter exists')
+    assert.equal(sourceReadCalls.length, 0, 'config guard fires before any source read')
+    assert.equal(externalWriteCalls.length, 0, 'config guard fires before any external write')
+    assert.equal(bomb.state.calls, 0, 'config guard fires before any records/provisioning I/O')
+  })
+  await withPlmAutoPersistFlag(undefined, async () => {
+    // Flag OFF: the same config keeps today's READ-ONLY behavior — the guard is an auto-persist
+    // precondition, not a new restriction on the existing dry-run surface.
+    const bomb = createCountingThrowMvpApis()
+    const { routes } = createPlmAutoPersistHarness({
+      recordsApi: bomb.recordsApi,
+      provisioningApi: bomb.provisioningApi,
+      fieldMap: forbiddenFieldMap,
+      rows: bypassRows,
+    })
+    const res = await invoke(routes, 'POST', T3B_SOURCE_RUN_PATH, { user: ADMIN_USER, body: t3bRequestBody() })
+    assertOkResponse(res, 200)
+    assert.equal(res.body.data.mode, 'dry_run')
+    assert.equal(bomb.state.calls, 0, 'the read-only path still never touches records/provisioning')
+  })
+  console.log('  testStockPreparationPlmSourceRunAutoPersistConfigGuard OK')
+}
+
+async function testStockPreparationPlmSourceRunAutoPersistLineStatus() {
+  const statusFieldMap = [
+    { source: 'path', target: 'pathKey' },
+    { source: 'childCode', target: 'childDrawingNo' },
+    { source: 'quantity', target: 'designQty' },
+    { source: 'state', target: 'lineStatus' },
+  ]
+  await withPlmAutoPersistFlag('true', async () => {
+    // OD-3: a source-mapped RAW lifecycle value outside the bridge input vocabulary rejects the WHOLE
+    // envelope with the dedicated 422 — after the (read-only) source read, but with persist/provisioning
+    // at ZERO calls — and the raw lifecycle value never crosses the response.
+    for (const rawLifecycle of ['released', 'obsolete', 'WIP']) {
+      const bomb = createCountingThrowMvpApis()
+      const { routes, sourceReadCalls } = createPlmAutoPersistHarness({
+        recordsApi: bomb.recordsApi,
+        provisioningApi: bomb.provisioningApi,
+        fieldMap: statusFieldMap,
+        rows: [
+          { path: '/root/asm-1', childCode: T3B_PLM_CHILD_1, quantity: 2, state: rawLifecycle },
+          { path: '/root/asm-1/part-2', childCode: T3B_PLM_CHILD_2, quantity: 1, state: 'active' },
+        ],
+      })
+      const res = await invoke(routes, 'POST', T3B_SOURCE_RUN_PATH, { user: ADMIN_USER, body: t3bRequestBody() })
+      assert.equal(res.statusCode, 422, `${rawLifecycle}: unsupported lifecycle rejects the whole envelope`)
+      assert.equal(res.body.error.code, 'STOCK_PREPARATION_PLM_AUTOPERSIST_LINE_STATUS_UNSUPPORTED', `${rawLifecycle}: dedicated coarse code`)
+      assert.equal(res.body.error.details.unsupportedRowCount, 1, `${rawLifecycle}: only the stable row count is disclosed`)
+      assert.equal(deepStringIncludes(res.body, rawLifecycle), false, `${rawLifecycle}: the raw lifecycle value never crosses the response`)
+      assert.equal(sourceReadCalls.length, 1, `${rawLifecycle}: the read-only source read ran`)
+      assert.equal(bomb.state.calls, 0, `${rawLifecycle}: persist/provisioning never ran`)
+    }
+
+    // Option A (ratified): the config guard already bars MAPPING the missingChildBom marker on this
+    // path, so the one remaining way intake can carry the internal 'missing_child_bom' status is a
+    // source-mapped status column whose VALUE is that marker. It rejects the WHOLE envelope — never a
+    // silent normalization to active/incomplete, never a partial write.
+    const bomb = createCountingThrowMvpApis()
+    const marker = createPlmAutoPersistHarness({
+      recordsApi: bomb.recordsApi,
+      provisioningApi: bomb.provisioningApi,
+      fieldMap: statusFieldMap,
+      rows: [
+        { path: '/root/asm-1', childCode: T3B_PLM_CHILD_1, quantity: 2, state: 'active' },
+        { path: '/root/asm-1/part-2', childCode: T3B_PLM_CHILD_2, quantity: 1, state: 'missing_child_bom' },
+      ],
+    })
+    const res = await invoke(marker.routes, 'POST', T3B_SOURCE_RUN_PATH, { user: ADMIN_USER, body: t3bRequestBody() })
+    assert.equal(res.statusCode, 422, 'a missing-child marker row rejects the whole envelope (Option A)')
+    assert.equal(res.body.error.code, 'STOCK_PREPARATION_PLM_AUTOPERSIST_LINE_STATUS_UNSUPPORTED')
+    assert.equal(deepStringIncludes(res.body, 'missing_child_bom'), false, 'the internal marker status never crosses the response')
+    assert.equal(bomb.state.calls, 0, 'the marker rejection reaches no records/provisioning I/O')
+
+    // A source-mapped status that is ALREADY canonical passes through unchanged (inactive stays inactive).
+    const store = createInMemoryMvpPersistStore()
+    const canonical = createPlmAutoPersistHarness({
+      recordsApi: store.recordsApi,
+      provisioningApi: store.provisioningApi,
+      fieldMap: statusFieldMap,
+      rows: [
+        { path: '/root/asm-1', childCode: T3B_PLM_CHILD_1, quantity: 2, state: 'inactive' },
+        { path: '/root/asm-1/part-2', childCode: T3B_PLM_CHILD_2, quantity: 1, state: 'active' },
+      ],
+    })
+    const ok = await invoke(canonical.routes, 'POST', T3B_SOURCE_RUN_PATH, {
+      user: ADMIN_USER,
+      body: t3bRequestBody({ syncRunId: 'plm_autopersist_canonical_1', snapshotBatchId: 'plm_autopersist_snapshot_canonical_1' }),
+    })
+    assert.equal(ok.statusCode, 201, 'canonical source-mapped statuses persist')
+    assert.equal(deepStringIncludes(store.writes, 'inactive'), true, "canonical 'inactive' survives the bridge into the write sink")
+  })
+  console.log('  testStockPreparationPlmSourceRunAutoPersistLineStatus OK')
+}
+
+async function testStockPreparationPlmSourceRunAutoPersistOffInert() {
+  const offBody = t3bRequestBody({ tenantId: 'tenant_evil', syncRunId: 'plm_autopersist_off_1', snapshotBatchId: 'plm_autopersist_snapshot_off_1' })
+  const responses = []
+  for (const flagValue of [undefined, 'false']) {
+    await withPlmAutoPersistFlag(flagValue, async () => {
+      const bomb = createCountingThrowMvpApis()
+      const { routes, externalWriteCalls, sourceReadCalls } = createPlmAutoPersistHarness({ recordsApi: bomb.recordsApi, provisioningApi: bomb.provisioningApi })
+      // Flag OFF (unset AND explicit 'false'): today's read-only behavior byte-for-byte — even a body
+      // tenantId is harmless because the read has no write side effect; the steering guard is not
+      // engaged and no autoPersist field is added.
+      const res = await invoke(routes, 'POST', T3B_SOURCE_RUN_PATH, { user: ADMIN_USER, body: { ...offBody } })
+      assertOkResponse(res, 200)
+      assert.equal(res.body.data.mode, 'dry_run')
+      assert.equal(res.body.data.evidence.internalWriteExecuted, false)
+      assert.equal(Object.prototype.hasOwnProperty.call(res.body.data, 'autoPersist'), false, 'OFF adds no autoPersist field')
+      assert.equal(bomb.state.calls, 0, 'OFF never touches records/provisioning')
+      assert.equal(externalWriteCalls.length, 0)
+      assert.equal(sourceReadCalls.length, 1, 'OFF still performs exactly the one read-only source read')
+      responses.push(JSON.parse(JSON.stringify(res.body)))
+    })
+  }
+  // Byte-equivalence between the two OFF spellings: the response is deterministic and identical.
+  assert.deepEqual(responses[0], responses[1], "flag unset and flag 'false' produce identical read-only responses")
+  console.log('  testStockPreparationPlmSourceRunAutoPersistOffInert OK')
+}
+
+async function testStockPreparationPlmSourceRunAutoPersistFailureIsCoarse() {
+  await withPlmAutoPersistFlag('true', async () => {
+    // OD-4/OD-5: a mid-persist failure surfaces as a coarse values-free error — no intake echo, no
+    // partial counters, no business values — and the response never claims the write succeeded.
+    const store = createInMemoryMvpPersistStore()
+    const failingRecordsApi = {
+      queryRecords: store.recordsApi.queryRecords,
+      patchRecord: store.recordsApi.patchRecord,
+      async createRecord(input) {
+        const creates = store.writes.filter((write) => write.op === 'create').length
+        if (creates >= 2) throw new Error('injected mid-persist storage failure')
+        return store.recordsApi.createRecord(input)
+      },
+    }
+    const { routes } = createPlmAutoPersistHarness({ recordsApi: failingRecordsApi, provisioningApi: store.provisioningApi })
+    const res = await invoke(routes, 'POST', T3B_SOURCE_RUN_PATH, {
+      user: ADMIN_USER,
+      body: t3bRequestBody({ syncRunId: 'plm_autopersist_fail_1', snapshotBatchId: 'plm_autopersist_snapshot_fail_1' }),
+    })
+    assert.ok(res.statusCode >= 500, `mid-persist failure is a server-side error (got ${res.statusCode})`)
+    assert.equal(res.body.ok, false)
+    for (const forbidden of [T3B_PLM_CHILD_1, T3B_PLM_CHILD_2, T3B_PLM_CREDENTIAL, T3B_SOURCE_PROJECT_NO, T3B_PROJECT_NAME]) {
+      assert.equal(deepStringIncludes(res.body, forbidden), false, `coarse failure: ${forbidden} never crosses the error response`)
+    }
+    assert.equal(deepStringIncludes(res.body, 'internal_persist'), false, 'a failed persist never claims internal_persist')
+  })
+  console.log('  testStockPreparationPlmSourceRunAutoPersistFailureIsCoarse OK')
+}
+
 async function main() {
   await testTemplatesCrudRoutes()
   await testUnauthenticatedWriteRequestIsRejected()
@@ -7535,6 +8243,16 @@ async function main() {
   await testStockPreparationReadonlySourceRunRoutes()
   await testStockPreparationSourceRunRejectsUnapprovedConfig()
   await testStockPreparationSourceRunRejectsSystemKindMismatch()
+  await testStockPreparationErpSourceRunAutoPersistOn()
+  await testStockPreparationErpSourceRunAutoPersistSteering()
+  await testStockPreparationErpSourceRunAutoPersistOffInert()
+  await testStockPreparationErpAutoPersistTenantResolversDiffer()
+  await testStockPreparationPlmSourceRunAutoPersistOn()
+  await testStockPreparationPlmSourceRunAutoPersistSteering()
+  await testStockPreparationPlmSourceRunAutoPersistConfigGuard()
+  await testStockPreparationPlmSourceRunAutoPersistLineStatus()
+  await testStockPreparationPlmSourceRunAutoPersistOffInert()
+  await testStockPreparationPlmSourceRunAutoPersistFailureIsCoarse()
   await testExternalSystemUpsertPreservesObjectSchema()
   await testExternalSystemTestPersistsFailureAndPreservesInactive()
   await testExternalSystemTestClearsErrorToActiveOnSuccess()

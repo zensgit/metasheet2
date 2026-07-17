@@ -139,11 +139,10 @@ export const GLOBAL_HISTORY_FLAG_MANIFEST = Object.freeze([
     conflictsWith: [],
     danger: 'high',
     purpose:
-      'Interim revert-execute master gate (current-risk mitigation, owner-directed): the merged §0.6 history-integrity precheck (#4234) is live-vs-latest and still blind to the healed-gap + check→write race, so revert-execute (bulk-overwrites live record field values back to T across up to MULTITABLE_SHEET_REVERT_MAX_RECORDS records, and resurrects records deleted after T — that resurrect sub-path additionally requires MULTITABLE_ENABLE_PIT_UNDELETE) is closed by DEFAULT until the full W0-1 correctness fix lands. Mirrors MULTITABLE_ENABLE_PIT_RESET\'s gate exactly: SAME `String(env).trim().toLowerCase() === \'true\'` resolution (hence caseInsensitive here too, unlike the config-revert family above which compares case-sensitively), same canManageSheetAccess (D2) floor. danger=high for the same reason as PIT_RESET, not the medium config-revert flags above: a whole-sheet-scale destructive bulk write over live record data with no undo, gated off specifically because a known correctness gap (TOCTOU-shaped) is unmitigated. revert-preview stays UNGATED (read-only; the FE preview UI still needs to render even while the button that would call execute is hidden — capabilities.sheetRevertEnabled controls that visibility, same flag-derived-capability pattern as pitResetEnabled).',
-    // source: packages/core-backend/src/routes/univer-meta.ts:10121 (SHEET_REVERT_ENABLED, `.trim().toLowerCase() === 'true'` guard),
-    //         :10164 (revert-execute gate call site — 403 REVERT_DISABLED when off),
-    //         :7153 (capabilities.sheetRevertEnabled — SAME flag-derived-capability pattern as pitResetEnabled, ANDed with canManageSheetAccess)
-    source: 'packages/core-backend/src/routes/univer-meta.ts:10121,10164,7153',
+      'Interim revert-execute master gate (current-risk mitigation, owner-directed): first-cut generation-aware integrity checks (#4269) improve the older live-vs-latest precheck, but exact committed-event anchoring, the all-writer fence, trust checkpoints, target-generation validation, and Revert outer-transaction atomicity remain required before destructive recovery is enablement-ready. Therefore revert-execute (bulk-overwrites live record field values back to an anchored state across up to MULTITABLE_SHEET_REVERT_MAX_RECORDS records, and resurrects records deleted after that anchor — that resurrect sub-path additionally requires MULTITABLE_ENABLE_PIT_UNDELETE) stays closed by DEFAULT until the complete W0 trust correction lands and passes staging. Mirrors MULTITABLE_ENABLE_PIT_RESET\'s gate exactly: SAME `String(env).trim().toLowerCase() === \'true\'` resolution (hence caseInsensitive here too, unlike the config-revert family above which compares case-sensitively), same canManageSheetAccess (D2) floor. danger=high for the same reason as PIT_RESET, not the medium config-revert flags above: a whole-sheet-scale destructive bulk write over live record data with no undo. revert-preview stays UNGATED (read-only; the FE preview UI still needs to render even while the button that would call execute is hidden — capabilities.sheetRevertEnabled controls that visibility, same flag-derived-capability pattern as pitResetEnabled).',
+    // Source symbols (line numbers intentionally omitted because this route is edited frequently):
+    // SHEET_REVERT_ENABLED, the /revert-execute REVERT_DISABLED guard, and capabilities.sheetRevertEnabled.
+    source: 'packages/core-backend/src/routes/univer-meta.ts#SHEET_REVERT_ENABLED,/revert-execute,capabilities.sheetRevertEnabled',
   },
   {
     key: 'MULTITABLE_ENABLE_PIT_RESET',
@@ -191,6 +190,34 @@ export const GLOBAL_HISTORY_FLAG_MANIFEST = Object.freeze([
           "MULTITABLE_ENABLE_PIT_UNDELETE is active but MULTITABLE_ENABLE_SHEET_REVERT is not — the undelete face rides inside revert-execute, whose master gate (checked FIRST) returns 403 REVERT_DISABLED before the undelete gate is reached. So undelete has no effect without SHEET_REVERT: dead configuration, not a working feature. Enable BOTH to make undelete-revert live.",
       },
     ],
+  },
+  {
+    key: 'MULTITABLE_ENABLE_WRITER_FENCE',
+    type: 'boolean',
+    activationValue: 'true',
+    caseInsensitive: true, // canonical-sheet-fence.ts isWriterFenceEnabled(): `.trim().toLowerCase() === 'true'`
+    dependsOn: [],
+    conflictsWith: [],
+    danger: 'medium',
+    purpose:
+      "W0-1 L4 canonical sheet-state fence. Default OFF ⇒ byte-identical writer behavior (no fence acquired, no durable-block checks, the auto-number advisory key keeps its pre-L4 single-caller semantics). When ON, every fenced meta_records writer serializes through the per-sheet canonical advisory fence (pg_advisory_xact_lock) and refuses 409 RECOVERY_IN_PROGRESS while a durable recovery writer-block ({fencing,applying,paused_retryable} in meta_sheets.recovery_writer_state) is active; revert/reset-execute claim that durable block across their windows (reset additionally checks it fence-first — the recovery-vs-recovery exclusion). danger=medium, not high: the flag never enables a destructive write (Revert/Reset stay behind their own gates) — it changes writer concurrency semantics (advisory-lock serialization + fail-closed refusal windows), which is a production behavior change but a protective one.",
+    // source: packages/core-backend/src/multitable/canonical-sheet-fence.ts:137 (isWriterFenceEnabled) — read by
+    //         record-service/record-write-service/records/auto-number-service/univer-meta writer entry points.
+    source: 'packages/core-backend/src/multitable/canonical-sheet-fence.ts:137',
+  },
+  {
+    key: 'MULTITABLE_HISTORY_CONTIGUITY_STRICT',
+    type: 'boolean',
+    activationValue: 'true',
+    caseInsensitive: true,
+    dependsOn: [],
+    conflictsWith: [],
+    danger: 'low',
+    purpose:
+      "W0-1 v3.7 (#4331 §9) STRICT history-integrity precheck. Default OFF ⇒ BYTE-IDENTICAL to the #4269 live-vs-latest + generation-aware-contiguity comparator (unchanged code path/exports). When ON (`String(env).trim().toLowerCase() === 'true'`, so 'TRUE'/' true ' also activate it — same case-insensitive family as PIT_RESET/SHEET_REVERT/PIT_UNDELETE), precheckSheetHistoryIntegrity delegates ENTIRELY to precheckSheetHistoryIntegrityStrict: seq-ordered (exact bigint) causal order, ALL generations validated (incl. generation 0 — events before the first create refuse chain_hole), C3 deleted/trashed-chain enumeration, and dup/illegal-seq fail-close. This is a PURE-READ refusal gate: it only makes revert/reset preview+execute refuse MORE (fail-closed HISTORY_INCOMPLETE), never enables any destructive write, so danger=low. It does NOT itself unlock Revert or Reset — those stay behind MULTITABLE_ENABLE_SHEET_REVERT / MULTITABLE_ENABLE_PIT_RESET; this flag only changes HOW their shared precheck proves the chain is trustworthy (and it also runs read-only inside the UNGATED revert-preview), so it is deliberately left out of dependsOn/conflictsWith — the strict precheck is well-defined regardless of whether either destructive gate is on.",
+    // source: packages/core-backend/src/multitable/history-integrity-precheck.ts:100 (isContiguityStrictMode,
+    //         `.trim().toLowerCase() === 'true'`), :459 (precheckSheetHistoryIntegrity delegates to the strict path)
+    source: 'packages/core-backend/src/multitable/history-integrity-precheck.ts:100,459',
   },
   {
     key: 'MULTITABLE_ENABLE_RECORD_UNDELETE_INBOUND',

@@ -20,6 +20,10 @@ on:
       - 'package.json'
       - 'pnpm-lock.yaml'
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   telemetry-plugin:
     runs-on: ubuntu-latest

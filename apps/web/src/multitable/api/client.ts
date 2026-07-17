@@ -757,6 +757,10 @@ function normalizeHistoryChange(raw: unknown): HistoryChange {
     changedFieldIds: Array.isArray(p.changedFieldIds) ? p.changedFieldIds.map(String) : [],
     before: p.before && typeof p.before === 'object' ? (p.before as Record<string, unknown>) : null,
     after: p.after && typeof p.after === 'object' ? (p.after as Record<string, unknown>) : null,
+    // OD-W2-5a half-wire fix: the HistoryChange type + backend payload carry restoredFromVersion but this
+    // normalizer dropped it, so the base History Center badge worked in component tests (which inject objects
+    // directly) yet went blank on the real client wire. Pass it through (badge keys on non-null).
+    restoredFromVersion: typeof p.restoredFromVersion === 'number' ? p.restoredFromVersion : null,
   }
 }
 
@@ -798,6 +802,8 @@ function normalizeRecordHistoryEntry(payload: Partial<MetaRecordRevision> | null
       ? null
       : isPlainObject(payload.snapshot) ? payload.snapshot : {},
     createdAt: typeof payload?.createdAt === 'string' ? payload.createdAt : '',
+    // OD-W2-5a: pass through the R11 restore back-reference so the inspector history badge can render it.
+    restoredFromVersion: typeof payload?.restoredFromVersion === 'number' ? payload.restoredFromVersion : null,
   }
 }
 
