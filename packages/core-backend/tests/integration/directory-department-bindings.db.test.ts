@@ -259,6 +259,86 @@ describeIfDatabase('Canonical Org MVP — B4 department binding table (real DB)'
     expect(err?.constraint).toBe('ddb_local_dept_fk')
   })
 
+  it('G. UPDATE path cannot bypass the chain: repoint-remote / rewrite-org_id / NULL-org_id / parent-org rewrite all rejected', async () => {
+    // FKs re-check on UPDATE of referencing columns — but that is an ASSERTED invariant until
+    // pinned. Owner review focus: "无 NULL、更新或 raw SQL 绕过". Four legs, each by exact cause.
+    const orgA = orgId('upd-A')
+    const orgB = orgId('upd-B')
+    seededOrgIds.push(orgA, orgB)
+    const local = await localSide(orgA)
+    const remoteA = await dingtalkSide(orgA, 'updA')
+    const remoteB = await dingtalkSide(orgB, 'updB')
+    const binding = await insertBinding({
+      org_id: orgA,
+      local_integration_id: local.intId,
+      local_department_id: local.deptId,
+      local_provider: 'local',
+      remote_integration_id: remoteA.intId,
+      remote_department_id: remoteA.deptId,
+      remote_provider: 'dingtalk',
+    })
+
+    // (a) repoint the remote side to an org-B integration → remote org FK rejects
+    const errA = await reject(() =>
+      query(
+        `UPDATE directory_department_bindings SET remote_integration_id=$1, remote_department_id=$2 WHERE id=$3`,
+        [remoteB.intId, remoteB.deptId, binding.id],
+      ),
+    )
+    expect(errA?.code).toBe('23503')
+    expect(errA?.constraint).toBe('ddb_remote_int_org_fk')
+
+    // (b) rewrite org_id alone → the LOCAL org FK rejects (both sides re-check)
+    const errB = await reject(() =>
+      query(`UPDATE directory_department_bindings SET org_id=$1 WHERE id=$2`, [orgB, binding.id]),
+    )
+    expect(errB?.code).toBe('23503')
+    expect(errB?.constraint).toBe('ddb_local_int_org_fk')
+
+    // (c) NULL org_id via UPDATE → NOT NULL rejects (the MATCH SIMPLE closer holds on UPDATE too)
+    const errC = await reject(() =>
+      query(`UPDATE directory_department_bindings SET org_id=NULL WHERE id=$1`, [binding.id]),
+    )
+    expect(errC?.code).toBe('23502')
+
+    // (d) PARENT-side rewrite: moving a BOUND integration to another org is rejected — the chain
+    // also pins the parent's org while a binding references it (a transfer must handle bindings
+    // first; it cannot silently drag a binding cross-org from the parent side).
+    const errD = await reject(() =>
+      query(`UPDATE directory_integrations SET org_id=$1 WHERE id=$2`, [orgB, remoteA.intId]),
+    )
+    expect(errD?.code).toBe('23503')
+    expect(errD?.constraint).toBe('ddb_remote_int_org_fk')
+  })
+
+  it('H. CASCADE radius: deleting the remote integration removes the binding ONLY — local integration and department survive', async () => {
+    const org = orgId('casc')
+    seededOrgIds.push(org)
+    const local = await localSide(org)
+    const remote = await dingtalkSide(org, 'casc')
+    const binding = await insertBinding({
+      org_id: org,
+      local_integration_id: local.intId,
+      local_department_id: local.deptId,
+      local_provider: 'local',
+      remote_integration_id: remote.intId,
+      remote_department_id: remote.deptId,
+      remote_provider: 'dingtalk',
+    })
+
+    await query(`DELETE FROM directory_integrations WHERE id = $1`, [remote.intId])
+
+    const gone = await query<{ n: number }>(
+      `SELECT count(*)::int AS n FROM directory_department_bindings WHERE id = $1`,
+      [binding.id],
+    )
+    expect(gone.rows[0].n).toBe(0) // binding cascaded away
+    const localInt = await query<{ n: number }>(`SELECT count(*)::int AS n FROM directory_integrations WHERE id = $1`, [local.intId])
+    const localDept = await query<{ n: number }>(`SELECT count(*)::int AS n FROM directory_departments WHERE id = $1`, [local.deptId])
+    expect(localInt.rows[0].n).toBe(1) // local parents untouched
+    expect(localDept.rows[0].n).toBe(1)
+  })
+
   it('F. schema contract: the six FKs + provider CHECK + three parent UNIQUE constraints exist', async () => {
     const own = await query<{ conname: string }>(
       `SELECT conname FROM pg_constraint WHERE conrelid = 'directory_department_bindings'::regclass`,
