@@ -1,4 +1,5 @@
 import type { ApprovalGraph, ApprovalNode, ApprovalEdge, ConditionNodeConfig, ParallelNodeConfig } from '../types/approval'
+import { APPROVAL_ROLE_CONFIGURE_SENTINEL } from '../types/approval'
 
 // D-2/D-3 topology-authoring engine (visual canvas design-lock). Distinct from the G-2..G-5 edit
 // modules (which edit a node's CONFIG): these PURE functions change graph STRUCTURE — add/remove
@@ -27,6 +28,24 @@ function edgeKeys(graph: ApprovalGraph): Set<string> {
 /** A default approval node config — a self-contained, backend-valid starter (requester approves). */
 function defaultApprovalConfig() {
   return { assigneeSources: [{ kind: 'requester' as const }], approvalMode: 'single' as const, emptyAssigneePolicy: 'error' as const }
+}
+
+/**
+ * Starter config for an ADDITIONAL parallel-branch approval node. Parallel branches must not share
+ * an approver: two branches that resolve to the same user 409 EVERY request at fan-out
+ * (`APPROVAL_ASSIGNEE_PARALLEL_DYNAMIC_CONFLICT`), so seeding every branch with the same
+ * `requester` default would make the feature's untouched output fail 100% of the time — a
+ * false-green (saves + publishes clean, dies at runtime). Instead the extra branch uses the
+ * existing configure-before-publish machinery: the `static_role` placeholder sentinel that the
+ * publish checklist surfaces and the backend fail-fasts on (`assertNoUnconfiguredPlaceholderRoles`)
+ * — the draft saves, but the admin MUST pick a real approver before it can publish.
+ */
+function placeholderBranchApprovalConfig() {
+  return {
+    assigneeSources: [{ kind: 'static_role' as const, roleIds: [APPROVAL_ROLE_CONFIGURE_SENTINEL] }],
+    approvalMode: 'single' as const,
+    emptyAssigneePolicy: 'error' as const,
+  }
 }
 
 function outEdges(graph: ApprovalGraph, nodeKey: string): ApprovalEdge[] {
@@ -220,7 +239,9 @@ export function insertParallelGateway(
     key: branchTwoKey,
     type: 'approval',
     name: '并行审批 2',
-    config: defaultApprovalConfig(),
+    // NOT defaultApprovalConfig(): requester×requester across the two starter branches would 409
+    // every request at runtime — see placeholderBranchApprovalConfig.
+    config: placeholderBranchApprovalConfig(),
   }
 
   return {
@@ -271,7 +292,9 @@ export function addParallelBranch(graph: ApprovalGraph, parallelNodeKey: string,
   const eKeys = edgeKeys(graph)
   const forkEdge = uniqueKey('edge', eKeys); eKeys.add(forkEdge)
   const joinEdge = uniqueKey('edge', eKeys)
-  const newNode: ApprovalNode = { key: newNodeKey, type: 'approval', name, config: defaultApprovalConfig() }
+  // Placeholder starter, not requester: a concrete dynamic default could silently duplicate an
+  // existing branch's approver (100% runtime 409) — see placeholderBranchApprovalConfig.
+  const newNode: ApprovalNode = { key: newNodeKey, type: 'approval', name, config: placeholderBranchApprovalConfig() }
   return {
     nodes: graph.nodes.map((n) => (n.key === parallelNodeKey ? { ...clone(n), config: { ...config, branches: [...config.branches, forkEdge] } } : clone(n))).concat([newNode]),
     edges: [

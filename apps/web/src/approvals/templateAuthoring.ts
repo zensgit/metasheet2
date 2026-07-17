@@ -62,7 +62,7 @@ export type {
 export { CONDITION_RULE_OPERATORS } from './conditionEdit'
 export { approvalFormulaInsertOptions } from './conditionEdit'
 export type { ParallelEdits, ParallelNodeEdit } from './parallelEdit'
-export { PARALLEL_JOIN_MODES } from './parallelEdit'
+export { PARALLEL_JOIN_MODES, parallelDynamicAssigneeConflicts } from './parallelEdit'
 export type { CcEdits, CcNodeEdit } from './ccEdit'
 export { CC_TARGET_TYPES } from './ccEdit'
 export type { ApprovalNodeEdits, ApprovalNodeSourceEdit } from './approvalNodeEdit'

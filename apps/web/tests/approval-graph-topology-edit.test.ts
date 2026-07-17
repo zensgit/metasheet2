@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'vitest'
-import type { ApprovalGraph, ApprovalTemplateDetailDTO } from '../src/types/approval'
+import type { ApprovalGraph, ApprovalTemplateDetailDTO, ApprovalAssigneeSource } from '../src/types/approval'
+import { APPROVAL_ROLE_CONFIGURE_SENTINEL } from '../src/types/approval'
+import { parallelDynamicAssigneeConflicts } from '../src/approvals/parallelEdit'
+import { placeholderRoleNodeKeys } from '../src/approvals/approvalNodeEdit'
 import {
   appendApprovalNode,
   insertConditionGateway,
@@ -143,6 +146,44 @@ describe('insertParallelGateway', () => {
     expect(branchTargets.every((target) => Boolean(edgeBetween(out, target, 'end')))).toBe(true)
     expect(edgeBetween(out, 'approval_1', parallel.key)).toBeTruthy()
     expect(edgeBetween(out, 'approval_1', 'end')).toBeFalsy()
+  })
+
+  // P2 regression (adversarial review F2): both starter branches used to seed `requester`, so the
+  // UNTOUCHED default output resolved both branches to the same user — publish was green, then the
+  // fan-out 409'd (APPROVAL_ASSIGNEE_PARALLEL_DYNAMIC_CONFLICT) on EVERY request. The second branch
+  // now uses the configure-before-publish placeholder role: the draft saves, the publish checklist
+  // + backend sentinel gate force the admin to pick a real approver first.
+  it('starter branches do NOT self-conflict: branch 2 is the configure-before-publish placeholder, not a duplicate requester', () => {
+    const out = insertParallelGateway(LINEAR, 'approval_1')
+    const parallel = out.nodes.find((candidate) => candidate.type === 'parallel')!
+    const config = parallel.config as { branches: string[] }
+    const [oneKey, twoKey] = config.branches.map((edgeKey) => out.edges.find((edge) => edge.key === edgeKey)!.target)
+    const sourcesOf = (key: string) => (node(out, key)!.config as { assigneeSources: ApprovalAssigneeSource[] }).assigneeSources
+    expect(sourcesOf(oneKey)).toEqual([{ kind: 'requester' }])
+    expect(sourcesOf(twoKey)).toEqual([{ kind: 'static_role', roleIds: [APPROVAL_ROLE_CONFIGURE_SENTINEL] }])
+    // No provably-identical dynamic sources across the starter branches…
+    expect(parallelDynamicAssigneeConflicts(out)).toEqual([])
+    // …and the placeholder is visible to the publish checklist once the draft is promoted (the
+    // "forces selection" half of the fix).
+    const draft = draftFromTemplate({
+      id: 't', key: 'k', name: 'n', description: null, category: null,
+      visibilityScope: { type: 'all', ids: [] }, slaHours: null, status: 'draft',
+      activeVersionId: null, latestVersionId: 'v',
+      createdAt: '2026-06-24T00:00:00Z', updatedAt: '2026-06-24T00:00:00Z',
+      formSchema: { fields: [{ id: 'amount', type: 'number', label: '金额', required: true }] },
+      approvalGraph: LINEAR,
+    })
+    const next = applyTopologyToDraft(draft, (graph) => insertParallelGateway(graph, 'approval_1'))
+    expect(placeholderRoleNodeKeys(next.approvalNodeEdits ?? {})).toEqual([twoKey])
+  })
+
+  it('addParallelBranch seeds the placeholder too (a concrete dynamic default could duplicate an existing branch)', () => {
+    const out = addParallelBranch(PARALLEL, 'parallel_1', 'C')
+    const config = node(out, 'parallel_1')!.config as { branches: string[] }
+    const newTarget = out.edges.find((e) => e.key === config.branches[2])!.target
+    expect((node(out, newTarget)!.config as { assigneeSources: ApprovalAssigneeSource[] }).assigneeSources)
+      .toEqual([{ kind: 'static_role', roleIds: [APPROVAL_ROLE_CONFIGURE_SENTINEL] }])
+    expect(parallelDynamicAssigneeConflicts(out)).toEqual([])
   })
 })
 
