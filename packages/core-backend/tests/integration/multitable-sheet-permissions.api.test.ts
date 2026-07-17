@@ -11,46 +11,13 @@ type QueryResult = {
 
 type QueryHandler = (sql: string, params?: unknown[]) => QueryResult | Promise<QueryResult>
 
-function legacyPermissionFixtureSql(sql: string): string | undefined {
-  const projectionReplacements: Array<[string, string]> = [
-    [
-      'SELECT id, sheet_id, version, data, created_by, locked, locked_by, locked_at FROM meta_records WHERE id = $1',
-      'SELECT id, sheet_id, version, data, created_by FROM meta_records WHERE id = $1',
-    ],
-    [
-      'SELECT id, version, data, locked, locked_by, locked_at FROM meta_records WHERE sheet_id = $1 ORDER BY created_at ASC, id ASC',
-      'SELECT id, version, data FROM meta_records WHERE sheet_id = $1 ORDER BY created_at ASC, id ASC',
-    ],
-    [
-      'SELECT id, sheet_id, created_by, locked, locked_by, created_at, updated_at FROM meta_records WHERE id = $1',
-      'SELECT id, sheet_id, created_by FROM meta_records WHERE id = $1',
-    ],
-    [
-      'SELECT id, version, data, created_by, locked, locked_by FROM meta_records WHERE sheet_id = $1 AND id = $2 FOR UPDATE',
-      'SELECT id, version, data, created_by FROM meta_records WHERE sheet_id = $1 AND id = $2 FOR UPDATE',
-    ],
-    [
-      'SELECT id, version, data, created_by, locked, locked_by FROM meta_records WHERE id = $1 AND sheet_id = $2 FOR UPDATE',
-      'SELECT id, version, data, created_by FROM meta_records WHERE id = $1 AND sheet_id = $2 FOR UPDATE',
-    ],
-    [
-      'SELECT id, version, data, locked, locked_by, locked_at FROM meta_records WHERE id = $1 AND sheet_id = $2',
-      'SELECT id, version, data FROM meta_records WHERE id = $1 AND sheet_id = $2',
-    ],
-    [
-      'SELECT id, name, type, property, "order" FROM meta_fields WHERE sheet_id = $1 ORDER BY "order" ASC, id ASC',
-      'SELECT id, name, type FROM meta_fields WHERE sheet_id = $1 ORDER BY "order" ASC, id ASC',
-    ],
-  ]
-
-  for (const [currentProjection, fixtureProjection] of projectionReplacements) {
-    if (sql.includes(currentProjection)) return sql.replace(currentProjection, fixtureProjection)
+function unlockedRecordFixture<T extends Record<string, unknown>>(row: T) {
+  return {
+    ...row,
+    locked: false,
+    locked_by: null,
+    locked_at: null,
   }
-  return undefined
-}
-
-function isUnhandledFixtureSql(error: unknown): error is Error {
-  return error instanceof Error && error.message.startsWith('Unhandled SQL in test:')
 }
 
 function createMockPool(
@@ -138,14 +105,7 @@ function createMockPool(
         })),
       }
     }
-    try {
-      return await queryHandler(sql, params)
-    } catch (error) {
-      // Retry only explicit legacy-fixture misses; assertions and unknown SQL still fail normally.
-      const fixtureSql = isUnhandledFixtureSql(error) ? legacyPermissionFixtureSql(sql) : undefined
-      if (!fixtureSql) throw error
-      return queryHandler(fixtureSql, params)
-    }
+    return queryHandler(sql, params)
   })
   const transaction = vi.fn(async (fn: (client: { query: typeof query }) => Promise<unknown>) => fn({ query }))
   return { query, transaction }
@@ -249,10 +209,16 @@ describe('Multitable sheet-scoped permissions API', () => {
             rows: [{ id: 'sheet_ops', base_id: 'base_ops', name: 'Orders', description: 'Ops records' }],
           }
         }
-        if (sql.includes('SELECT id, sheet_id, version, data, created_by FROM meta_records WHERE id = $1')) {
+        if (sql.includes('SELECT id, sheet_id, version, data, created_by, locked, locked_by, locked_at FROM meta_records WHERE id = $1')) {
           expect(params).toEqual(['rec_1'])
           return {
-            rows: [{ id: 'rec_1', sheet_id: 'sheet_ops', version: 3, data: { fld_name: 'Order A' } }],
+            rows: [unlockedRecordFixture({
+              id: 'rec_1',
+              sheet_id: 'sheet_ops',
+              version: 3,
+              data: { fld_name: 'Order A' },
+              created_by: null,
+            })],
           }
         }
         { const cr = configRevisionNoop(sql); if (cr) return cr }
@@ -516,7 +482,7 @@ describe('Multitable sheet-scoped permissions API', () => {
             rows: [{ id: 'fld_name', name: 'Name', type: 'string', property: {}, order: 1 }],
           }
         }
-        if (sql.includes('SELECT id, version, data FROM meta_records WHERE sheet_id = $1 ORDER BY created_at ASC, id ASC')) {
+        if (sql.includes('SELECT id, version, data, locked, locked_by, locked_at FROM meta_records WHERE sheet_id = $1 ORDER BY created_at ASC, id ASC')) {
           expect(params).toEqual(['sheet_ops'])
           return { rows: [] }
         }
@@ -577,10 +543,16 @@ describe('Multitable sheet-scoped permissions API', () => {
             rows: [{ id: 'rec_owned', version: 3, data: { fld_name: 'Mine' }, created_by: 'user_sheet_acl_1' }],
           }
         }
-        if (sql.includes('SELECT id, sheet_id, version, data, created_by FROM meta_records WHERE id = $1')) {
+        if (sql.includes('SELECT id, sheet_id, version, data, created_by, locked, locked_by, locked_at FROM meta_records WHERE id = $1')) {
           expect(params).toEqual(['rec_owned'])
           return {
-            rows: [{ id: 'rec_owned', sheet_id: 'sheet_ops', version: 3, data: { fld_name: 'Mine' }, created_by: 'user_sheet_acl_1' }],
+            rows: [unlockedRecordFixture({
+              id: 'rec_owned',
+              sheet_id: 'sheet_ops',
+              version: 3,
+              data: { fld_name: 'Mine' },
+              created_by: 'user_sheet_acl_1',
+            })],
           }
         }
         { const cr = configRevisionNoop(sql); if (cr) return cr }
@@ -631,10 +603,16 @@ describe('Multitable sheet-scoped permissions API', () => {
           expect(params).toEqual(['user_sheet_acl_1', ['sheet_ops']])
           return { rows: [] }
         }
-        if (sql.includes('SELECT id, sheet_id, version, data, created_by FROM meta_records WHERE id = $1')) {
+        if (sql.includes('SELECT id, sheet_id, version, data, created_by, locked, locked_by, locked_at FROM meta_records WHERE id = $1')) {
           expect(params).toEqual(['rec_1'])
           return {
-            rows: [{ id: 'rec_1', sheet_id: 'sheet_ops', version: 1, data: { fld_name: 'Blocked' }, created_by: 'user_sheet_acl_2' }],
+            rows: [unlockedRecordFixture({
+              id: 'rec_1',
+              sheet_id: 'sheet_ops',
+              version: 1,
+              data: { fld_name: 'Blocked' },
+              created_by: 'user_sheet_acl_2',
+            })],
           }
         }
         { const cr = configRevisionNoop(sql); if (cr) return cr }
@@ -685,10 +663,18 @@ describe('Multitable sheet-scoped permissions API', () => {
         }
         if (
           sql.includes('SELECT id, sheet_id FROM meta_records WHERE id = $1')
-          || sql.includes('SELECT id, sheet_id, created_by FROM meta_records WHERE id = $1')
+          || sql.includes('SELECT id, sheet_id, created_by, locked, locked_by, created_at, updated_at FROM meta_records WHERE id = $1')
         ) {
           expect(params).toEqual(['rec_1'])
-          return { rows: [{ id: 'rec_1', sheet_id: 'sheet_ops' }] }
+          return {
+            rows: [unlockedRecordFixture({
+              id: 'rec_1',
+              sheet_id: 'sheet_ops',
+              created_by: 'user_sheet_acl_2',
+              created_at: '2026-01-01T00:00:00.000Z',
+              updated_at: '2026-01-01T00:00:00.000Z',
+            })],
+          }
         }
         { const cr = configRevisionNoop(sql); if (cr) return cr }
         // A: approval-projection read-guard lookup — no projection sheet in this test
@@ -764,13 +750,13 @@ describe('Multitable sheet-scoped permissions API', () => {
         }
         if (
           sql.includes('SELECT id, version, data, COUNT(*) OVER()::int AS total')
-          || sql.includes('SELECT id, version, data FROM meta_records WHERE sheet_id = $1 ORDER BY created_at ASC, id ASC')
+          || sql.includes('SELECT id, version, data, locked, locked_by, locked_at FROM meta_records WHERE sheet_id = $1 ORDER BY created_at ASC, id ASC')
         ) {
           expect(params?.[0]).toBe('sheet_ops')
           return {
             rows: [
-              { id: 'rec_owned', version: 1, data: { fld_name: 'Mine' }, total: 2 },
-              { id: 'rec_foreign', version: 1, data: { fld_name: 'Theirs' }, total: 2 },
+              unlockedRecordFixture({ id: 'rec_owned', version: 1, data: { fld_name: 'Mine' }, total: 2 }),
+              unlockedRecordFixture({ id: 'rec_foreign', version: 1, data: { fld_name: 'Theirs' }, total: 2 }),
             ],
           }
         }
@@ -823,31 +809,33 @@ describe('Multitable sheet-scoped permissions API', () => {
           }
         }
         if (
-          sql.includes('SELECT id, sheet_id, version, data, created_by FROM meta_records WHERE id = $1')
+          sql.includes('SELECT id, sheet_id, version, data, created_by, locked, locked_by, locked_at FROM meta_records WHERE id = $1')
           || sql.includes('SELECT id, sheet_id, version, data FROM meta_records WHERE id = $1')
         ) {
           const recordId = String(params?.[0] ?? '')
           return {
-            rows: [{
+            rows: [unlockedRecordFixture({
               id: recordId,
               sheet_id: 'sheet_ops',
               version: recordId === 'rec_owned' ? 3 : 4,
               data: { fld_name: recordId === 'rec_owned' ? 'Mine' : 'Theirs' },
               created_by: recordId === 'rec_owned' ? 'user_sheet_acl_1' : 'user_sheet_acl_2',
-            }],
+            })],
           }
         }
         if (
-          sql.includes('SELECT id, sheet_id, created_by FROM meta_records WHERE id = $1')
+          sql.includes('SELECT id, sheet_id, created_by, locked, locked_by, created_at, updated_at FROM meta_records WHERE id = $1')
           || sql.includes('SELECT id, sheet_id FROM meta_records WHERE id = $1')
         ) {
           const recordId = String(params?.[0] ?? '')
           return {
-            rows: [{
+            rows: [unlockedRecordFixture({
               id: recordId,
               sheet_id: 'sheet_ops',
               created_by: recordId === 'rec_owned' ? 'user_sheet_acl_1' : 'user_sheet_acl_2',
-            }],
+              created_at: '2026-01-01T00:00:00.000Z',
+              updated_at: '2026-01-01T00:00:00.000Z',
+            })],
           }
         }
         if (sql.includes('SELECT id, base_id, name, description FROM meta_sheets WHERE id = $1')) {
@@ -861,17 +849,17 @@ describe('Multitable sheet-scoped permissions API', () => {
           }
         }
         if (
-          sql.includes('SELECT id, version, data, created_by FROM meta_records WHERE id = $1 AND sheet_id = $2 FOR UPDATE')
+          sql.includes('SELECT id, version, data, created_by, locked, locked_by FROM meta_records WHERE id = $1 AND sheet_id = $2 FOR UPDATE')
           || sql.includes('SELECT id, version, created_by FROM meta_records WHERE id = $1 AND sheet_id = $2 FOR UPDATE')
         ) {
           const recordId = String(params?.[0] ?? '')
           return {
-            rows: [{
+            rows: [unlockedRecordFixture({
               id: recordId,
               version: recordId === 'rec_owned' ? 3 : 4,
               data: { fld_name: recordId === 'rec_owned' ? 'Mine' : 'Theirs' },
               created_by: recordId === 'rec_owned' ? 'user_sheet_acl_1' : 'user_sheet_acl_2',
-            }],
+            })],
           }
         }
         { const cr = configRevisionNoop(sql); if (cr) return cr }
@@ -989,34 +977,41 @@ describe('Multitable sheet-scoped permissions API', () => {
           records.set(recordId, next)
           return { rows: [{ id: recordId, version: 1 }] }
         }
-        if (sql.includes('SELECT id, version, data FROM meta_records WHERE id = $1 AND sheet_id = $2')) {
+        if (
+          sql.includes('SELECT id, version, data, locked, locked_by, locked_at FROM meta_records WHERE id = $1 AND sheet_id = $2')
+          || sql.includes('SELECT id, version, data FROM meta_records WHERE id = $1 AND sheet_id = $2')
+        ) {
           const recordId = String(params?.[0] ?? '')
           expect(params?.[1]).toEqual('sheet_ops')
           const row = records.get(recordId)
           return {
-            rows: row ? [{ id: row.id, version: row.version, data: row.data }] : [],
+            rows: row ? [unlockedRecordFixture({ id: row.id, version: row.version, data: row.data })] : [],
           }
         }
         if (
-          sql.includes('SELECT id, version, data, created_by FROM meta_records WHERE sheet_id = $1 AND id = $2 FOR UPDATE')
+          sql.includes('SELECT id, version, data, created_by, locked, locked_by FROM meta_records WHERE sheet_id = $1 AND id = $2 FOR UPDATE')
           || sql.includes('SELECT id, version, created_by FROM meta_records WHERE sheet_id = $1 AND id = $2 FOR UPDATE')
         ) {
           expect(params?.[0]).toEqual('sheet_ops')
           const recordId = String(params?.[1] ?? '')
           const row = records.get(recordId)
           return {
-            rows: row ? [{ id: row.id, version: row.version, data: row.data, created_by: row.createdBy }] : [],
+            rows: row
+              ? [unlockedRecordFixture({ id: row.id, version: row.version, data: row.data, created_by: row.createdBy })]
+              : [],
           }
         }
         if (
-          sql.includes('SELECT id, version, data, created_by FROM meta_records WHERE id = $1 AND sheet_id = $2 FOR UPDATE')
+          sql.includes('SELECT id, version, data, created_by, locked, locked_by FROM meta_records WHERE id = $1 AND sheet_id = $2 FOR UPDATE')
           || sql.includes('SELECT id, version, created_by FROM meta_records WHERE id = $1 AND sheet_id = $2 FOR UPDATE')
         ) {
           expect(params?.[1]).toEqual('sheet_ops')
           const recordId = String(params?.[0] ?? '')
           const row = records.get(recordId)
           return {
-            rows: row ? [{ id: row.id, version: row.version, data: row.data, created_by: row.createdBy }] : [],
+            rows: row
+              ? [unlockedRecordFixture({ id: row.id, version: row.version, data: row.data, created_by: row.createdBy })]
+              : [],
           }
         }
         if (sql.includes('UPDATE meta_records') && sql.includes('WHERE sheet_id = $2 AND id = $3')) {
@@ -1043,11 +1038,19 @@ describe('Multitable sheet-scoped permissions API', () => {
           expect(params).toEqual([['rec_owned']])
           return { rows: [] }
         }
-        if (sql.includes('SELECT id, sheet_id, created_by FROM meta_records WHERE id = $1')) {
+        if (sql.includes('SELECT id, sheet_id, created_by, locked, locked_by, created_at, updated_at FROM meta_records WHERE id = $1')) {
           expect(params).toEqual(['rec_owned'])
           const row = records.get('rec_owned')
           return {
-            rows: row ? [{ id: row.id, sheet_id: row.sheetId, created_by: row.createdBy }] : [],
+            rows: row
+              ? [unlockedRecordFixture({
+                  id: row.id,
+                  sheet_id: row.sheetId,
+                  created_by: row.createdBy,
+                  created_at: '2026-01-01T00:00:00.000Z',
+                  updated_at: '2026-01-01T00:00:00.000Z',
+                })]
+              : [],
           }
         }
         if (sql.includes('SELECT id, sheet_id FROM meta_records WHERE id = $1')) {
@@ -2643,10 +2646,15 @@ describe('Multitable sheet-scoped permissions API', () => {
             rows: [{ sheet_id: 'sheet_open', perm_code: 'spreadsheet:read', subject_type: 'user' }],
           }
         }
-        if (sql.includes('SELECT id, name, type FROM meta_fields WHERE sheet_id = $1 ORDER BY "order" ASC, id ASC')) {
+        if (
+          sql.includes('SELECT id, name, type, property, "order" FROM meta_fields WHERE sheet_id = $1 ORDER BY "order" ASC, id ASC')
+          || sql.includes('SELECT id, name, type FROM meta_fields WHERE sheet_id = $1 ORDER BY "order" ASC, id ASC')
+        ) {
           expect(params).toEqual(['sheet_open'])
           return {
-            rows: [{ id: 'fld_title', name: 'Title', type: 'string' }],
+            rows: [sql.includes('property')
+              ? { id: 'fld_title', name: 'Title', type: 'string', property: {}, order: 1 }
+              : { id: 'fld_title', name: 'Title', type: 'string' }],
           }
         }
         if (sql.includes('SELECT id, data FROM meta_records WHERE sheet_id = $1 ORDER BY created_at ASC, id ASC')) {
@@ -2808,16 +2816,16 @@ describe('Multitable sheet-scoped permissions API', () => {
   test('allows lookup, rollup, and link summaries when foreign sheet is readable via direct sheet grant', async () => {
     const { app } = await createApp({
       queryHandler: async (sql, params) => {
-        if (sql.includes('SELECT id, sheet_id, version, data, created_by FROM meta_records WHERE id = $1')) {
+        if (sql.includes('SELECT id, sheet_id, version, data, created_by, locked, locked_by, locked_at FROM meta_records WHERE id = $1')) {
           expect(params).toEqual(['rec_order_1'])
           return {
-            rows: [{
+            rows: [unlockedRecordFixture({
               id: 'rec_order_1',
               sheet_id: 'sheet_orders',
               version: 4,
               data: { fld_name: 'Order A' },
               created_by: 'user_sheet_acl_1',
-            }],
+            })],
           }
         }
         if (sql.includes('SELECT id, base_id, name, description FROM meta_sheets WHERE id = $1')) {
@@ -2902,16 +2910,16 @@ describe('Multitable sheet-scoped permissions API', () => {
     const { app } = await createApp({
       tokenPerms: ['multitable:read'],
       queryHandler: async (sql, params) => {
-        if (sql.includes('SELECT id, sheet_id, version, data, created_by FROM meta_records WHERE id = $1')) {
+        if (sql.includes('SELECT id, sheet_id, version, data, created_by, locked, locked_by, locked_at FROM meta_records WHERE id = $1')) {
           expect(params).toEqual(['rec_order_1'])
           return {
-            rows: [{
+            rows: [unlockedRecordFixture({
               id: 'rec_order_1',
               sheet_id: 'sheet_orders',
               version: 4,
               data: { fld_name: 'Order A' },
               created_by: 'user_sheet_acl_1',
-            }],
+            })],
           }
         }
         if (sql.includes('SELECT id, base_id, name, description FROM meta_sheets WHERE id = $1')) {
