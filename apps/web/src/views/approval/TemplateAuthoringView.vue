@@ -530,7 +530,8 @@
                   <template v-if="canInsertAfter(canvasNodeByKey(pos.key)!)">
                     <el-button size="small" :data-testid="`approval-canvas-insert-${pos.key}`" @click.stop="onInsertApprovalAfter(pos.key)">+审批</el-button>
                     <el-button size="small" :data-testid="`approval-canvas-insert-condition-${pos.key}`" @click.stop="onInsertConditionAfter(pos.key)">+条件</el-button>
-                    <el-button size="small" :data-testid="`approval-canvas-insert-parallel-${pos.key}`" @click.stop="onInsertParallelAfter(pos.key)">+并行</el-button>
+                    <!-- F4: no +并行 inside a parallel branch — the backend rejects nested parallel. -->
+                    <el-button v-if="canInsertParallelAfter(canvasNodeByKey(pos.key)!)" size="small" :data-testid="`approval-canvas-insert-parallel-${pos.key}`" @click.stop="onInsertParallelAfter(pos.key)">+并行</el-button>
                   </template>
                   <el-button v-if="canRemoveNode(canvasNodeByKey(pos.key)!)" size="small" type="danger" :data-testid="`approval-canvas-remove-${pos.key}`" @click.stop="onRemoveNode(pos.key)">删除</el-button>
                 </div>
@@ -579,8 +580,9 @@
                   :data-testid="`approval-topology-insert-condition-after-${node.key}`"
                   @click="onInsertConditionAfter(node.key)"
                 >下方添加条件</el-button>
+                <!-- F4: no 并行 insert inside a parallel branch — the backend rejects nested parallel. -->
                 <el-button
-                  v-if="canInsertAfter(node)"
+                  v-if="canInsertParallelAfter(node)"
                   size="small"
                   :data-testid="`approval-topology-insert-parallel-after-${node.key}`"
                   @click="onInsertParallelAfter(node.key)"
@@ -1681,6 +1683,7 @@ import {
   addConditionBranch,
   addParallelBranch,
   appendApprovalNode,
+  collectParallelRegionNodeKeys,
   insertConditionGateway,
   insertParallelGateway,
   removeLinearNode,
@@ -2193,6 +2196,15 @@ function topologyEdgeCount(nodeKey: string, dir: 'source' | 'target'): number {
 }
 function canInsertAfter(node: ApprovalNode): boolean {
   return node.type !== 'end' && topologyEdgeCount(node.key, 'source') === 1
+}
+// F4: never OFFER a nested parallel — the backend rejects it at save ("cannot contain nested
+// parallel node"), and the canvas lock requires guiding toward valid shapes rather than building a
+// 422. Condition-in-parallel stays legal, so only the +并行 affordance is gated by region membership.
+const parallelRegionKeys = computed<Set<string>>(() =>
+  collectParallelRegionNodeKeys(draft.value.preservedGraph ?? { nodes: [], edges: [] }),
+)
+function canInsertParallelAfter(node: ApprovalNode): boolean {
+  return canInsertAfter(node) && !parallelRegionKeys.value.has(node.key)
 }
 function canRemoveNode(node: ApprovalNode): boolean {
   return (node.type === 'approval' || node.type === 'cc')

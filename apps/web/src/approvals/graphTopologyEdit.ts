@@ -55,6 +55,39 @@ function inEdges(graph: ApprovalGraph, nodeKey: string): ApprovalEdge[] {
   return graph.edges.filter((e) => e.target === nodeKey)
 }
 
+/**
+ * Node keys strictly INSIDE any parallel region — every node on a branch path between a parallel
+ * gateway and its `joinNodeKey` (join and gateway excluded). Mirrors the backend
+ * `collectParallelRegionNodeKeys` (ApprovalProductService.ts). Used to prevent authoring a NESTED
+ * parallel: the backend rejects it at save ("cannot contain nested parallel node"), and the canvas
+ * lock says the canvas must not offer a shape the engine rejects. Condition-in-parallel stays legal.
+ */
+export function collectParallelRegionNodeKeys(graph: ApprovalGraph): Set<string> {
+  const regionNodeKeys = new Set<string>()
+  for (const node of graph.nodes) {
+    if (node.type !== 'parallel') continue
+    const config = node.config as ParallelNodeConfig
+    const joinNodeKey = typeof config.joinNodeKey === 'string' ? config.joinNodeKey : null
+    const branchEdgeKeys = Array.isArray(config.branches)
+      ? config.branches.filter((entry): entry is string => typeof entry === 'string')
+      : []
+    for (const branchEdgeKey of branchEdgeKeys) {
+      const edge = graph.edges.find((candidate) => candidate.key === branchEdgeKey)
+      if (!edge) continue
+      const queue = [edge.target]
+      const visited = new Set<string>()
+      while (queue.length > 0) {
+        const nodeKey = queue.shift()!
+        if (nodeKey === joinNodeKey || visited.has(nodeKey)) continue
+        visited.add(nodeKey)
+        regionNodeKeys.add(nodeKey)
+        for (const out of outEdges(graph, nodeKey)) queue.push(out.target)
+      }
+    }
+  }
+  return regionNodeKeys
+}
+
 function reachableDistances(graph: ApprovalGraph, startKey: string): Map<string, number> {
   const distances = new Map<string, number>([[startKey, 0]])
   const queue = [startKey]
@@ -201,6 +234,12 @@ export function insertParallelGateway(
   const outs = outEdges(graph, afterNodeKey)
   if (outs.length !== 1) {
     throw new Error(`insertParallelGateway: ${afterNodeKey} must have exactly one outgoing edge (has ${outs.length})`)
+  }
+  // F4: the backend rejects NESTED parallel at save (`collectBranchAssignees` — "cannot contain
+  // nested parallel node"); refuse to author it (the view also hides the affordance). A CONDITION
+  // gateway inside a parallel branch remains legal — only parallel-in-parallel is blocked.
+  if (collectParallelRegionNodeKeys(graph).has(afterNodeKey)) {
+    throw new Error(`insertParallelGateway: ${afterNodeKey} is inside a parallel branch — nested parallel is not supported`)
   }
 
   const originalOut = outs[0]
