@@ -5027,6 +5027,8 @@
                       class="attendance__group-workflow-step"
                       type="button"
                       data-attendance-group-workflow-step="basics"
+                      aria-controls="attendance-group-stage-basics"
+                      :aria-current="attendanceGroupActiveStage === 'basics' ? 'step' : undefined"
                       :class="{ 'attendance__group-workflow-step--active': attendanceGroupActiveStage === 'basics' }"
                       @click="selectAttendanceGroupStage('basics')"
                     >
@@ -5036,6 +5038,8 @@
                       class="attendance__group-workflow-step"
                       type="button"
                       data-attendance-group-workflow-step="people"
+                      aria-controls="attendance-group-stage-people"
+                      :aria-current="attendanceGroupActiveStage === 'people' ? 'step' : undefined"
                       :class="{ 'attendance__group-workflow-step--active': attendanceGroupActiveStage === 'people' }"
                       @click="selectAttendanceGroupStage('people')"
                     >
@@ -5045,6 +5049,8 @@
                       class="attendance__group-workflow-step"
                       type="button"
                       data-attendance-group-workflow-step="schedule"
+                      aria-controls="attendance-group-stage-schedule"
+                      :aria-current="attendanceGroupActiveStage === 'schedule' ? 'step' : undefined"
                       :class="{ 'attendance__group-workflow-step--active': attendanceGroupActiveStage === 'schedule' }"
                       @click="selectAttendanceGroupStage('schedule')"
                     >
@@ -5054,6 +5060,8 @@
                       class="attendance__group-workflow-step"
                       type="button"
                       data-attendance-group-workflow-step="policies"
+                      aria-controls="attendance-group-stage-policies"
+                      :aria-current="attendanceGroupActiveStage === 'policies' ? 'step' : undefined"
                       :class="{ 'attendance__group-workflow-step--active': attendanceGroupActiveStage === 'policies' }"
                       @click="selectAttendanceGroupStage('policies')"
                     >
@@ -5886,6 +5894,33 @@
                     </div>
                     <div class="attendance__empty">
                       {{ tr('This type keeps the group as a people and policy boundary here. Scheduling details stay in Advanced scheduling.', '该类型在这里作为人员与策略边界；排班细节仍在高级排班维护。') }}
+                    </div>
+                  </section>
+                  <section
+                    v-else
+                    v-show="attendanceGroupActiveStage === 'schedule'"
+                    id="attendance-group-stage-schedule"
+                    class="attendance__group-panel"
+                    data-attendance-group-schedule-create-placeholder
+                  >
+                    <div class="attendance__admin-section-header">
+                      <div>
+                        <h6>{{ tr('Work time', '考勤时间') }}</h6>
+                        <span class="attendance__field-hint">
+                          {{ tr('Save basic info to unlock schedule preview and assignment actions.', '先保存基础信息，再使用排班预览与分配操作。') }}
+                        </span>
+                      </div>
+                      <button
+                        class="attendance__btn attendance__btn--primary"
+                        type="button"
+                        data-attendance-group-schedule-create-basics
+                        @click="selectAttendanceGroupStage('basics')"
+                      >
+                        {{ tr('Complete basic info', '填写基础信息') }}
+                      </button>
+                    </div>
+                    <div class="attendance__empty">
+                      {{ tr('Fixed shift is the default. After the group is created, this stage exposes the weekly matrix and fixed-schedule preview.', '默认使用固定班次。创建考勤组后，本阶段将显示周班次矩阵与固定排班预览。') }}
                     </div>
                   </section>
                 </section>
@@ -30486,7 +30521,7 @@ const holidaySectionBindings = {
   display: flex;
   flex-wrap: wrap;
   gap: 4px 10px;
-  color: #6b7280;
+  color: var(--ms-color-info);
   font-size: 12px;
 }
 
@@ -30523,9 +30558,9 @@ const holidaySectionBindings = {
   top: 8px;
   z-index: 2;
   padding: 8px;
-  border: 1px solid #dbe3ee;
+  border: 1px solid var(--ms-border-light);
   border-radius: 8px;
-  background: rgba(255, 255, 255, 0.96);
+  background: var(--ms-bg-card);
 }
 
 .attendance__group-workflow-step {
@@ -30535,10 +30570,10 @@ const holidaySectionBindings = {
   gap: 6px;
   min-height: 34px;
   min-width: 0;
-  border: 1px solid #dbe3ee;
+  border: 1px solid var(--ms-border-light);
   border-radius: 6px;
-  background: #f8fafc;
-  color: #334155;
+  background: var(--ms-bg-page);
+  color: var(--ms-text-2);
   cursor: pointer;
   font: inherit;
   font-size: 13px;
@@ -30546,15 +30581,15 @@ const holidaySectionBindings = {
 
 .attendance__group-workflow-step:hover,
 .attendance__group-workflow-step:focus-visible {
-  border-color: #1f6feb;
-  background: #eff6ff;
-  color: #0f3e76;
+  border-color: var(--ms-color-primary);
+  background: var(--el-color-primary-light-9);
+  color: var(--el-color-primary-dark-2);
 }
 
 .attendance__group-workflow-step--active {
-  border-color: #1f6feb;
-  background: #eff6ff;
-  color: #0f3e76;
+  border-color: var(--ms-color-primary);
+  background: var(--el-color-primary-light-9);
+  color: var(--el-color-primary-dark-2);
   font-weight: 600;
 }
 
@@ -30564,8 +30599,8 @@ const holidaySectionBindings = {
   height: 18px;
   place-items: center;
   border-radius: 50%;
-  background: #dbeafe;
-  color: #1d4ed8;
+  background: var(--el-color-primary-light-8);
+  color: var(--ms-color-primary);
   font-size: 11px;
   font-weight: 700;
 }

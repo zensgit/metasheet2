@@ -2665,11 +2665,16 @@ describe('Attendance admin regressions', () => {
     expect(groupsSection!.querySelector('#attendance-group-stage-people')).toBeTruthy()
     expect(groupsSection!.querySelector('#attendance-group-stage-policies')).toBeTruthy()
     expect(groupsSection!.querySelector('#attendance-group-stage-schedule')).toBeTruthy()
+    const basicsStage = workflow!.querySelector<HTMLButtonElement>('[data-attendance-group-workflow-step="basics"]')!
     const workTimeStage = workflow!.querySelector<HTMLButtonElement>('[data-attendance-group-workflow-step="schedule"]')!
+    expect(basicsStage.getAttribute('aria-current')).toBe('step')
+    expect(workTimeStage.getAttribute('aria-current')).toBeNull()
     workTimeStage.click()
     await flushUi(2)
     expect(groupsSection!.querySelector<HTMLElement>('#attendance-group-stage-basics')?.style.display).toBe('none')
     expect(groupsSection!.querySelector<HTMLElement>('#attendance-group-stage-schedule')?.style.display).not.toBe('none')
+    expect(basicsStage.getAttribute('aria-current')).toBeNull()
+    expect(workTimeStage.getAttribute('aria-current')).toBe('step')
     const rulesStage = workflow!.querySelector<HTMLButtonElement>('[data-attendance-group-workflow-step="policies"]')!
     rulesStage.click()
     await flushUi(2)
@@ -2749,6 +2754,14 @@ describe('Attendance admin regressions', () => {
     expect(groupsSection!.querySelector('[data-attendance-group-people]')?.textContent).toContain('Save the group before adding people.')
     expect(groupsSection!.querySelector('[data-attendance-group-managers]')?.textContent).toContain('Save the group before adding owners.')
     expect(groupsSection!.querySelector('[data-attendance-group-summary-card="rule-policy"]')?.textContent).toContain('Choose or save a group first')
+
+    workTimeStage.click()
+    await flushUi(2)
+    const createSchedulePlaceholder = groupsSection!.querySelector<HTMLElement>('[data-attendance-group-schedule-create-placeholder]')
+    expect(createSchedulePlaceholder?.textContent).toContain('Save basic info to unlock schedule preview')
+    createSchedulePlaceholder!.querySelector<HTMLButtonElement>('[data-attendance-group-schedule-create-basics]')!.click()
+    await flushUi(2)
+    expect(groupsSection!.querySelector<HTMLElement>('#attendance-group-stage-basics')?.style.display).not.toBe('none')
 
     const draftOpenWorkTime = groupsSection!.querySelector<HTMLButtonElement>('[data-attendance-group-summary-action="open-work-time-drawer"]')
     expect(draftOpenWorkTime).toBeTruthy()
