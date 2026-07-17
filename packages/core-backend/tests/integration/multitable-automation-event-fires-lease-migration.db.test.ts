@@ -59,8 +59,8 @@ describeDb('S6 event_fires tombstone→lease upgrade migration (real DB, isolate
 
   const rowsOf = async (ruleId: string) =>
     (
-      await sql<{ dedup_key: string; status: string; lease: string | null; attempts: number }>`
-        SELECT dedup_key, status, lease_expires_at::text AS lease, attempts
+      await sql<{ dedup_key: string; status: string; lease: string | null; attempts: number; fence: string }>`
+        SELECT dedup_key, status, lease_expires_at::text AS lease, attempts, fence::text AS fence
         FROM meta_automation_event_fires WHERE rule_id = ${ruleId} ORDER BY dedup_key
       `.execute(testDb)
     ).rows
@@ -74,12 +74,13 @@ describeDb('S6 event_fires tombstone→lease upgrade migration (real DB, isolate
     // run the REAL migration up() — the ALTER + backfill
     await expect(migrateUp(testDb)).resolves.toBeUndefined()
 
-    // every historical row is backfilled to done, lease-free, attempts 0 — so it is NOT re-fired
+    // every historical row is backfilled to done, lease-free, attempts 0, fence 0 — so it is NOT re-fired
     for (const ruleId of ['rule_A', 'rule_B']) {
       for (const r of await rowsOf(ruleId)) {
         expect(r.status).toBe('done')
         expect(r.lease).toBeNull()
         expect(r.attempts).toBe(0)
+        expect(r.fence).toBe('0')
       }
     }
     // a reclaim scan (in_progress + expired lease) sees NONE of them — no historical re-fire
@@ -88,6 +89,57 @@ describeDb('S6 event_fires tombstone→lease upgrade migration (real DB, isolate
       WHERE status = 'in_progress' AND lease_expires_at < now()
     `.execute(testDb)
     expect(reclaimable.rows[0].n).toBe(0)
+  })
+
+  it('FENCE is a monotonic single-writer token: claim increments, a stale-fence CAS writes 0 rows, bigint round-trips as string past 2^53', async () => {
+    await insertOld('rule_F', 'record.created:evt_f')
+    await migrateUp(testDb)
+    // claim: fence 0 → 1 via fence-CAS (WHERE fence = current)
+    const claim = await sql<{ fence: string }>`
+      UPDATE meta_automation_event_fires SET fence = fence + 1, status='in_progress', lease_expires_at = now() + interval '30 s'
+      WHERE rule_id='rule_F' AND fence = 0 RETURNING fence::text AS fence
+    `.execute(testDb)
+    expect(claim.rows[0].fence).toBe('1')
+    // reclaim: fence 1 → 2
+    const reclaim = await sql<{ fence: string }>`
+      UPDATE meta_automation_event_fires SET fence = fence + 1 WHERE rule_id='rule_F' AND fence = 1 RETURNING fence::text AS fence
+    `.execute(testDb)
+    expect(reclaim.rows[0].fence).toBe('2')
+    // a ZOMBIE holding the stale fence 1 tries to write a terminal — fence-CAS hits 0 rows (single-writer)
+    const zombie = await sql`
+      UPDATE meta_automation_event_fires SET status='done', lease_expires_at = NULL WHERE rule_id='rule_F' AND fence = 1
+    `.execute(testDb)
+    expect(Number(zombie.numAffectedRows ?? 0)).toBe(0)
+    // bigint precision: a fence past 2^53 must round-trip EXACTLY as a string (a JS number would corrupt it)
+    const big = '9007199254740993' // 2^53 + 1
+    await sql`UPDATE meta_automation_event_fires SET fence = ${big}::bigint WHERE rule_id='rule_F' AND fence = 2`.execute(testDb)
+    const back = await sql<{ fence: string }>`SELECT fence::text AS fence FROM meta_automation_event_fires WHERE rule_id='rule_F'`.execute(testDb)
+    expect(back.rows[0].fence).toBe(big)
+    // fence CHECK: negative rejected by the named constraint
+    await expect(
+      sql`UPDATE meta_automation_event_fires SET fence = -1 WHERE rule_id='rule_F'`.execute(testDb),
+    ).rejects.toThrow(/automation_event_fires_fence_nonneg/)
+  })
+
+  it('the FOUR ratified terminals done|outcome_unknown|failed|dead_letter are accepted and are lease-NULL', async () => {
+    await migrateUp(testDb)
+    for (const term of ['done', 'outcome_unknown', 'failed', 'dead_letter']) {
+      // a terminal row inserts cleanly (closed-set accepts it) and carries NO lease (biconditional)
+      await expect(
+        sql`INSERT INTO meta_automation_event_fires (rule_id, dedup_key, status) VALUES ('rule_T', ${term}, ${term})`.execute(testDb),
+      ).resolves.toBeTruthy()
+      // attaching a lease to a terminal is rejected — a settled row can never carry ownership
+      await expect(
+        sql`UPDATE meta_automation_event_fires SET lease_expires_at = now() + interval '30 s' WHERE rule_id='rule_T' AND dedup_key=${term}`.execute(testDb),
+      ).rejects.toThrow(/automation_event_fires_lease_iff_in_progress/)
+    }
+  })
+
+  it('attempts CHECK: a negative attempts is rejected by the named constraint', async () => {
+    await migrateUp(testDb)
+    await expect(
+      sql`INSERT INTO meta_automation_event_fires (rule_id, dedup_key, attempts) VALUES ('rule_N','k', -1)`.execute(testDb),
+    ).rejects.toThrow(/automation_event_fires_attempts_nonneg/)
   })
 
   it('lease biconditional CHECK: a done/pending row rejects a lease; an in_progress row requires one', async () => {

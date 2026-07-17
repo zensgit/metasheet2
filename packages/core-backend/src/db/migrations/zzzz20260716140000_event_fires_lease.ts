@@ -15,9 +15,19 @@
  * UPGRADE path — old-schema rows written BEFORE this migration then this migration applied — not fresh-DB,
  * which would create rows already-backfilled and never exercise the backfill statement.)
  *
- * The `status`/lease CHECKs mirror `meta_automation_outbox_consumer` (create_automation_outbox): a
- * BICONDITIONAL that ties `lease_expires_at IS NOT NULL` to `status='in_progress'` in BOTH directions, so a
- * settled row can never carry stale ownership and an in_progress row is always reclaimable.
+ * State machine (design lock §Layer-1, lines 353-355): `pending` | `in_progress` | and the FOUR
+ * resolve-permitting terminals `done` | `outcome_unknown` | `failed` | `dead_letter` (success; external-send
+ * ambiguity; deterministic permanent failure after bounded attempts). The `status`/lease CHECKs mirror
+ * `meta_automation_outbox_consumer`: a BICONDITIONAL ties `lease_expires_at IS NOT NULL` to
+ * `status='in_progress'` in BOTH directions, so every terminal (done/outcome_unknown/failed/dead_letter) and
+ * pending is lease-NULL — no stale ownership — and an in_progress row is always reclaimable.
+ *
+ * FENCE (design lock round-5, lines 49-50 + 59 — a UNIVERSAL rule covering EVERY reclaimable lease row): a
+ * monotonic `fence` self-incremented on claim/reclaim; writes to persistent state MUST be fence-CAS
+ * (`WHERE fence = <claimed>`), so a reclaimed "zombie" (alive but lease-expired holder) that tries to write
+ * with its stale fence hits 0 rows and aborts → persistent state is SINGLE-WRITER. `bigint` (not int): fence
+ * values can exceed 2^31, and must round-trip as a STRING at the driver seam (a JS number loses precision
+ * past 2^53).
  */
 import { sql, type Kysely } from 'kysely'
 
@@ -26,7 +36,8 @@ export async function up(db: Kysely<unknown>): Promise<void> {
   await sql`
     ALTER TABLE meta_automation_event_fires
       ADD COLUMN IF NOT EXISTS status text NOT NULL DEFAULT 'done'
-        CONSTRAINT automation_event_fires_status_valid CHECK (status IN ('pending','in_progress','done','dead_letter'))
+        CONSTRAINT automation_event_fires_status_valid
+        CHECK (status IN ('pending','in_progress','done','outcome_unknown','failed','dead_letter'))
   `.execute(db)
   await sql`ALTER TABLE meta_automation_event_fires ADD COLUMN IF NOT EXISTS lease_expires_at timestamptz`.execute(db)
   await sql`
@@ -34,8 +45,14 @@ export async function up(db: Kysely<unknown>): Promise<void> {
       ADD COLUMN IF NOT EXISTS attempts int NOT NULL DEFAULT 0
         CONSTRAINT automation_event_fires_attempts_nonneg CHECK (attempts >= 0)
   `.execute(db)
+  // FENCE — monotonic single-writer token, incremented on claim/reclaim; persistent-state writes are fence-CAS.
+  await sql`
+    ALTER TABLE meta_automation_event_fires
+      ADD COLUMN IF NOT EXISTS fence bigint NOT NULL DEFAULT 0
+        CONSTRAINT automation_event_fires_fence_nonneg CHECK (fence >= 0)
+  `.execute(db)
   // BICONDITIONAL: a lease exists IFF the row is in_progress (mirrors outbox_consumer). in_progress ⇒ leased
-  // (reclaimable); settled/pending ⇒ NO lease (no stale ownership).
+  // (reclaimable); every terminal + pending ⇒ NO lease (no stale ownership).
   await sql`
     ALTER TABLE meta_automation_event_fires
       ADD CONSTRAINT automation_event_fires_lease_iff_in_progress
@@ -51,6 +68,7 @@ export async function up(db: Kysely<unknown>): Promise<void> {
 export async function down(db: Kysely<unknown>): Promise<void> {
   await sql`DROP INDEX IF EXISTS idx_automation_event_fires_reclaim`.execute(db)
   await sql`ALTER TABLE meta_automation_event_fires DROP CONSTRAINT IF EXISTS automation_event_fires_lease_iff_in_progress`.execute(db)
+  await sql`ALTER TABLE meta_automation_event_fires DROP COLUMN IF EXISTS fence`.execute(db)
   await sql`ALTER TABLE meta_automation_event_fires DROP COLUMN IF EXISTS attempts`.execute(db)
   await sql`ALTER TABLE meta_automation_event_fires DROP COLUMN IF EXISTS lease_expires_at`.execute(db)
   await sql`ALTER TABLE meta_automation_event_fires DROP COLUMN IF EXISTS status`.execute(db)
