@@ -9,6 +9,16 @@ import { branchChildStepKey, topLevelStepKey } from './automation-step-key'
 import { deriveRuleActionSetFingerprint } from './automation-rule-fingerprint'
 import { claimExecutionAction, isClassAExecutionClaimEnabled } from './automation-execution-ledger'
 import { deriveActionKey } from './automation-action-idempotency'
+import {
+  classifyFetchError,
+  classifyOutboundResult,
+  claimOutboundIntent,
+  isClassBOutboundEnabled,
+  outboundReasonClass,
+  recordOutboundOutcome,
+  type OutboundAttemptResult,
+  type OutboundIntentIdentity,
+} from './automation-outbound-intent'
 import type { TransactionalQueryable } from './pg-transaction-guard'
 import { Logger } from '../core/logger'
 import { withAutomationEventId } from './automation-event-dedup'
@@ -1771,7 +1781,10 @@ export class AutomationExecutor {
           result = await this.executeDeleteRecord(action.config, context, identity)
           break
         case 'send_webhook':
-          result = await this.executeSendWebhook(action.config, context)
+          // #4196 Class-B: thread the execution identity so send_webhook can take the two-phase
+          // intent/outcome path when AUTOMATION_CLASSB_OUTBOUND_ENABLED is ON (flag OFF ⇒ identity ignored,
+          // byte-identical). The other four send_* actions are a clearly-flagged follow-up (see PR body).
+          result = await this.executeSendWebhook(action.config, context, identity)
           break
         case 'send_notification':
           result = await this.executeSendNotification(action.config, context)
@@ -2723,6 +2736,9 @@ export class AutomationExecutor {
   private async executeSendWebhook(
     config: Record<string, unknown>,
     context: ExecutionContext,
+    // #4196 Class-B identity. Present on every rule-driven call; undefined for the ad-hoc single-action
+    // dispatch (runSingleAction — no execution lineage, so no intent). Ignored entirely when the flag is OFF.
+    identity?: ClassAActionIdentity,
   ): Promise<AutomationStepResult> {
     const url = config.url as string | undefined
     if (!url) {
@@ -2757,6 +2773,16 @@ export class AutomationExecutor {
 
     const fetchFn = this.deps.fetchFn ?? globalThis.fetch
     const timeoutMs = webhookTimeoutMs()
+
+    // #4196 Class-B two-phase (flag ON + identity present). Intent (Tx A) commits BEFORE the send; a prior
+    // `sent`/`outcome_unknown` short-circuits with NO network call. When the flag is OFF (or there is no
+    // execution identity — the runSingleAction ad-hoc path) this is skipped and the legacy retry loop below
+    // runs BYTE-IDENTICAL to pre-slice.
+    const outboundId = this.classBOutboundIdentity(identity, 'send_webhook', config)
+    if (outboundId) {
+      return this.executeSendWebhookTwoPhase(outboundId, { url, method, headers, bodyStr, fetchFn, timeoutMs })
+    }
+
     const retries = maxWebhookRetries()
 
     let lastError: string | undefined
@@ -2801,6 +2827,103 @@ export class AutomationExecutor {
       actionType: 'send_webhook',
       status: 'failed',
       error: `Webhook failed after ${retries + 1} attempts: ${lastError}`,
+    }
+  }
+
+  /**
+   * #4196 Class-B gate: an outbound intent identity is present ONLY when the flag is ON AND the caller
+   * supplied a class-A execution identity (a rule-driven dispatch with a lineage root). Unlike class-A this
+   * does NOT require `deps.transaction` — the intent row is its own commit (Tx A) via the autocommit
+   * `queryFn`, with no DB mutation to co-commit. `config` is passed RAW to `deriveActionKey` so the outbound
+   * key is the SAME §2.1 identity as the class-A claim / §4 fingerprint.
+   */
+  private classBOutboundIdentity(
+    identity: ClassAActionIdentity | undefined,
+    actionType: AutomationActionType,
+    config: unknown,
+  ): OutboundIntentIdentity | null {
+    if (!isClassBOutboundEnabled() || !identity) return null
+    return {
+      kind: 'execution',
+      rootExecutionId: identity.rootExecutionId,
+      actionKey: deriveActionKey({ structuralPath: identity.structuralPath, actionType, canonicalConfig: config }),
+    }
+  }
+
+  /**
+   * #4196 Class-B two-phase send for send_webhook. Tx A (claim) already decided we may attempt; here we
+   * attempt EXACTLY ONCE — a send is at-most-once on this path, so there is NO in-call resend on an ambiguous
+   * failure (that would be the duplicate external effect `outcome_unknown` exists to forbid). Classify the
+   * single attempt, record the outcome (Tx B, guarded single-writer), and map to a step result:
+   *   - sent            → success;
+   *   - failed          → failed (definite pre-dispatch non-delivery; a later retry re-attempts via Tx A);
+   *   - outcome_unknown  → a FAILED-shaped step naming outcome_unknown (operator-visible; NEVER auto-resent).
+   */
+  private async executeSendWebhookTwoPhase(
+    outboundId: OutboundIntentIdentity,
+    req: {
+      url: string
+      method: string
+      headers: Record<string, string>
+      bodyStr: string
+      fetchFn: typeof fetch
+      timeoutMs: number
+    },
+  ): Promise<AutomationStepResult> {
+    // Tx A — intent committed BEFORE the network call. A prior sent/unknown short-circuits with no send.
+    const decision = await claimOutboundIntent(this.deps.queryFn, outboundId)
+    if (decision === 'skip_sent' || decision === 'skip_unknown') {
+      // Success-shaped, alreadyApplied — no second delivery for an already-sent or ambiguous prior attempt.
+      return this.alreadyAppliedResult('send_webhook')
+    }
+
+    // decision is 'proceed' | 'retry_failed' → attempt ONCE.
+    let attempt: OutboundAttemptResult
+    const controller = new AbortController()
+    const timeout = setTimeout(() => controller.abort(), req.timeoutMs)
+    try {
+      const response = await req.fetchFn(req.url, {
+        method: req.method,
+        headers: req.headers,
+        body: req.bodyStr,
+        signal: controller.signal,
+      })
+      attempt = { kind: 'response', status: response.status }
+    } catch (err) {
+      attempt = classifyFetchError(err)
+    } finally {
+      clearTimeout(timeout)
+    }
+
+    const outcome = classifyOutboundResult(attempt)
+    const reason = outboundReasonClass(attempt) // bounded, redacted class — never a body/URL/token
+    // Tx B — record the terminal outcome (guarded `status='pending'`, single-writer).
+    await recordOutboundOutcome(this.deps.queryFn, outboundId, outcome, reason)
+
+    if (outcome === 'sent') {
+      return {
+        actionType: 'send_webhook',
+        status: 'success',
+        output: { outcome: 'sent', httpStatus: attempt.kind === 'response' ? attempt.status : null },
+      }
+    }
+    if (outcome === 'failed') {
+      // Definite non-delivery (nothing left the client) — retryable; the run is marked failed.
+      return {
+        actionType: 'send_webhook',
+        status: 'failed',
+        error: `send_webhook definite non-delivery (${reason}); eligible for retry`,
+        output: { outcome: 'failed', reason },
+      }
+    }
+    // outcome_unknown — the send MAY have happened; surfaced as failed so the run does NOT silently succeed,
+    // and NEVER auto-resent (a retry consults the intent row and skips).
+    logger.warn(`send_webhook to ${redactString(req.url)} → outcome_unknown (${reason}); recorded, not auto-resent`)
+    return {
+      actionType: 'send_webhook',
+      status: 'failed',
+      error: `send_webhook outcome_unknown (${reason}); recorded, not auto-resent`,
+      output: { outcome: 'outcome_unknown', reason },
     }
   }
 
