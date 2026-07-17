@@ -734,6 +734,7 @@ jobs:
             tests/integration/multitable-automation-event-fires-lease-migration.db.test.ts \
             tests/integration/multitable-automation-event-fires-lease-realdb.db.test.ts \
             tests/integration/multitable-automation-approval-bridge-lease-migration.db.test.ts \
+            tests/integration/multitable-automation-approval-bridge-lease-realdb.test.ts \
             tests/integration/multitable-attachment-blob-purge.db.test.ts \
             tests/integration/multitable-attachment-root-escape.db.test.ts \
             tests/integration/stock-prep-audit-immutable-trigger.db.test.ts \

@@ -37,7 +37,7 @@ type BridgeStatus = 'creating' | 'pending' | 'in_progress' | 'resumed' | 'failed
 
 /** Reclaimable-lease knobs for the flag-ON completion claim (mirror S6 EVENT_DELIVERY_LEASE_MS + dispatcher). */
 const BRIDGE_COMPLETION_LEASE_MS = 60_000
-const BRIDGE_COMPLETION_MAX_ATTEMPTS = 8
+export const BRIDGE_COMPLETION_MAX_ATTEMPTS = 8
 
 export interface AutomationApprovalBridgeRow {
   id: string
