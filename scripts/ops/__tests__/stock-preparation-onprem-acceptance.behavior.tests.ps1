@@ -472,13 +472,13 @@ exec node "$(dirname "$0")/pm2-fixture.mjs" "$@"
     ($selectedTok -is [SecureString]) -and (-not [Environment]::GetEnvironmentVariable('METASHEET_ADMIN_TOKEN'))
   )
 
-  # WinPS 5.1 console-width wrap regression pin: a CRLF injected MID-TOKEN (as the 5.1 console host
-  # does when piping a long line to native stdin) must still parse - the helper strips raw CR/LF,
-  # which is provably safe for valid JSON.
-  $wrapJson = '[{"name":"metasheet-back' + "`r`n" + 'end","pm2_env":{"status":"onl' + "`r`n" + 'ine","restart_time":3,"pm_uptime":1000,"env":{"metasheet_admin_token":"LEAKED-WRAP-9911"}}}]'
-  $wrapped = Invoke-Pm2Projection $wrapJson
-  Check "pm2 projection: console-width CRLF wrap mid-token still parses and detects the leak" (
-    $wrapped.Exit -eq 0 -and $wrapped.Sample.state -eq 'online' -and $wrapped.Sample.adminTokenNonEmpty -eq $true -and $wrapped.Raw -notmatch 'LEAKED-WRAP-9911'
+  # BOM regression pin (PROVEN cause of the CI 5.1 arm's silent exit-1): a BOM-emitting
+  # $OutputEncoding prefixes native stdin with U+FEFF and JSON.parse rejects it. The helper strips
+  # ONLY a leading BOM (never valid JSON content -> lossless).
+  $bomJson = [string][char]0xFEFF + '[{"name":"metasheet-backend","pm2_env":{"status":"online","restart_time":3,"pm_uptime":1000,"env":{"metasheet_admin_token":"LEAKED-BOM-9911"}}}]'
+  $bommed = Invoke-Pm2Projection $bomJson
+  Check "pm2 projection: a leading BOM on the piped payload still parses and detects the leak" (
+    $bommed.Exit -eq 0 -and $bommed.Sample.state -eq 'online' -and $bommed.Sample.adminTokenNonEmpty -eq $true -and $bommed.Raw -notmatch 'LEAKED-BOM-9911'
   )
 
   # corrective-6: the PURE hygiene verdict is fail-closed (a stale packaged helper is a FAIL, not a skip).

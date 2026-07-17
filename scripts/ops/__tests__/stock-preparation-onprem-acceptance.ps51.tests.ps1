@@ -125,15 +125,16 @@ try {
 
 
 # ── corrective-6: token-hygiene projection + verdict under REAL Windows PowerShell 5.1 ───────────
-# (PSObject.Properties indexing, [bool] typing, .cmd PATH shim, ConvertFrom-Json of the 5-key
-# sample). Desktop-gated: on any other host the suite ALREADY fails loudly at the host check above,
-# so this can never green-skip.
+# (PSObject.Properties indexing, [bool] typing, FUNCTION pm2 shim, ConvertFrom-Json of the 5-key
+# sample, and the 5.1 native-stdin pipe with whatever $OutputEncoding the host session carries —
+# the CI session emits a UTF-8 BOM, which the helper must strip). Desktop-gated: on any other host
+# the suite ALREADY fails loudly at the host check above, so this can never green-skip.
 if ($PSVersionTable.PSEdition -eq 'Desktop') {
   $hygieneDir = Join-Path ([System.IO.Path]::GetTempPath()) ("t9ps51_pm2_" + [guid]::NewGuid().ToString('N').Substring(0, 12))
   New-Item -ItemType Directory -Path $hygieneDir | Out-Null
   try {
-    # -Encoding ASCII is LOAD-BEARING: Windows PowerShell 5.1 Set-Content defaults to UTF-16LE,
-    # and a BOM'd .mjs fixture cannot be executed by node (entity re-review finding).
+    # -Encoding ASCII pins the fixture bytes deterministically regardless of the host's
+    # Set-Content default encoding (which varies across 5.1 configurations).
     $hygieneFixture = Join-Path $hygieneDir 'pm2-fixture.mjs'
     Set-Content -Path $hygieneFixture -Encoding ASCII -Value @'
 #!/usr/bin/env node
@@ -160,9 +161,36 @@ process.stdout.write(process.env.T9_PS51_JLIST || '')
         try { $directErr = (($env:T9_PS51_JLIST | & node $helperPath 'METASHEET_ADMIN_TOKEN' 2>&1 1>$null) | Out-String) } catch { $directErr = "thrown:$($_.Exception.GetType().Name)" }
         $directErr = ($directErr -replace 'LEAKED-PS51-9911', '<REDACTED>')
         if ($directErr.Length -gt 200) { $directErr = $directErr.Substring(0, 200) }
+        # Owner-prescribed values-free PAYLOAD probes: byte count, BOM/NUL booleans, utf8 decode +
+        # JSON.parse verdicts (raw vs BOM-stripped), target entry count and counter-type booleans.
+        $probeFixture = Join-Path $hygieneDir 'payload-probe.mjs'
+        Set-Content -Path $probeFixture -Encoding ASCII -Value @'
+import fs from "node:fs"
+const buf = fs.readFileSync(0)
+const text = buf.toString("utf8")
+const out = {
+  byteLen: buf.length,
+  bomPrefix: buf.length >= 3 && buf[0] === 0xEF && buf[1] === 0xBB && buf[2] === 0xBF,
+  hasNul: buf.includes(0),
+  firstByteHex: buf.length ? buf[0].toString(16) : "empty",
+}
+let rawOk = false, strippedOk = false, targetCount = -1, countersOk = false
+try { JSON.parse(text); rawOk = true } catch {}
+try {
+  const parsed = JSON.parse(text.replace(/^\uFEFF/, ""))
+  strippedOk = true
+  const matches = Array.isArray(parsed) ? parsed.filter((entry) => entry && entry.name === "metasheet-backend") : []
+  targetCount = matches.length
+  const env = matches[0] && matches[0].pm2_env
+  countersOk = Boolean(env) && Number.isSafeInteger(env.restart_time) && Number.isSafeInteger(env.pm_uptime)
+} catch {}
+out.parseRawOk = rawOk; out.parseBomStrippedOk = strippedOk; out.targetCount = targetCount; out.countersOk = countersOk
+console.log(Object.entries(out).map(([k, v]) => k + "=" + v).join(" "))
+'@ -NoNewline
+        $payloadProbe = ($env:T9_PS51_JLIST | & node $probeFixture 2>$null); $probeExit = $LASTEXITCODE
         $evtProbe = ('hello' | & node -e "let r='';process.stdin.on('data',d=>r+=d).on('end',()=>console.log('EVT='+r.length))" 2>$null); $evtExit = $LASTEXITCODE
-        $aitProbe = ('hello' | & node --input-type=module -e "let r='';for await (const c of process.stdin) r+=c; console.log('AIT='+r.length)" 2>$null); $aitExit = $LASTEXITCODE
-        Write-Host ("  DIAG ps51-hygiene: helperExists=" + (Test-Path -LiteralPath $helperPath) + " shimExit=$shimExit shimLen=" + ("$shimRaw").Length + " directExit=$directExit directLen=" + ("$directRaw").Length + " evt=[$evtProbe/$evtExit] ait=[$aitProbe/$aitExit]")
+        Write-Host ("  DIAG ps51-hygiene: helperExists=" + (Test-Path -LiteralPath $helperPath) + " shimExit=$shimExit shimLen=" + ("$shimRaw").Length + " directExit=$directExit directLen=" + ("$directRaw").Length + " evt=[$evtProbe/$evtExit]")
+        Write-Host ("  DIAG ps51-payload: [" + $payloadProbe + "] probeExit=$probeExit")
         Write-Host ("  DIAG ps51-hygiene stderr: [" + $directErr.Trim() + "]")
       }
       Check 'ps51 hygiene: case-variant admin token projects to adminTokenNonEmpty=true through the 5.1 pipeline' (
