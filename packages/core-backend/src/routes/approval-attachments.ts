@@ -109,7 +109,7 @@ export function createApprovalAttachmentRouter(deps: ApprovalAttachmentRouteDeps
     if (!(await deps.resolveAttachmentField(templateId, fieldId))) {
       return res.status(400).json({ error: 'not_an_attachment_field' })
     }
-    const verdict = validateApprovalAttachments([{ fileName: f.originalname, mimeType: f.mimetype, sizeBytes: f.size }]) as {
+    const verdict = validateApprovalAttachments([{ fileName: f.originalname, mimeType: f.mimetype, sizeBytes: f.size, content: f.buffer }]) as {
       ok: boolean
       rejected?: Array<{ fileName: string; code: string }>
     }
