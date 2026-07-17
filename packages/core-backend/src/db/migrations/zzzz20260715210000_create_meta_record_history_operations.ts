@@ -47,12 +47,15 @@ import { sql, type Kysely } from 'kysely'
  *       stays fail-closed.
  *
  * WHOLE-OPERATION RETENTION (H2 — owner hardening): `meta_record_history_operations_prune(sheet_id,
- * operation_id)` prunes a whole sealed operation ATOMICALLY — it deletes the operation's events across BOTH
- * event tables AND its endpoint row in ONE transaction, under the retention GUC, so the endpoint's
- * count/max invariant is never left half-satisfied. A partial prune is impossible: dropping only the endpoint
- * leaves the events referencing a vanished endpoint and the DEFERRABLE FK RAISES at COMMIT; dropping only the
- * events leaves an orphan endpoint. A still-referenced / younger operation is untouched (the function is keyed
- * on the exact operation_id).
+ * operation_id)` prunes a whole sealed operation — it deletes the operation's events across BOTH event
+ * tables AND its endpoint row in ONE transaction, under the retention GUC. The two torn-prune directions
+ * have DIFFERENT protection mechanisms (owner review 2026-07-17 — do not overstate the DB half):
+ *   • endpoint-gone-but-events-remain — DB-ENFORCED: surviving events reference a vanished endpoint and the
+ *     DEFERRABLE FK RAISES at COMMIT.
+ *   • events-gone-but-endpoint-remains (an orphan endpoint) — NOT rejected by any FK; this direction is
+ *     protected only by this function's own implementation (all three DELETEs in one call) plus its golden
+ *     coverage. An orphan endpoint would be detectable but would COMMIT.
+ * A still-referenced / younger operation is untouched (the function is keyed on the exact operation_id).
  *
  * EXACT BIGINT (§1.1 / P2-C): endpoint_seq is BIGINT, compared natively in SQL and kept as a decimal string
  * end-to-end in TS/JSON — never Number()/parseInt/+/-. The validation trigger compares MAX(seq) in-DB
@@ -237,12 +240,16 @@ export async function up(db: Kysely<unknown>): Promise<void> {
   `.execute(db)
 
   // ── H2 (owner hardening): whole-operation retention — atomic prune of a sealed operation ─────────────
-  // Prunes ONE sealed operation ATOMICALLY: deletes the operation's events across BOTH event tables AND its
-  // endpoint row in ONE transaction, under the retention GUC that (5)'s DELETE-reject trigger honours. Never a
-  // partial prune — dropping only the endpoint leaves events referencing a vanished endpoint (the DEFERRABLE
-  // FK RAISES at COMMIT), dropping only the events leaves an orphan endpoint. A younger / still-referenced
-  // operation is untouched (keyed on the exact operation_id). The GUC is transaction-local (`set_config(…,
-  // true)`) so it never leaks past this call.
+  // Prunes ONE sealed operation: deletes the operation's events across BOTH event tables AND its endpoint
+  // row in ONE transaction, under the retention GUC that (5)'s DELETE-reject trigger honours. Torn-prune
+  // protection is DIRECTION-ASYMMETRIC (owner review 2026-07-17): endpoint-first is DB-enforced (surviving
+  // events trip the DEFERRABLE FK at COMMIT); events-first (an orphan endpoint) has NO FK and relies on this
+  // function's implementation + goldens. A younger / still-referenced operation is untouched (keyed on the
+  // exact operation_id). GUC scope: `set_config(…, true)` is transaction-local (reverts at txn END) — but
+  // WITHIN the caller's transaction it is the trailing `set_config('off')` below that restores H1 for the
+  // rest of that txn; that reset is LOAD-BEARING and pinned by the G2 golden
+  // (multitable-l4cov-services-fence-realdb.test.ts — removing it lets a later ad-hoc endpoint DELETE in the
+  // same caller txn slip through).
   await sql`
     CREATE OR REPLACE FUNCTION meta_record_history_operations_prune(p_sheet_id text, p_operation_id uuid)
     RETURNS void AS $fn$
