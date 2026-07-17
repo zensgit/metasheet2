@@ -111,6 +111,8 @@ OD-W3-2 退役审计字段(归 W5b)。
 
 ## 8. 收官声明(2026-07-10)
 
+> 本节保留 2026-07-10 当时的在途状态；最终实体机验收结论见 §9 addendum。
+
 **代码侧完成口径(更正版):W2 尾段 + W3/W4/W5 全波 + F follow-ups = 12 个实现 PR 已 MERGED
 on main;第 13 个(#4038 smoke)在途,owner REQUEST_CHANGES 修复后 fresh-green 合并。**
 落地定序(owner 指定):#4038 fresh-green 合并 → **实体机 dispatch PASS** → 本 MD 补 PASS 记录。
@@ -121,3 +123,55 @@ owner-gated 池(§7)+ Open Decisions(§6)+ 实体机执行。
 provisioning/ensure/sync-persist 面保留各自 run 记录,刻意不进本轨。
 FE 侧六视图全挂 StockPreparationWorkspace(壳 union 含 #4026/#4030 双波),
 integration-guard 收录全部 7 个 StockPreparation spec(43 文件/598 测)。
+
+## 9. 实体机验收 addendum(2026-07-17)
+
+W6 postdeploy smoke 已由 #4038 合入 main(`d11c1afac`)。最终 Windows on-prem 验收使用已校验的
+corrective-6 release `stock-prep-onprem-rc0-corrective6-20260717-f5c449782`，源码 SHA 为
+`f5c4497828915f861a948a9e08326b88ff4497e3`。完整 values-free 证据记录在 #4101；本节只固化
+关闭判据，不记录 tenant、credential、host、路径、业务值或原始日志。
+corrective-4 与 corrective-5 pre-release 均已标记 `[SUPERSEDED→corrective-6]`；corrective-6 是本弧
+唯一通过实体机验收的 canonical RC-0 package。
+
+首次 corrective-6 执行在 AUTH 后的 PROVISIONING 阶段 fail-closed。后续 bounded 澄清证明同一
+admin principal 被使用，但 runner 未收到非空 `-TenantId`。该失败因此归类为调用参数遗漏，不是
+包、迁移或 runtime 新缺陷。operator 使用同一已校验 release，从全新 stage 1 仅纠正本地 tenant
+参数后执行一次；未改包、未安装额外依赖、未使用 `MIGRATION_EXCLUDE`、未绕过 packaged runner，
+也未补跑 manual smoke。
+
+最终结果：
+
+```text
+releaseAssetChecksum=PASS
+remoteStagingChecksum=PASS
+packageProvenanceShaMatch=PASS
+packageShaMatch=PASS
+migrationStatus=PASS
+pm2RestartCommand=PASS
+pm2StableOnline=PASS
+healthcheck=PASS
+mvpSmoke.pass=true
+mvpSmoke.auditActionsCovered=8/8
+mvpSmoke.selfScanClean=true
+mvpSmoke.failureClass=NONE
+mvpSmoke.lastCompletedPhase=RESPONSE_LEAK_SCAN
+mvpSmoke.firstFailedCheck=NONE
+mvpSmoke.failedCheckCount=0
+mvpSmoke.responseLeakScanStatus=PASS
+externalPlmK3ErpWrite=false
+postRunCredentialHygiene=PASS
+postRunReadOnly.deployedProvenanceMatch=PASS
+postRunReadOnly.postSmokeStabilityCheck=PASS
+postRunReadOnly.healthcheck=PASS
+postRunReadOnly.independentCredentialHygiene=PASS
+postRunReadOnly.migrationExcludeAbsent=PASS
+postRunReadOnly.lingeringAcceptanceProcess=false
+failedStage=none
+repeatability=1/1
+overallAcceptance=PASS
+```
+
+**结论：W3-W6 on-prem package/runtime 验收弧 PASS，#4101 已按该范围 CLOSED。** 此结论只关闭本文定义的
+实体机运行时验收，不授权 §6/§7 的 owner-gated 产品决策、外部 PLM/K3/ERP 写、生产 rollout 或
+额外实体机执行。#4423 的 bounded HTTP failure diagnostics 是后续预防性加固，不是本次 PASS 的
+来源或关闭前置；本次验收不需要 corrective-7 package。
