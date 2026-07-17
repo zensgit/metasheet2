@@ -32,6 +32,11 @@ import {
   type InboundWebhookRejectReason,
 } from './automation-inbound-webhook'
 import { isValidIanaTimeZone } from './automation-timezone'
+import { isDurableDeliveryEnabled } from './automation-durable-delivery'
+
+/** S6 event-delivery lease window: long enough to cover a normal executeRule, short enough that a crashed
+ *  worker's row is reclaimable promptly. Only consulted on the durable-delivery (flag ON) lease path. */
+const EVENT_DELIVERY_LEASE_MS = 60_000
 import { ensureRecordNotLocked } from './record-lock'
 import { publishMultitableSheetRealtime } from './realtime-publish'
 import { extractSelectOptions, normalizeJson } from './field-codecs'
@@ -1560,6 +1565,72 @@ export class AutomationService {
   }
 
   /**
+   * S6 (durable-delivery flag ON only): claim the (rule, dedup) with a reclaimable LEASE instead of the
+   * permanent tombstone, so a crash BETWEEN the claim and `executeRule` finishing leaves the row RECLAIMABLE
+   * rather than dropping the work forever (design lock §Layer-1 window-2). Returns `{ fence }` when THIS caller
+   * owns the claim — a fresh row (fence 1) OR a reclaimed EXPIRED lease (fence bumped) — or `'skip'` when the
+   * row is already `done` (delivered) or held by a LIVE lease (another worker owns it; do NOT double-run).
+   * The claimer must `markEventDeliveryDone(ruleId, dedupKey, fence)` after `executeRule` succeeds; a zombie
+   * whose fence is stale loses the fence-CAS there (single-writer persisted state). Flag OFF still uses the
+   * legacy tombstone `claimEventDelivery` above — byte-neutral: the #4413 migration's `status DEFAULT 'done'`
+   * makes every legacy tombstone row read as delivered, so the two paths interoperate on the shared table.
+   */
+  private async claimEventDeliveryLeased(ruleId: string, dedupKey: string, leaseMs: number): Promise<{ fence: string } | 'skip'> {
+    const ms = Math.max(1, Math.floor(leaseMs))
+    // Fresh claim: insert in_progress with a lease + fence 1. ON CONFLICT DO NOTHING so an existing row falls
+    // through to the reclaim path (a bare tombstone/done row, or another worker's in_progress).
+    const fresh = await sql<{ fence: string }>`
+      INSERT INTO meta_automation_event_fires (rule_id, dedup_key, status, lease_expires_at, fence, attempts)
+      VALUES (${ruleId}, ${dedupKey}, 'in_progress', now() + ${ms} * interval '1 millisecond', 1, 1)
+      ON CONFLICT (rule_id, dedup_key) DO NOTHING
+      RETURNING fence::text AS fence
+    `.execute(this.db)
+    if (fresh.rows.length > 0) return { fence: fresh.rows[0].fence }
+    // Row exists: RECLAIM iff it is an EXPIRED in_progress lease (a crashed/zombie worker). A `done` row or a
+    // LIVE (unexpired) in_progress lease is left untouched → 'skip' (delivered, or owned by a live worker).
+    // The `status='in_progress' AND lease_expires_at < now()` predicate makes concurrent reclaimers race on
+    // the row: exactly one UPDATE affects it, the others see the already-bumped fence and get 0 rows → 'skip'.
+    const reclaim = await sql<{ fence: string }>`
+      UPDATE meta_automation_event_fires
+      SET fence = fence + 1, attempts = attempts + 1, lease_expires_at = now() + ${ms} * interval '1 millisecond'
+      WHERE rule_id = ${ruleId} AND dedup_key = ${dedupKey}
+        AND status = 'in_progress' AND lease_expires_at < now()
+      RETURNING fence::text AS fence
+    `.execute(this.db)
+    return reclaim.rows.length > 0 ? { fence: reclaim.rows[0].fence } : 'skip'
+  }
+
+  /** fence-CAS the leased row to terminal `done` (clears the lease atomically). A stale-fence zombie hits 0 rows. */
+  private async markEventDeliveryDone(ruleId: string, dedupKey: string, fence: string): Promise<boolean> {
+    const res = await sql`
+      UPDATE meta_automation_event_fires
+      SET status = 'done', lease_expires_at = NULL
+      WHERE rule_id = ${ruleId} AND dedup_key = ${dedupKey} AND fence = ${fence}::bigint AND status = 'in_progress'
+    `.execute(this.db)
+    return Number(res.numAffectedRows ?? 0) === 1
+  }
+
+  /**
+   * Run `run` under the event-dedup ledger, choosing the S6 lease flow when durable delivery is enabled and
+   * the legacy tombstone flow otherwise. Both return early (do nothing) when the delivery is already claimed
+   * by someone else / already done. The lease flow marks the row `done` (fence-CAS) only AFTER `run` succeeds;
+   * if `run` throws, the lease is left to expire so the next scan reclaims it (window-2 fix). Flag OFF is
+   * byte-neutral (legacy at-most-once tombstone).
+   */
+  private async runWithEventDedup(ruleId: string, dedupKey: string, run: () => Promise<unknown>, env: NodeJS.ProcessEnv = process.env): Promise<void> {
+    if (!isDurableDeliveryEnabled(env)) {
+      const claimed = await this.claimEventDelivery(ruleId, dedupKey)
+      if (!claimed) return
+      await run()
+      return
+    }
+    const lease = await this.claimEventDeliveryLeased(ruleId, dedupKey, EVENT_DELIVERY_LEASE_MS)
+    if (lease === 'skip') return
+    await run()
+    await this.markEventDeliveryDone(ruleId, dedupKey, lease.fence)
+  }
+
+  /**
    * Date-reminder scan (`schedule.date_field`). For each record in the rule's sheet whose date field yields a
    * DUE occurrence, claim it in the idempotency ledger and fire the rule once with the record as context.
    *
@@ -2067,10 +2138,10 @@ export class AutomationService {
 
       try {
         if (dedupKey) {
-          const claimed = await this.claimEventDelivery(rule.id, dedupKey)
-          if (!claimed) continue
+          await this.runWithEventDedup(rule.id, dedupKey, () => this.executeRule(execRule, payload))
+        } else {
+          await this.executeRule(execRule, payload)
         }
-        await this.executeRule(execRule, payload)
       } catch (err) {
         logger.error(
           `Automation rule ${rule.id} action failed`,
