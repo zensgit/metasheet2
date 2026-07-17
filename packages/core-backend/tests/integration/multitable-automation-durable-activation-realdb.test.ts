@@ -47,6 +47,7 @@ import { claimDueConsumers, completeConsumer, type ClaimedConsumer } from '../..
 import { runDispatchTick, ConsumerAdapterRegistry, type AdapterOutcome, type DispatchLoopObserver } from '../../src/multitable/automation-durable-dispatch-loop'
 import type { TransactionalQueryable } from '../../src/multitable/pg-transaction-guard'
 import { enqueueOutboxEvent } from '../../src/multitable/automation-outbox-enqueue'
+import { buildDurableConsumerHandlers, type DurableDeliveryServices } from '../../src/multitable/automation-durable-consumer-handlers'
 import { deriveOutboundIdempotencyKey } from '../../src/multitable/automation-action-idempotency'
 import { APPROVAL_COMPLETION_CONSUMERS, type RoutingManifest } from '../../src/multitable/automation-routing-manifest'
 import type { PoolClient } from 'pg'
@@ -353,5 +354,46 @@ describeIfDatabase('P2 durable-delivery S4-b/S5 activation + S7 crash-injection 
 
     // the zombie finally tries to write its terminal state: fence-CAS → 0 rows (single-writer persisted state)
     expect(await completeConsumer(db(), res.outboxId, keyZ, z!.fence)).toBe(false)
+  })
+
+  test('S7-composed: producer seam → real dispatch CLAIM → the REAL record-trigger handler delegates to handleEvent → row done', async () => {
+    // Composes the S5 wiring end-to-end on a run-unique key (no foreign-row claim): the outbox row is claimed
+    // by the ACTUAL dispatch tick, the claimed row flows into the REAL `automation-record-trigger` handler from
+    // buildDurableConsumerHandlers (not a synthetic recorder), and that handler delegates to the SAME
+    // AutomationService.handleEvent the legacy bus subscriber calls — proving the ClaimedConsumer shape → real
+    // handler → real method path holds under a live claim. Idempotency of the real handler is the sink's own
+    // event_fires lease (S6/#4426), exercised by the automation-service suites; here the handler is a spy so the
+    // composition stays hermetic and shared-DB-safe.
+    const calls: Array<{ eventType: string; payload: unknown }> = []
+    const spyServices = {
+      automationService: {
+        handleApprovalCompletionEvent: async () => {},
+        handleApprovalCompletionTrigger: async () => {},
+        handleApprovalTaskCreatedTrigger: async () => {},
+        handleEvent: async (eventType: string, payload: unknown) => { calls.push({ eventType, payload }) },
+      },
+      projectionService: { reconcile: async () => undefined },
+      webhookService: { deliverEvent: async () => [] },
+    } as unknown as DurableDeliveryServices
+    const realHandlers = buildDurableConsumerHandlers(spyServices)
+
+    const keyC = `ucomposed_${RUN}`
+    const res = await enqueueUnique('multitable.record.created', `evt_${RUN}_composed`, keyC)
+    // route the run-unique key to the REAL record-trigger handler (invoked with the live ClaimedConsumer)
+    const registry = new ConsumerAdapterRegistry()
+    registry.register({
+      key: keyC,
+      async handle(event): Promise<AdapterOutcome> {
+        await realHandlers['automation-record-trigger'](event)
+        return { outcome: 'success' }
+      },
+    })
+    await runDispatchTick(db(), registry)
+
+    expect(await consumerStatuses(res.outboxId)).toEqual({ [keyC]: 'done' })
+    // the REAL handler forwarded to handleEvent with the durable identity overlaid (fence-free stable eventId)
+    expect(calls).toHaveLength(1)
+    expect(calls[0].eventType).toBe('multitable.record.created')
+    expect((calls[0].payload as { _eventId?: string })._eventId).toBe(`evt_${RUN}_composed`)
   })
 })
