@@ -46,7 +46,8 @@ integrity pre-verified (#4368/#4380 heads == the commits inside the #4385 stack)
 | CI run-list | ✅ both L5 trust-checkpoint spec (@444) and L6-a golden (@572) execute |
 | `tsc` typecheck (core-backend) | ✅ 0 errors |
 | Migrations | ✅ clean; `meta_record_history_operations` + `trg_mrho_reject_update` live |
-| Golden (real DB) | ✅ 18/18 |
+| Golden (real DB, isolation) | ✅ 18/18 |
+| **Full CI bundle (217 specs, the 20.x-gated run-list)** | ✅ **217/217 files, 1995 tests pass / 3 pre-existing skips, 0 fail** on fresh postgres:14 — the L6-a shared-table BEFORE-triggers (`trg_mrr_reject_append_sealed`/`trg_mrvm_reject_append_sealed`) disrupt none of the other 216 specs |
 | Mutation A — re-couple `batch_id = operationId` (runtime) | ✅ load-bearing: `G-MULTIOP [S1]` + `W1 G-BATCH-ENDPOINT` RED; restore → green |
 | Mutation B — disable `trg_mrho_reject_update` (runtime) | ✅ load-bearing: `§F2 DB-immutable` RED; re-enable → green |
 | Flag default-OFF | ✅ mint INERT before any DB call (`=== 'true'`), operation_id NULL, no endpoint row |
