@@ -33,9 +33,36 @@ import {
   type DurableConsumerHandlers,
 } from '../../src/multitable/automation-durable-activation'
 import { claimDueConsumers, completeConsumer, type ClaimedConsumer } from '../../src/multitable/automation-durable-dispatcher'
-import { runDispatchTick, type DispatchLoopObserver } from '../../src/multitable/automation-durable-dispatch-loop'
+import { runDispatchTick, ConsumerAdapterRegistry, type AdapterOutcome, type DispatchLoopObserver } from '../../src/multitable/automation-durable-dispatch-loop'
 import type { TransactionalQueryable } from '../../src/multitable/pg-transaction-guard'
-import type { OutboxEventInput } from '../../src/multitable/automation-outbox-enqueue'
+import { enqueueOutboxEvent, type OutboxEventInput } from '../../src/multitable/automation-outbox-enqueue'
+import { deriveOutboundIdempotencyKey } from '../../src/multitable/automation-action-idempotency'
+import { APPROVAL_COMPLETION_CONSUMERS, type RoutingManifest } from '../../src/multitable/automation-routing-manifest'
+import type { PoolClient } from 'pg'
+
+/**
+ * A REAL idempotent outbound endpoint model: it records ONE effect per distinct idempotency key and
+ * DEDUPS repeats. `send(key)` returns 'delivered' the first time a key is seen and 'deduped' after —
+ * the endpoint the lock's Class-B semantics assume (§340). `effects` counts distinct real-world effects.
+ */
+class IdempotentEndpoint {
+  private readonly seen = new Set<string>()
+  readonly sends: string[] = []
+  send(idempotencyKey: string): 'delivered' | 'deduped' {
+    this.sends.push(idempotencyKey)
+    if (this.seen.has(idempotencyKey)) return 'deduped'
+    this.seen.add(idempotencyKey)
+    return 'delivered'
+  }
+  get effects(): number {
+    return this.seen.size
+  }
+}
+
+/** A run-unique single-consumer manifest so a tick claims ONLY this test's rows on the shared CI DB. */
+function uniqueManifest(consumerKey: string, eventType: string): RoutingManifest {
+  return { version: 1, routes: { [eventType]: [consumerKey] } }
+}
 
 const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
 const db = () => poolManager.get()
@@ -65,6 +92,42 @@ async function produceCommitted(input: OutboxEventInput, env: NodeJS.ProcessEnv)
   } finally {
     client.release()
   }
+}
+
+/**
+ * Enqueue a durable event over a RUN-UNIQUE single-consumer manifest, committed. Used by the crash-injection
+ * V-series so their claim/reclaim ticks touch ONLY this test's rows — never a sibling suite's due rows on the
+ * shared CI DB (#4337 review P2: the prior version claimed foreign rows with real keys + batchSize:500,
+ * mutating their attempts/lease/last_error and risking dead-letter).
+ */
+async function enqueueUnique(eventType: string, eventId: string, consumerKey: string) {
+  const client = await db().getInternalPool().connect()
+  try {
+    await client.query('BEGIN')
+    const trx: TransactionalQueryable = { isTransaction: true, query: (sql, params) => client.query(sql, params) }
+    const res = await enqueueOutboxEvent(trx, { eventType, eventId, payload: {} }, uniqueManifest(consumerKey, eventType))
+    await client.query('COMMIT')
+    enqueued.push(res.outboxId)
+    return res
+  } catch (e) {
+    await client.query('ROLLBACK').catch(() => {})
+    throw e
+  } finally {
+    client.release()
+  }
+}
+
+/** A registry with a single run-unique consumer whose adapter calls `onDeliver(event)` then succeeds. */
+function uniqueRegistry(consumerKey: string, onDeliver: (e: ClaimedConsumer) => void): ConsumerAdapterRegistry {
+  const reg = new ConsumerAdapterRegistry()
+  reg.register({
+    key: consumerKey,
+    async handle(e): Promise<AdapterOutcome> {
+      onDeliver(e)
+      return { outcome: 'success' }
+    },
+  })
+  return reg
 }
 
 // Handlers that record deliveries for OUR rows and defensively re-throw for foreign rows (retryable → left
@@ -117,9 +180,10 @@ describeIfDatabase('P2 durable-delivery S4-b/S5 activation + S7 crash-injection 
     expect(registry.keys().sort()).toEqual([...DURABLE_CONSUMER_KEYS].sort())
   })
 
-  test('flag ON end-to-end: produce (in txn) → boot → loop drains the fan-out; permanent failure → dead_letter', async () => {
-    const raw = db().getInternalPool()
-    const client = await raw.connect()
+  test('flag ON: produce (in txn) via the REAL seam enqueues the exact manifest fan-out (approval → 3 consumers, pending)', async () => {
+    // Proves the real produce→manifest fan-out WITHOUT draining (no tick → cannot claim a sibling suite's
+    // rows on the shared CI DB — the drain/poison behavior is proven separately on run-unique keys below).
+    const client = await db().getInternalPool().connect()
     let outboxId = ''
     try {
       await client.query('BEGIN')
@@ -130,29 +194,27 @@ describeIfDatabase('P2 durable-delivery S4-b/S5 activation + S7 crash-injection 
     } finally {
       client.release()
     }
-    const seen: Array<{ key: string; eventId: string; fence: string }> = []
-    const handle = bootDurableDelivery(db(), recordingHandlers(seen, { failBridgePermanently: true }), noopObserver, {
-      env: FLAG_ON,
-      intervalMs: 100,
-      batchSize: 500,
-    })
-    expect(handle).toBeTruthy()
-    try {
-      const deadline = Date.now() + 8_000
-      while (Date.now() < deadline) {
-        const s = await consumerStatuses(outboxId)
-        if (s['approval-trigger'] === 'done' && s['approval-projection'] === 'done' && s['approval-bridge'] === 'dead_letter') break
-        await new Promise((r) => setTimeout(r, 100))
-      }
-    } finally {
-      await handle!.stop()
-    }
     const s = await consumerStatuses(outboxId)
-    expect(s['approval-trigger']).toBe('done')
-    expect(s['approval-projection']).toBe('done')
-    expect(s['approval-bridge']).toBe('dead_letter') // PermanentDeliveryFailure → poison
-    expect(seen.every((x) => x.eventId === `evt_${RUN}_e2e`)).toBe(true) // stable original identity delivered
-  }, 15_000)
+    expect(Object.keys(s).sort()).toEqual([...APPROVAL_COMPLETION_CONSUMERS].sort())
+    expect(Object.values(s).every((v) => v === 'pending')).toBe(true)
+  })
+
+  test('flag ON: a PermanentDeliveryFailure handler poisons its row to dead_letter (run-unique key — no shared-row pollution)', async () => {
+    const keyP = `upoison_${RUN}`
+    const res = await enqueueUnique('multitable.record.updated', `evt_${RUN}_poison`, keyP)
+    const registry = new ConsumerAdapterRegistry()
+    let handled = false
+    registry.register({
+      key: keyP,
+      async handle(): Promise<AdapterOutcome> {
+        handled = true
+        return { outcome: 'permanent_failure', reason: 'permanent_rejection' } // the mapped PermanentDeliveryFailure
+      },
+    })
+    await runDispatchTick(db(), registry)
+    expect(handled).toBe(true)
+    expect(await consumerStatuses(res.outboxId)).toEqual({ [keyP]: 'dead_letter' })
+  })
 
   test('V1: produce-then-crash-BEFORE-commit → zero rows, zero deliveries', async () => {
     const raw = db().getInternalPool()
@@ -172,54 +234,78 @@ describeIfDatabase('P2 durable-delivery S4-b/S5 activation + S7 crash-injection 
 
   test('V2: commit-then-crash-before-dispatch → rows are durable; a later tick (restart) delivers', async () => {
     const res = await produceCommitted({ eventType: 'multitable.comment.created', eventId: `evt_${RUN}_v2`, payload: {} }, FLAG_ON)
-    enqueued.push(res!.outboxId)
-    // "crash": no dispatcher runs. Rows sit durable & pending:
-    expect(await consumerStatuses(res!.outboxId)).toEqual({ 'webhook-event-bridge': 'pending' })
+    // "crash": no dispatcher runs. Rows sit durable & pending (run-unique key — only ours):
+    const key2 = `uv2_${RUN}`
+    const r2 = await enqueueUnique('multitable.comment.created', `evt_${RUN}_v2`, key2)
+    expect(await consumerStatuses(r2.outboxId)).toEqual({ [key2]: 'pending' })
     // "restart": a fresh tick delivers.
-    const seen: Array<{ key: string; eventId: string; fence: string }> = []
-    await runDispatchTick(db(), buildConsumerAdapterRegistry(recordingHandlers(seen)), { batchSize: 500 })
-    expect(await consumerStatuses(res!.outboxId)).toEqual({ 'webhook-event-bridge': 'done' })
-    expect(seen.some((x) => x.eventId === `evt_${RUN}_v2`)).toBe(true)
+    const seen: string[] = []
+    await runDispatchTick(db(), uniqueRegistry(key2, (e) => seen.push(e.eventId)))
+    expect(await consumerStatuses(r2.outboxId)).toEqual({ [key2]: 'done' })
+    expect(seen).toContain(`evt_${RUN}_v2`)
   })
 
   test('V3: crash-after-claim → reclaim redelivers (at-least-once) with the SAME stable eventId across fences', async () => {
-    const res = await produceCommitted({ eventType: 'form.submitted', eventId: `evt_${RUN}_v3`, payload: {} }, FLAG_ON)
-    enqueued.push(res!.outboxId)
-    // worker A claims and "crashes" (never resolves)
-    const [a] = await claimDueConsumers(db(), { consumerKeys: ['automation-record-trigger'], batchSize: 500 })
-    const mine = a && a.outboxId === res!.outboxId ? a : (await claimDueConsumers(db(), { consumerKeys: ['automation-record-trigger'], batchSize: 500 })).find((c) => c.outboxId === res!.outboxId)
+    const key3 = `uv3_${RUN}`
+    const res = await enqueueUnique('form.submitted', `evt_${RUN}_v3`, key3)
+    // worker A claims its OWN run-unique row and "crashes" (never resolves)
+    const claimed = await claimDueConsumers(db(), { consumerKeys: [key3], batchSize: 50 })
+    const mine = claimed.find((c) => c.outboxId === res.outboxId)
     expect(mine?.eventId).toBe(`evt_${RUN}_v3`)
-    await db().query(`UPDATE meta_automation_outbox_consumer SET lease_expires_at = now() - interval '1 min' WHERE outbox_id=$1`, [res!.outboxId])
+    await db().query(`UPDATE meta_automation_outbox_consumer SET lease_expires_at = now() - interval '1 min' WHERE outbox_id=$1`, [res.outboxId])
     // worker B (restart) redelivers through the loop
-    const seen: Array<{ key: string; eventId: string; fence: string }> = []
-    await runDispatchTick(db(), buildConsumerAdapterRegistry(recordingHandlers(seen)), { batchSize: 500 })
+    const seen: Array<{ eventId: string; fence: string }> = []
+    await runDispatchTick(db(), uniqueRegistry(key3, (e) => seen.push({ eventId: e.eventId, fence: e.fence })))
     const delivered = seen.find((x) => x.eventId === `evt_${RUN}_v3`)
     expect(delivered).toBeTruthy() // at-least-once survived the crash
     expect(delivered!.eventId).toBe(mine!.eventId) // identity is fence-free — same dedup/idempotency seed
     expect(Number(delivered!.fence)).toBeGreaterThan(Number(mine!.fence)) // genuinely a different claim epoch
   })
 
-  test('V4: zombie + reclaimer both reach send → identical idempotency SEED across fences; zombie terminal write = 0 rows', async () => {
-    const res = await produceCommitted({ eventType: 'multitable.record.updated', eventId: `evt_${RUN}_v4`, payload: {} }, FLAG_ON)
-    enqueued.push(res!.outboxId)
-    // zombie Z claims (fence F1) and stalls past its lease — but stays alive
-    const zAll = await claimDueConsumers(db(), { consumerKeys: ['automation-record-trigger', 'webhook-event-bridge'], batchSize: 500 })
-    const z = zAll.find((c) => c.outboxId === res!.outboxId && c.consumerKey === 'automation-record-trigger')
+  test('V4: zombie AND reclaimer BOTH reach send → a real idempotent endpoint collapses the double-send to ONE effect; zombie terminal write = 0 rows', async () => {
+    const keyZ = `uv4_${RUN}`
+    const res = await enqueueUnique('multitable.record.updated', `evt_${RUN}_v4`, keyZ)
+    const endpoint = new IdempotentEndpoint()
+    // the Class-B outbound identity is EVENT + ACTION (not consumer_key, which can't distinguish two actions
+    // in one consumer). We use the ledger's deriveOutboundIdempotencyKey(eventId, actionKey) as the seed.
+    const seedFor = (eventId: string) => deriveOutboundIdempotencyKey(eventId, `action:${keyZ}`)
+
+    // 1) zombie Z claims (fence F1) and ACTUALLY reaches send — then stalls past its lease but stays alive.
+    const zClaim = await claimDueConsumers(db(), { consumerKeys: [keyZ], batchSize: 50 })
+    const z = zClaim.find((c) => c.outboxId === res.outboxId)
     expect(z).toBeTruthy()
-    const zombieSendKeySeed = `${z!.eventId}::${z!.consumerKey}` // the lock's outbound key basis: stable event+action identity, NO fence/attempt
+    const zSend = endpoint.send(seedFor(z!.eventId)) // Z reaches the endpoint
+    expect(zSend).toBe('delivered')
     await db().query(
-      `UPDATE meta_automation_outbox_consumer SET lease_expires_at = now() - interval '1 min' WHERE outbox_id=$1 AND consumer_key='automation-record-trigger'`,
-      [res!.outboxId],
+      `UPDATE meta_automation_outbox_consumer SET lease_expires_at = now() - interval '1 min' WHERE outbox_id=$1 AND consumer_key=$2`,
+      [res.outboxId, keyZ],
     )
-    // reclaimer R delivers (fence F2) — R's send uses ITS row's identity
-    const seen: Array<{ key: string; eventId: string; fence: string }> = []
-    await runDispatchTick(db(), buildConsumerAdapterRegistry(recordingHandlers(seen)), { batchSize: 500 })
-    const r = seen.find((x) => x.eventId === `evt_${RUN}_v4` && x.key === 'automation-record-trigger')
-    expect(r).toBeTruthy()
-    const reclaimerSendKeySeed = `${r!.eventId}::${r!.key}`
-    expect(reclaimerSendKeySeed).toBe(zombieSendKeySeed) // SAME key at the endpoint → double send collapses to one effect
-    expect(Number(r!.fence)).toBeGreaterThan(Number(z!.fence)) // and they really were different claim epochs
+
+    // 2) reclaimer R claims (fence F2) and ALSO reaches send — through the real loop.
+    let rEventId = ''
+    let rFence = ''
+    await runDispatchTick(
+      db(),
+      uniqueRegistry(keyZ, (e) => {
+        rEventId = e.eventId
+        rFence = e.fence
+        endpoint.send(seedFor(e.eventId)) // R reaches the endpoint too — the double send
+      }),
+    )
+    expect(rEventId).toBe(`evt_${RUN}_v4`)
+    expect(Number(rFence)).toBeGreaterThan(Number(z!.fence)) // genuinely different claim epochs (F2 > F1)
+
+    // BOTH reached send (2 sends), but the idempotent endpoint recorded exactly ONE effect — the double
+    // send collapsed because Z and R derived the IDENTICAL seed (event+action identity, fence-free).
+    expect(endpoint.sends).toHaveLength(2)
+    expect(endpoint.effects).toBe(1)
+
+    // POSITIVE CONTROL: a send with a DIFFERENT event identity is a distinct effect — the endpoint is not
+    // trivially collapsing everything (so the effects===1 above is meaningful, not vacuous).
+    expect(endpoint.send(seedFor('some-other-event'))).toBe('delivered')
+    expect(endpoint.effects).toBe(2)
+
     // the zombie finally tries to write its terminal state: fence-CAS → 0 rows (single-writer persisted state)
-    expect(await completeConsumer(db(), res!.outboxId, 'automation-record-trigger', z!.fence)).toBe(false)
+    expect(await completeConsumer(db(), res.outboxId, keyZ, z!.fence)).toBe(false)
   })
 })
