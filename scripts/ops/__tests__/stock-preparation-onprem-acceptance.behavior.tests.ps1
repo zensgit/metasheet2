@@ -368,9 +368,9 @@ Invoke-SmokeStage -Token $token
     $projected.Sample.restartTime -eq 3 -and
     $projected.Sample.uptime -eq 1000
   )
-  Check "pm2 projection: environment and sentinel values never cross the projection" (
+  Check "pm2 projection: environment and sentinel values never cross the projection (closed 5-key shape)" (
     $projected.Raw -notmatch $pm2Secret -and
-    @($projected.Sample.PSObject.Properties.Name).Count -eq 3
+    -not (Compare-Object @($projected.Sample.PSObject.Properties.Name) @('state','restartTime','uptime','adminTokenNonEmpty','authTokenNonEmpty'))
   )
 
   # Exercise the actual Get-Pm2Sample native-command pipeline, not only the helper in isolation. This
@@ -423,6 +423,27 @@ exec node "$(dirname "$0")/pm2-fixture.mjs" "$@"
   Check "pm2 projection: malformed counters fail closed with no output" (
     $invalidCounters.Exit -ne 0 -and -not $invalidCounters.Raw
   )
+
+  # corrective-6: token-hygiene projection over the REAL helper — booleans only, NEVER the value.
+  $tokenLeak = Invoke-Pm2Projection '[{"name":"metasheet-backend","pm2_env":{"status":"online","restart_time":0,"pm_uptime":1,"env":{"METASHEET_ADMIN_TOKEN":"LEAKED-TOKEN-VALUE-9911"}}}]'
+  Check "pm2 projection: admin token in the app env bag -> adminTokenNonEmpty=true, value NEVER echoed" (
+    $tokenLeak.Exit -eq 0 -and $tokenLeak.Sample.adminTokenNonEmpty -eq $true -and $tokenLeak.Sample.authTokenNonEmpty -eq $false -and $tokenLeak.Raw -notmatch 'LEAKED-TOKEN-VALUE-9911'
+  )
+  $tokenMerged = Invoke-Pm2Projection '[{"name":"metasheet-backend","pm2_env":{"status":"online","restart_time":0,"pm_uptime":1,"METASHEET_AUTH_TOKEN":"LEAKED-AUTH-VALUE-9911"}}]'
+  Check "pm2 projection: auth token merged into pm2_env (no env bag) -> authTokenNonEmpty=true, value NEVER echoed" (
+    $tokenMerged.Exit -eq 0 -and $tokenMerged.Sample.authTokenNonEmpty -eq $true -and $tokenMerged.Raw -notmatch 'LEAKED-AUTH-VALUE-9911'
+  )
+  $tokenClean = Invoke-Pm2Projection '[{"name":"metasheet-backend","pm2_env":{"status":"online","restart_time":0,"pm_uptime":1,"env":{"OTHER_VAR":"x"}}}]'
+  Check "pm2 projection: clean app env -> both hygiene booleans false" (
+    $tokenClean.Exit -eq 0 -and $tokenClean.Sample.adminTokenNonEmpty -eq $false -and $tokenClean.Sample.authTokenNonEmpty -eq $false
+  )
+
+  # corrective-6: the PURE hygiene verdict is fail-closed (a stale packaged helper is a FAIL, not a skip).
+  Check "hygiene: missing sample -> FAIL (sample_missing)" ((Test-Pm2TokenHygieneSample $null).reason -eq 'sample_missing')
+  Check "hygiene: projection without hygiene booleans -> FAIL (hygiene_fields_missing)" ((Test-Pm2TokenHygieneSample ([pscustomobject]@{ state='online'; restartTime=0; uptime=1 })).reason -eq 'hygiene_fields_missing')
+  Check "hygiene: admin token non-empty -> dedicated coarse reason" ((Test-Pm2TokenHygieneSample ([pscustomobject]@{ adminTokenNonEmpty=$true; authTokenNonEmpty=$false })).reason -eq 'PM2_ENV_METASHEET_ADMIN_TOKEN_NONEMPTY')
+  Check "hygiene: auth token non-empty -> dedicated coarse reason" ((Test-Pm2TokenHygieneSample ([pscustomobject]@{ adminTokenNonEmpty=$false; authTokenNonEmpty=$true })).reason -eq 'PM2_ENV_METASHEET_AUTH_TOKEN_NONEMPTY')
+  Check "hygiene: both clean -> ok" ((Test-Pm2TokenHygieneSample ([pscustomobject]@{ adminTokenNonEmpty=$false; authTokenNonEmpty=$false })).ok)
 
   Check "pm2: same restart_time + same uptime -> stable" ((Test-Pm2StableSample $base ([pscustomobject]@{ state='online'; restartTime=3; uptime=1000 })).ok)
   Check "pm2: restart_time incremented (crash-loop) -> FAIL (restart_loop)" ((Test-Pm2StableSample $base ([pscustomobject]@{ state='online'; restartTime=4; uptime=1000 })).reason -eq 'restart_loop')

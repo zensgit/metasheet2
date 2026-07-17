@@ -137,15 +137,43 @@ $expectedFields = @(
   'mvpSmoke.pass','auditActionsCovered','selfScanClean',
   'mvpSmoke.failureClass','mvpSmoke.lastCompletedPhase','mvpSmoke.firstFailedCheck',
   'mvpSmoke.failedCheckCount','mvpSmoke.responseLeakScanStatus',
-  'externalPlmK3ErpWrite','failedStage'
+  'externalPlmK3ErpWrite','postRunCredentialHygiene','failedStage'
 )
 $summaryBlock = if ($src -match "(?s)\`$Summary = \[ordered\]@\{(.*?)\}") { $Matches[1] } else { '' }
 $foundKeys = [regex]::Matches($summaryBlock, "(?m)^\s*'?([A-Za-z0-9.]+)'?\s*=") | ForEach-Object { $_.Groups[1].Value }
-Check "summary declares exactly the 14 whitelisted fields" (
-  ($foundKeys.Count -eq 14) -and (($expectedFields | Where-Object { $_ -notin $foundKeys }).Count -eq 0)
+Check "summary declares exactly the 15 whitelisted fields" (
+  ($foundKeys.Count -eq 15) -and (($expectedFields | Where-Object { $_ -notin $foundKeys }).Count -eq 0)
 )
 Check "summary has NO value-plane field (drawing/qty/unit/material/host/token)" (
   -not ($summaryBlock -match '(?i)drawing|qty|quantity|unit|material|host|token|password|secret|projectName')
+)
+
+# ── 1b. corrective-6 token-hygiene wiring (entity FAIL ACCEPTANCE_TOKEN_PERSISTED_IN_PM2_ENV) ────
+# The token must be read+scrubbed at the TOP of the orchestration (before ANY stage can spawn a
+# child that inherits the env), the pm2 stage must assert the runner env is token-free before the
+# restart, and a post-run hygiene stage must run between the smoke stage and Emit-Summary.
+$orchestrationStart = $src.IndexOf("if (`$MyInvocation.InvocationName -ne '.')")
+$orchestration = $src.Substring([Math]::Max($orchestrationStart, 0))
+Check "env-var token is read+scrubbed BEFORE the first stage in the orchestration" (
+  $orchestrationStart -ge 0 -and
+  $orchestration.IndexOf('Read-AdminTokenSecureFromEnv') -ge 0 -and
+  $orchestration.IndexOf('Read-AdminTokenSecureFromEnv') -lt $orchestration.IndexOf('Invoke-ShaStage')
+)
+Check "post-run hygiene stage runs after the smoke stage and before Emit-Summary" (
+  $orchestration.IndexOf('Invoke-PostRunHygieneStage') -gt $orchestration.IndexOf('Invoke-SmokeStage') -and
+  $orchestration.IndexOf('Invoke-PostRunHygieneStage') -lt $orchestration.IndexOf('Emit-Summary')
+)
+Check "pm2 stage asserts the runner env is token-free before the restart" (
+  $src -match 'token_env_present_before_pm2'
+)
+Check "hygiene verdict is fail-closed and values-free (fixed coarse reasons)" (
+  $src -match 'sample_missing' -and $src -match 'hygiene_fields_missing' -and
+  $src -match 'PM2_ENV_METASHEET_ADMIN_TOKEN_NONEMPTY' -and $src -match 'PM2_ENV_METASHEET_AUTH_TOKEN_NONEMPTY'
+)
+$pm2HelperSrc = Get-Content $pm2SampleHelper -Raw
+Check "pm2 projection helper reports token presence as BOOLEANS (never values)" (
+  $pm2HelperSrc -match 'adminTokenNonEmpty' -and $pm2HelperSrc -match 'authTokenNonEmpty' -and
+  $pm2HelperSrc -match 'METASHEET_ADMIN_TOKEN' -and $pm2HelperSrc -match 'tokenNonEmpty'
 )
 
 # ── 2. Token discipline. ─────────────────────────────────────────────────────────────────────────
