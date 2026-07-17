@@ -1,9 +1,9 @@
 # B5/B6 Routing-Core Design Lock（草案，待 owner 审定）
 
-Date: 2026-07-17 · Status: **DRAFT — 审定前 B5/B6 不开发**
+Date: 2026-07-17 · Status: **Q1–Q6 已由 owner 裁决（2026-07-17）— 锁定；实现处于 owner CHANGES 返工轮**
 Basis: #4215 §6/§7/§10.1（已 ratify-by-merge `66c7459a8`）+ B4 落地形态（#4419 `b94dcd644`）。
-本文件不重新设计 §6 —— 只把 §6 的 owner ruling 固化为可实现、可 mutation 验证的锁，并暴露
-四个需要 owner 拍板的开放问题。
+本文件不重新设计 §6 —— 只把 §6 的 owner ruling 固化为可实现、可 mutation 验证的锁。§3 记录
+owner 对 Q1–Q6 的最终裁决；§5 记录当前真实开发状态（B5-a..B7 已开发、owner 复审 CHANGES 返工中）。
 
 ## 0. B5 关闭的具体缺陷（现状实证）
 
@@ -94,39 +94,50 @@ purpose=`approval_routing` 的解析顺序：
   automation 四 purpose 留在 legacy（§10.2+），每个未来单独走「策略 + 等价证明」。
 - mutation：删 baked-snapshot 保护 ⇒ 在途不变测试红；删等价断言的任一源腿 ⇒ 对应矩阵红。
 
-## 3. 开放问题（owner 拍板后本锁转 RATIFIED）
+## 3. Q1–Q6 owner 裁决（2026-07-17，最终）
 
-- **Q1 无策略语义**：推荐 = legacy 字节级保留（锁 2；零行为变化，策略显式 opt-in）。
-  备选 = §6 字面「unset ⇒ fail-closed」——但那会在 B5 落地当天 break 所有现网审批路由，
-  不符合 staged opt-in 谱系。请确认推荐项。
-- **Q2 fallback 语义（v1）**：推荐 = **存列不启用**（v1 不自动 fallback：canonical 坏 ⇒ 响亮
-  fail-closed；自动 fallback 会静默掩盖 canonical 故障）。列保留供后续 purpose 用。
-- **Q3 `mode` 列语义**：§6 原文含 `mode`（`dingtalk`/`local`）。它与
-  `canonical_integration_id → provider` 冗余。推荐 = **v1 去掉 mode 列**（单一真源 =
-  canonical integration 的 provider；冗余状态会漂移）——此为对 §6 文本的唯一偏离，需 owner 点头；
-  若 owner 要保留，则加 CHECK(mode = canonical integration 的 provider) 同步（三列 FK 模式）。
-- **Q4 org 解析**：approval 路径今天只有 `local_user_id`，无 org 输入。推荐 = 由 requester 的
-  linked accounts 推导其 integration 的 org 集：恰一个 org ⇒ 用之查策略；>1 org ⇒ fail-closed
-  （operator-visible，多 org 用户的路由必须显式配置）；0 ⇒ 现状 `{}` 返回。
-- **Q5 preview 是否审计**：推荐 = 纯 GET 不审计（只读、无副作用、可能高频）；PATCH 才审计。
+- **Q1 无策略语义**：**已裁 = legacy 字节级保留**（零行为变化，策略显式 opt-in）。
+- **Q2 fallback**：**已裁 = 保留列，v1 不启用**（canonical 坏 ⇒ 响亮 fail-closed，不自动 fallback）。
+- **Q3 `mode` 列**：**已裁 = 不设冗余 mode**（canonical integration 的 provider 即唯一真源）。
+- **Q4 org 解析**：**已裁 = 0 个受治理 org ⇒ legacy；恰 1 个 ⇒ 用该策略；>1 个 ⇒ fail-close**
+  （受治理 = requester 有 linked account 的 org 中存在 approval_routing 策略行）。
+- **Q5 preview**：**已裁 = 只读 GET 不审计**；PATCH 才审计。
+- **Q6 B7 sweep 接线**：**已裁 = 成功同步提交后自动 sweep，按 `remoteIntegrationId` 收窄；
+  sweep 失败不得误报同步失败（不传染 sync 结果，值无关地记录），同时提供管理端重试入口**。
 
-### as-built 精化（实现期落定，随各 PR 附 gate 实证；owner 审定时一并裁）
+### 裁决对实现的增量要求（本轮 CHANGES 已列）
 
-- **Q4 精化**：多 org 用户仅在「≥1 个 linked org 有策略」时才 fail-closed；全部 org 均无策略 ⇒
-  legacy 字节级不变（否则无策略世界会被多 org 用户破坏 Q1 的零行为变化）。单个受治理 org + 若干
-  无策略 org ⇒ 跟随唯一策略（确定性，非猜测）。
-- **preview 机制**：resolver 增加 `overrideCanonicalIntegrationId` 只读预览选项（undefined=正常
-  probe；仅 preview 路由在校验 candidate 同 org+active 后传入；生产唯一调用点不传——gate 已全仓
-  grep 实证）。两腿同一 resolver ⇒ preview 不会与生产解析漂移。
-- **写点 409**：PATCH 指向非 active integration 直接 409（写时拒绝坏策略，优于 B5-b 之后逐单
-  fail-closed）。
-- **Q6（新，B7 接线）**：`sweepStaleDepartmentBindings` 幂等、确定，但**尚未接线**——post-sync
-  hook vs admin 触发是 owner 裁决（未裁前不碰已硬化的 sync core）。
+- **#4430 P1**：policy 配置错误在调用点被吞 ⇒ orgRelations 空 ⇒ 四种 org assignee source
+  （direct_manager / dept_head / continuous_managers / manager_at_level）解析为空 ⇒
+  emptyAssigneePolicy=auto-approve 时**审批被自动通过（fail-open）**。修法 = create 时对
+  **四源 + department/title 属性**全部 fail-close：policy 配置错 ⇒ 422
+  `APPROVAL_ROUTING_POLICY_MISCONFIGURED`；transient 读故障 ⇒ 503；两者均须证明
+  **零实例、零 assignment 落库**。
+- **#4431**：PATCH 仅接受有消费者的 purpose（v1 = `approval_routing`；其余四 purpose 拒绝——
+  无消费者的策略行是死配置）；**canonical=local 需启用保护**（default-OFF 显式开关，parity
+  能力未获准前不得指向 local）。
+- **#4434**：「在途不变」须证明**真 pending instance + 真 assignment** 跨策略翻转不变
+  （终态 auto-approved 实例的不变是平凡命题）。
+- **#4436**：sweep 补 remote integration 的 **status/provider 两条 SQL 守卫**；补 binding
+  管理入口（列表/重试）；实现 Q6 hook。
 
-## 4. 实现切分（审定后）
+## 4. 实现切分（as-built 实际）
 
-- **B5-a**（迁移 + 表 + FK 链 + 真库 schema 测试；Opus）→ **B5-b**（resolver 策略解析 + fail-closed
-  + legacy 回归 + mutation；Opus）→ **B5-c**（admin 路由 GET/PATCH/preview + 审计 + route 测试；
-  Sonnet 可跑量，Opus gate）→ **B6**（等价矩阵 + 在途不变；Opus）。
-- B5/B6 同碰 routing core，**串行**；每段照旧：真库测试 → mutation → 对抗 gate → exact-head CI →
-  owner 复审落地。
+- B5-a（迁移+表+FK 链+schema 测试）→ B5-b（resolver）→ B5-c（admin 路由）→ B6（等价证明）→
+  B7（suggest-only 对账）——全部串行、全部由主循环（Opus 级）实现并配独立对抗 gate
+  （计划原文写 B5-c 可 Sonnet 跑量，实际因 routing-core 敏感统一主循环实现——as-built 修正）。
+- 每段：真库测试 → mutation → 对抗 gate → CI → owner 复审落地。
+  **CI 事实修正（owner 抓）**：stacked PR（base≠main）只触发 pr-validate，**不构成 required CI
+  全绿**；落地时逐张 retarget→rebase→重放 mutation→全套 required CI→owner 复审。
+
+## 5. 当前真实开发状态（2026-07-17 owner 复审轮）
+
+| 票 | PR | 状态 |
+|---|---|---|
+| B5-a schema | #4429 | HOLD（无新 P1/P2；等本锁修订后随队 retarget/重跑）|
+| B5-b resolver | #4430 | CHANGES（P1 fail-open，修法见 §3）|
+| B5-c routes | #4431 | CHANGES（unsupported-purpose + local 启用保护）|
+| B6 等价 | #4434 | CHANGES（真 pending instance/assignment 证明）|
+| B7 对账 | #4436 | CHANGES（两条 SQL 守卫 + 管理入口 + Q6 hook）|
+
+Transfer T1 冻结不变；Canonical Org 收官门待五 PR 返工后逐张落地再定稿。
