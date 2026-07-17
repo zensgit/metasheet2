@@ -300,4 +300,180 @@ describeIfDatabase('Approval template authoring MVP — operator UAT (real DB, n
       restored_from_version_id: v1Id,
     })
   })
+
+  // P2-1 (review 20260717c): the restore-time snapshot revalidation is a PR-body Safety claim, so
+  // it needs a discriminating real-DB negative. We SQL-INSERT a historical version row whose graph
+  // references a form field that does not exist in its own snapshot — the shape a legitimately
+  // stored version takes AFTER the authoring contract drifts — and prove restore fail-fasts 400
+  // instead of copying the now-invalid snapshot into a new draft.
+  it('rejects restoring a historical snapshot that violates the current authoring contract (400, no write)', async () => {
+    const createResp = await jsonRequest(baseUrl, '/api/approval-templates', adminToken, {
+      method: 'POST',
+      body: {
+        key: `uat-restore-revalidation-${Date.now()}`,
+        name: 'UAT Restore Revalidation',
+        visibilityScope: { type: 'all', ids: [] },
+        formSchema: authoringFormSchema(),
+        approvalGraph: authoringApprovalGraph(),
+      },
+    })
+    expect(createResp.status).toBe(201)
+    const created = await createResp.json() as { id: string; latestVersionId: string }
+    createdTemplateIds.add(created.id)
+    const v1Id = created.latestVersionId
+
+    // Historical row with a graph whose form_field_user points at a field its own snapshot does
+    // not define. Inserted via SQL on purpose: today's create/update APIs (correctly) refuse to
+    // write this shape, which is exactly why only a drifted historical row can carry it.
+    const invalidGraph = authoringApprovalGraph()
+    invalidGraph.nodes[1] = {
+      key: 'approval_1',
+      type: 'approval',
+      name: 'Reviewer',
+      config: {
+        assigneeSources: [{ kind: 'form_field_user', fieldId: 'ghost_reviewer' }],
+        approvalMode: 'single',
+        emptyAssigneePolicy: 'error',
+      },
+    }
+    const pool = poolManager.get()
+    const insertedResult = await pool.query<{ id: string }>(
+      `INSERT INTO approval_template_versions (template_id, version, status, form_schema, approval_graph)
+       VALUES ($1, 2, 'draft', $2, $3)
+       RETURNING id`,
+      [created.id, JSON.stringify(authoringFormSchema()), JSON.stringify(invalidGraph)],
+    )
+    const invalidVersionId = insertedResult.rows[0].id
+
+    const restoreResp = await jsonRequest(
+      baseUrl,
+      `/api/approval-templates/${created.id}/versions/${invalidVersionId}/restore`,
+      adminToken,
+      { method: 'POST', body: { expectedLatestVersionId: v1Id } },
+    )
+    expect(restoreResp.status).toBe(400)
+    const payload = await restoreResp.json() as { error: { code: string; message: string } }
+    expect(payload.error.code).toBe('VALIDATION_ERROR')
+    // Typed + values-free: the message may name graph/node identifiers but must not echo the
+    // snapshot's field values (the snapshot has none here; assert the envelope stays structural).
+    expect(Object.keys(payload)).toEqual(['error'])
+
+    // Fail-fast means fail-closed: no new version row, latest pointer untouched.
+    const versions = await pool.query<{ version: number }>(
+      `SELECT version FROM approval_template_versions WHERE template_id = $1 ORDER BY version`,
+      [created.id],
+    )
+    expect(versions.rows.map((row) => row.version)).toEqual([1, 2])
+    const templateRow = await pool.query<{ latest_version_id: string }>(
+      `SELECT latest_version_id FROM approval_templates WHERE id = $1`,
+      [created.id],
+    )
+    expect(templateRow.rows[0].latest_version_id).toBe(v1Id)
+  })
+
+  // P3-2 (review 20260717c): the belongs-to-template (IDOR) guard was only discriminated in the
+  // mocked unit lane; this is the real-DB negative — a version id that exists but belongs to a
+  // DIFFERENT template must 404 without writing anything.
+  it('404s a cross-template version id on restore without creating a draft (real DB)', async () => {
+    const mkTemplate = async (label: string) => {
+      const resp = await jsonRequest(baseUrl, '/api/approval-templates', adminToken, {
+        method: 'POST',
+        body: {
+          key: `uat-restore-idor-${label}-${Date.now()}`,
+          name: `UAT Restore IDOR ${label}`,
+          visibilityScope: { type: 'all', ids: [] },
+          formSchema: authoringFormSchema(),
+          approvalGraph: authoringApprovalGraph(),
+        },
+      })
+      expect(resp.status).toBe(201)
+      const body = await resp.json() as { id: string; latestVersionId: string }
+      createdTemplateIds.add(body.id)
+      return body
+    }
+    const target = await mkTemplate('target')
+    const other = await mkTemplate('other')
+
+    const restoreResp = await jsonRequest(
+      baseUrl,
+      `/api/approval-templates/${target.id}/versions/${other.latestVersionId}/restore`,
+      adminToken,
+      { method: 'POST', body: { expectedLatestVersionId: target.latestVersionId } },
+    )
+    expect(restoreResp.status).toBe(404)
+    const payload = await restoreResp.json() as { error: { code: string } }
+    expect(payload.error.code).toBe('APPROVAL_TEMPLATE_VERSION_NOT_FOUND')
+
+    const pool = poolManager.get()
+    const targetVersions = await pool.query<{ version: number }>(
+      `SELECT version FROM approval_template_versions WHERE template_id = $1 ORDER BY version`,
+      [target.id],
+    )
+    expect(targetVersions.rows.map((row) => row.version)).toEqual([1])
+    const targetRow = await pool.query<{ latest_version_id: string }>(
+      `SELECT latest_version_id FROM approval_templates WHERE id = $1`,
+      [target.id],
+    )
+    expect(targetRow.rows[0].latest_version_id).toBe(target.latestVersionId)
+  })
+
+  // P3-3 (review 20260717c): pins that updateTemplate PARTICIPATES in the same template-row lock
+  // order restore uses (`SELECT ... FOR UPDATE` before reading MAX(version)), so a concurrent
+  // restore-style writer can never make PATCH collide on UNIQUE(template_id, version) → 500.
+  // Deterministic construction: a raw transaction holds the row lock and has already allocated
+  // version 2 (exactly what an in-flight restore does); the PATCH fired underneath must QUEUE on
+  // the lock, then allocate version 3 after commit. If the lock were dropped, the PATCH would read
+  // MAX(version)=1 immediately and die on the unique index instead of returning 200.
+  it('updateTemplate queues behind a concurrent restore-style writer instead of colliding on the version number', async () => {
+    const createResp = await jsonRequest(baseUrl, '/api/approval-templates', adminToken, {
+      method: 'POST',
+      body: {
+        key: `uat-restore-lockorder-${Date.now()}`,
+        name: 'UAT Restore Lock Order',
+        visibilityScope: { type: 'all', ids: [] },
+        formSchema: authoringFormSchema(),
+        approvalGraph: authoringApprovalGraph(),
+      },
+    })
+    expect(createResp.status).toBe(201)
+    const created = await createResp.json() as { id: string; latestVersionId: string }
+    createdTemplateIds.add(created.id)
+
+    const pool = poolManager.get()
+    let patchPromise!: ReturnType<typeof jsonRequest>
+    await pool.transaction(async ({ query }) => {
+      await query('SELECT id FROM approval_templates WHERE id = $1 FOR UPDATE', [created.id])
+      // The in-flight "restore": version 2 is allocated but not yet committed.
+      await query(
+        `INSERT INTO approval_template_versions (template_id, version, status, form_schema, approval_graph)
+         VALUES ($1, 2, 'draft', $2, $3)`,
+        [created.id, JSON.stringify(authoringFormSchema()), JSON.stringify(authoringApprovalGraph())],
+      )
+
+      patchPromise = jsonRequest(baseUrl, `/api/approval-templates/${created.id}`, adminToken, {
+        method: 'PATCH',
+        body: {
+          formSchema: {
+            fields: [
+              ...authoringFormSchema().fields,
+              { id: 'note', type: 'text', label: 'Note' },
+            ],
+          },
+        },
+      })
+      // Give the PATCH time to reach the service transaction. With the row lock in place it MUST
+      // still be pending here; without it, it has already claimed version 2 and is doomed.
+      // Returning from the handler COMMITs and releases the row lock.
+      await new Promise((resolve) => setTimeout(resolve, 400))
+    })
+
+    const patchResp = await patchPromise
+    expect(patchResp.status).toBe(200)
+
+    const versions = await pool.query<{ version: number }>(
+      `SELECT version FROM approval_template_versions WHERE template_id = $1 ORDER BY version`,
+      [created.id],
+    )
+    expect(versions.rows.map((row) => row.version)).toEqual([1, 2, 3])
+  })
 })
