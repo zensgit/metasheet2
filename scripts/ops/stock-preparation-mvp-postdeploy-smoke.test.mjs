@@ -1,5 +1,9 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { spawn } from 'node:child_process'
+import { once } from 'node:events'
+import { createServer } from 'node:http'
+import { fileURLToPath } from 'node:url'
 
 import {
   ALLOWED_ERROR_CODES,
@@ -14,12 +18,15 @@ import {
   computeFailureClass,
   DIFF_ROW_KEYS,
   ENGINE_MESSAGE_SENTINELS,
+  HTTP_FAILURE_CLASSES,
   MISSING,
   UNREGISTERED,
   buildOptionSetsFixture,
   buildSmokeFixture,
   diffRowProjectionValid,
   formatSummaryBlock,
+  classifyHttpFailure,
+  httpCheckDiagnostic,
   leakScan,
   newIds,
   projectCounts,
@@ -28,6 +35,7 @@ import {
   safeCount,
   safeField,
   safeHandle,
+  safeHttpStatus,
   safeMode,
   safeStatus,
 } from './stock-preparation-mvp-postdeploy-smoke.mjs'
@@ -228,6 +236,91 @@ test('safeCount admits finite numbers only; poison strings and null collapse to 
   assert.equal(safeCount(Infinity), -1)
 })
 
+test('corrective-7 HTTP diagnostics expose only a bounded status and fixed error class', () => {
+  assert.equal(safeHttpStatus(403), 403)
+  assert.equal(safeHttpStatus('503'), 503)
+  assert.equal(safeHttpStatus(99), 0)
+  assert.equal(safeHttpStatus('DWG-88472'), 0)
+
+  assert.equal(classifyHttpFailure(400, 'TENANT_REQUIRED'), 'TENANT_CONTEXT')
+  assert.equal(classifyHttpFailure(401, 'UNAUTHENTICATED'), 'AUTHENTICATION')
+  assert.equal(classifyHttpFailure(403, 'FORBIDDEN'), 'AUTHORIZATION')
+  assert.equal(classifyHttpFailure(404, 'NOT_FOUND'), 'NOT_FOUND')
+  assert.equal(classifyHttpFailure(503, 'STOCK_PREPARATION_MVP_PROVISIONING_API_UNAVAILABLE'), 'API_UNAVAILABLE')
+  assert.equal(classifyHttpFailure(500, 'INTERNAL_ERROR'), 'SERVER_ERROR')
+  assert.equal(classifyHttpFailure(200, 'SECRET_MATERIAL_Q235'), 'NONE')
+
+  const diagnostic = httpCheckDiagnostic({
+    status: 400,
+    body: { error: { code: 'TENANT_CONTEXT_REQUIRED', message: 'sensitive value omitted' } },
+  })
+  assert.deepEqual(diagnostic, { httpStatus: 400, errorClass: 'TENANT_CONTEXT' })
+  assert.ok(HTTP_FAILURE_CLASSES.includes(diagnostic.errorClass))
+  assert.ok(!JSON.stringify(diagnostic).includes('sensitive value omitted'))
+})
+
+test('corrective-7 full smoke: provisioning 403 reports the safe first-failure tuple and never the response message', async () => {
+  const seen = []
+  const responseSecret = 'MATERIAL-Q235-PRIVATE-RESPONSE'
+  const server = createServer((req, res) => {
+    const pathname = new URL(req.url, 'http://localhost').pathname
+    seen.push(`${req.method} ${pathname}`)
+    res.setHeader('content-type', 'application/json')
+    if (pathname === '/api/integration/status') {
+      res.statusCode = 200
+      res.end(JSON.stringify({ data: { routes: [] } }))
+      return
+    }
+    if (
+      pathname === '/api/integration/stock-preparation/mvp/readiness' ||
+      pathname === '/api/integration/stock-preparation/mvp/ensure'
+    ) {
+      res.statusCode = 403
+      res.end(JSON.stringify({ error: { code: 'FORBIDDEN', message: responseSecret } }))
+      return
+    }
+    res.statusCode = 500
+    res.end(JSON.stringify({ error: { code: 'INTERNAL_ERROR' } }))
+  })
+  server.listen(0, '127.0.0.1')
+  await once(server, 'listening')
+
+  try {
+    const address = server.address()
+    assert.ok(address && typeof address === 'object')
+    const smokePath = fileURLToPath(new URL('./stock-preparation-mvp-postdeploy-smoke.mjs', import.meta.url))
+    const child = spawn(process.execPath, [smokePath, '--base-url', `http://127.0.0.1:${address.port}`], {
+      env: { ...process.env, METASHEET_AUTH_TOKEN: 'test-only-token' },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    })
+    let stdout = ''
+    let stderr = ''
+    child.stdout.setEncoding('utf8')
+    child.stderr.setEncoding('utf8')
+    child.stdout.on('data', (chunk) => { stdout += chunk })
+    child.stderr.on('data', (chunk) => { stderr += chunk })
+    const [exitCode] = await once(child, 'close')
+
+    assert.equal(exitCode, 1)
+    assert.deepEqual(seen, [
+      'GET /api/integration/status',
+      'GET /api/integration/stock-preparation/mvp/readiness',
+      'POST /api/integration/stock-preparation/mvp/ensure',
+    ])
+    assert.match(stdout, /^failureClass=CHECK_FAILED$/m)
+    assert.match(stdout, /^lastCompletedPhase=AUTH$/m)
+    assert.match(stdout, /^firstFailedCheck=PROVISIONING$/m)
+    assert.match(stdout, /^failedCheckCount=3$/m)
+    assert.match(stdout, /^firstFailedHttpStatus=403$/m)
+    assert.match(stdout, /^firstFailedErrorClass=AUTHORIZATION$/m)
+    assert.match(stdout, /^responseLeakScanStatus=NOT_RUN$/m)
+    assert.doesNotMatch(stdout, /MATERIAL|Q235|PRIVATE-RESPONSE/)
+    assert.doesNotMatch(stderr, /MATERIAL|Q235|PRIVATE-RESPONSE/)
+  } finally {
+    await new Promise((resolve) => server.close(resolve))
+  }
+})
+
 test('safeHandle admits only platform handle shapes', () => {
   assert.equal(safeHandle('smoke_batch_t1783651754'), 'smoke_batch_t1783651754')
   assert.equal(safeHandle('stockprep_mapping_0123456789abcdef'), 'stockprep_mapping_0123456789abcdef')
@@ -262,7 +355,37 @@ test('computeDiagnosticLocus: a check-failed early-return localizes to the phase
   assert.equal(result.summary.lastCompletedPhase, 'AUTH')       // AUTH completed, PROVISIONING did not
   assert.equal(result.summary.firstFailedCheck, 'PROVISIONING') // first failed check's phase — a fixed enum
   assert.equal(result.summary.failedCheckCount, 2)
+  assert.equal(result.summary.firstFailedHttpStatus, 0)
+  assert.equal(result.summary.firstFailedErrorClass, 'NOT_HTTP')
   assert.equal(result.summary.responseLeakScanStatus, 'NOT_RUN') // never reached the leak-scan phase
+})
+
+test('computeDiagnosticLocus: first failed request keeps only the safe HTTP tuple', () => {
+  const result = {
+    summary: {},
+    checks: [
+      { name: 'auth ok', ok: true, phase: 'AUTH', httpStatus: 200, errorClass: 'NONE' },
+      { name: 'readiness failed', ok: false, phase: 'PROVISIONING', httpStatus: 403, errorClass: 'AUTHORIZATION' },
+      { name: 'later failure', ok: false, phase: 'PROVISIONING', httpStatus: 500, errorClass: 'SERVER_ERROR' },
+    ],
+  }
+  computeDiagnosticLocus(result, SMOKE_PHASES.indexOf('PROVISIONING'))
+  assert.equal(result.summary.firstFailedHttpStatus, 403)
+  assert.equal(result.summary.firstFailedErrorClass, 'AUTHORIZATION')
+})
+
+test('computeDiagnosticLocus: hostile HTTP diagnostics are clamped, never surfaced', () => {
+  const result = {
+    summary: {},
+    checks: [{
+      name: 'x', ok: false, phase: 'PROVISIONING', httpStatus: 'DWG-88472', errorClass: 'MATERIAL_Q235_SECRET',
+    }],
+  }
+  computeDiagnosticLocus(result, SMOKE_PHASES.indexOf('PROVISIONING'))
+  assert.equal(result.summary.firstFailedHttpStatus, 0)
+  assert.equal(result.summary.firstFailedErrorClass, 'UNKNOWN')
+  assert.ok(!JSON.stringify(result.summary).includes('DWG-88472'))
+  assert.ok(!JSON.stringify(result.summary).includes('Q235'))
 })
 
 test('computeDiagnosticLocus: firstFailedCheck is a FIXED enum — an off-vocabulary check.phase becomes UNKNOWN, never a value', () => {
@@ -278,6 +401,8 @@ test('computeDiagnosticLocus: a full pass reaching the last phase reports RESPON
   assert.equal(result.summary.lastCompletedPhase, 'RESPONSE_LEAK_SCAN')
   assert.equal(result.summary.firstFailedCheck, 'NONE')
   assert.equal(result.summary.failedCheckCount, 0)
+  assert.equal(result.summary.firstFailedHttpStatus, 0)
+  assert.equal(result.summary.firstFailedErrorClass, 'NONE')
   assert.equal(result.summary.responseLeakScanStatus, 'PASS')
 })
 
@@ -304,13 +429,14 @@ test('computeDiagnosticLocus: a THROW inside RESPONSE_LEAK_SCAN (leakScanClean n
   assert.equal(failed.summary.responseLeakScanStatus, 'FAIL')
 })
 
-test('diagnostic output face is EXACTLY the five declared fields (no reachedPhase or other internals leak into the summary)', () => {
+test('diagnostic output face is EXACTLY the seven declared fields (no reachedPhase or other internals leak into the summary)', () => {
   const result = { summary: { leakScanClean: true }, checks: [] }
   computeDiagnosticLocus(result, SMOKE_PHASES.length - 1)
   computeFailureClass(result)
   const diagKeys = Object.keys(result.summary).filter((k) => k !== 'leakScanClean')
   assert.deepEqual(diagKeys.sort(), [
-    'failedCheckCount', 'failureClass', 'firstFailedCheck', 'lastCompletedPhase', 'responseLeakScanStatus',
+    'failedCheckCount', 'failureClass', 'firstFailedCheck', 'firstFailedErrorClass',
+    'firstFailedHttpStatus', 'lastCompletedPhase', 'responseLeakScanStatus',
   ])
   assert.ok(!('reachedPhase' in result.summary), 'internal phase cursor must never appear in the output face')
 })
