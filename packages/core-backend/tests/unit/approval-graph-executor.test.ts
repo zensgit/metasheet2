@@ -136,6 +136,48 @@ describe('ApprovalGraphExecutor', () => {
     expect(() => new ApprovalGraphExecutor(runtimeGraph, { amount: 0 }).resolveInitialState()).toThrow(/division by zero/)
   })
 
+  it('skips a LEGACY empty-rules branch instead of match-all (defense-in-depth for stored graphs)', () => {
+    // A rules-mode branch with `rules: []` is rejected at authoring/create/update/publish
+    // (validateConditionBranchRules), but a graph STORED before that gate may still carry one.
+    // `[].every(...)` is vacuously true — without the runtime guard the empty branch would capture
+    // EVERY request (first-match-wins) and dead-code both the later branch and the default edge.
+    const runtimeGraph: RuntimeGraph = {
+      nodes: [
+        { key: 'start', type: 'start', config: {} },
+        {
+          key: 'route',
+          type: 'condition',
+          config: {
+            branches: [
+              { edgeKey: 'edge-empty', rules: [] }, // legacy vacuous branch — must never match
+              { edgeKey: 'edge-high', rules: [{ fieldId: 'amount', operator: 'gte', value: 1000 }] },
+            ],
+            defaultEdgeKey: 'edge-low',
+          },
+        },
+        { key: 'empty-review', type: 'approval', config: { assigneeType: 'role', assigneeIds: ['ghost'] } },
+        { key: 'high-review', type: 'approval', config: { assigneeType: 'role', assigneeIds: ['senior'] } },
+        { key: 'low-review', type: 'approval', config: { assigneeType: 'role', assigneeIds: ['standard'] } },
+        { key: 'end', type: 'end', config: {} },
+      ],
+      edges: [
+        { key: 'edge-start-route', source: 'start', target: 'route' },
+        { key: 'edge-empty', source: 'route', target: 'empty-review' },
+        { key: 'edge-high', source: 'route', target: 'high-review' },
+        { key: 'edge-low', source: 'route', target: 'low-review' },
+        { key: 'edge-empty-end', source: 'empty-review', target: 'end' },
+        { key: 'edge-high-end', source: 'high-review', target: 'end' },
+        { key: 'edge-low-end', source: 'low-review', target: 'end' },
+      ],
+      policy: { allowRevoke: true },
+    }
+
+    // A matching request routes via the LATER, real branch — not the empty one.
+    expect(new ApprovalGraphExecutor(runtimeGraph, { amount: 5000 }).resolveInitialState().currentNodeKey).toBe('high-review')
+    // A non-matching request falls through to the default edge — the intended "else" mechanism.
+    expect(new ApprovalGraphExecutor(runtimeGraph, { amount: 10 }).resolveInitialState().currentNodeKey).toBe('low-review')
+  })
+
   it('routes a requester.department branch from threaded requesterContext, fail-closed on absent (RA-1a)', () => {
     const runtimeGraph: RuntimeGraph = {
       nodes: [

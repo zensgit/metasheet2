@@ -2079,6 +2079,74 @@ describe('ApprovalProductService', () => {
     })
   })
 
+  describe('empty condition-branch rules gate (author / publish validation)', () => {
+    // A rules-mode branch with `rules: []` evaluates as `[].every(...)` === TRUE at runtime — it
+    // would silently capture ALL traffic (first-match-wins) and dead-code the default edge. The
+    // gate raises its own code at create / update / publish (like validateNodeTimeoutConfigs),
+    // NEVER inside normalizeApprovalGraph's stored-graph path (plain reads must not brick).
+    // Negative control for the formula exemption: the FC-1 describe above proves createTemplate
+    // ACCEPTS formula branches carrying `rules: []` — dropping the exemption REDs those tests.
+    function emptyBranchGraph() {
+      return {
+        nodes: [
+          { key: 'start', type: 'start', config: {} },
+          {
+            key: 'route',
+            type: 'condition',
+            config: { branches: [{ edgeKey: 'edge-high', rules: [] }], defaultEdgeKey: 'edge-low' },
+          },
+          { key: 'high', type: 'approval', config: { assigneeType: 'role', assigneeIds: ['senior'] } },
+          { key: 'low', type: 'approval', config: { assigneeType: 'role', assigneeIds: ['standard'] } },
+          { key: 'end', type: 'end', config: {} },
+        ],
+        edges: [
+          { key: 'edge-start-route', source: 'start', target: 'route' },
+          { key: 'edge-high', source: 'route', target: 'high' },
+          { key: 'edge-low', source: 'route', target: 'low' },
+          { key: 'edge-high-end', source: 'high', target: 'end' },
+          { key: 'edge-low-end', source: 'low', target: 'end' },
+        ],
+      }
+    }
+
+    it('rejects a rules-mode branch with EMPTY rules at createTemplate, before hitting the database', async () => {
+      const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+      const service = new ApprovalProductService()
+      await expect(service.createTemplate({
+        key: 'empty-branch-tpl',
+        name: 'Empty Branch Template',
+        formSchema: { fields: [{ id: 'amount', type: 'number', label: 'Amount' }] },
+        approvalGraph: emptyBranchGraph(),
+      } as never)).rejects.toMatchObject({ statusCode: 400, code: 'APPROVAL_CONDITION_BRANCH_RULES_EMPTY' })
+      expect(pgState.pool.connect).not.toHaveBeenCalled()
+    })
+
+    it('rejects an already-STORED empty-rules branch at PUBLISH (a legacy draft can never reach a published definition)', async () => {
+      const template = {
+        id: 'tpl-empty-branch', key: 'empty-branch', name: 'Empty Branch', description: null, category: null,
+        visibility_scope: { type: 'all', ids: [] }, sla_hours: null, status: 'draft',
+        active_version_id: null, latest_version_id: 'ver-eb', created_at: new Date(), updated_at: new Date(),
+      }
+      const version = {
+        id: 'ver-eb', template_id: 'tpl-empty-branch', version: 1, status: 'draft',
+        form_schema: { fields: [] }, approval_graph: emptyBranchGraph(),
+        created_at: new Date(), updated_at: new Date(),
+      }
+      pgState.client.query.mockImplementation(async (sql: string) => {
+        const statement = normalize(sql)
+        if (statement === 'BEGIN' || statement === 'COMMIT' || statement === 'ROLLBACK') return { rows: [], rowCount: 0 }
+        if (statement.startsWith('SELECT * FROM approval_templates WHERE id = $1 FOR UPDATE')) return { rows: [template], rowCount: 1 }
+        if (statement.startsWith('SELECT * FROM approval_template_versions WHERE id = $1')) return { rows: [version], rowCount: 1 }
+        if (statement.startsWith('UPDATE approval_published_definitions SET is_active = FALSE')) return { rows: [], rowCount: 0 }
+        { const epochResult = epochMockResult(statement); if (epochResult) return epochResult } throw new Error(`Unhandled query: ${statement}`)
+      })
+      const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+      await expect(
+        new ApprovalProductService().publishTemplate('tpl-empty-branch', { policy: { allowRevoke: true } } as never),
+      ).rejects.toMatchObject({ statusCode: 400, code: 'APPROVAL_CONDITION_BRANCH_RULES_EMPTY' })
+    })
+  })
+
   it('rejects empty assigneeSources and invalid form field sources before hitting the database', async () => {
     const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
     const service = new ApprovalProductService()

@@ -191,11 +191,19 @@ describe('addParallelBranch / removeParallelBranch', () => {
 })
 
 describe('addConditionBranch / removeConditionBranch', () => {
-  it('adds a branch (empty rules) rejoining at the default target, growing branches to 2', () => {
+  it('adds a branch seeded with the SAME incomplete starter rule as insertConditionGateway (NEVER empty rules), rejoining at the default target', () => {
     const out = addConditionBranch(CONDITION, 'cond_1', '中额')
     const config = node(out, 'cond_1')!.config as { branches: Array<{ edgeKey: string; rules: unknown[] }>; defaultEdgeKey: string }
     expect(config.branches).toHaveLength(2)
-    expect(config.branches[1].rules).toEqual([]) // admin fills the rule via the G-2 editor
+    // A `rules: []` seed would be a P1: the runtime evaluates a rules-mode branch as
+    // `rules.every(...)` — vacuously TRUE over [] — so an empty branch silently captures ALL
+    // traffic (first-match-wins) and dead-codes the default edge. The starter mirrors
+    // insertConditionGateway exactly: an incomplete rule the validator blocks (需要选择字段).
+    expect(config.branches[1]).toEqual({
+      edgeKey: config.branches[1].edgeKey,
+      conjunction: 'and',
+      rules: [{ fieldId: '', operator: 'eq', value: '' }],
+    })
     const newEdge = out.edges.find((e) => e.key === config.branches[1].edgeKey)!
     expect(newEdge.source).toBe('cond_1')
     expect(edgeBetween(out, newEdge.target, 'end')).toBeTruthy() // rejoins where the default edge went
@@ -264,5 +272,26 @@ describe('applyTopologyToComplexDraft — engine ↔ complex draft bridge (one s
     const conditionKey = next.preservedGraph!.nodes.find((candidate) => candidate.type === 'condition')!.key
     next.conditionEdits![conditionKey].branches[0].rules[0].fieldId = 'amount'
     expect(validateTemplateApprovalFlow(next).some((error) => error.includes('需要选择字段'))).toBe(false)
+  })
+
+  // P1 regression (adversarial review F1): +条件分支 via addConditionBranch previously seeded
+  // `rules: []`, which validated CLEAN and published — then the runtime's `[].every(...)` matched
+  // EVERY request, silently capturing all traffic and dead-coding the default edge. The added
+  // branch must be save-blocked exactly like insertConditionGateway's starter branch.
+  // (Mutation catcher: neutralize the addConditionBranch seed back to `rules: []` → this REDs.)
+  it('blocks save after ADDING a condition branch until its starter rule is configured (never a clean empty branch)', () => {
+    const draft = draftFromTemplate(tpl(CONDITION))
+    const next = applyTopologyToComplexDraft(draft, (g) => addConditionBranch(g, 'cond_1', '中额'))
+    expect(validateTemplateApprovalFlow(next).some((error) => error.includes('需要选择字段'))).toBe(true)
+    next.conditionEdits!.cond_1.branches[1].rules[0].fieldId = 'amount'
+    expect(validateTemplateApprovalFlow(next)).toEqual([])
+  })
+
+  // Layer (b) of the same fix: even a graph that ALREADY carries a rules-mode branch with zero
+  // rules (legacy stored / hand-built — no starter rule to be incomplete) must be save-blocked.
+  it('flags a rules-mode condition branch with ZERO rules as a validation error (empty branch would match everything)', () => {
+    const draft = draftFromTemplate(tpl(CONDITION))
+    draft.conditionEdits!.cond_1.branches[0].rules = []
+    expect(validateTemplateApprovalFlow(draft).some((error) => error.includes('需要至少一条规则'))).toBe(true)
   })
 })
