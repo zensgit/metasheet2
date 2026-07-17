@@ -28,25 +28,15 @@ const CUSTOM_ADMIN_CARRIER = typeof process.argv[2] === 'string' && process.argv
 const ADMIN_CARRIERS = [...new Set([CUSTOM_ADMIN_CARRIER, 'METASHEET_ADMIN_TOKEN'].filter(Boolean))]
 const AUTH_CARRIERS = ['METASHEET_AUTH_TOKEN']
 
-import fs from 'node:fs'
-
-// fs.readFileSync(0) instead of the async stdin iterator: Windows PowerShell 5.1 string-pipes can
-// race an ESM module's async stdin attach (observed as an empty read -> silent exit 1 on the CI
-// windows arm), while a synchronous fd-0 read drains whatever the pipe delivered.
 let raw = ''
-try {
-  raw = fs.readFileSync(0, 'utf8')
-} catch {
-  raw = ''
-}
+for await (const chunk of process.stdin) raw += chunk
+
+// Windows PowerShell 5.1 prefixes native string-pipeline input with a UTF-8 BOM. JSON.parse rejects
+// U+FEFF, so normalize exactly that transport marker while preserving the payload unchanged.
+if (raw.charCodeAt(0) === 0xfeff) raw = raw.slice(1)
 
 try {
-  // Windows PowerShell 5.1 pipes strings to native stdin through the console host, which HARD-WRAPS
-  // at the console buffer width - a CRLF can land in the middle of any JSON token (observed on the
-  // CI windows arm: short probes survive, a 176-char payload does not). Valid JSON cannot contain a
-  // raw CR/LF inside a string literal and no two JSON tokens are delimited by whitespace alone, so
-  // stripping every raw CR/LF provably reconstructs a parseable document.
-  const processes = JSON.parse(raw.replace(/[\r\n]+/g, ''))
+  const processes = JSON.parse(raw)
   if (!Array.isArray(processes)) throw new Error('invalid_shape')
 
   const matches = processes.filter((entry) => entry?.name === APP_NAME)
