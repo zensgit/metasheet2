@@ -515,6 +515,20 @@ describe('StockPreparationMappingConfirmView (view 3: confirm reads + human conf
     expect(retry.getAttribute('aria-label')).toBe('Retry loading the material-mapping confirmation queue')
   })
 
+  // H4-3 keyboard: the table wrap is a jsdom-testable, load-bearing scroll region — attribute
+  // presence is what a future refactor could silently delete (unlike the CSS focus ring, which
+  // jsdom cannot compute and is verified only via the browser harness in the PR description).
+  it('H4-3: the table wrap is a keyboard-reachable scroll region (tabindex/role/aria-label)', async () => {
+    mockRoutes()
+    const root = mountView()
+    await waitForSelector(root, '[data-testid="stock-prep-mapping-queue"]')
+    const wrap = root.querySelector('.sp-map__table-wrap') as HTMLElement
+    expect(wrap).not.toBeNull()
+    expect(wrap.getAttribute('tabindex')).toBe('0')
+    expect(wrap.getAttribute('role')).toBe('region')
+    expect(wrap.getAttribute('aria-label')).toBeTruthy()
+  })
+
   it('renders the English copy when locale is not zh-CN', async () => {
     h.locale = 'en'
     mockRoutes()

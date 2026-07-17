@@ -715,4 +715,29 @@ describe('StockPreparationSnapshotDiffView (readonly, values-free)', () => {
     expect(root.querySelector('[data-testid="stock-prep-snapshot-diff-rows-error"]')).toBeNull()
     expect(root.querySelector('[data-testid="stock-prep-snapshot-diff-rows-table"]')).not.toBeNull()
   })
+
+  // H4-3 keyboard: BOTH scroll wraps in this view are jsdom-testable, load-bearing scroll regions —
+  // attribute presence is what a future refactor could silently delete (unlike the CSS focus ring,
+  // which jsdom cannot compute and is verified only via the browser harness in the PR description).
+  it('H4-3: the batch-list wrap is a keyboard-reachable scroll region (tabindex/role/aria-label)', async () => {
+    h.listBatches.mockResolvedValue(batchListWithPlantedExtras())
+    const root = mountView()
+    await flushUi()
+    const wrap = root.querySelector('.sp-snap__table-wrap') as HTMLElement
+    expect(wrap).not.toBeNull()
+    expect(wrap.getAttribute('tabindex')).toBe('0')
+    expect(wrap.getAttribute('role')).toBe('region')
+    expect(wrap.getAttribute('aria-label')).toBeTruthy()
+  })
+
+  it('H4-3: the row-detail wrap is a keyboard-reachable scroll region (tabindex/role/aria-label)', async () => {
+    h.listRows.mockResolvedValue(diffRowsResult())
+    const root = await mountWithDiffShown()
+    await openRowDetail(root)
+    const wrap = root.querySelector('.sp-snap__rows-scroll') as HTMLElement
+    expect(wrap).not.toBeNull()
+    expect(wrap.getAttribute('tabindex')).toBe('0')
+    expect(wrap.getAttribute('role')).toBe('region')
+    expect(wrap.getAttribute('aria-label')).toBeTruthy()
+  })
 })
