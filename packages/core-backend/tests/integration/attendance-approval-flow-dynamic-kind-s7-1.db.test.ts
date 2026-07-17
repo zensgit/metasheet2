@@ -70,7 +70,10 @@ function errorCode(res: HttpResponse): string | undefined {
 const NODE_KEY_0 = 'attendance_request_step_0'
 const NODE_KEY_1 = 'attendance_request_step_1'
 const DYNAMIC_FLAG = 'ATTENDANCE_APPROVAL_DYNAMIC_ASSIGNEE_SOURCES_ENABLED'
-const HOST_MAX_LEVEL = 10 // host-resolved default (APPROVAL_MANAGER_CHAIN_MAX_LEVELS unset)
+// Pinned into APPROVAL_MANAGER_CHAIN_MAX_LEVELS in beforeAll BEFORE the core import — the host resolves
+// MAX_MANAGER_CHAIN_LEVELS at module load (ApprovalDirectoryOrg.ts), so the MAX+1 leg stays truthful even
+// when the ambient CI/dev environment sets its own value.
+const HOST_MAX_LEVEL = 10
 
 const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
 const describeIfDatabase = dbUrl ? describe : describe.skip
@@ -81,9 +84,13 @@ describeIfDatabase('S7-1 dynamic-kind step contract + fail-closed (authoring + r
   let pool: Pool | undefined
   let prevRbac: string | undefined
   let prevFlag: string | undefined
+  let prevMaxLevels: string | undefined
 
   const runSuffix = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
   const orgId = `s7-1-${runSuffix}`
+  // Isolated org for the whole-flow breadth case: keeps its single active flow unambiguous under
+  // loadApprovalFlow's newest-first pick, independent of every flow the main org accumulates.
+  const breadthOrgId = `s7-1b-${runSuffix}`
   const requester = `s7-1-req-${runSuffix}`
   let adminToken: string
   const createdFlowIds: string[] = []
@@ -155,6 +162,8 @@ describeIfDatabase('S7-1 dynamic-kind step contract + fail-closed (authoring + r
     process.env.RBAC_BYPASS = 'true'
     process.env.SKIP_PLUGINS = 'false'
     delete process.env[DYNAMIC_FLAG] // default OFF
+    prevMaxLevels = process.env.APPROVAL_MANAGER_CHAIN_MAX_LEVELS
+    process.env.APPROVAL_MANAGER_CHAIN_MAX_LEVELS = String(HOST_MAX_LEVEL)
 
     const repoRoot = path.join(__dirname, '../../../../')
     pool = new Pool({ connectionString: dbUrl })
@@ -181,12 +190,14 @@ describeIfDatabase('S7-1 dynamic-kind step contract + fail-closed (authoring + r
           await pool.query('DELETE FROM attendance_requests WHERE id = ANY($1::uuid[])', [createdRequestIds]).catch(() => undefined)
         }
         await pool.query('DELETE FROM attendance_requests WHERE org_id = $1', [orgId]).catch(() => undefined)
+        await pool.query('DELETE FROM attendance_requests WHERE org_id = $1', [breadthOrgId]).catch(() => undefined)
         if (createdInstanceIds.length > 0) {
           await pool.query('DELETE FROM approval_records WHERE instance_id = ANY($1::text[])', [createdInstanceIds]).catch(() => undefined)
           await pool.query('DELETE FROM approval_assignments WHERE instance_id = ANY($1::text[])', [createdInstanceIds]).catch(() => undefined)
           await pool.query('DELETE FROM approval_instances WHERE id = ANY($1::text[])', [createdInstanceIds]).catch(() => undefined)
         }
         await pool.query('DELETE FROM attendance_approval_flows WHERE org_id = $1', [orgId]).catch(() => undefined)
+        await pool.query('DELETE FROM attendance_approval_flows WHERE org_id = $1', [breadthOrgId]).catch(() => undefined)
       } finally {
         await pool.end()
       }
@@ -196,6 +207,8 @@ describeIfDatabase('S7-1 dynamic-kind step contract + fail-closed (authoring + r
     }
     if (prevRbac === undefined) delete process.env.RBAC_BYPASS
     else process.env.RBAC_BYPASS = prevRbac
+    if (prevMaxLevels === undefined) delete process.env.APPROVAL_MANAGER_CHAIN_MAX_LEVELS
+    else process.env.APPROVAL_MANAGER_CHAIN_MAX_LEVELS = prevMaxLevels
     if (prevFlag === undefined) delete process.env[DYNAMIC_FLAG]
     else process.env[DYNAMIC_FLAG] = prevFlag
   })
@@ -290,6 +303,45 @@ describeIfDatabase('S7-1 dynamic-kind step contract + fail-closed (authoring + r
       [orgId, requester],
     )
     expect(after.rows[0].n, 'no attendance_requests row may persist on a fail-closed create').toBe(before.rows[0].n)
+  })
+
+  // ── §4.1 runtime create WHOLE-FLOW breadth: the dynamic step is at index 1, NOT index 0. The create
+  // gate passes no onlyStepIndex (whole-flow scan) — a mutation narrowing it to step 0 must turn this red. ──
+  it('RUNTIME create: [static, dynamic] flow + flag OFF ⇒ fails-closed on the LATER dynamic step, zero rows', async () => {
+    setFlag(false)
+    const breadthFlowId = randomUUID()
+    await (pool as Pool).query(
+      `INSERT INTO attendance_approval_flows (id, org_id, name, request_type, steps, is_active)
+       VALUES ($1, $2, $3, 'time_correction', $4::jsonb, true)`,
+      [
+        breadthFlowId,
+        breadthOrgId,
+        `s7-1-runtime-breadth-${runSuffix}`,
+        JSON.stringify([{ name: 'S', approverUserIds: [requester] }, { kind: 'direct_manager' }]),
+      ],
+    )
+    createdFlowIds.push(breadthFlowId)
+
+    const workDate = '2026-05-21'
+    const res = await requestJson(`${baseUrl}/api/attendance/requests`, {
+      method: 'POST',
+      headers: authHeaders(adminToken),
+      body: JSON.stringify({
+        orgId: breadthOrgId,
+        workDate,
+        requestType: 'time_correction',
+        requestedInAt: `${workDate}T01:25:00Z`,
+        requestedOutAt: `${workDate}T10:00:00Z`,
+        reason: 's7-1 runtime create whole-flow breadth',
+      }),
+    })
+    expect(res.status, res.raw).toBe(422)
+    expect(errorCode(res)).toBe('APPROVAL_STEP_KIND_UNAVAILABLE')
+    const after = await (pool as Pool).query(
+      'SELECT COUNT(*)::int AS n FROM attendance_requests WHERE org_id = $1',
+      [breadthOrgId],
+    )
+    expect(after.rows[0].n, 'no attendance_requests row may persist when a LATER step is dynamic').toBe(0)
   })
 
   // ── §4.1 runtime step-advance fail-closed: approve step 1 advancing into a dynamic step 2, flag OFF ──
