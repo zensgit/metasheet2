@@ -8,7 +8,7 @@ import type { ApprovalAttachmentStore } from '../../src/services/approval-attach
 
 const FLAG_ON = { APPROVAL_ATTACHMENTS_ENABLED: 'true' } as unknown as NodeJS.ProcessEnv
 
-function makeApp(over: { rows?: unknown[]; viewer?: string | null; participant?: boolean; hidden?: boolean; org?: string | null } = {}) {
+function makeApp(over: { rows?: unknown[]; viewer?: string | null; participant?: boolean; hidden?: boolean; org?: string | null; attachmentField?: boolean } = {}) {
   const blobs = new Map<string, Buffer>()
   const inserted: unknown[][] = []
   const store: ApprovalAttachmentStore = {
@@ -38,6 +38,7 @@ function makeApp(over: { rows?: unknown[]; viewer?: string | null; participant?:
     },
     viewerId: () => (over.viewer === undefined ? 'u1' : over.viewer),
     orgId: () => (over.org === undefined ? 'org1' : over.org),
+    resolveAttachmentField: async () => over.attachmentField ?? true,
     env: FLAG_ON,
   })
   const app = express()
@@ -55,6 +56,7 @@ describe('approval attachment routes (flag-gated)', () => {
         authChecks: { isInstanceParticipant: async () => true, isFieldHiddenAtActiveNode: async () => false },
         viewerId: () => 'u1',
         orgId: () => 'org1',
+        resolveAttachmentField: async () => true,
         env: {} as NodeJS.ProcessEnv,
       })
       return { router: r }
@@ -94,6 +96,20 @@ describe('approval attachment routes (flag-gated)', () => {
       .attach('file', Buffer.from('MZ'), { filename: 'x.exe', contentType: 'application/x-msdownload' })
     expect(bad.status).toBe(422)
     expect(bad.body.rejected[0].code).toBe('mime_not_allowed')
+  })
+
+  // G2: a fieldId that is NOT an attachment-typed field in the template schema is rejected (400).
+  test('upload G2: a non-attachment fieldId is rejected 400; the blob is never written', async () => {
+    const { app, inserted, blobs } = makeApp({ attachmentField: false })
+    const r = await request(app)
+      .post('/api/approval/attachments')
+      .field('fieldId', 'not_an_attachment')
+      .field('templateId', 'tpl1')
+      .attach('file', Buffer.from('%PDF-1.4'), { filename: 'a.pdf', contentType: 'application/pdf' })
+    expect(r.status).toBe(400)
+    expect(r.body.error).toBe('not_an_attachment_field')
+    expect(inserted.length).toBe(0) // rejected before the durable row
+    expect(blobs.size).toBe(0) // and before any blob write
   })
 
   test('download: participant streams bound blob; non-participant gets 404 (no oracle); deleted → 410', async () => {

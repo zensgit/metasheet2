@@ -38,6 +38,13 @@ export interface ApprovalAttachmentRouteDeps {
    * owns the attachment is a property of the caller's identity, not a client-writable field.
    */
   orgId(req: Request): string | null
+  /**
+   * Is `fieldId` an `attachment`-typed field in `templateId`'s form schema? (§4.1 / G2.) The production
+   * wiring loads the template's form schema and checks the field's `type`; returns false for an unknown
+   * template, an unknown field, or a non-attachment field. A false result fails the upload closed (400) —
+   * an upload can never land against a non-attachment (or non-existent) field.
+   */
+  resolveAttachmentField(templateId: string, fieldId: string): Promise<boolean>
   env?: NodeJS.ProcessEnv
 }
 
@@ -64,6 +71,10 @@ export function createApprovalAttachmentRouter(deps: ApprovalAttachmentRouteDeps
     const fieldId = typeof req.body?.fieldId === 'string' && /[!-~]/.test(req.body.fieldId) ? req.body.fieldId : null
     const templateId = typeof req.body?.templateId === 'string' && /[!-~]/.test(req.body.templateId) ? req.body.templateId : null
     if (!fieldId || !templateId) return res.status(400).json({ error: 'template_and_field_required' })
+    // G2: the target field MUST be an attachment-typed field in the template's form schema — else 400.
+    if (!(await deps.resolveAttachmentField(templateId, fieldId))) {
+      return res.status(400).json({ error: 'not_an_attachment_field' })
+    }
     const verdict = validateApprovalAttachments([{ fileName: f.originalname, mimeType: f.mimetype, sizeBytes: f.size }]) as {
       ok: boolean
       rejected?: Array<{ fileName: string; code: string }>
