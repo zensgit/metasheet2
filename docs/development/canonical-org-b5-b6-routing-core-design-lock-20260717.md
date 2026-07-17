@@ -37,8 +37,10 @@ org_directory_routing_policy
   fallback 若非 NULL 同样 `(fallback_integration_id, org_id)` → 同约束。策略永远指不到别的 org
   的 integration。参与 FK 的列 NOT NULL（fallback 例外，NULL = 无 fallback；MATCH SIMPLE 下
   fallback 为 NULL 即跳过该 FK —— 这里 NULL 语义正确，非绕过）。
-- `ON DELETE` 明确：canonical FK **RESTRICT**（删除仍被策略引用的 integration 必须先改策略——
-  策略沉默消失比响亮报错更危险）；fallback FK **SET NULL**。
+- `ON DELETE` 明确：**两条 FK 均 RESTRICT**（as-built 修正：composite FK 的 `SET NULL` 会把全部
+  引用列置 NULL——含 NOT NULL 的 `org_id`——PG14 无列级 `SET NULL (col)`；且 RESTRICT 本就是意图
+  姿态：删除仍被策略引用的 integration 必须先改策略，策略沉默消失比响亮报错更危险。B5-a gate 实证
+  CASCADE 变体会**静默删策略行**，已用 `confdeltype='r'` 双腿钉死 + fallback 行为测试）。
 - 迁移 replay 幂等（IF NOT EXISTS + pg_constraint 探针，钉 conname+conrelid+contype）。
 
 ### 锁 2 — resolver 优先级（默认不变量：无策略 = 字节级现状）
@@ -107,6 +109,19 @@ purpose=`approval_routing` 的解析顺序：
   linked accounts 推导其 integration 的 org 集：恰一个 org ⇒ 用之查策略；>1 org ⇒ fail-closed
   （operator-visible，多 org 用户的路由必须显式配置）；0 ⇒ 现状 `{}` 返回。
 - **Q5 preview 是否审计**：推荐 = 纯 GET 不审计（只读、无副作用、可能高频）；PATCH 才审计。
+
+### as-built 精化（实现期落定，随各 PR 附 gate 实证；owner 审定时一并裁）
+
+- **Q4 精化**：多 org 用户仅在「≥1 个 linked org 有策略」时才 fail-closed；全部 org 均无策略 ⇒
+  legacy 字节级不变（否则无策略世界会被多 org 用户破坏 Q1 的零行为变化）。单个受治理 org + 若干
+  无策略 org ⇒ 跟随唯一策略（确定性，非猜测）。
+- **preview 机制**：resolver 增加 `overrideCanonicalIntegrationId` 只读预览选项（undefined=正常
+  probe；仅 preview 路由在校验 candidate 同 org+active 后传入；生产唯一调用点不传——gate 已全仓
+  grep 实证）。两腿同一 resolver ⇒ preview 不会与生产解析漂移。
+- **写点 409**：PATCH 指向非 active integration 直接 409（写时拒绝坏策略，优于 B5-b 之后逐单
+  fail-closed）。
+- **Q6（新，B7 接线）**：`sweepStaleDepartmentBindings` 幂等、确定，但**尚未接线**——post-sync
+  hook vs admin 触发是 owner 裁决（未裁前不碰已硬化的 sync core）。
 
 ## 4. 实现切分（审定后）
 
