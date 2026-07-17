@@ -32,6 +32,7 @@ import type {
   NodeTimeoutConfig,
   NodeTimeoutEffect,
   PublishApprovalTemplateRequest,
+  RestoreApprovalTemplateVersionRequest,
   RuntimeGraph,
   RuntimePolicy,
   UpdateApprovalTemplateRequest,
@@ -171,6 +172,7 @@ type TemplateVersionRow = {
    * published-without-a-note version, or any version predating the column.
    */
   publish_note?: string | null
+  restored_from_version_id?: string | null
   created_at: Date
   updated_at: Date
 }
@@ -2157,6 +2159,7 @@ function toApprovalTemplateVersionDetailDTO(bundle: TemplateBundle): ApprovalTem
     runtimeGraph: bundle.publishedDefinition ? asRuntimeGraph(bundle.publishedDefinition.runtime_graph) : null,
     publishedDefinitionId: bundle.publishedDefinition?.id || null,
     publishNote: bundle.version.publish_note ?? null,
+    restoredFromVersionId: bundle.version.restored_from_version_id ?? null,
     createdAt: bundle.version.created_at.toISOString(),
     updatedAt: bundle.version.updated_at.toISOString(),
   }
@@ -3348,9 +3351,119 @@ export class ApprovalProductService {
       status: row.status,
       publishNote: row.publish_note ?? null,
       publishedDefinitionId: row.published_definition_id ?? null,
+      restoredFromVersionId: row.restored_from_version_id ?? null,
       createdAt: row.created_at.toISOString(),
       updatedAt: row.updated_at.toISOString(),
     }))
+  }
+
+  async restoreTemplateVersion(
+    templateId: string,
+    versionId: string,
+    request: RestoreApprovalTemplateVersionRequest,
+  ): Promise<ApprovalTemplateVersionDetailDTO> {
+    if (!pool) throw new Error('Database not available')
+
+    const expectedLatestVersionId = normalizeRequiredString(
+      request.expectedLatestVersionId,
+      'expectedLatestVersionId',
+    )
+    let client: ApprovalDbClient | null = null
+    try {
+      client = await pool.connect()
+      await client.query('BEGIN')
+
+      const templateResult = await client.query<TemplateRow>(
+        `SELECT * FROM approval_templates WHERE id = $1 FOR UPDATE`,
+        [templateId],
+      )
+      const template = templateResult.rows[0]
+      if (!template) {
+        throw new ServiceError('Approval template not found', 404, 'APPROVAL_TEMPLATE_NOT_FOUND')
+      }
+      if (template.latest_version_id !== expectedLatestVersionId) {
+        throw new ServiceError(
+          'Approval template changed since version history was loaded',
+          409,
+          'APPROVAL_TEMPLATE_VERSION_STALE',
+        )
+      }
+      if (versionId === template.latest_version_id) {
+        throw new ServiceError(
+          'The selected version is already the latest version',
+          409,
+          'APPROVAL_TEMPLATE_VERSION_ALREADY_LATEST',
+        )
+      }
+
+      const sourceResult = await client.query<TemplateVersionRow>(
+        `SELECT *
+         FROM approval_template_versions
+         WHERE id = $1 AND template_id = $2`,
+        [versionId, templateId],
+      )
+      const source = sourceResult.rows[0]
+      if (!source) {
+        throw new ServiceError(
+          'Approval template version not found',
+          404,
+          'APPROVAL_TEMPLATE_VERSION_NOT_FOUND',
+        )
+      }
+
+      // Revalidate the historical snapshot against today's authoring contract before copying it.
+      // The new row is always a draft; publishing remains a separate, explicit operation.
+      const formSchema = assertFormSchema(source.form_schema)
+      const approvalGraph = assertApprovalGraph(source.approval_graph)
+      validateApprovalAssigneeSourcesAgainstFormSchema(approvalGraph, formSchema, REQUEST_VALIDATION_CONTEXT)
+      validateNodeFieldPermissionsAgainstFormSchema(approvalGraph, formSchema, REQUEST_VALIDATION_CONTEXT)
+      validateApprovalConditionFormulasAgainstFormSchema(approvalGraph, formSchema, REQUEST_VALIDATION_CONTEXT)
+      validateNodeTimeoutConfigs(approvalGraph)
+
+      const maxVersionResult = await client.query<{ max_version: string }>(
+        `SELECT COALESCE(MAX(version), 0)::text AS max_version
+         FROM approval_template_versions
+         WHERE template_id = $1`,
+        [templateId],
+      )
+      const nextVersion = Number.parseInt(maxVersionResult.rows[0]?.max_version || '0', 10) + 1
+      const restoredResult = await client.query<TemplateVersionRow>(
+        `INSERT INTO approval_template_versions (
+           template_id, version, status, form_schema, approval_graph, restored_from_version_id
+         )
+         VALUES ($1, $2, 'draft', $3, $4, $5)
+         RETURNING *`,
+        [
+          templateId,
+          nextVersion,
+          JSON.stringify(formSchema),
+          JSON.stringify(approvalGraph),
+          source.id,
+        ],
+      )
+      const restoredVersion = restoredResult.rows[0]
+
+      const updatedTemplateResult = await client.query<TemplateRow>(
+        `UPDATE approval_templates
+         SET latest_version_id = $1, updated_at = now()
+         WHERE id = $2
+         RETURNING *`,
+        [restoredVersion.id, templateId],
+      )
+      const updatedTemplate = updatedTemplateResult.rows[0]
+      await client.query('COMMIT')
+
+      return toApprovalTemplateVersionDetailDTO({
+        template: updatedTemplate,
+        version: restoredVersion,
+        publishedDefinition: null,
+      })
+    } catch (error) {
+      await rollbackQuietly(client)
+      throw error
+    } finally {
+      client?.release()
+    }
   }
 
   async createTemplate(request: CreateApprovalTemplateRequest): Promise<ApprovalTemplateDetailDTO> {

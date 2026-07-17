@@ -12,6 +12,10 @@ import { MetaSheetServer } from '../../src/index'
 import { poolManager } from '../../src/integration/db/connection-pool'
 import { ensureApprovalSchemaReady } from '../helpers/approval-schema-bootstrap'
 
+// tests/setup.ts replaces global fetch in its beforeAll. Capture Node's real implementation while
+// this module is evaluated so this real-HTTP suite cannot silently call the empty test stub.
+const realFetch: typeof globalThis.fetch = globalThis.fetch.bind(globalThis)
+
 // Same self-guard as the other approval *.api.test.ts (e.g. approval-wp1): this suite boots a real
 // MetaSheetServer + connects to Postgres, so it must SKIP when DATABASE_URL is unset (the unit
 // `test (18.x/20.x)` jobs, which match tests/integration but provide no DB) and RUN in the
@@ -27,7 +31,7 @@ async function canListenOnEphemeralPort(): Promise<boolean> {
 }
 
 async function authToken(baseUrl: string, userId: string): Promise<string> {
-  const response = await fetch(
+  const response = await realFetch(
     `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(userId)}&roles=admin&perms=${encodeURIComponent('*:*')}`,
   )
   expect(response.status).toBe(200)
@@ -41,7 +45,7 @@ async function jsonRequest(
   token: string,
   options: { method?: string; body?: unknown } = {},
 ) {
-  return await fetch(`${baseUrl}${path}`, {
+  return await realFetch(`${baseUrl}${path}`, {
     method: options.method || 'GET',
     headers: {
       Authorization: `Bearer ${token}`,
@@ -184,5 +188,116 @@ describeIfDatabase('Approval template authoring MVP — operator UAT (real DB, n
     expect(approval.currentNodeKey).toBe('approval_1')
     const activeAssignees = approval.assignments.filter((a) => a.isActive).map((a) => a.assigneeId)
     expect(activeAssignees).toEqual(['uat-approver-42'])
+  })
+
+  it('restores a historical version into one new draft under concurrent requests without changing the active version', async () => {
+    const createResp = await jsonRequest(baseUrl, '/api/approval-templates', adminToken, {
+      method: 'POST',
+      body: {
+        key: `uat-version-restore-${Date.now()}`,
+        name: 'UAT Version Restore',
+        visibilityScope: { type: 'all', ids: [] },
+        formSchema: authoringFormSchema(),
+        approvalGraph: authoringApprovalGraph(),
+      },
+    })
+    expect(createResp.status).toBe(201)
+    const created = await createResp.json() as { id: string; latestVersionId: string }
+    createdTemplateIds.add(created.id)
+    const v1Id = created.latestVersionId
+
+    const publishResp = await jsonRequest(baseUrl, `/api/approval-templates/${created.id}/publish`, adminToken, {
+      method: 'POST',
+      body: { policy: { allowRevoke: true } },
+    })
+    expect(publishResp.status).toBe(200)
+
+    const changedGraph = authoringApprovalGraph()
+    changedGraph.nodes[1] = {
+      key: 'approval_1',
+      type: 'approval',
+      name: 'Changed approver',
+      config: {
+        assigneeType: 'user',
+        assigneeIds: ['uat-different-approver'],
+        approvalMode: 'single',
+        emptyAssigneePolicy: 'error',
+      },
+    }
+    const updateResp = await jsonRequest(baseUrl, `/api/approval-templates/${created.id}`, adminToken, {
+      method: 'PATCH',
+      body: { approvalGraph: changedGraph },
+    })
+    expect(updateResp.status).toBe(200)
+    const updated = await updateResp.json() as { latestVersionId: string }
+    const v2Id = updated.latestVersionId
+    expect(v2Id).not.toBe(v1Id)
+
+    const restorePath = `/api/approval-templates/${created.id}/versions/${v1Id}/restore`
+    const [left, right] = await Promise.all([
+      jsonRequest(baseUrl, restorePath, adminToken, {
+        method: 'POST',
+        body: { expectedLatestVersionId: v2Id },
+      }),
+      jsonRequest(baseUrl, restorePath, adminToken, {
+        method: 'POST',
+        body: { expectedLatestVersionId: v2Id },
+      }),
+    ])
+    expect([left.status, right.status].sort()).toEqual([201, 409])
+    const success = left.status === 201 ? left : right
+    const stale = left.status === 409 ? left : right
+    const restored = await success.json() as {
+      id: string
+      version: number
+      status: string
+      restoredFromVersionId: string
+      approvalGraph: ReturnType<typeof authoringApprovalGraph>
+    }
+    const stalePayload = await stale.json() as { error: { code: string } }
+    expect(stalePayload.error.code).toBe('APPROVAL_TEMPLATE_VERSION_STALE')
+    expect(restored).toMatchObject({
+      version: 3,
+      status: 'draft',
+      restoredFromVersionId: v1Id,
+      approvalGraph: authoringApprovalGraph(),
+    })
+
+    const pool = poolManager.get()
+    const templateRow = await pool.query<{
+      active_version_id: string
+      latest_version_id: string
+      status: string
+    }>(
+      `SELECT active_version_id, latest_version_id, status
+       FROM approval_templates
+       WHERE id = $1`,
+      [created.id],
+    )
+    expect(templateRow.rows[0]).toEqual({
+      active_version_id: v1Id,
+      latest_version_id: restored.id,
+      status: 'published',
+    })
+    const versions = await pool.query<{
+      id: string
+      version: number
+      status: string
+      restored_from_version_id: string | null
+    }>(
+      `SELECT id, version, status, restored_from_version_id
+       FROM approval_template_versions
+       WHERE template_id = $1
+       ORDER BY version`,
+      [created.id],
+    )
+    expect(versions.rows).toHaveLength(3)
+    expect(versions.rows[0]).toMatchObject({ id: v1Id, version: 1, status: 'published', restored_from_version_id: null })
+    expect(versions.rows[2]).toMatchObject({
+      id: restored.id,
+      version: 3,
+      status: 'draft',
+      restored_from_version_id: v1Id,
+    })
   })
 })

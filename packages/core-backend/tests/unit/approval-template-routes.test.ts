@@ -26,6 +26,7 @@ type TemplateVersionRow = {
   approval_graph: Record<string, unknown>
   /** B3-09 — recorded at publish time; null everywhere else (mirrors the nullable column). */
   publish_note: string | null
+  restored_from_version_id: string | null
   created_at: Date
   updated_at: Date
 }
@@ -126,6 +127,7 @@ const routeState = vi.hoisted(() => {
         ],
       },
       publish_note: null,
+      restored_from_version_id: null,
       created_at: timestamp,
       updated_at: timestamp,
       ...overrides,
@@ -288,7 +290,8 @@ const routeState = vi.hoisted(() => {
 
     if (normalized.startsWith('INSERT INTO approval_template_versions')) {
       const timestamp = now()
-      const hasExplicitVersionParam = params.length === 4
+      const hasExplicitVersionParam = params.length >= 4
+      const isRestore = normalized.includes('restored_from_version_id')
       const row: TemplateVersionRow = {
         id: `ver-${state.versionSeq++}`,
         template_id: String(params[0]),
@@ -296,6 +299,8 @@ const routeState = vi.hoisted(() => {
         status: 'draft',
         form_schema: parseJson(hasExplicitVersionParam ? params[2] : params[1]),
         approval_graph: parseJson(hasExplicitVersionParam ? params[3] : params[2]),
+        publish_note: null,
+        restored_from_version_id: isRestore ? String(params[4]) : null,
         created_at: timestamp,
         updated_at: timestamp,
       }
@@ -940,6 +945,7 @@ describe('approval template routes', () => {
         'id',
         'publishNote',
         'publishedDefinitionId',
+        'restoredFromVersionId',
         'status',
         'templateId',
         'updatedAt',
@@ -971,6 +977,126 @@ describe('approval template routes', () => {
       const response = await request(pinned.url()).get(`/api/approval-templates/${template.id}/versions`)
 
       expect(response.status).toBe(403)
+    })
+
+    it('restores a historical snapshot as a new draft without switching the active published version', async () => {
+      const template = routeState.createTemplateFixture({ status: 'published' })
+      const v1 = routeState.createVersionFixture(template.id, {
+        version: 1,
+        status: 'published',
+        form_schema: { fields: [{ id: 'legacy', type: 'text', label: 'Legacy' }] },
+      })
+      const v2 = routeState.createVersionFixture(template.id, {
+        version: 2,
+        status: 'draft',
+        form_schema: { fields: [{ id: 'current', type: 'number', label: 'Current' }] },
+      })
+      template.active_version_id = v1.id
+      template.latest_version_id = v2.id
+
+      const app = createApp()
+      const response = await request(app)
+        .post(`/api/approval-templates/${template.id}/versions/${v1.id}/restore`)
+        .send({ expectedLatestVersionId: v2.id })
+
+      expect(response.status).toBe(201)
+      expect(response.body).toMatchObject({
+        templateId: template.id,
+        version: 3,
+        status: 'draft',
+        restoredFromVersionId: v1.id,
+        formSchema: v1.form_schema,
+        runtimeGraph: null,
+        publishedDefinitionId: null,
+      })
+      expect(response.body.id).not.toBe(v1.id)
+      expect(routeState.state.templates.get(template.id)).toMatchObject({
+        latest_version_id: response.body.id,
+        active_version_id: v1.id,
+        status: 'published',
+      })
+      expect(routeState.state.versions.get(v1.id)).toMatchObject({
+        status: 'published',
+        form_schema: v1.form_schema,
+      })
+    })
+
+    it('403s version restore for a non-admin before writing a new version', async () => {
+      const template = routeState.createTemplateFixture()
+      const v1 = routeState.createVersionFixture(template.id, { version: 1 })
+      const v2 = routeState.createVersionFixture(template.id, { version: 2 })
+      template.latest_version_id = v2.id
+      const beforeCount = routeState.state.versions.size
+      authState.currentUser = {
+        id: 'plain-user',
+        sub: 'plain-user',
+        name: 'Plain User',
+        email: 'plain@example.com',
+        permissions: ['approvals:read', 'approvals:write'],
+        roles: ['user'],
+      }
+
+      const app = createApp()
+      const response = await request(app)
+        .post(`/api/approval-templates/${template.id}/versions/${v1.id}/restore`)
+        .send({ expectedLatestVersionId: v2.id })
+
+      expect(response.status).toBe(403)
+      expect(routeState.state.versions.size).toBe(beforeCount)
+      expect(routeState.state.templates.get(template.id)?.latest_version_id).toBe(v2.id)
+    })
+
+    it('does not restore a version that belongs to another template', async () => {
+      const template = routeState.createTemplateFixture()
+      const latest = routeState.createVersionFixture(template.id, { version: 1 })
+      template.latest_version_id = latest.id
+      const otherTemplate = routeState.createTemplateFixture()
+      const foreignVersion = routeState.createVersionFixture(otherTemplate.id, { version: 1 })
+      otherTemplate.latest_version_id = foreignVersion.id
+      const beforeCount = routeState.state.versions.size
+
+      const app = createApp()
+      const response = await request(app)
+        .post(`/api/approval-templates/${template.id}/versions/${foreignVersion.id}/restore`)
+        .send({ expectedLatestVersionId: latest.id })
+
+      expect(response.status).toBe(404)
+      expect(response.body.error.code).toBe('APPROVAL_TEMPLATE_VERSION_NOT_FOUND')
+      expect(routeState.state.versions.size).toBe(beforeCount)
+      expect(routeState.state.templates.get(template.id)?.latest_version_id).toBe(latest.id)
+    })
+
+    it('rejects a stale restore without creating a new version', async () => {
+      const template = routeState.createTemplateFixture()
+      const v1 = routeState.createVersionFixture(template.id, { version: 1 })
+      const v2 = routeState.createVersionFixture(template.id, { version: 2 })
+      template.latest_version_id = v2.id
+      const beforeCount = routeState.state.versions.size
+
+      const app = createApp()
+      const response = await request(app)
+        .post(`/api/approval-templates/${template.id}/versions/${v1.id}/restore`)
+        .send({ expectedLatestVersionId: v1.id })
+
+      expect(response.status).toBe(409)
+      expect(response.body.error.code).toBe('APPROVAL_TEMPLATE_VERSION_STALE')
+      expect(routeState.state.versions.size).toBe(beforeCount)
+      expect(routeState.state.templates.get(template.id)?.latest_version_id).toBe(v2.id)
+    })
+
+    it('rejects restoring the latest version as a redundant copy', async () => {
+      const template = routeState.createTemplateFixture()
+      const latest = routeState.createVersionFixture(template.id)
+      template.latest_version_id = latest.id
+
+      const app = createApp()
+      const response = await request(app)
+        .post(`/api/approval-templates/${template.id}/versions/${latest.id}/restore`)
+        .send({ expectedLatestVersionId: latest.id })
+
+      expect(response.status).toBe(409)
+      expect(response.body.error.code).toBe('APPROVAL_TEMPLATE_VERSION_ALREADY_LATEST')
+      expect(routeState.state.versions.size).toBe(1)
     })
   })
 })
