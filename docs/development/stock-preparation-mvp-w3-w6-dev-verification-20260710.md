@@ -130,6 +130,8 @@ W6 postdeploy smoke 已由 #4038 合入 main(`d11c1afac`)。最终 Windows on-pr
 corrective-6 release `stock-prep-onprem-rc0-corrective6-20260717-f5c449782`，源码 SHA 为
 `f5c4497828915f861a948a9e08326b88ff4497e3`。完整 values-free 证据记录在 #4101；本节只固化
 关闭判据，不记录 tenant、credential、host、路径、业务值或原始日志。
+corrective-4 与 corrective-5 pre-release 均已标记 `[SUPERSEDED→corrective-6]`；corrective-6 是本弧
+唯一通过实体机验收的 canonical RC-0 package。
 
 首次 corrective-6 执行在 AUTH 后的 PROVISIONING 阶段 fail-closed。后续 bounded 澄清证明同一
 admin principal 被使用，但 runner 未收到非空 `-TenantId`。该失败因此归类为调用参数遗漏，不是
@@ -169,7 +171,7 @@ repeatability=1/1
 overallAcceptance=PASS
 ```
 
-**结论：W3-W6 on-prem package/runtime 验收弧 PASS，#4101 可关闭。** 此结论只关闭本文定义的
+**结论：W3-W6 on-prem package/runtime 验收弧 PASS，#4101 已按该范围 CLOSED。** 此结论只关闭本文定义的
 实体机运行时验收，不授权 §6/§7 的 owner-gated 产品决策、外部 PLM/K3/ERP 写、生产 rollout 或
 额外实体机执行。#4423 的 bounded HTTP failure diagnostics 是后续预防性加固，不是本次 PASS 的
 来源或关闭前置；本次验收不需要 corrective-7 package。
