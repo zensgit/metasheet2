@@ -174,6 +174,11 @@ jobs:
       - name: B4 department-bindings CI wiring contract
         run: node --test scripts/ops/b4-department-bindings-ci-wiring.test.mjs
 
+      # B5-a CI two-point wiring contract (no DB): the routing-policy schema suite must stay wired
+      # into BOTH vitest.config.ts (exclude) AND plugin-tests.yml (directory real-DB step).
+      - name: B5-a routing-policy CI wiring contract
+        run: node --test scripts/ops/b5a-routing-policy-ci-wiring.test.mjs
+
       # The production monitor invokes the same state helper covered here.
       # Keep this in the required 18/20 matrix so HTTP classification, silence
       # barriers, and alert/recovery streak semantics cannot drift silently.
@@ -647,6 +652,7 @@ jobs:
             tests/integration/local-directory-org-cycle-detection.db.test.ts \
             tests/integration/directory-local-integration-reactivation.db.test.ts \
             tests/integration/directory-department-bindings.db.test.ts \
+            tests/integration/org-directory-routing-policy-schema.db.test.ts \
             tests/integration/directory-normalized-manager.db.test.ts \
             tests/integration/attendance-csv-export-bom.test.ts \
             tests/integration/attendance-notification-redelivery.db.test.ts \
