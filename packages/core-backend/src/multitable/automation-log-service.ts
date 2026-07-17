@@ -124,7 +124,10 @@ export class AutomationLogService {
         rule_snapshot: persisted.ruleSnapshotJsonb,
         finished_at: execution.finishedAt ?? null,
         schema_version: execution.schemaVersion ?? AUTOMATION_EXECUTION_SCHEMA_VERSION,
-        rule_action_fingerprint: execution.ruleActionFingerprint ?? null,
+        // #4196 §4: rule_action_fingerprint is captured at INSERT (execution start) and is IMMUTABLE. It is
+        // deliberately NOT in this UPDATE set — resume / approval-bridge continuations pass execution objects
+        // rebuilt from suspension/bridge state that may not carry the field, and setting it here would NULL a
+        // previously-captured fingerprint, silently disarming the retry RULE_CHANGED guard for that execution.
         rerun_of_execution_id: execution.rerunOfExecutionId ?? null,
         initiated_by: execution.initiatedBy ?? null,
       })
