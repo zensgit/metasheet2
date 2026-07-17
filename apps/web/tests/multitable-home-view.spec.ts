@@ -184,6 +184,76 @@ describe('MultitableHomeView', () => {
     expect(root.textContent).not.toContain('暂无可访问的 Base')
   })
 
+  it('prioritizes quick access and incrementally renders a 165-base catalog', async () => {
+    const bases = Array.from({ length: 165 }, (_, index) => {
+      const number = String(index + 1).padStart(3, '0')
+      return {
+        id: `base_${number}`,
+        name: `Base ${number}`,
+        color: '#2563eb',
+      }
+    })
+    mocks.listBases.mockResolvedValue({ bases })
+    mocks.listTemplates.mockResolvedValue({ templates: [] })
+    localStorage.setItem(FAVORITE_BASES_KEY, JSON.stringify(['base_165']))
+    localStorage.setItem(RECENT_BASES_KEY, JSON.stringify([
+      { baseId: 'base_160', openedAt: '2026-07-16T10:00:00.000Z' },
+      { baseId: 'base_159', openedAt: '2026-07-16T09:00:00.000Z' },
+      { baseId: 'base_158', openedAt: '2026-07-16T08:00:00.000Z' },
+      { baseId: 'base_157', openedAt: '2026-07-16T07:00:00.000Z' },
+      { baseId: 'base_156', openedAt: '2026-07-16T06:00:00.000Z' },
+      { baseId: 'base_155', openedAt: '2026-07-16T05:00:00.000Z' },
+    ]))
+
+    const root = mountView()
+    await flushUi()
+
+    const directory = root.querySelector<HTMLElement>('[data-testid="multitable-home-base-directory"]')
+    const templateGallery = root.querySelector<HTMLElement>('[data-testid="multitable-home-template-gallery"]')
+    expect(directory).not.toBeNull()
+    expect(templateGallery).not.toBeNull()
+    expect(
+      directory!.compareDocumentPosition(templateGallery!) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy()
+    expect(directory?.querySelector('input[aria-label="Search bases"]')).not.toBeNull()
+
+    const quickButtons = Array.from(
+      root.querySelectorAll<HTMLButtonElement>('.multitable-home__quick-base'),
+    )
+    expect(quickButtons).toHaveLength(6)
+    expect(quickButtons.map((button) => button.dataset.baseId)).toEqual([
+      'base_165',
+      'base_160',
+      'base_159',
+      'base_158',
+      'base_157',
+      'base_156',
+    ])
+
+    expect(readBaseCardNames(root)).toHaveLength(24)
+    expect(root.querySelector('[data-testid="multitable-home-base-summary"]')?.textContent)
+      .toContain('已显示 24 / 165 个')
+
+    findButton(root, '加载更多').click()
+    await flushUi()
+    expect(readBaseCardNames(root)).toHaveLength(48)
+
+    const search = root.querySelector<HTMLInputElement>('input[aria-label="Search bases"]')
+    if (!search) throw new Error('Base search input not found')
+    search.value = 'base_160'
+    search.dispatchEvent(new Event('input'))
+    await flushUi()
+
+    expect(readBaseCardNames(root)).toEqual(['Base 160'])
+    expect(root.querySelector('[data-testid="multitable-home-base-summary"]')?.textContent)
+      .toContain('匹配 1 / 165 个')
+
+    search.value = ''
+    search.dispatchEvent(new Event('input'))
+    await flushUi()
+    expect(readBaseCardNames(root)).toHaveLength(24)
+  })
+
   it('promotes favorite bases and persists the favorite marker', async () => {
     mocks.listBases.mockResolvedValue({
       bases: [

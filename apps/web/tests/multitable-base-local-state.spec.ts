@@ -5,6 +5,7 @@ import {
   readFavoriteBaseIds,
   readRecentBaseOpens,
   rememberRecentBaseOpen,
+  selectQuickAccessBases,
   toggleFavoriteBaseId,
 } from '../src/multitable/utils/base-local-state'
 
@@ -93,5 +94,22 @@ describe('multitable base local state', () => {
     expect(sorted[1]).toMatchObject({ id: 'base_b', isFavorite: false, lastOpenedAt: '2026-05-18T10:00:00.000Z' })
     expect(sorted[3]).toMatchObject({ id: 'base_a', isFavorite: false, lastOpenedAt: null })
   })
-})
 
+  it('selects a bounded quick-access list without changing decorated ordering', () => {
+    const sorted = decorateAndSortBases(
+      [base('base_a'), base('base_b'), base('base_c'), base('base_d')],
+      ['base_c'],
+      [
+        { baseId: 'base_b', openedAt: '2026-05-18T10:00:00.000Z' },
+        { baseId: 'base_d', openedAt: '2026-05-18T09:00:00.000Z' },
+      ],
+    )
+
+    expect(selectQuickAccessBases(sorted, 2).map((item) => item.id)).toEqual([
+      'base_c',
+      'base_b',
+    ])
+    expect(selectQuickAccessBases(sorted, 0)).toEqual([])
+    expect(sorted.map((item) => item.id)).toEqual(['base_c', 'base_b', 'base_d', 'base_a'])
+  })
+})

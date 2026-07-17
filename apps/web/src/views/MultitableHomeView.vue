@@ -37,47 +37,17 @@
 
     <section
       class="multitable-home__panel"
-      :aria-label="templateCatalogLabel('home.aria', isZh)"
+      data-testid="multitable-home-base-directory"
     >
-      <div class="multitable-home__panel-head">
-        <div class="multitable-home__panel-title">
-          <h2>{{ templateCatalogLabel('home.title', isZh) }}</h2>
-          <span class="multitable-home__panel-subtitle">{{ templateCount(templates.length, isZh) }}</span>
-        </div>
-        <router-link
-          class="multitable-home__panel-link"
-          :to="{ name: TemplateCenterRouteName }"
-          data-testid="multitable-home-template-center-link"
-        >
-          {{ templateCatalogLabel('home.viewAll', isZh) }}
-        </router-link>
-      </div>
-
-      <p v-if="installError" class="multitable-home__error" role="alert">{{ installError }}</p>
-
-      <div v-if="templateLoading" class="multitable-home__state">
-        {{ templateCatalogLabel('home.loading', isZh) }}
-      </div>
-      <div v-else-if="!templates.length" class="multitable-home__empty">
-        {{ templateCatalogLabel('home.empty', isZh) }}
-      </div>
-      <div v-else class="multitable-home__template-grid">
-        <MetaTemplateCard
-          v-for="template in templates"
-          :key="template.id"
-          :template="template"
-          :installing="installingTemplateId === template.id"
-          @install="installAndRemember"
-        />
-      </div>
-    </section>
-
-    <section class="multitable-home__panel">
       <div class="multitable-home__panel-head">
         <div>
           <h2>可访问的 Base</h2>
-          <p v-if="bases.length" class="multitable-home__panel-subtitle">
-            {{ baseSearch.trim() ? `匹配 ${visibleBases.length} / ${bases.length} 个` : `${bases.length} 个` }}
+          <p
+            v-if="bases.length"
+            class="multitable-home__panel-subtitle"
+            data-testid="multitable-home-base-summary"
+          >
+            {{ baseCatalogSummary }}
           </p>
         </div>
         <label v-if="bases.length" class="multitable-home__search">
@@ -91,14 +61,54 @@
         </label>
       </div>
 
+      <section
+        v-if="quickAccessBases.length"
+        class="multitable-home__quick-access"
+        aria-labelledby="multitable-home-quick-access-title"
+        data-testid="multitable-home-quick-access"
+      >
+        <div class="multitable-home__quick-head">
+          <h3 id="multitable-home-quick-access-title">快速访问</h3>
+          <span>收藏和最近打开</span>
+        </div>
+        <div class="multitable-home__quick-grid">
+          <button
+            v-for="base in quickAccessBases"
+            :key="base.id"
+            type="button"
+            class="multitable-home__quick-base"
+            :data-base-id="base.id"
+            :aria-label="`打开 ${base.name}`"
+            :disabled="openingBaseId === base.id"
+            @click="openBase(base)"
+          >
+            <span
+              class="multitable-home__quick-icon"
+              :style="{ background: base.color || '#2563eb' }"
+              aria-hidden="true"
+            >
+              {{ base.icon || base.name.slice(0, 1).toUpperCase() }}
+            </span>
+            <span class="multitable-home__quick-copy">
+              <strong>{{ base.name }}</strong>
+              <small>
+                {{ base.isFavorite && base.lastOpenedAt
+                  ? '收藏 · 最近打开'
+                  : base.isFavorite ? '收藏' : '最近打开' }}
+              </small>
+            </span>
+          </button>
+        </div>
+      </section>
+
       <div v-if="loading" class="multitable-home__state">正在加载多维表...</div>
       <div v-else-if="!bases.length" class="multitable-home__empty">
         暂无可访问的 Base。你可以新建一个，或从数据工厂/考勤等业务入口生成多维表。
       </div>
-      <div v-else-if="!visibleBases.length" class="multitable-home__empty">
+      <div v-else-if="!searchedBases.length" class="multitable-home__empty">
         没有匹配的 Base。请调整搜索关键词。
       </div>
-      <div v-else class="multitable-home__grid">
+      <div v-else class="multitable-home__grid" data-testid="multitable-home-base-grid">
         <article v-for="base in visibleBases" :key="base.id" class="multitable-home__card">
           <div class="multitable-home__card-icon" :style="{ background: base.color || '#2563eb' }">
             {{ base.icon || base.name.slice(0, 1).toUpperCase() }}
@@ -133,12 +143,55 @@
           </MtButton>
         </article>
       </div>
+      <div v-if="hasMoreBases" class="multitable-home__catalog-footer">
+        <MtButton data-testid="multitable-home-load-more" @click="loadMoreBases">
+          加载更多（剩余 {{ remainingBaseCount }} 个）
+        </MtButton>
+      </div>
+    </section>
+
+    <section
+      class="multitable-home__panel"
+      :aria-label="templateCatalogLabel('home.aria', isZh)"
+      data-testid="multitable-home-template-gallery"
+    >
+      <div class="multitable-home__panel-head">
+        <div class="multitable-home__panel-title">
+          <h2>{{ templateCatalogLabel('home.title', isZh) }}</h2>
+          <span class="multitable-home__panel-subtitle">{{ templateCount(templates.length, isZh) }}</span>
+        </div>
+        <router-link
+          class="multitable-home__panel-link"
+          :to="{ name: TemplateCenterRouteName }"
+          data-testid="multitable-home-template-center-link"
+        >
+          {{ templateCatalogLabel('home.viewAll', isZh) }}
+        </router-link>
+      </div>
+
+      <p v-if="installError" class="multitable-home__error" role="alert">{{ installError }}</p>
+
+      <div v-if="templateLoading" class="multitable-home__state">
+        {{ templateCatalogLabel('home.loading', isZh) }}
+      </div>
+      <div v-else-if="!templates.length" class="multitable-home__empty">
+        {{ templateCatalogLabel('home.empty', isZh) }}
+      </div>
+      <div v-else class="multitable-home__template-grid">
+        <MetaTemplateCard
+          v-for="template in templates"
+          :key="template.id"
+          :template="template"
+          :installing="installingTemplateId === template.id"
+          @install="installAndRemember"
+        />
+      </div>
     </section>
   </section>
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { multitableClient } from '../multitable/api/client'
 import type {
@@ -154,6 +207,7 @@ import {
   readFavoriteBaseIds,
   readRecentBaseOpens,
   rememberRecentBaseOpen,
+  selectQuickAccessBases,
   toggleFavoriteBaseId,
 } from '../multitable/utils/base-local-state'
 import { AppRouteNames } from '../router/types'
@@ -167,6 +221,7 @@ import {
 } from '../multitable/utils/template-localization'
 
 const TemplateCenterRouteName = AppRouteNames.MULTITABLE_TEMPLATES
+const BASE_CATALOG_PAGE_SIZE = 24
 
 const router = useRouter()
 const { isZh } = useLocale()
@@ -181,6 +236,7 @@ const errorMessage = ref('')
 const templateError = ref('')
 const newBaseName = ref('')
 const baseSearch = ref('')
+const visibleBaseLimit = ref(BASE_CATALOG_PAGE_SIZE)
 
 const { installingTemplateId, errorMessage: installError, installAndOpen } = useTemplateInstall()
 
@@ -199,7 +255,29 @@ const searchedBases = computed<DecoratedBase[]>(() => {
   })
 })
 
-const visibleBases = computed(() => searchedBases.value)
+const quickAccessBases = computed(() => selectQuickAccessBases(decoratedBases.value))
+
+const visibleBases = computed(() => searchedBases.value.slice(0, visibleBaseLimit.value))
+
+const hasMoreBases = computed(() => visibleBases.value.length < searchedBases.value.length)
+
+const remainingBaseCount = computed(() => searchedBases.value.length - visibleBases.value.length)
+
+const baseCatalogSummary = computed(() => {
+  const total = bases.value.length
+  const matched = searchedBases.value.length
+  const visible = visibleBases.value.length
+  if (baseSearch.value.trim()) {
+    return hasMoreBases.value
+      ? `匹配 ${matched} / ${total} 个 · 已显示 ${visible} 个`
+      : `匹配 ${matched} / ${total} 个`
+  }
+  return hasMoreBases.value ? `已显示 ${visible} / ${total} 个` : `${total} 个`
+})
+
+watch(baseSearch, () => {
+  visibleBaseLimit.value = BASE_CATALOG_PAGE_SIZE
+})
 
 function toggleFavoriteBase(baseId: string): void {
   favoriteBaseIds.value = toggleFavoriteBaseId(baseId)
@@ -207,6 +285,10 @@ function toggleFavoriteBase(baseId: string): void {
 
 function rememberRecentBase(baseId: string): void {
   recentBaseOpens.value = rememberRecentBaseOpen(baseId)
+}
+
+function loadMoreBases(): void {
+  visibleBaseLimit.value += BASE_CATALOG_PAGE_SIZE
 }
 
 function resolveOpenTarget(context: MetaContext): { sheet: MetaSheet; view: MetaView } | null {
@@ -222,6 +304,7 @@ async function loadBases(): Promise<void> {
   try {
     const data = await multitableClient.listBases()
     bases.value = data.bases ?? []
+    visibleBaseLimit.value = BASE_CATALOG_PAGE_SIZE
   } catch (error) {
     errorMessage.value = error instanceof Error ? error.message : '加载多维表失败'
   } finally {
@@ -467,6 +550,93 @@ onMounted(loadHomeData)
   font-size: 14px;
 }
 
+.multitable-home__quick-access {
+  padding: 16px 24px;
+  border-bottom: 1px solid #e2e8f0;
+  background: #f8fafc;
+}
+
+.multitable-home__quick-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+
+.multitable-home__quick-head h3 {
+  margin: 0;
+  font-size: 14px;
+}
+
+.multitable-home__quick-head span {
+  color: #64748b;
+  font-size: 12px;
+}
+
+.multitable-home__quick-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 8px;
+}
+
+.multitable-home__quick-base {
+  display: grid;
+  grid-template-columns: 32px minmax(0, 1fr);
+  gap: 10px;
+  align-items: center;
+  min-height: 56px;
+  border: 1px solid #dbe3ee;
+  border-radius: 8px;
+  padding: 8px 10px;
+  background: #fff;
+  color: #0f172a;
+  text-align: left;
+  cursor: pointer;
+}
+
+.multitable-home__quick-base:hover {
+  border-color: #93c5fd;
+  background: #eff6ff;
+}
+
+.multitable-home__quick-base:focus-visible {
+  outline: 2px solid #2563eb;
+  outline-offset: 2px;
+}
+
+.multitable-home__quick-icon {
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
+  color: #fff;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.multitable-home__quick-copy {
+  min-width: 0;
+}
+
+.multitable-home__quick-copy strong,
+.multitable-home__quick-copy small {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.multitable-home__quick-copy strong {
+  font-size: 13px;
+}
+
+.multitable-home__quick-copy small {
+  margin-top: 2px;
+  color: #64748b;
+  font-size: 11px;
+}
+
 .multitable-home__state,
 .multitable-home__empty {
   padding: 32px 24px;
@@ -478,6 +648,12 @@ onMounted(loadHomeData)
   grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
   gap: 14px;
   padding: 18px;
+}
+
+.multitable-home__catalog-footer {
+  display: flex;
+  justify-content: center;
+  padding: 0 18px 18px;
 }
 
 .multitable-home__template-grid {
@@ -604,6 +780,14 @@ button:disabled {
   .multitable-home__create-form {
     min-width: 0;
     display: grid;
+  }
+
+  .multitable-home__quick-access {
+    padding: 14px 16px;
+  }
+
+  .multitable-home__quick-grid {
+    grid-template-columns: 1fr;
   }
 }
 </style>
