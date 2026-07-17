@@ -128,6 +128,13 @@ export default defineConfig({
       // a WHOLE FILE into the directory real-DB step in plugin-tests.yml (both points asserted by
       // pb4-4-reactivation-ci-wiring.test.mjs so neither can silently drop).
       'tests/integration/directory-local-integration-reactivation.db.test.ts',
+      // Canonical Org MVP B4 (#4215 §5.5): directory_department_bindings buildable FK chain — a
+      // cross-org binding is FK-IMPOSSIBLE to insert (both integrations pinned to one org_id column;
+      // NOT NULL closes the MATCH SIMPLE hole). Proves rejection BY the org-chain FK by name + the
+      // NOT NULL/FK mutations — meaningless without a real DB. DATABASE_URL-gated; excluded here so
+      // the no-DB job cannot skip-green it, and wired as a WHOLE FILE into the directory real-DB step
+      // in plugin-tests.yml (both points asserted by b4-department-bindings-ci-wiring.test.mjs).
+      'tests/integration/directory-department-bindings.db.test.ts',
       // Canonical Org MVP B3 (#4215 §5.4): proves ApprovalDirectoryOrg's DUAL-SOURCE direct-manager
       // resolution against real Postgres — normalized `is_manager` relation for a local integration,
       // the DingTalk `leader_in_dept` regression pin (load-bearing compat leg + is_manager=0 positive
