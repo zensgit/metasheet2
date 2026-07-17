@@ -13,6 +13,7 @@
  * claim and the outbox row. Checks and writes are injected seams; no production caller yet.
  */
 import type { Queryable } from './automation-durable-dispatcher'
+import type { TransactionalQueryable } from './pg-transaction-guard'
 import { claimActionApplied } from './automation-action-idempotency'
 import { mapApprovalFormValues, type FwbFieldMapping } from './approval-form-value-mapping'
 import { recheckFwbPermissionGates, type FwbGateChecks, type FwbGateId, type FwbGateSubject } from './approval-fwb-permission-gates'
@@ -93,7 +94,7 @@ export type FwbUpdateActionResult =
 
 /** FWB-2 executor: gates → bound-record recheck → mapping → same-txn claim + UPDATE + revision + outbox. */
 export async function executeUpdateBoundRecord(
-  trx: Queryable,
+  trx: TransactionalQueryable, // brand=compile-time doc; real enforcement = claimActionApplied's xid probe (#4336/#4340 hardening)
   input: FwbUpdateActionInput,
   gates: FwbGateChecks,
   linkChecks: RecordLinkChecks,
