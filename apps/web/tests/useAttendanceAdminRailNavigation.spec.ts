@@ -24,6 +24,7 @@ describe('useAttendanceAdminRailNavigation', () => {
   let container: HTMLDivElement | null = null
   let scrollIntoViewSpy: ReturnType<typeof vi.fn>
   let originalScrollIntoView: typeof HTMLElement.prototype.scrollIntoView | undefined
+  let originalIntersectionObserver: typeof window.IntersectionObserver | undefined
 
   beforeEach(() => {
     window.localStorage.clear()
@@ -33,6 +34,7 @@ describe('useAttendanceAdminRailNavigation', () => {
     document.body.appendChild(container)
     scrollIntoViewSpy = vi.fn()
     originalScrollIntoView = HTMLElement.prototype.scrollIntoView
+    originalIntersectionObserver = window.IntersectionObserver
     Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', {
       configurable: true,
       value: scrollIntoViewSpy,
@@ -48,9 +50,39 @@ describe('useAttendanceAdminRailNavigation', () => {
         value: originalScrollIntoView,
       })
     }
+    Object.defineProperty(window, 'IntersectionObserver', {
+      configurable: true,
+      value: originalIntersectionObserver,
+    })
     app = null
     container = null
   })
+
+  function installIntersectionObserver() {
+    let callback: IntersectionObserverCallback | null = null
+    class TestIntersectionObserver {
+      constructor(nextCallback: IntersectionObserverCallback) {
+        callback = nextCallback
+      }
+
+      disconnect = vi.fn()
+      observe = vi.fn()
+      unobserve = vi.fn()
+      takeRecords = vi.fn(() => [])
+      root = null
+      rootMargin = '0px'
+      thresholds = []
+    }
+    Object.defineProperty(window, 'IntersectionObserver', {
+      configurable: true,
+      value: TestIntersectionObserver,
+    })
+    return {
+      trigger(entries: IntersectionObserverEntry[]): void {
+        callback?.(entries, {} as IntersectionObserver)
+      },
+    }
+  }
 
   function mountHost(options?: { focused?: boolean }) {
     const items: AdminSectionNavItem[] = [
@@ -144,6 +176,24 @@ describe('useAttendanceAdminRailNavigation', () => {
     const scrolledTargets = scrollIntoViewSpy.mock.instances as HTMLElement[]
     expect(scrolledTargets.some(element => element.dataset.adminContent === 'true')).toBe(true)
     expect(scrolledTargets.some(element => element.id === 'attendance-admin-approval-flows')).toBe(false)
+  })
+
+  it('keeps the selected section when the observer reports another section in focused mode', async () => {
+    const observer = installIntersectionObserver()
+    const vm = mountHost({ focused: true })
+    await flushUi()
+
+    const approval = document.getElementById('attendance-admin-approval-flows')
+    expect(approval).toBeTruthy()
+    observer.trigger([{
+      target: approval!,
+      isIntersecting: true,
+      intersectionRatio: 0.9,
+      boundingClientRect: approval!.getBoundingClientRect(),
+    } as IntersectionObserverEntry])
+    await flushUi()
+
+    expect(vm.adminActiveSectionId).toBe('attendance-admin-settings')
   })
 
   it('closes compact nav after selecting a section', async () => {

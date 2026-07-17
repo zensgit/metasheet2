@@ -337,6 +337,10 @@ export default defineConfig({
       // action-idempotency ledger L1 schema golden — real-DB. Excluded HERE so it cannot skip-green
       // in the no-DB lane; whole-file wired into plugin-tests.yml. Two-point wiring.
       'tests/integration/multitable-action-applied-ledger-realdb.test.ts',
+      // #4196 execution-scoped applied ledger foundation (§2.2 locked table + §2 Class-A claim +
+      // §6.1 derived test-run root): real Postgres only — excluded HERE so it cannot skip-green in the
+      // no-DB lane, whole-file wired into `Run multitable real-DB integration` in plugin-tests.yml.
+      'tests/integration/multitable-automation-execution-ledger-realdb.test.ts',
       // P2 durable-delivery S2-a claim engine / fence-CAS — real-DB constructed-concurrency (zombie/SKIP
       // LOCKED). Excluded HERE so it cannot skip-green in the no-DB lane; whole-file wired into
       // plugin-tests.yml. Two-point wiring.

@@ -149,6 +149,8 @@ export function useAttendanceAdminRailNavigation({
     if (typeof window.IntersectionObserver === 'undefined') return
     adminSectionObserver = new window.IntersectionObserver(
       entries => {
+        // Focused mode renders one section at a time, so scroll position must not replace the user's selection.
+        if (adminFocusCurrentSectionOnly?.value) return
         const visible = entries
           .filter(entry => entry.isIntersecting)
           .sort((left, right) => {

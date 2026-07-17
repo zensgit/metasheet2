@@ -4970,13 +4970,15 @@
                       data-attendance-group-row
                     >
                       <button class="attendance__group-list-main" type="button" @click="selectAttendanceGroup(item)">
-                        <span>
+                        <span class="attendance__group-list-name">
                           <strong>{{ item.name }}</strong>
                           <small>{{ item.code || item.id }}</small>
                         </span>
-                        <span data-attendance-group-list-member-count>{{ attendanceGroupListMemberCountLabel(item) }}</span>
-                        <span>{{ attendanceGroupTypeLabel(readAttendanceGroupType(item)) }}</span>
-                        <span>{{ resolveRuleSetName(item.ruleSetId) }}</span>
+                        <span class="attendance__group-list-meta">
+                          <span data-attendance-group-list-member-count>{{ attendanceGroupListMemberCountLabel(item) }}</span>
+                          <span>{{ attendanceGroupTypeLabel(readAttendanceGroupType(item)) }}</span>
+                          <span>{{ resolveRuleSetName(item.ruleSetId) }}</span>
+                        </span>
                       </button>
                       <div class="attendance__group-list-row-actions">
                         <button
@@ -5036,7 +5038,54 @@
                     </div>
                   </div>
 
-                  <section class="attendance__group-panel" data-attendance-group-basic>
+                  <nav class="attendance__group-workflow" :aria-label="tr('Attendance group setup stages', '考勤组配置阶段')">
+                    <button
+                      class="attendance__group-workflow-step"
+                      type="button"
+                      data-attendance-group-workflow-step="basics"
+                      aria-controls="attendance-group-stage-basics"
+                      :aria-current="attendanceGroupActiveStage === 'basics' ? 'step' : undefined"
+                      :class="{ 'attendance__group-workflow-step--active': attendanceGroupActiveStage === 'basics' }"
+                      @click="selectAttendanceGroupStage('basics')"
+                    >
+                      <span>1</span>{{ tr('Basic info', '基础信息') }}
+                    </button>
+                    <button
+                      class="attendance__group-workflow-step"
+                      type="button"
+                      data-attendance-group-workflow-step="people"
+                      aria-controls="attendance-group-stage-people"
+                      :aria-current="attendanceGroupActiveStage === 'people' ? 'step' : undefined"
+                      :class="{ 'attendance__group-workflow-step--active': attendanceGroupActiveStage === 'people' }"
+                      @click="selectAttendanceGroupStage('people')"
+                    >
+                      <span>2</span>{{ tr('People', '考勤人员') }}
+                    </button>
+                    <button
+                      class="attendance__group-workflow-step"
+                      type="button"
+                      data-attendance-group-workflow-step="schedule"
+                      aria-controls="attendance-group-stage-schedule"
+                      :aria-current="attendanceGroupActiveStage === 'schedule' ? 'step' : undefined"
+                      :class="{ 'attendance__group-workflow-step--active': attendanceGroupActiveStage === 'schedule' }"
+                      @click="selectAttendanceGroupStage('schedule')"
+                    >
+                      <span>3</span>{{ tr('Work time', '考勤时间') }}
+                    </button>
+                    <button
+                      class="attendance__group-workflow-step"
+                      type="button"
+                      data-attendance-group-workflow-step="policies"
+                      aria-controls="attendance-group-stage-policies"
+                      :aria-current="attendanceGroupActiveStage === 'policies' ? 'step' : undefined"
+                      :class="{ 'attendance__group-workflow-step--active': attendanceGroupActiveStage === 'policies' }"
+                      @click="selectAttendanceGroupStage('policies')"
+                    >
+                      <span>4</span>{{ tr('Rules', '规则') }}
+                    </button>
+                  </nav>
+
+                  <section v-show="attendanceGroupActiveStage === 'basics'" id="attendance-group-stage-basics" class="attendance__group-panel" data-attendance-group-basic>
                     <div class="attendance__admin-section-header">
                       <h6>{{ tr('Basic info', '基础信息') }}</h6>
                       <span class="attendance__field-hint">{{ tr('Saved through the existing attendance group API.', '通过现有考勤组接口保存。') }}</span>
@@ -5110,7 +5159,7 @@
                     </div>
                   </section>
 
-                  <section class="attendance__group-panel" data-attendance-group-people>
+                  <section v-show="attendanceGroupActiveStage === 'people'" id="attendance-group-stage-people" class="attendance__group-panel" data-attendance-group-people>
                     <div class="attendance__admin-section-header">
                       <h6>{{ tr('People', '考勤人员') }}</h6>
                       <button
@@ -5246,7 +5295,7 @@
                     </template>
                   </section>
 
-                  <section class="attendance__group-panel" data-attendance-group-managers>
+                  <section v-show="attendanceGroupActiveStage === 'people'" class="attendance__group-panel" data-attendance-group-managers>
                     <div class="attendance__admin-section-header">
                       <div>
                         <h6>{{ tr('Owners', '负责人') }}</h6>
@@ -5370,7 +5419,7 @@
                     </template>
                   </section>
 
-                  <section class="attendance__group-summary-grid" data-attendance-group-summaries>
+                  <section v-show="attendanceGroupActiveStage === 'policies'" id="attendance-group-stage-policies" class="attendance__group-summary-grid" data-attendance-group-summaries>
                     <div
                       v-for="card in attendanceGroupSummaryCards"
                       :key="card.key"
@@ -5699,6 +5748,8 @@
 
                   <section
                     v-if="attendanceGroupEditingId && attendanceGroupForm.attendanceType === 'fixed_shift'"
+                    v-show="attendanceGroupActiveStage === 'schedule'"
+                    id="attendance-group-stage-schedule"
                     class="attendance__group-panel"
                     data-attendance-group-fixed-schedule-preview
                   >
@@ -5839,6 +5890,8 @@
                   </section>
                   <section
                     v-else-if="attendanceGroupEditingId"
+                    v-show="attendanceGroupActiveStage === 'schedule'"
+                    id="attendance-group-stage-schedule"
                     class="attendance__group-panel"
                     data-attendance-group-schedule-type-placeholder
                   >
@@ -5857,6 +5910,33 @@
                     </div>
                     <div class="attendance__empty">
                       {{ tr('This type keeps the group as a people and policy boundary here. Scheduling details stay in Advanced scheduling.', '该类型在这里作为人员与策略边界；排班细节仍在高级排班维护。') }}
+                    </div>
+                  </section>
+                  <section
+                    v-else
+                    v-show="attendanceGroupActiveStage === 'schedule'"
+                    id="attendance-group-stage-schedule"
+                    class="attendance__group-panel"
+                    data-attendance-group-schedule-create-placeholder
+                  >
+                    <div class="attendance__admin-section-header">
+                      <div>
+                        <h6>{{ tr('Work time', '考勤时间') }}</h6>
+                        <span class="attendance__field-hint">
+                          {{ tr('Save basic info to unlock schedule preview and assignment actions.', '先保存基础信息，再使用排班预览与分配操作。') }}
+                        </span>
+                      </div>
+                      <button
+                        class="attendance__btn attendance__btn--primary"
+                        type="button"
+                        data-attendance-group-schedule-create-basics
+                        @click="selectAttendanceGroupStage('basics')"
+                      >
+                        {{ tr('Complete basic info', '填写基础信息') }}
+                      </button>
+                    </div>
+                    <div class="attendance__empty">
+                      {{ tr('Fixed shift is the default. After the group is created, this stage exposes the weekly matrix and fixed-schedule preview.', '默认使用固定班次。创建考勤组后，本阶段将显示周班次矩阵与固定排班预览。') }}
                     </div>
                   </section>
                 </section>
@@ -10891,6 +10971,7 @@ interface AttendanceRuleTemplateVersion {
 }
 
 type AttendanceGroupType = 'fixed_shift' | 'scheduled_shift' | 'free_time'
+type AttendanceGroupWorkflowStage = 'basics' | 'people' | 'schedule' | 'policies'
 
 interface AttendanceGroup {
   id: string
@@ -13413,6 +13494,7 @@ const selectedDraftRotationAssignmentIds = ref<string[]>([])
 const schedulePublicationSaving = ref(false)
 const ruleSetEditingId = ref<string | null>(null)
 const attendanceGroupEditingId = ref<string | null>(null)
+const attendanceGroupActiveStage = ref<AttendanceGroupWorkflowStage>('basics')
 const attendanceGroupMemberGroupId = ref('')
 const attendanceGroupMemberSelectedUserId = ref('')
 const attendanceGroupMemberUserIds = ref('')
@@ -26570,6 +26652,7 @@ async function deleteRuleSet(id: string) {
 }
 
 function resetAttendanceGroupForm() {
+  attendanceGroupActiveStage.value = 'basics'
   attendanceGroupEditingId.value = null
   attendanceGroupForm.name = ''
   attendanceGroupForm.code = ''
@@ -26596,6 +26679,7 @@ function resetAttendanceGroupFixedSchedulePreview() {
 }
 
 function editAttendanceGroup(item: AttendanceGroup) {
+  attendanceGroupActiveStage.value = 'basics'
   const groupChanged = attendanceGroupMemberGroupId.value !== item.id
   attendanceGroupEditingId.value = item.id
   attendanceGroupForm.name = item.name
@@ -26623,6 +26707,10 @@ function startCreateAttendanceGroup() {
 
 function selectAttendanceGroup(item: AttendanceGroup) {
   editAttendanceGroup(item)
+}
+
+function selectAttendanceGroupStage(stage: AttendanceGroupWorkflowStage): void {
+  attendanceGroupActiveStage.value = stage
 }
 
 function cancelAttendanceGroupEdit() {
@@ -29968,6 +30056,10 @@ const holidaySectionBindings = {
   opacity: 0.62;
 }
 
+.attendance__admin-content--focused .attendance__admin-current-section {
+  position: static;
+}
+
 .attendance__admin-content--focused .attendance__admin-section + .attendance__admin-section {
   margin-top: 0;
 }
@@ -30419,9 +30511,10 @@ const holidaySectionBindings = {
 
 .attendance__group-layout {
   display: grid;
-  grid-template-columns: minmax(220px, 300px) minmax(0, 1fr);
+  grid-template-columns: minmax(240px, 320px) minmax(0, 1fr);
   gap: 16px;
   align-items: start;
+  min-width: 0;
 }
 
 .attendance__group-list,
@@ -30438,6 +30531,7 @@ const holidaySectionBindings = {
   flex-direction: column;
   gap: 10px;
   padding: 12px;
+  min-width: 0;
 }
 
 .attendance__group-list-header,
@@ -30491,13 +30585,14 @@ const holidaySectionBindings = {
   border-radius: 8px;
   background: #f9fafb;
   color: inherit;
+  min-width: 0;
 }
 
 .attendance__group-list-main {
-  display: flex;
-  justify-content: space-between;
-  gap: 12px;
+  display: grid;
+  gap: 8px;
   flex: 1;
+  min-width: 0;
   border: 0;
   padding: 0;
   background: transparent;
@@ -30506,9 +30601,25 @@ const holidaySectionBindings = {
   cursor: pointer;
 }
 
-.attendance__group-list-main span {
+.attendance__group-list-name {
   display: grid;
   gap: 4px;
+  min-width: 0;
+}
+
+.attendance__group-list-name strong,
+.attendance__group-list-name small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.attendance__group-list-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+  color: var(--ms-color-info);
+  font-size: 12px;
 }
 
 .attendance__group-list-row-actions {
@@ -30518,8 +30629,7 @@ const holidaySectionBindings = {
   justify-content: flex-end;
 }
 
-.attendance__group-list-item small,
-.attendance__group-list-main > span:last-child {
+.attendance__group-list-item small {
   color: #6b7280;
   font-size: 12px;
 }
@@ -30534,6 +30644,62 @@ const holidaySectionBindings = {
   display: grid;
   gap: 14px;
   padding: 14px;
+  min-width: 0;
+}
+
+.attendance__group-workflow {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+  position: sticky;
+  top: 8px;
+  z-index: 2;
+  padding: 8px;
+  border: 1px solid var(--ms-border-light);
+  border-radius: 8px;
+  background: var(--ms-bg-card);
+}
+
+.attendance__group-workflow-step {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: 34px;
+  min-width: 0;
+  border: 1px solid var(--ms-border-light);
+  border-radius: 6px;
+  background: var(--ms-bg-page);
+  color: var(--ms-text-2);
+  cursor: pointer;
+  font: inherit;
+  font-size: 13px;
+}
+
+.attendance__group-workflow-step:hover,
+.attendance__group-workflow-step:focus-visible {
+  border-color: var(--ms-color-primary);
+  background: var(--el-color-primary-light-9);
+  color: var(--el-color-primary-dark-2);
+}
+
+.attendance__group-workflow-step--active {
+  border-color: var(--ms-color-primary);
+  background: var(--el-color-primary-light-9);
+  color: var(--el-color-primary-dark-2);
+  font-weight: 600;
+}
+
+.attendance__group-workflow-step span {
+  display: inline-grid;
+  width: 18px;
+  height: 18px;
+  place-items: center;
+  border-radius: 50%;
+  background: var(--el-color-primary-light-8);
+  color: var(--ms-color-primary);
+  font-size: 11px;
+  font-weight: 700;
 }
 
 .attendance__group-detail-header h5,
@@ -30546,6 +30712,26 @@ const holidaySectionBindings = {
   display: grid;
   gap: 12px;
   padding: 14px;
+  scroll-margin-top: 62px;
+}
+
+.attendance__group-summary-grid {
+  scroll-margin-top: 62px;
+}
+
+@media (max-width: 1100px) {
+  .attendance__group-layout {
+    grid-template-columns: minmax(220px, 280px) minmax(0, 1fr);
+    gap: 12px;
+  }
+
+  .attendance__group-list-row-actions {
+    justify-content: flex-start;
+  }
+
+  .attendance__group-workflow-step {
+    font-size: 12px;
+  }
 }
 
 .attendance__group-people-meta {
@@ -30907,6 +31093,16 @@ const holidaySectionBindings = {
 
   .attendance__group-layout {
     grid-template-columns: 1fr;
+  }
+
+  .attendance__group-workflow {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    position: static;
+  }
+
+  .attendance__group-workflow-step {
+    justify-content: flex-start;
+    padding: 0 10px;
   }
 
   .attendance__group-detail-header,
