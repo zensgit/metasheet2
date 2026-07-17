@@ -80,10 +80,12 @@ describeIfDatabase('attachment bind (form-freeze) + reconciler (real DB)', () =>
     }
   })
 
-  test('reconciler: orphan blob → idempotent purge intent; live row missing its blob → surfaced, never deleted', async () => {
+  test('reconciler: orphan blob PAST grace → idempotent purge intent; live row missing its blob → surfaced, never deleted', async () => {
     const live = await seed({ key: `key_att6_${RUN}_live` })
     const orphanKey = `key_att6_${RUN}_orphan`
-    const listBlobs = async () => [orphanKey] // bucket has the orphan but NOT the live row's blob
+    const OLD = 2 * 60 * 60 * 1000 // 2h, past the 1h default grace
+    // bucket has the orphan (past grace) but NOT the live row's blob
+    const listBlobs = async () => [{ key: orphanKey, ageMs: OLD }]
     const r1 = await reconcileBucket(db(), listBlobs)
     expect(r1.orphanBlobsQueued).toBe(1)
     expect(r1.missingBlobs).toContain(`key_att6_${RUN}_live`)
@@ -93,5 +95,14 @@ describeIfDatabase('attachment bind (form-freeze) + reconciler (real DB)', () =>
     expect(row.rows[0].status).toBe('unbound') // never auto-deleted
     const pi = await db().query('SELECT count(*)::int AS c FROM approval_attachment_purge_intents WHERE storage_key=$1', [orphanKey])
     expect(Number(pi.rows[0].c)).toBe(1)
+  })
+
+  test('reconciler grace window (G15): an in-flight upload YOUNGER than the grace is NEVER purged', async () => {
+    const inflightKey = `key_att6_${RUN}_inflight`
+    const YOUNG = 5 * 60 * 1000 // 5m, well inside the 1h default grace — a blob still mid-upload/commit
+    const r = await reconcileBucket(db(), async () => [{ key: inflightKey, ageMs: YOUNG }])
+    expect(r.orphanBlobsQueued).toBe(0) // positive control: the just-uploaded blob is left alone
+    const pi = await db().query('SELECT count(*)::int AS c FROM approval_attachment_purge_intents WHERE storage_key=$1', [inflightKey])
+    expect(Number(pi.rows[0].c)).toBe(0)
   })
 })
