@@ -281,7 +281,10 @@ export class MetaSheetServer {
   private disableEventBus = process.env.DISABLE_EVENT_BUS === 'true'
   private metricsStreamService?: MetricsStreamService
   private dingtalkInteractiveCardStreamWorker?: DingTalkInteractiveCardStreamWorker
-  
+  // P2 durable-delivery S5: the outbox dispatch loop handle. null unless AUTOMATION_DURABLE_DELIVERY_ENABLED
+  // is ON (bootDurableDelivery returns null when the flag is off → no loop, no reads, byte-identical startup).
+  private durableDeliveryLoop: import('./multitable/automation-durable-dispatch-loop').DispatchLoopHandle | null = null
+
   // IoC Container
   private injector: Injector
 
@@ -1891,6 +1894,17 @@ export class MetaSheetServer {
         this.logger.warn(`AutomationService shutdown error: ${err instanceof Error ? err.message : String(err)}`)
       }
     }))
+    // P2 durable-delivery S5: stop the outbox dispatch loop (no-op when the flag was OFF — the handle is null).
+    // A clean stop lets in-flight adapters finish/abort and prevents a claimed row from being abandoned mid-lease.
+    if (this.durableDeliveryLoop) {
+      const loop = this.durableDeliveryLoop
+      this.durableDeliveryLoop = null
+      shutdownTasks.push(
+        loop.stop().catch((err) => {
+          this.logger.warn(`Durable delivery dispatch loop stop error: ${err instanceof Error ? err.message : String(err)}`)
+        }) as Promise<void>,
+      )
+    }
     shutdownTasks.push(Promise.resolve().then(() => {
       try {
         this.stopMetaRevisionRetention?.()
@@ -2299,6 +2313,38 @@ export class MetaSheetServer {
       this.logger.info('Webhook event bridge initialized')
     } catch (e) {
       this.logger.error('Webhook event bridge initialization failed; continuing in degraded mode', e as Error)
+    }
+
+    // P2 durable-delivery S5: start the transactional-outbox dispatch loop. Gated by
+    // AUTOMATION_DURABLE_DELIVERY_ENABLED — bootDurableDelivery returns null when the flag is OFF, so this
+    // block registers no loop, opens no poll, and reads no rows (byte-identical startup). When ON, it builds
+    // the six REAL consumer adapters (delegating to the SAME service methods the legacy bus subscribers call —
+    // handleApprovalCompletionEvent / ...Trigger / projection reconcile / handleEvent / webhook deliverEvent),
+    // asserts manifest completeness before any claim, and drains meta_automation_outbox_consumer. The legacy
+    // bus subscriptions above stay wired during the cutover; double delivery is collapsed by the sinks'
+    // idempotency (per the #4203 §316-325 migration-safety contract). stop() is registered in this.stop().
+    try {
+      const { bootDurableDelivery } = await import('./multitable/automation-durable-activation')
+      const { buildDurableConsumerHandlers } = await import('./multitable/automation-durable-consumer-handlers')
+      const { getApprovalRecordProjectionService } = await import('./multitable/approval-record-projection-service')
+      const { WebhookService } = await import('./multitable/webhook-service')
+      const { db: kyselyDbDurable } = await import('./db/db')
+      if (this.automationService) {
+        const handlers = buildDurableConsumerHandlers({
+          automationService: this.automationService,
+          projectionService: getApprovalRecordProjectionService(),
+          webhookService: new WebhookService(kyselyDbDurable),
+        })
+        this.durableDeliveryLoop = bootDurableDelivery(poolManager.get(), handlers, {
+          onUnknownConsumerKeys: (keys) => this.logger.warn(`Durable delivery: unknown consumer keys parked pending: ${keys.join(', ')}`),
+          onTickError: (err) => this.logger.error('Durable delivery dispatch tick error', err instanceof Error ? err : new Error(String(err))),
+          onHeartbeatError: (info) => this.logger.warn(`Durable delivery heartbeat renew DB error for ${info.consumerKey} (outbox ${info.outboxId}); row left for reclaim`),
+          onClaimTimePoison: (info) => this.logger.warn(`Durable delivery dead-lettered ${info.consumerKey} (outbox ${info.outboxId}) after ${info.attempts} attempts`),
+        })
+        if (this.durableDeliveryLoop) this.logger.info('Durable delivery dispatch loop started (AUTOMATION_DURABLE_DELIVERY_ENABLED)')
+      }
+    } catch (e) {
+      this.logger.error('Durable delivery dispatch loop initialization failed; continuing in degraded mode', e as Error)
     }
 
     try {

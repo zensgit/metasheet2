@@ -31,13 +31,18 @@ const logger = new Logger('WebhookEventBridge')
 
 /**
  * Map internal event names (as published on the EventBus) to webhook event types.
+ *
+ * Exported so the P2 durable-delivery `webhook-event-bridge` consumer adapter forwards on the SAME mapping as
+ * the legacy bus subscription below (a single source of truth — the durable path must never diverge from the
+ * bus path it replaces).
  */
-const EVENT_MAP: Record<string, WebhookEventType> = {
+export const WEBHOOK_BRIDGE_EVENT_MAP: Record<string, WebhookEventType> = {
   'multitable.record.created': 'record.created',
   'multitable.record.updated': 'record.updated',
   'multitable.record.deleted': 'record.deleted',
   'multitable.comment.created': 'comment.created',
 }
+const EVENT_MAP = WEBHOOK_BRIDGE_EVENT_MAP
 
 export interface WebhookEventBridgeOptions {
   /**

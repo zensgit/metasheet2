@@ -232,6 +232,20 @@ describeIfDatabase('P2 durable-delivery S4-b/S5 activation + S7 crash-injection 
     expect(Object.values(s).every((v) => v === 'pending')).toBe(true)
   })
 
+  test('boot lifecycle (flag ON): bootDurableDelivery returns a LIVE handle and stop() resolves cleanly — no rows touched', async () => {
+    // The index.ts wiring calls exactly this. A large interval means the first tick never fires before stop(),
+    // so booting the REAL six-key registry is safe on the shared CI DB (it claims nothing). This proves the
+    // start/stop lifecycle + shutdown hook path; per-row DELIVERY through the loop is proven by V2/V3 (tick)
+    // and the handler MAPPING by the unit suite. A `count(*)` before/after guards against a stray claim.
+    const before = await db().query('SELECT count(*)::int AS c FROM meta_automation_outbox_consumer WHERE status <> \'pending\'')
+    const handle = bootDurableDelivery(db(), recordingHandlers([]), noopObserver, { env: FLAG_ON, intervalMs: 3_600_000 })
+    expect(handle).not.toBeNull()
+    await handle!.stop() // resolves promptly (no in-flight adapter) — the shutdown path
+    await handle!.stop() // idempotent second stop must not throw
+    const after = await db().query('SELECT count(*)::int AS c FROM meta_automation_outbox_consumer WHERE status <> \'pending\'')
+    expect(Number(after.rows[0].c)).toBe(Number(before.rows[0].c)) // no tick fired → no claim → no foreign-row mutation
+  })
+
   test('flag ON: a PermanentDeliveryFailure handler poisons its row to dead_letter (run-unique key — no shared-row pollution)', async () => {
     const keyP = `upoison_${RUN}`
     const res = await enqueueUnique('multitable.record.updated', `evt_${RUN}_poison`, keyP)
