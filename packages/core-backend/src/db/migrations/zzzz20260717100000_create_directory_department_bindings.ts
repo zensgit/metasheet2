@@ -23,12 +23,16 @@ import { sql } from 'kysely'
  * remote_provider<>'local'. So the local side must be a `provider='local'` integration and the
  * remote side must not be — with no trigger.
  *
- * Each department is pinned to its own integration via `(department_id, integration_id) ->
- * directory_departments (id, integration_id)`, so a binding cannot reference a department that
- * belongs to a different integration than the one it names.
+ * Each department is pinned to its own integration AND to the role's provider via the THREE-column
+ * `(department_id, integration_id, provider) -> directory_departments (id, integration_id,
+ * provider)` (owner P2 round): the integration-level provider FKs alone say nothing about the
+ * DEPARTMENT row's own `provider` column, so a provider-mislabeled department under a
+ * correctly-labeled integration — the malformed-but-real shape B3/PB4-2 already treat as existing
+ * and reject on their write paths — could otherwise occupy either side of a binding. The provider
+ * leg closes that: dept.provider must equal the binding's role provider.
  *
  * The three parent-side UNIQUE constraints this needs — `directory_integrations (id, org_id)`,
- * `directory_integrations (id, provider)`, `directory_departments (id, integration_id)` — are all
+ * `directory_integrations (id, provider)`, `directory_departments (id, integration_id, provider)` — are all
  * REDUNDANT supersets of an existing primary key (`id` is already unique), so they reject no
  * existing row and are safe to add; a composite FK requires a real UNIQUE CONSTRAINT on exactly the
  * referenced columns (a plain unique INDEX is not referenceable), which is why they are ADD
@@ -88,12 +92,12 @@ export async function up(db: Kysely<unknown>): Promise<void> {
     BEGIN
       IF NOT EXISTS (
         SELECT 1 FROM pg_constraint
-         WHERE conname = 'uq_directory_departments_id_integration'
+         WHERE conname = 'uq_directory_departments_id_integration_provider'
            AND conrelid = 'directory_departments'::regclass
            AND contype = 'u'
       ) THEN
         ALTER TABLE directory_departments
-        ADD CONSTRAINT uq_directory_departments_id_integration UNIQUE (id, integration_id);
+        ADD CONSTRAINT uq_directory_departments_id_integration_provider UNIQUE (id, integration_id, provider);
       END IF;
     END $$;
   `.execute(db)
@@ -133,11 +137,15 @@ export async function up(db: Kysely<unknown>): Promise<void> {
       CONSTRAINT ddb_remote_int_provider_fk FOREIGN KEY (remote_integration_id, remote_provider)
         REFERENCES directory_integrations (id, provider) ON DELETE CASCADE,
 
-      -- each department belongs to its named integration
-      CONSTRAINT ddb_local_dept_fk FOREIGN KEY (local_department_id, local_integration_id)
-        REFERENCES directory_departments (id, integration_id) ON DELETE CASCADE,
-      CONSTRAINT ddb_remote_dept_fk FOREIGN KEY (remote_department_id, remote_integration_id)
-        REFERENCES directory_departments (id, integration_id) ON DELETE CASCADE
+      -- each department belongs to its named integration AND carries the role's provider itself
+      -- (owner P2: integration-level provider FKs alone do NOT constrain the DEPARTMENT row's own
+      -- provider column — a provider-mislabeled department under a correctly-labeled integration
+      -- (the malformed-but-real shape B3/PB4-2 already reject on their write paths) could otherwise
+      -- occupy either side of a binding. The provider leg pins dept.provider = the binding's role.)
+      CONSTRAINT ddb_local_dept_fk FOREIGN KEY (local_department_id, local_integration_id, local_provider)
+        REFERENCES directory_departments (id, integration_id, provider) ON DELETE CASCADE,
+      CONSTRAINT ddb_remote_dept_fk FOREIGN KEY (remote_department_id, remote_integration_id, remote_provider)
+        REFERENCES directory_departments (id, integration_id, provider) ON DELETE CASCADE
     )
   `.execute(db)
 
@@ -155,7 +163,7 @@ export async function up(db: Kysely<unknown>): Promise<void> {
 export async function down(db: Kysely<unknown>): Promise<void> {
   // Drop the table first (removes its FKs), then the redundant parent constraints.
   await sql`DROP TABLE IF EXISTS directory_department_bindings`.execute(db)
-  await sql`ALTER TABLE directory_departments DROP CONSTRAINT IF EXISTS uq_directory_departments_id_integration`.execute(db)
+  await sql`ALTER TABLE directory_departments DROP CONSTRAINT IF EXISTS uq_directory_departments_id_integration_provider`.execute(db)
   await sql`ALTER TABLE directory_integrations DROP CONSTRAINT IF EXISTS uq_directory_integrations_id_provider`.execute(db)
   await sql`ALTER TABLE directory_integrations DROP CONSTRAINT IF EXISTS uq_directory_integrations_id_org`.execute(db)
 }
