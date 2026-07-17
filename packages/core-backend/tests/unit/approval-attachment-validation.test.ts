@@ -55,6 +55,32 @@ describe('approval attachment validation (v1)', () => {
     if (!r.ok) expect(r.rejected).toEqual([{ fileName: 'bad.exe', code: 'mime_not_allowed' }])
   })
 
+  test('G3 content-signature cross-check: magic bytes must agree with the declared MIME', () => {
+    const PNG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
+    const JPEG = Buffer.from([0xff, 0xd8, 0xff, 0xe0])
+    const PDF = Buffer.from('%PDF-1.7\n')
+    const TEXT = Buffer.from('a,b,c\n1,2,3\n')
+    // positive controls: matching content passes
+    expect(validateApprovalAttachments([F({ fileName: 'c.png', mimeType: 'image/png', content: PNG })])).toEqual({ ok: true })
+    expect(validateApprovalAttachments([F({ fileName: 'a.pdf', mimeType: 'application/pdf', content: PDF })])).toEqual({ ok: true })
+    // txt/csv carry no binary signature — plain text is accepted
+    expect(validateApprovalAttachments([F({ fileName: 'd.csv', mimeType: 'text/csv', content: TEXT })])).toEqual({ ok: true })
+    // mismatches reject with content_mime_mismatch (the mime/ext still agree — only the bytes disagree)
+    const mismatches: Array<Record<string, unknown>> = [
+      { fileName: 'c.png', mimeType: 'image/png', content: JPEG }, // JPEG bytes declared png
+      { fileName: 'a.pdf', mimeType: 'application/pdf', content: PNG }, // PNG bytes declared pdf
+      { fileName: 'd.csv', mimeType: 'text/csv', content: PDF }, // a PDF renamed .csv
+      { fileName: 'c.png', mimeType: 'image/png', content: TEXT }, // claimed binary, no matching signature
+    ]
+    for (const over of mismatches) {
+      const r = validateApprovalAttachments([F(over as never)])
+      expect(r.ok).toBe(false)
+      if (!r.ok) expect(r.rejected[0].code).toBe('content_mime_mismatch')
+    }
+    // no content supplied → the content check is skipped (name/type/size validation unchanged)
+    expect(validateApprovalAttachments([F({ fileName: 'c.png', mimeType: 'image/png' })])).toEqual({ ok: true })
+  })
+
   test('prototype-pollution guard: an Object.prototype-name MIME must reject as unknown, never throw', () => {
     // A plain-object `V1_ALLOWLIST[mime]` lookup with attacker-controlled `mime` would otherwise
     // resolve an INHERITED Object.prototype member (truthy, not an array) for keys like
