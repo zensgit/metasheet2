@@ -171,6 +171,42 @@ describeIfDatabase('Canonical Org MVP — B7 suggest-only reconciliation (real D
     expect([...res.suggestions, ...res.ambiguous, ...res.unmatched].map((e) => e.remoteDepartmentId)).not.toContain(rBound)
   })
 
+  it('F. candidate guards (gate P3): an ARCHIVED local dept and a dept under an INACTIVE local integration never count as candidates', async () => {
+    const org = orgId('guards')
+    seededOrgIds.push(org)
+    const local = await getOrCreateLocalIntegration(org)
+    const dt = await dingtalkIntegration(org, 'gd')
+
+    // (a) archived local dept with a matching name → remote must land UNMATCHED, never a suggestion
+    const archived = await createLocalDepartment({ orgId: org, name: 'Legal' })
+    await query(`UPDATE directory_departments SET is_active = false WHERE id = $1`, [archived.id])
+    const rLegal = await dtDept(dt, `gd-legal-${STAMP}`, 'Legal')
+
+    // (b) a matching-name dept under an INACTIVE local integration → must not count either
+    const inactiveLocal = await query<{ id: string }>(
+      `INSERT INTO directory_integrations (org_id, provider, name, status, corp_id, config)
+       VALUES ($1, 'local', 'Local organization (old)', 'inactive', $2, '{"mode":"editable","source":"local"}'::jsonb)
+       RETURNING id`,
+      [org, `local:${org}`],
+    )
+    await query(
+      `INSERT INTO directory_departments (integration_id, provider, external_department_id, name, is_active, raw)
+       VALUES ($1, 'local', $2, 'HR', true, '{}'::jsonb)`,
+      [inactiveLocal.rows[0].id, `local:old-hr-${STAMP}`],
+    )
+    const rHr = await dtDept(dt, `gd-hr-${STAMP}`, 'HR')
+
+    // positive control in the same fixture: a live dept under the ACTIVE local integration matches
+    const live = await createLocalDepartment({ orgId: org, name: 'Live' })
+    const rLive = await dtDept(dt, `gd-live-${STAMP}`, 'Live')
+
+    const res = await suggestDepartmentBindings(org)
+    expect(res.unmatched.map((u) => u.remoteDepartmentId)).toEqual(expect.arrayContaining([rLegal, rHr]))
+    expect(res.suggestions.map((s) => s.remoteDepartmentId)).toEqual([rLive])
+    expect(res.suggestions[0].localDepartmentId).toBe(live.id)
+    expect(res.ambiguous).toHaveLength(0)
+  })
+
   it('E. suggest is READ-ONLY: binding rows byte-identical before and after', async () => {
     const { org, binding } = await boundFixture('ro')
     const before = await query<{ fp: string }>(`SELECT to_jsonb(b)::text AS fp FROM directory_department_bindings b WHERE id = $1`, [binding])
