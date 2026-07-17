@@ -182,6 +182,39 @@ describe('flag ON — two-phase intent/outcome', () => {
     expect(asyncAfter).toBe(asyncBefore) // NOT re-sent
   })
 
+  // MUTATION-PROOF for the catch's `sendReturned → 'sent'` leg: the ONLY scenario where that leg DECIDES the
+  // durable outcome is a Tx-B failure AFTER a successful send — the success-path recordOutboundOutcome('sent')
+  // throws, so the intent is still `pending` when the catch writes. Under the mutant (classify the DB error
+  // instead), the catch records the retryable `failed` for a DELIVERED card → a retry re-sends = duplicate.
+  it('Tx-B throw AFTER a successful send → catch records SENT (never failed); retry skips, no duplicate card', async () => {
+    const h = makeHarness((call) => (call === 0 ? tokenResponse() : asyncSendOk()))
+    const orig = h.deps.queryFn
+    let injected = false
+    // Throw ONCE on the first outcome-UPDATE that records 'sent' (recordOutboundOutcome's `SET status = $4`);
+    // the claim's literal-SQL flips (`SET status = 'outcome_unknown'` / `'pending'`) are untouched.
+    h.deps.queryFn = (async (sql: string, params: unknown[] = []) => {
+      const s = String(sql)
+      if (!injected && /meta_automation_outbound_intent/i.test(s) && /SET status = \$4/i.test(s) && params?.[3] === 'sent') {
+        injected = true
+        throw new Error('injected Tx-B outcome-write failure')
+      }
+      return (orig as (sql: string, params?: unknown[]) => Promise<unknown>)(sql, params)
+    }) as AutomationDeps['queryFn']
+
+    const first = await new AutomationExecutor(h.deps).execute(ruleWith(CARD), TRIGGER, undefined, ROOT)
+    expect(injected).toBe(true) // the success-path Tx B genuinely failed
+    // The card WAS delivered; the catch (sendReturned) must still terminalize the intent as `sent`.
+    expect(only(h.intent).status).toBe('sent')
+    expect(first.steps[0]?.status).toBe('failed') // the step surfaces the bookkeeping failure honestly
+
+    // And a retry must SKIP (skip_sent) — never a duplicate card for the delivered send.
+    const asyncBefore = h.fetch.mock.calls.filter((c) => String(c[0] ?? '').includes('asyncsend')).length
+    const retry = await new AutomationExecutor(h.deps).execute(ruleWith(CARD), TRIGGER, undefined, ROOT)
+    expect(retry.steps[0]?.alreadyApplied).toBe(true)
+    const asyncAfter = h.fetch.mock.calls.filter((c) => String(c[0] ?? '').includes('asyncsend')).length
+    expect(asyncAfter).toBe(asyncBefore)
+  })
+
   // MUTATION-PROOF for the catch outcome MAPPING (`… : outcomeUnknown ? 'outcome_unknown' : 'failed'`):
   // mutating the 'outcome_unknown' branch to 'failed' makes the intent terminal `failed` (retryable), so BOTH
   // the intent-status assertion AND the retry-skip assertion (a `failed` intent would retry_failed → re-send)
