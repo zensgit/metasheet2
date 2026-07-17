@@ -123,6 +123,51 @@ try {
   Remove-Item Env:METASHEET_AUTH_TOKEN -ErrorAction SilentlyContinue
 }
 
+
+# ── corrective-6: token-hygiene projection + verdict under REAL Windows PowerShell 5.1 ───────────
+# (PSObject.Properties indexing, [bool] typing, .cmd PATH shim, ConvertFrom-Json of the 5-key
+# sample). Desktop-gated: on any other host the suite ALREADY fails loudly at the host check above,
+# so this can never green-skip.
+if ($PSVersionTable.PSEdition -eq 'Desktop') {
+  $hygieneDir = Join-Path ([System.IO.Path]::GetTempPath()) ("t9ps51_pm2_" + [guid]::NewGuid().ToString('N').Substring(0, 12))
+  New-Item -ItemType Directory -Path $hygieneDir | Out-Null
+  try {
+    Set-Content -Path (Join-Path $hygieneDir 'pm2-fixture.mjs') -Value @'
+#!/usr/bin/env node
+if (process.argv[2] !== 'jlist') process.exit(2)
+process.stdout.write(process.env.T9_PS51_JLIST || '')
+'@ -NoNewline
+    Set-Content -Path (Join-Path $hygieneDir 'pm2.cmd') -Value "@echo off`r`nnode `"%~dp0pm2-fixture.mjs`" %*" -NoNewline
+    $oldPath = $env:PATH
+    try {
+      $env:PATH = "$hygieneDir;$oldPath"
+      $env:T9_PS51_JLIST = '[{"name":"metasheet-backend","pm2_env":{"status":"online","restart_time":3,"pm_uptime":1000,"env":{"Path":"first","PATH":"second","metasheet_admin_token":"LEAKED-PS51-9911"}}}]'
+      $leakSample = Get-Pm2Sample
+      Check 'ps51 hygiene: case-variant admin token projects to adminTokenNonEmpty=true through the 5.1 pipeline' (
+        $null -ne $leakSample -and $leakSample.adminTokenNonEmpty -eq $true -and $leakSample.authTokenNonEmpty -eq $false
+      )
+      $leakVerdict = Test-Pm2TokenHygieneSample $leakSample
+      Check 'ps51 hygiene: leaked sample fails closed with the dedicated coarse reason' (
+        (-not $leakVerdict.ok) -and $leakVerdict.reason -eq 'PM2_ENV_METASHEET_ADMIN_TOKEN_NONEMPTY'
+      )
+      $env:T9_PS51_JLIST = '[{"name":"metasheet-backend","pm2_env":{"status":"online","restart_time":3,"pm_uptime":1000,"env":{"Path":"first","PATH":"second"}}}]'
+      $cleanSample = Get-Pm2Sample
+      $cleanVerdict = Test-Pm2TokenHygieneSample $cleanSample
+      Check 'ps51 hygiene: clean env parses and passes under 5.1' (
+        $null -ne $cleanSample -and $cleanSample.adminTokenNonEmpty -eq $false -and $cleanVerdict.ok
+      )
+      Check 'ps51 hygiene: stale projection without booleans fails closed' (
+        (Test-Pm2TokenHygieneSample ([pscustomobject]@{ state = 'online'; restartTime = 3; uptime = 1000 })).reason -eq 'hygiene_fields_missing'
+      )
+    } finally {
+      $env:PATH = $oldPath
+      Remove-Item Env:T9_PS51_JLIST -ErrorAction SilentlyContinue
+    }
+  } finally {
+    Remove-Item -Recurse -Force $hygieneDir -ErrorAction SilentlyContinue
+  }
+}
+
 if ($fail -gt 0) {
   Write-Host "FAILED: $fail check(s); $pass passed"
   exit 1
