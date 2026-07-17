@@ -389,4 +389,42 @@ The same ruling mandates the **G-MULTIOP-BATCH** golden (§6) pinning the origin
 `patchRecords` transactions), and authorizes: merging this revision into #4331, flipping #4331 to RATIFIED, and
 merging #4331 into main — **without** any runtime merge in the same step. Runtime integration then proceeds
 L3 → L5 → L4 → L4cov → L6-a (+ endpoint-immutability + runtime decouple), each layer on then-current main with full
-required CI and an exact-head independent gate; all flags stay OFF.
+required CI and an exact-head independent gate; all flags stay OFF. **(This §10 integration order is SUPERSEDED by
+the §11 amendment below.)**
+
+## 11. Owner amendment — integration order + take-over discipline (2026-07-16)
+
+The runtime integration split the ratified slices finer than §7/§10 named, and the actual landing on `main` diverged
+from §10. This amendment is the **OPERATIVE order and SUPERSEDES the order clauses of §7 and §10.** (Design semantics
+in §1–§6 are unchanged.)
+
+**Why the divergence (no rollback):** L4 (all-writer canonical fence, #4346) merged to `main` (default-OFF) before the
+reorder was finalized. It is NOT rolled back — the whole lane is flags-OFF (zero production exposure), and L5 was
+re-gated on a combined ancestry that already includes L4 + L4cov, so safety is no lower than §10's L5-first order.
+
+**Slice split (finer than §7's "L5"/"L6"):**
+- §7 row 3 "L5" → **L5** (trust-checkpoint SCHEMA + state machine — Phase A) + **L5-wire** (checkpoint ACTIVATION runtime — Phase B).
+- §7 row 4 "L6" → **L6-a** (sealed operation-endpoint ledger + row immutability — Phase A) + **L6-b** (exact-anchor RESOLVER + signed preview identity — Phase B).
+- New **L4cov** rung: a writer-coverage extension of L4 (fences the writer families L4 left partial), landed as its own INDEPENDENT rung.
+
+**Phase A — trusted-substrate DAG to `main` — SUPERSEDES §10's `L3→L5→L4→L4cov→L6-a`:**
+> **L3 → L4 → L4cov → L5 → L6-a**
+
+Each layer rebased on then-current `main`, with **full required CI + an exact-head independent gate before merge**;
+flags OFF. **L6-a is merged as a COMBINED rung** with its two riders — endpoint-immutability (#4380) + batch/operation
+runtime decouple (#4385) — gated ONCE on the combined head with a fresh G-MULTIOP-BATCH mutation run.
+
+**Phase B — recovery-consuming layers — clarifies §7's `L6→L7→L8`; starts ONLY after the Phase A DAG is fully on `main`:**
+> integration + exact-head gate order = **L5-wire → L6-b → L7 → L8**, where **L8 is based on BOTH L6-b AND L7**
+> (its fenced all-or-nothing Revert execute uses L6-b's token-bound anchor **and** L7's target-generation validation).
+
+Drafting the four Phase-B slices MAY proceed in parallel, but each **MERGE is serial** in the order above, each on
+then-current `main` with full CI + an exact-head independent gate. All recovery flags stay default-OFF.
+
+**Phase C — enablement (unchanged, owner/ops-only):** strict-mode / Revert / Reset enablement, staging cutover, #4273
+re-measure, and any production flag flip remain OUT of autonomous scope. This amendment authorizes default-OFF
+implementation slices only (as the §9 tail).
+
+**Take-over discipline (recorded so all integration sessions share it):** a ≥65-min branch silence triggers only a
+READ-ONLY independent review + an alert — it does **NOT** transfer PR ownership. Driving another session's PR branch
+requires an explicit handoff; absent that, open a **superseding branch that does not touch the original PR**.
