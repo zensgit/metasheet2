@@ -41,6 +41,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
+import type { LocationQueryRaw } from 'vue-router'
 import { useLocale } from '../../composables/useLocale'
 import { useFeatureFlags } from '../../stores/featureFlags'
 import AttendanceOverview from './AttendanceOverview.vue'
@@ -187,14 +188,20 @@ const activeView = computed(() => {
       return {
         component: AttendanceAdminCenter,
         key: 'attendance-admin',
-        props: { initialSectionId: adminInitialSectionId.value },
+        props: {
+          initialSectionId: adminInitialSectionId.value,
+          onClearSection: returnToAdminHome,
+        },
       }
     case 'import':
       if (!canAccessAdmin.value) return null
       return {
         component: AttendanceAdminCenter,
         key: 'attendance-import',
-        props: { initialSectionId: 'attendance-admin-import' },
+        props: {
+          initialSectionId: 'attendance-admin-import',
+          onClearSection: returnToAdminHome,
+        },
       }
     case 'workflow':
       if (!canAccessWorkflow.value) return null
@@ -245,6 +252,12 @@ async function selectTab(tab: AttendanceTab): Promise<void> {
 
   // Keep this page-level state isolated to `tab`.
   const query = nextTab === 'overview' ? {} : { tab: nextTab }
+  await router.replace({ query })
+}
+
+async function returnToAdminHome(): Promise<void> {
+  const query: LocationQueryRaw = { ...route.query, tab: 'admin' }
+  delete query.section
   await router.replace({ query })
 }
 

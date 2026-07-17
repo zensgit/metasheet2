@@ -155,7 +155,11 @@ describe('Attendance admin anchor navigation', () => {
   })
 
   it('renders the four task groups as the first admin context and opens one workspace at a time', async () => {
-    app = createApp(AttendanceView, { mode: 'admin' })
+    const clearSection = vi.fn()
+    app = createApp(AttendanceView, {
+      mode: 'admin',
+      onClearSection: clearSection,
+    })
     app.mount(container!)
     await flushUi()
 
@@ -202,6 +206,7 @@ describe('Attendance admin anchor navigation', () => {
     expect(sectionWorkspace?.style.display).toBe('none')
     expect(window.location.hash).toBe('')
     expect(document.activeElement?.id).toBe('attendance-admin-task-home-title')
+    expect(clearSection).toHaveBeenCalledTimes(1)
   })
 
   it('creates an attendance group from the detail pane and selects it for people management', async () => {

@@ -10265,6 +10265,10 @@ const props = withDefaults(
   }
 )
 
+const emit = defineEmits<{
+  (event: 'clear-section'): void
+}>()
+
 const { locale, isZh } = useLocale()
 const tr = (en: string, zh: string): string => (isZh.value ? zh : en)
 const CALENDAR_DISPLAY_PREFS_STORAGE_KEY = 'metasheet_attendance_calendar_display'
@@ -14962,6 +14966,7 @@ function showAdminTaskHome(): void {
     url.hash = ''
     window.history.replaceState(window.history.state, '', `${url.pathname}${url.search}`)
   }
+  emit('clear-section')
   void nextTick(() => {
     document.getElementById('attendance-admin-task-home-title')?.focus({ preventScroll: true })
   })
