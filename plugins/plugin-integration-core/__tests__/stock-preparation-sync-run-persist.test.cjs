@@ -928,11 +928,9 @@ async function main() {
     const provisioning = makeProvisioning()
     await persistStockPreparationSyncRun({ permission: 'admin', recordsApi, provisioning, ...basePlanInputs() })
     const writesAfterFirst = recordsApi.createCalls.length
-    for (const [overrides, reason] of [
-      [{ syncRunId: 'run_2', snapshotBatchId: 'batch_2' }, 'not_monotonic'], // omitted -> defaults to 1 == history max
-      [{ syncRunId: 'run_2', snapshotBatchId: 'batch_2', snapshotVersion: 1 }, 'not_monotonic'],
-      // 0 is not a strict version at all (R4 parser: positive integers only) -> unprovable, not merely non-increasing.
-      [{ syncRunId: 'run_2', snapshotBatchId: 'batch_2', snapshotVersion: 0 }, 'history_unprovable'],
+    for (const overrides of [
+      { syncRunId: 'run_2', snapshotBatchId: 'batch_2' }, // omitted -> defaults to 1 == history max
+      { syncRunId: 'run_2', snapshotBatchId: 'batch_2', snapshotVersion: 1 },
     ]) {
       await assert.rejects(
         () => persistStockPreparationSyncRun({ permission: 'admin', recordsApi, provisioning, ...basePlanInputs(overrides) }),
@@ -941,9 +939,18 @@ async function main() {
           error.status === 422 &&
           error.code === 'PERSIST_VERSION_NOT_MONOTONIC' &&
           error.details.field === 'snapshotVersion' &&
-          error.details.reason === reason,
+          error.details.reason === 'not_monotonic',
       )
     }
+    // 0 is not a strict version at all — the SHARED parser rejects it at PLAN level (R5: preview and
+    // commit reject identically; it never reaches the persist guard).
+    await assert.rejects(
+      () => persistStockPreparationSyncRun({ permission: 'admin', recordsApi, provisioning, ...basePlanInputs({ syncRunId: 'run_2', snapshotBatchId: 'batch_2', snapshotVersion: 0 }) }),
+      (error) =>
+        error instanceof StockPreparationSyncRunPlanError &&
+        error.status === 422 &&
+        error.details.field === 'snapshotVersion',
+    )
     assert.equal(recordsApi.createCalls.length, writesAfterFirst, 'rejected before any write')
   })
 
@@ -1081,6 +1088,58 @@ async function main() {
       ...basePlanInputs({ syncRunId: 'run_2', snapshotBatchId: 'batch_2', snapshotVersion: 2 }),
     })
     assert.equal(ok.mode, 'created')
+  })
+
+  await run("R5: coercive version FORMS ('01'/'+1'/'1e2'/'0x10'/unsafe) — CURRENT input rejects at plan level, zero writes", async () => {
+    const recordsApi = makeRecordsApi()
+    const provisioning = makeProvisioning()
+    for (const bad of ['01', '+1', '1e2', '0x10', 2 ** 53, '9007199254740993', 1.5]) {
+      await assert.rejects(
+        () => persistStockPreparationSyncRun({
+          permission: 'admin',
+          recordsApi,
+          provisioning,
+          ...basePlanInputs({ syncRunId: 'run_x', snapshotBatchId: 'batch_x', snapshotVersion: bad }),
+        }),
+        (error) =>
+          error instanceof StockPreparationSyncRunPlanError &&
+          error.status === 422 &&
+          error.details.field === 'snapshotVersion',
+      )
+    }
+    assert.equal(recordsApi.createCalls.length, 0, 'zero writes across all rejected forms')
+  })
+
+  await run("R5: coercive version forms in HISTORY rows -> 422 history_unprovable, zero writes (Number() previously accepted every one)", async () => {
+    for (const bad of ['01', '+1', '1e2', '0x10', 2 ** 53]) {
+      const recordsApi = makeRecordsApi()
+      const provisioning = makeProvisioning()
+      await persistStockPreparationSyncRun({ permission: 'admin', recordsApi, provisioning, ...basePlanInputs() })
+      const batchRows = await recordsApi.queryRecords({
+        sheetId: BATCH_SHEET_ID,
+        filters: { [physicalFieldId(STAGING_PROJECT_ID, BATCH_OBJECT_ID, 'snapshotBatchId')]: 'batch_1' },
+      })
+      await recordsApi.patchRecord({
+        sheetId: BATCH_SHEET_ID,
+        recordId: batchRows[0].id,
+        changes: { [physicalFieldId(STAGING_PROJECT_ID, BATCH_OBJECT_ID, 'snapshotVersion')]: bad },
+      })
+      const writesBefore = recordsApi.createCalls.length
+      await assert.rejects(
+        () => persistStockPreparationSyncRun({
+          permission: 'admin',
+          recordsApi,
+          provisioning,
+          ...basePlanInputs({ syncRunId: 'run_2', snapshotBatchId: 'batch_2', snapshotVersion: 2 }),
+        }),
+        (error) =>
+          error instanceof StockPreparationSyncRunPersistError &&
+          error.status === 422 &&
+          error.code === 'PERSIST_VERSION_NOT_MONOTONIC' &&
+          error.details.reason === 'history_unprovable',
+      )
+      assert.equal(recordsApi.createCalls.length, writesBefore, 'zero writes on unprovable history')
+    }
   })
 
   await run('H-2: equal-version pointer on a DIFFERENT run (legacy/degenerate data) -> 409 pointer_unresolvable, never a silent 200', async () => {

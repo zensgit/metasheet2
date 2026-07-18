@@ -50,6 +50,7 @@ const {
     LINE_FIELD_IDS,
     RUN_FIELD_IDS,
   },
+  parseStrictVersion,
 } = require('./stock-preparation-sync-run-plan.cjs')
 const { createTargetScopedRecordsApi } = require('./stock-preparation-table-actions.cjs')
 const {
@@ -271,19 +272,8 @@ async function resolvePointerBatchVersion({ batchScoped, plan, pointerRunId }) {
   return parseStrictVersion(pointerBatches[0] && pointerBatches[0].data && pointerBatches[0].data.snapshotVersion)
 }
 
-// Round-4: STRICT version parser — Number() coerces null/''/booleans to finite numbers, which let
-// a null-version history row slip past the "non-numeric fails closed" intent. Versions must be
-// positive integers (or their non-empty string serializations); everything else is null → callers
-// fail closed. Used by ALL THREE consumers: the history max-scan, the pointer-batch resolution, and
-// the plan's own current version.
-function parseStrictVersion(value) {
-  let numeric = null
-  if (typeof value === 'number') numeric = value
-  else if (typeof value === 'string' && value.trim() !== '') numeric = Number(value)
-  else return null
-  if (!Number.isFinite(numeric) || !Number.isInteger(numeric) || numeric <= 0) return null
-  return numeric
-}
+// Round-5: parseStrictVersion is SHARED from sync-run-plan.cjs — plan (preview) and persist
+// (commit + history scan) reject identically; see that module for the canonical-decimal contract.
 
 // Round-3: bounded, numeric MAX-version scan over ALL batch rows of a business project (orphan
 // complete batches included — the pointer alone is not the history). Returns the maximum numeric
