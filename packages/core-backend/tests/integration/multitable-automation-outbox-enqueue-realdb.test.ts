@@ -82,7 +82,7 @@ describeIfDatabase('P2 durable-delivery S4-a — producer atomic enqueue (real D
     let outboxId = ''
     try {
       await client.query('BEGIN')
-      const res = await enqueueOutboxEvent(txn(client), { eventType: 'form.submitted', eventId: `evt_${RUN}_rollback`, payload: {} })
+      const res = await enqueueOutboxEvent(txn(client), { eventType: 'multitable.form.submitted', eventId: `evt_${RUN}_rollback`, payload: {} })
       outboxId = res.outboxId
       const inside = await client.query('SELECT count(*)::int AS c FROM meta_automation_outbox WHERE id=$1', [outboxId])
       expect(Number(inside.rows[0].c)).toBe(1) // visible INSIDE the txn (same client)...
@@ -131,7 +131,7 @@ describeIfDatabase('P2 durable-delivery S4-a — producer atomic enqueue (real D
     }
     try {
       await client.query('BEGIN')
-      await expect(enqueueOutboxEvent(failingTxn, { eventType: 'form.submitted', eventId: eid, payload: {} })).rejects.toThrow(/simulated DB failure/)
+      await expect(enqueueOutboxEvent(failingTxn, { eventType: 'multitable.form.submitted', eventId: eid, payload: {} })).rejects.toThrow(/simulated DB failure/)
       // the outbox INSERT (1st query) ran but is UNCOMMITTED — visible only inside this txn
       const inside = await client.query('SELECT count(*)::int AS c FROM meta_automation_outbox WHERE event_id=$1', [eid])
       expect(Number(inside.rows[0].c)).toBe(1)
@@ -150,13 +150,13 @@ describeIfDatabase('P2 durable-delivery S4-a — producer atomic enqueue (real D
   })
 
   test('identity/depth validation is a boundary error: blank eventId and bad depth throw before any SQL', async () => {
-    await expect(enqueueOutboxEvent(txnStub(), { eventType: 'form.submitted', eventId: '   ', payload: {} })).rejects.toThrow(/non-blank identity/)
-    await expect(enqueueOutboxEvent(txnStub(), { eventType: 'form.submitted', eventId: ' ﻿', payload: {} })).rejects.toThrow(/non-blank identity/)
+    await expect(enqueueOutboxEvent(txnStub(), { eventType: 'multitable.form.submitted', eventId: '   ', payload: {} })).rejects.toThrow(/non-blank identity/)
+    await expect(enqueueOutboxEvent(txnStub(), { eventType: 'multitable.form.submitted', eventId: ' ﻿', payload: {} })).rejects.toThrow(/non-blank identity/)
     await expect(
-      enqueueOutboxEvent(txnStub(), { eventType: 'form.submitted', eventId: `evt_${RUN}_d`, payload: {}, automationDepth: -1 }),
+      enqueueOutboxEvent(txnStub(), { eventType: 'multitable.form.submitted', eventId: `evt_${RUN}_d`, payload: {}, automationDepth: -1 }),
     ).rejects.toThrow(/automationDepth/)
     await expect(
-      enqueueOutboxEvent(txnStub(), { eventType: 'form.submitted', eventId: `evt_${RUN}_d2`, payload: {}, automationDepth: 1.5 }),
+      enqueueOutboxEvent(txnStub(), { eventType: 'multitable.form.submitted', eventId: `evt_${RUN}_d2`, payload: {}, automationDepth: 1.5 }),
     ).rejects.toThrow(/automationDepth/)
   })
 

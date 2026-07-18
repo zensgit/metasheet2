@@ -17,6 +17,8 @@
 import { randomUUID } from 'crypto'
 import type { EventBus } from '../integration/events/event-bus'
 import { withAutomationEventId } from './automation-event-dedup'
+import { enqueueRecordEventIfDurable, emitRecordEventIfLegacy } from './automation-producer-emit'
+import type { TransactionalQueryable } from './pg-transaction-guard'
 import { publishMultitableSheetRealtime } from './realtime-publish'
 import {
   createYjsInvalidationPostCommitHook,
@@ -56,6 +58,19 @@ export interface ConnectionPool {
   query: QueryFn
   transaction: <T>(handler: TransactionHandler<T>) => Promise<T>
 }
+
+/**
+ * P1#2 REPLACE — adapt this service's `pool.transaction` query handle to the shared produce-seam's
+ * TransactionalQueryable. Only ever built from a handle INSIDE `this.pool.transaction(...)`; the seam's
+ * xid probe (pg-transaction-guard) rejects a pool/autocommit handle at runtime, so the marker cannot lie.
+ */
+const asProducerTrx = (query: QueryFn): TransactionalQueryable => ({
+  isTransaction: true,
+  query: async (sql, params) => {
+    const r = await query(sql, params)
+    return { rows: (r.rows ?? []) as Array<Record<string, unknown>>, rowCount: r.rowCount ?? null }
+  },
+})
 
 export type UniverMetaField = {
   id: string
@@ -777,6 +792,22 @@ export class RecordWriteService {
     // W0-1 L6-a: hoisted so the post-txn response echo can use the operation id as batch_id (below). Inert
     // unless the L4 fence flag is on and the L6 migration is deployed.
     let ledger: OperationLedger = new OperationLedger(sheetId, null)
+    // P1#2 REPLACE — build each record's updated-event payload ONCE, BEFORE the transaction (stable `_eventId`
+    // per record), so the same-txn durable enqueue (flag ON, inside the txn) and the legacy post-commit Step-7
+    // emit (flag OFF) carry the same event identity. The `changes` object is the SAME construction Step 7
+    // used (`changesByRecord` is never mutated by the txn). A record skipped in-txn (`applied === 0` → not in
+    // `updated`) simply never uses its payload — building one is pure (a uuid stamp, no side effects).
+    const updatedEventPayloadByRecord = new Map(
+      Array.from(changesByRecord.entries(), ([recordId, changes]) => [
+        recordId,
+        withAutomationEventId({
+          sheetId,
+          recordId,
+          changes: Object.fromEntries(changes.map((change) => [change.fieldId, change.value])),
+          actorId,
+        }),
+      ] as const),
+    )
     const updates = await this.pool.transaction(async ({ query }) => {
       // W0-1 L4 (canonical fence): fence FIRST — before the preWriteGuard check and every mutation — then
       // refuse if a recovery holds a durable block. Covers the bulk / AI / OAPI patch family in one place.
@@ -1123,6 +1154,16 @@ export class RecordWriteService {
       // wrote, event_count = the number written. No-op when inert or zero-event. This is THE multi-event
       // anchor case (G-BATCH-ENDPOINT): the endpoint sits after ALL rows, never at an intermediate seq.
       await sealOperation(query, ledger)
+      // P1#2 REPLACE: same-transaction durable enqueue on the SUCCESS path (flag ON) — one event per record
+      // ACTUALLY written (mirrors Step 7's per-update legacy emit: skipped records emit nothing), atomic with
+      // every UPDATE + revision this bulk txn wrote. A throw anywhere above rolls back and enqueues nothing.
+      // Flag OFF ⇒ no-op (Step 7 emits legacy post-commit instead).
+      for (const update of updated) {
+        const payload = updatedEventPayloadByRecord.get(update.recordId)
+        if (payload) {
+          await enqueueRecordEventIfDurable(asProducerTrx(query), 'multitable.record.updated', payload)
+        }
+      }
       return updated
     })
 
@@ -1442,16 +1483,15 @@ export class RecordWriteService {
       // -------------------------------------------------------------------
       // Step 7: EventBus emit
       // -------------------------------------------------------------------
+      // P1#2 REPLACE: flag OFF ⇒ legacy post-commit emit per written record (byte-identical — same payload
+      // objects built pre-txn from the same `changesByRecord` construction); flag ON ⇒ SUPPRESSED (the
+      // same-txn enqueue inside the Step-1 transaction is the delivery path — keep-both would double-deliver
+      // the non-idempotent webhook sink).
       for (const update of updates) {
-        const changes = Object.fromEntries(
-          (changesByRecord.get(update.recordId) ?? []).map((change) => [change.fieldId, change.value]),
-        )
-        this.eventBus.emit('multitable.record.updated', withAutomationEventId({
-          sheetId,
-          recordId: update.recordId,
-          changes,
-          actorId,
-        }))
+        const payload = updatedEventPayloadByRecord.get(update.recordId)
+        if (payload) {
+          emitRecordEventIfLegacy(this.eventBus, 'multitable.record.updated', payload)
+        }
       }
     }
 

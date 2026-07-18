@@ -2,6 +2,8 @@ import { randomUUID } from 'crypto'
 
 import type { EventBus } from '../integration/events/event-bus'
 import { withAutomationEventId } from './automation-event-dedup'
+import { enqueueRecordEventIfDurable, emitRecordEventIfLegacy } from './automation-producer-emit'
+import type { TransactionalQueryable } from './pg-transaction-guard'
 import type { MultitableCapabilities } from './access'
 import {
   ensureAttachmentIdsExist as ensureAttachmentIdsExistShared,
@@ -75,6 +77,19 @@ export interface ConnectionPool {
   query: QueryFn
   transaction: <T>(handler: TransactionHandler<T>) => Promise<T>
 }
+
+/**
+ * P1#2 REPLACE — adapt this service's `pool.transaction` query handle to the shared produce-seam's
+ * TransactionalQueryable. Only ever built from a handle INSIDE `this.pool.transaction(...)`; the seam's
+ * xid probe (pg-transaction-guard) rejects a pool/autocommit handle at runtime, so the marker cannot lie.
+ */
+const asProducerTrx = (query: QueryFn): TransactionalQueryable => ({
+  isTransaction: true,
+  query: async (sql, params) => {
+    const r = await query(sql, params)
+    return { rows: (r.rows ?? []) as Array<Record<string, unknown>>, rowCount: r.rowCount ?? null }
+  },
+})
 
 export type UniverMetaField = MultitableField
 
@@ -520,6 +535,16 @@ export class RecordService {
 
     const patch: Record<string, unknown> = {}
     const recordId = `rec_${randomUUID()}`
+    // P1#2 REPLACE — build the created-event payload ONCE (stable `_eventId`) so the same-txn durable enqueue
+    // (flag ON, inside the txn) and the legacy post-commit emit (flag OFF) carry the same event identity.
+    // `data` holds the SAME `patch` reference the legacy emit passed; it is fully populated inside the txn
+    // before either phase serializes/emits it.
+    const createdEventPayload = withAutomationEventId({
+      sheetId,
+      recordId,
+      data: patch,
+      actorId,
+    })
     const recordRes = await this.pool.transaction(async ({ query }) => {
       // W0-1 L4 (canonical fence): create ALREADY takes this fence unconditionally (the auto-number key,
       // now renamed to `acquireCanonicalSheetFence` — same key). Byte-identical when the flag is off. The
@@ -737,6 +762,10 @@ export class RecordService {
 
       // W0-1 L6-a: seal the operation LAST (endpoint row = the exact committed boundary). No-op when inert.
       await sealOperation(query, op)
+      // P1#2 REPLACE: same-transaction durable enqueue on the SUCCESS path (flag ON) — atomic with the INSERT +
+      // revision above (any validation/permission throw rolls back and enqueues nothing by construction).
+      // Flag OFF ⇒ no-op (the legacy emit below fires instead). `patch` is fully populated by this point.
+      await enqueueRecordEventIfDurable(asProducerTrx(query), 'multitable.record.created', createdEventPayload)
       return inserted
     })
 
@@ -774,12 +803,9 @@ export class RecordService {
         patch,
       }],
     })
-    this.eventBus.emit('multitable.record.created', withAutomationEventId({
-      sheetId,
-      recordId,
-      data: patch,
-      actorId,
-    }))
+    // P1#2 REPLACE: flag OFF ⇒ legacy post-commit emit (byte-identical); flag ON ⇒ SUPPRESSED (the same-txn
+    // enqueue above is the delivery path — keep-both would double-deliver the non-idempotent webhook sink).
+    emitRecordEventIfLegacy(this.eventBus, 'multitable.record.created', createdEventPayload)
 
     return {
       recordId,
@@ -820,6 +846,13 @@ export class RecordService {
     // the ONE shared rule (`ensureRecordNotLocked`) so every mutation path enforces it identically.
     ensureRecordNotLocked(actorId, recordRow, () => new RecordPermissionError('Record is locked'))
 
+    // P1#2 REPLACE — build the deleted-event payload ONCE (stable `_eventId`) so the same-txn durable enqueue
+    // (flag ON, inside the txn) and the legacy post-commit emit (flag OFF) carry the same event identity.
+    const deletedEventPayload = withAutomationEventId({
+      sheetId,
+      recordId,
+      actorId,
+    })
     await this.pool.transaction(async ({ query }) => {
       // W0-1 L4 (canonical fence): fence FIRST (before any read/check), then refuse if a recovery holds a
       // durable block. No-op & byte-identical when MULTITABLE_ENABLE_WRITER_FENCE is off.
@@ -922,6 +955,10 @@ export class RecordService {
 
       // W0-1 L6-a: seal the operation LAST. No-op when inert.
       await sealOperation(query, op)
+      // P1#2 REPLACE: same-transaction durable enqueue on the SUCCESS path (flag ON) — atomic with the DELETE +
+      // revision + trash copy above (a version-conflict/permission throw rolls back and enqueues nothing).
+      // Flag OFF ⇒ no-op (the legacy emit below fires instead).
+      await enqueueRecordEventIfDurable(asProducerTrx(query), 'multitable.record.deleted', deletedEventPayload)
     })
 
     publishMultitableSheetRealtime({
@@ -932,11 +969,9 @@ export class RecordService {
       recordId,
       recordIds: [recordId],
     })
-    this.eventBus.emit('multitable.record.deleted', withAutomationEventId({
-      sheetId,
-      recordId,
-      actorId,
-    }))
+    // P1#2 REPLACE: flag OFF ⇒ legacy post-commit emit (byte-identical); flag ON ⇒ SUPPRESSED (the same-txn
+    // enqueue above is the delivery path).
+    emitRecordEventIfLegacy(this.eventBus, 'multitable.record.deleted', deletedEventPayload)
 
     return {
       recordId,
@@ -1094,6 +1129,9 @@ export class RecordService {
 
     let inboundOut: (InboundReplayResult & { recoverable: boolean }) | undefined
     const inboundEnabled = isRecordUndeleteInboundEnabled()
+    // P1#2 REPLACE — build the restored(created)-event payload ONCE (stable `_eventId`) so the same-txn durable
+    // enqueue (flag ON, inside the txn) and the legacy post-commit emit (flag OFF) carry the same identity.
+    const restoredEventPayload = withAutomationEventId({ sheetId, recordId, actorId })
     await this.pool.transaction(async ({ query }) => {
       // W0-1 L4 (canonical fence): fence FIRST, then refuse if a recovery holds a durable block. No-op &
       // byte-identical when MULTITABLE_ENABLE_WRITER_FENCE is off.
@@ -1170,6 +1208,10 @@ export class RecordService {
       await query('DELETE FROM meta_records_trash WHERE id = $1', [trashPk])
       // W0-1 L6-a: seal the operation LAST. No-op when inert.
       await sealOperation(query, op)
+      // P1#2 REPLACE: same-transaction durable enqueue on the SUCCESS path (flag ON) — atomic with the restore
+      // INSERT + revision + trash-row delete above (a restore-conflict throw rolls back and enqueues nothing).
+      // Flag OFF ⇒ no-op (the legacy emit below fires instead).
+      await enqueueRecordEventIfDurable(asProducerTrx(query), 'multitable.record.created', restoredEventPayload)
     })
 
     publishMultitableSheetRealtime({
@@ -1180,7 +1222,9 @@ export class RecordService {
       recordId,
       recordIds: [recordId],
     })
-    this.eventBus.emit('multitable.record.created', withAutomationEventId({ sheetId, recordId, actorId }))
+    // P1#2 REPLACE: flag OFF ⇒ legacy post-commit emit (byte-identical); flag ON ⇒ SUPPRESSED (the same-txn
+    // enqueue above is the delivery path).
+    emitRecordEventIfLegacy(this.eventBus, 'multitable.record.created', restoredEventPayload)
 
     return { recordId, sheetId, ...(inboundOut ? { inbound: inboundOut } : {}) }
   }
@@ -1364,6 +1408,16 @@ export class RecordService {
 
     let nextVersion = 1
     let pendingSubscriberNotification: NotifyRecordSubscribersInput | null = null
+    // P1#2 REPLACE — build the updated-event payload ONCE (stable `_eventId`) so the same-txn durable enqueue
+    // (flag ON, inside the txn) and the legacy post-commit emit (flag OFF) carry the same event identity.
+    // `data` holds the SAME `patch` reference the legacy emit passed (fully populated above, pre-txn);
+    // `actorId` is the same `access.userId ?? 'system'` expression the legacy emit used.
+    const updatedEventPayload = withAutomationEventId({
+      sheetId,
+      recordId,
+      data: patch,
+      actorId: access.userId ?? 'system',
+    })
     await this.pool.transaction(async ({ query }) => {
       // W0-1 L4 (canonical fence): fence FIRST, then refuse if a recovery holds a durable block. No-op &
       // byte-identical when MULTITABLE_ENABLE_WRITER_FENCE is off.
@@ -1496,6 +1550,10 @@ export class RecordService {
       // W0-1 L6-a: seal the operation LAST. No-op when inert OR when the patch had no field change (a
       // no-op patch emits no revision ⇒ zero-event operation ⇒ not an executable anchor, so no endpoint).
       await sealOperation(query, op)
+      // P1#2 REPLACE: same-transaction durable enqueue on the SUCCESS path (flag ON) — atomic with the UPDATE +
+      // revision above (a version-conflict/permission throw rolls back and enqueues nothing). Fires even for a
+      // zero-field patch, mirroring the legacy emit (which fired unconditionally post-commit). Flag OFF ⇒ no-op.
+      await enqueueRecordEventIfDurable(asProducerTrx(query), 'multitable.record.updated', updatedEventPayload)
     })
 
     if (pendingSubscriberNotification) {
@@ -1540,12 +1598,9 @@ export class RecordService {
         patch,
       }],
     })
-    this.eventBus.emit('multitable.record.updated', withAutomationEventId({
-      sheetId,
-      recordId,
-      data: patch,
-      actorId,
-    }))
+    // P1#2 REPLACE: flag OFF ⇒ legacy post-commit emit (byte-identical — the payload's actorId is the same
+    // `access.userId ?? 'system'` value); flag ON ⇒ SUPPRESSED (the same-txn enqueue above is the delivery path).
+    emitRecordEventIfLegacy(this.eventBus, 'multitable.record.updated', updatedEventPayload)
 
     return {
       recordId,

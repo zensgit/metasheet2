@@ -23,6 +23,7 @@ import {
 import type { TransactionalQueryable } from './pg-transaction-guard'
 import { Logger } from '../core/logger'
 import { withAutomationEventId } from './automation-event-dedup'
+import { enqueueRecordEventIfDurable, emitRecordEventIfLegacy } from './automation-producer-emit'
 import { redactString } from './automation-log-redact'
 import { computeActionFingerprint } from './automation-suspension-service'
 import type { ConditionBranchResumeCursor } from './automation-resume-cursor'
@@ -2270,6 +2271,16 @@ export class AutomationExecutor {
       // transaction below (same placement as before this slice).
       await this.sanitizeRichLongTextInWritePayload(effectiveSheetId, patch)
 
+      // P1#2c REPLACE — build the chaining-event payload ONCE (stable `_eventId`) so the same-txn durable
+      // enqueue (flag ON, inside the txn below) and the legacy post-commit emit (flag OFF) share one identity.
+      const chainEventPayload = withAutomationEventId({
+        sheetId: effectiveSheetId,
+        recordId: effectiveRecordId,
+        changes: fields,
+        actorId: context.actorId,
+        _automationDepth: ((context.triggerEvent as Record<string, unknown>)?._automationDepth as number ?? 0) + 1,
+      })
+
       // W0 slice ③ (D-1c design-lock, RATIFIED 2026-07-13, §0.5 OD-1..OD-3, §0/§7a site A3): the
       // lock-check, the UPDATE, and the revision INSERT now all run inside ONE transaction — mirrors
       // D-1's `executeDeleteRecord` fix just above (`withTransaction` is the SAME helper; its
@@ -2364,18 +2375,22 @@ export class AutomationExecutor {
             snapshot: normalizeJson(updatedRow.data),
           })
         }
+        // P1#2c REPLACE: same-transaction durable enqueue on the SUCCESS path (flag ON) — atomic with the
+        // UPDATE + revision (any throw above rolls it back; the duplicate-claim early-return above skips it,
+        // exactly as it skips the legacy emit). Unconditional on `updatedRow` to mirror the legacy emit
+        // 1:1 (the 0-row same-base leniency still emitted). Flag OFF ⇒ no-op (legacy emit below fires).
+        await enqueueRecordEventIfDurable(
+          { query, isTransaction: true } as unknown as TransactionalQueryable,
+          'multitable.record.updated',
+          chainEventPayload,
+        )
         return null
       })
       if (txResult) return txResult
 
-      // Emit event for chaining
-      this.deps.eventBus.emit('multitable.record.updated', withAutomationEventId({
-        sheetId: effectiveSheetId,
-        recordId: effectiveRecordId,
-        changes: fields,
-        actorId: context.actorId,
-        _automationDepth: ((context.triggerEvent as Record<string, unknown>)?._automationDepth as number ?? 0) + 1,
-      }))
+      // P1#2c REPLACE: flag OFF ⇒ legacy post-commit emit (byte-identical); flag ON ⇒ SUPPRESSED (the
+      // same-txn enqueue above is the delivery path — keep-both would double-deliver the webhook sink).
+      emitRecordEventIfLegacy(this.deps.eventBus, 'multitable.record.updated', chainEventPayload)
 
       // C1 real-time fan-out: invalidate the EFFECTIVE sheet's room (target for cross-base, trigger for
       // same-base) so its gated subscribers see the change live — automation writes were previously
@@ -2425,6 +2440,15 @@ export class AutomationExecutor {
         effectiveSheetId = targetSheetId
         effectiveRecordId = targetRecordId
       }
+
+      // P1#2c REPLACE — build the chaining-event payload ONCE (stable `_eventId`) so the same-txn durable
+      // enqueue (flag ON, inside the txn below) and the legacy post-commit emit (flag OFF) share one identity.
+      const chainEventPayload = withAutomationEventId({
+        sheetId: effectiveSheetId,
+        recordId: effectiveRecordId,
+        actorId: context.actorId,
+        _automationDepth: ((context.triggerEvent as Record<string, unknown>)?._automationDepth as number ?? 0) + 1,
+      })
 
       const step = await this.withTransaction(effectiveSheetId, async (query) => {
         // #4196 Class-A claim — FIRST statement, SAME transaction as the delete+revision below. A
@@ -2568,19 +2592,24 @@ export class AutomationExecutor {
           [effectiveRecordId, effectiveSheetId],
         )
 
+        // P1#2c REPLACE: same-transaction durable enqueue on the SUCCESS path (flag ON) — atomic with the
+        // link cleanup + revision + DELETE (any throw above rolls it back; the duplicate-claim early-return
+        // above skips it, exactly as it skips the legacy emit). Unconditional on `lockRow` to mirror the
+        // legacy emit 1:1 (the 0-row same-base leniency still emitted). Flag OFF ⇒ no-op.
+        await enqueueRecordEventIfDurable(
+          { query, isTransaction: true } as unknown as TransactionalQueryable,
+          'multitable.record.deleted',
+          chainEventPayload,
+        )
         return null
       })
       if (step) return step
 
-      // Emit event for chaining (mirrors the updated/created emits + the same-base delete sink's
-      // `multitable.record.deleted` shape). C1 real-time invalidation fan-out to the target base's room
-      // is OUT of this lock — this only emits the domain event; no cross-room publish is wired here.
-      this.deps.eventBus.emit('multitable.record.deleted', withAutomationEventId({
-        sheetId: effectiveSheetId,
-        recordId: effectiveRecordId,
-        actorId: context.actorId,
-        _automationDepth: ((context.triggerEvent as Record<string, unknown>)?._automationDepth as number ?? 0) + 1,
-      }))
+      // P1#2c REPLACE (mirrors the updated/created sites + the same-base delete sink's event shape): flag
+      // OFF ⇒ legacy post-commit emit (byte-identical); flag ON ⇒ SUPPRESSED (the same-txn enqueue above is
+      // the delivery path). C1 real-time invalidation fan-out to the target base's room stays OUT of this
+      // lock — this only carries the domain event; no cross-room publish is wired here.
+      emitRecordEventIfLegacy(this.deps.eventBus, 'multitable.record.deleted', chainEventPayload)
 
       // C1 real-time fan-out (see executeUpdateRecord) — invalidate the effective sheet's room.
       this.publishRecordRealtime('record-deleted', effectiveSheetId, effectiveRecordId, gate.crossBase, context)
@@ -2698,6 +2727,16 @@ export class AutomationExecutor {
       // field config before it reaches the DB (inert-by-construction at every writer).
       await this.sanitizeRichLongTextInWritePayload(targetSheetId, data)
 
+      // P1#2c REPLACE — build the chaining-event payload ONCE (stable `_eventId`) so the same-txn durable
+      // enqueue (flag ON, inside the txn below) and the legacy post-commit emit (flag OFF) share one identity.
+      const chainEventPayload = withAutomationEventId({
+        sheetId: targetSheetId,
+        recordId,
+        data,
+        actorId: context.actorId,
+        _automationDepth: ((context.triggerEvent as Record<string, unknown>)?._automationDepth as number ?? 0) + 1,
+      })
+
       // W0 slice ③ (D-1c design-lock, RATIFIED 2026-07-13, §0.5 OD-1..OD-3, §0/§7a site A4): the
       // INSERT and its birth revision now run inside ONE transaction — mirrors `executeUpdateRecord`
       // above / D-1's `executeDeleteRecord`. A failed revision INSERT rolls back the record INSERT: the
@@ -2741,19 +2780,23 @@ export class AutomationExecutor {
           patch: data,
           snapshot: data,
         })
+        // P1#2c REPLACE: same-transaction durable enqueue on the SUCCESS path (flag ON) — atomic with the
+        // INSERT + birth revision (a revision throw rolls it back; the duplicate-claim early-return above
+        // skips it, exactly as the caller below skips the legacy emit). Flag OFF ⇒ no-op.
+        await enqueueRecordEventIfDurable(
+          { query, isTransaction: true } as unknown as TransactionalQueryable,
+          'multitable.record.created',
+          chainEventPayload,
+        )
         return null
       })
       // #4196: a duplicate claim skipped the INSERT/revision — report the already-applied success and
       // emit NO create event and NO real-time fan-out (a replay must produce zero downstream effect).
       if (skipped === 'duplicate') return this.alreadyAppliedResult('create_record')
 
-      this.deps.eventBus.emit('multitable.record.created', withAutomationEventId({
-        sheetId: targetSheetId,
-        recordId,
-        data,
-        actorId: context.actorId,
-        _automationDepth: ((context.triggerEvent as Record<string, unknown>)?._automationDepth as number ?? 0) + 1,
-      }))
+      // P1#2c REPLACE: flag OFF ⇒ legacy post-commit emit (byte-identical); flag ON ⇒ SUPPRESSED (the
+      // same-txn enqueue above is the delivery path — keep-both would double-deliver the webhook sink).
+      emitRecordEventIfLegacy(this.deps.eventBus, 'multitable.record.created', chainEventPayload)
 
       // C1 real-time fan-out (see executeUpdateRecord) — invalidate the target sheet's room.
       this.publishRecordRealtime('record-created', targetSheetId, recordId, gate.crossBase, context)

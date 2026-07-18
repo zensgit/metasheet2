@@ -15,7 +15,10 @@
  * Posture (at-least-once, fire-and-forget): `deliverEvent` persists a durable
  * delivery row BEFORE the HTTP attempt and only then fires the request without
  * awaiting it, so a crash mid-flight leaves a `pending` row the retry tick picks
- * up. The bridge subscription itself is fire-and-forget (errors are logged, never
+ * up — including a FIRST attempt that died before its outcome handler stamped
+ * `next_retry_at` (the stray-grace leg of `retryFailedDeliveries`; before that
+ * leg existed such rows were a stuck absorbing state this header wrongly claimed
+ * were retried). The bridge subscription itself is fire-and-forget (errors are logged, never
  * propagated back to the emitting write). A full transactional outbox (emit inside
  * the write transaction) is out of scope — see the rank-5 wiring deliverable.
  */
@@ -31,13 +34,18 @@ const logger = new Logger('WebhookEventBridge')
 
 /**
  * Map internal event names (as published on the EventBus) to webhook event types.
+ *
+ * Exported so the P2 durable-delivery `webhook-event-bridge` consumer adapter forwards on the SAME mapping as
+ * the legacy bus subscription below (a single source of truth — the durable path must never diverge from the
+ * bus path it replaces).
  */
-const EVENT_MAP: Record<string, WebhookEventType> = {
+export const WEBHOOK_BRIDGE_EVENT_MAP: Record<string, WebhookEventType> = {
   'multitable.record.created': 'record.created',
   'multitable.record.updated': 'record.updated',
   'multitable.record.deleted': 'record.deleted',
   'multitable.comment.created': 'comment.created',
 }
+const EVENT_MAP = WEBHOOK_BRIDGE_EVENT_MAP
 
 export interface WebhookEventBridgeOptions {
   /**

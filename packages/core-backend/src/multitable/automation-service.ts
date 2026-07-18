@@ -32,7 +32,8 @@ import {
   type InboundWebhookRejectReason,
 } from './automation-inbound-webhook'
 import { isValidIanaTimeZone } from './automation-timezone'
-import { isDurableDeliveryEnabled } from './automation-durable-delivery'
+import { DurableSinkBusyError, isDurableDeliveryEnabled } from './automation-durable-delivery'
+import { enqueueRecordEventIfDurable, emitRecordEventIfLegacy } from './automation-producer-emit'
 import { claimEventFiresLease, markEventFiresDone } from './automation-event-fires-lease'
 
 /** S6 event-delivery lease window: long enough to cover a normal executeRule, short enough that a crashed
@@ -1595,7 +1596,15 @@ export class AutomationService {
       return
     }
     const lease = await claimEventFiresLease(this.db, ruleId, dedupKey, EVENT_DELIVERY_LEASE_MS)
-    if (lease === 'skip') return
+    if (lease === 'done') return
+    if (lease === 'busy') {
+      // Composed-timing hole (sink audit 2026-07-17): the outbox lease can expire before this sink lease, so
+      // a crashed worker's redelivery lands while the dead worker's sink lease is still LIVE. Returning here
+      // would resolve the delivery `done` and PERMANENTLY drop the work; running would double-run a live
+      // holder. Throw retryably instead — the dispatch loop's backoff outlives the sink lease, and the next
+      // redelivery reclaims (crashed holder) or reads `done` (live holder finished).
+      throw new DurableSinkBusyError('event_fires', `${ruleId}:${dedupKey}`)
+    }
     await run()
     await markEventFiresDone(this.db, ruleId, dedupKey, lease.fence)
   }
@@ -2437,13 +2446,58 @@ export class AutomationService {
     return { execution: continued }
   }
 
-  async handleApprovalCompletionEvent(event: ApprovalCompletionEventV1): Promise<void> {
+  async handleApprovalCompletionEvent(event: ApprovalCompletionEventV1, env: NodeJS.ProcessEnv = process.env): Promise<void> {
     if (event.version !== 1 || event.source !== 'approval-product') return
     if (!['approval.approved', 'approval.rejected', 'approval.revoked', 'approval.cancelled'].includes(event.eventType)) return
 
-    const bridge = await this.approvalBridgeService.claimCompletion(event)
-    if (!bridge) return
+    const leased = isDurableDeliveryEnabled(env)
+    const claim = await this.approvalBridgeService.claimCompletion(event, env)
+    if (claim.kind === 'none') return
+    if (claim.kind === 'busy') {
+      // Same composed-timing hole as runWithEventDedup (sink audit 2026-07-17): another worker's LIVE bridge
+      // lease. Resolving `done` here would drop a crashed holder's continuation forever; running would
+      // double-drive a live holder. Fail retryably — the redelivery after backoff reclaims an expired lease
+      // or reads the terminal row. (The legacy flag-OFF path never returns 'busy'.)
+      throw new DurableSinkBusyError('approval_bridge', event.approval.instanceId)
+    }
+    const bridge = claim.row
 
+    if (!leased) {
+      // LEGACY (flag OFF): claimCompletion already flipped the bridge to the terminal `resumed` BEFORE the
+      // continuation — byte-identical to the pre-P1#1 behavior (the window the P1 finding is about).
+      await this.resumeApprovalBridgeContinuation(bridge, event)
+      return
+    }
+    // P1#1 (flag ON): the bridge holds a RECLAIMABLE lease (in_progress). Run the continuation, THEN write the
+    // terminal `resumed` via fence-CAS — NO terminal-early write. A crash before markBridgeResumed leaves the
+    // lease to expire; the redelivered completion event reclaims it (bounded → dead_letter). The tail's own
+    // idempotency (Class-A same-txn claim / Class-B intent) makes the reclaim redelivery exactly-once at the
+    // effect level (at-least-once delivery + sink idempotency — the durable-delivery doctrine).
+    try {
+      await this.resumeApprovalBridgeContinuation(bridge, event)
+    } catch (err) {
+      // an UNEXPECTED throw (NOT a handled deterministic failure — those `return` inside the continuation):
+      // do NOT mark terminal. Let the lease expire so the work is reclaimed and retried; rethrow so a durable
+      // dispatcher driving this records a retryable failure.
+      logger.error(`Approval bridge continuation crashed for ${bridge.id}; leaving lease to expire for reclaim`, err instanceof Error ? err : undefined)
+      throw err
+    }
+    const won = await this.approvalBridgeService.markBridgeResumed(bridge.id, bridge.fence)
+    if (!won) {
+      // our lease expired mid-continuation and a reclaimer took the row (fence advanced); the continuation's
+      // effects are idempotent and the reclaimer writes the terminal state — nothing to do here.
+      logger.warn(`Approval bridge ${bridge.id} terminal write lost the fence-CAS (reclaimed mid-flight); reclaimer owns it`)
+    }
+  }
+
+  /**
+   * The bridge resume continuation — extracted VERBATIM so the legacy (terminal-early) path and the P1#1 lease
+   * path share ONE body. Its early `return`s are the DETERMINISTIC failures (missing execution, missing/disabled
+   * rule, changed fingerprint, non-approved outcome, record gone); each settles the execution and returns
+   * normally (no throw), so the caller then writes the terminal bridge state (legacy: already done by
+   * claimCompletion; lease: markBridgeResumed). Only an UNEXPECTED throw escapes to the caller's reclaim path.
+   */
+  private async resumeApprovalBridgeContinuation(bridge: AutomationApprovalBridgeRow, event: ApprovalCompletionEventV1): Promise<void> {
     const execution = await this.logService.getById(bridge.executionId)
     if (!execution) {
       logger.error(`start_approval bridge ${bridge.id} references missing execution ${bridge.executionId}`)
@@ -2918,6 +2972,15 @@ export class AutomationService {
       missingMessage?: string
     },
   ): Promise<boolean> {
+    // P1#2 REPLACE — build the chaining-event payload ONCE (stable `_eventId`) so the same-txn durable enqueue
+    // (inside the txn, flag ON) and the legacy post-commit emit (flag OFF) carry the same event identity.
+    const chainEventPayload = withAutomationEventId({
+      sheetId,
+      recordId,
+      changes: patch,
+      actorId: opts.chainActorId,
+      _automationDepth: opts.automationDepth,
+    })
     const wrote = await this.withTransaction(sheetId, async (query) => {
       const lockRes = await query(
         'SELECT locked, locked_by, created_by FROM meta_records WHERE id = $1 AND sheet_id = $2',
@@ -2953,17 +3016,27 @@ export class AutomationService {
           snapshot: normalizeJson(updatedRow.data),
         })
       }
+      // P1#2 REPLACE: same-transaction durable enqueue on the SUCCESS path (flag ON) — atomic with the
+      // writeback UPDATE + revision. A rollback (locked / gone target throws or returns false above) enqueues
+      // nothing by construction. Flag OFF ⇒ no-op (the legacy emit below fires instead).
+      await enqueueRecordEventIfDurable(
+        {
+          isTransaction: true,
+          query: async (sql, params) => {
+            const r = await query(sql, params)
+            return { rows: (r.rows ?? []) as Array<Record<string, unknown>>, rowCount: r.rowCount ?? null }
+          },
+        },
+        'multitable.record.updated',
+        chainEventPayload,
+      )
       return true
     })
     if (!wrote) return false
 
-    this.eventBus.emit('multitable.record.updated', withAutomationEventId({
-      sheetId,
-      recordId,
-      changes: patch,
-      actorId: opts.chainActorId,
-      _automationDepth: opts.automationDepth,
-    }))
+    // P1#2 REPLACE: flag OFF ⇒ legacy post-commit emit (byte-identical); flag ON ⇒ SUPPRESSED (the same-txn
+    // enqueue above is the delivery path — keep-both would double-deliver the non-idempotent webhook sink).
+    emitRecordEventIfLegacy(this.eventBus, 'multitable.record.updated', chainEventPayload)
     try {
       publishMultitableSheetRealtime({
         spreadsheetId: sheetId,

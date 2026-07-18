@@ -260,6 +260,30 @@ export default defineConfig({
       // S6 event_fires LEASE claim/reclaim (window-2 fix): isolated-schema real DB. Excluded here so it cannot
       // skip-green, whole-file wired into the attendance real-DB step in plugin-tests.yml.
       'tests/integration/multitable-automation-event-fires-lease-realdb.db.test.ts',
+      // P1#1 approval-bridge terminal→lease UPGRADE migration (existing rows keep status; new lease columns):
+      // isolated-schema real UPGRADE path. Excluded here so it cannot skip-green, whole-file wired into
+      // plugin-tests.yml's attendance real-DB step.
+      'tests/integration/multitable-automation-approval-bridge-lease-migration.db.test.ts',
+      // P1#1 approval-bridge LEASE claim/reclaim runtime crash matrix (terminal-early removal): real DB.
+      // Excluded here so it cannot skip-green, whole-file wired into plugin-tests.yml's attendance real-DB step.
+      'tests/integration/multitable-automation-approval-bridge-lease-realdb.test.ts',
+      // P1#2 producer REPLACE seam same-txn goldens (enqueueRecordEventIfDurable commit/rollback/off): real DB.
+      // Excluded here so it cannot skip-green, whole-file wired into plugin-tests.yml's attendance real-DB step.
+      'tests/integration/multitable-automation-producer-emit-realdb.test.ts',
+      // P1#2c producer family 2 (executor Class-A record events) REPLACE site goldens: real DB, same shape.
+      'tests/integration/multitable-automation-producer-family2-realdb.test.ts',
+      // Owner P1s (head 5afe30f26): REAL MetaSheetServer.start() fail-closed matrix — flag ON + missing
+      // AutomationService / disabled retry scheduler must ABORT startup; flag OFF keeps legacy degrade.
+      'tests/integration/multitable-durable-startup-failclosed.db.test.ts',
+      // P1#2d producer family 5 (univer-meta routes ×4) durable REPLACE goldens (route-driven): real DB.
+      // Excluded here so it cannot skip-green, whole-file wired into plugin-tests.yml's attendance real-DB step.
+      'tests/integration/multitable-automation-producer-family5-realdb.test.ts',
+      // P1#2b producer family 4 (record-service CRUD + record-write bulk) site-wiring goldens: real DB.
+      // Excluded here so it cannot skip-green, whole-file wired into plugin-tests.yml's attendance real-DB step.
+      'tests/integration/multitable-automation-producer-family4-realdb.test.ts',
+      // P1#2e producer family 1 (approval completion + task_created) REPLACE site goldens: real DB, same shape.
+      // Excluded here so it cannot skip-green, whole-file wired into plugin-tests.yml's attendance real-DB step.
+      'tests/integration/multitable-automation-producer-family1-realdb.test.ts',
       // F9 owner CHANGES-REQUESTED (GF9-1/GF9-2): multitable_attachments blob_purged_at migration +
       // deleteAttachmentBinary index-free delete + sweepMultitableAttachmentBlobPurge compensating-sweep
       // matrix, same shape/rationale as the F5 entry immediately above (DATABASE_URL-gated describeDb,
@@ -385,6 +409,9 @@ export default defineConfig({
       // P2 durable-delivery S4-a producer atomic enqueue — real-DB (txn atomicity + fan-out + e2e tick).
       // Excluded HERE so it cannot skip-green in the no-DB lane; whole-file wired into plugin-tests.yml.
       'tests/integration/multitable-automation-outbox-enqueue-realdb.test.ts',
+      // P2 durable-delivery S4-b/S5 activation seam + S7 crash-injection V-series — real-DB. Excluded
+      // HERE so it cannot skip-green in the no-DB lane; whole-file wired into plugin-tests.yml.
+      'tests/integration/multitable-automation-durable-activation-realdb.test.ts',
       // W0 tail (#4279, owner MUST-WRITE OD-6, design-lock §0.5 2026-07-13): field-undelete rehydration
       // revision goldens — proves `recreateFieldFromConfig`'s tombstone-value rehydration UPDATE bumps
       // `version` and emits a `recordRecordRevision` AT THE NEW version, same transaction, for every
