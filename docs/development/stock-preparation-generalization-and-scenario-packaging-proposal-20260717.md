@@ -2,16 +2,21 @@
 
 > **状态：PROPOSED。** 本文回答三个问题：①备料代码里还有多少真实的通用化空间；②抽取应该按什么
 > 次序、以什么纪律进行；③备料作为一个「场景」应如何在产品里呈现而不突兀。
-> 全部代码事实以 origin/main（`f72057844` 附近）为锚，由三路独立读代理逐模块核实（29 个后端
-> stock-preparation 模块 + 8 个 FE service 模块 + 产品呈现面 + 仓内先例全量走查）。
-> 本文不请求任何编码；每个阶段各自过 owner 门。
+> 全部代码事实以 origin/main **`fbb92eec48ecbe59dab0457b75115e5fbdf12d5a`** 为锚，由三路独立读
+> 代理逐模块核实（29 个后端 stock-preparation 模块 + 8 个 FE service 模块 + 产品呈现面 + 仓内
+> 先例全量走查）。本文不请求任何编码；每个阶段各自过 owner 门。
+>
+> **owner review round-1（2026-07-17）已吸收**：①K1 通用性按实际耦合面收窄（§2.2）；②实施
+> 顺序改为垂直推进（§4，owner 拍板五步序）；③App Center 前置条件明确、否决空壳插件（§5.3）；
+> ④措辞修正（2/3=启发式非度量；/stock-prep=integration:write；锚定 exact SHA）。
 
 ## 1. 核心判断
 
 备料的通用化空间**真实、分层、且仓内已有一次成功先例**：
 
 - 全部 29 个后端模块按「纯模式 / 模板参数化 / 域绑定」三分，比例约为 **1/3 : 1/3 : 1/3**——
-  也就是说约三分之二的代码在正确的注入点打开后可被第二个场景复用；
+  这是**架构启发式而非代码度量**（round-1 措辞修正）：它指方向（大部分机制层在正确注入点打开后
+  可复用），不作为工作量或行数承诺；
 - **先例已经存在**：option-sync 已经走完这条路——FOS-2 把循环/跳过/patch/报错语义抽成
   `field-option-sync-runtime.cjs` 通用内核（:3-18 明言「stock-preparation is now a THIN
   WRAPPER」），通用路由 `POST /api/integration/field-options/sync` 已在，契约测试把
@@ -33,7 +38,7 @@
 
 | # | 内核 | 现状证据 | 注入点（域参数） |
 |---|---|---|---|
-| K1 | **快照对账内核**：immutable keyed batch commit + exact replay + 结构完整性 + keyed row-diff | sync-run-plan/persist **自身无 BOM 数学**（域只经模板字段名与 run_type 词表进入；groundedRow 对模板外字段 THROW）；snapshot-diff 的算法（pathKey 匹配→identity 回退→added/removed、重复键 HELD、sha16、values-free evidence）完全通用，**只有 comparator 表与 CHANGE_TYPES 是 BOM 的**（:13-26,:124-133,:196-215） | 模板集、key picker、comparator 列表、change-type/blocking 词表 |
+| K1 | **快照对账骨架**（round-1 收窄：**骨架可抽，不是现成内核**）：事务/分页重放/快照判等骨架（immutable keyed batch commit + exact replay + 结构完整性）可抽取 | sync-run-plan/persist 自身无 BOM 数学（域只经模板字段名与 run_type 词表进入；groundedRow 对模板外字段 THROW）。但 snapshot-diff **不止 comparator/change-type 是域的**：pathKey 主键、`childDrawingNo|childVersion` 身份回退、重复键 HELD 策略、missing_child_bom、数量合法性、阻断分类、输出投影全部代码化（snapshot-diff.cjs:124,148-152,196-215；sync-run-plan.cjs:129） | **身份策略、分类器、阻断规则、投影、比较器全部由 preset 注入**；模板集、key picker、change-type/blocking 词表 |
 | K2 | **确认流内核**：系统产候选→人工确认（server 戳身份、XOR 确认模式、create-only、human_preserved 结构性剥离）+ 异常队列（severity + 闭词表 resolution） | confirm-writes/generation-runtime/confirm-reads 的机制层全部同型复用；域只在 XOR/tri-XOR 语义与 8 异常类型词表 | 候选方法词表、确认模式、异常类型/决议词表 |
 | K3 | **场景表模板 manifest 原语** | 仓内**四套**并行 manifest 机制共用同一 idiom（normalize-fail-closed、FORBIDDEN_CONTENT_KEYS、secret-shape 拒绝、values-free）：S3-1 integration-templates、S3-3 reference catalog、DF-T3a reference-mapping、备料 9 冻结模板——统一为一个平台 manifest 原语是**最强的单点通用化** | 模板清单、字段所有权（plm_system/human_preserved）、optionSource 契约键 |
 | K4 | **values-free 审计原语** | audit-store 的结构闸完全通用（enum-shaped ≤80 字符、一层计数嵌套、append-only）；场景绑定只有 8-action 词表 + 表名 `integration_stock_prep_audit`（066 迁移） | {action 词表, 表名} |
@@ -69,20 +74,28 @@ issueQty 数学、8 异常类型、tri-XOR 语义、备料六视图业务语义�
 - **第二场景候选**（同型：外部只读源→快照→diff→确认→内部表，按现有需求就近取材）：
   ① **ERP 物料主数据对账**——`erp_material_master` + T3a upsert-persist 已经是第二个 persist
   消费者的雏形；② 供应商/客户主数据对账；③ 价格表对账。建议 ①（代码距离最短、客户价值直接）；
-- **阶段序（每段独立 PR + owner 门）**：
-  - **S0 场景自注册**：路由注册表按场景分片 + 模板注册表注入（解阻碍 1/2）；对 stock-prep
-    byte-identical；
-  - **S1 K1 快照对账内核**：diff comparator/change-type 注入点 + plan/persist 模板参数化
-    （解阻碍 3/4）；**建议在 P4 方案 A（受限 unit-of-work）落地之后进行**，避免同一写面动两次；
-  - **S2 K2 确认流内核 + K4 审计参数化**；
-  - **S3 第二场景首发**（ERP 物料主数据对账 preset #2）——这是全部抽取的验收物。
+- **阶段序（round-1 改判：垂直推进，废除「先抽象后场景」的 S0→S3 序——那仍是平台先行重构，
+  与本节自己的原则矛盾）。owner 拍板五步**：
+  - **V0（现在可做）**：只修 plm-workbench focus allowlist 补 `/stock-prep`（风险低、语义明确）；
+  - **V1（P4 先行）**：先落 P4 方案 A（host 组合事务 + in-tx key fence），再抽 persist 骨架——
+    避免同一写面改两次；
+  - **V2（定义第二场景）**：「PLM ↔ ERP 物料主数据对账」，**必须拥有独立 manifest、路由、权限、
+    字段词表（自己的 frozen templates + 自己的 intake 别名表）和契约测试**——不能只是给备料
+    缓存换名字（`erp_material_master` 留在备料场景内不动，结构上排除该退化）；
+  - **V3（第二场景上线时抽 K1）**：最小场景注册 + 快照/diff MVP 同步拉动最少骨架抽取，按实际
+    需要再抽确认流；**验收判据 = 通用内核不再 import 任何 stock-prep 模板或域分类器**——
+    建议以 import-graph tripwire 测试机械化（内核模块 require 清单禁含 `stock-preparation-*`，
+    drain-only，照 supertest AST tripwire 模式）；
+  - **V4（最后做场景目录）**：新增 `stock-prep:read/operate/admin` 独立权限（顺带解决现状
+    「操作员须持 integration:write」的权限过宽），从统一 registry 派生 App Center 与首页场景
+    入口；模板中心继续只承载单表模板。
 
 ## 5. 场景化呈现：怎么不突兀
 
 ### 5.1 现状（三套半成品呈现机制不合流）
 
-- 备料今天**只有两个 admin 门后的顶栏链接**（数据工厂 `/integrations/workbench`、备料工作台
-  `/stock-prep`，都 v-if `integration:write`）：无 app-center 卡、无模板目录存在感、无 focus
+- 备料今天**只有两个 `integration:write` 权限门后的顶栏链接**（数据工厂 `/integrations/workbench`、
+  备料工作台 `/stock-prep`；appRoutes.ts:256 route 权限同为 integration:write，非 admin-only）：无 app-center 卡、无模板目录存在感、无 focus
   mode；**`plm-workbench` 专注模式的 allowlist 甚至不含 `/stock-prep`**（main.ts:157）——
   备料的天然受众在该模式下会被重定向走，这是现存的不协调；
 - 仓内已有三套机制但互不组合：**模板目录**（8 个硬编码单表模板，装完只有 base+sheets+fields+
@@ -105,15 +118,16 @@ after-sales 同构，因此天然不突兀：
 
 ### 5.3 三阶段落地
 
-- **P0（低成本、立即可做，互相独立）**：
-  ① `plm-workbench` allowlist 补 `/stock-prep`（一行，修现存不协调）；
-  ② 为备料出 app-center 卡——按 after-sales 先例给出 manifest 声明（navigation + permissions；
-  因 app-registry 一插件一 manifest，需 owner 裁：子场景 manifest 机制 vs 备料独立薄插件壳）；
-  ③ 首页/模板目录加「场景」分区的引导卡（已装场景直达入口，非模板安装）。
-- **P1（场景包格式）**：app.manifest 扩展为场景包（引用冻结模板集 + navigation + permissions +
-  read-source 依赖声明），装载复用 after-sales 的 install ledger + instance registry；模板目录
-  长出「场景」类目（区分单表模板 vs 场景包）。**这一步与 §4 S0 的场景自注册是同一枚硬币的
-  前后两面**（后端自注册 / 前端包声明）。
+- **P0（round-1 收窄：只有一件立即可做）**：`plm-workbench` allowlist 补 `/stock-prep`
+  （main.ts:155；一行，风险低、语义明确——路由本身仍有 integration:write 权限门，仅恢复该
+  模式下持权用户的可达性）。**app-center 卡与首页场景区不再是 P0**：app-registry 一插件只读
+  一个 manifest（app-registry.ts:91）且应用列表无权限过滤（platform-apps.ts:79），直接加卡
+  = 无权用户可见但打不开的假入口；**也不为 metadata 造运行时仍归 integration-core 的空壳插件**。
+- **P1（App Center 先补四个前置，再谈卡片）**：①一个插件可注册多个子应用；
+  ②manifest 支持 requiredPermissions；③feature/readiness 状态声明；④**服务端与前端双重
+  权限过滤**。之后场景包格式（引用冻结模板集 + navigation + permissions + read-source 依赖
+  声明）装载复用 after-sales 的 install ledger + instance registry；模板目录长出「场景」类目。
+  这一步与 §4 V3 的最小场景注册是同一枚硬币的前后两面（后端自注册 / 前端包声明）。
 - **P2（专注模式数据化）**：focus-mode allowlist 从 manifest navigation 派生（attendance 先例
   改造随行）——「备料专注模式」成为 manifest 产物而非 featureFlags.ts 代码分支。
 
@@ -132,10 +146,12 @@ after-sales 同构，因此天然不突兀：
 - attendance/after-sales 不改动，仅作先例引用（P2 阶段 attendance 的 allowlist 数据化随行，
   单独 owner 门）。
 
-## 7. Owner 决策点
+## 7. Owner 决策点（round-1 后更新）
 
-1. 认可「第二场景拉动抽取」策略与阶段序 S0→S3（vs 一次性平台重构——本文不推荐后者）；
-2. 第二场景选型（推荐 ①ERP 物料主数据对账）；
-3. 呈现 P0 三件是否立即开做（各自独立小 PR）；子场景 manifest vs 独立薄插件壳的取向；
-4. P1 场景包格式与 §4 S0 是否合并为一条线推进；
-5. K1 抽取与 P4 方案 A 的先后确认（本文建议 A 先行）。
+1. ~~策略与阶段序~~ **已裁：垂直推进 V0→V4**（§4）；
+2. ~~第二场景选型~~ **已裁：PLM ↔ ERP 物料主数据对账**，独立 manifest/路由/权限/词表/契约测试
+   为硬性要求（V2 charter 文本届时单独过门）；
+3. ~~P0 范围~~ **已裁：只修 focus allowlist**；App Center 卡等 P1 四前置齐备后再做；
+4. **仍开放**：V0 allowlist 一行修是否现在就开（本文建议开，独立小 PR）；
+5. **仍开放**：`stock-prep:read/operate/admin` 权限词表命名与迁移口径（V4 前置，影响现存
+   integration:write 持有者的过渡方案）。
