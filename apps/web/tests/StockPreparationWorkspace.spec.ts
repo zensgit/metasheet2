@@ -157,24 +157,56 @@ describe('Stock Preparation route registration (source drift pin)', () => {
     expect(TYPES).toContain("INTEGRATION_STOCK_PREPARATION: 'integration-stock-preparation'")
   })
 
-  // Regression pin for the plm-workbench focus allowlist fix: the guard allowlist is inline in
-  // main.ts (no unit seam until the P2 manifest-driven refactor), so pin it at source level like the
-  // route block above. Deleting '/stock-prep' from the allowlist turns this red. The permission
-  // semantics are NOT relaxed by the allowlist: main.ts runs the isRoutePermitted check BEFORE the
-  // focus-mode allowlists, and the /stock-prep route keeps its integration:write gate (asserted on
-  // the route block above) — the allowlist only restores reachability for authorized users.
-  it('plm-workbench focus allowlist contains exactly /stock-prep alongside the workbench prefixes', () => {
+  // Regression pin for the plm-workbench focus allowlist fix (round-7 hardening: the original pin's
+  // indexOf('isRoutePermitted') matched the IMPORT at the top of main.ts, not the real guard call —
+  // a mutation deleting the call still passed). The pin now walks the TypeScript AST: it locates the
+  // ACTUAL isRoutePermitted(...) call expression and the ACTUAL isPlmWorkbenchFocused() call inside
+  // the router guard and compares their positions, and it parses the allowedPrefixes array literal
+  // for an EXACT membership comparison. Deleting '/stock-prep', deleting the permission call, or
+  // moving it after the focus block turns this red (mutation-verified). Runtime semantics: the
+  // allowlist never relaxes the route's integration:write gate (route-block pin above).
+  it('plm-workbench focus allowlist is exactly the workbench prefixes + /stock-prep, and the real permission call precedes the focus block (AST)', async () => {
+    const ts = (await import('typescript')).default
     const MAIN = readFileSync(join(__dirname, '../src/main.ts'), 'utf8')
-    const focusIdx = MAIN.indexOf('isPlmWorkbenchFocused')
-    expect(focusIdx, 'plm-workbench focus block must exist in main.ts').toBeGreaterThan(-1)
-    const listStart = MAIN.indexOf('allowedPrefixes', focusIdx)
-    expect(listStart, 'plm-workbench allowedPrefixes must exist').toBeGreaterThan(-1)
-    const listEnd = MAIN.indexOf(']', listStart)
-    const allowlist = MAIN.slice(listStart, listEnd + 1)
-    expect(allowlist).toContain("'/stock-prep'")
-    expect(allowlist).toContain("'/integrations'")
-    // Permission check ordering: isRoutePermitted must appear BEFORE the focus-mode blocks.
-    expect(MAIN.indexOf('isRoutePermitted')).toBeLessThan(focusIdx)
+    const source = ts.createSourceFile('main.ts', MAIN, ts.ScriptTarget.ES2022, true)
+
+    let permittedCallPos = -1
+    let plmFocusCallPos = -1
+    let allowlist: string[] | null = null
+    const visit = (node: import('typescript').Node): void => {
+      if (ts.isCallExpression(node)) {
+        const callee = node.expression
+        if (ts.isIdentifier(callee) && callee.text === 'isRoutePermitted' && permittedCallPos === -1) {
+          permittedCallPos = node.getStart(source)
+        }
+        if (
+          ts.isPropertyAccessExpression(callee) &&
+          callee.name.text === 'isPlmWorkbenchFocused' &&
+          plmFocusCallPos === -1
+        ) {
+          plmFocusCallPos = node.getStart(source)
+        }
+      }
+      if (
+        ts.isVariableDeclaration(node) &&
+        ts.isIdentifier(node.name) &&
+        node.name.text === 'allowedPrefixes' &&
+        node.initializer &&
+        ts.isArrayLiteralExpression(node.initializer)
+      ) {
+        allowlist = node.initializer.elements
+          .filter((el): el is import('typescript').StringLiteral => ts.isStringLiteral(el))
+          .map((el) => el.text)
+      }
+      ts.forEachChild(node, visit)
+    }
+    visit(source)
+
+    expect(permittedCallPos, 'the real isRoutePermitted(...) CALL must exist (imports do not count)').toBeGreaterThan(-1)
+    expect(plmFocusCallPos, 'the real isPlmWorkbenchFocused() call must exist').toBeGreaterThan(-1)
+    expect(permittedCallPos, 'permission check must run BEFORE the plm-workbench focus block').toBeLessThan(plmFocusCallPos)
+    expect(allowlist, 'plm-workbench allowedPrefixes array must exist').not.toBeNull()
+    expect(allowlist).toEqual(['/plm', '/workflows', '/approvals', '/integrations', '/stock-prep'])
   })
 })
 
