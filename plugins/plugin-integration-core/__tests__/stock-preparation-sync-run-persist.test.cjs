@@ -946,6 +946,54 @@ async function main() {
     assert.equal(recordsApi.createCalls.length, writesAfterFirst, 'rejected before any write')
   })
 
+  await run('R3: a COMPLETE orphan batch (crash before project patch) still counts — intermediate version -> 422, next version proceeds', async () => {
+    const recordsApi = makeRecordsApi()
+    const provisioning = makeProvisioning()
+    // V1 commits fully (pointer -> run_1).
+    await persistStockPreparationSyncRun({ permission: 'admin', recordsApi, provisioning, ...basePlanInputs() })
+    // V3 crashes at CW4-existing: batch/lines/run all land, the project patch is lost — a COMPLETE
+    // orphan V3 exists while the pointer still names V1.
+    const crashingApi = Object.create(recordsApi)
+    crashingApi.patchRecord = async (input = {}) => {
+      if (input.sheetId === PROJECT_SHEET_ID) throw new Error('injected crash before project patch')
+      return recordsApi.patchRecord(input)
+    }
+    await assert.rejects(
+      () => persistStockPreparationSyncRun({
+        permission: 'admin',
+        recordsApi: crashingApi,
+        provisioning,
+        ...basePlanInputs({ syncRunId: 'run_3', snapshotBatchId: 'batch_3', snapshotVersion: 3 }),
+      }),
+      /injected crash before project patch/,
+    )
+    // Round-3 finding: a pointer-only compare accepted V2 here (V2 > pointer V1) despite the complete
+    // V3 — the guard must scan the project's WHOLE batch history.
+    const writesBefore = recordsApi.createCalls.length
+    await assert.rejects(
+      () => persistStockPreparationSyncRun({
+        permission: 'admin',
+        recordsApi,
+        provisioning,
+        ...basePlanInputs({ syncRunId: 'run_2', snapshotBatchId: 'batch_2', snapshotVersion: 2 }),
+      }),
+      (error) =>
+        error instanceof StockPreparationSyncRunPersistError &&
+        error.status === 422 &&
+        error.code === 'PERSIST_VERSION_NOT_MONOTONIC' &&
+        error.details.reason === 'not_monotonic',
+    )
+    assert.equal(recordsApi.createCalls.length, writesBefore, 'rejected before any write')
+    // Moving past the orphan is allowed: V4 > max(V3).
+    const next = await persistStockPreparationSyncRun({
+      permission: 'admin',
+      recordsApi,
+      provisioning,
+      ...basePlanInputs({ syncRunId: 'run_4', snapshotBatchId: 'batch_4', snapshotVersion: 4 }),
+    })
+    assert.equal(next.mode, 'created')
+  })
+
   await run('H-2: equal-version pointer on a DIFFERENT run (legacy/degenerate data) -> 409 pointer_unresolvable, never a silent 200', async () => {
     const recordsApi = makeRecordsApi()
     const provisioning = makeProvisioning()

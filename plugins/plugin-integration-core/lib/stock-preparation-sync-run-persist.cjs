@@ -272,6 +272,29 @@ async function resolvePointerBatchVersion({ batchScoped, plan, pointerRunId }) {
   return Number.isFinite(pointerVersion) ? pointerVersion : null
 }
 
+// Round-3: bounded, numeric MAX-version scan over ALL batch rows of a business project (orphan
+// complete batches included — the pointer alone is not the history). Returns the maximum numeric
+// snapshotVersion (0 when the project has no batch rows), or null when the history is unprovable
+// (page bound exceeded, malformed page, or any row with a non-numeric version) — callers fail closed.
+async function readProjectMaxBatchVersion(batchScoped, projectId) {
+  let maxVersion = 0
+  for (let page = 0; page < READ_MAX_PAGES; page += 1) {
+    const pageRows = await batchScoped.queryRecords({
+      filters: { projectId },
+      limit: READ_PAGE_LIMIT,
+      offset: page * READ_PAGE_LIMIT,
+    })
+    if (!Array.isArray(pageRows) || pageRows.length > READ_PAGE_LIMIT) return null
+    for (const row of pageRows) {
+      const version = Number(row && row.data && row.data.snapshotVersion)
+      if (!Number.isFinite(version)) return null
+      if (version > maxVersion) maxVersion = version
+    }
+    if (pageRows.length < READ_PAGE_LIMIT) return maxVersion
+  }
+  return null
+}
+
 function assertPlanIdentityKeys(plan, snapshotLines) {
   if (!optionalString(plan && plan.snapshotBatch && plan.snapshotBatch[BATCH_KEY_FIELD])) {
     throw new StockPreparationSyncRunPersistError(422, 'PERSIST_CONFIG_INVALID', 'planned snapshot batch key is required', { field: BATCH_KEY_FIELD })
@@ -576,17 +599,18 @@ async function persistStockPreparationSyncRun(input = {}) {
   }
 
   // H-2 precondition — CREATE path monotonic-version guard (before the FIRST write): a genuinely-new
-  // batch for an EXISTING project must carry a snapshotVersion strictly above the pointer batch's
-  // version. This is what makes the replay-side stale/advanced inference sound (see
-  // versionNotMonotonic above); a repeat sync that omits snapshotVersion (default 1) now fails loudly
-  // here instead of silently disabling CW4-existing detection.
+  // batch for an EXISTING project must carry a snapshotVersion strictly above EVERY existing batch of
+  // that project — not merely above the batch the live pointer names (round-3 finding: V1 commit →
+  // V3 crash before the project patch leaves a COMPLETE orphan V3 with the pointer still on V1; a
+  // pointer-only compare then wrongly accepted V2). The scan is bounded and numeric: paged read of
+  // the project's batch rows; an unprovable history (page bound exceeded / non-numeric version)
+  // fails closed. This is what makes the replay-side stale/advanced inference sound.
   if (projectRows.length === 1) {
-    const createPointerRunId = optionalString(projectRows[0] && projectRows[0].data && projectRows[0].data.lastSyncRunId)
-    if (!createPointerRunId) versionNotMonotonic('pointer_unresolvable')
-    const pointerVersion = await resolvePointerBatchVersion({ batchScoped: batchTarget.scoped, plan, pointerRunId: createPointerRunId })
     const currentVersion = Number(plan.snapshotBatch.snapshotVersion)
-    if (pointerVersion === null || !Number.isFinite(currentVersion)) versionNotMonotonic('pointer_unresolvable')
-    if (currentVersion <= pointerVersion) versionNotMonotonic('not_monotonic')
+    if (!Number.isFinite(currentVersion)) versionNotMonotonic('history_unprovable')
+    const maxVersion = await readProjectMaxBatchVersion(batchTarget.scoped, optionalString(planInputs.projectId))
+    if (maxVersion === null) versionNotMonotonic('history_unprovable')
+    if (currentVersion <= maxVersion) versionNotMonotonic('not_monotonic')
   }
 
   // 5. create-only path: batch row, then each line row, then the run row. createRecord ONLY — no
