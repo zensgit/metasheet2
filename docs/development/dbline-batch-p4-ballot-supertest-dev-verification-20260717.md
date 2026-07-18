@@ -63,11 +63,12 @@
 
 - 6 轮红逐一核对错误签名：socket hang up / ECONNRESET / 405-非预期状态（含 `expected 200 got 405`
   的打错 app 铁证）——全部归入串台类，无其他根因混入。
-- **三个迁移 suite 在 50 轮全量运行中 0 失败**，且按机制结构性免疫（`request(baseUrl)` 永不
-  listen，suite 端口全程占有）。
-- **诚实结论**：部分迁移**不降低** lane 级串台率（受害者在剩余 ~460 站点/39 文件间轮转）——
-  根除必须批量迁移；在此之前 `retry:2` 仍然必要。基线红率 3/25 略高于 #4169 时的 2/25，
-  与站点从 ~495 涨到 546 一致。
+- **三个迁移 suite 在 50 轮全量运行中 0 失败**——积极统计证据 + 机制论证（绑定期内其请求只达
+  自己的 app），**不作结构性免疫表述**（round-1 更正：suite 首次绑定仍可能复用刚释放的端口、
+  成为迟到请求的目标——collider 角色从逐请求降为每 suite 至多一次，非归零）。
+- **诚实结论**：部分迁移**不降低** lane 级串台率（受害者在剩余未迁移文件间轮转）——
+  根除必须批量迁移；在此之前 `retry:2` 仍然必要。（3/25 与 #4169 的 2/25 均为单样本率，
+  不据以推断趋势。）
 
 ## 4. 诚实边界（本批次未做 / 未证）
 
@@ -86,3 +87,15 @@
    同样零代码可批。
 3. **#4454**：批量迁移 GO/NO-GO（GO 则 ~460 站点按已证 recipe 机械展开，例外模式已编目）。
 4. （非本批次）RC-A #4437：等顾问配置 + 实体机回贴，回贴后按六判据复核。
+
+
+## 6. Owner review round-1（2026-07-17）判决与修正落点
+
+| PR | 判决 | 修正（本轮已落） |
+|---|---|---|
+| #4452 | REQUEST_CHANGES，暂不 ratify；方向条件接受 A+一次性 C，硬切换，H-1/H-2 先行，H-3 为 A 前置，T3a 另审 | §3 方案 A 重写为**受限 unit-of-work**（key lock/锁内复检/replay 判定/create-or-patch/revision 全在同一事务）；§9 H-1/H-2 升为先行必修、H-3 定为 A 前置；§10 决策点按裁定收敛 |
+| #4194 | REQUEST_CHANGES | OD2 行改判：`category_rule` **非安全状态**（FE 可选 + 匹配器尾部兜底 ≈ manual，`material-match.cjs:116-136`）→ 三选一交 owner，推荐服务端 fail-closed 先行；§0 台账日期更正（首次 PASS=corrective-7 07-12，最终收口=corrective-6 rerun，#4101 CLOSED=07-17）；PR body 同步更正；owner 预决五行已注记（待正式回帖生效） |
+| #4454 | 代码 APPROVE；批量迁移有条件 GO（分批 + AST 防回归 + 保留 retry:2） | 新增 AST tripwire + 冻结基线（**45 文件/636 站点**，drain-only）+ 可复现压力入口 `scripts/ops/supertest-crosstalk-stress.sh` + 原始 A/B 证据 MD；PR body 撤回「结构性免疫/不再是 collider」表述 |
+| #4456 | HOLD，最后合并 | 本 v2：§3 过强结论更正（结构性免疫→统计+机制；删站点增长推断）+ 本节判决台账 |
+
+四分支均已 rebase 追平 main 等 fresh-green；仍全部未 arm。
