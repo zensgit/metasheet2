@@ -174,6 +174,7 @@ import { adminDirectoryRouter } from './routes/admin-directory'
 import { adminDirectoryLocalRouter } from './routes/admin-directory-local'
 import { adminDirectoryDepartmentBindingsRouter } from './routes/admin-directory-department-bindings'
 import { adminDirectoryRoutingPolicyRouter } from './routes/admin-directory-routing-policy'
+import { adminDirectoryOrgTransfersRouter } from './routes/admin-directory-org-transfers'
 import { startDirectorySyncScheduler, stopDirectorySyncScheduler } from './directory/directory-sync-scheduler'
 import { canaryRoutes } from './routes/canary-routes'
 import { CanaryRouter } from './canary/CanaryRouter'
@@ -1354,6 +1355,9 @@ export class MetaSheetServer {
       }),
     }))
     this.app.use(adminUsersRouter())
+    // Transfer MVP T1 — mounted BEFORE the broader /api/admin/directory router so the more
+    // specific path wins outright; same `ensurePlatformAdmin` RBAC gate.
+    this.app.use('/api/admin/directory/org-transfers', adminDirectoryOrgTransfersRouter())
     this.app.use('/api/admin/directory', adminDirectoryRouter())
     // Canonical Org MVP B2 (local departments/accounts/memberships CRUD) — mounted alongside
     // adminDirectoryRouter under the same base path, sharing its `ensurePlatformAdmin` RBAC gate.
