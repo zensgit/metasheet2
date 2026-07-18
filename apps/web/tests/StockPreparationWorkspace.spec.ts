@@ -196,22 +196,72 @@ describe('Stock Preparation route registration (source drift pin)', () => {
     findGuard(source)
     expect(guardBody, 'router.beforeEach(callback) must exist').not.toBeNull()
 
-    const containsReturnNext = (node: TsNode): boolean => {
+    // Round-9: the deny branch must DIRECTLY return next(flags.resolveHomePath()) — a bare
+    // next() is an allow-through, and a decoy return inside a nested function must not count,
+    // so the walk refuses to descend into function-like nodes.
+    const isDenyReturn = (n: TsNode): boolean =>
+      ts.isReturnStatement(n) &&
+      !!n.expression &&
+      ts.isCallExpression(n.expression) &&
+      ts.isIdentifier(n.expression.expression) &&
+      n.expression.expression.text === 'next' &&
+      n.expression.arguments.length === 1 &&
+      ts.isCallExpression(n.expression.arguments[0]) &&
+      ts.isPropertyAccessExpression(n.expression.arguments[0].expression) &&
+      n.expression.arguments[0].expression.name.text === 'resolveHomePath' &&
+      ts.isIdentifier(n.expression.arguments[0].expression.expression) &&
+      n.expression.arguments[0].expression.expression.text === 'flags' &&
+      (n.expression.arguments[0] as import('typescript').CallExpression).arguments.length === 0
+    const containsDirectDenyReturn = (node: TsNode): boolean => {
       let found = false
       const walk = (n: TsNode): void => {
-        if (
-          ts.isReturnStatement(n) &&
-          n.expression &&
-          ts.isCallExpression(n.expression) &&
-          ts.isIdentifier(n.expression.expression) &&
-          n.expression.expression.text === 'next'
-        ) {
+        if (found) return
+        if (ts.isArrowFunction(n) || ts.isFunctionExpression(n) || ts.isFunctionDeclaration(n) || ts.isMethodDeclaration(n)) return
+        if (isDenyReturn(n)) {
           found = true
+          return
         }
-        if (!found) ts.forEachChild(n, walk)
+        ts.forEachChild(n, walk)
       }
       walk(node)
       return found
+    }
+    // Round-9: the permission call's ARGUMENTS are pinned too — first must be to.meta, second must
+    // be a callback whose body really calls auth.hasPermission(<its own parameter>) (a constant
+    // () => true callback is not an enforcing shape).
+    const isEnforcingPermittedCall = (call: import('typescript').CallExpression): boolean => {
+      if (call.arguments.length !== 2) return false
+      const arg0 = call.arguments[0]
+      const arg0Ok =
+        ts.isPropertyAccessExpression(arg0) &&
+        arg0.name.text === 'meta' &&
+        ts.isIdentifier(arg0.expression) &&
+        arg0.expression.text === 'to'
+      if (!arg0Ok) return false
+      const cb = call.arguments[1]
+      if (!(ts.isArrowFunction(cb) || ts.isFunctionExpression(cb))) return false
+      if (cb.parameters.length !== 1 || !ts.isIdentifier(cb.parameters[0].name)) return false
+      const paramName = cb.parameters[0].name.text
+      let callsHasPermission = false
+      const findPerm = (n: TsNode): void => {
+        if (callsHasPermission) return
+        if (
+          ts.isCallExpression(n) &&
+          ts.isPropertyAccessExpression(n.expression) &&
+          n.expression.name.text === 'hasPermission' &&
+          ts.isIdentifier(n.expression.expression) &&
+          n.expression.expression.text === 'auth' &&
+          n.arguments.length === 1 &&
+          ts.isIdentifier(n.arguments[0]) &&
+          n.arguments[0].text === paramName
+        ) {
+          callsHasPermission = true
+          return
+        }
+        ts.forEachChild(n, findPerm)
+      }
+      findPerm(cb)
+      return callsHasPermission
     }
 
     // 2-5. scoped scan of the guard body only.
@@ -228,7 +278,8 @@ describe('Stock Preparation route registration (source drift pin)', () => {
           ts.isCallExpression(cond.operand) &&
           ts.isIdentifier(cond.operand.expression) &&
           cond.operand.expression.text === 'isRoutePermitted' &&
-          containsReturnNext(node.thenStatement)
+          isEnforcingPermittedCall(cond.operand) &&
+          containsDirectDenyReturn(node.thenStatement)
         ) {
           enforcingIfPos = node.getStart(source)
         }
@@ -268,7 +319,7 @@ describe('Stock Preparation route registration (source drift pin)', () => {
     }
     scan(guardBody!)
 
-    expect(enforcingIfPos, 'the guard must contain if (!isRoutePermitted(...)) { ... return next(...) } — a bare call does not enforce').toBeGreaterThan(-1)
+    expect(enforcingIfPos, 'the guard must contain if (!isRoutePermitted(to.meta, cb-calling-auth.hasPermission)) { return next(flags.resolveHomePath()) } — bare calls, constant callbacks, bare next() and nested decoy returns do not enforce').toBeGreaterThan(-1)
     expect(plmFocusIfPos, 'the plm-workbench focus if-block must exist inside the guard').toBeGreaterThan(-1)
     expect(enforcingIfPos, 'the enforcing permission check must precede the plm-workbench focus block').toBeLessThan(plmFocusIfPos)
     expect(allowlist, 'allowedPrefixes must be declared INSIDE the plm-workbench focus block').not.toBeNull()
