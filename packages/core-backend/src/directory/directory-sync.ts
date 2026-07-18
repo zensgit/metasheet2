@@ -3108,6 +3108,12 @@ export class DirectorySyncInProgressError extends Error {
  * no run row and leaves nothing to reclaim. The admin override (§12.2 "unless an explicit admin
  * override is supplied") is the transfer row's `freeze_source_sync` flag — flipping it to false
  * un-freezes THIS transfer without cancelling it.
+ *
+ * Known window (documented, gate P3): the gate runs ONCE at sync entry, so a transfer created
+ * while a sync is already mid-pull does not stop that in-flight run — its absence sweep can still
+ * land. Exposure is bounded (T1 scan/apply are no-ops; the DT-OPS-01 mass-departure breaker caps
+ * the local-user cascade) and the runbook orders the transfer record BEFORE any provider-side
+ * draining. If T3 needs the window closed, re-assert this freeze immediately before the sweep.
  */
 export class DirectorySyncFrozenByTransferError extends Error {
   readonly statusCode = 409

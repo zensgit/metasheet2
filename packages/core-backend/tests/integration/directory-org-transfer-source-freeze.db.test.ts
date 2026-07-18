@@ -189,6 +189,7 @@ describeIfDatabase('Transfer MVP T2 — §12.2 source freeze during an active or
       .send({ async: true })
     expect(asyncRes.status).toBe(409)
     expect(asyncRes.body.error.code).toBe('DIRECTORY_SYNC_FROZEN_BY_TRANSFER')
+    expect(asyncRes.body.error.details?.transferId ?? asyncRes.body.error.transferId).toBe(transferId)
   })
 
   it('F. preview stays available during a freeze (the read-only evidence tool writes nothing)', async () => {
