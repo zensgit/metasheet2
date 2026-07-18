@@ -31,15 +31,17 @@
   停用后仍参与解析（写侧门已在 B3 关闭；读侧为既有设计属性，B3 未宣称覆盖）。
 - 主管**链**（chain hop）与**部门负责人**（dept head）仍走 legacy 源（B3 只泛化 direct-manager 步）。
 
-## 3. 未开发（顺序 owner 已裁：串行）
+## 3. B5–B7：已开发，owner CHANGES 返工轮（栈内 OPEN，未合并）
 
-> **B5/B6 门控（owner 2026-07-17，B4 落地时重申）**：B4 已落地（§1 `b94dcd644`）。B5/B6 为
-> routing-core，**先审定 design lock 再开发**——草案见
-> `canonical-org-b5-b6-routing-core-design-lock-20260717.md`（待 owner 审定）。
+> **B5/B6 门控（owner 2026-07-17，B4 落地时重申）**：B4 已落地（§1 `b94dcd644`）。routing-core 的
+> design lock 已完成 owner Q1–Q6 裁决（`canonical-org-b5-b6-routing-core-design-lock-20260717.md`，
+> 状态=已裁决—锁定）；B5-a..B7 **代码已在 stacked PR 栈上开发完毕**（#4429→#4430→#4431→#4434→
+> #4436，全 OPEN/unarmed），owner CHANGES 返工已推送，等待 owner 复审后按「逐张 retarget→全套
+> required CI→串行落地」协议合并。
 
 - **B5** 显式 `(org, purpose)` routing policy + 只读切换预览 → **B6** local/DingTalk 审批路由真库
   等价证明（首个真实消费者）→ **B7** 外部部门 suggest-only 对账（消失只标 `stale`，不得停用本地
-  部门）。B5/B6 同碰 routing core，**不并行**。
+  部门）。B5/B6 同碰 routing core，开发期**未并行**；落地亦串行。
 - Canonical Org **单独收官门**：真库 done-gate、迁移 replay、mutation 表、真实 merge SHA 全入库后，
   才解锁 Transfer。
 - **Transfer**：T1 → T2 → T2-Gate → **条件式 T2.5** → T3 → T4 → T5。**T2.5 为显式决策分支**（owner

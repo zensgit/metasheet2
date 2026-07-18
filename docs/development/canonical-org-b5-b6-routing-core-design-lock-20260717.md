@@ -1,4 +1,4 @@
-# B5/B6 Routing-Core Design Lock（草案，待 owner 审定）
+# B5/B6 Routing-Core Design Lock（Q1–Q6 已裁决 — 锁定）
 
 Date: 2026-07-17 · Status: **Q1–Q6 已由 owner 裁决（2026-07-17）— 锁定；实现处于 owner CHANGES 返工轮**
 Basis: #4215 §6/§7/§10.1（已 ratify-by-merge `66c7459a8`）+ B4 落地形态（#4419 `b94dcd644`）。
@@ -24,9 +24,9 @@ org_directory_routing_policy
   org_id                    text NOT NULL
   purpose                   text NOT NULL
   canonical_integration_id  uuid NOT NULL
-  fallback_integration_id   uuid NULL          -- 见开放问题 Q2
-  mode                      text NOT NULL      -- 见开放问题 Q3
+  fallback_integration_id   uuid NULL          -- Q2 裁决：留列，v1 不启用（resolver 不读）
   created_at / updated_at   timestamptz NOT NULL
+  -- Q3 裁决：无 mode 列（as-built 迁移 zzzz20260717110000 亦无）
 ```
 
 - `UNIQUE (org_id, purpose)` —— 一 org 一 purpose 至多一条策略。
@@ -41,7 +41,9 @@ org_directory_routing_policy
   引用列置 NULL——含 NOT NULL 的 `org_id`——PG14 无列级 `SET NULL (col)`；且 RESTRICT 本就是意图
   姿态：删除仍被策略引用的 integration 必须先改策略，策略沉默消失比响亮报错更危险。B5-a gate 实证
   CASCADE 变体会**静默删策略行**，已用 `confdeltype='r'` 双腿钉死 + fallback 行为测试）。
-- 迁移 replay 幂等（IF NOT EXISTS + pg_constraint 探针，钉 conname+conrelid+contype）。
+- 迁移 replay 幂等（as-built：单条原子 `CREATE TABLE IF NOT EXISTS`——表连同其内联约束要么整体
+  存在要么整体不存在，无需 pg_constraint 探针；约束形状的钉在 schema 测试里：conname + 列数 +
+  `confdeltype='r'` 双腿）。
 
 ### 锁 2 — resolver 优先级（默认不变量：无策略 = 字节级现状）
 
@@ -64,8 +66,8 @@ purpose=`approval_routing` 的解析顺序：
 - `GET /api/admin/directory/routing-policy/:purpose/preview?candidate=<integrationId>`：
   对**受影响面**（v1 = approval_routing 一个 purpose；报告面覆盖 §6 五 purpose 的骨架）计算
   before/after：现行解析源 vs 候选解析源下的申请人 dept/title/manager 差异样本。
-  **只读**：不写策略、不写审计之外的任何行、任何锁；实现层面 preview handler 里没有 UPDATE/INSERT
-  （审计除外——见开放问题 Q5，建议 preview 不审计，纯 GET）。
+  **只读**：不写策略、不写任何行、不取任何锁；实现层面 preview handler 里没有 UPDATE/INSERT。
+  （Q5 裁决：preview 为纯 GET，**不审计**——as-built handler 即如此。）
 - `PATCH /api/admin/directory/routing-policy/:purpose`：唯一写点。admin-only；values-free 审计
   `directory.routing_policy.set`（resourceId=`${orgId}:${purpose}`，meta 只含 orgId/purpose/
   integrationId —— 不回显 config）。
